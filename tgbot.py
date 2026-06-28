@@ -5,7 +5,7 @@
 A lean, stdlib-only (urllib long-polling) Telegram bot that drives the
 5gpn DoT gateway from inline-keyboard buttons.
 
-Architecture reminder: smartdns -> sniproxy -> DIRECT egress.
+Architecture reminder: smartdns -> xray -> DIRECT egress.
 There is NO exit layer, so there are NO exit-switching commands. The bot only
 manages: status, forced-proxy domains, chnroute/list refresh, cert renewal,
 service restarts, logs, and the iOS profile QR.
@@ -50,7 +50,7 @@ DOMAIN_FILE = os.path.join(CONF_DIR, ".domain")
 IOS_PORT = "8111"
 
 # Services the bot may restart / tail (the only three in the data path).
-SERVICES = ["smartdns", "sniproxy"]
+SERVICES = ["smartdns", "xray"]
 
 # Canonical FQDN rule, shared VERBATIM with api-server.py (and behaviorally with
 # install.sh's is_valid_domain): lowercase [a-z0-9-] labels (<=63), alphabetic
@@ -437,7 +437,7 @@ def domains_menu():
 def restart_menu():
     return [
         [{"text": "smartdns", "callback_data": "restart:smartdns"},
-         {"text": "sniproxy", "callback_data": "restart:sniproxy"}],
+         {"text": "xray", "callback_data": "restart:xray"}],
         [{"text": "全部", "callback_data": "restart:all"}],
         [{"text": "« 返回", "callback_data": "menu:main"}],
     ]

@@ -218,7 +218,7 @@
             <input id="d_domain" type="text" placeholder="域名，如 youtube.com" onkeydown="if(event.key==='Enter')addDomain()">
             <button class="primary" onclick="addDomain()">➕ 添加</button>
           </div>
-          <div class="small muted" style="margin-top:6px">这些域名将被强制经由代理（sniproxy）出站。</div>
+          <div class="small muted" style="margin-top:6px">这些域名将被强制经由代理（xray）出站。</div>
         </div>
         <div class="card">
           <div class="row"><h2 class="grow">域名列表</h2>
@@ -244,7 +244,7 @@
           <h2>重启服务</h2>
           <div class="row">
             <button onclick="restart('smartdns')">smartdns</button>
-            <button onclick="restart('sniproxy')">sniproxy</button>
+            <button onclick="restart('xray')">xray</button>
             <button class="danger" onclick="restart('all')">全部重启</button>
           </div>
         </div>
@@ -377,7 +377,7 @@ function logout(){
 }
 
 /* ---- dashboard ---- */
-const SVC_LABEL = { smartdns:"smartdns", sniproxy:"sniproxy" };
+const SVC_LABEL = { smartdns:"smartdns", xray:"xray" };
 function tile(label,val,pct,sub){
   return `<div class="tile"><div class="tlabel">${label}</div><div class="tval">${val}</div>`+
     (pct!=null?`<div class="bar"><i style="width:${Math.max(0,Math.min(100,Math.round(pct)))}%"></i></div>`:``)+
@@ -387,7 +387,7 @@ async function loadStatus() {
   try {
     const s = await api("/api/status");
     const svc = s.services || {};
-    const order = ["smartdns","sniproxy"];
+    const order = ["smartdns","xray"];
     $("services").innerHTML = order.map(k=>{
       const up = svc[k] === 'active';
       return `<div class="svc"><span class="sdot ${up?'on':'off'}"></span>`+

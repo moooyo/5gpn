@@ -1,6 +1,6 @@
 # 设计:sniproxy → xray-core(全量替换 + 开 QUIC)
 
-- 状态:设计待评审
+- 状态:已实施
 - 日期:2026-06-28
 - 范围:用 xray-core 的 `dokodemo-door` + sniffing 替换 dlundquist/sniproxy,作为 TCP(80/443)与 QUIC(UDP 443)的 SNI 透明转发层;直出不变。
 - 关联文档:[DESIGN.md](../../DESIGN.md)(§5 正确性约束、§6 数据流、§8 出口、§12 决策)

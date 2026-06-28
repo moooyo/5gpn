@@ -1,6 +1,6 @@
 # 5gpn 设计文档(smartdns DoT 网关)
 
-- 状态:设计待评审
+- 状态:已实施
 - 日期:2026-06-27
 - 范围:smartdns DoT 网关的整体设计
 - 已定决策:① 客户端仅 DoT(853) ② 不在强制列表但解析出国外 IP 的普通网站一律走 xray ③ **出口仅直出**(无 sing-box / WireGuard / 多出口 / 策略路由) ④ **QUIC/HTTP3 经 xray dokodemo-door sniff `quic` 透明转发**;UDP 443 防火墙放行;引入**预编译** xray 二进制(不引入 Go 构建工具链);xray 以 root + systemd sandbox 运行(决策反转:原为"QUIC not proxied / 防火墙拒绝 UDP 443 / 无 Go 工具链" → 现改为 QUIC 代理 + 预编译二进制 + root+sandbox;理由:dokodemo-door 原生支持 QUIC sniff,零额外依赖,xray 以 root 绑定低端口但通过 systemd sandbox 限权)

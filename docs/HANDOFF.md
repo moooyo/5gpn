@@ -8,18 +8,18 @@
 
 ## 1. 架构现状(一句话)
 
-**解析即策略**:客户端经 **DoT :853** 查 smartdns;命中强制表或解析出**国外 IP** 的域名被解析成**网关 IP**,客户端遂连到网关上的 **sniproxy(TCP 80/443)**,后者读 SNI、经硬编码 **22.22.22.22** 重解析真实 IP,**直接走默认路由出网**;国内域名拿到真实国内 IP **直连**(网关不在数据路径)。**QUIC/HTTP3 不代理**(UDP 443 在防火墙 `reject`,客户端回退 TCP)。出口**仅直出**(无隧道/多出口/mark)。
+**解析即策略**:客户端经 **DoT :853** 查 smartdns;命中强制表或解析出**国外 IP** 的域名被解析成**网关 IP**,客户端遂连到网关上的 **xray(TCP 80/443)**,后者读 SNI、经硬编码 **22.22.22.22** 重解析真实 IP,**直接走默认路由出网**;国内域名拿到真实国内 IP **直连**(网关不在数据路径)。**QUIC/HTTP3 由 xray sniff quic 透明转发**;UDP 443 放行（172.22 来源）。出口**仅直出**(无隧道/多出口/mark)。
 
 ---
 
 ## 2. 本次改动汇总
 
 ### 架构决策
-- **QUIC 不代理**:删除 `src/quic-proxy.go` + `quic-proxy.service` + Go 工具链;`setup-firewall.sh` 对 UDP 443 `reject`(快速回退 TCP)。
+- **QUIC 由 xray 代理**:引入 xray-core `dokodemo-door` + sniff `quic`;`setup-firewall.sh` 对 UDP 443 放行（172.22 来源）;预编译 xray 二进制,无 Go 工具链依赖;xray 以 root + systemd sandbox 运行。
 - **NPN-only 拓扑**:客户端在 `172.22.0.0/16`;引入客户端朝向地址 `GATEWAY_IP`(默认 = `PUBLIC_IP`,NPN 时 `export GATEWAY_IP=<内网地址>`),用于 smartdns `ip-alias` 目标、iOS `ServerAddresses`、profile/QR URL。
 
 ### 必修(P0/P1)
-- **证书续期**:`install.sh` 加全局 `renewal-hooks/pre|post`(临时开 80 + 停 sniproxy → 还原)+ Persistent `5gpn-certbot-renew.timer`,绕过 DoT-only 防火墙与 sniproxy 占用 :80 的问题(否则证书 ~90 天到期 → DoT 全量下线)。
+- **证书续期**:`install.sh` 加全局 `renewal-hooks/pre|post`(临时开 80 + 停 xray → 还原)+ Persistent `5gpn-certbot-renew.timer`,绕过 DoT-only 防火墙与 xray 占用 :80 的问题(否则证书 ~90 天到期 → DoT 全量下线)。
 - **iOS / 防火墙拓扑**:`setup-firewall.sh` 放行 `172.22 → 8111`(iOS 描述文件抓取),profile 指向内网网关地址。
 - **webui 假绿**:`!!svc[k]` → `svc[k] === 'active'`,停机时显示真实状态词。
 - **API 端口**:`install.sh` 默认 `8080` → `8443`;`api-server.py` 改读 systemd `Environment=`(token/port/bind/cert/CONF_DIR,文件兜底)。
@@ -55,9 +55,9 @@ systemd 沙箱(`NoNewPrivileges`/`ProtectSystem=strict`/`ProtectKernel*` 等)、
 - [ ] 全装一遍:`sudo bash install.sh`(NPN 时先 `export GATEWAY_IP=<内网>`)。
 - [ ] **P1 DNS**:DoT 查 被墙/国外→网关 IP、国内→真实国内 IP、AAAA→SOA、混合 IP 选国内、无回环。
 - [ ] **抗污染**:`china-whitelist.conf`/`bogus-nxdomain.conf` 存在且 smartdns 正常启动;被墙域名稳定返回网关 IP(不被伪国内 IP 直连)。
-- [ ] **P2 转发**:`curl https://<国外域名>` 经 sniproxy 直出可达;`tcpdump` 证实代理只查 22.22.22.22,不回 :853/:5353。
-- [ ] **QUIC 回退**:`curl --http3` 失败/回退,普通 `curl` 正常;`nc -uvz <gw> 443` 被拒。
-- [ ] **证书续期**:drop 防火墙生效下 `certbot renew --dry-run` 端到端成功;过程中 80 短暂放行、sniproxy 停后恢复;timer active。
-- [ ] **防火墙/沙箱**:仅 `172.22` 能连 80/443/8111;`systemctl show sniproxy/5gpn-iosprofile@ -p NoNewPrivileges,ProtectSystem` 生效;服务能正常启动(沙箱没误伤)。
+- [ ] **P2 转发**:`curl https://<国外域名>` 经 xray 直出可达;`tcpdump` 证实代理只查 22.22.22.22,不回 :853/:5353。
+- [ ] **QUIC 代理**:`curl --http3 https://<国外域名>` 经 xray sniff quic 透明转发成功;UDP 443 放行（172.22 来源）。
+- [ ] **证书续期**:drop 防火墙生效下 `certbot renew --dry-run` 端到端成功;过程中 80 短暂放行、xray 停后恢复;timer active。
+- [ ] **防火墙/沙箱**:仅 `172.22` 能连 80/443/8111;`systemctl show xray/5gpn-iosprofile@ -p NoNewPrivileges,ProtectSystem` 生效;服务能正常启动(沙箱没误伤)。
 - [ ] **控制面(可选)**:`--setup-api`/`--setup-tgbot` 后,API/bot/webui 增删域名 + chnroute 刷新 + 重启 + 备份/恢复正常;鉴权失败日志限速可见。
 - [ ] **CI**:把仓库推到 GitHub,确认 Actions 绿。
