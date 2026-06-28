@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Domain-validation consistency: tgbot.py domain validator and install.sh's is_valid_domain
 # must enforce the same FQDN rule. Pure bash+grep — runs on the dev box and in CI.
 set -u
