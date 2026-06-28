@@ -3,13 +3,13 @@
 - 状态:设计待评审
 - 日期:2026-06-27
 - 范围:smartdns DoT 网关的整体设计
-- 已定决策:① 客户端仅 DoT(853) ② 不在强制列表但解析出国外 IP 的普通网站一律走 sniproxy ③ **出口仅直出**(无 sing-box / WireGuard / 多出口 / 策略路由) ④ **QUIC/HTTP3 不代理**(UDP 443 在防火墙 reject,客户端回退 TCP/TLS 走 sniproxy;不含 quic-proxy 与 Go 工具链)
+- 已定决策:① 客户端仅 DoT(853) ② 不在强制列表但解析出国外 IP 的普通网站一律走 xray ③ **出口仅直出**(无 sing-box / WireGuard / 多出口 / 策略路由) ④ **QUIC/HTTP3 经 xray dokodemo-door sniff `quic` 透明转发**;UDP 443 防火墙放行;引入**预编译** xray 二进制(不引入 Go 构建工具链);xray 以 root + systemd sandbox 运行(决策反转:原为"QUIC not proxied / 防火墙拒绝 UDP 443 / 无 Go 工具链" → 现改为 QUIC 代理 + 预编译二进制 + root+sandbox;理由:dokodemo-door 原生支持 QUIC sniff,零额外依赖,xray 以 root 绑定低端口但通过 systemd sandbox 限权)
 
 ---
 
 ## 1. 目标与非目标
 
-**目标**:用 smartdns 作为 DNS 大脑,以"一张小强制代理域名表 + 一张 chnroute 反集(非中国 IP)"实现自动分流,组件尽量少;被代理流量经 sniproxy 透明转发后**直出**(单一直出口,无隧道/多出口)。
+**目标**:用 smartdns 作为 DNS 大脑,以"一张小强制代理域名表 + 一张 chnroute 反集(非中国 IP)"实现自动分流,组件尽量少;被代理流量经 xray 透明转发后**直出**(单一直出口,无隧道/多出口)。
 
 **非目标**:**不做多出口 / 隧道 / 策略路由(仅直出)**;不引入客户端 App;不追求 IPv6(维持 IPv4-only)。核心范式是"解析即策略 / SNI 透明转发不解密 TLS"。
 
@@ -29,10 +29,10 @@
 └──────────────────────────────────────────────────────────┘
         │ 解析成网关IP(被墙/国外)        │ 真实国内IP
         ▼                                  ▼
-  sniproxy(TCP 80/443)               客户端直连国内站
-  (UDP 443/QUIC → 防火墙 reject,       (网关不在数据路径)
-   客户端回退 TCP/TLS 走 sniproxy)
-        │  读 SNI,经 22.22.22.22 解析真实 IP
+  xray(dokodemo-door TCP 80 / TCP+UDP 443) 客户端直连国内站
+  (sniff tls/quic/http, freedom ForceIPv4, (网关不在数据路径)
+   dns hardcode 22.22.22.22, 私网→blackhole)
+        │  sniff SNI/域名,经 22.22.22.22 解析真实 IP
         ▼
   直接走网关默认路由出网(直出,无隧道/多出口)→ 互联网
 ```
@@ -44,14 +44,14 @@
 | smartdns 主配置 + 列表生成脚本 | DoT 入口、双上游抗污染、`address`、`ip-alias`、`force-AAAA-SOA` |
 | `proxy-domains.txt`(强制代理域名表) | 小表;污染兜底/已知必代理域名;可选 seed 自 gfwlist |
 | `foreign-cidr.txt`(chnroute 反集) | 全网 − 中国 IP 段,由公开中国 IP 表自动生成 + 定时更新 |
-| sniproxy + sniproxy.conf | TCP SNI 透明转发,`user pxout`,通配兜底无域名表,解析器 hardcode `22.22.22.22`,**直出** |
-| DoT-only 防火墙(nft 入站) | 仅放行 22/853 + `172.22→80/443/udp443`;**无 mark/策略路由** |
+| xray + config.json | dokodemo-door TCP 80 / TCP+UDP 443;sniffing tls/quic/http;freedom 直出(ForceIPv4);dns hardcode `22.22.22.22`;私网/loopback → blackhole(防回环兜底) |
+| DoT-only 防火墙(nft 入站) | 仅放行 22/853 + `172.22→80/443/udp443`;UDP 443 **accept**(QUIC 代理);**无 mark/策略路由** |
 | certbot / renew-hook / iOS profile / ios-http | 仅 DoT → 证书与 iOS 描述文件 |
-| install.sh 编排 | 装 smartdns、渲染配置、列表链路、systemd、sysctl/低内存 |
+| install.sh 编排 | 装 smartdns、下载预编译 xray 二进制(sha256 验证)、渲染配置、列表链路、systemd、sysctl/低内存 |
 | api-server / tgbot / webui | 管强制表 / chnroute 刷新 / 状态;改文件 + 重启 smartdns |
 | tests/ | policy 测试 |
 
-**明确不包含**:QUIC/HTTP3 代理(UDP 443 在防火墙 reject,客户端回退 TCP 由 sniproxy 接;不引入 Go 工具链);sing-box / WireGuard / 多出口 / `pxout` 打 mark / `table 100` 等出口层(仅直出)。
+**明确不包含**:sing-box / WireGuard / 多出口 / `pxout` 打 mark / `table 100` 等出口层(仅直出)。xray 以预编译二进制安装,不引入 Go 工具链。
 
 ## 4. smartdns DNS 决策模型(配置骨架)
 
@@ -86,19 +86,21 @@ ip-set   -name foreign -file /etc/smartdns/foreign-cidr.txt
 ip-rules ip-set:foreign -ip-alias __GATEWAY_IP__
 ```
 
-设计意图:对未命中强制表的域名,smartdns 并发查所有上游;国内明文解析器经 `-whitelist-ip` 只回中国 IP(污染/伪国内答案被滤掉),干净 DoT 解析器拿真实国外 IP。国内域名 → 拿到就近国内 IP(不在 foreign 集 → 直连);被墙/国外域名 → 拿到真实国外 IP(在 foreign 集 → `ip-alias` 改写成网关 IP → 进 sniproxy)。**不需要 chinalist**:国内/国外的区分由"解析出的 IP 是否在中国段"决定。残留硬伤:被污染成"看着像国内"的 IP 仍会通过 whitelist(补进强制表自愈)。
+设计意图:对未命中强制表的域名,smartdns 并发查所有上游;国内明文解析器经 `-whitelist-ip` 只回中国 IP(污染/伪国内答案被滤掉),干净 DoT 解析器拿真实国外 IP。国内域名 → 拿到就近国内 IP(不在 foreign 集 → 直连);被墙/国外域名 → 拿到真实国外 IP(在 foreign 集 → `ip-alias` 改写成网关 IP → 进 xray)。**不需要 chinalist**:国内/国外的区分由"解析出的 IP 是否在中国段"决定。残留硬伤:被污染成"看着像国内"的 IP 仍会通过 whitelist(补进强制表自愈)。
 
 ## 5. 三大正确性约束(必须在实现中强保证)
 
-1. **防回环(最关键)**:sniproxy 解析 SNI 时**绝不能使用会做 `ip-alias` 的 smartdns**,否则"国外域名→改写成网关IP→sniproxy 又连回网关"形成死循环。**决策:sniproxy 的解析器一律 hardcode 为 `22.22.22.22`**(外部解析器,绝不指向本机 smartdns)。(QUIC/HTTP3 不代理,UDP 443 reject,故无 quic-proxy 侧的回环面。)
-2. **判 geo 前先拿到干净真实 IP**:第二级判"国外?"依赖解析正确。靠 cn 组 `whitelist-ip`(只收中国 IP)+ `bogus-nxdomain` + clean 组(DoT 上游更难污染)。残留硬伤:被污染成"看着像国内"的 IP 会被误判直连 → 把该域名补进强制表自愈。
-3. **chnroute 反集的生成与时效**:`foreign-cidr.txt` = `0.0.0.0/0` 去掉中国段;由公开中国 IP 列表(如 `china_ip_list` / APNIC 衍生)自动生成并定时刷新。生成失败时保留旧表,不得清空(清空会把全部流量判成国内→直连→被墙站打不开)。
+1. **防回环(最关键)**:xray 解析 SNI 时**绝不能使用会做 `ip-alias` 的 smartdns**,否则"国外域名→改写成网关IP→xray 又连回网关"形成死循环。**决策:xray 的 `dns.servers` hardcode 为 `["22.22.22.22"]`**(外部解析器,绝不指向本机 smartdns)。
+2. **嗅探失败兜底**:dokodemo-door 的 `address` 占位为 `127.0.0.1`;routing 规则将所有私网/loopback CIDR(`127.0.0.0/8`、`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16` 等)发往 `blackhole` 出站——即使 sniff 失败也不会连回网关,流量被丢弃。
+3. **判 geo 前先拿到干净真实 IP**:第二级判"国外?"依赖解析正确。靠 cn 组 `whitelist-ip`(只收中国 IP)+ `bogus-nxdomain` + clean 组(DoT 上游更难污染)。残留硬伤:被污染成"看着像国内"的 IP 会被误判直连 → 把该域名补进强制表自愈。
+4. **chnroute 反集的生成与时效**:`foreign-cidr.txt` = `0.0.0.0/0` 去掉中国段;由公开中国 IP 列表(如 `china_ip_list` / APNIC 衍生)自动生成并定时刷新。生成失败时保留旧表,不得清空(清空会把全部流量判成国内→直连→被墙站打不开)。
 
 ## 6. 端到端数据流(三类)
 
-- **强制表命中(被墙/已知必代理)**:DoT 查 → `address` 直接返回网关 IP(不解析)→ 客户端连网关 → sniproxy 读 SNI(QUIC 被 reject→客户端回退 TCP)→ 经 22.22.22.22 解析真实 IP → **直接走网关默认路由出网**。
+- **强制表命中(被墙/已知必代理)**:DoT 查 → `address` 直接返回网关 IP(不解析)→ 客户端连网关 → xray dokodemo-door sniff SNI/quic → 经 22.22.22.22 解析真实 IP → **直接走网关默认路由出网**。
 - **未命中 + 国外 IP**:DoT 查 → 解析得真实国外 IP → `ip-alias` 改写成网关 IP → 同上进代理后**直出**。
 - **未命中 + 国内 IP**:DoT 查 → 解析得真实国内 IP(原样)→ 客户端**直连**,网关不经手。
+- QUIC/HTTP3 与 TLS 走同一 xray 实例:UDP 443 由防火墙放行进 xray,xray sniff `quic` 取 SNI 后直出;TCP 443 同理 sniff `tls`。
 
 ## 7. 客户端接入(仅 DoT)
 
@@ -108,9 +110,9 @@ ip-rules ip-set:foreign -ip-alias __GATEWAY_IP__
 
 ## 8. 出口:仅直出(无出口层)
 
-被代理的流量(命中强制表 / 国外 IP,被解析成网关 IP)由 sniproxy 接住(QUIC/HTTP3 不代理:UDP 443 在防火墙 reject,客户端回退 TCP/TLS),**读 SNI、经 22.22.22.22 解析真实目标 IP 后,直接走网关自身的默认路由出网**。网关本身即"够得到目标"的有利位置,无需隧道/多出口。
+被代理的流量(命中强制表 / 国外 IP,被解析成网关 IP)由 xray dokodemo-door 接住(TCP 80 sniff http、TCP+UDP 443 sniff tls/quic),**sniff SNI、经 22.22.22.22 解析真实目标 IP 后,直接走网关自身的默认路由出网**。QUIC/HTTP3 与 TLS 均代理:UDP 443 由防火墙放行,xray sniff `quic` 取得目标域名后 freedom 直出(ForceIPv4)。网关本身即"够得到目标"的有利位置,无需隧道/多出口。
 
-**明确不做**:`pxout` 打 mark、`ip rule fwmark`、`table 100`、apply-exit/set-exit、sing-box、WireGuard、连通性/延迟检查——全部不做。`pxout` 仅作为代理进程的非特权账户保留;防火墙只做入站过滤(仅 DoT 22/853 + NPN 的 80/443/udp443)。
+**明确不做**:`pxout` 打 mark、`ip rule fwmark`、`table 100`、apply-exit/set-exit、sing-box、WireGuard、连通性/延迟检查——全部不做。防火墙只做入站过滤(仅 DoT 22/853 + NPN 的 80/443/udp443)。
 
 ## 9. 规则与列表管理 / "API 改配置"
 
@@ -128,7 +130,7 @@ smartdns 规则均为**磁盘文本文件**;控制面(API/Bot/WebUI)以"**编辑
 ## 11. 阶段拆分(每阶段独立 spec + plan + 验证)
 
 - **P1 — DNS 大脑(smartdns)**:DoT 入口 + 双上游抗污染 + `address`(强制表)+ `ip-alias`(chnroute→网关IP)+ IPv4-only + 防回环解析器 + `foreign-cidr` 生成器。验收:DoT 查被墙/国外域名→网关 IP;查国内→真实国内 IP;查环回不死循环。
-- **P2 — 透明转发 + 直出**:sniproxy(解析器 hardcode `22.22.22.22`)+ DoT-only 入站防火墙(UDP 443/QUIC reject),接上 P1,**直接走默认路由出网**。验收:国外域名端到端经网关→sniproxy→直出可达;QUIC 被 reject 后客户端回退 TCP。
+- **P2 — 透明转发 + 直出**:xray dokodemo-door(dns hardcode `22.22.22.22`,私网→blackhole)+ DoT-only 入站防火墙(UDP 443 accept,QUIC 代理),接上 P1,**直接走默认路由出网**。验收:国外域名端到端经网关→xray→直出可达;QUIC/TLS 均可达。
 - ~~**P3 — 出口层**~~:**取消**(仅直出,无 sing-box / WireGuard / 多出口 / 策略路由)。
 - **P3 — 安装编排**:新 install、systemd 单元、ACME 证书、iOS profile(DoT)、sysctl/低内存、续期 hook。
 - **P4 — 控制面 + 测试 + 文档**:API/Bot/WebUI 按新模型重写;policy 测试;README。
@@ -138,9 +140,10 @@ smartdns 规则均为**磁盘文本文件**;控制面(API/Bot/WebUI)以"**编辑
 **已定(评审追加 2026-06-27):**
 - 不维护 chinalist:国内/国外的区分完全由"解析出的 IP 是否在中国段"决定(第 4 节模型,**认可**)。
 - 混合 IP(同域名既有国内又有国外 A 记录):**选国内** —— 只要解析结果含至少一个中国 IP,即按国内处理、直连;仅当全部 IP 均为国外时才 `ip-alias` 改写进代理。机制用 smartdns 的 IP 优选/过滤实现,P1 细化。
-- sniproxy 解析器:**hardcode `22.22.22.22`**(见第 5 节,满足防回环)。
-- QUIC/HTTP3:**不代理**——UDP 443 在防火墙 `reject`,客户端回退 TCP/TLS(由 sniproxy 接);quic-proxy 与 Go 工具链一并移除(评审追加 2026-06-27)。
-- 出口:**仅直出**——sing-box / WireGuard / 多出口 / `pxout` 打 mark / `ip rule` / `table 100` / apply-exit / set-exit / check-exits **全部移除**;被代理流量经 sniproxy 后直接走网关默认路由。
+- xray 解析器:**hardcode `dns.servers=["22.22.22.22"]`**(见第 5 节,满足防回环)。
+- QUIC/HTTP3:**代理**——xray dokodemo-door 在 UDP 443 上 sniff `quic` 取 SNI,直出;UDP 443 防火墙 `accept`(仅 NPN 172.22.0.0/16)。(決策反転:原为"防火墙拒绝 UDP 443、客户端回退 TCP";理由:xray dokodemo-door 原生支持 quic sniff,预编译二进制无需 Go 工具链,覆盖面更完整)
+- 出口:**仅直出**——sing-box / WireGuard / 多出口 / `pxout` 打 mark / `ip rule` / `table 100` / apply-exit / set-exit / check-exits **全部移除**;被代理流量经 xray 后直接走网关默认路由。
+- xray 权限:**root + systemd sandbox**——`User=root`(需绑定低端口 80/443),`NoNewPrivileges=yes` / `ProtectSystem=strict` / `RestrictAddressFamilies=AF_INET AF_UNIX` 等 sandbox 指令限权。(决策反转:原为非特权 `pxout` 用户;理由:dokodemo-door 必须绑定 80/443,xray 无 CAP_NET_BIND_SERVICE 支持,故以 root + 严格 sandbox 替代)
 
 **待定:**
 - clean 组在国内机器上的可达性(可能需先经一个固定干净通道)——P1/P3(安装)细化。
