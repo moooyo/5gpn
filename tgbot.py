@@ -47,9 +47,11 @@ INSTALL = os.path.join(BASE_DIR, "install.sh")
 SMARTDNS_DIR = "/etc/smartdns"
 PROXY_DOMAINS = os.path.join(SMARTDNS_DIR, "proxy-domains.txt")
 DOMAIN_FILE = os.path.join(CONF_DIR, ".domain")
+GATEWAY_FILE = os.path.join(CONF_DIR, ".gateway_ip")
+PUBLIC_IP_FILE = os.path.join(CONF_DIR, ".public_ip")
 IOS_PORT = "8111"
 
-# Services the bot may restart / tail (the only three in the data path).
+# Services the bot may restart / tail (the only two in the data path).
 SERVICES = ["smartdns", "xray"]
 
 # Canonical FQDN rule, shared behaviorally with install.sh's is_valid_domain:
@@ -307,7 +309,7 @@ def op_status():
     if domain:
         lines.append("🔗 域名：<code>%s</code>" % html.escape(domain))
         lines.append("🔒 DoT：<code>tls://%s:853</code>" % html.escape(domain))
-    pubip = _read_file(os.path.join(CONF_DIR, ".public_ip"))
+    pubip = _read_file(PUBLIC_IP_FILE)
     if pubip:
         lines.append("🌍 公网 IP：<code>%s</code>" % html.escape(pubip))
     lines.append("🎯 强制代理域名：<b>%d</b> 个" % len(_proxy_domains()))
@@ -394,12 +396,24 @@ def op_logs(svc):
     return "📜 <b>%s</b> 最近 50 行：\n%s" % (html.escape(svc), pre(out))
 
 
+def _ios_host():
+    """Host for the iOS profile URL — mirror install.sh's print_qr/regen_ios:
+    prefer the client-facing gateway IP, then the public IP, then the domain.
+    In NPN deployments GATEWAY_IP is the internal 172.22 address and the iOS
+    responder (:8111) is firewall-restricted to 172.22.0.0/16; the bare domain
+    resolves to the public IP and would be dropped there, so .gateway_ip wins.
+    Non-NPN: .gateway_ip == .public_ip, so the URL is unchanged in practice."""
+    return _read_file(GATEWAY_FILE) or _read_file(PUBLIC_IP_FILE) or _read_file(DOMAIN_FILE)
+
+
 def op_ios():
     """Return the iOS profile URL plus an ANSI-UTF8 QR text block."""
-    domain = _read_file(DOMAIN_FILE)
-    if not domain:
-        return "未找到域名（%s 为空）。先在服务器上完成安装。" % DOMAIN_FILE
-    url = "http://%s:%s/ios-dot.mobileconfig" % (domain, IOS_PORT)
+    host = _ios_host()
+    if not host:
+        return "未找到网关地址（%s / %s / %s 均为空）。先在服务器上完成安装。" % (
+            GATEWAY_FILE, PUBLIC_IP_FILE, DOMAIN_FILE
+        )
+    url = "http://%s:%s/ios-dot.mobileconfig" % (host, IOS_PORT)
     cap = (
         "📱 <b>iOS DoT 描述文件</b>\n用相机/浏览器打开下面的地址安装（仅蜂窝网生效）：\n"
         "<code>%s</code>" % html.escape(url)

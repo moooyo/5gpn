@@ -56,5 +56,5 @@ systemd 沙箱(`NoNewPrivileges`/`ProtectSystem=strict`/`ProtectKernel*` 等)、
 - [ ] **QUIC 代理**:`curl --http3 https://<国外域名>` 经 xray sniff quic 透明转发成功;UDP 443 放行（172.22 来源）。
 - [ ] **证书续期**:drop 防火墙生效下 `certbot renew --dry-run` 端到端成功;过程中 80 短暂放行、xray 停后恢复;timer active。
 - [ ] **防火墙/沙箱**:仅 `172.22` 能连 80/443/8111;`systemctl show xray/5gpn-iosprofile@ -p NoNewPrivileges,ProtectSystem` 生效;服务能正常启动(沙箱没误伤)。
-- [ ] **控制面**:`--setup-tgbot` 后,bot 增删域名 + chnroute 刷新 + 重启 + 备份/恢复正常;鉴权失败日志限速可见。
+- [ ] **控制面**:`--setup-tgbot` 后,bot 增删域名 + chnroute 刷新 + 重启正常;鉴权失败日志限速可见。
 - [ ] **CI**:把仓库推到 GitHub,确认 Actions 绿。
