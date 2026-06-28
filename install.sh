@@ -23,7 +23,7 @@ SRC_DIR="${BASE_DIR}/src"                # ios-http.py + build scratch
 WWW_DIR="${BASE_DIR}/www"                # iOS profile web root
 BUILD_DIR="${BASE_DIR}/build"            # download/unpack scratch
 
-CONF_DIR="/etc/5gpn"                 # state: .domain .public_ip .api_token ...
+CONF_DIR="/etc/5gpn"                 # state: .domain .public_ip .gateway_ip ...
 SMARTDNS_DIR="/etc/smartdns"             # smartdns.conf(.template), lists, cert/
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_DIR="/usr/local/etc/xray"
@@ -277,12 +277,7 @@ install_files() {
 
     # iOS responder + control-plane python (only if shipped in the checkout)
     [[ -f "${SCRIPT_DIR}/src/ios-http.py" ]] && install -m 0755 "${SCRIPT_DIR}/src/ios-http.py" "${SRC_DIR}/ios-http.py"
-    [[ -f "${SCRIPT_DIR}/api-server.py"  ]] && install -m 0755 "${SCRIPT_DIR}/api-server.py"  "${BASE_DIR}/api-server.py"
     [[ -f "${SCRIPT_DIR}/tgbot.py"       ]] && install -m 0755 "${SCRIPT_DIR}/tgbot.py"       "${BASE_DIR}/tgbot.py"
-    if [[ -d "${SCRIPT_DIR}/webui" ]]; then
-        mkdir -p "${BASE_DIR}/webui"
-        cp -r "${SCRIPT_DIR}/webui/." "${BASE_DIR}/webui/" 2>/dev/null || true
-    fi
     ok "Files installed under ${BASE_DIR} and ${SMARTDNS_DIR}."
 }
 
@@ -290,7 +285,7 @@ install_files() {
 # Domain + ACME certificate
 # ----------------------------------------------------------------------------
 is_valid_domain() {
-    # Same FQDN rule as api-server.py / tgbot.py DOMAIN_RE (bash ERE has no
+    # Same FQDN rule as tgbot.py DOMAIN_RE (bash ERE has no
     # lookahead, so total length is checked separately): lowercase [a-z0-9-]
     # labels (<=63), alphabetic 2-63 TLD, total 1..253. Case-insensitive.
     local d; d="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
@@ -450,9 +445,7 @@ run_update_lists() {
 
 run_setup_firewall() {
     info "Installing firewall + proxy units (direct egress, no exit layer)..."
-    local api_port=""
-    [[ -f "${CONF_DIR}/.api_port" ]] && api_port="$(cat "${CONF_DIR}/.api_port" 2>/dev/null || true)"
-    API_PORT="$api_port" IOS_PORT="$IOS_PORT" bash "${SCRIPTS_DIR}/setup-firewall.sh"
+    IOS_PORT="$IOS_PORT" bash "${SCRIPTS_DIR}/setup-firewall.sh"
     ok "Firewall + xray unit installed."
 }
 
@@ -585,67 +578,8 @@ start_services() {
 }
 
 # ----------------------------------------------------------------------------
-# Optional control plane: api / tgbot
+# Optional control plane: tgbot
 # ----------------------------------------------------------------------------
-setup_api() {
-    check_root
-    [[ -f "${BASE_DIR}/api-server.py" ]] || { err "${BASE_DIR}/api-server.py not found (run a full install or place the file)."; return 1; }
-    local py; py="$(command -v python3 || echo /usr/bin/python3)"
-    local token port domain
-    token="$(cat "${CONF_DIR}/.api_token" 2>/dev/null || true)"
-    [[ -z "$token" ]] && token="${API_TOKEN:-$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')}"
-    port="${API_PORT:-$(cat "${CONF_DIR}/.api_port" 2>/dev/null || echo 8443)}"
-    port="$(printf '%s' "$port" | tr -dc '0-9')"; [[ -n "$port" ]] || port=8443
-    domain="$(cat "${CONF_DIR}/.domain" 2>/dev/null || echo "")"
-
-    mkdir -p "$CONF_DIR"
-    printf '%s' "$token" > "${CONF_DIR}/.api_token"; chmod 600 "${CONF_DIR}/.api_token"
-    printf '%s' "$port"  > "${CONF_DIR}/.api_port"
-
-    cat > /etc/systemd/system/5gpn-api.service <<EOF
-[Unit]
-Description=5gpn HTTP control API
-After=network-online.target smartdns.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-Environment=API_TOKEN=${token}
-Environment=API_PORT=${port}
-Environment=API_BIND=0.0.0.0
-Environment=CONF_DIR=${CONF_DIR}
-Environment=API_TLS_CERT=${SMARTDNS_DIR}/cert/fullchain.pem
-Environment=API_TLS_KEY=${SMARTDNS_DIR}/cert/privkey.pem
-ExecStart=${py} ${BASE_DIR}/api-server.py
-Restart=on-failure
-RestartSec=5
-User=root
-TasksMax=128
-MemoryMax=96M
-LimitNOFILE=512
-NoNewPrivileges=yes
-ProtectHome=yes
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    # Re-run firewall so the API port is allowed (setup-firewall honors API_PORT).
-    [[ -x "${SCRIPTS_DIR}/setup-firewall.sh" ]] && API_PORT="$port" IOS_PORT="$IOS_PORT" bash "${SCRIPTS_DIR}/setup-firewall.sh" >/dev/null 2>&1 || true
-    systemctl daemon-reload
-    systemctl enable --now 5gpn-api.service 2>/dev/null || systemctl restart 5gpn-api.service || true
-    echo ""
-    ok "HTTP control API enabled."
-    echo "  URL:   https://${domain:-<domain>}:${port}"
-    echo "  Token: ${token}"
-    echo "  Stored: ${CONF_DIR}/.api_token (chmod 600)"
-    warn "Protect the token; access over HTTPS only."
-}
-
 setup_tgbot() {
     check_root
     [[ -f "${BASE_DIR}/tgbot.py" ]] || { err "${BASE_DIR}/tgbot.py not found (run a full install or place the file)."; return 1; }
@@ -752,7 +686,7 @@ show_status() {
         local s; s="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
         if [[ "$s" == active ]]; then echo "  ${svc}: ${GREEN}active${NC}"; else echo "  ${svc}: ${RED}${s}${NC}"; fi
     done
-    for opt in 5gpn-iosprofile.socket 5gpn-api 5gpn-tgbot; do
+    for opt in 5gpn-iosprofile.socket 5gpn-tgbot; do
         if systemctl list-unit-files 2>/dev/null | grep -q "^${opt}"; then
             local s; s="$(systemctl is-active "$opt" 2>/dev/null || echo unknown)"
             echo "  ${opt}: $([[ "$s" == active ]] && echo "${GREEN}active${NC}" || echo "${RED}${s}${NC}")"
@@ -789,6 +723,9 @@ full_install() {
 
     install_deps
     install_files
+    # Drop the removed HTTP control API if a previous install left it behind.
+    systemctl disable --now 5gpn-api 2>/dev/null || true
+    rm -f /etc/systemd/system/5gpn-api.service
     install_xray
 
     # Persist memory profile knobs the renderer/scripts read.
@@ -814,7 +751,7 @@ full_install() {
     echo "------------------------------------------"
     print_qr
     echo ""
-    info "Optional: '$0 --setup-api' / '$0 --setup-tgbot' for the control plane."
+    info "Optional: '$0 --setup-tgbot' to set up the Telegram control bot."
 }
 
 # ----------------------------------------------------------------------------
@@ -832,11 +769,10 @@ Usage: sudo bash install.sh [option]
   --add-domain <d>    Force-proxy a domain (adds to proxy-domains.txt)
   --del-domain <d>    Remove a domain from the forced-proxy list
   --ios               Regenerate the iOS profile + QR
-  --setup-api         Install + enable the HTTP control API; print the token
   --setup-tgbot       Install + enable the Telegram control bot
   --help              This help
 
-Env overrides: DOMAIN=, PUBLIC_IP=, EMAIL=, LOWMEM=1|0, API_TOKEN=, API_PORT=,
+Env overrides: DOMAIN=, PUBLIC_IP=, EMAIL=, LOWMEM=1|0,
                TGBOT_TOKEN=, TGBOT_ADMINS=
 EOF
 }
@@ -850,7 +786,6 @@ main() {
         --add-domain)   add_domain "${2:-}" ;;
         --del-domain)   del_domain "${2:-}" ;;
         --ios)          regen_ios ;;
-        --setup-api)    setup_api ;;
         --setup-tgbot)  setup_tgbot ;;
         --help|-h)      usage ;;
         *)              err "Unknown option: $cmd"; echo ""; usage; exit 2 ;;

@@ -6,14 +6,12 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$HERE/.."
-API_PORT="${API_PORT:-}"
 IOS_PORT="${IOS_PORT:-8111}"   # iOS profile fetch; NPN-only -> reachable from 172.22 only
 DOT_RATE="${DOT_RATE:-30/second}"   # per-source new-DoT-conn rate; raise for CGNAT-heavy bases
 DOT_BURST="${DOT_BURST:-60}"
 
 # DoT-only inbound (22/853, NO public 53) + client proxy ports from the NPN.
 tcp_ports="22, 853"
-[ -n "${API_PORT}" ] && tcp_ports="${tcp_ports}, ${API_PORT}"
 cat > /etc/nftables.conf <<EOF
 #!/usr/sbin/nft -f
 flush ruleset
