@@ -1,0 +1,45 @@
+# new-5gpn smartdns — auto-rendered from smartdns.conf.template. DO NOT edit in place.
+# Loop-avoidance: sniproxy MUST resolve via 22.22.22.22, NEVER this smartdns.
+
+# ---- Ingress: DoT only (853). Plaintext 53 is localhost-internal only. ----
+bind-tls [::]:853
+bind-cert-file __BIND_CERT__
+bind-cert-key-file __BIND_KEY__
+bind 127.0.0.1:5353
+
+# ---- IPv4-only ----
+force-AAAA-SOA yes
+
+# ---- Cache / TTL ----
+cache-size __CACHE_SIZE__
+rr-ttl-min 300
+rr-ttl-max 86400
+
+# ---- Upstreams: anti-pollution (DESIGN §5 constraint 2) ----
+# Domestic plaintext resolvers accept ONLY China IPs (-whitelist-ip + the
+# whitelist-ip set included below), so poisoned/foreign answers from them are
+# dropped. Clean overseas resolvers run over DoT (harder to poison) and return
+# the real foreign IP, which chnroute then ip-alias'es to the gateway.
+server 223.5.5.5 -whitelist-ip
+server 119.29.29.29 -whitelist-ip
+server-tls 8.8.8.8 -host-name dns.google
+server-tls 1.1.1.1
+
+# China IP whitelist for the -whitelist-ip domestic servers above. Generated from
+# china_ip_list by update-lists.sh; this file MUST exist or smartdns won't start.
+conf-file __CHINA_WHITELIST_FILE__
+
+# Known ISP/GFW bogus-NXDOMAIN poison addresses -> return SOA. Operator-editable.
+conf-file __BOGUS_NXDOMAIN_FILE__
+
+# Prefer reachable/closest IP so mixed answers favor the direct (China) IP.
+speed-check-mode ping,tcp:443
+response-mode first-ping
+
+# ---- (1) Forced-proxy domains -> gateway IP (no resolution) ----
+domain-set -name proxylist -type list -file __PROXY_DOMAINS_FILE__
+address /domain-set:proxylist/__GATEWAY_IP__
+
+# ---- (2) chnroute: any resolved IP in 'foreign' (non-China) -> rewrite to gateway IP ----
+ip-set -name foreign -type list -file __FOREIGN_CIDR_FILE__
+ip-rules ip-set:foreign -ip-alias __GATEWAY_IP__

@@ -1,0 +1,12 @@
+# Sample China IPv4 CIDR fixture (not used by unit tests, which use temp data).
+# Real list at runtime: https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt
+1.0.1.0/24
+1.0.2.0/23
+14.0.12.0/22
+27.8.0.0/13
+36.96.0.0/11
+58.14.0.0/15
+101.224.0.0/13
+116.128.0.0/10
+119.176.0.0/12
+171.8.0.0/13

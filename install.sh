@@ -1,0 +1,854 @@
+#!/usr/bin/env bash
+# new-5gpn installer / orchestrator (exit-less, direct-egress architecture).
+#
+#   client DoT:853 -> smartdns (returns the GATEWAY IP for blocked/foreign
+#   domains) -> sniproxy (TCP 80/443) reads SNI, resolves the real IP via
+#   22.22.22.22, then egress DIRECTLY out the default route.
+#
+# QUIC/HTTP3 is intentionally NOT proxied: UDP 443 is rejected at the firewall
+# so clients fall back to TCP/TLS (handled by sniproxy). No quic-proxy, no Go.
+#
+# There is NO exit layer: no sing-box, no WireGuard, no multi-exit, no
+# fwmark / ip-rule / table-100. Do not add any of those.
+set -euo pipefail
+
+# ----------------------------------------------------------------------------
+# Paths & constants
+# ----------------------------------------------------------------------------
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"   # repo new-5gpn/ when run from a checkout
+
+BASE_DIR="/opt/new-5gpn"                 # installed runtime root
+SCRIPTS_DIR="${BASE_DIR}/scripts"        # installed copies of repo scripts
+SRC_DIR="${BASE_DIR}/src"                # ios-http.py + build scratch
+WWW_DIR="${BASE_DIR}/www"                # iOS profile web root
+BUILD_DIR="${BASE_DIR}/build"            # sniproxy git build scratch
+
+CONF_DIR="/etc/new-5gpn"                 # state: .domain .public_ip .api_token ...
+SMARTDNS_DIR="/etc/smartdns"             # smartdns.conf(.template), lists, cert/
+SNIPROXY_CONF="/etc/sniproxy.conf"
+
+IOS_PORT=8111                            # socket-activated iOS profile responder
+RESOLV_FALLBACK="22.22.22.22"            # loop-avoidance external resolver (proxies)
+
+# ----------------------------------------------------------------------------
+# Pretty output helpers
+# ----------------------------------------------------------------------------
+if [[ -t 1 ]]; then
+    RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BLUE=$'\033[0;34m'; NC=$'\033[0m'
+else
+    RED=''; GREEN=''; YELLOW=''; BLUE=''; NC=''
+fi
+info() { echo "${BLUE}[INFO]${NC} $*"; }
+ok()   { echo "${GREEN}[OK]${NC}   $*"; }
+warn() { echo "${YELLOW}[WARN]${NC} $*"; }
+err()  { echo "${RED}[ERR]${NC}  $*" >&2; }
+
+check_root() {
+    if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+        err "This script must be run as root (use sudo)."
+        exit 1
+    fi
+}
+
+# ----------------------------------------------------------------------------
+# OS / memory / network detection
+# ----------------------------------------------------------------------------
+detect_os() {
+    if [[ ! -f /etc/os-release ]]; then
+        err "Cannot detect OS (/etc/os-release missing)."; exit 1
+    fi
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    OS="${ID:-unknown}"; VER="${VERSION_ID:-?}"
+    case "$OS" in
+        ubuntu|debian|raspbian|linuxmint|pop) PKG_MGR="apt-get" ;;
+        centos|rhel|rocky|almalinux|fedora|ol)
+            if command -v dnf >/dev/null 2>&1; then PKG_MGR="dnf"; else PKG_MGR="yum"; fi ;;
+        *)  # best-effort fallback by available manager
+            if   command -v apt-get >/dev/null 2>&1; then PKG_MGR="apt-get"
+            elif command -v dnf     >/dev/null 2>&1; then PKG_MGR="dnf"
+            elif command -v yum     >/dev/null 2>&1; then PKG_MGR="yum"
+            else err "Unsupported OS '$OS' and no known package manager."; exit 1; fi ;;
+    esac
+    info "Detected OS: $OS $VER (package manager: $PKG_MGR)"
+}
+
+# Sets MEM_TOTAL_MB, LOWMEM (0/1), MAKE_JOBS, CACHE_SIZE. LOWMEM env overrides.
+detect_memory_profile() {
+    MEM_TOTAL_MB=$(awk '/MemTotal/ { printf "%d", $2 / 1024 }' /proc/meminfo 2>/dev/null || echo 0)
+    if [[ -n "${LOWMEM:-}" ]]; then
+        case "$LOWMEM" in 1|yes|true|on) LOWMEM=1 ;; *) LOWMEM=0 ;; esac
+    elif [[ "${MEM_TOTAL_MB:-0}" -le 1300 ]]; then LOWMEM=1; else LOWMEM=0; fi
+
+    if [[ "$LOWMEM" == "1" ]]; then
+        MAKE_JOBS=1; CACHE_SIZE=20000
+        warn "Low-memory mode ON (RAM ${MEM_TOTAL_MB}MB): cache=${CACHE_SIZE}, 1 build job, swap ensured."
+    else
+        MAKE_JOBS="$(nproc 2>/dev/null || echo 2)"; CACHE_SIZE=512000
+        info "Standard memory mode (RAM ${MEM_TOTAL_MB}MB): cache=${CACHE_SIZE}."
+    fi
+}
+
+ensure_swap() {
+    [[ "${LOWMEM:-0}" == "1" ]] || return 0
+    if [[ "$(wc -l < /proc/swaps 2>/dev/null || echo 1)" -gt 1 ]]; then
+        info "Swap already present."; return 0
+    fi
+    [[ -e /swapfile ]] && return 0
+    local avail_mb; avail_mb=$(df -Pm / | awk 'NR==2 {print $4}')
+    if [[ -z "$avail_mb" || "$avail_mb" -lt 1536 ]]; then
+        warn "Not enough free disk for a swapfile (${avail_mb:-?}MB); skipping."; return 0
+    fi
+    info "Creating 1G swapfile (low-memory host)..."
+    fallocate -l 1G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none 2>/dev/null || {
+        warn "swapfile allocation failed; continuing without swap."; rm -f /swapfile; return 0; }
+    chmod 600 /swapfile
+    mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile 2>/dev/null || {
+        warn "mkswap/swapon failed; skipping swap."; rm -f /swapfile; return 0; }
+    grep -q '^/swapfile ' /etc/fstab 2>/dev/null || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    ok "1G swapfile active."
+}
+
+get_public_ip() {
+    if [[ -n "${PUBLIC_IP:-}" ]]; then info "Using PUBLIC_IP override: $PUBLIC_IP"; return 0; fi
+    # Prefer the gateway's own egress source address (this box IS the gateway).
+    PUBLIC_IP=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[\d.]+' || echo "")
+    if [[ -z "$PUBLIC_IP" ]]; then
+        PUBLIC_IP=$(curl -4 -s --max-time 10 https://api.ipify.org 2>/dev/null \
+                 || curl -4 -s --max-time 10 https://ifconfig.me   2>/dev/null \
+                 || curl -4 -s --max-time 10 https://icanhazip.com 2>/dev/null || echo "")
+    fi
+    if [[ -z "$PUBLIC_IP" ]]; then
+        err "Failed to detect public IPv4. Set PUBLIC_IP=<ip> and retry."; exit 1
+    fi
+    info "Public IPv4: $PUBLIC_IP"
+}
+
+# ----------------------------------------------------------------------------
+# Dependencies
+# ----------------------------------------------------------------------------
+install_deps() {
+    info "Installing dependencies..."
+    case "$PKG_MGR" in
+        apt-get)
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq || true
+            apt-get install -y -qq \
+                build-essential gcc git wget curl ca-certificates \
+                libev-dev libpcre3-dev libudns-dev libssl-dev \
+                autoconf automake libtool pkg-config gettext \
+                certbot nftables qrencode jq libcap2-bin \
+                python3 dnsutils || warn "some apt packages failed; continuing."
+            ;;
+        dnf|yum)
+            $PKG_MGR install -y -q \
+                gcc gcc-c++ make git wget curl ca-certificates \
+                libev-devel pcre-devel udns-devel openssl-devel \
+                autoconf automake libtool pkgconfig gettext \
+                certbot nftables qrencode jq \
+                python3 bind-utils || warn "some rpm packages failed; continuing."
+            # libcap setcap tooling (name varies by distro)
+            $PKG_MGR install -y -q libcap libcap-ng-utils 2>/dev/null || true
+            ;;
+    esac
+
+    install_smartdns
+
+    # certbot may break on very new Python; try to repair non-fatally.
+    if command -v certbot >/dev/null 2>&1 && ! certbot --version >/dev/null 2>&1; then
+        warn "certbot self-check failed; attempting pip repair."
+        pip3 install --upgrade --break-system-packages certbot 2>/dev/null \
+            || pip3 install --upgrade certbot 2>/dev/null || true
+    fi
+    command -v certbot >/dev/null 2>&1 || { err "certbot is required but missing."; exit 1; }
+}
+
+# smartdns: try the distro package, else fetch the official release binary.
+install_smartdns() {
+    if command -v smartdns >/dev/null 2>&1; then
+        [[ -n "${SMARTDNS_SHA256:-}" ]] && warn "SMARTDNS_SHA256 set but smartdns already on PATH; pin not applied."
+        info "smartdns already installed."; return 0
+    fi
+    info "Installing smartdns (distro package)..."
+    case "$PKG_MGR" in
+        apt-get) apt-get install -y -qq smartdns 2>/dev/null || true ;;
+        dnf|yum) $PKG_MGR install -y -q smartdns 2>/dev/null || true ;;
+    esac
+    command -v smartdns >/dev/null 2>&1 && {
+        [[ -n "${SMARTDNS_SHA256:-}" ]] && warn "SMARTDNS_SHA256 set but smartdns came from distro package (apt/dnf signature-verified); pin not applied."
+        ok "smartdns installed (distro)."; return 0
+    }
+
+    warn "Distro smartdns unavailable; downloading official release binary."
+    local arch sd_arch tmp ver
+    arch="$(uname -m)"
+    case "$arch" in
+        x86_64|amd64)  sd_arch="x86_64" ;;
+        aarch64|arm64) sd_arch="aarch64" ;;
+        armv7l|armhf)  sd_arch="arm" ;;
+        *) sd_arch="x86_64"; warn "unknown arch '$arch', trying x86_64." ;;
+    esac
+    ver="$(curl -fsSL https://api.github.com/repos/pymumu/smartdns/releases/latest 2>/dev/null \
+            | jq -r '.tag_name' 2>/dev/null || echo "")"
+    [[ -z "$ver" || "$ver" == "null" ]] && ver="Release46.1"
+    tmp="$(mktemp -d)"
+    # Prefer the static tar.gz asset for the arch; install the bundled binary.
+    if curl -fsSL "https://github.com/pymumu/smartdns/releases/download/${ver}/smartdns.${sd_arch}-debian-all.tar.gz" \
+            -o "$tmp/smartdns.tar.gz" 2>/dev/null && tar -tzf "$tmp/smartdns.tar.gz" >/dev/null 2>&1; then
+        # Opt-in integrity check: set SMARTDNS_SHA256=<hash> to pin the archive.
+        if [[ -n "${SMARTDNS_SHA256:-}" ]]; then
+            echo "${SMARTDNS_SHA256}  $tmp/smartdns.tar.gz" | sha256sum -c - \
+                || { err "smartdns archive sha256 mismatch."; rm -rf "$tmp"; exit 1; }
+        fi
+        tar -xzf "$tmp/smartdns.tar.gz" -C "$tmp"
+        local bin; bin="$(find "$tmp" -type f -name smartdns -perm -u+x 2>/dev/null | head -n1)"
+        [[ -z "$bin" ]] && bin="$(find "$tmp" -type f -name smartdns 2>/dev/null | head -n1)"
+        if [[ -n "$bin" ]]; then
+            install -m 0755 "$bin" /usr/sbin/smartdns
+            ok "smartdns ${ver} installed to /usr/sbin/smartdns."
+        fi
+    fi
+    rm -rf "$tmp"
+    command -v smartdns >/dev/null 2>&1 || { err "smartdns install failed (no package, no release)."; exit 1; }
+}
+
+# ----------------------------------------------------------------------------
+# Builds
+# ----------------------------------------------------------------------------
+build_sniproxy() {
+    if command -v sniproxy >/dev/null 2>&1 || [[ -x /usr/local/sbin/sniproxy ]]; then
+        info "sniproxy already built."; return 0
+    fi
+    info "Building sniproxy from dlundquist/sniproxy..."
+    mkdir -p "$BUILD_DIR"
+    [[ -d "$BUILD_DIR/sniproxy" ]] || git clone --depth=1 https://github.com/dlundquist/sniproxy.git "$BUILD_DIR/sniproxy"
+    (
+        cd "$BUILD_DIR/sniproxy"
+        DEBEMAIL="root@localhost" DEBFULLNAME="root" ./autogen.sh >/dev/null
+        ./configure --prefix=/usr/local --sysconfdir=/etc --enable-dns >/dev/null
+        make -j"${MAKE_JOBS:-1}" >/dev/null
+        make install >/dev/null
+    )
+    [[ -x /usr/local/sbin/sniproxy ]] || command -v sniproxy >/dev/null 2>&1 \
+        || { err "sniproxy build failed."; exit 1; }
+    ok "sniproxy installed to /usr/local/sbin/sniproxy."
+}
+
+# ----------------------------------------------------------------------------
+# Install config + scripts + control-plane sources
+# ----------------------------------------------------------------------------
+install_files() {
+    info "Installing config files and scripts..."
+    mkdir -p "$BASE_DIR" "$SCRIPTS_DIR" "$SRC_DIR" "$WWW_DIR" \
+             "$CONF_DIR" "$SMARTDNS_DIR" "$SMARTDNS_DIR/cert"
+
+    # smartdns template + proxy-domains seed (don't clobber an edited proxy list).
+    # The template is installed to BOTH /etc/smartdns (canonical) and
+    # /opt/new-5gpn/etc (where the installed update-lists.sh resolves it via
+    # ROOT="$HERE/..").
+    install -m 0644 "${SCRIPT_DIR}/etc/smartdns.conf.template" "${SMARTDNS_DIR}/smartdns.conf.template"
+    install -d -m 0755 "${BASE_DIR}/etc"
+    install -m 0644 "${SCRIPT_DIR}/etc/smartdns.conf.template" "${BASE_DIR}/etc/smartdns.conf.template"
+    if [[ ! -f "${SMARTDNS_DIR}/proxy-domains.txt" ]]; then
+        install -m 0644 "${SCRIPT_DIR}/etc/proxy-domains.txt" "${SMARTDNS_DIR}/proxy-domains.txt"
+    else
+        info "Keeping existing ${SMARTDNS_DIR}/proxy-domains.txt."
+    fi
+    # bogus-nxdomain poison list (anti-pollution include; don't clobber edits).
+    if [[ ! -f "${SMARTDNS_DIR}/bogus-nxdomain.conf" ]]; then
+        install -m 0644 "${SCRIPT_DIR}/etc/bogus-nxdomain.conf" "${SMARTDNS_DIR}/bogus-nxdomain.conf"
+    fi
+
+    # sniproxy.conf (resolver hardcoded to 22.22.22.22 in the repo file)
+    install -m 0644 "${SCRIPT_DIR}/etc/sniproxy.conf" "$SNIPROXY_CONF"
+
+    # repo scripts -> /opt/new-5gpn/scripts
+    for f in "${SCRIPT_DIR}"/scripts/*.sh "${SCRIPT_DIR}"/scripts/*.py; do
+        [[ -e "$f" ]] || continue
+        install -m 0755 "$f" "${SCRIPTS_DIR}/$(basename "$f")"
+    done
+
+    # iOS responder + control-plane python (only if shipped in the checkout)
+    [[ -f "${SCRIPT_DIR}/src/ios-http.py" ]] && install -m 0755 "${SCRIPT_DIR}/src/ios-http.py" "${SRC_DIR}/ios-http.py"
+    [[ -f "${SCRIPT_DIR}/api-server.py"  ]] && install -m 0755 "${SCRIPT_DIR}/api-server.py"  "${BASE_DIR}/api-server.py"
+    [[ -f "${SCRIPT_DIR}/tgbot.py"       ]] && install -m 0755 "${SCRIPT_DIR}/tgbot.py"       "${BASE_DIR}/tgbot.py"
+    if [[ -d "${SCRIPT_DIR}/webui" ]]; then
+        mkdir -p "${BASE_DIR}/webui"
+        cp -r "${SCRIPT_DIR}/webui/." "${BASE_DIR}/webui/" 2>/dev/null || true
+    fi
+    ok "Files installed under ${BASE_DIR} and ${SMARTDNS_DIR}."
+}
+
+# ----------------------------------------------------------------------------
+# Domain + ACME certificate
+# ----------------------------------------------------------------------------
+is_valid_domain() {
+    # Same FQDN rule as api-server.py / tgbot.py DOMAIN_RE (bash ERE has no
+    # lookahead, so total length is checked separately): lowercase [a-z0-9-]
+    # labels (<=63), alphabetic 2-63 TLD, total 1..253. Case-insensitive.
+    local d; d="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+    [[ ${#d} -ge 1 && ${#d} -le 253 ]] || return 1
+    [[ "$d" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]
+}
+
+resolve_domain() {
+    # Reuse a saved domain, else env DOMAIN, else prompt.
+    if [[ -z "${DOMAIN:-}" && -f "${CONF_DIR}/.domain" ]]; then
+        DOMAIN="$(cat "${CONF_DIR}/.domain" 2>/dev/null || true)"
+        is_valid_domain "$DOMAIN" && info "Reusing saved domain: $DOMAIN"
+    fi
+    if [[ -n "${DOMAIN:-}" ]]; then
+        is_valid_domain "$DOMAIN" || { err "Invalid DOMAIN '$DOMAIN'."; exit 1; }
+    else
+        if [[ ! -t 0 ]]; then
+            err "No domain. Set DOMAIN=dns.example.com for non-interactive installs."; exit 1
+        fi
+        local input=""
+        while true; do
+            read -r -p "Enter your DoT domain (e.g. dns.example.com): " input
+            input="${input#http://}"; input="${input#https://}"; input="${input%/}"; input="${input// /}"
+            is_valid_domain "$input" && { DOMAIN="$input"; break; }
+            warn "Invalid domain; enter a full FQDN like dns.example.com."
+        done
+    fi
+    mkdir -p "$CONF_DIR"
+    echo "$DOMAIN" > "${CONF_DIR}/.domain"
+    echo "$PUBLIC_IP" > "${CONF_DIR}/.public_ip"
+    info "Domain: $DOMAIN -> $PUBLIC_IP"
+}
+
+verify_a_record() {
+    info "Verifying $DOMAIN resolves to $PUBLIC_IP ..."
+    info "  Add an A record: ${DOMAIN}  A  ${PUBLIC_IP}  (low TTL)."
+    if [[ -t 0 ]]; then
+        local c=""; read -r -p "Press Enter once the A record is set (or type 'skip'): " c || c=""
+        [[ "$c" == "skip" ]] && { warn "Skipping A-record verification."; return 0; }
+    fi
+    local waited=0 resolved=""
+    while [[ $waited -lt 120 ]]; do
+        resolved=$(dig +short A "$DOMAIN" @1.1.1.1 2>/dev/null | grep -E '^[0-9.]+$' | head -n1 || true)
+        [[ -z "$resolved" ]] && resolved=$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1{print $1}' || true)
+        if [[ "$resolved" == "$PUBLIC_IP" ]]; then ok "DNS verified: $DOMAIN -> $PUBLIC_IP"; return 0; fi
+        sleep 5; waited=$((waited+5)); echo -n "."
+    done
+    echo ""
+    warn "A record not effective in 120s (saw: ${resolved:-none}); continuing. Cert issuance may fail."
+}
+
+open_port80()  { nft list table inet filter >/dev/null 2>&1 && nft insert rule inet filter input tcp dport 80 accept 2>/dev/null || true; }
+close_port80() { [[ -f /etc/nftables.conf ]] && nft -f /etc/nftables.conf 2>/dev/null || true; }
+
+install_cert() {
+    local live="/etc/letsencrypt/live/${DOMAIN}"
+    # Keep a still-valid cert (>30 days) to dodge Let's Encrypt rate limits.
+    if [[ -f "${live}/fullchain.pem" ]] && \
+       openssl x509 -checkend $((30*86400)) -noout -in "${live}/fullchain.pem" >/dev/null 2>&1; then
+        info "Valid cert exists (>30d); reusing."
+    else
+        info "Issuing Let's Encrypt cert for $DOMAIN (standalone)..."
+        open_port80
+        local rc=0
+        certbot certonly --standalone -d "$DOMAIN" --agree-tos -n \
+            -m "${EMAIL:-admin@${DOMAIN}}" --keep-until-expiring || rc=$?
+        close_port80
+        if [[ $rc -ne 0 || ! -f "${live}/fullchain.pem" ]]; then
+            err "Certificate issuance failed. Check: A record -> $PUBLIC_IP, port 80 reachable, LE rate limits."
+            exit 1
+        fi
+    fi
+    install -d -m 0755 "${SMARTDNS_DIR}/cert"
+    install -m 0644 "${live}/fullchain.pem" "${SMARTDNS_DIR}/cert/fullchain.pem"
+    install -m 0640 "${live}/privkey.pem"   "${SMARTDNS_DIR}/cert/privkey.pem"
+    ok "Cert deployed to ${SMARTDNS_DIR}/cert/."
+
+    # Renewal deploy hook (redeploys cert + restarts smartdns). Ships in repo.
+    if [[ -f "${SCRIPT_DIR}/scripts/renew-hook.sh" ]]; then
+        install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
+        install -m 0755 "${SCRIPT_DIR}/scripts/renew-hook.sh" \
+            /etc/letsencrypt/renewal-hooks/deploy/99-new5gpn.sh
+        ok "Renewal deploy hook installed."
+    else
+        warn "scripts/renew-hook.sh not found; auto-renew reload hook skipped."
+    fi
+
+    install_renewal_automation
+}
+
+# Make `certbot renew` work behind the DoT-only (drop) firewall where sniproxy
+# holds :80: install pre/post renewal-hooks that briefly open 80 + stop sniproxy
+# (then restore), plus a Persistent daily timer so renewal runs unattended.
+# Without this the LE cert expires (~90d) and DoT :853 dies with no :53 fallback.
+install_renewal_automation() {
+    install -d -m 0755 /etc/letsencrypt/renewal-hooks/pre /etc/letsencrypt/renewal-hooks/post
+    cat > /etc/letsencrypt/renewal-hooks/pre/10-new5gpn-open80.sh <<'EOF'
+#!/usr/bin/env bash
+# Free TCP 80 for certbot --standalone: open the firewall + stop sniproxy (binds :80).
+nft list table inet filter >/dev/null 2>&1 && nft insert rule inet filter input tcp dport 80 accept 2>/dev/null || true
+systemctl stop sniproxy 2>/dev/null || true
+EOF
+    cat > /etc/letsencrypt/renewal-hooks/post/10-new5gpn-close80.sh <<'EOF'
+#!/usr/bin/env bash
+# Restore DoT-only firewall (drops the temp :80 accept) + bring sniproxy back.
+# Runs after every renewal attempt, success or failure.
+systemctl start sniproxy 2>/dev/null || true
+[ -f /etc/nftables.conf ] && nft -f /etc/nftables.conf 2>/dev/null || true
+EOF
+    chmod +x /etc/letsencrypt/renewal-hooks/pre/10-new5gpn-open80.sh \
+             /etc/letsencrypt/renewal-hooks/post/10-new5gpn-close80.sh
+    ok "Renewal pre/post hooks installed (open/close :80 + cycle sniproxy)."
+
+    # Don't double up if the distro/snap already ships an enabled renewal timer
+    # (our renewal-hooks above apply regardless of which timer triggers renew).
+    if systemctl is-enabled certbot.timer >/dev/null 2>&1 \
+       || systemctl is-enabled snap.certbot.renew.timer >/dev/null 2>&1; then
+        info "Existing certbot timer detected; relying on it (our hooks still apply)."
+        return 0
+    fi
+    cat > /etc/systemd/system/new5gpn-certbot-renew.service <<'EOF'
+[Unit]
+Description=new-5gpn certbot renewal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'certbot renew --quiet'
+EOF
+    cat > /etc/systemd/system/new5gpn-certbot-renew.timer <<'EOF'
+[Unit]
+Description=new-5gpn daily certbot renewal check
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now new5gpn-certbot-renew.timer 2>/dev/null || true
+    ok "Installed new5gpn-certbot-renew.timer (daily, Persistent)."
+}
+
+# ----------------------------------------------------------------------------
+# Lists + smartdns render, firewall, iOS profile
+# ----------------------------------------------------------------------------
+run_update_lists() {
+    info "Building chnroute lists + rendering smartdns.conf..."
+    SMARTDNS_DIR="$SMARTDNS_DIR" GATEWAY_IP="${GATEWAY_IP:-$PUBLIC_IP}" CACHE_SIZE="$CACHE_SIZE" \
+        bash "${SCRIPTS_DIR}/update-lists.sh"
+    ok "Lists updated and smartdns.conf rendered."
+}
+
+run_setup_firewall() {
+    info "Installing firewall + proxy units (direct egress, no exit layer)..."
+    local api_port=""
+    [[ -f "${CONF_DIR}/.api_port" ]] && api_port="$(cat "${CONF_DIR}/.api_port" 2>/dev/null || true)"
+    API_PORT="$api_port" IOS_PORT="$IOS_PORT" bash "${SCRIPTS_DIR}/setup-firewall.sh"
+    ok "Firewall + sniproxy unit installed."
+}
+
+install_smartdns_unit() {
+    # Most smartdns packages ship a unit; if not, provide a minimal one.
+    if systemctl list-unit-files 2>/dev/null | grep -q '^smartdns\.service'; then return 0; fi
+    cat > /etc/systemd/system/smartdns.service <<EOF
+[Unit]
+Description=new-5gpn smartdns (DoT brain)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$(command -v smartdns) -f -c ${SMARTDNS_DIR}/smartdns.conf
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+}
+
+setup_ios_profile() {
+    info "Generating iOS DoT profile..."
+    mkdir -p "$WWW_DIR" "$SRC_DIR"
+    local gw="${GATEWAY_IP:-$PUBLIC_IP}"
+    if [[ -x "${SCRIPTS_DIR}/gen-ios-profile.sh" ]]; then
+        bash "${SCRIPTS_DIR}/gen-ios-profile.sh" "$DOMAIN" "$gw" "$WWW_DIR" \
+            || warn "gen-ios-profile.sh failed; profile may be incomplete."
+    else
+        warn "scripts/gen-ios-profile.sh not present yet; skipping profile generation."
+    fi
+
+    # Socket-activated (inetd-style) responder: only spawns on a real fetch.
+    local py; py="$(command -v python3 || echo /usr/bin/python3)"
+    if [[ ! -f "${SRC_DIR}/ios-http.py" ]]; then
+        warn "${SRC_DIR}/ios-http.py missing; iOS HTTP service not installed."
+        return 0
+    fi
+    cat > /etc/systemd/system/new5gpn-iosprofile.socket <<EOF
+[Unit]
+Description=new-5gpn iOS profile HTTP socket
+
+[Socket]
+ListenStream=0.0.0.0:${IOS_PORT}
+Accept=yes
+
+[Install]
+WantedBy=sockets.target
+EOF
+    cat > /etc/systemd/system/new5gpn-iosprofile@.service <<EOF
+[Unit]
+Description=new-5gpn iOS profile responder (per-connection)
+
+[Service]
+Type=simple
+ExecStart=${py} ${SRC_DIR}/ios-http.py
+Environment=WWW_DIR=${WWW_DIR}
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+User=root
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+EOF
+    systemctl daemon-reload
+    ok "iOS profile responder configured (socket-activated on :${IOS_PORT})."
+}
+
+print_qr() {
+    local url="http://${GATEWAY_IP:-$PUBLIC_IP}:${IOS_PORT}/ios-dot.mobileconfig"
+    if command -v qrencode >/dev/null 2>&1; then
+        echo ""; info "Scan to install the iOS profile:"
+        qrencode -t ANSIUTF8 "$url" || true
+    fi
+}
+
+# ----------------------------------------------------------------------------
+# System tuning (lean: BBR + conntrack + ip_forward, profile-scaled)
+# ----------------------------------------------------------------------------
+system_tuning() {
+    info "Applying sysctl tuning..."
+    modprobe nf_conntrack >/dev/null 2>&1 || true
+    mkdir -p /etc/modules-load.d; echo nf_conntrack > /etc/modules-load.d/new5gpn.conf
+    local ct sm
+    if [[ "${LOWMEM:-0}" == "1" ]]; then ct=131072; sm=60; else ct=1048576; sm=10; fi
+    cat > /etc/sysctl.d/99-new5gpn.conf <<EOF
+# new-5gpn ($([[ "${LOWMEM:-0}" == "1" ]] && echo low-memory || echo standard))
+net.ipv4.ip_forward=1
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_mtu_probing=1
+net.netfilter.nf_conntrack_max=${ct}
+vm.swappiness=${sm}
+EOF
+    sysctl --system >/dev/null 2>&1 || true
+}
+
+# ----------------------------------------------------------------------------
+# Service lifecycle
+# ----------------------------------------------------------------------------
+start_services() {
+    info "Enabling and starting services..."
+    systemctl daemon-reload
+    for svc in smartdns sniproxy nftables; do
+        systemctl enable "$svc" >/dev/null 2>&1 || true
+        systemctl restart "$svc" 2>/dev/null || systemctl start "$svc" 2>/dev/null \
+            || warn "could not start $svc (check: journalctl -u $svc)."
+    done
+    if systemctl list-unit-files 2>/dev/null | grep -q '^new5gpn-iosprofile\.socket'; then
+        systemctl enable --now new5gpn-iosprofile.socket 2>/dev/null || warn "iOS socket failed to start."
+    fi
+}
+
+# ----------------------------------------------------------------------------
+# Optional control plane: api / tgbot
+# ----------------------------------------------------------------------------
+setup_api() {
+    check_root
+    [[ -f "${BASE_DIR}/api-server.py" ]] || { err "${BASE_DIR}/api-server.py not found (run a full install or place the file)."; return 1; }
+    local py; py="$(command -v python3 || echo /usr/bin/python3)"
+    local token port domain
+    token="$(cat "${CONF_DIR}/.api_token" 2>/dev/null || true)"
+    [[ -z "$token" ]] && token="${API_TOKEN:-$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')}"
+    port="${API_PORT:-$(cat "${CONF_DIR}/.api_port" 2>/dev/null || echo 8443)}"
+    port="$(printf '%s' "$port" | tr -dc '0-9')"; [[ -n "$port" ]] || port=8443
+    domain="$(cat "${CONF_DIR}/.domain" 2>/dev/null || echo "")"
+
+    mkdir -p "$CONF_DIR"
+    printf '%s' "$token" > "${CONF_DIR}/.api_token"; chmod 600 "${CONF_DIR}/.api_token"
+    printf '%s' "$port"  > "${CONF_DIR}/.api_port"
+
+    cat > /etc/systemd/system/new5gpn-api.service <<EOF
+[Unit]
+Description=new-5gpn HTTP control API
+After=network-online.target smartdns.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=API_TOKEN=${token}
+Environment=API_PORT=${port}
+Environment=API_BIND=0.0.0.0
+Environment=CONF_DIR=${CONF_DIR}
+Environment=API_TLS_CERT=${SMARTDNS_DIR}/cert/fullchain.pem
+Environment=API_TLS_KEY=${SMARTDNS_DIR}/cert/privkey.pem
+ExecStart=${py} ${BASE_DIR}/api-server.py
+Restart=on-failure
+RestartSec=5
+User=root
+TasksMax=128
+MemoryMax=96M
+LimitNOFILE=512
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    # Re-run firewall so the API port is allowed (setup-firewall honors API_PORT).
+    [[ -x "${SCRIPTS_DIR}/setup-firewall.sh" ]] && API_PORT="$port" IOS_PORT="$IOS_PORT" bash "${SCRIPTS_DIR}/setup-firewall.sh" >/dev/null 2>&1 || true
+    systemctl daemon-reload
+    systemctl enable --now new5gpn-api.service 2>/dev/null || systemctl restart new5gpn-api.service || true
+    echo ""
+    ok "HTTP control API enabled."
+    echo "  URL:   https://${domain:-<domain>}:${port}"
+    echo "  Token: ${token}"
+    echo "  Stored: ${CONF_DIR}/.api_token (chmod 600)"
+    warn "Protect the token; access over HTTPS only."
+}
+
+setup_tgbot() {
+    check_root
+    [[ -f "${BASE_DIR}/tgbot.py" ]] || { err "${BASE_DIR}/tgbot.py not found (run a full install or place the file)."; return 1; }
+    local py; py="$(command -v python3 || echo /usr/bin/python3)"
+    local token admins
+    token="${TGBOT_TOKEN:-$(cat "${CONF_DIR}/.tgbot_token" 2>/dev/null || true)}"
+    if [[ -z "$token" && -t 0 ]]; then read -r -p "Telegram Bot Token (blank to skip): " token; fi
+    [[ -z "$token" ]] && { info "No Telegram token; skipping tgbot. Re-run later: $0 --setup-tgbot"; return 0; }
+    admins="${TGBOT_ADMINS:-$(cat "${CONF_DIR}/.tgbot_admins" 2>/dev/null || true)}"
+    if [[ -z "$admins" && -t 0 ]]; then read -r -p "Authorized Telegram numeric IDs (comma-separated, optional): " admins; fi
+    admins="$(printf '%s' "$admins" | tr ', ' '\n\n' | grep -E '^[0-9]+$' | paste -sd ',' - 2>/dev/null || true)"
+
+    mkdir -p "$CONF_DIR"
+    printf '%s' "$token"  > "${CONF_DIR}/.tgbot_token";  chmod 600 "${CONF_DIR}/.tgbot_token"
+    printf '%s' "$admins" > "${CONF_DIR}/.tgbot_admins"; chmod 600 "${CONF_DIR}/.tgbot_admins"
+
+    cat > /etc/systemd/system/new5gpn-tgbot.service <<EOF
+[Unit]
+Description=new-5gpn Telegram control bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=TGBOT_TOKEN=${token}
+Environment=TGBOT_ADMINS=${admins}
+Environment=CONF_DIR=${CONF_DIR}
+ExecStart=${py} ${BASE_DIR}/tgbot.py
+Restart=on-failure
+RestartSec=5
+User=root
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now new5gpn-tgbot.service 2>/dev/null || systemctl restart new5gpn-tgbot.service || true
+    ok "Telegram bot enabled."
+    echo "  Token stored: ${CONF_DIR}/.tgbot_token (chmod 600)"
+    [[ -z "$admins" ]] && warn "No admin IDs set yet; message the bot, then add IDs to ${CONF_DIR}/.tgbot_admins and: systemctl restart new5gpn-tgbot"
+}
+
+# ----------------------------------------------------------------------------
+# Domain-list management (proxy-domains.txt) + list refresh + status
+# ----------------------------------------------------------------------------
+add_domain() {
+    check_root
+    local d="${1:-}"; is_valid_domain "$d" || { err "Invalid domain: '$d'"; exit 1; }
+    local f="${SMARTDNS_DIR}/proxy-domains.txt"; mkdir -p "$SMARTDNS_DIR"; touch "$f"
+    if grep -qxF "$d" "$f"; then info "$d already in proxy list."; else echo "$d" >> "$f"; ok "Added $d to forced-proxy list."; fi
+    refresh_lists_and_restart
+}
+
+del_domain() {
+    check_root
+    local d="${1:-}"; [[ -n "$d" ]] || { err "Usage: --del-domain <domain>"; exit 1; }
+    local f="${SMARTDNS_DIR}/proxy-domains.txt"; [[ -f "$f" ]] || { warn "No proxy list."; return 0; }
+    if grep -qxF "$d" "$f"; then grep -vxF "$d" "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"; ok "Removed $d."; else info "$d not in list."; fi
+    refresh_lists_and_restart
+}
+
+refresh_lists_and_restart() {
+    local gw; gw="${GATEWAY_IP:-$(cat "${CONF_DIR}/.gateway_ip" 2>/dev/null || cat "${CONF_DIR}/.public_ip" 2>/dev/null || true)}"
+    [[ -z "$gw" ]] && gw="$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[\d.]+' || echo 127.0.0.1)"
+    local cs; cs="$(cat "${SMARTDNS_DIR}/.cache_size" 2>/dev/null || echo 20000)"
+    local sd="${SCRIPTS_DIR}/update-lists.sh"; [[ -x "$sd" ]] || sd="${SCRIPT_DIR}/scripts/update-lists.sh"
+    SMARTDNS_DIR="$SMARTDNS_DIR" GATEWAY_IP="$gw" CACHE_SIZE="$cs" bash "$sd"
+}
+
+do_update_lists() {
+    check_root
+    info "Refreshing china_ip_list + foreign-cidr + smartdns.conf..."
+    refresh_lists_and_restart
+    ok "Lists refreshed."
+}
+
+regen_ios() {
+    check_root
+    DOMAIN="$(cat "${CONF_DIR}/.domain" 2>/dev/null || true)"
+    PUBLIC_IP="$(cat "${CONF_DIR}/.public_ip" 2>/dev/null || true)"
+    GATEWAY_IP="${GATEWAY_IP:-$(cat "${CONF_DIR}/.gateway_ip" 2>/dev/null || true)}"
+    [[ -n "$DOMAIN" && -n "$PUBLIC_IP" ]] || { err "Domain/public IP unknown; run a full install first."; exit 1; }
+    setup_ios_profile
+    systemctl reload-or-restart new5gpn-iosprofile.socket 2>/dev/null || systemctl enable --now new5gpn-iosprofile.socket 2>/dev/null || true
+    print_qr
+    ok "iOS profile regenerated: http://${GATEWAY_IP:-$PUBLIC_IP}:${IOS_PORT}/ios-dot.mobileconfig"
+}
+
+show_status() {
+    local domain pubip f_lines f_age pd
+    domain="$(cat "${CONF_DIR}/.domain" 2>/dev/null || echo N/A)"
+    pubip="$(cat "${CONF_DIR}/.public_ip" 2>/dev/null || echo N/A)"
+    echo "=========================================="
+    echo "         new-5gpn status"
+    echo "=========================================="
+    for svc in smartdns sniproxy; do
+        local s; s="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
+        if [[ "$s" == active ]]; then echo "  ${svc}: ${GREEN}active${NC}"; else echo "  ${svc}: ${RED}${s}${NC}"; fi
+    done
+    for opt in new5gpn-iosprofile.socket new5gpn-api new5gpn-tgbot; do
+        if systemctl list-unit-files 2>/dev/null | grep -q "^${opt}"; then
+            local s; s="$(systemctl is-active "$opt" 2>/dev/null || echo unknown)"
+            echo "  ${opt}: $([[ "$s" == active ]] && echo "${GREEN}active${NC}" || echo "${RED}${s}${NC}")"
+        fi
+    done
+    echo ""
+    echo "  Domain:    $domain"
+    echo "  Public IP: $pubip"
+    echo "  DoT:       tls://${domain}:853"
+    pd=0; [[ -f "${SMARTDNS_DIR}/proxy-domains.txt" ]] && pd="$(grep -cvE '^\s*(#|$)' "${SMARTDNS_DIR}/proxy-domains.txt" 2>/dev/null || echo 0)"
+    echo "  Forced-proxy domains: $pd"
+    if [[ -f "${SMARTDNS_DIR}/foreign-cidr.txt" ]]; then
+        f_lines="$(grep -cvE '^[[:space:]]*(#|$)' "${SMARTDNS_DIR}/foreign-cidr.txt" 2>/dev/null || echo 0)"
+        local now mtime; now=$(date +%s); mtime=$(stat -c %Y "${SMARTDNS_DIR}/foreign-cidr.txt" 2>/dev/null || echo "$now")
+        f_age="$(( (now - mtime) / 3600 ))h"
+        echo "  foreign-cidr: ${f_lines} lines (age ${f_age})"
+    else
+        echo "  foreign-cidr: missing"
+    fi
+    echo "=========================================="
+}
+
+# ----------------------------------------------------------------------------
+# Full install
+# ----------------------------------------------------------------------------
+full_install() {
+    check_root
+    detect_os
+    detect_memory_profile
+    ensure_swap
+    get_public_ip
+    GATEWAY_IP="${GATEWAY_IP:-$PUBLIC_IP}"   # client-facing addr (NPN: export internal 172.22 IP)
+    mkdir -p "$CONF_DIR"; printf '%s' "$GATEWAY_IP" > "${CONF_DIR}/.gateway_ip"
+
+    install_deps
+    install_files
+    build_sniproxy
+
+    # Persist memory profile knobs the renderer/scripts read.
+    mkdir -p "$SMARTDNS_DIR"; echo "$CACHE_SIZE" > "${SMARTDNS_DIR}/.cache_size"
+
+    resolve_domain
+    verify_a_record
+    install_smartdns_unit
+    install_cert
+
+    run_update_lists       # fetch china_ip_list, build foreign-cidr, render smartdns.conf
+    run_setup_firewall     # pxout user + DoT-only nft + sniproxy unit
+    system_tuning
+    setup_ios_profile
+    start_services
+
+    echo ""
+    ok "new-5gpn install complete."
+    echo "------------------------------------------"
+    echo " DoT address:        tls://${DOMAIN}:853"
+    echo " Android Private DNS: ${DOMAIN}"
+    echo " iOS profile URL:     http://${GATEWAY_IP:-$PUBLIC_IP}:${IOS_PORT}/ios-dot.mobileconfig"
+    echo "------------------------------------------"
+    print_qr
+    echo ""
+    info "Optional: '$0 --setup-api' / '$0 --setup-tgbot' for the control plane."
+}
+
+# ----------------------------------------------------------------------------
+# Usage / dispatch
+# ----------------------------------------------------------------------------
+usage() {
+    cat <<EOF
+new-5gpn installer (exit-less DoT gateway)
+
+Usage: sudo bash install.sh [option]
+
+  (no args)           Full install / idempotent re-run
+  --update-lists      Refresh china_ip_list + foreign-cidr, re-render smartdns.conf
+  --status            Show service states, domain, IP, list counts/age
+  --add-domain <d>    Force-proxy a domain (adds to proxy-domains.txt)
+  --del-domain <d>    Remove a domain from the forced-proxy list
+  --ios               Regenerate the iOS profile + QR
+  --setup-api         Install + enable the HTTP control API; print the token
+  --setup-tgbot       Install + enable the Telegram control bot
+  --help              This help
+
+Env overrides: DOMAIN=, PUBLIC_IP=, EMAIL=, LOWMEM=1|0, API_TOKEN=, API_PORT=,
+               TGBOT_TOKEN=, TGBOT_ADMINS=
+EOF
+}
+
+main() {
+    local cmd="${1:-}"
+    case "$cmd" in
+        ""|install)     full_install ;;
+        --update-lists) do_update_lists ;;
+        --status)       show_status ;;
+        --add-domain)   add_domain "${2:-}" ;;
+        --del-domain)   del_domain "${2:-}" ;;
+        --ios)          regen_ios ;;
+        --setup-api)    setup_api ;;
+        --setup-tgbot)  setup_tgbot ;;
+        --help|-h)      usage ;;
+        *)              err "Unknown option: $cmd"; echo ""; usage; exit 2 ;;
+    esac
+}
+
+main "$@"

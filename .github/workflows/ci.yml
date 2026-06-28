@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      # new-5gpn may be the repo root or a subdirectory; locate tests/run-tests.sh.
+      - name: Locate project
+        id: loc
+        run: |
+          rt="$(find . -path '*/tests/run-tests.sh' -o -name run-tests.sh -path '*tests*' | head -1)"
+          [ -n "$rt" ] || { echo "run-tests.sh not found"; exit 1; }
+          td="$(dirname "$rt")"
+          echo "tests_dir=$td"      >> "$GITHUB_OUTPUT"
+          echo "root=$(dirname "$td")" >> "$GITHUB_OUTPUT"
+
+      # The dev box has no Python, so this gate (and the unit tests) only run here.
+      - name: py_compile all Python
+        run: |
+          mapfile -t pys < <(find "${{ steps.loc.outputs.root }}" -name '*.py' -not -path '*/.*')
+          printf '%s\n' "${pys[@]}"
+          python3 -m py_compile "${pys[@]}"
+
+      # run-tests.sh runs the unittest suite + every tests/*.sh policy test.
+      - name: Run test suite
+        run: bash "${{ steps.loc.outputs.tests_dir }}/run-tests.sh"

@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src *; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>5gpn 控制台</title>
+<style>
+  /* ---- theme: dark (default) ---- */
+  :root { --bg:#0f1115; --card:#181b22; --line:#262b36; --fg:#e6e9ef; --mut:#9aa4b2;
+          --acc:#4f8cff; --ok:#2ecc71; --bad:#ff5c5c; --warn:#f5a623;
+          --input-bg:#11141a; --btn-bg:#222836; --btn-line:#2f3645; --shadow:none;
+          --sidebar-bg:#14171e; --nav-active:rgba(79,140,255,.16); }
+  @media (prefers-color-scheme:light) {
+    :root:not([data-theme="dark"]) {
+      --bg:#f4f6f9; --card:#ffffff; --line:#e3e7ee; --fg:#1b1f27; --mut:#5b6573;
+      --acc:#2563eb; --ok:#16a34a; --bad:#dc2626; --warn:#b45309;
+      --input-bg:#ffffff; --btn-bg:#eef1f6; --btn-line:#d4dae3; --shadow:0 1px 3px rgba(20,30,60,.06);
+      --sidebar-bg:#ffffff; --nav-active:rgba(37,99,235,.10); }
+  }
+  :root[data-theme="light"] {
+    --bg:#f4f6f9; --card:#ffffff; --line:#e3e7ee; --fg:#1b1f27; --mut:#5b6573;
+    --acc:#2563eb; --ok:#16a34a; --bad:#dc2626; --warn:#b45309;
+    --input-bg:#ffffff; --btn-bg:#eef1f6; --btn-line:#d4dae3; --shadow:0 1px 3px rgba(20,30,60,.06);
+    --sidebar-bg:#ffffff; --nav-active:rgba(37,99,235,.10); }
+
+  * { box-sizing:border-box; }
+  html { -webkit-text-size-adjust:100%; }
+  body { margin:0; background:var(--bg); color:var(--fg); overflow-x:hidden;
+         -webkit-tap-highlight-color:transparent; transition:background-color .2s, color .2s;
+         font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; }
+  h2 { font-size:13px; margin:0 0 10px; color:var(--mut); text-transform:uppercase; letter-spacing:.04em; }
+  .hide { display:none !important; }
+  .grow { flex:1; } .muted { color:var(--mut); } .small { font-size:12px; }
+  a { color:var(--acc); }
+
+  /* form controls */
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .row + .row { margin-top:8px; }
+  input, select, button { font-family:inherit; font-size:16px;
+    color:var(--fg); background:var(--input-bg); border:1px solid var(--line); border-radius:10px; padding:10px 12px; line-height:1.25; }
+  input { min-width:0; }
+  input[type=text], input[type=password] { flex:1 1 200px; }
+  button { cursor:pointer; background:var(--btn-bg); border-color:var(--btn-line); min-height:42px; padding:9px 14px;
+    touch-action:manipulation; transition:transform .05s, background-color .2s, border-color .2s; }
+  button:active { transform:scale(.97); }
+  @media (hover:hover) { button:hover { border-color:var(--acc); } }
+  button.primary { background:var(--acc); border-color:var(--acc); color:#fff; }
+  button.danger { border-color:var(--bad); color:var(--bad); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+
+  /* ---- login screen ---- */
+  .login { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:16px; }
+  .logincard { width:100%; max-width:380px; background:var(--card); border:1px solid var(--line);
+    border-radius:16px; padding:22px; box-shadow:var(--shadow); }
+  .logincard h1 { font-size:20px; margin:0 0 4px; }
+  .logincard .sub { color:var(--mut); font-size:13px; margin-bottom:16px; }
+
+  /* ---- app layout (UniFi-style) ---- */
+  .layout { display:flex; min-height:100vh; }
+  .sidebar { width:208px; flex:0 0 208px; background:var(--sidebar-bg); border-right:1px solid var(--line);
+    display:flex; flex-direction:column; position:sticky; top:0; height:100vh; z-index:30; }
+  .brand { padding:18px 18px 10px; font-weight:700; font-size:16px; display:flex; align-items:center; gap:8px; }
+  .brand .dot { width:8px; height:8px; border-radius:50%; background:var(--bad); }
+  .brand .dot.on { background:var(--ok); }
+  nav.menu { flex:1; padding:8px; overflow:auto; }
+  .navitem { display:flex; align-items:center; gap:11px; padding:11px 14px; border-radius:10px;
+    color:var(--mut); cursor:pointer; font-size:14px; user-select:none; }
+  .navitem .ic { font-size:17px; width:20px; text-align:center; }
+  @media (hover:hover){ .navitem:hover { background:var(--nav-active); color:var(--fg); } }
+  .navitem.active { background:var(--nav-active); color:var(--acc); font-weight:600; }
+  .sidefoot { padding:12px; border-top:1px solid var(--line); display:flex; flex-direction:column; gap:8px; }
+  .sidefoot .url { font-size:11px; color:var(--mut); word-break:break-all; }
+  .sidefoot button { min-height:38px; }
+
+  .main { flex:1; min-width:0; display:flex; flex-direction:column; }
+  .topbar { display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid var(--line);
+    background:var(--card); position:sticky; top:0; z-index:10; min-height:56px; }
+  .topbar .title { font-size:16px; font-weight:600; flex:1; }
+  .topbar button { min-height:38px; padding:7px 11px; }
+  .hamb { display:none; }
+  .scrim { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:25; }
+  .content { padding:18px; width:100%; max-width:980px; }
+
+  /* dashboard tiles */
+  .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:14px; }
+  .tile { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px 16px; box-shadow:var(--shadow); }
+  .tile .tlabel { color:var(--mut); font-size:12px; }
+  .tile .tval { font-size:23px; font-weight:700; margin:5px 0 8px; word-break:break-all; }
+  .tile .tsub { color:var(--mut); font-size:11px; margin-top:7px; }
+
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:14px; box-shadow:var(--shadow); }
+
+  .pill { font-size:12px; padding:3px 9px; border-radius:999px; border:1px solid var(--line); color:var(--mut); white-space:nowrap; display:inline-block; }
+  .pill.on { color:var(--ok); border-color:var(--ok); }
+  .pill.off { color:var(--bad); border-color:var(--bad); }
+  .pill.wait { color:var(--warn); border-color:var(--warn); }
+  .pills { display:flex; flex-wrap:wrap; gap:6px; }
+
+  /* service rows with status dot */
+  .svc { display:flex; align-items:center; gap:10px; padding:11px 0; border-top:1px solid var(--line); }
+  .svc:first-child { border-top:none; }
+  .svc .sdot { width:10px; height:10px; border-radius:50%; background:var(--mut); flex:0 0 auto; }
+  .svc .sdot.on { background:var(--ok); box-shadow:0 0 0 4px rgba(46,204,113,.16); }
+  .svc .sdot.off { background:var(--bad); box-shadow:0 0 0 4px rgba(255,92,92,.16); }
+  .svc .sname { font-weight:600; flex:1; }
+
+  /* bar gauge */
+  .bar { height:9px; background:var(--input-bg); border-radius:6px; overflow:hidden; border:1px solid var(--line); }
+  .bar>i { display:block; height:100%; background:linear-gradient(90deg,#2ecc71,#f5a623,#ff5c5c); }
+
+  /* domain list */
+  #domlist { margin-top:10px; border:1px solid var(--line); border-radius:10px; max-height:420px; overflow:auto; }
+  .drow { display:flex; gap:8px; align-items:center; padding:9px 12px; border-top:1px solid var(--line); }
+  .drow:first-child { border-top:none; }
+  .drow .dname { flex:1; word-break:break-all; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:13px; }
+  .drow button { min-height:34px; padding:5px 11px; }
+
+  /* toast notifications */
+  #toasts { position:fixed; left:50%; transform:translateX(-50%); z-index:50;
+    bottom:max(16px,env(safe-area-inset-bottom)); display:flex; flex-direction:column; gap:8px;
+    width:min(92vw,440px); pointer-events:none; }
+  .toast { background:var(--card); border:1px solid var(--line); border-left:3px solid var(--acc);
+    border-radius:10px; padding:10px 12px; box-shadow:0 8px 28px rgba(0,0,0,.28); font-size:13px;
+    white-space:pre-wrap; word-break:break-word; pointer-events:auto; animation:tin .18s ease; }
+  .toast.ok { border-left-color:var(--ok); } .toast.bad { border-left-color:var(--bad); } .toast.wait { border-left-color:var(--warn); }
+  @keyframes tin { from{opacity:0; transform:translateY(10px);} to{opacity:1; transform:none;} }
+
+  /* spinner */
+  .spin { display:inline-block; width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent;
+    border-radius:50%; animation:spin .7s linear infinite; vertical-align:-2px; margin-right:6px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+
+  /* ---- mobile drawer ---- */
+  @media (max-width:860px) {
+    .sidebar { position:fixed; left:0; top:0; bottom:0; height:100%; transform:translateX(-100%); transition:transform .2s ease; }
+    .sidebar.open { transform:none; box-shadow:0 0 40px rgba(0,0,0,.4); }
+    .hamb { display:inline-flex; }
+    .content { padding:14px; padding-bottom:max(18px,env(safe-area-inset-bottom)); }
+    .topbar { padding-left:max(12px,env(safe-area-inset-left)); }
+    input[type=text], input[type=password] { flex:1 1 100%; }
+    .card .row > button { flex:1 1 auto; }
+    .card > .row:first-child > button, .topbar button { flex:0 0 auto; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ login ============ -->
+<div id="login" class="login">
+  <div class="logincard">
+    <h1>🛰️ 5gpn 控制台</h1>
+    <div class="sub">连接到你的网关 API</div>
+    <div class="row"><input id="url" type="text" placeholder="https://你的域名:8443" autocomplete="off"></div>
+    <div class="row" style="margin-top:8px"><input id="token" type="password" placeholder="API 令牌 (Bearer Token)" autocomplete="off"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="primary grow" onclick="connect()">连接</button>
+      <button onclick="clearCreds()">清除</button>
+      <button onclick="cycleTheme()" title="切换主题">🌓</button>
+    </div>
+    <div class="row small muted" id="conn" style="margin-top:10px">未连接</div>
+  </div>
+</div>
+
+<!-- ============ app ============ -->
+<div id="app" class="layout hide">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand"><span class="dot" id="brandDot"></span> 5gpn</div>
+    <nav class="menu">
+      <div class="navitem active" data-sec="dash"    onclick="showSection('dash')"><span class="ic">📊</span> 概览</div>
+      <div class="navitem"        data-sec="domains" onclick="showSection('domains')"><span class="ic">🌐</span> 代理域名</div>
+      <div class="navitem"        data-sec="console" onclick="showSection('console')"><span class="ic">🛠️</span> 运维</div>
+    </nav>
+    <div class="sidefoot">
+      <button id="themeBtn" onclick="cycleTheme()" title="切换主题">🌓 跟随</button>
+      <button onclick="logout()" title="退出登录">⏏️ 退出</button>
+      <div class="url" id="sideUrl"></div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="hamb" onclick="toggleSidebar()">☰</button>
+      <div class="title" id="secTitle">概览</div>
+      <span class="pill on" id="connPill">● 在线</span>
+      <button onclick="refreshAll()" title="刷新">🔄</button>
+    </header>
+
+    <div class="content">
+      <!-- 概览 -->
+      <section data-sec="dash">
+        <div class="card">
+          <h2>服务</h2>
+          <div id="services"></div>
+        </div>
+        <div class="tiles" id="tiles"></div>
+        <div class="card">
+          <h2>网络</h2>
+          <div class="row" style="gap:24px">
+            <div><div class="tlabel muted small">公网 IP</div><div id="m_ip" style="font-weight:600">-</div></div>
+            <div><div class="tlabel muted small">域名</div><div id="m_domain" style="font-weight:600">-</div></div>
+            <div><div class="tlabel muted small">代理域名数</div><div id="m_pdcount" style="font-weight:600">-</div></div>
+            <div><div class="tlabel muted small">chnroute 条目</div><div id="m_cidr" style="font-weight:600">-</div></div>
+            <div><div class="tlabel muted small">chnroute 更新于</div><div id="m_cidrage" style="font-weight:600">-</div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 代理域名 -->
+      <section data-sec="domains" hidden>
+        <div class="card">
+          <h2>添加强制代理域名</h2>
+          <div class="row">
+            <input id="d_domain" type="text" placeholder="域名，如 youtube.com" onkeydown="if(event.key==='Enter')addDomain()">
+            <button class="primary" onclick="addDomain()">➕ 添加</button>
+          </div>
+          <div class="small muted" style="margin-top:6px">这些域名将被强制经由代理（sniproxy）出站。</div>
+        </div>
+        <div class="card">
+          <div class="row"><h2 class="grow">域名列表</h2>
+            <span class="muted small" id="dom_meta"></span>
+            <button onclick="loadDomains()">🔄 读取</button></div>
+          <div class="row" style="margin-top:6px">
+            <input id="d_filter" type="text" placeholder="过滤…" oninput="renderDomains()">
+          </div>
+          <div id="domlist"></div>
+        </div>
+      </section>
+
+      <!-- 运维 -->
+      <section data-sec="console" hidden>
+        <div class="card">
+          <h2>列表更新</h2>
+          <div class="row">
+            <button class="primary" id="btnUpd" onclick="updateLists()">⟳ 刷新 chnroute</button>
+          </div>
+          <div class="small muted" style="margin-top:6px">重新拉取国内 IP 段（chnroute）并重载 smartdns 分流。</div>
+        </div>
+        <div class="card">
+          <h2>重启服务</h2>
+          <div class="row">
+            <button onclick="restart('smartdns')">smartdns</button>
+            <button onclick="restart('sniproxy')">sniproxy</button>
+            <button class="danger" onclick="restart('all')">全部重启</button>
+          </div>
+        </div>
+        <div class="card">
+          <h2>配置备份 / 恢复</h2>
+          <div class="row">
+            <button class="primary" onclick="backupConfig()">⬇️ 下载备份</button>
+            <button onclick="$('restoreFile').click()">⬆️ 恢复备份</button>
+            <input type="file" id="restoreFile" accept=".gz,.tgz,application/gzip,application/x-gzip" class="hide" onchange="restoreConfig(this)">
+          </div>
+          <div class="small muted" style="margin-top:6px">备份为 tar.gz 文件，包含配置与域名列表。恢复后建议重启相关服务。</div>
+        </div>
+        <div class="card">
+          <div class="row"><h2 class="grow">操作日志</h2><button onclick="$('out').textContent=''">清空</button></div>
+          <div id="out" class="small" style="font-family:ui-monospace,Menlo,Consolas,monospace; white-space:pre-wrap; word-break:break-word; max-height:320px; overflow:auto"></div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+<div id="scrim" class="scrim hide" onclick="closeSidebar()"></div>
+<div id="toasts"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let BASE = "", TOKEN = "";
+let DOMAINS = [];
+let statusTimer = null;
+const SEC_TITLE = { dash:"概览", domains:"代理域名", console:"运维" };
+
+/* ---- theme (auto / light / dark) ---- */
+const THEMES = ["auto","light","dark"], THEME_ICON = {auto:"🌓 跟随", light:"☀️ 白天", dark:"🌙 夜间"};
+function cssVar(n){ return getComputedStyle(document.body).getPropertyValue(n).trim() || "#888"; }
+function applyTheme(t){
+  if(t==="auto") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", t);
+  const b=$("themeBtn"); if(b) b.textContent = THEME_ICON[t]||THEME_ICON.auto;
+  const m=document.querySelector('meta[name=theme-color]'); if(m) m.setAttribute("content", cssVar("--bg"));
+}
+function cycleTheme(){
+  const cur=localStorage.getItem("g5_theme")||"auto";
+  const next=THEMES[(THEMES.indexOf(cur)+1)%THEMES.length];
+  localStorage.setItem("g5_theme", next); applyTheme(next);
+}
+applyTheme(localStorage.getItem("g5_theme")||"auto");
+if(window.matchMedia) window.matchMedia("(prefers-color-scheme:light)").addEventListener("change", ()=>{
+  if((localStorage.getItem("g5_theme")||"auto")==="auto") applyTheme("auto");
+});
+
+/* ---- helpers ---- */
+function esc(s){ return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function toast(msg, type){
+  const c=$("toasts"); if(!c) return;
+  const d=document.createElement("div"); d.className="toast "+(type||""); d.textContent=msg;
+  c.appendChild(d);
+  while(c.children.length>4) c.firstChild.remove();
+  setTimeout(()=>{ d.style.transition="opacity .3s"; d.style.opacity="0"; setTimeout(()=>d.remove(),300); }, type==="bad"?6000:3500);
+}
+function log(msg, type){
+  const o=$("out"); if(o){ const t=new Date().toLocaleTimeString(); o.textContent="["+t+"] "+msg+"\n"+o.textContent; }
+  toast(msg, type);
+}
+function fmtUptime(s){ s=s||0; const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  return ((d?d+"天":"")+(h?h+"小时":"")+((d||h)?"":m+"分"))||"0分"; }
+function fmtAge(s){ if(s==null) return "-"; s=Math.max(0,s|0);
+  if(s<60) return s+"秒前"; const m=Math.floor(s/60); if(m<60) return m+"分钟前";
+  const h=Math.floor(m/60); if(h<48) return h+"小时前"; return Math.floor(h/24)+"天前"; }
+
+/* ---- nav / drawer ---- */
+function showSection(sec){
+  sec = sec || "dash";
+  document.querySelectorAll('section[data-sec]').forEach(s=>{ s.hidden = (s.dataset.sec!==sec); });
+  document.querySelectorAll('.navitem').forEach(n=>n.classList.toggle('active', n.dataset.sec===sec));
+  $("secTitle").textContent = SEC_TITLE[sec]||"";
+  localStorage.setItem("g5_sec", sec);
+  closeSidebar();
+  if(sec==="domains") loadDomains();
+}
+function toggleSidebar(){ const o=$("sidebar").classList.toggle("open"); $("scrim").classList.toggle("hide", !o); }
+function closeSidebar(){ $("sidebar").classList.remove("open"); $("scrim").classList.add("hide"); }
+function refreshAll(){ loadStatus(); if(!$("app").querySelector('section[data-sec=domains]').hidden) loadDomains(); }
+
+/* ---- core fetch ---- */
+async function api(path, method, body, opts) {
+  opts = opts || {};
+  const o = { method: method||"GET", headers: { "Authorization": "Bearer "+TOKEN } };
+  if (body !== undefined && body !== null && !(body instanceof Blob)) {
+    o.headers["Content-Type"] = "application/json"; o.body = JSON.stringify(body);
+  } else if (body instanceof Blob) {
+    o.headers["Content-Type"] = "application/gzip"; o.body = body;
+  }
+  const r = await fetch(BASE+path, o);
+  if (opts.raw) {
+    if (!r.ok) throw new Error("HTTP "+r.status);
+    return r;
+  }
+  let j = null; const txt = await r.text().catch(()=> "");
+  if (txt) { try { j = JSON.parse(txt); } catch(e){ j = null; } }
+  if (!r.ok) throw new Error((j && (j.error||j.message)) || ("HTTP "+r.status));
+  return j || {};
+}
+
+/* ---- connect / auth ---- */
+async function connect() {
+  BASE = $("url").value.trim().replace(/\/+$/,"");
+  TOKEN = $("token").value.trim();
+  if (!BASE || !TOKEN) { $("conn").textContent="请填写地址和令牌"; return; }
+  $("conn").textContent = "连接中…";
+  try {
+    await api("/api/status");
+    localStorage.setItem("g5_url", BASE); sessionStorage.setItem("g5_token", TOKEN);
+    $("login").classList.add("hide"); $("app").classList.remove("hide");
+    $("brandDot").classList.add("on"); $("sideUrl").textContent = BASE;
+    showSection(localStorage.getItem("g5_sec")||"dash");
+    loadStatus();
+    if(statusTimer) clearInterval(statusTimer);
+    statusTimer = setInterval(loadStatus, 10000);
+  } catch(e) {
+    $("conn").textContent = "连接失败：" + e.message + "（检查地址 / 端口 / 证书 / 令牌）";
+  }
+}
+function clearCreds(){
+  localStorage.removeItem("g5_url"); sessionStorage.removeItem("g5_token");
+  $("url").value=""; $("token").value=""; $("conn").textContent="已清除";
+}
+function logout(){
+  if(statusTimer){ clearInterval(statusTimer); statusTimer=null; }
+  $("app").classList.add("hide"); $("login").classList.remove("hide");
+  $("conn").textContent="已退出"; $("brandDot").classList.remove("on");
+}
+
+/* ---- dashboard ---- */
+const SVC_LABEL = { smartdns:"smartdns", sniproxy:"sniproxy" };
+function tile(label,val,pct,sub){
+  return `<div class="tile"><div class="tlabel">${label}</div><div class="tval">${val}</div>`+
+    (pct!=null?`<div class="bar"><i style="width:${Math.max(0,Math.min(100,Math.round(pct)))}%"></i></div>`:``)+
+    (sub?`<div class="tsub">${sub}</div>`:``)+`</div>`;
+}
+async function loadStatus() {
+  try {
+    const s = await api("/api/status");
+    const svc = s.services || {};
+    const order = ["smartdns","sniproxy"];
+    $("services").innerHTML = order.map(k=>{
+      const up = svc[k] === 'active';
+      return `<div class="svc"><span class="sdot ${up?'on':'off'}"></span>`+
+        `<span class="sname">${SVC_LABEL[k]||k}</span>`+
+        `<span class="pill ${up?'on':'off'}">${up?'运行中':(svc[k]||'已停止')}</span></div>`;
+    }).join("");
+
+    const memPct = s.mem_total_mb ? (s.mem_used_mb/s.mem_total_mb*100) : 0;
+    $("tiles").innerHTML =
+      tile("CPU", (s.cpu_pct!=null?s.cpu_pct:0)+"%", s.cpu_pct||0, "") +
+      tile("内存", (s.mem_used_mb||0)+" MB", memPct, "共 "+(s.mem_total_mb||0)+" MB") +
+      tile("硬盘", (s.disk_pct!=null?s.disk_pct:0)+"%", s.disk_pct||0, "") +
+      tile("运行时间", fmtUptime(s.uptime_secs), null, "");
+
+    $("m_ip").textContent      = s.public_ip || "-";
+    $("m_domain").textContent  = s.domain || "-";
+    $("m_pdcount").textContent = (s.proxy_domains_count!=null ? s.proxy_domains_count : "-");
+    $("m_cidr").textContent    = (s.foreign_cidr_count!=null ? s.foreign_cidr_count.toLocaleString() : "-");
+    $("m_cidrage").textContent = fmtAge(s.foreign_cidr_age_secs);
+
+    $("connPill").className = "pill on"; $("connPill").textContent = "● 在线";
+  } catch(e){
+    $("connPill").className="pill off"; $("connPill").textContent="● 离线";
+    log("状态获取失败："+e.message, "bad");
+  }
+}
+
+/* ---- proxy domains ---- */
+async function loadDomains(){
+  try {
+    const r = await api("/api/domains");
+    DOMAINS = (r.domains||[]).slice();
+    renderDomains();
+  } catch(e){ log("域名读取失败："+e.message, "bad"); }
+}
+function renderDomains(){
+  const q = ($("d_filter").value||"").trim().toLowerCase();
+  const list = DOMAINS.filter(d=>!q || d.toLowerCase().includes(q));
+  $("dom_meta").textContent = "共 "+DOMAINS.length+" 个" + (q?("（匹配 "+list.length+"）"):"");
+  $("m_pdcount") && ($("m_pdcount").textContent = DOMAINS.length);
+  if(!DOMAINS.length){ $("domlist").innerHTML = `<div class="drow muted small">（暂无强制代理域名）</div>`; return; }
+  $("domlist").innerHTML = list.length ? list.map(d=>
+    `<div class="drow"><span class="dname">${esc(d)}</span>`+
+    `<button class="danger" onclick="delDomain('${esc(d).replace(/'/g,"\\'")}')">删除</button></div>`).join("")
+    : `<div class="drow muted small">无匹配域名</div>`;
+}
+async function addDomain(){
+  const d = $("d_domain").value.trim();
+  if(!d){ log("请输入域名", "bad"); return; }
+  try {
+    const r = await api("/api/domains","POST",{domain:d});
+    if(r.domains) { DOMAINS = r.domains.slice(); renderDomains(); }
+    else loadDomains();
+    $("d_domain").value="";
+    log("✅ 已添加 "+d, "ok");
+  } catch(e){ log("❌ 添加失败："+e.message, "bad"); }
+}
+async function delDomain(d){
+  if(!confirm("删除强制代理域名「"+d+"」？")) return;
+  try {
+    const r = await api("/api/domains","DELETE",{domain:d});
+    if(r.domains) { DOMAINS = r.domains.slice(); renderDomains(); }
+    else loadDomains();
+    log("✅ 已删除 "+d, "ok");
+  } catch(e){ log("❌ 删除失败："+e.message, "bad"); }
+}
+
+/* ---- ops: update-lists, restart, backup, restore ---- */
+async function updateLists(){
+  const b=$("btnUpd"); const orig=b.innerHTML;
+  b.disabled=true; b.innerHTML=`<span class="spin"></span>刷新中…`;
+  log("⏳ 正在刷新 chnroute…", "wait");
+  try {
+    const r = await api("/api/update-lists","POST",{});
+    log((r.ok?"✅ ":"❌ ")+"chnroute 刷新完成"+(r.output?("\n"+r.output):""), r.ok?"ok":"bad");
+    loadStatus();
+  } catch(e){ log("❌ 刷新失败："+e.message, "bad"); }
+  finally { b.disabled=false; b.innerHTML=orig; }
+}
+async function restart(service){
+  const label = service==="all" ? "全部服务" : service;
+  if(!confirm("确认重启 "+label+" ?")) return;
+  log("⏳ 正在重启 "+label+"…", "wait");
+  try {
+    const r = await api("/api/restart","POST",{service});
+    log((r.ok?"✅ ":"❌ ")+"已重启 "+label, r.ok?"ok":"bad");
+    setTimeout(loadStatus, 1500);
+  } catch(e){ log("❌ 重启失败："+e.message, "bad"); }
+}
+async function backupConfig(){
+  log("⏳ 生成备份…", "wait");
+  try {
+    const r = await api("/api/backup", "GET", undefined, {raw:true});
+    const blob = await r.blob();
+    let name = "5gpn-backup.tar.gz";
+    const cd = r.headers.get("Content-Disposition")||"";
+    const m = /filename="?([^"]+)"?/.exec(cd); if(m) name = m[1];
+    const url = URL.createObjectURL(blob);
+    const a=document.createElement("a"); a.href=url; a.download=name; document.body.appendChild(a); a.click();
+    a.remove(); setTimeout(()=>URL.revokeObjectURL(url),2000);
+    log("✅ 备份已下载", "ok");
+  } catch(e){ log("❌ 备份失败："+e.message, "bad"); }
+}
+async function restoreConfig(input){
+  const f = input.files[0]; if(!f){ return; }
+  if(!confirm("用该备份覆盖当前配置？建议恢复后重启相关服务。")){ input.value=""; return; }
+  log("⏳ 上传并恢复备份…", "wait");
+  try {
+    const r = await api("/api/restore","POST", f);
+    log((r.ok?"✅ ":"❌ ")+"恢复完成", r.ok?"ok":"bad");
+    loadStatus();
+  } catch(e){ log("❌ 恢复失败："+e.message, "bad"); }
+  finally { input.value=""; }
+}
+
+/* ---- restore saved creds ---- */
+(function(){
+  const u=localStorage.getItem("g5_url"), t=sessionStorage.getItem("g5_token");
+  if(u) $("url").value=u; if(t) $("token").value=t;
+  if(u&&t) connect();   // auto-reconnect only within the same browser session (token not persisted to disk)
+})();
+</script>
+</body>
+</html>

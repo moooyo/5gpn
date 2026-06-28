@@ -1,0 +1,26 @@
+[Unit]
+Description=new-5gpn sniproxy (TCP SNI transparent proxy)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/sniproxy -c /etc/sniproxy.conf -f
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+User=root
+LimitNOFILE=65535
+# Sandbox: leaf proxy — binds 80/443, drops to pxout, writes only its pidfile.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+ReadWritePaths=/run
+
+[Install]
+WantedBy=multi-user.target
