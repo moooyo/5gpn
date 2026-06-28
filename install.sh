@@ -41,10 +41,17 @@ if [[ -t 1 ]]; then
 else
     RED=''; GREEN=''; YELLOW=''; BLUE=''; NC=''
 fi
-info() { echo "${BLUE}[INFO]${NC} $*"; }
-ok()   { echo "${GREEN}[OK]${NC}   $*"; }
-warn() { echo "${YELLOW}[WARN]${NC} $*"; }
-err()  { echo "${RED}[ERR]${NC}  $*" >&2; }
+info() { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level info  -- "$*"; else echo "${BLUE}[INFO]${NC} $*"; fi; }
+ok()   { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level info  -- "✔ $*"; else echo "${GREEN}[OK]${NC}   $*"; fi; }
+warn() { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level warn  -- "$*"; else echo "${YELLOW}[WARN]${NC} $*"; fi; }
+err()  { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level error -- "$*" >&2; else echo "${RED}[ERR]${NC}  $*" >&2; fi; }
+
+# Interactive helpers. Callers MUST gate on [[ -t 0 ]]; these only choose gum vs read.
+ask_text()   { if [[ "$_HAVE_GUM" == 1 ]]; then gum input --prompt "$1 " --placeholder "${2:-}"; else local v; read -r -p "$1 " v; printf '%s' "$v"; fi; }
+ask_secret() { if [[ "$_HAVE_GUM" == 1 ]]; then gum input --password --prompt "$1 "; else local v; read -r -p "$1 " v; printf '%s' "$v"; fi; }
+ask_yesno()  { if [[ "$_HAVE_GUM" == 1 ]]; then gum confirm "$1"; else local a; read -r -p "$1 [y/N] " a; [[ "$a" == [yY]* ]]; fi; }
+# Run an opaque wait command behind a spinner when interactive; else run it plainly.
+gum_spin()   { local t="$1"; shift; if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then gum spin --title "$t" -- "$@"; else "$@"; fi; }
 
 # Bootstrap gum (prebuilt binary + sha256 verify). Never fatal: on any failure
 # _HAVE_GUM stays 0 and all helpers fall back to plain echo.
@@ -259,7 +266,7 @@ install_xray() {
     command -v unzip >/dev/null 2>&1 || { $PKG_MGR install -y unzip >/dev/null 2>&1 || true; }
     mkdir -p "$BUILD_DIR"
     local zip="$BUILD_DIR/Xray-linux-64.zip"
-    curl -fsSL "$url" -o "$zip" || { err "xray download failed ($url)"; exit 1; }
+    gum_spin "Downloading xray ${ver}…" curl -fsSL "$url" -o "$zip" || { err "xray download failed ($url)"; exit 1; }
     # Integrity: opt-in pin via XRAY_SHA256, else verify against the release .dgst.
     local exp="${XRAY_SHA256:-}"
     if [[ -z "$exp" ]]; then
@@ -346,7 +353,7 @@ resolve_domain() {
         fi
         local input=""
         while true; do
-            read -r -p "Enter your DoT domain (e.g. dns.example.com): " input
+            input="$(ask_text 'Enter your DoT domain (e.g. dns.example.com):')"
             input="${input#http://}"; input="${input#https://}"; input="${input%/}"; input="${input// /}"
             is_valid_domain "$input" && { DOMAIN="$input"; break; }
             warn "Invalid domain; enter a full FQDN like dns.example.com."
@@ -362,7 +369,7 @@ verify_a_record() {
     info "Verifying $DOMAIN resolves to $PUBLIC_IP ..."
     info "  Add an A record: ${DOMAIN}  A  ${PUBLIC_IP}  (low TTL)."
     if [[ -t 0 ]]; then
-        local c=""; read -r -p "Press Enter once the A record is set (or type 'skip'): " c || c=""
+        local c=""; c="$(ask_text "Press Enter once the A record is set (or type 'skip'):")" || c=""
         [[ "$c" == "skip" ]] && { warn "Skipping A-record verification."; return 0; }
     fi
     local waited=0 resolved=""
