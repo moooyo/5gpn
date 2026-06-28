@@ -633,10 +633,10 @@ setup_tgbot() {
     local py; py="$(command -v python3 || echo /usr/bin/python3)"
     local token admins
     token="${TGBOT_TOKEN:-$(cat "${CONF_DIR}/.tgbot_token" 2>/dev/null || true)}"
-    if [[ -z "$token" && -t 0 ]]; then read -r -p "Telegram Bot Token (blank to skip): " token; fi
+    if [[ -z "$token" && -t 0 ]]; then token="$(ask_secret 'Telegram Bot Token (blank to skip):')"; fi
     [[ -z "$token" ]] && { info "No Telegram token; skipping tgbot. Re-run later: $0 --setup-tgbot"; return 0; }
     admins="${TGBOT_ADMINS:-$(cat "${CONF_DIR}/.tgbot_admins" 2>/dev/null || true)}"
-    if [[ -z "$admins" && -t 0 ]]; then read -r -p "Authorized Telegram numeric IDs (comma-separated, optional): " admins; fi
+    if [[ -z "$admins" && -t 0 ]]; then admins="$(ask_text 'Authorized Telegram numeric IDs (comma-separated, optional):')"; fi
     admins="$(printf '%s' "$admins" | tr ', ' '\n\n' | grep -E '^[0-9]+$' | paste -sd ',' - 2>/dev/null || true)"
 
     mkdir -p "$CONF_DIR"
@@ -671,6 +671,13 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     systemctl enable --now 5gpn-tgbot.service 2>/dev/null || systemctl restart 5gpn-tgbot.service || true
+    if [[ -t 0 && "$_HAVE_GUM" == 1 ]]; then
+        gum style --border rounded --padding "0 1" \
+          "未知自己的 Telegram ID?" \
+          "1) 给你的 bot 发 /id" \
+          "2) 把回显的数字 ID 填入 ${CONF_DIR}/.tgbot_admins" \
+          "3) systemctl restart 5gpn-tgbot"
+    fi
     ok "Telegram bot enabled."
     echo "  Token stored: ${CONF_DIR}/.tgbot_token (chmod 600)"
     [[ -z "$admins" ]] && warn "No admin IDs set yet; message the bot, then add IDs to ${CONF_DIR}/.tgbot_admins and: systemctl restart 5gpn-tgbot"
