@@ -30,6 +30,8 @@ XRAY_DIR="/usr/local/etc/xray"
 
 IOS_PORT=8111                            # socket-activated iOS profile responder
 RESOLV_FALLBACK="22.22.22.22"            # loop-avoidance external resolver (proxies)
+GUM_VERSION="${GUM_VERSION:-0.17.0}"     # charmbracelet/gum (prebuilt; installer TUI)
+_HAVE_GUM=0                              # set by install_gum(); helpers fall back to echo when 0
 
 # ----------------------------------------------------------------------------
 # Pretty output helpers
@@ -43,6 +45,42 @@ info() { echo "${BLUE}[INFO]${NC} $*"; }
 ok()   { echo "${GREEN}[OK]${NC}   $*"; }
 warn() { echo "${YELLOW}[WARN]${NC} $*"; }
 err()  { echo "${RED}[ERR]${NC}  $*" >&2; }
+
+# Bootstrap gum (prebuilt binary + sha256 verify). Never fatal: on any failure
+# _HAVE_GUM stays 0 and all helpers fall back to plain echo.
+install_gum() {
+    if command -v gum >/dev/null 2>&1; then _HAVE_GUM=1; return 0; fi
+    local arch url tmp exp got bin
+    case "$(uname -m)" in
+        x86_64|amd64)  arch="x86_64" ;;
+        aarch64|arm64) arch="arm64"  ;;
+        armv7l|armhf)  arch="armv7"  ;;
+        *)             arch="x86_64" ;;
+    esac
+    url="https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/gum_${GUM_VERSION}_Linux_${arch}.tar.gz"
+    tmp="$(mktemp -d)"
+    if command -v curl >/dev/null 2>&1 && curl -fsSL "$url" -o "$tmp/gum.tgz" 2>/dev/null; then
+        exp="${GUM_SHA256:-}"
+        if [[ -z "$exp" ]]; then
+            curl -fsSL "https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/checksums.txt" \
+                 -o "$tmp/sums.txt" 2>/dev/null \
+                && exp="$(grep "gum_${GUM_VERSION}_Linux_${arch}.tar.gz" "$tmp/sums.txt" 2>/dev/null | awk '{print $1}' | head -1)"
+        fi
+        if [[ -n "$exp" ]]; then
+            got="$(sha256sum "$tmp/gum.tgz" | awk '{print $1}')"
+            if [[ "$got" != "$exp" ]]; then
+                warn "gum sha256 mismatch; continuing with plain output."
+                rm -rf "$tmp"; _HAVE_GUM=0; return 0
+            fi
+        fi
+        tar -xzf "$tmp/gum.tgz" -C "$tmp" 2>/dev/null
+        bin="$(find "$tmp" -type f -name gum 2>/dev/null | head -1)"
+        [[ -n "$bin" ]] && install -m 0755 "$bin" /usr/local/bin/gum 2>/dev/null
+    fi
+    rm -rf "$tmp"
+    if command -v gum >/dev/null 2>&1; then _HAVE_GUM=1; else _HAVE_GUM=0; warn "gum unavailable; using plain output."; fi
+    return 0
+}
 
 check_root() {
     if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -582,6 +620,7 @@ start_services() {
 # ----------------------------------------------------------------------------
 setup_tgbot() {
     check_root
+    install_gum
     [[ -f "${BASE_DIR}/tgbot.py" ]] || { err "${BASE_DIR}/tgbot.py not found (run a full install or place the file)."; return 1; }
     local py; py="$(command -v python3 || echo /usr/bin/python3)"
     local token admins
@@ -714,6 +753,7 @@ show_status() {
 # ----------------------------------------------------------------------------
 full_install() {
     check_root
+    install_gum
     detect_os
     detect_memory_profile
     ensure_swap
