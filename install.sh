@@ -52,6 +52,8 @@ ask_secret() { if [[ "$_HAVE_GUM" == 1 ]]; then gum input --password --prompt "$
 ask_yesno()  { if [[ "$_HAVE_GUM" == 1 ]]; then gum confirm "$1"; else local a; read -r -p "$1 [y/N] " a; [[ "$a" == [yY]* ]]; fi; }
 # Run an opaque wait command behind a spinner when interactive; else run it plainly.
 gum_spin()   { local t="$1"; shift; if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then gum spin --title "$t" -- "$@"; else "$@"; fi; }
+# Frame multi-line stdin in a rounded box when interactive; else pass it through.
+card()       { if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then gum style --border rounded --padding "0 1" --border-foreground 212; else cat; fi; }
 
 # Bootstrap gum (prebuilt binary + sha256 verify). Never fatal: on any failure
 # _HAVE_GUM stays 0 and all helpers fall back to plain echo.
@@ -314,6 +316,19 @@ install_files() {
     # xray config (dns hardcoded to 22.22.22.22 for loop-avoidance, IPv4-only, direct).
     install -d -m 0755 "$XRAY_DIR"
     install -m 0644 "${SCRIPT_DIR}/etc/xray/config.json" "$XRAY_DIR/config.json"
+    # SNI re-resolver: default 22.22.22.22 (the NPN carrier resolver; loop-avoidance
+    # requires only that it is NOT the local smartdns). Operators on a different
+    # network can point it at a reachable clean IPv4 resolver via XRAY_RESOLVER.
+    # The repo config.json keeps the default literal; we patch only the installed copy.
+    local xr="${XRAY_RESOLVER:-$RESOLV_FALLBACK}"
+    if [[ "$xr" != "$RESOLV_FALLBACK" ]]; then
+        if [[ "$xr" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            sed -i "s/${RESOLV_FALLBACK//./\\.}/${xr}/g" "$XRAY_DIR/config.json"
+            info "xray SNI resolver overridden -> ${xr}"
+        else
+            warn "XRAY_RESOLVER='${xr}' is not an IPv4; keeping default ${RESOLV_FALLBACK}."
+        fi
+    fi
 
     # repo scripts -> /opt/5gpn/scripts
     for f in "${SCRIPT_DIR}"/scripts/*.sh "${SCRIPT_DIR}"/scripts/*.py; do
@@ -491,7 +506,7 @@ run_update_lists() {
 
 run_setup_firewall() {
     info "Installing firewall + proxy units (direct egress, no exit layer)..."
-    IOS_PORT="$IOS_PORT" bash "${SCRIPTS_DIR}/setup-firewall.sh"
+    CLIENT_NET="${CLIENT_NET:-172.22.0.0/16}" IOS_PORT="$IOS_PORT" bash "${SCRIPTS_DIR}/setup-firewall.sh"
     ok "Firewall + xray unit installed."
 }
 
@@ -651,8 +666,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=TGBOT_TOKEN=${token}
-Environment=TGBOT_ADMINS=${admins}
+# Secrets are NOT placed here: a systemd unit is world-readable (mode 644, and
+# visible via 'systemctl show'). tgbot.py loads the token + admin IDs from the
+# chmod-600 ${CONF_DIR}/.tgbot_token + .tgbot_admins instead (see _load_secret()).
 Environment=CONF_DIR=${CONF_DIR}
 ExecStart=${py} ${BASE_DIR}/tgbot.py
 Restart=on-failure
@@ -679,7 +695,7 @@ EOF
           "3) systemctl restart 5gpn-tgbot"
     fi
     ok "Telegram bot enabled."
-    echo "  Token stored: ${CONF_DIR}/.tgbot_token (chmod 600)"
+    info "Token stored: ${CONF_DIR}/.tgbot_token (chmod 600)"
     [[ -z "$admins" ]] && warn "No admin IDs set yet; message the bot, then add IDs to ${CONF_DIR}/.tgbot_admins and: systemctl restart 5gpn-tgbot"
 }
 
@@ -730,37 +746,38 @@ regen_ios() {
 }
 
 show_status() {
-    local domain pubip f_lines f_age pd
-    domain="$(cat "${CONF_DIR}/.domain" 2>/dev/null || echo N/A)"
-    pubip="$(cat "${CONF_DIR}/.public_ip" 2>/dev/null || echo N/A)"
-    echo "=========================================="
-    echo "         5gpn status"
-    echo "=========================================="
-    for svc in smartdns xray; do
-        local s; s="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
-        if [[ "$s" == active ]]; then echo "  ${svc}: ${GREEN}active${NC}"; else echo "  ${svc}: ${RED}${s}${NC}"; fi
-    done
-    for opt in 5gpn-iosprofile.socket 5gpn-tgbot; do
-        if systemctl list-unit-files 2>/dev/null | grep -q "^${opt}"; then
-            local s; s="$(systemctl is-active "$opt" 2>/dev/null || echo unknown)"
-            echo "  ${opt}: $([[ "$s" == active ]] && echo "${GREEN}active${NC}" || echo "${RED}${s}${NC}")"
+    {
+        local domain pubip svc s opt pd
+        domain="$(cat "${CONF_DIR}/.domain" 2>/dev/null || echo N/A)"
+        pubip="$(cat "${CONF_DIR}/.public_ip" 2>/dev/null || echo N/A)"
+        echo "📊 5gpn 状态"
+        echo ""
+        for svc in smartdns xray; do
+            s="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
+            echo "  $([[ "$s" == active ]] && echo '✅' || echo '❌') ${svc}  (${s})"
+        done
+        for opt in 5gpn-iosprofile.socket 5gpn-tgbot; do
+            if systemctl list-unit-files 2>/dev/null | grep -q "^${opt}"; then
+                s="$(systemctl is-active "$opt" 2>/dev/null || echo unknown)"
+                echo "  $([[ "$s" == active ]] && echo '✅' || echo '❌') ${opt}  (${s})"
+            fi
+        done
+        echo ""
+        echo "  域名      $domain"
+        echo "  公网 IP   $pubip"
+        echo "  DoT       tls://${domain}:853"
+        pd=0; [[ -f "${SMARTDNS_DIR}/proxy-domains.txt" ]] && pd="$(grep -cvE '^[[:space:]]*(#|$)' "${SMARTDNS_DIR}/proxy-domains.txt" 2>/dev/null | head -n1 || echo 0)"
+        echo "  强制代理域名  ${pd:-0}"
+        if [[ -f "${SMARTDNS_DIR}/foreign-cidr.txt" ]]; then
+            local f_lines now mtime f_age
+            f_lines="$(grep -cvE '^[[:space:]]*(#|$)' "${SMARTDNS_DIR}/foreign-cidr.txt" 2>/dev/null | head -n1 || echo 0)"
+            now=$(date +%s); mtime=$(stat -c %Y "${SMARTDNS_DIR}/foreign-cidr.txt" 2>/dev/null || echo "$now")
+            f_age="$(( (now - mtime) / 3600 ))h"
+            echo "  foreign-cidr  ${f_lines:-0} 行（age ${f_age}）"
+        else
+            echo "  foreign-cidr  缺失"
         fi
-    done
-    echo ""
-    echo "  Domain:    $domain"
-    echo "  Public IP: $pubip"
-    echo "  DoT:       tls://${domain}:853"
-    pd=0; [[ -f "${SMARTDNS_DIR}/proxy-domains.txt" ]] && pd="$(grep -cvE '^\s*(#|$)' "${SMARTDNS_DIR}/proxy-domains.txt" 2>/dev/null || echo 0)"
-    echo "  Forced-proxy domains: $pd"
-    if [[ -f "${SMARTDNS_DIR}/foreign-cidr.txt" ]]; then
-        f_lines="$(grep -cvE '^[[:space:]]*(#|$)' "${SMARTDNS_DIR}/foreign-cidr.txt" 2>/dev/null || echo 0)"
-        local now mtime; now=$(date +%s); mtime=$(stat -c %Y "${SMARTDNS_DIR}/foreign-cidr.txt" 2>/dev/null || echo "$now")
-        f_age="$(( (now - mtime) / 3600 ))h"
-        echo "  foreign-cidr: ${f_lines} lines (age ${f_age})"
-    else
-        echo "  foreign-cidr: missing"
-    fi
-    echo "=========================================="
+    } | card
 }
 
 # ----------------------------------------------------------------------------
@@ -799,11 +816,13 @@ full_install() {
 
     echo ""
     ok "5gpn install complete."
-    echo "------------------------------------------"
-    echo " DoT address:        tls://${DOMAIN}:853"
-    echo " Android Private DNS: ${DOMAIN}"
-    echo " iOS profile URL:     http://${GATEWAY_IP:-$PUBLIC_IP}:${IOS_PORT}/ios-dot.mobileconfig"
-    echo "------------------------------------------"
+    {
+        echo "✅ 5gpn 安装完成"
+        echo ""
+        echo "  DoT 地址         tls://${DOMAIN}:853"
+        echo "  Android 私人DNS  ${DOMAIN}"
+        echo "  iOS 描述文件      http://${GATEWAY_IP:-$PUBLIC_IP}:${IOS_PORT}/ios-dot.mobileconfig"
+    } | card
     print_qr
     echo ""
     info "Optional: '$0 --setup-tgbot' to set up the Telegram control bot."
@@ -827,7 +846,8 @@ Usage: sudo bash install.sh [option]
   --setup-tgbot       Install + enable the Telegram control bot
   --help              This help
 
-Env overrides: DOMAIN=, PUBLIC_IP=, EMAIL=, LOWMEM=1|0,
+Env overrides: DOMAIN=, PUBLIC_IP=, GATEWAY_IP=, EMAIL=, LOWMEM=1|0,
+               CLIENT_NET=172.22.0.0/16, XRAY_RESOLVER=22.22.22.22,
                TGBOT_TOKEN=, TGBOT_ADMINS=
 EOF
 }

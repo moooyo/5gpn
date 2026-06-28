@@ -25,11 +25,14 @@ grep -Eq 'certbot renew'                "$INSTALL" || fail "renewal timer does n
 
 FW="$ROOT/scripts/setup-firewall.sh"
 
-# ===== 2.4/2.5 — NPN-only: iOS profile reachable internally; :8111 limited to 172.22 =====
+# ===== 2.4/2.5 — NPN-only: iOS profile reachable internally; :8111 limited to CLIENT_NET =====
 grep -Eq 'IOS_PORT' "$FW" || fail "firewall does not handle IOS_PORT (:8111 never opened)"
-grep -Eq 'ip saddr 172\.22\.0\.0/16 tcp dport \{ 80, 443, .*\} accept' "$FW" \
-    || fail ":8111 not allowed from 172.22 (NPN profile fetch breaks)"
-grep -Eq 'tcp_ports=.*8111' "$FW" && fail ":8111 must NOT be in the public tcp set (NPN-only = 172.22 only)"
+grep -Fq 'ip saddr ${CLIENT_NET} tcp dport { 80, 443,' "$FW" \
+    || fail "proxy/iOS ports (80/443/:8111) not gated to CLIENT_NET"
+# CLIENT_NET must default to the NPN client subnet (NPN-only by design).
+grep -Fq 'CLIENT_NET="${CLIENT_NET:-172.22.0.0/16}"' "$FW" \
+    || fail "CLIENT_NET default is not the NPN 172.22.0.0/16"
+grep -Eq 'tcp_ports=.*8111' "$FW" && fail ":8111 must NOT be in the public tcp set (NPN-only = CLIENT_NET only)"
 # installer uses a client-facing GATEWAY_IP (default = PUBLIC_IP) for ip-alias + iOS profile;
 # NPN operators export GATEWAY_IP=<internal 172.22 addr> so clients reach the internal gateway.
 grep -Eq 'GATEWAY_IP:-\$PUBLIC_IP' "$INSTALL" \

@@ -8,9 +8,14 @@ REPO="${REPO:-https://github.com/moooyo/5gpn}"
 BRANCH="${BRANCH:-main}"
 SRC="${SRC:-/opt/5gpn-src}"
 
-red()   { printf '\033[0;31m%s\033[0m\n' "$*" >&2; }
-green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
-info()  { printf '\033[0;34m%s\033[0m\n' "$*"; }
+# Gum-or-ANSI helpers. NOTE: this entrypoint runs BEFORE install.sh's install_gum()
+# bootstrap, so gum is normally absent here and these fall back to plain ANSI. They
+# light up only on a re-run where gum is already on PATH — we deliberately do NOT
+# install gum here (that is the excluded "install gum dependency" step).
+if command -v gum >/dev/null 2>&1 && [ -t 1 ]; then _HAVE_GUM=1; else _HAVE_GUM=0; fi
+red()   { if [ "$_HAVE_GUM" = 1 ]; then gum log --level error -- "$*" >&2; else printf '\033[0;31m%s\033[0m\n' "$*" >&2; fi; }
+green() { if [ "$_HAVE_GUM" = 1 ]; then gum log --level info  -- "$*";     else printf '\033[0;32m%s\033[0m\n' "$*"; fi; }
+info()  { if [ "$_HAVE_GUM" = 1 ]; then gum log --level info  -- "$*";     else printf '\033[0;34m%s\033[0m\n' "$*"; fi; }
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
     red "Please run as root (e.g. pipe into 'sudo bash')."

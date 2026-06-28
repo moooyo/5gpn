@@ -10,8 +10,16 @@
 #   (public IP for public deployments, internal 172.22 addr for NPN-only).
 set -euo pipefail
 
+# --- Gum-or-echo status helpers (gum when on PATH + interactive; else plain echo).
+# Installing gum is install.sh's job (install_gum); here we only detect + use it. ---
+if command -v gum >/dev/null 2>&1 && [ -t 1 ]; then _HAVE_GUM=1; else _HAVE_GUM=0; fi
+info() { if [ "$_HAVE_GUM" = 1 ]; then gum log --level info  -- "$*"; else echo "[INFO] $*"; fi; }
+ok()   { if [ "$_HAVE_GUM" = 1 ]; then gum log --level info  -- "$*"; else echo "[OK]   $*"; fi; }
+warn() { if [ "$_HAVE_GUM" = 1 ]; then gum log --level warn  -- "$*" >&2; else echo "[!]    $*" >&2; fi; }
+err()  { if [ "$_HAVE_GUM" = 1 ]; then gum log --level error -- "$*" >&2; else echo "[ERR]  $*" >&2; fi; }
+
 if [[ $# -ne 3 ]]; then
-    echo "Usage: $0 <DOMAIN> <PUBLIC_IP> <WWW_DIR>" >&2
+    err "Usage: $0 <DOMAIN> <PUBLIC_IP> <WWW_DIR>"
     exit 1
 fi
 
@@ -117,5 +125,5 @@ cat > "${WWW_DIR}/index.html" <<EOF
 </html>
 EOF
 
-echo "[+] Wrote ${profile_path}"
-echo "[+] Wrote ${WWW_DIR}/index.html"
+ok "Wrote ${profile_path}"
+ok "Wrote ${WWW_DIR}/index.html"

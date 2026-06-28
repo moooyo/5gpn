@@ -5,6 +5,17 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$HERE/.."
 
+# --- Gum-or-echo status helpers (gum when on PATH + interactive; else plain echo).
+# Installing gum is install.sh's job (install_gum); here we only detect + use it. ---
+if command -v gum >/dev/null 2>&1 && [ -t 1 ]; then _HAVE_GUM=1; else _HAVE_GUM=0; fi
+info() { if [ "$_HAVE_GUM" = 1 ]; then gum log --level info  -- "$*"; else echo "[INFO] $*"; fi; }
+ok()   { if [ "$_HAVE_GUM" = 1 ]; then gum log --level info  -- "$*"; else echo "[OK]   $*"; fi; }
+warn() { if [ "$_HAVE_GUM" = 1 ]; then gum log --level warn  -- "$*" >&2; else echo "[!]    $*" >&2; fi; }
+err()  { if [ "$_HAVE_GUM" = 1 ]; then gum log --level error -- "$*" >&2; else echo "[ERR]  $*" >&2; fi; }
+# Spinner only wraps the opaque download (its stdout is not operator-facing);
+# the rendered conf + the final "lists updated" line stay on the terminal.
+gum_spin() { local t="$1"; shift; if [ "$_HAVE_GUM" = 1 ] && [ -t 1 ]; then gum spin --title "$t" -- "$@"; else "$@"; fi; }
+
 SMARTDNS_DIR="${SMARTDNS_DIR:-/etc/smartdns}"
 GATEWAY_IP="${GATEWAY_IP:-$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[\d.]+' || echo 127.0.0.1)}"
 CHINA_IP_URL="${CHINA_IP_URL:-https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt}"
@@ -19,10 +30,10 @@ mkdir -p "$SMARTDNS_DIR"
 
 if [ "$DRY_RUN" != "1" ]; then
     tmp="$china.tmp"
-    if wget -qO "$tmp" "$CHINA_IP_URL"; then
+    if gum_spin "下载 china_ip_list…" wget -qO "$tmp" "$CHINA_IP_URL"; then
         mv "$tmp" "$china"
     else
-        echo "[!] china_ip_list download failed; keeping existing $china" >&2
+        warn "china_ip_list download failed; keeping existing $china"
         rm -f "$tmp"
     fi
 fi
@@ -55,4 +66,4 @@ python3 "$HERE/render_smartdns_conf.py" \
 if [ "$DRY_RUN" != "1" ]; then
     systemctl restart smartdns
 fi
-echo "[OK] lists updated (gateway=$GATEWAY_IP, dry_run=$DRY_RUN)"
+ok "lists updated (gateway=$GATEWAY_IP, dry_run=$DRY_RUN)"

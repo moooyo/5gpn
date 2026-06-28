@@ -29,7 +29,8 @@ grep -Eq 'tcp_ports="22, 853"'                   "$FW" || fail "inbound not limi
 grep -Eq 'udp dport 53 accept'                   "$FW" && fail "public plaintext :53 must not be opened"
 grep -Eq 'pgw_exit|fwmark|table 100|skuid'       "$FW" && fail "exit/mark layer must be removed (direct egress only)"
 grep -Eq 'udp dport 443 reject'                  "$FW" && fail "UDP 443 must NOT be rejected (QUIC now proxied)"
-grep -Eq '172\.22\.0\.0/16 udp dport 443 accept' "$FW" || fail "UDP 443 (QUIC) from NPN must be accepted"
+grep -Fq 'ip saddr ${CLIENT_NET} udp dport 443 accept' "$FW" || fail "UDP 443 (QUIC) from CLIENT_NET must be accepted"
+grep -Fq 'CLIENT_NET="${CLIENT_NET:-172.22.0.0/16}"' "$FW" || fail "CLIENT_NET default is not the NPN 172.22.0.0/16"
 grep -Eq 'quic-proxy'                            "$FW" && fail "no separate quic-proxy (xray handles QUIC inline)"
 
 # --- systemd: xray config path ---
