@@ -50,34 +50,35 @@ err()  { echo "${RED}[ERR]${NC}  $*" >&2; }
 # _HAVE_GUM stays 0 and all helpers fall back to plain echo.
 install_gum() {
     if command -v gum >/dev/null 2>&1; then _HAVE_GUM=1; return 0; fi
-    local arch url tmp exp got bin
-    case "$(uname -m)" in
+    local arch url tmp exp got bin m
+    m="$(uname -m 2>/dev/null || echo x86_64)"
+    case "$m" in
         x86_64|amd64)  arch="x86_64" ;;
         aarch64|arm64) arch="arm64"  ;;
         armv7l|armhf)  arch="armv7"  ;;
         *)             arch="x86_64" ;;
     esac
     url="https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/gum_${GUM_VERSION}_Linux_${arch}.tar.gz"
-    tmp="$(mktemp -d)"
+    tmp="$(mktemp -d 2>/dev/null)" || { warn "gum: mktemp failed; using plain output."; _HAVE_GUM=0; return 0; }
     if command -v curl >/dev/null 2>&1 && curl -fsSL "$url" -o "$tmp/gum.tgz" 2>/dev/null; then
         exp="${GUM_SHA256:-}"
         if [[ -z "$exp" ]]; then
             curl -fsSL "https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/checksums.txt" \
                  -o "$tmp/sums.txt" 2>/dev/null \
-                && exp="$(grep "gum_${GUM_VERSION}_Linux_${arch}.tar.gz" "$tmp/sums.txt" 2>/dev/null | awk '{print $1}' | head -1)"
+                && exp="$(grep "gum_${GUM_VERSION}_Linux_${arch}.tar.gz" "$tmp/sums.txt" 2>/dev/null | awk '{print $1}' | head -1 || true)"
         fi
         if [[ -n "$exp" ]]; then
-            got="$(sha256sum "$tmp/gum.tgz" | awk '{print $1}')"
+            got="$(sha256sum "$tmp/gum.tgz" 2>/dev/null | awk '{print $1}' || true)"
             if [[ "$got" != "$exp" ]]; then
                 warn "gum sha256 mismatch; continuing with plain output."
                 rm -rf "$tmp"; _HAVE_GUM=0; return 0
             fi
         fi
-        tar -xzf "$tmp/gum.tgz" -C "$tmp" 2>/dev/null
-        bin="$(find "$tmp" -type f -name gum 2>/dev/null | head -1)"
-        [[ -n "$bin" ]] && install -m 0755 "$bin" /usr/local/bin/gum 2>/dev/null
+        tar -xzf "$tmp/gum.tgz" -C "$tmp" 2>/dev/null || true
+        bin="$(find "$tmp" -type f -name gum 2>/dev/null | head -1 || true)"
+        [[ -n "$bin" ]] && { install -m 0755 "$bin" /usr/local/bin/gum 2>/dev/null || true; }
     fi
-    rm -rf "$tmp"
+    rm -rf "$tmp" 2>/dev/null || true
     if command -v gum >/dev/null 2>&1; then _HAVE_GUM=1; else _HAVE_GUM=0; warn "gum unavailable; using plain output."; fi
     return 0
 }
