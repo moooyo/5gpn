@@ -353,7 +353,7 @@ resolve_domain() {
         fi
         local input=""
         while true; do
-            input="$(ask_text 'Enter your DoT domain (e.g. dns.example.com):')"
+            input="$(ask_text 'Enter your DoT domain (e.g. dns.example.com):' || true)"
             input="${input#http://}"; input="${input#https://}"; input="${input%/}"; input="${input// /}"
             is_valid_domain "$input" && { DOMAIN="$input"; break; }
             warn "Invalid domain; enter a full FQDN like dns.example.com."
@@ -633,10 +633,10 @@ setup_tgbot() {
     local py; py="$(command -v python3 || echo /usr/bin/python3)"
     local token admins
     token="${TGBOT_TOKEN:-$(cat "${CONF_DIR}/.tgbot_token" 2>/dev/null || true)}"
-    if [[ -z "$token" && -t 0 ]]; then token="$(ask_secret 'Telegram Bot Token (blank to skip):')"; fi
+    if [[ -z "$token" && -t 0 ]]; then token="$(ask_secret 'Telegram Bot Token (blank to skip):' || true)"; fi
     [[ -z "$token" ]] && { info "No Telegram token; skipping tgbot. Re-run later: $0 --setup-tgbot"; return 0; }
     admins="${TGBOT_ADMINS:-$(cat "${CONF_DIR}/.tgbot_admins" 2>/dev/null || true)}"
-    if [[ -z "$admins" && -t 0 ]]; then admins="$(ask_text 'Authorized Telegram numeric IDs (comma-separated, optional):')"; fi
+    if [[ -z "$admins" && -t 0 ]]; then admins="$(ask_text 'Authorized Telegram numeric IDs (comma-separated, optional):' || true)"; fi
     admins="$(printf '%s' "$admins" | tr ', ' '\n\n' | grep -E '^[0-9]+$' | paste -sd ',' - 2>/dev/null || true)"
 
     mkdir -p "$CONF_DIR"
