@@ -4,27 +4,35 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$HERE/.."
 rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
-SNI="$ROOT/etc/sniproxy.conf"
+XRAY="$ROOT/etc/xray/config.json"
 FW="$ROOT/scripts/setup-firewall.sh"
-SS="$ROOT/etc/systemd/sniproxy.service"
+SS="$ROOT/etc/systemd/xray.service"
 
-# --- sniproxy: loop-avoidance + shape ---
-grep -Eq '^[[:space:]]*nameserver 22\.22\.22\.22' "$SNI" || fail "sniproxy resolver not 22.22.22.22"
-grep -Eq '127\.0\.0\.1|::1|:853|:5353'            "$SNI" && fail "sniproxy resolver must not point at local smartdns"
-grep -Eq '^user pxout'                            "$SNI" || fail "sniproxy not running as pxout"
-grep -Eq 'listener 0\.0\.0\.0:443'                "$SNI" || fail "sniproxy missing 443 listener"
-grep -Eq 'mode ipv4_only'                         "$SNI" || fail "sniproxy not ipv4_only"
+# --- xray: loop-avoidance + shape ---
+grep -Eq '"22\.22\.22\.22"'                          "$XRAY" || fail "xray dns resolver not 22.22.22.22"
+grep -Eq '127\.0\.0\.1:853|:5353|"::1"[^/]'          "$XRAY" && fail "xray dns must not point at local smartdns"
+grep -Eq '"dokodemo-door"'                           "$XRAY" || fail "xray not using dokodemo-door"
+grep -Eq '"port":[[:space:]]*443'                    "$XRAY" || fail "xray missing 443 inbound"
+grep -Eq '"network":[[:space:]]*"tcp,udp"'           "$XRAY" || fail "xray 443 must handle tcp+udp (QUIC)"
+grep -Eq '"quic"'                                    "$XRAY" || fail "xray must sniff quic"
+grep -Eq '"tls"'                                     "$XRAY" || fail "xray must sniff tls"
+grep -Eq '"port":[[:space:]]*80'                     "$XRAY" || fail "xray missing 80 inbound"
+grep -Eq '"http"'                                    "$XRAY" || fail "xray must sniff http on :80"
+grep -Eq '"domainStrategy":[[:space:]]*"ForceIPv4"'  "$XRAY" || fail "xray freedom not ForceIPv4 (IPv4-only)"
+grep -Eq '"blackhole"'                               "$XRAY" || fail "xray missing blackhole (anti-loop sink)"
+grep -Eq '"address":[[:space:]]*"127\.0\.0\.1"'      "$XRAY" || fail "xray dokodemo placeholder not 127.0.0.1 (sniff-fail sink)"
+grep -Eq '127\.0\.0\.0/8'                            "$XRAY" || fail "xray missing private->block anti-loop rule"
 
-# --- firewall: DoT-only inbound; exit/mark layer GONE; QUIC/UDP 443 disabled ---
-grep -Eq 'tcp_ports="22, 853"'             "$FW" || fail "inbound not limited to 22/853"
-grep -Eq 'udp dport 53 accept'             "$FW" && fail "public plaintext :53 must not be opened"
-grep -Eq 'pgw_exit|fwmark|table 100|skuid' "$FW" && fail "exit/mark layer must be removed (direct egress only)"
-grep -Eq 'udp dport 443 accept'            "$FW" && fail "UDP 443 (QUIC) must not be accepted"
-grep -Eq 'udp dport 443 reject'            "$FW" || fail "UDP 443 should be explicitly rejected (fast TCP fallback)"
-grep -Eq 'quic-proxy'                      "$FW" && fail "quic-proxy reference must be removed (QUIC dropped)"
+# --- firewall: DoT-only inbound; exit/mark layer GONE; QUIC now proxied ---
+grep -Eq 'tcp_ports="22, 853"'                   "$FW" || fail "inbound not limited to 22/853"
+grep -Eq 'udp dport 53 accept'                   "$FW" && fail "public plaintext :53 must not be opened"
+grep -Eq 'pgw_exit|fwmark|table 100|skuid'       "$FW" && fail "exit/mark layer must be removed (direct egress only)"
+grep -Eq 'udp dport 443 reject'                  "$FW" && fail "UDP 443 must NOT be rejected (QUIC now proxied)"
+grep -Eq '172\.22\.0\.0/16 udp dport 443 accept' "$FW" || fail "UDP 443 (QUIC) from NPN must be accepted"
+grep -Eq 'quic-proxy'                            "$FW" && fail "no separate quic-proxy (xray handles QUIC inline)"
 
-# --- systemd: sniproxy config path ---
-grep -Eq -- '-c /etc/sniproxy.conf'        "$SS" || fail "sniproxy.service missing config path"
+# --- systemd: xray config path ---
+grep -Eq -- '-c /usr/local/etc/xray/config.json' "$SS" || fail "xray.service missing config path"
 
 [ $rc -eq 0 ] && echo "proxy policy: PASS"
 exit $rc
