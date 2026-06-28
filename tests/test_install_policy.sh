@@ -20,7 +20,7 @@ grep -Eq 'systemctl stop sniproxy' "$INSTALL" || fail "renewal must stop sniprox
 grep -Eq 'renewal-hooks/post'       "$INSTALL" || fail "no certbot post-renewal hook installed"
 grep -Eq 'systemctl start sniproxy' "$INSTALL" || fail "post-renewal must restart sniproxy"
 # (3) a renewal timer so renewal actually runs unattended, and catches up missed runs.
-grep -Eq 'new5gpn-certbot-renew\.timer' "$INSTALL" || fail "no certbot renewal timer installed"
+grep -Eq '5gpn-certbot-renew\.timer' "$INSTALL" || fail "no certbot renewal timer installed"
 grep -Eq '^Persistent=true'             "$INSTALL" || fail "renewal timer not Persistent (missed runs won't catch up)"
 grep -Eq 'certbot renew'                "$INSTALL" || fail "renewal timer does not run 'certbot renew'"
 

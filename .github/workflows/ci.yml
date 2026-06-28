@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: '3.x'
 
-      # new-5gpn may be the repo root or a subdirectory; locate tests/run-tests.sh.
+      # 5gpn may be the repo root or a subdirectory; locate tests/run-tests.sh.
       - name: Locate project
         id: loc
         run: |

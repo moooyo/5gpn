@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-new-5gpn Telegram ops bot.
+5gpn Telegram ops bot.
 
 A lean, stdlib-only (urllib long-polling) Telegram bot that drives the
-new-5gpn DoT gateway from inline-keyboard buttons.
+5gpn DoT gateway from inline-keyboard buttons.
 
 Architecture reminder: smartdns -> sniproxy -> DIRECT egress.
 There is NO exit layer, so there are NO exit-switching commands. The bot only
@@ -12,7 +12,7 @@ service restarts, logs, and the iOS profile QR.
 
 Security model:
   * Bot token comes from the systemd EnvironmentFile (TGBOT_TOKEN) or, as a
-    fallback, /etc/new-5gpn/.tgbot_token (root-only, chmod 600).
+    fallback, /etc/5gpn/.tgbot_token (root-only, chmod 600).
   * Only numeric Telegram IDs in TGBOT_ADMINS / .tgbot_admins may operate the
     bot; every other update is ignored (except /id, which only reveals the
     caller's own id so an admin can bootstrap the allowlist).
@@ -21,11 +21,11 @@ Security model:
     before it ever reaches install.sh, which validates it again.
 
 Config / paths (override CONF_DIR via env if needed):
-  /etc/new-5gpn/.tgbot_token     bot token (fallback to TGBOT_TOKEN env)
-  /etc/new-5gpn/.tgbot_admins    authorized ids (fallback to TGBOT_ADMINS env)
-  /etc/new-5gpn/.domain          the gateway's domain (for the iOS URL)
+  /etc/5gpn/.tgbot_token     bot token (fallback to TGBOT_TOKEN env)
+  /etc/5gpn/.tgbot_admins    authorized ids (fallback to TGBOT_ADMINS env)
+  /etc/5gpn/.domain          the gateway's domain (for the iOS URL)
   /etc/smartdns/proxy-domains.txt forced-proxy domain list (read to list)
-  /opt/new-5gpn/install.sh       the CLI we shell out to for real work
+  /opt/5gpn/install.sh       the CLI we shell out to for real work
 """
 
 import html
@@ -41,8 +41,8 @@ import urllib.request
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-CONF_DIR = os.environ.get("CONF_DIR", "/etc/new-5gpn")
-BASE_DIR = os.environ.get("BASE_DIR", "/opt/new-5gpn")
+CONF_DIR = os.environ.get("CONF_DIR", "/etc/5gpn")
+BASE_DIR = os.environ.get("BASE_DIR", "/opt/5gpn")
 INSTALL = os.path.join(BASE_DIR, "install.sh")
 SMARTDNS_DIR = "/etc/smartdns"
 PROXY_DOMAINS = os.path.join(SMARTDNS_DIR, "proxy-domains.txt")
@@ -294,7 +294,7 @@ def op_status():
     """Compact status card: services + key facts + server metrics.
     Prefers a structured read over the raw `install.sh --status` text so the
     card is clean; the raw command stays available as a fallback if needed."""
-    lines = ["<b>📊 new-5gpn 状态</b>", ""]
+    lines = ["<b>📊 5gpn 状态</b>", ""]
     down = []
     for svc in SERVICES:
         ok = _is_active(svc) == "active"
@@ -480,7 +480,7 @@ def handle_message(msg):
     if text.startswith("/"):
         PENDING.pop(chat_id, None)
         if text.startswith(("/start", "/menu", "/help")):
-            send(chat_id, "<b>new-5gpn 控制台</b>\n选择一个操作：", main_menu())
+            send(chat_id, "<b>5gpn 控制台</b>\n选择一个操作：", main_menu())
         elif text.startswith("/status"):
             send(chat_id, op_status(), back_kb("menu:main"))
         else:
@@ -585,7 +585,7 @@ def main():
         print("[warn] no admin IDs; no one can operate. Use /id to find yours.", file=sys.stderr)
 
     set_commands()
-    print("new-5gpn tgbot started; admins=%s" % sorted(ADMIN_IDS), file=sys.stderr)
+    print("5gpn tgbot started; admins=%s" % sorted(ADMIN_IDS), file=sys.stderr)
 
     offset = None
     while True:

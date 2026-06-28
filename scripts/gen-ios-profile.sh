@@ -1,5 +1,5 @@
 #!/bin/bash
-# Generate the new-5gpn iOS DoT configuration profile (.mobileconfig) + landing page.
+# Generate the 5gpn iOS DoT configuration profile (.mobileconfig) + landing page.
 #
 # Architecture: client DoT:853 -> smartdns -> sniproxy -> DIRECT egress.
 # The profile points the phone's cellular DNS at this gateway over TLS (DoT). On
@@ -71,9 +71,9 @@ cat > "$profile_path" <<EOF
             <key>PayloadDescription</key>
             <string>Use ${DOMAIN} DNS over TLS only on cellular networks.</string>
             <key>PayloadDisplayName</key>
-            <string>new-5gpn Cellular DoT</string>
+            <string>5gpn Cellular DoT</string>
             <key>PayloadIdentifier</key>
-            <string>com.new-5gpn.${DOMAIN}.dnssettings</string>
+            <string>com.5gpn.${DOMAIN}.dnssettings</string>
             <key>PayloadType</key>
             <string>com.apple.dnsSettings.managed</string>
             <key>PayloadUUID</key>
@@ -85,11 +85,11 @@ cat > "$profile_path" <<EOF
     <key>PayloadDescription</key>
     <string>Installs a DNS over TLS profile for cellular networks only.</string>
     <key>PayloadDisplayName</key>
-    <string>new-5gpn Cellular DoT</string>
+    <string>5gpn Cellular DoT</string>
     <key>PayloadIdentifier</key>
-    <string>com.new-5gpn.${DOMAIN}</string>
+    <string>com.5gpn.${DOMAIN}</string>
     <key>PayloadOrganization</key>
-    <string>new-5gpn</string>
+    <string>5gpn</string>
     <key>PayloadRemovalDisallowed</key>
     <false/>
     <key>PayloadType</key>
@@ -108,10 +108,10 @@ cat > "${WWW_DIR}/index.html" <<EOF
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>new-5gpn iOS DoT</title>
+  <title>5gpn iOS DoT</title>
 </head>
 <body>
-  <h1>new-5gpn iOS DoT</h1>
+  <h1>5gpn iOS DoT</h1>
   <p><a href="/ios-dot.mobileconfig">下载 iOS 蜂窝网络 DoT 描述文件</a></p>
 </body>
 </html>

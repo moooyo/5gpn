@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-new-5gpn control-plane HTTP API (stdlib only).
+5gpn control-plane HTTP API (stdlib only).
 
 Architecture this serves:  smartdns -> sniproxy -> DIRECT egress.
 There is NO exit layer (no sing-box / wireguard / fwmark / routing tables), so
 this control plane is deliberately small. It only manages:
 
   * forced-proxy domains   (/etc/smartdns/proxy-domains.txt)
-  * chnroute refresh        (/opt/new-5gpn/scripts/update-lists.sh)
+  * chnroute refresh        (/opt/5gpn/scripts/update-lists.sh)
   * service status + host metrics
   * service restarts
   * config backup / restore
 
 Auth:   every /api/* call needs  Authorization: Bearer <token>  matching the
-        token in /etc/new-5gpn/.api_token (401 otherwise).
+        token in /etc/5gpn/.api_token (401 otherwise).
 Transport: HTTPS on .api_port (default 8443), cert from /etc/smartdns/cert/.
 CORS:   permissive ('*') so the static web UI can call it.
 
@@ -33,7 +33,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-CFG_DIR = os.environ.get("CONF_DIR") or "/etc/new-5gpn"
+CFG_DIR = os.environ.get("CONF_DIR") or "/etc/5gpn"
 SMARTDNS_DIR = "/etc/smartdns"
 TOKEN_FILE = CFG_DIR + "/.api_token"
 PORT_FILE = CFG_DIR + "/.api_port"
@@ -43,7 +43,7 @@ PROXY_DOMAINS = SMARTDNS_DIR + "/proxy-domains.txt"
 FOREIGN_CIDR = SMARTDNS_DIR + "/foreign-cidr.txt"
 CERT = os.environ.get("API_TLS_CERT") or (SMARTDNS_DIR + "/cert/fullchain.pem")
 KEY = os.environ.get("API_TLS_KEY") or (SMARTDNS_DIR + "/cert/privkey.pem")
-UPDATE_LISTS = "/opt/new-5gpn/scripts/update-lists.sh"
+UPDATE_LISTS = "/opt/5gpn/scripts/update-lists.sh"
 
 # Extra files folded into a backup if they exist (overseas / cache settings).
 EXTRA_BACKUP = [SMARTDNS_DIR + "/overseas.conf", SMARTDNS_DIR + "/cache.conf"]
@@ -306,7 +306,7 @@ def _log_auth_failure(src, command, path):
 # HTTP handler
 # ----------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
-    server_version = "new5gpn-api"
+    server_version = "5gpn-api"
     protocol_version = "HTTP/1.1"
     timeout = 30  # bound per-connection reads (slowloris); applied by StreamRequestHandler.setup()
 
@@ -400,7 +400,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/backup":
             try:
                 return self._bytes(200, make_backup(), "application/gzip",
-                                   "new5gpn-backup.tar.gz")
+                                   "5gpn-backup.tar.gz")
             except Exception as e:  # noqa: BLE001
                 return self._json(500, {"error": str(e)})
         return self._json(404, {"error": "not found"})
@@ -547,7 +547,7 @@ def main():
 
     httpd = TLSServer((BIND, PORT), Handler)
     httpd.ssl_ctx = ctx
-    sys.stderr.write("new5gpn-api listening on %s:%d (TLS)\n" % (BIND, PORT))
+    sys.stderr.write("5gpn-api listening on %s:%d (TLS)\n" % (BIND, PORT))
     sys.stderr.flush()
     try:
         httpd.serve_forever()

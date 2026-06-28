@@ -8,12 +8,12 @@
 
 - [ ] Install smartdns and python3.
 - [ ] Place a cert at `/etc/smartdns/cert/{fullchain.pem,privkey.pem}` (self-signed ok for smoke; client uses `+tls` without strict validation).
-- [ ] Copy `new-5gpn/etc/proxy-domains.txt` → `/etc/smartdns/proxy-domains.txt`.
+- [ ] Copy `5gpn/etc/proxy-domains.txt` → `/etc/smartdns/proxy-domains.txt`.
 - [ ] Generate lists + render config + start:
-      `SMARTDNS_DIR=/etc/smartdns GATEWAY_IP=<this-host-ip> bash new-5gpn/scripts/update-lists.sh`
+      `SMARTDNS_DIR=/etc/smartdns GATEWAY_IP=<this-host-ip> bash 5gpn/scripts/update-lists.sh`
       `systemctl restart smartdns`
 - [ ] First, run the automated suite that the dev box could not:
-      `bash new-5gpn/tests/run-tests.sh` → expect `ALL TESTS PASSED`.
+      `bash 5gpn/tests/run-tests.sh` → expect `ALL TESTS PASSED`.
 
 ## Behavioral checks (DoT on :853)
 
@@ -64,10 +64,10 @@
 
 Prereqs on the Linux box:
 - Build/install dlundquist sniproxy to `/usr/local/sbin/sniproxy`.
-- `cp new-5gpn/etc/sniproxy.conf /etc/sniproxy.conf`
-- `bash new-5gpn/scripts/setup-firewall.sh`  (creates pxout user, DoT-only nft, installs sniproxy unit, rejects UDP 443)
+- `cp 5gpn/etc/sniproxy.conf /etc/sniproxy.conf`
+- `bash 5gpn/scripts/setup-firewall.sh`  (creates pxout user, DoT-only nft, installs sniproxy unit, rejects UDP 443)
 - `systemctl enable --now sniproxy`
-- Static checks: `bash new-5gpn/tests/test_proxy_policy.sh` → `proxy policy: PASS`
+- Static checks: `bash 5gpn/tests/test_proxy_policy.sh` → `proxy policy: PASS`
 
 Direct egress only — no fwmark / table 100 / tunnels / exit layer.
 
@@ -99,14 +99,14 @@ drops :80 and sniproxy binds :80. The installer ships pre/post renewal-hooks
 (open 80 + stop sniproxy → restore) and a Persistent daily timer.
 
 - [ ] **Hooks present**: `ls /etc/letsencrypt/renewal-hooks/{pre,post}/` shows the
-      `10-new5gpn-open80.sh` / `10-new5gpn-close80.sh` scripts (executable).
+      `10-5gpn-open80.sh` / `10-5gpn-close80.sh` scripts (executable).
 - [ ] **Timer active**: `systemctl list-timers | grep certbot` shows a renewal timer
-      (ours `new5gpn-certbot-renew.timer`, or the distro's if it was already enabled).
+      (ours `5gpn-certbot-renew.timer`, or the distro's if it was already enabled).
 - [ ] **Dry-run renewal end-to-end** (firewall in drop policy, sniproxy running):
       `certbot renew --dry-run` succeeds. During it, confirm `:80` is briefly open and
       sniproxy is stopped, then restored (`systemctl is-active sniproxy` == active after).
 - [ ] **smartdns reloads new cert**: after a real renewal the deploy hook
-      (`/etc/letsencrypt/renewal-hooks/deploy/99-new5gpn.sh`) copies certs to
+      (`/etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh`) copies certs to
       `/etc/smartdns/cert/` and restarts smartdns; DoT :853 serves the new cert.
 
 Results:

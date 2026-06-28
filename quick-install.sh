@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# new-5gpn one-shot entrypoint.
+# 5gpn one-shot entrypoint.
 #   curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash
 # Fetches the repo, then runs install.sh with any args you pass through.
 set -euo pipefail

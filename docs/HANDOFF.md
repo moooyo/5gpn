@@ -1,4 +1,4 @@
-# new-5gpn 交付报告 / Handoff
+# 5gpn 交付报告 / Handoff
 
 - 日期:2026-06-28
 - 范围:在既有代码基础上,完成审计发现的**全部必修 + 应修 + 安全硬化**,并补齐自动化测试与 CI。
@@ -19,7 +19,7 @@
 - **NPN-only 拓扑**:客户端在 `172.22.0.0/16`;引入客户端朝向地址 `GATEWAY_IP`(默认 = `PUBLIC_IP`,NPN 时 `export GATEWAY_IP=<内网地址>`),用于 smartdns `ip-alias` 目标、iOS `ServerAddresses`、profile/QR URL。
 
 ### 必修(P0/P1)
-- **证书续期**:`install.sh` 加全局 `renewal-hooks/pre|post`(临时开 80 + 停 sniproxy → 还原)+ Persistent `new5gpn-certbot-renew.timer`,绕过 DoT-only 防火墙与 sniproxy 占用 :80 的问题(否则证书 ~90 天到期 → DoT 全量下线)。
+- **证书续期**:`install.sh` 加全局 `renewal-hooks/pre|post`(临时开 80 + 停 sniproxy → 还原)+ Persistent `5gpn-certbot-renew.timer`,绕过 DoT-only 防火墙与 sniproxy 占用 :80 的问题(否则证书 ~90 天到期 → DoT 全量下线)。
 - **iOS / 防火墙拓扑**:`setup-firewall.sh` 放行 `172.22 → 8111`(iOS 描述文件抓取),profile 指向内网网关地址。
 - **webui 假绿**:`!!svc[k]` → `svc[k] === 'active'`,停机时显示真实状态词。
 - **API 端口**:`install.sh` 默认 `8080` → `8443`;`api-server.py` 改读 systemd `Environment=`(token/port/bind/cert/CONF_DIR,文件兜底)。
@@ -36,7 +36,7 @@ systemd 沙箱(`NoNewPrivileges`/`ProtectSystem=strict`/`ProtectKernel*` 等)、
 ### 测试与 CI
 - **`DOMAIN_RE` 三处统一**到同一 FQDN 规则(api/tgbot 逐字相同;install.sh 等价)+ 反漂移测试。
 - **7 个自动化测试**:5 个 grep 策略测试(proxy/install/cleanup/hardening/domain,本机+CI 可跑)+ 2 个 Python(gen_foreign_cidr 单测、smartdns_conf policy,CI 跑)。
-- **CI**:`.github/workflows/ci.yml`(GitHub Actions/ubuntu)跑 `py_compile` + `run-tests.sh`;用 `find` 定位测试,兼容 new-5gpn 作为根或子目录。
+- **CI**:`.github/workflows/ci.yml`(GitHub Actions/ubuntu)跑 `py_compile` + `run-tests.sh`;用 `find` 定位测试,兼容 5gpn 作为根或子目录。
 
 ---
 
@@ -58,6 +58,6 @@ systemd 沙箱(`NoNewPrivileges`/`ProtectSystem=strict`/`ProtectKernel*` 等)、
 - [ ] **P2 转发**:`curl https://<国外域名>` 经 sniproxy 直出可达;`tcpdump` 证实代理只查 22.22.22.22,不回 :853/:5353。
 - [ ] **QUIC 回退**:`curl --http3` 失败/回退,普通 `curl` 正常;`nc -uvz <gw> 443` 被拒。
 - [ ] **证书续期**:drop 防火墙生效下 `certbot renew --dry-run` 端到端成功;过程中 80 短暂放行、sniproxy 停后恢复;timer active。
-- [ ] **防火墙/沙箱**:仅 `172.22` 能连 80/443/8111;`systemctl show sniproxy/new5gpn-iosprofile@ -p NoNewPrivileges,ProtectSystem` 生效;服务能正常启动(沙箱没误伤)。
+- [ ] **防火墙/沙箱**:仅 `172.22` 能连 80/443/8111;`systemctl show sniproxy/5gpn-iosprofile@ -p NoNewPrivileges,ProtectSystem` 生效;服务能正常启动(沙箱没误伤)。
 - [ ] **控制面(可选)**:`--setup-api`/`--setup-tgbot` 后,API/bot/webui 增删域名 + chnroute 刷新 + 重启 + 备份/恢复正常;鉴权失败日志限速可见。
 - [ ] **CI**:把仓库推到 GitHub,确认 Actions 绿。

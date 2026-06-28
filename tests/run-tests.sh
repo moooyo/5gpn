@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run all new-5gpn P1 tests. Exit non-zero on any failure.
+# Run all 5gpn P1 tests. Exit non-zero on any failure.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"

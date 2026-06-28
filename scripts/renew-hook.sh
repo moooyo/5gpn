@@ -33,6 +33,6 @@ if systemctl is-active --quiet smartdns; then
 fi
 
 # The control API holds the TLS cert in memory; restart it to load the renewed one.
-if systemctl is-active --quiet new5gpn-api; then
-    systemctl restart new5gpn-api 2>/dev/null || true
+if systemctl is-active --quiet 5gpn-api; then
+    systemctl restart 5gpn-api 2>/dev/null || true
 fi

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# new-5gpn installer / orchestrator (exit-less, direct-egress architecture).
+# 5gpn installer / orchestrator (exit-less, direct-egress architecture).
 #
 #   client DoT:853 -> smartdns (returns the GATEWAY IP for blocked/foreign
 #   domains) -> sniproxy (TCP 80/443) reads SNI, resolves the real IP via
@@ -16,15 +16,15 @@ set -euo pipefail
 # Paths & constants
 # ----------------------------------------------------------------------------
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
-SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"   # repo new-5gpn/ when run from a checkout
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"   # repo 5gpn/ when run from a checkout
 
-BASE_DIR="/opt/new-5gpn"                 # installed runtime root
+BASE_DIR="/opt/5gpn"                 # installed runtime root
 SCRIPTS_DIR="${BASE_DIR}/scripts"        # installed copies of repo scripts
 SRC_DIR="${BASE_DIR}/src"                # ios-http.py + build scratch
 WWW_DIR="${BASE_DIR}/www"                # iOS profile web root
 BUILD_DIR="${BASE_DIR}/build"            # sniproxy git build scratch
 
-CONF_DIR="/etc/new-5gpn"                 # state: .domain .public_ip .api_token ...
+CONF_DIR="/etc/5gpn"                 # state: .domain .public_ip .api_token ...
 SMARTDNS_DIR="/etc/smartdns"             # smartdns.conf(.template), lists, cert/
 SNIPROXY_CONF="/etc/sniproxy.conf"
 
@@ -245,7 +245,7 @@ install_files() {
 
     # smartdns template + proxy-domains seed (don't clobber an edited proxy list).
     # The template is installed to BOTH /etc/smartdns (canonical) and
-    # /opt/new-5gpn/etc (where the installed update-lists.sh resolves it via
+    # /opt/5gpn/etc (where the installed update-lists.sh resolves it via
     # ROOT="$HERE/..").
     install -m 0644 "${SCRIPT_DIR}/etc/smartdns.conf.template" "${SMARTDNS_DIR}/smartdns.conf.template"
     install -d -m 0755 "${BASE_DIR}/etc"
@@ -263,7 +263,7 @@ install_files() {
     # sniproxy.conf (resolver hardcoded to 22.22.22.22 in the repo file)
     install -m 0644 "${SCRIPT_DIR}/etc/sniproxy.conf" "$SNIPROXY_CONF"
 
-    # repo scripts -> /opt/new-5gpn/scripts
+    # repo scripts -> /opt/5gpn/scripts
     for f in "${SCRIPT_DIR}"/scripts/*.sh "${SCRIPT_DIR}"/scripts/*.py; do
         [[ -e "$f" ]] || continue
         install -m 0755 "$f" "${SCRIPTS_DIR}/$(basename "$f")"
@@ -366,7 +366,7 @@ install_cert() {
     if [[ -f "${SCRIPT_DIR}/scripts/renew-hook.sh" ]]; then
         install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
         install -m 0755 "${SCRIPT_DIR}/scripts/renew-hook.sh" \
-            /etc/letsencrypt/renewal-hooks/deploy/99-new5gpn.sh
+            /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh
         ok "Renewal deploy hook installed."
     else
         warn "scripts/renew-hook.sh not found; auto-renew reload hook skipped."
@@ -381,21 +381,21 @@ install_cert() {
 # Without this the LE cert expires (~90d) and DoT :853 dies with no :53 fallback.
 install_renewal_automation() {
     install -d -m 0755 /etc/letsencrypt/renewal-hooks/pre /etc/letsencrypt/renewal-hooks/post
-    cat > /etc/letsencrypt/renewal-hooks/pre/10-new5gpn-open80.sh <<'EOF'
+    cat > /etc/letsencrypt/renewal-hooks/pre/10-5gpn-open80.sh <<'EOF'
 #!/usr/bin/env bash
 # Free TCP 80 for certbot --standalone: open the firewall + stop sniproxy (binds :80).
 nft list table inet filter >/dev/null 2>&1 && nft insert rule inet filter input tcp dport 80 accept 2>/dev/null || true
 systemctl stop sniproxy 2>/dev/null || true
 EOF
-    cat > /etc/letsencrypt/renewal-hooks/post/10-new5gpn-close80.sh <<'EOF'
+    cat > /etc/letsencrypt/renewal-hooks/post/10-5gpn-close80.sh <<'EOF'
 #!/usr/bin/env bash
 # Restore DoT-only firewall (drops the temp :80 accept) + bring sniproxy back.
 # Runs after every renewal attempt, success or failure.
 systemctl start sniproxy 2>/dev/null || true
 [ -f /etc/nftables.conf ] && nft -f /etc/nftables.conf 2>/dev/null || true
 EOF
-    chmod +x /etc/letsencrypt/renewal-hooks/pre/10-new5gpn-open80.sh \
-             /etc/letsencrypt/renewal-hooks/post/10-new5gpn-close80.sh
+    chmod +x /etc/letsencrypt/renewal-hooks/pre/10-5gpn-open80.sh \
+             /etc/letsencrypt/renewal-hooks/post/10-5gpn-close80.sh
     ok "Renewal pre/post hooks installed (open/close :80 + cycle sniproxy)."
 
     # Don't double up if the distro/snap already ships an enabled renewal timer
@@ -405,9 +405,9 @@ EOF
         info "Existing certbot timer detected; relying on it (our hooks still apply)."
         return 0
     fi
-    cat > /etc/systemd/system/new5gpn-certbot-renew.service <<'EOF'
+    cat > /etc/systemd/system/5gpn-certbot-renew.service <<'EOF'
 [Unit]
-Description=new-5gpn certbot renewal
+Description=5gpn certbot renewal
 After=network-online.target
 Wants=network-online.target
 
@@ -415,9 +415,9 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=/bin/sh -c 'certbot renew --quiet'
 EOF
-    cat > /etc/systemd/system/new5gpn-certbot-renew.timer <<'EOF'
+    cat > /etc/systemd/system/5gpn-certbot-renew.timer <<'EOF'
 [Unit]
-Description=new-5gpn daily certbot renewal check
+Description=5gpn daily certbot renewal check
 
 [Timer]
 OnCalendar=*-*-* 03:00:00
@@ -428,8 +428,8 @@ Persistent=true
 WantedBy=timers.target
 EOF
     systemctl daemon-reload
-    systemctl enable --now new5gpn-certbot-renew.timer 2>/dev/null || true
-    ok "Installed new5gpn-certbot-renew.timer (daily, Persistent)."
+    systemctl enable --now 5gpn-certbot-renew.timer 2>/dev/null || true
+    ok "Installed 5gpn-certbot-renew.timer (daily, Persistent)."
 }
 
 # ----------------------------------------------------------------------------
@@ -455,7 +455,7 @@ install_smartdns_unit() {
     if systemctl list-unit-files 2>/dev/null | grep -q '^smartdns\.service'; then return 0; fi
     cat > /etc/systemd/system/smartdns.service <<EOF
 [Unit]
-Description=new-5gpn smartdns (DoT brain)
+Description=5gpn smartdns (DoT brain)
 After=network-online.target
 Wants=network-online.target
 
@@ -496,9 +496,9 @@ setup_ios_profile() {
         warn "${SRC_DIR}/ios-http.py missing; iOS HTTP service not installed."
         return 0
     fi
-    cat > /etc/systemd/system/new5gpn-iosprofile.socket <<EOF
+    cat > /etc/systemd/system/5gpn-iosprofile.socket <<EOF
 [Unit]
-Description=new-5gpn iOS profile HTTP socket
+Description=5gpn iOS profile HTTP socket
 
 [Socket]
 ListenStream=0.0.0.0:${IOS_PORT}
@@ -507,9 +507,9 @@ Accept=yes
 [Install]
 WantedBy=sockets.target
 EOF
-    cat > /etc/systemd/system/new5gpn-iosprofile@.service <<EOF
+    cat > /etc/systemd/system/5gpn-iosprofile@.service <<EOF
 [Unit]
-Description=new-5gpn iOS profile responder (per-connection)
+Description=5gpn iOS profile responder (per-connection)
 
 [Service]
 Type=simple
@@ -546,11 +546,11 @@ print_qr() {
 system_tuning() {
     info "Applying sysctl tuning..."
     modprobe nf_conntrack >/dev/null 2>&1 || true
-    mkdir -p /etc/modules-load.d; echo nf_conntrack > /etc/modules-load.d/new5gpn.conf
+    mkdir -p /etc/modules-load.d; echo nf_conntrack > /etc/modules-load.d/5gpn.conf
     local ct sm
     if [[ "${LOWMEM:-0}" == "1" ]]; then ct=131072; sm=60; else ct=1048576; sm=10; fi
-    cat > /etc/sysctl.d/99-new5gpn.conf <<EOF
-# new-5gpn ($([[ "${LOWMEM:-0}" == "1" ]] && echo low-memory || echo standard))
+    cat > /etc/sysctl.d/99-5gpn.conf <<EOF
+# 5gpn ($([[ "${LOWMEM:-0}" == "1" ]] && echo low-memory || echo standard))
 net.ipv4.ip_forward=1
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
@@ -573,8 +573,8 @@ start_services() {
         systemctl restart "$svc" 2>/dev/null || systemctl start "$svc" 2>/dev/null \
             || warn "could not start $svc (check: journalctl -u $svc)."
     done
-    if systemctl list-unit-files 2>/dev/null | grep -q '^new5gpn-iosprofile\.socket'; then
-        systemctl enable --now new5gpn-iosprofile.socket 2>/dev/null || warn "iOS socket failed to start."
+    if systemctl list-unit-files 2>/dev/null | grep -q '^5gpn-iosprofile\.socket'; then
+        systemctl enable --now 5gpn-iosprofile.socket 2>/dev/null || warn "iOS socket failed to start."
     fi
 }
 
@@ -596,9 +596,9 @@ setup_api() {
     printf '%s' "$token" > "${CONF_DIR}/.api_token"; chmod 600 "${CONF_DIR}/.api_token"
     printf '%s' "$port"  > "${CONF_DIR}/.api_port"
 
-    cat > /etc/systemd/system/new5gpn-api.service <<EOF
+    cat > /etc/systemd/system/5gpn-api.service <<EOF
 [Unit]
-Description=new-5gpn HTTP control API
+Description=5gpn HTTP control API
 After=network-online.target smartdns.service
 Wants=network-online.target
 
@@ -631,7 +631,7 @@ EOF
     # Re-run firewall so the API port is allowed (setup-firewall honors API_PORT).
     [[ -x "${SCRIPTS_DIR}/setup-firewall.sh" ]] && API_PORT="$port" IOS_PORT="$IOS_PORT" bash "${SCRIPTS_DIR}/setup-firewall.sh" >/dev/null 2>&1 || true
     systemctl daemon-reload
-    systemctl enable --now new5gpn-api.service 2>/dev/null || systemctl restart new5gpn-api.service || true
+    systemctl enable --now 5gpn-api.service 2>/dev/null || systemctl restart 5gpn-api.service || true
     echo ""
     ok "HTTP control API enabled."
     echo "  URL:   https://${domain:-<domain>}:${port}"
@@ -656,9 +656,9 @@ setup_tgbot() {
     printf '%s' "$token"  > "${CONF_DIR}/.tgbot_token";  chmod 600 "${CONF_DIR}/.tgbot_token"
     printf '%s' "$admins" > "${CONF_DIR}/.tgbot_admins"; chmod 600 "${CONF_DIR}/.tgbot_admins"
 
-    cat > /etc/systemd/system/new5gpn-tgbot.service <<EOF
+    cat > /etc/systemd/system/5gpn-tgbot.service <<EOF
 [Unit]
-Description=new-5gpn Telegram control bot
+Description=5gpn Telegram control bot
 After=network-online.target
 Wants=network-online.target
 
@@ -683,10 +683,10 @@ RestrictSUIDSGID=yes
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl enable --now new5gpn-tgbot.service 2>/dev/null || systemctl restart new5gpn-tgbot.service || true
+    systemctl enable --now 5gpn-tgbot.service 2>/dev/null || systemctl restart 5gpn-tgbot.service || true
     ok "Telegram bot enabled."
     echo "  Token stored: ${CONF_DIR}/.tgbot_token (chmod 600)"
-    [[ -z "$admins" ]] && warn "No admin IDs set yet; message the bot, then add IDs to ${CONF_DIR}/.tgbot_admins and: systemctl restart new5gpn-tgbot"
+    [[ -z "$admins" ]] && warn "No admin IDs set yet; message the bot, then add IDs to ${CONF_DIR}/.tgbot_admins and: systemctl restart 5gpn-tgbot"
 }
 
 # ----------------------------------------------------------------------------
@@ -730,7 +730,7 @@ regen_ios() {
     GATEWAY_IP="${GATEWAY_IP:-$(cat "${CONF_DIR}/.gateway_ip" 2>/dev/null || true)}"
     [[ -n "$DOMAIN" && -n "$PUBLIC_IP" ]] || { err "Domain/public IP unknown; run a full install first."; exit 1; }
     setup_ios_profile
-    systemctl reload-or-restart new5gpn-iosprofile.socket 2>/dev/null || systemctl enable --now new5gpn-iosprofile.socket 2>/dev/null || true
+    systemctl reload-or-restart 5gpn-iosprofile.socket 2>/dev/null || systemctl enable --now 5gpn-iosprofile.socket 2>/dev/null || true
     print_qr
     ok "iOS profile regenerated: http://${GATEWAY_IP:-$PUBLIC_IP}:${IOS_PORT}/ios-dot.mobileconfig"
 }
@@ -740,13 +740,13 @@ show_status() {
     domain="$(cat "${CONF_DIR}/.domain" 2>/dev/null || echo N/A)"
     pubip="$(cat "${CONF_DIR}/.public_ip" 2>/dev/null || echo N/A)"
     echo "=========================================="
-    echo "         new-5gpn status"
+    echo "         5gpn status"
     echo "=========================================="
     for svc in smartdns sniproxy; do
         local s; s="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
         if [[ "$s" == active ]]; then echo "  ${svc}: ${GREEN}active${NC}"; else echo "  ${svc}: ${RED}${s}${NC}"; fi
     done
-    for opt in new5gpn-iosprofile.socket new5gpn-api new5gpn-tgbot; do
+    for opt in 5gpn-iosprofile.socket 5gpn-api 5gpn-tgbot; do
         if systemctl list-unit-files 2>/dev/null | grep -q "^${opt}"; then
             local s; s="$(systemctl is-active "$opt" 2>/dev/null || echo unknown)"
             echo "  ${opt}: $([[ "$s" == active ]] && echo "${GREEN}active${NC}" || echo "${RED}${s}${NC}")"
@@ -800,7 +800,7 @@ full_install() {
     start_services
 
     echo ""
-    ok "new-5gpn install complete."
+    ok "5gpn install complete."
     echo "------------------------------------------"
     echo " DoT address:        tls://${DOMAIN}:853"
     echo " Android Private DNS: ${DOMAIN}"
@@ -816,7 +816,7 @@ full_install() {
 # ----------------------------------------------------------------------------
 usage() {
     cat <<EOF
-new-5gpn installer (exit-less DoT gateway)
+5gpn installer (exit-less DoT gateway)
 
 Usage: sudo bash install.sh [option]
 

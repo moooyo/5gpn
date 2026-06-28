@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# new-5gpn firewall + proxy service install. Direct egress only — no packet
+# 5gpn firewall + proxy service install. Direct egress only — no packet
 # marking, no policy routing, no tunnels, no exit layer. sniproxy egresses
 # straight out the gateway's default route. QUIC/HTTP3 is not proxied: UDP 443
 # is rejected so clients fall back to TCP/TLS (sniproxy).

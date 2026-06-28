@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Tiny inetd-style HTTP responder for the new-5gpn iOS DoT profile.
+Tiny inetd-style HTTP responder for the 5gpn iOS DoT profile.
 
 Invoked once per connection by systemd socket activation (Accept=yes), with the
 client socket wired to stdin/stdout. Serves a couple of static files from
@@ -10,7 +10,7 @@ import os
 import signal
 import sys
 
-WWW_DIR = os.environ.get("WWW_DIR", "/opt/new-5gpn/www")
+WWW_DIR = os.environ.get("WWW_DIR", "/opt/5gpn/www")
 
 ROUTES = {
     "/ios-dot.mobileconfig": ("ios-dot.mobileconfig", "application/x-apple-aspen-config"),

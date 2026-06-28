@@ -1,5 +1,5 @@
 [Unit]
-Description=new-5gpn sniproxy (TCP SNI transparent proxy)
+Description=5gpn sniproxy (TCP SNI transparent proxy)
 After=network.target
 
 [Service]

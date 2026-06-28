@@ -1,17 +1,17 @@
-# new-5gpn 设计文档(smartdns 重写版)
+# 5gpn 设计文档(smartdns DoT 网关)
 
 - 状态:设计待评审
 - 日期:2026-06-27
-- 范围:整仓库从零重写,独立于 `../` 旧实现,落在 `new-5gpn/`
-- 已定决策:① 整仓库从零重写 ② 客户端仅 DoT(853) ③ 不在强制列表但解析出国外 IP 的普通网站一律走 sniproxy ④ **出口仅直出**(无 sing-box / WireGuard / 多出口 / 策略路由) ⑤ **QUIC/HTTP3 不代理**(UDP 443 在防火墙 reject,客户端回退 TCP/TLS 走 sniproxy;移除 quic-proxy 与 Go 工具链)
+- 范围:smartdns DoT 网关的整体设计
+- 已定决策:① 客户端仅 DoT(853) ② 不在强制列表但解析出国外 IP 的普通网站一律走 sniproxy ③ **出口仅直出**(无 sing-box / WireGuard / 多出口 / 策略路由) ④ **QUIC/HTTP3 不代理**(UDP 443 在防火墙 reject,客户端回退 TCP/TLS 走 sniproxy;不含 quic-proxy 与 Go 工具链)
 
 ---
 
 ## 1. 目标与非目标
 
-**目标**:用 smartdns 取代旧版的 dnsdist + 自研 china-dns-race-proxy,把"维护两张大域名表(gfwlist/chinalist)"换成"一张小强制代理域名表 + 一张 chnroute 反集(非中国 IP)",分流更自动、组件更少;被代理流量经 sniproxy 透明转发后**直出**(单一直出口,无隧道/多出口)。
+**目标**:用 smartdns 作为 DNS 大脑,以"一张小强制代理域名表 + 一张 chnroute 反集(非中国 IP)"实现自动分流,组件尽量少;被代理流量经 sniproxy 透明转发后**直出**(单一直出口,无隧道/多出口)。
 
-**非目标**:不改变"解析即策略 / SNI 透明转发不解密 TLS"的核心范式;**不做多出口 / 隧道 / 策略路由(仅直出)**;不引入客户端 App;不追求 IPv6(维持 IPv4-only)。
+**非目标**:**不做多出口 / 隧道 / 策略路由(仅直出)**;不引入客户端 App;不追求 IPv6(维持 IPv4-only)。核心范式是"解析即策略 / SNI 透明转发不解密 TLS"。
 
 ## 2. 总体架构
 
@@ -37,23 +37,21 @@
   直接走网关默认路由出网(直出,无隧道/多出口)→ 互联网
 ```
 
-## 3. 组件清单(去留与来源)
+## 3. 组件清单
 
-| 组件 | 处置 | 备注 |
-|---|---|---|
-| smartdns 主配置 + 列表生成脚本 | 🆕 新建 | DoT 入口、双上游抗污染、`address`、`ip-alias`、`force-AAAA-SOA` |
-| `proxy-domains.txt`(强制代理域名表) | 🆕 新建 | 小表;为污染兜底/已知必代理域名;可选 seed 自 gfwlist |
-| `foreign-cidr.txt`(chnroute 反集) | 🆕 新建 | 全网 − 中国 IP 段,由公开中国 IP 表自动生成 + 定时更新 |
-| dnsdist / dnsdist.conf.template | ❌ 不带入 | smartdns 取代 |
-| china-dns-race-proxy.go | ❌ 不带入 | smartdns 自带并发竞速 + 测速选优 |
-| sniproxy + sniproxy.conf 方案 | ✅ 复用 | TCP SNI 透明转发,`user pxout`,通配兜底无域名表,解析器 hardcode `22.22.22.22`,**直出** |
-| ~~quic-proxy.go~~ | ❌ 不做 | **QUIC/HTTP3 不代理**:UDP 443 在防火墙 reject,客户端回退 TCP(由 sniproxy 接);连带移除 Go 工具链 |
-| DoT-only 防火墙(nft 入站) | 🆕 新建 | 仅放行 22/853 + `172.22→80/443/udp443`;**无 mark/策略路由** |
-| ~~sing-box / WireGuard / 多出口 / pxout-mark / table 100~~ | ❌ 不做 | 仅直出,整层移除 |
-| certbot / renew-hook / iOS profile / ios-http | ✅ 复用(适配) | 仅 DoT → 证书与 iOS 描述文件仍需要 |
-| install.sh 编排 | ♻️ 重写 | 装 smartdns、渲染新配置、新列表链路、systemd、sysctl/低内存 |
-| api-server / tgbot / webui | ♻️ 重写 | 管强制表 / chnroute 刷新 / 状态;改文件 + 重启 smartdns |
-| tests/ | ♻️ 重写 | 按新策略重写 policy 测试 |
+| 组件 | 作用 |
+|---|---|
+| smartdns 主配置 + 列表生成脚本 | DoT 入口、双上游抗污染、`address`、`ip-alias`、`force-AAAA-SOA` |
+| `proxy-domains.txt`(强制代理域名表) | 小表;污染兜底/已知必代理域名;可选 seed 自 gfwlist |
+| `foreign-cidr.txt`(chnroute 反集) | 全网 − 中国 IP 段,由公开中国 IP 表自动生成 + 定时更新 |
+| sniproxy + sniproxy.conf | TCP SNI 透明转发,`user pxout`,通配兜底无域名表,解析器 hardcode `22.22.22.22`,**直出** |
+| DoT-only 防火墙(nft 入站) | 仅放行 22/853 + `172.22→80/443/udp443`;**无 mark/策略路由** |
+| certbot / renew-hook / iOS profile / ios-http | 仅 DoT → 证书与 iOS 描述文件 |
+| install.sh 编排 | 装 smartdns、渲染配置、列表链路、systemd、sysctl/低内存 |
+| api-server / tgbot / webui | 管强制表 / chnroute 刷新 / 状态;改文件 + 重启 smartdns |
+| tests/ | policy 测试 |
+
+**明确不包含**:QUIC/HTTP3 代理(UDP 443 在防火墙 reject,客户端回退 TCP 由 sniproxy 接;不引入 Go 工具链);sing-box / WireGuard / 多出口 / `pxout` 打 mark / `table 100` 等出口层(仅直出)。
 
 ## 4. smartdns DNS 决策模型(配置骨架)
 
@@ -112,11 +110,11 @@ ip-rules ip-set:foreign -ip-alias __GATEWAY_IP__
 
 被代理的流量(命中强制表 / 国外 IP,被解析成网关 IP)由 sniproxy 接住(QUIC/HTTP3 不代理:UDP 443 在防火墙 reject,客户端回退 TCP/TLS),**读 SNI、经 22.22.22.22 解析真实目标 IP 后,直接走网关自身的默认路由出网**。网关本身即"够得到目标"的有利位置,无需隧道/多出口。
 
-**刻意移除**(相比旧版):`pxout` 打 mark、`ip rule fwmark`、`table 100`、apply-exit/set-exit、sing-box、WireGuard、连通性/延迟检查——全部不做。`pxout` 仅作为代理进程的非特权账户保留;防火墙只做入站过滤(仅 DoT 22/853 + NPN 的 80/443/udp443)。
+**明确不做**:`pxout` 打 mark、`ip rule fwmark`、`table 100`、apply-exit/set-exit、sing-box、WireGuard、连通性/延迟检查——全部不做。`pxout` 仅作为代理进程的非特权账户保留;防火墙只做入站过滤(仅 DoT 22/853 + NPN 的 80/443/udp443)。
 
 ## 9. 规则与列表管理 / "API 改配置"
 
-smartdns 规则均为**磁盘文本文件**;控制面(API/Bot/WebUI)以"**编辑文本文件 + 重启 smartdns**"方式生效(与旧版 update-rules 同模式,smartdns/mosdns 均无"改路由规则的内置 API")。需管理:
+smartdns 规则均为**磁盘文本文件**;控制面(API/Bot/WebUI)以"**编辑文本文件 + 重启 smartdns**"方式生效(smartdns 无"改路由规则的内置 API")。需管理:
 - `proxy-domains.txt`:增删强制代理域名(一行一条)。
 - `foreign-cidr.txt`:由 chnroute 生成器维护,一般不手动改。
 - (无出口管理——仅直出。)
