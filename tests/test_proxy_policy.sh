@@ -10,7 +10,7 @@ SS="$ROOT/etc/systemd/xray.service"
 
 # --- xray: loop-avoidance + shape ---
 grep -Eq '"22\.22\.22\.22"'                          "$XRAY" || fail "xray dns resolver not 22.22.22.22"
-grep -Eq '127\.0\.0\.1:853|:5353|"::1"[^/]'          "$XRAY" && fail "xray dns must not point at local smartdns"
+grep -Eq '127\.0\.0\.1:853|:5353|"::1"([^/]|$)'      "$XRAY" && fail "xray dns must not point at local smartdns"
 grep -Eq '"dokodemo-door"'                           "$XRAY" || fail "xray not using dokodemo-door"
 grep -Eq '"port":[[:space:]]*443'                    "$XRAY" || fail "xray missing 443 inbound"
 grep -Eq '"network":[[:space:]]*"tcp,udp"'           "$XRAY" || fail "xray 443 must handle tcp+udp (QUIC)"
@@ -18,6 +18,7 @@ grep -Eq '"quic"'                                    "$XRAY" || fail "xray must 
 grep -Eq '"tls"'                                     "$XRAY" || fail "xray must sniff tls"
 grep -Eq '"port":[[:space:]]*80'                     "$XRAY" || fail "xray missing 80 inbound"
 grep -Eq '"http"'                                    "$XRAY" || fail "xray must sniff http on :80"
+grep -Eq '"enabled":[[:space:]]*true'               "$XRAY" || fail "xray sniffing not enabled"
 grep -Eq '"domainStrategy":[[:space:]]*"ForceIPv4"'  "$XRAY" || fail "xray freedom not ForceIPv4 (IPv4-only)"
 grep -Eq '"blackhole"'                               "$XRAY" || fail "xray missing blackhole (anti-loop sink)"
 grep -Eq '"address":[[:space:]]*"127\.0\.0\.1"'      "$XRAY" || fail "xray dokodemo placeholder not 127.0.0.1 (sniff-fail sink)"
