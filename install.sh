@@ -135,17 +135,13 @@ install_deps() {
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq || true
             apt-get install -y -qq \
-                build-essential gcc git wget curl ca-certificates \
-                libev-dev libpcre3-dev libudns-dev libssl-dev \
-                autoconf automake libtool pkg-config gettext \
+                wget curl ca-certificates unzip \
                 certbot nftables qrencode jq libcap2-bin \
                 python3 dnsutils || warn "some apt packages failed; continuing."
             ;;
         dnf|yum)
             $PKG_MGR install -y -q \
-                gcc gcc-c++ make git wget curl ca-certificates \
-                libev-devel pcre-devel udns-devel openssl-devel \
-                autoconf automake libtool pkgconfig gettext \
+                wget curl ca-certificates unzip \
                 certbot nftables qrencode jq \
                 python3 bind-utils || warn "some rpm packages failed; continuing."
             # libcap setcap tooling (name varies by distro)
@@ -214,14 +210,14 @@ install_smartdns() {
 }
 
 # ----------------------------------------------------------------------------
-# Builds
+# xray (prebuilt binary)
 # ----------------------------------------------------------------------------
 install_xray() {
     if [[ -x "$XRAY_BIN" ]]; then info "xray already installed."; return 0; fi
     local ver="${XRAY_VERSION:-v26.6.22}"
     local url="https://github.com/XTLS/Xray-core/releases/download/${ver}/Xray-linux-64.zip"
     info "Downloading xray ${ver} (prebuilt binary; no Go toolchain)..."
-    command -v unzip >/dev/null 2>&1 || { apt-get install -y unzip >/dev/null 2>&1 || true; }
+    command -v unzip >/dev/null 2>&1 || { $PKG_MGR install -y unzip >/dev/null 2>&1 || true; }
     mkdir -p "$BUILD_DIR"
     local zip="$BUILD_DIR/Xray-linux-64.zip"
     curl -fsSL "$url" -o "$zip" || { err "xray download failed ($url)"; exit 1; }
