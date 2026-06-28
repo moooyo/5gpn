@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
-# Domain-validation consistency across the three validators (audit §4): api-server.py
-# & tgbot.py must share ONE FQDN regex, and install.sh's is_valid_domain must enforce
-# the same rule. Pure bash+grep — runs on the dev box and in CI.
+# Domain-validation consistency: tgbot.py domain validator and install.sh's is_valid_domain
+# must enforce the same FQDN rule. Pure bash+grep — runs on the dev box and in CI.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
 rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
-API="$ROOT/api-server.py"; TG="$ROOT/tgbot.py"; INSTALL="$ROOT/install.sh"
+TG="$ROOT/tgbot.py"; INSTALL="$ROOT/install.sh"
 
-# (1) api-server.py and tgbot.py must carry the IDENTICAL canonical pattern (anti-drift).
+# (1) tgbot.py carries the canonical FQDN pattern (api-server.py was removed).
 PAT='(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}'
-grep -Fq "$PAT" "$API" || fail "api-server.py DOMAIN_RE is not the canonical FQDN pattern"
-grep -Fq "$PAT" "$TG"  || fail "tgbot.py DOMAIN_RE drifted from api-server.py"
+grep -Fq "$PAT" "$TG"  || fail "tgbot.py DOMAIN_RE is not the canonical FQDN pattern"
 
 # (2) install.sh is_valid_domain must enforce the same rule. Extract + run in isolation.
 fn="$(sed -n '/^is_valid_domain()/,/^}/p' "$INSTALL")"

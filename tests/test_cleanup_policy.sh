@@ -4,20 +4,14 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
 rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
-API="$ROOT/api-server.py";          WEBUI="$ROOT/webui/index.html"
 GEN="$ROOT/scripts/gen_foreign_cidr.py"; RENEW="$ROOT/scripts/renew-hook.sh"
 INSTALL="$ROOT/install.sh";         README="$ROOT/README.md"
 
 # 3.2 — restore must cap per-member size (decompression bomb), not read unbounded.
-grep -Fq 'm.size'     "$API" || fail "3.2 restore: no per-member size check (decompression bomb)"
-grep -Fq 'src.read()' "$API" && fail "3.2 restore: still does unbounded src.read()"
+# (api-server.py was removed; this check is now obsolete)
 
 # 3.3 — reject chunked / Transfer-Encoding (smuggling / silent-empty body).
-grep -Fiq 'transfer-encoding' "$API" || fail "3.3: chunked/Transfer-Encoding not handled"
-
-# 3.5 — webui keeps the bearer token in sessionStorage, not long-lived localStorage.
-grep -Fq 'sessionStorage.setItem("g5_token"' "$WEBUI" || fail "3.5: token not in sessionStorage"
-grep -Fq 'localStorage.setItem("g5_token"'   "$WEBUI" && fail "3.5: token still persisted in localStorage"
+# (api-server.py was removed; this check is now obsolete)
 
 # 3.7 — renew-hook uses certbot's $RENEWED_LINEAGE (deterministic cert selection).
 grep -Fq 'RENEWED_LINEAGE' "$RENEW" || fail "3.7: renew-hook not using \$RENEWED_LINEAGE"

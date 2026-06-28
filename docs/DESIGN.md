@@ -48,7 +48,7 @@
 | DoT-only 防火墙(nft 入站) | 仅放行 22/853 + `172.22→80/443/udp443`;UDP 443 **accept**(QUIC 代理);**无 mark/策略路由** |
 | certbot / renew-hook / iOS profile / ios-http | 仅 DoT → 证书与 iOS 描述文件 |
 | install.sh 编排 | 装 smartdns、下载预编译 xray 二进制(sha256 验证)、渲染配置、列表链路、systemd、sysctl/低内存 |
-| api-server / tgbot / webui | 管强制表 / chnroute 刷新 / 状态;改文件 + 重启 smartdns |
+| `tgbot.py`(Telegram 控制面)+ `install.sh` Gum TUI | 管强制表 / chnroute 刷新 / 状态;改文件 + 重启 smartdns。Bot 通过 `--setup-tgbot` 配置,安装器内置 Gum TUI(自动下载预编译二进制)收集 token 与管理员 ID,无 Gum 时回退 plain echo |
 | tests/ | policy 测试 |
 
 **明确不包含**:sing-box / WireGuard / 多出口 / `pxout` 打 mark / `table 100` 等出口层(仅直出)。xray 以预编译二进制安装,不引入 Go 工具链。
@@ -114,9 +114,9 @@ ip-rules ip-set:foreign -ip-alias __GATEWAY_IP__
 
 **明确不做**:`pxout` 打 mark、`ip rule fwmark`、`table 100`、apply-exit/set-exit、sing-box、WireGuard、连通性/延迟检查——全部不做。防火墙只做入站过滤(仅 DoT 22/853 + NPN 的 80/443/udp443)。
 
-## 9. 规则与列表管理 / "API 改配置"
+## 9. 规则与列表管理
 
-smartdns 规则均为**磁盘文本文件**;控制面(API/Bot/WebUI)以"**编辑文本文件 + 重启 smartdns**"方式生效(smartdns 无"改路由规则的内置 API")。需管理:
+smartdns 规则均为**磁盘文本文件**;控制面(**Telegram Bot** `tgbot.py`,通过 `install.sh --setup-tgbot` 配置;安装期使用 **Gum TUI** 交互,无 Gum 时回退 plain echo)以"**编辑文本文件 + 重启 smartdns**"方式生效(smartdns 无"改路由规则的内置 API")。需管理:
 - `proxy-domains.txt`:增删强制代理域名(一行一条)。
 - `foreign-cidr.txt`:由 chnroute 生成器维护,一般不手动改。
 - (无出口管理——仅直出。)
@@ -133,7 +133,7 @@ smartdns 规则均为**磁盘文本文件**;控制面(API/Bot/WebUI)以"**编辑
 - **P2 — 透明转发 + 直出**:xray dokodemo-door(dns hardcode `22.22.22.22`,私网→blackhole)+ DoT-only 入站防火墙(UDP 443 accept,QUIC 代理),接上 P1,**直接走默认路由出网**。验收:国外域名端到端经网关→xray→直出可达;QUIC/TLS 均可达。
 - ~~**P3 — 出口层**~~:**取消**(仅直出,无 sing-box / WireGuard / 多出口 / 策略路由)。
 - **P3 — 安装编排**:新 install、systemd 单元、ACME 证书、iOS profile(DoT)、sysctl/低内存、续期 hook。
-- **P4 — 控制面 + 测试 + 文档**:API/Bot/WebUI 按新模型重写;policy 测试;README。
+- **P4 — 控制面 + 测试 + 文档**:Telegram Bot 按新模型重写(Gum TUI 配置);policy 测试;README。
 
 ## 12. 已定决策 / 待定 / 风险
 

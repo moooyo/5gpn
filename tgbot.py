@@ -52,10 +52,10 @@ IOS_PORT = "8111"
 # Services the bot may restart / tail (the only three in the data path).
 SERVICES = ["smartdns", "xray"]
 
-# Canonical FQDN rule, shared VERBATIM with api-server.py (and behaviorally with
-# install.sh's is_valid_domain): lowercase [a-z0-9-] labels (<=63), alphabetic
-# 2-63 TLD, total <=253. Input is lowercased before matching. Rejects underscores,
-# numeric TLDs, and over-length — keep all three validators in lockstep.
+# Canonical FQDN rule, shared behaviorally with install.sh's is_valid_domain:
+# lowercase [a-z0-9-] labels (<=63), alphabetic 2-63 TLD, total <=253.
+# Input is lowercased before matching. Rejects underscores, numeric TLDs,
+# and over-length — keep both validators in lockstep.
 DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )

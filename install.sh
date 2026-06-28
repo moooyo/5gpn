@@ -23,13 +23,15 @@ SRC_DIR="${BASE_DIR}/src"                # ios-http.py + build scratch
 WWW_DIR="${BASE_DIR}/www"                # iOS profile web root
 BUILD_DIR="${BASE_DIR}/build"            # download/unpack scratch
 
-CONF_DIR="/etc/5gpn"                 # state: .domain .public_ip .api_token ...
+CONF_DIR="/etc/5gpn"                 # state: .domain .public_ip .gateway_ip ...
 SMARTDNS_DIR="/etc/smartdns"             # smartdns.conf(.template), lists, cert/
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_DIR="/usr/local/etc/xray"
 
 IOS_PORT=8111                            # socket-activated iOS profile responder
 RESOLV_FALLBACK="22.22.22.22"            # loop-avoidance external resolver (proxies)
+GUM_VERSION="${GUM_VERSION:-0.17.0}"     # charmbracelet/gum (prebuilt; installer TUI)
+_HAVE_GUM=0                              # set by install_gum(); helpers fall back to echo when 0
 
 # ----------------------------------------------------------------------------
 # Pretty output helpers
@@ -39,10 +41,54 @@ if [[ -t 1 ]]; then
 else
     RED=''; GREEN=''; YELLOW=''; BLUE=''; NC=''
 fi
-info() { echo "${BLUE}[INFO]${NC} $*"; }
-ok()   { echo "${GREEN}[OK]${NC}   $*"; }
-warn() { echo "${YELLOW}[WARN]${NC} $*"; }
-err()  { echo "${RED}[ERR]${NC}  $*" >&2; }
+info() { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level info  -- "$*"; else echo "${BLUE}[INFO]${NC} $*"; fi; }
+ok()   { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level info  -- "✔ $*"; else echo "${GREEN}[OK]${NC}   $*"; fi; }
+warn() { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level warn  -- "$*"; else echo "${YELLOW}[WARN]${NC} $*"; fi; }
+err()  { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level error -- "$*" >&2; else echo "${RED}[ERR]${NC}  $*" >&2; fi; }
+
+# Interactive helpers. Callers MUST gate on [[ -t 0 ]]; these only choose gum vs read.
+ask_text()   { if [[ "$_HAVE_GUM" == 1 ]]; then gum input --prompt "$1 " --placeholder "${2:-}"; else local v; read -r -p "$1 " v; printf '%s' "$v"; fi; }
+ask_secret() { if [[ "$_HAVE_GUM" == 1 ]]; then gum input --password --prompt "$1 "; else local v; read -r -p "$1 " v; printf '%s' "$v"; fi; }
+ask_yesno()  { if [[ "$_HAVE_GUM" == 1 ]]; then gum confirm "$1"; else local a; read -r -p "$1 [y/N] " a; [[ "$a" == [yY]* ]]; fi; }
+# Run an opaque wait command behind a spinner when interactive; else run it plainly.
+gum_spin()   { local t="$1"; shift; if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then gum spin --title "$t" -- "$@"; else "$@"; fi; }
+
+# Bootstrap gum (prebuilt binary + sha256 verify). Never fatal: on any failure
+# _HAVE_GUM stays 0 and all helpers fall back to plain echo.
+install_gum() {
+    if command -v gum >/dev/null 2>&1; then _HAVE_GUM=1; return 0; fi
+    local arch url tmp exp got bin m
+    m="$(uname -m 2>/dev/null || echo x86_64)"
+    case "$m" in
+        x86_64|amd64)  arch="x86_64" ;;
+        aarch64|arm64) arch="arm64"  ;;
+        armv7l|armhf)  arch="armv7"  ;;
+        *)             arch="x86_64" ;;
+    esac
+    url="https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/gum_${GUM_VERSION}_Linux_${arch}.tar.gz"
+    tmp="$(mktemp -d 2>/dev/null)" || { warn "gum: mktemp failed; using plain output."; _HAVE_GUM=0; return 0; }
+    if command -v curl >/dev/null 2>&1 && curl -fsSL "$url" -o "$tmp/gum.tgz" 2>/dev/null; then
+        exp="${GUM_SHA256:-}"
+        if [[ -z "$exp" ]]; then
+            curl -fsSL "https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/checksums.txt" \
+                 -o "$tmp/sums.txt" 2>/dev/null \
+                && exp="$(grep "gum_${GUM_VERSION}_Linux_${arch}.tar.gz" "$tmp/sums.txt" 2>/dev/null | awk '{print $1}' | head -1 || true)"
+        fi
+        if [[ -n "$exp" ]]; then
+            got="$(sha256sum "$tmp/gum.tgz" 2>/dev/null | awk '{print $1}' || true)"
+            if [[ "$got" != "$exp" ]]; then
+                warn "gum sha256 mismatch; continuing with plain output."
+                rm -rf "$tmp"; _HAVE_GUM=0; return 0
+            fi
+        fi
+        tar -xzf "$tmp/gum.tgz" -C "$tmp" 2>/dev/null || true
+        bin="$(find "$tmp" -type f -name gum 2>/dev/null | head -1 || true)"
+        [[ -n "$bin" ]] && { install -m 0755 "$bin" /usr/local/bin/gum 2>/dev/null || true; }
+    fi
+    rm -rf "$tmp" 2>/dev/null || true
+    if command -v gum >/dev/null 2>&1; then _HAVE_GUM=1; else _HAVE_GUM=0; warn "gum unavailable; using plain output."; fi
+    return 0
+}
 
 check_root() {
     if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -220,7 +266,7 @@ install_xray() {
     command -v unzip >/dev/null 2>&1 || { $PKG_MGR install -y unzip >/dev/null 2>&1 || true; }
     mkdir -p "$BUILD_DIR"
     local zip="$BUILD_DIR/Xray-linux-64.zip"
-    curl -fsSL "$url" -o "$zip" || { err "xray download failed ($url)"; exit 1; }
+    gum_spin "Downloading xray ${ver}…" curl -fsSL "$url" -o "$zip" || { err "xray download failed ($url)"; exit 1; }
     # Integrity: opt-in pin via XRAY_SHA256, else verify against the release .dgst.
     local exp="${XRAY_SHA256:-}"
     if [[ -z "$exp" ]]; then
@@ -277,12 +323,7 @@ install_files() {
 
     # iOS responder + control-plane python (only if shipped in the checkout)
     [[ -f "${SCRIPT_DIR}/src/ios-http.py" ]] && install -m 0755 "${SCRIPT_DIR}/src/ios-http.py" "${SRC_DIR}/ios-http.py"
-    [[ -f "${SCRIPT_DIR}/api-server.py"  ]] && install -m 0755 "${SCRIPT_DIR}/api-server.py"  "${BASE_DIR}/api-server.py"
     [[ -f "${SCRIPT_DIR}/tgbot.py"       ]] && install -m 0755 "${SCRIPT_DIR}/tgbot.py"       "${BASE_DIR}/tgbot.py"
-    if [[ -d "${SCRIPT_DIR}/webui" ]]; then
-        mkdir -p "${BASE_DIR}/webui"
-        cp -r "${SCRIPT_DIR}/webui/." "${BASE_DIR}/webui/" 2>/dev/null || true
-    fi
     ok "Files installed under ${BASE_DIR} and ${SMARTDNS_DIR}."
 }
 
@@ -290,7 +331,7 @@ install_files() {
 # Domain + ACME certificate
 # ----------------------------------------------------------------------------
 is_valid_domain() {
-    # Same FQDN rule as api-server.py / tgbot.py DOMAIN_RE (bash ERE has no
+    # Same FQDN rule as tgbot.py DOMAIN_RE (bash ERE has no
     # lookahead, so total length is checked separately): lowercase [a-z0-9-]
     # labels (<=63), alphabetic 2-63 TLD, total 1..253. Case-insensitive.
     local d; d="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
@@ -312,7 +353,7 @@ resolve_domain() {
         fi
         local input=""
         while true; do
-            read -r -p "Enter your DoT domain (e.g. dns.example.com): " input
+            input="$(ask_text 'Enter your DoT domain (e.g. dns.example.com):' || true)"
             input="${input#http://}"; input="${input#https://}"; input="${input%/}"; input="${input// /}"
             is_valid_domain "$input" && { DOMAIN="$input"; break; }
             warn "Invalid domain; enter a full FQDN like dns.example.com."
@@ -328,7 +369,7 @@ verify_a_record() {
     info "Verifying $DOMAIN resolves to $PUBLIC_IP ..."
     info "  Add an A record: ${DOMAIN}  A  ${PUBLIC_IP}  (low TTL)."
     if [[ -t 0 ]]; then
-        local c=""; read -r -p "Press Enter once the A record is set (or type 'skip'): " c || c=""
+        local c=""; c="$(ask_text "Press Enter once the A record is set (or type 'skip'):")" || c=""
         [[ "$c" == "skip" ]] && { warn "Skipping A-record verification."; return 0; }
     fi
     local waited=0 resolved=""
@@ -450,9 +491,7 @@ run_update_lists() {
 
 run_setup_firewall() {
     info "Installing firewall + proxy units (direct egress, no exit layer)..."
-    local api_port=""
-    [[ -f "${CONF_DIR}/.api_port" ]] && api_port="$(cat "${CONF_DIR}/.api_port" 2>/dev/null || true)"
-    API_PORT="$api_port" IOS_PORT="$IOS_PORT" bash "${SCRIPTS_DIR}/setup-firewall.sh"
+    IOS_PORT="$IOS_PORT" bash "${SCRIPTS_DIR}/setup-firewall.sh"
     ok "Firewall + xray unit installed."
 }
 
@@ -585,77 +624,19 @@ start_services() {
 }
 
 # ----------------------------------------------------------------------------
-# Optional control plane: api / tgbot
+# Optional control plane: tgbot
 # ----------------------------------------------------------------------------
-setup_api() {
-    check_root
-    [[ -f "${BASE_DIR}/api-server.py" ]] || { err "${BASE_DIR}/api-server.py not found (run a full install or place the file)."; return 1; }
-    local py; py="$(command -v python3 || echo /usr/bin/python3)"
-    local token port domain
-    token="$(cat "${CONF_DIR}/.api_token" 2>/dev/null || true)"
-    [[ -z "$token" ]] && token="${API_TOKEN:-$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')}"
-    port="${API_PORT:-$(cat "${CONF_DIR}/.api_port" 2>/dev/null || echo 8443)}"
-    port="$(printf '%s' "$port" | tr -dc '0-9')"; [[ -n "$port" ]] || port=8443
-    domain="$(cat "${CONF_DIR}/.domain" 2>/dev/null || echo "")"
-
-    mkdir -p "$CONF_DIR"
-    printf '%s' "$token" > "${CONF_DIR}/.api_token"; chmod 600 "${CONF_DIR}/.api_token"
-    printf '%s' "$port"  > "${CONF_DIR}/.api_port"
-
-    cat > /etc/systemd/system/5gpn-api.service <<EOF
-[Unit]
-Description=5gpn HTTP control API
-After=network-online.target smartdns.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-Environment=API_TOKEN=${token}
-Environment=API_PORT=${port}
-Environment=API_BIND=0.0.0.0
-Environment=CONF_DIR=${CONF_DIR}
-Environment=API_TLS_CERT=${SMARTDNS_DIR}/cert/fullchain.pem
-Environment=API_TLS_KEY=${SMARTDNS_DIR}/cert/privkey.pem
-ExecStart=${py} ${BASE_DIR}/api-server.py
-Restart=on-failure
-RestartSec=5
-User=root
-TasksMax=128
-MemoryMax=96M
-LimitNOFILE=512
-NoNewPrivileges=yes
-ProtectHome=yes
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    # Re-run firewall so the API port is allowed (setup-firewall honors API_PORT).
-    [[ -x "${SCRIPTS_DIR}/setup-firewall.sh" ]] && API_PORT="$port" IOS_PORT="$IOS_PORT" bash "${SCRIPTS_DIR}/setup-firewall.sh" >/dev/null 2>&1 || true
-    systemctl daemon-reload
-    systemctl enable --now 5gpn-api.service 2>/dev/null || systemctl restart 5gpn-api.service || true
-    echo ""
-    ok "HTTP control API enabled."
-    echo "  URL:   https://${domain:-<domain>}:${port}"
-    echo "  Token: ${token}"
-    echo "  Stored: ${CONF_DIR}/.api_token (chmod 600)"
-    warn "Protect the token; access over HTTPS only."
-}
-
 setup_tgbot() {
     check_root
+    install_gum
     [[ -f "${BASE_DIR}/tgbot.py" ]] || { err "${BASE_DIR}/tgbot.py not found (run a full install or place the file)."; return 1; }
     local py; py="$(command -v python3 || echo /usr/bin/python3)"
     local token admins
     token="${TGBOT_TOKEN:-$(cat "${CONF_DIR}/.tgbot_token" 2>/dev/null || true)}"
-    if [[ -z "$token" && -t 0 ]]; then read -r -p "Telegram Bot Token (blank to skip): " token; fi
+    if [[ -z "$token" && -t 0 ]]; then token="$(ask_secret 'Telegram Bot Token (blank to skip):' || true)"; fi
     [[ -z "$token" ]] && { info "No Telegram token; skipping tgbot. Re-run later: $0 --setup-tgbot"; return 0; }
     admins="${TGBOT_ADMINS:-$(cat "${CONF_DIR}/.tgbot_admins" 2>/dev/null || true)}"
-    if [[ -z "$admins" && -t 0 ]]; then read -r -p "Authorized Telegram numeric IDs (comma-separated, optional): " admins; fi
+    if [[ -z "$admins" && -t 0 ]]; then admins="$(ask_text 'Authorized Telegram numeric IDs (comma-separated, optional):' || true)"; fi
     admins="$(printf '%s' "$admins" | tr ', ' '\n\n' | grep -E '^[0-9]+$' | paste -sd ',' - 2>/dev/null || true)"
 
     mkdir -p "$CONF_DIR"
@@ -690,6 +671,13 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     systemctl enable --now 5gpn-tgbot.service 2>/dev/null || systemctl restart 5gpn-tgbot.service || true
+    if [[ -t 0 && "$_HAVE_GUM" == 1 ]]; then
+        gum style --border rounded --padding "0 1" \
+          "未知自己的 Telegram ID?" \
+          "1) 给你的 bot 发 /id" \
+          "2) 把回显的数字 ID 填入 ${CONF_DIR}/.tgbot_admins" \
+          "3) systemctl restart 5gpn-tgbot"
+    fi
     ok "Telegram bot enabled."
     echo "  Token stored: ${CONF_DIR}/.tgbot_token (chmod 600)"
     [[ -z "$admins" ]] && warn "No admin IDs set yet; message the bot, then add IDs to ${CONF_DIR}/.tgbot_admins and: systemctl restart 5gpn-tgbot"
@@ -752,7 +740,7 @@ show_status() {
         local s; s="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
         if [[ "$s" == active ]]; then echo "  ${svc}: ${GREEN}active${NC}"; else echo "  ${svc}: ${RED}${s}${NC}"; fi
     done
-    for opt in 5gpn-iosprofile.socket 5gpn-api 5gpn-tgbot; do
+    for opt in 5gpn-iosprofile.socket 5gpn-tgbot; do
         if systemctl list-unit-files 2>/dev/null | grep -q "^${opt}"; then
             local s; s="$(systemctl is-active "$opt" 2>/dev/null || echo unknown)"
             echo "  ${opt}: $([[ "$s" == active ]] && echo "${GREEN}active${NC}" || echo "${RED}${s}${NC}")"
@@ -780,6 +768,7 @@ show_status() {
 # ----------------------------------------------------------------------------
 full_install() {
     check_root
+    install_gum
     detect_os
     detect_memory_profile
     ensure_swap
@@ -789,6 +778,9 @@ full_install() {
 
     install_deps
     install_files
+    # Drop the removed HTTP control API if a previous install left it behind.
+    systemctl disable --now 5gpn-api 2>/dev/null || true
+    rm -f /etc/systemd/system/5gpn-api.service
     install_xray
 
     # Persist memory profile knobs the renderer/scripts read.
@@ -814,7 +806,7 @@ full_install() {
     echo "------------------------------------------"
     print_qr
     echo ""
-    info "Optional: '$0 --setup-api' / '$0 --setup-tgbot' for the control plane."
+    info "Optional: '$0 --setup-tgbot' to set up the Telegram control bot."
 }
 
 # ----------------------------------------------------------------------------
@@ -832,11 +824,10 @@ Usage: sudo bash install.sh [option]
   --add-domain <d>    Force-proxy a domain (adds to proxy-domains.txt)
   --del-domain <d>    Remove a domain from the forced-proxy list
   --ios               Regenerate the iOS profile + QR
-  --setup-api         Install + enable the HTTP control API; print the token
   --setup-tgbot       Install + enable the Telegram control bot
   --help              This help
 
-Env overrides: DOMAIN=, PUBLIC_IP=, EMAIL=, LOWMEM=1|0, API_TOKEN=, API_PORT=,
+Env overrides: DOMAIN=, PUBLIC_IP=, EMAIL=, LOWMEM=1|0,
                TGBOT_TOKEN=, TGBOT_ADMINS=
 EOF
 }
@@ -850,7 +841,6 @@ main() {
         --add-domain)   add_domain "${2:-}" ;;
         --del-domain)   del_domain "${2:-}" ;;
         --ios)          regen_ios ;;
-        --setup-api)    setup_api ;;
         --setup-tgbot)  setup_tgbot ;;
         --help|-h)      usage ;;
         *)              err "Unknown option: $cmd"; echo ""; usage; exit 2 ;;

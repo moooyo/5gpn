@@ -45,7 +45,7 @@
 - **QUIC/HTTP3 由 xray sniff `quic` 透明转发、直出**:UDP 443 防火墙放行(仅 NPN 172.22.0.0/16),xray sniff quic 取 SNI 后 freedom 直出,与 TLS 走同一实例。
 - **防回环**:xray 的 `dns.servers` hardcode 为外部解析器 `["22.22.22.22"]`,绝不指向本机会做 `ip-alias` 的 smartdns,避免"国外域名→改写成网关 IP→又连回网关"的死循环;私网/loopback CIDR 路由至 blackhole 兜底。
 - **IPv4-only**:`force-AAAA-SOA`,不追求 IPv6。
-- **控制面**:可选的 HTTPS API / Telegram Bot / WebUI,以"编辑文本文件 + 重启 smartdns"方式管理强制表与列表刷新。
+- **控制面**:Telegram Bot(`tgbot.py`),以"编辑文本文件 + 重启 smartdns"方式管理强制表与列表刷新。Bot 通过 `install.sh --setup-tgbot` 配置,安装器内置 **Gum** TUI(自动下载预编译二进制)收集 token 与管理员 ID,无 Gum 时回退 plain echo 交互。
 
 ## 安装
 
@@ -56,7 +56,7 @@ curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh |
 # 或在 checkout 内:sudo bash install.sh
 ```
 
-安装器会:安装 smartdns、下载预编译 xray 二进制(sha256 验证)、签发并自动续期 Let's Encrypt 证书、渲染配置、装 DoT-only 防火墙、生成 iOS DoT 描述文件 + 二维码、拉起服务。
+安装器会:自动下载预编译 **Gum** 二进制(sha256 验证,无 Gum 时回退 plain echo)、安装 smartdns、下载预编译 xray 二进制(sha256 验证)、签发并自动续期 Let's Encrypt 证书、渲染配置、装 DoT-only 防火墙、生成 iOS DoT 描述文件 + 二维码、拉起服务。
 
 内网部署(客户端在内网,如 172.22.0.0/16)时,指定网关内网地址:
 
@@ -65,7 +65,7 @@ export GATEWAY_IP=<网关内网地址>
 sudo bash install.sh
 ```
 
-环境变量覆盖:`DOMAIN=` `PUBLIC_IP=` `EMAIL=` `LOWMEM=1|0` `API_TOKEN=` `API_PORT=` `TGBOT_TOKEN=` `TGBOT_ADMINS=`。
+环境变量覆盖:`DOMAIN=` `PUBLIC_IP=` `EMAIL=` `LOWMEM=1|0` `TGBOT_TOKEN=` `TGBOT_ADMINS=`。
 
 ## 客户端接入
 
@@ -80,8 +80,7 @@ sudo bash install.sh --update-lists  # 刷新 chnroute + 重渲染 + 重启 smar
 sudo bash install.sh --add-domain d  # 强制代理某域名
 sudo bash install.sh --del-domain d  # 取消强制代理
 sudo bash install.sh --ios           # 重新生成 iOS 描述文件 + 二维码
-sudo bash install.sh --setup-api     # 启用 HTTPS 控制 API(打印 token)
-sudo bash install.sh --setup-tgbot   # 启用 Telegram 控制 bot
+sudo bash install.sh --setup-tgbot   # 启用 Telegram 控制 bot(Gum TUI 交互)
 ```
 
 ## 仓库结构
@@ -93,7 +92,7 @@ sudo bash install.sh --setup-tgbot   # 启用 Telegram 控制 bot
 | `etc/` | smartdns 配置模板、`proxy-domains.txt`、xray 配置(`etc/xray/config.json`)、systemd 单元 |
 | `scripts/` | chnroute 生成、配置渲染、防火墙、iOS profile、证书续期 hook、列表更新 |
 | `src/ios-http.py` | iOS 描述文件分发的小型 HTTP 服务 |
-| `api-server.py` / `tgbot.py` / `webui/` | 可选控制面(API / Telegram Bot / WebUI) |
+| `tgbot.py` | Telegram 控制 bot(唯一控制面) |
 | `tests/` | 策略测试 + 集成冒烟清单 |
 | `docs/DESIGN.md` | 完整设计文档 |
 
