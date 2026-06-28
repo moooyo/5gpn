@@ -2,7 +2,7 @@
 """
 5gpn control-plane HTTP API (stdlib only).
 
-Architecture this serves:  smartdns -> sniproxy -> DIRECT egress.
+Architecture this serves:  smartdns -> xray -> DIRECT egress.
 There is NO exit layer (no sing-box / wireguard / fwmark / routing tables), so
 this control plane is deliberately small. It only manages:
 
@@ -50,10 +50,10 @@ EXTRA_BACKUP = [SMARTDNS_DIR + "/overseas.conf", SMARTDNS_DIR + "/cache.conf"]
 
 BIND = os.environ.get("API_BIND") or "0.0.0.0"
 DEFAULT_PORT = 8443
-# systemctl unit names; ALL (in /api/restart) maps to every unit. QUIC/quic-proxy
-# was removed: HTTP/3 is not proxied; UDP 443 is rejected at the firewall.
-SERVICES = {"smartdns": "smartdns", "sniproxy": "sniproxy"}
-RESTART_UNITS = {"smartdns": "smartdns", "sniproxy": "sniproxy"}
+# systemctl unit names; ALL (in /api/restart) maps to every unit. xray proxies
+# QUIC/HTTP3: it sniffs the QUIC SNI, and UDP 443 is allowed from NPN clients.
+SERVICES = {"smartdns": "smartdns", "xray": "xray"}
+RESTART_UNITS = {"smartdns": "smartdns", "xray": "xray"}
 
 # Conservative domain check: labels of [a-z0-9-], a dot, a 2+ letter TLD. Lower-
 # cased before matching. Rejects schemes, paths, spaces, leading/trailing dots.

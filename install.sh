@@ -2,11 +2,10 @@
 # 5gpn installer / orchestrator (exit-less, direct-egress architecture).
 #
 #   client DoT:853 -> smartdns (returns the GATEWAY IP for blocked/foreign
-#   domains) -> sniproxy (TCP 80/443) reads SNI, resolves the real IP via
+#   domains) -> xray (TCP 80/443/QUIC) reads SNI, resolves the real IP via
 #   22.22.22.22, then egress DIRECTLY out the default route.
 #
-# QUIC/HTTP3 is intentionally NOT proxied: UDP 443 is rejected at the firewall
-# so clients fall back to TCP/TLS (handled by sniproxy). No quic-proxy, no Go.
+# QUIC/HTTP3 is proxied by xray (UDP 443 SNI routing). No exit layer, no Go.
 #
 # There is NO exit layer: no sing-box, no WireGuard, no multi-exit, no
 # fwmark / ip-rule / table-100. Do not add any of those.
@@ -22,11 +21,12 @@ BASE_DIR="/opt/5gpn"                 # installed runtime root
 SCRIPTS_DIR="${BASE_DIR}/scripts"        # installed copies of repo scripts
 SRC_DIR="${BASE_DIR}/src"                # ios-http.py + build scratch
 WWW_DIR="${BASE_DIR}/www"                # iOS profile web root
-BUILD_DIR="${BASE_DIR}/build"            # sniproxy git build scratch
+BUILD_DIR="${BASE_DIR}/build"            # download/unpack scratch
 
 CONF_DIR="/etc/5gpn"                 # state: .domain .public_ip .api_token ...
 SMARTDNS_DIR="/etc/smartdns"             # smartdns.conf(.template), lists, cert/
-SNIPROXY_CONF="/etc/sniproxy.conf"
+XRAY_BIN="/usr/local/bin/xray"
+XRAY_DIR="/usr/local/etc/xray"
 
 IOS_PORT=8111                            # socket-activated iOS profile responder
 RESOLV_FALLBACK="22.22.22.22"            # loop-avoidance external resolver (proxies)
@@ -135,17 +135,13 @@ install_deps() {
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq || true
             apt-get install -y -qq \
-                build-essential gcc git wget curl ca-certificates \
-                libev-dev libpcre3-dev libudns-dev libssl-dev \
-                autoconf automake libtool pkg-config gettext \
+                wget curl ca-certificates unzip \
                 certbot nftables qrencode jq libcap2-bin \
                 python3 dnsutils || warn "some apt packages failed; continuing."
             ;;
         dnf|yum)
             $PKG_MGR install -y -q \
-                gcc gcc-c++ make git wget curl ca-certificates \
-                libev-devel pcre-devel udns-devel openssl-devel \
-                autoconf automake libtool pkgconfig gettext \
+                wget curl ca-certificates unzip \
                 certbot nftables qrencode jq \
                 python3 bind-utils || warn "some rpm packages failed; continuing."
             # libcap setcap tooling (name varies by distro)
@@ -214,25 +210,34 @@ install_smartdns() {
 }
 
 # ----------------------------------------------------------------------------
-# Builds
+# xray (prebuilt binary)
 # ----------------------------------------------------------------------------
-build_sniproxy() {
-    if command -v sniproxy >/dev/null 2>&1 || [[ -x /usr/local/sbin/sniproxy ]]; then
-        info "sniproxy already built."; return 0
-    fi
-    info "Building sniproxy from dlundquist/sniproxy..."
+install_xray() {
+    if [[ -x "$XRAY_BIN" ]]; then info "xray already installed."; return 0; fi
+    local ver="${XRAY_VERSION:-v26.6.22}"
+    local url="https://github.com/XTLS/Xray-core/releases/download/${ver}/Xray-linux-64.zip"
+    info "Downloading xray ${ver} (prebuilt binary; no Go toolchain)..."
+    command -v unzip >/dev/null 2>&1 || { $PKG_MGR install -y unzip >/dev/null 2>&1 || true; }
     mkdir -p "$BUILD_DIR"
-    [[ -d "$BUILD_DIR/sniproxy" ]] || git clone --depth=1 https://github.com/dlundquist/sniproxy.git "$BUILD_DIR/sniproxy"
-    (
-        cd "$BUILD_DIR/sniproxy"
-        DEBEMAIL="root@localhost" DEBFULLNAME="root" ./autogen.sh >/dev/null
-        ./configure --prefix=/usr/local --sysconfdir=/etc --enable-dns >/dev/null
-        make -j"${MAKE_JOBS:-1}" >/dev/null
-        make install >/dev/null
-    )
-    [[ -x /usr/local/sbin/sniproxy ]] || command -v sniproxy >/dev/null 2>&1 \
-        || { err "sniproxy build failed."; exit 1; }
-    ok "sniproxy installed to /usr/local/sbin/sniproxy."
+    local zip="$BUILD_DIR/Xray-linux-64.zip"
+    curl -fsSL "$url" -o "$zip" || { err "xray download failed ($url)"; exit 1; }
+    # Integrity: opt-in pin via XRAY_SHA256, else verify against the release .dgst.
+    local exp="${XRAY_SHA256:-}"
+    if [[ -z "$exp" ]]; then
+        curl -fsSL "${url}.dgst" -o "${zip}.dgst" \
+            && exp="$(grep -ioE '\b[0-9a-f]{64}\b' "${zip}.dgst" | head -1)" || true
+    fi
+    if [[ -n "$exp" ]]; then
+        local got; got="$(sha256sum "$zip" | awk '{print $1}')"
+        [[ "$got" == "$exp" ]] || { err "xray sha256 mismatch (want $exp got $got)"; exit 1; }
+        ok "xray archive sha256 verified."
+    else
+        warn "xray sha256 UNVERIFIED (set XRAY_SHA256 or ensure .dgst reachable)."
+    fi
+    unzip -o "$zip" xray -d "$BUILD_DIR" >/dev/null
+    install -m 0755 "$BUILD_DIR/xray" "$XRAY_BIN"
+    [[ -x "$XRAY_BIN" ]] || { err "xray install failed."; exit 1; }
+    ok "xray installed to $XRAY_BIN ($ver)."
 }
 
 # ----------------------------------------------------------------------------
@@ -260,8 +265,9 @@ install_files() {
         install -m 0644 "${SCRIPT_DIR}/etc/bogus-nxdomain.conf" "${SMARTDNS_DIR}/bogus-nxdomain.conf"
     fi
 
-    # sniproxy.conf (resolver hardcoded to 22.22.22.22 in the repo file)
-    install -m 0644 "${SCRIPT_DIR}/etc/sniproxy.conf" "$SNIPROXY_CONF"
+    # xray config (dns hardcoded to 22.22.22.22 for loop-avoidance, IPv4-only, direct).
+    install -d -m 0755 "$XRAY_DIR"
+    install -m 0644 "${SCRIPT_DIR}/etc/xray/config.json" "$XRAY_DIR/config.json"
 
     # repo scripts -> /opt/5gpn/scripts
     for f in "${SCRIPT_DIR}"/scripts/*.sh "${SCRIPT_DIR}"/scripts/*.py; do
@@ -375,28 +381,28 @@ install_cert() {
     install_renewal_automation
 }
 
-# Make `certbot renew` work behind the DoT-only (drop) firewall where sniproxy
-# holds :80: install pre/post renewal-hooks that briefly open 80 + stop sniproxy
+# Make `certbot renew` work behind the DoT-only (drop) firewall where xray
+# holds :80: install pre/post renewal-hooks that briefly open 80 + stop xray
 # (then restore), plus a Persistent daily timer so renewal runs unattended.
 # Without this the LE cert expires (~90d) and DoT :853 dies with no :53 fallback.
 install_renewal_automation() {
     install -d -m 0755 /etc/letsencrypt/renewal-hooks/pre /etc/letsencrypt/renewal-hooks/post
     cat > /etc/letsencrypt/renewal-hooks/pre/10-5gpn-open80.sh <<'EOF'
 #!/usr/bin/env bash
-# Free TCP 80 for certbot --standalone: open the firewall + stop sniproxy (binds :80).
+# Free TCP 80 for certbot --standalone: open the firewall + stop xray (binds :80).
 nft list table inet filter >/dev/null 2>&1 && nft insert rule inet filter input tcp dport 80 accept 2>/dev/null || true
-systemctl stop sniproxy 2>/dev/null || true
+systemctl stop xray 2>/dev/null || true
 EOF
     cat > /etc/letsencrypt/renewal-hooks/post/10-5gpn-close80.sh <<'EOF'
 #!/usr/bin/env bash
-# Restore DoT-only firewall (drops the temp :80 accept) + bring sniproxy back.
+# Restore DoT-only firewall (drops the temp :80 accept) + bring xray back.
 # Runs after every renewal attempt, success or failure.
-systemctl start sniproxy 2>/dev/null || true
+systemctl start xray 2>/dev/null || true
 [ -f /etc/nftables.conf ] && nft -f /etc/nftables.conf 2>/dev/null || true
 EOF
     chmod +x /etc/letsencrypt/renewal-hooks/pre/10-5gpn-open80.sh \
              /etc/letsencrypt/renewal-hooks/post/10-5gpn-close80.sh
-    ok "Renewal pre/post hooks installed (open/close :80 + cycle sniproxy)."
+    ok "Renewal pre/post hooks installed (open/close :80 + cycle xray)."
 
     # Don't double up if the distro/snap already ships an enabled renewal timer
     # (our renewal-hooks above apply regardless of which timer triggers renew).
@@ -447,7 +453,7 @@ run_setup_firewall() {
     local api_port=""
     [[ -f "${CONF_DIR}/.api_port" ]] && api_port="$(cat "${CONF_DIR}/.api_port" 2>/dev/null || true)"
     API_PORT="$api_port" IOS_PORT="$IOS_PORT" bash "${SCRIPTS_DIR}/setup-firewall.sh"
-    ok "Firewall + sniproxy unit installed."
+    ok "Firewall + xray unit installed."
 }
 
 install_smartdns_unit() {
@@ -568,7 +574,7 @@ EOF
 start_services() {
     info "Enabling and starting services..."
     systemctl daemon-reload
-    for svc in smartdns sniproxy nftables; do
+    for svc in smartdns xray nftables; do
         systemctl enable "$svc" >/dev/null 2>&1 || true
         systemctl restart "$svc" 2>/dev/null || systemctl start "$svc" 2>/dev/null \
             || warn "could not start $svc (check: journalctl -u $svc)."
@@ -742,7 +748,7 @@ show_status() {
     echo "=========================================="
     echo "         5gpn status"
     echo "=========================================="
-    for svc in smartdns sniproxy; do
+    for svc in smartdns xray; do
         local s; s="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
         if [[ "$s" == active ]]; then echo "  ${svc}: ${GREEN}active${NC}"; else echo "  ${svc}: ${RED}${s}${NC}"; fi
     done
@@ -783,7 +789,7 @@ full_install() {
 
     install_deps
     install_files
-    build_sniproxy
+    install_xray
 
     # Persist memory profile knobs the renderer/scripts read.
     mkdir -p "$SMARTDNS_DIR"; echo "$CACHE_SIZE" > "${SMARTDNS_DIR}/.cache_size"
@@ -794,7 +800,7 @@ full_install() {
     install_cert
 
     run_update_lists       # fetch china_ip_list, build foreign-cidr, render smartdns.conf
-    run_setup_firewall     # pxout user + DoT-only nft + sniproxy unit
+    run_setup_firewall     # DoT-only nft + xray unit
     system_tuning
     setup_ios_profile
     start_services

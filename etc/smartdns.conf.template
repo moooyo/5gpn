@@ -1,5 +1,5 @@
 # 5gpn smartdns — auto-rendered from smartdns.conf.template. DO NOT edit in place.
-# Loop-avoidance: sniproxy MUST resolve via 22.22.22.22, NEVER this smartdns.
+# Loop-avoidance: xray MUST resolve via 22.22.22.22, NEVER this smartdns.
 
 # ---- Ingress: DoT only (853). Plaintext 53 is localhost-internal only. ----
 bind-tls [::]:853

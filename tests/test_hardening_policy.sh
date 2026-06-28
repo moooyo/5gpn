@@ -4,14 +4,14 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
 rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
-SNI_SVC="$ROOT/etc/systemd/sniproxy.service"
+XRAY_SVC="$ROOT/etc/systemd/xray.service"
 INSTALL="$ROOT/install.sh"; FW="$ROOT/scripts/setup-firewall.sh"
 API="$ROOT/api-server.py";  WEBUI="$ROOT/webui/index.html"
 
 # --- systemd sandboxing ---
-grep -Fq 'NoNewPrivileges=yes'   "$SNI_SVC" || fail "sniproxy.service: no NoNewPrivileges"
-grep -Fq 'ProtectSystem=strict'  "$SNI_SVC" || fail "sniproxy.service: no ProtectSystem=strict"
-grep -Fq 'ReadWritePaths=/run'   "$SNI_SVC" || fail "sniproxy.service: pidfile path not writable under strict"
+grep -Fq 'NoNewPrivileges=yes'   "$XRAY_SVC" || fail "xray.service: no NoNewPrivileges"
+grep -Fq 'ProtectSystem=strict'  "$XRAY_SVC" || fail "xray.service: no ProtectSystem=strict"
+grep -Fq 'RestrictAddressFamilies=AF_INET AF_UNIX' "$XRAY_SVC" || fail "xray.service: address families not restricted"
 # The DEPLOYED units are heredocs in install.sh (smartdns/api/tgbot/iosprofile) — guard those,
 # not any static file. iosprofile (root, public, per-connection) must get ProtectSystem=strict.
 [ "$(grep -c 'NoNewPrivileges=yes' "$INSTALL")" -ge 4 ] || fail "install.sh units not all hardened (NoNewPrivileges <4)"

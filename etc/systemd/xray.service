@@ -1,0 +1,28 @@
+[Unit]
+Description=5gpn xray-core (SNI/QUIC transparent proxy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/xray run -c /usr/local/etc/xray/config.json
+Restart=on-failure
+RestartSec=5
+User=root
+LimitNOFILE=65535
+# Sandbox: leaf proxy — binds 80/443 tcp + 443 udp, root with no new privileges,
+# read-only config, IPv4 (+unix) sockets only. Writes nothing (logs -> journald).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+ReadOnlyPaths=/usr/local/etc/xray
+
+[Install]
+WantedBy=multi-user.target
