@@ -63,10 +63,10 @@
 # P2 — Transparent forwarding + direct egress (run after P2 is wired)
 
 Prereqs on the Linux box:
-- Install prebuilt xray to `/usr/local/bin/xray` (e.g. via `install_xray()` in `install.sh`).
-- `cp 5gpn/etc/xray/config.json /usr/local/etc/xray/config.json`
-- `bash 5gpn/scripts/setup-firewall.sh`  (creates DoT-only nft, installs xray unit, allows UDP 443)
-- `systemctl enable --now xray`
+- Install prebuilt sing-box to `/usr/local/bin/sing-box` (e.g. via `install_singbox()` in `install.sh`).
+- `cp 5gpn/etc/sing-box/config.json /usr/local/etc/sing-box/config.json`
+- `bash 5gpn/scripts/setup-firewall.sh`  (creates DoT-only nft, installs sing-box unit, allows UDP 443)
+- `systemctl enable --now sing-box`
 - Static checks: `bash 5gpn/tests/test_proxy_policy.sh` → `proxy policy: PASS`
 
 Direct egress only — no fwmark / table 100 / tunnels / exit layer.
@@ -74,12 +74,12 @@ Direct egress only — no fwmark / table 100 / tunnels / exit layer.
 Checks (client DNS = this gateway's DoT):
 
 - [ ] **TCP/HTTPS end-to-end**: `curl https://<a-foreign-domain>` → smartdns returns
-      gateway IP → xray dokodemo-door sniff tls → resolves via 22.22.22.22 → egresses out the
+      gateway IP → sing-box direct inbound sniff tls → resolves via 22.22.22.22 → egresses out the
       gateway's default route → page loads.
-- [ ] **QUIC proxied**: `curl --http3 https://<foreign-domain>` should succeed via xray (UDP 443
-      is accepted, xray sniff quic takes the SNI and direct-egresses); plain `curl https://<foreign-domain>`
-      also loads via xray. Optionally confirm `nc -uvz <gateway> 443` connects (not refused).
-- [ ] **No loop**: `tcpdump -ni any port 53` shows xray's lookups going to
+- [ ] **QUIC proxied**: `curl --http3 https://<foreign-domain>` should succeed via sing-box (UDP 443
+      is accepted, sing-box sniff quic takes the SNI and direct-egresses); plain `curl https://<foreign-domain>`
+      also loads via sing-box. Optionally confirm `nc -uvz <gateway> 443` connects (not refused).
+- [ ] **No loop**: `tcpdump -ni any port 53` shows sing-box's lookups going to
       22.22.22.22, NOT to :853/:5353; no traffic loops back to the gateway.
 - [ ] **DoT-only inbound**: external `nc -uvz <gateway> 53` fails (no public 53); DoT :853 works.
 - [ ] **No exit layer**: `ip rule` has no fwmark→table-100 rule; `nft list ruleset` has no
@@ -91,20 +91,20 @@ Results:
 
 ---
 
-# Cert auto-renewal (behind DoT-only firewall + xray:80)
+# Cert auto-renewal (behind DoT-only firewall + sing-box:80)
 
 The LE cert backs DoT :853; if renewal fails the whole gateway goes dark (no :53
 fallback). Renewal uses `--standalone`, so :80 must be free — but the firewall
-drops :80 and xray binds :80. The installer ships pre/post renewal-hooks
-(open 80 + stop xray → restore) and a Persistent daily timer.
+drops :80 and sing-box binds :80. The installer ships pre/post renewal-hooks
+(open 80 + stop sing-box → restore) and a Persistent daily timer.
 
 - [ ] **Hooks present**: `ls /etc/letsencrypt/renewal-hooks/{pre,post}/` shows the
       `10-5gpn-open80.sh` / `10-5gpn-close80.sh` scripts (executable).
 - [ ] **Timer active**: `systemctl list-timers | grep certbot` shows a renewal timer
       (ours `5gpn-certbot-renew.timer`, or the distro's if it was already enabled).
-- [ ] **Dry-run renewal end-to-end** (firewall in drop policy, xray running):
+- [ ] **Dry-run renewal end-to-end** (firewall in drop policy, sing-box running):
       `certbot renew --dry-run` succeeds. During it, confirm `:80` is briefly open and
-      xray is stopped, then restored (`systemctl is-active xray` == active after).
+      sing-box is stopped, then restored (`systemctl is-active sing-box` == active after).
 - [ ] **smartdns reloads new cert**: after a real renewal the deploy hook
       (`/etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh`) copies certs to
       `/etc/smartdns/cert/` and restarts smartdns; DoT :853 serves the new cert.

@@ -97,10 +97,10 @@ ip-rules ip-set:foreign -ip-alias __GATEWAY_IP__
 
 ## 6. 端到端数据流(三类)
 
-- **强制表命中(被墙/已知必代理)**:DoT 查 → `address` 直接返回网关 IP(不解析)→ 客户端连网关 → xray dokodemo-door sniff SNI/quic → 经 22.22.22.22 解析真实 IP → **直接走网关默认路由出网**。
+- **强制表命中(被墙/已知必代理)**:DoT 查 → `address` 直接返回网关 IP(不解析)→ 客户端连网关 → sing-box `direct` inbound route `action:sniff` 提取 SNI/quic/http → `action:resolve` 经 22.22.22.22 解析真实 IP → **直接走网关默认路由出网**。
 - **未命中 + 国外 IP**:DoT 查 → 解析得真实国外 IP → `ip-alias` 改写成网关 IP → 同上进代理后**直出**。
 - **未命中 + 国内 IP**:DoT 查 → 解析得真实国内 IP(原样)→ 客户端**直连**,网关不经手。
-- QUIC/HTTP3 与 TLS 走同一 xray 实例:UDP 443 由防火墙放行进 xray,xray sniff `quic` 取 SNI 后直出;TCP 443 同理 sniff `tls`。
+- QUIC/HTTP3 与 TLS 走同一 sing-box 实例:UDP 443 由防火墙放行进 sing-box,`action:sniff sniffer:quic` 取 SNI 后直出;TCP 443 同理 sniff `tls`。
 
 ## 7. 客户端接入(仅 DoT)
 
@@ -110,9 +110,9 @@ ip-rules ip-set:foreign -ip-alias __GATEWAY_IP__
 
 ## 8. 出口:仅直出(无出口层)
 
-被代理的流量(命中强制表 / 国外 IP,被解析成网关 IP)由 xray dokodemo-door 接住(TCP 80 sniff http、TCP+UDP 443 sniff tls/quic),**sniff SNI、经 22.22.22.22 解析真实目标 IP 后,直接走网关自身的默认路由出网**。QUIC/HTTP3 与 TLS 均代理:UDP 443 由防火墙放行,xray sniff `quic` 取得目标域名后 freedom 直出(ForceIPv4)。网关本身即"够得到目标"的有利位置,无需隧道/多出口。
+被代理的流量(命中强制表 / 国外 IP,被解析成网关 IP)由 sing-box `direct` inbound 接住(TCP 80 sniff http、TCP+UDP 443 sniff tls/quic),**route rule `action:sniff` 提取域名、`action:resolve` 经 22.22.22.22 解析真实目标 IP 后,直接走网关自身的默认路由出网**。QUIC/HTTP3 与 TLS 均代理:UDP 443 由防火墙放行,sing-box sniff `quic` 取得目标域名后 `direct` 出站(IPv4-only)。网关本身即"够得到目标"的有利位置,无需隧道/多出口。
 
-**明确不做**:`pxout` 打 mark、`ip rule fwmark`、`table 100`、apply-exit/set-exit、sing-box、WireGuard、连通性/延迟检查——全部不做。防火墙只做入站过滤(仅 DoT 22/853 + NPN 的 80/443/udp443)。
+**明确不做**:`pxout` 打 mark、`ip rule fwmark`、`table 100`、apply-exit/set-exit、WireGuard、多出口/tproxy/tun/fwmark——全部不做。防火墙只做入站过滤(仅 DoT 22/853 + NPN 的 80/443/udp443)。
 
 ## 9. 规则与列表管理
 
@@ -148,3 +148,12 @@ smartdns 规则均为**磁盘文本文件**;控制面(**Telegram Bot** `tgbot.py
 **待定:**
 - clean 组在国内机器上的可达性(可能需先经一个固定干净通道)——P1/P3(安装)细化。
 - 强制表初始来源(是否 seed 自 gfwlist 以减少冷启动漏网)——P1 决定。
+
+**决策追加 2026-06-29 — 数据平面 xray → sing-box(反转):**
+- **背景**:2026-06-28 刚完成 sniproxy→xray 迁移;2026-06-29 用户明确指令再次反转,改用 sing-box。
+- **技术结论**:对"嗅探 SNI 直出"窄场景,sing-box 与 xray 功能完全等价;代价是配置 churn、内存更高(~256 MB)、无 `.dgst` 旁文件。用户知悉权衡后仍明确选择 sing-box。
+- **新配置形态**:sing-box `direct` inbound(普通监听口,不引入 tproxy/redirect/tun)+ route rule `action:sniff sniffer:[tls,quic,http]` + `action:resolve strategy:ipv4_only server:ext` + `direct` outbound;DNS 单一外部 udp server `ext`=`22.22.22.22`(`default_domain_resolver` 引用),防回环机制与 xray hardcode 等价。
+- **嗅探失败防回环(sing-box 1.13 新坑)**:xray 用 dokodemo-door 占位 `127.0.0.1` → routing blackhole;sing-box 1.13 移除了 inbound `override_address`,sniff 失败保留原始目的(= 网关自身 IP)。替代方案:`resolve` 置于 reject 之前 + `ip_is_private:true → reject drop`(覆盖 NPN 私网部署)+ `ip_cidr:[GATEWAY_IP/32, PUBLIC_IP/32] → reject drop`(覆盖公网部署,私网规则盖不住时兜底);提交默认 sentinel `127.0.0.2/32`,install.sh 用实际 IP 改写。
+- **版本锁定**:pin `1.13.14`(`SINGBOX_VERSION` 可覆盖),config 按 1.12+ 新语法(typed DNS + rule-action)。
+- **sha256 验证**:默认不校验,保留 `SINGBOX_SHA256` opt-in(非致命)——sing-box 无 `.dgst` 旁文件,免去脆弱逻辑。(与 gum 强制 sha256 对比:gum 有 `checksums.txt`,可自动验;sing-box 无等价机制,故改为可选)
+- **保留历史**:xray 相关旧配置保留于 git 历史(上一条已定决策条目不删)。回滚靠 `git revert` + 切回旧单元 + `install_xray`。

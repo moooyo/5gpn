@@ -23,14 +23,14 @@ Follow the established pattern (see `install.sh`):
 
 ## Other standing conventions
 
-- **No exit layer.** Direct egress only — no sing-box / WireGuard / multi-exit / fwmark / `ip rule` / `table 100`. Don't add any of these.
+- **No exit layer.** Direct egress only — no WireGuard / multi-exit / fwmark / `ip rule` / `table 100`. Don't add any of these. sing-box IS the transparent SNI/QUIC forwarder (data plane) via a `direct` inbound — it does NOT do tproxy/tun/fwmark, so it stays within this rule.
 - **Control plane = Telegram bot only** (`tgbot.py`). The HTTP API + web UI were removed; don't reintroduce them.
-- **Prebuilt binaries + sha256 verify** for third-party tools (xray, gum) — no source builds / Go toolchain on the box.
-- **Tests are pure-grep policy scripts** under `tests/test_*.sh`; they run under Git Bash on Windows. `xray -test`, `nft -c`, gum runtime, and `test_smartdns_conf_policy.sh` (Python) are Linux/CI gates — run these on **test-env** (see below).
+- **Prebuilt binaries** for third-party tools (sing-box, gum) — no source builds / Go toolchain on the box. sha256 verify is mandatory for gum (`checksums.txt`); for **sing-box it is opt-in** (`SINGBOX_SHA256`, no `.dgst` sidecar upstream).
+- **Tests are pure-grep policy scripts** under `tests/test_*.sh`; they run under Git Bash on Windows. `sing-box check`, `nft -c`, gum runtime, and `test_smartdns_conf_policy.sh` (Python) are Linux/CI gates — run these on **test-env** (see below).
 
 ## Linux test environment (test-env)
 
-A real Debian box for the Linux/CI gates that can't run on the Windows dev box (`sing-box check` / `nft -c` / `xray -test` / Python policy tests / live DoT + QUIC behavior, cert/renewal flows, full `install.sh`).
+A real Debian box for the Linux/CI gates that can't run on the Windows dev box (`sing-box check` / `nft -c` / Python policy tests / live DoT + QUIC behavior, cert/renewal flows, full `install.sh`).
 
 - **Host:** `test-env` = Debian 13 (trixie) x86_64, `root@10.0.1.20:22`. Currently directly reachable on the network.
 - **SSH login:** `ssh test-env` — host defined in the dotssh config (`D:\Code\dotssh\config.d/hosts` → `root@10.0.1.20:22`); auth goes through the **Bitwarden SSH Agent** (Windows named pipe).
