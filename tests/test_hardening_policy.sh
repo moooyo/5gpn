@@ -10,7 +10,7 @@ INSTALL="$ROOT/install.sh"; FW="$ROOT/scripts/setup-firewall.sh"
 # --- systemd sandboxing ---
 grep -Fq 'NoNewPrivileges=yes'   "$SB_SVC" || fail "sing-box.service: no NoNewPrivileges"
 grep -Fq 'ProtectSystem=strict'  "$SB_SVC" || fail "sing-box.service: no ProtectSystem=strict"
-grep -Fq 'RestrictAddressFamilies=AF_INET AF_UNIX' "$SB_SVC" || fail "sing-box.service: address families not restricted"
+grep -Fq 'RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK' "$SB_SVC" || fail "sing-box.service: address families not the expected AF_INET AF_UNIX AF_NETLINK (no AF_INET6; AF_NETLINK needed for route subscribe)"
 # The DEPLOYED units are heredocs in install.sh (smartdns/api/tgbot/iosprofile) — guard those,
 # not any static file. iosprofile (root, public, per-connection) must get ProtectSystem=strict.
 [ "$(grep -c 'NoNewPrivileges=yes' "$INSTALL")" -ge 3 ] || fail "install.sh units not all hardened (NoNewPrivileges <3)"
