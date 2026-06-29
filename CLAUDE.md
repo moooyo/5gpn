@@ -26,4 +26,16 @@ Follow the established pattern (see `install.sh`):
 - **No exit layer.** Direct egress only — no sing-box / WireGuard / multi-exit / fwmark / `ip rule` / `table 100`. Don't add any of these.
 - **Control plane = Telegram bot only** (`tgbot.py`). The HTTP API + web UI were removed; don't reintroduce them.
 - **Prebuilt binaries + sha256 verify** for third-party tools (xray, gum) — no source builds / Go toolchain on the box.
-- **Tests are pure-grep policy scripts** under `tests/test_*.sh`; they run under Git Bash on Windows. `xray -test`, `nft -c`, gum runtime, and `test_smartdns_conf_policy.sh` (Python) are Linux/CI gates.
+- **Tests are pure-grep policy scripts** under `tests/test_*.sh`; they run under Git Bash on Windows. `xray -test`, `nft -c`, gum runtime, and `test_smartdns_conf_policy.sh` (Python) are Linux/CI gates — run these on **test-env** (see below).
+
+## Linux test environment (test-env)
+
+A real Debian box for the Linux/CI gates that can't run on the Windows dev box (`sing-box check` / `nft -c` / `xray -test` / Python policy tests / live DoT + QUIC behavior, cert/renewal flows, full `install.sh`).
+
+- **Host:** `test-env` = Debian 13 (trixie) x86_64, `root@10.0.1.20:22`. Currently directly reachable on the network.
+- **SSH login:** `ssh test-env` — host defined in the dotssh config (`D:\Code\dotssh\config.d/hosts` → `root@10.0.1.20:22`); auth goes through the **Bitwarden SSH Agent** (Windows named pipe).
+- **⚠️ Must use Windows native `ssh.exe`**, invoked via PowerShell:
+  `& "$env:WINDIR\System32\OpenSSH\ssh.exe" test-env '<cmd>'`.
+  **Do not use Git Bash's `ssh`** — it fails two ways: (1) the UTF-8 BOM at the start of `~/.ssh/config` makes it error `Bad configuration option: \357\273\277include`, and (2) it can't reach the agent private key in the Windows named pipe.
+- **Remote command quoting:** avoid `()` inside the PowerShell single-quoted command (it reaches remote bash as syntax). For multi-line / complex remote commands, pass a PowerShell here-string `@' ... '@` to `ssh.exe` instead.
+- ⚠️ **Real box, not a sandbox** — treat it like production: don't run destructive commands without reason, and remember `install.sh` changes firewall/systemd/certs there for real.
