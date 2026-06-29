@@ -12,6 +12,8 @@ User=root
 LimitNOFILE=65535
 # Sandbox: leaf proxy — binds 80/443 tcp + 443 udp, root with no new privileges,
 # read-only config, IPv4 (+unix) sockets only. Writes nothing (logs -> journald).
+# AF_NETLINK is required: sing-box subscribes to kernel route updates at startup
+# (it fatals "subscribe route updates: address family not supported" without it).
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -21,7 +23,7 @@ ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
-RestrictAddressFamilies=AF_INET AF_UNIX
+RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
 ReadOnlyPaths=/usr/local/etc/sing-box
 
 [Install]
