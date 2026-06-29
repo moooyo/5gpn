@@ -1,11 +1,11 @@
 [Unit]
-Description=5gpn xray-core (SNI/QUIC transparent proxy)
+Description=5gpn sing-box (SNI/QUIC transparent proxy)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/xray run -c /usr/local/etc/xray/config.json
+ExecStart=/usr/local/bin/sing-box run -c /usr/local/etc/sing-box/config.json
 Restart=on-failure
 RestartSec=5
 User=root
@@ -22,7 +22,7 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictAddressFamilies=AF_INET AF_UNIX
-ReadOnlyPaths=/usr/local/etc/xray
+ReadOnlyPaths=/usr/local/etc/sing-box
 
 [Install]
 WantedBy=multi-user.target

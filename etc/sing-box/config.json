@@ -1,0 +1,23 @@
+{
+  "log": { "level": "warn" },
+  "dns": {
+    "servers": [ { "type": "udp", "tag": "ext", "server": "22.22.22.22" } ],
+    "final": "ext",
+    "strategy": "ipv4_only"
+  },
+  "inbounds": [
+    { "type": "direct", "tag": "in443", "listen": "0.0.0.0", "listen_port": 443 },
+    { "type": "direct", "tag": "in80",  "listen": "0.0.0.0", "listen_port": 80, "network": "tcp" }
+  ],
+  "outbounds": [ { "type": "direct", "tag": "direct" } ],
+  "route": {
+    "default_domain_resolver": { "server": "ext" },
+    "rules": [
+      { "action": "sniff",   "sniffer": ["tls", "quic", "http"], "timeout": "300ms" },
+      { "action": "resolve", "strategy": "ipv4_only", "server": "ext" },
+      { "ip_is_private": true, "action": "reject", "method": "drop" },
+      { "ip_cidr": ["127.0.0.2/32"], "action": "reject", "method": "drop" }
+    ],
+    "final": "direct"
+  }
+}

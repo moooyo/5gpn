@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 5gpn firewall + proxy service install. Direct egress only â€” no packet
-# marking, no policy routing, no tunnels, no exit layer. xray egresses
-# straight out the gateway's default route. QUIC/HTTP3 IS proxied: xray
+# marking, no policy routing, no tunnels, no exit layer. sing-box egresses
+# straight out the gateway's default route. QUIC/HTTP3 IS proxied: sing-box
 # sniffs the QUIC SNI, so UDP 443 from NPN clients is allowed.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -43,7 +43,7 @@ table inet filter {
         tcp dport 853 ct state new meter dot_rate6 { ip6 saddr limit rate over ${DOT_RATE} burst ${DOT_BURST} packets } drop
         tcp dport { ${tcp_ports} } accept
         ip saddr ${CLIENT_NET} tcp dport { 80, 443, ${IOS_PORT} } accept
-        # QUIC/HTTP3 proxied by xray: allow UDP 443 from NPN clients (same scope as TCP 443).
+        # QUIC/HTTP3 proxied by sing-box: allow UDP 443 from NPN clients (same scope as TCP 443).
         ip saddr ${CLIENT_NET} udp dport 443 accept
         ip protocol icmp accept
         ip6 nexthdr icmpv6 accept
@@ -57,9 +57,11 @@ info "Applying DoT-only nftables ruleset (direct egress; QUIC/UDP 443 proxied)â€
 nft -f /etc/nftables.conf
 systemctl enable nftables 2>/dev/null || true
 
-# Migrate off sniproxy if a previous install left it behind.
+# Migrate off sniproxy / xray if a previous install left them behind.
 systemctl disable --now sniproxy 2>/dev/null || true
 rm -f /etc/systemd/system/sniproxy.service
-install -m 0644 "${ROOT}/etc/systemd/xray.service"   /etc/systemd/system/xray.service
+systemctl disable --now xray 2>/dev/null || true
+rm -f /etc/systemd/system/xray.service
+install -m 0644 "${ROOT}/etc/systemd/sing-box.service" /etc/systemd/system/sing-box.service
 systemctl daemon-reload
-ok "firewall + xray unit installed (direct egress; QUIC/UDP 443 proxied)"
+ok "firewall + sing-box unit installed (direct egress; QUIC/UDP 443 proxied)"

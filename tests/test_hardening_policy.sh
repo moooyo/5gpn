@@ -4,13 +4,13 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
 rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
-XRAY_SVC="$ROOT/etc/systemd/xray.service"
+SB_SVC="$ROOT/etc/systemd/sing-box.service"
 INSTALL="$ROOT/install.sh"; FW="$ROOT/scripts/setup-firewall.sh"
 
 # --- systemd sandboxing ---
-grep -Fq 'NoNewPrivileges=yes'   "$XRAY_SVC" || fail "xray.service: no NoNewPrivileges"
-grep -Fq 'ProtectSystem=strict'  "$XRAY_SVC" || fail "xray.service: no ProtectSystem=strict"
-grep -Fq 'RestrictAddressFamilies=AF_INET AF_UNIX' "$XRAY_SVC" || fail "xray.service: address families not restricted"
+grep -Fq 'NoNewPrivileges=yes'   "$SB_SVC" || fail "sing-box.service: no NoNewPrivileges"
+grep -Fq 'ProtectSystem=strict'  "$SB_SVC" || fail "sing-box.service: no ProtectSystem=strict"
+grep -Fq 'RestrictAddressFamilies=AF_INET AF_UNIX' "$SB_SVC" || fail "sing-box.service: address families not restricted"
 # The DEPLOYED units are heredocs in install.sh (smartdns/api/tgbot/iosprofile) — guard those,
 # not any static file. iosprofile (root, public, per-connection) must get ProtectSystem=strict.
 [ "$(grep -c 'NoNewPrivileges=yes' "$INSTALL")" -ge 3 ] || fail "install.sh units not all hardened (NoNewPrivileges <3)"
