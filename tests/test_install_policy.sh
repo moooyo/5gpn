@@ -8,16 +8,16 @@ rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
 INSTALL="$ROOT/install.sh"
 
-# --- certbot auto-renewal must survive the DoT-only (drop) firewall + xray:80 ---
+# --- certbot auto-renewal must survive the DoT-only (drop) firewall + sing-box:80 ---
 # The cert backs DoT :853; if renewal silently fails the whole gateway goes dark
 # (no plaintext :53 fallback). Renewal uses --standalone, which needs :80 free,
-# but the firewall drops :80 AND xray binds :80 at runtime.
-# (1) pre-renewal hook frees port 80 (open firewall + stop xray).
+# but the firewall drops :80 AND sing-box binds :80 at runtime.
+# (1) pre-renewal hook frees port 80 (open firewall + stop sing-box).
 grep -Eq 'renewal-hooks/pre'      "$INSTALL" || fail "no certbot pre-renewal hook installed"
-grep -Eq 'systemctl stop xray' "$INSTALL" || fail "renewal must stop xray to free :80 for --standalone"
-# (2) post-renewal hook restores the DoT-only firewall + restarts xray (runs win-or-lose).
+grep -Eq 'systemctl stop sing-box' "$INSTALL" || fail "renewal must stop sing-box to free :80 for --standalone"
+# (2) post-renewal hook restores the DoT-only firewall + restarts sing-box (runs win-or-lose).
 grep -Eq 'renewal-hooks/post'       "$INSTALL" || fail "no certbot post-renewal hook installed"
-grep -Eq 'systemctl start xray' "$INSTALL" || fail "post-renewal must restart xray"
+grep -Eq 'systemctl start sing-box' "$INSTALL" || fail "post-renewal must restart sing-box"
 # (3) a renewal timer so renewal actually runs unattended, and catches up missed runs.
 grep -Eq '5gpn-certbot-renew\.timer' "$INSTALL" || fail "no certbot renewal timer installed"
 grep -Eq '^Persistent=true'             "$INSTALL" || fail "renewal timer not Persistent (missed runs won't catch up)"
