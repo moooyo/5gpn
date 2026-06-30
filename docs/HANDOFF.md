@@ -1,8 +1,10 @@
 # 5gpn 交付报告 / Handoff
 
-- 日期:2026-06-28
+- 日期:2026-06-28(架构更新说明 2026-07-01)
 - 范围:在既有代码基础上,完成审计发现的**全部必修 + 应修 + 安全硬化**,并补齐自动化测试与 CI。
 - 架构图:见会话内 SVG;权威设计见 [DESIGN.md](DESIGN.md);上线验收清单见 [tests/integration-smoke.md](../tests/integration-smoke.md)。
+
+> **⚠️ 架构已更新(2026-07-01)**:本 Handoff 记录的是 smartdns 时代的架构与改动。该架构已被 **`5gpn-dns`(自研 Go DNS 网关)** 取代——smartdns + chinadns-ng 已移除,DNS 大脑改由 `5gpn-dns` 承担,入口从 DoT-only 扩展为 DoT :853 + DoH :8443 + 明文 DNS :53。当前权威设计见 [DESIGN.md](DESIGN.md) 及规格说明 [docs/superpowers/specs/2026-06-30-5gpn-dns-go-design.md](superpowers/specs/2026-06-30-5gpn-dns-go-design.md)。本 Handoff 保留为历史参考。
 
 ---
 

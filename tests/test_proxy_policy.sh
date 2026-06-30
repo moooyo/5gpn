@@ -14,7 +14,7 @@ SS="$ROOT/etc/systemd/sing-box.service"
 # pairing + actual tcp/udp listeners are verified by the test-env boot check (`ss`),
 # which is authoritative; these greps only assert the shapes are present.
 grep -Eq '"22\.22\.22\.22"'                         "$SB" || fail "sing-box resolver not 22.22.22.22"
-grep -Eq '127\.0\.0\.1:853|:5353|"::1"([^/]|$)'     "$SB" && fail "sing-box dns must not point at local smartdns"
+grep -Eq '127\.0\.0\.1:853|:5353|"::1"([^/]|$)'     "$SB" && fail "sing-box dns must not point at local 5gpn-dns"
 grep -Eq '"type":[[:space:]]*"direct"'              "$SB" || fail "sing-box not using direct inbound/outbound"
 grep -Eq '"listen_port":[[:space:]]*443'            "$SB" || fail "sing-box missing 443 inbound"
 grep -Eq '"listen_port":[[:space:]]*80'             "$SB" || fail "sing-box missing 80 inbound"

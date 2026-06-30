@@ -294,7 +294,7 @@ install_files() {
     install -d -m 0755 "$SINGBOX_DIR"
     install -m 0644 "${SCRIPT_DIR}/etc/sing-box/config.json" "$SINGBOX_DIR/config.json"
     # SNI re-resolver: default 22.22.22.22 (loop-avoidance requires only that it is NOT the
-    # local smartdns). Operators on a different network can point it at a reachable clean
+    # local 5gpn-dns). Operators on a different network can point it at a reachable clean
     # IPv4 resolver via SINGBOX_RESOLVER. We patch only the installed copy.
     local xr="${SINGBOX_RESOLVER:-$RESOLV_FALLBACK}"
     if [[ "$xr" != "$RESOLV_FALLBACK" ]]; then
@@ -478,7 +478,7 @@ EOF
 }
 
 # ----------------------------------------------------------------------------
-# Lists + smartdns render, firewall, iOS profile
+# Lists + rules, firewall, iOS profile
 # ----------------------------------------------------------------------------
 run_update_lists() {
     info "Building chnroute lists (china_ip_list.txt)..."

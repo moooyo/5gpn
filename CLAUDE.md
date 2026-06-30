@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Project guidance for working in this repo (5gpn — smartdns DoT gateway, exit-less / direct-egress).
+Project guidance for working in this repo (5gpn — 5gpn-dns DoT/DoH/plain-53 gateway, exit-less / direct-egress).
 
 ## TUI / installer interaction: use Gum
 
@@ -11,7 +11,7 @@ All interactive UI and styled output in shell scripts (chiefly `install.sh`) is 
 - `install.sh` carries the canonical inline helpers (`info/ok/warn/err/ask_*/gum_spin/card`) plus `install_gum()`.
 - The sub-scripts it invokes (`scripts/update-lists.sh`, `setup-firewall.sh`, `gen-ios-profile.sh`, `renew-hook.sh`) each carry a **small self-contained gum-or-echo preamble** — they only *detect* gum (`command -v gum` + `[ -t 1 ]`), they never install it (that is `install.sh`'s job). Kept self-contained on purpose: no shared-lib sourcing failure mode, and the per-script duplication is locked against drift by `tests/test_tui_policy.sh`.
 - `quick-install.sh` runs **before** gum is bootstrapped, so it is gum-aware-if-present with an ANSI fallback — do not make it install gum.
-- **Intentionally exempt** (don't terminal-TUI these): the Python pipe stages (`gen_foreign_cidr.py`, `render_smartdns_conf.py`) and `src/ios-http.py` (non-interactive; their stderr is wrapped by the caller's gum helpers), and `tgbot.py` (the control plane is already a Telegram-native inline-keyboard TUI).
+- **Intentionally exempt** (don't terminal-TUI these): `src/ios-http.py` (non-interactive; stderr is wrapped by the caller's gum helpers), and `tgbot.py` (the control plane is already a Telegram-native inline-keyboard TUI).
 
 Follow the established pattern (see `install.sh`):
 
@@ -24,13 +24,25 @@ Follow the established pattern (see `install.sh`):
 ## Other standing conventions
 
 - **No exit layer.** Direct egress only — no WireGuard / multi-exit / fwmark / `ip rule` / `table 100`. Don't add any of these. sing-box IS the transparent SNI/QUIC forwarder (data plane) via a `direct` inbound — it does NOT do tproxy/tun/fwmark, so it stays within this rule.
-- **Control plane = Telegram bot only** (`tgbot.py`). The HTTP API + web UI were removed; don't reintroduce them.
-- **Prebuilt binaries** for third-party tools (sing-box, gum) — no source builds / Go toolchain on the box. sha256 verify is mandatory for gum (`checksums.txt`); for **sing-box it is opt-in** (`SINGBOX_SHA256`, no `.dgst` sidecar upstream).
-- **Tests are pure-grep policy scripts** under `tests/test_*.sh`; they run under Git Bash on Windows. `sing-box check`, `nft -c`, gum runtime, and `test_smartdns_conf_policy.sh` (Python) are Linux/CI gates — run these on **test-env** (see below).
+
+- **DNS brain = `5gpn-dns`** (self-built Go binary, `cmd/5gpn-dns/`). It handles DoT :853, DoH :8443, and plain DNS :53 (rate-limited). smartdns and chinadns-ng are **removed**. Do not re-add them.
+
+- **Ingress transports** (deliberate reversal, 2026-07-01): DoT :853 + DoH :8443 + plain DNS :53 (public, per-source rate-limited). The earlier "DoT-only inbound, no public 53" stance is **reversed**. The :53 open-resolver surface is accepted; mitigated by rate limiting.
+
+- **Control plane** (deliberate reversal, 2026-07-01): tgbot.py remains the primary control plane. A public HTTPS API + Web UI **will be added in Phase 3**, coexisting with tgbot (tgbot will call the same API). The earlier "tgbot only / no HTTP API+web UI, don't reintroduce" stance is **reversed**. Phase 2 (subscriptions) and Phase 3 (API + Web UI) are planned but not yet implemented.
+
+- **Rule lists** (deliberate reversal, 2026-07-01): Phase 1 loads rules from local files in `/etc/5gpn/rules/`. Phase 2 will move them to **subscriptions** (remote URL auto-update). The earlier "manual-only" stance is **reversed** for Phase 2 onwards. Do not implement subscriptions until the Phase 2 spec is written.
+
+- **Prebuilt / CI-built binaries**: third-party tools (sing-box, gum) use prebuilt binaries — no Go toolchain on the box. `5gpn-dns` is our own binary: **built in CI** (`cmd/5gpn-dns/` → `moooyo/5gpn` release, `DNS_VERSION` pin, `DNS_SHA256` opt-in), then downloaded at install time. The "no toolchain on the box" rule still holds — `5gpn-dns` is built in CI, never on the gateway. sha256 verify is mandatory for gum (`checksums.txt`); for sing-box and 5gpn-dns it is opt-in (`SINGBOX_SHA256` / `DNS_SHA256`).
+
+- **Tests** taxonomy:
+  - **Pure-grep policy scripts** under `tests/test_*.sh` — run under Git Bash on Windows (dev box).
+  - **Go unit tests** `cmd/5gpn-dns/*_test.go` — run via `go test ./...` (CI + dev box; Go 1.26.3 is on the dev box).
+  - **Linux/CI gates**: `sing-box check`, `nft -c`, `go test` integration, live DoT+DoH+plain-53 behavior, cert/renewal flows, full `install.sh` — run on **test-env** (see below).
 
 ## Linux test environment (test-env)
 
-A real Debian box for the Linux/CI gates that can't run on the Windows dev box (`sing-box check` / `nft -c` / Python policy tests / live DoT + QUIC behavior, cert/renewal flows, full `install.sh`).
+A real Debian box for the Linux/CI gates that can't run on the Windows dev box (`sing-box check` / `nft -c` / live DNS + cert/renewal flows, full `install.sh`).
 
 - **Host:** `test-env` = Debian 13 (trixie) x86_64, `root@10.0.1.20:22`. Currently directly reachable on the network.
 - **SSH login:** `ssh test-env` — host defined in the dotssh config (`D:\Code\dotssh\config.d/hosts` → `root@10.0.1.20:22`); auth goes through the **Bitwarden SSH Agent** (Windows named pipe).

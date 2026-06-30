@@ -1,7 +1,7 @@
 #!/bin/bash
 # Generate the 5gpn iOS DoT configuration profile (.mobileconfig) + landing page.
 #
-# Architecture: client DoT:853 -> smartdns -> sing-box -> DIRECT egress.
+# Architecture: client DoT:853 / DoH:8443 / plain:53 -> 5gpn-dns -> sing-box -> DIRECT egress.
 # The profile points the phone's cellular DNS at this gateway over TLS (DoT). On
 # Wi-Fi it disconnects, so it only applies on cellular as designed.
 #
