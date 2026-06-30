@@ -16,9 +16,10 @@ INSTALL="$ROOT/install.sh";         README="$ROOT/README.md"
 # 3.7 — renew-hook uses certbot's $RENEWED_LINEAGE (deterministic cert selection).
 grep -Fq 'RENEWED_LINEAGE' "$RENEW" || fail "3.7: renew-hook not using \$RENEWED_LINEAGE"
 
-# 3.8 — generator drops over-broad prefixes (e.g. /0) and refuses an empty foreign set.
-grep -Fq 'prefixlen'   "$GEN" || fail "3.8: generator does not guard over-broad (e.g. /0) entries"
-grep -Fq 'not foreign' "$GEN" || fail "3.8: generator does not refuse an empty foreign set"
+# 3.8 — gen_foreign_cidr.py was removed in Task 8 (smartdns -> 5gpn-dns migration).
+# These checks are now obsolete.
+# grep -Fq 'prefixlen'   "$GEN" || fail "3.8: generator does not guard over-broad (e.g. /0) entries"
+# grep -Fq 'not foreign' "$GEN" || fail "3.8: generator does not refuse an empty foreign set"
 
 # 3.9 — status foreign count consistent with API (skip comments/blanks, not raw wc -l).
 grep -Fq 'wc -l < "${SMARTDNS_DIR}/foreign-cidr.txt"' "$INSTALL" && fail "3.9: foreign count still raw wc -l"

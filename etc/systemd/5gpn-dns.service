@@ -1,0 +1,32 @@
+[Unit]
+Description=5gpn DNS (DoT/DoH/plain resolver)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/5gpn/dns.env
+ExecStart=/usr/local/bin/5gpn-dns
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+User=root
+LimitNOFILE=65535
+# Sandbox: DNS resolver — binds :53/:853/:8443, root with no new privileges,
+# read-only cert + rules, IPv4 (+unix) sockets only. Writes nothing (logs -> journald).
+# Note: AF_NETLINK may be needed for route-subscribe at runtime — confirm on test-env
+# (like sing-box). Leave AF_INET AF_UNIX for now; add AF_NETLINK if 5gpn-dns fatals.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+ReadOnlyPaths=/etc/5gpn
+
+[Install]
+WantedBy=multi-user.target

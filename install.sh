@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # 5gpn installer / orchestrator (exit-less, direct-egress architecture).
 #
-#   client DoT:853 -> smartdns (returns the GATEWAY IP for blocked/foreign
-#   domains) -> sing-box (TCP 80/443/QUIC) reads SNI, resolves the real IP via
-#   22.22.22.22, then egress DIRECTLY out the default route.
+#   client DoT:853/DoH:8443/plain:53 -> 5gpn-dns (returns GATEWAY IP for
+#   blocked/foreign domains) -> sing-box (TCP 80/443/QUIC) reads SNI, resolves
+#   the real IP via 22.22.22.22, then egress DIRECTLY out the default route.
 #
 # QUIC/HTTP3 is proxied by sing-box (UDP 443 SNI routing). No exit layer, no Go.
 #
@@ -24,9 +24,13 @@ WWW_DIR="${BASE_DIR}/www"                # iOS profile web root
 BUILD_DIR="${BASE_DIR}/build"            # download/unpack scratch
 
 CONF_DIR="/etc/5gpn"                 # state: .domain .public_ip .gateway_ip ...
-SMARTDNS_DIR="/etc/smartdns"             # smartdns.conf(.template), lists, cert/
+DNS_BIN="/usr/local/bin/5gpn-dns"        # 5gpn-dns binary (DoT/DoH/plain resolver)
+DNS_CERT_DIR="/etc/5gpn/cert"            # cert copy for 5gpn-dns (hot-reloaded via SIGHUP)
+DNS_RULES_DIR_DEFAULT="/etc/5gpn/rules"  # rule files: blacklist.txt, direct.txt, etc.
 SINGBOX_BIN="/usr/local/bin/sing-box"
 SINGBOX_DIR="/usr/local/etc/sing-box"
+# Legacy: SMARTDNS_DIR kept only for remove-on-upgrade logic below; not used by new install.
+SMARTDNS_DIR="/etc/smartdns"
 
 IOS_PORT=8111                            # socket-activated iOS profile responder
 RESOLV_FALLBACK="22.22.22.22"            # loop-avoidance external resolver (proxies)
@@ -197,7 +201,7 @@ install_deps() {
             ;;
     esac
 
-    install_smartdns
+    install_5gpndns
 
     # certbot may break on very new Python; try to repair non-fatally.
     if command -v certbot >/dev/null 2>&1 && ! certbot --version >/dev/null 2>&1; then
@@ -208,53 +212,29 @@ install_deps() {
     command -v certbot >/dev/null 2>&1 || { err "certbot is required but missing."; exit 1; }
 }
 
-# smartdns: try the distro package, else fetch the official release binary.
-install_smartdns() {
-    if command -v smartdns >/dev/null 2>&1; then
-        [[ -n "${SMARTDNS_SHA256:-}" ]] && warn "SMARTDNS_SHA256 set but smartdns already on PATH; pin not applied."
-        info "smartdns already installed."; return 0
+# 5gpn-dns: prebuilt binary from moooyo/5gpn releases.
+# Mirrors the install_singbox download/sha256/install pattern.
+install_5gpndns() {
+    if [[ -x "$DNS_BIN" ]]; then info "5gpn-dns already installed."; return 0; fi
+    local ver="${DNS_VERSION:-dns-v0.1.0}"
+    local url="https://github.com/moooyo/5gpn/releases/download/${ver}/5gpn-dns-linux-amd64"
+    info "Downloading 5gpn-dns ${ver} (prebuilt binary; no Go toolchain)..."
+    mkdir -p "$BUILD_DIR"
+    local bin_dl="$BUILD_DIR/5gpn-dns-linux-amd64"
+    gum_spin "Downloading 5gpn-dns ${ver}…" curl -fsSL "$url" -o "$bin_dl" \
+        || { err "5gpn-dns download failed ($url)"; exit 1; }
+    # Integrity: opt-in only. Set DNS_SHA256=<hash> to pin the binary.
+    local exp="${DNS_SHA256:-}"
+    if [[ -n "$exp" ]]; then
+        local got; got="$(sha256sum "$bin_dl" | awk '{print $1}')"
+        [[ "$got" == "$exp" ]] || { err "5gpn-dns sha256 mismatch (want $exp got $got)"; exit 1; }
+        ok "5gpn-dns binary sha256 verified."
+    else
+        warn "5gpn-dns sha256 UNVERIFIED (set DNS_SHA256 to pin)."
     fi
-    info "Installing smartdns (distro package)..."
-    case "$PKG_MGR" in
-        apt-get) apt-get install -y -qq smartdns 2>/dev/null || true ;;
-        dnf|yum) $PKG_MGR install -y -q smartdns 2>/dev/null || true ;;
-    esac
-    command -v smartdns >/dev/null 2>&1 && {
-        [[ -n "${SMARTDNS_SHA256:-}" ]] && warn "SMARTDNS_SHA256 set but smartdns came from distro package (apt/dnf signature-verified); pin not applied."
-        ok "smartdns installed (distro)."; return 0
-    }
-
-    warn "Distro smartdns unavailable; downloading official release binary."
-    local arch sd_arch tmp ver
-    arch="$(uname -m)"
-    case "$arch" in
-        x86_64|amd64)  sd_arch="x86_64" ;;
-        aarch64|arm64) sd_arch="aarch64" ;;
-        armv7l|armhf)  sd_arch="arm" ;;
-        *) sd_arch="x86_64"; warn "unknown arch '$arch', trying x86_64." ;;
-    esac
-    ver="$(curl -fsSL https://api.github.com/repos/pymumu/smartdns/releases/latest 2>/dev/null \
-            | jq -r '.tag_name' 2>/dev/null || echo "")"
-    [[ -z "$ver" || "$ver" == "null" ]] && ver="Release46.1"
-    tmp="$(mktemp -d)"
-    # Prefer the static tar.gz asset for the arch; install the bundled binary.
-    if curl -fsSL "https://github.com/pymumu/smartdns/releases/download/${ver}/smartdns.${sd_arch}-debian-all.tar.gz" \
-            -o "$tmp/smartdns.tar.gz" 2>/dev/null && tar -tzf "$tmp/smartdns.tar.gz" >/dev/null 2>&1; then
-        # Opt-in integrity check: set SMARTDNS_SHA256=<hash> to pin the archive.
-        if [[ -n "${SMARTDNS_SHA256:-}" ]]; then
-            echo "${SMARTDNS_SHA256}  $tmp/smartdns.tar.gz" | sha256sum -c - \
-                || { err "smartdns archive sha256 mismatch."; rm -rf "$tmp"; exit 1; }
-        fi
-        tar -xzf "$tmp/smartdns.tar.gz" -C "$tmp"
-        local bin; bin="$(find "$tmp" -type f -name smartdns -perm -u+x 2>/dev/null | head -n1)"
-        [[ -z "$bin" ]] && bin="$(find "$tmp" -type f -name smartdns 2>/dev/null | head -n1)"
-        if [[ -n "$bin" ]]; then
-            install -m 0755 "$bin" /usr/sbin/smartdns
-            ok "smartdns ${ver} installed to /usr/sbin/smartdns."
-        fi
-    fi
-    rm -rf "$tmp"
-    command -v smartdns >/dev/null 2>&1 || { err "smartdns install failed (no package, no release)."; exit 1; }
+    install -m 0755 "$bin_dl" "$DNS_BIN"
+    [[ -x "$DNS_BIN" ]] || { err "5gpn-dns install failed."; exit 1; }
+    ok "5gpn-dns installed to $DNS_BIN (${ver})."
 }
 
 # ----------------------------------------------------------------------------
@@ -289,24 +269,26 @@ install_singbox() {
 install_files() {
     info "Installing config files and scripts..."
     mkdir -p "$BASE_DIR" "$SCRIPTS_DIR" "$SRC_DIR" "$WWW_DIR" \
-             "$CONF_DIR" "$SMARTDNS_DIR" "$SMARTDNS_DIR/cert"
+             "$CONF_DIR" "$DNS_CERT_DIR" "$DNS_RULES_DIR_DEFAULT"
 
-    # smartdns template + proxy-domains seed (don't clobber an edited proxy list).
-    # The template is installed to BOTH /etc/smartdns (canonical) and
-    # /opt/5gpn/etc (where the installed update-lists.sh resolves it via
-    # ROOT="$HERE/..").
-    install -m 0644 "${SCRIPT_DIR}/etc/smartdns.conf.template" "${SMARTDNS_DIR}/smartdns.conf.template"
-    install -d -m 0755 "${BASE_DIR}/etc"
-    install -m 0644 "${SCRIPT_DIR}/etc/smartdns.conf.template" "${BASE_DIR}/etc/smartdns.conf.template"
-    if [[ ! -f "${SMARTDNS_DIR}/proxy-domains.txt" ]]; then
-        install -m 0644 "${SCRIPT_DIR}/etc/proxy-domains.txt" "${SMARTDNS_DIR}/proxy-domains.txt"
+    # Seed rule files for 5gpn-dns (don't clobber operator-edited files).
+    # proxy-domains.txt content -> blacklist.txt (forced-proxy domain list).
+    if [[ ! -f "${DNS_RULES_DIR_DEFAULT}/blacklist.txt" ]]; then
+        if [[ -f "${SCRIPT_DIR}/etc/proxy-domains.txt" ]]; then
+            install -m 0644 "${SCRIPT_DIR}/etc/proxy-domains.txt" \
+                "${DNS_RULES_DIR_DEFAULT}/blacklist.txt"
+        else
+            printf '# 5gpn blacklist: one domain per line (forced-proxy)\n' \
+                > "${DNS_RULES_DIR_DEFAULT}/blacklist.txt"
+        fi
     else
-        info "Keeping existing ${SMARTDNS_DIR}/proxy-domains.txt."
+        info "Keeping existing ${DNS_RULES_DIR_DEFAULT}/blacklist.txt."
     fi
-    # bogus-nxdomain poison list (anti-pollution include; don't clobber edits).
-    if [[ ! -f "${SMARTDNS_DIR}/bogus-nxdomain.conf" ]]; then
-        install -m 0644 "${SCRIPT_DIR}/etc/bogus-nxdomain.conf" "${SMARTDNS_DIR}/bogus-nxdomain.conf"
-    fi
+    for stub in direct.txt adblock.txt; do
+        [[ -f "${DNS_RULES_DIR_DEFAULT}/${stub}" ]] || \
+            printf '# 5gpn %s: one domain per line\n' "$stub" \
+                > "${DNS_RULES_DIR_DEFAULT}/${stub}"
+    done
 
     # sing-box config (resolver hardcoded to 22.22.22.22 for loop-avoidance, IPv4-only, direct).
     install -d -m 0755 "$SINGBOX_DIR"
@@ -420,17 +402,17 @@ install_cert() {
             exit 1
         fi
     fi
-    install -d -m 0755 "${SMARTDNS_DIR}/cert"
-    install -m 0644 "${live}/fullchain.pem" "${SMARTDNS_DIR}/cert/fullchain.pem"
-    install -m 0640 "${live}/privkey.pem"   "${SMARTDNS_DIR}/cert/privkey.pem"
-    ok "Cert deployed to ${SMARTDNS_DIR}/cert/."
+    install -d -m 0755 "$DNS_CERT_DIR"
+    install -m 0644 "${live}/fullchain.pem" "${DNS_CERT_DIR}/fullchain.pem"
+    install -m 0640 "${live}/privkey.pem"   "${DNS_CERT_DIR}/privkey.pem"
+    ok "Cert deployed to ${DNS_CERT_DIR}/."
 
-    # Renewal deploy hook (redeploys cert + restarts smartdns). Ships in repo.
+    # Renewal deploy hook (copies certs to /etc/5gpn/cert + reloads 5gpn-dns via SIGHUP). Ships in repo.
     if [[ -f "${SCRIPT_DIR}/scripts/renew-hook.sh" ]]; then
         install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
         install -m 0755 "${SCRIPT_DIR}/scripts/renew-hook.sh" \
             /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh
-        ok "Renewal deploy hook installed."
+        ok "Renewal deploy hook installed (copies certs + systemctl reload 5gpn-dns)."
     else
         warn "scripts/renew-hook.sh not found; auto-renew reload hook skipped."
     fi
@@ -499,10 +481,10 @@ EOF
 # Lists + smartdns render, firewall, iOS profile
 # ----------------------------------------------------------------------------
 run_update_lists() {
-    info "Building chnroute lists + rendering smartdns.conf..."
+    info "Building chnroute lists (china_ip_list.txt)..."
     SMARTDNS_DIR="$SMARTDNS_DIR" GATEWAY_IP="${GATEWAY_IP:-$PUBLIC_IP}" CACHE_SIZE="$CACHE_SIZE" \
         bash "${SCRIPTS_DIR}/update-lists.sh"
-    ok "Lists updated and smartdns.conf rendered."
+    ok "Lists updated."
 }
 
 run_setup_firewall() {
@@ -513,33 +495,51 @@ run_setup_firewall() {
     ok "Firewall + sing-box unit installed."
 }
 
-install_smartdns_unit() {
-    # Most smartdns packages ship a unit; if not, provide a minimal one.
-    if systemctl list-unit-files 2>/dev/null | grep -q '^smartdns\.service'; then return 0; fi
-    cat > /etc/systemd/system/smartdns.service <<EOF
-[Unit]
-Description=5gpn smartdns (DoT brain)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=$(command -v smartdns) -f -c ${SMARTDNS_DIR}/smartdns.conf
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=65535
-NoNewPrivileges=yes
-ProtectHome=yes
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
+install_5gpndns_unit() {
+    info "Installing 5gpn-dns.service unit..."
+    # Install the static unit from the repo checkout (mirrors sing-box.service sandbox).
+    if [[ -f "${SCRIPT_DIR}/etc/systemd/5gpn-dns.service" ]]; then
+        install -m 0644 "${SCRIPT_DIR}/etc/systemd/5gpn-dns.service" \
+            /etc/systemd/system/5gpn-dns.service
+    else
+        err "etc/systemd/5gpn-dns.service not found in repo checkout."
+        exit 1
+    fi
     systemctl daemon-reload
+    ok "5gpn-dns.service installed."
+}
+
+write_dns_env() {
+    # Write /etc/5gpn/dns.env from install-time collected vars.
+    # cert paths always point at the /etc/5gpn/cert copies (maintained by renew-hook.sh).
+    mkdir -p "$CONF_DIR"
+    cat > "${CONF_DIR}/dns.env" <<EOF
+# 5gpn-dns environment — written by install.sh; edit for overrides.
+# Reload takes effect via: systemctl reload 5gpn-dns  (SIGHUP hot-reload)
+
+DNS_LISTEN_DOT=:853
+DNS_LISTEN_DOH=:8443
+DNS_LISTEN_PLAIN=:53
+DNS_LISTEN_DEBUG=127.0.0.1:5353
+
+DNS_CERT=${DNS_CERT_DIR}/fullchain.pem
+DNS_KEY=${DNS_CERT_DIR}/privkey.pem
+
+DNS_GATEWAY_IP=${GATEWAY_IP}
+
+DNS_CHINA=223.5.5.5,119.29.29.29
+DNS_TRUST=dns.google@8.8.8.8,one.one.one.one@1.1.1.1
+
+DNS_RULES_DIR=${DNS_RULES_DIR_DEFAULT}
+DNS_CHNROUTE=${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt
+
+DNS_CACHE_SIZE=4096
+DNS_TTL_MIN=300
+DNS_TTL_MAX=86400
+DNS_QUERY_TIMEOUT=5s
+EOF
+    chmod 640 "${CONF_DIR}/dns.env"
+    ok "Written ${CONF_DIR}/dns.env."
 }
 
 setup_ios_profile() {
@@ -631,7 +631,7 @@ EOF
 start_services() {
     info "Enabling and starting services..."
     systemctl daemon-reload
-    for svc in smartdns sing-box nftables; do
+    for svc in "5gpn-dns" sing-box nftables; do
         systemctl enable "$svc" >/dev/null 2>&1 || true
         systemctl restart "$svc" 2>/dev/null || systemctl start "$svc" 2>/dev/null \
             || warn "could not start $svc (check: journalctl -u $svc)."
@@ -703,12 +703,12 @@ EOF
 }
 
 # ----------------------------------------------------------------------------
-# Domain-list management (proxy-domains.txt) + list refresh + status
+# Domain-list management (rules/blacklist.txt) + list refresh + status
 # ----------------------------------------------------------------------------
 add_domain() {
     check_root
     local d="${1:-}"; is_valid_domain "$d" || { err "Invalid domain: '$d'"; exit 1; }
-    local f="${SMARTDNS_DIR}/proxy-domains.txt"; mkdir -p "$SMARTDNS_DIR"; touch "$f"
+    local f="${DNS_RULES_DIR_DEFAULT}/blacklist.txt"; mkdir -p "$DNS_RULES_DIR_DEFAULT"; touch "$f"
     if grep -qxF "$d" "$f"; then info "$d already in proxy list."; else echo "$d" >> "$f"; ok "Added $d to forced-proxy list."; fi
     refresh_lists_and_restart
 }
@@ -716,7 +716,7 @@ add_domain() {
 del_domain() {
     check_root
     local d="${1:-}"; [[ -n "$d" ]] || { err "Usage: --del-domain <domain>"; exit 1; }
-    local f="${SMARTDNS_DIR}/proxy-domains.txt"; [[ -f "$f" ]] || { warn "No proxy list."; return 0; }
+    local f="${DNS_RULES_DIR_DEFAULT}/blacklist.txt"; [[ -f "$f" ]] || { warn "No proxy list."; return 0; }
     if grep -qxF "$d" "$f"; then grep -vxF "$d" "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"; ok "Removed $d."; else info "$d not in list."; fi
     refresh_lists_and_restart
 }
@@ -724,14 +724,14 @@ del_domain() {
 refresh_lists_and_restart() {
     local gw; gw="${GATEWAY_IP:-$(cat "${CONF_DIR}/.gateway_ip" 2>/dev/null || cat "${CONF_DIR}/.public_ip" 2>/dev/null || true)}"
     [[ -z "$gw" ]] && gw="$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[\d.]+' || echo 127.0.0.1)"
-    local cs; cs="$(cat "${SMARTDNS_DIR}/.cache_size" 2>/dev/null || echo 20000)"
+    local cs; cs="$(cat "${CONF_DIR}/.cache_size" 2>/dev/null || echo 20000)"
     local sd="${SCRIPTS_DIR}/update-lists.sh"; [[ -x "$sd" ]] || sd="${SCRIPT_DIR}/scripts/update-lists.sh"
     SMARTDNS_DIR="$SMARTDNS_DIR" GATEWAY_IP="$gw" CACHE_SIZE="$cs" bash "$sd"
 }
 
 do_update_lists() {
     check_root
-    info "Refreshing china_ip_list + foreign-cidr + smartdns.conf..."
+    info "Refreshing china_ip_list (chnroute for split-horizon)..."
     refresh_lists_and_restart
     ok "Lists refreshed."
 }
@@ -755,7 +755,7 @@ show_status() {
         pubip="$(cat "${CONF_DIR}/.public_ip" 2>/dev/null || echo N/A)"
         echo "📊 5gpn 状态"
         echo ""
-        for svc in smartdns sing-box; do
+        for svc in "5gpn-dns" sing-box; do
             s="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
             echo "  $([[ "$s" == active ]] && echo '✅' || echo '❌') ${svc}  (${s})"
         done
@@ -769,16 +769,18 @@ show_status() {
         echo "  域名      $domain"
         echo "  公网 IP   $pubip"
         echo "  DoT       tls://${domain}:853"
-        pd=0; [[ -f "${SMARTDNS_DIR}/proxy-domains.txt" ]] && pd="$(grep -cvE '^[[:space:]]*(#|$)' "${SMARTDNS_DIR}/proxy-domains.txt" 2>/dev/null | head -n1 || echo 0)"
+        pd=0
+        [[ -f "${DNS_RULES_DIR_DEFAULT}/blacklist.txt" ]] && \
+            pd="$(grep -cvE '^[[:space:]]*(#|$)' "${DNS_RULES_DIR_DEFAULT}/blacklist.txt" 2>/dev/null | head -n1 || echo 0)"
         echo "  强制代理域名  ${pd:-0}"
-        if [[ -f "${SMARTDNS_DIR}/foreign-cidr.txt" ]]; then
+        if [[ -f "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" ]]; then
             local f_lines now mtime f_age
-            f_lines="$(grep -cvE '^[[:space:]]*(#|$)' "${SMARTDNS_DIR}/foreign-cidr.txt" 2>/dev/null | head -n1 || echo 0)"
-            now=$(date +%s); mtime=$(stat -c %Y "${SMARTDNS_DIR}/foreign-cidr.txt" 2>/dev/null || echo "$now")
+            f_lines="$(grep -cvE '^[[:space:]]*(#|$)' "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" 2>/dev/null | head -n1 || echo 0)"
+            now=$(date +%s); mtime=$(stat -c %Y "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" 2>/dev/null || echo "$now")
             f_age="$(( (now - mtime) / 3600 ))h"
-            echo "  foreign-cidr  ${f_lines:-0} 行（age ${f_age}）"
+            echo "  china_ip_list  ${f_lines:-0} 行（age ${f_age}）"
         else
-            echo "  foreign-cidr  缺失"
+            echo "  china_ip_list  缺失"
         fi
     } | card
 }
@@ -817,15 +819,21 @@ full_install() {
     info "sing-box SNI resolver: ${SINGBOX_RESOLVER}"
 
     install_singbox
-    # Persist memory profile knobs the renderer/scripts read.
-    mkdir -p "$SMARTDNS_DIR"; echo "$CACHE_SIZE" > "${SMARTDNS_DIR}/.cache_size"
+    # Persist memory profile knobs for scripts that read it.
+    mkdir -p "$CONF_DIR"; echo "$CACHE_SIZE" > "${CONF_DIR}/.cache_size"
 
     resolve_domain
     verify_a_record
-    install_smartdns_unit
+    install_5gpndns_unit
     install_cert
+    write_dns_env
 
-    run_update_lists       # fetch china_ip_list, build foreign-cidr, render smartdns.conf
+    # Migrate off smartdns: disable + remove if a previous install left it behind.
+    systemctl disable --now smartdns 2>/dev/null || true
+    rm -f /etc/systemd/system/smartdns.service
+    # (conf dir left in place so operators can recover proxy lists if needed)
+
+    run_update_lists       # fetch china_ip_list for split-horizon routing
     run_setup_firewall     # DoT-only nft + sing-box unit
     system_tuning
     setup_ios_profile
@@ -855,9 +863,9 @@ usage() {
 Usage: sudo bash install.sh [option]
 
   (no args)           Full install / idempotent re-run
-  --update-lists      Refresh china_ip_list + foreign-cidr, re-render smartdns.conf
+  --update-lists      Refresh china_ip_list (chnroute for split-horizon)
   --status            Show service states, domain, IP, list counts/age
-  --add-domain <d>    Force-proxy a domain (adds to proxy-domains.txt)
+  --add-domain <d>    Force-proxy a domain (adds to rules/blacklist.txt)
   --del-domain <d>    Remove a domain from the forced-proxy list
   --ios               Regenerate the iOS profile + QR
   --setup-tgbot       Install + enable the Telegram control bot
@@ -865,6 +873,7 @@ Usage: sudo bash install.sh [option]
 
 Env overrides: DOMAIN=, PUBLIC_IP=, GATEWAY_IP=, EMAIL=, LOWMEM=1|0,
                CLIENT_NET=172.22.0.0/16, SINGBOX_RESOLVER=22.22.22.22, SINGBOX_VERSION=1.13.14,
+               DNS_VERSION=dns-v0.1.0, DNS_SHA256=,
                DOT_RATE=30, DOT_BURST=60,
                TGBOT_TOKEN=, TGBOT_ADMINS=
 EOF
