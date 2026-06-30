@@ -802,6 +802,18 @@ full_install() {
     # Drop the replaced xray proxy if a previous install left it behind.
     systemctl disable --now xray 2>/dev/null || true
     rm -f /etc/systemd/system/xray.service; rm -rf /usr/local/etc/xray
+
+    # P0: sing-box SNI re-resolver. Prompt only (no probe/warning); env wins; persist.
+    SINGBOX_RESOLVER="${SINGBOX_RESOLVER:-$(cat "$CONF_DIR/.singbox_resolver" 2>/dev/null || true)}"
+    SINGBOX_RESOLVER="${SINGBOX_RESOLVER:-$RESOLV_FALLBACK}"
+    if [[ -t 0 ]]; then
+        _r="$(ask_text 'sing-box SNI 解析器 (代理流量重解析; 留默认即占位 IP)' "$SINGBOX_RESOLVER" || true)"
+        [[ -n "$_r" ]] && SINGBOX_RESOLVER="$_r"
+    fi
+    export SINGBOX_RESOLVER
+    printf '%s\n' "$SINGBOX_RESOLVER" > "$CONF_DIR/.singbox_resolver"
+    info "sing-box SNI resolver: ${SINGBOX_RESOLVER}"
+
     install_singbox
     # Persist memory profile knobs the renderer/scripts read.
     mkdir -p "$SMARTDNS_DIR"; echo "$CACHE_SIZE" > "${SMARTDNS_DIR}/.cache_size"

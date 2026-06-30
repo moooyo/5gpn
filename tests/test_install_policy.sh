@@ -38,5 +38,10 @@ grep -Eq 'tcp_ports=.*8111' "$FW" && fail ":8111 must NOT be in the public tcp s
 grep -Eq 'GATEWAY_IP:-\$PUBLIC_IP' "$INSTALL" \
     || fail "no client-facing GATEWAY_IP (default PUBLIC_IP) for ip-alias/iOS profile"
 
+# P0: install-time SNI resolver is prompted, persisted, and env-overridable.
+grep -Eq '\.singbox_resolver'                  "$INSTALL" || fail "resolver not persisted to /etc/5gpn/.singbox_resolver"
+grep -Eq 'SINGBOX_RESOLVER'                    "$INSTALL" || fail "SINGBOX_RESOLVER not wired in install flow"
+grep -Eq 'ask_text .*(解析器|resolver)'         "$INSTALL" || fail "no resolver prompt"
+
 [ $rc -eq 0 ] && echo "install policy: PASS"
 exit $rc
