@@ -24,7 +24,7 @@
 - **抗污染(约束 2)**:smartdns 国内解析器加 `-whitelist-ip`(只收中国 IP)+ `conf-file` 引入生成的 `china-whitelist.conf` 与 `bogus-nxdomain.conf`。
 
 ### 应修(§3)
-解压炸弹上限(restore 每成员封顶)、拒绝 chunked/`Transfer-Encoding`、`renew-hook.sh` 用 `$RENEWED_LINEAGE`、生成器丢弃 `/0` 且拒绝空 foreign 集、`--status` 计数一致、README 状态+用法。
+解压炸弹上限(restore 每成员封顶)、拒绝 chunked/`Transfer-Encoding`、`renew-hook.sh` 用 `$RENEWED_LINEAGE`、生成器丢弃 `/0` 且拒绝空 foreign 集、`--status` 计数一致、README 状态+用法。(注:这些 guard 随 api-server.py 移除;现 ios-http.py 为 GET-only 静态响应,不读请求体)
 
 ### 安全硬化(§4,经对抗式评审)
 systemd 沙箱(`NoNewPrivileges`/`ProtectSystem=strict`/`ProtectKernel*` 等)、DoT :853 每源限速(`DOT_RATE`/`DOT_BURST` 可调)、鉴权失败日志(**限速 1/s + 脱敏**防 journald 刷屏与终端转义注入)、`SMARTDNS_SHA256` 选配校验。

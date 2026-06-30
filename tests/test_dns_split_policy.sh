@@ -36,6 +36,12 @@ grep -Eq 'china_ip\.conf'        "$U" || fail "update-lists must generate china_
 grep -Eq 'CHINA_DOMAINS_FILE='   "$U" || fail "update-lists must pass CHINA_DOMAINS_FILE to render"
 grep -Eq 'CHINA_IP_FILE='        "$U" || fail "update-lists must pass CHINA_IP_FILE to render"
 grep -Eq 'CHINA_WHITELIST_FILE=' "$U" && fail "CHINA_WHITELIST_FILE removed (replaced by china_ip ip-set)"
+# --- dualstack-ip-selection must be disabled (no IPv6 preference interference) ---
+grep -Eq '^dualstack-ip-selection no' "$T" || fail "dualstack-ip-selection must be no"
+# --- install.sh must reference DOT_RATE/DOT_BURST (forward/help) ---
+I="$ROOT/install.sh"
+grep -Eq 'DOT_RATE'  "$I" || fail "install.sh must reference DOT_RATE (forward/help)"
+grep -Eq 'DOT_BURST' "$I" || fail "install.sh must reference DOT_BURST (forward/help)"
 
 [ $rc -eq 0 ] && echo "dns split policy: PASS"
 exit $rc

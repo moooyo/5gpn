@@ -25,13 +25,22 @@
       `kdig @<host-ip> +tls www.qq.com`
       Expect: a real China IP (in china_ip_list), NOT the gateway IP.
 
-- [ ] **Mixed IP → prefer China (选国内)**
-      Pick a domain known to resolve to both CN and foreign IPs; `kdig @<host-ip> +tls <domain>`.
-      Expect: a China IP (direct), NOT the gateway IP.
-      If it returns the gateway IP instead: tune anti-pollution / preference
-      (e.g. add a `nameserver /domain/cn` split or `-whitelist-ip` on the cn
-      group) and re-test. Record the tuning applied here:
-      - tuning: __________
+- [ ] **Blacklist → gateway IP (tier 1)**
+      Pick a domain in `proxy-domains.txt`; `kdig @<host-ip> +tls <domain>`.
+      Expect: answer == `<GATEWAY_IP>` (no real resolution, direct address return).
+
+- [ ] **Whitelist → direct, domestic-only DNS (tier 2)**
+      Pick a domain in `china-domains.txt`; `kdig @<host-ip> +tls <domain>`.
+      Expect: a real China IP (not the gateway IP).
+      Run `tcpdump -ni any port 853` during the query — confirm the query went ONLY to
+      the domestic group (no DoT traffic to 8.8.8.8 or 1.1.1.1).
+
+- [ ] **Tier-3 mixed → prefer China (no speed test)**
+      Use a domain that resolves to both CN and foreign IPs; `kdig @<host-ip> +tls <domain>`.
+      Expect: a China IP is returned (direct). With the CN record removed (or a domain
+      whose only answers are foreign), expect the gateway IP (proxy via ip-alias).
+      Confirm no ping/probe traffic (`speed-check-mode none`): `tcpdump -ni any icmp`
+      must be silent during the query.
 
 - [ ] **AAAA disabled**
       `kdig @<host-ip> +tls -t AAAA www.google.com`

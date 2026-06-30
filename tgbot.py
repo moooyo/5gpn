@@ -312,7 +312,7 @@ def op_status():
     pubip = _read_file(PUBLIC_IP_FILE)
     if pubip:
         lines.append("🌍 公网 IP：<code>%s</code>" % html.escape(pubip))
-    lines.append("🎯 强制代理域名：<b>%d</b> 个" % len(_proxy_domains()))
+    lines.append("🎯 黑名单(强制代理)域名：<b>%d</b> 个" % len(_proxy_domains()))
 
     if down:
         lines += ["", "⚠️ 异常：%s（用 📜 日志查看）" % html.escape("、".join(down))]
@@ -327,9 +327,9 @@ def op_status():
 def op_list_domains():
     ds = _proxy_domains()
     if not ds:
-        return "🎯 <b>强制代理域名</b>\n\n（列表为空）\n用「➕ 加域名」添加一个。"
+        return "🎯 <b>黑名单(强制代理)域名</b>\n\n（列表为空）\n用「➕ 加域名」添加一个。"
     body = "\n".join("%d. %s" % (i + 1, d) for i, d in enumerate(ds))
-    return "🎯 <b>强制代理域名</b>（%d 个）：\n<pre>%s</pre>" % (len(ds), html.escape(body))
+    return "🎯 <b>黑名单(强制代理)域名</b>（%d 个）：\n<pre>%s</pre>" % (len(ds), html.escape(body))
 
 
 def op_add_domain(domain):
@@ -338,7 +338,7 @@ def op_add_domain(domain):
         return "❌ 域名无效。请发送形如 <code>example.com</code> 的域名，或 /cancel。"
     ok, out = run(["bash", INSTALL, "--add-domain", domain], timeout=300)
     if ok:
-        return "✅ 已把 <b>%s</b> 加入强制代理列表，并已刷新生效。" % html.escape(domain)
+        return "✅ 已把 <b>%s</b> 加入黑名单(强制代理)列表，并已刷新生效。" % html.escape(domain)
     return "❌ <b>添加失败</b>\n%s" % pre(_tail(out, 6))
 
 
@@ -348,7 +348,7 @@ def op_del_domain(domain):
         return "❌ 域名无效。请发送要删除的域名，或 /cancel。"
     ok, out = run(["bash", INSTALL, "--del-domain", domain], timeout=300)
     if ok:
-        return "✅ 已把 <b>%s</b> 从强制代理列表移除，并已刷新生效。" % html.escape(domain)
+        return "✅ 已把 <b>%s</b> 从黑名单(强制代理)列表移除，并已刷新生效。" % html.escape(domain)
     return "❌ <b>删除失败</b>\n%s" % pre(_tail(out, 6))
 
 
@@ -544,7 +544,7 @@ def handle_callback(cb):
     # ---- conversational starts ----
     elif data == "dom:add":
         PENDING[chat_id] = {"action": "add_domain"}
-        edit(cb, "➕ 发送要<b>强制走代理</b>的域名（如 <code>example.com</code>）。\n发送 /cancel 取消。")
+        edit(cb, "➕ 发送要加入<b>黑名单(强制代理)</b>的域名（如 <code>example.com</code>）。\n发送 /cancel 取消。")
     elif data == "dom:del":
         PENDING[chat_id] = {"action": "del_domain"}
         edit(cb, op_list_domains() + "\n\n🗑 发送要<b>删除</b>的域名，或 /cancel 取消。")

@@ -57,36 +57,52 @@
 
 > 具体指令以 P1 spec 为准,下面是设计意图骨架。
 
+三层确定性分流:
+
+- **第一层(黑名单)**:`proxy-domains.txt` 中的域名 → `address /domain-set:blacklist/GATEWAY_IP`(不解析,直接返回网关 IP,必代理)。
+- **第二层(白名单)**:`china-domains.txt`(felixonmars 列表,自动更新)中的域名 → `nameserver /domain-set:cnlist/domestic`(只询问境内 DNS 组)→ 直连。
+- **第三层(其余)**:默认组(境内+境外上游都查)+ `ip-rules ip-set:china_ip -whitelist-ip`(合并答案含 CN IP 则只保留 CN IP,**内容过滤,不测速**)+ `speed-check-mode none`;无 CN IP → 答案全为境外 → `ip-rules ip-set:foreign -ip-alias GATEWAY_IP` → 改写成网关 IP → 进代理。
+
 ```ini
 # 入口:仅 DoT 对外
 bind-tls [::]:853
-tls-cert-file /etc/smartdns/cert/fullchain.pem
-tls-key-file  /etc/smartdns/cert/privkey.pem
+bind-cert-file   /etc/smartdns/cert/fullchain.pem
+bind-cert-key-file /etc/smartdns/cert/privkey.pem
 bind 127.0.0.1:5353        # 仅本机内部用,不对外
 
 # IPv4 only
 force-AAAA-SOA yes
 
-# 上游(抗污染):无域名表,所有上游并发竞速;不分 group / 不 exclude-default。
-# 国内明文解析器 -whitelist-ip:只接受中国 IP(滤掉污染/伪国内答案);
-# 干净 DoT 解析器无过滤:拿真实国外 IP。
-server     223.5.5.5    -whitelist-ip                 # 国内:只收中国 IP
-server     119.29.29.29 -whitelist-ip
-server-tls 8.8.8.8 -host-name dns.google             # 干净:真实国外 IP
-server-tls 1.1.1.1
-conf-file /etc/smartdns/china-whitelist.conf         # whitelist-ip 集(由 china_ip_list 生成)
-conf-file /etc/smartdns/bogus-nxdomain.conf          # 已知污染 IP -> SOA
+# 不测速,第三层由 IP 内容(china_ip)决定,非竞速
+speed-check-mode none
+dualstack-ip-selection no
 
-# ① 强制代理域名 → 网关IP（命中即代理，不解析）
-domain-set -name proxylist -file /etc/smartdns/proxy-domains.txt
-address /domain-set:proxylist/__GATEWAY_IP__
+# 上游两组,均留在默认组(第三层名称两组都查)
+server 223.5.5.5 -group domestic
+server 119.29.29.29 -group domestic
+server-tls 8.8.8.8 -host-name dns.google -group foreign
+server-tls 1.1.1.1 -group foreign
 
-# ② chnroute：解析后若 IP 属于「非中国」→ 改写成网关IP
-ip-set   -name foreign -file /etc/smartdns/foreign-cidr.txt
-ip-rules ip-set:foreign -ip-alias __GATEWAY_IP__
+# 已知污染 IP → SOA
+conf-file /etc/smartdns/bogus-nxdomain.conf
+
+# ① 第一层:黑名单 → 网关 IP(不解析,必代理)
+domain-set -name blacklist -type list -file /etc/smartdns/proxy-domains.txt
+address /domain-set:blacklist/GATEWAY_IP
+
+# ② 第二层:白名单(大陆域名)→ 只问境内 DNS → 直连
+domain-set -name cnlist -type list -file /etc/smartdns/china-domains.txt
+nameserver /domain-set:cnlist/domestic
+
+# ③ 第三层:其余 → 默认组(两组都查);含 CN IP → 只留 CN(内容过滤,不测速)
+ip-set -name china_ip -type list -file /etc/smartdns/china_ip.conf
+ip-rules ip-set:china_ip -whitelist-ip
+# 无 CN IP 时答案为境外 → 改写为网关 IP → 进代理
+ip-set -name foreign -type list -file /etc/smartdns/foreign-cidr.txt
+ip-rules ip-set:foreign -ip-alias GATEWAY_IP
 ```
 
-设计意图:对未命中强制表的域名,smartdns 并发查所有上游;国内明文解析器经 `-whitelist-ip` 只回中国 IP(污染/伪国内答案被滤掉),干净 DoT 解析器拿真实国外 IP。国内域名 → 拿到就近国内 IP(不在 foreign 集 → 直连);被墙/国外域名 → 拿到真实国外 IP(在 foreign 集 → `ip-alias` 改写成网关 IP → 进 sing-box)。**不需要 chinalist**:国内/国外的区分由"解析出的 IP 是否在中国段"决定。残留硬伤:被污染成"看着像国内"的 IP 仍会通过 whitelist(补进强制表自愈)。
+设计意图:第一层覆盖已知必代理/被污染域名(不解析即返回网关 IP);第二层用 felixonmars 大陆域名表强制只问境内上游(避免境内域名被境外 DoT 拿到国外 IP);第三层对既不在黑名单也不在白名单的域名并发查两组,用 `whitelist-ip` 内容过滤保留 CN IP(有则直连、外压掉),无 CN 则全走代理。**`speed-check-mode none`**:选择完全由 IP 归属决定,与应答先后无关(确定性,非 response-mode 竞速)。残留硬伤:被污染成"看着像国内"的 IP 仍会通过 `whitelist-ip` 误判直连 → 把该域名补进黑名单自愈。
 
 ## 5. 三大正确性约束(必须在实现中强保证)
 
@@ -157,3 +173,10 @@ smartdns 规则均为**磁盘文本文件**;控制面(**Telegram Bot** `tgbot.py
 - **版本锁定**:pin `1.13.14`(`SINGBOX_VERSION` 可覆盖),config 按 1.12+ 新语法(typed DNS + rule-action)。
 - **sha256 验证**:默认不校验,保留 `SINGBOX_SHA256` opt-in(非致命)——sing-box 无 `.dgst` 旁文件,免去脆弱逻辑。(与 gum 强制 sha256 对比:gum 有 `checksums.txt`,可自动验;sing-box 无等价机制,故改为可选)
 - **保留历史**:xray 相关旧配置保留于 git 历史(上一条已定决策条目不删)。回滚靠 `git revert` + 切回旧单元 + `install_xray`。
+
+**决策追加 2026-06-30 — 分流模型:纯 IP 判定 → 三层确定性(反转「不维护 chinalist」):**
+- **背景**:原 §4 称"含一个 CN IP 即直连"是硬保证,但代码只有 `response-mode first-ping` 延迟启发式,混合 CN/境外答案可能误判。
+- **新模型**:① 黑名单(`proxy-domains.txt`)→ `address`→网关IP(不解析,必代理);② 白名单(`china-domains.txt`,felixonmars,自动更新)→ `nameserver /domain-set:cnlist/domestic`(只问境内 DNS)→ 直连;③ 其余 → 默认组(境内+境外)都查 + `ip-rules ip-set:china_ip -whitelist-ip`(含 CN 即只留 CN,内容过滤、**不测速**)+ `speed-check-mode none`;无 CN → 境外 → `ip-alias`→ 代理。
+- **机制依据**:smartdns `whitelist-ip` 仅在答案含白名单 IP 时触发,对合并答案过滤,与应答先后无关 → 确定性(非 response-mode 竞速)。需 2024+ smartdns(空结果缓存修复)。
+- **取舍**:多一张 ~8 万条自动更新域名表;移除 per-server `-whitelist-ip` 与 `china-whitelist.conf`(由全局 `ip-rules china_ip` 取代)。残留硬伤(伪 CN 污染)仍靠黑名单自愈。
+- **保留历史**:旧"不维护 chinalist"决策不删;回滚靠 git。

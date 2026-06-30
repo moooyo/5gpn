@@ -38,7 +38,7 @@
 
 ## 关键特性
 
-- **两级分流,无需维护大域名表**:一张小的**强制代理域名表**(`proxy-domains.txt`,污染兜底/已知必代理)+ 一张 **chnroute 反集**(`foreign-cidr.txt`,非中国 IP 段,自动生成并定时刷新)。国内/国外的区分由"解析出的 IP 是否在中国段"决定,不需要 chinalist/gfwlist。
+- **三层确定性分流**:① **黑名单**(`proxy-domains.txt`,污染兜底/已知必代理)→ `address` 直接返回网关 IP(不解析);② **白名单**(`china-domains.txt`,felixonmars,自动更新)→ 只问境内 DNS → 直连;③ **其余** → 境内+境外并发查 + `ip-rules china_ip -whitelist-ip`(含 CN IP 优先直连,不测速)→ 无 CN 则 `ip-alias` 改写成网关 IP → 进代理。`speed-check-mode none`。
 - **抗污染解析**:国内明文上游用 `-whitelist-ip` 只接受中国 IP(滤掉污染答案),干净 DoT 上游(8.8.8.8 / 1.1.1.1)拿真实国外 IP,并发竞速选优。
 - **仅 DoT 接入**:对外只开 853(TLS),无明文 53 入口;客户端零 App。
 - **直出**:被代理流量经 sing-box `direct` inbound 透明转发(不解密 TLS),直接走网关默认路由出网——无 mark / 隧道 / 多出口 / 策略路由。
