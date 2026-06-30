@@ -147,6 +147,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 	if direct != nil && direct.Match(bare) {
 		if isA {
 			if cached, ok := h.cacheGet(name, q.Qtype); ok {
+				cached.Id = r.Id
 				return cached
 			}
 			resp, err := Arbitrate(ctx, r, h.China, h.Trust, cn)
@@ -173,6 +174,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 	// ── Step 6: default ──────────────────────────────────────────────────────
 	if isA {
 		if cached, ok := h.cacheGet(name, q.Qtype); ok {
+			cached.Id = r.Id
 			return cached
 		}
 		resp, err := Arbitrate(ctx, r, h.China, h.Trust, cn)
@@ -195,6 +197,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 // The result is cached.
 func (h *Handler) forwardTrust(ctx context.Context, r *dns.Msg, name string, qtype uint16) *dns.Msg {
 	if cached, ok := h.cacheGet(name, qtype); ok {
+		cached.Id = r.Id
 		return cached
 	}
 	resp, err := h.Trust.Exchange(ctx, r)

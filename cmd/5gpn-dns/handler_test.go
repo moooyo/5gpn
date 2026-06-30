@@ -637,3 +637,44 @@ func TestHandlerTimeoutZeroDoesNotSERVFAIL(t *testing.T) {
 		t.Errorf("ServeDNS returned SERVFAIL for Timeout==0; expected success")
 	}
 }
+
+// TestCacheHitPreservesRequestID: a cache hit must return the CURRENT request's
+// transaction ID, not the ID from the first (cache-populating) query.
+// Regression for: cached *dns.Msg.Id was not reset to the incoming r.Id, causing
+// strict DNS clients (dig, Android/iOS DoT) to reject the response as an ID mismatch.
+func TestCacheHitPreservesRequestID(t *testing.T) {
+	// Use a default (non-direct, non-blacklist) name so we exercise Step 6.
+	china := &fakeExchanger{reply: makeAMsg("cached.test", "1.2.3.4")}
+	trust := &fakeExchanger{reply: makeAMsg("cached.test", "9.9.9.9")}
+	h := newTestHandler(t, china, trust)
+
+	// First query: cache miss — populates the cache. Use ID=1111.
+	req1 := new(dns.Msg)
+	req1.SetQuestion("cached.test.", dns.TypeA)
+	req1.Id = 1111
+	q := dns.Question{Name: "cached.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	resp1 := h.resolve(context.Background(), q, req1)
+	if resp1 == nil {
+		t.Fatal("first resolve returned nil")
+	}
+
+	// Second query: cache hit. Use a DIFFERENT ID=2222.
+	req2 := new(dns.Msg)
+	req2.SetQuestion("cached.test.", dns.TypeA)
+	req2.Id = 2222
+	resp2 := h.resolve(context.Background(), q, req2)
+	if resp2 == nil {
+		t.Fatal("second resolve returned nil")
+	}
+
+	// The response ID must match the SECOND request's ID, not the first.
+	if resp2.Id != 2222 {
+		t.Errorf("cache hit returned Id=%d; want 2222 (the second request's Id, not the cached %d)", resp2.Id, resp1.Id)
+	}
+
+	// Sanity: answer must still be correct (CN IP 1.2.3.4 kept as-is).
+	ips := collectAIPs(resp2)
+	if len(ips) == 0 || ips[0] != "1.2.3.4" {
+		t.Errorf("cache hit returned wrong IPs: %v; want [1.2.3.4]", ips)
+	}
+}
