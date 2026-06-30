@@ -59,25 +59,9 @@ func newTestHandler(t *testing.T, china, trust Exchanger) *Handler {
 	}
 }
 
-// makeAMsg builds a dns.Msg A-record reply containing the given IPs.
+// makeAMsg builds a dns.Msg A-record reply containing the given IPs (TTL=60s).
 func makeAMsg(name string, ips ...string) *dns.Msg {
-	m := new(dns.Msg)
-	q := new(dns.Msg)
-	q.SetQuestion(dns.Fqdn(name), dns.TypeA)
-	m.SetReply(q)
-	m.RecursionAvailable = true
-	for _, ip := range ips {
-		m.Answer = append(m.Answer, &dns.A{
-			Hdr: dns.RR_Header{
-				Name:   dns.Fqdn(name),
-				Rrtype: dns.TypeA,
-				Class:  dns.ClassINET,
-				Ttl:    60,
-			},
-			A: net.ParseIP(ip).To4(),
-		})
-	}
-	return m
+	return makeAMsgWithTTL(name, 60, ips...)
 }
 
 // makeAAAAMsg builds a dns.Msg AAAA-record reply.
@@ -497,20 +481,26 @@ func TestCachePutDoesNotCacheSERVFAIL(t *testing.T) {
 	}
 }
 
-// TestMinAnswerTTLEmptyAnswer: empty Answer (NODATA) → ttlMin, not ttlMax.
-func TestMinAnswerTTLEmptyAnswer(t *testing.T) {
-	ttlMin := 10 * time.Second
-	ttlMax := 300 * time.Second
+// TestCachePutNODATACachesTTLMin: a NOERROR response with no Answer RRs (NODATA)
+// must be cached for TTLMin (policy lives in cachePut, not minAnswerTTL).
+func TestCachePutNODATACachesTTLMin(t *testing.T) {
+	china := &fakeExchanger{}
+	trust := &fakeExchanger{}
+	h := newTestHandler(t, china, trust)
 
 	nodataMsg := new(dns.Msg)
 	q0 := new(dns.Msg)
 	q0.SetQuestion("nodata.test.", dns.TypeA)
 	nodataMsg.SetReply(q0)
-	// Intentionally no Answer RRs.
+	// Intentionally no Answer RRs — NODATA.
 
-	got := minAnswerTTL(nodataMsg, ttlMin, ttlMax)
-	if got != ttlMin {
-		t.Errorf("empty Answer: minAnswerTTL = %v, want ttlMin=%v (not ttlMax=%v)", got, ttlMin, ttlMax)
+	h.cachePut("nodata.test.", dns.TypeA, nodataMsg)
+	cached, ok := h.Cache.Get("nodata.test.", dns.TypeA)
+	if !ok {
+		t.Fatal("NODATA NOERROR response should be cached")
+	}
+	if cached.Rcode != dns.RcodeSuccess {
+		t.Errorf("expected cached NOERROR, got %d", cached.Rcode)
 	}
 }
 
@@ -542,7 +532,6 @@ func TestMinAnswerTTLNonEmpty(t *testing.T) {
 // must produce a gateway RR whose TTL is within [TTLMin, TTLMax].
 func TestGatewayRRTTLClamped(t *testing.T) {
 	for _, upstreamTTL := range []uint32{0, 99999} {
-		upstreamTTL := upstreamTTL
 		t.Run(fmt.Sprintf("upstream_ttl_%d", upstreamTTL), func(t *testing.T) {
 			upstream := makeAMsgWithTTL("clamp.test", upstreamTTL, "9.9.9.9") // foreign IP → gateway rewrite
 			china := &fakeExchanger{reply: upstream}
@@ -591,5 +580,60 @@ func TestNilCNDoesNotPanic(t *testing.T) {
 	resp := h.resolve(context.Background(), q, req)
 	if resp == nil {
 		t.Fatal("expected non-nil response")
+	}
+}
+
+// TestGatewayReplyDoesNotAliasGatewayIP: mutating the returned A.A bytes must
+// not affect h.GatewayIP (the reply must own a copy, not share the backing array).
+func TestGatewayReplyDoesNotAliasGatewayIP(t *testing.T) {
+	china := &fakeExchanger{}
+	trust := &fakeExchanger{}
+	h := newTestHandler(t, china, trust)
+
+	req := new(dns.Msg)
+	req.SetQuestion("blacklist.test.", dns.TypeA)
+
+	resp := h.gatewayReply(req)
+	if resp == nil || len(resp.Answer) == 0 {
+		t.Fatal("expected non-empty gatewayReply")
+	}
+	aRR, ok := resp.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatalf("expected *dns.A, got %T", resp.Answer[0])
+	}
+
+	// Record original GatewayIP value.
+	origGW := make(net.IP, len(h.GatewayIP))
+	copy(origGW, h.GatewayIP)
+
+	// Mutate the returned A.A bytes in place.
+	for i := range aRR.A {
+		aRR.A[i] = 0xFF
+	}
+
+	// h.GatewayIP must be unchanged.
+	if !h.GatewayIP.Equal(origGW) {
+		t.Errorf("gatewayReply aliased GatewayIP: after mutation h.GatewayIP=%v, want %v", h.GatewayIP, origGW)
+	}
+}
+
+// TestHandlerTimeoutZeroDoesNotSERVFAIL: a Handler with Timeout==0 must resolve
+// a normal A query successfully (the zero-value guard defaults to 5s).
+func TestHandlerTimeoutZeroDoesNotSERVFAIL(t *testing.T) {
+	china := &fakeExchanger{reply: makeAMsg("example.test", "1.2.3.4")}
+	trust := &fakeExchanger{reply: makeAMsg("example.test", "9.9.9.9")}
+	h := newTestHandler(t, china, trust)
+	h.Timeout = 0 // exercise the zero-value guard
+
+	req := new(dns.Msg)
+	req.SetQuestion("example.test.", dns.TypeA)
+	w := &fakeWriter{remote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1234}}
+	h.ServeDNS(w, req)
+
+	if w.written == nil {
+		t.Fatal("ServeDNS did not write a response")
+	}
+	if w.written.Rcode == dns.RcodeServerFailure {
+		t.Errorf("ServeDNS returned SERVFAIL for Timeout==0; expected success")
 	}
 }

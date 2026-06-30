@@ -138,8 +138,9 @@ func TestArbitrateDeterminism(t *testing.T) {
 			q := new(dns.Msg)
 			q.SetQuestion("example.com.", dns.TypeA)
 
-			ctx := context.Background()
-			got, err := Arbitrate(ctx, q, tc.china, tc.trust, cn, timeout)
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			got, err := Arbitrate(ctx, q, tc.china, tc.trust, cn)
 			if err != nil {
 				t.Fatalf("Arbitrate returned error: %v", err)
 			}
@@ -177,8 +178,9 @@ func TestArbitrateTimeout(t *testing.T) {
 	q := new(dns.Msg)
 	q.SetQuestion("example.com.", dns.TypeA)
 
-	ctx := context.Background()
-	got, err := Arbitrate(ctx, q, china, trust, cn, 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	got, err := Arbitrate(ctx, q, china, trust, cn)
 	if err != nil {
 		t.Fatalf("Arbitrate returned error on china timeout: %v", err)
 	}

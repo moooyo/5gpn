@@ -2,7 +2,6 @@ package chnroute
 
 import (
 	"context"
-	"time"
 
 	"github.com/miekg/dns"
 )
@@ -27,17 +26,14 @@ func chinaIsCN(reply *dns.Msg, cn *Chnroute) bool {
 // to the deterministic chnroute rule:
 //
 //   - Start both upstreams simultaneously.
-//   - Wait for the china reply (up to timeout).
+//   - Wait for the china reply (bounded by ctx deadline set by the caller).
 //   - If the china reply contains any A record ∈ cn → return the china reply.
 //   - Otherwise (china foreign/error/timeout/NODATA) → return the trust reply.
 //
 // The decision is based solely on the chnroute membership of the china answer —
-// NEVER on which upstream returned first.
-func Arbitrate(ctx context.Context, q *dns.Msg, china, trust Exchanger, cn *Chnroute, timeout time.Duration) (*dns.Msg, error) {
-	// Each upstream runs in its own goroutine; we give china a bounded deadline.
-	chinaCtx, chinaCancel := context.WithTimeout(ctx, timeout)
-	defer chinaCancel()
-
+// NEVER on which upstream returned first.  Both upstreams are bounded by the
+// caller's ctx deadline; no second timeout is created here.
+func Arbitrate(ctx context.Context, q *dns.Msg, china, trust Exchanger, cn *Chnroute) (*dns.Msg, error) {
 	type exchangeResult struct {
 		msg *dns.Msg
 		err error
@@ -46,9 +42,9 @@ func Arbitrate(ctx context.Context, q *dns.Msg, china, trust Exchanger, cn *Chnr
 	chinaCh := make(chan exchangeResult, 1)
 	trustCh := make(chan exchangeResult, 1)
 
-	// Launch both concurrently.
+	// Launch both concurrently on the caller's ctx.
 	go func() {
-		m, err := china.Exchange(chinaCtx, q)
+		m, err := china.Exchange(ctx, q)
 		chinaCh <- exchangeResult{m, err}
 	}()
 	go func() {
@@ -56,7 +52,7 @@ func Arbitrate(ctx context.Context, q *dns.Msg, china, trust Exchanger, cn *Chnr
 		trustCh <- exchangeResult{m, err}
 	}()
 
-	// Wait for the china result (bounded by chinaCtx timeout).
+	// Wait for the china result (bounded by ctx deadline).
 	chinaRes := <-chinaCh
 
 	// Deterministic decision: if china has a CN address, return it.

@@ -41,9 +41,13 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		_ = w.WriteMsg(m)
 		return
 	}
-	// Fix #5: impose an overall query deadline so the trust goroutine
-	// inside Arbitrate can't run undeadlined.
-	ctx, cancel := context.WithTimeout(context.Background(), h.Timeout)
+	// Impose an overall query deadline. Guard against zero/negative Timeout
+	// (zero-value Handler) which would produce an already-expired context.
+	to := h.Timeout
+	if to <= 0 {
+		to = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), to)
 	defer cancel()
 	q := r.Question[0]
 	resp := h.resolve(ctx, q, r)
@@ -100,7 +104,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 			if cached, ok := h.cacheGet(name, q.Qtype); ok {
 				return cached
 			}
-			resp, err := Arbitrate(ctx, r, h.China, h.Trust, h.CN, h.Timeout)
+			resp, err := Arbitrate(ctx, r, h.China, h.Trust, h.CN)
 			if err != nil || resp == nil {
 				return h.serverFail(r)
 			}
@@ -126,7 +130,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 		if cached, ok := h.cacheGet(name, q.Qtype); ok {
 			return cached
 		}
-		resp, err := Arbitrate(ctx, r, h.China, h.Trust, h.CN, h.Timeout)
+		resp, err := Arbitrate(ctx, r, h.China, h.Trust, h.CN)
 		if err != nil || resp == nil {
 			return h.serverFail(r)
 		}
@@ -160,7 +164,7 @@ func (h *Handler) forwardTrust(ctx context.Context, r *dns.Msg, name string, qty
 // replaced with GatewayIP.  Multiple foreign IPs collapse to a single GatewayIP
 // entry (dedup).  The reply headers are refreshed from r.
 func (h *Handler) rewriteA(resp *dns.Msg, r *dns.Msg) *dns.Msg {
-	out := resp.Copy()
+	out := new(dns.Msg)
 	out.SetReply(r)
 	out.RecursionAvailable = true
 
@@ -179,16 +183,12 @@ func (h *Handler) rewriteA(resp *dns.Msg, r *dns.Msg) *dns.Msg {
 		} else {
 			if !gatewayAdded {
 				gw := &dns.A{
-					Hdr: dns.RR_Header{
-						Name:   a.Hdr.Name,
-						Rrtype: a.Hdr.Rrtype,
-						Class:  a.Hdr.Class,
-						// Fix #3: clamp gateway RR TTL to [TTLMin, TTLMax].
-						// Fix #6: copy GatewayIP to avoid slice aliasing.
-						Ttl: clampTTL(a.Hdr.Ttl, h.TTLMin, h.TTLMax),
-					},
-					A: append(net.IP(nil), h.GatewayIP...),
+					// Copy all Hdr fields from the upstream RR (preserves Rdlength
+					// and any future fields), then clamp only the TTL.
+					Hdr: a.Hdr,
+					A:   append(net.IP(nil), h.GatewayIP...),
 				}
+				gw.Hdr.Ttl = clampTTL(a.Hdr.Ttl, h.TTLMin, h.TTLMax)
 				rewritten = append(rewritten, gw)
 				gatewayAdded = true
 			}
@@ -249,7 +249,7 @@ func (h *Handler) gatewayReply(r *dns.Msg) *dns.Msg {
 			Class:  dns.ClassINET,
 			Ttl:    clampTTL(60, h.TTLMin, h.TTLMax),
 		},
-		A: h.GatewayIP,
+		A: append(net.IP(nil), h.GatewayIP...),
 	}}
 	return m
 }
@@ -280,17 +280,19 @@ func (h *Handler) cachePut(name string, qtype uint16, resp *dns.Msg) {
 	if resp.Rcode != dns.RcodeSuccess {
 		return
 	}
+	// NODATA (NOERROR with empty Answer): cache for TTLMin so the negative result
+	// is not stored indefinitely.
+	if len(resp.Answer) == 0 {
+		h.Cache.Put(name, qtype, resp, h.TTLMin)
+		return
+	}
 	ttl := minAnswerTTL(resp, h.TTLMin, h.TTLMax)
 	h.Cache.Put(name, qtype, resp, ttl)
 }
 
 // minAnswerTTL returns the minimum TTL across all answer RRs, clamped to
-// [ttlMin, ttlMax].  If there are no answer RRs (NODATA), ttlMin is returned.
+// [ttlMin, ttlMax].  Caller must ensure m.Answer is non-empty.
 func minAnswerTTL(m *dns.Msg, ttlMin, ttlMax time.Duration) time.Duration {
-	// Fix #2: empty Answer (NODATA) → return ttlMin, not ttlMax.
-	if len(m.Answer) == 0 {
-		return ttlMin
-	}
 	min := ttlMax
 	for _, rr := range m.Answer {
 		t := time.Duration(rr.Header().Ttl) * time.Second
