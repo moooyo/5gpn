@@ -21,7 +21,7 @@
 ### 必修(P0/P1)
 - **证书续期**:`install.sh` 加全局 `renewal-hooks/pre|post`(临时开 80 + 停 sing-box → 还原)+ Persistent `5gpn-certbot-renew.timer`,绕过 DoT-only 防火墙与 sing-box 占用 :80 的问题(否则证书 ~90 天到期 → DoT 全量下线)。
 - **iOS / 防火墙拓扑**:`setup-firewall.sh` 放行 `172.22 → 8111`(iOS 描述文件抓取),profile 指向内网网关地址。
-- **抗污染(约束 2)**:smartdns 国内解析器加 `-whitelist-ip`(只收中国 IP)+ `conf-file` 引入生成的 `china-whitelist.conf` 与 `bogus-nxdomain.conf`。
+- **抗污染(约束 2)**:smartdns 国内解析器加 `-whitelist-ip`(只收中国 IP)+ `conf-file` 引入生成的 `china-whitelist.conf` 与 `bogus-nxdomain.conf`。(已于 2026-06-30 被三层全局模型取代:全局 `ip-rules ip-set:china_ip -whitelist-ip` 对合并后答案过滤,per-server `-whitelist-ip` 与 `china-whitelist.conf` 已移除,改由 `china_ip.conf` 承载 ip-set；见 §12 决策记录。)
 
 ### 应修(§3)
 解压炸弹上限(restore 每成员封顶)、拒绝 chunked/`Transfer-Encoding`、`renew-hook.sh` 用 `$RENEWED_LINEAGE`、生成器丢弃 `/0` 且拒绝空 foreign 集、`--status` 计数一致、README 状态+用法。(注:这些 guard 随 api-server.py 移除;现 ios-http.py 为 GET-only 静态响应,不读请求体)
@@ -51,7 +51,7 @@ systemd 沙箱(`NoNewPrivileges`/`ProtectSystem=strict`/`ProtectKernel*` 等)、
 
 - [ ] 全装一遍:`sudo bash install.sh`(NPN 时先 `export GATEWAY_IP=<内网>`)。
 - [ ] **P1 DNS**:DoT 查 被墙/国外→网关 IP、国内→真实国内 IP、AAAA→SOA、混合 IP 选国内、无回环。
-- [ ] **抗污染**:`china-whitelist.conf`/`bogus-nxdomain.conf` 存在且 smartdns 正常启动;被墙域名稳定返回网关 IP(不被伪国内 IP 直连)。
+- [ ] **抗污染**:`china_ip.conf`/`bogus-nxdomain.conf` 存在且 smartdns 正常启动;被墙域名稳定返回网关 IP(不被伪国内 IP 直连)。
 - [ ] **P2 转发**:`curl https://<国外域名>` 经 sing-box 直出可达;`tcpdump` 证实代理只查 22.22.22.22,不回 :853/:5353。
 - [ ] **QUIC 代理**:`curl --http3 https://<国外域名>` 经 sing-box sniff quic 透明转发成功;UDP 443 放行（172.22 来源）。
 - [ ] **证书续期**:drop 防火墙生效下 `certbot renew --dry-run` 端到端成功;过程中 80 短暂放行、sing-box 停后恢复;timer active。

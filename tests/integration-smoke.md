@@ -51,7 +51,8 @@
       Expect: no recursive queries back to this host's own :853 / :5353.
 
 - [ ] **Anti-pollution (constraint 2)**
-      Confirm `/etc/smartdns/china-whitelist.conf` (whitelist-ip lines) and
+      Confirm `/etc/smartdns/china_ip.conf` (the china_ip ip-set backing
+      `ip-rules ip-set:china_ip -whitelist-ip`) and
       `/etc/smartdns/bogus-nxdomain.conf` exist and smartdns started cleanly
       (the `conf-file` includes load — a missing include aborts startup).
       Query several known-blocked foreign domains repeatedly; each must

@@ -21,7 +21,7 @@
         ▼
 ┌──────────────────────────────────────────────────────────┐
 │ smartdns(DNS 大脑)                                        │
-│  ① 命中强制代理域名表 proxylist → address → 返回网关IP      │
+│  ① 命中强制代理域名表 blacklist → address → 返回网关IP      │
 │  ② 其余:并发解析(cn 组就近+抗污染 / clean 组拿真实国外IP)│
 │       ip-set:foreign(非中国IP CIDR)                       │
 │         ├ 命中(国外)→ ip-alias → 返回网关IP               │
@@ -108,7 +108,7 @@ ip-rules ip-set:foreign -ip-alias GATEWAY_IP
 
 1. **防回环(最关键)**:sing-box 解析 SNI 时**绝不能使用会做 `ip-alias` 的 smartdns**,否则"国外域名→改写成网关IP→sing-box 又连回网关"形成死循环。**决策:sing-box 配置单一外部 DNS server `ext`=`22.22.22.22`**(`route.default_domain_resolver` 与 `resolve` action 均引用它),绝不指向本机 smartdns。
 2. **嗅探失败兜底**:sing-box 1.13 移除了 inbound 的 `override_address`,sniff 失败会**保留原始目的(= 网关自身 IP)**。兜底机制:`resolve` action 置于 reject 规则**之前**(即便"域名解析回自身 IP"也能被随后 reject 命中);`ip_is_private:true → reject(method:drop)` 覆盖 NPN 私网网关部署;`ip_cidr:[GATEWAY_IP/32, PUBLIC_IP/32] → reject(method:drop)` 覆盖公网部署(提交默认 sentinel `127.0.0.2/32`,install.sh patch 为实际 IP)。净效果与 xray 旧占位 `127.0.0.1` trick 一致:sniff 失败 / 指向自身的流量被丢弃,绝不回环。
-3. **判 geo 前先拿到干净真实 IP**:第二级判"国外?"依赖解析正确。靠 cn 组 `whitelist-ip`(只收中国 IP)+ `bogus-nxdomain` + clean 组(DoT 上游更难污染)。残留硬伤:被污染成"看着像国内"的 IP 会被误判直连 → 把该域名补进强制表自愈。
+3. **判 geo 前先拿到干净真实 IP**:第三层对既不在黑名单也不在白名单的域名并发查两组(境内 + 境外),用全局 `ip-rules ip-set:china_ip -whitelist-ip` 对合并后答案做内容过滤:含 CN IP 则只保留 CN IP(直连)、无 CN IP 则全走代理(`ip-alias`)。`speed-check-mode none`,确定性、非竞速。`bogus-nxdomain` 阻断已知污染 IP。残留硬伤:被污染成"看着像国内"的 IP 会被误判直连 → 把该域名补进强制表自愈。
 4. **chnroute 反集的生成与时效**:`foreign-cidr.txt` = `0.0.0.0/0` 去掉中国段;由公开中国 IP 列表(如 `china_ip_list` / APNIC 衍生)自动生成并定时刷新。生成失败时保留旧表,不得清空(清空会把全部流量判成国内→直连→被墙站打不开)。
 
 ## 6. 端到端数据流(三类)

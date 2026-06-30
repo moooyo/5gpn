@@ -39,7 +39,7 @@
 ## 关键特性
 
 - **三层确定性分流**:① **黑名单**(`proxy-domains.txt`,污染兜底/已知必代理)→ `address` 直接返回网关 IP(不解析);② **白名单**(`china-domains.txt`,felixonmars,自动更新)→ 只问境内 DNS → 直连;③ **其余** → 境内+境外并发查 + `ip-rules china_ip -whitelist-ip`(含 CN IP 优先直连,不测速)→ 无 CN 则 `ip-alias` 改写成网关 IP → 进代理。`speed-check-mode none`。
-- **抗污染解析**:国内明文上游用 `-whitelist-ip` 只接受中国 IP(滤掉污染答案),干净 DoT 上游(8.8.8.8 / 1.1.1.1)拿真实国外 IP,并发竞速选优。
+- **抗污染解析**:第三层中,干净 DoT 上游(8.8.8.8 / 1.1.1.1)解析不确定/境外域名;全局 `china_ip` ip-set 对合并后答案做内容过滤——含 CN IP 即只保留 CN IP(直连),全为境外则 `ip-alias` 改写为网关 IP(进代理)。`speed-check-mode none`,选择由 IP 归属决定(确定性,不竞速)。
 - **仅 DoT 接入**:对外只开 853(TLS),无明文 53 入口;客户端零 App。
 - **直出**:被代理流量经 sing-box `direct` inbound 透明转发(不解密 TLS),直接走网关默认路由出网——无 mark / 隧道 / 多出口 / 策略路由。
 - **QUIC/HTTP3 由 sing-box sniff `quic` 透明转发、直出**:UDP 443 防火墙放行(仅 NPN 172.22.0.0/16),sing-box sniff quic 取 SNI 后 direct 出站,与 TLS 走同一实例。
