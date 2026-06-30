@@ -353,7 +353,7 @@ def op_del_domain(domain):
 
 
 def op_update_lists():
-    """Refresh chnroute (china_ip_list) + foreign-cidr and re-render conf."""
+    """Refresh china_ip_list and reload 5gpn-dns."""
     ok, out = run(["bash", INSTALL, "--update-lists"], timeout=600)
     head = "✅ <b>chnroute / 名单已更新</b>" if ok else "❌ <b>更新失败</b>"
     return head + "\n" + pre(_tail(out, 12))

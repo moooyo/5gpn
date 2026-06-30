@@ -482,7 +482,7 @@ EOF
 # ----------------------------------------------------------------------------
 run_update_lists() {
     info "Building chnroute lists (china_ip_list.txt)..."
-    RULES_DIR="/etc/5gpn/rules" \
+    RULES_DIR="${RULES_DIR:-/etc/5gpn/rules}" \
         bash "${SCRIPTS_DIR}/update-lists.sh"
     ok "Lists updated."
 }
@@ -723,7 +723,7 @@ del_domain() {
 
 refresh_lists_and_restart() {
     local sd="${SCRIPTS_DIR}/update-lists.sh"; [[ -x "$sd" ]] || sd="${SCRIPT_DIR}/scripts/update-lists.sh"
-    RULES_DIR="/etc/5gpn/rules" bash "$sd"
+    RULES_DIR="${RULES_DIR:-/etc/5gpn/rules}" bash "$sd"
 }
 
 do_update_lists() {

@@ -60,6 +60,7 @@ grep -Eq 'tcp dport.*\b53\b'              "$FIREWALL" || fail "setup-firewall.sh
 grep -Fq 'tcp dport 8443 accept'          "$FIREWALL" || fail "setup-firewall.sh: no 'tcp dport 8443 accept'"
 grep -Fq '853'                            "$FIREWALL" || fail "setup-firewall.sh: DoT port 853 removed"
 grep -Eq 'dns_rate4|dns_rate6'            "$FIREWALL" || fail "setup-firewall.sh: no dns_rate4/dns_rate6 rate meter for :53"
+grep -Eq 'udp dport 53 meter dns_rate4'  "$FIREWALL" || fail "setup-firewall.sh: no UDP :53 per-source rate meter (dns_rate4)"
 grep -Fq '5gpn-dns.service'              "$FIREWALL" || fail "setup-firewall.sh: does not install 5gpn-dns.service"
 
 # --- update-lists.sh: writes to /etc/5gpn/rules, reloads 5gpn-dns, no old smartdns/gen/render ---
@@ -79,6 +80,8 @@ grep -Fq 'systemctl restart smartdns'    "$UPDATE_LISTS" \
 grep -Fq '"5gpn-dns"'   "$TGBOT" || fail "tgbot.py: SERVICES does not contain 5gpn-dns"
 grep -Fq '"smartdns"'   "$TGBOT" \
     && fail "tgbot.py: SERVICES still contains smartdns"
+grep -Fq 'xray'         "$TGBOT" \
+    && fail "tgbot.py: contains live xray token (obsolete)"
 
 [ $rc -eq 0 ] && echo "5gpn-dns policy: PASS"
 exit $rc

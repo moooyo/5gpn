@@ -44,8 +44,12 @@ table inet filter {
         tcp dport 853 ct state new meter dot_rate4 { ip saddr  limit rate over ${DOT_RATE} burst ${DOT_BURST} packets } drop
         tcp dport 853 ct state new meter dot_rate6 { ip6 saddr limit rate over ${DOT_RATE} burst ${DOT_BURST} packets } drop
         # Plain DNS 53 anti-abuse: same per-source rate meter as DoT.
-        tcp dport 53 ct state new meter dns_rate4 { ip saddr  limit rate over ${DOT_RATE} burst ${DOT_BURST} packets } drop
-        tcp dport 53 ct state new meter dns_rate6 { ip6 saddr limit rate over ${DOT_RATE} burst ${DOT_BURST} packets } drop
+        tcp dport 53 ct state new meter tcp53_rate4 { ip saddr  limit rate over ${DOT_RATE} burst ${DOT_BURST} packets } drop
+        tcp dport 53 ct state new meter tcp53_rate6 { ip6 saddr limit rate over ${DOT_RATE} burst ${DOT_BURST} packets } drop
+        # Public UDP :53 has no conntrack NEW state; rate-limit per-SOURCE packets
+        # instead (drop over-rate) to blunt DNS amplification/reflection abuse.
+        udp dport 53 meter dns_rate4 { ip saddr  limit rate over ${DOT_RATE} burst ${DOT_BURST} packets } drop
+        udp dport 53 meter dns_rate6 { ip6 saddr limit rate over ${DOT_RATE} burst ${DOT_BURST} packets } drop
         udp dport 53 accept
         tcp dport { ${tcp_ports} } accept
         tcp dport 8443 accept
