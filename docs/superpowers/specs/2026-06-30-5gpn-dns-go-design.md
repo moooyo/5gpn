@@ -128,3 +128,25 @@ dev box 交叉编译→scp;mock 上游:
 
 - 回滚 = `git revert` + 恢复 smartdns。`5gpn-dns` 卸载:disable + 删二进制/单元。
 - **取代**:main 上三层方案全部 DNS-大脑件 + 未落地 chinadns 方案。**保留**:Task 2 P0 提示、Task 3 DOT_RATE 转发、sing-box 全部。实现基线 = 当前 main 之上增量。
+
+## 13. 增补(2026-06-30):接入传输 + 全查询类型(修订 §3/§6/§7)
+
+**A) 接入传输(客户端侧;用户选定 DoT + DoH + 明文53,不做 DoQ):**
+- **DoT `:853/tcp`**(TLS,LE 证书)——核心(Android 私人 DNS / iOS)。
+- **DoH(`:8443/https`)**——`:443` 被 sing-box 占,只能用**非标端口**;复用 LE 证书,stdlib `net/http` handler 收 `application/dns-message`(GET base64url + POST)。客户端填 `https://<域名>:8443/dns-query`。
+- **明文 DNS `:53`(udp+tcp)对外**——⚠️ **第④条 reversal**:有意推翻项目"仅 DoT、不开明文 53"立场。缓解:对 :53 加 per-source 限速(沿用 `DOT_RATE/DOT_BURST` 思路);运维知悉 :53 易被 spoof/放大。
+- 保留 `127.0.0.1:5353` 调试口。四个监听共用同一 handler。
+- **依赖不变**:DoH 走 stdlib `net/http`,**无 quic-go**(未选 DoQ),第三方依赖仍仅 `miekg/dns`。
+- 监听 env:`DNS_LISTEN_DOT=:853`、`DNS_LISTEN_DOH=:8443`、`DNS_LISTEN_PLAIN=:53`、`DNS_LISTEN_DEBUG=127.0.0.1:5353`。
+
+**B) 防火墙(`setup-firewall.sh`)**:入站放行 `udp/tcp 53`、`tcp 853`、`tcp 8443`(+ 现有 sing-box 端口);:53 per-source 限速。CLAUDE.md/DESIGN 的"DoT-only 入站"叙述相应更新。
+
+**C) 全查询类型(修订 §3 第1步:"支持所有常见 DNS 查询类型"):** handler 按 qtype 分派——
+- `A` → chnroute 仲裁 + 国外→网关IP 改写(§3 第2-5步)。
+- `AAAA` → SOA(IPv4-only)。
+- `HTTPS`/`SVCB`(65) → 空 NOERROR(避免 ECH 藏 SNI,逼回退 A + 明文 SNI 的 TLS,保 sing-box 嗅探)。
+- **其余所有类型**(`CNAME`/`MX`/`TXT`/`NS`/`SOA`/`SRV`/`CAA`/`PTR`/`DS`/`DNSKEY`/`NAPTR`/…)→ **转发可信 DoT**(抗污染),verbatim 返回,**不改写**(非 A 无 IP 需 funnel);先查缓存。
+- 名单作用域:**adblock 对所有 qtype 拦截**;**blacklist/force-direct 主要作用于 A**(非 A 命中时按"转发可信 DoT"处理)。
+- 优化(后续):非 A 对已知 CN 域名走国内上游更快——P1 先一律可信 DoT(正确优先)。
+
+**D) 单测/验收增补**:每种 qtype(A 仲裁 / AAAA→SOA / HTTPS→空 / MX·TXT·CNAME·PTR→转发可信 verbatim);三种传输各自查通(`dig +tls` DoT、`curl` DoH:8443、`dig` 明文53);:53 限速生效。
