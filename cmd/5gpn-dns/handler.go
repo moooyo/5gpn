@@ -41,8 +41,12 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		_ = w.WriteMsg(m)
 		return
 	}
+	// Fix #5: impose an overall query deadline so the trust goroutine
+	// inside Arbitrate can't run undeadlined.
+	ctx, cancel := context.WithTimeout(context.Background(), h.Timeout)
+	defer cancel()
 	q := r.Question[0]
-	resp := h.resolve(context.Background(), q, r)
+	resp := h.resolve(ctx, q, r)
 	_ = w.WriteMsg(resp)
 }
 
@@ -175,8 +179,15 @@ func (h *Handler) rewriteA(resp *dns.Msg, r *dns.Msg) *dns.Msg {
 		} else {
 			if !gatewayAdded {
 				gw := &dns.A{
-					Hdr: a.Hdr,
-					A:   h.GatewayIP,
+					Hdr: dns.RR_Header{
+						Name:   a.Hdr.Name,
+						Rrtype: a.Hdr.Rrtype,
+						Class:  a.Hdr.Class,
+						// Fix #3: clamp gateway RR TTL to [TTLMin, TTLMax].
+						// Fix #6: copy GatewayIP to avoid slice aliasing.
+						Ttl: clampTTL(a.Hdr.Ttl, h.TTLMin, h.TTLMax),
+					},
+					A: append(net.IP(nil), h.GatewayIP...),
 				}
 				rewritten = append(rewritten, gw)
 				gatewayAdded = true
@@ -259,9 +270,14 @@ func (h *Handler) cacheGet(name string, qtype uint16) (*dns.Msg, bool) {
 }
 
 // cachePut stores resp in the cache, clamping its answer TTLs to [TTLMin, TTLMax].
-// Safe to call when h.Cache == nil.
+// Safe to call when h.Cache == nil.  Only caches successful (NOERROR) responses;
+// SERVFAIL / REFUSED / etc. are not cached.
 func (h *Handler) cachePut(name string, qtype uint16, resp *dns.Msg) {
 	if h.Cache == nil {
+		return
+	}
+	// Fix #1: don't cache non-success rcodes (e.g. SERVFAIL).
+	if resp.Rcode != dns.RcodeSuccess {
 		return
 	}
 	ttl := minAnswerTTL(resp, h.TTLMin, h.TTLMax)
@@ -269,8 +285,12 @@ func (h *Handler) cachePut(name string, qtype uint16, resp *dns.Msg) {
 }
 
 // minAnswerTTL returns the minimum TTL across all answer RRs, clamped to
-// [ttlMin, ttlMax].  If there are no answer RRs, ttlMin is returned.
+// [ttlMin, ttlMax].  If there are no answer RRs (NODATA), ttlMin is returned.
 func minAnswerTTL(m *dns.Msg, ttlMin, ttlMax time.Duration) time.Duration {
+	// Fix #2: empty Answer (NODATA) → return ttlMin, not ttlMax.
+	if len(m.Answer) == 0 {
+		return ttlMin
+	}
 	min := ttlMax
 	for _, rr := range m.Answer {
 		t := time.Duration(rr.Header().Ttl) * time.Second

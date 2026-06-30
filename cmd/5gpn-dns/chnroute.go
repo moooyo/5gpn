@@ -109,7 +109,11 @@ func LoadChnroute(path string) (*Chnroute, error) {
 
 // Contains reports whether ip is within any CIDR range in the set.
 // Returns false for non-IPv4 addresses.
+// Fix #4: nil receiver is safe — returns false (all IPs appear foreign).
 func (c *Chnroute) Contains(ip net.IP) bool {
+	if c == nil {
+		return false
+	}
 	ip4 := ip.To4()
 	if ip4 == nil {
 		return false

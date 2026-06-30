@@ -2,6 +2,7 @@ package chnroute
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -109,6 +110,27 @@ func collectAIPs(msg *dns.Msg) []string {
 	return ips
 }
 
+// makeAMsgWithTTL builds a dns.Msg A-record reply with a specific TTL.
+func makeAMsgWithTTL(name string, ttl uint32, ips ...string) *dns.Msg {
+	m := new(dns.Msg)
+	q := new(dns.Msg)
+	q.SetQuestion(dns.Fqdn(name), dns.TypeA)
+	m.SetReply(q)
+	m.RecursionAvailable = true
+	for _, ip := range ips {
+		m.Answer = append(m.Answer, &dns.A{
+			Hdr: dns.RR_Header{
+				Name:   dns.Fqdn(name),
+				Rrtype: dns.TypeA,
+				Class:  dns.ClassINET,
+				Ttl:    ttl,
+			},
+			A: net.ParseIP(ip).To4(),
+		})
+	}
+	return m
+}
+
 // ------- Tests -------
 
 // TestHandlerAAAA: AAAA query → SOA in Authority, empty Answer, NOERROR.
@@ -195,8 +217,8 @@ func TestHandlerAdblockAAAA(t *testing.T) {
 	req := new(dns.Msg)
 	req.SetQuestion("adblock.test.", dns.TypeAAAA)
 
-	// Note: adblock (step 3) comes AFTER AAAA-block (step 1). So AAAA to adblock.test
-	// hits step 1 first → SOA reply, not NXDOMAIN. But adblock applies to TypeA queries.
+	// Note: adblock (step 2) comes AFTER AAAA-block (step 1). So AAAA to adblock.test
+	// hits step 1 first → SOA reply, not NXDOMAIN.
 	// Per spec: step 1 fires on TypeAAAA first, so this returns SOA/NOERROR.
 	// Test that adblock is applied on TypeA:
 	q2 := dns.Question{Name: "adblock.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
@@ -428,4 +450,146 @@ type countingExchanger struct {
 func (c *countingExchanger) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	*c.count++
 	return c.inner.Exchange(ctx, q)
+}
+
+// ── Regression tests for review fixes ────────────────────────────────────────
+
+// TestCachePutDoesNotCacheSERVFAIL: a SERVFAIL from upstream must NOT be cached.
+// Uses the forwardTrust path (MX query) where the SERVFAIL Rcode is preserved
+// and would be incorrectly cached without the fix.
+func TestCachePutDoesNotCacheSERVFAIL(t *testing.T) {
+	callCount := 0
+	servfailMsg := new(dns.Msg)
+	q0 := new(dns.Msg)
+	q0.SetQuestion("fail.test.", dns.TypeMX)
+	servfailMsg.SetRcode(q0, dns.RcodeServerFailure)
+
+	inner := &fakeExchanger{reply: servfailMsg}
+	tracked := &countingExchanger{inner: inner, count: &callCount}
+	h := newTestHandler(t, tracked, tracked)
+
+	req := new(dns.Msg)
+	req.SetQuestion("fail.test.", dns.TypeMX)
+	q := dns.Question{Name: "fail.test.", Qtype: dns.TypeMX, Qclass: dns.ClassINET}
+
+	// First query: upstream is called (Trust exchanger).
+	resp1 := h.resolve(context.Background(), q, req)
+	if resp1.Rcode != dns.RcodeServerFailure {
+		t.Errorf("expected SERVFAIL, got Rcode=%d", resp1.Rcode)
+	}
+	after1 := callCount
+
+	// Second query: if SERVFAIL was (wrongly) cached, upstream would NOT be called.
+	req2 := new(dns.Msg)
+	req2.SetQuestion("fail.test.", dns.TypeMX)
+	resp2 := h.resolve(context.Background(), q, req2)
+	after2 := callCount
+
+	if after2 <= after1 {
+		t.Errorf("upstream should be called again on second query (SERVFAIL must not be cached); calls after 1st=%d, after 2nd=%d", after1, after2)
+	}
+	if resp2.Rcode != dns.RcodeServerFailure {
+		t.Errorf("second query should also return SERVFAIL, got Rcode=%d", resp2.Rcode)
+	}
+	// Also verify cache has no entry.
+	if _, ok := h.Cache.Get("fail.test.", dns.TypeMX); ok {
+		t.Error("cache must not hold a SERVFAIL entry")
+	}
+}
+
+// TestMinAnswerTTLEmptyAnswer: empty Answer (NODATA) → ttlMin, not ttlMax.
+func TestMinAnswerTTLEmptyAnswer(t *testing.T) {
+	ttlMin := 10 * time.Second
+	ttlMax := 300 * time.Second
+
+	nodataMsg := new(dns.Msg)
+	q0 := new(dns.Msg)
+	q0.SetQuestion("nodata.test.", dns.TypeA)
+	nodataMsg.SetReply(q0)
+	// Intentionally no Answer RRs.
+
+	got := minAnswerTTL(nodataMsg, ttlMin, ttlMax)
+	if got != ttlMin {
+		t.Errorf("empty Answer: minAnswerTTL = %v, want ttlMin=%v (not ttlMax=%v)", got, ttlMin, ttlMax)
+	}
+}
+
+// TestMinAnswerTTLNonEmpty: non-empty Answer → min of RR TTLs, clamped.
+func TestMinAnswerTTLNonEmpty(t *testing.T) {
+	ttlMin := 10 * time.Second
+	ttlMax := 300 * time.Second
+
+	// TTL=5s → below ttlMin, should be clamped to ttlMin.
+	msgLow := makeAMsgWithTTL("x.test", 5, "1.2.3.4")
+	if got := minAnswerTTL(msgLow, ttlMin, ttlMax); got != ttlMin {
+		t.Errorf("TTL=5s below ttlMin: got %v, want %v", got, ttlMin)
+	}
+
+	// TTL=60s → within bounds.
+	msgMid := makeAMsgWithTTL("x.test", 60, "1.2.3.4")
+	if got := minAnswerTTL(msgMid, ttlMin, ttlMax); got != 60*time.Second {
+		t.Errorf("TTL=60s: got %v, want 60s", got)
+	}
+
+	// TTL=86400s → above ttlMax, should be clamped to ttlMax.
+	msgHigh := makeAMsgWithTTL("x.test", 86400, "1.2.3.4")
+	if got := minAnswerTTL(msgHigh, ttlMin, ttlMax); got != ttlMax {
+		t.Errorf("TTL=86400s above ttlMax: got %v, want %v", got, ttlMax)
+	}
+}
+
+// TestGatewayRRTTLClamped: default-path rewrite with TTL=0 and TTL=99999 upstream
+// must produce a gateway RR whose TTL is within [TTLMin, TTLMax].
+func TestGatewayRRTTLClamped(t *testing.T) {
+	for _, upstreamTTL := range []uint32{0, 99999} {
+		upstreamTTL := upstreamTTL
+		t.Run(fmt.Sprintf("upstream_ttl_%d", upstreamTTL), func(t *testing.T) {
+			upstream := makeAMsgWithTTL("clamp.test", upstreamTTL, "9.9.9.9") // foreign IP → gateway rewrite
+			china := &fakeExchanger{reply: upstream}
+			trust := &fakeExchanger{reply: upstream}
+			h := newTestHandler(t, china, trust)
+
+			req := new(dns.Msg)
+			req.SetQuestion("clamp.test.", dns.TypeA)
+			q := dns.Question{Name: "clamp.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+
+			resp := h.resolve(context.Background(), q, req)
+			if resp.Rcode != dns.RcodeSuccess {
+				t.Fatalf("expected NOERROR, got %d", resp.Rcode)
+			}
+			ips := collectAIPs(resp)
+			if len(ips) == 0 || ips[0] != "10.0.0.1" {
+				t.Fatalf("expected gateway 10.0.0.1, got %v", ips)
+			}
+			gwRR := resp.Answer[0].(*dns.A)
+			ttl := time.Duration(gwRR.Hdr.Ttl) * time.Second
+			if ttl < h.TTLMin || ttl > h.TTLMax {
+				t.Errorf("gateway RR TTL=%v is outside [TTLMin=%v, TTLMax=%v]", ttl, h.TTLMin, h.TTLMax)
+			}
+		})
+	}
+}
+
+// TestNilCNDoesNotPanic: a Handler without CN set must not panic on an A query.
+func TestNilCNDoesNotPanic(t *testing.T) {
+	upstream := makeAMsg("nocn.test", "9.9.9.9")
+	china := &fakeExchanger{reply: upstream}
+	trust := &fakeExchanger{reply: upstream}
+	h := newTestHandler(t, china, trust)
+	h.CN = nil // remove CN
+
+	req := new(dns.Msg)
+	req.SetQuestion("nocn.test.", dns.TypeA)
+	q := dns.Question{Name: "nocn.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+
+	// Must not panic; foreign IP with nil CN → treat as foreign → GatewayIP.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("nil CN caused panic: %v", r)
+		}
+	}()
+	resp := h.resolve(context.Background(), q, req)
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
 }
