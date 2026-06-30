@@ -1,19 +1,17 @@
-package chnroute_test
+package main
 
 import (
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
-
-	chnroute "github.com/moooyo/5gpn/cmd/5gpn-dns"
 )
 
 func TestChnrouteContains(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "cn.txt")
 	os.WriteFile(p, []byte("1.0.0.0/8\n# comment\n203.0.113.0/24\nbogus\n"), 0o644)
-	c, err := chnroute.LoadChnroute(p)
+	c, err := LoadChnroute(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +32,7 @@ func TestChnrouteRefusesEmpty(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "e.txt")
 	os.WriteFile(p, []byte("# none\n"), 0o644)
-	if _, err := chnroute.LoadChnroute(p); err == nil {
+	if _, err := LoadChnroute(p); err == nil {
 		t.Fatal("want error on empty chnroute")
 	}
 }

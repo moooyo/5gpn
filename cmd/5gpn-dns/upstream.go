@@ -1,7 +1,8 @@
-package chnroute
+package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strings"
@@ -21,36 +22,40 @@ type result struct {
 	err error
 }
 
-// group is the common implementation for UDP and DoT upstream groups.
-// It fans out queries to all addrs concurrently and returns the first
-// non-error reply, cancelling the remaining goroutines via ctx.
-type group struct {
-	addrs []string // normalised host:port strings
-	net   string   // "udp" or "tcp-tls"
+// upstream is one member of a group: the dial address and TLS config to use.
+type upstream struct {
+	addr   string      // normalised host:port
+	tlsCfg *tls.Config // nil for UDP; set for DoT
 }
 
-// Exchange implements Exchanger. It starts one goroutine per address and
+// group is the common implementation for UDP and DoT upstream groups.
+// It fans out queries to all members concurrently and returns the first
+// non-error reply, cancelling the remaining goroutines via ctx.
+type group struct {
+	members []upstream
+	net     string // "udp" or "tcp-tls"
+}
+
+// Exchange implements Exchanger. It starts one goroutine per member and
 // returns the first non-error response. If all fail it returns the last error.
 func (g *group) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	ch := make(chan result, len(g.addrs))
-	for _, addr := range g.addrs {
-		addr := addr
+	ch := make(chan result, len(g.members))
+	for _, m := range g.members {
+		m := m
 		go func() {
-			c := &dns.Client{Net: g.net}
-			// ExchangeContext uses ctx for deadline/cancellation.
-			m, _, err := c.ExchangeContext(ctx, q, addr)
-			ch <- result{msg: m, err: err}
+			c := &dns.Client{Net: g.net, TLSConfig: m.tlsCfg}
+			msg, _, err := c.ExchangeContext(ctx, q, m.addr)
+			ch <- result{msg: msg, err: err}
 		}()
 	}
 
 	var lastErr error
-	for range g.addrs {
+	for range g.members {
 		r := <-ch
 		if r.err == nil {
-			// Signal all losers to stop.
 			cancel()
 			return r.msg, nil
 		}
@@ -88,18 +93,47 @@ func normaliseAddrs(addrs []string, defaultPort string) []string {
 // returns the first non-error reply. Addresses without an explicit port get
 // port 53 appended.
 func NewUDPGroup(addrs []string) Exchanger {
-	return &group{
-		addrs: normaliseAddrs(addrs, "53"),
-		net:   "udp",
+	members := make([]upstream, len(addrs))
+	for i, a := range normaliseAddrs(addrs, "53") {
+		members[i] = upstream{addr: a}
 	}
+	return &group{members: members, net: "udp"}
 }
 
 // NewDoTGroup returns an Exchanger that fans out DNS-over-TLS (tcp-tls) queries
 // to addrs and returns the first non-error reply. Addresses without an explicit
 // port get port 853 appended.
+//
+// Each address is used as the TLS ServerName as well (relying on the IP SAN in
+// the server certificate). Use NewDoTGroupFromEntries for explicit ServerName
+// control (e.g. "dns.google@8.8.8.8").
 func NewDoTGroup(addrs []string) Exchanger {
-	return &group{
-		addrs: normaliseAddrs(addrs, "853"),
-		net:   "tcp-tls",
+	members := make([]upstream, len(addrs))
+	for i, a := range normaliseAddrs(addrs, "853") {
+		host, _, _ := net.SplitHostPort(a)
+		members[i] = upstream{
+			addr:   a,
+			tlsCfg: &tls.Config{ServerName: host},
+		}
 	}
+	return &group{members: members, net: "tcp-tls"}
 }
+
+// NewDoTGroupFromEntries returns an Exchanger that fans out DoT queries to the
+// given entries, using each entry's ServerName for TLS verification and DialAddr
+// for the connection.  Addresses without an explicit port get port 853 appended.
+//
+// This is the preferred constructor when trust upstreams are configured via the
+// "serverName@dialIP" form (e.g. "dns.google@8.8.8.8").
+func NewDoTGroupFromEntries(entries []TrustEntry) Exchanger {
+	members := make([]upstream, len(entries))
+	for i, e := range entries {
+		addr := addDefaultPort(e.DialAddr, "853")
+		members[i] = upstream{
+			addr:   addr,
+			tlsCfg: &tls.Config{ServerName: e.ServerName},
+		}
+	}
+	return &group{members: members, net: "tcp-tls"}
+}
+

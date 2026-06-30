@@ -1,22 +1,35 @@
-package chnroute
+package main
 
 import (
 	"context"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
 )
 
+// ruleSnapshot is the reloadable portion of a Handler.
+// SIGHUP replaces the whole snapshot atomically; in-flight queries
+// that already loaded the old snapshot complete safely.
+type ruleSnapshot struct {
+	Adblock   *DomainSet
+	Direct    *DomainSet
+	Blacklist *DomainSet
+	CN        *Chnroute
+}
+
 // Handler is a dns.Handler that implements the 5gpn query dispatch policy:
 // AAAA-block → HTTPS/SVCB-block → adblock → force-direct → blacklist → default-arbitrate.
 type Handler struct {
-	// Rule sets.
+	// rules is swapped atomically on SIGHUP.
+	rules atomic.Pointer[ruleSnapshot]
+
+	// Rule sets — public for test construction; use swapRuleSets after init.
 	Adblock   *DomainSet // NXDOMAIN for matched names.
 	Direct    *DomainSet // Arbitrate but never rewrite IPs.
 	Blacklist *DomainSet // Synthetic single-A = GatewayIP, no upstream.
-
-	CN *Chnroute // IPv4 china ranges.
+	CN        *Chnroute  // IPv4 china ranges.
 
 	Cache *Cache // DNS response cache (may be nil to disable).
 
@@ -30,6 +43,35 @@ type Handler struct {
 	TTLMax time.Duration
 
 	Timeout time.Duration // Per-query arbitration timeout for china upstream.
+}
+
+// swapRuleSets atomically replaces the reloadable rule-set fields.
+// In-flight queries that have already loaded the old snapshot complete safely.
+// After a swap, new queries will pick up the updated values.
+func (h *Handler) swapRuleSets(adblock, direct, blacklist *DomainSet, cn *Chnroute) {
+	snap := &ruleSnapshot{
+		Adblock:   adblock,
+		Direct:    direct,
+		Blacklist: blacklist,
+		CN:        cn,
+	}
+	h.rules.Store(snap)
+	// Also update the public fields so that tests constructing a Handler directly
+	// and calling resolve() without going through swapRuleSets continue to work.
+	h.Adblock = adblock
+	h.Direct = direct
+	h.Blacklist = blacklist
+	h.CN = cn
+}
+
+// ruleSnap returns the current rule snapshot.  If swapRuleSets has been called
+// it returns the atomic snapshot; otherwise it falls back to the public fields
+// (which is how the Handler is used in unit tests).
+func (h *Handler) ruleSnap() (adblock, direct, blacklist *DomainSet, cn *Chnroute) {
+	if snap := h.rules.Load(); snap != nil {
+		return snap.Adblock, snap.Direct, snap.Blacklist, snap.CN
+	}
+	return h.Adblock, h.Direct, h.Blacklist, h.CN
 }
 
 // ServeDNS implements dns.Handler.  It unpacks the first question, calls
@@ -71,6 +113,9 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.Msg {
 	name := q.Name // already FQDN from the wire
 
+	// Load the current rule-set snapshot atomically.
+	adblock, direct, blacklist, cn := h.ruleSnap()
+
 	// ── Step 1: AAAA → synthetic SOA, NOERROR, empty Answer ─────────────────
 	if q.Qtype == dns.TypeAAAA {
 		return h.soaReply(r)
@@ -92,19 +137,19 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 	bare := stripDot(name)
 
 	// ── Step 3: adblock ──────────────────────────────────────────────────────
-	if h.Adblock != nil && h.Adblock.Match(bare) {
+	if adblock != nil && adblock.Match(bare) {
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeNameError)
 		return m
 	}
 
 	// ── Step 4: force-direct ─────────────────────────────────────────────────
-	if h.Direct != nil && h.Direct.Match(bare) {
+	if direct != nil && direct.Match(bare) {
 		if isA {
 			if cached, ok := h.cacheGet(name, q.Qtype); ok {
 				return cached
 			}
-			resp, err := Arbitrate(ctx, r, h.China, h.Trust, h.CN)
+			resp, err := Arbitrate(ctx, r, h.China, h.Trust, cn)
 			if err != nil || resp == nil {
 				return h.serverFail(r)
 			}
@@ -117,7 +162,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 	}
 
 	// ── Step 5: blacklist ────────────────────────────────────────────────────
-	if h.Blacklist != nil && h.Blacklist.Match(bare) {
+	if blacklist != nil && blacklist.Match(bare) {
 		if isA {
 			return h.gatewayReply(r)
 		}
@@ -130,12 +175,12 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 		if cached, ok := h.cacheGet(name, q.Qtype); ok {
 			return cached
 		}
-		resp, err := Arbitrate(ctx, r, h.China, h.Trust, h.CN)
+		resp, err := Arbitrate(ctx, r, h.China, h.Trust, cn)
 		if err != nil || resp == nil {
 			return h.serverFail(r)
 		}
 		resp = filterAAAA(resp)
-		resp = h.rewriteA(resp, r)
+		resp = h.rewriteA(resp, r, cn)
 		h.cachePut(name, q.Qtype, resp)
 		return resp
 	}
@@ -160,10 +205,10 @@ func (h *Handler) forwardTrust(ctx context.Context, r *dns.Msg, name string, qty
 	return resp
 }
 
-// rewriteA rewrites A records in resp: IPs in CN are kept; foreign IPs are
+// rewriteA rewrites A records in resp: IPs in cn are kept; foreign IPs are
 // replaced with GatewayIP.  Multiple foreign IPs collapse to a single GatewayIP
 // entry (dedup).  The reply headers are refreshed from r.
-func (h *Handler) rewriteA(resp *dns.Msg, r *dns.Msg) *dns.Msg {
+func (h *Handler) rewriteA(resp *dns.Msg, r *dns.Msg, cn *Chnroute) *dns.Msg {
 	out := new(dns.Msg)
 	out.SetReply(r)
 	out.RecursionAvailable = true
@@ -178,7 +223,7 @@ func (h *Handler) rewriteA(resp *dns.Msg, r *dns.Msg) *dns.Msg {
 			rewritten = append(rewritten, rr)
 			continue
 		}
-		if h.CN.Contains(a.A) {
+		if cn.Contains(a.A) {
 			rewritten = append(rewritten, a)
 		} else {
 			if !gatewayAdded {

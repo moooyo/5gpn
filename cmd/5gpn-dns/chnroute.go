@@ -1,6 +1,6 @@
 // Package chnroute_test uses the package name "chnroute" via external test package.
 // This file is package chnroute (the main package for this module).
-package chnroute
+package main
 
 import (
 	"bufio"

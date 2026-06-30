@@ -1,4 +1,4 @@
-package chnroute
+package main
 
 import (
 	"testing"

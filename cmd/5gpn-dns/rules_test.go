@@ -1,11 +1,9 @@
-package chnroute_test
+package main
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	chnroute "github.com/moooyo/5gpn/cmd/5gpn-dns"
 )
 
 // writeTempFile creates a temp file with content and returns its path.
@@ -21,7 +19,7 @@ func writeTempFile(t *testing.T, dir, name, content string) string {
 func TestDomainSetExactMatch(t *testing.T) {
 	dir := t.TempDir()
 	p := writeTempFile(t, dir, "rules.txt", "example.com\n")
-	ds, err := chnroute.LoadDomainSet(p)
+	ds, err := LoadDomainSet(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +31,7 @@ func TestDomainSetExactMatch(t *testing.T) {
 func TestDomainSetParentDomainMatch(t *testing.T) {
 	dir := t.TempDir()
 	p := writeTempFile(t, dir, "rules.txt", "example.com\n")
-	ds, err := chnroute.LoadDomainSet(p)
+	ds, err := LoadDomainSet(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +46,7 @@ func TestDomainSetNonMatchTrap(t *testing.T) {
 	// "notexample.com" must NOT match "example.com" — the canonical trap for HasSuffix.
 	dir := t.TempDir()
 	p := writeTempFile(t, dir, "rules.txt", "example.com\n")
-	ds, err := chnroute.LoadDomainSet(p)
+	ds, err := LoadDomainSet(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +58,7 @@ func TestDomainSetNonMatchTrap(t *testing.T) {
 func TestDomainSetCaseInsensitivity(t *testing.T) {
 	dir := t.TempDir()
 	p := writeTempFile(t, dir, "rules.txt", "Example.COM\n")
-	ds, err := chnroute.LoadDomainSet(p)
+	ds, err := LoadDomainSet(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +73,7 @@ func TestDomainSetTrailingDotNormalization(t *testing.T) {
 	dir := t.TempDir()
 	// File has trailing dot in the stored entry.
 	p := writeTempFile(t, dir, "rules.txt", "example.com.\n")
-	ds, err := chnroute.LoadDomainSet(p)
+	ds, err := LoadDomainSet(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +88,7 @@ func TestDomainSetTrailingDotNormalization(t *testing.T) {
 func TestDomainSetEmptySet(t *testing.T) {
 	dir := t.TempDir()
 	p := writeTempFile(t, dir, "rules.txt", "# just a comment\n\n")
-	ds, err := chnroute.LoadDomainSet(p)
+	ds, err := LoadDomainSet(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +102,7 @@ func TestDomainSetEmptySet(t *testing.T) {
 
 func TestDomainSetMissingFileSkipped(t *testing.T) {
 	// A path that does not exist must be silently skipped (not an error).
-	ds, err := chnroute.LoadDomainSet("/nonexistent/path/that/does/not/exist.txt")
+	ds, err := LoadDomainSet("/nonexistent/path/that/does/not/exist.txt")
 	if err != nil {
 		t.Fatalf("missing file must be skipped, got error: %v", err)
 	}
@@ -117,7 +115,7 @@ func TestDomainSetMultipleFiles(t *testing.T) {
 	dir := t.TempDir()
 	p1 := writeTempFile(t, dir, "a.txt", "example.com\n")
 	p2 := writeTempFile(t, dir, "b.txt", "test.org\n")
-	ds, err := chnroute.LoadDomainSet(p1, p2)
+	ds, err := LoadDomainSet(p1, p2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +134,7 @@ func TestDomainSetCommentsAndBlankLines(t *testing.T) {
 	dir := t.TempDir()
 	content := "# adblock list\nexample.com\n\n# more\nbad.net\n"
 	p := writeTempFile(t, dir, "rules.txt", content)
-	ds, err := chnroute.LoadDomainSet(p)
+	ds, err := LoadDomainSet(p)
 	if err != nil {
 		t.Fatal(err)
 	}
