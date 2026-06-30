@@ -35,3 +35,18 @@ jobs:
       # run-tests.sh runs the unittest suite + every tests/*.sh policy test.
       - name: Run test suite
         run: bash "${{ steps.loc.outputs.tests_dir }}/run-tests.sh"
+
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cmd/5gpn-dns/go.mod
+
+      - name: go vet and test
+        run: |
+          cd cmd/5gpn-dns
+          go vet ./...
+          go test ./...
