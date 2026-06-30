@@ -489,7 +489,7 @@ run_update_lists() {
 
 run_setup_firewall() {
     info "Installing firewall + proxy units (direct egress, no exit layer)..."
-    DOT_RATE="${DOT_RATE:-30}" DOT_BURST="${DOT_BURST:-60}" \
+    DOT_RATE="${DOT_RATE:-30/second}" DOT_BURST="${DOT_BURST:-60}" \
     CLIENT_NET="${CLIENT_NET:-172.22.0.0/16}" IOS_PORT="$IOS_PORT" \
         bash "${SCRIPTS_DIR}/setup-firewall.sh"
     ok "Firewall + sing-box unit installed."
@@ -871,7 +871,7 @@ Usage: sudo bash install.sh [option]
 Env overrides: DOMAIN=, PUBLIC_IP=, GATEWAY_IP=, EMAIL=, LOWMEM=1|0,
                CLIENT_NET=172.22.0.0/16, SINGBOX_RESOLVER=22.22.22.22, SINGBOX_VERSION=1.13.14,
                DNS_VERSION=dns-v0.1.0, DNS_SHA256=,
-               DOT_RATE=30, DOT_BURST=60,
+               DOT_RATE=30/second, DOT_BURST=60,
                TGBOT_TOKEN=, TGBOT_ADMINS=
 EOF
 }
