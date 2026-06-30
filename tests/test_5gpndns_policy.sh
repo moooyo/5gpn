@@ -8,6 +8,9 @@ rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 INSTALL="$ROOT/install.sh"
 RENEW="$ROOT/scripts/renew-hook.sh"
 DNS_SVC="$ROOT/etc/systemd/5gpn-dns.service"
+FIREWALL="$ROOT/scripts/setup-firewall.sh"
+UPDATE_LISTS="$ROOT/scripts/update-lists.sh"
+TGBOT="$ROOT/tgbot.py"
 
 # --- install.sh: install_5gpndns function present ---
 grep -Fq 'install_5gpndns'                  "$INSTALL" || fail "install.sh: no install_5gpndns function"
@@ -50,6 +53,32 @@ grep -Eq '^\s*(render_smartdns_conf|gen_foreign_cidr)' "$INSTALL" \
 
 # --- start_services / show_status: 5gpn-dns replaces smartdns ---
 grep -Eq '"5gpn-dns"' "$INSTALL" || fail "install.sh: 5gpn-dns not in service list (start_services/show_status)"
+
+# --- setup-firewall.sh: opens udp/tcp 53 + tcp 8443, keeps 853, rate-limits :53 ---
+grep -Fq 'udp dport 53 accept'            "$FIREWALL" || fail "setup-firewall.sh: no 'udp dport 53 accept'"
+grep -Eq 'tcp dport.*\b53\b'              "$FIREWALL" || fail "setup-firewall.sh: no tcp dport 53"
+grep -Fq 'tcp dport 8443 accept'          "$FIREWALL" || fail "setup-firewall.sh: no 'tcp dport 8443 accept'"
+grep -Fq '853'                            "$FIREWALL" || fail "setup-firewall.sh: DoT port 853 removed"
+grep -Eq 'dns_rate4|dns_rate6'            "$FIREWALL" || fail "setup-firewall.sh: no dns_rate4/dns_rate6 rate meter for :53"
+grep -Fq '5gpn-dns.service'              "$FIREWALL" || fail "setup-firewall.sh: does not install 5gpn-dns.service"
+
+# --- update-lists.sh: writes to /etc/5gpn/rules, reloads 5gpn-dns, no old smartdns/gen/render ---
+grep -Fq '/etc/5gpn/rules'               "$UPDATE_LISTS" || fail "update-lists.sh: no /etc/5gpn/rules path"
+grep -Fq 'china_ip_list.txt'             "$UPDATE_LISTS" || fail "update-lists.sh: no china_ip_list.txt"
+grep -Fq 'systemctl reload 5gpn-dns'     "$UPDATE_LISTS" || fail "update-lists.sh: does not reload 5gpn-dns"
+grep -Fq 'gen_foreign_cidr'              "$UPDATE_LISTS" \
+    && fail "update-lists.sh: still references gen_foreign_cidr (should be deleted)"
+grep -Fq 'render_smartdns_conf'          "$UPDATE_LISTS" \
+    && fail "update-lists.sh: still references render_smartdns_conf (should be deleted)"
+grep -Fq 'foreign-cidr'                  "$UPDATE_LISTS" \
+    && fail "update-lists.sh: still references foreign-cidr.txt (should be deleted)"
+grep -Fq 'systemctl restart smartdns'    "$UPDATE_LISTS" \
+    && fail "update-lists.sh: still restarts smartdns (should be deleted)"
+
+# --- tgbot.py: SERVICES has 5gpn-dns, no smartdns/xray ---
+grep -Fq '"5gpn-dns"'   "$TGBOT" || fail "tgbot.py: SERVICES does not contain 5gpn-dns"
+grep -Fq '"smartdns"'   "$TGBOT" \
+    && fail "tgbot.py: SERVICES still contains smartdns"
 
 [ $rc -eq 0 ] && echo "5gpn-dns policy: PASS"
 exit $rc

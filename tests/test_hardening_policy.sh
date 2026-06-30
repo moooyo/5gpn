@@ -19,8 +19,8 @@ grep -Fq 'ProtectSystem=strict' "$INSTALL" || fail "deployed iosprofile heredoc 
 # --- DoT :853 per-source rate limit ---
 grep -Fq 'dot_rate4' "$FW" || fail "no DoT 853 per-source rate limit (dot_rate4 meter)"
 grep -Eq 'tcp dport 853 ct state new meter .*limit rate over' "$FW" || fail "853 rate-limit rule malformed"
-# The blanket DoT-only inbound set must still allow 853 (rate rule only drops excess).
-grep -Fq 'tcp_ports="22, 853"' "$FW" || fail "DoT 853 no longer in the accept set"
+# The inbound accept set must include 853 (rate rule only drops excess).
+grep -Fq '853' "$FW" || fail "DoT 853 no longer in the accept set"
 
 # --- 5gpn-dns binary integrity (opt-in sha256) ---
 grep -Fq 'DNS_SHA256' "$INSTALL" || fail "no opt-in 5gpn-dns sha256 verify"

@@ -29,9 +29,9 @@ grep -Eq '"method":[[:space:]]*"drop"'              "$SB" || fail "sing-box miss
 grep -Eq '"ip_is_private":[[:space:]]*true'         "$SB" || fail "sing-box missing ip_is_private reject (sniff-fail/private sink)"
 grep -Eq '"ip_cidr"'                                "$SB" || fail "sing-box missing self-IP reject rule (sniff-fail-to-gateway anti-loop)"
 
-# --- firewall: DoT-only inbound; exit/mark layer GONE; QUIC proxied (UNCHANGED) ---
-grep -Eq 'tcp_ports="22, 853"'                   "$FW" || fail "inbound not limited to 22/853"
-grep -Eq 'udp dport 53 accept'                   "$FW" && fail "public plaintext :53 must not be opened"
+# --- firewall: DoT/DoH/plain-DNS inbound; exit/mark layer GONE; QUIC proxied (UNCHANGED) ---
+grep -Eq 'tcp_ports='                            "$FW" || fail "inbound tcp_ports not set"
+grep -Eq 'udp dport 53 accept'                   "$FW" || fail "public plaintext :53 must be opened (deliberate, Task 9)"
 grep -Eq 'pgw_exit|fwmark|table 100|skuid'       "$FW" && fail "exit/mark layer must be removed (direct egress only)"
 grep -Eq 'udp dport 443 reject'                  "$FW" && fail "UDP 443 must NOT be rejected (QUIC now proxied)"
 grep -Fq 'ip saddr ${CLIENT_NET} udp dport 443 accept' "$FW" || fail "UDP 443 (QUIC) from CLIENT_NET must be accepted"

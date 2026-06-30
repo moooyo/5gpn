@@ -3,9 +3,9 @@
 5gpn Telegram ops bot.
 
 A lean, stdlib-only (urllib long-polling) Telegram bot that drives the
-5gpn DoT gateway from inline-keyboard buttons.
+5gpn DoT/DoH/plain-DNS gateway from inline-keyboard buttons.
 
-Architecture reminder: smartdns -> sing-box -> DIRECT egress.
+Architecture reminder: 5gpn-dns (data-plane resolver) -> sing-box -> DIRECT egress.
 There is NO exit layer, so there are NO exit-switching commands. The bot only
 manages: status, forced-proxy domains, chnroute/list refresh, cert renewal,
 service restarts, logs, and the iOS profile QR.
@@ -24,7 +24,7 @@ Config / paths (override CONF_DIR via env if needed):
   /etc/5gpn/.tgbot_token     bot token (fallback to TGBOT_TOKEN env)
   /etc/5gpn/.tgbot_admins    authorized ids (fallback to TGBOT_ADMINS env)
   /etc/5gpn/.domain          the gateway's domain (for the iOS URL)
-  /etc/smartdns/proxy-domains.txt forced-proxy domain list (read to list)
+  /etc/5gpn/rules/blacklist.txt forced-proxy domain list (read to list)
   /opt/5gpn/install.sh       the CLI we shell out to for real work
 """
 
@@ -44,15 +44,15 @@ import urllib.request
 CONF_DIR = os.environ.get("CONF_DIR", "/etc/5gpn")
 BASE_DIR = os.environ.get("BASE_DIR", "/opt/5gpn")
 INSTALL = os.path.join(BASE_DIR, "install.sh")
-SMARTDNS_DIR = "/etc/smartdns"
-PROXY_DOMAINS = os.path.join(SMARTDNS_DIR, "proxy-domains.txt")
+RULES_DIR = os.path.join(CONF_DIR, "rules")
+PROXY_DOMAINS = os.path.join(RULES_DIR, "blacklist.txt")
 DOMAIN_FILE = os.path.join(CONF_DIR, ".domain")
 GATEWAY_FILE = os.path.join(CONF_DIR, ".gateway_ip")
 PUBLIC_IP_FILE = os.path.join(CONF_DIR, ".public_ip")
 IOS_PORT = "8111"
 
 # Services the bot may restart / tail (the only two in the data path).
-SERVICES = ["smartdns", "sing-box"]
+SERVICES = ["5gpn-dns", "sing-box"]
 
 # Canonical FQDN rule, shared behaviorally with install.sh's is_valid_domain:
 # lowercase [a-z0-9-] labels (<=63), alphabetic 2-63 TLD, total <=253.
@@ -360,13 +360,13 @@ def op_update_lists():
 
 
 def op_renew_cert():
-    """certbot renew; the installed deploy/renew hook reloads smartdns."""
+    """certbot renew; the installed deploy/renew hook reloads 5gpn-dns."""
     ok, out = run(["certbot", "renew", "--non-interactive"], timeout=600)
     tail = _tail(out, 12)
     if ok:
         if "No renewals were attempted" in out or "not yet due" in out.lower():
             return "ℹ️ <b>证书尚未到期</b>，无需续期。\n" + pre(tail)
-        return "✅ <b>证书已续期</b>（续期钩子会重载 smartdns）。\n" + pre(tail)
+        return "✅ <b>证书已续期</b>（续期钩子会重载 5gpn-dns）。\n" + pre(tail)
     return "❌ <b>证书续期失败</b>\n" + pre(tail)
 
 
@@ -450,7 +450,7 @@ def domains_menu():
 
 def restart_menu():
     return [
-        [{"text": "smartdns", "callback_data": "restart:smartdns"},
+        [{"text": "5gpn-dns", "callback_data": "restart:5gpn-dns"},
          {"text": "sing-box", "callback_data": "restart:sing-box"}],
         [{"text": "全部", "callback_data": "restart:all"}],
         [{"text": "« 返回", "callback_data": "menu:main"}],

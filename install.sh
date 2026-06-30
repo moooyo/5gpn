@@ -322,7 +322,7 @@ install_files() {
     # iOS responder + control-plane python (only if shipped in the checkout)
     [[ -f "${SCRIPT_DIR}/src/ios-http.py" ]] && install -m 0755 "${SCRIPT_DIR}/src/ios-http.py" "${SRC_DIR}/ios-http.py"
     [[ -f "${SCRIPT_DIR}/tgbot.py"       ]] && install -m 0755 "${SCRIPT_DIR}/tgbot.py"       "${BASE_DIR}/tgbot.py"
-    ok "Files installed under ${BASE_DIR} and ${SMARTDNS_DIR}."
+    ok "Files installed under ${BASE_DIR} and ${CONF_DIR}."
 }
 
 # ----------------------------------------------------------------------------
@@ -482,7 +482,7 @@ EOF
 # ----------------------------------------------------------------------------
 run_update_lists() {
     info "Building chnroute lists (china_ip_list.txt)..."
-    SMARTDNS_DIR="$SMARTDNS_DIR" GATEWAY_IP="${GATEWAY_IP:-$PUBLIC_IP}" CACHE_SIZE="$CACHE_SIZE" \
+    RULES_DIR="/etc/5gpn/rules" \
         bash "${SCRIPTS_DIR}/update-lists.sh"
     ok "Lists updated."
 }
@@ -722,11 +722,8 @@ del_domain() {
 }
 
 refresh_lists_and_restart() {
-    local gw; gw="${GATEWAY_IP:-$(cat "${CONF_DIR}/.gateway_ip" 2>/dev/null || cat "${CONF_DIR}/.public_ip" 2>/dev/null || true)}"
-    [[ -z "$gw" ]] && gw="$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[\d.]+' || echo 127.0.0.1)"
-    local cs; cs="$(cat "${CONF_DIR}/.cache_size" 2>/dev/null || echo 20000)"
     local sd="${SCRIPTS_DIR}/update-lists.sh"; [[ -x "$sd" ]] || sd="${SCRIPT_DIR}/scripts/update-lists.sh"
-    SMARTDNS_DIR="$SMARTDNS_DIR" GATEWAY_IP="$gw" CACHE_SIZE="$cs" bash "$sd"
+    RULES_DIR="/etc/5gpn/rules" bash "$sd"
 }
 
 do_update_lists() {
