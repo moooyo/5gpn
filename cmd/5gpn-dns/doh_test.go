@@ -180,3 +180,55 @@ func TestDoH_PostWithRealHandler(t *testing.T) {
 		t.Errorf("answer IP = %v, want 10.0.0.1", a.A)
 	}
 }
+
+// TestDoH_POST_ContentTypeWithParams verifies that RFC 8484 is satisfied when
+// the Content-Type header carries additional media-type parameters
+// (e.g. "application/dns-message; charset=utf-8") — the handler must accept
+// it rather than returning 415.
+func TestDoH_POST_ContentTypeWithParams(t *testing.T) {
+	h := &stubHandler{reply: new(dns.Msg)}
+	s := &Servers{cfg: Config{ListenDoH: ":8443"}, handler: h}
+
+	wire := makeDNSQuery("example.com")
+
+	for _, ct := range []string{
+		"application/dns-message; charset=utf-8",
+		"application/dns-message; charset=UTF-8",
+		"application/dns-message;boundary=something",
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/dns-query", bytes.NewReader(wire))
+		req.Header.Set("Content-Type", ct)
+		rec := httptest.NewRecorder()
+
+		s.dohHandler(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("Content-Type %q: status = %d, want 200", ct, rec.Code)
+		}
+	}
+}
+
+// TestDoH_POST_WrongContentType verifies that a wrong media type returns 415.
+func TestDoH_POST_WrongContentType(t *testing.T) {
+	h := &stubHandler{reply: new(dns.Msg)}
+	s := &Servers{cfg: Config{}, handler: h}
+
+	wire := makeDNSQuery("example.com")
+
+	for _, ct := range []string{
+		"text/plain",
+		"application/json",
+		"",
+		"not-a-valid/media-type(",
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/dns-query", bytes.NewReader(wire))
+		req.Header.Set("Content-Type", ct)
+		rec := httptest.NewRecorder()
+
+		s.dohHandler(rec, req)
+
+		if rec.Code != http.StatusUnsupportedMediaType {
+			t.Errorf("Content-Type %q: status = %d, want 415", ct, rec.Code)
+		}
+	}
+}

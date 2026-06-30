@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"sync"
@@ -214,7 +215,8 @@ func (s *Servers) dohHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case http.MethodPost:
-		if r.Header.Get("Content-Type") != "application/dns-message" {
+		mediatype, _, parseErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if parseErr != nil || mediatype != "application/dns-message" {
 			http.Error(w, "Content-Type must be application/dns-message", http.StatusUnsupportedMediaType)
 			return
 		}

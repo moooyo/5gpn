@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -26,9 +25,6 @@ func main() {
 	}
 
 	// ── Build Handler ─────────────────────────────────────────────────────────
-	var setsPtr atomic.Pointer[ruleSets]
-	setsPtr.Store(sets)
-
 	cacheSize := cfg.CacheSize
 	if cacheSize <= 0 {
 		cacheSize = 4096
@@ -70,7 +66,6 @@ func main() {
 				continue
 			}
 			// Atomic swap: in-flight queries holding the old Handler fields finish safely.
-			setsPtr.Store(newSets)
 			h.swapRuleSets(newSets.adblock, newSets.direct, newSets.blacklist, newSets.chnroute)
 			log.Println("SIGHUP: reload complete")
 		}

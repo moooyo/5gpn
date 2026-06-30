@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"fmt"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -28,16 +29,29 @@ type certCache struct {
 
 // get returns the current certificate, reloading from disk if either file's
 // mtime has changed since the last load.
+//
+// If a reload attempt fails (e.g. files are mid-write during cert renewal) and
+// a previously-loaded certificate is already cached, the stale certificate is
+// returned so that in-flight TLS handshakes continue to succeed.  An error is
+// only returned when there is no cached certificate at all (first-load failure).
 func (c *certCache) get(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	certInfo, err := os.Stat(c.certPath)
 	if err != nil {
+		if c.state.cert != nil {
+			log.Printf("cert: stat %s: %v — serving stale cert", c.certPath, err)
+			return c.state.cert, nil
+		}
 		return nil, fmt.Errorf("cert: stat %s: %w", c.certPath, err)
 	}
 	keyInfo, err := os.Stat(c.keyPath)
 	if err != nil {
+		if c.state.cert != nil {
+			log.Printf("cert: stat %s: %v — serving stale cert", c.keyPath, err)
+			return c.state.cert, nil
+		}
 		return nil, fmt.Errorf("cert: stat %s: %w", c.keyPath, err)
 	}
 
@@ -51,6 +65,10 @@ func (c *certCache) get(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	// Reload.
 	cert, err := tls.LoadX509KeyPair(c.certPath, c.keyPath)
 	if err != nil {
+		if c.state.cert != nil {
+			log.Printf("cert: load %s / %s: %v — serving stale cert", c.certPath, c.keyPath, err)
+			return c.state.cert, nil
+		}
 		return nil, fmt.Errorf("cert: load %s / %s: %w", c.certPath, c.keyPath, err)
 	}
 	c.state = certState{
