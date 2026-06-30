@@ -1,5 +1,5 @@
 # 5gpn smartdns — auto-rendered from smartdns.conf.template. DO NOT edit in place.
-# Loop-avoidance: xray MUST resolve via 22.22.22.22, NEVER this smartdns.
+# Loop-avoidance: sing-box MUST resolve via 22.22.22.22 (or SINGBOX_RESOLVER), NEVER this smartdns.
 
 # ---- Ingress: DoT only (853). Plaintext 53 is localhost-internal only. ----
 bind-tls [::]:853
@@ -15,31 +15,32 @@ cache-size __CACHE_SIZE__
 rr-ttl-min 300
 rr-ttl-max 86400
 
-# ---- Upstreams: anti-pollution (DESIGN §5 constraint 2) ----
-# Domestic plaintext resolvers accept ONLY China IPs (-whitelist-ip + the
-# whitelist-ip set included below), so poisoned/foreign answers from them are
-# dropped. Clean overseas resolvers run over DoT (harder to poison) and return
-# the real foreign IP, which chnroute then ip-alias'es to the gateway.
-server 223.5.5.5 -whitelist-ip
-server 119.29.29.29 -whitelist-ip
-server-tls 8.8.8.8 -host-name dns.google
-server-tls 1.1.1.1
+# ---- No latency probing: tier-3 selection is by IP content (china_ip), not speed ----
+speed-check-mode none
+dualstack-ip-selection no
 
-# China IP whitelist for the -whitelist-ip domestic servers above. Generated from
-# china_ip_list by update-lists.sh; this file MUST exist or smartdns won't start.
-conf-file __CHINA_WHITELIST_FILE__
+# ---- Two upstream groups; BOTH stay in the default group so tier-3 names query both ----
+server 223.5.5.5 -group domestic
+server 119.29.29.29 -group domestic
+server-tls 8.8.8.8 -host-name dns.google -group foreign
+server-tls 1.1.1.1 -group foreign
 
-# Known ISP/GFW bogus-NXDOMAIN poison addresses -> return SOA. Operator-editable.
+# Known ISP/GFW bogus-NXDOMAIN poison addresses -> SOA. Operator-editable.
 conf-file __BOGUS_NXDOMAIN_FILE__
 
-# Prefer reachable/closest IP so mixed answers favor the direct (China) IP.
-speed-check-mode ping,tcp:443
-response-mode first-ping
+# ---- (Tier 1) Blacklist domains -> gateway IP, no resolution (force proxy) ----
+domain-set -name blacklist -type list -file __PROXY_DOMAINS_FILE__
+address /domain-set:blacklist/__GATEWAY_IP__
 
-# ---- (1) Forced-proxy domains -> gateway IP (no resolution) ----
-domain-set -name proxylist -type list -file __PROXY_DOMAINS_FILE__
-address /domain-set:proxylist/__GATEWAY_IP__
+# ---- (Tier 2) Whitelist (mainland) domains -> domestic group only -> direct ----
+domain-set -name cnlist -type list -file __CHINA_DOMAINS_FILE__
+nameserver /domain-set:cnlist/domestic
 
-# ---- (2) chnroute: any resolved IP in 'foreign' (non-China) -> rewrite to gateway IP ----
+# ---- (Tier 3) Neither list: default group queries both; prefer China IP if present ----
+# whitelist-ip fires only when the merged answer contains a China IP -> then only
+# China IPs are kept (foreign dropped). No China IP -> whole foreign answer passes.
+ip-set -name china_ip -type list -file __CHINA_IP_FILE__
+ip-rules ip-set:china_ip -whitelist-ip
+# Any remaining foreign IP -> rewrite to the gateway IP -> sing-box -> proxy.
 ip-set -name foreign -type list -file __FOREIGN_CIDR_FILE__
 ip-rules ip-set:foreign -ip-alias __GATEWAY_IP__

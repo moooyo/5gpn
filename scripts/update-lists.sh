@@ -24,8 +24,11 @@ DRY_RUN="${DRY_RUN:-0}"
 
 china="$SMARTDNS_DIR/china_ip_list.txt"
 foreign="$SMARTDNS_DIR/foreign-cidr.txt"
-china_whitelist="$SMARTDNS_DIR/china-whitelist.conf"
+china_ipset="$SMARTDNS_DIR/china_ip.conf"
+china_domains="$SMARTDNS_DIR/china-domains.txt"
 bogus="$SMARTDNS_DIR/bogus-nxdomain.conf"
+CHINA_DOMAINS_URL="${CHINA_DOMAINS_URL:-https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/accelerated-domains.china.conf}"
+MIN_CN_DOMAINS="${MIN_CN_DOMAINS:-10000}"
 mkdir -p "$SMARTDNS_DIR"
 
 if [ "$DRY_RUN" != "1" ]; then
@@ -38,19 +41,37 @@ if [ "$DRY_RUN" != "1" ]; then
     fi
 fi
 
+# Mainland domain whitelist (felixonmars accelerated-domains). Lines look like:
+#   server=/example.cn/114.114.114.114  -> extract the domain. Keep old on failure.
+if [ "$DRY_RUN" != "1" ]; then
+    tmpd="$china_domains.dl"
+    if gum_spin "下载 china domains…" wget -qO "$tmpd" "$CHINA_DOMAINS_URL"; then
+        tmpx="$china_domains.tmp"
+        sed -n 's|^server=/\([^/]*\)/.*|\1|p' "$tmpd" | sort -u > "$tmpx"
+        n=$(grep -c . "$tmpx" 2>/dev/null || echo 0)
+        if [ "$n" -ge "$MIN_CN_DOMAINS" ]; then mv "$tmpx" "$china_domains"
+        else warn "china-domains too small ($n < $MIN_CN_DOMAINS); keeping existing"; rm -f "$tmpx"; fi
+        rm -f "$tmpd"
+    else
+        warn "china domains download failed; keeping existing $china_domains"
+        rm -f "$tmpd"
+    fi
+fi
+# domain-set -file must exist or smartdns refuses to start.
+[ -f "$china_domains" ] || printf '# (regenerate via update-lists.sh)\n' > "$china_domains"
+
 # Generator refuses (exit 1) on a too-small list, leaving old foreign intact.
 python3 "$HERE/gen_foreign_cidr.py" "$china" "$foreign"
 
-# Anti-pollution whitelist: domestic resolvers may only return these (China) IPs.
-# Regenerate from the china list; keep the old file if china is unusable (an empty
-# whitelist would make every domain look foreign -> everything proxied).
+# China IP set for tier-3 prefer-CN (ip-rules ip-set:china_ip -whitelist-ip).
+# Plain CIDR list from china_ip_list; keep old if china is unusable.
 if grep -Eq '^[0-9]' "$china" 2>/dev/null; then
-    tmpw="$china_whitelist.tmp"
-    grep -E '^[0-9]' "$china" | sed 's/^/whitelist-ip /' > "$tmpw" && mv "$tmpw" "$china_whitelist"
+    tmpc="$china_ipset.tmp"
+    grep -E '^[0-9]' "$china" > "$tmpc" && mv "$tmpc" "$china_ipset"
 fi
-# conf-file includes must always exist or smartdns refuses to start.
-[ -f "$china_whitelist" ] || printf '# (regenerate via update-lists.sh)\n' > "$china_whitelist"
-[ -f "$bogus" ] || printf '# bogus-nxdomain poison IPs (operator-editable)\n' > "$bogus"
+# conf-file / *-file includes must always exist or smartdns refuses to start.
+[ -f "$china_ipset" ] || printf '# (regenerate via update-lists.sh)\n' > "$china_ipset"
+[ -f "$bogus" ]       || printf '# bogus-nxdomain poison IPs (operator-editable)\n' > "$bogus"
 
 python3 "$HERE/render_smartdns_conf.py" \
     "$ROOT/etc/smartdns.conf.template" "$SMARTDNS_DIR/smartdns.conf" \
@@ -59,7 +80,8 @@ python3 "$HERE/render_smartdns_conf.py" \
     BIND_KEY="$SMARTDNS_DIR/cert/privkey.pem" \
     PROXY_DOMAINS_FILE="$SMARTDNS_DIR/proxy-domains.txt" \
     FOREIGN_CIDR_FILE="$foreign" \
-    CHINA_WHITELIST_FILE="$china_whitelist" \
+    CHINA_DOMAINS_FILE="$china_domains" \
+    CHINA_IP_FILE="$china_ipset" \
     BOGUS_NXDOMAIN_FILE="$bogus" \
     CACHE_SIZE="$CACHE_SIZE"
 
