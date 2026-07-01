@@ -81,6 +81,11 @@ grep -Eq '\{adblock,direct,blacklist,chnroute\}' "$INSTALL" || fail "install.sh:
 grep -Fq 'subscriptions.json'    "$INSTALL" || fail "install.sh: does not write subscriptions.json"
 grep -Fq 'DNS_SUBSCRIPTIONS'     "$INSTALL" || fail "install.sh: dns.env does not reference DNS_SUBSCRIPTIONS"
 
+# --- install.sh: stages etc/systemd into the installed tree (setup-firewall.sh,
+# run from /opt/5gpn/scripts, installs sing-box/5gpn-dns units from ${ROOT}/etc/systemd) ---
+grep -Fq '${BASE_DIR}/etc/systemd' "$INSTALL" || fail "install.sh: install_files does not stage etc/systemd into /opt/5gpn (setup-firewall.sh unit source)"
+grep -Fq '${ROOT}/etc/systemd/sing-box.service' "$FIREWALL" || fail "setup-firewall.sh: does not install sing-box.service from the staged unit dir"
+
 # --- 5gpn-dns.service: sandboxed conf-dir writes allowed under ProtectSystem=strict ---
 # The subscription manager + control-plane API write rule caches under
 # /etc/5gpn/rules AND rewrite /etc/5gpn/subscriptions.json (atomic temp+rename

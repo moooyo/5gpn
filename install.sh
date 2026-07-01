@@ -372,6 +372,15 @@ install_files() {
         [[ -e "$f" ]] || continue
         install -m 0755 "$f" "${SCRIPTS_DIR}/$(basename "$f")"
     done
+    # repo systemd units -> /opt/5gpn/etc/systemd. setup-firewall.sh runs from
+    # /opt/5gpn/scripts and installs the sing-box + 5gpn-dns units from
+    # "${ROOT}/etc/systemd/*.service" (ROOT=/opt/5gpn), so the unit sources must
+    # live under the installed tree, not just the (transient) install checkout.
+    install -d -m 0755 "${BASE_DIR}/etc/systemd"
+    for u in "${SCRIPT_DIR}"/etc/systemd/*.service; do
+        [[ -e "$u" ]] || continue
+        install -m 0644 "$u" "${BASE_DIR}/etc/systemd/$(basename "$u")"
+    done
     ok "Files installed under ${BASE_DIR} and ${CONF_DIR}."
 }
 
