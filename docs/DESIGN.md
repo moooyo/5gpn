@@ -58,12 +58,12 @@
 | `/etc/5gpn/rules/`(四类规则,手动文件 + 订阅缓存) | `adblock.txt`、`direct.txt`、`blacklist.txt`、`china_ip_list.txt`(手动)+ `<cat>/*.txt`(订阅缓存,Phase 2 已实现,见 §9) |
 | sing-box + config.json | `direct` inbound TCP 80 / TCP+UDP 443;route sniff tls/quic/http + resolve(ipv4_only);direct 直出;DNS 单一外部 `ext`=`22.22.22.22`;sniff 失败 / 私网 / 自身 IP → reject drop(防回环兜底) |
 | 防火墙(nft 入站) | 放行 22/53/853/8443 + `172.22→80/443/udp443`;:53 per-source 限速;**无 mark/策略路由** |
-| certbot / renew-hook / iOS profile / ios-http | 证书、iOS 描述文件;renew-hook 拷证书 + `kill -HUP`(5gpn-dns 热加载,不重启) |
+| certbot / renew-hook / iOS profile / iOS 分发服务 | 证书、iOS 描述文件;renew-hook 拷证书 + `kill -HUP`(5gpn-dns 热加载,不重启);iOS `.mobileconfig` 分发现由守护进程内 HTTP 服务承载(`cmd/5gpn-dns/iosd.go`,:8111,取代旧 `src/ios-http.py`) |
 | install.sh 编排 | 装 5gpn-dns(下载 CI 预编译产物)、下载预编译 sing-box、规则文件、systemd、sysctl/低内存 |
 | `subscriptions.json`(`/etc/5gpn/subscriptions.json`) | 订阅配置:各条目 `id`/`category`/`name`/`url`/`format`/`enabled`/`interval`;`5gpn-dns` 进程内订阅管理器按此定时拉取(见 §9) |
 | `cmd/5gpn-dns/api.go` + `Controller` | 控制台 HTTPS REST API(:9443,bearer token,仅 CLIENT_NET);对外暴露状态/统计/查询/订阅增删改/规则增删/更新/reload(见 §13) |
 | `cmd/5gpn-dns/web/`(内嵌 Web UI) | React + Vite + Tailwind + TypeScript;CI 构建 `npm run build` → `web/dist` → `go:embed` 打进二进制;登录/仪表盘/订阅/规则/查询/统计各视图(见 §13) |
-| `tgbot.py`(Telegram 控制面)+ `install.sh` Gum TUI | 管手动规则 / `update-lists.sh` 触发 reload / 状态;改文件 + SIGHUP。已改为调 :9443 API 的客户端,与 Web UI 并存 |
+| Telegram 控制 bot(`cmd/5gpn-dns/bot.go`,进程内 Go)+ `install.sh` Gum TUI | 管手动规则 / 触发 reload / 状态;`github.com/go-telegram/bot`,管理员门控,**直接调进程内 `Controller`**(不经 :9443 / 不需 token),与 Web UI 并存;特权操作委托 systemd(见 §14) |
 | tests/ | policy 测试 + Go 单测 |
 
 **明确不包含**:WireGuard / 多出口 / `pxout` 打 mark / `table 100` 等出口层(仅直出)。sing-box 以预编译二进制安装,5gpn-dns 以 CI 构建产物安装,网关上不引入 Go 工具链。
@@ -145,7 +145,7 @@ adblock 对**所有 qtype** 拦截(命中即 NXDOMAIN);blacklist / force-direct 
 
 ## 9. 规则与列表管理(Phase 2:进程内订阅管理器)
 
-规则有两个来源,合并生效(见 §4.4):**手动文本文件**(`/etc/5gpn/rules/<cat>.txt`,控制面 **Telegram Bot** `tgbot.py` 或 **Web UI** 编辑 + SIGHUP,或运维直接改文件)和**订阅**(`/etc/5gpn/subscriptions.json`,`5gpn-dns` 进程内的订阅管理器按各自 `interval` 定时拉取远程 URL)。Phase 3 已实现::9443 HTTPS REST API + 内嵌 Web UI(tgbot 已改为调同一 API,与 Web UI 并存),订阅的增删与规则增删均可走 API(见 §13)。
+规则有两个来源,合并生效(见 §4.4):**手动文本文件**(`/etc/5gpn/rules/<cat>.txt`,控制面 **进程内 Telegram Bot**(`cmd/5gpn-dns/bot.go`)或 **Web UI** 编辑 + SIGHUP,或运维直接改文件)和**订阅**(`/etc/5gpn/subscriptions.json`,`5gpn-dns` 进程内的订阅管理器按各自 `interval` 定时拉取远程 URL)。Phase 3 已实现::9443 HTTPS REST API + 内嵌 Web UI;Telegram bot 在 Phase 5 收进守护进程,直接调进程内 `Controller`(见 §14),订阅的增删与规则增删均可走 API 或 bot(见 §13)。
 
 **订阅管理器(`cmd/5gpn-dns/subscription.go`)**:
 - 配置文件 `/etc/5gpn/subscriptions.json`(env `DNS_SUBSCRIPTIONS` 覆盖路径);每条订阅含 `id`/`category`/`name`/`url`/`format`/`enabled`/`interval`。文件缺失 → 视为无订阅(不报错);JSON 损坏 → 报错并保留上次内存态。
@@ -173,7 +173,8 @@ adblock 对**所有 qtype** 拦截(命中即 NXDOMAIN);blacklist / force-direct 
 
 - **Phase 1(当前)**:`5gpn-dns` 引擎核心:DoT/DoH/plain-53 入口、四类规则(本地文件)、确定性仲裁、改写、AAAA→SOA、adblock、缓存、SIGHUP 重载、证书热加载。CI 构建(`moooyo/5gpn` release)。取代 smartdns + chinadns-ng。
 - **Phase 2(已实现)**:订阅系统:四类规则各可订阅远程 URL,进程内订阅管理器定时+按需拉取、与手动条目合并、落盘缓存、断网保留旧表、热重载。chnroute 默认由订阅提供;`update-lists.sh` 改为手动 reload 触发器。
-- **Phase 3(已实现)**::9443 bearer-token HTTPS REST API(`GET /api/status`、`GET /api/stats`、`GET /api/lookup?domain=`、`GET/POST /api/subscriptions`、`PATCH/DELETE /api/subscriptions/{id}`、`POST /api/update`、`GET/POST/DELETE /api/rules/{cat}`、`POST /api/reload`,均基于 `Controller`)+ 内嵌 React SPA(`cmd/5gpn-dns/web/`,`go:embed`);仅 CLIENT_NET 防火墙可达,`DNS_API_TOKEN` 鉴权(为空则整个控制台禁用,不会无鉴权对外提供);**`tgbot.py` 已改为调同一 API 的客户端,与 Web UI 并存**(详见 §13)。
+- **Phase 3(已实现)**::9443 bearer-token HTTPS REST API(`GET /api/status`、`GET /api/stats`、`GET /api/lookup?domain=`、`GET/POST /api/subscriptions`、`PATCH/DELETE /api/subscriptions/{id}`、`POST /api/update`、`GET/POST/DELETE /api/rules/{cat}`、`POST /api/reload`,均基于 `Controller`)+ 内嵌 React SPA(`cmd/5gpn-dns/web/`,`go:embed`);仅 CLIENT_NET 防火墙可达,`DNS_API_TOKEN` 鉴权(为空则整个控制台禁用,不会无鉴权对外提供)。Phase 3 时 `tgbot.py` 曾改为调同一 API 的客户端——**该点已被 Phase 5 取代**:Telegram bot 现为守护进程内的 Go 组件,直接调 `Controller`(见 §14)。
+- **Phase 5(已实现)**:Telegram bot 收进 `5gpn-dns` 守护进程(进程内 Go,`github.com/go-telegram/bot`,直接调 `Controller`,不经 :9443);iOS 分发服务同样收进进程内(:8111);**Python 全部移除**(`tgbot.py`/`src/ios-http.py`/`tests/test_tgbot.py` 删除),CI 去掉 Python(见 §14)。
 - ~~**出口层**~~:**取消**(仅直出,无 WireGuard/多出口/策略路由)。
 
 ## 12. 已定决策 / 待定 / 风险
@@ -225,10 +226,20 @@ adblock 对**所有 qtype** 拦截(命中即 NXDOMAIN);blacklist / force-direct 
 - **实现**:新增 `cmd/5gpn-dns/api.go`,在 `Controller` 之上补齐 `Lookup`,对外提供 bearer-token 鉴权的 HTTPS REST API,监听 `:9443`(`DNS_LISTEN_API`,install.sh 写入 `/etc/5gpn/dns.env`);同时 `go:embed cmd/5gpn-dns/web/dist` 把一个 React SPA 挂在 `/` 下,SPA 本身不鉴权(只是静态资源),它拿到的 token 用于调用 `/api/*`。
 - **端点**:`GET /api/status`、`GET /api/stats`、`GET /api/lookup?domain=`、`GET/POST /api/subscriptions`、`PATCH/DELETE /api/subscriptions/{id}`、`POST /api/update`、`GET/POST/DELETE /api/rules/{cat}`、`POST /api/reload`。所有 `/api/*` 要求 `Authorization: Bearer <DNS_API_TOKEN>`(常数时间比较);详见 §13。
 - **安全边界**:`DNS_API_TOKEN` 为空 → 整个控制台不启动(绝不无鉴权对外提供);防火墙只放行 CLIENT_NET 访问 :9443,不对公网开放;install.sh 自动生成 token(`openssl rand -hex 32`),重装时保留既有 token。
-- **tgbot 改为 API 客户端**:`tgbot.py` 不再直接改规则文件 / shell 出 `install.sh`,而是以 loopback `https://127.0.0.1:9443` 调用同一套 API(本机回环下 TLS 不校验证书,仍带 token),与 Web UI 并存、共享同一个 `Controller` 状态。
+- **tgbot 改为 API 客户端(Phase 3;已被 Phase 5 取代)**:Phase 3 时 `tgbot.py` 不再直接改规则文件 / shell 出 `install.sh`,而是以 loopback `https://127.0.0.1:9443` 调用同一套 API。**Phase 5 起该形态作废**:Telegram bot 现为守护进程内 Go 组件,直接调进程内 `Controller`(不经 :9443 / 不需 token),Python 全部移除(见 §14)。
 - **前端形态**:`cmd/5gpn-dns/web/` 是 React + Vite + Tailwind + TypeScript 项目,构建产物在 **CI** 里 `npm run build` 生成 `web/dist` 后 `go:embed` 进二进制;仓库里只提交一个占位 `web/dist/index.html`(保证 `go build` 在本地/CI 构建前也能过),真正构建出的 dist **不提交**。
 - **约定反转(同步改 CLAUDE.md)**:"控制面只有 tgbot、无 HTTP API/Web UI,Phase 3 前不实现" → Phase 3 已完成并上线;"tgbot 直接编辑规则文件" → tgbot 现为 API 客户端。
 - **保留历史**:tgbot 直接改文件 + SIGHUP 的旧实现保留于 git 历史;回滚 = 不设 `DNS_API_TOKEN`(控制台不启动),tgbot 需回退到对应的旧提交。
+
+**决策追加 2026-07-01 — Phase 5:Telegram bot + iOS 分发收进守护进程(进程内 Go);Python 全部移除;CI 去 Python(反转「tgbot 为 :9443 API 客户端」):**
+- **背景**:Phase 3 把 `tgbot.py` 改为经回环 `https://127.0.0.1:9443` 调 API 的 Python 客户端;iOS `.mobileconfig` 分发是 socket-activated 的 Python `src/ios-http.py`。仍在网关上留了 Python 运行时与单独单元。
+- **实现**:Telegram bot 重写为 `5gpn-dns` 守护进程内的 Go goroutine(`cmd/5gpn-dns/bot.go`,`github.com/go-telegram/bot`,零传递依赖),**直接调进程内 `Controller`**——不经 :9443、不需 HTTP/token。iOS 分发重写为进程内 `http.Server`(`cmd/5gpn-dns/iosd.go`,监听 `:8111`,`WWW_DIR`/`DNS_IOS_LISTEN`)。**Python 全部删除**:`tgbot.py`、`src/ios-http.py`、`tests/test_tgbot.py`。
+- **配置**:`TGBOT_TOKEN`/`TGBOT_ADMINS`(管理员门控)写 `/etc/5gpn/dns.env`;`install.sh --setup-tgbot` 写 token/admins + 重启 `5gpn-dns`(不再有单独 Python 单元)。
+- **依赖**:Go module 现依赖 `github.com/miekg/dns` + `github.com/go-telegram/bot`(两者均零传递依赖,最小依赖原则不变)。
+- **沙箱不放松**:bot 的特权操作(服务控制、证书续期)委托 systemd(`systemctl` / `systemd-run certbot`),`5gpn-dns` resolver 的加固 systemd 沙箱**保持不变——不放松**。
+- **CI 去 Python**:`.github/workflows/ci.yml` 删除 `actions/setup-python` 与 `py_compile` 步骤;`test` job 现只跑纯 grep 的 shell policy 测试,权威 `go vet` + `go test -race` 在独立 `go` job,`web` job 不变。
+- **约定反转(同步改 CLAUDE.md)**:"tgbot 为 :9443 API 客户端(Python)" → tgbot 现为进程内 Go 组件,直接调 `Controller`;"仓库含 Python / CI 跑 py_compile" → Python 全部移除,CI 去 Python。
+- **保留历史**:Python 版 tgbot / ios-http 保留于 git 历史;回滚靠 git。
 
 ## 13. 控制面(Phase 3::9443 HTTPS REST API + 内嵌 Web UI)
 
@@ -255,4 +266,20 @@ Phase 3 已实现,控制面从"tgbot 直接改文件 + SIGHUP"升级为"HTTPS RE
 **安全边界**:
 - **仅 CLIENT_NET 可达**:防火墙规则只放行 CLIENT_NET 访问 :9443,不面向公网(与 :53/:853/:8443 的公网暴露策略不同)。
 - **Token 门控**:`DNS_API_TOKEN` 为空即禁用整个控制台(不监听 :9443),避免"忘记设置 token = 无鉴权 API"的失误配置;install.sh 自动生成并在重装时保留同一 token。
-- **tgbot 作为客户端**:`tgbot.py` 通过 loopback `https://127.0.0.1:9443` 调用同一 API(回环连接不校验证书,但仍带 token),不再直接写规则文件或 shell 出 `install.sh` 做域名增删。
+- **Telegram bot(Phase 5:进程内 Go,不再是 :9443 客户端)**:Phase 3 时 `tgbot.py` 曾经回环 `https://127.0.0.1:9443` 调本 API;**Phase 5 起**,Telegram bot 是 `5gpn-dns` 守护进程内的 Go 组件(`cmd/5gpn-dns/bot.go`),**直接调进程内 `Controller`**,不经 :9443、不需 token,与 Web UI 并存共享同一 `Controller` 状态(见 §14)。
+
+## 14. 进程内 Telegram bot 与 iOS 分发服务(Phase 5)
+
+Phase 5 把控制面的 Telegram 一侧与 iOS 描述文件分发都从独立 Python 进程收进 `5gpn-dns` 守护进程,**仓库内不再有任何 Python**。
+
+**进程内 Telegram bot**(`cmd/5gpn-dns/bot.go`):
+- 用 `github.com/go-telegram/bot`(零传递依赖)在守护进程内起一个 goroutine;通过 `TGBOT_TOKEN`(`/etc/5gpn/dns.env`)启用,空则不启动 bot。
+- **管理员门控**:`TGBOT_ADMINS`(逗号分隔的 Telegram user id)白名单,非白名单用户被拒。
+- **直接调 `Controller`**:bot 命令映射到进程内 `Controller`(状态/统计/查询/订阅增删/规则增删/更新/reload),**不经 :9443、不需 token**——与 Web UI/REST API 并存共享同一份内存态。
+- **特权操作委托 systemd**:需要提权的操作(重启服务、触发证书续期)通过 `systemctl` / `systemd-run certbot` 委托 systemd,守护进程本身**不**获得额外能力,resolver 的加固 systemd 沙箱**保持不变**(见 §12 sandbox 决策)。
+- **启用方式**:`install.sh --setup-tgbot`(Gum TUI)把 `TGBOT_TOKEN`/`TGBOT_ADMINS` 写进 `dns.env` 并重启 `5gpn-dns`——没有单独的 Python bot 单元。
+
+**进程内 iOS 分发服务**(`cmd/5gpn-dns/iosd.go`):
+- 守护进程内的 `http.Server` 监听 `:8111`(`DNS_IOS_LISTEN`),从 `WWW_DIR` 分发 iOS `.mobileconfig` 描述文件,取代旧的 socket-activated Python `src/ios-http.py`。
+
+**依赖与测试**:Go module 依赖 = `github.com/miekg/dns` + `github.com/go-telegram/bot`(均零传递依赖)。bot / iOS 服务由 Go 单测覆盖(`bot_test.go` / `bot_ops_test.go` / `bot_render_test.go` / `iosd_test.go` 等,`go test ./...`);无 Python 测试。CI `test` job 仅跑 shell policy 测试,`go` job 跑 `go vet` + `go test -race`。
