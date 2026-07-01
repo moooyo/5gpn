@@ -264,6 +264,40 @@ install_singbox() {
 }
 
 # ----------------------------------------------------------------------------
+# Phase 2: subscriptions.json (remote rule-list auto-update, in-process in 5gpn-dns)
+# ----------------------------------------------------------------------------
+# Writes the default subscriptions.json — only if absent, so operator edits
+# (added/disabled/re-pointed subscriptions) are never clobbered on re-install.
+# Ships with exactly one enabled entry (chnroute china-ip): this replaces the
+# old update-lists.sh direct china_ip_list download. Disabled examples for the
+# other three categories live in etc/5gpn-dns/dns.env.example instead (valid
+# JSON has no comments).
+write_subscriptions_json() {
+    local f="${CONF_DIR}/subscriptions.json"
+    if [[ -f "$f" ]]; then
+        info "Keeping existing ${f}."
+        return 0
+    fi
+    cat > "$f" <<'EOF'
+{
+  "subscriptions": [
+    {
+      "id": "china-ip",
+      "category": "chnroute",
+      "name": "china_ip_list",
+      "url": "https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt",
+      "format": "cidr",
+      "enabled": true,
+      "interval": "24h"
+    }
+  ]
+}
+EOF
+    chmod 644 "$f"
+    ok "Written ${f} (chnroute china-ip subscription enabled)."
+}
+
+# ----------------------------------------------------------------------------
 # Install config + scripts + control-plane sources
 # ----------------------------------------------------------------------------
 install_files() {
@@ -289,6 +323,11 @@ install_files() {
             printf '# 5gpn %s: one domain per line\n' "$stub" \
                 > "${DNS_RULES_DIR_DEFAULT}/${stub}"
     done
+
+    # Phase 2: per-category subdirs for subscription-fetched caches (merged by
+    # the resolver alongside the manual <cat>.txt above: <cat>.txt + <cat>/*.txt).
+    install -d -m 0755 "${DNS_RULES_DIR_DEFAULT}"/{adblock,direct,blacklist,chnroute}
+    write_subscriptions_json
 
     # sing-box config (resolver hardcoded to 22.22.22.22 for loop-avoidance, IPv4-only, direct).
     install -d -m 0755 "$SINGBOX_DIR"
@@ -481,10 +520,10 @@ EOF
 # Lists + rules, firewall, iOS profile
 # ----------------------------------------------------------------------------
 run_update_lists() {
-    info "Building chnroute lists (china_ip_list.txt)..."
+    info "Triggering 5gpn-dns rule-cache reload (subscriptions fetch in-process)..."
     RULES_DIR="${RULES_DIR:-/etc/5gpn/rules}" \
         bash "${SCRIPTS_DIR}/update-lists.sh"
-    ok "Lists updated."
+    ok "Reload triggered."
 }
 
 run_setup_firewall() {
@@ -532,6 +571,11 @@ DNS_TRUST=dns.google@8.8.8.8,one.one.one.one@1.1.1.1
 
 DNS_RULES_DIR=${DNS_RULES_DIR_DEFAULT}
 DNS_CHNROUTE=${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt
+
+# Phase 2: remote rule-list subscriptions (fetched in-process; caches written to
+# DNS_RULES_DIR/<category>/<name>.txt, merged automatically with the manual
+# <category>.txt files above). See /etc/5gpn/subscriptions.json.
+DNS_SUBSCRIPTIONS=${CONF_DIR}/subscriptions.json
 
 DNS_CACHE_SIZE=4096
 DNS_TTL_MIN=300
@@ -728,7 +772,7 @@ refresh_lists_and_restart() {
 
 do_update_lists() {
     check_root
-    info "Refreshing china_ip_list (chnroute for split-horizon)..."
+    info "Refreshing 5gpn-dns rule caches (reload; subscriptions fetch in-process)..."
     refresh_lists_and_restart
     ok "Lists refreshed."
 }
@@ -830,7 +874,7 @@ full_install() {
     rm -f /etc/systemd/system/smartdns.service
     # (conf dir left in place so operators can recover proxy lists if needed)
 
-    run_update_lists       # fetch china_ip_list for split-horizon routing
+    run_update_lists       # trigger reload (subscriptions fetch chnroute in-process)
     run_setup_firewall     # DoT-only nft + sing-box unit
     system_tuning
     setup_ios_profile
@@ -860,7 +904,7 @@ usage() {
 Usage: sudo bash install.sh [option]
 
   (no args)           Full install / idempotent re-run
-  --update-lists      Refresh china_ip_list (chnroute for split-horizon)
+  --update-lists      Reload 5gpn-dns rule caches (subscriptions fetch in-process)
   --status            Show service states, domain, IP, list counts/age
   --add-domain <d>    Force-proxy a domain (adds to rules/blacklist.txt)
   --del-domain <d>    Remove a domain from the forced-proxy list

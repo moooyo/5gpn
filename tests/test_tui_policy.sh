@@ -24,11 +24,13 @@ for f in scripts/update-lists.sh scripts/setup-firewall.sh scripts/gen-ios-profi
     grep -Eq '\[OK\]|\[INFO\]' "$s" || fail "$f lost its plain-echo fallback"
 done
 
-# --- update-lists.sh: spin only the opaque download, never the operator output -
+# --- update-lists.sh: Phase 2 repurpose — a manual reload trigger, no fetch of its
+# own (the in-process subscription manager owns fetching), so there is no opaque
+# download left to wrap in gum_spin; its reload result must stay plain operator
+# output, never hidden behind a spinner.
 UL="$ROOT/scripts/update-lists.sh"
-grep -Fq 'gum_spin' "$UL" || fail "update-lists.sh download not wrapped in gum_spin"
 grep -Eq 'gum_spin[^|]*(render_smartdns_conf|systemctl)' "$UL" \
-    && fail "update-lists.sh must not hide the renderer/restart output behind a spinner"
+    && fail "update-lists.sh must not hide the reload/restart output behind a spinner"
 
 # --- quick-install.sh: pre-gum entrypoint — gum-aware-if-present, ANSI fallback -
 QI="$ROOT/quick-install.sh"

@@ -63,9 +63,9 @@ grep -Eq 'dns_rate4|dns_rate6'            "$FIREWALL" || fail "setup-firewall.sh
 grep -Eq 'udp dport 53 meter dns_rate4'  "$FIREWALL" || fail "setup-firewall.sh: no UDP :53 per-source rate meter (dns_rate4)"
 grep -Fq '5gpn-dns.service'              "$FIREWALL" || fail "setup-firewall.sh: does not install 5gpn-dns.service"
 
-# --- update-lists.sh: writes to /etc/5gpn/rules, reloads 5gpn-dns, no old smartdns/gen/render ---
+# --- update-lists.sh: repurposed (Phase 2) as a manual reload trigger; the in-process
+# subscription manager now owns the china_ip_list/chnroute fetch, not this script ---
 grep -Fq '/etc/5gpn/rules'               "$UPDATE_LISTS" || fail "update-lists.sh: no /etc/5gpn/rules path"
-grep -Fq 'china_ip_list.txt'             "$UPDATE_LISTS" || fail "update-lists.sh: no china_ip_list.txt"
 grep -Fq 'systemctl reload 5gpn-dns'     "$UPDATE_LISTS" || fail "update-lists.sh: does not reload 5gpn-dns"
 grep -Fq 'gen_foreign_cidr'              "$UPDATE_LISTS" \
     && fail "update-lists.sh: still references gen_foreign_cidr (should be deleted)"
@@ -75,6 +75,22 @@ grep -Fq 'foreign-cidr'                  "$UPDATE_LISTS" \
     && fail "update-lists.sh: still references foreign-cidr.txt (should be deleted)"
 grep -Fq 'systemctl restart smartdns'    "$UPDATE_LISTS" \
     && fail "update-lists.sh: still restarts smartdns (should be deleted)"
+
+# --- install.sh: Phase 2 subscriptions (rules subdirs, subscriptions.json, dns.env ref) ---
+grep -Eq '\{adblock,direct,blacklist,chnroute\}' "$INSTALL" || fail "install.sh: does not create rules/{adblock,direct,blacklist,chnroute} subdirs"
+grep -Fq 'subscriptions.json'    "$INSTALL" || fail "install.sh: does not write subscriptions.json"
+grep -Fq 'DNS_SUBSCRIPTIONS'     "$INSTALL" || fail "install.sh: dns.env does not reference DNS_SUBSCRIPTIONS"
+
+# --- 5gpn-dns.service: sandboxed rules-cache writes allowed under ProtectSystem=strict ---
+grep -Fq 'ReadWritePaths=/etc/5gpn/rules' "$DNS_SVC" || fail "5gpn-dns.service: no ReadWritePaths=/etc/5gpn/rules"
+
+# --- update-lists.sh: repurposed to a manual refresh trigger (reload only; subscription
+# manager in 5gpn-dns now owns the chnroute fetch) ---
+grep -Fq 'systemctl reload 5gpn-dns' "$UPDATE_LISTS" || fail "update-lists.sh: does not reload 5gpn-dns"
+grep -Fq 'CHINA_IP_URL'              "$UPDATE_LISTS" \
+    && fail "update-lists.sh: still fetches china_ip_list directly (should be subscription-owned)"
+grep -Fq 'wget'                      "$UPDATE_LISTS" \
+    && fail "update-lists.sh: still downloads lists directly (should be subscription-owned)"
 
 # --- tgbot.py: SERVICES has 5gpn-dns, no smartdns/xray ---
 grep -Fq '"5gpn-dns"'   "$TGBOT" || fail "tgbot.py: SERVICES does not contain 5gpn-dns"

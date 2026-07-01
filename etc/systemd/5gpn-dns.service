@@ -27,6 +27,10 @@ ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictAddressFamilies=AF_INET AF_UNIX
 ReadOnlyPaths=/etc/5gpn
+# Phase 2: the in-process subscription manager writes rule caches to
+# /etc/5gpn/rules/<category>/<name>.txt. Everything else under /etc/5gpn
+# (cert, dns.env, subscriptions.json itself) stays read-only.
+ReadWritePaths=/etc/5gpn/rules
 
 [Install]
 WantedBy=multi-user.target
