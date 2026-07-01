@@ -10,3 +10,12 @@ __pycache__/
 # Local scratch / temp
 *.tmp
 *.log
+
+# Go build outputs (5gpn-dns is built in CI / cross-compiled; never commit binaries)
+/cmd/5gpn-dns/5gpn-dns
+/cmd/5gpn-dns/5gpn-dns.exe
+*.exe
+
+# Frontend build output (Phase 3 web UI; built in CI)
+/web/node_modules/
+/web/dist/
