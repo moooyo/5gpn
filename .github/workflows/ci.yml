@@ -49,7 +49,9 @@ jobs:
         run: |
           cd cmd/5gpn-dns
           go vet ./...
-          go test ./...
+          # -race catches data races in the concurrent control server + subscription
+          # manager (ubuntu runners ship gcc, so cgo/-race works out of the box).
+          go test -race ./...
 
   web:
     runs-on: ubuntu-latest

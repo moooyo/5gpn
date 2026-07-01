@@ -34,7 +34,11 @@ jobs:
       - name: Build
         run: |
           cd cmd/5gpn-dns
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o 5gpn-dns-linux-amd64 .
+          # Stamp the release version into main.version (strip the dns- tag prefix,
+          # e.g. dns-v0.1.0 -> v0.1.0) so GET /api/status reports the real build.
+          VER="${GITHUB_REF_NAME#dns-}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -ldflags "-s -w -X main.version=${VER}" -o 5gpn-dns-linux-amd64 .
           sha256sum 5gpn-dns-linux-amd64 > checksums.txt
 
       - name: Upload release assets
