@@ -159,18 +159,26 @@ func main() {
 	}
 
 	// ── Phase 5: in-process Telegram control bot (goroutine) ──────────────────
-	// NewBot returns (nil, nil) when TGBOT_TOKEN is empty (bot disabled). The bot
-	// calls the in-memory Controller directly (no HTTP/token) and its Run loop
-	// recovers from panics, so a bot failure can never take down DNS resolution.
-	// Its privileged ops delegate to systemd (systemctl / systemd-run certbot),
-	// so the resolver's hardened sandbox stays intact.
-	if b, err := NewBot(cfg, ctrl); err != nil {
-		log.Printf("telegram bot: %v — bot disabled", err)
-	} else if b != nil {
-		go b.Run(ctx)
-		log.Printf("telegram bot enabled")
-	} else {
+	// The bot calls the in-memory Controller directly (no HTTP/token). Both
+	// construction (bot.New does a getMe round-trip to Telegram) and the Run loop
+	// happen inside the goroutine, so a slow/unreachable Telegram can never block
+	// the daemon's startup or DNS serving. A panic is recovered inside Run. An
+	// empty TGBOT_TOKEN disables the bot without spawning anything.
+	if cfg.TGBotToken == "" {
 		log.Printf("telegram bot disabled: TGBOT_TOKEN not set")
+	} else {
+		go func() {
+			b, err := NewBot(cfg, ctrl)
+			if err != nil {
+				log.Printf("telegram bot: %v — bot disabled", err)
+				return
+			}
+			if b == nil {
+				return
+			}
+			log.Printf("telegram bot enabled")
+			b.Run(ctx)
+		}()
 	}
 
 	// ── Phase 5: in-process iOS DoT profile server (goroutine) ────────────────
