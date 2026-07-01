@@ -17,6 +17,20 @@ jobs:
         with:
           go-version-file: cmd/5gpn-dns/go.mod
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: cmd/5gpn-dns/web/package-lock.json
+
+      # Build the control-console SPA BEFORE the Go build so go:embed
+      # (cmd/5gpn-dns/web/dist) bundles the real UI, not the committed placeholder.
+      - name: Build web UI
+        run: |
+          cd cmd/5gpn-dns/web
+          npm ci
+          npm run build
+
       - name: Build
         run: |
           cd cmd/5gpn-dns

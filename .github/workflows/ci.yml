@@ -50,3 +50,23 @@ jobs:
           cd cmd/5gpn-dns
           go vet ./...
           go test ./...
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: cmd/5gpn-dns/web/package-lock.json
+
+      # Frontend gate: the SPA must type-check and build cleanly. The release
+      # workflow runs the same build to produce the embedded dist.
+      - name: Build + typecheck web UI
+        run: |
+          cd cmd/5gpn-dns/web
+          npm ci
+          npm run build
+          npm run typecheck
