@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -392,11 +393,36 @@ func validateSubscription(s Subscription) error {
 	if !validCategories[s.Category] {
 		return fmt.Errorf("subscription: invalid category %q", s.Category)
 	}
+	if err := validateSubscriptionName(s.Name); err != nil {
+		return err
+	}
 	if s.Format == "" {
 		return errors.New("subscription: format must not be empty")
 	}
 	if s.URL == "" {
 		return errors.New("subscription: url must not be empty")
+	}
+	return nil
+}
+
+// validateSubscriptionName rejects any Name that is not a single, safe path
+// component. Name is free text (unlike Category, which is enum-guarded) and
+// is used verbatim in cachePath via filepath.Join(rulesDir, category,
+// name+".txt"). Without this guard, a Name such as "../../../etc/cron.d/evil"
+// would let filepath.Join's path cleaning escape rulesDir entirely, giving an
+// arbitrary-file write once Add is reachable over the Phase 3 HTTP API.
+func validateSubscriptionName(name string) error {
+	if name == "" {
+		return errors.New("subscription: name must not be empty")
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("subscription: invalid name %q (must be a single path component)", name)
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("subscription: invalid name %q (must be a single path component)", name)
+	}
+	if filepath.Base(name) != name {
+		return fmt.Errorf("subscription: invalid name %q (must be a single path component)", name)
 	}
 	return nil
 }

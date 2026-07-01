@@ -377,6 +377,73 @@ func TestAddRejectsInvalidCategory(t *testing.T) {
 	}
 }
 
+func TestAddRejectsPathTraversalName(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("a.com\n"))
+	}))
+	defer srv.Close()
+
+	badNames := []string{
+		"../../evil",
+		"a/b",
+		"..",
+		"../evil",
+		`a\b`,
+	}
+
+	for _, name := range badNames {
+		t.Run(name, func(t *testing.T) {
+			parent := t.TempDir()
+			rulesDir := filepath.Join(parent, "rules")
+			subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+			reload, _ := countingReload()
+			m, err := NewSubManager(subPath, rulesDir, reload)
+			if err != nil {
+				t.Fatalf("NewSubManager: %v", err)
+			}
+			sub := Subscription{
+				ID: "bad-" + t.Name(), Category: "blacklist", Name: name,
+				URL: srv.URL, Format: "plain", Enabled: false, Interval: time.Hour,
+			}
+			if err := m.Add(sub); err == nil {
+				t.Fatalf("want error adding subscription with Name %q, got nil", name)
+			}
+
+			// No file must have been written anywhere outside rulesDir, and in
+			// particular not in rulesDir's parent (where "../evil.txt" etc. would
+			// land).
+			assertNoStrayFiles(t, parent, "evil")
+		})
+	}
+}
+
+func TestAddAcceptsValidName(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("a.com\n"))
+	}))
+	defer srv.Close()
+
+	rulesDir := t.TempDir()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	reload, _ := countingReload()
+	m, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	sub := Subscription{
+		ID: "gfw", Category: "blacklist", Name: "gfwlist",
+		URL: srv.URL, Format: "plain", Enabled: false, Interval: time.Hour,
+	}
+	if err := m.Add(sub); err != nil {
+		t.Fatalf("Add with valid name: want nil error, got %v", err)
+	}
+
+	cachePath := filepath.Join(rulesDir, "blacklist", "gfwlist.txt")
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Errorf("cache file not created for valid name: %v", err)
+	}
+}
+
 func TestRemoveDeletesCacheAndJSONEntry(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("a.com\n"))
@@ -639,6 +706,18 @@ func TestRunSkipsInitialUpdateWhenCachePresent(t *testing.T) {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+// assertNoStrayFiles walks dir and fails the test if any file whose name
+// contains substr is found. Used to prove a rejected path-traversal Name
+// never resulted in a write outside the intended rules directory.
+func assertNoStrayFiles(t *testing.T, dir, substr string) {
+	t.Helper()
+	filepathWalk(t, dir, func(path string) {
+		if strings.Contains(filepath.Base(path), substr) {
+			t.Errorf("stray file matching %q must not exist: %s", substr, path)
+		}
+	})
+}
 
 // assertNoTmpFiles walks dir and fails the test if any *.tmp file is found,
 // proving atomic-write cleanliness (temp files are always renamed away).
