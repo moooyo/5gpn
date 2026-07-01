@@ -60,6 +60,10 @@ type Config struct {
 	TGBotToken  string         // env TGBOT_TOKEN; empty ⇒ bot disabled
 	TGBotAdmins map[int64]bool // env TGBOT_ADMINS; comma/space-separated int64 admin IDs
 
+	// Phase 5 Task 4: in-process iOS DoT-profile server (replaces src/ios-http.py).
+	IOSListen string // env DNS_IOS_LISTEN; default :8111; empty ⇒ server disabled
+	WWWDir    string // env WWW_DIR; default /opt/5gpn/www; static-file root
+
 	// Cache.
 	CacheSize int // max entries (0 → use default 4096)
 
@@ -92,6 +96,8 @@ type Config struct {
 //	DNS_STATS_FILE      /etc/5gpn/stats.json (empty disables persistence)
 //	DNS_API_RATE        20 (requests/sec per source IP; <= 0 disables rate limiting)
 //	DNS_API_BURST       40 (token-bucket capacity per source IP)
+//	DNS_IOS_LISTEN      :8111 (iOS DoT-profile HTTP server; empty disables)
+//	WWW_DIR             /opt/5gpn/www (static-file root for the iOS server)
 //
 // Empty listener strings disable that server.
 // If any TLS listener (DoT or DoH) has a non-empty address, DNS_CERT and
@@ -112,6 +118,8 @@ func LoadConfig() (Config, error) {
 		StatsFile:         envListen("DNS_STATS_FILE", "/etc/5gpn/stats.json"),
 		TGBotToken:        os.Getenv("TGBOT_TOKEN"),
 		TGBotAdmins:       parseAdminIDs(os.Getenv("TGBOT_ADMINS")),
+		IOSListen:         envListen("DNS_IOS_LISTEN", ":8111"),
+		WWWDir:            envOr("WWW_DIR", "/opt/5gpn/www"),
 	}
 
 	// Gateway IP.

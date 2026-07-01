@@ -17,6 +17,7 @@ var allDNSEnvKeys = []string{
 	"DNS_STATS_FILE",
 	"DNS_API_RATE", "DNS_API_BURST",
 	"TGBOT_TOKEN", "TGBOT_ADMINS",
+	"DNS_IOS_LISTEN", "WWW_DIR",
 }
 
 // clearAllDNSEnv unsets all DNS_ vars and restores them on t.Cleanup.
@@ -142,6 +143,15 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if len(cfg.TGBotAdmins) != 0 {
 		t.Errorf("TGBotAdmins default = %v, want empty set", cfg.TGBotAdmins)
 	}
+
+	// Phase 5 Task 4 iOS profile server: listener defaults to :8111; WWWDir to
+	// /opt/5gpn/www.
+	if cfg.IOSListen != ":8111" {
+		t.Errorf("IOSListen default = %q, want %q", cfg.IOSListen, ":8111")
+	}
+	if cfg.WWWDir != "/opt/5gpn/www" {
+		t.Errorf("WWWDir default = %q, want %q", cfg.WWWDir, "/opt/5gpn/www")
+	}
 }
 
 func TestLoadConfig_EnvOverride(t *testing.T) {
@@ -165,6 +175,8 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	t.Setenv("DNS_STATS_FILE", "/opt/5gpn/stats.json")
 	t.Setenv("DNS_API_RATE", "5")
 	t.Setenv("DNS_API_BURST", "10")
+	t.Setenv("DNS_IOS_LISTEN", ":8222")
+	t.Setenv("WWW_DIR", "/opt/5gpn/custom-www")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -213,6 +225,12 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	if cfg.APIBurst != 10 {
 		t.Errorf("APIBurst = %d, want 10", cfg.APIBurst)
 	}
+	if cfg.IOSListen != ":8222" {
+		t.Errorf("IOSListen = %q, want %q", cfg.IOSListen, ":8222")
+	}
+	if cfg.WWWDir != "/opt/5gpn/custom-www" {
+		t.Errorf("WWWDir = %q, want %q", cfg.WWWDir, "/opt/5gpn/custom-www")
+	}
 }
 
 // TestLoadConfig_APITokenEmptyByDefault confirms DNS_API_TOKEN has no default:
@@ -235,6 +253,24 @@ func TestLoadConfig_APITokenEmptyByDefault(t *testing.T) {
 	// is what decides disablement, not LoadConfig).
 	if cfg.ListenAPI != ":9443" {
 		t.Errorf("ListenAPI = %q, want %q", cfg.ListenAPI, ":9443")
+	}
+}
+
+// TestLoadConfig_IOSListenEmptyDisables confirms an explicitly-empty
+// DNS_IOS_LISTEN disables the iOS profile server (empty listener ⇒ no server),
+// matching the other listener-empty-disables semantics via envListen.
+func TestLoadConfig_IOSListenEmptyDisables(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	t.Setenv("DNS_IOS_LISTEN", "")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.IOSListen != "" {
+		t.Errorf("IOSListen = %q, want empty (disabled)", cfg.IOSListen)
 	}
 }
 
