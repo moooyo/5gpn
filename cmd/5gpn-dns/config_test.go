@@ -16,6 +16,7 @@ var allDNSEnvKeys = []string{
 	"DNS_LISTEN_API", "DNS_API_TOKEN",
 	"DNS_STATS_FILE",
 	"DNS_API_RATE", "DNS_API_BURST",
+	"TGBOT_TOKEN", "TGBOT_ADMINS",
 }
 
 // clearAllDNSEnv unsets all DNS_ vars and restores them on t.Cleanup.
@@ -131,6 +132,15 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 	if cfg.APIBurst != 40 {
 		t.Errorf("APIBurst default = %d, want 40", cfg.APIBurst)
+	}
+
+	// Phase 5 Telegram bot: token has no default (empty ⇒ bot disabled);
+	// admins parses to an empty (non-nil) set.
+	if cfg.TGBotToken != "" {
+		t.Errorf("TGBotToken default = %q, want empty", cfg.TGBotToken)
+	}
+	if len(cfg.TGBotAdmins) != 0 {
+		t.Errorf("TGBotAdmins default = %v, want empty set", cfg.TGBotAdmins)
 	}
 }
 
@@ -335,6 +345,65 @@ func TestLoadConfig_APIBurstZeroOrNegativeFallsBackWhenRatePositive(t *testing.T
 	}
 	if cfg.APIBurst != 40 {
 		t.Errorf("APIBurst = %d, want fallback default 40 when given 0 with rate>0", cfg.APIBurst)
+	}
+}
+
+// TestLoadConfig_TGBot confirms TGBOT_TOKEN / TGBOT_ADMINS are read into the
+// Config: token verbatim, admins parsed into an int64 set (mixed comma/space
+// separators, garbage dropped).
+func TestLoadConfig_TGBot(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	t.Setenv("TGBOT_TOKEN", "12345:abcdef")
+	t.Setenv("TGBOT_ADMINS", "111, 222 333")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.TGBotToken != "12345:abcdef" {
+		t.Errorf("TGBotToken = %q, want %q", cfg.TGBotToken, "12345:abcdef")
+	}
+	want := map[int64]bool{111: true, 222: true, 333: true}
+	if len(cfg.TGBotAdmins) != len(want) {
+		t.Fatalf("TGBotAdmins = %v, want %v", cfg.TGBotAdmins, want)
+	}
+	for id := range want {
+		if !cfg.TGBotAdmins[id] {
+			t.Errorf("TGBotAdmins missing %d; got %v", id, cfg.TGBotAdmins)
+		}
+	}
+}
+
+// TestParseAdminIDs exercises the separator handling and garbage rejection of
+// the TGBOT_ADMINS parser directly.
+func TestParseAdminIDs(t *testing.T) {
+	tests := []struct {
+		input string
+		want  map[int64]bool
+	}{
+		{"", map[int64]bool{}},
+		{"   ", map[int64]bool{}},
+		{"111, 222 333", map[int64]bool{111: true, 222: true, 333: true}},
+		{"111,222,333", map[int64]bool{111: true, 222: true, 333: true}},
+		{"111\t222\n333", map[int64]bool{111: true, 222: true, 333: true}},
+		{"x", map[int64]bool{}},                               // pure garbage dropped
+		{"111, x, 222", map[int64]bool{111: true, 222: true}}, // garbage skipped, rest kept
+		{"-5", map[int64]bool{-5: true}},                      // negative IDs are valid int64
+		{",,111,,", map[int64]bool{111: true}},                // empty tokens ignored
+	}
+	for _, tc := range tests {
+		got := parseAdminIDs(tc.input)
+		if len(got) != len(tc.want) {
+			t.Errorf("parseAdminIDs(%q) = %v, want %v", tc.input, got, tc.want)
+			continue
+		}
+		for id := range tc.want {
+			if !got[id] {
+				t.Errorf("parseAdminIDs(%q) = %v, missing %d", tc.input, got, id)
+			}
+		}
 	}
 }
 

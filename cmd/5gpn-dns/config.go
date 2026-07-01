@@ -56,6 +56,10 @@ type Config struct {
 	// Phase 4 Task A2: query-stat counter persistence.
 	StatsFile string // path for cumulative stats snapshot; empty disables persistence
 
+	// Phase 5: in-process Telegram bot.
+	TGBotToken  string         // env TGBOT_TOKEN; empty ⇒ bot disabled
+	TGBotAdmins map[int64]bool // env TGBOT_ADMINS; comma/space-separated int64 admin IDs
+
 	// Cache.
 	CacheSize int // max entries (0 → use default 4096)
 
@@ -106,6 +110,8 @@ func LoadConfig() (Config, error) {
 		ListenAPI:         envListen("DNS_LISTEN_API", ":9443"),
 		APIToken:          os.Getenv("DNS_API_TOKEN"),
 		StatsFile:         envListen("DNS_STATS_FILE", "/etc/5gpn/stats.json"),
+		TGBotToken:        os.Getenv("TGBOT_TOKEN"),
+		TGBotAdmins:       parseAdminIDs(os.Getenv("TGBOT_ADMINS")),
 	}
 
 	// Gateway IP.
@@ -247,6 +253,24 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// parseAdminIDs parses TGBOT_ADMINS: a list of Telegram numeric user IDs
+// separated by commas and/or whitespace (e.g. "111, 222 333"). Blank and
+// non-numeric ("garbage") tokens are silently skipped. Returns a set; an
+// empty/unset input yields an empty (non-nil) map.
+func parseAdminIDs(raw string) map[int64]bool {
+	admins := make(map[int64]bool)
+	for _, tok := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	}) {
+		id, err := strconv.ParseInt(tok, 10, 64)
+		if err != nil {
+			continue // ignore blanks/garbage
+		}
+		admins[id] = true
+	}
+	return admins
 }
 
 // splitTrim splits a comma-separated string and trims each element.

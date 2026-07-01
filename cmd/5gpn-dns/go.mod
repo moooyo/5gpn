@@ -2,7 +2,10 @@ module github.com/moooyo/5gpn/cmd/5gpn-dns
 
 go 1.26.3
 
-require github.com/miekg/dns v1.1.72
+require (
+	github.com/go-telegram/bot v1.22.0
+	github.com/miekg/dns v1.1.72
+)
 
 require (
 	golang.org/x/mod v0.31.0 // indirect
