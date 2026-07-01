@@ -38,47 +38,64 @@ func ipToUint32(ip net.IP) uint32 {
 // Returns an error if no valid CIDRs are found — an empty set would cause every
 // IP to appear foreign, which is a misconfiguration.
 func LoadChnroute(path string) (*Chnroute, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("chnroute: open %s: %w", path, err)
-	}
-	defer f.Close()
+	return LoadChnrouteFiles(path)
+}
 
+// LoadChnrouteFiles reads CIDR-per-line entries from all given paths (lines
+// starting with '#' are comments; malformed lines are silently skipped) and
+// returns a merged Chnroute. Paths that don't exist are skipped silently —
+// this lets callers combine a manual file with subscription-cache files
+// without pre-checking existence. Returns an error if no valid CIDRs are
+// found across all paths — an empty set would cause every IP to appear
+// foreign, which is a misconfiguration.
+func LoadChnrouteFiles(paths ...string) (*Chnroute, error) {
 	var raw []ipRange
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		_, ipNet, err := net.ParseCIDR(line)
+	for _, path := range paths {
+		f, err := os.Open(path)
 		if err != nil {
-			// silently skip bad lines per spec
-			continue
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("chnroute: open %s: %w", path, err)
 		}
-		ip4 := ipNet.IP.To4()
-		if ip4 == nil {
-			// skip non-IPv4 CIDRs
-			continue
+
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			_, ipNet, err := net.ParseCIDR(line)
+			if err != nil {
+				// silently skip bad lines per spec
+				continue
+			}
+			ip4 := ipNet.IP.To4()
+			if ip4 == nil {
+				// skip non-IPv4 CIDRs
+				continue
+			}
+			start := binary.BigEndian.Uint32(ip4)
+			// Calculate end: start | ^mask
+			ones, bits := ipNet.Mask.Size()
+			if bits != 32 {
+				// not an IPv4 mask
+				continue
+			}
+			hostBits := uint32(bits - ones)
+			var end uint32
+			if hostBits == 32 {
+				end = ^uint32(0)
+			} else {
+				end = start | (1<<hostBits - 1)
+			}
+			raw = append(raw, ipRange{start, end})
 		}
-		start := binary.BigEndian.Uint32(ip4)
-		// Calculate end: start | ^mask
-		ones, bits := ipNet.Mask.Size()
-		if bits != 32 {
-			// not an IPv4 mask
-			continue
+		scanErr := scanner.Err()
+		f.Close()
+		if scanErr != nil {
+			return nil, fmt.Errorf("chnroute: scan %s: %w", path, scanErr)
 		}
-		hostBits := uint32(bits - ones)
-		var end uint32
-		if hostBits == 32 {
-			end = ^uint32(0)
-		} else {
-			end = start | (1<<hostBits - 1)
-		}
-		raw = append(raw, ipRange{start, end})
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("chnroute: scan %s: %w", path, err)
 	}
 
 	if len(raw) == 0 {

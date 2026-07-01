@@ -126,7 +126,7 @@ func loadRuleSets(cfg Config) (*ruleSets, error) {
 
 	var cr *Chnroute
 	if cfg.ChnrouteFile != "" {
-		cr, err = LoadChnroute(cfg.ChnrouteFile)
+		cr, err = LoadChnrouteFiles(append([]string{cfg.ChnrouteFile}, globChnrouteDir(rulesDir)...)...)
 		if err != nil {
 			return nil, fmt.Errorf("chnroute: %w", err)
 		}
@@ -157,6 +157,15 @@ func globPattern(rulesDir, category string) []string {
 	paths = append(paths, matches...)
 
 	return paths
+}
+
+// globChnrouteDir returns the subscription-cache .txt files under
+// rulesDir/chnroute/*.txt (e.g. downloaded chnroute subscription caches).
+// Missing directory or no matches yields nil; glob errors are ignored since
+// the only possible error is a malformed pattern, which is static here.
+func globChnrouteDir(rulesDir string) []string {
+	matches, _ := filepath.Glob(filepath.Join(rulesDir, "chnroute", "*.txt"))
+	return matches
 }
 
 // orDisabled returns addr or "(disabled)" for display.
