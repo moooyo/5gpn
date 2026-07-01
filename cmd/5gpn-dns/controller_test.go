@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -211,6 +214,64 @@ func TestControllerSubscriptionsPassthrough(t *testing.T) {
 
 	if got := c.Subscriptions(); len(got) != 0 {
 		t.Fatalf("expected 0 subscriptions initially, got %d", len(got))
+	}
+}
+
+func TestControllerSubscriptionsWithHealth(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("a.com\nb.com\n"))
+	}))
+	defer srv.Close()
+
+	rulesDir := t.TempDir()
+	reload, _ := countingReload()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	subs, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	c := NewController(subs, reload, rulesDir, nil, nil, nil)
+
+	sub := Subscription{ID: "cwh1", Category: "direct", Name: "cwh1", URL: srv.URL, Format: "plain", Enabled: true, Interval: time.Hour}
+	if _, err := c.AddSubscription(sub); err != nil {
+		t.Fatalf("AddSubscription: %v", err)
+	}
+
+	views := c.SubscriptionsWithHealth()
+	if len(views) != 1 {
+		t.Fatalf("want 1 view, got %d: %+v", len(views), views)
+	}
+	v := views[0]
+	if v.ID != "cwh1" {
+		t.Errorf("view.ID = %q, want cwh1", v.ID)
+	}
+	if v.Health == nil {
+		t.Fatal("want Health populated after an update, got nil")
+	}
+	if !v.Health.OK || v.Health.Entries != 2 {
+		t.Errorf("view.Health = %+v, want OK=true Entries=2", v.Health)
+	}
+}
+
+func TestControllerSubscriptionsWithHealthNilBeforeUpdate(t *testing.T) {
+	rulesDir := t.TempDir()
+	reload, _ := countingReload()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	subs, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	subs.subs = []Subscription{
+		{ID: "never", Category: "direct", Name: "never", URL: "https://example.invalid/x", Format: "plain", Enabled: false, Interval: time.Hour},
+	}
+	c := NewController(subs, reload, rulesDir, nil, nil, nil)
+
+	views := c.SubscriptionsWithHealth()
+	if len(views) != 1 {
+		t.Fatalf("want 1 view, got %d", len(views))
+	}
+	if views[0].Health != nil {
+		t.Errorf("want nil Health for never-updated subscription, got %+v", views[0].Health)
 	}
 }
 

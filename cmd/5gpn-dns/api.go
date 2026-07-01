@@ -122,13 +122,15 @@ func (s *ControlServer) handleLookup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.ctrl.Lookup(r.Context(), domain))
 }
 
-// handleSubscriptionsList returns every configured subscription.
+// handleSubscriptionsList returns every configured subscription, each
+// enriched with its last-fetch health (last-run time, ok, entry count,
+// error) so the control console can show a "last update" column.
 func (s *ControlServer) handleSubscriptionsList(w http.ResponseWriter, r *http.Request) {
-	subs := s.ctrl.Subscriptions()
-	if subs == nil {
-		subs = []Subscription{}
+	views := s.ctrl.SubscriptionsWithHealth()
+	if views == nil {
+		views = []SubscriptionView{}
 	}
-	writeJSON(w, http.StatusOK, subs)
+	writeJSON(w, http.StatusOK, views)
 }
 
 // handleSubscriptionsCreate decodes a Subscription from the body, adds it

@@ -275,11 +275,57 @@ func TestAPISubscriptions_PostGoodBody200EchoesUpdateResult(t *testing.T) {
 		t.Errorf("UpdateResult = %+v, want OK=true Entries=2", got)
 	}
 
-	// Now visible via GET /api/subscriptions.
+	// Now visible via GET /api/subscriptions, with health attached.
 	listRec := doAPI(cs, http.MethodGet, "/api/subscriptions", nil, token, true)
 	list := decodeJSON[[]Subscription](t, listRec)
 	if len(list) != 1 || list[0].ID != "sub1" {
 		t.Errorf("subscriptions list = %+v, want 1 entry with ID sub1", list)
+	}
+
+	views := decodeJSON[[]SubscriptionView](t, listRec)
+	if len(views) != 1 {
+		t.Fatalf("subscriptions views = %+v, want 1 entry", views)
+	}
+	if views[0].ID != "sub1" {
+		t.Errorf("view.ID = %q, want sub1", views[0].ID)
+	}
+	if views[0].Health == nil {
+		t.Fatal("want health populated after an update, got nil")
+	}
+	if !views[0].Health.OK || views[0].Health.Entries != 2 {
+		t.Errorf("view.Health = %+v, want OK=true Entries=2", views[0].Health)
+	}
+}
+
+func TestAPISubscriptions_ListHealthAbsentBeforeUpdate(t *testing.T) {
+	cs, token := newAPITestServer(t)
+
+	body, _ := json.Marshal(map[string]any{
+		"id": "never", "category": "direct", "name": "never",
+		"url": "https://example.invalid/list.txt", "format": "plain",
+		"enabled": false, "interval": "24h",
+	})
+	// This subscription's initial fetch will fail (unreachable host), but Add
+	// still succeeds and records health (failed, not absent). To test the
+	// "absent" case we instead check the raw JSON omits the key when nil —
+	// verified directly against the Controller/SubManager in
+	// controller_test.go and subscription_test.go. Here we only check the
+	// wire shape: health, when present, decodes with ok/entries/err fields.
+	rec := doAPI(cs, http.MethodPost, "/api/subscriptions", body, token, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	listRec := doAPI(cs, http.MethodGet, "/api/subscriptions", nil, token, true)
+	views := decodeJSON[[]SubscriptionView](t, listRec)
+	if len(views) != 1 {
+		t.Fatalf("want 1 view, got %d", len(views))
+	}
+	if views[0].Health == nil {
+		t.Fatal("want health present (fetch was attempted, even though it failed)")
+	}
+	if views[0].Health.OK {
+		t.Error("want OK=false for unreachable host")
 	}
 }
 

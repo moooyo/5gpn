@@ -106,6 +106,18 @@ type UpdateResult struct {
 	Err     string `json:"err"`
 }
 
+// SubHealth records the outcome of the most recent fetch attempt for a
+// subscription: when it ran (RFC3339 UTC), whether it succeeded, how many
+// entries it parsed, and its error message (empty on success). At is "" only
+// in the zero value; once a fetch has ever run for a subscription its health
+// entry always has a non-empty At.
+type SubHealth struct {
+	At      string `json:"at"`
+	OK      bool   `json:"ok"`
+	Entries int    `json:"entries"`
+	Err     string `json:"err"`
+}
+
 // subscriptionsFile is the top-level shape of subscriptions.json.
 type subscriptionsFile struct {
 	Subscriptions []Subscription `json:"subscriptions"`
@@ -136,6 +148,7 @@ type SubManager struct {
 	path     string // path to subscriptions.json
 	rulesDir string // rules base directory (rulesDir/<category>/<name>.txt)
 	subs     []Subscription
+	health   map[string]SubHealth // per-subscription last-fetch health; guarded by mu
 	http     *http.Client
 	reload   func() error
 	mu       sync.Mutex
@@ -158,6 +171,7 @@ func NewSubManager(path, rulesDir string, reload func() error) (*SubManager, err
 		path:     path,
 		rulesDir: rulesDir,
 		subs:     subs,
+		health:   make(map[string]SubHealth),
 		http:     &http.Client{Timeout: 30 * time.Second},
 		reload:   reload,
 	}, nil
@@ -170,6 +184,35 @@ func (m *SubManager) List() []Subscription {
 	out := make([]Subscription, len(m.subs))
 	copy(out, m.subs)
 	return out
+}
+
+// Health returns a copy of the current per-subscription fetch health map,
+// keyed by subscription ID. A subscription that has never been fetched has
+// no entry. Safe for concurrent use; the returned map is independent of the
+// manager's internal state (mutating it has no effect on future Health()
+// calls).
+func (m *SubManager) Health() map[string]SubHealth {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]SubHealth, len(m.health))
+	for id, h := range m.health {
+		out[id] = h
+	}
+	return out
+}
+
+// recordHealth stores res as the latest health entry for its subscription
+// ID. Must NOT be called while already holding m.mu — it takes the lock
+// itself.
+func (m *SubManager) recordHealth(res UpdateResult) {
+	m.mu.Lock()
+	m.health[res.ID] = SubHealth{
+		At:      time.Now().UTC().Format(time.RFC3339),
+		OK:      res.OK,
+		Entries: res.Entries,
+		Err:     res.Err,
+	}
+	m.mu.Unlock()
 }
 
 // cachePath returns the on-disk cache file path for a subscription.
@@ -218,8 +261,21 @@ func (m *SubManager) UpdateAll(ctx context.Context) []UpdateResult {
 }
 
 // fetchAndCache performs the actual fetch -> parse -> floor-guard -> atomic
-// write -> reload pipeline for one subscription.
+// write -> reload pipeline for one subscription, and records the outcome in
+// m.health. This is the single canonical point every real-subscription
+// update path (UpdateOne, UpdateAll, and transitively Add's initial fetch and
+// Run's ticker) funnels through, so health is recorded here once rather than
+// at each caller.
 func (m *SubManager) fetchAndCache(ctx context.Context, sub Subscription) UpdateResult {
+	res := m.doFetchAndCache(ctx, sub)
+	m.recordHealth(res)
+	return res
+}
+
+// doFetchAndCache is the actual fetch -> parse -> floor-guard -> atomic
+// write -> reload pipeline, split out from fetchAndCache purely so every
+// return path funnels through fetchAndCache's single recordHealth call.
+func (m *SubManager) doFetchAndCache(ctx context.Context, sub Subscription) UpdateResult {
 	entries, err := m.fetchAndParse(ctx, sub)
 	if err != nil {
 		return UpdateResult{ID: sub.ID, OK: false, Err: err.Error()}

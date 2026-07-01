@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -76,6 +77,85 @@ func NewController(subs *SubManager, reload func() error, rulesDir string, stats
 // Subscriptions returns the currently configured subscriptions.
 func (c *Controller) Subscriptions() []Subscription {
 	return c.subs.List()
+}
+
+// SubscriptionHealth returns a copy of the per-subscription last-fetch health
+// map, keyed by subscription ID (see SubManager.Health).
+func (c *Controller) SubscriptionHealth() map[string]SubHealth {
+	return c.subs.Health()
+}
+
+// SubscriptionView is a Subscription enriched with its last-fetch health, for
+// the control-plane API/UI to show a "last update" column. Subscription's
+// fields are embedded so its non-JSON fields (notably Interval) are
+// promoted for direct Go access; MarshalJSON below (rather than relying on
+// promotion) flattens Subscription's own custom JSON encoding alongside
+// Health, since Subscription.MarshalJSON would otherwise be promoted as
+// SubscriptionView's *entire* Marshaler and silently swallow Health.
+type SubscriptionView struct {
+	Subscription
+	Health *SubHealth `json:"health,omitempty"`
+}
+
+// MarshalJSON flattens the embedded Subscription's own JSON encoding (id,
+// category, name, url, format, enabled, interval) together with health, so
+// the wire shape is the subscription's fields plus one added "health" key —
+// not a nested "Subscription" object.
+func (v SubscriptionView) MarshalJSON() ([]byte, error) {
+	subJSON, err := json.Marshal(v.Subscription)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(subJSON, &m); err != nil {
+		return nil, err
+	}
+	if v.Health != nil {
+		healthJSON, err := json.Marshal(v.Health)
+		if err != nil {
+			return nil, err
+		}
+		m["health"] = healthJSON
+	}
+	return json.Marshal(m)
+}
+
+// UnmarshalJSON is the mirror image of MarshalJSON: it decodes the
+// subscription fields via Subscription's own UnmarshalJSON (so Interval's
+// duration-string parsing still applies) and separately decodes "health" —
+// without this, Subscription.UnmarshalJSON would be promoted as
+// SubscriptionView's entire Unmarshaler and silently drop Health, exactly as
+// MarshalJSON's promotion problem above but on the decode side.
+func (v *SubscriptionView) UnmarshalJSON(data []byte) error {
+	if err := json.Unmarshal(data, &v.Subscription); err != nil {
+		return err
+	}
+	var aux struct {
+		Health *SubHealth `json:"health"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	v.Health = aux.Health
+	return nil
+}
+
+// SubscriptionsWithHealth returns every configured subscription paired with
+// its last-fetch health (nil if that subscription has never been fetched).
+func (c *Controller) SubscriptionsWithHealth() []SubscriptionView {
+	subs := c.subs.List()
+	health := c.subs.Health()
+
+	views := make([]SubscriptionView, 0, len(subs))
+	for _, s := range subs {
+		v := SubscriptionView{Subscription: s}
+		if h, ok := health[s.ID]; ok {
+			hCopy := h
+			v.Health = &hCopy
+		}
+		views = append(views, v)
+	}
+	return views
 }
 
 // AddSubscription validates, persists, and performs an initial fetch for a

@@ -809,6 +809,167 @@ func TestAddWhileRunActiveGetsLiveReschedule(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Health
+// ---------------------------------------------------------------------------
+
+func TestHealthRecordedAfterSuccessfulAdd(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("a.com\nb.com\n"))
+	}))
+	defer srv.Close()
+
+	rulesDir := t.TempDir()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	reload, _ := countingReload()
+	m, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	sub := Subscription{
+		ID: "h1", Category: "direct", Name: "h1",
+		URL: srv.URL, Format: "plain", Enabled: true, Interval: time.Hour,
+	}
+	if _, err := m.Add(sub); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	health := m.Health()
+	h, ok := health["h1"]
+	if !ok {
+		t.Fatalf("want health entry for h1, got none: %+v", health)
+	}
+	if !h.OK {
+		t.Errorf("want OK true, got false (err=%s)", h.Err)
+	}
+	if h.Entries != 2 {
+		t.Errorf("want Entries 2, got %d", h.Entries)
+	}
+	if h.Err != "" {
+		t.Errorf("want empty Err on success, got %q", h.Err)
+	}
+	if h.At == "" {
+		t.Error("want non-empty At timestamp")
+	}
+	if _, err := time.Parse(time.RFC3339, h.At); err != nil {
+		t.Errorf("At = %q is not RFC3339: %v", h.At, err)
+	}
+}
+
+func TestHealthRecordedAfterFailedFetch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	rulesDir := t.TempDir()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	reload, _ := countingReload()
+	m, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	m.subs = []Subscription{{
+		ID: "h2", Category: "blacklist", Name: "h2",
+		URL: srv.URL, Format: "plain", Enabled: true, Interval: time.Hour,
+	}}
+
+	res := m.UpdateOne(context.Background(), "h2")
+	if res.OK {
+		t.Fatal("precondition: fetch must fail (HTTP 500)")
+	}
+
+	health := m.Health()
+	h, ok := health["h2"]
+	if !ok {
+		t.Fatalf("want health entry for h2 even on failure, got none: %+v", health)
+	}
+	if h.OK {
+		t.Error("want OK false for failed fetch")
+	}
+	if h.Err == "" {
+		t.Error("want non-empty Err for failed fetch")
+	}
+	if h.At == "" {
+		t.Error("want non-empty At timestamp even on failure")
+	}
+}
+
+func TestHealthAbsentForNeverUpdatedSubscription(t *testing.T) {
+	rulesDir := t.TempDir()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	reload, _ := countingReload()
+	m, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	m.subs = []Subscription{{
+		ID: "never", Category: "direct", Name: "never",
+		URL: "https://example.invalid/x", Format: "plain", Enabled: false, Interval: time.Hour,
+	}}
+
+	health := m.Health()
+	if _, ok := health["never"]; ok {
+		t.Errorf("want no health entry for a subscription that was never updated, got %+v", health["never"])
+	}
+}
+
+func TestHealthReturnsCopyNotInternalMap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("a.com\n"))
+	}))
+	defer srv.Close()
+
+	rulesDir := t.TempDir()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	reload, _ := countingReload()
+	m, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	sub := Subscription{ID: "copy1", Category: "direct", Name: "copy1", URL: srv.URL, Format: "plain", Enabled: true, Interval: time.Hour}
+	if _, err := m.Add(sub); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	health := m.Health()
+	health["copy1"] = SubHealth{At: "tampered", OK: false, Entries: -1, Err: "tampered"}
+
+	health2 := m.Health()
+	if health2["copy1"].At == "tampered" {
+		t.Error("Health() must return a copy: mutating the returned map affected the manager's internal state")
+	}
+}
+
+func TestUpdateAllRecordsHealthForEverySubscription(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("a.com\nb.com\n"))
+	}))
+	defer srv.Close()
+
+	rulesDir := t.TempDir()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	reload, _ := countingReload()
+	m, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	m.subs = []Subscription{
+		{ID: "ua1", Category: "direct", Name: "ua1", URL: srv.URL, Format: "plain", Enabled: true, Interval: time.Hour},
+		{ID: "ua2", Category: "adblock", Name: "ua2", URL: srv.URL, Format: "plain", Enabled: true, Interval: time.Hour},
+	}
+
+	m.UpdateAll(context.Background())
+
+	health := m.Health()
+	if _, ok := health["ua1"]; !ok {
+		t.Error("want health for ua1 after UpdateAll")
+	}
+	if _, ok := health["ua2"]; !ok {
+		t.Error("want health for ua2 after UpdateAll")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
