@@ -99,7 +99,7 @@ func main() {
 	// ctrl is the facade the Phase 3 HTTP control-plane API will consume; for
 	// Phase 2 it is constructed (so tgbot/API wiring can attach later) but not
 	// yet served.
-	ctrl := NewController(subMgr, reload, cfg.RulesDir, h.stats, h.Cache.Len)
+	ctrl := NewController(subMgr, reload, cfg.RulesDir, h.stats, h.Cache.Len, h)
 	_ = ctrl // Phase 3 API server consumes ctrl
 
 	if subMgr != nil {

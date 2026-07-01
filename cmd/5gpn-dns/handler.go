@@ -151,6 +151,41 @@ func (h *Handler) ruleSnap() (adblock, direct, blacklist *DomainSet, cn *Chnrout
 	return h.Adblock, h.Direct, h.Blacklist, h.CN
 }
 
+// Verdict is the outcome of the shared name-only classification step:
+// Verdict is one of "direct"|"proxy"|"block"; Reason is one of
+// "adblock"|"force-direct"|"blacklist"|"chnroute-cn"|"chnroute-foreign".
+// A zero-value Verdict ("", "") means "no terminal name-only verdict — the
+// default case applies, and IP arbitration (chnroute-cn/chnroute-foreign)
+// is needed to decide."
+type Verdict struct {
+	Verdict string
+	Reason  string
+}
+
+// classifyName applies the name-only precedence adblock > direct > blacklist
+// and returns the corresponding terminal Verdict. It returns the zero Verdict
+// for the default case, meaning the caller must arbitrate and inspect the
+// resolved IPs (chnroute-cn / chnroute-foreign) to finish classifying.
+//
+// This mirrors resolve's steps 3–5 exactly (same precedence, same DomainSet
+// snapshot access) so that resolve and Controller.Lookup can share one
+// decision instead of drifting.
+func (h *Handler) classifyName(name string) Verdict {
+	adblock, direct, blacklist, _ := h.ruleSnap()
+	bare := stripDot(name)
+
+	if adblock != nil && adblock.Match(bare) {
+		return Verdict{Verdict: "block", Reason: "adblock"}
+	}
+	if direct != nil && direct.Match(bare) {
+		return Verdict{Verdict: "direct", Reason: "force-direct"}
+	}
+	if blacklist != nil && blacklist.Match(bare) {
+		return Verdict{Verdict: "proxy", Reason: "blacklist"}
+	}
+	return Verdict{}
+}
+
 // ServeDNS implements dns.Handler.  It unpacks the first question, calls
 // resolve, and writes the result back to w.
 func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
@@ -192,8 +227,10 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 
 	h.bumpTotal()
 
-	// Load the current rule-set snapshot atomically.
-	adblock, direct, blacklist, cn := h.ruleSnap()
+	// Load the current rule-set snapshot atomically. classifyName re-derives
+	// adblock/direct/blacklist from the same snapshot mechanism (ruleSnap);
+	// cn is still needed here directly for arbitration/rewrite.
+	_, _, _, cn := h.ruleSnap()
 
 	// ── Step 1: AAAA → synthetic SOA, NOERROR, empty Answer ─────────────────
 	if q.Qtype == dns.TypeAAAA {
@@ -212,11 +249,12 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 
 	isA := q.Qtype == dns.TypeA
 
-	// normalised name (no trailing dot) for DomainSet matching.
-	bare := stripDot(name)
+	// verdict carries the name-only precedence decision (adblock > direct >
+	// blacklist); a zero-value Verdict means "default case, arbitrate+rewrite".
+	verdict := h.classifyName(name)
 
 	// ── Step 3: adblock ──────────────────────────────────────────────────────
-	if adblock != nil && adblock.Match(bare) {
+	if verdict.Reason == "adblock" {
 		h.bumpBlock()
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeNameError)
@@ -224,7 +262,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 	}
 
 	// ── Step 4: force-direct ─────────────────────────────────────────────────
-	if direct != nil && direct.Match(bare) {
+	if verdict.Reason == "force-direct" {
 		if isA {
 			h.bumpDirect()
 			if cached, ok := h.cacheGet(name, q.Qtype); ok {
@@ -244,7 +282,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 	}
 
 	// ── Step 5: blacklist ────────────────────────────────────────────────────
-	if blacklist != nil && blacklist.Match(bare) {
+	if verdict.Reason == "blacklist" {
 		if isA {
 			h.bumpProxy()
 			return h.gatewayReply(r)

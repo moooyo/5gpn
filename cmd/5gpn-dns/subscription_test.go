@@ -107,7 +107,7 @@ func TestUpdateOneSuccessWritesCacheAndReloads(t *testing.T) {
 		ID: "blk1", Category: "blacklist", Name: "blk1",
 		URL: srv.URL, Format: "plain", Enabled: true, Interval: time.Hour,
 	}
-	if err := m.Add(sub); err != nil {
+	if _, err := m.Add(sub); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
@@ -314,8 +314,18 @@ func TestAddPersistsAndCaches(t *testing.T) {
 		ID: "s1", Category: "direct", Name: "s1",
 		URL: srv.URL, Format: "plain", Enabled: true, Interval: time.Hour,
 	}
-	if err := m.Add(sub); err != nil {
+	res, err := m.Add(sub)
+	if err != nil {
 		t.Fatalf("Add: %v", err)
+	}
+	if !res.OK {
+		t.Errorf("Add result OK = false, want true; err=%s", res.Err)
+	}
+	if res.ID != "s1" {
+		t.Errorf("Add result ID = %q, want %q", res.ID, "s1")
+	}
+	if res.Entries != 1 {
+		t.Errorf("Add result Entries = %d, want 1", res.Entries)
 	}
 
 	// Re-load from disk to verify persistence.
@@ -355,10 +365,10 @@ func TestAddRejectsDuplicateID(t *testing.T) {
 	sub := Subscription{ID: "dup", Category: "direct", Name: "dup", URL: srv.URL, Format: "plain", Enabled: false, Interval: time.Hour}
 	// Add's initial fetch is best-effort (does not fail Add), so this succeeds
 	// regardless of Enabled.
-	if err := m.Add(sub); err != nil {
+	if _, err := m.Add(sub); err != nil {
 		t.Fatalf("first Add: %v", err)
 	}
-	if err := m.Add(sub); err == nil {
+	if _, err := m.Add(sub); err == nil {
 		t.Fatal("want error adding duplicate ID, got nil")
 	}
 }
@@ -372,8 +382,35 @@ func TestAddRejectsInvalidCategory(t *testing.T) {
 		t.Fatalf("NewSubManager: %v", err)
 	}
 	sub := Subscription{ID: "bad", Category: "not-a-category", Name: "bad", URL: "https://example.com/x", Format: "plain", Enabled: false, Interval: time.Hour}
-	if err := m.Add(sub); err == nil {
+	if _, err := m.Add(sub); err == nil {
 		t.Fatal("want error for invalid category, got nil")
+	}
+}
+
+func TestAddRejectsNonHTTPURLScheme(t *testing.T) {
+	rulesDir := t.TempDir()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	reload, _ := countingReload()
+	m, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+
+	badURLs := []string{
+		"file:///etc/passwd",
+		"ftp://example.com/list.txt",
+		"not-a-url-at-all",
+	}
+	for _, url := range badURLs {
+		t.Run(url, func(t *testing.T) {
+			sub := Subscription{
+				ID: "scheme-" + url, Category: "direct", Name: "scheme-" + t.Name(),
+				URL: url, Format: "plain", Enabled: false, Interval: time.Hour,
+			}
+			if _, err := m.Add(sub); err == nil {
+				t.Fatalf("want error adding subscription with URL %q, got nil", url)
+			}
+		})
 	}
 }
 
@@ -405,7 +442,7 @@ func TestAddRejectsPathTraversalName(t *testing.T) {
 				ID: "bad-" + t.Name(), Category: "blacklist", Name: name,
 				URL: srv.URL, Format: "plain", Enabled: false, Interval: time.Hour,
 			}
-			if err := m.Add(sub); err == nil {
+			if _, err := m.Add(sub); err == nil {
 				t.Fatalf("want error adding subscription with Name %q, got nil", name)
 			}
 
@@ -434,7 +471,7 @@ func TestAddAcceptsValidName(t *testing.T) {
 		ID: "gfw", Category: "blacklist", Name: "gfwlist",
 		URL: srv.URL, Format: "plain", Enabled: false, Interval: time.Hour,
 	}
-	if err := m.Add(sub); err != nil {
+	if _, err := m.Add(sub); err != nil {
 		t.Fatalf("Add with valid name: want nil error, got %v", err)
 	}
 
@@ -461,7 +498,7 @@ func TestRemoveDeletesCacheAndJSONEntry(t *testing.T) {
 		ID: "rm1", Category: "adblock", Name: "rm1",
 		URL: srv.URL, Format: "plain", Enabled: true, Interval: time.Hour,
 	}
-	if err := m.Add(sub); err != nil {
+	if _, err := m.Add(sub); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	cachePath := filepath.Join(rulesDir, "adblock", "rm1.txt")
@@ -509,7 +546,7 @@ func TestListReturnsSubscriptions(t *testing.T) {
 		t.Fatalf("NewSubManager: %v", err)
 	}
 	sub := Subscription{ID: "l1", Category: "direct", Name: "l1", URL: srv.URL, Format: "plain", Enabled: false, Interval: time.Hour}
-	if err := m.Add(sub); err != nil {
+	if _, err := m.Add(sub); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	list := m.List()
@@ -569,7 +606,7 @@ func TestPersistedJSONHasHumanReadableInterval(t *testing.T) {
 		t.Fatalf("NewSubManager: %v", err)
 	}
 	sub := Subscription{ID: "j1", Category: "direct", Name: "j1", URL: srv.URL, Format: "plain", Enabled: false, Interval: 24 * time.Hour}
-	if err := m.Add(sub); err != nil {
+	if _, err := m.Add(sub); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
@@ -700,6 +737,74 @@ func TestRunSkipsInitialUpdateWhenCachePresent(t *testing.T) {
 	mu.Unlock()
 	if h != 0 {
 		t.Errorf("want no fetch when cache already present at Run startup, got %d hits", h)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Live reschedule: Add while Run is active starts a ticker for the new sub
+// ---------------------------------------------------------------------------
+
+func TestAddWhileRunActiveGetsLiveReschedule(t *testing.T) {
+	var hits int32
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.Write([]byte("a.com\n"))
+	}))
+	defer srv.Close()
+
+	rulesDir := t.TempDir()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	reload, _ := countingReload()
+	m, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		m.Run(ctx)
+		close(done)
+	}()
+
+	// Give Run a moment to start (it has nothing to do yet — no subs configured).
+	time.Sleep(50 * time.Millisecond)
+
+	sub := Subscription{
+		ID: "live1", Category: "direct", Name: "live1",
+		URL: srv.URL, Format: "plain", Enabled: true, Interval: 100 * time.Millisecond,
+	}
+	if _, err := m.Add(sub); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// Add's own initial fetch accounts for hit #1. Wait for a SECOND fetch to
+	// prove a ticker was launched for the live-added subscription (not just
+	// the one-shot initial fetch inside Add).
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		h := hits
+		mu.Unlock()
+		if h >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	<-done
+
+	mu.Lock()
+	h := hits
+	mu.Unlock()
+	if h < 2 {
+		t.Errorf("want >=2 fetches (initial Add fetch + at least one ticker fetch) for a subscription added while Run is active, got %d", h)
 	}
 }
 

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/miekg/dns"
 )
 
 // Stats is a point-in-time snapshot of engine verdict counters plus the
@@ -30,19 +32,29 @@ type Controller struct {
 	rulesDir string
 	stats    *statsCounters
 	cacheLen func() int
+
+	// handler gives Lookup access to the live engine (classifyName, the
+	// China/Trust exchangers, CN, GatewayIP, Timeout) so a manual lookup can
+	// reuse the exact same decision/arbitration path as the query pipeline.
+	// May be nil (e.g. in tests exercising only subscription/rule-list
+	// behavior); Lookup on a nil handler returns a zero-value LookupResult.
+	handler *Handler
 }
 
 // NewController constructs a Controller. Any of subs, stats, or cacheLen may
 // be nil (e.g. in tests exercising only a subset of behavior); nil subs makes
 // Subscriptions/AddSubscription/RemoveSubscription/Update panic if actually
 // called — callers wiring the real server must always pass a live SubManager.
-func NewController(subs *SubManager, reload func() error, rulesDir string, stats *statsCounters, cacheLen func() int) *Controller {
+// handler wires Lookup to the live engine; it may be nil if Lookup is never
+// called (e.g. in tests exercising only a subset of Controller's behavior).
+func NewController(subs *SubManager, reload func() error, rulesDir string, stats *statsCounters, cacheLen func() int, handler *Handler) *Controller {
 	return &Controller{
 		subs:     subs,
 		reload:   reload,
 		rulesDir: rulesDir,
 		stats:    stats,
 		cacheLen: cacheLen,
+		handler:  handler,
 	}
 }
 
@@ -52,8 +64,9 @@ func (c *Controller) Subscriptions() []Subscription {
 }
 
 // AddSubscription validates, persists, and performs an initial fetch for a
-// new subscription.
-func (c *Controller) AddSubscription(s Subscription) error {
+// new subscription, returning the initial fetch's UpdateResult alongside any
+// validation/persistence error.
+func (c *Controller) AddSubscription(s Subscription) (UpdateResult, error) {
 	return c.subs.Add(s)
 }
 
@@ -75,6 +88,106 @@ func (c *Controller) Update(ctx context.Context, id string) []UpdateResult {
 // live engine.
 func (c *Controller) Reload() error {
 	return c.reload()
+}
+
+// LookupResult is the outcome of a manual (control-plane) name lookup: the
+// same verdict/reason vocabulary as the query pipeline (see Verdict), plus
+// the IPs the lookup observed and which upstream group produced them (for
+// the default/arbitrated case only).
+type LookupResult struct {
+	Name     string
+	Verdict  string
+	Reason   string
+	IPs      []string
+	Upstream string
+}
+
+// Lookup runs the same classification the query pipeline uses for name, for
+// operator/API introspection (e.g. "why would this domain resolve the way it
+// does").  It never touches the cache and always performs a fresh lookup.
+//
+//   - adblock/force-direct/blacklist: classifyName's terminal verdict is
+//     returned as-is; block and blacklist never call an upstream (IPs empty).
+//     force-direct does need real IPs, so it arbitrates (as resolve does) and
+//     reports them un-rewritten under reason "force-direct".
+//   - default case (classifyName returns the zero Verdict): resolve the name
+//     via Arbitrate (the same china/trust race resolve uses) and classify the
+//     resulting IPs against CN: any CN-member IP → direct/chnroute-cn (IPs =
+//     the resolved IPs, as the client would see them kept as-is); otherwise →
+//     proxy/chnroute-foreign (IPs = the real resolved IPs, which is what a
+//     live query would rewrite to GatewayIP — reported here unrewritten so an
+//     operator can see the actual upstream answer being classified).
+//
+// Lookup on a Controller constructed with a nil handler (e.g. a test
+// exercising only subscription/rule-list behavior) returns a zero-value
+// LookupResult.
+func (c *Controller) Lookup(ctx context.Context, name string) LookupResult {
+	if c.handler == nil {
+		return LookupResult{}
+	}
+	h := c.handler
+
+	verdict := h.classifyName(name)
+
+	switch verdict.Reason {
+	case "adblock":
+		return LookupResult{Name: name, Verdict: verdict.Verdict, Reason: verdict.Reason}
+	case "blacklist":
+		return LookupResult{Name: name, Verdict: verdict.Verdict, Reason: verdict.Reason}
+	case "force-direct":
+		ips, upstream := h.lookupArbitrate(ctx, name)
+		return LookupResult{Name: name, Verdict: verdict.Verdict, Reason: verdict.Reason, IPs: ips, Upstream: upstream}
+	}
+
+	// Default case: resolve via the engine and classify the IPs against CN.
+	ips, upstream := h.lookupArbitrate(ctx, name)
+	if len(ips) == 0 {
+		return LookupResult{Name: name, Verdict: "", Reason: "", Upstream: upstream}
+	}
+
+	_, _, _, cn := h.ruleSnap()
+	for _, ipStr := range ips {
+		if ip := net.ParseIP(ipStr); ip != nil && cn.Contains(ip) {
+			return LookupResult{Name: name, Verdict: "direct", Reason: "chnroute-cn", IPs: ips, Upstream: upstream}
+		}
+	}
+	return LookupResult{Name: name, Verdict: "proxy", Reason: "chnroute-foreign", IPs: ips, Upstream: upstream}
+}
+
+// lookupArbitrate builds a synthetic A query for name, runs it through the
+// same Arbitrate race resolve uses, and returns the resolved IPv4 addresses
+// (as dotted strings, in Answer order) plus which upstream group's answer was
+// used ("china" if the china reply's IPs were returned, "trust" otherwise —
+// mirroring Arbitrate's decision rule). Returns (nil, "") on any error/nil
+// reply/empty answer.
+func (h *Handler) lookupArbitrate(ctx context.Context, name string) ([]string, string) {
+	fqdn := dns.Fqdn(name)
+	q := new(dns.Msg)
+	q.SetQuestion(fqdn, dns.TypeA)
+
+	resp, err := Arbitrate(ctx, q, h.China, h.Trust, h.CN)
+	if err != nil || resp == nil {
+		return nil, ""
+	}
+
+	var ips []string
+	for _, rr := range resp.Answer {
+		if a, ok := rr.(*dns.A); ok {
+			ips = append(ips, a.A.String())
+		}
+	}
+	if len(ips) == 0 {
+		return nil, ""
+	}
+
+	upstream := "trust"
+	for _, ipStr := range ips {
+		if ip := net.ParseIP(ipStr); ip != nil && h.CN.Contains(ip) {
+			upstream = "china"
+			break
+		}
+	}
+	return ips, upstream
 }
 
 // Stats returns a snapshot of the engine's verdict counters and current cache

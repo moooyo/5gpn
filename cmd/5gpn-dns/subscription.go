@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -138,6 +139,12 @@ type SubManager struct {
 	http     *http.Client
 	reload   func() error
 	mu       sync.Mutex
+
+	// runCtx is the context passed to Run, stored so a subscription added
+	// later via Add (while Run is active) can launch its own ticker goroutine
+	// instead of waiting for the process to restart. nil until Run is called;
+	// guarded by mu like the rest of the manager's mutable state.
+	runCtx context.Context
 }
 
 // NewSubManager constructs a SubManager, loading any existing subscriptions
@@ -330,29 +337,42 @@ func atomicWriteLines(path string, entries []string) error {
 }
 
 // Add validates, appends, and persists a new subscription, then performs an
-// initial UpdateOne to populate its cache.
-func (m *SubManager) Add(s Subscription) error {
+// initial UpdateOne to populate its cache and returns that fetch's result. If
+// Run is currently active (its ctx is stored in m.runCtx and not yet done),
+// Add also launches a ticker goroutine for the new subscription so it
+// auto-refreshes on its own Interval without requiring a process restart.
+func (m *SubManager) Add(s Subscription) (UpdateResult, error) {
 	if err := validateSubscription(s); err != nil {
-		return err
+		return UpdateResult{}, err
 	}
 
 	m.mu.Lock()
 	if _, _, exists := m.find(s.ID); exists {
 		m.mu.Unlock()
-		return fmt.Errorf("subscription: id %q already exists", s.ID)
+		return UpdateResult{}, fmt.Errorf("subscription: id %q already exists", s.ID)
 	}
 	m.subs = append(m.subs, s)
 	err := m.persistLocked()
+	runCtx := m.runCtx
 	m.mu.Unlock()
 	if err != nil {
-		return err
+		return UpdateResult{}, err
 	}
 
 	// The initial fetch is best-effort: a subscription is still validly
 	// registered even if its first fetch fails (e.g. transient network
 	// issue) — Run's ticker (or a later on-demand update) will retry.
-	m.UpdateOne(context.Background(), s.ID)
-	return nil
+	res := m.UpdateOne(context.Background(), s.ID)
+
+	// Live reschedule: Run is already driving the ticker loop for the
+	// existing subscriptions, so a sub added afterwards needs its own
+	// goroutine — otherwise it would only ever refresh once (here) until the
+	// next process restart.
+	if runCtx != nil && runCtx.Err() == nil && s.Enabled && s.Interval > 0 {
+		go m.runOne(runCtx, s)
+	}
+
+	return res, nil
 }
 
 // Remove drops a subscription by ID, persists the change, deletes its cache
@@ -402,7 +422,29 @@ func validateSubscription(s Subscription) error {
 	if s.URL == "" {
 		return errors.New("subscription: url must not be empty")
 	}
+	if err := validateSubscriptionURLScheme(s.URL); err != nil {
+		return err
+	}
 	return nil
+}
+
+// validateSubscriptionURLScheme rejects any URL whose scheme is not http or
+// https. Ahead of Task 1, Add was only reachable from trusted local config;
+// now that Phase 3 exposes Add over HTTP, an unrestricted URL would let a
+// caller point a subscription fetch at file:///etc/passwd (arbitrary local
+// file disclosure into the rule-set cache) or other non-http(s) schemes
+// intended for SSRF against internal services.
+func validateSubscriptionURLScheme(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("subscription: invalid url %q: %w", rawURL, err)
+	}
+	switch u.Scheme {
+	case "http", "https":
+		return nil
+	default:
+		return fmt.Errorf("subscription: invalid url scheme %q (must be http or https)", u.Scheme)
+	}
 }
 
 // validateSubscriptionName rejects any Name that is not a single, safe path
@@ -475,12 +517,28 @@ func (m *SubManager) persistLocked() error {
 // cache file is missing when Run starts, an immediate UpdateOne is performed
 // before entering the ticker loop (so a fresh install populates its cache
 // promptly rather than waiting a full interval). Run blocks until ctx is
-// done.
+// done, even when there are zero (or zero enabled) subscriptions to start
+// with — see the runCtx doc below for why that matters.
+//
+// ctx is also stored on the manager (m.runCtx) for the duration of the call,
+// so a subscription added afterwards via Add can detect that Run is active
+// and launch its own ticker goroutine (live reschedule) instead of only
+// refreshing once at Add time. Run must therefore stay "active" (block)
+// until ctx is actually done, regardless of how many subscriptions it started
+// with — otherwise a fresh install with no subscriptions yet configured
+// would have Run return immediately, clear runCtx, and silently disable live
+// reschedule for every subscription added afterwards.
 func (m *SubManager) Run(ctx context.Context) {
 	m.mu.Lock()
 	subs := make([]Subscription, len(m.subs))
 	copy(subs, m.subs)
+	m.runCtx = ctx
 	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		m.runCtx = nil
+		m.mu.Unlock()
+	}()
 
 	var wg sync.WaitGroup
 	for _, sub := range subs {
@@ -496,6 +554,11 @@ func (m *SubManager) Run(ctx context.Context) {
 			m.runOne(ctx, sub)
 		}(sub)
 	}
+
+	// Block until ctx is cancelled, independent of the per-subscription
+	// goroutines above (which themselves also block on ctx.Done() inside
+	// runOne's select). This keeps runCtx valid for the whole Run lifetime.
+	<-ctx.Done()
 	wg.Wait()
 }
 

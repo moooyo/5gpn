@@ -19,7 +19,7 @@ func TestControllerAddRuleAppendsAndReloads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSubManager: %v", err)
 	}
-	c := NewController(stats, reload, rulesDir, nil, nil)
+	c := NewController(stats, reload, rulesDir, nil, nil, nil)
 
 	if err := c.AddRule("blacklist", "x.com"); err != nil {
 		t.Fatalf("AddRule: %v", err)
@@ -44,7 +44,7 @@ func TestControllerAddRuleInvalidDomainErrorsAndFileUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSubManager: %v", err)
 	}
-	c := NewController(stats, reload, rulesDir, nil, nil)
+	c := NewController(stats, reload, rulesDir, nil, nil, nil)
 
 	if err := c.AddRule("blacklist", "not a domain"); err == nil {
 		t.Fatal("expected error for invalid domain, got nil")
@@ -69,7 +69,7 @@ func TestControllerAddRuleInvalidCIDRErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSubManager: %v", err)
 	}
-	c := NewController(stats, reload, rulesDir, nil, nil)
+	c := NewController(stats, reload, rulesDir, nil, nil, nil)
 
 	if err := c.AddRule("chnroute", "not-a-cidr"); err == nil {
 		t.Fatal("expected error for invalid CIDR, got nil")
@@ -93,7 +93,7 @@ func TestControllerAddRuleInvalidCategoryErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSubManager: %v", err)
 	}
-	c := NewController(stats, reload, rulesDir, nil, nil)
+	c := NewController(stats, reload, rulesDir, nil, nil, nil)
 
 	if err := c.AddRule("bogus", "x.com"); err == nil {
 		t.Fatal("expected error for invalid category, got nil")
@@ -111,7 +111,7 @@ func TestControllerRemoveRuleRemovesLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSubManager: %v", err)
 	}
-	c := NewController(stats, reload, rulesDir, nil, nil)
+	c := NewController(stats, reload, rulesDir, nil, nil, nil)
 
 	if err := c.AddRule("adblock", "a.com"); err != nil {
 		t.Fatalf("AddRule a.com: %v", err)
@@ -152,7 +152,7 @@ func TestControllerUpdateEmptyIDDelegatesToUpdateAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSubManager: %v", err)
 	}
-	c := NewController(stats, reload, rulesDir, nil, nil)
+	c := NewController(stats, reload, rulesDir, nil, nil, nil)
 
 	results := c.Update(context.Background(), "")
 	if results == nil {
@@ -175,7 +175,7 @@ func TestControllerSubscriptionsPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSubManager: %v", err)
 	}
-	c := NewController(subs, reload, rulesDir, nil, nil)
+	c := NewController(subs, reload, rulesDir, nil, nil, nil)
 
 	if got := c.Subscriptions(); len(got) != 0 {
 		t.Fatalf("expected 0 subscriptions initially, got %d", len(got))
@@ -184,7 +184,7 @@ func TestControllerSubscriptionsPassthrough(t *testing.T) {
 
 func TestControllerReload(t *testing.T) {
 	reload, count := countingReload()
-	c := NewController(nil, reload, t.TempDir(), nil, nil)
+	c := NewController(nil, reload, t.TempDir(), nil, nil, nil)
 	if err := c.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestControllerStatsSnapshot(t *testing.T) {
 
 	cacheLen := func() int { return 42 }
 
-	c := NewController(nil, func() error { return nil }, t.TempDir(), stats, cacheLen)
+	c := NewController(nil, func() error { return nil }, t.TempDir(), stats, cacheLen, nil)
 	got := c.Stats()
 
 	want := Stats{
@@ -224,10 +224,82 @@ func TestControllerStatsSnapshot(t *testing.T) {
 }
 
 func TestControllerStatsNilSafe(t *testing.T) {
-	c := NewController(nil, func() error { return nil }, t.TempDir(), nil, nil)
+	c := NewController(nil, func() error { return nil }, t.TempDir(), nil, nil, nil)
 	got := c.Stats()
 	want := Stats{}
 	if got != want {
 		t.Errorf("Stats() with nil stats/cacheLen = %+v, want zero value %+v", got, want)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Lookup
+// ---------------------------------------------------------------------------
+
+func TestControllerLookupBlacklistNoUpstream(t *testing.T) {
+	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
+	c := NewController(nil, func() error { return nil }, t.TempDir(), nil, nil, h)
+
+	got := c.Lookup(context.Background(), "blacklist.test")
+	if got.Name != "blacklist.test" || got.Verdict != "proxy" || got.Reason != "blacklist" {
+		t.Errorf("Lookup(blacklist.test) = %+v, want Name=blacklist.test Verdict=proxy Reason=blacklist", got)
+	}
+	if len(got.IPs) != 0 {
+		t.Errorf("Lookup(blacklist.test).IPs = %v, want empty (no upstream call)", got.IPs)
+	}
+}
+
+func TestControllerLookupDefaultCNIP(t *testing.T) {
+	china := &fakeExchanger{reply: makeAMsg("example.test", "1.2.3.4")}
+	trust := &fakeExchanger{reply: makeAMsg("example.test", "9.9.9.9")}
+	h := newTestHandler(t, china, trust)
+	c := NewController(nil, func() error { return nil }, t.TempDir(), nil, nil, h)
+
+	got := c.Lookup(context.Background(), "example.test")
+	if got.Verdict != "direct" || got.Reason != "chnroute-cn" {
+		t.Errorf("Lookup(example.test) verdict/reason = %s/%s, want direct/chnroute-cn", got.Verdict, got.Reason)
+	}
+	if len(got.IPs) != 1 || got.IPs[0] != "1.2.3.4" {
+		t.Errorf("Lookup(example.test).IPs = %v, want [1.2.3.4]", got.IPs)
+	}
+}
+
+func TestControllerLookupDefaultForeignIP(t *testing.T) {
+	china := &fakeExchanger{reply: makeAMsg("foreign.test", "9.9.9.9")}
+	trust := &fakeExchanger{reply: makeAMsg("foreign.test", "9.9.9.9")}
+	h := newTestHandler(t, china, trust)
+	c := NewController(nil, func() error { return nil }, t.TempDir(), nil, nil, h)
+
+	got := c.Lookup(context.Background(), "foreign.test")
+	if got.Verdict != "proxy" || got.Reason != "chnroute-foreign" {
+		t.Errorf("Lookup(foreign.test) verdict/reason = %s/%s, want proxy/chnroute-foreign", got.Verdict, got.Reason)
+	}
+	if len(got.IPs) != 1 || got.IPs[0] != "9.9.9.9" {
+		t.Errorf("Lookup(foreign.test).IPs = %v, want [9.9.9.9]", got.IPs)
+	}
+}
+
+func TestControllerLookupAdblockNoUpstream(t *testing.T) {
+	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
+	c := NewController(nil, func() error { return nil }, t.TempDir(), nil, nil, h)
+
+	got := c.Lookup(context.Background(), "adblock.test")
+	if got.Name != "adblock.test" || got.Verdict != "block" || got.Reason != "adblock" {
+		t.Errorf("Lookup(adblock.test) = %+v, want Name=adblock.test Verdict=block Reason=adblock", got)
+	}
+	if len(got.IPs) != 0 {
+		t.Errorf("Lookup(adblock.test).IPs = %v, want empty (no upstream call)", got.IPs)
+	}
+}
+
+func TestControllerLookupForceDirect(t *testing.T) {
+	china := &fakeExchanger{reply: makeAMsg("direct.test", "9.9.9.9")}
+	trust := &fakeExchanger{reply: makeAMsg("direct.test", "9.9.9.9")}
+	h := newTestHandler(t, china, trust)
+	c := NewController(nil, func() error { return nil }, t.TempDir(), nil, nil, h)
+
+	got := c.Lookup(context.Background(), "direct.test")
+	if got.Verdict != "direct" || got.Reason != "force-direct" {
+		t.Errorf("Lookup(direct.test) verdict/reason = %s/%s, want direct/force-direct", got.Verdict, got.Reason)
 	}
 }

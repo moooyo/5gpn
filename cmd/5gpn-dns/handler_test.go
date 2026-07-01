@@ -809,3 +809,73 @@ func TestCacheHitPreservesRequestID(t *testing.T) {
 		t.Errorf("cache hit returned wrong IPs: %v; want [1.2.3.4]", ips)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// classifyName (Phase 3 Task 1: shared decision extraction)
+// ---------------------------------------------------------------------------
+
+func TestClassifyNameAdblock(t *testing.T) {
+	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
+	got := h.classifyName("adblock.test")
+	want := Verdict{Verdict: "block", Reason: "adblock"}
+	if got != want {
+		t.Errorf("classifyName(adblock.test) = %+v, want %+v", got, want)
+	}
+}
+
+func TestClassifyNameForceDirect(t *testing.T) {
+	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
+	got := h.classifyName("direct.test")
+	want := Verdict{Verdict: "direct", Reason: "force-direct"}
+	if got != want {
+		t.Errorf("classifyName(direct.test) = %+v, want %+v", got, want)
+	}
+}
+
+func TestClassifyNameBlacklist(t *testing.T) {
+	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
+	got := h.classifyName("blacklist.test")
+	want := Verdict{Verdict: "proxy", Reason: "blacklist"}
+	if got != want {
+		t.Errorf("classifyName(blacklist.test) = %+v, want %+v", got, want)
+	}
+}
+
+func TestClassifyNameDefaultIsEmptyVerdict(t *testing.T) {
+	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
+	got := h.classifyName("example.test")
+	want := Verdict{}
+	if got != want {
+		t.Errorf("classifyName(example.test) = %+v, want zero-value Verdict (needs IP arbitration)", got)
+	}
+}
+
+// TestClassifyNamePrecedenceAdblockBeatsDirectAndBlacklist proves adblock
+// wins even when the same name also matches direct/blacklist (precedence:
+// adblock > direct > blacklist, matching resolve's step order).
+func TestClassifyNamePrecedenceAdblockBeatsDirectAndBlacklist(t *testing.T) {
+	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
+	h.Adblock.entries["both.test"] = struct{}{}
+	h.Direct.entries["both.test"] = struct{}{}
+	h.Blacklist.entries["both.test"] = struct{}{}
+
+	got := h.classifyName("both.test")
+	want := Verdict{Verdict: "block", Reason: "adblock"}
+	if got != want {
+		t.Errorf("classifyName(both.test) = %+v, want %+v (adblock precedence)", got, want)
+	}
+}
+
+// TestClassifyNamePrecedenceDirectBeatsBlacklist proves direct wins over
+// blacklist when a name matches both (matching resolve's step order).
+func TestClassifyNamePrecedenceDirectBeatsBlacklist(t *testing.T) {
+	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
+	h.Direct.entries["directandblack.test"] = struct{}{}
+	h.Blacklist.entries["directandblack.test"] = struct{}{}
+
+	got := h.classifyName("directandblack.test")
+	want := Verdict{Verdict: "direct", Reason: "force-direct"}
+	if got != want {
+		t.Errorf("classifyName(directandblack.test) = %+v, want %+v (direct precedence over blacklist)", got, want)
+	}
+}
