@@ -158,6 +158,28 @@ func main() {
 		log.Printf("control API disabled: DNS_API_TOKEN not set")
 	}
 
+	// ── Phase 5: in-process Telegram control bot (goroutine) ──────────────────
+	// NewBot returns (nil, nil) when TGBOT_TOKEN is empty (bot disabled). The bot
+	// calls the in-memory Controller directly (no HTTP/token) and its Run loop
+	// recovers from panics, so a bot failure can never take down DNS resolution.
+	// Its privileged ops delegate to systemd (systemctl / systemd-run certbot),
+	// so the resolver's hardened sandbox stays intact.
+	if b, err := NewBot(cfg, ctrl); err != nil {
+		log.Printf("telegram bot: %v — bot disabled", err)
+	} else if b != nil {
+		go b.Run(ctx)
+		log.Printf("telegram bot enabled")
+	} else {
+		log.Printf("telegram bot disabled: TGBOT_TOKEN not set")
+	}
+
+	// ── Phase 5: in-process iOS DoT profile server (goroutine) ────────────────
+	// Disabled if DNS_IOS_LISTEN is empty; a bind failure logs but never fatals.
+	go RunIOSServer(ctx, cfg)
+	if cfg.IOSListen != "" {
+		log.Printf("iOS profile server on %s (www=%s)", cfg.IOSListen, cfg.WWWDir)
+	}
+
 	// ── Block until SIGINT / SIGTERM ──────────────────────────────────────────
 	stopCh := make(chan os.Signal, 1)
 	signal.Notify(stopCh, syscall.SIGINT, syscall.SIGTERM)

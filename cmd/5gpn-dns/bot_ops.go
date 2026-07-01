@@ -184,13 +184,19 @@ func isKnownService(svc string) bool {
 // Cert renewal (certbot)
 // --------------------------------------------------------------------------- //
 
-// opRenewCert runs `certbot renew --non-interactive` and classifies the result.
-// The installed certbot deploy/renew hook SIGHUPs 5gpn-dns to pick up a renewed
-// cert, so the bot itself does nothing beyond invoking certbot. Port of
-// tgbot.py's op_renew_cert: the "no renewals"/"not yet due" wording maps to the
-// 尚未到期 message, a success to 已续期, a non-zero exit to 失败.
+// opRenewCert runs `certbot renew` and classifies the result. certbot is
+// launched via `systemd-run` — a transient unit spawned by PID 1 that does NOT
+// inherit 5gpn-dns's hardened sandbox (ProtectSystem=strict, read-only
+// /etc/5gpn/cert, etc.). This lets certbot write /etc/letsencrypt and its deploy
+// hook refresh /etc/5gpn/cert without loosening the resolver's own unit — the
+// bot now runs in-process, so a bare `certbot` would inherit the tight sandbox
+// and fail to write its state. The deploy hook SIGHUPs 5gpn-dns to pick up the
+// renewed cert. Port of tgbot.py's op_renew_cert (wording branches preserved).
 func (bt *Bot) opRenewCert() string {
-	ok, out := bt.run([]string{"certbot", "renew", "--non-interactive"}, 600*time.Second)
+	ok, out := bt.run([]string{
+		"systemd-run", "--pipe", "--collect", "--quiet",
+		"certbot", "renew", "--non-interactive",
+	}, 600*time.Second)
 	tail := tailLines(out, 12)
 	if ok {
 		lower := strings.ToLower(out)

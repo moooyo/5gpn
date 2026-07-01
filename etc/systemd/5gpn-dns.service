@@ -12,12 +12,21 @@ Restart=on-failure
 RestartSec=5
 User=root
 LimitNOFILE=65535
-# Sandbox: DNS resolver — binds :53/:853/:8443 (resolution) and :9443 (Phase 3
-# control-plane API + embedded SPA), root with no new privileges. IPv4 (+unix)
-# sockets only for now — AF_INET6 / AF_NETLINK are NOT granted; confirm on
-# test-env whether the runtime needs either (a dual-stack ":port" bind or route
-# subscribe) and add them there if 5gpn-dns fatals. Kept in lockstep with the
-# sibling sing-box unit's family set (see tests/test_hardening_policy.sh).
+# Sandbox: DNS resolver — binds :53/:853/:8443 (resolution), :9443 (Phase 3
+# control-plane API + embedded SPA), and :8111 (Phase 5 iOS DoT profile server),
+# root with no new privileges. IPv4 (+unix) sockets only for now — AF_INET6 /
+# AF_NETLINK are NOT granted; confirm on test-env whether the runtime needs
+# either (a dual-stack ":port" bind or route subscribe) and add them there if
+# 5gpn-dns fatals. Kept in lockstep with the sibling sing-box unit's family set
+# (see tests/test_hardening_policy.sh).
+#
+# Phase 5 (in-process Telegram bot): the bot's privileged ops are delegated to
+# systemd rather than run under this sandbox, so NO loosening is needed here:
+#   - `systemctl restart/is-active` talks to systemd over the AF_UNIX private
+#     socket (already permitted);
+#   - `certbot renew` is launched via `systemd-run` (a transient unit spawned by
+#     PID 1) so it runs OUTSIDE this sandbox and can write /etc/letsencrypt +
+#     refresh /etc/5gpn/cert. This deliberately keeps the resolver hardened.
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

@@ -181,8 +181,17 @@ func TestOpRenewCert(t *testing.T) {
 			fn, calls := recordRun(c.ok, c.out)
 			bt := &Bot{runFn: fn}
 			msg := bt.opRenewCert()
-			if len(*calls) != 1 || (*calls)[0][0] != "certbot" {
-				t.Fatalf("opRenewCert argv = %v, want a certbot renew", *calls)
+			if len(*calls) != 1 {
+				t.Fatalf("opRenewCert made %d run calls, want 1: %v", len(*calls), *calls)
+			}
+			argv := (*calls)[0]
+			// certbot is wrapped in systemd-run so it escapes the daemon's
+			// hardened sandbox; the argv must be a systemd-run … certbot renew.
+			if len(argv) == 0 || argv[0] != "systemd-run" {
+				t.Fatalf("opRenewCert argv = %v, want a systemd-run wrapper", argv)
+			}
+			if joined := strings.Join(argv, " "); !strings.Contains(joined, "certbot renew") {
+				t.Fatalf("opRenewCert argv = %v, want certbot renew inside", argv)
 			}
 			if !strings.Contains(msg, c.wantSubstr) {
 				t.Errorf("opRenewCert(%s) = %q, want substring %q", c.name, msg, c.wantSubstr)
