@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -200,13 +201,24 @@ func (s *ControlServer) handleRulesList(w http.ResponseWriter, r *http.Request) 
 	cat := r.PathValue("cat")
 	entries, err := s.ctrl.ListRules(cat)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeErr(w, ruleErrStatus(err), err.Error())
 		return
 	}
 	if entries == nil {
 		entries = []string{}
 	}
 	writeJSON(w, http.StatusOK, entries)
+}
+
+// ruleErrStatus maps a Controller rule error to an HTTP status: a caller
+// mistake (bad category / malformed entry, wrapping ErrInvalidRule) is a 400;
+// anything else (a disk read/write or reload failure while applying an
+// otherwise-valid entry) is a server-side 500.
+func ruleErrStatus(err error) int {
+	if errors.Is(err, ErrInvalidRule) {
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
 }
 
 // ruleEntryBody is the JSON body shape for POST/DELETE /api/rules/{cat}.
@@ -222,7 +234,7 @@ func (s *ControlServer) handleRulesAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.ctrl.AddRule(cat, body.Entry); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeErr(w, ruleErrStatus(err), err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -246,7 +258,7 @@ func (s *ControlServer) handleRulesRemove(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := s.ctrl.RemoveRule(cat, entry); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeErr(w, ruleErrStatus(err), err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

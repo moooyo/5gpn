@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,6 +98,37 @@ func TestControllerAddRuleInvalidCategoryErrors(t *testing.T) {
 
 	if err := c.AddRule("bogus", "x.com"); err == nil {
 		t.Fatal("expected error for invalid category, got nil")
+	}
+}
+
+// TestRuleValidationErrorsWrapErrInvalidRule locks in the sentinel the HTTP
+// layer relies on to return 400 (not 500) for a caller mistake: every
+// client-caused rule/category error must satisfy errors.Is(err, ErrInvalidRule),
+// while a valid entry must not.
+func TestRuleValidationErrorsWrapErrInvalidRule(t *testing.T) {
+	cases := []struct {
+		name, cat, entry string
+	}{
+		{"bad category", "bogus", "x.com"},
+		{"bad domain", "blacklist", "not a domain"},
+		{"bad cidr", "chnroute", "999.0.0.0/8"},
+		{"empty domain", "adblock", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := normalizeRuleEntry(tc.cat, tc.entry)
+			if err == nil {
+				t.Fatalf("expected error for %q/%q", tc.cat, tc.entry)
+			}
+			if !errors.Is(err, ErrInvalidRule) {
+				t.Errorf("error %q does not wrap ErrInvalidRule", err)
+			}
+		})
+	}
+
+	// A valid entry must NOT wrap ErrInvalidRule.
+	if _, err := normalizeRuleEntry("blacklist", "good.example"); err != nil {
+		t.Fatalf("valid entry errored: %v", err)
 	}
 }
 

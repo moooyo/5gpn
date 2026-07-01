@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -11,6 +12,13 @@ import (
 
 	"github.com/miekg/dns"
 )
+
+// ErrInvalidRule wraps every client-caused rule/category validation failure
+// (bad category, malformed CIDR/domain) so the HTTP layer can distinguish a
+// 400 (caller sent something invalid) from a 500 (a disk/reload failure while
+// applying an otherwise-valid entry). Wrapped, not returned bare, so the
+// descriptive message is preserved: errors.Is(err, ErrInvalidRule) still holds.
+var ErrInvalidRule = errors.New("invalid rule")
 
 // Stats is a point-in-time snapshot of engine verdict counters plus the
 // current cache size. It is the read model the Phase-3 HTTP API will expose.
@@ -229,7 +237,7 @@ func (c *Controller) manualRulePath(cat string) string {
 // "null".
 func (c *Controller) ListRules(cat string) ([]string, error) {
 	if !validCategories[cat] {
-		return nil, fmt.Errorf("controller: invalid category %q", cat)
+		return nil, fmt.Errorf("controller: invalid category %q: %w", cat, ErrInvalidRule)
 	}
 	lines, err := readRuleLines(c.manualRulePath(cat))
 	if err != nil {
@@ -332,17 +340,17 @@ func readRuleLines(path string) ([]string, error) {
 // known rule categories.
 func normalizeRuleEntry(cat, entry string) (string, error) {
 	if !validCategories[cat] {
-		return "", fmt.Errorf("controller: invalid category %q", cat)
+		return "", fmt.Errorf("controller: invalid category %q: %w", cat, ErrInvalidRule)
 	}
 	entry = strings.TrimSpace(entry)
 	if cat == "chnroute" {
 		if _, _, err := net.ParseCIDR(entry); err != nil {
-			return "", fmt.Errorf("controller: invalid CIDR %q: %w", entry, err)
+			return "", fmt.Errorf("controller: invalid CIDR %q: %v: %w", entry, err, ErrInvalidRule)
 		}
 		return strings.ToLower(entry), nil
 	}
 	if !isValidRuleDomain(entry) {
-		return "", fmt.Errorf("controller: invalid domain %q", entry)
+		return "", fmt.Errorf("controller: invalid domain %q: %w", entry, ErrInvalidRule)
 	}
 	return normalizeDomain(entry), nil
 }
