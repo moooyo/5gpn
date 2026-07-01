@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -56,8 +57,13 @@ type Bot struct {
 	// A slash command or /cancel clears it. Guarded by mu.
 	mu      sync.Mutex
 	pending map[int64]string
-	// Gateway/domain facts are read from disk (readStatusFacts); OS-op state
-	// (restart/logs/certbot/QR) is added in T3.
+
+	// runFn is the injectable shelling-out seam for the T3 OS-op handlers
+	// (restart/logs/certbot/QR). A nil runFn means "use the real run" (via
+	// Bot.run); tests set it to a stub so no real systemctl/journalctl/certbot/
+	// qrencode is ever invoked. Gateway/domain facts are read from disk
+	// (readStatusFacts / iosHost).
+	runFn func(argv []string, timeout time.Duration) (bool, string)
 }
 
 // NewBot constructs the in-process Telegram bot. An empty cfg.TGBotToken means
@@ -405,6 +411,22 @@ func (bt *Bot) handleCallback(ctx context.Context, b *bot.Bot, update *models.Up
 	case cbReload:
 		bt.edit(ctx, b, cq, "⏳ 正在重载规则…", nil)
 		bt.edit(ctx, b, cq, bt.doReload(ctx), backKB("menu:main"))
+	case cbMenuRestart:
+		bt.edit(ctx, b, cq, "选择要重启的服务：", restartMenu())
+	case cbMenuLogs:
+		bt.edit(ctx, b, cq, "选择要查看日志的服务：", logsMenu())
+	case cbRenew:
+		bt.edit(ctx, b, cq, "⏳ 正在续期证书，请稍候…", nil)
+		bt.edit(ctx, b, cq, bt.opRenewCert(), backKB("menu:main"))
+	case cbIOS:
+		bt.edit(ctx, b, cq, "⏳ 正在生成 iOS 二维码…", nil)
+		bt.edit(ctx, b, cq, bt.opIOS(), backKB("menu:main"))
+	case cbRestart:
+		bt.edit(ctx, b, cq, fmt.Sprintf("⏳ 正在处理 <b>%s</b>…", htmlEscape(intent.arg)), nil)
+		bt.edit(ctx, b, cq, bt.opRestart(intent.arg), backKB("menu:restart"))
+	case cbLogs:
+		bt.edit(ctx, b, cq, fmt.Sprintf("📜 正在取 <b>%s</b> 日志…", htmlEscape(intent.arg)), nil)
+		bt.edit(ctx, b, cq, bt.opLogs(intent.arg), backKB("menu:logs"))
 	case cbDomAdd:
 		bt.setPending(chatID, "add_domain")
 		bt.edit(ctx, b, cq, "➕ 发送要加入<b>黑名单(强制代理)</b>的域名（如 <code>example.com</code>）。\n发送 /cancel 取消。", nil)

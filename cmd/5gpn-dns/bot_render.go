@@ -358,13 +358,16 @@ func btn(text, data string) models.InlineKeyboardButton {
 	return models.InlineKeyboardButton{Text: text, CallbackData: data}
 }
 
-// mainMenu is the top-level menu. The T3 OS-op rows (续证书 / 重启服务 / 日志 /
-// iOS二维码) are intentionally omitted here and land with T3; the Controller-
-// backed subset is: status, domains, update subscriptions, reload rules.
+// mainMenu is the top-level menu. Rows 1-2 are the Controller-backed subset
+// (status, domains, update subscriptions, reload rules); rows 3-4 are the T3
+// OS-op entries (续证书 / 重启服务 / 日志 / iOS二维码), matching tgbot.py's
+// main_menu layout.
 func mainMenu() *models.InlineKeyboardMarkup {
 	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
 		{btn("📊 状态", "act:status"), btn("🎯 代理域名", "menu:domains")},
 		{btn("🔄 更新订阅", "act:update_lists"), btn("♻️ 重载规则", "act:reload")},
+		{btn("🔐 续证书", "act:renew"), btn("♻️ 重启服务", "menu:restart")},
+		{btn("📜 日志", "menu:logs"), btn("📱 iOS二维码", "act:ios")},
 	}}
 }
 
@@ -373,6 +376,30 @@ func domainsMenu() *models.InlineKeyboardMarkup {
 		{btn("➕ 加域名", "dom:add"), btn("🗑 删域名", "dom:del")},
 		{btn("« 返回", "menu:main")},
 	}}
+}
+
+// restartMenu is the service-restart submenu. Per the self-restart-paradox
+// design decision (the bot runs inside the 5gpn-dns process), the 5gpn-dns entry
+// is labeled 热重载 (in-process hot reload via ctrl.Reload()), NOT 重启 — only
+// sing-box gets a real systemctl restart. Mirrors tgbot.py's restart_menu but
+// with the corrected 5gpn-dns label.
+func restartMenu() *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{btn("♻️ 5gpn-dns 热重载", "restart:5gpn-dns"), btn("🔁 sing-box", "restart:sing-box")},
+		{btn("全部", "restart:all")},
+		{btn("« 返回", "menu:main")},
+	}}
+}
+
+// logsMenu is the log-view submenu: one row per data-path service plus a back
+// button. Mirrors tgbot.py's logs_menu.
+func logsMenu() *models.InlineKeyboardMarkup {
+	rows := make([][]models.InlineKeyboardButton, 0, len(botServices)+1)
+	for _, s := range botServices {
+		rows = append(rows, []models.InlineKeyboardButton{btn(s, "logs:"+s)})
+	}
+	rows = append(rows, []models.InlineKeyboardButton{btn("« 返回", "menu:main")})
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
 // backKB is a single "« 返回" button pointing at target (default the main menu).
@@ -410,6 +437,13 @@ const (
 	cbReload
 	cbDomAdd
 	cbDomDel
+	// T3 OS-op intents.
+	cbMenuRestart // menu:restart  — open the restart submenu
+	cbMenuLogs    // menu:logs     — open the logs submenu
+	cbRenew       // act:renew     — certbot renew
+	cbIOS         // act:ios       — iOS profile QR
+	cbRestart     // restart:<svc> — restart/reload a service (arg = svc)
+	cbLogs        // logs:<svc>    — tail a service's journal (arg = svc)
 )
 
 // callbackIntent is the parsed form of a button's callback_data.
@@ -435,12 +469,27 @@ func parseCallback(data string) callbackIntent {
 		return callbackIntent{kind: cbUpdateLists}
 	case "act:reload":
 		return callbackIntent{kind: cbReload}
+	case "menu:restart":
+		return callbackIntent{kind: cbMenuRestart}
+	case "menu:logs":
+		return callbackIntent{kind: cbMenuLogs}
+	case "act:renew":
+		return callbackIntent{kind: cbRenew}
+	case "act:ios":
+		return callbackIntent{kind: cbIOS}
 	case "dom:add":
 		return callbackIntent{kind: cbDomAdd}
 	case "dom:del":
 		return callbackIntent{kind: cbDomDel}
 	}
-	// Unknown: expose the "prefix:arg" tail for future (T3) extension.
+	// Prefix-classified data with a payload tail: restart:<svc>, logs:<svc>.
+	if svc, ok := strings.CutPrefix(data, "restart:"); ok {
+		return callbackIntent{kind: cbRestart, arg: svc}
+	}
+	if svc, ok := strings.CutPrefix(data, "logs:"); ok {
+		return callbackIntent{kind: cbLogs, arg: svc}
+	}
+	// Unknown: expose the "prefix:arg" tail for future extension.
 	if _, arg, ok := strings.Cut(data, ":"); ok {
 		return callbackIntent{kind: cbUnknown, arg: arg}
 	}
