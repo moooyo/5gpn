@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -163,7 +164,17 @@ func loadRuleSets(cfg Config) (*ruleSets, error) {
 	if cfg.ChnrouteFile != "" {
 		cr, err = LoadChnrouteFiles(append([]string{cfg.ChnrouteFile}, globChnrouteDir(rulesDir)...)...)
 		if err != nil {
-			return nil, fmt.Errorf("chnroute: %w", err)
+			if errors.Is(err, ErrEmptyChnroute) {
+				// Fail-safe, not fail-fast: an empty chnroute means every IP looks
+				// foreign (routed via proxy), which is safe — and self-heals once
+				// the subscription manager's in-process fetch lands. The
+				// alternative (log.Fatalf) would crash-loop forever on a fresh
+				// install where nothing has seeded chnroute yet.
+				log.Printf("warning: %v — starting with empty chnroute (all IPs treated as foreign) until a subscription fetch or manual file populates it", err)
+				cr = &Chnroute{}
+			} else {
+				return nil, fmt.Errorf("chnroute: %w", err)
+			}
 		}
 	}
 

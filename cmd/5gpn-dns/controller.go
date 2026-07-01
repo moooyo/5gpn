@@ -108,7 +108,8 @@ func (c *Controller) manualRulePath(cat string) string {
 // a domain otherwise), appends it (de-duplicated) to the category's manual
 // rule file, and reloads. The file and its parent directory are created if
 // missing. An invalid cat or entry returns an error and leaves the file
-// untouched.
+// untouched. Uses the same read-modify-write-via-atomicWriteLines path as
+// RemoveRule for consistency (no partial-write window from a plain append).
 func (c *Controller) AddRule(cat, entry string) error {
 	norm, err := normalizeRuleEntry(cat, entry)
 	if err != nil {
@@ -127,20 +128,10 @@ func (c *Controller) AddRule(cat, entry string) error {
 		}
 	}
 
-	if err := os.MkdirAll(c.rulesDir, 0o755); err != nil {
-		return fmt.Errorf("controller: mkdir %s: %w", c.rulesDir, err)
-	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("controller: open %s: %w", path, err)
-	}
-	_, werr := f.WriteString(norm + "\n")
-	cerr := f.Close()
-	if werr != nil {
-		return fmt.Errorf("controller: write %s: %w", path, werr)
-	}
-	if cerr != nil {
-		return fmt.Errorf("controller: close %s: %w", path, cerr)
+	out := append(existing[:len(existing):len(existing)], norm)
+
+	if err := atomicWriteLines(path, out); err != nil {
+		return err
 	}
 
 	return c.reload()

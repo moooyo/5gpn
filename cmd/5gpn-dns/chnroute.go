@@ -24,6 +24,13 @@ type Chnroute struct {
 	ranges []ipRange
 }
 
+// ErrEmptyChnroute is returned (wrapped) by LoadChnrouteFiles when no valid
+// IPv4 CIDRs were found across all given paths. Callers that can tolerate a
+// temporarily-empty chnroute (e.g. main's startup path, before the
+// subscription manager has had a chance to fetch one) can check for this with
+// errors.Is and fall back to an empty *Chnroute instead of failing hard.
+var ErrEmptyChnroute = errors.New("chnroute: empty set")
+
 // ipToUint32 converts a 4-byte IPv4 address to uint32 (big-endian).
 func ipToUint32(ip net.IP) uint32 {
 	ip4 := ip.To4()
@@ -99,7 +106,7 @@ func LoadChnrouteFiles(paths ...string) (*Chnroute, error) {
 	}
 
 	if len(raw) == 0 {
-		return nil, errors.New("chnroute: no valid IPv4 CIDRs found — refusing empty set")
+		return nil, fmt.Errorf("chnroute: no valid IPv4 CIDRs found: %w", ErrEmptyChnroute)
 	}
 
 	// Sort by start address, then merge overlapping/adjacent ranges.

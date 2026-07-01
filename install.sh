@@ -327,6 +327,22 @@ install_files() {
     # Phase 2: per-category subdirs for subscription-fetched caches (merged by
     # the resolver alongside the manual <cat>.txt above: <cat>.txt + <cat>/*.txt).
     install -d -m 0755 "${DNS_RULES_DIR_DEFAULT}"/{adblock,direct,blacklist,chnroute}
+
+    # Fresh-install fix (defense in depth #1): seed the manual chnroute file from
+    # the bundled snapshot so 5gpn-dns has a non-empty chnroute at first boot,
+    # before the subscription manager's in-process fetch has had a chance to run.
+    # Only when the cache is absent — never clobber a fresher subscription-fetched
+    # cache on re-install/upgrade. DNS_CHNROUTE (dns.env) points at this same path.
+    if [[ -s "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" ]]; then
+        info "Keeping existing ${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt."
+    elif [[ -f "${SCRIPT_DIR}/etc/china_ip_list.txt" ]]; then
+        install -m 0644 "${SCRIPT_DIR}/etc/china_ip_list.txt" \
+            "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt"
+        ok "Seeded ${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt from bundled snapshot."
+    else
+        warn "${SCRIPT_DIR}/etc/china_ip_list.txt missing; chnroute unseeded until subscription fetch runs."
+    fi
+
     write_subscriptions_json
 
     # sing-box config (resolver hardcoded to 22.22.22.22 for loop-avoidance, IPv4-only, direct).

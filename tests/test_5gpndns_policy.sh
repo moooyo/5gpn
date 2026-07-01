@@ -92,6 +92,21 @@ grep -Fq 'CHINA_IP_URL'              "$UPDATE_LISTS" \
 grep -Fq 'wget'                      "$UPDATE_LISTS" \
     && fail "update-lists.sh: still downloads lists directly (should be subscription-owned)"
 
+# --- install.sh: fresh-install chnroute seed (Task 8 fix A) ---
+# A truly fresh box must not crash-loop: the bundled etc/china_ip_list.txt
+# snapshot is installed as the manual chnroute file (DNS_CHNROUTE target)
+# before start_services, but only when no cache is already present (never
+# clobber a fresher subscription-fetched cache on re-install/upgrade).
+CHNROUTE_SEED="$ROOT/etc/china_ip_list.txt"
+[ -f "$CHNROUTE_SEED" ] || fail "etc/china_ip_list.txt seed does not exist"
+if [ -f "$CHNROUTE_SEED" ]; then
+    seed_lines="$(grep -cvE '^[[:space:]]*(#|$)' "$CHNROUTE_SEED" 2>/dev/null | head -n1 || echo 0)"
+    [ "${seed_lines:-0}" -ge 1000 ] || fail "etc/china_ip_list.txt seed has too few CIDR lines (${seed_lines:-0})"
+fi
+grep -Fq 'etc/china_ip_list.txt' "$INSTALL" || fail "install.sh: does not reference etc/china_ip_list.txt seed"
+grep -Eq '\[\[ -s "\$\{DNS_RULES_DIR_DEFAULT\}/china_ip_list.txt" \]\]' "$INSTALL" \
+    || fail "install.sh: does not guard chnroute seed install on cache absence (-s check)"
+
 # --- tgbot.py: SERVICES has 5gpn-dns, no smartdns/xray ---
 grep -Fq '"5gpn-dns"'   "$TGBOT" || fail "tgbot.py: SERVICES does not contain 5gpn-dns"
 grep -Fq '"smartdns"'   "$TGBOT" \
