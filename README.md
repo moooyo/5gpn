@@ -43,7 +43,7 @@
 
 ## 关键特性
 
-- **四类确定性规则**:① **adblock**(`adblock.txt`)→ NXDOMAIN;② **force-direct**(`direct.txt`)→ 仲裁后返回真实 IP,跳过改写(强制直连);③ **blacklist**(`blacklist.txt`,含旧 proxy-domains)→ 直接返回网关 IP(不解析);④ **默认 chnroute 仲裁** → 国内答案 IP∈chnroute 则直连,否则改写为网关 IP。
+- **四类确定性规则**(手动 + **订阅** 合并生效):① **adblock**(`adblock.txt` + `adblock/*.txt` 订阅缓存)→ NXDOMAIN;② **force-direct**(`direct.txt` + `direct/*.txt`)→ 仲裁后返回真实 IP,跳过改写(强制直连);③ **blacklist**(`blacklist.txt` + `blacklist/*.txt`,含旧 proxy-domains)→ 直接返回网关 IP(不解析);④ **默认 chnroute 仲裁**(`china_ip_list.txt` + `chnroute/*.txt`)→ 国内答案 IP∈chnroute 则直连,否则改写为网关 IP。
 - **确定性仲裁**:并发查国内 UDP(223.5.5.5/119.29.29.29)和可信 DoT(1.1.1.1/8.8.8.8);按 chnroute 成员关系判定,不看谁先回(非竞速)。这是 smartdns `whitelist-ip` 做不到的(test-env 实测验证)。
 - **多传输入口**:DoT :853(Android 私人 DNS / iOS)、DoH :8443(`https://<域名>:8443/dns-query`)、明文 DNS :53(per-source 限速)。
 - **全查询类型**:A → 仲裁+改写;AAAA → SOA(IPv4-only);HTTPS/SVCB → 空 NOERROR(保 sing-box SNI 嗅探);其余 → 转发可信 DoT,verbatim。
@@ -51,7 +51,8 @@
 - **QUIC/HTTP3 由 sing-box sniff `quic` 透明转发**:UDP 443 防火墙放行,sing-box sniff quic 取 SNI 后 direct 出站。
 - **防回环**:sing-box DNS 单一外部 server hardcode 为 `22.22.22.22`,绝不指向本机 5gpn-dns;`ip_is_private` + 自身 IP `ip_cidr` 规则 reject drop 兜底。
 - **IPv4-only**:AAAA 返回 SOA,不追求 IPv6。
-- **控制面**:Telegram Bot(`tgbot.py`),以"编辑文本文件 + SIGHUP"方式管理规则与列表刷新。Phase 3 将增加公开 HTTPS API + Web UI(tgbot 改为调同一 API,并存)。
+- **规则来源:订阅(远程 URL 自动更新)+ 手动条目**:`/etc/5gpn/subscriptions.json` 配置各类规则的远程订阅(`id`/`category`/`name`/`url`/`format`/`interval`),`5gpn-dns` 进程内按各自 `interval` 定时拉取、解析(`plain`/`gfwlist`/`dnsmasq`/`adblock`/`hosts`/`cidr`)、落盘缓存,与手动文件合并生效;拉取/解析失败保留旧缓存(离线安全)。chnroute 默认即由订阅维护。
+- **控制面**:Telegram Bot(`tgbot.py`),以"编辑文本文件 + SIGHUP"方式管理手动规则;订阅由 `subscriptions.json` 管理,`update-lists.sh` 提供手动 reload 触发。Phase 3 将增加公开 HTTPS API + Web UI(tgbot 改为调同一 API,并存)。
 - **证书热加载**:5gpn-dns 按 mtime 检测证书变化,续期后 `kill -HUP` 即生效,不重启。
 
 ## 安装
@@ -72,7 +73,7 @@ export GATEWAY_IP=<网关内网地址>
 sudo bash install.sh
 ```
 
-环境变量覆盖:`DOMAIN=` `PUBLIC_IP=` `EMAIL=` `LOWMEM=1|0` `DNS_VERSION=` `DNS_SHA256=` `SINGBOX_SHA256=` `TGBOT_TOKEN=` `TGBOT_ADMINS=`。
+环境变量覆盖:`DOMAIN=` `PUBLIC_IP=` `EMAIL=` `LOWMEM=1|0` `DNS_VERSION=` `DNS_SHA256=` `DNS_SUBSCRIPTIONS=`(默认 `/etc/5gpn/subscriptions.json`)`SINGBOX_SHA256=` `TGBOT_TOKEN=` `TGBOT_ADMINS=`。
 
 ## 客户端接入
 
@@ -85,7 +86,7 @@ sudo bash install.sh
 
 ```bash
 sudo bash install.sh --status        # 服务 / 域名 / 列表 状态
-sudo bash install.sh --update-lists  # 刷新 chnroute + SIGHUP
+sudo bash install.sh --update-lists  # 重载 5gpn-dns 规则缓存(SIGHUP;订阅的拉取由进程内定时器完成)
 sudo bash install.sh --add-domain d  # 强制代理某域名
 sudo bash install.sh --del-domain d  # 取消强制代理
 sudo bash install.sh --ios           # 重新生成 iOS 描述文件 + 二维码
@@ -99,8 +100,8 @@ sudo bash install.sh --setup-tgbot   # 启用 Telegram 控制 bot(Gum TUI 交互
 | `cmd/5gpn-dns/` | 5gpn-dns Go 源码(DNS 大脑;CI 构建 → `moooyo/5gpn` release) |
 | `install.sh` | 安装 / 升级编排,以及上面的运维子命令 |
 | `quick-install.sh` | 一键入口(拉取仓库后调用 `install.sh`) |
-| `etc/` | `blacklist.txt`(旧 proxy-domains)、`direct.txt`、`adblock.txt`、sing-box 配置(`etc/sing-box/config.json`)、systemd 单元 |
-| `scripts/` | chnroute 更新、防火墙、iOS profile、证书续期 hook、列表更新 |
+| `etc/` | `blacklist.txt`(旧 proxy-domains)、`direct.txt`、`adblock.txt`、`etc/5gpn-dns/dns.env.example`(含 `DNS_SUBSCRIPTIONS`)、sing-box 配置(`etc/sing-box/config.json`)、systemd 单元 |
+| `scripts/` | 防火墙、iOS profile、证书续期 hook、`update-lists.sh`(手动 reload 触发;chnroute 拉取已移入 5gpn-dns 进程内订阅管理器) |
 | `src/ios-http.py` | iOS 描述文件分发的小型 HTTP 服务 |
 | `tgbot.py` | Telegram 控制 bot(主控制面;Phase 3 将改为调公开 API) |
 | `tests/` | 策略测试(grep policy) + Go 单测(`cmd/5gpn-dns/*_test.go`) + 集成冒烟清单 |

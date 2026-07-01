@@ -7,10 +7,11 @@
 ## Pre-req setup
 
 - [ ] Deploy `5gpn-dns` to `/usr/local/bin/5gpn-dns` (CI binary or local cross-compile + scp).
-- [ ] Place rules in `/etc/5gpn/rules/`: `adblock.txt`, `direct.txt`, `blacklist.txt`, `china_ip_list.txt`.
+- [ ] Place rules in `/etc/5gpn/rules/`: `adblock.txt`, `direct.txt`, `blacklist.txt`, `china_ip_list.txt` (manual files; §I below adds subscription caches under `<category>/*.txt`).
+- [ ] (Optional, for §I) Place `/etc/5gpn/subscriptions.json` with at least one subscription pointing at a local test HTTP server.
 - [ ] Place cert at `/etc/5gpn/cert/{fullchain.pem,privkey.pem}` (self-signed ok; DoT client uses `+insecure`).
-- [ ] Start 5gpn-dns with env: `DNS_LISTEN_DOT=:853 DNS_LISTEN_DOH=:8443 DNS_LISTEN_PLAIN=:53 DNS_GATEWAY_IP=<this-host-ip> DNS_RULES_DIR=/etc/5gpn/rules /usr/local/bin/5gpn-dns`.
-- [ ] Run automated Go unit tests (dev box / CI): `go test ./cmd/5gpn-dns/...` → expect all PASS.
+- [ ] Start 5gpn-dns with env: `DNS_LISTEN_DOT=:853 DNS_LISTEN_DOH=:8443 DNS_LISTEN_PLAIN=:53 DNS_GATEWAY_IP=<this-host-ip> DNS_RULES_DIR=/etc/5gpn/rules DNS_SUBSCRIPTIONS=/etc/5gpn/subscriptions.json /usr/local/bin/5gpn-dns`.
+- [ ] Run automated Go unit tests (dev box / CI): `go test ./cmd/5gpn-dns/...` → expect all PASS (includes subscription/controller tests).
 - [ ] Run grep policy suite: `bash tests/run-tests.sh` → expect `ALL TESTS PASSED`.
 
 ---
@@ -100,6 +101,29 @@
 
 - [ ] **Trusted DoT resolves correctly** — known-blocked foreign domains consistently return gateway IP, never a fake "domestic-looking" IP.
 - [ ] **china_ip_list.txt present** — `ls -l /etc/5gpn/rules/china_ip_list.txt` → exists and non-empty. `update-lists.sh` refreshes it cleanly; old table retained on network failure.
+
+### I. Phase 2 — Subscription manager (in-process fetch/parse/cache)
+
+> Mirrors the spec §7 test-env matrix (`docs/superpowers/specs/2026-07-01-5gpn-dns-p2-subscriptions-design.md`). Requires a local `httptest`-style server (or any HTTP server you control) serving a rule-list body, and `/etc/5gpn/subscriptions.json` pointing a subscription at it.
+
+- [ ] **Subscription cache generated from a URL → rule effective**
+      Configure a subscription (e.g. `category: "blacklist"`, `format: "plain"`) pointing at a local HTTP server serving one test domain.
+      Start/reload `5gpn-dns` → confirm `/etc/5gpn/rules/blacklist/<name>.txt` is created with the parsed domain.
+      `dig @<host-ip> +short <that-domain>` → gateway IP (blacklist rule now effective, merged with any manual `blacklist.txt`).
+
+- [ ] **Change served body → update → hot-reload**
+      Change the HTTP server's response body (add/remove a domain), then trigger an update: either wait for the subscription's `interval` tick, or send an on-demand update (SIGHUP after cache refresh, or restart the fetch cycle per test harness).
+      Confirm the cache file content changes and the new/removed domain's resolution behavior flips accordingly — **without restarting the `5gpn-dns` process**.
+
+- [ ] **Offline / fetch failure → keep old cache**
+      With an existing good cache present, point the subscription at an unreachable URL (or stop the test HTTP server) and force a fetch.
+      Confirm the cache file under `/etc/5gpn/rules/<category>/<name>.txt` is **unchanged** (old cache retained, not cleared or truncated) and the previously-loaded rule remains effective. Also verify: a response that parses to too few entries (below the category's floor guard) is treated the same as a failure (old cache kept).
+
+- [ ] **Sandbox `ReadWritePaths` lets the manager write**
+      `systemctl show 5gpn-dns -p ReadWritePaths` → includes `/etc/5gpn/rules`.
+      Confirm the subscription manager can actually create/update files under `/etc/5gpn/rules/<category>/` while the rest of `/etc/5gpn` remains read-only (`ReadOnlyPaths=/etc/5gpn`) — i.e. no permission-denied in the journal when a subscription fetch writes its cache.
+
+- [ ] **`update-lists.sh` is now reload-only** — running `scripts/update-lists.sh` performs no network fetch itself; it only triggers `systemctl reload 5gpn-dns` (confirm via strace/journal: no outbound HTTP from the script, only from the `5gpn-dns` process's own subscription manager).
 
 ---
 

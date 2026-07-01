@@ -1,6 +1,6 @@
 # 5gpn 设计文档(5gpn-dns DoT/DoH/plain-53 网关)
 
-- 状态:已实施(Phase 1 engine in progress)
+- 状态:已实施(Phase 1 引擎 + Phase 2 订阅系统已完成;Phase 3 API+Web UI 计划中)
 - 日期:2026-06-27(更新 2026-07-01)
 - 范围:5gpn-dns Go DNS 网关的整体设计
 - 已定决策:① 客户端多传输接入:DoT :853 / DoH :8443 / 明文 DNS :53(限速) ② 不在强制列表但解析出国外 IP 的域名 → 改写为网关 IP,进 sing-box ③ **出口仅直出**(无 WireGuard / 多出口 / 策略路由) ④ **QUIC/HTTP3 经 sing-box `direct` inbound + route sniff `quic` 透明转发**;UDP 443 防火墙放行;sing-box 以 root + systemd sandbox 运行(数据平面历经 sniproxy → xray → sing-box 两次反转,完整决策记录见 §12)
@@ -55,12 +55,13 @@
 | 组件 | 作用 |
 |---|---|
 | `5gpn-dns`(Go 二进制,`cmd/5gpn-dns/`) | DNS 大脑:DoT/DoH/plain-53 入口、四类规则、确定性仲裁、chnroute CIDR 判定、改写网关IP、AAAA→SOA、adblock、缓存、SIGHUP 重载、证书热加载 |
-| `/etc/5gpn/rules/`(四类规则文件) | `adblock.txt`、`direct.txt`、`blacklist.txt`、`china_ip_list.txt`;Phase 2 升级为订阅 |
+| `/etc/5gpn/rules/`(四类规则,手动文件 + 订阅缓存) | `adblock.txt`、`direct.txt`、`blacklist.txt`、`china_ip_list.txt`(手动)+ `<cat>/*.txt`(订阅缓存,Phase 2 已实现,见 §9) |
 | sing-box + config.json | `direct` inbound TCP 80 / TCP+UDP 443;route sniff tls/quic/http + resolve(ipv4_only);direct 直出;DNS 单一外部 `ext`=`22.22.22.22`;sniff 失败 / 私网 / 自身 IP → reject drop(防回环兜底) |
 | 防火墙(nft 入站) | 放行 22/53/853/8443 + `172.22→80/443/udp443`;:53 per-source 限速;**无 mark/策略路由** |
 | certbot / renew-hook / iOS profile / ios-http | 证书、iOS 描述文件;renew-hook 拷证书 + `kill -HUP`(5gpn-dns 热加载,不重启) |
 | install.sh 编排 | 装 5gpn-dns(下载 CI 预编译产物)、下载预编译 sing-box、规则文件、systemd、sysctl/低内存 |
-| `tgbot.py`(Telegram 控制面)+ `install.sh` Gum TUI | 管规则 / chnroute 刷新 / 状态;改文件 + SIGHUP。Phase 3 tgbot 将改为调同一 API |
+| `subscriptions.json`(`/etc/5gpn/subscriptions.json`) | 订阅配置:各条目 `id`/`category`/`name`/`url`/`format`/`enabled`/`interval`;`5gpn-dns` 进程内订阅管理器按此定时拉取(见 §9) |
+| `tgbot.py`(Telegram 控制面)+ `install.sh` Gum TUI | 管手动规则 / `update-lists.sh` 触发 reload / 状态;改文件 + SIGHUP。Phase 3 tgbot 将改为调同一 API |
 | tests/ | policy 测试 + Go 单测 |
 
 **明确不包含**:WireGuard / 多出口 / `pxout` 打 mark / `table 100` 等出口层(仅直出)。sing-box 以预编译二进制安装,5gpn-dns 以 CI 构建产物安装,网关上不引入 Go 工具链。
@@ -98,13 +99,13 @@ adblock 对**所有 qtype** 拦截(命中即 NXDOMAIN);blacklist / force-direct 
 
 **确定性**:选择完全由 chnroute 成员关系决定,与应答先后无关(非竞速)。残留硬伤:被污染成"看着像国内"的 IP 仍可能误判直连 → 把该域名加进 blacklist 自愈。
 
-`china_ip_list.txt` 仍由 `update-lists.sh` 远程刷新(Phase 2 纳入统一订阅)。
+`china_ip_list.txt`(手动文件)+ `chnroute/*.txt`(订阅缓存,默认由一条指向 17mon/china_ip_list 的订阅维护,取代 Phase 1 `update-lists.sh` 直接下载 chnroute 的方式;见 §9)。
 
-### 4.4 规则文件加载
+### 4.4 规则文件加载(Phase 2:手动文件 + 订阅缓存合并)
 
-每类从 `DNS_RULES_DIR/<cat>/*.txt`(或单文件)加载,而非写死单文件——Phase 2 的订阅只是往同一目录多塞几份订阅缓存文件 + 触发 SIGHUP reload。
+每类的**有效集合 = 手动文件(`DNS_RULES_DIR/<cat>.txt`)+ 该类所有订阅缓存(`DNS_RULES_DIR/<cat>/*.txt`)**;`LoadDomainSet`/`LoadChnrouteFiles` 按 glob 合并多文件加载,不再是写死单文件。订阅缓存由 `5gpn-dns` 进程内的订阅管理器(见 §9)写入,手动文件仍可直接编辑(tgbot / 运维)。目录不存在(未配置任何订阅)→ 只用手动文件,行为退化为 Phase 1。
 
-**Phase 1**:本地文件加载。**Phase 2(计划)**:每类规则支持订阅远程 URL,定时拉取、落盘缓存、断网保留旧表。
+**Phase 1**:本地文件加载。**Phase 2(已实现)**:每类规则可订阅远程 URL,定时+按需拉取、解析、与手动条目合并、落盘缓存、断网保留旧表、热重载(见 §9)。
 
 ## 5. 正确性约束(必须在实现中强保证)
 
@@ -114,7 +115,7 @@ adblock 对**所有 qtype** 拦截(命中即 NXDOMAIN);blacklist / force-direct 
 
 3. **反污染(anti-pollution)**:可信 DoT(1.1.1.1/8.8.8.8)用于仲裁时的"可信"一侧,不受境内 DNS 污染。chnroute 成员判定基于 `china_ip_list.txt`(正集,定期更新)。污染成"看着像国内"的硬边缘情况靠 blacklist 自愈。不再需要 `foreign-cidr.txt`(反集)或 `bogus-nxdomain.conf`。
 
-4. **chnroute 时效**:`china_ip_list.txt` 由 `update-lists.sh` 远程刷新;刷新失败保留旧表(不得清空,清空会把全部流量判成国内→直连→被墙站打不开)。
+4. **chnroute 时效**:`chnroute/*.txt` 订阅缓存由进程内订阅管理器定时刷新(默认订阅指向 17mon/china_ip_list);拉取/解析失败或条目数低于下限保留旧表(不得清空,清空会把全部流量判成国内→直连→被墙站打不开)。`update-lists.sh` 现仅触发 `systemctl reload`(重读磁盘缓存),不再自己下载。
 
 5. **证书热加载**:`5gpn-dns` 用 `GetCertificate` 按 mtime 检测证书变化,续期后 `kill -HUP` 即生效,不需要重启服务。
 
@@ -140,15 +141,25 @@ adblock 对**所有 qtype** 拦截(命中即 NXDOMAIN);blacklist / force-direct 
 
 **明确不做**:`pxout` 打 mark、`ip rule fwmark`、`table 100`、WireGuard、多出口/tproxy/tun/fwmark。
 
-## 9. 规则与列表管理
+## 9. 规则与列表管理(Phase 2:进程内订阅管理器)
 
-规则均为磁盘文本文件(`/etc/5gpn/rules/`);控制面(**Telegram Bot** `tgbot.py`,通过 `install.sh --setup-tgbot` 配置)以"编辑文本文件 + SIGHUP"方式生效。Phase 2 计划:每类规则支持订阅远程 URL(定时拉取、落盘缓存)。Phase 3 计划:公开 HTTPS API + Web UI(tgbot 改为调同一 API,与 Web UI 并存)。
+规则有两个来源,合并生效(见 §4.4):**手动文本文件**(`/etc/5gpn/rules/<cat>.txt`,控制面 **Telegram Bot** `tgbot.py` 编辑 + SIGHUP,或运维直接改文件)和**订阅**(`/etc/5gpn/subscriptions.json`,`5gpn-dns` 进程内的订阅管理器按各自 `interval` 定时拉取远程 URL)。Phase 3 计划:公开 HTTPS API + Web UI(tgbot 改为调同一 API,与 Web UI 并存),届时订阅的增删也走 API。
+
+**订阅管理器(`cmd/5gpn-dns/subscription.go`)**:
+- 配置文件 `/etc/5gpn/subscriptions.json`(env `DNS_SUBSCRIPTIONS` 覆盖路径);每条订阅含 `id`/`category`/`name`/`url`/`format`/`enabled`/`interval`。文件缺失 → 视为无订阅(不报错);JSON 损坏 → 报错并保留上次内存态。
+- **支持格式**:域名类(adblock / force-direct / blacklist 三个分类)—— `plain`(一行一域名)、`gfwlist`(base64 整体解码 + 前缀剥离)、`dnsmasq`(`server=`/`address=` 取 domain)、`adblock`(ABP `||domain^` 语法子集)、`hosts`(`0.0.0.0 domain` 取 domain);CIDR 类(chnroute)—— `cidr`(一行一 CIDR)。
+- **落盘**:每条订阅的拉取结果写 `/etc/5gpn/rules/<category>/<name>.txt`(原子写 tmp+rename)。
+- **失败即保留旧表(offline-safe)**:拉取失败、解析失败、或解析后条目数低于该类别的下限(floor guard,域名类如 1、chnroute 如 100)→ 视为失败,**保留旧缓存不覆盖**,不清空(空表会误伤,如空 chnroute = 全部误判国外)。
+- **热重载**:每次成功拉取 → 重建该类规则集 → 原子 swap 生效,无需重启;`SIGHUP` 同样触发全量重读(手动文件 + 全部订阅缓存)。
+- **chnroute 现由默认订阅提供**(指向 17mon/china_ip_list),取代了 Phase 1 由 `update-lists.sh` 直接下载 chnroute 的方式。
+- `scripts/update-lists.sh` 现在只是一个手动刷新触发器:`systemctl reload 5gpn-dns`(SIGHUP 重读磁盘缓存),真正的拉取由进程内定时器完成。
 
 需管理:
-- `blacklist.txt`:增删强制代理域名。
-- `direct.txt`:增删强制直连域名。
-- `adblock.txt`:广告拦截域名。
-- `china_ip_list.txt`:由 `update-lists.sh` 维护,一般不手动改。
+- `blacklist.txt` / `blacklist/*.txt`:强制代理域名(手动 + 订阅缓存)。
+- `direct.txt` / `direct/*.txt`:强制直连域名(手动 + 订阅缓存)。
+- `adblock.txt` / `adblock/*.txt`:广告拦截域名(手动 + 订阅缓存)。
+- `china_ip_list.txt` / `chnroute/*.txt`:chnroute CIDR;默认由订阅维护,一般不手动改。
+- `subscriptions.json`:订阅本身的增删(id/URL/format/interval),Phase 2 手动编辑该文件 + reload;Phase 3 走 API。
 
 ## 10. 安全与合规
 
@@ -159,7 +170,7 @@ adblock 对**所有 qtype** 拦截(命中即 NXDOMAIN);blacklist / force-direct 
 ## 11. 阶段拆分(每阶段独立 spec + plan + 验证)
 
 - **Phase 1(当前)**:`5gpn-dns` 引擎核心:DoT/DoH/plain-53 入口、四类规则(本地文件)、确定性仲裁、改写、AAAA→SOA、adblock、缓存、SIGHUP 重载、证书热加载。CI 构建(`moooyo/5gpn` release)。取代 smartdns + chinadns-ng。
-- **Phase 2(计划)**:订阅系统:四类规则各订阅远程 URL,定时+按需拉取、与手动条目合并、落盘缓存、断网保留旧表。
+- **Phase 2(已实现)**:订阅系统:四类规则各可订阅远程 URL,进程内订阅管理器定时+按需拉取、与手动条目合并、落盘缓存、断网保留旧表、热重载。chnroute 默认由订阅提供;`update-lists.sh` 改为手动 reload 触发器。
 - **Phase 3(计划)**:公开 HTTPS API(token 鉴权,复用 LE 证书)+ Web UI:查询/统计/控制;**tgbot 改为调同一 API,与 Web UI 并存**。
 - ~~**出口层**~~:**取消**(仅直出,无 WireGuard/多出口/策略路由)。
 
@@ -195,3 +206,14 @@ adblock 对**所有 qtype** 拦截(命中即 NXDOMAIN);blacklist / force-direct 
 - **约定反转(同步改 CLAUDE.md)**:① "控制面只有 tgbot、无 HTTP API/web UI" → 有意重新引入(P3);② "规则手动添加" → 订阅(P2);③ "DoT-only 入站,不开明文 53" → DoT :853 + DoH :8443 + 明文 :53(限速,已接受);④ "prebuilt 第三方工具" → 5gpn-dns 是我们自己的 CI 产物(同规则,网关上不引工具链)。
 - **实测驱动的正确性基线**:确定性仲裁已在 test-env 用 mock 上游(CN/国外/超时)验证,两种时序均通过。smartdns `whitelist-ip` 的不确定性已被实测确认(非猜测)。
 - **保留历史**:三层 smartdns 设计 + chinadns-ng 评估保留于 `docs/superpowers/specs/` 历史记录中。smartdns 从 install.sh / systemd / 防火墙中移除(见 install.sh cleanup 段);`foreign-cidr.txt` + `gen_foreign_cidr.py` + `render_smartdns_conf.py` + `china-domains.txt` 一并移除。
+
+**决策追加 2026-07-01 — Phase 2:规则集经进程内订阅落地;失败保旧表;chnroute 改订阅;update-lists→reload:**
+- **背景**:Phase 1 的四类规则只支持本地手动文件;`china_ip_list.txt` 由 `update-lists.sh` 单独下载。Phase 2 spec(`docs/superpowers/specs/2026-07-01-5gpn-dns-p2-subscriptions-design.md`)把"规则手动添加"升级为订阅系统,现已实现(`cmd/5gpn-dns/subscription.go` + `subscription_test.go` + `controller_test.go`)。
+- **实现摘要**:`5gpn-dns` 读取 `/etc/5gpn/subscriptions.json`(env `DNS_SUBSCRIPTIONS`),每条订阅按各自 `interval` 在进程内定时拉取远程 URL,支持 `plain`/`gfwlist`(base64)/`dnsmasq`/`adblock`(ABP)/`hosts` 五种域名格式解析器和 `cidr`(chnroute)解析器,写入 `/etc/5gpn/rules/<category>/<name>.txt`。每类有效集合 = 手动 `<cat>.txt` + 该类全部订阅缓存(glob 合并,`LoadDomainSet`/`LoadChnrouteFiles`)。
+- **失败即保旧表(offline-safe)**:拉取失败、解析失败、或条目数低于该类别下限(floor guard)→ 视为失败,保留旧缓存不覆盖,不清空(空表会误伤,如空 chnroute = 全部误判国外)。
+- **chnroute 改由订阅提供**:默认 `subscriptions.json` 含一条指向 17mon/china_ip_list 的订阅,取代 Phase 1 里 `update-lists.sh` 直接下载 chnroute 的方式。
+- **`update-lists.sh` 降级为 reload 触发器**:不再自己下载任何东西,只 `systemctl reload 5gpn-dns`(SIGHUP 重读磁盘缓存),真正的拉取由进程内定时器完成。
+- **沙箱调整**:systemd 单元新增 `ReadWritePaths=/etc/5gpn/rules`,允许订阅管理器写缓存文件(其余 `/etc/5gpn` 仍 `ReadOnlyPaths`)。
+- **约定反转(同步改 CLAUDE.md)**:"规则手动添加,Phase 2 前不实现订阅" → Phase 2 完成,订阅与手动文件并存合并生效。
+- **Phase 3 承接**:`Controller`(`Subscriptions/AddSubscription/RemoveSubscription/Update/AddRule/RemoveRule/Reload/Stats`)已在 Phase 2 定义并实现,供 Phase 3 的 HTTPS API 直接调用;`Lookup` 留给 Phase 3。
+- **保留历史**:Phase 1 "本地文件、手动维护"的规则加载方式保留于 git 历史;回滚 = 不部署 `subscriptions.json`,行为退化为纯 Phase 1。
