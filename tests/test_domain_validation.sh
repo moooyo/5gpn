@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# Domain-validation consistency: tgbot.py domain validator and install.sh's is_valid_domain
-# must enforce the same FQDN rule. Pure bash+grep — runs on the dev box and in CI.
+# Domain-validation consistency: the Go bot's domainRE (cmd/5gpn-dns/bot.go) and
+# install.sh's is_valid_domain must enforce the same FQDN rule. Pure bash+grep —
+# runs on the dev box and in CI.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
 rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
-TG="$ROOT/tgbot.py"; INSTALL="$ROOT/install.sh"
+BOT="$ROOT/cmd/5gpn-dns/bot.go"; INSTALL="$ROOT/install.sh"
 
-# (1) tgbot.py carries the canonical FQDN pattern (api-server.py was removed).
-PAT='(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}'
-grep -Fq "$PAT" "$TG"  || fail "tgbot.py DOMAIN_RE is not the canonical FQDN pattern"
+# (1) bot.go carries the canonical FQDN pattern (RE2 form, no lookahead — the
+# ≤253 length bound is enforced separately in isValidDomain, mirroring install.sh).
+PAT='^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'
+grep -Fq "$PAT" "$BOT"  || fail "bot.go domainRE is not the canonical FQDN pattern"
 
 # (2) install.sh is_valid_domain must enforce the same rule. Extract + run in isolation.
 fn="$(sed -n '/^is_valid_domain()/,/^}/p' "$INSTALL")"

@@ -10,7 +10,7 @@ RENEW="$ROOT/scripts/renew-hook.sh"
 DNS_SVC="$ROOT/etc/systemd/5gpn-dns.service"
 FIREWALL="$ROOT/scripts/setup-firewall.sh"
 UPDATE_LISTS="$ROOT/scripts/update-lists.sh"
-TGBOT="$ROOT/tgbot.py"
+BOT="$ROOT/cmd/5gpn-dns/bot.go"
 
 # --- install.sh: install_5gpndns function present ---
 grep -Fq 'install_5gpndns'                  "$INSTALL" || fail "install.sh: no install_5gpndns function"
@@ -112,12 +112,12 @@ grep -Fq 'etc/china_ip_list.txt' "$INSTALL" || fail "install.sh: does not refere
 grep -Eq '\[\[ -s "\$\{DNS_RULES_DIR_DEFAULT\}/china_ip_list.txt" \]\]' "$INSTALL" \
     || fail "install.sh: does not guard chnroute seed install on cache absence (-s check)"
 
-# --- tgbot.py: SERVICES has 5gpn-dns, no smartdns/xray ---
-grep -Fq '"5gpn-dns"'   "$TGBOT" || fail "tgbot.py: SERVICES does not contain 5gpn-dns"
-grep -Fq '"smartdns"'   "$TGBOT" \
-    && fail "tgbot.py: SERVICES still contains smartdns"
-grep -Fq 'xray'         "$TGBOT" \
-    && fail "tgbot.py: contains live xray token (obsolete)"
+# --- bot.go: botServices has 5gpn-dns, no smartdns/xray (bot is in-process now) ---
+grep -Fq '"5gpn-dns"'   "$BOT" || fail "bot.go: botServices does not contain 5gpn-dns"
+grep -Fq '"smartdns"'   "$BOT" \
+    && fail "bot.go: botServices still contains smartdns"
+grep -Fq '"xray"'       "$BOT" \
+    && fail "bot.go: contains obsolete xray service"
 
 # --- install.sh: Phase 3 Task 6 control-plane token + :9443 firewall gate ---
 grep -Fq 'openssl rand'      "$INSTALL" || fail "install.sh: no token auto-gen (openssl rand)"

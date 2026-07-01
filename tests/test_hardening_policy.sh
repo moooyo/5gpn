@@ -5,16 +5,18 @@ HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
 rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
 SB_SVC="$ROOT/etc/systemd/sing-box.service"
+DNS_SVC="$ROOT/etc/systemd/5gpn-dns.service"
 INSTALL="$ROOT/install.sh"; FW="$ROOT/scripts/setup-firewall.sh"
 
 # --- systemd sandboxing ---
 grep -Fq 'NoNewPrivileges=yes'   "$SB_SVC" || fail "sing-box.service: no NoNewPrivileges"
 grep -Fq 'ProtectSystem=strict'  "$SB_SVC" || fail "sing-box.service: no ProtectSystem=strict"
 grep -Fq 'RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK' "$SB_SVC" || fail "sing-box.service: address families not the expected AF_INET AF_UNIX AF_NETLINK (no AF_INET6; AF_NETLINK needed for route subscribe)"
-# The DEPLOYED units are heredocs in install.sh (tgbot/iosprofile) — guard those,
-# not any static file. iosprofile (root, public, per-connection) must get ProtectSystem=strict.
-[ "$(grep -c 'NoNewPrivileges=yes' "$INSTALL")" -ge 2 ] || fail "install.sh units not all hardened (NoNewPrivileges <2)"
-grep -Fq 'ProtectSystem=strict' "$INSTALL" || fail "deployed iosprofile heredoc not hardened (ProtectSystem=strict)"
+# Phase 5: the Telegram bot + iOS profile responder are in-process goroutines of
+# 5gpn-dns (the separate python tgbot/iosprofile heredoc units are gone), so the
+# deployed daemon unit is the one that must stay hardened.
+grep -Fq 'NoNewPrivileges=yes'  "$DNS_SVC" || fail "5gpn-dns.service: no NoNewPrivileges"
+grep -Fq 'ProtectSystem=strict' "$DNS_SVC" || fail "5gpn-dns.service: no ProtectSystem=strict"
 
 # --- DoT :853 per-source rate limit ---
 grep -Fq 'dot_rate4' "$FW" || fail "no DoT 853 per-source rate limit (dot_rate4 meter)"

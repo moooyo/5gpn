@@ -29,7 +29,7 @@ WWW_DIR="$3"
 
 gen_uuid() {
     cat /proc/sys/kernel/random/uuid 2>/dev/null \
-        || python3 -c 'import uuid; print(uuid.uuid4())'
+        || uuidgen
 }
 
 PAYLOAD_UUID="$(gen_uuid)"

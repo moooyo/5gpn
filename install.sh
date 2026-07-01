@@ -19,8 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"   # repo 5gpn/ when run fr
 
 BASE_DIR="/opt/5gpn"                 # installed runtime root
 SCRIPTS_DIR="${BASE_DIR}/scripts"        # installed copies of repo scripts
-SRC_DIR="${BASE_DIR}/src"                # ios-http.py + build scratch
-WWW_DIR="${BASE_DIR}/www"                # iOS profile web root
+WWW_DIR="${BASE_DIR}/www"                # iOS profile web root (served in-process by 5gpn-dns)
 BUILD_DIR="${BASE_DIR}/build"            # download/unpack scratch
 
 CONF_DIR="/etc/5gpn"                 # state: .domain .public_ip .gateway_ip ...
@@ -189,13 +188,13 @@ install_deps() {
             apt-get install -y -qq \
                 wget curl ca-certificates unzip \
                 certbot nftables qrencode jq libcap2-bin \
-                python3 dnsutils || warn "some apt packages failed; continuing."
+                dnsutils || warn "some apt packages failed; continuing."
             ;;
         dnf|yum)
             $PKG_MGR install -y -q \
                 wget curl ca-certificates unzip \
                 certbot nftables qrencode jq \
-                python3 bind-utils || warn "some rpm packages failed; continuing."
+                bind-utils || warn "some rpm packages failed; continuing."
             # libcap setcap tooling (name varies by distro)
             $PKG_MGR install -y -q libcap libcap-ng-utils 2>/dev/null || true
             ;;
@@ -302,7 +301,7 @@ EOF
 # ----------------------------------------------------------------------------
 install_files() {
     info "Installing config files and scripts..."
-    mkdir -p "$BASE_DIR" "$SCRIPTS_DIR" "$SRC_DIR" "$WWW_DIR" \
+    mkdir -p "$BASE_DIR" "$SCRIPTS_DIR" "$WWW_DIR" \
              "$CONF_DIR" "$DNS_CERT_DIR" "$DNS_RULES_DIR_DEFAULT"
 
     # Seed rule files for 5gpn-dns (don't clobber operator-edited files).
@@ -369,14 +368,10 @@ install_files() {
     sed -i "s#\"127\\.0\\.0\\.2/32\"#${self}#" "$SINGBOX_DIR/config.json"
 
     # repo scripts -> /opt/5gpn/scripts
-    for f in "${SCRIPT_DIR}"/scripts/*.sh "${SCRIPT_DIR}"/scripts/*.py; do
+    for f in "${SCRIPT_DIR}"/scripts/*.sh; do
         [[ -e "$f" ]] || continue
         install -m 0755 "$f" "${SCRIPTS_DIR}/$(basename "$f")"
     done
-
-    # iOS responder + control-plane python (only if shipped in the checkout)
-    [[ -f "${SCRIPT_DIR}/src/ios-http.py" ]] && install -m 0755 "${SCRIPT_DIR}/src/ios-http.py" "${SRC_DIR}/ios-http.py"
-    [[ -f "${SCRIPT_DIR}/tgbot.py"       ]] && install -m 0755 "${SCRIPT_DIR}/tgbot.py"       "${BASE_DIR}/tgbot.py"
     ok "Files installed under ${BASE_DIR} and ${CONF_DIR}."
 }
 
@@ -384,7 +379,7 @@ install_files() {
 # Domain + ACME certificate
 # ----------------------------------------------------------------------------
 is_valid_domain() {
-    # Same FQDN rule as tgbot.py DOMAIN_RE (bash ERE has no
+    # Same FQDN rule as the Go bot's domainRE (cmd/5gpn-dns/bot.go); bash ERE has no
     # lookahead, so total length is checked separately): lowercase [a-z0-9-]
     # labels (<=63), alphabetic 2-63 TLD, total 1..253. Case-insensitive.
     local d; d="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
@@ -571,11 +566,16 @@ write_dns_env() {
 
     # DNS_API_TOKEN: reuse an existing token across re-installs (never rotate a
     # working token); else honor an env override; else generate one.
-    local existing_token=""
+    local existing_token="" existing_tgtoken="" existing_tgadmins=""
     if [[ -f "${CONF_DIR}/dns.env" ]]; then
         existing_token="$(grep -E '^DNS_API_TOKEN=' "${CONF_DIR}/dns.env" | head -1 | cut -d= -f2-)"
+        # Preserve tgbot secrets across re-installs (set by --setup-tgbot into dns.env).
+        existing_tgtoken="$(grep -E '^TGBOT_TOKEN=' "${CONF_DIR}/dns.env" | head -1 | cut -d= -f2-)"
+        existing_tgadmins="$(grep -E '^TGBOT_ADMINS=' "${CONF_DIR}/dns.env" | head -1 | cut -d= -f2-)"
     fi
     DNS_API_TOKEN="${DNS_API_TOKEN:-${existing_token:-$(openssl rand -hex 32)}}"
+    local tg_token="${TGBOT_TOKEN:-$existing_tgtoken}"
+    local tg_admins="${TGBOT_ADMINS:-$existing_tgadmins}"
 
     cat > "${CONF_DIR}/dns.env" <<EOF
 # 5gpn-dns environment — written by install.sh; edit for overrides.
@@ -609,6 +609,17 @@ DNS_SUBSCRIPTIONS=${CONF_DIR}/subscriptions.json
 DNS_LISTEN_API=:9443
 DNS_API_TOKEN=${DNS_API_TOKEN}
 
+# Phase 5: in-process iOS .mobileconfig responder (served by 5gpn-dns from WWW_DIR
+# on DNS_IOS_LISTEN — no separate python unit). Firewalled to CLIENT_NET only.
+WWW_DIR=${WWW_DIR}
+DNS_IOS_LISTEN=:${IOS_PORT}
+
+# Phase 5: in-process Telegram control bot (goroutine of 5gpn-dns). Populated by
+# 'install.sh --setup-tgbot' (or set here manually). Empty token ⇒ bot disabled.
+# TGBOT_ADMINS is a comma-separated list of authorized numeric Telegram IDs.
+TGBOT_TOKEN=${tg_token}
+TGBOT_ADMINS=${tg_admins}
+
 DNS_CACHE_SIZE=4096
 DNS_TTL_MIN=300
 DNS_TTL_MAX=86400
@@ -620,7 +631,7 @@ EOF
 
 setup_ios_profile() {
     info "Generating iOS DoT profile..."
-    mkdir -p "$WWW_DIR" "$SRC_DIR"
+    mkdir -p "$WWW_DIR"
     local gw="${GATEWAY_IP:-$PUBLIC_IP}"
     if [[ -x "${SCRIPTS_DIR}/gen-ios-profile.sh" ]]; then
         bash "${SCRIPTS_DIR}/gen-ios-profile.sh" "$DOMAIN" "$gw" "$WWW_DIR" \
@@ -629,46 +640,17 @@ setup_ios_profile() {
         warn "scripts/gen-ios-profile.sh not present yet; skipping profile generation."
     fi
 
-    # Socket-activated (inetd-style) responder: only spawns on a real fetch.
-    local py; py="$(command -v python3 || echo /usr/bin/python3)"
-    if [[ ! -f "${SRC_DIR}/ios-http.py" ]]; then
-        warn "${SRC_DIR}/ios-http.py missing; iOS HTTP service not installed."
-        return 0
+    # The .mobileconfig is now served by the 5gpn-dns daemon (in-process iOS
+    # responder on :${IOS_PORT}, WWW_DIR/DNS_IOS_LISTEN from dns.env) — no separate
+    # python responder unit. Clean up any socket-activated unit a prior install left.
+    if systemctl list-unit-files 2>/dev/null | grep -q '^5gpn-iosprofile\.'; then
+        systemctl disable --now '5gpn-iosprofile.socket' 2>/dev/null || true
+        rm -f /etc/systemd/system/5gpn-iosprofile.socket \
+              /etc/systemd/system/'5gpn-iosprofile@.service'
+        systemctl daemon-reload 2>/dev/null || true
+        info "Removed obsolete socket-activated iOS responder (daemon serves :${IOS_PORT} now)."
     fi
-    cat > /etc/systemd/system/5gpn-iosprofile.socket <<EOF
-[Unit]
-Description=5gpn iOS profile HTTP socket
-
-[Socket]
-ListenStream=0.0.0.0:${IOS_PORT}
-Accept=yes
-
-[Install]
-WantedBy=sockets.target
-EOF
-    cat > /etc/systemd/system/5gpn-iosprofile@.service <<EOF
-[Unit]
-Description=5gpn iOS profile responder (per-connection)
-
-[Service]
-Type=simple
-ExecStart=${py} ${SRC_DIR}/ios-http.py
-Environment=WWW_DIR=${WWW_DIR}
-StandardInput=socket
-StandardOutput=socket
-StandardError=journal
-User=root
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-EOF
-    systemctl daemon-reload
-    ok "iOS profile responder configured (socket-activated on :${IOS_PORT})."
+    ok "iOS profile generated (served in-process by 5gpn-dns on :${IOS_PORT})."
 }
 
 print_qr() {
@@ -712,70 +694,64 @@ start_services() {
         systemctl restart "$svc" 2>/dev/null || systemctl start "$svc" 2>/dev/null \
             || warn "could not start $svc (check: journalctl -u $svc)."
     done
-    if systemctl list-unit-files 2>/dev/null | grep -q '^5gpn-iosprofile\.socket'; then
-        systemctl enable --now 5gpn-iosprofile.socket 2>/dev/null || warn "iOS socket failed to start."
-    fi
 }
 
 # ----------------------------------------------------------------------------
-# Optional control plane: tgbot
+# Optional control plane: Telegram bot (now an in-process goroutine of 5gpn-dns,
+# configured via TGBOT_TOKEN / TGBOT_ADMINS in /etc/5gpn/dns.env)
 # ----------------------------------------------------------------------------
+# Set (or replace) a KEY=VALUE line in a dotenv file, preserving all other keys.
+# Appends the key if absent. Used to write TGBOT_* into dns.env without clobbering
+# DNS_API_TOKEN / DNS_* etc. (mirrors how write_dns_env preserves the token).
+set_dns_env_kv() {
+    local f="$1" key="$2" val="$3" tmp
+    mkdir -p "$(dirname "$f")"; touch "$f"
+    tmp="$(mktemp "${f}.XXXXXX")"
+    # Drop any existing (commented or live) definition of this key, then append the new one.
+    grep -vE "^#?[[:space:]]*${key}=" "$f" > "$tmp" 2>/dev/null || true
+    printf '%s=%s\n' "$key" "$val" >> "$tmp"
+    cat "$tmp" > "$f"; rm -f "$tmp"
+    chmod 640 "$f"
+}
+
 setup_tgbot() {
     check_root
     install_gum
-    [[ -f "${BASE_DIR}/tgbot.py" ]] || { err "${BASE_DIR}/tgbot.py not found (run a full install or place the file)."; return 1; }
-    local py; py="$(command -v python3 || echo /usr/bin/python3)"
-    local token admins
-    token="${TGBOT_TOKEN:-$(cat "${CONF_DIR}/.tgbot_token" 2>/dev/null || true)}"
+    local envf="${CONF_DIR}/dns.env"
+    [[ -f "$envf" ]] || { err "${envf} not found (run a full install first)."; return 1; }
+
+    # Clean up the old python bot unit if a previous install left it behind
+    # (the bot is an in-process goroutine of 5gpn-dns now).
+    systemctl disable --now 5gpn-tgbot 2>/dev/null || true
+    rm -f /etc/systemd/system/5gpn-tgbot.service
+    systemctl daemon-reload 2>/dev/null || true
+
+    # Token/admins: env override, else an existing dns.env value, else prompt.
+    local token admins existing_token existing_admins
+    existing_token="$(grep -E '^TGBOT_TOKEN=' "$envf" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+    existing_admins="$(grep -E '^TGBOT_ADMINS=' "$envf" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+    token="${TGBOT_TOKEN:-$existing_token}"
     if [[ -z "$token" && -t 0 ]]; then token="$(ask_secret 'Telegram Bot Token (blank to skip):' || true)"; fi
     [[ -z "$token" ]] && { info "No Telegram token; skipping tgbot. Re-run later: $0 --setup-tgbot"; return 0; }
-    admins="${TGBOT_ADMINS:-$(cat "${CONF_DIR}/.tgbot_admins" 2>/dev/null || true)}"
+    admins="${TGBOT_ADMINS:-$existing_admins}"
     if [[ -z "$admins" && -t 0 ]]; then admins="$(ask_text 'Authorized Telegram numeric IDs (comma-separated, optional):' || true)"; fi
     admins="$(printf '%s' "$admins" | tr ', ' '\n\n' | grep -E '^[0-9]+$' | paste -sd ',' - 2>/dev/null || true)"
 
-    mkdir -p "$CONF_DIR"
-    printf '%s' "$token"  > "${CONF_DIR}/.tgbot_token";  chmod 600 "${CONF_DIR}/.tgbot_token"
-    printf '%s' "$admins" > "${CONF_DIR}/.tgbot_admins"; chmod 600 "${CONF_DIR}/.tgbot_admins"
+    # Persist into dns.env (the daemon reads TGBOT_TOKEN/TGBOT_ADMINS from its env).
+    set_dns_env_kv "$envf" TGBOT_TOKEN  "$token"
+    set_dns_env_kv "$envf" TGBOT_ADMINS "$admins"
 
-    cat > /etc/systemd/system/5gpn-tgbot.service <<EOF
-[Unit]
-Description=5gpn Telegram control bot
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-# Secrets are NOT placed here: a systemd unit is world-readable (mode 644, and
-# visible via 'systemctl show'). tgbot.py loads the token + admin IDs from the
-# chmod-600 ${CONF_DIR}/.tgbot_token + .tgbot_admins instead (see _load_secret()).
-Environment=CONF_DIR=${CONF_DIR}
-ExecStart=${py} ${BASE_DIR}/tgbot.py
-Restart=on-failure
-RestartSec=5
-User=root
-NoNewPrivileges=yes
-ProtectHome=yes
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable --now 5gpn-tgbot.service 2>/dev/null || systemctl restart 5gpn-tgbot.service || true
+    systemctl restart 5gpn-dns 2>/dev/null || warn "could not restart 5gpn-dns (check: journalctl -u 5gpn-dns)."
     if [[ -t 0 && "$_HAVE_GUM" == 1 ]]; then
         gum style --border rounded --padding "0 1" \
           "未知自己的 Telegram ID?" \
           "1) 给你的 bot 发 /id" \
-          "2) 把回显的数字 ID 填入 ${CONF_DIR}/.tgbot_admins" \
-          "3) systemctl restart 5gpn-tgbot"
+          "2) 把回显的数字 ID 填入 ${envf} 的 TGBOT_ADMINS=" \
+          "3) systemctl restart 5gpn-dns"
     fi
-    ok "Telegram bot enabled."
-    info "Token stored: ${CONF_DIR}/.tgbot_token (chmod 600)"
-    [[ -z "$admins" ]] && warn "No admin IDs set yet; message the bot, then add IDs to ${CONF_DIR}/.tgbot_admins and: systemctl restart 5gpn-tgbot"
+    ok "bot 已随 5gpn-dns 启用。"
+    info "Token stored in ${envf} (chmod 640)."
+    [[ -z "$admins" ]] && warn "No admin IDs set yet; message the bot, then set TGBOT_ADMINS= in ${envf} and: systemctl restart 5gpn-dns"
 }
 
 # ----------------------------------------------------------------------------
@@ -816,27 +792,22 @@ regen_ios() {
     GATEWAY_IP="${GATEWAY_IP:-$(cat "${CONF_DIR}/.gateway_ip" 2>/dev/null || true)}"
     [[ -n "$DOMAIN" && -n "$PUBLIC_IP" ]] || { err "Domain/public IP unknown; run a full install first."; exit 1; }
     setup_ios_profile
-    systemctl reload-or-restart 5gpn-iosprofile.socket 2>/dev/null || systemctl enable --now 5gpn-iosprofile.socket 2>/dev/null || true
+    # No service restart needed: 5gpn-dns serves the profile from WWW_DIR on each request.
     print_qr
     ok "iOS profile regenerated: http://${GATEWAY_IP:-$PUBLIC_IP}:${IOS_PORT}/ios-dot.mobileconfig"
 }
 
 show_status() {
     {
-        local domain pubip svc s opt pd
+        local domain pubip svc s pd
         domain="$(cat "${CONF_DIR}/.domain" 2>/dev/null || echo N/A)"
         pubip="$(cat "${CONF_DIR}/.public_ip" 2>/dev/null || echo N/A)"
         echo "📊 5gpn 状态"
         echo ""
+        # Telegram bot + iOS profile responder are in-process goroutines of 5gpn-dns now.
         for svc in "5gpn-dns" sing-box; do
             s="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
             echo "  $([[ "$s" == active ]] && echo '✅' || echo '❌') ${svc}  (${s})"
-        done
-        for opt in 5gpn-iosprofile.socket 5gpn-tgbot; do
-            if systemctl list-unit-files 2>/dev/null | grep -q "^${opt}"; then
-                s="$(systemctl is-active "$opt" 2>/dev/null || echo unknown)"
-                echo "  $([[ "$s" == active ]] && echo '✅' || echo '❌') ${opt}  (${s})"
-            fi
         done
         echo ""
         echo "  域名      $domain"
@@ -879,6 +850,14 @@ full_install() {
     # Drop the replaced xray proxy if a previous install left it behind.
     systemctl disable --now xray 2>/dev/null || true
     rm -f /etc/systemd/system/xray.service; rm -rf /usr/local/etc/xray
+    # Phase 5: the Telegram bot + iOS profile responder are in-process goroutines of
+    # 5gpn-dns now — drop the standalone python units if a previous install left them.
+    systemctl disable --now 5gpn-tgbot 2>/dev/null || true
+    rm -f /etc/systemd/system/5gpn-tgbot.service
+    systemctl disable --now '5gpn-iosprofile.socket' 2>/dev/null || true
+    rm -f /etc/systemd/system/5gpn-iosprofile.socket \
+          /etc/systemd/system/'5gpn-iosprofile@.service'
+    rm -f /opt/5gpn/tgbot.py /opt/5gpn/src/ios-http.py
 
     # P0: sing-box SNI re-resolver. Prompt only (no probe/warning); env wins; persist.
     SINGBOX_RESOLVER="${SINGBOX_RESOLVER:-$(cat "$CONF_DIR/.singbox_resolver" 2>/dev/null || true)}"

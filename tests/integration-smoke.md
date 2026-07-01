@@ -163,8 +163,8 @@
       This is the regression the `ReadWritePaths=/etc/5gpn` sandbox fix (§I above) addresses — a bare-process run (no systemd unit) wouldn't catch it.
       Run this check specifically **under the systemd-managed service** (`systemctl start 5gpn-dns`, not a manual foreground run): create a subscription via the API, then `systemctl restart 5gpn-dns` (or just re-read `/etc/5gpn/subscriptions.json` on disk) and confirm the new subscription is actually persisted to disk — no permission-denied in the journal from the API's atomic temp-create+rename.
 
-- [ ] **tgbot reaches the loopback API with the dns.env token**
-      With `tgbot.py` running (`API_BASE=https://127.0.0.1:9443` default), issue a bot command that hits the API (e.g. status or add/del forced-proxy domain) and confirm it succeeds — i.e. tgbot correctly reads `DNS_API_TOKEN` from `/etc/5gpn/dns.env` and reaches the API over loopback.
+- [ ] **In-daemon Telegram bot responds to an authorized admin**
+      The bot is an in-process goroutine of `5gpn-dns` now (configured via `TGBOT_TOKEN` / `TGBOT_ADMINS` in `/etc/5gpn/dns.env`; empty token ⇒ bot disabled). Run `install.sh --setup-tgbot` (or set the two keys manually) and `systemctl restart 5gpn-dns`, then from an admin ID issue a bot command that touches state (e.g. status or add/del forced-proxy domain) and confirm it succeeds — i.e. the daemon picked up the token/admins from dns.env and the bot drives the Controller facade directly (no loopback HTTP hop).
 
 Results:
 - Pass/fail per check:
