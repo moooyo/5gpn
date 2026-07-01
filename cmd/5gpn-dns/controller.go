@@ -217,6 +217,22 @@ func (c *Controller) manualRulePath(cat string) string {
 	return filepath.Join(c.rulesDir, cat+".txt")
 }
 
+// ListRules returns the manual (non-subscription) rule entries currently
+// persisted for cat, in file order. An invalid cat returns an error. A
+// missing rule file is not an error: it returns an empty (non-nil) slice, so
+// callers (notably the HTTP API) can serialize it as JSON "[]" rather than
+// "null".
+func (c *Controller) ListRules(cat string) ([]string, error) {
+	if !validCategories[cat] {
+		return nil, fmt.Errorf("controller: invalid category %q", cat)
+	}
+	lines, err := readRuleLines(c.manualRulePath(cat))
+	if err != nil {
+		return nil, err
+	}
+	return append([]string{}, lines...), nil
+}
+
 // AddRule validates entry against cat's expected shape (a CIDR for chnroute,
 // a domain otherwise), appends it (de-duplicated) to the category's manual
 // rule file, and reloads. The file and its parent directory are created if

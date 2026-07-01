@@ -9,16 +9,22 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
+
+// version identifies the running build for GET /api/status. Left at "dev" for
+// now; wiring an ldflags override is a later task.
+var version = "dev"
 
 // ControlServer is the Phase-3 HTTPS control plane: a REST API over
 // Controller (bearer-token authenticated) plus the embedded SPA. It is a
 // separate listener from the DNS-facing DoT/DoH servers (Servers in
 // server.go) — different port, different purpose (admin, not resolution).
 type ControlServer struct {
-	srv   *http.Server
-	ctrl  *Controller
-	token string
+	srv       *http.Server
+	ctrl      *Controller
+	token     string
+	startTime time.Time
 }
 
 // NewControlServer builds a ControlServer from cfg and ctrl.
@@ -39,7 +45,7 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 		return nil, fmt.Errorf("control server: DNS_CERT and DNS_KEY are required when DNS_API_TOKEN is set")
 	}
 
-	s := &ControlServer{ctrl: ctrl, token: cfg.APIToken}
+	s := &ControlServer{ctrl: ctrl, token: cfg.APIToken, startTime: time.Now()}
 
 	webUI, err := newWebUIHandler()
 	if err != nil {
@@ -62,16 +68,218 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 	return s, nil
 }
 
-// apiMux builds the /api/* routes. Task 3 fills in the real REST endpoints
-// (subscriptions/rules/update/reload/lookup/stats); for now a single
-// placeholder route gives the auth middleware something to protect and
-// exercises the end-to-end request path.
+// maxAPIBodyBytes caps request bodies read by the control-plane API, so a
+// misbehaving/malicious caller can't exhaust memory with an oversized body.
+const maxAPIBodyBytes = 1 << 20 // 1 MiB
+
+// apiMux builds the /api/* routes: the full Phase-3 REST surface over
+// Controller (status/stats/lookup/subscriptions/rules/update/reload).
 func (s *ControlServer) apiMux() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-	})
+
+	mux.HandleFunc("GET /api/status", s.handleStatus)
+	mux.HandleFunc("GET /api/stats", s.handleStats)
+	mux.HandleFunc("GET /api/lookup", s.handleLookup)
+
+	mux.HandleFunc("GET /api/subscriptions", s.handleSubscriptionsList)
+	mux.HandleFunc("POST /api/subscriptions", s.handleSubscriptionsCreate)
+	mux.HandleFunc("PATCH /api/subscriptions/{id}", s.handleSubscriptionsReplace)
+	mux.HandleFunc("DELETE /api/subscriptions/{id}", s.handleSubscriptionsDelete)
+
+	mux.HandleFunc("POST /api/update", s.handleUpdate)
+
+	mux.HandleFunc("GET /api/rules/{cat}", s.handleRulesList)
+	mux.HandleFunc("POST /api/rules/{cat}", s.handleRulesAdd)
+	mux.HandleFunc("DELETE /api/rules/{cat}", s.handleRulesRemove)
+
+	mux.HandleFunc("POST /api/reload", s.handleReload)
+
 	return mux
+}
+
+// handleStatus reports build/runtime identity plus a stats snapshot.
+func (s *ControlServer) handleStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":        version,
+		"uptime_seconds": int(time.Since(s.startTime).Seconds()),
+		"stats":          s.ctrl.Stats(),
+	})
+}
+
+// handleStats returns the raw Stats snapshot.
+func (s *ControlServer) handleStats(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.ctrl.Stats())
+}
+
+// handleLookup runs a manual name classification/lookup. domain is required.
+func (s *ControlServer) handleLookup(w http.ResponseWriter, r *http.Request) {
+	domain := strings.TrimSpace(r.URL.Query().Get("domain"))
+	if domain == "" {
+		writeErr(w, http.StatusBadRequest, "missing required query parameter: domain")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.ctrl.Lookup(r.Context(), domain))
+}
+
+// handleSubscriptionsList returns every configured subscription.
+func (s *ControlServer) handleSubscriptionsList(w http.ResponseWriter, r *http.Request) {
+	subs := s.ctrl.Subscriptions()
+	if subs == nil {
+		subs = []Subscription{}
+	}
+	writeJSON(w, http.StatusOK, subs)
+}
+
+// handleSubscriptionsCreate decodes a Subscription from the body, adds it
+// (validating + performing the initial fetch), and returns the resulting
+// UpdateResult.
+func (s *ControlServer) handleSubscriptionsCreate(w http.ResponseWriter, r *http.Request) {
+	var sub Subscription
+	if !decodeJSONBody(w, r, &sub) {
+		return
+	}
+
+	res, err := s.ctrl.AddSubscription(sub)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// handleSubscriptionsReplace decodes a Subscription from the body, forces its
+// ID to the path value (so the URL is authoritative over any ID in the
+// body), and adds it in place of any prior subscription with that ID.
+func (s *ControlServer) handleSubscriptionsReplace(w http.ResponseWriter, r *http.Request) {
+	var sub Subscription
+	if !decodeJSONBody(w, r, &sub) {
+		return
+	}
+	sub.ID = r.PathValue("id")
+
+	// AddSubscription rejects a duplicate ID, so a like-for-like replace has
+	// to remove the existing entry (if any) first. A missing subscription is
+	// not an error here — PATCH doubles as upsert.
+	_ = s.ctrl.RemoveSubscription(sub.ID)
+
+	res, err := s.ctrl.AddSubscription(sub)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// handleSubscriptionsDelete removes a subscription by path ID. A not-found
+// error is mapped to 404; any other error is a 500.
+func (s *ControlServer) handleSubscriptionsDelete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.ctrl.RemoveSubscription(id); err != nil {
+		if isNotFoundErr(err) {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handleUpdate refreshes one subscription (?id=) or all of them (no id).
+func (s *ControlServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	results := s.ctrl.Update(r.Context(), id)
+	if results == nil {
+		results = []UpdateResult{}
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+// handleRulesList lists the manual rule entries for a category.
+func (s *ControlServer) handleRulesList(w http.ResponseWriter, r *http.Request) {
+	cat := r.PathValue("cat")
+	entries, err := s.ctrl.ListRules(cat)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if entries == nil {
+		entries = []string{}
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// ruleEntryBody is the JSON body shape for POST/DELETE /api/rules/{cat}.
+type ruleEntryBody struct {
+	Entry string `json:"entry"`
+}
+
+// handleRulesAdd adds a manual rule entry to a category.
+func (s *ControlServer) handleRulesAdd(w http.ResponseWriter, r *http.Request) {
+	cat := r.PathValue("cat")
+	var body ruleEntryBody
+	if !decodeJSONBody(w, r, &body) {
+		return
+	}
+	if err := s.ctrl.AddRule(cat, body.Entry); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handleRulesRemove removes a manual rule entry from a category. The entry
+// may be given either as a JSON body ({"entry":"..."}) or as a ?entry= query
+// parameter (so a DELETE without a body still works).
+func (s *ControlServer) handleRulesRemove(w http.ResponseWriter, r *http.Request) {
+	cat := r.PathValue("cat")
+
+	entry := r.URL.Query().Get("entry")
+	if entry == "" {
+		var body ruleEntryBody
+		if r.ContentLength != 0 {
+			if !decodeJSONBody(w, r, &body) {
+				return
+			}
+			entry = body.Entry
+		}
+	}
+
+	if err := s.ctrl.RemoveRule(cat, entry); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handleReload rebuilds the rule sets from disk and swaps them into the live
+// engine.
+func (s *ControlServer) handleReload(w http.ResponseWriter, r *http.Request) {
+	if err := s.ctrl.Reload(); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// isNotFoundErr reports whether err looks like a "not found" outcome from the
+// Controller/SubManager layer. SubManager.Remove doesn't define a sentinel
+// error, so this matches on the message text it's known to produce.
+func isNotFoundErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "not found")
+}
+
+// decodeJSONBody reads and JSON-decodes r.Body into dst, capping the body
+// size and writing a 400 JSON error on any read/decode failure. Returns
+// false (and has already written the error response) if decoding failed.
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAPIBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(dst); err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+		return false
+	}
+	return true
 }
 
 // authMiddleware requires a valid "Authorization: Bearer <token>" header on
@@ -112,6 +320,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeErr writes a {"error": msg} JSON response body with the given status
+// code.
+func writeErr(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
 }
 
 // Start begins serving HTTPS on cfg.ListenAPI in a background goroutine and

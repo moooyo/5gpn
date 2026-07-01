@@ -303,3 +303,72 @@ func TestControllerLookupForceDirect(t *testing.T) {
 		t.Errorf("Lookup(direct.test) verdict/reason = %s/%s, want direct/force-direct", got.Verdict, got.Reason)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ListRules
+// ---------------------------------------------------------------------------
+
+func TestControllerListRules_AddListRemoveRoundtrip(t *testing.T) {
+	rulesDir := t.TempDir()
+	reload, _ := countingReload()
+	stats, err := NewSubManager(filepath.Join(t.TempDir(), "subscriptions.json"), rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	c := NewController(stats, reload, rulesDir, nil, nil, nil)
+
+	if err := c.AddRule("blacklist", "x.test"); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	got, err := c.ListRules("blacklist")
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	found := false
+	for _, e := range got {
+		if e == "x.test" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ListRules(blacklist) = %v, want to contain x.test", got)
+	}
+
+	if err := c.RemoveRule("blacklist", "x.test"); err != nil {
+		t.Fatalf("RemoveRule: %v", err)
+	}
+
+	got, err = c.ListRules("blacklist")
+	if err != nil {
+		t.Fatalf("ListRules after remove: %v", err)
+	}
+	for _, e := range got {
+		if e == "x.test" {
+			t.Fatalf("ListRules(blacklist) after remove = %v, still contains x.test", got)
+		}
+	}
+}
+
+func TestControllerListRules_InvalidCategoryErrors(t *testing.T) {
+	c := NewController(nil, func() error { return nil }, t.TempDir(), nil, nil, nil)
+
+	if _, err := c.ListRules("bogus"); err == nil {
+		t.Fatal("expected error for invalid category, got nil")
+	}
+}
+
+func TestControllerListRules_AbsentFileReturnsEmptyNotError(t *testing.T) {
+	c := NewController(nil, func() error { return nil }, t.TempDir(), nil, nil, nil)
+
+	got, err := c.ListRules("adblock")
+	if err != nil {
+		t.Fatalf("ListRules on absent file: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ListRules on absent file = %v, want empty", got)
+	}
+	if got == nil {
+		t.Errorf("ListRules on absent file returned nil, want non-nil empty slice")
+	}
+}
