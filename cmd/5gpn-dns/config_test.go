@@ -12,6 +12,7 @@ var allDNSEnvKeys = []string{
 	"DNS_CERT", "DNS_KEY", "DNS_GATEWAY_IP",
 	"DNS_CHINA", "DNS_TRUST", "DNS_RULES_DIR", "DNS_CHNROUTE",
 	"DNS_CACHE_SIZE", "DNS_TTL_MIN", "DNS_TTL_MAX", "DNS_QUERY_TIMEOUT",
+	"DNS_SUBSCRIPTIONS",
 }
 
 // clearAllDNSEnv unsets all DNS_ vars and restores them on t.Cleanup.
@@ -102,6 +103,11 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.CacheSize != 4096 {
 		t.Errorf("CacheSize default = %d, want 4096", cfg.CacheSize)
 	}
+
+	// Default subscriptions file.
+	if cfg.SubscriptionsFile != "/etc/5gpn/subscriptions.json" {
+		t.Errorf("SubscriptionsFile default = %q, want %q", cfg.SubscriptionsFile, "/etc/5gpn/subscriptions.json")
+	}
 }
 
 func TestLoadConfig_EnvOverride(t *testing.T) {
@@ -119,6 +125,7 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	t.Setenv("DNS_TTL_MAX", "3600")
 	t.Setenv("DNS_QUERY_TIMEOUT", "3s")
 	t.Setenv("DNS_CACHE_SIZE", "512")
+	t.Setenv("DNS_SUBSCRIPTIONS", "/opt/5gpn/subs.json")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -148,6 +155,9 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	}
 	if cfg.CacheSize != 512 {
 		t.Errorf("CacheSize = %d, want 512", cfg.CacheSize)
+	}
+	if cfg.SubscriptionsFile != "/opt/5gpn/subs.json" {
+		t.Errorf("SubscriptionsFile = %q, want %q", cfg.SubscriptionsFile, "/opt/5gpn/subs.json")
 	}
 }
 

@@ -33,13 +33,16 @@ type Config struct {
 	KeyFile  string
 
 	// Networking.
-	GatewayIP  net.IP   // foreign-address rewrite target
-	ChinaAddrs []string // UDP upstream addresses (no port → :53 appended later)
+	GatewayIP    net.IP       // foreign-address rewrite target
+	ChinaAddrs   []string     // UDP upstream addresses (no port → :53 appended later)
 	TrustEntries []TrustEntry // DoT upstream entries
 
 	// Rule file locations.
-	RulesDir   string // directory containing adblock/direct/blacklist sub-files
+	RulesDir     string // directory containing adblock/direct/blacklist sub-files
 	ChnrouteFile string // path to china IP CIDR list
+
+	// Phase 2 subscriptions.
+	SubscriptionsFile string // path to subscriptions.json
 
 	// Cache.
 	CacheSize int // max entries (0 → use default 4096)
@@ -67,20 +70,22 @@ type Config struct {
 //	DNS_TTL_MIN         300  (seconds)
 //	DNS_TTL_MAX         86400 (seconds)
 //	DNS_QUERY_TIMEOUT   5s
+//	DNS_SUBSCRIPTIONS   /etc/5gpn/subscriptions.json
 //
 // Empty listener strings disable that server.
 // If any TLS listener (DoT or DoH) has a non-empty address, DNS_CERT and
 // DNS_KEY must also be non-empty, or an error is returned.
 func LoadConfig() (Config, error) {
 	cfg := Config{
-		ListenDoT:    envListen("DNS_LISTEN_DOT", ":853"),
-		ListenDoH:    envListen("DNS_LISTEN_DOH", ":8443"),
-		ListenPlain:  envListen("DNS_LISTEN_PLAIN", ":53"),
-		ListenDebug:  envListen("DNS_LISTEN_DEBUG", "127.0.0.1:5353"),
-		CertFile:     os.Getenv("DNS_CERT"),
-		KeyFile:      os.Getenv("DNS_KEY"),
-		RulesDir:     envOr("DNS_RULES_DIR", "/etc/5gpn/rules"),
-		ChnrouteFile: os.Getenv("DNS_CHNROUTE"),
+		ListenDoT:         envListen("DNS_LISTEN_DOT", ":853"),
+		ListenDoH:         envListen("DNS_LISTEN_DOH", ":8443"),
+		ListenPlain:       envListen("DNS_LISTEN_PLAIN", ":53"),
+		ListenDebug:       envListen("DNS_LISTEN_DEBUG", "127.0.0.1:5353"),
+		CertFile:          os.Getenv("DNS_CERT"),
+		KeyFile:           os.Getenv("DNS_KEY"),
+		RulesDir:          envOr("DNS_RULES_DIR", "/etc/5gpn/rules"),
+		ChnrouteFile:      os.Getenv("DNS_CHNROUTE"),
+		SubscriptionsFile: envOr("DNS_SUBSCRIPTIONS", "/etc/5gpn/subscriptions.json"),
 	}
 
 	// Gateway IP.

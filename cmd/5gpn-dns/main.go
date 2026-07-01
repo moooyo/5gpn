@@ -52,6 +52,21 @@ func main() {
 		TTLMin:    cfg.TTLMin,
 		TTLMax:    cfg.TTLMax,
 		Timeout:   cfg.QueryTimeout,
+		stats:     &statsCounters{},
+	}
+
+	// reload rebuilds the rule sets from disk and atomically swaps them into
+	// the live Handler. Shared by the SIGHUP handler, the SubManager (fires
+	// after a subscription cache file changes), and the Controller (fires
+	// after a manual rule-list edit).
+	reload := func() error {
+		newSets, err := loadRuleSets(cfg)
+		if err != nil {
+			return err
+		}
+		// Atomic swap: in-flight queries holding the old Handler fields finish safely.
+		h.swapRuleSets(newSets.adblock, newSets.direct, newSets.blacklist, newSets.chnroute)
+		return nil
 	}
 
 	// ── SIGHUP: hot-reload rule sets + chnroute ───────────────────────────────
@@ -60,16 +75,35 @@ func main() {
 	go func() {
 		for range sighupCh {
 			log.Println("SIGHUP: reloading rule sets and chnroute")
-			newSets, err := loadRuleSets(cfg)
-			if err != nil {
+			if err := reload(); err != nil {
 				log.Printf("SIGHUP reload failed: %v", err)
 				continue
 			}
-			// Atomic swap: in-flight queries holding the old Handler fields finish safely.
-			h.swapRuleSets(newSets.adblock, newSets.direct, newSets.blacklist, newSets.chnroute)
 			log.Println("SIGHUP: reload complete")
 		}
 	}()
+
+	// ── Phase 2: subscription manager + controller ────────────────────────────
+	// A missing subscriptions.json is not an error (NewSubManager/LoadSubscriptions
+	// returns an empty manager); a malformed one is logged and skipped so a bad
+	// subscriptions.json can never crash the resolver.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	subMgr, err := NewSubManager(cfg.SubscriptionsFile, cfg.RulesDir, reload)
+	if err != nil {
+		log.Printf("subscriptions: %v — continuing without subscription manager", err)
+		subMgr = nil
+	}
+	// ctrl is the facade the Phase 3 HTTP control-plane API will consume; for
+	// Phase 2 it is constructed (so tgbot/API wiring can attach later) but not
+	// yet served.
+	ctrl := NewController(subMgr, reload, cfg.RulesDir, h.stats, h.Cache.Len)
+	_ = ctrl // Phase 3 API server consumes ctrl
+
+	if subMgr != nil {
+		go subMgr.Run(ctx)
+	}
 
 	// ── Start servers ─────────────────────────────────────────────────────────
 	servers, err := NewServers(cfg, h)
@@ -93,9 +127,10 @@ func main() {
 	<-stopCh
 
 	log.Println("shutting down...")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	servers.Shutdown(ctx)
+	cancel() // stop the subscription manager's ticker loops
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	servers.Shutdown(shutdownCtx)
 	log.Println("shutdown complete")
 }
 
