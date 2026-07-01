@@ -81,8 +81,13 @@ grep -Eq '\{adblock,direct,blacklist,chnroute\}' "$INSTALL" || fail "install.sh:
 grep -Fq 'subscriptions.json'    "$INSTALL" || fail "install.sh: does not write subscriptions.json"
 grep -Fq 'DNS_SUBSCRIPTIONS'     "$INSTALL" || fail "install.sh: dns.env does not reference DNS_SUBSCRIPTIONS"
 
-# --- 5gpn-dns.service: sandboxed rules-cache writes allowed under ProtectSystem=strict ---
-grep -Fq 'ReadWritePaths=/etc/5gpn/rules' "$DNS_SVC" || fail "5gpn-dns.service: no ReadWritePaths=/etc/5gpn/rules"
+# --- 5gpn-dns.service: sandboxed conf-dir writes allowed under ProtectSystem=strict ---
+# The subscription manager + control-plane API write rule caches under
+# /etc/5gpn/rules AND rewrite /etc/5gpn/subscriptions.json (atomic temp+rename
+# needs the dir writable), so the whole conf dir is RW with the secrets
+# (dns.env, cert) re-protected read-only.
+grep -Fq 'ReadWritePaths=/etc/5gpn' "$DNS_SVC" || fail "5gpn-dns.service: no ReadWritePaths=/etc/5gpn (subscriptions.json write path)"
+grep -Fq 'ReadOnlyPaths=/etc/5gpn/dns.env' "$DNS_SVC" || fail "5gpn-dns.service: dns.env (token) not re-protected read-only"
 
 # --- update-lists.sh: repurposed to a manual refresh trigger (reload only; subscription
 # manager in 5gpn-dns now owns the chnroute fetch) ---
