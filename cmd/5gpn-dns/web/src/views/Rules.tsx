@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api, type RuleCategory } from '../api'
 import { LANES, laneForCategory } from '../verdicts'
-import { Spinner, EmptyState } from '../components/states'
+import { Spinner, EmptyState, ErrorNotice } from '../components/states'
 import { useToast } from '../components/Toast'
 
 const CATEGORIES: { cat: RuleCategory; blurb: string; placeholder: string }[] = [
@@ -77,6 +77,7 @@ function RulePanel({
   const color = lane ? LANES[lane].color : 'var(--accent)'
 
   const [entries, setEntries] = useState<string[] | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [removing, setRemoving] = useState<string | null>(null)
@@ -84,12 +85,16 @@ function RulePanel({
   const load = useCallback(() => {
     api
       .rules(cat)
-      .then(setEntries)
-      .catch((e) => {
-        setEntries([])
-        toast.push('err', `Load ${cat}: ${e.message}`)
+      .then((e) => {
+        setEntries(e)
+        setLoadError(null)
       })
-  }, [cat, toast])
+      .catch((e) => {
+        // Persist a per-panel error so a failed load is visibly distinct from a
+        // genuinely empty category (rather than a toast that fades to nothing).
+        setLoadError(e instanceof Error ? e.message : 'Load failed.')
+      })
+  }, [cat])
 
   useEffect(() => {
     load()
@@ -142,7 +147,7 @@ function RulePanel({
             {cat}
           </h2>
           <span className="ml-auto font-mono text-xs" style={{ color: 'var(--muted)' }}>
-            {entries ? `${entries.length}` : '·'}
+            {loadError ? '!' : entries ? `${entries.length}` : '·'}
           </span>
         </div>
         <p className="mt-1 text-xs" style={{ color: 'var(--muted)' }}>
@@ -151,7 +156,15 @@ function RulePanel({
       </header>
 
       <div className="flex-1 px-5 py-4">
-        {entries === null ? (
+        {loadError && (!entries || entries.length === 0) ? (
+          <ErrorNotice message={`Couldn't load ${cat} — ${loadError}`}>
+            <div className="mt-3">
+              <button className="btn btn-sm" onClick={load}>
+                Retry
+              </button>
+            </div>
+          </ErrorNotice>
+        ) : entries === null ? (
           <div className="flex items-center gap-2 py-4" style={{ color: 'var(--muted)' }}>
             <Spinner />
             <span className="font-mono text-xs">Loading…</span>

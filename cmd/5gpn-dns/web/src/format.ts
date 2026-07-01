@@ -29,6 +29,26 @@ export function successRatio(ok: number, err: number): string {
   return `${((ok / total) * 100).toFixed(1)}%`
 }
 
+/**
+ * A compact relative time from an RFC3339/ISO timestamp to now, e.g. "just
+ * now", "2m ago", "3h ago", "5d ago". Returns "—" for a missing or unparseable
+ * value. Future timestamps read as "just now".
+ */
+export function relativeTime(iso: string | undefined | null): string {
+  if (!iso) return '—'
+  const t = Date.parse(iso)
+  if (!Number.isFinite(t)) return '—'
+  const diffMs = Date.now() - t
+  const sec = Math.floor(diffMs / 1000)
+  if (sec < 45) return 'just now'
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min}m ago`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `${hr}h ago`
+  const day = Math.floor(hr / 24)
+  return `${day}d ago`
+}
+
 function prefersReducedMotion(): boolean {
   return (
     typeof window !== 'undefined' &&

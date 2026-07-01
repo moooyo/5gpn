@@ -1,17 +1,108 @@
 /*
- * The verdict-lane signature system — the one bold device in this UI. A
- * verdict/reason from the resolver maps to a consistent lane color, glyph, and
- * plain-English line, reused on the lane bar, the Lookup result tag, and the
- * Rules category headers.
+ * The verdict-lane signature system — the one bold device in this UI.
+ *
+ * Two related concepts live here:
+ *
+ * 1. REASON LANES (the stacked-bar signature). The resolver counts every query
+ *    by *why* it reached its verdict, and those five reason counters partition
+ *    `total` exactly. Each reason gets its own lane color, glyph, and line. This
+ *    is what the Dashboard hero bar, the TopBar mini bar, and the Stats view
+ *    render.
+ *
+ * 2. COARSE VERDICT LANES (tags). The Lookup result tag and Rules category
+ *    header show a coarse verdict color (direct / proxy / block / adblock). A
+ *    reason folds into one of those families for the tag.
  */
+
+import type { Stats } from './api'
+
+// ---- Reason lanes — the five-way partition of `total` ----------------------
+
+export type ReasonLane =
+  | 'chnroute-cn'
+  | 'force-direct'
+  | 'chnroute-foreign'
+  | 'blacklist'
+  | 'adblock'
+
+export interface ReasonLaneMeta {
+  key: ReasonLane
+  label: string
+  color: string // a CSS var reference
+  glyph: string // a small unicode mark
+  statKey: keyof Stats // the reason counter on Stats
+}
+
+/**
+ * The five reason lanes, in stack order, each a distinct color from the token
+ * palette:
+ *   chnroute-cn      → mint  (--v-direct)  resolves real, goes direct
+ *   force-direct     → teal  (--accent)    also direct, but operator-forced
+ *   chnroute-foreign → amber (--v-proxy)   routed via the gateway
+ *   blacklist        → rose  (--v-block)   sinkholed
+ *   adblock          → violet(--v-adblock) NXDOMAIN
+ */
+export const REASON_LANES: Record<ReasonLane, ReasonLaneMeta> = {
+  'chnroute-cn': {
+    key: 'chnroute-cn',
+    label: 'China',
+    color: 'var(--v-direct)',
+    glyph: '→',
+    statKey: 'chnroute_cn',
+  },
+  'force-direct': {
+    key: 'force-direct',
+    label: 'Forced direct',
+    color: 'var(--accent)',
+    glyph: '⇱',
+    statKey: 'force_direct',
+  },
+  'chnroute-foreign': {
+    key: 'chnroute-foreign',
+    label: 'Foreign',
+    color: 'var(--v-proxy)',
+    glyph: '⇄',
+    statKey: 'chnroute_foreign',
+  },
+  blacklist: {
+    key: 'blacklist',
+    label: 'Blacklist',
+    color: 'var(--v-block)',
+    glyph: '⊘',
+    statKey: 'blacklist',
+  },
+  adblock: {
+    key: 'adblock',
+    label: 'Ad-block',
+    color: 'var(--v-adblock)',
+    glyph: '∅',
+    statKey: 'adblock',
+  },
+}
+
+/** Reason lanes in stack/legend order — the five that partition `total`. */
+export const REASON_ORDER: ReasonLane[] = [
+  'chnroute-cn',
+  'force-direct',
+  'chnroute-foreign',
+  'blacklist',
+  'adblock',
+]
+
+/** The count for a reason lane from the reason-level Stats. */
+export function laneValue(stats: Stats, lane: ReasonLane): number {
+  return stats[REASON_LANES[lane].statKey]
+}
+
+// ---- Coarse verdict lanes — the tag colors ---------------------------------
 
 export type Lane = 'direct' | 'proxy' | 'block' | 'adblock'
 
 export interface LaneMeta {
   key: Lane
   label: string
-  color: string // the CSS var reference
-  glyph: string // a small unicode mark
+  color: string
+  glyph: string
 }
 
 export const LANES: Record<Lane, LaneMeta> = {
@@ -21,18 +112,13 @@ export const LANES: Record<Lane, LaneMeta> = {
   adblock: { key: 'adblock', label: 'Ad-block', color: 'var(--v-adblock)', glyph: '∅' },
 }
 
-// The three lanes that partition `total` in the stacked lane bar. adblock
-// (NXDOMAIN) isn't a distinct engine counter, so it isn't part of the total
-// partition — it still gets a lane color for tags/headers.
-export const BAR_LANES: Lane[] = ['direct', 'proxy', 'block']
-
 /**
- * Map a resolver reason string to its lane. The reason vocabulary comes from
- * Controller.Lookup:
- *   force-direct, chnroute-cn  -> direct (mint)
- *   chnroute-foreign           -> proxy  (amber)
- *   blacklist                  -> block  (rose)
- *   adblock                    -> adblock(violet)
+ * Map a resolver reason string to its coarse tag lane. The reason vocabulary
+ * comes from Controller.Lookup:
+ *   force-direct, chnroute-cn -> direct (mint)
+ *   chnroute-foreign          -> proxy  (amber)
+ *   blacklist                 -> block  (rose)
+ *   adblock                   -> adblock(violet)
  */
 export function laneForReason(reason: string): Lane | null {
   switch (reason) {

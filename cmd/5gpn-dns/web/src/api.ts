@@ -17,9 +17,13 @@ export const TOKEN_KEY = '5gpn_token'
 
 export interface Stats {
   total: number
-  direct: number
-  proxy: number
-  block: number
+  // Reason-level counters — a true breakdown of `total` by why the resolver
+  // reached its verdict.
+  adblock: number
+  force_direct: number
+  blacklist: number
+  chnroute_cn: number
+  chnroute_foreign: number
   cache_entries: number
   china_ok: number
   china_err: number
@@ -53,6 +57,19 @@ export interface Subscription {
   enabled: boolean
   interval: string // e.g. "6h", "30m"
 }
+
+/** Per-subscription fetch health, attached to the list read. Omitted for a
+ *  subscription that has never been fetched. */
+export interface SubHealth {
+  at: string // RFC3339 timestamp of the last fetch attempt
+  ok: boolean
+  entries: number
+  err: string
+}
+
+/** A subscription enriched with its last-fetch health, as returned by the
+ *  list endpoint. */
+export type SubscriptionView = Subscription & { health?: SubHealth }
 
 export interface UpdateResult {
   id: string
@@ -159,6 +176,11 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   }
 
   if (!resp.ok) {
+    // 429: the per-source rate limiter kicked in. Surface a clear, actionable
+    // message rather than the terse server body.
+    if (resp.status === 429) {
+      throw new ApiError(429, 'Rate limited — slow down and try again in a moment.')
+    }
     const msg =
       (data && typeof data === 'object' && 'error' in data && typeof (data as { error: unknown }).error === 'string'
         ? (data as { error: string }).error
@@ -184,8 +206,8 @@ export const api = {
     return request<LookupResult>('/api/lookup', { query: { domain } })
   },
 
-  async subscriptions(): Promise<Subscription[]> {
-    const r = await request<Subscription[] | null>('/api/subscriptions')
+  async subscriptions(): Promise<SubscriptionView[]> {
+    const r = await request<SubscriptionView[] | null>('/api/subscriptions')
     return r ?? []
   },
 

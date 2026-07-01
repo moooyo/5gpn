@@ -73,7 +73,7 @@ export function TopBar({
 
       <div className="ml-auto flex items-center gap-3">
         {stats && (
-          <div className="hidden sm:block" title="Live verdict split (direct / proxy / block)">
+          <div className="hidden sm:block" title="Live reason split (China / forced direct / foreign / blacklist / ad-block)">
             <VerdictLaneBar stats={stats} size="mini" />
           </div>
         )}
