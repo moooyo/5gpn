@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newTestControlServer builds a ControlServer with a fixed token for handler
@@ -349,6 +350,133 @@ func TestAPISubscriptions_PatchReplaces(t *testing.T) {
 	rec := doAPI(cs, http.MethodPatch, "/api/subscriptions/sub1", patchBody, token, true)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PATCH status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAPISubscriptions_PatchInvalidBodyPreservesOriginal is the P4 B1
+// regression test: PATCH with a well-formed but invalid body (bad category)
+// must not destroy the existing subscription. Before the fix,
+// handleSubscriptionsReplace removed the old subscription unconditionally
+// before validating the new one, so a 400 here left the subscription gone.
+func TestAPISubscriptions_PatchInvalidBodyPreservesOriginal(t *testing.T) {
+	cs, token := newAPITestServer(t)
+
+	addBody, _ := json.Marshal(map[string]any{
+		"id": "sub1", "category": "blacklist", "name": "n1",
+		"url": "https://example.invalid/list.txt", "format": "plain",
+		"enabled": true, "interval": "24h",
+	})
+	if rec := doAPI(cs, http.MethodPost, "/api/subscriptions", addBody, token, true); rec.Code != http.StatusOK {
+		t.Fatalf("seed POST status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	badBody, _ := json.Marshal(map[string]any{
+		"id": "sub1", "category": "bogus", "name": "n1",
+		"url": "https://example.invalid/list.txt", "format": "plain",
+		"enabled": true, "interval": "24h",
+	})
+	rec := doAPI(cs, http.MethodPatch, "/api/subscriptions/sub1", badBody, token, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PATCH status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+
+	listRec := doAPI(cs, http.MethodGet, "/api/subscriptions", nil, token, true)
+	list := decodeJSON[[]Subscription](t, listRec)
+	if len(list) != 1 || list[0].ID != "sub1" {
+		t.Fatalf("subscriptions after failed PATCH = %+v, want original sub1 preserved", list)
+	}
+	if list[0].Category != "blacklist" || list[0].URL != "https://example.invalid/list.txt" || list[0].Interval != 24*time.Hour {
+		t.Errorf("preserved subscription = %+v, want unchanged original values", list[0])
+	}
+}
+
+// TestAPISubscriptions_PatchInvalidURLSchemePreservesOriginal covers the
+// other stated example of a well-formed-but-invalid body: a non-http(s) URL
+// scheme, which validateSubscriptionURLScheme rejects.
+func TestAPISubscriptions_PatchInvalidURLSchemePreservesOriginal(t *testing.T) {
+	cs, token := newAPITestServer(t)
+
+	addBody, _ := json.Marshal(map[string]any{
+		"id": "sub1", "category": "blacklist", "name": "n1",
+		"url": "https://example.invalid/list.txt", "format": "plain",
+		"enabled": true, "interval": "24h",
+	})
+	if rec := doAPI(cs, http.MethodPost, "/api/subscriptions", addBody, token, true); rec.Code != http.StatusOK {
+		t.Fatalf("seed POST status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	badBody, _ := json.Marshal(map[string]any{
+		"id": "sub1", "category": "blacklist", "name": "n1",
+		"url": "ftp://example.invalid/list.txt", "format": "plain",
+		"enabled": true, "interval": "24h",
+	})
+	rec := doAPI(cs, http.MethodPatch, "/api/subscriptions/sub1", badBody, token, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PATCH status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+
+	listRec := doAPI(cs, http.MethodGet, "/api/subscriptions", nil, token, true)
+	list := decodeJSON[[]Subscription](t, listRec)
+	if len(list) != 1 || list[0].ID != "sub1" || list[0].URL != "https://example.invalid/list.txt" {
+		t.Fatalf("subscriptions after failed PATCH = %+v, want original sub1 preserved", list)
+	}
+}
+
+// TestAPISubscriptions_PatchValidChangeUpdatesFields is the happy path: PATCH
+// with a valid change updates the subscription's fields.
+func TestAPISubscriptions_PatchValidChangeUpdatesFields(t *testing.T) {
+	cs, token := newAPITestServer(t)
+
+	addBody, _ := json.Marshal(map[string]any{
+		"id": "sub1", "category": "blacklist", "name": "n1",
+		"url": "https://example.invalid/list.txt", "format": "plain",
+		"enabled": true, "interval": "24h",
+	})
+	if rec := doAPI(cs, http.MethodPost, "/api/subscriptions", addBody, token, true); rec.Code != http.StatusOK {
+		t.Fatalf("seed POST status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	patchBody, _ := json.Marshal(map[string]any{
+		"id": "sub1", "category": "blacklist", "name": "n1",
+		"url": "https://example.invalid/other.txt", "format": "plain",
+		"enabled": false, "interval": "12h",
+	})
+	rec := doAPI(cs, http.MethodPatch, "/api/subscriptions/sub1", patchBody, token, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	listRec := doAPI(cs, http.MethodGet, "/api/subscriptions", nil, token, true)
+	list := decodeJSON[[]Subscription](t, listRec)
+	if len(list) != 1 {
+		t.Fatalf("subscriptions after PATCH = %+v, want 1 entry", list)
+	}
+	got := list[0]
+	if got.URL != "https://example.invalid/other.txt" || got.Enabled || got.Interval != 12*time.Hour {
+		t.Errorf("subscription after PATCH = %+v, want updated url/enabled/interval", got)
+	}
+}
+
+// TestAPISubscriptions_PatchUpsertsUnknownID covers PATCH-as-upsert: patching
+// an id that doesn't exist yet with a valid body creates it (had==false path
+// in handleSubscriptionsReplace, so there's nothing to restore).
+func TestAPISubscriptions_PatchUpsertsUnknownID(t *testing.T) {
+	cs, token := newAPITestServer(t)
+
+	patchBody, _ := json.Marshal(map[string]any{
+		"id": "ignored-should-be-overridden", "category": "blacklist", "name": "n1",
+		"url": "https://example.invalid/list.txt", "format": "plain",
+		"enabled": true, "interval": "24h",
+	})
+	rec := doAPI(cs, http.MethodPatch, "/api/subscriptions/new-id", patchBody, token, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	listRec := doAPI(cs, http.MethodGet, "/api/subscriptions", nil, token, true)
+	list := decodeJSON[[]Subscription](t, listRec)
+	if len(list) != 1 || list[0].ID != "new-id" {
+		t.Fatalf("subscriptions after upsert PATCH = %+v, want 1 entry with ID new-id", list)
 	}
 }
 

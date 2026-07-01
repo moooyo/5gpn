@@ -529,6 +529,169 @@ func TestRemoveDeletesCacheAndJSONEntry(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Validate — P4 B1: side-effect-free pre-check used by PATCH to validate
+// before removing the existing subscription.
+// ---------------------------------------------------------------------------
+
+func TestValidateAcceptsValidSubscription(t *testing.T) {
+	rulesDir := t.TempDir()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	reload, _ := countingReload()
+	m, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	sub := Subscription{ID: "v1", Category: "direct", Name: "v1", URL: "https://example.com/x", Format: "plain", Enabled: true, Interval: time.Hour}
+	if err := m.Validate(sub); err != nil {
+		t.Fatalf("Validate valid subscription: %v", err)
+	}
+}
+
+func TestValidateAllowsExistingID(t *testing.T) {
+	// Validate must NOT reject on duplicate ID: PATCH legitimately re-validates
+	// an edit of a subscription that already exists under that ID.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("a.com\n"))
+	}))
+	defer srv.Close()
+
+	rulesDir := t.TempDir()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	reload, _ := countingReload()
+	m, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	existing := Subscription{ID: "dup1", Category: "direct", Name: "dup1", URL: srv.URL, Format: "plain", Enabled: true, Interval: time.Hour}
+	if _, err := m.Add(existing); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	edited := Subscription{ID: "dup1", Category: "direct", Name: "dup1", URL: "https://example.com/other", Format: "plain", Enabled: false, Interval: 2 * time.Hour}
+	if err := m.Validate(edited); err != nil {
+		t.Fatalf("Validate must accept an edit of an existing id, got: %v", err)
+	}
+}
+
+func TestValidateRejectsInvalidCategory(t *testing.T) {
+	rulesDir := t.TempDir()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	reload, _ := countingReload()
+	m, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	sub := Subscription{ID: "v2", Category: "bogus", Name: "v2", URL: "https://example.com/x", Format: "plain", Enabled: true, Interval: time.Hour}
+	if err := m.Validate(sub); err == nil {
+		t.Fatal("want error for invalid category, got nil")
+	}
+}
+
+func TestValidateRejectsInvalidURLScheme(t *testing.T) {
+	rulesDir := t.TempDir()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	reload, _ := countingReload()
+	m, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	sub := Subscription{ID: "v3", Category: "direct", Name: "v3", URL: "ftp://example.com/x", Format: "plain", Enabled: true, Interval: time.Hour}
+	if err := m.Validate(sub); err == nil {
+		t.Fatal("want error for invalid url scheme, got nil")
+	}
+}
+
+func TestValidateRejectsEmptyFormat(t *testing.T) {
+	rulesDir := t.TempDir()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	reload, _ := countingReload()
+	m, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	sub := Subscription{ID: "v4", Category: "direct", Name: "v4", URL: "https://example.com/x", Format: "", Enabled: true, Interval: time.Hour}
+	if err := m.Validate(sub); err == nil {
+		t.Fatal("want error for empty format, got nil")
+	}
+}
+
+func TestValidateDoesNotMutateManagerState(t *testing.T) {
+	rulesDir := t.TempDir()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	reload, count := countingReload()
+	m, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	sub := Subscription{ID: "v5", Category: "direct", Name: "v5", URL: "https://example.com/x", Format: "plain", Enabled: true, Interval: time.Hour}
+	if err := m.Validate(sub); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := len(m.List()); got != 0 {
+		t.Errorf("Validate must not add to the manager's subscription list, len=%d", got)
+	}
+	if count() != 0 {
+		t.Errorf("Validate must not call reload, count=%d", count())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Get — P4 B1: returns a copy of a subscription by ID for PATCH's
+// restore-on-failure path.
+// ---------------------------------------------------------------------------
+
+func TestGetReturnsCopyOfExistingSubscription(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("a.com\n"))
+	}))
+	defer srv.Close()
+
+	rulesDir := t.TempDir()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	reload, _ := countingReload()
+	m, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	sub := Subscription{ID: "g1", Category: "direct", Name: "g1", URL: srv.URL, Format: "plain", Enabled: true, Interval: time.Hour}
+	if _, err := m.Add(sub); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	got, ok := m.Get("g1")
+	if !ok {
+		t.Fatal("Get: want ok=true for existing id")
+	}
+	if got.ID != "g1" || got.URL != srv.URL {
+		t.Errorf("Get = %+v, want the added subscription", got)
+	}
+
+	// Mutating the returned value must not affect the manager's internal state.
+	got.URL = "https://mutated.example/should-not-stick"
+	got.Enabled = false
+	again, ok := m.Get("g1")
+	if !ok {
+		t.Fatal("Get (second call): want ok=true")
+	}
+	if again.URL != srv.URL || !again.Enabled {
+		t.Errorf("Get returned a non-copy: mutating the first result changed manager state, got %+v", again)
+	}
+}
+
+func TestGetReturnsFalseForAbsentID(t *testing.T) {
+	rulesDir := t.TempDir()
+	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
+	reload, _ := countingReload()
+	m, err := NewSubManager(subPath, rulesDir, reload)
+	if err != nil {
+		t.Fatalf("NewSubManager: %v", err)
+	}
+	if _, ok := m.Get("does-not-exist"); ok {
+		t.Fatal("Get: want ok=false for absent id")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // List
 // ---------------------------------------------------------------------------
 

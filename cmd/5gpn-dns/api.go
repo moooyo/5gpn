@@ -152,7 +152,23 @@ func (s *ControlServer) handleSubscriptionsCreate(w http.ResponseWriter, r *http
 
 // handleSubscriptionsReplace decodes a Subscription from the body, forces its
 // ID to the path value (so the URL is authoritative over any ID in the
-// body), and adds it in place of any prior subscription with that ID.
+// body), and replaces any prior subscription with that ID (PATCH doubles as
+// upsert when there is no prior subscription).
+//
+// Transactional guarantee: the new body is validated BEFORE the existing
+// subscription is touched, so a well-formed-but-invalid body (bad category,
+// malformed URL/name, empty format, etc.) is rejected with 400 while leaving
+// the existing subscription untouched — it is never removed just to have the
+// replacement fail. AddSubscription itself rejects a duplicate ID, so a
+// like-for-like replace still has to remove the existing entry first; if that
+// removal succeeded but the subsequent Add then fails for some other reason
+// (e.g. a disk/persist error — validation has already passed by this point),
+// the previous subscription is restored so the edit is atomic-ish rather than
+// leaving the caller with neither the old nor the new subscription. Note a
+// fetch failure inside Add is not such an error: Add returns
+// UpdateResult{OK:false} in a 200 (the subscription is saved; the first fetch
+// failed; Run's ticker or a later on-demand update will retry) — that path is
+// unchanged.
 func (s *ControlServer) handleSubscriptionsReplace(w http.ResponseWriter, r *http.Request) {
 	var sub Subscription
 	if !decodeJSONBody(w, r, &sub) {
@@ -160,14 +176,23 @@ func (s *ControlServer) handleSubscriptionsReplace(w http.ResponseWriter, r *htt
 	}
 	sub.ID = r.PathValue("id")
 
-	// AddSubscription rejects a duplicate ID, so a like-for-like replace has
-	// to remove the existing entry (if any) first. A missing subscription is
-	// not an error here — PATCH doubles as upsert.
+	if err := s.ctrl.ValidateSubscription(sub); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	old, had := s.ctrl.GetSubscription(sub.ID)
 	_ = s.ctrl.RemoveSubscription(sub.ID)
 
 	res, err := s.ctrl.AddSubscription(sub)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		// Residual failure after validation already passed (e.g. a disk/persist
+		// error) — restore the previous subscription so the failed edit doesn't
+		// also destroy the original.
+		if had {
+			_, _ = s.ctrl.AddSubscription(old)
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, res)

@@ -171,6 +171,21 @@ func (c *Controller) RemoveSubscription(id string) error {
 	return c.subs.Remove(id)
 }
 
+// ValidateSubscription checks s against the same field rules AddSubscription
+// enforces (bad ID/category/name/format/url-scheme), without the
+// duplicate-ID check and without any state change, fetch, or persist — see
+// SubManager.Validate. Used by PATCH to validate an edit before touching the
+// existing subscription.
+func (c *Controller) ValidateSubscription(s Subscription) error {
+	return c.subs.Validate(s)
+}
+
+// GetSubscription returns a copy of the subscription with the given ID, or
+// ok=false if none is configured under that ID. See SubManager.Get.
+func (c *Controller) GetSubscription(id string) (Subscription, bool) {
+	return c.subs.Get(id)
+}
+
 // Update refreshes one subscription by ID, or every subscription when id=="".
 func (c *Controller) Update(ctx context.Context, id string) []UpdateResult {
 	if id == "" {

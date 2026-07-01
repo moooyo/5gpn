@@ -392,6 +392,29 @@ func atomicWriteLines(path string, entries []string) error {
 	return nil
 }
 
+// Validate runs the same field checks Add does (bad ID/category/name/format/
+// url-scheme), WITHOUT the duplicate-ID check and without any state change,
+// fetch, or persist. The duplicate-ID check is skipped deliberately: unlike
+// Add (always creating a new entry), Validate is also used by PATCH to
+// pre-check an edit of a subscription that already exists under the target
+// ID, so rejecting on "ID already exists" would make every legitimate edit
+// fail validation. Safe to call concurrently; takes m.mu only to read (not
+// mutate) state, and never while holding it across I/O.
+func (m *SubManager) Validate(s Subscription) error {
+	return validateSubscription(s)
+}
+
+// Get returns a copy of the subscription with the given ID, or ok=false if no
+// subscription with that ID is configured. The returned value is independent
+// of the manager's internal state — mutating it has no effect on subsequent
+// Get/List calls.
+func (m *SubManager) Get(id string) (Subscription, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sub, _, ok := m.find(id)
+	return sub, ok
+}
+
 // Add validates, appends, and persists a new subscription, then performs an
 // initial UpdateOne to populate its cache and returns that fetch's result. If
 // Run is currently active (its ctx is stored in m.runCtx and not yet done),
