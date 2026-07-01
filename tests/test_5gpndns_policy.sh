@@ -114,5 +114,18 @@ grep -Fq '"smartdns"'   "$TGBOT" \
 grep -Fq 'xray'         "$TGBOT" \
     && fail "tgbot.py: contains live xray token (obsolete)"
 
+# --- install.sh: Phase 3 Task 6 control-plane token + :9443 firewall gate ---
+grep -Fq 'openssl rand'      "$INSTALL" || fail "install.sh: no token auto-gen (openssl rand)"
+grep -Fq 'DNS_API_TOKEN'     "$INSTALL" || fail "install.sh: does not write DNS_API_TOKEN into dns.env"
+grep -Fq 'DNS_LISTEN_API'    "$INSTALL" || fail "install.sh: does not write DNS_LISTEN_API into dns.env"
+grep -Fq 'existing_token'    "$INSTALL" || fail "install.sh: does not preserve an existing token across re-install"
+
+grep -Fq 'ip saddr ${CLIENT_NET} tcp dport 9443 accept' "$FIREWALL" \
+    || fail "setup-firewall.sh: no CLIENT_NET-scoped :9443 accept rule"
+grep -Eq 'tcp_ports=.*9443' "$FIREWALL" \
+    && fail "setup-firewall.sh: :9443 must not be in the public tcp_ports set"
+grep -Eq '^\s*tcp dport 9443 accept' "$FIREWALL" \
+    && fail "setup-firewall.sh: :9443 must be CLIENT_NET-only, not a bare public accept"
+
 [ $rc -eq 0 ] && echo "5gpn-dns policy: PASS"
 exit $rc

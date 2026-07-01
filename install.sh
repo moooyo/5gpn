@@ -568,6 +568,15 @@ write_dns_env() {
     # Write /etc/5gpn/dns.env from install-time collected vars.
     # cert paths always point at the /etc/5gpn/cert copies (maintained by renew-hook.sh).
     mkdir -p "$CONF_DIR"
+
+    # DNS_API_TOKEN: reuse an existing token across re-installs (never rotate a
+    # working token); else honor an env override; else generate one.
+    local existing_token=""
+    if [[ -f "${CONF_DIR}/dns.env" ]]; then
+        existing_token="$(grep -E '^DNS_API_TOKEN=' "${CONF_DIR}/dns.env" | head -1 | cut -d= -f2-)"
+    fi
+    DNS_API_TOKEN="${DNS_API_TOKEN:-${existing_token:-$(openssl rand -hex 32)}}"
+
     cat > "${CONF_DIR}/dns.env" <<EOF
 # 5gpn-dns environment — written by install.sh; edit for overrides.
 # Reload takes effect via: systemctl reload 5gpn-dns  (SIGHUP hot-reload)
@@ -592,6 +601,13 @@ DNS_CHNROUTE=${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt
 # DNS_RULES_DIR/<category>/<name>.txt, merged automatically with the manual
 # <category>.txt files above). See /etc/5gpn/subscriptions.json.
 DNS_SUBSCRIPTIONS=${CONF_DIR}/subscriptions.json
+
+# Phase 3: control-plane HTTPS API (bearer-token auth). Reachable from
+# CLIENT_NET only (see scripts/setup-firewall.sh); token is generated once and
+# preserved across re-installs so a working token is never rotated out from
+# under an operator/tgbot config.
+DNS_LISTEN_API=:9443
+DNS_API_TOKEN=${DNS_API_TOKEN}
 
 DNS_CACHE_SIZE=4096
 DNS_TTL_MIN=300
@@ -904,6 +920,11 @@ full_install() {
         echo "  DoT 地址         tls://${DOMAIN}:853"
         echo "  Android 私人DNS  ${DOMAIN}"
         echo "  iOS 描述文件      http://${GATEWAY_IP:-$PUBLIC_IP}:${IOS_PORT}/ios-dot.mobileconfig"
+    } | card
+    {
+        echo "Control console: https://${DOMAIN:-${GATEWAY_IP:-$PUBLIC_IP}}:9443"
+        echo "Token:           ${DNS_API_TOKEN}"
+        echo "(reachable from the NPN / CLIENT_NET only; shown once — not logged elsewhere)"
     } | card
     print_qr
     echo ""

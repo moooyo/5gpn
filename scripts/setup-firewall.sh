@@ -56,6 +56,8 @@ table inet filter {
         ip saddr ${CLIENT_NET} tcp dport { 80, 443, ${IOS_PORT} } accept
         # QUIC/HTTP3 proxied by sing-box: allow UDP 443 from NPN clients (same scope as TCP 443).
         ip saddr ${CLIENT_NET} udp dport 443 accept
+        # Control-plane API (5gpn-dns :9443, bearer-token) — reachable from NPN clients only, never public.
+        ip saddr ${CLIENT_NET} tcp dport 9443 accept
         ip protocol icmp accept
         ip6 nexthdr icmpv6 accept
     }
