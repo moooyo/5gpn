@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -113,8 +114,15 @@ func main() {
 
 	// Phase 4 Task A2: periodically persist stats + do a final save on shutdown
 	// (triggered by ctx being cancelled below). Best-effort — RunStatsPersister
-	// never crashes the resolver on a save failure.
-	go RunStatsPersister(ctx, cfg.StatsFile, h.stats, 60*time.Second)
+	// never crashes the resolver on a save failure. Tracked by persistWG so the
+	// shutdown path waits for the final save to complete before the process
+	// exits (rather than racing it).
+	var persistWG sync.WaitGroup
+	persistWG.Add(1)
+	go func() {
+		defer persistWG.Done()
+		RunStatsPersister(ctx, cfg.StatsFile, h.stats, 60*time.Second)
+	}()
 
 	// ── Phase 3: control-plane HTTPS API (:9443, bearer-token) ────────────────
 	// NewControlServer returns (nil, nil) when DNS_API_TOKEN is empty: the
@@ -163,6 +171,7 @@ func main() {
 		controlSrv.Shutdown(shutdownCtx)
 	}
 	servers.Shutdown(shutdownCtx)
+	persistWG.Wait() // ensure the stats persister's final save completes before exit
 	log.Println("shutdown complete")
 }
 

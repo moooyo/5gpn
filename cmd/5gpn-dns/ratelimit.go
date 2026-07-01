@@ -115,10 +115,18 @@ func (rl *rateLimiter) allow(key string, now time.Time) bool {
 // without needing a background goroutine.
 func (rl *rateLimiter) evictLocked(now time.Time) {
 	rl.lastSweep = now
-	staleAfter := time.Duration(staleIdleFactor*rl.burst/rl.rate*1000) * time.Millisecond
-	if staleAfter <= 0 {
+	// Idle window in seconds: how long a bucket must sit untouched before it's
+	// guaranteed refilled to full and no longer worth tracking. Computed in
+	// float seconds and clamped to a sane ceiling so an extreme (mis)configured
+	// burst/rate can't overflow the int64 nanosecond Duration below.
+	secs := staleIdleFactor * rl.burst / rl.rate
+	if secs <= 0 {
 		return
 	}
+	if secs > 3600 {
+		secs = 3600 // never track a bucket idle more than an hour
+	}
+	staleAfter := time.Duration(secs * float64(time.Second))
 	for k, b := range rl.buckets {
 		if now.Sub(b.last) > staleAfter {
 			delete(rl.buckets, k)

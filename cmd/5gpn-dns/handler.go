@@ -86,6 +86,33 @@ func (h *Handler) bumpTotal() {
 	h.stats.total.Add(1)
 }
 
+// bumpChina records the outcome of a china-upstream exchange (ok = no error).
+// A method on *statsCounters (not *Handler) so Arbitrate, which holds the
+// counters directly, can call it. Nil-safe.
+func (s *statsCounters) bumpChina(ok bool) {
+	if s == nil {
+		return
+	}
+	if ok {
+		s.chinaOK.Add(1)
+	} else {
+		s.chinaErr.Add(1)
+	}
+}
+
+// bumpTrust records the outcome of a trust-upstream exchange (ok = no error),
+// counted only when trust was actually consulted. Nil-safe.
+func (s *statsCounters) bumpTrust(ok bool) {
+	if s == nil {
+		return
+	}
+	if ok {
+		s.trustOK.Add(1)
+	} else {
+		s.trustErr.Add(1)
+	}
+}
+
 // bumpAdblock increments the adblock-reason counter. Safe to call when h.stats is nil.
 func (h *Handler) bumpAdblock() {
 	if h.stats == nil {
@@ -297,7 +324,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 				cached.Id = r.Id
 				return cached
 			}
-			resp, err := Arbitrate(ctx, r, h.China, h.Trust, cn)
+			resp, err := Arbitrate(ctx, r, h.China, h.Trust, cn, h.stats)
 			if err != nil || resp == nil {
 				return h.serverFail(r)
 			}
@@ -326,7 +353,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 			h.bumpDefaultVerdict(cached)
 			return cached
 		}
-		resp, err := Arbitrate(ctx, r, h.China, h.Trust, cn)
+		resp, err := Arbitrate(ctx, r, h.China, h.Trust, cn, h.stats)
 		if err != nil || resp == nil {
 			return h.serverFail(r)
 		}

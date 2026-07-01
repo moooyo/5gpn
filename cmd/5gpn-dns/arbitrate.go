@@ -33,7 +33,12 @@ func chinaIsCN(reply *dns.Msg, cn *Chnroute) bool {
 // The decision is based solely on the chnroute membership of the china answer —
 // NEVER on which upstream returned first.  Both upstreams are bounded by the
 // caller's ctx deadline; no second timeout is created here.
-func Arbitrate(ctx context.Context, q *dns.Msg, china, trust Exchanger, cn *Chnroute) (*dns.Msg, error) {
+//
+// stats (nil-safe) records upstream health: china is always awaited so its
+// ok/err is always counted; trust is only counted when it is actually consulted
+// (i.e. when china was not a CN answer) — when china wins, trust's result is
+// never read so it is not counted.
+func Arbitrate(ctx context.Context, q *dns.Msg, china, trust Exchanger, cn *Chnroute, stats *statsCounters) (*dns.Msg, error) {
 	type exchangeResult struct {
 		msg *dns.Msg
 		err error
@@ -54,6 +59,7 @@ func Arbitrate(ctx context.Context, q *dns.Msg, china, trust Exchanger, cn *Chnr
 
 	// Wait for the china result (bounded by ctx deadline).
 	chinaRes := <-chinaCh
+	stats.bumpChina(chinaRes.err == nil)
 
 	// Deterministic decision: if china has a CN address, return it.
 	if chinaRes.err == nil && chinaIsCN(chinaRes.msg, cn) {
@@ -62,6 +68,7 @@ func Arbitrate(ctx context.Context, q *dns.Msg, china, trust Exchanger, cn *Chnr
 
 	// Fall back to trust — await it unconditionally.
 	trustRes := <-trustCh
+	stats.bumpTrust(trustRes.err == nil)
 	if trustRes.err != nil {
 		return nil, trustRes.err
 	}

@@ -69,6 +69,65 @@ func loadTestChnroute(t *testing.T) *Chnroute {
 	return cn
 }
 
+// TestArbitrateUpstreamHealthCounters verifies Arbitrate records china/trust
+// exchange outcomes: china is always awaited (always counted); trust is counted
+// only when actually consulted (i.e. when china is not a CN answer).
+func TestArbitrateUpstreamHealthCounters(t *testing.T) {
+	cn := loadTestChnroute(t)
+	q := new(dns.Msg)
+	q.SetQuestion(dns.Fqdn("x.test"), dns.TypeA)
+
+	t.Run("china CN wins → trust not counted", func(t *testing.T) {
+		s := &statsCounters{}
+		china := &fakeExchanger{reply: buildMsg("x.test", "1.2.3.4")} // CN
+		trust := &fakeExchanger{reply: buildMsg("x.test", "9.9.9.9")}
+		if _, err := Arbitrate(context.Background(), q, china, trust, cn, s); err != nil {
+			t.Fatalf("Arbitrate: %v", err)
+		}
+		if got := s.chinaOK.Load(); got != 1 {
+			t.Errorf("chinaOK = %d, want 1", got)
+		}
+		if got := s.trustOK.Load() + s.trustErr.Load(); got != 0 {
+			t.Errorf("trust counted %d times, want 0 (not consulted)", got)
+		}
+	})
+
+	t.Run("china foreign → both counted", func(t *testing.T) {
+		s := &statsCounters{}
+		china := &fakeExchanger{reply: buildMsg("x.test", "8.8.8.8")} // foreign
+		trust := &fakeExchanger{reply: buildMsg("x.test", "9.9.9.9")}
+		if _, err := Arbitrate(context.Background(), q, china, trust, cn, s); err != nil {
+			t.Fatalf("Arbitrate: %v", err)
+		}
+		if s.chinaOK.Load() != 1 || s.trustOK.Load() != 1 {
+			t.Errorf("chinaOK=%d trustOK=%d, want 1/1", s.chinaOK.Load(), s.trustOK.Load())
+		}
+	})
+
+	t.Run("china error → chinaErr, trust consulted", func(t *testing.T) {
+		s := &statsCounters{}
+		china := &fakeExchanger{err: errors.New("boom")}
+		trust := &fakeExchanger{reply: buildMsg("x.test", "9.9.9.9")}
+		if _, err := Arbitrate(context.Background(), q, china, trust, cn, s); err != nil {
+			t.Fatalf("Arbitrate: %v", err)
+		}
+		if s.chinaErr.Load() != 1 || s.chinaOK.Load() != 0 {
+			t.Errorf("chinaErr=%d chinaOK=%d, want 1/0", s.chinaErr.Load(), s.chinaOK.Load())
+		}
+		if s.trustOK.Load() != 1 {
+			t.Errorf("trustOK = %d, want 1", s.trustOK.Load())
+		}
+	})
+
+	t.Run("nil stats does not panic", func(t *testing.T) {
+		china := &fakeExchanger{reply: buildMsg("x.test", "1.2.3.4")}
+		trust := &fakeExchanger{reply: buildMsg("x.test", "9.9.9.9")}
+		if _, err := Arbitrate(context.Background(), q, china, trust, cn, nil); err != nil {
+			t.Fatalf("Arbitrate with nil stats: %v", err)
+		}
+	})
+}
+
 // TestArbitrateDeterminism is the heart of Task 4.
 // It verifies that Arbitrate always returns the china reply when chinaIsCN,
 // regardless of which upstream is faster (the anti-first-response guarantee).
@@ -140,7 +199,7 @@ func TestArbitrateDeterminism(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
-			got, err := Arbitrate(ctx, q, tc.china, tc.trust, cn)
+			got, err := Arbitrate(ctx, q, tc.china, tc.trust, cn, nil)
 			if err != nil {
 				t.Fatalf("Arbitrate returned error: %v", err)
 			}
@@ -180,7 +239,7 @@ func TestArbitrateTimeout(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	got, err := Arbitrate(ctx, q, china, trust, cn)
+	got, err := Arbitrate(ctx, q, china, trust, cn, nil)
 	if err != nil {
 		t.Fatalf("Arbitrate returned error on china timeout: %v", err)
 	}

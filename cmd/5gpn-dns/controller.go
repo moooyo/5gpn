@@ -275,7 +275,7 @@ func (h *Handler) lookupArbitrate(ctx context.Context, name string) ([]string, s
 	q := new(dns.Msg)
 	q.SetQuestion(fqdn, dns.TypeA)
 
-	resp, err := Arbitrate(ctx, q, h.China, h.Trust, h.CN)
+	resp, err := Arbitrate(ctx, q, h.China, h.Trust, h.CN, h.stats)
 	if err != nil || resp == nil {
 		return nil, ""
 	}
