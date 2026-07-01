@@ -119,9 +119,10 @@
       With an existing good cache present, point the subscription at an unreachable URL (or stop the test HTTP server) and force a fetch.
       Confirm the cache file under `/etc/5gpn/rules/<category>/<name>.txt` is **unchanged** (old cache retained, not cleared or truncated) and the previously-loaded rule remains effective. Also verify: a response that parses to too few entries (below the category's floor guard) is treated the same as a failure (old cache kept).
 
-- [ ] **Sandbox `ReadWritePaths` lets the manager write**
-      `systemctl show 5gpn-dns -p ReadWritePaths` → includes `/etc/5gpn/rules`.
-      Confirm the subscription manager can actually create/update files under `/etc/5gpn/rules/<category>/` while the rest of `/etc/5gpn` remains read-only (`ReadOnlyPaths=/etc/5gpn`) — i.e. no permission-denied in the journal when a subscription fetch writes its cache.
+- [ ] **Sandbox `ReadWritePaths`/`ReadOnlyPaths` match the current model**
+      `systemctl show 5gpn-dns -p ReadWritePaths` → includes `/etc/5gpn` (the whole conf dir, not just `/etc/5gpn/rules` — this changed under Phase 3 so the API can atomically rewrite `subscriptions.json`, which needs the *directory* writable).
+      `systemctl show 5gpn-dns -p ReadOnlyPaths` → includes `/etc/5gpn/dns.env` (and `-/etc/5gpn/cert` if present) — these two are re-protected read-only carve-outs so the resolver can never rewrite its own token or TLS material.
+      Confirm both hold at once: the subscription manager can create/update files under `/etc/5gpn/rules/<category>/`, AND the control-plane API can rewrite `/etc/5gpn/subscriptions.json`, while `/etc/5gpn/dns.env` and `/etc/5gpn/cert/*` stay unwritable (no permission-denied in the journal for the former; a write attempt against the latter should fail).
 
 - [ ] **`update-lists.sh` is now reload-only** — running `scripts/update-lists.sh` performs no network fetch itself; it only triggers `systemctl reload 5gpn-dns` (confirm via strace/journal: no outbound HTTP from the script, only from the `5gpn-dns` process's own subscription manager).
 
@@ -131,6 +132,41 @@
 
 - Date / host:
 - 5gpn-dns version:
+- Pass/fail per check:
+- Notes:
+
+---
+
+## §J Phase 3 — 控制面 API + Web UI
+
+> Covers `cmd/5gpn-dns/api.go` (bearer-token HTTPS REST API on `:9443`, over the `Controller` facade) and the embedded React SPA (`go:embed cmd/5gpn-dns/web/dist`). See `docs/superpowers/specs/2026-07-01-5gpn-dns-p3-api-webui-design.md`.
+
+- [ ] **Unauthenticated request rejected, bearer token accepted**
+      `curl -sk -o /dev/null -w '%{http_code}' https://<host-ip>:9443/api/status` → `401` (no `Authorization` header).
+      `curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $DNS_API_TOKEN" https://<host-ip>:9443/api/status` → `200`.
+
+- [ ] **Empty `DNS_API_TOKEN` ⇒ control plane not served at all**
+      Restart `5gpn-dns` with `DNS_API_TOKEN=` (empty). Confirm `:9443` does not accept connections (or the API routes are absent) — the control plane must never be served unauthenticated.
+
+- [ ] **Firewall gates `:9443` to CLIENT_NET**
+      From a CLIENT_NET source: `curl -sk https://<host-ip>:9443/` succeeds (connection accepted).
+      From a non-CLIENT_NET source: connection to `:9443` is dropped/rejected by `nft` (confirm via `nft list ruleset` showing the `ip saddr ${CLIENT_NET} tcp dport 9443 accept` rule, and no broader accept for 9443).
+
+- [ ] **Embedded SPA served at `/`**
+      `curl -sk https://<host-ip>:9443/` → `200`, HTML body (the React shell).
+      `curl -sk https://<host-ip>:9443/assets/<some-hashed-asset>` → `200`, real JS/CSS asset (confirms `go:embed cmd/5gpn-dns/web/dist` is bundled, not the repo's placeholder `index.html`).
+
+- [ ] **Rules + subscriptions CRUD, `/api/lookup`, `/api/reload` roundtrip**
+      Through the authenticated API: add/remove a rule-list entry, add/remove a subscription, issue a test `/api/lookup` for a known domain, and trigger `/api/reload` — each call returns success and the effect is observable (new rule active, subscription present in a subsequent list call, reload doesn't error).
+
+- [ ] **Subscription CRUD persists under the systemd sandbox**
+      This is the regression the `ReadWritePaths=/etc/5gpn` sandbox fix (§I above) addresses — a bare-process run (no systemd unit) wouldn't catch it.
+      Run this check specifically **under the systemd-managed service** (`systemctl start 5gpn-dns`, not a manual foreground run): create a subscription via the API, then `systemctl restart 5gpn-dns` (or just re-read `/etc/5gpn/subscriptions.json` on disk) and confirm the new subscription is actually persisted to disk — no permission-denied in the journal from the API's atomic temp-create+rename.
+
+- [ ] **tgbot reaches the loopback API with the dns.env token**
+      With `tgbot.py` running (`API_BASE=https://127.0.0.1:9443` default), issue a bot command that hits the API (e.g. status or add/del forced-proxy domain) and confirm it succeeds — i.e. tgbot correctly reads `DNS_API_TOKEN` from `/etc/5gpn/dns.env` and reaches the API over loopback.
+
+Results:
 - Pass/fail per check:
 - Notes:
 

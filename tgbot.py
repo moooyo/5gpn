@@ -54,8 +54,12 @@ GATEWAY_FILE = os.path.join(CONF_DIR, ".gateway_ip")
 PUBLIC_IP_FILE = os.path.join(CONF_DIR, ".public_ip")
 IOS_PORT = "8111"
 
-# 5gpn-dns control-plane REST API (same box, loopback-only, bearer-token
-# authenticated). See docs/superpowers/specs/2026-07-01-5gpn-dns-p3-api-webui-design.md.
+# 5gpn-dns control-plane REST API (same box, bearer-token authenticated).
+# The API listener itself binds ALL interfaces on :9443 (not loopback-only) —
+# it is firewall-gated to CLIENT_NET only (see scripts/setup-firewall.sh).
+# tgbot's own connection here is over loopback (127.0.0.1), which is why the
+# no-verify TLS below is safe: the traffic never leaves the box.
+# See docs/superpowers/specs/2026-07-01-5gpn-dns-p3-api-webui-design.md.
 API_BASE = os.environ.get("API_BASE", "https://127.0.0.1:9443")
 
 # Services the bot may restart / tail (the only two in the data path).

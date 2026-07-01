@@ -86,6 +86,14 @@ sudo bash install.sh
 - **DoH**:在支持 DoH 的客户端填 `https://<网关域名>:8443/dns-query`。
 - **明文 DNS**:可直接使用 `:53`,但有限速;建议优先使用 DoT/DoH。
 
+## 🖥 Web 控制台(Phase 3)
+
+- **地址**:`https://<域名或网关地址>:9443`,安装结束时会打印一次。
+- **可达范围**:仅 CLIENT_NET(NPN 内网)可达,不对公网开放——:9443 虽然监听所有网卡,但 `setup-firewall.sh` 只放行 CLIENT_NET 来源。
+- **登录**:使用安装时打印的 `DNS_API_TOKEN` 登录,token 保存在浏览器 localStorage。
+- **找回 token**:`grep DNS_API_TOKEN /etc/5gpn/dns.env`。
+- **tgbot 共用同一 API**:`tgbot.py` 走回环(`https://127.0.0.1:9443`)调用同一套控制面 API,与 Web UI 并存。
+
 ## 常用命令
 
 ```bash
@@ -96,6 +104,8 @@ sudo bash install.sh --del-domain d  # 取消强制代理
 sudo bash install.sh --ios           # 重新生成 iOS 描述文件 + 二维码
 sudo bash install.sh --setup-tgbot   # 启用 Telegram 控制 bot(Gum TUI 交互)
 ```
+
+> `--status` 不打印 Web 控制台 token;需要时读 `/etc/5gpn/dns.env` 里的 `DNS_API_TOKEN`。
 
 ## 仓库结构
 
