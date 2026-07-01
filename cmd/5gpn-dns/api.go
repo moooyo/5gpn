@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -26,6 +27,7 @@ type ControlServer struct {
 	ctrl      *Controller
 	token     string
 	startTime time.Time
+	limiter   *rateLimiter
 }
 
 // NewControlServer builds a ControlServer from cfg and ctrl.
@@ -46,7 +48,12 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 		return nil, fmt.Errorf("control server: DNS_CERT and DNS_KEY are required when DNS_API_TOKEN is set")
 	}
 
-	s := &ControlServer{ctrl: ctrl, token: cfg.APIToken, startTime: time.Now()}
+	s := &ControlServer{
+		ctrl:      ctrl,
+		token:     cfg.APIToken,
+		startTime: time.Now(),
+		limiter:   newRateLimiter(cfg.APIRate, cfg.APIBurst),
+	}
 
 	webUI, err := newWebUIHandler()
 	if err != nil {
@@ -54,7 +61,7 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/", s.authMiddleware(s.apiMux()))
+	mux.Handle("/api/", s.rateLimitMiddleware(s.authMiddleware(s.apiMux())))
 	mux.Handle("/", webUI)
 
 	s.srv = &http.Server{
@@ -319,6 +326,39 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 		return false
 	}
 	return true
+}
+
+// rateLimitMiddleware enforces a per-source-IP token-bucket limit (Phase 4
+// Task C1) on every /api/* request, to blunt brute-force against the bearer
+// token and general abuse if the firewall is ever widened beyond CLIENT_NET.
+// It is wired OUTSIDE authMiddleware (see NewControlServer) so an
+// unauthenticated flood is limited too -- rate limiting must not depend on
+// having already proven a valid token.
+//
+// The source key is derived from r.RemoteAddr (host part only, via
+// net.SplitHostPort; the raw value is used as-is if that fails, e.g. in unit
+// tests that set a bare RemoteAddr). X-Forwarded-For is deliberately NOT
+// consulted: the control-plane listener is not behind a reverse proxy, so
+// trusting a client-supplied header here would let any caller pick its own
+// rate-limit bucket and defeat the whole point.
+//
+// When s.limiter has rate limiting disabled (APIRate <= 0), allow() always
+// returns true, so this middleware is a zero-overhead passthrough.
+func (s *ControlServer) rateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
+		}
+
+		if !s.limiter.allow(host, time.Now()) {
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limited"})
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 // authMiddleware requires a valid "Authorization: Bearer <token>" header on

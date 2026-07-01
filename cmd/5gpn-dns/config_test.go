@@ -15,6 +15,7 @@ var allDNSEnvKeys = []string{
 	"DNS_SUBSCRIPTIONS",
 	"DNS_LISTEN_API", "DNS_API_TOKEN",
 	"DNS_STATS_FILE",
+	"DNS_API_RATE", "DNS_API_BURST",
 }
 
 // clearAllDNSEnv unsets all DNS_ vars and restores them on t.Cleanup.
@@ -123,6 +124,14 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.StatsFile != "/etc/5gpn/stats.json" {
 		t.Errorf("StatsFile default = %q, want %q", cfg.StatsFile, "/etc/5gpn/stats.json")
 	}
+
+	// Default control-plane API rate limit (Phase 4 Task C1).
+	if cfg.APIRate != 20 {
+		t.Errorf("APIRate default = %v, want 20", cfg.APIRate)
+	}
+	if cfg.APIBurst != 40 {
+		t.Errorf("APIBurst default = %d, want 40", cfg.APIBurst)
+	}
 }
 
 func TestLoadConfig_EnvOverride(t *testing.T) {
@@ -144,6 +153,8 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	t.Setenv("DNS_LISTEN_API", ":9444")
 	t.Setenv("DNS_API_TOKEN", "s3cr3t")
 	t.Setenv("DNS_STATS_FILE", "/opt/5gpn/stats.json")
+	t.Setenv("DNS_API_RATE", "5")
+	t.Setenv("DNS_API_BURST", "10")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -185,6 +196,12 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	}
 	if cfg.StatsFile != "/opt/5gpn/stats.json" {
 		t.Errorf("StatsFile = %q, want %q", cfg.StatsFile, "/opt/5gpn/stats.json")
+	}
+	if cfg.APIRate != 5 {
+		t.Errorf("APIRate = %v, want 5", cfg.APIRate)
+	}
+	if cfg.APIBurst != 10 {
+		t.Errorf("APIBurst = %d, want 10", cfg.APIBurst)
 	}
 }
 
@@ -245,6 +262,79 @@ func TestLoadConfig_TLSNotRequired_NoTLSListeners(t *testing.T) {
 	_, err := LoadConfig()
 	if err != nil {
 		t.Fatalf("no TLS listeners → no cert error expected, got: %v", err)
+	}
+}
+
+// TestLoadConfig_APIRateDisabled confirms DNS_API_RATE=0 disables rate
+// limiting (APIRate <= 0 is the "allow all" sentinel consumed by
+// newRateLimiter/the middleware).
+func TestLoadConfig_APIRateDisabled(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	t.Setenv("DNS_API_RATE", "0")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.APIRate != 0 {
+		t.Errorf("APIRate = %v, want 0 (disabled)", cfg.APIRate)
+	}
+}
+
+// TestLoadConfig_APIRateBadValueFallsBackToDefault confirms a malformed
+// DNS_API_RATE doesn't crash LoadConfig -- it falls back to the default
+// rather than propagating a parse error (tolerant-numeric-knob pattern).
+func TestLoadConfig_APIRateBadValueFallsBackToDefault(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	t.Setenv("DNS_API_RATE", "not-a-number")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.APIRate != 20 {
+		t.Errorf("APIRate with bad env = %v, want default 20", cfg.APIRate)
+	}
+}
+
+// TestLoadConfig_APIBurstBadValueFallsBackToDefault mirrors the rate case for
+// DNS_API_BURST.
+func TestLoadConfig_APIBurstBadValueFallsBackToDefault(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	t.Setenv("DNS_API_BURST", "not-a-number")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.APIBurst != 40 {
+		t.Errorf("APIBurst with bad env = %d, want default 40", cfg.APIBurst)
+	}
+}
+
+// TestLoadConfig_APIBurstZeroOrNegativeFallsBackWhenRatePositive confirms
+// that when APIRate is positive (rate limiting enabled) but APIBurst is
+// given as <= 0, we fall back to the sane default rather than building a
+// limiter that can never let a request through.
+func TestLoadConfig_APIBurstZeroOrNegativeFallsBackWhenRatePositive(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	t.Setenv("DNS_API_RATE", "5")
+	t.Setenv("DNS_API_BURST", "0")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.APIBurst != 40 {
+		t.Errorf("APIBurst = %d, want fallback default 40 when given 0 with rate>0", cfg.APIBurst)
 	}
 }
 

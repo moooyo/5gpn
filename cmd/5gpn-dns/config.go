@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"strconv"
@@ -48,6 +49,10 @@ type Config struct {
 	ListenAPI string // default :9443 (TLS); control plane is disabled unless APIToken is set
 	APIToken  string // bearer token for /api/*; no default — empty means disabled
 
+	// Phase 4 Task C1: per-source rate limiting on the control-plane API.
+	APIRate  float64 // requests/sec allowed per source IP; <= 0 disables rate limiting
+	APIBurst int     // token-bucket capacity per source IP
+
 	// Phase 4 Task A2: query-stat counter persistence.
 	StatsFile string // path for cumulative stats snapshot; empty disables persistence
 
@@ -81,6 +86,8 @@ type Config struct {
 //	DNS_LISTEN_API      :9443
 //	DNS_API_TOKEN       (none — control plane disabled unless set)
 //	DNS_STATS_FILE      /etc/5gpn/stats.json (empty disables persistence)
+//	DNS_API_RATE        20 (requests/sec per source IP; <= 0 disables rate limiting)
+//	DNS_API_BURST       40 (token-bucket capacity per source IP)
 //
 // Empty listener strings disable that server.
 // If any TLS listener (DoT or DoH) has a non-empty address, DNS_CERT and
@@ -154,6 +161,38 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("config: invalid DNS_QUERY_TIMEOUT %q: %w", qtRaw, err)
 	}
 	cfg.QueryTimeout = qt
+
+	// Control-plane API rate limit (requests/sec per source IP). Tolerant
+	// parse: a bad value falls back to the default rather than failing
+	// LoadConfig outright (matches the other numeric-knob-with-fallback
+	// pattern used here, since a malformed rate limit isn't worth crashing
+	// the whole daemon over). <= 0 (explicitly, e.g. "0") disables limiting.
+	const defaultAPIRate = 20
+	cfg.APIRate = defaultAPIRate
+	if raw := os.Getenv("DNS_API_RATE"); raw != "" {
+		if n, err := strconv.ParseFloat(raw, 64); err == nil {
+			cfg.APIRate = n
+		} else {
+			log.Printf("config: invalid DNS_API_RATE %q, using default %v", raw, defaultAPIRate)
+		}
+	}
+
+	// Control-plane API token-bucket burst capacity per source IP.
+	const defaultAPIBurst = 40
+	cfg.APIBurst = defaultAPIBurst
+	if raw := os.Getenv("DNS_API_BURST"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			cfg.APIBurst = n
+		} else {
+			log.Printf("config: invalid DNS_API_BURST %q, using default %d", raw, defaultAPIBurst)
+		}
+	}
+	// A burst <= 0 while rate limiting is enabled would make the limiter
+	// unusable (never lets a request through), so fall back to the sane
+	// default in that case too.
+	if cfg.APIRate > 0 && cfg.APIBurst <= 0 {
+		cfg.APIBurst = defaultAPIBurst
+	}
 
 	// TLS validation: cert+key required when any TLS listener is enabled.
 	tlsEnabled := cfg.ListenDoT != "" || cfg.ListenDoH != ""

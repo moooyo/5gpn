@@ -820,3 +820,147 @@ func TestNewControlServer_RequiresCertWhenEnabled(t *testing.T) {
 		t.Fatal("expected error when APIToken set but CertFile/KeyFile missing, got nil")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4 Task C1: per-source rate limiting
+// ---------------------------------------------------------------------------
+
+// newRateLimitedTestServer builds a ControlServer with a tight rate/burst so
+// tests can trip the limiter deterministically within a handful of calls.
+func newRateLimitedTestServer(t *testing.T, rate float64, burst int) (*ControlServer, string) {
+	t.Helper()
+	const token = "test-token"
+	certPath, keyPath := generateSelfSignedCert(t, t.TempDir())
+	cfg := Config{
+		APIToken: token,
+		CertFile: certPath,
+		KeyFile:  keyPath,
+		APIRate:  rate,
+		APIBurst: burst,
+	}
+	cs, err := NewControlServer(cfg, &Controller{})
+	if err != nil {
+		t.Fatalf("NewControlServer: %v", err)
+	}
+	if cs == nil {
+		t.Fatalf("NewControlServer returned nil for non-empty token")
+	}
+	return cs, token
+}
+
+// doAPIFrom is doAPI but with an explicit RemoteAddr, so tests can simulate
+// distinct source IPs against the per-source limiter.
+func doAPIFrom(cs *ControlServer, method, path, remoteAddr, token string, auth bool) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, path, nil)
+	r.RemoteAddr = remoteAddr
+	if auth {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	cs.srv.Handler.ServeHTTP(rec, r)
+	return rec
+}
+
+// TestRateLimitMiddleware_TripsAfterBurst confirms repeated hits from the
+// same source IP get 429 once the burst is exhausted.
+func TestRateLimitMiddleware_TripsAfterBurst(t *testing.T) {
+	cs, token := newRateLimitedTestServer(t, 1, 2)
+	const addr = "203.0.113.5:5555"
+
+	for i := 0; i < 2; i++ {
+		rec := doAPIFrom(cs, http.MethodGet, "/api/status", addr, token, true)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("call %d status = %d, want 200; body=%s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+
+	rec := doAPIFrom(cs, http.MethodGet, "/api/status", addr, token, true)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("3rd rapid call status = %d, want 429; body=%s", rec.Code, rec.Body.String())
+	}
+	if ra := rec.Header().Get("Retry-After"); ra == "" {
+		t.Errorf("Retry-After header missing on 429 response")
+	}
+	body := decodeJSON[map[string]string](t, rec)
+	if body["error"] == "" {
+		t.Errorf("expected non-empty error message on 429, got %+v", body)
+	}
+}
+
+// TestRateLimitMiddleware_DifferentSourceStillSucceeds confirms the limiter
+// is keyed per-source: a different RemoteAddr is unaffected by another
+// source's exhausted bucket.
+func TestRateLimitMiddleware_DifferentSourceStillSucceeds(t *testing.T) {
+	cs, token := newRateLimitedTestServer(t, 1, 2)
+
+	// Exhaust source A.
+	for i := 0; i < 2; i++ {
+		doAPIFrom(cs, http.MethodGet, "/api/status", "203.0.113.5:1", token, true)
+	}
+	if rec := doAPIFrom(cs, http.MethodGet, "/api/status", "203.0.113.5:1", token, true); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("source A 3rd call status = %d, want 429", rec.Code)
+	}
+
+	// Source B, brand new bucket, should still succeed.
+	rec := doAPIFrom(cs, http.MethodGet, "/api/status", "198.51.100.9:1", token, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("source B status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRateLimitMiddleware_FiresBeforeAuth proves the rate limiter wraps the
+// auth middleware: a request over the limit with NO bearer token still gets
+// 429 (not 401), because the limiter runs first.
+func TestRateLimitMiddleware_FiresBeforeAuth(t *testing.T) {
+	cs, _ := newRateLimitedTestServer(t, 1, 1)
+	const addr = "203.0.113.7:1"
+
+	// First call (unauthenticated) consumes the single token and gets 401.
+	rec1 := doAPIFrom(cs, http.MethodGet, "/api/status", addr, "", false)
+	if rec1.Code != http.StatusUnauthorized {
+		t.Fatalf("1st unauthenticated call status = %d, want 401; body=%s", rec1.Code, rec1.Body.String())
+	}
+
+	// Second call, still unauthenticated and still over the (now exhausted)
+	// limit, must get 429 -- proving the limiter fired before auth even ran
+	// (an auth-first order would yield 401 again here).
+	rec2 := doAPIFrom(cs, http.MethodGet, "/api/status", addr, "", false)
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("2nd unauthenticated call over limit status = %d, want 429; body=%s", rec2.Code, rec2.Body.String())
+	}
+}
+
+// TestRateLimitMiddleware_DisabledNeverLimits confirms APIRate<=0 disables
+// rate limiting entirely: many rapid calls from the same source never get
+// 429.
+func TestRateLimitMiddleware_DisabledNeverLimits(t *testing.T) {
+	cs, token := newRateLimitedTestServer(t, 0, 40)
+	const addr = "203.0.113.9:1"
+
+	for i := 0; i < 50; i++ {
+		rec := doAPIFrom(cs, http.MethodGet, "/api/status", addr, token, true)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("call %d with rate limiting disabled status = %d, want 200; body=%s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// TestRateLimitMiddleware_DoesNotApplyToSPA confirms only /api/* is
+// rate-limited -- the SPA at "/" is unaffected even after the API bucket for
+// that source is exhausted.
+func TestRateLimitMiddleware_DoesNotApplyToSPA(t *testing.T) {
+	cs, token := newRateLimitedTestServer(t, 1, 1)
+	const addr = "203.0.113.11:1"
+
+	// Exhaust the API bucket for this source.
+	doAPIFrom(cs, http.MethodGet, "/api/status", addr, token, true)
+	if rec := doAPIFrom(cs, http.MethodGet, "/api/status", addr, token, true); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("API call over limit status = %d, want 429", rec.Code)
+	}
+
+	// The SPA route must still serve normally from the same source.
+	rec := doAPIFrom(cs, http.MethodGet, "/", addr, token, false)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("SPA status = %d, want 200 (not rate-limited); body=%s", rec.Code, rec.Body.String())
+	}
+}
