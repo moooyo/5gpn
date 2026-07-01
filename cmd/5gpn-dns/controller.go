@@ -20,18 +20,20 @@ import (
 // descriptive message is preserved: errors.Is(err, ErrInvalidRule) still holds.
 var ErrInvalidRule = errors.New("invalid rule")
 
-// Stats is a point-in-time snapshot of engine verdict counters plus the
+// Stats is a point-in-time snapshot of engine reason counters plus the
 // current cache size. It is the read model the Phase-3 HTTP API will expose.
 type Stats struct {
-	Total        uint64 `json:"total"`
-	Direct       uint64 `json:"direct"`
-	Proxy        uint64 `json:"proxy"`
-	Block        uint64 `json:"block"`
-	CacheEntries int    `json:"cache_entries"`
-	ChinaOK      uint64 `json:"china_ok"`
-	ChinaErr     uint64 `json:"china_err"`
-	TrustOK      uint64 `json:"trust_ok"`
-	TrustErr     uint64 `json:"trust_err"`
+	Total           uint64 `json:"total"`
+	Adblock         uint64 `json:"adblock"`
+	ForceDirect     uint64 `json:"force_direct"`
+	Blacklist       uint64 `json:"blacklist"`
+	ChnrouteCN      uint64 `json:"chnroute_cn"`
+	ChnrouteForeign uint64 `json:"chnroute_foreign"`
+	CacheEntries    int    `json:"cache_entries"`
+	ChinaOK         uint64 `json:"china_ok"`
+	ChinaErr        uint64 `json:"china_err"`
+	TrustOK         uint64 `json:"trust_ok"`
+	TrustErr        uint64 `json:"trust_err"`
 }
 
 // Controller is a thin facade over subscription management, manual rule-list
@@ -203,16 +205,18 @@ func (h *Handler) lookupArbitrate(ctx context.Context, name string) ([]string, s
 	return ips, upstream
 }
 
-// Stats returns a snapshot of the engine's verdict counters and current cache
+// Stats returns a snapshot of the engine's reason counters and current cache
 // size. Safe to call even when the Controller was constructed with nil
 // stats/cacheLen (e.g. in tests) — the corresponding fields are left at zero.
 func (c *Controller) Stats() Stats {
 	var s Stats
 	if c.stats != nil {
 		s.Total = c.stats.total.Load()
-		s.Direct = c.stats.direct.Load()
-		s.Proxy = c.stats.proxy.Load()
-		s.Block = c.stats.block.Load()
+		s.Adblock = c.stats.adblock.Load()
+		s.ForceDirect = c.stats.forceDirect.Load()
+		s.Blacklist = c.stats.blacklist.Load()
+		s.ChnrouteCN = c.stats.chnrouteCN.Load()
+		s.ChnrouteForeign = c.stats.chnrouteForeign.Load()
 		s.ChinaOK = c.stats.chinaOK.Load()
 		s.ChinaErr = c.stats.chinaErr.Load()
 		s.TrustOK = c.stats.trustOK.Load()

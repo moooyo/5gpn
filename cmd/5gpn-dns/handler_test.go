@@ -640,8 +640,8 @@ func TestHandlerTimeoutZeroDoesNotSERVFAIL(t *testing.T) {
 
 // ── Stats counters ───────────────────────────────────────────────────────────
 
-// TestHandlerStatsAdblockBumpsBlock: an adblock-matched A query bumps Total and Block.
-func TestHandlerStatsAdblockBumpsBlock(t *testing.T) {
+// TestHandlerStatsAdblockBumpsAdblock: an adblock-matched A query bumps Total and Adblock.
+func TestHandlerStatsAdblockBumpsAdblock(t *testing.T) {
 	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
 	h.stats = &statsCounters{}
 
@@ -653,19 +653,27 @@ func TestHandlerStatsAdblockBumpsBlock(t *testing.T) {
 	if got := h.stats.total.Load(); got != 1 {
 		t.Errorf("Total = %d, want 1", got)
 	}
-	if got := h.stats.block.Load(); got != 1 {
-		t.Errorf("Block = %d, want 1", got)
+	if got := h.stats.adblock.Load(); got != 1 {
+		t.Errorf("Adblock = %d, want 1", got)
 	}
-	if got := h.stats.direct.Load(); got != 0 {
-		t.Errorf("Direct = %d, want 0", got)
+	if got := h.stats.forceDirect.Load(); got != 0 {
+		t.Errorf("ForceDirect = %d, want 0", got)
 	}
-	if got := h.stats.proxy.Load(); got != 0 {
-		t.Errorf("Proxy = %d, want 0", got)
+	if got := h.stats.blacklist.Load(); got != 0 {
+		t.Errorf("Blacklist = %d, want 0", got)
+	}
+	if got := h.stats.chnrouteCN.Load(); got != 0 {
+		t.Errorf("ChnrouteCN = %d, want 0", got)
+	}
+	if got := h.stats.chnrouteForeign.Load(); got != 0 {
+		t.Errorf("ChnrouteForeign = %d, want 0", got)
 	}
 }
 
-// TestHandlerStatsBlacklistBumpsProxy: a blacklist-matched A query bumps Total and Proxy.
-func TestHandlerStatsBlacklistBumpsProxy(t *testing.T) {
+// TestHandlerStatsBlacklistBumpsBlacklist: a blacklist-matched A query bumps Total and Blacklist
+// (not the coarser "proxy" bucket — blacklist/sinkhole and chnroute-foreign/routed must be
+// distinguishable).
+func TestHandlerStatsBlacklistBumpsBlacklist(t *testing.T) {
 	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
 	h.stats = &statsCounters{}
 
@@ -677,14 +685,17 @@ func TestHandlerStatsBlacklistBumpsProxy(t *testing.T) {
 	if got := h.stats.total.Load(); got != 1 {
 		t.Errorf("Total = %d, want 1", got)
 	}
-	if got := h.stats.proxy.Load(); got != 1 {
-		t.Errorf("Proxy = %d, want 1", got)
+	if got := h.stats.blacklist.Load(); got != 1 {
+		t.Errorf("Blacklist = %d, want 1", got)
+	}
+	if got := h.stats.chnrouteForeign.Load(); got != 0 {
+		t.Errorf("ChnrouteForeign = %d, want 0", got)
 	}
 }
 
-// TestHandlerStatsDefaultCNKeptBumpsDirect: a default A query resolved to a CN IP
-// (kept as-is) bumps Total and Direct.
-func TestHandlerStatsDefaultCNKeptBumpsDirect(t *testing.T) {
+// TestHandlerStatsDefaultCNKeptBumpsChnrouteCN: a default A query resolved to a CN IP
+// (kept as-is) bumps Total and ChnrouteCN (not force-direct, which is a name-only match).
+func TestHandlerStatsDefaultCNKeptBumpsChnrouteCN(t *testing.T) {
 	china := &fakeExchanger{reply: makeAMsg("example.test", "1.2.3.4")}
 	trust := &fakeExchanger{reply: makeAMsg("example.test", "9.9.9.9")}
 	h := newTestHandler(t, china, trust)
@@ -698,17 +709,20 @@ func TestHandlerStatsDefaultCNKeptBumpsDirect(t *testing.T) {
 	if got := h.stats.total.Load(); got != 1 {
 		t.Errorf("Total = %d, want 1", got)
 	}
-	if got := h.stats.direct.Load(); got != 1 {
-		t.Errorf("Direct = %d, want 1", got)
+	if got := h.stats.chnrouteCN.Load(); got != 1 {
+		t.Errorf("ChnrouteCN = %d, want 1", got)
 	}
-	if got := h.stats.proxy.Load(); got != 0 {
-		t.Errorf("Proxy = %d, want 0", got)
+	if got := h.stats.chnrouteForeign.Load(); got != 0 {
+		t.Errorf("ChnrouteForeign = %d, want 0", got)
+	}
+	if got := h.stats.forceDirect.Load(); got != 0 {
+		t.Errorf("ForceDirect = %d, want 0", got)
 	}
 }
 
-// TestHandlerStatsDefaultForeignRewrittenBumpsProxy: a default A query resolved to a
-// foreign IP (rewritten to gateway) bumps Total and Proxy.
-func TestHandlerStatsDefaultForeignRewrittenBumpsProxy(t *testing.T) {
+// TestHandlerStatsDefaultForeignRewrittenBumpsChnrouteForeign: a default A query resolved to a
+// foreign IP (rewritten to gateway) bumps Total and ChnrouteForeign.
+func TestHandlerStatsDefaultForeignRewrittenBumpsChnrouteForeign(t *testing.T) {
 	china := &fakeExchanger{reply: makeAMsg("example.test", "9.9.9.9")}
 	trust := &fakeExchanger{reply: makeAMsg("example.test", "9.9.9.9")}
 	h := newTestHandler(t, china, trust)
@@ -722,13 +736,20 @@ func TestHandlerStatsDefaultForeignRewrittenBumpsProxy(t *testing.T) {
 	if got := h.stats.total.Load(); got != 1 {
 		t.Errorf("Total = %d, want 1", got)
 	}
-	if got := h.stats.proxy.Load(); got != 1 {
-		t.Errorf("Proxy = %d, want 1", got)
+	if got := h.stats.chnrouteForeign.Load(); got != 1 {
+		t.Errorf("ChnrouteForeign = %d, want 1", got)
+	}
+	if got := h.stats.chnrouteCN.Load(); got != 0 {
+		t.Errorf("ChnrouteCN = %d, want 0", got)
+	}
+	if got := h.stats.blacklist.Load(); got != 0 {
+		t.Errorf("Blacklist = %d, want 0", got)
 	}
 }
 
-// TestHandlerStatsForceDirectBumpsDirect: a force-direct-matched A query bumps Total and Direct.
-func TestHandlerStatsForceDirectBumpsDirect(t *testing.T) {
+// TestHandlerStatsForceDirectBumpsForceDirect: a force-direct-matched A query bumps Total and
+// ForceDirect (not chnroute-cn, which is the default-path IP-arbitration reason).
+func TestHandlerStatsForceDirectBumpsForceDirect(t *testing.T) {
 	china := &fakeExchanger{reply: makeAMsg("direct.test", "9.9.9.9")}
 	trust := &fakeExchanger{reply: makeAMsg("direct.test", "9.9.9.9")}
 	h := newTestHandler(t, china, trust)
@@ -742,8 +763,11 @@ func TestHandlerStatsForceDirectBumpsDirect(t *testing.T) {
 	if got := h.stats.total.Load(); got != 1 {
 		t.Errorf("Total = %d, want 1", got)
 	}
-	if got := h.stats.direct.Load(); got != 1 {
-		t.Errorf("Direct = %d, want 1", got)
+	if got := h.stats.forceDirect.Load(); got != 1 {
+		t.Errorf("ForceDirect = %d, want 1", got)
+	}
+	if got := h.stats.chnrouteCN.Load(); got != 0 {
+		t.Errorf("ChnrouteCN = %d, want 0", got)
 	}
 }
 

@@ -401,12 +401,16 @@ def op_status():
             % (html.escape(str(data.get("version", "?"))), up_h, up_m)
         )
         lines.append(
-            "📈 查询：总 %s · 直连 %s · 代理 %s · 拦截 %s · 缓存 %s"
+            "📈 查询：总 %s · 直连 %s（强制 %s + 国内 %s）· 代理 %s（黑名单 %s + 境外 %s）· 广告拦截 %s · 缓存 %s"
             % (
                 stats.get("total", 0),
-                stats.get("direct", 0),
-                stats.get("proxy", 0),
-                stats.get("block", 0),
+                stats.get("force_direct", 0) + stats.get("chnroute_cn", 0),
+                stats.get("force_direct", 0),
+                stats.get("chnroute_cn", 0),
+                stats.get("blacklist", 0) + stats.get("chnroute_foreign", 0),
+                stats.get("blacklist", 0),
+                stats.get("chnroute_foreign", 0),
+                stats.get("adblock", 0),
                 stats.get("cache_entries", 0),
             )
         )

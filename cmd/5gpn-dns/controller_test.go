@@ -232,9 +232,11 @@ func TestControllerReload(t *testing.T) {
 func TestControllerStatsSnapshot(t *testing.T) {
 	stats := &statsCounters{}
 	stats.total.Store(10)
-	stats.direct.Store(4)
-	stats.proxy.Store(3)
-	stats.block.Store(2)
+	stats.adblock.Store(5)
+	stats.forceDirect.Store(4)
+	stats.blacklist.Store(3)
+	stats.chnrouteCN.Store(2)
+	stats.chnrouteForeign.Store(1)
 	stats.chinaOK.Store(1)
 	stats.chinaErr.Store(1)
 	stats.trustOK.Store(1)
@@ -246,7 +248,7 @@ func TestControllerStatsSnapshot(t *testing.T) {
 	got := c.Stats()
 
 	want := Stats{
-		Total: 10, Direct: 4, Proxy: 3, Block: 2,
+		Total: 10, Adblock: 5, ForceDirect: 4, Blacklist: 3, ChnrouteCN: 2, ChnrouteForeign: 1,
 		CacheEntries: 42,
 		ChinaOK:      1, ChinaErr: 1, TrustOK: 1, TrustErr: 1,
 	}

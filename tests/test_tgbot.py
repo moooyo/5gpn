@@ -205,13 +205,18 @@ class TestApiOps(unittest.TestCase):
         self._install(lambda method, path, body=None, query=None: (True, {
             "version": "0.3.0",
             "uptime_seconds": 3725,
-            "stats": {"total": 100, "direct": 60, "proxy": 30, "block": 10,
+            "stats": {"total": 100, "adblock": 10, "force_direct": 25, "blacklist": 15,
+                      "chnroute_cn": 35, "chnroute_foreign": 15,
                       "cache_entries": 42, "china_ok": 59, "china_err": 1,
                       "trust_ok": 29, "trust_err": 1},
         }))
         out = tgbot.op_status()
         self.assertIn("0.3.0", out)
         self.assertIn("100", out)
+        # Direct = force_direct(25) + chnroute_cn(35) = 60; Proxy = blacklist(15) + chnroute_foreign(15) = 30.
+        self.assertIn("60", out)
+        self.assertIn("30", out)
+        self.assertIn("10", out)
 
     def test_status_notes_api_down_without_crashing(self):
         self._install(lambda method, path, body=None, query=None: (False, "control API unreachable (https://127.0.0.1:9443)"))

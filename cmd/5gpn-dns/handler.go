@@ -19,21 +19,32 @@ type ruleSnapshot struct {
 	CN        *Chnroute
 }
 
-// statsCounters holds per-verdict query counters, updated with atomics so
+// statsCounters holds per-reason query counters, updated with atomics so
 // they can be bumped from the hot query path without a mutex. All fields are
 // accessed via sync/atomic; zero value is valid (all counters start at 0).
 // A nil *statsCounters is valid too — callers must guard increments (see
 // Handler.bump*) so Handlers built without stats wiring (e.g. existing unit
 // tests that construct a Handler literal) never panic.
+//
+// The five reason counters replace the earlier coarse direct/proxy/block
+// verdict counters, which conflated distinct decisions the control console
+// needs to tell apart:
+//   - adblock:         step-3 adblock match (verdict "block").
+//   - forceDirect:     step-4 name-only "always direct" match (verdict "direct").
+//   - blacklist:       step-5 name-only sinkhole match (verdict "proxy").
+//   - chnrouteCN:      step-6 default path, resolved IP is a CN address kept as-is (verdict "direct").
+//   - chnrouteForeign: step-6 default path, resolved IP was foreign and rewritten to GatewayIP (verdict "proxy").
 type statsCounters struct {
-	total    atomic.Uint64
-	direct   atomic.Uint64
-	proxy    atomic.Uint64
-	block    atomic.Uint64
-	chinaOK  atomic.Uint64
-	chinaErr atomic.Uint64
-	trustOK  atomic.Uint64
-	trustErr atomic.Uint64
+	total           atomic.Uint64
+	adblock         atomic.Uint64
+	forceDirect     atomic.Uint64
+	blacklist       atomic.Uint64
+	chnrouteCN      atomic.Uint64
+	chnrouteForeign atomic.Uint64
+	chinaOK         atomic.Uint64
+	chinaErr        atomic.Uint64
+	trustOK         atomic.Uint64
+	trustErr        atomic.Uint64
 }
 
 // Handler is a dns.Handler that implements the 5gpn query dispatch policy:
@@ -75,34 +86,51 @@ func (h *Handler) bumpTotal() {
 	h.stats.total.Add(1)
 }
 
-// bumpDirect increments the direct-verdict counter. Safe to call when h.stats is nil.
-func (h *Handler) bumpDirect() {
+// bumpAdblock increments the adblock-reason counter. Safe to call when h.stats is nil.
+func (h *Handler) bumpAdblock() {
 	if h.stats == nil {
 		return
 	}
-	h.stats.direct.Add(1)
+	h.stats.adblock.Add(1)
 }
 
-// bumpProxy increments the proxy-verdict counter. Safe to call when h.stats is nil.
-func (h *Handler) bumpProxy() {
+// bumpForceDirect increments the force-direct-reason counter. Safe to call when h.stats is nil.
+func (h *Handler) bumpForceDirect() {
 	if h.stats == nil {
 		return
 	}
-	h.stats.proxy.Add(1)
+	h.stats.forceDirect.Add(1)
 }
 
-// bumpBlock increments the block-verdict counter. Safe to call when h.stats is nil.
-func (h *Handler) bumpBlock() {
+// bumpBlacklist increments the blacklist-reason counter. Safe to call when h.stats is nil.
+func (h *Handler) bumpBlacklist() {
 	if h.stats == nil {
 		return
 	}
-	h.stats.block.Add(1)
+	h.stats.blacklist.Add(1)
+}
+
+// bumpChnrouteCN increments the chnroute-cn-reason counter. Safe to call when h.stats is nil.
+func (h *Handler) bumpChnrouteCN() {
+	if h.stats == nil {
+		return
+	}
+	h.stats.chnrouteCN.Add(1)
+}
+
+// bumpChnrouteForeign increments the chnroute-foreign-reason counter. Safe to call when h.stats is nil.
+func (h *Handler) bumpChnrouteForeign() {
+	if h.stats == nil {
+		return
+	}
+	h.stats.chnrouteForeign.Add(1)
 }
 
 // bumpDefaultVerdict inspects a step-6 (default-path) A response and bumps
-// Direct if every A record is a kept CN address, or Proxy if any A record was
-// rewritten to GatewayIP. Safe to call when h.stats is nil or resp has no
-// Answer (e.g. NODATA — counted as neither, matching "no rewrite occurred").
+// ChnrouteCN if every A record is a kept CN address, or ChnrouteForeign if any
+// A record was rewritten to GatewayIP. Safe to call when h.stats is nil or
+// resp has no Answer (e.g. NODATA — counted as neither, matching "no rewrite
+// occurred").
 func (h *Handler) bumpDefaultVerdict(resp *dns.Msg) {
 	if h.stats == nil || resp == nil {
 		return
@@ -113,12 +141,12 @@ func (h *Handler) bumpDefaultVerdict(resp *dns.Msg) {
 			continue
 		}
 		if h.GatewayIP != nil && a.A.Equal(h.GatewayIP) {
-			h.bumpProxy()
+			h.bumpChnrouteForeign()
 			return
 		}
 	}
 	if len(resp.Answer) > 0 {
-		h.bumpDirect()
+		h.bumpChnrouteCN()
 	}
 }
 
@@ -255,7 +283,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 
 	// ── Step 3: adblock ──────────────────────────────────────────────────────
 	if verdict.Reason == "adblock" {
-		h.bumpBlock()
+		h.bumpAdblock()
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeNameError)
 		return m
@@ -264,7 +292,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 	// ── Step 4: force-direct ─────────────────────────────────────────────────
 	if verdict.Reason == "force-direct" {
 		if isA {
-			h.bumpDirect()
+			h.bumpForceDirect()
 			if cached, ok := h.cacheGet(name, q.Qtype); ok {
 				cached.Id = r.Id
 				return cached
@@ -284,7 +312,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 	// ── Step 5: blacklist ────────────────────────────────────────────────────
 	if verdict.Reason == "blacklist" {
 		if isA {
-			h.bumpProxy()
+			h.bumpBlacklist()
 			return h.gatewayReply(r)
 		}
 		// Non-A blacklist: forward to Trust (blacklist is A-specific semantics).
