@@ -19,3 +19,9 @@ __pycache__/
 # Frontend build output (Phase 3 web UI; built in CI)
 /web/node_modules/
 /web/dist/
+
+# Phase 3 control-plane SPA (cmd/5gpn-dns/web/dist) — built in CI via vite build;
+# committed placeholder index.html keeps `go build` (go:embed) working pre-frontend-build.
+/cmd/5gpn-dns/web/node_modules/
+/cmd/5gpn-dns/web/dist/*
+!/cmd/5gpn-dns/web/dist/index.html

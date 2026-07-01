@@ -13,6 +13,7 @@ var allDNSEnvKeys = []string{
 	"DNS_CHINA", "DNS_TRUST", "DNS_RULES_DIR", "DNS_CHNROUTE",
 	"DNS_CACHE_SIZE", "DNS_TTL_MIN", "DNS_TTL_MAX", "DNS_QUERY_TIMEOUT",
 	"DNS_SUBSCRIPTIONS",
+	"DNS_LISTEN_API", "DNS_API_TOKEN",
 }
 
 // clearAllDNSEnv unsets all DNS_ vars and restores them on t.Cleanup.
@@ -108,6 +109,14 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.SubscriptionsFile != "/etc/5gpn/subscriptions.json" {
 		t.Errorf("SubscriptionsFile default = %q, want %q", cfg.SubscriptionsFile, "/etc/5gpn/subscriptions.json")
 	}
+
+	// Default control-plane API listener; token has no default (empty).
+	if cfg.ListenAPI != ":9443" {
+		t.Errorf("ListenAPI default = %q, want %q", cfg.ListenAPI, ":9443")
+	}
+	if cfg.APIToken != "" {
+		t.Errorf("APIToken default = %q, want empty", cfg.APIToken)
+	}
 }
 
 func TestLoadConfig_EnvOverride(t *testing.T) {
@@ -126,6 +135,8 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	t.Setenv("DNS_QUERY_TIMEOUT", "3s")
 	t.Setenv("DNS_CACHE_SIZE", "512")
 	t.Setenv("DNS_SUBSCRIPTIONS", "/opt/5gpn/subs.json")
+	t.Setenv("DNS_LISTEN_API", ":9444")
+	t.Setenv("DNS_API_TOKEN", "s3cr3t")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -158,6 +169,35 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	}
 	if cfg.SubscriptionsFile != "/opt/5gpn/subs.json" {
 		t.Errorf("SubscriptionsFile = %q, want %q", cfg.SubscriptionsFile, "/opt/5gpn/subs.json")
+	}
+	if cfg.ListenAPI != ":9444" {
+		t.Errorf("ListenAPI = %q, want %q", cfg.ListenAPI, ":9444")
+	}
+	if cfg.APIToken != "s3cr3t" {
+		t.Errorf("APIToken = %q, want %q", cfg.APIToken, "s3cr3t")
+	}
+}
+
+// TestLoadConfig_APITokenEmptyByDefault confirms DNS_API_TOKEN has no default:
+// when unset the control plane is left disabled (empty token), distinct from
+// the listener defaults which always resolve to a non-empty address.
+func TestLoadConfig_APITokenEmptyByDefault(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	// DNS_API_TOKEN intentionally left unset.
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.APIToken != "" {
+		t.Errorf("APIToken = %q, want empty when DNS_API_TOKEN unset", cfg.APIToken)
+	}
+	// ListenAPI still defaults even though the token is empty (NewControlServer
+	// is what decides disablement, not LoadConfig).
+	if cfg.ListenAPI != ":9443" {
+		t.Errorf("ListenAPI = %q, want %q", cfg.ListenAPI, ":9443")
 	}
 }
 
