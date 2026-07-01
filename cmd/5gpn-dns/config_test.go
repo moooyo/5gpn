@@ -14,6 +14,7 @@ var allDNSEnvKeys = []string{
 	"DNS_CACHE_SIZE", "DNS_TTL_MIN", "DNS_TTL_MAX", "DNS_QUERY_TIMEOUT",
 	"DNS_SUBSCRIPTIONS",
 	"DNS_LISTEN_API", "DNS_API_TOKEN",
+	"DNS_STATS_FILE",
 }
 
 // clearAllDNSEnv unsets all DNS_ vars and restores them on t.Cleanup.
@@ -117,6 +118,11 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.APIToken != "" {
 		t.Errorf("APIToken default = %q, want empty", cfg.APIToken)
 	}
+
+	// Default stats persistence file (Phase 4 Task A2).
+	if cfg.StatsFile != "/etc/5gpn/stats.json" {
+		t.Errorf("StatsFile default = %q, want %q", cfg.StatsFile, "/etc/5gpn/stats.json")
+	}
 }
 
 func TestLoadConfig_EnvOverride(t *testing.T) {
@@ -137,6 +143,7 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	t.Setenv("DNS_SUBSCRIPTIONS", "/opt/5gpn/subs.json")
 	t.Setenv("DNS_LISTEN_API", ":9444")
 	t.Setenv("DNS_API_TOKEN", "s3cr3t")
+	t.Setenv("DNS_STATS_FILE", "/opt/5gpn/stats.json")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -175,6 +182,9 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	}
 	if cfg.APIToken != "s3cr3t" {
 		t.Errorf("APIToken = %q, want %q", cfg.APIToken, "s3cr3t")
+	}
+	if cfg.StatsFile != "/opt/5gpn/stats.json" {
+		t.Errorf("StatsFile = %q, want %q", cfg.StatsFile, "/opt/5gpn/stats.json")
 	}
 }
 

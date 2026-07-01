@@ -56,6 +56,14 @@ func main() {
 		stats:     &statsCounters{},
 	}
 
+	// Restore cumulative query-stat counters from a previous run, if any.
+	// A missing file (fresh install / first boot) is normal and silent; only
+	// a corrupt file is logged, and in that case counters simply start at
+	// zero rather than crashing the resolver.
+	if err := LoadStats(cfg.StatsFile, h.stats); err != nil {
+		log.Printf("stats: %v — starting with zero counters", err)
+	}
+
 	// reload rebuilds the rule sets from disk and atomically swaps them into
 	// the live Handler. Shared by the SIGHUP handler, the SubManager (fires
 	// after a subscription cache file changes), and the Controller (fires
@@ -102,6 +110,11 @@ func main() {
 	if subMgr != nil {
 		go subMgr.Run(ctx)
 	}
+
+	// Phase 4 Task A2: periodically persist stats + do a final save on shutdown
+	// (triggered by ctx being cancelled below). Best-effort — RunStatsPersister
+	// never crashes the resolver on a save failure.
+	go RunStatsPersister(ctx, cfg.StatsFile, h.stats, 60*time.Second)
 
 	// ── Phase 3: control-plane HTTPS API (:9443, bearer-token) ────────────────
 	// NewControlServer returns (nil, nil) when DNS_API_TOKEN is empty: the

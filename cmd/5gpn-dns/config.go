@@ -48,6 +48,9 @@ type Config struct {
 	ListenAPI string // default :9443 (TLS); control plane is disabled unless APIToken is set
 	APIToken  string // bearer token for /api/*; no default — empty means disabled
 
+	// Phase 4 Task A2: query-stat counter persistence.
+	StatsFile string // path for cumulative stats snapshot; empty disables persistence
+
 	// Cache.
 	CacheSize int // max entries (0 → use default 4096)
 
@@ -77,6 +80,7 @@ type Config struct {
 //	DNS_SUBSCRIPTIONS   /etc/5gpn/subscriptions.json
 //	DNS_LISTEN_API      :9443
 //	DNS_API_TOKEN       (none — control plane disabled unless set)
+//	DNS_STATS_FILE      /etc/5gpn/stats.json (empty disables persistence)
 //
 // Empty listener strings disable that server.
 // If any TLS listener (DoT or DoH) has a non-empty address, DNS_CERT and
@@ -94,6 +98,7 @@ func LoadConfig() (Config, error) {
 		SubscriptionsFile: envOr("DNS_SUBSCRIPTIONS", "/etc/5gpn/subscriptions.json"),
 		ListenAPI:         envListen("DNS_LISTEN_API", ":9443"),
 		APIToken:          os.Getenv("DNS_API_TOKEN"),
+		StatsFile:         envListen("DNS_STATS_FILE", "/etc/5gpn/stats.json"),
 	}
 
 	// Gateway IP.
