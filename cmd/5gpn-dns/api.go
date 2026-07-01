@@ -61,7 +61,7 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/", s.rateLimitMiddleware(s.authMiddleware(s.apiMux())))
+	mux.Handle("/api/", s.rateLimitMiddleware(s.auditMiddleware(s.authMiddleware(s.apiMux()))))
 	mux.Handle("/", webUI)
 
 	s.srv = &http.Server{

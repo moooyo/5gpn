@@ -1,0 +1,101 @@
+package main
+
+import (
+	"log"
+	"net"
+	"net/http"
+)
+
+// statusRecorder wraps an http.ResponseWriter to capture the status code
+// that was actually written, so middleware running after the handler (e.g.
+// auditMiddleware) can report the real outcome. If the handler never calls
+// WriteHeader explicitly (e.g. it only calls Write), the status defaults to
+// http.StatusOK, matching net/http's own behavior.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+// WriteHeader records status and passes it through to the underlying writer.
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+// Write passes through to the underlying writer. It does not need to
+// override behavior: if the handler writes without calling WriteHeader
+// first, net/http's ResponseWriter implicitly sends a 200, which matches
+// statusRecorder's zero-value default below.
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	return r.ResponseWriter.Write(b)
+}
+
+// resultStatus returns the status to report: whatever was recorded, or 200
+// if WriteHeader was never called.
+func (r *statusRecorder) resultStatus() int {
+	if r.status == 0 {
+		return http.StatusOK
+	}
+	return r.status
+}
+
+// auditMiddleware records a single-line audit entry for every mutating
+// control-plane request (POST/PUT/PATCH/DELETE), via the standard log
+// package (stderr -> journald under systemd, consistent with the rest of
+// the codebase; see CLAUDE.md — no new file/rotation infra).
+//
+// Only method/path/src/status are logged — never the request body or the
+// bearer token. For routes like POST /api/subscriptions the created
+// resource's id lives in the body, not the path; that's an accepted
+// granularity trade-off (see Phase 4 Task C2 design) rather than a reason to
+// inspect and log the body.
+//
+// GET/HEAD requests are reads, not mutations, and are not audited at all —
+// this keeps the audit log focused on actual state changes an operator
+// would want to review.
+//
+// It is wired OUTSIDE authMiddleware (see NewControlServer) so a rejected
+// (401) mutation attempt is still recorded — an unauthenticated attempt to
+// mutate state is itself a security-relevant signal — while staying INSIDE
+// rateLimitMiddleware so a request dropped for being rate-limited (which
+// never reaches here) doesn't also get an audit line.
+//
+// A logging failure must never break the request: log.Printf on a plain
+// stderr writer doesn't return an error the caller can act on, and this
+// middleware does no I/O of its own beyond that, so there is nothing here
+// that can panic or block the response path.
+func (s *ControlServer) auditMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isMutatingMethod(r.Method) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		rec := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
+
+		log.Printf("audit method=%s path=%s src=%s status=%d", r.Method, r.URL.Path, auditSource(r), rec.resultStatus())
+	})
+}
+
+// isMutatingMethod reports whether method represents a state-changing
+// control-plane request worth auditing.
+func isMutatingMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+// auditSource extracts the host part of r.RemoteAddr for the audit "src="
+// field, falling back to the raw RemoteAddr if it has no port (e.g. some
+// unit tests, or an unexpected upstream proxy format).
+func auditSource(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
