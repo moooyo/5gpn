@@ -15,10 +15,15 @@ import (
 // Stats is a point-in-time snapshot of engine verdict counters plus the
 // current cache size. It is the read model the Phase-3 HTTP API will expose.
 type Stats struct {
-	Total, Direct, Proxy, Block uint64
-	CacheEntries                int
-	ChinaOK, ChinaErr           uint64
-	TrustOK, TrustErr           uint64
+	Total        uint64 `json:"total"`
+	Direct       uint64 `json:"direct"`
+	Proxy        uint64 `json:"proxy"`
+	Block        uint64 `json:"block"`
+	CacheEntries int    `json:"cache_entries"`
+	ChinaOK      uint64 `json:"china_ok"`
+	ChinaErr     uint64 `json:"china_err"`
+	TrustOK      uint64 `json:"trust_ok"`
+	TrustErr     uint64 `json:"trust_err"`
 }
 
 // Controller is a thin facade over subscription management, manual rule-list
@@ -95,11 +100,11 @@ func (c *Controller) Reload() error {
 // the IPs the lookup observed and which upstream group produced them (for
 // the default/arbitrated case only).
 type LookupResult struct {
-	Name     string
-	Verdict  string
-	Reason   string
-	IPs      []string
-	Upstream string
+	Name     string   `json:"name"`
+	Verdict  string   `json:"verdict"`
+	Reason   string   `json:"reason"`
+	IPs      []string `json:"ips"`
+	Upstream string   `json:"upstream"`
 }
 
 // Lookup runs the same classification the query pipeline uses for name, for

@@ -100,10 +100,10 @@ func (s *Subscription) UnmarshalJSON(data []byte) error {
 
 // UpdateResult reports the outcome of updating a single subscription.
 type UpdateResult struct {
-	ID      string
-	OK      bool
-	Entries int
-	Err     string
+	ID      string `json:"id"`
+	OK      bool   `json:"ok"`
+	Entries int    `json:"entries"`
+	Err     string `json:"err"`
 }
 
 // subscriptionsFile is the top-level shape of subscriptions.json.
