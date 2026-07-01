@@ -96,14 +96,24 @@ func main() {
 		log.Printf("subscriptions: %v — continuing without subscription manager", err)
 		subMgr = nil
 	}
-	// ctrl is the facade the Phase 3 HTTP control-plane API will consume; for
-	// Phase 2 it is constructed (so tgbot/API wiring can attach later) but not
-	// yet served.
+	// ctrl is the facade the Phase 3 HTTP control-plane API consumes.
 	ctrl := NewController(subMgr, reload, cfg.RulesDir, h.stats, h.Cache.Len, h)
-	_ = ctrl // Phase 3 API server consumes ctrl
 
 	if subMgr != nil {
 		go subMgr.Run(ctx)
+	}
+
+	// ── Phase 3: control-plane HTTPS API (:9443, bearer-token) ────────────────
+	// NewControlServer returns (nil, nil) when DNS_API_TOKEN is empty: the
+	// control plane is disabled rather than served without authentication.
+	controlSrv, err := NewControlServer(cfg, ctrl)
+	if err != nil {
+		log.Fatalf("control server: %v", err)
+	}
+	if controlSrv != nil {
+		if err := controlSrv.Start(); err != nil {
+			log.Fatalf("control server start: %v", err)
+		}
 	}
 
 	// ── Start servers ─────────────────────────────────────────────────────────
@@ -121,6 +131,11 @@ func main() {
 		orDisabled(cfg.ListenPlain),
 		orDisabled(cfg.ListenDebug),
 	)
+	if controlSrv != nil {
+		log.Printf("control API listening on %s (bearer-token)", cfg.ListenAPI)
+	} else {
+		log.Printf("control API disabled: DNS_API_TOKEN not set")
+	}
 
 	// ── Block until SIGINT / SIGTERM ──────────────────────────────────────────
 	stopCh := make(chan os.Signal, 1)
@@ -131,6 +146,9 @@ func main() {
 	cancel() // stop the subscription manager's ticker loops
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
+	if controlSrv != nil {
+		controlSrv.Shutdown(shutdownCtx)
+	}
 	servers.Shutdown(shutdownCtx)
 	log.Println("shutdown complete")
 }
