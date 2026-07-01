@@ -16,40 +16,47 @@ Security model:
   * Only numeric Telegram IDs in TGBOT_ADMINS / .tgbot_admins may operate the
     bot; every other update is ignored (except /id, which only reveals the
     caller's own id so an admin can bootstrap the allowlist).
-  * Every operation maps to a fixed argv list executed WITHOUT a shell. The
-    only user-supplied value (a domain) is validated against a strict regex
-    before it ever reaches install.sh, which validates it again.
+  * Rule/list operations (add/del/list forced-proxy domains, refresh
+    subscriptions, status stats) go through the 5gpn-dns control-plane REST
+    API on 127.0.0.1:9443 (see api_call()), authenticated with a bearer token
+    (DNS_API_TOKEN). The bot and the API server are the same box; only
+    service restarts, logs, cert renewal, and the iOS QR stay local
+    (systemctl / journalctl / certbot / qrencode are not part of the API).
+  * The only user-supplied value routed to the API (a domain) is validated
+    against a strict regex before it is ever sent.
 
 Config / paths (override CONF_DIR via env if needed):
   /etc/5gpn/.tgbot_token     bot token (fallback to TGBOT_TOKEN env)
   /etc/5gpn/.tgbot_admins    authorized ids (fallback to TGBOT_ADMINS env)
   /etc/5gpn/.domain          the gateway's domain (for the iOS URL)
-  /etc/5gpn/rules/blacklist.txt forced-proxy domain list (read to list)
-  /opt/5gpn/install.sh       the CLI we shell out to for real work
+  /etc/5gpn/dns.env          5gpn-dns env file (DNS_API_TOKEN lives here)
+  https://127.0.0.1:9443/api/*  5gpn-dns control-plane REST API (loopback)
 """
 
 import html
 import json
 import os
 import re
+import ssl
 import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
 CONF_DIR = os.environ.get("CONF_DIR", "/etc/5gpn")
-BASE_DIR = os.environ.get("BASE_DIR", "/opt/5gpn")
-INSTALL = os.path.join(BASE_DIR, "install.sh")
-RULES_DIR = os.path.join(CONF_DIR, "rules")
-PROXY_DOMAINS = os.path.join(RULES_DIR, "blacklist.txt")
 DOMAIN_FILE = os.path.join(CONF_DIR, ".domain")
 GATEWAY_FILE = os.path.join(CONF_DIR, ".gateway_ip")
 PUBLIC_IP_FILE = os.path.join(CONF_DIR, ".public_ip")
 IOS_PORT = "8111"
+
+# 5gpn-dns control-plane REST API (same box, loopback-only, bearer-token
+# authenticated). See docs/superpowers/specs/2026-07-01-5gpn-dns-p3-api-webui-design.md.
+API_BASE = os.environ.get("API_BASE", "https://127.0.0.1:9443")
 
 # Services the bot may restart / tail (the only two in the data path).
 SERVICES = ["5gpn-dns", "sing-box"]
@@ -81,11 +88,25 @@ def _load_secret(env_name, filename):
     return val
 
 
+def _load_api_token():
+    """DNS_API_TOKEN: prefer the env var, else parse it out of dns.env
+    (a KEY=value file written by install.sh). Never logged."""
+    val = os.environ.get("DNS_API_TOKEN", "").strip()
+    if val:
+        return val
+    for line in _read_file(os.path.join(CONF_DIR, "dns.env")).splitlines():
+        line = line.strip()
+        if line.startswith("DNS_API_TOKEN="):
+            return line.split("=", 1)[1].strip()
+    return ""
+
+
 TOKEN = _load_secret("TGBOT_TOKEN", ".tgbot_token")
 ADMIN_IDS = {
     int(x) for x in re.split(r"[,\s]+", _load_secret("TGBOT_ADMINS", ".tgbot_admins")) if x
 }
 API = "https://api.telegram.org/bot%s/" % TOKEN
+API_TOKEN = _load_api_token()
 
 # Tiny per-chat state machine for the "send me the domain next" flows.
 # chat_id -> {"action": "add_domain" | "del_domain"}
@@ -112,6 +133,54 @@ def tg(method, **params):
     except Exception as e:
         # Transient network error: caller decides whether to retry.
         return {"ok": False, "error": str(e)}
+
+
+# --------------------------------------------------------------------------- #
+# 5gpn-dns control-plane API client (stdlib urllib + ssl)
+# --------------------------------------------------------------------------- #
+# The control API's TLS certificate is issued for the gateway's public domain
+# (the same LE/self cert 5gpn-dns uses for DoT/DoH), but the bot always talks
+# to 127.0.0.1 (loopback), so the certificate's hostname can never match.
+# Hostname/chain verification is disabled here on purpose: the connection
+# never leaves loopback, and the bearer token (not TLS) is the real
+# authenticator for this API.
+_API_SSL_CTX = ssl.create_default_context()
+_API_SSL_CTX.check_hostname = False
+_API_SSL_CTX.verify_mode = ssl.CERT_NONE
+
+
+def api_call(method, path, body=None, query=None):
+    """Call the 5gpn-dns control-plane REST API.
+
+    Returns (ok, data_or_error). Never raises: on transport failure or a
+    non-2xx response, returns (False, <human-readable message>); on success
+    returns (True, <decoded JSON>).
+    """
+    if not API_TOKEN:
+        return False, "控制台 API 未启用：dns.env 中没有 DNS_API_TOKEN"
+
+    url = API_BASE + path
+    if query:
+        url += "?" + urllib.parse.urlencode(query)
+
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", "Bearer " + API_TOKEN)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+
+    try:
+        with urllib.request.urlopen(req, timeout=30, context=_API_SSL_CTX) as resp:
+            raw = resp.read().decode("utf-8")
+            return True, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as e:
+        try:
+            err = json.loads(e.read().decode("utf-8")).get("error", str(e))
+        except Exception:
+            err = str(e)
+        return False, err
+    except Exception:
+        return False, "控制台 API 无法访问（%s）" % API_BASE
 
 
 def _chunks(text, size):
@@ -287,15 +356,19 @@ def system_metrics():
 # Operations
 # --------------------------------------------------------------------------- #
 def _proxy_domains():
-    """Effective (non-comment, non-blank) forced-proxy domains."""
-    txt = _read_file(PROXY_DOMAINS)
-    return [l.strip() for l in txt.splitlines() if l.strip() and not l.strip().startswith("#")]
+    """Effective forced-proxy (blacklist) domains, fetched from the control API.
+
+    Returns (ok, list_or_error_string) so callers can tell "empty list" apart
+    from "API unreachable" without raising.
+    """
+    return api_call("GET", "/api/rules/blacklist")
 
 
 def op_status():
-    """Compact status card: services + key facts + server metrics.
-    Prefers a structured read over the raw `install.sh --status` text so the
-    card is clean; the raw command stays available as a fallback if needed."""
+    """Compact status card: services + key facts + server metrics + a block
+    of live stats from the 5gpn-dns control API. The API block is additive —
+    if the API is unreachable, the local (systemctl/metrics) card still
+    renders in full, with a note that the API is down."""
     lines = ["<b>📊 5gpn 状态</b>", ""]
     down = []
     for svc in SERVICES:
@@ -312,7 +385,30 @@ def op_status():
     pubip = _read_file(PUBLIC_IP_FILE)
     if pubip:
         lines.append("🌍 公网 IP：<code>%s</code>" % html.escape(pubip))
-    lines.append("🎯 黑名单(强制代理)域名：<b>%d</b> 个" % len(_proxy_domains()))
+
+    ok, data = api_call("GET", "/api/status")
+    if ok:
+        stats = data.get("stats", {}) if isinstance(data, dict) else {}
+        up_s = data.get("uptime_seconds", 0) if isinstance(data, dict) else 0
+        up_h, up_m = divmod(int(up_s) // 60, 60)
+        lines.append("")
+        lines.append(
+            "🧩 5gpn-dns <code>%s</code>（运行 %d 小时 %d 分）"
+            % (html.escape(str(data.get("version", "?"))), up_h, up_m)
+        )
+        lines.append(
+            "📈 查询：总 %s · 直连 %s · 代理 %s · 拦截 %s · 缓存 %s"
+            % (
+                stats.get("total", 0),
+                stats.get("direct", 0),
+                stats.get("proxy", 0),
+                stats.get("block", 0),
+                stats.get("cache_entries", 0),
+            )
+        )
+    else:
+        lines.append("")
+        lines.append("⚠️ 控制台 API 不可用：%s" % html.escape(str(data)))
 
     if down:
         lines += ["", "⚠️ 异常：%s（用 📜 日志查看）" % html.escape("、".join(down))]
@@ -325,7 +421,10 @@ def op_status():
 
 
 def op_list_domains():
-    ds = _proxy_domains()
+    ok, data = _proxy_domains()
+    if not ok:
+        return "🎯 <b>黑名单(强制代理)域名</b>\n\n❌ %s" % html.escape(str(data))
+    ds = data or []
     if not ds:
         return "🎯 <b>黑名单(强制代理)域名</b>\n\n（列表为空）\n用「➕ 加域名」添加一个。"
     body = "\n".join("%d. %s" % (i + 1, d) for i, d in enumerate(ds))
@@ -336,27 +435,41 @@ def op_add_domain(domain):
     domain = (domain or "").strip().lower()
     if not DOMAIN_RE.match(domain) or len(domain) > 253:
         return "❌ 域名无效。请发送形如 <code>example.com</code> 的域名，或 /cancel。"
-    ok, out = run(["bash", INSTALL, "--add-domain", domain], timeout=300)
+    ok, data = api_call("POST", "/api/rules/blacklist", body={"entry": domain})
     if ok:
         return "✅ 已把 <b>%s</b> 加入黑名单(强制代理)列表，并已刷新生效。" % html.escape(domain)
-    return "❌ <b>添加失败</b>\n%s" % pre(_tail(out, 6))
+    return "❌ <b>添加失败</b>\n%s" % pre(str(data))
 
 
 def op_del_domain(domain):
     domain = (domain or "").strip().lower()
     if not DOMAIN_RE.match(domain) or len(domain) > 253:
         return "❌ 域名无效。请发送要删除的域名，或 /cancel。"
-    ok, out = run(["bash", INSTALL, "--del-domain", domain], timeout=300)
+    ok, data = api_call("DELETE", "/api/rules/blacklist", query={"entry": domain})
     if ok:
         return "✅ 已把 <b>%s</b> 从黑名单(强制代理)列表移除，并已刷新生效。" % html.escape(domain)
-    return "❌ <b>删除失败</b>\n%s" % pre(_tail(out, 6))
+    return "❌ <b>删除失败</b>\n%s" % pre(str(data))
 
 
 def op_update_lists():
-    """Refresh china_ip_list and reload 5gpn-dns."""
-    ok, out = run(["bash", INSTALL, "--update-lists"], timeout=600)
-    head = "✅ <b>chnroute / 名单已更新</b>" if ok else "❌ <b>更新失败</b>"
-    return head + "\n" + pre(_tail(out, 12))
+    """Refresh every configured rule-list subscription (chnroute, adblock,
+    etc.) via the control API and render a per-list summary."""
+    ok, data = api_call("POST", "/api/update")
+    if not ok:
+        return "❌ <b>更新失败</b>\n%s" % pre(str(data))
+    results = data or []
+    if not results:
+        return "✅ <b>名单已刷新</b>\n（没有配置任何订阅）"
+    lines = []
+    for r in results:
+        rid = r.get("id", "?")
+        if r.get("ok"):
+            lines.append("✅ %s：%s 条" % (rid, r.get("entries", 0)))
+        else:
+            lines.append("❌ %s：%s" % (rid, r.get("err", "未知错误")))
+    any_fail = any(not r.get("ok") for r in results)
+    head = "⚠️ <b>名单已更新（部分失败）</b>" if any_fail else "✅ <b>chnroute / 名单已更新</b>"
+    return head + "\n" + pre("\n".join(lines))
 
 
 def op_renew_cert():

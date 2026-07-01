@@ -106,14 +106,14 @@ class TestIosHost(unittest.TestCase):
 
 
 class TestDomainOpsRejectBeforeShell(unittest.TestCase):
-    """Invalid domains must be rejected without ever invoking install.sh."""
+    """Invalid domains must be rejected without ever calling the control API."""
 
     def setUp(self):
         def _boom(*a, **k):
-            raise AssertionError("run() must not be called for an invalid domain")
-        old = tgbot.run
-        tgbot.run = _boom
-        self.addCleanup(lambda: setattr(tgbot, "run", old))
+            raise AssertionError("api_call() must not be called for an invalid domain")
+        old = tgbot.api_call
+        tgbot.api_call = _boom
+        self.addCleanup(lambda: setattr(tgbot, "api_call", old))
 
     def test_add_rejects_invalid(self):
         self.assertIn("无效", tgbot.op_add_domain("not a domain"))
@@ -123,6 +123,148 @@ class TestDomainOpsRejectBeforeShell(unittest.TestCase):
 
     def test_add_rejects_empty(self):
         self.assertIn("无效", tgbot.op_add_domain(""))
+
+
+class TestApiOps(unittest.TestCase):
+    """op_* domain/list functions must call the control API, not install.sh."""
+
+    def setUp(self):
+        self.calls = []
+        old = tgbot.api_call
+        self._old = old
+        self.addCleanup(lambda: setattr(tgbot, "api_call", old))
+
+    def _install(self, fn):
+        tgbot.api_call = fn
+
+    def test_add_domain_posts_blacklist(self):
+        def fake(method, path, body=None, query=None):
+            self.calls.append((method, path, body, query))
+            return True, {"ok": True}
+        self._install(fake)
+        out = tgbot.op_add_domain("example.com")
+        self.assertEqual(self.calls, [("POST", "/api/rules/blacklist", {"entry": "example.com"}, None)])
+        self.assertIn("✅", out)
+        self.assertIn("example.com", out)
+
+    def test_add_domain_api_failure(self):
+        self._install(lambda method, path, body=None, query=None: (False, "control API unreachable"))
+        out = tgbot.op_add_domain("example.com")
+        self.assertIn("❌", out)
+
+    def test_del_domain_issues_delete(self):
+        def fake(method, path, body=None, query=None):
+            self.calls.append((method, path, body, query))
+            return True, {"ok": True}
+        self._install(fake)
+        out = tgbot.op_del_domain("example.com")
+        self.assertEqual(self.calls, [("DELETE", "/api/rules/blacklist", None, {"entry": "example.com"})])
+        self.assertIn("✅", out)
+
+    def test_del_domain_api_failure(self):
+        self._install(lambda method, path, body=None, query=None: (False, "boom"))
+        out = tgbot.op_del_domain("example.com")
+        self.assertIn("❌", out)
+
+    def test_list_domains_renders_fetched_list(self):
+        self._install(lambda method, path, body=None, query=None: (True, ["a.com", "b.com"]))
+        out = tgbot.op_list_domains()
+        self.assertIn("a.com", out)
+        self.assertIn("b.com", out)
+        self.assertIn("2", out)
+
+    def test_list_domains_empty(self):
+        self._install(lambda method, path, body=None, query=None: (True, []))
+        out = tgbot.op_list_domains()
+        self.assertIn("列表为空", out)
+
+    def test_list_domains_api_failure_shows_error_not_crash(self):
+        self._install(lambda method, path, body=None, query=None: (False, "control API unreachable (https://127.0.0.1:9443)"))
+        out = tgbot.op_list_domains()
+        self.assertIn("control API unreachable", out)
+
+    def test_update_lists_renders_summary(self):
+        results = [
+            {"id": "china-ip", "ok": True, "entries": 12345, "err": ""},
+            {"id": "easylist-cn", "ok": False, "entries": 0, "err": "fetch timeout"},
+        ]
+        self._install(lambda method, path, body=None, query=None: (True, results))
+        out = tgbot.op_update_lists()
+        self.assertIn("✅", out)
+        self.assertIn("china-ip", out)
+        self.assertIn("12345", out)
+        self.assertIn("easylist-cn", out)
+        self.assertIn("fetch timeout", out)
+
+    def test_update_lists_api_failure(self):
+        self._install(lambda method, path, body=None, query=None: (False, "control API unreachable"))
+        out = tgbot.op_update_lists()
+        self.assertIn("❌", out)
+
+    def test_status_includes_api_block_when_reachable(self):
+        self._install(lambda method, path, body=None, query=None: (True, {
+            "version": "0.3.0",
+            "uptime_seconds": 3725,
+            "stats": {"total": 100, "direct": 60, "proxy": 30, "block": 10,
+                      "cache_entries": 42, "china_ok": 59, "china_err": 1,
+                      "trust_ok": 29, "trust_err": 1},
+        }))
+        out = tgbot.op_status()
+        self.assertIn("0.3.0", out)
+        self.assertIn("100", out)
+
+    def test_status_notes_api_down_without_crashing(self):
+        self._install(lambda method, path, body=None, query=None: (False, "control API unreachable (https://127.0.0.1:9443)"))
+        out = tgbot.op_status()
+        self.assertIn("control API unreachable", out)
+
+
+class TestApiCallToken(unittest.TestCase):
+    """api_call must short-circuit with a clear message when no token is configured."""
+
+    def test_no_token_short_circuits(self):
+        old = tgbot.API_TOKEN
+        tgbot.API_TOKEN = ""
+        self.addCleanup(lambda: setattr(tgbot, "API_TOKEN", old))
+        ok, data = tgbot.api_call("GET", "/api/status")
+        self.assertFalse(ok)
+        self.assertIn("DNS_API_TOKEN", data)
+
+
+class TestLoadApiToken(unittest.TestCase):
+    """_load_api_token prefers DNS_API_TOKEN env over dns.env file."""
+
+    def test_env_wins_over_file(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: _rmtree(d))
+        env_path = os.path.join(d, "dns.env")
+        with open(env_path, "w") as f:
+            f.write("DNS_API_TOKEN=from-file\n")
+        old_conf_dir = tgbot.CONF_DIR
+        tgbot.CONF_DIR = d
+        self.addCleanup(lambda: setattr(tgbot, "CONF_DIR", old_conf_dir))
+        old_environ = os.environ.get("DNS_API_TOKEN")
+        os.environ["DNS_API_TOKEN"] = "from-env"
+        self.addCleanup(lambda: (os.environ.pop("DNS_API_TOKEN", None)
+                                  if old_environ is None
+                                  else os.environ.__setitem__("DNS_API_TOKEN", old_environ)))
+        self.assertEqual(tgbot._load_api_token(), "from-env")
+
+    def test_falls_back_to_file(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: _rmtree(d))
+        env_path = os.path.join(d, "dns.env")
+        with open(env_path, "w") as f:
+            f.write("# comment\nDNS_LISTEN_API=:9443\nDNS_API_TOKEN=from-file\nDNS_CACHE_SIZE=4096\n")
+        old_conf_dir = tgbot.CONF_DIR
+        tgbot.CONF_DIR = d
+        self.addCleanup(lambda: setattr(tgbot, "CONF_DIR", old_conf_dir))
+        old_environ = os.environ.get("DNS_API_TOKEN")
+        os.environ.pop("DNS_API_TOKEN", None)
+        self.addCleanup(lambda: (os.environ.pop("DNS_API_TOKEN", None)
+                                  if old_environ is None
+                                  else os.environ.__setitem__("DNS_API_TOKEN", old_environ)))
+        self.assertEqual(tgbot._load_api_token(), "from-file")
 
 
 class TestAuthAndRouting(unittest.TestCase):
