@@ -104,7 +104,7 @@
 
 ### I. Phase 2 — Subscription manager (in-process fetch/parse/cache)
 
-> Mirrors the spec §7 test-env matrix (`docs/superpowers/specs/2026-07-01-5gpn-dns-p2-subscriptions-design.md`). Requires a local `httptest`-style server (or any HTTP server you control) serving a rule-list body, and `/etc/5gpn/subscriptions.json` pointing a subscription at it.
+> Requires a local `httptest`-style server (or any HTTP server you control) serving a rule-list body, and `/etc/5gpn/subscriptions.json` pointing a subscription at it.
 
 - [ ] **Subscription cache generated from a URL → rule effective**
       Configure a subscription (e.g. `category: "blacklist"`, `format: "plain"`) pointing at a local HTTP server serving one test domain.
@@ -139,7 +139,7 @@
 
 ## §J Phase 3 — 控制面 API + Web UI
 
-> Covers `cmd/5gpn-dns/api.go` (bearer-token HTTPS REST API on `:9443`, over the `Controller` facade) and the embedded React SPA (`go:embed cmd/5gpn-dns/web/dist`). See `docs/superpowers/specs/2026-07-01-5gpn-dns-p3-api-webui-design.md`.
+> Covers `cmd/5gpn-dns/api.go` (bearer-token HTTPS REST API on `:9443`, over the `Controller` facade) and the embedded React SPA (`go:embed cmd/5gpn-dns/web/dist`).
 
 - [ ] **Unauthenticated request rejected, bearer token accepted**
       `curl -sk -o /dev/null -w '%{http_code}' https://<host-ip>:9443/api/status` → `401` (no `Authorization` header).
