@@ -19,6 +19,23 @@ type ruleSnapshot struct {
 	CN        *Chnroute
 }
 
+// statsCounters holds per-verdict query counters, updated with atomics so
+// they can be bumped from the hot query path without a mutex. All fields are
+// accessed via sync/atomic; zero value is valid (all counters start at 0).
+// A nil *statsCounters is valid too — callers must guard increments (see
+// Handler.bump*) so Handlers built without stats wiring (e.g. existing unit
+// tests that construct a Handler literal) never panic.
+type statsCounters struct {
+	total    atomic.Uint64
+	direct   atomic.Uint64
+	proxy    atomic.Uint64
+	block    atomic.Uint64
+	chinaOK  atomic.Uint64
+	chinaErr atomic.Uint64
+	trustOK  atomic.Uint64
+	trustErr atomic.Uint64
+}
+
 // Handler is a dns.Handler that implements the 5gpn query dispatch policy:
 // AAAA-block → HTTPS/SVCB-block → adblock → force-direct → blacklist → default-arbitrate.
 type Handler struct {
@@ -43,6 +60,66 @@ type Handler struct {
 	TTLMax time.Duration
 
 	Timeout time.Duration // Per-query arbitration timeout for china upstream.
+
+	// stats holds per-verdict query counters. May be nil (disabled): all
+	// bump* helpers guard against a nil stats pointer, so a zero-value or
+	// test-constructed Handler never panics.
+	stats *statsCounters
+}
+
+// bumpTotal increments the total-query counter. Safe to call when h.stats is nil.
+func (h *Handler) bumpTotal() {
+	if h.stats == nil {
+		return
+	}
+	h.stats.total.Add(1)
+}
+
+// bumpDirect increments the direct-verdict counter. Safe to call when h.stats is nil.
+func (h *Handler) bumpDirect() {
+	if h.stats == nil {
+		return
+	}
+	h.stats.direct.Add(1)
+}
+
+// bumpProxy increments the proxy-verdict counter. Safe to call when h.stats is nil.
+func (h *Handler) bumpProxy() {
+	if h.stats == nil {
+		return
+	}
+	h.stats.proxy.Add(1)
+}
+
+// bumpBlock increments the block-verdict counter. Safe to call when h.stats is nil.
+func (h *Handler) bumpBlock() {
+	if h.stats == nil {
+		return
+	}
+	h.stats.block.Add(1)
+}
+
+// bumpDefaultVerdict inspects a step-6 (default-path) A response and bumps
+// Direct if every A record is a kept CN address, or Proxy if any A record was
+// rewritten to GatewayIP. Safe to call when h.stats is nil or resp has no
+// Answer (e.g. NODATA — counted as neither, matching "no rewrite occurred").
+func (h *Handler) bumpDefaultVerdict(resp *dns.Msg) {
+	if h.stats == nil || resp == nil {
+		return
+	}
+	for _, rr := range resp.Answer {
+		a, ok := rr.(*dns.A)
+		if !ok {
+			continue
+		}
+		if h.GatewayIP != nil && a.A.Equal(h.GatewayIP) {
+			h.bumpProxy()
+			return
+		}
+	}
+	if len(resp.Answer) > 0 {
+		h.bumpDirect()
+	}
 }
 
 // swapRuleSets atomically replaces the reloadable rule-set fields.
@@ -113,6 +190,8 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.Msg {
 	name := q.Name // already FQDN from the wire
 
+	h.bumpTotal()
+
 	// Load the current rule-set snapshot atomically.
 	adblock, direct, blacklist, cn := h.ruleSnap()
 
@@ -138,6 +217,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 
 	// ── Step 3: adblock ──────────────────────────────────────────────────────
 	if adblock != nil && adblock.Match(bare) {
+		h.bumpBlock()
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeNameError)
 		return m
@@ -146,6 +226,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 	// ── Step 4: force-direct ─────────────────────────────────────────────────
 	if direct != nil && direct.Match(bare) {
 		if isA {
+			h.bumpDirect()
 			if cached, ok := h.cacheGet(name, q.Qtype); ok {
 				cached.Id = r.Id
 				return cached
@@ -165,6 +246,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 	// ── Step 5: blacklist ────────────────────────────────────────────────────
 	if blacklist != nil && blacklist.Match(bare) {
 		if isA {
+			h.bumpProxy()
 			return h.gatewayReply(r)
 		}
 		// Non-A blacklist: forward to Trust (blacklist is A-specific semantics).
@@ -175,6 +257,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 	if isA {
 		if cached, ok := h.cacheGet(name, q.Qtype); ok {
 			cached.Id = r.Id
+			h.bumpDefaultVerdict(cached)
 			return cached
 		}
 		resp, err := Arbitrate(ctx, r, h.China, h.Trust, cn)
@@ -184,6 +267,7 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 		resp = filterAAAA(resp)
 		resp = h.rewriteA(resp, r, cn)
 		h.cachePut(name, q.Qtype, resp)
+		h.bumpDefaultVerdict(resp)
 		return resp
 	}
 

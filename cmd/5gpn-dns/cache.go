@@ -97,3 +97,11 @@ func (c *Cache) Put(name string, qtype uint16, m *dns.Msg, ttl time.Duration) {
 		expiry: c.now().Add(ttl),
 	}
 }
+
+// Len returns the current number of entries in the cache (including any not
+// yet lazily evicted on expiry).
+func (c *Cache) Len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.m)
+}

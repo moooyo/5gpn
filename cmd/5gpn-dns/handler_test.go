@@ -638,6 +638,137 @@ func TestHandlerTimeoutZeroDoesNotSERVFAIL(t *testing.T) {
 	}
 }
 
+// ── Stats counters ───────────────────────────────────────────────────────────
+
+// TestHandlerStatsAdblockBumpsBlock: an adblock-matched A query bumps Total and Block.
+func TestHandlerStatsAdblockBumpsBlock(t *testing.T) {
+	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
+	h.stats = &statsCounters{}
+
+	q := dns.Question{Name: "adblock.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	req := new(dns.Msg)
+	req.SetQuestion("adblock.test.", dns.TypeA)
+	h.resolve(context.Background(), q, req)
+
+	if got := h.stats.total.Load(); got != 1 {
+		t.Errorf("Total = %d, want 1", got)
+	}
+	if got := h.stats.block.Load(); got != 1 {
+		t.Errorf("Block = %d, want 1", got)
+	}
+	if got := h.stats.direct.Load(); got != 0 {
+		t.Errorf("Direct = %d, want 0", got)
+	}
+	if got := h.stats.proxy.Load(); got != 0 {
+		t.Errorf("Proxy = %d, want 0", got)
+	}
+}
+
+// TestHandlerStatsBlacklistBumpsProxy: a blacklist-matched A query bumps Total and Proxy.
+func TestHandlerStatsBlacklistBumpsProxy(t *testing.T) {
+	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
+	h.stats = &statsCounters{}
+
+	q := dns.Question{Name: "blacklist.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	req := new(dns.Msg)
+	req.SetQuestion("blacklist.test.", dns.TypeA)
+	h.resolve(context.Background(), q, req)
+
+	if got := h.stats.total.Load(); got != 1 {
+		t.Errorf("Total = %d, want 1", got)
+	}
+	if got := h.stats.proxy.Load(); got != 1 {
+		t.Errorf("Proxy = %d, want 1", got)
+	}
+}
+
+// TestHandlerStatsDefaultCNKeptBumpsDirect: a default A query resolved to a CN IP
+// (kept as-is) bumps Total and Direct.
+func TestHandlerStatsDefaultCNKeptBumpsDirect(t *testing.T) {
+	china := &fakeExchanger{reply: makeAMsg("example.test", "1.2.3.4")}
+	trust := &fakeExchanger{reply: makeAMsg("example.test", "9.9.9.9")}
+	h := newTestHandler(t, china, trust)
+	h.stats = &statsCounters{}
+
+	q := dns.Question{Name: "example.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	req := new(dns.Msg)
+	req.SetQuestion("example.test.", dns.TypeA)
+	h.resolve(context.Background(), q, req)
+
+	if got := h.stats.total.Load(); got != 1 {
+		t.Errorf("Total = %d, want 1", got)
+	}
+	if got := h.stats.direct.Load(); got != 1 {
+		t.Errorf("Direct = %d, want 1", got)
+	}
+	if got := h.stats.proxy.Load(); got != 0 {
+		t.Errorf("Proxy = %d, want 0", got)
+	}
+}
+
+// TestHandlerStatsDefaultForeignRewrittenBumpsProxy: a default A query resolved to a
+// foreign IP (rewritten to gateway) bumps Total and Proxy.
+func TestHandlerStatsDefaultForeignRewrittenBumpsProxy(t *testing.T) {
+	china := &fakeExchanger{reply: makeAMsg("example.test", "9.9.9.9")}
+	trust := &fakeExchanger{reply: makeAMsg("example.test", "9.9.9.9")}
+	h := newTestHandler(t, china, trust)
+	h.stats = &statsCounters{}
+
+	q := dns.Question{Name: "example.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	req := new(dns.Msg)
+	req.SetQuestion("example.test.", dns.TypeA)
+	h.resolve(context.Background(), q, req)
+
+	if got := h.stats.total.Load(); got != 1 {
+		t.Errorf("Total = %d, want 1", got)
+	}
+	if got := h.stats.proxy.Load(); got != 1 {
+		t.Errorf("Proxy = %d, want 1", got)
+	}
+}
+
+// TestHandlerStatsForceDirectBumpsDirect: a force-direct-matched A query bumps Total and Direct.
+func TestHandlerStatsForceDirectBumpsDirect(t *testing.T) {
+	china := &fakeExchanger{reply: makeAMsg("direct.test", "9.9.9.9")}
+	trust := &fakeExchanger{reply: makeAMsg("direct.test", "9.9.9.9")}
+	h := newTestHandler(t, china, trust)
+	h.stats = &statsCounters{}
+
+	q := dns.Question{Name: "direct.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	req := new(dns.Msg)
+	req.SetQuestion("direct.test.", dns.TypeA)
+	h.resolve(context.Background(), q, req)
+
+	if got := h.stats.total.Load(); got != 1 {
+		t.Errorf("Total = %d, want 1", got)
+	}
+	if got := h.stats.direct.Load(); got != 1 {
+		t.Errorf("Direct = %d, want 1", got)
+	}
+}
+
+// TestHandlerStatsNilStatsDoesNotPanic: a Handler with nil stats (e.g. existing
+// test-constructed handlers) must not panic on resolve.
+func TestHandlerStatsNilStatsDoesNotPanic(t *testing.T) {
+	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
+	// h.stats is nil by default (newTestHandler does not set it).
+
+	q := dns.Question{Name: "example.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	req := new(dns.Msg)
+	req.SetQuestion("example.test.", dns.TypeA)
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("nil stats caused panic: %v", r)
+		}
+	}()
+	china := &fakeExchanger{reply: makeAMsg("example.test", "9.9.9.9")}
+	trust := &fakeExchanger{reply: makeAMsg("example.test", "9.9.9.9")}
+	h.China = china
+	h.Trust = trust
+	h.resolve(context.Background(), q, req)
+}
+
 // TestCacheHitPreservesRequestID: a cache hit must return the CURRENT request's
 // transaction ID, not the ID from the first (cache-populating) query.
 // Regression for: cached *dns.Msg.Id was not reset to the incoming r.Id, causing
