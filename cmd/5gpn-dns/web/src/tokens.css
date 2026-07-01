@@ -1,0 +1,50 @@
+/*
+ * Design tokens — the "signal desk" instrument-panel palette for the
+ * 5gpn-dns control console. Dark-first; a `.light` class on <html> overrides
+ * every variable for a legible light theme. The verdict-lane colors are the
+ * categorical signature system, reused everywhere a verdict is shown.
+ */
+
+:root,
+.dark {
+  --bg: #0c1416;
+  --surface: #111d1f;
+  --surface-2: #17282a;
+  --border: #24393b;
+  --text: #dce8e5;
+  --muted: #85a09b;
+  --accent: #2dd4bf; /* teal-400 — primary interactive */
+
+  /* verdict lanes */
+  --v-direct: #3fd8a4; /* mint  — force-direct + chnroute-cn */
+  --v-proxy: #e9a94c; /* amber — chnroute-foreign */
+  --v-block: #e76a82; /* rose  — blacklist */
+  --v-adblock: #b08be6; /* violet— adblock (NXDOMAIN) */
+
+  /* derived */
+  --accent-ink: #05201d; /* text on an accent-filled control */
+  --danger: #e76a82;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.25);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+}
+
+/* Light theme — optimized to be legible, not as polished as dark. */
+.light {
+  --bg: #eef3f2;
+  --surface: #ffffff;
+  --surface-2: #e6eeec;
+  --border: #c6d5d1;
+  --text: #10231f;
+  --muted: #4d635e;
+  --accent: #0d9488; /* deeper teal for contrast on light */
+
+  --v-direct: #0f9d63;
+  --v-proxy: #b9741a;
+  --v-block: #c3374f;
+  --v-adblock: #7a4fc0;
+
+  --accent-ink: #ffffff;
+  --danger: #c3374f;
+  --shadow: 0 1px 2px rgba(16, 35, 31, 0.08), 0 8px 24px rgba(16, 35, 31, 0.08);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+}
