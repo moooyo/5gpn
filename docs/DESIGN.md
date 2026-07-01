@@ -1,6 +1,6 @@
 # 5gpn 设计文档(5gpn-dns DoT/DoH/plain-53 网关)
 
-- 状态:已实施(Phase 1 引擎 + Phase 2 订阅系统已完成;Phase 3 API+Web UI 计划中)
+- 状态:已实施(Phase 1 引擎 + Phase 2 订阅 + Phase 3 API+Web UI 均已完成)
 - 日期:2026-06-27(更新 2026-07-01)
 - 范围:5gpn-dns Go DNS 网关的整体设计
 - 已定决策:① 客户端多传输接入:DoT :853 / DoH :8443 / 明文 DNS :53(限速) ② 不在强制列表但解析出国外 IP 的域名 → 改写为网关 IP,进 sing-box ③ **出口仅直出**(无 WireGuard / 多出口 / 策略路由) ④ **QUIC/HTTP3 经 sing-box `direct` inbound + route sniff `quic` 透明转发**;UDP 443 防火墙放行;sing-box 以 root + systemd sandbox 运行(数据平面历经 sniproxy → xray → sing-box 两次反转,完整决策记录见 §12)
@@ -61,7 +61,9 @@
 | certbot / renew-hook / iOS profile / ios-http | 证书、iOS 描述文件;renew-hook 拷证书 + `kill -HUP`(5gpn-dns 热加载,不重启) |
 | install.sh 编排 | 装 5gpn-dns(下载 CI 预编译产物)、下载预编译 sing-box、规则文件、systemd、sysctl/低内存 |
 | `subscriptions.json`(`/etc/5gpn/subscriptions.json`) | 订阅配置:各条目 `id`/`category`/`name`/`url`/`format`/`enabled`/`interval`;`5gpn-dns` 进程内订阅管理器按此定时拉取(见 §9) |
-| `tgbot.py`(Telegram 控制面)+ `install.sh` Gum TUI | 管手动规则 / `update-lists.sh` 触发 reload / 状态;改文件 + SIGHUP。Phase 3 tgbot 将改为调同一 API |
+| `cmd/5gpn-dns/api.go` + `Controller` | 控制台 HTTPS REST API(:9443,bearer token,仅 CLIENT_NET);对外暴露状态/统计/查询/订阅增删改/规则增删/更新/reload(见 §13) |
+| `cmd/5gpn-dns/web/`(内嵌 Web UI) | React + Vite + Tailwind + TypeScript;CI 构建 `npm run build` → `web/dist` → `go:embed` 打进二进制;登录/仪表盘/订阅/规则/查询/统计各视图(见 §13) |
+| `tgbot.py`(Telegram 控制面)+ `install.sh` Gum TUI | 管手动规则 / `update-lists.sh` 触发 reload / 状态;改文件 + SIGHUP。已改为调 :9443 API 的客户端,与 Web UI 并存 |
 | tests/ | policy 测试 + Go 单测 |
 
 **明确不包含**:WireGuard / 多出口 / `pxout` 打 mark / `table 100` 等出口层(仅直出)。sing-box 以预编译二进制安装,5gpn-dns 以 CI 构建产物安装,网关上不引入 Go 工具链。
@@ -143,7 +145,7 @@ adblock 对**所有 qtype** 拦截(命中即 NXDOMAIN);blacklist / force-direct 
 
 ## 9. 规则与列表管理(Phase 2:进程内订阅管理器)
 
-规则有两个来源,合并生效(见 §4.4):**手动文本文件**(`/etc/5gpn/rules/<cat>.txt`,控制面 **Telegram Bot** `tgbot.py` 编辑 + SIGHUP,或运维直接改文件)和**订阅**(`/etc/5gpn/subscriptions.json`,`5gpn-dns` 进程内的订阅管理器按各自 `interval` 定时拉取远程 URL)。Phase 3 计划:公开 HTTPS API + Web UI(tgbot 改为调同一 API,与 Web UI 并存),届时订阅的增删也走 API。
+规则有两个来源,合并生效(见 §4.4):**手动文本文件**(`/etc/5gpn/rules/<cat>.txt`,控制面 **Telegram Bot** `tgbot.py` 或 **Web UI** 编辑 + SIGHUP,或运维直接改文件)和**订阅**(`/etc/5gpn/subscriptions.json`,`5gpn-dns` 进程内的订阅管理器按各自 `interval` 定时拉取远程 URL)。Phase 3 已实现::9443 HTTPS REST API + 内嵌 Web UI(tgbot 已改为调同一 API,与 Web UI 并存),订阅的增删与规则增删均可走 API(见 §13)。
 
 **订阅管理器(`cmd/5gpn-dns/subscription.go`)**:
 - 配置文件 `/etc/5gpn/subscriptions.json`(env `DNS_SUBSCRIPTIONS` 覆盖路径);每条订阅含 `id`/`category`/`name`/`url`/`format`/`enabled`/`interval`。文件缺失 → 视为无订阅(不报错);JSON 损坏 → 报错并保留上次内存态。
@@ -159,7 +161,7 @@ adblock 对**所有 qtype** 拦截(命中即 NXDOMAIN);blacklist / force-direct 
 - `direct.txt` / `direct/*.txt`:强制直连域名(手动 + 订阅缓存)。
 - `adblock.txt` / `adblock/*.txt`:广告拦截域名(手动 + 订阅缓存)。
 - `china_ip_list.txt` / `chnroute/*.txt`:chnroute CIDR;默认由订阅维护,一般不手动改。
-- `subscriptions.json`:订阅本身的增删(id/URL/format/interval),Phase 2 手动编辑该文件 + reload;Phase 3 走 API。
+- `subscriptions.json`:订阅本身的增删(id/URL/format/interval),可手动编辑该文件 + reload,也可走 `:9443` API(`GET/POST /api/subscriptions`、`PATCH/DELETE /api/subscriptions/{id}`,见 §13)。
 
 ## 10. 安全与合规
 
@@ -171,7 +173,7 @@ adblock 对**所有 qtype** 拦截(命中即 NXDOMAIN);blacklist / force-direct 
 
 - **Phase 1(当前)**:`5gpn-dns` 引擎核心:DoT/DoH/plain-53 入口、四类规则(本地文件)、确定性仲裁、改写、AAAA→SOA、adblock、缓存、SIGHUP 重载、证书热加载。CI 构建(`moooyo/5gpn` release)。取代 smartdns + chinadns-ng。
 - **Phase 2(已实现)**:订阅系统:四类规则各可订阅远程 URL,进程内订阅管理器定时+按需拉取、与手动条目合并、落盘缓存、断网保留旧表、热重载。chnroute 默认由订阅提供;`update-lists.sh` 改为手动 reload 触发器。
-- **Phase 3(计划)**:公开 HTTPS API(token 鉴权,复用 LE 证书)+ Web UI:查询/统计/控制;**tgbot 改为调同一 API,与 Web UI 并存**。
+- **Phase 3(已实现)**::9443 bearer-token HTTPS REST API(`GET /api/status`、`GET /api/stats`、`GET /api/lookup?domain=`、`GET/POST /api/subscriptions`、`PATCH/DELETE /api/subscriptions/{id}`、`POST /api/update`、`GET/POST/DELETE /api/rules/{cat}`、`POST /api/reload`,均基于 `Controller`)+ 内嵌 React SPA(`cmd/5gpn-dns/web/`,`go:embed`);仅 CLIENT_NET 防火墙可达,`DNS_API_TOKEN` 鉴权(为空则整个控制台禁用,不会无鉴权对外提供);**`tgbot.py` 已改为调同一 API 的客户端,与 Web UI 并存**(详见 §13)。
 - ~~**出口层**~~:**取消**(仅直出,无 WireGuard/多出口/策略路由)。
 
 ## 12. 已定决策 / 待定 / 风险
@@ -202,7 +204,7 @@ adblock 对**所有 qtype** 拦截(命中即 NXDOMAIN);blacklist / force-direct 
 
 **决策追加 2026-07-01 — DNS 大脑:smartdns + chinadns-ng → 自研 Go `5gpn-dns`(反转):**
 - **背景**:三层 smartdns 方案在 test-env 实测时**证明不可行**:smartdns 无法做到"含国内 IP 即用国内、不测速"(内部实现是 response-mode 竞速,非 IP 成员关系判定),`whitelist-ip` 在混合答案下行为不确定。随后评估 chinadns-ng:能做确定性仲裁,但依赖内核 nftset + 多组件协调,复杂度高。
-- **用户决策**:自研 Go DNS 把逻辑收进一个进程,彻底取代 smartdns + chinadns-ng。分阶段:Phase 1 引擎(确定性仲裁,本 §§2-11)、Phase 2 订阅、Phase 3 公开 API + Web UI。
+- **用户决策**:自研 Go DNS 把逻辑收进一个进程,彻底取代 smartdns + chinadns-ng。分阶段:Phase 1 引擎(确定性仲裁,本 §§2-11)、Phase 2 订阅、Phase 3 控制台 API + Web UI(均已完成,见 §13)。
 - **约定反转(同步改 CLAUDE.md)**:① "控制面只有 tgbot、无 HTTP API/web UI" → 有意重新引入(P3);② "规则手动添加" → 订阅(P2);③ "DoT-only 入站,不开明文 53" → DoT :853 + DoH :8443 + 明文 :53(限速,已接受);④ "prebuilt 第三方工具" → 5gpn-dns 是我们自己的 CI 产物(同规则,网关上不引工具链)。
 - **实测驱动的正确性基线**:确定性仲裁已在 test-env 用 mock 上游(CN/国外/超时)验证,两种时序均通过。smartdns `whitelist-ip` 的不确定性已被实测确认(非猜测)。
 - **保留历史**:三层 smartdns 设计 + chinadns-ng 评估保留于 `docs/superpowers/specs/` 历史记录中。smartdns 从 install.sh / systemd / 防火墙中移除(见 install.sh cleanup 段);`foreign-cidr.txt` + `gen_foreign_cidr.py` + `render_smartdns_conf.py` + `china-domains.txt` 一并移除。
@@ -215,5 +217,42 @@ adblock 对**所有 qtype** 拦截(命中即 NXDOMAIN);blacklist / force-direct 
 - **`update-lists.sh` 降级为 reload 触发器**:不再自己下载任何东西,只 `systemctl reload 5gpn-dns`(SIGHUP 重读磁盘缓存),真正的拉取由进程内定时器完成。
 - **沙箱调整**:systemd 单元新增 `ReadWritePaths=/etc/5gpn/rules`,允许订阅管理器写缓存文件(其余 `/etc/5gpn` 仍 `ReadOnlyPaths`)。
 - **约定反转(同步改 CLAUDE.md)**:"规则手动添加,Phase 2 前不实现订阅" → Phase 2 完成,订阅与手动文件并存合并生效。
-- **Phase 3 承接**:`Controller`(`Subscriptions/AddSubscription/RemoveSubscription/Update/AddRule/RemoveRule/Reload/Stats`)已在 Phase 2 定义并实现,供 Phase 3 的 HTTPS API 直接调用;`Lookup` 留给 Phase 3。
+- **Phase 3 承接**:`Controller`(`Subscriptions/AddSubscription/RemoveSubscription/Update/AddRule/RemoveRule/Reload/Stats`)已在 Phase 2 定义并实现,`Lookup` 在 Phase 3 补齐;HTTPS API(`cmd/5gpn-dns/api.go`)现直接调用完整的 `Controller`(见 §13)。
 - **保留历史**:Phase 1 "本地文件、手动维护"的规则加载方式保留于 git 历史;回滚 = 不部署 `subscriptions.json`,行为退化为纯 Phase 1。
+
+**决策追加 2026-07-01 — Phase 3:控制台改为 :9443 HTTPS REST API + 内嵌 Web UI;tgbot 改为 API 客户端(反转「Phase 3 计划」为「Phase 3 已实现」):**
+- **背景**:Phase 2 已把 `Controller` 定义为可复用 facade(`Subscriptions/AddSubscription/RemoveSubscription/Update/AddRule/RemoveRule/Reload/Stats`),但 `Lookup` 与对外 HTTP 入口尚未实现,控制面仍只有 tgbot 直接改文件 + SIGHUP。
+- **实现**:新增 `cmd/5gpn-dns/api.go`,在 `Controller` 之上补齐 `Lookup`,对外提供 bearer-token 鉴权的 HTTPS REST API,监听 `:9443`(`DNS_LISTEN_API`,install.sh 写入 `/etc/5gpn/dns.env`);同时 `go:embed cmd/5gpn-dns/web/dist` 把一个 React SPA 挂在 `/` 下,SPA 本身不鉴权(只是静态资源),它拿到的 token 用于调用 `/api/*`。
+- **端点**:`GET /api/status`、`GET /api/stats`、`GET /api/lookup?domain=`、`GET/POST /api/subscriptions`、`PATCH/DELETE /api/subscriptions/{id}`、`POST /api/update`、`GET/POST/DELETE /api/rules/{cat}`、`POST /api/reload`。所有 `/api/*` 要求 `Authorization: Bearer <DNS_API_TOKEN>`(常数时间比较);详见 §13。
+- **安全边界**:`DNS_API_TOKEN` 为空 → 整个控制台不启动(绝不无鉴权对外提供);防火墙只放行 CLIENT_NET 访问 :9443,不对公网开放;install.sh 自动生成 token(`openssl rand -hex 32`),重装时保留既有 token。
+- **tgbot 改为 API 客户端**:`tgbot.py` 不再直接改规则文件 / shell 出 `install.sh`,而是以 loopback `https://127.0.0.1:9443` 调用同一套 API(本机回环下 TLS 不校验证书,仍带 token),与 Web UI 并存、共享同一个 `Controller` 状态。
+- **前端形态**:`cmd/5gpn-dns/web/` 是 React + Vite + Tailwind + TypeScript 项目,构建产物在 **CI** 里 `npm run build` 生成 `web/dist` 后 `go:embed` 进二进制;仓库里只提交一个占位 `web/dist/index.html`(保证 `go build` 在本地/CI 构建前也能过),真正构建出的 dist **不提交**。
+- **约定反转(同步改 CLAUDE.md)**:"控制面只有 tgbot、无 HTTP API/Web UI,Phase 3 前不实现" → Phase 3 已完成并上线;"tgbot 直接编辑规则文件" → tgbot 现为 API 客户端。
+- **保留历史**:tgbot 直接改文件 + SIGHUP 的旧实现保留于 git 历史;回滚 = 不设 `DNS_API_TOKEN`(控制台不启动),tgbot 需回退到对应的旧提交。
+
+## 13. 控制面(Phase 3::9443 HTTPS REST API + 内嵌 Web UI)
+
+Phase 3 已实现,控制面从"tgbot 直接改文件 + SIGHUP"升级为"HTTPS REST API + 内嵌 Web UI",tgbot 改为该 API 的客户端,二者并存。
+
+**API 服务**(`cmd/5gpn-dns/api.go`):
+- 监听地址由 `DNS_LISTEN_API` 配置(默认 `:9443`,install.sh 写入 `/etc/5gpn/dns.env`);复用与 DoT/DoH 相同的 Let's Encrypt 证书。
+- 鉴权:所有 `/api/*` 请求要求 `Authorization: Bearer <DNS_API_TOKEN>`,常数时间比较防时序侧信道;`DNS_API_TOKEN` 未设置(空)时**整个控制台不启动**,不存在无鉴权对外暴露的窗口。
+- 端点:
+  | 方法 + 路径 | 作用 |
+  |---|---|
+  | `GET /api/status` | 服务状态(证书有效期、订阅健康度等) |
+  | `GET /api/stats` | 查询统计(仲裁计数、缓存命中等,对应 `Controller.Stats`) |
+  | `GET /api/lookup?domain=` | 对单个域名走一遍四类规则 + 仲裁,返回判定结果(不缓存写入) |
+  | `GET/POST /api/subscriptions` | 列出 / 新增订阅(对应 `Controller.Subscriptions`/`AddSubscription`) |
+  | `PATCH/DELETE /api/subscriptions/{id}` | 修改 / 删除订阅(对应 `Controller.RemoveSubscription` 等) |
+  | `POST /api/update` | 触发订阅立即拉取(对应 `Controller.Update`) |
+  | `GET/POST/DELETE /api/rules/{cat}` | 查看 / 增 / 删某分类的手动规则条目(对应 `Controller.AddRule`/`RemoveRule`) |
+  | `POST /api/reload` | 全量重读手动文件 + 订阅缓存(对应 `Controller.Reload`,等效 SIGHUP) |
+- 首页 `/` 由 `go:embed cmd/5gpn-dns/web/dist` 提供的静态 SPA 承载,不需要鉴权(纯静态资源);SPA 登录后把 token 存下来,后续调用 `/api/*` 时附带。
+
+**Web UI**(`cmd/5gpn-dns/web/`):React + Vite + Tailwind + TypeScript;视图包括登录(输入 token)、Dashboard(状态总览)、Subscriptions(增删改 + 立即更新)、Rules(四类规则增删)、Lookup(单域名判定)、Stats(统计)。构建在 **CI** 完成(`npm run build` 产出 `web/dist`),随 Go 二进制一起 `go:embed`;仓库只提交占位 `web/dist/index.html`,真实构建产物不入库。
+
+**安全边界**:
+- **仅 CLIENT_NET 可达**:防火墙规则只放行 CLIENT_NET 访问 :9443,不面向公网(与 :53/:853/:8443 的公网暴露策略不同)。
+- **Token 门控**:`DNS_API_TOKEN` 为空即禁用整个控制台(不监听 :9443),避免"忘记设置 token = 无鉴权 API"的失误配置;install.sh 自动生成并在重装时保留同一 token。
+- **tgbot 作为客户端**:`tgbot.py` 通过 loopback `https://127.0.0.1:9443` 调用同一 API(回环连接不校验证书,但仍带 token),不再直接写规则文件或 shell 出 `install.sh` 做域名增删。
