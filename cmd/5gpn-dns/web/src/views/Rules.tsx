@@ -12,11 +12,51 @@ const CATEGORIES: { cat: RuleCategory; blurb: string; placeholder: string }[] = 
 ]
 
 export function RulesView() {
+  const toast = useToast()
+  const [reloadKey, setReloadKey] = useState(0)
+  const [reloading, setReloading] = useState(false)
+
+  const reloadFromDisk = async () => {
+    if (reloading) return
+    setReloading(true)
+    try {
+      await api.reload()
+      toast.push('ok', 'Reloaded rules from disk.')
+      setReloadKey((k) => k + 1) // re-fetch every panel's list
+    } catch (err) {
+      toast.push('err', err instanceof Error ? err.message : 'Could not reload rules.')
+    } finally {
+      setReloading(false)
+    }
+  }
+
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-      {CATEGORIES.map((c) => (
-        <RulePanel key={c.cat} cat={c.cat} blurb={c.blurb} placeholder={c.placeholder} />
-      ))}
+    <div className="flex flex-col gap-4">
+      <header className="flex items-center gap-3">
+        <p className="text-xs" style={{ color: 'var(--muted)' }}>
+          Manual entries merge with subscription caches. Edited the files on the box directly?
+          Reload to apply them to the live engine.
+        </p>
+        <button
+          className="btn btn-sm ml-auto shrink-0"
+          onClick={reloadFromDisk}
+          disabled={reloading}
+        >
+          {reloading ? <Spinner size={12} /> : null}
+          Reload from disk
+        </button>
+      </header>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {CATEGORIES.map((c) => (
+          <RulePanel
+            key={c.cat}
+            cat={c.cat}
+            blurb={c.blurb}
+            placeholder={c.placeholder}
+            reloadKey={reloadKey}
+          />
+        ))}
+      </div>
     </div>
   )
 }
@@ -25,10 +65,12 @@ function RulePanel({
   cat,
   blurb,
   placeholder,
+  reloadKey,
 }: {
   cat: RuleCategory
   blurb: string
   placeholder: string
+  reloadKey: number
 }) {
   const toast = useToast()
   const lane = laneForCategory(cat)
@@ -51,7 +93,7 @@ function RulePanel({
 
   useEffect(() => {
     load()
-  }, [load])
+  }, [load, reloadKey])
 
   const add = async (e: React.FormEvent) => {
     e.preventDefault()
