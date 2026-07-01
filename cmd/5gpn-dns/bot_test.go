@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -102,5 +105,150 @@ func TestNewBot_DisabledWhenNoToken(t *testing.T) {
 	}
 	if bt != nil {
 		t.Errorf("NewBot with empty token = %v, want nil (disabled)", bt)
+	}
+}
+
+// TestParseCallback confirms the callback-data → intent decision is a pure
+// function, dispatchable without a live Telegram connection. This is what makes
+// the whole callback router unit-testable: parseCallback classifies the button
+// data, and the handler switches on the returned intent.
+func TestParseCallback(t *testing.T) {
+	cases := []struct {
+		data     string
+		wantKind callbackKind
+		wantArg  string
+	}{
+		{"menu:main", cbMenuMain, ""},
+		{"menu:domains", cbMenuDomains, ""},
+		{"act:status", cbStatus, ""},
+		{"act:update_lists", cbUpdateLists, ""},
+		{"act:reload", cbReload, ""},
+		{"dom:add", cbDomAdd, ""},
+		{"dom:del", cbDomDel, ""},
+		{"", cbUnknown, ""},
+		{"garbage", cbUnknown, "garbage"},
+		{"act:something_else", cbUnknown, "something_else"},
+	}
+	for _, c := range cases {
+		got := parseCallback(c.data)
+		if got.kind != c.wantKind {
+			t.Errorf("parseCallback(%q).kind = %v, want %v", c.data, got.kind, c.wantKind)
+		}
+		if got.arg != c.wantArg {
+			t.Errorf("parseCallback(%q).arg = %q, want %q", c.data, got.arg, c.wantArg)
+		}
+	}
+}
+
+// TestDomainOpsRejectBeforeMutate is the Go analogue of tgbot.py's
+// TestDomainOpsRejectBeforeShell: an invalid domain must be rejected by
+// isValidDomain BEFORE any Controller mutation, so the on-disk rule file is
+// never touched (and reload is never called). We build a real Controller over a
+// temp rules dir with a reload counter, drive the add/del handlers with an
+// invalid domain, and assert the file was not created and reload never ran.
+func TestDomainOpsRejectBeforeMutate(t *testing.T) {
+	dir := t.TempDir()
+	reloadCalls := 0
+	ctrl := NewController(nil, func() error { reloadCalls++; return nil }, dir, nil, nil, nil)
+	bt := &Bot{ctrl: ctrl, admins: map[int64]bool{1: true}, pending: map[int64]string{}}
+
+	blacklistFile := filepath.Join(dir, "blacklist.txt")
+
+	invalids := []string{"not a domain", "http://x.com", "foo", "_x.com", "bar.com/x"}
+	for _, bad := range invalids {
+		// Add path.
+		msg, ok := bt.applyDomainOp("add_domain", bad)
+		if ok {
+			t.Errorf("applyDomainOp add %q reported success, want rejection", bad)
+		}
+		if !strings.Contains(msg, "无效") {
+			t.Errorf("applyDomainOp add %q message = %q, want an invalid-domain notice", bad, msg)
+		}
+		// Del path.
+		if _, ok := bt.applyDomainOp("del_domain", bad); ok {
+			t.Errorf("applyDomainOp del %q reported success, want rejection", bad)
+		}
+	}
+
+	if _, err := os.Stat(blacklistFile); !os.IsNotExist(err) {
+		t.Errorf("blacklist.txt should not exist after only-invalid ops, stat err = %v", err)
+	}
+	if reloadCalls != 0 {
+		t.Errorf("reload was called %d times on invalid-only ops, want 0", reloadCalls)
+	}
+}
+
+// TestDomainOpsValidMutates confirms the positive path still works: a valid
+// domain flows through to AddRule (file written, reload called), and the
+// success message names the domain.
+func TestDomainOpsValidMutates(t *testing.T) {
+	dir := t.TempDir()
+	reloadCalls := 0
+	ctrl := NewController(nil, func() error { reloadCalls++; return nil }, dir, nil, nil, nil)
+	bt := &Bot{ctrl: ctrl, admins: map[int64]bool{1: true}, pending: map[int64]string{}}
+
+	msg, ok := bt.applyDomainOp("add_domain", "example.com")
+	if !ok {
+		t.Fatalf("applyDomainOp add valid domain failed: %q", msg)
+	}
+	if !strings.Contains(msg, "example.com") {
+		t.Errorf("success message = %q, want it to name the domain", msg)
+	}
+	got, err := ctrl.ListRules("blacklist")
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	if len(got) != 1 || got[0] != "example.com" {
+		t.Errorf("blacklist after add = %v, want [example.com]", got)
+	}
+	if reloadCalls != 1 {
+		t.Errorf("reload called %d times, want 1", reloadCalls)
+	}
+
+	// Remove it again.
+	if _, ok := bt.applyDomainOp("del_domain", "example.com"); !ok {
+		t.Errorf("applyDomainOp del valid domain reported failure")
+	}
+	got, _ = ctrl.ListRules("blacklist")
+	if len(got) != 0 {
+		t.Errorf("blacklist after del = %v, want empty", got)
+	}
+}
+
+// TestPendingState exercises the per-chat conversational state machine: setting
+// a pending action, reading it, and clearing it are all guarded and correct.
+func TestPendingState(t *testing.T) {
+	bt := &Bot{pending: map[int64]string{}}
+
+	if got, ok := bt.getPending(42); ok || got != "" {
+		t.Errorf("getPending on empty = (%q,%v), want (\"\",false)", got, ok)
+	}
+	bt.setPending(42, "add_domain")
+	if got, ok := bt.getPending(42); !ok || got != "add_domain" {
+		t.Errorf("getPending after set = (%q,%v), want (\"add_domain\",true)", got, ok)
+	}
+	// A different chat is unaffected.
+	if _, ok := bt.getPending(99); ok {
+		t.Errorf("getPending(99) leaked state from chat 42")
+	}
+	bt.clearPending(42)
+	if _, ok := bt.getPending(42); ok {
+		t.Errorf("getPending after clear still set")
+	}
+}
+
+// TestRenderReload covers the reload button's ok/err rendering.
+func TestRenderReload(t *testing.T) {
+	dir := t.TempDir()
+	okCtrl := NewController(nil, func() error { return nil }, dir, nil, nil, nil)
+	bt := &Bot{ctrl: okCtrl, pending: map[int64]string{}}
+	if out := bt.doReload(context.Background()); !strings.Contains(out, "✅") {
+		t.Errorf("doReload success render = %q, want a ✅", out)
+	}
+
+	errCtrl := NewController(nil, func() error { return os.ErrPermission }, dir, nil, nil, nil)
+	bt2 := &Bot{ctrl: errCtrl, pending: map[int64]string{}}
+	if out := bt2.doReload(context.Background()); !strings.Contains(out, "❌") {
+		t.Errorf("doReload failure render = %q, want a ❌", out)
 	}
 }

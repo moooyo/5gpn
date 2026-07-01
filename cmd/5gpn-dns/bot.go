@@ -3,13 +3,21 @@ package main
 import (
 	"context"
 	"fmt"
+	"html"
 	"log"
+	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 )
+
+// botServices are the two data-path services the status card reports on (and
+// that T3 will let an admin restart / tail). The bot only reads their state
+// here (systemctl is-active); mutation lands in T3.
+var botServices = []string{"5gpn-dns", "sing-box"}
 
 // domainRE is the canonical FQDN pattern, ported from tgbot.py's DOMAIN_RE but
 // adapted for Go's RE2 engine, which has NO lookahead. tgbot.py used a
@@ -42,7 +50,14 @@ type Bot struct {
 	tg     *bot.Bot
 	ctrl   *Controller
 	admins map[int64]bool
-	// Gateway/domain facts are added in T3.
+
+	// pending is the per-chat conversational state machine, mirroring
+	// tgbot.py's PENDING dict: chat_id -> action ("add_domain"/"del_domain").
+	// A slash command or /cancel clears it. Guarded by mu.
+	mu      sync.Mutex
+	pending map[int64]string
+	// Gateway/domain facts are read from disk (readStatusFacts); OS-op state
+	// (restart/logs/certbot/QR) is added in T3.
 }
 
 // NewBot constructs the in-process Telegram bot. An empty cfg.TGBotToken means
@@ -58,14 +73,23 @@ func NewBot(cfg Config, ctrl *Controller) (*Bot, error) {
 	}
 
 	bt := &Bot{
-		ctrl:   ctrl,
-		admins: cfg.TGBotAdmins,
+		ctrl:    ctrl,
+		admins:  cfg.TGBotAdmins,
+		pending: make(map[int64]string),
 	}
 
 	opts := []bot.Option{
 		bot.WithMiddlewares(bt.adminGate),
 		bot.WithDefaultHandler(bt.defaultHandler),
 		bot.WithMessageTextHandler("/id", bot.MatchTypeExact, bt.handleID),
+		bot.WithMessageTextHandler("/start", bot.MatchTypePrefix, bt.handleMenu),
+		bot.WithMessageTextHandler("/menu", bot.MatchTypePrefix, bt.handleMenu),
+		bot.WithMessageTextHandler("/help", bot.MatchTypePrefix, bt.handleMenu),
+		bot.WithMessageTextHandler("/status", bot.MatchTypePrefix, bt.handleStatus),
+		bot.WithMessageTextHandler("/cancel", bot.MatchTypeExact, bt.handleCancel),
+		// A single callback handler routes every button press; the empty
+		// prefix matches all callback_data, and parseCallback classifies it.
+		bot.WithCallbackQueryDataHandler("", bot.MatchTypePrefix, bt.handleCallback),
 	}
 
 	tg, err := bot.New(cfg.TGBotToken, opts...)
@@ -76,16 +100,27 @@ func NewBot(cfg Config, ctrl *Controller) (*Bot, error) {
 	return bt, nil
 }
 
-// Run starts the long-poll loop, blocking until ctx is cancelled. It recovers
-// from any panic so a bot crash never propagates into (or takes down) the host
-// process — the bot is a best-effort control plane, not part of the data path.
+// Run starts the long-poll loop, blocking until ctx is cancelled. It registers
+// the quick-command menu first (best-effort; a failure there is non-fatal),
+// then recovers from any panic so a bot crash never propagates into (or takes
+// down) the host process — the bot is a best-effort control plane, not part of
+// the data path.
 func (bt *Bot) Run(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("bot: recovered from panic: %v", r)
 		}
 	}()
+	bt.setCommands(ctx)
 	bt.tg.Start(ctx)
+}
+
+// setCommands publishes the quick-command menu (the Telegram "Menu" button /
+// typing "/"). Best-effort: any error is logged, never fatal.
+func (bt *Bot) setCommands(ctx context.Context) {
+	if _, err := bt.tg.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: botCommands}); err != nil {
+		log.Printf("bot: setMyCommands: %v", err)
+	}
 }
 
 // isAdmin reports whether uid is an authorized admin. A nil/empty admin set
@@ -160,14 +195,338 @@ func (bt *Bot) handleID(ctx context.Context, b *bot.Bot, update *models.Update) 
 	})
 }
 
-// defaultHandler catches updates with no specific handler. For an admin-gated
-// bot skeleton it just acknowledges unknown input; real commands arrive in T2/T3.
-func (bt *Bot) defaultHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+// --------------------------------------------------------------------------- //
+// Per-chat conversational state (mirrors tgbot.py's PENDING dict)
+// --------------------------------------------------------------------------- //
+
+// setPending records that chat's next text message is the argument to action.
+func (bt *Bot) setPending(chatID int64, action string) {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	bt.pending[chatID] = action
+}
+
+// getPending returns chat's pending action (and whether one is set).
+func (bt *Bot) getPending(chatID int64) (string, bool) {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	a, ok := bt.pending[chatID]
+	return a, ok
+}
+
+// clearPending drops chat's pending action (a no-op if none is set).
+func (bt *Bot) clearPending(chatID int64) {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	delete(bt.pending, chatID)
+}
+
+// --------------------------------------------------------------------------- //
+// Send / edit helpers
+// --------------------------------------------------------------------------- //
+
+// send delivers an HTML message, paginating anything over Telegram's limit and
+// attaching kb (if non-nil) to the final chunk. Mirrors tgbot.py's send().
+func (bt *Bot) send(ctx context.Context, b *bot.Bot, chatID int64, text string, kb *models.InlineKeyboardMarkup) {
+	chunks := chunkText(text, 3900)
+	last := len(chunks) - 1
+	for i, chunk := range chunks {
+		params := &bot.SendMessageParams{
+			ChatID:             chatID,
+			Text:               chunk,
+			ParseMode:          models.ParseModeHTML,
+			LinkPreviewOptions: disabledPreview(),
+		}
+		if kb != nil && i == last {
+			params.ReplyMarkup = kb
+		}
+		_, _ = b.SendMessage(ctx, params)
+	}
+}
+
+// edit rewrites the message a callback button belongs to, keeping a flow in one
+// bubble. Falls back to a fresh message when the edit cannot be applied (e.g.
+// the message is inaccessible). Mirrors tgbot.py's edit().
+func (bt *Bot) edit(ctx context.Context, b *bot.Bot, cq *models.CallbackQuery, text string, kb *models.InlineKeyboardMarkup) {
+	chatID, msgID, ok := callbackTarget(cq)
+	if !ok {
+		return
+	}
+	if len(text) > 4096 {
+		text = text[:4096]
+	}
+	params := &bot.EditMessageTextParams{
+		ChatID:             chatID,
+		MessageID:          msgID,
+		Text:               text,
+		ParseMode:          models.ParseModeHTML,
+		LinkPreviewOptions: disabledPreview(),
+	}
+	if kb != nil {
+		params.ReplyMarkup = kb
+	}
+	if _, err := b.EditMessageText(ctx, params); err != nil {
+		// "message is not modified" is benign; otherwise fall back to a fresh
+		// message so the operator still sees the result.
+		if !strings.Contains(err.Error(), "not modified") {
+			bt.send(ctx, b, chatID, text, kb)
+		}
+	}
+}
+
+// callbackTarget extracts the (chatID, messageID) the callback's message lives
+// in, handling both accessible and inaccessible message shapes.
+func callbackTarget(cq *models.CallbackQuery) (chatID int64, msgID int, ok bool) {
+	switch cq.Message.Type {
+	case models.MaybeInaccessibleMessageTypeMessage:
+		if m := cq.Message.Message; m != nil {
+			return m.Chat.ID, m.ID, true
+		}
+	case models.MaybeInaccessibleMessageTypeInaccessibleMessage:
+		if m := cq.Message.InaccessibleMessage; m != nil {
+			return m.Chat.ID, m.MessageID, true
+		}
+	}
+	return 0, 0, false
+}
+
+// --------------------------------------------------------------------------- //
+// Command handlers
+// --------------------------------------------------------------------------- //
+
+// handleMenu opens the main menu (for /start, /menu, /help). Any slash command
+// also aborts an in-progress conversational flow, mirroring tgbot.py.
+func (bt *Bot) handleMenu(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: update.Message.Chat.ID,
-		Text:   "未知命令。发送 /id 查看你的数字 ID。",
-	})
+	bt.clearPending(update.Message.Chat.ID)
+	bt.send(ctx, b, update.Message.Chat.ID, "<b>5gpn 控制台</b>\n选择一个操作：", mainMenu())
 }
+
+// handleStatus renders the status card (for /status).
+func (bt *Bot) handleStatus(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+	bt.clearPending(update.Message.Chat.ID)
+	bt.send(ctx, b, update.Message.Chat.ID, bt.doStatus(), backKB("menu:main"))
+}
+
+// handleCancel clears any pending flow and reopens the menu (for /cancel).
+func (bt *Bot) handleCancel(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+	bt.clearPending(update.Message.Chat.ID)
+	bt.send(ctx, b, update.Message.Chat.ID, "已取消。", mainMenu())
+}
+
+// defaultHandler catches messages with no specific command handler. It drives
+// the conversational flows: when a chat has a pending action (add_domain /
+// del_domain), the next non-slash text message is treated as the domain
+// argument. Any unrecognized slash command clears the flow and hints at /menu;
+// plain text with no pending flow just reopens the menu. Mirrors tgbot.py's
+// handle_message tail. Panics are recovered so one bad update never kills the
+// poll loop.
+func (bt *Bot) defaultHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("bot: recovered from panic in defaultHandler: %v", r)
+		}
+	}()
+
+	if update.Message == nil {
+		return
+	}
+	chatID := update.Message.Chat.ID
+	text := strings.TrimSpace(update.Message.Text)
+
+	// Any slash command aborts an in-progress flow. (/start,/menu,/help,
+	// /status,/cancel,/id have their own handlers; this catches everything
+	// else, e.g. a typo.)
+	if strings.HasPrefix(text, "/") {
+		bt.clearPending(chatID)
+		bt.send(ctx, b, chatID, "未知命令。发送 /menu 打开操作面板。", nil)
+		return
+	}
+
+	// Conversational flows: the admin's next message is the domain argument.
+	if action, ok := bt.getPending(chatID); ok {
+		bt.clearPending(chatID)
+		bt.send(ctx, b, chatID, "⏳ 正在处理并刷新名单…", nil)
+		msg, _ := bt.applyDomainOp(action, text)
+		bt.send(ctx, b, chatID, msg, domainsMenu())
+		return
+	}
+
+	bt.send(ctx, b, chatID, "发送 /menu 打开操作面板。", mainMenu())
+}
+
+// --------------------------------------------------------------------------- //
+// Callback (inline-button) routing
+// --------------------------------------------------------------------------- //
+
+// handleCallback routes every inline-button press. It answers the callback
+// immediately (to stop the button's spinner), then classifies the data via the
+// pure parseCallback and dispatches. Panics are recovered so one bad update
+// never kills the poll loop.
+func (bt *Bot) handleCallback(ctx context.Context, b *bot.Bot, update *models.Update) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("bot: recovered from panic in handleCallback: %v", r)
+		}
+	}()
+
+	cq := update.CallbackQuery
+	if cq == nil {
+		return
+	}
+	// Stop the button spinner immediately; long ops still run synchronously.
+	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cq.ID})
+
+	chatID, _, ok := callbackTarget(cq)
+	if !ok {
+		return
+	}
+
+	intent := parseCallback(cq.Data)
+	switch intent.kind {
+	case cbMenuMain:
+		bt.clearPending(chatID)
+		bt.edit(ctx, b, cq, "选择一个操作：", mainMenu())
+	case cbMenuDomains:
+		bt.edit(ctx, b, cq, bt.doListDomains(), domainsMenu())
+	case cbStatus:
+		bt.edit(ctx, b, cq, bt.doStatus(), backKB("menu:main"))
+	case cbUpdateLists:
+		bt.edit(ctx, b, cq, "⏳ 正在更新订阅 / 名单，请稍候（可能较久）…", nil)
+		bt.edit(ctx, b, cq, bt.doUpdateLists(ctx), backKB("menu:main"))
+	case cbReload:
+		bt.edit(ctx, b, cq, "⏳ 正在重载规则…", nil)
+		bt.edit(ctx, b, cq, bt.doReload(ctx), backKB("menu:main"))
+	case cbDomAdd:
+		bt.setPending(chatID, "add_domain")
+		bt.edit(ctx, b, cq, "➕ 发送要加入<b>黑名单(强制代理)</b>的域名（如 <code>example.com</code>）。\n发送 /cancel 取消。", nil)
+	case cbDomDel:
+		bt.setPending(chatID, "del_domain")
+		bt.edit(ctx, b, cq, bt.doListDomains()+"\n\n🗑 发送要<b>删除</b>的域名，或 /cancel 取消。", nil)
+	default:
+		bt.edit(ctx, b, cq, "未知操作。", backKB("menu:main"))
+	}
+}
+
+// --------------------------------------------------------------------------- //
+// Controller-backed operations (in-memory; NO HTTP, NO :9443, NO token)
+// --------------------------------------------------------------------------- //
+
+// doStatus builds the status card from the in-process Controller stats, the
+// live service states (systemctl is-active — read-only), the on-disk gateway
+// facts, and the /proc server metrics. Metrics are computed defensively so a
+// failure there never breaks the card.
+func (bt *Bot) doStatus() string {
+	st := bt.ctrl.Stats()
+	svc := serviceStates()
+	facts := readStatusFacts()
+	metrics := safeSystemMetrics()
+	return renderStatus(st, svc, facts, metrics)
+}
+
+// safeSystemMetrics wraps systemMetrics so a panic there degrades to a note
+// rather than taking down the status render.
+func safeSystemMetrics() (card string) {
+	defer func() {
+		if r := recover(); r != nil {
+			card = fmt.Sprintf("（服务器指标获取失败：%v）", r)
+		}
+	}()
+	return systemMetrics()
+}
+
+// doListDomains renders the blacklist (forced-proxy) domain list from the
+// Controller.
+func (bt *Bot) doListDomains() string {
+	domains, err := bt.ctrl.ListRules("blacklist")
+	if err != nil {
+		return "🎯 <b>黑名单(强制代理)域名</b>\n\n❌ " + pre(err.Error())
+	}
+	return renderDomains(domains)
+}
+
+// applyDomainOp validates domain with isValidDomain BEFORE any Controller
+// mutation (guarded by TestDomainOpsRejectBeforeMutate), then adds/removes it
+// from the blacklist category. Returns (message, ok). action is one of
+// "add_domain" / "del_domain". An invalid domain returns (reject-message,
+// false) with NO Controller call, so the rule file is never touched.
+func (bt *Bot) applyDomainOp(action, domain string) (string, bool) {
+	d := strings.ToLower(strings.TrimSpace(domain))
+	if !isValidDomain(d) {
+		if action == "del_domain" {
+			return "❌ 域名无效。请发送要删除的域名，或 /cancel。", false
+		}
+		return "❌ 域名无效。请发送形如 <code>example.com</code> 的域名，或 /cancel。", false
+	}
+
+	switch action {
+	case "add_domain":
+		if err := bt.ctrl.AddRule("blacklist", d); err != nil {
+			return "❌ <b>添加失败</b>\n" + pre(err.Error()), false
+		}
+		return fmt.Sprintf("✅ 已把 <b>%s</b> 加入黑名单(强制代理)列表，并已刷新生效。", htmlEscape(d)), true
+	case "del_domain":
+		if err := bt.ctrl.RemoveRule("blacklist", d); err != nil {
+			return "❌ <b>删除失败</b>\n" + pre(err.Error()), false
+		}
+		return fmt.Sprintf("✅ 已把 <b>%s</b> 从黑名单(强制代理)列表移除，并已刷新生效。", htmlEscape(d)), true
+	default:
+		return "未知操作。", false
+	}
+}
+
+// doUpdateLists refreshes every configured subscription via the Controller and
+// renders the per-result summary.
+func (bt *Bot) doUpdateLists(ctx context.Context) string {
+	results := bt.ctrl.Update(ctx, "")
+	return renderUpdateResults(results)
+}
+
+// doReload rebuilds the rule sets from disk via the Controller.
+func (bt *Bot) doReload(ctx context.Context) string {
+	if err := bt.ctrl.Reload(); err != nil {
+		return "❌ <b>重载失败</b>\n" + pre(err.Error())
+	}
+	return "✅ <b>规则已重载</b>（已从磁盘重建并原子切换）。"
+}
+
+// --------------------------------------------------------------------------- //
+// Service state (read-only; systemctl is-active)
+// --------------------------------------------------------------------------- //
+
+// serviceStates returns each data-path service's systemctl state (e.g.
+// "active"/"failed"/"inactive"), or "unknown" when systemctl is unavailable
+// (e.g. the Windows dev box). Read-only; mutation (restart) is a T3 concern.
+func serviceStates() map[string]string {
+	out := make(map[string]string, len(botServices))
+	for _, s := range botServices {
+		out[s] = serviceState(s)
+	}
+	return out
+}
+
+// serviceState runs `systemctl is-active <unit>` and returns its trimmed
+// output. `systemctl is-active` exits non-zero for a non-active unit but still
+// prints the state on stdout, so we use the output regardless of exit code.
+// A missing systemctl (non-Linux) yields "unknown".
+func serviceState(unit string) string {
+	cmd := exec.Command("systemctl", "is-active", unit)
+	b, _ := cmd.Output()
+	state := strings.TrimSpace(string(b))
+	if state == "" {
+		return "unknown"
+	}
+	return state
+}
+
+// htmlEscape is a tiny wrapper so bot.go can HTML-escape without importing
+// html directly alongside the render helpers.
+func htmlEscape(s string) string { return html.EscapeString(s) }
