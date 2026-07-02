@@ -81,8 +81,9 @@ func (c *certCache) get(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
 
 // certGetter returns a GetCertificate callback that loads certPath/keyPath on
 // first call and reloads them whenever either file's mtime changes.  The
-// initial load is deferred to the first TLS handshake — files need not exist
-// until the server starts accepting connections.
+// callback itself is lazy (it loads on first invocation); NewServers invokes it
+// once at startup as a health gate, so in practice a missing/corrupt cert fails
+// at boot rather than silently at the first handshake.
 //
 // The returned function is safe for concurrent use; only one goroutine reloads
 // at a time.

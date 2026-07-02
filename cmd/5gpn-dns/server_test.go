@@ -136,3 +136,37 @@ func TestDoT_ALPN_dot(t *testing.T) {
 		t.Errorf("negotiated ALPN = %q, want \"dot\"", got)
 	}
 }
+
+// TestNewServersCertLoadGate is the startup TLS health gate: when DoT/DoH is
+// configured but the cert/key cannot be loaded, NewServers must fail loudly at
+// boot (so main log.Fatals) rather than defer to a silent handshake-time error
+// that leaves DoT/DoH dead while the process otherwise looks healthy.
+func TestNewServersCertLoadGate(t *testing.T) {
+	h := &stubHandler{reply: new(dns.Msg)}
+
+	t.Run("missing cert files → error", func(t *testing.T) {
+		cfg := Config{
+			ListenDoT: "127.0.0.1:0",
+			CertFile:  filepath.Join(t.TempDir(), "nope-cert.pem"),
+			KeyFile:   filepath.Join(t.TempDir(), "nope-key.pem"),
+		}
+		if _, err := NewServers(cfg, h); err == nil {
+			t.Fatal("NewServers must fail when the TLS cert cannot be loaded")
+		}
+	})
+
+	t.Run("valid cert → ok", func(t *testing.T) {
+		certFile, keyFile := writeTestCert(t)
+		cfg := Config{ListenDoH: "127.0.0.1:0", CertFile: certFile, KeyFile: keyFile}
+		if _, err := NewServers(cfg, h); err != nil {
+			t.Fatalf("NewServers with a valid cert: %v", err)
+		}
+	})
+
+	t.Run("no TLS listener → no cert needed", func(t *testing.T) {
+		cfg := Config{ListenPlain: "127.0.0.1:0"} // plain only, no cert
+		if _, err := NewServers(cfg, h); err != nil {
+			t.Fatalf("NewServers plain-only: %v", err)
+		}
+	})
+}

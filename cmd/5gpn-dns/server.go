@@ -84,6 +84,14 @@ func NewServers(cfg Config, handler dns.Handler) (*Servers, error) {
 		// onto the DoT listener, making RFC 7858 clients that offer ALPN "dot"
 		// (kdig, Android Private DNS) fail the handshake with no_application_protocol.
 		getCert := certGetter(cfg.CertFile, cfg.KeyFile)
+		// Startup health gate: force the initial cert load now so a missing or
+		// corrupt cert fails loudly at boot (main log.Fatals) instead of being
+		// deferred to the first TLS handshake, where a load failure would leave
+		// DoT/DoH silently dead while the process otherwise looks healthy. Also
+		// primes the cert cache so the first real handshake needs no disk load.
+		if _, err := getCert(nil); err != nil {
+			return nil, fmt.Errorf("servers: TLS cert load failed: %w", err)
+		}
 		s.dotTLSCfg = &tls.Config{
 			GetCertificate: getCert,
 			MinVersion:     tls.VersionTLS12,
