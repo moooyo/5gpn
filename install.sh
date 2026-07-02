@@ -25,6 +25,7 @@ BUILD_DIR="${BASE_DIR}/build"            # download/unpack scratch
 CONF_DIR="/etc/5gpn"                 # state: .domain .public_ip .gateway_ip ...
 DNS_BIN="/usr/local/bin/5gpn-dns"        # 5gpn-dns binary (DoT/DoH/plain resolver)
 DNS_CERT_DIR="/etc/5gpn/cert"            # cert copy for 5gpn-dns (hot-reloaded via SIGHUP)
+DNS_WEB_DIR="/opt/5gpn/web"               # control-console SPA (served from disk by :9443)
 DNS_RULES_DIR_DEFAULT="/etc/5gpn/rules"  # rule files: blacklist.txt, direct.txt, etc.
 SINGBOX_BIN="/usr/local/bin/sing-box"
 SINGBOX_DIR="/usr/local/etc/sing-box"
@@ -234,6 +235,29 @@ install_5gpndns() {
     install -m 0755 "$bin_dl" "$DNS_BIN"
     [[ -x "$DNS_BIN" ]] || { err "5gpn-dns install failed."; exit 1; }
     ok "5gpn-dns installed to $DNS_BIN (${ver})."
+}
+
+# 5gpn-web: control-console SPA tarball from the same moooyo/5gpn release.
+# Served from disk by the :9443 control server (DNS_WEB_DIR); no go:embed.
+install_web() {
+    local ver="${DNS_VERSION:-dns-v0.1.0}"
+    local v="${ver#dns-}"
+    local url="https://github.com/moooyo/5gpn/releases/download/${ver}/5gpn-web-${v}.tar.gz"
+    info "Downloading control-console SPA (5gpn-web ${v})..."
+    mkdir -p "$BUILD_DIR" "$DNS_WEB_DIR"
+    local tgz="$BUILD_DIR/5gpn-web-${v}.tar.gz"
+    gum_spin "Downloading 5gpn-web ${v}…" curl -fsSL "$url" -o "$tgz" \
+        || { warn "5gpn-web download failed ($url); the :9443 console will show a placeholder."; return 0; }
+    local exp="${WEB_SHA256:-}"
+    if [[ -n "$exp" ]]; then
+        local got; got="$(sha256sum "$tgz" | awk '{print $1}')"
+        [[ "$got" == "$exp" ]] || { err "5gpn-web sha256 mismatch (want $exp got $got)"; exit 1; }
+        ok "5gpn-web sha256 verified."
+    fi
+    rm -rf "${DNS_WEB_DIR:?}"/*
+    tar -xzf "$tgz" -C "$DNS_WEB_DIR" \
+        || { warn "5gpn-web extract failed; :9443 console will show a placeholder."; return 0; }
+    ok "Control-console SPA installed to ${DNS_WEB_DIR}/."
 }
 
 # ----------------------------------------------------------------------------
@@ -618,6 +642,10 @@ DNS_SUBSCRIPTIONS=${CONF_DIR}/subscriptions.json
 DNS_LISTEN_API=:9443
 DNS_API_TOKEN=${DNS_API_TOKEN}
 
+# Control-console SPA (served from disk by the :9443 server). Populated by
+# install_web from the 5gpn-web release tarball; empty dir -> built-in placeholder.
+DNS_WEB_DIR=${DNS_WEB_DIR}
+
 # Phase 5: in-process iOS .mobileconfig responder (served by 5gpn-dns from WWW_DIR
 # on DNS_IOS_LISTEN — no separate python unit). Firewalled to CLIENT_NET only.
 WWW_DIR=${WWW_DIR}
@@ -880,6 +908,7 @@ full_install() {
     info "sing-box SNI resolver: ${SINGBOX_RESOLVER}"
 
     install_singbox
+    install_web
     # Persist memory profile knobs for scripts that read it.
     mkdir -p "$CONF_DIR"; echo "$CACHE_SIZE" > "${CONF_DIR}/.cache_size"
 
@@ -940,6 +969,7 @@ Usage: sudo bash install.sh [option]
 Env overrides: DOMAIN=, PUBLIC_IP=, GATEWAY_IP=, EMAIL=, LOWMEM=1|0,
                CLIENT_NET=172.22.0.0/16, SINGBOX_RESOLVER=22.22.22.22, SINGBOX_VERSION=1.13.14,
                DNS_VERSION=dns-v0.1.0, DNS_SHA256=,
+               WEB_SHA256= (pin the 5gpn-web tarball), DNS_WEB_DIR=/opt/5gpn/web,
                DOT_RATE=30/second, DOT_BURST=60,
                TGBOT_TOKEN=, TGBOT_ADMINS=
 EOF

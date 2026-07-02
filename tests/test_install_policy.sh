@@ -43,5 +43,10 @@ grep -Eq '\.singbox_resolver'                  "$INSTALL" || fail "resolver not 
 grep -Eq 'SINGBOX_RESOLVER'                    "$INSTALL" || fail "SINGBOX_RESOLVER not wired in install flow"
 grep -Eq 'ask_text .*(解析器|resolver)'         "$INSTALL" || fail "no resolver prompt"
 
+# --- Frontend shipped separately + served from disk (not go:embed) ---
+grep -Eq 'install_web'          "$INSTALL" || fail "no install_web() to fetch the 5gpn-web tarball"
+grep -Eq '5gpn-web-.*\.tar\.gz' "$INSTALL" || fail "install_web does not fetch the 5gpn-web tarball asset"
+grep -Eq 'DNS_WEB_DIR'          "$INSTALL" || fail "DNS_WEB_DIR not wired in install.sh"
+
 [ $rc -eq 0 ] && echo "install policy: PASS"
 exit $rc
