@@ -13,7 +13,7 @@ RestartSec=5
 User=root
 LimitNOFILE=65535
 # Sandbox: DNS resolver — binds :53/:853/:8443 (resolution), :9443 (Phase 3
-# control-plane API + embedded SPA), and :8111 (Phase 5 iOS DoT profile server),
+# control-plane API + disk-served SPA), and :8111 (Phase 5 iOS DoT profile server),
 # root with no new privileges. IPv4 (+unix) sockets only for now — AF_INET6 /
 # AF_NETLINK are NOT granted; confirm on test-env whether the runtime needs
 # either (a dual-stack ":port" bind or route subscribe) and add them there if

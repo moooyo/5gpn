@@ -49,7 +49,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       # Frontend gate: the SPA must type-check and build cleanly. The release
-      # workflow runs the same build to produce the embedded dist.
+      # workflow runs the same build to produce the 5gpn-web release tarball.
       - name: Build + typecheck web UI
         run: |
           cd web

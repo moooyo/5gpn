@@ -19,7 +19,7 @@ import (
 var version = "dev"
 
 // ControlServer is the Phase-3 HTTPS control plane: a REST API over
-// Controller (bearer-token authenticated) plus the embedded SPA. It is a
+// Controller (bearer-token authenticated) plus the disk-served SPA. It is a
 // separate listener from the DNS-facing DoT/DoH servers (Servers in
 // server.go) — different port, different purpose (admin, not resolution).
 type ControlServer struct {
