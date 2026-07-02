@@ -21,13 +21,13 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
-          cache-dependency-path: cmd/5gpn-dns/web/package-lock.json
+          cache-dependency-path: web/package-lock.json
 
-      # Build the control-console SPA BEFORE the Go build so go:embed
-      # (cmd/5gpn-dns/web/dist) bundles the real UI, not the committed placeholder.
+      # Build the control-console SPA BEFORE packaging it into the 5gpn-web
+      # release tarball (daemon serves it from disk via DNS_WEB_DIR, not go:embed).
       - name: Build web UI
         run: |
-          cd cmd/5gpn-dns/web
+          cd web
           npm ci
           npm run build
 
@@ -41,9 +41,16 @@ jobs:
             -ldflags "-s -w -X main.version=${VER}" -o 5gpn-dns-linux-amd64 .
           sha256sum 5gpn-dns-linux-amd64 > checksums.txt
 
+      - name: Package web UI
+        run: |
+          VER="${GITHUB_REF_NAME#dns-}"
+          tar czf "5gpn-web-${VER}.tar.gz" -C web/dist .
+          sha256sum "5gpn-web-${VER}.tar.gz" >> cmd/5gpn-dns/checksums.txt
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
             cmd/5gpn-dns/5gpn-dns-linux-amd64
             cmd/5gpn-dns/checksums.txt
+            5gpn-web-*.tar.gz
