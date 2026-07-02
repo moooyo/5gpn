@@ -41,10 +41,15 @@ type statsCounters struct {
 	blacklist       atomic.Uint64
 	chnrouteCN      atomic.Uint64
 	chnrouteForeign atomic.Uint64
-	chinaOK         atomic.Uint64
-	chinaErr        atomic.Uint64
-	trustOK         atomic.Uint64
-	trustErr        atomic.Uint64
+	// china/trust ok/err are OBSERVABILITY-ONLY (see the note above the routing
+	// decision in Arbitrate): exposed via /api/stats + dashboard/bot and persisted,
+	// but they MUST NOT feed the china-vs-trust decision, which is deterministic by
+	// chnroute membership — never health/speed. They are also per-group and
+	// asymmetric (trust counted only when consulted), so unfit to drive selection.
+	chinaOK  atomic.Uint64
+	chinaErr atomic.Uint64
+	trustOK  atomic.Uint64
+	trustErr atomic.Uint64
 }
 
 // Handler is a dns.Handler that implements the 5gpn query dispatch policy:

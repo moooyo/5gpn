@@ -71,7 +71,11 @@ func Arbitrate(ctx context.Context, q *dns.Msg, china, trust Exchanger, cn *Chnr
 	chinaRes := <-chinaCh
 	stats.bumpChina(chinaRes.err == nil)
 
-	// Deterministic decision: if china has a CN address, return it.
+	// Deterministic decision: if china has a CN address, return it. This is by
+	// chnroute MEMBERSHIP only — never by upstream health/speed. The china/trust
+	// health counters bumped here are observability-only and deliberately do NOT
+	// influence this choice (TestArbitrateDeterminism locks it: a slow CN answer
+	// still wins over a fast trust one).
 	if chinaRes.err == nil && chinaIsCN(chinaRes.msg, cn) {
 		return chinaRes.msg, nil
 	}
