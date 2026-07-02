@@ -58,6 +58,10 @@ type Bot struct {
 	mu      sync.Mutex
 	pending map[int64]string
 
+	// subDrafts holds the per-chat add-subscription wizard state (bot_subs.go).
+	// Guarded by mu.
+	subDrafts map[int64]*subDraft
+
 	// runFn is the injectable shelling-out seam for the T3 OS-op handlers
 	// (restart/logs/certbot/QR). A nil runFn means "use the real run" (via
 	// Bot.run); tests set it to a stub so no real systemctl/journalctl/certbot/
@@ -79,9 +83,10 @@ func NewBot(cfg Config, ctrl *Controller) (*Bot, error) {
 	}
 
 	bt := &Bot{
-		ctrl:    ctrl,
-		admins:  cfg.TGBotAdmins,
-		pending: make(map[int64]string),
+		ctrl:      ctrl,
+		admins:    cfg.TGBotAdmins,
+		pending:   make(map[int64]string),
+		subDrafts: make(map[int64]*subDraft),
 	}
 
 	opts := []bot.Option{
@@ -325,6 +330,7 @@ func (bt *Bot) handleCancel(ctx context.Context, b *bot.Bot, update *models.Upda
 		return
 	}
 	bt.clearPending(update.Message.Chat.ID)
+	bt.clearSubDraft(update.Message.Chat.ID)
 	bt.send(ctx, b, update.Message.Chat.ID, "已取消。", mainMenu())
 }
 
@@ -357,12 +363,21 @@ func (bt *Bot) defaultHandler(ctx context.Context, b *bot.Bot, update *models.Up
 		return
 	}
 
-	// Conversational flows: the admin's next message is the domain argument.
+	// Conversational flows: the admin's next message is the argument to the
+	// pending action (add/del domain, or an add-subscription wizard step).
 	if action, ok := bt.getPending(chatID); ok {
 		bt.clearPending(chatID)
-		bt.send(ctx, b, chatID, "⏳ 正在处理并刷新名单…", nil)
-		msg, _ := bt.applyDomainOp(action, text)
-		bt.send(ctx, b, chatID, msg, domainsMenu())
+		switch action {
+		case "sub_name":
+			bt.send(ctx, b, chatID, bt.subSetName(chatID, text), nil)
+		case "sub_url":
+			msg, kb := bt.subFinish(chatID, text)
+			bt.send(ctx, b, chatID, msg, kb)
+		default: // add_domain / del_domain
+			bt.send(ctx, b, chatID, "⏳ 正在处理并刷新名单…", nil)
+			msg, _ := bt.applyDomainOp(action, text)
+			bt.send(ctx, b, chatID, msg, domainsMenu())
+		}
 		return
 	}
 
@@ -433,6 +448,31 @@ func (bt *Bot) handleCallback(ctx context.Context, b *bot.Bot, update *models.Up
 	case cbDomDel:
 		bt.setPending(chatID, "del_domain")
 		bt.edit(ctx, b, cq, bt.doListDomains()+"\n\n🗑 发送要<b>删除</b>的域名，或 /cancel 取消。", nil)
+	case cbMenuSubs:
+		bt.clearPending(chatID)
+		s, kb := bt.doSubsList()
+		bt.edit(ctx, b, cq, s, kb)
+	case cbSubView:
+		s, kb := bt.doSubDetail(intent.arg)
+		bt.edit(ctx, b, cq, s, kb)
+	case cbSubRefresh:
+		bt.edit(ctx, b, cq, "⏳ 正在刷新该订阅…", nil)
+		s, kb := bt.doSubRefresh(ctx, intent.arg)
+		bt.edit(ctx, b, cq, s, kb)
+	case cbSubToggle:
+		s, kb := bt.doSubToggle(intent.arg)
+		bt.edit(ctx, b, cq, s, kb)
+	case cbSubDelete:
+		s, kb := bt.doSubDelete(intent.arg)
+		bt.edit(ctx, b, cq, s, kb)
+	case cbSubAdd:
+		s, kb := bt.startSubAdd(chatID)
+		bt.edit(ctx, b, cq, s, kb)
+	case cbSubCat:
+		s, kb := bt.subSetCategory(chatID, intent.arg)
+		bt.edit(ctx, b, cq, s, kb)
+	case cbSubFmt:
+		bt.edit(ctx, b, cq, bt.subSetFormat(chatID, intent.arg), nil)
 	default:
 		bt.edit(ctx, b, cq, "未知操作。", backKB("menu:main"))
 	}

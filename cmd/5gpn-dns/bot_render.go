@@ -375,7 +375,7 @@ func btn(text, data string) models.InlineKeyboardButton {
 // main_menu layout.
 func mainMenu() *models.InlineKeyboardMarkup {
 	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
-		{btn("📊 状态", "act:status"), btn("🎯 代理域名", "menu:domains")},
+		{btn("📊 状态", "act:status"), btn("🎯 代理域名", "menu:domains"), btn("📚 订阅", "menu:subs")},
 		{btn("🔄 更新订阅", "act:update_lists"), btn("♻️ 重载规则", "act:reload")},
 		{btn("🔐 续证书", "act:renew"), btn("♻️ 重启服务", "menu:restart")},
 		{btn("📜 日志", "menu:logs"), btn("📱 iOS二维码", "act:ios")},
@@ -455,6 +455,15 @@ const (
 	cbIOS         // act:ios       — iOS profile QR
 	cbRestart     // restart:<svc> — restart/reload a service (arg = svc)
 	cbLogs        // logs:<svc>    — tail a service's journal (arg = svc)
+	// Subscription management (arg = subscription id / category / format).
+	cbMenuSubs   // menu:subs     — open the subscription list
+	cbSubView    // subview:<id>  — subscription detail
+	cbSubRefresh // subref:<id>   — refresh one subscription
+	cbSubToggle  // subtog:<id>   — enable/disable a subscription
+	cbSubDelete  // subdel:<id>   — delete a subscription
+	cbSubAdd     // sub:add       — start the add-subscription wizard
+	cbSubCat     // subcat:<cat>  — wizard: pick category
+	cbSubFmt     // subfmt:<fmt>  — wizard: pick format
 )
 
 // callbackIntent is the parsed form of a button's callback_data.
@@ -492,6 +501,10 @@ func parseCallback(data string) callbackIntent {
 		return callbackIntent{kind: cbDomAdd}
 	case "dom:del":
 		return callbackIntent{kind: cbDomDel}
+	case "menu:subs":
+		return callbackIntent{kind: cbMenuSubs}
+	case "sub:add":
+		return callbackIntent{kind: cbSubAdd}
 	}
 	// Prefix-classified data with a payload tail: restart:<svc>, logs:<svc>.
 	if svc, ok := strings.CutPrefix(data, "restart:"); ok {
@@ -499,6 +512,24 @@ func parseCallback(data string) callbackIntent {
 	}
 	if svc, ok := strings.CutPrefix(data, "logs:"); ok {
 		return callbackIntent{kind: cbLogs, arg: svc}
+	}
+	if id, ok := strings.CutPrefix(data, "subview:"); ok {
+		return callbackIntent{kind: cbSubView, arg: id}
+	}
+	if id, ok := strings.CutPrefix(data, "subref:"); ok {
+		return callbackIntent{kind: cbSubRefresh, arg: id}
+	}
+	if id, ok := strings.CutPrefix(data, "subtog:"); ok {
+		return callbackIntent{kind: cbSubToggle, arg: id}
+	}
+	if id, ok := strings.CutPrefix(data, "subdel:"); ok {
+		return callbackIntent{kind: cbSubDelete, arg: id}
+	}
+	if cat, ok := strings.CutPrefix(data, "subcat:"); ok {
+		return callbackIntent{kind: cbSubCat, arg: cat}
+	}
+	if format, ok := strings.CutPrefix(data, "subfmt:"); ok {
+		return callbackIntent{kind: cbSubFmt, arg: format}
 	}
 	// Unknown: expose the "prefix:arg" tail for future extension.
 	if _, arg, ok := strings.Cut(data, ":"); ok {
