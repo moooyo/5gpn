@@ -56,3 +56,51 @@ jobs:
           npm ci
           npm run build
           npm run typecheck
+
+  singbox-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Static validation of the sing-box data-plane config with the SAME pinned
+      # binary version install.sh downloads (install.sh's SINGBOX_VERSION). The
+      # committed config's install-time placeholders (22.22.22.22, 127.0.0.2/32)
+      # are valid literals, so `sing-box check` (schema-only, no network) passes
+      # the committed file as-is.
+      - name: sing-box check
+        run: |
+          set -euo pipefail
+          VER="$(sed -nE 's/.*SINGBOX_VERSION:-([0-9.]+)\}.*/\1/p' install.sh | head -n1)"
+          VER="${VER:-1.13.14}"
+          url="https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-amd64.tar.gz"
+          curl -fsSL "$url" -o /tmp/sb.tgz
+          tar -xzf /tmp/sb.tgz -C /tmp "sing-box-${VER}-linux-amd64/sing-box"
+          BIN="/tmp/sing-box-${VER}-linux-amd64/sing-box"
+          chmod +x "$BIN"
+          "$BIN" version
+          "$BIN" check -c etc/sing-box/config.json
+
+  firewall-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nftables
+        run: sudo apt-get update && sudo apt-get install -y nftables
+
+      # setup-firewall.sh generates /etc/nftables.conf then applies it with
+      # `nft -f`. Rewrite that one apply line into a check-only dry-run and stop
+      # before the systemctl/install tail, so CI validates the GENERATED ruleset
+      # (per-source rate meters, sets, drop-policy hooks) without mutating the
+      # runner. `nft -c` runs a kernel dry-run transaction, so it needs root + a
+      # real nf_tables kernel — both present on GitHub-hosted ubuntu-latest.
+      - name: Render + check nftables ruleset (dry-run, no apply)
+        run: |
+          set -euo pipefail
+          sed -E 's#^nft -f (/etc/nftables\.conf)$#nft -c -f \1; exit $?#' \
+            scripts/setup-firewall.sh > /tmp/fw-check.sh
+          # Refuse to run if the apply line wasn't rewritten (otherwise the script
+          # would apply the ruleset to the runner for real).
+          grep -q 'nft -c -f' /tmp/fw-check.sh || { echo "apply line not rewritten — aborting"; exit 1; }
+          sudo env CLIENT_NET=172.22.0.0/16 DOT_RATE=30/second DOT_BURST=60 IOS_PORT=8111 \
+            bash /tmp/fw-check.sh
