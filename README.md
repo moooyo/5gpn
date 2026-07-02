@@ -138,7 +138,7 @@ sudo bash install.sh --setup-tgbot   # 启用进程内 Telegram bot
 | `cmd/5gpn-dns/api.go` | 控制台 HTTPS REST API（`:9443`，基于 `Controller` facade） |
 | `cmd/5gpn-dns/bot.go` `bot_ops.go` | 进程内 Telegram bot |
 | `cmd/5gpn-dns/iosd.go` | iOS 描述文件分发（`:8111`） |
-| `cmd/5gpn-dns/web/` | React 控制台前端（CI `npm run build` → `web/dist` → `go:embed`；仓库仅提交占位 `index.html`） |
+| `web/` | React 控制台前端（独立构建；`npm run build` → `web/dist`，打包成 `5gpn-web-*.tar.gz` release asset；daemon 从 `DNS_WEB_DIR`=/opt/5gpn/web 磁盘 serve） |
 | `install.sh` / `quick-install.sh` | 安装 / 升级编排 + 运维子命令 |
 | `etc/` | 规则种子、`5gpn-dns/dns.env.example`、sing-box 配置、systemd 单元 |
 | `scripts/` | 防火墙、iOS profile 生成、证书续期 hook、`update-lists.sh` |

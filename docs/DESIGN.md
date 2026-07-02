@@ -139,9 +139,9 @@
 
 stats 为 reason 级：`total / adblock / force_direct / blacklist / chnroute_cn / chnroute_foreign / cache_entries / china_ok / china_err / trust_ok / trust_err`，持久化到 `DNS_STATS_FILE` 存活重启。
 
-### 5.2 内嵌 React Web 控制台
+### 5.2 React Web 控制台
 
-`cmd/5gpn-dns/web/`（React + Vite + Tailwind + TS），`go:embed web/dist` 编进二进制、根路径 `/` 提供。视图：Login（填 token）、Dashboard（verdict 分布条 + 上游健康）、Subscriptions（CRUD + 立即更新 + 健康列）、Rules（四类增删 + 从磁盘重载）、Lookup、Stats。前端**在 CI 构建**（`npm run build` → `web/dist` → `go:embed`）；仓库只提交占位 `web/dist/index.html`，真实产物不入库。
+`web/`（repo 根，React + Vite + Tailwind + TS）。构建产物打包成 `5gpn-web-<ver>.tar.gz`，随 `dns-v*` release 一起发布；daemon 的 :9443 控制服务从磁盘目录 `DNS_WEB_DIR`（默认 /opt/5gpn/web）serve，未部署时显示内置占位。视图不变：Login / Dashboard / Subscriptions / Rules / Lookup / Stats。
 
 ### 5.3 进程内 Telegram bot
 

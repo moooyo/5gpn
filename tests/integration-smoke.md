@@ -139,7 +139,7 @@
 
 ## §J Phase 3 — 控制面 API + Web UI
 
-> Covers `cmd/5gpn-dns/api.go` (bearer-token HTTPS REST API on `:9443`, over the `Controller` facade) and the embedded React SPA (`go:embed cmd/5gpn-dns/web/dist`).
+> Covers `cmd/5gpn-dns/api.go` (bearer-token HTTPS REST API on `:9443`, over the `Controller` facade) and the React SPA (`web/`, served from disk at `DNS_WEB_DIR`, default `/opt/5gpn/web`).
 
 - [ ] **Unauthenticated request rejected, bearer token accepted**
       `curl -sk -o /dev/null -w '%{http_code}' https://<host-ip>:9443/api/status` → `401` (no `Authorization` header).
@@ -152,9 +152,9 @@
       From a CLIENT_NET source: `curl -sk https://<host-ip>:9443/` succeeds (connection accepted).
       From a non-CLIENT_NET source: connection to `:9443` is dropped/rejected by `nft` (confirm via `nft list ruleset` showing the `ip saddr ${CLIENT_NET} tcp dport 9443 accept` rule, and no broader accept for 9443).
 
-- [ ] **Embedded SPA served at `/`**
+- [ ] **SPA served from disk at `/`**
       `curl -sk https://<host-ip>:9443/` → `200`, HTML body (the React shell).
-      `curl -sk https://<host-ip>:9443/assets/<some-hashed-asset>` → `200`, real JS/CSS asset (confirms `go:embed cmd/5gpn-dns/web/dist` is bundled, not the repo's placeholder `index.html`).
+      `curl -sk https://<host-ip>:9443/assets/<hashed-asset>` → `200`, real JS/CSS asset — confirms the SPA is served from `/opt/5gpn/web` (`DNS_WEB_DIR`), not the built-in placeholder.
 
 - [ ] **Rules + subscriptions CRUD, `/api/lookup`, `/api/reload` roundtrip**
       Through the authenticated API: add/remove a rule-list entry, add/remove a subscription, issue a test `/api/lookup` for a known domain, and trigger `/api/reload` — each call returns success and the effect is observable (new rule active, subscription present in a subsequent list call, reload doesn't error).
