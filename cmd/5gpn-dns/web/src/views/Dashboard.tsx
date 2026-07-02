@@ -53,6 +53,36 @@ export function DashboardView({ status: initial }: { status: Status | null }) {
         </Panel>
       </div>
 
+      {/* TLS certificate expiry — present only when a cert is configured */}
+      {status.cert && (
+        <Panel
+          eyebrow="TLS certificate"
+          title={status.cert.expired ? 'Certificate EXPIRED — DoT/DoH will fail' : 'Certificate validity'}
+        >
+          <div className="flex items-end justify-between">
+            <div>
+              <div className="eyebrow mb-1.5">{status.cert.expired ? 'Status' : 'Days remaining'}</div>
+              <div
+                className="font-mono text-2xl font-semibold"
+                style={{
+                  color: status.cert.expired
+                    ? 'var(--v-block)'
+                    : status.cert.days_remaining <= 14
+                      ? 'var(--accent)'
+                      : 'var(--v-direct)',
+                }}
+              >
+                {status.cert.expired ? 'EXPIRED' : status.cert.days_remaining}
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="eyebrow mb-1.5">Expires</div>
+              <div className="font-mono text-lg font-semibold">{status.cert.not_after.slice(0, 10)}</div>
+            </div>
+          </div>
+        </Panel>
+      )}
+
       {/* Upstream health */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <Panel eyebrow="Upstream" title="China resolvers">

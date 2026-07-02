@@ -259,7 +259,7 @@ func systemMetrics() string {
 //
 //	直连 = force_direct + chnroute_cn
 //	代理 = blacklist   + chnroute_foreign
-func renderStatus(st Stats, svc map[string]string, facts statusFacts, metricsCard string) string {
+func renderStatus(st Stats, svc map[string]string, facts statusFacts, metricsCard string, cert *CertStatus) string {
 	var lines []string
 	lines = append(lines, "<b>📊 5gpn 状态</b>", "")
 
@@ -281,6 +281,17 @@ func renderStatus(st Stats, svc map[string]string, facts statusFacts, metricsCar
 	}
 	if facts.publicIP != "" {
 		lines = append(lines, fmt.Sprintf("🌍 公网 IP：<code>%s</code>", html.EscapeString(facts.publicIP)))
+	}
+	if cert != nil {
+		icon := "🔐"
+		note := fmt.Sprintf("%d 天后过期", cert.DaysRemaining)
+		switch {
+		case cert.Expired:
+			icon, note = "🔴", "已过期"
+		case cert.DaysRemaining <= 14:
+			icon = "🟠"
+		}
+		lines = append(lines, fmt.Sprintf("%s 证书：%s（%s 到期）", icon, note, cert.NotAfter.Format("2006-01-02")))
 	}
 
 	direct := st.ForceDirect + st.ChnrouteCN

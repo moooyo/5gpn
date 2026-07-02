@@ -107,11 +107,15 @@ func (s *ControlServer) apiMux() http.Handler {
 
 // handleStatus reports build/runtime identity plus a stats snapshot.
 func (s *ControlServer) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"version":        version,
 		"uptime_seconds": int(time.Since(s.startTime).Seconds()),
 		"stats":          s.ctrl.Stats(),
-	})
+	}
+	if cs, ok := s.ctrl.CertStatus(); ok {
+		resp["cert"] = cs
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleStats returns the raw Stats snapshot.

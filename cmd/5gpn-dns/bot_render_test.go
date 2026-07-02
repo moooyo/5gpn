@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestFormattingHelpers ports tgbot.py's formatting helpers (pre / _tail /
@@ -129,7 +130,7 @@ func TestRenderStatus_ReasonBreakdown(t *testing.T) {
 	facts := statusFacts{domain: "dns.example.com", publicIP: "203.0.113.9"}
 	svc := map[string]string{"5gpn-dns": "active", "sing-box": "active"}
 
-	out := renderStatus(st, svc, facts, "" /* no metrics card in test */)
+	out := renderStatus(st, svc, facts, "" /* no metrics card in test */, nil)
 
 	// The reason breakdown must be derivable/visible:
 	// 直连 = force_direct(5) + chnroute_cn(40) = 45
@@ -165,13 +166,42 @@ func TestRenderStatus_ReasonBreakdown(t *testing.T) {
 // TestRenderStatus_ServiceDown flags a down service in the card.
 func TestRenderStatus_ServiceDown(t *testing.T) {
 	svc := map[string]string{"5gpn-dns": "active", "sing-box": "failed"}
-	out := renderStatus(Stats{}, svc, statusFacts{}, "")
+	out := renderStatus(Stats{}, svc, statusFacts{}, "", nil)
 	if !strings.Contains(out, "❌") {
 		t.Errorf("renderStatus with a down service should show ❌\n---\n%s", out)
 	}
 	if !strings.Contains(out, "sing-box") {
 		t.Errorf("renderStatus should name the services\n---\n%s", out)
 	}
+}
+
+// TestRenderStatusCert renders the TLS-cert expiry line in the status card.
+func TestRenderStatusCert(t *testing.T) {
+	svc := map[string]string{"5gpn-dns": "active", "sing-box": "active"}
+	facts := statusFacts{domain: "dns.example.com"}
+
+	t.Run("healthy cert shows days remaining", func(t *testing.T) {
+		cert := &CertStatus{NotAfter: time.Now().Add(60 * 24 * time.Hour), DaysRemaining: 60}
+		out := renderStatus(Stats{}, svc, facts, "", cert)
+		if !strings.Contains(out, "60 天后过期") {
+			t.Errorf("expected days-remaining in card:\n%s", out)
+		}
+	})
+
+	t.Run("expired cert shows 已过期", func(t *testing.T) {
+		cert := &CertStatus{NotAfter: time.Now().Add(-time.Hour), Expired: true}
+		out := renderStatus(Stats{}, svc, facts, "", cert)
+		if !strings.Contains(out, "已过期") {
+			t.Errorf("expected 已过期 in card:\n%s", out)
+		}
+	})
+
+	t.Run("no cert omits the line", func(t *testing.T) {
+		out := renderStatus(Stats{}, svc, facts, "", nil)
+		if strings.Contains(out, "证书") {
+			t.Errorf("no cert should omit the cert line:\n%s", out)
+		}
+	})
 }
 
 // TestRenderUpdateResults renders a mixed success/failure Update() batch like

@@ -451,7 +451,11 @@ func (bt *Bot) doStatus() string {
 	svc := serviceStates()
 	facts := readStatusFacts()
 	metrics := safeSystemMetrics()
-	return renderStatus(st, svc, facts, metrics)
+	var cert *CertStatus
+	if cs, ok := bt.ctrl.CertStatus(); ok {
+		cert = &cs
+	}
+	return renderStatus(st, svc, facts, metrics, cert)
 }
 
 // safeSystemMetrics wraps systemMetrics so a panic there degrades to a note

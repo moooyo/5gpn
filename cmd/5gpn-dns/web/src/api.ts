@@ -31,10 +31,17 @@ export interface Stats {
   trust_err: number
 }
 
+export interface CertStatus {
+  not_after: string // RFC3339 timestamp
+  days_remaining: number
+  expired: boolean
+}
+
 export interface Status {
   version: string
   uptime_seconds: number
   stats: Stats
+  cert?: CertStatus // absent when no TLS listener / cert monitor is wired
 }
 
 export interface LookupResult {

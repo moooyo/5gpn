@@ -146,6 +146,16 @@ func main() {
 		log.Fatalf("servers start: %v", err)
 	}
 
+	// TLS-cert expiry early-warning: when a cert is configured, periodically log
+	// as expiry approaches (error once expired) and surface days-until-expiry via
+	// the control-plane /status (and the bot). The certbot renewal timer runs at
+	// 03:00 ±6h; this warns if it ever falls behind, before DoT/DoH go dark.
+	if cfg.CertFile != "" {
+		certMon := newCertMonitor(cfg.CertFile, 14*24*time.Hour)
+		ctrl.SetCertStatusFn(certMon.status)
+		go certMon.Run(ctx, 6*time.Hour)
+	}
+
 	log.Printf("5gpn-dns started (DoT=%s DoH=%s plain=%s debug=%s)",
 		orDisabled(cfg.ListenDoT),
 		orDisabled(cfg.ListenDoH),

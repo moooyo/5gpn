@@ -49,6 +49,10 @@ type Controller struct {
 	stats    *statsCounters
 	cacheLen func() int
 
+	// certStatusFn, when set, returns the TLS-cert expiry view for /status and
+	// the bot status. nil when no TLS listener / cert monitor is wired.
+	certStatusFn func() (CertStatus, bool)
+
 	// handler gives Lookup access to the live engine (classifyName, the
 	// China/Trust exchangers, CN, GatewayIP, Timeout) so a manual lookup can
 	// reuse the exact same decision/arbitration path as the query pipeline.
@@ -72,6 +76,21 @@ func NewController(subs *SubManager, reload func() error, rulesDir string, stats
 		cacheLen: cacheLen,
 		handler:  handler,
 	}
+}
+
+// SetCertStatusFn wires the TLS-cert expiry source (the certMonitor). Optional;
+// unset means CertStatus reports ok=false.
+func (c *Controller) SetCertStatusFn(fn func() (CertStatus, bool)) {
+	c.certStatusFn = fn
+}
+
+// CertStatus returns the current TLS-cert expiry view. ok is false when no cert
+// monitor is wired or no cert has been read yet.
+func (c *Controller) CertStatus() (CertStatus, bool) {
+	if c.certStatusFn == nil {
+		return CertStatus{}, false
+	}
+	return c.certStatusFn()
 }
 
 // Subscriptions returns the currently configured subscriptions.
