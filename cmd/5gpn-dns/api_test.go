@@ -760,8 +760,8 @@ func TestControlServer_APIStatus_Authorized(t *testing.T) {
 	}
 }
 
-// TestControlServer_WebUI_ServesIndex confirms the SPA placeholder is served
-// at "/" (via the embedded web/dist).
+// TestControlServer_WebUI_ServesIndex confirms the SPA placeholder is served at
+// "/" when no SPA is deployed (WebDir empty in tests → built-in placeholder).
 func TestControlServer_WebUI_ServesIndex(t *testing.T) {
 	cs := newTestControlServer(t, "correct-token")
 

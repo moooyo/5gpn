@@ -55,7 +55,7 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 		limiter:   newRateLimiter(cfg.APIRate, cfg.APIBurst),
 	}
 
-	webUI, err := newWebUIHandler()
+	webUI, err := newWebUIHandler(cfg.WebDir)
 	if err != nil {
 		return nil, fmt.Errorf("control server: %w", err)
 	}
