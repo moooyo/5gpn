@@ -34,7 +34,7 @@
                           │    ├─ 缓存 / TTL 钳制 / 证书热重载 / SIGHUP    │
                           │    │                                          │
    Web/curl :9443 ───────▶│  控制面 ── HTTPS REST API  ┐                  │
-   浏览器   :9443 / ─────▶│           内嵌 React SPA   ├─ 同一 Controller  │
+   浏览器   :9443 / ─────▶│           磁盘 React SPA   ├─ 同一 Controller  │
    Telegram  (长轮询) ───▶│           进程内 bot       ┘   (内存直调)      │
    iPhone   :8111 ───────▶│  iOS 描述文件分发                             │
                           │                                               │
