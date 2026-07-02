@@ -32,13 +32,23 @@ func chinaIsCN(reply *dns.Msg, cn *Chnroute) bool {
 //
 // The decision is based solely on the chnroute membership of the china answer —
 // NEVER on which upstream returned first.  Both upstreams are bounded by the
-// caller's ctx deadline; no second timeout is created here.
+// caller's ctx deadline; no second timeout is added here, but Arbitrate derives
+// a cancellable child ctx and cancels it on return so the abandoned upstream
+// (trust, when china wins CN) is torn down immediately instead of lingering
+// until the caller's ctx is cancelled/expires.
 //
 // stats (nil-safe) records upstream health: china is always awaited so its
 // ok/err is always counted; trust is only counted when it is actually consulted
 // (i.e. when china was not a CN answer) — when china wins, trust's result is
 // never read so it is not counted.
 func Arbitrate(ctx context.Context, q *dns.Msg, china, trust Exchanger, cn *Chnroute, stats *statsCounters) (*dns.Msg, error) {
+	// Cancel the abandoned upstream as soon as we return. Inherits the caller's
+	// deadline (adds no new timeout); combined with the buffered channels below,
+	// this keeps the abandoned goroutine from lingering on a slow/hung upstream
+	// even when the caller's ctx has no cancel of its own.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	type exchangeResult struct {
 		msg *dns.Msg
 		err error

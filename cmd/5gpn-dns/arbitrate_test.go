@@ -254,3 +254,51 @@ func TestArbitrateTimeout(t *testing.T) {
 		t.Errorf("expected trust reply (9.9.9.9) after china timeout, got %q", gotIP)
 	}
 }
+
+// blockingExchanger blocks in Exchange until ctx is cancelled, signalling entry
+// and exit over channels. Used to prove Arbitrate releases the abandoned
+// upstream instead of leaking its goroutine.
+type blockingExchanger struct {
+	entered, exited chan struct{}
+}
+
+func (b *blockingExchanger) Exchange(ctx context.Context, _ *dns.Msg) (*dns.Msg, error) {
+	close(b.entered)
+	<-ctx.Done()
+	close(b.exited)
+	return nil, ctx.Err()
+}
+
+// TestArbitrateReleasesAbandonedUpstream proves that when china wins (a CN
+// answer), Arbitrate releases the still-running trust exchange as it returns —
+// even when the caller's ctx is never cancelled — so a slow/hung trust upstream
+// cannot accumulate goroutines under load. Arbitrate must self-cancel rather
+// than rely on the caller to tear down the abandoned upstream.
+func TestArbitrateReleasesAbandonedUpstream(t *testing.T) {
+	cn := loadTestChnroute(t)
+	q := new(dns.Msg)
+	q.SetQuestion("x.test.", dns.TypeA)
+
+	china := &fakeExchanger{reply: buildMsg("x.test", "1.2.3.4")} // CN, instant win
+	entered := make(chan struct{})
+	exited := make(chan struct{})
+	trust := &blockingExchanger{entered: entered, exited: exited}
+
+	// context.Background(): the caller provides NO deadline and NO cancel. If
+	// Arbitrate relied on the caller to release abandoned upstreams, the trust
+	// goroutine would block here forever.
+	reply, err := Arbitrate(context.Background(), q, china, trust, cn, nil)
+	if err != nil {
+		t.Fatalf("Arbitrate: %v", err)
+	}
+	if len(reply.Answer) == 0 {
+		t.Fatal("expected china CN answer")
+	}
+
+	<-entered // trust goroutine is running
+	select {
+	case <-exited: // released — no leak
+	case <-time.After(2 * time.Second):
+		t.Fatal("LEAK: abandoned trust goroutine not released after Arbitrate returned")
+	}
+}
