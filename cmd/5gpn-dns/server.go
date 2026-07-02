@@ -61,9 +61,10 @@ type Servers struct {
 	cfg     Config
 	handler dns.Handler
 
-	dnsSrvs  []*dns.Server
-	httpSrv  *http.Server
-	tlsCfg   *tls.Config
+	dnsSrvs   []*dns.Server
+	httpSrv   *http.Server
+	dotTLSCfg *tls.Config // DoT :853 — advertises ALPN "dot" (RFC 7858)
+	dohTLSCfg *tls.Config // DoH :8443 — http.Server appends h2/http1.1 to this one
 }
 
 // NewServers builds a Servers value from cfg and handler.  No listeners are
@@ -76,8 +77,20 @@ func NewServers(cfg Config, handler dns.Handler) (*Servers, error) {
 		if cfg.CertFile == "" || cfg.KeyFile == "" {
 			return nil, fmt.Errorf("servers: TLS listener requires DNS_CERT and DNS_KEY")
 		}
-		s.tlsCfg = &tls.Config{
-			GetCertificate: certGetter(cfg.CertFile, cfg.KeyFile),
+		// One shared cert loader (mtime hot-reload), but a SEPARATE *tls.Config
+		// per listener. They must not share a config: the DoH http.Server mutates
+		// its config's NextProtos to add "h2"/"http/1.1" when it enables HTTP/2
+		// (net/http2 ConfigureServer). A shared config would leak that ALPN set
+		// onto the DoT listener, making RFC 7858 clients that offer ALPN "dot"
+		// (kdig, Android Private DNS) fail the handshake with no_application_protocol.
+		getCert := certGetter(cfg.CertFile, cfg.KeyFile)
+		s.dotTLSCfg = &tls.Config{
+			GetCertificate: getCert,
+			MinVersion:     tls.VersionTLS12,
+			NextProtos:     []string{"dot"}, // RFC 7858
+		}
+		s.dohTLSCfg = &tls.Config{
+			GetCertificate: getCert,
 			MinVersion:     tls.VersionTLS12,
 		}
 	}
@@ -94,7 +107,7 @@ func (s *Servers) Start() error {
 		srv := &dns.Server{
 			Addr:      s.cfg.ListenDoT,
 			Net:       "tcp-tls",
-			TLSConfig: s.tlsCfg,
+			TLSConfig: s.dotTLSCfg,
 			Handler:   s.handler,
 		}
 		s.dnsSrvs = append(s.dnsSrvs, srv)
@@ -155,7 +168,7 @@ func (s *Servers) Start() error {
 		s.httpSrv = &http.Server{
 			Addr:      s.cfg.ListenDoH,
 			Handler:   mux,
-			TLSConfig: s.tlsCfg,
+			TLSConfig: s.dohTLSCfg,
 		}
 		go func() {
 			// TLSConfig already set; use ListenAndServeTLS with empty cert/key paths
