@@ -46,7 +46,7 @@ RestrictAddressFamilies=AF_INET AF_UNIX
 # material (the certbot renew-hook, a separate process, updates the cert then
 # SIGHUPs us).
 ReadWritePaths=/etc/5gpn
-ReadOnlyPaths=/etc/5gpn/dns.env -/etc/5gpn/cert
+ReadOnlyPaths=/etc/5gpn/dns.env -/etc/5gpn/cert -/opt/5gpn/web
 
 [Install]
 WantedBy=multi-user.target
