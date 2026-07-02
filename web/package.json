@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "5gpn-dns control console SPA (embedded into the Go binary via go:embed)",
+  "description": "5gpn-dns control console SPA (served by the daemon from DNS_WEB_DIR; shipped as the 5gpn-web release tarball)",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
