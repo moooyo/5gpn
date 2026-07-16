@@ -19,10 +19,11 @@ CERT_MODE=debug
 TGBOT_TOKEN=123:secret
 clear_external_config_env
 if [[ -z "${BASE_DOMAIN+x}" && -z "${PUBLIC_IP+x}" && -z "${EGRESS_RESOLVER+x}" \
-   && -z "${CERT_MODE+x}" && -z "${TGBOT_TOKEN+x}" ]]; then
+   && -z "${CERT_MODE+x}" && -z "${TGBOT_TOKEN+x}" \
+   && "${WWW_DIR:-}" == "${BASE_DIR}/www" ]]; then
     pass "caller configuration environment is discarded"
 else
-    fail "caller configuration environment survived clear_external_config_env"
+    fail "caller configuration survived or the fixed WWW_DIR was cleared"
 fi
 
 main_fn="$(sed -n '/^main()/,/^}/p' "$INSTALL")"

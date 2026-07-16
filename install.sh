@@ -198,9 +198,11 @@ clear_external_config_env() {
     unset BASE_DOMAIN CONSOLE_DOMAIN ZASH_DOMAIN DOT_DOMAIN PUBLIC_IP GATEWAY_IP \
         MIHOMO_LISTEN_IPS EGRESS_RESOLVER CHINA_ECS CACHE_SIZE LOWMEM
     for key in $DNS_ENV_KEYS; do
-        # These two were already overwritten from dns.env immediately after
-        # cfg_get was defined because ownership checks need them in library mode.
-        [[ "$key" == DNS_WEB_DIR || "$key" == DNS_ZASH_DIR ]] && continue
+        # The web/zashboard paths were already resolved from dns.env immediately
+        # after cfg_get was defined. WWW_DIR is an installer-owned constant that
+        # was assigned above, not caller configuration. Preserve all three while
+        # clearing every externally supplied daemon key.
+        [[ "$key" == DNS_WEB_DIR || "$key" == DNS_ZASH_DIR || "$key" == WWW_DIR ]] && continue
         unset "$key"
     done
 }
