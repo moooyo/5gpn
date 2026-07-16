@@ -356,9 +356,7 @@ func TestPeriodicRefreshKeepsOldCacheBelowFloor(t *testing.T) {
 }
 
 func TestRunRefreshesMissingCache(t *testing.T) {
-	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		hits.Add(1)
 		_, _ = w.Write([]byte("a.com\n"))
 	}))
 	defer srv.Close()
@@ -372,11 +370,58 @@ func TestRunRefreshesMissingCache(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { m.Run(ctx); close(done) }()
-	waitFor(t, 2*time.Second, func() bool { return hits.Load() >= 1 }, "initial subscription refresh")
+	cachePath := filepath.Join(rulesDir, "direct", "missing.txt")
+	waitFor(t, 2*time.Second, func() bool {
+		_, err := os.Stat(cachePath)
+		return err == nil
+	}, "initial subscription refresh")
 	cancel()
 	<-done
-	if _, err := os.Stat(filepath.Join(rulesDir, "direct", "missing.txt")); err != nil {
+	if _, err := os.Stat(cachePath); err != nil {
 		t.Fatalf("cache not created: %v", err)
+	}
+}
+
+func TestRunWaitsForInFlightWorker(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("a.com\n"))
+	}))
+	defer srv.Close()
+
+	reloadEntered := make(chan struct{}, 1)
+	releaseReload := make(chan struct{})
+	m := newTestSubManager(t, t.TempDir(), func() error {
+		reloadEntered <- struct{}{}
+		<-releaseReload
+		return nil
+	})
+	m.subs = []Subscription{{
+		ID: "blocking", Category: "direct", Name: "blocking",
+		URL: srv.URL, Format: "plain", Enabled: true, Interval: time.Hour,
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { m.Run(ctx); close(done) }()
+
+	select {
+	case <-reloadEntered:
+	case <-time.After(2 * time.Second):
+		cancel()
+		close(releaseReload)
+		t.Fatal("initial subscription refresh did not reach reload")
+	}
+	cancel()
+	select {
+	case <-done:
+		close(releaseReload)
+		t.Fatal("Run returned while a cache worker was still active")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseReload)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after the cache worker completed")
 	}
 }
 

@@ -192,6 +192,12 @@ type SubManager struct {
 	// goroutine while Run is active. Policy publication cancels the old
 	// generation before scheduling the new one. Guarded by mu.
 	cancels map[string]context.CancelFunc
+
+	// workers keeps Run from returning while a cancelled ticker is still
+	// finishing an in-flight cache transaction. New workers are registered only
+	// while holding mu and while runCtx is live, so shutdown can close admission
+	// under mu before waiting.
+	workers sync.WaitGroup
 }
 
 // NewSubManager constructs a SubManager, loading any existing subscriptions
@@ -446,7 +452,11 @@ func (m *SubManager) startTickerLocked(sub Subscription) {
 	m.stopTickerLocked(sub.ID)
 	cctx, cancel := context.WithCancel(m.runCtx)
 	m.cancels[sub.ID] = cancel
-	go m.runOne(cctx, sub)
+	m.workers.Add(1)
+	go func() {
+		defer m.workers.Done()
+		m.runOne(cctx, sub)
+	}()
 }
 
 // stopTickerLocked cancels and deregisters the ticker goroutine for id, if one
@@ -1060,20 +1070,23 @@ func (m *SubManager) Run(ctx context.Context) {
 		m.startTickerLocked(sub)
 	}
 	m.mu.Unlock()
-	defer func() {
-		m.mu.Lock()
-		m.runCtx = nil
-		// Cancel and drop every remaining ticker so none outlives Run.
-		for id := range m.cancels {
-			m.cancels[id]()
-			delete(m.cancels, id)
-		}
-		m.mu.Unlock()
-	}()
 
 	// The per-subscription ticker goroutines run on child contexts of ctx, so
 	// they observe the same cancellation.
 	<-ctx.Done()
+
+	// Close worker admission before waiting. Every startTickerLocked call holds
+	// mu and checks runCtx, so no WaitGroup Add can race with Wait after this
+	// point. Waiting also prevents callers from tearing down rulesDir while an
+	// in-flight atomic cache write is still completing.
+	m.mu.Lock()
+	m.runCtx = nil
+	for id := range m.cancels {
+		m.cancels[id]()
+		delete(m.cancels, id)
+	}
+	m.mu.Unlock()
+	m.workers.Wait()
 }
 
 // nextBackoff returns the next retry delay for a failed subscription fetch:
