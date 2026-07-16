@@ -168,9 +168,18 @@ dropped before reaching its HTTP server.
 
 `console.<base>` must have an externally usable A record to the public or
 otherwise client-routable gateway address before installation can declare the
-bootstrap path ready. `zash.<base>` may be synthetic and visible only after
-clients use 5gpn DNS. Android Private DNS discovery likewise requires
-`dot.<base>` to resolve through the client's pre-existing resolver.
+bootstrap path ready. In Cloudflare DNS-01 mode, `zash.<base>` may remain
+synthetic and visible only after clients use 5gpn DNS. Android Private DNS
+discovery likewise requires `dot.<base>` to resolve through the client's
+pre-existing resolver.
+
+HTTP-01 has a stricter public-DNS contract because all three service names are
+ACME challenge targets. `console.<base>`, `zash.<base>`, and `dot.<base>` must
+each have exactly one public A answer, that answer must be `DNS_PUBLIC_IP`, and
+none may have an AAAA answer. The installer and configuration TUI show these
+required records and require explicit operator confirmation, then wait for the
+same result through the fixed independent resolver `1.1.1.1` before issuance.
+The renewal path repeats the resolver check before every due HTTP-01 renewal.
 
 The console SNI deliberately bypasses the zashboard allowlist so a new client
 can download `/ios/` and load the SPA. This does not weaken API authentication:
@@ -228,11 +237,17 @@ The installer clears recognized configuration variables before dispatch.
   `/etc/5gpn/dns.env` and never consults caller environment values.
 - A first install without an interactive TTY fails closed. Headless shell
   variables are not an escape hatch for the TUI.
-- Management TUI operations update the persisted file first and then perform
-  the required reload or restart.
-- The Cloudflare credential is entered only through the TUI, then stored in
-  `/etc/5gpn/acme/cloudflare.ini` with root-only permissions. It is never
-  accepted from caller environment, persisted to `dns.env`, or echoed in logs.
+- Management TUI operations validate the complete candidate, including any
+  required public-DNS gate, before atomically publishing the persisted file and
+  performing the required reload or restart.
+- `CERT_MODE` is exactly `cloudflare`, `http-01`, or `debug`. Installation and
+  mode changes are TUI decisions; HTTP-01 additionally requires the displayed
+  public DNS records to be confirmed before its resolver gate begins.
+- Cloudflare mode requires its credential for both issuance and unattended
+  renewal, including when the current certificate is reusable. It is entered only through the TUI,
+  then stored in `/etc/5gpn/acme/cloudflare.ini` with root-only permissions. It
+  is never accepted from caller environment, persisted to `dns.env`, or echoed
+  in logs; HTTP-01 does not relax those rules or require that credential.
 
 Operator-facing scripts use Gum when available and plain output otherwise.
 Every Gum input, choice, or confirmation is gated on a TTY, cancellation is
@@ -260,11 +275,17 @@ certificate-reload API.
 
 ## Certificate model and lifecycle
 
-Production mode uses one Let's Encrypt lineage named for the base domain. The
-certificate contains both the apex `<base>` and `*.<base>` SANs and is issued
-with Cloudflare DNS-01. The wildcard covers `dot`, `console`, and `zash`
-because each is exactly one label below the base; it does not cover
-nested names such as `x.console.<base>`.
+Both production modes use exactly one Let's Encrypt lineage with Certbot name
+`<base>`. Its SAN set and ACME authenticator are mode-specific:
+
+- `cloudflare` uses Cloudflare DNS-01 and requests exactly the apex `<base>` and
+  wildcard `*.<base>`. The wildcard covers `dot`, `console`, and `zash` because
+  each is exactly one label below the base; it does not cover nested names such
+  as `x.console.<base>`.
+- `http-01` uses Certbot's standalone HTTP challenge and requests exactly
+  `console.<base>`, `zash.<base>`, and `dot.<base>`. It deliberately contains
+  neither the apex nor a wildcard SAN.
+- `debug` is self-signed test material, not a Certbot lineage.
 
 The same certificate is deployed into three role directories:
 
@@ -273,20 +294,42 @@ The same certificate is deployed into three role directories:
 - `/etc/5gpn/cert/zash` for zashboard HTTPS and the mihomo controller.
 
 Reinstall must prefer safe reuse over issuance. Before reusing material, it
-verifies the configured mode/provenance, validity window, apex and wildcard
-SANs, certificate/private-key match, and (for production) a trusted issuer
-chain. A debug self-signed certificate can never satisfy production reuse.
-Debug mode stores its source only below `/etc/5gpn/debug-cert`, and repeated
-debug installs reuse a still-valid matching debug keypair instead of generating
-a new one each time.
+verifies the configured mode/provenance, validity window, the exact SAN shape
+required by that mode, certificate/private-key match, and (for production) a
+trusted issuer chain. A legacy lineage without provenance may be adopted only
+when its exact live/archive paths, authenticator parameters, and absence of
+persistent per-lineage hooks form the strict expected 5gpn fingerprint; the
+installer then writes provenance. Cloudflare reuse therefore requires the apex and
+wildcard, while HTTP-01 reuse requires the three exact service SANs and no apex
+or wildcard. A debug self-signed certificate can never satisfy production
+reuse. Debug mode stores its source only below `/etc/5gpn/debug-cert`, and
+repeated debug installs reuse a still-valid matching debug keypair instead of
+generating a new one each time.
 
 Only missing, expiring, mismatched, or invalid material causes issuance. Role
 copies are staged completely before replacement. Production renewal is scoped
-to the configured certbot `--cert-name`; a 5gpn timer must not run an unscoped
-renewal over every lineage on the host. The deploy hook verifies that the
-renewed lineage matches `DNS_BASE_DOMAIN`, updates only the three role
-directories, and re-signs the iOS profile. Mihomo hot-loads the updated zash
-files without a data-plane restart.
+to `--cert-name <base>`; a 5gpn timer must not run an unscoped renewal over
+every lineage on the host. Both the timer and the confirmed Telegram bot action
+invoke the same mode-aware renewal helper. It returns without disruption when
+the lineage is not due only after validating the Let's Encrypt production
+server, authenticator, hook-free scoped renewal config, trusted live chain, and
+all three deployed role copies. A stale role copy is repaired through the owned
+deploy hook. The helper runs Cloudflare DNS-01 without stopping mihomo, and for
+a due HTTP-01 renewal first repeats the `1.1.1.1` A/AAAA gate, then briefly
+stops mihomo to release TCP `:80` for Certbot's standalone listener. The helper
+restores mihomo after either success or failure; an initial HTTP-01 issuance
+uses the same stop-and-restore discipline.
+
+Install/configure, the timer, the bot action, and decommission serialize on one
+root-owned private runtime lock. Installer rollback restores the exact prior
+live/archive/renewal state and the timer's enabled/active state after a failed
+mode change; it never consumes an unscoped or partial Certbot lineage.
+
+The deploy hook verifies that the renewed lineage matches `DNS_BASE_DOMAIN`,
+updates only the three role directories, and re-signs the iOS profile. It never
+restarts mihomo merely to load certificate files: mihomo hot-loads the updated
+zash role. Cloudflare renewal therefore has no data-plane interruption; the
+brief HTTP-01 interruption exists only to release `:80` for ACME.
 
 Normal uninstall preserves the 5gpn certificate lineage, role copies, debug
 source, and ACME credential so a later reinstall can reuse them. Domain
@@ -348,6 +391,9 @@ and Unix socket families and narrowly scoped writable paths. mihomo additionally
 needs IPv6 and netlink for its own direct egress and route lookup, while writes
 remain confined to `/etc/5gpn/mihomo`. `SAFE_PATHS` grants mihomo read access
 only to the zash certificate role and does not broaden filesystem writes.
+Neither runtime-service sandbox can access `/etc/5gpn/acme`; only the
+out-of-sandbox, scoped renewal helper may read the Cloudflare Zone:DNS:Edit
+credential.
 
 The control API is disabled when no bearer token is configured; it is never
 served unauthenticated. Certificate or TLS identity errors fail closed. A bad

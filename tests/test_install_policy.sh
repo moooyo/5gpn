@@ -7,21 +7,56 @@ ROOT="$HERE/.."
 rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
 INSTALL="$ROOT/install.sh"
+CERT_RENEW="$ROOT/scripts/cert-renew.sh"
+BOT_OPS="$ROOT/cmd/5gpn-dns/bot_ops.go"
 
-# --- certbot auto-renewal is now UNATTENDED via Cloudflare DNS-01 (2026-07-14
-# reversal): the API sets the transient _acme-challenge TXT with no human step
-# and no :80, so there is no pre/post renewal-hook stopping/starting anything
-# around port 80 anymore (that was the old http-01/--standalone flow). A box
-# upgrading from that flow still gets its legacy pre/post hook FILES cleaned up
-# (rm -f), so this only asserts no NEW pre/post hook dir is ever CREATED.
-grep -Eq 'install -d.*renewal-hooks/pre'  "$INSTALL" && fail "install.sh must not create a pre-renewal hook dir (no :80 dance needed for DNS-01)"
-grep -Eq 'install -d.*renewal-hooks/post' "$INSTALL" && fail "install.sh must not create a post-renewal hook dir (no :80 dance needed for DNS-01)"
-grep -Fq 'systemctl stop xray'  "$INSTALL" && fail "install.sh must not stop xray for cert renewal (DNS-01 needs no :80)"
-grep -Fq 'systemctl start xray' "$INSTALL" && fail "install.sh must not restart xray for cert renewal (DNS-01 needs no :80)"
-# a renewal timer so renewal actually runs unattended, and catches up missed runs.
-grep -Eq '5gpn-certbot-renew\.timer' "$INSTALL" || fail "no certbot renewal timer installed"
-grep -Eq '^Persistent=true'             "$INSTALL" || fail "renewal timer not Persistent (missed runs won't catch up)"
-grep -Eq 'certbot renew'                "$INSTALL" || fail "renewal timer does not run 'certbot renew'"
+# --- Production renewal is unattended through one mode-aware, cert-name-scoped
+# helper. Cloudflare never needs a :80 handoff; due HTTP-01 renewals coordinate
+# mihomo inside the helper. Legacy pre/post hook files may still be removed on
+# upgrade, but the installer must not create new global stop/start hooks.
+[ -f "$CERT_RENEW" ] || fail "mode-aware certificate renewal helper is missing"
+grep -Eq 'install -d.*renewal-hooks/pre'  "$INSTALL" && fail "install.sh must not create a global pre-renewal hook dir"
+grep -Eq 'install -d.*renewal-hooks/post' "$INSTALL" && fail "install.sh must not create a global post-renewal hook dir"
+grep -Fq 'systemctl stop xray'  "$INSTALL" && fail "certificate flows must never stop xray"
+grep -Fq 'systemctl start xray' "$INSTALL" && fail "certificate flows must never start xray"
+grep -Fiq 'xray' "$CERT_RENEW" && fail "certificate renewal helper must not reference xray"
+
+# The persistent timer and the Telegram bot must both enter through the helper,
+# never invoke an unscoped `certbot renew` of every host lineage.
+renew_auto_fn="$(sed -n '/^install_renewal_automation()/,/^}/p' "$INSTALL")"
+grep -Fq '5gpn-certbot-renew.timer' <<<"$renew_auto_fn" || fail "no certificate renewal timer installed"
+grep -Fq 'Persistent=true' <<<"$renew_auto_fn" || fail "renewal timer not Persistent (missed runs will not catch up)"
+grep -Fq 'ExecStart=/opt/5gpn/scripts/cert-renew.sh --quiet' <<<"$renew_auto_fn" \
+    || fail "renewal timer does not invoke the unified certificate helper"
+grep -Fq 'TimeoutStartSec=30min' <<<"$renew_auto_fn" \
+    || fail "renewal service timeout cannot cover the 1.1.1.1 wait plus Certbot"
+grep -Fq 'TimeoutStopSec=2min' <<<"$renew_auto_fn" \
+    || fail "renewal service does not leave a bounded TERM/restore window"
+grep -Eq 'ExecStart=.*certbot renew' <<<"$renew_auto_fn" \
+    && fail "renewal timer bypasses the scoped helper with direct certbot renew"
+grep -Fq 'EnvironmentFile=/etc/5gpn/dns.env' <<<"$renew_auto_fn" \
+    && fail "renewal service imports arbitrary persisted keys into a root shell environment"
+head -1 "$CERT_RENEW" | grep -Fxq '#!/bin/bash' \
+    || fail "renewal helper uses PATH-dependent /usr/bin/env for its root shell"
+grep -Fq '"/opt/5gpn/scripts/cert-renew.sh", "--cert-name", certName' "$BOT_OPS" \
+    || fail "Telegram renewal does not invoke the unified helper with the validated cert name"
+grep -Fq 'cf_credential_safe' "$CERT_RENEW" \
+    || fail "Cloudflare renewal can follow an unsafe credential symlink or permissions drift"
+
+# Install/configure ordering: resolve the TUI/persisted selection, wait for the
+# fixed-resolver DNS gate, and only then publish or issue certificate material.
+full_fn="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
+cfg_line="$(grep -n 'resolve_install_configuration' <<<"$full_fn" | head -1 | cut -d: -f1)"
+dns_line="$(grep -n '^[[:space:]]*verify_console_dns$' <<<"$full_fn" | head -1 | cut -d: -f1)"
+cert_line="$(grep -n '^[[:space:]]*install_cert "\$BASE_DOMAIN"' <<<"$full_fn" | head -1 | cut -d: -f1)"
+lock_line="$(grep -n '^[[:space:]]*acquire_install_cert_lock$' <<<"$full_fn" | head -1 | cut -d: -f1)"
+capture_line="$(grep -n '^[[:space:]]*capture_install_rollback$' <<<"$full_fn" | head -1 | cut -d: -f1)"
+if [[ -z "$cfg_line" || -z "$dns_line" || -z "$cert_line" \
+   || -z "$lock_line" || -z "$capture_line" \
+   || "$cfg_line" -ge "$dns_line" || "$dns_line" -ge "$lock_line" \
+   || "$lock_line" -ge "$capture_line" || "$capture_line" -ge "$cert_line" ]]; then
+    fail "configuration/DNS-gate/certificate issuance order is not fail-closed"
+fi
 
 # ===== iOS profile is served at the web console's public /ios/ path; the
 # standalone :8111 responder and the host firewall are both gone =====
@@ -56,6 +91,11 @@ for tok in '--menu|menu)' '--restart|restart)' '--change-base-domain|change-base
            '--change-public-ip|change-public-ip)' '--change-gateway|change-gateway)'; do
     grep -Fq -e "$tok" "$INSTALL" || fail "install.sh dispatch missing case: $tok"
 done
+main_fn="$(sed -n '/^main()/,/^}/p' "$INSTALL")"
+printf '%s' "$main_fn" | grep -Fq 'change_base_domain "${2:-}"' \
+    || fail "value-less deprecated change-domain aliases can trip set -u before opening the TUI"
+printf '%s' "$main_fn" | grep -Fq '${2#dot.}' \
+    && fail "change-dot-domain dereferences an unset positional argument under set -u"
 grep -Eq '^manage_menu\(\)'      "$INSTALL" || fail "no manage_menu() TUI"
 grep -Eq '^change_base_domain\(\)' "$INSTALL" || fail "no change_base_domain() (single base-domain change op)"
 grep -Eq '^change_public_ip\(\)'  "$INSTALL" || fail "no change_public_ip() (menu 'modify public IP')"
@@ -225,9 +265,15 @@ printf '%s' "$ect_fn" | grep -Eq '\[\[[^]]*-t 0' \
     || fail "ensure_cf_token does not gate the interactive prompt on a TTY ([[ -t 0 ]])"
 printf '%s' "$ect_fn" | grep -Fq 'shell environment tokens are not accepted' \
     || fail "ensure_cf_token noninteractive error does not explain TUI-only input"
-# ensure_cf_token must create ACME_DIR with mode 0700 so credentials dir is root-only.
-printf '%s' "$ect_fn" | grep -Eq 'install -d -m 0700' \
-    || fail "ensure_cf_token does not create ACME_DIR with mode 0700 (install -d -m 0700 missing)"
+# Directory creation and reuse go through the symlink/owner/mode safety gate.
+ead_fn="$(sed -n '/^ensure_acme_dir()/,/^}/p' "$INSTALL")"
+ads_fn="$(sed -n '/^acme_dir_safe()/,/^}/p' "$INSTALL")"
+printf '%s' "$ect_fn" | grep -Fq 'ensure_acme_dir || return 1' \
+    || fail "ensure_cf_token bypasses the protected ACME directory helper"
+printf '%s' "$ead_fn" | grep -Fq 'install -d -o root -g root -m 0700' \
+    || fail "ensure_acme_dir does not create a root-owned mode-0700 directory"
+printf '%s' "$ads_fn" | grep -Fq '! -L "$ACME_DIR"' \
+    || fail "ACME directory safety gate does not reject symlinks"
 # ensure_cf_token must be called within install_cert (issuance branch).
 printf '%s' "$ic_fn" | grep -Fq 'ensure_cf_token' \
     || fail "install_cert does not call ensure_cf_token (first issuance hard-aborts without a token)"
@@ -249,16 +295,14 @@ printf '%s' "$(sed -n '/^set_cf_token()/,/^}/p' "$INSTALL")" | grep -Fq 'write_c
 # Errexit-suppression hardening: all unguarded commands inside write_cf_credential and
 # ensure_cf_token must carry explicit || guards so they fail loudly when the function is
 # called with || (which suppresses set -e inside the callee).
-printf '%s' "$wcf_fn" | grep -Eq 'install -d.*\|\|' \
-    || fail "write_cf_credential: install -d is not guarded with || (silent failure under errexit suppression)"
+printf '%s' "$wcf_fn" | grep -Fq 'ensure_acme_dir || return 1' \
+    || fail "write_cf_credential bypasses the protected ACME directory helper"
 printf '%s' "$wcf_fn" | grep -Eq 'mktemp.*\|\|' \
     || fail "write_cf_credential: mktemp assignment is not guarded with || (silent failure under errexit suppression)"
 printf '%s' "$wcf_fn" | grep -Fq 'trailing newline' \
     || fail "write_cf_credential: CR/LF rejection error does not mention 'trailing newline' (operator hint missing)"
-printf '%s' "$ect_fn" | grep -Eq 'install -d.*\|\|' \
-    || fail "ensure_cf_token: install -d is not guarded with || (silent failure under errexit suppression)"
-printf '%s' "$ect_fn" | grep -Eq 'chmod 0?600.*\|\|' \
-    || fail "ensure_cf_token: chmod 0600 reuse path is not guarded with || (prints reuse success even if chmod failed)"
+printf '%s' "$ect_fn" | grep -Fq 'ensure_acme_dir || return 1' \
+    || fail "ensure_cf_token bypasses the protected ACME directory helper"
 # install_cert must contain the anchored call, not just a comment referencing ensure_cf_token.
 printf '%s' "$ic_fn" | grep -Fq 'ensure_cf_token || return 1' \
     || fail "install_cert: issuance branch must contain 'ensure_cf_token || return 1' (anchored call, not just a comment)"

@@ -38,10 +38,9 @@ type Config struct {
 	CertFile string
 	KeyFile  string
 
-	// TLS certificate files for the web console / control-plane listener (the
-	// WEB domain's cert — a separate certbot lineage from the DoT domain).
-	// Empty falls back to CertFile/KeyFile so a single-cert (debug) deployment
-	// still works.
+	// TLS certificate files for the web console / control-plane listener. The
+	// installer deploys the one selected lineage to each role directory. Empty
+	// falls back to CertFile/KeyFile for defensive single-cert compatibility.
 	WebCertFile string
 	WebKeyFile  string
 
@@ -132,7 +131,7 @@ type Config struct {
 	// is tracked separately (see the mihomo migration plan).
 	XrayResolver string
 
-	// Mihomo migration: the operator's base wildcard domain (env
+	// Mihomo migration: the operator's certificate base domain (env
 	// DNS_BASE_DOMAIN) and the console/zash panel domains derived from it (env
 	// DNS_CONSOLE_DOMAIN / DNS_ZASH_DOMAIN). install.sh persists all three, but
 	// older configs may only have DNS_BASE_DOMAIN; LoadConfig therefore derives
@@ -182,7 +181,7 @@ type Config struct {
 	// (env DNS_ZASH_DIR, default /opt/5gpn/zash) served by a SECOND loopback
 	// HTTPS panel on ZashListen (env DNS_ZASH_LISTEN, default 127.0.0.2:443).
 	// ZashCertFile/ZashKeyFile (env DNS_ZASH_CERT/DNS_ZASH_KEY) fall back to the
-	// web cert → DoT cert: the one wildcard *.<base> covers console+zash+dot.
+	// web cert → DoT cert: either production SAN shape covers all three roles.
 	ZashDir      string
 	ZashListen   string
 	ZashCertFile string
@@ -317,7 +316,7 @@ func LoadConfig() (Config, error) {
 	}
 
 	// zash panel cert reuses the web cert (itself already fell back to the DoT
-	// cert) — the single wildcard lineage serves all three domains.
+	// cert) — the single selected lineage covers all three service domains.
 	if cfg.ZashCertFile == "" || cfg.ZashKeyFile == "" {
 		cfg.ZashCertFile = cfg.WebCertFile
 		cfg.ZashKeyFile = cfg.WebKeyFile

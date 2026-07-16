@@ -217,21 +217,63 @@ else
     pass "service start failure propagates as a non-zero installer result"
 fi
 
-# Public console DNS is fail-closed.
+# Public/certificate DNS is fail-closed and always uses the independent
+# resolver instead of the host's possibly synthetic resolver.
 CONSOLE_DOMAIN=console.example.com
 PUBLIC_IP=198.51.100.9
 GATEWAY_IP=10.20.30.40
-dig() { echo 198.51.100.9; }
+DIG_LOG="$TMP/dig.log"
+DIG_A=198.51.100.9
+DIG_AAAA=""
+dig() {
+    printf '%s\n' "$*" >> "$DIG_LOG"
+    case " $* " in
+        *' AAAA '*) [[ -n "$DIG_AAAA" ]] && echo "$DIG_AAAA" ;;
+        *' A '*) [[ -n "$DIG_A" ]] && echo "$DIG_A" ;;
+    esac
+}
+CERT_MODE=cloudflare
 verify_console_dns >/dev/null \
     && pass "console A matching PUBLIC_IP passes bootstrap verification" \
     || fail "matching console A was rejected"
-dig() { echo 203.0.113.8; }
+grep -q '@1.1.1.1' "$DIG_LOG" \
+    && pass "console DNS bootstrap uses the fixed 1.1.1.1 resolver" \
+    || fail "console DNS bootstrap did not query 1.1.1.1"
+DIG_A=203.0.113.8
+CERT_DNS_WAIT_TIMEOUT=0
 if verify_console_dns >/dev/null 2>&1; then
     fail "mismatched console A passed bootstrap verification"
 else
     pass "mismatched console A fails closed"
 fi
+DIG_A=198.51.100.9
+derive_domains example.com
+CERT_MODE=http-01
+verify_console_dns >/dev/null \
+    && pass "HTTP-01 verifies console/zash/dot A and empty AAAA through 1.1.1.1" \
+    || fail "valid HTTP-01 service DNS was rejected"
+for name in console.example.com zash.example.com dot.example.com; do
+    grep -q " A ${name} @1.1.1.1" "$DIG_LOG" \
+        || fail "HTTP-01 DNS gate did not query A for ${name} through 1.1.1.1"
+    grep -q " AAAA ${name} @1.1.1.1" "$DIG_LOG" \
+        || fail "HTTP-01 DNS gate did not query AAAA for ${name} through 1.1.1.1"
+done
+DIG_AAAA=2001:db8::9
+if verify_console_dns >/dev/null 2>&1; then
+    fail "HTTP-01 accepted an IPv6 record on the IPv4-only gateway"
+else
+    pass "HTTP-01 rejects published AAAA records"
+fi
+DIG_AAAA=""
+CERT_MODE=debug
+: > "$DIG_LOG"
+verify_console_dns >/dev/null \
+    && [[ ! -s "$DIG_LOG" ]] \
+    && pass "debug mode skips public DNS checks" \
+    || fail "debug mode unexpectedly required public DNS"
 SKIP_CONSOLE_DNS_CHECK=1
+CERT_MODE=cloudflare
+DIG_A=203.0.113.8
 if verify_console_dns >/dev/null 2>&1; then
     fail "caller environment bypassed the console DNS safety gate"
 else
@@ -239,12 +281,58 @@ else
 fi
 unset SKIP_CONSOLE_DNS_CHECK
 
+# Initial HTTP-01 issuance releases :80 only when mihomo was active and always
+# restores that original state, including after Certbot failure.
+PORT80_LOG="$TMP/http-port80.log"
+HTTP_MIHOMO_ACTIVE=1
+HTTP_CERTBOT_RC=1
+systemctl() {
+    printf 'systemctl %s\n' "$*" >> "$PORT80_LOG"
+    case "$1" in
+        is-active) [[ "$HTTP_MIHOMO_ACTIVE" == 1 ]] ;;
+        stop|start) return 0 ;;
+        *) return 0 ;;
+    esac
+}
+certbot() {
+    printf 'certbot %s\n' "$*" >> "$PORT80_LOG"
+    return "$HTTP_CERTBOT_RC"
+}
+: > "$PORT80_LOG"
+if run_http_certbot certonly --standalone >/dev/null 2>&1; then
+    fail "HTTP-01 wrapper hid a Certbot failure"
+elif grep -q '^systemctl stop mihomo.service$' "$PORT80_LOG" \
+  && grep -q '^systemctl start mihomo.service$' "$PORT80_LOG"; then
+    pass "HTTP-01 restores an originally active mihomo after Certbot failure"
+else
+    fail "HTTP-01 did not stop and restore active mihomo around Certbot"
+fi
+HTTP_MIHOMO_ACTIVE=0
+HTTP_CERTBOT_RC=0
+: > "$PORT80_LOG"
+run_http_certbot certonly --standalone >/dev/null 2>&1 \
+    || fail "HTTP-01 wrapper failed with inactive mihomo and successful Certbot"
+if grep -Eq '^systemctl (stop|start) mihomo.service$' "$PORT80_LOG"; then
+    fail "HTTP-01 changed the state of an originally inactive mihomo"
+else
+    pass "HTTP-01 leaves an originally inactive mihomo stopped"
+fi
+
 # Static gates for operations that are intentionally not executed in a unit
 # test (root binary install, systemd, certificate issuance, network fallback).
 if grep -Eq 'nft flush ruleset|systemctl disable --now nftables|> /etc/nftables.conf' "$INSTALL"; then
     fail "installer still globally flushes/disables/overwrites nftables"
 else
     pass "installer contains no global nftables mutation"
+fi
+lock_fn="$(sed -n '/^acquire_install_cert_lock()/,/^}/p' "$INSTALL")"
+if grep -Fq 'CERT_RENEW_LOCK_FILE="/run/5gpn/cert-renew.lock"' "$INSTALL" \
+   && grep -Fq '! -L "$lock_dir"' <<<"$lock_fn" \
+   && grep -Fq 'file_uid "$lock_dir"' <<<"$lock_fn" \
+   && ! grep -Fq '/run/lock/' "$INSTALL"; then
+    pass "certificate lock uses a root-owned private non-symlink runtime directory"
+else
+    fail "certificate lock can clobber or follow files in a shared runtime directory"
 fi
 debug_fn="$(sed -n '/^issue_selfsigned_wildcard()/,/^}/p' "$INSTALL")"
 if grep -Fq '/etc/letsencrypt/live' <<<"$debug_fn"; then

@@ -34,6 +34,8 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
 Environment=SAFE_PATHS=/etc/5gpn/cert/zash
 # mihomo writes provider caches + reads whitelist.txt/config.yaml under its dir.
 ReadWritePaths=/etc/5gpn/mihomo
+# ACME credentials are unrelated to the data plane and must remain unreadable.
+InaccessiblePaths=-/etc/5gpn/acme
 
 [Install]
 WantedBy=multi-user.target

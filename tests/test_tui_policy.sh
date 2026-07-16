@@ -16,13 +16,43 @@ grep -Fq 'gum style --border rounded' "$INSTALL" || fail "install.sh card() does
 grep -Fq '==========================================' "$INSTALL" \
     && fail "install.sh still uses the old ==== status banner instead of a gum card"
 
-# --- sub-scripts + hook: gum-detect + gum log + plain-echo fallback all present -
-for f in scripts/update-lists.sh scripts/gen-ios-profile.sh scripts/renew-hook.sh; do
+# --- sub-scripts + hooks: gum-detect + gum log + plain-echo fallback all present -
+for f in scripts/update-lists.sh scripts/gen-ios-profile.sh scripts/renew-hook.sh scripts/cert-renew.sh; do
     s="$ROOT/$f"
     grep -Fq 'command -v gum'  "$s" || fail "$f does not detect gum on PATH"
     grep -Fq 'gum log'         "$s" || fail "$f has no gum log output path"
     grep -Eq '\[OK\]|\[INFO\]' "$s" || fail "$f lost its plain-echo fallback"
 done
+
+# --- Certificate-mode TUI: selection is TTY-only, cancellation-safe, and the
+# operator sees/accepts the DNS plan before the installer begins its resolver
+# wait. HTTP-01 must show all exact ACME names plus the no-AAAA/:80 contract.
+tui_fn="$(sed -n '/^configure_install_tui()/,/^}/p' "$INSTALL")"
+printf '%s' "$tui_fn" | grep -Fq '[[ -t 0 ]]' \
+    || fail "certificate-mode TUI is not gated on attached stdin"
+printf '%s' "$tui_fn" | grep -Fq "http-01 — Let’s Encrypt exact service SANs" \
+    || fail "certificate-mode TUI does not offer HTTP-01"
+printf '%s' "$tui_fn" | grep -Fq "cloudflare — Let’s Encrypt wildcard" \
+    || fail "certificate-mode TUI does not offer Cloudflare DNS-01"
+printf '%s' "$tui_fn" | grep -Fq "|| true)" \
+    || fail "certificate-mode TUI prompt capture is not cancellation-safe under set -e"
+for domain in CONSOLE_DOMAIN ZASH_DOMAIN DOT_DOMAIN; do
+    printf '%s' "$tui_fn" | grep -Fq "\${$domain}" \
+        || fail "HTTP-01 confirmation card omits \$$domain"
+done
+printf '%s' "$tui_fn" | grep -Fq 'AAAA: none for all three names' \
+    || fail "HTTP-01 confirmation card omits the no-AAAA requirement"
+printf '%s' "$tui_fn" | grep -Fq 'TCP/80: publicly reachable' \
+    || fail "HTTP-01 confirmation card omits public TCP/80 reachability"
+printf '%s' "$tui_fn" | grep -Fq 'wait for 1.1.1.1' \
+    || fail "certificate TUI does not explain the independent 1.1.1.1 wait"
+http_plan_line="$(grep -nF 'HTTP-01 DNS / network prerequisites' <<<"$tui_fn" | head -1 | cut -d: -f1)"
+http_confirm_line="$(grep -nF '我已确认上述 DNS 和 TCP/80 配置正确' <<<"$tui_fn" | head -1 | cut -d: -f1)"
+cf_confirm_line="$(grep -nF '我已确认上述 DNS 配置正确' <<<"$tui_fn" | head -1 | cut -d: -f1)"
+[[ -n "$http_plan_line" && -n "$http_confirm_line" && "$http_plan_line" -lt "$http_confirm_line" ]] \
+    || fail "HTTP-01 DNS plan is not shown before explicit confirmation"
+[[ -n "$cf_confirm_line" ]] \
+    || fail "Cloudflare install/configure path lacks explicit DNS confirmation"
 
 # --- update-lists.sh: Phase 2 repurpose — a manual reload trigger, no fetch of its
 # own (the in-process subscription manager owns fetching), so there is no opaque
