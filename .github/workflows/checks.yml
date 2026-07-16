@@ -1,0 +1,127 @@
+name: Checks
+
+# Reusable gate: the single source of truth for "is this tree shippable?".
+# Called by ci.yml (every branch push / PR) AND by release.yml (dns-v* tags), so
+# the release gate is byte-identical to day-to-day CI and the two can never
+# drift. Do not add checks to ci.yml or release.yml directly — add them here.
+on:
+  workflow_call:
+
+jobs:
+  # Zero-dependency shell gate: every operator-facing entrypoint must parse
+  # (bash -n) and pass the pure-grep policy tests (no Python / Go / node needed).
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: bash -n syntax gate
+        run: |
+          set -euo pipefail
+          for s in install.sh quick-install.sh scripts/*.sh; do
+            echo "--- bash -n $s ---"; bash -n "$s"
+          done
+      - name: Shell policy tests
+        run: |
+          set -euo pipefail
+          for t in tests/test_*.sh; do
+            echo "--- $t ---"; bash "$t"
+          done
+
+  # Go gate: gofmt-clean + vet + the full suite under the race detector (ubuntu
+  # runners ship gcc, so -race works). Catches the concurrent control-server /
+  # subscription-manager / resolver-pool races the non-race suite misses.
+  go:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cmd/5gpn-dns
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cmd/5gpn-dns/go.mod
+          cache-dependency-path: cmd/5gpn-dns/go.sum
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"; echo "$unformatted"
+            echo "Run: gofmt -w cmd/5gpn-dns"; exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go test -race
+        run: go test -race ./...
+
+  # Web gate: unit tests, production build, explicit bundle budgets, and the
+  # real-browser desktop + 390x844 mobile suites under production CSP.
+  # (npm run build == tsc && vite build; tsconfig includes tests, so this
+  # type-checks the whole SPA). The release workflow runs the same build to
+  # produce the 5gpn-web tarball.
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Unit tests (vitest)
+        run: npx vitest run
+      - name: Type-check + build
+        run: npm run build
+      - name: Bundle budgets
+        run: npm run bundle:check
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Browser E2E (desktop + mobile)
+        run: npx playwright test
+
+  # Validate the committed seed with the exact pinned data-plane binary. The
+  # digest prevents a mutable upstream artifact from changing this gate.
+  mihomo-config:
+    runs-on: ubuntu-latest
+    env:
+      MIHOMO_VERSION: v1.19.28
+      MIHOMO_SHA256: 70d01cfb8cb7bf7a92fd1af16cb4b9553d90bb4eecde3b5c4849103e27c80ddb
+    steps:
+      - uses: actions/checkout@v5
+      - name: Download pinned mihomo
+        run: |
+          set -euo pipefail
+          url="https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz"
+          curl -fsSL "$url" -o /tmp/mihomo.gz
+          echo "${MIHOMO_SHA256}  /tmp/mihomo.gz" | sha256sum -c -
+          gunzip /tmp/mihomo.gz
+          chmod 0755 /tmp/mihomo
+      - name: Render and validate seed config
+        run: |
+          set -euo pipefail
+          runtime="$(mktemp -d)"
+          trap 'rm -rf "$runtime"' EXIT
+          awk '
+            $0 == "__MIHOMO_LISTENERS__" {
+              print "  - {name: sniproxy, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: 127.0.0.1:443}"
+              print "  - {name: sniproxy80, type: tunnel, listen: 203.0.113.10, port: 80, network: [tcp], target: 127.0.0.1:80}"
+              next
+            }
+            {
+              gsub(/__GATEWAY_IP__/, "10.0.0.1")
+              gsub(/__PROFILE_DOMAIN__/, "profile.example.test")
+              gsub(/__CONSOLE_DOMAIN__/, "console.example.test")
+              gsub(/__ZASH_DOMAIN__/, "zash.example.test")
+              gsub(/__CONTROLLER_SECRET__/, "ci-controller-secret")
+              print
+            }
+          ' etc/mihomo/config.yaml.tmpl > "$runtime/config.yaml"
+          printf '127.0.0.1/32\n' > "$runtime/whitelist.txt"
+          if grep -Eq '__[A-Z0-9_]+__' "$runtime/config.yaml"; then
+            echo "unresolved mihomo template placeholder" >&2
+            exit 1
+          fi
+          /tmp/mihomo -t -f "$runtime/config.yaml" -d "$runtime"

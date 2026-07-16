@@ -1,0 +1,88 @@
+name: Release
+
+# Cut a release when a version tag is pushed. Both the legacy `dns-v*` scheme
+# and a bare SemVer tag (e.g. `0.0.1`) are accepted; the version stamp strips a
+# `dns-` prefix if present, so `0.0.1` stamps main.version=0.0.1. The full
+# checks.yml gate runs first (identical to CI); build/publish only runs if the
+# gate is green, so a tag on a broken commit can never ship a bad binary / SPA
+# to the assets install.sh downloads.
+on:
+  push:
+    tags:
+      - 'dns-v*'
+      - '[0-9]*.[0-9]*.[0-9]*'
+
+jobs:
+  gate:
+    uses: ./.github/workflows/checks.yml
+
+  build:
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cmd/5gpn-dns/go.mod
+          cache-dependency-path: cmd/5gpn-dns/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      # Build the control-console SPA BEFORE packaging it into the 5gpn-web
+      # tarball (the daemon serves it from disk via DNS_WEB_DIR, not go:embed).
+      - name: Build web UI
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build daemon
+        working-directory: cmd/5gpn-dns
+        run: |
+          # Stamp the release version into main.version (strip the dns- prefix,
+          # e.g. dns-v0.4.0 -> v0.4.0) so GET /api/status reports the real build.
+          VER="${GITHUB_REF_NAME#dns-}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -ldflags "-s -w -X main.version=${VER}" -o 5gpn-dns-linux-amd64 .
+          sha256sum 5gpn-dns-linux-amd64 > checksums.txt
+
+      - name: Package web UI
+        run: |
+          VER="${GITHUB_REF_NAME#dns-}"
+          tar czf "5gpn-web-${VER}.tar.gz" -C web/dist .
+          sha256sum "5gpn-web-${VER}.tar.gz" >> cmd/5gpn-dns/checksums.txt
+
+      # Installer bundle: install.sh + the config templates / scripts it reads at
+      # runtime (etc/, scripts/), version-matched to the binary + SPA in THIS
+      # release. quick-install.sh downloads this instead of cloning git, so config
+      # never drifts ahead of the pinned binary. install.sh's DNS_VERSION_DEFAULT
+      # is stamped to this tag so the bundle pulls its OWN release's binary + SPA.
+      # The asset name is UNVERSIONED so /releases/latest/download/ resolves it.
+      - name: Package installer bundle
+        run: |
+          stage="installer-bundle"
+          mkdir -p "$stage"
+          cp -r install.sh quick-install.sh etc scripts README.md LICENSE "$stage"/
+          sed -i "s/^DNS_VERSION_DEFAULT=.*/DNS_VERSION_DEFAULT=\"${GITHUB_REF_NAME}\"/" "$stage/install.sh"
+          # Fail loudly if the stamp did not take (guards against a renamed var).
+          grep -q "^DNS_VERSION_DEFAULT=\"${GITHUB_REF_NAME}\"" "$stage/install.sh" \
+            || { echo "DNS_VERSION_DEFAULT stamp failed"; exit 1; }
+          tar czf 5gpn-installer.tar.gz -C "$stage" .
+          sha256sum 5gpn-installer.tar.gz >> cmd/5gpn-dns/checksums.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            cmd/5gpn-dns/5gpn-dns-linux-amd64
+            cmd/5gpn-dns/checksums.txt
+            5gpn-web-*.tar.gz
+            5gpn-installer.tar.gz

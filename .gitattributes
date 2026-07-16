@@ -1,0 +1,3 @@
+# 5gpn targets Linux; keep all text files LF so shell scripts never get
+# CRLF line endings that would break on the gateway.
+* text=auto eol=lf

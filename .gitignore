@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Editor / OS
+*.swp
+*~
+.DS_Store
+
+# Local scratch / temp
+*.tmp
+*.log
+
+# Go build outputs (5gpn-dns is built in CI / cross-compiled; never commit binaries)
+/cmd/5gpn-dns/5gpn-dns
+/cmd/5gpn-dns/5gpn-dns.exe
+*.exe
+
+# Local build/staging scratch (cross-compiled binary + web tarballs for test-env deploys)
+/build/
+
+# Frontend build output (Phase 3 web UI; built in CI)
+/web/node_modules/
+/web/dist/
+
+# Visual-companion brainstorm mockups (scratch, not committed)
+/.superpowers/brainstorm/
+
+# Isolated feature worktrees
+/.worktrees/

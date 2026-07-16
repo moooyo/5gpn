@@ -1,0 +1,2 @@
+# Forced-proxy domains (one per line, suffix match). P1 default: empty.
+# Add a domain here to ALWAYS route it through the proxy regardless of resolved IP.

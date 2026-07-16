@@ -1,0 +1,24 @@
+name: CI
+
+# Day-to-day gate on every branch push (tags are handled by release.yml) and
+# every pull request. Delegates to the reusable checks.yml so CI and the release
+# gate stay identical.
+#
+# NOTE: `branches: ['**']` (not `tags-ignore`) is the correct "all branches, no
+# tags" filter — a `push` trigger that specifies only `tags`/`tags-ignore` and
+# no `branches` runs ONLY on tag pushes, so it would never fire on a branch.
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+  workflow_dispatch:
+
+# One in-flight run per ref; a newer push cancels the older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml

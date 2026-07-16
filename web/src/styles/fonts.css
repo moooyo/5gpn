@@ -1,0 +1,15 @@
+/*
+ * Font sourcing note (Task 0.3).
+ *
+ * All @font-face declarations for this app come from installed packages,
+ * imported directly in src/main.tsx (before this file / app styles):
+ *   - @fontsource/plus-jakarta-sans latin (400/500/600/700/800) -> family "Plus Jakarta Sans"
+ *   - @fontsource/jetbrains-mono latin (400/500/600)            -> family "JetBrains Mono"
+ *   - subsetted-fonts/MiSans-VF/MiSans-VF.css              -> family "MiSans-VF" (CJK, 96 unicode-range chunks)
+ *
+ * Do NOT re-declare @font-face here or anywhere else — this file is
+ * intentionally just documentation, not a stylesheet. CJK remains covered
+ * by MiSans; limiting the two Latin families avoids shipping Cyrillic,
+ * Vietnamese and Greek subsets the console never requests. Task 0.4's font
+ * stacks should reference the family names above directly.
+ */

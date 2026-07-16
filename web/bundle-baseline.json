@@ -1,0 +1,11 @@
+{
+  "_comment": "Measured 2026-07-16. All seven manifest routes are lazy. Initial JS is 159.10 KiB gzip; initial CSS is 36.37 KiB gzip; the largest route graph (overview) is 190.74 KiB gzip. PWA precache is about 1.35 MiB and fonts are runtime-cached (112 assets, about 2.38 MiB total). Caps retain bounded deployment headroom and must not be raised without explaining the regression.",
+  "initialJsGzipKiB": 159.10,
+  "initialCssGzipKiB": 36.37,
+  "maxInitialJsGzipKiB": 189,
+  "maxInitialCssGzipKiB": 45,
+  "maxRouteJsGzipKiB": 225,
+  "maxPrecacheKiB": 1500,
+  "maxFontAssets": 115,
+  "maxFontKiB": 2500
+}

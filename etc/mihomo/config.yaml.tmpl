@@ -1,0 +1,62 @@
+# 5gpn mihomo data plane — install-time seed (rendered by install.sh). This
+# file is fully operator-owned from here on: no region of it is daemon-
+# managed anymore (2026-07-15 policy/mihomo decoupling) -- edit it via the
+# console's mihomo config editor (GET/PUT /api/mihomo/config), '5gpn
+# mihomo-reset' to restore this seed, or by hand. The console's policy
+# engine only ever decides "gateway or not" (DNS layer); everything below
+# about what happens to gateway-bound traffic is yours to shape.
+external-controller: 127.0.0.1:9090
+secret: __CONTROLLER_SECRET__
+profile: { store-selected: true }
+mode: rule
+log-level: info
+
+listeners:
+__MIHOMO_LISTENERS__
+
+sniffer:
+  enable: true
+  parse-pure-ip: true
+  override-destination: true
+  sniff:
+    TLS:  { ports: [443] }
+    QUIC: { ports: [443] }
+    HTTP: { ports: [80] }
+
+dns:
+  enable: true
+  enhanced-mode: normal
+  nameserver: ["udp://127.0.0.1:5354"]   # 5gpn-dns egress broker: returns REAL upstream IPs
+
+hosts:
+  __PROFILE_DOMAIN__: 127.0.0.1
+  __CONSOLE_DOMAIN__: 127.0.0.1
+  __ZASH_DOMAIN__:    127.0.0.2
+
+rule-providers:
+  whitelist: {type: file, behavior: ipcidr, format: text, path: ./whitelist.txt}
+
+# Egress skeleton -- empty by default. Add proxy nodes (proxies:) and/or
+# node-subscription providers (proxy-providers:), then wire them into
+# proxy-groups as you like; the terminal MATCH rule below routes every
+# gateway-bound query that reached this point to the Proxies group.
+proxies: []
+proxy-providers: {}
+
+proxy-groups:
+  - {name: Proxies, type: select, proxies: [DIRECT]}
+
+rules:
+  - DOMAIN,__PROFILE_DOMAIN__,DIRECT
+  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
+  - DOMAIN,__CONSOLE_DOMAIN__,REJECT-DROP
+  - AND,((DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
+  - DOMAIN,__ZASH_DOMAIN__,REJECT-DROP
+  - IP-CIDR,__GATEWAY_IP__/32,REJECT-DROP,no-resolve
+  - IP-CIDR,127.0.0.0/8,REJECT-DROP,no-resolve
+  - IP-CIDR,10.0.0.0/8,REJECT-DROP,no-resolve
+  - IP-CIDR,172.16.0.0/12,REJECT-DROP,no-resolve
+  - IP-CIDR,192.168.0.0/16,REJECT-DROP,no-resolve
+  - IP-CIDR,100.64.0.0/10,REJECT-DROP,no-resolve
+  - IP-CIDR,169.254.0.0/16,REJECT-DROP,no-resolve
+  - MATCH,Proxies

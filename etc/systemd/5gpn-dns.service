@@ -1,0 +1,87 @@
+[Unit]
+Description=5gpn DNS (DoT resolver + web console)
+After=network-online.target mihomo.service
+Wants=network-online.target
+# Soft-order after the data-plane forwarder so a fresh boot brings mihomo up
+# before the resolver starts handing clients the gateway IP for foreign domains.
+# Wants= (not Requires=/BindsTo=): 5gpn-dns does not call mihomo in-process, so
+# a mihomo failure must never block DNS resolution — this is best-effort order.
+Wants=mihomo.service
+# Never give up restarting: the default start-limit would stop the unit after a
+# few rapid failures, but this box is the network's only resolver, so it must
+# keep retrying (paced by RestartSteps backoff below). 0 disables the limiter.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/5gpn/dns.env
+ExecStart=/usr/local/bin/5gpn-dns
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+# Growing backoff instead of an indefinite tight 5s crash-loop on a persistent
+# boot fault (bad cert / bind conflict / config error): the delay climbs 5s →
+# RestartMaxDelaySec across RestartSteps, so a hard fault reaches an observable,
+# non-hammering cadence. The [Unit] StartLimitIntervalSec=0 keeps it self-healing
+# (never gives up) — this box is the network's only resolver, so "stop trying" is
+# worse than "retry slowly". (RestartSteps/RestartMaxDelaySec need systemd >=
+# 254; Debian 13 ships 257.)
+RestartSteps=5
+RestartMaxDelaySec=300
+# Liveness watchdog: the daemon pings WATCHDOG=1 (RunWatchdog); if a wedged
+# process stops pinging within WatchdogSec, systemd restarts it (paced by the
+# backoff above) instead of leaving a hung-but-active resolver.
+WatchdogSec=30
+User=root
+LimitNOFILE=65535
+# cgroup ceilings so an overload (or a leak) degrades instead of OOM-killing the
+# whole box — the resolver is the network's only DNS. Percentages scale with the
+# box (systemd >= 247; Debian 13 is fine). MemoryHigh throttles via reclaim
+# pressure; MemoryMax is the hard stop; TasksMax bounds runaway thread growth.
+# The DNS_MAX_INFLIGHT admission cap keeps normal memory well under these.
+MemoryHigh=50%
+MemoryMax=75%
+TasksMax=4096
+# Sandbox: DNS resolver — binds :853 (DoT, the ONLY client-facing DNS
+# transport), 127.0.0.1:5353 (loopback debug UDP), and loopback :18443
+# (control-plane API + disk-served SPA + public /ios/ profile path; browsers
+# normally reach it through the mihomo SNI split on :443), root with no new
+# privileges.
+# IPv4 (+unix) sockets only for now — AF_INET6 /
+# AF_NETLINK are NOT granted; confirm on test-env whether the runtime needs
+# either (a dual-stack ":port" bind or route subscribe) and add them there if
+# 5gpn-dns fatals. Kept in lockstep with the sibling mihomo unit's family set
+# (see tests/test_hardening_policy.sh).
+#
+# Phase 5 (in-process Telegram bot): the bot's privileged ops are delegated to
+# systemd rather than run under this sandbox, so NO loosening is needed here:
+#   - `systemctl restart/is-active` talks to systemd over the AF_UNIX private
+#     socket (already permitted);
+#   - `certbot renew` is launched via `systemd-run` (a transient unit spawned by
+#     PID 1) so it runs OUTSIDE this sandbox and can write /etc/letsencrypt +
+#     refresh /etc/5gpn/cert. This deliberately keeps the resolver hardened.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+# Phase 2/3: the in-process subscription manager writes rule caches to
+# /etc/5gpn/rules/<category>/<name>.txt, and the control-plane API rewrites the
+# subscription config /etc/5gpn/subscriptions.json (atomic temp-create+rename,
+# which needs the *directory* writable — a file-level RW path is insufficient).
+# So the whole conf dir is writable, with the two secrets re-protected as
+# read-only carve-outs: the resolver must never rewrite its own token or TLS
+# material (the certbot renew-hook, a separate process, updates the cert then
+# SIGHUPs us).
+# Mihomo Egress DNS Broker: binds 127.0.0.1:5354 (UDP+TCP).
+# Port >1024 on loopback: no AmbientCapabilities or CAP_NET_BIND_SERVICE needed.
+ReadWritePaths=/etc/5gpn
+ReadOnlyPaths=/etc/5gpn/dns.env -/etc/5gpn/cert -/opt/5gpn/web
+
+[Install]
+WantedBy=multi-user.target

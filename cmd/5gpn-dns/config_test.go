@@ -1,0 +1,959 @@
+package main
+
+import (
+	"errors"
+	"os"
+	"testing"
+	"time"
+)
+
+// allDNSEnvKeys is the complete list of env vars read by LoadConfig.
+var allDNSEnvKeys = []string{
+	"DNS_LISTEN_DOT", "DNS_LISTEN_DEBUG",
+	"DNS_CERT", "DNS_KEY", "DNS_WEB_CERT", "DNS_WEB_KEY", "DNS_GATEWAY_IP",
+	"DNS_CHINA", "DNS_TRUST", "DNS_UPSTREAMS", "DNS_RULES_DIR", "DNS_CHNROUTE",
+	"DNS_CACHE_SIZE", "DNS_TTL_MIN", "DNS_TTL_MAX", "DNS_QUERY_TIMEOUT",
+	"DNS_SUBSCRIPTIONS",
+	"DNS_LISTEN_API", "DNS_API_TOKEN",
+	"DNS_STATS_FILE",
+	"DNS_API_RATE", "DNS_API_BURST",
+	"TGBOT_TOKEN", "TGBOT_ADMINS",
+	"WWW_DIR",
+	"DNS_CHINA_ECS", "DNS_ECS_FILE",
+	"DNS_EGRESS_BROKER",
+	"XRAY_RESOLVER", "DNS_EGRESS_RESOLVER",
+	"DNS_BASE_DOMAIN", "DNS_CONSOLE_DOMAIN", "DNS_ZASH_DOMAIN", "DNS_PROFILE_DOMAIN",
+	"DNS_MIHOMO_CONTROLLER", "DNS_MIHOMO_SECRET", "DNS_WHITELIST_FILE",
+	"DNS_ZASH_DIR", "DNS_ZASH_LISTEN", "DNS_ZASH_CERT", "DNS_ZASH_KEY",
+}
+
+// clearAllDNSEnv unsets all DNS_ vars and restores them on t.Cleanup.
+func clearAllDNSEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range allDNSEnvKeys {
+		// t.Setenv saves the old value and restores it at cleanup.
+		// We want to UNSET (not set-to-""), so we call os.Unsetenv manually
+		// and register a cleanup that restores the original value or unsets again.
+		old, wasSet := os.LookupEnv(k)
+		if err := os.Unsetenv(k); err != nil {
+			t.Fatalf("os.Unsetenv(%q): %v", k, err)
+		}
+		k, old, wasSet := k, old, wasSet // capture
+		t.Cleanup(func() {
+			if wasSet {
+				_ = os.Setenv(k, old)
+			} else {
+				_ = os.Unsetenv(k)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_Defaults(t *testing.T) {
+	// Wipe all DNS_ vars so we get pure defaults.  We also must supply cert/key
+	// because the default DoT listener (:853) is TLS.
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+
+	// Default listeners: DoT is the ONLY client-facing DNS transport (DoH and
+	// plain :53 were removed); the debug listener is loopback-only.
+	if cfg.ListenDoT != ":853" {
+		t.Errorf("ListenDoT default = %q, want %q", cfg.ListenDoT, ":853")
+	}
+	if cfg.ListenDebug != "127.0.0.1:5353" {
+		t.Errorf("ListenDebug default = %q, want %q", cfg.ListenDebug, "127.0.0.1:5353")
+	}
+
+	// Web-console cert falls back to the DoT cert when DNS_WEB_CERT/KEY unset.
+	if cfg.WebCertFile != cfg.CertFile || cfg.WebKeyFile != cfg.KeyFile {
+		t.Errorf("WebCertFile/WebKeyFile = %q/%q, want fallback to DNS_CERT/DNS_KEY", cfg.WebCertFile, cfg.WebKeyFile)
+	}
+
+	// Default upstream lists.
+	wantChina := []string{"223.5.5.5", "119.29.29.29"}
+	if len(cfg.ChinaAddrs) != len(wantChina) {
+		t.Errorf("ChinaAddrs len = %d, want %d", len(cfg.ChinaAddrs), len(wantChina))
+	} else {
+		for i, a := range cfg.ChinaAddrs {
+			if a != wantChina[i] {
+				t.Errorf("ChinaAddrs[%d] = %q, want %q", i, a, wantChina[i])
+			}
+		}
+	}
+
+	// Default trust upstream: the 22.22.22.22 sentinel, bare IP ⇒ plain UDP.
+	wantTrust := []TrustEntry{
+		{ServerName: "22.22.22.22", DialAddr: "22.22.22.22", Plain: true},
+	}
+	if len(cfg.TrustEntries) != len(wantTrust) {
+		t.Fatalf("TrustEntries len = %d, want %d", len(cfg.TrustEntries), len(wantTrust))
+	}
+	for i, te := range cfg.TrustEntries {
+		if te != wantTrust[i] {
+			t.Errorf("TrustEntries[%d] = %+v, want %+v", i, te, wantTrust[i])
+		}
+	}
+	if len(cfg.TrustRaw) != 1 || cfg.TrustRaw[0] != "22.22.22.22" {
+		t.Errorf("TrustRaw = %v, want [22.22.22.22]", cfg.TrustRaw)
+	}
+	if cfg.UpstreamsFile != "/etc/5gpn/upstreams.json" {
+		t.Errorf("UpstreamsFile = %q, want /etc/5gpn/upstreams.json", cfg.UpstreamsFile)
+	}
+
+	// Default durations.
+	if cfg.TTLMin != 300*time.Second {
+		t.Errorf("TTLMin = %v, want 300s", cfg.TTLMin)
+	}
+	if cfg.TTLMax != 86400*time.Second {
+		t.Errorf("TTLMax = %v, want 86400s", cfg.TTLMax)
+	}
+	if cfg.QueryTimeout != 5*time.Second {
+		t.Errorf("QueryTimeout = %v, want 5s", cfg.QueryTimeout)
+	}
+
+	// Default cache size.
+	if cfg.CacheSize != 4096 {
+		t.Errorf("CacheSize default = %d, want 4096", cfg.CacheSize)
+	}
+
+	// Default subscriptions file.
+	if cfg.SubscriptionsFile != "/etc/5gpn/subscriptions.json" {
+		t.Errorf("SubscriptionsFile default = %q, want %q", cfg.SubscriptionsFile, "/etc/5gpn/subscriptions.json")
+	}
+
+	// Default control-plane API listener; token has no default (empty). Binds
+	// LOOPBACK :443 directly — the mihomo SNI split redirects panel traffic
+	// straight there, so the daemon never needs a public listener.
+	if cfg.ListenAPI != "127.0.0.1:443" {
+		t.Errorf("ListenAPI default = %q, want %q", cfg.ListenAPI, "127.0.0.1:443")
+	}
+	if cfg.APIToken != "" {
+		t.Errorf("APIToken default = %q, want empty", cfg.APIToken)
+	}
+
+	// Default stats persistence file (Phase 4 Task A2).
+	if cfg.StatsFile != "/etc/5gpn/stats.json" {
+		t.Errorf("StatsFile default = %q, want %q", cfg.StatsFile, "/etc/5gpn/stats.json")
+	}
+
+	// Default control-plane API rate limit (Phase 4 Task C1).
+	if cfg.APIRate != 20 {
+		t.Errorf("APIRate default = %v, want 20", cfg.APIRate)
+	}
+	if cfg.APIBurst != 40 {
+		t.Errorf("APIBurst default = %d, want 40", cfg.APIBurst)
+	}
+
+	// Phase 5 Telegram bot: token has no default (empty ⇒ bot disabled);
+	// admins parses to an empty (non-nil) set.
+	if cfg.TGBotToken != "" {
+		t.Errorf("TGBotToken default = %q, want empty", cfg.TGBotToken)
+	}
+	if len(cfg.TGBotAdmins) != 0 {
+		t.Errorf("TGBotAdmins default = %v, want empty set", cfg.TGBotAdmins)
+	}
+
+	// iOS profile files (served at the control server's public /ios/ path).
+	if cfg.WWWDir != "/opt/5gpn/www" {
+		t.Errorf("WWWDir default = %q, want %q", cfg.WWWDir, "/opt/5gpn/www")
+	}
+}
+
+func TestLoadConfig_EnvOverride(t *testing.T) {
+	clearAllDNSEnv(t)
+
+	// Disable the DoT listener so no cert required.
+	t.Setenv("DNS_LISTEN_DOT", "")
+	t.Setenv("DNS_LISTEN_DEBUG", "127.0.0.1:1053")
+	t.Setenv("DNS_GATEWAY_IP", "10.0.0.1")
+	t.Setenv("DNS_CHINA", "8.8.8.8")
+	t.Setenv("DNS_TRUST", "dns.google@8.8.8.8,one.one.one.one@1.1.1.1")
+	t.Setenv("DNS_TTL_MIN", "60")
+	t.Setenv("DNS_TTL_MAX", "3600")
+	t.Setenv("DNS_QUERY_TIMEOUT", "3s")
+	t.Setenv("DNS_CACHE_SIZE", "512")
+	t.Setenv("DNS_SUBSCRIPTIONS", "/opt/5gpn/subs.json")
+	t.Setenv("DNS_LISTEN_API", ":9444")
+	t.Setenv("DNS_API_TOKEN", "s3cr3t")
+	t.Setenv("DNS_STATS_FILE", "/opt/5gpn/stats.json")
+	t.Setenv("DNS_API_RATE", "5")
+	t.Setenv("DNS_API_BURST", "10")
+	t.Setenv("DNS_WEB_CERT", "/etc/5gpn/cert/web/fullchain.pem")
+	t.Setenv("DNS_WEB_KEY", "/etc/5gpn/cert/web/privkey.pem")
+	t.Setenv("WWW_DIR", "/opt/5gpn/custom-www")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+
+	if cfg.ListenDoT != "" {
+		t.Errorf("ListenDoT = %q, want empty (disabled)", cfg.ListenDoT)
+	}
+	if cfg.ListenDebug != "127.0.0.1:1053" {
+		t.Errorf("ListenDebug = %q, want %q", cfg.ListenDebug, "127.0.0.1:1053")
+	}
+	if cfg.GatewayIP.String() != "10.0.0.1" {
+		t.Errorf("GatewayIP = %v, want 10.0.0.1", cfg.GatewayIP)
+	}
+	if len(cfg.ChinaAddrs) != 1 || cfg.ChinaAddrs[0] != "8.8.8.8" {
+		t.Errorf("ChinaAddrs = %v, want [8.8.8.8]", cfg.ChinaAddrs)
+	}
+	if cfg.TTLMin != 60*time.Second {
+		t.Errorf("TTLMin = %v, want 60s", cfg.TTLMin)
+	}
+	if cfg.TTLMax != 3600*time.Second {
+		t.Errorf("TTLMax = %v, want 3600s", cfg.TTLMax)
+	}
+	if cfg.QueryTimeout != 3*time.Second {
+		t.Errorf("QueryTimeout = %v, want 3s", cfg.QueryTimeout)
+	}
+	if cfg.CacheSize != 512 {
+		t.Errorf("CacheSize = %d, want 512", cfg.CacheSize)
+	}
+	if cfg.SubscriptionsFile != "/opt/5gpn/subs.json" {
+		t.Errorf("SubscriptionsFile = %q, want %q", cfg.SubscriptionsFile, "/opt/5gpn/subs.json")
+	}
+	if cfg.ListenAPI != ":9444" {
+		t.Errorf("ListenAPI = %q, want %q", cfg.ListenAPI, ":9444")
+	}
+	if cfg.APIToken != "s3cr3t" {
+		t.Errorf("APIToken = %q, want %q", cfg.APIToken, "s3cr3t")
+	}
+	if cfg.StatsFile != "/opt/5gpn/stats.json" {
+		t.Errorf("StatsFile = %q, want %q", cfg.StatsFile, "/opt/5gpn/stats.json")
+	}
+	if cfg.APIRate != 5 {
+		t.Errorf("APIRate = %v, want 5", cfg.APIRate)
+	}
+	if cfg.APIBurst != 10 {
+		t.Errorf("APIBurst = %d, want 10", cfg.APIBurst)
+	}
+	if cfg.WebCertFile != "/etc/5gpn/cert/web/fullchain.pem" || cfg.WebKeyFile != "/etc/5gpn/cert/web/privkey.pem" {
+		t.Errorf("WebCertFile/WebKeyFile = %q/%q, want the DNS_WEB_CERT/KEY overrides", cfg.WebCertFile, cfg.WebKeyFile)
+	}
+	if cfg.WWWDir != "/opt/5gpn/custom-www" {
+		t.Errorf("WWWDir = %q, want %q", cfg.WWWDir, "/opt/5gpn/custom-www")
+	}
+}
+
+// TestLoadConfig_APITokenEmptyByDefault confirms DNS_API_TOKEN has no default:
+// when unset the control plane is left disabled (empty token), distinct from
+// the listener defaults which always resolve to a non-empty address.
+func TestLoadConfig_APITokenEmptyByDefault(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	// DNS_API_TOKEN intentionally left unset.
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.APIToken != "" {
+		t.Errorf("APIToken = %q, want empty when DNS_API_TOKEN unset", cfg.APIToken)
+	}
+	// ListenAPI still defaults even though the token is empty (NewControlServer
+	// is what decides disablement, not LoadConfig).
+	if cfg.ListenAPI != "127.0.0.1:443" {
+		t.Errorf("ListenAPI = %q, want %q", cfg.ListenAPI, "127.0.0.1:443")
+	}
+}
+
+func TestLoadConfig_TLSRequired_DoT(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_LISTEN_DOT", ":853")
+	// DNS_CERT and DNS_KEY remain empty.
+
+	_, err := LoadConfig()
+	if err == nil {
+		t.Fatal("expected error when DoT enabled but CERT/KEY missing, got nil")
+	}
+}
+
+func TestLoadConfig_TLSNotRequired_NoTLSListeners(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_LISTEN_DOT", "")
+	// DNS_CERT and DNS_KEY remain empty.
+
+	_, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("no TLS listeners → no cert error expected, got: %v", err)
+	}
+}
+
+// TestLoadConfig_APIRateDisabled confirms DNS_API_RATE=0 disables rate
+// limiting (APIRate <= 0 is the "allow all" sentinel consumed by
+// newRateLimiter/the middleware).
+func TestLoadConfig_APIRateDisabled(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	t.Setenv("DNS_API_RATE", "0")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.APIRate != 0 {
+		t.Errorf("APIRate = %v, want 0 (disabled)", cfg.APIRate)
+	}
+}
+
+// TestLoadConfig_APIRateBadValueFallsBackToDefault confirms a malformed
+// DNS_API_RATE doesn't crash LoadConfig -- it falls back to the default
+// rather than propagating a parse error (tolerant-numeric-knob pattern).
+func TestLoadConfig_APIRateBadValueFallsBackToDefault(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	t.Setenv("DNS_API_RATE", "not-a-number")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.APIRate != 20 {
+		t.Errorf("APIRate with bad env = %v, want default 20", cfg.APIRate)
+	}
+}
+
+// TestLoadConfig_APIBurstBadValueFallsBackToDefault mirrors the rate case for
+// DNS_API_BURST.
+func TestLoadConfig_APIBurstBadValueFallsBackToDefault(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	t.Setenv("DNS_API_BURST", "not-a-number")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.APIBurst != 40 {
+		t.Errorf("APIBurst with bad env = %d, want default 40", cfg.APIBurst)
+	}
+}
+
+// TestLoadConfig_APIBurstZeroOrNegativeFallsBackWhenRatePositive confirms
+// that when APIRate is positive (rate limiting enabled) but APIBurst is
+// given as <= 0, we fall back to the sane default rather than building a
+// limiter that can never let a request through.
+func TestLoadConfig_APIBurstZeroOrNegativeFallsBackWhenRatePositive(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	t.Setenv("DNS_API_RATE", "5")
+	t.Setenv("DNS_API_BURST", "0")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.APIBurst != 40 {
+		t.Errorf("APIBurst = %d, want fallback default 40 when given 0 with rate>0", cfg.APIBurst)
+	}
+}
+
+// TestLoadConfig_TGBot confirms TGBOT_TOKEN / TGBOT_ADMINS are read into the
+// Config: token verbatim, admins parsed into an int64 set (mixed comma/space
+// separators, garbage dropped).
+func TestLoadConfig_TGBot(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	t.Setenv("TGBOT_TOKEN", "12345:abcdef")
+	t.Setenv("TGBOT_ADMINS", "111, 222 333")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.TGBotToken != "12345:abcdef" {
+		t.Errorf("TGBotToken = %q, want %q", cfg.TGBotToken, "12345:abcdef")
+	}
+	want := map[int64]bool{111: true, 222: true, 333: true}
+	if len(cfg.TGBotAdmins) != len(want) {
+		t.Fatalf("TGBotAdmins = %v, want %v", cfg.TGBotAdmins, want)
+	}
+	for id := range want {
+		if !cfg.TGBotAdmins[id] {
+			t.Errorf("TGBotAdmins missing %d; got %v", id, cfg.TGBotAdmins)
+		}
+	}
+}
+
+// TestParseAdminIDs exercises the separator handling and garbage rejection of
+// the TGBOT_ADMINS parser directly.
+func TestParseAdminIDs(t *testing.T) {
+	tests := []struct {
+		input string
+		want  map[int64]bool
+	}{
+		{"", map[int64]bool{}},
+		{"   ", map[int64]bool{}},
+		{"111, 222 333", map[int64]bool{111: true, 222: true, 333: true}},
+		{"111,222,333", map[int64]bool{111: true, 222: true, 333: true}},
+		{"111\t222\n333", map[int64]bool{111: true, 222: true, 333: true}},
+		{"x", map[int64]bool{}},                               // pure garbage dropped
+		{"111, x, 222", map[int64]bool{111: true, 222: true}}, // garbage skipped, rest kept
+		{"-5", map[int64]bool{-5: true}},                      // negative IDs are valid int64
+		{",,111,,", map[int64]bool{111: true}},                // empty tokens ignored
+	}
+	for _, tc := range tests {
+		got := parseAdminIDs(tc.input)
+		if len(got) != len(tc.want) {
+			t.Errorf("parseAdminIDs(%q) = %v, want %v", tc.input, got, tc.want)
+			continue
+		}
+		for id := range tc.want {
+			if !got[id] {
+				t.Errorf("parseAdminIDs(%q) = %v, missing %d", tc.input, got, id)
+			}
+		}
+	}
+}
+
+func TestParseTrustEntries(t *testing.T) {
+	tests := []struct {
+		input string
+		want  []TrustEntry
+	}{
+		{
+			input: "dns.google@8.8.8.8",
+			want:  []TrustEntry{{ServerName: "dns.google", DialAddr: "8.8.8.8"}},
+		},
+		{
+			// Bare IP ⇒ plain UDP (deliberate reversal 2026-07-10: it used to
+			// mean DoT-with-IP-SAN, which made an internal-resolver default
+			// like 22.22.22.22 unusable).
+			input: "1.1.1.1",
+			want:  []TrustEntry{{ServerName: "1.1.1.1", DialAddr: "1.1.1.1", Plain: true}},
+		},
+		{
+			input: "dns.google@8.8.8.8,one.one.one.one@1.1.1.1",
+			want: []TrustEntry{
+				{ServerName: "dns.google", DialAddr: "8.8.8.8"},
+				{ServerName: "one.one.one.one", DialAddr: "1.1.1.1"},
+			},
+		},
+	}
+	for _, tc := range tests {
+		got := parseTrustEntries(tc.input)
+		if len(got) != len(tc.want) {
+			t.Errorf("parseTrustEntries(%q): len=%d, want %d", tc.input, len(got), len(tc.want))
+			continue
+		}
+		for i, te := range got {
+			if te != tc.want[i] {
+				t.Errorf("parseTrustEntries(%q)[%d] = %+v, want %+v", tc.input, i, te, tc.want[i])
+			}
+		}
+	}
+}
+
+// B4: numeric tuning knobs (CACHE_SIZE / MAX_INFLIGHT / TTL_MIN / TTL_MAX /
+// QUERY_TIMEOUT) must fall back to their defaults on a malformed value rather
+// than making LoadConfig fatal — a single mistyped knob must never crash the
+// network's only resolver into a restart loop. This unifies their behaviour with
+// the DNS_API_RATE/BURST knobs (which already tolerated bad values).
+func TestLoadConfig_NumericKnobsBadValueFallBack(t *testing.T) {
+	cases := []struct {
+		key    string
+		bad    string
+		check  func(Config) bool
+		wantSt string
+	}{
+		{"DNS_CACHE_SIZE", "not-a-number", func(c Config) bool { return c.CacheSize == 4096 }, "CacheSize=4096"},
+		{"DNS_CACHE_SIZE", "-5", func(c Config) bool { return c.CacheSize == 4096 }, "CacheSize=4096"},
+		{"DNS_MAX_INFLIGHT", "xyz", func(c Config) bool { return c.MaxInflight == 4096 }, "MaxInflight=4096"},
+		{"DNS_TTL_MIN", "bad", func(c Config) bool { return c.TTLMin == 300*time.Second }, "TTLMin=300s"},
+		{"DNS_TTL_MAX", "bad", func(c Config) bool { return c.TTLMax == 86400*time.Second }, "TTLMax=86400s"},
+		{"DNS_QUERY_TIMEOUT", "not-a-duration", func(c Config) bool { return c.QueryTimeout == 5*time.Second }, "QueryTimeout=5s"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key+"="+tc.bad, func(t *testing.T) {
+			clearAllDNSEnv(t)
+			t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+			t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+			t.Setenv(tc.key, tc.bad)
+
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("LoadConfig() with bad %s should not error, got: %v", tc.key, err)
+			}
+			if !tc.check(cfg) {
+				t.Errorf("bad %s=%q did not fall back to default (%s)", tc.key, tc.bad, tc.wantSt)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_EgressBroker_Default(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.EgressBrokerAddr != "127.0.0.1:5354" {
+		t.Errorf("EgressBrokerAddr default = %q, want 127.0.0.1:5354", cfg.EgressBrokerAddr)
+	}
+}
+
+// TestLoadConfig_EgressBroker_EmptyDisables verifies an explicit empty
+// DNS_EGRESS_BROKER disables the broker (matches every other listener's
+// empty-disables convention) without failing LoadConfig.
+func TestLoadConfig_EgressBroker_EmptyDisables(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	t.Setenv("DNS_EGRESS_BROKER", "")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.EgressBrokerAddr != "" {
+		t.Errorf("EgressBrokerAddr = %q, want empty (disabled)", cfg.EgressBrokerAddr)
+	}
+}
+
+// TestLoadConfig_EgressBroker_AcceptsLoopbackOverride verifies a
+// non-default loopback IPv4 literal (with a custom port) is accepted.
+func TestLoadConfig_EgressBroker_AcceptsLoopbackOverride(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	t.Setenv("DNS_EGRESS_BROKER", "127.0.0.5:6000")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.EgressBrokerAddr != "127.0.0.5:6000" {
+		t.Errorf("EgressBrokerAddr = %q, want 127.0.0.5:6000", cfg.EgressBrokerAddr)
+	}
+}
+
+// TestLoadConfig_EgressBroker_RejectsNonLoopback verifies a routable (or
+// non-loopback loopback-adjacent) address is rejected — the broker must
+// never be reachable off-box (spec 6.5: loopback-only, never DNS_GATEWAY_IP,
+// never a public surface).
+func TestLoadConfig_EgressBroker_RejectsNonLoopback(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	t.Setenv("DNS_EGRESS_BROKER", "0.0.0.0:5354")
+
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig must reject a non-loopback DNS_EGRESS_BROKER")
+	}
+}
+
+// TestLoadConfig_EgressBroker_RejectsIPv6 verifies an IPv6 loopback literal
+// is rejected: RestrictAF-style IPv4-only handling has no IPv6 support in
+// this architecture yet (per the broker's brief), so accepting ::1 would
+// silently produce a broker that never receives the Xray tcp+local queries
+// it's supposed to serve.
+func TestLoadConfig_EgressBroker_RejectsIPv6(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	t.Setenv("DNS_EGRESS_BROKER", "[::1]:5354")
+
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig must reject an IPv6 DNS_EGRESS_BROKER (IPv4-only architecture)")
+	}
+}
+
+// TestLoadConfig_EgressBroker_RejectsHostname verifies a bare hostname
+// (not an IP literal) is rejected — the broker's loopback invariant must be
+// checkable without a DNS lookup at config-load time.
+func TestLoadConfig_EgressBroker_RejectsHostname(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+	t.Setenv("DNS_EGRESS_BROKER", "localhost:5354")
+
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig must reject a non-IP-literal DNS_EGRESS_BROKER host")
+	}
+}
+
+// TestLoadConfig_EgressBroker_RejectsBadPort verifies the port portion of
+// DNS_EGRESS_BROKER is validated explicitly (strconv.ParseUint, 1..65535) at
+// LoadConfig time rather than deferred to the eventual net.Listen bind
+// failure — a non-numeric, zero, or out-of-range port is a config error the
+// operator should see immediately.
+func TestLoadConfig_EgressBroker_RejectsBadPort(t *testing.T) {
+	for _, addr := range []string{
+		"127.0.0.1:abc",
+		"127.0.0.1:0",
+		"127.0.0.1:65536",
+	} {
+		t.Run(addr, func(t *testing.T) {
+			clearAllDNSEnv(t)
+			t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
+			t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
+			t.Setenv("DNS_EGRESS_BROKER", addr)
+
+			if _, err := LoadConfig(); err == nil {
+				t.Fatalf("LoadConfig must reject DNS_EGRESS_BROKER=%q", addr)
+			}
+		})
+	}
+}
+
+// --- XRAY_RESOLVER daemon-config tests (final-fix: static Xray broker) ---
+
+// TestLoadConfig_XrayResolverDefault verifies the daemon reads XRAY_RESOLVER
+// and applies the 22.22.22.22 placeholder default when unset.
+func TestLoadConfig_XrayResolverDefault(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/c")
+	t.Setenv("DNS_KEY", "/k")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.XrayResolver != "22.22.22.22" {
+		t.Fatalf("XrayResolver default = %q, want 22.22.22.22", cfg.XrayResolver)
+	}
+}
+
+// TestLoadConfig_XrayResolverPlainIPv4 accepts a plain IPv4.
+func TestLoadConfig_XrayResolverPlainIPv4(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/c")
+	t.Setenv("DNS_KEY", "/k")
+	t.Setenv("XRAY_RESOLVER", "1.1.1.1")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.XrayResolver != "1.1.1.1" {
+		t.Fatalf("XrayResolver = %q, want 1.1.1.1", cfg.XrayResolver)
+	}
+}
+
+// TestLoadConfig_XrayResolverDoH accepts an https DoH URL.
+func TestLoadConfig_XrayResolverDoH(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/c")
+	t.Setenv("DNS_KEY", "/k")
+	t.Setenv("XRAY_RESOLVER", "https://dns.google/dns-query")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.XrayResolver != "https://dns.google/dns-query" {
+		t.Fatalf("XrayResolver = %q", cfg.XrayResolver)
+	}
+}
+
+// TestLoadConfig_XrayResolverInvalid rejects a bare hostname (fatal config
+// error): validated via ValidateResolver.
+func TestLoadConfig_XrayResolverInvalid(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("XRAY_RESOLVER", "dns.google")
+	if _, err := LoadConfig(); err == nil {
+		t.Fatalf("LoadConfig accepted invalid XRAY_RESOLVER, want error")
+	}
+}
+
+// TestLoadConfig_EgressResolverPrefersNewKnob verifies DNS_EGRESS_RESOLVER
+// (the mihomo-migration rename target) wins over the legacy XRAY_RESOLVER
+// when both are set.
+func TestLoadConfig_EgressResolverPrefersNewKnob(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/c")
+	t.Setenv("DNS_KEY", "/k")
+	t.Setenv("XRAY_RESOLVER", "1.1.1.1")
+	t.Setenv("DNS_EGRESS_RESOLVER", "8.8.8.8")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.XrayResolver != "8.8.8.8" {
+		t.Fatalf("XrayResolver = %q, want DNS_EGRESS_RESOLVER (8.8.8.8) to win over XRAY_RESOLVER", cfg.XrayResolver)
+	}
+}
+
+// TestLoadConfig_EgressResolverFallsBackToXrayResolver verifies back-compat:
+// an upgraded box's dns.env may still only have XRAY_RESOLVER (pre-rename);
+// LoadConfig must keep honoring it when DNS_EGRESS_RESOLVER is unset.
+func TestLoadConfig_EgressResolverFallsBackToXrayResolver(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/c")
+	t.Setenv("DNS_KEY", "/k")
+	t.Setenv("XRAY_RESOLVER", "1.1.1.1")
+	// DNS_EGRESS_RESOLVER intentionally left unset.
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.XrayResolver != "1.1.1.1" {
+		t.Fatalf("XrayResolver = %q, want back-compat fallback to XRAY_RESOLVER (1.1.1.1)", cfg.XrayResolver)
+	}
+}
+
+// TestLoadConfig_ConsoleLoopback443 verifies the control-plane API listener's
+// default moved from the xray-era 127.0.0.1:18443 to loopback :443 (the
+// mihomo SNI split now redirects panel traffic straight to :443 -- see the
+// SP-1 mihomo migration plan).
+func TestLoadConfig_ConsoleLoopback443(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_GATEWAY_IP", "203.0.113.1")
+	t.Setenv("DNS_CERT", "/x/c")
+	t.Setenv("DNS_KEY", "/x/k")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ListenAPI != "127.0.0.1:443" {
+		t.Fatalf("ListenAPI=%q want 127.0.0.1:443", cfg.ListenAPI)
+	}
+}
+
+// TestLoadConfig_MihomoKnobs verifies the mihomo-migration knobs added in
+// Task 6: base/console/zash domains, the loopback mihomo controller address +
+// secret, and the panel allowlist file -- all resolved via the standard
+// envOr-default pattern.
+func TestLoadConfig_MihomoKnobs(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		clearAllDNSEnv(t)
+		t.Setenv("DNS_CERT", "/c")
+		t.Setenv("DNS_KEY", "/k")
+
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.BaseDomain != "" {
+			t.Errorf("BaseDomain default = %q, want empty", cfg.BaseDomain)
+		}
+		if cfg.ConsoleDomain != "" {
+			t.Errorf("ConsoleDomain default = %q, want empty", cfg.ConsoleDomain)
+		}
+		if cfg.ZashDomain != "" {
+			t.Errorf("ZashDomain default = %q, want empty", cfg.ZashDomain)
+		}
+		if cfg.ProfileDomain != "" {
+			t.Errorf("ProfileDomain default = %q, want empty", cfg.ProfileDomain)
+		}
+		if cfg.MihomoController != "127.0.0.1:9090" {
+			t.Errorf("MihomoController default = %q, want 127.0.0.1:9090", cfg.MihomoController)
+		}
+		if cfg.MihomoSecret != "" {
+			t.Errorf("MihomoSecret default = %q, want empty", cfg.MihomoSecret)
+		}
+		if cfg.WhitelistFile != "/etc/5gpn/mihomo/whitelist.txt" {
+			t.Errorf("WhitelistFile default = %q, want /etc/5gpn/mihomo/whitelist.txt", cfg.WhitelistFile)
+		}
+	})
+
+	t.Run("overrides", func(t *testing.T) {
+		clearAllDNSEnv(t)
+		t.Setenv("DNS_CERT", "/c")
+		t.Setenv("DNS_KEY", "/k")
+		t.Setenv("DNS_BASE_DOMAIN", "5gpn.example.com")
+		t.Setenv("DNS_CONSOLE_DOMAIN", "console.5gpn.example.com")
+		t.Setenv("DNS_ZASH_DOMAIN", "zash.5gpn.example.com")
+		t.Setenv("DNS_PROFILE_DOMAIN", "profiles.5gpn.example.com")
+		t.Setenv("DNS_MIHOMO_CONTROLLER", "127.0.0.1:9999")
+		t.Setenv("DNS_MIHOMO_SECRET", "s3cr3t")
+		t.Setenv("DNS_WHITELIST_FILE", "/opt/5gpn/whitelist.txt")
+
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.BaseDomain != "5gpn.example.com" {
+			t.Errorf("BaseDomain = %q, want 5gpn.example.com", cfg.BaseDomain)
+		}
+		if cfg.ConsoleDomain != "console.5gpn.example.com" {
+			t.Errorf("ConsoleDomain = %q, want console.5gpn.example.com", cfg.ConsoleDomain)
+		}
+		if cfg.ZashDomain != "zash.5gpn.example.com" {
+			t.Errorf("ZashDomain = %q, want zash.5gpn.example.com", cfg.ZashDomain)
+		}
+		if cfg.ProfileDomain != "profiles.5gpn.example.com" {
+			t.Errorf("ProfileDomain = %q, want profiles.5gpn.example.com", cfg.ProfileDomain)
+		}
+		if cfg.MihomoController != "127.0.0.1:9999" {
+			t.Errorf("MihomoController = %q, want 127.0.0.1:9999", cfg.MihomoController)
+		}
+		if cfg.MihomoSecret != "s3cr3t" {
+			t.Errorf("MihomoSecret = %q, want s3cr3t", cfg.MihomoSecret)
+		}
+		if cfg.WhitelistFile != "/opt/5gpn/whitelist.txt" {
+			t.Errorf("WhitelistFile = %q, want /opt/5gpn/whitelist.txt", cfg.WhitelistFile)
+		}
+	})
+
+	t.Run("profile domain derives from base", func(t *testing.T) {
+		clearAllDNSEnv(t)
+		t.Setenv("DNS_CERT", "/c")
+		t.Setenv("DNS_KEY", "/k")
+		t.Setenv("DNS_BASE_DOMAIN", "5gpn.example.com.")
+
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.ProfileDomain != "profile.5gpn.example.com" {
+			t.Errorf("ProfileDomain = %q, want derived profile.5gpn.example.com", cfg.ProfileDomain)
+		}
+	})
+}
+
+func TestLoadConfigRejectsOutOfRangeUpstreamPorts(t *testing.T) {
+	for _, tc := range []struct {
+		key, value string
+	}{
+		{"DNS_CHINA", "223.5.5.5:0"},
+		{"DNS_TRUST", "1.1.1.1:99999"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			clearAllDNSEnv(t)
+			t.Setenv("DNS_CERT", "/c")
+			t.Setenv("DNS_KEY", "/k")
+			t.Setenv(tc.key, tc.value)
+			if _, err := LoadConfig(); !errors.Is(err, ErrInvalidUpstream) {
+				t.Fatalf("LoadConfig error = %v, want ErrInvalidUpstream", err)
+			}
+		})
+	}
+}
+
+// UP-4 (2026-07-15 policy/mihomo decoupling): the structured egress model's
+// file knobs (DNS_EGRESS_MODEL/DNS_EGRESS_NODES -> Config.EgressFile/
+// EgressNodesFile) were REMOVED along with egress.go/api_egress.go -- only
+// the mihomo raw-config editor's file knob remains, resolved via the
+// standard envOr-default pattern.
+func TestLoadConfig_MihomoConfigFileKnob(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		clearAllDNSEnv(t)
+		t.Setenv("DNS_CERT", "/c")
+		t.Setenv("DNS_KEY", "/k")
+
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.MihomoConfigFile != "/etc/5gpn/mihomo/config.yaml" {
+			t.Errorf("MihomoConfigFile default = %q, want /etc/5gpn/mihomo/config.yaml", cfg.MihomoConfigFile)
+		}
+	})
+
+	t.Run("override", func(t *testing.T) {
+		clearAllDNSEnv(t)
+		t.Setenv("DNS_CERT", "/c")
+		t.Setenv("DNS_KEY", "/k")
+		t.Setenv("DNS_MIHOMO_CONFIG", "/opt/5gpn/mihomo/config.yaml")
+
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.MihomoConfigFile != "/opt/5gpn/mihomo/config.yaml" {
+			t.Errorf("MihomoConfigFile = %q, want /opt/5gpn/mihomo/config.yaml", cfg.MihomoConfigFile)
+		}
+	})
+}
+
+// SP-3 Task A1: the zashboard panel's dir/listen knobs plus the
+// ZashCert/Key -> WebCert/Key -> DoT-cert fallback chain, resolved via the
+// standard envOr-default pattern.
+func TestLoadConfig_ZashDefaults(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		clearAllDNSEnv(t)
+		t.Setenv("DNS_CERT", "/c")
+		t.Setenv("DNS_KEY", "/k")
+
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.ZashDir != "/opt/5gpn/zash" {
+			t.Errorf("ZashDir default = %q, want /opt/5gpn/zash", cfg.ZashDir)
+		}
+		if cfg.ZashListen != "127.0.0.2:443" {
+			t.Errorf("ZashListen default = %q, want 127.0.0.2:443", cfg.ZashListen)
+		}
+		// Neither DNS_WEB_CERT/KEY nor DNS_ZASH_CERT/KEY are set, so the zash
+		// cert falls all the way back to the DoT cert.
+		if cfg.ZashCertFile != cfg.CertFile || cfg.ZashKeyFile != cfg.KeyFile {
+			t.Errorf("ZashCertFile/KeyFile = %q/%q, want fallback to DoT cert %q/%q", cfg.ZashCertFile, cfg.ZashKeyFile, cfg.CertFile, cfg.KeyFile)
+		}
+	})
+
+	t.Run("overrides", func(t *testing.T) {
+		clearAllDNSEnv(t)
+		t.Setenv("DNS_CERT", "/c")
+		t.Setenv("DNS_KEY", "/k")
+		t.Setenv("DNS_ZASH_DIR", "/opt/5gpn/custom-zash")
+		t.Setenv("DNS_ZASH_LISTEN", "127.0.0.2:9443")
+
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.ZashDir != "/opt/5gpn/custom-zash" {
+			t.Errorf("ZashDir = %q, want /opt/5gpn/custom-zash", cfg.ZashDir)
+		}
+		if cfg.ZashListen != "127.0.0.2:9443" {
+			t.Errorf("ZashListen = %q, want 127.0.0.2:9443", cfg.ZashListen)
+		}
+	})
+}
+
+// TestLoadConfig_ZashCertFallback exercises the middle of the chain (zash
+// falls back to the web cert when web is set but zash isn't) and confirms an
+// explicit DNS_ZASH_CERT/KEY overrides that fallback.
+func TestLoadConfig_ZashCertFallback(t *testing.T) {
+	t.Run("falls back to web cert when zash unset", func(t *testing.T) {
+		clearAllDNSEnv(t)
+		t.Setenv("DNS_CERT", "/c")
+		t.Setenv("DNS_KEY", "/k")
+		t.Setenv("DNS_WEB_CERT", "/etc/5gpn/cert/web/fullchain.pem")
+		t.Setenv("DNS_WEB_KEY", "/etc/5gpn/cert/web/privkey.pem")
+
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.ZashCertFile != "/etc/5gpn/cert/web/fullchain.pem" || cfg.ZashKeyFile != "/etc/5gpn/cert/web/privkey.pem" {
+			t.Errorf("ZashCertFile/KeyFile = %q/%q, want fallback to web cert", cfg.ZashCertFile, cfg.ZashKeyFile)
+		}
+	})
+
+	t.Run("explicit zash cert overrides web fallback", func(t *testing.T) {
+		clearAllDNSEnv(t)
+		t.Setenv("DNS_CERT", "/c")
+		t.Setenv("DNS_KEY", "/k")
+		t.Setenv("DNS_WEB_CERT", "/etc/5gpn/cert/web/fullchain.pem")
+		t.Setenv("DNS_WEB_KEY", "/etc/5gpn/cert/web/privkey.pem")
+		t.Setenv("DNS_ZASH_CERT", "/etc/5gpn/cert/zash/fullchain.pem")
+		t.Setenv("DNS_ZASH_KEY", "/etc/5gpn/cert/zash/privkey.pem")
+
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.ZashCertFile != "/etc/5gpn/cert/zash/fullchain.pem" || cfg.ZashKeyFile != "/etc/5gpn/cert/zash/privkey.pem" {
+			t.Errorf("ZashCertFile/KeyFile = %q/%q, want explicit override", cfg.ZashCertFile, cfg.ZashKeyFile)
+		}
+	})
+}
