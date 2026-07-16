@@ -133,6 +133,10 @@ grep -Fq 'DNS_BASE_DOMAIN' "$RENEW" || fail "renew-hook.sh: does not match the l
 grep -Fq '/cert/dot'  "$RENEW" || fail "renew-hook.sh: does not deploy to the dot role dir"
 grep -Fq '/cert/web'  "$RENEW" || fail "renew-hook.sh: does not deploy to the web role dir"
 grep -Fq '/cert/zash' "$RENEW" || fail "renew-hook.sh: does not deploy to the zash role dir"
+grep -Fq 'mihomo reloads the controller certificate files automatically' "$RENEW" \
+    || fail "renew-hook.sh: missing mihomo controller certificate hot-reload contract"
+grep -Eq 'systemctl (restart|reload) mihomo' "$RENEW" \
+    && fail "renew-hook.sh: must not restart/reload mihomo for controller certificate renewal"
 grep -iq 'xray' "$RENEW" && fail "renew-hook.sh: must not reference xray (mihomo is the data plane)"
 
 # ===== gen-ios-profile.sh — unsigned profile fails CLOSED =====

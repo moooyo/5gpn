@@ -1,13 +1,11 @@
 #!/bin/bash
 # Let's Encrypt renewal deploy hook — copy the renewed WILDCARD lineage
-# (*.<DNS_BASE_DOMAIN> + base) to all THREE 5gpn role dirs (/etc/5gpn/cert/dot,
-# /etc/5gpn/cert/web, /etc/5gpn/cert/zash) and reload 5gpn-dns via SIGHUP. Every
-# TLS listener that serves these certs is 5gpn-dns itself (DoT :853 AND the
-# console/zash panel HTTPS terminators), whose certGetter re-reads cert/key
-# lazily on file-mtime change — so NO process restart is needed anywhere. In
-# particular mihomo is a raw L4 SNI/QUIC tunnel forwarder: it terminates NO TLS
-# and holds NO cert, so it is deliberately NEVER touched here (design §4.8 —
-# restarting it would needlessly kill every live forwarded session on renewal).
+# (*.<DNS_BASE_DOMAIN> + base) to the three 5gpn role dirs
+# (/etc/5gpn/cert/dot, /etc/5gpn/cert/web, /etc/5gpn/cert/zash). The zash role
+# is shared by the zashboard panel and the mihomo loopback external-controller.
+# 5gpn-dns serves the TLS listeners and reloads its own cert cache via SIGHUP;
+# mihomo reloads the controller certificate files automatically, so the renewed
+# zash copy becomes active without a mihomo restart or reload.
 #
 # ONE wildcard lineage now covers ALL THREE service subdomains (console/zash/
 # dot); the lineage being renewed is matched against dns.env's DNS_BASE_DOMAIN
@@ -74,19 +72,17 @@ else
 fi
 
 # SIGHUP reloads the rule sets; the redeployed cert is loaded lazily on the next
-# TLS handshake (certGetter mtime check). No restart — zero interruption to
-# in-flight DoT connections.
+# TLS handshake (certGetter mtime check), so the dot/web/zash copies take effect
+# without a daemon restart.
 if systemctl is-active --quiet 5gpn-dns; then
     systemctl reload 5gpn-dns
 fi
 ok "5gpn-dns reloaded (SIGHUP; cert applies on next handshake)"
 
-# NOTE: mihomo is deliberately NOT restarted here. It is a raw L4 tunnel
-# forwarder that terminates no TLS and holds no cert — the console/zash panels'
-# TLS is served by 5gpn-dns's mtime-hot-reloading certGetter, already covered by
-# the SIGHUP above. Restarting mihomo would kill every live forwarded TLS/QUIC
-# session on each renewal for nothing (design §4.8: "mihomo is never stopped for
-# renewal").
+# NOTE: mihomo is deliberately NOT restarted or reloaded here. It remains the
+# raw L4 forwarder for client traffic, while the loopback external-controller
+# uses the shared zash role certificate. Renewal only needs the file copies
+# above; restarting mihomo would add avoidable churn for live forwarded sessions.
 
 # Re-sign the iOS .mobileconfig with the freshly-renewed DoT cert. The profile is
 # S/MIME-signed at generation time with the THEN-current cert (gen-ios-profile.sh);

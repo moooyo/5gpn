@@ -1,5 +1,5 @@
 [Unit]
-Description=5gpn mihomo (sniproxy: SNI/QUIC forward + egress)
+Description=5gpn mihomo (TLS external-controller + SNI/QUIC forward + egress)
 After=network-online.target
 Wants=network-online.target
 
@@ -10,8 +10,9 @@ Restart=on-failure
 RestartSec=5
 User=root
 LimitNOFILE=65535
-# Sandbox: leaf proxy — binds 80/443 tcp + 443 udp + loopback external-controller.
-# mihomo dials both IPv4 and IPv6; AF_NETLINK is REQUIRED — its UDP/QUIC DIRECT
+# Sandbox: leaf proxy — binds 80/443 tcp + 443 udp + loopback TLS external-controller
+# on the shared zash role certificate. mihomo dials both IPv4 and IPv6;
+# AF_NETLINK is REQUIRED — its UDP/QUIC DIRECT
 # dial path does a route-table lookup (route ip+net: netlinkrib) that fatals the
 # forward with "address family not supported by protocol" without it (confirmed
 # on test-env 2026-07-14: QUIC/HTTP3 forwarding fails without AF_NETLINK; TCP is
@@ -26,7 +27,8 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
-# mihomo writes provider caches + reads whitelist.txt/config.yaml under its dir.
+# mihomo writes provider caches + reads whitelist.txt/config.yaml under its dir;
+# root already reads the zash controller cert under ProtectSystem=strict.
 ReadWritePaths=/etc/5gpn/mihomo
 
 [Install]

@@ -62,6 +62,7 @@
   - **HTTPS REST API + React Web 控制台 + iOS 描述文件**（同一回环 `:443` 监听，经 mihomo `:443` 的 SNI 分流对外暴露）。API 需 bearer token；来源 IP 先过 mihomo 的 `whitelist.txt` 面板白名单（TUI 管理），未放行的来源直接被 mihomo `REJECT-DROP`，连接根本到不了控制台监听端口。
   - **zashboard 面板**：同样经 mihomo SNI 分流 + 白名单暴露到本机另一回环端口。
   - **进程内 Telegram bot**（`github.com/go-telegram/bot`，管理员门控，直接调 `Controller`、不走 HTTP/token）。
+  - **Mihomo controller TLS**: the zash wildcard certificate role is shared by the zashboard panel and the mihomo controller. `DNS_MIHOMO_CONTROLLER` remains the loopback dial target; verified controller clients use `DNS_ZASH_DOMAIN` for TLS identity and trust `DNS_ZASH_CERT`. Ordinary reinstall/change-* preserve an existing operator-owned mihomo config byte-for-byte and do not migrate it; older installs need `DNS_ZASH_DOMAIN` plus either `mihomo-reset` or a manual TLS-only edit before verified controller clients can connect, otherwise they fail closed.
 - **出口由 mihomo 原生配置拥有**：被代理流量经 mihomo 的 `tunnel` 监听 + 内置嗅探器透明转发（不解密 TLS）；完整 `/etc/5gpn/mihomo/config.yaml` 由运维者管理，默认 `Proxies` 组只有 `DIRECT`，也可加入 mihomo 支持的应用层节点/组。DNS 策略只决定“是否进入网关”，绝不生成 mihomo 出口。仍禁止 TUN/TProxy、WireGuard、fwmark、策略路由表或把本项目变成客户端默认路由器。
 - **无宿主防火墙**：项目**不再管理宿主 nftables 防火墙**（`setup-firewall.sh` 已删除）。若需网络层过滤，用你的云安全组；控制台/zashboard 面板的访问控制改由 mihomo 的源 IP 白名单（`whitelist.txt`）承担（见上）。
 - **运维友好**：证书按文件 mtime 热重载（续期后下次 TLS 握手自动加载，无需重启；`kill -HUP` 只重载规则、与证书无关）；统计持久化存活重启；systemd 硬化沙箱，bot 特权操作经 `systemd-run`/`systemctl` 委派而不削弱沙箱。
@@ -99,7 +100,7 @@ sudo bash install.sh
 ```
 
 - **配置只有一个文件**：`/etc/5gpn/dns.env` 是唯一真源。每个开关按 `环境变量 > dns.env 现值 > 默认` 解析，然后写回 `dns.env`；裸重跑沿用其中的值。没有一堆 `.xxx` 状态文件。
-- **重跑刷新程序、保留运维配置**：每次运行安装脚本都会刷新 systemd 单元、`/opt/5gpn` 运行目录以及 pin 版本的 5gpn-dns/mihomo/Web 产物，避免二进制与模板错配；`/etc/5gpn` 和 `/etc/letsencrypt` 持久保留。已有且通过 `mihomo -t` 的完整 mihomo 配置会逐字节保留，普通安装和 `change-*` 不会用模板覆盖；只有显式 `mihomo-reset` 才会“临时候选 → 校验 → 备份 → 原子替换”。下载或校验失败会中止且不预删工作二进制。
+- **重跑刷新程序、保留运维配置**：每次运行安装脚本都会刷新 systemd 单元、`/opt/5gpn` 运行目录以及 pin 版本的 5gpn-dns/mihomo/Web 产物，避免二进制与模板错配；`/etc/5gpn` 和 `/etc/letsencrypt` 持久保留。已有且通过 `mihomo -t` 的完整 mihomo 配置会逐字节保留，普通安装和 `change-*` 不会用模板覆盖，也不会自动迁移到 TLS-only controller 模式；老安装要先补 `DNS_ZASH_DOMAIN`，再显式跑 `mihomo-reset` 或手工改成 TLS-only，verified Controller clients 才会放行。下载或校验失败会中止且不预删工作二进制。
 - **一个主域名、一张通配符证书、三个证书角色目录**：`BASE_DOMAIN` 只有**一条** certbot lineage、**一张** `*.<base>` 通配符证书，部署到 `/etc/5gpn/cert/{dot,web,zash}`（profile 与 console 共用 web 监听/证书）。菜单里 `5gpn change-base-domain <d>` 一次性重签通配符证书并重新派生四个子域名。
   - `CERT_MODE=cloudflare`（默认）— 真 Let's Encrypt 通配符证书，走 **DNS-01**（Cloudflare API 写 `_acme-challenge` TXT 记录），**不占用 :80、不需要停 mihomo**，也不需要 `console.<base>`/`zash.<base>`/`dot.<base>` 有公网 A 记录；自动续签（每日 `5gpn-certbot-renew.timer`）。**首次签发时安装器自动提示输入** Cloudflare API token（作用域：Zone:DNS:Edit）；token 存于 `/etc/5gpn/acme/cloudflare.ini`（目录 0700、文件 0600，仅 root 可读），**不**写入 `dns.env` 也不记日志。无人值守/CI 安装用 `CF_API_TOKEN=<token>` 环境变量预置（与 `CLOUDFLARE_API_TOKEN` 等价）；已有有效 token 的复用安装不会再次提示。也可在装完后随时用 `5gpn --set-cf-token` 更新。
   - `CERT_MODE=debug`（或 `DEBUG=1`）— 自签通配符证书，测试/开发用，无 certbot、无 DNS-01、无续签；客户端会提示不受信任。**除 debug 外，安装一定需要主域名。**
@@ -120,7 +121,7 @@ sudo bash install.sh
 
 ## 🖥 Web 控制台
 
-- **地址**：`https://console.<BASE_DOMAIN>/`（安装结束打印一次）。浏览器走标准 443，由 mihomo 的 SNI 分流转到本机回环 `:443`——前提是浏览器所在源 IP 在 `whitelist.txt` 面板白名单里（`5gpn --add-allow <cidr>` 添加），否则连接被 mihomo `REJECT-DROP`，根本到不了控制台。
+- **Address**: `https://console.<BASE_DOMAIN>/` (printed once at install completion). Browsers go through standard 443 and the mihomo SNI split to the local loopback `:443`; the same zash role wildcard is used for verified controller traffic, and `DNS_MIHOMO_CONTROLLER` remains the loopback dial target. The browser source IP must still be in mihomo's `whitelist.txt` allowlist (`5gpn --add-allow <cidr>`), otherwise mihomo `REJECT-DROP`s the connection before it reaches the console listener.
 - **登录**：用 `DNS_API_TOKEN` 登录（浏览器 localStorage 保存）。找回：`grep DNS_API_TOKEN /etc/5gpn/dns.env`。
 - **访问控制**：源 IP 白名单在 mihomo 层前置拦截（见上，取代了旧版的进程内 token 失败封锁）；token 本身仍是 bearer 鉴权。
 - **功能**：Dashboard、解析日志、解析测试、有序统一策略规则与 fallback、上游/ECS/Telegram 设置、mihomo 健康与 ticket 化实时日志，以及经 `mihomo -t` 校验的完整 mihomo 配置编辑/显式重置。

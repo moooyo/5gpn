@@ -120,6 +120,9 @@ curl --resolve "$PROFILE:443:127.0.0.1" -fsSI \
 
 ## 6. Mihomo controller boundaries
 
+- [ ] `DNS_MIHOMO_CONTROLLER` completes a TLS handshake for `DNS_ZASH_DOMAIN`
+  with the zash role certificate; plaintext HTTP or a mismatched SNI fails
+  closed.
 - [ ] `GET /api/mihomo/health` succeeds only with the console bearer.
 - [ ] `POST /api/mihomo/log-ticket` returns a short-lived opaque ticket.
 - [ ] That ticket upgrades `/proxy/logs` exactly once; reuse, expiry, missing
@@ -149,10 +152,11 @@ curl --resolve "$PROFILE:443:127.0.0.1" -fsSI \
 
 - [ ] Editing only a harmless mihomo field runs validation, atomically replaces
   the file, hot-applies it, and retains mode `0600` in a `0700` directory.
-- [ ] Removing any required infrastructure invariant or changing the controller
-  secret through the raw editor returns 400 and leaves disk/runtime unchanged.
-- [ ] The dedicated secret-rotation workflow updates daemon and mihomo together;
-  neither side is left locked out.
+- [ ] Raw config edits that remove `external-controller-tls`, change the zash
+  certificate paths, or omit `DNS_ZASH_DOMAIN` return 400 and leave
+  disk/runtime unchanged.
+- [ ] The dedicated secret-rotation workflow updates the daemon and mihomo
+  together; neither side is left locked out.
 - [ ] Two concurrent policy Apply calls serialize or return a clear conflict.
   Readers never observe a mixture of generations, and a failed apply leaves the
   prior generation active.
@@ -162,7 +166,10 @@ curl --resolve "$PROFILE:443:127.0.0.1" -fsSI \
 ## 9. Install, upgrade, and uninstall safety
 
 - [ ] A normal reinstall and each ordinary `change-*` operation leave the
-  operator mihomo config byte-for-byte identical and still validated.
+  operator mihomo config byte-for-byte identical and still validated; they do
+  not migrate an older installation to TLS-only controller mode. Older boxes
+  need `DNS_ZASH_DOMAIN` configured plus either an explicit `mihomo-reset` or a
+  manual TLS-only edit before verified Controller clients connect.
 - [ ] Explicit mihomo reset validates a candidate first, creates a backup, and
   atomically installs the seed. A failed candidate leaves the original intact.
 - [ ] A deliberately failed service start causes installer failure; it never
@@ -193,6 +200,9 @@ curl --resolve "$PROFILE:443:127.0.0.1" -fsSI \
 - [ ] `certbot renew --dry-run` succeeds; the deploy hook updates role copies and
   regenerates/signs the iOS profile.
 - [ ] New TLS handshakes observe renewed files by mtime without daemon restart.
+  The zash wildcard role is shared by the zashboard panel and the mihomo
+  controller, so a renewed controller cert becomes visible on the next TLS
+  handshake without restarting or reloading mihomo.
 - [ ] A temporarily missing/broken cert is visible in status/journal; restoring
   valid files allows the TLS listeners to recover without destroying DNS state.
 
