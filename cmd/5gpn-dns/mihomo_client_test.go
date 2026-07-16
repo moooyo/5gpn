@@ -64,9 +64,9 @@ func TestMihomoClient_PutConfigsAuth(t *testing.T) {
 }
 
 // TestMihomoClient_PutConfigs_NoSecret asserts the Authorization header is
-// omitted entirely when the client is constructed with an empty secret — a
-// mihomo controller with no `secret:` configured rejects any Authorization
-// header at all, so we must not send `Bearer `.
+// omitted entirely when the client is constructed with an empty secret.
+// A mihomo controller with no configured secret rejects any Authorization
+// header, so the client must leave the header out completely.
 func TestMihomoClient_PutConfigs_NoSecret(t *testing.T) {
 	authSet := false
 	srv := newMihomoTLSTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

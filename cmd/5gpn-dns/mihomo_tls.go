@@ -48,13 +48,13 @@ func newMihomoTransport(controller, serverName, certFile string) (*http.Transpor
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	return &http.Transport{
 		Proxy:               nil,
-		ForceAttemptHTTP2:   true,
 		TLSHandshakeTimeout: 10 * time.Second,
 		IdleConnTimeout:     90 * time.Second,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			ServerName: serverName,
 			RootCAs:    roots,
+			NextProtos: []string{"http/1.1"},
 		},
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return dialer.DialContext(ctx, network, controller)

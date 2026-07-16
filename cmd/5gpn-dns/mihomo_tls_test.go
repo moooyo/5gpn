@@ -36,6 +36,7 @@ func newMihomoTLSTestServerWithCert(t *testing.T, certFile, keyFile string, hand
 	server.TLS = &tls.Config{
 		Certificates: []tls.Certificate{pair},
 		MinVersion:   tls.VersionTLS12,
+		NextProtos:   []string{"h2", "http/1.1"},
 	}
 	server.StartTLS()
 	t.Cleanup(server.Close)

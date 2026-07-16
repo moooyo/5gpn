@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"crypto/tls"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -140,45 +139,52 @@ func TestMihomoProxy_PassThroughAddsNoneWhenAbsent(t *testing.T) {
 // TestMihomoProxy_WebSocketUpgradePassesThrough proves the proxy forwards a
 // WebSocket upgrade handshake rather than swallowing it.
 func TestMihomoProxy_WebSocketUpgradePassesThrough(t *testing.T) {
-	var gotConn, gotUpgrade, gotAuth string
+	var gotConn, gotUpgrade, gotAuth, gotRESTProto, gotWSProto string
 
-	certFile, keyFile := generateSelfSignedCert(t, t.TempDir())
-	pair, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		t.Fatalf("load test certificate: %v", err)
-	}
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	tlsLn := tls.NewListener(ln, &tls.Config{
-		Certificates: []tls.Certificate{pair},
-		MinVersion:   tls.VersionTLS12,
-	})
-	defer tlsLn.Close()
-
-	go func() {
-		conn, err := tlsLn.Accept()
-		if err != nil {
-			return
+	upstream := newMihomoTLSTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version":
+			gotRESTProto = r.Proto
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"version":"meta"}`))
+		case "/ws":
+			gotWSProto = r.Proto
+			gotConn = r.Header.Get("Connection")
+			gotUpgrade = r.Header.Get("Upgrade")
+			gotAuth = r.Header.Get("Authorization")
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				http.Error(w, "upstream missing hijacker", http.StatusInternalServerError)
+				return
+			}
+			conn, bufrw, err := hj.Hijack()
+			if err != nil {
+				http.Error(w, "hijack failed", http.StatusInternalServerError)
+				return
+			}
+			defer conn.Close()
+			_, _ = bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
+			_ = bufrw.Flush()
+		default:
+			http.NotFound(w, r)
 		}
-		defer conn.Close()
-		req, err := http.ReadRequest(bufio.NewReader(conn))
-		if err != nil {
-			return
-		}
-		gotConn = req.Header.Get("Connection")
-		gotUpgrade = req.Header.Get("Upgrade")
-		gotAuth = req.Header.Get("Authorization")
-		_, _ = conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"))
-	}()
+	}))
 
-	transport, err := newMihomoTransport(ln.Addr().String(), "test.local", certFile)
+	transport, err := newMihomoTransport(upstream.controller, upstream.serverName, upstream.certFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := newMihomoProxy("test.local", "s3cr3t", "/proxy", true, transport)
+	restReq, err := http.NewRequest(http.MethodGet, "https://"+upstream.serverName+"/version", nil)
+	if err != nil {
+		t.Fatalf("new rest request: %v", err)
+	}
+	restResp, err := (&http.Client{Transport: transport}).Do(restReq)
+	if err != nil {
+		t.Fatalf("prime shared transport: %v", err)
+	}
+	_ = restResp.Body.Close()
+
+	h := newMihomoProxy(upstream.serverName, "s3cr3t", "/proxy", true, transport)
 	proxySrv := httptest.NewServer(h)
 	defer proxySrv.Close()
 
@@ -209,6 +215,12 @@ func TestMihomoProxy_WebSocketUpgradePassesThrough(t *testing.T) {
 	}
 	if got := resp.Header.Get("Upgrade"); got != "websocket" {
 		t.Errorf("response Upgrade header = %q, want websocket", got)
+	}
+	if gotRESTProto != "HTTP/1.1" {
+		t.Errorf("shared transport REST protocol = %q, want HTTP/1.1 only", gotRESTProto)
+	}
+	if gotWSProto != "HTTP/1.1" {
+		t.Errorf("upstream websocket protocol = %q, want HTTP/1.1", gotWSProto)
 	}
 	if gotConn != "Upgrade" || gotUpgrade != "websocket" {
 		t.Errorf("upstream saw Connection=%q Upgrade=%q, want Upgrade/websocket (headers swallowed by proxy)", gotConn, gotUpgrade)
