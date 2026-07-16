@@ -245,7 +245,10 @@ canonical_dir_path() {
 
 write_ownership_marker() {
     local dir="$1" name="$2" value="$3" tmp
-    install -d -m 0755 -- "$dir" || return 1
+    if [[ ! -e "$dir" ]]; then
+        install -d -m 0755 -- "$dir" || return 1
+    fi
+    [[ -d "$dir" && ! -L "$dir" ]] || return 1
     tmp="$(mktemp "${dir}/.${name}.XXXXXX")" || return 1
     printf '%s\n' "$value" > "$tmp" || { rm -f -- "$tmp"; return 1; }
     chmod 0644 "$tmp" || { rm -f -- "$tmp"; return 1; }
@@ -337,7 +340,7 @@ safe_zashboard_path() {
     p="$(canonical_dir_path "$DNS_ZASH_DIR")" \
         || { err "Could not canonicalize DNS_ZASH_DIR='$DNS_ZASH_DIR'."; return 1; }
     case "$p" in
-        /|/bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/home|/home/*|/lib|/lib/*|/lib64|/lib64/*|/opt|/proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/srv|/sys|/sys/*|/tmp|/tmp/*|/usr|/usr/*|/var|/var/*|"$BASE_DIR"|"$CONF_DIR")
+        /|/bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/home|/home/*|/lib|/lib/*|/lib64|/lib64/*|/opt|/private/etc|/private/etc/*|/private/tmp|/private/tmp/*|/private/var|/private/var/*|/proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/srv|/sys|/sys/*|/tmp|/tmp/*|/usr|/usr/*|/var|/var/*|"$BASE_DIR"|"$CONF_DIR")
             err "Refusing unsafe DNS_ZASH_DIR: $p"; return 1 ;;
     esac
     printf '%s\n' "$p"
@@ -394,7 +397,7 @@ safe_web_path() {
     [[ -n "$DNS_WEB_DIR" && "$DNS_WEB_DIR" != *$'\n'* && "$DNS_WEB_DIR" != *$'\r'* ]] || return 1
     p="$(canonical_dir_path "$DNS_WEB_DIR")" || return 1
     case "$p" in
-        /|/bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/home|/home/*|/lib|/lib/*|/lib64|/lib64/*|/opt|/proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/srv|/sys|/sys/*|/tmp|/tmp/*|/usr|/usr/*|/var|/var/*|"$BASE_DIR"|"$CONF_DIR")
+        /|/bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/home|/home/*|/lib|/lib/*|/lib64|/lib64/*|/opt|/private/etc|/private/etc/*|/private/tmp|/private/tmp/*|/private/var|/private/var/*|/proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/srv|/sys|/sys/*|/tmp|/tmp/*|/usr|/usr/*|/var|/var/*|"$BASE_DIR"|"$CONF_DIR")
             err "Refusing unsafe DNS_WEB_DIR: $p"; return 1 ;;
     esac
     printf '%s\n' "$p"
@@ -633,7 +636,7 @@ get_public_ip() {
                  || curl -4 -s --max-time 10 https://icanhazip.com 2>/dev/null || echo "")
     fi
     if [[ -z "$PUBLIC_IP" ]]; then
-        err "Failed to detect public IPv4. Set PUBLIC_IP=<ip> and retry."; exit 1
+        err "Failed to detect public IPv4. Enter it through the attached-terminal TUI."; exit 1
     fi
     info "Public IPv4: $PUBLIC_IP"
 }
@@ -1958,8 +1961,11 @@ write_cert_provenance() {
 
 renew_hook_owned() {
     local hook="/etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh"
-    [[ -f "$hook" && ! -L "$hook" ]] \
-        && grep -qF 'renewed 5gpn WILDCARD lineage' "$hook" 2>/dev/null
+    [[ -f "$hook" && ! -L "$hook" ]] || return 1
+    grep -qF 'renewed 5gpn WILDCARD lineage' "$hook" 2>/dev/null \
+        || { grep -qF "Let's Encrypt renewal deploy hook" "$hook" 2>/dev/null \
+             && grep -qF 'DNS_BASE_DOMAIN' "$hook" 2>/dev/null \
+             && grep -qF '/etc/5gpn/cert' "$hook" 2>/dev/null; }
 }
 
 remove_owned_renew_hook() {
@@ -3533,7 +3539,7 @@ Domains + certificates: ONE base (apex) domain, ONE mandatory WILDCARD Let's Enc
                                        zash.<base>     zashboard panel
                                        dot.<base>      DoT :853 (Private DNS / iOS)
                                      Values are collected by the TUI.
-  CERT_MODE=cloudflare (default)     mandatory WILDCARD *.<base> cert via Let's
+  cloudflare mode (default)          mandatory WILDCARD *.<base> cert via Let's
                      Encrypt DNS-01 through the Cloudflare API (no :80, no public
                      A-record needed for certificate issuance); auto-renews unattended
                      via the daily 5gpn-certbot-renew.timer. Only an actual
@@ -3597,13 +3603,13 @@ main() {
         # leading 'dot.' to recover the base; --change-domain is the legacy
         # single-domain alias.
         --change-web-domain|change-web-domain)
-            warn "'$1' is deprecated; use 'change-base-domain <base>' (one wildcard covers console./zash./dot.)."
+            warn "'$1' is deprecated; use '5gpn configure'."
             change_base_domain "${2:-}" ;;
         --change-domain|change-domain)
-            warn "'$1' is deprecated; use 'change-base-domain <base>'."
+            warn "'$1' is deprecated; use '5gpn configure'."
             change_base_domain "${2:-}" ;;
         --change-dot-domain|change-dot-domain)
-            warn "'$1' is deprecated: the DoT name is now dot.<base>. Use 'change-base-domain <base>'."
+            warn "'$1' is deprecated; use '5gpn configure'."
             change_base_domain "${2#dot.}" ;;
         --change-public-ip|change-public-ip) change_public_ip "${2:-}" ;;
         --change-gateway|change-gateway) change_gateway "${2:-}" ;;

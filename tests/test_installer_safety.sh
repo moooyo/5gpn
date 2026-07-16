@@ -13,7 +13,7 @@ export INSTALL_SH_LIB_ONLY=1
 # shellcheck source=../install.sh
 source "$INSTALL"
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d "$ROOT/.test-installer-safety.XXXXXX")"
 trap 'rm -rf -- "$TMP"' EXIT
 
 # Fake a host with one assigned non-loopback IPv4 and a matching default route.
