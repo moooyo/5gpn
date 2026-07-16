@@ -3189,11 +3189,15 @@ configure_install_tui() {
         get_public_ip
         detected="$PUBLIC_IP"
     fi
-    while true; do
-        PUBLIC_IP="$(prompt_default '公网 IPv4 Public IPv4' "$detected")"
-        is_valid_ipv4 "$PUBLIC_IP" && break
-        warn "Invalid public IPv4."
-    done
+    if [[ "$advanced" == 1 ]]; then
+        while true; do
+            PUBLIC_IP="$(prompt_default '公网 IPv4 Public IPv4' "$detected")"
+            is_valid_ipv4 "$PUBLIC_IP" && break
+            warn "Invalid public IPv4."
+        done
+    else
+        PUBLIC_IP="$detected"
+    fi
     if [[ "$advanced" == 1 ]]; then
         while true; do
             GATEWAY_IP="$(prompt_default '客户端可达网关 IPv4 Gateway IPv4' "${GATEWAY_IP:-$PUBLIC_IP}")"

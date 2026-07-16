@@ -79,7 +79,7 @@ curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh |
 # 或在 checkout 内：sudo bash install.sh
 ```
 
-> First installation requires the TUI. It collects the certificate mode, base domain, public address, certificate email, and Cloudflare token when selected. The gateway and listener default to `PUBLIC_IP`; `5gpn configure` retains advanced overrides for special network layouts. The egress resolver defaults to `22.22.22.22`, ECS starts disabled for later WebUI configuration, and cache size is selected from the memory profile. Caller environment variables never override configuration; a first install without a TTY fails closed, while reinstall can reuse a valid `dns.env` non-interactively.
+> First installation requires the TUI. It collects the certificate mode, base domain, certificate email, and Cloudflare token when selected. `PUBLIC_IP` is detected automatically; the gateway and listener default to it. `5gpn configure` retains advanced public/gateway/listener overrides for special network layouts. The egress resolver defaults to `22.22.22.22`, ECS starts disabled for later WebUI configuration, and cache size is selected from the memory profile. Caller environment variables never override configuration; a first install without a TTY fails closed, while reinstall can reuse a valid `dns.env` non-interactively.
 
 安装器会先把固定版本的 5gpn-dns、Web、mihomo、zashboard 下载到 staging 并强制校验 SHA-256，再备份当前部署、原子发布并执行 readiness 探针；发布后失败会自动回滚。生产证书可选 Cloudflare DNS-01 或 HTTP-01，debug 模式使用隔离的自签证书。
 

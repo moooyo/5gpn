@@ -46,11 +46,13 @@ printf '%s' "$tui_fn" | grep -Fq 'CHINA_ECS="${CHINA_ECS:-}"' \
     || fail "installer does not default ECS to disabled"
 printf '%s' "$tui_fn" | grep -Fq 'GATEWAY_IP="$PUBLIC_IP"' \
     && printf '%s' "$tui_fn" | grep -Fq 'MIHOMO_LISTEN_IPS="$default_listen"' \
-    || fail "first install does not derive gateway/listener values automatically"
+    && printf '%s' "$tui_fn" | grep -Fq 'PUBLIC_IP="$detected"' \
+    || fail "first install does not derive public/gateway/listener values automatically"
 printf '%s' "$tui_fn" | grep -Fq 'if [[ "$advanced" == 1 ]]' \
+    && printf '%s' "$tui_fn" | grep -Fq '公网 IPv4 Public IPv4' \
     && printf '%s' "$tui_fn" | grep -Fq 'mihomo 本机监听 IPv4' \
     && printf '%s' "$tui_fn" | grep -Fq 'SNI 回源解析器' \
-    || fail "advanced configure TUI lost gateway/listener/resolver overrides"
+    || fail "advanced configure TUI lost public/gateway/listener/resolver overrides"
 printf '%s' "$tui_fn" | grep -Fq "|| true)" \
     || fail "certificate-mode TUI prompt capture is not cancellation-safe under set -e"
 for domain in CONSOLE_DOMAIN ZASH_DOMAIN DOT_DOMAIN; do
