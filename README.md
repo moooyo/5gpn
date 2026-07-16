@@ -121,7 +121,7 @@ sudo bash install.sh
 
 ## 🖥 Web 控制台
 
-- **Address**: `https://console.<BASE_DOMAIN>/` (printed once at install completion). Browsers go through standard 443 and the mihomo SNI split to the local loopback `:443`; the same zash role wildcard is used for verified controller traffic, and `DNS_MIHOMO_CONTROLLER` remains the loopback dial target. The browser source IP must still be in mihomo's `whitelist.txt` allowlist (`5gpn --add-allow <cidr>`), otherwise mihomo `REJECT-DROP`s the connection before it reaches the console listener.
+- **地址**：`https://console.<BASE_DOMAIN>/`（安装结束打印一次）。浏览器走标准 443，由 mihomo 的 SNI 分流转到本机回环 `:443`——前提是浏览器所在源 IP 在 `whitelist.txt` 面板白名单里（`5gpn --add-allow <cidr>` 添加），否则连接被 mihomo `REJECT-DROP`，根本到不了控制台。
 - **登录**：用 `DNS_API_TOKEN` 登录（浏览器 localStorage 保存）。找回：`grep DNS_API_TOKEN /etc/5gpn/dns.env`。
 - **访问控制**：源 IP 白名单在 mihomo 层前置拦截（见上，取代了旧版的进程内 token 失败封锁）；token 本身仍是 bearer 鉴权。
 - **功能**：Dashboard、解析日志、解析测试、有序统一策略规则与 fallback、上游/ECS/Telegram 设置、mihomo 健康与 ticket 化实时日志，以及经 `mihomo -t` 校验的完整 mihomo 配置编辑/显式重置。
