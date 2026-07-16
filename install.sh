@@ -117,14 +117,12 @@ GUM_BIN="${BIN_DIR}/gum"
 _HAVE_GUM=0                              # set by install_gum(); helpers fall back to echo when 0
 export PATH="${BIN_DIR}:${PATH}"
 
-# 5gpn-dns binary + web SPA release tag on moooyo/5gpn. This is the SINGLE
-# default the whole installer resolves against (install_5gpndns / install_web),
-# and it is what quick-install.sh passes through so the config files, the binary,
-# and the SPA all come from the SAME release. The release pipeline STAMPS this
-# exact line to the tag being cut (see .github/workflows/release.yml) so a
-# packaged installer always pulls its OWN release's artifacts — eliminating the
-# release-binary / working-tree-config skew that once broke the :443 webui.
-DNS_VERSION_DEFAULT="0.0.1"
+# 5gpn-dns binary + web SPA release selector on moooyo/5gpn. The source-tree
+# sentinel resolves the latest release once before any artifact is downloaded.
+# The release pipeline STAMPS this exact line to the tag being cut (see
+# .github/workflows/release.yml), so a packaged installer always pulls its OWN
+# release's artifacts and never mixes release binaries with another tag's files.
+DNS_VERSION_DEFAULT="latest"
 
 # ----------------------------------------------------------------------------
 # Pretty output helpers
@@ -813,6 +811,33 @@ release_checksum() {
     awk -v f="$asset" '$2 == f || $2 == "*" f { print tolower($1); exit }' "$sums"
 }
 
+valid_dns_release_tag() {
+    local tag="$1"
+    [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+resolve_dns_release_version() { # optional API URL is an internal test seam
+    local requested="$DNS_VERSION_DEFAULT"
+    local api_url="${1:-https://api.github.com/repos/moooyo/5gpn/releases/latest}"
+    local json tags
+
+    if [[ "$requested" != latest ]]; then
+        valid_dns_release_tag "$requested" \
+            || { err "Installer has an invalid pinned release tag."; return 1; }
+        printf '%s\n' "$requested"
+        return 0
+    fi
+
+    json="$(curl -fsSL "$api_url")" \
+        || { err "Could not resolve the latest 5gpn release."; return 1; }
+    tags="$(printf '%s\n' "$json" | sed -n 's/^.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*$/\1/p')"
+    [[ -n "$tags" && "$tags" != *$'\n'* ]] \
+        || { err "Latest release response has no unique tag."; return 1; }
+    valid_dns_release_tag "$tags" \
+        || { err "Latest release returned an unsafe tag."; return 1; }
+    printf '%s\n' "$tags"
+}
+
 archive_paths_safe() {
     local kind="$1" archive="$2" entry
     if [[ "$kind" == tar ]]; then
@@ -829,9 +854,13 @@ archive_paths_safe() {
 }
 
 stage_artifacts() {
-    local ver="$DNS_VERSION_DEFAULT"
-    local release="https://github.com/moooyo/5gpn/releases/download/${ver}"
-    local dns_asset="5gpn-dns-linux-amd64" web_asset="5gpn-web-${ver}.tar.gz"
+    local ver release
+    local dns_asset web_asset
+    ver="$(resolve_dns_release_version)" || return 1
+    DNS_VERSION_DEFAULT="$ver"
+    release="https://github.com/moooyo/5gpn/releases/download/${ver}"
+    dns_asset="5gpn-dns-linux-amd64"
+    web_asset="5gpn-web-${ver}.tar.gz"
     ARTIFACT_STAGE="$(mktemp -d /var/tmp/5gpn-artifacts.XXXXXX)" \
         || { err "Could not create artifact staging directory."; return 1; }
     chmod 0700 "$ARTIFACT_STAGE"

@@ -16,6 +16,26 @@ source "$INSTALL"
 TMP="$(mktemp -d "$ROOT/.test-installer-safety.XXXXXX")"
 trap 'rm -rf -- "$TMP"' EXIT
 
+# Source checkouts resolve latest once, while release bundles remain pinned to
+# the exact tag stamped by the release workflow.
+latest_json="$TMP/latest-release.json"
+printf '{"tag_name":"9.8.7"}\n' > "$latest_json"
+DNS_VERSION_DEFAULT="latest"
+resolved="$(resolve_dns_release_version "file://$latest_json" 2>/dev/null)"
+if [[ "$resolved" == 9.8.7 ]]; then
+    pass "source installer resolves the latest safe release tag"
+else
+    fail "source installer did not resolve the latest release tag"
+fi
+DNS_VERSION_DEFAULT="9.8.6"
+resolved="$(resolve_dns_release_version "file://$TMP/absent" 2>/dev/null)"
+if [[ "$resolved" == 9.8.6 ]]; then
+    pass "release installer keeps its stamped tag without another lookup"
+else
+    fail "release installer did not keep its stamped tag"
+fi
+DNS_VERSION_DEFAULT="latest"
+
 # Ownership verification must be safe under the installer's set -u mode. Keep
 # the call in a subshell so a nounset regression is reported by this test rather
 # than aborting the whole policy suite without a useful assertion.
