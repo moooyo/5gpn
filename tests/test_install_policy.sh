@@ -249,6 +249,21 @@ printf '%s' "$ect_fn" | grep -Eq 'install -d -m 0700' \
 # ensure_cf_token must be called within install_cert (issuance branch).
 printf '%s' "$ic_fn" | grep -Fq 'ensure_cf_token' \
     || fail "install_cert does not call ensure_cf_token (first issuance hard-aborts without a token)"
+# write_cf_credential is the shared atomic writer for both ensure_cf_token and set_cf_token.
+# It owns CR/LF rejection, atomic write, and temp-file cleanup (findings 3–5).
+grep -Eq '^write_cf_credential\(\)' "$INSTALL" \
+    || fail "no write_cf_credential() (shared CR/LF + atomic-write helper missing)"
+wcf_fn="$(sed -n '/^write_cf_credential()/,/^}/p' "$INSTALL")"
+# CR/LF rejection must be in the shared writer so env-var tokens are covered (finding 3).
+printf '%s' "$wcf_fn" | grep -Fq '$'"'"'\r'"'"'' \
+    || fail "write_cf_credential does not reject CR (env-var token CR/LF path uncovered)"
+printf '%s' "$wcf_fn" | grep -Fq '$'"'"'\n'"'"'' \
+    || fail "write_cf_credential does not reject LF (env-var token CR/LF path uncovered)"
+# Both callers must delegate writes to write_cf_credential (finding 4 — no duplicated logic).
+printf '%s' "$ect_fn" | grep -Fq 'write_cf_credential' \
+    || fail "ensure_cf_token does not call write_cf_credential (write logic duplicated)"
+printf '%s' "$(sed -n '/^set_cf_token()/,/^}/p' "$INSTALL")" | grep -Fq 'write_cf_credential' \
+    || fail "set_cf_token does not call write_cf_credential (write logic duplicated)"
 
 # --- UP-4 Task 8 (2026-07-15 policy/mihomo decoupling): strong zash secret +
 # full-config mihomo seed, no daemon-owned marker regions. ---

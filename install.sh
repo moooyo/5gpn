@@ -1548,14 +1548,16 @@ resolve_china_ecs() {
 #                       via the daily certbot timer (see install_renewal_automation).
 #                       Reuse (a still-valid lineage, or a still-valid preserved
 #                       role-dir copy when the lineage is gone) never needs the
-#                       token; only an actual ISSUANCE does. Set it via
-#                       '5gpn --set-cf-token' (or the manage menu), or manually:
-#                       a scoped Cloudflare API token in
-#                       /etc/5gpn/acme/cloudflare.ini (0600):
-#                         install -d -m 0700 /etc/5gpn/acme
-#                         echo 'dns_cloudflare_api_token = <token>' \
-#                           > /etc/5gpn/acme/cloudflare.ini
-#                         chmod 600 /etc/5gpn/acme/cloudflare.ini
+#                       token; only an actual ISSUANCE does. ensure_cf_token
+#                       collects it automatically with this precedence:
+#                         1. Valid saved /etc/5gpn/acme/cloudflare.ini — reused.
+#                         2. CF_API_TOKEN env var — headless/CI installs; copied
+#                            to cloudflare.ini, NEVER written to dns.env or logs.
+#                         3. CLOUDFLARE_API_TOKEN — alternate headless env var.
+#                         4. Interactive ask_secret on a TTY (guarded || true).
+#                         5. Explicit error — non-interactive with no token source.
+#                       Use '5gpn --set-cf-token' (or the manage menu) to update
+#                       the token at any time.
 #   debug              — a self-signed WILDCARD cert for test/dev boxes with no
 #                       public domain. No certbot, no DNS-01, no renewal.
 #                       iOS/browsers will flag it untrusted; that is the point
@@ -1732,6 +1734,26 @@ has_valid_cf_credential() {
     grep -qE '^dns_cloudflare_api_token[[:space:]]*=[[:space:]]*[^[:space:]]' "$f"
 }
 
+# write_cf_credential validates tok and writes it atomically to
+# ${ACME_DIR}/cloudflare.ini. Shared by ensure_cf_token and set_cf_token so
+# that CR/LF rejection, directory setup, atomic write, and temp-file cleanup
+# live in exactly one place.
+#   - Rejects CR and LF (no multi-line token injection).
+#   - Creates ACME_DIR at 0700.
+#   - Stages to a same-directory temp file (same-fs → atomic rename).
+#   - Removes the temp file explicitly on any publication failure.
+write_cf_credential() {
+    local tok="$1"
+    if [[ "$tok" =~ $'\r' || "$tok" =~ $'\n' ]]; then
+        err "Cloudflare API token must not contain CR or LF."; return 1
+    fi
+    install -d -m 0700 "$ACME_DIR"
+    local tmp; tmp="$(mktemp "${ACME_DIR}/.cloudflare.ini.XXXXXX")"
+    printf 'dns_cloudflare_api_token = %s\n' "$tok" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+    chmod 0600 "$tmp"                                         || { rm -f -- "$tmp"; return 1; }
+    mv -f -- "$tmp" "${ACME_DIR}/cloudflare.ini"              || { rm -f -- "$tmp"; return 1; }
+}
+
 # ensure_cf_token guarantees a valid Cloudflare API token exists in
 # ${ACME_DIR}/cloudflare.ini before certbot runs. Called ONLY in
 # install_cert's actual issuance branch — cert-reuse paths never call it,
@@ -1742,7 +1764,7 @@ has_valid_cf_credential() {
 #   3. CLOUDFLARE_API_TOKEN      — alternate headless env var; same semantics.
 #   4. Interactive ask_secret    — TTY only, guarded with || true under set -e.
 #   5. Explicit error            — non-interactive with no token source.
-# CR and LF are rejected before writing (no multi-line token injection).
+# CR and LF are rejected before writing (delegated to write_cf_credential).
 # The credentials dir is created as 0700; the file is written atomically and
 # chmod'd to 0600.
 ensure_cf_token() {
@@ -1759,20 +1781,12 @@ ensure_cf_token() {
     if [[ -z "$tok" ]]; then
         [[ -t 0 ]] && tok="$(ask_secret 'Cloudflare API token (Zone:DNS:Edit scope for your base zone):' || true)"
     fi
-    # Reject CR/LF — no multi-line token injection.
-    if [[ "$tok" =~ $'\r' || "$tok" =~ $'\n' ]]; then
-        err "Cloudflare API token must not contain CR or LF."; return 1
-    fi
     # 5) Explicit failure — non-interactive with no token source.
     if [[ -z "$tok" ]]; then
         err "No Cloudflare API token. Set CF_API_TOKEN=<token> for a headless install, or run '5gpn --set-cf-token' for an interactive setup."
         return 1
     fi
-    # Atomic write: stage under a temp name, chmod, then rename.
-    local tmp; tmp="$(mktemp "${ACME_DIR}/.cloudflare.ini.XXXXXX")"
-    printf 'dns_cloudflare_api_token = %s\n' "$tok" > "$tmp"
-    chmod 0600 "$tmp"
-    mv -f -- "$tmp" "${ACME_DIR}/cloudflare.ini"
+    write_cf_credential "$tok" || return 1
     ok "Cloudflare API token saved → ${ACME_DIR}/cloudflare.ini (0600, root-only)."
 }
 
@@ -1787,15 +1801,7 @@ set_cf_token() {
     local tok="${1:-}"
     [[ -z "$tok" && -t 0 ]] && tok="$(ask_secret 'Cloudflare API token (scope: Zone:DNS:Edit for your base zone)' || true)"
     [ -z "$tok" ] && { warn "no token entered — unchanged."; return 0; }
-    # Reject CR/LF — no multi-line token injection.
-    if [[ "$tok" =~ $'\r' || "$tok" =~ $'\n' ]]; then
-        err "Token must not contain CR or LF."; return 1
-    fi
-    install -d -m 0700 "$ACME_DIR"
-    local tmp; tmp="$(mktemp "${ACME_DIR}/.cloudflare.ini.XXXXXX")"
-    printf 'dns_cloudflare_api_token = %s\n' "$tok" > "$tmp"
-    chmod 0600 "$tmp"
-    mv -f -- "$tmp" "${ACME_DIR}/cloudflare.ini"
+    write_cf_credential "$tok" || return 1
     ok "Cloudflare token saved → ${ACME_DIR}/cloudflare.ini"
 }
 

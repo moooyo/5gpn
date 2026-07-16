@@ -92,7 +92,8 @@ curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh |
 export BASE_DOMAIN=example.com         # 主域名（非 debug 必填）；派生 console./zash./profile./dot.<base>
 export GATEWAY_IP=<网关内网地址>        # 可选：客户端实际访问的地址，写进 iOS 描述文件
 # 证书：默认 CERT_MODE=cloudflare（*.<base> 通配符，Cloudflare DNS-01，无需 :80，自动续签，
-# 首次签发前用 5gpn --set-cf-token 配置 Cloudflare API token）；测试/无公网入站可用 DEBUG=1 自签
+# 首次签发时安装器自动提示输入 Cloudflare API token；无人值守用 CF_API_TOKEN= 预置，
+# 或装完后随时用 5gpn --set-cf-token 更新，均可选）；测试/无公网入站可用 DEBUG=1 自签
 # export DEBUG=1                       # 自签证书（客户端不信任，仅测试用）
 sudo bash install.sh
 ```

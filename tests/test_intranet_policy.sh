@@ -90,15 +90,25 @@ _cb_line="$(printf '%s'  "$ic" | grep -n 'certbot certonly' | head -1 | cut -d: 
 # No HTTP-01 or webroot-based flags in the certbot issuance branch.
 printf '%s' "$ic" | grep -Eq -- '--http-01-port|--webroot' \
     && fail "install.sh: install_cert must not use HTTP-01/webroot certbot flags"
-# set_cf_token must reject CR/LF before persisting credentials.
+# write_cf_credential owns CR/LF rejection, atomic write, and temp cleanup for both callers.
+# Checking it here covers ensure_cf_token's env-var path (finding 3) and finding 5.
+wcf_fn_it="$(sed -n '/^write_cf_credential()/,/^}/p' "$INSTALL")"
+printf '%s' "$wcf_fn_it" | grep -Fq '$'"'"'\r'"'"'' \
+    || fail "install.sh: write_cf_credential does not reject CR (covers ensure_cf_token env-var path)"
+printf '%s' "$wcf_fn_it" | grep -Fq '$'"'"'\n'"'"'' \
+    || fail "install.sh: write_cf_credential does not reject LF (covers ensure_cf_token env-var path)"
+# Atomic write: same-dir mktemp + mv rename.
+printf '%s' "$wcf_fn_it" | grep -Fq 'mktemp' \
+    || fail "install.sh: write_cf_credential does not stage atomically (mktemp missing)"
+# Temp-file cleanup on failure — explicit rm -f per step, no broad trap (finding 5).
+printf '%s' "$wcf_fn_it" | grep -Fq 'rm -f' \
+    || fail "install.sh: write_cf_credential does not clean up temp on failure (rm -f missing)"
+# Both callers must delegate to write_cf_credential — no duplicated write logic (finding 4).
 sct_fn="$(sed -n '/^set_cf_token()/,/^}/p' "$INSTALL")"
-printf '%s' "$sct_fn" | grep -Fq '$'"'"'\r'"'"'' \
-    || fail "install.sh: set_cf_token does not reject CR (\$'\\r' check missing)"
-printf '%s' "$sct_fn" | grep -Fq '$'"'"'\n'"'"'' \
-    || fail "install.sh: set_cf_token does not reject LF (\$'\\n' check missing)"
-# set_cf_token must write atomically (mktemp stage + mv rename).
-printf '%s' "$sct_fn" | grep -Fq 'mktemp' \
-    || fail "install.sh: set_cf_token does not stage the credential atomically (mktemp missing)"
+printf '%s' "$sct_fn" | grep -Fq 'write_cf_credential' \
+    || fail "install.sh: set_cf_token does not delegate to write_cf_credential"
+printf '%s' "$ect_fn_it" | grep -Fq 'write_cf_credential' \
+    || fail "install.sh: ensure_cf_token does not delegate to write_cf_credential"
 grep -Fq 'systemctl stop xray' "$INSTALL" \
     && fail "install.sh: no cert-flow reference to 'systemctl stop xray' may remain anywhere"
 # No firewall to open — the old open_port80/close_port80 nft dance must stay gone.
