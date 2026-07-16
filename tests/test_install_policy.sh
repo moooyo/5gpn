@@ -243,6 +243,9 @@ printf '%s' "$ect_fn" | grep -Eq '\[\[ -t 0 \]\]' \
     || fail "ensure_cf_token does not gate the interactive prompt on a TTY ([[ -t 0 ]])"
 printf '%s' "$ect_fn" | grep -Eq 'err.*CF_API_TOKEN' \
     || fail "ensure_cf_token does not reference CF_API_TOKEN in its noninteractive failure message"
+# ensure_cf_token must create ACME_DIR with mode 0700 so credentials dir is root-only.
+printf '%s' "$ect_fn" | grep -Eq 'install -d -m 0700' \
+    || fail "ensure_cf_token does not create ACME_DIR with mode 0700 (install -d -m 0700 missing)"
 # ensure_cf_token must be called within install_cert (issuance branch).
 printf '%s' "$ic_fn" | grep -Fq 'ensure_cf_token' \
     || fail "install_cert does not call ensure_cf_token (first issuance hard-aborts without a token)"

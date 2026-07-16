@@ -84,7 +84,8 @@ printf '%s' "$ic" | grep -Fqe '-d "${base}"' \
 _ect_line="$(printf '%s' "$ic" | grep -n 'ensure_cf_token' | head -1 | cut -d: -f1)"
 _cb_line="$(printf '%s'  "$ic" | grep -n 'certbot certonly' | head -1 | cut -d: -f1)"
 [ -z "${_ect_line:-}" ] && fail "install.sh: install_cert does not call ensure_cf_token before certbot"
-[ -n "${_ect_line:-}" ] && [ "${_ect_line}" -ge "${_cb_line:-99999}" ] && \
+[ -z "${_cb_line:-}" ] && fail "install.sh: install_cert does not contain certbot certonly (certbot line not found)"
+[ -n "${_ect_line:-}" ] && [ "${_ect_line}" -ge "${_cb_line}" ] && \
     fail "install.sh: ensure_cf_token must appear BEFORE certbot certonly in install_cert"
 # No HTTP-01 or webroot-based flags in the certbot issuance branch.
 printf '%s' "$ic" | grep -Eq -- '--http-01-port|--webroot' \
