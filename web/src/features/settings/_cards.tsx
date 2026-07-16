@@ -129,9 +129,14 @@ export function TgbotCard({
     formState: { dirtyFields },
   } = useForm<TgbotFormValues>({ defaultValues: { token: '', admins: '' } })
 
+  const state = tgbot?.state ?? (tgbot?.running ? 'healthy' : 'disabled')
+  const adminsSnapshot = tgbot ? tgbot.admins.join(',') : null
+  const stateTone =
+    state === 'healthy' ? 'green' : state === 'degraded' ? 'red' : state === 'starting' ? 'amber' : 'neutral'
+
   useEffect(() => {
-    if (tgbot) reset({ token: '', admins: tgbot.admins.join(',') })
-  }, [tgbot, reset])
+    if (adminsSnapshot !== null) reset({ token: '', admins: adminsSnapshot })
+  }, [adminsSnapshot, reset])
 
   async function apply(update: TGBotUpdate) {
     try {
@@ -168,14 +173,25 @@ export function TgbotCard({
   return (
     <Card className="p-[18px]">
       <div className="mb-2 flex items-center justify-between">
-        <div className="text-[13px] font-bold text-text-strong">{t('settings.tgbot')}</div>
+        <div className="flex items-center gap-2">
+          <div className="text-[13px] font-bold text-text-strong">{t('settings.tgbot')}</div>
+          <Badge tone={stateTone}>{t(`settings.tgbotState_${state}`)}</Badge>
+        </div>
         <Toggle
-          checked={!!tgbot?.running}
+          checked={!!tgbot?.token_set}
           onCheckedChange={(checked) => void onToggle(checked)}
           disabled={!tgbot}
           aria-label={t('settings.tgbotStatus')}
         />
       </div>
+      {tgbot?.last_error ? (
+        <div
+          role="alert"
+          className="mb-2 break-all rounded-lg border border-red/25 bg-red/5 px-3 py-2 text-[10.5px] text-red"
+        >
+          {tgbot.last_error}
+        </div>
+      ) : null}
       <form onSubmit={(e) => void handleSubmit(onSubmit)(e)} className="flex flex-col">
         <Field
           label={t('settings.tgbotToken')}

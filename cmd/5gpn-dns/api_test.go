@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +11,7 @@ import (
 	"testing"
 )
 
-func TestControlServer_ProfileSNIServesOnlyIOS(t *testing.T) {
+func TestControlServer_PublicConsoleServesSPAAndIOSAndProtectsAPI(t *testing.T) {
 	certPath, keyPath := generateSelfSignedCert(t, t.TempDir())
 	wwwDir, _ := writeIOSFixtures(t)
 	webDir := t.TempDir()
@@ -25,7 +24,6 @@ func TestControlServer_ProfileSNIServesOnlyIOS(t *testing.T) {
 		KeyFile:       keyPath,
 		WWWDir:        wwwDir,
 		WebDir:        webDir,
-		ProfileDomain: "profile.example.com",
 		ConsoleDomain: "console.example.com",
 		ZashListen:    "",
 	}, &Controller{})
@@ -33,29 +31,22 @@ func TestControlServer_ProfileSNIServesOnlyIOS(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	do := func(path, sni, host string) *httptest.ResponseRecorder {
+	do := func(path string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
-		req.Host = host
-		req.TLS = &tls.ConnectionState{ServerName: sni}
+		req.Host = "console.example.com"
 		rec := httptest.NewRecorder()
 		cs.srv.Handler.ServeHTTP(rec, req)
 		return rec
 	}
 
-	if rec := do("/ios/ios-dot.mobileconfig", "profile.example.com", "profile.example.com:443"); rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/x-apple-aspen-config" {
-		t.Fatalf("profile SNI mobileconfig status/type=%d/%q", rec.Code, rec.Header().Get("Content-Type"))
+	if rec := do("/ios/ios-dot.mobileconfig"); rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/x-apple-aspen-config" {
+		t.Fatalf("console mobileconfig status/type=%d/%q", rec.Code, rec.Header().Get("Content-Type"))
 	}
-	if rec := do("/api/status", "profile.example.com", "profile.example.com"); rec.Code != http.StatusNotFound {
-		t.Fatalf("profile SNI reached console API: status=%d body=%s", rec.Code, rec.Body.String())
+	if rec := do("/api/status"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated console API status=%d body=%s, want 401", rec.Code, rec.Body.String())
 	}
-	if rec := do("/", "profile.example.com", "profile.example.com"); rec.Code != http.StatusTemporaryRedirect || rec.Header().Get("Location") != "/ios/" {
-		t.Fatalf("profile root status/location=%d/%q, want 307 /ios/", rec.Code, rec.Header().Get("Location"))
-	}
-	if rec := do("/", "profile.example.com", "console.example.com"); rec.Code != http.StatusMisdirectedRequest {
-		t.Fatalf("profile SNI with spoofed console Host status=%d, want 421", rec.Code)
-	}
-	if rec := do("/", "console.example.com", "console.example.com"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "private console") {
-		t.Fatalf("console SNI no longer reaches console SPA: status=%d body=%s", rec.Code, rec.Body.String())
+	if rec := do("/"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "private console") {
+		t.Fatalf("public console SPA status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

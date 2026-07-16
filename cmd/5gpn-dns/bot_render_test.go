@@ -1,9 +1,11 @@
 package main
 
 import (
+	"html"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // TestFormattingHelpers ports tgbot.py's formatting helpers (pre / _tail /
@@ -49,6 +51,21 @@ func TestFormattingHelpers(t *testing.T) {
 		}
 	})
 
+	t.Run("pre and preTail preserve valid Unicode and opposite ends", func(t *testing.T) {
+		input := "OLDEST-" + strings.Repeat("中🙂", 2200) + "-NEWEST"
+		head := pre(input)
+		tail := preTail(input)
+		if !utf8.ValidString(head) || !utf8.ValidString(tail) {
+			t.Fatal("pre truncation produced invalid UTF-8")
+		}
+		if !strings.Contains(head, "OLDEST") || strings.Contains(head, "NEWEST") {
+			t.Fatalf("pre did not keep the head: %q ...", head[:80])
+		}
+		if strings.Contains(tail, "OLDEST") || !strings.Contains(tail, "NEWEST") {
+			t.Fatalf("preTail did not keep the newest content")
+		}
+	})
+
 	t.Run("tailLines keeps the last N non-blank lines", func(t *testing.T) {
 		in := "a\n\nb\nc\n\nd\ne"
 		got := tailLines(in, 3)
@@ -87,6 +104,40 @@ func TestFormattingHelpers(t *testing.T) {
 		got := chunkText("hi", 100)
 		if len(got) != 1 || got[0] != "hi" {
 			t.Errorf("chunkText(\"hi\", 100) = %v, want [\"hi\"]", got)
+		}
+	})
+
+	t.Run("chunkText keeps UTF-8 entities and HTML tags valid", func(t *testing.T) {
+		got := chunkText("<b>你好🙂&amp;世界</b>", 3)
+		if len(got) < 2 {
+			t.Fatalf("chunkText returned %v, want pagination", got)
+		}
+		for i, chunk := range got {
+			if !utf8.ValidString(chunk) {
+				t.Fatalf("chunk %d is invalid UTF-8: %q", i, chunk)
+			}
+			if strings.Count(chunk, "<b>") != strings.Count(chunk, "</b>") {
+				t.Fatalf("chunk %d has unbalanced HTML: %q", i, chunk)
+			}
+			plain := strings.ReplaceAll(strings.ReplaceAll(chunk, "<b>", ""), "</b>", "")
+			plain = html.UnescapeString(plain)
+			if utf8.RuneCountInString(plain) > 3 {
+				t.Fatalf("chunk %d has %d rendered chars: %q", i, utf8.RuneCountInString(plain), chunk)
+			}
+		}
+	})
+
+	t.Run("chunkText repairs invalid UTF-8 instead of forwarding broken bytes", func(t *testing.T) {
+		got := strings.Join(chunkText(string([]byte{'a', 0xff, 'b'}), 2), "")
+		if !utf8.ValidString(got) || !strings.ContainsRune(got, utf8.RuneError) {
+			t.Fatalf("chunkText invalid UTF-8 result = %q", got)
+		}
+	})
+
+	t.Run("chunkText escapes unsupported markup and invalid entities", func(t *testing.T) {
+		got := strings.Join(chunkText("x &bogus; <wat>", 100), "")
+		if !strings.Contains(got, "&amp;bogus;") || !strings.Contains(got, "&lt;wat>") {
+			t.Fatalf("chunkText did not make invalid HTML safe: %q", got)
 		}
 	})
 
@@ -217,5 +268,98 @@ func TestRenderStatus_CertBroken(t *testing.T) {
 		&CertStatus{Broken: true, Error: "open /etc/5gpn/cert/fullchain.pem: no such file"})
 	if !strings.Contains(out, "无法加载") {
 		t.Errorf("broken-cert status should say 无法加载\n---\n%s", out)
+	}
+}
+
+func TestRenderResolveTest(t *testing.T) {
+	result := ResolveTestResult{
+		Name:      "evil<&.example",
+		Verdict:   "proxy",
+		Reason:    "chnroute-foreign",
+		Chosen:    "trust",
+		ChosenIPs: []string{"203.0.113.4"},
+		ClientIPs: []string{"192.0.2.10"},
+		Probes: []ResolveProbe{
+			{Server: "dns.example@1.1.1.1:853", Group: "trust", IPs: []string{"203.0.113.4"}, DurationMs: 12.5, Selected: true},
+			{Server: "bad.example", Group: "china", Err: "timeout <secret>", DurationMs: 2000},
+		},
+	}
+	out := renderResolveTest(result)
+	for _, want := range []string{"DNS 诊断", "组内采用", "12.5 ms", "timeout &lt;secret&gt;", "192.0.2.10"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("renderResolveTest missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "evil<&") {
+		t.Fatalf("domain was not HTML escaped: %s", out)
+	}
+}
+
+func TestBotMenusAreVersionedAndUnambiguous(t *testing.T) {
+	t.Setenv("DNS_CONSOLE_DOMAIN", "console.example.com")
+	t.Setenv(consoleDomainEnv, "console.example.com")
+	t.Setenv(baseDomainEnv, "example.com")
+
+	main := mainMenu()
+	var labels []string
+	for _, row := range main.InlineKeyboard {
+		for _, button := range row {
+			labels = append(labels, button.Text)
+			if button.CallbackData != "" && !strings.HasPrefix(button.CallbackData, botCallbackPrefix) {
+				t.Errorf("callback %q is not versioned", button.CallbackData)
+			}
+		}
+	}
+	joined := strings.Join(labels, "|")
+	for _, want := range []string{"状态", "DNS 诊断", "日志", "上游 DNS", "维护", "iOS 安装", "Web 控制台"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("main menu missing %q: %s", want, joined)
+		}
+	}
+
+	maintenance := maintenanceMenu()
+	var maintenanceLabels []string
+	for _, row := range maintenance.InlineKeyboard {
+		for _, button := range row {
+			maintenanceLabels = append(maintenanceLabels, button.Text)
+		}
+	}
+	maintenanceText := strings.Join(maintenanceLabels, "|")
+	if strings.Contains(maintenanceText, "全部") || strings.Contains(maintenanceText, "5gpn-dns 热重载") {
+		t.Fatalf("maintenance menu has duplicate/inaccurate actions: %s", maintenanceText)
+	}
+	if strings.Count(maintenanceText, "重载 DNS 规则") != 1 {
+		t.Fatalf("maintenance menu should have exactly one reload action: %s", maintenanceText)
+	}
+
+	ios := iosMenu()
+	var hasURL, hasPhoto bool
+	for _, row := range ios.InlineKeyboard {
+		for _, button := range row {
+			hasURL = hasURL || strings.Contains(button.URL, "/ios/ios-dot.mobileconfig")
+			hasPhoto = hasPhoto || strings.Contains(button.CallbackData, "ios-photo")
+		}
+	}
+	if !hasURL || !hasPhoto {
+		t.Fatalf("iOS menu missing URL/photo action: %+v", ios.InlineKeyboard)
+	}
+}
+
+func TestConfirmationCallbacks(t *testing.T) {
+	nonce := strings.Repeat("ab", botConfirmationBytes)
+	request := parseCallback(versionedCallback("request:" + string(botActionRestartMihomo)))
+	if request.kind != cbRequestConfirm || request.arg != string(botActionRestartMihomo) {
+		t.Fatalf("request parsed as %+v", request)
+	}
+	confirmed := parseCallback(versionedCallback("confirm:" + string(botActionRestartMihomo) + ":" + nonce))
+	if confirmed.kind != cbConfirmAction || confirmed.arg != string(botActionRestartMihomo) || confirmed.nonce != nonce {
+		t.Fatalf("confirmation parsed as %+v", confirmed)
+	}
+	cancelled := parseCallback(versionedCallback("cancel:" + nonce))
+	if cancelled.kind != cbCancelAction || cancelled.nonce != nonce {
+		t.Fatalf("cancel parsed as %+v", cancelled)
+	}
+	if got := parseCallback(versionedCallback("confirm:restart-mihomo:not-hex")); got.kind != cbUnknown {
+		t.Fatalf("malformed confirmation parsed as %+v", got)
 	}
 }

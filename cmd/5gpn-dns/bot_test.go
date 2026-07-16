@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/go-telegram/bot/models"
 )
 
 // TestIsValidDomain mirrors the VALID/INVALID tables from tgbot.py's
@@ -91,6 +93,40 @@ func TestBotIsAdmin_NilSet(t *testing.T) {
 	bt := &Bot{}
 	if bt.isAdmin(111) {
 		t.Errorf("isAdmin(111) with nil admins = true, want false")
+	}
+}
+
+func TestBotReplaceAdmins(t *testing.T) {
+	bt := &Bot{admins: map[int64]bool{111: true}}
+	bt.ReplaceAdmins([]int64{222, 222, -1})
+	if bt.isAdmin(111) || !bt.isAdmin(222) || bt.isAdmin(-1) {
+		t.Fatalf("ReplaceAdmins did not atomically replace the effective set: %v", bt.adminIDs())
+	}
+}
+
+func TestIsPrivateUpdate(t *testing.T) {
+	privateMessage := &models.Update{Message: &models.Message{Chat: models.Chat{ID: 1, Type: models.ChatTypePrivate}}}
+	groupMessage := &models.Update{Message: &models.Message{Chat: models.Chat{ID: -1, Type: models.ChatTypeGroup}}}
+	privateCallback := &models.Update{CallbackQuery: &models.CallbackQuery{
+		Message: models.MaybeInaccessibleMessage{
+			Type:    models.MaybeInaccessibleMessageTypeMessage,
+			Message: &models.Message{Chat: models.Chat{ID: 1, Type: models.ChatTypePrivate}},
+		},
+	}}
+	for name, tc := range map[string]struct {
+		update *models.Update
+		want   bool
+	}{
+		"private message":  {privateMessage, true},
+		"group message":    {groupMessage, false},
+		"private callback": {privateCallback, true},
+		"nil":              {nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := isPrivateUpdate(tc.update); got != tc.want {
+				t.Fatalf("isPrivateUpdate() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

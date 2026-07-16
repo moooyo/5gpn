@@ -89,21 +89,7 @@ func main() {
 		log.Printf("upstreams: %s overrides dns.env (china=%v trust=%v)", cfg.UpstreamsFile, uc.China, uc.Trust)
 	}
 
-	// Runtime Telegram-bot override (web-console managed): when tgbot.json exists
-	// its token + admin set override dns.env's TGBOT_TOKEN/TGBOT_ADMINS. A
-	// malformed file is logged and ignored — never a reason to crash the sole
-	// resolver, and it must not silently re-enable a bot the operator disabled.
-	if tc, err := LoadTGBot(cfg.TGBotFile); err != nil {
-		log.Printf("warning: %v — using dns.env tgbot config", err)
-	} else if tc != nil {
-		cfg.TGBotToken = tc.Token
-		cfg.TGBotAdmins = adminSetFromIDs(tc.Admins)
-		state := "token set"
-		if tc.Token == "" {
-			state = "no token (disabled)"
-		}
-		log.Printf("tgbot: %s overrides dns.env (%s, %d admin(s))", cfg.TGBotFile, state, len(tc.Admins))
-	}
+	applyTGBotOverride(&cfg)
 
 	// ── Initial load of rule sets and chnroute ────────────────────────────────
 	sets, err := loadRuleSets(cfg)
@@ -161,7 +147,6 @@ func main() {
 		// record) so the admin's browser reaches the gateway's SNI split.
 		ConsoleDomain: cfg.ConsoleDomain,
 		ZashDomain:    cfg.ZashDomain,
-		ProfileDomain: cfg.ProfileDomain,
 		TTLMin:        cfg.TTLMin,
 		TTLMax:        cfg.TTLMax,
 		Timeout:       cfg.QueryTimeout,
@@ -432,6 +417,10 @@ func main() {
 	// token + admin set are hot-reloadable from the web console via PUT /api/tgbot
 	// (botSup.Apply), which restarts just the bot goroutine, not the daemon.
 	botSup.Start()
+	if cfg.TGBotAlerts {
+		go newBotAlertMonitor(ctrl, botSup).Run(ctx)
+		log.Printf("telegram transition alerts enabled for configured bot administrators")
+	}
 
 	// systemd watchdog keepalive (no-op unless the unit sets WatchdogSec): a
 	// fully-wedged process stops pinging and systemd restarts it.
@@ -467,6 +456,31 @@ func main() {
 	}
 	persistWG.Wait() // ensure the stats persister's final save completes before exit
 	log.Println("shutdown complete")
+}
+
+// applyTGBotOverride applies the console-managed runtime bot configuration.
+// A present-but-unreadable override fails closed: falling back to an older
+// dns.env token/admin set could silently re-authorize an administrator that the
+// operator already revoked. A missing override still means "use bootstrap
+// dns.env values".
+func applyTGBotOverride(cfg *Config) {
+	tc, err := LoadTGBot(cfg.TGBotFile)
+	if err != nil {
+		cfg.TGBotToken = ""
+		cfg.TGBotAdmins = map[int64]bool{}
+		log.Printf("warning: %v — Telegram bot disabled fail-closed until the override is repaired", err)
+		return
+	}
+	if tc == nil {
+		return
+	}
+	cfg.TGBotToken = tc.Token
+	cfg.TGBotAdmins = adminSetFromIDs(tc.Admins)
+	state := "token set"
+	if tc.Token == "" {
+		state = "no token (disabled)"
+	}
+	log.Printf("tgbot: %s overrides dns.env (%s, %d admin(s))", cfg.TGBotFile, state, len(tc.Admins))
 }
 
 // wireMihomoConfigManagement enables the raw mihomo config editor only when the

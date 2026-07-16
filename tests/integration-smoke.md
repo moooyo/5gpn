@@ -91,32 +91,29 @@ afterward.
   parser error retains the previous cache byte-for-byte and schedules backoff.
 - [ ] An unchanged fetch does not rewrite cache files or flush response cache.
 
-## 5. Console, profile bootstrap, and authentication
+## 5. Public console, iOS bootstrap, and authentication
 
-Set `CONSOLE=console.<base>`, `PROFILE=profile.<base>`, and `TOKEN` to the
+Set `CONSOLE=console.<base>` and `TOKEN` to the
 current API bearer. Direct loopback tests isolate daemon routing:
 
 ```bash
 curl --resolve "$CONSOLE:443:127.0.0.1" -fsS \
   -H "Authorization: Bearer $TOKEN" "https://$CONSOLE/api/status"
-curl --resolve "$PROFILE:443:127.0.0.1" -fsSI \
-  "https://$PROFILE/ios/ios-dot.mobileconfig"
+curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
+  "https://$CONSOLE/ios/ios-dot.mobileconfig"
 ```
 
 - [ ] Correct console bearer returns 200; missing/wrong bearer returns 401 and
   never exposes status or mihomo credentials.
-- [ ] The profile response is `200` with
+- [ ] The console profile response is `200` with
   `Content-Type: application/x-apple-aspen-config`, contains no secret, and is
   installable by iOS before DoT is configured.
-- [ ] A normal install fails before declaring success when the profile A record
-  is missing/wrong. `SKIP_PROFILE_DNS_CHECK=1` is used only in a documented
-  CI/staged run, never to hide a broken production bootstrap.
-- [ ] `https://$PROFILE/` redirects only to `/ios/`.
-- [ ] `$PROFILE/api/status`, SPA paths, and `$PROFILE/proxy/*` return 404/421;
-  changing only the Host header while keeping another TLS SNI cannot bypass
-  this isolation.
+- [ ] A normal install fails before declaring success when the console A record
+  is missing/wrong; exported skip variables cannot bypass the gate.
+- [ ] `https://$CONSOLE/` serves the SPA; unauthenticated
+  `$CONSOLE/api/status` returns 401.
 - [ ] The generated download page links to
-  `/ios/ios-dot.mobileconfig`; a nonexistent profile path never returns the SPA
+  `/ios/ios-dot.mobileconfig`; a nonexistent install path never returns the SPA
   shell as a false-positive `200 text/html`.
 - [ ] Production CSP reports no inline script/style or worker/font violation.
 
@@ -199,7 +196,7 @@ curl --resolve "$PROFILE:443:127.0.0.1" -fsSI \
 
 ## 10. Certificate renewal and recovery
 
-- [ ] The wildcard lineage covers dot/console/zash/profile and renews with
+- [ ] The wildcard lineage covers dot/console/zash and renews with
   Cloudflare DNS-01 without stopping mihomo or binding an ACME `:80` listener.
 - [ ] `certbot renew --dry-run` succeeds; the deploy hook updates role copies and
   regenerates/signs the iOS profile.
@@ -209,6 +206,54 @@ curl --resolve "$PROFILE:443:127.0.0.1" -fsSI \
 - [ ] A temporarily missing/broken cert is visible in status/journal; restoring
   valid files allows the TLS listeners to recover without destroying DNS state.
 
+## 11. Telegram bot (optional real-network smoke)
+
+Use a disposable Telegram bot token, at least two test administrator accounts,
+and a temporary group. Back up `/etc/5gpn/tgbot.json` first and do not paste the
+token into recorded command output, screenshots, or issue logs.
+
+- [ ] `5gpn --setup-tgbot` requires a TTY, reports an existing `DNS_TGBOT_FILE` as the active
+  source, validates a replacement token through the live control API, and
+  atomically leaves a root-only (`0600`) JSON override. It does not claim that a
+  caller environment token became active.
+- [ ] A malformed or unauthorized token makes both CLI and Web apply fail. The
+  previous live bot and the byte-for-byte override remain usable, and neither
+  path prints a success message.
+- [ ] `GET /api/tgbot` never returns the token. Its lifecycle/health fields agree
+  with reality after enable, network failure, recovery, disable, and an
+  unexpected polling-loop exit.
+- [ ] A token that previously had a webhook is safely returned to long polling
+  without dropping pending updates. Commands and inline callback buttons both
+  work, proving the explicit `message` + `callback_query` update selection.
+- [ ] `/id` reports the numeric user ID. Every status, log, diagnostic, and
+  maintenance action is rejected outside an authorized administrator's private
+  chat; adding the bot to a group cannot reveal domains, addresses, or journal
+  output.
+- [ ] Removing an administrator takes effect immediately. A concurrent stale
+  token/admin apply cannot later restore the revoked account or replace a newer
+  configuration.
+- [ ] Menu navigation and refresh work for status, DNS diagnosis, logs,
+  upstreams, maintenance, iOS install, and the Web-console link. DNS diagnosis
+  agrees with `/api/resolve-test`; policy/subscription/YAML editing is absent.
+- [ ] Mihomo restart and certificate renewal require an unexpired one-use
+  confirmation. Replaying or double-clicking it cannot start a second job, and
+  the final message/audit record contains the real success or failure result.
+- [ ] Short logs retain the newest failure lines and paginate without breaking
+  Unicode or HTML. Oversized logs arrive as a protected text document. The iOS
+  action sends a PNG QR plus a direct `console.<base>/ios/` URL button.
+- [ ] When direct Telegram access is unavailable, setting a valid proxy through
+  the Telegram TUI and letting it restart the daemon restores operation through the
+  chosen HTTP/HTTPS CONNECT proxy. Invalid schemes/credentials fail visibly.
+  This test must not change `/etc/5gpn/mihomo/config.yaml`; any local mihomo
+  HTTP/mixed listener is created and secured explicitly by the operator.
+- [ ] With alerts disabled in the TUI, health polling sends no unsolicited messages.
+  With it enabled by the TUI, certificate, mihomo, and upstream
+  failure/recovery transitions produce protected private alerts to every
+  configured admin without repeated unchanged-state spam. Stopping the daemon
+  cannot produce a Telegram alert; the configured external heartbeat monitor
+  must detect that dead-man's-switch failure.
+
 After the run, restore temporary policy/upstream/config changes and compare the
-captured nftables and mihomo files. Record release version, mihomo version, test
-date, and any intentionally skipped checkbox with its reason.
+captured nftables and mihomo files, restore the Telegram override, and revoke
+the disposable token. Record release version, mihomo version, test date, and
+any intentionally skipped checkbox with its reason.

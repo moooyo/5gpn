@@ -115,10 +115,9 @@ EOF
 # the network, so an on-path attacker could otherwise
 # rewrite ServerName/ServerAddresses and persistently hijack the phone's cellular
 # DNS. If signing is impossible (no cert / openssl), the UNSIGNED profile is
-# REFUSED and removed (fail closed) unless ALLOW_UNSIGNED_PROFILE=1 — serving a
-# tamperable profile silently was the old, unsafe default.
-CERT_DIR="${CERT_DIR:-/etc/5gpn/cert/dot}"
-ALLOW_UNSIGNED="${ALLOW_UNSIGNED_PROFILE:-0}"
+# REFUSED and removed (fail closed). Caller-environment overrides are not a
+# configuration surface.
+CERT_DIR="/etc/5gpn/cert/dot"
 sign_ok=0
 if command -v openssl >/dev/null 2>&1 \
    && [[ -f "${CERT_DIR}/fullchain.pem" && -f "${CERT_DIR}/privkey.pem" ]]; then
@@ -148,13 +147,9 @@ else
     warn "No cert at ${CERT_DIR} (or openssl missing)."
 fi
 if [[ $sign_ok -ne 1 ]]; then
-    if [[ "$ALLOW_UNSIGNED" == "1" ]]; then
-        warn "ALLOW_UNSIGNED_PROFILE=1: serving the UNSIGNED profile despite the tamper-on-delivery risk."
-    else
-        rm -f "$profile_path"
-        err "Refusing to serve an UNSIGNED .mobileconfig (an on-path attacker on the delivery path could tamper it and hijack cellular DNS). Issue a cert (CERT_MODE=http-01) then re-run 'install.sh --ios', or set ALLOW_UNSIGNED_PROFILE=1 to override."
-        exit 1
-    fi
+    rm -f "$profile_path"
+    err "Refusing to serve an UNSIGNED .mobileconfig. Repair the configured certificate and rerun the TUI profile action."
+    exit 1
 fi
 
 # Landing page: the CSS and JavaScript are emitted as same-origin files instead
@@ -222,7 +217,7 @@ cat > "${WWW_DIR}/index.html" <<'HTML'
     </ol>
   </section>
   <section class="card"><div class="sect">说明</div><ul class="notes"><li>描述文件应显示「已验证」；若显示未验证，请勿安装。</li><li>移除路径：设置 → 通用 → VPN 与设备管理。</li></ul></section>
-  <footer>5gpn gateway · public profile bootstrap</footer>
+  <footer>5gpn gateway · public console install</footer>
 </div>
 </body>
 </html>

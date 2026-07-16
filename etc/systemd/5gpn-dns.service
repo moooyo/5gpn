@@ -15,7 +15,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 EnvironmentFile=/etc/5gpn/dns.env
-ExecStart=/usr/local/bin/5gpn-dns
+ExecStart=/opt/5gpn/bin/5gpn-dns
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5

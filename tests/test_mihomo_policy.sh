@@ -14,7 +14,7 @@ check install.sh 'MIHOMO_VERSION' 'mihomo version pin knob'
 nocheck install.sh 'install_xray\(\)' 'install_xray removed'
 
 # Task 2: mihomo unit
-check etc/systemd/mihomo.service 'ExecStart=/usr/local/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' 'mihomo ExecStart'
+check etc/systemd/mihomo.service 'ExecStart=/opt/5gpn/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' 'project-private mihomo ExecStart'
 check etc/systemd/mihomo.service 'RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX' 'mihomo AF set incl AF_NETLINK (required for QUIC/UDP DIRECT dial)'
 check etc/systemd/mihomo.service 'ReadWritePaths=/etc/5gpn/mihomo' 'mihomo writes provider caches'
 check etc/systemd/mihomo.service 'Environment=SAFE_PATHS=/etc/5gpn/cert/zash' 'mihomo SAFE_PATHS scoped to the shared zash controller cert'
@@ -41,8 +41,8 @@ check "$T" 'format: text'                              'whitelist provider uses 
 check "$T" 'RULE-SET,whitelist,DIRECT,src'             'source-IP allowlist rule'
 check "$T" 'REJECT-DROP'                               'silent deny for non-allowlisted'
 check "$T" '127\.0\.0\.1:5354'                         'DNS broker → egress resolver'
-check "$T" '__PROFILE_DOMAIN__: 127\.0\.0\.1'           'profile SNI loopback host mapping'
-check "$T" 'DOMAIN,__PROFILE_DOMAIN__,DIRECT'            'profile SNI bypasses panel whitelist'
+check "$T" 'DOMAIN,__CONSOLE_DOMAIN__,DIRECT'             'public console SNI direct route'
+nocheck "$T" '__PROFILE_DOMAIN__'                         'retired profile SNI removed'
 # UP-4 (2026-07-15 policy/mihomo decoupling): the daemon no longer owns ANY
 # region of the mihomo config -- the four >>>5gpn:*/<<<5gpn:* marker comment
 # blocks (rule-providers/proxy-providers/proxy-groups/split-rules) are GONE,
@@ -107,7 +107,7 @@ check install.sh '/usr/local/bin/xray' 'legacy /usr/local/bin/xray still removed
 
 # Task A4: zashboard dist acquisition (pinned dist.zip download + wiring)
 check install.sh 'install_zashboard\(\)' 'install_zashboard function exists'
-check install.sh 'ZASH_VERSION="\$\{ZASH_VERSION:-v3\.15\.0\}"' 'ZASH_VERSION default pin'
+check install.sh 'ZASH_VERSION="v3\.15\.0"' 'ZASH_VERSION fixed pin'
 check install.sh 'Zephyruso/zashboard/releases/download' 'downloads zashboard from Zephyruso/zashboard'
 if grep -A1 -E '^\s*install_web\s*$' "$root/install.sh" | grep -q 'install_zashboard'; then
     echo "ok: full_install calls install_zashboard right after install_web"

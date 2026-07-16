@@ -77,7 +77,14 @@ export interface ResolveTestResult {
 
 export interface UpstreamsView { china: string[]; trust: string[] }
 export interface ECSView { subnet: string }
-export interface TGBotView { admins: number[]; token_set: boolean; running: boolean }
+export type TGBotState = 'disabled' | 'starting' | 'healthy' | 'degraded'
+export interface TGBotView {
+  admins: number[]
+  token_set: boolean
+  running: boolean
+  state: TGBotState
+  last_error?: string
+}
 export interface TGBotUpdate { token?: string | null; admins: number[] }
 
 // Bearer-protected daemon projection of mihomo `/version`.

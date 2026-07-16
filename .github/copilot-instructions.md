@@ -15,8 +15,9 @@ archived migration notes to infer current ports, APIs, components, or config.
 - The complete `/etc/5gpn/mihomo/config.yaml` is operator-owned. Preserve it on
   reinstall and ordinary `change-*`; only explicit reset may replace it after
   validation and atomic publication.
-- `console.<base>` and `zash.<base>` are source-allowlisted SNI routes.
-  `profile.<base>` is public but serves only `/ios/`. `dot.<base>` is DoT.
+- `console.<base>` publicly serves the SPA and `/ios/`; every `/api/*` route
+  remains bearer-authenticated. `zash.<base>` is source-allowlisted. There is
+  no separate bootstrap hostname. `dot.<base>` is DoT.
 - The console uses bearer `/api/*` endpoints. Mihomo logs require a one-use
   ticket minted by `POST /api/mihomo/log-ticket`; the console has no arbitrary
   controller proxy. zashboard uses its separate allowlisted `/proxy/`.

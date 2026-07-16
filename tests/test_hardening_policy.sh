@@ -12,7 +12,7 @@ GO_DIR="$ROOT/cmd/5gpn-dns"
 # --- systemd sandboxing ---
 grep -Fq 'NoNewPrivileges=yes'   "$MIHOMO_SVC" || fail "mihomo.service: no NoNewPrivileges"
 grep -Fq 'ProtectSystem=strict'  "$MIHOMO_SVC" || fail "mihomo.service: no ProtectSystem=strict"
-grep -Fq 'ExecStart=/usr/local/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' "$MIHOMO_SVC" \
+grep -Fq 'ExecStart=/opt/5gpn/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' "$MIHOMO_SVC" \
     || fail "mihomo.service: unexpected ExecStart"
 # mihomo dials IPv4+IPv6 AND needs AF_NETLINK: its UDP/QUIC DIRECT dial does a
 # route-table lookup (netlinkrib) that fatals the forward without it (test-env-confirmed).
@@ -30,16 +30,16 @@ grep -Fq 'ProtectSystem=strict' "$DNS_SVC" || fail "5gpn-dns.service: no Protect
 # 5gpn-dns soft-orders after the mihomo data-plane forwarder (was xray).
 grep -Fq 'After=network-online.target mihomo.service' "$DNS_SVC" || fail "5gpn-dns.service must order After=...mihomo.service"
 
-# --- control-plane access control moved to the mihomo source-IP allowlist ---
-# The console binds loopback only and is gated by mihomo's whitelist rule-provider
-# (see etc/mihomo/config.yaml.tmpl); the old in-process token lockout + PROXY-protocol
-# support (which needed the real client IP behind the xray SNI split) are removed.
-[ ! -f "$GO_DIR/authblock.go" ]  || fail "authblock.go must be removed (console gated in mihomo, no in-process lockout)"
+# --- public console keeps token authentication; zashboard keeps the IP ACL ---
+# The daemon still binds loopback behind mihomo. The old in-process token lockout
+# and PROXY-protocol support are removed; /api/* remains bearer-authenticated.
+[ ! -f "$GO_DIR/authblock.go" ]  || fail "authblock.go must be removed (no in-process lockout)"
 [ ! -f "$GO_DIR/proxyproto.go" ] || fail "proxyproto.go must be removed (console is loopback-bound, no PROXY protocol)"
 grep -Fq '127.0.0.1:443' "$GO_DIR/config.go" || fail "config.go: control plane must default to loopback 127.0.0.1:443"
 
-# --- 5gpn-dns binary integrity (opt-in sha256) ---
-grep -Fq 'DNS_SHA256' "$INSTALL" || fail "no opt-in 5gpn-dns sha256 verify"
+# --- 5gpn-dns binary integrity (mandatory release checksum) ---
+grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/5gpn-dns"' "$INSTALL" \
+    || fail "no mandatory 5gpn-dns sha256 verification"
 
 [ $rc -eq 0 ] && echo "hardening policy: PASS"
 exit $rc

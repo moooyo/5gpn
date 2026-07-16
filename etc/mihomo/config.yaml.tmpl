@@ -33,7 +33,6 @@ dns:
   nameserver: ["udp://127.0.0.1:5354"]   # 5gpn-dns egress broker: returns REAL upstream IPs
 
 hosts:
-  __PROFILE_DOMAIN__: 127.0.0.1
   __CONSOLE_DOMAIN__: 127.0.0.1
   __ZASH_DOMAIN__:    127.0.0.2
 
@@ -51,9 +50,7 @@ proxy-groups:
   - {name: Proxies, type: select, proxies: [DIRECT]}
 
 rules:
-  - DOMAIN,__PROFILE_DOMAIN__,DIRECT
-  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
-  - DOMAIN,__CONSOLE_DOMAIN__,REJECT-DROP
+  - DOMAIN,__CONSOLE_DOMAIN__,DIRECT
   - AND,((DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
   - DOMAIN,__ZASH_DOMAIN__,REJECT-DROP
   - IP-CIDR,__GATEWAY_IP__/32,REJECT-DROP,no-resolve

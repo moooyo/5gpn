@@ -17,12 +17,12 @@ var allDNSEnvKeys = []string{
 	"DNS_LISTEN_API", "DNS_API_TOKEN",
 	"DNS_STATS_FILE",
 	"DNS_API_RATE", "DNS_API_BURST",
-	"TGBOT_TOKEN", "TGBOT_ADMINS",
+	"TGBOT_TOKEN", "TGBOT_ADMINS", "DNS_TGBOT_FILE", "TGBOT_PROXY_URL", "TGBOT_ALERTS",
 	"WWW_DIR",
 	"DNS_CHINA_ECS", "DNS_ECS_FILE",
 	"DNS_EGRESS_BROKER",
 	"XRAY_RESOLVER", "DNS_EGRESS_RESOLVER",
-	"DNS_BASE_DOMAIN", "DNS_CONSOLE_DOMAIN", "DNS_ZASH_DOMAIN", "DNS_PROFILE_DOMAIN",
+	"DNS_BASE_DOMAIN", "DNS_CONSOLE_DOMAIN", "DNS_ZASH_DOMAIN",
 	"DNS_MIHOMO_CONTROLLER", "DNS_MIHOMO_SECRET", "DNS_WHITELIST_FILE",
 	"DNS_ZASH_DIR", "DNS_ZASH_LISTEN", "DNS_ZASH_CERT", "DNS_ZASH_KEY",
 }
@@ -157,6 +157,15 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 	if len(cfg.TGBotAdmins) != 0 {
 		t.Errorf("TGBotAdmins default = %v, want empty set", cfg.TGBotAdmins)
+	}
+	if cfg.TGBotProxyURL != "" {
+		t.Errorf("TGBotProxyURL default = %q, want empty", cfg.TGBotProxyURL)
+	}
+	if cfg.TGBotFile != "/etc/5gpn/tgbot.json" {
+		t.Errorf("TGBotFile default = %q", cfg.TGBotFile)
+	}
+	if cfg.TGBotAlerts {
+		t.Error("TGBotAlerts default = true, want false")
 	}
 
 	// iOS profile files (served at the control server's public /ios/ path).
@@ -399,6 +408,9 @@ func TestLoadConfig_TGBot(t *testing.T) {
 	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
 	t.Setenv("TGBOT_TOKEN", "12345:abcdef")
 	t.Setenv("TGBOT_ADMINS", "111, 222 333")
+	t.Setenv("DNS_TGBOT_FILE", "/tmp/test-tgbot.json")
+	t.Setenv("TGBOT_PROXY_URL", "http://127.0.0.1:7890")
+	t.Setenv("TGBOT_ALERTS", "true")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -406,6 +418,15 @@ func TestLoadConfig_TGBot(t *testing.T) {
 	}
 	if cfg.TGBotToken != "12345:abcdef" {
 		t.Errorf("TGBotToken = %q, want %q", cfg.TGBotToken, "12345:abcdef")
+	}
+	if cfg.TGBotProxyURL != "http://127.0.0.1:7890" {
+		t.Errorf("TGBotProxyURL = %q", cfg.TGBotProxyURL)
+	}
+	if cfg.TGBotFile != "/tmp/test-tgbot.json" {
+		t.Errorf("TGBotFile = %q", cfg.TGBotFile)
+	}
+	if !cfg.TGBotAlerts {
+		t.Error("TGBotAlerts = false, want true")
 	}
 	want := map[int64]bool{111: true, 222: true, 333: true}
 	if len(cfg.TGBotAdmins) != len(want) {
@@ -415,6 +436,31 @@ func TestLoadConfig_TGBot(t *testing.T) {
 		if !cfg.TGBotAdmins[id] {
 			t.Errorf("TGBotAdmins missing %d; got %v", id, cfg.TGBotAdmins)
 		}
+	}
+}
+
+func TestLoadConfig_TGBotProxyValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		proxy   string
+		wantErr bool
+	}{
+		{name: "http", proxy: "http://127.0.0.1:7890"},
+		{name: "https with auth", proxy: "https://user:secret@proxy.example:8443"},
+		{name: "socks rejected", proxy: "socks5://127.0.0.1:7890", wantErr: true},
+		{name: "missing host", proxy: "http://", wantErr: true},
+		{name: "path rejected", proxy: "http://proxy.example/not-a-proxy-path", wantErr: true},
+		{name: "query rejected", proxy: "http://proxy.example?x=1", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearAllDNSEnv(t)
+			t.Setenv("DNS_LISTEN_DOT", "")
+			t.Setenv("TGBOT_PROXY_URL", tc.proxy)
+			_, err := LoadConfig()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("LoadConfig() error = %v, wantErr=%v", err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -778,9 +824,6 @@ func TestLoadConfig_MihomoKnobs(t *testing.T) {
 		if cfg.ZashDomain != "" {
 			t.Errorf("ZashDomain default = %q, want empty", cfg.ZashDomain)
 		}
-		if cfg.ProfileDomain != "" {
-			t.Errorf("ProfileDomain default = %q, want empty", cfg.ProfileDomain)
-		}
 		if cfg.MihomoController != "127.0.0.1:9090" {
 			t.Errorf("MihomoController default = %q, want 127.0.0.1:9090", cfg.MihomoController)
 		}
@@ -799,7 +842,6 @@ func TestLoadConfig_MihomoKnobs(t *testing.T) {
 		t.Setenv("DNS_BASE_DOMAIN", "5gpn.example.com")
 		t.Setenv("DNS_CONSOLE_DOMAIN", "console.5gpn.example.com")
 		t.Setenv("DNS_ZASH_DOMAIN", "zash.5gpn.example.com")
-		t.Setenv("DNS_PROFILE_DOMAIN", "profiles.5gpn.example.com")
 		t.Setenv("DNS_MIHOMO_CONTROLLER", "127.0.0.1:9999")
 		t.Setenv("DNS_MIHOMO_SECRET", "s3cr3t")
 		t.Setenv("DNS_WHITELIST_FILE", "/opt/5gpn/whitelist.txt")
@@ -817,9 +859,6 @@ func TestLoadConfig_MihomoKnobs(t *testing.T) {
 		if cfg.ZashDomain != "zash.5gpn.example.com" {
 			t.Errorf("ZashDomain = %q, want zash.5gpn.example.com", cfg.ZashDomain)
 		}
-		if cfg.ProfileDomain != "profiles.5gpn.example.com" {
-			t.Errorf("ProfileDomain = %q, want profiles.5gpn.example.com", cfg.ProfileDomain)
-		}
 		if cfg.MihomoController != "127.0.0.1:9999" {
 			t.Errorf("MihomoController = %q, want 127.0.0.1:9999", cfg.MihomoController)
 		}
@@ -831,20 +870,6 @@ func TestLoadConfig_MihomoKnobs(t *testing.T) {
 		}
 	})
 
-	t.Run("profile domain derives from base", func(t *testing.T) {
-		clearAllDNSEnv(t)
-		t.Setenv("DNS_CERT", "/c")
-		t.Setenv("DNS_KEY", "/k")
-		t.Setenv("DNS_BASE_DOMAIN", "5gpn.example.com.")
-
-		cfg, err := LoadConfig()
-		if err != nil {
-			t.Fatalf("LoadConfig: %v", err)
-		}
-		if cfg.ProfileDomain != "profile.5gpn.example.com" {
-			t.Errorf("ProfileDomain = %q, want derived profile.5gpn.example.com", cfg.ProfileDomain)
-		}
-	})
 }
 
 func TestLoadConfigRejectsOutOfRangeUpstreamPorts(t *testing.T) {

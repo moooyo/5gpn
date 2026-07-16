@@ -58,7 +58,7 @@ const en = {
       resolveTest: "Enter any domain to simulate 5gpn-dns's resolution decision",
       policyRules: 'Unified intent rules — one matcher → block/direct/proxy in the DNS engine',
       mihomo: 'Kernel health + live logs · read-only, deep ops in zashboard',
-      mihomoConfig: 'Edit the whole effective mihomo config · seven infrastructure invariants required',
+      mihomoConfig: 'Edit the whole effective mihomo config · six infrastructure invariants required',
       settings: 'System and service configuration',
     },
   },
@@ -82,6 +82,10 @@ const en = {
     tgbot: 'Telegram bot',
     tgbotStatus: 'Status',
     tgbotStateStopped: 'Stopped',
+    tgbotState_disabled: 'Disabled',
+    tgbotState_starting: 'Connecting',
+    tgbotState_healthy: 'Healthy',
+    tgbotState_degraded: 'Degraded',
     tgbotToken: 'Bot token',
     tgbotTokenPlaceholder: 'paste the token from @BotFather',
     tgbotTokenKeep: 'token set — leave blank to keep it',
@@ -91,7 +95,7 @@ const en = {
     tgbotAdminsHint:
       'Only these Telegram numeric user IDs may control the bot. An admin can DM the bot /id to learn theirs. Empty = the bot runs but denies everyone.',
     tgbotSave: 'Save & apply',
-    tgbotSaved: 'Applied — the bot was restarted with the new config.',
+    tgbotSaved: 'Telegram bot configuration applied.',
     tgbotSaveFailed: 'Save failed.',
     // Task 4.3 — Settings page card grid (DoT service / console / Telegram bot / upstream DNS / ECS / about strip)
     greenfieldTip: 'Managed by the CLI/SP-C for now',
@@ -358,7 +362,7 @@ const en = {
   },
   mihomoConfig: {
     intro:
-      'Edit the raw mihomo config as one whole document — there is no daemon-owned region to protect anymore. The server enforces the seven infrastructure invariants below and will refuse any edit that deletes one of them.',
+      'Edit the raw mihomo config as one whole document — there is no daemon-owned region to protect anymore. The server enforces the six infrastructure invariants below and will refuse any edit that deletes one of them.',
     loadFailed: 'Failed to load the mihomo config.',
     editorLabel: 'mihomo config (YAML)',
     controllerReachable: 'Controller reachable',
@@ -382,15 +386,11 @@ const en = {
       dns: { name: 'Our DNS', desc: 'a dns block whose nameserver includes the egress broker udp://127.0.0.1:5354.' },
       console: {
         name: 'Console SNI split',
-        desc: 'the console domain mapped to its loopback panel, with a whitelist-gated DIRECT rule and REJECT-DROP guard.',
+        desc: 'the console domain routes publicly DIRECT to its loopback panel; the SPA and /ios/ are public while /api/* still requires a bearer token.',
       },
       zash: {
         name: 'zash SNI split',
         desc: 'the zash domain mapped to its loopback panel, with a whitelist-gated DIRECT rule and REJECT-DROP guard.',
-      },
-      profile: {
-        name: 'Profile bootstrap SNI',
-        desc: 'the profile domain mapped to 127.0.0.1 with an unrestricted DIRECT rule; the daemon limits that SNI to /ios/.',
       },
       antiloop: { name: 'Anti-loop REJECT-DROP', desc: 'an IP-CIDR REJECT-DROP guard for the gateway itself.' },
     },

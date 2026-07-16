@@ -70,9 +70,10 @@ config="$MIHOMO_DIR/config.yaml"
 [[ -s "$config" && "$(stat -c %a "$config" 2>/dev/null || stat -f %Lp "$config")" == 600 ]] \
     && pass "first install seeds a private mihomo config" \
     || fail "first-install mihomo config missing or not mode 0600"
-grep -Fq 'profile.example.com: 127.0.0.1' "$config" \
-    && pass "seed contains isolated profile host mapping" \
-    || fail "seed lacks profile host mapping"
+grep -Fq 'console.example.com: 127.0.0.1' "$config" \
+    && grep -Fq 'DOMAIN,console.example.com,DIRECT' "$config" \
+    && pass "seed contains public console mapping" \
+    || fail "seed lacks public console mapping"
 printf '%s\n' '# operator edit must survive' >> "$config"
 before="$(sha256sum "$config" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$config" | awk '{print $1}')"
 render_mihomo_config >/dev/null
@@ -115,6 +116,12 @@ if safe_zashboard_path >/dev/null 2>&1; then
     fail "filesystem root accepted as DNS_ZASH_DIR"
 else
     pass "system root is rejected as DNS_ZASH_DIR"
+fi
+DNS_ZASH_DIR=/etc/5gpn-unowned-panel
+if safe_zashboard_path >/dev/null 2>&1; then
+    fail "system-directory descendant accepted as DNS_ZASH_DIR"
+else
+    pass "system-directory descendants are rejected as panel cleanup paths"
 fi
 
 # Generic sing-box paths and unit names do not prove 5gpn ownership.
@@ -190,9 +197,9 @@ remove_legacy_firewall >/dev/null
     || fail "ordinary nftables table was deleted"
 NFT_MODE=fingerprint
 remove_legacy_firewall >/dev/null
-grep -qx 'delete table inet filter' "$NFT_LOG" \
-    && pass "strongly fingerprinted legacy 5gpn table is deleted precisely" \
-    || fail "fingerprinted legacy table was not deleted precisely"
+[[ ! -s "$NFT_LOG" ]] \
+    && pass "mixed-ownership legacy inet/filter table is preserved for manual migration" \
+    || fail "fingerprinted generic host table was deleted wholesale"
 
 # Service activation errors must propagate instead of falling through to the
 # final "install complete" card.
@@ -210,26 +217,27 @@ else
     pass "service start failure propagates as a non-zero installer result"
 fi
 
-# Profile DNS is fail-closed unless the explicit staged-deployment bypass is
-# selected.
-PROFILE_DOMAIN=profile.example.com
+# Public console DNS is fail-closed.
+CONSOLE_DOMAIN=console.example.com
 PUBLIC_IP=198.51.100.9
 GATEWAY_IP=10.20.30.40
 dig() { echo 198.51.100.9; }
-verify_profile_dns >/dev/null \
-    && pass "profile A matching PUBLIC_IP passes bootstrap verification" \
-    || fail "matching profile A was rejected"
+verify_console_dns >/dev/null \
+    && pass "console A matching PUBLIC_IP passes bootstrap verification" \
+    || fail "matching console A was rejected"
 dig() { echo 203.0.113.8; }
-if verify_profile_dns >/dev/null 2>&1; then
-    fail "mismatched profile A passed bootstrap verification"
+if verify_console_dns >/dev/null 2>&1; then
+    fail "mismatched console A passed bootstrap verification"
 else
-    pass "mismatched profile A fails closed"
+    pass "mismatched console A fails closed"
 fi
-SKIP_PROFILE_DNS_CHECK=1
-verify_profile_dns >/dev/null \
-    && pass "explicit SKIP_PROFILE_DNS_CHECK bypass works" \
-    || fail "explicit profile DNS bypass was rejected"
-unset SKIP_PROFILE_DNS_CHECK
+SKIP_CONSOLE_DNS_CHECK=1
+if verify_console_dns >/dev/null 2>&1; then
+    fail "caller environment bypassed the console DNS safety gate"
+else
+    pass "console DNS gate ignores caller environment bypasses"
+fi
+unset SKIP_CONSOLE_DNS_CHECK
 
 # Static gates for operations that are intentionally not executed in a unit
 # test (root binary install, systemd, certificate issuance, network fallback).
@@ -249,9 +257,10 @@ fi
 grep -Fq 'checksum is missing or invalid; refusing to install' "$INSTALL" \
     && pass "gum missing/invalid checksum fails closed to plain output" \
     || fail "gum checksum absence is not fail-closed"
-grep -Fq 'Pinned tag ${DNS_VERSION} is unavailable; refusing to use main.' "$QUICK" \
-    && pass "pinned quick install never falls forward to main" \
-    || fail "pinned quick install can fall forward to main"
+grep -Fq 'Release tag ${tag} is unavailable; refusing to use a branch.' "$QUICK" \
+    && ! grep -Fq 'origin main' "$QUICK" \
+    && pass "quick install fallback stays on the resolved release tag" \
+    || fail "quick install can fall forward to a branch"
 grep -Fq '5gpn-quick-install-v1' "$QUICK" \
     && ! grep -Eq '^[[:space:]]*rm -rf "\$SRC"' "$QUICK" \
     && pass "quick-install cleanup is ownership-marker gated" \

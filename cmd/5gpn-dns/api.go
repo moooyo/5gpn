@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	telegram "github.com/go-telegram/bot"
 )
 
 const mihomoControllerUnavailableMsg = "mihomo controller unavailable"
@@ -62,8 +64,8 @@ func init() {
 // public /ios/ profile path. It is a separate listener from the DNS-facing DoT
 // server (Servers in server.go) — different port, different purpose (admin,
 // not resolution). It binds loopback only (cfg.ListenAPI); mihomo fronts it
-// on :443 via the SNI split and source-IP allowlisting happens there, before
-// a connection ever reaches this listener.
+// on :443 via the public console SNI split. The SPA and /ios/ are public;
+// every /api/* request still requires the console bearer token.
 type ControlServer struct {
 	srv     *http.Server
 	zashSrv *http.Server // second loopback panel (zashboard); nil when cfg.ZashListen == ""
@@ -96,7 +98,7 @@ type ControlServer struct {
 	// mihomoProxy is the secret-injecting loopback proxy used only by the
 	// authenticated health endpoint and the ticket-gated log WebSocket. It is
 	// deliberately not mounted directly: exposing the raw controller subtree
-	// would let any source-allowlisted visitor mutate mihomo without the console
+	// would let any public console visitor mutate mihomo without the console
 	// bearer token.
 	mihomoProxy http.Handler
 
@@ -182,25 +184,7 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 	mux.Handle("/proxy/", s.consoleMihomoProxy())
 	mux.Handle("/", webUI)
 
-	var consoleHandler http.Handler = mux
-	if cfg.ProfileDomain != "" {
-		// The public bootstrap SNI bypasses the admin source-IP whitelist in
-		// mihomo, so it must never be able to reach the console API or SPA. Route
-		// by the TLS SNI (not merely Host, which a client can spoof) and require
-		// the HTTP authority to agree before serving only /ios/.
-		profileMux := http.NewServeMux()
-		profileMux.Handle("/ios/", ios)
-		profileMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/" {
-				http.Redirect(w, r, "/ios/", http.StatusTemporaryRedirect)
-				return
-			}
-			http.NotFound(w, r)
-		})
-		consoleHandler = profileSNIRouter(cfg.ProfileDomain, mux, profileMux)
-	}
-
-	s.srv = buildPanelServer(cfg.ListenAPI, securityHeadersMiddleware(consoleHandler), webCert, webKey)
+	s.srv = buildPanelServer(cfg.ListenAPI, securityHeadersMiddleware(mux), webCert, webKey)
 
 	if cfg.ZashListen != "" {
 		if zashCert == "" || zashKey == "" {
@@ -233,40 +217,6 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 func unavailableMihomoProxy() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, mihomoControllerUnavailableMsg)
-	})
-}
-
-// canonicalHTTPHost normalises a TLS SNI or HTTP authority for exact routing.
-// ProfileDomain is a DNS name, so lowercasing and trimming one trailing dot is
-// sufficient; an optional HTTP port is removed first.
-func canonicalHTTPHost(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if host, _, err := net.SplitHostPort(raw); err == nil {
-		raw = host
-	}
-	return strings.ToLower(strings.TrimSuffix(strings.Trim(raw, "[]"), "."))
-}
-
-// profileSNIRouter makes the public bootstrap domain a separate security
-// surface while reusing the console's loopback TLS listener and wildcard cert.
-// Routing on r.TLS.ServerName is load-bearing: Host alone is attacker-chosen,
-// and the profile SNI deliberately bypasses the panel source-IP whitelist.
-func profileSNIRouter(profileDomain string, console, profile http.Handler) http.Handler {
-	want := canonicalHTTPHost(profileDomain)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sni := ""
-		if r.TLS != nil {
-			sni = canonicalHTTPHost(r.TLS.ServerName)
-		}
-		if want != "" && sni == want {
-			if canonicalHTTPHost(r.Host) != want {
-				http.Error(w, "misdirected request", http.StatusMisdirectedRequest)
-				return
-			}
-			profile.ServeHTTP(w, r)
-			return
-		}
-		console.ServeHTTP(w, r)
 	})
 }
 
@@ -573,9 +523,14 @@ func (s *ControlServer) handleTGBotSet(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, ErrTGBotUnavailable):
 			status = http.StatusServiceUnavailable
-		case strings.Contains(err.Error(), "telegram bot:"):
-			// A bad token (getMe failed) is a client error, not a server fault.
+		case errors.Is(err, errBotConfigSuperseded):
+			status = http.StatusConflict
+		case errors.Is(err, telegram.ErrorUnauthorized), errors.Is(err, telegram.ErrorForbidden):
 			status = http.StatusBadRequest
+		case strings.Contains(err.Error(), "telegram bot:"):
+			// Transient Telegram/proxy/webhook-preflight failures are an upstream
+			// availability problem. The old live bot remains untouched.
+			status = http.StatusBadGateway
 		}
 		writeErr(w, status, err.Error())
 		return

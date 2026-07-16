@@ -19,9 +19,9 @@ material, especially `docs/multi-exit-status.md`, is archived context only.
 - `/etc/5gpn/mihomo/config.yaml` is fully operator-owned. Normal install and
   `change-*` operations preserve a valid existing file. Only explicit reset may
   replace it, after `mihomo -t`, backup, and atomic rename.
-- `profile.<base>` is a public bootstrap SNI that may expose only `/ios/`.
-  Console and zashboard remain source-allowlisted. Never widen the profile host
-  to the SPA, `/api`, or `/proxy`.
+- `console.<base>` is the public bootstrap/console SNI: the SPA and `/ios/` are
+  public, while every `/api/*` request still requires the console bearer token.
+  Do not introduce a separate bootstrap hostname. zashboard remains source-allowlisted.
 - `/api/*` requires the console bearer token. Console mihomo logs use a
   short-lived one-use WebSocket ticket. Do not expose the full controller under
   the console `/proxy/`; zashboard has a separate allowlisted pass-through.
@@ -42,7 +42,8 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   so it is Gum-aware-if-present with an ANSI fallback.
 - Every Gum interaction (`input`, `choose`, `confirm`) is gated on `[[ -t 0 ]]`.
   `main()` must call `attach_tty` first so `curl | sudo bash` can reattach
-  `/dev/tty`; truly headless runs use environment values and never block.
+  `/dev/tty`; first install without a TTY fails closed, while reinstall may use
+  an already persisted valid `dns.env`. Caller environment is never config input.
 - Prompt captures must tolerate cancel under `set -e`, for example
   `value="$(ask_text '…' || true)"`.
 - `gum_spin` wraps opaque waits only, never commands whose output the operator

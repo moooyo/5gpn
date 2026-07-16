@@ -14,16 +14,16 @@ const textareaClass =
   'w-full min-h-[440px] resize-y rounded-[10px] border border-input-border bg-input px-3 py-2.5 font-mono text-[12px] leading-relaxed text-text-strong outline-none disabled:opacity-60'
 
 // The design doc's §4.4 table, in order — kept as data so the JSX below is a
-// plain map rather than seven near-identical <li> blocks.
-const INVARIANT_KEYS = ['controller', 'sniproxy', 'dns', 'console', 'zash', 'profile', 'antiloop'] as const
+// plain map rather than six near-identical <li> blocks.
+const INVARIANT_KEYS = ['controller', 'sniproxy', 'dns', 'console', 'zash', 'antiloop'] as const
 
 /** mihomo config editor (UP-4 §4, Task 11) — the operator edits the WHOLE
  *  effective mihomo config as one raw-text document (`/api/mihomo/config`).
  *  There is no daemon-owned region left to protect (the structured egress
- *  projection is gone) — instead the server enforces seven infrastructure
+ *  projection is gone) — instead the server enforces six infrastructure
  *  invariants (§4.4, listed read-only below) it will refuse to let an edit
  *  delete, because those are the box's own lifelines: the controller, the
- *  sniproxy inbound, our DNS steering broker, the console/zash/profile SNI
+ *  sniproxy inbound, our DNS steering broker, the console/zash SNI
  *  split, and the anti-loop guard. A rejected PUT/reset comes back as a 400 whose
  *  message names the missing invariant or carries `mihomo -t`'s stderr
  *  verbatim; that message is surfaced as a PERSISTENT banner (not just a

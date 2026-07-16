@@ -15,7 +15,6 @@ func goldenInfraParams() InfraParams {
 	return InfraParams{
 		ConsoleDomain:    "console.5gpn.test",
 		ZashDomain:       "zash.5gpn.test",
-		ProfileDomain:    "profile.5gpn.test",
 		GatewayIP:        "10.0.1.20",
 		Controller:       "127.0.0.1:9090",
 		ControllerSecret: "s3cr3t",
@@ -30,7 +29,6 @@ func goldenMihomoConfig() string {
 	r := strings.NewReplacer(
 		"__CONSOLE_DOMAIN__", "console.5gpn.test",
 		"__ZASH_DOMAIN__", "zash.5gpn.test",
-		"__PROFILE_DOMAIN__", "profile.5gpn.test",
 		"__MIHOMO_LISTENERS__", renderMihomoListeners([]string{"203.0.113.10"}),
 		"__GATEWAY_IP__", "10.0.1.20",
 		"__CONTROLLER_SECRET__", "s3cr3t",
@@ -44,23 +42,25 @@ func TestMihomoInvariants_GoldenPasses(t *testing.T) {
 	}
 }
 
-func TestMihomoInvariants_ProfileSNIMustStayPublicAndDirect(t *testing.T) {
+func TestMihomoInvariants_ConsoleSNIMustStayPublicAndDirect(t *testing.T) {
 	p := goldenInfraParams()
-	withProfile := goldenMihomoConfig()
-	if err := ValidateInvariants(withProfile, p); err != nil {
-		t.Fatalf("valid public profile split rejected: %v", err)
+	withConsole := goldenMihomoConfig()
+	if err := ValidateInvariants(withConsole, p); err != nil {
+		t.Fatalf("valid public console split rejected: %v", err)
 	}
 
 	for _, broken := range []string{
-		strings.Replace(withProfile, "  profile.5gpn.test: 127.0.0.1\n", "", 1),
-		strings.Replace(withProfile, "  - DOMAIN,profile.5gpn.test,DIRECT\n", "", 1),
-		strings.Replace(withProfile, "  - DOMAIN,profile.5gpn.test,DIRECT\n",
-			"  - AND,((DOMAIN,profile.5gpn.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT\n", 1),
+		strings.Replace(withConsole, "  console.5gpn.test: 127.0.0.1\n", "", 1),
+		strings.Replace(withConsole, "  - DOMAIN,console.5gpn.test,DIRECT\n", "", 1),
+		strings.Replace(withConsole, "  - DOMAIN,console.5gpn.test,DIRECT\n",
+			"  - AND,((DOMAIN,console.5gpn.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT\n", 1),
+		strings.Replace(withConsole, "  - DOMAIN,console.5gpn.test,DIRECT\n",
+			"  - DOMAIN,console.5gpn.test,DIRECT\n  - DOMAIN,console.5gpn.test,REJECT-DROP\n", 1),
 	} {
 		err := ValidateInvariants(broken, p)
 		var missing *ErrMissingInfra
-		if !errors.As(err, &missing) || missing.Name != "profile-sni" {
-			t.Fatalf("broken profile split error = %v, want profile-sni", err)
+		if !errors.As(err, &missing) || missing.Name != "console-sni" {
+			t.Fatalf("broken console split error = %v, want console-sni", err)
 		}
 	}
 }
@@ -197,17 +197,10 @@ func TestMihomoInvariants_MissingElement(t *testing.T) {
 			wantName: "console-sni",
 		},
 		{
-			name: "console REJECT-DROP guard removed",
-			mutate: func(cfg string) string {
-				return strings.Replace(cfg, "  - DOMAIN,console.5gpn.test,REJECT-DROP\n", "", 1)
-			},
-			wantName: "console-sni",
-		},
-		{
-			name: "console whitelist-gated DIRECT rule removed",
+			name: "console public DIRECT rule removed",
 			mutate: func(cfg string) string {
 				return strings.Replace(cfg,
-					"  - AND,((DOMAIN,console.5gpn.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT\n",
+					"  - DOMAIN,console.5gpn.test,DIRECT\n",
 					"", 1)
 			},
 			wantName: "console-sni",
@@ -227,9 +220,8 @@ func TestMihomoInvariants_MissingElement(t *testing.T) {
 			wantName: "zash-sni",
 		},
 		{
-			// Symmetric to the "console whitelist-gated DIRECT rule removed"
-			// case above (Unit-B review): the zash panel gets the exact same
-			// AND(...)-shaped rule, and its removal must be caught the same way.
+			// Zashboard remains source-allowlisted, so its AND(...)-shaped rule
+			// is still a required invariant.
 			name: "zash whitelist-gated DIRECT rule removed",
 			mutate: func(cfg string) string {
 				return strings.Replace(cfg,
@@ -320,7 +312,6 @@ func TestMihomoInvariants_ControllerAndDNSBrokerAreLiteral(t *testing.T) {
 
 	t.Setenv("DNS_CONSOLE_DOMAIN", "console.5gpn.test")
 	t.Setenv("DNS_ZASH_DOMAIN", "zash.5gpn.test")
-	t.Setenv("DNS_PROFILE_DOMAIN", "profile.5gpn.test")
 	t.Setenv("DNS_MIHOMO_LISTEN_IPS", "203.0.113.10")
 	t.Setenv("DNS_GATEWAY_IP", "10.0.1.20")
 	t.Setenv("DNS_MIHOMO_SECRET", "s3cr3t")
@@ -366,7 +357,6 @@ func TestMihomoConfigStore_ReadAndDefault(t *testing.T) {
 
 	t.Setenv("DNS_CONSOLE_DOMAIN", "console.5gpn.test")
 	t.Setenv("DNS_ZASH_DOMAIN", "zash.5gpn.test")
-	t.Setenv("DNS_PROFILE_DOMAIN", "profile.5gpn.test")
 	t.Setenv("DNS_MIHOMO_LISTEN_IPS", "203.0.113.10")
 	t.Setenv("DNS_GATEWAY_IP", "10.0.1.20")
 	t.Setenv("DNS_MIHOMO_SECRET", "s3cr3t")
@@ -385,7 +375,6 @@ func TestInfraParamsFromConfig(t *testing.T) {
 	cfg := Config{
 		ConsoleDomain:    "console.5gpn.test",
 		ZashDomain:       "zash.5gpn.test",
-		ProfileDomain:    "profile.5gpn.test",
 		MihomoController: "127.0.0.1:9090",
 		EgressBrokerAddr: "127.0.0.1:5354",
 	}
@@ -394,7 +383,6 @@ func TestInfraParamsFromConfig(t *testing.T) {
 	want := InfraParams{
 		ConsoleDomain:   "console.5gpn.test",
 		ZashDomain:      "zash.5gpn.test",
-		ProfileDomain:   "profile.5gpn.test",
 		GatewayIP:       "10.0.1.20",
 		Controller:      "127.0.0.1:9090",
 		EgressBrokerDNS: "udp://127.0.0.1:5354",
@@ -419,7 +407,6 @@ func TestInfraParamsFromConfig_EmptyGatewayAndBroker(t *testing.T) {
 func TestMihomoConfigDefaultRendersPluralListeners(t *testing.T) {
 	t.Setenv("DNS_CONSOLE_DOMAIN", "console.5gpn.test")
 	t.Setenv("DNS_ZASH_DOMAIN", "zash.5gpn.test")
-	t.Setenv("DNS_PROFILE_DOMAIN", "profile.5gpn.test")
 	t.Setenv("DNS_GATEWAY_IP", "10.0.1.20")
 	t.Setenv("DNS_PUBLIC_IP", "203.0.113.10")
 	t.Setenv("DNS_MIHOMO_LISTEN_IPS", "10.0.1.20, 203.0.113.10,10.0.1.20")
@@ -445,8 +432,6 @@ func TestMihomoConfigDefaultLegacyFallbackAndFailClosed(t *testing.T) {
 	setInfra := func() InfraParams {
 		t.Setenv("DNS_CONSOLE_DOMAIN", "console.5gpn.test")
 		t.Setenv("DNS_ZASH_DOMAIN", "zash.5gpn.test")
-		t.Setenv("DNS_BASE_DOMAIN", "5gpn.test.")
-		t.Setenv("DNS_PROFILE_DOMAIN", "")
 		t.Setenv("DNS_MIHOMO_SECRET", "s3cr3t")
 		return goldenInfraParams()
 	}
@@ -456,7 +441,7 @@ func TestMihomoConfigDefaultLegacyFallbackAndFailClosed(t *testing.T) {
 	t.Setenv("DNS_PUBLIC_IP", "203.0.113.10")
 	p.GatewayIP = "127.0.0.1"
 	def := NewMihomoConfigStore(filepath.Join(t.TempDir(), "config.yaml")).Default()
-	if !strings.Contains(def, "listen: 203.0.113.10") || !strings.Contains(def, "profile.5gpn.test: 127.0.0.1") {
+	if !strings.Contains(def, "listen: 203.0.113.10") || !strings.Contains(def, "console.5gpn.test: 127.0.0.1") {
 		t.Fatalf("legacy/default derivation missing from:\n%s", def)
 	}
 	if err := ValidateInvariants(def, p); err != nil {

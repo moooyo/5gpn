@@ -16,12 +16,13 @@ grep -Fq 'install_5gpndns'                  "$INSTALL" || fail "install.sh: no i
 grep -Fq '5gpn-dns-linux-amd64'             "$INSTALL" || fail "install.sh: does not download 5gpn-dns-linux-amd64"
 grep -Fq 'moooyo/5gpn'                      "$INSTALL" || fail "install.sh: release URL not from moooyo/5gpn"
 grep -Fq 'DNS_VERSION'                      "$INSTALL" || fail "install.sh: no DNS_VERSION var"
-grep -Fq 'DNS_SHA256'                       "$INSTALL" || fail "install.sh: no opt-in DNS_SHA256"
+grep -Fq 'release_checksum "$ARTIFACT_STAGE/checksums.txt" "$dns_asset"' "$INSTALL" \
+    || fail "install.sh: 5gpn-dns does not use mandatory release checksum"
 
 # --- etc/systemd/5gpn-dns.service: must exist with required directives ---
 [ -f "$DNS_SVC" ] || fail "etc/systemd/5gpn-dns.service does not exist"
 grep -Fq 'EnvironmentFile=/etc/5gpn/dns.env' "$DNS_SVC" || fail "5gpn-dns.service: no EnvironmentFile=/etc/5gpn/dns.env"
-grep -Fq 'ExecStart=/usr/local/bin/5gpn-dns' "$DNS_SVC" || fail "5gpn-dns.service: no ExecStart=/usr/local/bin/5gpn-dns"
+grep -Fq 'ExecStart=/opt/5gpn/bin/5gpn-dns' "$DNS_SVC" || fail "5gpn-dns.service: binary is not project-private"
 grep -Fq 'ExecReload=/bin/kill -HUP $MAINPID' "$DNS_SVC" || fail "5gpn-dns.service: no ExecReload=HUP"
 grep -Fq 'NoNewPrivileges=yes'               "$DNS_SVC" || fail "5gpn-dns.service: no NoNewPrivileges"
 grep -Fq 'ProtectSystem=strict'              "$DNS_SVC" || fail "5gpn-dns.service: no ProtectSystem=strict"
@@ -279,8 +280,11 @@ grep -Fq 'DNS_EGRESS_NODES=' "$INSTALL" \
     || fail "install.sh: env migration does not drop retired DNS_EGRESS_NODES"
 
 # the two default §7 list URLs are env-overridable
-grep -Fq 'CHINA_LIST_URL' "$INSTALL" || fail "install.sh: china-list URL not env-overridable (CHINA_LIST_URL)"
-grep -Fq 'GFW_URL'        "$INSTALL" || fail "install.sh: gfw URL not env-overridable (GFW_URL)"
+grep -Fq 'felixonmars/dnsmasq-china-list' "$INSTALL" || fail "install.sh: fixed china-list seed URL missing"
+grep -Fq 'Loyalsoldier/v2ray-rules-dat' "$INSTALL" || fail "install.sh: fixed gfw seed URL missing"
+seed_fn="$(sed -n '/^seed_policy_defaults()/,/^}/p' "$INSTALL")"
+printf '%s' "$seed_fn" | grep -Eq 'CHINA_LIST_URL|GFW_URL' \
+    && fail "install.sh: policy seed URLs still accept caller environment overrides"
 grep -Fq 'accelerated-domains.china.conf'  "$INSTALL" || fail "install.sh: missing dnsmasq-china-list default URL"
 grep -Fq 'v2ray-rules-dat'                 "$INSTALL" || fail "install.sh: missing gfw default URL"
 

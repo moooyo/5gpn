@@ -6,6 +6,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
 rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
 INSTALL="$ROOT/install.sh"
+TGBOT_HELPER="$ROOT/scripts/setup-tgbot.sh"
 
 # --- legacy python web control plane gone ---
 [ ! -e "$ROOT/api-server.py" ] || fail "api-server.py must be removed"
@@ -18,7 +19,8 @@ sed -n '/^clean_previous_install()/,/^}/p' "$INSTALL" | grep -Fq '5gpn-api.servi
 
 # --- gum bootstrap: prebuilt + verify, version-pinned, never fatal ---
 grep -Eq 'install_gum\(\)' "$INSTALL"                 || fail "no install_gum() bootstrap"
-grep -Eq 'GUM_VERSION:-0\.17\.0' "$INSTALL"           || fail "GUM_VERSION not pinned (default 0.17.0)"
+grep -Eq '^GUM_VERSION="0\.17\.0"' "$INSTALL"       || fail "GUM_VERSION not fixed at 0.17.0"
+grep -Fq 'GUM_BIN="${BIN_DIR}/gum"' "$INSTALL"       || fail "gum is not installed under the project-private bin dir"
 grep -Fq 'checksums.txt' "$INSTALL"                   || fail "gum not verified against release checksums"
 grep -Fq 'gum sha256 mismatch' "$INSTALL"             || fail "gum verify is not fail-closed"
 
@@ -28,8 +30,9 @@ grep -Fq '[INFO]' "$INSTALL"                          || fail "info() lost its e
 grep -Eq 'ask_secret\(\)' "$INSTALL"                  || fail "no ask_secret() prompt helper"
 grep -Fq 'gum input --password' "$INSTALL"            || fail "bot token not collected via gum --password"
 
-# --- non-TTY safety: gum prompts stay behind -t 0 (token prompt still guarded) ---
-grep -Eq '\[\[ -z "\$token" && -t 0 \]\]' "$INSTALL"  || fail "tgbot token prompt no longer TTY-gated"
+# --- non-TTY safety: Telegram configuration fails before prompts without a TTY ---
+grep -Fq 'Telegram configuration requires the TUI' "$INSTALL" \
+    || fail "tgbot configuration is not TTY-gated"
 
 [ $rc -eq 0 ] && echo "gum policy: PASS"
 exit $rc

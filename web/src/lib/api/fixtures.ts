@@ -5,9 +5,9 @@
 import type * as T from './types'
 
 // ---- mihomo config editor (UP-4 §4) ----------------------------------------
-// A minimal-but-realistic seed containing all seven infrastructure invariants
+// A minimal-but-realistic seed containing all six infrastructure invariants
 // (external-controller on the loopback controller; a :443 tunnel inbound;
-// the :5354 DNS broker; console/zash/profile SNI splits; the gateway-self anti-loop
+// the :5354 DNS broker; public console and allowlisted zash SNI splits; the gateway-self anti-loop
 // guard) so the default mock state is a VALID config the "current" and
 // "default" fixtures both start from.
 export const mihomoConfigDefaultText = `mixed-port: 7890
@@ -26,7 +26,6 @@ listeners:
 hosts:
   console.5gpn.test: 127.0.0.1
   zash.5gpn.test: 127.0.0.2
-  profile.5gpn.test: 127.0.0.1
 proxies: []
 proxy-providers: {}
 proxy-groups:
@@ -34,7 +33,6 @@ proxy-groups:
     type: select
     proxies: [DIRECT]
 rules:
-  - DOMAIN,profile.5gpn.test,DIRECT
   - DOMAIN,console.5gpn.test,DIRECT
   - DOMAIN,zash.5gpn.test,DIRECT
   - IP-CIDR,10.0.1.20/32,REJECT-DROP

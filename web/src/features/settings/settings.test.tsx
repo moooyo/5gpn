@@ -7,6 +7,7 @@ import { StatusContext, type StatusValue } from '../../lib/StatusContext'
 import { api } from '../../lib/api/client'
 import type { ECSView, Status, TGBotView, UpstreamsView } from '../../lib/api/types'
 import SettingsPage from './SettingsPage'
+import { TgbotCard } from './_cards'
 
 vi.mock('../../lib/api/client', () => ({
   api: {
@@ -21,7 +22,7 @@ vi.mock('../../lib/api/client', () => ({
 
 const UPSTREAMS: UpstreamsView = { china: ['223.5.5.5', '119.29.29.29'], trust: ['dns.google@8.8.8.8'] }
 const ECS: ECSView = { subnet: '122.96.30.0/24' }
-const TGBOT: TGBotView = { admins: [123456789], token_set: true, running: true }
+const TGBOT: TGBotView = { admins: [123456789], token_set: true, running: true, state: 'healthy' }
 
 function statusValue(overrides: Partial<StatusValue> = {}): StatusValue {
   return {
@@ -78,6 +79,17 @@ describe('SettingsPage', () => {
     expect(screen.getByDisplayValue('dns.google@8.8.8.8')).toBeInTheDocument()
     expect(screen.getByDisplayValue('122.96.30.0/24')).toBeInTheDocument()
     expect(screen.getByDisplayValue('123456789')).toBeInTheDocument()
+  })
+
+  it('aborts the in-flight Telegram health poll on unmount', async () => {
+    vi.mocked(api.getTgbot).mockImplementation(() => new Promise<TGBotView>(() => {}))
+    const view = renderSettings()
+    await waitFor(() => expect(api.getTgbot).toHaveBeenCalled())
+    const signal = vi.mocked(api.getTgbot).mock.calls[0]?.[0]
+    expect(signal).toBeInstanceOf(AbortSignal)
+    expect(signal?.aborted).toBe(false)
+    view.unmount()
+    expect(signal?.aborted).toBe(true)
   })
 
   it('cert status renders 有效 + days_remaining from status.cert', async () => {
@@ -179,6 +191,34 @@ describe('SettingsPage', () => {
     await waitFor(() => expect(api.putTgbot).toHaveBeenCalledWith({ admins: [123456789] }))
   })
 
+  it('shows the effective Telegram health state and last error', async () => {
+    vi.mocked(api.getTgbot).mockResolvedValue({
+      admins: [123456789],
+      token_set: true,
+      running: true,
+      state: 'degraded',
+      last_error: 'getUpdates conflict',
+    })
+    renderSettings()
+    expect(await screen.findByText(i18n.t('settings.tgbotState_degraded'))).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('getUpdates conflict')
+    expect(screen.getByRole('switch')).toBeChecked()
+  })
+
+  it('does not wipe an in-progress admin edit when only Telegram health changes', async () => {
+    const user = userEvent.setup()
+    const { rerender } = render(<TgbotCard tgbot={TGBOT} onSaved={() => {}} />)
+    const input = await screen.findByDisplayValue('123456789')
+    await user.type(input, ',222')
+    rerender(
+      <TgbotCard
+        tgbot={{ ...TGBOT, state: 'degraded', last_error: 'temporary outage' }}
+        onSaved={() => {}}
+      />,
+    )
+    expect(input).toHaveValue('123456789,222')
+  })
+
   it('saving tgbot after editing the token field includes token in the PUT body', async () => {
     const user = userEvent.setup()
     renderSettings()
@@ -203,7 +243,7 @@ describe('SettingsPage', () => {
   })
 
   it('turning the tgbot toggle on without a token set and without typing one shows an error toast instead of calling the API', async () => {
-    vi.mocked(api.getTgbot).mockResolvedValue({ admins: [], token_set: false, running: false })
+    vi.mocked(api.getTgbot).mockResolvedValue({ admins: [], token_set: false, running: false, state: 'disabled' })
     const user = userEvent.setup()
     renderSettings()
 

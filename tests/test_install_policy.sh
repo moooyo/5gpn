@@ -28,25 +28,15 @@ grep -Eq 'certbot renew'                "$INSTALL" || fail "renewal timer does n
 grep -Eq 'IOS_PORT=' "$INSTALL" && fail "install.sh must not reference IOS_PORT (:8111 responder removed)"
 grep -Fq '/ios/ios-dot.mobileconfig' "$INSTALL" \
     || fail "install.sh must print the /ios/ profile URL (web console path)"
-# GATEWAY_IP is prompted interactively at install (resolve_gateway_ip), defaults to
-# the detected PUBLIC_IP on a bare Enter / non-interactive install, and is editable
-# later via `5gpn change-gateway`. NPN operators enter/export the internal 172.22 addr.
-grep -Eq '^resolve_gateway_ip\(\)' "$INSTALL" \
-    || fail "no resolve_gateway_ip() (interactive install-time gateway IP prompt)"
-grep -Eq '^[[:space:]]*resolve_gateway_ip$' "$INSTALL" \
-    || fail "resolve_gateway_ip defined but never called in full_install"
-gw_fn="$(sed -n '/^resolve_gateway_ip()/,/^}/p' "$INSTALL")"
-printf '%s' "$gw_fn" | grep -Eq 'ask_text .*网关IP' \
-    || fail "resolve_gateway_ip does not prompt for the gateway IP"
-printf '%s' "$gw_fn" | grep -Fq 'GATEWAY_IP="$PUBLIC_IP"' \
-    || fail "resolve_gateway_ip does not default the gateway IP to PUBLIC_IP"
-
-# P0: install-time SNI resolver is prompted, persisted (to the single dns.env),
-# and env-overridable.
-grep -Eq 'XRAY_RESOLVER="?\$\{XRAY_RESOLVER:-\$\(cfg_get XRAY_RESOLVER\)\}' "$INSTALL" \
-    || fail "resolver not resolved from the single dns.env via cfg_get XRAY_RESOLVER"
-grep -Eq 'XRAY_RESOLVER'                       "$INSTALL" || fail "XRAY_RESOLVER not wired in install flow"
-grep -Eq 'ask_text .*(解析器|resolver)'         "$INSTALL" || fail "no resolver prompt"
+# First install is TUI-only; reinstall reads the persisted dns.env and caller
+# environment is explicitly cleared.
+grep -Eq '^configure_install_tui\(\)' "$INSTALL" || fail "no first-install TUI configuration wizard"
+grep -Eq '^load_persisted_install_config\(\)' "$INSTALL" || fail "no persisted installer config loader"
+grep -Eq '^clear_external_config_env\(\)' "$INSTALL" || fail "caller environment is not cleared"
+grep -Fq "First install/configuration requires an attached TTY" "$INSTALL" \
+    || fail "headless first install does not fail closed"
+grep -Eq "prompt_default .*网关|prompt_default .*Gateway" "$INSTALL" || fail "TUI has no gateway prompt"
+grep -Eq "prompt_default .*解析器|prompt_default .*resolver" "$INSTALL" || fail "TUI has no resolver prompt"
 
 # --- Frontend shipped separately + served from disk (not go:embed) ---
 grep -Eq 'install_web'          "$INSTALL" || fail "no install_web() to fetch the 5gpn-web tarball"
@@ -71,22 +61,12 @@ grep -Eq '^change_base_domain\(\)' "$INSTALL" || fail "no change_base_domain() (
 grep -Eq '^change_public_ip\(\)'  "$INSTALL" || fail "no change_public_ip() (menu 'modify public IP')"
 grep -Eq '^change_gateway\(\)'   "$INSTALL" || fail "no change_gateway() (menu 'modify gateway IP')"
 grep -Eq '^restart_services\(\)' "$INSTALL" || fail "no restart_services() (menu 'restart')"
-# change_base_domain must (re)issue the *.<base> wildcard, persist the base +
-# derived DoT domain, and re-render the mihomo config.
+# Legacy change commands are TUI-only compatibility wrappers around the single
+# transactional configuration/install path.
 cb_fn="$(sed -n '/^change_base_domain()/,/^}/p' "$INSTALL")"
-printf '%s' "$cb_fn" | grep -Fq 'install_cert "$new"' || fail "change_base_domain does not (re)issue the *.<base> wildcard cert"
-printf '%s' "$cb_fn" | grep -Fq 'set_dns_env_kv "${CONF_DIR}/dns.env" DNS_BASE_DOMAIN' \
-    || fail "change_base_domain does not persist DNS_BASE_DOMAIN into dns.env"
-printf '%s' "$cb_fn" | grep -Fq 'set_dns_env_kv "${CONF_DIR}/dns.env" DNS_DOMAIN' \
-    || fail "change_base_domain does not persist the derived DoT domain (DNS_DOMAIN)"
-printf '%s' "$cb_fn" | grep -Eq 'apply_domain_to_mihomo|render_mihomo_config' \
-    || fail "change_base_domain does not re-render the mihomo config"
-# change_public_ip must persist DNS_PUBLIC_IP + refresh the mihomo anti-loop list.
+printf '%s' "$cb_fn" | grep -Fq 'full_install configure' || fail "change_base_domain bypasses transactional TUI configure"
 cp_fn="$(sed -n '/^change_public_ip()/,/^}/p' "$INSTALL")"
-printf '%s' "$cp_fn" | grep -Fq 'set_dns_env_kv "${CONF_DIR}/dns.env" DNS_PUBLIC_IP' \
-    || fail "change_public_ip does not persist DNS_PUBLIC_IP into dns.env"
-printf '%s' "$cp_fn" | grep -Fq 'apply_gateway_to_mihomo' \
-    || fail "change_public_ip does not refresh the mihomo anti-loop blackhole"
+printf '%s' "$cp_fn" | grep -Fq 'full_install configure' || fail "change_public_ip bypasses transactional TUI configure"
 # Base-domain install flow: ONE base domain, the three service subdomains
 # (console./zash./dot.<base>) auto-derived by derive_domains.
 grep -Eq '^resolve_domains\(\)' "$INSTALL" || fail "no resolve_domains() (base-domain install prompt)"
@@ -100,12 +80,8 @@ dd_fn="$(sed -n '/^derive_domains()/,/^}/p' "$INSTALL")"
 printf '%s' "$dd_fn" | grep -Fq 'console.' || fail "derive_domains does not derive console.<base>"
 printf '%s' "$dd_fn" | grep -Fq 'zash.'    || fail "derive_domains does not derive zash.<base>"
 printf '%s' "$dd_fn" | grep -Fq 'dot.'     || fail "derive_domains does not derive dot.<base>"
-# change_gateway must persist DNS_GATEWAY_IP + refresh the mihomo anti-loop blackhole.
 cg_fn="$(sed -n '/^change_gateway()/,/^}/p' "$INSTALL")"
-printf '%s' "$cg_fn" | grep -Fq 'set_dns_env_kv "${CONF_DIR}/dns.env" DNS_GATEWAY_IP' \
-    || fail "change_gateway does not persist DNS_GATEWAY_IP into dns.env"
-printf '%s' "$cg_fn" | grep -Fq 'apply_gateway_to_mihomo' \
-    || fail "change_gateway does not refresh the mihomo anti-loop blackhole"
+printf '%s' "$cg_fn" | grep -Fq 'full_install configure' || fail "change_gateway bypasses transactional TUI configure"
 
 # --- Task 4: panel whitelist.txt TUI management + live controller refresh
 # (out-of-band; never web-editable, no full config reload). ---
@@ -187,20 +163,16 @@ printf '%s' "$cl_fn" | grep -Eq 'rm .*(\$\{?CONF_DIR|/etc/5gpn)' \
     && fail "clean_previous_install must not rm anything under /etc/5gpn (persisted)"
 printf '%s' "$cl_fn" | grep -Eq 'rm.*/etc/letsencrypt/(live|archive|renewal/)' \
     && fail "clean_previous_install must not remove the /etc/letsencrypt cert lineage"
-# It must not stop the live resolver/data plane (only legacy units are stopped):
-# no direct stop, and the CURRENT live unit (5gpn-dns) must never appear in the
-# disable --now legacy loop. xray is now a LEGACY unit (mihomo replaced it as the
-# data plane) and MUST appear in that loop, so a box upgrading from xray gets it
-# stopped/removed — otherwise it keeps holding :443 and mihomo can't bind.
+# It must not stop the live resolver/data plane. Legacy generic units are
+# handled only by ownership-gated helpers.
 printf '%s' "$cl_fn" | grep -Eq 'systemctl (stop|disable --now) (5gpn-dns|xray)' \
     && fail "clean_previous_install must not stop the running 5gpn-dns/xray"
 printf '%s' "$cl_fn" | sed -n '/for unit in/,/done/p' | grep -Eq '5gpn-dns\.service' \
     && fail "clean_previous_install's legacy stop-loop must not include the live 5gpn-dns unit"
-printf '%s' "$cl_fn" | sed -n '/for unit in/,/done/p' | grep -Eq 'xray\.service' \
-    || fail "clean_previous_install's legacy stop-loop must include xray.service (upgrade-from-xray teardown)"
-# The staged /opt/5gpn/install.sh must survive the wipe (the '5gpn' menu runs it).
-printf '%s' "$cl_fn" | grep -Fq '! -name install.sh' \
-    || fail "clean_previous_install must keep the staged /opt/5gpn/install.sh (find ... ! -name install.sh)"
+printf '%s' "$cl_fn" | grep -Fq 'remove_legacy_xray' \
+    || fail "clean_previous_install does not use ownership-gated Xray teardown"
+printf '%s' "$cl_fn" | grep -Fq 'BASE_OWNERSHIP_MARKER' \
+    || fail "runtime cleanup is not ownership-marker gated"
 # Installers must have NO keep-if-present early return: a stale binary next to a
 # fresh config is exactly the skew this rule exists to kill.
 grep -Fq '5gpn-dns already installed' "$INSTALL" \
@@ -239,22 +211,20 @@ grep -Eq '^has_valid_cf_credential\(\)' "$INSTALL" \
 hvc_fn="$(sed -n '/^has_valid_cf_credential()/,/^}/p' "$INSTALL")"
 printf '%s' "$hvc_fn" | grep -Fq 'dns_cloudflare_api_token' \
     || fail "has_valid_cf_credential does not check for the dns_cloudflare_api_token credential entry"
-# ensure_cf_token must implement the full precedence chain.
+# ensure_cf_token accepts only a saved credential or TUI input.
 grep -Eq '^ensure_cf_token\(\)' "$INSTALL" \
     || fail "no ensure_cf_token() (credential helper called before certbot in the issuance branch)"
 ect_fn="$(sed -n '/^ensure_cf_token()/,/^}/p' "$INSTALL")"
 printf '%s' "$ect_fn" | grep -Fq 'has_valid_cf_credential' \
     || fail "ensure_cf_token does not check has_valid_cf_credential (reuse path)"
-printf '%s' "$ect_fn" | grep -Fq 'CF_API_TOKEN' \
-    || fail "ensure_cf_token does not accept CF_API_TOKEN (headless-install env)"
-printf '%s' "$ect_fn" | grep -Fq 'CLOUDFLARE_API_TOKEN' \
-    || fail "ensure_cf_token does not accept CLOUDFLARE_API_TOKEN (alternate headless env)"
+printf '%s' "$ect_fn" | grep -Eq 'CF_API_TOKEN|CLOUDFLARE_API_TOKEN' \
+    && fail "ensure_cf_token still accepts headless environment credentials"
 printf '%s' "$ect_fn" | grep -Eq 'ask_secret.*\|\| true' \
     || fail "ensure_cf_token's ask_secret is not guarded with || true (cancel aborts under set -e)"
-printf '%s' "$ect_fn" | grep -Eq '\[\[ -t 0 \]\]' \
+printf '%s' "$ect_fn" | grep -Eq '\[\[[^]]*-t 0' \
     || fail "ensure_cf_token does not gate the interactive prompt on a TTY ([[ -t 0 ]])"
-printf '%s' "$ect_fn" | grep -Eq 'err.*CF_API_TOKEN' \
-    || fail "ensure_cf_token does not reference CF_API_TOKEN in its noninteractive failure message"
+printf '%s' "$ect_fn" | grep -Fq 'shell environment tokens are not accepted' \
+    || fail "ensure_cf_token noninteractive error does not explain TUI-only input"
 # ensure_cf_token must create ACME_DIR with mode 0700 so credentials dir is root-only.
 printf '%s' "$ect_fn" | grep -Eq 'install -d -m 0700' \
     || fail "ensure_cf_token does not create ACME_DIR with mode 0700 (install -d -m 0700 missing)"
@@ -334,10 +304,10 @@ grep -Fq '__CONSOLE_DOMAIN__: 127.0.0.1'       "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #4 (console SNI hosts mapping)"
 grep -Fq '__ZASH_DOMAIN__:    127.0.0.2'        "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #5 (zash SNI hosts mapping)"
-grep -Fq '__PROFILE_DOMAIN__: 127.0.0.1'        "$MIHOMO_TMPL" \
-    || fail "etc/mihomo/config.yaml.tmpl: missing public profile SNI hosts mapping"
-grep -Fq 'DOMAIN,__PROFILE_DOMAIN__,DIRECT'     "$MIHOMO_TMPL" \
-    || fail "etc/mihomo/config.yaml.tmpl: profile SNI is not routed before panel whitelist rules"
+grep -Fq 'DOMAIN,__CONSOLE_DOMAIN__,DIRECT'     "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: public console is not routed directly"
+grep -Fq '__PROFILE_DOMAIN__' "$MIHOMO_TMPL" \
+    && fail "etc/mihomo/config.yaml.tmpl: retired profile SNI remains"
 grep -Fq 'IP-CIDR,__GATEWAY_IP__/32,REJECT-DROP' "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #6 (anti-loop guard)"
 
@@ -359,10 +329,10 @@ printf '%s' "$rmc_fn" | grep -Fq 'mv -f -- "$candidate" "$config"' \
 # Bootstrap and bind identities are independent/fail-closed.
 grep -Fq 'DNS_MIHOMO_LISTEN_IPS=${MIHOMO_LISTEN_IPS}' "$INSTALL" \
     || fail "dns.env does not persist DNS_MIHOMO_LISTEN_IPS"
-grep -Fq 'DNS_PROFILE_DOMAIN=${PROFILE_DOMAIN}' "$INSTALL" \
-    || fail "dns.env does not persist DNS_PROFILE_DOMAIN"
-grep -Eq '^verify_profile_dns\(\)' "$INSTALL" \
-    || fail "install.sh has no fail-closed profile A-record verification"
+grep -Fq 'DNS_CONSOLE_DOMAIN=${CONSOLE_DOMAIN}' "$INSTALL" \
+    || fail "dns.env does not persist DNS_CONSOLE_DOMAIN"
+grep -Eq '^verify_console_dns\(\)' "$INSTALL" \
+    || fail "install.sh has no fail-closed public console A-record verification"
 
 # seed_policy_defaults no longer seeds egress.json/egress-nodes.enc or passes --egress-out.
 spd_fn="$(sed -n '/^seed_policy_defaults()/,/^}/p' "$INSTALL")"

@@ -30,9 +30,11 @@ type TGBotConfig struct {
 // TGBotView is the read model for GET /api/tgbot. It deliberately omits the raw
 // token — a client only learns WHETHER one is set, never its value.
 type TGBotView struct {
-	AdminIDs []int64 `json:"admins"`
-	TokenSet bool    `json:"token_set"`
-	Running  bool    `json:"running"`
+	AdminIDs  []int64 `json:"admins"`
+	TokenSet  bool    `json:"token_set"`
+	Running   bool    `json:"running"`
+	State     string  `json:"state"`
+	LastError string  `json:"last_error,omitempty"`
 }
 
 // LoadTGBot reads the runtime tgbot-override file. A missing file (or an empty
@@ -91,6 +93,11 @@ func SaveTGBot(path string, tc TGBotConfig) error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("tgbot: write %s: %w", tmpPath, err)
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("tgbot: sync %s: %w", tmpPath, err)
+	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("tgbot: close %s: %w", tmpPath, err)
@@ -98,6 +105,15 @@ func SaveTGBot(path string, tc TGBotConfig) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("tgbot: rename to %s: %w", path, err)
+	}
+	// The rename already published a complete 0600 file. Directory fsync is a
+	// best-effort durability barrier: after publication, reporting failure would
+	// make the supervisor keep the old live bot even though restart would load
+	// the new file, creating a worse live/disk split that cannot be rolled back
+	// safely here.
+	if dirHandle, openErr := os.Open(dir); openErr == nil {
+		_ = dirHandle.Sync()
+		_ = dirHandle.Close()
 	}
 	return nil
 }

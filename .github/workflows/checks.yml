@@ -112,7 +112,6 @@ jobs:
             }
             {
               gsub(/__GATEWAY_IP__/, "10.0.0.1")
-              gsub(/__PROFILE_DOMAIN__/, "profile.example.test")
               gsub(/__CONSOLE_DOMAIN__/, "console.example.test")
               gsub(/__ZASH_DOMAIN__/, "zash.example.test")
               gsub(/__CONTROLLER_SECRET__/, "ci-controller-secret")

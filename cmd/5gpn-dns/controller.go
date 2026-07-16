@@ -158,11 +158,23 @@ func (c *Controller) SetTGBotManager(m tgbotManager) {
 // A Controller with no wired manager reports an empty, not-running view.
 func (c *Controller) GetTGBot() TGBotView {
 	if c.tgbot == nil {
-		return TGBotView{AdminIDs: []int64{}}
+		return TGBotView{AdminIDs: []int64{}, State: botStateDisabled}
 	}
 	v := c.tgbot.View()
 	if v.AdminIDs == nil {
 		v.AdminIDs = []int64{}
+	}
+	// Preserve compatibility with alternate/test managers written before the
+	// explicit health state was added while keeping the API state non-empty.
+	if v.State == "" {
+		switch {
+		case v.Running:
+			v.State = botStateHealthy
+		case v.TokenSet:
+			v.State = botStateDegraded
+		default:
+			v.State = botStateDisabled
+		}
 	}
 	return v
 }

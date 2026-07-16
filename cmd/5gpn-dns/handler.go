@@ -104,14 +104,12 @@ type Handler struct {
 
 	GatewayIP net.IP // IP to substitute for foreign addresses.
 
-	// ConsoleDomain / ZashDomain / ProfileDomain are gateway self domains. A
+	// ConsoleDomain / ZashDomain are gateway self domains. A
 	// client already using 5gpn DNS must receive GatewayIP locally so its TLS
-	// connection lands on the mihomo SNI split; this also keeps profile bootstrap
-	// working during external-DNS trouble. Empty ⇒ no override.
+	// connection lands on the mihomo SNI split. Empty ⇒ no override.
 	// See isPanelDomain / the self-domain override in resolveTraced.
 	ConsoleDomain string
 	ZashDomain    string
-	ProfileDomain string
 
 	// Cache TTL clamping.
 	TTLMin time.Duration
@@ -1145,9 +1143,6 @@ func (h *Handler) isPanelDomain(name string) bool {
 		return true
 	}
 	if h.ZashDomain != "" && strings.EqualFold(bare, stripDot(h.ZashDomain)) {
-		return true
-	}
-	if h.ProfileDomain != "" && strings.EqualFold(bare, stripDot(h.ProfileDomain)) {
 		return true
 	}
 	return false

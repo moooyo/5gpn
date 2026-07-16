@@ -9,7 +9,6 @@
 # operators who want an on-demand refresh between ticks (e.g. after editing
 # a manual rules/*.txt file).
 #
-# DRY_RUN=1 skips the reload (useful for testing the gum-or-echo preamble).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$HERE/.."
@@ -22,19 +21,14 @@ ok()   { if [ "$_HAVE_GUM" = 1 ]; then gum log --level info  -- "$*"; else echo 
 warn() { if [ "$_HAVE_GUM" = 1 ]; then gum log --level warn  -- "$*" >&2; else echo "[!]    $*" >&2; fi; }
 err()  { if [ "$_HAVE_GUM" = 1 ]; then gum log --level error -- "$*" >&2; else echo "[ERR]  $*" >&2; fi; }
 
-RULES_DIR="${RULES_DIR:-/etc/5gpn/rules}"
-DRY_RUN="${DRY_RUN:-0}"
+RULES_DIR="/etc/5gpn/rules"
 
 mkdir -p "$RULES_DIR"
 
-if [ "$DRY_RUN" != "1" ]; then
-    if systemctl reload 5gpn-dns 2>/dev/null; then
-        ok "5gpn-dns reloaded (rule caches re-read from disk)."
-    else
-        warn "systemctl reload 5gpn-dns failed (not running / not installed?); caches unchanged."
-    fi
+if systemctl reload 5gpn-dns 2>/dev/null; then
+    ok "5gpn-dns reloaded (rule caches re-read from disk)."
 else
-    info "DRY_RUN=1: skipping reload."
+    warn "systemctl reload 5gpn-dns failed (not running / not installed?); caches unchanged."
 fi
 
-ok "lists refresh trigger done (rules_dir=$RULES_DIR, dry_run=$DRY_RUN)"
+ok "lists refresh trigger done (rules_dir=$RULES_DIR)"

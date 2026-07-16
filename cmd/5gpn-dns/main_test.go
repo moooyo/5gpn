@@ -7,6 +7,35 @@ import (
 	"testing"
 )
 
+func TestApplyTGBotOverrideFailClosed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tgbot.json")
+	if err := os.WriteFile(path, []byte("{not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		TGBotFile:   path,
+		TGBotToken:  "old-token-must-not-revive",
+		TGBotAdmins: map[int64]bool{111: true},
+	}
+	applyTGBotOverride(&cfg)
+	if cfg.TGBotToken != "" || len(cfg.TGBotAdmins) != 0 {
+		t.Fatalf("malformed override did not fail closed: token=%q admins=%v", cfg.TGBotToken, cfg.TGBotAdmins)
+	}
+}
+
+func TestApplyTGBotOverrideMissingUsesBootstrap(t *testing.T) {
+	cfg := Config{
+		TGBotFile:   filepath.Join(t.TempDir(), "missing.json"),
+		TGBotToken:  "bootstrap",
+		TGBotAdmins: map[int64]bool{111: true},
+	}
+	applyTGBotOverride(&cfg)
+	if cfg.TGBotToken != "bootstrap" || !cfg.TGBotAdmins[111] {
+		t.Fatalf("missing override changed bootstrap config: %+v", cfg)
+	}
+}
+
 // TestLoadRuleSets_EmptyChnrouteTolerated verifies the fresh-install fix: a
 // Config pointing at a missing chnroute file plus an empty rules directory
 // (i.e. nothing has seeded chnroute yet, and no subscription cache exists)

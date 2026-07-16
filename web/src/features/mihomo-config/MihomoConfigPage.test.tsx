@@ -44,7 +44,7 @@ describe('MihomoConfigPage', () => {
     const textarea = (await screen.findByTestId('mihomo-config-textarea')) as HTMLTextAreaElement
     await waitFor(() => expect(textarea.value).toBe(CURRENT_TEXT))
     expect(api.getMihomoConfig).toHaveBeenCalledTimes(1)
-    expect(screen.getByText('Profile bootstrap SNI')).toBeInTheDocument()
+    expect(screen.getByText('Console SNI split')).toBeInTheDocument()
   })
 
   it('keeps an unsaved edit when the UI language changes', async () => {

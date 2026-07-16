@@ -44,7 +44,6 @@ import (
 type InfraParams struct {
 	ConsoleDomain    string // env DNS_CONSOLE_DOMAIN
 	ZashDomain       string // env DNS_ZASH_DOMAIN
-	ProfileDomain    string // env DNS_PROFILE_DOMAIN; public profile-only SNI
 	GatewayIP        string // env DNS_GATEWAY_IP (formatted, e.g. "10.0.1.20")
 	Controller       string // env DNS_MIHOMO_CONTROLLER, e.g. "127.0.0.1:9090" -- see doc above
 	ControllerSecret string // env DNS_MIHOMO_SECRET; immutable through the raw editor
@@ -72,7 +71,6 @@ func InfraParamsFromConfig(cfg Config) InfraParams {
 	return InfraParams{
 		ConsoleDomain:    cfg.ConsoleDomain,
 		ZashDomain:       cfg.ZashDomain,
-		ProfileDomain:    cfg.ProfileDomain,
 		GatewayIP:        gw,
 		Controller:       cfg.MihomoController,
 		ControllerSecret: cfg.MihomoSecret,
@@ -236,16 +234,9 @@ func mihomoSeedListenerIPs() []string {
 // dns.env sourced into their process environment — there is no separate
 // "config object" to thread through.
 func (s *MihomoConfigStore) Default() string {
-	profileDomain := os.Getenv("DNS_PROFILE_DOMAIN")
-	if profileDomain == "" {
-		if base := strings.TrimSuffix(os.Getenv("DNS_BASE_DOMAIN"), "."); base != "" {
-			profileDomain = "profile." + base
-		}
-	}
 	r := strings.NewReplacer(
 		"__CONSOLE_DOMAIN__", os.Getenv("DNS_CONSOLE_DOMAIN"),
 		"__ZASH_DOMAIN__", os.Getenv("DNS_ZASH_DOMAIN"),
-		"__PROFILE_DOMAIN__", profileDomain,
 		"__MIHOMO_LISTENERS__", renderMihomoListeners(mihomoSeedListenerIPs()),
 		"__GATEWAY_IP__", os.Getenv("DNS_GATEWAY_IP"),
 		"__CONTROLLER_SECRET__", os.Getenv("DNS_MIHOMO_SECRET"),
@@ -297,7 +288,6 @@ dns:
   nameserver: ["udp://127.0.0.1:5354"]   # 5gpn-dns egress broker: returns REAL upstream IPs
 
 hosts:
-  __PROFILE_DOMAIN__: 127.0.0.1
   __CONSOLE_DOMAIN__: 127.0.0.1
   __ZASH_DOMAIN__:    127.0.0.2
 
@@ -315,9 +305,7 @@ proxy-groups:
   - {name: Proxies, type: select, proxies: [DIRECT]}
 
 rules:
-  - DOMAIN,__PROFILE_DOMAIN__,DIRECT
-  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
-  - DOMAIN,__CONSOLE_DOMAIN__,REJECT-DROP
+  - DOMAIN,__CONSOLE_DOMAIN__,DIRECT
   - AND,((DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
   - DOMAIN,__ZASH_DOMAIN__,REJECT-DROP
   - IP-CIDR,__GATEWAY_IP__/32,REJECT-DROP,no-resolve
@@ -512,11 +500,10 @@ func hasDNSBrokerInvariant(norm string) bool {
 	return pat.MatchString(norm)
 }
 
-// hasSNISplit asserts domain is mapped to hostsIP in hosts:, AND has a
+// hasAllowlistedSNISplit asserts domain is mapped to hostsIP in hosts:, AND has a
 // whitelist-gated DIRECT rule, AND has a same-domain REJECT-DROP guard
-// (design §4.4 #4/#5 — the console and zash checks share this shape,
-// differing only in domain and hosts target IP).
-func hasSNISplit(norm, domain, hostsIP string) bool {
+// for the source-allowlisted zashboard surface.
+func hasAllowlistedSNISplit(norm, domain, hostsIP string) bool {
 	if strings.TrimSpace(domain) == "" {
 		return false
 	}
@@ -525,9 +512,7 @@ func hasSNISplit(norm, domain, hostsIP string) bool {
 	hostsPat := regexp.MustCompile(d + `\s*:\s*` + regexp.QuoteMeta(hostsIP) + `\b`)
 	// directPat is anchored to the exact AND(...) rule SHAPE — not a loose
 	// proximity window — so it can't be satisfied by a DIFFERENT domain's
-	// whitelist-gated rule sitting a few tokens away in the same rules list
-	// (console and zash each have one; a bare "domain ... whitelist ...
-	// DIRECT" window would happily match across the boundary between them).
+	// whitelist-gated rule sitting a few tokens away in the same rules list.
 	// Still whitespace-tolerant (\s* at every punctuation boundary) so
 	// reformatting alone doesn't trip it.
 	directPat := regexp.MustCompile(`AND,\s*\(\s*\(\s*DOMAIN,\s*` + d +
@@ -537,18 +522,20 @@ func hasSNISplit(norm, domain, hostsIP string) bool {
 	return hostsPat.MatchString(norm) && directPat.MatchString(norm) && dropPat.MatchString(norm)
 }
 
-// hasProfileSNISplit checks the public bootstrap host. Unlike the console and
-// zash panels it must not carry the source-IP whitelist condition: new devices
-// need to download /ios/ before they can use the managed DNS path. Host/SNI
-// isolation in api.go limits this domain to that route only.
-func hasProfileSNISplit(norm, domain string) bool {
+// hasPublicSNISplit checks a public panel mapping: the hostname must resolve to
+// the expected loopback backend and route DIRECT without a source allowlist.
+func hasPublicSNISplit(norm, domain, hostsIP string) bool {
 	if strings.TrimSpace(domain) == "" {
 		return false
 	}
 	d := regexp.QuoteMeta(domain)
-	hostsPat := regexp.MustCompile(d + `\s*:\s*127\.0\.0\.1\b`)
+	hostsPat := regexp.MustCompile(d + `\s*:\s*` + regexp.QuoteMeta(hostsIP) + `\b`)
 	directPat := regexp.MustCompile(`(?:^|\s)-\s*DOMAIN,\s*` + d + `\s*,\s*DIRECT(?:\s|$)`)
-	return hostsPat.MatchString(norm) && directPat.MatchString(norm)
+	allowlistedPat := regexp.MustCompile(`AND,\s*\(\s*\(\s*DOMAIN,\s*` + d +
+		`\s*\)\s*,\s*\(\s*RULE-SET,\s*whitelist,\s*DIRECT,\s*src\s*\)\s*\)\s*,\s*DIRECT`)
+	dropPat := regexp.MustCompile(`DOMAIN,\s*` + d + `\s*,\s*REJECT-DROP`)
+	return hostsPat.MatchString(norm) && directPat.MatchString(norm) &&
+		!allowlistedPat.MatchString(norm) && !dropPat.MatchString(norm)
 }
 
 // hasAntiLoopInvariant asserts the gateway-self REJECT-DROP guard is present
@@ -586,12 +573,10 @@ func ValidateInvariants(text string, p InfraParams) error {
 		return &ErrMissingInfra{Name: "sniproxy-inbound"}
 	case !hasDNSBrokerInvariant(norm):
 		return &ErrMissingInfra{Name: "dns-broker"}
-	case !hasSNISplit(norm, p.ConsoleDomain, "127.0.0.1"):
+	case !hasPublicSNISplit(norm, p.ConsoleDomain, "127.0.0.1"):
 		return &ErrMissingInfra{Name: "console-sni"}
-	case !hasSNISplit(norm, p.ZashDomain, "127.0.0.2"):
+	case !hasAllowlistedSNISplit(norm, p.ZashDomain, "127.0.0.2"):
 		return &ErrMissingInfra{Name: "zash-sni"}
-	case p.ProfileDomain != "" && !hasProfileSNISplit(norm, p.ProfileDomain):
-		return &ErrMissingInfra{Name: "profile-sni"}
 	case !hasAntiLoopInvariant(norm, p):
 		return &ErrMissingInfra{Name: "anti-loop"}
 	case !hasControllerSecretInvariant(text, p.ControllerSecret):

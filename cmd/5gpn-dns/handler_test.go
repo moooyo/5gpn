@@ -149,7 +149,6 @@ func TestHandlerPanelDomainOverride(t *testing.T) {
 	h := newTestHandler(t, china, trust)
 	h.ConsoleDomain = "console.example.com"
 	h.ZashDomain = "zash.example.com"
-	h.ProfileDomain = "profile.example.com"
 	h.GatewayIP = net.ParseIP("203.0.113.1").To4()
 
 	resolveA := func(name string) *dns.Msg {
@@ -170,12 +169,6 @@ func TestHandlerPanelDomainOverride(t *testing.T) {
 	// Case-insensitive, trailing-dot-normalised match on the zash domain too.
 	if got := collectAIPs(resolveA("ZASH.Example.COM")); len(got) != 1 || got[0] != "203.0.113.1" {
 		t.Fatalf("zash (mixed case) A = %v, want [203.0.113.1]", got)
-	}
-	if got := collectAIPs(resolveA("profile.example.com")); len(got) != 1 || got[0] != "203.0.113.1" {
-		t.Fatalf("profile A = %v, want [203.0.113.1]", got)
-	}
-	if china.calls != 0 || trust.calls != 0 {
-		t.Fatalf("profile-domain query hit upstream (china=%d trust=%d)", china.calls, trust.calls)
 	}
 
 	// AAAA for a panel domain → NODATA (NOERROR, empty Answer), no upstream.
@@ -205,7 +198,7 @@ func TestHandlerPanelDomainOverride(t *testing.T) {
 
 	// With the panel domains UNSET, the same name is not hijacked (empty-string
 	// guard): it falls through to the normal upstream path.
-	h.ConsoleDomain, h.ZashDomain, h.ProfileDomain = "", "", ""
+	h.ConsoleDomain, h.ZashDomain = "", ""
 	china.calls, trust.calls = 0, 0
 	china.reply = makeAMsg("console.example.com", "9.9.9.9")
 	trust.reply = makeAMsg("console.example.com", "9.9.9.9")

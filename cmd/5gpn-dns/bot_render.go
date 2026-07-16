@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
 	"html"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -24,17 +26,70 @@ import (
 // _ANSI_RE. Compiled once.
 var ansiRE = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
-// pre wraps raw text in a safely-escaped monospace <pre> block: strip ANSI,
-// trim, HTML-escape (so Telegram's HTML parse_mode never mistakes content for
-// tags), and truncate to 3500 chars. Empty input becomes the (无输出)
-// placeholder. Direct port of tgbot.py's pre().
+const preContentLimit = 3500
+
+// truncateRunes shortens text without ever splitting a UTF-8 sequence.
+func truncateRunes(text string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(text) <= max {
+		return text
+	}
+	runes := []rune(text)
+	return string(runes[:max])
+}
+
+func tailRunes(text string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(text) <= max {
+		return text
+	}
+	runes := []rune(text)
+	return string(runes[len(runes)-max:])
+}
+
+func cleanTelegramText(text string) string {
+	text = ansiRE.ReplaceAllString(text, "")
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t':
+			return r
+		}
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, text)
+}
+
+// pre wraps raw text in a safely escaped monospace block. Its limit is in
+// Unicode code points, not bytes, so Chinese text and emoji are never cut into
+// invalid UTF-8. preTail is the log-oriented variant that keeps the newest
+// output when truncation is necessary.
 func pre(text string) string {
-	text = strings.TrimSpace(ansiRE.ReplaceAllString(text, ""))
+	return preBlock(text, false)
+}
+
+func preTail(text string) string {
+	return preBlock(text, true)
+}
+
+func preBlock(text string, keepTail bool) string {
+	text = strings.TrimSpace(cleanTelegramText(text))
 	if text == "" {
 		text = "(无输出)"
 	}
-	if len(text) > 3500 {
-		text = text[:3500] + "\n... (已截断)"
+	if utf8.RuneCountInString(text) > preContentLimit {
+		marker := "\n…（已截断）"
+		if keepTail {
+			marker = "…（前部已截断，以下为最新内容）\n"
+			text = marker + tailRunes(text, preContentLimit-utf8.RuneCountInString(marker))
+		} else {
+			text = truncateRunes(text, preContentLimit-utf8.RuneCountInString(marker)) + marker
+		}
 	}
 	return "<pre>" + html.EscapeString(text) + "</pre>"
 }
@@ -54,21 +109,151 @@ func tailLines(text string, n int) string {
 	return strings.Join(lines, "\n")
 }
 
-// chunkText splits text into pieces of at most size bytes each, for paginating
-// long messages under Telegram's 4096-char limit. Empty input yields a single
-// empty chunk (so callers always send at least one message). Port of
-// tgbot.py's _chunks().
+type openHTMLTag struct {
+	name string
+	raw  string
+}
+
+var telegramHTMLTags = map[string]bool{
+	"a": true, "b": true, "strong": true, "i": true, "em": true,
+	"u": true, "ins": true, "s": true, "strike": true, "del": true,
+	"code": true, "pre": true, "blockquote": true, "tg-spoiler": true,
+}
+
+// htmlTag describes a complete supported Telegram HTML tag. Unsupported or
+// incomplete '<...>' text is treated as visible text and therefore cannot
+// corrupt the tag stack used to close/reopen chunks.
+func htmlTag(raw string) (name string, closing, selfClosing, ok bool) {
+	if len(raw) < 3 || raw[0] != '<' || raw[len(raw)-1] != '>' {
+		return "", false, false, false
+	}
+	body := strings.TrimSpace(raw[1 : len(raw)-1])
+	if strings.HasPrefix(body, "/") {
+		closing = true
+		body = strings.TrimSpace(body[1:])
+	}
+	if strings.HasSuffix(body, "/") {
+		selfClosing = true
+		body = strings.TrimSpace(strings.TrimSuffix(body, "/"))
+	}
+	if i := strings.IndexAny(body, " \t\r\n"); i >= 0 {
+		body = body[:i]
+	}
+	name = strings.ToLower(body)
+	if !telegramHTMLTags[name] {
+		return "", false, false, false
+	}
+	return name, closing, selfClosing, true
+}
+
+func entityEnd(text string, start int) int {
+	endLimit := start + 34
+	if endLimit > len(text) {
+		endLimit = len(text)
+	}
+	semi := strings.IndexByte(text[start:endLimit], ';')
+	if semi < 0 {
+		return -1
+	}
+	end := start + semi + 1
+	entity := text[start:end]
+	if html.UnescapeString(entity) == entity {
+		return -1
+	}
+	return end
+}
+
+// chunkText paginates Telegram HTML by rendered Unicode characters. It never
+// splits a UTF-8 sequence, entity, or tag; formatting tags are closed at the
+// end of one chunk and reopened in the next so every chunk is independently
+// valid HTML. Empty input still yields one chunk.
 func chunkText(text string, size int) []string {
 	if text == "" {
 		return []string{""}
 	}
-	var out []string
-	for i := 0; i < len(text); i += size {
-		end := i + size
-		if end > len(text) {
-			end = len(text)
+	if size <= 0 {
+		size = 1
+	}
+
+	var (
+		out     []string
+		chunk   strings.Builder
+		visible int
+		open    []openHTMLTag
+	)
+
+	closeOpen := func() {
+		for i := len(open) - 1; i >= 0; i-- {
+			chunk.WriteString("</" + open[i].name + ">")
 		}
-		out = append(out, text[i:end])
+	}
+	flush := func() {
+		closeOpen()
+		out = append(out, chunk.String())
+		chunk.Reset()
+		for _, tag := range open {
+			chunk.WriteString(tag.raw)
+		}
+		visible = 0
+	}
+
+	for i := 0; i < len(text); {
+		invalidTagStart := false
+		if text[i] == '<' {
+			if rel := strings.IndexByte(text[i:], '>'); rel >= 0 {
+				end := i + rel + 1
+				raw := text[i:end]
+				if name, closing, selfClosing, ok := htmlTag(raw); ok {
+					chunk.WriteString(raw)
+					if closing {
+						if len(open) > 0 && open[len(open)-1].name == name {
+							open = open[:len(open)-1]
+						}
+					} else if !selfClosing {
+						open = append(open, openHTMLTag{name: name, raw: raw})
+					}
+					i = end
+					continue
+				}
+			}
+			invalidTagStart = true
+		}
+
+		tokenEnd := i
+		token := ""
+		if invalidTagStart {
+			tokenEnd = i + 1
+			token = "&lt;"
+		} else if text[i] == '&' {
+			tokenEnd = entityEnd(text, i)
+			if tokenEnd < 0 {
+				tokenEnd = i + 1
+				token = "&amp;"
+			}
+		}
+		if tokenEnd < 0 || tokenEnd == i {
+			r, width := utf8.DecodeRuneInString(text[i:])
+			if width == 0 {
+				break
+			}
+			tokenEnd = i + width
+			if r == utf8.RuneError && width == 1 {
+				token = string(utf8.RuneError)
+			}
+		}
+		if visible == size {
+			flush()
+		}
+		if token == "" {
+			token = text[i:tokenEnd]
+		}
+		chunk.WriteString(token)
+		visible++
+		i = tokenEnd
+	}
+	if chunk.Len() > 0 || len(out) == 0 {
+		closeOpen()
+		out = append(out, chunk.String())
 	}
 	return out
 }
@@ -323,46 +508,140 @@ func renderStatus(st Stats, svc map[string]string, facts statusFacts, metricsCar
 	return strings.Join(lines, "\n")
 }
 
+// renderResolveTest presents the same per-upstream DNS diagnostic used by the
+// web console. Probe order is preserved because pool order, not latency,
+// determines which reply a group adopts.
+func renderResolveTest(result ResolveTestResult) string {
+	name := result.Name
+	if name == "" {
+		name = "(未知域名)"
+	}
+	lines := []string{
+		"<b>🧪 DNS 诊断</b>",
+		fmt.Sprintf("域名：<code>%s</code>", html.EscapeString(name)),
+	}
+	if result.Verdict != "" || result.Reason != "" {
+		lines = append(lines, fmt.Sprintf(
+			"判定：<b>%s</b> · <code>%s</code>",
+			html.EscapeString(result.Verdict), html.EscapeString(result.Reason),
+		))
+	}
+	if result.Chosen != "" {
+		lines = append(lines, fmt.Sprintf(
+			"采用：<b>%s</b> · <code>%s</code>",
+			html.EscapeString(result.Chosen),
+			html.EscapeString(strings.Join(result.ChosenIPs, ", ")),
+		))
+	}
+	if len(result.ClientIPs) > 0 {
+		lines = append(lines, "客户端答案：<code>"+html.EscapeString(strings.Join(result.ClientIPs, ", "))+"</code>")
+	}
+	if len(result.Probes) == 0 {
+		lines = append(lines, "", "未查询上游（规则已直接给出结果，或当前没有可用上游）。")
+		return strings.Join(lines, "\n")
+	}
+
+	lines = append(lines, "", "<b>逐上游探测（配置顺序）</b>")
+	for _, probe := range result.Probes {
+		icon := "✅"
+		outcome := strings.Join(probe.IPs, ", ")
+		if probe.Err != "" {
+			icon = "❌"
+			outcome = probe.Err
+		} else if outcome == "" {
+			icon = "⚠️"
+			outcome = probe.Rcode
+		}
+		selected := ""
+		if probe.Selected {
+			selected = " · 组内采用"
+		}
+		lines = append(lines, fmt.Sprintf(
+			"%s <b>%s</b> <code>%s</code> · %.1f ms%s\n   <code>%s</code>",
+			icon,
+			html.EscapeString(probe.Group),
+			html.EscapeString(probe.Server),
+			probe.DurationMs,
+			selected,
+			html.EscapeString(outcome),
+		))
+	}
+	return strings.Join(lines, "\n")
+}
+
 // NOTE (UP-1 Task D3/D4): renderDomains/renderUpdateResults were REMOVED
 // here — they rendered the bot's GFW-domain list and subscription-refresh
 // batch, both absorbed by the unified policy-rule model (managed exclusively
 // via the web console's /api/policy/* surface now).
 
 // --------------------------------------------------------------------------- //
-// Inline keyboards (ported from tgbot.py, minus the T3 OS-op entries)
+// Inline keyboards
 // --------------------------------------------------------------------------- //
 
+const botCallbackPrefix = "b1:"
+
+func versionedCallback(data string) string {
+	if strings.HasPrefix(data, botCallbackPrefix) {
+		return data
+	}
+	return botCallbackPrefix + data
+}
+
 func btn(text, data string) models.InlineKeyboardButton {
-	return models.InlineKeyboardButton{Text: text, CallbackData: data}
+	return models.InlineKeyboardButton{Text: text, CallbackData: versionedCallback(data)}
 }
 
-// mainMenu is the top-level menu. Row 1 is the Controller-backed subset
-// (status, upstreams); rows 2-3 are the T3 OS-op entries (续证书 / 重启服务 /
-// 日志 / iOS二维码), matching tgbot.py's main_menu layout. UP-1 Task D3/D4
-// dropped the "🎯 代理域名" / "📚 订阅" / "🔄 更新订阅" entries — the manual-rule
-// and subscription management they exposed is now exclusively web-console-
-// managed via the unified policy-rule model.
+func urlBtn(text, target string) models.InlineKeyboardButton {
+	return models.InlineKeyboardButton{Text: text, URL: target}
+}
+
+func webConsoleURL() (string, bool) {
+	candidates := []string{
+		os.Getenv("DNS_CONSOLE_DOMAIN"),
+		os.Getenv(webDomainEnv),
+	}
+	if base := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(os.Getenv(baseDomainEnv))), "."); isValidDomain(base) {
+		candidates = append(candidates, "console."+base)
+	}
+	for _, candidate := range candidates {
+		host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(candidate)), ".")
+		if isValidDomain(host) {
+			return "https://" + host + "/", true
+		}
+	}
+	return "", false
+}
+
+// mainMenu keeps frequent read-only tasks at the top and moves privileged
+// operations into one maintenance submenu. Policy/subscription editing remains
+// exclusively in the Web console.
 func mainMenu() *models.InlineKeyboardMarkup {
-	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
-		{btn("📊 状态", "act:status"), btn("🌐 上游DNS", "menu:upstreams")},
-		{btn("♻️ 重载规则", "act:reload"), btn("🔐 续证书", "act:renew")},
-		{btn("♻️ 重启服务", "menu:restart"), btn("📜 日志", "menu:logs")},
-		{btn("📱 iOS二维码", "act:ios")},
-	}}
+	rows := [][]models.InlineKeyboardButton{
+		{btn("📊 状态", "act:status"), btn("🧪 DNS 诊断", "act:diagnose")},
+		{btn("📜 日志", "menu:logs"), btn("🌐 上游 DNS", "menu:upstreams")},
+		{btn("🛠 维护", "menu:maintenance"), btn("📱 iOS 安装", "menu:ios")},
+	}
+	if target, ok := webConsoleURL(); ok {
+		rows = append(rows, []models.InlineKeyboardButton{urlBtn("🔗 Web 控制台", target)})
+	}
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-// restartMenu is the service-restart submenu. Per the self-restart-paradox
-// design decision (the bot runs inside the 5gpn-dns process), the 5gpn-dns entry
-// is labeled 热重载 (in-process hot reload via ctrl.Reload()), NOT 重启 — only
-// mihomo gets a real systemctl restart (mihomo migration: the bot no longer
-// manages xray). Mirrors tgbot.py's restart_menu but with the corrected
-// 5gpn-dns label.
-func restartMenu() *models.InlineKeyboardMarkup {
+// maintenanceMenu has one unambiguous rule-reload entry. Restart and renewal
+// callbacks request a one-use confirmation; they never execute directly.
+func maintenanceMenu() *models.InlineKeyboardMarkup {
 	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
-		{btn("♻️ 5gpn-dns 热重载", "restart:5gpn-dns"), btn("🔁 Mihomo", "restart:mihomo")},
-		{btn("全部", "restart:all")},
+		{btn("♻️ 重载 DNS 规则", "act:reload")},
+		{btn("🔁 重启 Mihomo", "request:"+string(botActionRestartMihomo))},
+		{btn("🔐 检查并续期证书", "request:"+string(botActionRenewCert))},
 		{btn("« 返回", "menu:main")},
 	}}
+}
+
+// restartMenu is retained as a source-compatible alias while bot.go migrates
+// to the accurately named maintenance submenu.
+func restartMenu() *models.InlineKeyboardMarkup {
+	return maintenanceMenu()
 }
 
 // logsMenu is the log-view submenu: one row per data-path service plus a back
@@ -374,6 +653,51 @@ func logsMenu() *models.InlineKeyboardMarkup {
 	}
 	rows = append(rows, []models.InlineKeyboardButton{btn("« 返回", "menu:main")})
 	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+func statusKB() *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{btn("🔄 刷新状态", "act:status")},
+		{btn("« 返回", "menu:main")},
+	}}
+}
+
+func logsResultKB(service string) *models.InlineKeyboardMarkup {
+	rows := [][]models.InlineKeyboardButton{}
+	if isKnownService(service) {
+		rows = append(rows, []models.InlineKeyboardButton{btn("🔄 刷新日志", "logs:"+service)})
+	}
+	rows = append(rows, []models.InlineKeyboardButton{btn("« 返回", "menu:logs")})
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+func diagnoseKB() *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{btn("🧪 再次诊断", "act:diagnose")},
+		{btn("« 返回", "menu:main")},
+	}}
+}
+
+func iosMenu() *models.InlineKeyboardMarkup {
+	rows := [][]models.InlineKeyboardButton{}
+	if target, ok := iosProfileURL(); ok {
+		rows = append(rows, []models.InlineKeyboardButton{urlBtn("📥 安装描述文件", target)})
+		rows = append(rows, []models.InlineKeyboardButton{btn("🖼 发送二维码图片", "act:ios-photo")})
+	}
+	rows = append(rows, []models.InlineKeyboardButton{btn("« 返回", "menu:main")})
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+func confirmationMenu(action botPrivilegedAction, nonce string) *models.InlineKeyboardMarkup {
+	if !validBotPrivilegedAction(action) || !validConfirmationNonce(nonce) {
+		return backKB("menu:maintenance")
+	}
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{
+			btn("✅ 确认执行", "confirm:"+string(action)+":"+nonce),
+			btn("取消", "cancel:"+nonce),
+		},
+	}}
 }
 
 // backKB is a single "« 返回" button pointing at target (default the main menu).
@@ -390,9 +714,14 @@ func backKB(target string) *models.InlineKeyboardMarkup {
 var botCommands = []models.BotCommand{
 	{Command: "menu", Description: "打开操作面板"},
 	{Command: "status", Description: "查看运行状态"},
-	{Command: "cancel", Description: "取消当前操作"},
+	{Command: "lookup", Description: "诊断域名解析与策略"},
+	{Command: "cancel", Description: "取消待输入内容"},
 	{Command: "id", Description: "获取我的 Telegram ID"},
 	{Command: "help", Description: "帮助说明"},
+}
+
+var idBotCommand = []models.BotCommand{
+	{Command: "id", Description: "获取我的 Telegram ID"},
 }
 
 // --------------------------------------------------------------------------- //
@@ -406,15 +735,24 @@ const (
 	cbUnknown callbackKind = iota
 	cbMenuMain
 	cbStatus
+	cbDiagnose
 	cbUpstreams // menu:upstreams — read-only china/trust upstream view
 	cbReload
-	// T3 OS-op intents.
-	cbMenuRestart // menu:restart  — open the restart submenu
-	cbMenuLogs    // menu:logs     — open the logs submenu
-	cbRenew       // act:renew     — certbot renew
-	cbIOS         // act:ios       — iOS profile QR
-	cbRestart     // restart:<svc> — restart/reload a service (arg = svc)
-	cbLogs        // logs:<svc>    — tail a service's journal (arg = svc)
+	cbMenuMaintenance
+	cbMenuLogs
+	cbMenuIOS
+	cbIOSPhoto
+	cbRequestConfirm
+	cbConfirmAction
+	cbCancelAction
+	cbLogs // logs:<svc> — tail a service's journal (arg = svc)
+
+	// Legacy kinds are retained while handler wiring migrates. Versioned menus
+	// never emit these direct privileged callbacks.
+	cbMenuRestart
+	cbRenew
+	cbIOS
+	cbRestart
 	// UP-1 Task D3/D4 removed cbMenuDomains/cbDomAdd/cbDomDel/cbUpdateLists
 	// (manual-rule GFW-domain view+edit, subscription refresh) and
 	// cbMenuSubs/cbSubView/cbSubRefresh/cbSubToggle/cbSubDelete/cbSubAdd/
@@ -425,16 +763,75 @@ const (
 
 // callbackIntent is the parsed form of a button's callback_data.
 type callbackIntent struct {
-	kind callbackKind
-	arg  string // trailing payload for unrecognized "prefix:arg" data (aids T3)
+	kind  callbackKind
+	arg   string
+	nonce string
 }
 
-// parseCallback classifies callback_data into a callbackIntent. It is a pure
-// function so the whole callback router is unit-testable without a live
-// Telegram connection. Unrecognized data returns cbUnknown, with arg carrying
-// any "prefix:arg" tail (so T3 can extend the switch for restart:/logs: without
-// changing this signature).
+func validConfirmationNonce(nonce string) bool {
+	if len(nonce) != botConfirmationBytes*2 {
+		return false
+	}
+	_, err := hex.DecodeString(nonce)
+	return err == nil
+}
+
+// parseCallback classifies callback data without a live Telegram connection.
+// Current buttons carry a b1 prefix. Legacy read-only/navigation data remains
+// usable, but old direct restart/renew callbacks are separated into legacy
+// kinds so new handler wiring can reject them rather than bypass confirmation.
 func parseCallback(data string) callbackIntent {
+	payload, versioned := strings.CutPrefix(data, botCallbackPrefix)
+	if !versioned {
+		return parseLegacyCallback(data)
+	}
+
+	switch payload {
+	case "menu:main":
+		return callbackIntent{kind: cbMenuMain}
+	case "act:status":
+		return callbackIntent{kind: cbStatus}
+	case "act:diagnose":
+		return callbackIntent{kind: cbDiagnose}
+	case "menu:upstreams":
+		return callbackIntent{kind: cbUpstreams}
+	case "act:reload":
+		return callbackIntent{kind: cbReload}
+	case "menu:maintenance":
+		return callbackIntent{kind: cbMenuMaintenance}
+	case "menu:logs":
+		return callbackIntent{kind: cbMenuLogs}
+	case "menu:ios":
+		return callbackIntent{kind: cbMenuIOS}
+	case "act:ios-photo":
+		return callbackIntent{kind: cbIOSPhoto}
+	}
+	if svc, ok := strings.CutPrefix(payload, "logs:"); ok {
+		return callbackIntent{kind: cbLogs, arg: svc}
+	}
+	if actionRaw, ok := strings.CutPrefix(payload, "request:"); ok {
+		action := botPrivilegedAction(actionRaw)
+		if validBotPrivilegedAction(action) {
+			return callbackIntent{kind: cbRequestConfirm, arg: actionRaw}
+		}
+	}
+	if rest, ok := strings.CutPrefix(payload, "confirm:"); ok {
+		actionRaw, nonce, found := strings.Cut(rest, ":")
+		action := botPrivilegedAction(actionRaw)
+		if found && validBotPrivilegedAction(action) && validConfirmationNonce(nonce) {
+			return callbackIntent{kind: cbConfirmAction, arg: actionRaw, nonce: nonce}
+		}
+	}
+	if nonce, ok := strings.CutPrefix(payload, "cancel:"); ok && validConfirmationNonce(nonce) {
+		return callbackIntent{kind: cbCancelAction, nonce: nonce}
+	}
+	if _, arg, ok := strings.Cut(payload, ":"); ok {
+		return callbackIntent{kind: cbUnknown, arg: arg}
+	}
+	return callbackIntent{kind: cbUnknown, arg: payload}
+}
+
+func parseLegacyCallback(data string) callbackIntent {
 	switch data {
 	case "menu:main":
 		return callbackIntent{kind: cbMenuMain}
@@ -453,14 +850,12 @@ func parseCallback(data string) callbackIntent {
 	case "act:ios":
 		return callbackIntent{kind: cbIOS}
 	}
-	// Prefix-classified data with a payload tail: restart:<svc>, logs:<svc>.
 	if svc, ok := strings.CutPrefix(data, "restart:"); ok {
 		return callbackIntent{kind: cbRestart, arg: svc}
 	}
 	if svc, ok := strings.CutPrefix(data, "logs:"); ok {
 		return callbackIntent{kind: cbLogs, arg: svc}
 	}
-	// Unknown: expose the "prefix:arg" tail for future extension.
 	if _, arg, ok := strings.Cut(data, ":"); ok {
 		return callbackIntent{kind: cbUnknown, arg: arg}
 	}

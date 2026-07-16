@@ -177,8 +177,8 @@ secret: e2e-secret
 listeners:
   - {name: sniproxy, type: tunnel, port: 443, target: 127.0.0.1:443}
 dns: {nameserver: ["udp://127.0.0.1:5354"]}
-hosts: {console.example.test: 127.0.0.1, zash.example.test: 127.0.0.2, profile.example.test: 127.0.0.1}
-rules: ["DOMAIN,profile.example.test,DIRECT", "IP-CIDR,10.0.0.1/32,REJECT-DROP", "MATCH,DIRECT"]
+hosts: {console.example.test: 127.0.0.1, zash.example.test: 127.0.0.2}
+rules: ["DOMAIN,console.example.test,DIRECT", "IP-CIDR,10.0.0.1/32,REJECT-DROP", "MATCH,DIRECT"]
 `
 
 const MIHOMO_CONFIG_FIXTURE: T.MihomoConfig = {

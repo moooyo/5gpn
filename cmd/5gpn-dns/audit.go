@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 )
 
 // statusRecorder wraps an http.ResponseWriter to capture the status code
@@ -112,7 +113,36 @@ func auditSource(r *http.Request) string {
 // "ok" / "err" / "invoked" (see auditResult). Never logs message bodies or
 // tokens, mirroring the HTTP audit's restraint.
 func auditBot(op string, adminID int64, result string) {
-	log.Printf("audit src=telegram op=%s admin=%d result=%s", op, adminID, result)
+	log.Printf("audit src=telegram op=%s admin=%d result=%s", auditBotToken(op), adminID, auditBotToken(result))
+}
+
+// auditBotOutcome records the final result of a completed bot operation. The
+// handler may still record an invocation line before a slow operation, but it
+// must call this after completion so journald distinguishes attempted work from
+// work that actually succeeded.
+func auditBotOutcome(op string, adminID int64, ok bool) {
+	auditBot(op, adminID, auditResult(ok))
+}
+
+func auditBotToken(value string) string {
+	value = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r
+		case r >= '0' && r <= '9':
+			return r
+		case strings.ContainsRune("._:-", r):
+			return r
+		default:
+			return '_'
+		}
+	}, value)
+	if value == "" {
+		return "unknown"
+	}
+	return truncateRunes(value, 96)
 }
 
 // auditResult maps a success boolean to the audit "result=" token used by

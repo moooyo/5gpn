@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -101,6 +102,16 @@ type Config struct {
 	// Phase 5: in-process Telegram bot.
 	TGBotToken  string         // env TGBOT_TOKEN; empty ⇒ bot disabled
 	TGBotAdmins map[int64]bool // env TGBOT_ADMINS; comma/space-separated int64 admin IDs
+	// TGBotProxyURL is an optional HTTP/HTTPS CONNECT proxy used only for
+	// Telegram Bot API traffic (env TGBOT_PROXY_URL). It lets an operator route
+	// the bot through an explicitly configured loopback mihomo mixed/HTTP
+	// listener without changing any other daemon egress. The installer never
+	// mutates operator-owned mihomo config to create that listener.
+	TGBotProxyURL string
+	// TGBotAlerts enables transition-based Telegram notifications to configured
+	// admins (env TGBOT_ALERTS, default false). It is opt-in because a bot can
+	// message an admin only after that user has opened the private chat.
+	TGBotAlerts bool
 	// TGBotFile is the runtime tgbot-override file (env DNS_TGBOT_FILE, default
 	// /etc/5gpn/tgbot.json). When present it overrides TGBOT_TOKEN/TGBOT_ADMINS
 	// at startup and is rewritten by PUT /api/tgbot (web-console managed), so the
@@ -125,14 +136,13 @@ type Config struct {
 	// DNS_BASE_DOMAIN) and the console/zash panel domains derived from it (env
 	// DNS_CONSOLE_DOMAIN / DNS_ZASH_DOMAIN). install.sh persists all three, but
 	// older configs may only have DNS_BASE_DOMAIN; LoadConfig therefore derives
-	// zash.<base> and profile.<base> when those two explicit vars are empty.
+	// zash.<base> when the explicit value is empty.
 	// Empty still means the value isn't known yet (e.g. a box not yet migrated to
 	// the base-domain scheme); nothing in this task consumes ConsoleDomain beyond
 	// storing it.
 	BaseDomain    string
 	ConsoleDomain string
 	ZashDomain    string
-	ProfileDomain string // public profile-only SNI host; defaults to profile.<base>
 
 	// MihomoController is mihomo's loopback external-controller API address
 	// (env DNS_MIHOMO_CONTROLLER, default 127.0.0.1:9090) and MihomoSecret is
@@ -241,13 +251,15 @@ type Config struct {
 //	DNS_STATS_FILE      /etc/5gpn/stats.json (empty disables persistence)
 //	DNS_API_RATE        20 (requests/sec per source IP; <= 0 disables rate limiting)
 //	DNS_API_BURST       40 (token-bucket capacity per source IP)
+//	TGBOT_PROXY_URL     (none — optional HTTP/HTTPS CONNECT proxy for Telegram only)
+//	TGBOT_ALERTS        false (notify admins on cert/mihomo/upstream transitions)
 //	WWW_DIR             /opt/5gpn/www (static-file root for the /ios/ profile path)
 //	DNS_WEB_DIR         /opt/5gpn/web (control-console SPA static root)
 //	DNS_EGRESS_BROKER   127.0.0.1:5354 (mihomo sniffed-origin DNS resolver)
 //	DNS_MIHOMO_CONTROLLER 127.0.0.1:9090 (mihomo's loopback external-controller API)
 //	DNS_MIHOMO_SECRET   (none — mihomo controller bearer secret)
 //	DNS_WHITELIST_FILE  /etc/5gpn/mihomo/whitelist.txt (panel source-IP allowlist)
-//	DNS_BASE_DOMAIN / DNS_CONSOLE_DOMAIN / DNS_ZASH_DOMAIN / DNS_PROFILE_DOMAIN (none — older configs derive zash/profile from base when empty)
+//	DNS_BASE_DOMAIN / DNS_CONSOLE_DOMAIN / DNS_ZASH_DOMAIN (none — zash derives from base when empty)
 //	DNS_MIHOMO_CONFIG   /etc/5gpn/mihomo/config.yaml (operator-owned mihomo config; console raw editor)
 //	DNS_POLICY_RULES    /etc/5gpn/policy.json (unified policy-rule model; plain JSON, public subscription URLs; empty disables)
 //	DNS_ZASH_DIR        /opt/5gpn/zash (unzipped zashboard dist, served by the zash panel)
@@ -273,12 +285,13 @@ func LoadConfig() (Config, error) {
 		StatsFile:         envListen("DNS_STATS_FILE", "/etc/5gpn/stats.json"),
 		TGBotToken:        os.Getenv("TGBOT_TOKEN"),
 		TGBotAdmins:       parseAdminIDs(os.Getenv("TGBOT_ADMINS")),
+		TGBotProxyURL:     strings.TrimSpace(os.Getenv("TGBOT_PROXY_URL")),
+		TGBotAlerts:       envBool("TGBOT_ALERTS", false),
 		WWWDir:            envOr("WWW_DIR", "/opt/5gpn/www"),
 		WebDir:            envOr("DNS_WEB_DIR", "/opt/5gpn/web"),
 		BaseDomain:        envOr("DNS_BASE_DOMAIN", ""),
 		ConsoleDomain:     envOr("DNS_CONSOLE_DOMAIN", ""),
 		ZashDomain:        envOr("DNS_ZASH_DOMAIN", ""),
-		ProfileDomain:     envOr("DNS_PROFILE_DOMAIN", ""),
 		MihomoController:  envOr("DNS_MIHOMO_CONTROLLER", "127.0.0.1:9090"),
 		MihomoSecret:      envOr("DNS_MIHOMO_SECRET", ""),
 		WhitelistFile:     envOr("DNS_WHITELIST_FILE", "/etc/5gpn/mihomo/whitelist.txt"),
@@ -289,12 +302,12 @@ func LoadConfig() (Config, error) {
 		ZashCertFile:      os.Getenv("DNS_ZASH_CERT"),
 		ZashKeyFile:       os.Getenv("DNS_ZASH_KEY"),
 	}
+	if err := validateTGBotProxyURL(cfg.TGBotProxyURL); err != nil {
+		return Config{}, fmt.Errorf("config: invalid TGBOT_PROXY_URL: %w", err)
+	}
 	trimmedBaseDomain := strings.TrimSuffix(cfg.BaseDomain, ".")
 	if cfg.ZashDomain == "" && trimmedBaseDomain != "" {
 		cfg.ZashDomain = "zash." + trimmedBaseDomain
-	}
-	if cfg.ProfileDomain == "" && trimmedBaseDomain != "" {
-		cfg.ProfileDomain = "profile." + trimmedBaseDomain
 	}
 	// Web-console cert falls back to the DoT cert so a single-cert deployment
 	// (CERT_MODE=debug, or a dev box) still serves loopback :443.
@@ -468,6 +481,34 @@ func LoadConfig() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// validateTGBotProxyURL accepts only an HTTP(S) forward/CONNECT proxy. SOCKS
+// would require another direct dependency and is intentionally unsupported;
+// mihomo's mixed-port accepts HTTP CONNECT already. Keeping this parser strict
+// also prevents surprising path/query components from being silently ignored
+// by net/http's proxy transport.
+func validateTGBotProxyURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("scheme must be http or https")
+	}
+	if u.Host == "" {
+		return fmt.Errorf("host is required")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return fmt.Errorf("path is not allowed")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("query and fragment are not allowed")
+	}
+	return nil
 }
 
 // parseTrustEntries parses a comma-separated list of trust upstream specs.

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -44,6 +46,38 @@ func TestOpRestartMihomo(t *testing.T) {
 	}
 	if !strings.Contains(msg, "mihomo") {
 		t.Errorf("opRestart(mihomo) msg = %q, want it to name mihomo", msg)
+	}
+}
+
+func TestRestartMihomoRequiresCommandAndActiveSuccess(t *testing.T) {
+	tests := []struct {
+		name       string
+		restartOK  bool
+		activeOK   bool
+		state      string
+		wantOK     bool
+		wantDetail string
+	}{
+		{name: "both succeed", restartOK: true, activeOK: true, state: "active", wantOK: true},
+		{name: "restart fails despite stale active state", restartOK: false, activeOK: true, state: "active", wantDetail: "restart 失败"},
+		{name: "restart exits zero but service is failed", restartOK: true, activeOK: false, state: "failed", wantDetail: "is-active"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			bt := &Bot{runFn: func(argv []string, _ time.Duration) (bool, string) {
+				if len(argv) >= 2 && argv[1] == "restart" {
+					return tc.restartOK, "restart diagnostic"
+				}
+				return tc.activeOK, tc.state
+			}}
+			result := bt.restartMihomoResult()
+			if result.OK != tc.wantOK {
+				t.Fatalf("result.OK = %v, want %v; result=%+v", result.OK, tc.wantOK, result)
+			}
+			if tc.wantDetail != "" && !strings.Contains(result.HTML(), tc.wantDetail) {
+				t.Fatalf("result HTML = %q, want %q", result.HTML(), tc.wantDetail)
+			}
+		})
 	}
 }
 
@@ -146,6 +180,26 @@ func TestOpLogsKnownService(t *testing.T) {
 	}
 }
 
+func TestOpLogsFailureIsExplicitAndKeepsNewestOutput(t *testing.T) {
+	out := "old-marker\n" + strings.Repeat("旧", 4000) + "\nLATEST-FAILURE"
+	fn, _ := recordRun(false, out)
+	result := (&Bot{runFn: fn}).opLogsResult("mihomo")
+
+	if result.OK {
+		t.Fatal("failed journalctl reported OK")
+	}
+	rendered := result.HTML()
+	if !strings.Contains(rendered, "日志读取失败") {
+		t.Fatalf("failure not explicit: %q", rendered[:min(len(rendered), 200)])
+	}
+	if !strings.Contains(rendered, "LATEST-FAILURE") {
+		t.Fatal("truncated log lost the newest failure line")
+	}
+	if strings.Contains(rendered, "old-marker") {
+		t.Fatal("tail-oriented truncation retained the oldest marker")
+	}
+}
+
 // TestOpLogsUnknownService rejects an unknown service without shelling out.
 func TestOpLogsUnknownService(t *testing.T) {
 	fn, calls := recordRun(true, "")
@@ -176,6 +230,7 @@ func TestOpRenewCert(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(baseDomainEnv, "example.com")
 			fn, calls := recordRun(c.ok, c.out)
 			bt := &Bot{runFn: fn}
 			msg := bt.opRenewCert()
@@ -188,8 +243,17 @@ func TestOpRenewCert(t *testing.T) {
 			if len(argv) == 0 || argv[0] != "systemd-run" {
 				t.Fatalf("opRenewCert argv = %v, want a systemd-run wrapper", argv)
 			}
-			if joined := strings.Join(argv, " "); !strings.Contains(joined, "certbot renew") {
-				t.Fatalf("opRenewCert argv = %v, want certbot renew inside", argv)
+			want := []string{
+				"systemd-run", "--pipe", "--collect", "--quiet",
+				"certbot", "renew", "--cert-name", "example.com", "--non-interactive",
+			}
+			if len(argv) != len(want) {
+				t.Fatalf("opRenewCert argv = %v, want %v", argv, want)
+			}
+			for i := range want {
+				if argv[i] != want[i] {
+					t.Fatalf("opRenewCert argv = %v, want %v", argv, want)
+				}
 			}
 			if !strings.Contains(msg, c.wantSubstr) {
 				t.Errorf("opRenewCert(%s) = %q, want substring %q", c.name, msg, c.wantSubstr)
@@ -198,55 +262,101 @@ func TestOpRenewCert(t *testing.T) {
 	}
 }
 
+func TestOpRenewCertFailsClosedWithoutValidBaseDomain(t *testing.T) {
+	for _, value := range []string{"", "not-a-domain", "example.com;certbot renew"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv(baseDomainEnv, value)
+			fn, calls := recordRun(true, "must not run")
+			bt := &Bot{runFn: fn}
+
+			msg := bt.opRenewCert()
+
+			if len(*calls) != 0 {
+				t.Fatalf("opRenewCert with DNS_BASE_DOMAIN=%q ran %v, want no subprocess", value, *calls)
+			}
+			if !strings.Contains(msg, "已拒绝") || !strings.Contains(msg, baseDomainEnv) {
+				t.Errorf("opRenewCert with DNS_BASE_DOMAIN=%q = %q, want fail-closed notice", value, msg)
+			}
+		})
+	}
+}
+
+func TestOpRenewCertCanonicalizesCertName(t *testing.T) {
+	t.Setenv(baseDomainEnv, "EXAMPLE.COM.")
+	fn, calls := recordRun(true, "Cert not yet due for renewal")
+	bt := &Bot{runFn: fn}
+
+	bt.opRenewCert()
+
+	if len(*calls) != 1 {
+		t.Fatalf("opRenewCert made %d calls, want 1", len(*calls))
+	}
+	argv := (*calls)[0]
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == "--cert-name" {
+			if argv[i+1] != "example.com" {
+				t.Fatalf("--cert-name = %q, want example.com", argv[i+1])
+			}
+			return
+		}
+	}
+	t.Fatalf("opRenewCert argv = %v, missing --cert-name", argv)
+}
+
 // setIOSHostEnv points the iosHost source env keys at fresh test-scoped vars
 // (cleared by default) for the duration of a test. The bot reads the identity
 // from the environment (systemd loads dns.env), not from state files.
 func setIOSHostEnv(t *testing.T, webDomain, dotDomain string) {
 	t.Helper()
-	t.Setenv(profileDomainEnv, "")
+	t.Setenv(consoleDomainEnv, "")
+	t.Setenv(baseDomainEnv, "")
 	t.Setenv(webDomainEnv, webDomain)
 	t.Setenv(domainEnv, dotDomain)
 }
 
-// TestIosHost: the dedicated public profile-only SNI wins. WEB and DoT remain
-// migration fallbacks; an IP is never used because it cannot satisfy TLS SNI.
+// TestIosHost: the explicit public console domain wins. WEB, a base-derived
+// console name, and DoT remain migration fallbacks.
 func TestIosHost(t *testing.T) {
 	cases := []struct {
-		profileDomain, webDomain, dotDomain, want string
+		consoleDomain, webDomain, baseDomain, dotDomain, want string
 	}{
-		{"profile.example.com", "console.example.com", "dot.example.com", "profile.example.com"},
-		{"", "console.example.com", "dot.example.com", "console.example.com"},
-		{"", "", "dot.example.com", "dot.example.com"},
-		{"", "", "", ""},
+		{"console.explicit.com", "console.legacy.com", "example.com", "dot.example.com", "console.explicit.com"},
+		{"", "console.legacy.com", "example.com", "dot.example.com", "console.legacy.com"},
+		{"", "", "example.com", "dot.example.com", "console.example.com"},
+		{"", "", "", "dot.example.com", "dot.example.com"},
+		{"", "", "", "", ""},
 	}
 	for _, c := range cases {
 		setIOSHostEnv(t, c.webDomain, c.dotDomain)
-		t.Setenv(profileDomainEnv, c.profileDomain)
+		t.Setenv(consoleDomainEnv, c.consoleDomain)
+		t.Setenv(baseDomainEnv, c.baseDomain)
 		if got := iosHost(); got != c.want {
-			t.Errorf("iosHost() with profile=%q web=%q dot=%q = %q, want %q", c.profileDomain, c.webDomain, c.dotDomain, got, c.want)
+			t.Errorf("iosHost() with console=%q web=%q base=%q dot=%q = %q, want %q", c.consoleDomain, c.webDomain, c.baseDomain, c.dotDomain, got, c.want)
 		}
 	}
 }
 
-// TestOpIosURLUsesProfileDomain: the QR must point at the public profile-only
-// host, not the source-allowlisted admin console.
-func TestOpIosURLUsesProfileDomain(t *testing.T) {
+// TestOpIosURLUsesConsoleDomain: the QR must point at the public console.
+func TestOpIosURLUsesConsoleDomain(t *testing.T) {
 	setIOSHostEnv(t, "console.example.com", "dot.example.com")
-	t.Setenv(profileDomainEnv, "profile.example.com")
+	t.Setenv(consoleDomainEnv, "console.example.com")
 
-	fn, _ := recordRun(true, "QRCODE-ANSI-BLOCK")
+	fn, calls := recordRun(true, "QRCODE-ANSI-BLOCK")
 	bt := &Bot{runFn: fn}
 	msg := bt.opIOS()
 
-	wantURL := "https://profile.example.com/ios/ios-dot.mobileconfig"
+	wantURL := "https://console.example.com/ios/ios-dot.mobileconfig"
 	if !strings.Contains(msg, wantURL) {
-		t.Errorf("opIOS() = %q, want it to contain the profile-domain URL %q", msg, wantURL)
+		t.Errorf("opIOS() = %q, want it to contain the console URL %q", msg, wantURL)
 	}
 	if strings.Contains(msg, "8111") {
 		t.Errorf("opIOS() = %q, must NOT reference the removed :8111 responder", msg)
 	}
-	if !strings.Contains(msg, "QRCODE-ANSI-BLOCK") {
-		t.Errorf("opIOS() = %q, want the QR block embedded when qrencode succeeds", msg)
+	if strings.Contains(msg, "QRCODE-ANSI-BLOCK") {
+		t.Errorf("opIOS() = %q, ANSI QR art must not be embedded", msg)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("opIOS() ran %v; QR generation belongs to the native photo action", *calls)
 	}
 }
 
@@ -270,17 +380,68 @@ func TestOpIosNoHost(t *testing.T) {
 	}
 }
 
-// TestOpIosQrencodeMissing: when qrencode fails/missing, the URL alone is still
-// returned (actionable) with no QR block.
-func TestOpIosQrencodeMissing(t *testing.T) {
+func TestOpIosDoesNotNeedQrencodeForActionableURL(t *testing.T) {
 	setIOSHostEnv(t, "example.com", "")
 
-	fn, _ := recordRun(false, "命令不存在：qrencode")
+	fn, calls := recordRun(false, "命令不存在：qrencode")
 	bt := &Bot{runFn: fn}
 	msg := bt.opIOS()
 
 	if !strings.Contains(msg, "https://example.com/ios/ios-dot.mobileconfig") {
-		t.Errorf("opIOS() = %q, want the URL even when qrencode is missing", msg)
+		t.Errorf("opIOS() = %q, want the actionable URL", msg)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("opIOS() unexpectedly invoked qrencode through text runner: %v", *calls)
+	}
+}
+
+func TestBotActionGuardConfirmationAndSingleFlight(t *testing.T) {
+	now := time.Unix(1000, 0)
+	guard := newBotActionGuard()
+	guard.now = func() time.Time { return now }
+	guard.entropy = bytes.NewReader(bytes.Repeat([]byte{0x5a}, botConfirmationBytes*3))
+
+	nonce, expires, err := guard.Issue(botActionRestartMihomo, 7, 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !validConfirmationNonce(nonce) || !expires.Equal(now.Add(botConfirmationTTL)) {
+		t.Fatalf("nonce/expires = %q/%v", nonce, expires)
+	}
+	if guard.Consume(nonce, botActionRestartMihomo, 8, 11) {
+		t.Fatal("another admin consumed the confirmation")
+	}
+	if !guard.Consume(nonce, botActionRestartMihomo, 7, 11) {
+		t.Fatal("owner could not consume confirmation")
+	}
+	if guard.Consume(nonce, botActionRestartMihomo, 7, 11) {
+		t.Fatal("confirmation replay succeeded")
+	}
+
+	expired, _, err := guard.Issue(botActionRenewCert, 7, 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(botConfirmationTTL)
+	if guard.Consume(expired, botActionRenewCert, 7, 11) {
+		t.Fatal("expired confirmation succeeded")
+	}
+
+	if !guard.TryStart(botActionRestartMihomo) {
+		t.Fatal("first operation did not acquire single-flight guard")
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if guard.TryStart(botActionRestartMihomo) {
+			t.Error("concurrent operation acquired single-flight guard")
+		}
+	}()
+	wg.Wait()
+	guard.Finish(botActionRestartMihomo)
+	if !guard.TryStart(botActionRestartMihomo) {
+		t.Fatal("operation remained locked after Finish")
 	}
 }
 

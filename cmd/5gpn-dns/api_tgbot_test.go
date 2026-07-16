@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+
+	telegram "github.com/go-telegram/bot"
 )
 
 // fakeTGBotManager records Apply calls and returns a fixed View, so the API
@@ -53,7 +56,7 @@ func TestAPITGBot_GetRedactsToken(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("response not JSON: %v", err)
 	}
-	if !got.TokenSet || !got.Running || len(got.AdminIDs) != 2 {
+	if !got.TokenSet || !got.Running || got.State != botStateHealthy || len(got.AdminIDs) != 2 {
 		t.Errorf("view = %+v", got)
 	}
 }
@@ -104,5 +107,27 @@ func TestAPITGBot_Unavailable(t *testing.T) {
 	rec = doAPI(cs, http.MethodPut, "/api/tgbot", body, token, true)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("PUT (unwired) status = %d, want 503", rec.Code)
+	}
+}
+
+func TestAPITGBot_ErrorStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "invalid token", err: fmt.Errorf("telegram bot: %w", telegram.ErrorUnauthorized), want: http.StatusBadRequest},
+		{name: "Telegram unavailable", err: fmt.Errorf("telegram bot: network timeout"), want: http.StatusBadGateway},
+		{name: "superseded", err: fmt.Errorf("telegram bot: %w", errBotConfigSuperseded), want: http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs, token := newAPITestServer(t)
+			cs.ctrl.SetTGBotManager(&fakeTGBotManager{applyErr: tc.err})
+			body := mustJSON(t, map[string]any{"token": "candidate", "admins": []int64{1}})
+			rec := doAPI(cs, http.MethodPut, "/api/tgbot", body, token, true)
+			if rec.Code != tc.want {
+				t.Fatalf("status=%d body=%s, want %d", rec.Code, rec.Body.String(), tc.want)
+			}
+		})
 	}
 }

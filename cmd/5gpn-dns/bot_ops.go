@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"html"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,8 +33,9 @@ var (
 	gatewayIPEnv     = "DNS_GATEWAY_IP"
 	publicIPEnv      = "DNS_PUBLIC_IP"
 	domainEnv        = "DNS_DOMAIN"
+	baseDomainEnv    = "DNS_BASE_DOMAIN"
 	webDomainEnv     = "DNS_WEB_DOMAIN"
-	profileDomainEnv = "DNS_PROFILE_DOMAIN"
+	consoleDomainEnv = "DNS_CONSOLE_DOMAIN"
 )
 
 // run executes a fixed argv with a timeout, returning (ok, ansi-stripped
@@ -86,6 +92,214 @@ func (bt *Bot) run(argv []string, timeout time.Duration) (bool, string) {
 	return run(argv, timeout)
 }
 
+// botOperationResult is the common outcome of every privileged bot operation.
+// HTMLSummary is trusted, locally-authored Telegram HTML; Detail is always raw
+// command/error output and is escaped only when HTML renders it. Keeping the
+// success bit separate from the human text lets the callback handler record a
+// final ok/err audit entry without guessing from an emoji or translated text.
+type botOperationResult struct {
+	OK             bool
+	HTMLSummary    string
+	Detail         string
+	Duration       time.Duration
+	KeepDetailTail bool
+}
+
+// HTML renders an operation result without ever interpreting subprocess output
+// as Telegram markup. Log-like details keep their newest content when they must
+// be shortened; diagnostics use the beginning by default.
+func (r botOperationResult) HTML() string {
+	if strings.TrimSpace(r.Detail) == "" {
+		return r.HTMLSummary
+	}
+	detail := pre(r.Detail)
+	if r.KeepDetailTail {
+		detail = preTail(r.Detail)
+	}
+	return r.HTMLSummary + "\n" + detail
+}
+
+// botPrivilegedAction is deliberately closed: confirmation callback data may
+// name only these two destructive/expensive actions. Rule reload is quick and
+// reversible, while log/status/diagnostic operations are read-only.
+type botPrivilegedAction string
+
+const (
+	botActionRestartMihomo botPrivilegedAction = "restart-mihomo"
+	botActionRenewCert     botPrivilegedAction = "renew-cert"
+	botConfirmationTTL                         = 60 * time.Second
+	botConfirmationBytes                       = 12
+)
+
+func validBotPrivilegedAction(action botPrivilegedAction) bool {
+	switch action {
+	case botActionRestartMihomo, botActionRenewCert:
+		return true
+	default:
+		return false
+	}
+}
+
+type botConfirmation struct {
+	action  botPrivilegedAction
+	adminID int64
+	chatID  int64
+	expires time.Time
+}
+
+// botActionGuard provides both one-use confirmation nonces and Bot-wide
+// single-flight exclusion for privileged actions. Its zero value is usable.
+// A nonce is bound to the requesting admin, private chat and exact action, so a
+// forwarded button or replay cannot authorize another operation.
+type botActionGuard struct {
+	mu            sync.Mutex
+	confirmations map[string]botConfirmation
+	inFlight      map[botPrivilegedAction]bool
+	now           func() time.Time
+	entropy       io.Reader
+	ttl           time.Duration
+}
+
+func newBotActionGuard() *botActionGuard {
+	return &botActionGuard{
+		confirmations: make(map[string]botConfirmation),
+		inFlight:      make(map[botPrivilegedAction]bool),
+		now:           time.Now,
+		entropy:       rand.Reader,
+		ttl:           botConfirmationTTL,
+	}
+}
+
+func (g *botActionGuard) initLocked() {
+	if g.confirmations == nil {
+		g.confirmations = make(map[string]botConfirmation)
+	}
+	if g.inFlight == nil {
+		g.inFlight = make(map[botPrivilegedAction]bool)
+	}
+	if g.now == nil {
+		g.now = time.Now
+	}
+	if g.entropy == nil {
+		g.entropy = rand.Reader
+	}
+	if g.ttl <= 0 {
+		g.ttl = botConfirmationTTL
+	}
+}
+
+func (g *botActionGuard) pruneLocked(now time.Time) {
+	for nonce, c := range g.confirmations {
+		if !now.Before(c.expires) {
+			delete(g.confirmations, nonce)
+		}
+	}
+}
+
+// Issue creates a fresh confirmation nonce and revokes any older outstanding
+// nonce for the same admin/chat/action tuple.
+func (g *botActionGuard) Issue(action botPrivilegedAction, adminID, chatID int64) (string, time.Time, error) {
+	if !validBotPrivilegedAction(action) {
+		return "", time.Time{}, fmt.Errorf("unsupported bot action %q", action)
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.initLocked()
+	now := g.now()
+	g.pruneLocked(now)
+
+	var nonce string
+	for attempt := 0; attempt < 4; attempt++ {
+		raw := make([]byte, botConfirmationBytes)
+		if _, err := io.ReadFull(g.entropy, raw); err != nil {
+			return "", time.Time{}, fmt.Errorf("generate confirmation nonce: %w", err)
+		}
+		candidate := hex.EncodeToString(raw)
+		if _, exists := g.confirmations[candidate]; !exists {
+			nonce = candidate
+			break
+		}
+	}
+	if nonce == "" {
+		return "", time.Time{}, fmt.Errorf("generate confirmation nonce: repeated collision")
+	}
+
+	for nonce, c := range g.confirmations {
+		if c.action == action && c.adminID == adminID && c.chatID == chatID {
+			delete(g.confirmations, nonce)
+		}
+	}
+	expires := now.Add(g.ttl)
+	g.confirmations[nonce] = botConfirmation{
+		action: action, adminID: adminID, chatID: chatID, expires: expires,
+	}
+	return nonce, expires, nil
+}
+
+// Consume authorizes exactly one matching operation. A mismatch does not burn
+// the real owner's ticket; an expired or successfully used nonce is deleted.
+func (g *botActionGuard) Consume(nonce string, action botPrivilegedAction, adminID, chatID int64) bool {
+	if !validBotPrivilegedAction(action) {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.initLocked()
+	now := g.now()
+	c, ok := g.confirmations[nonce]
+	if !ok {
+		return false
+	}
+	if !now.Before(c.expires) {
+		delete(g.confirmations, nonce)
+		return false
+	}
+	if c.action != action || c.adminID != adminID || c.chatID != chatID {
+		return false
+	}
+	delete(g.confirmations, nonce)
+	return true
+}
+
+// Cancel deletes a confirmation only for the admin/chat that owns it.
+func (g *botActionGuard) Cancel(nonce string, adminID, chatID int64) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.initLocked()
+	c, ok := g.confirmations[nonce]
+	if !ok || c.adminID != adminID || c.chatID != chatID {
+		return false
+	}
+	delete(g.confirmations, nonce)
+	return true
+}
+
+// TryStart/Finish form the single-flight boundary around the actual command.
+// Exclusion is per action and shared by all updates handled by one Bot, which
+// prevents two admins from concurrently restarting mihomo or renewing the same
+// certificate.
+func (g *botActionGuard) TryStart(action botPrivilegedAction) bool {
+	if !validBotPrivilegedAction(action) {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.initLocked()
+	if g.inFlight[action] {
+		return false
+	}
+	g.inFlight[action] = true
+	return true
+}
+
+func (g *botActionGuard) Finish(action botPrivilegedAction) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.initLocked()
+	delete(g.inFlight, action)
+}
+
 // --------------------------------------------------------------------------- //
 // Restart (→ hot reload for 5gpn-dns; real restart for mihomo)
 // --------------------------------------------------------------------------- //
@@ -98,18 +312,29 @@ func (bt *Bot) run(argv []string, timeout time.Duration) (bool, string) {
 // manages xray). "all" does both. An unknown service is rejected without
 // shelling out or reloading.
 func (bt *Bot) opRestart(svc string) string {
+	return bt.opRestartResult(svc).HTML()
+}
+
+// opRestartResult performs the requested operation and exposes its real
+// success bit for final auditing. "all" remains accepted only for compatibility
+// with an already-open pre-upgrade menu; its wording states exactly what ran.
+func (bt *Bot) opRestartResult(svc string) botOperationResult {
+	started := time.Now()
 	switch svc {
 	case "all":
-		var lines []string
-		lines = append(lines, bt.restartMihomo())
-		lines = append(lines, bt.reload5gpnDNS())
-		return "♻️ <b>全部服务已处理</b>\n" + strings.Join(lines, "\n")
+		mihomo := bt.restartMihomoResult()
+		dns := bt.reload5gpnDNSResult()
+		return botOperationResult{
+			OK:          mihomo.OK && dns.OK,
+			HTMLSummary: "♻️ <b>已处理 Mihomo 重启与 DNS 规则重载</b>\n" + mihomo.HTML() + "\n" + dns.HTML(),
+			Duration:    time.Since(started),
+		}
 	case "mihomo":
-		return bt.restartMihomo()
+		return bt.restartMihomoResult()
 	case "5gpn-dns":
-		return bt.reload5gpnDNS()
+		return bt.reload5gpnDNSResult()
 	default:
-		return "未知服务。"
+		return botOperationResult{OK: false, HTMLSummary: "❌ 未知服务。", Duration: time.Since(started)}
 	}
 }
 
@@ -118,22 +343,63 @@ func (bt *Bot) opRestart(svc string) string {
 // service (formerly sing-box, then Xray, now mihomo — see the mihomo
 // migration note in main.go/bot.go).
 func (bt *Bot) restartMihomo() string {
-	bt.run([]string{"systemctl", "restart", "mihomo"}, 60*time.Second)
-	state := bt.serviceActive("mihomo")
-	icon := "❌"
-	if state == "active" {
-		icon = "✅"
+	return bt.restartMihomoResult().HTML()
+}
+
+func (bt *Bot) restartMihomoResult() botOperationResult {
+	started := time.Now()
+	restartOK, restartOut := bt.run([]string{"systemctl", "restart", "mihomo"}, 60*time.Second)
+	activeOK, stateOut := bt.run([]string{"systemctl", "is-active", "mihomo"}, 10*time.Second)
+	state := normalizedServiceState(stateOut)
+	ok := restartOK && activeOK && state == "active"
+
+	if ok {
+		return botOperationResult{
+			OK:          true,
+			HTMLSummary: "✅ <b>mihomo</b> 已重启并确认 active",
+			Duration:    time.Since(started),
+		}
 	}
-	return fmt.Sprintf("%s <b>mihomo</b> 已重启（%s）", icon, html.EscapeString(state))
+
+	var detail []string
+	if !restartOK {
+		detail = append(detail, "systemctl restart 失败：\n"+strings.TrimSpace(restartOut))
+	}
+	if !activeOK || state != "active" {
+		detail = append(detail, "systemctl is-active 未确认服务正常：\n"+strings.TrimSpace(stateOut))
+	}
+	return botOperationResult{
+		OK: false,
+		HTMLSummary: fmt.Sprintf(
+			"❌ <b>Mihomo 重启失败</b>（当前状态：%s）",
+			html.EscapeString(state),
+		),
+		Detail:   strings.Join(detail, "\n\n"),
+		Duration: time.Since(started),
+	}
 }
 
 // reload5gpnDNS hot-reloads 5gpn-dns's rules in-process (ctrl.Reload()) instead
 // of restarting the host process — see opRestart's self-restart note.
 func (bt *Bot) reload5gpnDNS() string {
+	return bt.reload5gpnDNSResult().HTML()
+}
+
+func (bt *Bot) reload5gpnDNSResult() botOperationResult {
+	started := time.Now()
 	if err := bt.ctrl.Reload(); err != nil {
-		return "❌ <b>5gpn-dns 热重载失败</b>\n" + pre(err.Error())
+		return botOperationResult{
+			OK:          false,
+			HTMLSummary: "❌ <b>DNS 规则重载失败</b>",
+			Detail:      err.Error(),
+			Duration:    time.Since(started),
+		}
 	}
-	return "♻️ 5gpn-dns 已热重载规则（进程内，不重启）"
+	return botOperationResult{
+		OK:          true,
+		HTMLSummary: "✅ 5gpn-dns 已热重载 DNS 规则（进程内，不重启）",
+		Duration:    time.Since(started),
+	}
 }
 
 // serviceActive returns the injectable-run equivalent of `systemctl is-active
@@ -143,11 +409,20 @@ func (bt *Bot) reload5gpnDNS() string {
 // output regardless of ok.
 func (bt *Bot) serviceActive(unit string) string {
 	_, out := bt.run([]string{"systemctl", "is-active", unit}, 10*time.Second)
+	return normalizedServiceState(out)
+}
+
+func normalizedServiceState(out string) string {
 	state := strings.TrimSpace(out)
 	if state == "" {
 		return "unknown"
 	}
-	return state
+	// systemctl normally emits one word. Keep an unexpected diagnostic safe and
+	// compact in the status/restart card instead of reflecting arbitrary output.
+	if fields := strings.Fields(state); len(fields) > 0 {
+		state = fields[len(fields)-1]
+	}
+	return truncateRunes(state, 64)
 }
 
 // --------------------------------------------------------------------------- //
@@ -159,14 +434,34 @@ func (bt *Bot) serviceActive(unit string) string {
 // requested result). Only the two known data-path services are allowed; any
 // other value is rejected without shelling out. Mirrors tgbot.py's op_logs.
 func (bt *Bot) opLogs(svc string) string {
+	return bt.opLogsResult(svc).HTML()
+}
+
+func (bt *Bot) opLogsResult(svc string) botOperationResult {
+	started := time.Now()
 	if !isKnownService(svc) {
-		return "未知服务。"
+		return botOperationResult{OK: false, HTMLSummary: "❌ 未知服务。", Duration: time.Since(started)}
 	}
-	_, out := bt.run(
+	ok, out := bt.run(
 		[]string{"journalctl", "-u", svc, "-n", "50", "--no-pager", "-o", "short-iso"},
 		30*time.Second,
 	)
-	return fmt.Sprintf("📜 <b>%s</b> 最近 50 行：\n%s", html.EscapeString(svc), pre(out))
+	if !ok {
+		return botOperationResult{
+			OK:             false,
+			HTMLSummary:    fmt.Sprintf("❌ <b>%s 日志读取失败</b>", html.EscapeString(svc)),
+			Detail:         out,
+			Duration:       time.Since(started),
+			KeepDetailTail: true,
+		}
+	}
+	return botOperationResult{
+		OK:             true,
+		HTMLSummary:    fmt.Sprintf("📜 <b>%s</b> 最近 50 行", html.EscapeString(svc)),
+		Detail:         out,
+		Duration:       time.Since(started),
+		KeepDetailTail: true,
+	}
 }
 
 // isKnownService reports whether svc is one of the two data-path services the
@@ -184,8 +479,24 @@ func isKnownService(svc string) bool {
 // Cert renewal (certbot)
 // --------------------------------------------------------------------------- //
 
-// opRenewCert runs `certbot renew` and classifies the result. certbot is
-// launched via `systemd-run` — a transient unit spawned by PID 1 that does NOT
+// renewalCertName returns the one certbot lineage name this daemon is allowed
+// to renew. install.sh names the wildcard lineage after DNS_BASE_DOMAIN. A
+// single trailing root dot is harmless in DNS configuration but is not part of
+// certbot's lineage name, so it is removed before applying the same strict FQDN
+// validation used by the rest of the bot.
+func renewalCertName() (string, bool) {
+	name := strings.ToLower(strings.TrimSuffix(os.Getenv(baseDomainEnv), "."))
+	if !isValidDomain(name) {
+		return "", false
+	}
+	return name, true
+}
+
+// opRenewCert runs `certbot renew --cert-name <DNS_BASE_DOMAIN>` and classifies
+// the result. Missing or invalid identity fails closed before any subprocess is
+// started, so the bot can never renew unrelated certbot lineages on a shared
+// host. Certbot is launched via `systemd-run` — a transient unit spawned by PID
+// 1 that does NOT
 // inherit 5gpn-dns's hardened sandbox (ProtectSystem=strict, read-only
 // /etc/5gpn/cert, etc.). This lets certbot write /etc/letsencrypt and its deploy
 // hook refresh /etc/5gpn/cert without loosening the resolver's own unit — the
@@ -193,60 +504,137 @@ func isKnownService(svc string) bool {
 // and fail to write its state. The deploy hook SIGHUPs 5gpn-dns to pick up the
 // renewed cert. Port of tgbot.py's op_renew_cert (wording branches preserved).
 func (bt *Bot) opRenewCert() string {
+	return bt.opRenewCertResult().HTML()
+}
+
+func (bt *Bot) opRenewCertResult() botOperationResult {
+	started := time.Now()
+	certName, valid := renewalCertName()
+	if !valid {
+		return botOperationResult{
+			OK:          false,
+			HTMLSummary: "❌ <b>证书续期已拒绝</b>\n<code>DNS_BASE_DOMAIN</code> 缺失或非法；未运行 certbot。",
+			Duration:    time.Since(started),
+		}
+	}
 	ok, out := bt.run([]string{
 		"systemd-run", "--pipe", "--collect", "--quiet",
-		"certbot", "renew", "--non-interactive",
+		"certbot", "renew", "--cert-name", certName, "--non-interactive",
 	}, 600*time.Second)
 	tail := tailLines(out, 12)
 	if ok {
 		lower := strings.ToLower(out)
 		if strings.Contains(out, "No renewals were attempted") || strings.Contains(lower, "not yet due") {
-			return "ℹ️ <b>证书尚未到期</b>，无需续期。\n" + pre(tail)
+			return botOperationResult{
+				OK:          true,
+				HTMLSummary: "ℹ️ <b>证书尚未到期</b>，无需续期。",
+				Detail:      tail,
+				Duration:    time.Since(started),
+			}
 		}
-		return "✅ <b>证书已续期</b>（续期钩子会重载 5gpn-dns）。\n" + pre(tail)
+		return botOperationResult{
+			OK:          true,
+			HTMLSummary: "✅ <b>证书已续期</b>（续期钩子会重载 5gpn-dns）。",
+			Detail:      tail,
+			Duration:    time.Since(started),
+		}
 	}
-	return "❌ <b>证书续期失败</b>\n" + pre(tail)
+	return botOperationResult{
+		OK:          false,
+		HTMLSummary: "❌ <b>证书续期失败</b>",
+		Detail:      tail,
+		Duration:    time.Since(started),
+	}
 }
 
 // --------------------------------------------------------------------------- //
 // iOS profile QR
 // --------------------------------------------------------------------------- //
 
-// iosHost picks the host for the iOS profile URL. New installs use the public,
-// profile-only bootstrap SNI (DNS_PROFILE_DOMAIN), which works before the phone
-// has installed 5gpn DNS and does not expose the admin console. WEB and DoT are
-// compatibility fallbacks for boxes not yet migrated to the dedicated host.
+// iosHost picks the public console host for the iOS profile URL. WEB and the
+// derived console.<base> name are migration fallbacks for older dns.env files;
+// the legacy DoT identity remains the final fallback.
 func iosHost() string {
-	if v := strings.TrimSpace(os.Getenv(profileDomainEnv)); v != "" {
+	if v := strings.TrimSpace(os.Getenv(consoleDomainEnv)); v != "" {
 		return v
 	}
 	if v := strings.TrimSpace(os.Getenv(webDomainEnv)); v != "" {
 		return v
 	}
+	if base := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(os.Getenv(baseDomainEnv))), "."); isValidDomain(base) {
+		return "console." + base
+	}
 	return strings.TrimSpace(os.Getenv(domainEnv))
 }
 
-// opIOS builds the iOS profile URL (https://<web-domain>/ios/ios-dot.mobileconfig)
-// and, when qrencode is available, an ANSI-UTF8 QR block for it. If no host is
-// configured yet, it returns a "not found" notice (and never shells out). If
-// qrencode is missing/fails, the URL alone is still returned — it is actionable
-// on its own.
-func (bt *Bot) opIOS() string {
-	host := iosHost()
-	if host == "" {
-		return fmt.Sprintf(
-			"未找到描述文件域名（%s / %s / %s 均为空）。先在服务器上完成安装。",
-			profileDomainEnv, webDomainEnv, domainEnv,
-		)
+// iosProfileURL returns the safe, canonical HTTPS URL used by both the URL
+// keyboard button and the QR-photo path.
+func iosProfileURL() (string, bool) {
+	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(iosHost())), ".")
+	if !isValidDomain(host) {
+		return "", false
 	}
-	url := fmt.Sprintf("https://%s/ios/ios-dot.mobileconfig", host)
-	cap := "📱 <b>iOS DoT 描述文件</b>\n用相机/浏览器打开下面的地址安装（仅蜂窝网生效）：\n" +
-		fmt.Sprintf("<code>%s</code>", html.EscapeString(url))
+	return "https://" + host + "/ios/ios-dot.mobileconfig", true
+}
 
-	ok, qr := bt.run([]string{"qrencode", "-t", "ANSIUTF8", "-m", "1", url}, 15*time.Second)
-	if ok && strings.TrimSpace(qr) != "" {
-		return cap + "\n\n<pre>" + html.EscapeString(qr) + "</pre>"
+// opIOS now renders only the actionable URL. QR delivery is a separate native
+// Telegram photo action (iosQRCodePNG), avoiding unreadable ANSI-art messages.
+func (bt *Bot) opIOS() string {
+	return bt.opIOSResult().HTML()
+}
+
+func (bt *Bot) opIOSResult() botOperationResult {
+	started := time.Now()
+	url, ok := iosProfileURL()
+	if !ok {
+		return botOperationResult{
+			OK: false,
+			HTMLSummary: fmt.Sprintf(
+				"❌ 未找到合法的控制台域名（%s / %s）。先完成网关域名配置。",
+				consoleDomainEnv, baseDomainEnv,
+			),
+			Duration: time.Since(started),
+		}
 	}
-	// qrencode missing / failed: the URL alone is still actionable.
-	return cap
+	return botOperationResult{
+		OK: true,
+		HTMLSummary: "📱 <b>iOS DoT 描述文件</b>\n点击“安装描述文件”或发送二维码图片：\n" +
+			fmt.Sprintf("<code>%s</code>", html.EscapeString(url)),
+		Duration: time.Since(started),
+	}
+}
+
+// iosQRCodePNG renders a bounded PNG suitable for models.InputFileUpload.
+// qrencode writes to stdout; no shell is involved. The PNG signature is
+// verified so command diagnostics or a corrupt result are never uploaded as an
+// image. The URL remains separately available when qrencode is unavailable.
+func iosQRCodePNG() ([]byte, string, error) {
+	url, ok := iosProfileURL()
+	if !ok {
+		return nil, "", fmt.Errorf("no valid iOS profile URL")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "qrencode", "-t", "PNG", "-o", "-", "-m", "1", url)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	png, err := cmd.Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		return nil, url, fmt.Errorf("qrencode timed out")
+	}
+	if err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = err.Error()
+		}
+		return nil, url, fmt.Errorf("qrencode: %s", detail)
+	}
+	if len(png) > 10<<20 {
+		return nil, url, fmt.Errorf("qrencode output is too large")
+	}
+	if !bytes.HasPrefix(png, []byte("\x89PNG\r\n\x1a\n")) {
+		return nil, url, fmt.Errorf("qrencode returned a non-PNG response")
+	}
+	return png, url, nil
 }

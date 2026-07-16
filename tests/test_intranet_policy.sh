@@ -58,14 +58,14 @@ grep -Eq '^deploy_cert_roles\(\)' "$INSTALL" \
 dbg="$(sed -n '/^issue_selfsigned_wildcard()/,/^}/p' "$INSTALL")"
 printf '%s' "$dbg" | grep -Fq 'openssl req -x509' \
     || fail "install.sh: debug mode does not generate a self-signed cert (openssl req -x509)"
-printf '%s' "$dbg" | grep -Fq 'renewal-hooks/deploy/99-5gpn.sh' \
-    || fail "install.sh: debug branch does not remove the 99-5gpn.sh deploy hook"
+printf '%s' "$dbg" | grep -Fq 'remove_owned_renew_hook' \
+    || fail "install.sh: debug branch does not ownership-gate deploy-hook removal"
 printf '%s' "$dbg" | grep -Fq 'systemctl disable --now 5gpn-certbot-renew.timer' \
     || fail "install.sh: debug branch does not disable 5gpn-certbot-renew.timer"
 
 # ===== cloudflare DNS-01 issuance — no :80, no xray, no --standalone =====
 ic="$(sed -n '/^install_cert()/,/^}/p' "$INSTALL")"
-printf '%s' "$ic" | grep -Eq 'certbot certonly --dns-cloudflare' \
+printf '%s' "$ic" | grep -Eq 'certbot_args=\(certonly --cert-name .*--dns-cloudflare' \
     || fail "install.sh: install_cert does not use certbot --dns-cloudflare (Cloudflare DNS-01)"
 printf '%s' "$ic" | grep -Fqe '-d "*.${base}"' \
     || fail "install.sh: install_cert does not request a WILDCARD (-d \"*.\${base}\")"
@@ -80,12 +80,12 @@ printf '%s' "$ect_fn_it" | grep -Eq 'chmod 0?600' \
 # Apex SAN must appear alongside the wildcard in the certbot invocation.
 printf '%s' "$ic" | grep -Fqe '-d "${base}"' \
     || fail "install.sh: install_cert does not request the apex SAN (-d \"\${base}\")"
-# ensure_cf_token must be called BEFORE certbot certonly in the issuance branch.
+# ensure_cf_token must be called BEFORE construction/execution of certbot args.
 # Anchor on the actual call line, not a comment that also contains the name.
 _ect_line="$(printf '%s' "$ic" | grep -n 'ensure_cf_token || return 1' | head -1 | cut -d: -f1)"
-_cb_line="$(printf '%s'  "$ic" | grep -n 'certbot certonly' | head -1 | cut -d: -f1)"
+_cb_line="$(printf '%s'  "$ic" | grep -n 'certbot_args=(certonly' | head -1 | cut -d: -f1)"
 [ -z "${_ect_line:-}" ] && fail "install.sh: install_cert does not contain 'ensure_cf_token || return 1' (anchored call missing)"
-[ -z "${_cb_line:-}" ] && fail "install.sh: install_cert does not contain certbot certonly (certbot line not found)"
+[ -z "${_cb_line:-}" ] && fail "install.sh: install_cert does not construct scoped certbot certonly arguments"
 [ -n "${_ect_line:-}" ] && [ "${_ect_line}" -ge "${_cb_line}" ] && \
     fail "install.sh: ensure_cf_token must appear BEFORE certbot certonly in install_cert"
 # No HTTP-01 or webroot-based flags in the certbot issuance branch.
@@ -130,9 +130,14 @@ grep -Eq 'open_port80|close_port80' "$INSTALL" \
 RENEW="$ROOT/scripts/renew-hook.sh"
 grep -Fq 'RENEWED_LINEAGE' "$RENEW" || fail "renew-hook.sh: does not use RENEWED_LINEAGE"
 grep -Fq 'DNS_BASE_DOMAIN' "$RENEW" || fail "renew-hook.sh: does not match the lineage to DNS_BASE_DOMAIN"
-grep -Fq '/cert/dot'  "$RENEW" || fail "renew-hook.sh: does not deploy to the dot role dir"
-grep -Fq '/cert/web'  "$RENEW" || fail "renew-hook.sh: does not deploy to the web role dir"
-grep -Fq '/cert/zash' "$RENEW" || fail "renew-hook.sh: does not deploy to the zash role dir"
+grep -Fq 'roles=(dot web zash)' "$RENEW" \
+    || fail "renew-hook.sh: does not deploy to all dot/web/zash role dirs"
+grep -Fq 'validate_cert_pair' "$RENEW" \
+    || fail "renew-hook.sh: does not validate SANs and the certificate/private-key pair"
+grep -Fq 'mktemp "${dest}/.fullchain.pem.XXXXXX"' "$RENEW" \
+    || fail "renew-hook.sh: certificate publication is not same-directory staged"
+grep -Fq 'mv -f -- "${cert_tmps[$i]}"' "$RENEW" \
+    || fail "renew-hook.sh: staged certificate is not atomically renamed into place"
 grep -Fq 'mihomo reloads the controller certificate files automatically' "$RENEW" \
     || fail "renew-hook.sh: missing mihomo controller certificate hot-reload contract"
 grep -Eq 'systemctl (restart|reload) mihomo' "$RENEW" \
@@ -141,8 +146,8 @@ grep -iq 'xray' "$RENEW" && fail "renew-hook.sh: must not reference xray (mihomo
 
 # ===== gen-ios-profile.sh — unsigned profile fails CLOSED =====
 fc="$(sed -n '/sign_ok -ne 1/,/^fi$/p' "$IOSGEN")"
-printf '%s' "$fc" | grep -Fq 'ALLOW_UNSIGNED' \
-    || fail "gen-ios-profile.sh: unsigned handling lost its ALLOW_UNSIGNED_PROFILE gate"
+grep -Fq 'ALLOW_UNSIGNED_PROFILE' "$IOSGEN" \
+    && fail "gen-ios-profile.sh: caller environment can still allow unsigned profiles"
 printf '%s' "$fc" | grep -Fq 'rm -f "$profile_path"' \
     || fail "gen-ios-profile.sh: unsigned profile is not removed (must fail closed, not serve tamperable)"
 printf '%s' "$fc" | grep -Eq 'exit 1' \
@@ -172,46 +177,34 @@ printf '%s' "$rt" | grep -Eq 'systemctl reload 5gpn-dns|kill -HUP' \
 # a comment is fine; a `$CONF_DIR/.<key>` path is not).
 grep -Eq 'CONF_DIR\}?/\.(gateway_ip|public_ip|domain|cert_mode|client_net|dot_rate|dot_burst|dns_public_ingress|cache_size|xray_resolver|certbot)' "$INSTALL" \
     && fail "install.sh still reads/writes a per-key .state file (config must be the single dns.env)"
-# full_install resolves every knob env > dns.env (cfg_get) > default.
+# full_install resolves persisted config or collects it through the TUI.
 grep -Eq '^cfg_get\(\)' "$INSTALL" \
     || fail "install.sh: no cfg_get() single-source reader"
-# GATEWAY_IP: resolved from dns.env via cfg_get (env override still wins), then
-# prompted interactively on a first install (resolve_gateway_ip) — no silent inline
-# default in full_install. A bare re-run reads + preserves the persisted value.
-grep -Fq 'GATEWAY_IP="${GATEWAY_IP:-$(cfg_get DNS_GATEWAY_IP)}"' "$INSTALL" \
-    || fail "install.sh: GATEWAY_IP not resolved from dns.env via cfg_get DNS_GATEWAY_IP"
-grep -Eq '^[[:space:]]*resolve_gateway_ip$' "$INSTALL" \
-    || fail "install.sh: full_install does not call resolve_gateway_ip (interactive gateway IP prompt)"
-grep -Fq 'CERT_MODE="${CERT_MODE:-$(cfg_get CERT_MODE)}"' "$INSTALL" \
-    || fail "install.sh: CERT_MODE not resolved from dns.env via cfg_get CERT_MODE"
-# PUBLIC_IP: auto-detected default, dns.env-preserved, menu-changeable.
-grep -Fq 'PUBLIC_IP="${PUBLIC_IP:-$(cfg_get DNS_PUBLIC_IP)}"' "$INSTALL" \
-    || fail "install.sh: PUBLIC_IP not resolved from dns.env via cfg_get DNS_PUBLIC_IP"
+grep -Eq '^load_persisted_install_config\(\)' "$INSTALL" \
+    || fail "install.sh: persisted install configuration loader missing"
+grep -Eq '^configure_install_tui\(\)' "$INSTALL" \
+    || fail "install.sh: TUI configuration wizard missing"
+grep -Eq '^clear_external_config_env\(\)' "$INSTALL" \
+    || fail "install.sh: caller environment is not explicitly discarded"
+# PUBLIC_IP retains TUI auto-detection.
 grep -Eq '^get_public_ip\(\)' "$INSTALL" \
     || fail "install.sh: no get_public_ip() auto-detection"
-# Base (apex) domain required unless debug; console./zash./dot. subdomains are
-# auto-derived from it.
-grep -Fq 'Set BASE_DOMAIN=example.com' "$INSTALL" \
-    || fail "install.sh: resolve_domains does not require a base domain for non-interactive non-debug installs"
-grep -Fq 'DEBUG:-0' "$INSTALL" \
-    || fail "install.sh: DEBUG=1 shortcut for CERT_MODE=debug missing"
-
-# ===== XRAY_RESOLVER resolved BEFORE install_files (its sed consumes it) =====
-resolver_line="$(grep -nF 'XRAY_RESOLVER="${XRAY_RESOLVER:-$(cfg_get XRAY_RESOLVER)}"' "$INSTALL" | tail -1 | cut -d: -f1)"
+# ===== Persisted resolver is validated BEFORE install_files =====
+resolver_line="$(grep -n '^[[:space:]]*resolve_install_configuration ' "$INSTALL" | tail -1 | cut -d: -f1)"
 files_line="$(grep -n '^[[:space:]]*install_files$' "$INSTALL" | tail -1 | cut -d: -f1)"
 if [ -z "${resolver_line:-}" ] || [ -z "${files_line:-}" ]; then
-    fail "install.sh: could not locate XRAY_RESOLVER resolution or the install_files call"
+    fail "install.sh: could not locate configuration resolution or install_files"
 elif [ "$resolver_line" -ge "$files_line" ]; then
-    fail "install.sh: XRAY_RESOLVER must be resolved BEFORE the install_files call (its sed override consumes it)"
+    fail "install.sh: persisted/TUI configuration must be resolved before publication"
 fi
 
-# ===== The mihomo config must be (re-)rendered AFTER the domains are resolved =====
-webdom_line="$(grep -n '^[[:space:]]*render_mihomo_config$' "$INSTALL" | tail -1 | cut -d: -f1)"
-domains_line="$(grep -n '^[[:space:]]*resolve_domains$' "$INSTALL" | tail -1 | cut -d: -f1)"
+# ===== The mihomo config must be rendered AFTER configuration resolution =====
+webdom_line="$(grep -nE '^[[:space:]]*render_mihomo_config( --reset)?$' "$INSTALL" | tail -1 | cut -d: -f1)"
+domains_line="$resolver_line"
 if [ -z "${webdom_line:-}" ] || [ -z "${domains_line:-}" ]; then
-    fail "install.sh: could not locate render_mihomo_config or resolve_domains in full_install"
+    fail "install.sh: could not locate render_mihomo_config or configuration resolution"
 elif [ "$webdom_line" -le "$domains_line" ]; then
-    fail "install.sh: render_mihomo_config must run AFTER resolve_domains (first install has no WEB_DOMAIN before it)"
+    fail "install.sh: render_mihomo_config must run after validated TUI/persisted configuration"
 fi
 
 # ===== CPU arch guard — amd64-only prebuilts must refuse other arches early =====
@@ -223,8 +216,8 @@ grep -Eq '^[[:space:]]*check_arch$' "$INSTALL" \
 # ===== DNS_CACHE_SIZE — the RAM-derived cache size must reach dns.env =====
 grep -Eq 'DNS_CACHE_SIZE=\$\{CACHE_SIZE' "$INSTALL" \
     || fail "install.sh: write_dns_env hardcodes DNS_CACHE_SIZE (must interpolate \${CACHE_SIZE} so the memory-derived size takes effect)"
-grep -Fq 'CACHE_SIZE="${CACHE_SIZE:-$(cfg_get DNS_CACHE_SIZE)}"' "$INSTALL" \
-    || fail "install.sh: CACHE_SIZE not resolved from dns.env via cfg_get DNS_CACHE_SIZE (single-source)"
+grep -Fq 'CACHE_SIZE="$(cfg_get DNS_CACHE_SIZE)"' "$INSTALL" \
+    || fail "install.sh: CACHE_SIZE not loaded from persisted dns.env"
 
 [ $rc -eq 0 ] && echo "intranet policy: PASS"
 exit $rc

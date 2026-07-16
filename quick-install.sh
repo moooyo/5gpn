@@ -2,54 +2,46 @@
 # 5gpn one-shot entrypoint.
 #   curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash
 #
-# Downloads the RELEASE installer bundle — install.sh plus the config templates
-# and scripts it needs — all version-matched to the 5gpn-dns binary and web SPA
-# in the SAME release, then runs install.sh. Nothing is COMPILED on the box:
-# install.sh only downloads prebuilt release artifacts (binary + SPA + xray/gum).
-#
-# Why a release bundle instead of a git checkout: the old path cloned `main` for
-# the config templates while install.sh downloaded a PINNED release binary — so a
-# main that had drifted ahead of the release shipped config newer than the binary
-# (the skew that once broke the :443 webui). Fetching install.sh + configs from
-# the same release as the binary eliminates that class of bug.
-#
-# Pin a specific release with DNS_VERSION=dns-vX.Y.Z; otherwise the newest
-# published release is used. Falls back to a version-matched git checkout ONLY
-# if the bundle cannot be fetched (e.g. an older release cut before the bundle
-# existed). A pinned request never silently falls forward to main.
+# Resolve the newest published release once, then obtain every installer input
+# from that exact tag.  The release bundle is preferred; a tag checkout is only
+# used when the bundle asset itself is unavailable.  We never fall forward to a
+# branch, and a downloaded bundle is never used without its published digest.
 set -euo pipefail
 
-REPO="${REPO:-https://github.com/moooyo/5gpn}"
-SRC_REQUESTED="${SRC:-}"
-SRC=""
-SRC_MARKER=".5gpn-quick-install-owned"
+readonly RELEASE_REPO="https://github.com/moooyo/5gpn"
+readonly LATEST_RELEASE_API="https://api.github.com/repos/moooyo/5gpn/releases/latest"
+readonly SOURCE_MARKER=".5gpn-quick-install-owned"
+readonly SOURCE_MARKER_VALUE="5gpn-quick-install-v1"
+readonly WORK_MARKER=".5gpn-quick-install-work-owned"
+readonly WORK_MARKER_VALUE="5gpn-quick-install-work-v1"
+readonly BUNDLE_NAME="5gpn-installer.tar.gz"
+readonly CHECKSUMS_NAME="checksums.txt"
 
-# Gum-or-ANSI helpers. NOTE: this entrypoint runs BEFORE install.sh's install_gum()
-# bootstrap, so gum is normally absent here and these fall back to plain ANSI. They
-# light up only on a re-run where gum is already on PATH — we deliberately do NOT
-# install gum here (that is the excluded "install gum dependency" step).
-if command -v gum >/dev/null 2>&1 && [ -t 1 ]; then _HAVE_GUM=1; else _HAVE_GUM=0; fi
-red()   { if [ "$_HAVE_GUM" = 1 ]; then gum log --level error -- "$*" >&2; else printf '\033[0;31m%s\033[0m\n' "$*" >&2; fi; }
-green() { if [ "$_HAVE_GUM" = 1 ]; then gum log --level info  -- "$*";     else printf '\033[0;32m%s\033[0m\n' "$*"; fi; }
-info()  { if [ "$_HAVE_GUM" = 1 ]; then gum log --level info  -- "$*";     else printf '\033[0;34m%s\033[0m\n' "$*"; fi; }
+_QI_SOURCE_DIR=""
 
-if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-    red "Please run as root (e.g. pipe into 'sudo bash')."
-    exit 1
-fi
+# Gum-or-ANSI helpers. This entrypoint runs before install.sh bootstraps Gum, so
+# Gum is merely detected here; failure or absence always has a plain fallback.
+if command -v gum >/dev/null 2>&1 && [[ -t 1 ]]; then _HAVE_GUM=1; else _HAVE_GUM=0; fi
+red()   { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level error -- "$*" >&2; else printf '\033[0;31m%s\033[0m\n' "$*" >&2; fi; }
+green() { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level info  -- "$*";     else printf '\033[0;32m%s\033[0m\n' "$*"; fi; }
+info()  { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level info  -- "$*";     else printf '\033[0;34m%s\033[0m\n' "$*"; fi; }
 
-dl() { # dl <url> <out> — curl or wget, whichever exists
-    if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
-    elif command -v wget >/dev/null 2>&1; then wget -qO "$2" "$1"
-    else red "Need curl or wget to download."; return 1; fi
+dl() { # dl <url> <out> -- curl or wget, whichever exists
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$1" -o "$2"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$2" "$1"
+    else
+        red "Need curl or wget to download."
+        return 1
+    fi
 }
 
-# Resolve a path even when its final component does not exist. quick-install
-# runs as root, so an unchecked `rm -rf "$SRC"` turns a typo such as SRC=/etc
-# into a host-destroying operation. Every directory we clear must be both a
-# non-system path and explicitly owned by this script via SRC_MARKER.
+# Resolve a path even when its final component does not yet exist. Every source
+# directory is stored and rechecked in canonical form before recursive cleanup.
 canonical_path() {
     local p="$1" parent leaf cur suffix=""
+    [[ -n "$p" && "$p" != *$'\n'* && "$p" != *$'\r'* ]] || return 1
     [[ "$p" == /* ]] || p="$PWD/$p"
     if command -v realpath >/dev/null 2>&1 && realpath -m / >/dev/null 2>&1; then
         realpath -m -- "$p"
@@ -62,7 +54,8 @@ canonical_path() {
     [[ "$p" != *'/../'* && "$p" != */.. && "$p" != *'/./'* ]] || return 1
     cur="$p"
     while [[ ! -e "$cur" && "$cur" != / ]]; do
-        leaf="$(basename -- "$cur")"; suffix="/${leaf}${suffix}"
+        leaf="$(basename -- "$cur")"
+        suffix="/${leaf}${suffix}"
         cur="$(dirname -- "$cur")"
     done
     [[ -d "$cur" ]] || return 1
@@ -70,100 +63,327 @@ canonical_path() {
     printf '%s%s\n' "$parent" "$suffix"
 }
 
+safe_source_path() {
+    local p="$1"
+    [[ -n "$p" && "$p" == /* ]] || return 1
+    case "$p" in
+        /|/bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/lib|/lib/*|/lib64|/lib64/*|\
+        /proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/sys|/sys/*|/usr|/usr/*|/var)
+            return 1 ;;
+        /var/*)
+            [[ "$p" == /var/tmp/* ]] || return 1 ;;
+    esac
+    return 0
+}
+
+marker_matches() { # marker_matches <path> <exact-value>
+    local marker="$1" value="$2"
+    [[ -f "$marker" && ! -L "$marker" ]] || return 1
+    printf '%s\n' "$value" | cmp -s - "$marker"
+}
+
+# Create a marker without following or overwriting a raced symlink. The hard
+# link succeeds only while the destination name is still absent.
+create_marker() { # create_marker <directory> <name> <value>
+    local dir="$1" name="$2" value="$3" tmp
+    [[ -d "$dir" && ! -L "$dir" ]] || return 1
+    [[ ! -e "$dir/$name" && ! -L "$dir/$name" ]] || return 1
+    tmp="$(mktemp "$dir/.5gpn-marker.XXXXXX")" || return 1
+    chmod 600 "$tmp" 2>/dev/null || true
+    if ! printf '%s\n' "$value" > "$tmp" || ! ln -- "$tmp" "$dir/$name"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+    rm -f -- "$tmp"
+    marker_matches "$dir/$name" "$value"
+}
+
+source_dir_is_owned() {
+    local canonical
+    [[ -n "$_QI_SOURCE_DIR" && -d "$_QI_SOURCE_DIR" && ! -L "$_QI_SOURCE_DIR" ]] || return 1
+    safe_source_path "$_QI_SOURCE_DIR" || return 1
+    canonical="$(canonical_path "$_QI_SOURCE_DIR")" || return 1
+    [[ "$canonical" == "$_QI_SOURCE_DIR" ]] || return 1
+    marker_matches "$_QI_SOURCE_DIR/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE"
+}
+
+# The optional argument is an internal seam used by safety tests. Production
+# always passes an empty value and therefore uses a private mktemp directory;
+# SRC is deliberately not a public environment override.
 prepare_source_dir() {
-    if [[ -z "$SRC_REQUESTED" ]]; then
-        SRC="$(mktemp -d /tmp/5gpn-installer.XXXXXX)" \
+    local requested="${1:-}" canonical contents
+    if [[ -z "$requested" ]]; then
+        canonical="$(mktemp -d /tmp/5gpn-installer.XXXXXX)" \
             || { red "Could not allocate a temporary installer directory."; return 1; }
     else
-        [[ "$SRC_REQUESTED" != *$'\n'* && "$SRC_REQUESTED" != *$'\r'* ]] \
-            || { red "SRC contains a newline and is unsafe."; return 1; }
-        SRC="$(canonical_path "$SRC_REQUESTED")" || return 1
-        case "$SRC" in
-            /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
-                red "Refusing unsafe SRC directory: $SRC"; return 1 ;;
-        esac
-        if [[ -e "$SRC" && ! -d "$SRC" ]]; then
-            red "SRC exists but is not a directory: $SRC"; return 1
-        fi
-        if [[ -d "$SRC" && ! -f "$SRC/$SRC_MARKER" ]] \
-           && [[ -n "$(find "$SRC" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
-            red "Refusing to clear non-empty SRC without $SRC_MARKER: $SRC"
+        canonical="$(canonical_path "$requested")" \
+            || { red "Invalid installer source path."; return 1; }
+        safe_source_path "$canonical" \
+            || { red "Refusing unsafe installer source directory: $canonical"; return 1; }
+        if [[ -e "$canonical" && ! -d "$canonical" ]]; then
+            red "Installer source exists but is not a directory: $canonical"
             return 1
         fi
-        mkdir -p -- "$SRC"
+        mkdir -p -- "$canonical"
     fi
-    printf '%s\n' '5gpn-quick-install-v1' > "$SRC/$SRC_MARKER"
+
+    canonical="$(canonical_path "$canonical")" || return 1
+    safe_source_path "$canonical" || return 1
+    [[ -d "$canonical" && ! -L "$canonical" ]] || return 1
+    _QI_SOURCE_DIR="$canonical"
+
+    if [[ -e "$_QI_SOURCE_DIR/$SOURCE_MARKER" || -L "$_QI_SOURCE_DIR/$SOURCE_MARKER" ]]; then
+        marker_matches "$_QI_SOURCE_DIR/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE" \
+            || { red "Refusing installer source with an invalid ownership marker: $_QI_SOURCE_DIR"; return 1; }
+    else
+        contents="$(find "$_QI_SOURCE_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"
+        [[ -z "$contents" ]] \
+            || { red "Refusing to claim a non-empty installer source: $_QI_SOURCE_DIR"; return 1; }
+        create_marker "$_QI_SOURCE_DIR" "$SOURCE_MARKER" "$SOURCE_MARKER_VALUE" \
+            || { red "Could not claim installer source: $_QI_SOURCE_DIR"; return 1; }
+    fi
+    source_dir_is_owned
 }
 
 clear_source_dir() {
-    [[ -d "$SRC" && -f "$SRC/$SRC_MARKER" ]] \
-        && [[ "$(cat "$SRC/$SRC_MARKER" 2>/dev/null || true)" == '5gpn-quick-install-v1' ]] \
-        || { red "Refusing to clear unowned installer directory: ${SRC:-<empty>}"; return 1; }
-    find "$SRC" -mindepth 1 -maxdepth 1 ! -name "$SRC_MARKER" -exec rm -rf -- {} +
+    source_dir_is_owned \
+        || { red "Refusing to clear unowned installer directory: ${_QI_SOURCE_DIR:-<empty>}"; return 1; }
+    find "$_QI_SOURCE_DIR" -mindepth 1 -maxdepth 1 ! -name "$SOURCE_MARKER" -exec rm -rf -- {} +
+    # Revalidate immediately after deletion so a replaced marker cannot be used
+    # by a later archive or git publication step.
+    source_dir_is_owned \
+        || { red "Installer source ownership changed during cleanup."; return 1; }
 }
 
-prepare_source_dir || exit 1
-
-# The release path. A pinned DNS_VERSION -> that tag's asset; otherwise GitHub's
-# /releases/latest/download/<asset> shortcut, which always resolves to the newest
-# release. The bundle's install.sh is self-stamped to its own release (its
-# DNS_VERSION_DEFAULT is set at package time), so the binary + SPA it downloads
-# later always match these config templates.
-if [[ -n "${DNS_VERSION:-}" ]]; then
-    BUNDLE_URL="${REPO}/releases/download/${DNS_VERSION}/5gpn-installer.tar.gz"
-    export DNS_VERSION
-else
-    BUNDLE_URL="${REPO}/releases/latest/download/5gpn-installer.tar.gz"
-fi
-
-fetch_bundle() {
-    local tgz
-    tgz="$(mktemp /tmp/5gpn-installer.XXXXXX.tgz)" \
-        || { red "Could not allocate a temporary bundle file."; return 1; }
-    info "Downloading release installer bundle..."
-    dl "$BUNDLE_URL" "$tgz" || { rm -f "$tgz"; return 1; }
-    gzip -t "$tgz" 2>/dev/null || { red "Bundle is not a valid archive."; rm -f "$tgz"; return 1; }
-    clear_source_dir || { rm -f "$tgz"; return 1; }
-    tar -xzf "$tgz" -C "$SRC" || { rm -f "$tgz"; return 1; }
-    rm -f "$tgz"
-    # A release archive must not be able to transfer ownership of some other
-    # path merely by supplying its own marker contents.
-    printf '%s\n' '5gpn-quick-install-v1' > "$SRC/$SRC_MARKER"
-    [[ -f "$SRC/install.sh" ]]
+make_work_dir() {
+    local dir canonical temp_root
+    dir="$(mktemp -d /tmp/5gpn-quick-work.XXXXXX)" || return 1
+    canonical="$(canonical_path "$dir")" || return 1
+    temp_root="$(canonical_path /tmp)" || return 1
+    [[ "$canonical" == "$temp_root"/5gpn-quick-work.* && -d "$canonical" && ! -L "$canonical" ]] || return 1
+    create_marker "$canonical" "$WORK_MARKER" "$WORK_MARKER_VALUE" || return 1
+    printf '%s\n' "$canonical"
 }
 
-fetch_git() {
-    command -v git >/dev/null 2>&1 || { red "git unavailable for the fallback checkout."; return 1; }
-    clear_source_dir || return 1
-    if [[ -n "${DNS_VERSION:-}" ]]; then
-        info "Falling back to a shallow git checkout of pinned tag ${DNS_VERSION}..."
-        git -C "$SRC" init -q
-        git -C "$SRC" remote add origin "$REPO"
-        git -C "$SRC" fetch -q --depth=1 origin "refs/tags/${DNS_VERSION}:refs/tags/${DNS_VERSION}" \
-            || { red "Pinned tag ${DNS_VERSION} is unavailable; refusing to use main."; return 1; }
-        git -C "$SRC" checkout -q --detach "refs/tags/${DNS_VERSION}"
-    else
-        info "Falling back to a shallow git checkout of main (no version was pinned)..."
-        git -C "$SRC" init -q
-        git -C "$SRC" remote add origin "$REPO"
-        git -C "$SRC" fetch -q --depth=1 origin main
-        git -C "$SRC" checkout -q --detach FETCH_HEAD
+remove_work_dir() {
+    local dir="$1" canonical temp_root
+    canonical="$(canonical_path "$dir")" || return 1
+    temp_root="$(canonical_path /tmp)" || return 1
+    [[ "$canonical" == "$dir" && "$canonical" == "$temp_root"/5gpn-quick-work.* ]] || return 1
+    marker_matches "$canonical/$WORK_MARKER" "$WORK_MARKER_VALUE" || return 1
+    find "$canonical" -mindepth 1 -maxdepth 1 ! -name "$WORK_MARKER" -exec rm -rf -- {} +
+    marker_matches "$canonical/$WORK_MARKER" "$WORK_MARKER_VALUE" || return 1
+    rm -f -- "$canonical/$WORK_MARKER"
+    rmdir -- "$canonical"
+}
+
+valid_release_tag() {
+    local tag="$1"
+    [[ -n "$tag" && ${#tag} -le 128 && "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
+resolve_latest_tag() { # optional API URL is an internal test seam
+    local api_url="${1:-$LATEST_RELEASE_API}" json tags tag
+    json="$(mktemp /tmp/5gpn-release.json.XXXXXX)" || return 1
+    if ! dl "$api_url" "$json"; then
+        rm -f -- "$json"
+        red "Could not resolve the latest 5gpn release."
+        return 1
     fi
-    printf '%s\n' '5gpn-quick-install-v1' > "$SRC/$SRC_MARKER"
-    [[ -f "$SRC/install.sh" ]]
+    tags="$(sed -n 's/^.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*$/\1/p' "$json")"
+    rm -f -- "$json"
+    [[ -n "$tags" && "$tags" != *$'\n'* ]] || { red "Latest release response has no unique tag."; return 1; }
+    tag="$tags"
+    valid_release_tag "$tag" || { red "Latest release returned an unsafe tag."; return 1; }
+    printf '%s\n' "$tag"
 }
 
-if fetch_bundle; then
-    green "Installer bundle ready at ${SRC}."
-else
-    red "Release installer bundle unavailable; using a git checkout instead."
-    fetch_git || { red "Could not obtain the installer."; exit 1; }
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        red "No SHA-256 utility is available."
+        return 1
+    fi
+}
+
+verify_bundle_digest() { # verify_bundle_digest <bundle> <checksums.txt>
+    local bundle="$1" checksums="$2" matches expected actual
+    matches="$(awk '$2 == "5gpn-installer.tar.gz" || $2 == "*5gpn-installer.tar.gz" { print $1 }' "$checksums")" \
+        || return 1
+    [[ -n "$matches" && "$matches" != *$'\n'* && "$matches" =~ ^[0-9A-Fa-f]{64}$ ]] \
+        || { red "Release checksums contain no unique valid digest for $BUNDLE_NAME."; return 1; }
+    expected="$(printf '%s' "$matches" | tr 'A-F' 'a-f')"
+    actual="$(sha256_file "$bundle")" || return 1
+    actual="$(printf '%s' "$actual" | tr 'A-F' 'a-f')"
+    [[ "$actual" == "$expected" ]] \
+        || { red "Installer bundle checksum mismatch; refusing to continue."; return 1; }
+}
+
+archive_is_safe() {
+    local archive="$1" names verbose entry normalized line first
+    names="$(tar -tzf "$archive" 2>/dev/null)" || { red "Bundle is not a valid archive."; return 1; }
+    verbose="$(tar -tvzf "$archive" 2>/dev/null)" || return 1
+
+    while IFS= read -r entry; do
+        normalized="$entry"
+        while [[ "$normalized" == ./* ]]; do normalized="${normalized#./}"; done
+        [[ -z "$normalized" ]] && continue
+        [[ "$normalized" != /* ]] || { red "Bundle contains an absolute path."; return 1; }
+        case "/$normalized/" in
+            */../*) red "Bundle contains a parent-directory path."; return 1 ;;
+        esac
+        [[ "$normalized" != "$SOURCE_MARKER" && "$normalized" != "$WORK_MARKER" ]] \
+            || { red "Bundle attempts to replace an ownership marker."; return 1; }
+    done <<< "$names"
+
+    # Installer bundles contain only directories and ordinary files. Refusing
+    # links also prevents a later member from escaping the staging directory.
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        first="${line:0:1}"
+        case "$first" in
+            -|d) ;;
+            *) red "Bundle contains a link or special file; refusing to extract."; return 1 ;;
+        esac
+    done <<< "$verbose"
+}
+
+validate_stage() {
+    local stage="$1"
+    marker_matches "$stage/$WORK_MARKER" "$WORK_MARKER_VALUE" || return 1
+    [[ ! -e "$stage/$SOURCE_MARKER" && ! -L "$stage/$SOURCE_MARKER" ]] || return 1
+    [[ -f "$stage/install.sh" && ! -L "$stage/install.sh" ]] || return 1
+    [[ -z "$(find "$stage" -path "$stage/.git" -prune -o -type l -print -quit 2>/dev/null)" ]] || return 1
+}
+
+publish_stage() {
+    local stage="$1" entry base
+    validate_stage "$stage" || { red "Staged installer content is unsafe or incomplete."; return 1; }
+    clear_source_dir || return 1
+    shopt -s dotglob nullglob
+    for entry in "$stage"/*; do
+        base="$(basename -- "$entry")"
+        case "$base" in
+            "$WORK_MARKER"|.git) continue ;;
+        esac
+        mv -- "$entry" "$_QI_SOURCE_DIR/" || { shopt -u dotglob nullglob; return 1; }
+    done
+    shopt -u dotglob nullglob
+    source_dir_is_owned || return 1
+    [[ -f "$_QI_SOURCE_DIR/install.sh" && ! -L "$_QI_SOURCE_DIR/install.sh" ]]
+}
+
+fetch_bundle() { # fetch_bundle <repo> <release-tag>; 10=asset absent, 20=hard failure
+    local repo="$1" tag="$2" tgz checksums stage bundle_url checksums_url
+    valid_release_tag "$tag" || return 20
+    tgz="$(mktemp /tmp/5gpn-installer.tgz.XXXXXX)" || return 20
+    checksums="$(mktemp /tmp/5gpn-checksums.txt.XXXXXX)" || { rm -f -- "$tgz"; return 20; }
+    bundle_url="${repo}/releases/download/${tag}/${BUNDLE_NAME}"
+    checksums_url="${repo}/releases/download/${tag}/${CHECKSUMS_NAME}"
+
+    info "Downloading installer bundle for release ${tag}..."
+    if ! dl "$bundle_url" "$tgz"; then
+        rm -f -- "$tgz" "$checksums"
+        return 10
+    fi
+    if ! dl "$checksums_url" "$checksums"; then
+        red "Could not download ${CHECKSUMS_NAME}; refusing an unverified bundle."
+        rm -f -- "$tgz" "$checksums"
+        return 20
+    fi
+    # This detects release corruption and accidental asset skew. The digest is
+    # same-origin release metadata, not an independent cryptographic signature.
+    if ! verify_bundle_digest "$tgz" "$checksums"; then
+        rm -f -- "$tgz" "$checksums"
+        return 20
+    fi
+    archive_is_safe "$tgz" || { rm -f -- "$tgz" "$checksums"; return 20; }
+    stage="$(make_work_dir)" || { rm -f -- "$tgz" "$checksums"; return 20; }
+    if ! tar --no-same-owner --no-same-permissions -xzf "$tgz" -C "$stage"; then
+        red "Could not safely extract the installer bundle."
+        rm -f -- "$tgz" "$checksums"
+        remove_work_dir "$stage" || true
+        return 20
+    fi
+    rm -f -- "$tgz" "$checksums"
+    if ! publish_stage "$stage"; then
+        remove_work_dir "$stage" || true
+        return 20
+    fi
+    remove_work_dir "$stage" || { red "Could not clean the installer staging directory."; return 20; }
+}
+
+stamp_installer_version() {
+    local installer="$1" tag="$2" tmp count
+    valid_release_tag "$tag" || return 1
+    [[ -f "$installer" && ! -L "$installer" ]] || return 1
+    count="$(grep -c '^DNS_VERSION_DEFAULT=' "$installer" || true)"
+    [[ "$count" == 1 ]] || return 1
+    tmp="${installer}.stamp.$$"
+    sed "s/^DNS_VERSION_DEFAULT=.*/DNS_VERSION_DEFAULT=\"${tag}\"/" "$installer" > "$tmp" || return 1
+    chmod "$(stat -c %a "$installer" 2>/dev/null || stat -f %Lp "$installer")" "$tmp" 2>/dev/null || chmod 755 "$tmp"
+    mv -- "$tmp" "$installer"
+    grep -Fqx "DNS_VERSION_DEFAULT=\"${tag}\"" "$installer"
+}
+
+fetch_git() { # fetch_git <repo> <the already-resolved release-tag>
+    local repo="$1" tag="$2" stage
+    valid_release_tag "$tag" || return 1
+    command -v git >/dev/null 2>&1 || { red "git unavailable for the release-tag fallback."; return 1; }
+    stage="$(make_work_dir)" || return 1
+    info "Bundle asset unavailable; checking out the same release tag ${tag}..."
+    git -C "$stage" init -q \
+        && git -C "$stage" remote add origin "$repo" \
+        && git -C "$stage" fetch -q --depth=1 origin "refs/tags/${tag}:refs/tags/${tag}" \
+        && git -C "$stage" checkout -q --detach "refs/tags/${tag}" \
+        || { red "Release tag ${tag} is unavailable; refusing to use a branch."; remove_work_dir "$stage" || true; return 1; }
+    stamp_installer_version "$stage/install.sh" "$tag" \
+        || { red "Could not bind the fallback installer to release ${tag}."; remove_work_dir "$stage" || true; return 1; }
+    if ! publish_stage "$stage"; then
+        remove_work_dir "$stage" || true
+        return 1
+    fi
+    remove_work_dir "$stage" || { red "Could not clean the installer staging directory."; return 1; }
+}
+
+main() {
+    local release_tag status install
+    if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+        red "Please run as root (e.g. pipe into 'sudo bash')."
+        return 1
+    fi
+
+    # These historical environment overrides must not leak into install.sh.
+    # Release selection is fixed to latest; configuration is collected by TUI.
+    unset DNS_VERSION REPO SRC
+    prepare_source_dir "" || return 1
+    release_tag="$(resolve_latest_tag)" || return 1
+
+    if fetch_bundle "$RELEASE_REPO" "$release_tag"; then
+        green "Verified installer bundle ready at ${_QI_SOURCE_DIR}."
+    else
+        status=$?
+        if [[ "$status" != 10 ]]; then
+            red "Release installer verification failed; aborting."
+            return 1
+        fi
+        fetch_git "$RELEASE_REPO" "$release_tag" \
+            || { red "Could not obtain release ${release_tag}."; return 1; }
+        green "Release-tag installer ready at ${_QI_SOURCE_DIR}."
+    fi
+
+    install="${_QI_SOURCE_DIR}/install.sh"
+    [[ -f "$install" && ! -L "$install" ]] \
+        || { red "install.sh not found at $install"; return 1; }
+    chmod +x "$install" 2>/dev/null || true
+    green "Source ready at ${_QI_SOURCE_DIR}. Launching installer..."
+    cd "$_QI_SOURCE_DIR"
+    exec bash ./install.sh "$@"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi
-
-INSTALL="${SRC}/install.sh"
-[[ -f "$INSTALL" ]] || { red "install.sh not found at $INSTALL"; exit 1; }
-chmod +x "$INSTALL" 2>/dev/null || true
-
-green "Source ready at ${SRC}. Launching installer..."
-cd "${SRC}"
-exec bash ./install.sh "$@"

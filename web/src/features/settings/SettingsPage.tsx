@@ -19,16 +19,45 @@ export default function SettingsPage() {
     let cancelled = false
 
     async function load() {
-      const [u, e, tg] = await Promise.allSettled([api.getUpstreams(), api.getEcs(), api.getTgbot()])
+      const [u, e] = await Promise.allSettled([api.getUpstreams(), api.getEcs()])
       if (cancelled) return
       if (u.status === 'fulfilled') setUpstreams(u.value)
       if (e.status === 'fulfilled') setEcs(e.value)
-      if (tg.status === 'fulfilled') setTgbot(tg.value)
     }
 
     void load()
     return () => {
       cancelled = true
+    }
+  }, [])
+
+  // Bot lifecycle can move starting → healthy/degraded independently after a
+  // save or gateway-network recovery. Poll single-flight and abort on unmount;
+  // scheduling the next request only after the current one settles prevents
+  // overlapping GETs on a slow Telegram/control path.
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let controller: AbortController | undefined
+
+    async function pollTgbot() {
+      controller = new AbortController()
+      try {
+        const value = await api.getTgbot(controller.signal)
+        if (!cancelled) setTgbot(value)
+      } catch {
+        // Keep the last known state; the normal control-plane status surfaces
+        // connectivity failures elsewhere.
+      } finally {
+        if (!cancelled) timer = setTimeout(() => void pollTgbot(), 5_000)
+      }
+    }
+
+    void pollTgbot()
+    return () => {
+      cancelled = true
+      controller?.abort()
+      if (timer !== undefined) clearTimeout(timer)
     }
   }, [])
 
