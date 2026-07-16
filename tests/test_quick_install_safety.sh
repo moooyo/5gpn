@@ -17,6 +17,19 @@ set +e
 TMP="$(mktemp -d /tmp/5gpn-quick-test.XXXXXX)"
 trap 'rm -rf -- "$TMP"' EXIT
 
+# Exercise the exact production entrypoint guard through stdin. BASH_SOURCE has
+# no element zero in this mode, so the guard must tolerate nounset and call main.
+entry_guard="$(sed -n '/^if \[\[ .*BASH_SOURCE\[0\]/,/^fi$/p' "$QUICK")"
+entry_result="$(printf '%s\n' \
+    'set -u' \
+    'main() { printf "%s\n" stdin-entry-ran; }' \
+    "$entry_guard" | bash 2>&1)"
+if [[ "$?" == 0 && "$entry_result" == stdin-entry-ran ]]; then
+    pass "stdin execution tolerates an unset BASH_SOURCE element and runs main"
+else
+    fail "stdin execution guard failed: $entry_result"
+fi
+
 # A new or empty custom path can be claimed, and the stored path is canonical.
 mkdir -p "$TMP/canonical"
 prepare_source_dir "$TMP/source" >/dev/null 2>&1
