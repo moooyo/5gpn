@@ -60,8 +60,10 @@ printf '%s' "$dbg" | grep -Fq 'openssl req -x509' \
     || fail "install.sh: debug mode does not generate a self-signed cert (openssl req -x509)"
 printf '%s' "$dbg" | grep -Fq 'remove_owned_renew_hook' \
     || fail "install.sh: debug branch does not ownership-gate deploy-hook removal"
-printf '%s' "$dbg" | grep -Fq 'systemctl disable --now 5gpn-certbot-renew.timer' \
-    || fail "install.sh: debug branch does not disable 5gpn-certbot-renew.timer"
+printf '%s' "$dbg" | grep -Fq 'remove_owned_renewal_automation' \
+    || fail "install.sh: debug branch does not ownership-gate renewal-unit removal"
+printf '%s' "$dbg" | grep -Eq 'systemctl disable --now 5gpn-certbot-renew|rm -f.*/5gpn-certbot-renew' \
+    && fail "install.sh: debug branch mutates renewal units outside the ownership gate"
 
 # ===== cloudflare DNS-01 issuance — no :80, no xray, no --standalone =====
 ic="$(sed -n '/^install_cert()/,/^}/p' "$INSTALL")"

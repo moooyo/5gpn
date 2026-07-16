@@ -79,6 +79,14 @@ grep -Fq 'remove_legacy_xray' "$INSTALL" \
     && pass "legacy services are ownership gated" \
     || fail "legacy service ownership gate missing"
 
+renew_install="$(sed -n '/^install_renewal_automation()/,/^}/p' "$INSTALL")"
+renew_remove="$(sed -n '/^remove_owned_renewal_automation()/,/^}/p' "$INSTALL")"
+grep -Fq 'preflight_renewal_unit_ownership' <<<"$renew_install" \
+    && grep -Fq 'remove_owned_unit 5gpn-certbot-renew.timer' <<<"$renew_remove" \
+    && grep -Fq 'remove_owned_unit 5gpn-certbot-renew.service' <<<"$renew_remove" \
+    && pass "renewal units are ownership-gated before replacement and removal" \
+    || fail "renewal unit ownership gates are incomplete"
+
 grep -Fq 'MIHOMO_BIN="${BIN_DIR}/mihomo"' "$INSTALL" \
     && grep -Fq 'GUM_BIN="${BIN_DIR}/gum"' "$INSTALL" \
     && pass "generic mihomo/gum binaries moved under the project root" \
@@ -109,6 +117,70 @@ if command -v openssl >/dev/null 2>&1; then
     fi
     rm -rf -- "$cert_tmp"
 fi
+
+cert_state_tmp="$(mktemp -d)"
+DNS_CERT_DIR="$cert_state_tmp/cert"
+DOT_CERT_DIR="$DNS_CERT_DIR/dot"
+WEB_CERT_DIR="$DNS_CERT_DIR/web"
+ZASH_CERT_DIR="$DNS_CERT_DIR/zash"
+DEBUG_CERT_DIR="$cert_state_tmp/debug-cert"
+ACME_DIR="$cert_state_tmp/acme"
+LE_LIVE_ROOT="$cert_state_tmp/letsencrypt/live"
+LE_ARCHIVE_ROOT="$cert_state_tmp/letsencrypt/archive"
+LE_RENEWAL_ROOT="$cert_state_tmp/letsencrypt/renewal"
+mkdir -p "$DOT_CERT_DIR" "$LE_LIVE_ROOT/example.com" "$LE_ARCHIVE_ROOT" "$LE_RENEWAL_ROOT"
+
+write_cert_provenance cloudflare example.com reused
+if certbot_lineage_owned_by_5gpn example.com; then
+    fail "a reused Certbot lineage was treated as 5gpn-owned"
+else
+    pass "reused Certbot lineage provenance is non-owning"
+fi
+write_cert_provenance cloudflare example.com owned
+certbot_lineage_owned_by_5gpn example.com \
+    && pass "newly issued Certbot lineage provenance records ownership" \
+    || fail "owned Certbot lineage provenance was not recognized"
+
+certbot_log="$cert_state_tmp/certbot.log"
+certbot() { printf '%s\n' "$*" >> "$certbot_log"; }
+printf 'dns_cloudflare_credentials = %s/cloudflare.ini\n' "$ACME_DIR" \
+    > "$LE_RENEWAL_ROOT/example.com.conf"
+write_cert_provenance cloudflare example.com reused
+decommission_certbot_lineage example.com >/dev/null
+if [[ -s "$certbot_log" || "$DECOMMISSION_PRESERVE_ACME" != 1 ]]; then
+    fail "decommission sent a reused external lineage to certbot delete"
+else
+    pass "decommission preserves a reused external lineage and its referenced credential"
+fi
+write_cert_provenance cloudflare example.com owned
+decommission_certbot_lineage example.com >/dev/null
+grep -qx -- 'delete --non-interactive --cert-name example.com' "$certbot_log" \
+    && pass "decommission deletes only a provenance-confirmed owned lineage" \
+    || fail "owned lineage was not deleted with the exact cert name"
+
+# Simulate a lost Certbot live lineage with a still-valid preserved dot role.
+rm -rf -- "$LE_LIVE_ROOT/example.com"
+touch "$DOT_CERT_DIR/fullchain.pem" "$DOT_CERT_DIR/privkey.pem"
+: > "$certbot_log"
+reuse_log="$cert_state_tmp/reuse.log"
+validate_cert_pair() { [[ "$1" == "$DOT_CERT_DIR/fullchain.pem" ]]; }
+deploy_cert_roles() { printf 'deploy:%s:%s\n' "$1" "${2:-}" >> "$reuse_log"; }
+remove_owned_renew_hook() { printf '%s\n' hook-removed >> "$reuse_log"; }
+remove_owned_renewal_automation() { printf '%s\n' units-removed >> "$reuse_log"; }
+ensure_cf_token() { printf '%s\n' token-requested >> "$reuse_log"; return 1; }
+write_cert_provenance cloudflare example.com reused
+CERT_MODE=cloudflare
+if install_cert example.com >/dev/null \
+   && grep -qx "deploy:example.com:${DOT_CERT_DIR}" "$reuse_log" \
+   && grep -qx 'units-removed' "$reuse_log" \
+   && [[ "$(cert_provenance_get certbot_lineage)" == missing ]] \
+   && ! grep -q 'token-requested' "$reuse_log" \
+   && [[ ! -s "$certbot_log" ]]; then
+    pass "missing lineage reuses the preserved role cert without issuance and disables renewal"
+else
+    fail "preserved role certificate fallback is incomplete"
+fi
+rm -rf -- "$cert_state_tmp"
 
 echo "----"
 if [[ "$FAIL" == 0 ]]; then

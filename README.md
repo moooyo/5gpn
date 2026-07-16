@@ -166,7 +166,7 @@ sudo bash install.sh --setup-tgbot
 5gpn --set-cf-token        # 在 TUI 中设置/更新 Cloudflare API token
 5gpn --uninstall           # TUI 确认卸载，默认保留 /etc/5gpn
 5gpn --uninstall --purge   # 清除非证书状态，仍保留 cert/debug-cert/acme 供复用
-5gpn --uninstall --decommission # 精确删除本项目 lineage、证书和 Cloudflare token
+5gpn --uninstall --decommission # 删除本地证书；仅删 5gpn-owned lineage，并保留共享 lineage 仍引用的 token
 ```
 
 （等价的 `sudo bash install.sh <同名子命令>` 仍可用；`change-web-domain` / `change-dot-domain` / `change-domain` 都是 `change-base-domain` 的过渡期废弃别名。）

@@ -278,7 +278,11 @@ SANs, certificate/private-key match, and (for production) a trusted issuer
 chain. A debug self-signed certificate can never satisfy production reuse.
 Debug mode stores its source only below `/etc/5gpn/debug-cert`, and repeated
 debug installs reuse a still-valid matching debug keypair instead of generating
-a new one each time.
+a new one each time. Certificate provenance records whether the Certbot lineage
+was created by 5gpn, reused from an existing operator lineage, or is currently
+missing. A valid preserved role copy may recover service when the canonical
+lineage is missing, but renewal automation remains disabled until that lineage
+is repaired or reissued.
 
 Only missing, expiring, mismatched, or invalid material causes issuance. Role
 copies are staged completely before replacement. Production renewal is scoped
@@ -291,7 +295,12 @@ files without a data-plane restart.
 Normal uninstall preserves the 5gpn certificate lineage, role copies, debug
 source, and ACME credential so a later reinstall can reuse them. Domain
 decommissioning is a separate explicit operation: it must name the exact 5gpn
-lineage and must never delete another Certbot lineage.
+lineage and must never delete another Certbot lineage. `certbot delete` is
+permitted only when persisted provenance proves that 5gpn created the lineage;
+reused or legacy/unknown lineages are preserved for manual review. If such a
+preserved lineage's renewal configuration references the 5gpn Cloudflare
+credential, that credential is preserved as well so decommissioning does not
+break another service's future renewal.
 
 ## Installer publication and host safety
 
@@ -309,6 +318,9 @@ leave the previously runnable binaries, units, renewal hook, and operator
 configuration in place. Third-party tools are prebuilt and version-pinned; no
 compiler toolchain is installed on the gateway. Gum bootstrap failure is
 non-fatal and falls back to plain output.
+
+Replacement or removal of the current `5gpn-dns`, mihomo, and certificate-
+renewal service/timer units is gated by an explicit 5gpn ownership fingerprint.
 
 Root-owned recursive deletion requires all of the following:
 

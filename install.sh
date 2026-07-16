@@ -69,6 +69,11 @@ DOT_CERT_DIR="${DNS_CERT_DIR}/dot"       # DoT :853 cert copy (hot-reloaded on m
 WEB_CERT_DIR="${DNS_CERT_DIR}/web"       # web-console :18443 cert copy
 ZASH_CERT_DIR="${DNS_CERT_DIR}/zash"     # zashboard panel cert copy
 ACME_DIR="/etc/5gpn/acme"                # root-only Cloudflare API-token credentials dir
+LE_ROOT="/etc/letsencrypt"
+LE_LIVE_ROOT="${LE_ROOT}/live"
+LE_ARCHIVE_ROOT="${LE_ROOT}/archive"
+LE_RENEWAL_ROOT="${LE_ROOT}/renewal"
+DECOMMISSION_PRESERVE_ACME=0
 DNS_WEB_DIR_DEFAULT="/opt/5gpn/web"         # resolved from dns.env after cfg_get is defined
 # DNS_ZASH_DIR (zashboard SPA dist, config.go's ZashDir) is resolved just below
 # cfg_get()'s definition -- NOT here: the daemon reads DNS_ZASH_DIR out of dns.env,
@@ -730,6 +735,16 @@ unit_file_owned_by_5gpn() {
     grep -Eiq '^[[:space:]]*(Description=5gpn([[:space:]:_-]|$)|#[[:space:]]*(Managed|Installed) by 5gpn([[:space:]]|$))' "$file"
 }
 
+preflight_owned_units() {
+    local unit
+    for unit in "$@"; do
+        if systemctl cat "$unit" >/dev/null 2>&1 || [[ -e "/etc/systemd/system/$unit" ]]; then
+            unit_file_owned_by_5gpn "$unit" \
+                || { err "Refusing to replace an existing non-5gpn unit: $unit"; return 1; }
+        fi
+    done
+}
+
 remove_owned_unit() {
     local unit="$1"
     if unit_file_owned_by_5gpn "$unit"; then
@@ -741,6 +756,16 @@ remove_owned_unit() {
     if systemctl cat "$unit" >/dev/null 2>&1 || [[ -e "/etc/systemd/system/$unit" ]]; then
         warn "Preserving unowned unit: $unit"
     fi
+}
+
+preflight_renewal_unit_ownership() {
+    preflight_owned_units 5gpn-certbot-renew.service 5gpn-certbot-renew.timer
+}
+
+remove_owned_renewal_automation() {
+    remove_owned_unit 5gpn-certbot-renew.timer
+    remove_owned_unit 5gpn-certbot-renew.service
+    systemctl daemon-reload 2>/dev/null || true
 }
 
 remove_legacy_xray() {
@@ -1950,13 +1975,71 @@ validate_cert_pair() {
     [[ "$trust" != production ]] || cert_chain_trusted "$cert"
 }
 
+cert_provenance_get() {
+    local key="$1" file="${DNS_CERT_DIR}/.provenance"
+    [[ -f "$file" && ! -L "$file" ]] || return 0
+    grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+cert_provenance_matches() {
+    local mode="$1" base="$2"
+    [[ "$(cert_provenance_get mode)" == "$mode" \
+       && "$(cert_provenance_get base)" == "$base" ]]
+}
+
+certbot_lineage_owned_by_5gpn() {
+    local base="$1"
+    cert_provenance_matches cloudflare "$base" \
+        && [[ "$(cert_provenance_get certbot_lineage)" == owned ]]
+}
+
+certbot_lineage_artifacts_exist() {
+    local base="$1"
+    [[ -e "${LE_LIVE_ROOT}/${base}" \
+       || -e "${LE_ARCHIVE_ROOT}/${base}" \
+       || -e "${LE_RENEWAL_ROOT}/${base}.conf" ]] \
+        || compgen -G "${LE_LIVE_ROOT}/${base}-[0-9][0-9][0-9][0-9]" >/dev/null \
+        || compgen -G "${LE_ARCHIVE_ROOT}/${base}-[0-9][0-9][0-9][0-9]" >/dev/null \
+        || compgen -G "${LE_RENEWAL_ROOT}/${base}-[0-9][0-9][0-9][0-9].conf" >/dev/null
+}
+
 write_cert_provenance() {
-    local mode="$1" base="$2" tmp
+    local mode="$1" base="$2" lineage="${3:-none}" tmp
+    case "$mode:$lineage" in
+        debug:none|cloudflare:owned|cloudflare:reused|cloudflare:missing) ;;
+        *) err "Invalid certificate provenance state: ${mode}:${lineage}"; return 1 ;;
+    esac
     install -d -m 0750 "$DNS_CERT_DIR"
     tmp="$(mktemp "${DNS_CERT_DIR}/.provenance.XXXXXX")" || return 1
-    printf 'mode=%s\nbase=%s\n' "$mode" "$base" > "$tmp"
+    printf 'mode=%s\nbase=%s\ncertbot_lineage=%s\n' "$mode" "$base" "$lineage" > "$tmp"
     chmod 0640 "$tmp"
+    sync -f "$tmp" 2>/dev/null || true
     mv -f -- "$tmp" "$DNS_CERT_DIR/.provenance"
+    sync -f "$DNS_CERT_DIR" 2>/dev/null || true
+}
+
+decommission_certbot_lineage() {
+    local base="$1" live
+    live="${LE_LIVE_ROOT}/${base}"
+    DECOMMISSION_PRESERVE_ACME=0
+    is_valid_domain "$base" \
+        || { err "Cannot decommission: persisted base domain is invalid."; return 1; }
+    if [[ ! -e "$live" ]]; then
+        info "No canonical Certbot lineage exists for '${base}'."
+        return 0
+    fi
+    if ! certbot_lineage_owned_by_5gpn "$base"; then
+        warn "Preserving Certbot lineage '${base}': provenance does not prove that 5gpn created it."
+        if grep -qF -- "$ACME_DIR/cloudflare.ini" "${LE_RENEWAL_ROOT}/${base}.conf" 2>/dev/null; then
+            DECOMMISSION_PRESERVE_ACME=1
+            warn "Its renewal configuration still references the 5gpn Cloudflare credential; preserving ${ACME_DIR}."
+        fi
+        warn "Delete that lineage manually only after checking that no other service uses it."
+        return 0
+    fi
+    certbot delete --non-interactive --cert-name "$base" \
+        || { err "Certbot refused to delete the exact 5gpn-owned lineage '$base'."; return 1; }
+    ok "Deleted the provenance-confirmed 5gpn Certbot lineage '${base}'."
 }
 
 renew_hook_owned() {
@@ -1981,11 +2064,13 @@ remove_owned_renew_hook() {
 install_cert() {
     local base="${1:?install_cert needs a base domain}"
     local mode="$CERT_MODE"
-    local live="/etc/letsencrypt/live/${base}"
+    local live="${LE_LIVE_ROOT}/${base}" lineage_origin="" lineage_preexisting=0 lineage_was_owned=0
+    certbot_lineage_owned_by_5gpn "$base" && lineage_was_owned=1
 
     if [ "$mode" = "debug" ]; then
         local debug_src="${DEBUG_CERT_DIR}/${base}"
-        if validate_cert_pair "${debug_src}/fullchain.pem" "${debug_src}/privkey.pem" \
+        if cert_provenance_matches debug "$base" \
+           && validate_cert_pair "${debug_src}/fullchain.pem" "${debug_src}/privkey.pem" \
                 "$base" "$((30*86400))" debug \
            && { [[ -z "$GATEWAY_IP" ]] || openssl x509 -checkip "$GATEWAY_IP" -noout -in "${debug_src}/fullchain.pem" >/dev/null 2>&1; } \
            && { [[ -z "$PUBLIC_IP" ]] || openssl x509 -checkip "$PUBLIC_IP" -noout -in "${debug_src}/fullchain.pem" >/dev/null 2>&1; }; then
@@ -1994,14 +2079,9 @@ install_cert() {
             issue_selfsigned_wildcard "$base" || return 1
         fi
         deploy_cert_roles "$base" "$debug_src"
-        write_cert_provenance debug "$base"
+        write_cert_provenance debug "$base" none
         remove_owned_renew_hook
-        if [[ -f /etc/systemd/system/5gpn-certbot-renew.timer ]]; then
-            systemctl disable --now 5gpn-certbot-renew.timer 2>/dev/null || true
-            rm -f /etc/systemd/system/5gpn-certbot-renew.timer \
-                  /etc/systemd/system/5gpn-certbot-renew.service
-            systemctl daemon-reload 2>/dev/null || true
-        fi
+        remove_owned_renewal_automation
         return 0
     fi
 
@@ -2012,13 +2092,33 @@ install_cert() {
     if validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
             "$base" "$((30*86400))" production; then
         # 1) A still-valid (>30d) certbot lineage for this base domain.
+        lineage_origin=reused
+        certbot_lineage_owned_by_5gpn "$base" && lineage_origin=owned
         info "Valid wildcard cert for *.${base} in the certbot lineage (>30d); reusing (no issuance)."
     else
-        if [[ ! -e "$live" ]] && compgen -G "/etc/letsencrypt/live/${base}-[0-9][0-9][0-9][0-9]" >/dev/null; then
+        if [[ ! -e "$live" ]] && compgen -G "${LE_LIVE_ROOT}/${base}-[0-9][0-9][0-9][0-9]" >/dev/null; then
             err "A duplicate Certbot lineage exists for ${base}, but the canonical ${live} lineage is absent."
             err "Resolve that lineage explicitly before reinstalling; refusing silent reuse without scoped renewal."
             return 1
         fi
+        # A purge deliberately keeps the deployed role copies. If Certbot's
+        # canonical live lineage was lost, a matching trusted copy can recover
+        # service without consuming a new issuance. There is no renewable
+        # Certbot lineage in this state, so remove only 5gpn-owned automation and
+        # make the missing-renewal condition explicit to the operator.
+        if [[ ! -e "$live" ]] \
+           && cert_provenance_matches cloudflare "$base" \
+           && validate_cert_pair "${DOT_CERT_DIR}/fullchain.pem" "${DOT_CERT_DIR}/privkey.pem" \
+                "$base" "$((30*86400))" production; then
+            info "Certbot lineage is missing; reusing the validated preserved role certificate for *.${base}."
+            deploy_cert_roles "$base" "$DOT_CERT_DIR" || return 1
+            write_cert_provenance cloudflare "$base" missing || return 1
+            remove_owned_renew_hook
+            remove_owned_renewal_automation
+            warn "The preserved certificate is active, but automatic renewal is disabled until the Certbot lineage is repaired or reissued."
+            return 0
+        fi
+        certbot_lineage_artifacts_exist "$base" && lineage_preexisting=1
         if [[ -e "$live" ]] \
            && ! validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" "$base" 0 production; then
             force=1
@@ -2033,12 +2133,17 @@ install_cert() {
         [[ "$force" == 1 ]] && certbot_args+=(--force-renewal)
         certbot "${certbot_args[@]}" \
             || { err "certbot DNS-01 failed for *.${base} (check the Cloudflare token's Zone:DNS:Edit scope + zone match)."; return 1; }
+        if [[ "$lineage_was_owned" == 1 || "$lineage_preexisting" == 0 ]]; then
+            lineage_origin=owned
+        else
+            lineage_origin=reused
+        fi
     fi
 
     validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" "$base" 86400 production \
         || { err "Issued/reused production certificate failed trust, SAN, expiry, or key validation."; return 1; }
     deploy_cert_roles "$base"
-    write_cert_provenance cloudflare "$base"
+    write_cert_provenance cloudflare "$base" "$lineage_origin"
 
     # Renewal deploy hook (copies the renewed wildcard to all three role dirs +
     # reloads 5gpn-dns via SIGHUP + re-signs the iOS profile). Ships in repo.
@@ -2089,12 +2194,7 @@ issue_selfsigned_wildcard() {
     warn "CERT_MODE=debug: SELF-SIGNED WILDCARD cert for *.${base} (CN=${base}, SAN=${san}). NOT trusted by clients — test/dev only."
     # Dismantle any cloudflare-mode renewal machinery a prior install left.
     remove_owned_renew_hook
-    if [[ -f /etc/systemd/system/5gpn-certbot-renew.timer ]]; then
-        systemctl disable --now 5gpn-certbot-renew.timer 2>/dev/null || true
-        rm -f /etc/systemd/system/5gpn-certbot-renew.timer \
-              /etc/systemd/system/5gpn-certbot-renew.service
-        systemctl daemon-reload 2>/dev/null || true
-    fi
+    remove_owned_renewal_automation
 }
 
 # deploy_cert_roles <base> — copy the wildcard lineage to all three role dirs.
@@ -2102,15 +2202,15 @@ issue_selfsigned_wildcard() {
 # dirs. Defaults to reading from the certbot lineage (/etc/letsencrypt/live/<base>);
 # a caller can pass an alternate src_dir (e.g. a still-valid preserved role-dir
 # copy, when the lineage itself is gone — see install_cert's reuse fallback).
-# When src_dir IS one of the role dirs (the dot-preserved-copy case), that one
-# role is a same-file copy (which `install` refuses) — just re-chmod it in place.
+# A source role may also be the destination role. Staging to distinct temporary
+# files keeps that recovery copy safe until validation and atomic publication.
 deploy_cert_roles() {
-    local base="$1" src="${2:-/etc/letsencrypt/live/${base}}" r dest cert_tmp key_tmp trust=production
+    local base="$1" src="${2:-${LE_LIVE_ROOT}/${base}}" r dest cert_tmp key_tmp trust=production
     [[ "$src" == "$DEBUG_CERT_DIR"/* ]] && trust=debug
     validate_cert_pair "${src}/fullchain.pem" "${src}/privkey.pem" "$base" 0 "$trust" \
         || { err "Certificate source failed validation: $src"; return 1; }
     for r in dot web zash; do
-        dest="/etc/5gpn/cert/$r"
+        dest="${DNS_CERT_DIR}/$r"
         install -d -m 0750 "$dest"
         cert_tmp="$(mktemp "${dest}/.fullchain.pem.XXXXXX")" || return 1
         key_tmp="$(mktemp "${dest}/.privkey.pem.XXXXXX")" || { rm -f -- "$cert_tmp"; return 1; }
@@ -2132,6 +2232,7 @@ deploy_cert_roles() {
 # renewal-hooks to stop/start anything around port 80.
 install_renewal_automation() {
     local service_tmp timer_tmp
+    preflight_renewal_unit_ownership || return 1
     service_tmp="$(mktemp /etc/systemd/system/.5gpn-certbot-renew.service.XXXXXX)" || return 1
     timer_tmp="$(mktemp /etc/systemd/system/.5gpn-certbot-renew.timer.XXXXXX)" \
         || { rm -f -- "$service_tmp"; return 1; }
@@ -2296,13 +2397,8 @@ remove_legacy_firewall() {
 }
 
 preflight_unit_ownership() {
-    local unit
-    for unit in 5gpn-dns.service mihomo.service; do
-        if systemctl cat "$unit" >/dev/null 2>&1 || [[ -e "/etc/systemd/system/$unit" ]]; then
-            unit_file_owned_by_5gpn "$unit" \
-                || { err "Refusing to replace an existing non-5gpn unit: $unit"; return 1; }
-        fi
-    done
+    preflight_owned_units 5gpn-dns.service mihomo.service \
+        5gpn-certbot-renew.service 5gpn-certbot-renew.timer
 }
 
 install_units() {
@@ -3367,11 +3463,13 @@ full_install() {
 # ----------------------------------------------------------------------------
 # Uninstall: reverse install.sh's invasive host changes. Keeps /etc/5gpn (cert,
 # token, rules, subscriptions) by default; --purge removes it EXCEPT the cert dir.
-# The TLS cert is DELIBERATELY preserved in BOTH modes — re-issuing a Let's Encrypt
+# The TLS cert is DELIBERATELY preserved in normal/purge modes — re-issuing a Let's Encrypt
 # cert for the same domain is rate-limited, so the deployed copy (/etc/5gpn/cert)
 # AND the certbot lineage (/etc/letsencrypt, never touched here) survive so a
 # re-install reuses the cert instead of burning a new issuance. Remove certs
-# manually only when decommissioning the domain.
+# manually only when decommissioning the domain. Decommission removes a Certbot
+# lineage only when provenance proves 5gpn created it; shared/external lineages
+# and any 5gpn credential they still reference remain intact.
 # ----------------------------------------------------------------------------
 uninstall() {
     check_root
@@ -3384,7 +3482,8 @@ uninstall() {
     esac
     [[ -t 0 ]] || { err "Uninstall requires an attached TTY confirmation."; return 1; }
     local prompt="确认卸载 5gpn?"
-    [[ "$decommission" == 1 ]] && prompt="确认卸载并永久删除 5gpn 证书及 Cloudflare 凭据?"
+    [[ "$decommission" == 1 ]] \
+        && prompt="确认卸载并删除可证明由 5gpn 拥有的证书材料?（共享 lineage/凭据会保留）"
     ask_yesno "$prompt" || return 0
     claim_project_roots
     warn "Uninstalling 5gpn: stopping services and reverting host changes."
@@ -3456,13 +3555,14 @@ uninstall() {
 
     if [[ "$decommission" == 1 ]]; then
         base="$(cfg_get DNS_BASE_DOMAIN)"
-        is_valid_domain "$base" || { err "Cannot decommission: persisted base domain is invalid."; return 1; }
-        if [[ -e "/etc/letsencrypt/live/$base" ]]; then
-            certbot delete --non-interactive --cert-name "$base" \
-                || { err "Certbot refused to delete the exact 5gpn lineage '$base'."; return 1; }
+        decommission_certbot_lineage "$base" || return 1
+        rm -rf -- "$DNS_CERT_DIR" "$DEBUG_CERT_DIR"
+        if [[ "$DECOMMISSION_PRESERVE_ACME" == 0 ]]; then
+            rm -rf -- "$ACME_DIR"
+            ok "Deleted 5gpn role/debug certificate material and Cloudflare credential."
+        else
+            ok "Deleted 5gpn role/debug certificate material; kept the credential required by the preserved external lineage."
         fi
-        rm -rf -- "$DNS_CERT_DIR" "$DEBUG_CERT_DIR" "$ACME_DIR"
-        ok "Deleted exact 5gpn certificate material and Cloudflare credential."
     fi
 
     if [[ $purge == 1 ]]; then
@@ -3479,9 +3579,11 @@ uninstall() {
             || { err "Config ownership marker missing; refusing purge."; return 1; }
         find "$CONF_DIR" -mindepth 1 -maxdepth 1 ! -name "$CONF_OWNERSHIP_MARKER" \
             ! -name cert ! -name acme ! -name debug-cert -exec rm -rf -- {} +
-        if [[ "$decommission" == 1 ]]; then
+        if [[ "$decommission" == 1 && "$DECOMMISSION_PRESERVE_ACME" == 0 ]]; then
             remove_fixed_owned_dir "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"
             ok "Decommissioned all 5gpn configuration and certificate credentials."
+        elif [[ "$decommission" == 1 ]]; then
+            warn "Decommission kept ${CONF_DIR}/acme because the preserved external lineage still references it."
         else
             warn "Purged ${CONF_DIR} EXCEPT cert/, debug-cert/, and acme/ for safe certificate reuse."
             info "Use the explicit TUI-confirmed '--uninstall --decommission' mode to remove the exact lineage and Cloudflare token."
@@ -3522,7 +3624,8 @@ Usage: sudo bash install.sh [option]     — or, after install, just:  5gpn [opt
                       with a freshly rendered, validated seed, then restart
   --uninstall [--purge|--decommission]
                       TUI-confirmed ownership-safe removal. Purge preserves cert/
-                      debug-cert/acme; decommission deletes only the exact 5gpn lineage
+                      debug-cert/acme; decommission deletes a Certbot lineage only
+                      when provenance proves that 5gpn created it
   --help              This help
 
 After a full install, `5gpn` opens the management TUI. Configuration commands do
@@ -3552,7 +3655,9 @@ Domains + certificates: ONE base (apex) domain, ONE mandatory WILDCARD Let's Enc
                      no public domain — no certbot, no DNS-01, no renewal; clients
                      see it untrusted.
   Production reuse validates trust, apex+wildcard SANs and cert/key matching;
-  debug certificates are reusable only inside debug mode.
+  debug certificates are reusable only inside debug mode. If only a preserved
+  production role copy survives, it is reused without issuance and renewal stays
+  disabled until the Certbot lineage is repaired.
 
 There is NO host firewall management (removed): use your provider's security
 group if you need one. The console SPA and /ios/ are public while /api/* requires
