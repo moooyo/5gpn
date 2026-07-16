@@ -818,6 +818,9 @@ func TestLoadConfig_MihomoKnobs(t *testing.T) {
 		if cfg.BaseDomain != "" {
 			t.Errorf("BaseDomain default = %q, want empty", cfg.BaseDomain)
 		}
+		if cfg.DotDomain != "" {
+			t.Errorf("DotDomain default = %q, want empty", cfg.DotDomain)
+		}
 		if cfg.ConsoleDomain != "" {
 			t.Errorf("ConsoleDomain default = %q, want empty", cfg.ConsoleDomain)
 		}
@@ -839,6 +842,7 @@ func TestLoadConfig_MihomoKnobs(t *testing.T) {
 		clearAllDNSEnv(t)
 		t.Setenv("DNS_CERT", "/c")
 		t.Setenv("DNS_KEY", "/k")
+		t.Setenv("DNS_DOMAIN", "dot.5gpn.example.com")
 		t.Setenv("DNS_BASE_DOMAIN", "5gpn.example.com")
 		t.Setenv("DNS_CONSOLE_DOMAIN", "console.5gpn.example.com")
 		t.Setenv("DNS_ZASH_DOMAIN", "zash.5gpn.example.com")
@@ -852,6 +856,9 @@ func TestLoadConfig_MihomoKnobs(t *testing.T) {
 		}
 		if cfg.BaseDomain != "5gpn.example.com" {
 			t.Errorf("BaseDomain = %q, want 5gpn.example.com", cfg.BaseDomain)
+		}
+		if cfg.DotDomain != "dot.5gpn.example.com" {
+			t.Errorf("DotDomain = %q, want dot.5gpn.example.com", cfg.DotDomain)
 		}
 		if cfg.ConsoleDomain != "console.5gpn.example.com" {
 			t.Errorf("ConsoleDomain = %q, want console.5gpn.example.com", cfg.ConsoleDomain)

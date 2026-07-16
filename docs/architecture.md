@@ -40,7 +40,7 @@ architecture.
 | `5gpn-dns` | `:853/tcp` | The only client DNS ingress, DNS over TLS. |
 | `5gpn-dns` | `127.0.0.1:5353/udp` | Local debugging only; it must remain loopback. |
 | `5gpn-dns` | `127.0.0.1:5354/udp` and `/tcp` | Egress DNS broker used by mihomo after hostname sniffing. |
-| `5gpn-dns` | `127.0.0.1:443/tcp` | Public HTTPS console and iOS install page, plus the bearer-authenticated API. |
+| `5gpn-dns` | `127.0.0.1:443/tcp` | Public HTTPS console assets and iOS profile download, plus the bearer-authenticated API. |
 | `5gpn-dns` | `127.0.0.2:443/tcp` | HTTPS zashboard static files and its controller proxy. |
 | mihomo | configured local IPv4 addresses on `:80/tcp` and `:443/tcp+udp` | SNI/HTTP/QUIC ingress for traffic steered to the gateway. |
 | mihomo | `127.0.0.1:9090/tcp` | TLS-only external controller. |
@@ -159,7 +159,7 @@ One base domain derives three single-label service names:
 | Name | Role | Access boundary |
 | --- | --- | --- |
 | `dot.<base>` | DoT identity on `:853` | Public DNS service. |
-| `console.<base>` | Public React SPA, `/ios/`, and `/api/*` | SPA/bootstrap are public; every API endpoint requires the console bearer token. |
+| `console.<base>` | Public React SPA, `/ios/ios-dot.mobileconfig`, and `/api/*` | SPA assets and profile download are public; every API endpoint requires the console bearer token. |
 | `zash.<base>` | zashboard | Separate mihomo source-IP allowlist route and a dedicated controller pass-through. |
 
 Mihomo sends public console traffic to `127.0.0.1:443` and allowlisted
@@ -173,7 +173,10 @@ clients use 5gpn DNS. Android Private DNS discovery likewise requires
 `dot.<base>` to resolve through the client's pre-existing resolver.
 
 The console SNI deliberately bypasses the zashboard allowlist so a new client
-can download `/ios/` and load the SPA. This does not weaken API authentication:
+can download `/ios/ios-dot.mobileconfig` and load the SPA. iOS and Android
+instructions, the profile QR code, and the download link live in the console's
+`/setup-guide` route; there is no separately maintained install page. This does
+not weaken API authentication:
 all `/api/*` routes still require the bearer token, and console log WebSockets
 still require one-use tickets.
 
@@ -269,7 +272,7 @@ nested names such as `x.console.<base>`.
 The same certificate is deployed into three role directories:
 
 - `/etc/5gpn/cert/dot` for DoT and iOS profile signing;
-- `/etc/5gpn/cert/web` for console HTTPS and its `/ios/` install path;
+- `/etc/5gpn/cert/web` for console HTTPS and its public iOS profile download;
 - `/etc/5gpn/cert/zash` for zashboard HTTPS and the mihomo controller.
 
 Reinstall must prefer safe reuse over issuance. Before reusing material, it

@@ -48,7 +48,7 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"   # repo 5gpn/ when run fr
 BASE_DIR="/opt/5gpn"                 # installed runtime root
 BIN_DIR="${BASE_DIR}/bin"                # project-private binaries; never share /usr/local/bin names
 SCRIPTS_DIR="${BASE_DIR}/scripts"        # installed copies of repo scripts
-WWW_DIR="${BASE_DIR}/www"                # iOS profile web root (served in-process by 5gpn-dns)
+WWW_DIR="${BASE_DIR}/www"                # signed iOS profile root (served in-process by 5gpn-dns)
 BUILD_DIR="${BASE_DIR}/build"            # download/unpack scratch
 BASE_OWNERSHIP_MARKER=".5gpn-owned"
 BASE_OWNERSHIP_VALUE="5gpn-runtime-v1"
@@ -2580,7 +2580,7 @@ DNS_SUBSCRIPTIONS=${CONF_DIR}/subscriptions.json
 
 # Control-plane HTTPS API + public web console. Browsers reach it
 # at https://DNS_WEB_DOMAIN via the mihomo :443 SNI split, which forwards
-# straight to this loopback listener. The SPA and /ios/ are public; every
+# straight to this loopback listener. SPA assets and the profile download are public; every
 # /api/* request requires the bearer token. The token is generated once and
 # preserved across re-installs so a working token is never rotated out from
 # under an operator config.
@@ -2719,7 +2719,7 @@ setup_ios_profile() {
         systemctl daemon-reload 2>/dev/null || true
         info "Removed obsolete socket-activated iOS responder (daemon serves /ios/ now)."
     fi
-    ok "iOS profile generated (served at https://${CONSOLE_DOMAIN:-<console-domain>}/ios/)."
+    ok "iOS profile generated (downloaded from https://${CONSOLE_DOMAIN:-<console-domain>}/ios/ios-dot.mobileconfig)."
 }
 
 print_qr() {
@@ -3447,7 +3447,7 @@ full_install() {
     {
         echo "Web 控制台: https://${CONSOLE_DOMAIN}/"
         echo "zashboard:  https://${ZASH_DOMAIN}/"
-        echo "iOS 安装:   https://${CONSOLE_DOMAIN}/ios/"
+        echo "配置向导:   https://${CONSOLE_DOMAIN}/setup-guide"
         [[ "$token_was_present" == 0 && -t 1 ]] && echo "Token:      ${DNS_API_TOKEN}"
         echo "(console 公网开放，/api 需要 bearer token；zashboard 仅对白名单来源 IP 开放)"
     } | card
@@ -3660,7 +3660,7 @@ Domains + certificates: ONE base (apex) domain, ONE mandatory WILDCARD Let's Enc
   disabled until the Certbot lineage is repaired.
 
 There is NO host firewall management (removed): use your provider's security
-group if you need one. The console SPA and /ios/ are public while /api/* requires
+group if you need one. Console assets and the iOS profile download are public while /api/* requires
 the bearer token. Zashboard remains limited to source IPs in mihomo's
 whitelist.txt allowlist.
 

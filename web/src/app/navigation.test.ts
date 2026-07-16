@@ -10,9 +10,20 @@ describe('navigation model', () => {
   // with the structured egress model, dropping the item count from 8 to 7,
   // then (Task 11) added a 'mihomo-config' item next to 'mihomo' in the
 	// system group, then the obsolete advanced draft editor was removed.
-	it('has exactly 4 groups and 7 items total', () => {
+	it('has exactly 4 groups and 8 items total', () => {
 		expect(NAV_GROUPS.length).toBe(4)
-		expect(ALL_NAV_ITEMS.length).toBe(7)
+		expect(ALL_NAV_ITEMS.length).toBe(8)
+  })
+
+  it('exposes the setup guide next to the dashboard', () => {
+    const overview = NAV_GROUPS.find((g) => g.id === 'overview')
+    expect(overview?.items.map((item) => item.id)).toEqual(['overview', 'setup-guide'])
+    expect(overview?.items[1]).toEqual({
+      id: 'setup-guide',
+      path: '/setup-guide',
+      labelKey: 'nav.setupGuide',
+      icon: 'BookOpenCheck',
+    })
   })
 
   it('exposes the unified policy-rules item and no longer the DNS subscriptions item', () => {

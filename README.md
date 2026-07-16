@@ -39,7 +39,7 @@
   按运维者的 mihomo 配置选择应用层出口（默认 DIRECT）→ 互联网
 ```
 
-**一个主域名、一张通配符证书**：`BASE_DOMAIN` 自动派生 `console.<base>`、`zash.<base>` 和 `dot.<base>`，由同一张 `*.<base>` + apex 证书覆盖。`console.<base>` 是公开的 SPA 与 iOS bootstrap 入口，所有 `/api/*` 仍强制 bearer token；`zash.<base>` 继续由 mihomo 来源白名单保护。
+**一个主域名、一张通配符证书**：`BASE_DOMAIN` 自动派生 `console.<base>`、`zash.<base>` 和 `dot.<base>`，由同一张 `*.<base>` + apex 证书覆盖。`console.<base>` 提供 SPA 与公开的 iOS profile 下载，所有 `/api/*` 仍强制 bearer token；`zash.<base>` 继续由 mihomo 来源白名单保护。
 
 | 场景 | DNS 行为 | 数据路径 |
 |---|---|---|
@@ -47,7 +47,7 @@
 | 命中 proxy（强制进入网关） | 直接返回网关 IP | 客户端 → mihomo → 运维者配置的出口 |
 | 仲裁后国外 IP | 改写为网关 IP | 客户端 → mihomo → 运维者配置的出口 |
 | 仲裁后国内 IP | 原样返回真实 IP | 客户端直连，网关不经手 |
-| SNI = console 域名 | —— | 公开 SPA 与 `/ios/`；`/api/*` 强制 bearer |
+| SNI = console 域名 | —— | 公开 SPA 资源与 `/ios/ios-dot.mobileconfig`；`/api/*` 强制 bearer |
 | SNI = zashboard 域名（源 IP 在白名单） | —— | mihomo :443 → 独立回环面板 |
 
 ---
@@ -59,7 +59,7 @@
 - **全查询类型**：A → 仲裁+改写；AAAA → SOA（IPv4-only）；HTTPS/SVCB → 空 NOERROR（保 SNI 嗅探）；其余 → 转发可信 DoT。
 - **有序统一策略**：`/etc/5gpn/policy.json` 中每条规则以 exact/suffix/keyword/subscription 匹配一种 block/direct/proxy 意图，跨意图按全局顺序 first-match；未命中项可选 auto/direct/gateway fallback。系统 chnroute 与编译后的策略订阅由进程内抓取器定时更新，支持 `plain`/`gfwlist`/`dnsmasq`/`adblock`/`hosts`/`cidr`，失败保留旧缓存（离线安全）。
 - **统一控制面**（多前端共用同一内存 `Controller`）：
-  - **HTTPS REST API + React Web 控制台 + iOS 描述文件**：console SPA 与 `/ios/` 公开，所有 API 需 bearer token；zashboard 仍由 mihomo `whitelist.txt` 来源白名单保护。
+  - **HTTPS REST API + React Web 控制台 + iOS 描述文件**：console SPA 资源与 profile 下载公开，所有 API 需 bearer token；iOS/Android 配置说明、二维码与下载入口统一位于控制台“配置向导”；zashboard 仍由 mihomo `whitelist.txt` 来源白名单保护。
   - **zashboard 面板**：同样经 mihomo SNI 分流 + 白名单暴露到本机另一回环端口。
   - **进程内 Telegram bot**（`github.com/go-telegram/bot`，管理员门控，直接调 `Controller`、不走 HTTP/token）。
   - **Mihomo controller TLS**: the zash wildcard certificate role is shared by the zashboard panel and the mihomo controller. `DNS_MIHOMO_CONTROLLER` remains the loopback dial target; verified controller clients use `DNS_ZASH_DOMAIN` for TLS identity and trust `DNS_ZASH_CERT`. Mihomo v1.19.28 also needs `SAFE_PATHS=/etc/5gpn/cert/zash` because the shared controller cert lives outside `-d /etc/5gpn/mihomo`; that allowlist is read-only and does not widen writes or relax `ProtectSystem=strict`. Ordinary reinstall/change-* preserve an existing operator-owned mihomo config byte-for-byte and do not migrate it; older installs need `DNS_ZASH_DOMAIN` plus either `mihomo-reset` or a manual TLS-only edit before verified controller clients can connect, otherwise they fail closed. If the verified controller transport/client cannot be built, DNS and the rest of the control plane keep running while Mihomo health/config/proxy endpoints stay unavailable (503) rather than downgrading to plaintext HTTP.
@@ -93,7 +93,7 @@ curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh |
   - **cloudflare** — TUI 输入 Cloudflare API token，走 DNS-01；续期命令固定 `--cert-name <base>`，不会续同机其他 lineage。
   - **debug** — TUI 选择的自签模式；无 certbot。仍有效且 SAN/IP/私钥匹配时复用，不会每次重签。
   - **安全复用**：生产复用要求有效期、apex+wildcard SAN、可信链和 cert/key 匹配；debug 自签永远不能进入生产复用路径。
-- **按域名访问**：`console.<base>` 必须提前有指向公网或客户端可路由网关 IP 的 A 记录；该检查没有环境变量 bypass。SPA 与 `/ios/` 公开，所有 `/api/*` 仍需 bearer token。
+- **按域名访问**：`console.<base>` 必须提前有指向公网或客户端可路由网关 IP 的 A 记录；该检查没有环境变量 bypass。SPA 资源与 iOS profile 下载公开，所有 `/api/*` 仍需 bearer token。
 - **IPv4 前提**：本方案全链路 **IPv4-only**（AAAA 一律 SOA、chnroute/网关改写仅 IPv4、守护进程沙箱仅 `AF_INET`）。要求 5G/APN 给客户端分配 **可路由到网关的 IPv4**（或 CLAT）；IPv6-only 接入的客户端够不到网关。
 
 安装版本和第三方版本/摘要固定在发布包中，不接受 `DNS_VERSION`、`MIHOMO_VERSION` 或 `*_SHA256` 环境覆盖。Telegram token、管理员、代理和告警也从管理 TUI 配置。
@@ -102,8 +102,8 @@ curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh |
 
 ## 客户端接入
 
-- **Android**：设置 → 私人 DNS → 填 DoT 域名（`dot.<BASE_DOMAIN>`）。
-- **iOS**：扫安装结束二维码，或访问 `https://console.<BASE_DOMAIN>/ios/ios-dot.mobileconfig`。
+- **Android**：登录 Web 控制台并打开“配置向导”，按页面提示在“私人 DNS”中填写实际 DoT 域名。
+- **iOS**：登录 Web 控制台并打开“配置向导”，使用页面二维码或下载按钮安装已签名描述文件。
 
 ---
 
@@ -112,7 +112,7 @@ curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh |
 - **地址**：`https://console.<BASE_DOMAIN>/`。SPA 公开；所有 `/api/*` 仍需 `DNS_API_TOKEN`。zashboard 单独保留来源 IP 白名单。
 - **登录**：用 `DNS_API_TOKEN` 登录（浏览器 localStorage 保存）。找回：`grep DNS_API_TOKEN /etc/5gpn/dns.env`。
 - **访问控制**：源 IP 白名单在 mihomo 层前置拦截（见上，取代了旧版的进程内 token 失败封锁）；token 本身仍是 bearer 鉴权。
-- **功能**：Dashboard、解析日志、解析测试、有序统一策略规则与 fallback、上游/ECS/Telegram 设置、mihomo 健康与 ticket 化实时日志，以及经 `mihomo -t` 校验的完整 mihomo 配置编辑/显式重置。
+- **功能**：Dashboard、iOS/Android 配置向导、解析日志、解析测试、有序统一策略规则与 fallback、上游/ECS/Telegram 设置、mihomo 健康与 ticket 化实时日志，以及经 `mihomo -t` 校验的完整 mihomo 配置编辑/显式重置。
 - **zashboard 面板**：`https://zash.<BASE_DOMAIN>/`，同样经 mihomo SNI 分流 + 白名单保护到本机另一回环端口。
 
 ---
@@ -180,9 +180,9 @@ sudo bash install.sh --setup-tgbot
 | 路径 | 说明 |
 |---|---|
 | `cmd/5gpn-dns/` | `5gpn-dns` Go 源码——DNS 引擎 + 控制面 API + bot + iOS 分发，全在一个二进制（CI 构建 → `moooyo/5gpn` release） |
-| `cmd/5gpn-dns/api.go` | 控制台 HTTPS REST API + Web + `/ios/`（回环 `:443`，基于 `Controller` facade，经 mihomo SNI 分流对外暴露） |
+| `cmd/5gpn-dns/api.go` | 控制台 HTTPS REST API + Web + iOS profile 下载（回环 `:443`，基于 `Controller` facade，经 mihomo SNI 分流对外暴露） |
 | `cmd/5gpn-dns/bot.go` `bot_ops.go` | 进程内 Telegram bot |
-| `cmd/5gpn-dns/iosd.go` | iOS 描述文件分发（控制台 `/ios/` 公开路径） |
+| `cmd/5gpn-dns/iosd.go` | iOS 描述文件分发（公开 `/ios/ios-dot.mobileconfig`，旧 `/ios/` 跳转到控制台向导） |
 | `web/` | React 控制台前端（独立构建；`npm run build` → `web/dist`，打包成 `5gpn-web-*.tar.gz` release asset；daemon 从 `DNS_WEB_DIR`=/opt/5gpn/web 磁盘 serve） |
 | `install.sh` / `quick-install.sh` | 安装 / 升级编排 + 运维子命令 |
 | `etc/` | 规则种子、`5gpn-dns/dns.env.example`、mihomo 配置模板、systemd 单元 |

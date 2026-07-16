@@ -61,11 +61,11 @@ func init() {
 
 // ControlServer is the HTTPS control plane on :18443: a REST API over
 // Controller (bearer-token authenticated) plus the disk-served SPA and the
-// public /ios/ profile path. It is a separate listener from the DNS-facing DoT
+// public iOS profile download. It is a separate listener from the DNS-facing DoT
 // server (Servers in server.go) — different port, different purpose (admin,
 // not resolution). It binds loopback only (cfg.ListenAPI); mihomo fronts it
-// on :443 via the public console SNI split. The SPA and /ios/ are public;
-// every /api/* request still requires the console bearer token.
+// on :443 via the public console SNI split. SPA assets and the profile download
+// are public; every /api/* request still requires the console bearer token.
 type ControlServer struct {
 	srv     *http.Server
 	zashSrv *http.Server // second loopback panel (zashboard); nil when cfg.ZashListen == ""
@@ -74,6 +74,10 @@ type ControlServer struct {
 	token     string
 	startTime time.Time
 	limiter   *rateLimiter
+
+	// dotDomain mirrors cfg.DotDomain (DNS_DOMAIN), surfaced read-only through
+	// the token-gated status endpoint for the console's Android setup guide.
+	dotDomain string
 
 	// zashDomain mirrors cfg.ZashDomain (DNS_ZASH_DOMAIN), surfaced read-only
 	// via GET /api/status so the console's mihomo page can deep-link into the
@@ -151,6 +155,7 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 		token:        cfg.APIToken,
 		startTime:    time.Now(),
 		limiter:      newRateLimiter(cfg.APIRate, cfg.APIBurst),
+		dotDomain:    cfg.DotDomain,
 		zashDomain:   cfg.ZashDomain,
 		mihomoSecret: cfg.MihomoSecret,
 		mihomoProxy:  unavailableMihomoProxy(),
@@ -236,7 +241,7 @@ func buildPanelServer(addr string, handler http.Handler, certFile, keyFile strin
 }
 
 // securityHeadersMiddleware sets defense-in-depth response headers on the whole
-// :18443 surface (API + SPA + /ios/). The console holds its bearer token in localStorage,
+// :18443 surface (API + SPA + profile download). The console holds its bearer token in localStorage,
 // so an injected script would be a full control-plane takeover — CSP is the real
 // mitigation; the rest blunt MIME-sniffing and clickjacking. External hashed
 // module chunks satisfy the 'self' default-src.
@@ -378,6 +383,9 @@ func (s *ControlServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if cs, ok := s.ctrl.CertStatus(); ok {
 		resp["cert"] = cs
+	}
+	if s.dotDomain != "" {
+		resp["dot_domain"] = s.dotDomain
 	}
 	if s.zashDomain != "" {
 		resp["zash_domain"] = s.zashDomain

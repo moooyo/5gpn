@@ -23,6 +23,8 @@ export interface CertStatus {
   broken?: boolean
   error?: string
 }
+// `dot_domain` is the exact DNS_DOMAIN identity Android users enter as their
+// Private DNS provider hostname. Omitted when deployment identity is unknown.
 // `zash_domain` mirrors cfg.ZashDomain (DNS_ZASH_DOMAIN, added in A5) — the
 // console's mihomo page (C3) deep-links into the zashboard panel using it,
 // rather than deriving a domain by label-swapping location.host. Omitted
@@ -36,6 +38,7 @@ export interface Status {
   uptime_seconds: number
   stats: Stats
   cert?: CertStatus
+  dot_domain?: string
   zash_domain?: string
   mihomo_secret?: string
 }

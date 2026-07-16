@@ -45,6 +45,7 @@ const STATUS_FIXTURE: T.Status = {
   version: 'dev+abc1234',
   uptime_seconds: 3600,
   stats: STATS_FIXTURE,
+  dot_domain: 'dot.example.test',
   cert: {
     not_after: '2026-10-01T00:00:00Z',
     days_remaining: 82,

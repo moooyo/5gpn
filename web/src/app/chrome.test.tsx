@@ -77,6 +77,7 @@ describe('Sidebar', () => {
 describe('Topbar', () => {
   it('pageMeta maps a route to its nav item id, falling back to overview', () => {
     expect(pageMeta('/logs')).toBe('logs')
+    expect(pageMeta('/setup-guide')).toBe('setup-guide')
     expect(pageMeta('/resolve-test')).toBe('resolve-test')
     expect(pageMeta('/does-not-exist')).toBe('overview')
     expect(pageMeta('/')).toBe('overview')

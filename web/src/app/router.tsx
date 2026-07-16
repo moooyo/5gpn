@@ -31,6 +31,7 @@ function lazyPage(loader: () => Promise<{ default: ComponentType }>) {
  * never duplicated. The daemon serves the SPA with history fallback. */
 const PAGE_LOADERS: Record<string, () => Promise<{ default: ComponentType }>> = {
   overview: () => import('../features/overview/OverviewPage'),
+  'setup-guide': () => import('../features/setup-guide/SetupGuidePage'),
   logs: () => import('../features/logs/LogsPage'),
   'resolve-test': () => import('../features/resolve-test/ResolveTestPage'),
   'policy-rules': () => import('../features/policy-rules/PolicyRulesPage'),

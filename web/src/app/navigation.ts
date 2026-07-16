@@ -20,6 +20,7 @@ export const NAV_GROUPS: NavGroup[] = [
     labelKey: 'nav.group.overview',
     items: [
       { id: 'overview', path: '/overview', labelKey: 'nav.overview', icon: 'LayoutGrid' },
+      { id: 'setup-guide', path: '/setup-guide', labelKey: 'nav.setupGuide', icon: 'BookOpenCheck' },
     ],
   },
   {
