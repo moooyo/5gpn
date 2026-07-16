@@ -34,6 +34,23 @@ printf '%s' "$tui_fn" | grep -Fq "http-01 — Let’s Encrypt exact service SANs
     || fail "certificate-mode TUI does not offer HTTP-01"
 printf '%s' "$tui_fn" | grep -Fq "cloudflare — Let’s Encrypt wildcard" \
     || fail "certificate-mode TUI does not offer Cloudflare DNS-01"
+printf '%s' "$tui_fn" | grep -Fq 'ensure_cf_token || return 1' \
+    || fail "Cloudflare selection does not collect or reuse the API token inside the TUI"
+printf '%s' "$tui_fn" | grep -Eq "国内解析 ECS|DNS cache entries" \
+    && fail "installer still prompts for automatic ECS/cache values"
+printf '%s' "$tui_fn" | grep -Fq 'EGRESS_RESOLVER="$DNS_EGRESS_RESOLVER_DEFAULT"' \
+    || fail "first install does not apply the default egress resolver automatically"
+printf '%s' "$tui_fn" | grep -Fq 'CACHE_SIZE="${CACHE_SIZE:-${_CACHE_SIZE_DEFAULT:-4096}}"' \
+    || fail "installer does not apply the memory-derived cache default automatically"
+printf '%s' "$tui_fn" | grep -Fq 'CHINA_ECS="${CHINA_ECS:-}"' \
+    || fail "installer does not default ECS to disabled"
+printf '%s' "$tui_fn" | grep -Fq 'GATEWAY_IP="$PUBLIC_IP"' \
+    && printf '%s' "$tui_fn" | grep -Fq 'MIHOMO_LISTEN_IPS="$default_listen"' \
+    || fail "first install does not derive gateway/listener values automatically"
+printf '%s' "$tui_fn" | grep -Fq 'if [[ "$advanced" == 1 ]]' \
+    && printf '%s' "$tui_fn" | grep -Fq 'mihomo 本机监听 IPv4' \
+    && printf '%s' "$tui_fn" | grep -Fq 'SNI 回源解析器' \
+    || fail "advanced configure TUI lost gateway/listener/resolver overrides"
 printf '%s' "$tui_fn" | grep -Fq "|| true)" \
     || fail "certificate-mode TUI prompt capture is not cancellation-safe under set -e"
 for domain in CONSOLE_DOMAIN ZASH_DOMAIN DOT_DOMAIN; do
@@ -49,10 +66,11 @@ printf '%s' "$tui_fn" | grep -Fq 'wait for 1.1.1.1' \
 http_plan_line="$(grep -nF 'HTTP-01 DNS / network prerequisites' <<<"$tui_fn" | head -1 | cut -d: -f1)"
 http_confirm_line="$(grep -nF '我已确认上述 DNS 和 TCP/80 配置正确' <<<"$tui_fn" | head -1 | cut -d: -f1)"
 cf_confirm_line="$(grep -nF '我已确认上述 DNS 配置正确' <<<"$tui_fn" | head -1 | cut -d: -f1)"
+cf_token_line="$(grep -nF 'ensure_cf_token || return 1' <<<"$tui_fn" | head -1 | cut -d: -f1)"
 [[ -n "$http_plan_line" && -n "$http_confirm_line" && "$http_plan_line" -lt "$http_confirm_line" ]] \
     || fail "HTTP-01 DNS plan is not shown before explicit confirmation"
-[[ -n "$cf_confirm_line" ]] \
-    || fail "Cloudflare install/configure path lacks explicit DNS confirmation"
+[[ -n "$cf_token_line" && -n "$cf_confirm_line" && "$cf_token_line" -lt "$cf_confirm_line" ]] \
+    || fail "Cloudflare token is not collected before final DNS confirmation"
 
 # --- reload-rules.sh performs only the visible local reload. ---
 UL="$ROOT/scripts/reload-rules.sh"

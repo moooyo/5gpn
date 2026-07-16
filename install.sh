@@ -94,11 +94,9 @@ MIHOMO_SHA256="70d01cfb8cb7bf7a92fd1af16cb4b9553d90bb4eecde3b5c4849103e27c80ddb"
 ZASH_VERSION="v3.15.0"                   # Zephyruso/zashboard prebuilt dist.zip
 ZASH_SHA256="adba7b03f3bec792a354e65469fb8ac5513e48e0f646650f78aa313bcf5b18e9"
 # Egress SNI re-resolver: the resolver the loopback DNS broker uses to turn a
-# sniffed (often GFW-blocked) SNI into the real server IP before egress. Poison
-# resistance matters — a plain resolver can be spoofed for exactly the blocked
-# domains. DNS_EGRESS_RESOLVER=<ipv4> -> plain UDP; =https://…/dns-query -> DoH
-# (recommended for real deployments). Unset -> the 22.22.22.22 sentinel.
-# Consumed by 5gpn-dns as DNS_EGRESS_RESOLVER.
+# sniffed SNI into the real server IP before egress. An IPv4 value uses plain
+# UDP; an https://…/dns-query value uses DoH. 22.22.22.22 is the operational
+# project default and is consumed directly by 5gpn-dns.
 DNS_EGRESS_RESOLVER_DEFAULT="22.22.22.22"
 readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_LISTEN_API DNS_CERT DNS_KEY DNS_WEB_CERT DNS_WEB_KEY DNS_ZASH_CERT DNS_ZASH_KEY \
 DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL DNS_CHINA DNS_TRUST DNS_UPSTREAMS \
@@ -107,11 +105,8 @@ DNS_SUBSCRIPTIONS DNS_POLICY_RULES DNS_API_TOKEN DNS_API_RATE DNS_API_BURST DNS_
 DNS_WHITELIST_FILE DNS_MIHOMO_CONFIG DNS_ZASH_DIR DNS_ZASH_LISTEN DNS_WEB_DIR WWW_DIR TGBOT_TOKEN TGBOT_ADMINS \
 DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS DNS_CACHE_SIZE DNS_MAX_INFLIGHT DNS_TTL_MIN DNS_TTL_MAX DNS_QUERY_TIMEOUT \
 DNS_STATS_FILE DNS_HEARTBEAT_URL DNS_HEARTBEAT_INTERVAL"
-# EDNS Client Subnet for the CHINA resolver group: the /24 of the clients'
-# cellular egress IP, so CN CDNs schedule answers near the CLIENTS instead of
-# near the gateway's own egress. Prompted at install (check ip.cn ON CELLULAR
-# data); a bare IP is normalised to its /24 before persisting.
-CHINA_ECS_DEFAULT="122.96.30.0"
+# EDNS Client Subnet is disabled by default. Operators can enable or change it
+# after installation through the web console, which persists the runtime value.
 GUM_VERSION="0.17.0"                     # charmbracelet/gum (prebuilt; installer TUI)
 GUM_BIN="${BIN_DIR}/gum"
 _HAVE_GUM=0                              # set by install_gum(); helpers fall back to echo when 0
@@ -1377,8 +1372,8 @@ seed_policy_defaults() {
 # Install config + scripts + control-plane sources
 # ----------------------------------------------------------------------------
 # validate_egress_resolver <resolver> -- validate the format of the Egress DNS
-# Broker's fallback resolver (DNS_EGRESS_RESOLVER; 22.22.22.22 sentinel by
-# default). The runtime data path is the fixed loopback
+# Broker's fallback resolver (DNS_EGRESS_RESOLVER; 22.22.22.22 by default). The
+# runtime data path is the fixed loopback
 # broker (udp://127.0.0.1:5354, wired into mihomo's dns.nameserver in the
 # committed template), so there is no per-install file substitution to do here.
 # The resolver is NOT inert: the 5gpn-dns daemon consumes it directly to build
@@ -1837,15 +1832,6 @@ is_valid_ipv4_or_cidr() {
             ;;
         *) is_valid_ipv4 "$value" ;;
     esac
-}
-
-# ecs_to_cidr24 normalises an operator-entered IPv4 (or a.b.c.d/nn CIDR) to
-# the /24 the daemon attaches as EDNS Client Subnet: a.b.c.0/24. A /24 (never
-# the full address) is precise enough for CDN scheduling without shipping one
-# identifiable client IP upstream.
-ecs_to_cidr24() {
-    local ip="${1%%/*}"
-    printf '%s.0/24' "${ip%.*}"
 }
 
 # install_cert <base_domain> — provision ONE scoped production lineage and
@@ -2622,19 +2608,17 @@ CERT_MODE=${CERT_MODE}
 CERT_EMAIL=${CERT_EMAIL}
 
 # Upstream resolver groups. DNS_CHINA entries are plain-UDP IPs; DNS_TRUST
-# entries are bare "IP" (plain UDP — e.g. the 22.22.22.22 internal-resolver
-# sentinel) or "serverName@IP" (DoT). These are the INSTALL-TIME defaults:
+# entries are bare "IP" (plain UDP — e.g. the 22.22.22.22 resolver) or
+# "serverName@IP" (DoT). These are the INSTALL-TIME defaults:
 # when /etc/5gpn/upstreams.json exists (written by the web console via
 # Settings → upstream DNS, hot-applied without a restart) it overrides both.
 DNS_CHINA=${dns_china}
 DNS_TRUST=${dns_trust}
 DNS_UPSTREAMS=${upstreams_file}
 
-# EDNS Client Subnet attached to china-group queries: the /24 of the clients'
-# cellular egress IP (check ip.cn ON CELLULAR data), so CN CDNs schedule
-# answers near the clients. INSTALL-TIME default: when /etc/5gpn/ecs.json
-# exists (written by the web console via Settings → 国内解析 ECS, hot-applied
-# without a restart) it overrides this. "off" disables ECS.
+# EDNS Client Subnet attached to china-group queries. It is disabled by default;
+# /etc/5gpn/ecs.json (written by the web console and hot-applied without a
+# restart) enables or changes it at runtime.
 DNS_CHINA_ECS=${china_ecs}
 DNS_CHINA_0X20=${china_0x20}
 DNS_ECS_FILE=${ecs_file}
@@ -2646,8 +2630,7 @@ DNS_CHNROUTE=${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt
 # broker's fallback exchanger; mihomo's config.yaml never references it -- its
 # dns.nameserver always points at the fixed loopback broker). Persisted here so
 # a bare re-run preserves it.
-# Default 22.22.22.22 is a NON-functional placeholder — set a real plain-IPv4 or
-# https://…/dns-query DoH through '5gpn configure'.
+# The operational default is the plain-UDP resolver 22.22.22.22.
 DNS_EGRESS_RESOLVER=${EGRESS_RESOLVER}
 DNS_EGRESS_BROKER=127.0.0.1:5354
 
@@ -3155,13 +3138,11 @@ validate_install_config() {
     fi
     [[ "$CACHE_SIZE" =~ ^[1-9][0-9]*$ ]] || { err "Persisted DNS_CACHE_SIZE is invalid."; return 1; }
     case "$CHINA_ECS" in
-        off|none|disable|0) ;;
+        ""|off|none|disable|0) ;;
         *) is_valid_ipv4 "${CHINA_ECS%%/*}" || { err "Persisted DNS_CHINA_ECS is invalid."; return 1; } ;;
     esac
     validate_egress_resolver "$EGRESS_RESOLVER" >/dev/null \
         || { err "Persisted DNS_EGRESS_RESOLVER is invalid."; return 1; }
-    [[ "$EGRESS_RESOLVER" != "$DNS_EGRESS_RESOLVER_DEFAULT" ]] \
-        || { err "Persisted DNS_EGRESS_RESOLVER is still the non-functional placeholder."; return 1; }
     MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" || return 1
     export BASE_DOMAIN PUBLIC_IP GATEWAY_IP MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL \
         CACHE_SIZE CHINA_ECS EGRESS_RESOLVER
@@ -3169,7 +3150,7 @@ validate_install_config() {
 
 configure_install_tui() {
     [[ -t 0 ]] || { err "First install/configuration requires an attached TTY; shell environment injection is not supported."; return 1; }
-    local choice detected value default_listen
+    local advanced="${1:-0}" choice detected value default_listen
     case "${CERT_MODE:-cloudflare}" in
         http-01)
             choice="$(ask_choice '证书模式 Certificate mode' \
@@ -3213,37 +3194,43 @@ configure_install_tui() {
         is_valid_ipv4 "$PUBLIC_IP" && break
         warn "Invalid public IPv4."
     done
-    while true; do
-        GATEWAY_IP="$(prompt_default '客户端可达网关 IPv4 Gateway IPv4' "${GATEWAY_IP:-$PUBLIC_IP}")"
-        is_valid_ipv4 "$GATEWAY_IP" && break
-        warn "Invalid gateway IPv4."
-    done
+    if [[ "$advanced" == 1 ]]; then
+        while true; do
+            GATEWAY_IP="$(prompt_default '客户端可达网关 IPv4 Gateway IPv4' "${GATEWAY_IP:-$PUBLIC_IP}")"
+            is_valid_ipv4 "$GATEWAY_IP" && break
+            warn "Invalid gateway IPv4."
+        done
+    else
+        GATEWAY_IP="$PUBLIC_IP"
+    fi
 
-    while true; do
-        EGRESS_RESOLVER="$(prompt_default 'SNI 回源解析器 (IPv4 或 https://…/dns-query)' "${EGRESS_RESOLVER:-https://1.1.1.1/dns-query}")"
-        validate_egress_resolver "$EGRESS_RESOLVER" >/dev/null && break
-        warn "Invalid resolver."
-    done
+    if [[ "$advanced" == 1 ]]; then
+        while true; do
+            EGRESS_RESOLVER="$(prompt_default 'SNI 回源解析器 (IPv4 或 https://…/dns-query)' "${EGRESS_RESOLVER:-$DNS_EGRESS_RESOLVER_DEFAULT}")"
+            validate_egress_resolver "$EGRESS_RESOLVER" >/dev/null && break
+            warn "Invalid resolver."
+        done
+    else
+        EGRESS_RESOLVER="$DNS_EGRESS_RESOLVER_DEFAULT"
+    fi
 
     default_listen="$(resolve_mihomo_listen_ips "${MIHOMO_LISTEN_IPS:-}" 2>/dev/null || true)"
+    if [[ -z "$default_listen" ]]; then
+        default_listen="$(resolve_mihomo_listen_ips "$PUBLIC_IP" 2>/dev/null || true)"
+    fi
     [[ -n "$default_listen" ]] || default_listen="$(resolve_mihomo_listen_ips '' 2>/dev/null || true)"
     [[ -n "$default_listen" ]] \
         || { err "No locally assigned IPv4 is available for mihomo listeners."; return 1; }
-    while true; do
-        MIHOMO_LISTEN_IPS="$(prompt_default 'mihomo 本机监听 IPv4（逗号分隔）' "$default_listen")"
-        MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" && break
-    done
-
-    while true; do
-        CHINA_ECS="$(prompt_default '国内解析 ECS IPv4（或 off）' "${CHINA_ECS:-$CHINA_ECS_DEFAULT}")"
-        case "$CHINA_ECS" in
-            off|none|disable|0) break ;;
-            *) is_valid_ipv4 "${CHINA_ECS%%/*}" && { CHINA_ECS="$(ecs_to_cidr24 "$CHINA_ECS")"; break; } ;;
-        esac
-        warn "Invalid ECS value."
-    done
-
-    CACHE_SIZE="$(prompt_default 'DNS cache entries' "${CACHE_SIZE:-${_CACHE_SIZE_DEFAULT:-4096}}")"
+    if [[ "$advanced" == 1 ]]; then
+        while true; do
+            MIHOMO_LISTEN_IPS="$(prompt_default 'mihomo 本机监听 IPv4（逗号分隔）' "$default_listen")"
+            MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" && break
+        done
+    else
+        MIHOMO_LISTEN_IPS="$default_listen"
+    fi
+    CHINA_ECS="${CHINA_ECS:-}"
+    CACHE_SIZE="${CACHE_SIZE:-${_CACHE_SIZE_DEFAULT:-4096}}"
     [[ "$CACHE_SIZE" =~ ^[1-9][0-9]*$ ]] \
         || { err "DNS cache size must be a positive integer."; return 1; }
     if [[ "$CERT_MODE" != debug ]]; then
@@ -3252,6 +3239,9 @@ configure_install_tui() {
             || { err "Invalid certificate email."; return 1; }
     else
         CERT_EMAIL=""
+    fi
+    if [[ "$CERT_MODE" == cloudflare ]]; then
+        ensure_cf_token || return 1
     fi
 
     {
@@ -3262,7 +3252,7 @@ configure_install_tui() {
         echo "  gateway:    $GATEWAY_IP"
         echo "  listeners:  $MIHOMO_LISTEN_IPS"
         echo "  resolver:   $EGRESS_RESOLVER"
-        echo "  ECS:        $CHINA_ECS"
+        echo "  ECS:        ${CHINA_ECS:-disabled (configure in WebUI)}"
         echo "  cache:      $CACHE_SIZE"
     } | card
     if [[ "$CERT_MODE" == http-01 ]]; then
@@ -3302,7 +3292,7 @@ resolve_install_configuration() {
         return 0
     fi
     [[ -f "${CONF_DIR}/dns.env" ]] && load_persisted_install_config || true
-    configure_install_tui
+    configure_install_tui "$force_tui"
     validate_install_config
 }
 

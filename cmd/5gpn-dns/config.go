@@ -57,9 +57,9 @@ type Config struct {
 
 	// ChinaECS is the EDNS Client Subnet (RFC 7871) attached to china-group
 	// queries so CN CDNs schedule answers near the CLIENTS' cellular egress
-	// instead of near the gateway's own IP (env DNS_CHINA_ECS; default
-	// 122.96.30.0/24; "off"/"none" disables; a bare IPv4 is normalised to its
-	// /24). nil disables ECS. The web console overrides it at runtime via
+	// instead of near the gateway's own IP (env DNS_CHINA_ECS; empty or
+	// "off"/"none" disables; a bare IPv4 is normalised to its /24). nil disables
+	// ECS. The web console overrides it at runtime via
 	// PUT /api/ecs, persisted to EcsFile (which wins over this at startup).
 	ChinaECS *net.IPNet
 
@@ -117,7 +117,7 @@ type Config struct {
 	// EgressResolver is the resolver used by the loopback egress DNS broker
 	// when mihomo asks for a sniffed origin (env DNS_EGRESS_RESOLVER). It accepts
 	// a plain IPv4 over UDP (with TC-to-TCP retry) or an HTTPS DoH URL. The
-	// 22.22.22.22 sentinel is the fresh-install placeholder.
+	// operational default is 22.22.22.22.
 	EgressResolver string
 
 	// The operator's base domain (env DNS_BASE_DOMAIN) and its derived service
@@ -210,7 +210,7 @@ type Config struct {
 //	DNS_CHINA           223.5.5.5,119.29.29.29
 //	DNS_TRUST           22.22.22.22  (bare IP=plain UDP; "host@IP"=DoT)
 //	DNS_UPSTREAMS       /etc/5gpn/upstreams.json (web-console override; empty disables)
-//	DNS_CHINA_ECS       122.96.30.0/24 (china-group EDNS Client Subnet; "off" disables)
+//	DNS_CHINA_ECS       (empty by default; china-group EDNS Client Subnet; "off" disables)
 //	DNS_ECS_FILE        /etc/5gpn/ecs.json (web-console ECS override; empty disables)
 //	DNS_RULES_DIR       /etc/5gpn/rules
 //	DNS_CACHE_SIZE      4096
@@ -303,9 +303,8 @@ func LoadConfig() (Config, error) {
 	chinaRaw := envOr("DNS_CHINA", "223.5.5.5,119.29.29.29")
 	cfg.ChinaAddrs = splitTrim(chinaRaw)
 
-	// Trust upstreams. Default is the 22.22.22.22 sentinel: a bare IP queried
-	// over plain UDP, meant to be replaced by
-	// the operator via the web console (Settings → upstream DNS).
+	// Trust upstreams. Default is 22.22.22.22, queried over plain UDP. Operators
+	// can replace it through the web console (Settings → upstream DNS).
 	trustRaw := envOr("DNS_TRUST", "22.22.22.22")
 	cfg.TrustRaw = splitTrim(trustRaw)
 	cfg.TrustEntries = parseTrustEntryList(cfg.TrustRaw)
@@ -321,10 +320,10 @@ func LoadConfig() (Config, error) {
 	cfg.TGBotFile = envListen("DNS_TGBOT_FILE", "/etc/5gpn/tgbot.json")
 
 	// Egress SNI re-resolver (env DNS_EGRESS_RESOLVER). Consumed by the egress
-	// DNS broker. Default is the 22.22.22.22 placeholder; a malformed value is
+	// DNS broker. Default is 22.22.22.22; a malformed value is
 	// FATAL (ValidateResolver):
 	// a broken resolver would silently break the sniffed-origin data path, so
-	// surface it at load time. The 22.22.22.22 sentinel passes ValidateResolver
+	// surface it at load time. The 22.22.22.22 default passes ValidateResolver
 	// as a plain IPv4.
 	egressResolver := strings.TrimSpace(os.Getenv("DNS_EGRESS_RESOLVER"))
 	if egressResolver == "" {
@@ -335,20 +334,17 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("config: invalid DNS_EGRESS_RESOLVER: %w", err)
 	}
 
-	// China-group EDNS Client Subnet. Warn-not-fatal like every tuning knob: a
-	// typo'd subnet must never crash-loop the sole resolver — fall back to the
-	// default. "off"/"none"/"disable"/"0" explicitly disables ECS.
-	const defaultChinaECS = "122.96.30.0/24"
+	// China-group EDNS Client Subnet. It is disabled until the operator enables
+	// it through the web console or DNS_CHINA_ECS. A typo must never crash-loop
+	// the sole resolver; invalid values degrade to disabled.
 	switch raw := strings.ToLower(strings.TrimSpace(os.Getenv("DNS_CHINA_ECS"))); raw {
-	case "":
-		cfg.ChinaECS, _ = parseECS(defaultChinaECS)
-	case "off", "none", "disable", "0":
+	case "", "off", "none", "disable", "0":
 		cfg.ChinaECS = nil
 	default:
 		subnet, err := parseECS(raw)
 		if err != nil {
-			log.Printf("config: invalid DNS_CHINA_ECS %q, using default %s", raw, defaultChinaECS)
-			subnet, _ = parseECS(defaultChinaECS)
+			log.Printf("config: invalid DNS_CHINA_ECS %q, disabling ECS", raw)
+			subnet = nil
 		}
 		cfg.ChinaECS = subnet
 	}

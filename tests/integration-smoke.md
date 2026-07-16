@@ -11,7 +11,7 @@ current architecture is `docs/architecture.md`.
 - A client with L3 reachability to one address in `DNS_MIHOMO_LISTEN_IPS`.
 - A test `BASE_DOMAIN`, a certificate matching the selected `CERT_MODE`
   (`cloudflare`, `http-01`, or an explicitly accepted `debug` certificate), and
-  a real `DNS_EGRESS_RESOLVER` rather than the `22.22.22.22` sentinel.
+  a reachable `DNS_EGRESS_RESOLVER` (the operational default is `22.22.22.22`).
 - At least two controllable upstreams when testing sequential fallback.
 
 Capture before-state for host-owned facilities. In particular:

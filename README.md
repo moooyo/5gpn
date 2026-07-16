@@ -32,8 +32,8 @@
   · SNI == console → DIRECT 回环（API bearer）；SNI == zashboard →
     源 IP 命中 whitelist.txt 才 DIRECT，否则 REJECT-DROP
   · 其余 SNI/QUIC → mihomo 内置嗅探器（sniffer）取域名，经 5gpn-dns 的回环 Egress DNS
-    Broker (127.0.0.1:5354) 重解析，DNS_EGRESS_RESOLVER 兜底（默认 22.22.22.22 占位，
-    需设成真实解析器）
+    Broker (127.0.0.1:5354) re-resolves through DNS_EGRESS_RESOLVER
+    (operational default: plain-UDP 22.22.22.22)
         │
         ▼
   按运维者的 mihomo 配置选择应用层出口（默认 DIRECT）→ 互联网
@@ -79,7 +79,7 @@ curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh |
 # 或在 checkout 内：sudo bash install.sh
 ```
 
-> 首次安装必须通过 TUI 完成。脚本会把 `curl | sudo bash` 的输入重新接到 `/dev/tty`，依次收集证书模式、主域名、公网/网关 IP、本机监听地址、SNI 回源解析器、ECS 与缓存配置，然后原子写入 `/etc/5gpn/dns.env`。调用者 shell 环境变量不会覆盖配置；首次安装没有 TTY 会直接失败。已有有效 `dns.env` 的重装可非交互复用。
+> First installation requires the TUI. It collects the certificate mode, base domain, public address, certificate email, and Cloudflare token when selected. The gateway and listener default to `PUBLIC_IP`; `5gpn configure` retains advanced overrides for special network layouts. The egress resolver defaults to `22.22.22.22`, ECS starts disabled for later WebUI configuration, and cache size is selected from the memory profile. Caller environment variables never override configuration; a first install without a TTY fails closed, while reinstall can reuse a valid `dns.env` non-interactively.
 
 安装器会先把固定版本的 5gpn-dns、Web、mihomo、zashboard 下载到 staging 并强制校验 SHA-256，再备份当前部署、原子发布并执行 readiness 探针；发布后失败会自动回滚。生产证书可选 Cloudflare DNS-01 或 HTTP-01，debug 模式使用隔离的自签证书。
 

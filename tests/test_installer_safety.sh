@@ -67,6 +67,22 @@ got="$(resolve_mihomo_listen_ips '')" || got=""
 got="$(resolve_mihomo_listen_ips '10.20.30.40,10.20.30.40')" || got=""
 [[ "$got" == 10.20.30.40 ]] && pass "listener addresses are deduplicated" \
     || fail "listener dedupe = '$got'"
+
+# Fresh-install automatic values are a complete valid configuration: the
+# operational resolver is accepted, ECS starts disabled, and cache size is the
+# memory-profile default selected before the TUI runs.
+BASE_DOMAIN=example.com
+MIHOMO_LISTEN_IPS=10.20.30.40
+CERT_MODE=debug
+CERT_EMAIL=""
+CACHE_SIZE=20000
+CHINA_ECS=""
+EGRESS_RESOLVER=22.22.22.22
+if validate_install_config >/dev/null 2>&1; then
+    pass "automatic resolver, disabled ECS, and cache defaults validate"
+else
+    fail "fresh-install automatic defaults were rejected"
+fi
 if resolve_mihomo_listen_ips '203.0.113.7' >/dev/null 2>&1; then
     fail "non-local listener address was accepted"
 else

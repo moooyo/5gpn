@@ -253,12 +253,12 @@ func TestLoadConfig_ChinaECS(t *testing.T) {
 		env  string
 		want string
 	}{
-		{"", "122.96.30.0/24"},         // default
+		{"", ""},                       // disabled by default
 		{"1.2.3.4", "1.2.3.0/24"},      // bare IP normalised to /24
 		{"10.1.0.0/16", "10.1.0.0/16"}, // CIDR honoured
 		{"off", ""},                    // explicit disable
 		{"none", ""},
-		{"garbage", "122.96.30.0/24"}, // warn-not-fatal → default
+		{"garbage", ""}, // warn-not-fatal → disabled
 	}
 	for _, c := range cases {
 		t.Run("DNS_CHINA_ECS="+c.env, func(t *testing.T) {

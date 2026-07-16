@@ -86,7 +86,7 @@ func TestLoadConfig_Defaults(t *testing.T) {
 		}
 	}
 
-	// Default trust upstream: the 22.22.22.22 sentinel, bare IP ⇒ plain UDP.
+	// Default trust upstream: 22.22.22.22, bare IP ⇒ plain UDP.
 	wantTrust := []TrustEntry{
 		{ServerName: "22.22.22.22", DialAddr: "22.22.22.22", Plain: true},
 	}
