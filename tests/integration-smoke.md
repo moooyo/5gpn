@@ -180,6 +180,11 @@ curl --resolve "$PROFILE:443:127.0.0.1" -fsSI \
 - [ ] Custom cleanup paths outside 5gpn defaults are rejected unless canonical,
   safe, and marked as 5gpn-owned. `/`, system directories, and unowned paths are
   never recursively deleted.
+- [ ] Install an operator-managed `sing-box.service`,
+  `/usr/local/bin/sing-box`, and `/usr/local/etc/sing-box`; normal reinstall and
+  uninstall preserve all three. A legacy unit is disabled and removed only when
+  its unit file explicitly identifies 5gpn ownership; shared binary and config
+  paths remain untouched.
 
 ## 10. Certificate renewal and recovery
 
