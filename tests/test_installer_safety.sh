@@ -16,6 +16,18 @@ source "$INSTALL"
 TMP="$(mktemp -d "$ROOT/.test-installer-safety.XXXXXX")"
 trap 'rm -rf -- "$TMP"' EXIT
 
+# Ownership verification must be safe under the installer's set -u mode. Keep
+# the call in a subshell so a nounset regression is reported by this test rather
+# than aborting the whole policy suite without a useful assertion.
+owned_root="$TMP/owned-root"
+mkdir -p "$owned_root"
+printf '%s\n' 'test-owner-v1' > "$owned_root/.owner"
+if (verify_ownership_marker "$owned_root" '.owner' 'test-owner-v1'); then
+    pass "ownership marker verification is nounset-safe"
+else
+    fail "ownership marker verification aborts under set -u"
+fi
+
 # Fake a host with one assigned non-loopback IPv4 and a matching default route.
 ip() {
     case "$*" in

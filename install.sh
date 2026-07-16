@@ -258,7 +258,8 @@ write_ownership_marker() {
 }
 
 verify_ownership_marker() {
-    local dir="$1" name="$2" value="$3" marker="$dir/$name"
+    local dir="$1" name="$2" value="$3" marker
+    marker="$dir/$name"
     [[ -f "$marker" && ! -L "$marker" ]] || return 1
     [[ "$(cat "$marker" 2>/dev/null || true)" == "$value" ]]
 }
