@@ -247,25 +247,28 @@ else
     pass "mihomo reset does not restart after candidate publication failure"
 fi
 
-# External zashboard directories need a marker before recursive cleanup.
+# External zashboard directories need a marker before recursive cleanup. The
+# GitHub checkout lives below /home, which safe_zashboard_path intentionally
+# rejects, so isolate ownership lifecycle behavior from path-policy behavior.
 BASE_DIR="$TMP/base"
-DNS_ZASH_DIR="$TMP/external/zash"
-mkdir -p "$DNS_ZASH_DIR"; echo foreign > "$DNS_ZASH_DIR/file"
-if claim_zashboard_dir >/dev/null 2>&1; then
-    fail "non-empty unowned zashboard directory was claimed"
+if (
+    safe_zashboard_path() { printf '%s\n' "$DNS_ZASH_DIR"; }
+    DNS_ZASH_DIR="$TMP/external/zash"
+    mkdir -p "$DNS_ZASH_DIR"
+    echo foreign > "$DNS_ZASH_DIR/file"
+    ! claim_zashboard_dir >/dev/null 2>&1
+    rm -f "$DNS_ZASH_DIR/file"
+    claim_zashboard_dir >/dev/null
+    echo owned > "$DNS_ZASH_DIR/file"
+    clear_zashboard_dir >/dev/null
+    [[ -f "$DNS_ZASH_DIR/$ZASH_OWNERSHIP_MARKER" && ! -e "$DNS_ZASH_DIR/file" ]]
+    remove_zashboard_dir >/dev/null
+    [[ ! -e "$DNS_ZASH_DIR" ]]
+); then
+    pass "zashboard ownership marker gates cleanup and removal"
 else
-    pass "non-empty unowned zashboard directory is refused"
+    fail "zashboard ownership lifecycle check failed"
 fi
-rm -f "$DNS_ZASH_DIR/file"
-claim_zashboard_dir >/dev/null
-echo owned > "$DNS_ZASH_DIR/file"
-clear_zashboard_dir >/dev/null
-[[ -f "$DNS_ZASH_DIR/$ZASH_OWNERSHIP_MARKER" && ! -e "$DNS_ZASH_DIR/file" ]] \
-    && pass "marker-owned zashboard directory can be cleared safely" \
-    || fail "marker-owned zashboard clear failed"
-remove_zashboard_dir >/dev/null
-[[ ! -e "$DNS_ZASH_DIR" ]] && pass "marker-owned zashboard directory can be removed" \
-    || fail "marker-owned zashboard removal failed"
 DNS_ZASH_DIR=/
 if safe_zashboard_path >/dev/null 2>&1; then
     fail "filesystem root accepted as DNS_ZASH_DIR"
