@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -38,6 +39,28 @@ func TestIOSHandler_Mobileconfig(t *testing.T) {
 	}
 	if got := rec.Body.Bytes(); string(got) != string(want) {
 		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+func TestIOSHandler_MobileconfigHead(t *testing.T) {
+	dir, want := writeIOSFixtures(t)
+	h := iosHandler(dir)
+
+	req := httptest.NewRequest(http.MethodHead, "/ios-dot.mobileconfig", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/x-apple-aspen-config" {
+		t.Errorf("Content-Type = %q, want application/x-apple-aspen-config", got)
+	}
+	if got := rec.Header().Get("Content-Length"); got != strconv.Itoa(len(want)) {
+		t.Errorf("Content-Length = %q, want %d", got, len(want))
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("HEAD body length = %d, want 0", rec.Body.Len())
 	}
 }
 

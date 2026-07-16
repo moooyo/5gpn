@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 // iosRoute maps a fixed request path to the on-disk filename (relative to
@@ -32,15 +33,16 @@ var iosRoutes = map[string]iosRoute{
 // /ios/ (behind http.StripPrefix) — the profile carries no secrets, and an
 // iPhone must be able to fetch it before it has any configuration.
 //
-//   - GET /ios/ios-dot.mobileconfig → application/x-apple-aspen-config
+//   - GET/HEAD /ios/ios-dot.mobileconfig → application/x-apple-aspen-config
 //   - GET /ios/ → redirect to the console setup guide
 //
-// Anything else is 404; a non-GET method is 405; a missing backing file is 404
-// (not 500). Because only the fixed route table selects the filename — request
-// input is never joined into the path — there is no path-traversal surface.
+// Anything else is 404; a method other than GET or HEAD is 405; a missing
+// backing file is 404 (not 500). Because only the fixed route table selects the
+// filename — request input is never joined into the path — there is no
+// path-traversal surface.
 func iosHandler(wwwDir string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -71,7 +73,11 @@ func iosHandler(wwwDir string) http.Handler {
 		// The profile is re-signed on certificate renewal. Never let Safari reuse
 		// a stale CMS payload across those events.
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodHead {
+			return
+		}
 		_, _ = w.Write(body)
 	})
 }
