@@ -1012,15 +1012,40 @@ reset_mihomo_config() {
 # reload/restart, so an in-flight admin session over the panel is undisturbed.
 # ----------------------------------------------------------------------------
 
+# mihomo_controller_curl dials the loopback mihomo controller over verified TLS
+# using the zash certificate and SNI, while still letting callers supply their
+# own curl flags and path.
+mihomo_controller_curl() {
+    local path="$1"; shift
+    local controller server_name cert_file host port
+    controller="${DNS_MIHOMO_CONTROLLER:-$(cfg_get DNS_MIHOMO_CONTROLLER)}"
+    controller="${controller:-127.0.0.1:9090}"
+    controller="${controller#http://}"
+    controller="${controller#https://}"
+    host="${controller%:*}"
+    port="${controller##*:}"
+    [[ "$host" != "$controller" && "$port" =~ ^[0-9]+$ ]] \
+        || { warn "invalid mihomo controller address: $controller"; return 1; }
+    server_name="${ZASH_DOMAIN:-${DNS_ZASH_DOMAIN:-$(cfg_get DNS_ZASH_DOMAIN)}}"
+    cert_file="${DNS_ZASH_CERT:-$(cfg_get DNS_ZASH_CERT)}"
+    cert_file="${cert_file:-${ZASH_CERT_DIR}/fullchain.pem}"
+    [[ -n "$server_name" ]] \
+        || { warn "DNS_ZASH_DOMAIN is required for mihomo controller TLS"; return 1; }
+    [[ -r "$cert_file" ]] \
+        || { warn "mihomo controller trust certificate is unreadable: $cert_file"; return 1; }
+    curl --cacert "$cert_file" \
+        --connect-to "${server_name}:${port}:${host}:${port}" \
+        "$@" "https://${server_name}:${port}${path}"
+}
+
 # apply_whitelist pushes the on-disk whitelist.txt live via the mihomo
 # controller's rule-provider reload endpoint (no full config reload/restart).
 apply_whitelist() {
-    # TODO(Task 6): read DNS_MIHOMO_SECRET once that dns.env knob exists. Until
-    # then, source the controller secret the same way render_mihomo_config's
-    # own re-render path does: read it back out of the rendered config.yaml.
-    local secret; secret="$(sed -n 's/^secret:[[:space:]]*//p' "$MIHOMO_DIR/config.yaml" 2>/dev/null | head -1)"
-    curl -fsS -X PUT "http://127.0.0.1:9090/providers/rules/whitelist" \
-        -H "Authorization: Bearer ${secret}" -o /dev/null \
+    local secret
+    secret="${DNS_MIHOMO_SECRET:-$(cfg_get DNS_MIHOMO_SECRET)}"
+    [[ -n "$secret" ]] || secret="$(mihomo_config_secret "$MIHOMO_DIR/config.yaml")"
+    mihomo_controller_curl "/providers/rules/whitelist" \
+        -fsS -X PUT -H "Authorization: Bearer ${secret}" -o /dev/null \
         && ok "whitelist applied" || warn "whitelist refresh failed (is mihomo running?)"
 }
 
@@ -2289,8 +2314,8 @@ probe_mihomo_ready() {
     controller="${controller#http://}"; controller="${controller#https://}"
     secret="${DNS_MIHOMO_SECRET:-$(cfg_get DNS_MIHOMO_SECRET)}"
     local -a curl_args=(--fail --silent --show-error --max-time 2 -o /dev/null)
-    [[ -n "$secret" ]] && curl_args+=(-H "Authorization: Bearer $secret")
-    curl "${curl_args[@]}" "http://${controller}/version" >/dev/null 2>&1 || return 1
+    [[ -n "$secret" ]] && curl_args+=(-H "Authorization: Bearer ${secret}")
+    mihomo_controller_curl "/version" "${curl_args[@]}" >/dev/null 2>&1 || return 1
 
     command -v ss >/dev/null 2>&1 || return 1
     while IFS= read -r ip; do

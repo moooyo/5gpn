@@ -132,12 +132,14 @@ printf '%s' "$da_fn" | grep -Fq '"$MIHOMO_DIR/whitelist.txt"' \
 printf '%s' "$da_fn" | grep -Fq 'apply_whitelist' \
     || fail "del_allow_ip does not call apply_whitelist (live refresh)"
 aw_fn="$(sed -n '/^apply_whitelist()/,/^}/p' "$INSTALL")"
-printf '%s' "$aw_fn" | grep -Fq 'providers/rules/whitelist' \
-    || fail "apply_whitelist does not PUT the controller's providers/rules/whitelist endpoint"
+printf '%s' "$aw_fn" | grep -Fq 'mihomo_controller_curl "/providers/rules/whitelist"' \
+    || fail "apply_whitelist does not use the shared HTTPS controller helper"
 printf '%s' "$aw_fn" | grep -Fq 'Authorization: Bearer' \
     || fail "apply_whitelist does not send the controller bearer secret"
-printf '%s' "$aw_fn" | grep -Fq 'TODO(Task 6)' \
-    || fail "apply_whitelist is missing the TODO(Task 6) DNS_MIHOMO_SECRET marker"
+printf '%s' "$aw_fn" | grep -Fq 'ok "whitelist applied"' \
+    || fail "apply_whitelist does not preserve the success message"
+grep -Fq 'http://127.0.0.1:9090' "$INSTALL" \
+    && fail "installer still calls the plaintext mihomo controller"
 # manage_menu must expose add/remove allowlist entries as menu ops.
 mm_fn="$(sed -n '/^manage_menu()/,/^}/p' "$INSTALL")"
 printf '%s' "$mm_fn" | grep -Fq 'add_allow_ip' \
@@ -285,6 +287,14 @@ printf '%s' "$ic_fn" | grep -Fq 'ensure_cf_token || return 1' \
 # full-config mihomo seed, no daemon-owned marker regions. ---
 MIHOMO_TMPL="$ROOT/etc/mihomo/config.yaml.tmpl"
 [ -f "$MIHOMO_TMPL" ] || fail "etc/mihomo/config.yaml.tmpl does not exist"
+grep -Fq 'external-controller: ""' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: plaintext controller must stay disabled"
+grep -Fq 'external-controller-tls: 127.0.0.1:9090' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: missing TLS controller listener"
+grep -Fq '/etc/5gpn/cert/zash/fullchain.pem' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: missing zash certificate path"
+grep -Fq '/etc/5gpn/cert/zash/privkey.pem' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: missing zash private key path"
 grep -Fq '>>>5gpn' "$MIHOMO_TMPL" \
     && fail "etc/mihomo/config.yaml.tmpl: no daemon-owned >>>5gpn marker regions may remain (config is fully operator-owned)"
 grep -Fq '<<<5gpn' "$MIHOMO_TMPL" \
