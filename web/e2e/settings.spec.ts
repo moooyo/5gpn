@@ -47,5 +47,5 @@ test('turning the Telegram bot toggle off disables it (mock accepts) and shows a
 
   await page.getByRole('switch').click()
 
-  await expect(page.getByText('已应用 —— 机器人已按新配置重启。')).toBeVisible()
+  await expect(page.getByText('已应用 Telegram 机器人配置。')).toBeVisible()
 })

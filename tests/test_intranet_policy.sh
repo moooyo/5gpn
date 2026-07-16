@@ -152,18 +152,10 @@ printf '%s' "$fc" | grep -Fq 'rm -f "$profile_path"' \
     || fail "gen-ios-profile.sh: unsigned profile is not removed (must fail closed, not serve tamperable)"
 printf '%s' "$fc" | grep -Eq 'exit 1' \
     || fail "gen-ios-profile.sh: refusing an unsigned profile must exit non-zero"
-# The landing page must remain compatible with the console's strict CSP and its
-# profile link/probe must stay under the mounted /ios/ prefix (relative URL).
-grep -Fq 'href="ios-dot.mobileconfig"' "$IOSGEN" \
-    || fail "gen-ios-profile.sh: profile download URL must be relative to /ios/"
-grep -Fq 'fetch("ios-dot.mobileconfig"' "$IOSGEN" \
-    || fail "gen-ios-profile.sh: availability probe must use the real relative profile URL"
-grep -Fq 'href="ios.css"' "$IOSGEN" \
-    || fail "gen-ios-profile.sh: landing CSS must be an external same-origin asset"
-grep -Fq 'src="ios.js"' "$IOSGEN" \
-    || fail "gen-ios-profile.sh: landing JS must be an external same-origin asset"
-grep -Eq '^[[:space:]]*<(style|script)>' "$IOSGEN" \
-    && fail "gen-ios-profile.sh: inline style/script blocks violate the production CSP"
+# The configuration guide lives in the console SPA. The profile generator must
+# publish only the signed payload, never recreate a second landing-page bundle.
+grep -Eq '(index\.html|ios\.css|ios\.js)' "$IOSGEN" \
+    && fail "gen-ios-profile.sh: standalone iOS landing assets must stay removed"
 
 # ===== rotate_token — restart, never reload/SIGHUP =====
 rt="$(sed -n '/^rotate_token()/,/^}/p' "$INSTALL")"

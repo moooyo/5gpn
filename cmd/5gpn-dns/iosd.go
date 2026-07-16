@@ -15,8 +15,9 @@ type iosRoute struct {
 	ctype string
 }
 
-// iosRoutes is the closed set of paths the iOS profile handler answers. Only
-// these fixed routes are served; the request path is never joined into the
+// iosRoutes is the closed set of files the iOS profile handler answers. The
+// configuration guide now lives inside the console SPA; this handler only
+// distributes the signed payload. Request paths are never joined into the
 // filesystem path, so path traversal is impossible by construction.
 //
 // The mobileconfig's Content-Type "application/x-apple-aspen-config" is the
@@ -24,20 +25,16 @@ type iosRoute struct {
 // it is set explicitly rather than sniffed.
 var iosRoutes = map[string]iosRoute{
 	"/ios-dot.mobileconfig": {file: "ios-dot.mobileconfig", ctype: "application/x-apple-aspen-config"},
-	"/":                     {file: "index.html", ctype: "text/html; charset=utf-8"},
-	"/index.html":           {file: "index.html", ctype: "text/html; charset=utf-8"},
-	"/ios.css":              {file: "ios.css", ctype: "text/css; charset=utf-8"},
-	"/ios.js":               {file: "ios.js", ctype: "text/javascript; charset=utf-8"},
 }
 
-// iosHandler returns the HTTP handler for the iOS DoT-profile pages rooted at
+// iosHandler returns the HTTP handler for the signed iOS DoT profile rooted at
 // wwwDir. It is mounted PUBLIC (no bearer token) on the control server at
 // /ios/ (behind http.StripPrefix) — the profile carries no secrets, and an
 // iPhone must be able to fetch it before it has any configuration. The old
 // standalone :8111 responder was removed; this handler is its in-mux successor.
 //
 //   - GET /ios/ios-dot.mobileconfig → application/x-apple-aspen-config
-//   - GET /ios/ and /ios/index.html → text/html; charset=utf-8
+//   - GET /ios/ and /ios/index.html → redirect to the console setup guide
 //
 // Anything else is 404; a non-GET method is 405; a missing backing file is 404
 // (not 500). Because only the fixed route table selects the filename — request
@@ -46,6 +43,10 @@ func iosHandler(wwwDir string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			http.Redirect(w, r, "/setup-guide", http.StatusSeeOther)
 			return
 		}
 		route, ok := iosRoutes[r.URL.Path]
@@ -68,9 +69,8 @@ func iosHandler(wwwDir string) http.Handler {
 		// Set the explicit Content-Type BEFORE writing the body so it is not
 		// overridden by net/http's content sniffing on the first Write.
 		w.Header().Set("Content-Type", route.ctype)
-		// The profile is re-signed on certificate renewal and the landing assets
-		// may change on an installer upgrade. Never let Safari reuse a stale page
-		// or stale CMS payload across those events.
+		// The profile is re-signed on certificate renewal. Never let Safari reuse
+		// a stale CMS payload across those events.
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)

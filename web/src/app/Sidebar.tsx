@@ -3,6 +3,7 @@ import { NavLink } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import {
   LayoutGrid,
+  BookOpenCheck,
   Split,
   ScrollText,
   Search,
@@ -25,6 +26,7 @@ import { cn } from '../lib/cn'
 // names used in navigation.ts.
 const ICONS: Record<string, ComponentType<LucideProps>> = {
   LayoutGrid,
+  BookOpenCheck,
   Split,
   ScrollText,
   Search,

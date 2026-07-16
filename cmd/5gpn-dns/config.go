@@ -132,14 +132,14 @@ type Config struct {
 	// is tracked separately (see the mihomo migration plan).
 	XrayResolver string
 
-	// Mihomo migration: the operator's base wildcard domain (env
-	// DNS_BASE_DOMAIN) and the console/zash panel domains derived from it (env
-	// DNS_CONSOLE_DOMAIN / DNS_ZASH_DOMAIN). install.sh persists all three, but
-	// older configs may only have DNS_BASE_DOMAIN; LoadConfig therefore derives
-	// zash.<base> when the explicit value is empty.
+	// Deployment domains. DNS_DOMAIN is the public DoT identity used by client
+	// setup instructions; DNS_BASE_DOMAIN owns the wildcard lineage, while the
+	// console/zash panel domains are derived from it. install.sh persists all
+	// four, but older configs may only have DNS_BASE_DOMAIN; LoadConfig therefore
+	// derives zash.<base> when the explicit value is empty.
 	// Empty still means the value isn't known yet (e.g. a box not yet migrated to
-	// the base-domain scheme); nothing in this task consumes ConsoleDomain beyond
-	// storing it.
+	// the base-domain scheme).
+	DotDomain     string
 	BaseDomain    string
 	ConsoleDomain string
 	ZashDomain    string
@@ -190,8 +190,8 @@ type Config struct {
 
 	// iOS DoT-profile distribution: the .mobileconfig under WWWDir is served by
 	// the control server at the public (token-free) /ios/ path — there is no
-	// separate iOS listener/port anymore (the old :8111 responder was removed).
-	WWWDir string // env WWW_DIR; default /opt/5gpn/www; static-file root
+	// separate listener or install page (the old :8111 responder was removed).
+	WWWDir string // env WWW_DIR; default /opt/5gpn/www; signed-profile root
 	WebDir string // env DNS_WEB_DIR; default /opt/5gpn/web; control-console SPA static root
 
 	// Cache.
@@ -253,13 +253,13 @@ type Config struct {
 //	DNS_API_BURST       40 (token-bucket capacity per source IP)
 //	TGBOT_PROXY_URL     (none — optional HTTP/HTTPS CONNECT proxy for Telegram only)
 //	TGBOT_ALERTS        false (notify admins on cert/mihomo/upstream transitions)
-//	WWW_DIR             /opt/5gpn/www (static-file root for the /ios/ profile path)
+//	WWW_DIR             /opt/5gpn/www (signed-profile root for the /ios/ download path)
 //	DNS_WEB_DIR         /opt/5gpn/web (control-console SPA static root)
 //	DNS_EGRESS_BROKER   127.0.0.1:5354 (mihomo sniffed-origin DNS resolver)
 //	DNS_MIHOMO_CONTROLLER 127.0.0.1:9090 (mihomo's loopback external-controller API)
 //	DNS_MIHOMO_SECRET   (none — mihomo controller bearer secret)
 //	DNS_WHITELIST_FILE  /etc/5gpn/mihomo/whitelist.txt (panel source-IP allowlist)
-//	DNS_BASE_DOMAIN / DNS_CONSOLE_DOMAIN / DNS_ZASH_DOMAIN (none — zash derives from base when empty)
+//	DNS_DOMAIN / DNS_BASE_DOMAIN / DNS_CONSOLE_DOMAIN / DNS_ZASH_DOMAIN (none — zash derives from base when empty)
 //	DNS_MIHOMO_CONFIG   /etc/5gpn/mihomo/config.yaml (operator-owned mihomo config; console raw editor)
 //	DNS_POLICY_RULES    /etc/5gpn/policy.json (unified policy-rule model; plain JSON, public subscription URLs; empty disables)
 //	DNS_ZASH_DIR        /opt/5gpn/zash (unzipped zashboard dist, served by the zash panel)
@@ -289,6 +289,7 @@ func LoadConfig() (Config, error) {
 		TGBotAlerts:       envBool("TGBOT_ALERTS", false),
 		WWWDir:            envOr("WWW_DIR", "/opt/5gpn/www"),
 		WebDir:            envOr("DNS_WEB_DIR", "/opt/5gpn/web"),
+		DotDomain:         envOr("DNS_DOMAIN", ""),
 		BaseDomain:        envOr("DNS_BASE_DOMAIN", ""),
 		ConsoleDomain:     envOr("DNS_CONSOLE_DOMAIN", ""),
 		ZashDomain:        envOr("DNS_ZASH_DOMAIN", ""),

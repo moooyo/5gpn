@@ -112,9 +112,11 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   is missing/wrong; exported skip variables cannot bypass the gate.
 - [ ] `https://$CONSOLE/` serves the SPA; unauthenticated
   `$CONSOLE/api/status` returns 401.
-- [ ] The generated download page links to
-  `/ios/ios-dot.mobileconfig`; a nonexistent install path never returns the SPA
-  shell as a false-positive `200 text/html`.
+- [ ] The authenticated console `/setup-guide` route shows separate iOS and
+  Android instructions, the exact `DNS_DOMAIN`, a profile QR code, and a direct
+  `/ios/ios-dot.mobileconfig` link. Legacy `/ios/` redirects to the guide; a
+  nonexistent profile path never returns the SPA shell as a false-positive
+  `200 text/html`.
 - [ ] Production CSP reports no inline script/style or worker/font violation.
 
 ## 6. Mihomo controller boundaries
@@ -240,7 +242,8 @@ token into recorded command output, screenshots, or issue logs.
   the final message/audit record contains the real success or failure result.
 - [ ] Short logs retain the newest failure lines and paginate without breaking
   Unicode or HTML. Oversized logs arrive as a protected text document. The iOS
-  action sends a PNG QR plus a direct `console.<base>/ios/` URL button.
+  action sends a PNG QR plus a direct
+  `console.<base>/ios/ios-dot.mobileconfig` URL button.
 - [ ] When direct Telegram access is unavailable, setting a valid proxy through
   the Telegram TUI and letting it restart the daemon restores operation through the
   chosen HTTP/HTTPS CONNECT proxy. Invalid schemes/credentials fail visibly.

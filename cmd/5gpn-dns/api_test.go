@@ -395,6 +395,31 @@ func TestAPIStatus_ZashDomainOmittedWhenUnset(t *testing.T) {
 	}
 }
 
+// TestAPIStatus_DotDomain locks the setup-guide contract: authenticated
+// clients receive the exact DoT identity configured by DNS_DOMAIN rather than
+// guessing it from the console hostname.
+func TestAPIStatus_DotDomain(t *testing.T) {
+	certPath, keyPath := generateSelfSignedCert(t, t.TempDir())
+	const token = "test-token"
+	cfg := Config{
+		APIToken: token, CertFile: certPath, KeyFile: keyPath,
+		DotDomain: "dot.5gpn.example.com",
+	}
+	cs, err := NewControlServer(cfg, &Controller{})
+	if err != nil {
+		t.Fatalf("NewControlServer: %v", err)
+	}
+
+	rec := doAPI(cs, http.MethodGet, "/api/status", nil, token, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeJSON[map[string]any](t, rec)
+	if got := body["dot_domain"]; got != "dot.5gpn.example.com" {
+		t.Errorf("dot_domain = %v, want %q", got, "dot.5gpn.example.com")
+	}
+}
+
 // TestAPIStatus_MihomoSecret locks the Task 7 addition (design §5.3): the
 // TOKEN-GATED GET /api/status includes mihomo_secret so an authenticated
 // console admin's "前往 zash" deep-link can carry it (URL-encoded) and
