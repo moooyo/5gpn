@@ -103,12 +103,12 @@ Go toolchain on the box). Pins per [`install.sh`](install.sh).
 
 | Component | Version | License | Copyright / Source |
 |---|---|---|---|
-| Xray-core | 26.3.27 | MPL-2.0 | © 2020 The XTLS Authors (Project X) — https://github.com/XTLS/Xray-core |
+| mihomo | v1.19.28 | GPL-3.0 | © MetaCubeX contributors — https://github.com/MetaCubeX/mihomo |
 | gum | 0.17.0 | MIT | © Charmbracelet, Inc. — https://github.com/charmbracelet/gum |
 | Zephyruso/zashboard | v3.15.0 | MIT | © 2024 Zephyruso — https://github.com/Zephyruso/zashboard |
 
-> Xray-core is distributed under the Mozilla Public License 2.0; its source is
-> available at the link above.
+> mihomo is distributed under the GNU General Public License v3.0; its source
+> is available at the link above.
 
 > zashboard is a prebuilt frontend `dist.zip` (a mihomo/Clash web dashboard),
 > not a compiled binary — `install_zashboard()` downloads and unpacks the

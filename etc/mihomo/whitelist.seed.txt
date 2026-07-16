@@ -1,2 +1,2 @@
 # 5gpn panel source-IP allowlist (one CIDR per line). TUI-managed; NOT web-editable.
-# Seeded with the admin CIDR at install; refresh live via PUT /providers/rules/whitelist.
+# Intentionally empty until `5gpn add-allow <cidr>` explicitly adds a source.

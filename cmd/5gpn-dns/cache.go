@@ -234,7 +234,7 @@ func (c *Cache) Len() int {
 // Handler.swapRuleSets) so a rule change takes effect immediately instead of
 // being masked by already-cached responses. Cached values are the *final,
 // rewritten* answers (rewriteA / force-direct / forwardTrust output), so a
-// domain moved into blacklist, out of force-direct, or reclassified by a
+// domain moved into force-proxy, out of force-direct, or reclassified by a
 // chnroute update would otherwise keep serving its pre-change answer until the
 // entry's TTL expires — up to DNS_TTL_MAX (default 24h) — turning an API/bot/
 // SIGHUP "reload" into a silent no-op for already-cached names.

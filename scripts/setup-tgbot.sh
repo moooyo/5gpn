@@ -10,6 +10,9 @@ fi
 
 persist_tgbot_startup_settings() {
     local envf="$1" proxy_url="$2" alerts="$3" tmp
+    [[ "$envf" == "${CONF_DIR}/dns.env" ]] \
+        || { err "Refusing unexpected Telegram settings path: $envf"; return 1; }
+    validate_dns_env_schema || return 1
     [[ "$proxy_url" != *$'\n'* && "$proxy_url" != *$'\r'* \
        && "$alerts" != *$'\n'* && "$alerts" != *$'\r'* ]] \
         || { err "Telegram startup settings must not contain newlines."; return 1; }
@@ -31,12 +34,6 @@ setup_tgbot_live() {
     [[ -t 0 ]] || { err "Telegram configuration requires the TUI."; return 1; }
     local envf="${CONF_DIR}/dns.env"
     [[ -f "$envf" ]] || { err "${envf} not found (run a full install first)."; return 1; }
-
-    # Retired Python unit cleanup is exact and upgrade-only. The live bot is an
-    # in-process goroutine and is never restarted as a whole by this workflow.
-    systemctl disable --now 5gpn-tgbot 2>/dev/null || true
-    rm -f /etc/systemd/system/5gpn-tgbot.service
-    systemctl daemon-reload 2>/dev/null || true
 
     local tgbot_file
     tgbot_file="$(cfg_get DNS_TGBOT_FILE)"
@@ -87,7 +84,7 @@ setup_tgbot_live() {
     if [[ "$include_token" == 1 ]]; then
         if [[ -z "$token" ]]; then
             rm -f -- "$request" "$response" "$current"
-            info "No Telegram token supplied; nothing changed. Re-run later: $0 --setup-tgbot"
+            info "No Telegram token supplied; nothing changed. Re-run later: $0 setup-tgbot"
             return 0
         fi
         if [[ ! "$token" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]]; then
@@ -187,7 +184,7 @@ setup_tgbot_live() {
         gum style --border rounded --padding "0 1" \
           "未知自己的 Telegram ID?" \
           "1) 给你的 bot 发 /id" \
-          "2) 再运行 5gpn --setup-tgbot，或在 Web 设置中加入该 ID"
+          "2) 再运行 5gpn setup-tgbot，或在 Web 设置中加入该 ID"
     fi
     ok "Telegram 配置已由守护进程接受并安全应用；有效配置已原子保存到 ${tgbot_file}。"
     info "The token remains redacted through the API; ${tgbot_file} is mode 0600."

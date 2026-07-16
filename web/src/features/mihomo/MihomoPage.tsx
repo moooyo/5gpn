@@ -42,9 +42,8 @@ function buildColumns(t: TFunction): ColumnDef<MihomoLogLine, unknown>[] {
   ]
 }
 
-// The zashboard-seeding deep-link (named in the A4 design, secret-carrying
-// per the UP-4 zashboard-auth design §5.3): opens zashboard pre-filled to
-// talk to THIS box's mihomo controller through the daemon's `/proxy/`
+// Opens zashboard pre-filled to talk to this box's mihomo controller through
+// the daemon's `/proxy/`
 // reverse proxy. The zash mux's `/proxy/` handler now passes the browser's
 // `Authorization` straight through to the controller instead of injecting
 // it server-side, so zashboard itself must present the secret — carried
@@ -64,7 +63,7 @@ function buildZashboardHref(zashDomain: string, secret: string): string {
  *  ticket-gated same-origin `/proxy/logs` WebSocket (see useMihomoLogs). Deep ops
  *  (connections/traffic/per-node inspection) are intentionally NOT built
  *  here — the "Open zashboard" link hands that off to the full zashboard
- *  panel the daemon also serves (see docs on the A2-A4 zashboard batch). */
+ *  panel the daemon also serves. */
 export default function MihomoPage() {
   const { t } = useTranslation()
   const { status, mihomo, mihomoOk, loading } = useStatus()

@@ -4,8 +4,8 @@
  */
 import type * as T from './types'
 
-// ---- mihomo config editor (UP-4 §4) ----------------------------------------
-// A minimal-but-realistic seed containing all six infrastructure invariants
+// ---- mihomo config editor -------------------------------------------------
+// A minimal-but-realistic seed containing all seven infrastructure invariants
 // (external-controller on the loopback controller; a :443 tunnel inbound;
 // the :5354 DNS broker; public console and allowlisted zash SNI splits; the gateway-self anti-loop
 // guard) so the default mock state is a VALID config the "current" and
@@ -18,7 +18,7 @@ dns:
   nameserver:
     - udp://127.0.0.1:5354
 listeners:
-  - name: sniproxy
+  - name: gateway
     type: tunnel
     port: 443
     network: [tcp, udp]
@@ -46,7 +46,7 @@ export const mihomoConfig: T.MihomoConfig = {
   controller_authenticated: true,
 }
 
-// ---- Unified policy rules (UP-1; mirrors cmd/5gpn-dns/policy_rules.go's
+// ---- Unified policy rules (mirrors cmd/5gpn-dns/policy_rules.go's
 // JSON shapes — see types.ts's PolicyRule/PolicyMatcher/PolicyFallback for the
 // field-by-field mapping). `policyFallback` is a `const` object mutated
 // IN PLACE (mock.ts's putPolicyFallback does `Object.assign(...)`, never a
@@ -56,9 +56,6 @@ export const mihomoConfig: T.MihomoConfig = {
 // value` from a consuming module is rejected by both the spec and tsc
 // (TS2540) even when the exporting module declared `let` — only in-place
 // mutation of the referenced object/array works across that boundary.
-//
-// UP-4 made the policy binary: no rule carries a `selector` and the fallback
-// carries no `default_selector` — a `proxy` rule (prule-3) is a bare intent.
 export const policyRules: T.PolicyRule[] = [
   { id: 'prule-1', order: 0, matcher: { kind: 'subscription', value: 'https://example.test/blocklist.txt', format: 'plain', interval: '24h0m0s' }, intent: 'block', enabled: true },
   { id: 'prule-2', order: 1, matcher: { kind: 'domain-suffix', value: 'example.cn' }, intent: 'direct', enabled: true },

@@ -149,8 +149,11 @@ func LoadECSFile(path string) (*ecsFileConfig, error) {
 		return nil, fmt.Errorf("ecs: read %s: %w", path, err)
 	}
 	var fc ecsFileConfig
-	if err := json.Unmarshal(data, &fc); err != nil {
+	if err := unmarshalStrictJSON(data, &fc); err != nil {
 		return nil, fmt.Errorf("ecs: parse %s: %w", path, err)
+	}
+	if fc.Version != ecsFileVersion {
+		return nil, fmt.Errorf("ecs: %s: unsupported schema version %d (want %d)", path, fc.Version, ecsFileVersion)
 	}
 	if _, err := parseECS(fc.Subnet); err != nil {
 		return nil, fmt.Errorf("ecs: %s: %w", path, err)

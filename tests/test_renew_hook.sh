@@ -40,14 +40,8 @@ systemctl() {
 
 write_env() {
     local mode="${1:-cloudflare}"
-    local console="${2:-console.example.test}"
-    local zash="${3:-zash.example.test}"
-    local dot="${4:-dot.example.test}"
     printf '%s\n' \
         'DNS_BASE_DOMAIN=EXAMPLE.TEST.' \
-        "DNS_DOMAIN=${dot}" \
-        "DNS_CONSOLE_DOMAIN=${console}" \
-        "DNS_ZASH_DOMAIN=${zash}" \
         'DNS_GATEWAY_IP=192.0.2.10' \
         "CERT_MODE=${mode}" > "$DNS_ENV"
 }
@@ -108,7 +102,7 @@ pass "unrelated lineage remains a no-op with invalid 5gpn certificate mode"
 # The production hook must fail closed for debug and unknown modes when Certbot
 # presents the configured lineage. Debug certificate installation is owned by
 # the explicit installer path, never by an ACME deploy hook.
-for mode in debug nonsense; do
+for mode in debug http nonsense; do
     write_env "$mode"
     : > "$SYSTEMCTL_LOG"
     RENEWED_LINEAGE="$LE_LIVE_ROOT/example.test"
@@ -118,7 +112,7 @@ for mode in debug nonsense; do
     [[ ! -e "$CERT_ROOT" && ! -s "$SYSTEMCTL_LOG" ]] \
         || fail "CERT_MODE=$mode published or reloaded before failing"
 done
-pass "debug and invalid production deploy-hook modes fail closed"
+pass "debug, aliases, and invalid production deploy-hook modes fail closed"
 
 # A valid Cloudflare apex+wildcard pair is staged in each destination and
 # published with final permissions. Reload happens only after publication.
@@ -171,9 +165,9 @@ after="$(role_checksums)"
     || fail "extra Cloudflare DNS SAN changed roles or reloaded the daemon"
 pass "Cloudflare certificate with an extra DNS SAN fails before publication"
 
-# HTTP and http-01 modes use a non-wildcard lineage containing exactly the three
+# HTTP-01 uses a non-wildcard lineage containing exactly the three
 # derived service DNS names. Non-DNS SANs do not change that identity set.
-write_env http
+write_env http-01
 generate_cert "$LE_LIVE_ROOT/example.test" \
     'DNS:console.example.test,DNS:zash.example.test,DNS:dot.example.test,IP:192.0.2.10'
 : > "$SYSTEMCTL_LOG"
@@ -185,7 +179,7 @@ for role in dot web zash; do
 done
 [[ ! -s "$SYSTEMCTL_LOG" ]] \
     || fail "valid HTTP-01 publication incorrectly used SIGHUP/systemctl"
-pass "http alias publishes a certificate covering all three service SANs"
+pass "HTTP-01 publishes a certificate covering all three service SANs"
 
 # An extra HTTP-01 DNS identity must fail before any live role is changed.
 write_env http-01
@@ -221,20 +215,6 @@ for missing in console zash dot; do
         || fail "HTTP-01 certificate missing $missing SAN reloaded the daemon"
 done
 pass "HTTP-01 certificate missing any required service SAN fails before publication"
-
-# Persisted service domains are configuration, not alternate identities. They
-# must exactly match the three names derived from DNS_BASE_DOMAIN.
-write_env http-01 wrong.example.test zash.example.test dot.example.test
-generate_cert "$LE_LIVE_ROOT/example.test" \
-    'DNS:console.example.test,DNS:zash.example.test,DNS:dot.example.test'
-: > "$SYSTEMCTL_LOG"
-if renew_hook_main >/dev/null 2>&1; then
-    fail "drifted DNS_CONSOLE_DOMAIN was accepted"
-fi
-after="$(role_checksums)"
-[[ "$before" == "$after" && ! -s "$SYSTEMCTL_LOG" ]] \
-    || fail "derived-domain validation failed after publication or reload"
-pass "drifted derived domains fail closed before publication"
 
 # A valid-SAN leaf paired with a different private key must likewise fail closed.
 write_env http-01

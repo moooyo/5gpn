@@ -50,6 +50,10 @@ listeners="$(render_mihomo_listeners '10.20.30.40,10.20.30.41')"
    && "$(grep -c 'port: 80' <<<"$listeners")" == 2 ]] \
     && pass "two bind IPs render independent :80/:443 listener pairs" \
     || fail "dynamic listener renderer did not emit two listener pairs"
+[[ "$listeners" == *'name: gateway,'* && "$listeners" == *'name: gateway-2,'* \
+   && "$listeners" == *'name: gateway80,'* && "$listeners" == *'name: gateway80-2,'* ]] \
+    && pass "listener names use the current gateway vocabulary" \
+    || fail "dynamic listener names are not gateway/gateway80"
 
 # Seed -> preserve byte-for-byte -> explicit validated reset with backup.
 MIHOMO_DIR="$TMP/mihomo"
@@ -91,6 +95,157 @@ fi
 grep -q '\.config\.yaml\.' "$MIHOMO_TEST_LOG" \
     && pass "mihomo validates a staged candidate before publication" \
     || fail "mihomo never validated a staged config candidate"
+printf '%s\n' '# backup failure must preserve this' >> "$config"
+if (
+    cp() { return 1; }
+    render_mihomo_config --reset
+) >/dev/null 2>&1; then
+    fail "explicit reset succeeded after backup failure"
+elif ! grep -Fq '# backup failure must preserve this' "$config"; then
+    fail "explicit reset changed the live config after backup failure"
+elif compgen -G "$MIHOMO_DIR/.config.yaml.*" >/dev/null; then
+    fail "explicit reset left a candidate behind after backup failure"
+else
+    pass "backup failure leaves the live mihomo config unchanged"
+fi
+
+# dns.env accepts exactly the current key set and rejects ambiguous state.
+saved_dns_env="$(cat "$CONF_DIR/dns.env" 2>/dev/null || true)"
+printf '%s\n' \
+    'DNS_BASE_DOMAIN=example.com' \
+    'DNS_PUBLIC_IP=198.51.100.9' > "$CONF_DIR/dns.env"
+validate_dns_env_schema >/dev/null 2>&1 \
+    && pass "current dns.env keys pass strict schema validation" \
+    || fail "current dns.env keys were rejected"
+printf '%s\n' 'DNS_DOMAIN=dot.example.com' > "$CONF_DIR/dns.env"
+if validate_dns_env_schema >/dev/null 2>&1; then
+    fail "retired dns.env key was accepted"
+else
+    pass "retired dns.env key is rejected"
+fi
+printf '%s\n' \
+    'DNS_BASE_DOMAIN=example.com' \
+    'DNS_BASE_DOMAIN=other.example.com' > "$CONF_DIR/dns.env"
+if validate_dns_env_schema >/dev/null 2>&1; then
+    fail "duplicate dns.env key was accepted"
+else
+    pass "duplicate dns.env key is rejected"
+fi
+printf '%s\n' "$saved_dns_env" > "$CONF_DIR/dns.env"
+if set_dns_env_kv "$CONF_DIR/dns.env" DNS_DOMAIN dot.example.com >/dev/null 2>&1; then
+    fail "dns.env writer accepted a retired key"
+else
+    pass "dns.env writer enforces the current-key whitelist"
+fi
+whitelist_keys="$(for key in $DNS_ENV_KEYS; do printf '%s\n' "$key"; done | sort)"
+rendered_keys="$(sed -n '/^write_dns_env()/,/^}/p' "$INSTALL" \
+    | sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' | sort)"
+example_keys="$(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' \
+    "$ROOT/etc/5gpn-dns/dns.env.example" | sort)"
+[[ "$whitelist_keys" == "$rendered_keys" && "$whitelist_keys" == "$example_keys" ]] \
+    && pass "dns.env writer, example, and current-key whitelist match exactly" \
+    || fail "dns.env writer/example keys drifted from the current-key whitelist"
+
+# Only current, unprefixed commands are accepted, and their arity is enforced
+# before an operation can run.
+if (
+    attach_tty() { :; }
+    clear_external_config_env() { :; }
+    main --status
+) >/dev/null 2>&1; then
+    fail "flag-style command alias was accepted"
+else
+    pass "flag-style command alias is rejected"
+fi
+command_ran="$TMP/command-ran"
+if (
+    attach_tty() { :; }
+    clear_external_config_env() { :; }
+    show_status() { : > "$command_ran"; }
+    main status extra
+) >/dev/null 2>&1 || [[ -e "$command_ran" ]]; then
+    fail "unsupported status arguments reached the operation"
+else
+    pass "command arity is enforced before dispatch"
+fi
+
+# Allowlist mutations accept only canonical IPv4/IP-CIDR entries, are exact,
+# and refuse symlink targets.
+allow_dir="$TMP/allowlist"
+if (
+    MIHOMO_DIR="$allow_dir"
+    check_root() { :; }
+    install_gum() { :; }
+    apply_whitelist() { :; }
+    ! add_allow_ip '203.0.113.1/33' >/dev/null 2>&1 || exit 1
+    [[ ! -e "$MIHOMO_DIR/whitelist.txt" ]] || exit 1
+    add_allow_ip '203.0.113.1/32' >/dev/null || exit 1
+    add_allow_ip '203.0.113.10/32' >/dev/null || exit 1
+    add_allow_ip '203.0.113.1/32' >/dev/null || exit 1
+    add_allow_ip '203.0.113.20' >/dev/null || exit 1
+    [[ "$(grep -c '^203\.0\.113\.1/32$' "$MIHOMO_DIR/whitelist.txt")" == 1 ]] || exit 1
+    grep -qxF '203.0.113.20/32' "$MIHOMO_DIR/whitelist.txt" || exit 1
+    del_allow_ip '203.0.113.1/32' >/dev/null || exit 1
+    del_allow_ip '203.0.113.20' >/dev/null || exit 1
+    ! grep -qxF '203.0.113.1/32' "$MIHOMO_DIR/whitelist.txt" || exit 1
+    ! grep -qxF '203.0.113.20/32' "$MIHOMO_DIR/whitelist.txt" || exit 1
+    grep -qxF '203.0.113.10/32' "$MIHOMO_DIR/whitelist.txt" || exit 1
+); then
+    pass "allowlist updates validate, deduplicate, and delete exact CIDRs"
+else
+    fail "allowlist update boundaries are not enforced"
+fi
+symlink_target="$TMP/allowlist-target"
+printf '%s\n' sentinel > "$symlink_target"
+rm -rf -- "$allow_dir"
+mkdir -p "$allow_dir"
+ln -s "$symlink_target" "$allow_dir/whitelist.txt"
+if (
+    MIHOMO_DIR="$allow_dir"
+    check_root() { :; }
+    install_gum() { :; }
+    apply_whitelist() { :; }
+    add_allow_ip '203.0.113.1/32'
+) >/dev/null 2>&1; then
+    fail "allowlist writer followed a symlink"
+elif [[ "$(cat "$symlink_target")" == sentinel ]]; then
+    pass "allowlist writer refuses symlink targets"
+else
+    fail "allowlist writer modified a symlink target"
+fi
+
+# Reset must stop at the first failed boundary even when main dispatch invokes
+# it through an && list (which suppresses Bash errexit inside called functions).
+reset_ran="$TMP/reset-ran"
+if (
+    check_root() { :; }
+    install_gum() { :; }
+    load_mihomo_reset_context() { return 1; }
+    render_mihomo_config() { : > "$reset_ran"; }
+    restart_services() { : > "$reset_ran"; }
+    reset_mihomo_config
+) >/dev/null 2>&1; then
+    fail "mihomo reset succeeded without a valid current dns.env"
+elif [[ -e "$reset_ran" ]]; then
+    fail "mihomo reset continued after context validation failed"
+else
+    pass "mihomo reset stops before rendering when current config is invalid"
+fi
+restart_ran="$TMP/restart-ran"
+if (
+    check_root() { :; }
+    install_gum() { :; }
+    load_mihomo_reset_context() { :; }
+    render_mihomo_config() { return 1; }
+    restart_services() { : > "$restart_ran"; }
+    reset_mihomo_config
+) >/dev/null 2>&1; then
+    fail "mihomo reset succeeded after candidate publication failed"
+elif [[ -e "$restart_ran" ]]; then
+    fail "mihomo reset restarted services after candidate publication failed"
+else
+    pass "mihomo reset does not restart after candidate publication failure"
+fi
 
 # External zashboard directories need a marker before recursive cleanup.
 BASE_DIR="$TMP/base"
@@ -123,83 +278,6 @@ if safe_zashboard_path >/dev/null 2>&1; then
 else
     pass "system-directory descendants are rejected as panel cleanup paths"
 fi
-
-# Generic sing-box paths and unit names do not prove 5gpn ownership.
-SINGBOX_BIN="$TMP/sing-box/bin/sing-box"
-SINGBOX_DIR="$TMP/sing-box/config"
-SINGBOX_UNIT="$TMP/systemd/sing-box.service"
-SINGBOX_SYSTEMCTL_LOG="$TMP/sing-box-systemctl.log"
-mkdir -p "$(dirname "$SINGBOX_BIN")" "$SINGBOX_DIR" "$(dirname "$SINGBOX_UNIT")"
-touch "$SINGBOX_BIN" "$SINGBOX_DIR/config.json"
-cat > "$SINGBOX_UNIT" <<'EOF'
-[Unit]
-Description=Operator-managed sing-box
-EOF
-systemctl() {
-    printf '%s\n' "$*" >> "$SINGBOX_SYSTEMCTL_LOG"
-    return 0
-}
-if ! declare -F remove_legacy_singbox >/dev/null; then
-    fail "sing-box cleanup has no ownership-gated helper"
-else
-    remove_legacy_singbox >/dev/null
-    [[ -e "$SINGBOX_BIN" && -e "$SINGBOX_DIR/config.json" && -e "$SINGBOX_UNIT" \
-       && ! -s "$SINGBOX_SYSTEMCTL_LOG" ]] \
-        && pass "unowned sing-box installation is preserved" \
-        || fail "unowned sing-box installation was modified"
-
-    cat > "$SINGBOX_UNIT" <<'EOF'
-[Unit]
-Description=5gpn legacy sing-box data plane
-EOF
-    : > "$SINGBOX_SYSTEMCTL_LOG"
-    remove_legacy_singbox >/dev/null
-    [[ ! -e "$SINGBOX_UNIT" && -e "$SINGBOX_BIN" && -e "$SINGBOX_DIR/config.json" ]] \
-        && grep -qx 'disable --now sing-box.service' "$SINGBOX_SYSTEMCTL_LOG" \
-        && pass "fingerprinted legacy 5gpn sing-box unit is removed precisely" \
-        || fail "fingerprinted legacy 5gpn sing-box unit cleanup was not precise"
-fi
-for fn_name in clean_previous_install uninstall; do
-    fn_body="$(sed -n "/^${fn_name}()/,/^}/p" "$INSTALL")"
-    if ! grep -Fq 'remove_legacy_singbox' <<<"$fn_body"; then
-        fail "$fn_name does not route sing-box cleanup through the ownership gate"
-    elif grep -Eq '^[[:space:]]*[^#].*(sing-box\.service|/usr/local/bin/sing-box|SINGBOX_(BIN|DIR))' <<<"$fn_body"; then
-        fail "$fn_name still mutates generic sing-box artifacts directly"
-    else
-        pass "$fn_name gates sing-box cleanup by ownership"
-    fi
-done
-
-# A generic host filter table must survive; only the legacy multi-fingerprint
-# table is eligible for precise deletion.
-NFT_LOG="$TMP/nft.log"; export NFT_LOG
-NFT_MODE=generic
-nft() {
-    if [[ "$1" == list && "$2" == table ]]; then
-        if [[ "$3" == inet && "$4" == filter ]]; then
-            if [[ "$NFT_MODE" == fingerprint ]]; then
-                echo 'table inet filter { dot_rate4 dot_rate6 doh_rate4 doh_rate6 tcp dport 9443 }'
-            else
-                echo 'table inet filter { chain input { type filter hook input priority 0; } }'
-            fi
-            return 0
-        fi
-        return 1
-    fi
-    if [[ "$1" == delete && "$2" == table ]]; then
-        printf '%s\n' "$*" >> "$NFT_LOG"; return 0
-    fi
-    return 1
-}
-SCRIPTS_DIR="$TMP/scripts"; mkdir -p "$SCRIPTS_DIR"
-remove_legacy_firewall >/dev/null
-[[ ! -s "$NFT_LOG" ]] && pass "ordinary nftables inet/filter table is preserved" \
-    || fail "ordinary nftables table was deleted"
-NFT_MODE=fingerprint
-remove_legacy_firewall >/dev/null
-[[ ! -s "$NFT_LOG" ]] \
-    && pass "mixed-ownership legacy inet/filter table is preserved for manual migration" \
-    || fail "fingerprinted generic host table was deleted wholesale"
 
 # Service activation errors must propagate instead of falling through to the
 # final "install complete" card.
@@ -258,6 +336,19 @@ for name in console.example.com zash.example.com dot.example.com; do
     grep -q " AAAA ${name} @1.1.1.1" "$DIG_LOG" \
         || fail "HTTP-01 DNS gate did not query AAAA for ${name} through 1.1.1.1"
 done
+DIG_A=$'alias.example.net.\n198.51.100.9'
+if verify_console_dns >/dev/null 2>&1; then
+    fail "HTTP-01 accepted a CNAME indirection"
+else
+    pass "HTTP-01 requires a direct A record"
+fi
+DIG_A=$'198.51.100.9\n198.51.100.9'
+if verify_console_dns >/dev/null 2>&1; then
+    fail "HTTP-01 accepted multiple A answers"
+else
+    pass "HTTP-01 requires exactly one A answer"
+fi
+DIG_A=198.51.100.9
 DIG_AAAA=2001:db8::9
 if verify_console_dns >/dev/null 2>&1; then
     fail "HTTP-01 accepted an IPv6 record on the IPv4-only gateway"

@@ -20,8 +20,8 @@ func TestControlServer_PublicConsoleServesSPAAndIOSAndProtectsAPI(t *testing.T) 
 	}
 	cs, err := NewControlServer(Config{
 		APIToken:      "tok",
-		CertFile:      certPath,
-		KeyFile:       keyPath,
+		WebCertFile:   certPath,
+		WebKeyFile:    keyPath,
 		WWWDir:        wwwDir,
 		WebDir:        webDir,
 		ConsoleDomain: "console.example.com",
@@ -58,7 +58,7 @@ func newTestControlServer(t *testing.T, token string) *ControlServer {
 	t.Helper()
 	certPath, keyPath := generateSelfSignedCert(t, t.TempDir())
 	cfg := Config{
-		APIToken: token, CertFile: certPath, KeyFile: keyPath,
+		APIToken: token, WebCertFile: certPath, WebKeyFile: keyPath,
 	}
 	cs, err := NewControlServer(cfg, &Controller{})
 	if err != nil {
@@ -74,8 +74,10 @@ func TestNewControlServer_MihomoTLSUnavailableFailsClosed(t *testing.T) {
 	certPath, keyPath := generateSelfSignedCert(t, t.TempDir())
 	cs, err := NewControlServer(Config{
 		APIToken:         "tok",
-		CertFile:         certPath,
-		KeyFile:          keyPath,
+		WebCertFile:      certPath,
+		WebKeyFile:       keyPath,
+		ZashCertFile:     certPath,
+		ZashKeyFile:      keyPath,
 		MihomoController: "127.0.0.1:9090",
 	}, &Controller{})
 	if err != nil {
@@ -146,13 +148,8 @@ func TestAuthMiddleware_EmptyTokenFailsClosed(t *testing.T) {
 	}
 }
 
-// TestAuth_NoIPLockout locks the Task 7 reversal: the control plane now binds
-// loopback and is IP-gated by mihomo (source-IP allowlisting happens at the
-// proxy layer, before a connection ever reaches this listener), so the
-// in-process fail2ban-style IP lockout (authBlocker) is gone. Presenting a
-// wrong bearer token any number of times must always return 401 — never a
-// 403 lockout, regardless of how many consecutive failures precede it.
-func TestAuth_NoIPLockout(t *testing.T) {
+// Repeated invalid bearer tokens remain authentication failures.
+func TestAuthRepeatedFailuresStayUnauthorized(t *testing.T) {
 	cs, _ := newAPITestServer(t)
 	for i := 0; i < 10; i++ {
 		rec := doAPI(cs, http.MethodGet, "/api/status", nil, "wrong-token", true)
@@ -162,30 +159,17 @@ func TestAuth_NoIPLockout(t *testing.T) {
 	}
 }
 
-// newAPITestServerWithDir is the shared builder behind newAPITestServer: a
-// ControlServer backed by a real Controller (real SubManager over a temp
-// subscriptions.json + temp rules dir, no engine handler wired — Lookup
-// tests below don't need real resolution since the package's
-// classifyName/Arbitrate paths are already covered by
-// controller_test.go/handler_test.go). Returns the ControlServer, the bearer
-// token to use in requests, and the temp rules directory.
-func newAPITestServerWithDir(t *testing.T) (*ControlServer, string, string) {
+// newAPITestServer builds an authenticated control server for API tests.
+func newAPITestServer(t *testing.T) (*ControlServer, string) {
 	t.Helper()
 	const token = "test-token"
 
-	rulesDir := t.TempDir()
-	subPath := filepath.Join(t.TempDir(), "subscriptions.json")
-
 	reload := func() error { return nil }
-	subs, err := NewSubManager(subPath, rulesDir, reload, nil)
-	if err != nil {
-		t.Fatalf("NewSubManager: %v", err)
-	}
-	ctrl := NewController(subs, reload, rulesDir, &statsCounters{}, func() int { return 0 }, nil)
+	ctrl := NewController(reload, &statsCounters{}, func() int { return 0 }, nil)
 
 	certPath, keyPath := generateSelfSignedCert(t, t.TempDir())
 	cfg := Config{
-		APIToken: token, CertFile: certPath, KeyFile: keyPath,
+		APIToken: token, WebCertFile: certPath, WebKeyFile: keyPath,
 	}
 	cs, err := NewControlServer(cfg, ctrl)
 	if err != nil {
@@ -194,14 +178,6 @@ func newAPITestServerWithDir(t *testing.T) (*ControlServer, string, string) {
 	if cs == nil {
 		t.Fatalf("NewControlServer returned nil for non-empty token")
 	}
-	return cs, token, rulesDir
-}
-
-// newAPITestServer is newAPITestServerWithDir without the rules dir, for the
-// majority of tests that don't need to touch rule files on disk directly.
-func newAPITestServer(t *testing.T) (*ControlServer, string) {
-	t.Helper()
-	cs, token, _ := newAPITestServerWithDir(t)
 	return cs, token
 }
 
@@ -254,13 +230,10 @@ func TestAPIRoutes_RequireAuth(t *testing.T) {
 		method, path string
 	}{
 		{http.MethodGet, "/api/status"},
-		{http.MethodGet, "/api/stats"},
-		{http.MethodGet, "/api/lookup?domain=example.com"},
 		{http.MethodGet, "/api/resolve-test?domain=example.com"},
 		{http.MethodGet, "/api/querylog"},
 		{http.MethodGet, "/api/upstreams"},
 		{http.MethodPut, "/api/upstreams"},
-		{http.MethodPost, "/api/reload"},
 		{http.MethodGet, "/api/ecs"},
 		{http.MethodPut, "/api/ecs"},
 		{http.MethodGet, "/api/tgbot"},
@@ -272,52 +245,6 @@ func TestAPIRoutes_RequireAuth(t *testing.T) {
 			rec := doAPI(cs, rt.method, rt.path, nil, "", false)
 			if rec.Code != http.StatusUnauthorized {
 				t.Fatalf("status = %d, want 401 (no auth); body=%s", rec.Code, rec.Body.String())
-			}
-		})
-	}
-}
-
-func TestAPILegacyDraftRoutesGone(t *testing.T) {
-	cs, token := newAPITestServer(t)
-	for _, rt := range []struct{ method, path string }{
-		{http.MethodGet, "/api/capabilities"},
-		{http.MethodGet, "/api/drafts"},
-		{http.MethodPost, "/api/drafts/example/validate"},
-		{http.MethodPost, "/api/drafts/example/resolve-test"},
-	} {
-		rec := doAPI(cs, rt.method, rt.path, nil, token, true)
-		if rec.Code != http.StatusNotFound {
-			t.Fatalf("%s %s status = %d, want 404; body=%s", rt.method, rt.path, rec.Code, rec.Body.String())
-		}
-	}
-}
-
-// TestAPIEgressRoutesGone locks the 2026-07-15 policy/mihomo decoupling
-// removal: /api/egress/* (node-subs, rule-subs, split-rules, selectors,
-// selectors/{id}/select, apply) no longer exists -- egress routing is now
-// the operator's raw mihomo config (GET/PUT /api/mihomo/config), not a
-// daemon-managed structured model. Uses a VALID token so a 404 actually
-// proves "no such route" rather than being masked by the 401 auth gate
-// TestAPIRoutes_RequireAuth exercises above.
-func TestAPIEgressRoutesGone(t *testing.T) {
-	cs, token := newAPITestServer(t)
-
-	routes := []struct {
-		method, path string
-	}{
-		{http.MethodGet, "/api/egress/node-subs"},
-		{http.MethodGet, "/api/egress/rule-subs"},
-		{http.MethodGet, "/api/egress/split-rules"},
-		{http.MethodGet, "/api/egress/selectors"},
-		{http.MethodPut, "/api/egress/selectors/foo/select"},
-		{http.MethodPost, "/api/egress/apply"},
-	}
-
-	for _, rt := range routes {
-		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
-			rec := doAPI(cs, rt.method, rt.path, nil, token, true)
-			if rec.Code != http.StatusNotFound {
-				t.Fatalf("status = %d, want 404 (route removed); body=%s", rec.Code, rec.Body.String())
 			}
 		})
 	}
@@ -350,14 +277,13 @@ func TestAPIStatus(t *testing.T) {
 	}
 }
 
-// TestAPIStatus_ZashDomain locks the A5 addition: /api/status surfaces the
-// configured zashboard panel domain (DNS_ZASH_DOMAIN) so the mihomo console
-// page (C3) can deep-link into zashboard without scraping location.host.
+// TestAPIStatus_ZashDomain verifies the derived zashboard domain is surfaced
+// for the console deep link.
 func TestAPIStatus_ZashDomain(t *testing.T) {
 	certPath, keyPath := generateSelfSignedCert(t, t.TempDir())
 	const token = "test-token"
 	cfg := Config{
-		APIToken: token, CertFile: certPath, KeyFile: keyPath,
+		APIToken: token, WebCertFile: certPath, WebKeyFile: keyPath,
 		ZashDomain: "zash.5gpn.example.com",
 	}
 	cs, err := NewControlServer(cfg, &Controller{})
@@ -380,7 +306,7 @@ func TestAPIStatus_ZashDomain(t *testing.T) {
 }
 
 // TestAPIStatus_ZashDomainOmittedWhenUnset asserts the omitempty contract:
-// no DNS_ZASH_DOMAIN configured means the key is absent, not an empty string
+// no derived zash domain means the key is absent, not an empty string
 // (the frontend treats presence as "zashboard panel available").
 func TestAPIStatus_ZashDomainOmittedWhenUnset(t *testing.T) {
 	cs, token := newAPITestServer(t)
@@ -391,18 +317,18 @@ func TestAPIStatus_ZashDomainOmittedWhenUnset(t *testing.T) {
 	}
 	body := decodeJSON[map[string]any](t, rec)
 	if _, ok := body["zash_domain"]; ok {
-		t.Errorf("zash_domain present with no DNS_ZASH_DOMAIN configured: %v", body["zash_domain"])
+		t.Errorf("zash_domain present without a configured base domain: %v", body["zash_domain"])
 	}
 }
 
 // TestAPIStatus_DotDomain locks the setup-guide contract: authenticated
-// clients receive the exact DoT identity configured by DNS_DOMAIN rather than
+// clients receive the DoT identity derived from DNS_BASE_DOMAIN rather than
 // guessing it from the console hostname.
 func TestAPIStatus_DotDomain(t *testing.T) {
 	certPath, keyPath := generateSelfSignedCert(t, t.TempDir())
 	const token = "test-token"
 	cfg := Config{
-		APIToken: token, CertFile: certPath, KeyFile: keyPath,
+		APIToken: token, WebCertFile: certPath, WebKeyFile: keyPath,
 		DotDomain: "dot.5gpn.example.com",
 	}
 	cs, err := NewControlServer(cfg, &Controller{})
@@ -420,15 +346,15 @@ func TestAPIStatus_DotDomain(t *testing.T) {
 	}
 }
 
-// TestAPIStatus_MihomoSecret locks the Task 7 addition (design §5.3): the
-// TOKEN-GATED GET /api/status includes mihomo_secret so an authenticated
+// TestAPIStatus_MihomoSecret verifies the token-gated status response includes
+// mihomo_secret so an authenticated
 // console admin's "前往 zash" deep-link can carry it (URL-encoded) and
 // auto-auth into zashboard's pass-through /proxy/ mount.
 func TestAPIStatus_MihomoSecret(t *testing.T) {
 	certPath, keyPath := generateSelfSignedCert(t, t.TempDir())
 	const token = "test-token"
 	cfg := Config{
-		APIToken: token, CertFile: certPath, KeyFile: keyPath,
+		APIToken: token, WebCertFile: certPath, WebKeyFile: keyPath,
 		MihomoSecret: "controller-s3cr3t",
 	}
 	cs, err := NewControlServer(cfg, &Controller{})
@@ -459,84 +385,6 @@ func TestAPIStatus_MihomoSecretOmittedWhenUnset(t *testing.T) {
 	body := decodeJSON[map[string]any](t, rec)
 	if _, ok := body["mihomo_secret"]; ok {
 		t.Errorf("mihomo_secret present with no DNS_MIHOMO_SECRET configured: %v", body["mihomo_secret"])
-	}
-}
-
-// ---------------------------------------------------------------------------
-// GET /api/stats
-// ---------------------------------------------------------------------------
-
-func TestAPIStats(t *testing.T) {
-	cs, token := newAPITestServer(t)
-
-	rec := doAPI(cs, http.MethodGet, "/api/stats", nil, token, true)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	got := decodeJSON[Stats](t, rec)
-	want := Stats{}
-	if got != want {
-		t.Errorf("Stats = %+v, want zero value %+v", got, want)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// GET /api/lookup
-// ---------------------------------------------------------------------------
-
-func TestAPILookup_MissingDomain(t *testing.T) {
-	cs, token := newAPITestServer(t)
-
-	rec := doAPI(cs, http.MethodGet, "/api/lookup", nil, token, true)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
-	}
-	body := decodeJSON[map[string]string](t, rec)
-	if body["error"] == "" {
-		t.Errorf("expected non-empty error message, got %+v", body)
-	}
-}
-
-func TestAPILookup_NilHandlerZeroValue(t *testing.T) {
-	// newAPITestServer's Controller has a nil engine handler, so Lookup
-	// returns a zero-value LookupResult -- this test only asserts the HTTP
-	// plumbing (200 + well-formed JSON), not resolution behavior (that's
-	// controller_test.go's job).
-	cs, token := newAPITestServer(t)
-
-	rec := doAPI(cs, http.MethodGet, "/api/lookup?domain=example.com", nil, token, true)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	got := decodeJSON[LookupResult](t, rec)
-	if got.Name != "" {
-		t.Errorf("Name = %q, want empty (nil-handler zero value)", got.Name)
-	}
-}
-
-// NOTE (UP-1 Task D3): the managed DNS-subscription (GET/POST/PATCH/DELETE
-// /api/subscriptions*), manual per-category rules (GET/POST/DELETE
-// /api/rules/{cat}), and manual refresh (POST /api/update) endpoint tests
-// were REMOVED here — the HTTP surface they covered is gone, absorbed by the
-// unified policy-rule model (see api_policy_rules_test.go for
-// /api/policy/rules + /api/policy/fallback + /api/policy/apply coverage).
-// newRuleTestServer (the rules-dir-exposing test server variant those tests
-// used) was removed alongside them as now-unused.
-
-// ---------------------------------------------------------------------------
-// POST /api/reload
-// ---------------------------------------------------------------------------
-
-func TestAPIReload(t *testing.T) {
-	cs, token := newAPITestServer(t)
-
-	rec := doAPI(cs, http.MethodPost, "/api/reload", nil, token, true)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	body := decodeJSON[map[string]bool](t, rec)
-	if !body["ok"] {
-		t.Errorf("body = %+v, want ok=true", body)
 	}
 }
 
@@ -713,7 +561,7 @@ func TestNewControlServer_RequiresCertWhenEnabled(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 4 Task C1: per-source rate limiting
+// Per-source rate limiting
 // ---------------------------------------------------------------------------
 
 // newRateLimitedTestServer builds a ControlServer with a tight rate/burst so
@@ -723,11 +571,8 @@ func newRateLimitedTestServer(t *testing.T, rate float64, burst int) (*ControlSe
 	const token = "test-token"
 	certPath, keyPath := generateSelfSignedCert(t, t.TempDir())
 	cfg := Config{
-		APIToken: token,
-		CertFile: certPath,
-		KeyFile:  keyPath,
-		APIRate:  rate,
-		APIBurst: burst,
+		APIToken: token, WebCertFile: certPath, WebKeyFile: keyPath,
+		APIRate: rate, APIBurst: burst,
 	}
 	cs, err := NewControlServer(cfg, &Controller{})
 	if err != nil {
@@ -862,7 +707,7 @@ func TestSecurityHeaders_CSPStyleSplit(t *testing.T) {
 			"default-src 'self'",
 			"img-src 'self' data:",
 			"font-src 'self'",                  // bundled MiSans-VF, explicit same-origin allowance
-			"style-src 'self' 'unsafe-inline'", // legacy fallback only
+			"style-src 'self' 'unsafe-inline'", // baseline browser fallback
 			"style-src-elem 'self'",            // no inline <style> elements in the built SPA
 			"style-src-attr 'unsafe-inline'",   // React dynamic style={} attributes
 			"worker-src 'self'",                // PWA service worker (vite-plugin-pwa /sw.js)
@@ -905,7 +750,7 @@ func TestRateLimitMiddleware_DoesNotApplyToSPA(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// SP-3 Task A3: second zashboard panel + separated console/zash proxy auth
+// Second zashboard panel + separated console/zash proxy auth
 // ---------------------------------------------------------------------------
 
 // TestControlServer_BothPanelsAndProxy confirms NewControlServer builds a
@@ -927,8 +772,7 @@ func TestControlServer_BothPanelsAndProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := Config{
-		APIToken: "tok", CertFile: certPath, KeyFile: keyPath,
-		WebCertFile: certPath, WebKeyFile: keyPath,
+		APIToken: "tok", WebCertFile: certPath, WebKeyFile: keyPath,
 		ZashCertFile: certPath, ZashKeyFile: keyPath,
 		ZashDir: zashDir, ZashListen: "127.0.0.2:0",
 		ZashDomain:       mihomo.serverName,
@@ -1032,7 +876,7 @@ func TestControlServer_BothPanelsAndProxy(t *testing.T) {
 func TestControlServer_NoZashWhenListenEmpty(t *testing.T) {
 	certPath, keyPath := generateSelfSignedCert(t, t.TempDir())
 	cfg := Config{
-		APIToken: "tok", CertFile: certPath, KeyFile: keyPath,
+		APIToken: "tok", WebCertFile: certPath, WebKeyFile: keyPath,
 		ZashListen: "",
 	}
 	cs, err := NewControlServer(cfg, &Controller{})
@@ -1054,7 +898,7 @@ func TestZashSecurityHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := Config{
-		APIToken: "tok", CertFile: certPath, KeyFile: keyPath,
+		APIToken: "tok", WebCertFile: certPath, WebKeyFile: keyPath,
 		ZashCertFile: certPath, ZashKeyFile: keyPath,
 		ZashDir: zashDir, ZashListen: "127.0.0.2:0",
 		ZashDomain:       "test.local",

@@ -1,22 +1,15 @@
-// Package main (this file): the unified policy-rule model — the daemon-side,
-// console-managed intent-based rule model that replaced the separate
-// block/direct/blacklist DomainSet + chnroute CIDR + the SP-2 structured
-// egress split-rule surfaces with one ordered rule list: each PolicyRule
-// matches a name (or a whole subscription of names) and maps it to an Intent
-// (block/direct/proxy).
-//
-// Binary policy (2026-07-15 policy/mihomo decoupling design, §2): the policy
-// layer decides ONLY "gateway or not" at the DNS layer. IntentProxy means
+// Package main implements the console-managed, ordered DNS policy model. Each
+// rule matches a name (or a subscription of names) and maps it to a
+// block/direct/proxy intent. The policy layer decides only DNS steering:
+// IntentProxy means
 // "steer to the gateway" and nothing more — it carries no selector/target.
 // Once traffic reaches the box, whether it egresses direct or through a node
 // is entirely the operator's mihomo config (edited as raw text, see the
-// mihomo config editor design doc §4), never a per-rule field here. A
+// raw mihomo config editor), never a per-rule field here. A
 // PolicyRule therefore never references a mihomo proxy-group.
 //
-// MVP matcher kinds are deliberately narrow: domain / domain-suffix /
-// domain-keyword / subscription. domain-wildcard and domain-regex are NOT
-// part of the MVP surface (dropped by design, not an oversight) — do not
-// add them without a corresponding plan update.
+// Matcher kinds are deliberately narrow: domain, domain-suffix,
+// domain-keyword, and subscription.
 package main
 
 import (
@@ -25,11 +18,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 )
@@ -79,9 +71,9 @@ const (
 	FallbackGateway FallbackPolicy = "gateway"
 )
 
-// Matcher is a name-based match spec. Format and Interval are meaningful
-// only when Kind == KindSubscription (Value is then the list URL); they are
-// the zero value otherwise.
+// Matcher is a name-based match spec. Format and a positive Interval are
+// required when Kind == KindSubscription (Value is then the list URL); both
+// fields must be the zero value otherwise.
 type Matcher struct {
 	Kind     MatcherKind
 	Value    string
@@ -111,7 +103,7 @@ func (m Matcher) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON parses Interval from a Go duration string.
 func (m *Matcher) UnmarshalJSON(data []byte) error {
 	var raw matcherJSON
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalStrictJSON(data, &raw); err != nil {
 		return err
 	}
 	d, err := parseOptionalDuration(raw.Interval)
@@ -151,9 +143,7 @@ type PolicyModel struct {
 	Fallback Fallback     `json:"fallback"`
 }
 
-// policySchemaVersion is the current policy.json schema version. A missing
-// "version" (0) is treated as this version; a higher one was written by a
-// newer binary — known fields are honoured, unknown ones ignored.
+// policySchemaVersion is the exact policy.json schema version accepted.
 const policySchemaVersion = 1
 
 // LoadPolicyModel reads policy.json. A missing file is not an error: it
@@ -170,18 +160,14 @@ func LoadPolicyModel(path string) (PolicyModel, error) {
 		return PolicyModel{}, fmt.Errorf("policy: read %s: %w", path, err)
 	}
 	var m PolicyModel
-	if err := json.Unmarshal(data, &m); err != nil {
+	if err := unmarshalStrictJSON(data, &m); err != nil {
 		return PolicyModel{}, fmt.Errorf("policy: parse %s: %w", path, err)
 	}
-	if m.Version > policySchemaVersion {
-		log.Printf("warning: %s is schema version %d, newer than this binary understands (%d) — parsing known fields only",
-			path, m.Version, policySchemaVersion)
+	if m.Version != policySchemaVersion {
+		return PolicyModel{}, fmt.Errorf("policy: %s: unsupported schema version %d (want %d)", path, m.Version, policySchemaVersion)
 	}
-	if m.Version == 0 {
-		m.Version = policySchemaVersion
-	}
-	if m.Fallback.Policy == "" {
-		m.Fallback.Policy = FallbackAuto
+	if err := validatePolicyModel(m); err != nil {
+		return PolicyModel{}, fmt.Errorf("policy: %s: %w", path, err)
 	}
 	return m, nil
 }
@@ -204,15 +190,7 @@ var ErrPolicyNotFound = errors.New("policy rule not found")
 var ErrPolicyRevisionChanged = errors.New("policy model changed during apply")
 
 // ---------------------------------------------------------------------------
-// Shared store-boundary helpers
-//
-// These used to live in the now-deleted structured egress model (egress.go,
-// removed by the 2026-07-15 policy/mihomo decoupling): a generic atomic
-// same-directory-temp-file-then-rename writer, a random ID minter, an
-// optional-duration JSON parser, and a store-boundary field validator. They
-// were never actually egress-specific — PolicyRuleManager is now their only
-// consumer — so they moved here rather than disappearing with the model
-// that used to also use them.
+// Shared store-boundary helpers.
 // ---------------------------------------------------------------------------
 
 // atomicWriteFile writes data to path via a same-directory temp file +
@@ -267,8 +245,9 @@ func newPolicyID(prefix string) string {
 	return prefix + "-" + hex.EncodeToString(b[:])
 }
 
-// parseOptionalDuration parses a Go duration string, treating "" as zero
-// (never an error — a freshly-added entry may not have one yet).
+// parseOptionalDuration parses a Go duration string, treating "" as zero.
+// Validation then requires a positive value for subscription matchers and the
+// zero value for every inline matcher kind.
 func parseOptionalDuration(raw string) (time.Duration, error) {
 	if raw == "" {
 		return 0, nil
@@ -280,27 +259,13 @@ func parseOptionalDuration(raw string) (time.Duration, error) {
 	return d, nil
 }
 
-// policyMarkerSentinels are reserved substrings a matcher value must never
-// contain. Historically these fenced the (now-removed) mihomo marker-splice
-// regions; kept as a belt-and-braces reserved-token guard even though no
-// marker-based file exists anymore.
-var policyMarkerSentinels = []string{">>>5gpn:", "<<<5gpn:"}
-
 // validatePolicyField is the shared store-boundary guard for every
 // user-supplied policy-model field: it rejects, before the value is ever
-// persisted, a newline/carriage-return/other ASCII control byte (< 0x20) —
-// which would otherwise let a single matcher value inject an extra line into
-// a manual "<category>[.<matchtype>].txt" file the policy compiler writes
-// one-value-per-line — and the reserved marker sentinels above.
+// persisted, a newline/carriage-return/other ASCII control byte (< 0x20).
 func validatePolicyField(field, s string) error {
 	for i := 0; i < len(s); i++ {
 		if c := s[i]; c == '\n' || c == '\r' || c < 0x20 {
 			return fmt.Errorf("%w: %s must not contain a newline, carriage return, or other control character", ErrInvalidPolicy, field)
-		}
-	}
-	for _, mk := range policyMarkerSentinels {
-		if strings.Contains(s, mk) {
-			return fmt.Errorf("%w: %s must not contain the reserved marker sentinel %q", ErrInvalidPolicy, field, mk)
 		}
 	}
 	return nil
@@ -350,18 +315,14 @@ func (m *PolicyRuleManager) saveLocked() error {
 	return atomicWriteFile(m.path, append(data, '\n'), 0o644)
 }
 
-// validSubscriptionFormats enumerates the ParseDomains (parsers.go) formats a
-// KindSubscription matcher may name. Deliberately excludes "cidr" (chnroute's
-// format): a PolicyRule matcher always expands to domain-suffix-style name
-// matches (see the KindSubscription doc comment above), never CIDRs.
+// validSubscriptionFormats enumerates the ParseDomains (parsers.go) formats
+// accepted by policy matchers and block/direct/proxy Subscription definitions.
+// It deliberately excludes "cidr", which is reserved for chnroute.
 var validSubscriptionFormats = map[string]bool{
 	"plain": true, "gfwlist": true, "dnsmasq": true, "hosts": true,
 }
 
-// validMatcherKinds enumerates the MVP matcher surface. Deliberately just
-// these four (no domain-wildcard/domain-regex — see this file's package doc
-// comment) even though a wider set might be imaginable; do not widen this
-// without a plan update.
+// validMatcherKinds enumerates the supported matcher surface.
 var validMatcherKinds = map[MatcherKind]bool{
 	KindDomain: true, KindDomainSuffix: true, KindDomainKeyword: true, KindSubscription: true,
 }
@@ -371,6 +332,31 @@ var validIntents = map[Intent]bool{IntentBlock: true, IntentDirect: true, Intent
 
 // validFallbackPolicies enumerates the only three legal FallbackPolicy values.
 var validFallbackPolicies = map[FallbackPolicy]bool{FallbackAuto: true, FallbackDirect: true, FallbackGateway: true}
+
+var policyIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
+
+func validatePolicyModel(model PolicyModel) error {
+	if err := validateFallback(model.Fallback); err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(model.Rules))
+	for i, rule := range model.Rules {
+		if !policyIDRE.MatchString(rule.ID) {
+			return fmt.Errorf("%w: rule id %q must be a path-safe identifier", ErrInvalidPolicy, rule.ID)
+		}
+		if seen[rule.ID] {
+			return fmt.Errorf("%w: duplicate rule id %q", ErrInvalidPolicy, rule.ID)
+		}
+		seen[rule.ID] = true
+		if rule.Order != i {
+			return fmt.Errorf("%w: rule %q order is %d, want %d", ErrInvalidPolicy, rule.ID, rule.Order, i)
+		}
+		if err := validatePolicyRule(rule); err != nil {
+			return fmt.Errorf("rule %q: %w", rule.ID, err)
+		}
+	}
+	return nil
+}
 
 // validateMatcher checks a Matcher's structural + injection-safety rules.
 // Every kind rejects newlines, control bytes, and the reserved marker
@@ -395,7 +381,13 @@ func validateMatcher(mm Matcher) error {
 		if !validSubscriptionFormats[mm.Format] {
 			return fmt.Errorf("%w: subscription format %q must be plain|gfwlist|dnsmasq|hosts", ErrInvalidPolicy, mm.Format)
 		}
+		if mm.Interval <= 0 {
+			return fmt.Errorf("%w: subscription interval must be positive", ErrInvalidPolicy)
+		}
 	case KindDomain, KindDomainSuffix:
+		if mm.Format != "" || mm.Interval != 0 {
+			return fmt.Errorf("%w: matcher kind %q must not set format or interval", ErrInvalidPolicy, mm.Kind)
+		}
 		if err := validatePolicyField("matcher.value", mm.Value); err != nil {
 			return err
 		}
@@ -403,6 +395,9 @@ func validateMatcher(mm Matcher) error {
 			return fmt.Errorf("%w: %q is not a valid domain", ErrInvalidPolicy, mm.Value)
 		}
 	default: // KindDomainKeyword: a free-form substring, no dot/FQDN shape required.
+		if mm.Format != "" || mm.Interval != 0 {
+			return fmt.Errorf("%w: matcher kind %q must not set format or interval", ErrInvalidPolicy, mm.Kind)
+		}
 		if err := validatePolicyField("matcher.value", mm.Value); err != nil {
 			return err
 		}
@@ -429,13 +424,6 @@ func validatePolicyRule(r PolicyRule) error {
 	return validateMatcher(r.Matcher)
 }
 
-// Validate is a public, pre-check entry point for the API/bot layer to
-// surface a validation error before attempting a mutation, without actually
-// mutating the model.
-func (m *PolicyRuleManager) Validate(r PolicyRule) error {
-	return validatePolicyRule(r)
-}
-
 // ruleIndex returns the index of the rule with the given ID in rules, or -1.
 func ruleIndex(rules []PolicyRule, id string) int {
 	for i, r := range rules {
@@ -444,17 +432,6 @@ func ruleIndex(rules []PolicyRule, id string) int {
 		}
 	}
 	return -1
-}
-
-// Model returns a defensive deep copy of the current PolicyModel — callers
-// must never be able to mutate the manager's internal state through the
-// returned value.
-func (m *PolicyRuleManager) Model() PolicyModel {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := m.model
-	out.Rules = append([]PolicyRule(nil), m.model.Rules...)
-	return out
 }
 
 // Snapshot returns a defensive model copy and its in-memory revision for an

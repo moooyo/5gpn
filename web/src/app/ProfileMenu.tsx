@@ -6,9 +6,7 @@ import { clearToken } from '../lib/api/http'
 import { cn } from '../lib/cn'
 
 export interface ProfileMenuProps {
-  /** Called after the token is cleared. Defaults to a full page reload (this
-   *  task builds ProfileMenu standalone; Task 3C wires it to real router
-   *  navigation to the login screen). */
+  /** Called after the token is cleared. Defaults to a full-page reload. */
   onLogout?: () => void
 }
 

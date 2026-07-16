@@ -1,11 +1,5 @@
-// Package main (this file): the /api/mihomo/config* REST surface — the
-// console's raw mihomo config editor (design §4.2/§4.3). Handler idiom
-// mirrors api_policy_rules.go: decode/none → call the apply pipeline →
-// writeJSON. The apply pipeline itself (applyMihomoConfig) is the ONLY path
-// left in the daemon that mutates mihomo (see mihomo_client.go's package
-// doc): infra-invariant check → `mihomo -t` → atomic write → hot-apply,
-// exactly the order design §4.3 requires, with any failure before the
-// atomic write leaving the on-disk config and running mihomo untouched.
+// Package main implements the raw mihomo config API. Its apply pipeline checks
+// infrastructure invariants, runs `mihomo -t`, atomically writes, and hot-applies.
 package main
 
 import (
@@ -21,7 +15,7 @@ import (
 // mihomoBin is the mihomo binary the apply pipeline validates candidate
 // configs against. A var (not a const) solely so tests can point it at a
 // fake script; production never overrides it.
-var mihomoBin = "/usr/local/bin/mihomo"
+var mihomoBin = "/opt/5gpn/bin/mihomo"
 
 // mihomoTester runs `mihomo -t` against a candidate config file, returning
 // nil on success or an error whose message carries mihomo's own diagnostic
@@ -147,18 +141,8 @@ func (s *ControlServer) handleMihomoConfigPut(w http.ResponseWriter, r *http.Req
 	if !decodeJSONBody(w, r, &body) {
 		return
 	}
-	status, resp := s.applyMihomoConfig(r.Context(), body.Text)
+	status, resp := s.applyMihomoConfig(r.Context(), body.Text, false)
 	writeJSON(w, status, resp)
-}
-
-// handleMihomoConfigDefault returns the seed default text (a "reset preview")
-// without writing or applying anything.
-func (s *ControlServer) handleMihomoConfigDefault(w http.ResponseWriter, r *http.Request) {
-	if s.mihomoStore == nil {
-		writeErr(w, http.StatusServiceUnavailable, "mihomo config management unavailable")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"text": s.mihomoStore.Default()})
 }
 
 // handleMihomoConfigReset overwrites the config with the seed default and
@@ -169,24 +153,23 @@ func (s *ControlServer) handleMihomoConfigReset(w http.ResponseWriter, r *http.R
 		writeErr(w, http.StatusServiceUnavailable, "mihomo config management unavailable")
 		return
 	}
-	status, resp := s.applyMihomoConfig(r.Context(), s.mihomoStore.Default())
+	status, resp := s.applyMihomoConfig(r.Context(), s.mihomoStore.Default(), true)
 	writeJSON(w, status, resp)
 }
 
-// applyMihomoConfig runs the design §4.3 apply order:
+// applyMihomoConfig runs the apply order:
 //
 //  1. ValidateInvariants (text-pattern, no YAML parse) → reject → 400.
 //  2. `mihomo -t -f <tmpfile> -d <dir>` on a scratch temp file (never the
 //     live config path) → reject → 400 with mihomo's own diagnostic text.
 //  3. Atomic write (temp + rename) to the real config path.
 //  4. Hot-apply via PUT /configs. A failure here does NOT roll back step 3
-//     (design §4.3 step 4: "the new file is already on disk... report the
-//     apply error so the operator knows a restart is pending") — reported as
+//     because the new file is already durable — reported as
 //     502 with written=true so the caller can tell the two failure modes
 //     apart.
 //
 // Returns the HTTP status and JSON body the caller should write.
-func (s *ControlServer) applyMihomoConfig(ctx context.Context, text string) (int, map[string]any) {
+func (s *ControlServer) applyMihomoConfig(ctx context.Context, text string, backup bool) (int, map[string]any) {
 	// Serialize the whole pipeline per store (mirrors PolicyRuleManager.mu):
 	// two concurrent PUT/reset calls must not interleave their write+hot-apply
 	// steps (see MihomoConfigStore.mu's doc in mihomo_config.go).
@@ -220,6 +203,15 @@ func (s *ControlServer) applyMihomoConfig(ctx context.Context, text string) (int
 		defer cancel()
 		if err := s.mihomoTest.Test(testCtx, tmpPath, dir); err != nil {
 			return http.StatusBadRequest, map[string]any{"error": err.Error()}
+		}
+	}
+	if backup {
+		current, err := s.mihomoStore.Read()
+		if err != nil {
+			return http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("mihomo: read config for backup: %v", err)}
+		}
+		if err := atomicWriteFile(s.mihomoStore.Path()+".bak", []byte(current), 0o600); err != nil {
+			return http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("mihomo: write backup: %v", err)}
 		}
 	}
 

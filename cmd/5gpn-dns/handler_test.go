@@ -31,24 +31,13 @@ func (f *fakeWriter) Hijack()                     {}
 //   - Chnroute covers 1.0.0.0/8 (so 1.2.3.4 is CN; 9.9.9.9 is foreign).
 //   - block:     block.test
 //   - direct:    direct.test
-//   - blacklist: blacklist.test
+//   - force-proxy: proxy.test
 //   - GatewayIP: 10.0.0.1
 func newTestHandler(t *testing.T, china, trust Exchanger) *Handler {
 	t.Helper()
 	cn := &Chnroute{ranges: []ipRange{{start: ipToUint32(net.ParseIP("1.0.0.0").To4()), end: ipToUint32(net.ParseIP("1.255.255.255").To4())}}}
 
-	makeDS := func(domains ...string) *DomainSet {
-		ds := &DomainSet{suffix: make(map[string]struct{})}
-		for _, d := range domains {
-			ds.suffix[d] = struct{}{}
-		}
-		return ds
-	}
-
-	return &Handler{
-		Block:     makeDS("block.test"),
-		Direct:    makeDS("direct.test"),
-		Blacklist: makeDS("blacklist.test"),
+	h := &Handler{
 		CN:        cn,
 		Cache:     NewCache(128),
 		China:     china,
@@ -57,6 +46,25 @@ func newTestHandler(t *testing.T, china, trust Exchanger) *Handler {
 		TTLMin:    10 * time.Second,
 		TTLMax:    300 * time.Second,
 		Timeout:   500 * time.Millisecond,
+	}
+	publishTestPolicy(t, h, FallbackAuto,
+		PolicyRule{Intent: IntentBlock, Matcher: Matcher{Kind: KindDomainSuffix, Value: "block.test"}},
+		PolicyRule{Intent: IntentDirect, Matcher: Matcher{Kind: KindDomainSuffix, Value: "direct.test"}},
+		PolicyRule{Intent: IntentProxy, Matcher: Matcher{Kind: KindDomainSuffix, Value: "proxy.test"}},
+	)
+	return h
+}
+
+func publishTestPolicy(t *testing.T, h *Handler, fallback FallbackPolicy, rules ...PolicyRule) {
+	t.Helper()
+	for i := range rules {
+		rules[i].ID = fmt.Sprintf("test-%d", i+1)
+		rules[i].Order = i
+		rules[i].Enabled = true
+	}
+	model := PolicyModel{Version: policySchemaVersion, Rules: rules, Fallback: Fallback{Policy: fallback}}
+	if err := h.publishPolicyModel(model, t.TempDir()); err != nil {
+		t.Fatalf("publish test policy: %v", err)
 	}
 }
 
@@ -295,16 +303,16 @@ func TestHandlerDirectForeignKept(t *testing.T) {
 	}
 }
 
-// TestHandlerBlacklist: blacklist-listed name, A query → answer = GatewayIP, no upstream call.
-func TestHandlerBlacklist(t *testing.T) {
+// TestHandlerForceProxy: proxy-intent name returns GatewayIP without upstream calls.
+func TestHandlerForceProxy(t *testing.T) {
 	// If upstream is called we'd know (it would return something else or we can track calls).
 	callCount := 0
-	trackExchanger := &countingExchanger{inner: &fakeExchanger{reply: makeAMsg("blacklist.test", "1.1.1.1")}, count: &callCount}
+	trackExchanger := &countingExchanger{inner: &fakeExchanger{reply: makeAMsg("proxy.test", "1.1.1.1")}, count: &callCount}
 	h := newTestHandler(t, trackExchanger, trackExchanger)
 
-	q := dns.Question{Name: "blacklist.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	q := dns.Question{Name: "proxy.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	req := new(dns.Msg)
-	req.SetQuestion("blacklist.test.", dns.TypeA)
+	req.SetQuestion("proxy.test.", dns.TypeA)
 
 	resp := h.resolve(context.Background(), q, req)
 	ips := collectAIPs(resp)
@@ -312,7 +320,7 @@ func TestHandlerBlacklist(t *testing.T) {
 		t.Errorf("expected [10.0.0.1] (gateway), got %v", ips)
 	}
 	if callCount != 0 {
-		t.Errorf("expected no upstream calls for blacklist, got %d", callCount)
+		t.Errorf("expected no upstream calls for force-proxy, got %d", callCount)
 	}
 }
 
@@ -396,9 +404,8 @@ func (c *atomicCountingExchanger) Exchange(ctx context.Context, q *dns.Msg) (*dn
 // newStubHandlerForeign builds a minimal Handler for the fallback-mode tests:
 // china/trust both return the given IPs for whatever name is asked (via one
 // shared atomicCountingExchanger, so upstream calls are countable),
-// GatewayIP=10.0.0.1, and no rule sets/chnroute (nil ⇒ classifyName always
-// returns the zero Verdict and Chnroute.Contains treats every IP as foreign —
-// both are documented nil-safe). Deliberately no Cache: h.Cache==nil disables
+// GatewayIP=10.0.0.1, and no rules/chnroute. Deliberately no Cache:
+// h.Cache==nil disables
 // cacheGet/cachePut entirely, so repeated resolve() calls for the SAME name
 // under different fallback modes always re-arbitrate instead of replaying an
 // answer cached under a prior mode.
@@ -415,6 +422,7 @@ func newStubHandlerForeign(t *testing.T, name string, ips ...string) (*Handler, 
 		TTLMax:    300 * time.Second,
 		Timeout:   500 * time.Millisecond,
 	}
+	publishTestPolicy(t, h, FallbackAuto)
 	return h, &calls
 }
 
@@ -428,7 +436,7 @@ func firstA(resp *dns.Msg) string {
 }
 
 // TestHandlerFallbackModes covers the step-6 (unmatched-name) fallback modes:
-//   - auto (default, unset): byte-identical to the pre-policy behavior — a
+//   - auto: a
 //     foreign answer is rewritten to GatewayIP.
 //   - direct: arbitrate but return the real (un-rewritten) IP.
 //   - gateway: synthetic GatewayIP answer, no upstream consulted at all.
@@ -438,26 +446,18 @@ func TestHandlerFallbackModes(t *testing.T) {
 	r := new(dns.Msg)
 	r.SetQuestion(q.Name, dns.TypeA)
 
-	// fallbackMode() defaults to auto on a zero-value Handler.
-	if got := h.fallbackMode(); got != FallbackAuto {
-		t.Fatalf("default fallbackMode() = %q, want %q", got, FallbackAuto)
-	}
-
-	// auto (default): foreign rewritten to gateway (existing behavior).
+	// auto: foreign rewritten to gateway.
 	if ip := firstA(h.resolve(context.Background(), q, r)); ip != "10.0.0.1" {
 		t.Fatalf("auto: want gateway rewrite 10.0.0.1, got %s", ip)
 	}
 
-	h.setFallback(FallbackDirect)
-	if got := h.fallbackMode(); got != FallbackDirect {
-		t.Fatalf("fallbackMode() after setFallback(direct) = %q, want %q", got, FallbackDirect)
-	}
+	publishTestPolicy(t, h, FallbackDirect)
 	if ip := firstA(h.resolve(context.Background(), q, r)); ip != "8.8.8.8" {
 		t.Fatalf("direct: want real IP 8.8.8.8 (no rewrite), got %s", ip)
 	}
 
 	beforeGateway := calls.Load()
-	h.setFallback(FallbackGateway)
+	publishTestPolicy(t, h, FallbackGateway)
 	if ip := firstA(h.resolve(context.Background(), q, r)); ip != "10.0.0.1" {
 		t.Fatalf("gateway: want synthetic gateway IP 10.0.0.1, got %s", ip)
 	}
@@ -467,12 +467,6 @@ func TestHandlerFallbackModes(t *testing.T) {
 		// launched and awaited by arbitrateSrc); gateway mode must add none.
 		t.Fatalf("gateway mode must not consult any upstream: call count went %d -> %d", beforeGateway, after)
 	}
-
-	// setFallback("") must be treated as auto (zero-value equivalence).
-	h.setFallback("")
-	if got := h.fallbackMode(); got != FallbackAuto {
-		t.Fatalf(`fallbackMode() after setFallback("") = %q, want %q`, got, FallbackAuto)
-	}
 }
 
 // TestHandlerFallbackGatewayOverridesCN proves gateway mode steers even a
@@ -481,7 +475,7 @@ func TestHandlerFallbackModes(t *testing.T) {
 func TestHandlerFallbackGatewayOverridesCN(t *testing.T) {
 	h, calls := newStubHandlerForeign(t, "cn.example.com", "1.2.3.4")
 	h.CN = &Chnroute{ranges: []ipRange{{start: ipToUint32(net.ParseIP("1.0.0.0").To4()), end: ipToUint32(net.ParseIP("1.255.255.255").To4())}}}
-	h.setFallback(FallbackGateway)
+	publishTestPolicy(t, h, FallbackGateway)
 
 	q := dns.Question{Name: "cn.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	r := new(dns.Msg)
@@ -543,33 +537,16 @@ func TestHandlerServeDNS(t *testing.T) {
 	}
 }
 
-// TestHandlerDirectBlacklistPrecedence: a domain on both direct and blacklist → direct wins (step 4 before 5).
-func TestHandlerDirectBlacklistPrecedence(t *testing.T) {
-	// Make a handler where "both.test" is in both Direct and Blacklist.
-	cn := &Chnroute{ranges: []ipRange{{start: ipToUint32(net.ParseIP("1.0.0.0").To4()), end: ipToUint32(net.ParseIP("1.255.255.255").To4())}}}
-	makeDS := func(domains ...string) *DomainSet {
-		ds := &DomainSet{suffix: make(map[string]struct{})}
-		for _, d := range domains {
-			ds.suffix[d] = struct{}{}
-		}
-		return ds
-	}
+// TestHandlerFirstMatchWins verifies global order across intents.
+func TestHandlerFirstMatchWins(t *testing.T) {
 	// arbitrate returns foreign 9.9.9.9; direct win means no rewrite.
 	china := &fakeExchanger{reply: makeAMsg("both.test", "9.9.9.9")}
 	trust := &fakeExchanger{reply: makeAMsg("both.test", "9.9.9.9")}
-	h := &Handler{
-		Block:     makeDS(),
-		Direct:    makeDS("both.test"),
-		Blacklist: makeDS("both.test"),
-		CN:        cn,
-		Cache:     NewCache(128),
-		China:     china,
-		Trust:     trust,
-		GatewayIP: net.ParseIP("10.0.0.1").To4(),
-		TTLMin:    10 * time.Second,
-		TTLMax:    300 * time.Second,
-		Timeout:   500 * time.Millisecond,
-	}
+	h := newTestHandler(t, china, trust)
+	publishTestPolicy(t, h, FallbackAuto,
+		PolicyRule{Intent: IntentDirect, Matcher: Matcher{Kind: KindDomainSuffix, Value: "both.test"}},
+		PolicyRule{Intent: IntentProxy, Matcher: Matcher{Kind: KindDomainSuffix, Value: "both.test"}},
+	)
 
 	q := dns.Question{Name: "both.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	req := new(dns.Msg)
@@ -579,7 +556,7 @@ func TestHandlerDirectBlacklistPrecedence(t *testing.T) {
 	ips := collectAIPs(resp)
 	// direct wins → no rewrite → 9.9.9.9 kept.
 	if len(ips) != 1 || ips[0] != "9.9.9.9" {
-		t.Errorf("expected direct to win over blacklist (9.9.9.9 kept), got %v", ips)
+		t.Errorf("expected first direct rule to win over proxy (9.9.9.9 kept), got %v", ips)
 	}
 }
 
@@ -772,7 +749,7 @@ func TestGatewayReplyDoesNotAliasGatewayIP(t *testing.T) {
 	h := newTestHandler(t, china, trust)
 
 	req := new(dns.Msg)
-	req.SetQuestion("blacklist.test.", dns.TypeA)
+	req.SetQuestion("proxy.test.", dns.TypeA)
 
 	resp := h.gatewayReply(req)
 	if resp == nil || len(resp.Answer) == 0 {
@@ -840,8 +817,8 @@ func TestHandlerStatsBlockBumpsBlock(t *testing.T) {
 	if got := h.stats.forceDirect.Load(); got != 0 {
 		t.Errorf("ForceDirect = %d, want 0", got)
 	}
-	if got := h.stats.blacklist.Load(); got != 0 {
-		t.Errorf("Blacklist = %d, want 0", got)
+	if got := h.stats.forceProxy.Load(); got != 0 {
+		t.Errorf("ForceProxy = %d, want 0", got)
 	}
 	if got := h.stats.chnrouteCN.Load(); got != 0 {
 		t.Errorf("ChnrouteCN = %d, want 0", got)
@@ -851,23 +828,23 @@ func TestHandlerStatsBlockBumpsBlock(t *testing.T) {
 	}
 }
 
-// TestHandlerStatsBlacklistBumpsBlacklist: a blacklist-matched A query bumps Total and Blacklist
-// (not the coarser "proxy" bucket — blacklist/sinkhole and chnroute-foreign/routed must be
+// TestHandlerStatsForceProxyBumpsForceProxy: an explicit proxy match bumps Total and ForceProxy
+// (separate from chnroute-foreign)
 // distinguishable).
-func TestHandlerStatsBlacklistBumpsBlacklist(t *testing.T) {
+func TestHandlerStatsForceProxyBumpsForceProxy(t *testing.T) {
 	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
 	h.stats = &statsCounters{}
 
-	q := dns.Question{Name: "blacklist.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	q := dns.Question{Name: "proxy.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	req := new(dns.Msg)
-	req.SetQuestion("blacklist.test.", dns.TypeA)
+	req.SetQuestion("proxy.test.", dns.TypeA)
 	h.resolve(context.Background(), q, req)
 
 	if got := h.stats.total.Load(); got != 1 {
 		t.Errorf("Total = %d, want 1", got)
 	}
-	if got := h.stats.blacklist.Load(); got != 1 {
-		t.Errorf("Blacklist = %d, want 1", got)
+	if got := h.stats.forceProxy.Load(); got != 1 {
+		t.Errorf("ForceProxy = %d, want 1", got)
 	}
 	if got := h.stats.chnrouteForeign.Load(); got != 0 {
 		t.Errorf("ChnrouteForeign = %d, want 0", got)
@@ -923,8 +900,8 @@ func TestHandlerStatsDefaultForeignRewrittenBumpsChnrouteForeign(t *testing.T) {
 	if got := h.stats.chnrouteCN.Load(); got != 0 {
 		t.Errorf("ChnrouteCN = %d, want 0", got)
 	}
-	if got := h.stats.blacklist.Load(); got != 0 {
-		t.Errorf("Blacklist = %d, want 0", got)
+	if got := h.stats.forceProxy.Load(); got != 0 {
+		t.Errorf("ForceProxy = %d, want 0", got)
 	}
 }
 
@@ -983,7 +960,7 @@ func TestFallbackDirectCacheHitPreservesTraceMetadata(t *testing.T) {
 	china := &fakeExchanger{reply: makeAMsg("cached-direct.test", "9.9.9.8")}
 	trust := &fakeExchanger{reply: makeAMsg("cached-direct.test", "9.9.9.9")}
 	h := newTestHandler(t, china, trust)
-	h.setFallback(FallbackDirect)
+	publishTestPolicy(t, h, FallbackDirect)
 	q := dns.Question{Name: "cached-direct.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	req := new(dns.Msg)
 	req.SetQuestion(q.Name, q.Qtype)
@@ -1027,7 +1004,7 @@ func TestHandlerStatsNilStatsDoesNotPanic(t *testing.T) {
 // Regression for: cached *dns.Msg.Id was not reset to the incoming r.Id, causing
 // strict DNS clients (dig, Android/iOS DoT) to reject the response as an ID mismatch.
 func TestCacheHitPreservesRequestID(t *testing.T) {
-	// Use a default (non-direct, non-blacklist) name so we exercise Step 6.
+	// Use a default (non-direct, non-force-proxy) name so we exercise fallback.
 	china := &fakeExchanger{reply: makeAMsg("cached.test", "1.2.3.4")}
 	trust := &fakeExchanger{reply: makeAMsg("cached.test", "9.9.9.9")}
 	h := newTestHandler(t, china, trust)
@@ -1064,12 +1041,12 @@ func TestCacheHitPreservesRequestID(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// classifyName (Phase 3 Task 1: shared decision extraction)
+// decideName policy decisions
 // ---------------------------------------------------------------------------
 
 func TestClassifyNameBlock(t *testing.T) {
 	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
-	got := h.classifyName("block.test")
+	got := h.decideName("block.test").Verdict
 	want := Verdict{Verdict: "block", Reason: "block"}
 	if got != want {
 		t.Errorf("classifyName(block.test) = %+v, want %+v", got, want)
@@ -1078,57 +1055,56 @@ func TestClassifyNameBlock(t *testing.T) {
 
 func TestClassifyNameForceDirect(t *testing.T) {
 	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
-	got := h.classifyName("direct.test")
+	got := h.decideName("direct.test").Verdict
 	want := Verdict{Verdict: "direct", Reason: "force-direct"}
 	if got != want {
 		t.Errorf("classifyName(direct.test) = %+v, want %+v", got, want)
 	}
 }
 
-func TestClassifyNameBlacklist(t *testing.T) {
+func TestClassifyNameForceProxy(t *testing.T) {
 	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
-	got := h.classifyName("blacklist.test")
-	want := Verdict{Verdict: "proxy", Reason: "blacklist"}
+	got := h.decideName("proxy.test").Verdict
+	want := Verdict{Verdict: "proxy", Reason: "force-proxy"}
 	if got != want {
-		t.Errorf("classifyName(blacklist.test) = %+v, want %+v", got, want)
+		t.Errorf("classifyName(proxy.test) = %+v, want %+v", got, want)
 	}
 }
 
 func TestClassifyNameDefaultIsEmptyVerdict(t *testing.T) {
 	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
-	got := h.classifyName("example.test")
+	got := h.decideName("example.test").Verdict
 	want := Verdict{}
 	if got != want {
 		t.Errorf("classifyName(example.test) = %+v, want zero-value Verdict (needs IP arbitration)", got)
 	}
 }
 
-// TestClassifyNamePrecedenceBlockBeatsDirectAndBlacklist proves block
-// wins even when the same name also matches direct/blacklist (precedence:
-// block > direct > blacklist, matching resolve's step order).
-func TestClassifyNamePrecedenceBlockBeatsDirectAndBlacklist(t *testing.T) {
+func TestClassifyNameFirstRuleBlock(t *testing.T) {
 	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
-	h.Block.suffix["both.test"] = struct{}{}
-	h.Direct.suffix["both.test"] = struct{}{}
-	h.Blacklist.suffix["both.test"] = struct{}{}
+	publishTestPolicy(t, h, FallbackAuto,
+		PolicyRule{Intent: IntentBlock, Matcher: Matcher{Kind: KindDomainSuffix, Value: "both.test"}},
+		PolicyRule{Intent: IntentDirect, Matcher: Matcher{Kind: KindDomainSuffix, Value: "both.test"}},
+		PolicyRule{Intent: IntentProxy, Matcher: Matcher{Kind: KindDomainSuffix, Value: "both.test"}},
+	)
 
-	got := h.classifyName("both.test")
+	got := h.decideName("both.test").Verdict
 	want := Verdict{Verdict: "block", Reason: "block"}
 	if got != want {
 		t.Errorf("classifyName(both.test) = %+v, want %+v (block precedence)", got, want)
 	}
 }
 
-// TestClassifyNamePrecedenceDirectBeatsBlacklist proves direct wins over
-// blacklist when a name matches both (matching resolve's step order).
-func TestClassifyNamePrecedenceDirectBeatsBlacklist(t *testing.T) {
+func TestClassifyNameFirstRuleDirect(t *testing.T) {
 	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
-	h.Direct.suffix["directandblack.test"] = struct{}{}
-	h.Blacklist.suffix["directandblack.test"] = struct{}{}
+	publishTestPolicy(t, h, FallbackAuto,
+		PolicyRule{Intent: IntentDirect, Matcher: Matcher{Kind: KindDomainSuffix, Value: "directandproxy.test"}},
+		PolicyRule{Intent: IntentProxy, Matcher: Matcher{Kind: KindDomainSuffix, Value: "directandproxy.test"}},
+	)
 
-	got := h.classifyName("directandblack.test")
+	got := h.decideName("directandproxy.test").Verdict
 	want := Verdict{Verdict: "direct", Reason: "force-direct"}
 	if got != want {
-		t.Errorf("classifyName(directandblack.test) = %+v, want %+v (direct precedence over blacklist)", got, want)
+		t.Errorf("classifyName(directandproxy.test) = %+v, want %+v", got, want)
 	}
 }

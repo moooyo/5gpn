@@ -128,8 +128,7 @@ func TestArbitrateUpstreamHealthCounters(t *testing.T) {
 	})
 }
 
-// TestArbitrateDeterminism is the heart of Task 4.
-// It verifies that Arbitrate always returns the china reply when chinaIsCN,
+// TestArbitrateDeterminism verifies that Arbitrate always returns the china reply when chinaIsCN,
 // regardless of which upstream is faster (the anti-first-response guarantee).
 func TestArbitrateDeterminism(t *testing.T) {
 	cn := loadTestChnroute(t)

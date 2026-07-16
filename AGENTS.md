@@ -2,7 +2,7 @@
 
 Project guidance for this repository. Read `docs/architecture.md` before making
 architectural changes; it is the sole current-architecture document. Historical
-material, especially `docs/multi-exit-status.md`, is archived context only.
+plans, design handoffs, and git history are context only.
 
 ## Non-negotiable architecture
 
@@ -16,9 +16,9 @@ material, especially `docs/multi-exit-status.md`, is archived context only.
   auto/direct/gateway fallback. It is DNS-only. Do not recreate policy-v2,
   drafts/generations, structured egress, node/selector APIs, or a generated
   mihomo config region.
-- `/etc/5gpn/mihomo/config.yaml` is fully operator-owned. Normal install and
-  `change-*` operations preserve a valid existing file. Only explicit reset may
-  replace it, after `mihomo -t`, backup, and atomic rename.
+- `/etc/5gpn/mihomo/config.yaml` is fully operator-owned. Normal install,
+  reinstall, and `configure` operations preserve a valid existing file. Only
+  explicit reset may replace it, after `mihomo -t`, backup, and atomic rename.
 - `console.<base>` is the public bootstrap/console SNI: the SPA and `/ios/` are
   public, while every `/api/*` request still requires the console bearer token.
   Do not introduce a separate bootstrap hostname. zashboard remains source-allowlisted.
@@ -58,8 +58,14 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   tests together.
 - Never execute a broad `nft flush ruleset`, overwrite the host's nftables
   configuration, disable its firewall service, or assume ownership of unrelated
-  tables. Upgrade cleanup may delete only an unambiguously identified legacy
-  5gpn table.
+  tables. 5gpn does not create, migrate, or remove host firewall rules.
+- The project is pre-release: persist and accept only the current configuration
+  keys, file schemas, commands, and callback formats. Do not add compatibility
+  aliases, schema migrations, or retired-component teardown paths.
+- `CERT_MODE` is exactly `cloudflare`, `http-01`, or `debug`. Both production
+  modes use one scoped `<base>` Certbot lineage. HTTP-01 requires exact
+  console/zash/dot A records, no AAAA, and may stop mihomo only for the bounded
+  standalone challenge; Cloudflare credentials are used only by DNS-01.
 - Any root recursive deletion must use a canonical, validated path plus a 5gpn
   ownership marker. Refuse `/`, system directories, empty paths, and unowned
   custom directories.
@@ -118,6 +124,5 @@ CI also renders the seed and validates it with digest-pinned mihomo. For real
 deployment behavior follow `tests/integration-smoke.md`.
 
 Preserve unrelated dirty-worktree changes. Use `rg` for discovery and
-`apply_patch` for edits. Do not remove legacy teardown merely because the
-retired component is absent from the current architecture: upgrades may still
-need to clean its old artifacts.
+`apply_patch` for edits. Until a release policy says otherwise, change stale
+pre-release contracts directly instead of preserving or migrating them.

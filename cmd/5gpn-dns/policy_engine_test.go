@@ -18,8 +18,8 @@ import (
 // TestPolicyEngine_CompileAndApply_Success drives the full pipeline over a
 // real PolicyRuleManager (one block rule + one proxy subscription rule) and
 // a real SubManager fetching from an httptest server. It asserts the DNS-only
-// outcomes: the block name lands in the DNS manual file, the subscription's
-// fetch lands in the DNS cache, and the fallback is applied to the handler.
+// outcomes: the subscription fetch lands in the DNS cache and the ordered
+// snapshot is published.
 func TestPolicyEngine_CompileAndApply_Success(t *testing.T) {
 	dir := t.TempDir()
 	rulesDir := filepath.Join(dir, "rules")
@@ -41,7 +41,7 @@ func TestPolicyEngine_CompileAndApply_Success(t *testing.T) {
 	}
 	subRule, err := polMgr.AddRule(PolicyRule{
 		Intent: IntentProxy, Enabled: true,
-		Matcher: Matcher{Kind: KindSubscription, Value: srv.URL, Format: "plain"},
+		Matcher: Matcher{Kind: KindSubscription, Value: srv.URL, Format: "plain", Interval: time.Hour},
 	})
 	if err != nil {
 		t.Fatalf("AddRule(proxy-subscription): %v", err)
@@ -62,17 +62,8 @@ func TestPolicyEngine_CompileAndApply_Success(t *testing.T) {
 		t.Fatalf("CompileAndApply: %v", err)
 	}
 
-	// (a) block name landed in rules/block.txt.
-	blockData, err := os.ReadFile(filepath.Join(rulesDir, "block.txt"))
-	if err != nil {
-		t.Fatalf("read block.txt: %v", err)
-	}
-	if !strings.Contains(string(blockData), "ads.example.com") {
-		t.Errorf("block.txt missing block rule, got: %s", blockData)
-	}
-
-	// (b) the DNS cache side of the fetch exists.
-	dnsCachePath := filepath.Join(rulesDir, "blacklist", "pol_"+subRule.ID+".txt")
+	// The DNS cache side of the fetch exists.
+	dnsCachePath := filepath.Join(rulesDir, "proxy", "pol_"+subRule.ID+".txt")
 	dnsCacheData, err := os.ReadFile(dnsCachePath)
 	if err != nil {
 		t.Fatalf("DNS cache %s missing: %v", dnsCachePath, err)
@@ -81,9 +72,8 @@ func TestPolicyEngine_CompileAndApply_Success(t *testing.T) {
 		t.Errorf("DNS cache missing fetched entries, got: %s", dnsCacheData)
 	}
 
-	// (c) handler.fallbackMode() reflects the model (default auto).
-	if got := h.fallbackMode(); got != FallbackAuto {
-		t.Errorf("fallback mode = %s, want %s", got, FallbackAuto)
+	if snap := h.orderedPolicy.Load(); snap == nil || snap.Fallback != FallbackAuto {
+		t.Fatalf("ordered policy snapshot = %+v", snap)
 	}
 
 	if reloadCalls == 0 {
@@ -154,7 +144,7 @@ func TestPolicyEngineApplyPublishesReorderedGlobalFirstMatch(t *testing.T) {
 	if err := engine.CompileAndApply(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := h.classifyName("www.example.com"); got.Reason != "force-direct" {
+	if got := h.decideName("www.example.com").Verdict; got.Reason != "force-direct" {
 		t.Fatalf("initial order verdict = %+v, want direct", got)
 	}
 	if err := mgr.Reorder([]string{block.ID, direct.ID}); err != nil {
@@ -163,7 +153,7 @@ func TestPolicyEngineApplyPublishesReorderedGlobalFirstMatch(t *testing.T) {
 	if err := engine.CompileAndApply(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := h.classifyName("www.example.com"); got.Reason != "block" {
+	if got := h.decideName("www.example.com").Verdict; got.Reason != "block" {
 		t.Fatalf("reordered verdict = %+v, want block", got)
 	}
 }
@@ -188,7 +178,7 @@ func TestPolicyEngineRevisionCASRejectsStaleApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	subRule, err := mgr.AddRule(PolicyRule{Intent: IntentBlock, Enabled: true,
-		Matcher: Matcher{Kind: KindSubscription, Value: srv.URL, Format: "plain"}})
+		Matcher: Matcher{Kind: KindSubscription, Value: srv.URL, Format: "plain", Interval: time.Hour}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,8 +214,8 @@ func TestPolicyEngineRevisionCASRejectsStaleApply(t *testing.T) {
 	if _, err := os.Stat(cachePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stale generation wrote subscription cache: %v", err)
 	}
-	if got := subs.List(); len(got) != 0 {
-		t.Fatalf("stale generation changed in-memory subscriptions: %+v", got)
+	if len(subs.subs) != 0 {
+		t.Fatalf("stale generation changed in-memory subscriptions: %+v", subs.subs)
 	}
 	if h.orderedPolicy.Load() != nil {
 		t.Fatal("stale generation was published to the live handler")
@@ -244,7 +234,7 @@ func TestPolicyEngineReloadFailureRollsBackSubscriptionGeneration(t *testing.T) 
 		t.Fatal(err)
 	}
 	rule, err := mgr.AddRule(PolicyRule{Intent: IntentBlock, Enabled: true,
-		Matcher: Matcher{Kind: KindSubscription, Value: srv.URL, Format: "plain"}})
+		Matcher: Matcher{Kind: KindSubscription, Value: srv.URL, Format: "plain", Interval: time.Hour}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,8 +256,8 @@ func TestPolicyEngineReloadFailureRollsBackSubscriptionGeneration(t *testing.T) 
 			t.Fatalf("transaction rollback left %s: %v", path, err)
 		}
 	}
-	if got := subs.List(); len(got) != 0 {
-		t.Fatalf("rollback changed in-memory subscriptions: %+v", got)
+	if len(subs.subs) != 0 {
+		t.Fatalf("rollback changed in-memory subscriptions: %+v", subs.subs)
 	}
 }
 
@@ -283,11 +273,11 @@ func TestPolicyEngineSubscriptionFetchFailureKeepsLastGoodCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	rule, err := mgr.AddRule(PolicyRule{Intent: IntentBlock, Enabled: true,
-		Matcher: Matcher{Kind: KindSubscription, Value: url, Format: "plain"}})
+		Matcher: Matcher{Kind: KindSubscription, Value: url, Format: "plain", Interval: time.Hour}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sub := Subscription{ID: rule.ID, Category: "block", Name: providerName(rule.ID), URL: url, Format: "plain", Enabled: true}
+	sub := Subscription{ID: rule.ID, Category: "block", Name: providerName(rule.ID), URL: url, Format: "plain", Enabled: true, Interval: time.Hour}
 	subsPath := filepath.Join(dir, "subscriptions.json")
 	if err := writeSubscriptionsFile(subsPath, []Subscription{sub}); err != nil {
 		t.Fatal(err)
@@ -312,7 +302,7 @@ func TestPolicyEngineSubscriptionFetchFailureKeepsLastGoodCache(t *testing.T) {
 	if string(data) != "last-good.example\n" {
 		t.Fatalf("cache replaced after fetch failure: %q", data)
 	}
-	if got := h.classifyName("last-good.example"); got.Reason != "block" {
+	if got := h.decideName("last-good.example").Verdict; got.Reason != "block" {
 		t.Fatalf("last-good cache not published: %+v", got)
 	}
 }
@@ -370,14 +360,8 @@ func TestPolicyEngineCanceledApplyDoesNotCommit(t *testing.T) {
 	}
 }
 
-// TestPolicyEngine_CompileAndApply_CompileErrorLeavesFallbackUntouched
-// proves a compile-time error (an unknown intent slipping past validation,
-// e.g. a hand-edited policy.json) returns an error and leaves the handler's
-// fallback untouched — CompileAndApply must not partially apply a rejected
-// compile.
-func TestPolicyEngine_CompileAndApply_CompileErrorLeavesFallbackUntouched(t *testing.T) {
+func TestPolicyEngine_InvalidPersistedPolicyRejectedAtLoad(t *testing.T) {
 	dir := t.TempDir()
-	rulesDir := filepath.Join(dir, "rules")
 	policyPath := filepath.Join(dir, "policy.json")
 
 	// Hand-craft an invalid model on disk (bypassing AddRule's validation) so
@@ -394,21 +378,7 @@ func TestPolicyEngine_CompileAndApply_CompileErrorLeavesFallbackUntouched(t *tes
 	if err := os.WriteFile(policyPath, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	polMgr, err := NewPolicyRuleManager(policyPath)
-	if err != nil {
-		t.Fatalf("NewPolicyRuleManager: %v", err)
-	}
-
-	h := &Handler{}
-	h.setFallback(FallbackDirect) // known starting value, distinct from the model's fallback
-
-	reload := func() error { return nil }
-	engine := NewPolicyEngine(polMgr, nil, h, reload, rulesDir)
-
-	if err := engine.CompileAndApply(context.Background()); err == nil {
-		t.Fatal("expected an error from an invalid compile, got nil")
-	}
-	if got := h.fallbackMode(); got != FallbackDirect {
-		t.Errorf("fallback must not change on a rejected compile, got %s want %s", got, FallbackDirect)
+	if _, err := NewPolicyRuleManager(policyPath); err == nil {
+		t.Fatal("invalid persisted policy was accepted")
 	}
 }

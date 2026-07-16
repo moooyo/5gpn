@@ -19,17 +19,13 @@ function contentOf(r: PolicyRule): Omit<PolicyRule, 'id' | 'order'> {
   return { matcher: r.matcher, intent: r.intent, enabled: r.enabled }
 }
 
-/** 策略规则 (unified policy rules) page shell — `/api/policy/rules` +
- *  `/api/policy/fallback` (UP-1), Task B4. Fetch once on mount (rules only —
- *  UP-4 made the policy binary, so there is no selector list to load
- *  alongside it), own every dialog (add/edit/delete) and the Apply action,
- *  hand the table nothing but data + callbacks (PolicyRulesTable, B3, is
- *  pure).
+/** Unified policy-rule page backed by `/api/policy/rules` and
+ *  `/api/policy/fallback`. It owns the dialogs and Apply action while the
+ *  table receives only data and callbacks.
  *
  *  CRUD (toggle/reorder/delete/dialog-save) persists to the rule store
  *  immediately and reloads the list; Apply is the separate step that
- *  compiles + `mihomo -t` validates + hot-reloads the live policy, same
- *  persist-vs-apply split as before.
+ *  compiles and hot-reloads the live DNS policy.
  *
  *  This page is DNS-only. Post-steering egress is the operator's complete
  *  mihomo config, edited on its own page. */

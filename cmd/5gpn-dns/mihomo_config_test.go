@@ -16,9 +16,7 @@ func goldenInfraParams() InfraParams {
 		ConsoleDomain:    "console.5gpn.test",
 		ZashDomain:       "zash.5gpn.test",
 		GatewayIP:        "10.0.1.20",
-		Controller:       "127.0.0.1:9090",
 		ControllerSecret: "s3cr3t",
-		EgressBrokerDNS:  "udp://127.0.0.1:5354",
 	}
 }
 
@@ -72,8 +70,8 @@ func TestMihomoInvariants_ConsoleSNIMustStayPublicAndDirect(t *testing.T) {
 func TestMihomoInvariants_WhitespaceReformattedStillPasses(t *testing.T) {
 	cfg := goldenMihomoConfig()
 	reformatted := strings.ReplaceAll(cfg,
-		"- {name: sniproxy, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: 127.0.0.1:443}",
-		"- name:    sniproxy\n    type: tunnel\n    listen: 203.0.113.10\n    port:   443\n    network: [tcp, udp]\n    target:      127.0.0.1:443",
+		"- {name: gateway, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: 127.0.0.1:443}",
+		"- name:    gateway\n    type: tunnel\n    listen: 203.0.113.10\n    port:   443\n    network: [tcp, udp]\n    target:      127.0.0.1:443",
 	)
 	// Extra blank lines and leading/trailing whitespace elsewhere.
 	reformatted = strings.ReplaceAll(reformatted, `external-controller: ""`, `external-controller:    ""   `)
@@ -172,13 +170,13 @@ func TestMihomoInvariants_MissingElement(t *testing.T) {
 			wantName: "controller",
 		},
 		{
-			name: "sniproxy tunnel listener removed",
+			name: "gateway tunnel listener removed",
 			mutate: func(cfg string) string {
 				return strings.Replace(cfg,
-					"  - {name: sniproxy, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: 127.0.0.1:443}\n",
+					"  - {name: gateway, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: 127.0.0.1:443}\n",
 					"", 1)
 			},
-			wantName: "sniproxy-inbound",
+			wantName: "gateway-inbound",
 		},
 		{
 			name: "dns nameserver missing the egress broker",
@@ -299,35 +297,6 @@ func TestMihomoInvariants_EmptyInfraParamsFailClosed(t *testing.T) {
 	}
 }
 
-// TestMihomoInvariants_ControllerAndDNSBrokerAreLiteral is the Unit-B-review
-// regression lock: hasControllerInvariant/hasDNSBrokerInvariant must match
-// the FIXED literal values the seed template hardcodes (design §4.4 rows
-// #1/#3), never InfraParams.Controller/.EgressBrokerDNS — Default()'s output
-// must satisfy ValidateInvariants even when those two fields are populated
-// with values that do NOT appear anywhere in the config text, proving the
-// check does not consult them.
-func TestMihomoInvariants_ControllerAndDNSBrokerAreLiteral(t *testing.T) {
-	dir := t.TempDir()
-	store := NewMihomoConfigStore(filepath.Join(dir, "config.yaml"))
-
-	t.Setenv("DNS_CONSOLE_DOMAIN", "console.5gpn.test")
-	t.Setenv("DNS_ZASH_DOMAIN", "zash.5gpn.test")
-	t.Setenv("DNS_MIHOMO_LISTEN_IPS", "203.0.113.10")
-	t.Setenv("DNS_GATEWAY_IP", "10.0.1.20")
-	t.Setenv("DNS_MIHOMO_SECRET", "s3cr3t")
-	t.Setenv("DNS_PUBLIC_IP", "203.0.113.10")
-
-	def := store.Default()
-
-	p := goldenInfraParams()
-	p.Controller = "10.9.9.9:1234"          // does NOT appear in the seed text
-	p.EgressBrokerDNS = "udp://10.9.9.9:53" // does NOT appear in the seed text
-
-	if err := ValidateInvariants(def, p); err != nil {
-		t.Fatalf("Default() should satisfy all invariants even with non-default InfraParams.Controller/.EgressBrokerDNS: %v", err)
-	}
-}
-
 func TestMihomoConfigStore_ReadAndDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -355,8 +324,7 @@ func TestMihomoConfigStore_ReadAndDefault(t *testing.T) {
 		t.Fatalf("Read() = %q, want %q", got, "hello: world\n")
 	}
 
-	t.Setenv("DNS_CONSOLE_DOMAIN", "console.5gpn.test")
-	t.Setenv("DNS_ZASH_DOMAIN", "zash.5gpn.test")
+	t.Setenv("DNS_BASE_DOMAIN", "5gpn.test")
 	t.Setenv("DNS_MIHOMO_LISTEN_IPS", "203.0.113.10")
 	t.Setenv("DNS_GATEWAY_IP", "10.0.1.20")
 	t.Setenv("DNS_MIHOMO_SECRET", "s3cr3t")
@@ -381,32 +349,24 @@ func TestInfraParamsFromConfig(t *testing.T) {
 	cfg.GatewayIP = net.ParseIP("10.0.1.20")
 	p := InfraParamsFromConfig(cfg)
 	want := InfraParams{
-		ConsoleDomain:   "console.5gpn.test",
-		ZashDomain:      "zash.5gpn.test",
-		GatewayIP:       "10.0.1.20",
-		Controller:      "127.0.0.1:9090",
-		EgressBrokerDNS: "udp://127.0.0.1:5354",
+		ConsoleDomain: "console.5gpn.test",
+		ZashDomain:    "zash.5gpn.test",
+		GatewayIP:     "10.0.1.20",
 	}
 	if p != want {
 		t.Fatalf("InfraParamsFromConfig = %+v, want %+v", p, want)
 	}
 }
 
-// TestInfraParamsFromConfig_EmptyGatewayAndBroker asserts a nil GatewayIP /
-// empty EgressBrokerAddr yield empty fields (fail-closed), not a placeholder.
-func TestInfraParamsFromConfig_EmptyGatewayAndBroker(t *testing.T) {
+func TestInfraParamsFromConfig_EmptyGateway(t *testing.T) {
 	p := InfraParamsFromConfig(Config{})
 	if p.GatewayIP != "" {
 		t.Fatalf("GatewayIP = %q, want empty", p.GatewayIP)
 	}
-	if p.EgressBrokerDNS != "" {
-		t.Fatalf("EgressBrokerDNS = %q, want empty", p.EgressBrokerDNS)
-	}
 }
 
 func TestMihomoConfigDefaultRendersPluralListeners(t *testing.T) {
-	t.Setenv("DNS_CONSOLE_DOMAIN", "console.5gpn.test")
-	t.Setenv("DNS_ZASH_DOMAIN", "zash.5gpn.test")
+	t.Setenv("DNS_BASE_DOMAIN", "5gpn.test")
 	t.Setenv("DNS_GATEWAY_IP", "10.0.1.20")
 	t.Setenv("DNS_PUBLIC_IP", "203.0.113.10")
 	t.Setenv("DNS_MIHOMO_LISTEN_IPS", "10.0.1.20, 203.0.113.10,10.0.1.20")
@@ -414,10 +374,10 @@ func TestMihomoConfigDefaultRendersPluralListeners(t *testing.T) {
 
 	got := NewMihomoConfigStore(filepath.Join(t.TempDir(), "config.yaml")).Default()
 	for _, want := range []string{
-		"name: sniproxy, type: tunnel, listen: 10.0.1.20, port: 443",
-		"name: sniproxy80, type: tunnel, listen: 10.0.1.20, port: 80",
-		"name: sniproxy-2, type: tunnel, listen: 203.0.113.10, port: 443",
-		"name: sniproxy80-2, type: tunnel, listen: 203.0.113.10, port: 80",
+		"name: gateway, type: tunnel, listen: 10.0.1.20, port: 443",
+		"name: gateway80, type: tunnel, listen: 10.0.1.20, port: 80",
+		"name: gateway-2, type: tunnel, listen: 203.0.113.10, port: 443",
+		"name: gateway80-2, type: tunnel, listen: 203.0.113.10, port: 80",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Default() missing %q", want)
@@ -428,40 +388,31 @@ func TestMihomoConfigDefaultRendersPluralListeners(t *testing.T) {
 	}
 }
 
-func TestMihomoConfigDefaultLegacyFallbackAndFailClosed(t *testing.T) {
+func TestMihomoConfigDefaultRequiresExplicitSafeListeners(t *testing.T) {
 	setInfra := func() InfraParams {
-		t.Setenv("DNS_CONSOLE_DOMAIN", "console.5gpn.test")
-		t.Setenv("DNS_ZASH_DOMAIN", "zash.5gpn.test")
+		t.Setenv("DNS_BASE_DOMAIN", "5gpn.test")
 		t.Setenv("DNS_MIHOMO_SECRET", "s3cr3t")
 		return goldenInfraParams()
 	}
 	p := setInfra()
 	t.Setenv("DNS_MIHOMO_LISTEN_IPS", "")
-	t.Setenv("DNS_GATEWAY_IP", "127.0.0.1")
+	t.Setenv("DNS_GATEWAY_IP", "10.0.1.20")
 	t.Setenv("DNS_PUBLIC_IP", "203.0.113.10")
-	p.GatewayIP = "127.0.0.1"
 	def := NewMihomoConfigStore(filepath.Join(t.TempDir(), "config.yaml")).Default()
-	if !strings.Contains(def, "listen: 203.0.113.10") || !strings.Contains(def, "console.5gpn.test: 127.0.0.1") {
-		t.Fatalf("legacy/default derivation missing from:\n%s", def)
-	}
-	if err := ValidateInvariants(def, p); err != nil {
-		t.Fatalf("legacy public-IP fallback should remain resettable: %v", err)
-	}
-
-	t.Setenv("DNS_GATEWAY_IP", "")
-	t.Setenv("DNS_PUBLIC_IP", "")
-	def = NewMihomoConfigStore(filepath.Join(t.TempDir(), "config.yaml")).Default()
 	err := ValidateInvariants(def, p)
 	var missing *ErrMissingInfra
-	if !errors.As(err, &missing) || missing.Name != "sniproxy-inbound" {
-		t.Fatalf("empty legacy listener inputs error = %v, want sniproxy-inbound", err)
+	if !errors.As(err, &missing) || missing.Name != "gateway-inbound" {
+		t.Fatalf("empty explicit listener error = %v, want gateway-inbound", err)
+	}
+	if strings.Contains(def, "listen: 203.0.113.10") {
+		t.Fatal("DNS_PUBLIC_IP must not be used as an implicit listener")
 	}
 
 	t.Setenv("DNS_MIHOMO_LISTEN_IPS", "0.0.0.0")
 	def = NewMihomoConfigStore(filepath.Join(t.TempDir(), "config.yaml")).Default()
 	err = ValidateInvariants(def, p)
-	if !errors.As(err, &missing) || missing.Name != "sniproxy-inbound" {
-		t.Fatalf("unsafe explicit listener error = %v, want sniproxy-inbound", err)
+	if !errors.As(err, &missing) || missing.Name != "gateway-inbound" {
+		t.Fatalf("unsafe explicit listener error = %v, want gateway-inbound", err)
 	}
 }
 

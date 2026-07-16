@@ -24,19 +24,17 @@ grep -Eq 'DNS_PLAIN53' "$INSTALL" \
     && fail "install.sh: DNS_PLAIN53 knob must stay removed (plain :53 listener is gone entirely)"
 grep -Eq 'DNS_CLIENT_NET=\$\{CLIENT_NET\}' "$INSTALL" \
     && fail "install.sh: dns.env must not emit DNS_CLIENT_NET (in-process IP allowlist removed)"
-# Upgrade path: a legacy ruleset must be flushed, and stale removed-feature keys
-# must NOT be carried over into the rewritten dns.env.
-grep -Eq '^remove_legacy_firewall\(\)' "$INSTALL" \
-    || fail "install.sh: no remove_legacy_firewall() upgrade cleanup"
-grep -Fq 'removed_keys=' "$INSTALL" \
-    || fail "install.sh: write_dns_env has no removed-keys drop list (stale DoH/firewall knobs would be carried forever)"
+grep -Eq '(^|[[:space:]])nft([[:space:]]|$)' "$INSTALL" \
+    && fail "install.sh: must not inspect or mutate host nftables"
 
 # ===== Cert modes: cloudflare | http-01 | debug only =====
 ncm="$(sed -n '/^normalize_cert_mode()/,/^}/p' "$INSTALL")"
 printf '%s' "$ncm" | grep -Fq 'cloudflare) printf' \
     || fail "install.sh: normalize_cert_mode does not accept cloudflare"
-printf '%s' "$ncm" | grep -Fq 'http|http-01) printf' \
-    || fail "install.sh: normalize_cert_mode does not canonicalize http/http-01"
+printf '%s' "$ncm" | grep -Fq 'http-01) printf' \
+    || fail "install.sh: normalize_cert_mode does not accept http-01"
+printf '%s' "$ncm" | grep -Fq 'http|http-01)' \
+    && fail "install.sh: normalize_cert_mode still accepts the unsupported http alias"
 printf '%s' "$ncm" | grep -Fq 'debug) printf' \
     || fail "install.sh: normalize_cert_mode does not accept debug"
 grep -Fq 'Persisted CERT_MODE must be cloudflare, http-01, or debug.' "$INSTALL" \

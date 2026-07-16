@@ -438,7 +438,6 @@ func (s *botSupervisor) View() TGBotView {
 	return TGBotView{
 		AdminIDs:  append([]int64(nil), s.admins...),
 		TokenSet:  s.token != "",
-		Running:   s.running,
 		State:     s.state,
 		LastError: s.lastError,
 	}

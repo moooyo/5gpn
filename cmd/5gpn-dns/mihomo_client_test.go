@@ -86,10 +86,10 @@ func TestMihomoClient_PutConfigs_NoSecret(t *testing.T) {
 	}
 }
 
-// TestMihomoClient_Reachable asserts any completed round trip — including a
+// TestMihomoClient_Status asserts any completed round trip — including a
 // non-2xx status — counts as reachable, while a dead/unlistening address
 // (nothing to dial) counts as unreachable.
-func TestMihomoClient_Reachable(t *testing.T) {
+func TestMihomoClient_Status(t *testing.T) {
 	srv := newMihomoTLSTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
@@ -97,9 +97,6 @@ func TestMihomoClient_Reachable(t *testing.T) {
 	c, err := NewMihomoClient(srv.controller, "tok", srv.serverName, srv.certFile)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !c.Reachable(context.Background()) {
-		t.Fatalf("expected reachable=true for a live (even 401) controller")
 	}
 	status := c.Status(context.Background())
 	if !status.Reachable || status.Authenticated {
@@ -112,7 +109,7 @@ func TestMihomoClient_Reachable(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	if dead.Reachable(ctx) {
+	if dead.Status(ctx).Reachable {
 		t.Fatalf("expected reachable=false when nothing is listening")
 	}
 }

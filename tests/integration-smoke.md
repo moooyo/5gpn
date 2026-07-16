@@ -32,8 +32,8 @@ sudo cp -a /etc/5gpn/mihomo/config.yaml /tmp/mihomo-config.before
   - `127.0.0.1:5353/udp` and `127.0.0.1:5354/tcp+udp`;
   - console `127.0.0.1:443/tcp`, zashboard `127.0.0.2:443/tcp`;
   - mihomo `:80/tcp` and `:443/tcp+udp` on every configured local listen IP.
-- [ ] Nothing listens publicly on DNS `:53`, DoH `:8443`, profile `:8111`, or
-  old control ports `:9443`/`:18443`.
+- [ ] Nothing listens publicly on DNS `:53`, DoH `:8443`, or a standalone
+  profile port.
 - [ ] `mihomo -t -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo` succeeds.
 - [ ] Every `DNS_MIHOMO_LISTEN_IPS` value appears on a local interface. A
   non-local NAT/public address is rejected by installer validation.
@@ -72,8 +72,8 @@ afterward.
   - `gateway`: gateway steering.
 - [ ] A cached reply preserves its original verdict/reason/upstream metadata in
   `/api/querylog`; a fallback-direct cache hit is not mislabeled chnroute-cn.
-- [ ] `/api/lookup` and `/api/resolve-test` agree with the live query for direct,
-  proxy, every fallback, NXDOMAIN, and NODATA.
+- [ ] `/api/resolve-test` agrees with the live query for direct, proxy, every
+  fallback, NXDOMAIN, and NODATA.
 
 ## 4. Upstream ordering, reload, and subscriptions
 
@@ -113,15 +113,17 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
 - [ ] `https://$CONSOLE/` serves the SPA; unauthenticated
   `$CONSOLE/api/status` returns 401.
 - [ ] The authenticated console `/setup-guide` route shows separate iOS and
-  Android instructions, the exact `DNS_DOMAIN`, a profile QR code, and a direct
-  `/ios/ios-dot.mobileconfig` link. Legacy `/ios/` redirects to the guide; a
+  Android instructions, the derived `dot.<DNS_BASE_DOMAIN>` identity, a profile
+  QR code, and a direct `/ios/ios-dot.mobileconfig` link. Public `/ios/`
+  redirects to the guide; a
   nonexistent profile path never returns the SPA shell as a false-positive
   `200 text/html`.
 - [ ] Production CSP reports no inline script/style or worker/font violation.
 
 ## 6. Mihomo controller boundaries
 
-- [ ] `DNS_MIHOMO_CONTROLLER` completes a TLS handshake for `DNS_ZASH_DOMAIN`
+- [ ] `DNS_MIHOMO_CONTROLLER` completes a TLS handshake for
+  `zash.<DNS_BASE_DOMAIN>`
   with the zash role certificate and no earlier safe-path rejection in
   `journalctl -u mihomo -b`; plaintext HTTP or a mismatched SNI fails closed.
 - [ ] zashboard REST and WebSocket operations succeed through `/proxy/` while
@@ -166,13 +168,10 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
 - [ ] Structural subscription sync/persistence failure makes Apply fail; only a
   remote fetch outage may degrade while retaining old cache.
 
-## 9. Install, upgrade, and uninstall safety
+## 9. Install, reinstall, and uninstall safety
 
-- [ ] A normal reinstall and each ordinary `change-*` operation leave the
-  operator mihomo config byte-for-byte identical and still validated; they do
-  not migrate an older installation to TLS-only controller mode. Older boxes
-  need `DNS_ZASH_DOMAIN` configured plus either an explicit `mihomo-reset` or a
-  manual TLS-only edit before verified Controller clients connect.
+- [ ] A normal reinstall and `configure` leave the operator mihomo config
+  byte-for-byte identical after validation.
 - [ ] Explicit mihomo reset validates a candidate first, creates a backup, and
   atomically installs the seed. A failed candidate leaves the original intact.
 - [ ] A deliberately failed service start causes installer failure; it never
@@ -183,18 +182,15 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
 - [ ] Pinned quick-install failure does not fall back to a mismatched `main`.
 - [ ] Missing/invalid Gum checksum falls back to plain output without installing
   the unverified binary.
-- [ ] Compare `nft list ruleset` with `/tmp/nft.before`: install, upgrade, and
-  uninstall leave unrelated tables, `/etc/nftables.conf`, and firewall service
-  enablement unchanged. Only a uniquely identified legacy 5gpn table may be
-  removed.
+- [ ] Compare `nft list ruleset` with `/tmp/nft.before`: install, reinstall, and
+  uninstall leave every table, `/etc/nftables.conf`, and firewall-service
+  enablement unchanged.
 - [ ] Custom cleanup paths outside 5gpn defaults are rejected unless canonical,
   safe, and marked as 5gpn-owned. `/`, system directories, and unowned paths are
   never recursively deleted.
-- [ ] Install an operator-managed `sing-box.service`,
-  `/usr/local/bin/sing-box`, and `/usr/local/etc/sing-box`; normal reinstall and
-  uninstall preserve all three. A legacy unit is disabled and removed only when
-  its unit file explicitly identifies 5gpn ownership; shared binary and config
-  paths remain untouched.
+- [ ] Pre-create similarly named operator-managed services, binaries, and
+  directories without 5gpn ownership markers; install, reinstall, and uninstall
+  preserve them unchanged.
 
 ## 10. Certificate renewal and recovery
 
@@ -242,7 +238,7 @@ Use a disposable Telegram bot token, at least two test administrator accounts,
 and a temporary group. Back up `/etc/5gpn/tgbot.json` first and do not paste the
 token into recorded command output, screenshots, or issue logs.
 
-- [ ] `5gpn --setup-tgbot` requires a TTY, reports an existing `DNS_TGBOT_FILE` as the active
+- [ ] `5gpn setup-tgbot` requires a TTY, reports an existing `DNS_TGBOT_FILE` as the active
   source, validates a replacement token through the live control API, and
   atomically leaves a root-only (`0600`) JSON override. It does not claim that a
   caller environment token became active.

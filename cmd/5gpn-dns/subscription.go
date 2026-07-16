@@ -37,27 +37,21 @@ const (
 // validCategories enumerates the four rule-set categories a subscription may
 // target.
 var validCategories = map[string]bool{
-	"block":     true,
-	"direct":    true,
-	"blacklist": true,
-	"chnroute":  true,
+	"block":    true,
+	"direct":   true,
+	"proxy":    true,
+	"chnroute": true,
 }
-
-// ErrSubNotFound is wrapped by every "no subscription with this ID" error so the
-// HTTP/bot layers can map it precisely (errors.Is) instead of substring-matching
-// "not found" — which would also catch an unrelated file-not-found and silently
-// change API status codes.
-var ErrSubNotFound = errors.New("subscription not found")
 
 // Subscription describes one remote rule-list subscription.
 type Subscription struct {
 	ID       string
-	Category string // block|direct|blacklist|chnroute
+	Category string // block|direct|proxy|chnroute
 	Name     string
 	URL      string
-	Format   string // parser format; for chnroute use "cidr"
+	Format   string // chnroute: cidr; block/direct/proxy: plain|gfwlist|dnsmasq|hosts
 	Enabled  bool
-	Interval time.Duration
+	Interval time.Duration // must be positive when Enabled
 }
 
 // subscriptionJSON is the on-disk JSON shape for a Subscription: identical
@@ -89,7 +83,7 @@ func (s Subscription) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON parses Interval from a Go duration string.
 func (s *Subscription) UnmarshalJSON(data []byte) error {
 	var raw subscriptionJSON
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalStrictJSON(data, &raw); err != nil {
 		return err
 	}
 	var interval time.Duration
@@ -136,11 +130,7 @@ type subscriptionsFile struct {
 	Subscriptions []Subscription `json:"subscriptions"`
 }
 
-// subsSchemaVersion is the current subscriptions.json schema version. A missing
-// "version" (0) is treated as this version (pre-versioning files). A file whose
-// version is HIGHER than this was written by a newer binary — we log and still
-// parse the fields we understand, so a downgrade degrades rather than looking
-// like corruption (a bare json error).
+// subsSchemaVersion is the exact subscriptions.json schema version accepted.
 const subsSchemaVersion = 1
 
 // LoadSubscriptions reads and parses the subscriptions JSON file at path.
@@ -155,12 +145,24 @@ func LoadSubscriptions(path string) ([]Subscription, error) {
 		return nil, fmt.Errorf("subscriptions: read %s: %w", path, err)
 	}
 	var doc subscriptionsFile
-	if err := json.Unmarshal(data, &doc); err != nil {
+	if err := unmarshalStrictJSON(data, &doc); err != nil {
 		return nil, fmt.Errorf("subscriptions: parse %s: %w", path, err)
 	}
-	if doc.Version > subsSchemaVersion {
-		log.Printf("warning: %s is schema version %d, newer than this binary understands (%d) — parsing known fields only",
-			path, doc.Version, subsSchemaVersion)
+	if doc.Version != subsSchemaVersion {
+		return nil, fmt.Errorf("subscriptions: %s: unsupported schema version %d (want %d)", path, doc.Version, subsSchemaVersion)
+	}
+	seen := make(map[string]bool, len(doc.Subscriptions))
+	for _, sub := range doc.Subscriptions {
+		if err := validateSubscription(sub); err != nil {
+			return nil, fmt.Errorf("subscriptions: %s: %w", path, err)
+		}
+		if seen[sub.ID] {
+			return nil, fmt.Errorf("subscriptions: %s: duplicate id %q", path, sub.ID)
+		}
+		seen[sub.ID] = true
+	}
+	if err := validateUniqueSubscriptionCachePaths(doc.Subscriptions); err != nil {
+		return nil, fmt.Errorf("subscriptions: %s: %w", path, err)
 	}
 	return doc.Subscriptions, nil
 }
@@ -181,18 +183,14 @@ type SubManager struct {
 	// published or aborted, so ticker fetches cannot leak partial cache state.
 	txMu sync.Mutex
 
-	// runCtx is the context passed to Run, stored so a subscription added
-	// later via Add (while Run is active) can launch its own ticker goroutine
-	// instead of waiting for the process to restart. nil until Run is called;
-	// guarded by mu like the rest of the manager's mutable state.
+	// runCtx is the context passed to Run. Policy publication uses it to start
+	// tickers for a newly published subscription set without restarting the
+	// process. nil until Run is called; guarded by mu.
 	runCtx context.Context
 
 	// cancels holds, per subscription ID, the CancelFunc for its running ticker
-	// goroutine (only while Run is active). It lets Remove/Replace stop exactly
-	// one subscription's ticker instead of leaking it, and lets Add/Replace
-	// cancel a stale ticker before spawning a fresh one — without it, Remove
-	// leaked the goroutine forever and every edit (Remove+Add) double-scheduled
-	// the fetch. Guarded by mu.
+	// goroutine while Run is active. Policy publication cancels the old
+	// generation before scheduling the new one. Guarded by mu.
 	cancels map[string]context.CancelFunc
 }
 
@@ -399,30 +397,6 @@ func isInternalFetchIP(ip net.IP) bool {
 // the isInternalFetchIP guard.
 var subDialAllowed = func(ip net.IP) bool { return !isInternalFetchIP(ip) }
 
-// List returns a snapshot copy of the currently configured subscriptions.
-func (m *SubManager) List() []Subscription {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make([]Subscription, len(m.subs))
-	copy(out, m.subs)
-	return out
-}
-
-// Health returns a copy of the current per-subscription fetch health map,
-// keyed by subscription ID. A subscription that has never been fetched has
-// no entry. Safe for concurrent use; the returned map is independent of the
-// manager's internal state (mutating it has no effect on future Health()
-// calls).
-func (m *SubManager) Health() map[string]SubHealth {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make(map[string]SubHealth, len(m.health))
-	for id, h := range m.health {
-		out[id] = h
-	}
-	return out
-}
-
 // recordHealth stores res as the latest health entry for its subscription
 // ID. Must NOT be called while already holding m.mu — it takes the lock
 // itself.
@@ -456,9 +430,7 @@ func (m *SubManager) find(id string) (Subscription, int, bool) {
 // startTickerLocked launches a ticker goroutine for sub under a fresh per-sub
 // cancellable context derived from runCtx, first cancelling any existing ticker
 // for the same ID. No-op when Run is not active (runCtx nil/done), or sub is
-// disabled / has a non-positive interval. Caller must hold m.mu. The goroutine
-// is spawned while holding the lock, which is safe: the `go` statement does not
-// block, and runOne only takes m.mu after this method has returned.
+// disabled / has a non-positive interval. Caller must hold m.mu.
 func (m *SubManager) startTickerLocked(sub Subscription) {
 	if m.runCtx == nil || m.runCtx.Err() != nil {
 		return
@@ -466,11 +438,8 @@ func (m *SubManager) startTickerLocked(sub Subscription) {
 	if !sub.Enabled || sub.Interval <= 0 {
 		return
 	}
-	// Guard against a ghost ticker: Add releases m.mu for its best-effort initial
-	// fetch, then re-acquires it to call this. If a concurrent Remove(sub.ID) ran
-	// in that window it found no ticker yet (stopTickerLocked was a no-op) and
-	// dropped the sub from m.subs — so spawning now would leave a ticker fetching
-	// a subscription that no longer exists. Confirm it's still present first.
+	// A prepared policy generation may have been superseded before scheduling.
+	// Confirm the subscription is still part of the live snapshot.
 	if _, _, ok := m.find(sub.ID); !ok {
 		return
 	}
@@ -489,11 +458,11 @@ func (m *SubManager) stopTickerLocked(id string) {
 	}
 }
 
-// UpdateOne fetches, parses, and caches a single subscription by ID, then
+// updateOne fetches, parses, and caches a single subscription by ID, then
 // calls reload on success. On failure (fetch error, parse error, or the
 // parsed entry count falling below the category's floor guard) the existing
 // cache file is left untouched and reload is not called.
-func (m *SubManager) UpdateOne(ctx context.Context, id string) UpdateResult {
+func (m *SubManager) updateOne(ctx context.Context, id string) UpdateResult {
 	m.mu.Lock()
 	sub, _, ok := m.find(id)
 	m.mu.Unlock()
@@ -503,27 +472,10 @@ func (m *SubManager) UpdateOne(ctx context.Context, id string) UpdateResult {
 	return m.fetchAndCache(ctx, sub)
 }
 
-// UpdateAll updates every subscription (enabled or not) and returns one
-// result per subscription, in configured order.
-func (m *SubManager) UpdateAll(ctx context.Context) []UpdateResult {
-	m.mu.Lock()
-	subs := make([]Subscription, len(m.subs))
-	copy(subs, m.subs)
-	m.mu.Unlock()
-
-	results := make([]UpdateResult, 0, len(subs))
-	for _, s := range subs {
-		results = append(results, m.fetchAndCache(ctx, s))
-	}
-	return results
-}
-
 // fetchAndCache performs the actual fetch -> parse -> floor-guard -> atomic
 // write -> reload pipeline for one subscription, and records the outcome in
-// m.health. This is the single canonical point every real-subscription
-// update path (UpdateOne, UpdateAll, and transitively Add's initial fetch and
-// Run's ticker) funnels through, so health is recorded here once rather than
-// at each caller.
+// m.health. This is the single canonical point for periodic subscription
+// refreshes, so health is recorded here once rather than at each caller.
 func (m *SubManager) fetchAndCache(ctx context.Context, sub Subscription) UpdateResult {
 	m.txMu.Lock()
 	defer m.txMu.Unlock()
@@ -615,6 +567,9 @@ func (m *SubManager) PreparePolicyGeneration(ctx context.Context, desired []Subs
 		}
 		seen[s.ID] = true
 	}
+	if err := validateUniqueSubscriptionCachePaths(desired); err != nil {
+		return nil, fmt.Errorf("prepare policy subscriptions: %w", err)
+	}
 
 	current := append([]Subscription(nil), m.subs...)
 	oldByID := make(map[string]Subscription, len(current))
@@ -626,6 +581,9 @@ func (m *SubManager) PreparePolicyGeneration(ctx context.Context, desired []Subs
 		}
 	}
 	final = append(final, desired...)
+	if err := validateUniqueSubscriptionCachePaths(final); err != nil {
+		return nil, fmt.Errorf("prepare policy subscriptions: final set: %w", err)
+	}
 
 	p := &preparedPolicySubscriptions{
 		m:       m,
@@ -759,9 +717,6 @@ func (p *preparedPolicySubscriptions) Rollback() error {
 	p.release()
 	return err
 }
-
-// Abort closes a generation that never reached CommitFiles.
-func (p *preparedPolicySubscriptions) Abort() { p.release() }
 
 // Publish installs the already-committed subscription model and reschedules
 // policy tickers, then releases the transaction locks.
@@ -974,257 +929,28 @@ func atomicWriteLines(path string, entries []string) error {
 	return nil
 }
 
-// Validate runs the same field checks Add does (bad ID/category/name/format/
-// url-scheme), WITHOUT the duplicate-ID check and without any state change,
-// fetch, or persist. The duplicate-ID check is skipped deliberately: Validate
-// is used by the bot's add-subscription wizard to pre-check a draft whose ID
-// may already exist under the target being edited, so rejecting on "ID already
-// exists" would make a legitimate re-check fail. Pure and lock-free (it only
-// calls validateSubscription, reading no manager state), hence safe to call
-// concurrently.
-func (m *SubManager) Validate(s Subscription) error {
-	return validateSubscription(s)
-}
-
-// Get returns a copy of the subscription with the given ID, or ok=false if no
-// subscription with that ID is configured. The returned value is independent
-// of the manager's internal state — mutating it has no effect on subsequent
-// Get/List calls.
-func (m *SubManager) Get(id string) (Subscription, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	sub, _, ok := m.find(id)
-	return sub, ok
-}
-
-// Add validates, appends, and persists a new subscription, then performs an
-// initial UpdateOne to populate its cache and returns that fetch's result. If
-// Run is currently active (its ctx is stored in m.runCtx and not yet done),
-// Add also launches a ticker goroutine for the new subscription so it
-// auto-refreshes on its own Interval without requiring a process restart.
-func (m *SubManager) Add(s Subscription) (UpdateResult, error) {
-	if err := validateSubscription(s); err != nil {
-		return UpdateResult{}, err
-	}
-
-	m.mu.Lock()
-	if _, _, exists := m.find(s.ID); exists {
-		m.mu.Unlock()
-		return UpdateResult{}, fmt.Errorf("subscription: id %q already exists", s.ID)
-	}
-	m.subs = append(m.subs, s)
-	err := m.persistLocked()
-	m.mu.Unlock()
-	if err != nil {
-		return UpdateResult{}, err
-	}
-
-	// The initial fetch is best-effort: a subscription is still validly
-	// registered even if its first fetch fails (e.g. transient network
-	// issue) — Run's ticker (or a later on-demand update) will retry.
-	res := m.UpdateOne(context.Background(), s.ID)
-
-	// Live reschedule: if Run is active, spawn this sub's ticker (registered by
-	// ID so Remove/Replace can later stop exactly it). No-op when Run isn't
-	// running or the sub is disabled/interval<=0.
-	m.mu.Lock()
-	m.startTickerLocked(s)
-	m.mu.Unlock()
-
-	return res, nil
-}
-
-// Remove drops a subscription by ID, stops its ticker goroutine, persists the
-// change, deletes its cache file (if any), and triggers a reload.
-func (m *SubManager) Remove(id string) error {
-	m.mu.Lock()
-	sub, idx, ok := m.find(id)
-	if !ok {
-		m.mu.Unlock()
-		return fmt.Errorf("subscription: id %q: %w", id, ErrSubNotFound)
-	}
-	m.stopTickerLocked(id) // stop its ticker before dropping the sub (no leak)
-	m.subs = append(m.subs[:idx], m.subs[idx+1:]...)
-	err := m.persistLocked()
-	m.mu.Unlock()
-	if err != nil {
-		return err
-	}
-
-	cachePath := m.cachePath(sub)
-	if err := os.Remove(cachePath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("subscription %s: remove cache file: %w", id, err)
-	}
-
-	if m.reload != nil {
-		if err := m.reload(); err != nil {
-			return fmt.Errorf("subscription %s: reload after remove: %w", id, err)
-		}
-	}
-	return nil
-}
-
-// Replace updates the subscription with id in place: it validates s, swaps the
-// slice entry (persisting), reschedules the ticker (cancel old, start new), and
-// re-fetches. s.ID must equal id. Unlike the old Remove+Add dance the API PATCH
-// and bot toggle used, there is never a window in which the subscription exists
-// under neither definition, and the ticker is neither leaked nor double-
-// scheduled. Returns the re-fetch's UpdateResult.
-func (m *SubManager) Replace(id string, s Subscription) (UpdateResult, error) {
-	if s.ID != id {
-		return UpdateResult{}, fmt.Errorf("subscription: replace id mismatch (%q != %q)", s.ID, id)
-	}
-	if err := validateSubscription(s); err != nil {
-		return UpdateResult{}, err
-	}
-
-	m.mu.Lock()
-	old, idx, ok := m.find(id)
-	if !ok {
-		m.mu.Unlock()
-		return UpdateResult{}, fmt.Errorf("subscription: id %q: %w", id, ErrSubNotFound)
-	}
-	m.subs[idx] = s
-	if err := m.persistLocked(); err != nil {
-		m.subs[idx] = old // roll back the in-memory swap on persist failure
-		m.mu.Unlock()
-		return UpdateResult{}, err
-	}
-	m.stopTickerLocked(id) // stop the old-interval ticker before re-fetch
-	m.mu.Unlock()
-
-	// If the category or name changed, the old cache file is now orphaned (it
-	// would keep merging into its old category's rules); remove it and reload so
-	// the stale entries drop even if the new fetch below fails.
-	pathChanged := m.cachePath(old) != m.cachePath(s)
-	if pathChanged {
-		_ = os.Remove(m.cachePath(old))
-		if m.reload != nil {
-			_ = m.reload()
-		}
-	}
-
-	// Re-fetch under the new definition (writes the new cache + reloads on
-	// success; keeps the old cache on failure, as UpdateOne always does).
-	res := m.UpdateOne(context.Background(), s.ID)
-
-	// Start the ticker on the new interval/enabled state.
-	m.mu.Lock()
-	m.startTickerLocked(s)
-	m.mu.Unlock()
-
-	return res, nil
-}
-
-// Sync reconciles the manager's tracked subscription set to desired — the
-// policy compiler's `CompiledDNS.Subs` (see policy_compile.go), which is the
-// sole source of truth for what gets fetched once the policy engine is fully
-// wired (C4/D3) — but ONLY within the policy-owned categories
-// (policyOwnedCategory/policyManualCategories, policy_engine.go:
-// block/direct/blacklist). It adds every subscription in desired that
-// isn't currently tracked, removes every POLICY-OWNED tracked subscription
-// absent from desired, and replaces any tracked subscription whose
-// definition (Category/Name/URL/Format/Enabled/Interval) differs from its
-// desired counterpart — Subscription has no slice/map fields, so a plain
-// `!=` comparison is exact. It is idempotent: a Sync call whose desired set
-// exactly matches the current one performs no Add/Remove/Replace at all (and
-// hence no re-fetch, ticker churn, or reload).
-//
-// A tracked subscription in a category the policy compiler never produces —
-// chiefly chnroute, the install-seeded CN-IP-list arbitration input
-// (intentCategory, policy_compile.go, never maps any Intent to "chnroute";
-// spec §13 keeps chnroute a system arbitration input, not a policy rule) —
-// is NEVER in CompiledDNS.Subs and must not be treated as "no longer
-// desired": Sync leaves it fully alone (tracked, cached, still ticking)
-// regardless of what the passed-in desired set contains. Without this
-// carve-out, the first policy CompileAndApply on a fresh daemon would delete
-// the chnroute subscription and its cache, permanently killing CN-IP-list
-// auto-refresh (the bundled ChnrouteFile snapshot survives, so there is no
-// immediate outage — but the list would never refresh again).
-//
-// Sync itself takes no lock — it drives the manager purely through the
-// already-locked public CRUD methods (Add/Remove/Replace/List), so it
-// composes correctly with any concurrent caller of those methods (the old
-// managed HTTP/bot subscription surface, kept alongside Sync until Task D3
-// retires it). Every per-subscription failure is collected and returned
-// together via errors.Join rather than aborting the reconcile on the first
-// one, so one bad subscription in the desired set doesn't block the rest from
-// converging.
-func (m *SubManager) Sync(desired []Subscription) error {
-	current := m.List()
-	have := make(map[string]Subscription, len(current))
-	for _, s := range current {
-		have[s.ID] = s
-	}
-
-	want := make(map[string]bool, len(desired))
-	var errs []error
-	for _, s := range desired {
-		want[s.ID] = true
-		old, exists := have[s.ID]
-		switch {
-		case !exists:
-			if _, err := m.Add(s); err != nil {
-				errs = append(errs, fmt.Errorf("sync: add %s: %w", s.ID, err))
-			}
-		case old != s:
-			if _, err := m.Replace(s.ID, s); err != nil {
-				errs = append(errs, fmt.Errorf("sync: replace %s: %w", s.ID, err))
-			}
-		}
-	}
-
-	for id, s := range have {
-		if want[id] {
-			continue
-		}
-		if !policyOwnedCategory(s.Category) {
-			// Not a policy-rule category (e.g. chnroute) — the desired set
-			// (CompiledDNS.Subs) never carries these, so absence here means
-			// nothing; leave it tracked. See the Sync doc comment above.
-			continue
-		}
-		if err := m.Remove(id); err != nil {
-			errs = append(errs, fmt.Errorf("sync: remove %s: %w", id, err))
-		}
-	}
-
-	return errors.Join(errs...)
-}
-
 // policyOwnedCategory reports whether cat is one of the policy-compiler-owned
-// DNS categories (policyManualCategories, policy_engine.go) — the only
-// categories that can ever appear in a policy compile's desired subscription
-// set (CompiledDNS.Subs). Reused here (rather than duplicating the list) so
-// the two can never drift apart. Note this is deliberately narrower than
-// validCategories above, which also allows "chnroute" — chnroute is a valid
-// subscription category but not a policy-owned one; see Sync's doc comment.
+// DNS categories. It is deliberately narrower than validCategories, which
+// also allows the system-owned chnroute subscription.
 func policyOwnedCategory(cat string) bool {
-	for _, c := range policyManualCategories {
-		if c == cat {
-			return true
-		}
-	}
-	return false
+	return cat == "block" || cat == "direct" || cat == "proxy"
 }
 
-// maxSubscriptionIDLen bounds a subscription ID's byte length. The ID is
-// embedded in Telegram inline-keyboard callback_data as "subview:<id>" (and
-// subref/subtog/subdel), and Telegram hard-caps callback_data at 64 bytes; the
-// longest prefix is 8 bytes, so an ID over ~56 bytes makes the whole keyboard
-// invalid and the bot's subscription menu silently stops rendering. 48 leaves
-// comfortable margin. The bot wizard sets Name == ID, so validateSubscriptionName
-// enforces the same bound (a multibyte name is measured in BYTES, not runes).
-const maxSubscriptionIDLen = 48
+const (
+	// maxSubscriptionIDLen matches the current policy rule ID schema.
+	maxSubscriptionIDLen = 64
+	// maxSubscriptionNameLen leaves room for generated provider prefixes while
+	// keeping the cache basename well below common filesystem limits.
+	maxSubscriptionNameLen = 128
+)
 
-// validateSubscription checks the fields required before a subscription can
-// be added.
+// validateSubscription checks one current-schema subscription definition.
 func validateSubscription(s Subscription) error {
 	if s.ID == "" {
 		return errors.New("subscription: id must not be empty")
 	}
 	if len(s.ID) > maxSubscriptionIDLen {
-		return fmt.Errorf("subscription: id %q too long (%d bytes; max %d — it is embedded in Telegram callback_data, capped at 64)", s.ID, len(s.ID), maxSubscriptionIDLen)
+		return fmt.Errorf("subscription: id %q too long (%d bytes; max %d)", s.ID, len(s.ID), maxSubscriptionIDLen)
 	}
 	if !validCategories[s.Category] {
 		return fmt.Errorf("subscription: invalid category %q", s.Category)
@@ -1232,8 +958,18 @@ func validateSubscription(s Subscription) error {
 	if err := validateSubscriptionName(s.Name); err != nil {
 		return err
 	}
-	if s.Format == "" {
-		return errors.New("subscription: format must not be empty")
+	switch s.Category {
+	case "chnroute":
+		if s.Format != "cidr" {
+			return fmt.Errorf("subscription: chnroute format %q must be cidr", s.Format)
+		}
+	default: // block, direct, proxy
+		if !validSubscriptionFormats[s.Format] {
+			return fmt.Errorf("subscription: %s format %q must be plain|gfwlist|dnsmasq|hosts", s.Category, s.Format)
+		}
+	}
+	if s.Enabled && s.Interval <= 0 {
+		return errors.New("subscription: enabled interval must be positive")
 	}
 	if s.URL == "" {
 		return errors.New("subscription: url must not be empty")
@@ -1244,12 +980,30 @@ func validateSubscription(s Subscription) error {
 	return nil
 }
 
-// validateSubscriptionURLScheme rejects any URL whose scheme is not http or
-// https. Ahead of Task 1, Add was only reachable from trusted local config;
-// now that Phase 3 exposes Add over HTTP, an unrestricted URL would let a
-// caller point a subscription fetch at file:///etc/passwd (arbitrary local
-// file disclosure into the rule-set cache) or other non-http(s) schemes
-// intended for SSRF against internal services.
+type subscriptionCacheKey struct {
+	category string
+	name     string
+}
+
+// validateUniqueSubscriptionCachePaths prevents two definitions from owning
+// the same rulesDir/<category>/<name>.txt file. IDs identify subscriptions,
+// but the category/name pair identifies the durable cache they mutate.
+func validateUniqueSubscriptionCachePaths(subs []Subscription) error {
+	seen := make(map[subscriptionCacheKey]string, len(subs))
+	for _, sub := range subs {
+		key := subscriptionCacheKey{category: sub.Category, name: sub.Name}
+		if previousID, ok := seen[key]; ok {
+			return fmt.Errorf(
+				"subscription: duplicate cache path for category %q and name %q (ids %q and %q)",
+				sub.Category, sub.Name, previousID, sub.ID,
+			)
+		}
+		seen[key] = sub.ID
+	}
+	return nil
+}
+
+// validateSubscriptionURLScheme rejects non-HTTP(S) fetch targets.
 func validateSubscriptionURLScheme(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -1264,11 +1018,7 @@ func validateSubscriptionURLScheme(rawURL string) error {
 }
 
 // validateSubscriptionName rejects any Name that is not a single, safe path
-// component. Name is free text (unlike Category, which is enum-guarded) and
-// is used verbatim in cachePath via filepath.Join(rulesDir, category,
-// name+".txt"). Without this guard, a Name such as "../../../etc/cron.d/evil"
-// would let filepath.Join's path cleaning escape rulesDir entirely, giving an
-// arbitrary-file write once Add is reachable over the Phase 3 HTTP API.
+// component because cachePath uses it as a file name below rulesDir.
 func validateSubscriptionName(name string) error {
 	if name == "" {
 		return errors.New("subscription: name must not be empty")
@@ -1282,80 +1032,31 @@ func validateSubscriptionName(name string) error {
 	if filepath.Base(name) != name {
 		return fmt.Errorf("subscription: invalid name %q (must be a single path component)", name)
 	}
-	if len(name) > maxSubscriptionIDLen {
-		return fmt.Errorf("subscription: name %q too long (%d bytes; max %d)", name, len(name), maxSubscriptionIDLen)
+	if len(name) > maxSubscriptionNameLen {
+		return fmt.Errorf("subscription: name %q too long (%d bytes; max %d)", name, len(name), maxSubscriptionNameLen)
 	}
-	return nil
-}
-
-// persistLocked marshals m.subs to JSON and atomically writes it to m.path.
-// Callers must hold m.mu.
-func (m *SubManager) persistLocked() error {
-	doc := subscriptionsFile{Version: subsSchemaVersion, Subscriptions: m.subs}
-	data, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return fmt.Errorf("subscriptions: marshal: %w", err)
-	}
-
-	dir := filepath.Dir(m.path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("subscriptions: mkdir %s: %w", dir, err)
-	}
-	tmp, err := os.CreateTemp(dir, ".subscriptions-*.tmp")
-	if err != nil {
-		return fmt.Errorf("subscriptions: create temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	succeeded := false
-	defer func() {
-		if !succeeded {
-			os.Remove(tmpPath)
-		}
-	}()
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("subscriptions: write temp file: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("subscriptions: sync temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("subscriptions: close temp file: %w", err)
-	}
-	if err := os.Rename(tmpPath, m.path); err != nil {
-		return fmt.Errorf("subscriptions: rename %s -> %s: %w", tmpPath, m.path, err)
-	}
-	succeeded = true
 	return nil
 }
 
 // Run starts one goroutine per enabled subscription, ticking at its
-// configured interval and calling UpdateOne on each tick. If a subscription's
-// cache file is missing when Run starts, an immediate UpdateOne is performed
+// configured interval and refreshing it on each tick. If a subscription's
+// cache file is missing when Run starts, an immediate refresh is performed
 // before entering the ticker loop (so a fresh install populates its cache
 // promptly rather than waiting a full interval). Run blocks until ctx is
 // done, even when there are zero (or zero enabled) subscriptions to start
-// with — see the runCtx doc below for why that matters.
+// with, allowing a later policy publication to schedule its subscriptions.
 //
 // ctx is also stored on the manager (m.runCtx) for the duration of the call,
-// so a subscription added afterwards via Add can detect that Run is active
-// and launch its own ticker goroutine (live reschedule) instead of only
-// refreshing once at Add time. Run must therefore stay "active" (block)
-// until ctx is actually done, regardless of how many subscriptions it started
-// with — otherwise a fresh install with no subscriptions yet configured
-// would have Run return immediately, clear runCtx, and silently disable live
-// reschedule for every subscription added afterwards.
+// so Publish can schedule a newly committed policy generation without a
+// process restart.
 func (m *SubManager) Run(ctx context.Context) {
 	m.mu.Lock()
 	m.runCtx = ctx
 	subs := make([]Subscription, len(m.subs))
 	copy(subs, m.subs)
 	for _, sub := range subs {
-		// startTickerLocked registers a per-sub cancel derived from ctx (and
-		// skips disabled / interval<=0 subs), so Remove/Replace can later stop
-		// exactly one ticker.
+		// startTickerLocked registers a per-sub cancel derived from ctx and
+		// skips disabled or non-positive-interval subscriptions.
 		m.startTickerLocked(sub)
 	}
 	m.mu.Unlock()
@@ -1370,10 +1071,8 @@ func (m *SubManager) Run(ctx context.Context) {
 		m.mu.Unlock()
 	}()
 
-	// Block until ctx is cancelled. The per-subscription ticker goroutines run
-	// on child contexts of ctx, so they observe the same cancellation; keeping
-	// runCtx valid for the whole Run lifetime is what lets Add/Replace live-
-	// reschedule (see the runCtx doc above).
+	// The per-subscription ticker goroutines run on child contexts of ctx, so
+	// they observe the same cancellation.
 	<-ctx.Done()
 }
 
@@ -1411,7 +1110,7 @@ func (m *SubManager) runOne(ctx context.Context, sub Subscription) {
 	// Immediate fetch when the cache is absent (fresh install / first run).
 	next := sub.Interval
 	if _, err := os.Stat(m.cachePath(sub)); err != nil && os.IsNotExist(err) {
-		res := m.UpdateOne(ctx, sub.ID)
+		res := m.updateOne(ctx, sub.ID)
 		next = schedule(res.OK)
 	}
 
@@ -1422,7 +1121,7 @@ func (m *SubManager) runOne(ctx context.Context, sub Subscription) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			res := m.UpdateOne(ctx, sub.ID)
+			res := m.updateOne(ctx, sub.ID)
 			timer.Reset(schedule(res.OK))
 		}
 	}

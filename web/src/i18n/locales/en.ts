@@ -10,7 +10,6 @@ const en = {
     delete: 'Delete',
     running: 'Running',
     loading: 'Loading…',
-    backendPending: 'Pending backend (SP-A)',
     errorTitle: 'Something went wrong',
     errorBody: 'The page hit an unexpected error. Reloading usually fixes it.',
     reload: 'Reload',
@@ -54,13 +53,13 @@ const en = {
     consoleTag: 'Console',
     kernelDns: 'DNS server',
     sub: {
-      overview: 'Live monitoring · QPS / traffic / connections',
+      overview: 'Live monitoring · QPS / decisions / upstream health',
       setupGuide: 'Connect iPhone, iPad, and Android devices to 5gpn encrypted DNS',
       logs: 'Recent 5gpn-dns resolution history · decisions & outcomes',
       resolveTest: "Enter any domain to simulate 5gpn-dns's resolution decision",
       policyRules: 'Unified intent rules — one matcher → block/direct/proxy in the DNS engine',
       mihomo: 'Kernel health + live logs · read-only, deep ops in zashboard',
-      mihomoConfig: 'Edit the whole effective mihomo config · six infrastructure invariants required',
+      mihomoConfig: 'Edit the whole effective mihomo config · seven infrastructure invariants required',
       settings: 'System and service configuration',
     },
   },
@@ -140,8 +139,7 @@ const en = {
     tgbotSave: 'Save & apply',
     tgbotSaved: 'Telegram bot configuration applied.',
     tgbotSaveFailed: 'Save failed.',
-    // Task 4.3 — Settings page card grid (DoT service / console / Telegram bot / upstream DNS / ECS / about strip)
-    greenfieldTip: 'Managed by the CLI/SP-C for now',
+    greenfieldTip: 'Managed through the installer TUI',
     dotService: 'DoT service',
     dotDomain: 'DoT domain',
     cert: "Let's Encrypt certificate",
@@ -167,7 +165,6 @@ const en = {
     rateLimited: 'Rate limited — slow down and try again in a moment.',
     blocked: 'Too many failed login attempts — this address is blocked for ~{{minutes}} min.',
     requestFailed: 'Request failed ({{status}}).',
-    backendPending: 'Backend not ready yet (pending SP-A)',
   },
   auth: {
     title: '5GPN Console',
@@ -193,12 +190,7 @@ const en = {
     noVerdict: 'no verdict',
   },
   overview: {
-    // Task 5.2 — Overview/Dashboard page, trimmed in B3. LIVE-only: QPS and
-    // decision split from /api/stats. The former current-exit card and
-    // traffic-preview cards were dropped (their backend endpoints were
-    // removed in SP-2) — egress switching is now the operator's raw mihomo
-    // config (UP-4), not a console feature.
-    intro: 'QPS and the decision split below are live, derived from /api/stats.',
+    intro: 'QPS and the decision split below are live, derived from /api/status.',
     live: 'Live',
     paused: 'Paused',
     pause: 'Pause',
@@ -209,12 +201,10 @@ const en = {
     decision: {
       block: 'Blocked',
       forceDirect: 'Force-direct',
-      blacklist: 'Force-proxy',
+      forceProxy: 'Force-proxy',
       chnrouteCn: 'CN direct',
       chnrouteForeign: 'Foreign proxy',
     },
-    // "A档" dashboard charts — still LIVE SNAPSHOTS from /api/stats, added on
-    // top of the QPS/decision-split cards above (no new backend fields).
     cacheHitRate: 'Cache hit rate',
     upstreamHealth: 'Upstream health & latency',
     upstreamHealthOk: 'OK',
@@ -243,7 +233,7 @@ const en = {
     label: {
       block: 'Blocked',
       forceDirect: 'Force-direct',
-      blacklist: 'Force-proxy',
+      forceProxy: 'Force-proxy',
       chnrouteCn: 'CN direct',
       chnrouteForeign: 'Foreign proxy',
     },
@@ -254,22 +244,22 @@ const en = {
     steps: {
       block: ['Matched the block domain set', '5gpn-dns returns NXDOMAIN', 'The client never opens a connection'],
       forceDirect: [
-        'Matched the force-direct allowlist',
+        'Matched a direct rule',
         'Resolved via the trust resolver for the real IP',
         'Result: direct, bypassing the gateway',
       ],
-      blacklist: [
-        'Matched the blacklist denylist',
+      forceProxy: [
+        'Matched a proxy rule',
         '5gpn-dns returns the gateway IP',
         'The connection is steered to the proxy egress',
       ],
       chnrouteCn: [
-        'No allow/deny match — falls to chnroute arbitration',
+        'No policy rule matched — falls to chnroute arbitration',
         'Concurrent query: domestic UDP ‖ trust DoT',
         'Domestic answer IP is in chnroute — adopted, direct',
       ],
       chnrouteForeign: [
-        'No allow/deny match — falls to chnroute arbitration',
+        'No policy rule matched — falls to chnroute arbitration',
         'Concurrent query: domestic UDP ‖ trust DoT',
         'Answer IP is not in chnroute — returns the gateway IP, proxied',
       ],
@@ -300,7 +290,7 @@ const en = {
     // keys are the generic fallback used when `reason` is missing/unknown.
     decision: {
       forceDirect: 'Force-direct',
-      blacklist: 'Force-proxy',
+      forceProxy: 'Force-proxy',
       chnrouteCn: 'CN direct',
       chnrouteForeign: 'Foreign proxy',
       direct: 'Direct',
@@ -308,14 +298,8 @@ const en = {
       block: 'Blocked',
     },
   },
-  // UP-3 (B1-B4) — 策略规则 (Policy Rules): the unified intent-rule console
-  // over `/api/policy/rules` + `/api/policy/fallback`. Each rule is one
-  // matcher (domain / domain-suffix / domain-keyword / subscription) → one
-  // intent (block/direct/proxy), compiled to the DNS engine only — UP-4 made
-  // the policy strictly binary: a proxy intent carries no selector, and what
-  // happens to gateway-bound traffic afterwards is the operator's raw mihomo
-  // config. Replaces the old DNS-rules (`rules.*`) and rule-subscription
-  // (`subscriptions.*`) namespaces, both removed.
+  // Unified DNS intent rules over `/api/policy/rules` and
+  // `/api/policy/fallback`.
   policyRules: {
     applyHint: 'Edits save right away — the compiled policy only reloads after you Apply.',
     newRule: 'Add rule',
@@ -341,6 +325,7 @@ const en = {
       enabledLabel: 'Enabled',
       errValueRequired: 'Enter a value.',
       errUrlInvalid: 'Enter a valid http(s) URL.',
+      errIntervalRequired: 'Enter a refresh interval.',
       saveFailed: 'Save failed.',
       createOk: 'Rule added.',
       editOk: 'Rule saved.',
@@ -405,7 +390,7 @@ const en = {
   },
   mihomoConfig: {
     intro:
-      'Edit the raw mihomo config as one whole document — there is no daemon-owned region to protect anymore. The server enforces the six infrastructure invariants below and will refuse any edit that deletes one of them.',
+      'Edit the complete operator-owned mihomo config. The server enforces the seven infrastructure invariants below and refuses any edit that deletes one of them.',
     loadFailed: 'Failed to load the mihomo config.',
     editorLabel: 'mihomo config (YAML)',
     controllerReachable: 'Controller reachable',
@@ -424,8 +409,9 @@ const en = {
     resetFailed: 'Restore failed.',
     invariantsTitle: 'Required infrastructure (present-or-reject)',
     invariants: {
-      controller: { name: 'Controller', desc: 'external-controller bound to the loopback controller (127.0.0.1:9090).' },
-      sniproxy: { name: 'sniproxy inbound', desc: 'a tunnel listener on port 443 targeting 127.0.0.1:443.' },
+      controller: { name: 'TLS controller', desc: 'plaintext control is disabled and external-controller-tls uses 127.0.0.1:9090 with the fixed zash certificate paths.' },
+      secret: { name: 'Controller secret', desc: 'the controller bearer secret stays synchronized with the daemon client and console proxy.' },
+      gateway: { name: 'Gateway ingress', desc: 'a gateway* tunnel listener on port 443 targeting 127.0.0.1:443.' },
       dns: { name: 'Our DNS', desc: 'a dns block whose nameserver includes the egress broker udp://127.0.0.1:5354.' },
       console: {
         name: 'Console SNI split',

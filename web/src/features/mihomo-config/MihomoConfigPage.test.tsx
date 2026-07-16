@@ -44,6 +44,8 @@ describe('MihomoConfigPage', () => {
     const textarea = (await screen.findByTestId('mihomo-config-textarea')) as HTMLTextAreaElement
     await waitFor(() => expect(textarea.value).toBe(CURRENT_TEXT))
     expect(api.getMihomoConfig).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('Gateway ingress')).toBeInTheDocument()
+    expect(screen.getByText('Controller secret')).toBeInTheDocument()
     expect(screen.getByText('Console SNI split')).toBeInTheDocument()
   })
 

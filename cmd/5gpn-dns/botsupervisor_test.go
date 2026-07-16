@@ -109,7 +109,7 @@ func TestBotSupervisor_ApplyLifecycle(t *testing.T) {
 	if err := sup.Apply(&good, []int64{111}); err != nil {
 		t.Fatalf("Apply enable: %v", err)
 	}
-	if v := sup.View(); !v.TokenSet || !v.Running || v.State != botStateHealthy || len(v.AdminIDs) != 1 || v.AdminIDs[0] != 111 {
+	if v := sup.View(); !v.TokenSet || v.State != botStateHealthy || len(v.AdminIDs) != 1 || v.AdminIDs[0] != 111 {
 		t.Fatalf("after enable, view = %+v", v)
 	}
 	if tc, err := LoadTGBot(file); err != nil || tc == nil || tc.Token != "good-token" {
@@ -141,7 +141,7 @@ func TestBotSupervisor_ApplyLifecycle(t *testing.T) {
 	if last != prevRunner {
 		t.Error("bad-token Apply replaced the old bot")
 	}
-	if v := sup.View(); !v.Running || !v.TokenSet || len(v.AdminIDs) != 2 {
+	if v := sup.View(); v.State != botStateHealthy || !v.TokenSet || len(v.AdminIDs) != 2 {
 		t.Errorf("bad-token Apply changed live state: %+v", v)
 	}
 
@@ -149,7 +149,7 @@ func TestBotSupervisor_ApplyLifecycle(t *testing.T) {
 	if err := sup.Apply(&empty, []int64{111}); err != nil {
 		t.Fatalf("Apply disable: %v", err)
 	}
-	if v := sup.View(); v.Running || v.TokenSet || v.State != botStateDisabled {
+	if v := sup.View(); v.TokenSet || v.State != botStateDisabled {
 		t.Errorf("after disable, view = %+v", v)
 	}
 	if tc, _ := LoadTGBot(file); tc == nil || tc.Token != "" {
@@ -168,7 +168,7 @@ func TestBotSupervisor_StartEmptyTokenDisabled(t *testing.T) {
 	if calls != 0 {
 		t.Errorf("Start with empty token called factory %d times", calls)
 	}
-	if v := sup.View(); v.Running || v.TokenSet || v.State != botStateDisabled {
+	if v := sup.View(); v.TokenSet || v.State != botStateDisabled {
 		t.Errorf("empty-token view = %+v", v)
 	}
 }
@@ -190,7 +190,7 @@ func TestBotSupervisor_StartupFailureRetriesAndRecovers(t *testing.T) {
 	}
 
 	sup.Start()
-	view := waitBotView(t, sup, func(v TGBotView) bool { return v.Running })
+	view := waitBotView(t, sup, func(v TGBotView) bool { return v.State == botStateHealthy })
 	if view.State != botStateHealthy || view.LastError != "" {
 		t.Fatalf("recovered view = %+v", view)
 	}
@@ -248,7 +248,9 @@ func TestBotSupervisor_StartupBuildCannotOverwriteNewConfig(t *testing.T) {
 	}
 	close(releaseOld)
 	<-oldBuilt
-	waitBotView(t, sup, func(v TGBotView) bool { return v.Running && len(v.AdminIDs) == 1 && v.AdminIDs[0] == 22 })
+	waitBotView(t, sup, func(v TGBotView) bool {
+		return v.State == botStateHealthy && len(v.AdminIDs) == 1 && v.AdminIDs[0] == 22
+	})
 	time.Sleep(5 * time.Millisecond)
 
 	sup.mu.Lock()
@@ -320,7 +322,7 @@ func TestBotSupervisor_RunnerExitUpdatesHealth(t *testing.T) {
 	if err := sup.Apply(&token, []int64{1}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	view := waitBotView(t, sup, func(v TGBotView) bool { return !v.Running && v.State == botStateDegraded })
+	view := waitBotView(t, sup, func(v TGBotView) bool { return v.State == botStateDegraded })
 	if view.LastError == "" {
 		t.Fatalf("runner exit omitted last error: %+v", view)
 	}
@@ -345,7 +347,7 @@ func TestBotSupervisor_HealthReporterIsRunnerScoped(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	view := sup.View()
-	if !view.Running || view.State != botStateDegraded || view.LastError != "poll failed" {
+	if view.State != botStateDegraded || view.LastError != "poll failed" {
 		t.Fatalf("degraded health view = %+v", view)
 	}
 	if !oldRunner.reportHealth(nil) || sup.View().State != botStateHealthy {
@@ -371,13 +373,13 @@ func TestBotSupervisor_PersistFailureLeavesLiveConfigUntouched(t *testing.T) {
 	runner := &fakeRunner{}
 	sup.factory = func(Config, *Controller) (botRunner, error) { return runner, nil }
 	sup.Start()
-	waitBotView(t, sup, func(v TGBotView) bool { return v.Running })
+	waitBotView(t, sup, func(v TGBotView) bool { return v.State == botStateHealthy })
 
 	if err := sup.Apply(nil, []int64{2}); err == nil {
 		t.Fatal("Apply should fail when persistence directory is missing")
 	}
 	view := sup.View()
-	if len(view.AdminIDs) != 1 || view.AdminIDs[0] != 1 || !view.Running {
+	if len(view.AdminIDs) != 1 || view.AdminIDs[0] != 1 || view.State != botStateHealthy {
 		t.Fatalf("persist failure changed live view: %+v", view)
 	}
 	if got := runner.adminSnapshot(); len(got) != 0 {

@@ -10,17 +10,7 @@ import (
 	"time"
 )
 
-// MihomoClient talks to a mihomo (Clash-Meta) external controller REST API.
-// Trimmed by the 2026-07-15 policy/mihomo decoupling: the daemon no longer
-// projects a per-domain rule set into mihomo, so the per-provider/
-// per-selector mutation methods (force-refresh a proxy/rule provider, switch
-// a selector's active member) are removed along with the structured egress
-// model + api_egress.go that were their only callers. What's KEPT: PutConfigs
-// (PUT /configs — reused by the mihomo-config-editor's hot-apply,
-// api_mihomo_config.go) and Reachable, the one read-only status call so far
-// (GET /api/mihomo/config's controller_reachable field; the browser-facing
-// /proxy/ reverse-proxy in mihomo_proxy.go covers richer read-only monitoring
-// today).
+// MihomoClient provides verified controller status and hot config apply.
 //
 // It deliberately dials LOOPBACK through verified TLS: MihomoController
 // supplies the loopback host:port to connect to, while ZashDomain supplies the
@@ -68,16 +58,6 @@ func (c *MihomoClient) PutConfigs(ctx context.Context, path string) error {
 		return fmt.Errorf("mihomo: encode configs body: %w", err)
 	}
 	return c.do(ctx, http.MethodPut, "/configs?force=false", body)
-}
-
-// Reachable reports whether the controller answered at all — any completed
-// HTTP round trip (even a non-2xx status, e.g. 401 on a bad/missing secret)
-// counts as reachable; only a dial/timeout failure (mihomo down, wrong
-// address) counts as unreachable. Used by GET /api/mihomo/config's
-// controller_reachable field, a light health signal for the console — NOT an
-// auth check.
-func (c *MihomoClient) Reachable(ctx context.Context) bool {
-	return c.Status(ctx).Reachable
 }
 
 // Status probes /version and reports both transport reachability and whether

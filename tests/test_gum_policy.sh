@@ -8,14 +8,10 @@ rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 INSTALL="$ROOT/install.sh"
 TGBOT_HELPER="$ROOT/scripts/setup-tgbot.sh"
 
-# --- legacy python web control plane gone ---
+# --- removed Python web control plane stays absent ---
 [ ! -e "$ROOT/api-server.py" ] || fail "api-server.py must be removed"
 [ ! -e "$ROOT/webui" ]         || fail "webui/ must be removed"
 grep -Eq 'setup_api|api-server\.py|API_PORT' "$INSTALL" && fail "install.sh still references the removed HTTP API"
-# Upgrade cleanup of the removed 5gpn-api unit now lives in
-# clean_previous_install's legacy-unit loop (fresh-artifact rule, 2026-07-10).
-sed -n '/^clean_previous_install()/,/^}/p' "$INSTALL" | grep -Fq '5gpn-api.service' \
-    || fail "no upgrade cleanup for the removed 5gpn-api unit (clean_previous_install legacy loop)"
 
 # --- gum bootstrap: prebuilt + verify, version-pinned, never fatal ---
 grep -Eq 'install_gum\(\)' "$INSTALL"                 || fail "no install_gum() bootstrap"

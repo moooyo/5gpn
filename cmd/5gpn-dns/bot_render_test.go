@@ -169,7 +169,7 @@ func TestRenderStatus_ReasonBreakdown(t *testing.T) {
 		Total:           100,
 		Block:           7,
 		ForceDirect:     5,
-		Blacklist:       3,
+		ForceProxy:      3,
 		ChnrouteCN:      40,
 		ChnrouteForeign: 45,
 		CacheEntries:    12,
@@ -185,11 +185,11 @@ func TestRenderStatus_ReasonBreakdown(t *testing.T) {
 
 	// The reason breakdown must be derivable/visible:
 	// 直连 = force_direct(5) + chnroute_cn(40) = 45
-	// 代理 = blacklist(3) + chnroute_foreign(45) = 48
+	// 代理 = force_proxy(3) + chnroute_foreign(45) = 48
 	for _, want := range []string{
 		"总", "100", // total
 		"直连", "45", // force_direct + chnroute_cn
-		"代理", "48", // blacklist + chnroute_foreign
+		"代理", "48", // force_proxy + chnroute_foreign
 		"拦截", "7", // block
 		"缓存", "12", // cache_entries
 	} {
@@ -255,14 +255,7 @@ func TestRenderStatusCert(t *testing.T) {
 	})
 }
 
-// NOTE (UP-1 Task D3/D4): TestRenderUpdateResults/TestRenderDomains/
-// TestParseCallback_DomainTypes were REMOVED here — they covered
-// renderUpdateResults/renderDomains/domadd:/domdel: callback parsing, all
-// deleted along with the bot's subscription-refresh and GFW-domain
-// view+edit commands (absorbed by the unified policy-rule model).
-
-// #2: a broken cert renders an unmistakable "cannot load" line in the bot status
-// card (the only surface reachable when the :9443 console is down).
+// A broken cert renders an unmistakable "cannot load" line in bot status.
 func TestRenderStatus_CertBroken(t *testing.T) {
 	out := renderStatus(Stats{}, map[string]string{}, statusFacts{}, "",
 		&CertStatus{Broken: true, Error: "open /etc/5gpn/cert/fullchain.pem: no such file"})
@@ -296,8 +289,6 @@ func TestRenderResolveTest(t *testing.T) {
 }
 
 func TestBotMenusAreVersionedAndUnambiguous(t *testing.T) {
-	t.Setenv("DNS_CONSOLE_DOMAIN", "console.example.com")
-	t.Setenv(consoleDomainEnv, "console.example.com")
 	t.Setenv(baseDomainEnv, "example.com")
 
 	main := mainMenu()

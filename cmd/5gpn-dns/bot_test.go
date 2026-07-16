@@ -1,8 +1,6 @@
 package main
 
 import (
-	"context"
-	"os"
 	"strings"
 	"testing"
 
@@ -153,13 +151,14 @@ func TestParseCallback(t *testing.T) {
 		wantKind callbackKind
 		wantArg  string
 	}{
-		{"menu:main", cbMenuMain, ""},
-		{"act:status", cbStatus, ""},
-		{"menu:upstreams", cbUpstreams, ""},
-		{"act:reload", cbReload, ""},
+		{versionedCallback("menu:main"), cbMenuMain, ""},
+		{versionedCallback("act:status"), cbStatus, ""},
+		{versionedCallback("menu:upstreams"), cbUpstreams, ""},
+		{versionedCallback("act:reload"), cbReload, ""},
 		{"", cbUnknown, ""},
 		{"garbage", cbUnknown, "garbage"},
-		{"act:something_else", cbUnknown, "something_else"},
+		{versionedCallback("act:something_else"), cbUnknown, "something_else"},
+		{"menu:main", cbUnknown, "menu:main"},
 	}
 	for _, c := range cases {
 		got := parseCallback(c.data)
@@ -171,12 +170,6 @@ func TestParseCallback(t *testing.T) {
 		}
 	}
 }
-
-// NOTE (UP-1 Task D3/D4): TestDomainOpsRejectBeforeMutate/
-// TestDomainOpsValidMutates/TestApplyDomainOp_Typed were REMOVED here — they
-// covered applyDomainOp (the bot's GFW-domain add/del command), deleted along
-// with Controller.AddRule/RemoveRule/ListRules (absorbed by the unified
-// policy-rule model).
 
 // TestPendingState exercises the per-chat conversational state machine: setting
 // a pending action, reading it, and clearing it are all guarded and correct.
@@ -197,22 +190,6 @@ func TestPendingState(t *testing.T) {
 	bt.clearPending(42)
 	if _, ok := bt.getPending(42); ok {
 		t.Errorf("getPending after clear still set")
-	}
-}
-
-// TestRenderReload covers the reload button's ok/err rendering.
-func TestRenderReload(t *testing.T) {
-	dir := t.TempDir()
-	okCtrl := NewController(nil, func() error { return nil }, dir, nil, nil, nil)
-	bt := &Bot{ctrl: okCtrl, pending: map[int64]string{}}
-	if out := bt.doReload(context.Background()); !strings.Contains(out, "✅") {
-		t.Errorf("doReload success render = %q, want a ✅", out)
-	}
-
-	errCtrl := NewController(nil, func() error { return os.ErrPermission }, dir, nil, nil, nil)
-	bt2 := &Bot{ctrl: errCtrl, pending: map[int64]string{}}
-	if out := bt2.doReload(context.Background()); !strings.Contains(out, "❌") {
-		t.Errorf("doReload failure render = %q, want a ❌", out)
 	}
 }
 

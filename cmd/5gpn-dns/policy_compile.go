@@ -1,26 +1,6 @@
-// Package main (this file): the DNS-side policy compiler. CompilePolicy
-// turns a PolicyModel (policy_rules.go) into the concrete DNS-side rule-file
-// assignment (CompiledDNS): which category (block/direct/blacklist — the
-// existing DomainSet categories rules.go/main.go already load) each enabled
-// rule's matcher contributes to, split into inline manual-file entries
-// (grouped by MatchType, so the caller can write them straight to the
-// existing "<category>[.<matchtype>].txt" convention — see main.go's
-// globPattern) versus subscription fetch specs (a category cache directory,
-// "<category>/<name>.txt", always MatchSuffix).
-//
-// Binary policy / DNS-only compile (2026-07-15 policy/mihomo decoupling
-// design, §2.4): this is the compiler's ONLY output now. There used to be a
-// second, mihomo-side projection (CompiledMihomo: split-rules/rule-providers/
-// a local file rule-provider per subscription) rendered by the same walk —
-// that whole projection is REMOVED. A proxy-intent rule means only "steer to
-// the gateway" (DNS category "blacklist"); what mihomo does with gateway-
-// bound traffic afterwards is the operator's own mihomo config, never
-// something this compiler renders. Do not reintroduce a mihomo-side return
-// value here — see the design doc's §3 removals list.
-//
-// This is pure/deterministic: no file I/O happens here (that is a later
-// engine's job — policy_engine.go writes rulesDir and fetches
-// subscriptions).
+// CompilePolicy validates an ordered policy and derives its subscription
+// fetch set. Inline matchers are materialized directly by CompileRuntimePolicy
+// and do not need an intermediate category file.
 package main
 
 import (
@@ -30,19 +10,13 @@ import (
 	"strings"
 )
 
-// CompiledDNS is the output of CompilePolicy: Manual[category][matchType]
-// holds the inline (non-subscription) entries destined for the manual
-// "<category>[.<matchtype>].txt" files; Subs holds one Subscription fetch
-// descriptor per subscription-kind rule, Category set from the rule's
-// Intent. Both are computed fresh on every compile — the caller (the policy
-// engine) diffs/writes them, this type carries no I/O state of its own.
+// CompiledDNS is the set of policy-owned subscription caches to reconcile.
 type CompiledDNS struct {
-	Manual map[string]map[MatchType][]string
-	Subs   []Subscription
+	Subs []Subscription
 }
 
-// intentCategory maps a PolicyRule's Intent to the DNS-side DomainSet
-// category it compiles into: block→block, direct→direct, proxy→blacklist.
+// intentCategory maps a PolicyRule's Intent to its subscription-cache
+// directory: block→block, direct→direct, proxy→proxy.
 // ok is false for any value outside the validated Intent enum (validIntents,
 // policy_rules.go) — the compiler treats that as an error rather than
 // silently dropping or miscategorizing the rule, since a model normally
@@ -54,32 +28,13 @@ func intentCategory(i Intent) (string, bool) {
 	case IntentDirect:
 		return "direct", true
 	case IntentProxy:
-		return "blacklist", true
+		return "proxy", true
 	}
 	return "", false
 }
 
-// kindMatchType maps a matcher kind to the DNS DomainSet MatchType (rules.go)
-// its inline entries are written as: domain→exact (whole-name), domain-suffix
-// →suffix (parent-domain/self), domain-keyword→keyword (substring). The MVP
-// matcher surface is exactly these plus subscription (policy_rules.go);
-// subscription never reaches this function directly (CompilePolicy branches
-// on KindSubscription before calling it) — its cache file is always suffix
-// per main.go's globPattern, which is why the default case documents that
-// rather than requiring a KindSubscription arm.
-func kindMatchType(k MatcherKind) MatchType {
-	switch k {
-	case KindDomain:
-		return MatchExact
-	case KindDomainKeyword:
-		return MatchKeyword
-	default: // KindDomainSuffix (and KindSubscription's cache file: always suffix)
-		return MatchSuffix
-	}
-}
-
-// dnsValue returns the string an inline matcher contributes to a DNS
-// DomainSet file for its kind: domain/domain-suffix are normalized FQDNs
+// dnsValue returns the normalized value of an inline matcher. Domain and
+// domain-suffix values are normalized FQDNs
 // (normalizeDomain, parsers.go — lowercase, no trailing dot); domain-keyword
 // is a lowercased, trimmed substring token (no FQDN shape required — mirrors
 // validateMatcher's free-form keyword handling in policy_rules.go).
@@ -101,39 +56,14 @@ func providerName(ruleID string) string { return "pol_" + ruleID }
 // returns the same result, with no file I/O — writing rulesDir and fetching
 // subscriptions is the policy engine's job. Only Enabled rules compile, in
 // Order (operator precedence).
-func CompilePolicy(model PolicyModel, rulesDir string) (CompiledDNS, error) {
-	if model.Fallback.Policy == "" {
-		model.Fallback.Policy = FallbackAuto
-	}
+func CompilePolicy(model PolicyModel) (CompiledDNS, error) {
 	if err := validateFallback(model.Fallback); err != nil {
 		return CompiledDNS{}, fmt.Errorf("policy compile: %w", err)
 	}
-	cdns := CompiledDNS{Manual: map[string]map[MatchType][]string{}}
+	cdns := CompiledDNS{}
 
 	rules := append([]PolicyRule(nil), model.Rules...)
 	sort.SliceStable(rules, func(i, j int) bool { return rules[i].Order < rules[j].Order })
-
-	// seen dedupes (category, matchType, value) so a manual file never gets a
-	// visible duplicate line, even if two enabled rules normalize to the same
-	// entry.
-	seen := map[string]map[MatchType]map[string]bool{}
-	addManual := func(cat string, mt MatchType, val string) {
-		if val == "" {
-			return
-		}
-		if cdns.Manual[cat] == nil {
-			cdns.Manual[cat] = map[MatchType][]string{}
-			seen[cat] = map[MatchType]map[string]bool{}
-		}
-		if seen[cat][mt] == nil {
-			seen[cat][mt] = map[string]bool{}
-		}
-		if seen[cat][mt][val] {
-			return
-		}
-		seen[cat][mt][val] = true
-		cdns.Manual[cat][mt] = append(cdns.Manual[cat][mt], val)
-	}
 
 	for _, r := range rules {
 		if err := validatePolicyRule(r); err != nil {
@@ -142,12 +72,11 @@ func CompilePolicy(model PolicyModel, rulesDir string) (CompiledDNS, error) {
 		if !r.Enabled {
 			continue
 		}
-		cat, ok := intentCategory(r.Intent)
-		if !ok {
-			return CompiledDNS{}, fmt.Errorf("policy compile: rule %s has unknown intent %q", r.ID, r.Intent)
-		}
-
 		if r.Matcher.Kind == KindSubscription {
+			cat, ok := intentCategory(r.Intent)
+			if !ok {
+				return CompiledDNS{}, fmt.Errorf("policy compile: rule %s has unknown intent %q", r.ID, r.Intent)
+			}
 			// A fetch descriptor assigned to this intent's category. Name =
 			// providerName purely for a stable, path-safe cache basename.
 			cdns.Subs = append(cdns.Subs, Subscription{
@@ -159,13 +88,7 @@ func CompilePolicy(model PolicyModel, rulesDir string) (CompiledDNS, error) {
 				Enabled:  true,
 				Interval: r.Matcher.Interval,
 			})
-			continue
 		}
-
-		// Inline (literal) matcher: domain / domain-suffix / domain-keyword
-		// (the only remaining valid kinds) all contribute to a DomainSet.
-		val := dnsValue(r.Matcher.Kind, r.Matcher.Value)
-		addManual(cat, kindMatchType(r.Matcher.Kind), val)
 	}
 
 	return cdns, nil
@@ -191,9 +114,6 @@ type runtimePolicySnapshot struct {
 // the operator's global order. A missing cache is an empty matcher (offline-
 // safe first fetch); a present but unreadable cache is a hard apply error.
 func CompileRuntimePolicy(model PolicyModel, rulesDir string) (*runtimePolicySnapshot, error) {
-	if model.Fallback.Policy == "" {
-		model.Fallback.Policy = FallbackAuto
-	}
 	if err := validateFallback(model.Fallback); err != nil {
 		return nil, fmt.Errorf("policy runtime: %w", err)
 	}

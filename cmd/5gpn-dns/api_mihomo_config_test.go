@@ -11,6 +11,12 @@ import (
 	"testing"
 )
 
+func TestMihomoBinaryPath(t *testing.T) {
+	if mihomoBin != "/opt/5gpn/bin/mihomo" {
+		t.Fatalf("mihomoBin = %q", mihomoBin)
+	}
+}
+
 // fakeMihomoTester is an injectable mihomoTester: err (if non-nil) is
 // returned verbatim from Test, and every call's (path, dir) args are
 // recorded so tests can assert the validation ran against a SCRATCH file,
@@ -320,45 +326,11 @@ func TestMihomoConfigAPI_Put_ApplyFails_DiskStillUpdated(t *testing.T) {
 	}
 }
 
-// TestMihomoConfigAPI_Default returns the seed text without touching disk or
-// the controller.
-func TestMihomoConfigAPI_Default(t *testing.T) {
-	fx := newMihomoConfigTestFixture(t)
-	t.Setenv("DNS_CONSOLE_DOMAIN", fx.infra.ConsoleDomain)
-	t.Setenv("DNS_ZASH_DOMAIN", fx.infra.ZashDomain)
-	t.Setenv("DNS_MIHOMO_LISTEN_IPS", "203.0.113.10")
-	t.Setenv("DNS_GATEWAY_IP", fx.infra.GatewayIP)
-	t.Setenv("DNS_MIHOMO_SECRET", "s3cr3t")
-	t.Setenv("DNS_PUBLIC_IP", "203.0.113.10")
-
-	rec := doAPI(fx.cs, http.MethodGet, "/api/mihomo/config/default", nil, fx.token, true)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Text != goldenMihomoConfig() {
-		t.Fatalf("default text mismatch:\n--- got ---\n%s\n--- want ---\n%s", resp.Text, goldenMihomoConfig())
-	}
-	if fx.tester.calls != 0 || fx.ctl.putCalls != 0 {
-		t.Fatalf("GET .../default must not validate or apply anything")
-	}
-	onDisk, _ := fx.store.Read()
-	if onDisk != fx.golden {
-		t.Fatalf("GET .../default must not touch the on-disk config")
-	}
-}
-
 // TestMihomoConfigAPI_Reset restores the seed default: it should overwrite a
 // broken on-disk config and successfully re-apply it.
 func TestMihomoConfigAPI_Reset(t *testing.T) {
 	fx := newMihomoConfigTestFixture(t)
-	t.Setenv("DNS_CONSOLE_DOMAIN", fx.infra.ConsoleDomain)
-	t.Setenv("DNS_ZASH_DOMAIN", fx.infra.ZashDomain)
+	t.Setenv("DNS_BASE_DOMAIN", "5gpn.test")
 	t.Setenv("DNS_MIHOMO_LISTEN_IPS", "203.0.113.10")
 	t.Setenv("DNS_GATEWAY_IP", fx.infra.GatewayIP)
 	t.Setenv("DNS_MIHOMO_SECRET", "s3cr3t")
@@ -393,6 +365,13 @@ func TestMihomoConfigAPI_Reset(t *testing.T) {
 	}
 	if onDisk != goldenMihomoConfig() {
 		t.Fatalf("reset should restore the seed default:\n--- got ---\n%s\n--- want ---\n%s", onDisk, goldenMihomoConfig())
+	}
+	backup, err := os.ReadFile(fx.store.Path() + ".bak")
+	if err != nil || string(backup) != "garbage: not a real config" {
+		t.Fatalf("reset backup = %q, %v", backup, err)
+	}
+	if info, err := os.Stat(fx.store.Path() + ".bak"); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("reset backup mode: info=%v err=%v", info, err)
 	}
 	if fx.ctl.putCalls != 1 {
 		t.Fatalf("reset should hot-apply the restored default, got %d PutConfigs calls", fx.ctl.putCalls)

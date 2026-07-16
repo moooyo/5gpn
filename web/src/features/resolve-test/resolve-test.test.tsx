@@ -65,7 +65,7 @@ describe('ResolveTestPage', () => {
     await user.click(screen.getByRole('button', { name: i18n.t('resolveTest.run') }))
 
     expect(await screen.findByText('国内直连')).toBeInTheDocument()
-    expect(screen.getByText('未命中黑白名单，进入 chnroute 仲裁')).toBeInTheDocument()
+    expect(screen.getByText('未命中策略规则，进入 chnroute 仲裁')).toBeInTheDocument()
     expect(screen.getByText('并发查询：国内 UDP ‖ 可信 DoT')).toBeInTheDocument()
     expect(screen.getByText('国内答案 IP ∈ chnroute → 采用，直连')).toBeInTheDocument()
     expect(screen.getByText('110.242.68.66')).toBeInTheDocument()

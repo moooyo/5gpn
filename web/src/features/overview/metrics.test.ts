@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { arbitrationSegments, cacheHitRate, upstreamHealth } from './metrics'
+import { arbitrationSegments, cacheHitRate, decisionCounts, upstreamHealth } from './metrics'
+
+describe('decisionCounts', () => {
+  it('maps the current force_proxy stats field', () => {
+    expect(decisionCounts({
+      block: 1,
+      force_direct: 2,
+      force_proxy: 3,
+      chnroute_cn: 4,
+      chnroute_foreign: 5,
+    })).toEqual({ block: 1, forceDirect: 2, forceProxy: 3, chnrouteCn: 4, chnrouteForeign: 5 })
+  })
+})
 
 describe('cacheHitRate', () => {
   it('computes hits / (hits + misses) * 100', () => {

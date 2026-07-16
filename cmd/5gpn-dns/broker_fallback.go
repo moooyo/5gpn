@@ -187,7 +187,7 @@ func newDefaultEgressDNSBroker(cfg Config) (*EgressDNSBroker, io.Closer, error) 
 	if strings.TrimSpace(cfg.EgressBrokerAddr) == "" {
 		return nil, nil, fmt.Errorf("egress DNS broker address is empty; mihomo requires a loopback broker listener")
 	}
-	upstream, closer, err := buildBrokerFallbackExchanger(cfg.XrayResolver, nil)
+	upstream, closer, err := buildBrokerFallbackExchanger(cfg.EgressResolver, nil)
 	if err != nil {
 		return nil, nil, err
 	}

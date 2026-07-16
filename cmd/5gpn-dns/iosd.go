@@ -30,11 +30,10 @@ var iosRoutes = map[string]iosRoute{
 // iosHandler returns the HTTP handler for the signed iOS DoT profile rooted at
 // wwwDir. It is mounted PUBLIC (no bearer token) on the control server at
 // /ios/ (behind http.StripPrefix) — the profile carries no secrets, and an
-// iPhone must be able to fetch it before it has any configuration. The old
-// standalone :8111 responder was removed; this handler is its in-mux successor.
+// iPhone must be able to fetch it before it has any configuration.
 //
 //   - GET /ios/ios-dot.mobileconfig → application/x-apple-aspen-config
-//   - GET /ios/ and /ios/index.html → redirect to the console setup guide
+//   - GET /ios/ → redirect to the console setup guide
 //
 // Anything else is 404; a non-GET method is 405; a missing backing file is 404
 // (not 500). Because only the fixed route table selects the filename — request
@@ -45,7 +44,7 @@ func iosHandler(wwwDir string) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+		if r.URL.Path == "/" {
 			http.Redirect(w, r, "/setup-guide", http.StatusSeeOther)
 			return
 		}

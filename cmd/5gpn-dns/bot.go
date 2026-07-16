@@ -19,11 +19,8 @@ import (
 	"github.com/go-telegram/bot/models"
 )
 
-// botServices are the two data-path services the status card reports on (and
-// that T3 will let an admin restart / tail). The bot only reads their state
-// here (systemctl is-active); mutation lands in T3. mihomo replaces xray as
-// the SNI/QUIC transparent-proxy data-plane service (see the mihomo
-// migration note in main.go).
+// botServices are the two runtime services the status card reports and whose
+// logs the bot may read.
 var botServices = []string{"5gpn-dns", "mihomo"}
 
 // domainRE is the canonical FQDN pattern, ported from tgbot.py's DOMAIN_RE but
@@ -50,9 +47,7 @@ func isValidDomain(s string) bool {
 
 // Bot is the in-process Telegram control plane. It wraps a *bot.Bot
 // (long-polling) and calls the in-memory Controller directly — no HTTP, no
-// bearer token. This is the Phase 5 Task 1 skeleton: connect, admin-gate, and
-// the /id bootstrap command. Command handlers (subscriptions, rules, status,
-// etc.) land in later tasks.
+// bearer token.
 type Bot struct {
 	tg         *bot.Bot
 	ctrl       *Controller
@@ -121,8 +116,7 @@ func newBotWithOptions(cfg Config, ctrl *Controller, extra ...bot.Option) (*Bot,
 		// prefix matches all callback_data, and parseCallback classifies it.
 		bot.WithCallbackQueryDataHandler("", bot.MatchTypePrefix, bt.handleCallback),
 		// Telegram retains a token's previous allowed_updates value when the field
-		// is omitted. Always declare both update types this implementation needs so
-		// a token migrated from another bot cannot leave inline buttons inert.
+		// is omitted. Always declare both update types this implementation needs.
 		bot.WithAllowedUpdates(bot.AllowedUpdates{"message", "callback_query"}),
 		bot.WithErrorsHandler(func(err error) {
 			log.Printf("bot: Telegram polling error: %v", err)
@@ -787,11 +781,11 @@ func (bt *Bot) handleCallback(ctx context.Context, b *bot.Bot, update *models.Up
 		result := bt.reload5gpnDNSResult()
 		auditBotOutcome("reload", uid, result.OK)
 		bt.edit(ctx, b, cq, result.HTML(), backKB("menu:maintenance"))
-	case cbMenuMaintenance, cbMenuRestart:
+	case cbMenuMaintenance:
 		bt.edit(ctx, b, cq, "维护操作：", maintenanceMenu())
 	case cbMenuLogs:
 		bt.edit(ctx, b, cq, "选择要查看日志的服务：", logsMenu())
-	case cbMenuIOS, cbIOS:
+	case cbMenuIOS:
 		bt.edit(ctx, b, cq, bt.opIOSResult().HTML(), iosMenu())
 	case cbIOSPhoto:
 		auditBot("ios-profile-photo", uid, "invoked")
@@ -828,11 +822,6 @@ func (bt *Bot) handleCallback(ctx context.Context, b *bot.Bot, update *models.Up
 		} else {
 			bt.edit(ctx, b, cq, result.HTML(), logsResultKB(intent.arg))
 		}
-	case cbRenew, cbRestart:
-		// Pre-upgrade messages contain direct privileged callbacks. Never execute
-		// them after confirmation was introduced; force the operator through a
-		// fresh, nonce-bound maintenance menu.
-		bt.edit(ctx, b, cq, "⚠️ 旧菜单已失效，请在新维护菜单中重新选择并确认。", maintenanceMenu())
 	default:
 		bt.edit(ctx, b, cq, "未知操作。", backKB("menu:main"))
 	}
@@ -880,7 +869,7 @@ func (bt *Bot) executeConfirmedAction(
 	var result botOperationResult
 	switch action {
 	case botActionRestartMihomo:
-		result = bt.opRestartResult("mihomo")
+		result = bt.restartMihomoResult()
 	case botActionRenewCert:
 		result = bt.opRenewCertResult()
 	default:
@@ -936,7 +925,7 @@ func (bt *Bot) sendLogDocument(ctx context.Context, b *bot.Bot, chatID int64, se
 }
 
 // --------------------------------------------------------------------------- //
-// Controller-backed operations (in-memory; NO HTTP, NO :9443, NO token)
+// Controller-backed operations (in-memory; no HTTP or bearer token)
 // --------------------------------------------------------------------------- //
 
 // doStatus builds the status card from the in-process Controller stats, the
@@ -991,20 +980,6 @@ func renderUpstreamList(specs []string) string {
 		return pre("（未配置）")
 	}
 	return pre(strings.Join(specs, "\n"))
-}
-
-// NOTE (UP-1 Task D3/D4): doListDomains/applyDomainOp/doUpdateLists (the
-// bot's "🎯 代理域名" GFW-domain view+edit and "🔄 更新订阅" quick actions)
-// were REMOVED here — they called Controller.ListAllRules/AddRule/
-// RemoveRule/Update, all absorbed by the unified policy-rule model and
-// managed exclusively via the web console's /api/policy/* surface now.
-
-// doReload rebuilds the rule sets from disk via the Controller.
-func (bt *Bot) doReload(ctx context.Context) string {
-	if err := bt.ctrl.Reload(); err != nil {
-		return "❌ <b>重载失败</b>\n" + pre(err.Error())
-	}
-	return "✅ <b>规则已重载</b>（已从磁盘重建并原子切换）。"
 }
 
 // --------------------------------------------------------------------------- //

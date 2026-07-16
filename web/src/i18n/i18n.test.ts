@@ -18,7 +18,7 @@ function flattenKeys(obj: unknown, prefix = ''): string[] {
 }
 
 // A representative sample spanning every namespace actually used by the
-// current pages (Task 7A cleanup — see i18n/locales/{en,zh}.ts). Not
+// current pages (see i18n/locales/{en,zh}.ts). Not
 // exhaustive (a full "every key resolves" check would just re-implement
 // i18next), but catches the common failure mode: a key present in one
 // catalog resolving to the raw key string in the other (missing translation)
@@ -26,7 +26,6 @@ function flattenKeys(obj: unknown, prefix = ''): string[] {
 const SAMPLE_KEYS = [
   'common.save',
   'common.cancel',
-  'common.backendPending',
   'common.errorTitle',
   'common.errorBody',
   'common.reload',
@@ -51,7 +50,7 @@ const SAMPLE_KEYS = [
   'setupGuide.android.hostnameLabel',
   'logs.searchPlaceholder',
   'logs.colTime',
-  'logs.decision.blacklist',
+  'logs.decision.forceProxy',
   'resolveTest.domainLabel',
   'resolveTest.run',
   'resolveTest.label.chnrouteCn',

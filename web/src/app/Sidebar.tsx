@@ -129,7 +129,7 @@ function KernelStatusCard() {
     <div className="mt-auto flex flex-col gap-[9px] rounded-[11px] border border-border bg-bg p-3">
       <KernelRow title={t('topbar.kernelDns')} sub="5gpn-dns · :853 DoT" up={dnsOk} />
       <div className="h-px bg-divider" />
-      <KernelRow title="mihomo" sub="sniproxy · :443" up={mihomoOk} />
+      <KernelRow title="mihomo" sub="gateway · :443" up={mihomoOk} />
     </div>
   )
 }

@@ -4,15 +4,7 @@
 // delivered PolicyModel type so the seeded shape can never drift from what
 // the daemon parses. Invoked by `5gpn-dns --seed-defaults` (main.go), which
 // install.sh calls once at install time BEFORE the daemon's first boot
-// compile — because policy_engine.go's writeManualFiles rewrites the
-// block/direct/blacklist manual files from the policy model on every apply,
-// so a default only survives if it is a policy rule here.
-//
-// Binary policy (2026-07-15 policy/mihomo decoupling): a proxy-intent rule
-// carries no selector/target, so this seed no longer touches any mihomo
-// egress model (the former egress.json "Proxies" default selector seed —
-// seedEgressProxies — is REMOVED; a later unit's mihomo config seed is the
-// only remaining place that mentions a default proxy-group).
+// compile. Proxy-intent rules only steer DNS answers to the gateway.
 package main
 
 import (
@@ -25,10 +17,8 @@ import (
 	"time"
 )
 
-// Default subscription list URLs (spec §7). install.sh resolves each from an
-// env override (> these defaults) and passes it via the --*-url flags; these
-// consts are the fallback when a flag is omitted (a bare `5gpn-dns
-// --seed-defaults` still ships a working model).
+// Default subscription list URLs. The seed command accepts explicit URL flags;
+// these constants apply when a flag is omitted.
 const (
 	defaultChinaListURL = "https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/accelerated-domains.china.conf"
 	defaultGFWURL       = "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/gfw.txt"
@@ -147,7 +137,10 @@ func seedDefaults(policyPath string, in seedInputs) error {
 // skip-if-present). IDs are therefore minted once and preserved across runs.
 func seedPolicyFile(path string, in seedInputs) error {
 	if _, err := os.Stat(path); err == nil {
-		log.Printf("seed: %s exists — preserving the operator policy model", path)
+		if _, err := LoadPolicyModel(path); err != nil {
+			return fmt.Errorf("seed: existing policy validation: %w", err)
+		}
+		log.Printf("seed: %s exists and is valid — preserving the operator policy model", path)
 		return nil
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("seed: stat %s: %w", path, err)

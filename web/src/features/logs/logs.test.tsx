@@ -2,14 +2,11 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import i18n from '../../i18n'
-import { api, BackendPendingError } from '../../lib/api/client'
+import { api } from '../../lib/api/client'
 import type { QueryLogEntry, QueryLogResponse } from '../../lib/api/types'
 import LogsPage from './LogsPage'
 
-vi.mock('../../lib/api/client', () => {
-  class BackendPendingError extends Error {}
-  return { api: { getQueryLog: vi.fn() }, BackendPendingError }
-})
+vi.mock('../../lib/api/client', () => ({ api: { getQueryLog: vi.fn() } }))
 
 // jsdom does not lay out the DOM, so `offsetHeight`/`offsetWidth` are always
 // 0 — @tanstack/react-virtual's `getRect()` reads exactly those to size the
@@ -187,10 +184,4 @@ describe('LogsPage', () => {
     expect(await screen.findByText(i18n.t('logs.loadFailed'))).toBeInTheDocument()
   })
 
-  it('shows the backend-pending state on BackendPendingError', async () => {
-    vi.mocked(api.getQueryLog).mockRejectedValue(new BackendPendingError())
-    render(<LogsPage />)
-
-    expect(await screen.findByText(i18n.t('common.backendPending'))).toBeInTheDocument()
-  })
 })

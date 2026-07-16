@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// C1: audit classification must flag every mutating/privileged callback (and
-// only those), so the bot's audit trail matches the :9443 API's. Read-only
+// Audit classification must flag every mutating/privileged callback (and
+// only those), matching the control API. Read-only
 // navigation must not be audited.
 func TestAuditableCallbackOp(t *testing.T) {
 	mutating := []struct {
@@ -33,8 +33,7 @@ func TestAuditableCallbackOp(t *testing.T) {
 	// Read-only / navigation intents must NOT be audited.
 	readOnly := []callbackKind{
 		cbUnknown, cbMenuMain, cbStatus,
-		cbMenuRestart, cbMenuLogs, cbRequestConfirm,
-		cbRenew, cbRestart, cbIOS,
+		cbMenuMaintenance, cbMenuLogs, cbMenuIOS, cbRequestConfirm,
 	}
 	for _, kind := range readOnly {
 		if op, ok := auditableCallbackOp(callbackIntent{kind: kind}); ok {

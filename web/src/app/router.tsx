@@ -12,7 +12,7 @@ function PageSpinner() {
 }
 
 /** Wraps a route-lazy page loader in its own Suspense boundary. Every page
- *  (not just Overview, task 5.1's initial cut) loads this way so its JS —
+ *  loads this way so its JS —
  *  and its deps (echarts, tanstack/react-table, …) — code-splits into a
  *  dynamic chunk instead of the entry graph. This is what keeps the initial
  *  bundle within the budget checked by scripts/check-bundle.mjs: the entry

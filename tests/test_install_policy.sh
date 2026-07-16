@@ -12,8 +12,7 @@ BOT_OPS="$ROOT/cmd/5gpn-dns/bot_ops.go"
 
 # --- Production renewal is unattended through one mode-aware, cert-name-scoped
 # helper. Cloudflare never needs a :80 handoff; due HTTP-01 renewals coordinate
-# mihomo inside the helper. Legacy pre/post hook files may still be removed on
-# upgrade, but the installer must not create new global stop/start hooks.
+# mihomo inside the helper. The installer must not create global stop/start hooks.
 [ -f "$CERT_RENEW" ] || fail "mode-aware certificate renewal helper is missing"
 grep -Eq 'install -d.*renewal-hooks/pre'  "$INSTALL" && fail "install.sh must not create a global pre-renewal hook dir"
 grep -Eq 'install -d.*renewal-hooks/post' "$INSTALL" && fail "install.sh must not create a global post-renewal hook dir"
@@ -28,6 +27,10 @@ grep -Fq '5gpn-certbot-renew.timer' <<<"$renew_auto_fn" || fail "no certificate 
 grep -Fq 'Persistent=true' <<<"$renew_auto_fn" || fail "renewal timer not Persistent (missed runs will not catch up)"
 grep -Fq 'ExecStart=/opt/5gpn/scripts/cert-renew.sh --quiet' <<<"$renew_auto_fn" \
     || fail "renewal timer does not invoke the unified certificate helper"
+grep -Fq '# 5gpn-unit-id: 5gpn-certbot-renew.service:v1' <<<"$renew_auto_fn" \
+    || fail "renewal service has no exact ownership marker"
+grep -Fq '# 5gpn-unit-id: 5gpn-certbot-renew.timer:v1' <<<"$renew_auto_fn" \
+    || fail "renewal timer has no exact ownership marker"
 grep -Fq 'TimeoutStartSec=30min' <<<"$renew_auto_fn" \
     || fail "renewal service timeout cannot cover the 1.1.1.1 wait plus Certbot"
 grep -Fq 'TimeoutStopSec=2min' <<<"$renew_auto_fn" \
@@ -38,10 +41,27 @@ grep -Fq 'EnvironmentFile=/etc/5gpn/dns.env' <<<"$renew_auto_fn" \
     && fail "renewal service imports arbitrary persisted keys into a root shell environment"
 head -1 "$CERT_RENEW" | grep -Fxq '#!/bin/bash' \
     || fail "renewal helper uses PATH-dependent /usr/bin/env for its root shell"
+head -2 "$ROOT/scripts/renew-hook.sh" | grep -Fxq '# 5gpn-renew-hook-id: deploy-v1' \
+    || fail "certificate deploy hook has no exact ownership marker"
+renew_owned_fn="$(sed -n '/^renew_hook_owned()/,/^}/p' "$INSTALL")"
+grep -Fq '# 5gpn-renew-hook-id: deploy-v1' <<<"$renew_owned_fn" \
+    || fail "deploy-hook ownership check does not require the exact current marker"
+grep -Fq 'renewed 5gpn WILDCARD lineage' <<<"$renew_owned_fn" \
+    && fail "deploy-hook ownership still accepts the superseded wildcard text"
 grep -Fq '"/opt/5gpn/scripts/cert-renew.sh", "--cert-name", certName' "$BOT_OPS" \
     || fail "Telegram renewal does not invoke the unified helper with the validated cert name"
 grep -Fq 'cf_credential_safe' "$CERT_RENEW" \
     || fail "Cloudflare renewal can follow an unsafe credential symlink or permissions drift"
+
+unit_owned_fn="$(sed -n '/^unit_file_owned_by_5gpn()/,/^}/p' "$INSTALL")"
+grep -Fq '# 5gpn-unit-id:' <<<"$unit_owned_fn" \
+    || fail "systemd ownership does not require an exact unit marker"
+grep -Fq 'Description=5gpn' <<<"$unit_owned_fn" \
+    && fail "systemd ownership still trusts a display description"
+grep -Fxq '# 5gpn-unit-id: 5gpn-dns.service:v1' "$ROOT/etc/systemd/5gpn-dns.service" \
+    || fail "5gpn-dns unit lacks its exact ownership marker"
+grep -Fxq '# 5gpn-unit-id: mihomo.service:v1' "$ROOT/etc/systemd/mihomo.service" \
+    || fail "mihomo unit lacks its exact ownership marker"
 
 # Install/configure ordering: resolve the TUI/persisted selection, wait for the
 # fixed-resolver DNS gate, and only then publish or issue certificate material.
@@ -67,6 +87,8 @@ grep -Fq '/ios/ios-dot.mobileconfig' "$INSTALL" \
 # environment is explicitly cleared.
 grep -Eq '^configure_install_tui\(\)' "$INSTALL" || fail "no first-install TUI configuration wizard"
 grep -Eq '^load_persisted_install_config\(\)' "$INSTALL" || fail "no persisted installer config loader"
+grep -Eq '^validate_dns_env_schema\(\)' "$INSTALL" || fail "no strict persisted dns.env schema validator"
+grep -Fq 'unsupported key' "$INSTALL" || fail "persisted dns.env does not reject unknown keys"
 grep -Eq '^clear_external_config_env\(\)' "$INSTALL" || fail "caller environment is not cleared"
 grep -Fq "First install/configuration requires an attached TTY" "$INSTALL" \
     || fail "headless first install does not fail closed"
@@ -82,50 +104,30 @@ grep -Eq 'DNS_WEB_DIR'          "$INSTALL" || fail "DNS_WEB_DIR not wired in ins
 grep -Eq '^install_manage_cli\(\)' "$INSTALL" || fail "no install_manage_cli() (the 5gpn management command)"
 grep -Eq '^[[:space:]]*install_manage_cli$' "$INSTALL" || fail "install_manage_cli defined but never called in full_install"
 grep -Fq '/usr/local/bin/5gpn' "$INSTALL" || fail "5gpn launcher not written to /usr/local/bin/5gpn"
-grep -Fq 'exec bash "$BK" --menu' "$INSTALL" || fail "5gpn launcher does not open the management menu with no args"
-# The menu + its operations must be dispatchable — including the single
-# base-domain change command (with its back-compat aliases) and the public-IP
-# change.
-for tok in '--menu|menu)' '--restart|restart)' '--change-base-domain|change-base-domain)' \
-           '--change-web-domain|change-web-domain)' '--change-dot-domain|change-dot-domain)' \
-           '--change-public-ip|change-public-ip)' '--change-gateway|change-gateway)'; do
+grep -Fq 'exec bash "$BK" menu' "$INSTALL" || fail "5gpn launcher does not open the management menu with no args"
+# The current menu, restart, and transactional configure operations are dispatchable.
+for tok in 'menu)' 'restart)' 'configure)'; do
     grep -Fq -e "$tok" "$INSTALL" || fail "install.sh dispatch missing case: $tok"
 done
-main_fn="$(sed -n '/^main()/,/^}/p' "$INSTALL")"
-printf '%s' "$main_fn" | grep -Fq 'change_base_domain "${2:-}"' \
-    || fail "value-less deprecated change-domain aliases can trip set -u before opening the TUI"
-printf '%s' "$main_fn" | grep -Fq '${2#dot.}' \
-    && fail "change-dot-domain dereferences an unset positional argument under set -u"
+grep -Eq -- '--(configure|menu|status|restart|reload-rules|add-allow|del-allow|ios|setup-tgbot|rotate-token|set-cf-token|mihomo-reset|uninstall|help)\)' "$INSTALL" \
+    && fail "install.sh still accepts a flag-style command alias"
 grep -Eq '^manage_menu\(\)'      "$INSTALL" || fail "no manage_menu() TUI"
-grep -Eq '^change_base_domain\(\)' "$INSTALL" || fail "no change_base_domain() (single base-domain change op)"
-grep -Eq '^change_public_ip\(\)'  "$INSTALL" || fail "no change_public_ip() (menu 'modify public IP')"
-grep -Eq '^change_gateway\(\)'   "$INSTALL" || fail "no change_gateway() (menu 'modify gateway IP')"
 grep -Eq '^restart_services\(\)' "$INSTALL" || fail "no restart_services() (menu 'restart')"
-# Legacy change commands are TUI-only compatibility wrappers around the single
-# transactional configuration/install path.
-cb_fn="$(sed -n '/^change_base_domain()/,/^}/p' "$INSTALL")"
-printf '%s' "$cb_fn" | grep -Fq 'full_install configure' || fail "change_base_domain bypasses transactional TUI configure"
-cp_fn="$(sed -n '/^change_public_ip()/,/^}/p' "$INSTALL")"
-printf '%s' "$cp_fn" | grep -Fq 'full_install configure' || fail "change_public_ip bypasses transactional TUI configure"
+grep -Eq '^require_command_arity\(\)' "$INSTALL" || fail "commands do not reject unsupported argv shapes"
 # Base-domain install flow: ONE base domain, the three service subdomains
 # (console./zash./dot.<base>) auto-derived by derive_domains.
-grep -Eq '^resolve_domains\(\)' "$INSTALL" || fail "no resolve_domains() (base-domain install prompt)"
-rd_fn="$(sed -n '/^resolve_domains()/,/^}/p' "$INSTALL")"
-printf '%s' "$rd_fn" | grep -Fq 'derive_domains' \
-    || fail "resolve_domains does not derive the service subdomains via derive_domains"
-printf '%s' "$rd_fn" | grep -Eq 'DNS_BASE_DOMAIN|DNS_WEB_DOMAIN' \
-    || fail "resolve_domains does not read the base/web domain back from dns.env"
 grep -Eq '^derive_domains\(\)' "$INSTALL" || fail "no derive_domains() (single subdomain derivation)"
 dd_fn="$(sed -n '/^derive_domains()/,/^}/p' "$INSTALL")"
 printf '%s' "$dd_fn" | grep -Fq 'console.' || fail "derive_domains does not derive console.<base>"
 printf '%s' "$dd_fn" | grep -Fq 'zash.'    || fail "derive_domains does not derive zash.<base>"
 printf '%s' "$dd_fn" | grep -Fq 'dot.'     || fail "derive_domains does not derive dot.<base>"
-cg_fn="$(sed -n '/^change_gateway()/,/^}/p' "$INSTALL")"
-printf '%s' "$cg_fn" | grep -Fq 'full_install configure' || fail "change_gateway bypasses transactional TUI configure"
+grep -Eq '^load_persisted_domains\(\)' "$INSTALL" || fail "no persisted base-domain derivation helper"
+grep -Eq 'DNS_(DOMAIN|WEB_DOMAIN|CONSOLE_DOMAIN|ZASH_DOMAIN)=' "$INSTALL" \
+    && fail "installer still persists a redundant derived-domain key"
 
 # --- Task 4: panel whitelist.txt TUI management + live controller refresh
 # (out-of-band; never web-editable, no full config reload). ---
-for tok in '--add-allow)' '--del-allow)'; do
+for tok in 'add-allow)' 'del-allow)'; do
     grep -Fq -e "$tok" "$INSTALL" || fail "install.sh dispatch missing case: $tok"
 done
 grep -Eq '^add_allow_ip\(\)'     "$INSTALL" || fail "no add_allow_ip() (menu/CLI whitelist add)"
@@ -136,15 +138,21 @@ printf '%s' "$aa_fn" | grep -Fq 'ask_text' \
     || fail "add_allow_ip does not prompt via ask_text"
 printf '%s' "$aa_fn" | grep -Eq 'ask_text .*\|\| true\)"' \
     || fail "add_allow_ip's ask_text capture is not guarded with || true (cancel would abort under set -e)"
-printf '%s' "$aa_fn" | grep -Fq '"$MIHOMO_DIR/whitelist.txt"' \
+printf '%s' "$aa_fn" | grep -Fq 'file="${MIHOMO_DIR}/whitelist.txt"' \
     || fail "add_allow_ip does not write MIHOMO_DIR/whitelist.txt"
+printf '%s' "$aa_fn" | grep -Fq 'is_valid_ipv4_or_cidr' \
+    || fail "add_allow_ip does not validate the current IPv4/CIDR format"
 printf '%s' "$aa_fn" | grep -Fq 'apply_whitelist' \
     || fail "add_allow_ip does not call apply_whitelist (live refresh)"
 da_fn="$(sed -n '/^del_allow_ip()/,/^}/p' "$INSTALL")"
 printf '%s' "$da_fn" | grep -Eq 'ask_text .*\|\| true\)"' \
     || fail "del_allow_ip's ask_text capture is not guarded with || true (cancel would abort under set -e)"
-printf '%s' "$da_fn" | grep -Fq '"$MIHOMO_DIR/whitelist.txt"' \
+printf '%s' "$da_fn" | grep -Fq 'file="${MIHOMO_DIR}/whitelist.txt"' \
     || fail "del_allow_ip does not edit MIHOMO_DIR/whitelist.txt"
+printf '%s' "$da_fn" | grep -Fq 'is_valid_ipv4_or_cidr' \
+    || fail "del_allow_ip does not validate the current IPv4/CIDR format"
+printf '%s' "$da_fn" | grep -Eq 'sed -i.*\$ip' \
+    && fail "del_allow_ip still interpolates an entry into a sed regular expression"
 printf '%s' "$da_fn" | grep -Fq 'apply_whitelist' \
     || fail "del_allow_ip does not call apply_whitelist (live refresh)"
 aw_fn="$(sed -n '/^apply_whitelist()/,/^}/p' "$INSTALL")"
@@ -190,37 +198,14 @@ printf '%s' "$at_fn" | grep -Fq '[[ -t 0 ]] && return 0' \
 grep -Eq '^[[:space:]]*attach_tty$' "$INSTALL" \
     || fail "main() does not call attach_tty (piped install stays non-interactive)"
 
-# --- Fresh-artifact re-runs (2026-07-10): every install cleans previous units/
-# configs and unconditionally re-downloads every binary at its pin; ONLY
-# /etc/5gpn + /etc/letsencrypt persist. No keep-if-present shortcuts. ---
-grep -Eq '^clean_previous_install\(\)' "$INSTALL" \
-    || fail "no clean_previous_install() (fresh-artifact rule)"
-grep -Eq '^[[:space:]]*clean_previous_install$' "$INSTALL" \
-    || fail "clean_previous_install defined but never called in full_install"
-cl_fn="$(sed -n '/^clean_previous_install()/,/^}/p' "$INSTALL")"
-# The clean step must never touch the persisted config/cert dir or the LE lineage.
-printf '%s' "$cl_fn" | grep -Eq 'rm .*(\$\{?CONF_DIR|/etc/5gpn)' \
-    && fail "clean_previous_install must not rm anything under /etc/5gpn (persisted)"
-printf '%s' "$cl_fn" | grep -Eq 'rm.*/etc/letsencrypt/(live|archive|renewal/)' \
-    && fail "clean_previous_install must not remove the /etc/letsencrypt cert lineage"
-# It must not stop the live resolver/data plane. Legacy generic units are
-# handled only by ownership-gated helpers.
-printf '%s' "$cl_fn" | grep -Eq 'systemctl (stop|disable --now) (5gpn-dns|xray)' \
-    && fail "clean_previous_install must not stop the running 5gpn-dns/xray"
-printf '%s' "$cl_fn" | sed -n '/for unit in/,/done/p' | grep -Eq '5gpn-dns\.service' \
-    && fail "clean_previous_install's legacy stop-loop must not include the live 5gpn-dns unit"
-printf '%s' "$cl_fn" | grep -Fq 'remove_legacy_xray' \
-    || fail "clean_previous_install does not use ownership-gated Xray teardown"
-printf '%s' "$cl_fn" | grep -Fq 'BASE_OWNERSHIP_MARKER' \
-    || fail "runtime cleanup is not ownership-marker gated"
-# Installers must have NO keep-if-present early return: a stale binary next to a
-# fresh config is exactly the skew this rule exists to kill.
-grep -Fq '5gpn-dns already installed' "$INSTALL" \
-    && fail "install_5gpndns must not keep an existing binary (fresh-artifact rule)"
-grep -Fq 'Xray already installed' "$INSTALL" \
-    && fail "install_xray must not keep an existing binary (fresh-artifact rule)"
-grep -Fq 'SPA already present' "$INSTALL" \
-    && fail "install_web must not keep an existing web dir (fresh-artifact rule)"
+# Publication is staged and rollback-capable without any old-release teardown.
+grep -Eq '^stage_artifacts\(\)' "$INSTALL" || fail "release artifacts are not staged"
+grep -Eq '^capture_install_rollback\(\)' "$INSTALL" || fail "install rollback snapshot is missing"
+grep -Eq '^rollback_install\(\)' "$INSTALL" || fail "install rollback path is missing"
+grep -Eq '^[[:space:]]*stage_artifacts$' "$INSTALL" || fail "full_install does not stage artifacts"
+grep -Eq '^[[:space:]]*capture_install_rollback$' "$INSTALL" || fail "full_install does not capture rollback state"
+grep -Eq '^remove_legacy_|^clean_previous_install\(\)' "$INSTALL" \
+    && fail "installer still contains an old-release teardown helper"
 
 # --- Certs are DELIBERATELY preserved (re-issuing an LE cert is rate-limited) ---
 un_fn="$(sed -n '/^uninstall()/,/^}/p' "$INSTALL")"
@@ -341,7 +326,9 @@ grep -Fq 'private-key: /etc/5gpn/cert/zash/privkey.pem' "$MIHOMO_TMPL" \
 grep -Fq '__MIHOMO_LISTENERS__'                 "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing dynamic listener placeholder"
 grep -Fq 'target: 127.0.0.1:443'               "$INSTALL" \
-    || fail "install.sh: dynamic listener renderer missing sniproxy loopback target"
+    || fail "install.sh: dynamic listener renderer missing gateway loopback target"
+grep -Fq 'name: gateway%s'                       "$INSTALL" \
+    || fail "install.sh: dynamic listener renderer missing gateway listener name"
 grep -Fq 'udp://127.0.0.1:5354'                "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #3 (egress DNS broker)"
 grep -Fq '__CONSOLE_DOMAIN__: 127.0.0.1'       "$MIHOMO_TMPL" \
@@ -373,8 +360,8 @@ printf '%s' "$rmc_fn" | grep -Fq 'mv -f -- "$candidate" "$config"' \
 # Bootstrap and bind identities are independent/fail-closed.
 grep -Fq 'DNS_MIHOMO_LISTEN_IPS=${MIHOMO_LISTEN_IPS}' "$INSTALL" \
     || fail "dns.env does not persist DNS_MIHOMO_LISTEN_IPS"
-grep -Fq 'DNS_CONSOLE_DOMAIN=${CONSOLE_DOMAIN}' "$INSTALL" \
-    || fail "dns.env does not persist DNS_CONSOLE_DOMAIN"
+grep -Fq 'DNS_BASE_DOMAIN=${BASE_DOMAIN}' "$INSTALL" \
+    || fail "dns.env does not persist the base domain"
 grep -Eq '^verify_console_dns\(\)' "$INSTALL" \
     || fail "install.sh has no fail-closed public console A-record verification"
 

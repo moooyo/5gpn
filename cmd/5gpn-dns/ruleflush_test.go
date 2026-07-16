@@ -42,20 +42,18 @@ func TestSwapRuleSetsFlushesCache(t *testing.T) {
 	if _, ok := h.Cache.Get("cached.test", dns.TypeA); !ok {
 		t.Fatal("precondition: expected a cached entry")
 	}
-	h.swapRuleSets(h.Block, h.Direct, h.Blacklist, h.CN)
+	h.swapRuleSets(h.CN)
 	if _, ok := h.Cache.Get("cached.test", dns.TypeA); ok {
 		t.Fatal("swapRuleSets did not invalidate the cache: cached.test still a hit")
 	}
 }
 
-// B2: concurrent Controller.Lookup and rule-set reloads must not race. Before
-// the fix, swapRuleSets wrote the public h.CN field on every reload while
-// lookupArbitrate read it — a genuine data race `go test -race` flags here.
-func TestControllerLookupRaceWithReload(t *testing.T) {
+// B2: concurrent diagnostics and chnroute reloads must not race.
+func TestControllerResolveTestRaceWithReload(t *testing.T) {
 	china := &fakeExchanger{reply: makeAMsg("x.test", "1.2.3.4")}
 	trust := &fakeExchanger{reply: makeAMsg("x.test", "9.9.9.9")}
 	h := newTestHandler(t, china, trust)
-	c := NewController(nil, func() error { return nil }, t.TempDir(), nil, nil, h)
+	c := NewController(func() error { return nil }, nil, nil, h)
 
 	// Two distinct chnroute snapshots the reloader alternates between, so the
 	// atomic pointer genuinely changes on each swap.
@@ -81,12 +79,12 @@ func TestControllerLookupRaceWithReload(t *testing.T) {
 				if i%2 == 1 {
 					cn = cnB
 				}
-				h.swapRuleSets(h.Block, h.Direct, h.Blacklist, cn)
+				h.swapRuleSets(cn)
 			}
 		}()
 	}
 
-	// Lookupers: run the manual lookup path concurrently with reloads.
+	// Run diagnostics concurrently with reloads.
 	for r := 0; r < 3; r++ {
 		wg.Add(1)
 		go func() {
@@ -97,7 +95,7 @@ func TestControllerLookupRaceWithReload(t *testing.T) {
 					return
 				default:
 				}
-				_ = c.Lookup(context.Background(), "x.test")
+				_ = c.ResolveTest(context.Background(), "x.test")
 			}
 		}()
 	}

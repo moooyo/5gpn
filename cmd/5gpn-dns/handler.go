@@ -15,10 +15,7 @@ import (
 // SIGHUP replaces the whole snapshot atomically; in-flight queries
 // that already loaded the old snapshot complete safely.
 type ruleSnapshot struct {
-	Block     *DomainSet
-	Direct    *DomainSet
-	Blacklist *DomainSet
-	CN        *Chnroute
+	CN *Chnroute
 }
 
 // statsCounters holds per-reason query counters, updated with atomics so
@@ -28,23 +25,22 @@ type ruleSnapshot struct {
 // Handler.bump*) so Handlers built without stats wiring (e.g. existing unit
 // tests that construct a Handler literal) never panic.
 //
-// The five reason counters replace the earlier coarse direct/proxy/block
-// verdict counters, which conflated distinct decisions the control console
-// needs to tell apart:
+// Reason-level counters distinguish explicit policy decisions from automatic
+// chnroute arbitration:
 //   - block:           step-3 block match (verdict "block").
 //   - forceDirect:     step-4 name-only "always direct" match (verdict "direct").
-//   - blacklist:       step-5 name-only sinkhole match (verdict "proxy").
+//   - forceProxy:      explicit proxy-intent match (verdict "proxy").
 //   - chnrouteCN:      step-6 default path, resolved IP is a CN address kept as-is (verdict "direct").
 //   - chnrouteForeign: step-6 default path, resolved IP was foreign and rewritten to GatewayIP (verdict "proxy").
 type statsCounters struct {
 	total           atomic.Uint64
 	block           atomic.Uint64
 	forceDirect     atomic.Uint64
-	blacklist       atomic.Uint64
+	forceProxy      atomic.Uint64
 	chnrouteCN      atomic.Uint64
 	chnrouteForeign atomic.Uint64
 	// china/trust ok/err are OBSERVABILITY-ONLY (see the note above the routing
-	// decision in Arbitrate): exposed via /api/stats + dashboard/bot and persisted,
+	// decision in Arbitrate): exposed via status/dashboard/bot and persisted,
 	// but they MUST NOT feed the china-vs-trust decision, which is deterministic by
 	// chnroute membership ? never health/speed. They are also per-group and
 	// asymmetric (trust counted only when consulted), so unfit to drive selection.
@@ -54,7 +50,7 @@ type statsCounters struct {
 	trustErr atomic.Uint64
 
 	// Observability-only (like the china/trust ok/err counters): cache
-	// effectiveness and per-group upstream latency, exposed via /api/stats and
+	// effectiveness and per-group upstream latency, exposed via status and
 	// the dashboard so "why is resolution slow / is the cache working" is
 	// answerable. cacheHits/Misses are bumped in Handler.cacheGet; the latency
 	// sums (nanoseconds) + counts are bumped from Arbitrate's exchange
@@ -67,8 +63,7 @@ type statsCounters struct {
 	trustLatCount atomic.Uint64
 }
 
-// Handler is a dns.Handler that implements the 5gpn query dispatch policy:
-// AAAA-block ? HTTPS/SVCB-block ? block ? force-direct ? blacklist ? default-arbitrate.
+// Handler is a dns.Handler that implements the ordered 5gpn DNS policy.
 type Handler struct {
 	// rules is swapped atomically on SIGHUP.
 	rules atomic.Pointer[ruleSnapshot]
@@ -78,19 +73,14 @@ type Handler struct {
 	// test-constructed Handlers; main publishes the initial snapshot at boot.
 	ups atomic.Pointer[upstreamSnapshot]
 
-	// orderedPolicy is the globally ordered first-match policy snapshot. A nil
-	// pointer preserves the legacy category-set behavior for test/upgrade
-	// construction; once a policy model is published, even an empty snapshot is
-	// authoritative and unmatched names proceed to fallback.
+	// orderedPolicy is the globally ordered first-match policy snapshot.
 	orderedPolicy       atomic.Pointer[runtimePolicySnapshot]
 	policyPlan          atomic.Pointer[runtimePolicyPlan]
 	policyRefreshPaused atomic.Bool
 
-	// Rule sets ? public for test construction; use swapRuleSets after init.
-	Block     *DomainSet // NXDOMAIN for matched names.
-	Direct    *DomainSet // Arbitrate but never rewrite IPs.
-	Blacklist *DomainSet // Synthetic single-A = GatewayIP, no upstream.
-	CN        *Chnroute  // IPv4 china ranges.
+	// CN is a construction-time test seam. Runtime publishes it through
+	// swapRuleSets before serving.
+	CN *Chnroute // IPv4 china ranges.
 
 	Cache *Cache // DNS response cache (may be nil to disable).
 
@@ -128,46 +118,11 @@ type Handler struct {
 	// nil disables shedding (DNS_MAX_INFLIGHT=0, and every test-constructed
 	// Handler), preserving the unbounded pre-#1 behaviour there.
 	sem chan struct{}
-
-	// fallback selects the step-6 (unmatched) behavior: auto|direct|gateway. A
-	// nil pointer means auto — a zero-value/test Handler is byte-identical to
-	// the pre-policy default path. Swapped atomically by the policy apply
-	// (see setFallback), mirroring the rules/ups atomic-swap idiom above.
-	fallback atomic.Pointer[FallbackPolicy]
 }
 
 type runtimePolicyPlan struct {
 	Model    PolicyModel
 	RulesDir string
-}
-
-// setFallback installs the step-6 fallback mode. An empty string (the
-// FallbackPolicy zero value) is treated as FallbackAuto, so a caller that
-// passes through an unset config value never accidentally disables the
-// default arbitration path.
-func (h *Handler) setFallback(p FallbackPolicy) {
-	if p == "" {
-		p = FallbackAuto
-	}
-	h.fallback.Store(&p)
-}
-
-// fallbackMode returns the current step-6 fallback mode, defaulting to
-// FallbackAuto when setFallback has never been called (nil pointer) — this is
-// what makes a zero-value/test-constructed Handler behave exactly as the
-// pre-policy code did.
-func (h *Handler) fallbackMode() FallbackPolicy {
-	if p := h.fallback.Load(); p != nil {
-		return *p
-	}
-	return FallbackAuto
-}
-
-func (h *Handler) effectiveFallbackMode() FallbackPolicy {
-	if snap := h.orderedPolicy.Load(); snap != nil {
-		return snap.Fallback
-	}
-	return h.fallbackMode()
 }
 
 // bumpTotal increments the total-query counter. Safe to call when h.stats is nil.
@@ -241,12 +196,12 @@ func (h *Handler) bumpForceDirect() {
 	h.stats.forceDirect.Add(1)
 }
 
-// bumpBlacklist increments the blacklist-reason counter. Safe to call when h.stats is nil.
-func (h *Handler) bumpBlacklist() {
+// bumpForceProxy increments the explicit proxy-reason counter.
+func (h *Handler) bumpForceProxy() {
 	if h.stats == nil {
 		return
 	}
-	h.stats.blacklist.Add(1)
+	h.stats.forceProxy.Add(1)
 }
 
 // bumpChnrouteCN increments the chnroute-cn-reason counter. Safe to call when h.stats is nil.
@@ -311,27 +266,13 @@ func (h *Handler) bumpDefaultVerdict(resp *dns.Msg) {
 // the response cache. In-flight queries that have already loaded the old
 // snapshot complete safely; new queries pick up the updated values.
 //
-// Every reload path ? SIGHUP, manual AddRule/RemoveRule via the Controller, and
-// subscription-cache refreshes ? funnels through here, so this is the single
+// Every chnroute/subscription cache reload funnels through here, so this is the single
 // point at which the response cache must be invalidated (see Cache.Flush): the
 // cache holds fully-rewritten answers, so a rule change that is not accompanied
 // by a flush would keep serving pre-change answers until TTL expiry (up to 24h).
 // The initial publish at startup flushes an empty cache (a no-op).
-//
-// The public Block/Direct/Blacklist/CN fields are intentionally NOT written
-// here. They are construction-only (set by a Handler literal in tests and in
-// main before any goroutine starts) and read solely via ruleSnap's nil-fallback
-// when swapRuleSets was never called. Writing them on every reload used to race
-// concurrent readers (Controller.lookupArbitrate) and concurrent reloaders (two
-// subscription tickers firing at once) with no lock ? a genuine data race. The
-// atomic snapshot below is the single source of truth for the live query path.
-func (h *Handler) swapRuleSets(block, direct, blacklist *DomainSet, cn *Chnroute) {
-	snap := &ruleSnapshot{
-		Block:     block,
-		Direct:    direct,
-		Blacklist: blacklist,
-		CN:        cn,
-	}
+func (h *Handler) swapRuleSets(cn *Chnroute) {
+	snap := &ruleSnapshot{CN: cn}
 	h.rules.Store(snap)
 	if !h.policyRefreshPaused.Load() {
 		if err := h.refreshOrderedPolicy(); err != nil {
@@ -383,14 +324,13 @@ func (h *Handler) refreshOrderedPolicy() error {
 	return nil
 }
 
-// ruleSnap returns the current rule snapshot.  If swapRuleSets has been called
-// it returns the atomic snapshot; otherwise it falls back to the public fields
-// (which is how the Handler is used in unit tests).
-func (h *Handler) ruleSnap() (block, direct, blacklist *DomainSet, cn *Chnroute) {
+// chnroute returns the live atomic snapshot, or the construction-time test
+// seam when no snapshot was published.
+func (h *Handler) chnroute() *Chnroute {
 	if snap := h.rules.Load(); snap != nil {
-		return snap.Block, snap.Direct, snap.Blacklist, snap.CN
+		return snap.CN
 	}
-	return h.Block, h.Direct, h.Blacklist, h.CN
+	return h.CN
 }
 
 // swapUpstreams atomically replaces the live china/trust exchanger groups and
@@ -420,9 +360,9 @@ func (h *Handler) upstreamSnap() *upstreamSnapshot {
 
 // Verdict is the outcome of the shared name-only classification step:
 // Verdict is one of "direct"|"proxy"|"block"; Reason is one of
-// "block"|"force-direct"|"blacklist"|"chnroute-cn"|"chnroute-foreign"|
-// "fallback-direct"|"fallback-gateway" (the latter two are step-6 outcomes
-// under the FallbackDirect/FallbackGateway modes — see fallbackMode).
+// "block"|"force-direct"|"force-proxy"|"chnroute-cn"|"chnroute-foreign"|
+// "fallback-direct"|"fallback-gateway" (the latter two are unmatched-name
+// outcomes under the ordered snapshot's fallback policy).
 // A zero-value Verdict ("", "") means "no terminal name-only verdict ? the
 // default case applies, and IP arbitration (chnroute-cn/chnroute-foreign)
 // is needed to decide."
@@ -449,16 +389,21 @@ type resolutionDecision struct {
 // and ResolveTest. It folds the ordered name rule and the configured fallback
 // into one executable action so diagnostics cannot silently ignore fallback.
 func (h *Handler) decideName(name string) resolutionDecision {
-	v := h.classifyName(name)
+	snap := h.orderedPolicy.Load()
+	v := classifyPolicySnapshot(snap, name)
 	switch v.Reason {
 	case "block":
 		return resolutionDecision{Verdict: v, Action: actionBlock}
 	case "force-direct":
 		return resolutionDecision{Verdict: v, Action: actionDirect}
-	case "blacklist":
+	case "force-proxy":
 		return resolutionDecision{Verdict: v, Action: actionGateway}
 	}
-	switch h.effectiveFallbackMode() {
+	fallback := FallbackAuto
+	if snap != nil {
+		fallback = snap.Fallback
+	}
+	switch fallback {
 	case FallbackDirect:
 		return resolutionDecision{Verdict: Verdict{Verdict: "direct", Reason: "fallback-direct"}, Action: actionDirect}
 	case FallbackGateway:
@@ -468,43 +413,23 @@ func (h *Handler) decideName(name string) resolutionDecision {
 	}
 }
 
-// classifyName applies the name-only precedence block > direct > blacklist
-// and returns the corresponding terminal Verdict. It returns the zero Verdict
-// for the default case, meaning the caller must arbitrate and inspect the
-// resolved IPs (chnroute-cn / chnroute-foreign) to finish classifying.
-//
-// This mirrors resolve's steps 3?5 exactly (same precedence, same DomainSet
-// snapshot access) so that resolve and Controller.Lookup can share one
-// decision instead of drifting.
-func (h *Handler) classifyName(name string) Verdict {
-	if snap := h.orderedPolicy.Load(); snap != nil {
-		bare := stripDot(name)
-		for _, rule := range snap.Rules {
-			if !rule.Matcher.Match(bare) {
-				continue
-			}
-			switch rule.Intent {
-			case IntentBlock:
-				return Verdict{Verdict: "block", Reason: "block"}
-			case IntentDirect:
-				return Verdict{Verdict: "direct", Reason: "force-direct"}
-			case IntentProxy:
-				return Verdict{Verdict: "proxy", Reason: "blacklist"}
-			}
-		}
+func classifyPolicySnapshot(snap *runtimePolicySnapshot, name string) Verdict {
+	if snap == nil {
 		return Verdict{}
 	}
-	block, direct, blacklist, _ := h.ruleSnap()
 	bare := stripDot(name)
-
-	if block != nil && block.Match(bare) {
-		return Verdict{Verdict: "block", Reason: "block"}
-	}
-	if direct != nil && direct.Match(bare) {
-		return Verdict{Verdict: "direct", Reason: "force-direct"}
-	}
-	if blacklist != nil && blacklist.Match(bare) {
-		return Verdict{Verdict: "proxy", Reason: "blacklist"}
+	for _, rule := range snap.Rules {
+		if !rule.Matcher.Match(bare) {
+			continue
+		}
+		switch rule.Intent {
+		case IntentBlock:
+			return Verdict{Verdict: "block", Reason: "block"}
+		case IntentDirect:
+			return Verdict{Verdict: "direct", Reason: "force-direct"}
+		case IntentProxy:
+			return Verdict{Verdict: "proxy", Reason: "force-proxy"}
+		}
 	}
 	return Verdict{}
 }
@@ -648,8 +573,8 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 //  2. TypeHTTPS / SVCB    ? empty NOERROR.
 //  3. block match         ? NXDOMAIN.
 //  4. direct match        ? arbitrate, return IPs as-is (drop AAAA RRs, no rewrite).
-//  5. blacklist match     ? synthetic A = GatewayIP, no upstream.
-//  6. default             ? fallbackMode()-gated:
+//  5. force-proxy match   ? synthetic A = GatewayIP, no upstream.
+//  6. default             ? ordered-policy fallback:
 //     auto (default)   ? arbitrate, rewrite each A: CN.Contains?keep, else GatewayIP; dedup.
 //     direct           ? arbitrate, return the real IPs as-is (never rewrite to GatewayIP).
 //     gateway          ? synthetic A = GatewayIP for every name, no upstream consulted.
@@ -690,10 +615,8 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 	// repopulate the freshly flushed cache and re-mask the rule change.
 	epoch := h.Cache.Epoch()
 
-	// Load the current rule-set snapshot atomically. classifyName re-derives
-	// block/direct/blacklist from the same snapshot mechanism (ruleSnap);
-	// cn is still needed here directly for arbitration/rewrite.
-	_, _, _, cn := h.ruleSnap()
+	// Capture the current chnroute snapshot once for arbitration/rewrite.
+	cn := h.chnroute()
 
 	// ?? Step 1: AAAA ? synthetic SOA, NOERROR, empty Answer ?????????????????
 	if q.Qtype == dns.TypeAAAA {
@@ -705,7 +628,7 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 	// We deliberately refuse to serve HTTPS/SVCB (RFC 9460) records. Two reasons,
 	// both load-bearing for the SNI-steering data plane:
 	//   1. ECH: the HTTPS RR's `ech` SvcParam lets the client encrypt the TLS
-	//      ClientHello SNI. The xray sniproxy reads the PLAINTEXT SNI to recover
+	//      ClientHello SNI. Mihomo reads the plaintext hostname to recover
 	//      the real destination; an encrypted SNI is unroutable and would be
 	//      blackholed. Withholding the RR keeps the SNI in cleartext.
 	//   2. ipv4hint/ipv6hint: the RR can hand the client the origin's real IPs
@@ -723,8 +646,8 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 
 	isA := q.Qtype == dns.TypeA
 
-	// verdict carries the name-only precedence decision (block > direct >
-	// blacklist); a zero-value Verdict means "default case, arbitrate+rewrite".
+	// verdict carries the ordered name-only decision; a zero-value Verdict means
+	// "default case, arbitrate+rewrite".
 	decision := h.decideName(name)
 	verdict := decision.Verdict
 
@@ -767,18 +690,18 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 		return h.forwardTrust(ctx, trust, r, name, q.Qtype, epoch, ri)
 	}
 
-	// ?? Step 5: blacklist ????????????????????????????????????????????????????
+	// Explicit proxy intent.
 	if decision.Action == actionGateway {
 		ri.noteVerdict(verdict)
 		if isA {
-			if verdict.Reason == "blacklist" {
-				h.bumpBlacklist()
+			if verdict.Reason == "force-proxy" {
+				h.bumpForceProxy()
 			} else {
 				h.bumpChnrouteForeign()
 			}
 			return h.gatewayReply(r)
 		}
-		// Non-A blacklist: forward to Trust (blacklist is A-specific semantics).
+		// Non-A proxy intent: forward to Trust (steering is A-specific).
 		return h.forwardTrust(ctx, trust, r, name, q.Qtype, epoch, ri)
 	}
 
@@ -981,7 +904,7 @@ func (h *Handler) soaReply(r *dns.Msg) *dns.Msg {
 
 // gatewayReply returns a synthetic A reply containing only GatewayIP. When no
 // gateway is configured (DNS_GATEWAY_IP unset/unspecified) it returns NXDOMAIN
-// instead of a bogus 0.0.0.0 ? a blacklisted name should fail closed, not
+// instead of a bogus 0.0.0.0; an explicit proxy-intent name should fail closed, not
 // resolve to an unroutable address.
 func (h *Handler) gatewayReply(r *dns.Msg) *dns.Msg {
 	if h.GatewayIP == nil || h.GatewayIP.IsUnspecified() {

@@ -88,7 +88,7 @@ export function ConsoleCard() {
     <Card className="p-[18px]">
       <div className="mb-1 text-[13px] font-bold text-text-strong">{t('settings.consoleTitle')}</div>
       <DataLine label={t('settings.listenPort')} sub={t('settings.listenPortHint')}>
-        <span className="font-mono text-[12.5px] font-bold text-primary">18443</span>
+        <span className="font-mono text-[12.5px] font-bold text-primary">127.0.0.1:443</span>
       </DataLine>
       <DataLine className="border-b-0" label={t('settings.adminAccount')} sub="admin">
         <Button
@@ -129,7 +129,7 @@ export function TgbotCard({
     formState: { dirtyFields },
   } = useForm<TgbotFormValues>({ defaultValues: { token: '', admins: '' } })
 
-  const state = tgbot?.state ?? (tgbot?.running ? 'healthy' : 'disabled')
+  const state = tgbot ? tgbot.state : 'disabled'
   const adminsSnapshot = tgbot ? tgbot.admins.join(',') : null
   const stateTone =
     state === 'healthy' ? 'green' : state === 'degraded' ? 'red' : state === 'starting' ? 'amber' : 'neutral'

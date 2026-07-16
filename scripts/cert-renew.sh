@@ -57,7 +57,7 @@ file_mode() { stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || 
 normalized_mode() {
     case "${1:-}" in
         cloudflare) printf '%s\n' cloudflare ;;
-        http|http-01) printf '%s\n' http-01 ;;
+        http-01) printf '%s\n' http-01 ;;
         debug) printf '%s\n' debug ;;
         *) return 1 ;;
     esac
@@ -113,22 +113,17 @@ renewal_conf_safe() {
     esac
 }
 
-# http_cert_domains <base> prints the exact HTTP-01 SAN set after verifying
-# that dns.env has not drifted from the single-base derivation contract.
+# http_cert_domains <base> prints the exact HTTP-01 SAN set.
 http_cert_domains() {
-    local base="$1" console zash dot
-    console="$(cfg_get DNS_CONSOLE_DOMAIN)"
-    [[ -n "$console" ]] || console="$(cfg_get DNS_WEB_DOMAIN)"
-    zash="$(cfg_get DNS_ZASH_DOMAIN)"
-    dot="$(cfg_get DNS_DOMAIN)"
-    [[ "$console" == "console.${base}" && "$zash" == "zash.${base}" && "$dot" == "dot.${base}" ]] \
-        || { err "Service domains in ${DNS_ENV} do not match DNS_BASE_DOMAIN=${base}."; return 1; }
-    printf '%s\n' "$console" "$zash" "$dot"
+    local base="$1"
+    valid_domain "$base" || return 1
+    printf 'console.%s\nzash.%s\ndot.%s\n' "$base" "$base" "$base"
 }
 
 deploy_hook_owned() {
     [[ -f "$DEPLOY_HOOK" && ! -L "$DEPLOY_HOOK" && -x "$DEPLOY_HOOK" ]] || return 1
-    grep -qF "Let's Encrypt renewal deploy hook" "$DEPLOY_HOOK" 2>/dev/null \
+    grep -Fqx '# 5gpn-renew-hook-id: deploy-v1' "$DEPLOY_HOOK" \
+        && grep -qF "Let's Encrypt renewal deploy hook" "$DEPLOY_HOOK" \
         && grep -qF 'DNS_BASE_DOMAIN' "$DEPLOY_HOOK" 2>/dev/null \
         && grep -qF '/etc/5gpn/cert' "$DEPLOY_HOOK" 2>/dev/null
 }
@@ -164,23 +159,23 @@ ensure_live_deployed() {
 }
 
 dns_records_match() {
-    local expected="$1" domain raw ips aaaa ip
+    local expected="$1" domain raw ips aaaa raw_count ip_count
     shift
     command -v dig >/dev/null 2>&1 \
         || { err "dig is required for the 1.1.1.1 certificate DNS check."; return 1; }
     for domain in "$@"; do
         raw="$(dig +time=3 +tries=1 +short A "$domain" @"$DNS_RESOLVER" 2>/dev/null || true)"
         ips="$(printf '%s\n' "$raw" | awk '/^[0-9]+(\.[0-9]+){3}$/' || true)"
-        if [[ -z "$ips" ]]; then
-            warn "DNS not ready via ${DNS_RESOLVER}: ${domain} has no A record (raw: ${raw:-none})."
+        raw_count="$(printf '%s\n' "$raw" | awk 'NF { n++ } END { print n+0 }')"
+        ip_count="$(printf '%s\n' "$ips" | awk 'NF { n++ } END { print n+0 }')"
+        if [[ "$raw_count" != 1 || "$ip_count" != 1 ]]; then
+            warn "DNS not ready via ${DNS_RESOLVER}: ${domain} must have exactly one direct A record (raw: ${raw:-none})."
             return 1
         fi
-        while IFS= read -r ip; do
-            if [[ "$ip" != "$expected" ]]; then
-                warn "DNS mismatch via ${DNS_RESOLVER}: ${domain} A [${ips//$'\n'/, }] (want only ${expected})."
-                return 1
-            fi
-        done <<<"$ips"
+        if [[ "$ips" != "$expected" ]]; then
+            warn "DNS mismatch via ${DNS_RESOLVER}: ${domain} A [${ips}] (want ${expected})."
+            return 1
+        fi
         # Let's Encrypt prefers a published IPv6 route when one exists. This
         # gateway is IPv4-only, so a stale AAAA would make HTTP-01 nondeterministic.
         aaaa="$(dig +time=3 +tries=1 +short AAAA "$domain" @"$DNS_RESOLVER" 2>/dev/null \

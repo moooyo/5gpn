@@ -11,13 +11,13 @@ import { api } from '../../lib/api/client'
 describe('PolicyRuleDialog', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('has no selector field for any intent, including proxy (binary policy — UP-4)', async () => {
+  it('keeps application egress out of every DNS intent', async () => {
     const user = userEvent.setup()
     render(<PolicyRuleDialog open onOpenChange={() => {}} onSaved={() => {}} />)
     // default intent = block -> no selector field
     expect(screen.queryByTestId('policy-rule-selector-field')).toBeNull()
     await user.click(screen.getByTestId('policy-rule-intent-proxy'))
-    // proxy is just an intent now — still no selector field
+    // proxy is only a DNS steering intent
     expect(screen.queryByTestId('policy-rule-selector-field')).toBeNull()
     await user.click(screen.getByTestId('policy-rule-intent-direct'))
     expect(screen.queryByTestId('policy-rule-selector-field')).toBeNull()
@@ -31,6 +31,17 @@ describe('PolicyRuleDialog', () => {
     await user.click(screen.getByTestId('policy-rule-kind-subscription'))
     expect(screen.getByTestId('policy-rule-format-field')).toBeInTheDocument()
     expect(screen.getByTestId('policy-rule-interval-field')).toBeInTheDocument()
+  })
+
+  it('rejects a subscription without a positive interval', async () => {
+    const user = userEvent.setup()
+    render(<PolicyRuleDialog open onOpenChange={() => {}} onSaved={() => {}} />)
+    await user.click(screen.getByTestId('policy-rule-kind-subscription'))
+    await user.type(screen.getByTestId('policy-rule-value'), 'https://example.test/list.txt')
+    await user.clear(screen.getByPlaceholderText('24h0m0s'))
+    await user.click(screen.getByTestId('policy-rule-dialog-save'))
+    expect(screen.getByText('policyRules.dialog.errIntervalRequired')).toBeInTheDocument()
+    expect(api.createPolicyRule).not.toHaveBeenCalled()
   })
 
   it('submits a proxy rule with just {intent:"proxy"} and no selector', async () => {

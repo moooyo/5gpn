@@ -13,8 +13,7 @@ import (
 
 // Servers holds the DNS listeners (DoT + the loopback debug listener) and
 // provides Start / Shutdown lifecycle management. DoT is the ONLY client-facing
-// transport — DoH and plain :53 were removed (2026-07-10); the debug listener
-// is loopback plain UDP for on-box troubleshooting only.
+// transport; the debug listener is loopback plain UDP for on-box troubleshooting.
 type Servers struct {
 	cfg     Config
 	handler dns.Handler

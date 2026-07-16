@@ -137,11 +137,9 @@ function buildColumns(a: ColArgs): ColumnDef<PolicyRule, any>[] {
   ]
 }
 
-/** Ordered rule table for the ~90-default-row seed (UP-3 Task B3). A pure
- *  presentational component — the CRUD calls (reorder/toggle/edit/delete)
- *  are all owned by the caller (B4's page shell), matching egress's
- *  Tab-owns-CRUD split at one level up: here the table only computes WHICH
- *  id list a reorder means and hands it back via onReorder.
+/** Pure presentational ordered-rule table. The caller owns all CRUD calls;
+ *  the table computes which id list a reorder means and returns it through
+ *  onReorder.
  *
  *  Reorder is disabled while filtering (search or intent) is active:
  *  "moving row N" is only unambiguous against the full, contiguous order —

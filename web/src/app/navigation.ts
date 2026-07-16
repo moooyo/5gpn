@@ -1,6 +1,5 @@
-// Authoritative application route/navigation manifest. The router and E2E
-// suite both derive paths from this list, so a removed page cannot silently
-// remain as a redirecting false-positive test fixture.
+// Authoritative application route/navigation manifest shared by the router
+// and the E2E suite.
 export interface NavItem {
   id: string
   path: string

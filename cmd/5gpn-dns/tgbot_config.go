@@ -9,9 +9,7 @@ import (
 	"sort"
 )
 
-// tgbotSchemaVersion is the current tgbot.json schema version. A missing
-// "version" (0) is treated as this version; a higher one was written by a newer
-// binary — known fields are honoured, unknown ones ignored.
+// tgbotSchemaVersion is the exact tgbot.json schema version accepted.
 const tgbotSchemaVersion = 1
 
 // TGBotConfig is the on-disk shape of /etc/5gpn/tgbot.json — the web-console
@@ -32,7 +30,6 @@ type TGBotConfig struct {
 type TGBotView struct {
 	AdminIDs  []int64 `json:"admins"`
 	TokenSet  bool    `json:"token_set"`
-	Running   bool    `json:"running"`
 	State     string  `json:"state"`
 	LastError string  `json:"last_error,omitempty"`
 }
@@ -53,8 +50,11 @@ func LoadTGBot(path string) (*TGBotConfig, error) {
 		return nil, fmt.Errorf("tgbot: read %s: %w", path, err)
 	}
 	var tc TGBotConfig
-	if err := json.Unmarshal(data, &tc); err != nil {
+	if err := unmarshalStrictJSON(data, &tc); err != nil {
 		return nil, fmt.Errorf("tgbot: parse %s: %w", path, err)
+	}
+	if tc.Version != tgbotSchemaVersion {
+		return nil, fmt.Errorf("tgbot: %s: unsupported schema version %d (want %d)", path, tc.Version, tgbotSchemaVersion)
 	}
 	tc.Admins = normalizeAdminIDs(tc.Admins)
 	return &tc, nil

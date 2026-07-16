@@ -63,7 +63,7 @@ func startUDPTCPResolver(t *testing.T, name, ip string, truncateUDP bool) (strin
 }
 
 // TestBrokerFallback_PlainUDP builds a fallback exchanger from a plain-IPv4
-// XRAY_RESOLVER (host:port) and verifies it resolves over UDP.
+// egress resolver (host:port) and verifies it resolves over UDP.
 func TestBrokerFallback_PlainUDP(t *testing.T) {
 	addr, stop := startUDPTCPResolver(t, "example.com.", "203.0.113.7", false)
 	defer stop()
@@ -270,7 +270,7 @@ func TestEgressDNSBroker_NoResolverServfails(t *testing.T) {
 var _ Exchanger = (*brokerFakeExchanger)(nil)
 
 func TestNewDefaultEgressDNSBroker(t *testing.T) {
-	cfg := Config{EgressBrokerAddr: "127.0.0.1:0", XrayResolver: "198.51.100.1"}
+	cfg := Config{EgressBrokerAddr: "127.0.0.1:0", EgressResolver: "198.51.100.1"}
 	b, closer, err := newDefaultEgressDNSBroker(cfg)
 	if err != nil {
 		t.Fatalf("newDefaultEgressDNSBroker: %v", err)
@@ -284,7 +284,7 @@ func TestNewDefaultEgressDNSBroker(t *testing.T) {
 }
 
 func TestNewDefaultEgressDNSBroker_EmptyAddrIsConfigError(t *testing.T) {
-	cfg := Config{EgressBrokerAddr: "", XrayResolver: "198.51.100.1"}
+	cfg := Config{EgressBrokerAddr: "", EgressResolver: "198.51.100.1"}
 	_, _, err := newDefaultEgressDNSBroker(cfg)
 	if err == nil {
 		t.Fatal("empty broker address must be a config error, not a silent disable")

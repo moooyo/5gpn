@@ -79,12 +79,8 @@ func GetGroupECS(ex Exchanger) *net.IPNet {
 }
 
 // Exchange implements Exchanger. It tries the members SEQUENTIALLY in pool
-// (configuration) order and returns the first success — it does NOT fan out
-// to every member (deliberate reversal 2026-07-10: pool order is the
-// operator's preference order and the adopted answer must be deterministic;
-// racing all members picked the answer by gateway-side latency, which says
-// nothing about the CLIENTS' network position, and burned N-1 wasted queries
-// per lookup).
+// (configuration) order and returns the first success. Pool order is the
+// operator's deterministic preference order.
 //
 // Each attempt gets an equal slice of the remaining ctx budget
 // (remaining / members-left), so a dead first member cannot consume the whole

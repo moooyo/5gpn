@@ -85,23 +85,20 @@ prepare_source_dir /etc/5gpn-quick-test >/dev/null 2>&1
 [[ "$?" != 0 ]] && pass "system directory descendants are refused" \
     || fail "system directory descendant was accepted"
 
-# Latest is resolved once to a validated tag. Historical shell overrides and
-# branch/latest shortcuts are absent from the production path.
+# Latest is resolved once to a validated tag; branch shortcuts are absent.
 latest_json="$TMP/latest.json"
-printf '{"tag_name":"dns-v9.8.7"}\n' > "$latest_json"
+printf '{"tag_name":"9.8.7"}\n' > "$latest_json"
 dl() { cp -- "$1" "$2"; }
 got="$(resolve_latest_tag "$latest_json" 2>/dev/null)"
-[[ "$got" == dns-v9.8.7 ]] && pass "latest release response resolves to one safe tag" \
+[[ "$got" == 9.8.7 ]] && pass "latest release response resolves to one safe tag" \
     || fail "latest tag resolution returned '$got'"
 
 printf '{"tag_name":"../main"}\n' > "$latest_json"
 resolve_latest_tag "$latest_json" >/dev/null 2>&1
 [[ "$?" != 0 ]] && pass "unsafe release tag is rejected" \
     || fail "unsafe release tag was accepted"
-
-if grep -Fq 'unset DNS_VERSION REPO SRC' "$QUICK" \
-   && ! grep -Eq 'REPO="\$\{|SRC_REQUESTED=|DNS_VERSION:-|releases/latest/download|origin main' "$QUICK"; then
-    pass "quick install ignores historical environment overrides and branch shortcuts"
+if ! grep -Eq 'REPO="\$\{|SRC_REQUESTED=|DNS_VERSION:-|releases/latest/download|origin main' "$QUICK"; then
+    pass "quick install exposes no environment or branch release override"
 else
     fail "quick install still exposes an environment or branch version override"
 fi
@@ -134,7 +131,7 @@ dl() {
 
 bundle_target="$TMP/bundle-target"
 prepare_source_dir "$bundle_target" >/dev/null 2>&1
-fetch_bundle https://fixture.invalid dns-v9.8.7 >/dev/null 2>&1
+fetch_bundle https://fixture.invalid 9.8.7 >/dev/null 2>&1
 if [[ "$?" == 0 && -f "$_QI_SOURCE_DIR/install.sh" && -f "$_QI_SOURCE_DIR/template.txt" ]] \
    && marker_matches "$_QI_SOURCE_DIR/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE"; then
     pass "digest-verified bundle is staged and published"
@@ -146,7 +143,7 @@ mismatch_target="$TMP/mismatch-target"
 prepare_source_dir "$mismatch_target" >/dev/null 2>&1
 echo keep > "$_QI_SOURCE_DIR/keep"
 printf '%064d  %s\n' 0 "$BUNDLE_NAME" > "$FIXTURE_CHECKSUMS"
-fetch_bundle https://fixture.invalid dns-v9.8.7 >/dev/null 2>&1
+fetch_bundle https://fixture.invalid 9.8.7 >/dev/null 2>&1
 rc=$?
 if [[ "$rc" == 20 && -f "$_QI_SOURCE_DIR/keep" && ! -e "$_QI_SOURCE_DIR/install.sh" ]]; then
     pass "bundle digest mismatch fails closed before source cleanup"
@@ -155,11 +152,11 @@ else
 fi
 
 DL_MODE=missing_checksums
-fetch_bundle https://fixture.invalid dns-v9.8.7 >/dev/null 2>&1
+fetch_bundle https://fixture.invalid 9.8.7 >/dev/null 2>&1
 [[ "$?" == 20 ]] && pass "missing checksums fail closed" \
     || fail "bundle without checksums did not hard-fail"
 DL_MODE=missing_bundle
-fetch_bundle https://fixture.invalid dns-v9.8.7 >/dev/null 2>&1
+fetch_bundle https://fixture.invalid 9.8.7 >/dev/null 2>&1
 [[ "$?" == 10 ]] && pass "only an absent bundle is eligible for tag fallback" \
     || fail "absent bundle did not return the fallback-only status"
 
@@ -177,7 +174,7 @@ else
     fail "unsafe archive validation or extraction ownership gate is missing"
 fi
 
-# The git compatibility path fetches only the already-resolved tag, stamps that
+# The git release fallback fetches only the already-resolved tag, stamps that
 # tag into install.sh, and leaves the source untouched when the tag is absent.
 repo="$TMP/repo"
 git init -q "$repo"
@@ -187,13 +184,13 @@ printf '#!/usr/bin/env bash\nDNS_VERSION_DEFAULT="unstamped"\n' > "$repo/install
 echo branch > "$repo/branch-only"
 git -C "$repo" add install.sh branch-only
 git -C "$repo" commit -qm fixture
-git -C "$repo" tag dns-v9.8.7
+git -C "$repo" tag 9.8.7
 
 git_target="$TMP/git-target"
 prepare_source_dir "$git_target" >/dev/null 2>&1
-fetch_git "$repo" dns-v9.8.7 >/dev/null 2>&1
+fetch_git "$repo" 9.8.7 >/dev/null 2>&1
 if [[ "$?" == 0 ]] \
-   && grep -Fqx 'DNS_VERSION_DEFAULT="dns-v9.8.7"' "$_QI_SOURCE_DIR/install.sh"; then
+   && grep -Fqx 'DNS_VERSION_DEFAULT="9.8.7"' "$_QI_SOURCE_DIR/install.sh"; then
     pass "git fallback checks out and stamps the exact resolved tag"
 else
     fail "git fallback did not bind install.sh to the resolved tag"
@@ -202,7 +199,7 @@ fi
 missing_target="$TMP/missing-tag-target"
 prepare_source_dir "$missing_target" >/dev/null 2>&1
 echo keep > "$_QI_SOURCE_DIR/keep"
-fetch_git "$repo" dns-v0.0.0-missing >/dev/null 2>&1
+fetch_git "$repo" 0.0.0 >/dev/null 2>&1
 if [[ "$?" != 0 && -f "$_QI_SOURCE_DIR/keep" && ! -e "$_QI_SOURCE_DIR/branch-only" ]]; then
     pass "missing tag never falls back to the repository branch"
 else
@@ -212,11 +209,11 @@ fi
 ln -s "$outside" "$repo/$SOURCE_MARKER"
 git -C "$repo" add "$SOURCE_MARKER"
 git -C "$repo" commit -qm unsafe-marker
-git -C "$repo" tag dns-v9.8.8
+git -C "$repo" tag 9.8.8
 linked_git_target="$TMP/linked-git-target"
 prepare_source_dir "$linked_git_target" >/dev/null 2>&1
 echo keep > "$_QI_SOURCE_DIR/keep"
-fetch_git "$repo" dns-v9.8.8 >/dev/null 2>&1
+fetch_git "$repo" 9.8.8 >/dev/null 2>&1
 if [[ "$?" != 0 && -f "$_QI_SOURCE_DIR/keep" && "$(cat "$outside")" == untouched ]]; then
     pass "git checkout cannot publish or follow an ownership-marker symlink"
 else

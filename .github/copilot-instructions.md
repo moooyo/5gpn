@@ -1,7 +1,7 @@
 # Copilot instructions
 
-`docs/architecture.md` is the only current-architecture reference. Do not use
-archived migration notes to infer current ports, APIs, components, or config.
+Follow `AGENTS.md`; `docs/architecture.md` is the only current-architecture
+reference. Historical plans and design handoffs are context only.
 
 ## Current system
 
@@ -13,7 +13,7 @@ archived migration notes to infer current ports, APIs, components, or config.
 - DNS policy is an ordered, first-match block/direct/proxy model in
   `/etc/5gpn/policy.json`. It does not project into mihomo.
 - The complete `/etc/5gpn/mihomo/config.yaml` is operator-owned. Preserve it on
-  reinstall and ordinary `change-*`; only explicit reset may replace it after
+  reinstall and `configure`; only explicit reset may replace it after
   validation and atomic publication.
 - `console.<base>` publicly serves the SPA and `/ios/`; every `/api/*` route
   remains bearer-authenticated. `zash.<base>` is source-allowlisted. There is
@@ -24,8 +24,9 @@ archived migration notes to infer current ports, APIs, components, or config.
 
 Do not add Xray, sing-box, smartdns, chinadns-ng, Python, DoH/public `:53`,
 policy-v2 drafts, structured egress, TUN/TProxy, WireGuard, fwmark, policy
-routing, or host firewall ownership. Legacy names may remain only in scoped
-upgrade teardown.
+routing, or host firewall ownership. This project is pre-release: accept only
+the current config keys, schemas, commands, and callbacks; do not add aliases,
+migrations, or teardown for superseded implementations.
 
 ## Development commands
 
@@ -61,6 +62,9 @@ the installer's version pin and renderer placeholders.
   delete an unvalidated/unowned path.
 - Never place a debug certificate under `/etc/letsencrypt`; use
   `/etc/5gpn/debug-cert`.
+- Keep certificate modes exact: `cloudflare`, `http-01`, or `debug`; do not add
+  aliases. HTTP-01 uses the three derived service names and its scoped renewal
+  helper, while Cloudflare credentials remain DNS-01-only.
 - Keep Go's direct dependencies limited to `miekg/dns` and
   `go-telegram/bot` unless a design explicitly changes the policy.
 - Preserve sequential member order inside each upstream group and concurrent

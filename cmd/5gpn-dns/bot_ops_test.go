@@ -20,35 +20,6 @@ func recordRun(ok bool, out string) (func(argv []string, timeout time.Duration) 
 	return fn, &calls
 }
 
-// TestOpRestartMihomoUsesSystemctl asserts restarting mihomo shells out to
-// `systemctl restart mihomo` (real restart) and then reports is-active.
-func TestOpRestartMihomo(t *testing.T) {
-	dir := t.TempDir()
-	reloadCalls := 0
-	ctrl := NewController(nil, func() error { reloadCalls++; return nil }, dir, nil, nil, nil)
-	fn, calls := recordRun(true, "active")
-	bt := &Bot{ctrl: ctrl, runFn: fn}
-
-	msg := bt.opRestart("mihomo")
-
-	// It must have shelled out to restart mihomo (and separately is-active).
-	foundRestart := false
-	for _, c := range *calls {
-		if len(c) == 3 && c[0] == "systemctl" && c[1] == "restart" && c[2] == "mihomo" {
-			foundRestart = true
-		}
-	}
-	if !foundRestart {
-		t.Errorf("opRestart(mihomo) did not run [systemctl restart mihomo]; calls=%v", *calls)
-	}
-	if reloadCalls != 0 {
-		t.Errorf("opRestart(mihomo) called ctrl.Reload() %d times, want 0 (mihomo is a real restart)", reloadCalls)
-	}
-	if !strings.Contains(msg, "mihomo") {
-		t.Errorf("opRestart(mihomo) msg = %q, want it to name mihomo", msg)
-	}
-}
-
 func TestRestartMihomoRequiresCommandAndActiveSuccess(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -81,86 +52,12 @@ func TestRestartMihomoRequiresCommandAndActiveSuccess(t *testing.T) {
 	}
 }
 
-// TestOpRestart5gpnDnsReloadsNoSystemctl is the self-restart-paradox guard:
-// restarting the bot's own host process (5gpn-dns) must NOT systemctl-restart
-// (that would kill the bot mid-command). It must instead call ctrl.Reload()
-// (in-process hot reload) and label it as 热重载 (not 重启).
-func TestOpRestart5gpnDnsReloadsNoSystemctl(t *testing.T) {
-	dir := t.TempDir()
-	reloadCalls := 0
-	ctrl := NewController(nil, func() error { reloadCalls++; return nil }, dir, nil, nil, nil)
-	fn, calls := recordRun(true, "active")
-	bt := &Bot{ctrl: ctrl, runFn: fn}
-
-	msg := bt.opRestart("5gpn-dns")
-
-	if reloadCalls != 1 {
-		t.Errorf("opRestart(5gpn-dns) called ctrl.Reload() %d times, want 1 (hot reload, not restart)", reloadCalls)
-	}
-	for _, c := range *calls {
-		if len(c) >= 2 && c[0] == "systemctl" && c[1] == "restart" {
-			t.Errorf("opRestart(5gpn-dns) ran a systemctl restart (%v); self-restart would kill the bot", c)
-		}
-	}
-	if !strings.Contains(msg, "热重载") {
-		t.Errorf("opRestart(5gpn-dns) msg = %q, want it to say 热重载 (hot reload, not restart)", msg)
-	}
-}
-
-// TestOpRestartAll restarts mihomo (real) AND hot-reloads 5gpn-dns.
-func TestOpRestartAll(t *testing.T) {
-	dir := t.TempDir()
-	reloadCalls := 0
-	ctrl := NewController(nil, func() error { reloadCalls++; return nil }, dir, nil, nil, nil)
-	fn, calls := recordRun(true, "active")
-	bt := &Bot{ctrl: ctrl, runFn: fn}
-
-	bt.opRestart("all")
-
-	if reloadCalls != 1 {
-		t.Errorf("opRestart(all) called ctrl.Reload() %d times, want 1 (5gpn-dns hot reload)", reloadCalls)
-	}
-	foundMihomoRestart := false
-	for _, c := range *calls {
-		if len(c) == 3 && c[0] == "systemctl" && c[1] == "restart" && c[2] == "mihomo" {
-			foundMihomoRestart = true
-		}
-		if len(c) == 3 && c[0] == "systemctl" && c[1] == "restart" && c[2] == "5gpn-dns" {
-			t.Errorf("opRestart(all) systemctl-restarted 5gpn-dns; want hot reload, not restart")
-		}
-	}
-	if !foundMihomoRestart {
-		t.Errorf("opRestart(all) did not restart mihomo; calls=%v", *calls)
-	}
-}
-
-// TestOpRestartUnknown rejects an unknown service without shelling out or
-// reloading.
-func TestOpRestartUnknown(t *testing.T) {
-	dir := t.TempDir()
-	reloadCalls := 0
-	ctrl := NewController(nil, func() error { reloadCalls++; return nil }, dir, nil, nil, nil)
-	fn, calls := recordRun(true, "active")
-	bt := &Bot{ctrl: ctrl, runFn: fn}
-
-	msg := bt.opRestart("nginx")
-	if len(*calls) != 0 {
-		t.Errorf("opRestart(nginx) shelled out %v, want none for unknown service", *calls)
-	}
-	if reloadCalls != 0 {
-		t.Errorf("opRestart(nginx) reloaded %d times, want 0", reloadCalls)
-	}
-	if !strings.Contains(msg, "未知服务") {
-		t.Errorf("opRestart(nginx) msg = %q, want an unknown-service notice", msg)
-	}
-}
-
 // TestOpLogsKnownService builds the journalctl argv for a known service.
 func TestOpLogsKnownService(t *testing.T) {
 	fn, calls := recordRun(true, "some log output")
 	bt := &Bot{runFn: fn}
 
-	msg := bt.opLogs("5gpn-dns")
+	msg := bt.opLogsResult("5gpn-dns").HTML()
 
 	if len(*calls) != 1 {
 		t.Fatalf("opLogs(5gpn-dns) made %d run calls, want 1", len(*calls))
@@ -205,7 +102,7 @@ func TestOpLogsUnknownService(t *testing.T) {
 	fn, calls := recordRun(true, "")
 	bt := &Bot{runFn: fn}
 
-	msg := bt.opLogs("nginx")
+	msg := bt.opLogsResult("nginx").HTML()
 	if len(*calls) != 0 {
 		t.Errorf("opLogs(nginx) shelled out %v, want none for unknown service", *calls)
 	}
@@ -237,7 +134,7 @@ func TestOpRenewCert(t *testing.T) {
 				gotTimeout = timeout
 				return fn(argv, timeout)
 			}}
-			msg := bt.opRenewCert()
+			msg := bt.opRenewCertResult().HTML()
 			if len(*calls) != 1 {
 				t.Fatalf("opRenewCert made %d run calls, want 1: %v", len(*calls), *calls)
 			}
@@ -277,7 +174,7 @@ func TestOpRenewCertFailsClosedWithoutValidBaseDomain(t *testing.T) {
 			fn, calls := recordRun(true, "must not run")
 			bt := &Bot{runFn: fn}
 
-			msg := bt.opRenewCert()
+			msg := bt.opRenewCertResult().HTML()
 
 			if len(*calls) != 0 {
 				t.Fatalf("opRenewCert with DNS_BASE_DOMAIN=%q ran %v, want no subprocess", value, *calls)
@@ -296,7 +193,7 @@ func TestOpRenewCertCanonicalizesCertName(t *testing.T) {
 			fn, calls := recordRun(true, "[INFO] Cert not yet due for renewal")
 			bt := &Bot{runFn: fn}
 
-			msg := bt.opRenewCert()
+			msg := bt.opRenewCertResult().HTML()
 
 			if len(*calls) != 1 {
 				t.Fatalf("opRenewCert made %d calls, want 1", len(*calls))
@@ -317,54 +214,34 @@ func TestOpRenewCertCanonicalizesCertName(t *testing.T) {
 	}
 }
 
-// setIOSHostEnv points the iosHost source env keys at fresh test-scoped vars
-// (cleared by default) for the duration of a test. The bot reads the identity
-// from the environment (systemd loads dns.env), not from state files.
-func setIOSHostEnv(t *testing.T, webDomain, dotDomain string) {
+func setIOSHostEnv(t *testing.T, baseDomain string) {
 	t.Helper()
-	t.Setenv(consoleDomainEnv, "")
-	t.Setenv(baseDomainEnv, "")
-	t.Setenv(webDomainEnv, webDomain)
-	t.Setenv(domainEnv, dotDomain)
+	t.Setenv(baseDomainEnv, baseDomain)
 }
 
-// TestIosHost: the explicit public console domain wins. WEB, a base-derived
-// console name, and DoT remain migration fallbacks.
 func TestIosHost(t *testing.T) {
-	cases := []struct {
-		consoleDomain, webDomain, baseDomain, dotDomain, want string
-	}{
-		{"console.explicit.com", "console.legacy.com", "example.com", "dot.example.com", "console.explicit.com"},
-		{"", "console.legacy.com", "example.com", "dot.example.com", "console.legacy.com"},
-		{"", "", "example.com", "dot.example.com", "console.example.com"},
-		{"", "", "", "dot.example.com", "dot.example.com"},
-		{"", "", "", "", ""},
+	setIOSHostEnv(t, "example.com")
+	if got := iosHost(); got != "console.example.com" {
+		t.Fatalf("iosHost() = %q, want configured console domain", got)
 	}
-	for _, c := range cases {
-		setIOSHostEnv(t, c.webDomain, c.dotDomain)
-		t.Setenv(consoleDomainEnv, c.consoleDomain)
-		t.Setenv(baseDomainEnv, c.baseDomain)
-		if got := iosHost(); got != c.want {
-			t.Errorf("iosHost() with console=%q web=%q base=%q dot=%q = %q, want %q", c.consoleDomain, c.webDomain, c.baseDomain, c.dotDomain, got, c.want)
-		}
+
+	setIOSHostEnv(t, "")
+	if got := iosHost(); got != "" {
+		t.Fatalf("iosHost() = %q, want empty without DNS_BASE_DOMAIN", got)
 	}
 }
 
 // TestOpIosURLUsesConsoleDomain: the QR must point at the public console.
 func TestOpIosURLUsesConsoleDomain(t *testing.T) {
-	setIOSHostEnv(t, "console.example.com", "dot.example.com")
-	t.Setenv(consoleDomainEnv, "console.example.com")
+	setIOSHostEnv(t, "example.com")
 
 	fn, calls := recordRun(true, "QRCODE-ANSI-BLOCK")
 	bt := &Bot{runFn: fn}
-	msg := bt.opIOS()
+	msg := bt.opIOSResult().HTML()
 
 	wantURL := "https://console.example.com/ios/ios-dot.mobileconfig"
 	if !strings.Contains(msg, wantURL) {
 		t.Errorf("opIOS() = %q, want it to contain the console URL %q", msg, wantURL)
-	}
-	if strings.Contains(msg, "8111") {
-		t.Errorf("opIOS() = %q, must NOT reference the removed :8111 responder", msg)
 	}
 	if strings.Contains(msg, "QRCODE-ANSI-BLOCK") {
 		t.Errorf("opIOS() = %q, ANSI QR art must not be embedded", msg)
@@ -377,11 +254,11 @@ func TestOpIosURLUsesConsoleDomain(t *testing.T) {
 // TestOpIosNoHost: with no domain configured, opIOS reports that no host was
 // found and does NOT build a URL.
 func TestOpIosNoHost(t *testing.T) {
-	setIOSHostEnv(t, "", "") // no web/dot domain in the environment
+	setIOSHostEnv(t, "")
 
 	fn, calls := recordRun(true, "")
 	bt := &Bot{runFn: fn}
-	msg := bt.opIOS()
+	msg := bt.opIOSResult().HTML()
 
 	if strings.Contains(msg, "https://") {
 		t.Errorf("opIOS() with no host = %q, want no URL", msg)
@@ -395,13 +272,13 @@ func TestOpIosNoHost(t *testing.T) {
 }
 
 func TestOpIosDoesNotNeedQrencodeForActionableURL(t *testing.T) {
-	setIOSHostEnv(t, "example.com", "")
+	setIOSHostEnv(t, "example.com")
 
 	fn, calls := recordRun(false, "命令不存在：qrencode")
 	bt := &Bot{runFn: fn}
-	msg := bt.opIOS()
+	msg := bt.opIOSResult().HTML()
 
-	if !strings.Contains(msg, "https://example.com/ios/ios-dot.mobileconfig") {
+	if !strings.Contains(msg, "https://console.example.com/ios/ios-dot.mobileconfig") {
 		t.Errorf("opIOS() = %q, want the actionable URL", msg)
 	}
 	if len(*calls) != 0 {
@@ -456,35 +333,6 @@ func TestBotActionGuardConfirmationAndSingleFlight(t *testing.T) {
 	guard.Finish(botActionRestartMihomo)
 	if !guard.TryStart(botActionRestartMihomo) {
 		t.Fatal("operation remained locked after Finish")
-	}
-}
-
-// TestParseCallbackT3 confirms the T3 callback additions classify correctly,
-// including the restart:/logs: arg tail.
-func TestParseCallbackT3(t *testing.T) {
-	cases := []struct {
-		data     string
-		wantKind callbackKind
-		wantArg  string
-	}{
-		{"menu:restart", cbMenuRestart, ""},
-		{"menu:logs", cbMenuLogs, ""},
-		{"act:renew", cbRenew, ""},
-		{"act:ios", cbIOS, ""},
-		{"restart:mihomo", cbRestart, "mihomo"},
-		{"restart:5gpn-dns", cbRestart, "5gpn-dns"},
-		{"restart:all", cbRestart, "all"},
-		{"logs:5gpn-dns", cbLogs, "5gpn-dns"},
-		{"logs:mihomo", cbLogs, "mihomo"},
-	}
-	for _, c := range cases {
-		got := parseCallback(c.data)
-		if got.kind != c.wantKind {
-			t.Errorf("parseCallback(%q).kind = %v, want %v", c.data, got.kind, c.wantKind)
-		}
-		if got.arg != c.wantArg {
-			t.Errorf("parseCallback(%q).arg = %q, want %q", c.data, got.arg, c.wantArg)
-		}
 	}
 }
 

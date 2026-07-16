@@ -11,9 +11,8 @@ interface ErrorBoundaryState {
 }
 
 /**
- * Top-level render-error catcher (Task 7A). Without this, an uncaught render
- * error anywhere in the tree unmounts the whole React root — the SPA goes
- * blank with nothing but a console stack trace (flagged in Task 5.2).
+ * Top-level render-error catcher. Without this, an uncaught render error
+ * anywhere in the tree unmounts the whole React root and leaves a blank SPA.
  *
  * Mounted in main.tsx OUTSIDE the router but INSIDE ThemeProvider, so the
  * fallback card is themed even though the router (and whatever page threw)

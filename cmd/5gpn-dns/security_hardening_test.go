@@ -69,20 +69,19 @@ func TestNoGatewayDegradesInsteadOfBlackhole(t *testing.T) {
 	}
 }
 
-// #11: with no gateway, a blacklisted name returns NXDOMAIN (fail closed), not a
-// bogus 0.0.0.0.
-func TestNoGatewayBlacklistReturnsNXDOMAIN(t *testing.T) {
+// With no gateway, a force-proxy name returns NXDOMAIN instead of 0.0.0.0.
+func TestNoGatewayForceProxyReturnsNXDOMAIN(t *testing.T) {
 	china := &fakeExchanger{}
 	trust := &fakeExchanger{}
 	h := newTestHandler(t, china, trust)
 	h.GatewayIP = nil // unset
 
-	q := dns.Question{Name: "blacklist.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	q := dns.Question{Name: "proxy.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	req := new(dns.Msg)
-	req.SetQuestion("blacklist.test.", dns.TypeA)
+	req.SetQuestion("proxy.test.", dns.TypeA)
 	resp := h.resolve(context.Background(), q, req)
 
 	if resp.Rcode != dns.RcodeNameError {
-		t.Errorf("no-gateway blacklist should be NXDOMAIN, got rcode %d with answer %v", resp.Rcode, resp.Answer)
+		t.Errorf("no-gateway force-proxy should be NXDOMAIN, got rcode %d with answer %v", resp.Rcode, resp.Answer)
 	}
 }

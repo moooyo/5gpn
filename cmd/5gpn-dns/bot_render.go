@@ -286,7 +286,7 @@ func readFileTrim(path string) string {
 }
 
 // statusFacts are the gateway identity facts shown in the status card, read
-// from the daemon environment (DNS_DOMAIN / DNS_PUBLIC_IP), which systemd
+// from DNS_BASE_DOMAIN / DNS_PUBLIC_IP, which systemd
 // populates from the single config file /etc/5gpn/dns.env.
 type statusFacts struct {
 	domain   string
@@ -296,8 +296,13 @@ type statusFacts struct {
 // readStatusFacts loads the domain/public-IP facts from the environment. An
 // unset key yields an empty string (the status card simply omits that line).
 func readStatusFacts() statusFacts {
+	base := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(os.Getenv(baseDomainEnv))), ".")
+	domain := ""
+	if isValidDomain(base) {
+		domain = "dot." + base
+	}
 	return statusFacts{
-		domain:   strings.TrimSpace(os.Getenv("DNS_DOMAIN")),
+		domain:   domain,
 		publicIP: strings.TrimSpace(os.Getenv("DNS_PUBLIC_IP")),
 	}
 }
@@ -439,7 +444,7 @@ func systemMetrics() string {
 // The breakdown mirrors op_status's stats line:
 //
 //	直连 = force_direct + chnroute_cn
-//	代理 = blacklist   + chnroute_foreign
+//	代理 = force_proxy + chnroute_foreign
 func renderStatus(st Stats, svc map[string]string, facts statusFacts, metricsCard string, cert *CertStatus) string {
 	var lines []string
 	lines = append(lines, "<b>📊 5gpn 状态</b>", "")
@@ -486,12 +491,12 @@ func renderStatus(st Stats, svc map[string]string, facts statusFacts, metricsCar
 	}
 
 	direct := st.ForceDirect + st.ChnrouteCN
-	proxy := st.Blacklist + st.ChnrouteForeign
+	proxy := st.ForceProxy + st.ChnrouteForeign
 	lines = append(lines, "")
 	lines = append(lines, fmt.Sprintf(
 		"📈 查询：总 %d · 直连 %d（强制 %d + 国内 %d）· 代理 %d（GFW %d + 境外 %d）· 拦截 %d · 缓存 %d",
 		st.Total, direct, st.ForceDirect, st.ChnrouteCN,
-		proxy, st.Blacklist, st.ChnrouteForeign, st.Block, st.CacheEntries,
+		proxy, st.ForceProxy, st.ChnrouteForeign, st.Block, st.CacheEntries,
 	))
 	lines = append(lines, fmt.Sprintf(
 		"🔀 上游：国内 ✅%d/❌%d · 境外 ✅%d/❌%d",
@@ -569,11 +574,6 @@ func renderResolveTest(result ResolveTestResult) string {
 	return strings.Join(lines, "\n")
 }
 
-// NOTE (UP-1 Task D3/D4): renderDomains/renderUpdateResults were REMOVED
-// here — they rendered the bot's GFW-domain list and subscription-refresh
-// batch, both absorbed by the unified policy-rule model (managed exclusively
-// via the web console's /api/policy/* surface now).
-
 // --------------------------------------------------------------------------- //
 // Inline keyboards
 // --------------------------------------------------------------------------- //
@@ -596,18 +596,9 @@ func urlBtn(text, target string) models.InlineKeyboardButton {
 }
 
 func webConsoleURL() (string, bool) {
-	candidates := []string{
-		os.Getenv("DNS_CONSOLE_DOMAIN"),
-		os.Getenv(webDomainEnv),
-	}
-	if base := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(os.Getenv(baseDomainEnv))), "."); isValidDomain(base) {
-		candidates = append(candidates, "console."+base)
-	}
-	for _, candidate := range candidates {
-		host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(candidate)), ".")
-		if isValidDomain(host) {
-			return "https://" + host + "/", true
-		}
+	base := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(os.Getenv(baseDomainEnv))), ".")
+	if isValidDomain(base) {
+		return "https://console." + base + "/", true
 	}
 	return "", false
 }
@@ -636,12 +627,6 @@ func maintenanceMenu() *models.InlineKeyboardMarkup {
 		{btn("🔐 检查并续期证书", "request:"+string(botActionRenewCert))},
 		{btn("« 返回", "menu:main")},
 	}}
-}
-
-// restartMenu is retained as a source-compatible alias while bot.go migrates
-// to the accurately named maintenance submenu.
-func restartMenu() *models.InlineKeyboardMarkup {
-	return maintenanceMenu()
 }
 
 // logsMenu is the log-view submenu: one row per data-path service plus a back
@@ -746,19 +731,6 @@ const (
 	cbConfirmAction
 	cbCancelAction
 	cbLogs // logs:<svc> — tail a service's journal (arg = svc)
-
-	// Legacy kinds are retained while handler wiring migrates. Versioned menus
-	// never emit these direct privileged callbacks.
-	cbMenuRestart
-	cbRenew
-	cbIOS
-	cbRestart
-	// UP-1 Task D3/D4 removed cbMenuDomains/cbDomAdd/cbDomDel/cbUpdateLists
-	// (manual-rule GFW-domain view+edit, subscription refresh) and
-	// cbMenuSubs/cbSubView/cbSubRefresh/cbSubToggle/cbSubDelete/cbSubAdd/
-	// cbSubCat/cbSubFmt (the subscription management menu + add wizard) —
-	// both absorbed by the unified policy-rule model, web-console-managed
-	// only now.
 )
 
 // callbackIntent is the parsed form of a button's callback_data.
@@ -776,14 +748,12 @@ func validConfirmationNonce(nonce string) bool {
 	return err == nil
 }
 
-// parseCallback classifies callback data without a live Telegram connection.
-// Current buttons carry a b1 prefix. Legacy read-only/navigation data remains
-// usable, but old direct restart/renew callbacks are separated into legacy
-// kinds so new handler wiring can reject them rather than bypass confirmation.
+// parseCallback classifies current, versioned callback data without a live
+// Telegram connection. Unversioned data is not part of the callback protocol.
 func parseCallback(data string) callbackIntent {
 	payload, versioned := strings.CutPrefix(data, botCallbackPrefix)
 	if !versioned {
-		return parseLegacyCallback(data)
+		return callbackIntent{kind: cbUnknown, arg: data}
 	}
 
 	switch payload {
@@ -829,37 +799,6 @@ func parseCallback(data string) callbackIntent {
 		return callbackIntent{kind: cbUnknown, arg: arg}
 	}
 	return callbackIntent{kind: cbUnknown, arg: payload}
-}
-
-func parseLegacyCallback(data string) callbackIntent {
-	switch data {
-	case "menu:main":
-		return callbackIntent{kind: cbMenuMain}
-	case "act:status":
-		return callbackIntent{kind: cbStatus}
-	case "menu:upstreams":
-		return callbackIntent{kind: cbUpstreams}
-	case "act:reload":
-		return callbackIntent{kind: cbReload}
-	case "menu:restart":
-		return callbackIntent{kind: cbMenuRestart}
-	case "menu:logs":
-		return callbackIntent{kind: cbMenuLogs}
-	case "act:renew":
-		return callbackIntent{kind: cbRenew}
-	case "act:ios":
-		return callbackIntent{kind: cbIOS}
-	}
-	if svc, ok := strings.CutPrefix(data, "restart:"); ok {
-		return callbackIntent{kind: cbRestart, arg: svc}
-	}
-	if svc, ok := strings.CutPrefix(data, "logs:"); ok {
-		return callbackIntent{kind: cbLogs, arg: svc}
-	}
-	if _, arg, ok := strings.Cut(data, ":"); ok {
-		return callbackIntent{kind: cbUnknown, arg: arg}
-	}
-	return callbackIntent{kind: cbUnknown, arg: data}
 }
 
 // disabledPreview is a reusable "no link preview" option for outgoing

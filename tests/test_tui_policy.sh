@@ -17,7 +17,7 @@ grep -Fq '==========================================' "$INSTALL" \
     && fail "install.sh still uses the old ==== status banner instead of a gum card"
 
 # --- sub-scripts + hooks: gum-detect + gum log + plain-echo fallback all present -
-for f in scripts/update-lists.sh scripts/gen-ios-profile.sh scripts/renew-hook.sh scripts/cert-renew.sh; do
+for f in scripts/reload-rules.sh scripts/gen-ios-profile.sh scripts/renew-hook.sh scripts/cert-renew.sh; do
     s="$ROOT/$f"
     grep -Fq 'command -v gum'  "$s" || fail "$f does not detect gum on PATH"
     grep -Fq 'gum log'         "$s" || fail "$f has no gum log output path"
@@ -54,13 +54,10 @@ cf_confirm_line="$(grep -nF '我已确认上述 DNS 配置正确' <<<"$tui_fn" |
 [[ -n "$cf_confirm_line" ]] \
     || fail "Cloudflare install/configure path lacks explicit DNS confirmation"
 
-# --- update-lists.sh: Phase 2 repurpose — a manual reload trigger, no fetch of its
-# own (the in-process subscription manager owns fetching), so there is no opaque
-# download left to wrap in gum_spin; its reload result must stay plain operator
-# output, never hidden behind a spinner.
-UL="$ROOT/scripts/update-lists.sh"
+# --- reload-rules.sh performs only the visible local reload. ---
+UL="$ROOT/scripts/reload-rules.sh"
 grep -Eq 'gum_spin[^|]*(render_smartdns_conf|systemctl)' "$UL" \
-    && fail "update-lists.sh must not hide the reload/restart output behind a spinner"
+    && fail "reload-rules.sh must not hide reload output behind a spinner"
 
 # --- quick-install.sh: pre-gum entrypoint — gum-aware-if-present, ANSI fallback -
 QI="$ROOT/quick-install.sh"

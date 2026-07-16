@@ -43,7 +43,7 @@ describe('api client — live methods', () => {
   })
 })
 
-describe('api client — mihomo config (live, no 404 fallback — UP-4 endpoints exist)', () => {
+describe('api client — mihomo config', () => {
   it('getMihomoConfig GETs /api/mihomo/config and returns the config', async () => {
     vi.stubEnv('VITE_API_MOCK', '0')
     vi.resetModules()
@@ -87,17 +87,6 @@ describe('api client — mihomo config (live, no 404 fallback — UP-4 endpoints
     }
     expect(caught).toBeInstanceOf(ApiError)
     expect(caught).toMatchObject({ status: 400, message: 'missing required infrastructure: controller' })
-  })
-
-  it('getMihomoConfigDefault GETs /api/mihomo/config/default', async () => {
-    vi.stubEnv('VITE_API_MOCK', '0')
-    vi.resetModules()
-    const f = vi.fn().mockResolvedValue(jsonResp(200, { text: 'seed text' }))
-    vi.stubGlobal('fetch', f)
-    const { api } = await import('./client')
-    const result = await api.getMihomoConfigDefault()
-    expect(f.mock.calls[0][0]).toBe('/api/mihomo/config/default')
-    expect(result).toEqual({ text: 'seed text' })
   })
 
   it('resetMihomoConfig POSTs to /api/mihomo/config/reset', async () => {
@@ -148,11 +137,11 @@ describe('api client — mihomo config mock ON (VITE_API_MOCK=1)', () => {
     await expect(api.putMihomoConfig('proxies: []\n')).rejects.toBeInstanceOf(ApiError)
   })
 
-  it('getMihomoConfigDefault resolves the seed text; resetMihomoConfig restores it after an edit', async () => {
+  it('resetMihomoConfig restores the seed after an edit', async () => {
     vi.stubEnv('VITE_API_MOCK', '1')
     vi.resetModules()
     const { api } = await import('./client')
-    const { text: seed } = await api.getMihomoConfigDefault()
+    const { text: seed } = await api.getMihomoConfig()
     await api.putMihomoConfig(seed + '\n# edited\n')
     expect((await api.getMihomoConfig()).text).not.toBe(seed)
     const reset = await api.resetMihomoConfig()
@@ -161,7 +150,7 @@ describe('api client — mihomo config mock ON (VITE_API_MOCK=1)', () => {
   })
 })
 
-describe('api client — policy rules (live, no 404 fallback — UP-1 endpoints exist)', () => {
+describe('api client — policy rules', () => {
   it('getPolicyRules GETs /api/policy/rules and returns the list', async () => {
     vi.stubEnv('VITE_API_MOCK', '0')
     vi.resetModules()
@@ -297,55 +286,5 @@ describe('api client — policy rules mock ON (VITE_API_MOCK=1)', () => {
     vi.resetModules()
     const { api } = await import('./client')
     await expect(api.applyPolicy()).resolves.toEqual({ ok: true })
-  })
-})
-
-describe('api client — removed surface stays removed (UP-3 D2 + UP-4 regression guard)', () => {
-  // The DNS-rules/subscriptions/update methods and the egress split-rules/
-  // rule-subs quartets were deleted in C4 — absorbed into the unified
-  // getPolicyRules/*PolicyRule*/getPolicyFallback/putPolicyFallback/
-  // applyPolicy methods above. UP-4 then removed the ENTIRE egress surface
-  // (node-subs/selectors CRUD + apply/select) along with the structured
-  // egress model — mihomo egress is now the raw mihomo-config methods
-  // instead. Backend-side removal of the corresponding routes is locked by
-  // tests/test_5gpndns_policy.sh (UP-1 Task D5) and the UP-4 backend tasks;
-  // this guards the client from silently growing a method back (e.g. a
-  // rebase reintroducing it, or a copy-paste from an older branch) with no
-  // route for it to call and no test noticing.
-  it('never re-grows the removed DNS-rules/subscriptions/update methods', async () => {
-    vi.stubEnv('VITE_API_MOCK', '0')
-    vi.resetModules()
-    const { api } = await import('./client')
-    for (const name of [
-      'getRules', 'addRule', 'removeRule',
-      'listSubscriptions', 'createSubscription', 'replaceSubscription', 'deleteSubscription', 'updateSubscription', 'updateAllSubscriptions',
-    ]) {
-      expect(name in api, `api.${name} should not exist`).toBe(false)
-    }
-  })
-
-  it('never re-grows the removed egress split-rules/rule-subs quartets', async () => {
-    vi.stubEnv('VITE_API_MOCK', '0')
-    vi.resetModules()
-    const { api } = await import('./client')
-    for (const name of [
-      'getEgressSplitRules', 'createEgressSplitRule', 'updateEgressSplitRule', 'deleteEgressSplitRule',
-      'getEgressRuleSubs', 'createEgressRuleSub', 'updateEgressRuleSub', 'deleteEgressRuleSub',
-    ]) {
-      expect(name in api, `api.${name} should not exist`).toBe(false)
-    }
-  })
-
-  it('never re-grows the removed egress node-subs/selectors/apply/select surface (UP-4)', async () => {
-    vi.stubEnv('VITE_API_MOCK', '0')
-    vi.resetModules()
-    const { api } = await import('./client')
-    for (const name of [
-      'getEgressNodeSubs', 'createEgressNodeSub', 'updateEgressNodeSub', 'deleteEgressNodeSub',
-      'getEgressSelectors', 'createEgressSelector', 'updateEgressSelector', 'deleteEgressSelector',
-      'applyEgress', 'selectEgressMember',
-    ]) {
-      expect(name in api, `api.${name} should not exist`).toBe(false)
-    }
   })
 })

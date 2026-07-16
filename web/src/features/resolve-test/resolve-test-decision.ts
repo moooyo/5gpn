@@ -14,20 +14,18 @@ export const EXAMPLE_DOMAINS = [
 ]
 
 // reason -> i18n key slug shared by resolveTest.label.<slug> and
-// resolveTest.steps.<slug>. These are the 5 literal `reason` strings
-// cmd/5gpn-dns/resolvetest.go ever sets, and match the design handoff's
-// decide() outcomes exactly.
+// resolveTest.steps.<slug>. These are the five reasons with specialized UI.
 const KNOWN_SLUG: Record<string, string> = {
   'block': 'block',
   'force-direct': 'forceDirect',
-  'blacklist': 'blacklist',
+  'force-proxy': 'forceProxy',
   'chnroute-cn': 'chnrouteCn',
   'chnroute-foreign': 'chnrouteForeign',
 }
 
 export interface ResolveTestDecision {
   /** Shared with the logs view's reason→color mapping (block red /
-   *  force-direct green / blacklist blue / chnroute-cn cyan /
+   *  force-direct green / force-proxy blue / chnroute-cn cyan /
    *  chnroute-foreign blue; falls back by `verdict`). */
   color: string
   /** Already-localized pill text. */

@@ -16,7 +16,7 @@ func bumpAllStats(s *statsCounters) {
 	s.total.Store(11)
 	s.block.Store(21)
 	s.forceDirect.Store(31)
-	s.blacklist.Store(41)
+	s.forceProxy.Store(41)
 	s.chnrouteCN.Store(51)
 	s.chnrouteForeign.Store(61)
 	s.chinaOK.Store(71)

@@ -17,26 +17,25 @@ import (
 )
 
 func main() {
-	// -version/--version: print the build version and exit BEFORE loading config,
-	// so `5gpn-dns -version` works on a box with no dns.env/cert (install.sh uses
+	// --version: print the build version and exit BEFORE loading config,
+	// so the release binary can be inspected without dns.env/cert (install.sh uses
 	// it to detect version skew on re-install). No flag package — a single bare
 	// flag doesn't warrant it.
-	if len(os.Args) > 1 && (os.Args[1] == "-version" || os.Args[1] == "--version") {
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
 		fmt.Println(version)
 		return
 	}
 
 	// --seed-defaults: write the default policy.json, then exit. install.sh
 	// runs this once at install time (before start_services) so the daemon's
-	// first boot compile sees the seeded model rather than an empty one (an
-	// empty policy.json would compile writeManualFiles to empty and wipe the
-	// default rule set). Idempotent (skip-if-present); no dns.env/cert
-	// needed, so it runs before LoadConfig like -version. It gets its own
-	// FlagSet — the bare-arg convention the -version check uses does not scale to
+	// first boot compile sees the seeded model rather than an empty one.
+	// Idempotent (validate-if-present); no dns.env/cert is needed, so it runs
+	// before LoadConfig like --version. It gets its own FlagSet because
 	// the paths/URLs this takes.
 	if len(os.Args) > 1 && os.Args[1] == "--seed-defaults" {
 		fs := flag.NewFlagSet("seed-defaults", flag.ExitOnError)
 		policyOut := fs.String("policy-out", "/etc/5gpn/policy.json", "policy.json output path")
+		subscriptions := fs.String("subscriptions", "/etc/5gpn/subscriptions.json", "subscriptions.json validation path")
 		bypass := fs.String("bypass", "", "bundled DoH/DoT/HTTPDNS bypass domain list (domain-suffix block)")
 		keyword := fs.String("keyword", "", "bundled bypass keyword list (domain-keyword block)")
 		proxyDomains := fs.String("proxy-domains", "", "bundled forced-proxy domain list (domain-suffix proxy)")
@@ -50,31 +49,18 @@ func main() {
 		if err := seedDefaults(*policyOut, in); err != nil {
 			log.Fatalf("seed-defaults: %v", err)
 		}
+		if _, err := LoadSubscriptions(*subscriptions); err != nil {
+			log.Fatalf("seed-defaults: %v", err)
+		}
 		return
+	}
+	if len(os.Args) > 1 {
+		log.Fatalf("unknown command %q", os.Args[1])
 	}
 
 	cfg, err := LoadConfig()
 	if err != nil {
 		log.Fatalf("config: %v", err)
-	}
-
-	// --mihomo-reset: restore the seed default mihomo config and restart
-	// mihomo, then exit. A lifeline for a self-inflicted bad edit (via PUT
-	// /api/mihomo/config) that left the console/zash panels unreachable
-	// (design §4.2) — this CLI path goes straight to disk + systemctl,
-	// bypassing the HTTP API and mihomo's live PUT /configs entirely, so it
-	// doesn't depend on either the console or a healthy controller. Runs
-	// AFTER LoadConfig (unlike --seed-defaults/-version) because it needs
-	// cfg.MihomoConfigFile; MihomoConfigStore.Default() itself reads the
-	// same process environment LoadConfig just read from, so this only
-	// works when dns.env has actually been sourced into the environment
-	// (true for both a systemd-invoked run and install.sh's `5gpn
-	// mihomo-reset` wrapper).
-	if len(os.Args) > 1 && os.Args[1] == "--mihomo-reset" {
-		if err := mihomoResetCLI(cfg); err != nil {
-			log.Fatalf("mihomo-reset: %v", err)
-		}
-		return
 	}
 
 	// Runtime upstream override (web-console managed): when upstreams.json
@@ -127,18 +113,16 @@ func main() {
 	gatewayIP := cfg.GatewayIP
 	if gatewayIP == nil {
 		// Degrade, don't blackhole: without a gateway to steer to, keep foreign A
-		// records as-is (plain split-aware resolution) and NXDOMAIN the blacklist,
+		// records as-is (plain split-aware resolution) and NXDOMAIN explicit
+		// proxy-intent names,
 		// rather than fabricating an unroutable 0.0.0.0 for every non-CN name — a
 		// silent, total, hard-to-diagnose outage of all foreign destinations. The
 		// old code called this a "no-op" but it substituted 0.0.0.0 instead.
-		log.Printf("warning: DNS_GATEWAY_IP not set — foreign IPs will NOT be steered to the gateway; the resolver degrades to plain split-aware (foreign A returned as-is, blacklist returns NXDOMAIN)")
+		log.Printf("warning: DNS_GATEWAY_IP not set — foreign IPs will NOT be steered to the gateway; the resolver degrades to plain split-aware (foreign A returned as-is, force-proxy returns NXDOMAIN)")
 	}
 
 	h := &Handler{
 		CN:        sets.chnroute,
-		Block:     sets.block,
-		Direct:    sets.direct,
-		Blacklist: sets.blacklist,
 		Cache:     cache,
 		China:     china,
 		Trust:     trust,
@@ -159,12 +143,8 @@ func main() {
 		h.sem = make(chan struct{}, cfg.MaxInflight)
 	}
 	// Publish the initial rule sets into the atomic snapshot immediately, so the
-	// live query path (ruleSnap) reads the atomic from the very first query and
-	// never the public fields. Without this the atomic is nil until the first
-	// SIGHUP/reload, and that first swapRuleSets would write the public fields
-	// concurrently with in-flight queries reading them through ruleSnap's
-	// nil-fallback — a data race. Initialising here closes that window.
-	h.swapRuleSets(sets.block, sets.direct, sets.blacklist, sets.chnroute)
+	// Publish chnroute before serving so every query reads an atomic snapshot.
+	h.swapRuleSets(sets.chnroute)
 
 	// Publish the initial upstream snapshot for the same reason: the query path
 	// (exchangers) and PUT /api/upstreams both go through the atomic pointer.
@@ -198,7 +178,7 @@ func main() {
 			return err
 		}
 		// Atomic swap: in-flight queries holding the old Handler fields finish safely.
-		h.swapRuleSets(newSets.block, newSets.direct, newSets.blacklist, newSets.chnroute)
+		h.swapRuleSets(newSets.chnroute)
 		return nil
 	}
 
@@ -216,18 +196,10 @@ func main() {
 		}
 	}()
 
-	// ── Phase 2: subscription manager + controller ────────────────────────────
+	// ── Subscription manager + controller ────────────────────────────────────
 	// A missing subscriptions.json is not an error (NewSubManager/LoadSubscriptions
 	// returns an empty manager); a malformed one is logged and skipped so a bad
 	// subscriptions.json can never crash the resolver.
-	//
-	// UP-1 Task D3: subscriptions.json is no longer a hand-edited operator
-	// source of truth (the /api/subscriptions* HTTP surface + Controller CRUD
-	// facade that managed it directly are gone) — it is now a policy-compiler-
-	// driven DERIVED cache: PolicyEngine.CompileAndApply reconciles subMgr's
-	// tracked set to CompiledDNS.Subs on every apply (subMgr.Sync) and at boot,
-	// and Sync's Add/Remove/Replace calls persist to this same file as a side
-	// effect. policy.json (policy_rules.go) is the actual source of truth.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -250,8 +222,8 @@ func main() {
 		log.Printf("subscriptions: %v — continuing without subscription manager", err)
 		subMgr = nil
 	}
-	// ctrl is the facade the Phase 3 HTTP control-plane API consumes.
-	ctrl := NewController(subMgr, reload, cfg.RulesDir, h.stats, h.Cache.Len, h)
+	// ctrl is shared by the HTTP API and Telegram bot.
+	ctrl := NewController(reload, h.stats, h.Cache.Len, h)
 
 	// Upstream hot-swap hook (PUT /api/upstreams): rebuild both groups from the
 	// validated specs, swap them into the live engine (flushes the response
@@ -297,9 +269,8 @@ func main() {
 	// (the console-managed policy.json store) + policy_compile.go's
 	// CompilePolicy (the DNS-only compiler) tied together by
 	// policy_engine.go's PolicyEngine, which runs the compiler end-to-end:
-	// DNS category caches, the subscription fetch/sync, and the DNS fallback
-	// switch. There is no mihomo side to this anymore (2026-07-15 policy/
-	// mihomo decoupling) -- a policy apply never mutates mihomo. A
+	// policy subscriptions and the live ordered DNS snapshot. A policy apply
+	// never mutates mihomo. A
 	// PolicyRuleManager construction failure (a malformed policy.json) is
 	// warn-and-continue, like every other optional store -- the sole
 	// resolver must never crash-loop over an operator's bad edit.
@@ -307,16 +278,18 @@ func main() {
 	if polMgr, err := NewPolicyRuleManager(cfg.PolicyRulesFile); err != nil {
 		log.Printf("warning: policy: %v -- policy rule management disabled", err)
 	} else {
-		// Live from the very first query, even before the boot compile below
-		// (which fetches subscriptions and may take a moment, or fail
-		// offline) ever runs -- mirrors the pre-policy default (auto).
-		h.setFallback(polMgr.GetFallback().Policy)
 		polEngine = NewPolicyEngine(polMgr, subMgr, h, reload, cfg.RulesDir)
 		ctrl.SetPolicyEngine(polMgr, polEngine)
 		if err := polEngine.PrepareRuntime(); err != nil {
 			log.Printf("warning: policy: initial runtime snapshot: %v", err)
 		}
 		log.Printf("policy: rule engine ready (rules=%s, %d rule(s))", cfg.PolicyRulesFile, len(polMgr.Rules()))
+	}
+	if h.orderedPolicy.Load() == nil {
+		model := PolicyModel{Version: policySchemaVersion, Fallback: Fallback{Policy: FallbackAuto}}
+		if err := h.publishPolicyModel(model, cfg.RulesDir); err != nil {
+			log.Fatalf("policy: publish default runtime: %v", err)
+		}
 	}
 
 	// Mihomo always resolves sniffed origins through the loopback Egress DNS
@@ -336,7 +309,7 @@ func main() {
 		go subMgr.Run(ctx)
 	}
 
-	// Phase 4 Task A2: periodically persist stats + do a final save on shutdown
+	// Periodically persist stats and do a final save on shutdown
 	// (triggered by ctx being cancelled below). Best-effort — RunStatsPersister
 	// never crashes the resolver on a save failure. Tracked by persistWG so the
 	// shutdown path waits for the final save to complete before the process
@@ -348,7 +321,7 @@ func main() {
 		RunStatsPersister(ctx, cfg.StatsFile, h.stats, 60*time.Second)
 	}()
 
-	// ── Control-plane HTTPS API + web console (:18443, bearer-token) ──────────
+	// ── Control-plane HTTPS API + web console (loopback :443) ────────────────
 	// NewControlServer returns (nil, nil) when DNS_API_TOKEN is empty: the
 	// control plane is disabled rather than served without authentication.
 	controlSrv, err := NewControlServer(cfg, ctrl)
@@ -371,9 +344,9 @@ func main() {
 		log.Fatalf("servers start: %v", err)
 	}
 
-	// UP-1 Task C4: run the policy engine's first compile+apply in the
+	// Run the policy engine's first compile+apply in the
 	// background, after the DNS/control-plane listeners are already up.
-	// CompileAndApply does a real subscription fetch plus a `mihomo -t` exec;
+	// CompileAndApply can perform real subscription fetches;
 	// it must never delay -- or, offline, indefinitely block -- the sole
 	// resolver's startup. Warn-on-error, like every other best-effort
 	// boot-time task here (stats restore, cert monitor, heartbeat): an
@@ -409,7 +382,7 @@ func main() {
 		log.Printf("control API disabled: DNS_API_TOKEN not set")
 	}
 
-	// ── Phase 5: in-process Telegram control bot (supervised goroutine) ───────
+	// ── In-process Telegram control bot (supervised goroutine) ────────────────
 	// The bot calls the in-memory Controller directly (no HTTP/token). The
 	// supervisor builds it (bot.New does a getMe round-trip to Telegram) and runs
 	// the long-poll in a child goroutine, so a slow/unreachable Telegram can never
@@ -503,8 +476,7 @@ func wireMihomoConfigManagement(controlSrv *ControlServer, cfg Config, logf func
 		}
 		return
 	}
-	// Mihomo raw-config editor (GET/PUT /api/mihomo/config + /default +
-	// /reset — design §4.2). Wired only when the verified controller client is
+	// Mihomo raw-config editor and explicit reset. Wired only when the verified controller client is
 	// available; otherwise the endpoints stay unavailable rather than
 	// downgrading or partially working against plaintext HTTP.
 	controlSrv.SetMihomoConfig(
@@ -515,75 +487,24 @@ func wireMihomoConfigManagement(controlSrv *ControlServer, cfg Config, logf func
 	)
 }
 
-// mihomoResetCLI implements --mihomo-reset: write the seed default mihomo
-// config to cfg.MihomoConfigFile (atomic temp+rename, matching the API
-// apply pipeline's write step) and restart mihomo via systemd so it picks up
-// the fresh file. Deliberately skips ValidateInvariants/`mihomo -t` — this is
-// the LAST-RESORT recovery path when the console itself may be unreachable
-// because of a bad edit, and the seed template is trusted by construction
-// (it's exactly what a fresh install renders); gating recovery behind the
-// same checks it exists to route around would defeat its purpose. It also
-// skips the live PUT /configs hot-apply the API uses (no assumption that the
-// controller is even reachable) in favor of a real `systemctl restart`,
-// mirroring bot_ops.go's restartMihomo.
-func mihomoResetCLI(cfg Config) error {
-	store := NewMihomoConfigStore(cfg.MihomoConfigFile)
-	text := store.Default()
-	if err := store.EnsurePrivateDir(); err != nil {
-		return fmt.Errorf("secure %s: %w", store.Dir(), err)
-	}
-	if err := atomicWriteFile(store.Path(), []byte(text), 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", store.Path(), err)
-	}
-	log.Printf("mihomo-reset: wrote seed default to %s", store.Path())
-
-	ok, out := run([]string{"systemctl", "restart", "mihomo"}, 60*time.Second)
-	if !ok {
-		return fmt.Errorf("systemctl restart mihomo: %s", out)
-	}
-	log.Printf("mihomo-reset: mihomo restarted")
-	return nil
-}
-
 // ruleSets holds the reloadable rule data.
 type ruleSets struct {
-	block     *DomainSet
-	direct    *DomainSet
-	blacklist *DomainSet
-	chnroute  *Chnroute
+	chnroute *Chnroute
 }
 
 // loadRuleSets reads all rule files from disk according to cfg.
 func loadRuleSets(cfg Config) (*ruleSets, error) {
 	rulesDir := cfg.RulesDir
 
-	block, err := LoadDomainSetTyped(globPattern(rulesDir, "block")...)
-	if err != nil {
-		return nil, fmt.Errorf("block: %w", err)
-	}
-	direct, err := LoadDomainSetTyped(globPattern(rulesDir, "direct")...)
-	if err != nil {
-		return nil, fmt.Errorf("direct: %w", err)
-	}
-	blacklist, err := LoadDomainSetTyped(globPattern(rulesDir, "blacklist")...)
-	if err != nil {
-		return nil, fmt.Errorf("blacklist: %w", err)
-	}
-
 	// chnroute sources, in load order (LoadChnrouteFiles merges all of them):
 	//   - cfg.ChnrouteFile          → the DNS_CHNROUTE pin (default china_ip_list.txt), optional
-	//   - rulesDir/chnroute.txt     → the manual file the :18443 API / bot / web console
-	//     write via Controller.manualRulePath("chnroute", …). This MUST be in the load
-	//     path or a manual "China route" add is a silent no-op (persisted+listed, never
-	//     applied). It was previously omitted — only cfg.ChnrouteFile + chnroute/*.txt loaded.
 	//   - rulesDir/chnroute/*.txt   → subscription caches (globChnrouteDir)
-	// Loading is unconditional: even with DNS_CHNROUTE unset, subscription caches and
-	// the manual file must still populate CN — otherwise every IP looks foreign silently.
+	// Loading is unconditional: even with DNS_CHNROUTE unset, subscription caches
+	// must still populate CN.
 	chnFiles := make([]string, 0, 2)
 	if cfg.ChnrouteFile != "" {
 		chnFiles = append(chnFiles, cfg.ChnrouteFile)
 	}
-	chnFiles = append(chnFiles, filepath.Join(rulesDir, "chnroute.txt"))
 	chnFiles = append(chnFiles, globChnrouteDir(rulesDir)...)
 
 	cr, err := LoadChnrouteFiles(chnFiles...)
@@ -594,7 +515,7 @@ func loadRuleSets(cfg Config) (*ruleSets, error) {
 			// the subscription manager's in-process fetch lands. The
 			// alternative (log.Fatalf) would crash-loop forever on a fresh
 			// install where nothing has seeded chnroute yet.
-			log.Printf("warning: %v — starting with empty chnroute (all IPs treated as foreign) until a subscription fetch or manual file populates it", err)
+			log.Printf("warning: %v — starting with empty chnroute (all IPs treated as foreign) until a subscription fetch populates it", err)
 			cr = &Chnroute{}
 		} else {
 			return nil, fmt.Errorf("chnroute: %w", err)
@@ -602,34 +523,8 @@ func loadRuleSets(cfg Config) (*ruleSets, error) {
 	}
 
 	return &ruleSets{
-		block:     block,
-		direct:    direct,
-		blacklist: blacklist,
-		chnroute:  cr,
+		chnroute: cr,
 	}, nil
-}
-
-// globPattern returns the (file, match-type) specs for a domain rule category:
-//   - rulesDir/<cat>.txt            → suffix (bare, backward compatible)
-//   - rulesDir/<cat>.exact.txt      → exact
-//   - rulesDir/<cat>.keyword.txt    → keyword
-//   - rulesDir/<cat>.prefix.txt     → prefix
-//   - rulesDir/<cat>/*.txt          → suffix (subscription caches)
-//
-// Explicit per-type filenames (not a <cat>.*.txt glob) so an unrelated file can
-// never be silently picked up. Missing paths are tolerated by LoadDomainSetTyped.
-func globPattern(rulesDir, category string) []fileSpec {
-	specs := []fileSpec{
-		{Path: filepath.Join(rulesDir, category+".txt"), Type: MatchSuffix},
-		{Path: filepath.Join(rulesDir, category+".exact.txt"), Type: MatchExact},
-		{Path: filepath.Join(rulesDir, category+".keyword.txt"), Type: MatchKeyword},
-		{Path: filepath.Join(rulesDir, category+".prefix.txt"), Type: MatchPrefix},
-	}
-	matches, _ := filepath.Glob(filepath.Join(rulesDir, category, "*.txt"))
-	for _, m := range matches {
-		specs = append(specs, fileSpec{Path: m, Type: MatchSuffix})
-	}
-	return specs
 }
 
 // globChnrouteDir returns the subscription-cache .txt files under

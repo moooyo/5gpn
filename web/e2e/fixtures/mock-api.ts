@@ -27,7 +27,7 @@ const STATS_FIXTURE: T.Stats = {
   total: 4200,
   block: 120,
   force_direct: 30,
-  blacklist: 5,
+  force_proxy: 5,
   chnroute_cn: 2800,
   chnroute_foreign: 1200,
   cache_entries: 440,
@@ -144,12 +144,12 @@ const QUERYLOG_FIXTURE: T.QueryLogResponse = {
       client: '192.168.1.11',
       name: 'malware.example.',
       qtype: 'A',
-      verdict: 'block',
-      reason: 'blacklist',
+      verdict: 'proxy',
+      reason: 'force-proxy',
       upstream: '',
       cache_hit: false,
-      rcode: 'NXDOMAIN',
-      ips: [],
+      rcode: 'NOERROR',
+      ips: ['10.0.1.20'],
       duration_ms: 0,
     },
   ],
@@ -165,7 +165,7 @@ const ECS_FIXTURE: T.ECSView = { subnet: '122.96.30.0/24' }
 const TGBOT_FIXTURE: T.TGBotView = {
   admins: [123456789],
   token_set: true,
-  running: true,
+  state: 'healthy',
 }
 
 const POLICY_RULES_FIXTURE: T.PolicyRule[] = [
@@ -176,7 +176,7 @@ const POLICY_RULES_FIXTURE: T.PolicyRule[] = [
 const MIHOMO_CONFIG_TEXT = `external-controller: 127.0.0.1:9090
 secret: e2e-secret
 listeners:
-  - {name: sniproxy, type: tunnel, port: 443, target: 127.0.0.1:443}
+  - {name: gateway, type: tunnel, port: 443, target: 127.0.0.1:443}
 dns: {nameserver: ["udp://127.0.0.1:5354"]}
 hosts: {console.example.test: 127.0.0.1, zash.example.test: 127.0.0.2}
 rules: ["DOMAIN,console.example.test,DIRECT", "IP-CIDR,10.0.0.1/32,REJECT-DROP", "MATCH,DIRECT"]
@@ -226,9 +226,8 @@ export async function setupMockApi(page: Page): Promise<void> {
 
     if (!checkAuth(route)) return
 
-    // Status / stats
+    // Status
     if (path === '/api/status') return json(route, STATUS_FIXTURE)
-    if (path === '/api/stats') return json(route, STATS_FIXTURE)
     if (path === '/api/mihomo/health' && method === 'GET') {
       return json(route, { version: 'v1.19.28', meta: true } satisfies T.MihomoHealth)
     }
@@ -267,7 +266,6 @@ export async function setupMockApi(page: Page): Promise<void> {
 
     // Raw operator-owned mihomo config
     if (path === '/api/mihomo/config' && method === 'GET') return json(route, MIHOMO_CONFIG_FIXTURE)
-    if (path === '/api/mihomo/config/default' && method === 'GET') return json(route, { text: MIHOMO_CONFIG_TEXT })
     if (path === '/api/mihomo/config/reset' && method === 'POST') return json(route, MIHOMO_CONFIG_FIXTURE)
 
     // Unhandled — return 404

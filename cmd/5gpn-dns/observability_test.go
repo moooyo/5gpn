@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -36,7 +37,7 @@ func TestCacheHitMissCounters(t *testing.T) {
 		t.Errorf("cacheHits = %d, want 1", got)
 	}
 
-	c := NewController(nil, func() error { return nil }, t.TempDir(), h.stats, h.Cache.Len, nil)
+	c := NewController(func() error { return nil }, h.stats, h.Cache.Len, nil)
 	st := c.Stats()
 	if st.CacheHits != 1 || st.CacheMisses != 1 {
 		t.Errorf("Stats cache = hits %d misses %d, want 1/1", st.CacheHits, st.CacheMisses)
@@ -63,7 +64,7 @@ func TestUpstreamLatencyRecorded(t *testing.T) {
 		t.Errorf("trustLatCount = %d, want >=1", got)
 	}
 
-	c := NewController(nil, func() error { return nil }, t.TempDir(), h.stats, nil, nil)
+	c := NewController(func() error { return nil }, h.stats, nil, nil)
 	_ = c.Stats() // must not panic; avg may be ~0 with a no-delay fake exchanger
 }
 
@@ -92,9 +93,9 @@ func TestSubscriptionFailureIsLogged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSubManager: %v", err)
 	}
-	m.subs = []Subscription{{ID: "f1", Category: "direct", Name: "f1", URL: srv.URL, Format: "plain", Enabled: true}}
+	m.subs = []Subscription{{ID: "f1", Category: "direct", Name: "f1", URL: srv.URL, Format: "plain", Enabled: true, Interval: time.Hour}}
 
-	res := m.UpdateOne(context.Background(), "f1")
+	res := m.updateOne(context.Background(), "f1")
 	if res.OK {
 		t.Fatal("expected the 500 fetch to fail")
 	}

@@ -2,8 +2,8 @@
  * Shared kernel-status poller (amendment A-M3).
  *
  * Polls the two liveness surfaces the chrome needs — api.getStatus() (the
- * 5gpn-dns daemon itself) and api.getMihomoHealth() (the mihomo sniproxy
- * kernel, via the daemon's bearer-protected /api/mihomo/health endpoint) —
+ * 5gpn-dns daemon itself) and api.getMihomoHealth() (the mihomo gateway
+ * forwarder, via the daemon's bearer-protected /api/mihomo/health endpoint) —
  * on a completion-scheduled interval, and exposes both raw payloads plus derived up/down flags
  * via context.
  *

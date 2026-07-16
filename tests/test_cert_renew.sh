@@ -31,6 +31,7 @@ DEPLOY_HOOK="$TMP/99-5gpn.sh"
 export TEST_CERT_ROOT="$CERT_ROOT"
 cat > "$DEPLOY_HOOK" <<'EOF'
 #!/usr/bin/env bash
+# 5gpn-renew-hook-id: deploy-v1
 # Let's Encrypt renewal deploy hook; reads DNS_BASE_DOMAIN; publishes /etc/5gpn/cert.
 set -eu
 [[ "${RENEW_HOOK_VALIDATE_ONLY:-0}" == 1 ]] && exit 0
@@ -94,10 +95,6 @@ cfg_get() {
         DNS_BASE_DOMAIN)    printf '%s\n' "$CFG_BASE" ;;
         CERT_MODE)          printf '%s\n' "$CFG_MODE" ;;
         DNS_PUBLIC_IP)      printf '%s\n' "$CFG_PUBLIC" ;;
-        DNS_CONSOLE_DOMAIN) printf 'console.%s\n' "$CFG_BASE" ;;
-        DNS_WEB_DOMAIN)     printf 'console.%s\n' "$CFG_BASE" ;;
-        DNS_ZASH_DOMAIN)    printf 'zash.%s\n' "$CFG_BASE" ;;
-        DNS_DOMAIN)         printf 'dot.%s\n' "$CFG_BASE" ;;
         *)                  return 0 ;;
     esac
 }
@@ -124,6 +121,8 @@ dig() {
     case "$query:$MOCK_DNS_MODE" in
         A:ready|A:aaaa) printf '%s\n' "$CFG_PUBLIC" ;;
         A:mismatch)     printf '198.51.100.77\n' ;;
+        A:cname)        printf 'alias.example.net.\n%s\n' "$CFG_PUBLIC" ;;
+        A:multi)        printf '%s\n%s\n' "$CFG_PUBLIC" "$CFG_PUBLIC" ;;
         AAAA:aaaa)      printf '2001:db8::9\n' ;;
     esac
     return 0
@@ -224,6 +223,16 @@ expect_log "dig A console.example.com @1.1.1.1" "HTTP renewal checks A through 1
 expect_log "dig AAAA console.example.com @1.1.1.1" "HTTP renewal checks AAAA through 1.1.1.1"
 expect_no_log "certbot " "HTTP DNS failure does not invoke Certbot"
 expect_no_log "systemctl " "HTTP DNS failure does not touch mihomo"
+
+reset_case
+MOCK_DNS_MODE=cname
+expect_failure "HTTP DNS rejects a CNAME indirection" cert_renew_main --cert-name example.com
+expect_no_log "systemctl " "CNAME rejection happens before touching mihomo"
+
+reset_case
+MOCK_DNS_MODE=multi
+expect_failure "HTTP DNS rejects multiple A answers" cert_renew_main --cert-name example.com
+expect_no_log "systemctl " "multiple-A rejection happens before touching mihomo"
 
 # If Certbot fails after stopping an active mihomo, restoration still happens
 # and the order remains DNS -> stop -> Certbot -> start.

@@ -28,7 +28,7 @@
 └────────────────────────────────────────────────────────────┘
         │ 境外 → 网关 IP                    │ 国内 → 真实 IP / 封锁 → NXDOMAIN
         ▼                                    ▼
-  mihomo (sniproxy tunnel 监听 TCP 80 / TCP+UDP 443)  客户端直连 / 不发起连接
+  mihomo (gateway tunnel 监听 TCP 80 / TCP+UDP 443)  客户端直连 / 不发起连接
   · SNI == console → DIRECT 回环（API bearer）；SNI == zashboard →
     源 IP 命中 whitelist.txt 才 DIRECT，否则 REJECT-DROP
   · 其余 SNI/QUIC → mihomo 内置嗅探器（sniffer）取域名，经 5gpn-dns 的回环 Egress DNS
@@ -54,15 +54,15 @@
 
 ## 关键特性
 
-- **确定性 chnroute 仲裁**：并发查国内 UDP（`223.5.5.5`/`119.29.29.29`）和可信 DoT（`8.8.8.8`/`1.1.1.1`），**按 chnroute 成员关系判定，不看谁先回**（非竞速）。这是 smartdns 做不到、当初自研的根本原因。
-- **DoT-only 入口**：唯一的客户端 DNS 传输是 DoT `:853`（DoH 与明文 `:53` 已移除）。另有一个仅回环的 `127.0.0.1:5353` 明文调试监听，仅用于本机排障。
+- **确定性 chnroute 仲裁**：并发查国内 UDP（`223.5.5.5`/`119.29.29.29`）和可信 DoT（`8.8.8.8`/`1.1.1.1`），**按 chnroute 成员关系判定，不看谁先回**（非竞速）。
+- **DoT-only 入口**：唯一的客户端 DNS 传输是 DoT `:853`；不提供 DoH 或客户端明文 `:53`。另有一个仅回环的 `127.0.0.1:5353` 明文调试监听，仅用于本机排障。
 - **全查询类型**：A → 仲裁+改写；AAAA → SOA（IPv4-only）；HTTPS/SVCB → 空 NOERROR（保 SNI 嗅探）；其余 → 转发可信 DoT。
-- **有序统一策略**：`/etc/5gpn/policy.json` 中每条规则以 exact/suffix/keyword/subscription 匹配一种 block/direct/proxy 意图，跨意图按全局顺序 first-match；未命中项可选 auto/direct/gateway fallback。系统 chnroute 与编译后的策略订阅由进程内抓取器定时更新，支持 `plain`/`gfwlist`/`dnsmasq`/`adblock`/`hosts`/`cidr`，失败保留旧缓存（离线安全）。
+- **有序统一策略**：`/etc/5gpn/policy.json` 中每条规则以 exact/suffix/keyword/subscription 匹配一种 block/direct/proxy 意图，跨意图按全局顺序 first-match；未命中项可选 auto/direct/gateway fallback。系统 chnroute 与编译后的策略订阅由进程内抓取器定时更新，域名列表支持 `plain`/`gfwlist`/`dnsmasq`/`hosts`，chnroute 使用 `cidr`；失败保留旧缓存（离线安全）。
 - **统一控制面**（多前端共用同一内存 `Controller`）：
   - **HTTPS REST API + React Web 控制台 + iOS 描述文件**：console SPA 资源与 profile 下载公开，所有 API 需 bearer token；iOS/Android 配置说明、二维码与下载入口统一位于控制台“配置向导”；zashboard 仍由 mihomo `whitelist.txt` 来源白名单保护。
   - **zashboard 面板**：同样经 mihomo SNI 分流 + 白名单暴露到本机另一回环端口。
   - **进程内 Telegram bot**（`github.com/go-telegram/bot`，管理员门控，直接调 `Controller`、不走 HTTP/token）。
-  - **Mihomo controller TLS**: the zash certificate role is shared by the zashboard panel and the mihomo controller. `DNS_MIHOMO_CONTROLLER` remains the loopback dial target; verified controller clients use `DNS_ZASH_DOMAIN` for TLS identity and trust `DNS_ZASH_CERT`. Mihomo v1.19.28 also needs `SAFE_PATHS=/etc/5gpn/cert/zash` because the shared controller cert lives outside `-d /etc/5gpn/mihomo`; that allowlist is read-only and does not widen writes or relax `ProtectSystem=strict`. Ordinary reinstall/change-* preserve an existing operator-owned mihomo config byte-for-byte and do not migrate it; older installs need `DNS_ZASH_DOMAIN` plus either `mihomo-reset` or a manual TLS-only edit before verified controller clients can connect, otherwise they fail closed. If the verified controller transport/client cannot be built, DNS and the rest of the control plane keep running while Mihomo health/config/proxy endpoints stay unavailable (503) rather than downgrading to plaintext HTTP.
+  - **Mihomo controller TLS**：zash 证书角色由 zashboard 与 mihomo controller 共用。`DNS_MIHOMO_CONTROLLER` 是回环拨号地址；客户端以派生的 `zash.<base>` 校验 TLS 身份并信任 `DNS_ZASH_CERT`。Mihomo v1.19.28 通过只读 `SAFE_PATHS=/etc/5gpn/cert/zash` 读取位于 `-d /etc/5gpn/mihomo` 外的证书。普通重装逐字节保留已通过校验的 operator-owned 配置；若 verified controller transport 无法构造，DNS 与其余控制面继续运行，Mihomo 健康、配置和代理端点返回 unavailable/503，绝不降级到明文 HTTP。
 - **出口由 mihomo 原生配置拥有**：被代理流量经 mihomo 的 `tunnel` 监听 + 内置嗅探器透明转发（不解密 TLS）；完整 `/etc/5gpn/mihomo/config.yaml` 由运维者管理，默认 `Proxies` 组只有 `DIRECT`，也可加入 mihomo 支持的应用层节点/组。DNS 策略只决定“是否进入网关”，绝不生成 mihomo 出口。仍禁止 TUN/TProxy、WireGuard、fwmark、策略路由表或把本项目变成客户端默认路由器。
 - **无宿主防火墙**：项目不管理宿主 nftables；zashboard 的网络访问控制由 mihomo 来源白名单承担，console API 依赖 bearer 鉴权。
 - **运维友好**：证书按文件 mtime 热重载（无需为了加载新证书额外重启；HTTP-01 只在 ACME `:80` challenge 窗口短停 mihomo；`kill -HUP` 只重载规则、与证书无关）；统计持久化存活重启；systemd 硬化沙箱，bot 特权操作经 `systemd-run`/`systemctl` 委派而不削弱沙箱。
@@ -88,13 +88,13 @@ curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh |
 运行 `sudo bash install.sh`，在 TUI 的“客户端可达网关 IPv4”中填写内网地址；证书模式也在同一向导选择。`console.`、`zash.`、`dot.` 三个域名自动从主域名派生。
 
 - **配置只有一个持久入口**：安装器配置由 TUI 写入 `/etc/5gpn/dns.env`；重装只读该文件，明确忽略调用者环境。仅 Cloudflare 模式需要的 API token 单独保存在 root-only 的 `/etc/5gpn/acme/cloudflare.ini`，不会进入 `dns.env`、调用者环境或日志。
-- **重跑刷新程序、保留运维配置**：每次运行安装脚本都会刷新 systemd 单元、`/opt/5gpn` 运行目录以及 pin 版本的 5gpn-dns/mihomo/Web 产物，避免二进制与模板错配；`/etc/5gpn` 和 `/etc/letsencrypt` 持久保留。已有且通过 `mihomo -t` 的完整 mihomo 配置会逐字节保留，普通安装和 `change-*` 不会用模板覆盖，也不会自动迁移到 TLS-only controller 模式；老安装要先补 `DNS_ZASH_DOMAIN`，再显式跑 `mihomo-reset` 或手工改成 TLS-only，verified Controller clients 才会放行。Until that migration happens, the Mihomo TLS integration fails closed/unavailable while DNS startup continues. 下载或校验失败会中止且不预删工作二进制。
+- **重跑刷新程序、保留运维配置**：每次运行安装脚本都会刷新 systemd 单元、`/opt/5gpn` 运行目录以及 pin 版本的 5gpn-dns/mihomo/Web 产物；`/etc/5gpn` 和 `/etc/letsencrypt` 持久保留。已有且通过 `mihomo -t` 的完整 mihomo 配置会逐字节保留；只有显式 `mihomo-reset` 才会在备份和校验后替换它。下载或校验失败会中止且不预删工作二进制。
 - **一个主域名、一条 lineage、三个证书角色目录**：两种生产模式都只使用 cert-name 为 `<base>` 的**一条** scoped Certbot lineage，并部署到 `/etc/5gpn/cert/{dot,web,zash}`。所有身份和证书模式修改统一进入 `5gpn configure` TUI；`CERT_MODE` 只允许 `cloudflare`、`http-01`、`debug`。
   - **cloudflare** — TUI 输入 Cloudflare API token，DNS-01 签发 apex `<base>` + `*.<base>`；签发和续期都不停止 mihomo。即使当前证书可复用，也必须保留受保护的 token 以保证自动续期；`zash.<base>` 可继续只由 5gpn 合成解析。
-  - **http-01** — 签发且只签发 `console.<base>`、`zash.<base>`、`dot.<base>` 三个精确 SAN，不包含 apex 或 wildcard。TUI 会先展示三条所需 A 记录并要求确认 DNS 配置无误，再通过固定解析器 `1.1.1.1` 等待三个名字各自只有一条 A 且均为 `DNS_PUBLIC_IP`；本项目为 IPv4-only，三者都不得发布 AAAA。初签及到期续签会短暂停止 mihomo 释放 TCP `:80`，并在签发成功或失败后恢复。
+  - **http-01** — 签发且只签发 `console.<base>`、`zash.<base>`、`dot.<base>` 三个精确 SAN，不包含 apex 或 wildcard。TUI 会展示三条所需 A 记录并要求确认，再通过固定解析器 `1.1.1.1` 等待三个名字各自只有一条 A 且均为 `DNS_PUBLIC_IP`；三者都不得发布 AAAA。初签及到期续签会短暂停止 mihomo 释放 TCP `:80`，并在成功或失败后恢复。
   - **debug** — TUI 选择的自签模式；无 Certbot。仍有效且 SAN/IP/私钥匹配时复用，不会每次重签。
   - **安全复用**：生产复用要求有效期、可信链、cert/key 匹配，以及与模式完全一致的 SAN；debug 自签永远不能进入生产复用路径。
-- **按域名访问**：`console.<base>` 必须提前有指向公网或客户端可路由网关 IP 的 A 记录；该检查没有环境变量 bypass。HTTP-01 进一步要求三个服务名都满足上述公网 A/无 AAAA 约束，不能使用 synthetic zash。SPA 资源与 iOS profile 下载公开，所有 `/api/*` 仍需 bearer token。
+- **按域名访问**：`console.<base>` 必须提前有指向公网或客户端可路由网关 IP 的 A 记录；该检查没有环境变量 bypass。HTTP-01 进一步要求三个服务名都满足上述公网 A/无 AAAA 约束。SPA 资源与 iOS profile 下载公开，所有 `/api/*` 仍需 bearer token。
 - **统一续期入口**：systemd timer 与 Telegram bot 的确认续期动作调用同一个 mode-aware helper，只处理 `--cert-name <base>`。未到期时不打断数据面；Cloudflare 到期续签仍不停机，HTTP-01 到期续签会再次等待 `1.1.1.1` DNS 检查通过后再执行 `:80` 的短暂停机窗口。
 - **IPv4 前提**：本方案全链路 **IPv4-only**（AAAA 一律 SOA、chnroute/网关改写仅 IPv4、守护进程沙箱仅 `AF_INET`）。要求 5G/APN 给客户端分配 **可路由到网关的 IPv4**（或 CLAT）；IPv6-only 接入的客户端够不到网关。
 
@@ -113,7 +113,7 @@ curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh |
 
 - **地址**：`https://console.<BASE_DOMAIN>/`。SPA 公开；所有 `/api/*` 仍需 `DNS_API_TOKEN`。zashboard 单独保留来源 IP 白名单。
 - **登录**：用 `DNS_API_TOKEN` 登录（浏览器 localStorage 保存）。找回：`grep DNS_API_TOKEN /etc/5gpn/dns.env`。
-- **访问控制**：源 IP 白名单在 mihomo 层前置拦截（见上，取代了旧版的进程内 token 失败封锁）；token 本身仍是 bearer 鉴权。
+- **访问控制**：zashboard 的源 IP 白名单在 mihomo 层前置拦截；console API 使用 bearer token 鉴权。
 - **功能**：Dashboard、iOS/Android 配置向导、解析日志、解析测试、有序统一策略规则与 fallback、上游/ECS/Telegram 设置、mihomo 健康与 ticket 化实时日志，以及经 `mihomo -t` 校验的完整 mihomo 配置编辑/显式重置。
 - **zashboard 面板**：`https://zash.<BASE_DOMAIN>/`，同样经 mihomo SNI 分流 + 白名单保护到本机另一回环端口。
 
@@ -127,7 +127,7 @@ Telegram bot 是 `5gpn-dns` 守护进程内的一个 Go 组件（不是独立进
 
 ```bash
 # 守护进程启动后：通过 TUI 输入 token/admin，调用本机 PUT /api/tgbot
-sudo bash install.sh --setup-tgbot
+sudo bash install.sh setup-tgbot
 ```
 
 2) **Web 控制台**（推荐）：设置 → Telegram 机器人，填令牌 + 管理员 ID → 保存。
@@ -138,42 +138,36 @@ sudo bash install.sh --setup-tgbot
 - **inline 菜单**：状态/刷新、DNS 诊断、日志/刷新、上游、维护、iOS 安装和 Web 控制台。复杂策略排序、订阅和完整 mihomo YAML 仍只在 Web 管理。
 - **危险操作有闭环**：Mihomo 重启和证书续期使用 60 秒一次性确认并进程级去重；唯一的 DNS 维护动作是进程内重载规则，不伪装成重启守护进程。
 - **Telegram 原生输出**：iOS 使用 URL 按钮和 PNG 二维码；短日志保留最新故障行并按 Unicode/HTML 安全分页，超长日志作为受保护文本文件发送。
-- **受限网络出站**：在 `5gpn --setup-tgbot` TUI 中配置 Telegram 专用 HTTP/HTTPS CONNECT 代理；修改该启动期设置时会重启 `5gpn-dns`。5gpn 不会改写 operator-owned mihomo 配置；如使用本机 mihomo，operator 必须自行提供仅按需暴露的 HTTP/mixed listener。
+- **受限网络出站**：在 `5gpn setup-tgbot` TUI 中配置 Telegram 专用 HTTP/HTTPS CONNECT 代理；修改该启动期设置时会重启 `5gpn-dns`。5gpn 不会改写 operator-owned mihomo 配置；如使用本机 mihomo，operator 必须自行提供仅按需暴露的 HTTP/mixed listener。
 - **可选状态告警**：在同一 TUI 中启用后，证书、Mihomo 和上游健康状态变化会以受保护私聊推送给所有已配置管理员（用户须先主动打开 bot 私聊）。该监视器与守护进程同生共死，主机/进程宕机仍必须依靠外部 dead-man's switch。
 
 ---
 
 ## 常用命令
 
-安装完成后，终端直接输入 **`5gpn`** 打开交互管理菜单（状态 / 重启 / 配置与证书模式 / 改公网IP / 改网关IP / 改回源解析器 / 更新规则 / zashboard 白名单 / iOS 描述文件 / 轮换令牌 / Cloudflare token / Telegram Bot / 卸载）。也可带子命令直接执行：
+安装完成后，终端直接输入 **`5gpn`** 打开交互管理菜单（状态 / 重启 / 编辑安装与证书配置 / 重载规则 / zashboard 白名单 / iOS 描述文件 / 轮换令牌 / Cloudflare token / Telegram Bot / 卸载）。也可带子命令直接执行：
 
 ```bash
 5gpn                        # 打开管理菜单
-5gpn --status              # 服务 / 域名 / 列表 状态
+5gpn status                # 服务 / 域名 / 列表 状态
 5gpn restart               # 重启 5gpn-dns + mihomo
 5gpn configure             # 打开完整配置 TUI，事务化应用并在失败时回滚
-5gpn change-base-domain    # 兼容入口；同样打开完整配置 TUI（不接受值参数）
-5gpn change-public-ip      # 兼容入口；同样打开完整配置 TUI
-5gpn change-resolver       # 兼容入口；同样打开完整配置 TUI
-5gpn change-gateway        # 兼容入口；同样打开完整配置 TUI
 5gpn mihomo-reset          # 显式备份当前配置，以通过 mihomo -t 的最新种子原子替换
-5gpn --update-lists        # 触发规则缓存 reload（SIGHUP）
-5gpn --add-domain d        # 强制代理某域名（加入 blacklist）
-5gpn --del-domain d        # 取消强制代理
-5gpn --add-allow cidr      # 添加 zashboard 来源 IP 白名单（live 生效）
-5gpn --del-allow cidr      # 从 zashboard 白名单移除
-5gpn --ios                 # 重新生成 iOS 描述文件 + 二维码
-5gpn --setup-tgbot         # 校验并热应用进程内 Telegram bot 配置
-5gpn --rotate-token        # 轮换控制台 DNS_API_TOKEN（旧 token 立即失效 + 重启）
-5gpn --set-cf-token        # 在 TUI 中设置/更新 Cloudflare API token
-5gpn --uninstall           # TUI 确认卸载，默认保留 /etc/5gpn
-5gpn --uninstall --purge   # 清除非证书状态，仍保留 cert/debug-cert/acme 供复用
-5gpn --uninstall --decommission # 删除本地证书；仅删 5gpn-owned lineage，并保留共享 lineage 仍引用的 token
+5gpn reload-rules          # 重载规则缓存与 chnroute（SIGHUP）
+5gpn add-allow cidr        # 添加 zashboard 来源 IP 白名单（live 生效）
+5gpn del-allow cidr        # 从 zashboard 白名单移除
+5gpn ios                   # 重新生成 iOS 描述文件 + 二维码
+5gpn setup-tgbot           # 校验并热应用进程内 Telegram bot 配置
+5gpn rotate-token          # 轮换控制台 DNS_API_TOKEN（旧 token 立即失效 + 重启）
+5gpn set-cf-token          # 在 TUI 中设置/更新 Cloudflare API token
+5gpn uninstall             # TUI 确认卸载，默认保留 /etc/5gpn
+5gpn uninstall --purge     # 清除非证书状态，仍保留 cert/debug-cert/acme 供复用
+5gpn uninstall --decommission # 仅在 provenance 证明 5gpn 创建时删除精确 lineage，并安全处理凭据
 ```
 
-（等价的 `sudo bash install.sh <同名子命令>` 仍可用；`change-web-domain` / `change-dot-domain` / `change-domain` 都是 `change-base-domain` 的过渡期废弃别名。）
+等价的 `sudo bash install.sh <同名子命令>` 仍可用。
 
-配置改动：`systemctl reload 5gpn-dns`（=SIGHUP）**只热重载 `/etc/5gpn/rules/` 下的规则文件 + chnroute**（订阅 / 手动规则更新走同一路径，不重启）。**dns.env 里的守护进程开关（上游、网关IP、监听地址、token、cache、TTL、0x20、心跳等）在启动时读取一次，改动后需 `systemctl restart 5gpn-dns` 才生效**；证书是例外——按文件 mtime 在下次握手自动加载。
+配置改动：`systemctl reload 5gpn-dns`（=SIGHUP）**只重载 policy 编译结果与 chnroute**，不主动拉取远程订阅。**dns.env 里的守护进程开关（上游、网关IP、监听地址、token、cache、TTL、0x20、心跳等）在启动时读取一次，改动后需 `systemctl restart 5gpn-dns` 才生效**；证书是例外——按文件 mtime 在下次握手自动加载。
 
 ---
 
@@ -184,11 +178,11 @@ sudo bash install.sh --setup-tgbot
 | `cmd/5gpn-dns/` | `5gpn-dns` Go 源码——DNS 引擎 + 控制面 API + bot + iOS 分发，全在一个二进制（CI 构建 → `moooyo/5gpn` release） |
 | `cmd/5gpn-dns/api.go` | 控制台 HTTPS REST API + Web + iOS profile 下载（回环 `:443`，基于 `Controller` facade，经 mihomo SNI 分流对外暴露） |
 | `cmd/5gpn-dns/bot.go` `bot_ops.go` | 进程内 Telegram bot |
-| `cmd/5gpn-dns/iosd.go` | iOS 描述文件分发（公开 `/ios/ios-dot.mobileconfig`，旧 `/ios/` 跳转到控制台向导） |
+| `cmd/5gpn-dns/iosd.go` | iOS 描述文件分发（公开 `/ios/ios-dot.mobileconfig`，`/ios/` 跳转到控制台向导） |
 | `web/` | React 控制台前端（独立构建；`npm run build` → `web/dist`，打包成 `5gpn-web-*.tar.gz` release asset；daemon 从 `DNS_WEB_DIR`=/opt/5gpn/web 磁盘 serve） |
-| `install.sh` / `quick-install.sh` | 安装 / 升级编排 + 运维子命令 |
+| `install.sh` / `quick-install.sh` | 安装 / 重装编排 + 运维子命令 |
 | `etc/` | 规则种子、`5gpn-dns/dns.env.example`、mihomo 配置模板、systemd 单元 |
-| `scripts/` | iOS profile 生成、mode-aware 证书续期 helper/部署 hook、`update-lists.sh` |
+| `scripts/` | iOS profile 生成、mode-aware 证书续期 helper/部署 hook、`reload-rules.sh` |
 | `tests/` | Go 单测 `cmd/5gpn-dns/*_test.go` + shell policy 测试 + 集成冒烟清单 |
 
 ---

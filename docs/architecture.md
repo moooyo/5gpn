@@ -118,10 +118,9 @@ loopback egress broker, panel routing, anti-loop rules, and a `Proxies` group
 whose initial choice is `DIRECT`. After publication there is no generated or
 daemon-managed region.
 
-Normal install, reinstall, upgrade, and ordinary `change-*` operations must
-validate and preserve an existing valid file byte-for-byte. They must not
-silently migrate it. Only an explicit `mihomo-reset` may replace it, and reset
-must:
+Normal install, reinstall, and `configure` operations must validate and
+preserve an existing valid file byte-for-byte. They must not silently rewrite
+it. Only an explicit `mihomo-reset` may replace it, and reset must:
 
 1. render a complete candidate outside the live path;
 2. validate the candidate with the pinned `mihomo -t`;
@@ -131,8 +130,8 @@ must:
 The raw console editor follows the same validation and atomic-publication
 rules. Required infrastructure invariants cannot be edited away: the plaintext
 controller remains disabled, the TLS controller stays on loopback, the shared
-zash certificate paths remain fixed, and the egress DNS broker remains
-loopback.
+zash certificate paths and controller secret remain fixed, and the egress DNS
+broker remains loopback.
 
 New seeds use mihomo's native TLS controller only:
 
@@ -233,6 +232,8 @@ deployment identity and daemon knobs. systemd reads it with
 `EnvironmentFile=` and presents its keys to `5gpn-dns`; that launch mechanism
 does not make the caller's ambient shell an installer configuration interface.
 The installer clears recognized configuration variables before dispatch.
+`DNS_BASE_DOMAIN` is the only persisted hostname identity; the daemon and
+scripts derive `dot`, `console`, and `zash` names from it.
 
 - On a first install, the attached-terminal TUI collects required values,
   validates them, and atomically writes the resulting configuration files.
@@ -299,7 +300,7 @@ The same certificate is deployed into three role directories:
 Reinstall must prefer safe reuse over issuance. Before reusing material, it
 verifies the configured mode/provenance, validity window, the exact SAN shape
 required by that mode, certificate/private-key match, and (for production) a
-trusted issuer chain. A legacy lineage without provenance may be adopted only
+trusted issuer chain. A pre-existing external lineage without provenance may be reused only
 when its exact live/archive paths, authenticator parameters, and absence of
 persistent per-lineage hooks form the strict expected 5gpn fingerprint; the
 installer then writes provenance. Provenance records the selected mode and
@@ -344,14 +345,14 @@ source, and ACME credential so a later reinstall can reuse them. Domain
 decommissioning is a separate explicit operation: it must name the exact 5gpn
 lineage and must never delete another Certbot lineage. `certbot delete` is
 permitted only when strict path/authenticator validation passes and provenance
-proves that 5gpn created the lineage. Reused or legacy/unknown lineages remain
+proves that 5gpn created the lineage. Reused or unproven external lineages remain
 for manual review. If such a preserved Cloudflare lineage still references the
 5gpn credential, that credential is preserved so decommissioning cannot break
 its future renewal.
 
 ## Installer publication and host safety
 
-An install or upgrade is staged before it mutates the working deployment:
+An install or reinstall is staged before it mutates the working deployment:
 
 1. validate persisted configuration and prerequisites;
 2. download version-pinned release artifacts and verify their published
@@ -386,19 +387,22 @@ services, binaries, configuration, or data. In particular:
 
 - a pre-existing `/swapfile` and its fstab entry are untouched unless an
   installation ownership record proves 5gpn created that exact file;
-- global `mihomo`, Gum, Xray, smartdns, sniproxy, sing-box, and Certbot assets
-  are untouched unless a 5gpn marker or exact unit fingerprint proves ownership;
-- legacy teardown may remove an old artifact only after that same ownership
-  proof;
+- global `mihomo`, Gum, and Certbot assets are untouched unless a 5gpn marker
+  or exact unit fingerprint proves ownership;
 - unrelated systemd units, Certbot lineages/hooks, `/etc/fstab` entries,
   sysctls, modules, and directories are not modified;
-- no nftables ruleset is flushed, no host firewall configuration is replaced,
-  and only an unambiguously identified legacy 5gpn table may be deleted.
+- no nftables ruleset or host firewall configuration is modified.
 
 `--purge` can remove additional 5gpn-owned state, but it does not weaken path,
 marker, lineage, or ownership checks. Certificate deletion remains separate so
 purge cannot accidentally defeat reinstall reuse or remove another domain's
 key material.
+
+The repository is pre-release and has one current contract. Persisted config
+uses only current key names, versioned JSON files must match the current schema
+exactly, and operator commands and Telegram callback data use only their current
+forms. The installer and daemon do not contain aliases, migrations, or teardown
+for superseded pre-release implementations.
 
 ## Runtime hardening and failure boundaries
 

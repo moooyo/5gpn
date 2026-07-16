@@ -10,7 +10,7 @@ import (
 // RunHeartbeat pings HeartbeatURL every interval while the daemon is alive — an
 // outbound dead-man's switch. It is the one liveness signal that survives the
 // failure modes the rest of the design can't report: a powered-off / crashed box
-// (the CLIENT_NET-only :9443 control plane can't be scraped, and the in-process
+// (the authenticated console control plane may not be externally monitored, and the in-process
 // Telegram bot dies with the daemon) and a wedged process (stops pinging). An
 // external monitor (healthchecks.io, Uptime Kuma push endpoint, a self-hosted
 // receiver) alerts when the pings stop for longer than its grace period.

@@ -45,9 +45,9 @@ func TestAuditMiddleware_MutatingRequestIsLogged(t *testing.T) {
 	cs, token := newAPITestServer(t)
 	buf := captureAuditLog(t)
 
-	rec := doAPIFrom(cs, http.MethodPost, "/api/reload", "203.0.113.5:5555", token, true)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /api/reload status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	rec := doAPIFrom(cs, http.MethodPost, "/api/policy/apply", "203.0.113.5:5555", token, true)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("POST /api/policy/apply status = %d, want 503; body=%s", rec.Code, rec.Body.String())
 	}
 
 	lines := auditLines(buf)
@@ -55,7 +55,7 @@ func TestAuditMiddleware_MutatingRequestIsLogged(t *testing.T) {
 		t.Fatalf("audit lines = %d, want 1; log=%q", len(lines), buf.String())
 	}
 	line := lines[0]
-	for _, want := range []string{"method=POST", "path=/api/reload", "src=203.0.113.5", "status=200"} {
+	for _, want := range []string{"method=POST", "path=/api/policy/apply", "src=203.0.113.5", "status=503"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("audit line %q missing %q", line, want)
 		}
@@ -130,13 +130,13 @@ func TestAuditMiddleware_RemoteAddrWithoutPortFallsBack(t *testing.T) {
 	cs, token := newAPITestServer(t)
 	buf := captureAuditLog(t)
 
-	r := httptest.NewRequest(http.MethodPost, "/api/reload", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/policy/apply", nil)
 	r.RemoteAddr = "no-port-host"
 	r.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	cs.srv.Handler.ServeHTTP(rec, r)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /api/reload status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("POST /api/policy/apply status = %d, want 503; body=%s", rec.Code, rec.Body.String())
 	}
 
 	lines := auditLines(buf)
@@ -155,7 +155,7 @@ func TestAuditMiddleware_DoesNotLogRequestBody(t *testing.T) {
 	cs, token := newAPITestServer(t)
 	buf := captureAuditLog(t)
 
-	body := []byte(`{"id":"secret-sub","matcher":{"kind":"subscription","value":"https://example.com/super-secret-list?token=hunter2","format":"plain"},"intent":"block","enabled":true}`)
+	body := []byte(`{"id":"secret-sub","matcher":{"kind":"subscription","value":"https://example.com/super-secret-list?token=hunter2","format":"plain","interval":"1h"},"intent":"block","enabled":true}`)
 	rec := doAPI(cs, http.MethodPost, "/api/policy/rules", body, token, true)
 	_ = rec // status not the point of this test
 

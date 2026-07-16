@@ -40,7 +40,7 @@ type ResolveTestResult struct {
 	Name    string `json:"name"`
 	Verdict string `json:"verdict"`
 	Reason  string `json:"reason"`
-	// Probes is empty for terminal name-only verdicts (block/blacklist),
+	// Probes is empty for terminal name-only verdicts (block/force-proxy),
 	// which never consult an upstream — mirroring the real pipeline.
 	Probes []ResolveProbe `json:"probes"`
 	// Chosen is the group whose answer the arbitration rule adopts ("china"
@@ -64,7 +64,7 @@ func (c *Controller) ResolveTest(ctx context.Context, name string) ResolveTestRe
 
 	decision := h.decideName(name)
 	verdict := decision.Verdict
-	_, _, _, cn := h.ruleSnap()
+	cn := h.chnroute()
 
 	// Terminal name-only verdicts never consult an upstream (same as resolve).
 	switch decision.Action {

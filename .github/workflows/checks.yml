@@ -1,7 +1,7 @@
 name: Checks
 
 # Reusable gate: the single source of truth for "is this tree shippable?".
-# Called by ci.yml (every branch push / PR) AND by release.yml (dns-v* tags), so
+# Called by ci.yml (every branch push / PR) AND by release.yml (SemVer tags), so
 # the release gate is byte-identical to day-to-day CI and the two can never
 # drift. Do not add checks to ci.yml or release.yml directly — add them here.
 on:
@@ -106,8 +106,8 @@ jobs:
           trap 'rm -rf "$runtime"' EXIT
           awk '
             $0 == "__MIHOMO_LISTENERS__" {
-              print "  - {name: sniproxy, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: 127.0.0.1:443}"
-              print "  - {name: sniproxy80, type: tunnel, listen: 203.0.113.10, port: 80, network: [tcp], target: 127.0.0.1:80}"
+              print "  - {name: gateway, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: 127.0.0.1:443}"
+              print "  - {name: gateway80, type: tunnel, listen: 203.0.113.10, port: 80, network: [tcp], target: 127.0.0.1:80}"
               next
             }
             {

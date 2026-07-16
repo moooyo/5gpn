@@ -1,15 +1,10 @@
 name: Release
 
-# Cut a release when a version tag is pushed. Both the legacy `dns-v*` scheme
-# and a bare SemVer tag (e.g. `0.0.1`) are accepted; the version stamp strips a
-# `dns-` prefix if present, so `0.0.1` stamps main.version=0.0.1. The full
-# checks.yml gate runs first (identical to CI); build/publish only runs if the
-# gate is green, so a tag on a broken commit can never ship a bad binary / SPA
-# to the assets install.sh downloads.
+# Cut a release for a bare SemVer tag such as `0.0.1`. The full checks.yml gate
+# runs first (identical to CI); build/publish only runs if the gate is green.
 on:
   push:
     tags:
-      - 'dns-v*'
       - '[0-9]*.[0-9]*.[0-9]*'
 
 jobs:
@@ -23,6 +18,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v5
+
+      - name: Validate release tag
+        run: '[[ "$GITHUB_REF_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]'
 
       - uses: actions/setup-go@v5
         with:
@@ -46,16 +44,16 @@ jobs:
       - name: Build daemon
         working-directory: cmd/5gpn-dns
         run: |
-          # Stamp the release version into main.version (strip the dns- prefix,
-          # e.g. dns-v0.4.0 -> v0.4.0) so GET /api/status reports the real build.
-          VER="${GITHUB_REF_NAME#dns-}"
+          # Stamp the release version into main.version so GET /api/status
+          # reports the exact published build.
+          VER="${GITHUB_REF_NAME}"
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
             -ldflags "-s -w -X main.version=${VER}" -o 5gpn-dns-linux-amd64 .
           sha256sum 5gpn-dns-linux-amd64 > checksums.txt
 
       - name: Package web UI
         run: |
-          VER="${GITHUB_REF_NAME#dns-}"
+          VER="${GITHUB_REF_NAME}"
           tar czf "5gpn-web-${VER}.tar.gz" -C web/dist .
           sha256sum "5gpn-web-${VER}.tar.gz" >> cmd/5gpn-dns/checksums.txt
 

@@ -42,14 +42,12 @@ func (r *statusRecorder) resultStatus() int {
 
 // auditMiddleware records a single-line audit entry for every mutating
 // control-plane request (POST/PUT/PATCH/DELETE), via the standard log
-// package (stderr -> journald under systemd, consistent with the rest of
-// the codebase; see CLAUDE.md — no new file/rotation infra).
+// package (stderr -> journald under systemd).
 //
 // Only method/path/src/status are logged — never the request body or the
 // bearer token. For routes like POST /api/policy/rules the created
-// resource's id lives in the body, not the path; that's an accepted
-// granularity trade-off (see Phase 4 Task C2 design) rather than a reason to
-// inspect and log the body.
+// resource's id lives in the body, not the path; that granularity avoids
+// inspecting or logging request bodies.
 //
 // GET/HEAD requests are reads, not mutations, and are not audited at all —
 // this keeps the audit log focused on actual state changes an operator
@@ -103,13 +101,13 @@ func auditSource(r *http.Request) string {
 
 // auditBot records a single-line audit entry for a state-changing or privileged
 // operation performed through the in-process Telegram bot, mirroring the HTTP
-// auditMiddleware lines for the :9443 API (same "audit " prefix, stderr →
+// auditMiddleware lines for the HTTPS API (same "audit " prefix, stderr →
 // journald). The bot is a privileged control path — it reaches the daemon over
 // Telegram long-polling (bypassing the CLIENT_NET firewall) and can trigger
 // systemctl / the systemd-run delegated renewal helper / journalctl — yet its
 // mutations were previously unaudited, an asymmetry with the HTTP API this
-// closes. op is a short verb (e.g. "add_domain", "reload", "restart:mihomo",
-// "renew-cert"),
+// closes. op is a
+// short verb (e.g. "reload", "restart-mihomo", "renew-cert"),
 // adminID is the Telegram user id that issued it, and result is one of
 // "ok" / "err" / "invoked" (see auditResult). Never logs message bodies or
 // tokens, mirroring the HTTP audit's restraint.

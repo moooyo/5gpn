@@ -8,7 +8,7 @@ import (
 )
 
 // placeholderHTML is served when the SPA directory has no index.html (the
-// frontend has not been deployed yet). The :18443 API keeps working; this just
+// frontend has not been deployed yet). The API keeps working; this just
 // tells the operator to install the 5gpn-web release tarball into DNS_WEB_DIR.
 const placeholderHTML = `<!doctype html><html><head><meta charset="utf-8"><title>5gpn-dns</title></head>` +
 	`<body>5gpn-dns 控制台未部署 — 安装 5gpn-web tarball 到 DNS_WEB_DIR。</body></html>`

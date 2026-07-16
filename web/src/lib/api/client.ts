@@ -3,28 +3,17 @@
  *
  * Live methods hit the daemon via apiFetch (http.ts's bearer-token core).
  * The current surface is status/diagnostics, settings, ordered DNS policy,
- * and the complete operator-owned mihomo config. There are no draft,
- * structured-egress, node, selector, exit, or traffic methods here.
+ * and the complete operator-owned mihomo config.
  *
  * MOCK is read once at module load — flip it in tests with
  * vi.stubEnv('VITE_API_MOCK', …) + vi.resetModules() + a dynamic
  * import('./client').
  */
-import i18n from '../../i18n'
 import { apiFetch } from './http'
 import * as mock from './mock'
 import type * as T from './types'
 
 export const MOCK = import.meta.env.VITE_API_MOCK === '1'
-
-/** Compatibility error shape retained for a backend that has not yet shipped
- * a queried diagnostic endpoint. Current production endpoints treat 404 as a
- * normal ApiError. */
-export class BackendPendingError extends Error {
-  constructor() {
-    super(i18n.t('errors.backendPending'))
-  }
-}
 
 const qs = (params: Record<string, string | number | undefined>) => {
   const u = new URLSearchParams()
@@ -36,7 +25,6 @@ const qs = (params: Record<string, string | number | undefined>) => {
 export const api = {
   // ---- live --------------------------------------------------------------
   getStatus: (signal?: AbortSignal) => apiFetch<T.Status>('/api/status', { signal }),
-  getStats: () => apiFetch<T.Stats>('/api/stats'),
   getQueryLog: (q = '', limit?: number, signal?: AbortSignal) =>
     apiFetch<T.QueryLogResponse>('/api/querylog' + qs({ q, limit }), { signal }),
   resolveTest: (domain: string) => apiFetch<T.ResolveTestResult>('/api/resolve-test' + qs({ domain })),
@@ -48,22 +36,18 @@ export const api = {
   putTgbot: (u: T.TGBotUpdate) => apiFetch<T.TGBotView>('/api/tgbot', { method: 'PUT', body: JSON.stringify(u) }),
   getMihomoHealth: (signal?: AbortSignal) => apiFetch<T.MihomoHealth>('/api/mihomo/health', { signal }),
   createMihomoLogTicket: () => apiFetch<T.MihomoLogTicket>('/api/mihomo/log-ticket', { method: 'POST' }),
-  // ---- mihomo config editor (UP-4 backend; LIVE — endpoints exist, so no
-  // BackendPendingError fallback: a 404 here is a real error) ---------------
-  // The operator edits the WHOLE mihomo config as raw text; there is no
-  // daemon-owned region left to project into it (the structured egress
-  // model is gone). PUT/reset both run the same infra-invariant + `mihomo
+  // ---- mihomo config editor ----------------------------------------------
+  // The operator edits the WHOLE mihomo config as raw text. PUT/reset both
+  // run the same infra-invariant + `mihomo
   // -t` + hot-apply pipeline server-side (see api_mihomo_config.go); a 400
   // means validation rejected the text and neither the on-disk config nor
   // the running mihomo instance was touched.
   getMihomoConfig: () => (MOCK ? mock.getMihomoConfig() : apiFetch<T.MihomoConfig>('/api/mihomo/config')),
   putMihomoConfig: (text: string) =>
     MOCK ? mock.putMihomoConfig(text) : apiFetch<T.MihomoConfig>('/api/mihomo/config', { method: 'PUT', body: JSON.stringify({ text }) }),
-  getMihomoConfigDefault: () => (MOCK ? mock.getMihomoConfigDefault() : apiFetch<{ text: string }>('/api/mihomo/config/default')),
   resetMihomoConfig: () => (MOCK ? mock.resetMihomoConfig() : apiFetch<T.MihomoConfig>('/api/mihomo/config/reset', { method: 'POST' })),
 
-  // ---- unified policy rules (UP-1 backend; LIVE — endpoints exist, so no
-  // BackendPendingError fallback: a 404 here is a real error) ---------------
+  // ---- unified policy rules ----------------------------------------------
   getPolicyRules: () => (MOCK ? mock.getPolicyRules() : apiFetch<T.PolicyRule[]>('/api/policy/rules')),
   createPolicyRule: (r: Omit<T.PolicyRule, 'id' | 'order'>) =>
     MOCK ? mock.createPolicyRule(r) : apiFetch<T.PolicyRule>('/api/policy/rules', { method: 'POST', body: JSON.stringify(r) }),

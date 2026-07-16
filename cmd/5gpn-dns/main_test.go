@@ -50,7 +50,7 @@ func TestApplyTGBotOverrideMissingUsesBootstrap(t *testing.T) {
 func TestLoadRuleSets_EmptyChnrouteTolerated(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{
-		RulesDir:     dir, // empty: no block.txt/direct.txt/blacklist.txt/chnroute/*.txt
+		RulesDir:     dir, // empty: no subscription cache
 		ChnrouteFile: filepath.Join(dir, "does-not-exist.txt"),
 	}
 
@@ -70,64 +70,6 @@ func TestLoadRuleSets_EmptyChnrouteTolerated(t *testing.T) {
 	// Nil-safe Contains: everything appears foreign (fail-safe -> proxied).
 	if sets.chnroute.Contains(net.ParseIP("1.2.3.4")) {
 		t.Fatal("empty chnroute must not claim any IP as CN")
-	}
-}
-
-func TestLoadRuleSets_PerTypeFiles(t *testing.T) {
-	dir := t.TempDir()
-	must := func(name, content string) {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	must("blacklist.txt", "suf.example.com\n")       // suffix (bare)
-	must("blacklist.exact.txt", "api.example.com\n") // exact
-	must("blacklist.keyword.txt", "trackme\n")       // keyword
-	must("blacklist.prefix.txt", "ads\n")            // prefix
-
-	cfg := Config{RulesDir: dir}
-	sets, err := loadRuleSets(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bl := sets.blacklist
-	if !bl.Match("x.suf.example.com") {
-		t.Error("suffix entry not loaded")
-	}
-	if !bl.Match("api.example.com") || bl.Match("x.api.example.com") {
-		t.Error("exact entry not loaded as exact")
-	}
-	if !bl.Match("mytrackme.net") {
-		t.Error("keyword entry not loaded")
-	}
-	if !bl.Match("ads.example.com") {
-		t.Error("prefix entry not loaded")
-	}
-}
-
-// TestLoadRuleSets_ManualChnrouteLoaded verifies that the manual chnroute.txt
-// the :9443 API / Telegram bot / web console write (via
-// Controller.manualRulePath("chnroute", …) → rulesDir/chnroute.txt) is actually
-// picked up by loadRuleSets. This regresses a silent no-op: the load path used
-// to be `cfg.ChnrouteFile + rulesDir/chnroute/*.txt` only, so a manual "China
-// route" add was persisted and listed but never applied to CN classification.
-func TestLoadRuleSets_ManualChnrouteLoaded(t *testing.T) {
-	dir := t.TempDir()
-	// The manual file the Controller writes — note NO cfg.ChnrouteFile is set,
-	// so this also covers "DNS_CHNROUTE unset must not skip chnroute loading".
-	if err := os.WriteFile(filepath.Join(dir, "chnroute.txt"), []byte("203.0.113.0/24\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg := Config{RulesDir: dir} // ChnrouteFile deliberately empty
-	sets, err := loadRuleSets(cfg)
-	if err != nil {
-		t.Fatalf("loadRuleSets: %v", err)
-	}
-	if sets.chnroute == nil || !sets.chnroute.Contains(net.ParseIP("203.0.113.10")) {
-		t.Fatal("manual rulesDir/chnroute.txt CIDR not loaded — a manual China-route add is a silent no-op")
-	}
-	if sets.chnroute.Contains(net.ParseIP("198.51.100.1")) {
-		t.Fatal("chnroute matched an out-of-range IP")
 	}
 }
 

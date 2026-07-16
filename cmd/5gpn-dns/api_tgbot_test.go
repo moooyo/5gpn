@@ -42,7 +42,7 @@ func mustJSON(t *testing.T, v any) []byte {
 func TestAPITGBot_GetRedactsToken(t *testing.T) {
 	cs, token := newAPITestServer(t)
 	cs.ctrl.SetTGBotManager(&fakeTGBotManager{
-		view: TGBotView{AdminIDs: []int64{111, 222}, TokenSet: true, Running: true},
+		view: TGBotView{AdminIDs: []int64{111, 222}, TokenSet: true, State: botStateHealthy},
 	})
 
 	rec := doAPI(cs, http.MethodGet, "/api/tgbot", nil, token, true)
@@ -56,7 +56,7 @@ func TestAPITGBot_GetRedactsToken(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("response not JSON: %v", err)
 	}
-	if !got.TokenSet || !got.Running || got.State != botStateHealthy || len(got.AdminIDs) != 2 {
+	if !got.TokenSet || got.State != botStateHealthy || len(got.AdminIDs) != 2 {
 		t.Errorf("view = %+v", got)
 	}
 }
@@ -65,7 +65,7 @@ func TestAPITGBot_GetRedactsToken(t *testing.T) {
 // nil pointer (keep-current) rather than an empty string (disable).
 func TestAPITGBot_Put(t *testing.T) {
 	cs, token := newAPITestServer(t)
-	mgr := &fakeTGBotManager{view: TGBotView{AdminIDs: []int64{}}}
+	mgr := &fakeTGBotManager{view: TGBotView{AdminIDs: []int64{}, State: botStateDisabled}}
 	cs.ctrl.SetTGBotManager(mgr)
 
 	// Explicit token.

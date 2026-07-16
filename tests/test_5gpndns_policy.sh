@@ -8,7 +8,7 @@ rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 INSTALL="$ROOT/install.sh"
 RENEW="$ROOT/scripts/renew-hook.sh"
 DNS_SVC="$ROOT/etc/systemd/5gpn-dns.service"
-UPDATE_LISTS="$ROOT/scripts/update-lists.sh"
+RELOAD_RULES="$ROOT/scripts/reload-rules.sh"
 BOT="$ROOT/cmd/5gpn-dns/bot.go"
 
 # --- install.sh: install_5gpndns function present ---
@@ -43,7 +43,7 @@ grep -Eq 'systemctl reload 5gpn-dns|kill -HUP' "$RENEW" \
     && fail "renew-hook.sh: certificate publication must not misuse the rules-only SIGHUP API"
 grep -Fq '/etc/5gpn/cert'             "$INSTALL" || fail "install.sh: does not copy certs to /etc/5gpn/cert"
 
-# --- no lingering smartdns references in install.sh (migrate-off comment OK) ---
+# --- no smartdns implementation in install.sh ---
 grep -Eq '^\s*install_smartdns\b'            "$INSTALL" \
     && fail "install.sh: still calls install_smartdns (not just disabled/removed)"
 grep -Eq '^\s*install_smartdns_unit\b'       "$INSTALL" \
@@ -60,24 +60,23 @@ grep -Eq '^DNS_LISTEN_DOH='   "$INSTALL" && fail "install.sh: dns.env must not e
 grep -Eq '^DNS_LISTEN_PLAIN=' "$INSTALL" && fail "install.sh: dns.env must not emit DNS_LISTEN_PLAIN (plain :53 removed)"
 grep -Fq 'DNS_LISTEN_DOT=:853' "$INSTALL" || fail "install.sh: dns.env must pin the DoT listener :853"
 grep -Fq 'install_units'       "$INSTALL" || fail "install.sh: no install_units (unit install moved out of the removed setup-firewall.sh)"
-grep -Fq 'remove_legacy_firewall' "$INSTALL" || fail "install.sh: must clean up a legacy 5gpn nftables ruleset on upgrade"
+grep -Eq '(^|[[:space:]])nft([[:space:]]|$)' "$INSTALL" && fail "install.sh: must not manage host nftables"
 
-# --- update-lists.sh: repurposed (Phase 2) as a manual reload trigger; the in-process
-# subscription manager now owns the china_ip_list/chnroute fetch, not this script ---
-grep -Fq '/etc/5gpn/rules'               "$UPDATE_LISTS" || fail "update-lists.sh: no /etc/5gpn/rules path"
-grep -Fq 'systemctl reload 5gpn-dns'     "$UPDATE_LISTS" || fail "update-lists.sh: does not reload 5gpn-dns"
-grep -Fq 'gen_foreign_cidr'              "$UPDATE_LISTS" \
-    && fail "update-lists.sh: still references gen_foreign_cidr (should be deleted)"
-grep -Fq 'render_smartdns_conf'          "$UPDATE_LISTS" \
-    && fail "update-lists.sh: still references render_smartdns_conf (should be deleted)"
-grep -Fq 'foreign-cidr'                  "$UPDATE_LISTS" \
-    && fail "update-lists.sh: still references foreign-cidr.txt (should be deleted)"
-grep -Fq 'systemctl restart smartdns'    "$UPDATE_LISTS" \
-    && fail "update-lists.sh: still restarts smartdns (should be deleted)"
-grep -Fq 'CHINA_IP_URL'                  "$UPDATE_LISTS" \
-    && fail "update-lists.sh: still fetches china_ip_list directly (should be subscription-owned)"
-grep -Fq 'wget'                          "$UPDATE_LISTS" \
-    && fail "update-lists.sh: still downloads lists directly (should be subscription-owned)"
+# --- reload-rules.sh performs a local SIGHUP and never claims to fetch. ---
+grep -Fq 'systemctl reload 5gpn-dns' "$RELOAD_RULES" || fail "reload-rules.sh: does not reload 5gpn-dns"
+grep -Eq 'curl|wget|CHINA_IP_URL' "$RELOAD_RULES" \
+    && fail "reload-rules.sh: must not fetch remote lists"
+grep -Fq -- 'reload-rules)' "$INSTALL" || fail "install.sh: current reload-rules command is not dispatched"
+reload_fn="$(sed -n '/^reload_rules()/,/^}/p' "$INSTALL")"
+printf '%s' "$reload_fn" | grep -Fq 'bash "$script" ||' \
+    || fail "install.sh: reload_rules does not propagate helper failure"
+reload_stub="$(mktemp -d)"
+printf '#!/bin/sh\nexit 1\n' > "$reload_stub/systemctl"
+chmod +x "$reload_stub/systemctl"
+if PATH="$reload_stub:$PATH" bash "$RELOAD_RULES" >/dev/null 2>&1; then
+    fail "reload-rules.sh reports success after systemctl reload failure"
+fi
+rm -rf "$reload_stub"
 
 # --- UP-1 Task D5: unified policy-rule model is the console-facing surface.
 # config.go carries the policy-rule store knobs, and api.go mounts the new
@@ -150,7 +149,7 @@ grep -Fq '"xray"'       "$BOT" \
 grep -Fq '"mihomo"'     "$BOT" \
     || fail "bot.go: botServices does not contain mihomo (bot must control the mihomo data plane)"
 
-# --- install.sh: control-plane token + loopback :443 pin (mihomo migration) ---
+# --- install.sh: control-plane token + loopback :443 pin ---
 grep -Fq 'openssl rand'      "$INSTALL" || fail "install.sh: no token auto-gen (openssl rand)"
 grep -Fq 'DNS_API_TOKEN'     "$INSTALL" || fail "install.sh: does not write DNS_API_TOKEN into dns.env"
 grep -Fq 'DNS_LISTEN_API=127.0.0.1:443' "$INSTALL" \
@@ -190,16 +189,15 @@ grep -Fq 'mihomo requires a loopback broker listener' "$BROKER_FALLBACK" \
 # A broker bind failure must be fatal in main (fail-loud), not warn-disable.
 grep -Eq 'log\.Fatalf\("egress DNS broker' "$POLICY_MAIN" \
     || fail "main.go: broker bind failure must be fatal (log.Fatalf)"
-# XRAY_RESOLVER is now a daemon config value, validated at load time.
+# The egress resolver has one current key and field.
+grep -Fq 'DNS_EGRESS_RESOLVER' "$POLICY_CFG" \
+    || fail "config.go: DNS_EGRESS_RESOLVER must be read by the daemon"
+grep -Fq 'EgressResolver string' "$POLICY_CFG" \
+    || fail "config.go: no EgressResolver field"
 grep -Fq 'XRAY_RESOLVER' "$POLICY_CFG" \
-    || fail "config.go: XRAY_RESOLVER must be read by the daemon"
-grep -Fq 'XrayResolver' "$POLICY_CFG" \
-    || fail "config.go: no XrayResolver field"
-# install.sh must no longer call XRAY_RESOLVER inert; change-resolver restarts the daemon.
-grep -Eq 'is inert|value.*is inert|resolver.*is inert' "$INSTALL_SH" \
-    && fail "install.sh: XRAY_RESOLVER is no longer inert (daemon consumes it)"
-grep -Fq 'systemctl restart 5gpn-dns' "$INSTALL_SH" \
-    || fail "install.sh change_resolver: must restart 5gpn-dns (daemon consumes XRAY_RESOLVER)"
+    && fail "config.go: removed XRAY_RESOLVER key is still read"
+grep -Fq 'XRAY_RESOLVER' "$INSTALL_SH" \
+    && fail "install.sh: removed XRAY_RESOLVER key remains"
 
 API_GO="$ROOT/cmd/5gpn-dns/api.go"
 
@@ -247,7 +245,7 @@ fi
 # --- UP-2/UP-4: install seeds the unified policy default ruleset (policy.json) ---
 # install.sh invokes the daemon's --seed-defaults subcommand (Go owns the JSON
 # shape) BEFORE start_services, so the first boot compile sees a populated
-# model rather than wiping the manual files to empty. Binary policy (UP-4,
+# model. Binary policy (UP-4,
 # 2026-07-15 policy/mihomo decoupling): a proxy-intent rule carries no
 # selector, so the seed no longer creates egress.json/egress-nodes.enc or a
 # rule-provider dir -- egress routing is entirely the operator's mihomo
@@ -260,26 +258,11 @@ grep -Fq -- '--egress-out'         "$INSTALL" && fail "install.sh: seed_policy_d
 spd_fn="$(sed -n '/^seed_policy_defaults()/,/^}/p' "$INSTALL")"
 printf '%s' "$spd_fn" | grep -Fq '${CONF_DIR}/egress.json' && fail "install.sh: must not seed egress.json (structured egress model removed)"
 
-# Upgrade cleanup removes only retired stores and keeps policy.json. The env
-# carry-over filter retains DNS_POLICY_RULES but drops every other old
-# DNS_POLICY_* knob, plus the retired structured-egress path knobs.
-legacy_cleanup_fn="$(sed -n '/^remove_legacy_policy_state()/,/^}/p' "$INSTALL")"
-printf '%s' "$legacy_cleanup_fn" | grep -Fq '"${CONF_DIR}/policy"' \
-    || fail "install.sh: upgrade does not remove the retired draft store"
-printf '%s' "$legacy_cleanup_fn" | grep -Fq '"${CONF_DIR}/policy.json"' \
-    && fail "install.sh: upgrade cleanup must preserve the live unified policy.json"
-printf '%s' "$legacy_cleanup_fn" | grep -Fq '"${CONF_DIR}/egress.json"' \
-    || fail "install.sh: upgrade does not remove retired egress.json"
-printf '%s' "$legacy_cleanup_fn" | grep -Fq '"${CONF_DIR}/egress-nodes.enc"' \
-    || fail "install.sh: upgrade does not remove retired egress-nodes.enc"
-grep -Fq 'DNS_POLICY_RULES=) ;;' "$INSTALL" \
-    || fail "install.sh: env migration does not preserve the live DNS_POLICY_RULES override"
-grep -Fq 'DNS_POLICY_*=) continue ;;' "$INSTALL" \
-    || fail "install.sh: env migration does not drop retired DNS_POLICY_* knobs"
-grep -Fq 'DNS_EGRESS_MODEL=' "$INSTALL" \
-    || fail "install.sh: env migration does not drop retired DNS_EGRESS_MODEL"
-grep -Fq 'DNS_EGRESS_NODES=' "$INSTALL" \
-    || fail "install.sh: env migration does not drop retired DNS_EGRESS_NODES"
+# No superseded policy/egress state helper or path remains.
+grep -Fq 'remove_legacy_policy_state' "$INSTALL" \
+    && fail "install.sh: old policy-state migration helper remains"
+grep -Eq 'egress(-nodes)?\.(json|enc)' "$INSTALL" \
+    && fail "install.sh: removed structured-egress state path remains"
 
 # the two default §7 list URLs are env-overridable
 grep -Fq 'felixonmars/dnsmasq-china-list' "$INSTALL" || fail "install.sh: fixed china-list seed URL missing"
@@ -305,15 +288,18 @@ grep -Fq -- '--seed-defaults' "$ROOT/cmd/5gpn-dns/main.go" || fail "main.go: no 
 grep -Fq '"category": "chnroute"' "$INSTALL" || fail "install.sh: chnroute subscription must stay in subscriptions.json"
 grep -Fq 'china_ip_list'          "$INSTALL" || fail "install.sh: china_ip_list chnroute source must stay"
 
-# the OLD policy-owned subscriptions are GONE from subscriptions.json (now policy.json)
+# Policy-owned subscriptions stay in policy.json rather than subscriptions.json.
 grep -Fq '"category": "block"'   "$INSTALL" && fail "install.sh: block subscription must move to policy.json"
-grep -Fq '"category": "blacklist"' "$INSTALL" && fail "install.sh: blacklist(gfw) subscription must move to policy.json"
+grep -Fq '"category": "proxy"'     "$INSTALL" && fail "install.sh: proxy(gfw) subscription must move to policy.json"
 grep -Fq '"category": "direct"'    "$INSTALL" && fail "install.sh: direct(china-list) subscription must move to policy.json"
 
-# the OLD manual-file seeds are GONE (writeManualFiles regenerates them from the inline policy rules)
-grep -Eq 'install .*\$\{DNS_RULES_DIR_DEFAULT\}/block\.txt'            "$INSTALL" && fail "install.sh: must not seed block.txt (policy-owned)"
-grep -Eq 'install .*\$\{DNS_RULES_DIR_DEFAULT\}/block\.keyword\.txt'   "$INSTALL" && fail "install.sh: must not seed block.keyword.txt (policy-owned)"
-grep -Eq 'install .*\$\{DNS_RULES_DIR_DEFAULT\}/blacklist\.txt'        "$INSTALL" && fail "install.sh: must not seed blacklist.txt (policy-owned)"
+# Current cache directories use the block/direct/proxy vocabulary; there is no
+# shell-managed category file.
+grep -Fq '"${DNS_RULES_DIR_DEFAULT}"/{block,direct,proxy,chnroute}' "$INSTALL" \
+    || fail "install.sh: current subscription cache directories are incomplete"
+grep -Eq '(block|direct|proxy|blacklist)(\.keyword|\.prefix|\.suffix)?\.txt' "$INSTALL" \
+    && fail "install.sh: shell-managed DNS category file remains"
+grep -Fq 'blacklist' "$INSTALL" && fail "install.sh: removed blacklist category remains"
 
 true  # ensure the block's last command never sets rc via a && short-circuit
 

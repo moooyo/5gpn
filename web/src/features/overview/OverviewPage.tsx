@@ -67,19 +67,10 @@ function MetricCard({ label, color, unit, value, series, delta }: MetricCardProp
   )
 }
 
-/** 仪表盘 (Overview/Dashboard) — task 5.2, trimmed in B3. Sources `/api/stats`
- *  via the shared StatusContext: QPS (derived client-side as Δtotal/Δt across
- *  polls) and the 决策分布 donut (the 5 verdict counters). The former
- *  current-exit card (the removed exit-selector fetch + the shared default-exit store) and
- *  traffic-preview cards (getTraffic()) were dropped in B3 — SP-2 removed
- *  their backend endpoints (`/api/exits`, `/api/traffic`, `/api/nodes`) and
- *  egress switching is now the operator's raw mihomo config (UP-4, which also
- *  removed the console's own egress feature); mihomo traffic/connections move
- *  to zashboard (deep ops), not this page. A single live/pause toggle (A-L3)
- *  stops/starts the client-side QPS derivation.
- *
- *  "A档" charts (below the 决策分布 row): 缓存命中率 gauge, 上游健康与延迟
- *  bar chart, and a focused 境内/境外分流比 donut — all LIVE SNAPSHOTS
+/** Dashboard sourced from `/api/status` via the shared StatusContext. QPS is
+ *  derived client-side as Δtotal/Δt across polls; the live/pause toggle
+ *  controls that series. The decision, cache, upstream-health, and
+ *  arbitration charts are live snapshots
  *  recomputed from `status.stats` every render (same as 决策分布 above), not
  *  tied to the `live`/pause QPS series. No new backend fields. */
 export default function OverviewPage() {
@@ -88,7 +79,7 @@ export default function OverviewPage() {
 
   const [live, setLive] = useState(true)
 
-  // ---- LIVE: QPS derived from /api/stats's monotonic `total` counter ------
+  // ---- LIVE: QPS derived from /api/status's monotonic `total` counter -----
   const prevPointRef = useRef<QpsPoint | null>(null)
   const [qpsSeries, setQpsSeries] = useState<number[]>([])
   const [qpsNow, setQpsNow] = useState(0)
@@ -106,25 +97,24 @@ export default function OverviewPage() {
     setQpsSeries((s) => pushCapped(s, Math.round(qps), SERIES_CAP))
   }, [status?.stats?.total, status?.uptime_seconds, live])
 
-  // ---- 决策分布 (LIVE, from /api/stats verdict counters) -------------------
+  // ---- 决策分布 (LIVE, from /api/status verdict counters) ------------------
   const decisionSegments: DonutSegment[] = useMemo(() => {
     const c = decisionCounts(status?.stats)
     return [
       { name: t('overview.decision.block'), value: c.block, color: '#dc2626' },
       { name: t('overview.decision.forceDirect'), value: c.forceDirect, color: '#16a34a' },
-      { name: t('overview.decision.blacklist'), value: c.blacklist, color: '#2563eb' },
+      { name: t('overview.decision.forceProxy'), value: c.forceProxy, color: '#2563eb' },
       { name: t('overview.decision.chnrouteCn'), value: c.chnrouteCn, color: '#0891b2' },
       // Distinct indigo, NOT the A-H1 log/resolve-test mapping's blue
-      // (#2563eb, same as 强制代理/blacklist there — disambiguated by label
-      // text in that table) and NOT the former traffic-trend card's upload
-      // cyan (#38bdf8, dropped in B3). The donut has no per-wedge label, so
+      // (#2563eb, same as force-proxy there — disambiguated by label
+      // text in that table). The donut has no per-wedge label, so
       // its 5 segments need 5 visually distinct colors by design.
       { name: t('overview.decision.chnrouteForeign'), value: c.chnrouteForeign, color: '#6366f1' },
     ]
   }, [status?.stats, t])
   const decisionTotal = decisionSegments.reduce((sum, seg) => sum + seg.value, 0)
 
-  // ---- 缓存命中率 (LIVE, from /api/stats cache_hits/cache_misses) ----------
+  // ---- 缓存命中率 (LIVE, from /api/status cache_hits/cache_misses) ---------
   const hitRatePct = useMemo(() => cacheHitRate(status?.stats), [status?.stats])
 
   // ---- 上游健康与延迟 (LIVE, china vs trust ok/err counts + avg latency) ---

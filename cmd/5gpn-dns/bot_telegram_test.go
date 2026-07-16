@@ -175,7 +175,7 @@ func privateCallback(data string) *models.Update {
 	}}
 }
 
-func TestCallbackRouterDiagnosisAndLegacySafety(t *testing.T) {
+func TestCallbackRouterDiagnosis(t *testing.T) {
 	updates := make(chan struct{}, 1)
 	server, calls := newFakeTelegramServer(t, "", updates)
 	defer server.Close()
@@ -195,15 +195,6 @@ func TestCallbackRouterDiagnosisAndLegacySafety(t *testing.T) {
 		t.Fatalf("callback was not acknowledged/edited: %v", calls.methods)
 	}
 
-	var shellCalls int
-	bt.runFn = func([]string, time.Duration) (bool, string) {
-		shellCalls++
-		return true, "active"
-	}
-	bt.handleCallback(context.Background(), bt.tg, privateCallback("restart:mihomo"))
-	if shellCalls != 0 {
-		t.Fatalf("legacy direct restart executed %d subprocesses; want zero", shellCalls)
-	}
 }
 
 func TestConfirmedCallbackIsOneUse(t *testing.T) {

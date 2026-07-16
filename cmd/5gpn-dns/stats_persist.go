@@ -10,10 +10,7 @@ import (
 	"time"
 )
 
-// statsSchemaVersion is the current stats.json schema version. A missing
-// "version" (0, pre-versioning) is treated as this version; a higher one was
-// written by a newer binary — LoadStats logs and restores the known counters,
-// so a downgrade degrades rather than looking like corruption.
+// statsSchemaVersion is the exact stats.json schema version accepted.
 const statsSchemaVersion = 1
 
 // statsSnapshot is the serializable, cumulative-since-first-boot form of
@@ -26,16 +23,14 @@ type statsSnapshot struct {
 	Total           uint64 `json:"total"`
 	Block           uint64 `json:"block"`
 	ForceDirect     uint64 `json:"force_direct"`
-	Blacklist       uint64 `json:"blacklist"`
+	ForceProxy      uint64 `json:"force_proxy"`
 	ChnrouteCN      uint64 `json:"chnroute_cn"`
 	ChnrouteForeign uint64 `json:"chnroute_foreign"`
 	ChinaOK         uint64 `json:"china_ok"`
 	ChinaErr        uint64 `json:"china_err"`
 	TrustOK         uint64 `json:"trust_ok"`
 	TrustErr        uint64 `json:"trust_err"`
-	// Observability counters (cumulative). Older stats.json files predate these
-	// and decode them as zero — a benign restart-time reset of the derived
-	// hit-rate / avg-latency, not a failure.
+	// Observability counters (cumulative).
 	CacheHits     uint64 `json:"cache_hits"`
 	CacheMisses   uint64 `json:"cache_misses"`
 	ChinaLatNanos uint64 `json:"china_lat_nanos"`
@@ -52,7 +47,7 @@ func (s *statsCounters) snapshot() statsSnapshot {
 		Total:           s.total.Load(),
 		Block:           s.block.Load(),
 		ForceDirect:     s.forceDirect.Load(),
-		Blacklist:       s.blacklist.Load(),
+		ForceProxy:      s.forceProxy.Load(),
 		ChnrouteCN:      s.chnrouteCN.Load(),
 		ChnrouteForeign: s.chnrouteForeign.Load(),
 		ChinaOK:         s.chinaOK.Load(),
@@ -73,7 +68,7 @@ func (s *statsCounters) restore(snap statsSnapshot) {
 	s.total.Store(snap.Total)
 	s.block.Store(snap.Block)
 	s.forceDirect.Store(snap.ForceDirect)
-	s.blacklist.Store(snap.Blacklist)
+	s.forceProxy.Store(snap.ForceProxy)
 	s.chnrouteCN.Store(snap.ChnrouteCN)
 	s.chnrouteForeign.Store(snap.ChnrouteForeign)
 	s.chinaOK.Store(snap.ChinaOK)
@@ -105,21 +100,19 @@ func LoadStats(path string, s *statsCounters) error {
 		return fmt.Errorf("stats: read %s: %w", path, err)
 	}
 	var snap statsSnapshot
-	if err := json.Unmarshal(data, &snap); err != nil {
+	if err := unmarshalStrictJSON(data, &snap); err != nil {
 		return fmt.Errorf("stats: parse %s: %w", path, err)
 	}
-	if snap.Version > statsSchemaVersion {
-		log.Printf("warning: %s is schema version %d, newer than this binary understands (%d) — restoring known counters only",
-			path, snap.Version, statsSchemaVersion)
+	if snap.Version != statsSchemaVersion {
+		return fmt.Errorf("stats: %s: unsupported schema version %d (want %d)", path, snap.Version, statsSchemaVersion)
 	}
 	s.restore(snap)
 	return nil
 }
 
 // SaveStats atomically writes s's current snapshot to path: marshal to JSON,
-// write to a temp file in the same directory, then rename over the final
-// path (mirrors SubManager.persistLocked's atomic-write pattern). An empty
-// path or a nil s is a no-op.
+// write to a temp file in the same directory, then rename over the final path.
+// An empty path or a nil s is a no-op.
 func SaveStats(path string, s *statsCounters) error {
 	if path == "" || s == nil {
 		return nil

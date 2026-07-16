@@ -11,15 +11,13 @@ import (
 
 // CertStatus is the TLS-cert expiry view exposed via the control-plane /status
 // endpoint (and the Telegram bot status). It is early-warning only: an expired
-// cert still fails DoT/DoH at the TLS layer while plain :53 keeps serving — this
-// surfaces the countdown the renewal timer doesn't.
+// cert fails TLS handshakes; this surfaces the countdown the renewal timer does not.
 type CertStatus struct {
 	NotAfter      time.Time `json:"not_after"`
 	DaysRemaining int       `json:"days_remaining"`
 	Expired       bool      `json:"expired"`
 	// Broken/Error surface a cert that currently fails to load (deleted/corrupt
-	// file) — the degrade case (review #2): DoT/:18443 fail handshakes while
-	// plain :53 keeps serving, so the API/bot show this rather than nothing.
+	// file), so the API/bot show the degraded TLS role rather than nothing.
 	Broken bool   `json:"broken,omitempty"`
 	Error  string `json:"error,omitempty"`
 }
@@ -51,7 +49,7 @@ func (m *certMonitor) check(now time.Time) {
 	// serving path (certGetter → certCache.get) actually does.
 	pair, err := tls.LoadX509KeyPair(m.certFile, m.keyFile)
 	if err != nil {
-		log.Printf("cert-monitor: ERROR cannot load cert+key (%s / %s): %v — DoT/:18443 can't (re)load the cert (they may still serve a previously-loaded one); fix it.", m.certFile, m.keyFile, err)
+		log.Printf("cert-monitor: ERROR cannot load cert+key (%s / %s): %v — the TLS listener cannot reload this role; fix it.", m.certFile, m.keyFile, err)
 		m.mu.Lock()
 		m.lastErr = err
 		m.mu.Unlock()
@@ -74,7 +72,7 @@ func (m *certMonitor) check(now time.Time) {
 
 	switch remaining := na.Sub(now); {
 	case remaining <= 0:
-		log.Printf("cert-monitor: TLS cert EXPIRED %s ago (notAfter=%s) — DoT/DoH handshakes will fail; plain :53 still serves. Renew now.",
+		log.Printf("cert-monitor: TLS cert EXPIRED %s ago (notAfter=%s) — TLS handshakes will fail. Renew now.",
 			(-remaining).Round(time.Hour), na.Format(time.RFC3339))
 	case remaining <= m.warnBefore:
 		log.Printf("cert-monitor: TLS cert expires in %s (notAfter=%s) — confirm renewal is working.",

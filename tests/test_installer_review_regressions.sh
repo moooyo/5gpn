@@ -14,12 +14,12 @@ source "$INSTALL"
 
 BASE_DOMAIN=env.example
 PUBLIC_IP=203.0.113.9
-CF_API_TOKEN=secret
-DNS_VERSION=untrusted
+EGRESS_RESOLVER=https://untrusted.example/dns-query
+CERT_MODE=debug
 TGBOT_TOKEN=123:secret
 clear_external_config_env
-if [[ -z "${BASE_DOMAIN+x}" && -z "${PUBLIC_IP+x}" && -z "${CF_API_TOKEN+x}" \
-   && -z "${DNS_VERSION+x}" && -z "${TGBOT_TOKEN+x}" ]]; then
+if [[ -z "${BASE_DOMAIN+x}" && -z "${PUBLIC_IP+x}" && -z "${EGRESS_RESOLVER+x}" \
+   && -z "${CERT_MODE+x}" && -z "${TGBOT_TOKEN+x}" ]]; then
     pass "caller configuration environment is discarded"
 else
     fail "caller configuration environment survived clear_external_config_env"
@@ -40,11 +40,9 @@ fi
 
 stage_line="$(grep -n '^[[:space:]]*stage_artifacts$' "$INSTALL" | tail -1 | cut -d: -f1)"
 capture_line="$(grep -n '^[[:space:]]*capture_install_rollback$' "$INSTALL" | tail -1 | cut -d: -f1)"
-clean_line="$(grep -n '^[[:space:]]*clean_previous_install$' "$INSTALL" | tail -1 | cut -d: -f1)"
 publish_line="$(grep -n '^[[:space:]]*install_5gpndns$' "$INSTALL" | tail -1 | cut -d: -f1)"
-if [[ -n "$stage_line" && -n "$capture_line" && -n "$clean_line" && -n "$publish_line" \
-   && "$stage_line" -lt "$capture_line" && "$capture_line" -lt "$clean_line" \
-   && "$clean_line" -lt "$publish_line" ]]; then
+if [[ -n "$stage_line" && -n "$capture_line" && -n "$publish_line" \
+   && "$stage_line" -lt "$capture_line" && "$capture_line" -lt "$publish_line" ]]; then
     pass "artifact verification and rollback capture precede publication"
 else
     fail "install publication order is not transactional"
@@ -98,10 +96,11 @@ else
     fail "project-private swap path missing"
 fi
 
-grep -Fq 'remove_legacy_xray' "$INSTALL" \
-    && grep -Fq 'unit_file_owned_by_5gpn' "$INSTALL" \
-    && pass "legacy services are ownership gated" \
-    || fail "legacy service ownership gate missing"
+if grep -Eq '^remove_legacy_|xray\.service|smartdns\.service|sing-box\.service' "$INSTALL"; then
+    fail "old-release service teardown remains"
+else
+    pass "installer has no old-release service teardown"
+fi
 
 renew_install="$(sed -n '/^install_renewal_automation()/,/^}/p' "$INSTALL")"
 renew_remove="$(sed -n '/^remove_owned_renewal_automation()/,/^}/p' "$INSTALL")"

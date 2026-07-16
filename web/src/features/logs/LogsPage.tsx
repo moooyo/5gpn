@@ -4,7 +4,7 @@ import type { TFunction } from 'i18next'
 import { Search } from 'lucide-react'
 import { Card, Chip, Input, StatusDot } from '../../components/ds'
 import { VirtualTable } from '../../components/data-grid'
-import { api, BackendPendingError } from '../../lib/api/client'
+import { api } from '../../lib/api/client'
 import type { QueryLogEntry } from '../../lib/api/types'
 import { cn } from '../../lib/cn'
 import { useMediaQuery } from '../../lib/useMediaQuery'
@@ -14,12 +14,12 @@ const POLL_MS = 3000
 const SEARCH_DEBOUNCE_MS = 250
 const LIMIT = 300
 
-type LoadState = 'loading' | 'ready' | 'pending' | 'error'
+type LoadState = 'loading' | 'ready' | 'error'
 
 // The four legend colors from the design handoff's log view (~L311-314) —
 // each reuses an existing `logs.decision.*` key rather than inventing
 // legend-only copy, since the 5 reason-driven labels collapse onto exactly
-// these 4 colors (blacklist and chnroute-foreign share blue).
+// these 4 colors (force-proxy and chnroute-foreign share blue).
 const LEGEND: Array<{ color: string; labelKey: string }> = [
   { color: '#16a34a', labelKey: 'logs.decision.direct' },
   { color: '#0891b2', labelKey: 'logs.decision.chnrouteCn' },
@@ -83,10 +83,10 @@ export default function LogsPage() {
       if (requestId !== requestIdRef.current) return
       setEntries(res.entries ?? [])
       setState('ready')
-    } catch (err) {
+    } catch {
       if (controller.signal.aborted || requestId !== requestIdRef.current) return
       setEntries([])
-      setState(err instanceof BackendPendingError ? 'pending' : 'error')
+      setState('error')
     } finally {
       if (activeControllerRef.current === controller) activeControllerRef.current = null
     }
@@ -169,8 +169,6 @@ export default function LogsPage() {
       <Card className="overflow-hidden p-0">
         {state === 'loading' ? (
           <div className="p-8 text-center text-[12.5px] text-text-faint">{t('logs.loading')}</div>
-        ) : state === 'pending' ? (
-          <div className="p-8 text-center text-[12.5px] text-text-faint">{t('common.backendPending')}</div>
         ) : state === 'error' ? (
           <div className="p-8 text-center text-[12.5px] text-red">{t('logs.loadFailed')}</div>
         ) : entries.length === 0 ? (

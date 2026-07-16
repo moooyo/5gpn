@@ -59,7 +59,7 @@ func init() {
 	}
 }
 
-// ControlServer is the HTTPS control plane on :18443: a REST API over
+// ControlServer is the loopback HTTPS control plane on :443: a REST API over
 // Controller (bearer-token authenticated) plus the disk-served SPA and the
 // public iOS profile download. It is a separate listener from the DNS-facing DoT
 // server (Servers in server.go) — different port, different purpose (admin,
@@ -75,17 +75,17 @@ type ControlServer struct {
 	startTime time.Time
 	limiter   *rateLimiter
 
-	// dotDomain mirrors cfg.DotDomain (DNS_DOMAIN), surfaced read-only through
-	// the token-gated status endpoint for the console's Android setup guide.
+	// dotDomain is the derived dot.<base> name surfaced through the token-gated
+	// status endpoint for the console setup guide.
 	dotDomain string
 
-	// zashDomain mirrors cfg.ZashDomain (DNS_ZASH_DOMAIN), surfaced read-only
+	// zashDomain is the derived zash.<base> name, surfaced read-only
 	// via GET /api/status so the console's mihomo page can deep-link into the
 	// zashboard panel without scraping location.host. Empty when unconfigured.
 	zashDomain string
 
 	// mihomoSecret mirrors cfg.MihomoSecret (DNS_MIHOMO_SECRET), surfaced on
-	// the TOKEN-GATED GET /api/status (design §5.3) so an authenticated
+	// the token-gated GET /api/status so an authenticated
 	// console admin's "前往 zash" deep-link can carry it (URL-encoded) and
 	// auto-auth into zashboard's pass-through /proxy/ mount. Never exposed
 	// anywhere unauthenticated.
@@ -128,26 +128,19 @@ type ControlServer struct {
 // all — and NewControlServer returns (nil, nil) so callers can treat that as
 // "nothing to start" rather than an error.
 //
-// When enabled, cfg.WebCertFile and cfg.WebKeyFile are required (LoadConfig
-// falls them back to DNS_CERT/DNS_KEY when unset): the control plane is
-// HTTPS-only, serving the WEB domain's certificate.
+// When enabled, cfg.WebCertFile and cfg.WebKeyFile are required: the control
+// plane is HTTPS-only and each certificate role is explicit.
 func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 	if cfg.APIToken == "" {
 		return nil, nil
 	}
-	// LoadConfig already falls the web cert back to the DoT cert; repeat the
-	// fallback here so a directly-constructed Config (tests, embedding) gets the
-	// same behavior.
 	webCert, webKey := cfg.WebCertFile, cfg.WebKeyFile
 	if webCert == "" || webKey == "" {
-		webCert, webKey = cfg.CertFile, cfg.KeyFile
-	}
-	if webCert == "" || webKey == "" {
-		return nil, fmt.Errorf("control server: DNS_WEB_CERT and DNS_WEB_KEY (or DNS_CERT/DNS_KEY) are required when DNS_API_TOKEN is set")
+		return nil, fmt.Errorf("control server: DNS_WEB_CERT and DNS_WEB_KEY are required when DNS_API_TOKEN is set")
 	}
 	zashCert, zashKey := cfg.ZashCertFile, cfg.ZashKeyFile
-	if zashCert == "" || zashKey == "" {
-		zashCert, zashKey = webCert, webKey
+	if (cfg.ZashListen != "" || cfg.MihomoController != "") && (zashCert == "" || zashKey == "") {
+		return nil, fmt.Errorf("control server: DNS_ZASH_CERT and DNS_ZASH_KEY are required for zashboard/controller TLS")
 	}
 
 	s := &ControlServer{
@@ -170,7 +163,7 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 	if cfg.MihomoController != "" {
 		transport, transportErr := newMihomoTransport(cfg.MihomoController, cfg.ZashDomain, zashCert)
 		if transportErr != nil {
-			log.Printf("warning: control server: mihomo controller TLS unavailable: %v -- /api/mihomo/health and /proxy/* fail closed until DNS_ZASH_DOMAIN, controller cert, and loopback controller settings are valid", transportErr)
+			log.Printf("warning: control server: mihomo controller TLS unavailable: %v -- /api/mihomo/health and /proxy/* fail closed until DNS_BASE_DOMAIN, the zash role certificate, and loopback controller settings are valid", transportErr)
 		} else {
 			mihomoTransport = transport
 			s.mihomoProxy = newMihomoProxy(cfg.ZashDomain, cfg.MihomoSecret, "/proxy", true, mihomoTransport)
@@ -180,7 +173,7 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 	ios := http.StripPrefix("/ios", iosHandler(cfg.WWWDir))
 	mux := http.NewServeMux()
 	mux.Handle("/api/", s.rateLimitMiddleware(s.auditMiddleware(s.authMiddleware(s.apiMux()))))
-	// iOS .mobileconfig distribution (formerly the :8111 responder): public,
+	// iOS .mobileconfig distribution is public,
 	// token-free — the profile carries no secrets (just the DoT hostname), and
 	// an iPhone must be able to fetch it before it is configured for anything.
 	mux.Handle("/ios/", ios)
@@ -193,7 +186,7 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 
 	if cfg.ZashListen != "" {
 		if zashCert == "" || zashKey == "" {
-			return nil, fmt.Errorf("control server: DNS_ZASH_CERT and DNS_ZASH_KEY (or DNS_WEB_CERT/DNS_CERT) are required when DNS_ZASH_LISTEN is set")
+			return nil, fmt.Errorf("control server: DNS_ZASH_CERT and DNS_ZASH_KEY are required when DNS_ZASH_LISTEN is set")
 		}
 
 		zashUI, err := newWebUIHandler(cfg.ZashDir)
@@ -202,8 +195,7 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 		}
 
 		// Pass-through proxy (inject=false): forwards the browser's own
-		// Authorization unchanged instead of injecting the secret — see the
-		// design §5.2 comment on consoleProxy above.
+		// Authorization unchanged instead of injecting the secret.
 		zashProxy := unavailableMihomoProxy()
 		if mihomoTransport != nil {
 			zashProxy = newMihomoProxy(cfg.ZashDomain, cfg.MihomoSecret, "/proxy", false, mihomoTransport)
@@ -241,7 +233,7 @@ func buildPanelServer(addr string, handler http.Handler, certFile, keyFile strin
 }
 
 // securityHeadersMiddleware sets defense-in-depth response headers on the whole
-// :18443 surface (API + SPA + profile download). The console holds its bearer token in localStorage,
+// console HTTPS surface (API + SPA + /ios/). The console holds its bearer token in localStorage,
 // so an injected script would be a full control-plane takeover — CSP is the real
 // mitigation; the rest blunt MIME-sniffing and clickjacking. External hashed
 // module chunks satisfy the 'self' default-src.
@@ -252,9 +244,8 @@ func buildPanelServer(addr string, handler http.Handler, certFile, keyFile strin
 // (injected <style> elements) on modern browsers. What actually needs inline
 // styles is the SPA's dynamic React style={} *attributes*, which are governed
 // by style-src-attr; that stays 'unsafe-inline'. The plain
-// style-src 'self' 'unsafe-inline' is kept ONLY as a fallback for older
-// browsers that don't understand the -elem/-attr split (their behavior is
-// unchanged). Tightening style-src-attr further would require migrating the
+// style-src 'self' 'unsafe-inline' is the baseline fallback for browsers that
+// do not implement the -elem/-attr split. Tightening style-src-attr further would require moving the
 // dynamic values to CSS custom properties first (long-term item) — do not drop
 // it blind.
 //
@@ -312,16 +303,11 @@ func zashSecurityHeadersMiddleware(next http.Handler) http.Handler {
 // misbehaving/malicious caller can't exhaust memory with an oversized body.
 const maxAPIBodyBytes = 1 << 20 // 1 MiB
 
-// apiMux builds the /api/* routes: the full REST surface over Controller
-// (status/stats/lookup/upstreams/ecs/tgbot/reload/unified policy rules —
-// see the NOTE below on the removed managed-
-// subscription/manual-rules surface).
+// apiMux builds the bearer-authenticated control API.
 func (s *ControlServer) apiMux() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/status", s.handleStatus)
-	mux.HandleFunc("GET /api/stats", s.handleStats)
-	mux.HandleFunc("GET /api/lookup", s.handleLookup)
 	mux.HandleFunc("GET /api/resolve-test", s.handleResolveTest)
 	mux.HandleFunc("GET /api/querylog", s.handleQueryLog)
 
@@ -340,16 +326,6 @@ func (s *ControlServer) apiMux() http.Handler {
 	mux.HandleFunc("GET /api/mihomo/health", s.handleMihomoHealth)
 	mux.HandleFunc("POST /api/mihomo/log-ticket", s.handleMihomoLogTicket)
 
-	// NOTE (UP-1 Task D3): the managed DNS-subscription (/api/subscriptions*),
-	// manual per-category rules (/api/rules/{cat}), and manual refresh
-	// (/api/update) operator surface was REMOVED here — absorbed by the
-	// unified policy-rule model (see /api/policy/* below). The underlying
-	// SubManager fetch engine (subscription.go) is NOT removed: the policy
-	// compiler drives it directly via SubManager.Sync (policy_engine.go),
-	// it's just no longer a hand-managed HTTP surface.
-
-	mux.HandleFunc("POST /api/reload", s.handleReload)
-
 	mux.HandleFunc("GET /api/policy/rules", s.handlePolicyRulesList)
 	mux.HandleFunc("POST /api/policy/rules", s.handlePolicyRulesCreate)
 	mux.HandleFunc("PATCH /api/policy/rules/{id}", s.handlePolicyRulesReplace)
@@ -363,7 +339,6 @@ func (s *ControlServer) apiMux() http.Handler {
 
 	mux.HandleFunc("GET /api/mihomo/config", s.handleMihomoConfigGet)
 	mux.HandleFunc("PUT /api/mihomo/config", s.handleMihomoConfigPut)
-	mux.HandleFunc("GET /api/mihomo/config/default", s.handleMihomoConfigDefault)
 	mux.HandleFunc("POST /api/mihomo/config/reset", s.handleMihomoConfigReset)
 
 	return mux
@@ -394,21 +369,6 @@ func (s *ControlServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp["mihomo_secret"] = s.mihomoSecret
 	}
 	writeJSON(w, http.StatusOK, resp)
-}
-
-// handleStats returns the raw Stats snapshot.
-func (s *ControlServer) handleStats(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.ctrl.Stats())
-}
-
-// handleLookup runs a manual name classification/lookup. domain is required.
-func (s *ControlServer) handleLookup(w http.ResponseWriter, r *http.Request) {
-	domain := strings.TrimSpace(r.URL.Query().Get("domain"))
-	if domain == "" {
-		writeErr(w, http.StatusBadRequest, "missing required query parameter: domain")
-		return
-	}
-	writeJSON(w, http.StatusOK, s.ctrl.Lookup(r.Context(), domain))
 }
 
 // handleResolveTest runs the diagnostic per-server lookup (see ResolveTest):
@@ -640,32 +600,20 @@ func (s *ControlServer) consoleMihomoProxy() http.Handler {
 	})
 }
 
-// handleReload rebuilds the rule sets from disk and swaps them into the live
-// engine.
-func (s *ControlServer) handleReload(w http.ResponseWriter, r *http.Request) {
-	if err := s.ctrl.Reload(); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
 // decodeJSONBody reads and JSON-decodes r.Body into dst, capping the body
 // size and writing a 400 JSON error on any read/decode failure. Returns
 // false (and has already written the error response) if decoding failed.
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxAPIBodyBytes)
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(dst); err != nil {
+	if err := decodeStrictJSON(r.Body, dst); err != nil {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 		return false
 	}
 	return true
 }
 
-// rateLimitMiddleware enforces a per-source-IP token-bucket limit (Phase 4
-// Task C1) on every /api/* request, to blunt brute-force against the bearer
-// token and general abuse if the firewall is ever widened beyond CLIENT_NET.
+// rateLimitMiddleware enforces a per-source-IP token-bucket limit on every
+// /api/* request to blunt bearer-token brute force and general abuse.
 // It is wired OUTSIDE authMiddleware (see NewControlServer) so an
 // unauthenticated flood is limited too -- rate limiting must not depend on
 // having already proven a valid token.

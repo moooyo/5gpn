@@ -92,9 +92,8 @@ func TestBuildDefaultPolicyModelMissingProxyFileNoError(t *testing.T) {
 }
 
 func TestDefaultModelRulesValidate(t *testing.T) {
-	// The shipped model must pass the real PolicyRuleManager validation —
-	// otherwise the console would reject an operator's later edit that the
-	// seed accepted.
+	// The shipped model must pass the same complete validation used when
+	// policy.json is loaded.
 	dir := t.TempDir()
 	in := seedInputs{
 		BypassPath:   writeSeed(t, dir, "b.txt", "cloudflare-dns.com\nuse-application-dns.net\n"),
@@ -106,14 +105,8 @@ func TestDefaultModelRulesValidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mgr, err := NewPolicyRuleManager(filepath.Join(dir, "p.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, r := range m.Rules {
-		if err := mgr.Validate(r); err != nil {
-			t.Fatalf("shipped rule fails validation: %+v: %v", r, err)
-		}
+	if err := validatePolicyModel(m); err != nil {
+		t.Fatalf("shipped model fails validation: %v", err)
 	}
 }
 

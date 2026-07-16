@@ -53,7 +53,7 @@ const STATS: Status['stats'] = {
   total: 7200,
   block: 100,
   force_direct: 50,
-  blacklist: 20,
+  force_proxy: 20,
   chnroute_cn: 500,
   chnroute_foreign: 300,
   cache_entries: 10,
@@ -94,7 +94,7 @@ afterEach(async () => {
 })
 
 describe('OverviewPage', () => {
-  it('renders the QPS card from /api/stats (total/uptime, no second sample yet)', async () => {
+  it('renders the QPS card from /api/status (total/uptime, no second sample yet)', async () => {
     renderOverview()
 
     // 7200 total / 3600s uptime = 2 qps exactly — appears twice (top metric

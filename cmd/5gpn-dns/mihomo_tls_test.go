@@ -76,7 +76,7 @@ func TestMihomoClientRejectsWrongServerName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client.Reachable(context.Background()) {
+	if client.Status(context.Background()).Reachable {
 		t.Fatal("wrong certificate identity must be unreachable")
 	}
 }

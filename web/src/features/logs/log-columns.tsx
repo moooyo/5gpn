@@ -20,7 +20,7 @@ export interface Decision {
 export const DECISION: Record<string, Decision> = {
   'block': { key: 'logs.decision.block', color: '#dc2626' }, // 拦截 red
   'force-direct': { key: 'logs.decision.forceDirect', color: '#16a34a' }, // 强制直连 green
-  'blacklist': { key: 'logs.decision.blacklist', color: '#2563eb' }, // 强制代理 blue
+  'force-proxy': { key: 'logs.decision.forceProxy', color: '#2563eb' }, // 强制代理 blue
   'chnroute-cn': { key: 'logs.decision.chnrouteCn', color: '#0891b2' }, // 国内直连 cyan
   'chnroute-foreign': { key: 'logs.decision.chnrouteForeign', color: '#2563eb' }, // 境外代理 blue
 }

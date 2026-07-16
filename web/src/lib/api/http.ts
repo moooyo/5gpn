@@ -1,11 +1,7 @@
 /*
  * Auth/fetch core for the 5gpn-dns control-plane API client.
  *
- * Ported verbatim from the preserved (dead-legacy) `web/src/api.ts` — same
- * token storage key, same 401→AuthError/clear-token behavior, same 403
- * blocked/retry_after_seconds and 429 rate-limit handling, same i18n error
- * messages. Do not invent new auth semantics here; `web/src/api.ts` remains
- * the reference until it is removed by a later task.
+ * All console requests share this bearer-token and typed-error behavior.
  */
 
 import i18n from '../../i18n'
@@ -68,9 +64,7 @@ function authHeaders(init?: RequestInit): Record<string, string> {
   return headers
 }
 
-/** Inspects a non-2xx response body and throws the matching typed error.
- *  Shared by apiFetch and apiText so both surfaces get identical error
- *  semantics (401/403-blocked/429/generic). */
+/** Inspects a non-2xx response body and throws the matching typed error. */
 function throwForStatus(status: number, data: unknown): never {
   if (status === 429) {
     throw new ApiError(429, i18n.t('errors.rateLimited'))
@@ -126,38 +120,4 @@ export async function apiFetch<T = unknown>(path: string, init: RequestInit = {}
 
   if (resp.status === 204 || !text) return undefined as T
   return data as T
-}
-
-/** Same auth + error handling as apiFetch, but returns the raw response text
- *  (for streamed/non-JSON bodies, e.g. a future log-stream endpoint). */
-export async function apiText(path: string, init: RequestInit = {}): Promise<string> {
-  const headers = { ...authHeaders(init), ...(init.headers as Record<string, string> | undefined) }
-
-  let resp: Response
-  try {
-    resp = await fetch(path, { cache: 'no-store', ...init, headers })
-  } catch (err) {
-    if (err instanceof DOMException && err.name === 'AbortError') throw err
-    throw new ApiError(0, i18n.t('errors.network'))
-  }
-
-  if (resp.status === 401) {
-    clearToken()
-    throw new AuthError(i18n.t('errors.tokenRejected'))
-  }
-
-  if (!resp.ok) {
-    const text = await resp.text()
-    let data: unknown = null
-    if (text) {
-      try {
-        data = JSON.parse(text)
-      } catch {
-        data = null
-      }
-    }
-    throwForStatus(resp.status, data)
-  }
-
-  return resp.text()
 }

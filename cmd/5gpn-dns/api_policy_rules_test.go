@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -318,12 +317,8 @@ func TestPolicyApplyAPI_Success(t *testing.T) {
 		t.Fatalf("apply status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	blockData, err := os.ReadFile(filepath.Join(rulesDir, "block.txt"))
-	if err != nil {
-		t.Fatalf("read block.txt: %v", err)
-	}
-	if !strings.Contains(string(blockData), "ads.example.com") {
-		t.Errorf("block.txt missing block rule, got: %s", blockData)
+	if got := h.decideName("x.ads.example.com").Verdict; got.Reason != "block" {
+		t.Errorf("published policy verdict = %+v", got)
 	}
 }
 

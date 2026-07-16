@@ -13,7 +13,7 @@ describe('resolveDecision (amendment A-H1)', () => {
   it.each([
     ['block', 'logs.decision.block', '#dc2626'],
     ['force-direct', 'logs.decision.forceDirect', '#16a34a'],
-    ['blacklist', 'logs.decision.blacklist', '#2563eb'],
+    ['force-proxy', 'logs.decision.forceProxy', '#2563eb'],
     ['chnroute-cn', 'logs.decision.chnrouteCn', '#0891b2'],
     ['chnroute-foreign', 'logs.decision.chnrouteForeign', '#2563eb'],
   ])('reason=%s -> { key: %s, color: %s }', (reason, key, color) => {

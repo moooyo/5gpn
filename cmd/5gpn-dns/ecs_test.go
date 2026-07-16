@@ -333,7 +333,7 @@ func TestECSFile_RoundTrip(t *testing.T) {
 func TestControllerSetChinaECS(t *testing.T) {
 	china := NewUDPGroup([]string{"127.0.0.1:1"}, false)
 	h := &Handler{China: china, Cache: NewCache(16)}
-	ctrl := NewController(nil, func() error { return nil }, t.TempDir(), nil, nil, h)
+	ctrl := NewController(func() error { return nil }, nil, nil, h)
 	ecsPath := filepath.Join(t.TempDir(), "ecs.json")
 	ctrl.SetECSFile(ecsPath)
 

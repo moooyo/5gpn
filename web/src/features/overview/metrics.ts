@@ -1,18 +1,14 @@
 /*
- * Pure helpers backing the 仪表盘 (Overview/Dashboard) page — task 5.2,
- * trimmed in B3 (the current-exit card's helpers — resolveCurrentExit,
- * latencyTone, flagCode, cumulativeGB — were removed along with the card;
- * egress switching is now the operator's raw mihomo config, UP-4, which also
- * removed the console's own egress feature).
+ * Pure helpers backing the dashboard.
  *
- * `/api/stats` (polled by the shared StatusContext) only carries a
+ * `/api/status` (polled by the shared StatusContext) carries a
  * monotonically increasing `total` query counter, never a rate — QPS is
  * derived client-side here as Δtotal / Δt across StatusContext polls, with a
  * capped rolling series feeding the sparkline. Kept dependency-free (no React
  * imports) so it is trivially unit-testable without rendering anything.
  *
- * "A档" dashboard charts (added on top of 5.2/B3, still all LIVE SNAPSHOTS
- * recomputed from `status.stats` every render, no new backend fields):
+ * The dashboard charts are live snapshots recomputed from `status.stats` on
+ * every render:
  * `cacheHitRate` (缓存命中率 gauge), `upstreamHealth` (上游健康与延迟 bar
  * chart, china vs trust), `arbitrationSegments` (境内/境外分流比 donut — the
  * chnroute-only half of `decisionCounts`, split out for its own focused card).
@@ -64,7 +60,7 @@ export function pctDelta(series: number[]): number | null {
 export interface DecisionCounts {
   block: number
   forceDirect: number
-  blacklist: number
+  forceProxy: number
   chnrouteCn: number
   chnrouteForeign: number
 }
@@ -72,19 +68,18 @@ export interface DecisionCounts {
 interface StatsLike {
   block: number
   force_direct: number
-  blacklist: number
+  force_proxy: number
   chnroute_cn: number
   chnroute_foreign: number
 }
 
-/** Lifts the 5 verdict counters off `/api/stats` (amendment A-M3: the LIVE
- *  决策分布 donut is derived from these, never from the traffic mock's
- *  by_protocol). Tolerates an absent `stats` (pre-first-poll) by zeroing. */
+/** Lifts the five decision counters from `/api/status`. Tolerates an absent
+ *  pre-first-poll `stats` value by zeroing. */
 export function decisionCounts(stats?: StatsLike): DecisionCounts {
   return {
     block: stats?.block ?? 0,
     forceDirect: stats?.force_direct ?? 0,
-    blacklist: stats?.blacklist ?? 0,
+    forceProxy: stats?.force_proxy ?? 0,
     chnrouteCn: stats?.chnroute_cn ?? 0,
     chnrouteForeign: stats?.chnroute_foreign ?? 0,
   }
@@ -131,7 +126,7 @@ interface UpstreamHealthStatsLike {
 }
 
 /** Lifts the china/trust success+error counters and average latencies off
- *  `/api/stats` for the upstream-health bar chart. Tolerates an absent
+ *  `/api/status` for the upstream-health bar chart. Tolerates an absent
  *  `stats` (pre-first-poll) by zeroing. */
 export function upstreamHealth(stats?: UpstreamHealthStatsLike): UpstreamHealth {
   return {
@@ -153,8 +148,8 @@ interface ArbitrationStatsLike {
 }
 
 /** Lifts the two chnroute-arbitration outcome counters (直连 vs 代理) off
- *  `/api/stats` for the dedicated CN/foreign split donut — narrower than
- *  `decisionCounts` (which mixes in block/force-direct/blacklist too).
+ *  `/api/status` for the dedicated CN/foreign split donut — narrower than
+ *  `decisionCounts` (which also includes block/force-direct/force-proxy).
  *  Tolerates an absent `stats`. */
 export function arbitrationSegments(stats?: ArbitrationStatsLike): ArbitrationCounts {
   return {
@@ -162,4 +157,3 @@ export function arbitrationSegments(stats?: ArbitrationStatsLike): ArbitrationCo
     foreign: stats?.chnroute_foreign ?? 0,
   }
 }
-

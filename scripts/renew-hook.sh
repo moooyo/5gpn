@@ -1,4 +1,5 @@
 #!/bin/bash
+# 5gpn-renew-hook-id: deploy-v1
 # Let's Encrypt renewal deploy hook — publish the renewed 5gpn lineage to
 # /etc/5gpn/cert/{dot,web,zash}. Cloudflare DNS-01 lineages must cover the apex
 # and wildcard; HTTP-01 lineages must cover all three derived service names.
@@ -34,7 +35,7 @@ CERT_MODE=""
 CONSOLE_DOMAIN=""
 ZASH_DOMAIN=""
 DOT_DOMAIN=""
-_WILDCARD_RENEWED=0
+_CERT_RENEWED=0
 
 cfg_get() { grep -E "^${1}=" "$DNS_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true; }
 
@@ -55,7 +56,7 @@ normalized_base_domain() {
 normalized_cert_mode() {
     case "${1:-}" in
         cloudflare) printf '%s\n' cloudflare ;;
-        http|http-01) printf '%s\n' http-01 ;;
+        http-01) printf '%s\n' http-01 ;;
         debug) printf '%s\n' debug ;;
         *) return 1 ;;
     esac
@@ -210,7 +211,7 @@ deploy_lineage() {
     publish_roles "${live}/fullchain.pem" "${live}/privkey.pem" \
         "$CERT_MODE" "$BASE_DOMAIN" "$CONSOLE_DOMAIN" "$ZASH_DOMAIN" "$DOT_DOMAIN" \
         || return 1
-    _WILDCARD_RENEWED=1
+    _CERT_RENEWED=1
     ok "${CERT_MODE} cert for ${BASE_DOMAIN} redeployed to dot/web/zash"
 }
 
@@ -225,6 +226,9 @@ renew_hook_main() {
         [[ -n "${RENEWED_LINEAGE:-}" ]] && return 0
         return 1
     fi
+    CONSOLE_DOMAIN="console.${BASE_DOMAIN}"
+    ZASH_DOMAIN="zash.${BASE_DOMAIN}"
+    DOT_DOMAIN="dot.${BASE_DOMAIN}"
     expected="${LE_LIVE_ROOT}/${BASE_DOMAIN}"
 
     if [[ -n "${RENEWED_LINEAGE:-}" ]]; then
@@ -248,15 +252,6 @@ renew_hook_main() {
         return 1
     fi
 
-    CONSOLE_DOMAIN="$(cfg_get DNS_CONSOLE_DOMAIN)"
-    ZASH_DOMAIN="$(cfg_get DNS_ZASH_DOMAIN)"
-    DOT_DOMAIN="$(cfg_get DNS_DOMAIN)"
-    if [[ "$CONSOLE_DOMAIN" != "console.${BASE_DOMAIN}" \
-       || "$ZASH_DOMAIN" != "zash.${BASE_DOMAIN}" \
-       || "$DOT_DOMAIN" != "dot.${BASE_DOMAIN}" ]]; then
-        err "service domains in ${DNS_ENV} do not match DNS_BASE_DOMAIN=${BASE_DOMAIN}; no certificate was deployed."
-        return 1
-    fi
     valid_base_domain "$CONSOLE_DOMAIN" \
         && valid_base_domain "$ZASH_DOMAIN" \
         && valid_base_domain "$DOT_DOMAIN" \
@@ -268,7 +263,7 @@ renew_hook_main() {
         return
     fi
 
-    _WILDCARD_RENEWED=0
+    _CERT_RENEWED=0
     deploy_lineage "$live" || return 1
 
     # TLS readers detect the atomically replaced files by mtime on the next
@@ -279,11 +274,11 @@ renew_hook_main() {
     # Re-sign the iOS profile with the renewed DoT role. Best-effort: certificate
     # deployment is already complete, so profile failure must not fail renewal.
     gw="$(cfg_get DNS_GATEWAY_IP)"
-    if [[ "$_WILDCARD_RENEWED" == 1 && -x "$IOSGEN" && -n "$DOT_DOMAIN" && -n "$gw" ]]; then
+    if [[ "$_CERT_RENEWED" == 1 && -x "$IOSGEN" && -n "$DOT_DOMAIN" && -n "$gw" ]]; then
         if bash "$IOSGEN" "$DOT_DOMAIN" "$gw" "$WWW_DIR" >/dev/null 2>&1; then
             ok "iOS profile re-signed with the renewed cert."
         else
-            warn "iOS profile re-sign failed (non-fatal); it may show as unverified until 'install.sh --ios' is re-run."
+            warn "iOS profile re-sign failed (non-fatal); it may show as unverified until 'install.sh ios' is re-run."
         fi
     fi
 }

@@ -3,7 +3,7 @@ export interface Stats {
   total: number
   block: number
   force_direct: number
-  blacklist: number
+  force_proxy: number
   chnroute_cn: number
   chnroute_foreign: number
   cache_entries: number
@@ -23,16 +23,15 @@ export interface CertStatus {
   broken?: boolean
   error?: string
 }
-// `dot_domain` is the exact DNS_DOMAIN identity Android users enter as their
-// Private DNS provider hostname. Omitted when deployment identity is unknown.
-// `zash_domain` mirrors cfg.ZashDomain (DNS_ZASH_DOMAIN, added in A5) — the
-// console's mihomo page (C3) deep-links into the zashboard panel using it,
-// rather than deriving a domain by label-swapping location.host. Omitted
-// (not empty-string) when the operator hasn't configured a zashboard panel.
-// `mihomo_secret` (UP-4 Task 9/7) is the controller secret, exposed ONLY on
+// `dot_domain` is the derived DoT identity Android users enter as their
+// Private DNS provider hostname. It is omitted when the base domain is unset.
+// `zash_domain` mirrors cfg.ZashDomain. The console uses it for the zashboard
+// deep link instead of deriving a domain from location.host. It is omitted
+// when the operator has not configured a zashboard panel.
+// `mihomo_secret` is the controller secret, exposed ONLY on
 // the token-gated /api/status response — it feeds the zashboard deep-link's
-// `secret=` param so an authenticated console admin auto-auths into zash
-// (see the policy/mihomo-decoupling design §5.3). Omitted if unset.
+// `secret=` parameter so an authenticated console admin can open zashboard.
+// It is omitted if unset.
 export interface Status {
   version: string
   uptime_seconds: number
@@ -49,7 +48,7 @@ export interface QueryLogEntry {
   name: string
   qtype: string
   verdict?: string // ONLY {block,direct,proxy}
-  reason?: string  // block | force-direct | blacklist | chnroute-cn | chnroute-foreign — drives the log decision label+color
+  reason?: string  // current resolver reason; drives the log decision label and color
   upstream?: string
   cache_hit: boolean
   rcode: string
@@ -84,7 +83,6 @@ export type TGBotState = 'disabled' | 'starting' | 'healthy' | 'degraded'
 export interface TGBotView {
   admins: number[]
   token_set: boolean
-  running: boolean
   state: TGBotState
   last_error?: string
 }
@@ -104,13 +102,11 @@ export interface MihomoLogTicket { ticket: string }
 // validate against.
 export interface MihomoLogLine { type: string; payload: string }
 
-// mihomo config editor (UP-4 §4; verbatim to cmd/5gpn-dns/api_mihomo_config.go's
-// GET /api/mihomo/config response). The operator edits the WHOLE effective
-// mihomo config as raw text — there is no daemon-owned region to protect
-// (the old structured-egress projection is gone), so this is the single
+// Verbatim GET /api/mihomo/config response. The operator edits the complete
+// effective mihomo config as raw text, so this is the single
 // source of truth for `/etc/5gpn/mihomo/config.yaml`. `applied_at` is the
-// RFC3339 timestamp of the last successful PUT/reset (absent if the on-disk
-// config predates this endpoint's bookkeeping); `controller_reachable`
+// RFC3339 timestamp of the last successful PUT/reset in this daemon process
+// (absent before either operation succeeds); `controller_reachable`
 // reflects TCP/HTTP reachability; `controller_authenticated` separately says
 // whether the configured secret was accepted (a 401 is reachable but unusable).
 export interface MihomoConfig {
@@ -120,23 +116,27 @@ export interface MihomoConfig {
   controller_authenticated: boolean
 }
 
-// ---- Unified policy rules (UP-1; verbatim to cmd/5gpn-dns/policy_rules.go
-// json tags). UP-4 made the policy strictly BINARY: a rule carries no selector and the
-// fallback carries no default selector — `proxy` means only "steer to the
-// gateway"; everything about what happens to that traffic afterwards is the
-// operator's mihomo config (see `MihomoConfig` above), never a console field. --
+// ---- Unified policy rules -----------------------------------------------
+// `proxy` means only "steer to the gateway"; application egress belongs to
+// the operator-owned mihomo config, never to a DNS-policy field.
 export type MatcherKind = 'domain' | 'domain-suffix' | 'domain-keyword' | 'subscription'
 export type Intent = 'block' | 'direct' | 'proxy'
 export type FallbackPolicyKind = 'auto' | 'direct' | 'gateway'
 export type SubscriptionFormat = 'plain' | 'gfwlist' | 'dnsmasq' | 'hosts'
 
-export interface PolicyMatcher {
-  kind: MatcherKind
-  value: string // the literal (domain/suffix/keyword) OR the subscription URL
-  // format + interval are meaningful only when kind === 'subscription':
-  format?: SubscriptionFormat
-  interval?: string // Go duration STRING, e.g. "6h0m0s" — NOT a number of ms
-}
+export type PolicyMatcher =
+  | {
+      kind: Exclude<MatcherKind, 'subscription'>
+      value: string
+      format?: never
+      interval?: never
+    }
+  | {
+      kind: 'subscription'
+      value: string
+      format: SubscriptionFormat
+      interval: string // positive Go duration, e.g. "6h0m0s"
+    }
 export interface PolicyRule {
   id: string
   order: number

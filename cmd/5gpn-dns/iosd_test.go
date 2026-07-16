@@ -41,34 +41,18 @@ func TestIOSHandler_Mobileconfig(t *testing.T) {
 	}
 }
 
-func TestIOSHandler_LegacyLandingRoutesRedirectToConsoleGuide(t *testing.T) {
+func TestIOSHandler_SetupGuideRedirect(t *testing.T) {
 	dir, _ := writeIOSFixtures(t)
 	h := iosHandler(dir)
 
-	for _, path := range []string{"/", "/index.html"} {
-		req := httptest.NewRequest(http.MethodGet, path, nil)
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusSeeOther {
-			t.Errorf("GET %s: status = %d, want 303", path, rec.Code)
-		}
-		if got := rec.Header().Get("Location"); got != "/setup-guide" {
-			t.Errorf("GET %s: Location = %q, want /setup-guide", path, got)
-		}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("GET /: status = %d, want 303", rec.Code)
 	}
-}
-
-func TestIOSHandler_LegacyLandingAssetsAreGone(t *testing.T) {
-	dir, _ := writeIOSFixtures(t)
-	h := iosHandler(dir)
-	for _, path := range []string{"/ios.css", "/ios.js"} {
-		req := httptest.NewRequest(http.MethodGet, path, nil)
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusNotFound {
-			t.Errorf("GET %s: status=%d, want 404", path, rec.Code)
-		}
+	if got := rec.Header().Get("Location"); got != "/setup-guide" {
+		t.Errorf("GET /: Location = %q, want /setup-guide", got)
 	}
 }
 
@@ -175,7 +159,7 @@ func TestIOSHandler_MountedUnderIOSPrefix(t *testing.T) {
 		t.Errorf("body = %q, want the mobileconfig fixture", body)
 	}
 
-	// Legacy landing links now enter the guide inside the console SPA.
+	// The public bootstrap path enters the guide inside the console SPA.
 	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}

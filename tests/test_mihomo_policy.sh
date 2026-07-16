@@ -29,6 +29,8 @@ check "$T" 'certificate: /etc/5gpn/cert/zash/fullchain\.pem' 'controller TLS cer
 check "$T" 'private-key: /etc/5gpn/cert/zash/privkey\.pem'   'controller TLS private-key key pinned'
 nocheck install.sh 'http://127\.0\.0\.1:9090'           'installer no longer calls the plaintext mihomo controller'
 check install.sh 'render_mihomo_listeners\(\)'          'dynamic listener renderer'
+check install.sh 'name: gateway%s'                       'current gateway listener name'
+check install.sh 'name: gateway80%s'                     'current gateway HTTP listener name'
 check install.sh 'type: tunnel.*port: 443.*network: \[tcp, udp\]' ':443 tcp+udp listener renderer'
 check install.sh 'target: 127\.0\.0\.1:443'             'listener renderer loopback target'
 nocheck "$T" 'proxy:'                                  'NO proxy field on listeners (would bypass rules)'
@@ -97,18 +99,12 @@ check install.sh 'set_cf_token' 'TUI op to set CF token'
 check cmd/5gpn-dns/bot.go '"mihomo"' 'bot manages mihomo'
 nocheck cmd/5gpn-dns/bot.go '"xray"' 'bot no longer manages xray'
 
-# Task 10: lifecycle/management surface swept to mihomo + single base-domain op.
-check install.sh 'change_base_domain\(\)|change-base-domain' 'single base-domain change op'
+# Task 10: lifecycle/management surface uses mihomo + transactional configure.
+check install.sh 'configure\)' 'single transactional configure op'
 check install.sh 'for svc in mihomo 5gpn-dns|systemctl enable "\$svc"' 'lifecycle drives mihomo (enable/restart)'
-# SCOPED negatives (NOT a broad nocheck 'xray' -- legacy teardown needs it): the
-# ACTIVE service loops (start_services/show_status) and restart_services must no
-# longer name xray.
 nocheck install.sh 'for svc in .*xray' 'start/status service loop no longer includes xray'
 nocheck install.sh 'systemctl restart xray' 'restart_services no longer restarts xray'
-# Legacy xray teardown MUST remain (a box upgrading FROM xray needs it removed,
-# else old xray keeps holding :443/:80 and mihomo can never bind).
-check install.sh 'xray\.service' 'legacy xray.service still torn down (clean/uninstall)'
-check install.sh '/usr/local/bin/xray' 'legacy /usr/local/bin/xray still removed on uninstall'
+nocheck install.sh 'xray\.service|/usr/local/bin/xray' 'no old Xray teardown remains'
 
 # Task A4: zashboard dist acquisition (pinned dist.zip download + wiring)
 check install.sh 'install_zashboard\(\)' 'install_zashboard function exists'

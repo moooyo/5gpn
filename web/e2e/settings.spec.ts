@@ -11,7 +11,7 @@ test('settings page renders all config cards with zero CSP violations', async ({
   const main = page.getByRole('main')
   await expect(main.getByText('DoT 服务')).toBeVisible()
   await expect(main.getByText('控制台', { exact: true })).toBeVisible()
-  await expect(main.getByText('18443')).toBeVisible()
+  await expect(main.getByText('127.0.0.1:443')).toBeVisible()
   await expect(main.getByText('Telegram 机器人')).toBeVisible()
   await expect(main.getByText('上游 DNS')).toBeVisible()
   await expect(main.getByText('国内解析 ECS')).toBeVisible()
@@ -20,10 +20,10 @@ test('settings page renders all config cards with zero CSP violations', async ({
   // Cert status from the shared mock fixture (days_remaining: 82, not expired/broken) -> 有效.
   await expect(page.getByText('有效')).toBeVisible()
 
-  // Greenfield controls: disabled + tooltip, never functional inputs.
+  // Installer-owned controls stay read-only in the web console.
   const domainInput = page.getByLabel('DoT 域名')
   await expect(domainInput).toBeDisabled()
-  await expect(domainInput).toHaveAttribute('title', '暂由 CLI/SP-C 管理')
+  await expect(domainInput).toHaveAttribute('title', '请通过安装/管理 TUI 配置')
   const changePwBtn = page.getByRole('button', { name: '修改密码' })
   await expect(changePwBtn).toBeDisabled()
 

@@ -172,7 +172,7 @@ func TestControllerSetUpstreams(t *testing.T) {
 		China: h.China, Trust: h.Trust,
 		ChinaRaw: []string{"223.5.5.5"}, TrustRaw: []string{"22.22.22.22"},
 	})
-	c := NewController(nil, func() error { return nil }, t.TempDir(), nil, nil, h)
+	c := NewController(func() error { return nil }, nil, nil, h)
 
 	// Unwired apply hook → error.
 	if err := c.SetUpstreams([]string{"223.5.5.5"}, []string{"1.1.1.1"}); err == nil {
@@ -310,13 +310,13 @@ func TestQueryLogRetentionAndSearch(t *testing.T) {
 }
 
 // TestServeContextLogsQueries: the serve path records one entry per query with
-// the verdict trace (here: blacklist → synthetic gateway answer, no upstream).
+// the verdict trace (here: force-proxy → synthetic gateway answer, no upstream).
 func TestServeContextLogsQueries(t *testing.T) {
-	h := newTestHandler(t, &fakeExchanger{reply: buildMsg("blacklist.test", "")}, &fakeExchanger{reply: buildMsg("blacklist.test", "")})
+	h := newTestHandler(t, &fakeExchanger{reply: buildMsg("proxy.test", "")}, &fakeExchanger{reply: buildMsg("proxy.test", "")})
 	h.qlog = newQueryLog(16, 5*time.Minute)
 
 	req := new(dns.Msg)
-	req.SetQuestion("blacklist.test.", dns.TypeA)
+	req.SetQuestion("proxy.test.", dns.TypeA)
 	fw := &fakeWriter{remote: &net.UDPAddr{IP: net.ParseIP("192.0.2.7"), Port: 5353}}
 	h.serveContext(context.Background(), fw, req)
 
@@ -325,8 +325,8 @@ func TestServeContextLogsQueries(t *testing.T) {
 		t.Fatalf("query log entries = %d, want 1", len(got))
 	}
 	e := got[0]
-	if e.Name != "blacklist.test" || e.Verdict != "proxy" || e.Reason != "blacklist" {
-		t.Errorf("entry = %+v, want blacklist.test proxy/blacklist", e)
+	if e.Name != "proxy.test" || e.Verdict != "proxy" || e.Reason != "force-proxy" {
+		t.Errorf("entry = %+v, want proxy.test proxy/force-proxy", e)
 	}
 	if e.Client != "192.0.2.7" {
 		t.Errorf("client = %q, want 192.0.2.7", e.Client)
@@ -400,7 +400,7 @@ func TestResolveTest_PoolOrderAdoption(t *testing.T) {
 		TrustRaw:     []string{trustAddr},
 		TrustEntries: []TrustEntry{{ServerName: trustAddr, DialAddr: trustAddr, Plain: true}},
 	})
-	c := NewController(nil, func() error { return nil }, t.TempDir(), nil, nil, h)
+	c := NewController(func() error { return nil }, nil, nil, h)
 
 	got := c.ResolveTest(context.Background(), "order.example")
 	if got.Chosen != "china" {
@@ -431,23 +431,23 @@ func TestSelectFirstAdoptsNXDOMAINAndNODATA(t *testing.T) {
 	}
 }
 
-// TestResolveTest_TerminalVerdicts: block/blacklist never consult an
-// upstream; blacklist reports the gateway as what the client receives.
+// TestResolveTest_TerminalVerdicts: block/force-proxy never consult an
+// upstream; force-proxy reports the gateway as what the client receives.
 func TestResolveTest_TerminalVerdicts(t *testing.T) {
 	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
-	c := NewController(nil, func() error { return nil }, t.TempDir(), nil, nil, h)
+	c := NewController(func() error { return nil }, nil, nil, h)
 
 	got := c.ResolveTest(context.Background(), "block.test")
 	if got.Verdict != "block" || got.Reason != "block" || len(got.Probes) != 0 || len(got.ClientIPs) != 0 {
 		t.Errorf("block: %+v", got)
 	}
 
-	got = c.ResolveTest(context.Background(), "blacklist.test")
-	if got.Verdict != "proxy" || got.Reason != "blacklist" || len(got.Probes) != 0 {
-		t.Errorf("blacklist: %+v", got)
+	got = c.ResolveTest(context.Background(), "proxy.test")
+	if got.Verdict != "proxy" || got.Reason != "force-proxy" || len(got.Probes) != 0 {
+		t.Errorf("force-proxy: %+v", got)
 	}
 	if len(got.ClientIPs) != 1 || got.ClientIPs[0] != "10.0.0.1" {
-		t.Errorf("blacklist client IPs = %v, want [10.0.0.1]", got.ClientIPs)
+		t.Errorf("force-proxy client IPs = %v, want [10.0.0.1]", got.ClientIPs)
 	}
 }
 
@@ -465,7 +465,7 @@ func TestResolveTest_ProbesAndArbitration(t *testing.T) {
 		TrustRaw:     []string{foreignAddr},
 		TrustEntries: []TrustEntry{{ServerName: foreignAddr, DialAddr: foreignAddr, Plain: true}},
 	})
-	c := NewController(nil, func() error { return nil }, t.TempDir(), nil, nil, h)
+	c := NewController(func() error { return nil }, nil, nil, h)
 
 	got := c.ResolveTest(context.Background(), "cn-domain.example")
 	if len(got.Probes) != 2 {
@@ -517,7 +517,7 @@ func TestResolveTest_ProbesAndArbitration(t *testing.T) {
 
 	// The shared decision layer must make the same foreign answer direct when
 	// fallback=direct, without changing per-server probing or pool selection.
-	h.setFallback(FallbackDirect)
+	publishTestPolicy(t, h, FallbackDirect)
 	got = c.ResolveTest(context.Background(), "foreign.example")
 	if got.Verdict != "direct" || got.Reason != "fallback-direct" ||
 		len(got.ClientIPs) != 1 || got.ClientIPs[0] != "9.9.9.9" {

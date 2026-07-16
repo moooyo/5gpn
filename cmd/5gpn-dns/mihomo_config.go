@@ -1,16 +1,12 @@
-// Package main (this file): the mihomo raw-config editor's storage +
-// infra-invariant validator (2026-07-15 policy/mihomo decoupling design §4).
-// The daemon no longer projects policy/egress state into mihomo (that whole
-// model was removed — see mihomo_client.go's package doc); instead the
-// operator edits mihomo's ENTIRE config as text, and this file provides the
-// two building blocks the API layer (api_mihomo_config.go) composes:
+// Package main provides storage and infrastructure validation for the complete,
+// operator-owned mihomo config. The API layer composes two building blocks:
 //
 //   - MihomoConfigStore: read the on-disk config, and render the install-time
 //     seed default from the box's own dns.env-derived environment.
 //   - ValidateInvariants: a text-pattern (regexp) check — NOT a YAML parse,
 //     see the "no YAML library" module policy — that the submitted text still
-//     contains the six pieces of infrastructure the box's own lifelines
-//     depend on (design §4.4), so an operator's edit can break their own
+//     contains the seven pieces of infrastructure the box's own lifelines
+//     depend on, so an operator's edit can break their own
 //     routing rules but can never accidentally cut off the controller, the
 //     SNI-split panels, or the egress DNS broker.
 package main
@@ -27,61 +23,34 @@ import (
 )
 
 // InfraParams is the set of box-specific values ValidateInvariants checks a
-// submitted mihomo config against — the console/zash domains and the gateway
-// IP (rows #4/#5/#6). These come from the daemon's OWN configuration
-// (dns.env), not literals, so the check matches what THIS box is actually
-// configured with (see InfraParamsFromConfig).
-//
-// Controller and EgressBrokerDNS are NOT consulted by hasControllerInvariant
-// / hasDNSBrokerInvariant (design §4.4 rows #1/#3): those two are checked
-// against fixed literals (literalControllerAddr / literalDNSBrokerNameserver
-// below), because the seed template hardcodes them unconditionally — unlike
-// the console/zash domains or gateway IP, they are never sed-substituted per
-// box. The fields stay on this struct (InfraParamsFromConfig still populates
-// them, and tests still assert on them) so a future invariant that DOES need
-// the box's configured controller/broker address has somewhere to read it
-// from, but the current two checks deliberately ignore them.
+// submitted mihomo config against.
 type InfraParams struct {
-	ConsoleDomain    string // env DNS_CONSOLE_DOMAIN
-	ZashDomain       string // env DNS_ZASH_DOMAIN
+	ConsoleDomain    string // console.<DNS_BASE_DOMAIN>
+	ZashDomain       string // zash.<DNS_BASE_DOMAIN>
 	GatewayIP        string // env DNS_GATEWAY_IP (formatted, e.g. "10.0.1.20")
-	Controller       string // env DNS_MIHOMO_CONTROLLER, e.g. "127.0.0.1:9090" -- see doc above
 	ControllerSecret string // env DNS_MIHOMO_SECRET; immutable through the raw editor
-	EgressBrokerDNS  string // e.g. "udp://127.0.0.1:5354" (env DNS_EGRESS_BROKER, "udp://" + addr) -- see doc above
 }
 
 // InfraParamsFromConfig builds InfraParams from the daemon's live Config —
-// the actual console/zash domains, gateway IP, mihomo controller address, and
-// egress DNS broker address this box is running with (see Config.ConsoleDomain
-// / Config.ZashDomain / Config.GatewayIP / Config.MihomoController /
-// Config.EgressBrokerAddr). A nil GatewayIP or empty EgressBrokerAddr yields
-// an empty field rather than a placeholder — ValidateInvariants treats an
-// empty invariant value as "cannot be satisfied" (fail-closed), never as a
-// wildcard.
+// the actual console/zash domains, gateway IP, and controller secret.
 func InfraParamsFromConfig(cfg Config) InfraParams {
 	gw := ""
 	if cfg.GatewayIP != nil {
 		gw = cfg.GatewayIP.String()
 	}
-	broker := strings.TrimSpace(cfg.EgressBrokerAddr)
-	egressDNS := ""
-	if broker != "" {
-		egressDNS = "udp://" + broker
-	}
 	return InfraParams{
 		ConsoleDomain:    cfg.ConsoleDomain,
 		ZashDomain:       cfg.ZashDomain,
 		GatewayIP:        gw,
-		Controller:       cfg.MihomoController,
 		ControllerSecret: cfg.MihomoSecret,
-		EgressBrokerDNS:  egressDNS,
 	}
 }
 
 // ErrMissingInfra reports that a submitted mihomo config is missing one of
-// the six required infrastructure invariants (design §4.4). Name is one of
-// "controller", "sniproxy-inbound", "dns-broker", "console-sni", "zash-sni",
-// "anti-loop" — always the FIRST missing invariant in that fixed check order.
+// the seven required infrastructure invariants. Name is one of
+// "controller", "gateway-inbound", "dns-broker", "console-sni", "zash-sni",
+// "anti-loop", "controller-secret" — always the FIRST missing invariant in
+// that fixed check order.
 // The API layer (api_mihomo_config.go's applyMihomoConfig) maps this to an
 // HTTP 400 directly via err.Error() — it does not need errors.As itself,
 // since ValidateInvariants never wraps *ErrMissingInfra in another error;
@@ -189,37 +158,20 @@ func renderMihomoListeners(ips []string) string {
 		if i > 0 {
 			suffix = fmt.Sprintf("-%d", i+1)
 		}
-		fmt.Fprintf(&b, "  - {name: sniproxy%s, type: tunnel, listen: %s, port: 443, network: [tcp, udp], target: 127.0.0.1:443}\n", suffix, ip)
-		fmt.Fprintf(&b, "  - {name: sniproxy80%s, type: tunnel, listen: %s, port: 80, network: [tcp], target: 127.0.0.1:80}\n", suffix, ip)
+		fmt.Fprintf(&b, "  - {name: gateway%s, type: tunnel, listen: %s, port: 443, network: [tcp, udp], target: 127.0.0.1:443}\n", suffix, ip)
+		fmt.Fprintf(&b, "  - {name: gateway80%s, type: tunnel, listen: %s, port: 80, network: [tcp], target: 127.0.0.1:80}\n", suffix, ip)
 	}
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
 func mihomoSeedListenerIPs() []string {
-	if raw := strings.TrimSpace(os.Getenv("DNS_MIHOMO_LISTEN_IPS")); raw != "" {
-		ips, ok := normalizeMihomoListenerIPs(raw)
-		if !ok {
-			return nil
-		}
-		return ips
+	raw := strings.TrimSpace(os.Getenv("DNS_MIHOMO_LISTEN_IPS"))
+	if raw == "" {
+		return nil
 	}
-	// Upgrade compatibility: boxes predating DNS_MIHOMO_LISTEN_IPS still have
-	// gateway/public identity values. Invalid, duplicate, or loopback values are
-	// ignored; an empty result intentionally renders no inbound so invariant
-	// validation rejects reset instead of binding unsafely.
-	raw := os.Getenv("DNS_GATEWAY_IP") + "," + os.Getenv("DNS_PUBLIC_IP")
 	ips, ok := normalizeMihomoListenerIPs(raw)
 	if !ok {
-		// Legacy candidates are filtered independently rather than letting one
-		// bad old value discard the other usable address.
-		var valid []string
-		for _, candidate := range strings.Split(raw, ",") {
-			one, oneOK := normalizeMihomoListenerIPs(candidate)
-			if oneOK {
-				valid = append(valid, one...)
-			}
-		}
-		ips, _ = normalizeMihomoListenerIPs(strings.Join(valid, ","))
+		return nil
 	}
 	return ips
 }
@@ -227,16 +179,18 @@ func mihomoSeedListenerIPs() []string {
 // Default renders the install-time seed config (mihomoConfigSeedTemplate)
 // against the process's OWN environment — the same DNS_* keys systemd's
 // EnvironmentFile populates from /etc/5gpn/dns.env for the running daemon
-// (mirrors bot_ops.go's DNS_PUBLIC_IP / DNS_GATEWAY_IP convention). It takes
-// no arguments deliberately: it must be callable identically from the
-// running daemon (GET .../default, POST .../reset) and from the
-// --mihomo-reset CLI recovery path (main.go), both of which already run with
-// dns.env sourced into their process environment — there is no separate
-// "config object" to thread through.
+// EnvironmentFile populates from /etc/5gpn/dns.env. It takes no arguments so
+// the reset handler always renders from the daemon's current deployment identity.
 func (s *MihomoConfigStore) Default() string {
+	base := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(os.Getenv("DNS_BASE_DOMAIN"))), ".")
+	consoleDomain, zashDomain := "", ""
+	if isValidDomain(base) {
+		consoleDomain = "console." + base
+		zashDomain = "zash." + base
+	}
 	r := strings.NewReplacer(
-		"__CONSOLE_DOMAIN__", os.Getenv("DNS_CONSOLE_DOMAIN"),
-		"__ZASH_DOMAIN__", os.Getenv("DNS_ZASH_DOMAIN"),
+		"__CONSOLE_DOMAIN__", consoleDomain,
+		"__ZASH_DOMAIN__", zashDomain,
 		"__MIHOMO_LISTENERS__", renderMihomoListeners(mihomoSeedListenerIPs()),
 		"__GATEWAY_IP__", os.Getenv("DNS_GATEWAY_IP"),
 		"__CONTROLLER_SECRET__", os.Getenv("DNS_MIHOMO_SECRET"),
@@ -250,12 +204,12 @@ func (s *MihomoConfigStore) Default() string {
 // via sed; go:embed cannot reach it directly from this package (it lives
 // outside cmd/5gpn-dns/, and embed forbids ".." paths), so this is a
 // deliberate duplication that lets the daemon regenerate the exact same seed
-// at runtime (GET .../default, POST .../reset, --mihomo-reset) without
+// for POST .../reset without
 // needing the source-tree etc/ directory to exist on the box. Whenever
 // etc/mihomo/config.yaml.tmpl changes, update this const identically.
 const mihomoConfigSeedTemplate = `# 5gpn mihomo data plane — install-time seed (rendered by install.sh). This
 # file is fully operator-owned from here on: no region of it is daemon-
-# managed anymore (2026-07-15 policy/mihomo decoupling) -- edit it via the
+# managed by the daemon -- edit it via the
 # console's mihomo config editor (GET/PUT /api/mihomo/config), '5gpn
 # mihomo-reset' to restore this seed, or by hand. The console's policy
 # engine only ever decides "gateway or not" (DNS layer); everything below
@@ -357,16 +311,12 @@ const proximityWindow = `.{0,200}?`
 
 // literalControllerTLSAddr, literalControllerCert, literalControllerKey, and
 // literalDNSBrokerNameserver are the box's fixed loopback controller TLS
-// listener, zashboard cert/key paths, and egress DNS broker nameserver URL
-// (design §4.4 rows 1 and 3). These are LITERALS, not
-// InfraParams.Controller/.EgressBrokerDNS: the seed template
+// listener, zashboard cert/key paths, and egress DNS broker nameserver URL.
+// These are fixed seed-template literals:
 // (mihomoConfigSeedTemplate / etc/mihomo/config.yaml.tmpl) hardcodes them
 // unconditionally, unlike the console/zash domains or gateway IP. Checking
-// against cfg.MihomoController/cfg.EgressBrokerAddr instead (as an earlier
-// revision of this file did) was a bug: an operator who changed
-// DNS_MIHOMO_CONTROLLER away from its default would make ValidateInvariants
-// reject the box's own correctly-seeded config, since the text this invariant
-// actually needs to find never varies with that setting.
+// against runtime dial settings would be incorrect because these seed values
+// never vary with the controller client's connection target.
 const (
 	literalControllerTLSAddr   = "127.0.0.1:9090"
 	literalControllerCert      = "/etc/5gpn/cert/zash/fullchain.pem"
@@ -462,8 +412,7 @@ func topLevelYAMLMapScalar(text, mapKey, key string) (string, bool) {
 }
 
 // hasControllerInvariant asserts plaintext control is disabled, the loopback
-// TLS controller is fixed, and the zashboard cert/key paths stay exact
-// (design §4.4 #1).
+// TLS controller is fixed, and the zashboard cert/key paths stay exact.
 func hasControllerInvariant(text string) bool {
 	plain, plainOK := topLevelYAMLScalar(text, "external-controller")
 	tlsAddr, tlsOK := topLevelYAMLScalar(text, "external-controller-tls")
@@ -486,15 +435,15 @@ func hasControllerSecretInvariant(text, want string) bool {
 	return ok && got == want
 }
 
-// hasSniproxyInbound asserts a `tunnel` listener on port 443 targeting
-// 127.0.0.1:443 (design §4.4 #2).
-func hasSniproxyInbound(norm string) bool {
+// hasGatewayInbound asserts a `tunnel` listener on port 443 targeting
+// 127.0.0.1:443.
+func hasGatewayInbound(norm string) bool {
 	pat := regexp.MustCompile(`type\s*:\s*tunnel` + proximityWindow + `port\s*:\s*443` + proximityWindow + `target\s*:\s*"?127\.0\.0\.1:443"?`)
 	return pat.MatchString(norm)
 }
 
 // hasDNSBrokerInvariant asserts the dns: nameserver list includes the egress
-// broker (design §4.4 #3, literalDNSBrokerNameserver).
+// broker.
 func hasDNSBrokerInvariant(norm string) bool {
 	pat := regexp.MustCompile(`nameserver` + proximityWindow + regexp.QuoteMeta(literalDNSBrokerNameserver))
 	return pat.MatchString(norm)
@@ -538,8 +487,7 @@ func hasPublicSNISplit(norm, domain, hostsIP string) bool {
 		!allowlistedPat.MatchString(norm) && !dropPat.MatchString(norm)
 }
 
-// hasAntiLoopInvariant asserts the gateway-self REJECT-DROP guard is present
-// (design §4.4 #6).
+// hasAntiLoopInvariant asserts an exact gateway /32 REJECT-DROP guard.
 func hasAntiLoopInvariant(norm string, p InfraParams) bool {
 	if strings.TrimSpace(p.GatewayIP) == "" {
 		return false
@@ -550,11 +498,10 @@ func hasAntiLoopInvariant(norm string, p InfraParams) bool {
 
 // ValidateInvariants checks that text (a candidate mihomo config, about to
 // be submitted to `mihomo -t` and then applied) still contains every one of
-// the six infrastructure invariants (design §4.4), matched against p (the
-// box's own actual configuration — see InfraParamsFromConfig). It returns
+// the seven infrastructure invariants, matched against p (the box's own actual
+// configuration — see InfraParamsFromConfig). It returns
 // the FIRST missing invariant as *ErrMissingInfra (checked in the fixed order
-// below, matching the design doc's numbering), or nil when all six are
-// present.
+// below), or nil when all seven are present.
 //
 // This is a text-pattern check (regexp), not a structural YAML parse — the
 // module's no-YAML-library policy (miekg/dns + go-telegram/bot only) rules
@@ -569,8 +516,8 @@ func ValidateInvariants(text string, p InfraParams) error {
 	switch {
 	case !hasControllerInvariant(text):
 		return &ErrMissingInfra{Name: "controller"}
-	case !hasSniproxyInbound(norm):
-		return &ErrMissingInfra{Name: "sniproxy-inbound"}
+	case !hasGatewayInbound(norm):
+		return &ErrMissingInfra{Name: "gateway-inbound"}
 	case !hasDNSBrokerInvariant(norm):
 		return &ErrMissingInfra{Name: "dns-broker"}
 	case !hasPublicSNISplit(norm, p.ConsoleDomain, "127.0.0.1"):

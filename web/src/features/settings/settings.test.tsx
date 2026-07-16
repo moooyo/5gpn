@@ -22,7 +22,7 @@ vi.mock('../../lib/api/client', () => ({
 
 const UPSTREAMS: UpstreamsView = { china: ['223.5.5.5', '119.29.29.29'], trust: ['dns.google@8.8.8.8'] }
 const ECS: ECSView = { subnet: '122.96.30.0/24' }
-const TGBOT: TGBotView = { admins: [123456789], token_set: true, running: true, state: 'healthy' }
+const TGBOT: TGBotView = { admins: [123456789], token_set: true, state: 'healthy' }
 
 function statusValue(overrides: Partial<StatusValue> = {}): StatusValue {
   return {
@@ -195,7 +195,6 @@ describe('SettingsPage', () => {
     vi.mocked(api.getTgbot).mockResolvedValue({
       admins: [123456789],
       token_set: true,
-      running: true,
       state: 'degraded',
       last_error: 'getUpdates conflict',
     })
@@ -243,7 +242,7 @@ describe('SettingsPage', () => {
   })
 
   it('turning the tgbot toggle on without a token set and without typing one shows an error toast instead of calling the API', async () => {
-    vi.mocked(api.getTgbot).mockResolvedValue({ admins: [], token_set: false, running: false, state: 'disabled' })
+    vi.mocked(api.getTgbot).mockResolvedValue({ admins: [], token_set: false, state: 'disabled' })
     const user = userEvent.setup()
     renderSettings()
 

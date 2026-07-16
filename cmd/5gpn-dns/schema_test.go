@@ -6,36 +6,28 @@ import (
 	"testing"
 )
 
-// #34: a subscriptions.json written by a newer binary (higher schema version)
-// still loads its known fields rather than failing like corruption.
-func TestSubscriptionsForwardCompatSchema(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "subscriptions.json")
-	doc := `{"version":99,"subscriptions":[{"id":"s1","category":"direct","name":"n1","url":"https://e.test/x","format":"plain","enabled":true,"interval":"1h"}]}`
-	if err := os.WriteFile(p, []byte(doc), 0o644); err != nil {
-		t.Fatal(err)
+func TestPersistentJSONRejectsVersionAndShapeDrift(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		load func(string) error
+	}{
+		{"subscriptions missing version", `{"subscriptions":[]}`, func(p string) error { _, err := LoadSubscriptions(p); return err }},
+		{"subscriptions future version", `{"version":99,"subscriptions":[]}`, func(p string) error { _, err := LoadSubscriptions(p); return err }},
+		{"subscriptions unknown field", `{"version":1,"subscriptions":[],"extra":1}`, func(p string) error { _, err := LoadSubscriptions(p); return err }},
+		{"stats missing version", `{"total":1}`, func(p string) error { return LoadStats(p, &statsCounters{}) }},
+		{"stats future version", `{"version":99,"total":1}`, func(p string) error { return LoadStats(p, &statsCounters{}) }},
+		{"stats unknown field", `{"version":1,"extra":1}`, func(p string) error { return LoadStats(p, &statsCounters{}) }},
 	}
-	subs, err := LoadSubscriptions(p)
-	if err != nil {
-		t.Fatalf("LoadSubscriptions on a newer schema should not error: %v", err)
-	}
-	if len(subs) != 1 || subs[0].ID != "s1" {
-		t.Errorf("want the known subscription s1 to load, got %v", subs)
-	}
-}
-
-// #34: a stats.json from a newer binary restores the counters it understands
-// without erroring.
-func TestStatsForwardCompatSchema(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "stats.json")
-	doc := `{"version":99,"total":42,"cache_hits":7,"some_future_field":123}`
-	if err := os.WriteFile(p, []byte(doc), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	s := &statsCounters{}
-	if err := LoadStats(p, s); err != nil {
-		t.Fatalf("LoadStats on a newer schema should not error: %v", err)
-	}
-	if got := s.total.Load(); got != 42 {
-		t.Errorf("total = %d, want 42 (known field restored)", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "state.json")
+			if err := os.WriteFile(p, []byte(tc.doc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.load(p); err == nil {
+				t.Fatal("invalid persistent JSON was accepted")
+			}
+		})
 	}
 }

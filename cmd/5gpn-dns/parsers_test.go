@@ -45,12 +45,6 @@ func TestParseDomainsDnsmasq(t *testing.T) {
 	}
 }
 
-func TestParseDomains_AdblockFormatRemoved(t *testing.T) {
-	if _, err := ParseDomains("adblock", []byte("||example.com^")); !errors.Is(err, ErrUnknownFormat) {
-		t.Fatalf("adblock format should be unknown, got err=%v", err)
-	}
-}
-
 func TestParseDomainsHosts(t *testing.T) {
 	raw := []byte("0.0.0.0 h.com\n127.0.0.1 g.com localhost\n")
 	got, err := ParseDomains("hosts", raw)

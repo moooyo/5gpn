@@ -10,11 +10,10 @@ function errMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback
 }
 
-/** `policy`/`gateway` fallback control (`/api/policy/fallback`, UP-3 Task
- *  B2): a segmented auto/direct/gateway control — UP-4 removed the
- *  default-selector picker entirely (the fallback is just a policy kind now;
- *  the terminal routing of gateway-bound traffic is the operator's mihomo
- *  `MATCH` line, never a console field). Self-loads via getPolicyFallback.
+/** Segmented auto/direct/gateway control for `/api/policy/fallback`.
+ *  Application routing for gateway-bound traffic belongs to the operator's
+ *  mihomo config, never to this DNS-only control. Self-loads via
+ *  getPolicyFallback.
  *
  *  A selection PERSISTS IMMEDIATELY to policy.json (like every rule edit —
  *  matching the page's "edits save immediately" model), so there is no separate

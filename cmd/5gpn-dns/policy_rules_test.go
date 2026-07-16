@@ -42,13 +42,7 @@ func TestPolicyModelJSONRoundTrip(t *testing.T) {
 	}
 }
 
-// TestPolicyModelJSONIgnoresStraySelectorFields proves a policy.json/wire
-// payload written by an older (pre-decoupling) client — which still carries
-// a "selector" on a rule and a "default_selector" on the fallback — round-
-// trips cleanly: encoding/json silently drops fields the target struct no
-// longer declares, so the binary-policy model is unaffected by leftover keys
-// rather than erroring or resurrecting the field.
-func TestPolicyModelJSONIgnoresStraySelectorFields(t *testing.T) {
+func TestPolicyModelRejectsUnknownFields(t *testing.T) {
 	raw := `{
 		"version": 1,
 		"rules": [
@@ -57,25 +51,12 @@ func TestPolicyModelJSONIgnoresStraySelectorFields(t *testing.T) {
 		],
 		"fallback": {"policy":"auto","default_selector":"Proxies"}
 	}`
-	var m PolicyModel
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(m.Rules) != 1 || m.Rules[0].Intent != IntentProxy || m.Rules[0].Matcher.Value != "example.com" {
-		t.Fatalf("rule round-trip: %+v", m.Rules)
-	}
-	if m.Fallback.Policy != FallbackAuto {
-		t.Fatalf("fallback round-trip: %+v", m.Fallback)
-	}
-
-	// Re-marshal must produce exactly {"policy":"auto"} for fallback — no
-	// default_selector key resurrected.
-	data, err := json.Marshal(m.Fallback)
-	if err != nil {
+	path := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != `{"policy":"auto"}` {
-		t.Fatalf("re-marshaled fallback = %s, want {\"policy\":\"auto\"}", data)
+	if _, err := LoadPolicyModel(path); err == nil {
+		t.Fatal("unknown selector fields were accepted")
 	}
 }
 
@@ -244,7 +225,7 @@ func TestPolicyManagerFallbackGetSet(t *testing.T) {
 	}
 }
 
-// TestPolicyManagerDefensiveCopy proves Model()/Rules() return copies: a
+// TestPolicyManagerDefensiveCopy proves Snapshot()/Rules() return copies: a
 // caller mutating the returned PolicyModel/[]PolicyRule must never be able
 // to corrupt the manager's internal state.
 func TestPolicyManagerDefensiveCopy(t *testing.T) {
@@ -264,11 +245,11 @@ func TestPolicyManagerDefensiveCopy(t *testing.T) {
 		t.Fatalf("mutating the slice returned by Rules() leaked into the store: %+v", got)
 	}
 
-	model := m.Model()
+	model, _ := m.Snapshot()
 	model.Rules[0].Intent = IntentProxy
 	model.Fallback.Policy = FallbackDirect
-	if got := m.Model(); got.Rules[0].Intent != IntentBlock || got.Fallback.Policy != FallbackAuto {
-		t.Fatalf("mutating the value returned by Model() leaked into the store: %+v", got)
+	if got, _ := m.Snapshot(); got.Rules[0].Intent != IntentBlock || got.Fallback.Policy != FallbackAuto {
+		t.Fatalf("mutating the value returned by Snapshot() leaked into the store: %+v", got)
 	}
 }
 
@@ -338,7 +319,7 @@ func TestPolicyValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sub := PolicyRule{Intent: IntentBlock, Enabled: true, Matcher: Matcher{Kind: KindSubscription, Value: "ftp://x/list", Format: "plain"}}
+	sub := PolicyRule{Intent: IntentBlock, Enabled: true, Matcher: Matcher{Kind: KindSubscription, Value: "ftp://x/list", Format: "plain", Interval: time.Hour}}
 	if _, err := m.AddRule(sub); !errors.Is(err, ErrInvalidPolicy) {
 		t.Fatalf("non-http(s) subscription url must be rejected, got %v", err)
 	}
@@ -365,8 +346,7 @@ func TestPolicyValidationCommaAllowedEverywhere(t *testing.T) {
 }
 
 // TestPolicyValidationInjectionMarkerAndNewline is the CRITICAL security
-// case: a matcher value carrying an embedded newline plus a reserved marker
-// sentinel (">>>5gpn:") must be rejected — an embedded newline could
+// case: a matcher value carrying an embedded newline must be rejected — it could
 // otherwise inject an extra line into the manual rule file the compiler
 // writes one-value-per-line.
 func TestPolicyValidationInjectionMarkerAndNewline(t *testing.T) {
@@ -377,20 +357,15 @@ func TestPolicyValidationInjectionMarkerAndNewline(t *testing.T) {
 
 	newlineMarker := PolicyRule{
 		Intent: IntentBlock, Enabled: true,
-		Matcher: Matcher{Kind: KindDomainSuffix, Value: "evil.com\n>>>5gpn:forged\nDOMAIN,injected.example,REJECT"},
+		Matcher: Matcher{Kind: KindDomainSuffix, Value: "evil.com\nDOMAIN,injected.example,REJECT"},
 	}
 	if _, err := m.AddRule(newlineMarker); !errors.Is(err, ErrInvalidPolicy) {
-		t.Fatalf("embedded newline + forged marker sentinel must be ErrInvalidPolicy, got %v", err)
+		t.Fatalf("embedded newline must be ErrInvalidPolicy, got %v", err)
 	}
 
 	crOnly := PolicyRule{Intent: IntentBlock, Enabled: true, Matcher: Matcher{Kind: KindDomainKeyword, Value: "ads\rinjected"}}
 	if _, err := m.AddRule(crOnly); !errors.Is(err, ErrInvalidPolicy) {
 		t.Fatalf("embedded carriage return must be ErrInvalidPolicy, got %v", err)
-	}
-
-	markerOnly := PolicyRule{Intent: IntentBlock, Enabled: true, Matcher: Matcher{Kind: KindDomainKeyword, Value: "<<<5gpn:end"}}
-	if _, err := m.AddRule(markerOnly); !errors.Is(err, ErrInvalidPolicy) {
-		t.Fatalf("bare marker sentinel must be ErrInvalidPolicy, got %v", err)
 	}
 
 	ctrlByte := PolicyRule{Intent: IntentBlock, Enabled: true, Matcher: Matcher{Kind: KindDomainKeyword, Value: "ads\x00null"}}
@@ -456,13 +431,39 @@ func TestPolicyValidationSubscriptionUnknownFormat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := PolicyRule{Intent: IntentBlock, Enabled: true, Matcher: Matcher{Kind: KindSubscription, Value: "https://x/list.txt", Format: "cidr"}}
+	r := PolicyRule{Intent: IntentBlock, Enabled: true, Matcher: Matcher{Kind: KindSubscription, Value: "https://x/list.txt", Format: "cidr", Interval: time.Hour}}
 	if _, err := m.AddRule(r); !errors.Is(err, ErrInvalidPolicy) {
 		t.Fatalf("unknown subscription format must be ErrInvalidPolicy, got %v", err)
 	}
-	ok := PolicyRule{Intent: IntentBlock, Enabled: true, Matcher: Matcher{Kind: KindSubscription, Value: "https://x/list.txt", Format: "gfwlist"}}
+	ok := PolicyRule{Intent: IntentBlock, Enabled: true, Matcher: Matcher{Kind: KindSubscription, Value: "https://x/list.txt", Format: "gfwlist", Interval: time.Hour}}
 	if _, err := m.AddRule(ok); err != nil {
 		t.Fatalf("valid subscription format rejected: %v", err)
+	}
+}
+
+func TestPolicyValidationMatcherDiscriminator(t *testing.T) {
+	tests := map[string]Matcher{
+		"domain format":            {Kind: KindDomain, Value: "example.com", Format: "plain"},
+		"suffix interval":          {Kind: KindDomainSuffix, Value: "example.com", Interval: time.Hour},
+		"keyword format":           {Kind: KindDomainKeyword, Value: "tracker", Format: "hosts"},
+		"keyword interval":         {Kind: KindDomainKeyword, Value: "tracker", Interval: -time.Second},
+		"subscription no interval": {Kind: KindSubscription, Value: "https://x/list.txt", Format: "plain"},
+		"subscription negative interval": {
+			Kind: KindSubscription, Value: "https://x/list.txt", Format: "plain", Interval: -time.Second,
+		},
+	}
+	for name, matcher := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := validateMatcher(matcher); !errors.Is(err, ErrInvalidPolicy) {
+				t.Fatalf("invalid matcher error = %v, want ErrInvalidPolicy", err)
+			}
+		})
+	}
+
+	if err := validateMatcher(Matcher{
+		Kind: KindSubscription, Value: "https://x/list.txt", Format: "plain", Interval: time.Hour,
+	}); err != nil {
+		t.Fatalf("valid subscription matcher rejected: %v", err)
 	}
 }
 
@@ -495,29 +496,6 @@ func TestPolicyValidationUpdateRuleRejectsInvalid(t *testing.T) {
 	}
 	if got := m.Rules(); got[0].Matcher.Value != "a.com" {
 		t.Fatalf("rejected update must leave the stored rule untouched: %+v", got)
-	}
-}
-
-// TestPolicyRuleManagerValidatePublic covers the public, side-effect-free
-// Validate pre-check the API/bot layer will use.
-func TestPolicyRuleManagerValidatePublic(t *testing.T) {
-	m, err := NewPolicyRuleManager(t.TempDir() + "/p.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bad := PolicyRule{Intent: Intent("bogus"), Enabled: true, Matcher: Matcher{Kind: KindDomain, Value: "x.com"}}
-	if err := m.Validate(bad); !errors.Is(err, ErrInvalidPolicy) {
-		t.Fatalf("Validate must reject an unknown intent, got %v", err)
-	}
-	if len(m.Rules()) != 0 {
-		t.Fatalf("Validate must not mutate the model: %+v", m.Rules())
-	}
-	good := PolicyRule{Intent: IntentProxy, Enabled: true, Matcher: Matcher{Kind: KindDomain, Value: "x.com"}}
-	if err := m.Validate(good); err != nil {
-		t.Fatalf("Validate rejected a valid rule: %v", err)
-	}
-	if len(m.Rules()) != 0 {
-		t.Fatalf("Validate must not mutate the model even for a valid rule: %+v", m.Rules())
 	}
 }
 

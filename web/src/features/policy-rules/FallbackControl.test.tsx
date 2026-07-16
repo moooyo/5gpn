@@ -37,7 +37,7 @@ describe('FallbackControl', () => {
     expect(screen.queryByTestId('policy-fallback-save')).toBeNull()
   })
 
-  it('has no default-selector control (binary policy — UP-4)', async () => {
+  it('keeps application egress out of the DNS fallback control', async () => {
     render(<FallbackControl />)
     await waitFor(() => expect(screen.getByRole('tab', { name: /gateway/i })).toBeInTheDocument())
     expect(screen.queryByRole('combobox')).toBeNull()

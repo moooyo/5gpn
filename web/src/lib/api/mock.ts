@@ -11,7 +11,7 @@ import type * as T from './types'
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
-// ---- mihomo config editor (UP-4 §4) ----------------------------------------
+// ---- mihomo config editor -------------------------------------------------
 // Mirrors the real apply pipeline's ONE observable invariant check the
 // editor page (next unit) needs to exercise: a submitted text missing the
 // `external-controller:` line is rejected with the same ApiError(400, …)
@@ -33,10 +33,6 @@ export async function putMihomoConfig(text: string): Promise<T.MihomoConfig> {
   fixtures.mihomoConfig.applied_at = new Date().toISOString()
   return { ...fixtures.mihomoConfig }
 }
-export async function getMihomoConfigDefault(): Promise<{ text: string }> {
-  await delay(80)
-  return { text: fixtures.mihomoConfigDefaultText }
-}
 export async function resetMihomoConfig(): Promise<T.MihomoConfig> {
   await delay(150)
   fixtures.mihomoConfig.text = fixtures.mihomoConfigDefaultText
@@ -44,7 +40,7 @@ export async function resetMihomoConfig(): Promise<T.MihomoConfig> {
   return { ...fixtures.mihomoConfig }
 }
 
-// ---- Unified policy rules (UP-1) -------------------------------------------
+// ---- Unified policy rules -------------------------------------------------
 // Same quartet-plus-apply idiom as the mihomo-config mocks above, plus a
 // reorder op (rules are order-sensitive — first match wins) and a fallback
 // get/put.

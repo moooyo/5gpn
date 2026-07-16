@@ -179,7 +179,7 @@ remove_work_dir() {
 
 valid_release_tag() {
     local tag="$1"
-    [[ -n "$tag" && ${#tag} -le 128 && "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+    [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
 resolve_latest_tag() { # optional API URL is an internal test seam
@@ -356,9 +356,6 @@ main() {
         return 1
     fi
 
-    # These historical environment overrides must not leak into install.sh.
-    # Release selection is fixed to latest; configuration is collected by TUI.
-    unset DNS_VERSION REPO SRC
     prepare_source_dir "" || return 1
     release_tag="$(resolve_latest_tag)" || return 1
 

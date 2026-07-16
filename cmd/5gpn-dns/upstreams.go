@@ -15,9 +15,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// upstreamsSchemaVersion is the current upstreams.json schema version. A
-// missing "version" (0) is treated as this version; a higher one was written
-// by a newer binary — known fields are honoured, unknown ones ignored.
+// upstreamsSchemaVersion is the exact upstreams.json schema version accepted.
 const upstreamsSchemaVersion = 1
 
 // UpstreamsConfig is the on-disk shape of /etc/5gpn/upstreams.json — the
@@ -48,8 +46,11 @@ func LoadUpstreams(path string) (*UpstreamsConfig, error) {
 		return nil, fmt.Errorf("upstreams: read %s: %w", path, err)
 	}
 	var uc UpstreamsConfig
-	if err := json.Unmarshal(data, &uc); err != nil {
+	if err := unmarshalStrictJSON(data, &uc); err != nil {
 		return nil, fmt.Errorf("upstreams: parse %s: %w", path, err)
+	}
+	if uc.Version != upstreamsSchemaVersion {
+		return nil, fmt.Errorf("upstreams: %s: unsupported schema version %d (want %d)", path, uc.Version, upstreamsSchemaVersion)
 	}
 	if err := ValidateUpstreams(uc.China, uc.Trust); err != nil {
 		return nil, fmt.Errorf("upstreams: %s: %w", path, err)

@@ -10,7 +10,7 @@ import { PolicyRulesTable } from './PolicyRulesTable'
 import type { PolicyRule } from '../../lib/api/types'
 
 const RULES: PolicyRule[] = [
-  { id: 'a', order: 0, matcher: { kind: 'subscription', value: 'https://x/blocklist.txt', format: 'plain' }, intent: 'block', enabled: true },
+  { id: 'a', order: 0, matcher: { kind: 'subscription', value: 'https://x/blocklist.txt', format: 'plain', interval: '24h0m0s' }, intent: 'block', enabled: true },
   { id: 'b', order: 1, matcher: { kind: 'domain-suffix', value: 'example.cn' }, intent: 'direct', enabled: true },
   { id: 'c', order: 2, matcher: { kind: 'domain-suffix', value: 'netflix.com' }, intent: 'proxy', enabled: false },
 ]

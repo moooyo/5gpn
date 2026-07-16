@@ -28,8 +28,7 @@ type TrustEntry struct {
 // Config holds the resolved configuration for 5gpn-dns.
 type Config struct {
 	// Listener addresses.  An empty string means the listener is disabled.
-	// DoT is the ONLY client-facing DNS transport (DoH/plain-:53 were removed
-	// 2026-07-10); ListenDebug is a loopback-only plain-UDP listener kept for
+	// DoT is the ONLY client-facing DNS transport; ListenDebug is a loopback-only plain-UDP listener kept for
 	// on-box troubleshooting (dig @127.0.0.1 -p 5353), never public.
 	ListenDoT   string // default :853   (TLS)
 	ListenDebug string // default 127.0.0.1:5353 (plain UDP, debug)
@@ -38,9 +37,7 @@ type Config struct {
 	CertFile string
 	KeyFile  string
 
-	// TLS certificate files for the web console / control-plane listener. The
-	// installer deploys the one selected lineage to each role directory. Empty
-	// falls back to CertFile/KeyFile for defensive single-cert compatibility.
+	// TLS certificate files for the web console role.
 	WebCertFile string
 	WebKeyFile  string
 
@@ -81,24 +78,24 @@ type Config struct {
 	China0x20 bool
 
 	// Rule file locations.
-	RulesDir     string // directory containing block/direct/blacklist sub-files
+	RulesDir     string // directory containing subscription caches and chnroute
 	ChnrouteFile string // path to china IP CIDR list
 
-	// Phase 2 subscriptions.
+	// Subscriptions.
 	SubscriptionsFile string // path to subscriptions.json
 
-	// Phase 3 control-plane API + web console.
+	// Control-plane API + web console.
 	ListenAPI string // default 127.0.0.1:443 (TLS); control plane is disabled unless APIToken is set
 	APIToken  string // bearer token for /api/*; no default — empty means disabled
 
-	// Phase 4 Task C1: per-source rate limiting on the control-plane API.
+	// Per-source rate limiting on the control-plane API.
 	APIRate  float64 // requests/sec allowed per source IP; <= 0 disables rate limiting
 	APIBurst int     // token-bucket capacity per source IP
 
-	// Phase 4 Task A2: query-stat counter persistence.
+	// Query-stat counter persistence.
 	StatsFile string // path for cumulative stats snapshot; empty disables persistence
 
-	// Phase 5: in-process Telegram bot.
+	// In-process Telegram bot.
 	TGBotToken  string         // env TGBOT_TOKEN; empty ⇒ bot disabled
 	TGBotAdmins map[int64]bool // env TGBOT_ADMINS; comma/space-separated int64 admin IDs
 	// TGBotProxyURL is an optional HTTP/HTTPS CONNECT proxy used only for
@@ -117,29 +114,17 @@ type Config struct {
 	// bot token + admin set can be changed without editing the read-only dns.env.
 	TGBotFile string
 
-	// XrayResolver is the sniffed-origin SNI re-resolver value (env
-	// DNS_EGRESS_RESOLVER; back-compat fallback XRAY_RESOLVER, the pre-rename
-	// name from the xray era -- an upgraded box's dns.env may still only carry
-	// the old key, default 22.22.22.22 placeholder). It is CONSUMED by the
-	// daemon: the loopback Egress DNS Broker's legacy fallback exchanger (used
-	// when no shadow policy binding is published) queries this resolver with
-	// the same semantics the old standalone Xray dns.servers[0] entry used --
-	// a plain IPv4 over UDP (TC->TCP fallback) or an https://.../dns-query DoH
-	// URL. Validated by ValidateResolver; the 22.22.22.22 sentinel is accepted
-	// (non-functional placeholder) so a fresh box still boots. The field name
-	// keeps the pre-rename "Xray" spelling for this task; a follow-up rename
-	// is tracked separately (see the mihomo migration plan).
-	XrayResolver string
+	// EgressResolver is the resolver used by the loopback egress DNS broker
+	// when mihomo asks for a sniffed origin (env DNS_EGRESS_RESOLVER). It accepts
+	// a plain IPv4 over UDP (with TC-to-TCP retry) or an HTTPS DoH URL. The
+	// 22.22.22.22 sentinel is the fresh-install placeholder.
+	EgressResolver string
 
-	// Deployment domains. DNS_DOMAIN is the public DoT identity used by client
-	// setup instructions; DNS_BASE_DOMAIN names the selected certificate lineage,
-	// while console/zash panel domains are derived from it. install.sh persists
-	// all four, but older configs may only have DNS_BASE_DOMAIN; LoadConfig
-	// therefore derives zash.<base> when the explicit value is empty.
-	// Empty still means the value isn't known yet (e.g. a box not yet migrated to
-	// the base-domain scheme).
-	DotDomain     string
+	// The operator's base domain (env DNS_BASE_DOMAIN) and its derived service
+	// names. DNS_BASE_DOMAIN is the only hostname identity read from the
+	// environment.
 	BaseDomain    string
+	DotDomain     string
 	ConsoleDomain string
 	ZashDomain    string
 
@@ -162,35 +147,25 @@ type Config struct {
 	// and writes (env DNS_MIHOMO_CONFIG, default /etc/5gpn/mihomo/config.yaml)
 	// — install.sh renders the initial seed (etc/mihomo/config.yaml.tmpl); the
 	// daemon validates (`mihomo -t`) and hot-applies every subsequent PUT/reset
-	// via api_mihomo_config.go, but owns no region of it (2026-07-15
-	// policy/mihomo decoupling: the former structured egress model's
-	// EgressFile/EgressNodesFile fields and the daemon-rendered dynamic tail
-	// they backed are gone; this is now the operator's entire, single-source
-	// config).
+	// via api_mihomo_config.go, but owns no region of it.
 	MihomoConfigFile string
 
-	// UP-1: the unified intent-based policy-rule model (policy_rules.go).
 	// PolicyRulesFile is the console-managed plain-JSON rule list (env
-	// DNS_POLICY_RULES, default /etc/5gpn/policy.json) — policy subscription
-	// URLs are PUBLIC (unlike the former egress node-sub URLs), so this file
-	// is plain JSON, never sealed. An explicit empty value disables the store
+	// DNS_POLICY_RULES, default /etc/5gpn/policy.json). An explicit empty value disables the store
 	// (matches UpstreamsFile's envListen convention).
 	PolicyRulesFile string
 
-	// SP-3 zashboard panel: ZashDir is the unzipped Zephyruso/zashboard dist
+	// ZashDir is the unzipped zashboard dist
 	// (env DNS_ZASH_DIR, default /opt/5gpn/zash) served by a SECOND loopback
 	// HTTPS panel on ZashListen (env DNS_ZASH_LISTEN, default 127.0.0.2:443).
-	// ZashCertFile/ZashKeyFile (env DNS_ZASH_CERT/DNS_ZASH_KEY) fall back to the
-	// web cert → DoT cert: either production SAN shape covers all three roles.
 	ZashDir      string
 	ZashListen   string
 	ZashCertFile string
 	ZashKeyFile  string
 
 	// iOS DoT-profile distribution: the .mobileconfig under WWWDir is served by
-	// the control server at the public (token-free) /ios/ path — there is no
-	// separate listener or install page (the old :8111 responder was removed).
-	WWWDir string // env WWW_DIR; default /opt/5gpn/www; signed-profile root
+	// the control server at the public (token-free) /ios/ path.
+	WWWDir string // env WWW_DIR; default /opt/5gpn/www; profile root
 	WebDir string // env DNS_WEB_DIR; default /opt/5gpn/web; control-console SPA static root
 
 	// Cache.
@@ -228,7 +203,7 @@ type Config struct {
 
 // LoadConfig reads DNS_* environment variables and returns a validated Config.
 //
-// Defaults (spec §6 + §13):
+// Defaults:
 //
 //	DNS_LISTEN_DOT      :853
 //	DNS_LISTEN_DEBUG    127.0.0.1:5353
@@ -246,7 +221,7 @@ type Config struct {
 //	DNS_SUBSCRIPTIONS   /etc/5gpn/subscriptions.json
 //	DNS_LISTEN_API      127.0.0.1:443
 //	DNS_API_TOKEN       (none — control plane disabled unless set)
-//	DNS_WEB_CERT/_KEY   (empty — fall back to DNS_CERT/DNS_KEY)
+//	DNS_WEB_CERT/_KEY   (required when the control plane is enabled)
 //	DNS_STATS_FILE      /etc/5gpn/stats.json (empty disables persistence)
 //	DNS_API_RATE        20 (requests/sec per source IP; <= 0 disables rate limiting)
 //	DNS_API_BURST       40 (token-bucket capacity per source IP)
@@ -258,12 +233,12 @@ type Config struct {
 //	DNS_MIHOMO_CONTROLLER 127.0.0.1:9090 (mihomo's loopback external-controller API)
 //	DNS_MIHOMO_SECRET   (none — mihomo controller bearer secret)
 //	DNS_WHITELIST_FILE  /etc/5gpn/mihomo/whitelist.txt (panel source-IP allowlist)
-//	DNS_DOMAIN / DNS_BASE_DOMAIN / DNS_CONSOLE_DOMAIN / DNS_ZASH_DOMAIN (none — zash derives from base when empty)
+//	DNS_BASE_DOMAIN     (none — dot/console/zash names derive from it)
 //	DNS_MIHOMO_CONFIG   /etc/5gpn/mihomo/config.yaml (operator-owned mihomo config; console raw editor)
 //	DNS_POLICY_RULES    /etc/5gpn/policy.json (unified policy-rule model; plain JSON, public subscription URLs; empty disables)
 //	DNS_ZASH_DIR        /opt/5gpn/zash (unzipped zashboard dist, served by the zash panel)
 //	DNS_ZASH_LISTEN     127.0.0.2:443 (second loopback HTTPS listener for the zash panel)
-//	DNS_ZASH_CERT/_KEY  (empty — fall back to DNS_WEB_CERT/_KEY, then DNS_CERT/DNS_KEY)
+//	DNS_ZASH_CERT/_KEY  (required when the zashboard listener is enabled)
 //
 // Empty listener strings disable that server.
 // If the DoT listener has a non-empty address, DNS_CERT and DNS_KEY must also
@@ -288,10 +263,7 @@ func LoadConfig() (Config, error) {
 		TGBotAlerts:       envBool("TGBOT_ALERTS", false),
 		WWWDir:            envOr("WWW_DIR", "/opt/5gpn/www"),
 		WebDir:            envOr("DNS_WEB_DIR", "/opt/5gpn/web"),
-		DotDomain:         envOr("DNS_DOMAIN", ""),
 		BaseDomain:        envOr("DNS_BASE_DOMAIN", ""),
-		ConsoleDomain:     envOr("DNS_CONSOLE_DOMAIN", ""),
-		ZashDomain:        envOr("DNS_ZASH_DOMAIN", ""),
 		MihomoController:  envOr("DNS_MIHOMO_CONTROLLER", "127.0.0.1:9090"),
 		MihomoSecret:      envOr("DNS_MIHOMO_SECRET", ""),
 		WhitelistFile:     envOr("DNS_WHITELIST_FILE", "/etc/5gpn/mihomo/whitelist.txt"),
@@ -305,22 +277,14 @@ func LoadConfig() (Config, error) {
 	if err := validateTGBotProxyURL(cfg.TGBotProxyURL); err != nil {
 		return Config{}, fmt.Errorf("config: invalid TGBOT_PROXY_URL: %w", err)
 	}
-	trimmedBaseDomain := strings.TrimSuffix(cfg.BaseDomain, ".")
-	if cfg.ZashDomain == "" && trimmedBaseDomain != "" {
-		cfg.ZashDomain = "zash." + trimmedBaseDomain
-	}
-	// Web-console cert falls back to the DoT cert so a single-cert deployment
-	// (CERT_MODE=debug, or a dev box) still serves loopback :443.
-	if cfg.WebCertFile == "" || cfg.WebKeyFile == "" {
-		cfg.WebCertFile = cfg.CertFile
-		cfg.WebKeyFile = cfg.KeyFile
-	}
-
-	// zash panel cert reuses the web cert (itself already fell back to the DoT
-	// cert) — the single selected lineage covers all three service domains.
-	if cfg.ZashCertFile == "" || cfg.ZashKeyFile == "" {
-		cfg.ZashCertFile = cfg.WebCertFile
-		cfg.ZashKeyFile = cfg.WebKeyFile
+	cfg.BaseDomain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(cfg.BaseDomain)), ".")
+	if cfg.BaseDomain != "" {
+		if !isValidDomain(cfg.BaseDomain) {
+			return Config{}, fmt.Errorf("config: invalid DNS_BASE_DOMAIN %q", cfg.BaseDomain)
+		}
+		cfg.DotDomain = "dot." + cfg.BaseDomain
+		cfg.ConsoleDomain = "console." + cfg.BaseDomain
+		cfg.ZashDomain = "zash." + cfg.BaseDomain
 	}
 
 	// Gateway IP.
@@ -339,8 +303,8 @@ func LoadConfig() (Config, error) {
 	chinaRaw := envOr("DNS_CHINA", "223.5.5.5,119.29.29.29")
 	cfg.ChinaAddrs = splitTrim(chinaRaw)
 
-	// Trust upstreams. Default is the 22.22.22.22 sentinel (same convention as
-	// XRAY_RESOLVER): a bare IP queried over plain UDP, meant to be replaced by
+	// Trust upstreams. Default is the 22.22.22.22 sentinel: a bare IP queried
+	// over plain UDP, meant to be replaced by
 	// the operator via the web console (Settings → upstream DNS).
 	trustRaw := envOr("DNS_TRUST", "22.22.22.22")
 	cfg.TrustRaw = splitTrim(trustRaw)
@@ -356,23 +320,19 @@ func LoadConfig() (Config, error) {
 	// TGBOT_TOKEN/TGBOT_ADMINS at startup, rewritten by PUT /api/tgbot).
 	cfg.TGBotFile = envListen("DNS_TGBOT_FILE", "/etc/5gpn/tgbot.json")
 
-	// Egress SNI re-resolver (env DNS_EGRESS_RESOLVER; back-compat fallback
-	// XRAY_RESOLVER for a box whose dns.env predates the mihomo-migration
-	// rename). Consumed by the broker's legacy fallback exchanger. Default is
-	// the 22.22.22.22 placeholder; a malformed value is FATAL (ValidateResolver):
+	// Egress SNI re-resolver (env DNS_EGRESS_RESOLVER). Consumed by the egress
+	// DNS broker. Default is the 22.22.22.22 placeholder; a malformed value is
+	// FATAL (ValidateResolver):
 	// a broken resolver would silently break the sniffed-origin data path, so
 	// surface it at load time. The 22.22.22.22 sentinel passes ValidateResolver
 	// as a plain IPv4.
 	egressResolver := strings.TrimSpace(os.Getenv("DNS_EGRESS_RESOLVER"))
 	if egressResolver == "" {
-		egressResolver = strings.TrimSpace(os.Getenv("XRAY_RESOLVER"))
-	}
-	if egressResolver == "" {
 		egressResolver = "22.22.22.22"
 	}
-	cfg.XrayResolver = egressResolver
-	if err := ValidateResolver(cfg.XrayResolver); err != nil {
-		return Config{}, fmt.Errorf("config: invalid DNS_EGRESS_RESOLVER/XRAY_RESOLVER: %w", err)
+	cfg.EgressResolver = egressResolver
+	if err := ValidateResolver(cfg.EgressResolver); err != nil {
+		return Config{}, fmt.Errorf("config: invalid DNS_EGRESS_RESOLVER: %w", err)
 	}
 
 	// China-group EDNS Client Subnet. Warn-not-fatal like every tuning knob: a
@@ -479,6 +439,14 @@ func LoadConfig() (Config, error) {
 			return Config{}, errors.New("config: DNS_CERT and DNS_KEY are required when the DoT listener is enabled")
 		}
 	}
+	if cfg.APIToken != "" && cfg.ListenAPI != "" {
+		if cfg.WebCertFile == "" || cfg.WebKeyFile == "" {
+			return Config{}, errors.New("config: DNS_WEB_CERT and DNS_WEB_KEY are required when the control plane is enabled")
+		}
+		if cfg.ZashListen != "" && (cfg.ZashCertFile == "" || cfg.ZashKeyFile == "") {
+			return Config{}, errors.New("config: DNS_ZASH_CERT and DNS_ZASH_KEY are required when the zashboard listener is enabled")
+		}
+	}
 
 	return cfg, nil
 }
@@ -511,17 +479,8 @@ func validateTGBotProxyURL(raw string) error {
 	return nil
 }
 
-// parseTrustEntries parses a comma-separated list of trust upstream specs.
-// Each spec is either "serverName@dialAddr" (DoT) or a bare IP (plain UDP).
-func parseTrustEntries(raw string) []TrustEntry {
-	return parseTrustEntryList(splitTrim(raw))
-}
-
 // parseTrustEntryList parses trust upstream specs, one per element:
-// "serverName@dialAddr" → DoT; bare "IP" → plain UDP (Plain=true). The bare
-// form deliberately means plaintext (deliberate reversal 2026-07-10 — it used
-// to mean DoT-with-IP-SAN, which made the 22.22.22.22-style internal-resolver
-// default impossible to use).
+// "serverName@dialAddr" → DoT; bare "IP" → plain UDP (Plain=true).
 func parseTrustEntryList(parts []string) []TrustEntry {
 	entries := make([]TrustEntry, 0, len(parts))
 	for _, p := range parts {
@@ -557,18 +516,6 @@ func envListen(key, def string) string {
 
 // envOr returns os.Getenv(key) when non-empty, otherwise def.
 // For non-listener settings: empty and unset are both treated as "use default".
-// splitCommaList splits a comma-separated env value into a trimmed,
-// empty-filtered slice. Returns nil for an all-empty input.
-func splitCommaList(v string) []string {
-	var out []string
-	for _, p := range strings.Split(v, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

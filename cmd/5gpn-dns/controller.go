@@ -4,11 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"strings"
 	"time"
-
-	"github.com/miekg/dns"
 )
 
 // ErrTGBotUnavailable is returned by GetTGBot/SetTGBot when no bot supervisor is
@@ -32,7 +29,7 @@ type Stats struct {
 	Total           uint64 `json:"total"`
 	Block           uint64 `json:"block"`
 	ForceDirect     uint64 `json:"force_direct"`
-	Blacklist       uint64 `json:"blacklist"`
+	ForceProxy      uint64 `json:"force_proxy"`
 	ChnrouteCN      uint64 `json:"chnroute_cn"`
 	ChnrouteForeign uint64 `json:"chnroute_foreign"`
 	CacheEntries    int    `json:"cache_entries"`
@@ -49,15 +46,9 @@ type Stats struct {
 	TrustAvgMs  float64 `json:"trust_avg_ms"`
 }
 
-// Controller is a thin facade over subscription management, manual rule-list
-// editing, reload, and stats — the single surface the Phase-3 HTTP API (and
-// tgbot) will call into. It holds no independent state of its own beyond what
-// it needs to delegate: the SubManager, the reload callback, the manual rules
-// directory, and read-only handles into the engine's live counters/cache.
+// Controller is the in-process facade used by the HTTP API and Telegram bot.
 type Controller struct {
-	subs     *SubManager
 	reload   func() error
-	rulesDir string
 	stats    *statsCounters
 	cacheLen func() int
 
@@ -107,19 +98,11 @@ type tgbotManager interface {
 	Apply(tokenPtr *string, admins []int64) error
 }
 
-// NewController constructs a Controller. Any of subs, stats, or cacheLen may
-// be nil (e.g. in tests exercising only a subset of behavior). subs/rulesDir
-// are retained on the struct for construction compatibility (see the NOTE at
-// the (now-removed) subscription facade above) but, since UP-1 Task D3, no
-// Controller method reads either field — the policy engine drives the
-// SubManager directly instead.
-// handler wires Lookup to the live engine; it may be nil if Lookup is never
-// called (e.g. in tests exercising only a subset of Controller's behavior).
-func NewController(subs *SubManager, reload func() error, rulesDir string, stats *statsCounters, cacheLen func() int, handler *Handler) *Controller {
+// NewController constructs a Controller. stats, cacheLen, and handler may be
+// nil when the corresponding read surface is unavailable.
+func NewController(reload func() error, stats *statsCounters, cacheLen func() int, handler *Handler) *Controller {
 	return &Controller{
-		subs:     subs,
 		reload:   reload,
-		rulesDir: rulesDir,
 		stats:    stats,
 		cacheLen: cacheLen,
 		handler:  handler,
@@ -163,18 +146,6 @@ func (c *Controller) GetTGBot() TGBotView {
 	v := c.tgbot.View()
 	if v.AdminIDs == nil {
 		v.AdminIDs = []int64{}
-	}
-	// Preserve compatibility with alternate/test managers written before the
-	// explicit health state was added while keeping the API state non-empty.
-	if v.State == "" {
-		switch {
-		case v.Running:
-			v.State = botStateHealthy
-		case v.TokenSet:
-			v.State = botStateDegraded
-		default:
-			v.State = botStateDisabled
-		}
 	}
 	return v
 }
@@ -283,126 +254,10 @@ func (c *Controller) QueryLog(q string, limit int) []QueryLogEntry {
 	return entries
 }
 
-// NOTE (UP-1 Task D3): the operator-facing subscription facade
-// (Subscriptions/SubscriptionHealth/SubscriptionsWithHealth/SubscriptionView/
-// AddSubscription/RemoveSubscription/ReplaceSubscription/
-// ValidateSubscription/GetSubscription/Update) was REMOVED here — the
-// managed-DNS-subscription HTTP surface it backed (/api/subscriptions*,
-// /api/update) is gone, absorbed by the unified policy-rule model
-// (policy_rules.go/policy_engine.go). c.subs (the SubManager) is still held
-// on Controller (kept for construction compatibility / a possible future
-// read-only fetch-health view — see R3 in
-// docs/superpowers/plans/2026-07-15-up1-policy-engine.md) but no Controller
-// method reads it anymore: the policy engine drives the SAME SubManager
-// directly (Sync/UpdateAll — see PolicyEngine.CompileAndApply in
-// policy_engine.go and the subs field it holds independently), never
-// through this facade.
-
 // Reload rebuilds the rule sets from disk and atomically swaps them into the
 // live engine.
 func (c *Controller) Reload() error {
 	return c.reload()
-}
-
-// LookupResult is the outcome of a manual (control-plane) name lookup: the
-// same verdict/reason vocabulary as the query pipeline (see Verdict), plus
-// the IPs the lookup observed and which upstream group produced them (for
-// the default/arbitrated case only).
-type LookupResult struct {
-	Name     string   `json:"name"`
-	Verdict  string   `json:"verdict"`
-	Reason   string   `json:"reason"`
-	IPs      []string `json:"ips"`
-	Upstream string   `json:"upstream"`
-}
-
-// Lookup runs the same classification the query pipeline uses for name, for
-// operator/API introspection (e.g. "why would this domain resolve the way it
-// does").  It never touches the cache and always performs a fresh lookup.
-//
-//   - block/force-direct/blacklist: classifyName's terminal verdict is
-//     returned as-is; block and blacklist never call an upstream (IPs empty).
-//     force-direct does need real IPs, so it arbitrates (as resolve does) and
-//     reports them un-rewritten under reason "force-direct".
-//   - default case (classifyName returns the zero Verdict): resolve the name
-//     via Arbitrate (the same china/trust race resolve uses) and classify the
-//     resulting IPs against CN: any CN-member IP → direct/chnroute-cn (IPs =
-//     the resolved IPs, as the client would see them kept as-is); otherwise →
-//     proxy/chnroute-foreign (IPs = the real resolved IPs, which is what a
-//     live query would rewrite to GatewayIP — reported here unrewritten so an
-//     operator can see the actual upstream answer being classified).
-//
-// Lookup on a Controller constructed with a nil handler (e.g. a test
-// exercising only subscription/rule-list behavior) returns a zero-value
-// LookupResult.
-func (c *Controller) Lookup(ctx context.Context, name string) LookupResult {
-	if c.handler == nil {
-		return LookupResult{}
-	}
-	h := c.handler
-
-	decision := h.decideName(name)
-	verdict := decision.Verdict
-
-	// Load the rule snapshot once (atomic; never the racy public h.CN field) and
-	// thread cn through lookupArbitrate so a concurrent reload cannot race this
-	// read. classifyName above loads its own snapshot, mirroring resolve().
-	_, _, _, cn := h.ruleSnap()
-
-	switch decision.Action {
-	case actionBlock:
-		return LookupResult{Name: name, Verdict: verdict.Verdict, Reason: verdict.Reason}
-	case actionGateway:
-		return LookupResult{Name: name, Verdict: verdict.Verdict, Reason: verdict.Reason}
-	case actionDirect:
-		ips, upstream := h.lookupArbitrate(ctx, name, cn)
-		return LookupResult{Name: name, Verdict: verdict.Verdict, Reason: verdict.Reason, IPs: ips, Upstream: upstream}
-	}
-
-	// Default case: resolve via the engine and classify the IPs against CN.
-	ips, upstream := h.lookupArbitrate(ctx, name, cn)
-	if len(ips) == 0 {
-		return LookupResult{Name: name, Verdict: "", Reason: "", Upstream: upstream}
-	}
-
-	for _, ipStr := range ips {
-		if ip := net.ParseIP(ipStr); ip != nil && cn.Contains(ip) {
-			return LookupResult{Name: name, Verdict: "direct", Reason: "chnroute-cn", IPs: ips, Upstream: upstream}
-		}
-	}
-	return LookupResult{Name: name, Verdict: "proxy", Reason: "chnroute-foreign", IPs: ips, Upstream: upstream}
-}
-
-// lookupArbitrate builds a synthetic A query for name, runs it through the
-// same Arbitrate race resolve uses, and returns the resolved IPv4 addresses
-// (as dotted strings, in Answer order) plus which upstream group's answer was
-// used ("china" if the china reply's IPs were returned, "trust" otherwise —
-// mirroring Arbitrate's decision rule). Returns (nil, "") on any error/nil
-// reply/empty answer. cn is the chnroute snapshot the caller loaded (never the
-// mutable public h.CN field) so this cannot race a concurrent reload; the
-// upstream pair is loaded via the same atomic snapshot the query path uses
-// (exchangers), so a concurrent hot swap cannot race this either.
-func (h *Handler) lookupArbitrate(ctx context.Context, name string, cn *Chnroute) ([]string, string) {
-	fqdn := dns.Fqdn(name)
-	q := new(dns.Msg)
-	q.SetQuestion(fqdn, dns.TypeA)
-
-	china, trust := h.exchangers()
-	resp, upstream, err := arbitrateSrc(ctx, q, china, trust, cn, h.stats)
-	if err != nil || resp == nil {
-		return nil, ""
-	}
-
-	var ips []string
-	for _, rr := range resp.Answer {
-		if a, ok := rr.(*dns.A); ok {
-			ips = append(ips, a.A.String())
-		}
-	}
-	if len(ips) == 0 {
-		return nil, upstream
-	}
-	return ips, upstream
 }
 
 // Stats returns a snapshot of the engine's reason counters and current cache
@@ -414,7 +269,7 @@ func (c *Controller) Stats() Stats {
 		s.Total = c.stats.total.Load()
 		s.Block = c.stats.block.Load()
 		s.ForceDirect = c.stats.forceDirect.Load()
-		s.Blacklist = c.stats.blacklist.Load()
+		s.ForceProxy = c.stats.forceProxy.Load()
 		s.ChnrouteCN = c.stats.chnrouteCN.Load()
 		s.ChnrouteForeign = c.stats.chnrouteForeign.Load()
 		s.ChinaOK = c.stats.chinaOK.Load()
@@ -440,15 +295,6 @@ func avgMs(sumNanos, count uint64) float64 {
 	}
 	return float64(sumNanos) / float64(count) / 1e6
 }
-
-// NOTE (UP-1 Task D3): the manual-rule facade (manualRulePath/ListRules/
-// ListAllRules/AddRule/RemoveRule/readRuleLines/normalizeRuleEntry) was
-// REMOVED here — the /api/rules/{cat} HTTP surface it backed is gone,
-// absorbed by the unified policy-rule model (policy_rules.go's
-// PolicyRuleManager + policy_engine.go's writeManualFiles, which now OWNS
-// the manual "<category>[.<matchtype>].txt" files as compiled artifacts).
-// isValidRuleDomain is KEPT below — policy_rules.go's validateMatcher still
-// calls it directly for domain-shaped matcher validation.
 
 // isValidRuleDomain reports whether entry looks like a plausible FQDN: after
 // trimming whitespace, non-empty, no internal whitespace, contains at least
@@ -559,10 +405,8 @@ func (c *Controller) SetPolicyFallback(f Fallback) error {
 	return c.policyRules.SetFallback(f)
 }
 
-// ApplyPolicy compiles the current PolicyModel and applies it end-to-end
-// (manual rule files, subscriptions, the fallback switch — see
-// PolicyEngine.CompileAndApply). There is no mihomo side to this apply
-// anymore (2026-07-15 policy/mihomo decoupling). Returns
+// ApplyPolicy compiles the current PolicyModel, reconciles its subscriptions,
+// and publishes the live DNS snapshot. It never mutates mihomo. Returns
 // ErrPolicyRulesUnavailable when no PolicyEngine is wired (a PolicyRuleManager
 // alone is not enough — CompileAndApply is a PolicyEngine method).
 func (c *Controller) ApplyPolicy(ctx context.Context) error {

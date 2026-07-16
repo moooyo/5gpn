@@ -62,12 +62,11 @@ function initial(rule: PolicyRule | null | undefined): FormState {
   }
 }
 
-/** Add/edit dialog for one unified policy rule (`/api/policy/rules`, UP-3
- *  Task B1). The one gate that makes this form more than a plain CRUD sheet:
- *  matcher KIND drives whether the URL/format/interval subscription fields
+/** Add/edit dialog for one unified policy rule. The matcher kind controls
+ *  whether the URL/format/interval subscription fields
  *  show (only `kind === 'subscription'` fetches a remote list; the domain
- *  family kinds are a bare literal). INTENT (block/direct/proxy) carries no
- *  extra fields — UP-4 made the policy strictly binary: `proxy` means only
+ *  family kinds are a bare literal). Intent (block/direct/proxy) carries no
+ *  extra fields: `proxy` means only
  *  "steer to the gateway", and there is no selector to pick here; what
  *  happens to that traffic afterwards is the operator's mihomo config,
  *  edited elsewhere. Built on ds/Modal + ds/Select; the kind/intent pickers
@@ -107,8 +106,13 @@ export function PolicyRuleDialog({ open, onOpenChange, rule, onSaved }: PolicyRu
       setError(t('policyRules.dialog.errUrlInvalid'))
       return null
     }
-    const matcher: PolicyMatcher = isSub
-      ? { kind: form.kind, value, format: form.format, interval: form.interval.trim() || undefined }
+    const interval = form.interval.trim()
+    if (isSub && !interval) {
+      setError(t('policyRules.dialog.errIntervalRequired'))
+      return null
+    }
+    const matcher: PolicyMatcher = form.kind === 'subscription'
+      ? { kind: 'subscription', value, format: form.format, interval }
       : { kind: form.kind, value }
     return {
       matcher,
@@ -210,8 +214,7 @@ export function PolicyRuleDialog({ open, onOpenChange, rule, onSaved }: PolicyRu
           </>
         ) : null}
 
-        {/* intent — block/direct/proxy, a bare steering decision. UP-4:
-            proxy carries no selector; nothing further to show here. */}
+        {/* Intent is a bare DNS-steering decision. */}
         <Field label={t('policyRules.dialog.intentLabel')}>
           <div className="flex gap-1.5" role="radiogroup">
             {INTENTS.map((i) => (

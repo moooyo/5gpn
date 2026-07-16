@@ -15,11 +15,10 @@ import (
 	"time"
 )
 
-// This file holds the Phase-5 Task-3 OS-operation ops ported from tgbot.py:
-// service restart (→ hot reload for 5gpn-dns), journalctl logs, scoped cert
-// renewal, and the iOS profile QR. These are the only bot operations that shell
-// out (systemctl / journalctl / cert-renew.sh / qrencode are not part of the
-// control-plane API); everything else goes through the in-process Controller.
+// This file holds the bot operations that reach the host: service restart
+// (with hot reload for 5gpn-dns), journal logs, scoped certificate renewal, and
+// iOS profile QR generation. Everything else goes through the in-process
+// Controller.
 //
 // Injectability for tests: the shelling-out primitive is Bot.runFn (a nil field
 // falls back to the real run via Bot.run), and the three iOS-host source files
@@ -29,14 +28,7 @@ import (
 // iOS-host / identity facts come from the daemon's environment, which systemd
 // populates from the single config file /etc/5gpn/dns.env (EnvironmentFile). The
 // keys are read via package vars so tests can override them with t.Setenv.
-var (
-	gatewayIPEnv     = "DNS_GATEWAY_IP"
-	publicIPEnv      = "DNS_PUBLIC_IP"
-	domainEnv        = "DNS_DOMAIN"
-	baseDomainEnv    = "DNS_BASE_DOMAIN"
-	webDomainEnv     = "DNS_WEB_DOMAIN"
-	consoleDomainEnv = "DNS_CONSOLE_DOMAIN"
-)
+var baseDomainEnv = "DNS_BASE_DOMAIN"
 
 // run executes a fixed argv with a timeout, returning (ok, ansi-stripped
 // combined stdout+stderr). It NEVER uses a shell: argv is passed verbatim to
@@ -300,52 +292,7 @@ func (g *botActionGuard) Finish(action botPrivilegedAction) {
 	delete(g.inFlight, action)
 }
 
-// --------------------------------------------------------------------------- //
-// Restart (→ hot reload for 5gpn-dns; real restart for mihomo)
-// --------------------------------------------------------------------------- //
-
-// opRestart handles the restart:<svc> callbacks. The self-restart paradox: the
-// bot now runs INSIDE the 5gpn-dns process, so a `systemctl restart 5gpn-dns`
-// would kill the bot mid-command. Therefore 5gpn-dns is NOT restarted — it is
-// hot-reloaded in-process via ctrl.Reload() and labeled 热重载 (not 重启). Only
-// mihomo gets a real `systemctl restart` (mihomo migration: the bot no longer
-// manages xray). "all" does both. An unknown service is rejected without
-// shelling out or reloading.
-func (bt *Bot) opRestart(svc string) string {
-	return bt.opRestartResult(svc).HTML()
-}
-
-// opRestartResult performs the requested operation and exposes its real
-// success bit for final auditing. "all" remains accepted only for compatibility
-// with an already-open pre-upgrade menu; its wording states exactly what ran.
-func (bt *Bot) opRestartResult(svc string) botOperationResult {
-	started := time.Now()
-	switch svc {
-	case "all":
-		mihomo := bt.restartMihomoResult()
-		dns := bt.reload5gpnDNSResult()
-		return botOperationResult{
-			OK:          mihomo.OK && dns.OK,
-			HTMLSummary: "♻️ <b>已处理 Mihomo 重启与 DNS 规则重载</b>\n" + mihomo.HTML() + "\n" + dns.HTML(),
-			Duration:    time.Since(started),
-		}
-	case "mihomo":
-		return bt.restartMihomoResult()
-	case "5gpn-dns":
-		return bt.reload5gpnDNSResult()
-	default:
-		return botOperationResult{OK: false, HTMLSummary: "❌ 未知服务。", Duration: time.Since(started)}
-	}
-}
-
-// restartMihomo does a real `systemctl restart mihomo`, then reports the
-// resulting is-active state. Mirrors tgbot.py's op_restart for the data-plane
-// service (formerly sing-box, then Xray, now mihomo — see the mihomo
-// migration note in main.go/bot.go).
-func (bt *Bot) restartMihomo() string {
-	return bt.restartMihomoResult().HTML()
-}
-
+// restartMihomoResult restarts mihomo and verifies the resulting active state.
 func (bt *Bot) restartMihomoResult() botOperationResult {
 	started := time.Now()
 	restartOK, restartOut := bt.run([]string{"systemctl", "restart", "mihomo"}, 60*time.Second)
@@ -377,12 +324,6 @@ func (bt *Bot) restartMihomoResult() botOperationResult {
 		Detail:   strings.Join(detail, "\n\n"),
 		Duration: time.Since(started),
 	}
-}
-
-// reload5gpnDNS hot-reloads 5gpn-dns's rules in-process (ctrl.Reload()) instead
-// of restarting the host process — see opRestart's self-restart note.
-func (bt *Bot) reload5gpnDNS() string {
-	return bt.reload5gpnDNSResult().HTML()
 }
 
 func (bt *Bot) reload5gpnDNSResult() botOperationResult {
@@ -429,14 +370,10 @@ func normalizedServiceState(out string) string {
 // Logs (journalctl)
 // --------------------------------------------------------------------------- //
 
-// opLogs handles the logs:<svc> callbacks: it tails the last 50 lines of a
+// opLogsResult handles the logs:<svc> callbacks: it tails the last 50 lines of a
 // known service's journal and returns them <pre>-wrapped (the raw content IS the
 // requested result). Only the two known data-path services are allowed; any
 // other value is rejected without shelling out. Mirrors tgbot.py's op_logs.
-func (bt *Bot) opLogs(svc string) string {
-	return bt.opLogsResult(svc).HTML()
-}
-
 func (bt *Bot) opLogsResult(svc string) botOperationResult {
 	started := time.Now()
 	if !isKnownService(svc) {
@@ -492,7 +429,7 @@ func renewalCertName() (string, bool) {
 	return name, true
 }
 
-// opRenewCert runs the unified scoped renewal helper for DNS_BASE_DOMAIN and
+// opRenewCertResult runs the scoped renewal helper for DNS_BASE_DOMAIN and
 // classifies the result. Missing or invalid identity fails closed before any
 // subprocess is started, so the bot can never renew an unrelated lineage on a
 // shared host. The helper is launched via `systemd-run` — a transient unit
@@ -501,10 +438,6 @@ func renewalCertName() (string, bool) {
 // configured Cloudflare DNS-01 or HTTP-01 renewal workflow, while systemd-run
 // lets it update ACME state and deployed certificate material without
 // loosening the resolver's own unit.
-func (bt *Bot) opRenewCert() string {
-	return bt.opRenewCertResult().HTML()
-}
-
 func (bt *Bot) opRenewCertResult() botOperationResult {
 	started := time.Now()
 	certName, valid := renewalCertName()
@@ -550,20 +483,13 @@ func (bt *Bot) opRenewCertResult() botOperationResult {
 // iOS profile QR
 // --------------------------------------------------------------------------- //
 
-// iosHost picks the public console host for the iOS profile URL. WEB and the
-// derived console.<base> name are migration fallbacks for older dns.env files;
-// the legacy DoT identity remains the final fallback.
+// iosHost derives the public console host from the configured base domain.
 func iosHost() string {
-	if v := strings.TrimSpace(os.Getenv(consoleDomainEnv)); v != "" {
-		return v
+	base := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(os.Getenv(baseDomainEnv))), ".")
+	if !isValidDomain(base) {
+		return ""
 	}
-	if v := strings.TrimSpace(os.Getenv(webDomainEnv)); v != "" {
-		return v
-	}
-	if base := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(os.Getenv(baseDomainEnv))), "."); isValidDomain(base) {
-		return "console." + base
-	}
-	return strings.TrimSpace(os.Getenv(domainEnv))
+	return "console." + base
 }
 
 // iosProfileURL returns the safe, canonical HTTPS URL used by both the URL
@@ -576,23 +502,16 @@ func iosProfileURL() (string, bool) {
 	return "https://" + host + "/ios/ios-dot.mobileconfig", true
 }
 
-// opIOS now renders only the actionable URL. QR delivery is a separate native
+// opIOSResult renders only the actionable URL. QR delivery is a separate native
 // Telegram photo action (iosQRCodePNG), avoiding unreadable ANSI-art messages.
-func (bt *Bot) opIOS() string {
-	return bt.opIOSResult().HTML()
-}
-
 func (bt *Bot) opIOSResult() botOperationResult {
 	started := time.Now()
 	url, ok := iosProfileURL()
 	if !ok {
 		return botOperationResult{
-			OK: false,
-			HTMLSummary: fmt.Sprintf(
-				"❌ 未找到合法的控制台域名（%s / %s）。先完成网关域名配置。",
-				consoleDomainEnv, baseDomainEnv,
-			),
-			Duration: time.Since(started),
+			OK:          false,
+			HTMLSummary: fmt.Sprintf("❌ 未找到合法的控制台域名（由 %s 派生）。先完成网关域名配置。", baseDomainEnv),
+			Duration:    time.Since(started),
 		}
 	}
 	return botOperationResult{

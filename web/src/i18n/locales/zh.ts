@@ -4,7 +4,7 @@ const zh: typeof en = {
   common: { cancel: '取消',
     saving: '保存中…',
     save: '保存', add: '添加', edit: '编辑', delete: '删除',
-    running: '运行中', loading: '加载中…', backendPending: '待后端(SP-A)',
+    running: '运行中', loading: '加载中…',
     errorTitle: '出现错误', errorBody: '页面出现了预期之外的错误，重新加载通常可以解决。', reload: '重新加载',
     pagePrev: '上一页', pageNext: '下一页', pageOf: '第 {{page}} / {{count}} 页' },
   nav: {
@@ -38,13 +38,13 @@ const zh: typeof en = {
     consoleTag: '控制台',
     kernelDns: 'DNS 服务器',
     sub: {
-      overview: '实时监控 · QPS / 流量 / 连接',
+      overview: '实时监控 · QPS / 决策 / 上游健康',
       setupGuide: '将 iPhone、iPad 与 Android 设备接入 5gpn 加密 DNS',
       logs: '5gpn-dns 最近解析历史 · 决策与结果',
       resolveTest: '输入任意域名，模拟 5gpn-dns 的解析决策',
       policyRules: '统一意图规则 —— 一条匹配项 → DNS 引擎中的拦截/直连/代理',
       mihomo: '内核健康状态 + 实时日志 · 只读，深度操作请前往 zashboard',
-      mihomoConfig: '编辑完整的 mihomo 生效配置 · 强制要求六项基础设施',
+      mihomoConfig: '编辑完整的 mihomo 生效配置 · 强制要求七项基础设施',
       settings: '系统与服务配置',
     },
   },
@@ -124,8 +124,7 @@ const zh: typeof en = {
     tgbotSave: '保存并应用',
     tgbotSaved: '已应用 Telegram 机器人配置。',
     tgbotSaveFailed: '保存失败。',
-    // Task 4.3 — 设置 page card grid (DoT 服务 / 控制台 / Telegram Bot / 上游 DNS / ECS / about strip)
-    greenfieldTip: '暂由 CLI/SP-C 管理',
+    greenfieldTip: '请通过安装/管理 TUI 配置',
     dotService: 'DoT 服务',
     dotDomain: 'DoT 域名',
     cert: "Let's Encrypt 证书",
@@ -151,7 +150,6 @@ const zh: typeof en = {
     rateLimited: '请求过于频繁 — 请稍后再试。',
     blocked: '登录失败次数过多 — 当前地址已被封锁约 {{minutes}} 分钟。',
     requestFailed: '请求失败（{{status}}）。',
-    backendPending: '后端未就绪 (待 SP-A)',
   },
   auth: {
     title: '5GPN 控制台',
@@ -175,10 +173,7 @@ const zh: typeof en = {
     noVerdict: '无判定',
   },
   overview: {
-    // Task 5.2 — 仪表盘 page, trimmed in B3. LIVE-only: QPS 与决策分布，来自
-    // /api/stats。原「当前出口」卡片与流量预览卡片已移除（其后端接口已在
-    // SP-2 删除）——出口切换现由运维者自行编辑的 mihomo 配置承担（UP-4）。
-    intro: '下方 QPS 与决策分布均为实时数据，来自 /api/stats。',
+    intro: '下方 QPS 与决策分布均为实时数据，来自 /api/status。',
     live: '实时',
     paused: '已暂停',
     pause: '暂停',
@@ -189,12 +184,10 @@ const zh: typeof en = {
     decision: {
       block: '拦截',
       forceDirect: '强制直连',
-      blacklist: '强制代理',
+      forceProxy: '强制代理',
       chnrouteCn: '国内直连',
       chnrouteForeign: '境外代理',
     },
-    // "A档" 仪表盘图表 —— 同样全部为 /api/stats 的实时快照（在上面 QPS/决策
-    // 分布卡片基础上新增，无新增后端字段）。
     cacheHitRate: '缓存命中率',
     upstreamHealth: '上游健康与延迟',
     upstreamHealthOk: '成功',
@@ -223,7 +216,7 @@ const zh: typeof en = {
     label: {
       block: '拦截',
       forceDirect: '强制直连',
-      blacklist: '强制代理',
+      forceProxy: '强制代理',
       chnrouteCn: '国内直连',
       chnrouteForeign: '境外代理',
     },
@@ -233,15 +226,15 @@ const zh: typeof en = {
     // coarser `verdict` instead).
     steps: {
       block: ['命中 block 域名集', '5gpn-dns 返回 NXDOMAIN', '客户端不发起任何连接'],
-      forceDirect: ['命中 force-direct 白名单', '用可信解析器取真实 IP', '结果：直连，不经网关'],
-      blacklist: ['命中 blacklist 黑名单', '5gpn-dns 返回网关 IP', '连接被引导至代理出口'],
+      forceDirect: ['命中 direct 直连规则', '用可信解析器取真实 IP', '结果：直连，不经网关'],
+      forceProxy: ['命中 proxy 代理规则', '5gpn-dns 返回网关 IP', '连接被引导至代理出口'],
       chnrouteCn: [
-        '未命中黑白名单，进入 chnroute 仲裁',
+        '未命中策略规则，进入 chnroute 仲裁',
         '并发查询：国内 UDP ‖ 可信 DoT',
         '国内答案 IP ∈ chnroute → 采用，直连',
       ],
       chnrouteForeign: [
-        '未命中黑白名单，进入 chnroute 仲裁',
+        '未命中策略规则，进入 chnroute 仲裁',
         '并发查询：国内 UDP ‖ 可信 DoT',
         '答案 IP ∉ chnroute → 返回网关 IP，走代理',
       ],
@@ -267,7 +260,7 @@ const zh: typeof en = {
     colDuration: '耗时',
     decision: {
       forceDirect: '强制直连',
-      blacklist: '强制代理',
+      forceProxy: '强制代理',
       chnrouteCn: '国内直连',
       chnrouteForeign: '境外代理',
       direct: '直连',
@@ -275,13 +268,7 @@ const zh: typeof en = {
       block: '拦截',
     },
   },
-  // UP-3（B1-B4）—— 策略规则：基于 `/api/policy/rules` +
-  // `/api/policy/fallback` 的统一意图规则控制台。每条规则是一个匹配项
-  // （域名 / 域名后缀 / 域名关键词 / 订阅）→ 一种处理方式（拦截/直连/代理），
-  // 仅编译进 DNS 引擎 —— UP-4 将策略变为严格的二元模型：代理处理方式不再携带
-  // 出口选择器，网关流量之后的去向完全由运维者自行编辑的 mihomo 配置决定。
-  // 取代了原有的 DNS 规则（`rules.*`）与规则订阅（`subscriptions.*`）命名
-  // 空间，两者均已移除。
+  // 基于 `/api/policy/rules` 与 `/api/policy/fallback` 的统一 DNS 意图规则。
   policyRules: {
     applyHint: '编辑会立即保存——编译后的策略需点击"应用"才会重新加载。',
     newRule: '新增规则',
@@ -307,6 +294,7 @@ const zh: typeof en = {
       enabledLabel: '启用',
       errValueRequired: '请输入值。',
       errUrlInvalid: '请输入合法的 http(s) URL。',
+      errIntervalRequired: '请输入刷新间隔。',
       saveFailed: '保存失败。',
       createOk: '规则已添加',
       editOk: '规则已保存',
@@ -370,7 +358,7 @@ const zh: typeof en = {
     emptyHint: '等待 mihomo 内核输出日志…',
   },
   mihomoConfig: {
-    intro: '将 mihomo 的完整生效配置作为单一文档编辑 —— 已经没有由守护进程托管的保护区域。服务端强制要求下列六项基础设施，任何删除它们的编辑都会被拒绝。',
+    intro: '将 mihomo 的完整生效配置作为单一文档编辑。服务端强制要求下列七项基础设施，任何删除它们的编辑都会被拒绝。',
     loadFailed: '加载 mihomo 配置失败。',
     editorLabel: 'mihomo 配置（YAML）',
     controllerReachable: '控制器可达',
@@ -388,8 +376,9 @@ const zh: typeof en = {
     resetFailed: '恢复失败。',
     invariantsTitle: '必需的基础设施（缺失即拒绝）',
     invariants: {
-      controller: { name: '控制器', desc: 'external-controller 绑定到回环控制器（127.0.0.1:9090）。' },
-      sniproxy: { name: 'sniproxy 入站', desc: '一个监听 443 端口、指向 127.0.0.1:443 的 tunnel 入站。' },
+      controller: { name: 'TLS 控制器', desc: '关闭明文控制器，external-controller-tls 使用 127.0.0.1:9090 与固定 zash 证书路径。' },
+      secret: { name: '控制器密钥', desc: '控制器 bearer 密钥须与守护进程客户端和控制台代理保持一致。' },
+      gateway: { name: '网关入口', desc: '一个监听 443 端口、指向 127.0.0.1:443 的 gateway* tunnel 入站。' },
       dns: { name: '我们指定的 DNS', desc: 'dns 配置块的 nameserver 中包含出口代理 udp://127.0.0.1:5354。' },
       console: { name: 'console SNI 分流', desc: 'console 域名公开 DIRECT 到回环面板；SPA 资源与 iOS 描述文件下载公开，/api/* 仍需 bearer token。' },
       zash: { name: 'zash SNI 分流', desc: 'zash 域名映射到其回环面板，且有白名单限定的 DIRECT 规则与 REJECT-DROP 守卫。' },
