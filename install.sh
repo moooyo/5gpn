@@ -71,9 +71,10 @@ MIHOMO_VERSION="${MIHOMO_VERSION:-v1.19.28}"
 ZASH_VERSION="${ZASH_VERSION:-v3.15.0}"  # Zephyruso/zashboard prebuilt dist.zip
 # Legacy: SMARTDNS_DIR kept only for remove-on-upgrade logic below; not used by new install.
 SMARTDNS_DIR="/etc/smartdns"
-# Old sing-box paths — kept ONLY so migration can stop/disable/remove them (see install_mihomo + uninstall).
+# Old sing-box paths are used only for ownership-gated migration diagnostics.
 SINGBOX_BIN="/usr/local/bin/sing-box"
 SINGBOX_DIR="/usr/local/etc/sing-box"
+SINGBOX_UNIT="/etc/systemd/system/sing-box.service"
 # NOTE: the legacy xray binary (/usr/local/bin/xray) + config dir (/usr/local/etc/xray)
 # are NOT tracked as constants — mihomo replaced xray as the data plane. Their
 # literal paths appear ONLY in the upgrade-from-xray teardown (clean_previous_install
@@ -495,11 +496,30 @@ render_mihomo_listeners() {
 # files keep their inodes while the processes run, so the resolver stays up
 # through the whole install; start_services restarts into the fresh artifacts
 # at the end. Legacy units (python control plane, socket iOS responder,
-# sing-box/smartdns/xray data planes) ARE stopped — nothing should restart those,
-# including a box upgrading from a pre-mihomo xray install (xray.service would
-# otherwise keep holding :443/:80 and mihomo could never bind).
+# smartdns/xray data planes) ARE stopped; a sing-box unit is stopped only when
+# its unit file carries an explicit 5gpn fingerprint. This keeps unrelated
+# operator-managed sing-box installations intact while allowing a verified
+# legacy unit to release :443/:80 for mihomo.
 # The gum binary is NOT removed (the running installer's own TUI helpers exec
 # it); install_gum refreshes it in place when the GUM_VERSION pin moves.
+legacy_singbox_unit_owned() {
+    [[ -f "$SINGBOX_UNIT" ]] || return 1
+    grep -Eiq '^[[:space:]]*(Description=5gpn([[:space:]:_-]|$)|#[[:space:]]*(Managed|Installed) by 5gpn([[:space:]]|$))' \
+        "$SINGBOX_UNIT"
+}
+
+remove_legacy_singbox() {
+    if legacy_singbox_unit_owned; then
+        systemctl disable --now sing-box.service 2>/dev/null || true
+        rm -f -- "$SINGBOX_UNIT"
+        ok "Removed the fingerprinted legacy 5gpn sing-box unit; preserved shared binary and config paths."
+        return 0
+    fi
+    if [[ -e "$SINGBOX_BIN" || -e "$SINGBOX_DIR" || -e "$SINGBOX_UNIT" ]]; then
+        warn "Preserving sing-box artifacts because 5gpn ownership cannot be established."
+    fi
+}
+
 clean_previous_install() {
     info "Cleaning previous install artifacts (units + generated configs; /etc/5gpn kept)..."
 
@@ -517,20 +537,17 @@ clean_previous_install() {
     # e.g. the renew timer via install_renewal_automation).
     local unit
     for unit in 5gpn-api.service 5gpn-tgbot.service 5gpn-iosprofile.socket \
-                '5gpn-iosprofile@.service' xray.service sing-box.service smartdns.service \
+                '5gpn-iosprofile@.service' xray.service smartdns.service \
                 sniproxy.service 5gpn-certbot-renew.timer 5gpn-certbot-renew.service; do
         systemctl disable --now "$unit" 2>/dev/null || true
         rm -f "/etc/systemd/system/$unit"
     done
+    remove_legacy_singbox
     systemctl daemon-reload 2>/dev/null || true
-
-    # Stray binaries of removed components (current binaries are replaced by
-    # their installers, not pre-deleted — no broken window on download failure).
-    rm -f "$SINGBOX_BIN"
 
     # Generated runtime configs + tuning (all regenerated later this run). The
     # legacy xray config dir is removed by literal path (upgrade-from-xray).
-    rm -rf /usr/local/etc/xray "$SINGBOX_DIR"
+    rm -rf /usr/local/etc/xray
     rm -f /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh \
           /etc/letsencrypt/renewal-hooks/pre/10-5gpn-stop-xray.sh \
           /etc/letsencrypt/renewal-hooks/post/10-5gpn-start-xray.sh \
@@ -2516,8 +2533,8 @@ full_install() {
 
     install_files
     install_manage_cli
-    # (Legacy python units, sing-box, smartdns etc. were all removed by
-    # clean_previous_install above.)
+    # Legacy python/smartdns units and any fingerprinted 5gpn sing-box unit were
+    # removed by clean_previous_install above.
 
     install_mihomo
     install_web
@@ -2597,16 +2614,16 @@ uninstall() {
     [[ "${1:-}" == "--purge" ]] && purge=1
     warn "Uninstalling 5gpn: stopping services and reverting host changes."
 
-    # systemd units + our renew timer (+ legacy unit names, best-effort). Includes
-    # the removed sing-box data plane, the obsolete socket-activated iOS responder,
-    # and the legacy sniproxy unit so a box that once ran an older layout is fully
-    # cleaned.
-    for unit in 5gpn-dns.service mihomo.service xray.service sing-box.service 5gpn-certbot-renew.timer \
+    # systemd units + our renew timer (+ ownership-safe legacy unit names,
+    # best-effort). Includes the obsolete socket-activated iOS responder and the
+    # legacy sniproxy unit so a box that once ran an older layout is fully cleaned.
+    for unit in 5gpn-dns.service mihomo.service xray.service 5gpn-certbot-renew.timer \
                 5gpn-certbot-renew.service 5gpn-api.service 5gpn-tgbot.service \
                 5gpn-iosprofile.socket '5gpn-iosprofile@.service' sniproxy.service; do
         systemctl disable --now "$unit" 2>/dev/null || true
         rm -f "/etc/systemd/system/$unit"
     done
+    remove_legacy_singbox
     systemctl daemon-reload 2>/dev/null || true
 
     # letsencrypt hooks we installed (current + legacy nft-era names).
@@ -2634,8 +2651,8 @@ uninstall() {
     # Binaries + install tree. Also the gum binary install_gum fetched and the
     # quick-install.sh source checkout, so an uninstall leaves nothing of ours on
     # the box (both are best-effort — absent on a manual/dev install).
-    rm -f /usr/local/bin/5gpn-dns /usr/local/bin/mihomo /usr/local/bin/xray /usr/local/bin/sing-box /usr/local/bin/gum /usr/local/bin/5gpn
-    rm -rf /usr/local/etc/xray "$SINGBOX_DIR"
+    rm -f /usr/local/bin/5gpn-dns /usr/local/bin/mihomo /usr/local/bin/xray /usr/local/bin/gum /usr/local/bin/5gpn
+    rm -rf /usr/local/etc/xray
     # Remove an external zashboard path while its ownership marker is still
     # available. The default path is removed with BASE_DIR immediately after.
     if [[ "$DNS_ZASH_DIR" != "$BASE_DIR"/* ]]; then

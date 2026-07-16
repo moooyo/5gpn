@@ -117,6 +117,52 @@ else
     pass "system root is rejected as DNS_ZASH_DIR"
 fi
 
+# Generic sing-box paths and unit names do not prove 5gpn ownership.
+SINGBOX_BIN="$TMP/sing-box/bin/sing-box"
+SINGBOX_DIR="$TMP/sing-box/config"
+SINGBOX_UNIT="$TMP/systemd/sing-box.service"
+SINGBOX_SYSTEMCTL_LOG="$TMP/sing-box-systemctl.log"
+mkdir -p "$(dirname "$SINGBOX_BIN")" "$SINGBOX_DIR" "$(dirname "$SINGBOX_UNIT")"
+touch "$SINGBOX_BIN" "$SINGBOX_DIR/config.json"
+cat > "$SINGBOX_UNIT" <<'EOF'
+[Unit]
+Description=Operator-managed sing-box
+EOF
+systemctl() {
+    printf '%s\n' "$*" >> "$SINGBOX_SYSTEMCTL_LOG"
+    return 0
+}
+if ! declare -F remove_legacy_singbox >/dev/null; then
+    fail "sing-box cleanup has no ownership-gated helper"
+else
+    remove_legacy_singbox >/dev/null
+    [[ -e "$SINGBOX_BIN" && -e "$SINGBOX_DIR/config.json" && -e "$SINGBOX_UNIT" \
+       && ! -s "$SINGBOX_SYSTEMCTL_LOG" ]] \
+        && pass "unowned sing-box installation is preserved" \
+        || fail "unowned sing-box installation was modified"
+
+    cat > "$SINGBOX_UNIT" <<'EOF'
+[Unit]
+Description=5gpn legacy sing-box data plane
+EOF
+    : > "$SINGBOX_SYSTEMCTL_LOG"
+    remove_legacy_singbox >/dev/null
+    [[ ! -e "$SINGBOX_UNIT" && -e "$SINGBOX_BIN" && -e "$SINGBOX_DIR/config.json" ]] \
+        && grep -qx 'disable --now sing-box.service' "$SINGBOX_SYSTEMCTL_LOG" \
+        && pass "fingerprinted legacy 5gpn sing-box unit is removed precisely" \
+        || fail "fingerprinted legacy 5gpn sing-box unit cleanup was not precise"
+fi
+for fn_name in clean_previous_install uninstall; do
+    fn_body="$(sed -n "/^${fn_name}()/,/^}/p" "$INSTALL")"
+    if ! grep -Fq 'remove_legacy_singbox' <<<"$fn_body"; then
+        fail "$fn_name does not route sing-box cleanup through the ownership gate"
+    elif grep -Eq '^[[:space:]]*[^#].*(sing-box\.service|/usr/local/bin/sing-box|SINGBOX_(BIN|DIR))' <<<"$fn_body"; then
+        fail "$fn_name still mutates generic sing-box artifacts directly"
+    else
+        pass "$fn_name gates sing-box cleanup by ownership"
+    fi
+done
+
 # A generic host filter table must survive; only the legacy multi-fingerprint
 # table is eligible for precise deletion.
 NFT_LOG="$TMP/nft.log"; export NFT_LOG
