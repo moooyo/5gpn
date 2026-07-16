@@ -136,8 +136,9 @@ func TestMihomoProxy_PassThroughAddsNoneWhenAbsent(t *testing.T) {
 	}
 }
 
-// TestMihomoProxy_WebSocketUpgradePassesThrough proves the proxy forwards a
-// WebSocket upgrade handshake rather than swallowing it.
+// TestMihomoProxy_WebSocketUpgradePassesThrough locks in the stdlib behavior we
+// rely on: ReverseProxy forwards WebSocket upgrades correctly as long as the
+// shared controller transport stays on HTTP/1.1.
 func TestMihomoProxy_WebSocketUpgradePassesThrough(t *testing.T) {
 	var gotConn, gotUpgrade, gotAuth, gotRESTProto, gotWSProto string
 

@@ -19,6 +19,8 @@ grep -Fq 'ExecStart=/usr/local/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /et
 grep -Fq 'RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX' "$MIHOMO_SVC" || fail "mihomo.service: address families must be AF_INET AF_INET6 AF_NETLINK AF_UNIX (AF_NETLINK required for QUIC/UDP forward)"
 # mihomo writes provider caches under its own dir, unlike xray's read-only config mount.
 grep -Fq 'ReadWritePaths=/etc/5gpn/mihomo' "$MIHOMO_SVC" || fail "mihomo.service must have ReadWritePaths=/etc/5gpn/mihomo (provider caches)"
+grep -Fq 'Environment=SAFE_PATHS=/etc/5gpn/cert/zash' "$MIHOMO_SVC" \
+    || fail "mihomo.service must scope SAFE_PATHS to /etc/5gpn/cert/zash for the shared controller certificate"
 
 # Phase 5: the Telegram bot + iOS profile responder are in-process goroutines of
 # 5gpn-dns (the separate python tgbot/iosprofile heredoc units are gone), so the

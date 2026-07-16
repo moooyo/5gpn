@@ -17,6 +17,7 @@ nocheck install.sh 'install_xray\(\)' 'install_xray removed'
 check etc/systemd/mihomo.service 'ExecStart=/usr/local/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' 'mihomo ExecStart'
 check etc/systemd/mihomo.service 'RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX' 'mihomo AF set incl AF_NETLINK (required for QUIC/UDP DIRECT dial)'
 check etc/systemd/mihomo.service 'ReadWritePaths=/etc/5gpn/mihomo' 'mihomo writes provider caches'
+check etc/systemd/mihomo.service 'Environment=SAFE_PATHS=/etc/5gpn/cert/zash' 'mihomo SAFE_PATHS scoped to the shared zash controller cert'
 check install.sh 'mihomo\.service' 'install_units installs mihomo.service'
 
 # Task 3: mihomo config template shape
@@ -24,8 +25,8 @@ T=etc/mihomo/config.yaml.tmpl
 check "$T" '__MIHOMO_LISTENERS__'                      'dynamic local-listener placeholder'
 check "$T" 'external-controller: ""'                   'plaintext controller disabled in seed'
 check "$T" 'external-controller-tls: 127\.0\.0\.1:9090' 'TLS controller loopback listener'
-check "$T" '/etc/5gpn/cert/zash/fullchain\.pem'       'controller TLS certificate path pinned'
-check "$T" '/etc/5gpn/cert/zash/privkey\.pem'         'controller TLS private-key path pinned'
+check "$T" 'certificate: /etc/5gpn/cert/zash/fullchain\.pem' 'controller TLS certificate key pinned'
+check "$T" 'private-key: /etc/5gpn/cert/zash/privkey\.pem'   'controller TLS private-key key pinned'
 nocheck install.sh 'http://127\.0\.0\.1:9090'           'installer no longer calls the plaintext mihomo controller'
 check install.sh 'render_mihomo_listeners\(\)'          'dynamic listener renderer'
 check install.sh 'type: tunnel.*port: 443.*network: \[tcp, udp\]' ':443 tcp+udp listener renderer'

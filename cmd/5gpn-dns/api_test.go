@@ -79,6 +79,45 @@ func newTestControlServer(t *testing.T, token string) *ControlServer {
 	return cs
 }
 
+func TestNewControlServer_MihomoTLSUnavailableFailsClosed(t *testing.T) {
+	certPath, keyPath := generateSelfSignedCert(t, t.TempDir())
+	cs, err := NewControlServer(Config{
+		APIToken:         "tok",
+		CertFile:         certPath,
+		KeyFile:          keyPath,
+		MihomoController: "127.0.0.1:9090",
+	}, &Controller{})
+	if err != nil {
+		t.Fatalf("NewControlServer returned an unexpected constructor error: %v", err)
+	}
+
+	rec := doAPI(cs, http.MethodGet, "/api/mihomo/health", nil, "tok", true)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("mihomo health status=%d body=%s, want 503 when controller TLS is unavailable", rec.Code, rec.Body.String())
+	}
+	if rec := doAPI(cs, http.MethodGet, "/api/status", nil, "tok", true); rec.Code != http.StatusOK {
+		t.Fatalf("status endpoint should stay available: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWireMihomoConfigManagement_ClientFailureLeavesConfigAPIUnavailable(t *testing.T) {
+	cs, token := newAPITestServer(t)
+	certPath, _ := generateSelfSignedCert(t, t.TempDir())
+
+	wireMihomoConfigManagement(cs, Config{
+		MihomoController: "127.0.0.1:9090",
+		ZashCertFile:     certPath,
+	}, func(string, ...any) {})
+
+	rec := doAPI(cs, http.MethodGet, "/api/mihomo/config", nil, token, true)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("config endpoint status=%d body=%s, want 503 when mihomo client wiring fails closed", rec.Code, rec.Body.String())
+	}
+	if rec := doAPI(cs, http.MethodGet, "/api/status", nil, token, true); rec.Code != http.StatusOK {
+		t.Fatalf("status endpoint should stay available: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestAuthMiddleware_EmptyTokenFailsClosed locks the F2 guard: even if a
 // ControlServer were constructed with an empty token (NewControlServer refuses
 // to, so this builds the struct directly), a request must be REJECTED and never

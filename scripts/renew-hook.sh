@@ -4,8 +4,7 @@
 # (/etc/5gpn/cert/dot, /etc/5gpn/cert/web, /etc/5gpn/cert/zash). The zash role
 # is shared by the zashboard panel and the mihomo loopback external-controller.
 # 5gpn-dns serves the TLS listeners and reloads its own cert cache via SIGHUP;
-# mihomo reloads the controller certificate files automatically, so the renewed
-# zash copy becomes active without a mihomo restart or reload.
+# The pinned mihomo v1.19.28 build guarantees that mihomo reloads the controller certificate files automatically, so the renewed zash copy becomes active without a mihomo restart or reload.
 #
 # ONE wildcard lineage now covers ALL THREE service subdomains (console/zash/
 # dot); the lineage being renewed is matched against dns.env's DNS_BASE_DOMAIN

@@ -27,8 +27,12 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
-# mihomo writes provider caches + reads whitelist.txt/config.yaml under its dir;
-# root already reads the zash controller cert under ProtectSystem=strict.
+# mihomo v1.19.28 safe-path checks only trust files under -d plus SAFE_PATHS.
+# The shared zash controller cert lives outside /etc/5gpn/mihomo, so allow only
+# that read-only cert dir while keeping ProtectSystem=strict and writes scoped to
+# /etc/5gpn/mihomo.
+Environment=SAFE_PATHS=/etc/5gpn/cert/zash
+# mihomo writes provider caches + reads whitelist.txt/config.yaml under its dir.
 ReadWritePaths=/etc/5gpn/mihomo
 
 [Install]

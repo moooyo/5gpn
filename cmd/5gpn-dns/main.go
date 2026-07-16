@@ -371,24 +371,7 @@ func main() {
 		log.Fatalf("control server: %v", err)
 	}
 	if controlSrv != nil {
-		mihomoClient, err := NewMihomoClient(
-			cfg.MihomoController,
-			cfg.MihomoSecret,
-			cfg.ZashDomain,
-			cfg.ZashCertFile,
-		)
-		if err != nil {
-			log.Fatalf("mihomo client: %v", err)
-		}
-		// Mihomo raw-config editor (GET/PUT /api/mihomo/config + /default +
-		// /reset — design §4.2). Always wired: MihomoConfigFile/Controller
-		// carry sane defaults even on an otherwise-unconfigured box.
-		controlSrv.SetMihomoConfig(
-			NewMihomoConfigStore(cfg.MihomoConfigFile),
-			InfraParamsFromConfig(cfg),
-			realMihomoTester{},
-			mihomoClient,
-		)
+		wireMihomoConfigManagement(controlSrv, cfg, log.Printf)
 		if err := controlSrv.Start(); err != nil {
 			log.Fatalf("control server start: %v", err)
 		}
@@ -484,6 +467,38 @@ func main() {
 	}
 	persistWG.Wait() // ensure the stats persister's final save completes before exit
 	log.Println("shutdown complete")
+}
+
+// wireMihomoConfigManagement enables the raw mihomo config editor only when the
+// daemon can build its own verified-TLS controller client. A broken/old
+// controller TLS setup must fail closed for the mihomo integration while the
+// DNS resolver and the rest of the control plane keep running.
+func wireMihomoConfigManagement(controlSrv *ControlServer, cfg Config, logf func(string, ...any)) {
+	if controlSrv == nil {
+		return
+	}
+	mihomoClient, err := NewMihomoClient(
+		cfg.MihomoController,
+		cfg.MihomoSecret,
+		cfg.ZashDomain,
+		cfg.ZashCertFile,
+	)
+	if err != nil {
+		if logf != nil {
+			logf("warning: mihomo config management unavailable: %v -- DNS continues and /api/mihomo/config stays fail-closed until the controller TLS inputs are fixed", err)
+		}
+		return
+	}
+	// Mihomo raw-config editor (GET/PUT /api/mihomo/config + /default +
+	// /reset — design §4.2). Wired only when the verified controller client is
+	// available; otherwise the endpoints stay unavailable rather than
+	// downgrading or partially working against plaintext HTTP.
+	controlSrv.SetMihomoConfig(
+		NewMihomoConfigStore(cfg.MihomoConfigFile),
+		InfraParamsFromConfig(cfg),
+		realMihomoTester{},
+		mihomoClient,
+	)
 }
 
 // mihomoResetCLI implements --mihomo-reset: write the seed default mihomo

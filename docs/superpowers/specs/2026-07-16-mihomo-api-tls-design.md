@@ -42,6 +42,12 @@ The zash role certificate is the existing wildcard certificate deployed by the
 installer to `/etc/5gpn/cert/zash`. It covers `DNS_ZASH_DOMAIN` and is already
 maintained by the certificate deployment and renewal flow.
 
+Mihomo v1.19.28 safe-path enforcement also requires
+`SAFE_PATHS=/etc/5gpn/cert/zash` in the systemd unit because the shared zash
+certificate directory is outside mihomo's `-d /etc/5gpn/mihomo` home. This is a
+read-only allowlist entry only; `ProtectSystem=strict` and
+`ReadWritePaths=/etc/5gpn/mihomo` stay unchanged.
+
 ## TLS Client Architecture
 
 The daemon will use one shared TLS client configuration for both controller
@@ -86,6 +92,10 @@ controller certificate rather than as a component that terminates no TLS.
 - Missing or unreadable zash trust material causes the daemon controller client
   to fail closed rather than downgrade to HTTP.
 - A certificate with the wrong DNS identity is rejected.
+- If the verified Mihomo TLS transport or daemon client cannot be constructed
+  (missing `DNS_ZASH_DOMAIN`, unreadable cert, or invalid/non-loopback
+  controller address), the Mihomo integration stays unavailable/503 while DNS
+  startup and the rest of the control plane continue.
 - Raw configuration updates that enable the plaintext controller, omit the TLS
   controller, or change the required zash certificate paths are rejected before
   validation or publication.

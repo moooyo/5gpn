@@ -123,11 +123,12 @@ type Config struct {
 
 	// Mihomo migration: the operator's base wildcard domain (env
 	// DNS_BASE_DOMAIN) and the console/zash panel domains derived from it (env
-	// DNS_CONSOLE_DOMAIN / DNS_ZASH_DOMAIN) -- install.sh persists all three so
-	// the daemon can read back what it's actually being served as without
-	// re-deriving the "zash.<console>" convention itself. Empty means the
-	// value isn't known yet (e.g. a box not yet migrated to the base-domain
-	// scheme); nothing in this task consumes them beyond storing them.
+	// DNS_CONSOLE_DOMAIN / DNS_ZASH_DOMAIN). install.sh persists all three, but
+	// older configs may only have DNS_BASE_DOMAIN; LoadConfig therefore derives
+	// zash.<base> and profile.<base> when those two explicit vars are empty.
+	// Empty still means the value isn't known yet (e.g. a box not yet migrated to
+	// the base-domain scheme); nothing in this task consumes ConsoleDomain beyond
+	// storing it.
 	BaseDomain    string
 	ConsoleDomain string
 	ZashDomain    string
@@ -247,7 +248,7 @@ type Config struct {
 //	DNS_MIHOMO_CONTROLLER 127.0.0.1:9090 (mihomo's loopback external-controller API)
 //	DNS_MIHOMO_SECRET   (none — mihomo controller bearer secret)
 //	DNS_WHITELIST_FILE  /etc/5gpn/mihomo/whitelist.txt (panel source-IP allowlist)
-//	DNS_BASE_DOMAIN / DNS_CONSOLE_DOMAIN / DNS_ZASH_DOMAIN / DNS_PROFILE_DOMAIN (none — mihomo migration domains)
+//	DNS_BASE_DOMAIN / DNS_CONSOLE_DOMAIN / DNS_ZASH_DOMAIN / DNS_PROFILE_DOMAIN (none — older configs derive zash/profile from base when empty)
 //	DNS_MIHOMO_CONFIG   /etc/5gpn/mihomo/config.yaml (operator-owned mihomo config; console raw editor)
 //	DNS_POLICY_RULES    /etc/5gpn/policy.json (unified policy-rule model; plain JSON, public subscription URLs; empty disables)
 //	DNS_ZASH_DIR        /opt/5gpn/zash (unzipped zashboard dist, served by the zash panel)
@@ -289,8 +290,12 @@ func LoadConfig() (Config, error) {
 		ZashCertFile:      os.Getenv("DNS_ZASH_CERT"),
 		ZashKeyFile:       os.Getenv("DNS_ZASH_KEY"),
 	}
-	if cfg.ProfileDomain == "" && cfg.BaseDomain != "" {
-		cfg.ProfileDomain = "profile." + strings.TrimSuffix(cfg.BaseDomain, ".")
+	trimmedBaseDomain := strings.TrimSuffix(cfg.BaseDomain, ".")
+	if cfg.ZashDomain == "" && trimmedBaseDomain != "" {
+		cfg.ZashDomain = "zash." + trimmedBaseDomain
+	}
+	if cfg.ProfileDomain == "" && trimmedBaseDomain != "" {
+		cfg.ProfileDomain = "profile." + trimmedBaseDomain
 	}
 	// Web-console cert falls back to the DoT cert so a single-cert deployment
 	// (CERT_MODE=debug, or a dev box) still serves loopback :443.

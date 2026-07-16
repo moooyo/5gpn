@@ -19,6 +19,8 @@ import (
 	"time"
 )
 
+const mihomoControllerUnavailableMsg = "mihomo controller unavailable"
+
 // version identifies the running build for GET /api/status. Release builds stamp
 // it via -ldflags "-X main.version=..." (see .github/workflows/release.yml); the
 // literal "dev" means a local or CI-untagged build, not missing wiring.
@@ -149,6 +151,7 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 		limiter:      newRateLimiter(cfg.APIRate, cfg.APIBurst),
 		zashDomain:   cfg.ZashDomain,
 		mihomoSecret: cfg.MihomoSecret,
+		mihomoProxy:  unavailableMihomoProxy(),
 	}
 
 	webUI, err := newWebUIHandler(cfg.WebDir)
@@ -160,16 +163,12 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 	if cfg.MihomoController != "" {
 		transport, transportErr := newMihomoTransport(cfg.MihomoController, cfg.ZashDomain, zashCert)
 		if transportErr != nil {
-			return nil, fmt.Errorf("control server: %w", transportErr)
+			log.Printf("warning: control server: mihomo controller TLS unavailable: %v -- /api/mihomo/health and /proxy/* fail closed until DNS_ZASH_DOMAIN, controller cert, and loopback controller settings are valid", transportErr)
+		} else {
+			mihomoTransport = transport
+			s.mihomoProxy = newMihomoProxy(cfg.ZashDomain, cfg.MihomoSecret, "/proxy", true, mihomoTransport)
 		}
-		mihomoTransport = transport
 	}
-
-	// Secret-injecting console proxy. It is NOT exposed as a raw subtree: the
-	// authenticated /api/mihomo/health handler uses it internally for /version,
-	// while the only public proxy route is the single-use-ticket-gated /logs
-	// WebSocket. The zash panel below keeps its separate pass-through model.
-	s.mihomoProxy = newMihomoProxy(cfg.ZashDomain, cfg.MihomoSecret, "/proxy", true, mihomoTransport)
 
 	ios := http.StripPrefix("/ios", iosHandler(cfg.WWWDir))
 	mux := http.NewServeMux()
@@ -216,7 +215,10 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 		// Pass-through proxy (inject=false): forwards the browser's own
 		// Authorization unchanged instead of injecting the secret — see the
 		// design §5.2 comment on consoleProxy above.
-		zashProxy := newMihomoProxy(cfg.ZashDomain, cfg.MihomoSecret, "/proxy", false, mihomoTransport)
+		zashProxy := unavailableMihomoProxy()
+		if mihomoTransport != nil {
+			zashProxy = newMihomoProxy(cfg.ZashDomain, cfg.MihomoSecret, "/proxy", false, mihomoTransport)
+		}
 
 		zmux := http.NewServeMux()
 		zmux.Handle("/proxy/", zashProxy)
@@ -226,6 +228,12 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 	}
 
 	return s, nil
+}
+
+func unavailableMihomoProxy() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeErr(w, http.StatusServiceUnavailable, mihomoControllerUnavailableMsg)
+	})
 }
 
 // canonicalHTTPHost normalises a TLS SNI or HTTP authority for exact routing.
@@ -582,10 +590,6 @@ const mihomoHealthTimeout = 2 * time.Second
 // daemon-held controller credential. This handler itself sits behind the
 // console bearer middleware; callers cannot select another controller path.
 func (s *ControlServer) handleMihomoHealth(w http.ResponseWriter, r *http.Request) {
-	if s.mihomoProxy == nil {
-		writeErr(w, http.StatusServiceUnavailable, "mihomo monitoring unavailable")
-		return
-	}
 	// The controller is loopback, but a wedged process can still accept a
 	// connection without answering. Bound the internal probe so the shared
 	// StatusContext poll cannot hang forever and stop all later health updates.

@@ -2000,7 +2000,9 @@ DNS_LISTEN_DEBUG=127.0.0.1:5353
 #   dot/  serves DoT :853 (also signs the iOS profile)
 #   web/  serves the web console (loopback :443, behind the mihomo SNI split)
 #   zash/ serves the zashboard panel
-# All hot-reload on file-mtime change; renew-hook.sh redeploys on renewal.
+# All hot-reload on file-mtime change; pinned mihomo v1.19.28 guarantees that
+# mihomo reloads the controller certificate files automatically, and
+# renew-hook.sh redeploys on renewal.
 DNS_CERT=${DOT_CERT_DIR}/fullchain.pem
 DNS_KEY=${DOT_CERT_DIR}/privkey.pem
 DNS_WEB_CERT=${WEB_CERT_DIR}/fullchain.pem

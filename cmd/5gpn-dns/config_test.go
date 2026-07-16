@@ -243,6 +243,35 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_DerivesZashDomainFromBaseDomain(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_LISTEN_DOT", "")
+	t.Setenv("DNS_BASE_DOMAIN", "example.com.")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.ZashDomain != "zash.example.com" {
+		t.Fatalf("ZashDomain = %q, want zash.example.com", cfg.ZashDomain)
+	}
+}
+
+func TestLoadConfig_PreservesExplicitZashDomainOverride(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_LISTEN_DOT", "")
+	t.Setenv("DNS_BASE_DOMAIN", "example.com")
+	t.Setenv("DNS_ZASH_DOMAIN", "custom-zash.example.net")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	}
+	if cfg.ZashDomain != "custom-zash.example.net" {
+		t.Fatalf("ZashDomain = %q, want explicit override preserved", cfg.ZashDomain)
+	}
+}
+
 // TestLoadConfig_APITokenEmptyByDefault confirms DNS_API_TOKEN has no default:
 // when unset the control plane is left disabled (empty token), distinct from
 // the listener defaults which always resolve to a non-empty address.

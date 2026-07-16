@@ -147,6 +147,9 @@ printf '%s' "$mc_fn" | grep -Fq 'https://' \
     || fail "mihomo_controller_curl does not use HTTPS"
 printf '%s' "$mc_fn" | grep -Eq -- '(^|[[:space:]])(-k|--insecure)([[:space:]]|$)' \
     && fail "mihomo_controller_curl must not disable TLS verification"
+pmr_fn="$(sed -n '/^probe_mihomo_ready()/,/^}/p' "$INSTALL")"
+printf '%s' "$pmr_fn" | grep -Fq 'mihomo_controller_curl "/version"' \
+    || fail "probe_mihomo_ready must call mihomo_controller_curl for the TLS controller probe"
 # manage_menu must expose add/remove allowlist entries as menu ops.
 mm_fn="$(sed -n '/^manage_menu()/,/^}/p' "$INSTALL")"
 printf '%s' "$mm_fn" | grep -Fq 'add_allow_ip' \

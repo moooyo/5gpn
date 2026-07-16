@@ -388,6 +388,9 @@ const (
 
 func parseYAMLScalar(raw string) (string, bool) {
 	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
 	switch {
 	case len(raw) >= 2 && raw[0] == '\'' && raw[len(raw)-1] == '\'':
 		return strings.ReplaceAll(raw[1:len(raw)-1], "''", "'"), true

@@ -25,6 +25,8 @@ sudo cp -a /etc/5gpn/mihomo/config.yaml /tmp/mihomo-config.before
 
 - [ ] `systemctl is-active 5gpn-dns mihomo` reports both active.
 - [ ] `journalctl -u 5gpn-dns -b` contains no bind/config fatal error.
+- [ ] `journalctl -u mihomo -b` contains no `External controller tls listen error`
+  or safe-path rejection after startup.
 - [ ] `ss -lntup` shows:
   - `:853/tcp` owned by `5gpn-dns`;
   - `127.0.0.1:5353/udp` and `127.0.0.1:5354/tcp+udp`;
@@ -121,8 +123,8 @@ curl --resolve "$PROFILE:443:127.0.0.1" -fsSI \
 ## 6. Mihomo controller boundaries
 
 - [ ] `DNS_MIHOMO_CONTROLLER` completes a TLS handshake for `DNS_ZASH_DOMAIN`
-  with the zash role certificate; plaintext HTTP or a mismatched SNI fails
-  closed.
+  with the zash role certificate and no earlier safe-path rejection in
+  `journalctl -u mihomo -b`; plaintext HTTP or a mismatched SNI fails closed.
 - [ ] zashboard REST and WebSocket operations succeed through `/proxy/` while
   the 5gpn-to-mihomo hop is HTTPS.
 - [ ] `GET /api/mihomo/health` succeeds only with the console bearer.

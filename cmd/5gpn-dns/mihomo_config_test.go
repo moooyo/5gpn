@@ -112,6 +112,20 @@ func TestMihomoInvariants_MissingElement(t *testing.T) {
 			wantName: "controller",
 		},
 		{
+			name: "plaintext controller bare empty scalar rejected",
+			mutate: func(cfg string) string {
+				return strings.Replace(cfg, `external-controller: ""`, "external-controller:", 1)
+			},
+			wantName: "controller",
+		},
+		{
+			name: "plaintext controller continuation scalar rejected",
+			mutate: func(cfg string) string {
+				return strings.Replace(cfg, "external-controller: \"\"\n", "external-controller:\n  127.0.0.1:9091\n", 1)
+			},
+			wantName: "controller",
+		},
+		{
 			name: "TLS controller removed",
 			mutate: func(cfg string) string {
 				return strings.Replace(cfg, "external-controller-tls: 127.0.0.1:9090\n", "", 1)
