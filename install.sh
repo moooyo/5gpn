@@ -1595,12 +1595,11 @@ install_cert() {
         deploy_cert_roles "$base" "$DOT_CERT_DIR"
         return 0
     else
-        # Neither reuse path applies — an actual certbot issuance is required,
-        # and THIS is the only branch that needs the Cloudflare API token.
-        install -d -m 0700 "$ACME_DIR"
-        [ -s "${ACME_DIR}/cloudflare.ini" ] \
-            || { err "missing ${ACME_DIR}/cloudflare.ini — set it via '5gpn --set-cf-token' (or the manage menu), or create it manually: install -d -m 0700 ${ACME_DIR} && echo 'dns_cloudflare_api_token = <token>' > ${ACME_DIR}/cloudflare.ini && chmod 600 ${ACME_DIR}/cloudflare.ini"; return 1; }
-        chmod 600 "${ACME_DIR}/cloudflare.ini"
+        # Neither reuse path applies — actual certbot issuance is required.
+        # ensure_cf_token is the only path that writes the credentials file; it
+        # is called here — not on the reuse paths above — so a still-valid cert
+        # never prompts for the token.
+        ensure_cf_token || return 1
 
         info "Issuing Let's Encrypt WILDCARD cert for *.${base} (cloudflare DNS-01)..."
         certbot certonly --dns-cloudflare --dns-cloudflare-credentials "${ACME_DIR}/cloudflare.ini" \
@@ -1724,6 +1723,59 @@ EOF
     ok "Installed 5gpn-certbot-renew.timer (daily, Persistent, unattended DNS-01 renewal)."
 }
 
+# has_valid_cf_credential returns 0 (true) when ${ACME_DIR}/cloudflare.ini
+# exists and contains a non-empty dns_cloudflare_api_token value.
+# Used by ensure_cf_token to decide whether to prompt or reuse.
+has_valid_cf_credential() {
+    local f="${ACME_DIR}/cloudflare.ini"
+    [[ -s "$f" ]] || return 1
+    grep -qE '^dns_cloudflare_api_token[[:space:]]*=[[:space:]]*[^[:space:]]' "$f"
+}
+
+# ensure_cf_token guarantees a valid Cloudflare API token exists in
+# ${ACME_DIR}/cloudflare.ini before certbot runs. Called ONLY in
+# install_cert's actual issuance branch — cert-reuse paths never call it,
+# so a still-valid cert never prompts. Precedence:
+#   1. Valid saved credential (has_valid_cf_credential) — reuse, no prompt.
+#   2. CF_API_TOKEN env var      — headless installs (CI / cloud-init);
+#      copied to the credentials file, NOT written to dns.env or logs.
+#   3. CLOUDFLARE_API_TOKEN      — alternate headless env var; same semantics.
+#   4. Interactive ask_secret    — TTY only, guarded with || true under set -e.
+#   5. Explicit error            — non-interactive with no token source.
+# CR and LF are rejected before writing (no multi-line token injection).
+# The credentials dir is created as 0700; the file is written atomically and
+# chmod'd to 0600.
+ensure_cf_token() {
+    install -d -m 0700 "$ACME_DIR"
+    # 1) Valid saved credential — reuse without prompting.
+    if has_valid_cf_credential; then
+        chmod 0600 "${ACME_DIR}/cloudflare.ini"
+        info "Reusing saved Cloudflare API token (${ACME_DIR}/cloudflare.ini)."
+        return 0
+    fi
+    # 2 & 3) Headless env var inputs (CI, cloud-init, automated re-issue).
+    local tok="${CF_API_TOKEN:-${CLOUDFLARE_API_TOKEN:-}}"
+    # 4) Interactive secret prompt on a TTY (guarded — cancel returns empty under set -e).
+    if [[ -z "$tok" ]]; then
+        [[ -t 0 ]] && tok="$(ask_secret 'Cloudflare API token (Zone:DNS:Edit scope for your base zone):' || true)"
+    fi
+    # Reject CR/LF — no multi-line token injection.
+    if [[ "$tok" =~ $'\r' || "$tok" =~ $'\n' ]]; then
+        err "Cloudflare API token must not contain CR or LF."; return 1
+    fi
+    # 5) Explicit failure — non-interactive with no token source.
+    if [[ -z "$tok" ]]; then
+        err "No Cloudflare API token. Set CF_API_TOKEN=<token> for a headless install, or run '5gpn --set-cf-token' for an interactive setup."
+        return 1
+    fi
+    # Atomic write: stage under a temp name, chmod, then rename.
+    local tmp; tmp="$(mktemp "${ACME_DIR}/.cloudflare.ini.XXXXXX")"
+    printf 'dns_cloudflare_api_token = %s\n' "$tok" > "$tmp"
+    chmod 0600 "$tmp"
+    mv -f -- "$tmp" "${ACME_DIR}/cloudflare.ini"
+    ok "Cloudflare API token saved → ${ACME_DIR}/cloudflare.ini (0600, root-only)."
+}
+
 # set_cf_token prompts for (or accepts as $1) the Cloudflare API token used by
 # install_cert's cloudflare/DNS-01 issuance path, and writes it to
 # ${ACME_DIR}/cloudflare.ini (0600, root-only). This is the ONLY TUI/CLI op that
@@ -1735,9 +1787,15 @@ set_cf_token() {
     local tok="${1:-}"
     [[ -z "$tok" && -t 0 ]] && tok="$(ask_secret 'Cloudflare API token (scope: Zone:DNS:Edit for your base zone)' || true)"
     [ -z "$tok" ] && { warn "no token entered — unchanged."; return 0; }
+    # Reject CR/LF — no multi-line token injection.
+    if [[ "$tok" =~ $'\r' || "$tok" =~ $'\n' ]]; then
+        err "Token must not contain CR or LF."; return 1
+    fi
     install -d -m 0700 "$ACME_DIR"
-    printf 'dns_cloudflare_api_token = %s\n' "$tok" > "${ACME_DIR}/cloudflare.ini"
-    chmod 600 "${ACME_DIR}/cloudflare.ini"
+    local tmp; tmp="$(mktemp "${ACME_DIR}/.cloudflare.ini.XXXXXX")"
+    printf 'dns_cloudflare_api_token = %s\n' "$tok" > "$tmp"
+    chmod 0600 "$tmp"
+    mv -f -- "$tmp" "${ACME_DIR}/cloudflare.ini"
     ok "Cloudflare token saved → ${ACME_DIR}/cloudflare.ini"
 }
 
@@ -2691,7 +2749,10 @@ Usage: sudo bash install.sh [option]     — or, after install, just:  5gpn [opt
   --setup-tgbot       Install + enable the Telegram control bot
   --rotate-token      Generate a new control-console DNS_API_TOKEN + restart
   --set-cf-token [t]  Set/update the Cloudflare API token used by cert issuance
-                      (writes /etc/5gpn/acme/cloudflare.ini; prompts if omitted)
+                      (writes /etc/5gpn/acme/cloudflare.ini, dir 0700 file 0600;
+                      prompts if omitted). Headless/CI installs: set CF_API_TOKEN=
+                      <token> — first issuance prompts automatically; the token is
+                      copied to cloudflare.ini, NEVER written to dns.env or logged.
   mihomo-reset        Explicitly back up + replace the operator mihomo config
                       with a freshly rendered, validated seed, then restart
   --uninstall [--purge]  Remove units/tuning + binaries (keeps /etc/5gpn;
@@ -2723,12 +2784,12 @@ Domains + certificates: ONE base (apex) domain, ONE mandatory WILDCARD Let's Enc
                      Encrypt DNS-01 through the Cloudflare API (no :80, no public
                      A-record needed for certificate issuance); auto-renews unattended
                      via the daily 5gpn-certbot-renew.timer. Only an actual
-                     ISSUANCE (no valid cert to reuse) needs a scoped Cloudflare
-                     API token in /etc/5gpn/acme/cloudflare.ini (0600); set it via
-                     '5gpn --set-cf-token' (or the menu), or manually:
-                       install -d -m 0700 /etc/5gpn/acme
-                       echo 'dns_cloudflare_api_token = <token>' > /etc/5gpn/acme/cloudflare.ini
-                       chmod 600 /etc/5gpn/acme/cloudflare.ini
+                     ISSUANCE (no valid cert to reuse) needs a Cloudflare API token;
+                     the first-install issuance prompts for it automatically on a
+                     TTY (or reads CF_API_TOKEN/CLOUDFLARE_API_TOKEN for headless
+                     installs). The token is stored in /etc/5gpn/acme/cloudflare.ini
+                     (dir 0700, file 0600) and is NEVER written to dns.env or logs.
+                     Use '5gpn --set-cf-token' (or the menu) to update it at any time.
   CERT_MODE=debug    (or DEBUG=1) self-signed WILDCARD cert for a test/dev box with
                      no public domain — no certbot, no DNS-01, no renewal; clients
                      see it untrusted.
@@ -2760,6 +2821,10 @@ Env overrides (persisted to dns.env):
                        to its /24; 'off' disables; editable later in the web console
   DNS_MAX_INFLIGHT= DNS_TTL_MIN= DNS_TTL_MAX= DNS_QUERY_TIMEOUT=   daemon tuning (see dns.env)
   DNS_API_TOKEN=       control-console bearer token (auto-generated + preserved; see --rotate-token)
+  CF_API_TOKEN=        Cloudflare API token for cert issuance (Zone:DNS:Edit scope); copied to
+                       /etc/5gpn/acme/cloudflare.ini (dir 0700, file 0600), NEVER to dns.env or logs.
+                       Interactive installs prompt automatically on first issuance — no need to set this.
+                       Headless/CI installs: set this env var (or CLOUDFLARE_API_TOKEN=) before running.
   DNS_EGRESS_RESOLVER= egress SNI re-resolver (back-compat alias XRAY_RESOLVER;
                        default=22.22.22.22 placeholder; ipv4=plain-UDP or
                        https://…/dns-query=DoH). NOT prompted at install — set it

@@ -220,6 +220,33 @@ printf '%s' "$ic_fn" | grep -Fq 'keep-until-expiring' \
 printf '%s' "$ic_fn" | grep -Eiq 'reus(e|ing)' \
     || fail "install_cert has no cert-reuse path (would re-issue every install)"
 
+# --- Task 1: Cloudflare API-token credential helper ---
+# has_valid_cf_credential must recognise a saved token in cloudflare.ini.
+grep -Eq '^has_valid_cf_credential\(\)' "$INSTALL" \
+    || fail "no has_valid_cf_credential() (must recognise a saved Cloudflare API token in cloudflare.ini)"
+hvc_fn="$(sed -n '/^has_valid_cf_credential()/,/^}/p' "$INSTALL")"
+printf '%s' "$hvc_fn" | grep -Fq 'dns_cloudflare_api_token' \
+    || fail "has_valid_cf_credential does not check for the dns_cloudflare_api_token credential entry"
+# ensure_cf_token must implement the full precedence chain.
+grep -Eq '^ensure_cf_token\(\)' "$INSTALL" \
+    || fail "no ensure_cf_token() (credential helper called before certbot in the issuance branch)"
+ect_fn="$(sed -n '/^ensure_cf_token()/,/^}/p' "$INSTALL")"
+printf '%s' "$ect_fn" | grep -Fq 'has_valid_cf_credential' \
+    || fail "ensure_cf_token does not check has_valid_cf_credential (reuse path)"
+printf '%s' "$ect_fn" | grep -Fq 'CF_API_TOKEN' \
+    || fail "ensure_cf_token does not accept CF_API_TOKEN (headless-install env)"
+printf '%s' "$ect_fn" | grep -Fq 'CLOUDFLARE_API_TOKEN' \
+    || fail "ensure_cf_token does not accept CLOUDFLARE_API_TOKEN (alternate headless env)"
+printf '%s' "$ect_fn" | grep -Eq 'ask_secret.*\|\| true' \
+    || fail "ensure_cf_token's ask_secret is not guarded with || true (cancel aborts under set -e)"
+printf '%s' "$ect_fn" | grep -Eq '\[\[ -t 0 \]\]' \
+    || fail "ensure_cf_token does not gate the interactive prompt on a TTY ([[ -t 0 ]])"
+printf '%s' "$ect_fn" | grep -Eq 'err.*CF_API_TOKEN' \
+    || fail "ensure_cf_token does not reference CF_API_TOKEN in its noninteractive failure message"
+# ensure_cf_token must be called within install_cert (issuance branch).
+printf '%s' "$ic_fn" | grep -Fq 'ensure_cf_token' \
+    || fail "install_cert does not call ensure_cf_token (first issuance hard-aborts without a token)"
+
 # --- UP-4 Task 8 (2026-07-15 policy/mihomo decoupling): strong zash secret +
 # full-config mihomo seed, no daemon-owned marker regions. ---
 MIHOMO_TMPL="$ROOT/etc/mihomo/config.yaml.tmpl"

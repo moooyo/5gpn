@@ -73,8 +73,31 @@ printf '%s' "$ic" | grep -Fq 'systemctl stop xray' \
     && fail "install.sh: install_cert must not stop xray (DNS-01 needs no :80 port-coordination)"
 printf '%s' "$ic" | grep -Fqe '--standalone' \
     && fail "install.sh: install_cert must not use certbot --standalone (:80 challenge removed)"
-printf '%s' "$ic" | grep -Eq 'chmod 600 "?\$\{ACME_DIR\}/cloudflare\.ini"?' \
-    || fail "install.sh: cloudflare.ini credentials file is not chmod 600"
+# cloudflare.ini must be protected 0600 — chmod must happen inside ensure_cf_token.
+ect_fn_it="$(sed -n '/^ensure_cf_token()/,/^}/p' "$INSTALL")"
+printf '%s' "$ect_fn_it" | grep -Eq 'chmod 0?600' \
+    || fail "install.sh: ensure_cf_token does not set mode 0600 on cloudflare.ini"
+# Apex SAN must appear alongside the wildcard in the certbot invocation.
+printf '%s' "$ic" | grep -Fqe '-d "${base}"' \
+    || fail "install.sh: install_cert does not request the apex SAN (-d \"\${base}\")"
+# ensure_cf_token must be called BEFORE certbot certonly in the issuance branch.
+_ect_line="$(printf '%s' "$ic" | grep -n 'ensure_cf_token' | head -1 | cut -d: -f1)"
+_cb_line="$(printf '%s'  "$ic" | grep -n 'certbot certonly' | head -1 | cut -d: -f1)"
+[ -z "${_ect_line:-}" ] && fail "install.sh: install_cert does not call ensure_cf_token before certbot"
+[ -n "${_ect_line:-}" ] && [ "${_ect_line}" -ge "${_cb_line:-99999}" ] && \
+    fail "install.sh: ensure_cf_token must appear BEFORE certbot certonly in install_cert"
+# No HTTP-01 or webroot-based flags in the certbot issuance branch.
+printf '%s' "$ic" | grep -Eq -- '--http-01-port|--webroot' \
+    && fail "install.sh: install_cert must not use HTTP-01/webroot certbot flags"
+# set_cf_token must reject CR/LF before persisting credentials.
+sct_fn="$(sed -n '/^set_cf_token()/,/^}/p' "$INSTALL")"
+printf '%s' "$sct_fn" | grep -Fq '$'"'"'\r'"'"'' \
+    || fail "install.sh: set_cf_token does not reject CR (\$'\\r' check missing)"
+printf '%s' "$sct_fn" | grep -Fq '$'"'"'\n'"'"'' \
+    || fail "install.sh: set_cf_token does not reject LF (\$'\\n' check missing)"
+# set_cf_token must write atomically (mktemp stage + mv rename).
+printf '%s' "$sct_fn" | grep -Fq 'mktemp' \
+    || fail "install.sh: set_cf_token does not stage the credential atomically (mktemp missing)"
 grep -Fq 'systemctl stop xray' "$INSTALL" \
     && fail "install.sh: no cert-flow reference to 'systemctl stop xray' may remain anywhere"
 # No firewall to open — the old open_port80/close_port80 nft dance must stay gone.
