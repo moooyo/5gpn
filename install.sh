@@ -1045,7 +1045,7 @@ apply_whitelist() {
     secret="${DNS_MIHOMO_SECRET:-$(cfg_get DNS_MIHOMO_SECRET)}"
     [[ -n "$secret" ]] || secret="$(mihomo_config_secret "$MIHOMO_DIR/config.yaml")"
     mihomo_controller_curl "/providers/rules/whitelist" \
-        -fsS -X PUT -H "Authorization: Bearer ${secret}" -o /dev/null \
+        -fsS -X PUT -H "Authorization: Bearer $secret" -o /dev/null \
         && ok "whitelist applied" || warn "whitelist refresh failed (is mihomo running?)"
 }
 
@@ -2308,13 +2308,10 @@ EOF
 # ----------------------------------------------------------------------------
 probe_mihomo_ready() {
     systemctl is-active --quiet mihomo || return 1
-    local controller secret ip port
-    controller="${DNS_MIHOMO_CONTROLLER:-$(cfg_get DNS_MIHOMO_CONTROLLER)}"
-    controller="${controller:-127.0.0.1:9090}"
-    controller="${controller#http://}"; controller="${controller#https://}"
+    local secret ip port
     secret="${DNS_MIHOMO_SECRET:-$(cfg_get DNS_MIHOMO_SECRET)}"
     local -a curl_args=(--fail --silent --show-error --max-time 2 -o /dev/null)
-    [[ -n "$secret" ]] && curl_args+=(-H "Authorization: Bearer ${secret}")
+    [[ -n "$secret" ]] && curl_args+=(-H "Authorization: Bearer $secret")
     mihomo_controller_curl "/version" "${curl_args[@]}" >/dev/null 2>&1 || return 1
 
     command -v ss >/dev/null 2>&1 || return 1

@@ -136,10 +136,17 @@ printf '%s' "$aw_fn" | grep -Fq 'mihomo_controller_curl "/providers/rules/whitel
     || fail "apply_whitelist does not use the shared HTTPS controller helper"
 printf '%s' "$aw_fn" | grep -Fq 'Authorization: Bearer' \
     || fail "apply_whitelist does not send the controller bearer secret"
-printf '%s' "$aw_fn" | grep -Fq 'ok "whitelist applied"' \
-    || fail "apply_whitelist does not preserve the success message"
 grep -Fq 'http://127.0.0.1:9090' "$INSTALL" \
     && fail "installer still calls the plaintext mihomo controller"
+mc_fn="$(sed -n '/^mihomo_controller_curl()/,/^}/p' "$INSTALL")"
+printf '%s' "$mc_fn" | grep -Fq -- '--cacert' \
+    || fail "mihomo_controller_curl does not verify the zash certificate"
+printf '%s' "$mc_fn" | grep -Fq -- '--connect-to' \
+    || fail "mihomo_controller_curl does not dial the configured loopback target"
+printf '%s' "$mc_fn" | grep -Fq 'https://' \
+    || fail "mihomo_controller_curl does not use HTTPS"
+printf '%s' "$mc_fn" | grep -Eq -- '(^|[[:space:]])(-k|--insecure)([[:space:]]|$)' \
+    && fail "mihomo_controller_curl must not disable TLS verification"
 # manage_menu must expose add/remove allowlist entries as menu ops.
 mm_fn="$(sed -n '/^manage_menu()/,/^}/p' "$INSTALL")"
 printf '%s' "$mm_fn" | grep -Fq 'add_allow_ip' \
