@@ -166,6 +166,8 @@ sudo bash install.sh setup-tgbot
 5gpn uninstall --decommission # 仅在 provenance 证明 5gpn 创建时删除精确 lineage，并安全处理凭据
 ```
 
+Uninstall preserves the verified `/opt/5gpn/bin/gum` binary for reuse by other host automation while removing the remaining 5gpn runtime.
+
 等价的 `sudo bash install.sh <同名子命令>` 仍可用。
 
 配置改动：`systemctl reload 5gpn-dns`（=SIGHUP）**只重载 policy 编译结果与 chnroute**，不主动拉取远程订阅。**dns.env 里的守护进程开关（上游、网关IP、监听地址、token、cache、TTL、0x20、心跳等）在启动时读取一次，改动后需 `systemctl restart 5gpn-dns` 才生效**；证书是例外——按文件 mtime 在下次握手自动加载。

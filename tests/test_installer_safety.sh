@@ -48,6 +48,41 @@ else
     fail "ownership marker verification aborts under set -u"
 fi
 
+# Uninstall keeps Gum while deleting the rest of an owned runtime, and falls
+# back to plain output before deleting a runtime where Gum is already absent.
+if (
+    BASE_DIR="$TMP/runtime-with-gum"
+    BIN_DIR="$BASE_DIR/bin"
+    GUM_BIN="$BIN_DIR/gum"
+    _HAVE_GUM=0
+    mkdir -p "$BIN_DIR" "$BASE_DIR/scripts"
+    printf '%s\n' "$BASE_OWNERSHIP_VALUE" > "$BASE_DIR/$BASE_OWNERSHIP_MARKER"
+    printf '#!/bin/sh\nexit 0\n' > "$GUM_BIN"
+    chmod 0755 "$GUM_BIN"
+    printf 'runtime\n' > "$BIN_DIR/5gpn-dns"
+    printf 'runtime\n' > "$BASE_DIR/scripts/helper"
+    remove_runtime_preserving_gum >/dev/null
+    [[ -x "$GUM_BIN" && ! -e "$BIN_DIR/5gpn-dns" && ! -e "$BASE_DIR/scripts" ]]
+); then
+    pass "uninstall preserves Gum and removes the remaining runtime"
+else
+    fail "uninstall did not preserve Gum cleanly"
+fi
+if (
+    BASE_DIR="$TMP/runtime-without-gum"
+    BIN_DIR="$BASE_DIR/bin"
+    GUM_BIN="$BIN_DIR/gum"
+    _HAVE_GUM=1
+    mkdir -p "$BIN_DIR"
+    printf '%s\n' "$BASE_OWNERSHIP_VALUE" > "$BASE_DIR/$BASE_OWNERSHIP_MARKER"
+    remove_runtime_preserving_gum >/dev/null
+    [[ ! -e "$BASE_DIR" && "$_HAVE_GUM" == 0 ]]
+); then
+    pass "uninstall disables Gum output before removing an absent-Gum runtime"
+else
+    fail "uninstall retained a stale Gum output state"
+fi
+
 # Fake a host with one assigned non-loopback IPv4 and a matching default route.
 ip() {
     case "$*" in

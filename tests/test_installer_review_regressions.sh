@@ -115,6 +115,11 @@ grep -Fq 'MIHOMO_BIN="${BIN_DIR}/mihomo"' "$INSTALL" \
     && grep -Fq 'GUM_BIN="${BIN_DIR}/gum"' "$INSTALL" \
     && pass "generic mihomo/gum binaries moved under the project root" \
     || fail "generic global binary collision remains"
+uninstall_fn="$(sed -n '/^uninstall()/,/^}/p' "$INSTALL")"
+grep -Fq 'remove_runtime_preserving_gum' <<<"$uninstall_fn" \
+    && ! grep -Fq 'remove_fixed_owned_dir "$BASE_DIR"' <<<"$uninstall_fn" \
+    && pass "uninstall preserves Gum through the dedicated runtime cleanup" \
+    || fail "uninstall still removes Gum with the whole runtime"
 
 grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/5gpn-dns"' "$INSTALL" \
     && grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/mihomo.gz"' "$INSTALL" \

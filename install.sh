@@ -41,7 +41,7 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]:-}" 2>/dev/null || echo "${BASH_SOU
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"   # repo 5gpn/ when run from a checkout
 
 BASE_DIR="/opt/5gpn"                 # installed runtime root
-BIN_DIR="${BASE_DIR}/bin"                # project-private binaries; never share /usr/local/bin names
+BIN_DIR="${BASE_DIR}/bin"                # project-managed binaries; Gum survives uninstall for host reuse
 SCRIPTS_DIR="${BASE_DIR}/scripts"        # installed copies of repo scripts
 WWW_DIR="${BASE_DIR}/www"                # signed iOS profile root (served in-process by 5gpn-dns)
 BASE_OWNERSHIP_MARKER=".5gpn-owned"
@@ -315,6 +315,34 @@ remove_fixed_owned_dir() {
     verify_ownership_marker "$dir" "$marker" "$value" \
         || { err "Refusing to remove unowned directory: $dir"; return 1; }
     rm -rf -- "$dir"
+}
+
+# Remove the 5gpn runtime while preserving the verified Gum binary. Gum is a
+# general operator UI tool and may be referenced by other host automation after
+# 5gpn is removed. The project root and ownership marker remain so a later
+# reinstall can safely reuse the directory. If Gum is already absent, disable
+# Gum output before removing the whole owned runtime.
+remove_runtime_preserving_gum() {
+    local canonical
+    [[ -e "$BASE_DIR" ]] || { _HAVE_GUM=0; return 0; }
+    canonical="$(canonical_dir_path "$BASE_DIR")" || return 1
+    [[ "$canonical" == "$BASE_DIR" ]] \
+        || { err "Refusing runtime directory alias during removal: $BASE_DIR"; return 1; }
+    verify_ownership_marker "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
+        || { err "Refusing to remove unowned runtime directory: $BASE_DIR"; return 1; }
+
+    if [[ -d "$BIN_DIR" && ! -L "$BIN_DIR" && -f "$GUM_BIN" && ! -L "$GUM_BIN" ]]; then
+        find "$BASE_DIR" -mindepth 1 -maxdepth 1 \
+            ! -name "$BASE_OWNERSHIP_MARKER" ! -path "$BIN_DIR" -exec rm -rf -- {} + \
+            || { err "Could not remove the 5gpn runtime around preserved Gum."; return 1; }
+        find "$BIN_DIR" -mindepth 1 -maxdepth 1 ! -name gum -exec rm -rf -- {} + \
+            || { err "Could not clean project binaries around preserved Gum."; return 1; }
+        ok "Preserved shared Gum binary: $GUM_BIN"
+        return 0
+    fi
+
+    _HAVE_GUM=0
+    remove_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"
 }
 
 safe_zashboard_path() {
@@ -3471,7 +3499,7 @@ uninstall() {
     if [[ "$DNS_ZASH_DIR" != "$BASE_DIR"/* ]]; then
         remove_zashboard_dir || warn "Kept unowned/unsafe DNS_ZASH_DIR '$DNS_ZASH_DIR'."
     fi
-    remove_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"
+    remove_runtime_preserving_gum
     remove_fixed_owned_dir "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE"
 
     if [[ "$decommission" == 1 ]]; then
