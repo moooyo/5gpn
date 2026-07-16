@@ -15,8 +15,10 @@ configuration produced by the explicit `mihomo-reset` operation.
 
 Ordinary reinstalls and `change-*` operations continue to validate and preserve
 an existing operator-owned `/etc/5gpn/mihomo/config.yaml` byte-for-byte. This
-change does not migrate existing configurations automatically and does not
-restrict later edits through the raw mihomo configuration editor.
+change does not migrate existing configurations automatically. The raw mihomo
+configuration editor's existing controller invariant will be updated to require
+the TLS-only listener and the zash certificate paths, preventing a later edit
+from reintroducing plaintext controller access.
 
 ## Controller Configuration
 
@@ -84,6 +86,9 @@ controller certificate rather than as a component that terminates no TLS.
 - Missing or unreadable zash trust material causes the daemon controller client
   to fail closed rather than downgrade to HTTP.
 - A certificate with the wrong DNS identity is rejected.
+- Raw configuration updates that enable the plaintext controller, omit the TLS
+  controller, or change the required zash certificate paths are rejected before
+  validation or publication.
 - Controller authentication continues to use the existing bearer secret.
 - Reverse-proxy authentication behavior remains unchanged: the console injects
   the daemon-held secret, while zashboard forwards the browser-supplied
