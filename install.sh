@@ -3274,12 +3274,14 @@ configure_install_tui() {
     elif [[ "$CERT_MODE" == cloudflare ]]; then
         {
             echo "Cloudflare DNS-01 prerequisites"
-            echo "  ${CONSOLE_DOMAIN} A -> ${PUBLIC_IP}"
+            echo "  Required record: ${CONSOLE_DOMAIN} A -> ${PUBLIC_IP}"
             [[ "$GATEWAY_IP" != "$PUBLIC_IP" ]] && echo "  or client-routable gateway A -> ${GATEWAY_IP}"
-            echo "  Cloudflare token needs Zone:DNS:Edit for ${BASE_DOMAIN}."
+            echo "  The API token is used only for ACME TXT records."
+            echo "  The installer does NOT create or modify this A record."
+            echo "  Token scope: Zone:DNS:Edit for ${BASE_DOMAIN}."
             echo "The installer will wait for 1.1.1.1 to observe the console A record."
         } | card
-        ask_yesno "我已确认上述 DNS 配置正确；保存并开始等待验证?" \
+        ask_yesno "我已添加上述 console A 记录；现在开始通过 1.1.1.1 验证?" \
             || { warn "Configuration cancelled before the DNS check."; return 1; }
     else
         ask_yesno "保存以上 debug 配置并继续?" \
@@ -3319,7 +3321,7 @@ mihomo_config_matches_install_config() {
 # Full install
 # ----------------------------------------------------------------------------
 full_install() {
-    local force_tui=0 token_was_present=0
+    local force_tui=0
     [[ "${1:-}" == configure ]] && force_tui=1
     check_root
     claim_project_roots
@@ -3338,7 +3340,6 @@ full_install() {
     preflight_unit_ownership
     claim_web_dir
     claim_zashboard_dir
-    [[ -n "$(cfg_get DNS_API_TOKEN)" ]] && token_was_present=1
 
     # Package installation may add shared OS packages, but no live 5gpn file has
     # been removed or replaced yet. Debug mode deliberately skips Certbot.
@@ -3387,7 +3388,7 @@ full_install() {
         echo "Web 控制台: https://${CONSOLE_DOMAIN}/"
         echo "zashboard:  https://${ZASH_DOMAIN}/"
         echo "配置向导:   https://${CONSOLE_DOMAIN}/setup-guide"
-        [[ "$token_was_present" == 0 && -t 1 ]] && echo "Token:      ${DNS_API_TOKEN}"
+        [[ -t 1 ]] && echo "Console token: ${DNS_API_TOKEN}"
         echo "(console 公网开放，/api 需要 bearer token；zashboard 仅对白名单来源 IP 开放)"
     } | card
     print_qr

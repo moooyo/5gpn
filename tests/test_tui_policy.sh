@@ -67,12 +67,15 @@ printf '%s' "$tui_fn" | grep -Fq 'wait for 1.1.1.1' \
     || fail "certificate TUI does not explain the independent 1.1.1.1 wait"
 http_plan_line="$(grep -nF 'HTTP-01 DNS / network prerequisites' <<<"$tui_fn" | head -1 | cut -d: -f1)"
 http_confirm_line="$(grep -nF '我已确认上述 DNS 和 TCP/80 配置正确' <<<"$tui_fn" | head -1 | cut -d: -f1)"
-cf_confirm_line="$(grep -nF '我已确认上述 DNS 配置正确' <<<"$tui_fn" | head -1 | cut -d: -f1)"
+cf_confirm_line="$(grep -nF '我已添加上述 console A 记录' <<<"$tui_fn" | head -1 | cut -d: -f1)"
 cf_token_line="$(grep -nF 'ensure_cf_token || return 1' <<<"$tui_fn" | head -1 | cut -d: -f1)"
 [[ -n "$http_plan_line" && -n "$http_confirm_line" && "$http_plan_line" -lt "$http_confirm_line" ]] \
     || fail "HTTP-01 DNS plan is not shown before explicit confirmation"
 [[ -n "$cf_token_line" && -n "$cf_confirm_line" && "$cf_token_line" -lt "$cf_confirm_line" ]] \
     || fail "Cloudflare token is not collected before final DNS confirmation"
+printf '%s' "$tui_fn" | grep -Fq 'The API token is used only for ACME TXT records.' \
+    && printf '%s' "$tui_fn" | grep -Fq 'does NOT create or modify this A record' \
+    || fail "Cloudflare TUI does not explain that the console A record is operator-managed"
 
 # --- reload-rules.sh performs only the visible local reload. ---
 UL="$ROOT/scripts/reload-rules.sh"

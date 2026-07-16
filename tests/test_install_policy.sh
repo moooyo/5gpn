@@ -95,6 +95,10 @@ grep -Fq "First install/configuration requires an attached TTY" "$INSTALL" \
 grep -Eq "prompt_default .*网关|prompt_default .*Gateway" "$INSTALL" || fail "TUI has no gateway prompt"
 grep -Fq 'EGRESS_RESOLVER="$DNS_EGRESS_RESOLVER_DEFAULT"' "$INSTALL" \
     || fail "first-install TUI does not apply the default resolver automatically"
+full_install_fn="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
+printf '%s' "$full_install_fn" | grep -Fq 'echo "Console token: ${DNS_API_TOKEN}"' \
+    && ! printf '%s' "$full_install_fn" | grep -Fq 'token_was_present' \
+    || fail "successful interactive installs do not always show the current console token"
 
 # --- Frontend shipped separately + served from disk (not go:embed) ---
 grep -Eq 'install_web'          "$INSTALL" || fail "no install_web() to fetch the 5gpn-web tarball"
