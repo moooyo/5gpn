@@ -81,9 +81,10 @@ printf '%s' "$ect_fn_it" | grep -Eq 'chmod 0?600' \
 printf '%s' "$ic" | grep -Fqe '-d "${base}"' \
     || fail "install.sh: install_cert does not request the apex SAN (-d \"\${base}\")"
 # ensure_cf_token must be called BEFORE certbot certonly in the issuance branch.
-_ect_line="$(printf '%s' "$ic" | grep -n 'ensure_cf_token' | head -1 | cut -d: -f1)"
+# Anchor on the actual call line, not a comment that also contains the name.
+_ect_line="$(printf '%s' "$ic" | grep -n 'ensure_cf_token || return 1' | head -1 | cut -d: -f1)"
 _cb_line="$(printf '%s'  "$ic" | grep -n 'certbot certonly' | head -1 | cut -d: -f1)"
-[ -z "${_ect_line:-}" ] && fail "install.sh: install_cert does not call ensure_cf_token before certbot"
+[ -z "${_ect_line:-}" ] && fail "install.sh: install_cert does not contain 'ensure_cf_token || return 1' (anchored call missing)"
 [ -z "${_cb_line:-}" ] && fail "install.sh: install_cert does not contain certbot certonly (certbot line not found)"
 [ -n "${_ect_line:-}" ] && [ "${_ect_line}" -ge "${_cb_line}" ] && \
     fail "install.sh: ensure_cf_token must appear BEFORE certbot certonly in install_cert"
@@ -109,6 +110,16 @@ printf '%s' "$sct_fn" | grep -Fq 'write_cf_credential' \
     || fail "install.sh: set_cf_token does not delegate to write_cf_credential"
 printf '%s' "$ect_fn_it" | grep -Fq 'write_cf_credential' \
     || fail "install.sh: ensure_cf_token does not delegate to write_cf_credential"
+# Errexit-suppression hardening: unguarded commands inside these helpers must carry
+# explicit || guards so they fail loudly when called with || (which suppresses set -e).
+printf '%s' "$wcf_fn_it" | grep -Eq 'install -d.*\|\|' \
+    || fail "install.sh: write_cf_credential install -d is not guarded with || (silent failure under errexit suppression)"
+printf '%s' "$wcf_fn_it" | grep -Eq 'mktemp.*\|\|' \
+    || fail "install.sh: write_cf_credential mktemp is not guarded with || (silent failure under errexit suppression)"
+printf '%s' "$ect_fn_it" | grep -Eq 'install -d.*\|\|' \
+    || fail "install.sh: ensure_cf_token install -d is not guarded with || (silent failure under errexit suppression)"
+printf '%s' "$ect_fn_it" | grep -Eq 'chmod 0?600.*\|\|' \
+    || fail "install.sh: ensure_cf_token chmod 0600 reuse path is not guarded with || (prints success on chmod failure)"
 grep -Fq 'systemctl stop xray' "$INSTALL" \
     && fail "install.sh: no cert-flow reference to 'systemctl stop xray' may remain anywhere"
 # No firewall to open — the old open_port80/close_port80 nft dance must stay gone.

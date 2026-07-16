@@ -1745,10 +1745,10 @@ has_valid_cf_credential() {
 write_cf_credential() {
     local tok="$1"
     if [[ "$tok" =~ $'\r' || "$tok" =~ $'\n' ]]; then
-        err "Cloudflare API token must not contain CR or LF."; return 1
+        err "Cloudflare API token must not contain CR or LF (check for a trailing newline)."; return 1
     fi
-    install -d -m 0700 "$ACME_DIR"
-    local tmp; tmp="$(mktemp "${ACME_DIR}/.cloudflare.ini.XXXXXX")"
+    install -d -m 0700 "$ACME_DIR" || { err "Cannot create ACME credentials directory ${ACME_DIR}."; return 1; }
+    local tmp; tmp="$(mktemp "${ACME_DIR}/.cloudflare.ini.XXXXXX")" || { err "Cannot create temp file in ${ACME_DIR}."; return 1; }
     printf 'dns_cloudflare_api_token = %s\n' "$tok" > "$tmp" || { rm -f -- "$tmp"; return 1; }
     chmod 0600 "$tmp"                                         || { rm -f -- "$tmp"; return 1; }
     mv -f -- "$tmp" "${ACME_DIR}/cloudflare.ini"              || { rm -f -- "$tmp"; return 1; }
@@ -1768,10 +1768,10 @@ write_cf_credential() {
 # The credentials dir is created as 0700; the file is written atomically and
 # chmod'd to 0600.
 ensure_cf_token() {
-    install -d -m 0700 "$ACME_DIR"
+    install -d -m 0700 "$ACME_DIR" || { err "Cannot create ACME credentials directory ${ACME_DIR}."; return 1; }
     # 1) Valid saved credential — reuse without prompting.
     if has_valid_cf_credential; then
-        chmod 0600 "${ACME_DIR}/cloudflare.ini"
+        chmod 0600 "${ACME_DIR}/cloudflare.ini" || { err "Cannot set permissions on ${ACME_DIR}/cloudflare.ini."; return 1; }
         info "Reusing saved Cloudflare API token (${ACME_DIR}/cloudflare.ini)."
         return 0
     fi

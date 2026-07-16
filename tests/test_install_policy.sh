@@ -264,6 +264,22 @@ printf '%s' "$ect_fn" | grep -Fq 'write_cf_credential' \
     || fail "ensure_cf_token does not call write_cf_credential (write logic duplicated)"
 printf '%s' "$(sed -n '/^set_cf_token()/,/^}/p' "$INSTALL")" | grep -Fq 'write_cf_credential' \
     || fail "set_cf_token does not call write_cf_credential (write logic duplicated)"
+# Errexit-suppression hardening: all unguarded commands inside write_cf_credential and
+# ensure_cf_token must carry explicit || guards so they fail loudly when the function is
+# called with || (which suppresses set -e inside the callee).
+printf '%s' "$wcf_fn" | grep -Eq 'install -d.*\|\|' \
+    || fail "write_cf_credential: install -d is not guarded with || (silent failure under errexit suppression)"
+printf '%s' "$wcf_fn" | grep -Eq 'mktemp.*\|\|' \
+    || fail "write_cf_credential: mktemp assignment is not guarded with || (silent failure under errexit suppression)"
+printf '%s' "$wcf_fn" | grep -Fq 'trailing newline' \
+    || fail "write_cf_credential: CR/LF rejection error does not mention 'trailing newline' (operator hint missing)"
+printf '%s' "$ect_fn" | grep -Eq 'install -d.*\|\|' \
+    || fail "ensure_cf_token: install -d is not guarded with || (silent failure under errexit suppression)"
+printf '%s' "$ect_fn" | grep -Eq 'chmod 0?600.*\|\|' \
+    || fail "ensure_cf_token: chmod 0600 reuse path is not guarded with || (prints reuse success even if chmod failed)"
+# install_cert must contain the anchored call, not just a comment referencing ensure_cf_token.
+printf '%s' "$ic_fn" | grep -Fq 'ensure_cf_token || return 1' \
+    || fail "install_cert: issuance branch must contain 'ensure_cf_token || return 1' (anchored call, not just a comment)"
 
 # --- UP-4 Task 8 (2026-07-15 policy/mihomo decoupling): strong zash secret +
 # full-config mihomo seed, no daemon-owned marker regions. ---
