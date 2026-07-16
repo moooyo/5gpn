@@ -137,6 +137,10 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 	if webCert == "" || webKey == "" {
 		return nil, fmt.Errorf("control server: DNS_WEB_CERT and DNS_WEB_KEY (or DNS_CERT/DNS_KEY) are required when DNS_API_TOKEN is set")
 	}
+	zashCert, zashKey := cfg.ZashCertFile, cfg.ZashKeyFile
+	if zashCert == "" || zashKey == "" {
+		zashCert, zashKey = webCert, webKey
+	}
 
 	s := &ControlServer{
 		ctrl:         ctrl,
@@ -152,11 +156,20 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 		return nil, fmt.Errorf("control server: %w", err)
 	}
 
+	var mihomoTransport http.RoundTripper
+	if cfg.MihomoController != "" {
+		transport, transportErr := newMihomoTransport(cfg.MihomoController, cfg.ZashDomain, zashCert)
+		if transportErr != nil {
+			return nil, fmt.Errorf("control server: %w", transportErr)
+		}
+		mihomoTransport = transport
+	}
+
 	// Secret-injecting console proxy. It is NOT exposed as a raw subtree: the
 	// authenticated /api/mihomo/health handler uses it internally for /version,
 	// while the only public proxy route is the single-use-ticket-gated /logs
 	// WebSocket. The zash panel below keeps its separate pass-through model.
-	s.mihomoProxy = newMihomoProxy(cfg.MihomoController, cfg.MihomoSecret, "/proxy", true)
+	s.mihomoProxy = newMihomoProxy(cfg.ZashDomain, cfg.MihomoSecret, "/proxy", true, mihomoTransport)
 
 	ios := http.StripPrefix("/ios", iosHandler(cfg.WWWDir))
 	mux := http.NewServeMux()
@@ -191,15 +204,6 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 	s.srv = buildPanelServer(cfg.ListenAPI, securityHeadersMiddleware(consoleHandler), webCert, webKey)
 
 	if cfg.ZashListen != "" {
-		// Zash panel cert falls back the same way the web cert did above
-		// (cfg.WebCertFile/KeyFile, itself already fell back to
-		// cfg.CertFile/KeyFile) — LoadConfig already resolves this chain (see
-		// Config.ZashCertFile), but repeat it here so a directly-constructed
-		// Config (tests, embedding) gets the same behavior.
-		zashCert, zashKey := cfg.ZashCertFile, cfg.ZashKeyFile
-		if zashCert == "" || zashKey == "" {
-			zashCert, zashKey = webCert, webKey
-		}
 		if zashCert == "" || zashKey == "" {
 			return nil, fmt.Errorf("control server: DNS_ZASH_CERT and DNS_ZASH_KEY (or DNS_WEB_CERT/DNS_CERT) are required when DNS_ZASH_LISTEN is set")
 		}
@@ -212,7 +216,7 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 		// Pass-through proxy (inject=false): forwards the browser's own
 		// Authorization unchanged instead of injecting the secret — see the
 		// design §5.2 comment on consoleProxy above.
-		zashProxy := newMihomoProxy(cfg.MihomoController, cfg.MihomoSecret, "/proxy", false)
+		zashProxy := newMihomoProxy(cfg.ZashDomain, cfg.MihomoSecret, "/proxy", false, mihomoTransport)
 
 		zmux := http.NewServeMux()
 		zmux.Handle("/proxy/", zashProxy)

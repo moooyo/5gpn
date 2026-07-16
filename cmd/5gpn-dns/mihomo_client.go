@@ -22,12 +22,11 @@ import (
 // /proxy/ reverse-proxy in mihomo_proxy.go covers richer read-only monitoring
 // today).
 //
-// It deliberately dials LOOPBACK: mihomo's external-controller listens on
-// 127.0.0.1 (Config.MihomoController defaults to "127.0.0.1:9090"), so this
-// client is built as a plain *http.Client — NOT newSubHTTPClient's
-// SSRF-guarded dialer (subscription.go), which explicitly REJECTS loopback
-// targets. Mirrors heartbeat.go's client shape (plain client, fixed
-// timeout, no shared transport tricks).
+// It deliberately dials LOOPBACK through verified TLS: MihomoController
+// supplies the loopback host:port to connect to, while ZashDomain supplies the
+// SNI and verified certificate identity. The transport trusts the operating
+// system root store plus the panel certificate file and never falls back to
+// plaintext HTTP.
 type MihomoClient struct {
 	base   string
 	secret string
@@ -42,14 +41,21 @@ type MihomoStatus struct {
 	Authenticated bool
 }
 
-// NewMihomoClient builds a client for the controller at host:port (e.g.
-// "127.0.0.1:9090"), authenticating with secret when non-empty.
-func NewMihomoClient(controller, secret string) *MihomoClient {
-	return &MihomoClient{
-		base:   "http://" + controller,
-		secret: secret,
-		hc:     &http.Client{Timeout: 10 * time.Second},
+// NewMihomoClient builds a verified-TLS client for the controller at host:port
+// (for example "127.0.0.1:9090"), authenticating with secret when non-empty.
+func NewMihomoClient(controller, secret, serverName, certFile string) (*MihomoClient, error) {
+	transport, err := newMihomoTransport(controller, serverName, certFile)
+	if err != nil {
+		return nil, err
 	}
+	return &MihomoClient{
+		base:   "https://" + serverName,
+		secret: secret,
+		hc: &http.Client{
+			Transport: transport,
+			Timeout:   10 * time.Second,
+		},
+	}, nil
 }
 
 // PutConfigs tells mihomo to reload its config from path on disk

@@ -27,6 +27,7 @@ func generateSelfSignedCert(t *testing.T, dir string) (certPath, keyPath string)
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "test"},
+		DNSNames:     []string{"test.local"},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 	}

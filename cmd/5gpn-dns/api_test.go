@@ -860,16 +860,13 @@ func TestRateLimitMiddleware_DoesNotApplyToSPA(t *testing.T) {
 func TestControlServer_BothPanelsAndProxy(t *testing.T) {
 	const controllerBody = "mihomo-controller-ok"
 	var gotAuth, gotPath, gotQuery string
-	mihomo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	certPath, keyPath := generateSelfSignedCert(t, t.TempDir())
+	mihomo := newMihomoTLSTestServerWithCert(t, certPath, keyPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		gotPath = r.URL.Path
 		gotQuery = r.URL.RawQuery
 		_, _ = w.Write([]byte(controllerBody))
 	}))
-	defer mihomo.Close()
-	controllerAddr := strings.TrimPrefix(mihomo.URL, "http://")
-
-	certPath, keyPath := generateSelfSignedCert(t, t.TempDir())
 	zashDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(zashDir, "index.html"), []byte("<html>zash</html>"), 0o644); err != nil {
 		t.Fatal(err)
@@ -879,7 +876,8 @@ func TestControlServer_BothPanelsAndProxy(t *testing.T) {
 		WebCertFile: certPath, WebKeyFile: keyPath,
 		ZashCertFile: certPath, ZashKeyFile: keyPath,
 		ZashDir: zashDir, ZashListen: "127.0.0.2:0",
-		MihomoController: controllerAddr, MihomoSecret: "sec",
+		ZashDomain:       mihomo.serverName,
+		MihomoController: mihomo.controller, MihomoSecret: "sec",
 	}
 	cs, err := NewControlServer(cfg, &Controller{})
 	if err != nil {
@@ -889,8 +887,6 @@ func TestControlServer_BothPanelsAndProxy(t *testing.T) {
 		t.Fatal("zashSrv not built despite ZashListen set")
 	}
 
-	// zash mux serves its static index for a deep-link path (hash-router SPA
-	// fallback).
 	req := httptest.NewRequest(http.MethodGet, "/#/proxies", nil)
 	rec := httptest.NewRecorder()
 	cs.zashSrv.Handler.ServeHTTP(rec, req)
@@ -898,10 +894,6 @@ func TestControlServer_BothPanelsAndProxy(t *testing.T) {
 		t.Fatalf("zash panel index: status=%d body=%s, want 200 with the zashboard index", rec.Code, rec.Body.String())
 	}
 
-	// /proxy/ is mounted on the zash mux too -- it must actually reach the
-	// fake mihomo controller, not fall back to the zash SPA index. The zash
-	// mount is pass-through (design §5.2): a request with no Authorization
-	// must reach mihomo with none (never the injected secret).
 	req = httptest.NewRequest(http.MethodGet, "/proxy/version", nil)
 	rec = httptest.NewRecorder()
 	cs.zashSrv.Handler.ServeHTTP(rec, req)
@@ -912,18 +904,14 @@ func TestControlServer_BothPanelsAndProxy(t *testing.T) {
 		t.Fatalf("zash /proxy/ mount injected Authorization %q for a request with none; must pass through unchanged", gotAuth)
 	}
 
-	// A zash request THAT DOES carry an Authorization must have it forwarded
-	// unchanged, never overwritten with the configured controller secret.
 	req = httptest.NewRequest(http.MethodGet, "/proxy/version", nil)
-	req.Header.Set("Authorization", "Bearer from-the-browser")
+	req.Header.Set("Authorization", "Bearer browser-secret")
 	rec = httptest.NewRecorder()
 	cs.zashSrv.Handler.ServeHTTP(rec, req)
-	if gotAuth != "Bearer from-the-browser" {
+	if gotAuth != "Bearer browser-secret" {
 		t.Fatalf("zash /proxy/ mount auth = %q, want the browser's own Authorization forwarded unchanged", gotAuth)
 	}
 
-	// The console must NOT expose the raw controller subtree, even to a caller
-	// that knows the normal console bearer token.
 	req = httptest.NewRequest(http.MethodGet, "/proxy/version", nil)
 	req.Header.Set("Authorization", "Bearer tok")
 	rec = httptest.NewRecorder()
@@ -932,8 +920,6 @@ func TestControlServer_BothPanelsAndProxy(t *testing.T) {
 		t.Fatalf("raw console /proxy/version status=%d, want 404", rec.Code)
 	}
 
-	// Health is available through the bearer-authenticated API and maps to
-	// exactly the controller's /version endpoint with the daemon-held secret.
 	req = httptest.NewRequest(http.MethodGet, "/api/mihomo/health", nil)
 	req.Header.Set("Authorization", "Bearer tok")
 	rec = httptest.NewRecorder()
@@ -948,7 +934,6 @@ func TestControlServer_BothPanelsAndProxy(t *testing.T) {
 		t.Fatalf("console health upstream path=%q, want /version", gotPath)
 	}
 
-	// Mint a one-use log ticket over the authenticated API.
 	req = httptest.NewRequest(http.MethodPost, "/api/mihomo/log-ticket", nil)
 	req.Header.Set("Authorization", "Bearer tok")
 	rec = httptest.NewRecorder()
@@ -966,8 +951,6 @@ func TestControlServer_BothPanelsAndProxy(t *testing.T) {
 		t.Fatalf("log ticket Cache-Control=%q, want no-store", got)
 	}
 
-	// The ticket opens exactly /logs, is stripped before forwarding, and the
-	// daemon injects the controller secret.
 	req = httptest.NewRequest(http.MethodGet, "/proxy/logs?level=info&ticket="+ticketResp.Ticket, nil)
 	rec = httptest.NewRecorder()
 	cs.srv.Handler.ServeHTTP(rec, req)
@@ -981,7 +964,6 @@ func TestControlServer_BothPanelsAndProxy(t *testing.T) {
 		t.Fatalf("log proxy auth=%q, want injected controller secret", gotAuth)
 	}
 
-	// Tickets are single-use and cannot be replayed.
 	req = httptest.NewRequest(http.MethodGet, "/proxy/logs?ticket="+ticketResp.Ticket, nil)
 	rec = httptest.NewRecorder()
 	cs.srv.Handler.ServeHTTP(rec, req)
@@ -1020,6 +1002,7 @@ func TestZashSecurityHeaders(t *testing.T) {
 		APIToken: "tok", CertFile: certPath, KeyFile: keyPath,
 		ZashCertFile: certPath, ZashKeyFile: keyPath,
 		ZashDir: zashDir, ZashListen: "127.0.0.2:0",
+		ZashDomain:       "test.local",
 		MihomoController: "127.0.0.1:9090", MihomoSecret: "sec",
 	}
 	cs, err := NewControlServer(cfg, &Controller{})

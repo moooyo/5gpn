@@ -8,15 +8,15 @@ import (
 	"strings"
 )
 
-// newMihomoProxy builds the BROWSER-facing reverse-proxy to mihomo's loopback
-// external-controller REST+WebSocket API. Unlike MihomoClient (mihomo_client.go,
-// the daemon's own apply calls), this is mounted on the panel HTTPS servers at
-// mountPrefix so the console's read-only monitoring and zashboard's full ops can
-// reach the controller. Callers decide the access model: the console never
-// mounts the raw proxy and reaches it only through a bearer-authenticated
-// health handler or a one-use-ticket log gate; the separate zashboard panel
-// mounts pass-through mode behind its SNI source allowlist and relies on the
-// controller secret supplied by zashboard itself.
+// newMihomoProxy builds the BROWSER-facing reverse-proxy to Mihomo's verified
+// loopback-TLS external-controller REST+WebSocket API. Unlike MihomoClient
+// (mihomo_client.go, the daemon's own apply calls), this is mounted on the
+// panel HTTPS servers at mountPrefix so the console's read-only monitoring and
+// zashboard's full ops can reach the controller. Callers decide the access
+// model: the console never mounts the raw proxy and reaches it only through a
+// bearer-authenticated health handler or a one-use-ticket log gate; the
+// separate zashboard panel mounts pass-through mode behind its SNI source
+// allowlist and relies on the controller secret supplied by zashboard itself.
 //
 // inject selects which of the two mihomo-auth models this mount uses (design
 // §5.2, zashboard authentication):
@@ -30,13 +30,19 @@ import (
 //     visitor has no secret to send, so the controller itself 401s; a console
 //     admin's "前往 zash" deep-link carries the secret (api.go's
 //     GET /api/status, §5.3) so it auto-auths.
-func newMihomoProxy(controller, secret, mountPrefix string, inject bool) http.Handler {
+func newMihomoProxy(upstreamHost, secret, mountPrefix string, inject bool, transport http.RoundTripper) http.Handler {
+	if transport == nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "mihomo controller unavailable", http.StatusServiceUnavailable)
+		})
+	}
 	prefix := strings.TrimSuffix(mountPrefix, "/")
 	return &httputil.ReverseProxy{
+		Transport: transport,
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.Out.URL.Scheme = "http"
-			pr.Out.URL.Host = controller
-			pr.Out.Host = controller
+			pr.Out.URL.Scheme = "https"
+			pr.Out.URL.Host = upstreamHost
+			pr.Out.Host = upstreamHost
 			p := strings.TrimPrefix(pr.In.URL.Path, prefix)
 			if p == "" || p[0] != '/' {
 				p = "/" + p

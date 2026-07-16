@@ -371,6 +371,15 @@ func main() {
 		log.Fatalf("control server: %v", err)
 	}
 	if controlSrv != nil {
+		mihomoClient, err := NewMihomoClient(
+			cfg.MihomoController,
+			cfg.MihomoSecret,
+			cfg.ZashDomain,
+			cfg.ZashCertFile,
+		)
+		if err != nil {
+			log.Fatalf("mihomo client: %v", err)
+		}
 		// Mihomo raw-config editor (GET/PUT /api/mihomo/config + /default +
 		// /reset — design §4.2). Always wired: MihomoConfigFile/Controller
 		// carry sane defaults even on an otherwise-unconfigured box.
@@ -378,7 +387,7 @@ func main() {
 			NewMihomoConfigStore(cfg.MihomoConfigFile),
 			InfraParamsFromConfig(cfg),
 			realMihomoTester{},
-			NewMihomoClient(cfg.MihomoController, cfg.MihomoSecret),
+			mihomoClient,
 		)
 		if err := controlSrv.Start(); err != nil {
 			log.Fatalf("control server start: %v", err)

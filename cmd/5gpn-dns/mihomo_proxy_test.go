@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/tls"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -9,20 +10,28 @@ import (
 	"testing"
 )
 
+func newMihomoProxyTestHandler(t *testing.T, secret string, inject bool, upstream http.Handler) http.Handler {
+	t.Helper()
+
+	server := newMihomoTLSTestServer(t, upstream)
+	transport, err := newMihomoTransport(server.controller, server.serverName, server.certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newMihomoProxy(server.serverName, secret, "/proxy", inject, transport)
+}
+
 func TestMihomoProxy_InjectsSecretAndStripsPrefix(t *testing.T) {
 	var gotPath, gotAuth string
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := newMihomoProxyTestHandler(t, "s3cr3t", true, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"version":"meta"}`))
 	}))
-	defer upstream.Close()
-	controller := strings.TrimPrefix(upstream.URL, "http://")
 
-	h := newMihomoProxy(controller, "s3cr3t", "/proxy", true)
 	req := httptest.NewRequest(http.MethodGet, "/proxy/version", nil)
-	req.Header.Set("Authorization", "Bearer 5gpn-console-token") // must NOT reach mihomo
+	req.Header.Set("Authorization", "Bearer console-token")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
@@ -39,13 +48,13 @@ func TestMihomoProxy_InjectsSecretAndStripsPrefix(t *testing.T) {
 
 func TestMihomoProxy_EmptySecretStripsInboundAuth(t *testing.T) {
 	var gotAuth string
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := newMihomoProxyTestHandler(t, "", true, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
 	}))
-	defer upstream.Close()
-	h := newMihomoProxy(strings.TrimPrefix(upstream.URL, "http://"), "", "/proxy", true)
+
 	req := httptest.NewRequest(http.MethodGet, "/proxy/configs", nil)
-	req.Header.Set("Authorization", "Bearer leak")
+	req.Header.Set("Authorization", "Bearer console-token")
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	if gotAuth != "" {
 		t.Errorf("empty-secret proxy forwarded Authorization %q; must be stripped", gotAuth)
@@ -53,17 +62,10 @@ func TestMihomoProxy_EmptySecretStripsInboundAuth(t *testing.T) {
 }
 
 func TestMihomoProxy_InjectedAuthFailureIsBadGateway(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	injected := newMihomoProxyTestHandler(t, "stale-secret", true, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="mihomo"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}))
-	defer upstream.Close()
-	controller := strings.TrimPrefix(upstream.URL, "http://")
-
-	// The injecting console proxy sits behind a successfully validated 5gpn
-	// bearer token. It must not relay mihomo's 401, because the SPA treats any
-	// API 401 as a rejected console token and logs the operator out.
-	injected := newMihomoProxy(controller, "stale-secret", "/proxy", true)
 	rec := httptest.NewRecorder()
 	injected.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/proxy/version", nil))
 	if rec.Code != http.StatusBadGateway {
@@ -76,9 +78,10 @@ func TestMihomoProxy_InjectedAuthFailureIsBadGateway(t *testing.T) {
 		t.Fatalf("injecting proxy body = %q", rec.Body.String())
 	}
 
-	// Zashboard supplies its own controller credential, so pass-through mode
-	// must retain mihomo's native challenge rather than hiding it.
-	passThrough := newMihomoProxy(controller, "ignored", "/proxy", false)
+	passThrough := newMihomoProxyTestHandler(t, "ignored", false, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="mihomo"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
 	rec = httptest.NewRecorder()
 	passThrough.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/proxy/version", nil))
 	if rec.Code != http.StatusUnauthorized {
@@ -92,23 +95,20 @@ func TestMihomoProxy_InjectedAuthFailureIsBadGateway(t *testing.T) {
 // — regardless of what the daemon's own controller secret is configured to.
 func TestMihomoProxy_PassThroughForwardsIncomingAuth(t *testing.T) {
 	var gotAuth string
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := newMihomoProxyTestHandler(t, "s3cr3t", false, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer upstream.Close()
-	controller := strings.TrimPrefix(upstream.URL, "http://")
 
-	h := newMihomoProxy(controller, "s3cr3t", "/proxy", false)
 	req := httptest.NewRequest(http.MethodGet, "/proxy/version", nil)
-	req.Header.Set("Authorization", "Bearer from-the-browser")
+	req.Header.Set("Authorization", "Bearer browser-secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d", rr.Code)
 	}
-	if gotAuth != "Bearer from-the-browser" {
+	if gotAuth != "Bearer browser-secret" {
 		t.Errorf("upstream auth = %q, want the browser's own Authorization forwarded unchanged (never the configured secret)", gotAuth)
 	}
 }
@@ -120,14 +120,11 @@ func TestMihomoProxy_PassThroughForwardsIncomingAuth(t *testing.T) {
 func TestMihomoProxy_PassThroughAddsNoneWhenAbsent(t *testing.T) {
 	var gotAuth string
 	sawHeader := false
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := newMihomoProxyTestHandler(t, "s3cr3t", false, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth, sawHeader = r.Header.Get("Authorization"), r.Header.Get("Authorization") != ""
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer upstream.Close()
-	controller := strings.TrimPrefix(upstream.URL, "http://")
 
-	h := newMihomoProxy(controller, "s3cr3t", "/proxy", false)
 	req := httptest.NewRequest(http.MethodGet, "/proxy/version", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -141,26 +138,28 @@ func TestMihomoProxy_PassThroughAddsNoneWhenAbsent(t *testing.T) {
 }
 
 // TestMihomoProxy_WebSocketUpgradePassesThrough proves the proxy forwards a
-// WebSocket upgrade handshake rather than swallowing it: the upstream hijacks
-// the raw connection and writes a hand-rolled "101 Switching Protocols"
-// response, and we assert the client sees that 101 (plus its Connection/
-// Upgrade headers) THROUGH the proxy, and that the upstream received the
-// inbound Connection/Upgrade headers and the injected mihomo secret. This
-// deliberately avoids any websocket library (module policy: only miekg/dns +
-// go-telegram/bot as direct deps) — net/http/httputil.ReverseProxy detects
-// the "Connection: Upgrade" request itself and switches to raw byte-pipe
-// proxying (net/http/httputil since Go 1.12), so a stdlib hijack on both ends
-// is sufficient to exercise that path.
+// WebSocket upgrade handshake rather than swallowing it.
 func TestMihomoProxy_WebSocketUpgradePassesThrough(t *testing.T) {
 	var gotConn, gotUpgrade, gotAuth string
+
+	certFile, keyFile := generateSelfSignedCert(t, t.TempDir())
+	pair, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		t.Fatalf("load test certificate: %v", err)
+	}
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	tlsLn := tls.NewListener(ln, &tls.Config{
+		Certificates: []tls.Certificate{pair},
+		MinVersion:   tls.VersionTLS12,
+	})
+	defer tlsLn.Close()
 
 	go func() {
-		conn, err := ln.Accept()
+		conn, err := tlsLn.Accept()
 		if err != nil {
 			return
 		}
@@ -175,7 +174,11 @@ func TestMihomoProxy_WebSocketUpgradePassesThrough(t *testing.T) {
 		_, _ = conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"))
 	}()
 
-	h := newMihomoProxy(ln.Addr().String(), "s3cr3t", "/proxy", true)
+	transport, err := newMihomoTransport(ln.Addr().String(), "test.local", certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newMihomoProxy("test.local", "s3cr3t", "/proxy", true, transport)
 	proxySrv := httptest.NewServer(h)
 	defer proxySrv.Close()
 

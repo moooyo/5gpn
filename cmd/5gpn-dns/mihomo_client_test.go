@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +13,7 @@ import (
 // {"path": ...} JSON body.
 func TestMihomoClient_PutConfigs(t *testing.T) {
 	var gotPath, gotQuery, gotBody string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newMihomoTLSTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotQuery = r.URL.RawQuery
 		b, _ := io.ReadAll(r.Body)
@@ -22,11 +21,13 @@ func TestMihomoClient_PutConfigs(t *testing.T) {
 		if r.Method != "PUT" {
 			t.Errorf("bad method %s", r.Method)
 		}
-		w.WriteHeader(204)
+		w.WriteHeader(http.StatusNoContent)
 	}))
-	defer srv.Close()
 
-	c := NewMihomoClient(strings.TrimPrefix(srv.URL, "http://"), "tok")
+	c, err := NewMihomoClient(srv.controller, "tok", srv.serverName, srv.certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := c.PutConfigs(context.Background(), "/etc/mihomo/config.yaml"); err != nil {
 		t.Fatal(err)
 	}
@@ -45,13 +46,15 @@ func TestMihomoClient_PutConfigs(t *testing.T) {
 // bearer token attached.
 func TestMihomoClient_PutConfigsAuth(t *testing.T) {
 	var gotAuth string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newMihomoTLSTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
-		w.WriteHeader(204)
+		w.WriteHeader(http.StatusNoContent)
 	}))
-	defer srv.Close()
 
-	c := NewMihomoClient(strings.TrimPrefix(srv.URL, "http://"), "s3cr3t")
+	c, err := NewMihomoClient(srv.controller, "s3cr3t", srv.serverName, srv.certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := c.PutConfigs(context.Background(), "/etc/mihomo/config.yaml"); err != nil {
 		t.Fatal(err)
 	}
@@ -63,16 +66,18 @@ func TestMihomoClient_PutConfigsAuth(t *testing.T) {
 // TestMihomoClient_PutConfigs_NoSecret asserts the Authorization header is
 // omitted entirely when the client is constructed with an empty secret — a
 // mihomo controller with no `secret:` configured rejects any Authorization
-// header at all, so we must not send `Bearer ` (empty).
+// header at all, so we must not send `Bearer `.
 func TestMihomoClient_PutConfigs_NoSecret(t *testing.T) {
 	authSet := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newMihomoTLSTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authSet = r.Header.Get("Authorization") != "" || len(r.Header.Values("Authorization")) > 0
-		w.WriteHeader(200)
+		w.WriteHeader(http.StatusOK)
 	}))
-	defer srv.Close()
 
-	c := NewMihomoClient(strings.TrimPrefix(srv.URL, "http://"), "")
+	c, err := NewMihomoClient(srv.controller, "", srv.serverName, srv.certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := c.PutConfigs(context.Background(), "/etc/mihomo/config.yaml"); err != nil {
 		t.Fatal(err)
 	}
@@ -85,12 +90,14 @@ func TestMihomoClient_PutConfigs_NoSecret(t *testing.T) {
 // non-2xx status — counts as reachable, while a dead/unlistening address
 // (nothing to dial) counts as unreachable.
 func TestMihomoClient_Reachable(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newMihomoTLSTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
-	defer srv.Close()
 
-	c := NewMihomoClient(strings.TrimPrefix(srv.URL, "http://"), "tok")
+	c, err := NewMihomoClient(srv.controller, "tok", srv.serverName, srv.certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !c.Reachable(context.Background()) {
 		t.Fatalf("expected reachable=true for a live (even 401) controller")
 	}
@@ -99,7 +106,10 @@ func TestMihomoClient_Reachable(t *testing.T) {
 		t.Fatalf("401 status = %+v, want reachable but unauthenticated", status)
 	}
 
-	dead := NewMihomoClient("127.0.0.1:1", "") // nothing listens on port 1
+	dead, err := NewMihomoClient("127.0.0.1:1", "", srv.serverName, srv.certFile) // nothing listens on port 1
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	if dead.Reachable(ctx) {
@@ -110,14 +120,16 @@ func TestMihomoClient_Reachable(t *testing.T) {
 // TestMihomoClient_ErrorStatus asserts a non-2xx response surfaces as an
 // error carrying the status code and a snippet of the response body.
 func TestMihomoClient_ErrorStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newMihomoTLSTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("boom: config validation failed"))
 	}))
-	defer srv.Close()
 
-	c := NewMihomoClient(strings.TrimPrefix(srv.URL, "http://"), "tok")
-	err := c.PutConfigs(context.Background(), "/etc/mihomo/config.yaml")
+	c, err := NewMihomoClient(srv.controller, "tok", srv.serverName, srv.certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.PutConfigs(context.Background(), "/etc/mihomo/config.yaml")
 	if err == nil {
 		t.Fatal("expected error for 500 response")
 	}
