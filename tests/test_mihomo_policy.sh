@@ -22,6 +22,10 @@ check install.sh 'mihomo\.service' 'install_units installs mihomo.service'
 # Task 3: mihomo config template shape
 T=etc/mihomo/config.yaml.tmpl
 check "$T" '__MIHOMO_LISTENERS__'                      'dynamic local-listener placeholder'
+check "$T" 'external-controller: ""'                   'plaintext controller disabled in seed'
+check "$T" 'external-controller-tls: 127\.0\.0\.1:9090' 'TLS controller loopback listener'
+check "$T" '/etc/5gpn/cert/zash/fullchain\.pem'       'controller TLS certificate path pinned'
+check "$T" '/etc/5gpn/cert/zash/privkey\.pem'         'controller TLS private-key path pinned'
 check install.sh 'render_mihomo_listeners\(\)'          'dynamic listener renderer'
 check install.sh 'type: tunnel.*port: 443.*network: \[tcp, udp\]' ':443 tcp+udp listener renderer'
 check install.sh 'target: 127\.0\.0\.1:443'             'listener renderer loopback target'

@@ -216,7 +216,7 @@ func TestMihomoConfigAPI_Put_Valid(t *testing.T) {
 func TestMihomoConfigAPI_Put_MissingController(t *testing.T) {
 	fx := newMihomoConfigTestFixture(t)
 
-	broken := strings.Replace(fx.golden, "external-controller: 127.0.0.1:9090\n", "", 1)
+	broken := strings.Replace(fx.golden, "external-controller-tls: 127.0.0.1:9090\n", "", 1)
 	body, _ := json.Marshal(map[string]string{"text": broken})
 	rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/config", body, fx.token, true)
 

@@ -5,8 +5,12 @@
 # mihomo-reset' to restore this seed, or by hand. The console's policy
 # engine only ever decides "gateway or not" (DNS layer); everything below
 # about what happens to gateway-bound traffic is yours to shape.
-external-controller: 127.0.0.1:9090
+external-controller: ""
+external-controller-tls: 127.0.0.1:9090
 secret: __CONTROLLER_SECRET__
+tls:
+  certificate: /etc/5gpn/cert/zash/fullchain.pem
+  private-key: /etc/5gpn/cert/zash/privkey.pem
 profile: { store-selected: true }
 mode: rule
 log-level: info

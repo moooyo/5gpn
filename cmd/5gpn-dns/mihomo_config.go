@@ -269,8 +269,12 @@ const mihomoConfigSeedTemplate = `# 5gpn mihomo data plane — install-time seed
 # mihomo-reset' to restore this seed, or by hand. The console's policy
 # engine only ever decides "gateway or not" (DNS layer); everything below
 # about what happens to gateway-bound traffic is yours to shape.
-external-controller: 127.0.0.1:9090
+external-controller: ""
+external-controller-tls: 127.0.0.1:9090
 secret: __CONTROLLER_SECRET__
+tls:
+  certificate: /etc/5gpn/cert/zash/fullchain.pem
+  private-key: /etc/5gpn/cert/zash/privkey.pem
 profile: { store-selected: true }
 mode: rule
 log-level: info
@@ -363,28 +367,121 @@ func normalizeForMatch(text string) string {
 // bleed into each other.
 const proximityWindow = `.{0,200}?`
 
-// literalControllerAddr and literalDNSBrokerNameserver are the box's fixed
-// loopback controller address and egress DNS broker nameserver URL (design
-// §4.4 rows 1 and 3). These are LITERALS, not InfraParams.Controller /
-// .EgressBrokerDNS: the seed template (mihomoConfigSeedTemplate /
-// etc/mihomo/config.yaml.tmpl) hardcodes "external-controller: 127.0.0.1:9090"
-// and "udp://127.0.0.1:5354" unconditionally — they are never sed-substituted
-// per box, unlike the console/zash domains or gateway IP. Checking against
-// cfg.MihomoController/cfg.EgressBrokerAddr instead (as an earlier revision
-// of this file did) was a bug: an operator who changed DNS_MIHOMO_CONTROLLER
-// away from its default would make ValidateInvariants reject the box's own
-// correctly-seeded config, since the text this invariant actually needs to
-// find never varies with that setting.
+// literalControllerTLSAddr, literalControllerCert, literalControllerKey, and
+// literalDNSBrokerNameserver are the box's fixed loopback controller TLS
+// listener, zashboard cert/key paths, and egress DNS broker nameserver URL
+// (design §4.4 rows 1 and 3). These are LITERALS, not
+// InfraParams.Controller/.EgressBrokerDNS: the seed template
+// (mihomoConfigSeedTemplate / etc/mihomo/config.yaml.tmpl) hardcodes them
+// unconditionally, unlike the console/zash domains or gateway IP. Checking
+// against cfg.MihomoController/cfg.EgressBrokerAddr instead (as an earlier
+// revision of this file did) was a bug: an operator who changed
+// DNS_MIHOMO_CONTROLLER away from its default would make ValidateInvariants
+// reject the box's own correctly-seeded config, since the text this invariant
+// actually needs to find never varies with that setting.
 const (
-	literalControllerAddr      = "127.0.0.1:9090"
+	literalControllerTLSAddr   = "127.0.0.1:9090"
+	literalControllerCert      = "/etc/5gpn/cert/zash/fullchain.pem"
+	literalControllerKey       = "/etc/5gpn/cert/zash/privkey.pem"
 	literalDNSBrokerNameserver = "udp://127.0.0.1:5354"
 )
 
-// hasControllerInvariant asserts `external-controller:` is bound to the
-// loopback controller (design §4.4 #1, literalControllerAddr).
-func hasControllerInvariant(norm string) bool {
-	pat := regexp.MustCompile(`external-controller\s*:\s*"?` + regexp.QuoteMeta(literalControllerAddr) + `"?\b`)
-	return pat.MatchString(norm)
+func parseYAMLScalar(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	switch {
+	case len(raw) >= 2 && raw[0] == '\'' && raw[len(raw)-1] == '\'':
+		return strings.ReplaceAll(raw[1:len(raw)-1], "''", "'"), true
+	case len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"':
+		value, err := strconv.Unquote(raw)
+		return value, err == nil
+	default:
+		return raw, true
+	}
+}
+
+func topLevelYAMLScalar(text, key string) (string, bool) {
+	var value string
+	found := false
+	prefix := key + ":"
+	for _, raw := range strings.Split(stripYAMLComments(text), "\n") {
+		if raw != strings.TrimLeft(raw, " \t") || !strings.HasPrefix(raw, prefix) {
+			continue
+		}
+		if found {
+			return "", false
+		}
+		var ok bool
+		value, ok = parseYAMLScalar(strings.TrimPrefix(raw, prefix))
+		if !ok {
+			return "", false
+		}
+		found = true
+	}
+	return value, found
+}
+
+func topLevelYAMLMapScalar(text, mapKey, key string) (string, bool) {
+	lines := strings.Split(stripYAMLComments(text), "\n")
+	inMap := false
+	mapFound := false
+	childIndent := -1
+	var value string
+	valueFound := false
+	for _, raw := range lines {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		trimmed := strings.TrimLeft(raw, " \t")
+		indent := len(raw) - len(trimmed)
+		if indent == 0 {
+			if inMap {
+				inMap = false
+			}
+			if !strings.HasPrefix(trimmed, mapKey+":") {
+				continue
+			}
+			if mapFound || strings.TrimSpace(strings.TrimPrefix(trimmed, mapKey+":")) != "" {
+				return "", false
+			}
+			mapFound = true
+			inMap = true
+			childIndent = -1
+			continue
+		}
+		if !inMap {
+			continue
+		}
+		if childIndent == -1 {
+			childIndent = indent
+		}
+		if indent != childIndent || !strings.HasPrefix(trimmed, key+":") {
+			continue
+		}
+		if valueFound {
+			return "", false
+		}
+		var ok bool
+		value, ok = parseYAMLScalar(strings.TrimPrefix(trimmed, key+":"))
+		if !ok {
+			return "", false
+		}
+		valueFound = true
+	}
+	return value, mapFound && valueFound
+}
+
+// hasControllerInvariant asserts plaintext control is disabled, the loopback
+// TLS controller is fixed, and the zashboard cert/key paths stay exact
+// (design §4.4 #1).
+func hasControllerInvariant(text string) bool {
+	plain, plainOK := topLevelYAMLScalar(text, "external-controller")
+	tlsAddr, tlsOK := topLevelYAMLScalar(text, "external-controller-tls")
+	cert, certOK := topLevelYAMLMapScalar(text, "tls", "certificate")
+	key, keyOK := topLevelYAMLMapScalar(text, "tls", "private-key")
+	return plainOK && plain == "" &&
+		tlsOK && tlsAddr == literalControllerTLSAddr &&
+		certOK && cert == literalControllerCert &&
+		keyOK && key == literalControllerKey
 }
 
 // hasControllerSecretInvariant requires the raw editor to preserve the
@@ -394,26 +491,8 @@ func hasControllerInvariant(norm string) bool {
 // rotation operation can coordinate those components in the future; raw YAML
 // editing is intentionally not such an operation.
 func hasControllerSecretInvariant(text, want string) bool {
-	for _, raw := range strings.Split(stripYAMLComments(text), "\n") {
-		// The controller secret is a top-level key. Do not let a nested `secret:`
-		// elsewhere in the document satisfy this invariant.
-		if raw != strings.TrimLeft(raw, " \t") || !strings.HasPrefix(raw, "secret:") {
-			continue
-		}
-		got := strings.TrimSpace(strings.TrimPrefix(raw, "secret:"))
-		switch {
-		case len(got) >= 2 && got[0] == '\'' && got[len(got)-1] == '\'':
-			got = strings.ReplaceAll(got[1:len(got)-1], "''", "'")
-		case len(got) >= 2 && got[0] == '"' && got[len(got)-1] == '"':
-			unquoted, err := strconv.Unquote(got)
-			if err != nil {
-				return false
-			}
-			got = unquoted
-		}
-		return got == want
-	}
-	return false
+	got, ok := topLevelYAMLScalar(text, "secret")
+	return ok && got == want
 }
 
 // hasSniproxyInbound asserts a `tunnel` listener on port 443 targeting
@@ -498,7 +577,7 @@ func ValidateInvariants(text string, p InfraParams) error {
 	norm := normalizeForMatch(text)
 
 	switch {
-	case !hasControllerInvariant(norm):
+	case !hasControllerInvariant(text):
 		return &ErrMissingInfra{Name: "controller"}
 	case !hasSniproxyInbound(norm):
 		return &ErrMissingInfra{Name: "sniproxy-inbound"}

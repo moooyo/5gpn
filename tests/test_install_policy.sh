@@ -296,8 +296,14 @@ grep -Fq -- '- MATCH,DIRECT' "$MIHOMO_TMPL" \
 grep -Fq '{name: Proxies, type: select, proxies: [DIRECT]}' "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: default Proxies select group (DIRECT-only) missing"
 # Infrastructure invariants must all still be present in the seed/render path.
-grep -Fq 'external-controller: 127.0.0.1:9090' "$MIHOMO_TMPL" \
-    || fail "etc/mihomo/config.yaml.tmpl: missing invariant #1 (controller)"
+grep -Fq 'external-controller: ""' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: plaintext controller must stay disabled"
+grep -Fq 'external-controller-tls: 127.0.0.1:9090' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: missing invariant #1 (TLS controller)"
+grep -Fq 'certificate: /etc/5gpn/cert/zash/fullchain.pem' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: missing invariant #1 (zash controller certificate path)"
+grep -Fq 'private-key: /etc/5gpn/cert/zash/privkey.pem' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: missing invariant #1 (zash controller private-key path)"
 grep -Fq '__MIHOMO_LISTENERS__'                 "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing dynamic listener placeholder"
 grep -Fq 'target: 127.0.0.1:443'               "$INSTALL" \

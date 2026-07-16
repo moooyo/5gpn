@@ -76,11 +76,23 @@ func TestMihomoInvariants_WhitespaceReformattedStillPasses(t *testing.T) {
 		"- name:    sniproxy\n    type: tunnel\n    listen: 203.0.113.10\n    port:   443\n    network: [tcp, udp]\n    target:      127.0.0.1:443",
 	)
 	// Extra blank lines and leading/trailing whitespace elsewhere.
-	reformatted = strings.ReplaceAll(reformatted, "external-controller: 127.0.0.1:9090", "external-controller:    127.0.0.1:9090   ")
+	reformatted = strings.ReplaceAll(reformatted, `external-controller: ""`, `external-controller:    ""   `)
 	reformatted = "\n\n" + reformatted + "\n\n"
 
 	if err := ValidateInvariants(reformatted, goldenInfraParams()); err != nil {
 		t.Fatalf("whitespace-reformatted-but-valid config should still pass: %v", err)
+	}
+}
+
+func TestMihomoInvariants_ControllerQuotedScalarsStillPass(t *testing.T) {
+	cfg := goldenMihomoConfig()
+	cfg = strings.Replace(cfg, `external-controller: ""`, `external-controller: ''`, 1)
+	cfg = strings.Replace(cfg, "external-controller-tls: 127.0.0.1:9090", `external-controller-tls: "127.0.0.1:9090"`, 1)
+	cfg = strings.Replace(cfg, "certificate: /etc/5gpn/cert/zash/fullchain.pem", "certificate: '/etc/5gpn/cert/zash/fullchain.pem'", 1)
+	cfg = strings.Replace(cfg, "private-key: /etc/5gpn/cert/zash/privkey.pem", `private-key: "/etc/5gpn/cert/zash/privkey.pem"`, 1)
+
+	if err := ValidateInvariants(cfg, goldenInfraParams()); err != nil {
+		t.Fatalf("quoted controller scalars should still pass: %v", err)
 	}
 }
 
@@ -93,16 +105,55 @@ func TestMihomoInvariants_MissingElement(t *testing.T) {
 		wantName string
 	}{
 		{
-			name: "controller line removed",
+			name: "plaintext controller enabled",
 			mutate: func(cfg string) string {
-				return strings.Replace(cfg, "external-controller: 127.0.0.1:9090\n", "", 1)
+				return strings.Replace(cfg, `external-controller: ""`, "external-controller: 127.0.0.1:9090", 1)
 			},
 			wantName: "controller",
 		},
 		{
-			name: "controller bound to a different address",
+			name: "TLS controller removed",
 			mutate: func(cfg string) string {
-				return strings.Replace(cfg, "external-controller: 127.0.0.1:9090", "external-controller: 0.0.0.0:9090", 1)
+				return strings.Replace(cfg, "external-controller-tls: 127.0.0.1:9090\n", "", 1)
+			},
+			wantName: "controller",
+		},
+		{
+			name: "controller certificate changed",
+			mutate: func(cfg string) string {
+				return strings.Replace(cfg, "/etc/5gpn/cert/zash/fullchain.pem", "/tmp/controller.pem", 1)
+			},
+			wantName: "controller",
+		},
+		{
+			name: "controller private key changed",
+			mutate: func(cfg string) string {
+				return strings.Replace(cfg, "/etc/5gpn/cert/zash/privkey.pem", "/tmp/controller.key", 1)
+			},
+			wantName: "controller",
+		},
+		{
+			name: "duplicate TLS controller key rejected",
+			mutate: func(cfg string) string {
+				return strings.Replace(cfg, "secret: s3cr3t\n", "external-controller-tls: 127.0.0.1:9090\nsecret: s3cr3t\n", 1)
+			},
+			wantName: "controller",
+		},
+		{
+			name: "nested TLS decoy rejected",
+			mutate: func(cfg string) string {
+				return strings.Replace(cfg,
+					"tls:\n  certificate: /etc/5gpn/cert/zash/fullchain.pem\n  private-key: /etc/5gpn/cert/zash/privkey.pem\n",
+					"tls:\n  nested:\n    certificate: /etc/5gpn/cert/zash/fullchain.pem\n    private-key: /etc/5gpn/cert/zash/privkey.pem\n", 1)
+			},
+			wantName: "controller",
+		},
+		{
+			name: "flow-style TLS substitution rejected",
+			mutate: func(cfg string) string {
+				return strings.Replace(cfg,
+					"tls:\n  certificate: /etc/5gpn/cert/zash/fullchain.pem\n  private-key: /etc/5gpn/cert/zash/privkey.pem\n",
+					"tls: { certificate: /etc/5gpn/cert/zash/fullchain.pem, private-key: /etc/5gpn/cert/zash/privkey.pem }\n", 1)
 			},
 			wantName: "controller",
 		},
@@ -190,7 +241,7 @@ func TestMihomoInvariants_MissingElement(t *testing.T) {
 		{
 			name: "invariant commented out still counts as missing",
 			mutate: func(cfg string) string {
-				return strings.Replace(cfg, "external-controller: 127.0.0.1:9090", "# external-controller: 127.0.0.1:9090", 1)
+				return strings.Replace(cfg, `external-controller: ""`, `# external-controller: ""`, 1)
 			},
 			wantName: "controller",
 		},
