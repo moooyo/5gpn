@@ -141,9 +141,8 @@ type Config struct {
 	// persists it to DNS_MIHOMO_SECRET (write_dns_env / set_dns_env_kv), so this
 	// knob carries the REAL secret at runtime: it authenticates BOTH the daemon's
 	// own MihomoClient (apply calls) and the browser-facing /proxy/ reverse-proxy
-	// against the same controller. (The still-open apply_whitelist TODO(Task 6)
-	// in install.sh is a separate shell-side item: the TUI whitelist-refresh curl
-	// doesn't yet send this secret.) WhitelistFile is the panel source-IP
+	// against the same controller. Installer-side controller calls use the same
+	// secret through mihomo_controller_curl. WhitelistFile is the panel source-IP
 	// allowlist mihomo's rule-provider reloads from (env DNS_WHITELIST_FILE,
 	// default /etc/5gpn/mihomo/whitelist.txt).
 	MihomoController string
