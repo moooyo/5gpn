@@ -391,8 +391,8 @@ func main() {
 
 	// TLS-cert expiry early-warning: when a cert is configured, periodically log
 	// as expiry approaches (error once expired) and surface days-until-expiry via
-	// the control-plane /status (and the bot). The certbot renewal timer runs at
-	// 03:00 ±6h; this warns if it ever falls behind, before DoT/DoH go dark.
+	// the control-plane /status (and the bot). The scoped renewal timer runs at
+	// 03:00 ±6h; this warns if it ever falls behind, before TLS service fails.
 	if cfg.CertFile != "" {
 		certMon := newCertMonitor(cfg.CertFile, cfg.KeyFile, 14*24*time.Hour)
 		ctrl.SetCertStatusFn(certMon.status)

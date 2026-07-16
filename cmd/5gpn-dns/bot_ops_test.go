@@ -10,7 +10,7 @@ import (
 
 // recordRun builds a run-stub that records every argv it is called with and
 // returns the canned (ok, out). It mirrors how tgbot's tests monkeypatched
-// tgbot.run: no real systemctl/journalctl/certbot/qrencode is ever invoked.
+// tgbot.run: no real systemctl/journalctl/renewal-helper/qrencode is invoked.
 func recordRun(ok bool, out string) (func(argv []string, timeout time.Duration) (bool, string), *[][]string) {
 	var calls [][]string
 	fn := func(argv []string, timeout time.Duration) (bool, string) {
@@ -214,8 +214,8 @@ func TestOpLogsUnknownService(t *testing.T) {
 	}
 }
 
-// TestOpRenewCert covers the three certbot-renew branches (not-yet-due,
-// renewed, failed) via the stubbed run.
+// TestOpRenewCert covers the three renewal-helper branches (not-yet-due,
+// renewed, failed) via the stubbed run and locks its sandbox-escape argv.
 func TestOpRenewCert(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -232,20 +232,25 @@ func TestOpRenewCert(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv(baseDomainEnv, "example.com")
 			fn, calls := recordRun(c.ok, c.out)
-			bt := &Bot{runFn: fn}
+			var gotTimeout time.Duration
+			bt := &Bot{runFn: func(argv []string, timeout time.Duration) (bool, string) {
+				gotTimeout = timeout
+				return fn(argv, timeout)
+			}}
 			msg := bt.opRenewCert()
 			if len(*calls) != 1 {
 				t.Fatalf("opRenewCert made %d run calls, want 1: %v", len(*calls), *calls)
 			}
 			argv := (*calls)[0]
-			// certbot is wrapped in systemd-run so it escapes the daemon's
-			// hardened sandbox; the argv must be a systemd-run … certbot renew.
+			// The unified helper is wrapped in systemd-run so it escapes the
+			// daemon's hardened sandbox.
 			if len(argv) == 0 || argv[0] != "systemd-run" {
 				t.Fatalf("opRenewCert argv = %v, want a systemd-run wrapper", argv)
 			}
 			want := []string{
 				"systemd-run", "--pipe", "--collect", "--quiet",
-				"certbot", "renew", "--cert-name", "example.com", "--non-interactive",
+				"--property=RuntimeMaxSec=25min", "--property=TimeoutStopSec=2min",
+				"/opt/5gpn/scripts/cert-renew.sh", "--cert-name", "example.com",
 			}
 			if len(argv) != len(want) {
 				t.Fatalf("opRenewCert argv = %v, want %v", argv, want)
@@ -254,6 +259,9 @@ func TestOpRenewCert(t *testing.T) {
 				if argv[i] != want[i] {
 					t.Fatalf("opRenewCert argv = %v, want %v", argv, want)
 				}
+			}
+			if gotTimeout != 30*time.Minute {
+				t.Fatalf("opRenewCert timeout = %s, want 30m", gotTimeout)
 			}
 			if !strings.Contains(msg, c.wantSubstr) {
 				t.Errorf("opRenewCert(%s) = %q, want substring %q", c.name, msg, c.wantSubstr)
@@ -282,25 +290,31 @@ func TestOpRenewCertFailsClosedWithoutValidBaseDomain(t *testing.T) {
 }
 
 func TestOpRenewCertCanonicalizesCertName(t *testing.T) {
-	t.Setenv(baseDomainEnv, "EXAMPLE.COM.")
-	fn, calls := recordRun(true, "Cert not yet due for renewal")
-	bt := &Bot{runFn: fn}
+	for _, value := range []string{"EXAMPLE.COM", "example.com."} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv(baseDomainEnv, value)
+			fn, calls := recordRun(true, "[INFO] Cert not yet due for renewal")
+			bt := &Bot{runFn: fn}
 
-	bt.opRenewCert()
+			msg := bt.opRenewCert()
 
-	if len(*calls) != 1 {
-		t.Fatalf("opRenewCert made %d calls, want 1", len(*calls))
-	}
-	argv := (*calls)[0]
-	for i := 0; i+1 < len(argv); i++ {
-		if argv[i] == "--cert-name" {
-			if argv[i+1] != "example.com" {
-				t.Fatalf("--cert-name = %q, want example.com", argv[i+1])
+			if len(*calls) != 1 {
+				t.Fatalf("opRenewCert made %d calls, want 1", len(*calls))
 			}
-			return
-		}
+			want := []string{
+				"systemd-run", "--pipe", "--collect", "--quiet",
+				"--property=RuntimeMaxSec=25min", "--property=TimeoutStopSec=2min",
+				"/opt/5gpn/scripts/cert-renew.sh", "--cert-name", "example.com",
+			}
+			argv := (*calls)[0]
+			if strings.Join(argv, "\x00") != strings.Join(want, "\x00") {
+				t.Fatalf("opRenewCert argv = %v, want %v", argv, want)
+			}
+			if !strings.Contains(msg, "尚未到期") {
+				t.Fatalf("opRenewCert helper result = %q, want not-yet-due classification", msg)
+			}
+		})
 	}
-	t.Fatalf("opRenewCert argv = %v, missing --cert-name", argv)
 }
 
 // setIOSHostEnv points the iosHost source env keys at fresh test-scoped vars

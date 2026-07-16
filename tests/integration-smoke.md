@@ -9,9 +9,9 @@ current architecture is `docs/architecture.md`.
 - A Linux amd64 host with the current release installed.
 - `dig` with DoT support, `curl`, `openssl`, `jq`, and `systemctl`.
 - A client with L3 reachability to one address in `DNS_MIHOMO_LISTEN_IPS`.
-- A test `BASE_DOMAIN`, valid wildcard certificate (or an explicitly accepted
-  debug certificate), and a real `DNS_EGRESS_RESOLVER` rather than the
-  `22.22.22.22` sentinel.
+- A test `BASE_DOMAIN`, a certificate matching the selected `CERT_MODE`
+  (`cloudflare`, `http-01`, or an explicitly accepted `debug` certificate), and
+  a real `DNS_EGRESS_RESOLVER` rather than the `22.22.22.22` sentinel.
 - At least two controllable upstreams when testing sequential fallback.
 
 Capture before-state for host-owned facilities. In particular:
@@ -198,13 +198,41 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
 
 ## 10. Certificate renewal and recovery
 
-- [ ] The wildcard lineage covers dot/console/zash and renews with
-  Cloudflare DNS-01 without stopping mihomo or binding an ACME `:80` listener.
-- [ ] `certbot renew --dry-run` succeeds; the deploy hook updates role copies and
-  regenerates/signs the iOS profile.
+- [ ] `CERT_MODE` accepts exactly `cloudflare`, `http-01`, and `debug`; switching
+  between modes is a confirmed TUI operation, not a caller-environment input.
+- [ ] Both production modes use only the canonical
+  `/etc/letsencrypt/live/<base>` lineage with Certbot name `<base>`; no numbered
+  duplicate or unscoped host lineage is issued or renewed.
+- [ ] In `cloudflare` mode, the certificate has the exact apex `<base>` and
+  `*.<base>` SAN shape. Initial issuance and a due timer renewal use Cloudflare
+  DNS-01 without stopping mihomo or binding an ACME `:80` listener; a synthetic
+  `zash.<base>` remains valid for this mode.
+- [ ] In `http-01` mode, install and mode-switch TUI screens display the required
+  A records for `console.<base>`, `zash.<base>`, and `dot.<base>` and require an
+  explicit confirmation before any issuance attempt.
+- [ ] For HTTP-01, make one A answer absent, wrong, or non-unique, or publish an
+  AAAA answer. The gate observes the failure through `1.1.1.1`, keeps waiting
+  and then fails closed without issuing a certificate. After all three names
+  each return exactly the sole A `DNS_PUBLIC_IP` and no AAAA through `1.1.1.1`,
+  the same install/configure path proceeds.
+- [ ] The HTTP-01 lineage contains exactly the three service SANs and contains
+  neither `<base>` nor `*.<base>`.
+- [ ] HTTP-01 initial issuance briefly stops mihomo, serves the standalone ACME
+  challenge on TCP `:80`, and restores mihomo afterward. A forced challenge
+  failure also restores a previously active mihomo service.
+- [ ] A scheduled check while the certificate is not due leaves mihomo running.
+  A due HTTP-01 renewal repeats the `1.1.1.1` DNS gate and the same bounded
+  stop-and-restore window; a due Cloudflare renewal remains interruption-free.
+- [ ] The systemd timer and the Telegram bot's confirmed renewal action invoke
+  the same mode-aware scoped helper. Their result and journal output agree for
+  not-due, success, DNS-gate failure, Certbot failure, and mihomo-restore failure.
+- [ ] A successful production renewal runs the deploy hook, updates all three
+  role copies, and regenerates/signs the iOS profile.
 - [ ] New TLS handshakes observe renewed files by mtime without daemon restart.
-- [ ] After certificate renewal, a new Controller TLS handshake presents the
-  renewed certificate without restarting mihomo.
+- [ ] After Cloudflare renewal, a new Controller TLS handshake presents the
+  renewed certificate without restarting mihomo. HTTP-01 needs no additional
+  certificate-loading restart beyond restoring mihomo after its ACME `:80`
+  window.
 - [ ] A temporarily missing/broken cert is visible in status/journal; restoring
   valid files allows the TLS listeners to recover without destroying DNS state.
 

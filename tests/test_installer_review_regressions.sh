@@ -3,6 +3,7 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL="$ROOT/install.sh"
+CERT_RENEW="$ROOT/scripts/cert-renew.sh"
 FAIL=0
 pass(){ echo "ok: $*"; }
 fail(){ echo "FAIL: $*"; FAIL=1; }
@@ -54,6 +55,26 @@ grep -Fq 'trap install_transaction_error ERR' "$INSTALL" \
     && pass "publication failures have a rollback trap" \
     || fail "publication rollback is not wired"
 
+capture_fn="$(sed -n '/^capture_install_rollback()/,/^}/p' "$INSTALL")"
+rollback_fn="$(sed -n '/^rollback_install()/,/^}/p' "$INSTALL")"
+if grep -Fq '/etc/letsencrypt/renewal/${b}.conf' <<<"$capture_fn" \
+   && grep -Fq '/etc/letsencrypt/live/${b}' <<<"$capture_fn" \
+   && grep -Fq '/etc/letsencrypt/archive/${b}' <<<"$capture_fn" \
+   && grep -Fq 'certbot delete --non-interactive --cert-name "$renewal_base"' <<<"$rollback_fn" \
+   && grep -Fq 'ROLLBACK_DIR/le-live/${renewal_base}' <<<"$rollback_fn"; then
+    pass "certificate mode switches snapshot and restore the exact scoped lineage"
+else
+    fail "transaction rollback can leave cert mode/authenticator/lineage split-brain"
+fi
+if grep -Fq '5gpn-certbot-renew.timer.enabled' <<<"$capture_fn" \
+   && grep -Fq '5gpn-certbot-renew.timer.active' <<<"$capture_fn" \
+   && grep -Fq 'systemctl enable 5gpn-certbot-renew.timer' <<<"$rollback_fn" \
+   && grep -Fq 'systemctl start 5gpn-certbot-renew.timer' <<<"$rollback_fn"; then
+    pass "rollback preserves certificate timer enabled/active state"
+else
+    fail "certificate timer state is lost across a failed mode switch"
+fi
+
 ic="$(sed -n '/^install_cert()/,/^}/p' "$INSTALL")"
 grep -Fq 'validate_cert_pair' <<<"$ic" \
     && grep -Fq 'production' <<<"$ic" \
@@ -61,10 +82,13 @@ grep -Fq 'validate_cert_pair' <<<"$ic" \
     && pass "production/debug certificate reuse paths are validated and isolated" \
     || fail "certificate reuse validation/mode isolation missing"
 
-grep -Fq -- '--cert-name "$base"' <<<"$ic" \
-    && grep -Fq -- '--cert-name "$DNS_BASE_DOMAIN"' "$INSTALL" \
-    && pass "issuance and renewal are scoped to the 5gpn cert name" \
-    || fail "certbot operation is not cert-name scoped"
+if grep -Fq -- '--cert-name "$base"' <<<"$ic" \
+   && grep -Fq 'certbot_args=(renew --cert-name "$base" --non-interactive)' "$CERT_RENEW" \
+   && grep -Fq '[[ -z "$requested_name" || "$requested_name" == "$base" ]]' "$CERT_RENEW"; then
+    pass "issuance and helper renewal are strictly scoped to the configured cert name"
+else
+    fail "certificate issuance/renewal is not cert-name scoped"
+fi
 
 if grep -Eq 'swapoff[[:space:]]+/swapfile|rm -f[[:space:]]+/swapfile' "$INSTALL"; then
     fail "generic host /swapfile is still touched"
@@ -115,6 +139,26 @@ if command -v openssl >/dev/null 2>&1; then
     else
         fail "test OpenSSL cannot generate a SAN certificate"
     fi
+    if openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+        -keyout "$cert_tmp/http-key.pem" -out "$cert_tmp/http-cert.pem" \
+        -subj /CN=console.example.com \
+        -addext 'subjectAltName=DNS:console.example.com,DNS:zash.example.com,DNS:dot.example.com' >/dev/null 2>&1; then
+        cert_chain_trusted() { return 0; }
+        validate_cert_pair "$cert_tmp/http-cert.pem" "$cert_tmp/http-key.pem" example.com 0 production http-01 \
+            && pass "HTTP-01 exact console/zash/dot SAN shape validates" \
+            || fail "HTTP-01 exact service SAN certificate was rejected"
+        openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+            -keyout "$cert_tmp/http-extra-key.pem" -out "$cert_tmp/http-extra-cert.pem" \
+            -subj /CN=console.example.com \
+            -addext 'subjectAltName=DNS:console.example.com,DNS:zash.example.com,DNS:dot.example.com,DNS:extra.example.com' >/dev/null 2>&1
+        if validate_cert_pair "$cert_tmp/http-extra-cert.pem" "$cert_tmp/http-extra-key.pem" example.com 0 production http-01; then
+            fail "HTTP-01 certificate with an extra DNS SAN was accepted"
+        else
+            pass "HTTP-01 reuse requires the exact three-service DNS SAN set"
+        fi
+    else
+        fail "test OpenSSL cannot generate an HTTP-01 SAN certificate"
+    fi
     rm -rf -- "$cert_tmp"
 fi
 
@@ -153,6 +197,7 @@ else
     pass "decommission preserves a reused external lineage and its referenced credential"
 fi
 write_cert_provenance cloudflare example.com owned
+decommission_lineage_safe() { return 0; }
 decommission_certbot_lineage example.com >/dev/null
 grep -qx -- 'delete --non-interactive --cert-name example.com' "$certbot_log" \
     && pass "decommission deletes only a provenance-confirmed owned lineage" \
@@ -160,6 +205,8 @@ grep -qx -- 'delete --non-interactive --cert-name example.com' "$certbot_log" \
 
 # Simulate a lost Certbot live lineage with a still-valid preserved dot role.
 rm -rf -- "$LE_LIVE_ROOT/example.com"
+rm -rf -- "$LE_ARCHIVE_ROOT/example.com"
+rm -f -- "$LE_RENEWAL_ROOT/example.com.conf"
 touch "$DOT_CERT_DIR/fullchain.pem" "$DOT_CERT_DIR/privkey.pem"
 : > "$certbot_log"
 reuse_log="$cert_state_tmp/reuse.log"

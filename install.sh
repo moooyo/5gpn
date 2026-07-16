@@ -8,17 +8,15 @@
 #   default; SP-2 adds selectable exits). mihomo also SNI-splits the panels
 #   (console./zash.<base>) to the daemon's loopback :443 listener.
 #
-# One base domain, one mandatory WILDCARD cert lineage (2026-07-14, replaces the
-# old http-01/:80 two-lineage flow):
+# One base domain and one scoped production cert lineage:
 #   BASE_DOMAIN  -> the operator's ONE apex domain (the single knob).
 #   CONSOLE_DOMAIN/ZASH_DOMAIN/DOT_DOMAIN
 #     (= console./zash./dot.<BASE_DOMAIN>)
-#     are auto-derived subdomains (derive_domains), all covered by ONE
-#     `*.<base>` + `<base>` Let's Encrypt cert issued via Cloudflare DNS-01
-#     (certbot-dns-cloudflare; no :80 challenge). console.<base> needs a
-#     pre-existing client-resolvable A record because the console and its iOS
-#     install path are public. Auto-renewal is
-#     unattended via the daily certbot timer.
+#     are auto-derived subdomains (derive_domains). Cloudflare DNS-01 issues
+#     `*.<base>` + `<base>`; HTTP-01 issues the three exact service SANs because
+#     HTTP-01 cannot issue wildcards. HTTP-01 waits for all three A records via
+#     1.1.1.1, then briefly releases mihomo's :80 listener for issuance/renewal.
+#     Auto-renewal is unattended via the daily scoped certbot timer.
 #     CERT_MODE=debug issues a self-signed wildcard instead (test/dev boxes).
 #
 # QUIC/HTTP3 is proxied by mihomo (UDP 443 sniff-forward). No exit layer, no Go
@@ -63,16 +61,22 @@ SWAP_FILE="${STATE_DIR}/swapfile"
 SWAP_FSTAB_MARKER="# 5gpn-owned-swap-v1"
 SWAP_CREATED_THIS_RUN=0
 DNS_BIN="${BIN_DIR}/5gpn-dns"            # 5gpn-dns binary (DoT resolver + web console)
-DNS_CERT_DIR="/etc/5gpn/cert"            # cert root; the ONE wildcard is copied into dot/, web/, zash/
+DNS_CERT_DIR="/etc/5gpn/cert"            # selected cert copied into dot/, web/, zash/ roles
 DEBUG_CERT_DIR="/etc/5gpn/debug-cert"     # self-signed debug certs; NEVER under /etc/letsencrypt
 DOT_CERT_DIR="${DNS_CERT_DIR}/dot"       # DoT :853 cert copy (hot-reloaded on mtime change)
-WEB_CERT_DIR="${DNS_CERT_DIR}/web"       # web-console :18443 cert copy
+WEB_CERT_DIR="${DNS_CERT_DIR}/web"       # loopback HTTPS console :443 cert copy
 ZASH_CERT_DIR="${DNS_CERT_DIR}/zash"     # zashboard panel cert copy
 ACME_DIR="/etc/5gpn/acme"                # root-only Cloudflare API-token credentials dir
 LE_ROOT="/etc/letsencrypt"
 LE_LIVE_ROOT="${LE_ROOT}/live"
 LE_ARCHIVE_ROOT="${LE_ROOT}/archive"
 LE_RENEWAL_ROOT="${LE_ROOT}/renewal"
+CERT_DNS_RESOLVER="1.1.1.1"              # fixed independent resolver for ACME A/AAAA gates
+CERT_DNS_WAIT_TIMEOUT=600                 # bounded install/configure propagation wait
+CERT_DNS_WAIT_INTERVAL=10
+CERT_RENEW_LOCK_FILE="/run/5gpn/cert-renew.lock"
+LE_PRODUCTION_SERVER="https://acme-v02.api.letsencrypt.org/directory"
+INSTALL_CERT_LOCK_HELD=0
 DECOMMISSION_PRESERVE_ACME=0
 DNS_WEB_DIR_DEFAULT="/opt/5gpn/web"         # resolved from dns.env after cfg_get is defined
 # DNS_ZASH_DIR (zashboard SPA dist, config.go's ZashDir) is resolved just below
@@ -872,34 +876,48 @@ install_deps() {
             apt-get update -qq || true
             apt-get install -y -qq \
                 wget curl ca-certificates unzip iproute2 openssl \
-                qrencode jq libcap2-bin \
+                qrencode jq libcap2-bin util-linux \
                 dnsutils || warn "some apt packages failed; continuing."
+            if [[ "$CERT_MODE" != debug ]]; then
+                apt-get install -y -qq certbot \
+                    || { err "Could not install certbot from the OS repository."; return 1; }
+            fi
             if [[ "$CERT_MODE" == cloudflare ]]; then
-                apt-get install -y -qq certbot python3-certbot-dns-cloudflare \
-                    || { err "Could not install certbot + Cloudflare DNS plugin from the OS repository."; return 1; }
+                apt-get install -y -qq python3-certbot-dns-cloudflare \
+                    || { err "Could not install the Cloudflare DNS plugin from the OS repository."; return 1; }
             fi
             ;;
         dnf|yum)
             $PKG_MGR install -y -q \
                 wget curl ca-certificates unzip iproute openssl \
-                qrencode jq \
+                qrencode jq util-linux \
                 bind-utils || warn "some rpm packages failed; continuing."
+            if [[ "$CERT_MODE" != debug ]]; then
+                $PKG_MGR install -y -q certbot \
+                    || { err "Could not install certbot from the OS repository."; return 1; }
+            fi
             if [[ "$CERT_MODE" == cloudflare ]]; then
-                $PKG_MGR install -y -q certbot python3-certbot-dns-cloudflare \
-                    || { err "Could not install certbot + Cloudflare DNS plugin from the OS repository."; return 1; }
+                $PKG_MGR install -y -q python3-certbot-dns-cloudflare \
+                    || { err "Could not install the Cloudflare DNS plugin from the OS repository."; return 1; }
             fi
             # libcap setcap tooling (name varies by distro)
             $PKG_MGR install -y -q libcap libcap-ng-utils 2>/dev/null || true
             ;;
     esac
     local cmd
-    for cmd in curl openssl tar gzip unzip sha256sum ip; do
+    for cmd in curl openssl tar gzip unzip sha256sum ip flock; do
         command -v "$cmd" >/dev/null 2>&1 \
             || { err "Required command is missing after dependency install: $cmd"; return 1; }
     done
-    if [[ "$CERT_MODE" == cloudflare ]]; then
+    if [[ "$CERT_MODE" != debug ]]; then
+        command -v dig >/dev/null 2>&1 \
+            || { err "dig is required for public DNS verification in production certificate modes."; return 1; }
+    fi
+    if [[ "$CERT_MODE" != debug ]]; then
         command -v certbot >/dev/null 2>&1 && certbot --version >/dev/null 2>&1 \
             || { err "Working certbot is required for production certificates."; return 1; }
+    fi
+    if [[ "$CERT_MODE" == cloudflare ]]; then
         certbot plugins 2>/dev/null | grep -q dns-cloudflare \
             || { err "certbot-dns-cloudflare plugin is required for renewal."; return 1; }
     fi
@@ -1028,6 +1046,44 @@ cleanup_artifact_stage() {
     ARTIFACT_STAGE=""
 }
 
+file_uid() { stat -c %u -- "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null || true; }
+file_mode() { stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || true; }
+
+acquire_install_cert_lock() {
+    [[ "$INSTALL_CERT_LOCK_HELD" == 0 ]] || return 0
+    command -v flock >/dev/null 2>&1 \
+        || { err "flock is required for certificate-operation exclusion."; return 1; }
+    local lock_dir; lock_dir="$(dirname -- "$CERT_RENEW_LOCK_FILE")"
+    if [[ ! -e "$lock_dir" ]]; then
+        install -d -o root -g root -m 0700 "$lock_dir" \
+            || { err "Could not create the certificate-renewal lock directory."; return 1; }
+    fi
+    [[ -d "$lock_dir" && ! -L "$lock_dir" \
+       && "$(readlink -f -- "$lock_dir" 2>/dev/null || true)" == "$lock_dir" \
+       && "$(file_uid "$lock_dir")" == 0 \
+       && "$(file_mode "$lock_dir")" == 700 ]] \
+        || { err "Unsafe certificate-renewal lock directory: ${lock_dir}"; return 1; }
+    if [[ -e "$CERT_RENEW_LOCK_FILE" ]]; then
+        [[ -f "$CERT_RENEW_LOCK_FILE" && ! -L "$CERT_RENEW_LOCK_FILE" \
+           && "$(file_uid "$CERT_RENEW_LOCK_FILE")" == 0 ]] \
+            || { err "Unsafe certificate-renewal lock file: ${CERT_RENEW_LOCK_FILE}"; return 1; }
+    fi
+    exec 8>"$CERT_RENEW_LOCK_FILE"
+    chmod 0600 "$CERT_RENEW_LOCK_FILE" \
+        || { exec 8>&-; err "Could not protect the certificate-renewal lock file."; return 1; }
+    info "Waiting for any active 5gpn certificate renewal to finish..."
+    flock -w 900 8 \
+        || { exec 8>&-; err "Timed out waiting for the 5gpn certificate-renewal lock."; return 1; }
+    INSTALL_CERT_LOCK_HELD=1
+}
+
+release_install_cert_lock() {
+    [[ "$INSTALL_CERT_LOCK_HELD" == 1 ]] || return 0
+    flock -u 8 2>/dev/null || true
+    exec 8>&-
+    INSTALL_CERT_LOCK_HELD=0
+}
+
 capture_install_rollback() {
     ROLLBACK_DIR="$ARTIFACT_STAGE/rollback"
     install -d -m 0700 "$ROLLBACK_DIR"
@@ -1042,11 +1098,69 @@ capture_install_rollback() {
             : > "$ROLLBACK_DIR/units/$unit.absent"
         fi
     done
+    if systemctl is-enabled --quiet 5gpn-certbot-renew.timer 2>/dev/null; then
+        : > "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.enabled"
+    else
+        : > "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.disabled"
+    fi
+    if systemctl is-active --quiet 5gpn-certbot-renew.timer 2>/dev/null; then
+        : > "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.active"
+    else
+        : > "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.inactive"
+    fi
     if [[ -f /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh ]]; then
         cp -p -- /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh "$ROLLBACK_DIR/renew-hook"
     else
         : > "$ROLLBACK_DIR/renew-hook.absent"
     fi
+    # A certificate-method switch rewrites this scoped Certbot renewal file.
+    # Snapshot both the currently persisted base and the newly selected base so
+    # a later publication failure cannot leave dns.env and the authenticator in
+    # different modes. No other host lineage is read or touched.
+    install -d -m 0700 "$ROLLBACK_DIR/renewal-conf"
+    local old_base selected_base b seen="" conf_present live_present archive_present present_count
+    old_base="$(cfg_get DNS_BASE_DOMAIN)"
+    selected_base="${BASE_DOMAIN:-}"
+    : > "$ROLLBACK_DIR/renewal-names"
+    for b in "$old_base" "$selected_base"; do
+        b="$(printf '%s' "${b%.}" | tr '[:upper:]' '[:lower:]')"
+        is_valid_domain "$b" || continue
+        case " $seen " in *" $b "*) continue ;; esac
+        seen+=" $b"
+        printf '%s\n' "$b" >> "$ROLLBACK_DIR/renewal-names"
+        conf_present=0; live_present=0; archive_present=0
+        [[ -e "/etc/letsencrypt/renewal/${b}.conf" || -L "/etc/letsencrypt/renewal/${b}.conf" ]] && conf_present=1
+        [[ -e "/etc/letsencrypt/live/${b}" || -L "/etc/letsencrypt/live/${b}" ]] && live_present=1
+        [[ -e "/etc/letsencrypt/archive/${b}" || -L "/etc/letsencrypt/archive/${b}" ]] && archive_present=1
+        present_count=$((conf_present + live_present + archive_present))
+        [[ "$present_count" == 0 || "$present_count" == 3 ]] \
+            || { err "Certbot lineage ${b} is partial (renewal/live/archive must be all present or all absent); refusing replacement."; return 1; }
+        if [[ -f "/etc/letsencrypt/renewal/${b}.conf" && ! -L "/etc/letsencrypt/renewal/${b}.conf" ]]; then
+            certbot_renewal_conf_scoped "/etc/letsencrypt/renewal/${b}.conf" "$b" \
+                || { err "Certbot renewal config for ${b} escapes its exact live/archive paths; refusing replacement."; return 1; }
+            cp -p -- "/etc/letsencrypt/renewal/${b}.conf" "$ROLLBACK_DIR/renewal-conf/${b}.conf"
+        elif [[ -e "/etc/letsencrypt/renewal/${b}.conf" || -L "/etc/letsencrypt/renewal/${b}.conf" ]]; then
+            err "Refusing unsafe Certbot renewal config path: /etc/letsencrypt/renewal/${b}.conf"
+            return 1
+        else
+            : > "$ROLLBACK_DIR/renewal-conf/${b}.absent"
+        fi
+        if [[ "$live_present" == 1 ]]; then
+            : > "$ROLLBACK_DIR/renewal-conf/${b}.lineage-present"
+            [[ -d "/etc/letsencrypt/live/${b}" && ! -L "/etc/letsencrypt/live/${b}" \
+               && -d "/etc/letsencrypt/archive/${b}" && ! -L "/etc/letsencrypt/archive/${b}" \
+               && -s "/etc/letsencrypt/live/${b}/fullchain.pem" \
+               && -s "/etc/letsencrypt/live/${b}/privkey.pem" ]] \
+                || { err "Existing Certbot lineage ${b} has an unsafe or incomplete layout; refusing transactional replacement."; return 1; }
+            install -d -m 0700 "$ROLLBACK_DIR/le-live" "$ROLLBACK_DIR/le-archive" "$ROLLBACK_DIR/lineage-leaf/${b}"
+            cp -a -- "/etc/letsencrypt/live/${b}" "$ROLLBACK_DIR/le-live/${b}"
+            cp -a -- "/etc/letsencrypt/archive/${b}" "$ROLLBACK_DIR/le-archive/${b}"
+            cp -L -- "/etc/letsencrypt/live/${b}/fullchain.pem" "$ROLLBACK_DIR/lineage-leaf/${b}/fullchain.pem"
+            cp -L -- "/etc/letsencrypt/live/${b}/privkey.pem" "$ROLLBACK_DIR/lineage-leaf/${b}/privkey.pem"
+        else
+            : > "$ROLLBACK_DIR/renewal-conf/${b}.lineage-absent"
+        fi
+    done
     if unit_file_owned_by_5gpn xray.service; then
         install -d -m 0700 "$ROLLBACK_DIR/legacy-xray"
         cp -p -- /etc/systemd/system/xray.service "$ROLLBACK_DIR/legacy-xray/xray.service"
@@ -1066,6 +1180,7 @@ capture_install_rollback() {
 
 rollback_install() {
     [[ "$INSTALL_TRANSACTION_ACTIVE" == 1 && -d "$ROLLBACK_DIR" ]] || return 0
+    local rollback_cert_failed=0
     INSTALL_TRANSACTION_ACTIVE=0
     warn "Install publication failed; restoring the previous 5gpn deployment."
     if [[ "$SWAP_CREATED_THIS_RUN" == 1 ]]; then
@@ -1098,6 +1213,71 @@ rollback_install() {
     elif [[ -f "$ROLLBACK_DIR/renew-hook.absent" ]]; then
         rm -f -- /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh
     fi
+    if [[ -f "$ROLLBACK_DIR/renewal-names" ]]; then
+        local renewal_base lineage_changed restore_ok
+        while IFS= read -r renewal_base; do
+            is_valid_domain "$renewal_base" || continue
+            if [[ -f "$ROLLBACK_DIR/renewal-conf/${renewal_base}.lineage-present" ]]; then
+                lineage_changed=0
+                cmp -s "$ROLLBACK_DIR/lineage-leaf/${renewal_base}/fullchain.pem" \
+                    "/etc/letsencrypt/live/${renewal_base}/fullchain.pem" 2>/dev/null \
+                    || lineage_changed=1
+                cmp -s "$ROLLBACK_DIR/lineage-leaf/${renewal_base}/privkey.pem" \
+                    "/etc/letsencrypt/live/${renewal_base}/privkey.pem" 2>/dev/null \
+                    || lineage_changed=1
+                if [[ -f "$ROLLBACK_DIR/renewal-conf/${renewal_base}.conf" ]]; then
+                    cmp -s "$ROLLBACK_DIR/renewal-conf/${renewal_base}.conf" \
+                        "/etc/letsencrypt/renewal/${renewal_base}.conf" 2>/dev/null \
+                        || lineage_changed=1
+                elif [[ -e "/etc/letsencrypt/renewal/${renewal_base}.conf" ]]; then
+                    lineage_changed=1
+                fi
+                if [[ "$lineage_changed" == 1 ]]; then
+                    if certbot delete --non-interactive --cert-name "$renewal_base" >/dev/null 2>&1; then
+                        restore_ok=1
+                        [[ ! -e "/etc/letsencrypt/live/${renewal_base}" \
+                           && ! -e "/etc/letsencrypt/archive/${renewal_base}" \
+                           && ! -e "/etc/letsencrypt/renewal/${renewal_base}.conf" ]] \
+                            || restore_ok=0
+                        install -d -m 0755 /etc/letsencrypt/live /etc/letsencrypt/archive /etc/letsencrypt/renewal \
+                            || restore_ok=0
+                        [[ "$restore_ok" == 1 ]] \
+                            && cp -a -- "$ROLLBACK_DIR/le-live/${renewal_base}" "/etc/letsencrypt/live/${renewal_base}" \
+                            || restore_ok=0
+                        [[ "$restore_ok" == 1 ]] \
+                            && cp -a -- "$ROLLBACK_DIR/le-archive/${renewal_base}" "/etc/letsencrypt/archive/${renewal_base}" \
+                            || restore_ok=0
+                        if [[ "$restore_ok" == 1 && -f "$ROLLBACK_DIR/renewal-conf/${renewal_base}.conf" ]]; then
+                            cp -p -- "$ROLLBACK_DIR/renewal-conf/${renewal_base}.conf" \
+                                "/etc/letsencrypt/renewal/${renewal_base}.conf" \
+                                || restore_ok=0
+                        fi
+                        if [[ "$restore_ok" == 1 ]]; then
+                            cmp -s "$ROLLBACK_DIR/lineage-leaf/${renewal_base}/fullchain.pem" \
+                                "/etc/letsencrypt/live/${renewal_base}/fullchain.pem" 2>/dev/null \
+                                || restore_ok=0
+                            cmp -s "$ROLLBACK_DIR/lineage-leaf/${renewal_base}/privkey.pem" \
+                                "/etc/letsencrypt/live/${renewal_base}/privkey.pem" 2>/dev/null \
+                                || restore_ok=0
+                        fi
+                        if [[ "$restore_ok" != 1 ]]; then
+                            rollback_cert_failed=1
+                            systemctl disable --now 5gpn-certbot-renew.timer 2>/dev/null || true
+                            warn "Certbot lineage ${renewal_base} could not be fully restored; automatic renewal was disabled."
+                        fi
+                    else
+                        rollback_cert_failed=1
+                        systemctl disable --now 5gpn-certbot-renew.timer 2>/dev/null || true
+                        warn "Could not restore Certbot lineage ${renewal_base}; automatic renewal was disabled to avoid a mode mismatch."
+                    fi
+                fi
+            elif [[ -f "$ROLLBACK_DIR/renewal-conf/${renewal_base}.lineage-absent" ]] \
+               && [[ -e "/etc/letsencrypt/live/${renewal_base}" || -e "/etc/letsencrypt/renewal/${renewal_base}.conf" ]]; then
+                certbot delete --non-interactive --cert-name "$renewal_base" >/dev/null 2>&1 \
+                    || warn "Could not remove newly created rollback lineage ${renewal_base}; it is not referenced by restored dns.env."
+            fi
+        done < "$ROLLBACK_DIR/renewal-names"
+    fi
     if [[ -d "$ROLLBACK_DIR/legacy-xray" ]]; then
         cp -p -- "$ROLLBACK_DIR/legacy-xray/xray.service" /etc/systemd/system/xray.service
         [[ -f "$ROLLBACK_DIR/legacy-xray/xray" ]] \
@@ -1120,10 +1300,30 @@ rollback_install() {
         cp -a -- "$ROLLBACK_DIR/external-zash" "$DNS_ZASH_DIR"
     fi
     systemctl daemon-reload 2>/dev/null || true
+    if [[ "$rollback_cert_failed" == 0 ]]; then
+        if [[ -f "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.enabled" ]]; then
+            systemctl enable 5gpn-certbot-renew.timer 2>/dev/null || true
+        else
+            systemctl disable 5gpn-certbot-renew.timer 2>/dev/null || true
+        fi
+        if [[ -f "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.active" ]]; then
+            systemctl start 5gpn-certbot-renew.timer 2>/dev/null || true
+        else
+            systemctl stop 5gpn-certbot-renew.timer 2>/dev/null || true
+        fi
+    else
+        systemctl disable --now 5gpn-certbot-renew.timer 2>/dev/null || true
+    fi
     systemctl restart mihomo.service 2>/dev/null || true
     systemctl restart 5gpn-dns.service 2>/dev/null || true
     [[ -d "$ROLLBACK_DIR/legacy-xray" ]] && systemctl enable --now xray.service 2>/dev/null || true
-    warn "Previous deployment restored; inspect the reported error before retrying."
+    release_install_cert_lock
+    if [[ "$rollback_cert_failed" == 0 ]]; then
+        warn "Previous deployment restored; inspect the reported error before retrying."
+    else
+        err "Previous service files were restored, but certificate-lineage rollback was incomplete; automatic renewal is disabled pending repair."
+        return 1
+    fi
 }
 
 install_transaction_exit() {
@@ -1651,8 +1851,8 @@ restart_services() {
 
 # _load_change_ctx resolves the shared change-command context from the single
 # dns.env: identities, cert mode, email. Auto-detects
-# + persists PUBLIC_IP if it was never captured (used by mihomo's listener bind
-# + debug-mode self-signed cert SANs; cloudflare-mode DNS-01 needs no public IP).
+# + persists PUBLIC_IP if it was never captured (used by mihomo's listener bind,
+# debug SANs, and HTTP-01 DNS validation; Cloudflare issuance itself needs no A).
 # BASE_DOMAIN is the authoritative apex knob; WEB/DOT are the derived
 # console.<base>/dot.<base> service domains read back from dns.env.
 _load_change_ctx() {
@@ -1667,6 +1867,7 @@ _load_change_ctx() {
     [[ -z "$BASE_DOMAIN" ]] && BASE_DOMAIN="${WEB_DOMAIN#console.}"
     derive_domains "$BASE_DOMAIN"
     CERT_MODE="$(cfg_get CERT_MODE)"; CERT_MODE="${CERT_MODE:-cloudflare}"
+    CERT_MODE="$(normalize_cert_mode "$CERT_MODE" 2>/dev/null || printf '%s' "$CERT_MODE")"
     CERT_EMAIL="$(cfg_get CERT_EMAIL)"
     if [[ -z "$PUBLIC_IP" ]]; then
         get_public_ip                                            # sets PUBLIC_IP or exits
@@ -1788,6 +1989,15 @@ is_valid_domain() {
     [[ "$d" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]
 }
 
+normalize_cert_mode() {
+    case "${1:-}" in
+        cloudflare) printf '%s\n' cloudflare ;;
+        http|http-01) printf '%s\n' http-01 ;;
+        debug) printf '%s\n' debug ;;
+        *) return 1 ;;
+    esac
+}
+
 is_valid_ipv4() {
     # Dotted-quad, each octet 0..255, with NO leading zero on a multi-digit octet
     # — matching Go's net.ParseIP (cmd/5gpn-dns/config.go), which rejects e.g.
@@ -1806,7 +2016,7 @@ is_valid_ipv4() {
 resolve_domains() {
     # ONE operator domain knob: the base (apex) domain. The three service
     # domains are auto-derived subdomains (derive_domains), all covered by the
-    # single *.<base> wildcard cert:
+    # single selected certificate (wildcard in Cloudflare/debug, exact SANs in HTTP-01):
     #   console.<base> -> the web console (also exported as WEB_DOMAIN)
     #   zash.<base>    -> the zashboard panel
     #   dot.<base>     -> DoT :853 (Android Private DNS / iOS profile)
@@ -1915,25 +2125,28 @@ resolve_china_ecs() {
     info "China ECS subnet: $CHINA_ECS"
 }
 
-# install_cert <base_domain> — provision ONE mandatory WILDCARD lineage
-# (*.<base> + <base>) and deploy it to all three role directories:
+# install_cert <base_domain> — provision ONE scoped production lineage and
+# deploy it to all three role directories:
 #   dot  -> ${DOT_CERT_DIR}  (serves DoT :853; also signs the iOS profile)
 #   web  -> ${WEB_CERT_DIR}  (serves the web console behind the mihomo SNI split)
 #   zash -> ${ZASH_CERT_DIR} (serves the zashboard panel)
-# Two modes (resolved from persisted dns.env or the TUI):
+# Three modes (resolved from persisted dns.env or the TUI):
 #   cloudflare (default) — Let's Encrypt DNS-01 through the Cloudflare API
-#                       (certbot-dns-cloudflare; no :80, no public A-record
-#                       needed for these subdomains); auto-renews unattended
+#                       for apex + *.<base>; auto-renews unattended
 #                       via the daily certbot timer (see install_renewal_automation).
-#                       Reuse (a still-valid lineage, or a still-valid preserved
-#                       role-dir copy when the lineage is gone) never needs the
-#                       token; only an actual ISSUANCE does. ensure_cf_token
-#                       collects it automatically with this precedence:
+#                       A protected token is required for unattended renewal,
+#                       even when the current lineage is reusable. ensure_cf_token
+#                       obtains it with this precedence:
 #                         1. Valid saved /etc/5gpn/acme/cloudflare.ini — reused.
 #                         2. Interactive ask_secret on a TTY (guarded || true).
 #                         3. Explicit error — non-interactive with no saved token.
 #                       Use '5gpn --set-cf-token' (or the manage menu) to update
 #                       the token at any time.
+#   http-01            — Let's Encrypt standalone HTTP challenge for the exact
+#                       console/zash/dot service SANs. The TUI confirms the DNS
+#                       plan, then waits for 1.1.1.1 to see every A record at
+#                       PUBLIC_IP with no AAAA. Issuance and due renewal briefly
+#                       stop and restore mihomo to release public TCP :80.
 #   debug              — a self-signed WILDCARD cert for test/dev boxes with no
 #                       public domain. No certbot, no DNS-01, no renewal.
 #                       iOS/browsers will flag it untrusted; that is the point
@@ -1942,6 +2155,11 @@ cert_has_exact_san() {
     local cert="$1" wanted="$2"
     openssl x509 -in "$cert" -noout -ext subjectAltName 2>/dev/null \
         | tr ',' '\n' | sed -n 's/^[[:space:]]*DNS://p' | grep -Fxq -- "$wanted"
+}
+
+cert_dns_san_count() {
+    openssl x509 -in "$1" -noout -ext subjectAltName 2>/dev/null \
+        | tr ',' '\n' | sed -n 's/^[[:space:]]*DNS://p' | wc -l | tr -d '[:space:]'
 }
 
 cert_key_matches() {
@@ -1964,14 +2182,32 @@ cert_chain_trusted() {
                     -untrusted "$cert" "$cert" >/dev/null 2>&1; }
 }
 
+cert_identity_matches_mode() {
+    local cert="$1" key="$2" base="$3" mode="$4" dns_san_count
+    [[ -s "$cert" && -s "$key" ]] || return 1
+    dns_san_count="$(cert_dns_san_count "$cert")" || return 1
+    case "$mode" in
+        cloudflare|debug)
+            [[ "$dns_san_count" == 2 ]] || return 1
+            cert_has_exact_san "$cert" "$base" || return 1
+            cert_has_exact_san "$cert" "*.${base}" || return 1 ;;
+        http|http-01)
+            [[ "$dns_san_count" == 3 ]] || return 1
+            cert_has_exact_san "$cert" "console.${base}" || return 1
+            cert_has_exact_san "$cert" "zash.${base}" || return 1
+            cert_has_exact_san "$cert" "dot.${base}" || return 1 ;;
+        *) return 1 ;;
+    esac
+    openssl x509 -checkhost "dot.${base}" -noout -in "$cert" >/dev/null 2>&1 || return 1
+    cert_key_matches "$cert" "$key"
+}
+
 validate_cert_pair() {
     local cert="$1" key="$2" base="$3" seconds="$4" trust="$5"
-    [[ -s "$cert" && -s "$key" ]] || return 1
+    local mode="${6:-cloudflare}"
+    [[ "$trust" == debug ]] && mode=debug
     openssl x509 -checkend "$seconds" -noout -in "$cert" >/dev/null 2>&1 || return 1
-    cert_has_exact_san "$cert" "$base" || return 1
-    cert_has_exact_san "$cert" "*.${base}" || return 1
-    openssl x509 -checkhost "dot.${base}" -noout -in "$cert" >/dev/null 2>&1 || return 1
-    cert_key_matches "$cert" "$key" || return 1
+    cert_identity_matches_mode "$cert" "$key" "$base" "$mode" || return 1
     [[ "$trust" != production ]] || cert_chain_trusted "$cert"
 }
 
@@ -1987,9 +2223,18 @@ cert_provenance_matches() {
        && "$(cert_provenance_get base)" == "$base" ]]
 }
 
+cert_provenance_base_matches() {
+    local base="$1" mode
+    [[ "$(cert_provenance_get base)" == "$base" ]] || return 1
+    mode="$(cert_provenance_get mode)"
+    [[ "$mode" == cloudflare || "$mode" == http-01 || "$mode" == debug ]]
+}
+
 certbot_lineage_owned_by_5gpn() {
-    local base="$1"
-    cert_provenance_matches cloudflare "$base" \
+    local base="$1" mode
+    cert_provenance_base_matches "$base" || return 1
+    mode="$(cert_provenance_get mode)"
+    [[ "$mode" == cloudflare || "$mode" == http-01 ]] \
         && [[ "$(cert_provenance_get certbot_lineage)" == owned ]]
 }
 
@@ -2003,10 +2248,73 @@ certbot_lineage_artifacts_exist() {
         || compgen -G "${LE_RENEWAL_ROOT}/${base}-[0-9][0-9][0-9][0-9].conf" >/dev/null
 }
 
+certbot_renewal_conf_scoped() {
+    local conf="$1" base="$2" key value expected server
+    [[ -f "$conf" && ! -L "$conf" ]] || return 1
+    for key in archive_dir cert privkey chain fullchain; do
+        value="$(grep -E "^[[:space:]]*${key}[[:space:]]*=" "$conf" 2>/dev/null \
+            | tail -1 | cut -d= -f2- | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+        case "$key" in
+            archive_dir) expected="${LE_ARCHIVE_ROOT}/${base}" ;;
+            *) expected="${LE_LIVE_ROOT}/${base}/${key}.pem" ;;
+        esac
+        [[ "$value" == "$expected" ]] || return 1
+    done
+    # 5gpn uses one audited directory deploy hook and its own mode-aware wrapper.
+    # Persisted per-lineage hooks would execute arbitrary root commands when the
+    # timer/Bot renews a lineage, so they are never adopted or preserved.
+    if grep -Eq '^[[:space:]]*(pre_hook|post_hook|deploy_hook|renew_hook)[[:space:]]*=[[:space:]]*[^[:space:]]' "$conf"; then
+        return 1
+    fi
+    server="$(grep -E '^[[:space:]]*server[[:space:]]*=' "$conf" 2>/dev/null \
+        | tail -1 | cut -d= -f2- | tr -d '[:space:]')"
+    [[ "$server" == "$LE_PRODUCTION_SERVER" ]]
+}
+
+certbot_renewal_mode_matches() {
+    local base="$1" mode="$2" conf="${LE_RENEWAL_ROOT}/${base}.conf" auth value
+    certbot_renewal_conf_scoped "$conf" "$base" || return 1
+    auth="$(grep -E '^[[:space:]]*authenticator[[:space:]]*=' "$conf" 2>/dev/null \
+        | tail -1 | cut -d= -f2- | tr -d '[:space:]')"
+    case "$mode" in
+        cloudflare)
+            [[ "$auth" == dns-cloudflare ]] || return 1
+            value="$(grep -E '^[[:space:]]*dns_cloudflare_credentials[[:space:]]*=' "$conf" 2>/dev/null \
+                | tail -1 | cut -d= -f2- | tr -d '[:space:]')"
+            [[ "$value" == "$ACME_DIR/cloudflare.ini" ]] ;;
+        http-01)
+            [[ "$auth" == standalone ]] || return 1
+            value="$(grep -E '^[[:space:]]*http01_port[[:space:]]*=' "$conf" 2>/dev/null \
+                | tail -1 | cut -d= -f2- | tr -d '[:space:]')"
+            [[ -z "$value" || "$value" == 80 ]] || return 1
+            value="$(grep -E '^[[:space:]]*http01_address[[:space:]]*=' "$conf" 2>/dev/null \
+                | tail -1 | cut -d= -f2- | tr -d '[:space:]')"
+            [[ -z "$value" ]] ;;
+        *) return 1 ;;
+    esac
+}
+
+decommission_lineage_safe() {
+    local base="$1" mode=""
+    cert_provenance_base_matches "$base" || return 1
+    [[ -d "${LE_LIVE_ROOT}/${base}" && ! -L "${LE_LIVE_ROOT}/${base}" \
+       && -d "${LE_ARCHIVE_ROOT}/${base}" && ! -L "${LE_ARCHIVE_ROOT}/${base}" ]] \
+        || return 1
+    if certbot_renewal_mode_matches "$base" cloudflare; then
+        mode=cloudflare
+    elif certbot_renewal_mode_matches "$base" http-01; then
+        mode=http-01
+    else
+        return 1
+    fi
+    cert_identity_matches_mode "${LE_LIVE_ROOT}/${base}/fullchain.pem" \
+        "${LE_LIVE_ROOT}/${base}/privkey.pem" "$base" "$mode"
+}
+
 write_cert_provenance() {
     local mode="$1" base="$2" lineage="${3:-none}" tmp
     case "$mode:$lineage" in
-        debug:none|cloudflare:owned|cloudflare:reused|cloudflare:missing) ;;
+        debug:none|cloudflare:owned|cloudflare:reused|cloudflare:missing|http-01:owned|http-01:reused|http-01:missing) ;;
         *) err "Invalid certificate provenance state: ${mode}:${lineage}"; return 1 ;;
     esac
     install -d -m 0750 "$DNS_CERT_DIR"
@@ -2019,24 +2327,26 @@ write_cert_provenance() {
 }
 
 decommission_certbot_lineage() {
-    local base="$1" live
-    live="${LE_LIVE_ROOT}/${base}"
+    local base="$1" conf
+    conf="${LE_RENEWAL_ROOT}/${base}.conf"
     DECOMMISSION_PRESERVE_ACME=0
     is_valid_domain "$base" \
         || { err "Cannot decommission: persisted base domain is invalid."; return 1; }
-    if [[ ! -e "$live" ]]; then
-        info "No canonical Certbot lineage exists for '${base}'."
+    if ! certbot_lineage_artifacts_exist "$base"; then
+        info "No Certbot lineage artifacts exist for '${base}'."
         return 0
     fi
     if ! certbot_lineage_owned_by_5gpn "$base"; then
         warn "Preserving Certbot lineage '${base}': provenance does not prove that 5gpn created it."
-        if grep -qF -- "$ACME_DIR/cloudflare.ini" "${LE_RENEWAL_ROOT}/${base}.conf" 2>/dev/null; then
+        if grep -qF -- "$ACME_DIR/cloudflare.ini" "$conf" 2>/dev/null; then
             DECOMMISSION_PRESERVE_ACME=1
             warn "Its renewal configuration still references the 5gpn Cloudflare credential; preserving ${ACME_DIR}."
         fi
         warn "Delete that lineage manually only after checking that no other service uses it."
         return 0
     fi
+    decommission_lineage_safe "$base" \
+        || { err "Owned lineage '${base}' is partial, unscoped, or mode-mismatched; refusing Certbot deletion."; return 1; }
     certbot delete --non-interactive --cert-name "$base" \
         || { err "Certbot refused to delete the exact 5gpn-owned lineage '$base'."; return 1; }
     ok "Deleted the provenance-confirmed 5gpn Certbot lineage '${base}'."
@@ -2061,10 +2371,56 @@ remove_owned_renew_hook() {
     fi
 }
 
+install_cert_deploy_hook() {
+    local src="${SCRIPT_DIR}/scripts/renew-hook.sh"
+    [[ -f "$src" ]] || src="${SCRIPTS_DIR}/renew-hook.sh"
+    [[ -f "$src" ]] \
+        || { err "scripts/renew-hook.sh not found; refusing production certificate setup without a deploy hook."; return 1; }
+    install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy || return 1
+    if [[ -e /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh ]] \
+       && ! renew_hook_owned; then
+        err "Refusing to overwrite an unowned Certbot deploy hook: /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh"
+        return 1
+    fi
+    install -m 0755 "$src" /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh || return 1
+    ok "Renewal deploy hook installed (validated dot/web/zash publication + iOS re-sign)."
+}
+
+# Certbot standalone must own public TCP :80. Run in a subshell so its signal
+# traps cannot replace the full install transaction's ERR/EXIT rollback traps.
+# Only a mihomo service that was active is stopped and restored; an unrelated
+# process occupying :80 is never killed and simply makes Certbot fail closed.
+run_http_certbot() (
+    local restore=0 certbot_rc=0 restore_rc=0
+    restore_active_mihomo() {
+        [[ "$restore" == 1 ]] || return 0
+        restore=0
+        systemctl start mihomo.service \
+            && ok "mihomo restored after the HTTP-01 challenge." \
+            || { err "Could not restore mihomo after the HTTP-01 challenge."; return 1; }
+    }
+    trap 'restore_active_mihomo || true' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    if systemctl is-active --quiet mihomo.service 2>/dev/null; then
+        info "Temporarily stopping mihomo to release TCP :80 for HTTP-01."
+        restore=1
+        systemctl stop mihomo.service \
+            || { err "Could not stop mihomo; refusing to run Certbot while :80 may be occupied."; exit 1; }
+    fi
+    certbot "$@" || certbot_rc=$?
+    restore_active_mihomo || restore_rc=$?
+    trap - EXIT INT TERM
+    [[ "$certbot_rc" == 0 ]] || exit "$certbot_rc"
+    [[ "$restore_rc" == 0 ]] || exit "$restore_rc"
+)
+
 install_cert() {
     local base="${1:?install_cert needs a base domain}"
     local mode="$CERT_MODE"
-    local live="${LE_LIVE_ROOT}/${base}" lineage_origin="" lineage_preexisting=0 lineage_was_owned=0
+    local live="${LE_LIVE_ROOT}/${base}"
+    local lineage_origin="" lineage_preexisting=0 lineage_was_owned=0
+    local force=0 cf_token_ready=0
     certbot_lineage_owned_by_5gpn "$base" && lineage_was_owned=1
 
     if [ "$mode" = "debug" ]; then
@@ -2085,54 +2441,68 @@ install_cert() {
         return 0
     fi
 
-    # ── cloudflare (DNS-01), wildcard, auto-renew ───────────────────────────
-    # Reuse is checked FIRST, in two forms, and — deliberately — neither reuse
-    # path requires the Cloudflare API token: pure reuse never calls certbot.
-    local force=0
+    [[ "$mode" == cloudflare || "$mode" == http-01 ]] \
+        || { err "CERT_MODE must be cloudflare, http-01, or debug."; return 1; }
+
+    # Reuse is mode-aware. The SAN shape distinguishes wildcard DNS-01 from
+    # exact-name HTTP-01; renewal.conf and provenance prevent a mode switch
+    # from silently retaining the previous authenticator.
     if validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
-            "$base" "$((30*86400))" production; then
-        # 1) A still-valid (>30d) certbot lineage for this base domain.
+            "$base" "$((30*86400))" production "$mode" \
+       && certbot_renewal_mode_matches "$base" "$mode" \
+       && { [[ ! -e "$DNS_CERT_DIR/.provenance" ]] || cert_provenance_matches "$mode" "$base"; }; then
         lineage_origin=reused
-        certbot_lineage_owned_by_5gpn "$base" && lineage_origin=owned
-        info "Valid wildcard cert for *.${base} in the certbot lineage (>30d); reusing (no issuance)."
+        [[ "$lineage_was_owned" == 1 ]] && lineage_origin=owned
+        info "Valid ${mode} certificate and matching renewal authenticator for ${base} (>30d); reusing."
     else
         if [[ ! -e "$live" ]] && compgen -G "${LE_LIVE_ROOT}/${base}-[0-9][0-9][0-9][0-9]" >/dev/null; then
             err "A duplicate Certbot lineage exists for ${base}, but the canonical ${live} lineage is absent."
             err "Resolve that lineage explicitly before reinstalling; refusing silent reuse without scoped renewal."
             return 1
         fi
-        # A purge deliberately keeps the deployed role copies. If Certbot's
-        # canonical live lineage was lost, a matching trusted copy can recover
-        # service without consuming a new issuance. There is no renewable
-        # Certbot lineage in this state, so remove only 5gpn-owned automation and
-        # make the missing-renewal condition explicit to the operator.
-        if [[ ! -e "$live" ]] \
-           && cert_provenance_matches cloudflare "$base" \
+        # Purge preserves deployed role copies. If the canonical lineage is
+        # entirely absent, a matching trusted role copy may recover service
+        # without consuming a new issuance. Renewal stays disabled until repair.
+        if ! certbot_lineage_artifacts_exist "$base" \
+           && cert_provenance_matches "$mode" "$base" \
            && validate_cert_pair "${DOT_CERT_DIR}/fullchain.pem" "${DOT_CERT_DIR}/privkey.pem" \
-                "$base" "$((30*86400))" production; then
-            info "Certbot lineage is missing; reusing the validated preserved role certificate for *.${base}."
-            deploy_cert_roles "$base" "$DOT_CERT_DIR" || return 1
-            write_cert_provenance cloudflare "$base" missing || return 1
+                "$base" "$((30*86400))" production "$mode"; then
+            info "Certbot lineage is missing; reusing the validated preserved ${mode} role certificate for ${base}."
+            deploy_cert_roles "$base" "$DOT_CERT_DIR" "$mode" || return 1
+            write_cert_provenance "$mode" "$base" missing || return 1
             remove_owned_renew_hook
             remove_owned_renewal_automation
             warn "The preserved certificate is active, but automatic renewal is disabled until the Certbot lineage is repaired or reissued."
             return 0
         fi
         certbot_lineage_artifacts_exist "$base" && lineage_preexisting=1
-        if [[ -e "$live" ]] \
-           && ! validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" "$base" 0 production; then
-            force=1
+        [[ -e "$live" ]] && force=1
+        local -a certbot_args=(certonly --cert-name "$base" --server "$LE_PRODUCTION_SERVER" --agree-tos -n \
+            -m "${CERT_EMAIL:-admin@${base}}" --keep-until-expiring --no-directory-hooks)
+        if [[ "$mode" == cloudflare ]]; then
+            ensure_cf_token || return 1
+            cf_token_ready=1
+            info "Issuing Let's Encrypt WILDCARD cert for *.${base} (Cloudflare DNS-01)..."
+            certbot_args+=(--dns-cloudflare \
+                --dns-cloudflare-credentials "${ACME_DIR}/cloudflare.ini" \
+                --dns-cloudflare-propagation-seconds 30 -d "*.${base}" -d "${base}")
+        else
+            check_http_challenge_dns_once \
+                || { err "HTTP-01 DNS changed after preflight: ${CERT_DNS_LAST_OBSERVATION:-no answer}."; return 1; }
+            info "Issuing Let's Encrypt cert for ${CONSOLE_DOMAIN}, ${ZASH_DOMAIN}, ${DOT_DOMAIN} (HTTP-01 / :80)..."
+            certbot_args+=(--standalone --preferred-challenges http-01 \
+                -d "$CONSOLE_DOMAIN" -d "$ZASH_DOMAIN" -d "$DOT_DOMAIN")
         fi
-        ensure_cf_token || return 1
-
-        info "Issuing Let's Encrypt WILDCARD cert for *.${base} (cloudflare DNS-01)..."
-        local -a certbot_args=(certonly --cert-name "$base" --dns-cloudflare \
-            --dns-cloudflare-credentials "${ACME_DIR}/cloudflare.ini" \
-            -d "*.${base}" -d "${base}" --agree-tos -n -m "${CERT_EMAIL:-admin@${base}}" \
-            --keep-until-expiring --dns-cloudflare-propagation-seconds 30)
-        [[ "$force" == 1 ]] && certbot_args+=(--force-renewal)
-        certbot "${certbot_args[@]}" \
-            || { err "certbot DNS-01 failed for *.${base} (check the Cloudflare token's Zone:DNS:Edit scope + zone match)."; return 1; }
+        # Non-interactive Certbot otherwise refuses a changed SAN set when the
+        # same cert-name switches between wildcard DNS-01 and exact HTTP-01.
+        [[ "$force" == 1 ]] && certbot_args+=(--force-renewal --renew-with-new-domains)
+        if [[ "$mode" == http-01 ]]; then
+            run_http_certbot "${certbot_args[@]}" \
+                || { err "Certbot HTTP-01 failed. Check all three public A records, absence of AAAA, TCP/80/NAT/security-group reachability, and rate limits."; return 1; }
+        else
+            certbot "${certbot_args[@]}" \
+                || { err "Certbot DNS-01 failed for *.${base} (check the Cloudflare token's Zone:DNS:Edit scope + zone match)."; return 1; }
+        fi
         if [[ "$lineage_was_owned" == 1 || "$lineage_preexisting" == 0 ]]; then
             lineage_origin=owned
         else
@@ -2140,27 +2510,16 @@ install_cert() {
         fi
     fi
 
-    validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" "$base" 86400 production \
+    validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" "$base" 86400 production "$mode" \
         || { err "Issued/reused production certificate failed trust, SAN, expiry, or key validation."; return 1; }
-    deploy_cert_roles "$base"
-    write_cert_provenance cloudflare "$base" "$lineage_origin"
-
-    # Renewal deploy hook (copies the renewed wildcard to all three role dirs +
-    # reloads 5gpn-dns via SIGHUP + re-signs the iOS profile). Ships in repo.
-    if [[ -f "${SCRIPT_DIR}/scripts/renew-hook.sh" ]]; then
-        install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
-        if [[ -e /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh ]] \
-           && ! renew_hook_owned; then
-            err "Refusing to overwrite an unowned Certbot deploy hook: /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh"
-            return 1
-        fi
-        install -m 0755 "${SCRIPT_DIR}/scripts/renew-hook.sh" \
-            /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh
-        ok "Renewal deploy hook installed (copies cert to dot/web/zash + reload + iOS re-sign)."
-    else
-        warn "scripts/renew-hook.sh not found; auto-renew reload hook skipped."
+    certbot_renewal_mode_matches "$base" "$mode" \
+        || { err "Certbot renewal config is unscoped, mode-mismatched, or contains persistent hooks."; return 1; }
+    if [[ "$mode" == cloudflare && "$cf_token_ready" == 0 ]]; then
+        ensure_cf_token || { err "Cloudflare renewal requires a protected API token even when the current certificate is reusable."; return 1; }
     fi
-
+    deploy_cert_roles "$base" "$live" "$mode"
+    write_cert_provenance "$mode" "$base" "$lineage_origin"
+    install_cert_deploy_hook
     install_renewal_automation
 }
 
@@ -2169,7 +2528,7 @@ install_cert() {
 # so every role's cert works by IP or name on an internal test box. Debug
 # material lives under /etc/5gpn/debug-cert only: writing through Certbot's
 # /etc/letsencrypt/live symlinks can truncate the real archive certificates.
-# No renewal machinery — and any cloudflare-mode automation a prior install
+# No renewal machinery — and any production-mode automation a prior install
 # left is dismantled so the daily timer cannot run an unwanted renewal.
 issue_selfsigned_wildcard() {
     local base="$1"
@@ -2192,47 +2551,58 @@ issue_selfsigned_wildcard() {
     mv -f -- "${tmp}/fullchain.pem" "${live}/fullchain.pem"
     rmdir -- "$tmp"
     warn "CERT_MODE=debug: SELF-SIGNED WILDCARD cert for *.${base} (CN=${base}, SAN=${san}). NOT trusted by clients — test/dev only."
-    # Dismantle any cloudflare-mode renewal machinery a prior install left.
+    # Dismantle any production-mode renewal machinery a prior install left.
     remove_owned_renew_hook
     remove_owned_renewal_automation
 }
 
-# deploy_cert_roles <base> — copy the wildcard lineage to all three role dirs.
-# deploy_cert_roles <base> [src_dir] — copy the wildcard cert to all three role
-# dirs. Defaults to reading from the certbot lineage (/etc/letsencrypt/live/<base>);
-# a caller can pass an alternate src_dir (e.g. a still-valid preserved role-dir
-# copy, when the lineage itself is gone — see install_cert's reuse fallback).
-# A source role may also be the destination role. Staging to distinct temporary
-# files keeps that recovery copy safe until validation and atomic publication.
+# deploy_cert_roles <base> — copy the selected lineage to all three role dirs.
+# deploy_cert_roles <base> [src_dir] [mode] — copy the selected cert to all role
+# dirs. Defaults to reading from the Certbot lineage; a preserved role copy or
+# debug mode may pass an alternate source directory explicitly.
 deploy_cert_roles() {
-    local base="$1" src="${2:-${LE_LIVE_ROOT}/${base}}" r dest cert_tmp key_tmp trust=production
-    [[ "$src" == "$DEBUG_CERT_DIR"/* ]] && trust=debug
-    validate_cert_pair "${src}/fullchain.pem" "${src}/privkey.pem" "$base" 0 "$trust" \
+    local base="$1" src="${2:-${LE_LIVE_ROOT}/${base}}" mode="${3:-${CERT_MODE:-cloudflare}}"
+    local r dest cert_tmp key_tmp trust=production i
+    local -a roles=(dot web zash) dests=() cert_tmps=() key_tmps=()
+    [[ "$src" == "$DEBUG_CERT_DIR"/* ]] && { trust=debug; mode=debug; }
+    validate_cert_pair "${src}/fullchain.pem" "${src}/privkey.pem" "$base" 0 "$trust" "$mode" \
         || { err "Certificate source failed validation: $src"; return 1; }
-    for r in dot web zash; do
+    # Stage and validate every role before replacing any live file.
+    for r in "${roles[@]}"; do
         dest="${DNS_CERT_DIR}/$r"
-        install -d -m 0750 "$dest"
-        cert_tmp="$(mktemp "${dest}/.fullchain.pem.XXXXXX")" || return 1
-        key_tmp="$(mktemp "${dest}/.privkey.pem.XXXXXX")" || { rm -f -- "$cert_tmp"; return 1; }
+        install -d -m 0750 "$dest" \
+            || { rm -f -- "${cert_tmps[@]}" "${key_tmps[@]}"; return 1; }
+        cert_tmp="$(mktemp "${dest}/.fullchain.pem.XXXXXX")" \
+            || { rm -f -- "${cert_tmps[@]}" "${key_tmps[@]}"; return 1; }
+        key_tmp="$(mktemp "${dest}/.privkey.pem.XXXXXX")" \
+            || { rm -f -- "$cert_tmp" "${cert_tmps[@]}" "${key_tmps[@]}"; return 1; }
+        dests+=("$dest"); cert_tmps+=("$cert_tmp"); key_tmps+=("$key_tmp")
         install -m 0640 "${src}/fullchain.pem" "$cert_tmp" \
             && install -m 0640 "${src}/privkey.pem" "$key_tmp" \
-            && validate_cert_pair "$cert_tmp" "$key_tmp" "$base" 0 "$trust" \
-            || { rm -f -- "$cert_tmp" "$key_tmp"; return 1; }
+            && validate_cert_pair "$cert_tmp" "$key_tmp" "$base" 0 "$trust" "$mode" \
+            || { rm -f -- "${cert_tmps[@]}" "${key_tmps[@]}"; return 1; }
         sync -f "$cert_tmp" "$key_tmp" 2>/dev/null || true
-        mv -f -- "$key_tmp" "${dest}/privkey.pem"
-        mv -f -- "$cert_tmp" "${dest}/fullchain.pem"
     done
-    ok "Wildcard cert for *.${base} deployed to dot/web/zash role dirs."
+    for i in "${!roles[@]}"; do
+        mv -f -- "${key_tmps[$i]}" "${dests[$i]}/privkey.pem" \
+            || { rm -f -- "${cert_tmps[@]}" "${key_tmps[@]}"; return 1; }
+        key_tmps[$i]=""
+        mv -f -- "${cert_tmps[$i]}" "${dests[$i]}/fullchain.pem" \
+            || { rm -f -- "${cert_tmps[@]}" "${key_tmps[@]}"; return 1; }
+        cert_tmps[$i]=""
+    done
+    ok "${mode} certificate for ${base} deployed to dot/web/zash role dirs."
 }
 
-# install_renewal_automation installs a daily systemd timer running
-# `certbot renew`. With --dns-cloudflare the renewal is fully unattended (the
-# API sets the transient _acme-challenge TXT, no :80, no human step, no xray
-# coordination) — so, unlike the old http-01 flow, there are no pre/post
-# renewal-hooks to stop/start anything around port 80.
+# install_renewal_automation installs a daily systemd timer running the single
+# mode-aware renewal helper. It checks the exact cert-name and due window;
+# Cloudflare renews without interruption, while HTTP-01 first validates DNS via
+# 1.1.1.1 and safely releases/restores mihomo's TCP :80 listeners.
 install_renewal_automation() {
     local service_tmp timer_tmp
     preflight_renewal_unit_ownership || return 1
+    [[ -x "${SCRIPTS_DIR}/cert-renew.sh" ]] \
+        || { err "Scoped renewal helper is missing: ${SCRIPTS_DIR}/cert-renew.sh"; return 1; }
     service_tmp="$(mktemp /etc/systemd/system/.5gpn-certbot-renew.service.XXXXXX)" || return 1
     timer_tmp="$(mktemp /etc/systemd/system/.5gpn-certbot-renew.timer.XXXXXX)" \
         || { rm -f -- "$service_tmp"; return 1; }
@@ -2244,8 +2614,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=/etc/5gpn/dns.env
-ExecStart=/bin/sh -c 'exec certbot renew --quiet --cert-name "$DNS_BASE_DOMAIN"'
+TimeoutStartSec=30min
+TimeoutStopSec=2min
+ExecStart=/opt/5gpn/scripts/cert-renew.sh --quiet
 EOF
     cat > "$timer_tmp" <<'EOF'
 [Unit]
@@ -2267,7 +2638,30 @@ EOF
         || { err "Could not enable/start scoped certificate renewal timer."; return 1; }
     systemctl is-enabled --quiet 5gpn-certbot-renew.timer \
         || { err "Scoped certificate renewal timer is not enabled."; return 1; }
-    ok "Installed 5gpn-certbot-renew.timer (daily, Persistent, unattended DNS-01 renewal)."
+    ok "Installed 5gpn-certbot-renew.timer (daily, Persistent, mode-aware scoped renewal)."
+}
+
+acme_dir_safe() {
+    [[ -d "$ACME_DIR" && ! -L "$ACME_DIR" \
+       && "$(readlink -f -- "$ACME_DIR" 2>/dev/null || true)" == "$ACME_DIR" \
+       && "$(file_uid "$ACME_DIR")" == 0 \
+       && "$(file_mode "$ACME_DIR")" == 700 ]]
+}
+
+ensure_acme_dir() {
+    if [[ ! -e "$ACME_DIR" && ! -L "$ACME_DIR" ]]; then
+        install -d -o root -g root -m 0700 "$ACME_DIR" \
+            || { err "Cannot create ACME credentials directory ${ACME_DIR}."; return 1; }
+    fi
+    acme_dir_safe \
+        || { err "ACME credentials directory must be canonical, root-owned, non-symlink, and mode 0700: ${ACME_DIR}"; return 1; }
+}
+
+cf_credential_file_safe() {
+    local f="${ACME_DIR}/cloudflare.ini"
+    [[ -f "$f" && ! -L "$f" \
+       && "$(file_uid "$f")" == 0 \
+       && "$(file_mode "$f")" == 600 ]]
 }
 
 # has_valid_cf_credential returns 0 (true) when ${ACME_DIR}/cloudflare.ini
@@ -2275,7 +2669,7 @@ EOF
 # Used by ensure_cf_token to decide whether to prompt or reuse.
 has_valid_cf_credential() {
     local f="${ACME_DIR}/cloudflare.ini"
-    [[ -s "$f" ]] || return 1
+    acme_dir_safe && cf_credential_file_safe && [[ -s "$f" ]] || return 1
     grep -qE '^dns_cloudflare_api_token[[:space:]]*=[[:space:]]*[^[:space:]]' "$f"
 }
 
@@ -2292,7 +2686,11 @@ write_cf_credential() {
     if [[ "$tok" =~ $'\r' || "$tok" =~ $'\n' ]]; then
         err "Cloudflare API token must not contain CR or LF (check for a trailing newline)."; return 1
     fi
-    install -d -m 0700 "$ACME_DIR" || { err "Cannot create ACME credentials directory ${ACME_DIR}."; return 1; }
+    ensure_acme_dir || return 1
+    if [[ -e "${ACME_DIR}/cloudflare.ini" || -L "${ACME_DIR}/cloudflare.ini" ]]; then
+        cf_credential_file_safe \
+            || { err "Refusing unsafe existing Cloudflare credential path: ${ACME_DIR}/cloudflare.ini"; return 1; }
+    fi
     local tmp; tmp="$(mktemp "${ACME_DIR}/.cloudflare.ini.XXXXXX")" || { err "Cannot create temp file in ${ACME_DIR}."; return 1; }
     printf 'dns_cloudflare_api_token = %s\n' "$tok" > "$tmp" || { rm -f -- "$tmp"; return 1; }
     chmod 0600 "$tmp"                                         || { rm -f -- "$tmp"; return 1; }
@@ -2300,9 +2698,9 @@ write_cf_credential() {
 }
 
 # ensure_cf_token guarantees a valid Cloudflare API token exists in
-# ${ACME_DIR}/cloudflare.ini before certbot runs. Called ONLY in
-# install_cert's actual issuance branch — cert-reuse paths never call it,
-# so a still-valid cert never prompts. Precedence:
+# ${ACME_DIR}/cloudflare.ini before Certbot issuance or renewal automation is
+# enabled. A reusable lineage still requires the credential for future renewal.
+# Precedence:
 #   1. Valid saved credential (has_valid_cf_credential) — reuse, no prompt.
 #   2. Interactive ask_secret    — TTY only, guarded with || true under set -e.
 #   3. Explicit error            — non-interactive with no saved token.
@@ -2310,10 +2708,9 @@ write_cf_credential() {
 # The credentials dir is created as 0700; the file is written atomically and
 # chmod'd to 0600.
 ensure_cf_token() {
-    install -d -m 0700 "$ACME_DIR" || { err "Cannot create ACME credentials directory ${ACME_DIR}."; return 1; }
+    ensure_acme_dir || return 1
     # 1) Valid saved credential — reuse without prompting.
     if has_valid_cf_credential; then
-        chmod 0600 "${ACME_DIR}/cloudflare.ini" || { err "Cannot set permissions on ${ACME_DIR}/cloudflare.ini."; return 1; }
         info "Reusing saved Cloudflare API token (${ACME_DIR}/cloudflare.ini)."
         return 0
     fi
@@ -2330,9 +2727,8 @@ ensure_cf_token() {
 # set_cf_token prompts for (or accepts as $1) the Cloudflare API token used by
 # install_cert's cloudflare/DNS-01 issuance path, and writes it to
 # ${ACME_DIR}/cloudflare.ini (0600, root-only). This is the ONLY TUI/CLI op that
-# writes that file — previously it had to be placed there by hand. Reuse-only
-# installs (a still-valid lineage or preserved cert copy) never need this; it's
-# only required the first time an actual certbot issuance happens for a domain.
+# writes that file — previously it had to be placed there by hand. The saved
+# credential is required for both Cloudflare issuance and unattended renewal.
 set_cf_token() {
     check_root
     [[ -z "${1:-}" ]] || { err "Token arguments are not accepted; enter it through the TUI."; return 1; }
@@ -2504,8 +2900,8 @@ write_dns_env() {
 DNS_LISTEN_DOT=:853
 DNS_LISTEN_DEBUG=127.0.0.1:5353
 
-# TLS certs — ONE mandatory WILDCARD lineage (*.<DNS_BASE_DOMAIN> + base),
-# deployed to THREE role dirs:
+# TLS certs — ONE scoped lineage. Cloudflare uses apex+wildcard; HTTP-01 uses
+# exact console/zash/dot SANs. Either shape is deployed to THREE role dirs:
 #   dot/  serves DoT :853 (also signs the iOS profile)
 #   web/  serves the web console (loopback :443, behind the mihomo SNI split)
 #   zash/ serves the zashboard panel
@@ -2519,8 +2915,8 @@ DNS_WEB_KEY=${WEB_CERT_DIR}/privkey.pem
 
 # ── Deployment identity + cert (read by install.sh/renew-hook.sh; also read by
 # the in-process Telegram bot). DNS_BASE_DOMAIN = the operator's ONE apex domain
-# (the wildcard cert's base); the three service domains are auto-derived
-# subdomains of it, all covered by the one *.<base> lineage:
+# (the cert-name); the three service domains are auto-derived subdomains and
+# covered by the selected wildcard or exact-SAN certificate:
 #   DNS_DOMAIN         = dot.<base>      (DoT :853)
 #   DNS_WEB_DOMAIN     = console.<base>  (web console; == DNS_CONSOLE_DOMAIN)
 #   DNS_CONSOLE_DOMAIN = console.<base>  (mihomo SNI-split to loopback :443)
@@ -2603,9 +2999,8 @@ DNS_WHITELIST_FILE=${dns_whitelist_file}
 
 # SP-3 zashboard panel (Task A1): ZashDir is the unzipped Zephyruso/zashboard
 # dist served by a SECOND loopback HTTPS listener on ZashListen. ZashCert/Key
-# always point at the wildcard's zash/ role-dir copy (deploy_cert_roles); the
-# daemon's own config.go fallback (zash -> web -> dot cert) covers a
-# debug/self-signed single-cert box where that role dir is never populated.
+# always point at the selected certificate's zash/ role-dir copy
+# (deploy_cert_roles); the daemon's fallback remains defense in depth.
 DNS_ZASH_DIR=${dns_zash_dir}
 DNS_ZASH_LISTEN=${dns_zash_listen}
 DNS_ZASH_CERT=${ZASH_CERT_DIR}/fullchain.pem
@@ -2732,28 +3127,93 @@ print_qr() {
     fi
 }
 
-# The console host is the public bootstrap path. Fail closed unless its A record
-# already reaches this box before publication.
-verify_console_dns() {
-    local console="${CONSOLE_DOMAIN:-$(cfg_get DNS_CONSOLE_DOMAIN)}" answers="" ip
-    [[ -n "$console" ]] \
-        || { err "DNS_CONSOLE_DOMAIN is empty; cannot verify the public console endpoint."; return 1; }
-    if command -v dig >/dev/null 2>&1; then
-        answers="$(dig +time=3 +tries=1 +short A "$console" 2>/dev/null || true)"
-    elif command -v getent >/dev/null 2>&1; then
-        answers="$(getent ahostsv4 "$console" 2>/dev/null | awk '{print $1}' || true)"
+# Certificate/public-bootstrap DNS checks use a fixed independent resolver. A
+# system resolver can be this gateway itself (and therefore synthesize the
+# desired answer before public DNS is ready), which is unsafe for both HTTP-01
+# and the public console bootstrap.
+CERT_DNS_LAST_OBSERVATION=""
+
+cert_dns_name_matches() {
+    local domain="$1" require_no_aaaa="$2"; shift 2
+    local raw="" ips="" aaaa="" ip expected matched
+    command -v dig >/dev/null 2>&1 \
+        || { CERT_DNS_LAST_OBSERVATION="dig is unavailable"; return 1; }
+    raw="$(dig +time=3 +tries=1 +short A "$domain" @"$CERT_DNS_RESOLVER" 2>/dev/null || true)"
+    ips="$(printf '%s\n' "$raw" | awk '/^[0-9]+(\.[0-9]+){3}$/' || true)"
+    if [[ "$require_no_aaaa" == 1 ]]; then
+        aaaa="$(dig +time=3 +tries=1 +short AAAA "$domain" @"$CERT_DNS_RESOLVER" 2>/dev/null \
+            | awk '/:/' || true)"
     else
-        err "Neither dig nor getent is available to verify ${console}."
-        return 1
+        aaaa="not-required"
     fi
+    CERT_DNS_LAST_OBSERVATION="${domain}: A=[${ips//$'\n'/, }] AAAA=[${aaaa//$'\n'/, }]"
+    [[ -n "$ips" ]] || return 1
+    [[ "$require_no_aaaa" != 1 || -z "$aaaa" ]] || return 1
     while IFS= read -r ip; do
-        [[ "$ip" == "${PUBLIC_IP:-}" || "$ip" == "${GATEWAY_IP:-}" ]] || continue
-        ok "Public console DNS verified: ${console} A ${ip}."
-        return 0
-    done <<<"$answers"
-    err "Public console is not reachable: ${console} A records [${answers//$'\n'/, }] do not include PUBLIC_IP=${PUBLIC_IP:-unset} or GATEWAY_IP=${GATEWAY_IP:-unset}."
-    err "Create 'console.${BASE_DOMAIN:-<base>} A -> ${PUBLIC_IP:-<PUBLIC_IP>}' (or a client-routable ${GATEWAY_IP:-<GATEWAY_IP>} in NPN), wait for DNS propagation, then re-run."
-    return 1
+        matched=0
+        for expected in "$@"; do
+            [[ -n "$expected" && "$ip" == "$expected" ]] && { matched=1; break; }
+        done
+        [[ "$matched" == 1 ]] || return 1
+    done <<<"$ips"
+}
+
+wait_for_cert_dns() {
+    local description="$1"; shift
+    local check_fn="$1"; shift
+    local started=$SECONDS elapsed
+    info "Waiting for ${description} through DNS ${CERT_DNS_RESOLVER} (up to ${CERT_DNS_WAIT_TIMEOUT}s)..."
+    while true; do
+        if "$check_fn" "$@"; then
+            return 0
+        fi
+        elapsed=$((SECONDS - started))
+        if (( elapsed >= CERT_DNS_WAIT_TIMEOUT )); then
+            err "DNS did not converge through ${CERT_DNS_RESOLVER} within ${CERT_DNS_WAIT_TIMEOUT}s."
+            err "Last observation: ${CERT_DNS_LAST_OBSERVATION:-no answer}."
+            return 1
+        fi
+        info "DNS not ready (${CERT_DNS_LAST_OBSERVATION:-no answer}); retrying in ${CERT_DNS_WAIT_INTERVAL}s."
+        sleep "$CERT_DNS_WAIT_INTERVAL"
+    done
+}
+
+check_console_dns_once() {
+    local console="$1"
+    cert_dns_name_matches "$console" 0 "${PUBLIC_IP:-}" "${GATEWAY_IP:-}" || return 1
+    ok "Public console DNS verified via ${CERT_DNS_RESOLVER}: ${CERT_DNS_LAST_OBSERVATION}."
+}
+
+check_http_challenge_dns_once() {
+    local domain
+    for domain in "$CONSOLE_DOMAIN" "$ZASH_DOMAIN" "$DOT_DOMAIN"; do
+        cert_dns_name_matches "$domain" 1 "$PUBLIC_IP" || return 1
+    done
+    for domain in "$CONSOLE_DOMAIN" "$ZASH_DOMAIN" "$DOT_DOMAIN"; do
+        ok "HTTP-01 DNS verified via ${CERT_DNS_RESOLVER}: ${domain} A ${PUBLIC_IP} (no AAAA)."
+    done
+}
+
+# The public gate is mode-aware: Cloudflare only needs the console bootstrap
+# name, HTTP-01 needs all exact certificate SANs, and debug is intentionally
+# allowed to use the private 5gpn.local placeholder.
+verify_console_dns() {
+    local mode="${CERT_MODE:-cloudflare}"
+    case "$mode" in
+        debug)
+            info "CERT_MODE=debug: skipping public DNS propagation checks."
+            return 0 ;;
+        http|http-01)
+            wait_for_cert_dns "HTTP-01 service records" check_http_challenge_dns_once \
+                || { err "Set console/zash/dot A records to DNS_PUBLIC_IP=${PUBLIC_IP}, remove AAAA records, and keep public TCP/80 reachable."; return 1; } ;;
+        cloudflare)
+            local console="${CONSOLE_DOMAIN:-$(cfg_get DNS_CONSOLE_DOMAIN)}"
+            [[ -n "$console" ]] \
+                || { err "DNS_CONSOLE_DOMAIN is empty; cannot verify the public console endpoint."; return 1; }
+            wait_for_cert_dns "public console record" check_console_dns_once "$console" \
+                || { err "Create '${console} A -> ${PUBLIC_IP:-<PUBLIC_IP>}' (or client-routable ${GATEWAY_IP:-<GATEWAY_IP>} in NPN)."; return 1; } ;;
+        *) err "Unknown CERT_MODE '${mode}' during DNS verification."; return 1 ;;
+    esac
 }
 
 verify_console_endpoint() {
@@ -3147,6 +3607,9 @@ regen_ios() {
     WEB_DOMAIN="${WEB_DOMAIN:-$(cfg_get DNS_WEB_DOMAIN)}"
     CONSOLE_DOMAIN="${CONSOLE_DOMAIN:-$(cfg_get DNS_CONSOLE_DOMAIN)}"
     BASE_DOMAIN="${BASE_DOMAIN:-$(cfg_get DNS_BASE_DOMAIN)}"
+    derive_domains "$BASE_DOMAIN"
+    CERT_MODE="$(cfg_get CERT_MODE)"; CERT_MODE="${CERT_MODE:-cloudflare}"
+    CERT_MODE="$(normalize_cert_mode "$CERT_MODE" 2>/dev/null || printf '%s' "$CERT_MODE")"
     PUBLIC_IP="$(cfg_get DNS_PUBLIC_IP)"
     GATEWAY_IP="${GATEWAY_IP:-$(cfg_get DNS_GATEWAY_IP)}"
     [[ -n "$DOT_DOMAIN" && -n "$PUBLIC_IP" ]] || { err "Domain/public IP unknown; run a full install first."; exit 1; }
@@ -3213,6 +3676,7 @@ load_persisted_install_config() {
     GATEWAY_IP="$(cfg_get DNS_GATEWAY_IP)"
     MIHOMO_LISTEN_IPS="$(cfg_get DNS_MIHOMO_LISTEN_IPS)"
     CERT_MODE="$(cfg_get CERT_MODE)"; CERT_MODE="${CERT_MODE:-cloudflare}"
+    CERT_MODE="$(normalize_cert_mode "$CERT_MODE" 2>/dev/null || printf '%s' "$CERT_MODE")"
     CERT_EMAIL="$(cfg_get CERT_EMAIL)"
     CACHE_SIZE="$(cfg_get DNS_CACHE_SIZE)"
     CHINA_ECS="$(cfg_get DNS_CHINA_ECS)"
@@ -3225,8 +3689,13 @@ validate_install_config() {
     is_valid_domain "${BASE_DOMAIN:-}" || { err "Persisted base domain is invalid."; return 1; }
     is_valid_ipv4 "${PUBLIC_IP:-}" || { err "Persisted public IPv4 is invalid."; return 1; }
     is_valid_ipv4 "${GATEWAY_IP:-}" || { err "Persisted gateway IPv4 is invalid."; return 1; }
-    [[ "$CERT_MODE" == cloudflare || "$CERT_MODE" == debug ]] \
-        || { err "Persisted CERT_MODE must be cloudflare or debug."; return 1; }
+    CERT_MODE="$(normalize_cert_mode "$CERT_MODE" 2>/dev/null || true)"
+    [[ "$CERT_MODE" == cloudflare || "$CERT_MODE" == http-01 || "$CERT_MODE" == debug ]] \
+        || { err "Persisted CERT_MODE must be cloudflare, http-01, or debug."; return 1; }
+    if [[ "$CERT_MODE" != debug ]]; then
+        [[ "${CERT_EMAIL:-}" == *@* && "$CERT_EMAIL" != *[[:space:]]* ]] \
+            || { err "Persisted CERT_EMAIL is invalid for the selected production certificate mode."; return 1; }
+    fi
     [[ "$CACHE_SIZE" =~ ^[1-9][0-9]*$ ]] || { err "Persisted DNS_CACHE_SIZE is invalid."; return 1; }
     case "$CHINA_ECS" in
         off|none|disable|0) ;;
@@ -3244,17 +3713,29 @@ validate_install_config() {
 configure_install_tui() {
     [[ -t 0 ]] || { err "First install/configuration requires an attached TTY; shell environment injection is not supported."; return 1; }
     local choice detected value default_listen
-    if [[ "${CERT_MODE:-cloudflare}" == debug ]]; then
-        choice="$(ask_choice '证书模式 Certificate mode' \
-            'debug — self-signed test certificate (current)' \
-            'cloudflare — Let’s Encrypt wildcard' || true)"
-    else
-        choice="$(ask_choice '证书模式 Certificate mode' \
-            'cloudflare — Let’s Encrypt wildcard (current/recommended)' \
-            'debug — self-signed test certificate' || true)"
-    fi
+    case "${CERT_MODE:-cloudflare}" in
+        http-01)
+            choice="$(ask_choice '证书模式 Certificate mode' \
+                'http-01 — Let’s Encrypt exact service SANs (current)' \
+                'cloudflare — Let’s Encrypt wildcard (recommended)' \
+                'debug — self-signed test certificate' || true)" ;;
+        debug)
+            choice="$(ask_choice '证书模式 Certificate mode' \
+                'debug — self-signed test certificate (current)' \
+                'cloudflare — Let’s Encrypt wildcard (recommended)' \
+                'http-01 — Let’s Encrypt exact service SANs' || true)" ;;
+        *)
+            choice="$(ask_choice '证书模式 Certificate mode' \
+                'cloudflare — Let’s Encrypt wildcard (current/recommended)' \
+                'http-01 — Let’s Encrypt exact service SANs' \
+                'debug — self-signed test certificate' || true)" ;;
+    esac
     [[ -n "$choice" ]] || { warn "Certificate mode selection cancelled."; return 1; }
-    case "$choice" in debug*) CERT_MODE=debug ;; cloudflare*) CERT_MODE=cloudflare ;; esac
+    case "$choice" in
+        debug*) CERT_MODE=debug ;;
+        http-01*) CERT_MODE=http-01 ;;
+        cloudflare*) CERT_MODE=cloudflare ;;
+    esac
 
     while true; do
         value="$(prompt_default '主域名 Base domain' "${BASE_DOMAIN:-5gpn.local}")"
@@ -3308,7 +3789,7 @@ configure_install_tui() {
     CACHE_SIZE="$(prompt_default 'DNS cache entries' "${CACHE_SIZE:-${_CACHE_SIZE_DEFAULT:-4096}}")"
     [[ "$CACHE_SIZE" =~ ^[1-9][0-9]*$ ]] \
         || { err "DNS cache size must be a positive integer."; return 1; }
-    if [[ "$CERT_MODE" == cloudflare ]]; then
+    if [[ "$CERT_MODE" != debug ]]; then
         CERT_EMAIL="$(prompt_default 'Let’s Encrypt email' "${CERT_EMAIL:-admin@${BASE_DOMAIN}}")"
         [[ "$CERT_EMAIL" == *@* && "$CERT_EMAIL" != *[[:space:]]* ]] \
             || { err "Invalid certificate email."; return 1; }
@@ -3327,7 +3808,32 @@ configure_install_tui() {
         echo "  ECS:        $CHINA_ECS"
         echo "  cache:      $CACHE_SIZE"
     } | card
-    ask_yesno "保存以上配置并继续?" || { warn "Configuration cancelled."; return 1; }
+    if [[ "$CERT_MODE" == http-01 ]]; then
+        {
+            echo "HTTP-01 DNS / network prerequisites"
+            echo "  ${CONSOLE_DOMAIN}  A -> ${PUBLIC_IP}"
+            echo "  ${ZASH_DOMAIN}     A -> ${PUBLIC_IP}"
+            echo "  ${DOT_DOMAIN}      A -> ${PUBLIC_IP}"
+            echo "  AAAA: none for all three names (IPv4-only gateway)"
+            echo "  TCP/80: publicly reachable through NAT/security-group rules"
+            echo "The installer will wait for 1.1.1.1 to observe these records."
+        } | card
+        ask_yesno "我已确认上述 DNS 和 TCP/80 配置正确；保存并开始等待验证?" \
+            || { warn "Configuration cancelled before the DNS check."; return 1; }
+    elif [[ "$CERT_MODE" == cloudflare ]]; then
+        {
+            echo "Cloudflare DNS-01 prerequisites"
+            echo "  ${CONSOLE_DOMAIN} A -> ${PUBLIC_IP}"
+            [[ "$GATEWAY_IP" != "$PUBLIC_IP" ]] && echo "  or client-routable gateway A -> ${GATEWAY_IP}"
+            echo "  Cloudflare token needs Zone:DNS:Edit for ${BASE_DOMAIN}."
+            echo "The installer will wait for 1.1.1.1 to observe the console A record."
+        } | card
+        ask_yesno "我已确认上述 DNS 配置正确；保存并开始等待验证?" \
+            || { warn "Configuration cancelled before the DNS check."; return 1; }
+    else
+        ask_yesno "保存以上 debug 配置并继续?" \
+            || { warn "Configuration cancelled."; return 1; }
+    fi
     export BASE_DOMAIN PUBLIC_IP GATEWAY_IP MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL \
         CACHE_SIZE CHINA_ECS EGRESS_RESOLVER
 }
@@ -3401,6 +3907,7 @@ full_install() {
     trap cleanup_artifact_stage EXIT
     verify_console_dns
     stage_artifacts
+    acquire_install_cert_lock
     capture_install_rollback
     trap install_transaction_error ERR
     trap install_transaction_exit EXIT
@@ -3431,6 +3938,7 @@ full_install() {
     remove_legacy_firewall
     run_update_lists
     INSTALL_TRANSACTION_ACTIVE=0
+    release_install_cert_lock
     cleanup_artifact_stage
     trap - ERR EXIT
 
@@ -3463,7 +3971,7 @@ full_install() {
 # ----------------------------------------------------------------------------
 # Uninstall: reverse install.sh's invasive host changes. Keeps /etc/5gpn (cert,
 # token, rules, subscriptions) by default; --purge removes it EXCEPT the cert dir.
-# The TLS cert is DELIBERATELY preserved in normal/purge modes — re-issuing a Let's Encrypt
+# TLS material is DELIBERATELY preserved in normal/purge modes — re-issuing a Let's Encrypt
 # cert for the same domain is rate-limited, so the deployed copy (/etc/5gpn/cert)
 # AND the certbot lineage (/etc/letsencrypt, never touched here) survive so a
 # re-install reuses the cert instead of burning a new issuance. Remove certs
@@ -3486,6 +3994,14 @@ uninstall() {
         && prompt="确认卸载并删除可证明由 5gpn 拥有的证书材料?（共享 lineage/凭据会保留）"
     ask_yesno "$prompt" || return 0
     claim_project_roots
+    acquire_install_cert_lock
+    if [[ "$decommission" == 1 ]]; then
+        base="$(cfg_get DNS_BASE_DOMAIN)"
+        if ! decommission_certbot_lineage "$base"; then
+            release_install_cert_lock
+            return 1
+        fi
+    fi
     warn "Uninstalling 5gpn: stopping services and reverting host changes."
 
     unit_file_owned_by_5gpn 5gpn-dns.service \
@@ -3554,8 +4070,6 @@ uninstall() {
     remove_fixed_owned_dir "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE"
 
     if [[ "$decommission" == 1 ]]; then
-        base="$(cfg_get DNS_BASE_DOMAIN)"
-        decommission_certbot_lineage "$base" || return 1
         rm -rf -- "$DNS_CERT_DIR" "$DEBUG_CERT_DIR"
         if [[ "$DECOMMISSION_PRESERVE_ACME" == 0 ]]; then
             rm -rf -- "$ACME_DIR"
@@ -3571,8 +4085,8 @@ uninstall() {
         # (/etc/5gpn/cert) AND the certbot lineage (/etc/letsencrypt, never removed
         # here) must survive so a later re-install reuses the cert instead of
         # burning a fresh issuance. The acme/ dir (Cloudflare API token) is ALSO
-        # preserved: install_cert's reuse-only path (a still-valid lineage or
-        # preserved cert copy) never touches certbot, but a re-install that DOES
+        # preserved: install_cert's valid-lineage reuse path never touches certbot,
+        # but a re-install that DOES
         # need to issue (no valid cert survived) must not hard-abort for a token
         # that was needlessly wiped. Remove everything else under CONF_DIR.
         verify_ownership_marker "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
@@ -3591,6 +4105,7 @@ uninstall() {
     else
         ok "Kept ${CONF_DIR} (cert, acme token, DNS_API_TOKEN, rules, subscriptions). '--purge' removes it EXCEPT cert/ and acme/ (always kept for reuse)."
     fi
+    release_install_cert_lock
     ok "5gpn uninstalled."
 }
 
@@ -3634,7 +4149,7 @@ not accept values on argv or through the caller environment.
 Config: /etc/5gpn/dns.env is the persistent source of truth. First install writes
 it from the TUI; reinstall reads it. Ambient shell variables are discarded.
 
-Domains + certificates: ONE base (apex) domain, ONE mandatory WILDCARD Let's Encrypt lineage.
+Domains + certificates: ONE base domain and ONE scoped Let's Encrypt lineage.
   BASE_DOMAIN (e.g. example.com)     the operator's single domain knob. Three
                                      service domains are auto-derived:
                                        console.<base>  web console (mihomo :443 SNI
@@ -3642,19 +4157,25 @@ Domains + certificates: ONE base (apex) domain, ONE mandatory WILDCARD Let's Enc
                                        zash.<base>     zashboard panel
                                        dot.<base>      DoT :853 (Private DNS / iOS)
                                      Values are collected by the TUI.
-  cloudflare mode (default)          mandatory WILDCARD *.<base> cert via Let's
+  cloudflare mode (default)          apex + WILDCARD *.<base> cert via Let's
                      Encrypt DNS-01 through the Cloudflare API (no :80, no public
                      A-record needed for certificate issuance); auto-renews unattended
-                     via the daily 5gpn-certbot-renew.timer. Only an actual
-                     ISSUANCE (no valid cert to reuse) needs a Cloudflare API token;
-                     the first-install issuance prompts for it on a TTY. The token
+                     via the daily 5gpn-certbot-renew.timer. A protected Cloudflare
+                     API token is required even when reusing a valid cert so future
+                     renewal remains unattended; missing credentials prompt in the TUI. The token
                      is stored in /etc/5gpn/acme/cloudflare.ini
                      (dir 0700, file 0600) and is NEVER written to dns.env or logs.
                      Use '5gpn --set-cf-token' (or the menu) to update it at any time.
+  http-01 mode       exact console/zash/dot SAN certificate via public TCP :80.
+                     After explicit TUI confirmation, all three A records must
+                     resolve through 1.1.1.1 to DNS_PUBLIC_IP with no AAAA.
+                     Issuance and due renewal briefly stop and restore mihomo;
+                     automatic renewal uses the same scoped helper as the bot.
   debug mode         self-signed WILDCARD cert for a test/dev box with
                      no public domain — no certbot, no DNS-01, no renewal; clients
                      see it untrusted.
-  Production reuse validates trust, apex+wildcard SANs and cert/key matching;
+  Production reuse validates mode-specific SANs, renewal authenticator,
+  provenance, trust, expiry, and cert/key matching;
   debug certificates are reusable only inside debug mode. If only a preserved
   production role copy survives, it is reused without issuance and renewal stays
   disabled until the Certbot lineage is repaired.
@@ -3715,7 +4236,7 @@ main() {
             change_base_domain "${2:-}" ;;
         --change-dot-domain|change-dot-domain)
             warn "'$1' is deprecated; use '5gpn configure'."
-            change_base_domain "${2#dot.}" ;;
+            change_base_domain "${2:-}" ;;
         --change-public-ip|change-public-ip) change_public_ip "${2:-}" ;;
         --change-gateway|change-gateway) change_gateway "${2:-}" ;;
         --change-resolver|change-resolver) change_resolver "${2:-}" ;;

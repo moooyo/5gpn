@@ -106,9 +106,10 @@ func auditSource(r *http.Request) string {
 // auditMiddleware lines for the :9443 API (same "audit " prefix, stderr →
 // journald). The bot is a privileged control path — it reaches the daemon over
 // Telegram long-polling (bypassing the CLIENT_NET firewall) and can trigger
-// systemctl / systemd-run certbot / journalctl — yet its mutations were
-// previously unaudited, an asymmetry with the HTTP API this closes. op is a
-// short verb (e.g. "add_domain", "reload", "restart:xray", "renew-cert"),
+// systemctl / the systemd-run delegated renewal helper / journalctl — yet its
+// mutations were previously unaudited, an asymmetry with the HTTP API this
+// closes. op is a short verb (e.g. "add_domain", "reload", "restart:mihomo",
+// "renew-cert"),
 // adminID is the Telegram user id that issued it, and result is one of
 // "ok" / "err" / "invoked" (see auditResult). Never logs message bodies or
 // tokens, mirroring the HTTP audit's restraint.

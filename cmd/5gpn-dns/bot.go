@@ -70,9 +70,9 @@ type Bot struct {
 	pending map[int64]string
 
 	// runFn is the injectable shelling-out seam for the T3 OS-op handlers
-	// (restart/logs/certbot/QR). A nil runFn means "use the real run" (via
-	// Bot.run); tests set it to a stub so no real systemctl/journalctl/certbot/
-	// qrencode is ever invoked. Gateway/domain facts are read from disk
+	// (restart/logs/certificate renewal/QR). A nil runFn means "use the real run"
+	// (via Bot.run); tests set it to a stub so no real privileged command is
+	// invoked. Gateway/domain facts are read from disk
 	// (readStatusFacts / iosHost).
 	runFn func(argv []string, timeout time.Duration) (bool, string)
 }

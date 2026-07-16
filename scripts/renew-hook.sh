@@ -1,14 +1,17 @@
 #!/bin/bash
-# Let's Encrypt renewal deploy hook — publish the renewed 5gpn WILDCARD lineage
-# (*.<DNS_BASE_DOMAIN> + apex) to /etc/5gpn/cert/{dot,web,zash}.
+# Let's Encrypt renewal deploy hook — publish the renewed 5gpn lineage to
+# /etc/5gpn/cert/{dot,web,zash}. Cloudflare DNS-01 lineages must cover the apex
+# and wildcard; HTTP-01 lineages must cover all three derived service names.
 # The zash role is shared by the zashboard panel and mihomo's TLS controller.
 # The pinned mihomo v1.19.28 build guarantees that mihomo reloads the controller certificate files automatically, so the renewed zash copy becomes active without a mihomo restart or reload.
 #
 # This hook is installed system-wide and certbot may invoke it for unrelated
 # lineages. It therefore accepts only the exact lineage named by the validated
 # DNS_BASE_DOMAIN, verifies the leaf SANs and private-key match before staging,
-# and reloads/re-signs only after all three role copies were published.
+# and re-signs only after all three role copies were published.
 set -euo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 
 # --- Gum-or-echo status helpers. As a certbot deploy hook this normally runs
 # without a TTY, so output stays as plain, journald-friendly lines. ---
@@ -27,6 +30,9 @@ IOSGEN=/opt/5gpn/scripts/gen-ios-profile.sh
 WWW_DIR=/opt/5gpn/www
 
 BASE_DOMAIN=""
+CERT_MODE=""
+CONSOLE_DOMAIN=""
+ZASH_DOMAIN=""
 DOT_DOMAIN=""
 _WILDCARD_RENEWED=0
 
@@ -46,12 +52,34 @@ normalized_base_domain() {
     printf '%s\n' "$d"
 }
 
-# validate_cert_pair <cert> <key> <base>
-# Require a currently valid leaf certificate with BOTH exact SANs used by the
-# installer and prove that the private key has the same public key. Comparing
-# public-key PEM works for RSA and EC keys without exposing private material.
+normalized_cert_mode() {
+    case "${1:-}" in
+        cloudflare) printf '%s\n' cloudflare ;;
+        http|http-01) printf '%s\n' http-01 ;;
+        debug) printf '%s\n' debug ;;
+        *) return 1 ;;
+    esac
+}
+
+cert_chain_trusted() {
+    local cert="$1"
+    openssl verify -purpose sslserver -CApath /etc/ssl/certs -untrusted "$cert" "$cert" >/dev/null 2>&1 \
+        || { [[ -f /etc/pki/tls/certs/ca-bundle.crt ]] \
+             && openssl verify -purpose sslserver -CAfile /etc/pki/tls/certs/ca-bundle.crt \
+                    -untrusted "$cert" "$cert" >/dev/null 2>&1; }
+}
+
+# validate_cert_pair <cert> <key> <mode> <base> <console> <zash> <dot>
+# Require a currently valid leaf certificate with exactly the DNS SAN set for
+# its issuance mode and prove that the private key has the same public key.
+# Non-DNS SANs do not affect this identity check. Comparing public-key PEM works
+# for RSA and EC keys without exposing private material. Debug certificates
+# share Cloudflare's apex+wildcard shape, although renew_hook_main never deploys
+# debug lineages.
 validate_cert_pair() {
-    local cert="$1" key="$2" base="$3" sans normalized_sans cert_pub key_pub
+    local cert="$1" key="$2" mode="$3" base="$4"
+    local console="$5" zash="$6" dot="$7"
+    local sans normalized_sans dns_sans cert_pub key_pub required name
     [[ -s "$cert" ]] || { err "certificate is missing or empty: $cert"; return 1; }
     [[ -s "$key" ]]  || { err "private key is missing or empty: $key"; return 1; }
 
@@ -61,10 +89,28 @@ validate_cert_pair() {
         || { err "cannot read certificate SANs: $cert"; return 1; }
     normalized_sans="$(printf '%s\n' "$sans" | tr ',' '\n' \
         | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    grep -Fqx -- "DNS:${base}" <<<"$normalized_sans" \
-        || { err "certificate does not cover apex ${base}"; return 1; }
-    grep -Fqx -- "DNS:*.${base}" <<<"$normalized_sans" \
-        || { err "certificate does not cover wildcard *.${base}"; return 1; }
+    dns_sans="$(printf '%s\n' "$normalized_sans" | sed -n 's/^DNS://p')"
+    case "$mode" in
+        cloudflare|debug)
+            required="${base}"$'\n'"*.${base}"
+            ;;
+        http-01)
+            required="${console}"$'\n'"${zash}"$'\n'"${dot}"
+            ;;
+        *)
+            err "unsupported certificate mode: $mode"
+            return 1
+            ;;
+    esac
+    while IFS= read -r name; do
+        grep -Fqx -- "$name" <<<"$dns_sans" \
+            || { err "certificate does not cover required SAN ${name}"; return 1; }
+    done <<<"$required"
+    while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        grep -Fqx -- "$name" <<<"$required" \
+            || { err "certificate has unexpected DNS SAN ${name}"; return 1; }
+    done <<<"$dns_sans"
 
     cert_pub="$(openssl x509 -in "$cert" -pubkey -noout 2>/dev/null)" \
         || { err "cannot read certificate public key: $cert"; return 1; }
@@ -72,6 +118,8 @@ validate_cert_pair() {
         || { err "cannot read private key: $key"; return 1; }
     [[ -n "$cert_pub" && "$cert_pub" == "$key_pub" ]] \
         || { err "certificate/private-key mismatch for ${base}"; return 1; }
+    [[ "$mode" == debug ]] || cert_chain_trusted "$cert" \
+        || { err "certificate chain is not trusted for production TLS"; return 1; }
 }
 
 cleanup_staged() {
@@ -84,14 +132,15 @@ cleanup_staged() {
     return 0
 }
 
-# publish_roles <cert> <key> <base>
+# publish_roles <cert> <key> <mode> <base> <console> <zash> <dot>
 # Stage and validate every role before publishing any of them. Each temporary
 # file is created beside its destination, receives final permissions, and is
 # then renamed over the live path. A two-file pair cannot be switched with one
 # portable filesystem operation, but same-directory rename prevents readers
 # from ever seeing a truncated file and keeps the publication window minimal.
 publish_roles() {
-    local cert="$1" key="$2" base="$3" r dest cert_tmp key_tmp i
+    local cert="$1" key="$2" mode="$3" base="$4"
+    local console="$5" zash="$6" dot="$7" r dest cert_tmp key_tmp i
     local -a roles=(dot web zash) dests=() cert_tmps=() key_tmps=()
 
     for r in "${roles[@]}"; do
@@ -122,7 +171,8 @@ publish_roles() {
             cleanup_staged "${cert_tmps[@]}" "${key_tmps[@]}"
             return 1
         fi
-        if ! validate_cert_pair "$cert_tmp" "$key_tmp" "$base"; then
+        if ! validate_cert_pair "$cert_tmp" "$key_tmp" "$mode" "$base" \
+            "$console" "$zash" "$dot"; then
             cleanup_staged "${cert_tmps[@]}" "${key_tmps[@]}"
             return 1
         fi
@@ -154,16 +204,18 @@ deploy_lineage() {
         || { err "refusing non-5gpn lineage: $live"; return 1; }
     [[ -d "$live" ]] || { err "5gpn lineage directory is missing: $live"; return 1; }
 
-    validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" "$BASE_DOMAIN" \
+    validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
+        "$CERT_MODE" "$BASE_DOMAIN" "$CONSOLE_DOMAIN" "$ZASH_DOMAIN" "$DOT_DOMAIN" \
         || return 1
-    publish_roles "${live}/fullchain.pem" "${live}/privkey.pem" "$BASE_DOMAIN" \
+    publish_roles "${live}/fullchain.pem" "${live}/privkey.pem" \
+        "$CERT_MODE" "$BASE_DOMAIN" "$CONSOLE_DOMAIN" "$ZASH_DOMAIN" "$DOT_DOMAIN" \
         || return 1
     _WILDCARD_RENEWED=1
-    ok "wildcard cert for ${BASE_DOMAIN} redeployed to dot/web/zash"
+    ok "${CERT_MODE} cert for ${BASE_DOMAIN} redeployed to dot/web/zash"
 }
 
 renew_hook_main() {
-    local configured live expected gw
+    local configured raw_mode live expected gw
     configured="$(cfg_get DNS_BASE_DOMAIN)"
     if ! BASE_DOMAIN="$(normalized_base_domain "$configured")"; then
         err "DNS_BASE_DOMAIN is missing or invalid; no certificate was deployed."
@@ -173,7 +225,6 @@ renew_hook_main() {
         [[ -n "${RENEWED_LINEAGE:-}" ]] && return 0
         return 1
     fi
-    DOT_DOMAIN="$(cfg_get DNS_DOMAIN)"
     expected="${LE_LIVE_ROOT}/${BASE_DOMAIN}"
 
     if [[ -n "${RENEWED_LINEAGE:-}" ]]; then
@@ -187,18 +238,43 @@ renew_hook_main() {
         live="$expected"
     fi
 
+    raw_mode="$(cfg_get CERT_MODE)"
+    if ! CERT_MODE="$(normalized_cert_mode "$raw_mode")"; then
+        err "CERT_MODE must be cloudflare or http-01; no certificate was deployed."
+        return 1
+    fi
+    if [[ "$CERT_MODE" == debug ]]; then
+        err "CERT_MODE=debug has no ACME deploy-hook lineage; no certificate was deployed."
+        return 1
+    fi
+
+    CONSOLE_DOMAIN="$(cfg_get DNS_CONSOLE_DOMAIN)"
+    ZASH_DOMAIN="$(cfg_get DNS_ZASH_DOMAIN)"
+    DOT_DOMAIN="$(cfg_get DNS_DOMAIN)"
+    if [[ "$CONSOLE_DOMAIN" != "console.${BASE_DOMAIN}" \
+       || "$ZASH_DOMAIN" != "zash.${BASE_DOMAIN}" \
+       || "$DOT_DOMAIN" != "dot.${BASE_DOMAIN}" ]]; then
+        err "service domains in ${DNS_ENV} do not match DNS_BASE_DOMAIN=${BASE_DOMAIN}; no certificate was deployed."
+        return 1
+    fi
+    valid_base_domain "$CONSOLE_DOMAIN" \
+        && valid_base_domain "$ZASH_DOMAIN" \
+        && valid_base_domain "$DOT_DOMAIN" \
+        || { err "derived service domains are invalid; no certificate was deployed."; return 1; }
+
+    if [[ "${RENEW_HOOK_VALIDATE_ONLY:-0}" == 1 ]]; then
+        validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
+            "$CERT_MODE" "$BASE_DOMAIN" "$CONSOLE_DOMAIN" "$ZASH_DOMAIN" "$DOT_DOMAIN"
+        return
+    fi
+
     _WILDCARD_RENEWED=0
     deploy_lineage "$live" || return 1
 
-    # Only a successfully validated and published 5gpn lineage may trigger a
-    # daemon reload. Unrelated certbot renewals returned above without touching it.
-    if systemctl is-active --quiet 5gpn-dns; then
-        systemctl reload 5gpn-dns \
-            || { err "5gpn-dns reload failed after certificate publication"; return 1; }
-        ok "5gpn-dns reloaded (SIGHUP; cert applies on next handshake)"
-    else
-        info "5gpn-dns is not active; certificate published without reload."
-    fi
+    # TLS readers detect the atomically replaced files by mtime on the next
+    # handshake. SIGHUP is deliberately reserved for rules/chnroute reloads and
+    # is not used as a certificate-reload API.
+    ok "Certificate files published; TLS readers will load them on the next handshake."
 
     # Re-sign the iOS profile with the renewed DoT role. Best-effort: certificate
     # deployment is already complete, so profile failure must not fail renewal.

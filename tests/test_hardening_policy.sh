@@ -19,6 +19,8 @@ grep -Fq 'ExecStart=/opt/5gpn/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc
 grep -Fq 'RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX' "$MIHOMO_SVC" || fail "mihomo.service: address families must be AF_INET AF_INET6 AF_NETLINK AF_UNIX (AF_NETLINK required for QUIC/UDP forward)"
 # mihomo writes provider caches under its own dir, unlike xray's read-only config mount.
 grep -Fq 'ReadWritePaths=/etc/5gpn/mihomo' "$MIHOMO_SVC" || fail "mihomo.service must have ReadWritePaths=/etc/5gpn/mihomo (provider caches)"
+grep -Fq 'InaccessiblePaths=-/etc/5gpn/acme' "$MIHOMO_SVC" \
+    || fail "mihomo.service must not read the Cloudflare Zone:DNS:Edit token"
 grep -Fq 'Environment=SAFE_PATHS=/etc/5gpn/cert/zash' "$MIHOMO_SVC" \
     || fail "mihomo.service must scope SAFE_PATHS to /etc/5gpn/cert/zash for the shared controller certificate"
 

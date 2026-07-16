@@ -37,10 +37,10 @@ grep -Fq 'DNS_RULES_DIR'        "$INSTALL" || fail "install.sh: no DNS_RULES_DIR
 grep -Fq 'DNS_CERT'             "$INSTALL" || fail "install.sh: no DNS_CERT in dns.env"
 grep -Fq 'DNS_KEY'              "$INSTALL" || fail "install.sh: no DNS_KEY in dns.env"
 
-# --- renewal / cert deploy path reloads 5gpn-dns (not smartdns) ---
-grep -Fq 'systemctl reload 5gpn-dns'  "$RENEW" || fail "renew-hook.sh: does not reload 5gpn-dns"
+# --- renewal publishes cert files; SIGHUP remains rules/chnroute-only ---
 grep -Fq '/etc/5gpn/cert'             "$RENEW" || fail "renew-hook.sh: certs not copied to /etc/5gpn/cert"
-grep -Fq 'systemctl reload 5gpn-dns'  "$INSTALL" || fail "install.sh deploy hook: does not reload 5gpn-dns"
+grep -Eq 'systemctl reload 5gpn-dns|kill -HUP' "$RENEW" \
+    && fail "renew-hook.sh: certificate publication must not misuse the rules-only SIGHUP API"
 grep -Fq '/etc/5gpn/cert'             "$INSTALL" || fail "install.sh: does not copy certs to /etc/5gpn/cert"
 
 # --- no lingering smartdns references in install.sh (migrate-off comment OK) ---
@@ -122,6 +122,8 @@ grep -Fq 'mihomo.service' "$INSTALL" || fail "install.sh: install_units does not
 # with the secrets (dns.env, cert) re-protected read-only.
 grep -Fq 'ReadWritePaths=/etc/5gpn' "$DNS_SVC" || fail "5gpn-dns.service: no ReadWritePaths=/etc/5gpn (policy.json + provider-dir write path)"
 grep -Fq 'ReadOnlyPaths=/etc/5gpn/dns.env' "$DNS_SVC" || fail "5gpn-dns.service: dns.env (token) not re-protected read-only"
+grep -Fq 'InaccessiblePaths=-/etc/5gpn/acme' "$DNS_SVC" \
+    || fail "5gpn-dns.service: resolver sandbox can access the Cloudflare Zone:DNS:Edit token"
 
 # --- install.sh: fresh-install chnroute seed (Task 8 fix A) ---
 # A truly fresh box must not crash-loop: the bundled etc/china_ip_list.txt

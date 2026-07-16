@@ -79,11 +79,16 @@ check install.sh 'del_allow_ip\(\)' 'whitelist del op'
 check install.sh 'providers/rules/whitelist' 'live whitelist refresh via controller'
 check install.sh 'whitelist' 'manage_menu exposes whitelist' # ensure a menu label
 
-# Task 5: Cloudflare DNS-01 wildcard cert (replace http-01/:80)
-check install.sh 'dns-cloudflare' 'certbot uses Cloudflare DNS-01'
+# Task 5: selectable Cloudflare DNS-01 wildcard or HTTP-01 exact-SAN cert.
+check install.sh 'dns-cloudflare' 'Cloudflare mode uses DNS-01'
 check install.sh 'DNS_BASE_DOMAIN|BASE_DOMAIN' 'base-domain knob'
-check install.sh '\*\.' 'wildcard cert (certbot -d "*.${base}")'
-nocheck install.sh 'systemctl stop xray' 'no stop-xray-for-:80 dance'
+check install.sh '\*\.' 'Cloudflare cert includes wildcard *.base'
+check install.sh 'standalone --preferred-challenges http-01' 'HTTP-01 mode uses the standalone challenge'
+check install.sh 'run_http_certbot\(\)' 'HTTP-01 has a scoped mihomo stop/restore wrapper'
+check scripts/cert-renew.sh 'DNS_RESOLVER=1\.1\.1\.1' 'HTTP renewal DNS gate uses 1.1.1.1'
+check scripts/cert-renew.sh 'renew --cert-name "\$base"' 'renewal remains cert-name scoped'
+nocheck install.sh 'systemctl stop xray' 'certificate issuance never stops xray'
+nocheck scripts/cert-renew.sh 'xray' 'renewal helper never touches xray'
 nocheck scripts/renew-hook.sh 'xray' 'renew-hook does not touch xray'
 check install.sh 'set_cf_token' 'TUI op to set CF token'
 

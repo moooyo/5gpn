@@ -16,9 +16,9 @@ import (
 )
 
 // This file holds the Phase-5 Task-3 OS-operation ops ported from tgbot.py:
-// service restart (→ hot reload for 5gpn-dns), journalctl logs, certbot cert
+// service restart (→ hot reload for 5gpn-dns), journalctl logs, scoped cert
 // renewal, and the iOS profile QR. These are the only bot operations that shell
-// out (systemctl / journalctl / certbot / qrencode are not part of the
+// out (systemctl / journalctl / cert-renew.sh / qrencode are not part of the
 // control-plane API); everything else goes through the in-process Controller.
 //
 // Injectability for tests: the shelling-out primitive is Bot.runFn (a nil field
@@ -476,13 +476,13 @@ func isKnownService(svc string) bool {
 }
 
 // --------------------------------------------------------------------------- //
-// Cert renewal (certbot)
+// Cert renewal
 // --------------------------------------------------------------------------- //
 
-// renewalCertName returns the one certbot lineage name this daemon is allowed
-// to renew. install.sh names the wildcard lineage after DNS_BASE_DOMAIN. A
+// renewalCertName returns the one certificate lineage name this daemon is
+// allowed to renew. install.sh names the lineage after DNS_BASE_DOMAIN. A
 // single trailing root dot is harmless in DNS configuration but is not part of
-// certbot's lineage name, so it is removed before applying the same strict FQDN
+// the lineage name, so it is removed before applying the same strict FQDN
 // validation used by the rest of the bot.
 func renewalCertName() (string, bool) {
 	name := strings.ToLower(strings.TrimSuffix(os.Getenv(baseDomainEnv), "."))
@@ -492,17 +492,15 @@ func renewalCertName() (string, bool) {
 	return name, true
 }
 
-// opRenewCert runs `certbot renew --cert-name <DNS_BASE_DOMAIN>` and classifies
-// the result. Missing or invalid identity fails closed before any subprocess is
-// started, so the bot can never renew unrelated certbot lineages on a shared
-// host. Certbot is launched via `systemd-run` — a transient unit spawned by PID
-// 1 that does NOT
-// inherit 5gpn-dns's hardened sandbox (ProtectSystem=strict, read-only
-// /etc/5gpn/cert, etc.). This lets certbot write /etc/letsencrypt and its deploy
-// hook refresh /etc/5gpn/cert without loosening the resolver's own unit — the
-// bot now runs in-process, so a bare `certbot` would inherit the tight sandbox
-// and fail to write its state. The deploy hook SIGHUPs 5gpn-dns to pick up the
-// renewed cert. Port of tgbot.py's op_renew_cert (wording branches preserved).
+// opRenewCert runs the unified scoped renewal helper for DNS_BASE_DOMAIN and
+// classifies the result. Missing or invalid identity fails closed before any
+// subprocess is started, so the bot can never renew an unrelated lineage on a
+// shared host. The helper is launched via `systemd-run` — a transient unit
+// spawned by PID 1 that does not inherit 5gpn-dns's hardened sandbox
+// (ProtectSystem=strict, read-only /etc/5gpn/cert, etc.). The helper owns the
+// configured Cloudflare DNS-01 or HTTP-01 renewal workflow, while systemd-run
+// lets it update ACME state and deployed certificate material without
+// loosening the resolver's own unit.
 func (bt *Bot) opRenewCert() string {
 	return bt.opRenewCertResult().HTML()
 }
@@ -513,14 +511,15 @@ func (bt *Bot) opRenewCertResult() botOperationResult {
 	if !valid {
 		return botOperationResult{
 			OK:          false,
-			HTMLSummary: "❌ <b>证书续期已拒绝</b>\n<code>DNS_BASE_DOMAIN</code> 缺失或非法；未运行 certbot。",
+			HTMLSummary: "❌ <b>证书续期已拒绝</b>\n<code>DNS_BASE_DOMAIN</code> 缺失或非法；未运行续期脚本。",
 			Duration:    time.Since(started),
 		}
 	}
 	ok, out := bt.run([]string{
 		"systemd-run", "--pipe", "--collect", "--quiet",
-		"certbot", "renew", "--cert-name", certName, "--non-interactive",
-	}, 600*time.Second)
+		"--property=RuntimeMaxSec=25min", "--property=TimeoutStopSec=2min",
+		"/opt/5gpn/scripts/cert-renew.sh", "--cert-name", certName,
+	}, 30*time.Minute)
 	tail := tailLines(out, 12)
 	if ok {
 		lower := strings.ToLower(out)
@@ -534,7 +533,7 @@ func (bt *Bot) opRenewCertResult() botOperationResult {
 		}
 		return botOperationResult{
 			OK:          true,
-			HTMLSummary: "✅ <b>证书已续期</b>（续期钩子会重载 5gpn-dns）。",
+			HTMLSummary: "✅ <b>证书已续期</b>（TLS 将在下次握手加载新文件）。",
 			Detail:      tail,
 			Duration:    time.Since(started),
 		}
