@@ -24,9 +24,22 @@ sudo cp -a /etc/5gpn/mihomo/config.yaml /tmp/mihomo-config.before
 ## 1. Static and service health
 
 - [ ] `systemctl is-active 5gpn-dns mihomo` reports both active.
+- [ ] `systemctl show -p User -p Group -p SupplementaryGroups 5gpn-dns`
+  reports `gpn-dns`, `gpn-dns`, and exactly `mihomo`; mihomo
+  reports its dedicated `mihomo` user/group.
 - [ ] `journalctl -u 5gpn-dns -b` contains no bind/config fatal error.
 - [ ] `journalctl -u mihomo -b` contains no `External controller tls listen error`
   or safe-path rejection after startup.
+- [ ] `runuser -u gpn-dns -- journalctl -n 1 --no-pager` is denied; the daemon
+  has no general host-journal permission. Starting each fixed exporter through
+  the Bot produces a root-owned, `gpn-dns`-readable `0640` file below
+  `/run/5gpn-journal`, bounded to 256 KiB and containing the requested unit's
+  newest 50 lines.
+- [ ] Evaluate the installed polkit rule with a `gpn-dns` subject. It authorizes
+  only `org.freedesktop.systemd1.manage-units` details
+  `mihomo.service`/`restart`, `5gpn-certbot-renew.service`/`start`, and the two
+  exact `5gpn-journal@{5gpn-dns,mihomo}.service`/`start` instances; changing
+  any unit or verb is denied. Verify with `pkcheck` before exercising the Bot.
 - [ ] `ss -lntup` shows:
   - `:853/tcp` owned by `5gpn-dns`;
   - `127.0.0.1:5353/udp` and `127.0.0.1:5354/tcp+udp`;

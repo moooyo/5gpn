@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -9,8 +10,38 @@ import (
 
 // cacheKey identifies a cached DNS response.
 type cacheKey struct {
-	name  string
-	qtype uint16
+	name             string
+	qtype            uint16
+	dnssecOK         bool
+	checkingDisabled bool
+}
+
+// cacheOptions are request properties that can change the upstream response.
+// Client ECS is deliberately absent: it is stripped before every upstream
+// exchange, so it can never be part of response selection or cache identity.
+type cacheOptions struct {
+	dnssecOK         bool
+	checkingDisabled bool
+}
+
+func cacheOptionsFromMsg(m *dns.Msg) cacheOptions {
+	if m == nil {
+		return cacheOptions{}
+	}
+	opts := cacheOptions{checkingDisabled: m.CheckingDisabled}
+	if opt := m.IsEdns0(); opt != nil {
+		opts.dnssecOK = opt.Do()
+	}
+	return opts
+}
+
+func newCacheKey(name string, qtype uint16, opts cacheOptions) cacheKey {
+	return cacheKey{
+		name:             strings.ToLower(dns.Fqdn(name)),
+		qtype:            qtype,
+		dnssecOK:         opts.dnssecOK,
+		checkingDisabled: opts.checkingDisabled,
+	}
 }
 
 // entry holds a cached DNS message and its expiry timestamp.
@@ -30,7 +61,7 @@ type cacheMetadata struct {
 }
 
 // Cache is a concurrency-safe, capacity-bounded TTL cache for DNS responses,
-// keyed by (name, qtype).
+// keyed by the canonical name, qtype, and DNSSEC request properties.
 type Cache struct {
 	mu  sync.Mutex
 	m   map[cacheKey]entry
@@ -65,10 +96,16 @@ func (c *Cache) Get(name string, qtype uint16) (*dns.Msg, bool) {
 
 // GetWithMetadata is Get plus the decision metadata stored with the response.
 func (c *Cache) GetWithMetadata(name string, qtype uint16) (*dns.Msg, cacheMetadata, bool) {
+	return c.GetWithMetadataOptions(name, qtype, cacheOptions{})
+}
+
+// GetWithMetadataOptions is GetWithMetadata with response-varying request
+// properties included in the cache identity.
+func (c *Cache) GetWithMetadataOptions(name string, qtype uint16, opts cacheOptions) (*dns.Msg, cacheMetadata, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	k := cacheKey{name: name, qtype: qtype}
+	k := newCacheKey(name, qtype, opts)
 	e, ok := c.m[k]
 	if !ok {
 		return nil, cacheMetadata{}, false
@@ -92,6 +129,8 @@ func (c *Cache) GetWithMetadata(name string, qtype uint16) (*dns.Msg, cacheMetad
 	for _, rr := range cp.Answer {
 		rr.Header().Ttl = remainingSecs
 	}
+	capSectionTTLs(cp.Ns, remainingSecs)
+	capSectionTTLs(cp.Extra, remainingSecs)
 
 	return cp, e.meta, true
 }
@@ -112,10 +151,15 @@ func (c *Cache) GetStale(name string, qtype uint16, ttlSecs uint32) (*dns.Msg, b
 }
 
 func (c *Cache) GetStaleWithMetadata(name string, qtype uint16, ttlSecs uint32) (*dns.Msg, cacheMetadata, bool) {
+	return c.GetStaleWithMetadataOptions(name, qtype, ttlSecs, cacheOptions{})
+}
+
+// GetStaleWithMetadataOptions is the request-profile-aware stale lookup.
+func (c *Cache) GetStaleWithMetadataOptions(name string, qtype uint16, ttlSecs uint32, opts cacheOptions) (*dns.Msg, cacheMetadata, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	k := cacheKey{name: name, qtype: qtype}
+	k := newCacheKey(name, qtype, opts)
 	e, ok := c.m[k]
 	if !ok {
 		return nil, cacheMetadata{}, false
@@ -128,7 +172,20 @@ func (c *Cache) GetStaleWithMetadata(name string, qtype uint16, ttlSecs uint32) 
 	for _, rr := range cp.Answer {
 		rr.Header().Ttl = ttlSecs
 	}
+	capSectionTTLs(cp.Ns, ttlSecs)
+	capSectionTTLs(cp.Extra, ttlSecs)
 	return cp, e.meta, true
+}
+
+func capSectionTTLs(rrs []dns.RR, max uint32) {
+	for _, rr := range rrs {
+		if _, ok := rr.(*dns.OPT); ok {
+			continue
+		}
+		if rr.Header().Ttl > max {
+			rr.Header().Ttl = max
+		}
+	}
 }
 
 // Put stores a deep copy of m in the cache under (name, qtype) with the given
@@ -137,14 +194,14 @@ func (c *Cache) GetStaleWithMetadata(name string, qtype uint16, ttlSecs uint32) 
 func (c *Cache) Put(name string, qtype uint16, m *dns.Msg, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.putLocked(name, qtype, m, ttl, cacheMetadata{})
+	c.putLocked(name, qtype, cacheOptions{}, m, ttl, cacheMetadata{})
 }
 
 // PutWithMetadata stores a response and the decision that produced it.
 func (c *Cache) PutWithMetadata(name string, qtype uint16, m *dns.Msg, ttl time.Duration, meta cacheMetadata) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.putLocked(name, qtype, m, ttl, meta)
+	c.putLocked(name, qtype, cacheOptions{}, m, ttl, meta)
 }
 
 // Epoch returns the current flush epoch (see the epoch field). Nil-safe.
@@ -167,17 +224,23 @@ func (c *Cache) PutAtEpoch(name string, qtype uint16, m *dns.Msg, ttl time.Durat
 
 // PutAtEpochWithMetadata is PutAtEpoch plus decision metadata.
 func (c *Cache) PutAtEpochWithMetadata(name string, qtype uint16, m *dns.Msg, ttl time.Duration, epoch uint64, meta cacheMetadata) {
+	c.PutAtEpochWithMetadataOptions(name, qtype, cacheOptions{}, m, ttl, epoch, meta)
+}
+
+// PutAtEpochWithMetadataOptions stores a response under its complete request
+// profile while retaining the flush-epoch safety check.
+func (c *Cache) PutAtEpochWithMetadataOptions(name string, qtype uint16, opts cacheOptions, m *dns.Msg, ttl time.Duration, epoch uint64, meta cacheMetadata) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if epoch != c.epoch {
 		return
 	}
-	c.putLocked(name, qtype, m, ttl, meta)
+	c.putLocked(name, qtype, opts, m, ttl, meta)
 }
 
 // putLocked is the shared Put body. Caller must hold c.mu.
-func (c *Cache) putLocked(name string, qtype uint16, m *dns.Msg, ttl time.Duration, meta cacheMetadata) {
-	k := cacheKey{name: name, qtype: qtype}
+func (c *Cache) putLocked(name string, qtype uint16, opts cacheOptions, m *dns.Msg, ttl time.Duration, meta cacheMetadata) {
+	k := newCacheKey(name, qtype, opts)
 
 	// If we're at capacity and this is a new key, evict one entry (preferring
 	// an already-expired zombie over a hot live entry).

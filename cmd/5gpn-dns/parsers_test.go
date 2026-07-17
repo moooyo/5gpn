@@ -115,14 +115,33 @@ func TestParseCIDRsEmpty(t *testing.T) {
 
 func TestParseDomainsAcceptsLineAboveScannerDefault(t *testing.T) {
 	// Regression: bufio.Scanner used to stop at 64 KiB and ParseDomains ignored
-	// Scanner.Err, allowing a partially parsed list to replace the old cache.
+	// Scanner.Err, allowing a partially parsed list to replace the old cache. A
+	// line this long is not a valid domain, but the parser must still reach and
+	// retain the valid line after it.
 	long := strings.Repeat("a", 70*1024) + ".example\n"
 	got, err := ParseDomains("plain", []byte("first.example\n"+long+"last.example\n"))
 	if err != nil {
 		t.Fatalf("long but in-cap line rejected: %v", err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("got %d entries, want all 3 (scanner must not truncate)", len(got))
+	if !reflect.DeepEqual(got, []string{"first.example", "last.example"}) {
+		t.Fatalf("got %v, want valid entries on both sides of the long line", got)
+	}
+}
+
+func TestParseDomainsRejectsHTMLAndMostlyInvalidContent(t *testing.T) {
+	for _, raw := range []string{
+		"<html><body>upstream error</body></html>\n",
+		"valid.example\nnot a domain\n<html>\n{}\n",
+	} {
+		if _, err := ParseDomains("plain", []byte(raw)); err == nil {
+			t.Fatalf("mostly invalid payload was accepted: %q", raw)
+		}
+	}
+}
+
+func TestParseCIDRsRejectsMostlyInvalidContent(t *testing.T) {
+	if _, err := ParseCIDRs([]byte("1.0.0.0/8\nbad\nalso-bad\n<html>\n")); err == nil {
+		t.Fatal("mostly invalid CIDR payload was accepted")
 	}
 }
 

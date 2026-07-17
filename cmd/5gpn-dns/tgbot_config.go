@@ -42,11 +42,21 @@ func LoadTGBot(path string) (*TGBotConfig, error) {
 	if path == "" {
 		return nil, nil
 	}
-	data, err := os.ReadFile(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
+		return nil, fmt.Errorf("tgbot: inspect %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("tgbot: %s must be a regular non-symlink file", path)
+	}
+	if err := validateTGBotFileSecurity(path, info); err != nil {
+		return nil, fmt.Errorf("tgbot: insecure %s: %w", path, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
 		return nil, fmt.Errorf("tgbot: read %s: %w", path, err)
 	}
 	var tc TGBotConfig

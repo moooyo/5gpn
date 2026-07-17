@@ -129,10 +129,13 @@ deploy_hook_owned() {
 }
 
 role_copies_match_live() {
-    local live="$1" role cert key
+    local live="$1" role cert key current
     for role in dot web zash; do
-        cert="${CERT_ROOT}/${role}/fullchain.pem"
-        key="${CERT_ROOT}/${role}/privkey.pem"
+        current="${CERT_ROOT}/${role}/current"
+        [[ -L "$current" && "$(readlink -- "$current")" =~ ^generations/[A-Za-z0-9._-]+$ ]] \
+            || return 1
+        cert="${CERT_ROOT}/${role}/current/fullchain.pem"
+        key="${CERT_ROOT}/${role}/current/privkey.pem"
         [[ -f "$cert" && ! -L "$cert" && -f "$key" && ! -L "$key" \
            && "$(file_uid "$cert")" == "$EUID" \
            && "$(file_uid "$key")" == "$EUID" \

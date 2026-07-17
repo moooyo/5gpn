@@ -12,7 +12,8 @@ var allDNSEnvKeys = []string{
 	"DNS_LISTEN_DOT", "DNS_LISTEN_DEBUG",
 	"DNS_CERT", "DNS_KEY", "DNS_WEB_CERT", "DNS_WEB_KEY", "DNS_GATEWAY_IP",
 	"DNS_CHINA", "DNS_TRUST", "DNS_UPSTREAMS", "DNS_RULES_DIR", "DNS_CHNROUTE",
-	"DNS_CACHE_SIZE", "DNS_TTL_MIN", "DNS_TTL_MAX", "DNS_QUERY_TIMEOUT",
+	"DNS_CACHE_SIZE", "DNS_MAX_INFLIGHT", "DNS_TTL_MIN", "DNS_TTL_MAX", "DNS_QUERY_TIMEOUT",
+	"DNS_HEARTBEAT_URL", "DNS_HEARTBEAT_INTERVAL",
 	"DNS_SUBSCRIPTIONS",
 	"DNS_LISTEN_API", "DNS_API_TOKEN",
 	"DNS_STATS_FILE",
@@ -187,15 +188,15 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	t.Setenv("DNS_QUERY_TIMEOUT", "3s")
 	t.Setenv("DNS_CACHE_SIZE", "512")
 	t.Setenv("DNS_SUBSCRIPTIONS", "/opt/5gpn/subs.json")
-	t.Setenv("DNS_LISTEN_API", ":9444")
+	t.Setenv("DNS_LISTEN_API", "127.0.0.1:9444")
 	t.Setenv("DNS_API_TOKEN", "s3cr3t")
 	t.Setenv("DNS_STATS_FILE", "/opt/5gpn/stats.json")
 	t.Setenv("DNS_API_RATE", "5")
 	t.Setenv("DNS_API_BURST", "10")
-	t.Setenv("DNS_WEB_CERT", "/etc/5gpn/cert/web/fullchain.pem")
-	t.Setenv("DNS_WEB_KEY", "/etc/5gpn/cert/web/privkey.pem")
-	t.Setenv("DNS_ZASH_CERT", "/etc/5gpn/cert/zash/fullchain.pem")
-	t.Setenv("DNS_ZASH_KEY", "/etc/5gpn/cert/zash/privkey.pem")
+	t.Setenv("DNS_WEB_CERT", "/etc/5gpn/cert/web/current/fullchain.pem")
+	t.Setenv("DNS_WEB_KEY", "/etc/5gpn/cert/web/current/privkey.pem")
+	t.Setenv("DNS_ZASH_CERT", "/etc/5gpn/cert/zash/current/fullchain.pem")
+	t.Setenv("DNS_ZASH_KEY", "/etc/5gpn/cert/zash/current/privkey.pem")
 	t.Setenv("WWW_DIR", "/opt/5gpn/custom-www")
 
 	cfg, err := LoadConfig()
@@ -230,8 +231,8 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	if cfg.SubscriptionsFile != "/opt/5gpn/subs.json" {
 		t.Errorf("SubscriptionsFile = %q, want %q", cfg.SubscriptionsFile, "/opt/5gpn/subs.json")
 	}
-	if cfg.ListenAPI != ":9444" {
-		t.Errorf("ListenAPI = %q, want %q", cfg.ListenAPI, ":9444")
+	if cfg.ListenAPI != "127.0.0.1:9444" {
+		t.Errorf("ListenAPI = %q, want %q", cfg.ListenAPI, "127.0.0.1:9444")
 	}
 	if cfg.APIToken != "s3cr3t" {
 		t.Errorf("APIToken = %q, want %q", cfg.APIToken, "s3cr3t")
@@ -245,7 +246,7 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	if cfg.APIBurst != 10 {
 		t.Errorf("APIBurst = %d, want 10", cfg.APIBurst)
 	}
-	if cfg.WebCertFile != "/etc/5gpn/cert/web/fullchain.pem" || cfg.WebKeyFile != "/etc/5gpn/cert/web/privkey.pem" {
+	if cfg.WebCertFile != "/etc/5gpn/cert/web/current/fullchain.pem" || cfg.WebKeyFile != "/etc/5gpn/cert/web/current/privkey.pem" {
 		t.Errorf("WebCertFile/WebKeyFile = %q/%q, want the DNS_WEB_CERT/KEY overrides", cfg.WebCertFile, cfg.WebKeyFile)
 	}
 	if cfg.WWWDir != "/opt/5gpn/custom-www" {
@@ -427,24 +428,28 @@ func TestLoadConfig_TGBot(t *testing.T) {
 
 func TestLoadConfig_TGBotProxyValidation(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		proxy   string
-		wantErr bool
+		name      string
+		proxy     string
+		wantToken bool
 	}{
-		{name: "http", proxy: "http://127.0.0.1:7890"},
-		{name: "https with auth", proxy: "https://user:secret@proxy.example:8443"},
-		{name: "socks rejected", proxy: "socks5://127.0.0.1:7890", wantErr: true},
-		{name: "missing host", proxy: "http://", wantErr: true},
-		{name: "path rejected", proxy: "http://proxy.example/not-a-proxy-path", wantErr: true},
-		{name: "query rejected", proxy: "http://proxy.example?x=1", wantErr: true},
+		{name: "http", proxy: "http://127.0.0.1:7890", wantToken: true},
+		{name: "https with auth", proxy: "https://user:secret@proxy.example:8443", wantToken: true},
+		{name: "socks rejected", proxy: "socks5://127.0.0.1:7890"},
+		{name: "missing host", proxy: "http://"},
+		{name: "path rejected", proxy: "http://proxy.example/not-a-proxy-path"},
+		{name: "query rejected", proxy: "http://proxy.example?x=1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearAllDNSEnv(t)
 			t.Setenv("DNS_LISTEN_DOT", "")
 			t.Setenv("TGBOT_PROXY_URL", tc.proxy)
-			_, err := LoadConfig()
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("LoadConfig() error = %v, wantErr=%v", err, tc.wantErr)
+			t.Setenv("TGBOT_TOKEN", "123:token")
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("LoadConfig() must not fail DNS for optional proxy: %v", err)
+			}
+			if (cfg.TGBotToken != "") != tc.wantToken {
+				t.Fatalf("TGBotToken retained = %v, want %v", cfg.TGBotToken != "", tc.wantToken)
 			}
 		})
 	}
@@ -820,6 +825,8 @@ func TestLoadConfigRejectsOutOfRangeUpstreamPorts(t *testing.T) {
 	}{
 		{"DNS_CHINA", "223.5.5.5:0"},
 		{"DNS_TRUST", "1.1.1.1:99999"},
+		{"DNS_CHINA", "[2001:db8::1]:53"},
+		{"DNS_TRUST", "dns.example@[2001:db8::1]:853"},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
 			clearAllDNSEnv(t)
@@ -830,6 +837,78 @@ func TestLoadConfigRejectsOutOfRangeUpstreamPorts(t *testing.T) {
 				t.Fatalf("LoadConfig error = %v, want ErrInvalidUpstream", err)
 			}
 		})
+	}
+}
+
+func TestLoadConfigRejectsUnsafeListenerBindings(t *testing.T) {
+	for _, tc := range []struct {
+		key, value string
+	}{
+		{"DNS_LISTEN_DEBUG", "0.0.0.0:5353"},
+		{"DNS_LISTEN_API", "192.0.2.10:443"},
+		{"DNS_ZASH_LISTEN", "[::1]:443"},
+		{"DNS_LISTEN_DOT", ":8853"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			clearAllDNSEnv(t)
+			t.Setenv("DNS_LISTEN_DOT", "")
+			t.Setenv(tc.key, tc.value)
+			if _, err := LoadConfig(); err == nil {
+				t.Fatalf("LoadConfig accepted %s=%q", tc.key, tc.value)
+			}
+		})
+	}
+}
+
+func TestLoadConfigRejectsIPv6Gateway(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_LISTEN_DOT", "")
+	t.Setenv("DNS_GATEWAY_IP", "2001:db8::1")
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig accepted an IPv6 gateway in the IPv4 architecture")
+	}
+}
+
+func TestLoadConfigBoundsNumericKnobs(t *testing.T) {
+	for _, tc := range []struct {
+		key, value string
+		check      func(Config) bool
+	}{
+		{"DNS_CACHE_SIZE", "1000000000", func(c Config) bool { return c.CacheSize == 4096 }},
+		{"DNS_MAX_INFLIGHT", "1000000000", func(c Config) bool { return c.MaxInflight == 4096 }},
+		{"DNS_TTL_MAX", "9223372036854775807", func(c Config) bool { return c.TTLMax == 86400*time.Second }},
+		{"DNS_QUERY_TIMEOUT", "0s", func(c Config) bool { return c.QueryTimeout == 5*time.Second }},
+		{"DNS_HEARTBEAT_INTERVAL", "1ms", func(c Config) bool { return c.HeartbeatInterval == 60*time.Second }},
+		{"DNS_API_RATE", "NaN", func(c Config) bool { return c.APIRate == 20 }},
+		{"DNS_API_RATE", "+Inf", func(c Config) bool { return c.APIRate == 20 }},
+		{"DNS_API_BURST", "1000000000", func(c Config) bool { return c.APIBurst == 40 }},
+	} {
+		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
+			clearAllDNSEnv(t)
+			t.Setenv("DNS_LISTEN_DOT", "")
+			t.Setenv(tc.key, tc.value)
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.check(cfg) {
+				t.Fatalf("%s=%q was not bounded: %+v", tc.key, tc.value, cfg)
+			}
+		})
+	}
+}
+
+func TestLoadConfigRepairsInvertedTTLRange(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_LISTEN_DOT", "")
+	t.Setenv("DNS_TTL_MIN", "3600")
+	t.Setenv("DNS_TTL_MAX", "60")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TTLMin != 300*time.Second || cfg.TTLMax != 86400*time.Second {
+		t.Fatalf("TTL range = %s..%s, want defaults", cfg.TTLMin, cfg.TTLMax)
 	}
 }
 
@@ -911,16 +990,16 @@ func TestLoadConfig_ZashCertExplicit(t *testing.T) {
 		clearAllDNSEnv(t)
 		t.Setenv("DNS_CERT", "/c")
 		t.Setenv("DNS_KEY", "/k")
-		t.Setenv("DNS_WEB_CERT", "/etc/5gpn/cert/web/fullchain.pem")
-		t.Setenv("DNS_WEB_KEY", "/etc/5gpn/cert/web/privkey.pem")
-		t.Setenv("DNS_ZASH_CERT", "/etc/5gpn/cert/zash/fullchain.pem")
-		t.Setenv("DNS_ZASH_KEY", "/etc/5gpn/cert/zash/privkey.pem")
+		t.Setenv("DNS_WEB_CERT", "/etc/5gpn/cert/web/current/fullchain.pem")
+		t.Setenv("DNS_WEB_KEY", "/etc/5gpn/cert/web/current/privkey.pem")
+		t.Setenv("DNS_ZASH_CERT", "/etc/5gpn/cert/zash/current/fullchain.pem")
+		t.Setenv("DNS_ZASH_KEY", "/etc/5gpn/cert/zash/current/privkey.pem")
 
 		cfg, err := LoadConfig()
 		if err != nil {
 			t.Fatalf("LoadConfig: %v", err)
 		}
-		if cfg.ZashCertFile != "/etc/5gpn/cert/zash/fullchain.pem" || cfg.ZashKeyFile != "/etc/5gpn/cert/zash/privkey.pem" {
+		if cfg.ZashCertFile != "/etc/5gpn/cert/zash/current/fullchain.pem" || cfg.ZashKeyFile != "/etc/5gpn/cert/zash/current/privkey.pem" {
 			t.Errorf("ZashCertFile/KeyFile = %q/%q, want explicit override", cfg.ZashCertFile, cfg.ZashKeyFile)
 		}
 	})

@@ -9,6 +9,7 @@ import type { MihomoLogLine } from '../../lib/api/types'
 import { useStatus } from '../../lib/StatusContext'
 import { cn } from '../../lib/cn'
 import { useMihomoLogs } from './useMihomoLogs'
+import { api } from '../../lib/api/client'
 
 // mihomo's log levels (its own free-form `type` field) mapped to the
 // closest existing Badge tone — unrecognized/absent levels fall to neutral
@@ -42,20 +43,6 @@ function buildColumns(t: TFunction): ColumnDef<MihomoLogLine, unknown>[] {
   ]
 }
 
-// Opens zashboard pre-filled to talk to this box's mihomo controller through
-// the daemon's `/proxy/`
-// reverse proxy. The zash mux's `/proxy/` handler now passes the browser's
-// `Authorization` straight through to the controller instead of injecting
-// it server-side, so zashboard itself must present the secret — carried
-// here so an authenticated console admin auto-auths rather than hitting a
-// 401. `secret` is the only piece that goes through `encodeURIComponent`
-// (mihomo secrets contain `+`/`/`/`=`, which are URL-unsafe); the whole URL
-// is still built as a plain template (not URLSearchParams) so the path
-// segment in `secondaryPath` stays a literal `/proxy`, not `%2Fproxy`.
-function buildZashboardHref(zashDomain: string, secret: string): string {
-  return `https://${zashDomain}/#/setup?hostname=${zashDomain}&port=443&secret=${encodeURIComponent(secret)}&secondaryPath=/proxy`
-}
-
 /** 出口内核 (mihomo) — READ-ONLY monitoring: a health card (version/meta
  *  from the shared `useStatus()` poll, the bearer-protected
  *  `/api/mihomo/health` liveness check the Sidebar's kernel-status dot reads — see
@@ -68,11 +55,27 @@ export default function MihomoPage() {
   const { t } = useTranslation()
   const { status, mihomo, mihomoOk, loading } = useStatus()
   const zashDomain = status?.zash_domain
-  const mihomoSecret = status?.mihomo_secret ?? ''
 
   const [paused, setPaused] = useState(false)
+  const [openingZash, setOpeningZash] = useState(false)
   const { lines, connected } = useMihomoLogs({ paused })
   const columns = useMemo(() => buildColumns(t), [t])
+
+  const openZashboard = async () => {
+    if (openingZash) return
+    setOpeningZash(true)
+    const popup = window.open('about:blank', '_blank')
+    if (popup) popup.opener = null
+    try {
+      const handoff = await api.createZashboardHandoff()
+      if (popup) popup.location.replace(handoff.url)
+      else window.location.assign(handoff.url)
+    } catch {
+      popup?.close()
+    } finally {
+      setOpeningZash(false)
+    }
+  }
 
   return (
     <div className="flex max-w-[1180px] flex-col gap-4" data-testid="page-mihomo">
@@ -95,15 +98,16 @@ export default function MihomoPage() {
             </>
           )}
           {zashDomain ? (
-            <a
-              href={buildZashboardHref(zashDomain, mihomoSecret)}
-              target="_blank"
-              rel="noreferrer"
+            <button
+              type="button"
+              onClick={() => void openZashboard()}
+              disabled={openingZash}
+              aria-busy={openingZash}
               className="ml-auto inline-flex items-center gap-1.5 rounded-[10px] border border-input-border bg-card px-3 py-1.5 text-[12px] font-semibold text-text-mid hover:bg-primary/10"
             >
               <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
               {t('mihomo.openZashboard')}
-            </a>
+            </button>
           ) : null}
         </div>
       </Card>

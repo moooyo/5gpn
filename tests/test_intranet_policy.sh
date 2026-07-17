@@ -49,9 +49,9 @@ grep -Fq 'WEB_CERT_DIR="${DNS_CERT_DIR}/web"' "$INSTALL" \
     || fail "install.sh: no WEB_CERT_DIR role dir (/etc/5gpn/cert/web)"
 grep -Fq 'ZASH_CERT_DIR="${DNS_CERT_DIR}/zash"' "$INSTALL" \
     || fail "install.sh: no ZASH_CERT_DIR role dir (/etc/5gpn/cert/zash)"
-grep -Fq 'DNS_WEB_CERT=${WEB_CERT_DIR}/fullchain.pem' "$INSTALL" \
+grep -Fq 'DNS_WEB_CERT=${WEB_CERT_DIR}/current/fullchain.pem' "$INSTALL" \
     || fail "install.sh: dns.env does not point DNS_WEB_CERT at the web role dir"
-grep -Fq 'DNS_CERT=${DOT_CERT_DIR}/fullchain.pem' "$INSTALL" \
+grep -Fq 'DNS_CERT=${DOT_CERT_DIR}/current/fullchain.pem' "$INSTALL" \
     || fail "install.sh: dns.env does not point DNS_CERT at the dot role dir"
 # full_install must provision the ONE lineage named for the base domain.
 grep -Eq '^[[:space:]]*install_cert "\$BASE_DOMAIN"' "$INSTALL" \
@@ -185,10 +185,10 @@ grep -Fq 'roles=(dot web zash)' "$RENEW" \
     || fail "renew-hook.sh: does not deploy to all dot/web/zash role dirs"
 grep -Fq 'validate_cert_pair' "$RENEW" \
     || fail "renew-hook.sh: does not validate SANs and the certificate/private-key pair"
-grep -Fq 'mktemp "${dest}/.fullchain.pem.XXXXXX"' "$RENEW" \
-    || fail "renew-hook.sh: certificate publication is not same-directory staged"
-grep -Fq 'mv -f -- "${cert_tmps[$i]}"' "$RENEW" \
-    || fail "renew-hook.sh: staged certificate is not atomically renamed into place"
+grep -Fq 'mktemp -d "${dest}/generations/.new.XXXXXX"' "$RENEW" \
+    || fail "renew-hook.sh: certificate generation is not same-directory staged"
+grep -Fq 'mv -Tf -- "${links[$i]}" "${dests[$i]}/current"' "$RENEW" \
+    || fail "renew-hook.sh: certificate pair is not atomically published"
 grep -Fq 'mihomo reloads the controller certificate files automatically' "$RENEW" \
     || fail "renew-hook.sh: missing mihomo controller certificate hot-reload contract"
 grep -Eq 'systemctl (restart|reload) mihomo' "$RENEW" \

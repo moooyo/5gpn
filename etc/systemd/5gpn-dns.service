@@ -33,7 +33,11 @@ RestartMaxDelaySec=300
 # process stops pinging within WatchdogSec, systemd restarts it (paced by the
 # backoff above) instead of leaving a hung-but-active resolver.
 WatchdogSec=30
-User=root
+User=gpn-dns
+Group=gpn-dns
+# Grants the raw-config editor access to the shared operator-owned config.
+SupplementaryGroups=mihomo
+UMask=0027
 LimitNOFILE=65535
 # cgroup ceilings so an overload (or a leak) degrades instead of OOM-killing the
 # whole box — the resolver is the network's only DNS. Percentages scale with the
@@ -46,8 +50,8 @@ TasksMax=4096
 # Sandbox: DNS resolver — binds :853 (DoT, the ONLY client-facing DNS
 # transport), 127.0.0.1:5353 (loopback debug UDP), and loopback :443
 # (control-plane API + disk-served SPA + public /ios/ profile path; browsers
-# normally reach it through the mihomo SNI split on :443), root with no new
-# privileges.
+# normally reach it through the mihomo SNI split on :443). The service account
+# receives only the low-port bind capability.
 # IPv4 (+unix) sockets only for now — AF_INET6 /
 # AF_NETLINK are NOT granted; confirm on test-env whether the runtime needs
 # either (a dual-stack ":port" bind or route subscribe) and add them there if
@@ -58,11 +62,14 @@ TasksMax=4096
 # systemd rather than run under this sandbox, so NO loosening is needed here:
 #   - `systemctl restart/is-active` talks to systemd over the AF_UNIX private
 #     socket (already permitted);
-#   - `/opt/5gpn/scripts/cert-renew.sh --cert-name <validated-base>` is launched
-#     via `systemd-run` (a transient unit spawned by PID 1), so the configured
-#     DNS-01/HTTP-01 workflow runs OUTSIDE this sandbox and can update ACME state
-#     plus /etc/5gpn/cert. This deliberately keeps the resolver hardened.
+#   - the fixed `5gpn-certbot-renew.service` runs the configured DNS-01/HTTP-01
+#     workflow outside this sandbox;
+#   - fixed `5gpn-journal@{5gpn-dns,mihomo}` instances export bounded tails
+#     without granting this account host-wide journal access.
+# A narrow polkit rule permits only those starts and restarting mihomo.
 NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
@@ -71,6 +78,8 @@ ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
+ProtectProc=invisible
+ProcSubset=pid
 RestrictAddressFamilies=AF_INET AF_UNIX
 # The in-process subscription manager writes rule caches to
 # /etc/5gpn/rules/<category>/<name>.txt, and the control-plane API rewrites the
@@ -81,7 +90,6 @@ RestrictAddressFamilies=AF_INET AF_UNIX
 # this sandbox; TLS readers notice file mtimes without using rules-only SIGHUP.
 # The Cloudflare credential is entirely inaccessible below.
 # Mihomo Egress DNS Broker: binds 127.0.0.1:5354 (UDP+TCP).
-# Port >1024 on loopback: no AmbientCapabilities or CAP_NET_BIND_SERVICE needed.
 ReadWritePaths=/etc/5gpn
 ReadOnlyPaths=/etc/5gpn/dns.env -/etc/5gpn/cert -/opt/5gpn/web
 # ACME credentials are consumed only by the out-of-sandbox renewal helper.

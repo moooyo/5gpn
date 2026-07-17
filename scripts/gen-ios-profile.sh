@@ -118,7 +118,7 @@ EOF
 # DNS. If signing is impossible (no cert / openssl), the UNSIGNED profile is
 # REFUSED and removed (fail closed). Caller-environment overrides are not a
 # configuration surface.
-CERT_DIR="/etc/5gpn/cert/dot"
+CERT_DIR="/etc/5gpn/cert/dot/current"
 sign_ok=0
 if command -v openssl >/dev/null 2>&1 \
    && [[ -f "${CERT_DIR}/fullchain.pem" && -f "${CERT_DIR}/privkey.pem" ]]; then

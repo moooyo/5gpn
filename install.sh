@@ -62,6 +62,8 @@ DEBUG_CERT_DIR="/etc/5gpn/debug-cert"     # self-signed debug certs; NEVER under
 DOT_CERT_DIR="${DNS_CERT_DIR}/dot"       # DoT :853 cert copy (hot-reloaded on mtime change)
 WEB_CERT_DIR="${DNS_CERT_DIR}/web"       # loopback HTTPS console :443 cert copy
 ZASH_CERT_DIR="${DNS_CERT_DIR}/zash"     # zashboard panel cert copy
+CERT_ROLE_MARKER=".5gpn-cert-role-owned"
+CERT_ROLE_VALUE_PREFIX="5gpn-cert-role-v1"
 ACME_DIR="/etc/5gpn/acme"                # root-only Cloudflare API-token credentials dir
 LE_ROOT="/etc/letsencrypt"
 LE_LIVE_ROOT="${LE_ROOT}/live"
@@ -82,6 +84,10 @@ DNS_WEB_DIR_DEFAULT="/opt/5gpn/web"         # resolved from dns.env after cfg_ge
 DNS_RULES_DIR_DEFAULT="/etc/5gpn/rules"  # subscription caches and chnroute snapshot
 MIHOMO_BIN="${BIN_DIR}/mihomo"
 MIHOMO_DIR="/etc/5gpn/mihomo"           # config.yaml + whitelist.txt + provider caches
+DNS_SERVICE_USER="gpn-dns"
+MIHOMO_SERVICE_USER="mihomo"
+POLKIT_RULE_PATH="/etc/polkit-1/rules.d/50-5gpn.rules"
+POLKIT_RULE_MARKER="// 5gpn-polkit-id: runtime-operations-v1"
 ZASH_OWNERSHIP_MARKER=".5gpn-zashboard-owned"
 WEB_OWNERSHIP_MARKER=".5gpn-web-owned"
 WEB_OWNERSHIP_VALUE="5gpn-web-v1"
@@ -259,6 +265,94 @@ verify_ownership_marker() {
     [[ "$(cat "$marker" 2>/dev/null || true)" == "$value" ]]
 }
 
+owned_root_canonical() {
+    local dir="$1" marker="$2" value="$3" canonical
+    [[ -n "$dir" && "$dir" == /* && -d "$dir" && ! -L "$dir" ]] || return 1
+    canonical="$(canonical_dir_path "$dir")" || return 1
+    [[ "$canonical" == "$dir" ]] || return 1
+    case "$canonical" in
+        /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
+            return 1 ;;
+    esac
+    verify_ownership_marker "$canonical" "$marker" "$value" || return 1
+    printf '%s\n' "$canonical"
+}
+
+remove_owned_root() {
+    local canonical
+    canonical="$(owned_root_canonical "$1" "$2" "$3")" || return 1
+    rm -rf -- "$canonical"
+}
+
+clear_owned_scope() {
+    local root="$1" marker="$2" value="$3" scope="$4" canonical scope_canonical preserve
+    shift 4
+    canonical="$(owned_root_canonical "$root" "$marker" "$value")" || return 1
+    scope_canonical="$(canonical_dir_path "$scope")" || return 1
+    [[ "$scope_canonical" == "$scope" ]] || return 1
+    [[ "$scope_canonical" == "$canonical" || "$scope_canonical" == "$canonical"/* ]] || return 1
+    local -a find_args=(find "$scope_canonical" -mindepth 1 -maxdepth 1)
+    for preserve in "$@"; do
+        [[ -n "$preserve" && "$preserve" != */* ]] || return 1
+        find_args+=(! -name "$preserve")
+    done
+    "${find_args[@]}" -exec rm -rf -- {} +
+}
+
+remove_owned_child() {
+    local root="$1" marker="$2" value="$3" child="$4" canonical target
+    [[ -n "$child" && "$child" != */* ]] || return 1
+    canonical="$(owned_root_canonical "$root" "$marker" "$value")" || return 1
+    target="${canonical}/${child}"
+    [[ ! -e "$target" && ! -L "$target" ]] && return 0
+    [[ -d "$target" && ! -L "$target" ]] || return 1
+    [[ "$(canonical_dir_path "$target")" == "$target" ]] || return 1
+    rm -rf -- "$target"
+}
+
+remove_owned_scoped_child() {
+    local root="$1" marker="$2" value="$3" scope="$4" child="$5"
+    local canonical scope_canonical target
+    [[ -n "$child" && "$child" != */* ]] || return 1
+    canonical="$(owned_root_canonical "$root" "$marker" "$value")" || return 1
+    scope_canonical="$(canonical_dir_path "$scope")" || return 1
+    [[ "$scope_canonical" == "$scope" && "$scope_canonical" == "$canonical"/* ]] || return 1
+    target="${scope_canonical}/${child}"
+    [[ ! -e "$target" && ! -L "$target" ]] && return 0
+    [[ -d "$target" && ! -L "$target" ]] || return 1
+    [[ "$(canonical_dir_path "$target")" == "$target" ]] || return 1
+    rm -rf -- "$target"
+}
+
+# Remove unpublished certificate generations and temporary current links after
+# a staging or publication failure. A generation still referenced by current is
+# deliberately retained: that can happen only when rollback of a published role
+# also failed, and deleting it would turn a recoverable new certificate into a
+# dangling live link.
+cleanup_cert_role_candidates() {
+    local roles_name="$1" dests_name="$2" generations_name="$3" links_name="$4"
+    local -n candidate_roles="$roles_name"
+    local -n candidate_dests="$dests_name"
+    local -n candidate_generations="$generations_name"
+    local -n candidate_links="$links_name"
+    local i role dest generation link target current
+    for i in "${!candidate_generations[@]}"; do
+        role="${candidate_roles[$i]}"
+        dest="${candidate_dests[$i]}"
+        generation="${candidate_generations[$i]}"
+        link="${candidate_links[$i]:-}"
+        [[ -z "$link" ]] || rm -f -- "$link"
+        [[ -n "$generation" ]] || continue
+        target="generations/$(basename -- "$generation")"
+        current="$(readlink -- "${dest}/current" 2>/dev/null || true)"
+        if [[ "$current" != "$target" ]]; then
+            remove_owned_scoped_child "$dest" "$CERT_ROLE_MARKER" \
+                "${CERT_ROLE_VALUE_PREFIX}:${role}" "${dest}/generations" \
+                "$(basename -- "$generation")" || true
+        fi
+    done
+}
+
 claim_temp_dir() {
     local dir="$1" canonical
     canonical="$(canonical_dir_path "$dir")" || return 1
@@ -308,13 +402,10 @@ claim_project_roots() {
 }
 
 remove_fixed_owned_dir() {
-    local dir="$1" marker="$2" value="$3" canonical
+    local dir="$1" marker="$2" value="$3"
     [[ -e "$dir" ]] || return 0
-    canonical="$(canonical_dir_path "$dir")" || return 1
-    [[ "$canonical" == "$dir" ]] || { err "Refusing directory alias during removal: $dir"; return 1; }
-    verify_ownership_marker "$dir" "$marker" "$value" \
-        || { err "Refusing to remove unowned directory: $dir"; return 1; }
-    rm -rf -- "$dir"
+    remove_owned_root "$dir" "$marker" "$value" \
+        || { err "Refusing to remove unsafe or unowned directory: $dir"; return 1; }
 }
 
 # Remove the 5gpn runtime while preserving the verified Gum binary. Gum is a
@@ -332,10 +423,11 @@ remove_runtime_preserving_gum() {
         || { err "Refusing to remove unowned runtime directory: $BASE_DIR"; return 1; }
 
     if [[ -d "$BIN_DIR" && ! -L "$BIN_DIR" && -f "$GUM_BIN" && ! -L "$GUM_BIN" ]]; then
-        find "$BASE_DIR" -mindepth 1 -maxdepth 1 \
-            ! -name "$BASE_OWNERSHIP_MARKER" ! -path "$BIN_DIR" -exec rm -rf -- {} + \
+        clear_owned_scope "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
+            "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" bin \
             || { err "Could not remove the 5gpn runtime around preserved Gum."; return 1; }
-        find "$BIN_DIR" -mindepth 1 -maxdepth 1 ! -name gum -exec rm -rf -- {} + \
+        clear_owned_scope "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
+            "$BIN_DIR" gum \
             || { err "Could not clean project binaries around preserved Gum."; return 1; }
         ok "Preserved shared Gum binary: $GUM_BIN"
         return 0
@@ -387,8 +479,8 @@ claim_zashboard_dir() {
 
 clear_zashboard_dir() {
     claim_zashboard_dir || return 1
-    find "$DNS_ZASH_DIR" -mindepth 1 -maxdepth 1 ! -name "$ZASH_OWNERSHIP_MARKER" \
-        -exec rm -rf -- {} +
+    clear_owned_scope "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1' \
+        "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER"
 }
 
 remove_zashboard_dir() {
@@ -399,7 +491,7 @@ remove_zashboard_dir() {
     [[ -f "$marker" && ! -L "$marker" ]] \
         && [[ "$(cat "$marker" 2>/dev/null || true)" == '5gpn-zashboard-v1' ]] \
         || { err "Refusing to remove unowned zashboard directory: $p"; return 1; }
-    rm -rf -- "$p"
+    remove_owned_root "$p" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1'
 }
 
 safe_web_path() {
@@ -435,21 +527,24 @@ publish_owned_tree() {
     candidate="$(mktemp -d "${parent}/.${leaf}.new.XXXXXX")" || return 1
     write_ownership_marker "$candidate" "$marker" "$value" \
         || { rmdir -- "$candidate"; return 1; }
-    cp -a -- "$src/." "$candidate/" || { rm -rf -- "$candidate"; return 1; }
+    cp -a -- "$src/." "$candidate/" \
+        || { remove_owned_root "$candidate" "$marker" "$value" || true; return 1; }
     write_ownership_marker "$candidate" "$marker" "$value" \
-        || { rm -rf -- "$candidate"; return 1; }
+        || { remove_owned_root "$candidate" "$marker" "$value" || true; return 1; }
     backup="${parent}/.${leaf}.old.$$"
     if [[ -e "$dest" ]]; then
         verify_ownership_marker "$dest" "$marker" "$value" \
-            || { rm -rf -- "$candidate"; err "Refusing to replace unowned tree: $dest"; return 1; }
-        mv -- "$dest" "$backup" || { rm -rf -- "$candidate"; return 1; }
+            || { remove_owned_root "$candidate" "$marker" "$value" || true; err "Refusing to replace unowned tree: $dest"; return 1; }
+        mv -- "$dest" "$backup" \
+            || { remove_owned_root "$candidate" "$marker" "$value" || true; return 1; }
     fi
     if ! mv -- "$candidate" "$dest"; then
         [[ -e "$backup" ]] && mv -- "$backup" "$dest"
+        remove_owned_root "$candidate" "$marker" "$value" || true
         return 1
     fi
     if [[ -e "$backup" ]]; then
-        verify_ownership_marker "$backup" "$marker" "$value" && rm -rf -- "$backup"
+        remove_owned_root "$backup" "$marker" "$value" || true
     fi
 }
 
@@ -514,7 +609,10 @@ install_gum() {
         warn "gum sha256 mismatch; refusing to install it and using plain output."
         remove_temp_dir "$tmp"; return 0
     fi
-    if ! tar -xzf "$tmp/gum.tgz" -C "$tmp" 2>/dev/null; then
+    if ! archive_paths_safe tar "$tmp/gum.tgz" \
+       || ! tar --no-same-owner --no-same-permissions --delay-directory-restore \
+            -xzf "$tmp/gum.tgz" -C "$tmp" 2>/dev/null \
+       || ! extracted_tree_safe "$tmp"; then
         warn "gum archive extraction failed; using plain output."
         remove_temp_dir "$tmp"; return 0
     fi
@@ -705,9 +803,54 @@ render_mihomo_listeners() {
 # ----------------------------------------------------------------------------
 # Dependencies and installed-unit ownership
 # ----------------------------------------------------------------------------
+systemd_unit_has_dropins() {
+    local unit="$1" root
+    shift
+    local -a roots=("$@")
+    if [[ "${#roots[@]}" == 0 ]]; then
+        roots=(/etc/systemd/system.control /run/systemd/system.control \
+               /run/systemd/transient /run/systemd/generator.early \
+               /etc/systemd/system /etc/systemd/system.attached \
+               /run/systemd/system /run/systemd/system.attached \
+               /run/systemd/generator /usr/local/lib/systemd/system \
+               /usr/lib/systemd/system /lib/systemd/system \
+               /run/systemd/generator.late)
+    fi
+    for root in "${roots[@]}"; do
+        [[ ! -e "${root}/${unit}.d" && ! -L "${root}/${unit}.d" ]] || return 0
+        case "$root" in
+            /etc/systemd/system.control|/run/systemd/system.control|/run/systemd/transient|/run/systemd/generator.early)
+                [[ ! -e "${root}/${unit}" && ! -L "${root}/${unit}" ]] || return 0 ;;
+        esac
+    done
+    return 1
+}
+
+journal_export_instances_clear() {
+    local unit root
+    local -a roots=("$@")
+    if [[ "${#roots[@]}" == 0 ]]; then
+        roots=(/etc/systemd/system.control /run/systemd/system.control \
+               /run/systemd/transient /run/systemd/generator.early \
+               /etc/systemd/system /etc/systemd/system.attached \
+               /run/systemd/system /run/systemd/system.attached \
+               /run/systemd/generator /usr/local/lib/systemd/system \
+               /usr/lib/systemd/system /lib/systemd/system \
+               /run/systemd/generator.late)
+    fi
+    for unit in 5gpn-journal@5gpn-dns.service 5gpn-journal@mihomo.service; do
+        for root in "${roots[@]}"; do
+            [[ ! -e "${root}/${unit}" && ! -L "${root}/${unit}" \
+               && ! -e "${root}/${unit}.d" && ! -L "${root}/${unit}.d" ]] \
+                || return 1
+        done
+    done
+}
+
 unit_file_owned_by_5gpn() {
     local unit="$1" file="/etc/systemd/system/$1"
     [[ -f "$file" && ! -L "$file" ]] || return 1
+    ! systemd_unit_has_dropins "$unit" || return 1
     grep -Fqx "# 5gpn-unit-id: ${unit}:v1" "$file" || return 1
     case "$unit" in
         5gpn-dns.service)
@@ -715,6 +858,9 @@ unit_file_owned_by_5gpn() {
                 && grep -Fqx 'ExecStart=/opt/5gpn/bin/5gpn-dns' "$file" ;;
         mihomo.service)
             grep -Fqx 'ExecStart=/opt/5gpn/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' "$file" ;;
+        5gpn-journal@.service)
+            grep -Fqx 'ExecStart=/opt/5gpn/scripts/export-journal.sh %i' "$file" \
+                && journal_export_instances_clear ;;
         5gpn-certbot-renew.service)
             grep -Fqx 'ExecStart=/opt/5gpn/scripts/cert-renew.sh --quiet' "$file" ;;
         5gpn-certbot-renew.timer)
@@ -751,6 +897,85 @@ preflight_renewal_unit_ownership() {
     preflight_owned_units 5gpn-certbot-renew.service 5gpn-certbot-renew.timer
 }
 
+service_account_is_safe() {
+    local user="$1" group="$2" entry uid home shell primary uid_min
+    entry="$(getent passwd "$user" 2>/dev/null)" || return 1
+    uid="$(printf '%s\n' "$entry" | cut -d: -f3)"
+    home="$(printf '%s\n' "$entry" | cut -d: -f6)"
+    shell="$(printf '%s\n' "$entry" | cut -d: -f7)"
+    primary="$(id -gn "$user" 2>/dev/null)" || return 1
+    uid_min="$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs 2>/dev/null)"
+    uid_min="${uid_min:-1000}"
+    [[ "$uid" =~ ^[0-9]+$ && "$uid_min" =~ ^[0-9]+$ && "$uid" -lt "$uid_min" ]] || return 1
+    [[ "$home" == /nonexistent && "$primary" == "$group" ]] || return 1
+    case "$shell" in */nologin|/bin/false) ;; *) return 1 ;; esac
+}
+
+service_account_name_is_valid() {
+    [[ "${1:-}" =~ ^[a-z_][a-z0-9_-]{0,30}$ ]]
+}
+
+ensure_service_account() {
+    local user="$1" group="$2" nologin members
+    service_account_name_is_valid "$user" && service_account_name_is_valid "$group" \
+        || { err "Invalid strict service account name: $user/$group"; return 1; }
+    if getent group "$group" >/dev/null 2>&1; then
+        members="$(getent group "$group" | cut -d: -f4)"
+        [[ -z "$members" ]] \
+            || { err "Refusing shared service group with explicit members: $group"; return 1; }
+    else
+        groupadd --system "$group" || return 1
+    fi
+    if getent passwd "$user" >/dev/null 2>&1; then
+        service_account_is_safe "$user" "$group" \
+            || { err "Refusing incompatible pre-existing service account: $user"; return 1; }
+        return 0
+    fi
+    nologin="$(command -v nologin 2>/dev/null || true)"
+    nologin="${nologin:-/usr/sbin/nologin}"
+    useradd --system --gid "$group" --home-dir /nonexistent --shell "$nologin" \
+        --no-create-home "$user" || return 1
+    service_account_is_safe "$user" "$group"
+}
+
+install_service_accounts() {
+    command -v getent >/dev/null 2>&1 \
+        && command -v groupadd >/dev/null 2>&1 \
+        && command -v useradd >/dev/null 2>&1 \
+        || { err "getent, groupadd, and useradd are required for service isolation."; return 1; }
+    ensure_service_account "$DNS_SERVICE_USER" "$DNS_SERVICE_USER" || return 1
+    ensure_service_account "$MIHOMO_SERVICE_USER" "$MIHOMO_SERVICE_USER" || return 1
+    ok "Dedicated service accounts are ready: ${DNS_SERVICE_USER}, ${MIHOMO_SERVICE_USER}."
+}
+
+polkit_rule_owned_by_5gpn() {
+    [[ -f "$POLKIT_RULE_PATH" && ! -L "$POLKIT_RULE_PATH" ]] \
+        && grep -Fqx "$POLKIT_RULE_MARKER" "$POLKIT_RULE_PATH"
+}
+
+preflight_polkit_rule_ownership() {
+    [[ ! -e "$POLKIT_RULE_PATH" ]] || polkit_rule_owned_by_5gpn \
+        || { err "Refusing to replace an unowned polkit rule: $POLKIT_RULE_PATH"; return 1; }
+}
+
+install_polkit_rule() {
+    local src candidate
+    preflight_polkit_rule_ownership || return 1
+    if [[ -f "${SCRIPT_DIR}/etc/polkit-1/rules.d/50-5gpn.rules" ]]; then
+        src="${SCRIPT_DIR}/etc/polkit-1/rules.d/50-5gpn.rules"
+    elif [[ -f "${BASE_DIR}/etc/polkit-1/rules.d/50-5gpn.rules" ]]; then
+        src="${BASE_DIR}/etc/polkit-1/rules.d/50-5gpn.rules"
+    else
+        err "The fixed 5gpn polkit rule is missing."
+        return 1
+    fi
+    install -d -o root -g root -m 0755 "$(dirname -- "$POLKIT_RULE_PATH")" || return 1
+    candidate="$(mktemp "$(dirname -- "$POLKIT_RULE_PATH")/.50-5gpn.rules.XXXXXX")" || return 1
+    install -o root -g root -m 0644 "$src" "$candidate" \
+        || { rm -f -- "$candidate"; return 1; }
+    mv -f -- "$candidate" "$POLKIT_RULE_PATH"
+}
+
 remove_owned_renewal_automation() {
     remove_owned_unit 5gpn-certbot-renew.timer
     remove_owned_unit 5gpn-certbot-renew.service
@@ -764,7 +989,7 @@ install_deps() {
             apt-get update -qq || true
             apt-get install -y -qq \
                 wget curl ca-certificates unzip iproute2 openssl \
-                qrencode jq libcap2-bin util-linux \
+                qrencode jq libcap2-bin util-linux polkitd \
                 dnsutils || warn "some apt packages failed; continuing."
             if [[ "$CERT_MODE" != debug ]]; then
                 apt-get install -y -qq certbot \
@@ -778,7 +1003,7 @@ install_deps() {
         dnf|yum)
             $PKG_MGR install -y -q \
                 wget curl ca-certificates unzip iproute openssl \
-                qrencode jq util-linux \
+                qrencode jq util-linux polkit \
                 bind-utils || warn "some rpm packages failed; continuing."
             if [[ "$CERT_MODE" != debug ]]; then
                 $PKG_MGR install -y -q certbot \
@@ -862,18 +1087,60 @@ resolve_dns_release_version() { # optional API URL is an internal test seam
 }
 
 archive_paths_safe() {
-    local kind="$1" archive="$2" entry
+    local kind="$1" archive="$2" entry normalized names verbose types
+    local name_count type_count
+    declare -A seen=()
     if [[ "$kind" == tar ]]; then
+        names="$(tar -tzf "$archive" 2>/dev/null)" || return 1
+        verbose="$(tar -tvzf "$archive" 2>/dev/null)" || return 1
         while IFS= read -r entry; do
-            [[ -n "$entry" && "$entry" != /* && "$entry" != ../* && "$entry" != *'/../'* && "$entry" != */.. ]] \
-                || return 1
-        done < <(tar -tzf "$archive")
+            [[ -n "$entry" ]] || return 1
+            normalized="$entry"
+            while [[ "$normalized" == ./* ]]; do normalized="${normalized#./}"; done
+            normalized="${normalized%/}"
+            [[ -z "$normalized" ]] && continue
+            [[ "$normalized" != /* && "$normalized" != ../* \
+                && "$normalized" != *'/../'* && "$normalized" != */.. \
+                && "$normalized" != *'\'* ]] || return 1
+            case "/$normalized/" in
+                */"$TEMP_OWNERSHIP_MARKER"/*|*/"$BASE_OWNERSHIP_MARKER"/*) return 1 ;;
+            esac
+            [[ -z "${seen[$normalized]+x}" ]] || return 1
+            seen[$normalized]=1
+        done <<< "$names"
+        while IFS= read -r entry; do
+            [[ -n "$entry" ]] || continue
+            case "${entry:0:1}" in -|d) ;; *) return 1 ;; esac
+        done <<< "$verbose"
     else
+        names="$(unzip -Z1 "$archive" 2>/dev/null)" || return 1
         while IFS= read -r entry; do
-            [[ -n "$entry" && "$entry" != /* && "$entry" != ../* && "$entry" != *'/../'* && "$entry" != */.. ]] \
-                || return 1
-        done < <(unzip -Z1 "$archive")
+            [[ -n "$entry" ]] || return 1
+            normalized="${entry%/}"
+            [[ -n "$normalized" && "$normalized" != /* && "$normalized" != ../* \
+                && "$normalized" != *'/../'* && "$normalized" != */.. \
+                && "$normalized" != *'\'* ]] || return 1
+            case "/$normalized/" in
+                */"$TEMP_OWNERSHIP_MARKER"/*|*/"$BASE_OWNERSHIP_MARKER"/*) return 1 ;;
+            esac
+            [[ -z "${seen[$normalized]+x}" ]] || return 1
+            seen[$normalized]=1
+        done <<< "$names"
+        verbose="$(unzip -Z -l "$archive" 2>/dev/null)" || return 1
+        types="$(printf '%s\n' "$verbose" | awk '/^[-dlcbps][rwxstST-]{9}[[:space:]]/ { print substr($0,1,1) }')"
+        name_count="$(printf '%s\n' "$names" | awk 'NF { n++ } END { print n+0 }')"
+        type_count="$(printf '%s\n' "$types" | awk 'NF { n++ } END { print n+0 }')"
+        [[ "$name_count" == "$type_count" && "$name_count" -gt 0 ]] || return 1
+        [[ -z "$(printf '%s\n' "$types" | grep -Ev '^[-d]$' || true)" ]] || return 1
     fi
+}
+
+extracted_tree_safe() {
+    local root="$1"
+    [[ -d "$root" && ! -L "$root" ]] || return 1
+    [[ -z "$(find "$root" -mindepth 1 -type l -print -quit 2>/dev/null)" ]] || return 1
+    [[ -z "$(find "$root" -mindepth 1 ! -type f ! -type d -print -quit 2>/dev/null)" ]] || return 1
+    [[ -z "$(find "$root" -mindepth 1 -type f -links +1 -print -quit 2>/dev/null)" ]] || return 1
 }
 
 stage_artifacts() {
@@ -907,7 +1174,10 @@ stage_artifacts() {
     archive_paths_safe tar "$ARTIFACT_STAGE/web.tgz" \
         || { err "Unsafe path in web archive."; return 1; }
     mkdir "$ARTIFACT_STAGE/web"
-    tar --no-same-owner --no-same-permissions -xzf "$ARTIFACT_STAGE/web.tgz" -C "$ARTIFACT_STAGE/web"
+    tar --no-same-owner --no-same-permissions --delay-directory-restore \
+        -xzf "$ARTIFACT_STAGE/web.tgz" -C "$ARTIFACT_STAGE/web"
+    extracted_tree_safe "$ARTIFACT_STAGE/web" \
+        || { err "Unsafe object found after web archive extraction."; return 1; }
     [[ -f "$ARTIFACT_STAGE/web/index.html" ]] \
         || { err "Staged web archive has no index.html."; return 1; }
 
@@ -926,6 +1196,8 @@ stage_artifacts() {
         || { err "Unsafe path in zashboard archive."; return 1; }
     mkdir "$ARTIFACT_STAGE/zash"
     unzip -qo "$ARTIFACT_STAGE/zash.zip" -d "$ARTIFACT_STAGE/zash"
+    extracted_tree_safe "$ARTIFACT_STAGE/zash" \
+        || { err "Unsafe object found after zashboard archive extraction."; return 1; }
     if [[ -f "$ARTIFACT_STAGE/zash/dist/index.html" ]]; then
         mv "$ARTIFACT_STAGE/zash/dist"/* "$ARTIFACT_STAGE/zash/"
         rmdir "$ARTIFACT_STAGE/zash/dist"
@@ -1010,13 +1282,21 @@ capture_install_rollback() {
     cp -a -- "$CONF_DIR" "$ROLLBACK_DIR/conf"
     local unit
     install -d -m 0700 "$ROLLBACK_DIR/units"
-    for unit in 5gpn-dns.service mihomo.service 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
+    for unit in 5gpn-dns.service mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
         if [[ -f "/etc/systemd/system/$unit" && ! -L "/etc/systemd/system/$unit" ]]; then
             cp -p -- "/etc/systemd/system/$unit" "$ROLLBACK_DIR/units/$unit"
         else
             : > "$ROLLBACK_DIR/units/$unit.absent"
         fi
     done
+    install -d -m 0700 "$ROLLBACK_DIR/polkit"
+    if [[ -e "$POLKIT_RULE_PATH" || -L "$POLKIT_RULE_PATH" ]]; then
+        polkit_rule_owned_by_5gpn \
+            || { err "Unsafe polkit rule appeared before rollback capture: $POLKIT_RULE_PATH"; return 1; }
+        cp -p -- "$POLKIT_RULE_PATH" "$ROLLBACK_DIR/polkit/50-5gpn.rules"
+    else
+        : > "$ROLLBACK_DIR/polkit/50-5gpn.rules.absent"
+    fi
     if systemctl is-enabled --quiet 5gpn-certbot-renew.timer 2>/dev/null; then
         : > "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.enabled"
     else
@@ -1093,7 +1373,7 @@ capture_install_rollback() {
 
 rollback_install() {
     [[ "$INSTALL_TRANSACTION_ACTIVE" == 1 && -d "$ROLLBACK_DIR" ]] || return 0
-    local rollback_cert_failed=0
+    local rollback_cert_failed=0 rollback_host_failed=0 polkit_candidate=""
     INSTALL_TRANSACTION_ACTIVE=0
     warn "Install publication failed; restoring the previous 5gpn deployment."
     if [[ "$SWAP_CREATED_THIS_RUN" == 1 ]]; then
@@ -1104,15 +1384,15 @@ rollback_install() {
     fi
     systemctl stop 5gpn-dns.service mihomo.service 2>/dev/null || true
     if verify_ownership_marker "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"; then
-        rm -rf -- "$BASE_DIR"
+        remove_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"
     fi
     cp -a -- "$ROLLBACK_DIR/base" "$BASE_DIR"
     if verify_ownership_marker "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"; then
-        rm -rf -- "$CONF_DIR"
+        remove_fixed_owned_dir "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"
     fi
     cp -a -- "$ROLLBACK_DIR/conf" "$CONF_DIR"
     local unit
-    for unit in 5gpn-dns.service mihomo.service 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
+    for unit in 5gpn-dns.service mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
         if [[ -f "$ROLLBACK_DIR/units/$unit" ]]; then
             cp -p -- "$ROLLBACK_DIR/units/$unit" "/etc/systemd/system/$unit"
         elif [[ -f "$ROLLBACK_DIR/units/$unit.absent" ]] \
@@ -1120,6 +1400,34 @@ rollback_install() {
             rm -f -- "/etc/systemd/system/$unit"
         fi
     done
+    if [[ -f "$ROLLBACK_DIR/polkit/50-5gpn.rules" ]]; then
+        if [[ ( -e "$POLKIT_RULE_PATH" || -L "$POLKIT_RULE_PATH" ) ]] \
+           && ! polkit_rule_owned_by_5gpn; then
+            warn "Could not restore the previous polkit rule because the live path is no longer 5gpn-owned."
+            rollback_host_failed=1
+        else
+            install -d -o root -g root -m 0755 "$(dirname -- "$POLKIT_RULE_PATH")" \
+                || rollback_host_failed=1
+            if [[ "$rollback_host_failed" == 0 ]]; then
+                polkit_candidate="$(mktemp "$(dirname -- "$POLKIT_RULE_PATH")/.50-5gpn.rollback.XXXXXX")" \
+                    || rollback_host_failed=1
+            fi
+            if [[ "$rollback_host_failed" == 0 ]]; then
+                install -o root -g root -m 0644 "$ROLLBACK_DIR/polkit/50-5gpn.rules" "$polkit_candidate" \
+                    && mv -f -- "$polkit_candidate" "$POLKIT_RULE_PATH" \
+                    || rollback_host_failed=1
+            fi
+            [[ "$rollback_host_failed" == 0 || -z "$polkit_candidate" ]] \
+                || rm -f -- "$polkit_candidate"
+        fi
+    elif [[ -f "$ROLLBACK_DIR/polkit/50-5gpn.rules.absent" ]]; then
+        if polkit_rule_owned_by_5gpn; then
+            rm -f -- "$POLKIT_RULE_PATH" || rollback_host_failed=1
+        elif [[ -e "$POLKIT_RULE_PATH" || -L "$POLKIT_RULE_PATH" ]]; then
+            warn "Could not restore an absent polkit rule because the live path is no longer 5gpn-owned."
+            rollback_host_failed=1
+        fi
+    fi
     if [[ -f "$ROLLBACK_DIR/renew-hook" ]]; then
         install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
         cp -p -- "$ROLLBACK_DIR/renew-hook" /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh
@@ -1193,13 +1501,13 @@ rollback_install() {
     fi
     if [[ -d "$ROLLBACK_DIR/external-web" ]]; then
         if verify_ownership_marker "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"; then
-            rm -rf -- "$DNS_WEB_DIR"
+            remove_fixed_owned_dir "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"
         fi
         cp -a -- "$ROLLBACK_DIR/external-web" "$DNS_WEB_DIR"
     fi
     if [[ -d "$ROLLBACK_DIR/external-zash" ]]; then
         if verify_ownership_marker "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1'; then
-            rm -rf -- "$DNS_ZASH_DIR"
+            remove_fixed_owned_dir "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1'
         fi
         cp -a -- "$ROLLBACK_DIR/external-zash" "$DNS_ZASH_DIR"
     fi
@@ -1221,10 +1529,13 @@ rollback_install() {
     systemctl restart mihomo.service 2>/dev/null || true
     systemctl restart 5gpn-dns.service 2>/dev/null || true
     release_install_cert_lock
-    if [[ "$rollback_cert_failed" == 0 ]]; then
+    if [[ "$rollback_cert_failed" == 0 && "$rollback_host_failed" == 0 ]]; then
         warn "Previous deployment restored; inspect the reported error before retrying."
     else
-        err "Previous service files were restored, but certificate-lineage rollback was incomplete; automatic renewal is disabled pending repair."
+        [[ "$rollback_cert_failed" == 0 ]] \
+            || err "Certificate-lineage rollback was incomplete; automatic renewal is disabled pending repair."
+        [[ "$rollback_host_failed" == 0 ]] \
+            || err "Host authorization rollback was incomplete; inspect $POLKIT_RULE_PATH before retrying."
         return 1
     fi
 }
@@ -1294,12 +1605,10 @@ install_web() {
 # zash panel must not abort the resolver install (the console + DoT still work).
 #
 # This ONLY acquires+unzips the dist -- it does not seed a backend. zashboard
-# reads its mihomo-controller target from URL params on first load
-# (#/setup?hostname=...&port=...&secret=...&secondaryPath=<path>), persisted to
-# localStorage; SP-3's C3 console adds a deep-link with those params (secondary
-# path pointed at the mihomo reverse-proxy route), so no index.html/config patch
-# happens here. Real zashboard -> reverse-proxy -> mihomo controller wiring is a
-# test-env cutover gate, not installer scope.
+# receives its controller target from the daemon's one-use handoff redirect.
+# The redirect stores only a fixed non-secret placeholder in zashboard; an
+# HttpOnly host session gates /proxy/ and the daemon injects the real controller
+# credential. No index.html/config patch happens here.
 install_zashboard() {
     [[ -n "$ARTIFACT_STAGE" && -f "$ARTIFACT_STAGE/zash/index.html" ]] \
         || { err "zashboard was not staged."; return 1; }
@@ -1424,7 +1733,8 @@ validate_egress_resolver() {
 seed_mihomo_whitelist() {
     # whitelist.txt is TUI-managed after install and never clobbered.
     if [[ ! -f "$MIHOMO_DIR/whitelist.txt" ]]; then
-        install -m 0644 "${SCRIPT_DIR}/etc/mihomo/whitelist.seed.txt" "$MIHOMO_DIR/whitelist.txt"
+        install -g "$MIHOMO_SERVICE_USER" -m 0660 \
+            "${SCRIPT_DIR}/etc/mihomo/whitelist.seed.txt" "$MIHOMO_DIR/whitelist.txt"
         warn "Zashboard is unreachable until you explicitly add a source CIDR with '5gpn add-allow'."
     fi
 }
@@ -1452,7 +1762,7 @@ persist_mihomo_secret() {
 # old file, fsyncs, and atomically renames it into place.
 render_mihomo_config() {
     local mode="${1:-seed}" config="${MIHOMO_DIR}/config.yaml" secret=""
-    install -d -m 0700 "$MIHOMO_DIR"
+    install -d -g "$MIHOMO_SERVICE_USER" -m 2770 "$MIHOMO_DIR"
     seed_mihomo_whitelist
 
     if [[ -f "$config" && "$mode" != "--reset" ]]; then
@@ -1460,7 +1770,8 @@ render_mihomo_config() {
             err "Existing operator-owned mihomo config is invalid; it was NOT overwritten: $config"
             return 1
         fi
-        chmod 0600 "$config" 2>/dev/null || true
+        chgrp "$MIHOMO_SERVICE_USER" "$config" 2>/dev/null || true
+        chmod 0660 "$config" 2>/dev/null || true
         secret="$(mihomo_config_secret "$config")"
         persist_mihomo_secret "$secret"
         ok "Existing operator-owned mihomo config validated and preserved: $config"
@@ -1484,7 +1795,8 @@ render_mihomo_config() {
     listeners="$(render_mihomo_listeners "$MIHOMO_LISTEN_IPS")"
     candidate="$(mktemp "${MIHOMO_DIR}/.config.yaml.XXXXXX")" \
         || { err "Could not create a mihomo config candidate in $MIHOMO_DIR"; return 1; }
-    chmod 0600 "$candidate" \
+    chgrp "$MIHOMO_SERVICE_USER" "$candidate" \
+        && chmod 0660 "$candidate" \
         || { rm -f -- "$candidate"; err "Could not secure the mihomo config candidate."; return 1; }
 
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -1510,7 +1822,8 @@ render_mihomo_config() {
             || { rm -f -- "$candidate"; err "Could not reserve a mihomo config backup path."; return 1; }
         cp -p -- "$config" "$backup" \
             || { rm -f -- "$candidate" "$backup"; err "Could not back up the operator mihomo config; live config was not changed."; return 1; }
-        chmod 0600 "$backup" \
+        chgrp "$MIHOMO_SERVICE_USER" "$backup" \
+            && chmod 0660 "$backup" \
             || { rm -f -- "$candidate" "$backup"; err "Could not secure the mihomo config backup; live config was not changed."; return 1; }
         sync -f "$backup" 2>/dev/null || true
         info "Backed up operator mihomo config to $backup"
@@ -1589,7 +1902,7 @@ add_allow_ip() {
     is_valid_ipv4_or_cidr "$ip" \
         || { err "Allowlist entry must be a canonical IPv4 address or IPv4 CIDR."; return 1; }
     [[ "$ip" == */* ]] || ip="${ip}/32"
-    install -d -m 0755 "$MIHOMO_DIR"
+    install -d -g "$MIHOMO_SERVICE_USER" -m 2770 "$MIHOMO_DIR"
     [[ ! -e "$file" || ( -f "$file" && ! -L "$file" ) ]] \
         || { err "Refusing unsafe allowlist path: $file"; return 1; }
     tmp="$(mktemp "${MIHOMO_DIR}/.whitelist.XXXXXX")" || return 1
@@ -1602,7 +1915,8 @@ add_allow_ip() {
         printf '%s\n' "$ip" >> "$tmp" \
             || { rm -f -- "$tmp"; err "Could not update the allowlist candidate."; return 1; }
     fi
-    chmod 0644 "$tmp" \
+    chgrp "$MIHOMO_SERVICE_USER" "$tmp" \
+        && chmod 0660 "$tmp" \
         || { rm -f -- "$tmp"; err "Could not secure the allowlist candidate."; return 1; }
     sync -f "$tmp" 2>/dev/null || true
     mv -f -- "$tmp" "$file" \
@@ -1633,7 +1947,8 @@ del_allow_ip() {
     tmp="$(mktemp "${MIHOMO_DIR}/.whitelist.XXXXXX")" || return 1
     awk -v entry="$ip" '$0 != entry' "$file" > "$tmp" \
         || { rm -f -- "$tmp"; err "Could not update the allowlist candidate."; return 1; }
-    chmod 0644 "$tmp" \
+    chgrp "$MIHOMO_SERVICE_USER" "$tmp" \
+        && chmod 0660 "$tmp" \
         || { rm -f -- "$tmp"; err "Could not secure the allowlist candidate."; return 1; }
     sync -f "$tmp" 2>/dev/null || true
     mv -f -- "$tmp" "$file" \
@@ -1681,6 +1996,9 @@ install_files() {
         [[ -e "$u" ]] || continue
         install -m 0644 "$u" "${BASE_DIR}/etc/systemd/$(basename "$u")"
     done
+    install -d -m 0755 "${BASE_DIR}/etc/polkit-1/rules.d"
+    install -m 0644 "${SCRIPT_DIR}/etc/polkit-1/rules.d/50-5gpn.rules" \
+        "${BASE_DIR}/etc/polkit-1/rules.d/50-5gpn.rules"
     ok "Files installed under ${BASE_DIR} and ${CONF_DIR}."
 }
 
@@ -2202,10 +2520,10 @@ install_cert() {
         # without consuming a new issuance. Renewal stays disabled until repair.
         if ! certbot_lineage_artifacts_exist "$base" \
            && cert_provenance_matches "$mode" "$base" \
-           && validate_cert_pair "${DOT_CERT_DIR}/fullchain.pem" "${DOT_CERT_DIR}/privkey.pem" \
+           && validate_cert_pair "${DOT_CERT_DIR}/current/fullchain.pem" "${DOT_CERT_DIR}/current/privkey.pem" \
                 "$base" "$((30*86400))" production "$mode"; then
             info "Certbot lineage is missing; reusing the validated preserved ${mode} role certificate for ${base}."
-            deploy_cert_roles "$base" "$DOT_CERT_DIR" "$mode" || return 1
+            deploy_cert_roles "$base" "$DOT_CERT_DIR/current" "$mode" || return 1
             write_cert_provenance "$mode" "$base" missing || return 1
             remove_owned_renew_hook
             remove_owned_renewal_automation
@@ -2273,19 +2591,22 @@ issue_selfsigned_wildcard() {
     install -d -m 0700 "$live"
     tmp="$(mktemp -d "${live}/.new.XXXXXX")" \
         || { err "CERT_MODE=debug: could not create a certificate staging directory."; return 1; }
+    write_ownership_marker "$tmp" "$TEMP_OWNERSHIP_MARKER" "$TEMP_OWNERSHIP_VALUE" \
+        || { rmdir -- "$tmp"; return 1; }
     local san="DNS:${base},DNS:*.${base}"
     [[ -n "${GATEWAY_IP:-}" ]] && san="${san},IP:${GATEWAY_IP}"
     [[ -n "${PUBLIC_IP:-}" && "${PUBLIC_IP:-}" != "${GATEWAY_IP:-}" ]] && san="${san},IP:${PUBLIC_IP}"
     openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
         -keyout "${tmp}/privkey.pem" -out "${tmp}/fullchain.pem" \
         -subj "/CN=${base}" -addext "subjectAltName=${san}" >/dev/null 2>&1 \
-        || { rm -rf -- "$tmp"; err "CERT_MODE=debug: self-signed wildcard cert generation failed (is openssl installed?)."; return 1; }
+        || { remove_owned_root "$tmp" "$TEMP_OWNERSHIP_MARKER" "$TEMP_OWNERSHIP_VALUE" || true; err "CERT_MODE=debug: self-signed wildcard cert generation failed (is openssl installed?)."; return 1; }
     chmod 0600 "${tmp}/privkey.pem" "${tmp}/fullchain.pem"
     # Candidate files are complete before either live role source is replaced.
     # Both moves stay on the same filesystem and are therefore atomic.
     sync -f "${tmp}/privkey.pem" "${tmp}/fullchain.pem" 2>/dev/null || true
     mv -f -- "${tmp}/privkey.pem" "${live}/privkey.pem"
     mv -f -- "${tmp}/fullchain.pem" "${live}/fullchain.pem"
+    rm -f -- "${tmp}/${TEMP_OWNERSHIP_MARKER}"
     rmdir -- "$tmp"
     warn "CERT_MODE=debug: SELF-SIGNED WILDCARD cert for *.${base} (CN=${base}, SAN=${san}). NOT trusted by clients — test/dev only."
     # Dismantle production renewal machinery when switching to debug mode.
@@ -2299,34 +2620,90 @@ issue_selfsigned_wildcard() {
 # debug mode may pass an alternate source directory explicitly.
 deploy_cert_roles() {
     local base="$1" src="${2:-${LE_LIVE_ROOT}/${base}}" mode="${3:-${CERT_MODE:-cloudflare}}"
-    local r dest cert_tmp key_tmp trust=production i
-    local -a roles=(dot web zash) dests=() cert_tmps=() key_tmps=()
+    local r dest group generation final link_tmp old trust=production i j rollback_link
+    local -a roles=(dot web zash) dests=() generations=() links=() old_targets=()
     [[ "$src" == "$DEBUG_CERT_DIR"/* ]] && { trust=debug; mode=debug; }
     validate_cert_pair "${src}/fullchain.pem" "${src}/privkey.pem" "$base" 0 "$trust" "$mode" \
         || { err "Certificate source failed validation: $src"; return 1; }
-    # Stage and validate every role before replacing any live file.
+
+    # Each role publishes one complete generation through an atomically replaced
+    # relative symlink. Readers therefore see the old pair or the new pair,
+    # never a key and certificate from different generations.
     for r in "${roles[@]}"; do
         dest="${DNS_CERT_DIR}/$r"
-        install -d -m 0750 "$dest" \
-            || { rm -f -- "${cert_tmps[@]}" "${key_tmps[@]}"; return 1; }
-        cert_tmp="$(mktemp "${dest}/.fullchain.pem.XXXXXX")" \
-            || { rm -f -- "${cert_tmps[@]}" "${key_tmps[@]}"; return 1; }
-        key_tmp="$(mktemp "${dest}/.privkey.pem.XXXXXX")" \
-            || { rm -f -- "$cert_tmp" "${cert_tmps[@]}" "${key_tmps[@]}"; return 1; }
-        dests+=("$dest"); cert_tmps+=("$cert_tmp"); key_tmps+=("$key_tmp")
-        install -m 0640 "${src}/fullchain.pem" "$cert_tmp" \
-            && install -m 0640 "${src}/privkey.pem" "$key_tmp" \
-            && validate_cert_pair "$cert_tmp" "$key_tmp" "$base" 0 "$trust" "$mode" \
-            || { rm -f -- "${cert_tmps[@]}" "${key_tmps[@]}"; return 1; }
-        sync -f "$cert_tmp" "$key_tmp" 2>/dev/null || true
+        group="$DNS_SERVICE_USER"
+        [[ "$r" == zash ]] && group="$MIHOMO_SERVICE_USER"
+        install -d -g "$group" -m 0750 "$dest" \
+            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
+        write_ownership_marker "$dest" "$CERT_ROLE_MARKER" "${CERT_ROLE_VALUE_PREFIX}:${r}" \
+            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
+        install -d -g "$group" -m 0750 "${dest}/generations" \
+            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
+        if [[ -e "${dest}/current" || -L "${dest}/current" ]]; then
+            [[ -L "${dest}/current" ]] \
+                || { cleanup_cert_role_candidates roles dests generations links; err "Certificate role current path is not a symlink: ${dest}/current"; return 1; }
+            old="$(readlink -- "${dest}/current")"
+            [[ "$old" =~ ^generations/[A-Za-z0-9._-]+$ && -d "${dest}/${old}" ]] \
+                || { cleanup_cert_role_candidates roles dests generations links; err "Certificate role current symlink is unsafe: ${dest}/current"; return 1; }
+        else
+            old=""
+        fi
+
+        generation="$(mktemp -d "${dest}/generations/.new.XXXXXX")" \
+            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
+        dests+=("$dest")
+        generations+=("$generation")
+        links+=("")
+        old_targets+=("$old")
+        i=$((${#generations[@]} - 1))
+        chgrp "$group" "$generation" && chmod 0750 "$generation" \
+            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
+        install -g "$group" -m 0640 "${src}/fullchain.pem" "${generation}/fullchain.pem" \
+            && install -g "$group" -m 0640 "${src}/privkey.pem" "${generation}/privkey.pem" \
+            && validate_cert_pair "${generation}/fullchain.pem" "${generation}/privkey.pem" \
+                "$base" 0 "$trust" "$mode" \
+            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
+        sync -f "${generation}/fullchain.pem" "${generation}/privkey.pem" "$generation" 2>/dev/null || true
+        final="${dest}/generations/generation-$(date -u +%Y%m%dT%H%M%SZ)-${BASHPID}-${RANDOM}"
+        [[ ! -e "$final" ]] \
+            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
+        mv -- "$generation" "$final" \
+            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
+        generations[$i]="$final"
+        link_tmp="${dest}/.current.${BASHPID}.${RANDOM}"
+        [[ ! -e "$link_tmp" && ! -L "$link_tmp" ]] \
+            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
+        links[$i]="$link_tmp"
+        ln -s "generations/$(basename -- "$final")" "$link_tmp" \
+            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
     done
+
     for i in "${!roles[@]}"; do
-        mv -f -- "${key_tmps[$i]}" "${dests[$i]}/privkey.pem" \
-            || { rm -f -- "${cert_tmps[@]}" "${key_tmps[@]}"; return 1; }
-        key_tmps[$i]=""
-        mv -f -- "${cert_tmps[$i]}" "${dests[$i]}/fullchain.pem" \
-            || { rm -f -- "${cert_tmps[@]}" "${key_tmps[@]}"; return 1; }
-        cert_tmps[$i]=""
+        if ! mv -Tf -- "${links[$i]}" "${dests[$i]}/current"; then
+            for ((j = 0; j < i; j++)); do
+                if [[ -n "${old_targets[$j]}" ]]; then
+                    rollback_link="${dests[$j]}/.rollback.${BASHPID}.${RANDOM}"
+                    ln -s "${old_targets[$j]}" "$rollback_link" \
+                        && mv -Tf -- "$rollback_link" "${dests[$j]}/current" || true
+                    rm -f -- "$rollback_link"
+                else
+                    rm -f -- "${dests[$j]}/current"
+                fi
+            done
+            cleanup_cert_role_candidates roles dests generations links
+            err "Could not atomically publish certificate role ${roles[$i]}."
+            return 1
+        fi
+        links[$i]=""
+    done
+
+    for i in "${!roles[@]}"; do
+        r="${roles[$i]}"
+        dest="${dests[$i]}"
+        final="${generations[$i]}"
+        clear_owned_scope "$dest" "$CERT_ROLE_MARKER" "${CERT_ROLE_VALUE_PREFIX}:${r}" \
+            "${dest}/generations" "$(basename -- "$final")" || return 1
+        rm -f -- "${dest}/fullchain.pem" "${dest}/privkey.pem"
     done
     ok "${mode} certificate for ${base} deployed to dot/web/zash role dirs."
 }
@@ -2492,8 +2869,11 @@ reload_rules() {
 }
 
 preflight_unit_ownership() {
-    preflight_owned_units 5gpn-dns.service mihomo.service \
+    preflight_owned_units 5gpn-dns.service mihomo.service 5gpn-journal@.service \
         5gpn-certbot-renew.service 5gpn-certbot-renew.timer
+    journal_export_instances_clear \
+        || { err "Refusing conflicting fixed 5gpn journal exporter instance or drop-in."; return 1; }
+    preflight_polkit_rule_ownership
 }
 
 install_units() {
@@ -2501,7 +2881,7 @@ install_units() {
     # Prefer the repo checkout; fall back to the staged copies under /opt/5gpn
     # (a piped curl|bash install has no checkout after install_files staged them).
     local src u
-    for u in 5gpn-dns.service mihomo.service; do
+    for u in 5gpn-dns.service mihomo.service 5gpn-journal@.service; do
         if [[ -f "${SCRIPT_DIR}/etc/systemd/${u}" ]]; then
             src="${SCRIPT_DIR}/etc/systemd/${u}"
         elif [[ -f "${BASE_DIR}/etc/systemd/${u}" ]]; then
@@ -2516,8 +2896,52 @@ install_units() {
         sync -f "$candidate" 2>/dev/null || true
         mv -f -- "$candidate" "/etc/systemd/system/${u}"
     done
+    install_polkit_rule || return 1
     systemctl daemon-reload
-    ok "5gpn-dns.service + mihomo.service installed."
+    ok "5gpn-dns.service, mihomo.service, and the fixed journal exporter installed."
+}
+
+prepare_runtime_permissions() {
+    local path role group
+    install -d -o root -g "$DNS_SERVICE_USER" -m 2771 "$CONF_DIR" || return 1
+    if [[ -f "${CONF_DIR}/dns.env" ]]; then
+        chown root:"$DNS_SERVICE_USER" "${CONF_DIR}/dns.env" || return 1
+        chmod 0640 "${CONF_DIR}/dns.env" || return 1
+    fi
+
+    install -d -o "$DNS_SERVICE_USER" -g "$DNS_SERVICE_USER" -m 2770 \
+        "$DNS_RULES_DIR_DEFAULT" || return 1
+    find "$DNS_RULES_DIR_DEFAULT" -type d -exec chown "$DNS_SERVICE_USER:$DNS_SERVICE_USER" {} + \
+        -exec chmod 2770 {} + || return 1
+    find "$DNS_RULES_DIR_DEFAULT" -type f -exec chown "$DNS_SERVICE_USER:$DNS_SERVICE_USER" {} + \
+        -exec chmod 0640 {} + || return 1
+
+    for path in subscriptions.json policy.json upstreams.json ecs.json stats.json; do
+        [[ -f "${CONF_DIR}/${path}" ]] || continue
+        chown "$DNS_SERVICE_USER:$DNS_SERVICE_USER" "${CONF_DIR}/${path}" || return 1
+        chmod 0640 "${CONF_DIR}/${path}" || return 1
+    done
+    if [[ -f "${CONF_DIR}/tgbot.json" ]]; then
+        chown "$DNS_SERVICE_USER:$DNS_SERVICE_USER" "${CONF_DIR}/tgbot.json" || return 1
+        chmod 0600 "${CONF_DIR}/tgbot.json" || return 1
+    fi
+
+    install -d -o root -g "$MIHOMO_SERVICE_USER" -m 2770 "$MIHOMO_DIR" || return 1
+    find "$MIHOMO_DIR" -type d -exec chown "root:$MIHOMO_SERVICE_USER" {} + \
+        -exec chmod 2770 {} + || return 1
+    find "$MIHOMO_DIR" -type f -exec chown "root:$MIHOMO_SERVICE_USER" {} + \
+        -exec chmod 0660 {} + || return 1
+
+    install -d -o root -g root -m 0751 "$DNS_CERT_DIR" || return 1
+    for role in dot web zash; do
+        group="$DNS_SERVICE_USER"
+        [[ "$role" == zash ]] && group="$MIHOMO_SERVICE_USER"
+        [[ -d "${DNS_CERT_DIR}/${role}" ]] || continue
+        chown -R "root:${group}" "${DNS_CERT_DIR}/${role}" || return 1
+        find "${DNS_CERT_DIR}/${role}" -type d -exec chmod 0750 {} + || return 1
+        find "${DNS_CERT_DIR}/${role}" -type f -exec chmod 0640 {} + || return 1
+    done
+    ok "Runtime state and TLS material are scoped to dedicated service accounts."
 }
 
 write_dns_env() {
@@ -2613,10 +3037,10 @@ DNS_LISTEN_DEBUG=127.0.0.1:5353
 # All hot-reload on file-mtime change; pinned mihomo v1.19.28 guarantees that
 # mihomo reloads the controller certificate files automatically, and
 # renew-hook.sh redeploys on renewal.
-DNS_CERT=${DOT_CERT_DIR}/fullchain.pem
-DNS_KEY=${DOT_CERT_DIR}/privkey.pem
-DNS_WEB_CERT=${WEB_CERT_DIR}/fullchain.pem
-DNS_WEB_KEY=${WEB_CERT_DIR}/privkey.pem
+DNS_CERT=${DOT_CERT_DIR}/current/fullchain.pem
+DNS_KEY=${DOT_CERT_DIR}/current/privkey.pem
+DNS_WEB_CERT=${WEB_CERT_DIR}/current/fullchain.pem
+DNS_WEB_KEY=${WEB_CERT_DIR}/current/privkey.pem
 
 # ── Deployment identity + cert (read by install.sh/renew-hook.sh; also read by
 # the in-process Telegram bot). DNS_BASE_DOMAIN = the operator's ONE apex domain
@@ -2696,8 +3120,8 @@ DNS_MIHOMO_CONFIG=${mihomo_config}
 # (deploy_cert_roles).
 DNS_ZASH_DIR=${dns_zash_dir}
 DNS_ZASH_LISTEN=${dns_zash_listen}
-DNS_ZASH_CERT=${ZASH_CERT_DIR}/fullchain.pem
-DNS_ZASH_KEY=${ZASH_CERT_DIR}/privkey.pem
+DNS_ZASH_CERT=${ZASH_CERT_DIR}/current/fullchain.pem
+DNS_ZASH_KEY=${ZASH_CERT_DIR}/current/privkey.pem
 
 # Control-console SPA (served from disk by the loopback :443 server). Populated
 # by install_web from the 5gpn-web release tarball; empty dir -> built-in placeholder.
@@ -2755,17 +3179,17 @@ setup_ios_profile() {
         # The profile configures (and is signed with) the DoT domain's cert.
         if ! bash "${SCRIPTS_DIR}/gen-ios-profile.sh" "$DOT_DOMAIN" "$gw" "$candidate"; then
             warn "gen-ios-profile.sh failed because a signed profile could not be produced — no profile served."
-            rm -rf -- "$candidate"
+            remove_owned_root "$candidate" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE" || true
             return 1
         fi
     else
         warn "scripts/gen-ios-profile.sh not present yet; skipping profile generation."
-        rm -rf -- "$candidate"
+        remove_owned_root "$candidate" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE" || true
         return 1
     fi
     publish_owned_tree "$candidate" "$WWW_DIR" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE" \
-        || { rm -rf -- "$candidate"; return 1; }
-    rm -rf -- "$candidate"
+        || { remove_owned_root "$candidate" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE" || true; return 1; }
+    remove_owned_root "$candidate" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE"
 
     ok "iOS profile generated (downloaded from https://${CONSOLE_DOMAIN:-<console-domain>}/ios/ios-dot.mobileconfig)."
 }
@@ -3383,6 +3807,7 @@ full_install() {
 
     # Only after every input, host conflict, download, digest, archive, console
     # DNS gate, and existing mihomo config has passed do we enter publication.
+    install_service_accounts
     install_5gpndns
     install_mihomo
     install_files
@@ -3394,6 +3819,7 @@ full_install() {
     install_cert "$BASE_DOMAIN"
     render_mihomo_config
     setup_ios_profile
+    prepare_runtime_permissions
     start_services
     verify_console_endpoint
     reload_rules
@@ -3465,10 +3891,17 @@ uninstall() {
     warn "Uninstalling 5gpn: stopping services and reverting host changes."
 
     local unit
-    for unit in 5gpn-dns.service mihomo.service 5gpn-certbot-renew.timer \
+    for unit in 5gpn-dns.service mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.timer \
                 5gpn-certbot-renew.service; do
         remove_owned_unit "$unit"
     done
+    rm -f -- /run/5gpn-journal/5gpn-dns.log /run/5gpn-journal/mihomo.log 2>/dev/null || true
+    rmdir -- /run/5gpn-journal 2>/dev/null || true
+    if polkit_rule_owned_by_5gpn; then
+        rm -f -- "$POLKIT_RULE_PATH"
+    elif [[ -e "$POLKIT_RULE_PATH" ]]; then
+        warn "Preserving unowned polkit rule: $POLKIT_RULE_PATH"
+    fi
     systemctl daemon-reload 2>/dev/null || true
 
     # Remove the exact deploy hook installed by the current release.
@@ -3491,7 +3924,7 @@ uninstall() {
     if [[ "$DNS_WEB_DIR" != "$BASE_DIR"/* && -e "$DNS_WEB_DIR" ]]; then
         if [[ "$(safe_web_path 2>/dev/null || true)" == "$DNS_WEB_DIR" ]] \
            && verify_ownership_marker "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"; then
-            rm -rf -- "$DNS_WEB_DIR"
+            remove_fixed_owned_dir "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"
         else
             warn "Kept unowned/unsafe DNS_WEB_DIR '$DNS_WEB_DIR'."
         fi
@@ -3503,9 +3936,13 @@ uninstall() {
     remove_fixed_owned_dir "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE"
 
     if [[ "$decommission" == 1 ]]; then
-        rm -rf -- "$DNS_CERT_DIR" "$DEBUG_CERT_DIR"
+        remove_owned_child "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" cert \
+            || { err "Refusing unsafe certificate-role removal."; return 1; }
+        remove_owned_child "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" debug-cert \
+            || { err "Refusing unsafe debug-certificate removal."; return 1; }
         if [[ "$DECOMMISSION_PRESERVE_ACME" == 0 ]]; then
-            rm -rf -- "$ACME_DIR"
+            remove_owned_child "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" acme \
+                || { err "Refusing unsafe ACME credential removal."; return 1; }
             ok "Deleted 5gpn role/debug certificate material and Cloudflare credential."
         else
             ok "Deleted 5gpn role/debug certificate material; kept the credential required by the preserved external lineage."
@@ -3522,10 +3959,9 @@ uninstall() {
         # but a re-install that DOES
         # need to issue (no valid cert survived) must not hard-abort for a token
         # that was needlessly wiped. Remove everything else under CONF_DIR.
-        verify_ownership_marker "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
-            || { err "Config ownership marker missing; refusing purge."; return 1; }
-        find "$CONF_DIR" -mindepth 1 -maxdepth 1 ! -name "$CONF_OWNERSHIP_MARKER" \
-            ! -name cert ! -name acme ! -name debug-cert -exec rm -rf -- {} +
+        clear_owned_scope "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
+            "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" cert acme debug-cert \
+            || { err "Config ownership validation failed; refusing purge."; return 1; }
         if [[ "$decommission" == 1 && "$DECOMMISSION_PRESERVE_ACME" == 0 ]]; then
             remove_fixed_owned_dir "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"
             ok "Decommissioned all 5gpn configuration and certificate credentials."

@@ -537,6 +537,31 @@ func TestHandlerServeDNS(t *testing.T) {
 	}
 }
 
+func TestHandlerRejectsMultipleQuestions(t *testing.T) {
+	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
+	req := new(dns.Msg)
+	req.Question = []dns.Question{
+		{Name: "allowed.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET},
+		{Name: "block.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET},
+	}
+	w := &fakeWriter{remote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1234}}
+	h.ServeDNS(w, req)
+	if w.written == nil || w.written.Rcode != dns.RcodeFormatError {
+		t.Fatalf("multiple-question response = %#v, want FORMERR", w.written)
+	}
+}
+
+func TestHandlerRejectsNonINETQuestion(t *testing.T) {
+	h := newTestHandler(t, &fakeExchanger{}, &fakeExchanger{})
+	req := new(dns.Msg)
+	req.Question = []dns.Question{{Name: "version.bind.", Qtype: dns.TypeTXT, Qclass: dns.ClassCHAOS}}
+	w := &fakeWriter{remote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1234}}
+	h.ServeDNS(w, req)
+	if w.written == nil || w.written.Rcode != dns.RcodeNotImplemented {
+		t.Fatalf("non-IN response = %#v, want NOTIMP", w.written)
+	}
+}
+
 // TestHandlerFirstMatchWins verifies global order across intents.
 func TestHandlerFirstMatchWins(t *testing.T) {
 	// arbitrate returns foreign 9.9.9.9; direct win means no rewrite.

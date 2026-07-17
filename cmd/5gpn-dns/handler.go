@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -118,6 +119,49 @@ type Handler struct {
 	// nil disables shedding (DNS_MAX_INFLIGHT=0, and every test-constructed
 	// Handler), preserving the unbounded pre-#1 behaviour there.
 	sem chan struct{}
+
+	// flights coalesces concurrent cache misses for the same request profile.
+	// The map is capacity-bounded independently of admission control so a
+	// random-name flood cannot turn request coalescing into an unbounded map.
+	flightMu    sync.Mutex
+	flights     map[dnsFlightKey]*dnsFlight
+	flightLimit int
+}
+
+const defaultDNSFlightLimit = 1024
+
+// dnsFlightKey contains every request property that can affect the response,
+// plus the exact runtime snapshots used by the leader. Snapshot identity keeps
+// a reload boundary from coalescing an old-policy query with a new-policy one.
+type dnsFlightKey struct {
+	name             string
+	qtype            uint16
+	qclass           uint16
+	dnssecOK         bool
+	checkingDisabled bool
+	epoch            uint64
+	policy           *runtimePolicySnapshot
+	rules            *ruleSnapshot
+	upstreams        *upstreamSnapshot
+	action           resolutionAction
+}
+
+type dnsFlightScope struct {
+	epoch     uint64
+	policy    *runtimePolicySnapshot
+	rules     *ruleSnapshot
+	upstreams *upstreamSnapshot
+	action    resolutionAction
+}
+
+type dnsFlightResult struct {
+	msg  *dns.Msg
+	info resolveInfo
+}
+
+type dnsFlight struct {
+	done   chan struct{}
+	result dnsFlightResult
 }
 
 type runtimePolicyPlan struct {
@@ -383,6 +427,7 @@ const (
 type resolutionDecision struct {
 	Verdict Verdict
 	Action  resolutionAction
+	snap    *runtimePolicySnapshot
 }
 
 // decideName is the shared policy decision used by live resolution, Lookup,
@@ -393,11 +438,11 @@ func (h *Handler) decideName(name string) resolutionDecision {
 	v := classifyPolicySnapshot(snap, name)
 	switch v.Reason {
 	case "block":
-		return resolutionDecision{Verdict: v, Action: actionBlock}
+		return resolutionDecision{Verdict: v, Action: actionBlock, snap: snap}
 	case "force-direct":
-		return resolutionDecision{Verdict: v, Action: actionDirect}
+		return resolutionDecision{Verdict: v, Action: actionDirect, snap: snap}
 	case "force-proxy":
-		return resolutionDecision{Verdict: v, Action: actionGateway}
+		return resolutionDecision{Verdict: v, Action: actionGateway, snap: snap}
 	}
 	fallback := FallbackAuto
 	if snap != nil {
@@ -405,11 +450,11 @@ func (h *Handler) decideName(name string) resolutionDecision {
 	}
 	switch fallback {
 	case FallbackDirect:
-		return resolutionDecision{Verdict: Verdict{Verdict: "direct", Reason: "fallback-direct"}, Action: actionDirect}
+		return resolutionDecision{Verdict: Verdict{Verdict: "direct", Reason: "fallback-direct"}, Action: actionDirect, snap: snap}
 	case FallbackGateway:
-		return resolutionDecision{Verdict: Verdict{Verdict: "proxy", Reason: "fallback-gateway"}, Action: actionGateway}
+		return resolutionDecision{Verdict: Verdict{Verdict: "proxy", Reason: "fallback-gateway"}, Action: actionGateway, snap: snap}
 	default:
-		return resolutionDecision{Action: actionAuto}
+		return resolutionDecision{Action: actionAuto, snap: snap}
 	}
 }
 
@@ -434,21 +479,26 @@ func classifyPolicySnapshot(snap *runtimePolicySnapshot, name string) Verdict {
 	return Verdict{}
 }
 
-// ServeDNS implements dns.Handler.  The miekg UDP/TCP/DoT path carries no
-// client cancellation, so it dispatches with context.Background(); the DoH
-// front-end calls serveContext directly with the HTTP request context.
+// ServeDNS implements dns.Handler. The miekg UDP/TCP/DoT path carries no client
+// cancellation, so it dispatches with context.Background().
 func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	h.serveContext(context.Background(), w, r)
 }
 
 // serveContext is the shared per-query entry for every transport. parent
-// carries client cancellation where the transport provides it (DoH threads
-// r.Context()). It applies admission control, imposes the per-query deadline,
-// resolves, and truncates UDP replies, then writes the result to w.
+// carries client cancellation where a caller provides it. It applies admission
+// control, imposes the per-query deadline, resolves, and truncates UDP replies,
+// then writes the result to w.
 func (h *Handler) serveContext(parent context.Context, w dns.ResponseWriter, r *dns.Msg) {
-	if len(r.Question) == 0 {
+	if len(r.Question) != 1 {
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeFormatError)
+		_ = w.WriteMsg(m)
+		return
+	}
+	if r.Question[0].Qclass != dns.ClassINET {
+		m := new(dns.Msg)
+		m.SetRcode(r, dns.RcodeNotImplemented)
 		_ = w.WriteMsg(m)
 		return
 	}
@@ -500,7 +550,7 @@ func (h *Handler) serveContext(parent context.Context, w dns.ResponseWriter, r *
 	// UDP responses must fit the client's advertised EDNS budget (512 without
 	// EDNS). Truncate sets TC=1 when it drops RRs so the client cleanly retries
 	// over TCP instead of receiving an oversized/malformed datagram. TCP/DoT and
-	// the DoH shim report Network()!="udp" and are left intact (stream-framed).
+	// stream transports report Network()!="udp" and are left intact.
 	if isUDP(w) {
 		resp.Truncate(udpBudget(r))
 	}
@@ -558,6 +608,114 @@ func (ri *resolveInfo) noteCacheHit() {
 	}
 }
 
+func newDNSFlightKey(q dns.Question, r *dns.Msg, scope dnsFlightScope) dnsFlightKey {
+	opts := cacheOptionsFromMsg(r)
+	return dnsFlightKey{
+		name:             strings.ToLower(dns.Fqdn(q.Name)),
+		qtype:            q.Qtype,
+		qclass:           q.Qclass,
+		dnssecOK:         opts.dnssecOK,
+		checkingDisabled: opts.checkingDisabled,
+		epoch:            scope.epoch,
+		policy:           scope.policy,
+		rules:            scope.rules,
+		upstreams:        scope.upstreams,
+		action:           scope.action,
+	}
+}
+
+// coalesceResolution runs one detached, timeout-bounded resolution for all
+// concurrent callers with the same key. A caller that is canceled stops
+// waiting without canceling the shared resolution. When the distinct-key map
+// is full, the caller resolves independently so capacity pressure cannot grow
+// the map or block unrelated names.
+func (h *Handler) coalesceResolution(
+	ctx context.Context,
+	q dns.Question,
+	r *dns.Msg,
+	scope dnsFlightScope,
+	initial resolveInfo,
+	resolve func(context.Context, *dns.Msg, *resolveInfo) *dns.Msg,
+) (*dns.Msg, resolveInfo, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, initial, false
+	}
+
+	template := new(dns.Msg)
+	if r != nil {
+		template = r.Copy()
+	} else {
+		template.Question = []dns.Question{q}
+	}
+	key := newDNSFlightKey(q, template, scope)
+	limit := h.flightLimit
+	if limit <= 0 {
+		limit = defaultDNSFlightLimit
+	}
+
+	h.flightMu.Lock()
+	flight := h.flights[key]
+	leader := false
+	if flight == nil && len(h.flights) < limit {
+		if h.flights == nil {
+			h.flights = make(map[dnsFlightKey]*dnsFlight)
+		}
+		flight = &dnsFlight{done: make(chan struct{})}
+		h.flights[key] = flight
+		leader = true
+	}
+	h.flightMu.Unlock()
+
+	if flight == nil {
+		info := initial
+		msg := resolve(ctx, template, &info)
+		return prepareFlightReply(msg, r), info, true
+	}
+
+	if leader {
+		go func() {
+			to := h.Timeout
+			if to <= 0 {
+				to = 5 * time.Second
+			}
+			runCtx, cancel := context.WithTimeout(context.Background(), to)
+			defer cancel()
+
+			info := initial
+			flight.result = dnsFlightResult{
+				msg:  resolve(runCtx, template, &info),
+				info: info,
+			}
+			close(flight.done)
+
+			h.flightMu.Lock()
+			if h.flights[key] == flight {
+				delete(h.flights, key)
+			}
+			h.flightMu.Unlock()
+		}()
+	}
+
+	select {
+	case <-flight.done:
+		return prepareFlightReply(flight.result.msg, r), flight.result.info, true
+	case <-ctx.Done():
+		return nil, initial, false
+	}
+}
+
+func prepareFlightReply(msg, request *dns.Msg) *dns.Msg {
+	if msg == nil {
+		return nil
+	}
+	reply := msg.Copy()
+	prepareCachedReply(reply, request)
+	return reply
+}
+
 // resolve is the testable inner implementation, sans tracing ? the signature
 // the existing unit tests exercise.
 func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.Msg {
@@ -605,8 +763,13 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 	}
 
 	// The upstream groups are hot-swappable (PUT /api/upstreams); load the
-	// current pair once so one query never mixes groups from two generations.
-	china, trust := h.exchangers()
+	// current pair and its identity once so one query never mixes groups from
+	// two generations or shares a flight across a swap.
+	upstreamGeneration := h.ups.Load()
+	china, trust := h.China, h.Trust
+	if upstreamGeneration != nil {
+		china, trust = upstreamGeneration.China, upstreamGeneration.Trust
+	}
 
 	// Capture the cache epoch BEFORE the rule snapshot: if a reload
 	// (swapRuleSets = snapshot swap + cache flush + epoch bump) lands anywhere
@@ -615,8 +778,13 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 	// repopulate the freshly flushed cache and re-mask the rule change.
 	epoch := h.Cache.Epoch()
 
-	// Capture the current chnroute snapshot once for arbitration/rewrite.
-	cn := h.chnroute()
+	// Capture the current chnroute snapshot and identity once for
+	// arbitration/rewrite and flight generation isolation.
+	ruleGeneration := h.rules.Load()
+	cn := h.CN
+	if ruleGeneration != nil {
+		cn = ruleGeneration.CN
+	}
 
 	// ?? Step 1: AAAA ? synthetic SOA, NOERROR, empty Answer ?????????????????
 	if q.Qtype == dns.TypeAAAA {
@@ -650,6 +818,13 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 	// "default case, arbitrate+rewrite".
 	decision := h.decideName(name)
 	verdict := decision.Verdict
+	flightScope := dnsFlightScope{
+		epoch:     epoch,
+		policy:    decision.snap,
+		rules:     ruleGeneration,
+		upstreams: upstreamGeneration,
+		action:    decision.Action,
+	}
 
 	// ?? Step 3: block ??????????????????????????????????????????????????????
 	if decision.Action == actionBlock {
@@ -665,8 +840,7 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 		ri.noteVerdict(verdict)
 		if isA {
 			h.bumpForceDirect()
-			if cached, meta, ok := h.cacheGetWithMetadata(name, q.Qtype); ok {
-				cached.Id = r.Id
+			if cached, meta, ok := h.cacheGetForRequest(r, name, q.Qtype); ok {
 				ri.noteUpstream(meta.Upstream)
 				ri.noteCacheHit()
 				return cached
@@ -675,19 +849,32 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 			// arbitration as the default path, then return the adopted answer
 			// without gateway rewriting. A foreign domain explicitly marked direct
 			// must therefore still work when china has no useful answer.
-			resp, src, err := arbitrateSrc(ctx, r, china, trust, cn, h.stats)
-			if err != nil || resp == nil {
-				return h.staleOrServerFail(r, name, q.Qtype, ri)
+			initial := resolveInfo{}
+			if ri != nil {
+				initial = *ri
 			}
-			ri.noteUpstream(src)
-			resp = filterAAAA(resp)
-			h.cachePutWithMetadata(name, q.Qtype, resp, epoch, cacheMetadata{
-				Verdict: verdict.Verdict, Reason: verdict.Reason, Upstream: src,
+			resp, info, ok := h.coalesceResolution(ctx, q, r, flightScope, initial, func(runCtx context.Context, flightReq *dns.Msg, flightInfo *resolveInfo) *dns.Msg {
+				resolved, src, err := arbitrateSrc(runCtx, flightReq, china, trust, cn, h.stats)
+				if err != nil || resolved == nil {
+					return h.staleOrServerFail(flightReq, name, q.Qtype, flightInfo)
+				}
+				flightInfo.noteUpstream(src)
+				resolved = filterAAAA(resolved)
+				h.cachePutForRequest(flightReq, name, q.Qtype, resolved, flightScope.epoch, cacheMetadata{
+					Verdict: verdict.Verdict, Reason: verdict.Reason, Upstream: src,
+				})
+				return resolved
 			})
+			if !ok || resp == nil {
+				return h.serverFail(r)
+			}
+			if ri != nil {
+				*ri = info
+			}
 			return resp
 		}
 		// Non-A direct ? forward to Trust verbatim.
-		return h.forwardTrust(ctx, trust, r, name, q.Qtype, epoch, ri)
+		return h.forwardTrust(ctx, trust, q, r, flightScope, ri)
 	}
 
 	// Explicit proxy intent.
@@ -702,13 +889,12 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 			return h.gatewayReply(r)
 		}
 		// Non-A proxy intent: forward to Trust (steering is A-specific).
-		return h.forwardTrust(ctx, trust, r, name, q.Qtype, epoch, ri)
+		return h.forwardTrust(ctx, trust, q, r, flightScope, ri)
 	}
 
 	// ?? Step 6: default ??????????????????????????????????????????????????????
 	if isA {
-		if cached, meta, ok := h.cacheGetWithMetadata(name, q.Qtype); ok {
-			cached.Id = r.Id
+		if cached, meta, ok := h.cacheGetForRequest(r, name, q.Qtype); ok {
 			if meta.Reason != "" {
 				ri.noteVerdict(Verdict{Verdict: meta.Verdict, Reason: meta.Reason})
 				ri.noteUpstream(meta.Upstream)
@@ -728,36 +914,49 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 			return cached
 		}
 		// Auto fallback: arbitrate and rewrite only foreign answers.
-		resp, src, err := arbitrateSrc(ctx, r, china, trust, cn, h.stats)
-		if err != nil || resp == nil {
-			return h.staleOrServerFail(r, name, q.Qtype, ri)
+		initial := resolveInfo{}
+		if ri != nil {
+			initial = *ri
 		}
-		ri.noteUpstream(src)
-		resp = filterAAAA(resp)
-		resp = h.rewriteA(resp, r, cn)
-		defaultVerdict := h.defaultVerdictOf(resp)
-		ri.noteVerdict(defaultVerdict)
-		h.cachePutWithMetadata(name, q.Qtype, resp, epoch, cacheMetadata{
-			Verdict: defaultVerdict.Verdict, Reason: defaultVerdict.Reason, Upstream: src,
+		resp, info, ok := h.coalesceResolution(ctx, q, r, flightScope, initial, func(runCtx context.Context, flightReq *dns.Msg, flightInfo *resolveInfo) *dns.Msg {
+			resolved, src, err := arbitrateSrc(runCtx, flightReq, china, trust, cn, h.stats)
+			if err != nil || resolved == nil {
+				return h.staleOrServerFail(flightReq, name, q.Qtype, flightInfo)
+			}
+			flightInfo.noteUpstream(src)
+			resolved = filterAAAA(resolved)
+			resolved = h.rewriteA(resolved, flightReq, cn)
+			resolvedVerdict := h.defaultVerdictOf(resolved)
+			flightInfo.noteVerdict(resolvedVerdict)
+			h.cachePutForRequest(flightReq, name, q.Qtype, resolved, flightScope.epoch, cacheMetadata{
+				Verdict: resolvedVerdict.Verdict, Reason: resolvedVerdict.Reason, Upstream: src,
+			})
+			return resolved
 		})
+		if !ok || resp == nil {
+			return h.serverFail(r)
+		}
+		if ri != nil {
+			*ri = info
+		}
 		h.bumpDefaultVerdict(resp)
 		return resp
 	}
 
 	// ?? All other qtypes: forward to Trust verbatim ??????????????????????????
-	return h.forwardTrust(ctx, trust, r, name, q.Qtype, epoch, ri)
+	return h.forwardTrust(ctx, trust, q, r, flightScope, ri)
 }
 
 // ?? helpers ??????????????????????????????????????????????????????????????????
 
 // forwardTrust sends q to the given trust exchanger and returns the reply
 // verbatim. The result is cached.
-func (h *Handler) forwardTrust(ctx context.Context, trust Exchanger, r *dns.Msg, name string, qtype uint16, epoch uint64, ri *resolveInfo) *dns.Msg {
+func (h *Handler) forwardTrust(ctx context.Context, trust Exchanger, q dns.Question, r *dns.Msg, scope dnsFlightScope, ri *resolveInfo) *dns.Msg {
+	name, qtype := q.Name, q.Qtype
 	if ri != nil && ri.reason == "" {
 		ri.reason = "forward-trust"
 	}
-	if cached, meta, ok := h.cacheGetWithMetadata(name, qtype); ok {
-		cached.Id = r.Id
+	if cached, meta, ok := h.cacheGetForRequest(r, name, qtype); ok {
 		if meta.Reason != "" {
 			ri.noteVerdict(Verdict{Verdict: meta.Verdict, Reason: meta.Reason})
 			ri.noteUpstream(meta.Upstream)
@@ -765,16 +964,26 @@ func (h *Handler) forwardTrust(ctx context.Context, trust Exchanger, r *dns.Msg,
 		ri.noteCacheHit()
 		return cached
 	}
-	resp, err := trust.Exchange(ctx, r)
-	if err != nil || resp == nil {
-		return h.staleOrServerFail(r, name, qtype, ri)
-	}
-	ri.noteUpstream("trust")
-	meta := cacheMetadata{Upstream: "trust"}
+	initial := resolveInfo{}
 	if ri != nil {
-		meta.Verdict, meta.Reason = ri.verdict, ri.reason
+		initial = *ri
 	}
-	h.cachePutWithMetadata(name, qtype, resp, epoch, meta)
+	resp, info, ok := h.coalesceResolution(ctx, q, r, scope, initial, func(runCtx context.Context, flightReq *dns.Msg, flightInfo *resolveInfo) *dns.Msg {
+		resolved, err := trust.Exchange(runCtx, flightReq)
+		if err != nil || resolved == nil {
+			return h.staleOrServerFail(flightReq, name, qtype, flightInfo)
+		}
+		flightInfo.noteUpstream("trust")
+		meta := cacheMetadata{Upstream: "trust", Verdict: flightInfo.verdict, Reason: flightInfo.reason}
+		h.cachePutForRequest(flightReq, name, qtype, resolved, scope.epoch, meta)
+		return resolved
+	})
+	if !ok || resp == nil {
+		return h.serverFail(r)
+	}
+	if ri != nil {
+		*ri = info
+	}
 	return resp
 }
 
@@ -939,8 +1148,7 @@ func (h *Handler) serverFail(r *dns.Msg) *dns.Msg {
 // answer during a total upstream outage beats handing every client a hard error
 // while correct data sat in memory seconds ago.
 func (h *Handler) staleOrServerFail(r *dns.Msg, name string, qtype uint16, ri *resolveInfo) *dns.Msg {
-	if stale, meta, ok := h.cacheGetStaleWithMetadata(name, qtype); ok {
-		stale.Id = r.Id
+	if stale, meta, ok := h.cacheGetStaleForRequest(r, name, qtype); ok {
 		if meta.Reason != "" {
 			ri.noteVerdict(Verdict{Verdict: meta.Verdict, Reason: meta.Reason})
 			ri.noteUpstream(meta.Upstream)
@@ -960,10 +1168,22 @@ func (h *Handler) cacheGetStale(name string, qtype uint16) (*dns.Msg, bool) {
 }
 
 func (h *Handler) cacheGetStaleWithMetadata(name string, qtype uint16) (*dns.Msg, cacheMetadata, bool) {
+	return h.cacheGetStaleWithMetadataOptions(name, qtype, cacheOptions{})
+}
+
+func (h *Handler) cacheGetStaleWithMetadataOptions(name string, qtype uint16, opts cacheOptions) (*dns.Msg, cacheMetadata, bool) {
 	if h.Cache == nil {
 		return nil, cacheMetadata{}, false
 	}
-	return h.Cache.GetStaleWithMetadata(name, qtype, staleReplyTTLSecs)
+	return h.Cache.GetStaleWithMetadataOptions(name, qtype, staleReplyTTLSecs, opts)
+}
+
+func (h *Handler) cacheGetStaleForRequest(r *dns.Msg, name string, qtype uint16) (*dns.Msg, cacheMetadata, bool) {
+	msg, meta, ok := h.cacheGetStaleWithMetadataOptions(name, qtype, cacheOptionsFromMsg(r))
+	if ok {
+		prepareCachedReply(msg, r)
+	}
+	return msg, meta, ok
 }
 
 // staleReplyTTLSecs is the TTL stamped on a served-stale answer: short, so a
@@ -978,10 +1198,14 @@ func (h *Handler) cacheGet(name string, qtype uint16) (*dns.Msg, bool) {
 }
 
 func (h *Handler) cacheGetWithMetadata(name string, qtype uint16) (*dns.Msg, cacheMetadata, bool) {
+	return h.cacheGetWithMetadataOptions(name, qtype, cacheOptions{})
+}
+
+func (h *Handler) cacheGetWithMetadataOptions(name string, qtype uint16, opts cacheOptions) (*dns.Msg, cacheMetadata, bool) {
 	if h.Cache == nil {
 		return nil, cacheMetadata{}, false
 	}
-	msg, meta, ok := h.Cache.GetWithMetadata(name, qtype)
+	msg, meta, ok := h.Cache.GetWithMetadataOptions(name, qtype, opts)
 	if h.stats != nil {
 		if ok {
 			h.stats.cacheHits.Add(1)
@@ -992,6 +1216,22 @@ func (h *Handler) cacheGetWithMetadata(name string, qtype uint16) (*dns.Msg, cac
 	return msg, meta, ok
 }
 
+func (h *Handler) cacheGetForRequest(r *dns.Msg, name string, qtype uint16) (*dns.Msg, cacheMetadata, bool) {
+	msg, meta, ok := h.cacheGetWithMetadataOptions(name, qtype, cacheOptionsFromMsg(r))
+	if ok {
+		prepareCachedReply(msg, r)
+	}
+	return msg, meta, ok
+}
+
+func prepareCachedReply(cached, request *dns.Msg) {
+	if cached == nil || request == nil {
+		return
+	}
+	cached.Id = request.Id
+	cached.Question = append(cached.Question[:0], request.Question...)
+}
+
 // cachePut stores resp in the cache, clamping its answer TTLs to [TTLMin, TTLMax].
 // Safe to call when h.Cache == nil.  Only caches successful (NOERROR) responses;
 // SERVFAIL / REFUSED / etc. are not cached.
@@ -1000,6 +1240,14 @@ func (h *Handler) cachePut(name string, qtype uint16, resp *dns.Msg, epoch uint6
 }
 
 func (h *Handler) cachePutWithMetadata(name string, qtype uint16, resp *dns.Msg, epoch uint64, meta cacheMetadata) {
+	h.cachePutWithMetadataOptions(name, qtype, cacheOptions{}, resp, epoch, meta)
+}
+
+func (h *Handler) cachePutForRequest(r *dns.Msg, name string, qtype uint16, resp *dns.Msg, epoch uint64, meta cacheMetadata) {
+	h.cachePutWithMetadataOptions(name, qtype, cacheOptionsFromMsg(r), resp, epoch, meta)
+}
+
+func (h *Handler) cachePutWithMetadataOptions(name string, qtype uint16, opts cacheOptions, resp *dns.Msg, epoch uint64, meta cacheMetadata) {
 	if h.Cache == nil {
 		return
 	}
@@ -1010,11 +1258,11 @@ func (h *Handler) cachePutWithMetadata(name string, qtype uint16, resp *dns.Msg,
 	// NODATA (NOERROR with empty Answer): cache for TTLMin so the negative result
 	// is not stored indefinitely.
 	if len(resp.Answer) == 0 {
-		h.Cache.PutAtEpochWithMetadata(name, qtype, resp, h.TTLMin, epoch, meta)
+		h.Cache.PutAtEpochWithMetadataOptions(name, qtype, opts, resp, h.TTLMin, epoch, meta)
 		return
 	}
 	ttl := minAnswerTTL(resp, h.TTLMin, h.TTLMax)
-	h.Cache.PutAtEpochWithMetadata(name, qtype, resp, ttl, epoch, meta)
+	h.Cache.PutAtEpochWithMetadataOptions(name, qtype, opts, resp, ttl, epoch, meta)
 }
 
 // minAnswerTTL returns the minimum TTL across all answer RRs, clamped to

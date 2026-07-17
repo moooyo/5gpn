@@ -159,7 +159,7 @@ func (s *ControlServer) handleMihomoConfigReset(w http.ResponseWriter, r *http.R
 
 // applyMihomoConfig runs the apply order:
 //
-//  1. ValidateInvariants (text-pattern, no YAML parse) → reject → 400.
+//  1. ValidateInvariants (structural YAML parse) → reject → 400.
 //  2. `mihomo -t -f <tmpfile> -d <dir>` on a scratch temp file (never the
 //     live config path) → reject → 400 with mihomo's own diagnostic text.
 //  3. Atomic write (temp + rename) to the real config path.
@@ -210,12 +210,12 @@ func (s *ControlServer) applyMihomoConfig(ctx context.Context, text string, back
 		if err != nil {
 			return http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("mihomo: read config for backup: %v", err)}
 		}
-		if err := atomicWriteFile(s.mihomoStore.Path()+".bak", []byte(current), 0o600); err != nil {
+		if err := atomicWriteFile(s.mihomoStore.Path()+".bak", []byte(current), 0o660); err != nil {
 			return http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("mihomo: write backup: %v", err)}
 		}
 	}
 
-	if err := atomicWriteFile(s.mihomoStore.Path(), []byte(text), 0o600); err != nil {
+	if err := atomicWriteFile(s.mihomoStore.Path(), []byte(text), 0o660); err != nil {
 		return http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("mihomo: write config: %v", err)}
 	}
 

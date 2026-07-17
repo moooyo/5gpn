@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -10,7 +12,7 @@ import (
 
 // recordRun builds a run-stub that records every argv it is called with and
 // returns the canned (ok, out). It mirrors how tgbot's tests monkeypatched
-// tgbot.run: no real systemctl/journalctl/renewal-helper/qrencode is invoked.
+// tgbot.run: no real systemctl/renewal-helper/qrencode is invoked.
 func recordRun(ok bool, out string) (func(argv []string, timeout time.Duration) (bool, string), *[][]string) {
 	var calls [][]string
 	fn := func(argv []string, timeout time.Duration) (bool, string) {
@@ -52,17 +54,22 @@ func TestRestartMihomoRequiresCommandAndActiveSuccess(t *testing.T) {
 	}
 }
 
-// TestOpLogsKnownService builds the journalctl argv for a known service.
+// TestOpLogsKnownService starts only the fixed exporter unit and reads its
+// bounded result file for a known service.
 func TestOpLogsKnownService(t *testing.T) {
-	fn, calls := recordRun(true, "some log output")
-	bt := &Bot{runFn: fn}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "5gpn-dns.log"), []byte("some log output"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fn, calls := recordRun(true, "")
+	bt := &Bot{runFn: fn, journalDir: dir}
 
 	msg := bt.opLogsResult("5gpn-dns").HTML()
 
 	if len(*calls) != 1 {
 		t.Fatalf("opLogs(5gpn-dns) made %d run calls, want 1", len(*calls))
 	}
-	want := []string{"journalctl", "-u", "5gpn-dns", "-n", "50", "--no-pager", "-o", "short-iso"}
+	want := []string{"systemctl", "start", "5gpn-journal@5gpn-dns.service"}
 	got := (*calls)[0]
 	if len(got) != len(want) {
 		t.Fatalf("opLogs argv = %v, want %v", got, want)
@@ -75,6 +82,9 @@ func TestOpLogsKnownService(t *testing.T) {
 	if !strings.Contains(msg, "5gpn-dns") || !strings.Contains(msg, "<pre>") {
 		t.Errorf("opLogs render = %q, want a <pre>-wrapped block naming the service", msg)
 	}
+	if !strings.Contains(msg, "some log output") {
+		t.Errorf("opLogs render = %q, want exported journal content", msg)
+	}
 }
 
 func TestOpLogsFailureIsExplicitAndKeepsNewestOutput(t *testing.T) {
@@ -83,7 +93,7 @@ func TestOpLogsFailureIsExplicitAndKeepsNewestOutput(t *testing.T) {
 	result := (&Bot{runFn: fn}).opLogsResult("mihomo")
 
 	if result.OK {
-		t.Fatal("failed journalctl reported OK")
+		t.Fatal("failed journal exporter reported OK")
 	}
 	rendered := result.HTML()
 	if !strings.Contains(rendered, "日志读取失败") {
@@ -94,6 +104,46 @@ func TestOpLogsFailureIsExplicitAndKeepsNewestOutput(t *testing.T) {
 	}
 	if strings.Contains(rendered, "old-marker") {
 		t.Fatal("tail-oriented truncation retained the oldest marker")
+	}
+}
+
+func TestOpLogsRejectsUnsafeOrOversizedExport(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, path string)
+	}{
+		{
+			name: "symlink",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				target := filepath.Join(t.TempDir(), "target")
+				if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+			},
+		},
+		{
+			name: "oversized",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, bytes.Repeat([]byte("x"), journalExportMaxBytes+1), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.setup(t, filepath.Join(dir, "mihomo.log"))
+			fn, _ := recordRun(true, "")
+			result := (&Bot{runFn: fn, journalDir: dir}).opLogsResult("mihomo")
+			if result.OK || !strings.Contains(result.HTMLSummary, "日志读取失败") {
+				t.Fatalf("unsafe export result = %+v", result)
+			}
+		})
 	}
 }
 
@@ -111,8 +161,7 @@ func TestOpLogsUnknownService(t *testing.T) {
 	}
 }
 
-// TestOpRenewCert covers the three renewal-helper branches (not-yet-due,
-// renewed, failed) via the stubbed run and locks its sandbox-escape argv.
+// TestOpRenewCert covers the fixed renewal-service success and failure paths.
 func TestOpRenewCert(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -120,9 +169,8 @@ func TestOpRenewCert(t *testing.T) {
 		out        string
 		wantSubstr string
 	}{
-		{"not yet due", true, "Cert not yet due for renewal", "尚未到期"},
-		{"no renewals attempted", true, "No renewals were attempted.", "尚未到期"},
-		{"renewed", true, "Congratulations, all renewals succeeded", "已续期"},
+		{"not yet due", true, "", "检查已完成"},
+		{"renewed", true, "", "检查已完成"},
 		{"failed", false, "some error", "失败"},
 	}
 	for _, c := range cases {
@@ -139,16 +187,7 @@ func TestOpRenewCert(t *testing.T) {
 				t.Fatalf("opRenewCert made %d run calls, want 1: %v", len(*calls), *calls)
 			}
 			argv := (*calls)[0]
-			// The unified helper is wrapped in systemd-run so it escapes the
-			// daemon's hardened sandbox.
-			if len(argv) == 0 || argv[0] != "systemd-run" {
-				t.Fatalf("opRenewCert argv = %v, want a systemd-run wrapper", argv)
-			}
-			want := []string{
-				"systemd-run", "--pipe", "--collect", "--quiet",
-				"--property=RuntimeMaxSec=25min", "--property=TimeoutStopSec=2min",
-				"/opt/5gpn/scripts/cert-renew.sh", "--cert-name", "example.com",
-			}
+			want := []string{"systemctl", "start", "5gpn-certbot-renew.service"}
 			if len(argv) != len(want) {
 				t.Fatalf("opRenewCert argv = %v, want %v", argv, want)
 			}
@@ -198,17 +237,13 @@ func TestOpRenewCertCanonicalizesCertName(t *testing.T) {
 			if len(*calls) != 1 {
 				t.Fatalf("opRenewCert made %d calls, want 1", len(*calls))
 			}
-			want := []string{
-				"systemd-run", "--pipe", "--collect", "--quiet",
-				"--property=RuntimeMaxSec=25min", "--property=TimeoutStopSec=2min",
-				"/opt/5gpn/scripts/cert-renew.sh", "--cert-name", "example.com",
-			}
+			want := []string{"systemctl", "start", "5gpn-certbot-renew.service"}
 			argv := (*calls)[0]
 			if strings.Join(argv, "\x00") != strings.Join(want, "\x00") {
 				t.Fatalf("opRenewCert argv = %v, want %v", argv, want)
 			}
-			if !strings.Contains(msg, "尚未到期") {
-				t.Fatalf("opRenewCert helper result = %q, want not-yet-due classification", msg)
+			if !strings.Contains(msg, "检查已完成") {
+				t.Fatalf("opRenewCert helper result = %q, want completion notice", msg)
 			}
 		})
 	}

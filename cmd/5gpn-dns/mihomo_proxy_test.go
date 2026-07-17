@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func newMihomoProxyTestHandler(t *testing.T, secret string, inject bool, upstream http.Handler) http.Handler {
+func newMihomoProxyTestHandler(t *testing.T, secret string, upstream http.Handler) http.Handler {
 	t.Helper()
 
 	server := newMihomoTLSTestServer(t, upstream)
@@ -17,12 +17,12 @@ func newMihomoProxyTestHandler(t *testing.T, secret string, inject bool, upstrea
 	if err != nil {
 		t.Fatal(err)
 	}
-	return newMihomoProxy(server.serverName, secret, "/proxy", inject, transport)
+	return newMihomoProxy(server.serverName, secret, "/proxy", transport)
 }
 
 func TestMihomoProxy_InjectsSecretAndStripsPrefix(t *testing.T) {
 	var gotPath, gotAuth string
-	h := newMihomoProxyTestHandler(t, "s3cr3t", true, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := newMihomoProxyTestHandler(t, "s3cr3t", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
 		w.WriteHeader(http.StatusOK)
@@ -47,7 +47,7 @@ func TestMihomoProxy_InjectsSecretAndStripsPrefix(t *testing.T) {
 
 func TestMihomoProxy_EmptySecretStripsInboundAuth(t *testing.T) {
 	var gotAuth string
-	h := newMihomoProxyTestHandler(t, "", true, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := newMihomoProxyTestHandler(t, "", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -61,7 +61,7 @@ func TestMihomoProxy_EmptySecretStripsInboundAuth(t *testing.T) {
 }
 
 func TestMihomoProxy_InjectedAuthFailureIsBadGateway(t *testing.T) {
-	injected := newMihomoProxyTestHandler(t, "stale-secret", true, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	injected := newMihomoProxyTestHandler(t, "stale-secret", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="mihomo"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}))
@@ -77,63 +77,6 @@ func TestMihomoProxy_InjectedAuthFailureIsBadGateway(t *testing.T) {
 		t.Fatalf("injecting proxy body = %q", rec.Body.String())
 	}
 
-	passThrough := newMihomoProxyTestHandler(t, "ignored", false, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="mihomo"`)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-	}))
-	rec = httptest.NewRecorder()
-	passThrough.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/proxy/version", nil))
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("pass-through proxy status = %d, want 401", rec.Code)
-	}
-}
-
-// TestMihomoProxy_PassThroughForwardsIncomingAuth asserts the zash mux's
-// pass-through proxy (inject=false, design §5.2) forwards the BROWSER's own
-// Authorization header unchanged — the opposite of the injecting proxy above
-// — regardless of what the daemon's own controller secret is configured to.
-func TestMihomoProxy_PassThroughForwardsIncomingAuth(t *testing.T) {
-	var gotAuth string
-	h := newMihomoProxyTestHandler(t, "s3cr3t", false, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodGet, "/proxy/version", nil)
-	req.Header.Set("Authorization", "Bearer browser-secret")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d", rr.Code)
-	}
-	if gotAuth != "Bearer browser-secret" {
-		t.Errorf("upstream auth = %q, want the browser's own Authorization forwarded unchanged (never the configured secret)", gotAuth)
-	}
-}
-
-// TestMihomoProxy_PassThroughAddsNoneWhenAbsent asserts the pass-through
-// proxy does not invent an Authorization header when the browser sent none
-// — an unauthenticated zashboard visitor must reach the controller with no
-// credential at all, so mihomo itself can 401 it.
-func TestMihomoProxy_PassThroughAddsNoneWhenAbsent(t *testing.T) {
-	var gotAuth string
-	sawHeader := false
-	h := newMihomoProxyTestHandler(t, "s3cr3t", false, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth, sawHeader = r.Header.Get("Authorization"), r.Header.Get("Authorization") != ""
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodGet, "/proxy/version", nil)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d", rr.Code)
-	}
-	if sawHeader {
-		t.Errorf("upstream saw an Authorization header (%q) despite the browser sending none; pass-through must not inject one", gotAuth)
-	}
 }
 
 // TestMihomoProxy_WebSocketUpgradePassesThrough locks in the stdlib behavior we
@@ -185,7 +128,7 @@ func TestMihomoProxy_WebSocketUpgradePassesThrough(t *testing.T) {
 	}
 	_ = restResp.Body.Close()
 
-	h := newMihomoProxy(upstream.serverName, "s3cr3t", "/proxy", true, transport)
+	h := newMihomoProxy(upstream.serverName, "s3cr3t", "/proxy", transport)
 	proxySrv := httptest.NewServer(h)
 	defer proxySrv.Close()
 

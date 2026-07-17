@@ -104,7 +104,7 @@ func auditSource(r *http.Request) string {
 // auditMiddleware lines for the HTTPS API (same "audit " prefix, stderr →
 // journald). The bot is a privileged control path — it reaches the daemon over
 // Telegram long-polling (bypassing the CLIENT_NET firewall) and can trigger
-// systemctl / the systemd-run delegated renewal helper / journalctl — yet its
+// systemctl / the fixed delegated renewal and journal-export services — yet its
 // mutations were previously unaudited, an asymmetry with the HTTP API this
 // closes. op is a
 // short verb (e.g. "reload", "restart-mihomo", "renew-cert"),

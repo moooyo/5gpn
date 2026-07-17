@@ -36,10 +36,11 @@ cat > "$DEPLOY_HOOK" <<'EOF'
 set -eu
 [[ "${RENEW_HOOK_VALIDATE_ONLY:-0}" == 1 ]] && exit 0
 for role in dot web zash; do
-    mkdir -p "$TEST_CERT_ROOT/$role"
-    cp "$RENEWED_LINEAGE/fullchain.pem" "$TEST_CERT_ROOT/$role/fullchain.pem"
-    cp "$RENEWED_LINEAGE/privkey.pem" "$TEST_CERT_ROOT/$role/privkey.pem"
-    chmod 0640 "$TEST_CERT_ROOT/$role/fullchain.pem" "$TEST_CERT_ROOT/$role/privkey.pem"
+    mkdir -p "$TEST_CERT_ROOT/$role/generations/fixture"
+    cp "$RENEWED_LINEAGE/fullchain.pem" "$TEST_CERT_ROOT/$role/generations/fixture/fullchain.pem"
+    cp "$RENEWED_LINEAGE/privkey.pem" "$TEST_CERT_ROOT/$role/generations/fixture/privkey.pem"
+    chmod 0640 "$TEST_CERT_ROOT/$role/generations/fixture/fullchain.pem" "$TEST_CERT_ROOT/$role/generations/fixture/privkey.pem"
+    ln -sfn generations/fixture "$TEST_CERT_ROOT/$role/current"
 done
 EOF
 chmod +x "$DEPLOY_HOOK"
@@ -47,10 +48,11 @@ chmod +x "$DEPLOY_HOOK"
 sync_role_copies() {
     local role
     for role in dot web zash; do
-        mkdir -p "$CERT_ROOT/$role"
-        cp "$LE_LIVE_ROOT/example.com/fullchain.pem" "$CERT_ROOT/$role/fullchain.pem"
-        cp "$LE_LIVE_ROOT/example.com/privkey.pem" "$CERT_ROOT/$role/privkey.pem"
-        chmod 0640 "$CERT_ROOT/$role/fullchain.pem" "$CERT_ROOT/$role/privkey.pem"
+        mkdir -p "$CERT_ROOT/$role/generations/fixture"
+        cp "$LE_LIVE_ROOT/example.com/fullchain.pem" "$CERT_ROOT/$role/generations/fixture/fullchain.pem"
+        cp "$LE_LIVE_ROOT/example.com/privkey.pem" "$CERT_ROOT/$role/generations/fixture/privkey.pem"
+        chmod 0640 "$CERT_ROOT/$role/generations/fixture/fullchain.pem" "$CERT_ROOT/$role/generations/fixture/privkey.pem"
+        ln -sfn generations/fixture "$CERT_ROOT/$role/current"
     done
 }
 sync_role_copies
@@ -209,9 +211,9 @@ expect_no_log "certbot " "not-due certificate does not invoke Certbot"
 # deploy hook instead of being skipped forever as "not due".
 reset_case
 MOCK_CERT_FRESH=1
-printf 'stale\n' > "$CERT_ROOT/web/fullchain.pem"
+printf 'stale\n' > "$CERT_ROOT/web/current/fullchain.pem"
 expect_success "not-due lineage repairs stale role copies" cert_renew_main --cert-name example.com
-cmp -s "$LE_LIVE_ROOT/example.com/fullchain.pem" "$CERT_ROOT/web/fullchain.pem" \
+cmp -s "$LE_LIVE_ROOT/example.com/fullchain.pem" "$CERT_ROOT/web/current/fullchain.pem" \
     && pass "stale role certificate was redeployed from the live lineage" \
     || fail "stale role certificate survived the not-due fast path"
 

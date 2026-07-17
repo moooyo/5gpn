@@ -1,0 +1,23 @@
+// 5gpn-polkit-id: runtime-operations-v1
+// Permit the unprivileged control plane to request only its fixed privileged
+// operations. Command lines and unit definitions remain root-owned.
+polkit.addRule(function(action, subject) {
+    if (subject.user !== "gpn-dns" ||
+        action.id !== "org.freedesktop.systemd1.manage-units") {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    var unit = action.lookup("unit");
+    var verb = action.lookup("verb");
+    if (unit === "mihomo.service" && verb === "restart") {
+        return polkit.Result.YES;
+    }
+    if (unit === "5gpn-certbot-renew.service" && verb === "start") {
+        return polkit.Result.YES;
+    }
+    if ((unit === "5gpn-journal@5gpn-dns.service" ||
+         unit === "5gpn-journal@mihomo.service") && verb === "start") {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

@@ -26,20 +26,24 @@ describe('api client — live methods', () => {
     expect(f.mock.calls[0][0]).toBe('/api/status')
   })
 
-  it('uses bearer-protected mihomo health and log-ticket endpoints', async () => {
+  it('uses bearer-protected mihomo health, log-ticket, and zashboard handoff endpoints', async () => {
     vi.stubEnv('VITE_API_MOCK', '0')
     vi.resetModules()
     const f = vi.fn()
       .mockResolvedValueOnce(jsonResp(200, { version: 'v1.19.28', meta: true }))
       .mockResolvedValueOnce(jsonResp(200, { ticket: 'once' }))
+      .mockResolvedValueOnce(jsonResp(200, { url: 'https://zash.example/handoff?ticket=once', expires_in_seconds: 30 }))
     vi.stubGlobal('fetch', f)
     const { api } = await import('./client')
 
     await expect(api.getMihomoHealth()).resolves.toMatchObject({ version: 'v1.19.28' })
     await expect(api.createMihomoLogTicket()).resolves.toEqual({ ticket: 'once' })
+    await expect(api.createZashboardHandoff()).resolves.toMatchObject({ expires_in_seconds: 30 })
     expect(f.mock.calls[0][0]).toBe('/api/mihomo/health')
     expect(f.mock.calls[1][0]).toBe('/api/mihomo/log-ticket')
     expect(f.mock.calls[1][1].method).toBe('POST')
+    expect(f.mock.calls[2][0]).toBe('/api/mihomo/zashboard-handoff')
+    expect(f.mock.calls[2][1].method).toBe('POST')
   })
 })
 

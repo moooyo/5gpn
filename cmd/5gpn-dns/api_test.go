@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestControlServer_PublicConsoleServesSPAAndIOSAndProtectsAPI(t *testing.T) {
@@ -346,11 +348,9 @@ func TestAPIStatus_DotDomain(t *testing.T) {
 	}
 }
 
-// TestAPIStatus_MihomoSecret verifies the token-gated status response includes
-// mihomo_secret so an authenticated
-// console admin's "前往 zash" deep-link can carry it (URL-encoded) and
-// auto-auth into zashboard's pass-through /proxy/ mount.
-func TestAPIStatus_MihomoSecret(t *testing.T) {
+// TestAPIStatus_NeverExposesMihomoSecret verifies the long-lived controller
+// credential is not serialized even to an authenticated console client.
+func TestAPIStatus_NeverExposesMihomoSecret(t *testing.T) {
 	certPath, keyPath := generateSelfSignedCert(t, t.TempDir())
 	const token = "test-token"
 	cfg := Config{
@@ -367,15 +367,12 @@ func TestAPIStatus_MihomoSecret(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	body := decodeJSON[map[string]any](t, rec)
-	if got := body["mihomo_secret"]; got != "controller-s3cr3t" {
-		t.Errorf("mihomo_secret = %v, want %q", got, "controller-s3cr3t")
+	if got, ok := body["mihomo_secret"]; ok {
+		t.Errorf("mihomo_secret leaked in status response: %v", got)
 	}
 }
 
-// TestAPIStatus_MihomoSecretOmittedWhenUnset mirrors the zash_domain
-// omitempty contract: no DNS_MIHOMO_SECRET configured means the key is
-// absent, not an empty string.
-func TestAPIStatus_MihomoSecretOmittedWhenUnset(t *testing.T) {
+func TestAPIStatus_MihomoSecretAbsentWhenUnset(t *testing.T) {
 	cs, token := newAPITestServer(t)
 
 	rec := doAPI(cs, http.MethodGet, "/api/status", nil, token, true)
@@ -477,9 +474,8 @@ func TestControlServer_APIStatus_Authorized(t *testing.T) {
 
 // TestControlServer_APIJSON_NoStore asserts control-plane JSON is served with
 // Cache-Control: no-store so a private browser cache never persists the
-// mihomo_secret (/api/status, polled every 5s) or client-IP/qname PII
-// (/api/querylog) to disk past logout. writeJSON sets it centrally, so every
-// /api/* JSON is covered — spot-check the two most sensitive endpoints plus the
+// client-IP/qname PII (/api/querylog) to disk past logout. writeJSON sets it
+// centrally, so every /api/* JSON is covered — spot-check status/querylog plus the
 // unauthorized 401 (which also flows through writeJSON).
 func TestControlServer_APIJSON_NoStore(t *testing.T) {
 	cs := newTestControlServer(t, "correct-token")
@@ -644,25 +640,36 @@ func TestRateLimitMiddleware_DifferentSourceStillSucceeds(t *testing.T) {
 	}
 }
 
-// TestRateLimitMiddleware_FiresBeforeAuth proves the rate limiter wraps the
-// auth middleware: a request over the limit with NO bearer token still gets
-// 429 (not 401), because the limiter runs first.
-func TestRateLimitMiddleware_FiresBeforeAuth(t *testing.T) {
-	cs, _ := newRateLimitedTestServer(t, 1, 1)
+// TestUnauthenticatedRequestsDoNotConsumeAdminRateLimit proves a public caller
+// cannot drain the shared loopback bucket before presenting a valid token.
+func TestUnauthenticatedRequestsDoNotConsumeAdminRateLimit(t *testing.T) {
+	cs, token := newRateLimitedTestServer(t, 1, 1)
 	const addr = "203.0.113.7:1"
 
-	// First call (unauthenticated) consumes the single token and gets 401.
 	rec1 := doAPIFrom(cs, http.MethodGet, "/api/status", addr, "", false)
 	if rec1.Code != http.StatusUnauthorized {
 		t.Fatalf("1st unauthenticated call status = %d, want 401; body=%s", rec1.Code, rec1.Body.String())
 	}
-
-	// Second call, still unauthenticated and still over the (now exhausted)
-	// limit, must get 429 -- proving the limiter fired before auth even ran
-	// (an auth-first order would yield 401 again here).
 	rec2 := doAPIFrom(cs, http.MethodGet, "/api/status", addr, "", false)
-	if rec2.Code != http.StatusTooManyRequests {
-		t.Fatalf("2nd unauthenticated call over limit status = %d, want 429; body=%s", rec2.Code, rec2.Body.String())
+	if rec2.Code != http.StatusUnauthorized {
+		t.Fatalf("2nd unauthenticated call status = %d, want 401; body=%s", rec2.Code, rec2.Body.String())
+	}
+	rec3 := doAPIFrom(cs, http.MethodGet, "/api/status", addr, token, true)
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("authenticated call after public failures status = %d, want 200; body=%s", rec3.Code, rec3.Body.String())
+	}
+}
+
+func TestBuildPanelServerHasConnectionLimits(t *testing.T) {
+	srv := buildPanelServer("127.0.0.1:443", http.NotFoundHandler(), "cert", "key")
+	if srv.ReadHeaderTimeout != panelReadHeaderTimeout || srv.IdleTimeout != panelIdleTimeout {
+		t.Fatalf("panel timeouts = (%s, %s)", srv.ReadHeaderTimeout, srv.IdleTimeout)
+	}
+	if srv.MaxHeaderBytes != panelMaxHeaderBytes {
+		t.Fatalf("MaxHeaderBytes = %d, want %d", srv.MaxHeaderBytes, panelMaxHeaderBytes)
+	}
+	if srv.WriteTimeout != 0 {
+		t.Fatalf("WriteTimeout = %s, want zero for WebSocket compatibility", srv.WriteTimeout)
 	}
 }
 
@@ -754,9 +761,9 @@ func TestRateLimitMiddleware_DoesNotApplyToSPA(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestControlServer_BothPanelsAndProxy confirms NewControlServer builds a
-// second (zash) panel server when cfg.ZashListen is set. The zash /proxy/
-// remains controller-secret pass-through, while the console exposes only an
-// authenticated health endpoint and a one-use-ticket log stream.
+// second (zash) panel server when cfg.ZashListen is set. The zash /proxy/ is
+// gated by an HttpOnly session obtained from a one-use console handoff, while
+// the console exposes only health and a one-use-ticket log stream.
 func TestControlServer_BothPanelsAndProxy(t *testing.T) {
 	const controllerBody = "mihomo-controller-ok"
 	var gotAuth, gotPath, gotQuery string
@@ -796,19 +803,101 @@ func TestControlServer_BothPanelsAndProxy(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/proxy/version", nil)
 	rec = httptest.NewRecorder()
 	cs.zashSrv.Handler.ServeHTTP(rec, req)
-	if !strings.Contains(rec.Body.String(), controllerBody) {
-		t.Fatalf("/proxy/ on the zash mux: body=%q, want it to reach the fake mihomo controller (%q)", rec.Body.String(), controllerBody)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("zash /proxy/ without session status=%d, want 401", rec.Code)
 	}
-	if gotAuth != "" {
-		t.Fatalf("zash /proxy/ mount injected Authorization %q for a request with none; must pass through unchanged", gotAuth)
+	if gotPath != "" {
+		t.Fatalf("zash /proxy/ without session reached controller path %q", gotPath)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/proxy/version", nil)
 	req.Header.Set("Authorization", "Bearer browser-secret")
 	rec = httptest.NewRecorder()
 	cs.zashSrv.Handler.ServeHTTP(rec, req)
-	if gotAuth != "Bearer browser-secret" {
-		t.Fatalf("zash /proxy/ mount auth = %q, want the browser's own Authorization forwarded unchanged", gotAuth)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("browser Authorization bypass status=%d, want 401", rec.Code)
+	}
+
+	// Mint the short-lived handoff through the bearer-authenticated console.
+	req = httptest.NewRequest(http.MethodPost, "/api/mihomo/zashboard-handoff", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec = httptest.NewRecorder()
+	cs.srv.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mint zashboard handoff status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var handoff struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &handoff); err != nil || handoff.URL == "" {
+		t.Fatalf("decode zashboard handoff: err=%v body=%s", err, rec.Body.String())
+	}
+	handoffURL, err := url.Parse(handoff.URL)
+	if err != nil || handoffURL.Path != "/handoff" || handoffURL.Query().Get("ticket") == "" || handoffURL.Query().Get("secret") != "" {
+		t.Fatalf("invalid handoff URL %q: %v", handoff.URL, err)
+	}
+
+	// The zash origin consumes the ticket once and issues a secure HttpOnly
+	// host cookie before redirecting to a setup URL with only a fixed placeholder.
+	req = httptest.NewRequest(http.MethodGet, handoffURL.RequestURI(), nil)
+	rec = httptest.NewRecorder()
+	cs.zashSrv.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("consume handoff status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	location := rec.Header().Get("Location")
+	if strings.Contains(location, "secret=sec&") || !strings.Contains(location, "secret=5gpn-session") {
+		t.Fatalf("handoff redirect contains unsafe or missing setup state: %q", location)
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != zashSessionCookie || !cookies[0].HttpOnly || !cookies[0].Secure || cookies[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("zash session cookie = %+v, want one Secure HttpOnly SameSite=Strict cookie", cookies)
+	}
+	sessionCookie := cookies[0]
+
+	req = httptest.NewRequest(http.MethodGet, handoffURL.RequestURI(), nil)
+	rec = httptest.NewRecorder()
+	cs.zashSrv.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("replayed zashboard handoff status=%d, want 401", rec.Code)
+	}
+
+	gotPath = ""
+	req = httptest.NewRequest(http.MethodGet, "/proxy/version", nil)
+	req.AddCookie(sessionCookie)
+	req.Header.Set("Authorization", "Bearer attacker-value")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec = httptest.NewRecorder()
+	cs.zashSrv.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), controllerBody) {
+		t.Fatalf("session zash proxy: status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if gotAuth != "Bearer sec" {
+		t.Fatalf("zash proxy auth=%q, want daemon-injected controller secret", gotAuth)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/proxy/version", nil)
+	req.AddCookie(sessionCookie)
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rec = httptest.NewRecorder()
+	cs.zashSrv.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("cross-site zash proxy status=%d, want 401", rec.Code)
+	}
+
+	digest, ok := browserCredentialDigest(sessionCookie.Value)
+	if !ok {
+		t.Fatal("issued zash session cookie is not canonical")
+	}
+	cs.zashAuthMu.Lock()
+	cs.zashSessions[digest] = time.Now().Add(-time.Second)
+	cs.zashAuthMu.Unlock()
+	req = httptest.NewRequest(http.MethodGet, "/proxy/version", nil)
+	req.AddCookie(sessionCookie)
+	rec = httptest.NewRecorder()
+	cs.zashSrv.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expired zash session status=%d, want 401", rec.Code)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/proxy/version", nil)

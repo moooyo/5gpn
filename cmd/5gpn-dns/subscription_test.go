@@ -355,6 +355,60 @@ func TestPeriodicRefreshKeepsOldCacheBelowFloor(t *testing.T) {
 	}
 }
 
+func TestPeriodicRefreshRejectsHTMLResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<html><body>temporary error</body></html>"))
+	}))
+	defer srv.Close()
+
+	rulesDir := t.TempDir()
+	cachePath := filepath.Join(rulesDir, "block", "list.txt")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const oldContent = "last-good.example\n"
+	if err := os.WriteFile(cachePath, []byte(oldContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := newTestSubManager(t, rulesDir, nil)
+	m.subs = []Subscription{{ID: "list", Category: "block", Name: "list", URL: srv.URL, Format: "plain", Enabled: true, Interval: time.Hour}}
+	if res := m.updateOne(context.Background(), "list"); res.OK || !strings.Contains(res.Err, "HTML") {
+		t.Fatalf("HTML refresh = %+v", res)
+	}
+	if data, err := os.ReadFile(cachePath); err != nil || string(data) != oldContent {
+		t.Fatalf("last-good cache = %q, err=%v", data, err)
+	}
+}
+
+func TestPeriodicRefreshRejectsLargeRelativeShrink(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("only-one.example\n"))
+	}))
+	defer srv.Close()
+
+	rulesDir := t.TempDir()
+	cachePath := filepath.Join(rulesDir, "proxy", "list.txt")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var old strings.Builder
+	for i := 0; i < 100; i++ {
+		fmt.Fprintf(&old, "entry-%d.example\n", i)
+	}
+	if err := os.WriteFile(cachePath, []byte(old.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := newTestSubManager(t, rulesDir, nil)
+	m.subs = []Subscription{{ID: "list", Category: "proxy", Name: "list", URL: srv.URL, Format: "plain", Enabled: true, Interval: time.Hour}}
+	if res := m.updateOne(context.Background(), "list"); res.OK || !strings.Contains(res.Err, "shrink guard") {
+		t.Fatalf("shrinking refresh = %+v", res)
+	}
+	if data, err := os.ReadFile(cachePath); err != nil || string(data) != old.String() {
+		t.Fatalf("last-good cache changed, err=%v", err)
+	}
+}
+
 func TestRunRefreshesMissingCache(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("a.com\n"))

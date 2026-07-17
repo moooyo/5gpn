@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
@@ -30,8 +31,10 @@ const maxSubscriptionBodySize = 32 << 20 // 32 MiB
 // rule set with a near-empty one. An empty chnroute set in particular would
 // make every IP appear "foreign".
 const (
-	domainFloor   = 1
-	chnrouteFloor = 100
+	domainFloor                   = 1
+	chnrouteFloor                 = 100
+	shrinkGuardMinimumExisting    = 20
+	shrinkGuardMinimumRetainedPct = 20
 )
 
 // validCategories enumerates the four rule-set categories a subscription may
@@ -613,6 +616,9 @@ func (m *SubManager) PreparePolicyGeneration(ctx context.Context, desired []Subs
 			err = fmt.Errorf("parsed %d entries, below floor guard %d", len(entries), domainFloor)
 		}
 		if err == nil {
+			err = validateSubscriptionShrink(target, len(entries))
+		}
+		if err == nil {
 			p.writes[target] = entries
 			p.results = append(p.results, UpdateResult{ID: s.ID, OK: true, Entries: len(entries)})
 			continue
@@ -801,11 +807,14 @@ func (m *SubManager) doFetchAndCache(ctx context.Context, sub Subscription) Upda
 	}
 
 	path := m.cachePath(sub)
+	if err := validateSubscriptionShrink(path, len(entries)); err != nil {
+		return UpdateResult{ID: sub.ID, OK: false, Err: err.Error()}
+	}
 	// Steady-state ticks usually re-download identical content. Skipping the
 	// write+reload then matters: every reload flushes the whole response cache
 	// (swapRuleSets), so an unconditional reload per subscription interval
-	// cold-starts the cache — and, with no singleflight, turns the miss storm
-	// into a full china+trust upstream fan-out — even when nothing changed.
+	// cold-starts the cache and creates avoidable upstream work even though
+	// concurrent identical misses are coalesced.
 	if linesUnchangedOnDisk(path, entries) {
 		return UpdateResult{ID: sub.ID, OK: true, Entries: len(entries)}
 	}
@@ -845,6 +854,12 @@ func (m *SubManager) fetchAndParse(ctx context.Context, sub Subscription) ([]str
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("subscription %s: fetch: unexpected status %s", sub.ID, resp.Status)
 	}
+	if mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err == nil {
+		switch strings.ToLower(mediaType) {
+		case "text/html", "application/xhtml+xml":
+			return nil, fmt.Errorf("subscription %s: refusing HTML response", sub.ID)
+		}
+	}
 
 	// Read one byte past the cap so an oversized body is DETECTED, not silently
 	// truncated: io.LimitReader(cap) returns exactly cap bytes with err==nil on
@@ -867,6 +882,27 @@ func (m *SubManager) fetchAndParse(ctx context.Context, sub Subscription) ([]str
 		return nil, fmt.Errorf("subscription %s: parse: %w", sub.ID, err)
 	}
 	return entries, nil
+}
+
+func validateSubscriptionShrink(path string, newCount int) error {
+	oldEntries, err := cachedRuleLines(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read existing cache for shrink guard: %w", err)
+	}
+	oldCount := len(oldEntries)
+	if oldCount < shrinkGuardMinimumExisting {
+		return nil
+	}
+	if newCount*100 < oldCount*shrinkGuardMinimumRetainedPct {
+		return fmt.Errorf(
+			"parsed %d entries versus previous %d (below %d%% shrink guard) — keeping existing cache",
+			newCount, oldCount, shrinkGuardMinimumRetainedPct,
+		)
+	}
+	return nil
 }
 
 // atomicWriteLines writes one entry per line to path via a temp file in the

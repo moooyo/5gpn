@@ -69,7 +69,8 @@ type Bot struct {
 	// (via Bot.run); tests set it to a stub so no real privileged command is
 	// invoked. Gateway/domain facts are read from disk
 	// (readStatusFacts / iosHost).
-	runFn func(argv []string, timeout time.Duration) (bool, string)
+	runFn      func(argv []string, timeout time.Duration) (bool, string)
+	journalDir string // test-only override; empty uses /run/5gpn-journal
 }
 
 // NewBot constructs the in-process Telegram bot. An empty cfg.TGBotToken means
@@ -161,14 +162,15 @@ func newBotWithOptions(cfg Config, ctrl *Controller, extra ...bot.Option) (*Bot,
 }
 
 // newTGBotHTTPClient returns a client whose proxy override is scoped to
-// Telegram only. With an empty override the cloned default transport preserves
-// Go's standard HTTP_PROXY/HTTPS_PROXY/NO_PROXY behaviour.
+// Telegram only. With an empty override it explicitly disables proxying so
+// ambient HTTP_PROXY/HTTPS_PROXY variables cannot become undeclared config.
 func newTGBotHTTPClient(proxyRaw string) (*http.Client, error) {
 	transport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return nil, fmt.Errorf("default HTTP transport has unexpected type %T", http.DefaultTransport)
 	}
 	tr := transport.Clone()
+	tr.Proxy = nil
 	if proxyRaw != "" {
 		proxyURL, err := url.Parse(proxyRaw)
 		if err != nil {

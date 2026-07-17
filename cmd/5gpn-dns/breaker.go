@@ -24,10 +24,11 @@ const (
 // still honoured by membership; the breaker only short-circuits a group that has
 // already failed repeatedly (where there is no answer to honour anyway).
 type breaker struct {
-	mu        sync.Mutex
-	failures  int
-	openUntil time.Time
-	now       func() time.Time // injectable clock for tests
+	mu            sync.Mutex
+	failures      int
+	openUntil     time.Time
+	probeInFlight bool
+	now           func() time.Time // injectable clock for tests
 }
 
 func newBreaker() *breaker { return &breaker{now: time.Now} }
@@ -44,7 +45,11 @@ func (b *breaker) allow() bool {
 	if b.openUntil.IsZero() {
 		return true
 	}
-	return !b.clock().Before(b.openUntil)
+	if b.clock().Before(b.openUntil) || b.probeInFlight {
+		return false
+	}
+	b.probeInFlight = true
+	return true
 }
 
 // record folds one call outcome into the breaker: a success closes it (resets
@@ -57,6 +62,7 @@ func (b *breaker) record(ok bool) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.probeInFlight = false
 	if ok {
 		b.failures = 0
 		b.openUntil = time.Time{}
@@ -66,6 +72,17 @@ func (b *breaker) record(ok bool) {
 	if b.failures >= breakerThreshold {
 		b.openUntil = b.clock().Add(breakerCooldown)
 	}
+}
+
+// recordCanceled releases a half-open probe slot without treating caller
+// cancellation as upstream success or failure. A later request may probe again.
+func (b *breaker) recordCanceled() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	b.probeInFlight = false
+	b.mu.Unlock()
 }
 
 func (b *breaker) clock() time.Time {

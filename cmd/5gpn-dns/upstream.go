@@ -93,14 +93,14 @@ func (g *group) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 		return nil, fmt.Errorf("upstream group (%s) circuit open", g.label)
 	}
 
-	// ECS: attach the configured client subnet to a COPY of the query (the
-	// caller's message is never mutated — it is also the reply template on the
-	// serve path). ecsSubnet is remembered so the reply's ECS echo can be
-	// stripped below, keeping the injected subnet contained to the wire.
-	send := q
+	// Always send a private copy and remove client-supplied ECS before any
+	// upstream exchange. Only the operator-configured China subnet may leave the
+	// gateway; trust must never receive a client subnet, and a client-provided ECS
+	// value must never affect a response stored for another client.
+	send := q.Copy()
+	stripECSFromMsg(send)
 	ecsSubnet := g.ecs.Load()
 	if ecsSubnet != nil {
-		send = q.Copy()
 		setECSOnMsg(send, ecsSubnet)
 	}
 
@@ -111,9 +111,6 @@ func (g *group) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	var origName, sentName string
 	if g.randomize.Load() && len(q.Question) > 0 {
 		origName = q.Question[0].Name
-		if send == q {
-			send = q.Copy()
-		}
 		sentName = randomizeDNSCase(origName)
 		send.Question[0].Name = sentName
 	}
@@ -130,6 +127,13 @@ func (g *group) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 		}
 		c := &dns.Client{Net: m.net, TLSConfig: m.tlsCfg}
 		msg, _, err := c.ExchangeContext(attemptCtx, send, m.addr)
+		// miekg/dns deliberately does not retry a truncated UDP response over
+		// TCP. Do it here within the same member slice so a DoT client never gets
+		// a TC response it cannot recover from on its already-stream transport.
+		if err == nil && msg != nil && msg.Truncated && m.net == "udp" {
+			tcpClient := &dns.Client{Net: "tcp"}
+			msg, _, err = tcpClient.ExchangeContext(attemptCtx, send, m.addr)
+		}
 		if cancel != nil {
 			cancel()
 		}
@@ -146,6 +150,7 @@ func (g *group) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 		// didn't answer. Checked on the PARENT ctx — an attempt-slice timeout
 		// is DeadlineExceeded on the child only and must keep iterating.
 		if ctx.Err() == context.Canceled {
+			g.breaker.recordCanceled()
 			if err == nil {
 				err = ctx.Err()
 			}
@@ -165,11 +170,9 @@ func (g *group) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 			restoreDNSCase(msg, sentName, origName)
 		}
 		if err == nil {
-			if ecsSubnet != nil {
-				// We injected ECS; the client never asked for it — strip the
-				// upstream's echo so it stays contained to the upstream wire.
-				stripECSFromMsg(msg)
-			}
+			// ECS is an upstream-only implementation detail. Strip an echo or an
+			// unsolicited option regardless of whether operator ECS is enabled.
+			stripECSFromMsg(msg)
 			g.breaker.record(true)
 			return msg, nil
 		}

@@ -15,6 +15,92 @@ source "$INSTALL"
 
 TMP="$(mktemp -d "$ROOT/.test-installer-safety.XXXXXX")"
 trap 'rm -rf -- "$TMP"' EXIT
+POSIX_MODES=0
+printf probe > "$TMP/.mode-probe"
+chmod 0600 "$TMP/.mode-probe" 2>/dev/null || true
+[[ "$(stat -c %a "$TMP/.mode-probe" 2>/dev/null || stat -f %Lp "$TMP/.mode-probe")" == 600 ]] \
+    && POSIX_MODES=1
+
+# Main-installer archive validation is behavioral: ordinary files/directories
+# pass, while links, hardlinks, and special files are rejected before extract.
+archive_fixture="$(mktemp -d /tmp/5gpn-archive-test.XXXXXX)"
+mkdir -p "$archive_fixture/safe/dir"
+printf 'payload\n' > "$archive_fixture/safe/dir/file.txt"
+tar -czf "$archive_fixture/safe.tgz" -C "$archive_fixture/safe" .
+archive_paths_safe tar "$archive_fixture/safe.tgz" \
+    && pass "main installer accepts an ordinary tar tree" \
+    || fail "main installer rejected an ordinary tar tree"
+
+mkdir -p "$archive_fixture/hardlink"
+printf 'payload\n' > "$archive_fixture/hardlink/file.txt"
+ln "$archive_fixture/hardlink/file.txt" "$archive_fixture/hardlink/alias.txt"
+tar -czf "$archive_fixture/hardlink.tgz" -C "$archive_fixture/hardlink" .
+if archive_paths_safe tar "$archive_fixture/hardlink.tgz" >/dev/null 2>&1; then
+    fail "main installer accepted a tar hardlink"
+else
+    pass "main installer rejects tar hardlinks before extraction"
+fi
+
+mkdir -p "$archive_fixture/special"
+if mkfifo "$archive_fixture/special/pipe"; then
+    tar -czf "$archive_fixture/special.tgz" -C "$archive_fixture/special" .
+    if archive_paths_safe tar "$archive_fixture/special.tgz" >/dev/null 2>&1; then
+        fail "main installer accepted a tar special file"
+    else
+        pass "main installer rejects tar special files before extraction"
+    fi
+else
+    fail "test host could not create the FIFO needed for tar special-file coverage"
+fi
+
+if command -v base64 >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+    # Prebuilt with Go's archive/zip using Unix modes: one ordinary regular
+    # file and one symlink entry. Embedding keeps this shell gate independent
+    # of a zip-creation tool while exercising the exact unzip metadata parser.
+    safe_zip_b64='UEsDBBQACAAAAAAAAAAAAAAAAAAAAAAAAAAJAAAAYWxpYXMudHh0cGF5bG9hZApQSwcIEs5IXwgAAAAIAAAAUEsBAhQDFAAIAAAAAAAAABLOSF8IAAAACAAAAAkAAAAAAAAAAAAAAKSBAAAAAGFsaWFzLnR4dFBLBQYAAAAAAQABADcAAAA/AAAAAAA='
+    link_zip_b64='UEsDBBQACAAAAAAAAAAAAAAAAAAAAAAAAAAJAAAAYWxpYXMudHh0ZmlsZS50eHRQSwcIJRb34AgAAAAIAAAAUEsBAhQDFAAIAAAAAAAAACUW9+AIAAAACAAAAAkAAAAAAAAAAAAAAP+hAAAAAGFsaWFzLnR4dFBLBQYAAAAAAQABADcAAAA/AAAAAAA='
+    printf '%s' "$safe_zip_b64" | base64 -d > "$archive_fixture/safe.zip"
+    archive_paths_safe zip "$archive_fixture/safe.zip" \
+        && pass "main installer accepts an ordinary zip tree" \
+        || fail "main installer rejected an ordinary zip tree"
+
+    printf '%s' "$link_zip_b64" | base64 -d > "$archive_fixture/link.zip"
+    if archive_paths_safe zip "$archive_fixture/link.zip" >/dev/null 2>&1; then
+        fail "main installer accepted a zip symlink"
+    else
+        pass "main installer rejects zip special entries before extraction"
+    fi
+else
+    pass "zip special-entry behavior skipped because base64/unzip are unavailable"
+fi
+rm -rf -- "$archive_fixture"
+
+if service_account_name_is_valid gpn-dns \
+   && ! service_account_name_is_valid 5gpn-dns \
+   && ! service_account_name_is_valid 'gpn.dns'; then
+    pass "service accounts use Debian/systemd strict user-name syntax"
+else
+    fail "service account name validation does not match strict Linux syntax"
+fi
+
+unit_conflicts="$TMP/systemd-conflicts"
+mkdir -p "$unit_conflicts"
+if ! journal_export_instances_clear "$unit_conflicts"; then
+    fail "empty systemd search root was treated as an exporter conflict"
+fi
+touch "$unit_conflicts/5gpn-journal@5gpn-dns.service"
+if journal_export_instances_clear "$unit_conflicts"; then
+    fail "pre-existing exact journal exporter instance was accepted"
+else
+    pass "exact journal exporter instance conflicts are rejected before polkit publication"
+fi
+rm -f -- "$unit_conflicts/5gpn-journal@5gpn-dns.service"
+mkdir "$unit_conflicts/5gpn-dns.service.d"
+if systemd_unit_has_dropins 5gpn-dns.service "$unit_conflicts"; then
+    pass "systemd unit drop-ins invalidate the project ownership fingerprint"
+else
+    fail "systemd unit drop-in was ignored by ownership validation"
+fi
 
 # Source checkouts resolve latest once, while release bundles remain pinned to
 # the exact tag stamped by the release workflow.
@@ -140,6 +226,7 @@ listeners="$(render_mihomo_listeners '10.20.30.40,10.20.30.41')"
 
 # Seed -> preserve byte-for-byte -> explicit validated reset with backup.
 MIHOMO_DIR="$TMP/mihomo"
+MIHOMO_SERVICE_USER="$(id -gn)"
 CONF_DIR="$TMP/conf"
 MIHOMO_BIN="$TMP/fake-mihomo"
 MIHOMO_TEST_LOG="$TMP/mihomo.log"; export MIHOMO_TEST_LOG
@@ -154,9 +241,10 @@ BASE_DOMAIN=example.com
 MIHOMO_LISTEN_IPS=10.20.30.40
 render_mihomo_config >/dev/null
 config="$MIHOMO_DIR/config.yaml"
-[[ -s "$config" && "$(stat -c %a "$config" 2>/dev/null || stat -f %Lp "$config")" == 600 ]] \
+config_mode="$(stat -c %a "$config" 2>/dev/null || stat -f %Lp "$config")"
+[[ -s "$config" && ( "$POSIX_MODES" == 0 || "$config_mode" == 660 ) ]] \
     && pass "first install seeds a private mihomo config" \
-    || fail "first-install mihomo config missing or not mode 0600"
+    || fail "first-install mihomo config missing or not mode 0660"
 grep -Fq 'console.example.com: 127.0.0.1' "$config" \
     && grep -Fq 'DOMAIN,console.example.com,DIRECT' "$config" \
     && pass "seed contains public console mapping" \
@@ -522,10 +610,11 @@ fi
 grep -Fq 'checksum is missing or invalid; refusing to install' "$INSTALL" \
     && pass "gum missing/invalid checksum fails closed to plain output" \
     || fail "gum checksum absence is not fail-closed"
-grep -Fq 'Release tag ${tag} is unavailable; refusing to use a branch.' "$QUICK" \
-    && ! grep -Fq 'origin main' "$QUICK" \
-    && pass "quick install fallback stays on the resolved release tag" \
-    || fail "quick install can fall forward to a branch"
+if ! grep -Eq '^fetch_git\(\)|git -C .*fetch|git -C .*checkout|origin main' "$QUICK"; then
+    pass "quick install has no unsigned branch or tag fallback"
+else
+    fail "quick install can fall forward to unsigned git content"
+fi
 grep -Fq '5gpn-quick-install-v1' "$QUICK" \
     && ! grep -Eq '^[[:space:]]*rm -rf "\$SRC"' "$QUICK" \
     && pass "quick-install cleanup is ownership-marker gated" \

@@ -63,6 +63,35 @@ func TestCachePreservesDecisionMetadata(t *testing.T) {
 	}
 }
 
+func TestCacheCanonicalizesQuestionName(t *testing.T) {
+	c := NewCache(2)
+	c.Put("MiXeD.Example.", dns.TypeA, makeMsg("mixed.example.", 300), time.Minute)
+	if _, ok := c.Get("mixed.example.", dns.TypeA); !ok {
+		t.Fatal("DNS name casing created a distinct cache key")
+	}
+	if c.Len() != 1 {
+		t.Fatalf("cache length = %d, want one canonical entry", c.Len())
+	}
+}
+
+func TestCacheSeparatesDNSSECRequestProfiles(t *testing.T) {
+	c := NewCache(4)
+	epoch := c.Epoch()
+	plain := cacheOptions{}
+	do := cacheOptions{dnssecOK: true}
+	cd := cacheOptions{checkingDisabled: true}
+	c.PutAtEpochWithMetadataOptions("example.com.", dns.TypeA, do, makeMsg("example.com.", 300), time.Minute, epoch, cacheMetadata{})
+	if _, _, ok := c.GetWithMetadataOptions("example.com.", dns.TypeA, plain); ok {
+		t.Fatal("plain query reused a DO=1 response")
+	}
+	if _, _, ok := c.GetWithMetadataOptions("example.com.", dns.TypeA, cd); ok {
+		t.Fatal("CD=1 query reused a DO=1 response")
+	}
+	if _, _, ok := c.GetWithMetadataOptions("example.com.", dns.TypeA, do); !ok {
+		t.Fatal("matching DO=1 query missed its cache entry")
+	}
+}
+
 // TestCacheExpiry verifies that an entry whose TTL has elapsed returns false.
 func TestCacheExpiry(t *testing.T) {
 	now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
