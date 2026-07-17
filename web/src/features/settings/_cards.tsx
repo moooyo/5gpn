@@ -1,21 +1,14 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { Badge, Button, Card, DataLine, Field, Input, Toggle, toast } from '../../components/ds'
 import { cn } from '../../lib/cn'
 import { api } from '../../lib/api/client'
 import type { CertStatus, ECSView, TGBotUpdate, TGBotView, UpstreamsView } from '../../lib/api/types'
+import { UpstreamGroupEditor } from './UpstreamGroupEditor'
 
 function errMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback
-}
-
-/** Split a textarea's raw value into trimmed, non-empty lines. */
-function parseLines(raw: string): string[] {
-  return raw
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
 }
 
 /** Parse a comma-separated admin-ID list into numeric Telegram user IDs. */
@@ -27,9 +20,6 @@ function parseAdmins(raw: string): number[] {
     .map((part) => Number(part))
     .filter((n) => Number.isFinite(n))
 }
-
-const textareaClass =
-  'w-full min-h-[92px] resize-y rounded-[10px] border border-input-border bg-input px-3 py-2.5 font-mono text-[12px] text-text-strong outline-none'
 
 // ---- 1. DoT 服务 ------------------------------------------------------------
 
@@ -221,11 +211,6 @@ export function TgbotCard({
 
 // ---- 4. 上游 DNS -------------------------------------------------------------
 
-interface UpstreamsFormValues {
-  china: string
-  trust: string
-}
-
 export function UpstreamsCard({
   upstreams,
   onSaved,
@@ -234,44 +219,58 @@ export function UpstreamsCard({
   onSaved: (v: UpstreamsView) => void
 }) {
   const { t } = useTranslation()
-  const { register, handleSubmit, reset } = useForm<UpstreamsFormValues>({
-    defaultValues: { china: '', trust: '' },
-  })
+  const [draft, setDraft] = useState<UpstreamsView>({ china: [], trust: [] })
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
-    if (upstreams) reset({ china: upstreams.china.join('\n'), trust: upstreams.trust.join('\n') })
-  }, [upstreams, reset])
+    if (upstreams) setDraft({ china: [...upstreams.china], trust: [...upstreams.trust] })
+  }, [upstreams])
 
-  async function onSubmit(values: UpstreamsFormValues) {
+  async function onSubmit() {
+    if (draft.china.length === 0 || draft.trust.length === 0) return
+    setSaving(true)
     try {
-      const res = await api.putUpstreams({ china: parseLines(values.china), trust: parseLines(values.trust) })
+      const res = await api.putUpstreams(draft)
       onSaved(res)
-      reset({ china: res.china.join('\n'), trust: res.trust.join('\n') })
       toast.success(t('settings.upstreamsSaved'))
     } catch (err) {
       toast.error(errMessage(err, t('settings.upstreamsSaveFailed')))
+    } finally {
+      setSaving(false)
     }
   }
 
   return (
-    <Card className="p-[18px]">
+    <Card className="p-[18px]" data-testid="upstreams-card">
       <div className="mb-1 text-[13px] font-bold text-text-strong">{t('settings.upstreams')}</div>
       <p className="mb-3 text-[10.5px] leading-relaxed text-text-faint">{t('settings.upstreamsHint')}</p>
-      <form onSubmit={(e) => void handleSubmit(onSubmit)(e)} className="flex flex-col gap-3">
+      <div className="flex flex-col gap-3">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <Field label={t('settings.upstreamsChina')}>
-            <textarea className={textareaClass} {...register('china')} />
-          </Field>
-          <Field label={t('settings.upstreamsTrust')}>
-            <textarea className={textareaClass} {...register('trust')} />
-          </Field>
+          <UpstreamGroupEditor
+            group="china"
+            entries={draft.china}
+            disabled={!upstreams || saving}
+            onChange={(china) => setDraft((current) => ({ ...current, china }))}
+          />
+          <UpstreamGroupEditor
+            group="trust"
+            entries={draft.trust}
+            disabled={!upstreams || saving}
+            onChange={(trust) => setDraft((current) => ({ ...current, trust }))}
+          />
         </div>
         <div className="flex justify-end">
-          <Button type="submit" size="sm" disabled={!upstreams} data-testid="upstreams-save">
-            {t('settings.upstreamsSave')}
+          <Button
+            type="button"
+            size="sm"
+            disabled={!upstreams || saving || draft.china.length === 0 || draft.trust.length === 0}
+            onClick={() => void onSubmit()}
+            data-testid="upstreams-save"
+          >
+            {saving ? t('common.saving') : t('settings.upstreamsSave')}
           </Button>
         </div>
-      </form>
+      </div>
     </Card>
   )
 }

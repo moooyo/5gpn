@@ -71,12 +71,11 @@ describe('SettingsPage', () => {
     expect(api.getEcs).toHaveBeenCalled()
     expect(api.getTgbot).toHaveBeenCalled()
 
-    // getByDisplayValue's default normalizer collapses \n to a space, so
-    // matching a textarea's literal multi-line value needs an identity normalizer.
-    expect(
-      await screen.findByDisplayValue('223.5.5.5\n119.29.29.29', { normalizer: (s) => s }),
-    ).toBeInTheDocument()
-    expect(screen.getByDisplayValue('dns.google@8.8.8.8')).toBeInTheDocument()
+    expect(await screen.findByText('223.5.5.5')).toBeInTheDocument()
+    expect(screen.getByText('119.29.29.29')).toBeInTheDocument()
+    expect(screen.getByText('dns.google@8.8.8.8')).toBeInTheDocument()
+    expect(screen.getAllByText('UDP')).toHaveLength(2)
+    expect(screen.getByText('DoT')).toBeInTheDocument()
     expect(screen.getByDisplayValue('122.96.30.0/24')).toBeInTheDocument()
     expect(screen.getByDisplayValue('123456789')).toBeInTheDocument()
   })
@@ -139,22 +138,63 @@ describe('SettingsPage', () => {
     expect(changePwBtn).toHaveAttribute('title', tip)
   })
 
-  it('saving upstreams splits/trims/drops-empty lines and calls putUpstreams with parsed arrays', async () => {
+  it('adds and removes validated list entries before saving the ordered groups', async () => {
     const user = userEvent.setup()
     renderSettings()
 
-    const chinaBox = await screen.findByDisplayValue('223.5.5.5\n119.29.29.29', { normalizer: (s) => s })
-    await user.clear(chinaBox)
-    await user.type(chinaBox, '223.5.5.5{enter}  119.29.29.29  {enter}{enter}1.1.1.1')
+    await screen.findByText('223.5.5.5')
+    await user.click(screen.getByTestId('upstreams-add-china'))
+    await user.type(screen.getByTestId('upstreams-address'), '1.1.1.1:5353')
+    await user.click(screen.getByTestId('upstreams-add-china-confirm'))
+    expect(await screen.findByText('1.1.1.1:5353')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '删除 119.29.29.29' }))
 
+    await user.click(screen.getByTestId('upstreams-add-trust'))
+    expect(screen.getByTestId('upstreams-protocol-dot')).toHaveAttribute('aria-checked', 'true')
+    await user.type(screen.getByTestId('upstreams-server-name'), 'dns.cloudflare.com')
+    await user.type(screen.getByTestId('upstreams-address'), '1.1.1.1')
+    await user.click(screen.getByTestId('upstreams-add-trust-confirm'))
+    await user.click(screen.getByRole('button', { name: '删除 dns.google@8.8.8.8' }))
+
+    expect(api.putUpstreams).not.toHaveBeenCalled()
     await user.click(screen.getByTestId('upstreams-save'))
 
     await waitFor(() =>
       expect(api.putUpstreams).toHaveBeenCalledWith({
-        china: ['223.5.5.5', '119.29.29.29', '1.1.1.1'],
-        trust: ['dns.google@8.8.8.8'],
+        china: ['223.5.5.5', '1.1.1.1:5353'],
+        trust: ['dns.cloudflare.com@1.1.1.1'],
       }),
     )
+  })
+
+  it('rejects invalid protocol fields and duplicate entries in the add dialog', async () => {
+    const user = userEvent.setup()
+    renderSettings()
+
+    await screen.findByText('223.5.5.5')
+    await user.click(screen.getByTestId('upstreams-add-trust'))
+    await user.type(screen.getByTestId('upstreams-address'), 'dns.google')
+    await user.click(screen.getByTestId('upstreams-add-trust-confirm'))
+    expect(screen.getByText('请输入 TLS 服务器名称。')).toBeInTheDocument()
+    expect(screen.getByText('请输入合法 IP；端口可选，范围为 1–65535。')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '取消' }))
+    await user.click(screen.getByTestId('upstreams-add-china'))
+    await user.type(screen.getByTestId('upstreams-address'), '223.5.5.5')
+    await user.click(screen.getByTestId('upstreams-add-china-confirm'))
+    expect(screen.getByRole('alert')).toHaveTextContent('该上游已在列表中。')
+  })
+
+  it('prevents saving when either upstream group is empty', async () => {
+    const user = userEvent.setup()
+    renderSettings()
+
+    await screen.findByText('223.5.5.5')
+    await user.click(screen.getByRole('button', { name: '删除 223.5.5.5' }))
+    await user.click(screen.getByRole('button', { name: '删除 119.29.29.29' }))
+
+    expect(screen.getByText('至少添加一个上游 DNS 后才能保存。')).toBeInTheDocument()
+    expect(screen.getByTestId('upstreams-save')).toBeDisabled()
   })
 
   it('shows the ApiError message via toast when saving upstreams fails (400)', async () => {
@@ -162,7 +202,7 @@ describe('SettingsPage', () => {
     const user = userEvent.setup()
     renderSettings()
 
-    await screen.findByDisplayValue('223.5.5.5\n119.29.29.29', { normalizer: (s) => s })
+    await screen.findByText('223.5.5.5')
     await user.click(screen.getByTestId('upstreams-save'))
 
     expect(await screen.findByText('invalid upstream: bad-host')).toBeInTheDocument()

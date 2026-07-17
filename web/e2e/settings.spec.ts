@@ -40,6 +40,31 @@ test('saving the ECS card (mock accepts) shows a success toast', async ({ page }
   await expect(page.getByText('已应用 —— 国内组查询现携带')).toBeVisible()
 })
 
+test('upstream DNS uses list controls and validates protocol-specific additions', async ({ page }) => {
+  await setupMockApiWithToken(page)
+  await page.goto('/settings')
+  await page.waitForLoadState('networkidle')
+
+  const card = page.getByTestId('upstreams-card')
+  await expect(card).toBeVisible()
+  await expect(card.locator('textarea')).toHaveCount(0)
+  await expect(card.getByText('223.5.5.5', { exact: true })).toBeVisible()
+  await expect(card.getByText('dot.example.com@8.8.8.8:853', { exact: true })).toBeVisible()
+
+  await card.getByTestId('upstreams-add-trust').click()
+  const dialog = page.getByRole('dialog', { name: '添加境外 DNS' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByTestId('upstreams-protocol-dot')).toHaveAttribute('aria-checked', 'true')
+  await dialog.getByTestId('upstreams-add-trust-confirm').click()
+  await expect(dialog.getByText('请输入 TLS 服务器名称。')).toBeVisible()
+  await expect(dialog.getByText('请输入服务器 IP。')).toBeVisible()
+
+  await dialog.getByTestId('upstreams-server-name').fill('dns.cloudflare.com')
+  await dialog.getByTestId('upstreams-address').fill('1.1.1.1')
+  await dialog.getByTestId('upstreams-add-trust-confirm').click()
+  await expect(card.getByText('dns.cloudflare.com@1.1.1.1', { exact: true })).toBeVisible()
+})
+
 test('turning the Telegram bot toggle off disables it (mock accepts) and shows a success toast', async ({ page }) => {
   await setupMockApiWithToken(page)
   await page.goto('/settings')
