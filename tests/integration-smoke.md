@@ -44,7 +44,8 @@ sudo cp -a /etc/5gpn/mihomo/config.yaml /tmp/mihomo-config.before
   - `:853/tcp` owned by `5gpn-dns`;
   - `127.0.0.1:5353/udp` and `127.0.0.1:5354/tcp+udp`;
   - console `127.0.0.1:443/tcp`, zashboard `127.0.0.2:443/tcp`;
-  - mihomo TCP `:80`, `:443`, `:8080`, and `:8443`, plus UDP `:443`, on every
+  - mihomo TCP `:80`, `:443`, `:5060`, `:8080`, and `:8443`, plus UDP `:443`
+    and `:5060`, on every
     configured local listen IP when testing a fresh or explicitly reset seed.
 - [ ] Nothing exposes public DNS `:53`, a DoH handler, or a standalone profile
   port. TCP `:8443` is mihomo application ingress, not DoH.
@@ -164,12 +165,12 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
 - [ ] Fresh/reset seeds forward sniffable TCP `:8080` and `:8443` traffic to
   the visible HTTP Host or TLS SNI on the same destination port. No-SNI,
   unrecognized raw TCP, and UDP on those ports fail closed.
-- [ ] Settings reports `speedtest-5060` disabled when the complete mihomo YAML
-  has no canonical `:5060` listener/sniffer objects. Enabling it requires an
-  explicit confirmation and results in TCP and UDP `:5060` listeners on every
-  configured gateway address, with `5060` present in the HTTP, TLS, and QUIC
-  sniffer port sets and exact console/zash `:5060` rejects immediately after
-  the canonical panel-reject prefix. Restrict the test source in the provider
+- [ ] A fresh or explicitly reset seed reports `speedtest-5060` enabled and has
+  TCP and UDP `:5060` listeners on every configured gateway address, with
+  `5060` present in the HTTP, TLS, and QUIC sniffer port sets and exact
+  console/zash `:5060` rejects immediately after the canonical panel-reject
+  prefix. Disabling it requires confirmation and removes only those canonical
+  objects; re-enabling restores them. Restrict the test source in the provider
   security group.
 - [ ] On the enabled module, HTTP Host and TLS SNI preserve destination port
   `5060`. Test QUIC only against an origin that actually serves supported QUIC

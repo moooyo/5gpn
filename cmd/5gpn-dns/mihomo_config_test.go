@@ -47,6 +47,7 @@ func TestMihomoSeedUsesForcedConsoleFallbackTargets(t *testing.T) {
 		"target: console.5gpn.test:80}",
 		"target: console.5gpn.test:8080}",
 		"target: console.5gpn.test:8443}",
+		"target: console.5gpn.test:5060}",
 		"force-domain: [console.5gpn.test]",
 	} {
 		if !strings.Contains(cfg, want) {
@@ -71,13 +72,13 @@ func TestMihomoInvariants_HostnameGatewayRequiresForcedSniff(t *testing.T) {
 	perProtocolOverride := strings.Replace(valid,
 		"  override-destination: true\n", "  override-destination: false\n", 1)
 	perProtocolOverride = strings.Replace(perProtocolOverride,
-		"TLS:  { ports: [443, 8080, 8443] }", "TLS:  { ports: [443, 8080, 8443], override-destination: true }", 1)
+		"TLS:  { ports: [443, 8080, 8443, 5060] }", "TLS:  { ports: [443, 8080, 8443, 5060], override-destination: true }", 1)
 	perProtocolOverride = strings.Replace(perProtocolOverride,
-		"QUIC: { ports: [443] }", "QUIC: { ports: [443], override-destination: true }", 1)
+		"QUIC: { ports: [443, 5060] }", "QUIC: { ports: [443, 5060], override-destination: true }", 1)
 	if err := ValidateInvariants(perProtocolOverride, p); err != nil {
 		t.Fatalf("effective per-protocol destination overrides should remain valid: %v", err)
 	}
-	portRange := strings.Replace(valid, "TLS:  { ports: [443, 8080, 8443] }", "TLS:  { ports: [400-500, 8080, 8443] }", 1)
+	portRange := strings.Replace(valid, "TLS:  { ports: [443, 8080, 8443, 5060] }", "TLS:  { ports: [400-500, 8080, 8443, 5060] }", 1)
 	if err := ValidateInvariants(portRange, p); err != nil {
 		t.Fatalf("a TLS port range containing 443 should remain valid: %v", err)
 	}
@@ -89,10 +90,10 @@ func TestMihomoInvariants_HostnameGatewayRequiresForcedSniff(t *testing.T) {
 		strings.Replace(valid, "  override-destination: true\n", "  override-destination: false\n", 1),
 		strings.Replace(valid, "  force-domain: [console.5gpn.test]\n", "  force-domain: [console.5gpn.test]\n  skip-src-address: [0.0.0.0/0]\n", 1),
 		strings.Replace(valid, "  force-domain: [console.5gpn.test]\n", "  force-domain: [console.5gpn.test]\n  skip-domain: [+.example.test]\n", 1),
-		strings.Replace(valid, "TLS:  { ports: [443, 8080, 8443] }", "TLS:  { ports: [8443] }", 1),
-		strings.Replace(valid, "TLS:  { ports: [443, 8080, 8443] }", "TLS:  { ports: [443, 8080, 8443], override-destination: false }", 1),
-		strings.Replace(valid, "QUIC: { ports: [443] }", "QUIC: { ports: [8443] }", 1),
-		strings.Replace(valid, "QUIC: { ports: [443] }", "QUIC: { ports: [443], override-destination: false }", 1),
+		strings.Replace(valid, "TLS:  { ports: [443, 8080, 8443, 5060] }", "TLS:  { ports: [8443, 5060] }", 1),
+		strings.Replace(valid, "TLS:  { ports: [443, 8080, 8443, 5060] }", "TLS:  { ports: [443, 8080, 8443, 5060], override-destination: false }", 1),
+		strings.Replace(valid, "QUIC: { ports: [443, 5060] }", "QUIC: { ports: [5060] }", 1),
+		strings.Replace(valid, "QUIC: { ports: [443, 5060] }", "QUIC: { ports: [443, 5060], override-destination: false }", 1),
 		strings.Replace(valid, "target: console.5gpn.test:443", "target: other.5gpn.test:443", 1),
 	}
 	for _, broken := range brokenConfigs {
@@ -124,7 +125,7 @@ func TestMihomoInvariants_AllNamedGatewayListenersMustBeSafe(t *testing.T) {
 
 func TestMihomoInvariants_LegacyLoopbackGatewayRemainsValid(t *testing.T) {
 	legacy := goldenMihomoConfig()
-	for _, port := range []string{"443", "80", "8080", "8443"} {
+	for _, port := range []string{"443", "80", "8080", "8443", "5060"} {
 		legacy = strings.Replace(legacy, "target: console.5gpn.test:"+port+"}", "target: 127.0.0.1:"+port+"}", 1)
 	}
 	legacy = strings.Replace(legacy, "  force-domain: [console.5gpn.test]\n",
@@ -162,6 +163,11 @@ func TestMihomoSeedPanelFallbackRejectsPrecedeDirect(t *testing.T) {
 			direct: "  - DOMAIN,console.5gpn.test,DIRECT\n",
 		},
 		{
+			name:   "console speedtest",
+			reject: "  - AND,((DOMAIN,console.5gpn.test),(DST-PORT,5060)),REJECT\n",
+			direct: "  - DOMAIN,console.5gpn.test,DIRECT\n",
+		},
+		{
 			name:   "zashboard UDP",
 			reject: "  - AND,((DOMAIN,zash.5gpn.test),(NETWORK,UDP)),REJECT\n",
 			direct: "  - AND,((DOMAIN,zash.5gpn.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT\n",
@@ -181,6 +187,11 @@ func TestMihomoSeedPanelFallbackRejectsPrecedeDirect(t *testing.T) {
 			reject: "  - AND,((DOMAIN,zash.5gpn.test),(DST-PORT,8443)),REJECT\n",
 			direct: "  - AND,((DOMAIN,zash.5gpn.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT\n",
 		},
+		{
+			name:   "zashboard speedtest",
+			reject: "  - AND,((DOMAIN,zash.5gpn.test),(DST-PORT,5060)),REJECT\n",
+			direct: "  - AND,((DOMAIN,zash.5gpn.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT\n",
+		},
 	} {
 		rejectAt, directAt := strings.Index(cfg, tc.reject), strings.Index(cfg, tc.direct)
 		if rejectAt < 0 || directAt < 0 || rejectAt >= directAt {
@@ -196,6 +207,8 @@ func TestMihomoSeedUsesFastRejectGuards(t *testing.T) {
 	}
 	for _, want := range []string{
 		"DOMAIN,zash.5gpn.test,REJECT",
+		"AND,((DOMAIN,console.5gpn.test),(DST-PORT,5060)),REJECT",
+		"AND,((DOMAIN,zash.5gpn.test),(DST-PORT,5060)),REJECT",
 		"IP-CIDR,10.0.1.20/32,REJECT,no-resolve",
 		"IP-CIDR,127.0.0.0/8,REJECT,no-resolve",
 		"IP-CIDR,10.0.0.0/8,REJECT,no-resolve",
@@ -602,16 +615,21 @@ func TestMihomoConfigDefaultRendersPluralListeners(t *testing.T) {
 		"name: gateway80, type: tunnel, listen: 10.0.1.20, port: 80, network: [tcp], target: console.5gpn.test:80",
 		"name: gateway8080, type: tunnel, listen: 10.0.1.20, port: 8080, network: [tcp], target: console.5gpn.test:8080",
 		"name: gateway8443, type: tunnel, listen: 10.0.1.20, port: 8443, network: [tcp], target: console.5gpn.test:8443",
+		"name: gateway5060, type: tunnel, listen: 10.0.1.20, port: 5060, network: [tcp, udp], target: console.5gpn.test:5060",
 		"name: gateway-2, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: console.5gpn.test:443",
 		"name: gateway80-2, type: tunnel, listen: 203.0.113.10, port: 80, network: [tcp], target: console.5gpn.test:80",
 		"name: gateway8080-2, type: tunnel, listen: 203.0.113.10, port: 8080, network: [tcp], target: console.5gpn.test:8080",
 		"name: gateway8443-2, type: tunnel, listen: 203.0.113.10, port: 8443, network: [tcp], target: console.5gpn.test:8443",
-		"TLS:  { ports: [443, 8080, 8443] }",
-		"HTTP: { ports: [80, 8080, 8443] }",
+		"name: gateway5060-2, type: tunnel, listen: 203.0.113.10, port: 5060, network: [tcp, udp], target: console.5gpn.test:5060",
+		"TLS:  { ports: [443, 8080, 8443, 5060] }",
+		"QUIC: { ports: [443, 5060] }",
+		"HTTP: { ports: [80, 8080, 8443, 5060] }",
 		"AND,((DOMAIN,console.5gpn.test),(DST-PORT,8080)),REJECT",
 		"AND,((DOMAIN,console.5gpn.test),(DST-PORT,8443)),REJECT",
 		"AND,((DOMAIN,zash.5gpn.test),(DST-PORT,8080)),REJECT",
 		"AND,((DOMAIN,zash.5gpn.test),(DST-PORT,8443)),REJECT",
+		"AND,((DOMAIN,console.5gpn.test),(DST-PORT,5060)),REJECT",
+		"AND,((DOMAIN,zash.5gpn.test),(DST-PORT,5060)),REJECT",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Default() missing %q", want)

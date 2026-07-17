@@ -3,7 +3,7 @@
 #
 #   client DoT:853 (the ONLY DNS transport) -> 5gpn-dns (NXDOMAIN for block,
 #   real IP for direct, gateway IP for proxy/foreign) -> mihomo
-#   (:80/:443/:8080/:8443) sniffs HTTP Host or TLS SNI
+#   (:80/:443/:5060/:8080/:8443) sniffs HTTP Host or TLS SNI
 #   (sniffer override-destination), the loopback DNS broker re-resolves the real
 #   IP via DNS_EGRESS_RESOLVER, then egresses through its operator-owned policy.
 #   mihomo also SNI-splits the panels
@@ -810,6 +810,7 @@ render_mihomo_listeners() {
         printf '  - {name: gateway80%s, type: tunnel, listen: %s, port: 80, network: [tcp], target: %s:80}\n' "$suffix" "$ip" "$console_domain"
         printf '  - {name: gateway8080%s, type: tunnel, listen: %s, port: 8080, network: [tcp], target: %s:8080}\n' "$suffix" "$ip" "$console_domain"
         printf '  - {name: gateway8443%s, type: tunnel, listen: %s, port: 8443, network: [tcp], target: %s:8443}\n' "$suffix" "$ip" "$console_domain"
+        printf '  - {name: gateway5060%s, type: tunnel, listen: %s, port: 5060, network: [tcp, udp], target: %s:5060}\n' "$suffix" "$ip" "$console_domain"
     done < <(printf '%s\n' "$ips" | tr ',' '\n')
 }
 
@@ -3357,7 +3358,11 @@ probe_mihomo_ready() {
     systemctl is-active --quiet mihomo || return 1
     local secret ip port
     local -a tcp_ports=(80 443)
-    [[ "${MIHOMO_SEED_PORTS_REQUIRED:-0}" == 1 ]] && tcp_ports+=(8080 8443)
+    local -a udp_ports=(443)
+    if [[ "${MIHOMO_SEED_PORTS_REQUIRED:-0}" == 1 ]]; then
+        tcp_ports+=(5060 8080 8443)
+        udp_ports+=(5060)
+    fi
     secret="$(cfg_get DNS_MIHOMO_SECRET)"
     local -a curl_args=(--fail --silent --show-error --max-time 2 -o /dev/null)
     [[ -n "$secret" ]] && curl_args+=(-H "Authorization: Bearer $secret")
@@ -3369,7 +3374,9 @@ probe_mihomo_ready() {
         for port in "${tcp_ports[@]}"; do
             ss -H -ltn 2>/dev/null | grep -Fq "${ip}:${port} " || return 1
         done
-        ss -H -lun 2>/dev/null | grep -Fq "${ip}:443 " || return 1
+        for port in "${udp_ports[@]}"; do
+            ss -H -lun 2>/dev/null | grep -Fq "${ip}:${port} " || return 1
+        done
     done < <(printf '%s\n' "$MIHOMO_LISTEN_IPS" | tr ',' '\n')
 }
 
@@ -4074,7 +4081,7 @@ Domains + certificates: ONE base domain and ONE scoped Let's Encrypt lineage.
 
 There is NO host firewall management: use your provider's security
 group if you need one. New/reset mihomo seeds require client reachability to
-TCP 80, 443, 8080, and 8443 plus UDP 443. The console SPA and /ios/ are public
+TCP 80, 443, 5060, 8080, and 8443 plus UDP 443 and 5060. The console SPA and /ios/ are public
 while /api/* requires the bearer token. Zashboard remains limited to source IPs
 in mihomo's whitelist.txt allowlist.
 

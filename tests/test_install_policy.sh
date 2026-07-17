@@ -185,12 +185,14 @@ printf '%s' "$pmr_fn" | grep -Fq 'mihomo_controller_curl "/version"' \
     || fail "probe_mihomo_ready must call mihomo_controller_curl for the TLS controller probe"
 printf '%s' "$pmr_fn" | grep -Fq 'local -a tcp_ports=(80 443)' \
     || fail "probe_mihomo_ready must always require the baseline TCP ports"
-printf '%s' "$pmr_fn" | grep -Fq 'tcp_ports+=(8080 8443)' \
-    || fail "probe_mihomo_ready must conditionally require the alternate seed ports"
+printf '%s' "$pmr_fn" | grep -Fq 'tcp_ports+=(5060 8080 8443)' \
+    || fail "probe_mihomo_ready must conditionally require every extra seed TCP port"
 printf '%s' "$pmr_fn" | grep -Fq '${MIHOMO_SEED_PORTS_REQUIRED:-0}' \
     || fail "probe_mihomo_ready must default alternate-port readiness to disabled"
-printf '%s' "$pmr_fn" | grep -Fq 'ss -H -lun 2>/dev/null | grep -Fq "${ip}:443 "' \
-    || fail "probe_mihomo_ready must retain the UDP :443 readiness probe"
+printf '%s' "$pmr_fn" | grep -Fq 'local -a udp_ports=(443)' \
+    || fail "probe_mihomo_ready must always require UDP :443"
+printf '%s' "$pmr_fn" | grep -Fq 'udp_ports+=(5060)' \
+    || fail "probe_mihomo_ready must conditionally require default-module UDP :5060"
 # manage_menu must expose add/remove allowlist entries as menu ops.
 mm_fn="$(sed -n '/^manage_menu()/,/^}/p' "$INSTALL")"
 printf '%s' "$mm_fn" | grep -Fq 'add_allow_ip' \

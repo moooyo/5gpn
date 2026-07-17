@@ -105,7 +105,7 @@ jobs:
           echo "${MIHOMO_SHA256}  /tmp/mihomo.gz" | sha256sum -c -
           gunzip /tmp/mihomo.gz
           chmod 0755 /tmp/mihomo
-      - name: Render and validate seed and ingress-module configs
+      - name: Render and validate enabled and disabled ingress-module configs
         run: |
           set -euo pipefail
           runtime="$(mktemp -d)"
@@ -116,6 +116,7 @@ jobs:
               print "  - {name: gateway80, type: tunnel, listen: 203.0.113.10, port: 80, network: [tcp], target: console.example.test:80}"
               print "  - {name: gateway8080, type: tunnel, listen: 203.0.113.10, port: 8080, network: [tcp], target: console.example.test:8080}"
               print "  - {name: gateway8443, type: tunnel, listen: 203.0.113.10, port: 8443, network: [tcp], target: console.example.test:8443}"
+              print "  - {name: gateway5060, type: tunnel, listen: 203.0.113.10, port: 5060, network: [tcp, udp], target: console.example.test:5060}"
               next
             }
             {
@@ -132,18 +133,17 @@ jobs:
             exit 1
           fi
           /tmp/mihomo -t -f "$runtime/config.yaml" -d "$runtime"
+          grep -Fq 'name: gateway5060' "$runtime/config.yaml"
+          grep -Fq 'target: console.example.test:5060' "$runtime/config.yaml"
+          grep -Fq 'QUIC: { ports: [443, 5060] }' "$runtime/config.yaml"
+          grep -Fq 'AND,((DOMAIN,console.example.test),(DST-PORT,5060)),REJECT' "$runtime/config.yaml"
+          grep -Fq 'AND,((DOMAIN,zash.example.test),(DST-PORT,5060)),REJECT' "$runtime/config.yaml"
           sed \
-            -e '/name: gateway8443/a\  - {name: gateway5060, type: tunnel, listen: 203.0.113.10, port: 5060, network: [tcp, udp], target: console.example.test:5060}' \
-            -e 's/TLS:  { ports: \[443, 8080, 8443\] }/TLS:  { ports: [443, 8080, 8443, 5060] }/' \
-            -e 's/QUIC: { ports: \[443\] }/QUIC: { ports: [443, 5060] }/' \
-            -e 's/HTTP: { ports: \[80, 8080, 8443\] }/HTTP: { ports: [80, 8080, 8443, 5060] }/' \
-            -e '/DOMAIN,zash.example.test.*DST-PORT,8443.*REJECT/a\  - AND,((DOMAIN,console.example.test),(DST-PORT,5060)),REJECT\n  - AND,((DOMAIN,zash.example.test),(DST-PORT,5060)),REJECT' \
-            "$runtime/config.yaml" > "$runtime/config-speedtest-5060.yaml"
-          grep -Fq 'name: gateway5060' "$runtime/config-speedtest-5060.yaml"
-          grep -Fq 'target: console.example.test:5060' "$runtime/config-speedtest-5060.yaml"
-          grep -Fq 'QUIC: { ports: [443, 5060] }' "$runtime/config-speedtest-5060.yaml"
-          grep -Fq 'AND,((DOMAIN,console.example.test),(DST-PORT,5060)),REJECT' "$runtime/config-speedtest-5060.yaml"
-          grep -Fq 'AND,((DOMAIN,zash.example.test),(DST-PORT,5060)),REJECT' "$runtime/config-speedtest-5060.yaml"
-          /tmp/mihomo -t -f "$runtime/config-speedtest-5060.yaml" -d "$runtime"
+            -e '/name: gateway5060/d' \
+            -e 's/, 5060//g' \
+            -e '/DST-PORT,5060/d' \
+            "$runtime/config.yaml" > "$runtime/config-speedtest-5060-disabled.yaml"
+          ! grep -Fq '5060' "$runtime/config-speedtest-5060-disabled.yaml"
+          /tmp/mihomo -t -f "$runtime/config-speedtest-5060-disabled.yaml" -d "$runtime"
       - name: Exercise sniff-cache isolation
         run: bash tests/mihomo-sniff-cache-regression.sh /tmp/mihomo

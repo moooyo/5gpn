@@ -97,7 +97,7 @@ export function ConsoleCard() {
   )
 }
 
-// ---- 3. Optional ingress ports -------------------------------------------
+// ---- 3. Ingress ports ----------------------------------------------------
 
 function ingressDraft(modules: IngressModule[]): Record<string, boolean> {
   return Object.fromEntries(modules.map((module) => [module.id, module.enabled]))

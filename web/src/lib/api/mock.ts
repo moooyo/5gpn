@@ -56,7 +56,7 @@ export async function resetMihomoConfig(revision: string): Promise<T.MihomoConfi
   return { ...fixtures.mihomoConfig }
 }
 
-// ---- optional ingress modules --------------------------------------------
+// ---- ingress modules -----------------------------------------------------
 
 function ingressModulesView(): T.IngressModulesView {
   return {

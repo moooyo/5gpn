@@ -31,31 +31,64 @@ func TestMihomoIngressModules_EnableDisableRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected initial catalog: %+v", before)
 	}
 	module := before.Modules[0]
-	if module.ID != speedtestModuleID || module.Enabled || !module.Manageable {
-		t.Fatalf("initial module = %+v, want disabled/manageable", module)
+	if module.ID != speedtestModuleID || !module.Enabled || !module.Manageable {
+		t.Fatalf("initial module = %+v, want enabled/manageable", module)
 	}
 	if module.Port != 5060 || strings.Join(module.Networks, ",") != "tcp,udp" || strings.Join(module.Sniffers, ",") != "http,tls,quic" {
 		t.Fatalf("static module capabilities = %+v", module)
 	}
 
-	enableBody, _ := json.Marshal(map[string]any{"enabled": true, "revision": before.Revision})
+	moduleRules := speedtestModuleGuardRules(fx.infra)
+	disableBody, _ := json.Marshal(map[string]any{"enabled": false, "revision": before.Revision})
+	disabledRec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/ingress-modules/"+speedtestModuleID, disableBody, fx.token, true)
+	if disabledRec.Code != http.StatusOK {
+		t.Fatalf("disable status=%d body=%s", disabledRec.Code, disabledRec.Body.String())
+	}
+	disabled := decodeJSON[mihomoIngressModulesResponse](t, disabledRec)
+	if disabled.Modules[0].Enabled || !disabled.Modules[0].Manageable || disabled.Revision == before.Revision {
+		t.Fatalf("disabled catalog = %+v", disabled)
+	}
+	if fx.tester.calls != 1 || fx.ctl.putCalls != 1 {
+		t.Fatalf("disable validation/apply calls = %d/%d, want 1/1", fx.tester.calls, fx.ctl.putCalls)
+	}
+	disabledText, err := fx.store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(disabledText, "# operator-owned comment") || !strings.Contains(disabledText, "custom-extension:") {
+		t.Fatalf("operator comments/unknown fields were not preserved:\n%s", disabledText)
+	}
+	if view := analyzeSpeedtestModule(disabledText, fx.infra).View; view.Enabled || !view.Manageable {
+		t.Fatalf("on-disk disabled module = %+v", view)
+	}
+	for _, rule := range moduleRules {
+		if strings.Contains(disabledText, rule) {
+			t.Fatalf("disabled module retained local-service guard %q", rule)
+		}
+	}
+	backup, err := os.ReadFile(fx.store.Path() + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(backup) != operatorText {
+		t.Fatal("module disable backup does not contain the exact old bytes")
+	}
+
+	enableBody, _ := json.Marshal(map[string]any{"enabled": true, "revision": disabled.Revision})
 	enabledRec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/ingress-modules/"+speedtestModuleID, enableBody, fx.token, true)
 	if enabledRec.Code != http.StatusOK {
 		t.Fatalf("enable status=%d body=%s", enabledRec.Code, enabledRec.Body.String())
 	}
 	enabled := decodeJSON[mihomoIngressModulesResponse](t, enabledRec)
-	if !enabled.Modules[0].Enabled || !enabled.Modules[0].Manageable || enabled.Revision == before.Revision {
+	if !enabled.Modules[0].Enabled || !enabled.Modules[0].Manageable || enabled.Revision == disabled.Revision {
 		t.Fatalf("enabled catalog = %+v", enabled)
 	}
-	if fx.tester.calls != 1 || fx.ctl.putCalls != 1 {
-		t.Fatalf("enable validation/apply calls = %d/%d, want 1/1", fx.tester.calls, fx.ctl.putCalls)
+	if fx.tester.calls != 2 || fx.ctl.putCalls != 2 {
+		t.Fatalf("round-trip validation/apply calls = %d/%d, want 2/2", fx.tester.calls, fx.ctl.putCalls)
 	}
 	onDisk, err := fx.store.Read()
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !strings.Contains(onDisk, "# operator-owned comment") || !strings.Contains(onDisk, "custom-extension:") {
-		t.Fatalf("operator comments/unknown fields were not preserved:\n%s", onDisk)
 	}
 	analysis := analyzeSpeedtestModule(onDisk, fx.infra)
 	if !analysis.View.Enabled || !analysis.View.Manageable {
@@ -72,7 +105,6 @@ func TestMihomoIngressModules_EnableDisableRoundTrip(t *testing.T) {
 	if !moduleTargetFound {
 		t.Fatal("enabled module listener must use the same-port console hostname target")
 	}
-	moduleRules := speedtestModuleGuardRules(fx.infra)
 	for _, rule := range moduleRules {
 		if !strings.Contains(onDisk, rule) {
 			t.Fatalf("enabled module is missing local-service guard %q", rule)
@@ -81,34 +113,12 @@ func TestMihomoIngressModules_EnableDisableRoundTrip(t *testing.T) {
 	if strings.Index(onDisk, moduleRules[0]) > strings.Index(onDisk, "DOMAIN,"+fx.infra.ConsoleDomain+",DIRECT") {
 		t.Fatal("module local-service guards must precede console/zash accepting rules")
 	}
-	backup, err := os.ReadFile(fx.store.Path() + ".bak")
+	backup, err = os.ReadFile(fx.store.Path() + ".bak")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(backup) != operatorText {
-		t.Fatal("module enable backup does not contain the exact old bytes")
-	}
-
-	disableBody, _ := json.Marshal(map[string]any{"enabled": false, "revision": enabled.Revision})
-	disabledRec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/ingress-modules/"+speedtestModuleID, disableBody, fx.token, true)
-	if disabledRec.Code != http.StatusOK {
-		t.Fatalf("disable status=%d body=%s", disabledRec.Code, disabledRec.Body.String())
-	}
-	disabled := decodeJSON[mihomoIngressModulesResponse](t, disabledRec)
-	if disabled.Modules[0].Enabled || !disabled.Modules[0].Manageable {
-		t.Fatalf("disabled catalog = %+v", disabled)
-	}
-	disabledText, err := fx.store.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, rule := range moduleRules {
-		if strings.Contains(disabledText, rule) {
-			t.Fatalf("disabled module retained local-service guard %q", rule)
-		}
-	}
-	if fx.tester.calls != 2 || fx.ctl.putCalls != 2 {
-		t.Fatalf("round-trip validation/apply calls = %d/%d, want 2/2", fx.tester.calls, fx.ctl.putCalls)
+	if string(backup) != disabledText {
+		t.Fatal("module enable backup does not contain the exact disabled bytes")
 	}
 }
 
@@ -119,12 +129,6 @@ func TestMihomoIngressModules_MultipleCanonicalGatewayBinds(t *testing.T) {
 		renderMihomoListeners([]string{"203.0.113.10", "198.51.100.20"}, fx.infra.ConsoleDomain), 1)
 	if err := os.WriteFile(fx.store.Path(), []byte(multi), 0o660); err != nil {
 		t.Fatal(err)
-	}
-	before := getIngressModules(t, fx)
-	body, _ := json.Marshal(map[string]any{"enabled": true, "revision": before.Revision})
-	rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/ingress-modules/"+speedtestModuleID, body, fx.token, true)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("enable status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	text, err := fx.store.Read()
 	if err != nil {
@@ -180,7 +184,7 @@ func TestMihomoIngressModules_RejectsStaleRevisionWithoutSideEffects(t *testing.
 	if err := os.WriteFile(fx.store.Path(), []byte(newText), 0o660); err != nil {
 		t.Fatal(err)
 	}
-	body, _ := json.Marshal(map[string]any{"enabled": true, "revision": before.Revision})
+	body, _ := json.Marshal(map[string]any{"enabled": false, "revision": before.Revision})
 	rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/ingress-modules/"+speedtestModuleID, body, fx.token, true)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("stale revision status=%d body=%s", rec.Code, rec.Body.String())
@@ -235,7 +239,7 @@ func TestMihomoIngressModules_DetectsExternalEditDuringValidation(t *testing.T) 
 			t.Errorf("external edit: %v", err)
 		}
 	}
-	body, _ := json.Marshal(map[string]any{"enabled": true, "revision": before.Revision})
+	body, _ := json.Marshal(map[string]any{"enabled": false, "revision": before.Revision})
 	rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/ingress-modules/"+speedtestModuleID, body, fx.token, true)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status=%d want 409 body=%s", rec.Code, rec.Body.String())
@@ -265,7 +269,7 @@ func TestMihomoIngressModules_PartialCustomAndAliasAreUnmanageable(t *testing.T)
 		{
 			name: "partial sniffer port",
 			edit: func(text string) string {
-				return strings.Replace(text, "HTTP: { ports: [80, 8080, 8443] }", "HTTP: { ports: [80, 8080, 8443, 5060] }", 1)
+				return strings.Replace(text, "HTTP: { ports: [80, 8080, 8443, 5060] }", "HTTP: { ports: [80, 8080, 8443] }", 1)
 			},
 		},
 		{
@@ -284,7 +288,7 @@ func TestMihomoIngressModules_PartialCustomAndAliasAreUnmanageable(t *testing.T)
 		{
 			name: "sniff port range",
 			edit: func(text string) string {
-				return strings.Replace(text, "TLS:  { ports: [443, 8080, 8443] }", `TLS:  { ports: [443, 8080, 8443, "5000-6000"] }`, 1)
+				return strings.Replace(text, "TLS:  { ports: [443, 8080, 8443, 5060] }", `TLS:  { ports: [443, 8080, 8443, 5060, "5000-6000"] }`, 1)
 			},
 		},
 	}
@@ -446,18 +450,18 @@ func TestMihomoIngressModules_RequiresCanonicalSnifferBooleans(t *testing.T) {
 	}{
 		{
 			protocol: "HTTP",
-			before:   "HTTP: { ports: [80, 8080, 8443] }",
-			after:    "HTTP: { ports: [80, 8080, 8443], override-destination: false }",
+			before:   "HTTP: { ports: [80, 8080, 8443, 5060] }",
+			after:    "HTTP: { ports: [80, 8080, 8443, 5060], override-destination: false }",
 		},
 		{
 			protocol: "TLS",
-			before:   "TLS:  { ports: [443, 8080, 8443] }",
-			after:    "TLS:  { ports: [443, 8080, 8443], override-destination: false }",
+			before:   "TLS:  { ports: [443, 8080, 8443, 5060] }",
+			after:    "TLS:  { ports: [443, 8080, 8443, 5060], override-destination: false }",
 		},
 		{
 			protocol: "QUIC",
-			before:   "QUIC: { ports: [443] }",
-			after:    "QUIC: { ports: [443], override-destination: false }",
+			before:   "QUIC: { ports: [443, 5060] }",
+			after:    "QUIC: { ports: [443, 5060], override-destination: false }",
 		},
 	} {
 		t.Run(tc.protocol+" override-destination", func(t *testing.T) {
@@ -494,7 +498,7 @@ func TestMihomoIngressModules_HotApplyFailureRollsBackDiskAndController(t *testi
 	ctl := &rollbackTestController{}
 	fx.cs.SetMihomoConfig(fx.store, fx.infra, fx.tester, ctl)
 	before := getIngressModules(t, fx)
-	body, _ := json.Marshal(map[string]any{"enabled": true, "revision": before.Revision})
+	body, _ := json.Marshal(map[string]any{"enabled": false, "revision": before.Revision})
 	rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/ingress-modules/"+speedtestModuleID, body, fx.token, true)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("hot-apply failure status=%d body=%s", rec.Code, rec.Body.String())
@@ -539,7 +543,7 @@ func TestMihomoIngressModules_ValidationFailureLeavesLiveConfigUntouched(t *test
 	fx := newMihomoConfigTestFixture(t)
 	fx.tester.err = errors.New("mihomo -t rejected candidate")
 	before := getIngressModules(t, fx)
-	body, _ := json.Marshal(map[string]any{"enabled": true, "revision": before.Revision})
+	body, _ := json.Marshal(map[string]any{"enabled": false, "revision": before.Revision})
 	rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/ingress-modules/"+speedtestModuleID, body, fx.token, true)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("validation failure status=%d body=%s", rec.Code, rec.Body.String())

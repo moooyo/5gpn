@@ -246,19 +246,22 @@ listeners="$(render_mihomo_listeners '10.20.30.40,10.20.30.41' 'console.example.
 [[ "$(grep -Fc 'port: 443,' <<<"$listeners")" == 2 \
    && "$(grep -Fc 'port: 80,' <<<"$listeners")" == 2 \
    && "$(grep -Fc 'port: 8080,' <<<"$listeners")" == 2 \
-   && "$(grep -Fc 'port: 8443,' <<<"$listeners")" == 2 ]] \
-    && pass "two bind IPs render independent :80/:443/:8080/:8443 listener sets" \
-    || fail "dynamic listener renderer did not emit four listeners per bind IP"
+   && "$(grep -Fc 'port: 8443,' <<<"$listeners")" == 2 \
+   && "$(grep -Fc 'port: 5060,' <<<"$listeners")" == 2 ]] \
+    && pass "two bind IPs render independent :80/:443/:5060/:8080/:8443 listener sets" \
+    || fail "dynamic listener renderer did not emit five listeners per bind IP"
 [[ "$listeners" == *'name: gateway,'* && "$listeners" == *'name: gateway-2,'* \
    && "$listeners" == *'name: gateway80,'* && "$listeners" == *'name: gateway80-2,'* \
    && "$listeners" == *'name: gateway8080,'* && "$listeners" == *'name: gateway8080-2,'* \
-   && "$listeners" == *'name: gateway8443,'* && "$listeners" == *'name: gateway8443-2,'* ]] \
+   && "$listeners" == *'name: gateway8443,'* && "$listeners" == *'name: gateway8443-2,'* \
+   && "$listeners" == *'name: gateway5060,'* && "$listeners" == *'name: gateway5060-2,'* ]] \
     && pass "listener names use the current gateway vocabulary" \
     || fail "dynamic listener names do not cover all seeded gateway ports"
 [[ "$(grep -Fc 'target: console.example.com:443}' <<<"$listeners")" == 2 \
    && "$(grep -Fc 'target: console.example.com:80}' <<<"$listeners")" == 2 \
    && "$(grep -Fc 'target: console.example.com:8080}' <<<"$listeners")" == 2 \
-   && "$(grep -Fc 'target: console.example.com:8443}' <<<"$listeners")" == 2 ]] \
+   && "$(grep -Fc 'target: console.example.com:8443}' <<<"$listeners")" == 2 \
+   && "$(grep -Fc 'target: console.example.com:5060}' <<<"$listeners")" == 2 ]] \
     && pass "all listener sets use same-port console hostname fallback targets" \
     || fail "dynamic listeners did not use the console hostname target"
 
@@ -288,8 +291,10 @@ config_mode="$(stat -c %a "$config" 2>/dev/null || stat -f %Lp "$config")"
     || fail "first-install mihomo config missing or not mode 0660"
 grep -Fq 'console.example.com: 127.0.0.1' "$config" \
     && grep -Fq 'DOMAIN,console.example.com,DIRECT' "$config" \
+    && grep -Fq 'name: gateway5060' "$config" \
+    && grep -Fq 'QUIC: { ports: [443, 5060] }' "$config" \
     && pass "seed contains public console mapping" \
-    || fail "seed lacks public console mapping"
+    || fail "seed lacks public console mapping or default :5060 ingress"
 printf '%s\n' '# operator edit must survive' >> "$config"
 before="$(sha256sum "$config" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$config" | awk '{print $1}')"
 render_mihomo_config >/dev/null

@@ -30,7 +30,7 @@ const TGBOT: TGBotView = { admins: [123456789], token_set: true, state: 'healthy
 const INGRESS: IngressModulesView = {
   revision: 'r1',
   modules: [
-    { id: 'speedtest-5060', port: 5060, networks: ['tcp', 'udp'], sniffers: ['http', 'tls', 'quic'], enabled: false, manageable: true },
+    { id: 'speedtest-5060', port: 5060, networks: ['tcp', 'udp'], sniffers: ['http', 'tls', 'quic'], enabled: true, manageable: true },
   ],
 }
 
@@ -73,7 +73,7 @@ beforeEach(async () => {
   vi.mocked(api.getIngressModules).mockReset().mockResolvedValue(INGRESS)
   vi.mocked(api.putIngressModule).mockReset().mockResolvedValue({
     revision: 'r2',
-    modules: [{ ...INGRESS.modules[0], enabled: true }],
+    modules: [{ ...INGRESS.modules[0], enabled: false }],
   })
 })
 
@@ -100,7 +100,7 @@ describe('SettingsPage', () => {
     expect(screen.getByDisplayValue('123456789')).toBeInTheDocument()
   })
 
-  it('keeps ingress-module toggles as a draft, then confirms and applies the current revision', async () => {
+  it('loads the default-enabled ingress module, keeps changes as a draft, then confirms disable', async () => {
     const user = userEvent.setup()
     renderSettings()
 
@@ -116,7 +116,7 @@ describe('SettingsPage', () => {
 
     const dialog = await screen.findByRole('dialog')
     await user.click(within(dialog).getByRole('button', { name: i18n.t('settings.ingressSave') }))
-    await waitFor(() => expect(api.putIngressModule).toHaveBeenCalledWith('speedtest-5060', true, 'r1'))
+    await waitFor(() => expect(api.putIngressModule).toHaveBeenCalledWith('speedtest-5060', false, 'r1'))
   })
 
   it('keeps a module unavailable for custom YAML and links to the mihomo editor', async () => {
@@ -160,7 +160,7 @@ describe('SettingsPage', () => {
 
     expect(await screen.findByTestId('ingress-ports-error')).toHaveTextContent('入口配置已被其他编辑修改')
     await waitFor(() => expect(api.getIngressModules).toHaveBeenCalledTimes(2))
-    expect(screen.getByRole('switch', { name: '切换 Speedtest 兼容' })).not.toBeChecked()
+    expect(screen.getByRole('switch', { name: '切换 Speedtest 兼容' })).toBeChecked()
   })
 
   it('refreshes module state after a hot-apply failure and rollback', async () => {
@@ -179,7 +179,7 @@ describe('SettingsPage', () => {
 
     expect(await screen.findByTestId('ingress-ports-error')).toHaveTextContent('previous config restored')
     await waitFor(() => expect(api.getIngressModules).toHaveBeenCalledTimes(2))
-    expect(screen.getByRole('switch', { name: '切换 Speedtest 兼容' })).not.toBeChecked()
+    expect(screen.getByRole('switch', { name: '切换 Speedtest 兼容' })).toBeChecked()
   })
 
   it('aborts the in-flight Telegram health poll on unmount', async () => {

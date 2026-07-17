@@ -469,12 +469,12 @@ func TestMihomoConfigAPI_StaleRawPutAfterIngressModuleUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	modules := getIngressModules(t, fx)
-	enableBody, _ := json.Marshal(map[string]any{"enabled": true, "revision": modules.Revision})
-	enabledRec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/ingress-modules/"+speedtestModuleID, enableBody, fx.token, true)
-	if enabledRec.Code != http.StatusOK {
-		t.Fatalf("enable status=%d body=%s", enabledRec.Code, enabledRec.Body.String())
+	disableBody, _ := json.Marshal(map[string]any{"enabled": false, "revision": modules.Revision})
+	updatedRec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/ingress-modules/"+speedtestModuleID, disableBody, fx.token, true)
+	if updatedRec.Code != http.StatusOK {
+		t.Fatalf("disable status=%d body=%s", updatedRec.Code, updatedRec.Body.String())
 	}
-	enabledText, err := fx.store.Read()
+	updatedText, err := fx.store.Read()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,14 +488,14 @@ func TestMihomoConfigAPI_StaleRawPutAfterIngressModuleUpdate(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &conflict); err != nil {
 		t.Fatal(err)
 	}
-	if conflict.Revision != mihomoConfigRevision(enabledText) {
-		t.Fatalf("conflict revision=%q want enabled config revision", conflict.Revision)
+	if conflict.Revision != mihomoConfigRevision(updatedText) {
+		t.Fatalf("conflict revision=%q want updated config revision", conflict.Revision)
 	}
-	if got, _ := fx.store.Read(); got != enabledText {
+	if got, _ := fx.store.Read(); got != updatedText {
 		t.Fatal("stale raw PUT overwrote ingress module update")
 	}
-	if view := analyzeSpeedtestModule(enabledText, fx.infra).View; !view.Enabled {
-		t.Fatalf("module not retained: %+v", view)
+	if view := analyzeSpeedtestModule(updatedText, fx.infra).View; view.Enabled || !view.Manageable {
+		t.Fatalf("disabled module state not retained: %+v", view)
 	}
 	if fx.tester.calls != 1 || fx.ctl.putCalls != 1 {
 		t.Fatalf("stale raw PUT reached validator/controller: %d/%d", fx.tester.calls, fx.ctl.putCalls)
@@ -511,12 +511,12 @@ func TestMihomoConfigAPI_StaleResetAfterIngressModuleUpdate(t *testing.T) {
 
 	rawRevision := mihomoConfigRevision(fx.golden)
 	modules := getIngressModules(t, fx)
-	enableBody, _ := json.Marshal(map[string]any{"enabled": true, "revision": modules.Revision})
-	enabledRec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/ingress-modules/"+speedtestModuleID, enableBody, fx.token, true)
-	if enabledRec.Code != http.StatusOK {
-		t.Fatalf("enable status=%d body=%s", enabledRec.Code, enabledRec.Body.String())
+	disableBody, _ := json.Marshal(map[string]any{"enabled": false, "revision": modules.Revision})
+	updatedRec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/ingress-modules/"+speedtestModuleID, disableBody, fx.token, true)
+	if updatedRec.Code != http.StatusOK {
+		t.Fatalf("disable status=%d body=%s", updatedRec.Code, updatedRec.Body.String())
 	}
-	enabledText, err := fx.store.Read()
+	updatedText, err := fx.store.Read()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -530,14 +530,14 @@ func TestMihomoConfigAPI_StaleResetAfterIngressModuleUpdate(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &conflict); err != nil {
 		t.Fatal(err)
 	}
-	if conflict.Revision != mihomoConfigRevision(enabledText) {
-		t.Fatalf("conflict revision=%q want enabled config revision", conflict.Revision)
+	if conflict.Revision != mihomoConfigRevision(updatedText) {
+		t.Fatalf("conflict revision=%q want updated config revision", conflict.Revision)
 	}
-	if got, _ := fx.store.Read(); got != enabledText {
+	if got, _ := fx.store.Read(); got != updatedText {
 		t.Fatal("stale reset overwrote ingress module update")
 	}
-	if view := analyzeSpeedtestModule(enabledText, fx.infra).View; !view.Enabled {
-		t.Fatalf("module not retained: %+v", view)
+	if view := analyzeSpeedtestModule(updatedText, fx.infra).View; view.Enabled || !view.Manageable {
+		t.Fatalf("disabled module state not retained: %+v", view)
 	}
 	if fx.tester.calls != 1 || fx.ctl.putCalls != 1 {
 		t.Fatalf("stale reset reached validator/controller: %d/%d", fx.tester.calls, fx.ctl.putCalls)

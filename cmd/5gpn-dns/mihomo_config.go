@@ -161,6 +161,7 @@ func renderMihomoListeners(ips []string, consoleDomain string) string {
 		fmt.Fprintf(&b, "  - {name: gateway80%s, type: tunnel, listen: %s, port: 80, network: [tcp], target: %s:80}\n", suffix, ip, consoleDomain)
 		fmt.Fprintf(&b, "  - {name: gateway8080%s, type: tunnel, listen: %s, port: 8080, network: [tcp], target: %s:8080}\n", suffix, ip, consoleDomain)
 		fmt.Fprintf(&b, "  - {name: gateway8443%s, type: tunnel, listen: %s, port: 8443, network: [tcp], target: %s:8443}\n", suffix, ip, consoleDomain)
+		fmt.Fprintf(&b, "  - {name: gateway5060%s, type: tunnel, listen: %s, port: 5060, network: [tcp, udp], target: %s:5060}\n", suffix, ip, consoleDomain)
 	}
 	return strings.TrimSuffix(b.String(), "\n")
 }
@@ -233,9 +234,9 @@ sniffer:
   override-destination: true
   force-domain: [__CONSOLE_DOMAIN__]
   sniff:
-    TLS:  { ports: [443, 8080, 8443] }
-    QUIC: { ports: [443] }
-    HTTP: { ports: [80, 8080, 8443] }
+    TLS:  { ports: [443, 8080, 8443, 5060] }
+    QUIC: { ports: [443, 5060] }
+    HTTP: { ports: [80, 8080, 8443, 5060] }
 
 dns:
   enable: true
@@ -268,6 +269,8 @@ rules:
   - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,80)),REJECT
   - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8080)),REJECT
   - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8443)),REJECT
+  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,5060)),REJECT
+  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,5060)),REJECT
   - DOMAIN,__CONSOLE_DOMAIN__,DIRECT
   - AND,((DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
   - DOMAIN,__ZASH_DOMAIN__,REJECT

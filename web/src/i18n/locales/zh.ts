@@ -164,7 +164,7 @@ const zh: typeof en = {
     aboutTitle: '5GPN 控制台',
     aboutVersion: '5gpn-dns {{version}}',
     ingressPorts: '入口端口',
-    ingressPortsHint: '按应用启用额外的 mihomo 入口。保存后会验证配置并热加载。',
+    ingressPortsHint: '管理默认启用的 Speedtest 兼容 mihomo 入口。保存后会验证配置并热加载。',
     ingressEnabled: '已启用',
     ingressDisabled: '未启用',
     ingressPendingEnable: '待启用',
@@ -188,7 +188,7 @@ const zh: typeof en = {
     ingressModules: {
       'speedtest-5060': {
         name: 'Speedtest 兼容',
-        description: '为 TCP Web/TLS 与 UDP QUIC 流量增加 :5060；Ookla 原生 UDP 仍不受支持。',
+        description: '为 TCP Web/TLS 与 UDP QUIC 流量提供 :5060；Ookla 原生 UDP 仍不受支持。',
       },
     },
   },

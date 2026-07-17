@@ -182,6 +182,7 @@ sniffer: {enable: true, override-destination: true, force-domain: [console.examp
 dns: {nameserver: ["udp://127.0.0.1:5354"]}
 hosts: {console.example.test: 127.0.0.1, zash.example.test: 127.0.0.2}
 rules: ["DOMAIN,console.example.test,DIRECT", "IP-CIDR,10.0.0.1/32,REJECT", "MATCH,DIRECT"]
+# e2e speedtest-5060 enabled
 `
 
 const INGRESS_MARKER = '# e2e speedtest-5060 enabled\n'
@@ -244,7 +245,7 @@ function json(route: Route, body: unknown, status = 200): Promise<void> {
  * boot the authed shell.
  */
 export async function setupMockApi(page: Page): Promise<void> {
-  let ingressEnabled = false
+  let ingressEnabled = true
   let mihomoText = MIHOMO_CONFIG_TEXT
   let revision = mihomoRevision(mihomoText)
 
@@ -317,7 +318,7 @@ export async function setupMockApi(page: Page): Promise<void> {
     if (path === '/api/mihomo/config/reset' && method === 'POST') {
       const body = route.request().postDataJSON() as { revision?: unknown }
       if (body.revision !== revision) return json(route, { error: 'mihomo config revision changed', revision }, 409)
-      ingressEnabled = false
+      ingressEnabled = true
       replaceMihomoText(MIHOMO_CONFIG_TEXT)
       return json(route, currentMihomoConfig())
     }

@@ -51,7 +51,7 @@ export const mihomoConfig: T.MihomoConfig = {
   controller_authenticated: true,
 }
 
-// ---- optional ingress modules --------------------------------------------
+// ---- ingress modules -----------------------------------------------------
 export const ingressModules: T.IngressModulesView = {
   revision: '0000000000000000000000000000000000000000000000000000000000000001',
   modules: [
@@ -60,7 +60,7 @@ export const ingressModules: T.IngressModulesView = {
       port: 5060,
       networks: ['tcp', 'udp'],
       sniffers: ['http', 'tls', 'quic'],
-      enabled: false,
+      enabled: true,
       manageable: true,
     },
   ],

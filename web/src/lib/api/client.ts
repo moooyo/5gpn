@@ -52,7 +52,7 @@ export const api = {
     MOCK
       ? mock.resetMihomoConfig(revision)
       : apiFetch<T.MihomoConfig>('/api/mihomo/config/reset', { method: 'POST', body: JSON.stringify({ revision }) }),
-  // Built-in optional ingress modules. The service owns the candidate
+  // Built-in ingress modules. The service owns the candidate
   // validation and atomic config publication. Raw editor/reset and module
   // writes all carry the same byte revision so neither surface can silently
   // replace a newer edit from the other.

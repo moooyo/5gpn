@@ -182,7 +182,7 @@ const en = {
     aboutTitle: '5GPN Console',
     aboutVersion: '5gpn-dns {{version}}',
     ingressPorts: 'Ingress ports',
-    ingressPortsHint: 'Enable additional mihomo ingress by application. Saving validates and hot-reloads the configuration.',
+    ingressPortsHint: 'Manage the default Speedtest-compatible mihomo ingress. Saving validates and hot-reloads the configuration.',
     ingressEnabled: 'Enabled',
     ingressDisabled: 'Disabled',
     ingressPendingEnable: 'Pending enable',
@@ -206,7 +206,7 @@ const en = {
     ingressModules: {
       'speedtest-5060': {
         name: 'Speedtest compatibility',
-        description: 'Adds :5060 for TCP Web/TLS and UDP QUIC traffic. Ookla native UDP remains unsupported.',
+        description: 'Provides :5060 for TCP Web/TLS and UDP QUIC traffic. Ookla native UDP remains unsupported.',
       },
     },
   },

@@ -79,28 +79,28 @@ test('turning the Telegram bot toggle off disables it (mock accepts) and shows a
   await expect(page.getByText('已应用 Telegram 机器人配置。')).toBeVisible()
 })
 
-test('the Speedtest ingress module stays a draft until confirmation, then applies TCP and UDP together', async ({ page }) => {
+test('the default-enabled Speedtest ingress module stays a draft until disable confirmation', async ({ page }) => {
   await setupMockApiWithToken(page)
   await page.goto('/settings')
   await page.waitForLoadState('networkidle')
 
   const card = page.getByTestId('ingress-ports-card')
   const toggle = card.getByRole('switch', { name: '切换 Speedtest 兼容' })
-  await expect(toggle).not.toBeChecked()
-  await toggle.click()
   await expect(toggle).toBeChecked()
+  await toggle.click()
+  await expect(toggle).not.toBeChecked()
 
   const requestPromise = page.waitForRequest((request) =>
     request.url().endsWith('/api/mihomo/ingress-modules/speedtest-5060') && request.method() === 'PUT',
   )
   await card.getByTestId('ingress-ports-save').click()
-  const dialog = page.getByRole('dialog', { name: '启用入口端口？' })
-  await expect(dialog.getByText(/云安全组/)).toBeVisible()
+  const dialog = page.getByRole('dialog', { name: '停用入口端口？' })
+  await expect(dialog.getByText(/连接可能中断/)).toBeVisible()
   await dialog.getByRole('button', { name: '保存并应用' }).click()
 
   const request = await requestPromise
   const body = request.postDataJSON() as { enabled?: unknown; revision?: unknown }
-  expect(body.enabled).toBe(true)
+  expect(body.enabled).toBe(false)
   expect(body.revision).toMatch(/^[0-9a-f]{64}$/)
   await expect(page.getByText('已应用入口端口配置。')).toBeVisible()
 })

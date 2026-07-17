@@ -25,7 +25,7 @@ client
   |                         |
   | real origin address     | gateway address
   v                         v
-client direct          mihomo :80/:443/:8080/:8443 -- operator-defined application egress
+client direct          mihomo :80/:443/:5060/:8080/:8443 -- operator-defined application egress
 ```
 
 This is not a host router or VPN. The project does not install or manage TUN,
@@ -42,35 +42,36 @@ architecture.
 | `5gpn-dns` | `127.0.0.1:5354/udp` and `/tcp` | Egress DNS broker used by mihomo after hostname sniffing. |
 | `5gpn-dns` | `127.0.0.1:443/tcp` | Public HTTPS console assets and iOS profile download, plus the bearer-authenticated API. |
 | `5gpn-dns` | `127.0.0.2:443/tcp` | HTTPS zashboard static files and its controller proxy. |
-| mihomo | configured local IPv4 addresses on TCP `:80`, `:443`, `:8080`, and `:8443`, plus UDP `:443` | HTTP/TLS/QUIC ingress for traffic steered to the gateway. |
+| mihomo | configured local IPv4 addresses on TCP `:80`, `:443`, `:5060`, `:8080`, and `:8443`, plus UDP `:443` and `:5060` | HTTP/TLS/QUIC ingress for traffic steered to the gateway. |
 | mihomo | `127.0.0.1:9090/tcp` | TLS-only external controller. |
 
 There is no public DoH listener and no client-facing plain DNS listener on
 `:53`. Those transports must not be reintroduced. The debug DNS and egress
 broker addresses must reject non-loopback or non-IPv4 configuration.
 
-The initial seed's alternate Web ingress is finite and explicit. TCP `:8080`
-and `:8443` are accepted only so the HTTP and TLS sniffers can replace the
-synthetic gateway destination with the visible Host or SNI while retaining the
-same destination port. They do not provide arbitrary-port interception, raw
-UDP forwarding, or routing when no usable hostname is visible. QUIC remains
-limited to UDP `:443`. Port-scoped rejects prevent the public console and
-zashboard hostnames from exposing unrelated loopback services on `:80`,
-`:8080`, or `:8443`.
+The initial seed's alternate ingress is finite and explicit. TCP `:8080` and
+`:8443` are accepted so the HTTP and TLS sniffers can replace the synthetic
+gateway destination with the visible Host or SNI while retaining the same
+destination port. The default-enabled `speedtest-5060` module adds TCP and UDP
+`:5060`; UDP forwarding there still requires recognizable QUIC with visible
+SNI. These listeners do not provide arbitrary-port interception, generic raw
+UDP forwarding, or routing when no usable hostname is visible. Port-scoped
+rejects prevent the public console and zashboard hostnames from exposing
+unrelated loopback services on `:80`, `:5060`, `:8080`, or `:8443`.
 
-The authenticated console exposes a finite ingress-module catalog for optional
-ports. Modules are disabled unless their exact listener and sniffer shape is
-already present in the operator configuration. The first module is
-`speedtest-5060`: an explicit opt-in that adds TCP and UDP `:5060` on every
-canonical gateway listener address, targets `console.<base>:5060`, and enables
-HTTP, TLS, and QUIC sniffing on that port. The exact console name remains in
-`sniffer.force-domain`, so malformed traffic cannot poison the failure-cache
-keys used by the default ingress ports. TCP forwarding still requires a visible
-HTTP Host or TLS SNI. UDP forwarding still requires recognizable QUIC with a
-visible SNI; Ookla's native UDP protocol, SIP, and other raw UDP cannot recover
-the original server after DNS steering and therefore fail closed.
+The authenticated console exposes a finite ingress-module catalog. Module state
+is derived from the complete operator-owned YAML, not from a separate state
+file. The first module is `speedtest-5060`, enabled in every fresh or explicitly
+reset seed. It adds TCP and UDP `:5060` on every canonical gateway listener
+address, targets `console.<base>:5060`, and enables HTTP, TLS, and QUIC sniffing
+on that port. The exact console name remains in `sniffer.force-domain`, so
+malformed traffic cannot poison the failure-cache keys used by the other
+default ingress ports. TCP forwarding still requires a visible HTTP Host or TLS
+SNI. UDP forwarding still requires recognizable QUIC with a visible SNI;
+Ookla's native UDP protocol, SIP, and other raw UDP cannot recover the original
+server after DNS steering and therefore fail closed.
 
-The rule boundary is exact: eight panel protocol/port rejects, the optional two
+The rule boundary is exact: eight base panel protocol/port rejects, the two
 `:5060` panel rejects, the console and allowlisted zashboard routes, the
 zashboard deny-by-default rule, seven anti-loop destination guards, and the
 terminal `MATCH`. The anti-loop guards must follow the panel routes because
@@ -80,14 +81,16 @@ fallback as loopback traffic. The module is manageable only with this boundary
 and its exact listener/sniffer shape. Its two port-scoped rejects prevent
 `:5060` from exposing either loopback panel. Repeated un-sniffable scans can
 temporarily suppress sniffing on the isolated `console.<base>:5060` cache key,
-but cannot suppress sniffing on `:443`, `:80`, `:8080`, or `:8443`. This is
-another reason the module is opt-in and should be source-restricted.
+but cannot suppress sniffing on `:443`, `:80`, `:8080`, or `:8443`. The default
+`:5060` listener must therefore be source-restricted when broad public exposure
+is not intended.
 
-Enabling an ingress module creates an unauthenticated public Host/SNI relay on
+An enabled ingress module creates an unauthenticated public Host/SNI relay on
 the selected port. 5gpn does not manage a host firewall, so the operator must
 restrict source access with the provider security group or an independently
-managed firewall. A module is never enabled automatically during install,
-reinstall, configure, daemon startup, or reload.
+managed firewall. Fresh install and explicit reset publish `speedtest-5060`
+enabled. Reinstall, configure, daemon startup, and reload preserve the current
+operator-owned YAML and never reconcile or enable a missing module implicitly.
 
 The `5gpn-dns` systemd unit is softly ordered after mihomo (`Wants`/`After`),
 not coupled with `Requires` or `BindsTo`: a controller or data-plane failure
@@ -176,8 +179,8 @@ DNS-steered HTTP traffic; it is not an ACME-only socket. The seed rejects
 `DIRECT` rule, because the console contract is HTTPS-only and no loopback
 HTTP backend exists.
 
-New seed listeners use the same-port `console.<base>:443`, `:80`, `:8080`, and
-`:8443` hostname targets, and the optional module uses `console.<base>:5060`.
+New seed listeners use the same-port `console.<base>:443`, `:80`, `:5060`,
+`:8080`, and `:8443` hostname targets.
 The exact console name in `sniffer.force-domain` is the other half of this
 invariant: forced sniffing replaces the provisional name with a successfully
 discovered TLS, HTTP, or QUIC hostname. A failed TCP 443 sniff safely falls back

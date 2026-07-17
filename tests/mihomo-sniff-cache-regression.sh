@@ -83,8 +83,8 @@ awk -v cert="$RUNTIME/cert.pem" -v key="$RUNTIME/key.pem" -v listener="$GATEWAY_
     gsub(/127.0.0.1:9090/, "127.0.0.1:19090")
     gsub(/\/etc\/5gpn\/cert\/zash\/current\/fullchain.pem/, cert)
     gsub(/\/etc\/5gpn\/cert\/zash\/current\/privkey.pem/, key)
-	if ($0 ~ /TLS:.*ports: \[443, 8080, 8443\]/) {
-	  gsub(/ports: \[443, 8080, 8443\]/, "ports: [18443, 8080, 8443]")
+	if ($0 ~ /TLS:.*ports: \[443, 8080, 8443, 5060\]/) {
+	  gsub(/ports: \[443, 8080, 8443, 5060\]/, "ports: [18443, 8080, 8443, 5060]")
 	}
     print
   }

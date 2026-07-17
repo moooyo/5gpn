@@ -33,22 +33,26 @@ check install.sh 'name: gateway%s'                       'current gateway listen
 check install.sh 'name: gateway80%s'                     'current gateway HTTP listener name'
 check install.sh 'name: gateway8080%s'                   'alternate HTTP listener name'
 check install.sh 'name: gateway8443%s'                   'alternate HTTPS listener name'
+check install.sh 'name: gateway5060%s'                   'default Speedtest listener name'
 check install.sh 'type: tunnel.*port: 443.*network: \[tcp, udp\]' ':443 tcp+udp listener renderer'
 check install.sh 'target: %s:443'                       'listener renderer hostname target'
 check install.sh 'port: 8080.*network: \[tcp\].*target: %s:8080' ':8080 TCP hostname target renderer'
 check install.sh 'port: 8443.*network: \[tcp\].*target: %s:8443' ':8443 TCP hostname target renderer'
+check install.sh 'port: 5060.*network: \[tcp, udp\].*target: %s:5060' ':5060 TCP/UDP hostname target renderer'
 check install.sh 'render_mihomo_listeners "\$MIHOMO_LISTEN_IPS" "\$CONSOLE_DOMAIN"' 'renderer receives the console hostname'
 nocheck "$T" 'proxy:'                                  'NO proxy field on listeners (would bypass rules)'
 check "$T" 'parse-pure-ip: true'                       'sniffer parse-pure-ip'
 check "$T" 'override-destination: true'                'sniffer override-destination'
 check "$T" 'force-domain: \[__CONSOLE_DOMAIN__\]'     'console fallback always forces hostname sniffing'
-check "$T" 'TLS:  \{ ports: \[443, 8080, 8443\] \}'   'TLS sniffer covers standard and alternate ports'
-check "$T" 'HTTP: \{ ports: \[80, 8080, 8443\] \}'    'HTTP sniffer covers standard and alternate ports'
-check "$T" 'QUIC: \{ ports: \[443\] \}'               'QUIC remains limited to UDP :443'
+check "$T" 'TLS:  \{ ports: \[443, 8080, 8443, 5060\] \}'   'TLS sniffer covers default ingress ports'
+check "$T" 'HTTP: \{ ports: \[80, 8080, 8443, 5060\] \}'    'HTTP sniffer covers default ingress ports'
+check "$T" 'QUIC: \{ ports: \[443, 5060\] \}'               'QUIC sniffer covers default UDP ingress ports'
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,8080.*REJECT' 'console cannot expose loopback :8080'
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,8443.*REJECT' 'console cannot expose loopback :8443'
 check "$T" 'DOMAIN,__ZASH_DOMAIN__.*DST-PORT,8080.*REJECT' 'zash cannot expose loopback :8080'
 check "$T" 'DOMAIN,__ZASH_DOMAIN__.*DST-PORT,8443.*REJECT' 'zash cannot expose loopback :8443'
+check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,5060.*REJECT' 'console cannot expose loopback :5060'
+check "$T" 'DOMAIN,__ZASH_DOMAIN__.*DST-PORT,5060.*REJECT' 'zash cannot expose loopback :5060'
 check "$T" 'rule-providers:'                           'rule-providers block'
 check "$T" 'whitelist:'                                'whitelist rule-provider'
 check "$T" 'behavior: ipcidr'                          'whitelist ipcidr behavior'
@@ -72,7 +76,9 @@ for rule in \
     'AND,((DOMAIN,__ZASH_DOMAIN__),(NETWORK,UDP)),REJECT' \
     'AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,80)),REJECT' \
     'AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8080)),REJECT' \
-    'AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8443)),REJECT'; do
+    'AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8443)),REJECT' \
+    'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,5060)),REJECT' \
+    'AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,5060)),REJECT'; do
     reject_line="$(grep -nF "  - $rule" "$root/$T" | cut -d: -f1 || true)"
     route_line="$zash_direct_line"
     [[ "$rule" == *'__CONSOLE_DOMAIN__'* ]] && route_line="$console_direct_line"
