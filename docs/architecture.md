@@ -65,9 +65,11 @@ file. The first module is `speedtest-5060`, enabled in every fresh or explicitly
 reset seed. It adds TCP and UDP `:5060` on every canonical gateway listener
 address, targets `console.<base>:5060`, and enables HTTP, TLS, and QUIC sniffing
 on that port. The exact console name remains in `sniffer.force-domain`, so
-malformed traffic cannot poison the failure-cache keys used by the other
-default ingress ports. TCP forwarding still requires a visible HTTP Host or TLS
-SNI. UDP forwarding still requires recognizable QUIC with a visible SNI;
+Mihomo bypasses its TCP sniff-failure skip cache for these forced attempts.
+Malformed traffic therefore cannot suppress later valid sniffing on `:5060` or
+poison the cache keys used by the other default ingress ports. TCP forwarding
+still requires a visible HTTP Host or TLS SNI. UDP forwarding still requires
+recognizable QUIC with a visible SNI;
 Ookla's native UDP protocol, SIP, and other raw UDP cannot recover the original
 server after DNS steering and therefore fail closed.
 
@@ -79,11 +81,12 @@ mihomo resolves the synthetic console target through `hosts` before matching
 rules; moving those guards earlier would reject the legitimate console
 fallback as loopback traffic. The module is manageable only with this boundary
 and its exact listener/sniffer shape. Its two port-scoped rejects prevent
-`:5060` from exposing either loopback panel. Repeated un-sniffable scans can
-temporarily suppress sniffing on the isolated `console.<base>:5060` cache key,
-but cannot suppress sniffing on `:443`, `:80`, `:8080`, or `:8443`. The default
-`:5060` listener must therefore be source-restricted when broad public exposure
-is not intended.
+`:5060` from exposing either loopback panel. Forced sniffing deliberately keeps
+trying after malformed traffic instead of activating Mihomo's 600-second
+failure-cache skip. Repeated slow, silent, or un-sniffable TCP connections can
+still consume connection and sniffing resources, however. The default `:5060`
+listener must therefore be source-restricted when broad public exposure is not
+intended.
 
 An enabled ingress module creates an unauthenticated public Host/SNI relay on
 the selected port. 5gpn does not manage a host firewall, so the operator must
