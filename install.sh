@@ -71,6 +71,7 @@ CERT_DNS_RESOLVER="1.1.1.1"              # fixed independent resolver for ACME A
 CERT_DNS_WAIT_TIMEOUT=600                 # bounded install/configure propagation wait
 CERT_DNS_WAIT_INTERVAL=10
 CERT_RENEW_LOCK_FILE="/run/5gpn/cert-renew.lock"
+CERT_REUSE_MIN_SECONDS=0                  # every currently valid matching certificate is reusable
 LE_PRODUCTION_SERVER="https://acme-v02.api.letsencrypt.org/directory"
 INSTALL_CERT_LOCK_HELD=0
 DECOMMISSION_PRESERVE_ACME=0
@@ -1945,7 +1946,16 @@ validate_cert_pair() {
     [[ "$trust" == debug ]] && mode=debug
     openssl x509 -checkend "$seconds" -noout -in "$cert" >/dev/null 2>&1 || return 1
     cert_identity_matches_mode "$cert" "$key" "$base" "$mode" || return 1
-    [[ "$trust" != production ]] || cert_chain_trusted "$cert"
+    if [[ "$trust" == production ]]; then
+        # Chain verification also enforces NotBefore/NotAfter at the current
+        # time, complementing checkend's forward-expiry threshold.
+        cert_chain_trusted "$cert"
+    else
+        # Debug leaves are self-signed. Trusting only this exact leaf lets
+        # OpenSSL verify its signature and full current validity window without
+        # allowing it into the production trust path.
+        openssl verify -purpose sslserver -CAfile "$cert" "$cert" >/dev/null 2>&1
+    fi
 }
 
 cert_provenance_get() {
@@ -2156,17 +2166,21 @@ install_cert() {
     local base="${1:?install_cert needs a base domain}"
     local mode="$CERT_MODE"
     local live="${LE_LIVE_ROOT}/${base}"
-    local lineage_origin="" lineage_preexisting=0 lineage_was_owned=0
+    local lineage_origin="" lineage_preexisting=0 lineage_was_owned=0 live_cert_valid=0
     local force=0 cf_token_ready=0
     certbot_lineage_owned_by_5gpn "$base" && lineage_was_owned=1
 
     if [ "$mode" = "debug" ]; then
-        local debug_src="${DEBUG_CERT_DIR}/${base}"
-        if cert_provenance_matches debug "$base" \
-           && validate_cert_pair "${debug_src}/fullchain.pem" "${debug_src}/privkey.pem" \
-                "$base" "$((30*86400))" debug \
+        local debug_src="${DEBUG_CERT_DIR}/${base}" debug_cert_valid=0
+        if validate_cert_pair "${debug_src}/fullchain.pem" "${debug_src}/privkey.pem" \
+                "$base" "$CERT_REUSE_MIN_SECONDS" debug \
            && { [[ -z "$GATEWAY_IP" ]] || openssl x509 -checkip "$GATEWAY_IP" -noout -in "${debug_src}/fullchain.pem" >/dev/null 2>&1; } \
            && { [[ -z "$PUBLIC_IP" ]] || openssl x509 -checkip "$PUBLIC_IP" -noout -in "${debug_src}/fullchain.pem" >/dev/null 2>&1; }; then
+            debug_cert_valid=1
+        fi
+        if [[ "$debug_cert_valid" == 1 ]]; then
+            { [[ ! -e "$DNS_CERT_DIR/.provenance" ]] || cert_provenance_matches debug "$base"; } \
+                || { err "A valid debug certificate exists for ${base}, but its 5gpn provenance conflicts; refusing automatic replacement."; return 1; }
             info "Reusing valid matching debug certificate for *.${base}."
         else
             issue_selfsigned_wildcard "$base" || return 1
@@ -2181,16 +2195,23 @@ install_cert() {
     [[ "$mode" == cloudflare || "$mode" == http-01 ]] \
         || { err "CERT_MODE must be cloudflare, http-01, or debug."; return 1; }
 
-    # Reuse is mode-aware. The SAN shape distinguishes wildcard DNS-01 from
-    # exact-name HTTP-01; renewal.conf and provenance prevent a mode switch
-    # from silently retaining the previous authenticator.
-    if validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
-            "$base" "$((30*86400))" production "$mode" \
-       && certbot_renewal_mode_matches "$base" "$mode" \
-       && { [[ ! -e "$DNS_CERT_DIR/.provenance" ]] || cert_provenance_matches "$mode" "$base"; }; then
+    # Reuse is mode-aware. Every currently valid matching certificate is kept,
+    # regardless of how little lifetime remains. The renewal timer, not an
+    # install or configure run, owns proactive rotation. The SAN shape
+    # distinguishes wildcard DNS-01 from exact-name HTTP-01; renewal.conf and
+    # provenance prevent a mode switch from silently retaining the previous
+    # authenticator.
+    validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
+        "$base" "$CERT_REUSE_MIN_SECONDS" production "$mode" \
+        && live_cert_valid=1
+    if [[ "$live_cert_valid" == 1 ]]; then
+        certbot_renewal_mode_matches "$base" "$mode" \
+            || { err "A valid ${mode} certificate exists for ${base}, but its renewal configuration is unsafe or mode-mismatched; refusing automatic replacement."; return 1; }
+        { [[ ! -e "$DNS_CERT_DIR/.provenance" ]] || cert_provenance_matches "$mode" "$base"; } \
+            || { err "A valid ${mode} certificate exists for ${base}, but its 5gpn provenance is mode-mismatched; refusing automatic replacement."; return 1; }
         lineage_origin=reused
         [[ "$lineage_was_owned" == 1 ]] && lineage_origin=owned
-        info "Valid ${mode} certificate and matching renewal authenticator for ${base} (>30d); reusing."
+        info "Valid unexpired ${mode} certificate and matching renewal authenticator for ${base}; reusing."
     else
         if [[ ! -e "$live" ]] && compgen -G "${LE_LIVE_ROOT}/${base}-[0-9][0-9][0-9][0-9]" >/dev/null; then
             err "A duplicate Certbot lineage exists for ${base}, but the canonical ${live} lineage is absent."
@@ -2201,9 +2222,10 @@ install_cert() {
         # entirely absent, a matching trusted role copy may recover service
         # without consuming a new issuance. Renewal stays disabled until repair.
         if ! certbot_lineage_artifacts_exist "$base" \
-           && cert_provenance_matches "$mode" "$base" \
            && validate_cert_pair "${DOT_CERT_DIR}/fullchain.pem" "${DOT_CERT_DIR}/privkey.pem" \
-                "$base" "$((30*86400))" production "$mode"; then
+                "$base" "$CERT_REUSE_MIN_SECONDS" production "$mode"; then
+            { [[ ! -e "$DNS_CERT_DIR/.provenance" ]] || cert_provenance_matches "$mode" "$base"; } \
+                || { err "A valid preserved ${mode} role certificate exists for ${base}, but its 5gpn provenance conflicts; refusing automatic replacement."; return 1; }
             info "Certbot lineage is missing; reusing the validated preserved ${mode} role certificate for ${base}."
             deploy_cert_roles "$base" "$DOT_CERT_DIR" "$mode" || return 1
             write_cert_provenance "$mode" "$base" missing || return 1
@@ -2247,7 +2269,8 @@ install_cert() {
         fi
     fi
 
-    validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" "$base" 86400 production "$mode" \
+    validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
+        "$base" "$CERT_REUSE_MIN_SECONDS" production "$mode" \
         || { err "Issued/reused production certificate failed trust, SAN, expiry, or key validation."; return 1; }
     certbot_renewal_mode_matches "$base" "$mode" \
         || { err "Certbot renewal config is unscoped, mode-mismatched, or contains persistent hooks."; return 1; }
@@ -2332,9 +2355,10 @@ deploy_cert_roles() {
 }
 
 # install_renewal_automation installs a daily systemd timer running the single
-# mode-aware renewal helper. It checks the exact cert-name and due window;
-# Cloudflare renews without interruption, while HTTP-01 first validates DNS via
-# 1.1.1.1 and safely releases/restores mihomo's TCP :80 listeners.
+# mode-aware renewal helper. It checks the exact cert-name and three-day due
+# window. Cloudflare needs no ACME listener handoff; HTTP-01 first validates DNS
+# via 1.1.1.1 and safely releases/restores mihomo's TCP :80 listeners. A
+# successful deploy then restarts both runtime services for either mode.
 install_renewal_automation() {
     local service_tmp timer_tmp
     preflight_renewal_unit_ownership || return 1
@@ -2610,9 +2634,8 @@ DNS_LISTEN_DEBUG=127.0.0.1:5353
 #   dot/  serves DoT :853 (also signs the iOS profile)
 #   web/  serves the web console (loopback :443, behind the mihomo SNI split)
 #   zash/ serves the zashboard panel
-# All hot-reload on file-mtime change; pinned mihomo v1.19.28 guarantees that
-# mihomo reloads the controller certificate files automatically, and
-# renew-hook.sh redeploys on renewal.
+# renew-hook.sh redeploys all role copies and restarts mihomo plus 5gpn-dns
+# after a successful renewal so every listener activates the new certificate.
 DNS_CERT=${DOT_CERT_DIR}/fullchain.pem
 DNS_KEY=${DOT_CERT_DIR}/privkey.pem
 DNS_WEB_CERT=${WEB_CERT_DIR}/fullchain.pem

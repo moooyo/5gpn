@@ -199,6 +199,18 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
 - [ ] Both production modes use only the canonical
   `/etc/letsencrypt/live/<base>` lineage with Certbot name `<base>`; no numbered
   duplicate or unscoped host lineage is issued or renewed.
+- [ ] First install, reinstall, and `configure` reuse a currently valid,
+  mode-matching certificate even when fewer than 30 days remain. They issue
+  only for missing, expired, identity/key/trust-invalid, or mode-mismatched
+  material; the installer itself never rotates a valid certificate merely
+  because it is close to expiry.
+- [ ] Give a currently valid, mode-matching lineage unsafe or mode-mismatched
+  renewal metadata/provenance. Install and `configure` fail closed without
+  invoking Certbot or replacing the certificate.
+- [ ] With no provenance, a fully valid matching debug source at the exact
+  debug path, or a fully valid matching preserved role copy when the canonical
+  lineage is absent, is adopted and reused without signing. Conflicting
+  provenance fails closed instead.
 - [ ] In `cloudflare` mode, the certificate has the exact apex `<base>` and
   `*.<base>` SAN shape. Initial issuance and a due timer renewal use Cloudflare
   DNS-01 without stopping mihomo or binding an ACME `:80` listener; a synthetic
@@ -216,19 +228,27 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
 - [ ] HTTP-01 initial issuance briefly stops mihomo, serves the standalone ACME
   challenge on TCP `:80`, and restores mihomo afterward. A forced challenge
   failure also restores a previously active mihomo service.
-- [ ] A scheduled check while the certificate is not due leaves mihomo running.
+- [ ] Any certificate issued or replaced by install/configure is deployed
+  without a mid-transaction directory hook; the final service phase restarts
+  `mihomo.service` followed by `5gpn-dns.service` before readiness succeeds.
+- [ ] A scheduled check with more than three days remaining leaves both runtime
+  services running and does not invoke Certbot. At three days or less, a due
+  certificate enters the scoped renewal path.
   A due HTTP-01 renewal repeats the `1.1.1.1` DNS gate and the same bounded
-  stop-and-restore window; a due Cloudflare renewal remains interruption-free.
+  stop-and-restore window; Cloudflare renewal does not release TCP `:80`.
+- [ ] Enabling/reinstalling the persistent timer, including an immediate
+  systemd catch-up run, never adds `--force-renewal` and obeys the same
+  three-day gate.
 - [ ] The systemd timer and the Telegram bot's confirmed renewal action invoke
   the same mode-aware scoped helper. Their result and journal output agree for
   not-due, success, DNS-gate failure, Certbot failure, and mihomo-restore failure.
 - [ ] A successful production renewal runs the deploy hook, updates all three
-  role copies, and regenerates/signs the iOS profile.
-- [ ] New TLS handshakes observe renewed files by mtime without daemon restart.
-- [ ] After Cloudflare renewal, a new Controller TLS handshake presents the
-  renewed certificate without restarting mihomo. HTTP-01 needs no additional
-  certificate-loading restart beyond restoring mihomo after its ACME `:80`
-  window.
+  role copies, regenerates/signs the iOS profile, then restarts
+  `mihomo.service` followed by `5gpn-dns.service`. A failure to restart either
+  service makes the deploy hook fail after attempting both restarts.
+- [ ] After either Cloudflare or HTTP-01 renewal, new DoT, console, zashboard,
+  and Controller TLS handshakes present the renewed certificate from the
+  restarted services.
 - [ ] A temporarily missing/broken cert is visible in status/journal; restoring
   valid files allows the TLS listeners to recover without destroying DNS state.
 

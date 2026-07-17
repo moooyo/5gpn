@@ -836,7 +836,7 @@ func confirmationPrompt(action botPrivilegedAction, expires time.Time) string {
 		impact = "转发中的新连接可能短暂中断。"
 	case botActionRenewCert:
 		label = "检查并续期 5gpn 证书"
-		impact = "仅针对当前 DNS_BASE_DOMAIN 的 certbot lineage。"
+		impact = "仅针对当前 DNS_BASE_DOMAIN 的 certbot lineage；若实际续期，将重启 mihomo 与 5gpn-dns，当前进度消息可能停留在执行中。"
 	}
 	return fmt.Sprintf(
 		"⚠️ <b>确认%s？</b>\n%s\n\n确认仅可使用一次，并将于 <code>%s</code> 过期。",

@@ -1,10 +1,11 @@
 #!/bin/bash
 # Scoped 5gpn certificate renewal entrypoint.
 #
-# Cloudflare DNS-01 renews without touching mihomo. HTTP-01 first waits until
-# every public service name resolves through 1.1.1.1 to DNS_PUBLIC_IP, then
-# briefly releases mihomo's TCP :80 listeners for Certbot's standalone server.
-# The service is restored after both successful and failed renewal attempts.
+# Cloudflare DNS-01 does not release mihomo's TCP :80 listener. HTTP-01 first
+# waits until every public service name resolves through 1.1.1.1 to
+# DNS_PUBLIC_IP, then briefly releases :80 for Certbot's standalone server.
+# Successful renewal deployment restarts both runtime services; a failed
+# HTTP-01 attempt restores a mihomo service that was active before the attempt.
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
@@ -27,7 +28,7 @@ ACME_DIR=/etc/5gpn/acme
 DNS_RESOLVER=1.1.1.1
 DNS_WAIT_TIMEOUT=600
 DNS_WAIT_INTERVAL=10
-RENEW_BEFORE_SECONDS=$((30 * 86400))
+RENEW_BEFORE_SECONDS=$((3 * 86400))
 MIHOMO_RESTORE_NEEDED=0
 RENEW_LOCK_FILE=/run/5gpn/cert-renew.lock
 
@@ -298,7 +299,7 @@ cert_renew_main() {
     cert="${LE_LIVE_ROOT}/${base}/fullchain.pem"
     if [[ -s "$cert" ]] && openssl x509 -checkend "$RENEW_BEFORE_SECONDS" -noout -in "$cert" >/dev/null 2>&1; then
         ensure_live_deployed "${LE_LIVE_ROOT}/${base}" || return 1
-        info "Cert not yet due for renewal (more than 30 days remain)."
+        info "Cert not yet due for renewal (more than 3 days remain)."
         return 0
     fi
 

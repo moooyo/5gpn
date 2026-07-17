@@ -122,7 +122,7 @@ func TestOpRenewCert(t *testing.T) {
 	}{
 		{"not yet due", true, "Cert not yet due for renewal", "尚未到期"},
 		{"no renewals attempted", true, "No renewals were attempted.", "尚未到期"},
-		{"renewed", true, "Congratulations, all renewals succeeded", "已续期"},
+		{"renewed", true, "Congratulations, all renewals succeeded", "重启 mihomo"},
 		{"failed", false, "some error", "失败"},
 	}
 	for _, c := range cases {

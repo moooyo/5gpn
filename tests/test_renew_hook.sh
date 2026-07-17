@@ -28,12 +28,14 @@ LE_LIVE_ROOT="$TMP/live"
 IOSGEN="$TMP/no-ios-generator"
 WWW_DIR="$TMP/www"
 SYSTEMCTL_LOG="$TMP/systemctl.log"
+SYSTEMCTL_FAIL_SERVICE=""
 mkdir -p "$LE_LIVE_ROOT"
 
 systemctl() {
     printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
     case "$1" in
-        is-active|reload) return 0 ;;
+        is-active) return 0 ;;
+        restart) [[ "$2" != "$SYSTEMCTL_FAIL_SERVICE" ]] ;;
         *) return 1 ;;
     esac
 }
@@ -78,7 +80,7 @@ RENEWED_LINEAGE="$LE_LIVE_ROOT/other.test"
 renew_hook_main >/dev/null
 [[ ! -e "$CERT_ROOT" ]] || fail "unrelated lineage created role files"
 [[ ! -s "$SYSTEMCTL_LOG" ]] || fail "unrelated lineage touched systemd: $(cat "$SYSTEMCTL_LOG")"
-pass "unrelated lineage is ignored without reload"
+pass "unrelated lineage is ignored without service changes"
 
 # Certbot duplicate suffixes are not accepted as aliases for the configured
 # cert-name; bot renewal and hook deployment both target the exact base name.
@@ -115,7 +117,8 @@ done
 pass "debug, aliases, and invalid production deploy-hook modes fail closed"
 
 # A valid Cloudflare apex+wildcard pair is staged in each destination and
-# published with final permissions. Reload happens only after publication.
+# published with final permissions. Both runtime services restart only after
+# publication.
 write_env cloudflare
 : > "$SYSTEMCTL_LOG"
 RENEWED_LINEAGE="$LE_LIVE_ROOT/example.test/"
@@ -130,13 +133,18 @@ for role in dot web zash; do
         console.example.test zash.example.test dot.example.test >/dev/null \
         || fail "$role certificate pair failed post-publication validation"
 done
-[[ ! -s "$SYSTEMCTL_LOG" ]] \
-    || fail "valid certificate publication incorrectly used SIGHUP/systemctl"
+grep -qx 'restart mihomo.service' "$SYSTEMCTL_LOG" \
+    || fail "valid certificate publication did not restart mihomo"
+grep -qx 'restart 5gpn-dns.service' "$SYSTEMCTL_LOG" \
+    || fail "valid certificate publication did not restart 5gpn-dns"
+[[ "$(sed -n '1p' "$SYSTEMCTL_LOG")" == 'restart mihomo.service' \
+   && "$(sed -n '2p' "$SYSTEMCTL_LOG")" == 'restart 5gpn-dns.service' ]] \
+    || fail "certificate services were not restarted in data-plane-before-DNS order"
 if find "$CERT_ROOT" -type f \( -name '.fullchain.pem.*' -o -name '.privkey.pem.*' \) \
     | grep -q .; then
     fail "staging files were left behind after successful publication"
 fi
-pass "valid Cloudflare pair is staged/published without misusing SIGHUP"
+pass "valid Cloudflare pair is staged/published before ordered service restarts"
 
 before="$(role_checksums)"
 
@@ -149,7 +157,7 @@ if renew_hook_main >/dev/null 2>&1; then
 fi
 after="$(role_checksums)"
 [[ "$before" == "$after" ]] || fail "Cloudflare SAN failure changed live role files"
-[[ ! -s "$SYSTEMCTL_LOG" ]] || fail "SAN validation failure reloaded the daemon"
+[[ ! -s "$SYSTEMCTL_LOG" ]] || fail "SAN validation failure touched a service"
 pass "Cloudflare certificate missing wildcard fails closed before publication"
 
 # Cloudflare DNS-01 also rejects DNS identities beyond the exact apex+wildcard
@@ -162,7 +170,7 @@ if renew_hook_main >/dev/null 2>&1; then
 fi
 after="$(role_checksums)"
 [[ "$before" == "$after" && ! -s "$SYSTEMCTL_LOG" ]] \
-    || fail "extra Cloudflare DNS SAN changed roles or reloaded the daemon"
+    || fail "extra Cloudflare DNS SAN changed roles or touched a service"
 pass "Cloudflare certificate with an extra DNS SAN fails before publication"
 
 # HTTP-01 uses a non-wildcard lineage containing exactly the three
@@ -177,9 +185,26 @@ for role in dot web zash; do
         http-01 example.test console.example.test zash.example.test dot.example.test >/dev/null \
         || fail "$role HTTP-01 certificate failed post-publication validation"
 done
-[[ ! -s "$SYSTEMCTL_LOG" ]] \
-    || fail "valid HTTP-01 publication incorrectly used SIGHUP/systemctl"
-pass "HTTP-01 publishes a certificate covering all three service SANs"
+grep -qx 'restart mihomo.service' "$SYSTEMCTL_LOG" \
+    && grep -qx 'restart 5gpn-dns.service' "$SYSTEMCTL_LOG" \
+    || fail "valid HTTP-01 publication did not restart both runtime services"
+pass "HTTP-01 publishes a certificate covering all three service SANs and restarts services"
+
+# A restart failure is visible, but the second service is still attempted so
+# the first failure cannot conceal its state.
+write_env cloudflare
+generate_cert "$LE_LIVE_ROOT/example.test" \
+    'DNS:example.test,DNS:*.example.test,IP:192.0.2.10'
+: > "$SYSTEMCTL_LOG"
+SYSTEMCTL_FAIL_SERVICE=mihomo.service
+if renew_hook_main >/dev/null 2>&1; then
+    fail "deploy hook ignored a mihomo restart failure"
+fi
+grep -qx 'restart mihomo.service' "$SYSTEMCTL_LOG" \
+    && grep -qx 'restart 5gpn-dns.service' "$SYSTEMCTL_LOG" \
+    || fail "deploy hook did not attempt both service restarts after one failed"
+SYSTEMCTL_FAIL_SERVICE=""
+pass "deploy hook reports restart failure after attempting both services"
 
 # An extra HTTP-01 DNS identity must fail before any live role is changed.
 write_env http-01
@@ -192,7 +217,7 @@ if renew_hook_main >/dev/null 2>&1; then
 fi
 after="$(role_checksums)"
 [[ "$before" == "$after" && ! -s "$SYSTEMCTL_LOG" ]] \
-    || fail "extra HTTP-01 DNS SAN changed roles or reloaded the daemon"
+    || fail "extra HTTP-01 DNS SAN changed roles or touched a service"
 pass "HTTP-01 certificate with an extra DNS SAN fails before publication"
 
 # Every required HTTP-01 SAN is independently mandatory. Validation happens
@@ -212,7 +237,7 @@ for missing in console zash dot; do
     [[ "$before" == "$after" ]] \
         || fail "HTTP-01 certificate missing $missing SAN changed live role files"
     [[ ! -s "$SYSTEMCTL_LOG" ]] \
-        || fail "HTTP-01 certificate missing $missing SAN reloaded the daemon"
+        || fail "HTTP-01 certificate missing $missing SAN touched a service"
 done
 pass "HTTP-01 certificate missing any required service SAN fails before publication"
 
@@ -228,7 +253,7 @@ if renew_hook_main >/dev/null 2>&1; then
 fi
 after="$(role_checksums)"
 [[ "$before" == "$after" ]] || fail "key mismatch changed live role files"
-[[ ! -s "$SYSTEMCTL_LOG" ]] || fail "key mismatch reloaded the daemon"
+[[ ! -s "$SYSTEMCTL_LOG" ]] || fail "key mismatch touched a service"
 pass "certificate/private-key mismatch fails closed before publication"
 
 echo "renew hook tests: PASS"

@@ -189,10 +189,12 @@ grep -Fq 'mktemp "${dest}/.fullchain.pem.XXXXXX"' "$RENEW" \
     || fail "renew-hook.sh: certificate publication is not same-directory staged"
 grep -Fq 'mv -f -- "${cert_tmps[$i]}"' "$RENEW" \
     || fail "renew-hook.sh: staged certificate is not atomically renamed into place"
-grep -Fq 'mihomo reloads the controller certificate files automatically' "$RENEW" \
-    || fail "renew-hook.sh: missing mihomo controller certificate hot-reload contract"
-grep -Eq 'systemctl (restart|reload) mihomo' "$RENEW" \
-    && fail "renew-hook.sh: must not restart/reload mihomo for controller certificate renewal"
+grep -Fq 'restart_runtime_services' "$RENEW" \
+    || fail "renew-hook.sh: missing post-renewal runtime restart contract"
+grep -Fq 'for service in mihomo.service 5gpn-dns.service' "$RENEW" \
+    || fail "renew-hook.sh: must restart mihomo before 5gpn-dns after certificate renewal"
+grep -Eq 'systemctl reload|kill[[:space:]]+-HUP' "$RENEW" \
+    && fail "renew-hook.sh: certificate activation must use restart, not reload/SIGHUP"
 grep -iq 'xray' "$RENEW" && fail "renew-hook.sh: must not reference xray (mihomo is the data plane)"
 
 # ===== gen-ios-profile.sh — unsigned profile fails CLOSED =====

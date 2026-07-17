@@ -15,10 +15,9 @@ import (
 	"time"
 )
 
-// This file holds the bot operations that reach the host: service restart
-// (with hot reload for 5gpn-dns), journal logs, scoped certificate renewal, and
-// iOS profile QR generation. Everything else goes through the in-process
-// Controller.
+// This file holds the bot operations that reach the host: service restart,
+// 5gpn-dns rule reload, journal logs, scoped certificate renewal, and iOS
+// profile QR generation. Everything else goes through the in-process Controller.
 //
 // Injectability for tests: the shelling-out primitive is Bot.runFn (a nil field
 // falls back to the real run via Bot.run), and the three iOS-host source files
@@ -466,7 +465,7 @@ func (bt *Bot) opRenewCertResult() botOperationResult {
 		}
 		return botOperationResult{
 			OK:          true,
-			HTMLSummary: "✅ <b>证书已续期</b>（TLS 将在下次握手加载新文件）。",
+			HTMLSummary: "✅ <b>证书已续期</b>（已部署新文件并重启 mihomo 与 5gpn-dns）。",
 			Detail:      tail,
 			Duration:    time.Since(started),
 		}

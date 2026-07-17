@@ -4,7 +4,9 @@
 # /etc/5gpn/cert/{dot,web,zash}. Cloudflare DNS-01 lineages must cover the apex
 # and wildcard; HTTP-01 lineages must cover all three derived service names.
 # The zash role is shared by the zashboard panel and mihomo's TLS controller.
-# The pinned mihomo v1.19.28 build guarantees that mihomo reloads the controller certificate files automatically, so the renewed zash copy becomes active without a mihomo restart or reload.
+# After validated publication and iOS profile regeneration, both runtime
+# services are restarted so every listener deterministically serves the new
+# certificate before the deploy hook reports success.
 #
 # This hook is installed system-wide and certbot may invoke it for unrelated
 # lineages. It therefore accepts only the exact lineage named by the validated
@@ -197,6 +199,22 @@ publish_roles() {
     done
 }
 
+restart_runtime_services() {
+    local service failed=0
+    # Keep data-plane-before-DNS ordering consistent with the installer. Both
+    # restarts are attempted so one failure cannot hide the other service's
+    # state; any failure still makes the deploy hook fail visibly.
+    for service in mihomo.service 5gpn-dns.service; do
+        if systemctl restart "$service"; then
+            ok "Restarted ${service} after certificate deployment."
+        else
+            err "Failed to restart ${service} after certificate deployment."
+            failed=1
+        fi
+    done
+    [[ "$failed" == 0 ]]
+}
+
 # deploy_lineage <live-dir>: validate and deploy only the exact current 5gpn
 # lineage. No basename-suffix matching and no scan of unrelated live dirs.
 deploy_lineage() {
@@ -266,10 +284,9 @@ renew_hook_main() {
     _CERT_RENEWED=0
     deploy_lineage "$live" || return 1
 
-    # TLS readers detect the atomically replaced files by mtime on the next
-    # handshake. SIGHUP is deliberately reserved for rules/chnroute reloads and
-    # is not used as a certificate-reload API.
-    ok "Certificate files published; TLS readers will load them on the next handshake."
+    # SIGHUP remains reserved for rules/chnroute reloads. Certificate
+    # activation uses an explicit restart after all dependent files are ready.
+    ok "Certificate files published."
 
     # Re-sign the iOS profile with the renewed DoT role. Best-effort: certificate
     # deployment is already complete, so profile failure must not fail renewal.
@@ -280,6 +297,10 @@ renew_hook_main() {
         else
             warn "iOS profile re-sign failed (non-fatal); it may show as unverified until 'install.sh ios' is re-run."
         fi
+    fi
+
+    if [[ "$_CERT_RENEWED" == 1 ]]; then
+        restart_runtime_services || return 1
     fi
 }
 

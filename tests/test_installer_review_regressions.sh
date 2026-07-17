@@ -80,6 +80,95 @@ grep -Fq 'validate_cert_pair' <<<"$ic" \
     && grep -Fq 'Reusing valid matching debug certificate' <<<"$ic" \
     && pass "production/debug certificate reuse paths are validated and isolated" \
     || fail "certificate reuse validation/mode isolation missing"
+if grep -Fq 'CERT_REUSE_MIN_SECONDS=0' "$INSTALL" \
+   && grep -Fq '"$base" "$CERT_REUSE_MIN_SECONDS" production "$mode"' <<<"$ic" \
+   && grep -Fq 'refusing automatic replacement' <<<"$ic"; then
+    pass "install/configure reuse every currently valid matching certificate and fail closed on metadata mismatch"
+else
+    fail "install/configure can still rotate an unexpired matching certificate"
+fi
+
+# Exercise the decision boundary rather than relying only on source shape: a
+# currently valid matching certificate is reused at checkend=0, and unsafe
+# renewal metadata fails closed without reaching Certbot.
+cert_reuse_tmp="$(mktemp -d)"
+cert_reuse_log="$cert_reuse_tmp/actions.log"
+(
+    DNS_CERT_DIR="$cert_reuse_tmp/cert"
+    DOT_CERT_DIR="$DNS_CERT_DIR/dot"
+    WEB_CERT_DIR="$DNS_CERT_DIR/web"
+    ZASH_CERT_DIR="$DNS_CERT_DIR/zash"
+    LE_LIVE_ROOT="$cert_reuse_tmp/live"
+    LE_ARCHIVE_ROOT="$cert_reuse_tmp/archive"
+    LE_RENEWAL_ROOT="$cert_reuse_tmp/renewal"
+    ACME_DIR="$cert_reuse_tmp/acme"
+    CERT_MODE=cloudflare
+    CERT_EMAIL=admin@example.com
+    mkdir -p "$LE_LIVE_ROOT/example.com" "$LE_ARCHIVE_ROOT/example.com" "$LE_RENEWAL_ROOT"
+    validate_cert_pair() { printf 'validate-seconds=%s\n' "$4" >> "$cert_reuse_log"; return 0; }
+    certbot_renewal_mode_matches() { return 0; }
+    certbot() { printf 'certbot-called\n' >> "$cert_reuse_log"; return 0; }
+    ensure_cf_token() { return 0; }
+    deploy_cert_roles() { return 0; }
+    write_cert_provenance() { return 0; }
+    install_cert_deploy_hook() { return 0; }
+    install_renewal_automation() { return 0; }
+    install_cert example.com >/dev/null
+)
+if grep -qx 'validate-seconds=0' "$cert_reuse_log" \
+   && ! grep -q 'certbot-called' "$cert_reuse_log"; then
+    pass "a currently valid matching certificate is reused without Certbot"
+else
+    fail "valid-certificate reuse invoked Certbot or used a future-expiry threshold"
+fi
+: > "$cert_reuse_log"
+if (
+    DNS_CERT_DIR="$cert_reuse_tmp/cert"
+    DOT_CERT_DIR="$DNS_CERT_DIR/dot"
+    WEB_CERT_DIR="$DNS_CERT_DIR/web"
+    ZASH_CERT_DIR="$DNS_CERT_DIR/zash"
+    LE_LIVE_ROOT="$cert_reuse_tmp/live"
+    LE_ARCHIVE_ROOT="$cert_reuse_tmp/archive"
+    LE_RENEWAL_ROOT="$cert_reuse_tmp/renewal"
+    ACME_DIR="$cert_reuse_tmp/acme"
+    CERT_MODE=cloudflare
+    validate_cert_pair() { return 0; }
+    certbot_renewal_mode_matches() { return 1; }
+    certbot() { printf 'certbot-called\n' >> "$cert_reuse_log"; return 0; }
+    install_cert example.com >/dev/null 2>&1
+); then
+    fail "unsafe renewal metadata was accepted for a valid certificate"
+elif grep -q 'certbot-called' "$cert_reuse_log"; then
+    fail "unsafe renewal metadata caused automatic certificate replacement"
+else
+    pass "valid certificate with unsafe renewal metadata fails without Certbot"
+fi
+
+: > "$cert_reuse_log"
+(
+    DNS_CERT_DIR="$cert_reuse_tmp/cert"
+    DOT_CERT_DIR="$DNS_CERT_DIR/dot"
+    WEB_CERT_DIR="$DNS_CERT_DIR/web"
+    ZASH_CERT_DIR="$DNS_CERT_DIR/zash"
+    DEBUG_CERT_DIR="$cert_reuse_tmp/debug-cert"
+    CERT_MODE=debug
+    GATEWAY_IP=""
+    PUBLIC_IP=""
+    validate_cert_pair() { printf 'debug-validate-seconds=%s\n' "$4" >> "$cert_reuse_log"; return 0; }
+    issue_selfsigned_wildcard() { printf 'debug-issued\n' >> "$cert_reuse_log"; return 0; }
+    deploy_cert_roles() { return 0; }
+    write_cert_provenance() { return 0; }
+    remove_owned_renew_hook() { return 0; }
+    remove_owned_renewal_automation() { return 0; }
+    install_cert example.com >/dev/null
+)
+if grep -qx 'debug-validate-seconds=0' "$cert_reuse_log" \
+   && ! grep -q 'debug-issued' "$cert_reuse_log"; then
+    pass "first-run debug mode adopts a valid exact-path certificate without re-signing"
+else
+    fail "first-run debug mode re-signed a valid exact-path certificate"
+fi
+rm -rf -- "$cert_reuse_tmp"
 
 if grep -Fq -- '--cert-name "$base"' <<<"$ic" \
    && grep -Fq 'certbot_args=(renew --cert-name "$base" --non-interactive)' "$CERT_RENEW" \
@@ -231,6 +320,23 @@ if install_cert example.com >/dev/null \
     pass "missing lineage reuses the preserved role cert without issuance and disables renewal"
 else
     fail "preserved role certificate fallback is incomplete"
+fi
+
+# Provenance may be absent on a first run or after manual recovery. Exact-path
+# role material still avoids issuance when its full certificate validation
+# establishes the selected mode and base.
+rm -f -- "$DNS_CERT_DIR/.provenance"
+: > "$certbot_log"
+: > "$reuse_log"
+if install_cert example.com >/dev/null \
+   && grep -qx "deploy:example.com:${DOT_CERT_DIR}" "$reuse_log" \
+   && grep -qx 'units-removed' "$reuse_log" \
+   && [[ "$(cert_provenance_get certbot_lineage)" == missing ]] \
+   && ! grep -q 'token-requested' "$reuse_log" \
+   && [[ ! -s "$certbot_log" ]]; then
+    pass "missing lineage adopts a valid preserved role certificate without prior provenance"
+else
+    fail "provenance-free preserved role certificate triggered issuance or was rejected"
 fi
 rm -rf -- "$cert_state_tmp"
 

@@ -274,7 +274,8 @@ Specialized live state remains in purpose-specific, atomically written files:
 Adding a daemon knob requires config parsing, installer persistence, the
 `dns.env.example` entry, and tests in the same change. SIGHUP reloads rule files
 and chnroute only; ordinary `dns.env` changes require a service restart. TLS
-certificates are loaded from their files on change without making SIGHUP a
+readers can detect changed certificate files, but the managed renewal lifecycle
+still performs explicit ordered service restarts; SIGHUP is never a
 certificate-reload API.
 
 ## Certificate model and lifecycle
@@ -297,8 +298,9 @@ The same certificate is deployed into three role directories:
 - `/etc/5gpn/cert/web` for console HTTPS and its public iOS profile download;
 - `/etc/5gpn/cert/zash` for zashboard HTTPS and the mihomo controller.
 
-Reinstall must prefer safe reuse over issuance. Before reusing material, it
-verifies the configured mode/provenance, validity window, the exact SAN shape
+First install, reinstall, and `configure` must prefer safe reuse over issuance.
+Before reusing material, each path verifies the configured mode/provenance,
+that the leaf is currently within its validity window, the exact SAN shape
 required by that mode, certificate/private-key match, and (for production) a
 trusted issuer chain. A pre-existing external lineage without provenance may be reused only
 when its exact live/archive paths, authenticator parameters, and absence of
@@ -309,25 +311,43 @@ operator lineage, or is currently missing. Cloudflare reuse requires the apex
 and wildcard, while HTTP-01 reuse requires the three exact service SANs and no
 apex or wildcard. A debug self-signed certificate can never satisfy production
 reuse. Debug mode stores its source only below `/etc/5gpn/debug-cert`, and
-repeated debug installs reuse a still-valid matching debug keypair instead of
-generating a new one each time. When the canonical lineage is entirely absent,
-a valid mode-matching preserved role copy may recover service without issuing a
-new certificate; renewal automation stays disabled until the lineage is repaired
-or reissued.
+first or repeated debug installs reuse a still-valid matching debug keypair
+instead of generating a new one each time. When the canonical lineage is
+entirely absent, a valid mode-matching preserved role copy may recover service
+without issuing a new certificate; renewal automation stays disabled until the
+lineage is repaired or reissued. Either exact-path source may be adopted when
+provenance is absent because its full identity/key/time/trust checks establish
+the current mode and base. An existing conflicting provenance record fails
+closed instead of being overwritten.
 
-Only missing, expiring, mismatched, or invalid material causes issuance. Role
-copies are staged completely before replacement. Production renewal is scoped
+An install or configure run never replaces a currently valid, mode-matching
+certificate merely because it is close to expiry. Only missing, expired,
+mode/SAN-mismatched, key-mismatched, untrusted, or otherwise invalid material
+causes issuance. Role copies are staged completely before replacement.
+Production renewal is scoped
 to `--cert-name <base>`; a 5gpn timer must not run an unscoped renewal over
 every lineage on the host. Both the timer and the confirmed Telegram bot action
-invoke the same mode-aware renewal helper. It returns without disruption when
-the lineage is not due only after validating the Let's Encrypt production
+invoke the same mode-aware renewal helper. The daily helper attempts renewal
+only when no more than three days remain. It returns without disruption when
+more than three days remain, only after validating the Let's Encrypt production
 server, authenticator, hook-free scoped renewal config, trusted live chain, and
 all three deployed role copies. A stale role copy is repaired through the owned
-deploy hook. The helper runs Cloudflare DNS-01 without stopping mihomo, and for
-a due HTTP-01 renewal first repeats the `1.1.1.1` A/AAAA gate, then briefly
-stops mihomo to release TCP `:80` for Certbot's standalone listener. The helper
-restores mihomo after either success or failure; an initial HTTP-01 issuance
-uses the same stop-and-restore discipline.
+deploy hook. Cloudflare DNS-01 does not stop mihomo for an ACME challenge. For a
+due HTTP-01 renewal, the helper first repeats the `1.1.1.1` A/AAAA gate, then
+briefly stops mihomo to release TCP `:80` for Certbot's standalone listener.
+The helper restores mihomo after either success or failure; an initial HTTP-01
+issuance uses the same stop-and-restore discipline. Successful deployment then
+performs the common runtime restarts described below.
+
+Starting or reinstalling the persistent timer does not force a refresh. If
+systemd performs an immediate catch-up run for a missed calendar event, that
+run uses the same three-day gate and ordinary scoped `certbot renew`; the helper
+never adds `--force-renewal`.
+
+If a currently valid, mode-matching certificate has unsafe, missing, or
+mode-mismatched renewal metadata or conflicting 5gpn provenance, the installer
+fails closed and preserves it. Metadata inconsistency is never converted into
+an automatic forced issuance.
 
 Install/configure, the timer, the bot action, and decommission serialize on one
 root-owned private runtime lock. Installer rollback restores the exact prior
@@ -335,10 +355,20 @@ live/archive/renewal state and the timer's enabled/active state after a failed
 mode change; it never consumes an unscoped or partial Certbot lineage.
 
 The deploy hook verifies that the renewed lineage matches `DNS_BASE_DOMAIN`,
-updates only the three role directories, and re-signs the iOS profile. It never
-restarts mihomo merely to load certificate files: mihomo hot-loads the updated
-zash role. Cloudflare renewal therefore has no data-plane interruption; the
-brief HTTP-01 interruption exists only to release `:80` for ACME.
+updates only the three role directories, and re-signs the iOS profile. After a
+successful renewed-certificate publication, it restarts `mihomo.service` first
+and `5gpn-dns.service` second. Both restarts are attempted and either failure is
+reported as deploy-hook failure. Cloudflare DNS-01 does not release `:80`, but
+successful renewal still has the bounded interruption caused by these service
+restarts. HTTP-01 additionally has the earlier bounded mihomo stop needed to
+release `:80` for ACME.
+
+Initial issuance or replacement during install/configure runs with Certbot
+directory hooks disabled so services are not restarted in the middle of the
+publication transaction. After certificate validation, role deployment, iOS
+profile generation, and unit publication complete, the transaction's normal
+service phase restarts `mihomo.service` and then `5gpn-dns.service`. Thus newly
+issued material is active before readiness probes and install success.
 
 Normal uninstall preserves the 5gpn certificate lineage, role copies, debug
 source, and ACME credential so a later reinstall can reuse them. Domain

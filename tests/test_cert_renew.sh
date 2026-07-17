@@ -15,6 +15,17 @@ export CERT_RENEW_LIB_ONLY=1
 # shellcheck source=../scripts/cert-renew.sh
 source "$HELPER"
 
+if [[ "$RENEW_BEFORE_SECONDS" == "$((3 * 86400))" ]]; then
+    pass "renewal due window is three days"
+else
+    fail "renewal due window is not three days"
+fi
+if grep -Fq -- '--force-renewal' "$HELPER"; then
+    fail "renewal helper contains a forced-refresh path"
+else
+    pass "renewal helper never forces a refresh"
+fi
+
 TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT
 LOG="$TMP/actions.log"
@@ -201,6 +212,7 @@ expect_before() {
 reset_case
 MOCK_CERT_FRESH=1
 expect_success "not-due HTTP certificate exits successfully" cert_renew_main --cert-name example.com
+expect_log "openssl x509 -checkend 259200" "not-due check uses the three-day threshold"
 expect_no_log "dig " "not-due certificate does not query DNS"
 expect_no_log "systemctl " "not-due certificate does not inspect/stop mihomo"
 expect_no_log "certbot " "not-due certificate does not invoke Certbot"
@@ -260,16 +272,17 @@ MOCK_MIHOMO_ACTIVE=0
 expect_success "HTTP renewal works with initially inactive mihomo" cert_renew_main --cert-name example.com
 expect_log "certbot renew --cert-name example.com --non-interactive" "inactive-mihomo renewal remains cert-name scoped"
 expect_no_log "systemctl stop mihomo" "initially inactive mihomo is not stopped"
-expect_no_log "systemctl start mihomo" "initially inactive mihomo is not started"
+expect_no_log "systemctl start mihomo" "HTTP challenge wrapper does not start an initially inactive mihomo"
 
-# Cloudflare DNS-01 never enters the HTTP DNS or mihomo handoff path.
+# Cloudflare DNS-01 never enters the HTTP DNS or :80 handoff path. Successful
+# deployment restarts are owned and tested by the real deploy hook separately.
 reset_case
 CFG_MODE=cloudflare
 write_renewal_conf
 expect_success "Cloudflare renewal succeeds through scoped Certbot" cert_renew_main
 expect_log "certbot renew --cert-name example.com --non-interactive" "timer-style Cloudflare renewal derives the exact cert name"
 expect_no_log "dig " "Cloudflare renewal does not run the HTTP DNS gate"
-expect_no_log "systemctl " "Cloudflare renewal does not touch mihomo"
+expect_no_log "systemctl " "Cloudflare challenge path does not directly manage services"
 
 # Root-executed per-lineage hooks are never adopted; 5gpn uses its one audited
 # directory deploy hook and mode-aware wrapper instead.

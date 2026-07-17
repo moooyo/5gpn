@@ -65,7 +65,7 @@
   - **Mihomo controller TLS**：zash 证书角色由 zashboard 与 mihomo controller 共用。`DNS_MIHOMO_CONTROLLER` 是回环拨号地址；客户端以派生的 `zash.<base>` 校验 TLS 身份并信任 `DNS_ZASH_CERT`。Mihomo v1.19.28 通过只读 `SAFE_PATHS=/etc/5gpn/cert/zash` 读取位于 `-d /etc/5gpn/mihomo` 外的证书。普通重装逐字节保留已通过校验的 operator-owned 配置；若 verified controller transport 无法构造，DNS 与其余控制面继续运行，Mihomo 健康、配置和代理端点返回 unavailable/503，绝不降级到明文 HTTP。
 - **出口由 mihomo 原生配置拥有**：被代理流量经 mihomo 的 `tunnel` 监听 + 内置嗅探器透明转发（不解密 TLS）；完整 `/etc/5gpn/mihomo/config.yaml` 由运维者管理，默认 `Proxies` 组只有 `DIRECT`，也可加入 mihomo 支持的应用层节点/组。DNS 策略只决定“是否进入网关”，绝不生成 mihomo 出口。仍禁止 TUN/TProxy、WireGuard、fwmark、策略路由表或把本项目变成客户端默认路由器。
 - **无宿主防火墙**：项目不管理宿主 nftables；zashboard 的网络访问控制由 mihomo 来源白名单承担，console API 依赖 bearer 鉴权。
-- **运维友好**：证书按文件 mtime 热重载（无需为了加载新证书额外重启；HTTP-01 只在 ACME `:80` challenge 窗口短停 mihomo；`kill -HUP` 只重载规则、与证书无关）；统计持久化存活重启；systemd 硬化沙箱，bot 特权操作经 `systemd-run`/`systemctl` 委派而不削弱沙箱。
+- **Operational lifecycle**: successful renewal atomically deploys all certificate roles, re-signs the iOS profile, then restarts `mihomo` followed by `5gpn-dns`. HTTP-01 additionally stops mihomo only for its bounded ACME `:80` challenge window. `kill -HUP` remains rules-only and is never a certificate activation API.
 - **零 Python、极小依赖**：Go 侧只依赖 `miekg/dns` + `go-telegram/bot`；第三方工具（mihomo、gum）用预编译二进制，网关上不放工具链。
 
 ---
@@ -90,13 +90,13 @@ curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh |
 - **配置只有一个持久入口**：安装器配置由 TUI 写入 `/etc/5gpn/dns.env`；重装只读该文件，明确忽略调用者环境。仅 Cloudflare 模式需要的 API token 单独保存在 root-only 的 `/etc/5gpn/acme/cloudflare.ini`，不会进入 `dns.env`、调用者环境或日志。
 - **重跑刷新程序、保留运维配置**：每次运行安装脚本都会刷新 systemd 单元、`/opt/5gpn` 运行目录以及 pin 版本的 5gpn-dns/mihomo/Web 产物；`/etc/5gpn` 和 `/etc/letsencrypt` 持久保留。已有且通过 `mihomo -t` 的完整 mihomo 配置会逐字节保留；只有显式 `mihomo-reset` 才会在备份和校验后替换它。下载或校验失败会中止且不预删工作二进制。
 - **一个主域名、一条 lineage、三个证书角色目录**：两种生产模式都只使用 cert-name 为 `<base>` 的**一条** scoped Certbot lineage，并部署到 `/etc/5gpn/cert/{dot,web,zash}`。所有身份和证书模式修改统一进入 `5gpn configure` TUI；`CERT_MODE` 只允许 `cloudflare`、`http-01`、`debug`。
-  - **cloudflare** — TUI 输入 Cloudflare API token，DNS-01 签发 apex `<base>` + `*.<base>`；签发和续期都不停止 mihomo。即使当前证书可复用，也必须保留受保护的 token 以保证自动续期；`zash.<base>` 可继续只由 5gpn 合成解析。
-  - **http-01** — 签发且只签发 `console.<base>`、`zash.<base>`、`dot.<base>` 三个精确 SAN，不包含 apex 或 wildcard。TUI 会展示三条所需 A 记录并要求确认，再通过固定解析器 `1.1.1.1` 等待三个名字各自只有一条 A 且均为 `DNS_PUBLIC_IP`；三者都不得发布 AAAA。初签及到期续签会短暂停止 mihomo 释放 TCP `:80`，并在成功或失败后恢复。
+  - **cloudflare** — The TUI stores a protected Cloudflare API token and DNS-01 issues apex `<base>` plus `*.<base>`. ACME validation does not release mihomo's `:80` listener, but successful renewal still performs the common mihomo/5gpn-dns restarts. The token remains required for unattended renewal even when the current certificate is reusable; `zash.<base>` may remain synthetic-only.
+  - **http-01** — Issuance covers exactly `console.<base>`, `zash.<base>`, and `dot.<base>`, with no apex or wildcard SAN. The TUI confirms all three A records, and `1.1.1.1` must observe exactly `DNS_PUBLIC_IP` with no AAAA. Initial issuance and due renewal briefly stop mihomo for TCP `:80`; failure restores its prior state, while successful renewal continues into the common ordered service restarts.
   - **debug** — TUI 选择的自签模式；无 Certbot。仍有效且 SAN/IP/私钥匹配时复用，不会每次重签。
-  - **安全复用**：生产复用要求有效期、可信链、cert/key 匹配，以及与模式完全一致的 SAN；debug 自签永远不能进入生产复用路径。
+  - **Safe reuse**: first install, reinstall, and `configure` reuse every currently valid certificate whose trust, cert/key pair, exact SAN set, mode, renewal metadata, and provenance checks pass. Near-expiry alone never triggers installer issuance; the daily renewal helper owns the three-day rotation window.
 - **按域名访问**：`console.<base>` 必须提前有指向公网或客户端可路由网关 IP 的 A 记录；该检查没有环境变量 bypass。HTTP-01 进一步要求三个服务名都满足上述公网 A/无 AAAA 约束。SPA 资源与 iOS profile 下载公开，所有 `/api/*` 仍需 bearer token。
   The Cloudflare API token manages ACME TXT records only; the operator must create the displayed `console.<base>` A record before confirming the installer prompt.
-- **统一续期入口**：systemd timer 与 Telegram bot 的确认续期动作调用同一个 mode-aware helper，只处理 `--cert-name <base>`。未到期时不打断数据面；Cloudflare 到期续签仍不停机，HTTP-01 到期续签会再次等待 `1.1.1.1` DNS 检查通过后再执行 `:80` 的短暂停机窗口。
+- **Unified renewal entrypoint**: the systemd timer and confirmed Telegram action call the same mode-aware helper for only `--cert-name <base>`. More than three days before expiry it does not invoke Certbot or restart services. Successful Cloudflare or HTTP-01 renewal restarts mihomo and 5gpn-dns; HTTP-01 first repeats the `1.1.1.1` gate and its bounded `:80` handoff.
 - **IPv4 前提**：本方案全链路 **IPv4-only**（AAAA 一律 SOA、chnroute/网关改写仅 IPv4、守护进程沙箱仅 `AF_INET`）。要求 5G/APN 给客户端分配 **可路由到网关的 IPv4**（或 CLAT）；IPv6-only 接入的客户端够不到网关。
 
 安装版本和第三方版本/摘要固定在发布包中，不接受 `DNS_VERSION`、`MIHOMO_VERSION` 或 `*_SHA256` 环境覆盖。Telegram token、管理员、代理和告警也从管理 TUI 配置。
@@ -170,7 +170,7 @@ Uninstall preserves the verified `/opt/5gpn/bin/gum` binary for reuse by other h
 
 等价的 `sudo bash install.sh <同名子命令>` 仍可用。
 
-配置改动：`systemctl reload 5gpn-dns`（=SIGHUP）**只重载 policy 编译结果与 chnroute**，不主动拉取远程订阅。**dns.env 里的守护进程开关（上游、网关IP、监听地址、token、cache、TTL、0x20、心跳等）在启动时读取一次，改动后需 `systemctl restart 5gpn-dns` 才生效**；证书是例外——按文件 mtime 在下次握手自动加载。
+Configuration lifecycle: `systemctl reload 5gpn-dns` (`SIGHUP`) reloads only compiled policy results and chnroute; it does not fetch remote subscriptions. Daemon settings from `dns.env` are read at startup and require `systemctl restart 5gpn-dns`. Certificate renewal uses the deploy hook's explicit ordered restart of `mihomo` and `5gpn-dns`.
 
 ---
 
