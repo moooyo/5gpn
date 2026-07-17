@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useStatus } from '../../lib/StatusContext'
 import { api } from '../../lib/api/client'
-import type { ECSView, TGBotView, UpstreamsView } from '../../lib/api/types'
-import { AboutStrip, ConsoleCard, DotServiceCard, EcsCard, TgbotCard, UpstreamsCard } from './_cards'
+import type { ECSView, IngressModulesView, TGBotView, UpstreamsView } from '../../lib/api/types'
+import { AboutStrip, ConsoleCard, DotServiceCard, EcsCard, IngressPortsCard, TgbotCard, UpstreamsCard } from './_cards'
 
 /** 设置 (Settings) page — live config cards for the DoT service/cert, the
  *  control-plane console, the Telegram bot, upstream DNS groups and ECS,
@@ -14,6 +14,25 @@ export default function SettingsPage() {
   const [upstreams, setUpstreams] = useState<UpstreamsView | null>(null)
   const [ecs, setEcs] = useState<ECSView | null>(null)
   const [tgbot, setTgbot] = useState<TGBotView | null>(null)
+  const [ingressModules, setIngressModules] = useState<IngressModulesView | null>(null)
+  const [ingressLoadState, setIngressLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const ingressLoadSequence = useRef(0)
+
+  const loadIngressModules = useCallback(async (): Promise<IngressModulesView | null> => {
+    const sequence = ++ingressLoadSequence.current
+    setIngressLoadState('loading')
+    try {
+      const value = await api.getIngressModules()
+      if (sequence !== ingressLoadSequence.current) return null
+      setIngressModules(value)
+      setIngressLoadState('ready')
+      return value
+    } catch {
+      if (sequence !== ingressLoadSequence.current) return null
+      setIngressLoadState('error')
+      return null
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -26,10 +45,12 @@ export default function SettingsPage() {
     }
 
     void load()
+    void loadIngressModules()
     return () => {
       cancelled = true
+      ingressLoadSequence.current++
     }
-  }, [])
+  }, [loadIngressModules])
 
   // Bot lifecycle can move starting → healthy/degraded independently after a
   // save or gateway-network recovery. Poll single-flight and abort on unmount;
@@ -67,6 +88,12 @@ export default function SettingsPage() {
         <DotServiceCard cert={status?.cert} />
         <ConsoleCard />
       </div>
+      <IngressPortsCard
+        modules={ingressModules}
+        loadState={ingressLoadState}
+        onReload={loadIngressModules}
+        onSaved={setIngressModules}
+      />
       <TgbotCard tgbot={tgbot} onSaved={setTgbot} />
       <UpstreamsCard upstreams={upstreams} onSaved={setUpstreams} />
       <EcsCard ecs={ecs} onSaved={setEcs} />

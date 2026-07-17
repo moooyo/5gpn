@@ -158,6 +158,8 @@ func renderMihomoListeners(ips []string) string {
 		}
 		fmt.Fprintf(&b, "  - {name: gateway%s, type: tunnel, listen: %s, port: 443, network: [tcp, udp], target: 127.0.0.1:443}\n", suffix, ip)
 		fmt.Fprintf(&b, "  - {name: gateway80%s, type: tunnel, listen: %s, port: 80, network: [tcp], target: 127.0.0.1:80}\n", suffix, ip)
+		fmt.Fprintf(&b, "  - {name: gateway8080%s, type: tunnel, listen: %s, port: 8080, network: [tcp], target: 127.0.0.1:8080}\n", suffix, ip)
+		fmt.Fprintf(&b, "  - {name: gateway8443%s, type: tunnel, listen: %s, port: 8443, network: [tcp], target: 127.0.0.1:8443}\n", suffix, ip)
 	}
 	return strings.TrimSuffix(b.String(), "\n")
 }
@@ -230,9 +232,9 @@ sniffer:
   parse-pure-ip: true
   override-destination: true
   sniff:
-    TLS:  { ports: [443] }
+    TLS:  { ports: [443, 8080, 8443] }
     QUIC: { ports: [443] }
-    HTTP: { ports: [80] }
+    HTTP: { ports: [80, 8080, 8443] }
 
 dns:
   enable: true
@@ -257,9 +259,6 @@ proxy-groups:
   - {name: Proxies, type: select, proxies: [DIRECT]}
 
 rules:
-  - DOMAIN,__CONSOLE_DOMAIN__,DIRECT
-  - AND,((DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
-  - DOMAIN,__ZASH_DOMAIN__,REJECT-DROP
   - IP-CIDR,__GATEWAY_IP__/32,REJECT-DROP,no-resolve
   - IP-CIDR,127.0.0.0/8,REJECT-DROP,no-resolve
   - IP-CIDR,10.0.0.0/8,REJECT-DROP,no-resolve
@@ -267,6 +266,17 @@ rules:
   - IP-CIDR,192.168.0.0/16,REJECT-DROP,no-resolve
   - IP-CIDR,100.64.0.0/10,REJECT-DROP,no-resolve
   - IP-CIDR,169.254.0.0/16,REJECT-DROP,no-resolve
+  # Public panel hostnames terminate on gateway :443 only. Alternate ingress
+  # must never expose unrelated services bound to the same loopback ports.
+  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,80)),REJECT-DROP
+  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8080)),REJECT-DROP
+  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8443)),REJECT-DROP
+  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,80)),REJECT-DROP
+  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8080)),REJECT-DROP
+  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8443)),REJECT-DROP
+  - DOMAIN,__CONSOLE_DOMAIN__,DIRECT
+  - AND,((DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
+  - DOMAIN,__ZASH_DOMAIN__,REJECT-DROP
   - MATCH,Proxies
 `
 

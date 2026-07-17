@@ -415,8 +415,18 @@ func TestMihomoConfigDefaultRendersPluralListeners(t *testing.T) {
 	for _, want := range []string{
 		"name: gateway, type: tunnel, listen: 10.0.1.20, port: 443",
 		"name: gateway80, type: tunnel, listen: 10.0.1.20, port: 80",
+		"name: gateway8080, type: tunnel, listen: 10.0.1.20, port: 8080, network: [tcp], target: 127.0.0.1:8080",
+		"name: gateway8443, type: tunnel, listen: 10.0.1.20, port: 8443, network: [tcp], target: 127.0.0.1:8443",
 		"name: gateway-2, type: tunnel, listen: 203.0.113.10, port: 443",
 		"name: gateway80-2, type: tunnel, listen: 203.0.113.10, port: 80",
+		"name: gateway8080-2, type: tunnel, listen: 203.0.113.10, port: 8080, network: [tcp], target: 127.0.0.1:8080",
+		"name: gateway8443-2, type: tunnel, listen: 203.0.113.10, port: 8443, network: [tcp], target: 127.0.0.1:8443",
+		"TLS:  { ports: [443, 8080, 8443] }",
+		"HTTP: { ports: [80, 8080, 8443] }",
+		"AND,((DOMAIN,console.5gpn.test),(DST-PORT,8080)),REJECT-DROP",
+		"AND,((DOMAIN,console.5gpn.test),(DST-PORT,8443)),REJECT-DROP",
+		"AND,((DOMAIN,zash.5gpn.test),(DST-PORT,8080)),REJECT-DROP",
+		"AND,((DOMAIN,zash.5gpn.test),(DST-PORT,8443)),REJECT-DROP",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Default() missing %q", want)
@@ -424,6 +434,14 @@ func TestMihomoConfigDefaultRendersPluralListeners(t *testing.T) {
 	}
 	if strings.Contains(got, "__MIHOMO_LISTENERS__") || strings.Contains(got, "__PUBLIC_IP__") {
 		t.Fatal("Default() left an unresolved listener token")
+	}
+	for _, forbidden := range []string{
+		"port: 8080, network: [tcp, udp]",
+		"port: 8443, network: [tcp, udp]",
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("Default() unexpectedly enables UDP in %q", forbidden)
+		}
 	}
 }
 

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useId, type ReactNode } from 'react'
 import { Button } from './Button'
 import { Modal } from './Modal'
 
@@ -28,11 +28,13 @@ export function ConfirmDialog({
   danger,
   onConfirm,
 }: ConfirmDialogProps) {
+  const descriptionId = useId()
   return (
     <Modal
       open={open}
       onOpenChange={onOpenChange}
       title={title}
+      descriptionId={description !== undefined ? descriptionId : undefined}
       className="w-[min(92vw,400px)]"
       footer={
         <>
@@ -54,7 +56,7 @@ export function ConfirmDialog({
       }
     >
       {description !== undefined ? (
-        <p className="text-[13px] leading-relaxed text-text-soft">{description}</p>
+        <p id={descriptionId} className="text-[13px] leading-relaxed text-text-soft">{description}</p>
       ) : null}
     </Modal>
   )

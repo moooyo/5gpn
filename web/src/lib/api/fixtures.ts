@@ -41,9 +41,25 @@ rules:
 
 export const mihomoConfig: T.MihomoConfig = {
   text: mihomoConfigDefaultText,
+  revision: '0000000000000000000000000000000000000000000000000000000000000001',
   applied_at: '2026-07-14T00:00:00Z',
   controller_reachable: true,
   controller_authenticated: true,
+}
+
+// ---- optional ingress modules --------------------------------------------
+export const ingressModules: T.IngressModulesView = {
+  revision: '0000000000000000000000000000000000000000000000000000000000000001',
+  modules: [
+    {
+      id: 'speedtest-5060',
+      port: 5060,
+      networks: ['tcp', 'udp'],
+      sniffers: ['http', 'tls', 'quic'],
+      enabled: false,
+      manageable: true,
+    },
+  ],
 }
 
 // ---- Unified policy rules (mirrors cmd/5gpn-dns/policy_rules.go's

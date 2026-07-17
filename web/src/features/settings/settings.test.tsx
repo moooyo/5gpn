@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router-dom'
 import i18n from '../../i18n'
 import { Toaster } from '../../components/ds'
 import { StatusContext, type StatusValue } from '../../lib/StatusContext'
 import { api } from '../../lib/api/client'
-import type { ECSView, Status, TGBotView, UpstreamsView } from '../../lib/api/types'
+import { ApiError } from '../../lib/api/http'
+import type { ECSView, IngressModulesView, Status, TGBotView, UpstreamsView } from '../../lib/api/types'
 import SettingsPage from './SettingsPage'
 import { TgbotCard } from './_cards'
 
@@ -17,12 +19,20 @@ vi.mock('../../lib/api/client', () => ({
     putEcs: vi.fn(),
     getTgbot: vi.fn(),
     putTgbot: vi.fn(),
+    getIngressModules: vi.fn(),
+    putIngressModule: vi.fn(),
   },
 }))
 
 const UPSTREAMS: UpstreamsView = { china: ['223.5.5.5', '119.29.29.29'], trust: ['dns.google@8.8.8.8'] }
 const ECS: ECSView = { subnet: '122.96.30.0/24' }
 const TGBOT: TGBotView = { admins: [123456789], token_set: true, state: 'healthy' }
+const INGRESS: IngressModulesView = {
+  revision: 'r1',
+  modules: [
+    { id: 'speedtest-5060', port: 5060, networks: ['tcp', 'udp'], sniffers: ['http', 'tls', 'quic'], enabled: false, manageable: true },
+  ],
+}
 
 function statusValue(overrides: Partial<StatusValue> = {}): StatusValue {
   return {
@@ -42,8 +52,10 @@ function statusValue(overrides: Partial<StatusValue> = {}): StatusValue {
 function renderSettings(status: StatusValue = statusValue()) {
   return render(
     <StatusContext.Provider value={status}>
-      <SettingsPage />
-      <Toaster />
+      <MemoryRouter>
+        <SettingsPage />
+        <Toaster />
+      </MemoryRouter>
     </StatusContext.Provider>,
   )
 }
@@ -56,6 +68,11 @@ beforeEach(async () => {
   vi.mocked(api.putEcs).mockReset().mockResolvedValue(ECS)
   vi.mocked(api.getTgbot).mockReset().mockResolvedValue(TGBOT)
   vi.mocked(api.putTgbot).mockReset().mockResolvedValue(TGBOT)
+  vi.mocked(api.getIngressModules).mockReset().mockResolvedValue(INGRESS)
+  vi.mocked(api.putIngressModule).mockReset().mockResolvedValue({
+    revision: 'r2',
+    modules: [{ ...INGRESS.modules[0], enabled: true }],
+  })
 })
 
 afterEach(async () => {
@@ -70,6 +87,7 @@ describe('SettingsPage', () => {
     await waitFor(() => expect(api.getUpstreams).toHaveBeenCalled())
     expect(api.getEcs).toHaveBeenCalled()
     expect(api.getTgbot).toHaveBeenCalled()
+    expect(api.getIngressModules).toHaveBeenCalled()
 
     expect(await screen.findByText('223.5.5.5')).toBeInTheDocument()
     expect(screen.getByText('119.29.29.29')).toBeInTheDocument()
@@ -78,6 +96,88 @@ describe('SettingsPage', () => {
     expect(screen.getByText('DoT')).toBeInTheDocument()
     expect(screen.getByDisplayValue('122.96.30.0/24')).toBeInTheDocument()
     expect(screen.getByDisplayValue('123456789')).toBeInTheDocument()
+  })
+
+  it('keeps ingress-module toggles as a draft, then confirms and applies the current revision', async () => {
+    const user = userEvent.setup()
+    renderSettings()
+
+    expect(await screen.findByText('Speedtest 兼容')).toBeInTheDocument()
+    expect(screen.getByText(':5060')).toBeInTheDocument()
+    expect(screen.getByText('TCP · Host/SNI')).toBeInTheDocument()
+    expect(screen.getByText('UDP · 仅 QUIC')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('switch', { name: '切换 Speedtest 兼容' }))
+    expect(api.putIngressModule).not.toHaveBeenCalled()
+    await user.click(screen.getByTestId('ingress-ports-save'))
+    expect(api.putIngressModule).not.toHaveBeenCalled()
+
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: i18n.t('settings.ingressSave') }))
+    await waitFor(() => expect(api.putIngressModule).toHaveBeenCalledWith('speedtest-5060', true, 'r1'))
+  })
+
+  it('keeps a module unavailable for custom YAML and links to the mihomo editor', async () => {
+    vi.mocked(api.getIngressModules).mockResolvedValue({
+      revision: 'custom',
+      modules: [{ ...INGRESS.modules[0], enabled: true, manageable: false, reason: 'custom_config' }],
+    })
+    renderSettings()
+
+    const toggle = await screen.findByRole('switch', { name: '切换 Speedtest 兼容' })
+    expect(toggle).toBeDisabled()
+    expect(screen.getByRole('link', { name: 'mihomo 配置' })).toHaveAttribute('href', '/mihomo-config')
+  })
+
+  it('shows an ingress load error and retries without reloading the page', async () => {
+    const user = userEvent.setup()
+    vi.mocked(api.getIngressModules).mockRejectedValueOnce(new ApiError(0, 'offline'))
+    renderSettings()
+
+    expect(await screen.findByTestId('ingress-ports-load-error')).toHaveTextContent('无法加载当前入口端口配置')
+    await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+    expect(await screen.findByText('Speedtest 兼容')).toBeInTheDocument()
+    expect(api.getIngressModules).toHaveBeenCalledTimes(2)
+    expect(screen.queryByTestId('ingress-ports-load-error')).not.toBeInTheDocument()
+  })
+
+  it('refreshes the current module state and shows a localized conflict after a stale revision', async () => {
+    const user = userEvent.setup()
+    vi.mocked(api.getIngressModules)
+      .mockResolvedValueOnce(INGRESS)
+      .mockResolvedValueOnce({ revision: 'r-current', modules: INGRESS.modules })
+    vi.mocked(api.putIngressModule).mockRejectedValue(new ApiError(409, 'mihomo config revision changed'))
+    renderSettings()
+    await screen.findByText('Speedtest 兼容')
+
+    await user.click(screen.getByRole('switch', { name: '切换 Speedtest 兼容' }))
+    await user.click(screen.getByTestId('ingress-ports-save'))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: i18n.t('settings.ingressSave') }))
+
+    expect(await screen.findByTestId('ingress-ports-error')).toHaveTextContent('入口配置已被其他编辑修改')
+    await waitFor(() => expect(api.getIngressModules).toHaveBeenCalledTimes(2))
+    expect(screen.getByRole('switch', { name: '切换 Speedtest 兼容' })).not.toBeChecked()
+  })
+
+  it('refreshes module state after a hot-apply failure and rollback', async () => {
+    const user = userEvent.setup()
+    vi.mocked(api.getIngressModules)
+      .mockResolvedValueOnce(INGRESS)
+      .mockResolvedValueOnce({ revision: 'r-rolled-back', modules: INGRESS.modules })
+    vi.mocked(api.putIngressModule).mockRejectedValue(new ApiError(502, 'candidate apply failed; previous config restored'))
+    renderSettings()
+    await screen.findByText('Speedtest 兼容')
+
+    await user.click(screen.getByRole('switch', { name: '切换 Speedtest 兼容' }))
+    await user.click(screen.getByTestId('ingress-ports-save'))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: i18n.t('settings.ingressSave') }))
+
+    expect(await screen.findByTestId('ingress-ports-error')).toHaveTextContent('previous config restored')
+    await waitFor(() => expect(api.getIngressModules).toHaveBeenCalledTimes(2))
+    expect(screen.getByRole('switch', { name: '切换 Speedtest 兼容' })).not.toBeChecked()
   })
 
   it('aborts the in-flight Telegram health poll on unmount', async () => {
@@ -241,7 +341,7 @@ describe('SettingsPage', () => {
     renderSettings()
     expect(await screen.findByText(i18n.t('settings.tgbotState_degraded'))).toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent('getUpdates conflict')
-    expect(screen.getByRole('switch')).toBeChecked()
+    expect(screen.getByRole('switch', { name: i18n.t('settings.tgbotStatus') })).toBeChecked()
   })
 
   it('does not wipe an in-progress admin edit when only Telegram health changes', async () => {
@@ -276,7 +376,7 @@ describe('SettingsPage', () => {
     renderSettings()
 
     await screen.findByDisplayValue('123456789')
-    await user.click(screen.getByRole('switch'))
+    await user.click(screen.getByRole('switch', { name: i18n.t('settings.tgbotStatus') }))
 
     await waitFor(() => expect(api.putTgbot).toHaveBeenCalledWith({ admins: [123456789], token: '' }))
   })
@@ -286,8 +386,8 @@ describe('SettingsPage', () => {
     const user = userEvent.setup()
     renderSettings()
 
-    await waitFor(() => expect(screen.getByRole('switch')).not.toBeDisabled())
-    await user.click(screen.getByRole('switch'))
+    await waitFor(() => expect(screen.getByRole('switch', { name: i18n.t('settings.tgbotStatus') })).not.toBeDisabled())
+    await user.click(screen.getByRole('switch', { name: i18n.t('settings.tgbotStatus') }))
 
     expect(await screen.findByText(i18n.t('settings.tgbotNeedToken'))).toBeInTheDocument()
     expect(api.putTgbot).not.toHaveBeenCalled()

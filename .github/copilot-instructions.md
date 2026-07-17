@@ -8,13 +8,22 @@ reference. Historical plans and design handoffs are context only.
 - `5gpn-dns` serves client DoT on `:853`, loopback debug DNS on
   `127.0.0.1:5353/udp`, loopback egress DNS for mihomo on `127.0.0.1:5354`,
   and the authenticated console/API on loopback TLS `:443`.
-- mihomo listens on configured local IPv4 addresses at TCP `:80` and TCP/UDP
-  `:443`, sniffs the original host, and owns all post-steering egress behavior.
+- New mihomo seeds listen on configured local IPv4 addresses at TCP `:80`,
+  `:443`, `:8080`, and `:8443`, plus UDP `:443`. They sniff the original host
+  and own all post-steering egress behavior. Existing valid operator configs
+  remain byte-preserved until an explicit edit or reset.
 - DNS policy is an ordered, first-match block/direct/proxy model in
   `/etc/5gpn/policy.json`. It does not project into mihomo.
 - The complete `/etc/5gpn/mihomo/config.yaml` is operator-owned. Preserve it on
   reinstall and `configure`; only explicit reset may replace it after
   validation and atomic publication.
+- Optional ingress modules are authenticated, explicit one-shot structural
+  edits of that same complete config, never a generated region or second state
+  file. The `speedtest-5060` module is default-off and may add TCP/UDP `:5060`
+  only when the current listener/sniffer/guard shape is canonical and protected
+  by the exact-byte config revision. It also blocks console/zash on that port.
+  UDP support means sniffable QUIC only; raw Ookla UDP cannot recover its
+  pre-steering target.
 - `console.<base>` publicly serves the SPA and `/ios/`; every `/api/*` route
   remains bearer-authenticated. `zash.<base>` is source-allowlisted. There is
   no separate bootstrap hostname. `dot.<base>` is DoT.

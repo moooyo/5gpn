@@ -18,14 +18,15 @@ export function Toggle({ checked, onCheckedChange, disabled, className, title, .
       disabled={disabled}
       title={title}
       className={cn(
-        'relative h-[19px] w-[34px] shrink-0 cursor-pointer rounded-full bg-input-border outline-none transition-colors',
+        'relative h-6 w-10 shrink-0 cursor-pointer rounded-full bg-input-border p-1 outline-none transition-colors',
+        'focus-visible:ring-2 focus-visible:ring-primary/35',
         'data-[state=checked]:bg-primary',
         'disabled:cursor-not-allowed disabled:opacity-50',
         className,
       )}
       {...aria}
     >
-      <SwitchPrimitive.Thumb className="block h-[15px] w-[15px] shrink-0 translate-x-[2px] rounded-full bg-white shadow-sm transition-transform data-[state=checked]:translate-x-[17px]" />
+      <SwitchPrimitive.Thumb className="block h-4 w-4 shrink-0 translate-x-0 rounded-full bg-white shadow-sm transition-transform data-[state=checked]:translate-x-4" />
     </SwitchPrimitive.Root>
   )
 }

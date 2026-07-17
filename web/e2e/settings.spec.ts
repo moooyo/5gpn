@@ -12,6 +12,10 @@ test('settings page renders all config cards with zero CSP violations', async ({
   await expect(main.getByText('DoT 服务')).toBeVisible()
   await expect(main.getByText('控制台', { exact: true })).toBeVisible()
   await expect(main.getByText('127.0.0.1:443')).toBeVisible()
+  await expect(main.getByText('入口端口')).toBeVisible()
+  await expect(main.getByText(':5060', { exact: true })).toBeVisible()
+  await expect(main.getByText('TCP · Host/SNI')).toBeVisible()
+  await expect(main.getByText('UDP · 仅 QUIC')).toBeVisible()
   await expect(main.getByText('Telegram 机器人')).toBeVisible()
   await expect(main.getByText('上游 DNS')).toBeVisible()
   await expect(main.getByText('国内解析 ECS')).toBeVisible()
@@ -70,7 +74,33 @@ test('turning the Telegram bot toggle off disables it (mock accepts) and shows a
   await page.goto('/settings')
   await page.waitForLoadState('networkidle')
 
-  await page.getByRole('switch').click()
+  await page.getByRole('switch', { name: 'Telegram 机器人状态' }).click()
 
   await expect(page.getByText('已应用 Telegram 机器人配置。')).toBeVisible()
+})
+
+test('the Speedtest ingress module stays a draft until confirmation, then applies TCP and UDP together', async ({ page }) => {
+  await setupMockApiWithToken(page)
+  await page.goto('/settings')
+  await page.waitForLoadState('networkidle')
+
+  const card = page.getByTestId('ingress-ports-card')
+  const toggle = card.getByRole('switch', { name: '切换 Speedtest 兼容' })
+  await expect(toggle).not.toBeChecked()
+  await toggle.click()
+  await expect(toggle).toBeChecked()
+
+  const requestPromise = page.waitForRequest((request) =>
+    request.url().endsWith('/api/mihomo/ingress-modules/speedtest-5060') && request.method() === 'PUT',
+  )
+  await card.getByTestId('ingress-ports-save').click()
+  const dialog = page.getByRole('dialog', { name: '启用入口端口？' })
+  await expect(dialog.getByText(/云安全组/)).toBeVisible()
+  await dialog.getByRole('button', { name: '保存并应用' }).click()
+
+  const request = await requestPromise
+  const body = request.postDataJSON() as { enabled?: unknown; revision?: unknown }
+  expect(body.enabled).toBe(true)
+  expect(body.revision).toMatch(/^[0-9a-f]{64}$/)
+  await expect(page.getByText('已应用入口端口配置。')).toBeVisible()
 })

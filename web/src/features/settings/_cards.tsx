@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
-import { Badge, Button, Card, DataLine, Field, Input, Toggle, toast } from '../../components/ds'
+import { Link } from 'react-router-dom'
+import { Badge, Button, Card, ConfirmDialog, DataLine, Field, Input, Toggle, toast } from '../../components/ds'
 import { cn } from '../../lib/cn'
 import { api } from '../../lib/api/client'
-import type { CertStatus, ECSView, TGBotUpdate, TGBotView, UpstreamsView } from '../../lib/api/types'
+import { ApiError } from '../../lib/api/http'
+import type { CertStatus, ECSView, IngressModule, IngressModulesView, TGBotUpdate, TGBotView, UpstreamsView } from '../../lib/api/types'
 import { UpstreamGroupEditor } from './UpstreamGroupEditor'
 
 function errMessage(err: unknown, fallback: string): string {
@@ -95,7 +97,175 @@ export function ConsoleCard() {
   )
 }
 
-// ---- 3. Telegram Bot --------------------------------------------------------
+// ---- 3. Optional ingress ports -------------------------------------------
+
+function ingressDraft(modules: IngressModule[]): Record<string, boolean> {
+  return Object.fromEntries(modules.map((module) => [module.id, module.enabled]))
+}
+
+export function IngressPortsCard({
+  modules,
+  loadState,
+  onReload,
+  onSaved,
+}: {
+  modules: IngressModulesView | null
+  loadState: 'loading' | 'ready' | 'error'
+  onReload: () => Promise<IngressModulesView | null>
+  onSaved: (v: IngressModulesView) => void
+}) {
+  const { t } = useTranslation()
+  const [draft, setDraft] = useState<Record<string, boolean>>({})
+  const [saving, setSaving] = useState(false)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (modules) setDraft(ingressDraft(modules.modules))
+  }, [modules])
+
+  const changed =
+    modules?.modules.filter((module) => (draft[module.id] ?? module.enabled) !== module.enabled) ?? []
+  const enabling = changed.some((module) => draft[module.id])
+
+  async function save() {
+    if (!modules || changed.length === 0 || saving) return
+    setSaving(true)
+    setError(null)
+    try {
+      // The catalog currently has one fixed module. If it grows, the API must
+      // gain an atomic batch operation before the UI permits multi-module
+      // drafts; sequential writes would expose a partially applied selection.
+      if (changed.length !== 1) throw new Error(t('settings.ingressSaveFailed'))
+      let next = modules
+      for (const module of changed) {
+        next = await api.putIngressModule(module.id, !!draft[module.id], next.revision)
+      }
+      onSaved(next)
+      toast.success(t('settings.ingressSaved'))
+    } catch (err) {
+      const conflict = err instanceof ApiError && err.status === 409
+      if (conflict || (err instanceof ApiError && err.status === 502)) await onReload()
+      setError(conflict ? t('settings.ingressConflict') : errMessage(err, t('settings.ingressSaveFailed')))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Card className="p-[18px]" data-testid="ingress-ports-card">
+      <div className="mb-1 text-[13px] font-bold text-text-strong">{t('settings.ingressPorts')}</div>
+      <p className="mb-3 text-[10.5px] leading-relaxed text-text-faint">{t('settings.ingressPortsHint')}</p>
+
+      {loadState === 'loading' && !modules ? (
+        <div role="status" className="rounded-[10px] border border-divider bg-input/40 px-3 py-4 text-[10.5px] text-text-faint">
+          {t('common.loading')}
+        </div>
+      ) : null}
+      {loadState === 'error' ? (
+        <div
+          role="alert"
+          className="mb-3 flex flex-col gap-2 rounded-[10px] border border-red/25 bg-red/5 px-3 py-3 text-[10.5px] text-red sm:flex-row sm:items-center sm:justify-between"
+          data-testid="ingress-ports-load-error"
+        >
+          <span>{t('settings.ingressLoadFailed')}</span>
+          <Button type="button" variant="secondary" size="sm" onClick={() => void onReload()}>
+            {t('common.reload')}
+          </Button>
+        </div>
+      ) : null}
+
+      <div className="flex flex-col gap-3">
+        {modules?.modules.map((module) => {
+          const enabled = draft[module.id] ?? module.enabled
+          const pending = enabled !== module.enabled
+          const manageable = module.manageable && !saving && loadState === 'ready'
+          return (
+            <div key={module.id} className="rounded-[10px] border border-divider bg-input/40 p-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[12.5px] font-semibold text-text-mid">{t(`settings.ingressModules.${module.id}.name`)}</span>
+                    <Badge tone={pending ? 'amber' : enabled ? 'green' : 'neutral'}>
+                      {pending
+                        ? enabled
+                          ? t('settings.ingressPendingEnable')
+                          : t('settings.ingressPendingDisable')
+                        : enabled
+                          ? t('settings.ingressEnabled')
+                          : t('settings.ingressDisabled')}
+                    </Badge>
+                  </div>
+                  <p className="mt-1 text-[10.5px] leading-relaxed text-text-faint">
+                    {t(`settings.ingressModules.${module.id}.description`)}
+                  </p>
+                </div>
+                <Toggle
+                  checked={enabled}
+                  onCheckedChange={(checked) => {
+                    setDraft((current) => ({ ...current, [module.id]: checked }))
+                    setError(null)
+                  }}
+                  disabled={!manageable}
+                  aria-label={t('settings.ingressToggle', { name: t(`settings.ingressModules.${module.id}.name`) })}
+                />
+              </div>
+
+              <div className="mt-3 flex flex-col gap-2 rounded-[8px] border border-divider bg-card px-3 py-2.5 sm:flex-row sm:items-center">
+                <span className="border-b border-divider pb-2 font-mono text-[16px] font-bold text-primary sm:border-b-0 sm:border-r sm:pb-0 sm:pr-3">
+                  :{module.port}
+                </span>
+                <div className="flex flex-wrap gap-1.5" aria-label={t('settings.ingressProtocols')}>
+                  {module.networks.includes('tcp') ? <Badge tone="blue">{t('settings.ingressTcp')}</Badge> : null}
+                  {module.networks.includes('udp') ? <Badge tone="cyan">{t('settings.ingressUdp')}</Badge> : null}
+                </div>
+              </div>
+
+              {module.manageable ? null : (
+                <p className="mt-2 text-[10.5px] leading-relaxed text-text-faint">
+                  {t('settings.ingressCustomConfig')}{' '}
+                  <Link to="/mihomo-config" className="font-semibold text-primary underline-offset-2 hover:underline">
+                    {t('settings.ingressOpenConfig')}
+                  </Link>
+                </p>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      <p className="mt-3 text-[10.5px] leading-relaxed text-text-faint">{t('settings.ingressSafety')}</p>
+      {error ? (
+        <div role="alert" className="mt-3 rounded-lg border border-red/25 bg-red/5 px-3 py-2 text-[10.5px] leading-relaxed text-red" data-testid="ingress-ports-error">
+          {error}
+        </div>
+      ) : null}
+      <div className="mt-3 flex justify-end border-t border-divider pt-3">
+        <Button
+          type="button"
+          size="sm"
+          disabled={!modules || loadState !== 'ready' || saving || changed.length === 0}
+          onClick={() => setConfirmOpen(true)}
+          data-testid="ingress-ports-save"
+        >
+          {saving ? t('common.saving') : t('settings.ingressSave')}
+        </Button>
+      </div>
+
+      <ConfirmDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        title={enabling ? t('settings.ingressEnableConfirmTitle') : t('settings.ingressDisableConfirmTitle')}
+        description={enabling ? t('settings.ingressEnableConfirmBody') : t('settings.ingressDisableConfirmBody')}
+        confirmLabel={t('settings.ingressSave')}
+        cancelLabel={t('common.cancel')}
+        onConfirm={() => void save()}
+      />
+    </Card>
+  )
+}
+
+// ---- 4. Telegram Bot --------------------------------------------------------
 
 interface TgbotFormValues {
   token: string
@@ -209,7 +379,7 @@ export function TgbotCard({
   )
 }
 
-// ---- 4. 上游 DNS -------------------------------------------------------------
+// ---- 5. 上游 DNS -------------------------------------------------------------
 
 export function UpstreamsCard({
   upstreams,
@@ -275,7 +445,7 @@ export function UpstreamsCard({
   )
 }
 
-// ---- 5. ECS -----------------------------------------------------------------
+// ---- 6. ECS -----------------------------------------------------------------
 
 interface EcsFormValues {
   subnet: string
@@ -320,7 +490,7 @@ export function EcsCard({ ecs, onSaved }: { ecs: ECSView | null; onSaved: (v: EC
   )
 }
 
-// ---- 6. About strip ----------------------------------------------------------
+// ---- 7. About strip ----------------------------------------------------------
 
 export function AboutStrip({ version, className }: { version?: string; className?: string }) {
   const { t } = useTranslation()

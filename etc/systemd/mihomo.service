@@ -13,7 +13,8 @@ User=mihomo
 Group=mihomo
 UMask=0027
 LimitNOFILE=65535
-# Sandbox: leaf proxy — binds 80/443 tcp + 443 udp + loopback TLS external-controller
+# Sandbox: leaf proxy — binds 80/443/8080/8443 tcp + 443 udp by default;
+# optional catalog modules may add 5060 tcp/udp, plus loopback TLS external-controller
 # on the shared zash role certificate. mihomo dials both IPv4 and IPv6;
 # AF_NETLINK is REQUIRED — its UDP/QUIC DIRECT
 # dial path does a route-table lookup (route ip+net: netlinkrib) that fatals the

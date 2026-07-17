@@ -25,6 +25,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const PORT = parseInt(process.argv[2] ?? '4173', 10)
+const HOST = process.argv[3] ?? '127.0.0.1'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DIST = path.resolve(__dirname, '../../dist')
 const SEP = path.sep
@@ -116,8 +117,8 @@ const server = http.createServer((req, res) => {
   }
 })
 
-server.listen(PORT, '127.0.0.1', () => {
-  process.stdout.write(`listening on http://127.0.0.1:${PORT}\n`)
+server.listen(PORT, HOST, () => {
+  process.stdout.write(`listening on http://${HOST}:${PORT}\n`)
 })
 
 process.on('SIGTERM', () => { server.close(); process.exit(0) })

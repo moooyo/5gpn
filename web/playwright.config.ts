@@ -1,5 +1,9 @@
 import { defineConfig, devices } from '@playwright/test'
 
+const serverPort = process.env.PLAYWRIGHT_PORT ?? '4173'
+const serverHost = process.env.PLAYWRIGHT_HOST ?? '127.0.0.1'
+const serverURL = `http://${serverHost}:${serverPort}`
+
 /**
  * Playwright config for the 5gpn-dns console e2e gate.
  *
@@ -17,7 +21,7 @@ export default defineConfig({
   outputDir: 'e2e/test-results',
 
   use: {
-    baseURL: 'http://127.0.0.1:4173',
+    baseURL: serverURL,
     // Prevent a previously installed localhost PWA worker from serving stale
     // assets and producing results from an older production build.
     serviceWorkers: 'block',
@@ -26,8 +30,8 @@ export default defineConfig({
   },
 
   webServer: {
-    command: 'node e2e/server/csp-server.mjs 4173',
-    url: 'http://127.0.0.1:4173',
+    command: `node e2e/server/csp-server.mjs ${serverPort} ${serverHost}`,
+    url: serverURL,
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,
   },
@@ -39,7 +43,7 @@ export default defineConfig({
       use: {
         ...devices['Desktop Chrome'],
         viewport: { width: 1440, height: 900 },
-        baseURL: 'http://127.0.0.1:4173',
+        baseURL: serverURL,
       },
     },
     {
@@ -50,7 +54,7 @@ export default defineConfig({
         viewport: { width: 390, height: 844 },
         isMobile: true,
         hasTouch: true,
-        baseURL: 'http://127.0.0.1:4173',
+        baseURL: serverURL,
       },
     },
   ],

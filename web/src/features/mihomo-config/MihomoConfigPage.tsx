@@ -3,6 +3,8 @@ import { useTranslation } from 'react-i18next'
 import { RotateCcw, ShieldCheck } from 'lucide-react'
 import { Badge, Button, Card, CardHeader, ConfirmDialog, StatusDot, toast } from '../../components/ds'
 import { api } from '../../lib/api/client'
+import { ApiError } from '../../lib/api/http'
+import type { MihomoConfig } from '../../lib/api/types'
 import { relativeTime } from '../../format'
 import i18n from '../../i18n'
 
@@ -22,9 +24,11 @@ const INVARIANT_KEYS = ['controller', 'secret', 'gateway', 'dns', 'console', 'za
  *  invariants, listed read-only below, and refuses to let an edit
  *  delete, because those are the box's own lifelines: the controller, the
  *  gateway ingress, our DNS steering broker, the console/zash SNI
- *  split, and the anti-loop guard. A rejected PUT/reset comes back as a 400 whose
- *  message names the missing invariant or carries `mihomo -t`'s stderr
- *  verbatim; that message is surfaced as a PERSISTENT banner (not just a
+ *  split, and the anti-loop guard. PUT/reset also carry the exact-byte
+ *  revision loaded with the editor so another raw or module edit produces a
+ *  409 rather than a lost update. A validation rejection names the missing
+ *  invariant or carries `mihomo -t`'s stderr verbatim; that message is
+ *  surfaced as a PERSISTENT banner (not just a
  *  toast, which auto-dismisses) and the editor's text is left exactly as
  *  the operator typed it — they need to fix it and resubmit, never lose
  *  the edit. */
@@ -32,6 +36,7 @@ export default function MihomoConfigPage() {
   const { t } = useTranslation()
   const [text, setText] = useState('')
   const [persistedText, setPersistedText] = useState('')
+  const [revision, setRevision] = useState('')
   const [loading, setLoading] = useState(true)
   const [appliedAt, setAppliedAt] = useState<string | undefined>(undefined)
   const [controllerReachable, setControllerReachable] = useState(false)
@@ -39,18 +44,27 @@ export default function MihomoConfigPage() {
   const [applying, setApplying] = useState(false)
   const [resetting, setResetting] = useState(false)
   const [resetOpen, setResetOpen] = useState(false)
+  const [reloadOpen, setReloadOpen] = useState(false)
+  const [conflict, setConflict] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const dirty = !loading && text !== persistedText
+
+  const acceptSnapshot = useCallback((cfg: MihomoConfig, replaceEditor: boolean) => {
+    if (replaceEditor) setText(cfg.text)
+    setPersistedText(cfg.text)
+    setRevision(cfg.revision)
+    setAppliedAt(cfg.applied_at)
+    setControllerReachable(cfg.controller_reachable)
+    setControllerAuthenticated(cfg.controller_authenticated)
+  }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
       const cfg = await api.getMihomoConfig()
-      setText(cfg.text)
-      setPersistedText(cfg.text)
-      setAppliedAt(cfg.applied_at)
-      setControllerReachable(cfg.controller_reachable)
-      setControllerAuthenticated(cfg.controller_authenticated)
+      acceptSnapshot(cfg, true)
+      setConflict(false)
+      setError(null)
     } catch (err) {
       // Read the current catalog at failure time without making the data
       // loader depend on useTranslation()'s `t` identity. A language change
@@ -59,7 +73,7 @@ export default function MihomoConfigPage() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [acceptSnapshot])
   useEffect(() => void load(), [load])
 
   useEffect(() => {
@@ -77,18 +91,35 @@ export default function MihomoConfigPage() {
     setApplying(true)
     setError(null)
     try {
-      const cfg = await api.putMihomoConfig(submittedText)
+      const cfg = await api.putMihomoConfig(submittedText, revision)
       // If the operator keeps typing while PUT is in flight, preserve that
       // newer text: only move the persisted baseline to what was submitted.
-      setPersistedText(submittedText)
-      setAppliedAt(cfg.applied_at)
-      setControllerReachable(cfg.controller_reachable)
-      setControllerAuthenticated(cfg.controller_authenticated)
+      acceptSnapshot(cfg, false)
+      setConflict(false)
       toast.success(t('mihomoConfig.applyOk'))
     } catch (err) {
       // Deliberately does NOT touch `text` — a rejected apply must never
       // clobber the operator's in-progress edit (see the header comment).
-      const message = errMessage(err, t('mihomoConfig.applyFailed'))
+      const revisionConflict = err instanceof ApiError && err.status === 409
+      let requiresReload = revisionConflict
+      if (err instanceof ApiError && err.status === 502) {
+        try {
+          const current = await api.getMihomoConfig()
+          if (current.text === submittedText) {
+            acceptSnapshot(current, false)
+          } else {
+            requiresReload = true
+          }
+        } catch {
+          // Keep the submitted editor text and old snapshot if the follow-up
+          // read also fails. The persistent apply error remains visible.
+          requiresReload = true
+        }
+      }
+      setConflict(requiresReload)
+      const message = revisionConflict
+        ? t('mihomoConfig.revisionConflict')
+        : errMessage(err, t('mihomoConfig.applyFailed'))
       setError(message)
       toast.error(message)
     } finally {
@@ -100,15 +131,26 @@ export default function MihomoConfigPage() {
     setResetting(true)
     setError(null)
     try {
-      const cfg = await api.resetMihomoConfig()
-      setText(cfg.text)
-      setPersistedText(cfg.text)
-      setAppliedAt(cfg.applied_at)
-      setControllerReachable(cfg.controller_reachable)
-      setControllerAuthenticated(cfg.controller_authenticated)
+      const cfg = await api.resetMihomoConfig(revision)
+      acceptSnapshot(cfg, true)
+      setConflict(false)
       toast.success(t('mihomoConfig.resetOk'))
     } catch (err) {
-      const message = errMessage(err, t('mihomoConfig.resetFailed'))
+      const revisionConflict = err instanceof ApiError && err.status === 409
+      let requiresReload = revisionConflict
+      if (err instanceof ApiError && err.status === 502) {
+        try {
+          acceptSnapshot(await api.getMihomoConfig(), true)
+        } catch {
+          // Preserve the current editor when the final on-disk state cannot
+          // be read after a failed controller reload.
+          requiresReload = true
+        }
+      }
+      setConflict(requiresReload)
+      const message = revisionConflict
+        ? t('mihomoConfig.revisionConflict')
+        : errMessage(err, t('mihomoConfig.resetFailed'))
       setError(message)
       toast.error(message)
     } finally {
@@ -143,7 +185,7 @@ export default function MihomoConfigPage() {
           value={text}
           onChange={(e) => {
             setText(e.target.value)
-            setError(null)
+            if (!conflict) setError(null)
           }}
           disabled={loading}
           spellCheck={false}
@@ -153,10 +195,16 @@ export default function MihomoConfigPage() {
 
         {error ? (
           <div
-            className="mt-2 rounded-[10px] border border-red/30 bg-red/10 p-3 text-[11.5px] text-red"
+            className="mt-2 flex flex-col gap-2 rounded-[10px] border border-red/30 bg-red/10 p-3 text-[11.5px] text-red sm:flex-row sm:items-center sm:justify-between"
             data-testid="mihomo-config-error"
+            role="alert"
           >
-            {error}
+            <span>{error}</span>
+            {conflict ? (
+              <Button type="button" variant="secondary" size="sm" onClick={() => setReloadOpen(true)}>
+                {t('mihomoConfig.reloadCurrent')}
+              </Button>
+            ) : null}
           </div>
         ) : null}
 
@@ -165,7 +213,7 @@ export default function MihomoConfigPage() {
             type="button"
             variant="secondary"
             onClick={() => setResetOpen(true)}
-            disabled={loading || applying || resetting}
+            disabled={loading || !revision || conflict || applying || resetting}
             data-testid="mihomo-config-reset"
           >
             <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
@@ -174,7 +222,7 @@ export default function MihomoConfigPage() {
           <Button
             type="button"
             onClick={() => void handleApply()}
-            disabled={loading || applying || resetting}
+            disabled={loading || !revision || conflict || applying || resetting}
             data-testid="mihomo-config-apply"
           >
             <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
@@ -204,6 +252,15 @@ export default function MihomoConfigPage() {
         cancelLabel={t('common.cancel')}
         danger
         onConfirm={() => void handleReset()}
+      />
+      <ConfirmDialog
+        open={reloadOpen}
+        onOpenChange={setReloadOpen}
+        title={t('mihomoConfig.reloadConfirmTitle')}
+        description={t('mihomoConfig.reloadConfirmBody')}
+        confirmLabel={t('mihomoConfig.reloadCurrent')}
+        cancelLabel={t('common.cancel')}
+        onConfirm={() => void load()}
       />
     </div>
   )

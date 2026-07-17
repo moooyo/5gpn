@@ -28,7 +28,7 @@
 └────────────────────────────────────────────────────────────┘
         │ 境外 → 网关 IP                    │ 国内 → 真实 IP / 封锁 → NXDOMAIN
         ▼                                    ▼
-  mihomo (gateway tunnel 监听 TCP 80 / TCP+UDP 443)  客户端直连 / 不发起连接
+  mihomo (TCP 80/443/8080/8443; UDP 443)            Client direct / no connection
   · SNI == console → DIRECT 回环（API bearer）；SNI == zashboard →
     源 IP 命中 whitelist.txt 才 DIRECT，否则 REJECT-DROP
   · 其余 SNI/QUIC → mihomo 内置嗅探器（sniffer）取域名，经 5gpn-dns 的回环 Egress DNS
@@ -64,6 +64,8 @@
   - **进程内 Telegram bot**（`github.com/go-telegram/bot`，管理员门控，直接调 `Controller`、不走 HTTP/token）。
   - **Mihomo controller TLS**：zash 证书角色由 zashboard 与 mihomo controller 共用。`DNS_MIHOMO_CONTROLLER` 是回环拨号地址；客户端以派生的 `zash.<base>` 校验 TLS 身份并信任 `DNS_ZASH_CERT`。Mihomo v1.19.28 通过只读 `SAFE_PATHS=/etc/5gpn/cert/zash` 读取位于 `-d /etc/5gpn/mihomo` 外的证书。普通重装逐字节保留已通过校验的 operator-owned 配置；若 verified controller transport 无法构造，DNS 与其余控制面继续运行，Mihomo 健康、配置和代理端点返回 unavailable/503，绝不降级到明文 HTTP。
 - **出口由 mihomo 原生配置拥有**：被代理流量经 mihomo 的 `tunnel` 监听 + 内置嗅探器透明转发（不解密 TLS）；完整 `/etc/5gpn/mihomo/config.yaml` 由运维者管理，默认 `Proxies` 组只有 `DIRECT`，也可加入 mihomo 支持的应用层节点/组。DNS 策略只决定“是否进入网关”，绝不生成 mihomo 出口。仍禁止 TUN/TProxy、WireGuard、fwmark、策略路由表或把本项目变成客户端默认路由器。
+- **Explicit alternate Web ports**: the initial mihomo seed accepts TCP `:8080` and `:8443` in addition to `:80` and `:443`. HTTP Host or TLS SNI replaces the synthetic gateway destination while preserving the accepted port. This does not provide arbitrary-port, raw-UDP, no-SNI, or ECH-inner-name forwarding.
+- **Optional ingress modules**: Settings exposes a fixed, explicit catalog backed by the complete operator-owned mihomo YAML. The `speedtest-5060` module is disabled by default; enabling it adds TCP/UDP `:5060`, HTTP/TLS/QUIC sniffing, and port-scoped rejects for the loopback console panels after revision checks, full `mihomo -t` validation, backup, atomic publication, and hot-apply rollback. TCP needs a visible Host/SNI and UDP supports recognizable QUIC only — Ookla native UDP and other raw UDP remain unsupported. Because `5060` is also a common SIP port and the listener is an unauthenticated Host/SNI relay, restrict its sources with the provider security group or an independently managed firewall.
 - **无宿主防火墙**：项目不管理宿主 nftables；zashboard 的网络访问控制由 mihomo 来源白名单承担，console API 依赖 bearer 鉴权。
 - **Operational hardening**: certificate pairs hot-reload without a service restart; HTTP-01 stops mihomo only for the bounded ACME `:80` challenge; `kill -HUP` remains rules-only; privileged bot operations can request only pre-installed fixed units through narrowly authorized `systemctl` actions.
 - **Minimal runtime dependencies**: the repository contains no Python; Go has three direct dependencies (`miekg/dns`, `go-telegram/bot`, and `yaml.v3`), with YAML parsing kept as the explicit structural-validation boundary. Third-party gateway tools remain pinned prebuilt binaries, so no compiler toolchain is installed on the gateway.
@@ -80,6 +82,10 @@ curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh |
 ```
 
 > First installation requires the TUI. It collects the certificate mode, base domain, certificate email, and Cloudflare token when selected. `PUBLIC_IP` is detected automatically; the gateway and listener default to it. `5gpn configure` retains advanced public/gateway/listener overrides for special network layouts. The egress resolver defaults to `22.22.22.22`, ECS starts disabled for later WebUI configuration, and cache size is selected from the memory profile. Caller environment variables never override configuration; a first install without a TTY fails closed, while reinstall can reuse a valid `dns.env` non-interactively.
+
+> TCP `:8080` and `:8443` are present in new seeds and explicit `5gpn mihomo-reset` output. Reinstall preserves an existing valid operator-owned mihomo config byte-for-byte, so existing deployments must add the listeners and sniff ports manually or use the explicit reset path after reviewing its backup-and-replace behavior. Provider security groups or upstream firewalls must allow both TCP ports from the intended clients.
+
+> The `speedtest-5060` switch also requires the seven destination guards to precede every accepting mihomo rule. Older operator-owned configs are still preserved and may therefore show the module as custom/unmanageable until those guards are reordered manually or the reviewed seed is restored explicitly.
 
 安装器会先把固定版本的 5gpn-dns、Web、mihomo、zashboard 下载到 staging 并强制校验 SHA-256，再备份当前部署、原子发布并执行 readiness 探针；发布后失败会自动回滚。生产证书可选 Cloudflare DNS-01 或 HTTP-01，debug 模式使用隔离的自签证书。
 

@@ -44,9 +44,27 @@ export const api = {
   // means validation rejected the text and neither the on-disk config nor
   // the running mihomo instance was touched.
   getMihomoConfig: () => (MOCK ? mock.getMihomoConfig() : apiFetch<T.MihomoConfig>('/api/mihomo/config')),
-  putMihomoConfig: (text: string) =>
-    MOCK ? mock.putMihomoConfig(text) : apiFetch<T.MihomoConfig>('/api/mihomo/config', { method: 'PUT', body: JSON.stringify({ text }) }),
-  resetMihomoConfig: () => (MOCK ? mock.resetMihomoConfig() : apiFetch<T.MihomoConfig>('/api/mihomo/config/reset', { method: 'POST' })),
+  putMihomoConfig: (text: string, revision: string) =>
+    MOCK
+      ? mock.putMihomoConfig(text, revision)
+      : apiFetch<T.MihomoConfig>('/api/mihomo/config', { method: 'PUT', body: JSON.stringify({ text, revision }) }),
+  resetMihomoConfig: (revision: string) =>
+    MOCK
+      ? mock.resetMihomoConfig(revision)
+      : apiFetch<T.MihomoConfig>('/api/mihomo/config/reset', { method: 'POST', body: JSON.stringify({ revision }) }),
+  // Built-in optional ingress modules. The service owns the candidate
+  // validation and atomic config publication. Raw editor/reset and module
+  // writes all carry the same byte revision so neither surface can silently
+  // replace a newer edit from the other.
+  getIngressModules: () =>
+    MOCK ? mock.getIngressModules() : apiFetch<T.IngressModulesView>('/api/mihomo/ingress-modules'),
+  putIngressModule: (id: string, enabled: boolean, revision: string) =>
+    MOCK
+      ? mock.putIngressModule(id, enabled, revision)
+      : apiFetch<T.IngressModulesView>(`/api/mihomo/ingress-modules/${encodeURIComponent(id)}`, {
+          method: 'PUT',
+          body: JSON.stringify({ enabled, revision }),
+        }),
 
   // ---- unified policy rules ----------------------------------------------
   getPolicyRules: () => (MOCK ? mock.getPolicyRules() : apiFetch<T.PolicyRule[]>('/api/policy/rules')),

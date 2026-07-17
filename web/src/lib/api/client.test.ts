@@ -51,7 +51,7 @@ describe('api client — mihomo config', () => {
   it('getMihomoConfig GETs /api/mihomo/config and returns the config', async () => {
     vi.stubEnv('VITE_API_MOCK', '0')
     vi.resetModules()
-    const cfg = { text: 'external-controller: 127.0.0.1:9090\n', applied_at: '2026-07-14T00:00:00Z', controller_reachable: true, controller_authenticated: true }
+    const cfg = { text: 'external-controller: 127.0.0.1:9090\n', revision: 'r1', applied_at: '2026-07-14T00:00:00Z', controller_reachable: true, controller_authenticated: true }
     const f = vi.fn().mockResolvedValue(jsonResp(200, cfg))
     vi.stubGlobal('fetch', f)
     const { api } = await import('./client')
@@ -61,18 +61,18 @@ describe('api client — mihomo config', () => {
     expect(result).toEqual(cfg)
   })
 
-  it('putMihomoConfig PUTs {text} to /api/mihomo/config', async () => {
+  it('putMihomoConfig PUTs {text,revision} to /api/mihomo/config', async () => {
     vi.stubEnv('VITE_API_MOCK', '0')
     vi.resetModules()
     const text = 'external-controller: 127.0.0.1:9090\n'
-    const updated = { text, applied_at: '2026-07-14T01:00:00Z', controller_reachable: true, controller_authenticated: true }
+    const updated = { text, revision: 'r2', applied_at: '2026-07-14T01:00:00Z', controller_reachable: true, controller_authenticated: true }
     const f = vi.fn().mockResolvedValue(jsonResp(200, updated))
     vi.stubGlobal('fetch', f)
     const { api } = await import('./client')
-    const result = await api.putMihomoConfig(text)
+    const result = await api.putMihomoConfig(text, 'r1')
     expect(f.mock.calls[0][0]).toBe('/api/mihomo/config')
     expect(f.mock.calls[0][1].method).toBe('PUT')
-    expect(JSON.parse(f.mock.calls[0][1].body as string)).toEqual({ text })
+    expect(JSON.parse(f.mock.calls[0][1].body as string)).toEqual({ text, revision: 'r1' })
     expect(result).toEqual(updated)
   })
 
@@ -85,7 +85,7 @@ describe('api client — mihomo config', () => {
     const { ApiError } = await import('./http')
     let caught: unknown
     try {
-      await api.putMihomoConfig('no controller line')
+      await api.putMihomoConfig('no controller line', 'r1')
     } catch (err) {
       caught = err
     }
@@ -96,14 +96,36 @@ describe('api client — mihomo config', () => {
   it('resetMihomoConfig POSTs to /api/mihomo/config/reset', async () => {
     vi.stubEnv('VITE_API_MOCK', '0')
     vi.resetModules()
-    const reset = { text: 'seed text', applied_at: '2026-07-14T02:00:00Z', controller_reachable: true, controller_authenticated: true }
+    const reset = { text: 'seed text', revision: 'r2', applied_at: '2026-07-14T02:00:00Z', controller_reachable: true, controller_authenticated: true }
     const f = vi.fn().mockResolvedValue(jsonResp(200, reset))
     vi.stubGlobal('fetch', f)
     const { api } = await import('./client')
-    const result = await api.resetMihomoConfig()
+    const result = await api.resetMihomoConfig('r1')
     expect(f.mock.calls[0][0]).toBe('/api/mihomo/config/reset')
     expect(f.mock.calls[0][1].method).toBe('POST')
+    expect(JSON.parse(f.mock.calls[0][1].body as string)).toEqual({ revision: 'r1' })
     expect(result).toEqual(reset)
+  })
+})
+
+describe('api client — ingress modules', () => {
+  it('gets modules and updates one module with enabled and revision', async () => {
+    vi.stubEnv('VITE_API_MOCK', '0')
+    vi.resetModules()
+    const view = {
+      revision: 'r1',
+      modules: [{ id: 'speedtest-5060', port: 5060, networks: ['tcp', 'udp'], sniffers: ['http', 'tls', 'quic'], enabled: false, manageable: true }],
+    }
+    const f = vi.fn().mockResolvedValueOnce(jsonResp(200, view)).mockResolvedValueOnce(jsonResp(200, view))
+    vi.stubGlobal('fetch', f)
+    const { api } = await import('./client')
+
+    await expect(api.getIngressModules()).resolves.toEqual(view)
+    await expect(api.putIngressModule('speedtest-5060', true, 'r1')).resolves.toEqual(view)
+    expect(f.mock.calls[0][0]).toBe('/api/mihomo/ingress-modules')
+    expect(f.mock.calls[1][0]).toBe('/api/mihomo/ingress-modules/speedtest-5060')
+    expect(f.mock.calls[1][1].method).toBe('PUT')
+    expect(JSON.parse(f.mock.calls[1][1].body as string)).toEqual({ enabled: true, revision: 'r1' })
   })
 })
 
@@ -116,6 +138,7 @@ describe('api client — mihomo config mock ON (VITE_API_MOCK=1)', () => {
     expect(cfg.text).toContain('external-controller:')
     expect(cfg.controller_reachable).toBe(true)
     expect(cfg.controller_authenticated).toBe(true)
+    expect(cfg.revision).toBeTruthy()
   })
 
   it('putMihomoConfig round-trips a valid edit', async () => {
@@ -124,7 +147,7 @@ describe('api client — mihomo config mock ON (VITE_API_MOCK=1)', () => {
     const { api } = await import('./client')
     const before = await api.getMihomoConfig()
     const nextText = before.text + '\n# a harmless edit\n'
-    const updated = await api.putMihomoConfig(nextText)
+    const updated = await api.putMihomoConfig(nextText, before.revision)
     expect(updated.text).toBe(nextText)
     expect(await api.getMihomoConfig()).toEqual(updated)
   })
@@ -134,23 +157,44 @@ describe('api client — mihomo config mock ON (VITE_API_MOCK=1)', () => {
     vi.resetModules()
     const { api } = await import('./client')
     const { ApiError } = await import('./http')
-    await expect(api.putMihomoConfig('proxies: []\n')).rejects.toMatchObject({
+    const before = await api.getMihomoConfig()
+    await expect(api.putMihomoConfig('proxies: []\n', before.revision)).rejects.toMatchObject({
       status: 400,
       message: 'missing required infrastructure: controller',
     })
-    await expect(api.putMihomoConfig('proxies: []\n')).rejects.toBeInstanceOf(ApiError)
+    await expect(api.putMihomoConfig('proxies: []\n', before.revision)).rejects.toBeInstanceOf(ApiError)
   })
 
   it('resetMihomoConfig restores the seed after an edit', async () => {
     vi.stubEnv('VITE_API_MOCK', '1')
     vi.resetModules()
     const { api } = await import('./client')
-    const { text: seed } = await api.getMihomoConfig()
-    await api.putMihomoConfig(seed + '\n# edited\n')
+    const before = await api.getMihomoConfig()
+    const seed = before.text
+    const edited = await api.putMihomoConfig(seed + '\n# edited\n', before.revision)
     expect((await api.getMihomoConfig()).text).not.toBe(seed)
-    const reset = await api.resetMihomoConfig()
+    const reset = await api.resetMihomoConfig(edited.revision)
     expect(reset.text).toBe(seed)
     expect((await api.getMihomoConfig()).text).toBe(seed)
+  })
+})
+
+describe('api client — ingress modules mock ON (VITE_API_MOCK=1)', () => {
+  it('round-trips an enabled module and advances its revision', async () => {
+    vi.stubEnv('VITE_API_MOCK', '1')
+    vi.resetModules()
+    const { api } = await import('./client')
+    const before = await api.getIngressModules()
+    const updated = await api.putIngressModule('speedtest-5060', true, before.revision)
+    expect(updated.revision).not.toBe(before.revision)
+    expect(updated.modules[0]).toMatchObject({ id: 'speedtest-5060', enabled: true })
+  })
+
+  it('rejects a stale revision', async () => {
+    vi.stubEnv('VITE_API_MOCK', '1')
+    vi.resetModules()
+    const { api } = await import('./client')
+    await expect(api.putIngressModule('speedtest-5060', true, 'stale')).rejects.toMatchObject({ status: 409 })
   })
 })
 

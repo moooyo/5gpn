@@ -19,25 +19,72 @@ const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 // JSON body's `error` field into the thrown message) — callers don't need to
 // branch on mock-vs-live to handle the rejection path.
 const missingControllerMsg = 'missing required infrastructure: controller'
+let mihomoRevisionSequence = 1
+
+function advanceMihomoRevision(): void {
+  mihomoRevisionSequence++
+  const revision = mihomoRevisionSequence.toString(16).padStart(64, '0')
+  fixtures.mihomoConfig.revision = revision
+  fixtures.ingressModules.revision = revision
+}
 
 export async function getMihomoConfig(): Promise<T.MihomoConfig> {
   await delay(100)
   return { ...fixtures.mihomoConfig }
 }
-export async function putMihomoConfig(text: string): Promise<T.MihomoConfig> {
+export async function putMihomoConfig(text: string, revision: string): Promise<T.MihomoConfig> {
   await delay(150)
+  if (revision !== fixtures.mihomoConfig.revision) {
+    throw new ApiError(409, 'The mihomo configuration changed. Reload and merge your edit.')
+  }
   if (!text.includes('external-controller:')) {
     throw new ApiError(400, missingControllerMsg)
   }
   fixtures.mihomoConfig.text = text
   fixtures.mihomoConfig.applied_at = new Date().toISOString()
+  advanceMihomoRevision()
   return { ...fixtures.mihomoConfig }
 }
-export async function resetMihomoConfig(): Promise<T.MihomoConfig> {
+export async function resetMihomoConfig(revision: string): Promise<T.MihomoConfig> {
   await delay(150)
+  if (revision !== fixtures.mihomoConfig.revision) {
+    throw new ApiError(409, 'The mihomo configuration changed. Reload before restoring the default.')
+  }
   fixtures.mihomoConfig.text = fixtures.mihomoConfigDefaultText
   fixtures.mihomoConfig.applied_at = new Date().toISOString()
+  advanceMihomoRevision()
   return { ...fixtures.mihomoConfig }
+}
+
+// ---- optional ingress modules --------------------------------------------
+
+function ingressModulesView(): T.IngressModulesView {
+  return {
+    revision: fixtures.ingressModules.revision,
+    modules: fixtures.ingressModules.modules.map((module) => ({
+      ...module,
+      networks: [...module.networks],
+      sniffers: [...module.sniffers],
+    })),
+  }
+}
+
+export async function getIngressModules(): Promise<T.IngressModulesView> {
+  await delay(100)
+  return ingressModulesView()
+}
+
+export async function putIngressModule(id: string, enabled: boolean, revision: string): Promise<T.IngressModulesView> {
+  await delay(150)
+  if (revision !== fixtures.ingressModules.revision) {
+    throw new ApiError(409, 'The ingress configuration changed. Refresh and try again.')
+  }
+  const module = fixtures.ingressModules.modules.find((candidate) => candidate.id === id)
+  if (!module) throw new ApiError(404, 'Ingress module not found.')
+  if (!module.manageable) throw new ApiError(409, 'This module is managed by a custom mihomo configuration.')
+  module.enabled = enabled
+  advanceMihomoRevision()
+  return ingressModulesView()
 }
 
 // ---- Unified policy rules -------------------------------------------------

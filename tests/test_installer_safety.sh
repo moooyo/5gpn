@@ -243,14 +243,22 @@ else
     pass "panel loopback listener address is rejected"
 fi
 listeners="$(render_mihomo_listeners '10.20.30.40,10.20.30.41')"
-[[ "$(grep -c 'port: 443' <<<"$listeners")" == 2 \
-   && "$(grep -c 'port: 80' <<<"$listeners")" == 2 ]] \
-    && pass "two bind IPs render independent :80/:443 listener pairs" \
-    || fail "dynamic listener renderer did not emit two listener pairs"
+[[ "$(grep -Fc 'port: 443,' <<<"$listeners")" == 2 \
+   && "$(grep -Fc 'port: 80,' <<<"$listeners")" == 2 \
+   && "$(grep -Fc 'port: 8080,' <<<"$listeners")" == 2 \
+   && "$(grep -Fc 'port: 8443,' <<<"$listeners")" == 2 ]] \
+    && pass "two bind IPs render independent :80/:443/:8080/:8443 listener sets" \
+    || fail "dynamic listener renderer did not emit four listeners per bind IP"
 [[ "$listeners" == *'name: gateway,'* && "$listeners" == *'name: gateway-2,'* \
-   && "$listeners" == *'name: gateway80,'* && "$listeners" == *'name: gateway80-2,'* ]] \
+   && "$listeners" == *'name: gateway80,'* && "$listeners" == *'name: gateway80-2,'* \
+   && "$listeners" == *'name: gateway8080,'* && "$listeners" == *'name: gateway8080-2,'* \
+   && "$listeners" == *'name: gateway8443,'* && "$listeners" == *'name: gateway8443-2,'* ]] \
     && pass "listener names use the current gateway vocabulary" \
-    || fail "dynamic listener names are not gateway/gateway80"
+    || fail "dynamic listener names do not cover all seeded gateway ports"
+[[ "$(grep -Fc 'port: 8080, network: [tcp], target: 127.0.0.1:8080' <<<"$listeners")" == 2 \
+   && "$(grep -Fc 'port: 8443, network: [tcp], target: 127.0.0.1:8443' <<<"$listeners")" == 2 ]] \
+    && pass "alternate Web listeners preserve their TCP destination ports" \
+    || fail "alternate Web listeners lost TCP-only same-port targets"
 
 # Seed -> preserve byte-for-byte -> explicit validated reset with backup.
 MIHOMO_DIR="$TMP/mihomo"
@@ -269,6 +277,9 @@ BASE_DOMAIN=example.com
 MIHOMO_LISTEN_IPS=10.20.30.40
 render_mihomo_config >/dev/null
 config="$MIHOMO_DIR/config.yaml"
+[[ "$MIHOMO_SEED_PORTS_REQUIRED" == 1 ]] \
+    && pass "first-install seed requires alternate-port readiness" \
+    || fail "first-install seed did not enable alternate-port readiness"
 config_mode="$(stat -c %a "$config" 2>/dev/null || stat -f %Lp "$config")"
 [[ -s "$config" && ( "$POSIX_MODES" == 0 || "$config_mode" == 660 ) ]] \
     && pass "first install seeds a private mihomo config" \
@@ -281,9 +292,15 @@ printf '%s\n' '# operator edit must survive' >> "$config"
 before="$(sha256sum "$config" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$config" | awk '{print $1}')"
 render_mihomo_config >/dev/null
 after="$(sha256sum "$config" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$config" | awk '{print $1}')"
+[[ "$MIHOMO_SEED_PORTS_REQUIRED" == 0 ]] \
+    && pass "preserved operator config keeps alternate-port readiness optional" \
+    || fail "preserved operator config incorrectly requires seed-only ports"
 [[ "$before" == "$after" ]] && pass "normal render validates and preserves operator config bytes" \
     || fail "normal render overwrote operator config"
 render_mihomo_config --reset >/dev/null
+[[ "$MIHOMO_SEED_PORTS_REQUIRED" == 1 ]] \
+    && pass "explicit reset requires alternate-port readiness" \
+    || fail "explicit reset did not enable alternate-port readiness"
 if grep -Fq '# operator edit must survive' "$config"; then
     fail "explicit reset did not replace operator config"
 elif compgen -G "$config.bak.*" >/dev/null; then

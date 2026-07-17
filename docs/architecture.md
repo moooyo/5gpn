@@ -25,7 +25,7 @@ client
   |                         |
   | real origin address     | gateway address
   v                         v
-client direct          mihomo :80/:443 -- operator-defined application egress
+client direct          mihomo :80/:443/:8080/:8443 -- operator-defined application egress
 ```
 
 This is not a host router or VPN. The project does not install or manage TUN,
@@ -42,12 +42,49 @@ architecture.
 | `5gpn-dns` | `127.0.0.1:5354/udp` and `/tcp` | Egress DNS broker used by mihomo after hostname sniffing. |
 | `5gpn-dns` | `127.0.0.1:443/tcp` | Public HTTPS console assets and iOS profile download, plus the bearer-authenticated API. |
 | `5gpn-dns` | `127.0.0.2:443/tcp` | HTTPS zashboard static files and its controller proxy. |
-| mihomo | configured local IPv4 addresses on `:80/tcp` and `:443/tcp+udp` | SNI/HTTP/QUIC ingress for traffic steered to the gateway. |
+| mihomo | configured local IPv4 addresses on TCP `:80`, `:443`, `:8080`, and `:8443`, plus UDP `:443` | HTTP/TLS/QUIC ingress for traffic steered to the gateway. |
 | mihomo | `127.0.0.1:9090/tcp` | TLS-only external controller. |
 
 There is no public DoH listener and no client-facing plain DNS listener on
 `:53`. Those transports must not be reintroduced. The debug DNS and egress
 broker addresses must reject non-loopback or non-IPv4 configuration.
+
+The initial seed's alternate Web ingress is finite and explicit. TCP `:8080`
+and `:8443` are accepted only so the HTTP and TLS sniffers can replace the
+synthetic gateway destination with the visible Host or SNI while retaining the
+same destination port. They do not provide arbitrary-port interception, raw
+UDP forwarding, or routing when no usable hostname is visible. QUIC remains
+limited to UDP `:443`. Port-scoped rejects prevent the public console and
+zashboard hostnames from exposing unrelated loopback services on `:80`,
+`:8080`, or `:8443`.
+
+The authenticated console exposes a finite ingress-module catalog for optional
+ports. Modules are disabled unless their exact listener and sniffer shape is
+already present in the operator configuration. The first module is
+`speedtest-5060`: an explicit opt-in that adds TCP and UDP `:5060` on every
+canonical gateway listener address, retains destination port `5060`, and
+enables HTTP, TLS, and QUIC sniffing on that port. The module also inserts exact
+console and zashboard `DOMAIN` plus `DST-PORT,5060` drop rules after the seven
+destination guards and before either local service's accepting rule. This
+prevents a sniffed service hostname from using the `hosts` mapping to reach a
+loopback `:5060` endpoint. TCP forwarding still requires
+a visible HTTP Host or TLS SNI. UDP forwarding still requires recognizable QUIC
+with a visible SNI; Ookla's native UDP protocol, SIP, and other raw UDP cannot
+recover the original server after DNS steering and therefore fail closed. The
+module is manageable only when the gateway, loopback, RFC1918, CGNAT, and
+link-local destination guards precede every accepting rule. While enabled it
+also owns exact port-scoped rejects for the console and zashboard hostnames, so
+`:5060` cannot expose either loopback panel.
+Because `5060` is also a common SIP port, raw TCP scans can feed repeated
+un-sniffable connections into mihomo's failure cache and temporarily degrade
+valid hostname sniffing on the shared loopback target. This is another reason
+the module is opt-in and should be source-restricted.
+
+Enabling an ingress module creates an unauthenticated public Host/SNI relay on
+the selected port. 5gpn does not manage a host firewall, so the operator must
+restrict source access with the provider security group or an independently
+managed firewall. A module is never enabled automatically during install,
+reinstall, configure, daemon startup, or reload.
 
 The `5gpn-dns` systemd unit is softly ordered after mihomo (`Wants`/`After`),
 not coupled with `Requires` or `BindsTo`: a controller or data-plane failure
@@ -139,7 +176,24 @@ The raw console editor follows the same validation and atomic-publication
 rules. Required infrastructure invariants cannot be edited away: the plaintext
 controller remains disabled, the TLS controller stays on loopback, the shared
 zash certificate paths and controller secret remain fixed, and the egress DNS
-broker remains loopback.
+broker remains loopback. GET returns a SHA-256 revision of the original config
+bytes; raw PUT and console reset must submit that revision. The daemon compares
+it under the shared store lock and again after `mihomo -t`, immediately before
+publication, so stale editors and external changes observed before that final
+check are rejected with `409`. A manual editor does not honor the daemon's
+process-local mutex and can still race the final atomic rename; operators must
+coordinate out-of-band writes.
+
+The ingress-module UI is a narrow, one-shot structural editor over this same
+complete file, not a second configuration source. It derives state from the
+current YAML, accepts only fixed catalog entries, and modifies a module only
+when all of its listener and sniffer objects match the canonical shape. Each
+write is protected by a revision of the original bytes, validates the complete
+candidate, retains a backup, atomically publishes it, and hot-applies it. A
+stale revision or partial/custom module shape is rejected. A failed hot apply
+restores and reapplies the previous bytes. There is no module state file,
+generated region, startup reconciliation, or daemon-owned YAML fragment; the
+result remains fully operator-owned and visible in the raw editor.
 
 New seeds use mihomo's native TLS controller only:
 
@@ -478,6 +532,12 @@ mobile uses card rows with a drawer sidebar. Route metadata is centralized in
 `web/src/app/navigation.ts`. The built `web/dist` directory is a release
 artifact, not committed source; PWA, initial asset, lazy-route, and font budgets
 remain enforced.
+
+Settings may expose the fixed mihomo ingress-module catalog. A module toggle is
+only a local draft until the operator reviews a capability and exposure warning
+and explicitly confirms the apply. The UI must distinguish a bound UDP socket
+from supported raw UDP forwarding, show revision/custom-config conflicts, and
+state that external firewall policy remains the operator's responsibility.
 
 ## Verification boundary
 

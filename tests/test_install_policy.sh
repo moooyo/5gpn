@@ -183,6 +183,14 @@ printf '%s' "$mc_fn" | grep -Eq -- '(^|[[:space:]])(-k|--insecure)([[:space:]]|$
 pmr_fn="$(sed -n '/^probe_mihomo_ready()/,/^}/p' "$INSTALL")"
 printf '%s' "$pmr_fn" | grep -Fq 'mihomo_controller_curl "/version"' \
     || fail "probe_mihomo_ready must call mihomo_controller_curl for the TLS controller probe"
+printf '%s' "$pmr_fn" | grep -Fq 'local -a tcp_ports=(80 443)' \
+    || fail "probe_mihomo_ready must always require the baseline TCP ports"
+printf '%s' "$pmr_fn" | grep -Fq 'tcp_ports+=(8080 8443)' \
+    || fail "probe_mihomo_ready must conditionally require the alternate seed ports"
+printf '%s' "$pmr_fn" | grep -Fq '${MIHOMO_SEED_PORTS_REQUIRED:-0}' \
+    || fail "probe_mihomo_ready must default alternate-port readiness to disabled"
+printf '%s' "$pmr_fn" | grep -Fq 'ss -H -lun 2>/dev/null | grep -Fq "${ip}:443 "' \
+    || fail "probe_mihomo_ready must retain the UDP :443 readiness probe"
 # manage_menu must expose add/remove allowlist entries as menu ops.
 mm_fn="$(sed -n '/^manage_menu()/,/^}/p' "$INSTALL")"
 printf '%s' "$mm_fn" | grep -Fq 'add_allow_ip' \
@@ -337,6 +345,10 @@ grep -Fq '__MIHOMO_LISTENERS__'                 "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing dynamic listener placeholder"
 grep -Fq 'target: 127.0.0.1:443'               "$INSTALL" \
     || fail "install.sh: dynamic listener renderer missing gateway loopback target"
+grep -Fq 'target: 127.0.0.1:8080'              "$INSTALL" \
+    || fail "install.sh: dynamic listener renderer missing :8080 same-port target"
+grep -Fq 'target: 127.0.0.1:8443'              "$INSTALL" \
+    || fail "install.sh: dynamic listener renderer missing :8443 same-port target"
 grep -Fq 'name: gateway%s'                       "$INSTALL" \
     || fail "install.sh: dynamic listener renderer missing gateway listener name"
 grep -Fq 'udp://127.0.0.1:5354'                "$MIHOMO_TMPL" \
@@ -354,6 +366,10 @@ grep -Fq 'IP-CIDR,__GATEWAY_IP__/32,REJECT-DROP' "$MIHOMO_TMPL" \
 
 # render_mihomo_config generates a strong mixed secret (base64), not the old hex.
 rmc_fn="$(sed -n '/^render_mihomo_config()/,/^}/p' "$INSTALL")"
+printf '%s' "$rmc_fn" | grep -Fq 'MIHOMO_SEED_PORTS_REQUIRED=0' \
+    || fail "render_mihomo_config must clear the in-process seed-port readiness flag on entry"
+printf '%s' "$rmc_fn" | grep -Fq 'MIHOMO_SEED_PORTS_REQUIRED=1' \
+    || fail "render_mihomo_config must require seed-port readiness after publishing a seed"
 printf '%s' "$rmc_fn" | grep -Fq 'openssl rand -base64 24' \
     || fail "render_mihomo_config must generate the controller secret via openssl rand -base64 24 (strong mixed secret, design §5.1)"
 printf '%s' "$rmc_fn" | grep -Fq 'openssl rand -hex 16' \

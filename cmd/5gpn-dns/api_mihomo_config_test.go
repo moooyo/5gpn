@@ -22,16 +22,20 @@ func TestMihomoBinaryPath(t *testing.T) {
 // recorded so tests can assert the validation ran against a SCRATCH file,
 // never the live config path.
 type fakeMihomoTester struct {
-	err   error
-	calls int
-	lastP string
-	lastD string
+	err    error
+	calls  int
+	lastP  string
+	lastD  string
+	onTest func()
 }
 
 func (f *fakeMihomoTester) Test(_ context.Context, path, dir string) error {
 	f.calls++
 	f.lastP = path
 	f.lastD = dir
+	if f.onTest != nil {
+		f.onTest()
+	}
 	return f.err
 }
 
@@ -67,6 +71,24 @@ type mihomoTestFixture struct {
 	ctl    *fakeMihomoController
 	infra  InfraParams
 	golden string
+}
+
+func mihomoConfigPutBody(t *testing.T, text, revision string) []byte {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"text": text, "revision": revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func mihomoConfigResetBody(t *testing.T, revision string) []byte {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"revision": revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
 }
 
 // newMihomoConfigTestFixture builds a ControlServer wired for
@@ -108,6 +130,7 @@ func TestMihomoConfigAPI_Get(t *testing.T) {
 	}
 	var resp struct {
 		Text                    string `json:"text"`
+		Revision                string `json:"revision"`
 		ControllerReachable     bool   `json:"controller_reachable"`
 		ControllerAuthenticated bool   `json:"controller_authenticated"`
 		AppliedAt               string `json:"applied_at"`
@@ -117,6 +140,9 @@ func TestMihomoConfigAPI_Get(t *testing.T) {
 	}
 	if resp.Text != fx.golden {
 		t.Fatalf("text mismatch:\n--- got ---\n%s\n--- want ---\n%s", resp.Text, fx.golden)
+	}
+	if resp.Revision != mihomoConfigRevision(fx.golden) {
+		t.Fatalf("revision=%q want SHA-256 of original config bytes", resp.Revision)
 	}
 	if !resp.ControllerReachable {
 		t.Fatalf("expected controller_reachable=true (fake reports reachable)")
@@ -144,7 +170,7 @@ func TestMihomoConfigAPI_Put_Valid(t *testing.T) {
 	fx := newMihomoConfigTestFixture(t)
 
 	newText := fx.golden + "\n# a harmless trailing comment\n"
-	body, _ := json.Marshal(map[string]string{"text": newText})
+	body := mihomoConfigPutBody(t, newText, mihomoConfigRevision(fx.golden))
 	rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/config", body, fx.token, true)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
@@ -155,6 +181,7 @@ func TestMihomoConfigAPI_Put_Valid(t *testing.T) {
 	// editor types PUT/reset as MihomoConfig and refreshes its view from it.
 	var putResp struct {
 		Text                string `json:"text"`
+		Revision            string `json:"revision"`
 		AppliedAt           string `json:"applied_at"`
 		ControllerReachable bool   `json:"controller_reachable"`
 	}
@@ -163,6 +190,9 @@ func TestMihomoConfigAPI_Put_Valid(t *testing.T) {
 	}
 	if putResp.Text != newText {
 		t.Fatalf("PUT success text=%q want %q", putResp.Text, newText)
+	}
+	if putResp.Revision != mihomoConfigRevision(newText) {
+		t.Fatalf("PUT success revision=%q want candidate revision", putResp.Revision)
 	}
 	if !putResp.ControllerReachable {
 		t.Fatalf("PUT success should report controller_reachable=true (fake reachable)")
@@ -230,7 +260,7 @@ func TestMihomoConfigAPI_Put_MissingController(t *testing.T) {
 	fx := newMihomoConfigTestFixture(t)
 
 	broken := strings.Replace(fx.golden, "external-controller-tls: 127.0.0.1:9090\n", "", 1)
-	body, _ := json.Marshal(map[string]string{"text": broken})
+	body := mihomoConfigPutBody(t, broken, mihomoConfigRevision(fx.golden))
 	rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/config", body, fx.token, true)
 
 	if rec.Code != http.StatusBadRequest {
@@ -271,7 +301,7 @@ func TestMihomoConfigAPI_Put_FailsMihomoTest(t *testing.T) {
 	// This is valid YAML and preserves every infrastructure invariant. The fake
 	// tester is therefore the only layer that can reject it.
 	newText := fx.golden + "\nexperimental-test-option: true\n"
-	body, _ := json.Marshal(map[string]string{"text": newText})
+	body := mihomoConfigPutBody(t, newText, mihomoConfigRevision(fx.golden))
 	rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/config", body, fx.token, true)
 
 	if rec.Code != http.StatusBadRequest {
@@ -305,7 +335,7 @@ func TestMihomoConfigAPI_Put_FailsMihomoTest(t *testing.T) {
 func TestMihomoConfigAPI_Put_RejectsDuplicateKeyBeforeMihomoTest(t *testing.T) {
 	fx := newMihomoConfigTestFixture(t)
 	duplicate := strings.Replace(fx.golden, "secret: s3cr3t\n", "secret: s3cr3t\nsecret: attacker\n", 1)
-	body, _ := json.Marshal(map[string]string{"text": duplicate})
+	body := mihomoConfigPutBody(t, duplicate, mihomoConfigRevision(fx.golden))
 	rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/config", body, fx.token, true)
 
 	if rec.Code != http.StatusBadRequest {
@@ -345,7 +375,7 @@ func TestMihomoConfigAPI_Put_ApplyFails_DiskStillUpdated(t *testing.T) {
 	fx.ctl.putErr = errors.New("dial tcp 127.0.0.1:9090: connect: connection refused")
 
 	newText := fx.golden + "\n# a harmless trailing comment\n"
-	body, _ := json.Marshal(map[string]string{"text": newText})
+	body := mihomoConfigPutBody(t, newText, mihomoConfigRevision(fx.golden))
 	rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/config", body, fx.token, true)
 
 	if rec.Code != http.StatusBadGateway {
@@ -371,6 +401,168 @@ func TestMihomoConfigAPI_Put_ApplyFails_DiskStillUpdated(t *testing.T) {
 	}
 }
 
+func TestMihomoConfigAPI_Put_RequiresStrictRevisionBody(t *testing.T) {
+	fx := newMihomoConfigTestFixture(t)
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "missing revision", body: `{"text":"candidate"}`},
+		{name: "missing text", body: `{"revision":"` + mihomoConfigRevision(fx.golden) + `"}`},
+		{name: "invalid revision", body: `{"text":"candidate","revision":"nope"}`},
+		{name: "unknown field", body: `{"text":"candidate","revision":"` + mihomoConfigRevision(fx.golden) + `","extra":true}`},
+		{name: "multiple values", body: `{"text":"candidate","revision":"` + mihomoConfigRevision(fx.golden) + `"} {}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/config", []byte(tc.body), fx.token, true)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d want 400 body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	if got, _ := fx.store.Read(); got != fx.golden {
+		t.Fatal("invalid request body changed config")
+	}
+	if fx.tester.calls != 0 || fx.ctl.putCalls != 0 {
+		t.Fatalf("invalid request body reached validator/controller: %d/%d", fx.tester.calls, fx.ctl.putCalls)
+	}
+}
+
+func TestMihomoConfigAPI_Put_DetectsExternalEditDuringValidation(t *testing.T) {
+	fx := newMihomoConfigTestFixture(t)
+	externalText := fx.golden + "\n# external edit during validation\n"
+	fx.tester.onTest = func() {
+		if err := os.WriteFile(fx.store.Path(), []byte(externalText), 0o660); err != nil {
+			t.Errorf("external edit: %v", err)
+		}
+	}
+	candidate := fx.golden + "\n# raw editor candidate\n"
+	rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/config", mihomoConfigPutBody(t, candidate, mihomoConfigRevision(fx.golden)), fx.token, true)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d want 409 body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Revision string `json:"revision"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Revision != mihomoConfigRevision(externalText) {
+		t.Fatalf("revision=%q want external edit revision", resp.Revision)
+	}
+	if got, _ := fx.store.Read(); got != externalText {
+		t.Fatal("raw candidate overwrote external edit made during validation")
+	}
+	if fx.tester.calls != 1 || fx.ctl.putCalls != 0 {
+		t.Fatalf("validation/controller calls=%d/%d want 1/0", fx.tester.calls, fx.ctl.putCalls)
+	}
+}
+
+func TestMihomoConfigAPI_StaleRawPutAfterIngressModuleUpdate(t *testing.T) {
+	fx := newMihomoConfigTestFixture(t)
+	rawGet := doAPI(fx.cs, http.MethodGet, "/api/mihomo/config", nil, fx.token, true)
+	var raw struct {
+		Revision string `json:"revision"`
+	}
+	if err := json.Unmarshal(rawGet.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	modules := getIngressModules(t, fx)
+	enableBody, _ := json.Marshal(map[string]any{"enabled": true, "revision": modules.Revision})
+	enabledRec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/ingress-modules/"+speedtestModuleID, enableBody, fx.token, true)
+	if enabledRec.Code != http.StatusOK {
+		t.Fatalf("enable status=%d body=%s", enabledRec.Code, enabledRec.Body.String())
+	}
+	enabledText, err := fx.store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/config", mihomoConfigPutBody(t, fx.golden+"\n# stale raw edit\n", raw.Revision), fx.token, true)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("stale raw PUT status=%d want 409 body=%s", rec.Code, rec.Body.String())
+	}
+	var conflict struct {
+		Revision string `json:"revision"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &conflict); err != nil {
+		t.Fatal(err)
+	}
+	if conflict.Revision != mihomoConfigRevision(enabledText) {
+		t.Fatalf("conflict revision=%q want enabled config revision", conflict.Revision)
+	}
+	if got, _ := fx.store.Read(); got != enabledText {
+		t.Fatal("stale raw PUT overwrote ingress module update")
+	}
+	if view := analyzeSpeedtestModule(enabledText, fx.infra).View; !view.Enabled {
+		t.Fatalf("module not retained: %+v", view)
+	}
+	if fx.tester.calls != 1 || fx.ctl.putCalls != 1 {
+		t.Fatalf("stale raw PUT reached validator/controller: %d/%d", fx.tester.calls, fx.ctl.putCalls)
+	}
+}
+
+func TestMihomoConfigAPI_StaleResetAfterIngressModuleUpdate(t *testing.T) {
+	fx := newMihomoConfigTestFixture(t)
+	t.Setenv("DNS_BASE_DOMAIN", "5gpn.test")
+	t.Setenv("DNS_MIHOMO_LISTEN_IPS", "203.0.113.10")
+	t.Setenv("DNS_GATEWAY_IP", fx.infra.GatewayIP)
+	t.Setenv("DNS_MIHOMO_SECRET", "s3cr3t")
+
+	rawRevision := mihomoConfigRevision(fx.golden)
+	modules := getIngressModules(t, fx)
+	enableBody, _ := json.Marshal(map[string]any{"enabled": true, "revision": modules.Revision})
+	enabledRec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/ingress-modules/"+speedtestModuleID, enableBody, fx.token, true)
+	if enabledRec.Code != http.StatusOK {
+		t.Fatalf("enable status=%d body=%s", enabledRec.Code, enabledRec.Body.String())
+	}
+	enabledText, err := fx.store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := doAPI(fx.cs, http.MethodPost, "/api/mihomo/config/reset", mihomoConfigResetBody(t, rawRevision), fx.token, true)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("stale reset status=%d want 409 body=%s", rec.Code, rec.Body.String())
+	}
+	var conflict struct {
+		Revision string `json:"revision"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &conflict); err != nil {
+		t.Fatal(err)
+	}
+	if conflict.Revision != mihomoConfigRevision(enabledText) {
+		t.Fatalf("conflict revision=%q want enabled config revision", conflict.Revision)
+	}
+	if got, _ := fx.store.Read(); got != enabledText {
+		t.Fatal("stale reset overwrote ingress module update")
+	}
+	if view := analyzeSpeedtestModule(enabledText, fx.infra).View; !view.Enabled {
+		t.Fatalf("module not retained: %+v", view)
+	}
+	if fx.tester.calls != 1 || fx.ctl.putCalls != 1 {
+		t.Fatalf("stale reset reached validator/controller: %d/%d", fx.tester.calls, fx.ctl.putCalls)
+	}
+}
+
+func TestMihomoConfigAPI_Reset_RequiresStrictRevisionBody(t *testing.T) {
+	fx := newMihomoConfigTestFixture(t)
+	tests := []string{
+		``,
+		`{}`,
+		`{"revision":"nope"}`,
+		`{"revision":"` + mihomoConfigRevision(fx.golden) + `","extra":true}`,
+	}
+	for _, body := range tests {
+		rec := doAPI(fx.cs, http.MethodPost, "/api/mihomo/config/reset", []byte(body), fx.token, true)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("body=%q status=%d want 400 response=%s", body, rec.Code, rec.Body.String())
+		}
+	}
+	if fx.tester.calls != 0 || fx.ctl.putCalls != 0 {
+		t.Fatalf("invalid reset reached validator/controller: %d/%d", fx.tester.calls, fx.ctl.putCalls)
+	}
+}
+
 // TestMihomoConfigAPI_Reset restores the seed default: it should overwrite a
 // broken on-disk config and successfully re-apply it.
 func TestMihomoConfigAPI_Reset(t *testing.T) {
@@ -386,7 +578,7 @@ func TestMihomoConfigAPI_Reset(t *testing.T) {
 		t.Fatalf("seed broken config: %v", err)
 	}
 
-	rec := doAPI(fx.cs, http.MethodPost, "/api/mihomo/config/reset", nil, fx.token, true)
+	rec := doAPI(fx.cs, http.MethodPost, "/api/mihomo/config/reset", mihomoConfigResetBody(t, mihomoConfigRevision("garbage: not a real config")), fx.token, true)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}

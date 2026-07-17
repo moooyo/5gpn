@@ -2,8 +2,8 @@
 # 5gpn installer / orchestrator (DNS-steering architecture).
 #
 #   client DoT:853 (the ONLY DNS transport) -> 5gpn-dns (NXDOMAIN for block,
-#   real IP for direct, gateway IP for proxy/foreign) -> mihomo (:443/:80)
-#   sniffs the SNI
+#   real IP for direct, gateway IP for proxy/foreign) -> mihomo
+#   (:80/:443/:8080/:8443) sniffs HTTP Host or TLS SNI
 #   (sniffer override-destination), the loopback DNS broker re-resolves the real
 #   IP via DNS_EGRESS_RESOLVER, then egresses through its operator-owned policy.
 #   mihomo also SNI-splits the panels
@@ -805,6 +805,8 @@ render_mihomo_listeners() {
         [[ "$idx" -gt 1 ]] && suffix="-${idx}"
         printf '  - {name: gateway%s, type: tunnel, listen: %s, port: 443, network: [tcp, udp], target: 127.0.0.1:443}\n' "$suffix" "$ip"
         printf '  - {name: gateway80%s, type: tunnel, listen: %s, port: 80, network: [tcp], target: 127.0.0.1:80}\n' "$suffix" "$ip"
+        printf '  - {name: gateway8080%s, type: tunnel, listen: %s, port: 8080, network: [tcp], target: 127.0.0.1:8080}\n' "$suffix" "$ip"
+        printf '  - {name: gateway8443%s, type: tunnel, listen: %s, port: 8443, network: [tcp], target: 127.0.0.1:8443}\n' "$suffix" "$ip"
     done < <(printf '%s\n' "$ips" | tr ',' '\n')
 }
 
@@ -1770,6 +1772,7 @@ persist_mihomo_secret() {
 # old file, fsyncs, and atomically renames it into place.
 render_mihomo_config() {
     local mode="${1:-seed}" config="${MIHOMO_DIR}/config.yaml" secret=""
+    MIHOMO_SEED_PORTS_REQUIRED=0
     install -d -g "$MIHOMO_SERVICE_USER" -m 2770 "$MIHOMO_DIR"
     seed_mihomo_whitelist
 
@@ -1840,6 +1843,7 @@ render_mihomo_config() {
         || { rm -f -- "$candidate"; err "Could not atomically publish the mihomo config candidate."; return 1; }
     sync -f "$MIHOMO_DIR" 2>/dev/null || true
     persist_mihomo_secret "$secret"
+    MIHOMO_SEED_PORTS_REQUIRED=1
 
     ok "mihomo config ${mode/--/} candidate validated and atomically installed at $config."
 }
@@ -3338,6 +3342,8 @@ verify_console_endpoint() {
 probe_mihomo_ready() {
     systemctl is-active --quiet mihomo || return 1
     local secret ip port
+    local -a tcp_ports=(80 443)
+    [[ "${MIHOMO_SEED_PORTS_REQUIRED:-0}" == 1 ]] && tcp_ports+=(8080 8443)
     secret="$(cfg_get DNS_MIHOMO_SECRET)"
     local -a curl_args=(--fail --silent --show-error --max-time 2 -o /dev/null)
     [[ -n "$secret" ]] && curl_args+=(-H "Authorization: Bearer $secret")
@@ -3346,7 +3352,7 @@ probe_mihomo_ready() {
     command -v ss >/dev/null 2>&1 || return 1
     while IFS= read -r ip; do
         [[ -n "$ip" ]] || continue
-        for port in 80 443; do
+        for port in "${tcp_ports[@]}"; do
             ss -H -ltn 2>/dev/null | grep -Fq "${ip}:${port} " || return 1
         done
         ss -H -lun 2>/dev/null | grep -Fq "${ip}:443 " || return 1
@@ -4050,9 +4056,10 @@ Domains + certificates: ONE base domain and ONE scoped Let's Encrypt lineage.
   disabled until the Certbot lineage is repaired.
 
 There is NO host firewall management: use your provider's security
-group if you need one. The console SPA and /ios/ are public while /api/* requires
-the bearer token. Zashboard remains limited to source IPs in mihomo's
-whitelist.txt allowlist.
+group if you need one. New/reset mihomo seeds require client reachability to
+TCP 80, 443, 8080, and 8443 plus UDP 443. The console SPA and /ios/ are public
+while /api/* requires the bearer token. Zashboard remains limited to source IPs
+in mihomo's whitelist.txt allowlist.
 
   TUI configuration:
     certificate mode/email, base domain, public/gateway/listener IPv4,

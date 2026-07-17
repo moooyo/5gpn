@@ -240,6 +240,8 @@ func TestAPIRoutes_RequireAuth(t *testing.T) {
 		{http.MethodPut, "/api/ecs"},
 		{http.MethodGet, "/api/tgbot"},
 		{http.MethodPut, "/api/tgbot"},
+		{http.MethodGet, "/api/mihomo/ingress-modules"},
+		{http.MethodPut, "/api/mihomo/ingress-modules/speedtest-5060"},
 	}
 
 	for _, rt := range routes {

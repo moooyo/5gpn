@@ -44,9 +44,10 @@ sudo cp -a /etc/5gpn/mihomo/config.yaml /tmp/mihomo-config.before
   - `:853/tcp` owned by `5gpn-dns`;
   - `127.0.0.1:5353/udp` and `127.0.0.1:5354/tcp+udp`;
   - console `127.0.0.1:443/tcp`, zashboard `127.0.0.2:443/tcp`;
-  - mihomo `:80/tcp` and `:443/tcp+udp` on every configured local listen IP.
-- [ ] Nothing listens publicly on DNS `:53`, DoH `:8443`, or a standalone
-  profile port.
+  - mihomo TCP `:80`, `:443`, `:8080`, and `:8443`, plus UDP `:443`, on every
+    configured local listen IP when testing a fresh or explicitly reset seed.
+- [ ] Nothing exposes public DNS `:53`, a DoH handler, or a standalone profile
+  port. TCP `:8443` is mihomo application ingress, not DoH.
 - [ ] `mihomo -t -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo` succeeds.
 - [ ] Every `DNS_MIHOMO_LISTEN_IPS` value appears on a local interface. A
   non-local NAT/public address is rejected by installer validation.
@@ -59,8 +60,10 @@ Let `DOT=dot.<base>` and `GW=<DNS_GATEWAY_IP>`.
   certificate valid for `$DOT`.
 - [ ] `dig @127.0.0.1 -p 5353 example.com A` works on-box; the same debug port
   is unreachable remotely.
-- [ ] Plain `dig @$GW example.com` and `curl -k https://$GW:8443/dns-query`
-  fail because those public transports do not exist.
+- [ ] Plain `dig @$GW example.com` fails because public plain DNS does not
+  exist. `curl -k https://$GW:8443/dns-query` must not return a valid DoH
+  response; TCP `:8443` is an application-forwarding listener without a DoH
+  handler.
 - [ ] AAAA returns the documented IPv4-only negative response.
 - [ ] HTTPS/SVCB returns NOERROR/NODATA with the synthetic authority needed to
   keep the client on visible SNI and avoid ipv4hint bypass.
@@ -158,6 +161,20 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   is one of the active mihomo listener addresses.
 - [ ] HTTPS, HTTP, and QUIC connections steered to the gateway are sniffed and
   forwarded according to the operator mihomo config.
+- [ ] Fresh/reset seeds forward sniffable TCP `:8080` and `:8443` traffic to
+  the visible HTTP Host or TLS SNI on the same destination port. No-SNI,
+  unrecognized raw TCP, and UDP on those ports fail closed.
+- [ ] Settings reports `speedtest-5060` disabled when the complete mihomo YAML
+  has no canonical `:5060` listener/sniffer objects. Enabling it requires an
+  explicit confirmation and results in TCP and UDP `:5060` listeners on every
+  configured gateway address, with `5060` present in the HTTP, TLS, and QUIC
+  sniffer port sets and exact console/zash `:5060` rejects immediately after
+  the leading destination guards. Restrict the test source in the provider
+  security group.
+- [ ] On the enabled module, HTTP Host and TLS SNI preserve destination port
+  `5060`. Test QUIC only against an origin that actually serves supported QUIC
+  on `:5060`. A raw UDP packet and a raw TCP/SIP connection fail closed; they
+  are not successful Speedtest acceptance cases.
 - [ ] Mihomo's re-resolution reaches `127.0.0.1:5354`, then the configured real
   egress resolver; it does not loop back into DoT `:853` or gateway ingress.
 - [ ] Direct/CN DNS answers bypass the gateway and connect to the real address.
@@ -167,6 +184,16 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   forwarding setup.
 
 ## 8. Config apply and concurrency
+
+- [ ] A stale ingress-module revision, a partial/custom `:5060` shape, or a
+  missing, late, or bypassed fail-closed private/loopback guard is rejected
+  without changing the live file. Force a module hot-apply failure and verify
+  the previous exact bytes are restored and reapplied. Disabling a canonical
+  module removes only its exact listeners, sniffer entries, and panel guards.
+
+- [ ] Load the raw editor, change the ingress module elsewhere, then submit the
+  old raw snapshot and an old reset confirmation. Both stale revisions return
+  `409`, preserve the newer module config, and leave the controller untouched.
 
 - [ ] Editing only a harmless mihomo field runs validation, atomically replaces
   the file, hot-applies it, and retains mode `0600` in a `0700` directory.

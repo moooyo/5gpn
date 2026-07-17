@@ -7,18 +7,19 @@ export interface ModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   title?: ReactNode
+  descriptionId?: string
   children: ReactNode
   footer?: ReactNode
   className?: string
 }
 
-export function Modal({ open, onOpenChange, title, children, footer, className }: ModalProps) {
+export function Modal({ open, onOpenChange, title, descriptionId, children, footer, className }: ModalProps) {
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 bg-[rgba(16,24,40,.35)]" />
         <DialogPrimitive.Content
-          aria-describedby={undefined}
+          aria-describedby={descriptionId}
           className={cn(
             'fixed left-1/2 top-1/2 w-[min(92vw,480px)] -translate-x-1/2 -translate-y-1/2 rounded-card border border-border bg-card p-5 shadow-pop',
             className,

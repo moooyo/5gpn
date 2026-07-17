@@ -16,6 +16,7 @@
  * that's the surface a login-submit test should exercise.
  */
 
+import { createHash } from 'node:crypto'
 import type { Page, Route } from '@playwright/test'
 import type * as T from '../../src/lib/api/types'
 
@@ -182,11 +183,34 @@ hosts: {console.example.test: 127.0.0.1, zash.example.test: 127.0.0.2}
 rules: ["DOMAIN,console.example.test,DIRECT", "IP-CIDR,10.0.0.1/32,REJECT-DROP", "MATCH,DIRECT"]
 `
 
+const INGRESS_MARKER = '# e2e speedtest-5060 enabled\n'
+
+function mihomoRevision(text: string): string {
+  return createHash('sha256').update(text).digest('hex')
+}
+
 const MIHOMO_CONFIG_FIXTURE: T.MihomoConfig = {
   text: MIHOMO_CONFIG_TEXT,
+  revision: mihomoRevision(MIHOMO_CONFIG_TEXT),
   applied_at: '2026-07-16T00:00:00Z',
   controller_reachable: true,
   controller_authenticated: true,
+}
+
+function ingressModulesFixture(enabled: boolean, revision: string): T.IngressModulesView {
+  return {
+    revision,
+    modules: [
+      {
+        id: 'speedtest-5060',
+        port: 5060,
+        networks: ['tcp', 'udp'],
+        sniffers: ['http', 'tls', 'quic'],
+        enabled,
+        manageable: true,
+      },
+    ],
+  }
 }
 
 // ---- Auth helper -----------------------------------------------------------
@@ -219,6 +243,21 @@ function json(route: Route, body: unknown, status = 200): Promise<void> {
  * boot the authed shell.
  */
 export async function setupMockApi(page: Page): Promise<void> {
+  let ingressEnabled = false
+  let mihomoText = MIHOMO_CONFIG_TEXT
+  let revision = mihomoRevision(mihomoText)
+
+  const currentMihomoConfig = (): T.MihomoConfig => ({
+    ...MIHOMO_CONFIG_FIXTURE,
+    text: mihomoText,
+    revision,
+  })
+
+  const replaceMihomoText = (text: string): void => {
+    mihomoText = text
+    revision = mihomoRevision(text)
+  }
+
   await page.route('/api/**', async (route) => {
     const url = new URL(route.request().url())
     const path = url.pathname
@@ -265,8 +304,38 @@ export async function setupMockApi(page: Page): Promise<void> {
     if (path === '/api/policy/apply' && method === 'POST') return json(route, { ok: true })
 
     // Raw operator-owned mihomo config
-    if (path === '/api/mihomo/config' && method === 'GET') return json(route, MIHOMO_CONFIG_FIXTURE)
-    if (path === '/api/mihomo/config/reset' && method === 'POST') return json(route, MIHOMO_CONFIG_FIXTURE)
+    if (path === '/api/mihomo/config' && method === 'GET') return json(route, currentMihomoConfig())
+    if (path === '/api/mihomo/config' && method === 'PUT') {
+      const body = route.request().postDataJSON() as { text?: unknown; revision?: unknown }
+      if (body.revision !== revision) return json(route, { error: 'mihomo config revision changed', revision }, 409)
+      if (typeof body.text !== 'string') return json(route, { error: 'text is required' }, 400)
+      replaceMihomoText(body.text)
+      ingressEnabled = mihomoText.includes(INGRESS_MARKER)
+      return json(route, currentMihomoConfig())
+    }
+    if (path === '/api/mihomo/config/reset' && method === 'POST') {
+      const body = route.request().postDataJSON() as { revision?: unknown }
+      if (body.revision !== revision) return json(route, { error: 'mihomo config revision changed', revision }, 409)
+      ingressEnabled = false
+      replaceMihomoText(MIHOMO_CONFIG_TEXT)
+      return json(route, currentMihomoConfig())
+    }
+    if (path === '/api/mihomo/ingress-modules' && method === 'GET') {
+      return json(route, ingressModulesFixture(ingressEnabled, revision))
+    }
+    if (path === '/api/mihomo/ingress-modules/speedtest-5060' && method === 'PUT') {
+      const body = route.request().postDataJSON() as { enabled?: unknown; revision?: unknown }
+      if (body.revision !== revision) {
+        return json(route, { error: 'ingress module revision changed', revision }, 409)
+      }
+      if (typeof body.enabled !== 'boolean') {
+        return json(route, { error: 'enabled must be a boolean' }, 400)
+      }
+      ingressEnabled = body.enabled
+      const withoutMarker = mihomoText.replace(`\n${INGRESS_MARKER}`, '')
+      replaceMihomoText(ingressEnabled ? `${withoutMarker}\n${INGRESS_MARKER}` : withoutMarker)
+      return json(route, ingressModulesFixture(ingressEnabled, revision))
+    }
 
     // Unhandled — return 404
     return route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'not found' }) })

@@ -109,11 +109,33 @@ export interface MihomoLogLine { type: string; payload: string }
 // (absent before either operation succeeds); `controller_reachable`
 // reflects TCP/HTTP reachability; `controller_authenticated` separately says
 // whether the configured secret was accepted (a 401 is reachable but unusable).
+// `revision` is the SHA-256 of the exact config bytes and is required by
+// PUT/reset to reject stale editors.
 export interface MihomoConfig {
   text: string
+  revision: string
   applied_at?: string
   controller_reachable: boolean
   controller_authenticated: boolean
+}
+
+// Narrow, built-in mihomo ingress modules. These are explicit operator
+// actions over the complete config document; they are not a daemon-owned
+// generated configuration region.
+export type IngressNetwork = 'tcp' | 'udp'
+export type IngressSniffer = 'http' | 'tls' | 'quic'
+export interface IngressModule {
+  id: string
+  port: number
+  networks: IngressNetwork[]
+  sniffers: IngressSniffer[]
+  enabled: boolean
+  manageable: boolean
+  reason?: string
+}
+export interface IngressModulesView {
+  revision: string
+  modules: IngressModule[]
 }
 
 // ---- Unified policy rules -----------------------------------------------

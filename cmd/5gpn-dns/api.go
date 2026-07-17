@@ -365,6 +365,8 @@ func (s *ControlServer) apiMux() http.Handler {
 	mux.HandleFunc("GET /api/mihomo/config", s.handleMihomoConfigGet)
 	mux.HandleFunc("PUT /api/mihomo/config", s.handleMihomoConfigPut)
 	mux.HandleFunc("POST /api/mihomo/config/reset", s.handleMihomoConfigReset)
+	mux.HandleFunc("GET /api/mihomo/ingress-modules", s.handleMihomoIngressModulesGet)
+	mux.HandleFunc("PUT /api/mihomo/ingress-modules/{id}", s.handleMihomoIngressModulePut)
 
 	return mux
 }

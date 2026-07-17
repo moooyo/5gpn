@@ -8,6 +8,7 @@ import {
   CardBody,
   CardHeader,
   Chip,
+  ConfirmDialog,
   DataLine,
   Field,
   Input,
@@ -142,8 +143,31 @@ describe('Toggle', () => {
     const user = userEvent.setup()
     const onCheckedChange = vi.fn()
     render(<Toggle checked={false} onCheckedChange={onCheckedChange} aria-label="enable" />)
-    await user.click(screen.getByRole('switch'))
+    const toggle = screen.getByRole('switch')
+    expect(toggle.className).toContain('h-6')
+    expect(toggle.className).toContain('focus-visible:ring-2')
+    await user.click(toggle)
     expect(onCheckedChange).toHaveBeenCalledWith(true)
+  })
+})
+
+describe('ConfirmDialog', () => {
+  it('associates its safety description with the dialog', () => {
+    render(
+      <ConfirmDialog
+        open
+        onOpenChange={() => {}}
+        title="Open a public port?"
+        description="Restrict the source before continuing."
+        confirmLabel="Continue"
+        cancelLabel="Cancel"
+        onConfirm={() => {}}
+      />,
+    )
+    const dialog = screen.getByRole('dialog')
+    const descriptionId = dialog.getAttribute('aria-describedby')
+    expect(descriptionId).toBeTruthy()
+    expect(document.getElementById(descriptionId!)).toHaveTextContent('Restrict the source')
   })
 })
 
