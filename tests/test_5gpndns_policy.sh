@@ -113,6 +113,9 @@ grep -Eq 'HandleFunc\("[A-Z]+ /api/egress/rule-subs'    "$POLICY_RULES_API" \
 # falls back to it on a piped curl|bash install with no checkout) ---
 grep -Fq '${BASE_DIR}/etc/systemd' "$INSTALL" || fail "install.sh: install_files does not stage etc/systemd into /opt/5gpn"
 grep -Fq 'mihomo.service' "$INSTALL" || fail "install.sh: install_units does not install mihomo.service"
+grep -Fq '${BASE_DIR}/etc/mihomo' "$INSTALL" || fail "install.sh: installed management runtime has no mihomo asset directory"
+grep -Fq 'config.yaml.tmpl whitelist.seed.txt' "$INSTALL" \
+    || fail "install.sh: installed management runtime does not retain every mihomo reset asset"
 
 # --- 5gpn-dns.service: sandboxed conf-dir writes allowed under ProtectSystem=strict ---
 # The policy engine rewrites /etc/5gpn/policy.json (the console-managed

@@ -1747,8 +1747,12 @@ validate_egress_resolver() {
 seed_mihomo_whitelist() {
     # whitelist.txt is TUI-managed after install and never clobbered.
     if [[ ! -f "$MIHOMO_DIR/whitelist.txt" ]]; then
+        local seed="${SCRIPT_DIR}/etc/mihomo/whitelist.seed.txt"
+        [[ -f "$seed" && -r "$seed" && -s "$seed" ]] \
+            || { err "Bundled mihomo whitelist seed is missing, unreadable, or empty: $seed"; return 1; }
         install -g "$MIHOMO_SERVICE_USER" -m 0660 \
-            "${SCRIPT_DIR}/etc/mihomo/whitelist.seed.txt" "$MIHOMO_DIR/whitelist.txt"
+            "$seed" "$MIHOMO_DIR/whitelist.txt" \
+            || { err "Could not seed the mihomo source allowlist."; return 1; }
         warn "Zashboard is unreachable until you explicitly add a source CIDR with '5gpn add-allow'."
     fi
 }
@@ -1775,10 +1779,10 @@ persist_mihomo_secret() {
 # renders to a same-directory candidate, validates that candidate, backs up the
 # old file, fsyncs, and atomically renames it into place.
 render_mihomo_config() {
-    local mode="${1:-seed}" config="${MIHOMO_DIR}/config.yaml" secret=""
+    local mode="${1:-seed}" config="${MIHOMO_DIR}/config.yaml" secret="" template=""
     MIHOMO_SEED_PORTS_REQUIRED=0
     install -d -g "$MIHOMO_SERVICE_USER" -m 2770 "$MIHOMO_DIR"
-    seed_mihomo_whitelist
+    seed_mihomo_whitelist || return 1
 
     if [[ -f "$config" && "$mode" != "--reset" ]]; then
         if ! "$MIHOMO_BIN" -t -f "$config" -d "$MIHOMO_DIR"; then
@@ -1792,6 +1796,10 @@ render_mihomo_config() {
         ok "Existing operator-owned mihomo config validated and preserved: $config"
         return 0
     fi
+
+    template="${SCRIPT_DIR}/etc/mihomo/config.yaml.tmpl"
+    [[ -f "$template" && -r "$template" && -s "$template" ]] \
+        || { err "Bundled mihomo seed template is missing, unreadable, or empty: $template"; return 1; }
 
     # Controller secret survives an explicit reset. On first install, prefer a
     # persisted value and otherwise generate a strong mixed secret.
@@ -1814,7 +1822,7 @@ render_mihomo_config() {
         && chmod 0660 "$candidate" \
         || { rm -f -- "$candidate"; err "Could not secure the mihomo config candidate."; return 1; }
 
-    while IFS= read -r line || [[ -n "$line" ]]; do
+    if ! while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$line" == '__MIHOMO_LISTENERS__' ]]; then
             printf '%s\n' "$listeners"
             continue
@@ -1824,7 +1832,11 @@ render_mihomo_config() {
         line="${line//__ZASH_DOMAIN__/$ZASH_DOMAIN}"
         line="${line//__CONTROLLER_SECRET__/$secret}"
         printf '%s\n' "$line"
-    done < "${SCRIPT_DIR}/etc/mihomo/config.yaml.tmpl" > "$candidate"
+    done < "$template" > "$candidate"; then
+        rm -f -- "$candidate"
+        err "Could not render the mihomo config candidate from $template"
+        return 1
+    fi
 
     if ! "$MIHOMO_BIN" -t -f "$candidate" -d "$MIHOMO_DIR"; then
         rm -f -- "$candidate"
@@ -1973,6 +1985,29 @@ del_allow_ip() {
     apply_whitelist
 }
 
+install_mihomo_runtime_assets() {
+    local runtime_dir="${BASE_DIR}/etc/mihomo" asset source candidate
+    install -d -m 0755 "$runtime_dir" \
+        || { err "Could not create the installed mihomo asset directory: $runtime_dir"; return 1; }
+
+    for asset in config.yaml.tmpl whitelist.seed.txt; do
+        source="${SCRIPT_DIR}/etc/mihomo/${asset}"
+        [[ -f "$source" && -r "$source" && -s "$source" ]] \
+            || { err "Required mihomo runtime asset is missing, unreadable, or empty: $source"; return 1; }
+    done
+
+    for asset in config.yaml.tmpl whitelist.seed.txt; do
+        source="${SCRIPT_DIR}/etc/mihomo/${asset}"
+        candidate="$(mktemp "${runtime_dir}/.${asset}.XXXXXX")" \
+            || { err "Could not stage mihomo runtime asset: $asset"; return 1; }
+        install -m 0644 "$source" "$candidate" \
+            || { rm -f -- "$candidate"; err "Could not copy mihomo runtime asset: $asset"; return 1; }
+        sync -f "$candidate" 2>/dev/null || true
+        mv -f -- "$candidate" "${runtime_dir}/${asset}" \
+            || { rm -f -- "$candidate"; err "Could not publish mihomo runtime asset: $asset"; return 1; }
+    done
+}
+
 install_files() {
     info "Installing config files and scripts..."
     mkdir -p "$BASE_DIR" "$SCRIPTS_DIR" "$WWW_DIR" \
@@ -2015,6 +2050,9 @@ install_files() {
     install -d -m 0755 "${BASE_DIR}/etc/polkit-1/rules.d"
     install -m 0644 "${SCRIPT_DIR}/etc/polkit-1/rules.d/50-5gpn.rules" \
         "${BASE_DIR}/etc/polkit-1/rules.d/50-5gpn.rules"
+    # The installed management script resolves reset assets relative to
+    # /opt/5gpn, so persist every mihomo seed input beside that script.
+    install_mihomo_runtime_assets || return 1
     ok "Files installed under ${BASE_DIR} and ${CONF_DIR}."
 }
 

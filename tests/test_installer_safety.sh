@@ -265,6 +265,25 @@ listeners="$(render_mihomo_listeners '10.20.30.40,10.20.30.41' 'console.example.
     && pass "all listener sets use same-port console hostname fallback targets" \
     || fail "dynamic listeners did not use the console hostname target"
 
+# Persist the seed inputs needed by the installed management script. Rendering
+# below deliberately switches SCRIPT_DIR to this simulated runtime tree so the
+# test covers `5gpn mihomo-reset`, not only execution from a source checkout.
+source_script_dir="$SCRIPT_DIR"
+source_base_dir="$BASE_DIR"
+runtime_root="$TMP/runtime-assets"
+BASE_DIR="$runtime_root"
+if install_mihomo_runtime_assets >/dev/null \
+   && cmp -s "$source_script_dir/etc/mihomo/config.yaml.tmpl" \
+        "$runtime_root/etc/mihomo/config.yaml.tmpl" \
+   && cmp -s "$source_script_dir/etc/mihomo/whitelist.seed.txt" \
+        "$runtime_root/etc/mihomo/whitelist.seed.txt"; then
+    pass "installed management runtime retains all mihomo reset assets"
+else
+    fail "installed management runtime is missing mihomo reset assets"
+fi
+BASE_DIR="$source_base_dir"
+SCRIPT_DIR="$runtime_root"
+
 # Seed -> preserve byte-for-byte -> explicit validated reset with backup.
 MIHOMO_DIR="$TMP/mihomo"
 MIHOMO_SERVICE_USER="$(id -gn)"
@@ -331,6 +350,22 @@ elif compgen -G "$MIHOMO_DIR/.config.yaml.*" >/dev/null; then
 else
     pass "backup failure leaves the live mihomo config unchanged"
 fi
+
+before="$(sha256sum "$config" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$config" | awk '{print $1}')"
+SCRIPT_DIR="$TMP/runtime-without-mihomo-template"
+mkdir -p "$SCRIPT_DIR/etc/mihomo"
+if missing_template_output="$(render_mihomo_config --reset 2>&1)"; then
+    fail "explicit reset succeeded without its installed mihomo template"
+elif [[ "$before" != "$(sha256sum "$config" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$config" | awk '{print $1}')" ]]; then
+    fail "missing mihomo template changed the live operator config"
+elif compgen -G "$MIHOMO_DIR/.config.yaml.*" >/dev/null; then
+    fail "missing mihomo template left an empty candidate behind"
+elif [[ "$missing_template_output" != *"mihomo seed template is missing, unreadable, or empty"* ]]; then
+    fail "missing mihomo template did not produce a clear installer error"
+else
+    pass "missing installed template fails before candidate creation and preserves live config"
+fi
+SCRIPT_DIR="$source_script_dir"
 
 # dns.env accepts exactly the current key set and rejects ambiguous state.
 saved_dns_env="$(cat "$CONF_DIR/dns.env" 2>/dev/null || true)"
