@@ -521,6 +521,11 @@ claim_web_dir() {
     write_ownership_marker "$p" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"
 }
 
+# Atomically publish a tree of public static assets. Source trees may come from
+# mktemp (0700) or a restrictive caller umask, and cp -a preserves those modes.
+# Normalize the complete candidate before the live-tree swap so the unprivileged
+# gpn-dns service can traverse and read the console, zashboard, and iOS profile
+# without exposing any writable path to it.
 publish_owned_tree() {
     local src="$1" dest="$2" marker="$3" value="$4" parent leaf candidate backup
     parent="$(dirname -- "$dest")"; leaf="$(basename -- "$dest")"
@@ -530,6 +535,9 @@ publish_owned_tree() {
     cp -a -- "$src/." "$candidate/" \
         || { remove_owned_root "$candidate" "$marker" "$value" || true; return 1; }
     write_ownership_marker "$candidate" "$marker" "$value" \
+        || { remove_owned_root "$candidate" "$marker" "$value" || true; return 1; }
+    find "$candidate" -type d -exec chmod 0755 {} + \
+        && find "$candidate" -type f -exec chmod 0644 {} + \
         || { remove_owned_root "$candidate" "$marker" "$value" || true; return 1; }
     backup="${parent}/.${leaf}.old.$$"
     if [[ -e "$dest" ]]; then
