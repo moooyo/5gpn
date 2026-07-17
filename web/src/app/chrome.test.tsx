@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { Sidebar } from './Sidebar'
@@ -10,6 +10,7 @@ import { StatusContext, StatusProvider, useStatus, type StatusValue } from '../l
 import { ThemeProvider } from '../lib/theme'
 import i18n from '../i18n'
 import { api } from '../lib/api/client'
+import { ApiError } from '../lib/api/http'
 import type { Status, MihomoHealth } from '../lib/api/types'
 
 vi.mock('../lib/api/client', () => ({
@@ -39,13 +40,17 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  vi.useRealTimers()
   await i18n.changeLanguage('zh')
   vi.restoreAllMocks()
 })
 
 describe('Sidebar', () => {
   it('renders all 8 nav item labels in zh, and the item matching the current route gets the active pill', async () => {
-    renderChrome(<Sidebar />, { route: '/logs', status: { dnsOk: true, mihomoOk: true, loading: false } })
+    renderChrome(<Sidebar />, {
+      route: '/logs',
+      status: { dnsState: 'healthy', mihomoState: 'healthy', dnsOk: true, mihomoOk: true, loading: false },
+    })
 
     for (const item of ALL_NAV_ITEMS) {
       expect(screen.getByText(i18n.t(item.labelKey))).toBeInTheDocument()
@@ -60,17 +65,44 @@ describe('Sidebar', () => {
     expect(inactiveLink!.className).not.toContain('text-primary')
   })
 
-  it('kernel status card: dnsOk=true shows DNS row running (green), mihomoOk=false shows mihomo row stopped (red)', () => {
-    renderChrome(<Sidebar />, { route: '/overview', status: { dnsOk: true, mihomoOk: false, loading: false } })
+  it('renders healthy and down kernel states with their distinct labels and colors', () => {
+    renderChrome(<Sidebar />, {
+      route: '/overview',
+      status: { dnsState: 'healthy', mihomoState: 'down', dnsOk: true, mihomoOk: false, loading: false },
+    })
 
     expect(screen.getByText('DNS 服务器')).toBeInTheDocument()
     expect(screen.getByText('mihomo')).toBeInTheDocument()
 
-    const runningEl = screen.getByText(i18n.t('common.running'))
+    const runningEl = screen.getByText(i18n.t('common.healthHealthy'))
     expect(runningEl.className).toContain('text-green')
 
-    const stoppedEl = screen.getByText(i18n.t('settings.tgbotStateStopped'))
+    const stoppedEl = screen.getByText(i18n.t('common.healthDown'))
     expect(stoppedEl.className).toContain('text-red')
+  })
+
+  it('renders initial checking and transport-failure unknown states without claiming either service is down', () => {
+    const { rerender } = renderChrome(<Sidebar />, {
+      route: '/overview',
+      status: { dnsState: 'checking', mihomoState: 'checking', dnsOk: false, mihomoOk: false, loading: true },
+    })
+
+    expect(screen.getAllByText(i18n.t('common.healthChecking'))).toHaveLength(2)
+    expect(screen.queryByText(i18n.t('common.healthDown'))).not.toBeInTheDocument()
+
+    rerender(
+      <MemoryRouter initialEntries={['/overview']}>
+        <ThemeProvider>
+          <StatusContext.Provider
+            value={{ dnsState: 'unknown', mihomoState: 'unknown', dnsOk: false, mihomoOk: false, loading: false }}
+          >
+            <Sidebar />
+          </StatusContext.Provider>
+        </ThemeProvider>
+      </MemoryRouter>,
+    )
+    expect(screen.getAllByText(i18n.t('common.healthUnknown'))).toHaveLength(2)
+    expect(screen.queryByText(i18n.t('common.healthDown'))).not.toBeInTheDocument()
   })
 })
 
@@ -84,7 +116,10 @@ describe('Topbar', () => {
   })
 
   it('shows the title and subtitle for the current route (/logs)', () => {
-    renderChrome(<Topbar />, { route: '/logs', status: { dnsOk: true, mihomoOk: true, loading: false } })
+    renderChrome(<Topbar />, {
+      route: '/logs',
+      status: { dnsState: 'healthy', mihomoState: 'healthy', dnsOk: true, mihomoOk: true, loading: false },
+    })
 
     expect(screen.getByText('解析日志')).toBeInTheDocument()
     expect(screen.getByText(i18n.t('topbar.sub.logs'))).toBeInTheDocument()
@@ -127,10 +162,10 @@ describe('StatusProvider / useStatus', () => {
   })
 
   function Probe() {
-    const { status, mihomo, dnsOk, mihomoOk, loading } = useStatus()
+    const { status, mihomo, dnsState, mihomoState, dnsOk, mihomoOk, loading } = useStatus()
     return (
       <div data-testid="probe">
-        {JSON.stringify({ dnsOk, mihomoOk, loading, hasStatus: status !== undefined, hasMihomo: mihomo !== undefined })}
+        {JSON.stringify({ dnsState, mihomoState, dnsOk, mihomoOk, loading, hasStatus: status !== undefined, hasMihomo: mihomo !== undefined })}
       </div>
     )
   }
@@ -147,12 +182,12 @@ describe('StatusProvider / useStatus', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('probe').textContent).toBe(
-        JSON.stringify({ dnsOk: true, mihomoOk: true, loading: false, hasStatus: true, hasMihomo: true }),
+        JSON.stringify({ dnsState: 'healthy', mihomoState: 'healthy', dnsOk: true, mihomoOk: true, loading: false, hasStatus: true, hasMihomo: true }),
       )
     })
   })
 
-  it('swallows poll errors into dnsOk=false/mihomoOk=false without throwing', async () => {
+  it('maps a shared console or network failure to unknown instead of down', async () => {
     vi.mocked(api.getStatus).mockRejectedValue(new Error('network'))
     vi.mocked(api.getMihomoHealth).mockRejectedValue(new Error('network'))
 
@@ -164,9 +199,90 @@ describe('StatusProvider / useStatus', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('probe').textContent).toBe(
-        JSON.stringify({ dnsOk: false, mihomoOk: false, loading: false, hasStatus: false, hasMihomo: false }),
+        JSON.stringify({ dnsState: 'unknown', mihomoState: 'unknown', dnsOk: false, mihomoOk: false, loading: false, hasStatus: false, hasMihomo: false }),
       )
     })
+  })
+
+  it('marks mihomo down only when status succeeds and the health endpoint returns an explicit server error', async () => {
+    vi.mocked(api.getStatus).mockResolvedValue(OK_STATUS)
+    vi.mocked(api.getMihomoHealth).mockRejectedValue(new ApiError(502, 'mihomo unavailable'))
+
+    render(
+      <StatusProvider intervalMs={100_000}>
+        <Probe />
+      </StatusProvider>,
+    )
+
+    await waitFor(() => expect(screen.getByTestId('probe').textContent).toContain('"mihomoState":"down"'))
+    expect(screen.getByTestId('probe').textContent).toContain('"dnsState":"healthy"')
+  })
+
+  it('keeps mihomo unknown when the same poll cannot establish that the console status path is healthy', async () => {
+    vi.mocked(api.getStatus).mockRejectedValue(new ApiError(503, 'console unavailable'))
+    vi.mocked(api.getMihomoHealth).mockRejectedValue(new ApiError(503, 'mihomo unavailable'))
+
+    render(
+      <StatusProvider intervalMs={100_000}>
+        <Probe />
+      </StatusProvider>,
+    )
+
+    await waitFor(() => expect(screen.getByTestId('probe').textContent).toContain('"loading":false'))
+    expect(screen.getByTestId('probe').textContent).toContain('"dnsState":"unknown"')
+    expect(screen.getByTestId('probe').textContent).toContain('"mihomoState":"unknown"')
+  })
+
+  it('keeps mihomo unknown when its request fails without an explicit server response', async () => {
+    vi.mocked(api.getStatus).mockResolvedValue(OK_STATUS)
+    vi.mocked(api.getMihomoHealth).mockRejectedValue(new ApiError(0, 'network'))
+
+    render(
+      <StatusProvider intervalMs={100_000}>
+        <Probe />
+      </StatusProvider>,
+    )
+
+    await waitFor(() => expect(screen.getByTestId('probe').textContent).toContain('"mihomoState":"unknown"'))
+  })
+
+  it('updates a completed result while the other request is still pending', async () => {
+    vi.useFakeTimers()
+    vi.mocked(api.getStatus).mockResolvedValue(OK_STATUS)
+    vi.mocked(api.getMihomoHealth).mockImplementation(() => new Promise<MihomoHealth>(() => undefined))
+
+    render(
+      <StatusProvider intervalMs={100_000} requestTimeoutMs={1_000}>
+        <Probe />
+      </StatusProvider>,
+    )
+    await act(async () => { await Promise.resolve() })
+
+    expect(screen.getByTestId('probe').textContent).toContain('"dnsState":"healthy"')
+    expect(screen.getByTestId('probe').textContent).toContain('"mihomoState":"checking"')
+    expect(screen.getByTestId('probe').textContent).toContain('"loading":true')
+  })
+
+  it('deadlines a hanging request and schedules the next non-overlapping poll', async () => {
+    vi.useFakeTimers()
+    vi.mocked(api.getStatus).mockResolvedValue(OK_STATUS)
+    vi.mocked(api.getMihomoHealth).mockImplementation(() => new Promise<MihomoHealth>(() => undefined))
+
+    render(
+      <StatusProvider intervalMs={50} requestTimeoutMs={100}>
+        <Probe />
+      </StatusProvider>,
+    )
+    expect(api.getStatus).toHaveBeenCalledTimes(1)
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+    expect(screen.getByTestId('probe').textContent).toContain('"mihomoState":"unknown"')
+    expect(screen.getByTestId('probe').textContent).toContain('"loading":false')
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(49) })
+    expect(api.getStatus).toHaveBeenCalledTimes(1)
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    expect(api.getStatus).toHaveBeenCalledTimes(2)
   })
 
   it('clears the completion-scheduled poll on unmount', async () => {
@@ -214,6 +330,5 @@ describe('StatusProvider / useStatus', () => {
     await vi.advanceTimersByTimeAsync(1)
     expect(api.getStatus).toHaveBeenCalledTimes(2)
     unmount()
-    vi.useRealTimers()
   })
 })

@@ -69,7 +69,15 @@ const STATS: Status['stats'] = {
 const STATUS: Status = { version: 'dev+abc1234', uptime_seconds: 3600, stats: STATS }
 
 function statusValue(overrides: Partial<StatusValue> = {}): StatusValue {
-  return { dnsOk: true, mihomoOk: true, loading: false, status: STATUS, ...overrides }
+  return {
+    dnsState: 'healthy',
+    mihomoState: 'healthy',
+    dnsOk: true,
+    mihomoOk: true,
+    loading: false,
+    status: STATUS,
+    ...overrides,
+  }
 }
 
 function renderOverview(status: StatusValue = statusValue()) {

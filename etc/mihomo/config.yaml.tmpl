@@ -22,6 +22,7 @@ sniffer:
   enable: true
   parse-pure-ip: true
   override-destination: true
+  force-domain: [__CONSOLE_DOMAIN__]
   sniff:
     TLS:  { ports: [443, 8080, 8443] }
     QUIC: { ports: [443] }
@@ -50,22 +51,22 @@ proxy-groups:
   - {name: Proxies, type: select, proxies: [DIRECT]}
 
 rules:
-  - IP-CIDR,__GATEWAY_IP__/32,REJECT-DROP,no-resolve
-  - IP-CIDR,127.0.0.0/8,REJECT-DROP,no-resolve
-  - IP-CIDR,10.0.0.0/8,REJECT-DROP,no-resolve
-  - IP-CIDR,172.16.0.0/12,REJECT-DROP,no-resolve
-  - IP-CIDR,192.168.0.0/16,REJECT-DROP,no-resolve
-  - IP-CIDR,100.64.0.0/10,REJECT-DROP,no-resolve
-  - IP-CIDR,169.254.0.0/16,REJECT-DROP,no-resolve
-  # Public panel hostnames terminate on gateway :443 only. Alternate ingress
-  # must never expose unrelated services bound to the same loopback ports.
-  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,80)),REJECT-DROP
-  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8080)),REJECT-DROP
-  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8443)),REJECT-DROP
-  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,80)),REJECT-DROP
-  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8080)),REJECT-DROP
-  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8443)),REJECT-DROP
+  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(NETWORK,UDP)),REJECT
+  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,80)),REJECT
+  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8080)),REJECT
+  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8443)),REJECT
+  - AND,((DOMAIN,__ZASH_DOMAIN__),(NETWORK,UDP)),REJECT
+  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,80)),REJECT
+  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8080)),REJECT
+  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8443)),REJECT
   - DOMAIN,__CONSOLE_DOMAIN__,DIRECT
   - AND,((DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
-  - DOMAIN,__ZASH_DOMAIN__,REJECT-DROP
+  - DOMAIN,__ZASH_DOMAIN__,REJECT
+  - IP-CIDR,__GATEWAY_IP__/32,REJECT,no-resolve
+  - IP-CIDR,127.0.0.0/8,REJECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,REJECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,REJECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,REJECT,no-resolve
+  - IP-CIDR,100.64.0.0/10,REJECT,no-resolve
+  - IP-CIDR,169.254.0.0/16,REJECT,no-resolve
   - MATCH,Proxies

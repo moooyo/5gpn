@@ -36,6 +36,8 @@ const INGRESS: IngressModulesView = {
 
 function statusValue(overrides: Partial<StatusValue> = {}): StatusValue {
   return {
+    dnsState: 'healthy',
+    mihomoState: 'healthy',
     dnsOk: true,
     mihomoOk: true,
     loading: false,

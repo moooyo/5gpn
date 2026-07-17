@@ -140,15 +140,15 @@ func (g *group) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 
 		// A caller-side cancellation is not an upstream health signal:
 		// Arbitrate cancels the abandoned group on every china-CN win, and a
-		// disconnecting client cancels both groups. The trust DoT dial
-		// (TCP+TLS handshake, ~100ms+) is almost always still in flight when
-		// a china UDP answer (~5-30ms) wins, and DialContext honours
-		// cancellation — so counting those as failures lets ordinary CN-heavy
-		// traffic trip the trust breaker (5 consecutive CN answers open it,
-		// and the half-open probe can be re-cancelled the same way, latching
-		// it). Deadline expiry still counts: the upstream had its budget and
-		// didn't answer. Checked on the PARENT ctx — an attempt-slice timeout
-		// is DeadlineExceeded on the child only and must keep iterating.
+		// disconnecting client cancels both groups. A trust attempt (especially
+		// a TCP+TLS member) may still be in flight when a fast china UDP answer
+		// wins, and DialContext honours cancellation — so counting those as
+		// failures lets ordinary CN-heavy traffic trip the trust breaker
+		// (5 consecutive CN answers open it, and the half-open probe can be
+		// re-cancelled the same way, latching it). Deadline expiry still counts:
+		// the upstream had its budget and didn't answer. Checked on the PARENT
+		// ctx — an attempt-slice timeout is DeadlineExceeded on the child only
+		// and must keep iterating.
 		if ctx.Err() == context.Canceled {
 			g.breaker.recordCanceled()
 			if err == nil {

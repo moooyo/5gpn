@@ -177,10 +177,11 @@ const POLICY_RULES_FIXTURE: T.PolicyRule[] = [
 const MIHOMO_CONFIG_TEXT = `external-controller: 127.0.0.1:9090
 secret: e2e-secret
 listeners:
-  - {name: gateway, type: tunnel, port: 443, target: 127.0.0.1:443}
+  - {name: gateway, type: tunnel, port: 443, target: console.example.test:443}
+sniffer: {enable: true, override-destination: true, force-domain: [console.example.test]}
 dns: {nameserver: ["udp://127.0.0.1:5354"]}
 hosts: {console.example.test: 127.0.0.1, zash.example.test: 127.0.0.2}
-rules: ["DOMAIN,console.example.test,DIRECT", "IP-CIDR,10.0.0.1/32,REJECT-DROP", "MATCH,DIRECT"]
+rules: ["DOMAIN,console.example.test,DIRECT", "IP-CIDR,10.0.0.1/32,REJECT", "MATCH,DIRECT"]
 `
 
 const INGRESS_MARKER = '# e2e speedtest-5060 enabled\n'

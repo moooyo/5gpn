@@ -67,6 +67,8 @@ function statusWith(
   if (zashDomain) status.zash_domain = zashDomain
   return {
     status,
+    dnsState: 'healthy',
+    mihomoState: opts.mihomoOk === false ? 'down' : 'healthy',
     dnsOk: true,
     mihomoOk: opts.mihomoOk ?? true,
     mihomo: opts.mihomo ?? { version: 'v1.19.0', meta: true },

@@ -34,27 +34,60 @@ check install.sh 'name: gateway80%s'                     'current gateway HTTP l
 check install.sh 'name: gateway8080%s'                   'alternate HTTP listener name'
 check install.sh 'name: gateway8443%s'                   'alternate HTTPS listener name'
 check install.sh 'type: tunnel.*port: 443.*network: \[tcp, udp\]' ':443 tcp+udp listener renderer'
-check install.sh 'target: 127\.0\.0\.1:443'             'listener renderer loopback target'
-check install.sh 'port: 8080.*network: \[tcp\].*target: 127\.0\.0\.1:8080' ':8080 TCP same-port listener renderer'
-check install.sh 'port: 8443.*network: \[tcp\].*target: 127\.0\.0\.1:8443' ':8443 TCP same-port listener renderer'
+check install.sh 'target: %s:443'                       'listener renderer hostname target'
+check install.sh 'port: 8080.*network: \[tcp\].*target: %s:8080' ':8080 TCP hostname target renderer'
+check install.sh 'port: 8443.*network: \[tcp\].*target: %s:8443' ':8443 TCP hostname target renderer'
+check install.sh 'render_mihomo_listeners "\$MIHOMO_LISTEN_IPS" "\$CONSOLE_DOMAIN"' 'renderer receives the console hostname'
 nocheck "$T" 'proxy:'                                  'NO proxy field on listeners (would bypass rules)'
 check "$T" 'parse-pure-ip: true'                       'sniffer parse-pure-ip'
 check "$T" 'override-destination: true'                'sniffer override-destination'
+check "$T" 'force-domain: \[__CONSOLE_DOMAIN__\]'     'console fallback always forces hostname sniffing'
 check "$T" 'TLS:  \{ ports: \[443, 8080, 8443\] \}'   'TLS sniffer covers standard and alternate ports'
 check "$T" 'HTTP: \{ ports: \[80, 8080, 8443\] \}'    'HTTP sniffer covers standard and alternate ports'
 check "$T" 'QUIC: \{ ports: \[443\] \}'               'QUIC remains limited to UDP :443'
-check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,8080.*REJECT-DROP' 'console cannot expose loopback :8080'
-check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,8443.*REJECT-DROP' 'console cannot expose loopback :8443'
-check "$T" 'DOMAIN,__ZASH_DOMAIN__.*DST-PORT,8080.*REJECT-DROP' 'zash cannot expose loopback :8080'
-check "$T" 'DOMAIN,__ZASH_DOMAIN__.*DST-PORT,8443.*REJECT-DROP' 'zash cannot expose loopback :8443'
+check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,8080.*REJECT' 'console cannot expose loopback :8080'
+check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,8443.*REJECT' 'console cannot expose loopback :8443'
+check "$T" 'DOMAIN,__ZASH_DOMAIN__.*DST-PORT,8080.*REJECT' 'zash cannot expose loopback :8080'
+check "$T" 'DOMAIN,__ZASH_DOMAIN__.*DST-PORT,8443.*REJECT' 'zash cannot expose loopback :8443'
 check "$T" 'rule-providers:'                           'rule-providers block'
 check "$T" 'whitelist:'                                'whitelist rule-provider'
 check "$T" 'behavior: ipcidr'                          'whitelist ipcidr behavior'
 check "$T" 'format: text'                              'whitelist provider uses text format'
 check "$T" 'RULE-SET,whitelist,DIRECT,src'             'source-IP allowlist rule'
-check "$T" 'REJECT-DROP'                               'silent deny for non-allowlisted'
+check "$T" 'DOMAIN,__ZASH_DOMAIN__,REJECT'              'fast deny for non-allowlisted zashboard traffic'
+nocheck "$T" 'REJECT-DROP'                             'seed avoids connection-retaining reject rules'
 check "$T" '127\.0\.0\.1:5354'                         'DNS broker → egress resolver'
+check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(NETWORK,UDP\)\),REJECT' 'console UDP fallback fast-reject rule'
+check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(DST-PORT,80\)\),REJECT' 'console HTTP fast-reject rule'
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__,DIRECT'             'public console SNI direct route'
+check "$T" 'AND,\(\(DOMAIN,__ZASH_DOMAIN__\),\(NETWORK,UDP\)\),REJECT' 'zashboard UDP fast-reject rule'
+console_direct_line="$(grep -nF '  - DOMAIN,__CONSOLE_DOMAIN__,DIRECT' "$root/$T" | cut -d: -f1 || true)"
+zash_direct_line="$(grep -nF '  - AND,((DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
+panel_order_ok=1
+for rule in \
+    'AND,((DOMAIN,__CONSOLE_DOMAIN__),(NETWORK,UDP)),REJECT' \
+    'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,80)),REJECT' \
+    'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8080)),REJECT' \
+    'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8443)),REJECT' \
+    'AND,((DOMAIN,__ZASH_DOMAIN__),(NETWORK,UDP)),REJECT' \
+    'AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,80)),REJECT' \
+    'AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8080)),REJECT' \
+    'AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8443)),REJECT'; do
+    reject_line="$(grep -nF "  - $rule" "$root/$T" | cut -d: -f1 || true)"
+    route_line="$zash_direct_line"
+    [[ "$rule" == *'__CONSOLE_DOMAIN__'* ]] && route_line="$console_direct_line"
+    if [ -z "$reject_line" ] || [ -z "$route_line" ] || [ "$reject_line" -ge "$route_line" ]; then
+        panel_order_ok=0
+    fi
+done
+zash_deny_line="$(grep -nF '  - DOMAIN,__ZASH_DOMAIN__,REJECT' "$root/$T" | cut -d: -f1 || true)"
+anti_loop_line="$(grep -nF '  - IP-CIDR,__GATEWAY_IP__/32,REJECT,no-resolve' "$root/$T" | cut -d: -f1 || true)"
+if [ "$panel_order_ok" = 1 ] && [ -n "$zash_deny_line" ] && [ -n "$anti_loop_line" ] \
+    && [ "$zash_deny_line" -lt "$anti_loop_line" ]; then
+    echo "ok: panel rejects precede panel routes and anti-loop guards follow them"
+else
+    echo "FAIL: unsafe panel/anti-loop rule ordering"; FAIL=1
+fi
 nocheck "$T" '__PROFILE_DOMAIN__'                         'retired profile SNI removed'
 # UP-4 (2026-07-15 policy/mihomo decoupling): the daemon no longer owns ANY
 # region of the mihomo config -- the four >>>5gpn:*/<<<5gpn:* marker comment

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,9 +44,10 @@ type mihomoIngressModuleUpdate struct {
 }
 
 type gatewayBind struct {
-	Name   string
-	Suffix string
-	Listen string
+	Name       string
+	Suffix     string
+	Listen     string
+	TargetHost string
 }
 
 type speedtestModuleAnalysis struct {
@@ -249,7 +251,7 @@ func analyzeSpeedtestModule(text string, infra InfraParams) speedtestModuleAnaly
 		return analysis
 	}
 	analysis.Listeners = listeners
-	gateways, err := canonicalGatewayBinds(listeners)
+	gateways, err := canonicalGatewayBinds(listeners, infra.ConsoleDomain)
 	if err != nil {
 		analysis.View.Reason = "canonical-gateway-conflict"
 		return analysis
@@ -266,7 +268,7 @@ func analyzeSpeedtestModule(text string, infra InfraParams) speedtestModuleAnaly
 		return analysis
 	}
 	analysis.SniffPorts = sniffPorts
-	guardBoundary, ok := failClosedGuardBoundary(root, infra.GatewayIP)
+	guardBoundary, ok := failClosedGuardBoundary(root, infra)
 	if !ok {
 		analysis.View.Reason = "fail-closed-guards-missing"
 		return analysis
@@ -430,7 +432,11 @@ func exactStringSequence(node *yaml.Node, values ...string) bool {
 	return true
 }
 
-func canonicalGatewayBinds(listeners *yaml.Node) ([]gatewayBind, error) {
+func canonicalGatewayBinds(listeners *yaml.Node, consoleDomain string) ([]gatewayBind, error) {
+	if strings.TrimSpace(consoleDomain) == "" {
+		return nil, fmt.Errorf("console domain is missing")
+	}
+	wantTarget := net.JoinHostPort(consoleDomain, "443")
 	var gateways []gatewayBind
 	seenNames := make(map[string]bool)
 	seenListen := make(map[string]bool)
@@ -451,7 +457,7 @@ func canonicalGatewayBinds(listeners *yaml.Node) ([]gatewayBind, error) {
 		port, portOK := yamlInteger(mappingNodeValue(item, "port"))
 		target, targetOK := mappingScalar(item, "target")
 		ip := net.ParseIP(listen)
-		if !typeOK || typeName != "tunnel" || !listenOK || ip == nil || ip.To4() == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.To4().String() != listen || !portOK || port != 443 || !targetOK || target != "127.0.0.1:443" || !exactStringSequence(mappingNodeValue(item, "network"), "tcp", "udp") {
+		if !typeOK || typeName != "tunnel" || !listenOK || ip == nil || ip.To4() == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.To4().String() != listen || !portOK || port != 443 || !targetOK || target != wantTarget || !exactStringSequence(mappingNodeValue(item, "network"), "tcp", "udp") {
 			return nil, fmt.Errorf("canonical gateway listener %q is not exact", name)
 		}
 		if seenNames[name] || seenListen[listen] {
@@ -459,7 +465,7 @@ func canonicalGatewayBinds(listeners *yaml.Node) ([]gatewayBind, error) {
 		}
 		seenNames[name] = true
 		seenListen[listen] = true
-		gateways = append(gateways, gatewayBind{Name: name, Suffix: match[1], Listen: listen})
+		gateways = append(gateways, gatewayBind{Name: name, Suffix: match[1], Listen: listen, TargetHost: consoleDomain})
 	}
 	return gateways, nil
 }
@@ -495,73 +501,109 @@ func canonicalSniffPortNodes(root *yaml.Node) (map[string]*yaml.Node, error) {
 				return nil, fmt.Errorf("sniffer.sniff.%s.ports contains a non-integer entry", protocol)
 			}
 		}
+		if override := mappingNodeValue(config, "override-destination"); override != nil &&
+			(override.Kind != yaml.ScalarNode || override.Tag != "!!bool" || override.Value != "true") {
+			return nil, fmt.Errorf("sniffer.sniff.%s.override-destination must not disable destination replacement", protocol)
+		}
 		result[protocol] = ports
 	}
 	return result, nil
 }
 
-func failClosedGuardBoundary(root *yaml.Node, gatewayIP string) (int, bool) {
+func failClosedGuardBoundary(root *yaml.Node, infra InfraParams) (int, bool) {
 	rules := mappingNodeValue(root, "rules")
-	if rules == nil || rules.Kind != yaml.SequenceNode || strings.TrimSpace(gatewayIP) == "" {
+	if rules == nil || rules.Kind != yaml.SequenceNode || strings.TrimSpace(infra.GatewayIP) == "" ||
+		strings.TrimSpace(infra.ConsoleDomain) == "" || strings.TrimSpace(infra.ZashDomain) == "" {
 		return 0, false
 	}
-	wanted := map[string]bool{
-		gatewayIP + "/32": false,
-		"127.0.0.0/8":     false,
-		"10.0.0.0/8":      false,
-		"172.16.0.0/12":   false,
-		"192.168.0.0/16":  false,
-		"100.64.0.0/10":   false,
-		"169.254.0.0/16":  false,
+	panelGuards := []string{
+		"AND,((DOMAIN," + infra.ConsoleDomain + "),(NETWORK,UDP))",
+		"AND,((DOMAIN," + infra.ConsoleDomain + "),(DST-PORT,80))",
+		"AND,((DOMAIN," + infra.ConsoleDomain + "),(DST-PORT,8080))",
+		"AND,((DOMAIN," + infra.ConsoleDomain + "),(DST-PORT,8443))",
+		"AND,((DOMAIN," + infra.ZashDomain + "),(NETWORK,UDP))",
+		"AND,((DOMAIN," + infra.ZashDomain + "),(DST-PORT,80))",
+		"AND,((DOMAIN," + infra.ZashDomain + "),(DST-PORT,8080))",
+		"AND,((DOMAIN," + infra.ZashDomain + "),(DST-PORT,8443))",
 	}
-	guardsComplete := false
-	matchSeen := false
-	guardBoundary := 0
-	for index, item := range rules.Content {
+	if len(rules.Content) < len(panelGuards) {
+		return 0, false
+	}
+	for index, base := range panelGuards {
+		item := rules.Content[index]
+		if item.Kind != yaml.ScalarNode || !matchesDenyRule(compactMihomoRule(item.Value), base, false) {
+			return 0, false
+		}
+	}
+	guardBoundary := len(panelGuards)
+
+	// An enabled or partially edited module may occupy up to two slots at the
+	// insertion boundary. Its exact shape is classified separately below.
+	cursor := guardBoundary
+	for cursor < len(rules.Content) && cursor < guardBoundary+2 {
+		item := rules.Content[cursor]
+		if item.Kind != yaml.ScalarNode || !strings.Contains(compactMihomoRule(item.Value), "DST-PORT,5060") {
+			break
+		}
+		cursor++
+	}
+	wantRoutes := []string{
+		"DOMAIN," + infra.ConsoleDomain + ",DIRECT",
+		"AND,((DOMAIN," + infra.ZashDomain + "),(RULE-SET,whitelist,DIRECT,src)),DIRECT",
+	}
+	for _, want := range wantRoutes {
+		if cursor >= len(rules.Content) || rules.Content[cursor].Kind != yaml.ScalarNode || compactMihomoRule(rules.Content[cursor].Value) != want {
+			return 0, false
+		}
+		cursor++
+	}
+	if cursor >= len(rules.Content) || rules.Content[cursor].Kind != yaml.ScalarNode ||
+		!matchesDenyRule(compactMihomoRule(rules.Content[cursor].Value), "DOMAIN,"+infra.ZashDomain, false) {
+		return 0, false
+	}
+	cursor++
+
+	antiLoopGuards := []string{
+		"IP-CIDR," + infra.GatewayIP + "/32",
+		"IP-CIDR,127.0.0.0/8",
+		"IP-CIDR,10.0.0.0/8",
+		"IP-CIDR,172.16.0.0/12",
+		"IP-CIDR,192.168.0.0/16",
+		"IP-CIDR,100.64.0.0/10",
+		"IP-CIDR,169.254.0.0/16",
+	}
+	for _, base := range antiLoopGuards {
+		if cursor >= len(rules.Content) || rules.Content[cursor].Kind != yaml.ScalarNode ||
+			!matchesDenyRule(compactMihomoRule(rules.Content[cursor].Value), base, true) {
+			return 0, false
+		}
+		cursor++
+	}
+	for ; cursor < len(rules.Content); cursor++ {
+		item := rules.Content[cursor]
 		if item.Kind != yaml.ScalarNode {
 			return 0, false
 		}
-		rule := compactMihomoRule(item.Value)
-		if guardsComplete && strings.HasPrefix(rule, "MATCH,") {
-			matchSeen = true
-			break
-		}
-		parts := strings.Split(rule, ",")
-		isGuard := (len(parts) == 3 || len(parts) == 4) &&
-			parts[0] == "IP-CIDR" &&
-			parts[2] == "REJECT-DROP" &&
-			(len(parts) == 3 || parts[3] == "no-resolve")
-		if isGuard {
-			_, isGuard = wanted[parts[1]]
-		}
-		if isGuard {
-			wanted[parts[1]] = true
-			guardsComplete = true
-			for _, found := range wanted {
-				if !found {
-					guardsComplete = false
-					break
-				}
-			}
-			if guardsComplete && guardBoundary == 0 {
-				guardBoundary = index + 1
-			}
-			continue
-		}
-		if !guardsComplete {
-			// Before every required destination guard is established, any
-			// unfamiliar rule could accept traffic. Refuse to manage the module
-			// instead of trying to interpret mihomo's complete rule grammar.
-			return 0, false
+		if strings.HasPrefix(compactMihomoRule(item.Value), "MATCH,") {
+			return guardBoundary, true
 		}
 	}
-	return guardBoundary, guardsComplete && matchSeen
+	return 0, false
+}
+
+func matchesDenyRule(rule, base string, allowNoResolve bool) bool {
+	for _, action := range []string{"REJECT", "REJECT-DROP"} {
+		if rule == base+","+action || (allowNoResolve && rule == base+","+action+",no-resolve") {
+			return true
+		}
+	}
+	return false
 }
 
 func speedtestModuleGuardRules(infra InfraParams) []string {
 	return []string{
-		"AND,((DOMAIN," + infra.ConsoleDomain + "),(DST-PORT,5060)),REJECT-DROP",
-		"AND,((DOMAIN," + infra.ZashDomain + "),(DST-PORT,5060)),REJECT-DROP",
+		"AND,((DOMAIN," + infra.ConsoleDomain + "),(DST-PORT,5060)),REJECT",
+		"AND,((DOMAIN," + infra.ZashDomain + "),(DST-PORT,5060)),REJECT",
 	}
 }
 
@@ -596,7 +638,8 @@ func exactModuleListener(node *yaml.Node, gateway gatewayBind) bool {
 	listen, listenOK := mappingScalar(node, "listen")
 	port, portOK := yamlInteger(mappingNodeValue(node, "port"))
 	target, targetOK := mappingScalar(node, "target")
-	return nameOK && name == moduleListenerName(gateway) && typeOK && typeName == "tunnel" && listenOK && listen == gateway.Listen && portOK && port == speedtestModulePort && targetOK && target == "127.0.0.1:5060" && exactStringSequence(mappingNodeValue(node, "network"), "tcp", "udp")
+	wantTarget := net.JoinHostPort(gateway.TargetHost, strconv.Itoa(speedtestModulePort))
+	return nameOK && name == moduleListenerName(gateway) && typeOK && typeName == "tunnel" && listenOK && listen == gateway.Listen && portOK && port == speedtestModulePort && targetOK && target == wantTarget && exactStringSequence(mappingNodeValue(node, "network"), "tcp", "udp")
 }
 
 func sequenceIntCount(node *yaml.Node, value int) int {
@@ -711,7 +754,7 @@ func newModuleListenerNode(gateway gatewayBind) *yaml.Node {
 			scalarNode("listen"), scalarNode(gateway.Listen),
 			scalarNode("port"), intScalarNode(speedtestModulePort),
 			scalarNode("network"), network,
-			scalarNode("target"), scalarNode("127.0.0.1:5060"),
+			scalarNode("target"), scalarNode(net.JoinHostPort(gateway.TargetHost, strconv.Itoa(speedtestModulePort))),
 		},
 	}
 }

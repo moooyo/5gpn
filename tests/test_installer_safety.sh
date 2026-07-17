@@ -218,17 +218,17 @@ got="$(resolve_mihomo_listen_ips '10.20.30.40,10.20.30.40')" || got=""
     || fail "listener dedupe = '$got'"
 
 # Fresh-install automatic values are a complete valid configuration: the
-# operational resolver is accepted, ECS starts disabled, and cache size is the
+# operational resolver and ECS subnet are accepted, and cache size is the
 # memory-profile default selected before the TUI runs.
 BASE_DOMAIN=example.com
 MIHOMO_LISTEN_IPS=10.20.30.40
 CERT_MODE=debug
 CERT_EMAIL=""
 CACHE_SIZE=20000
-CHINA_ECS=""
+CHINA_ECS="112.96.32.0/24"
 EGRESS_RESOLVER=22.22.22.22
 if validate_install_config >/dev/null 2>&1; then
-    pass "automatic resolver, disabled ECS, and cache defaults validate"
+    pass "automatic resolver, ECS, and cache defaults validate"
 else
     fail "fresh-install automatic defaults were rejected"
 fi
@@ -242,7 +242,7 @@ if resolve_mihomo_listen_ips '127.0.0.1' >/dev/null 2>&1; then
 else
     pass "panel loopback listener address is rejected"
 fi
-listeners="$(render_mihomo_listeners '10.20.30.40,10.20.30.41')"
+listeners="$(render_mihomo_listeners '10.20.30.40,10.20.30.41' 'console.example.com')"
 [[ "$(grep -Fc 'port: 443,' <<<"$listeners")" == 2 \
    && "$(grep -Fc 'port: 80,' <<<"$listeners")" == 2 \
    && "$(grep -Fc 'port: 8080,' <<<"$listeners")" == 2 \
@@ -255,10 +255,12 @@ listeners="$(render_mihomo_listeners '10.20.30.40,10.20.30.41')"
    && "$listeners" == *'name: gateway8443,'* && "$listeners" == *'name: gateway8443-2,'* ]] \
     && pass "listener names use the current gateway vocabulary" \
     || fail "dynamic listener names do not cover all seeded gateway ports"
-[[ "$(grep -Fc 'port: 8080, network: [tcp], target: 127.0.0.1:8080' <<<"$listeners")" == 2 \
-   && "$(grep -Fc 'port: 8443, network: [tcp], target: 127.0.0.1:8443' <<<"$listeners")" == 2 ]] \
-    && pass "alternate Web listeners preserve their TCP destination ports" \
-    || fail "alternate Web listeners lost TCP-only same-port targets"
+[[ "$(grep -Fc 'target: console.example.com:443}' <<<"$listeners")" == 2 \
+   && "$(grep -Fc 'target: console.example.com:80}' <<<"$listeners")" == 2 \
+   && "$(grep -Fc 'target: console.example.com:8080}' <<<"$listeners")" == 2 \
+   && "$(grep -Fc 'target: console.example.com:8443}' <<<"$listeners")" == 2 ]] \
+    && pass "all listener sets use same-port console hostname fallback targets" \
+    || fail "dynamic listeners did not use the console hostname target"
 
 # Seed -> preserve byte-for-byte -> explicit validated reset with backup.
 MIHOMO_DIR="$TMP/mihomo"
@@ -591,11 +593,13 @@ else
 fi
 unset SKIP_CONSOLE_DNS_CHECK
 
-# Initial HTTP-01 issuance releases :80 only when mihomo was active and always
-# restores that original state, including after Certbot failure.
+# Initial HTTP-01 issuance releases :80 only when mihomo was active. Failure and
+# signal paths restore it immediately; success leaves it stopped until role
+# certificates are published and full_install reaches start_services.
 PORT80_LOG="$TMP/http-port80.log"
 HTTP_MIHOMO_ACTIVE=1
 HTTP_CERTBOT_RC=1
+HTTP_CERTBOT_SIGNAL=""
 systemctl() {
     printf 'systemctl %s\n' "$*" >> "$PORT80_LOG"
     case "$1" in
@@ -606,6 +610,9 @@ systemctl() {
 }
 certbot() {
     printf 'certbot %s\n' "$*" >> "$PORT80_LOG"
+    if [[ -n "$HTTP_CERTBOT_SIGNAL" ]]; then
+        kill "-$HTTP_CERTBOT_SIGNAL" "$BASHPID"
+    fi
     return "$HTTP_CERTBOT_RC"
 }
 : > "$PORT80_LOG"
@@ -617,6 +624,28 @@ elif grep -q '^systemctl stop mihomo.service$' "$PORT80_LOG" \
 else
     fail "HTTP-01 did not stop and restore active mihomo around Certbot"
 fi
+HTTP_CERTBOT_RC=0
+: > "$PORT80_LOG"
+run_http_certbot certonly --standalone >/dev/null 2>&1 \
+    || fail "HTTP-01 wrapper failed after successful Certbot"
+if grep -q '^systemctl stop mihomo.service$' "$PORT80_LOG" \
+   && ! grep -q '^systemctl start mihomo.service$' "$PORT80_LOG"; then
+    pass "successful HTTP-01 keeps active mihomo stopped for certificate publication"
+else
+    fail "successful HTTP-01 restored mihomo before certificate publication"
+fi
+for HTTP_CERTBOT_SIGNAL in INT TERM; do
+    : > "$PORT80_LOG"
+    if run_http_certbot certonly --standalone >/dev/null 2>&1; then
+        fail "HTTP-01 wrapper hid a $HTTP_CERTBOT_SIGNAL signal"
+    elif grep -q '^systemctl stop mihomo.service$' "$PORT80_LOG" \
+      && grep -q '^systemctl start mihomo.service$' "$PORT80_LOG"; then
+        pass "HTTP-01 restores an originally active mihomo after $HTTP_CERTBOT_SIGNAL"
+    else
+        fail "HTTP-01 $HTTP_CERTBOT_SIGNAL path did not restore active mihomo"
+    fi
+done
+HTTP_CERTBOT_SIGNAL=""
 HTTP_MIHOMO_ACTIVE=0
 HTTP_CERTBOT_RC=0
 : > "$PORT80_LOG"
@@ -626,6 +655,56 @@ if grep -Eq '^systemctl (stop|start) mihomo.service$' "$PORT80_LOG"; then
     fail "HTTP-01 changed the state of an originally inactive mihomo"
 else
     pass "HTTP-01 leaves an originally inactive mihomo stopped"
+fi
+
+# Exercise the real install_cert orchestration with deterministic stubs. This
+# catches the original race: no service start may occur between successful
+# Certbot completion and deploy_cert_roles, while the later start_services phase
+# remains responsible for restoring the data plane.
+HTTP_INSTALL_LOG="$TMP/http-install-order.log"
+(
+    CERT_MODE=http-01
+    CERT_EMAIL=admin@example.com
+    derive_domains example.com
+    validation_calls=0
+    certbot_lineage_owned_by_5gpn() { return 1; }
+    certbot_lineage_artifacts_exist() { return 1; }
+    cert_provenance_matches() { return 1; }
+    validate_cert_pair() {
+        validation_calls=$((validation_calls + 1))
+        [[ "$validation_calls" -ge 2 ]]
+    }
+    certbot_renewal_mode_matches() { return 0; }
+    check_http_challenge_dns_once() { return 0; }
+    write_cert_provenance() { printf 'write_cert_provenance\n' >> "$HTTP_INSTALL_LOG"; }
+    install_cert_deploy_hook() { printf 'install_cert_deploy_hook\n' >> "$HTTP_INSTALL_LOG"; }
+    install_renewal_automation() { printf 'install_renewal_automation\n' >> "$HTTP_INSTALL_LOG"; }
+    deploy_cert_roles() { printf 'deploy_cert_roles zash/current\n' >> "$HTTP_INSTALL_LOG"; }
+    systemctl() {
+        printf 'systemctl %s\n' "$*" >> "$HTTP_INSTALL_LOG"
+        return 0
+    }
+    certbot() {
+        printf 'certbot %s\n' "$*" >> "$HTTP_INSTALL_LOG"
+        return 0
+    }
+    start_services() {
+        printf 'start_services\n' >> "$HTTP_INSTALL_LOG"
+        systemctl start mihomo.service
+    }
+    : > "$HTTP_INSTALL_LOG"
+    install_cert example.com >/dev/null 2>&1 || exit 1
+    start_services
+) || fail "mocked successful HTTP-01 install flow failed"
+http_certbot_line="$(grep -n '^certbot ' "$HTTP_INSTALL_LOG" | head -1 | cut -d: -f1)"
+http_deploy_line="$(grep -n '^deploy_cert_roles zash/current$' "$HTTP_INSTALL_LOG" | head -1 | cut -d: -f1)"
+http_start_line="$(grep -n '^systemctl start mihomo.service$' "$HTTP_INSTALL_LOG" | head -1 | cut -d: -f1)"
+if [[ -n "$http_certbot_line" && -n "$http_deploy_line" && -n "$http_start_line" \
+   && "$http_certbot_line" -lt "$http_deploy_line" \
+   && "$http_deploy_line" -lt "$http_start_line" ]]; then
+    pass "HTTP-01 publishes zash/current before start_services restores mihomo"
+else
+    fail "HTTP-01 service restoration raced ahead of zash/current publication"
 fi
 
 # Static gates for operations that are intentionally not executed in a unit

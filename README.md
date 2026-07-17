@@ -30,7 +30,7 @@
         ▼                                    ▼
   mihomo (TCP 80/443/8080/8443; UDP 443)            Client direct / no connection
   · SNI == console → DIRECT 回环（API bearer）；SNI == zashboard →
-    源 IP 命中 whitelist.txt 才 DIRECT，否则 REJECT-DROP
+    源 IP 命中 whitelist.txt 才 DIRECT，否则快速 REJECT
   · 其余 SNI/QUIC → mihomo 内置嗅探器（sniffer）取域名，经 5gpn-dns 的回环 Egress DNS
     Broker (127.0.0.1:5354) re-resolves through DNS_EGRESS_RESOLVER
     (operational default: plain-UDP 22.22.22.22)
@@ -54,9 +54,10 @@
 
 ## 关键特性
 
-- **确定性 chnroute 仲裁**：并发查国内 UDP（`223.5.5.5`/`119.29.29.29`）和可信 DoT（`8.8.8.8`/`1.1.1.1`），**按 chnroute 成员关系判定，不看谁先回**（非竞速）。
+- **Deterministic chnroute arbitration**: query the operational China resolver `223.5.5.5` and trust resolver `22.22.22.22` concurrently over UDP/53, then decide by chnroute membership rather than response speed.
 - **DoT-only 入口**：唯一的客户端 DNS 传输是 DoT `:853`；不提供 DoH 或客户端明文 `:53`。另有一个仅回环的 `127.0.0.1:5353` 明文调试监听，仅用于本机排障。
-- **全查询类型**：A → 仲裁+改写；AAAA → SOA（IPv4-only）；HTTPS/SVCB → 空 NOERROR（保 SNI 嗅探）；其余 → 转发可信 DoT。
+- **All query types**: A uses arbitration and rewriting; AAAA returns IPv4-only NODATA with SOA; HTTPS/SVCB returns NODATA to preserve hostname sniffing; other types use the trust upstream.
+- **Sniff-failure isolation**: new mihomo seeds pair same-port `console.<base>` listener targets with an exact `force-domain` entry. Successful sniffing still replaces the provisional target with the real origin, while malformed public traffic cannot poison one shared IP failure-cache key for every connection.
 - **有序统一策略**：`/etc/5gpn/policy.json` 中每条规则以 exact/suffix/keyword/subscription 匹配一种 block/direct/proxy 意图，跨意图按全局顺序 first-match；未命中项可选 auto/direct/gateway fallback。系统 chnroute 与编译后的策略订阅由进程内抓取器定时更新，域名列表支持 `plain`/`gfwlist`/`dnsmasq`/`hosts`，chnroute 使用 `cidr`；失败保留旧缓存（离线安全）。
 - **统一控制面**（多前端共用同一内存 `Controller`）：
   - **HTTPS REST API + React Web 控制台 + iOS 描述文件**：console SPA 资源与 profile 下载公开，所有 API 需 bearer token；iOS/Android 配置说明、二维码与下载入口统一位于控制台“配置向导”；zashboard 仍由 mihomo `whitelist.txt` 来源白名单保护。
@@ -65,7 +66,7 @@
   - **Mihomo controller TLS**：zash 证书角色由 zashboard 与 mihomo controller 共用。`DNS_MIHOMO_CONTROLLER` 是回环拨号地址；客户端以派生的 `zash.<base>` 校验 TLS 身份并信任 `DNS_ZASH_CERT`。Mihomo v1.19.28 通过只读 `SAFE_PATHS=/etc/5gpn/cert/zash` 读取位于 `-d /etc/5gpn/mihomo` 外的证书。普通重装逐字节保留已通过校验的 operator-owned 配置；若 verified controller transport 无法构造，DNS 与其余控制面继续运行，Mihomo 健康、配置和代理端点返回 unavailable/503，绝不降级到明文 HTTP。
 - **出口由 mihomo 原生配置拥有**：被代理流量经 mihomo 的 `tunnel` 监听 + 内置嗅探器透明转发（不解密 TLS）；完整 `/etc/5gpn/mihomo/config.yaml` 由运维者管理，默认 `Proxies` 组只有 `DIRECT`，也可加入 mihomo 支持的应用层节点/组。DNS 策略只决定“是否进入网关”，绝不生成 mihomo 出口。仍禁止 TUN/TProxy、WireGuard、fwmark、策略路由表或把本项目变成客户端默认路由器。
 - **Explicit alternate Web ports**: the initial mihomo seed accepts TCP `:8080` and `:8443` in addition to `:80` and `:443`. HTTP Host or TLS SNI replaces the synthetic gateway destination while preserving the accepted port. This does not provide arbitrary-port, raw-UDP, no-SNI, or ECH-inner-name forwarding.
-- **Optional ingress modules**: Settings exposes a fixed, explicit catalog backed by the complete operator-owned mihomo YAML. The `speedtest-5060` module is disabled by default; enabling it adds TCP/UDP `:5060`, HTTP/TLS/QUIC sniffing, and port-scoped rejects for the loopback console panels after revision checks, full `mihomo -t` validation, backup, atomic publication, and hot-apply rollback. TCP needs a visible Host/SNI and UDP supports recognizable QUIC only — Ookla native UDP and other raw UDP remain unsupported. Because `5060` is also a common SIP port and the listener is an unauthenticated Host/SNI relay, restrict its sources with the provider security group or an independently managed firewall.
+- **Optional ingress modules**: Settings exposes a fixed, explicit catalog backed by the complete operator-owned mihomo YAML. The `speedtest-5060` module is disabled by default; enabling it adds TCP/UDP `:5060`, a same-port `console.<base>:5060` forced-sniff target, HTTP/TLS/QUIC sniffing, and port-scoped rejects for the loopback console panels after revision checks, full `mihomo -t` validation, backup, atomic publication, and hot-apply rollback. Its hostname target isolates malformed traffic from the default ingress ports. TCP needs a visible Host/SNI and UDP supports recognizable QUIC only — Ookla native UDP and other raw UDP remain unsupported. Because `5060` is also a common SIP port and the listener is an unauthenticated Host/SNI relay, restrict its sources with the provider security group or an independently managed firewall.
 - **无宿主防火墙**：项目不管理宿主 nftables；zashboard 的网络访问控制由 mihomo 来源白名单承担，console API 依赖 bearer 鉴权。
 - **Operational hardening**: certificate pairs hot-reload without a service restart; HTTP-01 stops mihomo only for the bounded ACME `:80` challenge; `kill -HUP` remains rules-only; privileged bot operations can request only pre-installed fixed units through narrowly authorized `systemctl` actions.
 - **Minimal runtime dependencies**: the repository contains no Python; Go has three direct dependencies (`miekg/dns`, `go-telegram/bot`, and `yaml.v3`), with YAML parsing kept as the explicit structural-validation boundary. Third-party gateway tools remain pinned prebuilt binaries, so no compiler toolchain is installed on the gateway.
@@ -81,11 +82,11 @@ curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh |
 # 或在 checkout 内：sudo bash install.sh
 ```
 
-> First installation requires the TUI. It collects the certificate mode, base domain, certificate email, and Cloudflare token when selected. `PUBLIC_IP` is detected automatically; the gateway and listener default to it. `5gpn configure` retains advanced public/gateway/listener overrides for special network layouts. The egress resolver defaults to `22.22.22.22`, ECS starts disabled for later WebUI configuration, and cache size is selected from the memory profile. Caller environment variables never override configuration; a first install without a TTY fails closed, while reinstall can reuse a valid `dns.env` non-interactively.
+> First installation requires the TUI. It collects the certificate mode, base domain, certificate email, and Cloudflare token when selected. `PUBLIC_IP` is detected automatically; the gateway and listener default to it. `5gpn configure` retains advanced public/gateway/listener overrides for special network layouts. China DNS defaults to `223.5.5.5` over UDP/53, trust DNS and the egress resolver default to `22.22.22.22` over UDP/53, China ECS defaults to `112.96.32.0/24`, and cache size is selected from the memory profile. Caller environment variables never override configuration; a first install without a TTY fails closed, while reinstall can reuse a valid `dns.env` non-interactively.
 
 > TCP `:8080` and `:8443` are present in new seeds and explicit `5gpn mihomo-reset` output. Reinstall preserves an existing valid operator-owned mihomo config byte-for-byte, so existing deployments must add the listeners and sniff ports manually or use the explicit reset path after reviewing its backup-and-replace behavior. Provider security groups or upstream firewalls must allow both TCP ports from the intended clients.
 
-> The `speedtest-5060` switch also requires the seven destination guards to precede every accepting mihomo rule. Older operator-owned configs are still preserved and may therefore show the module as custom/unmanageable until those guards are reordered manually or the reviewed seed is restored explicitly.
+> The `speedtest-5060` switch requires the reviewed rule boundary: panel protocol/port rejects, optional `:5060` panel rejects, panel routes, zashboard deny-by-default, anti-loop destination guards, then terminal `MATCH`. The anti-loop guards intentionally follow the panel routes because mihomo resolves the console fallback through `hosts` before rule matching. Older operator-owned configs are still preserved and may therefore show the module as custom/unmanageable until the rules are reordered manually or the reviewed seed is restored explicitly.
 
 安装器会先把固定版本的 5gpn-dns、Web、mihomo、zashboard 下载到 staging 并强制校验 SHA-256，再备份当前部署、原子发布并执行 readiness 探针；发布后失败会自动回滚。生产证书可选 Cloudflare DNS-01 或 HTTP-01，debug 模式使用隔离的自签证书。
 

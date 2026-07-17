@@ -343,25 +343,29 @@ grep -Fq 'private-key: /etc/5gpn/cert/zash/current/privkey.pem' "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #1 (zash controller private-key path)"
 grep -Fq '__MIHOMO_LISTENERS__'                 "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing dynamic listener placeholder"
-grep -Fq 'target: 127.0.0.1:443'               "$INSTALL" \
-    || fail "install.sh: dynamic listener renderer missing gateway loopback target"
-grep -Fq 'target: 127.0.0.1:8080'              "$INSTALL" \
-    || fail "install.sh: dynamic listener renderer missing :8080 same-port target"
-grep -Fq 'target: 127.0.0.1:8443'              "$INSTALL" \
-    || fail "install.sh: dynamic listener renderer missing :8443 same-port target"
+grep -Fq 'target: %s:443'                       "$INSTALL" \
+    || fail "install.sh: dynamic listener renderer missing gateway hostname target"
+grep -Fq 'target: %s:8080'                      "$INSTALL" \
+    || fail "install.sh: dynamic listener renderer missing :8080 hostname target"
+grep -Fq 'target: %s:8443'                      "$INSTALL" \
+    || fail "install.sh: dynamic listener renderer missing :8443 hostname target"
+grep -Fq 'render_mihomo_listeners "$MIHOMO_LISTEN_IPS" "$CONSOLE_DOMAIN"' "$INSTALL" \
+    || fail "install.sh: listener renderer is not passed the console hostname"
 grep -Fq 'name: gateway%s'                       "$INSTALL" \
     || fail "install.sh: dynamic listener renderer missing gateway listener name"
 grep -Fq 'udp://127.0.0.1:5354'                "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #3 (egress DNS broker)"
 grep -Fq '__CONSOLE_DOMAIN__: 127.0.0.1'       "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #4 (console SNI hosts mapping)"
+grep -Fq 'force-domain: [__CONSOLE_DOMAIN__]'  "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: console fallback does not force hostname sniffing"
 grep -Fq '__ZASH_DOMAIN__:    127.0.0.2'        "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #5 (zash SNI hosts mapping)"
 grep -Fq 'DOMAIN,__CONSOLE_DOMAIN__,DIRECT'     "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: public console is not routed directly"
 grep -Fq '__PROFILE_DOMAIN__' "$MIHOMO_TMPL" \
     && fail "etc/mihomo/config.yaml.tmpl: retired profile SNI remains"
-grep -Fq 'IP-CIDR,__GATEWAY_IP__/32,REJECT-DROP' "$MIHOMO_TMPL" \
+grep -Fq 'IP-CIDR,__GATEWAY_IP__/32,REJECT' "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #6 (anti-loop guard)"
 
 # render_mihomo_config generates a strong mixed secret (base64), not the old hex.

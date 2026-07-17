@@ -16,7 +16,7 @@ func chinaIsCN(reply *dns.Msg, cn *Chnroute) bool {
 	// A truncated china reply carries only a partial Answer set; deciding CN
 	// membership on it could misclassify a CN domain as foreign (and funnel it
 	// through the gateway). Treat truncated as non-authoritative and fall
-	// through to the trust upstream, which is queried over TCP-framed DoT.
+	// through to the independently configured trust upstream.
 	if reply.Truncated {
 		return false
 	}

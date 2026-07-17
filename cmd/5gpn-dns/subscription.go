@@ -271,7 +271,7 @@ func trustHostResolver(x Exchanger) HostResolver {
 // hop's scheme and caps redirects; (3) Proxy is nil so HTTP(S)_PROXY env can't
 // redirect fetches through an attacker-influenced proxy.
 //
-// resolver, when non-nil, resolves the request hostname via the trust DoT
+// resolver, when non-nil, resolves the request hostname via the trust
 // upstream (real IPs) instead of the box's own resolver — which, on a working
 // 5gpn gateway, rewrites foreign hosts to the gateway IP and would otherwise
 // deadlock the SSRF guard against the gateway's own address. Only the dialed

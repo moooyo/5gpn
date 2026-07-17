@@ -5,6 +5,7 @@ const zh: typeof en = {
     saving: '保存中…',
     save: '保存', add: '添加', edit: '编辑', delete: '删除',
     running: '运行中', loading: '加载中…',
+    healthChecking: '检查中', healthHealthy: '正常', healthUnknown: '未知', healthDown: '异常',
     errorTitle: '出现错误', errorBody: '页面出现了预期之外的错误，重新加载通常可以解决。', reload: '重新加载',
     pagePrev: '上一页', pageNext: '下一页', pageOf: '第 {{page}} / {{count}} 页' },
   nav: {
@@ -430,11 +431,11 @@ const zh: typeof en = {
     invariants: {
       controller: { name: 'TLS 控制器', desc: '关闭明文控制器，external-controller-tls 使用 127.0.0.1:9090 与固定 zash 证书路径。' },
       secret: { name: '控制器密钥', desc: '控制器 bearer 密钥须与守护进程客户端和控制台代理保持一致。' },
-      gateway: { name: '网关入口', desc: '一个监听 443 端口、指向 127.0.0.1:443 的 gateway* tunnel 入站。' },
+      gateway: { name: '网关入口', desc: '一个监听 443 端口的 tunnel 入站；新种子使用 console 域名 target 并精确强制嗅探，同时兼容旧的回环 target。' },
       dns: { name: '我们指定的 DNS', desc: 'dns 配置块的 nameserver 中包含出口代理 udp://127.0.0.1:5354。' },
       console: { name: 'console SNI 分流', desc: 'console 域名公开 DIRECT 到回环面板；SPA 资源与 iOS 描述文件下载公开，/api/* 仍需 bearer token。' },
-      zash: { name: 'zash SNI 分流', desc: 'zash 域名映射到其回环面板，且有白名单限定的 DIRECT 规则与 REJECT-DROP 守卫。' },
-      antiloop: { name: '防环 REJECT-DROP', desc: '针对网关自身地址的 IP-CIDR REJECT-DROP 守卫。' },
+      zash: { name: 'zash SNI 分流', desc: 'zash 域名映射到其回环面板，且有白名单限定的 DIRECT 规则与拒绝守卫。' },
+      antiloop: { name: '防环拒绝', desc: '针对网关自身地址的 IP-CIDR 拒绝守卫。' },
     },
   },
 }

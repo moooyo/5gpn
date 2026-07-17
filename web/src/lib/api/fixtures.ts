@@ -22,7 +22,11 @@ listeners:
     type: tunnel
     port: 443
     network: [tcp, udp]
-    target: 127.0.0.1:443
+    target: console.5gpn.test:443
+sniffer:
+  enable: true
+  override-destination: true
+  force-domain: [console.5gpn.test]
 hosts:
   console.5gpn.test: 127.0.0.1
   zash.5gpn.test: 127.0.0.2
@@ -35,7 +39,7 @@ proxy-groups:
 rules:
   - DOMAIN,console.5gpn.test,DIRECT
   - DOMAIN,zash.5gpn.test,DIRECT
-  - IP-CIDR,10.0.1.20/32,REJECT-DROP
+  - IP-CIDR,10.0.1.20/32,REJECT
   - MATCH,Proxies
 `
 

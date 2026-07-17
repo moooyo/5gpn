@@ -126,6 +126,10 @@ type Handler struct {
 	flightMu    sync.Mutex
 	flights     map[dnsFlightKey]*dnsFlight
 	flightLimit int
+
+	// afterCacheEpoch is a test seam for changes that land after a resolver
+	// captures the cache epoch but before it loads any runtime snapshots.
+	afterCacheEpoch func()
 }
 
 const defaultDNSFlightLimit = 1024
@@ -762,6 +766,16 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 		return h.soaReply(r)
 	}
 
+	// Capture the cache epoch BEFORE every runtime snapshot. If an upstream,
+	// rule, or policy swap lands anywhere between here and the final cachePut,
+	// the epoch mismatch discards the write. Loading any snapshot before the
+	// epoch would let a request combine old runtime state with a post-flush
+	// epoch and repopulate the new cache generation with a stale answer.
+	epoch := h.Cache.Epoch()
+	if h.afterCacheEpoch != nil {
+		h.afterCacheEpoch()
+	}
+
 	// The upstream groups are hot-swappable (PUT /api/upstreams); load the
 	// current pair and its identity once so one query never mixes groups from
 	// two generations or shares a flight across a swap.
@@ -770,13 +784,6 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 	if upstreamGeneration != nil {
 		china, trust = upstreamGeneration.China, upstreamGeneration.Trust
 	}
-
-	// Capture the cache epoch BEFORE the rule snapshot: if a reload
-	// (swapRuleSets = snapshot swap + cache flush + epoch bump) lands anywhere
-	// between here and the final cachePut, the epoch mismatch discards the
-	// write ? an answer computed under the pre-reload rules must not
-	// repopulate the freshly flushed cache and re-mask the rule change.
-	epoch := h.Cache.Epoch()
 
 	// Capture the current chnroute snapshot and identity once for
 	// arbitration/rewrite and flight generation isolation.

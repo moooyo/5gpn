@@ -91,9 +91,9 @@ done
 printf '%s' "$ic" | grep -Eq -- '--http-01-port|--webroot' \
     && fail "install.sh: HTTP-01 must use the standard standalone :80 flow, not custom-port/webroot flags"
 
-# HTTP-01 releases only mihomo's :80 listeners and restores only a service that
-# was originally active. Cloudflare reaches Certbot directly, bypassing this
-# stop/start wrapper.
+# HTTP-01 releases only mihomo's :80 listeners. Failure and signal paths restore
+# an originally active service immediately; successful initial issuance defers
+# restoration until after role publication. Cloudflare reaches Certbot directly.
 http_run="$(sed -n '/^run_http_certbot()/,/^)/p' "$INSTALL")"
 printf '%s' "$http_run" | grep -Fq 'systemctl is-active --quiet mihomo.service' \
     || fail "install.sh: HTTP-01 wrapper does not remember whether mihomo was active"

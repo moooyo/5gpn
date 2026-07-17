@@ -76,7 +76,7 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 
 	// Default upstream lists.
-	wantChina := []string{"223.5.5.5", "119.29.29.29"}
+	wantChina := []string{"223.5.5.5"}
 	if len(cfg.ChinaAddrs) != len(wantChina) {
 		t.Errorf("ChinaAddrs len = %d, want %d", len(cfg.ChinaAddrs), len(wantChina))
 	} else {
@@ -104,6 +104,9 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 	if cfg.UpstreamsFile != "/etc/5gpn/upstreams.json" {
 		t.Errorf("UpstreamsFile = %q, want /etc/5gpn/upstreams.json", cfg.UpstreamsFile)
+	}
+	if got := ecsSubnetString(cfg.ChinaECS); got != "112.96.32.0/24" {
+		t.Errorf("ChinaECS default = %q, want 112.96.32.0/24", got)
 	}
 
 	// Default durations.

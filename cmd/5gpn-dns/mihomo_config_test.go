@@ -27,7 +27,7 @@ func goldenMihomoConfig() string {
 	r := strings.NewReplacer(
 		"__CONSOLE_DOMAIN__", "console.5gpn.test",
 		"__ZASH_DOMAIN__", "zash.5gpn.test",
-		"__MIHOMO_LISTENERS__", renderMihomoListeners([]string{"203.0.113.10"}),
+		"__MIHOMO_LISTENERS__", renderMihomoListeners([]string{"203.0.113.10"}, "console.5gpn.test"),
 		"__GATEWAY_IP__", "10.0.1.20",
 		"__CONTROLLER_SECRET__", "s3cr3t",
 	)
@@ -37,6 +37,189 @@ func goldenMihomoConfig() string {
 func TestMihomoInvariants_GoldenPasses(t *testing.T) {
 	if err := ValidateInvariants(goldenMihomoConfig(), goldenInfraParams()); err != nil {
 		t.Fatalf("golden config should satisfy all invariants: %v", err)
+	}
+}
+
+func TestMihomoSeedUsesForcedConsoleFallbackTargets(t *testing.T) {
+	cfg := goldenMihomoConfig()
+	for _, want := range []string{
+		"target: console.5gpn.test:443}",
+		"target: console.5gpn.test:80}",
+		"target: console.5gpn.test:8080}",
+		"target: console.5gpn.test:8443}",
+		"force-domain: [console.5gpn.test]",
+	} {
+		if !strings.Contains(cfg, want) {
+			t.Errorf("seed config is missing %q", want)
+		}
+	}
+	if strings.Contains(cfg, "target: 127.0.0.1:") {
+		t.Fatal("seed listener targets must not share the loopback sniff-failure cache key")
+	}
+}
+
+func TestMihomoInvariants_HostnameGatewayRequiresForcedSniff(t *testing.T) {
+	p := goldenInfraParams()
+	valid := goldenMihomoConfig()
+
+	extraForceDomain := strings.Replace(valid,
+		"force-domain: [console.5gpn.test]",
+		"force-domain: [example.test, console.5gpn.test]", 1)
+	if err := ValidateInvariants(extraForceDomain, p); err != nil {
+		t.Fatalf("extra operator-owned force-domain entries should remain valid: %v", err)
+	}
+	perProtocolOverride := strings.Replace(valid,
+		"  override-destination: true\n", "  override-destination: false\n", 1)
+	perProtocolOverride = strings.Replace(perProtocolOverride,
+		"TLS:  { ports: [443, 8080, 8443] }", "TLS:  { ports: [443, 8080, 8443], override-destination: true }", 1)
+	perProtocolOverride = strings.Replace(perProtocolOverride,
+		"QUIC: { ports: [443] }", "QUIC: { ports: [443], override-destination: true }", 1)
+	if err := ValidateInvariants(perProtocolOverride, p); err != nil {
+		t.Fatalf("effective per-protocol destination overrides should remain valid: %v", err)
+	}
+	portRange := strings.Replace(valid, "TLS:  { ports: [443, 8080, 8443] }", "TLS:  { ports: [400-500, 8080, 8443] }", 1)
+	if err := ValidateInvariants(portRange, p); err != nil {
+		t.Fatalf("a TLS port range containing 443 should remain valid: %v", err)
+	}
+
+	brokenConfigs := []string{
+		strings.Replace(valid, "  force-domain: [console.5gpn.test]\n", "", 1),
+		strings.Replace(valid, "force-domain: [console.5gpn.test]", "force-domain: [+.console.5gpn.test]", 1),
+		strings.Replace(valid, "  enable: true\n", "  enable: false\n", 1),
+		strings.Replace(valid, "  override-destination: true\n", "  override-destination: false\n", 1),
+		strings.Replace(valid, "  force-domain: [console.5gpn.test]\n", "  force-domain: [console.5gpn.test]\n  skip-src-address: [0.0.0.0/0]\n", 1),
+		strings.Replace(valid, "  force-domain: [console.5gpn.test]\n", "  force-domain: [console.5gpn.test]\n  skip-domain: [+.example.test]\n", 1),
+		strings.Replace(valid, "TLS:  { ports: [443, 8080, 8443] }", "TLS:  { ports: [8443] }", 1),
+		strings.Replace(valid, "TLS:  { ports: [443, 8080, 8443] }", "TLS:  { ports: [443, 8080, 8443], override-destination: false }", 1),
+		strings.Replace(valid, "QUIC: { ports: [443] }", "QUIC: { ports: [8443] }", 1),
+		strings.Replace(valid, "QUIC: { ports: [443] }", "QUIC: { ports: [443], override-destination: false }", 1),
+		strings.Replace(valid, "target: console.5gpn.test:443", "target: other.5gpn.test:443", 1),
+	}
+	for _, broken := range brokenConfigs {
+		err := ValidateInvariants(broken, p)
+		var missing *ErrMissingInfra
+		if !errors.As(err, &missing) || missing.Name != "gateway-inbound" {
+			t.Fatalf("unsafe hostname target error = %v, want gateway-inbound", err)
+		}
+	}
+}
+
+func TestMihomoInvariants_AllNamedGatewayListenersMustBeSafe(t *testing.T) {
+	valid := goldenMihomoConfig()
+	first := "  - {name: gateway, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: console.5gpn.test:443}\n"
+	unsafeNamed := strings.Replace(valid, first, first+
+		"  - {name: gateway-2, type: tunnel, listen: 203.0.113.11, port: 443, network: [tcp, udp], target: other.5gpn.test:443}\n", 1)
+	err := ValidateInvariants(unsafeNamed, goldenInfraParams())
+	var missing *ErrMissingInfra
+	if !errors.As(err, &missing) || missing.Name != "gateway-inbound" {
+		t.Fatalf("unsafe named gateway error = %v, want gateway-inbound", err)
+	}
+
+	custom := strings.Replace(valid, first, first+
+		"  - {name: operator-tunnel, type: tunnel, listen: 203.0.113.11, port: 443, network: [tcp], target: other.example.test:443}\n", 1)
+	if err := ValidateInvariants(custom, goldenInfraParams()); err != nil {
+		t.Fatalf("an additional operator-owned non-gateway listener should remain valid: %v", err)
+	}
+}
+
+func TestMihomoInvariants_LegacyLoopbackGatewayRemainsValid(t *testing.T) {
+	legacy := goldenMihomoConfig()
+	for _, port := range []string{"443", "80", "8080", "8443"} {
+		legacy = strings.Replace(legacy, "target: console.5gpn.test:"+port+"}", "target: 127.0.0.1:"+port+"}", 1)
+	}
+	legacy = strings.Replace(legacy, "  force-domain: [console.5gpn.test]\n",
+		"  skip-src-address: [0.0.0.0/0]\n  skip-domain: [+.example.test]\n", 1)
+	if err := ValidateInvariants(legacy, goldenInfraParams()); err != nil {
+		t.Fatalf("legacy operator-owned loopback listener should remain valid: %v", err)
+	}
+}
+
+func TestMihomoSeedPanelFallbackRejectsPrecedeDirect(t *testing.T) {
+	cfg := goldenMihomoConfig()
+	for _, tc := range []struct {
+		name   string
+		reject string
+		direct string
+	}{
+		{
+			name:   "console UDP",
+			reject: "  - AND,((DOMAIN,console.5gpn.test),(NETWORK,UDP)),REJECT\n",
+			direct: "  - DOMAIN,console.5gpn.test,DIRECT\n",
+		},
+		{
+			name:   "console HTTP",
+			reject: "  - AND,((DOMAIN,console.5gpn.test),(DST-PORT,80)),REJECT\n",
+			direct: "  - DOMAIN,console.5gpn.test,DIRECT\n",
+		},
+		{
+			name:   "console alternate HTTP",
+			reject: "  - AND,((DOMAIN,console.5gpn.test),(DST-PORT,8080)),REJECT\n",
+			direct: "  - DOMAIN,console.5gpn.test,DIRECT\n",
+		},
+		{
+			name:   "console alternate HTTPS",
+			reject: "  - AND,((DOMAIN,console.5gpn.test),(DST-PORT,8443)),REJECT\n",
+			direct: "  - DOMAIN,console.5gpn.test,DIRECT\n",
+		},
+		{
+			name:   "zashboard UDP",
+			reject: "  - AND,((DOMAIN,zash.5gpn.test),(NETWORK,UDP)),REJECT\n",
+			direct: "  - AND,((DOMAIN,zash.5gpn.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT\n",
+		},
+		{
+			name:   "zashboard HTTP",
+			reject: "  - AND,((DOMAIN,zash.5gpn.test),(DST-PORT,80)),REJECT\n",
+			direct: "  - AND,((DOMAIN,zash.5gpn.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT\n",
+		},
+		{
+			name:   "zashboard alternate HTTP",
+			reject: "  - AND,((DOMAIN,zash.5gpn.test),(DST-PORT,8080)),REJECT\n",
+			direct: "  - AND,((DOMAIN,zash.5gpn.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT\n",
+		},
+		{
+			name:   "zashboard alternate HTTPS",
+			reject: "  - AND,((DOMAIN,zash.5gpn.test),(DST-PORT,8443)),REJECT\n",
+			direct: "  - AND,((DOMAIN,zash.5gpn.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT\n",
+		},
+	} {
+		rejectAt, directAt := strings.Index(cfg, tc.reject), strings.Index(cfg, tc.direct)
+		if rejectAt < 0 || directAt < 0 || rejectAt >= directAt {
+			t.Errorf("%s fallback reject must be present before its DIRECT rule", tc.name)
+		}
+	}
+}
+
+func TestMihomoSeedUsesFastRejectGuards(t *testing.T) {
+	cfg := goldenMihomoConfig()
+	if strings.Contains(cfg, "REJECT-DROP") {
+		t.Fatal("seed config must not retain connections with REJECT-DROP")
+	}
+	for _, want := range []string{
+		"DOMAIN,zash.5gpn.test,REJECT",
+		"IP-CIDR,10.0.1.20/32,REJECT,no-resolve",
+		"IP-CIDR,127.0.0.0/8,REJECT,no-resolve",
+		"IP-CIDR,10.0.0.0/8,REJECT,no-resolve",
+		"IP-CIDR,172.16.0.0/12,REJECT,no-resolve",
+		"IP-CIDR,192.168.0.0/16,REJECT,no-resolve",
+		"IP-CIDR,100.64.0.0/10,REJECT,no-resolve",
+		"IP-CIDR,169.254.0.0/16,REJECT,no-resolve",
+	} {
+		if !strings.Contains(cfg, want) {
+			t.Errorf("seed config is missing fast reject guard %q", want)
+		}
+	}
+}
+
+func TestMihomoInvariants_DenyActionRemainsOperatorOwned(t *testing.T) {
+	cfg := goldenMihomoConfig()
+	cfg = strings.Replace(cfg,
+		"  - DOMAIN,zash.5gpn.test,REJECT\n",
+		"  - DOMAIN,zash.5gpn.test,REJECT-DROP\n", 1)
+	cfg = strings.Replace(cfg,
+		"  - IP-CIDR,10.0.1.20/32,REJECT,no-resolve\n",
+		"  - IP-CIDR,10.0.1.20/32,REJECT-DROP,no-resolve\n", 1)
+	if err := ValidateInvariants(cfg, goldenInfraParams()); err != nil {
+		t.Fatalf("operator-owned REJECT-DROP guards should remain structurally valid: %v", err)
 	}
 }
 
@@ -52,6 +235,8 @@ func TestMihomoInvariants_ConsoleSNIMustStayPublicAndDirect(t *testing.T) {
 		strings.Replace(withConsole, "  - DOMAIN,console.5gpn.test,DIRECT\n", "", 1),
 		strings.Replace(withConsole, "  - DOMAIN,console.5gpn.test,DIRECT\n",
 			"  - AND,((DOMAIN,console.5gpn.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT\n", 1),
+		strings.Replace(withConsole, "  - DOMAIN,console.5gpn.test,DIRECT\n",
+			"  - DOMAIN,console.5gpn.test,DIRECT\n  - DOMAIN,console.5gpn.test,REJECT\n", 1),
 		strings.Replace(withConsole, "  - DOMAIN,console.5gpn.test,DIRECT\n",
 			"  - DOMAIN,console.5gpn.test,DIRECT\n  - DOMAIN,console.5gpn.test,REJECT-DROP\n", 1),
 	} {
@@ -70,8 +255,8 @@ func TestMihomoInvariants_ConsoleSNIMustStayPublicAndDirect(t *testing.T) {
 func TestMihomoInvariants_WhitespaceReformattedStillPasses(t *testing.T) {
 	cfg := goldenMihomoConfig()
 	reformatted := strings.ReplaceAll(cfg,
-		"- {name: gateway, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: 127.0.0.1:443}",
-		"- name:    gateway\n    type: tunnel\n    listen: 203.0.113.10\n    port:   443\n    network: [tcp, udp]\n    target:      127.0.0.1:443",
+		"- {name: gateway, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: console.5gpn.test:443}",
+		"- name:    gateway\n    type: tunnel\n    listen: 203.0.113.10\n    port:   443\n    network: [tcp, udp]\n    target:      console.5gpn.test:443",
 	)
 	// Extra blank lines and leading/trailing whitespace elsewhere.
 	reformatted = strings.ReplaceAll(reformatted, `external-controller: ""`, `external-controller:    ""   `)
@@ -105,7 +290,7 @@ func TestMihomoInvariants_FlowStyleTLSStillPasses(t *testing.T) {
 
 func TestMihomoInvariants_RejectsStructuralDecoys(t *testing.T) {
 	cfg := strings.Replace(goldenMihomoConfig(),
-		"  - {name: gateway, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: 127.0.0.1:443}\n",
+		"  - {name: gateway, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: console.5gpn.test:443}\n",
 		"", 1)
 	cfg += "\ndecoy:\n  type: tunnel\n  port: 443\n  target: 127.0.0.1:443\n"
 
@@ -212,7 +397,7 @@ func TestMihomoInvariants_MissingElement(t *testing.T) {
 			name: "gateway tunnel listener removed",
 			mutate: func(cfg string) string {
 				return strings.Replace(cfg,
-					"  - {name: gateway, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: 127.0.0.1:443}\n",
+					"  - {name: gateway, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: console.5gpn.test:443}\n",
 					"", 1)
 			},
 			wantName: "gateway-inbound",
@@ -250,9 +435,9 @@ func TestMihomoInvariants_MissingElement(t *testing.T) {
 			wantName: "zash-sni",
 		},
 		{
-			name: "zash REJECT-DROP guard removed",
+			name: "zash deny guard removed",
 			mutate: func(cfg string) string {
-				return strings.Replace(cfg, "  - DOMAIN,zash.5gpn.test,REJECT-DROP\n", "", 1)
+				return strings.Replace(cfg, "  - DOMAIN,zash.5gpn.test,REJECT\n", "", 1)
 			},
 			wantName: "zash-sni",
 		},
@@ -277,7 +462,7 @@ func TestMihomoInvariants_MissingElement(t *testing.T) {
 		{
 			name: "anti-loop gateway guard removed",
 			mutate: func(cfg string) string {
-				return strings.Replace(cfg, "  - IP-CIDR,10.0.1.20/32,REJECT-DROP,no-resolve\n", "", 1)
+				return strings.Replace(cfg, "  - IP-CIDR,10.0.1.20/32,REJECT,no-resolve\n", "", 1)
 			},
 			wantName: "anti-loop",
 		},
@@ -319,9 +504,9 @@ func TestMihomoInvariants_MissingElement(t *testing.T) {
 // "cannot be satisfied", never as a wildcard that matches anything. The
 // controller/dns-broker checks (design §4.4 rows #1/#3) are literal-based
 // (see literalControllerAddr/literalDNSBrokerNameserver in mihomo_config.go)
-// and so are satisfied by the golden config regardless of InfraParams —
-// console-sni is therefore the first PARAM-dependent check to fail against a
-// wholly-empty InfraParams.
+// and so are satisfied by the golden config regardless of InfraParams. The
+// hostname-targeted gateway check now depends on the exact console domain, so
+// it is the first parameter-dependent check to fail against empty parameters.
 func TestMihomoInvariants_EmptyInfraParamsFailClosed(t *testing.T) {
 	err := ValidateInvariants(goldenMihomoConfig(), InfraParams{})
 	if err == nil {
@@ -331,8 +516,8 @@ func TestMihomoInvariants_EmptyInfraParamsFailClosed(t *testing.T) {
 	if !errors.As(err, &mi) {
 		t.Fatalf("expected *ErrMissingInfra, got %T: %v", err, err)
 	}
-	if mi.Name != "console-sni" {
-		t.Fatalf("expected the first param-dependent check (console-sni) to fail first, got %q", mi.Name)
+	if mi.Name != "gateway-inbound" {
+		t.Fatalf("expected the first param-dependent check (gateway-inbound) to fail first, got %q", mi.Name)
 	}
 }
 
@@ -413,20 +598,20 @@ func TestMihomoConfigDefaultRendersPluralListeners(t *testing.T) {
 
 	got := NewMihomoConfigStore(filepath.Join(t.TempDir(), "config.yaml")).Default()
 	for _, want := range []string{
-		"name: gateway, type: tunnel, listen: 10.0.1.20, port: 443",
-		"name: gateway80, type: tunnel, listen: 10.0.1.20, port: 80",
-		"name: gateway8080, type: tunnel, listen: 10.0.1.20, port: 8080, network: [tcp], target: 127.0.0.1:8080",
-		"name: gateway8443, type: tunnel, listen: 10.0.1.20, port: 8443, network: [tcp], target: 127.0.0.1:8443",
-		"name: gateway-2, type: tunnel, listen: 203.0.113.10, port: 443",
-		"name: gateway80-2, type: tunnel, listen: 203.0.113.10, port: 80",
-		"name: gateway8080-2, type: tunnel, listen: 203.0.113.10, port: 8080, network: [tcp], target: 127.0.0.1:8080",
-		"name: gateway8443-2, type: tunnel, listen: 203.0.113.10, port: 8443, network: [tcp], target: 127.0.0.1:8443",
+		"name: gateway, type: tunnel, listen: 10.0.1.20, port: 443, network: [tcp, udp], target: console.5gpn.test:443",
+		"name: gateway80, type: tunnel, listen: 10.0.1.20, port: 80, network: [tcp], target: console.5gpn.test:80",
+		"name: gateway8080, type: tunnel, listen: 10.0.1.20, port: 8080, network: [tcp], target: console.5gpn.test:8080",
+		"name: gateway8443, type: tunnel, listen: 10.0.1.20, port: 8443, network: [tcp], target: console.5gpn.test:8443",
+		"name: gateway-2, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: console.5gpn.test:443",
+		"name: gateway80-2, type: tunnel, listen: 203.0.113.10, port: 80, network: [tcp], target: console.5gpn.test:80",
+		"name: gateway8080-2, type: tunnel, listen: 203.0.113.10, port: 8080, network: [tcp], target: console.5gpn.test:8080",
+		"name: gateway8443-2, type: tunnel, listen: 203.0.113.10, port: 8443, network: [tcp], target: console.5gpn.test:8443",
 		"TLS:  { ports: [443, 8080, 8443] }",
 		"HTTP: { ports: [80, 8080, 8443] }",
-		"AND,((DOMAIN,console.5gpn.test),(DST-PORT,8080)),REJECT-DROP",
-		"AND,((DOMAIN,console.5gpn.test),(DST-PORT,8443)),REJECT-DROP",
-		"AND,((DOMAIN,zash.5gpn.test),(DST-PORT,8080)),REJECT-DROP",
-		"AND,((DOMAIN,zash.5gpn.test),(DST-PORT,8443)),REJECT-DROP",
+		"AND,((DOMAIN,console.5gpn.test),(DST-PORT,8080)),REJECT",
+		"AND,((DOMAIN,console.5gpn.test),(DST-PORT,8443)),REJECT",
+		"AND,((DOMAIN,zash.5gpn.test),(DST-PORT,8080)),REJECT",
+		"AND,((DOMAIN,zash.5gpn.test),(DST-PORT,8443)),REJECT",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Default() missing %q", want)

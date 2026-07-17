@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -149,17 +150,17 @@ func normalizeMihomoListenerIPs(raw string) ([]string, bool) {
 	return out, true
 }
 
-func renderMihomoListeners(ips []string) string {
+func renderMihomoListeners(ips []string, consoleDomain string) string {
 	var b strings.Builder
 	for i, ip := range ips {
 		suffix := ""
 		if i > 0 {
 			suffix = fmt.Sprintf("-%d", i+1)
 		}
-		fmt.Fprintf(&b, "  - {name: gateway%s, type: tunnel, listen: %s, port: 443, network: [tcp, udp], target: 127.0.0.1:443}\n", suffix, ip)
-		fmt.Fprintf(&b, "  - {name: gateway80%s, type: tunnel, listen: %s, port: 80, network: [tcp], target: 127.0.0.1:80}\n", suffix, ip)
-		fmt.Fprintf(&b, "  - {name: gateway8080%s, type: tunnel, listen: %s, port: 8080, network: [tcp], target: 127.0.0.1:8080}\n", suffix, ip)
-		fmt.Fprintf(&b, "  - {name: gateway8443%s, type: tunnel, listen: %s, port: 8443, network: [tcp], target: 127.0.0.1:8443}\n", suffix, ip)
+		fmt.Fprintf(&b, "  - {name: gateway%s, type: tunnel, listen: %s, port: 443, network: [tcp, udp], target: %s:443}\n", suffix, ip, consoleDomain)
+		fmt.Fprintf(&b, "  - {name: gateway80%s, type: tunnel, listen: %s, port: 80, network: [tcp], target: %s:80}\n", suffix, ip, consoleDomain)
+		fmt.Fprintf(&b, "  - {name: gateway8080%s, type: tunnel, listen: %s, port: 8080, network: [tcp], target: %s:8080}\n", suffix, ip, consoleDomain)
+		fmt.Fprintf(&b, "  - {name: gateway8443%s, type: tunnel, listen: %s, port: 8443, network: [tcp], target: %s:8443}\n", suffix, ip, consoleDomain)
 	}
 	return strings.TrimSuffix(b.String(), "\n")
 }
@@ -178,7 +179,6 @@ func mihomoSeedListenerIPs() []string {
 
 // Default renders the install-time seed config (mihomoConfigSeedTemplate)
 // against the process's OWN environment — the same DNS_* keys systemd's
-// EnvironmentFile populates from /etc/5gpn/dns.env for the running daemon
 // EnvironmentFile populates from /etc/5gpn/dns.env. It takes no arguments so
 // the reset handler always renders from the daemon's current deployment identity.
 func (s *MihomoConfigStore) Default() string {
@@ -191,7 +191,7 @@ func (s *MihomoConfigStore) Default() string {
 	r := strings.NewReplacer(
 		"__CONSOLE_DOMAIN__", consoleDomain,
 		"__ZASH_DOMAIN__", zashDomain,
-		"__MIHOMO_LISTENERS__", renderMihomoListeners(mihomoSeedListenerIPs()),
+		"__MIHOMO_LISTENERS__", renderMihomoListeners(mihomoSeedListenerIPs(), consoleDomain),
 		"__GATEWAY_IP__", os.Getenv("DNS_GATEWAY_IP"),
 		"__CONTROLLER_SECRET__", os.Getenv("DNS_MIHOMO_SECRET"),
 	)
@@ -231,6 +231,7 @@ sniffer:
   enable: true
   parse-pure-ip: true
   override-destination: true
+  force-domain: [__CONSOLE_DOMAIN__]
   sniff:
     TLS:  { ports: [443, 8080, 8443] }
     QUIC: { ports: [443] }
@@ -259,24 +260,24 @@ proxy-groups:
   - {name: Proxies, type: select, proxies: [DIRECT]}
 
 rules:
-  - IP-CIDR,__GATEWAY_IP__/32,REJECT-DROP,no-resolve
-  - IP-CIDR,127.0.0.0/8,REJECT-DROP,no-resolve
-  - IP-CIDR,10.0.0.0/8,REJECT-DROP,no-resolve
-  - IP-CIDR,172.16.0.0/12,REJECT-DROP,no-resolve
-  - IP-CIDR,192.168.0.0/16,REJECT-DROP,no-resolve
-  - IP-CIDR,100.64.0.0/10,REJECT-DROP,no-resolve
-  - IP-CIDR,169.254.0.0/16,REJECT-DROP,no-resolve
-  # Public panel hostnames terminate on gateway :443 only. Alternate ingress
-  # must never expose unrelated services bound to the same loopback ports.
-  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,80)),REJECT-DROP
-  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8080)),REJECT-DROP
-  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8443)),REJECT-DROP
-  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,80)),REJECT-DROP
-  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8080)),REJECT-DROP
-  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8443)),REJECT-DROP
+  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(NETWORK,UDP)),REJECT
+  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,80)),REJECT
+  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8080)),REJECT
+  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8443)),REJECT
+  - AND,((DOMAIN,__ZASH_DOMAIN__),(NETWORK,UDP)),REJECT
+  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,80)),REJECT
+  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8080)),REJECT
+  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8443)),REJECT
   - DOMAIN,__CONSOLE_DOMAIN__,DIRECT
   - AND,((DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
-  - DOMAIN,__ZASH_DOMAIN__,REJECT-DROP
+  - DOMAIN,__ZASH_DOMAIN__,REJECT
+  - IP-CIDR,__GATEWAY_IP__/32,REJECT,no-resolve
+  - IP-CIDR,127.0.0.0/8,REJECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,REJECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,REJECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,REJECT,no-resolve
+  - IP-CIDR,100.64.0.0/10,REJECT,no-resolve
+  - IP-CIDR,169.254.0.0/16,REJECT,no-resolve
   - MATCH,Proxies
 `
 
@@ -301,6 +302,7 @@ type mihomoInvariantDocument struct {
 	Secret                *string                   `yaml:"secret"`
 	TLS                   *mihomoInvariantTLS       `yaml:"tls"`
 	Listeners             []mihomoInvariantListener `yaml:"listeners"`
+	Sniffer               *mihomoInvariantSniffer   `yaml:"sniffer"`
 	DNS                   *mihomoInvariantDNS       `yaml:"dns"`
 	Hosts                 map[string]string         `yaml:"hosts"`
 	Rules                 []string                  `yaml:"rules"`
@@ -312,9 +314,25 @@ type mihomoInvariantTLS struct {
 }
 
 type mihomoInvariantListener struct {
-	Type   string `yaml:"type"`
-	Port   int    `yaml:"port"`
-	Target string `yaml:"target"`
+	Name    string   `yaml:"name"`
+	Type    string   `yaml:"type"`
+	Port    int      `yaml:"port"`
+	Network []string `yaml:"network"`
+	Target  string   `yaml:"target"`
+}
+
+type mihomoInvariantSniffer struct {
+	Enable              *bool                                    `yaml:"enable"`
+	OverrideDestination *bool                                    `yaml:"override-destination"`
+	ForceDomain         []string                                 `yaml:"force-domain"`
+	SkipSrcAddress      []string                                 `yaml:"skip-src-address"`
+	SkipDomain          []string                                 `yaml:"skip-domain"`
+	Sniff               map[string]mihomoInvariantSniffingConfig `yaml:"sniff"`
+}
+
+type mihomoInvariantSniffingConfig struct {
+	Ports               []string `yaml:"ports"`
+	OverrideDestination *bool    `yaml:"override-destination"`
 }
 
 type mihomoInvariantDNS struct {
@@ -365,11 +383,149 @@ func hasControllerSecretInvariant(doc *mihomoInvariantDocument, want string) boo
 	return exactScalar(doc.Secret, want)
 }
 
-// hasGatewayInbound asserts an actual listeners entry is a tunnel on port 443
-// targeting the loopback console endpoint.
-func hasGatewayInbound(doc *mihomoInvariantDocument) bool {
+func hasForcedConsoleSniff(doc *mihomoInvariantDocument, domain string) bool {
+	if strings.TrimSpace(domain) == "" || doc.Sniffer == nil ||
+		doc.Sniffer.Enable == nil || !*doc.Sniffer.Enable ||
+		len(doc.Sniffer.SkipSrcAddress) != 0 || len(doc.Sniffer.SkipDomain) != 0 {
+		return false
+	}
+	for _, forced := range doc.Sniffer.ForceDomain {
+		if forced == domain {
+			return true
+		}
+	}
+	return false
+}
+
+func portRangeContains(spec string, want int) bool {
+	parts := strings.Split(strings.TrimSpace(spec), "-")
+	if len(parts) < 1 || len(parts) > 2 {
+		return false
+	}
+	parse := func(raw string) (int, bool) {
+		port, err := strconv.Atoi(strings.Trim(raw, "[] "))
+		return port, err == nil && port >= 0 && port <= 65535
+	}
+	start, ok := parse(parts[0])
+	if !ok {
+		return false
+	}
+	end := start
+	if len(parts) == 2 {
+		end, ok = parse(parts[1])
+		if !ok {
+			return false
+		}
+	}
+	if start > end {
+		start, end = end, start
+	}
+	return want >= start && want <= end
+}
+
+func snifferPortsContain(ports []string, want int) bool {
+	// Mihomo treats an omitted/empty ports list as all ports.
+	if len(ports) == 0 {
+		return true
+	}
+	for _, spec := range ports {
+		if portRangeContains(spec, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEffectiveSniffer(doc *mihomoInvariantDocument, protocol string, port int) bool {
+	if doc.Sniffer == nil {
+		return false
+	}
+	found := false
+	valid := false
+	for name, config := range doc.Sniffer.Sniff {
+		if !strings.EqualFold(name, protocol) {
+			continue
+		}
+		// Mihomo accepts protocol names case-insensitively. Multiple differently
+		// cased entries collapse onto one runtime map key in iteration order, so
+		// fail closed instead of accepting a nondeterministic effective value.
+		if found {
+			return false
+		}
+		found = true
+		override := doc.Sniffer.OverrideDestination != nil && *doc.Sniffer.OverrideDestination
+		if config.OverrideDestination != nil {
+			override = *config.OverrideDestination
+		}
+		valid = override && snifferPortsContain(config.Ports, port)
+	}
+	return found && valid
+}
+
+func listenerSupportsNetwork(listener mihomoInvariantListener, network string) bool {
+	for _, candidate := range listener.Network {
+		if candidate == network {
+			return true
+		}
+	}
+	return false
+}
+
+func isGatewayListenerName(name string) bool {
+	if name == "gateway" {
+		return true
+	}
+	if !strings.HasPrefix(name, "gateway-") {
+		return false
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(name, "gateway-"))
+	return err == nil && n >= 2
+}
+
+func isValidGatewayListener(doc *mihomoInvariantDocument, listener mihomoInvariantListener, p InfraParams) bool {
+	if listener.Type != "tunnel" || listener.Port != 443 {
+		return false
+	}
+	if listener.Target == "127.0.0.1:443" {
+		return true
+	}
+	if listener.Target != p.ConsoleDomain+":443" ||
+		!hasForcedConsoleSniff(doc, p.ConsoleDomain) ||
+		!listenerSupportsNetwork(listener, "tcp") ||
+		!hasEffectiveSniffer(doc, "TLS", 443) {
+		return false
+	}
+	if listenerSupportsNetwork(listener, "udp") && !hasEffectiveSniffer(doc, "QUIC", 443) {
+		return false
+	}
+	return true
+}
+
+// hasGatewayInbound asserts an actual listeners entry is a tunnel on port 443.
+// Existing operator-owned configs may keep the legacy loopback target. The
+// hostname target used by new seeds is accepted only with forced destination
+// sniffing, which prevents mihomo's target-keyed sniff failure cache from
+// disabling hostname discovery for every gateway connection at once.
+func hasGatewayInbound(doc *mihomoInvariantDocument, p InfraParams) bool {
+	namedGateway := false
 	for _, listener := range doc.Listeners {
-		if listener.Type == "tunnel" && listener.Port == 443 && listener.Target == "127.0.0.1:443" {
+		if !isGatewayListenerName(listener.Name) {
+			continue
+		}
+		namedGateway = true
+		if !isValidGatewayListener(doc, listener, p) {
+			return false
+		}
+	}
+	if namedGateway {
+		return true
+	}
+
+	// Preserve structurally valid operator configs created before listener
+	// names became part of the seed vocabulary. Additional custom listeners
+	// remain operator-owned and are not mistaken for gateway infrastructure.
+	for _, listener := range doc.Listeners {
+		if isValidGatewayListener(doc, listener, p) {
 			return true
 		}
 	}
@@ -416,8 +572,17 @@ func allowlistedDomainRule(domain string) string {
 	return "AND,((DOMAIN," + domain + "),(RULE-SET,whitelist,DIRECT,src)),DIRECT"
 }
 
-func dropDomainRule(domain string) string {
-	return "DOMAIN," + domain + ",REJECT-DROP"
+func denyDomainRule(domain, action string) string {
+	return "DOMAIN," + domain + "," + action
+}
+
+func hasDenyDomainRule(doc *mihomoInvariantDocument, domain string) bool {
+	for _, action := range []string{"REJECT", "REJECT-DROP"} {
+		if containsRule(doc.Rules, denyDomainRule(domain, action)) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasAllowlistedSNISplit asserts the real hosts and rules collections contain
@@ -427,7 +592,7 @@ func hasAllowlistedSNISplit(doc *mihomoInvariantDocument, domain, hostsIP string
 		return false
 	}
 	return containsRule(doc.Rules, allowlistedDomainRule(domain)) &&
-		containsRule(doc.Rules, dropDomainRule(domain))
+		hasDenyDomainRule(doc, domain)
 }
 
 // hasPublicSNISplit checks that the console maps to its loopback backend and
@@ -439,16 +604,23 @@ func hasPublicSNISplit(doc *mihomoInvariantDocument, domain, hostsIP string) boo
 	}
 	return containsRule(doc.Rules, directDomainRule(domain)) &&
 		!containsRule(doc.Rules, allowlistedDomainRule(domain)) &&
-		!containsRule(doc.Rules, dropDomainRule(domain))
+		!hasDenyDomainRule(doc, domain)
 }
 
-// hasAntiLoopInvariant asserts an exact gateway /32 REJECT-DROP guard.
+// hasAntiLoopInvariant asserts an exact gateway /32 deny guard. The action is
+// operator-owned; both mihomo reject actions preserve the required anti-loop
+// boundary, while the seed uses REJECT to avoid REJECT-DROP's connection hold.
 func hasAntiLoopInvariant(doc *mihomoInvariantDocument, p InfraParams) bool {
 	if strings.TrimSpace(p.GatewayIP) == "" {
 		return false
 	}
-	base := "IP-CIDR," + p.GatewayIP + "/32,REJECT-DROP"
-	return containsRule(doc.Rules, base) || containsRule(doc.Rules, base+",no-resolve")
+	for _, action := range []string{"REJECT", "REJECT-DROP"} {
+		base := "IP-CIDR," + p.GatewayIP + "/32," + action
+		if containsRule(doc.Rules, base) || containsRule(doc.Rules, base+",no-resolve") {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidateInvariants checks that text (a candidate mihomo config, about to
@@ -470,7 +642,7 @@ func ValidateInvariants(text string, p InfraParams) error {
 	switch {
 	case !hasControllerInvariant(doc):
 		return &ErrMissingInfra{Name: "controller"}
-	case !hasGatewayInbound(doc):
+	case !hasGatewayInbound(doc, p):
 		return &ErrMissingInfra{Name: "gateway-inbound"}
 	case !hasDNSBrokerInvariant(doc):
 		return &ErrMissingInfra{Name: "dns-broker"}

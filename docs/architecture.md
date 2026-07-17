@@ -62,23 +62,26 @@ The authenticated console exposes a finite ingress-module catalog for optional
 ports. Modules are disabled unless their exact listener and sniffer shape is
 already present in the operator configuration. The first module is
 `speedtest-5060`: an explicit opt-in that adds TCP and UDP `:5060` on every
-canonical gateway listener address, retains destination port `5060`, and
-enables HTTP, TLS, and QUIC sniffing on that port. The module also inserts exact
-console and zashboard `DOMAIN` plus `DST-PORT,5060` drop rules after the seven
-destination guards and before either local service's accepting rule. This
-prevents a sniffed service hostname from using the `hosts` mapping to reach a
-loopback `:5060` endpoint. TCP forwarding still requires
-a visible HTTP Host or TLS SNI. UDP forwarding still requires recognizable QUIC
-with a visible SNI; Ookla's native UDP protocol, SIP, and other raw UDP cannot
-recover the original server after DNS steering and therefore fail closed. The
-module is manageable only when the gateway, loopback, RFC1918, CGNAT, and
-link-local destination guards precede every accepting rule. While enabled it
-also owns exact port-scoped rejects for the console and zashboard hostnames, so
-`:5060` cannot expose either loopback panel.
-Because `5060` is also a common SIP port, raw TCP scans can feed repeated
-un-sniffable connections into mihomo's failure cache and temporarily degrade
-valid hostname sniffing on the shared loopback target. This is another reason
-the module is opt-in and should be source-restricted.
+canonical gateway listener address, targets `console.<base>:5060`, and enables
+HTTP, TLS, and QUIC sniffing on that port. The exact console name remains in
+`sniffer.force-domain`, so malformed traffic cannot poison the failure-cache
+keys used by the default ingress ports. TCP forwarding still requires a visible
+HTTP Host or TLS SNI. UDP forwarding still requires recognizable QUIC with a
+visible SNI; Ookla's native UDP protocol, SIP, and other raw UDP cannot recover
+the original server after DNS steering and therefore fail closed.
+
+The rule boundary is exact: eight panel protocol/port rejects, the optional two
+`:5060` panel rejects, the console and allowlisted zashboard routes, the
+zashboard deny-by-default rule, seven anti-loop destination guards, and the
+terminal `MATCH`. The anti-loop guards must follow the panel routes because
+mihomo resolves the synthetic console target through `hosts` before matching
+rules; moving those guards earlier would reject the legitimate console
+fallback as loopback traffic. The module is manageable only with this boundary
+and its exact listener/sniffer shape. Its two port-scoped rejects prevent
+`:5060` from exposing either loopback panel. Repeated un-sniffable scans can
+temporarily suppress sniffing on the isolated `console.<base>:5060` cache key,
+but cannot suppress sniffing on `:443`, `:80`, `:8080`, or `:8443`. This is
+another reason the module is opt-in and should be source-restricted.
 
 Enabling an ingress module creates an unauthenticated public Host/SNI relay on
 the selected port. 5gpn does not manage a host firewall, so the operator must
@@ -122,6 +125,10 @@ remaining caller deadline so one failed member cannot starve later members.
 Caller cancellation is not recorded as an upstream breaker failure; an
 individual attempt deadline may fall through to the next member.
 
+New installations default to one plain-UDP member in each group:
+`223.5.5.5:53` for China and `22.22.22.22:53` for trust. The default China ECS
+subnet is `112.96.32.0/24`; an operator may override or disable it explicitly.
+
 Query-type behavior is intentionally IPv4-oriented:
 
 - A follows the ordered policy and fallback above.
@@ -162,6 +169,36 @@ configuration. The initial seed provides listeners, hostname sniffing, the
 loopback egress broker, panel routing, anti-loop rules, and a `Proxies` group
 whose initial choice is `DIRECT`. After publication there is no generated or
 daemon-managed region.
+
+The public mihomo `:80` listener remains general data-plane ingress for
+DNS-steered HTTP traffic; it is not an ACME-only socket. The seed rejects
+`console.<base>` requests whose destination port is 80 before the console
+`DIRECT` rule, because the console contract is HTTPS-only and no loopback
+HTTP backend exists.
+
+New seed listeners use the same-port `console.<base>:443`, `:80`, `:8080`, and
+`:8443` hostname targets, and the optional module uses `console.<base>:5060`.
+The exact console name in `sniffer.force-domain` is the other half of this
+invariant: forced sniffing replaces the provisional name with a successfully
+discovered TLS, HTTP, or QUIC hostname. A failed TCP 443 sniff safely falls back
+to the public console; the panel protocol/port rules reject unsupported UDP and
+non-443 panel fallbacks. This avoids mihomo v1.19.28's target-keyed
+sniff-failure cache, where one IP target shared by every connection can suppress
+sniffing globally for 600 seconds after repeated malformed traffic. The
+`hosts` entry still resolves the console fallback to `127.0.0.1`; no new public
+backend is introduced. Structural validation also
+rejects hostname-targeted gateway configurations whose source-address or
+domain skip lists can preempt the required forced sniff; legacy loopback-target
+operator configurations remain accepted and are never rewritten implicitly.
+
+The seed uses `REJECT` for the zashboard deny-by-default rule and every
+anti-loop destination guard. Mihomo v1.19.28 implements `REJECT-DROP` by
+holding the TCP relay read path for about 60 seconds, so it is not an overload
+control and must not be the seed default for public listeners. `REJECT` keeps
+the same deny boundary without a failed loopback dial or mihomo's dial retry
+path. These actions remain operator-owned: structural validation accepts both
+deny actions and normal install operations do not rewrite an existing valid
+configuration; explicit reset publishes the safer seed.
 
 Normal install, reinstall, and `configure` operations must validate and
 preserve an existing valid file byte-for-byte. They must not silently rewrite
@@ -225,7 +262,7 @@ One base domain derives three single-label service names:
 
 Mihomo sends public console traffic to `127.0.0.1:443` and allowlisted
 zashboard traffic to `127.0.0.2:443`. Non-allowlisted zashboard sources are
-dropped before reaching its HTTP server.
+rejected before reaching its HTTP server.
 
 `console.<base>` must have an externally usable A record to the public or
 otherwise client-routable gateway address before installation can declare the
@@ -398,8 +435,11 @@ all three deployed role copies. A stale role copy is repaired through the owned
 deploy hook. The helper runs Cloudflare DNS-01 without stopping mihomo, and for
 a due HTTP-01 renewal first repeats the `1.1.1.1` A/AAAA gate, then briefly
 stops mihomo to release TCP `:80` for Certbot's standalone listener. The helper
-restores mihomo after either success or failure; an initial HTTP-01 issuance
-uses the same stop-and-restore discipline.
+restores mihomo after either success or failure. During initial HTTP-01
+issuance, failure and signal paths restore an originally active mihomo, while
+success keeps it stopped until the new lineage has been validated and all role
+certificates, including `zash/current`, have been published. The normal
+`full_install` service-start phase then restores the data plane.
 
 Install/configure, the timer, the bot action, and decommission serialize on one
 root-owned private runtime lock. Installer rollback restores the exact prior

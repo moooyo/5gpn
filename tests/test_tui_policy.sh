@@ -42,8 +42,15 @@ printf '%s' "$tui_fn" | grep -Fq 'EGRESS_RESOLVER="$DNS_EGRESS_RESOLVER_DEFAULT"
     || fail "first install does not apply the default egress resolver automatically"
 printf '%s' "$tui_fn" | grep -Fq 'CACHE_SIZE="${CACHE_SIZE:-${_CACHE_SIZE_DEFAULT:-4096}}"' \
     || fail "installer does not apply the memory-derived cache default automatically"
-printf '%s' "$tui_fn" | grep -Fq 'CHINA_ECS="${CHINA_ECS:-}"' \
-    || fail "installer does not default ECS to disabled"
+printf '%s' "$tui_fn" | grep -Fq 'CHINA_ECS="$DNS_CHINA_ECS_DEFAULT"' \
+    || fail "installer does not apply the operational ECS default"
+grep -Fq 'DNS_CHINA_DEFAULT="223.5.5.5"' "$INSTALL" \
+    && grep -Fq 'DNS_TRUST_DEFAULT="22.22.22.22"' "$INSTALL" \
+    && grep -Fq 'DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"' "$INSTALL" \
+    || fail "installer operational DNS/ECS defaults drifted"
+grep -Fq 'local dns_china="${existing_china:-$DNS_CHINA_DEFAULT}"' "$INSTALL" \
+    && grep -Fq 'local dns_trust="${existing_trust:-$DNS_TRUST_DEFAULT}"' "$INSTALL" \
+    || fail "dns.env writer does not consume the operational upstream defaults"
 printf '%s' "$tui_fn" | grep -Fq 'GATEWAY_IP="$PUBLIC_IP"' \
     && printf '%s' "$tui_fn" | grep -Fq 'MIHOMO_LISTEN_IPS="$default_listen"' \
     && printf '%s' "$tui_fn" | grep -Fq 'PUBLIC_IP="$detected"' \

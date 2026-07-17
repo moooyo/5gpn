@@ -10,6 +10,10 @@ const en = {
     delete: 'Delete',
     running: 'Running',
     loading: 'Loading…',
+    healthChecking: 'Checking',
+    healthHealthy: 'Healthy',
+    healthUnknown: 'Unknown',
+    healthDown: 'Unavailable',
     errorTitle: 'Something went wrong',
     errorBody: 'The page hit an unexpected error. Reloading usually fixes it.',
     reload: 'Reload',
@@ -463,7 +467,7 @@ const en = {
     invariants: {
       controller: { name: 'TLS controller', desc: 'plaintext control is disabled and external-controller-tls uses 127.0.0.1:9090 with the fixed zash certificate paths.' },
       secret: { name: 'Controller secret', desc: 'the controller bearer secret stays synchronized with the daemon client and console proxy.' },
-      gateway: { name: 'Gateway ingress', desc: 'a gateway* tunnel listener on port 443 targeting 127.0.0.1:443.' },
+      gateway: { name: 'Gateway ingress', desc: 'a port 443 tunnel ingress; new seeds use the console hostname target with exact forced sniffing, while the legacy loopback target remains valid.' },
       dns: { name: 'Our DNS', desc: 'a dns block whose nameserver includes the egress broker udp://127.0.0.1:5354.' },
       console: {
         name: 'Console SNI split',
@@ -471,9 +475,9 @@ const en = {
       },
       zash: {
         name: 'zash SNI split',
-        desc: 'the zash domain mapped to its loopback panel, with a whitelist-gated DIRECT rule and REJECT-DROP guard.',
+        desc: 'the zash domain mapped to its loopback panel, with a whitelist-gated DIRECT rule and deny guard.',
       },
-      antiloop: { name: 'Anti-loop REJECT-DROP', desc: 'an IP-CIDR REJECT-DROP guard for the gateway itself.' },
+      antiloop: { name: 'Anti-loop reject', desc: 'an IP-CIDR deny guard for the gateway itself.' },
     },
   },
 }

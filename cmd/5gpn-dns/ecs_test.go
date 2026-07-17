@@ -256,22 +256,25 @@ func TestGroupExchange_NoECSWhenDisabled(t *testing.T) {
 
 func TestLoadConfig_ChinaECS(t *testing.T) {
 	cases := []struct {
+		name string
+		set  bool
 		env  string
 		want string
 	}{
-		{"", ""},                       // disabled by default
-		{"1.2.3.4", "1.2.3.0/24"},      // bare IP normalised to /24
-		{"10.1.0.0/16", "10.1.0.0/16"}, // CIDR honoured
-		{"off", ""},                    // explicit disable
-		{"none", ""},
-		{"garbage", ""}, // warn-not-fatal → disabled
+		{name: "unset uses operational default", want: "112.96.32.0/24"},
+		{name: "explicit empty disables", set: true, env: "", want: ""},
+		{name: "bare IPv4 normalizes to slash 24", set: true, env: "1.2.3.4", want: "1.2.3.0/24"},
+		{name: "CIDR is honored", set: true, env: "10.1.0.0/16", want: "10.1.0.0/16"},
+		{name: "off disables", set: true, env: "off", want: ""},
+		{name: "none disables", set: true, env: "none", want: ""},
+		{name: "invalid disables", set: true, env: "garbage", want: ""},
 	}
 	for _, c := range cases {
-		t.Run("DNS_CHINA_ECS="+c.env, func(t *testing.T) {
+		t.Run(c.name, func(t *testing.T) {
 			clearAllDNSEnv(t)
 			t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
 			t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
-			if c.env != "" {
+			if c.set {
 				t.Setenv("DNS_CHINA_ECS", c.env)
 			}
 			cfg, err := LoadConfig()

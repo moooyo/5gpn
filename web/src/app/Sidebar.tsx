@@ -17,7 +17,7 @@ import {
   type LucideProps,
 } from 'lucide-react'
 import { NAV_GROUPS } from './navigation'
-import { useStatus } from '../lib/StatusContext'
+import { useStatus, type HealthState } from '../lib/StatusContext'
 import { StatusDot } from '../components/ds'
 import { cn } from '../lib/cn'
 
@@ -123,28 +123,36 @@ export function Sidebar({ className, onNavigate, onClose, testId }: SidebarProps
 
 function KernelStatusCard() {
   const { t } = useTranslation()
-  const { dnsOk, mihomoOk } = useStatus()
+  const { dnsState, mihomoState } = useStatus()
 
   return (
     <div className="mt-auto flex flex-col gap-[9px] rounded-[11px] border border-border bg-bg p-3">
-      <KernelRow title={t('topbar.kernelDns')} sub="5gpn-dns · :853 DoT" up={dnsOk} />
+      <KernelRow title={t('topbar.kernelDns')} sub="5gpn-dns · :853 DoT" state={dnsState} />
       <div className="h-px bg-divider" />
-      <KernelRow title="mihomo" sub="gateway · :443" up={mihomoOk} />
+      <KernelRow title="mihomo" sub="gateway · :443" state={mihomoState} />
     </div>
   )
 }
 
-function KernelRow({ title, sub, up }: { title: string; sub: string; up: boolean }) {
+const HEALTH_PRESENTATION: Record<HealthState, { color: string; className: string; labelKey: string }> = {
+  checking: { color: 'var(--color-amber)', className: 'text-amber', labelKey: 'common.healthChecking' },
+  healthy: { color: '#22c55e', className: 'text-green', labelKey: 'common.healthHealthy' },
+  unknown: { color: 'var(--color-text-faint)', className: 'text-text-faint', labelKey: 'common.healthUnknown' },
+  down: { color: '#dc2626', className: 'text-red', labelKey: 'common.healthDown' },
+}
+
+function KernelRow({ title, sub, state }: { title: string; sub: string; state: HealthState }) {
   const { t } = useTranslation()
+  const presentation = HEALTH_PRESENTATION[state]
   return (
     <div className="flex items-center gap-2">
-      <StatusDot color={up ? '#22c55e' : '#dc2626'} pulse={up} />
+      <StatusDot color={presentation.color} pulse={state === 'checking' || state === 'healthy'} />
       <div className="flex flex-1 flex-col">
         <span className="text-[11.5px] font-bold text-text-strong">{title}</span>
         <span className="text-[9.5px] text-text-faint">{sub}</span>
       </div>
-      <span className={cn('text-[10px] font-bold', up ? 'text-green' : 'text-red')}>
-        {up ? t('common.running') : t('settings.tgbotStateStopped')}
+      <span className={cn('text-[10px] font-bold', presentation.className)}>
+        {t(presentation.labelKey)}
       </span>
     </div>
   )

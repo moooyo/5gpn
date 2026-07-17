@@ -104,6 +104,9 @@ ZASH_SHA256="adba7b03f3bec792a354e65469fb8ac5513e48e0f646650f78aa313bcf5b18e9"
 # UDP; an https://…/dns-query value uses DoH. 22.22.22.22 is the operational
 # project default and is consumed directly by 5gpn-dns.
 DNS_EGRESS_RESOLVER_DEFAULT="22.22.22.22"
+DNS_CHINA_DEFAULT="223.5.5.5"
+DNS_TRUST_DEFAULT="22.22.22.22"
+DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
 readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_LISTEN_API DNS_CERT DNS_KEY DNS_WEB_CERT DNS_WEB_KEY DNS_ZASH_CERT DNS_ZASH_KEY \
 DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL DNS_CHINA DNS_TRUST DNS_UPSTREAMS \
 DNS_CHINA_ECS DNS_CHINA_0X20 DNS_ECS_FILE DNS_RULES_DIR DNS_CHNROUTE DNS_EGRESS_RESOLVER DNS_EGRESS_BROKER \
@@ -111,8 +114,8 @@ DNS_SUBSCRIPTIONS DNS_POLICY_RULES DNS_API_TOKEN DNS_API_RATE DNS_API_BURST DNS_
 DNS_WHITELIST_FILE DNS_MIHOMO_CONFIG DNS_ZASH_DIR DNS_ZASH_LISTEN DNS_WEB_DIR WWW_DIR TGBOT_TOKEN TGBOT_ADMINS \
 DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS DNS_CACHE_SIZE DNS_MAX_INFLIGHT DNS_TTL_MIN DNS_TTL_MAX DNS_QUERY_TIMEOUT \
 DNS_STATS_FILE DNS_HEARTBEAT_URL DNS_HEARTBEAT_INTERVAL"
-# EDNS Client Subnet is disabled by default. Operators can enable or change it
-# after installation through the web console, which persists the runtime value.
+# EDNS Client Subnet uses the operational default above. Operators can disable
+# or change it through the web console, which persists the runtime value.
 GUM_VERSION="0.17.0"                     # charmbracelet/gum (prebuilt; installer TUI)
 GUM_BIN="${BIN_DIR}/gum"
 _HAVE_GUM=0                              # set by install_gum(); helpers fall back to echo when 0
@@ -798,15 +801,15 @@ resolve_mihomo_listen_ips() {
 }
 
 render_mihomo_listeners() {
-    local ips="$1" ip idx=0 suffix
+    local ips="$1" console_domain="$2" ip idx=0 suffix
     while IFS= read -r ip; do
         [[ -n "$ip" ]] || continue
         idx=$((idx + 1)); suffix=""
         [[ "$idx" -gt 1 ]] && suffix="-${idx}"
-        printf '  - {name: gateway%s, type: tunnel, listen: %s, port: 443, network: [tcp, udp], target: 127.0.0.1:443}\n' "$suffix" "$ip"
-        printf '  - {name: gateway80%s, type: tunnel, listen: %s, port: 80, network: [tcp], target: 127.0.0.1:80}\n' "$suffix" "$ip"
-        printf '  - {name: gateway8080%s, type: tunnel, listen: %s, port: 8080, network: [tcp], target: 127.0.0.1:8080}\n' "$suffix" "$ip"
-        printf '  - {name: gateway8443%s, type: tunnel, listen: %s, port: 8443, network: [tcp], target: 127.0.0.1:8443}\n' "$suffix" "$ip"
+        printf '  - {name: gateway%s, type: tunnel, listen: %s, port: 443, network: [tcp, udp], target: %s:443}\n' "$suffix" "$ip" "$console_domain"
+        printf '  - {name: gateway80%s, type: tunnel, listen: %s, port: 80, network: [tcp], target: %s:80}\n' "$suffix" "$ip" "$console_domain"
+        printf '  - {name: gateway8080%s, type: tunnel, listen: %s, port: 8080, network: [tcp], target: %s:8080}\n' "$suffix" "$ip" "$console_domain"
+        printf '  - {name: gateway8443%s, type: tunnel, listen: %s, port: 8443, network: [tcp], target: %s:8443}\n' "$suffix" "$ip" "$console_domain"
     done < <(printf '%s\n' "$ips" | tr ',' '\n')
 }
 
@@ -1217,7 +1220,7 @@ stage_artifacts() {
 
     if [[ ! -f "$MIHOMO_DIR/config.yaml" ]]; then
         local seed="$ARTIFACT_STAGE/mihomo-seed.yaml" line listeners
-        listeners="$(render_mihomo_listeners "$MIHOMO_LISTEN_IPS")"
+        listeners="$(render_mihomo_listeners "$MIHOMO_LISTEN_IPS" "$CONSOLE_DOMAIN")"
         while IFS= read -r line || [[ -n "$line" ]]; do
             if [[ "$line" == '__MIHOMO_LISTENERS__' ]]; then
                 printf '%s\n' "$listeners"
@@ -1803,7 +1806,7 @@ render_mihomo_config() {
     MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" || return 1
     export MIHOMO_LISTEN_IPS
     local listeners candidate line backup
-    listeners="$(render_mihomo_listeners "$MIHOMO_LISTEN_IPS")"
+    listeners="$(render_mihomo_listeners "$MIHOMO_LISTEN_IPS" "$CONSOLE_DOMAIN")"
     candidate="$(mktemp "${MIHOMO_DIR}/.config.yaml.XXXXXX")" \
         || { err "Could not create a mihomo config candidate in $MIHOMO_DIR"; return 1; }
     chgrp "$MIHOMO_SERVICE_USER" "$candidate" \
@@ -2212,8 +2215,10 @@ is_valid_ipv4_or_cidr() {
 #   http-01            — Let's Encrypt standalone HTTP challenge for the exact
 #                       console/zash/dot service SANs. The TUI confirms the DNS
 #                       plan, then waits for 1.1.1.1 to see every A record at
-#                       PUBLIC_IP with no AAAA. Issuance and due renewal briefly
-#                       stop and restore mihomo to release public TCP :80.
+#                       PUBLIC_IP with no AAAA. Initial issuance keeps an
+#                       originally active mihomo stopped through role-certificate
+#                       publication, then full_install starts it. Due renewal
+#                       briefly stops and restores mihomo around Certbot.
 #   debug              — a self-signed WILDCARD cert for test/dev boxes with no
 #                       public domain. No certbot, no DNS-01, no renewal.
 #                       iOS/browsers will flag it untrusted; that is the point
@@ -2455,8 +2460,11 @@ install_cert_deploy_hook() {
 
 # Certbot standalone must own public TCP :80. Run in a subshell so its signal
 # traps cannot replace the full install transaction's ERR/EXIT rollback traps.
-# Only a mihomo service that was active is stopped and restored; an unrelated
-# process occupying :80 is never killed and simply makes Certbot fail closed.
+# Only a mihomo service that was active is stopped. Failure and signal paths
+# restore it from this subshell. After successful initial issuance, leave it
+# stopped so install_cert can validate and publish zash/current before
+# full_install's normal start_services step restores the data plane. An
+# unrelated process occupying :80 is never killed and makes Certbot fail closed.
 run_http_certbot() (
     local restore=0 certbot_rc=0 restore_rc=0
     restore_active_mihomo() {
@@ -2476,7 +2484,13 @@ run_http_certbot() (
             || { err "Could not stop mihomo; refusing to run Certbot while :80 may be occupied."; exit 1; }
     fi
     certbot "$@" || certbot_rc=$?
-    restore_active_mihomo || restore_rc=$?
+    if [[ "$certbot_rc" == 0 ]]; then
+        # Disarm the EXIT restore only after Certbot has returned successfully.
+        # Until this assignment, INT/TERM/EXIT still restore the original state.
+        restore=0
+    else
+        restore_active_mihomo || restore_rc=$?
+    fi
     trap - EXIT INT TERM
     [[ "$certbot_rc" == 0 ]] || exit "$certbot_rc"
     [[ "$restore_rc" == 0 ]] || exit "$restore_rc"
@@ -2983,8 +2997,8 @@ write_dns_env() {
     # A bare DNS_TRUST IP is queried over plain UDP; "host@IP" entries use DoT.
     # Operators change it post-install via the web console
     # (Settings → upstream DNS), which persists to /etc/5gpn/upstreams.json.
-    local dns_china="${existing_china:-223.5.5.5,119.29.29.29}"
-    local dns_trust="${existing_trust:-dns.google@8.8.8.8,one.one.one.one@1.1.1.1}"
+    local dns_china="${existing_china:-$DNS_CHINA_DEFAULT}"
+    local dns_trust="${existing_trust:-$DNS_TRUST_DEFAULT}"
 
     # Obtain console/zash/base domains from the single derivation of the
     # operator's base (apex) domain
@@ -3080,9 +3094,9 @@ DNS_CHINA=${dns_china}
 DNS_TRUST=${dns_trust}
 DNS_UPSTREAMS=${upstreams_file}
 
-# EDNS Client Subnet attached to china-group queries. It is disabled by default;
-# /etc/5gpn/ecs.json (written by the web console and hot-applied without a
-# restart) enables or changes it at runtime.
+# EDNS Client Subnet attached to china-group queries. New installations use
+# the operational 112.96.32.0/24 default; /etc/5gpn/ecs.json (written by the
+# web console and hot-applied without a restart) overrides it at runtime.
 DNS_CHINA_ECS=${china_ecs}
 DNS_CHINA_0X20=${china_0x20}
 DNS_ECS_FILE=${ecs_file}
@@ -3699,7 +3713,9 @@ configure_install_tui() {
     else
         MIHOMO_LISTEN_IPS="$default_listen"
     fi
-    CHINA_ECS="${CHINA_ECS:-}"
+    if [[ -z "${CHINA_ECS+x}" ]]; then
+        CHINA_ECS="$DNS_CHINA_ECS_DEFAULT"
+    fi
     CACHE_SIZE="${CACHE_SIZE:-${_CACHE_SIZE_DEFAULT:-4096}}"
     [[ "$CACHE_SIZE" =~ ^[1-9][0-9]*$ ]] \
         || { err "DNS cache size must be a positive integer."; return 1; }
@@ -3773,7 +3789,7 @@ mihomo_config_matches_install_config() {
     [[ -f "$config" ]] || return 0
     grep -Fq -- "$CONSOLE_DOMAIN" "$config" || return 1
     grep -Eq "^[[:space:]]*-[[:space:]]*DOMAIN,[[:space:]]*${CONSOLE_DOMAIN//./\\.},[[:space:]]*DIRECT[[:space:]]*$" "$config" || return 1
-    ! grep -Eq "DOMAIN,[[:space:]]*${CONSOLE_DOMAIN//./\\.},[[:space:]]*REJECT-DROP" "$config" || return 1
+    ! grep -Eq "DOMAIN,[[:space:]]*${CONSOLE_DOMAIN//./\\.},[[:space:]]*REJECT(-DROP)?" "$config" || return 1
     ! grep -Eq "AND,.*DOMAIN,[[:space:]]*${CONSOLE_DOMAIN//./\\.}.*RULE-SET,[[:space:]]*whitelist" "$config" || return 1
     ! grep -Fq -- "profile.${BASE_DOMAIN}" "$config" || return 1
     grep -Fq -- "$ZASH_DOMAIN" "$config" || return 1
@@ -4044,8 +4060,9 @@ Domains + certificates: ONE base domain and ONE scoped Let's Encrypt lineage.
   http-01 mode       exact console/zash/dot SAN certificate via public TCP :80.
                      After explicit TUI confirmation, all three A records must
                      resolve through 1.1.1.1 to DNS_PUBLIC_IP with no AAAA.
-                     Issuance and due renewal briefly stop and restore mihomo;
-                     automatic renewal uses the same scoped helper as the bot.
+                     Initial issuance keeps mihomo stopped until role certificates
+                     are published and full_install starts services. Due renewal
+                     briefly stops and restores mihomo with the scoped helper.
   debug mode         self-signed WILDCARD cert for a test/dev box with
                      no public domain — no certbot, no DNS-01, no renewal; clients
                      see it untrusted.

@@ -13,6 +13,8 @@ describe('SetupGuidePage', () => {
     render(
       <StatusContext.Provider
         value={{
+          dnsState: 'healthy',
+          mihomoState: 'healthy',
           dnsOk: true,
           mihomoOk: true,
           loading: false,

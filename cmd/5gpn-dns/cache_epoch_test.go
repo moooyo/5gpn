@@ -62,6 +62,34 @@ func TestResolveDoesNotRepopulateFlushedCache(t *testing.T) {
 	}
 }
 
+// An upstream swap after epoch capture but before snapshot capture must make
+// the request use the new upstreams while preventing its old-epoch cache write
+// from entering the newly flushed cache generation.
+func TestResolveCapturesEpochBeforeUpstreamSnapshot(t *testing.T) {
+	name := "snapshot-order.direct.test."
+	oldChina := &fakeExchanger{reply: makeAMsg(name)}
+	oldTrust := &fakeExchanger{reply: makeAMsg(name, "9.9.9.9")}
+	newChina := &fakeExchanger{reply: makeAMsg(name)}
+	newTrust := &fakeExchanger{reply: makeAMsg(name, "8.8.8.8")}
+
+	h := newTestHandler(t, oldChina, oldTrust)
+	h.swapUpstreams(&upstreamSnapshot{China: oldChina, Trust: oldTrust})
+	h.afterCacheEpoch = func() {
+		h.swapUpstreams(&upstreamSnapshot{China: newChina, Trust: newTrust})
+		h.afterCacheEpoch = nil
+	}
+
+	req := new(dns.Msg)
+	req.SetQuestion(name, dns.TypeA)
+	resp := h.resolve(context.Background(), req.Question[0], req)
+	if got := collectAIPs(resp); len(got) != 1 || got[0] != "8.8.8.8" {
+		t.Fatalf("response IPs = %v, want new upstream answer [8.8.8.8]", got)
+	}
+	if _, ok := h.Cache.Get(name, dns.TypeA); ok {
+		t.Fatal("old-epoch write entered the post-swap cache generation")
+	}
+}
+
 // hookExchanger returns a canned reply after running hook — a seam to inject
 // a concurrent event (e.g. a cache flush) mid-resolve.
 type hookExchanger struct {

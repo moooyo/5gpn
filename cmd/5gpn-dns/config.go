@@ -14,6 +14,12 @@ import (
 )
 
 const (
+	defaultChinaUpstreams = "223.5.5.5"
+	defaultTrustUpstreams = "22.22.22.22"
+	defaultChinaECS       = "112.96.32.0/24"
+)
+
+const (
 	maxCacheEntries       = 1_000_000
 	maxInflightQueries    = 65_536
 	maxConfiguredTTL      = 30 * 24 * time.Hour
@@ -220,10 +226,10 @@ type Config struct {
 //
 //	DNS_LISTEN_DOT      :853
 //	DNS_LISTEN_DEBUG    127.0.0.1:5353
-//	DNS_CHINA           223.5.5.5,119.29.29.29
+//	DNS_CHINA           223.5.5.5  (plain UDP)
 //	DNS_TRUST           22.22.22.22  (bare IP=plain UDP; "host@IP"=DoT)
 //	DNS_UPSTREAMS       /etc/5gpn/upstreams.json (web-console override; empty disables)
-//	DNS_CHINA_ECS       (empty by default; china-group EDNS Client Subnet; "off" disables)
+//	DNS_CHINA_ECS       112.96.32.0/24 (china-group EDNS Client Subnet; empty or "off" disables)
 //	DNS_ECS_FILE        /etc/5gpn/ecs.json (web-console ECS override; empty disables)
 //	DNS_RULES_DIR       /etc/5gpn/rules
 //	DNS_CACHE_SIZE      4096
@@ -331,12 +337,12 @@ func LoadConfig() (Config, error) {
 	}
 
 	// China upstreams.
-	chinaRaw := envOr("DNS_CHINA", "223.5.5.5,119.29.29.29")
+	chinaRaw := envOr("DNS_CHINA", defaultChinaUpstreams)
 	cfg.ChinaAddrs = splitTrim(chinaRaw)
 
 	// Trust upstreams. Default is 22.22.22.22, queried over plain UDP. Operators
 	// can replace it through the web console (Settings → upstream DNS).
-	trustRaw := envOr("DNS_TRUST", "22.22.22.22")
+	trustRaw := envOr("DNS_TRUST", defaultTrustUpstreams)
 	cfg.TrustRaw = splitTrim(trustRaw)
 	cfg.TrustEntries = parseTrustEntryList(cfg.TrustRaw)
 	if err := ValidateUpstreams(cfg.ChinaAddrs, cfg.TrustRaw); err != nil {
@@ -365,10 +371,14 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("config: invalid DNS_EGRESS_RESOLVER: %w", err)
 	}
 
-	// China-group EDNS Client Subnet. It is disabled until the operator enables
-	// it through the web console or DNS_CHINA_ECS. A typo must never crash-loop
-	// the sole resolver; invalid values degrade to disabled.
-	switch raw := strings.ToLower(strings.TrimSpace(os.Getenv("DNS_CHINA_ECS"))); raw {
+	// China-group EDNS Client Subnet. An unset environment uses the operational
+	// default; an explicitly empty value or "off" disables it. A typo must never
+	// crash-loop the sole resolver, so invalid values degrade to disabled.
+	chinaECSRaw, chinaECSSet := os.LookupEnv("DNS_CHINA_ECS")
+	if !chinaECSSet {
+		chinaECSRaw = defaultChinaECS
+	}
+	switch raw := strings.ToLower(strings.TrimSpace(chinaECSRaw)); raw {
 	case "", "off", "none", "disable", "0":
 		cfg.ChinaECS = nil
 	default:

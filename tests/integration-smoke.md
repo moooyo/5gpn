@@ -169,12 +169,28 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   explicit confirmation and results in TCP and UDP `:5060` listeners on every
   configured gateway address, with `5060` present in the HTTP, TLS, and QUIC
   sniffer port sets and exact console/zash `:5060` rejects immediately after
-  the leading destination guards. Restrict the test source in the provider
+  the canonical panel-reject prefix. Restrict the test source in the provider
   security group.
 - [ ] On the enabled module, HTTP Host and TLS SNI preserve destination port
   `5060`. Test QUIC only against an origin that actually serves supported QUIC
   on `:5060`. A raw UDP packet and a raw TCP/SIP connection fail closed; they
   are not successful Speedtest acceptance cases.
+- [ ] With the reset seed active, send at least six malformed or non-TLS TCP
+  connections to the gateway `:443` listener, then immediately verify both a
+  valid `console.<base>` TLS request and a different gateway-steered TLS SNI.
+  The console still reaches its loopback backend and the different SNI is
+  sniffed and forwarded normally; neither request waits for a 600-second
+  sniff-failure cache expiry.
+- [ ] With the reset seed active, an HTTP request for `console.<base>` through
+  the gateway `:80` listener is rejected promptly before the console `DIRECT`
+  rule. Mihomo logs show no attempted dial to `127.0.0.1:80`; HTTPS through
+  the gateway `:443` listener still reaches the console successfully.
+- [ ] UDP traffic that remains identified as `console.<base>` or `zash.<base>`
+  is rejected promptly before either panel `DIRECT` rule; successfully sniffed
+  QUIC for other hostnames still follows the operator data-plane rules.
+- [ ] The reset seed contains no `REJECT-DROP`. Non-allowlisted zashboard and
+  anti-loop traffic match `REJECT`, create no outbound dial retries, and leave
+  no connection tracker after the client closes.
 - [ ] Mihomo's re-resolution reaches `127.0.0.1:5354`, then the configured real
   egress resolver; it does not loop back into DoT `:853` or gateway ingress.
 - [ ] Direct/CN DNS answers bypass the gateway and connect to the real address.
@@ -253,9 +269,11 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   the same install/configure path proceeds.
 - [ ] The HTTP-01 lineage contains exactly the three service SANs and contains
   neither `<base>` nor `*.<base>`.
-- [ ] HTTP-01 initial issuance briefly stops mihomo, serves the standalone ACME
-  challenge on TCP `:80`, and restores mihomo afterward. A forced challenge
-  failure also restores a previously active mihomo service.
+- [ ] HTTP-01 initial issuance stops mihomo, serves the standalone ACME
+  challenge on TCP `:80`, keeps mihomo stopped while the new lineage and
+  `zash/current` role certificate are validated/published, and restores it in
+  the later service-start phase. A forced challenge failure or signal also
+  restores a previously active mihomo service.
 - [ ] A scheduled check while the certificate is not due leaves mihomo running.
   A due HTTP-01 renewal repeats the `1.1.1.1` DNS gate and the same bounded
   stop-and-restore window; a due Cloudflare renewal remains interruption-free.

@@ -57,8 +57,20 @@ func TestMihomoIngressModules_EnableDisableRoundTrip(t *testing.T) {
 	if !strings.Contains(onDisk, "# operator-owned comment") || !strings.Contains(onDisk, "custom-extension:") {
 		t.Fatalf("operator comments/unknown fields were not preserved:\n%s", onDisk)
 	}
-	if got := analyzeSpeedtestModule(onDisk, fx.infra).View; !got.Enabled || !got.Manageable {
-		t.Fatalf("on-disk enabled module = %+v", got)
+	analysis := analyzeSpeedtestModule(onDisk, fx.infra)
+	if !analysis.View.Enabled || !analysis.View.Manageable {
+		t.Fatalf("on-disk enabled module = %+v", analysis.View)
+	}
+	moduleTargetFound := false
+	for _, listener := range analysis.Listeners.Content {
+		name, _ := mappingScalar(listener, "name")
+		target, _ := mappingScalar(listener, "target")
+		if name == "gateway5060" && target == fx.infra.ConsoleDomain+":5060" {
+			moduleTargetFound = true
+		}
+	}
+	if !moduleTargetFound {
+		t.Fatal("enabled module listener must use the same-port console hostname target")
 	}
 	moduleRules := speedtestModuleGuardRules(fx.infra)
 	for _, rule := range moduleRules {
@@ -102,7 +114,9 @@ func TestMihomoIngressModules_EnableDisableRoundTrip(t *testing.T) {
 
 func TestMihomoIngressModules_MultipleCanonicalGatewayBinds(t *testing.T) {
 	fx := newMihomoConfigTestFixture(t)
-	multi := strings.Replace(fx.golden, renderMihomoListeners([]string{"203.0.113.10"}), renderMihomoListeners([]string{"203.0.113.10", "198.51.100.20"}), 1)
+	multi := strings.Replace(fx.golden,
+		renderMihomoListeners([]string{"203.0.113.10"}, fx.infra.ConsoleDomain),
+		renderMihomoListeners([]string{"203.0.113.10", "198.51.100.20"}, fx.infra.ConsoleDomain), 1)
 	if err := os.WriteFile(fx.store.Path(), []byte(multi), 0o660); err != nil {
 		t.Fatal(err)
 	}
@@ -124,12 +138,38 @@ func TestMihomoIngressModules_MultipleCanonicalGatewayBinds(t *testing.T) {
 		found := false
 		for _, listener := range analysis.Listeners.Content {
 			if name, ok := mappingScalar(listener, "name"); ok && name == want {
+				target, targetOK := mappingScalar(listener, "target")
+				if !targetOK || target != fx.infra.ConsoleDomain+":5060" {
+					t.Fatalf("generated listener %q target = %q", want, target)
+				}
 				found = true
 			}
 		}
 		if !found {
 			t.Fatalf("missing generated listener %q", want)
 		}
+	}
+}
+
+func TestMihomoIngressModules_LegacyLoopbackGatewayIsUnmanageable(t *testing.T) {
+	fx := newMihomoConfigTestFixture(t)
+	legacy := fx.golden
+	for _, port := range []string{"443", "80", "8080", "8443"} {
+		oldTarget := "target: " + fx.infra.ConsoleDomain + ":" + port + "}"
+		newTarget := "target: 127.0.0.1:" + port + "}"
+		changed := strings.Replace(legacy, oldTarget, newTarget, 1)
+		if changed == legacy {
+			t.Fatalf("fixture does not contain %q", oldTarget)
+		}
+		legacy = changed
+	}
+	legacy = strings.Replace(legacy, "  force-domain: ["+fx.infra.ConsoleDomain+"]\n", "", 1)
+	if err := ValidateInvariants(legacy, fx.infra); err != nil {
+		t.Fatalf("legacy operator-owned loopback config should remain valid: %v", err)
+	}
+	view := analyzeSpeedtestModule(legacy, fx.infra).View
+	if view.Manageable || view.Reason != "canonical-gateway-conflict" {
+		t.Fatalf("legacy loopback config = %+v, want canonical gateway conflict", view)
 	}
 }
 
@@ -328,7 +368,7 @@ func TestMihomoIngressModules_PartialLocalServiceGuardIsUnmanageable(t *testing.
 		{
 			name: "custom guard action",
 			edit: func(text string) string {
-				return strings.Replace(text, rules[1], strings.TrimSuffix(rules[1], "REJECT-DROP")+"REJECT", 1)
+				return strings.Replace(text, rules[1], strings.TrimSuffix(rules[1], "REJECT")+"DIRECT", 1)
 			},
 		},
 	} {
@@ -347,13 +387,13 @@ func TestMihomoIngressModules_PartialLocalServiceGuardIsUnmanageable(t *testing.
 
 func TestMihomoIngressModules_RequiresAllFailClosedGuardsBeforeMatch(t *testing.T) {
 	guards := []string{
-		"  - IP-CIDR,10.0.1.20/32,REJECT-DROP,no-resolve\n",
-		"  - IP-CIDR,127.0.0.0/8,REJECT-DROP,no-resolve\n",
-		"  - IP-CIDR,10.0.0.0/8,REJECT-DROP,no-resolve\n",
-		"  - IP-CIDR,172.16.0.0/12,REJECT-DROP,no-resolve\n",
-		"  - IP-CIDR,192.168.0.0/16,REJECT-DROP,no-resolve\n",
-		"  - IP-CIDR,100.64.0.0/10,REJECT-DROP,no-resolve\n",
-		"  - IP-CIDR,169.254.0.0/16,REJECT-DROP,no-resolve\n",
+		"  - IP-CIDR,10.0.1.20/32,REJECT,no-resolve\n",
+		"  - IP-CIDR,127.0.0.0/8,REJECT,no-resolve\n",
+		"  - IP-CIDR,10.0.0.0/8,REJECT,no-resolve\n",
+		"  - IP-CIDR,172.16.0.0/12,REJECT,no-resolve\n",
+		"  - IP-CIDR,192.168.0.0/16,REJECT,no-resolve\n",
+		"  - IP-CIDR,100.64.0.0/10,REJECT,no-resolve\n",
+		"  - IP-CIDR,169.254.0.0/16,REJECT,no-resolve\n",
 	}
 	for _, guard := range guards {
 		t.Run(strings.TrimSpace(guard), func(t *testing.T) {
@@ -370,7 +410,7 @@ func TestMihomoIngressModules_RequiresAllFailClosedGuardsBeforeMatch(t *testing.
 	}
 
 	fx := newMihomoConfigTestFixture(t)
-	guard := "  - IP-CIDR,127.0.0.0/8,REJECT-DROP,no-resolve\n"
+	guard := "  - IP-CIDR,127.0.0.0/8,REJECT,no-resolve\n"
 	changed := strings.Replace(fx.golden, guard, "", 1)
 	changed = strings.Replace(changed, "  - MATCH,Proxies\n", "  - MATCH,Proxies\n"+guard, 1)
 	if analyzeSpeedtestModule(changed, fx.infra).View.Manageable {
@@ -378,7 +418,7 @@ func TestMihomoIngressModules_RequiresAllFailClosedGuardsBeforeMatch(t *testing.
 	}
 
 	fx = newMihomoConfigTestFixture(t)
-	firstGuard := "  - IP-CIDR,10.0.1.20/32,REJECT-DROP,no-resolve\n"
+	firstGuard := "  - IP-CIDR,10.0.1.20/32,REJECT,no-resolve\n"
 	changed = strings.Replace(fx.golden, firstGuard, "  - DST-PORT,5060,DIRECT\n"+firstGuard, 1)
 	if analyzeSpeedtestModule(changed, fx.infra).View.Manageable {
 		t.Fatal("an accepting rule before the guards must make the module unmanageable")
@@ -395,6 +435,39 @@ func TestMihomoIngressModules_RequiresCanonicalSnifferBooleans(t *testing.T) {
 			}
 			if analyzeSpeedtestModule(changed, fx.infra).View.Manageable {
 				t.Fatalf("sniffer.%s=false reported manageable", key)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		protocol string
+		before   string
+		after    string
+	}{
+		{
+			protocol: "HTTP",
+			before:   "HTTP: { ports: [80, 8080, 8443] }",
+			after:    "HTTP: { ports: [80, 8080, 8443], override-destination: false }",
+		},
+		{
+			protocol: "TLS",
+			before:   "TLS:  { ports: [443, 8080, 8443] }",
+			after:    "TLS:  { ports: [443, 8080, 8443], override-destination: false }",
+		},
+		{
+			protocol: "QUIC",
+			before:   "QUIC: { ports: [443] }",
+			after:    "QUIC: { ports: [443], override-destination: false }",
+		},
+	} {
+		t.Run(tc.protocol+" override-destination", func(t *testing.T) {
+			fx := newMihomoConfigTestFixture(t)
+			changed := strings.Replace(fx.golden, tc.before, tc.after, 1)
+			if changed == fx.golden {
+				t.Fatalf("fixture does not contain sniffer.sniff.%s", tc.protocol)
+			}
+			if analyzeSpeedtestModule(changed, fx.infra).View.Manageable {
+				t.Fatalf("sniffer.sniff.%s.override-destination=false reported manageable", tc.protocol)
 			}
 		})
 	}
