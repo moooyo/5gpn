@@ -36,6 +36,7 @@ export const api = {
   putTgbot: (u: T.TGBotUpdate) => apiFetch<T.TGBotView>('/api/tgbot', { method: 'PUT', body: JSON.stringify(u) }),
   getMihomoHealth: (signal?: AbortSignal) => apiFetch<T.MihomoHealth>('/api/mihomo/health', { signal }),
   createMihomoLogTicket: () => apiFetch<T.MihomoLogTicket>('/api/mihomo/log-ticket', { method: 'POST' }),
+  createZashboardHandoff: () => apiFetch<T.ZashboardHandoff>('/api/mihomo/zashboard-handoff', { method: 'POST' }),
   // ---- mihomo config editor ----------------------------------------------
   // The operator edits the WHOLE mihomo config as raw text. PUT/reset both
   // run the same infra-invariant + `mihomo

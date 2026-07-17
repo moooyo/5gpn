@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -58,7 +59,7 @@ func run(argv []string, timeout time.Duration) (bool, string) {
 	}
 	if err != nil {
 		// Distinguish "binary not found" (friendlier message) from a non-zero
-		// exit (the output IS the useful part — e.g. journalctl printing a
+		// exit (the output IS the useful part — e.g. systemctl printing a
 		// state line). exec.ErrNotFound / *exec.Error wrap the lookup failure.
 		if execErr, ok := err.(*exec.Error); ok {
 			return false, "命令不存在：" + execErr.Name
@@ -367,20 +368,39 @@ func normalizedServiceState(out string) string {
 }
 
 // --------------------------------------------------------------------------- //
-// Logs (journalctl)
+// Logs (fixed systemd journal exporter)
 // --------------------------------------------------------------------------- //
+
+const (
+	journalExportDir      = "/run/5gpn-journal"
+	journalExportMaxBytes = 256 << 10
+)
+
+func journalExportTarget(svc string) (unit, filename string, ok bool) {
+	switch svc {
+	case "5gpn-dns":
+		return "5gpn-journal@5gpn-dns.service", "5gpn-dns.log", true
+	case "mihomo":
+		return "5gpn-journal@mihomo.service", "mihomo.log", true
+	default:
+		return "", "", false
+	}
+}
 
 // opLogsResult handles the logs:<svc> callbacks: it tails the last 50 lines of a
 // known service's journal and returns them <pre>-wrapped (the raw content IS the
-// requested result). Only the two known data-path services are allowed; any
-// other value is rejected without shelling out. Mirrors tgbot.py's op_logs.
+// requested result). The daemon cannot read the host journal directly. Instead,
+// polkit lets it start one of two exact root-owned exporter instances, which
+// atomically publishes a bounded read-only file. Any other service is rejected
+// without starting a unit.
 func (bt *Bot) opLogsResult(svc string) botOperationResult {
 	started := time.Now()
-	if !isKnownService(svc) {
+	exportUnit, filename, known := journalExportTarget(svc)
+	if !known {
 		return botOperationResult{OK: false, HTMLSummary: "❌ 未知服务。", Duration: time.Since(started)}
 	}
 	ok, out := bt.run(
-		[]string{"journalctl", "-u", svc, "-n", "50", "--no-pager", "-o", "short-iso"},
+		[]string{"systemctl", "start", exportUnit},
 		30*time.Second,
 	)
 	if !ok {
@@ -392,10 +412,43 @@ func (bt *Bot) opLogsResult(svc string) botOperationResult {
 			KeepDetailTail: true,
 		}
 	}
+	dir := bt.journalDir
+	if dir == "" {
+		dir = journalExportDir
+	}
+	path := filepath.Join(dir, filename)
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > journalExportMaxBytes {
+		detail := ""
+		if err != nil {
+			detail = err.Error()
+		} else if !info.Mode().IsRegular() {
+			detail = "journal exporter produced a non-regular file"
+		} else {
+			detail = "journal exporter exceeded its output limit"
+		}
+		return botOperationResult{
+			OK:             false,
+			HTMLSummary:    fmt.Sprintf("❌ <b>%s 日志读取失败</b>", html.EscapeString(svc)),
+			Detail:         detail,
+			Duration:       time.Since(started),
+			KeepDetailTail: true,
+		}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return botOperationResult{
+			OK:             false,
+			HTMLSummary:    fmt.Sprintf("❌ <b>%s 日志读取失败</b>", html.EscapeString(svc)),
+			Detail:         err.Error(),
+			Duration:       time.Since(started),
+			KeepDetailTail: true,
+		}
+	}
 	return botOperationResult{
 		OK:             true,
 		HTMLSummary:    fmt.Sprintf("📜 <b>%s</b> 最近 50 行", html.EscapeString(svc)),
-		Detail:         out,
+		Detail:         string(data),
 		Duration:       time.Since(started),
 		KeepDetailTail: true,
 	}
@@ -429,15 +482,10 @@ func renewalCertName() (string, bool) {
 	return name, true
 }
 
-// opRenewCertResult runs the scoped renewal helper for DNS_BASE_DOMAIN and
-// classifies the result. Missing or invalid identity fails closed before any
-// subprocess is started, so the bot can never renew an unrelated lineage on a
-// shared host. The helper is launched via `systemd-run` — a transient unit
-// spawned by PID 1 that does not inherit 5gpn-dns's hardened sandbox
-// (ProtectSystem=strict, read-only /etc/5gpn/cert, etc.). The helper owns the
-// configured Cloudflare DNS-01 or HTTP-01 renewal workflow, while systemd-run
-// lets it update ACME state and deployed certificate material without
-// loosening the resolver's own unit.
+// opRenewCertResult starts the one pre-installed scoped renewal unit. Missing
+// or invalid identity fails closed before any subprocess is started. Using a
+// fixed unit keeps the privileged command, arguments, timeout, and filesystem
+// access outside bot-controlled input while preserving the resolver sandbox.
 func (bt *Bot) opRenewCertResult() botOperationResult {
 	started := time.Now()
 	certName, valid := renewalCertName()
@@ -448,25 +496,13 @@ func (bt *Bot) opRenewCertResult() botOperationResult {
 			Duration:    time.Since(started),
 		}
 	}
-	ok, out := bt.run([]string{
-		"systemd-run", "--pipe", "--collect", "--quiet",
-		"--property=RuntimeMaxSec=25min", "--property=TimeoutStopSec=2min",
-		"/opt/5gpn/scripts/cert-renew.sh", "--cert-name", certName,
-	}, 30*time.Minute)
+	_ = certName
+	ok, out := bt.run([]string{"systemctl", "start", "5gpn-certbot-renew.service"}, 30*time.Minute)
 	tail := tailLines(out, 12)
 	if ok {
-		lower := strings.ToLower(out)
-		if strings.Contains(out, "No renewals were attempted") || strings.Contains(lower, "not yet due") {
-			return botOperationResult{
-				OK:          true,
-				HTMLSummary: "ℹ️ <b>证书尚未到期</b>，无需续期。",
-				Detail:      tail,
-				Duration:    time.Since(started),
-			}
-		}
 		return botOperationResult{
 			OK:          true,
-			HTMLSummary: "✅ <b>证书已续期</b>（TLS 将在下次握手加载新文件）。",
+			HTMLSummary: "✅ <b>证书续期检查已完成</b>（如已到期，TLS 将在下次握手加载新文件）。",
 			Detail:      tail,
 			Duration:    time.Since(started),
 		}

@@ -1,10 +1,11 @@
 module github.com/moooyo/5gpn/cmd/5gpn-dns
 
-go 1.26.3
+go 1.26.5
 
 require (
 	github.com/go-telegram/bot v1.22.0
 	github.com/miekg/dns v1.1.72
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

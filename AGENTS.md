@@ -25,9 +25,11 @@ plans, design handoffs, and git history are context only.
 - `/api/*` requires the console bearer token. Console mihomo logs use a
   short-lived one-use WebSocket ticket. Do not expose the full controller under
   the console `/proxy/`; zashboard has a separate allowlisted pass-through.
-- There is no Python in the repository. Go has exactly two direct dependencies:
-  `github.com/miekg/dns` and `github.com/go-telegram/bot`; do not add another
-  direct dependency without an explicit design decision.
+- There is no Python in the repository. Go has exactly three direct dependencies:
+  `github.com/miekg/dns`, `github.com/go-telegram/bot`, and `gopkg.in/yaml.v3`.
+  The YAML dependency is the explicit security boundary for structural mihomo
+  invariant validation; do not add another direct dependency without an explicit
+  design decision.
 
 ## Shell TUI policy: Gum
 

@@ -29,6 +29,10 @@ DNS_ENV=/etc/5gpn/dns.env
 LE_LIVE_ROOT=/etc/letsencrypt/live
 IOSGEN=/opt/5gpn/scripts/gen-ios-profile.sh
 WWW_DIR=/opt/5gpn/www
+CERT_ROLE_MARKER=.5gpn-cert-role-owned
+CERT_ROLE_VALUE_PREFIX=5gpn-cert-role-v1
+DNS_CERT_GROUP=5gpn-dns
+MIHOMO_CERT_GROUP=mihomo
 
 BASE_DOMAIN=""
 CERT_MODE=""
@@ -133,67 +137,130 @@ cleanup_staged() {
     return 0
 }
 
+role_group() {
+    local role="$1" group="$DNS_CERT_GROUP"
+    [[ "$role" == zash ]] && group="$MIHOMO_CERT_GROUP"
+    if getent group "$group" >/dev/null 2>&1; then
+        printf '%s\n' "$group"
+    elif [[ "$CERT_ROOT" != /etc/5gpn/cert ]]; then
+        id -gn
+    else
+        err "required certificate group is missing: $group"
+        return 1
+    fi
+}
+
+write_role_marker() {
+    local role="$1" dest="$2" tmp
+    [[ -d "$dest" && ! -L "$dest" ]] || return 1
+    tmp="$(mktemp "${dest}/.${CERT_ROLE_MARKER}.XXXXXX")" || return 1
+    printf '%s\n' "${CERT_ROLE_VALUE_PREFIX}:${role}" > "$tmp" \
+        && chmod 0644 "$tmp" \
+        && mv -f -- "$tmp" "${dest}/${CERT_ROLE_MARKER}" \
+        || { rm -f -- "$tmp"; return 1; }
+}
+
+role_is_owned() {
+    local role="$1" dest="$2" marker="${dest}/${CERT_ROLE_MARKER}"
+    [[ -d "$dest" && ! -L "$dest" && -f "$marker" && ! -L "$marker" ]] \
+        && [[ "$(cat "$marker" 2>/dev/null || true)" == "${CERT_ROLE_VALUE_PREFIX}:${role}" ]]
+}
+
+remove_role_generation() {
+    local role="$1" dest="$2" generation="$3" cert_root_real dest_real gen_real
+    [[ -n "$generation" && "$generation" != */* ]] || return 1
+    role_is_owned "$role" "$dest" || return 1
+    cert_root_real="$(readlink -f -- "$CERT_ROOT")" || return 1
+    dest_real="$(readlink -f -- "$dest")" || return 1
+    [[ "$dest_real" == "$cert_root_real/$role" ]] || return 1
+    gen_real="$(readlink -f -- "${dest}/generations/${generation}")" || return 1
+    [[ "$gen_real" == "$dest_real/generations/$generation" && -d "$gen_real" && ! -L "$gen_real" ]] || return 1
+    rm -rf -- "$gen_real"
+}
+
+cleanup_role_generations() {
+    local role="$1" dest="$2" keep="$3" entry name
+    role_is_owned "$role" "$dest" || return 1
+    [[ "$keep" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+    while IFS= read -r entry; do
+        [[ -n "$entry" ]] || continue
+        name="$(basename -- "$entry")"
+        [[ "$name" == "$keep" ]] && continue
+        remove_role_generation "$role" "$dest" "$name" || return 1
+    done < <(find "${dest}/generations" -mindepth 1 -maxdepth 1 -type d -print)
+}
+
 # publish_roles <cert> <key> <mode> <base> <console> <zash> <dot>
-# Stage and validate every role before publishing any of them. Each temporary
-# file is created beside its destination, receives final permissions, and is
-# then renamed over the live path. A two-file pair cannot be switched with one
-# portable filesystem operation, but same-directory rename prevents readers
-# from ever seeing a truncated file and keeps the publication window minimal.
+# Stage complete generations for all roles, then atomically swap each role's
+# single current symlink. A TLS reader can never observe a mixed keypair.
 publish_roles() {
     local cert="$1" key="$2" mode="$3" base="$4"
-    local console="$5" zash="$6" dot="$7" r dest cert_tmp key_tmp i
-    local -a roles=(dot web zash) dests=() cert_tmps=() key_tmps=()
+    local console="$5" zash="$6" dot="$7" r dest group generation final link_tmp old i j rollback_link
+    local -a roles=(dot web zash) dests=() generations=() links=() old_targets=()
 
     for r in "${roles[@]}"; do
         dest="${CERT_ROOT}/${r}"
-        if ! install -d -m 0750 "$dest"; then
+        group="$(role_group "$r")" || return 1
+        if ! install -d -g "$group" -m 0750 "$dest"; then
             err "cannot create certificate role directory: $dest"
-            cleanup_staged "${cert_tmps[@]}" "${key_tmps[@]}"
             return 1
         fi
-        cert_tmp="$(mktemp "${dest}/.fullchain.pem.XXXXXX")" || {
-            err "cannot stage certificate in $dest"
-            cleanup_staged "${cert_tmps[@]}" "${key_tmps[@]}"
-            return 1
-        }
-        key_tmp="$(mktemp "${dest}/.privkey.pem.XXXXXX")" || {
-            err "cannot stage private key in $dest"
-            cleanup_staged "$cert_tmp" "${cert_tmps[@]}" "${key_tmps[@]}"
-            return 1
-        }
-        dests+=("$dest")
-        cert_tmps+=("$cert_tmp")
-        key_tmps+=("$key_tmp")
-
-        if ! install -m 0640 "$cert" "$cert_tmp" \
-           || ! install -m 0640 "$key" "$key_tmp" \
-           || ! chmod 0640 "$cert_tmp" "$key_tmp"; then
+        write_role_marker "$r" "$dest" || return 1
+        install -d -g "$group" -m 0750 "${dest}/generations" || return 1
+        if [[ -e "${dest}/current" || -L "${dest}/current" ]]; then
+            [[ -L "${dest}/current" ]] || { err "unsafe current path in $dest"; return 1; }
+            old="$(readlink -- "${dest}/current")"
+            [[ "$old" =~ ^generations/[A-Za-z0-9._-]+$ && -d "${dest}/${old}" ]] \
+                || { err "unsafe current symlink in $dest"; return 1; }
+        else
+            old=""
+        fi
+        generation="$(mktemp -d "${dest}/generations/.new.XXXXXX")" || return 1
+        chgrp "$group" "$generation" && chmod 0750 "$generation" || return 1
+        if ! install -g "$group" -m 0640 "$cert" "${generation}/fullchain.pem" \
+           || ! install -g "$group" -m 0640 "$key" "${generation}/privkey.pem"; then
             err "cannot stage certificate pair in $dest"
-            cleanup_staged "${cert_tmps[@]}" "${key_tmps[@]}"
+            remove_role_generation "$r" "$dest" "$(basename -- "$generation")" || true
             return 1
         fi
-        if ! validate_cert_pair "$cert_tmp" "$key_tmp" "$mode" "$base" \
+        if ! validate_cert_pair "${generation}/fullchain.pem" "${generation}/privkey.pem" "$mode" "$base" \
             "$console" "$zash" "$dot"; then
-            cleanup_staged "${cert_tmps[@]}" "${key_tmps[@]}"
+            remove_role_generation "$r" "$dest" "$(basename -- "$generation")" || true
             return 1
         fi
+        final="${dest}/generations/generation-$(date -u +%Y%m%dT%H%M%SZ)-${BASHPID}-${RANDOM}"
+        [[ ! -e "$final" ]] || return 1
+        mv -- "$generation" "$final" || return 1
+        link_tmp="${dest}/.current.${BASHPID}.${RANDOM}"
+        [[ ! -e "$link_tmp" && ! -L "$link_tmp" ]] || return 1
+        ln -s "generations/$(basename -- "$final")" "$link_tmp" || return 1
+        dests+=("$dest")
+        generations+=("$final")
+        links+=("$link_tmp")
+        old_targets+=("$old")
     done
 
-    # Publish key first and certificate immediately after it. Both moves stay on
-    # the destination filesystem and are atomic for the individual file.
     for i in "${!roles[@]}"; do
-        if ! mv -f -- "${key_tmps[$i]}" "${dests[$i]}/privkey.pem"; then
-            err "cannot publish private key for role ${roles[$i]}"
-            cleanup_staged "${cert_tmps[@]}" "${key_tmps[@]}"
+        if ! mv -Tf -- "${links[$i]}" "${dests[$i]}/current"; then
+            for ((j = 0; j < i; j++)); do
+                if [[ -n "${old_targets[$j]}" ]]; then
+                    rollback_link="${dests[$j]}/.rollback.${BASHPID}.${RANDOM}"
+                    ln -s "${old_targets[$j]}" "$rollback_link" \
+                        && mv -Tf -- "$rollback_link" "${dests[$j]}/current" || true
+                else
+                    rm -f -- "${dests[$j]}/current"
+                fi
+            done
+            rm -f -- "${links[@]}"
+            err "cannot atomically publish certificate role ${roles[$i]}"
             return 1
         fi
-        key_tmps[$i]=""
-        if ! mv -f -- "${cert_tmps[$i]}" "${dests[$i]}/fullchain.pem"; then
-            err "cannot publish certificate for role ${roles[$i]}"
-            cleanup_staged "${cert_tmps[@]}" "${key_tmps[@]}"
-            return 1
-        fi
-        cert_tmps[$i]=""
+        links[$i]=""
+    done
+    for i in "${!roles[@]}"; do
+        cleanup_role_generations "${roles[$i]}" "${dests[$i]}" \
+            "$(basename -- "${generations[$i]}")" || return 1
+        rm -f -- "${dests[$i]}/fullchain.pem" "${dests[$i]}/privkey.pem"
     done
 }
 

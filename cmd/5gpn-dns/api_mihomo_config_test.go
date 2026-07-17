@@ -77,7 +77,13 @@ func newMihomoConfigTestFixture(t *testing.T) *mihomoTestFixture {
 	t.Helper()
 	cs, token := newAPITestServer(t)
 
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "mihomo")
+	if err := os.Mkdir(dir, 0o770); err != nil {
+		t.Fatalf("create shared config dir: %v", err)
+	}
+	if err := os.Chmod(dir, 0o770); err != nil {
+		t.Fatalf("set shared config dir mode: %v", err)
+	}
 	path := filepath.Join(dir, "config.yaml")
 	golden := goldenMihomoConfig()
 	if err := os.WriteFile(path, []byte(golden), 0o644); err != nil {
@@ -172,16 +178,17 @@ func TestMihomoConfigAPI_Put_Valid(t *testing.T) {
 	if onDisk != newText {
 		t.Fatalf("on-disk config not updated:\n--- got ---\n%s\n--- want ---\n%s", onDisk, newText)
 	}
-	if info, err := os.Stat(fx.store.Path()); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("config mode = %v, %v; want 0600", func() os.FileMode {
+	posixModes := filesystemSupportsPOSIXModes(t, fx.store.Dir())
+	if info, err := os.Stat(fx.store.Path()); err != nil || posixModes && info.Mode().Perm() != 0o660 {
+		t.Fatalf("config mode = %v, %v; want 0660", func() os.FileMode {
 			if info == nil {
 				return 0
 			}
 			return info.Mode().Perm()
 		}(), err)
 	}
-	if info, err := os.Stat(fx.store.Dir()); err != nil || info.Mode().Perm() != 0o700 {
-		t.Fatalf("config dir mode = %v, %v; want 0700", func() os.FileMode {
+	if info, err := os.Stat(fx.store.Dir()); err != nil || posixModes && info.Mode().Perm() != 0o770 {
+		t.Fatalf("config dir mode = %v, %v; want 0770", func() os.FileMode {
 			if info == nil {
 				return 0
 			}
@@ -259,9 +266,11 @@ func TestMihomoConfigAPI_Put_MissingController(t *testing.T) {
 // the disk is left untouched.
 func TestMihomoConfigAPI_Put_FailsMihomoTest(t *testing.T) {
 	fx := newMihomoConfigTestFixture(t)
-	fx.tester.err = errors.New("mihomo -t: 1: 2: yaml: line 3: mapping values are not allowed in this context")
+	fx.tester.err = errors.New("mihomo -t: candidate rejected by fake validator")
 
-	newText := fx.golden + "\nsome: garbage: here\n"
+	// This is valid YAML and preserves every infrastructure invariant. The fake
+	// tester is therefore the only layer that can reject it.
+	newText := fx.golden + "\nexperimental-test-option: true\n"
 	body, _ := json.Marshal(map[string]string{"text": newText})
 	rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/config", body, fx.token, true)
 
@@ -274,8 +283,11 @@ func TestMihomoConfigAPI_Put_FailsMihomoTest(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !strings.Contains(resp.Error, "mapping values are not allowed") {
+	if !strings.Contains(resp.Error, "candidate rejected by fake validator") {
 		t.Fatalf("error=%q should surface mihomo -t's stderr", resp.Error)
+	}
+	if fx.tester.calls != 1 {
+		t.Fatalf("mihomo -t calls = %d, want exactly 1", fx.tester.calls)
 	}
 
 	onDisk, err := fx.store.Read()
@@ -287,6 +299,39 @@ func TestMihomoConfigAPI_Put_FailsMihomoTest(t *testing.T) {
 	}
 	if fx.ctl.putCalls != 0 {
 		t.Fatalf("PutConfigs must not run when mihomo -t fails, got %d calls", fx.ctl.putCalls)
+	}
+}
+
+func TestMihomoConfigAPI_Put_RejectsDuplicateKeyBeforeMihomoTest(t *testing.T) {
+	fx := newMihomoConfigTestFixture(t)
+	duplicate := strings.Replace(fx.golden, "secret: s3cr3t\n", "secret: s3cr3t\nsecret: attacker\n", 1)
+	body, _ := json.Marshal(map[string]string{"text": duplicate})
+	rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/config", body, fx.token, true)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(resp.Error, "invalid mihomo YAML") {
+		t.Fatalf("error=%q, want structural YAML rejection", resp.Error)
+	}
+	if fx.tester.calls != 0 {
+		t.Fatalf("mihomo -t must not run for duplicate keys, got %d calls", fx.tester.calls)
+	}
+	if fx.ctl.putCalls != 0 {
+		t.Fatalf("PutConfigs must not run for duplicate keys, got %d calls", fx.ctl.putCalls)
+	}
+	onDisk, err := fx.store.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if onDisk != fx.golden {
+		t.Fatal("disk changed after duplicate-key rejection")
 	}
 }
 
@@ -370,7 +415,7 @@ func TestMihomoConfigAPI_Reset(t *testing.T) {
 	if err != nil || string(backup) != "garbage: not a real config" {
 		t.Fatalf("reset backup = %q, %v", backup, err)
 	}
-	if info, err := os.Stat(fx.store.Path() + ".bak"); err != nil || info.Mode().Perm() != 0o600 {
+	if info, err := os.Stat(fx.store.Path() + ".bak"); err != nil || filesystemSupportsPOSIXModes(t, fx.store.Dir()) && info.Mode().Perm() != 0o660 {
 		t.Fatalf("reset backup mode: info=%v err=%v", info, err)
 	}
 	if fx.ctl.putCalls != 1 {

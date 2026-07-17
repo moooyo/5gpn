@@ -48,8 +48,10 @@ grep -Fq '# 5gpn-renew-hook-id: deploy-v1' <<<"$renew_owned_fn" \
     || fail "deploy-hook ownership check does not require the exact current marker"
 grep -Fq 'renewed 5gpn WILDCARD lineage' <<<"$renew_owned_fn" \
     && fail "deploy-hook ownership still accepts the superseded wildcard text"
-grep -Fq '"/opt/5gpn/scripts/cert-renew.sh", "--cert-name", certName' "$BOT_OPS" \
-    || fail "Telegram renewal does not invoke the unified helper with the validated cert name"
+grep -Fq '"systemctl", "start", "5gpn-certbot-renew.service"' "$BOT_OPS" \
+    || fail "Telegram renewal does not start the fixed scoped renewal service"
+grep -Fq 'systemd-run' "$BOT_OPS" \
+    && fail "Telegram renewal must not create an operator-controlled transient root unit"
 grep -Fq 'cf_credential_safe' "$CERT_RENEW" \
     || fail "Cloudflare renewal can follow an unsafe credential symlink or permissions drift"
 
@@ -62,6 +64,8 @@ grep -Fxq '# 5gpn-unit-id: 5gpn-dns.service:v1' "$ROOT/etc/systemd/5gpn-dns.serv
     || fail "5gpn-dns unit lacks its exact ownership marker"
 grep -Fxq '# 5gpn-unit-id: mihomo.service:v1' "$ROOT/etc/systemd/mihomo.service" \
     || fail "mihomo unit lacks its exact ownership marker"
+grep -Fxq '# 5gpn-unit-id: 5gpn-journal@.service:v1' "$ROOT/etc/systemd/5gpn-journal@.service" \
+    || fail "journal exporter unit lacks its exact ownership marker"
 
 # Install/configure ordering: resolve the TUI/persisted selection, wait for the
 # fixed-resolver DNS gate, and only then publish or issue certificate material.
@@ -214,13 +218,14 @@ grep -Eq '^remove_legacy_|^clean_previous_install\(\)' "$INSTALL" \
 
 # --- Certs are DELIBERATELY preserved (re-issuing an LE cert is rate-limited) ---
 un_fn="$(sed -n '/^uninstall()/,/^}/p' "$INSTALL")"
-printf '%s' "$un_fn" | grep -Fq '! -name cert' \
-    || fail "uninstall --purge must preserve the cert dir (find ... ! -name cert)"
+printf '%s' "$un_fn" | grep -Fq '"$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"' \
+    && printf '%s' "$un_fn" | grep -Fq '"$CONF_DIR" "$CONF_OWNERSHIP_MARKER" cert acme debug-cert' \
+    || fail "uninstall --purge must use the owned-scope helper while preserving certificate state"
 # The Cloudflare API-token dir must ALSO survive --purge: otherwise a reinstall
 # with a still-valid cert (which needs no token) is fine, but a reinstall that
 # DOES need to issue would hard-abort for a token wiped for no reason.
-printf '%s' "$un_fn" | grep -Fq '! -name acme' \
-    || fail "uninstall --purge must preserve the acme/ dir (find ... ! -name acme) so the Cloudflare token survives"
+printf '%s' "$un_fn" | grep -Fq 'cert acme debug-cert' \
+    || fail "uninstall --purge must preserve acme/ so the Cloudflare token survives"
 printf '%s' "$un_fn" | grep -Eq 'rm -rf "\$CONF_DIR"( |$)' \
     && fail "uninstall must NOT 'rm -rf \$CONF_DIR' wholesale (would delete the preserved cert dir)"
 # The certbot lineage (live/archive/renewal conf) must never be removed by uninstall —
@@ -305,9 +310,9 @@ grep -Fq 'external-controller: ""' "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: plaintext controller must stay disabled"
 grep -Fq 'external-controller-tls: 127.0.0.1:9090' "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing TLS controller listener"
-grep -Fq '/etc/5gpn/cert/zash/fullchain.pem' "$MIHOMO_TMPL" \
+grep -Fq '/etc/5gpn/cert/zash/current/fullchain.pem' "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing zash certificate path"
-grep -Fq '/etc/5gpn/cert/zash/privkey.pem' "$MIHOMO_TMPL" \
+grep -Fq '/etc/5gpn/cert/zash/current/privkey.pem' "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing zash private key path"
 grep -Fq '>>>5gpn' "$MIHOMO_TMPL" \
     && fail "etc/mihomo/config.yaml.tmpl: no daemon-owned >>>5gpn marker regions may remain (config is fully operator-owned)"
@@ -324,9 +329,9 @@ grep -Fq 'external-controller: ""' "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: plaintext controller must stay disabled"
 grep -Fq 'external-controller-tls: 127.0.0.1:9090' "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #1 (TLS controller)"
-grep -Fq 'certificate: /etc/5gpn/cert/zash/fullchain.pem' "$MIHOMO_TMPL" \
+grep -Fq 'certificate: /etc/5gpn/cert/zash/current/fullchain.pem' "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #1 (zash controller certificate path)"
-grep -Fq 'private-key: /etc/5gpn/cert/zash/privkey.pem' "$MIHOMO_TMPL" \
+grep -Fq 'private-key: /etc/5gpn/cert/zash/current/privkey.pem' "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #1 (zash controller private-key path)"
 grep -Fq '__MIHOMO_LISTENERS__'                 "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing dynamic listener placeholder"

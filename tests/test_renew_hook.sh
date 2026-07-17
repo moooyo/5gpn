@@ -61,9 +61,9 @@ mode_of() {
 
 role_checksums() {
     cksum \
-        "$CERT_ROOT/dot/fullchain.pem" "$CERT_ROOT/dot/privkey.pem" \
-        "$CERT_ROOT/web/fullchain.pem" "$CERT_ROOT/web/privkey.pem" \
-        "$CERT_ROOT/zash/fullchain.pem" "$CERT_ROOT/zash/privkey.pem"
+        "$CERT_ROOT/dot/current/fullchain.pem" "$CERT_ROOT/dot/current/privkey.pem" \
+        "$CERT_ROOT/web/current/fullchain.pem" "$CERT_ROOT/web/current/privkey.pem" \
+        "$CERT_ROOT/zash/current/fullchain.pem" "$CERT_ROOT/zash/current/privkey.pem"
 }
 
 write_env
@@ -121,8 +121,9 @@ write_env cloudflare
 RENEWED_LINEAGE="$LE_LIVE_ROOT/example.test/"
 renew_hook_main >/dev/null
 for role in dot web zash; do
-    cert="$CERT_ROOT/$role/fullchain.pem"
-    key="$CERT_ROOT/$role/privkey.pem"
+    [[ -L "$CERT_ROOT/$role/current" ]] || fail "$role current generation is not an atomic symlink"
+    cert="$CERT_ROOT/$role/current/fullchain.pem"
+    key="$CERT_ROOT/$role/current/privkey.pem"
     [[ -s "$cert" && -s "$key" ]] || fail "$role certificate pair was not published"
     [[ "$(mode_of "$cert")" == 640 && "$(mode_of "$key")" == 640 ]] \
         || fail "$role certificate pair does not have mode 0640"
@@ -132,7 +133,7 @@ for role in dot web zash; do
 done
 [[ ! -s "$SYSTEMCTL_LOG" ]] \
     || fail "valid certificate publication incorrectly used SIGHUP/systemctl"
-if find "$CERT_ROOT" -type f \( -name '.fullchain.pem.*' -o -name '.privkey.pem.*' \) \
+if find "$CERT_ROOT" \( -name '.new.*' -o -name '.current.*' \) \
     | grep -q .; then
     fail "staging files were left behind after successful publication"
 fi
@@ -173,7 +174,7 @@ generate_cert "$LE_LIVE_ROOT/example.test" \
 : > "$SYSTEMCTL_LOG"
 renew_hook_main >/dev/null
 for role in dot web zash; do
-    validate_cert_pair "$CERT_ROOT/$role/fullchain.pem" "$CERT_ROOT/$role/privkey.pem" \
+    validate_cert_pair "$CERT_ROOT/$role/current/fullchain.pem" "$CERT_ROOT/$role/current/privkey.pem" \
         http-01 example.test console.example.test zash.example.test dot.example.test >/dev/null \
         || fail "$role HTTP-01 certificate failed post-publication validation"
 done

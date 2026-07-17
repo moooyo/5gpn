@@ -229,9 +229,12 @@ func TestGroupExchange_NoECSWhenDisabled(t *testing.T) {
 
 	q := new(dns.Msg)
 	q.SetQuestion("example.com.", dns.TypeA)
+	clientSubnet, _ := parseECS("198.51.100.0/24")
+	setECSOnMsg(q, clientSubnet)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := g.Exchange(ctx, q); err != nil {
+	resp, err := g.Exchange(ctx, q)
+	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}
 	select {
@@ -241,6 +244,9 @@ func TestGroupExchange_NoECSWhenDisabled(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("upstream never received the query")
+	}
+	if findECS(resp) != nil {
+		t.Fatal("client ECS was echoed back in the downstream response")
 	}
 }
 

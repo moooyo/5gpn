@@ -102,14 +102,18 @@ var ErrInvalidUpstream = errors.New("invalid upstream")
 // obvious garbage before it becomes a TLS SNI, not fully validate RFC 1035.
 var hostnameRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$`)
 
-// validIPPort reports whether s is an IP address with an optional port
-// ("22.22.22.22", "22.22.22.22:5353", "[::1]:53").
+// validIPPort reports whether s is an IPv4 address with an optional port.
+// The DNS daemon's systemd sandbox intentionally excludes AF_INET6.
 func validIPPort(s string) bool {
-	if net.ParseIP(s) != nil {
+	if ip := net.ParseIP(s); ip != nil && ip.To4() != nil {
 		return true
 	}
 	host, port, err := net.SplitHostPort(s)
-	if err != nil || net.ParseIP(host) == nil {
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.To4() == nil {
 		return false
 	}
 	// SplitHostPort validates only the shape. Parse the value as an unsigned

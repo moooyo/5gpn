@@ -7,7 +7,7 @@ import type { MihomoHealth, Status } from '../../lib/api/types'
 import MihomoPage from './MihomoPage'
 
 vi.mock('../../lib/api/client', () => ({
-  api: { createMihomoLogTicket: vi.fn() },
+  api: { createMihomoLogTicket: vi.fn(), createZashboardHandoff: vi.fn() },
 }))
 import { api } from '../../lib/api/client'
 
@@ -61,11 +61,10 @@ class FakeWebSocket {
 
 function statusWith(
   zashDomain?: string,
-  opts: { mihomoOk?: boolean; mihomo?: MihomoHealth; loading?: boolean; mihomoSecret?: string } = {},
+  opts: { mihomoOk?: boolean; mihomo?: MihomoHealth; loading?: boolean } = {},
 ): StatusValue {
   const status = { version: 'dev', uptime_seconds: 1, stats: {} as Status['stats'] } as Status
   if (zashDomain) status.zash_domain = zashDomain
-  if (opts.mihomoSecret !== undefined) status.mihomo_secret = opts.mihomoSecret
   return {
     status,
     dnsOk: true,
@@ -77,7 +76,7 @@ function statusWith(
 
 function renderPage(
   zashDomain?: string,
-  opts?: { mihomoOk?: boolean; mihomo?: MihomoHealth; loading?: boolean; mihomoSecret?: string },
+  opts?: { mihomoOk?: boolean; mihomo?: MihomoHealth; loading?: boolean },
 ) {
   return render(
     <StatusContext.Provider value={statusWith(zashDomain, opts)}>
@@ -91,6 +90,11 @@ beforeEach(async () => {
   FakeWebSocket.instances = []
   vi.mocked(api.createMihomoLogTicket).mockReset()
   vi.mocked(api.createMihomoLogTicket).mockResolvedValue({ ticket: 'ticket-1' })
+  vi.mocked(api.createZashboardHandoff).mockReset()
+  vi.mocked(api.createZashboardHandoff).mockResolvedValue({
+    url: 'https://zash.5gpn.example.com/handoff?ticket=one-use-ticket',
+    expires_in_seconds: 30,
+  })
   vi.stubGlobal('WebSocket', FakeWebSocket as unknown as typeof WebSocket)
 })
 
@@ -141,22 +145,27 @@ describe('MihomoPage', () => {
     expect(screen.queryByText('third line should not appear')).not.toBeInTheDocument()
   })
 
-  it('the "open zashboard" link carries the encoded mihomo secret and a literal secondaryPath=/proxy', async () => {
-    renderPage('zash.5gpn.example.com', { mihomoSecret: 'a+b/c=d' })
+  it('opens zashboard through a one-use handoff without putting the controller secret in the browser URL', async () => {
+    const replace = vi.fn()
+    const close = vi.fn()
+    vi.spyOn(window, 'open').mockReturnValue({ location: { replace }, close, opener: window } as unknown as Window)
+    renderPage('zash.5gpn.example.com')
     await screen.findByText('v1.19.0')
 
-    const link = screen.getByRole('link', { name: new RegExp(i18n.t('mihomo.openZashboard')) })
-    const href = link.getAttribute('href')!
-    expect(href).toContain(`secret=${encodeURIComponent('a+b/c=d')}`)
-    expect(href).toContain('secondaryPath=/proxy')
-    expect(href).toContain('zash.5gpn.example.com')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: new RegExp(i18n.t('mihomo.openZashboard')) }))
+
+    await waitFor(() => expect(api.createZashboardHandoff).toHaveBeenCalledTimes(1))
+    expect(replace).toHaveBeenCalledWith('https://zash.5gpn.example.com/handoff?ticket=one-use-ticket')
+    expect(replace.mock.calls[0]?.[0]).not.toContain('secret=')
+    expect(close).not.toHaveBeenCalled()
   })
 
   it('hides the "open zashboard" link when zash_domain is empty', async () => {
     renderPage(undefined)
     await screen.findByText('v1.19.0')
 
-    expect(screen.queryByText(i18n.t('mihomo.openZashboard'))).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: new RegExp(i18n.t('mihomo.openZashboard')) })).not.toBeInTheDocument()
   })
 })
 

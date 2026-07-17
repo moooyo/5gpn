@@ -36,9 +36,28 @@ func TestBreakerOpensAndRecovers(t *testing.T) {
 	if !b.allow() {
 		t.Fatal("breaker should allow a half-open probe after cooldown")
 	}
+	if b.allow() {
+		t.Fatal("breaker must allow only one concurrent half-open probe")
+	}
 	b.record(true) // probe succeeds
 	if !b.allow() {
 		t.Fatal("breaker should be closed after a success")
+	}
+}
+
+func TestBreakerCanceledHalfOpenProbeCanBeRetried(t *testing.T) {
+	clk := time.Unix(1_700_000_000, 0)
+	b := &breaker{now: func() time.Time { return clk }}
+	for i := 0; i < breakerThreshold; i++ {
+		b.record(false)
+	}
+	clk = clk.Add(breakerCooldown)
+	if !b.allow() {
+		t.Fatal("expected initial half-open probe")
+	}
+	b.recordCanceled()
+	if !b.allow() {
+		t.Fatal("caller cancellation must release the half-open probe slot")
 	}
 }
 

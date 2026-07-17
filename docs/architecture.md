@@ -102,6 +102,14 @@ cache state. A query captures the cache epoch before its rule snapshot; a
 query that began under an old generation cannot repopulate the newly flushed
 cache after a swap.
 
+Concurrent cache misses with the same canonical name, type, class, DO, and CD
+profile share one timeout-bounded upstream resolution. Policy, rule, upstream,
+and cache generations are also part of the internal flight identity, so a hot
+swap cannot share an old decision with a new request. A canceled waiter stops
+waiting without canceling the shared query or recording a breaker failure. The
+distinct-key flight map has a fixed capacity; at capacity, unrelated requests
+resolve independently under the normal admission and query deadlines.
+
 Subscription refresh is fail-safe. Network, redirect, parse, scan, or
 too-small/partial-result failure keeps the last complete cache. URL resolution,
 every redirect, and the final dial target are subject to SSRF protections.
@@ -139,8 +147,8 @@ New seeds use mihomo's native TLS controller only:
 external-controller: ""
 external-controller-tls: 127.0.0.1:9090
 tls:
-  certificate: /etc/5gpn/cert/zash/fullchain.pem
-  private-key: /etc/5gpn/cert/zash/privkey.pem
+  certificate: /etc/5gpn/cert/zash/current/fullchain.pem
+  private-key: /etc/5gpn/cert/zash/current/privkey.pem
 ```
 
 Both the daemon's mihomo client and the zashboard reverse proxy dial the
@@ -193,8 +201,14 @@ handlers provide narrow health and config operations. Live logs use a
 cryptographically random, short-lived, one-use ticket minted by
 `POST /api/mihomo/log-ticket`; that ticket authorizes exactly one
 `/proxy/logs` WebSocket upgrade and is consumed before proxying. Zashboard's
-separate `/proxy/` is the only general controller pass-through and forwards the
-browser-supplied controller authorization.
+separate `/proxy/` is the only general controller pass-through. An authenticated
+console request mints a short-lived, one-use zashboard handoff URL. The zash
+origin consumes it, sets a host-only `Secure`, `HttpOnly`, `SameSite=Strict`
+session cookie, and redirects to zashboard with only a fixed non-secret setup
+placeholder. Every controller request requires that session; the daemon strips
+browser authorization and injects the controller secret server-side. The secret
+is never returned by `/api/status` or placed in a URL, referrer, history, DOM, or
+localStorage.
 
 The Telegram bot runs inside `5gpn-dns` and calls the same in-process
 `Controller` used by the HTTP API. `/id` provides the caller's numeric user ID;
@@ -293,9 +307,13 @@ Both production modes use exactly one Let's Encrypt lineage with Certbot name
 
 The same certificate is deployed into three role directories:
 
-- `/etc/5gpn/cert/dot` for DoT and iOS profile signing;
-- `/etc/5gpn/cert/web` for console HTTPS and its public iOS profile download;
-- `/etc/5gpn/cert/zash` for zashboard HTTPS and the mihomo controller.
+- `/etc/5gpn/cert/dot/current` for DoT and iOS profile signing;
+- `/etc/5gpn/cert/web/current` for console HTTPS and its public iOS profile download;
+- `/etc/5gpn/cert/zash/current` for zashboard HTTPS and the mihomo controller.
+
+Each `current` entry is an atomically replaced relative symlink to a complete,
+validated generation containing both `fullchain.pem` and `privkey.pem`. Readers
+therefore observe either the old pair or the new pair, never one file from each.
 
 Reinstall must prefer safe reuse over issuance. Before reusing material, it
 verifies the configured mode/provenance, validity window, the exact SAN shape
@@ -406,14 +424,31 @@ for superseded pre-release implementations.
 
 ## Runtime hardening and failure boundaries
 
-Both services run under hardened systemd units. `5gpn-dns` receives only IPv4
-and Unix socket families and narrowly scoped writable paths. mihomo additionally
-needs IPv6 and netlink for its own direct egress and route lookup, while writes
-remain confined to `/etc/5gpn/mihomo`. `SAFE_PATHS` grants mihomo read access
-only to the zash certificate role and does not broaden filesystem writes.
-Neither runtime-service sandbox can access `/etc/5gpn/acme`; only the
-out-of-sandbox, scoped renewal helper may read the Cloudflare Zone:DNS:Edit
-credential.
+Both services run as dedicated non-root accounts under hardened systemd units.
+Each receives only `CAP_NET_BIND_SERVICE`; `5gpn-dns` receives only IPv4 and
+Unix socket families, while mihomo additionally needs IPv6 and netlink for its
+own direct egress and route lookup. Runtime state owned by `5gpn-dns` is
+private to that account. `/etc/5gpn/mihomo` is a setgid `root:mihomo` directory
+with group-writable `0660` files so mihomo can read its operator-owned config
+and the control plane can atomically edit it through its `mihomo` supplementary
+group. Writes remain confined to those declared paths. `SAFE_PATHS` grants
+mihomo read access only to the zash certificate role and does not broaden
+filesystem writes.
+
+The `gpn-dns` account is not a member of `systemd-journal` and cannot read the
+host journal directly. For an authorized private-chat Bot log request, polkit
+allows it to start only `5gpn-journal@5gpn-dns.service` or
+`5gpn-journal@mihomo.service`. The root-owned template validates the instance,
+exports at most the newest 50 lines and 256 KiB to an atomic, read-only runtime
+file, and accepts no caller-selected unit or path. The same root-owned polkit
+rule authorizes only two other operations: restarting `mihomo.service` and
+starting `5gpn-certbot-renew.service`. The installer ownership-gates,
+snapshots, and rolls back that exact rule and exporter together with the other
+service units. Any unit drop-in or pre-existing exact journal-export instance
+invalidates the ownership fingerprint and aborts before polkit publication.
+Neither runtime-service sandbox can access `/etc/5gpn/acme`;
+only the out-of-sandbox, scoped renewal helper may read the Cloudflare
+Zone:DNS:Edit credential.
 
 The control API is disabled when no bearer token is configured; it is never
 served unauthenticated. Certificate or TLS identity errors fail closed. A bad
@@ -423,9 +458,13 @@ Telegram token/admin override is the deliberate exception: a present but
 invalid file disables that remote control path so revoked authority cannot be
 restored from stale bootstrap defaults.
 
-The repository contains no Python. The Go module has exactly two direct
-dependencies, `github.com/miekg/dns` and `github.com/go-telegram/bot`; adding a
-third requires an explicit architecture decision.
+The repository contains no Python. The Go module has exactly three direct
+dependencies: `github.com/miekg/dns`, `github.com/go-telegram/bot`, and
+`gopkg.in/yaml.v3`. The YAML dependency is an explicit security decision: raw
+mihomo edits are parsed structurally before invariant validation so decoy keys,
+wrong nesting, duplicate keys, and multi-document overrides cannot satisfy the
+control-plane boundary. Adding another direct dependency requires an explicit
+architecture decision.
 
 ## Web console constraints
 

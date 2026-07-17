@@ -86,11 +86,66 @@ func TestMihomoInvariants_ControllerQuotedScalarsStillPass(t *testing.T) {
 	cfg := goldenMihomoConfig()
 	cfg = strings.Replace(cfg, `external-controller: ""`, `external-controller: ''`, 1)
 	cfg = strings.Replace(cfg, "external-controller-tls: 127.0.0.1:9090", `external-controller-tls: "127.0.0.1:9090"`, 1)
-	cfg = strings.Replace(cfg, "certificate: /etc/5gpn/cert/zash/fullchain.pem", "certificate: '/etc/5gpn/cert/zash/fullchain.pem'", 1)
-	cfg = strings.Replace(cfg, "private-key: /etc/5gpn/cert/zash/privkey.pem", `private-key: "/etc/5gpn/cert/zash/privkey.pem"`, 1)
+	cfg = strings.Replace(cfg, "certificate: /etc/5gpn/cert/zash/current/fullchain.pem", "certificate: '/etc/5gpn/cert/zash/current/fullchain.pem'", 1)
+	cfg = strings.Replace(cfg, "private-key: /etc/5gpn/cert/zash/current/privkey.pem", `private-key: "/etc/5gpn/cert/zash/current/privkey.pem"`, 1)
 
 	if err := ValidateInvariants(cfg, goldenInfraParams()); err != nil {
 		t.Fatalf("quoted controller scalars should still pass: %v", err)
+	}
+}
+
+func TestMihomoInvariants_FlowStyleTLSStillPasses(t *testing.T) {
+	cfg := strings.Replace(goldenMihomoConfig(),
+		"tls:\n  certificate: /etc/5gpn/cert/zash/current/fullchain.pem\n  private-key: /etc/5gpn/cert/zash/current/privkey.pem\n",
+		"tls: {certificate: /etc/5gpn/cert/zash/current/fullchain.pem, private-key: /etc/5gpn/cert/zash/current/privkey.pem}\n", 1)
+	if err := ValidateInvariants(cfg, goldenInfraParams()); err != nil {
+		t.Fatalf("flow-style TLS map should remain valid: %v", err)
+	}
+}
+
+func TestMihomoInvariants_RejectsStructuralDecoys(t *testing.T) {
+	cfg := strings.Replace(goldenMihomoConfig(),
+		"  - {name: gateway, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: 127.0.0.1:443}\n",
+		"", 1)
+	cfg += "\ndecoy:\n  type: tunnel\n  port: 443\n  target: 127.0.0.1:443\n"
+
+	err := ValidateInvariants(cfg, goldenInfraParams())
+	var missing *ErrMissingInfra
+	if !errors.As(err, &missing) || missing.Name != "gateway-inbound" {
+		t.Fatalf("nested listener decoy error = %v, want gateway-inbound", err)
+	}
+}
+
+func TestMihomoInvariants_RejectsInvalidYAMLDocuments(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+	}{
+		{
+			name: "duplicate top-level key",
+			text: strings.Replace(goldenMihomoConfig(), "secret: s3cr3t\n", "secret: s3cr3t\nsecret: attacker\n", 1),
+		},
+		{
+			name: "duplicate nested key",
+			text: strings.Replace(goldenMihomoConfig(),
+				"  certificate: /etc/5gpn/cert/zash/current/fullchain.pem\n",
+				"  certificate: /etc/5gpn/cert/zash/current/fullchain.pem\n  certificate: /tmp/decoy.pem\n", 1),
+		},
+		{
+			name: "multiple documents",
+			text: goldenMihomoConfig() + "\n---\nsecret: attacker\n",
+		},
+		{
+			name: "malformed yaml",
+			text: goldenMihomoConfig() + "\nbroken: [\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateInvariants(tc.text, goldenInfraParams())
+			if err == nil || !strings.Contains(err.Error(), "invalid mihomo YAML") {
+				t.Fatalf("error = %v, want invalid mihomo YAML", err)
+			}
+		})
 	}
 }
 
@@ -133,21 +188,14 @@ func TestMihomoInvariants_MissingElement(t *testing.T) {
 		{
 			name: "controller certificate changed",
 			mutate: func(cfg string) string {
-				return strings.Replace(cfg, "/etc/5gpn/cert/zash/fullchain.pem", "/tmp/controller.pem", 1)
+				return strings.Replace(cfg, "/etc/5gpn/cert/zash/current/fullchain.pem", "/tmp/controller.pem", 1)
 			},
 			wantName: "controller",
 		},
 		{
 			name: "controller private key changed",
 			mutate: func(cfg string) string {
-				return strings.Replace(cfg, "/etc/5gpn/cert/zash/privkey.pem", "/tmp/controller.key", 1)
-			},
-			wantName: "controller",
-		},
-		{
-			name: "duplicate TLS controller key rejected",
-			mutate: func(cfg string) string {
-				return strings.Replace(cfg, "secret: s3cr3t\n", "external-controller-tls: 127.0.0.1:9090\nsecret: s3cr3t\n", 1)
+				return strings.Replace(cfg, "/etc/5gpn/cert/zash/current/privkey.pem", "/tmp/controller.key", 1)
 			},
 			wantName: "controller",
 		},
@@ -155,17 +203,8 @@ func TestMihomoInvariants_MissingElement(t *testing.T) {
 			name: "nested TLS decoy rejected",
 			mutate: func(cfg string) string {
 				return strings.Replace(cfg,
-					"tls:\n  certificate: /etc/5gpn/cert/zash/fullchain.pem\n  private-key: /etc/5gpn/cert/zash/privkey.pem\n",
-					"tls:\n  nested:\n    certificate: /etc/5gpn/cert/zash/fullchain.pem\n    private-key: /etc/5gpn/cert/zash/privkey.pem\n", 1)
-			},
-			wantName: "controller",
-		},
-		{
-			name: "flow-style TLS substitution rejected",
-			mutate: func(cfg string) string {
-				return strings.Replace(cfg,
-					"tls:\n  certificate: /etc/5gpn/cert/zash/fullchain.pem\n  private-key: /etc/5gpn/cert/zash/privkey.pem\n",
-					"tls: { certificate: /etc/5gpn/cert/zash/fullchain.pem, private-key: /etc/5gpn/cert/zash/privkey.pem }\n", 1)
+					"tls:\n  certificate: /etc/5gpn/cert/zash/current/fullchain.pem\n  private-key: /etc/5gpn/cert/zash/current/privkey.pem\n",
+					"tls:\n  nested:\n    certificate: /etc/5gpn/cert/zash/current/fullchain.pem\n    private-key: /etc/5gpn/cert/zash/current/privkey.pem\n", 1)
 			},
 			wantName: "controller",
 		},

@@ -224,19 +224,25 @@ verify_bundle_digest() { # verify_bundle_digest <bundle> <checksums.txt>
 
 archive_is_safe() {
     local archive="$1" names verbose entry normalized line first
+    declare -A seen=()
     names="$(tar -tzf "$archive" 2>/dev/null)" || { red "Bundle is not a valid archive."; return 1; }
     verbose="$(tar -tvzf "$archive" 2>/dev/null)" || return 1
 
     while IFS= read -r entry; do
         normalized="$entry"
         while [[ "$normalized" == ./* ]]; do normalized="${normalized#./}"; done
+        normalized="${normalized%/}"
         [[ -z "$normalized" ]] && continue
         [[ "$normalized" != /* ]] || { red "Bundle contains an absolute path."; return 1; }
+        [[ "$normalized" != *'\'* ]] || { red "Bundle contains a backslash path."; return 1; }
         case "/$normalized/" in
             */../*) red "Bundle contains a parent-directory path."; return 1 ;;
         esac
         [[ "$normalized" != "$SOURCE_MARKER" && "$normalized" != "$WORK_MARKER" ]] \
             || { red "Bundle attempts to replace an ownership marker."; return 1; }
+        [[ -z "${seen[$normalized]+x}" ]] \
+            || { red "Bundle contains a duplicate path."; return 1; }
+        seen[$normalized]=1
     done <<< "$names"
 
     # Installer bundles contain only directories and ordinary files. Refusing
@@ -257,6 +263,8 @@ validate_stage() {
     [[ ! -e "$stage/$SOURCE_MARKER" && ! -L "$stage/$SOURCE_MARKER" ]] || return 1
     [[ -f "$stage/install.sh" && ! -L "$stage/install.sh" ]] || return 1
     [[ -z "$(find "$stage" -path "$stage/.git" -prune -o -type l -print -quit 2>/dev/null)" ]] || return 1
+    [[ -z "$(find "$stage" -mindepth 1 ! -type f ! -type d -print -quit 2>/dev/null)" ]] || return 1
+    [[ -z "$(find "$stage" -mindepth 1 -type f -links +1 -print -quit 2>/dev/null)" ]] || return 1
 }
 
 publish_stage() {
@@ -302,7 +310,8 @@ fetch_bundle() { # fetch_bundle <repo> <release-tag>; 10=asset absent, 20=hard f
     fi
     archive_is_safe "$tgz" || { rm -f -- "$tgz" "$checksums"; return 20; }
     stage="$(make_work_dir)" || { rm -f -- "$tgz" "$checksums"; return 20; }
-    if ! tar --no-same-owner --no-same-permissions -xzf "$tgz" -C "$stage"; then
+    if ! tar --no-same-owner --no-same-permissions --delay-directory-restore \
+        -xzf "$tgz" -C "$stage"; then
         red "Could not safely extract the installer bundle."
         rm -f -- "$tgz" "$checksums"
         remove_work_dir "$stage" || true
@@ -314,39 +323,6 @@ fetch_bundle() { # fetch_bundle <repo> <release-tag>; 10=asset absent, 20=hard f
         return 20
     fi
     remove_work_dir "$stage" || { red "Could not clean the installer staging directory."; return 20; }
-}
-
-stamp_installer_version() {
-    local installer="$1" tag="$2" tmp count
-    valid_release_tag "$tag" || return 1
-    [[ -f "$installer" && ! -L "$installer" ]] || return 1
-    count="$(grep -c '^DNS_VERSION_DEFAULT=' "$installer" || true)"
-    [[ "$count" == 1 ]] || return 1
-    tmp="${installer}.stamp.$$"
-    sed "s/^DNS_VERSION_DEFAULT=.*/DNS_VERSION_DEFAULT=\"${tag}\"/" "$installer" > "$tmp" || return 1
-    chmod "$(stat -c %a "$installer" 2>/dev/null || stat -f %Lp "$installer")" "$tmp" 2>/dev/null || chmod 755 "$tmp"
-    mv -- "$tmp" "$installer"
-    grep -Fqx "DNS_VERSION_DEFAULT=\"${tag}\"" "$installer"
-}
-
-fetch_git() { # fetch_git <repo> <the already-resolved release-tag>
-    local repo="$1" tag="$2" stage
-    valid_release_tag "$tag" || return 1
-    command -v git >/dev/null 2>&1 || { red "git unavailable for the release-tag fallback."; return 1; }
-    stage="$(make_work_dir)" || return 1
-    info "Bundle asset unavailable; checking out the same release tag ${tag}..."
-    git -C "$stage" init -q \
-        && git -C "$stage" remote add origin "$repo" \
-        && git -C "$stage" fetch -q --depth=1 origin "refs/tags/${tag}:refs/tags/${tag}" \
-        && git -C "$stage" checkout -q --detach "refs/tags/${tag}" \
-        || { red "Release tag ${tag} is unavailable; refusing to use a branch."; remove_work_dir "$stage" || true; return 1; }
-    stamp_installer_version "$stage/install.sh" "$tag" \
-        || { red "Could not bind the fallback installer to release ${tag}."; remove_work_dir "$stage" || true; return 1; }
-    if ! publish_stage "$stage"; then
-        remove_work_dir "$stage" || true
-        return 1
-    fi
-    remove_work_dir "$stage" || { red "Could not clean the installer staging directory."; return 1; }
 }
 
 main() {
@@ -367,9 +343,8 @@ main() {
             red "Release installer verification failed; aborting."
             return 1
         fi
-        fetch_git "$RELEASE_REPO" "$release_tag" \
-            || { red "Could not obtain release ${release_tag}."; return 1; }
-        green "Release-tag installer ready at ${_QI_SOURCE_DIR}."
+        red "The verified installer bundle for release ${release_tag} is unavailable; refusing an unsigned source fallback."
+        return 1
     fi
 
     install="${_QI_SOURCE_DIR}/install.sh"

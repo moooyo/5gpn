@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"testing"
 )
 
@@ -23,8 +22,8 @@ func TestTGBotConfig_SaveLoadRoundtrip(t *testing.T) {
 		t.Fatalf("SaveTGBot: %v", err)
 	}
 
-	// 0600 — the file holds a secret. Windows perms are emulated differently.
-	if runtime.GOOS != "windows" {
+	// 0600 — the file holds a secret when the filesystem enforces POSIX modes.
+	if filesystemSupportsPOSIXModes(t, filepath.Dir(f)) {
 		fi, err := os.Stat(f)
 		if err != nil {
 			t.Fatalf("stat: %v", err)
@@ -47,6 +46,21 @@ func TestTGBotConfig_SaveLoadRoundtrip(t *testing.T) {
 	}
 	if out.Version != tgbotSchemaVersion {
 		t.Errorf("version = %d, want %d", out.Version, tgbotSchemaVersion)
+	}
+}
+
+func TestLoadTGBotRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.json")
+	link := filepath.Join(dir, "tgbot.json")
+	if err := os.WriteFile(target, []byte(`{"version":1,"token":"secret","admins":[1]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := LoadTGBot(link); err == nil {
+		t.Fatal("LoadTGBot accepted a symlink")
 	}
 }
 

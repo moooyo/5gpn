@@ -1,0 +1,38 @@
+# 5gpn-unit-id: 5gpn-journal@.service:v1
+[Unit]
+Description=Export a bounded journal tail for 5gpn %i
+
+[Service]
+Type=oneshot
+User=root
+Group=gpn-dns
+ExecStart=/opt/5gpn/scripts/export-journal.sh %i
+UMask=0027
+RuntimeDirectory=5gpn-journal
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RemoveIPC=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/run/5gpn-journal
+InaccessiblePaths=-/etc/5gpn/acme -/etc/5gpn/dns.env

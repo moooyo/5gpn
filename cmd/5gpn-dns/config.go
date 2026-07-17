@@ -4,12 +4,25 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+)
+
+const (
+	maxCacheEntries       = 1_000_000
+	maxInflightQueries    = 65_536
+	maxConfiguredTTL      = 30 * 24 * time.Hour
+	minQueryTimeout       = 100 * time.Millisecond
+	maxQueryTimeout       = time.Minute
+	minHeartbeatInterval  = 10 * time.Second
+	maxHeartbeatInterval  = 24 * time.Hour
+	maxConfiguredAPIRate  = 100_000
+	maxConfiguredAPIBurst = 10_000
 )
 
 // TrustEntry describes a single trust upstream. Two spec forms:
@@ -275,7 +288,28 @@ func LoadConfig() (Config, error) {
 		ZashKeyFile:       os.Getenv("DNS_ZASH_KEY"),
 	}
 	if err := validateTGBotProxyURL(cfg.TGBotProxyURL); err != nil {
-		return Config{}, fmt.Errorf("config: invalid TGBOT_PROXY_URL: %w", err)
+		// The bot is optional. Keep the invalid value so a later runtime token
+		// override still fails closed instead of silently bypassing the intended
+		// proxy, but disable the bootstrap bot rather than crash-looping DNS.
+		log.Printf("config: invalid TGBOT_PROXY_URL; disabling Telegram bot: %v", err)
+		cfg.TGBotToken = ""
+		cfg.TGBotAdmins = map[int64]bool{}
+	}
+	for key, addr := range map[string]string{
+		"DNS_LISTEN_DEBUG": cfg.ListenDebug,
+		"DNS_LISTEN_API":   cfg.ListenAPI,
+		"DNS_ZASH_LISTEN":  cfg.ZashListen,
+	} {
+		if addr != "" {
+			if err := validateLoopbackIPv4Addr(addr); err != nil {
+				return Config{}, fmt.Errorf("config: invalid %s %q: must be loopback IPv4: %w", key, addr, err)
+			}
+		}
+	}
+	if cfg.ListenDoT != "" {
+		if err := validateDoTAddr(cfg.ListenDoT); err != nil {
+			return Config{}, fmt.Errorf("config: invalid DNS_LISTEN_DOT %q: %w", cfg.ListenDoT, err)
+		}
 	}
 	cfg.BaseDomain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(cfg.BaseDomain)), ".")
 	if cfg.BaseDomain != "" {
@@ -290,13 +324,10 @@ func LoadConfig() (Config, error) {
 	// Gateway IP.
 	if raw := os.Getenv("DNS_GATEWAY_IP"); raw != "" {
 		ip := net.ParseIP(raw)
-		if ip == nil {
-			return Config{}, fmt.Errorf("config: invalid DNS_GATEWAY_IP %q", raw)
+		if ip == nil || ip.To4() == nil {
+			return Config{}, fmt.Errorf("config: invalid DNS_GATEWAY_IP %q (must be IPv4)", raw)
 		}
 		cfg.GatewayIP = ip.To4()
-		if cfg.GatewayIP == nil {
-			cfg.GatewayIP = ip
-		}
 	}
 
 	// China upstreams.
@@ -368,17 +399,22 @@ func LoadConfig() (Config, error) {
 	// TTL clamping (seconds).
 	cfg.TTLMin = envSecondsOr("DNS_TTL_MIN", 300)
 	cfg.TTLMax = envSecondsOr("DNS_TTL_MAX", 86400)
+	if cfg.TTLMin > cfg.TTLMax {
+		log.Printf("config: DNS_TTL_MIN %s exceeds DNS_TTL_MAX %s, using defaults", cfg.TTLMin, cfg.TTLMax)
+		cfg.TTLMin = 300 * time.Second
+		cfg.TTLMax = 86400 * time.Second
+	}
 
 	// Query timeout (Go duration string).
 	cfg.QueryTimeout = envDurationOr("DNS_QUERY_TIMEOUT", 5*time.Second)
 
 	// Outbound liveness heartbeat (dead-man's switch; see Config.HeartbeatURL).
 	// Only http/https URLs are honoured; anything else is warned + ignored.
-	if raw := os.Getenv("DNS_HEARTBEAT_URL"); raw != "" {
-		if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+	if raw := strings.TrimSpace(os.Getenv("DNS_HEARTBEAT_URL")); raw != "" {
+		if err := validateHeartbeatURL(raw); err == nil {
 			cfg.HeartbeatURL = raw
 		} else {
-			log.Printf("config: ignoring DNS_HEARTBEAT_URL %q (must start with http:// or https://)", raw)
+			log.Printf("config: ignoring invalid DNS_HEARTBEAT_URL: %v", err)
 		}
 	}
 	cfg.HeartbeatInterval = envDurationOr("DNS_HEARTBEAT_INTERVAL", 60*time.Second)
@@ -405,7 +441,7 @@ func LoadConfig() (Config, error) {
 	const defaultAPIRate = 20
 	cfg.APIRate = defaultAPIRate
 	if raw := os.Getenv("DNS_API_RATE"); raw != "" {
-		if n, err := strconv.ParseFloat(raw, 64); err == nil {
+		if n, err := strconv.ParseFloat(raw, 64); err == nil && !math.IsNaN(n) && !math.IsInf(n, 0) && n <= maxConfiguredAPIRate {
 			cfg.APIRate = n
 		} else {
 			log.Printf("config: invalid DNS_API_RATE %q, using default %v", raw, defaultAPIRate)
@@ -416,7 +452,7 @@ func LoadConfig() (Config, error) {
 	const defaultAPIBurst = 40
 	cfg.APIBurst = defaultAPIBurst
 	if raw := os.Getenv("DNS_API_BURST"); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil {
+		if n, err := strconv.Atoi(raw); err == nil && n <= maxConfiguredAPIBurst {
 			cfg.APIBurst = n
 		} else {
 			log.Printf("config: invalid DNS_API_BURST %q, using default %d", raw, defaultAPIBurst)
@@ -471,6 +507,41 @@ func validateTGBotProxyURL(raw string) error {
 	}
 	if u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("query and fragment are not allowed")
+	}
+	return nil
+}
+
+func validateHeartbeatURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return errors.New("URL cannot be parsed")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("scheme must be http or https")
+	}
+	if u.Hostname() == "" {
+		return errors.New("host is required")
+	}
+	if u.User != nil {
+		return errors.New("userinfo is not allowed")
+	}
+	return nil
+}
+
+func validateDoTAddr(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("must be host:port: %w", err)
+	}
+	if port != "853" {
+		return fmt.Errorf("port must be 853")
+	}
+	if host == "" {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.To4() == nil {
+		return errors.New("host must be an IPv4 literal or empty wildcard")
 	}
 	return nil
 }
@@ -564,7 +635,11 @@ func envIntOr(key string, def int) int {
 		return def
 	}
 	n, err := strconv.Atoi(raw)
-	if err != nil || n < 0 {
+	max := maxCacheEntries
+	if key == "DNS_MAX_INFLIGHT" {
+		max = maxInflightQueries
+	}
+	if err != nil || n < 0 || n > max {
 		log.Printf("config: invalid %s %q, using default %d", key, raw, def)
 		return def
 	}
@@ -579,10 +654,11 @@ func envSecondsOr(key string, def int) time.Duration {
 	if raw == "" {
 		return time.Duration(def) * time.Second
 	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 0 {
+	n, err := strconv.ParseInt(raw, 10, 64)
+	maxSeconds := int64(maxConfiguredTTL / time.Second)
+	if err != nil || n < 0 || n > maxSeconds {
 		log.Printf("config: invalid %s %q, using default %ds", key, raw, def)
-		n = def
+		return time.Duration(def) * time.Second
 	}
 	return time.Duration(n) * time.Second
 }
@@ -596,7 +672,14 @@ func envDurationOr(key string, def time.Duration) time.Duration {
 		return def
 	}
 	d, err := time.ParseDuration(raw)
-	if err != nil || d < 0 {
+	min, max := time.Duration(0), time.Duration(1<<63-1)
+	switch key {
+	case "DNS_QUERY_TIMEOUT":
+		min, max = minQueryTimeout, maxQueryTimeout
+	case "DNS_HEARTBEAT_INTERVAL":
+		min, max = minHeartbeatInterval, maxHeartbeatInterval
+	}
+	if err != nil || d < min || d > max {
 		log.Printf("config: invalid %s %q, using default %s", key, raw, def)
 		return def
 	}

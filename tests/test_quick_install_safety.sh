@@ -170,8 +170,13 @@ fetch_bundle https://fixture.invalid 9.8.7 >/dev/null 2>&1
     || fail "bundle without checksums did not hard-fail"
 DL_MODE=missing_bundle
 fetch_bundle https://fixture.invalid 9.8.7 >/dev/null 2>&1
-[[ "$?" == 10 ]] && pass "only an absent bundle is eligible for tag fallback" \
-    || fail "absent bundle did not return the fallback-only status"
+[[ "$?" == 10 ]] && pass "an absent bundle is reported distinctly and still fails closed" \
+    || fail "absent bundle did not return the bundle-missing status"
+if ! grep -Eq '^fetch_git\(\)|git -C .*fetch|git -C .*checkout' "$QUICK"; then
+    pass "missing bundles cannot fall back to unsigned git content"
+else
+    fail "quick installer still contains an unsigned git fallback"
+fi
 
 # Archive validation rejects ownership-marker links before extraction and uses
 # no-same-owner extraction for ordinary bundles.
@@ -185,52 +190,6 @@ if [[ "$?" != 0 ]] && grep -Fq -- '--no-same-owner --no-same-permissions' "$QUIC
     pass "archive links/markers are rejected and extraction drops stored ownership"
 else
     fail "unsafe archive validation or extraction ownership gate is missing"
-fi
-
-# The git release fallback fetches only the already-resolved tag, stamps that
-# tag into install.sh, and leaves the source untouched when the tag is absent.
-repo="$TMP/repo"
-git init -q "$repo"
-git -C "$repo" config user.name 5gpn-test
-git -C "$repo" config user.email 5gpn-test@example.invalid
-printf '#!/usr/bin/env bash\nDNS_VERSION_DEFAULT="unstamped"\n' > "$repo/install.sh"
-echo branch > "$repo/branch-only"
-git -C "$repo" add install.sh branch-only
-git -C "$repo" commit -qm fixture
-git -C "$repo" tag 9.8.7
-
-git_target="$TMP/git-target"
-prepare_source_dir "$git_target" >/dev/null 2>&1
-fetch_git "$repo" 9.8.7 >/dev/null 2>&1
-if [[ "$?" == 0 ]] \
-   && grep -Fqx 'DNS_VERSION_DEFAULT="9.8.7"' "$_QI_SOURCE_DIR/install.sh"; then
-    pass "git fallback checks out and stamps the exact resolved tag"
-else
-    fail "git fallback did not bind install.sh to the resolved tag"
-fi
-
-missing_target="$TMP/missing-tag-target"
-prepare_source_dir "$missing_target" >/dev/null 2>&1
-echo keep > "$_QI_SOURCE_DIR/keep"
-fetch_git "$repo" 0.0.0 >/dev/null 2>&1
-if [[ "$?" != 0 && -f "$_QI_SOURCE_DIR/keep" && ! -e "$_QI_SOURCE_DIR/branch-only" ]]; then
-    pass "missing tag never falls back to the repository branch"
-else
-    fail "missing tag fallback modified source or used a branch"
-fi
-
-ln -s "$outside" "$repo/$SOURCE_MARKER"
-git -C "$repo" add "$SOURCE_MARKER"
-git -C "$repo" commit -qm unsafe-marker
-git -C "$repo" tag 9.8.8
-linked_git_target="$TMP/linked-git-target"
-prepare_source_dir "$linked_git_target" >/dev/null 2>&1
-echo keep > "$_QI_SOURCE_DIR/keep"
-fetch_git "$repo" 9.8.8 >/dev/null 2>&1
-if [[ "$?" != 0 && -f "$_QI_SOURCE_DIR/keep" && "$(cat "$outside")" == untouched ]]; then
-    pass "git checkout cannot publish or follow an ownership-marker symlink"
-else
-    fail "git marker symlink escaped staging or modified the source"
 fi
 
 echo "----"

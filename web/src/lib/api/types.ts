@@ -28,10 +28,6 @@ export interface CertStatus {
 // `zash_domain` mirrors cfg.ZashDomain. The console uses it for the zashboard
 // deep link instead of deriving a domain from location.host. It is omitted
 // when the operator has not configured a zashboard panel.
-// `mihomo_secret` is the controller secret, exposed ONLY on
-// the token-gated /api/status response — it feeds the zashboard deep-link's
-// `secret=` parameter so an authenticated console admin can open zashboard.
-// It is omitted if unset.
 export interface Status {
   version: string
   uptime_seconds: number
@@ -39,7 +35,11 @@ export interface Status {
   cert?: CertStatus
   dot_domain?: string
   zash_domain?: string
-  mihomo_secret?: string
+}
+
+export interface ZashboardHandoff {
+  url: string
+  expires_in_seconds: number
 }
 
 export interface QueryLogEntry {

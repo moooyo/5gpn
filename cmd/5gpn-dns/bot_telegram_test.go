@@ -159,6 +159,21 @@ func TestTelegramHTTPClientUsesDedicatedProxy(t *testing.T) {
 	}
 }
 
+func TestTelegramHTTPClientDoesNotUseAmbientProxy(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:65534")
+	client, err := newTGBotHTTPClient("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T", client.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("empty TGBOT_PROXY_URL inherited an ambient proxy")
+	}
+}
+
 func privateCallback(data string) *models.Update {
 	return &models.Update{CallbackQuery: &models.CallbackQuery{
 		ID:   "callback-id",

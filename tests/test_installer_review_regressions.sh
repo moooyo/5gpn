@@ -73,6 +73,14 @@ if grep -Fq '5gpn-certbot-renew.timer.enabled' <<<"$capture_fn" \
 else
     fail "certificate timer state is lost across a failed mode switch"
 fi
+if grep -Fq 'ROLLBACK_DIR/polkit/50-5gpn.rules' <<<"$capture_fn" \
+   && grep -Fq 'ROLLBACK_DIR/polkit/50-5gpn.rules' <<<"$rollback_fn" \
+   && grep -Fq '50-5gpn.rules.absent' <<<"$rollback_fn" \
+   && grep -Fq 'polkit_rule_owned_by_5gpn' <<<"$rollback_fn"; then
+    pass "rollback restores the exact prior 5gpn polkit rule or its absence"
+else
+    fail "failed publication can leave a new or changed polkit authorization behind"
+fi
 
 ic="$(sed -n '/^install_cert()/,/^}/p' "$INSTALL")"
 grep -Fq 'validate_cert_pair' <<<"$ic" \
@@ -164,6 +172,28 @@ if command -v openssl >/dev/null 2>&1; then
     else
         fail "test OpenSSL cannot generate an HTTP-01 SAN certificate"
     fi
+
+    # A later-role staging failure must remove every earlier unpublished
+    # generation and temporary current link. The live role remains absent.
+    cert_failure_root="$(mktemp -d)"
+    DEBUG_CERT_DIR="$cert_failure_root/debug-cert"
+    DNS_CERT_DIR="$cert_failure_root/cert"
+    DNS_SERVICE_USER="$(id -gn)"
+    MIHOMO_SERVICE_USER="$DNS_SERVICE_USER"
+    mkdir -p "$DEBUG_CERT_DIR/example.com" "$DNS_CERT_DIR"
+    cp "$cert_tmp/cert.pem" "$DEBUG_CERT_DIR/example.com/fullchain.pem"
+    cp "$cert_tmp/key.pem" "$DEBUG_CERT_DIR/example.com/privkey.pem"
+    touch "$DNS_CERT_DIR/web"
+    if deploy_cert_roles example.com "$DEBUG_CERT_DIR/example.com" debug >/dev/null 2>&1; then
+        fail "certificate deployment succeeded despite an invalid later role path"
+    elif find "$DNS_CERT_DIR/dot" -mindepth 1 \
+            \( -name '.current.*' -o -name '.new.*' -o -name 'generation-*' -o -name current \) \
+            -print -quit 2>/dev/null | grep -q .; then
+        fail "failed certificate staging left an unpublished generation or link"
+    else
+        pass "failed certificate staging cleans every unpublished generation and link"
+    fi
+    rm -rf -- "$cert_failure_root"
     rm -rf -- "$cert_tmp"
 fi
 
@@ -177,7 +207,7 @@ ACME_DIR="$cert_state_tmp/acme"
 LE_LIVE_ROOT="$cert_state_tmp/letsencrypt/live"
 LE_ARCHIVE_ROOT="$cert_state_tmp/letsencrypt/archive"
 LE_RENEWAL_ROOT="$cert_state_tmp/letsencrypt/renewal"
-mkdir -p "$DOT_CERT_DIR" "$LE_LIVE_ROOT/example.com" "$LE_ARCHIVE_ROOT" "$LE_RENEWAL_ROOT"
+mkdir -p "$DOT_CERT_DIR/current" "$LE_LIVE_ROOT/example.com" "$LE_ARCHIVE_ROOT" "$LE_RENEWAL_ROOT"
 
 write_cert_provenance cloudflare example.com reused
 if certbot_lineage_owned_by_5gpn example.com; then
@@ -212,10 +242,10 @@ grep -qx -- 'delete --non-interactive --cert-name example.com' "$certbot_log" \
 rm -rf -- "$LE_LIVE_ROOT/example.com"
 rm -rf -- "$LE_ARCHIVE_ROOT/example.com"
 rm -f -- "$LE_RENEWAL_ROOT/example.com.conf"
-touch "$DOT_CERT_DIR/fullchain.pem" "$DOT_CERT_DIR/privkey.pem"
+touch "$DOT_CERT_DIR/current/fullchain.pem" "$DOT_CERT_DIR/current/privkey.pem"
 : > "$certbot_log"
 reuse_log="$cert_state_tmp/reuse.log"
-validate_cert_pair() { [[ "$1" == "$DOT_CERT_DIR/fullchain.pem" ]]; }
+validate_cert_pair() { [[ "$1" == "$DOT_CERT_DIR/current/fullchain.pem" ]]; }
 deploy_cert_roles() { printf 'deploy:%s:%s\n' "$1" "${2:-}" >> "$reuse_log"; }
 remove_owned_renew_hook() { printf '%s\n' hook-removed >> "$reuse_log"; }
 remove_owned_renewal_automation() { printf '%s\n' units-removed >> "$reuse_log"; }
@@ -223,7 +253,7 @@ ensure_cf_token() { printf '%s\n' token-requested >> "$reuse_log"; return 1; }
 write_cert_provenance cloudflare example.com reused
 CERT_MODE=cloudflare
 if install_cert example.com >/dev/null \
-   && grep -qx "deploy:example.com:${DOT_CERT_DIR}" "$reuse_log" \
+   && grep -qx "deploy:example.com:${DOT_CERT_DIR}/current" "$reuse_log" \
    && grep -qx 'units-removed' "$reuse_log" \
    && [[ "$(cert_provenance_get certbot_lineage)" == missing ]] \
    && ! grep -q 'token-requested' "$reuse_log" \

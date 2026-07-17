@@ -7,13 +7,16 @@ name: Checks
 on:
   workflow_call:
 
+permissions:
+  contents: read
+
 jobs:
   # Zero-dependency shell gate: every operator-facing entrypoint must parse
   # (bash -n) and pass the pure-grep policy tests (no Python / Go / node needed).
   shell:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: bash -n syntax gate
         run: |
           set -euo pipefail
@@ -36,8 +39,8 @@ jobs:
       run:
         working-directory: cmd/5gpn-dns
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: cmd/5gpn-dns/go.mod
           cache-dependency-path: cmd/5gpn-dns/go.sum
@@ -50,6 +53,8 @@ jobs:
           fi
       - name: go vet
         run: go vet ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
       - name: go test -race
         run: go test -race ./...
 
@@ -64,8 +69,8 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -90,7 +95,7 @@ jobs:
       MIHOMO_VERSION: v1.19.28
       MIHOMO_SHA256: 70d01cfb8cb7bf7a92fd1af16cb4b9553d90bb4eecde3b5c4849103e27c80ddb
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Download pinned mihomo
         run: |
           set -euo pipefail

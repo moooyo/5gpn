@@ -14,6 +14,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 # One in-flight run per ref; a newer push cancels the older run.
 concurrency:
   group: ci-${{ github.ref }}

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	crand "crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/base64"
@@ -12,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -22,6 +24,12 @@ import (
 )
 
 const mihomoControllerUnavailableMsg = "mihomo controller unavailable"
+
+const (
+	panelReadHeaderTimeout = 10 * time.Second
+	panelIdleTimeout       = 90 * time.Second
+	panelMaxHeaderBytes    = 64 << 10
+)
 
 // version identifies the running build for GET /api/status. Release builds stamp
 // it via -ldflags "-X main.version=..." (see .github/workflows/release.yml); the
@@ -84,13 +92,6 @@ type ControlServer struct {
 	// zashboard panel without scraping location.host. Empty when unconfigured.
 	zashDomain string
 
-	// mihomoSecret mirrors cfg.MihomoSecret (DNS_MIHOMO_SECRET), surfaced on
-	// the token-gated GET /api/status so an authenticated
-	// console admin's "前往 zash" deep-link can carry it (URL-encoded) and
-	// auto-auth into zashboard's pass-through /proxy/ mount. Never exposed
-	// anywhere unauthenticated.
-	mihomoSecret string
-
 	// Mihomo raw-config editor (api_mihomo_config.go). Wired post-construction
 	// via SetMihomoConfig; nil store means the
 	// /api/mihomo/config* endpoints report unavailable (503) rather than
@@ -112,6 +113,14 @@ type ControlServer struct {
 	// request is forwarded to mihomo and is never accepted for another path.
 	mihomoLogTicketsMu sync.Mutex
 	mihomoLogTickets   map[string]time.Time
+
+	// An authenticated console request mints a one-use zashboard handoff ticket.
+	// The zash origin consumes it, sets a host-only HttpOnly session cookie, and
+	// injects the controller credential server-side for that session. The
+	// controller secret never enters browser JavaScript, URLs, or localStorage.
+	zashAuthMu         sync.Mutex
+	zashHandoffTickets map[[32]byte]time.Time
+	zashSessions       map[[32]byte]time.Time
 
 	// mihomoAppliedAt is the last time a PUT/reset successfully hot-applied a
 	// config (in-memory only; a restart forgets it). Guarded by
@@ -144,14 +153,13 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 	}
 
 	s := &ControlServer{
-		ctrl:         ctrl,
-		token:        cfg.APIToken,
-		startTime:    time.Now(),
-		limiter:      newRateLimiter(cfg.APIRate, cfg.APIBurst),
-		dotDomain:    cfg.DotDomain,
-		zashDomain:   cfg.ZashDomain,
-		mihomoSecret: cfg.MihomoSecret,
-		mihomoProxy:  unavailableMihomoProxy(),
+		ctrl:        ctrl,
+		token:       cfg.APIToken,
+		startTime:   time.Now(),
+		limiter:     newRateLimiter(cfg.APIRate, cfg.APIBurst),
+		dotDomain:   cfg.DotDomain,
+		zashDomain:  cfg.ZashDomain,
+		mihomoProxy: unavailableMihomoProxy(),
 	}
 
 	webUI, err := newWebUIHandler(cfg.WebDir)
@@ -166,13 +174,17 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 			log.Printf("warning: control server: mihomo controller TLS unavailable: %v -- /api/mihomo/health and /proxy/* fail closed until DNS_BASE_DOMAIN, the zash role certificate, and loopback controller settings are valid", transportErr)
 		} else {
 			mihomoTransport = transport
-			s.mihomoProxy = newMihomoProxy(cfg.ZashDomain, cfg.MihomoSecret, "/proxy", true, mihomoTransport)
+			s.mihomoProxy = newMihomoProxy(cfg.ZashDomain, cfg.MihomoSecret, "/proxy", mihomoTransport)
 		}
 	}
 
 	ios := http.StripPrefix("/ios", iosHandler(cfg.WWWDir))
 	mux := http.NewServeMux()
-	mux.Handle("/api/", s.rateLimitMiddleware(s.auditMiddleware(s.authMiddleware(s.apiMux()))))
+	// Audit every mutation, authenticate before touching the administrator's
+	// shared limiter bucket, then rate-limit authenticated API work. Mihomo's
+	// loopback tunnel does not carry PROXY protocol, so public callers must not
+	// be able to drain a bucket keyed by the tunnel's loopback source address.
+	mux.Handle("/api/", s.auditMiddleware(s.authMiddleware(s.rateLimitMiddleware(s.apiMux()))))
 	// iOS .mobileconfig distribution is public,
 	// token-free — the profile carries no secrets (just the DoT hostname), and
 	// an iPhone must be able to fetch it before it is configured for anything.
@@ -194,15 +206,16 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 			return nil, fmt.Errorf("control server: zash: %w", err)
 		}
 
-		// Pass-through proxy (inject=false): forwards the browser's own
-		// Authorization unchanged instead of injecting the secret.
+		// A valid HttpOnly zash session gates the full controller proxy. The
+		// daemon injects the controller secret only after that gate.
 		zashProxy := unavailableMihomoProxy()
 		if mihomoTransport != nil {
-			zashProxy = newMihomoProxy(cfg.ZashDomain, cfg.MihomoSecret, "/proxy", false, mihomoTransport)
+			zashProxy = newMihomoProxy(cfg.ZashDomain, cfg.MihomoSecret, "/proxy", mihomoTransport)
 		}
 
 		zmux := http.NewServeMux()
-		zmux.Handle("/proxy/", zashProxy)
+		zmux.HandleFunc("GET /handoff", s.handleZashHandoff)
+		zmux.Handle("/proxy/", s.zashSessionMiddleware(zashProxy))
 		zmux.Handle("/", zashUI)
 
 		s.zashSrv = buildPanelServer(cfg.ZashListen, zashSecurityHeadersMiddleware(zmux), zashCert, zashKey)
@@ -223,8 +236,11 @@ func unavailableMihomoProxy() http.Handler {
 // stack and which cert pair they present.
 func buildPanelServer(addr string, handler http.Handler, certFile, keyFile string) *http.Server {
 	return &http.Server{
-		Addr:    addr,
-		Handler: handler,
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: panelReadHeaderTimeout,
+		IdleTimeout:       panelIdleTimeout,
+		MaxHeaderBytes:    panelMaxHeaderBytes,
 		TLSConfig: &tls.Config{
 			GetCertificate: certGetter(certFile, keyFile),
 			MinVersion:     tls.VersionTLS12,
@@ -282,8 +298,8 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 // is deliberately more permissive than the console's: zashboard ships inline
 // styles, blob: workers, and may need wasm eval — the console's strict CSP would
 // break it. This is acceptable because the zash panel is loopback-bound +
-// allowlist-gated (mihomo :443), holds NO 5gpn bearer token (the mihomo secret
-// is injected by the /proxy/ reverse-proxy, never sent to the browser), so the
+// allowlist-gated (mihomo :443), holds NO 5gpn bearer or controller token (the
+// controller secret is injected only after an HttpOnly session gate), so the
 // strict-CSP token-theft threat model does not apply here. Exact directive set
 // is verified against the pinned zashboard on test-env (see A4 gate).
 func zashSecurityHeadersMiddleware(next http.Handler) http.Handler {
@@ -325,6 +341,7 @@ func (s *ControlServer) apiMux() http.Handler {
 	// because browser WebSocket handshakes cannot set Authorization headers.
 	mux.HandleFunc("GET /api/mihomo/health", s.handleMihomoHealth)
 	mux.HandleFunc("POST /api/mihomo/log-ticket", s.handleMihomoLogTicket)
+	mux.HandleFunc("POST /api/mihomo/zashboard-handoff", s.handleZashboardHandoffTicket)
 
 	mux.HandleFunc("GET /api/policy/rules", s.handlePolicyRulesList)
 	mux.HandleFunc("POST /api/policy/rules", s.handlePolicyRulesCreate)
@@ -344,12 +361,9 @@ func (s *ControlServer) apiMux() http.Handler {
 	return mux
 }
 
-// handleStatus reports build/runtime identity plus a stats snapshot. This
-// handler sits behind authMiddleware (see apiMux), so mihomo_secret — the
-// controller secret zashboard's pass-through /proxy/ mount requires (design
-// §5.2/§5.3) — is safe to include: only an authenticated console admin can
-// read it, and the frontend uses it solely to build the "前往 zash"
-// deep-link's URL-encoded secret= query param.
+// handleStatus reports build/runtime identity plus a stats snapshot. Controller
+// credentials are deliberately absent; zashboard access uses the separate
+// one-use handoff endpoint and an HttpOnly host session.
 func (s *ControlServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"version":        version,
@@ -364,9 +378,6 @@ func (s *ControlServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.zashDomain != "" {
 		resp["zash_domain"] = s.zashDomain
-	}
-	if s.mihomoSecret != "" {
-		resp["mihomo_secret"] = s.mihomoSecret
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -506,8 +517,179 @@ func (s *ControlServer) handleTGBotSet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.ctrl.GetTGBot())
 }
 
-const mihomoLogTicketTTL = 30 * time.Second
-const mihomoHealthTimeout = 2 * time.Second
+const (
+	mihomoLogTicketTTL  = 30 * time.Second
+	mihomoHealthTimeout = 2 * time.Second
+	zashHandoffTTL      = 30 * time.Second
+	zashSessionTTL      = 12 * time.Hour
+	zashAuthEntryLimit  = 512
+	zashSessionCookie   = "__Host-5gpn-zash"
+)
+
+func newBrowserCredential() (string, [32]byte, error) {
+	var raw [32]byte
+	if _, err := crand.Read(raw[:]); err != nil {
+		return "", [32]byte{}, err
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw[:])
+	return token, sha256.Sum256(raw[:]), nil
+}
+
+func browserCredentialDigest(token string) ([32]byte, bool) {
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil || len(raw) != 32 || base64.RawURLEncoding.EncodeToString(raw) != token {
+		return [32]byte{}, false
+	}
+	return sha256.Sum256(raw), true
+}
+
+func pruneBrowserCredentials(entries map[[32]byte]time.Time, now time.Time) {
+	for key, expires := range entries {
+		if !expires.After(now) {
+			delete(entries, key)
+		}
+	}
+	for len(entries) >= zashAuthEntryLimit {
+		var oldestKey [32]byte
+		var oldest time.Time
+		for key, expires := range entries {
+			if oldest.IsZero() || expires.Before(oldest) {
+				oldestKey, oldest = key, expires
+			}
+		}
+		delete(entries, oldestKey)
+	}
+}
+
+func (s *ControlServer) mintZashHandoff(now time.Time) (string, time.Time, error) {
+	token, digest, err := newBrowserCredential()
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	expires := now.Add(zashHandoffTTL)
+	s.zashAuthMu.Lock()
+	defer s.zashAuthMu.Unlock()
+	if s.zashHandoffTickets == nil {
+		s.zashHandoffTickets = make(map[[32]byte]time.Time)
+	}
+	pruneBrowserCredentials(s.zashHandoffTickets, now)
+	s.zashHandoffTickets[digest] = expires
+	return token, expires, nil
+}
+
+func (s *ControlServer) consumeZashHandoff(token string, now time.Time) bool {
+	digest, valid := browserCredentialDigest(token)
+	if !valid {
+		return false
+	}
+	s.zashAuthMu.Lock()
+	defer s.zashAuthMu.Unlock()
+	expires, ok := s.zashHandoffTickets[digest]
+	if ok {
+		delete(s.zashHandoffTickets, digest)
+	}
+	return ok && expires.After(now)
+}
+
+func (s *ControlServer) mintZashSession(now time.Time) (string, time.Time, error) {
+	token, digest, err := newBrowserCredential()
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	expires := now.Add(zashSessionTTL)
+	s.zashAuthMu.Lock()
+	defer s.zashAuthMu.Unlock()
+	if s.zashSessions == nil {
+		s.zashSessions = make(map[[32]byte]time.Time)
+	}
+	pruneBrowserCredentials(s.zashSessions, now)
+	s.zashSessions[digest] = expires
+	return token, expires, nil
+}
+
+func (s *ControlServer) validZashSession(token string, now time.Time) bool {
+	digest, valid := browserCredentialDigest(token)
+	if !valid {
+		return false
+	}
+	s.zashAuthMu.Lock()
+	defer s.zashAuthMu.Unlock()
+	expires, ok := s.zashSessions[digest]
+	if ok && !expires.After(now) {
+		delete(s.zashSessions, digest)
+		ok = false
+	}
+	return ok
+}
+
+// handleZashboardHandoffTicket mints a one-use cross-origin bootstrap URL.
+// The URL carries only a disposable ticket; never the controller secret.
+func (s *ControlServer) handleZashboardHandoffTicket(w http.ResponseWriter, _ *http.Request) {
+	if s.zashDomain == "" || s.zashSrv == nil {
+		writeErr(w, http.StatusServiceUnavailable, "zashboard unavailable")
+		return
+	}
+	ticket, _, err := s.mintZashHandoff(time.Now())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "could not mint zashboard handoff")
+		return
+	}
+	u := url.URL{Scheme: "https", Host: s.zashDomain, Path: "/handoff"}
+	q := u.Query()
+	q.Set("ticket", ticket)
+	u.RawQuery = q.Encode()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"url":                u.String(),
+		"expires_in_seconds": int(zashHandoffTTL.Seconds()),
+	})
+}
+
+// handleZashHandoff consumes the ticket before issuing a host-only HttpOnly
+// session. The redirect fragment contains only a fixed non-secret placeholder
+// required by zashboard's setup parser; proxy authentication is cookie-backed.
+func (s *ControlServer) handleZashHandoff(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	if !s.consumeZashHandoff(r.URL.Query().Get("ticket"), now) {
+		writeErr(w, http.StatusUnauthorized, "invalid or expired zashboard handoff")
+		return
+	}
+	session, expires, err := s.mintZashSession(now)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "could not create zashboard session")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     zashSessionCookie,
+		Value:    session,
+		Path:     "/",
+		Expires:  expires,
+		MaxAge:   int(zashSessionTTL.Seconds()),
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	target := "/#/setup?hostname=" + url.QueryEscape(s.zashDomain) +
+		"&port=443&secret=5gpn-session&secondaryPath=/proxy"
+	http.Redirect(w, r, target, http.StatusSeeOther)
+}
+
+func (s *ControlServer) zashSessionMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" {
+			writeErr(w, http.StatusUnauthorized, "zashboard session required")
+			return
+		}
+		cookie, err := r.Cookie(zashSessionCookie)
+		if err != nil || !s.validZashSession(cookie.Value, time.Now()) {
+			writeErr(w, http.StatusUnauthorized, "zashboard session required")
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
+}
 
 // handleMihomoHealth proxies exactly mihomo's GET /version through the
 // daemon-held controller credential. This handler itself sits behind the
@@ -613,17 +795,15 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 }
 
 // rateLimitMiddleware enforces a per-source-IP token-bucket limit on every
-// /api/* request to blunt bearer-token brute force and general abuse.
-// It is wired OUTSIDE authMiddleware (see NewControlServer) so an
-// unauthenticated flood is limited too -- rate limiting must not depend on
-// having already proven a valid token.
+// authenticated /api/* request to bound expensive control-plane work. It is
+// wired inside authMiddleware because the public mihomo tunnel collapses
+// backend RemoteAddr values to loopback; unauthenticated callers must not be
+// able to consume the administrator's shared bucket.
 //
 // The source key is derived from r.RemoteAddr (host part only, via
 // net.SplitHostPort; the raw value is used as-is if that fails, e.g. in unit
-// tests that set a bare RemoteAddr). X-Forwarded-For is deliberately NOT
-// consulted: the control-plane listener is not behind a reverse proxy, so
-// trusting a client-supplied header here would let any caller pick its own
-// rate-limit bucket and defeat the whole point.
+// tests that set a bare RemoteAddr). X-Forwarded-For is deliberately not
+// consulted because mihomo does not authenticate or set that header.
 //
 // When s.limiter has rate limiting disabled (APIRate <= 0), allow() always
 // returns true, so this middleware is a zero-overhead passthrough.
@@ -650,10 +830,9 @@ func (s *ControlServer) rateLimitMiddleware(next http.Handler) http.Handler {
 // side channels. Missing, malformed, or mismatched tokens get 401 with a
 // small JSON error body.
 //
-// There is no in-process IP lockout here: the control plane binds loopback
-// and mihomo enforces source-IP allowlisting ahead of it, so a source that
-// can reach this listener at all is already trusted at the network layer —
-// brute-forcing the token from an untrusted source never gets this far.
+// There is no pre-authentication IP lockout here. The console SNI is public by
+// design, while the bearer token is high entropy; connection-level timeouts
+// bound slow clients and only authenticated requests consume rate-limit state.
 func (s *ControlServer) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		const prefix = "Bearer "
@@ -693,8 +872,8 @@ func (s *ControlServer) authMiddleware(next http.Handler) http.Handler {
 
 // writeJSON writes v as a JSON response body with the given status code.
 //
-// Control-plane JSON carries secrets (mihomo_secret in /api/status, polled
-// every 5s by the SPA) and client PII (client IP + qname in /api/querylog).
+// Control-plane JSON carries sensitive operational data such as client IP and
+// qname in /api/querylog. Controller secrets are never serialized to JSON.
 // no-store keeps a private browser cache from persisting those bodies to disk,
 // where they would outlive the localStorage token past logout and be readable
 // by a same-host local user or disk forensics. Applied centrally so every

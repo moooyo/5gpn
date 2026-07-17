@@ -15,22 +15,11 @@ import (
 // zashboard's full ops can reach the controller. Callers decide the access
 // model: the console never mounts the raw proxy and reaches it only through a
 // bearer-authenticated health handler or a one-use-ticket log gate; the
-// separate zashboard panel mounts pass-through mode behind its SNI source
-// allowlist and relies on the controller secret supplied by zashboard itself.
-//
-// inject selects which of the two mihomo-auth models this mount uses (design
-// §5.2, zashboard authentication):
-//
-//   - inject=true (console internal use): the secret is injected daemon-side,
-//     so the browser never holds it. The caller must already have passed the
-//     console bearer/ticket gate in api.go.
-//   - inject=false (the zash mux): the browser's own Authorization header is
-//     forwarded UNCHANGED (added when present, omitted when absent). This is
-//     the password gate for zashboard: an allowlisted-but-unauthenticated
-//     visitor has no secret to send, so the controller itself 401s; a console
-//     admin's "前往 zash" deep-link carries the secret (api.go's
-//     GET /api/status, §5.3) so it auto-auths.
-func newMihomoProxy(upstreamHost, secret, mountPrefix string, inject bool, transport http.RoundTripper) http.Handler {
+// separate zashboard panel mounts the full pass-through behind its SNI source
+// allowlist. Every caller must first enforce its own console ticket or zash
+// HttpOnly-session gate; the proxy always strips browser Authorization and
+// injects the daemon-held controller credential.
+func newMihomoProxy(upstreamHost, secret, mountPrefix string, transport http.RoundTripper) http.Handler {
 	if transport == nil {
 		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "mihomo controller unavailable", http.StatusServiceUnavailable)
@@ -49,14 +38,7 @@ func newMihomoProxy(upstreamHost, secret, mountPrefix string, inject bool, trans
 			}
 			pr.Out.URL.Path = p
 			pr.Out.URL.RawPath = ""
-			if !inject {
-				// Pass-through mode (zash mux): pr.Out already carries whatever
-				// Authorization the browser sent (httputil.ReverseProxy clones
-				// pr.In's headers into pr.Out before calling Rewrite) — leave it
-				// untouched, and add nothing when the browser sent none.
-				return
-			}
-			// Injecting mode (console mux): never forward the browser's own
+			// Never forward the browser's own
 			// Authorization (the 5gpn console bearer) to mihomo; inject the
 			// controller secret instead. An empty-secret mihomo rejects ANY
 			// Authorization header, so the Del is load-bearing for the
@@ -67,14 +49,13 @@ func newMihomoProxy(upstreamHost, secret, mountPrefix string, inject bool, trans
 			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			// In injecting mode the browser has already authenticated to the
-			// 5gpn API. A 401/403 here therefore means the daemon-held mihomo
+			// The browser has already authenticated through the relevant gate.
+			// A 401/403 here therefore means the daemon-held mihomo
 			// controller secret is stale; forwarding that status verbatim would
 			// make apiFetch mistake it for a rejected CONSOLE token, clear the
 			// valid token, and log the operator out. Present controller-auth
-			// failures as an upstream 502 instead. Pass-through zashboard mode
-			// deliberately retains mihomo's native 401 password challenge.
-			if !inject || (resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden) {
+			// failures as an upstream 502 instead.
+			if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
 				return nil
 			}
 			const body = `{"error":"mihomo controller authentication failed"}`

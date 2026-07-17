@@ -3,23 +3,24 @@
 //
 //   - MihomoConfigStore: read the on-disk config, and render the install-time
 //     seed default from the box's own dns.env-derived environment.
-//   - ValidateInvariants: a text-pattern (regexp) check — NOT a YAML parse,
-//     see the "no YAML library" module policy — that the submitted text still
-//     contains the seven pieces of infrastructure the box's own lifelines
-//     depend on, so an operator's edit can break their own
-//     routing rules but can never accidentally cut off the controller, the
-//     SNI-split panels, or the egress DNS broker.
+//   - ValidateInvariants: a structural YAML check that the submitted document
+//     still contains the seven pieces of infrastructure the box's own lifelines
+//     depend on, so an operator's edit can break their own routing rules but
+//     cannot accidentally cut off the controller, the SNI-split panels, or the
+//     egress DNS broker.
 package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"sync"
+	"unicode"
+
+	"gopkg.in/yaml.v3"
 )
 
 // InfraParams is the set of box-specific values ValidateInvariants checks a
@@ -112,14 +113,11 @@ func (s *MihomoConfigStore) Read() (string, error) {
 	return string(b), nil
 }
 
-// EnsurePrivateDir creates the config directory if needed and forces it to
-// owner-only access. config.yaml contains the mihomo controller bearer secret,
-// so inheriting a world-readable 0755 directory is not acceptable.
+// EnsurePrivateDir creates the config directory if needed. Production
+// ownership and setgid permissions are installed out of process because the
+// unprivileged daemon must not chown or chmod the shared mihomo directory.
 func (s *MihomoConfigStore) EnsurePrivateDir() error {
-	if err := os.MkdirAll(s.dir, 0o700); err != nil {
-		return err
-	}
-	return os.Chmod(s.dir, 0o700)
+	return os.MkdirAll(s.dir, 0o770)
 }
 
 // normalizeMihomoListenerIPs validates, de-duplicates, and preserves the
@@ -218,8 +216,8 @@ external-controller: ""
 external-controller-tls: 127.0.0.1:9090
 secret: __CONTROLLER_SECRET__
 tls:
-  certificate: /etc/5gpn/cert/zash/fullchain.pem
-  private-key: /etc/5gpn/cert/zash/privkey.pem
+  certificate: /etc/5gpn/cert/zash/current/fullchain.pem
+  private-key: /etc/5gpn/cert/zash/current/privkey.pem
 profile: { store-selected: true }
 mode: rule
 log-level: info
@@ -272,43 +270,6 @@ rules:
   - MATCH,Proxies
 `
 
-// whitespaceRunRE collapses any run of whitespace (spaces, tabs, newlines) to
-// a single space, so ValidateInvariants's regexes are indifferent to
-// reformatting (different indentation, wrapped lines, a flow map turned into
-// block style) — only the token PATTERNS matter, never the literal layout.
-var whitespaceRunRE = regexp.MustCompile(`\s+`)
-
-// stripYAMLComments drops everything from the first `#` to end-of-line, on
-// every line. Naive (doesn't understand quoted strings containing `#`), but
-// this is a hand-edited operator config, not arbitrary YAML — it is enough to
-// stop an invariant from being satisfied by a COMMENTED-OUT line (e.g.
-// `# external-controller: 127.0.0.1:9090`), which a bare substring/regex
-// check would otherwise treat as "present".
-func stripYAMLComments(text string) string {
-	lines := strings.Split(text, "\n")
-	for i, l := range lines {
-		if idx := strings.IndexByte(l, '#'); idx >= 0 {
-			lines[i] = l[:idx]
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
-// normalizeForMatch prepares text for invariant matching: strip comments (so
-// a disabled line can't satisfy a check), then collapse all whitespace to
-// single spaces (so reformatting can't defeat a check either).
-func normalizeForMatch(text string) string {
-	return whitespaceRunRE.ReplaceAllString(stripYAMLComments(text), " ")
-}
-
-// proximityWindow bounds how far apart two required substrings may be within
-// the same logical config entry (e.g. a flow-style listener map, or a rules
-// list that got reformatted) for a combined pattern to still count as one
-// unit — generous enough to survive reformatting, small enough that two
-// invariants' near-identical tokens (e.g. the two `tunnel` listeners) don't
-// bleed into each other.
-const proximityWindow = `.{0,200}?`
-
 // literalControllerTLSAddr, literalControllerCert, literalControllerKey, and
 // literalDNSBrokerNameserver are the box's fixed loopback controller TLS
 // listener, zashboard cert/key paths, and egress DNS broker nameserver URL.
@@ -319,109 +280,69 @@ const proximityWindow = `.{0,200}?`
 // never vary with the controller client's connection target.
 const (
 	literalControllerTLSAddr   = "127.0.0.1:9090"
-	literalControllerCert      = "/etc/5gpn/cert/zash/fullchain.pem"
-	literalControllerKey       = "/etc/5gpn/cert/zash/privkey.pem"
+	literalControllerCert      = "/etc/5gpn/cert/zash/current/fullchain.pem"
+	literalControllerKey       = "/etc/5gpn/cert/zash/current/privkey.pem"
 	literalDNSBrokerNameserver = "udp://127.0.0.1:5354"
 )
 
-func parseYAMLScalar(raw string) (string, bool) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", false
-	}
-	switch {
-	case len(raw) >= 2 && raw[0] == '\'' && raw[len(raw)-1] == '\'':
-		return strings.ReplaceAll(raw[1:len(raw)-1], "''", "'"), true
-	case len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"':
-		value, err := strconv.Unquote(raw)
-		return value, err == nil
-	default:
-		return raw, true
-	}
+type mihomoInvariantDocument struct {
+	ExternalController    *string                   `yaml:"external-controller"`
+	ExternalControllerTLS *string                   `yaml:"external-controller-tls"`
+	Secret                *string                   `yaml:"secret"`
+	TLS                   *mihomoInvariantTLS       `yaml:"tls"`
+	Listeners             []mihomoInvariantListener `yaml:"listeners"`
+	DNS                   *mihomoInvariantDNS       `yaml:"dns"`
+	Hosts                 map[string]string         `yaml:"hosts"`
+	Rules                 []string                  `yaml:"rules"`
 }
 
-func topLevelYAMLScalar(text, key string) (string, bool) {
-	var value string
-	found := false
-	prefix := key + ":"
-	for _, raw := range strings.Split(stripYAMLComments(text), "\n") {
-		if raw != strings.TrimLeft(raw, " \t") || !strings.HasPrefix(raw, prefix) {
-			continue
-		}
-		if found {
-			return "", false
-		}
-		var ok bool
-		value, ok = parseYAMLScalar(strings.TrimPrefix(raw, prefix))
-		if !ok {
-			return "", false
-		}
-		found = true
-	}
-	return value, found
+type mihomoInvariantTLS struct {
+	Certificate *string `yaml:"certificate"`
+	PrivateKey  *string `yaml:"private-key"`
 }
 
-func topLevelYAMLMapScalar(text, mapKey, key string) (string, bool) {
-	lines := strings.Split(stripYAMLComments(text), "\n")
-	inMap := false
-	mapFound := false
-	childIndent := -1
-	var value string
-	valueFound := false
-	for _, raw := range lines {
-		if strings.TrimSpace(raw) == "" {
-			continue
+type mihomoInvariantListener struct {
+	Type   string `yaml:"type"`
+	Port   int    `yaml:"port"`
+	Target string `yaml:"target"`
+}
+
+type mihomoInvariantDNS struct {
+	Nameserver []string `yaml:"nameserver"`
+}
+
+func parseMihomoInvariantDocument(text string) (*mihomoInvariantDocument, error) {
+	dec := yaml.NewDecoder(strings.NewReader(text))
+	var doc mihomoInvariantDocument
+	if err := dec.Decode(&doc); err != nil {
+		if err == io.EOF {
+			return nil, fmt.Errorf("invalid mihomo YAML: empty document")
 		}
-		trimmed := strings.TrimLeft(raw, " \t")
-		indent := len(raw) - len(trimmed)
-		if indent == 0 {
-			if inMap {
-				inMap = false
-			}
-			if !strings.HasPrefix(trimmed, mapKey+":") {
-				continue
-			}
-			if mapFound || strings.TrimSpace(strings.TrimPrefix(trimmed, mapKey+":")) != "" {
-				return "", false
-			}
-			mapFound = true
-			inMap = true
-			childIndent = -1
-			continue
-		}
-		if !inMap {
-			continue
-		}
-		if childIndent == -1 {
-			childIndent = indent
-		}
-		if indent != childIndent || !strings.HasPrefix(trimmed, key+":") {
-			continue
-		}
-		if valueFound {
-			return "", false
-		}
-		var ok bool
-		value, ok = parseYAMLScalar(strings.TrimPrefix(trimmed, key+":"))
-		if !ok {
-			return "", false
-		}
-		valueFound = true
+		return nil, fmt.Errorf("invalid mihomo YAML: %w", err)
 	}
-	return value, mapFound && valueFound
+
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return nil, fmt.Errorf("invalid mihomo YAML: %w", err)
+		}
+		return nil, fmt.Errorf("invalid mihomo YAML: multiple documents are not allowed")
+	}
+	return &doc, nil
+}
+
+func exactScalar(got *string, want string) bool {
+	return got != nil && *got == want
 }
 
 // hasControllerInvariant asserts plaintext control is disabled, the loopback
 // TLS controller is fixed, and the zashboard cert/key paths stay exact.
-func hasControllerInvariant(text string) bool {
-	plain, plainOK := topLevelYAMLScalar(text, "external-controller")
-	tlsAddr, tlsOK := topLevelYAMLScalar(text, "external-controller-tls")
-	cert, certOK := topLevelYAMLMapScalar(text, "tls", "certificate")
-	key, keyOK := topLevelYAMLMapScalar(text, "tls", "private-key")
-	return plainOK && plain == "" &&
-		tlsOK && tlsAddr == literalControllerTLSAddr &&
-		certOK && cert == literalControllerCert &&
-		keyOK && key == literalControllerKey
+func hasControllerInvariant(doc *mihomoInvariantDocument) bool {
+	return exactScalar(doc.ExternalController, "") &&
+		exactScalar(doc.ExternalControllerTLS, literalControllerTLSAddr) &&
+		doc.TLS != nil &&
+		exactScalar(doc.TLS.Certificate, literalControllerCert) &&
+		exactScalar(doc.TLS.PrivateKey, literalControllerKey)
 }
 
 // hasControllerSecretInvariant requires the raw editor to preserve the
@@ -430,70 +351,94 @@ func hasControllerInvariant(text string) bool {
 // would make the next hot-apply immediately lock both out. A dedicated secret
 // rotation operation can coordinate those components in the future; raw YAML
 // editing is intentionally not such an operation.
-func hasControllerSecretInvariant(text, want string) bool {
-	got, ok := topLevelYAMLScalar(text, "secret")
-	return ok && got == want
+func hasControllerSecretInvariant(doc *mihomoInvariantDocument, want string) bool {
+	return exactScalar(doc.Secret, want)
 }
 
-// hasGatewayInbound asserts a `tunnel` listener on port 443 targeting
-// 127.0.0.1:443.
-func hasGatewayInbound(norm string) bool {
-	pat := regexp.MustCompile(`type\s*:\s*tunnel` + proximityWindow + `port\s*:\s*443` + proximityWindow + `target\s*:\s*"?127\.0\.0\.1:443"?`)
-	return pat.MatchString(norm)
+// hasGatewayInbound asserts an actual listeners entry is a tunnel on port 443
+// targeting the loopback console endpoint.
+func hasGatewayInbound(doc *mihomoInvariantDocument) bool {
+	for _, listener := range doc.Listeners {
+		if listener.Type == "tunnel" && listener.Port == 443 && listener.Target == "127.0.0.1:443" {
+			return true
+		}
+	}
+	return false
 }
 
-// hasDNSBrokerInvariant asserts the dns: nameserver list includes the egress
-// broker.
-func hasDNSBrokerInvariant(norm string) bool {
-	pat := regexp.MustCompile(`nameserver` + proximityWindow + regexp.QuoteMeta(literalDNSBrokerNameserver))
-	return pat.MatchString(norm)
-}
-
-// hasAllowlistedSNISplit asserts domain is mapped to hostsIP in hosts:, AND has a
-// whitelist-gated DIRECT rule, AND has a same-domain REJECT-DROP guard
-// for the source-allowlisted zashboard surface.
-func hasAllowlistedSNISplit(norm, domain, hostsIP string) bool {
-	if strings.TrimSpace(domain) == "" {
+// hasDNSBrokerInvariant asserts the actual dns.nameserver sequence includes
+// the loopback egress broker.
+func hasDNSBrokerInvariant(doc *mihomoInvariantDocument) bool {
+	if doc.DNS == nil {
 		return false
 	}
-	d := regexp.QuoteMeta(domain)
-
-	hostsPat := regexp.MustCompile(d + `\s*:\s*` + regexp.QuoteMeta(hostsIP) + `\b`)
-	// directPat is anchored to the exact AND(...) rule SHAPE — not a loose
-	// proximity window — so it can't be satisfied by a DIFFERENT domain's
-	// whitelist-gated rule sitting a few tokens away in the same rules list.
-	// Still whitespace-tolerant (\s* at every punctuation boundary) so
-	// reformatting alone doesn't trip it.
-	directPat := regexp.MustCompile(`AND,\s*\(\s*\(\s*DOMAIN,\s*` + d +
-		`\s*\)\s*,\s*\(\s*RULE-SET,\s*whitelist,\s*DIRECT,\s*src\s*\)\s*\)\s*,\s*DIRECT`)
-	dropPat := regexp.MustCompile(`DOMAIN,\s*` + d + `\s*,\s*REJECT-DROP`)
-
-	return hostsPat.MatchString(norm) && directPat.MatchString(norm) && dropPat.MatchString(norm)
+	for _, nameserver := range doc.DNS.Nameserver {
+		if nameserver == literalDNSBrokerNameserver {
+			return true
+		}
+	}
+	return false
 }
 
-// hasPublicSNISplit checks a public panel mapping: the hostname must resolve to
-// the expected loopback backend and route DIRECT without a source allowlist.
-func hasPublicSNISplit(norm, domain, hostsIP string) bool {
-	if strings.TrimSpace(domain) == "" {
+func compactMihomoRule(rule string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, rule)
+}
+
+func containsRule(rules []string, want string) bool {
+	for _, rule := range rules {
+		if compactMihomoRule(rule) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func directDomainRule(domain string) string {
+	return "DOMAIN," + domain + ",DIRECT"
+}
+
+func allowlistedDomainRule(domain string) string {
+	return "AND,((DOMAIN," + domain + "),(RULE-SET,whitelist,DIRECT,src)),DIRECT"
+}
+
+func dropDomainRule(domain string) string {
+	return "DOMAIN," + domain + ",REJECT-DROP"
+}
+
+// hasAllowlistedSNISplit asserts the real hosts and rules collections contain
+// the source-allowlisted zashboard split and its deny-by-default guard.
+func hasAllowlistedSNISplit(doc *mihomoInvariantDocument, domain, hostsIP string) bool {
+	if strings.TrimSpace(domain) == "" || doc.Hosts[domain] != hostsIP {
 		return false
 	}
-	d := regexp.QuoteMeta(domain)
-	hostsPat := regexp.MustCompile(d + `\s*:\s*` + regexp.QuoteMeta(hostsIP) + `\b`)
-	directPat := regexp.MustCompile(`(?:^|\s)-\s*DOMAIN,\s*` + d + `\s*,\s*DIRECT(?:\s|$)`)
-	allowlistedPat := regexp.MustCompile(`AND,\s*\(\s*\(\s*DOMAIN,\s*` + d +
-		`\s*\)\s*,\s*\(\s*RULE-SET,\s*whitelist,\s*DIRECT,\s*src\s*\)\s*\)\s*,\s*DIRECT`)
-	dropPat := regexp.MustCompile(`DOMAIN,\s*` + d + `\s*,\s*REJECT-DROP`)
-	return hostsPat.MatchString(norm) && directPat.MatchString(norm) &&
-		!allowlistedPat.MatchString(norm) && !dropPat.MatchString(norm)
+	return containsRule(doc.Rules, allowlistedDomainRule(domain)) &&
+		containsRule(doc.Rules, dropDomainRule(domain))
+}
+
+// hasPublicSNISplit checks that the console maps to its loopback backend and
+// has an unconditional DIRECT rule without zashboard-style allowlist or drop
+// rules for the same hostname.
+func hasPublicSNISplit(doc *mihomoInvariantDocument, domain, hostsIP string) bool {
+	if strings.TrimSpace(domain) == "" || doc.Hosts[domain] != hostsIP {
+		return false
+	}
+	return containsRule(doc.Rules, directDomainRule(domain)) &&
+		!containsRule(doc.Rules, allowlistedDomainRule(domain)) &&
+		!containsRule(doc.Rules, dropDomainRule(domain))
 }
 
 // hasAntiLoopInvariant asserts an exact gateway /32 REJECT-DROP guard.
-func hasAntiLoopInvariant(norm string, p InfraParams) bool {
+func hasAntiLoopInvariant(doc *mihomoInvariantDocument, p InfraParams) bool {
 	if strings.TrimSpace(p.GatewayIP) == "" {
 		return false
 	}
-	pat := regexp.MustCompile(`IP-CIDR,\s*` + regexp.QuoteMeta(p.GatewayIP) + `/32,\s*REJECT-DROP`)
-	return pat.MatchString(norm)
+	base := "IP-CIDR," + p.GatewayIP + "/32,REJECT-DROP"
+	return containsRule(doc.Rules, base) || containsRule(doc.Rules, base+",no-resolve")
 }
 
 // ValidateInvariants checks that text (a candidate mihomo config, about to
@@ -503,30 +448,29 @@ func hasAntiLoopInvariant(norm string, p InfraParams) bool {
 // the FIRST missing invariant as *ErrMissingInfra (checked in the fixed order
 // below), or nil when all seven are present.
 //
-// This is a text-pattern check (regexp), not a structural YAML parse — the
-// module's no-YAML-library policy (miekg/dns + go-telegram/bot only) rules
-// that out. `mihomo -t` (run separately, after this check — see
-// api_mihomo_config.go) already guarantees the text parses as YAML mihomo
-// accepts; this check adds the semantic guarantee that the box's own
-// lifelines (controller, SNI-split panels, egress DNS broker, anti-loop
-// guard) cannot be edited away.
+// The YAML is decoded into a narrow structural view before checking. Unknown
+// operator-owned fields remain accepted, while malformed input, duplicate
+// keys, and additional YAML documents fail closed before `mihomo -t` runs.
 func ValidateInvariants(text string, p InfraParams) error {
-	norm := normalizeForMatch(text)
+	doc, err := parseMihomoInvariantDocument(text)
+	if err != nil {
+		return err
+	}
 
 	switch {
-	case !hasControllerInvariant(text):
+	case !hasControllerInvariant(doc):
 		return &ErrMissingInfra{Name: "controller"}
-	case !hasGatewayInbound(norm):
+	case !hasGatewayInbound(doc):
 		return &ErrMissingInfra{Name: "gateway-inbound"}
-	case !hasDNSBrokerInvariant(norm):
+	case !hasDNSBrokerInvariant(doc):
 		return &ErrMissingInfra{Name: "dns-broker"}
-	case !hasPublicSNISplit(norm, p.ConsoleDomain, "127.0.0.1"):
+	case !hasPublicSNISplit(doc, p.ConsoleDomain, "127.0.0.1"):
 		return &ErrMissingInfra{Name: "console-sni"}
-	case !hasAllowlistedSNISplit(norm, p.ZashDomain, "127.0.0.2"):
+	case !hasAllowlistedSNISplit(doc, p.ZashDomain, "127.0.0.2"):
 		return &ErrMissingInfra{Name: "zash-sni"}
-	case !hasAntiLoopInvariant(norm, p):
+	case !hasAntiLoopInvariant(doc, p):
 		return &ErrMissingInfra{Name: "anti-loop"}
-	case !hasControllerSecretInvariant(text, p.ControllerSecret):
+	case !hasControllerSecretInvariant(doc, p.ControllerSecret):
 		return &ErrMissingInfra{Name: "controller-secret"}
 	}
 	return nil
