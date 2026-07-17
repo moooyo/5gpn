@@ -365,7 +365,7 @@ const zh: typeof en = {
     healthLoading: '正在检查内核健康状态…',
     healthFailed: '无法连接到 mihomo 内核。',
     metaBadge: 'Meta',
-    openZashboard: '前往 zashboard（深度运维）',
+    openZashboard: '前往 zashboard',
     connected: '实时日志已连接',
     disconnected: '重连中…',
     pause: '暂停',

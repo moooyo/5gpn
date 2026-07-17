@@ -214,7 +214,15 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 		}
 
 		zmux := http.NewServeMux()
-		zmux.HandleFunc("GET /handoff", s.handleZashHandoff)
+		// Zashboard's root-scoped service worker handles every GET navigation
+		// with its cached SPA shell. Keep the one-use handoff as a POST so the
+		// request always reaches the daemon, including for returning users whose
+		// browser already has that worker active.
+		zmux.HandleFunc("POST /handoff", s.handleZashHandoff)
+		zmux.HandleFunc("/handoff", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		})
 		zmux.Handle("/proxy/", s.zashSessionMiddleware(zashProxy))
 		zmux.Handle("/", zashUI)
 

@@ -396,7 +396,7 @@ const en = {
     healthLoading: 'Checking kernel health…',
     healthFailed: 'Could not reach the mihomo kernel.',
     metaBadge: 'Meta',
-    openZashboard: 'Open zashboard (deep ops)',
+    openZashboard: 'Open zashboard',
     connected: 'Live logs connected',
     disconnected: 'Reconnecting…',
     pause: 'Pause',

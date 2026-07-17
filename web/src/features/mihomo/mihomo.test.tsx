@@ -146,9 +146,18 @@ describe('MihomoPage', () => {
   })
 
   it('opens zashboard through a one-use handoff without putting the controller secret in the browser URL', async () => {
-    const replace = vi.fn()
     const close = vi.fn()
-    vi.spyOn(window, 'open').mockReturnValue({ location: { replace }, close, opener: window } as unknown as Window)
+    const popupDocument = document.implementation.createHTMLDocument('zashboard handoff')
+    let submittedForm: HTMLFormElement | undefined
+    vi.spyOn(HTMLFormElement.prototype, 'submit').mockImplementation(function (this: HTMLFormElement) {
+      submittedForm = this
+    })
+    vi.spyOn(window, 'open').mockReturnValue({
+      document: popupDocument,
+      close,
+      closed: false,
+      opener: window,
+    } as unknown as Window)
     renderPage('zash.5gpn.example.com')
     await screen.findByText('v1.19.0')
 
@@ -156,9 +165,29 @@ describe('MihomoPage', () => {
     await user.click(screen.getByRole('button', { name: new RegExp(i18n.t('mihomo.openZashboard')) }))
 
     await waitFor(() => expect(api.createZashboardHandoff).toHaveBeenCalledTimes(1))
-    expect(replace).toHaveBeenCalledWith('https://zash.5gpn.example.com/handoff?ticket=one-use-ticket')
-    expect(replace.mock.calls[0]?.[0]).not.toContain('secret=')
+    await waitFor(() => expect(submittedForm).toBeDefined())
+    expect(submittedForm?.method).toBe('post')
+    expect(submittedForm?.action).toBe('https://zash.5gpn.example.com/handoff?ticket=one-use-ticket')
+    expect(submittedForm?.action).not.toContain('secret=')
     expect(close).not.toHaveBeenCalled()
+  })
+
+  it('submits the handoff in the current tab when the popup is blocked', async () => {
+    let submittedForm: HTMLFormElement | undefined
+    vi.spyOn(HTMLFormElement.prototype, 'submit').mockImplementation(function (this: HTMLFormElement) {
+      submittedForm = this
+    })
+    vi.spyOn(window, 'open').mockReturnValue(null)
+    renderPage('zash.5gpn.example.com')
+    await screen.findByText('v1.19.0')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: i18n.t('mihomo.openZashboard') }))
+
+    await waitFor(() => expect(submittedForm).toBeDefined())
+    expect(submittedForm?.ownerDocument).toBe(document)
+    expect(submittedForm?.method).toBe('post')
+    expect(submittedForm?.action).toBe('https://zash.5gpn.example.com/handoff?ticket=one-use-ticket')
   })
 
   it('hides the "open zashboard" link when zash_domain is empty', async () => {

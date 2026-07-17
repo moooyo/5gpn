@@ -68,8 +68,19 @@ export default function MihomoPage() {
     if (popup) popup.opener = null
     try {
       const handoff = await api.createZashboardHandoff()
-      if (popup) popup.location.replace(handoff.url)
-      else window.location.assign(handoff.url)
+      // Zashboard's root-scoped service worker turns every GET navigation
+      // into its cached SPA shell, which would swallow /handoff before the
+      // daemon can set the session cookie. Workbox does not route POST, so a
+      // top-level form submission reliably reaches the handoff endpoint even
+      // when an older zashboard worker is already controlling this origin.
+      const targetDocument = popup && !popup.closed ? popup.document : document
+      const form = targetDocument.createElement('form')
+      form.method = 'post'
+      form.action = handoff.url
+      form.hidden = true
+      targetDocument.body.appendChild(form)
+      form.submit()
+      form.remove()
     } catch {
       popup?.close()
     } finally {

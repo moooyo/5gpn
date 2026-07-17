@@ -839,7 +839,17 @@ func TestControlServer_BothPanelsAndProxy(t *testing.T) {
 
 	// The zash origin consumes the ticket once and issues a secure HttpOnly
 	// host cookie before redirecting to a setup URL with only a fixed placeholder.
+	// GET is deliberately not accepted: zashboard's root-scoped Workbox
+	// navigation fallback consumes GET navigations before they reach the
+	// daemon. The browser submits this URL as a top-level POST instead.
 	req = httptest.NewRequest(http.MethodGet, handoffURL.RequestURI(), nil)
+	rec = httptest.NewRecorder()
+	cs.zashSrv.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET handoff status=%d, want 405", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, handoffURL.RequestURI(), nil)
 	rec = httptest.NewRecorder()
 	cs.zashSrv.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusSeeOther {
@@ -849,13 +859,26 @@ func TestControlServer_BothPanelsAndProxy(t *testing.T) {
 	if strings.Contains(location, "secret=sec&") || !strings.Contains(location, "secret=5gpn-session") {
 		t.Fatalf("handoff redirect contains unsafe or missing setup state: %q", location)
 	}
+	setupURL, err := url.Parse(location)
+	if err != nil || setupURL.Path != "/" {
+		t.Fatalf("handoff redirect URL = %q, err=%v; want root path with setup fragment", location, err)
+	}
+	setupFragment, err := url.Parse(setupURL.Fragment)
+	if err != nil || setupFragment.Path != "/setup" {
+		t.Fatalf("handoff redirect fragment = %q, err=%v; want /setup", setupURL.Fragment, err)
+	}
+	setupQuery := setupFragment.Query()
+	if setupQuery.Get("hostname") != cfg.ZashDomain || setupQuery.Get("port") != "443" ||
+		setupQuery.Get("secret") != "5gpn-session" || setupQuery.Get("secondaryPath") != "/proxy" {
+		t.Fatalf("handoff setup query = %v, want fixed zashboard proxy settings", setupQuery)
+	}
 	cookies := rec.Result().Cookies()
 	if len(cookies) != 1 || cookies[0].Name != zashSessionCookie || !cookies[0].HttpOnly || !cookies[0].Secure || cookies[0].SameSite != http.SameSiteStrictMode {
 		t.Fatalf("zash session cookie = %+v, want one Secure HttpOnly SameSite=Strict cookie", cookies)
 	}
 	sessionCookie := cookies[0]
 
-	req = httptest.NewRequest(http.MethodGet, handoffURL.RequestURI(), nil)
+	req = httptest.NewRequest(http.MethodPost, handoffURL.RequestURI(), nil)
 	rec = httptest.NewRecorder()
 	cs.zashSrv.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
