@@ -134,6 +134,34 @@ else
     fail "ownership marker verification aborts under set -u"
 fi
 
+# Static publication must override restrictive source modes before the atomic
+# swap. The console, zashboard, and iOS profile are all served by the
+# unprivileged gpn-dns account, while their source trees can originate from
+# mktemp or a caller running with umask 077.
+static_root="$TMP/static-publication"
+if (
+    umask 077
+    src="$static_root/source"
+    dest="$static_root/live"
+    mkdir -p "$src/assets"
+    printf 'index\n' > "$src/index.html"
+    printf 'asset\n' > "$src/assets/app.js"
+    chmod 0700 "$src" "$src/assets"
+    chmod 0600 "$src/index.html" "$src/assets/app.js"
+    publish_owned_tree "$src" "$dest" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"
+    [[ "$(file_mode "$dest")" == 755 ]]
+    [[ "$(file_mode "$dest/assets")" == 755 ]]
+    [[ "$(file_mode "$dest/index.html")" == 644 ]]
+    [[ "$(file_mode "$dest/assets/app.js")" == 644 ]]
+    [[ "$(file_mode "$dest/$WEB_OWNERSHIP_MARKER")" == 644 ]]
+    grep -qxF index "$dest/index.html"
+    grep -qxF asset "$dest/assets/app.js"
+); then
+    pass "static publication normalizes restrictive source modes for gpn-dns"
+else
+    fail "static publication retained modes that block the gpn-dns service"
+fi
+
 # Uninstall keeps Gum while deleting the rest of an owned runtime, and falls
 # back to plain output before deleting a runtime where Gum is already absent.
 if (
