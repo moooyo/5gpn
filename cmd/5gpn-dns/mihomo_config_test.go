@@ -30,6 +30,10 @@ func goldenMihomoConfig() string {
 		"__MIHOMO_LISTENERS__", renderMihomoListeners([]string{"203.0.113.10"}, "console.5gpn.test"),
 		"__GATEWAY_IP__", "10.0.1.20",
 		"__CONTROLLER_SECRET__", "s3cr3t",
+		"__INTERCEPT_INBOUND_USERNAME__", "interception-unavailable",
+		"__INTERCEPT_INBOUND_PASSWORD__", "interception-unavailable-password",
+		"__INTERCEPT_UPSTREAM_USERNAME__", "interception-upstream-unavailable",
+		"__INTERCEPT_UPSTREAM_PASSWORD__", "interception-upstream-unavailable-password",
 	)
 	return r.Replace(mihomoConfigSeedTemplate)
 }

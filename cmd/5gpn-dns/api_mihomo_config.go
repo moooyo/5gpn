@@ -151,6 +151,9 @@ func (s *ControlServer) handleMihomoConfigPut(w http.ResponseWriter, r *http.Req
 		return
 	}
 	status, resp := s.applyMihomoConfig(r.Context(), *body.Text, false, body.Revision)
+	if status == http.StatusOK && s.interceptModules != nil {
+		_ = s.interceptModules.ReconcileMihomoText(*body.Text)
+	}
 	writeJSON(w, status, resp)
 }
 
@@ -173,6 +176,9 @@ func (s *ControlServer) handleMihomoConfigReset(w http.ResponseWriter, r *http.R
 		return
 	}
 	status, resp := s.applyMihomoConfig(r.Context(), s.mihomoStore.Default(), true, body.Revision)
+	if status == http.StatusOK && s.interceptModules != nil {
+		_ = s.interceptModules.ReconcileMihomoText(s.mihomoStore.Default())
+	}
 	writeJSON(w, status, resp)
 }
 

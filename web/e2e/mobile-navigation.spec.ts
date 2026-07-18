@@ -43,3 +43,25 @@ test('390px settings layout stacks upstream lists and keeps the add dialog in vi
   expect(dialogBox!.x).toBeGreaterThanOrEqual(0)
   expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(390)
 })
+
+test('390px module layout stacks snapshots and keeps the import dialog in view', async ({ page }) => {
+  await setupMockApiWithToken(page)
+  await page.goto('/modules')
+
+  await expect(page.getByTestId('page-modules')).toBeVisible()
+  const builtIn = page.getByTestId('module-builtin-wloc')
+  const imported = page.getByTestId('module-mod-1234567890abcdef')
+  const [builtInBox, importedBox] = await Promise.all([builtIn.boundingBox(), imported.boundingBox()])
+  expect(builtInBox).not.toBeNull()
+  expect(importedBox).not.toBeNull()
+  expect(importedBox!.y).toBeGreaterThan(builtInBox!.y + builtInBox!.height)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+
+  await page.getByRole('button', { name: /导入模块|Import module/ }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  const dialogBox = await dialog.boundingBox()
+  expect(dialogBox).not.toBeNull()
+  expect(dialogBox!.x).toBeGreaterThanOrEqual(0)
+  expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(390)
+})

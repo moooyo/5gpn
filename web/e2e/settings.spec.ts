@@ -12,10 +12,10 @@ test('settings page renders all config cards with zero CSP violations', async ({
   await expect(main.getByText('DoT 服务')).toBeVisible()
   await expect(main.getByText('控制台', { exact: true })).toBeVisible()
   await expect(main.getByText('127.0.0.1:443')).toBeVisible()
-  await expect(main.getByText('入口端口')).toBeVisible()
+  await expect(main.getByText('mihomo 功能模块')).toBeVisible()
   await expect(main.getByText(':5060', { exact: true })).toBeVisible()
-  await expect(main.getByText('TCP · Host/SNI')).toBeVisible()
-  await expect(main.getByText('UDP · 仅 QUIC')).toBeVisible()
+  await expect(main.getByText('TCP · Host/SNI')).toHaveCount(1)
+  await expect(main.getByText('UDP · 仅 QUIC')).toHaveCount(1)
   await expect(main.getByText('Telegram 机器人')).toBeVisible()
   await expect(main.getByText('上游 DNS')).toBeVisible()
   await expect(main.getByText('国内解析 ECS')).toBeVisible()
@@ -94,7 +94,7 @@ test('the default-enabled Speedtest ingress module stays a draft until disable c
     request.url().endsWith('/api/mihomo/ingress-modules/speedtest-5060') && request.method() === 'PUT',
   )
   await card.getByTestId('ingress-ports-save').click()
-  const dialog = page.getByRole('dialog', { name: '停用入口端口？' })
+  const dialog = page.getByRole('dialog', { name: '停用所选模块？' })
   await expect(dialog.getByText(/连接可能中断/)).toBeVisible()
   await dialog.getByRole('button', { name: '保存并应用' }).click()
 
@@ -103,4 +103,35 @@ test('the default-enabled Speedtest ingress module stays a draft until disable c
   expect(body.enabled).toBe(false)
   expect(body.revision).toMatch(/^[0-9a-f]{64}$/)
   await expect(page.getByText('已应用入口端口配置。')).toBeVisible()
+})
+
+test('WLOC interception requires coordinates and explicit confirmation', async ({ page }) => {
+  await setupMockApiWithToken(page)
+  await page.goto('/modules')
+  await page.waitForLoadState('networkidle')
+
+  const card = page.getByTestId('wloc-intercept-card')
+  const fields = card.getByRole('spinbutton')
+  await expect(fields).toHaveCount(3)
+  await fields.nth(0).fill('113.94114')
+  await fields.nth(1).fill('22.544577')
+  await fields.nth(2).fill('25')
+  await card.getByRole('switch', { name: '启用 WLOC 响应改写' }).click()
+  const requestPromise = page.waitForRequest((request) =>
+    request.url().endsWith('/api/interception/wloc') && request.method() === 'PUT',
+  )
+  await card.getByRole('button', { name: '保存' }).click()
+  const dialog = page.getByRole('dialog', { name: '启用 WLOC MITM？' })
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: '保存' }).click()
+
+  const request = await requestPromise
+  expect(request.postDataJSON()).toMatchObject({
+    enabled: true,
+    longitude: 113.94114,
+    latitude: 22.544577,
+    accuracy: 25,
+    fail_closed: true,
+  })
+  await expect(page.getByText('WLOC 响应改写配置已保存。')).toBeVisible()
 })

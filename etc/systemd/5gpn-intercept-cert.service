@@ -1,0 +1,27 @@
+# 5gpn-unit-id: 5gpn-intercept-cert.service:v1
+[Unit]
+Description=Publish the module-scoped 5gpn interception leaf
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/5gpn/scripts/intercept-cert-renew.sh
+User=root
+Group=gpn-intercept
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/etc/5gpn/intercept /run/5gpn
+ReadOnlyPaths=/etc/5gpn/intercept-ca /opt/5gpn/bin/5gpn-intercept /opt/5gpn/scripts/intercept-cert-renew.sh

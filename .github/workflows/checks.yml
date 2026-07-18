@@ -58,6 +58,31 @@ jobs:
       - name: go test -race
         run: go test -race ./...
 
+  intercept-go:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cmd/5gpn-intercept
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: cmd/5gpn-intercept/go.mod
+          cache-dependency-path: cmd/5gpn-intercept/go.sum
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"; echo "$unformatted"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+      - name: go test -race
+        run: go test -race ./...
+
   # Web gate: unit tests, production build, explicit bundle budgets, and the
   # real-browser desktop + 390x844 mobile suites under production CSP.
   # (npm run build == tsc && vite build; tsconfig includes tests, so this
@@ -105,7 +130,7 @@ jobs:
           echo "${MIHOMO_SHA256}  /tmp/mihomo.gz" | sha256sum -c -
           gunzip /tmp/mihomo.gz
           chmod 0755 /tmp/mihomo
-      - name: Render and validate enabled and disabled ingress-module configs
+      - name: Render and validate ingress and interception module configs
         run: |
           set -euo pipefail
           runtime="$(mktemp -d)"
@@ -124,6 +149,10 @@ jobs:
               gsub(/__CONSOLE_DOMAIN__/, "console.example.test")
               gsub(/__ZASH_DOMAIN__/, "zash.example.test")
               gsub(/__CONTROLLER_SECRET__/, "ci-controller-secret")
+              gsub(/__INTERCEPT_INBOUND_USERNAME__/, "ci-module-inbound-user")
+              gsub(/__INTERCEPT_INBOUND_PASSWORD__/, "ci-module-inbound-password-123456")
+              gsub(/__INTERCEPT_UPSTREAM_USERNAME__/, "ci-module-upstream-user")
+              gsub(/__INTERCEPT_UPSTREAM_PASSWORD__/, "ci-module-upstream-password-123456")
               print
             }
           ' etc/mihomo/config.yaml.tmpl > "$runtime/config.yaml"
@@ -138,6 +167,12 @@ jobs:
           grep -Fq 'QUIC: { ports: [443, 5060] }' "$runtime/config.yaml"
           grep -Fq 'AND,((DOMAIN,console.example.test),(DST-PORT,5060)),REJECT' "$runtime/config.yaml"
           grep -Fq 'AND,((DOMAIN,zash.example.test),(DST-PORT,5060)),REJECT' "$runtime/config.yaml"
+          grep -Fq 'name: intercept-egress' "$runtime/config.yaml"
+          grep -Fq 'name: MODULE-MITM' "$runtime/config.yaml"
+          grep -Fq 'IN-NAME,intercept-egress,Proxies' "$runtime/config.yaml"
+          sed '/  - MATCH,Proxies/i\  - AND,((DOMAIN,api.example.test),(DST-PORT,443)),MODULE-MITM\n  - AND,((DOMAIN-WILDCARD,*.cdn.example.test),(DST-PORT,443)),MODULE-MITM' \
+            "$runtime/config.yaml" > "$runtime/config-module-enabled.yaml"
+          /tmp/mihomo -t -f "$runtime/config-module-enabled.yaml" -d "$runtime"
           sed \
             -e '/name: gateway5060/d' \
             -e 's/, 5060//g' \

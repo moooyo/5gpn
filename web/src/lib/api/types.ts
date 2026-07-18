@@ -138,6 +138,89 @@ export interface IngressModulesView {
   modules: IngressModule[]
 }
 
+export interface WLOCInterceptView {
+  revision: string
+  enabled: boolean
+  longitude: number | null
+  latitude: number | null
+  accuracy: number
+  fail_closed: boolean
+  max_body_bytes: number
+  hosts: string[]
+  profile_url: string
+}
+
+export interface WLOCInterceptUpdate {
+  revision: string
+  enabled: boolean
+  longitude: number | null
+  latitude: number | null
+  accuracy: number
+  fail_closed: boolean
+  max_body_bytes: number
+}
+
+export type InterceptModuleFormat = 'builtin' | 'surge' | 'loon'
+export type InterceptModuleCompatibility = 'full' | 'partial'
+export interface InterceptModule {
+  id: string
+  name: string
+  description?: string
+  format: InterceptModuleFormat
+  enabled: boolean
+  ready: boolean
+  reason?: string
+  compatibility: InterceptModuleCompatibility
+  partial_allowed: boolean
+  hosts: string[]
+  script_count: number
+  rewrite_count: number
+  unsupported?: string[]
+  source_url?: string
+  source_digest: string
+  imported_at?: string
+  argument?: string
+}
+export interface InterceptModulesView {
+  revision: string
+  ca_profile_url: string
+  catalog_url: string
+  modules: InterceptModule[]
+  active_hosts: string[]
+}
+export interface InterceptScriptSnapshot {
+  id: string
+  url?: string
+  digest: string
+  body: string
+}
+export interface InterceptModuleSnapshot {
+  id: string
+  name: string
+  format: InterceptModuleFormat
+  source_url?: string
+  source_digest: string
+  source_body: string
+  scripts: InterceptScriptSnapshot[]
+}
+export type InterceptFetchProfile = 'standard' | 'quantumult-x'
+export interface InterceptModuleImport {
+  revision: string
+  url?: string
+  content?: string
+  format: 'auto' | 'surge' | 'loon'
+  fetch_profile: InterceptFetchProfile
+  referer?: string
+  argument?: string
+  partial_allowed: boolean
+}
+export interface InterceptModuleUpdate {
+  revision: string
+  enabled?: boolean
+  argument?: string
+  partial_allowed?: boolean
+}
+
 // ---- Unified policy rules -----------------------------------------------
 // `proxy` means only "steer to the gateway"; application egress belongs to
 // the operator-owned mihomo config, never to a DNS-policy field.

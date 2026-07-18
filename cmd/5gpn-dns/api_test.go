@@ -44,6 +44,9 @@ func TestControlServer_PublicConsoleServesSPAAndIOSAndProtectsAPI(t *testing.T) 
 	if rec := do("/ios/ios-dot.mobileconfig"); rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/x-apple-aspen-config" {
 		t.Fatalf("console mobileconfig status/type=%d/%q", rec.Code, rec.Header().Get("Content-Type"))
 	}
+	if rec := do("/ios/ios-intercept-ca.mobileconfig"); rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/x-apple-aspen-config" {
+		t.Fatalf("console interception CA mobileconfig status/type=%d/%q", rec.Code, rec.Header().Get("Content-Type"))
+	}
 	if rec := do("/api/status"); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated console API status=%d body=%s, want 401", rec.Code, rec.Body.String())
 	}
@@ -242,6 +245,13 @@ func TestAPIRoutes_RequireAuth(t *testing.T) {
 		{http.MethodPut, "/api/tgbot"},
 		{http.MethodGet, "/api/mihomo/ingress-modules"},
 		{http.MethodPut, "/api/mihomo/ingress-modules/speedtest-5060"},
+		{http.MethodGet, "/api/interception/wloc"},
+		{http.MethodPut, "/api/interception/wloc"},
+		{http.MethodGet, "/api/interception/modules"},
+		{http.MethodGet, "/api/interception/modules/mod-1234567890abcdef"},
+		{http.MethodPost, "/api/interception/modules/import"},
+		{http.MethodPut, "/api/interception/modules/mod-1234567890abcdef"},
+		{http.MethodDelete, "/api/interception/modules/mod-1234567890abcdef"},
 	}
 
 	for _, rt := range routes {

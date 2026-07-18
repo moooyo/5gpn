@@ -34,12 +34,21 @@
   · 其余 SNI/QUIC → mihomo 内置嗅探器（sniffer）取域名，经 5gpn-dns 的回环 Egress DNS
     Broker (127.0.0.1:5354) re-resolves through DNS_EGRESS_RESOLVER
     (operational default: plain-UDP 22.22.22.22)
+  · enabled interception module host → authenticated SOCKS5 TCP/UDP → 5gpn-intercept
+    (TLS/H1/H2 + QUIC v1/v2/HTTP3 termination and transformation) →
+    authenticated SOCKS5 TCP/UDP → mihomo intercept-egress → operator egress
         │
         ▼
   按运维者的 mihomo 配置选择应用层出口（默认 DIRECT）→ 互联网
 ```
 
 **一个主域名、一条证书 lineage**：`BASE_DOMAIN` 自动派生 `console.<base>`、`zash.<base>` 和 `dot.<base>`。Cloudflare 模式签发 apex + `*.<base>`，HTTP-01 模式则只签发这三个服务名的精确 SAN；两种生产模式都固定使用 `--cert-name <base>` 的同一条 scoped lineage。`console.<base>` 提供 SPA 与公开的 iOS profile 下载，所有 `/api/*` 仍强制 bearer token；`zash.<base>` 继续由 mihomo 来源白名单保护。
+
+Modular MITM uses a completely separate private root CA. It is not
+part of the public lineage above and never replaces the DoT or console
+certificate. Only the root-owned certificate publisher can use its signing key
+to create a leaf for the enabled module host set; the runtime sidecar cannot
+read that key.
 
 | 场景 | DNS 行为 | 数据路径 |
 |---|---|---|
@@ -63,13 +72,15 @@
   - **HTTPS REST API + React Web 控制台 + iOS 描述文件**：console SPA 资源与 profile 下载公开，所有 API 需 bearer token；iOS/Android 配置说明、二维码与下载入口统一位于控制台“配置向导”；zashboard 仍由 mihomo `whitelist.txt` 来源白名单保护。
   - **zashboard 面板**：同样经 mihomo SNI 分流 + 白名单暴露到本机另一回环端口。
   - **进程内 Telegram bot**（`github.com/go-telegram/bot`，管理员门控，直接调 `Controller`、不走 HTTP/token）。
+  - **模块控制一致性**：Console `/modules` 与 Telegram 模块菜单调用同一个事务管理器；启用或关闭会一并更新证书、mihomo 规则和 DNS 引流，任一步失败都会回滚或保持旧状态。
   - **Mihomo controller TLS**：zash 证书角色由 zashboard 与 mihomo controller 共用。`DNS_MIHOMO_CONTROLLER` 是回环拨号地址；客户端以派生的 `zash.<base>` 校验 TLS 身份并信任 `DNS_ZASH_CERT`。Mihomo v1.19.28 通过只读 `SAFE_PATHS=/etc/5gpn/cert/zash` 读取位于 `-d /etc/5gpn/mihomo` 外的证书。普通重装逐字节保留已通过校验的 operator-owned 配置；若 verified controller transport 无法构造，DNS 与其余控制面继续运行，Mihomo 健康、配置和代理端点返回 unavailable/503，绝不降级到明文 HTTP。
-- **出口由 mihomo 原生配置拥有**：被代理流量经 mihomo 的 `tunnel` 监听 + 内置嗅探器透明转发（不解密 TLS）；完整 `/etc/5gpn/mihomo/config.yaml` 由运维者管理，默认 `Proxies` 组只有 `DIRECT`，也可加入 mihomo 支持的应用层节点/组。DNS 策略只决定“是否进入网关”，绝不生成 mihomo 出口。仍禁止 TUN/TProxy、WireGuard、fwmark、策略路由表或把本项目变成客户端默认路由器。
+- **出口由 mihomo 原生配置拥有**：被代理流量经 mihomo 的 `tunnel` 监听 + 内置嗅探器透明转发；完整 `/etc/5gpn/mihomo/config.yaml` 由运维者管理，默认 `Proxies` 组只有 `DIRECT`，也可加入 mihomo 支持的应用层节点/组。The allowlisted module sidecar is the only TLS-termination exception, and every transformed upstream returns through mihomo. DNS 策略只决定“是否进入网关”，绝不生成 mihomo 出口。仍禁止 TUN/TProxy、WireGuard、fwmark、策略路由表或把本项目变成客户端默认路由器。
 - **Explicit alternate Web ports**: the initial mihomo seed accepts TCP `:8080` and `:8443` in addition to `:80` and `:443`. HTTP Host or TLS SNI replaces the synthetic gateway destination while preserving the accepted port. This does not provide arbitrary-port, raw-UDP, no-SNI, or ECH-inner-name forwarding.
 - **Ingress modules**: Settings exposes a fixed, explicit catalog backed by the complete operator-owned mihomo YAML. The `speedtest-5060` module is enabled in fresh and explicitly reset seeds, adding TCP/UDP `:5060`, a same-port `console.<base>:5060` forced-sniff target, HTTP/TLS/QUIC sniffing, and port-scoped rejects for the loopback console panels. Operators can disable or re-enable it with revision checks, full `mihomo -t` validation, backup, atomic publication, and hot-apply rollback. Its hostname target isolates malformed traffic from the other default ingress ports. TCP needs a visible Host/SNI and UDP supports recognizable QUIC only — Ookla native UDP and other raw UDP remain unsupported. Because `5060` is also a common SIP port and the listener is an unauthenticated Host/SNI relay, restrict its sources with the provider security group or an independently managed firewall.
+- **Modular full HTTP/3 interception**: the dedicated Console page imports one Surge/Loon URL, pasted module, or local upload into immutable SHA-256 snapshots. `hub.kelee.one` is only an external selection link; 5gpn does not crawl or mirror it. Supported MITM hosts, HTTP request/response scripts, request-header rewrites, and URL reject/redirect actions are shown before enable; exact source/script bodies are available on demand, and unsupported directives require explicit partial-compatibility acknowledgement. Scripts run in a bounded goja VM with no network, filesystem, process, or module-loader access. `builtin-wloc` remains disabled by default and applies the bounded Apple protobuf transformer. Port-scoped TCP TLS, QUIC v1/v2, and HTTP/3 on `:443` share the same active host allowlist; HTTP and alternate-port traffic stays on the normal mihomo path, and all transformed upstream TCP/UDP returns through mihomo. The private CA profile requires manual full trust and may be used only on owned or explicitly authorized devices.
 - **无宿主防火墙**：项目不管理宿主 nftables；zashboard 的网络访问控制由 mihomo 来源白名单承担，console API 依赖 bearer 鉴权。
 - **Operational hardening**: certificate pairs hot-reload without a service restart; HTTP-01 stops mihomo only for the bounded ACME `:80` challenge; `kill -HUP` remains rules-only; privileged bot operations can request only pre-installed fixed units through narrowly authorized `systemctl` actions.
-- **Minimal runtime dependencies**: the repository contains no Python; Go has three direct dependencies (`miekg/dns`, `go-telegram/bot`, and `yaml.v3`), with YAML parsing kept as the explicit structural-validation boundary. Third-party gateway tools remain pinned prebuilt binaries, so no compiler toolchain is installed on the gateway.
+- **Minimal runtime dependencies**: the repository contains no Python. `5gpn-dns` retains its three direct dependencies (`miekg/dns`, `go-telegram/bot`, and `yaml.v3`); the separate interception module has three explicit direct dependencies: `quic-go`, `goja`, and `regexp2` (used to bound goja's backtracking fallback). Release binaries are built in CI, so no compiler toolchain is installed on the gateway.
 
 ---
 
@@ -158,7 +169,7 @@ sudo bash install.sh setup-tgbot
 ```bash
 5gpn                        # 打开管理菜单
 5gpn status                # 服务 / 域名 / 列表 状态
-5gpn restart               # 重启 5gpn-dns + mihomo
+5gpn restart               # 重启 5gpn-dns + 5gpn-intercept + mihomo
 5gpn configure             # 打开完整配置 TUI，事务化应用并在失败时回滚
 5gpn mihomo-reset          # 显式备份当前配置，以通过 mihomo -t 的最新种子原子替换
 5gpn reload-rules          # 重载规则缓存与 chnroute（SIGHUP）

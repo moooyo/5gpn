@@ -36,7 +36,7 @@ WatchdogSec=30
 User=gpn-dns
 Group=gpn-dns
 # Grants the raw-config editor access to the shared operator-owned config.
-SupplementaryGroups=mihomo
+SupplementaryGroups=mihomo gpn-intercept
 UMask=0027
 LimitNOFILE=65535
 # cgroup ceilings so an overload (or a leak) degrades instead of OOM-killing the
@@ -93,7 +93,7 @@ RestrictAddressFamilies=AF_INET AF_UNIX
 ReadWritePaths=/etc/5gpn
 ReadOnlyPaths=/etc/5gpn/dns.env -/etc/5gpn/cert -/opt/5gpn/web
 # ACME credentials are consumed only by the out-of-sandbox renewal helper.
-InaccessiblePaths=-/etc/5gpn/acme
+InaccessiblePaths=-/etc/5gpn/acme -/etc/5gpn/intercept-ca -/etc/5gpn/intercept/tls
 
 [Install]
 WantedBy=multi-user.target

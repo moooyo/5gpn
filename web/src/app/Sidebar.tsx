@@ -13,6 +13,7 @@ import {
   Shield,
   Gauge,
   FileCode2,
+  Boxes,
   X,
   type LucideProps,
 } from 'lucide-react'
@@ -35,6 +36,7 @@ const ICONS: Record<string, ComponentType<LucideProps>> = {
   SlidersHorizontal,
   Gauge,
   FileCode2,
+  Boxes,
 }
 
 export interface SidebarProps {

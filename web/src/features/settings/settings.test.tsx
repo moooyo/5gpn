@@ -106,8 +106,8 @@ describe('SettingsPage', () => {
 
     expect(await screen.findByText('Speedtest 兼容')).toBeInTheDocument()
     expect(screen.getByText(':5060')).toBeInTheDocument()
-    expect(screen.getByText('TCP · Host/SNI')).toBeInTheDocument()
-    expect(screen.getByText('UDP · 仅 QUIC')).toBeInTheDocument()
+    expect(screen.getAllByText('TCP · Host/SNI')).toHaveLength(1)
+    expect(screen.getAllByText('UDP · 仅 QUIC')).toHaveLength(1)
 
     await user.click(screen.getByRole('switch', { name: '切换 Speedtest 兼容' }))
     expect(api.putIngressModule).not.toHaveBeenCalled()

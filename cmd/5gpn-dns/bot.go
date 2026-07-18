@@ -19,8 +19,9 @@ import (
 	"github.com/go-telegram/bot/models"
 )
 
-// botServices are the two runtime services the status card reports and whose
-// logs the bot may read.
+// botServices are the primary DNS and forwarding services the compact bot
+// reports and tails. The optional interception sidecar remains a Web-console
+// and systemd surface so the bot does not gain CA-adjacent operations.
 var botServices = []string{"5gpn-dns", "mihomo"}
 
 // domainRE is the canonical FQDN pattern, ported from tgbot.py's DOMAIN_RE but
@@ -622,6 +623,7 @@ func (bt *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update
 			"• 仅允许已配置管理员私聊操作。\n"+
 			"• <code>/lookup example.com</code> 查看规则判定与逐上游结果。\n"+
 			"• 重启 Mihomo 和续证需二次确认，并且同类操作只能同时运行一个。\n"+
+			"• MITM 模块可在菜单中审查状态并二次确认启停；部分兼容模块必须先在 Web 控制台确认。\n"+
 			"• 复杂策略、上游编辑和 Mihomo YAML 请使用 Web 控制台。\n"+
 			"• <code>/cancel</code> 只取消当前等待的域名输入，不会中断已启动的系统操作。",
 		mainMenu())
@@ -734,6 +736,8 @@ func auditableCallbackOp(intent callbackIntent) (op string, mutating bool) {
 		return "logs:" + intent.arg, true // privileged journal exfil to Telegram
 	case cbIOSPhoto:
 		return "ios-profile-photo", true
+	case cbModuleToggle:
+		return "module:" + intent.arg, true
 	default:
 		return "", false
 	}
@@ -789,6 +793,60 @@ func (bt *Bot) handleCallback(ctx context.Context, b *bot.Bot, update *models.Up
 		bt.edit(ctx, b, cq, "选择要查看日志的服务：", logsMenu())
 	case cbMenuIOS:
 		bt.edit(ctx, b, cq, bt.opIOSResult().HTML(), iosMenu())
+	case cbMenuModules:
+		bt.renderModules(ctx, b, cq, "")
+	case cbModuleRequest:
+		parts := strings.SplitN(intent.arg, ":", 2)
+		if len(parts) != 2 {
+			bt.edit(ctx, b, cq, "模块操作无效。", backKB("menu:modules"))
+			return
+		}
+		view, viewErr := bt.ctrl.InterceptModules()
+		if viewErr != nil {
+			bt.edit(ctx, b, cq, "❌ 模块状态不可用："+pre(viewErr.Error()), backKB("menu:main"))
+			return
+		}
+		var selected *interceptModuleView
+		for index := range view.Modules {
+			if view.Modules[index].ID == parts[1] {
+				selected = &view.Modules[index]
+				break
+			}
+		}
+		if selected == nil {
+			bt.edit(ctx, b, cq, "模块不存在或已被删除。", backKB("menu:modules"))
+			return
+		}
+		enabled := parts[0] == "on"
+		action := "关闭"
+		impact := "这会移除 DNS 与 mihomo 拦截路由。"
+		if enabled {
+			action = "启用"
+			impact = "这会发布模块证书、mihomo TCP/QUIC 规则与 DNS 引流，并允许脚本读取解密后的流量。"
+		}
+		bt.edit(ctx, b, cq, fmt.Sprintf("⚠️ <b>确认%s %s？</b>\n%s", action, html.EscapeString(telegramModuleName(*selected)), impact), interceptModuleConfirmationMenu(selected.ID, enabled))
+	case cbModuleToggle:
+		auditBot("module:"+intent.arg, uid, "invoked")
+		parts := strings.SplitN(intent.arg, ":", 2)
+		if len(parts) != 2 {
+			bt.edit(ctx, b, cq, "模块操作无效。", backKB("menu:modules"))
+			return
+		}
+		enabled := parts[0] == "on"
+		view, viewErr := bt.ctrl.InterceptModules()
+		if viewErr != nil {
+			auditBotOutcome("module:"+intent.arg, uid, false)
+			bt.edit(ctx, b, cq, "❌ 模块状态不可用："+pre(viewErr.Error()), backKB("menu:main"))
+			return
+		}
+		updated, updateErr := bt.ctrl.SetInterceptModuleEnabled(ctx, parts[1], view.Revision, enabled)
+		if updateErr != nil {
+			auditBotOutcome("module:"+intent.arg, uid, false)
+			bt.renderModules(ctx, b, cq, "❌ 操作失败："+pre(updateErr.Error()))
+			return
+		}
+		auditBotOutcome("module:"+intent.arg, uid, true)
+		bt.edit(ctx, b, cq, renderInterceptModules(updated, "✅ 模块状态已更新。"), interceptModulesMenu(updated))
 	case cbIOSPhoto:
 		auditBot("ios-profile-photo", uid, "invoked")
 		ok := bt.sendIOSPhoto(ctx, b, chatID)
@@ -827,6 +885,15 @@ func (bt *Bot) handleCallback(ctx context.Context, b *bot.Bot, update *models.Up
 	default:
 		bt.edit(ctx, b, cq, "未知操作。", backKB("menu:main"))
 	}
+}
+
+func (bt *Bot) renderModules(ctx context.Context, b *bot.Bot, cq *models.CallbackQuery, notice string) {
+	view, err := bt.ctrl.InterceptModules()
+	if err != nil {
+		bt.edit(ctx, b, cq, "❌ 模块状态不可用："+pre(err.Error()), backKB("menu:main"))
+		return
+	}
+	bt.edit(ctx, b, cq, renderInterceptModules(view, notice), interceptModulesMenu(view))
 }
 
 func confirmationPrompt(action botPrivilegedAction, expires time.Time) string {

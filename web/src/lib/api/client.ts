@@ -65,6 +65,39 @@ export const api = {
           method: 'PUT',
           body: JSON.stringify({ enabled, revision }),
         }),
+  getWLOCIntercept: () =>
+    MOCK ? mock.getWLOCIntercept() : apiFetch<T.WLOCInterceptView>('/api/interception/wloc'),
+  putWLOCIntercept: (update: T.WLOCInterceptUpdate) =>
+    MOCK
+      ? mock.putWLOCIntercept(update)
+      : apiFetch<T.WLOCInterceptView>('/api/interception/wloc', { method: 'PUT', body: JSON.stringify(update) }),
+  getInterceptModules: () =>
+    MOCK ? mock.getInterceptModules() : apiFetch<T.InterceptModulesView>('/api/interception/modules'),
+  getInterceptModuleSnapshot: (id: string) =>
+    MOCK
+      ? mock.getInterceptModuleSnapshot(id)
+      : apiFetch<T.InterceptModuleSnapshot>(`/api/interception/modules/${encodeURIComponent(id)}`),
+  importInterceptModule: (request: T.InterceptModuleImport) =>
+    MOCK
+      ? mock.importInterceptModule(request)
+      : apiFetch<T.InterceptModulesView>('/api/interception/modules/import', {
+          method: 'POST',
+          body: JSON.stringify(request),
+        }),
+  putInterceptModule: (id: string, update: T.InterceptModuleUpdate) =>
+    MOCK
+      ? mock.putInterceptModule(id, update)
+      : apiFetch<T.InterceptModulesView>(`/api/interception/modules/${encodeURIComponent(id)}`, {
+          method: 'PUT',
+          body: JSON.stringify(update),
+        }),
+  deleteInterceptModule: (id: string, revision: string) =>
+    MOCK
+      ? mock.deleteInterceptModule(id, revision)
+      : apiFetch<T.InterceptModulesView>(`/api/interception/modules/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+          body: JSON.stringify({ revision }),
+        }),
 
   // ---- unified policy rules ----------------------------------------------
   getPolicyRules: () => (MOCK ? mock.getPolicyRules() : apiFetch<T.PolicyRule[]>('/api/policy/rules')),

@@ -168,6 +168,9 @@ type Config struct {
 	// daemon validates (`mihomo -t`) and hot-applies every subsequent PUT/reset
 	// via api_mihomo_config.go, but owns no region of it.
 	MihomoConfigFile string
+	// InterceptConfigFile is the modular sidecar document managed by the
+	// authenticated module API. It never contains a CA private key.
+	InterceptConfigFile string
 
 	// PolicyRulesFile is the console-managed plain-JSON rule list (env
 	// DNS_POLICY_RULES, default /etc/5gpn/policy.json). An explicit empty value disables the store
@@ -254,6 +257,7 @@ type Config struct {
 //	DNS_WHITELIST_FILE  /etc/5gpn/mihomo/whitelist.txt (panel source-IP allowlist)
 //	DNS_BASE_DOMAIN     (none — dot/console/zash names derive from it)
 //	DNS_MIHOMO_CONFIG   /etc/5gpn/mihomo/config.yaml (operator-owned mihomo config; console raw editor)
+//	DNS_INTERCEPT_CONFIG /etc/5gpn/intercept/config.json (allowlisted module sidecar config)
 //	DNS_POLICY_RULES    /etc/5gpn/policy.json (unified policy-rule model; plain JSON, public subscription URLs; empty disables)
 //	DNS_ZASH_DIR        /opt/5gpn/zash (unzipped zashboard dist, served by the zash panel)
 //	DNS_ZASH_LISTEN     127.0.0.2:443 (second loopback HTTPS listener for the zash panel)
@@ -264,34 +268,35 @@ type Config struct {
 // be non-empty, or an error is returned.
 func LoadConfig() (Config, error) {
 	cfg := Config{
-		ListenDoT:         envListen("DNS_LISTEN_DOT", ":853"),
-		ListenDebug:       envListen("DNS_LISTEN_DEBUG", "127.0.0.1:5353"),
-		CertFile:          os.Getenv("DNS_CERT"),
-		KeyFile:           os.Getenv("DNS_KEY"),
-		WebCertFile:       os.Getenv("DNS_WEB_CERT"),
-		WebKeyFile:        os.Getenv("DNS_WEB_KEY"),
-		RulesDir:          envOr("DNS_RULES_DIR", "/etc/5gpn/rules"),
-		ChnrouteFile:      os.Getenv("DNS_CHNROUTE"),
-		SubscriptionsFile: envOr("DNS_SUBSCRIPTIONS", "/etc/5gpn/subscriptions.json"),
-		ListenAPI:         envListen("DNS_LISTEN_API", "127.0.0.1:443"),
-		APIToken:          os.Getenv("DNS_API_TOKEN"),
-		StatsFile:         envListen("DNS_STATS_FILE", "/etc/5gpn/stats.json"),
-		TGBotToken:        os.Getenv("TGBOT_TOKEN"),
-		TGBotAdmins:       parseAdminIDs(os.Getenv("TGBOT_ADMINS")),
-		TGBotProxyURL:     strings.TrimSpace(os.Getenv("TGBOT_PROXY_URL")),
-		TGBotAlerts:       envBool("TGBOT_ALERTS", false),
-		WWWDir:            envOr("WWW_DIR", "/opt/5gpn/www"),
-		WebDir:            envOr("DNS_WEB_DIR", "/opt/5gpn/web"),
-		BaseDomain:        envOr("DNS_BASE_DOMAIN", ""),
-		MihomoController:  envOr("DNS_MIHOMO_CONTROLLER", "127.0.0.1:9090"),
-		MihomoSecret:      envOr("DNS_MIHOMO_SECRET", ""),
-		WhitelistFile:     envOr("DNS_WHITELIST_FILE", "/etc/5gpn/mihomo/whitelist.txt"),
-		MihomoConfigFile:  envOr("DNS_MIHOMO_CONFIG", "/etc/5gpn/mihomo/config.yaml"),
-		PolicyRulesFile:   envListen("DNS_POLICY_RULES", "/etc/5gpn/policy.json"),
-		ZashDir:           envOr("DNS_ZASH_DIR", "/opt/5gpn/zash"),
-		ZashListen:        envListen("DNS_ZASH_LISTEN", "127.0.0.2:443"),
-		ZashCertFile:      os.Getenv("DNS_ZASH_CERT"),
-		ZashKeyFile:       os.Getenv("DNS_ZASH_KEY"),
+		ListenDoT:           envListen("DNS_LISTEN_DOT", ":853"),
+		ListenDebug:         envListen("DNS_LISTEN_DEBUG", "127.0.0.1:5353"),
+		CertFile:            os.Getenv("DNS_CERT"),
+		KeyFile:             os.Getenv("DNS_KEY"),
+		WebCertFile:         os.Getenv("DNS_WEB_CERT"),
+		WebKeyFile:          os.Getenv("DNS_WEB_KEY"),
+		RulesDir:            envOr("DNS_RULES_DIR", "/etc/5gpn/rules"),
+		ChnrouteFile:        os.Getenv("DNS_CHNROUTE"),
+		SubscriptionsFile:   envOr("DNS_SUBSCRIPTIONS", "/etc/5gpn/subscriptions.json"),
+		ListenAPI:           envListen("DNS_LISTEN_API", "127.0.0.1:443"),
+		APIToken:            os.Getenv("DNS_API_TOKEN"),
+		StatsFile:           envListen("DNS_STATS_FILE", "/etc/5gpn/stats.json"),
+		TGBotToken:          os.Getenv("TGBOT_TOKEN"),
+		TGBotAdmins:         parseAdminIDs(os.Getenv("TGBOT_ADMINS")),
+		TGBotProxyURL:       strings.TrimSpace(os.Getenv("TGBOT_PROXY_URL")),
+		TGBotAlerts:         envBool("TGBOT_ALERTS", false),
+		WWWDir:              envOr("WWW_DIR", "/opt/5gpn/www"),
+		WebDir:              envOr("DNS_WEB_DIR", "/opt/5gpn/web"),
+		BaseDomain:          envOr("DNS_BASE_DOMAIN", ""),
+		MihomoController:    envOr("DNS_MIHOMO_CONTROLLER", "127.0.0.1:9090"),
+		MihomoSecret:        envOr("DNS_MIHOMO_SECRET", ""),
+		WhitelistFile:       envOr("DNS_WHITELIST_FILE", "/etc/5gpn/mihomo/whitelist.txt"),
+		MihomoConfigFile:    envOr("DNS_MIHOMO_CONFIG", "/etc/5gpn/mihomo/config.yaml"),
+		InterceptConfigFile: envOr("DNS_INTERCEPT_CONFIG", "/etc/5gpn/intercept/config.json"),
+		PolicyRulesFile:     envListen("DNS_POLICY_RULES", "/etc/5gpn/policy.json"),
+		ZashDir:             envOr("DNS_ZASH_DIR", "/opt/5gpn/zash"),
+		ZashListen:          envListen("DNS_ZASH_LISTEN", "127.0.0.2:443"),
+		ZashCertFile:        os.Getenv("DNS_ZASH_CERT"),
+		ZashKeyFile:         os.Getenv("DNS_ZASH_KEY"),
 	}
 	if err := validateTGBotProxyURL(cfg.TGBotProxyURL); err != nil {
 		// The bot is optional. Keep the invalid value so a later runtime token
@@ -300,6 +305,9 @@ func LoadConfig() (Config, error) {
 		log.Printf("config: invalid TGBOT_PROXY_URL; disabling Telegram bot: %v", err)
 		cfg.TGBotToken = ""
 		cfg.TGBotAdmins = map[int64]bool{}
+	}
+	if cfg.InterceptConfigFile != "/etc/5gpn/intercept/config.json" {
+		return Config{}, fmt.Errorf("DNS_INTERCEPT_CONFIG must be /etc/5gpn/intercept/config.json")
 	}
 	for key, addr := range map[string]string{
 		"DNS_LISTEN_DEBUG": cfg.ListenDebug,

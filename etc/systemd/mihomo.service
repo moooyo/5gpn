@@ -1,8 +1,8 @@
 # 5gpn-unit-id: mihomo.service:v1
 [Unit]
 Description=5gpn mihomo (TLS external-controller + SNI/QUIC forward + egress)
-After=network-online.target
-Wants=network-online.target
+After=network-online.target 5gpn-intercept.service
+Wants=network-online.target 5gpn-intercept.service
 
 [Service]
 Type=simple

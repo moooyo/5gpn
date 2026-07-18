@@ -189,12 +189,25 @@ func (s *MihomoConfigStore) Default() string {
 		consoleDomain = "console." + base
 		zashDomain = "zash." + base
 	}
+	interceptInUser, interceptInPass := "interception-unavailable", "interception-unavailable-password"
+	interceptUpUser, interceptUpPass := "interception-upstream-unavailable", "interception-upstream-unavailable-password"
+	interceptPath := envOr("DNS_INTERCEPT_CONFIG", "/etc/5gpn/intercept/config.json")
+	if body, err := os.ReadFile(interceptPath); err == nil {
+		if document, err := decodeInterceptConfig(body); err == nil {
+			interceptInUser, interceptInPass = document.Username, document.Password
+			interceptUpUser, interceptUpPass = document.UpstreamProxy.Username, document.UpstreamProxy.Password
+		}
+	}
 	r := strings.NewReplacer(
 		"__CONSOLE_DOMAIN__", consoleDomain,
 		"__ZASH_DOMAIN__", zashDomain,
 		"__MIHOMO_LISTENERS__", renderMihomoListeners(mihomoSeedListenerIPs(), consoleDomain),
 		"__GATEWAY_IP__", os.Getenv("DNS_GATEWAY_IP"),
 		"__CONTROLLER_SECRET__", os.Getenv("DNS_MIHOMO_SECRET"),
+		"__INTERCEPT_INBOUND_USERNAME__", interceptInUser,
+		"__INTERCEPT_INBOUND_PASSWORD__", interceptInPass,
+		"__INTERCEPT_UPSTREAM_USERNAME__", interceptUpUser,
+		"__INTERCEPT_UPSTREAM_PASSWORD__", interceptUpPass,
 	)
 	return r.Replace(mihomoConfigSeedTemplate)
 }
@@ -227,6 +240,13 @@ log-level: info
 
 listeners:
 __MIHOMO_LISTENERS__
+  - name: intercept-egress
+    type: mixed
+    listen: 127.0.0.1
+    port: 17890
+    udp: true
+    users:
+      - {username: __INTERCEPT_UPSTREAM_USERNAME__, password: __INTERCEPT_UPSTREAM_PASSWORD__}
 
 sniffer:
   enable: true
@@ -254,7 +274,14 @@ rule-providers:
 # node-subscription providers (proxy-providers:), then wire them into
 # proxy-groups as you like; the terminal MATCH rule below routes every
 # gateway-bound query that reached this point to the Proxies group.
-proxies: []
+proxies:
+  - name: MODULE-MITM
+    type: socks5
+    server: 127.0.0.1
+    port: 18080
+    username: __INTERCEPT_INBOUND_USERNAME__
+    password: __INTERCEPT_INBOUND_PASSWORD__
+    udp: true
 proxy-providers: {}
 
 proxy-groups:
@@ -281,6 +308,7 @@ rules:
   - IP-CIDR,192.168.0.0/16,REJECT,no-resolve
   - IP-CIDR,100.64.0.0/10,REJECT,no-resolve
   - IP-CIDR,169.254.0.0/16,REJECT,no-resolve
+  - IN-NAME,intercept-egress,Proxies
   - MATCH,Proxies
 `
 

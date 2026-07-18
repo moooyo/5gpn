@@ -7,9 +7,11 @@ current behavior.
 
 ## System boundary
 
-5gpn is an IPv4 DNS-steering gateway with two runtime components:
+5gpn is an IPv4 DNS-steering gateway with three runtime components:
 
 - `5gpn-dns` is the DNS decision engine and control-plane process.
+- `5gpn-intercept` is an allowlisted, module-driven TLS and HTTP/3
+  transformation sidecar.
 - mihomo is the application-layer forwarding data plane.
 
 The DNS answer determines whether a client connects directly to an origin or
@@ -26,6 +28,14 @@ client
   | real origin address     | gateway address
   v                         v
 client direct          mihomo :80/:443/:5060/:8080/:8443 -- operator-defined application egress
+                              |
+                              | enabled module hosts, authenticated SOCKS5 TCP/UDP
+                              v
+                       5gpn-intercept -- TLS/H1/H2 and QUIC v1/v2/H3 termination
+                              |
+                              | authenticated loopback SOCKS5 TCP/UDP
+                              v
+                       mihomo intercept-egress -- operator-defined application egress
 ```
 
 This is not a host router or VPN. The project does not install or manage TUN,
@@ -42,8 +52,10 @@ architecture.
 | `5gpn-dns` | `127.0.0.1:5354/udp` and `/tcp` | Egress DNS broker used by mihomo after hostname sniffing. |
 | `5gpn-dns` | `127.0.0.1:443/tcp` | Public HTTPS console assets and iOS profile download, plus the bearer-authenticated API. |
 | `5gpn-dns` | `127.0.0.2:443/tcp` | HTTPS zashboard static files and its controller proxy. |
+| `5gpn-intercept` | `127.0.0.1:18080/tcp` | Authenticated SOCKS5 control and TCP interception ingress. Each authenticated UDP ASSOCIATE receives a private ephemeral loopback UDP socket. |
 | mihomo | configured local IPv4 addresses on TCP `:80`, `:443`, `:5060`, `:8080`, and `:8443`, plus UDP `:443` and `:5060` | HTTP/TLS/QUIC ingress for traffic steered to the gateway. |
 | mihomo | `127.0.0.1:9090/tcp` | TLS-only external controller. |
+| mihomo | `127.0.0.1:17890/tcp` and UDP associations | Authenticated mixed listener used only for post-transformation egress from `5gpn-intercept`. |
 
 There is no public DoH listener and no client-facing plain DNS listener on
 `:53`. Those transports must not be reintroduced. The debug DNS and egress
@@ -59,7 +71,7 @@ UDP forwarding, or routing when no usable hostname is visible. Port-scoped
 rejects prevent the public console and zashboard hostnames from exposing
 unrelated loopback services on `:80`, `:5060`, `:8080`, or `:8443`.
 
-The authenticated console exposes a finite ingress-module catalog. Module state
+The authenticated console exposes a finite mihomo-module catalog. Module state
 is derived from the complete operator-owned YAML, not from a separate state
 file. The first module is `speedtest-5060`, enabled in every fresh or explicitly
 reset seed. It adds TCP and UDP `:5060` on every canonical gateway listener
@@ -75,8 +87,11 @@ server after DNS steering and therefore fail closed.
 
 The rule boundary is exact: eight base panel protocol/port rejects, the two
 `:5060` panel rejects, the console and allowlisted zashboard routes, the
-zashboard deny-by-default rule, seven anti-loop destination guards, and the
-terminal `MATCH`. The anti-loop guards must follow the panel routes because
+zashboard deny-by-default rule, seven anti-loop destination guards, the
+interception egress bypass, zero or more canonical module-host rules, and the
+terminal `MATCH`. Module-host rules use the reserved `MODULE-MITM` action and
+must be a contiguous, sorted block immediately after the recursion bypass.
+The anti-loop guards must follow the panel routes because
 mihomo resolves the synthetic console target through `hosts` before matching
 rules; moving those guards earlier would reject the legitimate console
 fallback as loopback traffic. The module is manageable only with this boundary
@@ -94,6 +109,55 @@ restrict source access with the provider security group or an independently
 managed firewall. Fresh install and explicit reset publish `speedtest-5060`
 enabled. Reinstall, configure, daemon startup, and reload preserve the current
 operator-owned YAML and never reconcile or enable a missing module implicitly.
+
+The interception subsystem is a separate catalog from the fixed mihomo ingress
+catalog. The seed always contains an authenticated loopback `MODULE-MITM`
+SOCKS5 node, the matching `intercept-egress` mixed listener, and an `IN-NAME`
+bypass to the terminal operator egress group. No module-host rule is present in
+a fresh seed. Enabling a module derives exact `DOMAIN` and wildcard
+`DOMAIN-WILDCARD` matchers from its normalized `[MITM]` host list and combines
+each with `DST-PORT,443` in a canonical `AND` rule. Only TCP TLS and UDP QUIC on
+port 443 are sent to the sidecar; HTTP and alternate-port traffic continues to
+the operator's normal rule path. A hostname target must match
+the active module set; a pure-IP SOCKS target is accepted only until the TLS or
+QUIC handshake supplies an allowlisted SNI. Unknown SNI fails closed.
+
+The sidecar terminates TLS with HTTP/1.1 or HTTP/2 and QUIC v1/v2 with HTTP/3.
+Its upstream connection is separately certificate-verified and always returns
+through mihomo's authenticated `intercept-egress` SOCKS5 listener. The HTTP/3
+client starts with QUIC v1 and retries v2 only after an authenticated version-
+negotiation failure, before request data is sent. There is no direct sidecar
+egress.
+
+Installing the private root is necessary but not sufficient for every app.
+Certificate pinning, mutual TLS, an independently provisioned ECH configuration,
+or a protocol without an HTTP semantic layer remains unsupported and fails
+closed. The DNS engine's existing HTTPS/SVCB NODATA behavior prevents ordinary
+DNS-discovered ECH on the steered path, but it cannot remove keys provisioned
+inside an application.
+
+`builtin-wloc` is the built-in module and is disabled by default. It declares
+only `gs-loc.apple.com` and `gs-loc-cn.apple.com` and applies the bounded WLOC
+protobuf response transformer at `/clls/wloc`. External modules are immutable
+Surge or Loon snapshots imported by one explicit URL, pasted text, or an
+uploaded local file. 5gpn does not enumerate, crawl, mirror, or redistribute a
+third-party module store. The Console may link to `https://hub.kelee.one/` as
+an external selection aid. URL imports may opt into the `Quantumult X` user
+agent and an explicit HTTPS Referer; those headers do not bypass an origin's
+authentication or anti-bot policy.
+
+The supported external-module surface is intentionally finite: `[MITM]
+hostname`, HTTP request/response entries in `[Script]`, request header delete/
+replace/replace-regex actions in `[Header Rewrite]`, and terminal actions in
+`[URL Rewrite]` or `[Rewrite]`. Module and referenced script bodies are fetched
+once with the subscription-grade HTTPS/redirect/SSRF dial guard, bounded,
+hashed, and stored locally. Relative script URLs are resolved only for a URL-
+based import. Unsupported sections or capabilities are displayed explicitly.
+A partially compatible snapshot remains disabled unless the importer records
+an explicit partial-execution acknowledgement. That acknowledgement may also
+be recorded later from the authenticated Console after inspecting the exact
+snapshot; Telegram cannot bypass this review gate. Unsupported directives
+never execute.
 
 The `5gpn-dns` systemd unit is softly ordered after mihomo (`Wants`/`After`),
 not coupled with `Requires` or `BindsTo`: a controller or data-plane failure
@@ -115,6 +179,16 @@ all intents. The policy compiler may maintain rule-cache files and policy-owned
 subscriptions, but policy apply is DNS-only. It must never render, patch, or
 apply mihomo configuration. There are no policy drafts, generations,
 policy-v2 objects, structured egress targets, node APIs, or selector APIs.
+
+Enabled interception hosts form a separate system overlay before this operator
+list. The overlay is empty after a fresh install and is published only after an
+explicit module transaction has prepared the module snapshot and certificate,
+validated and hot-applied the matching mihomo rules, and committed the sidecar
+state. A matching name receives the same gateway action and `force-proxy`
+observability reason as an explicit proxy-intent rule. Disabling a module
+removes its overlay and flushes the response cache. This overlay is not a
+second general policy language: it accepts only the normalized host patterns
+owned by enabled interception modules and cannot select an egress node.
 
 An unmatched name uses one of three fallbacks:
 
@@ -234,9 +308,45 @@ when all of its listener and sniffer objects match the canonical shape. Each
 write is protected by a revision of the original bytes, validates the complete
 candidate, retains a backup, atomically publishes it, and hot-applies it. A
 stale revision or partial/custom module shape is rejected. A failed hot apply
-restores and reapplies the previous bytes. There is no module state file,
+restores and reapplies the previous bytes. There is no separate ingress-capability state file,
 generated region, startup reconciliation, or daemon-owned YAML fragment; the
 result remains fully operator-owned and visible in the raw editor.
+
+The `MODULE-MITM` action and its contiguous rule block are reserved for the
+interception manager. A raw reset or safe partial deletion makes active modules
+degraded and immediately removes their DNS overlay. A later explicit module
+toggle may reconcile a missing/subset reserved block, but it refuses any extra,
+reordered, duplicate, non-canonical, or non-module rule targeting the reserved
+action.
+
+Interception modules are managed through the authenticated
+`/api/interception/modules` surface. The Console and Telegram bot call the same
+in-process `InterceptModuleManager`; neither has a private toggle path. Import,
+argument update, delete, and enable/disable operations carry the SHA-256
+revision of the complete sidecar document. The WLOC coordinate endpoint is a
+narrow view over the same revision and manager.
+Telegram lists the same readiness and host state and uses a separate
+confirmation message before applying an enable or disable. It cannot import,
+inspect source bodies, edit arguments, or acknowledge partial compatibility;
+those higher-context operations remain in the authenticated Console.
+
+An enable/disable transaction holds the sidecar and mihomo store locks in a
+fixed order. It validates the candidate sidecar with the installed
+`5gpn-intercept --check-config`, structurally renders the reserved mihomo rule
+block, validates the complete YAML invariants, runs `mihomo -t`, and preserves
+the old bytes for rollback. When new SANs are needed, it atomically publishes
+the candidate sidecar document, waits for the root-owned certificate publisher
+to acknowledge the exact host-set digest, then atomically publishes and hot-
+applies mihomo before publishing the DNS overlay. Certificate or mihomo failure
+restores the old sidecar bytes; mihomo failure also restores and reapplies the
+old operator configuration. Disable operations may leave a temporary
+certificate SAN superset, but the runtime allowlist rejects disabled hosts.
+
+`/etc/5gpn/intercept/config.json` preserves installer-owned SOCKS credentials,
+loopback addresses, and certificate paths across every API write. It also
+stores the built-in WLOC settings and immutable external module/source/script
+snapshots. The sidecar reloads only a fully valid document by mtime and retains
+the last valid snapshot after an invalid external replacement.
 
 New seeds use mihomo's native TLS controller only:
 
@@ -263,7 +373,7 @@ One base domain derives three single-label service names:
 | Name | Role | Access boundary |
 | --- | --- | --- |
 | `dot.<base>` | DoT identity on `:853` | Public DNS service. |
-| `console.<base>` | Public React SPA, `/ios/ios-dot.mobileconfig`, and `/api/*` | SPA assets and profile download are public; every API endpoint requires the console bearer token. |
+| `console.<base>` | Public React SPA, `/ios/ios-dot.mobileconfig`, `/ios/ios-intercept-ca.mobileconfig`, and `/api/*` | SPA assets and profile downloads are public; every API endpoint requires the console bearer token. |
 | `zash.<base>` | zashboard | Separate mihomo source-IP allowlist route and a dedicated controller pass-through. |
 
 Mihomo sends public console traffic to `127.0.0.1:443` and allowlisted
@@ -381,6 +491,15 @@ Specialized live state remains in purpose-specific, atomically written files:
   A present but unreadable/malformed bot override disables the bot fail-closed
   instead of restoring a possibly revoked bootstrap administrator;
 - `mihomo/config.yaml` and `mihomo/whitelist.txt` are operator data-plane state.
+- `intercept/config.json` is the sidecar runtime document. Its SOCKS credentials
+  and fixed paths are installer-owned; module imports store bounded immutable
+  source and script snapshots, normalized hosts/actions, compatibility review,
+  and enabled state. The built-in WLOC parameters live in the same document;
+- `/var/lib/5gpn-intercept/store.json` is the size-bounded, sidecar-owned
+  persistence backend for compatible `$persistentStore` and `$prefs` calls.
+  Scripts cannot choose its path. Normal uninstall preserves its independently
+  marked state directory with the module document; purge and decommission
+  remove it through the fixed canonical path and ownership marker.
 
 Adding a daemon knob requires config parsing, installer persistence, the
 `dns.env.example` entry, and tests in the same change. SIGHUP reloads rule files
@@ -407,6 +526,38 @@ The same certificate is deployed into three role directories:
 - `/etc/5gpn/cert/dot/current` for DoT and iOS profile signing;
 - `/etc/5gpn/cert/web/current` for console HTTPS and its public iOS profile download;
 - `/etc/5gpn/cert/zash/current` for zashboard HTTPS and the mihomo controller.
+
+Modular interception uses a separate private trust domain. Its root certificate
+and signing key live under the independently ownership-marked
+`/etc/5gpn/intercept-ca`; no runtime service can read the signing key. The
+sidecar receives only a non-CA leaf under `/etc/5gpn/intercept/tls`. Its SAN set
+contains the two stable built-in WLOC names plus the exact and wildcard hosts
+of currently enabled external modules. A wildcard SAN is permitted only in the
+normalized `*.example.com` shape; a module cannot request an all-domain or IP
+certificate.
+
+`5gpn-intercept-cert.path` watches the atomically replaced module document and
+starts the root-owned, sandboxed `5gpn-intercept-cert.service`. The helper asks
+the sidecar binary's minimal duplicate-key-safe certificate-request parser for
+one canonical SAN list and digest. This root path never compiles or executes
+module JavaScript. The helper signs a new
+397-day leaf, publishes both staged keypair files, then writes the public
+`intercept/cert-state` digest that unblocks the module transaction only after
+the pair validates. The sidecar retains its last valid in-memory leaf across a
+transient mixed-file reload attempt. The daily
+scoped certificate service invokes the same idempotent helper for expiry. The
+root is never rotated implicitly and the sidecar loads a new leaf on the next
+handshake without a restart.
+`5gpn-intercept.service` also requires and orders itself after the idempotent
+certificate oneshot, so a module document changed while the gateway was off
+cannot start the sidecar with a stale SAN set.
+
+The root is distributed in a separate, removable, CMS-signed
+`/ios/ios-intercept-ca.mobileconfig`. A manually downloaded profile still
+requires the operator to enable full SSL trust in iOS. Removing interception
+trust does not remove or change the cellular DoT profile. Normal uninstall and
+purge preserve the private root for enrolled devices; explicit decommission
+removes it through its ownership marker.
 
 Each `current` entry is an atomically replaced relative symlink to a complete,
 validated generation containing both `fullchain.pem` and `privkey.pem`. Readers
@@ -485,7 +636,7 @@ configuration in place. Third-party tools are prebuilt and version-pinned; no
 compiler toolchain is installed on the gateway. Gum bootstrap failure is
 non-fatal and falls back to plain output.
 
-Replacement or removal of the current `5gpn-dns`, mihomo, and certificate-
+Replacement or removal of the current `5gpn-dns`, `5gpn-intercept`, mihomo, and certificate-
 renewal service/timer units is gated by an explicit 5gpn ownership fingerprint.
 
 Root-owned recursive deletion requires all of the following:
@@ -524,9 +675,11 @@ for superseded pre-release implementations.
 
 ## Runtime hardening and failure boundaries
 
-Both services run as dedicated non-root accounts under hardened systemd units.
-Each receives only `CAP_NET_BIND_SERVICE`; `5gpn-dns` receives only IPv4 and
-Unix socket families, while mihomo additionally needs IPv6 and netlink for its
+All three long-running services run as dedicated non-root accounts under hardened systemd units.
+Mihomo and `5gpn-dns` receive only `CAP_NET_BIND_SERVICE`; `5gpn-intercept`
+receives no capabilities because all of its sockets use high loopback ports.
+`5gpn-dns` and `5gpn-intercept` receive only IPv4 and Unix socket families,
+while mihomo additionally needs IPv6 and netlink for its
 own direct egress and route lookup. Runtime state owned by `5gpn-dns` is
 private to that account. `/etc/5gpn/mihomo` is a setgid `root:mihomo` directory
 with group-writable `0660` files so mihomo can read its operator-owned config
@@ -546,9 +699,22 @@ starting `5gpn-certbot-renew.service`. The installer ownership-gates,
 snapshots, and rolls back that exact rule and exporter together with the other
 service units. Any unit drop-in or pre-existing exact journal-export instance
 invalidates the ownership fingerprint and aborts before polkit publication.
-Neither runtime-service sandbox can access `/etc/5gpn/acme`;
-only the out-of-sandbox, scoped renewal helper may read the Cloudflare
-Zone:DNS:Edit credential.
+No long-running runtime-service sandbox can access `/etc/5gpn/acme` or the
+interception CA signing key. Only the bounded root certificate oneshot may read
+that key, and only the scoped public-certificate renewal helper may read the
+Cloudflare Zone:DNS:Edit credential.
+
+Each external script action runs in a fresh goja VM. The compatibility globals
+are limited to `$request`, `$response`, `$done`, `$argument`, `$environment`,
+`$script`, `$persistentStore`, `$prefs`, console logging, and no-op notification
+surfaces. `$httpClient` and `$task.fetch` fail closed; there is no filesystem,
+process, module loader, socket, or ambient Go object. Source, request, response,
+per-rule, total-module, persistent-key, and persistent-file sizes are bounded.
+At most two body-buffering transformation flows run concurrently; excess work
+fails closed with service unavailable instead of exceeding the sidecar cgroup.
+VM execution has a rule timeout, and regexp2's non-RE2 JavaScript fallback has
+an independent 250 ms match limit so catastrophic backtracking cannot evade the
+VM interrupt. Script errors fail the transformed request closed.
 
 The control API is disabled when no bearer token is configured; it is never
 served unauthenticated. Certificate or TLS identity errors fail closed. A bad
@@ -558,13 +724,19 @@ Telegram token/admin override is the deliberate exception: a present but
 invalid file disables that remote control path so revoked authority cannot be
 restored from stale bootstrap defaults.
 
-The repository contains no Python. The Go module has exactly three direct
-dependencies: `github.com/miekg/dns`, `github.com/go-telegram/bot`, and
-`gopkg.in/yaml.v3`. The YAML dependency is an explicit security decision: raw
+The repository contains no Python. The `5gpn-dns` Go module has exactly three
+direct dependencies: `github.com/miekg/dns`, `github.com/go-telegram/bot`, and
+`gopkg.in/yaml.v3`. The separate `5gpn-intercept` module has exactly three
+direct dependencies: `github.com/quic-go/quic-go` for QUIC v1/v2 and HTTP/3,
+`github.com/dop251/goja` for the isolated Surge/Loon JavaScript compatibility
+runtime, and `github.com/dlclark/regexp2/v2` solely to impose the explicit
+backtracking timeout on goja's fallback expression engine. These architecture
+decisions add no gateway toolchain. The YAML
+dependency is an explicit security decision: raw
 mihomo edits are parsed structurally before invariant validation so decoy keys,
 wrong nesting, duplicate keys, and multi-document overrides cannot satisfy the
-control-plane boundary. Adding another direct dependency requires an explicit
-architecture decision.
+control-plane boundary. Adding another direct dependency to either module
+requires an explicit architecture decision.
 
 ## Web console constraints
 
@@ -579,16 +751,30 @@ mobile uses card rows with a drawer sidebar. Route metadata is centralized in
 artifact, not committed source; PWA, initial asset, lazy-route, and font budgets
 remain enforced.
 
-Settings may expose the fixed mihomo ingress-module catalog. A module toggle is
+Settings may expose the fixed mihomo ingress-capability catalog. A capability toggle is
 only a local draft until the operator reviews a capability and exposure warning
 and explicitly confirms the apply. The UI must distinguish a bound UDP socket
 from supported raw UDP forwarding, show revision/custom-config conflicts, and
 state that external firewall policy remains the operator's responsibility.
 
+The dedicated `/modules` route owns interception modules. It shows immutable
+source/script digests, normalized MITM hosts, supported action counts,
+compatibility and unsupported-directive details, enabled/runtime state, and a
+visible snapshot-to-trust-to-traffic transaction rail. An authenticated,
+on-demand detail read exposes the exact stored module and script bodies for
+review; list responses do not send those potentially large bodies. Import supports one URL,
+paste, or local upload and exposes the QX header/Referer preset without
+presenting the external catalog as a mirrored store. Enable, disable, delete,
+and argument changes use revision checks and explicit confirmation. The same
+page owns the narrow WLOC coordinate fields and links the separate CA profile.
+It must state that the CA enables decryption only for enabled module hosts,
+requires explicit device authorization and manual trust, and that all devices
+routed into WLOC share the configured coordinates.
+
 ## Verification boundary
 
 Changes are tested in proportion to their surface. The complete local gates
-are the repository shell tests, Go formatting/vet/race tests, Web typecheck and
+are the repository shell tests, formatting/vet/race tests for both Go modules, Web typecheck and
 Vitest/build/bundle checks, and Playwright tests. CI also renders the mihomo
 seed and validates it with the digest-pinned mihomo version. Real gateway
 behavior is accepted with `tests/integration-smoke.md`.

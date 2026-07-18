@@ -79,6 +79,12 @@ type Handler struct {
 	policyPlan          atomic.Pointer[runtimePolicyPlan]
 	policyRefreshPaused atomic.Bool
 
+	// interceptHosts is a system-owned overlay published only after an explicit
+	// interception-module transaction has installed the matching certificate
+	// and mihomo rules. It is evaluated before the operator policy so a module
+	// cannot be enabled while its declared MITM host still resolves directly.
+	interceptHosts atomic.Pointer[interceptHostSnapshot]
+
 	// CN is a construction-time test seam. Runtime publishes it through
 	// swapRuleSets before serving.
 	CN *Chnroute // IPv4 china ranges.
@@ -438,6 +444,13 @@ type resolutionDecision struct {
 // and ResolveTest. It folds the ordered name rule and the configured fallback
 // into one executable action so diagnostics cannot silently ignore fallback.
 func (h *Handler) decideName(name string) resolutionDecision {
+	if snapshot := h.interceptHosts.Load(); snapshot != nil && snapshot.Match(name) {
+		return resolutionDecision{
+			Verdict: Verdict{Verdict: "proxy", Reason: "force-proxy"},
+			Action:  actionGateway,
+			snap:    h.orderedPolicy.Load(),
+		}
+	}
 	snap := h.orderedPolicy.Load()
 	v := classifyPolicySnapshot(snap, name)
 	switch v.Reason {
@@ -460,6 +473,47 @@ func (h *Handler) decideName(name string) resolutionDecision {
 	default:
 		return resolutionDecision{Action: actionAuto, snap: snap}
 	}
+}
+
+type interceptHostSnapshot struct {
+	exact    map[string]struct{}
+	wildcard []string
+}
+
+func newInterceptHostSnapshot(patterns []string) *interceptHostSnapshot {
+	snapshot := &interceptHostSnapshot{exact: make(map[string]struct{})}
+	for _, pattern := range patterns {
+		pattern = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(pattern), "."))
+		if strings.HasPrefix(pattern, "*.") {
+			snapshot.wildcard = append(snapshot.wildcard, strings.TrimPrefix(pattern, "*."))
+			continue
+		}
+		if pattern != "" {
+			snapshot.exact[pattern] = struct{}{}
+		}
+	}
+	return snapshot
+}
+
+func (s *interceptHostSnapshot) Match(name string) bool {
+	if s == nil {
+		return false
+	}
+	name = strings.ToLower(stripDot(name))
+	if _, ok := s.exact[name]; ok {
+		return true
+	}
+	for _, suffix := range s.wildcard {
+		if len(name) > len(suffix)+1 && strings.HasSuffix(name, "."+suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handler) setInterceptHosts(patterns []string) {
+	h.interceptHosts.Store(newInterceptHostSnapshot(patterns))
+	h.Cache.Flush()
 }
 
 func classifyPolicySnapshot(snap *runtimePolicySnapshot, name string) Verdict {

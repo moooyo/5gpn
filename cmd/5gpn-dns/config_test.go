@@ -25,6 +25,7 @@ var allDNSEnvKeys = []string{
 	"DNS_EGRESS_RESOLVER",
 	"DNS_BASE_DOMAIN",
 	"DNS_MIHOMO_CONTROLLER", "DNS_MIHOMO_SECRET", "DNS_WHITELIST_FILE",
+	"DNS_MIHOMO_CONFIG", "DNS_INTERCEPT_CONFIG",
 	"DNS_ZASH_DIR", "DNS_ZASH_LISTEN", "DNS_ZASH_CERT", "DNS_ZASH_KEY",
 }
 
@@ -929,6 +930,9 @@ func TestLoadConfig_MihomoConfigFileKnob(t *testing.T) {
 		if cfg.MihomoConfigFile != "/etc/5gpn/mihomo/config.yaml" {
 			t.Errorf("MihomoConfigFile default = %q, want /etc/5gpn/mihomo/config.yaml", cfg.MihomoConfigFile)
 		}
+		if cfg.InterceptConfigFile != "/etc/5gpn/intercept/config.json" {
+			t.Errorf("InterceptConfigFile default = %q", cfg.InterceptConfigFile)
+		}
 	})
 
 	t.Run("override", func(t *testing.T) {
@@ -943,6 +947,16 @@ func TestLoadConfig_MihomoConfigFileKnob(t *testing.T) {
 		}
 		if cfg.MihomoConfigFile != "/opt/5gpn/mihomo/config.yaml" {
 			t.Errorf("MihomoConfigFile = %q, want /opt/5gpn/mihomo/config.yaml", cfg.MihomoConfigFile)
+		}
+	})
+
+	t.Run("reject interception path override", func(t *testing.T) {
+		clearAllDNSEnv(t)
+		t.Setenv("DNS_CERT", "/c")
+		t.Setenv("DNS_KEY", "/k")
+		t.Setenv("DNS_INTERCEPT_CONFIG", "/opt/5gpn/intercept/config.json")
+		if _, err := LoadConfig(); err == nil {
+			t.Fatal("LoadConfig accepted a non-canonical interception config path")
 		}
 	})
 }

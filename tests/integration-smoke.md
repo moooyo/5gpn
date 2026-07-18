@@ -339,6 +339,50 @@ token into recorded command output, screenshots, or issue logs.
   cannot produce a Telegram alert; the configured external heartbeat monitor
   must detect that dead-man's-switch failure.
 
+## Modular HTTP/3 interception
+
+- [ ] `5gpn-intercept.service` runs as `gpn-intercept`, has no capabilities,
+  listens only on `127.0.0.1:18080/tcp`, and passes
+  `/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json --healthcheck`.
+  Its private `/var/lib/5gpn-intercept/store.json` survives a sidecar restart,
+  while purge removes the independently marked state directory.
+- [ ] `/etc/5gpn/intercept-ca/root.key` is root-only and is inaccessible from
+  `5gpn-dns`, mihomo, and `5gpn-intercept`; the runtime leaf is not a CA and
+  covers the stable WLOC names plus every enabled synthetic module host.
+- [ ] `5gpn-intercept-cert.path` reacts to an atomic module config replacement,
+  the root-owned publisher writes the expected `cert-state` digest, and neither
+  long-running daemon can read the signing key.
+- [ ] `/ios/ios-intercept-ca.mobileconfig` downloads as a CMS-signed Apple profile.
+  On an owned test iPhone, install it and explicitly enable full trust under
+  Certificate Trust Settings. Removing this profile does not remove the DoT
+  profile.
+- [ ] From Console `/modules`, import a synthetic Surge fixture by URL with the
+  Quantumult X header preset and Referer. Verify the server snapshots both the
+  module and referenced script, reports unsupported sections, and refuses an
+  unacknowledged partial module. Repeat with a synthetic Loon fixture and a
+  pasted/uploaded source. Do not crawl or mirror the linked external catalog.
+- [ ] Enable the synthetic module in the Console, then disable/re-enable it from
+  Telegram. Each surface shows the same revision and state. The complete
+  mihomo config passes `mihomo -t`; sorted port-443 `AND` rules containing
+  `DOMAIN`/`DOMAIN-WILDCARD` matchers sit
+  after `IN-NAME,intercept-egress,<terminal-target>` and before `MATCH`, the DNS
+  answer changes to the gateway only while enabled, and certificate/mihomo
+  failure injection restores the previous state.
+- [ ] Verify a script can use `$request`, `$response`, `$done`, `$argument`, and
+  durable `$persistentStore`/`$prefs`; `$httpClient`, `$task.fetch`, filesystem,
+  process, and module-loader access fail closed. Oversized bodies, VM timeout,
+  and backtracking-regexp timeout remain bounded.
+- [ ] Configure WLOC coordinates on the same Modules page and enable
+  `builtin-wloc`.
+- [ ] Exercise WLOC over TCP/H2, QUIC v1/H3, and QUIC v2/H3. In every case the
+  response is patched, the upstream certificate is verified, and packet capture
+  shows the sidecar's upstream TCP/UDP entering mihomo's authenticated
+  `intercept-egress` listener rather than dialing Apple directly.
+- [ ] With malformed protobuf, a client that does not trust the private CA, a
+  wrong SNI, or any inactive module target, interception fails closed. Disabling
+  the module restores ordinary end-to-end forwarding without changing the
+  operator's terminal egress group.
+
 After the run, restore temporary policy/upstream/config changes and compare the
 captured nftables and mihomo files, restore the Telegram override, and revoke
 the disposable token. Record release version, mihomo version, test date, and

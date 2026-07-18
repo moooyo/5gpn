@@ -57,6 +57,7 @@ SWAP_FILE="${STATE_DIR}/swapfile"
 SWAP_FSTAB_MARKER="# 5gpn-owned-swap-v1"
 SWAP_CREATED_THIS_RUN=0
 DNS_BIN="${BIN_DIR}/5gpn-dns"            # 5gpn-dns binary (DoT resolver + web console)
+INTERCEPT_BIN="${BIN_DIR}/5gpn-intercept" # allowlisted TLS/HTTP3 interception sidecar
 DNS_CERT_DIR="/etc/5gpn/cert"            # selected cert copied into dot/, web/, zash/ roles
 DEBUG_CERT_DIR="/etc/5gpn/debug-cert"     # self-signed debug certs; NEVER under /etc/letsencrypt
 DOT_CERT_DIR="${DNS_CERT_DIR}/dot"       # DoT :853 cert copy (hot-reloaded on mtime change)
@@ -84,8 +85,16 @@ DNS_WEB_DIR_DEFAULT="/opt/5gpn/web"         # resolved from dns.env after cfg_ge
 DNS_RULES_DIR_DEFAULT="/etc/5gpn/rules"  # subscription caches and chnroute snapshot
 MIHOMO_BIN="${BIN_DIR}/mihomo"
 MIHOMO_DIR="/etc/5gpn/mihomo"           # config.yaml + whitelist.txt + provider caches
+INTERCEPT_DIR="/etc/5gpn/intercept"
+INTERCEPT_CA_DIR="/etc/5gpn/intercept-ca"
+INTERCEPT_CA_MARKER=".5gpn-intercept-ca-owned"
+INTERCEPT_CA_MARKER_VALUE="5gpn-intercept-ca-v1"
+INTERCEPT_STATE_DIR="/var/lib/5gpn-intercept"
+INTERCEPT_STATE_MARKER=".5gpn-intercept-state-owned"
+INTERCEPT_STATE_MARKER_VALUE="5gpn-intercept-state-v1"
 DNS_SERVICE_USER="gpn-dns"
 MIHOMO_SERVICE_USER="mihomo"
+INTERCEPT_SERVICE_USER="gpn-intercept"
 POLKIT_RULE_PATH="/etc/polkit-1/rules.d/50-5gpn.rules"
 POLKIT_RULE_MARKER="// 5gpn-polkit-id: runtime-operations-v1"
 ZASH_OWNERSHIP_MARKER=".5gpn-zashboard-owned"
@@ -111,7 +120,7 @@ readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_LISTEN_API DNS_CERT D
 DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL DNS_CHINA DNS_TRUST DNS_UPSTREAMS \
 DNS_CHINA_ECS DNS_CHINA_0X20 DNS_ECS_FILE DNS_RULES_DIR DNS_CHNROUTE DNS_EGRESS_RESOLVER DNS_EGRESS_BROKER \
 DNS_SUBSCRIPTIONS DNS_POLICY_RULES DNS_API_TOKEN DNS_API_RATE DNS_API_BURST DNS_MIHOMO_CONTROLLER DNS_MIHOMO_SECRET \
-DNS_WHITELIST_FILE DNS_MIHOMO_CONFIG DNS_ZASH_DIR DNS_ZASH_LISTEN DNS_WEB_DIR WWW_DIR TGBOT_TOKEN TGBOT_ADMINS \
+DNS_WHITELIST_FILE DNS_MIHOMO_CONFIG DNS_INTERCEPT_CONFIG DNS_ZASH_DIR DNS_ZASH_LISTEN DNS_WEB_DIR WWW_DIR TGBOT_TOKEN TGBOT_ADMINS \
 DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS DNS_CACHE_SIZE DNS_MAX_INFLIGHT DNS_TTL_MIN DNS_TTL_MAX DNS_QUERY_TIMEOUT \
 DNS_STATS_FILE DNS_HEARTBEAT_URL DNS_HEARTBEAT_INTERVAL"
 # EDNS Client Subnet uses the operational default above. Operators can disable
@@ -402,6 +411,8 @@ claim_project_roots() {
     claim_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"
     claim_fixed_owned_dir "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"
     claim_fixed_owned_dir "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE"
+    claim_fixed_owned_dir "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE"
+    claim_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE"
 }
 
 remove_fixed_owned_dir() {
@@ -872,6 +883,12 @@ unit_file_owned_by_5gpn() {
                 && grep -Fqx 'ExecStart=/opt/5gpn/bin/5gpn-dns' "$file" ;;
         mihomo.service)
             grep -Fqx 'ExecStart=/opt/5gpn/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' "$file" ;;
+        5gpn-intercept.service)
+            grep -Fqx 'ExecStart=/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json' "$file" ;;
+        5gpn-intercept-cert.service)
+            grep -Fqx 'ExecStart=/opt/5gpn/scripts/intercept-cert-renew.sh' "$file" ;;
+        5gpn-intercept-cert.path)
+            grep -Fqx 'PathChanged=/etc/5gpn/intercept/config.json' "$file" ;;
         5gpn-journal@.service)
             grep -Fqx 'ExecStart=/opt/5gpn/scripts/export-journal.sh %i' "$file" \
                 && journal_export_instances_clear ;;
@@ -959,7 +976,8 @@ install_service_accounts() {
         || { err "getent, groupadd, and useradd are required for service isolation."; return 1; }
     ensure_service_account "$DNS_SERVICE_USER" "$DNS_SERVICE_USER" || return 1
     ensure_service_account "$MIHOMO_SERVICE_USER" "$MIHOMO_SERVICE_USER" || return 1
-    ok "Dedicated service accounts are ready: ${DNS_SERVICE_USER}, ${MIHOMO_SERVICE_USER}."
+    ensure_service_account "$INTERCEPT_SERVICE_USER" "$INTERCEPT_SERVICE_USER" || return 1
+    ok "Dedicated service accounts are ready: ${DNS_SERVICE_USER}, ${MIHOMO_SERVICE_USER}, ${INTERCEPT_SERVICE_USER}."
 }
 
 polkit_rule_owned_by_5gpn() {
@@ -1159,11 +1177,12 @@ extracted_tree_safe() {
 
 stage_artifacts() {
     local ver release
-    local dns_asset web_asset
+    local dns_asset intercept_asset web_asset
     ver="$(resolve_dns_release_version)" || return 1
     DNS_VERSION_DEFAULT="$ver"
     release="https://github.com/moooyo/5gpn/releases/download/${ver}"
     dns_asset="5gpn-dns-linux-amd64"
+    intercept_asset="5gpn-intercept-linux-amd64"
     web_asset="5gpn-web-${ver}.tar.gz"
     ARTIFACT_STAGE="$(mktemp -d /var/tmp/5gpn-artifacts.XXXXXX)" \
         || { err "Could not create artifact staging directory."; return 1; }
@@ -1180,6 +1199,14 @@ stage_artifacts() {
     chmod 0755 "$ARTIFACT_STAGE/5gpn-dns"
     "$ARTIFACT_STAGE/5gpn-dns" --version >/dev/null 2>&1 \
         || { err "Staged 5gpn-dns binary did not execute."; return 1; }
+
+    curl -fsSL "$release/$intercept_asset" -o "$ARTIFACT_STAGE/5gpn-intercept" \
+        || { err "Could not download $intercept_asset."; return 1; }
+    verify_sha256 "$ARTIFACT_STAGE/5gpn-intercept" \
+        "$(release_checksum "$ARTIFACT_STAGE/checksums.txt" "$intercept_asset")" || return 1
+    chmod 0755 "$ARTIFACT_STAGE/5gpn-intercept"
+    "$ARTIFACT_STAGE/5gpn-intercept" --version >/dev/null 2>&1 \
+        || { err "Staged 5gpn-intercept binary did not execute."; return 1; }
 
     curl -fsSL "$release/$web_asset" -o "$ARTIFACT_STAGE/web.tgz" \
         || { err "Could not download $web_asset."; return 1; }
@@ -1231,6 +1258,10 @@ stage_artifacts() {
             line="${line//__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN}"
             line="${line//__ZASH_DOMAIN__/$ZASH_DOMAIN}"
             line="${line//__CONTROLLER_SECRET__/preflight-only-secret}"
+            line="${line//__INTERCEPT_INBOUND_USERNAME__/preflight-inbound-user}"
+            line="${line//__INTERCEPT_INBOUND_PASSWORD__/preflight-inbound-password-123456}"
+            line="${line//__INTERCEPT_UPSTREAM_USERNAME__/preflight-upstream-user}"
+            line="${line//__INTERCEPT_UPSTREAM_PASSWORD__/preflight-upstream-password-123456}"
             printf '%s\n' "$line"
         done < "${SCRIPT_DIR}/etc/mihomo/config.yaml.tmpl" > "$seed"
         install -d -m 0700 "$ARTIFACT_STAGE/mihomo-home"
@@ -1294,9 +1325,15 @@ capture_install_rollback() {
     install -d -m 0700 "$ROLLBACK_DIR"
     cp -a -- "$BASE_DIR" "$ROLLBACK_DIR/base"
     cp -a -- "$CONF_DIR" "$ROLLBACK_DIR/conf"
+    verify_ownership_marker "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" \
+        || { err "Interception CA directory lost its ownership marker before rollback capture."; return 1; }
+    cp -a -- "$INTERCEPT_CA_DIR" "$ROLLBACK_DIR/intercept-ca"
+    verify_ownership_marker "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" \
+        || { err "Interception state directory lost its ownership marker before rollback capture."; return 1; }
+    cp -a -- "$INTERCEPT_STATE_DIR" "$ROLLBACK_DIR/intercept-state"
     local unit
     install -d -m 0700 "$ROLLBACK_DIR/units"
-    for unit in 5gpn-dns.service mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
+    for unit in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
         if [[ -f "/etc/systemd/system/$unit" && ! -L "/etc/systemd/system/$unit" ]]; then
             cp -p -- "/etc/systemd/system/$unit" "$ROLLBACK_DIR/units/$unit"
         else
@@ -1315,6 +1352,12 @@ capture_install_rollback() {
         : > "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.enabled"
     else
         : > "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.disabled"
+    fi
+    if systemctl is-enabled --quiet 5gpn-intercept-cert.path 2>/dev/null; then
+        : > "$ROLLBACK_DIR/units/5gpn-intercept-cert.path.enabled"
+    fi
+    if systemctl is-active --quiet 5gpn-intercept-cert.path 2>/dev/null; then
+        : > "$ROLLBACK_DIR/units/5gpn-intercept-cert.path.active"
     fi
     if systemctl is-active --quiet 5gpn-certbot-renew.timer 2>/dev/null; then
         : > "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.active"
@@ -1387,7 +1430,7 @@ capture_install_rollback() {
 
 rollback_install() {
     [[ "$INSTALL_TRANSACTION_ACTIVE" == 1 && -d "$ROLLBACK_DIR" ]] || return 0
-    local rollback_cert_failed=0 rollback_host_failed=0 polkit_candidate=""
+    local rollback_cert_failed=0 rollback_host_failed=0 rollback_state_failed=0 polkit_candidate=""
     INSTALL_TRANSACTION_ACTIVE=0
     warn "Install publication failed; restoring the previous 5gpn deployment."
     if [[ "$SWAP_CREATED_THIS_RUN" == 1 ]]; then
@@ -1396,7 +1439,7 @@ rollback_install() {
         sed -i "\|^${SWAP_FILE} none swap sw 0 0 ${SWAP_FSTAB_MARKER}$|d" /etc/fstab 2>/dev/null || true
         SWAP_CREATED_THIS_RUN=0
     fi
-    systemctl stop 5gpn-dns.service mihomo.service 2>/dev/null || true
+    systemctl stop 5gpn-dns.service mihomo.service 5gpn-intercept.service 5gpn-intercept-cert.path 2>/dev/null || true
     if verify_ownership_marker "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"; then
         remove_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"
     fi
@@ -1405,8 +1448,26 @@ rollback_install() {
         remove_fixed_owned_dir "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"
     fi
     cp -a -- "$ROLLBACK_DIR/conf" "$CONF_DIR"
+    if verify_ownership_marker "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE"; then
+        remove_fixed_owned_dir "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" \
+            || rollback_host_failed=1
+    elif [[ -e "$INTERCEPT_CA_DIR" || -L "$INTERCEPT_CA_DIR" ]]; then
+        warn "Could not restore the interception CA because its live path is no longer 5gpn-owned."
+        rollback_host_failed=1
+    fi
+    [[ "$rollback_host_failed" != 0 ]] || cp -a -- "$ROLLBACK_DIR/intercept-ca" "$INTERCEPT_CA_DIR" \
+        || rollback_host_failed=1
+    if verify_ownership_marker "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE"; then
+        remove_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" \
+            || rollback_state_failed=1
+    elif [[ -e "$INTERCEPT_STATE_DIR" || -L "$INTERCEPT_STATE_DIR" ]]; then
+        warn "Could not restore interception state because its live path is no longer 5gpn-owned."
+        rollback_state_failed=1
+    fi
+    [[ "$rollback_state_failed" != 0 ]] || cp -a -- "$ROLLBACK_DIR/intercept-state" "$INTERCEPT_STATE_DIR" \
+        || rollback_state_failed=1
     local unit
-    for unit in 5gpn-dns.service mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
+    for unit in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
         if [[ -f "$ROLLBACK_DIR/units/$unit" ]]; then
             cp -p -- "$ROLLBACK_DIR/units/$unit" "/etc/systemd/system/$unit"
         elif [[ -f "$ROLLBACK_DIR/units/$unit.absent" ]] \
@@ -1526,6 +1587,16 @@ rollback_install() {
         cp -a -- "$ROLLBACK_DIR/external-zash" "$DNS_ZASH_DIR"
     fi
     systemctl daemon-reload 2>/dev/null || true
+    if [[ -f "$ROLLBACK_DIR/units/5gpn-intercept-cert.path.enabled" ]]; then
+        systemctl enable 5gpn-intercept-cert.path 2>/dev/null || true
+    else
+        systemctl disable 5gpn-intercept-cert.path 2>/dev/null || true
+    fi
+    if [[ -f "$ROLLBACK_DIR/units/5gpn-intercept-cert.path.active" ]]; then
+        systemctl start 5gpn-intercept-cert.path 2>/dev/null || true
+    else
+        systemctl stop 5gpn-intercept-cert.path 2>/dev/null || true
+    fi
     if [[ "$rollback_cert_failed" == 0 ]]; then
         if [[ -f "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.enabled" ]]; then
             systemctl enable 5gpn-certbot-renew.timer 2>/dev/null || true
@@ -1540,16 +1611,19 @@ rollback_install() {
     else
         systemctl disable --now 5gpn-certbot-renew.timer 2>/dev/null || true
     fi
+    systemctl restart 5gpn-intercept.service 2>/dev/null || true
     systemctl restart mihomo.service 2>/dev/null || true
     systemctl restart 5gpn-dns.service 2>/dev/null || true
     release_install_cert_lock
-    if [[ "$rollback_cert_failed" == 0 && "$rollback_host_failed" == 0 ]]; then
+    if [[ "$rollback_cert_failed" == 0 && "$rollback_host_failed" == 0 && "$rollback_state_failed" == 0 ]]; then
         warn "Previous deployment restored; inspect the reported error before retrying."
     else
         [[ "$rollback_cert_failed" == 0 ]] \
             || err "Certificate-lineage rollback was incomplete; automatic renewal is disabled pending repair."
         [[ "$rollback_host_failed" == 0 ]] \
             || err "Host authorization rollback was incomplete; inspect $POLKIT_RULE_PATH before retrying."
+        [[ "$rollback_state_failed" == 0 ]] \
+            || err "Interception state rollback was incomplete; inspect $INTERCEPT_STATE_DIR before retrying."
         return 1
     fi
 }
@@ -1596,6 +1670,152 @@ install_5gpndns() {
     publish_executable "$ARTIFACT_STAGE/5gpn-dns" "$DNS_BIN"
     [[ -x "$DNS_BIN" ]] || { err "5gpn-dns install failed."; exit 1; }
     ok "Verified 5gpn-dns ${DNS_VERSION_DEFAULT} published to $DNS_BIN."
+}
+
+install_intercept() {
+    [[ -n "$ARTIFACT_STAGE" && -x "$ARTIFACT_STAGE/5gpn-intercept" ]] \
+        || { err "5gpn-intercept was not staged."; return 1; }
+    publish_executable "$ARTIFACT_STAGE/5gpn-intercept" "$INTERCEPT_BIN"
+    [[ -x "$INTERCEPT_BIN" ]] || { err "5gpn-intercept install failed."; return 1; }
+    ok "Verified 5gpn-intercept ${DNS_VERSION_DEFAULT} published to $INTERCEPT_BIN."
+}
+
+prepare_intercept_runtime_dirs() {
+    local path canonical
+    for path in "$INTERCEPT_DIR" "$INTERCEPT_DIR/tls"; do
+        [[ ! -e "$path" && ! -L "$path" ]] || [[ -d "$path" && ! -L "$path" ]] \
+            || { err "Refusing unsafe interception runtime path: $path"; return 1; }
+        install -d -o root -g "$INTERCEPT_SERVICE_USER" -m 0750 "$path" || return 1
+        canonical="$(canonical_dir_path "$path")" || return 1
+        [[ "$canonical" == "$path" ]] \
+            || { err "Refusing interception runtime path alias: $path -> $canonical"; return 1; }
+    done
+    chmod 2770 "$INTERCEPT_DIR" || return 1
+}
+
+prepare_intercept_state_dir() {
+    claim_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" || return 1
+    install -d -o "$INTERCEPT_SERVICE_USER" -g "$INTERCEPT_SERVICE_USER" -m 0700 "$INTERCEPT_STATE_DIR" || return 1
+    write_ownership_marker "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" || return 1
+}
+
+ensure_intercept_config() {
+    local config="$INTERCEPT_DIR/config.json" candidate inbound_user inbound_pass upstream_user upstream_pass
+    prepare_intercept_runtime_dirs || return 1
+    if [[ -f "$config" && ! -L "$config" ]]; then
+        "$INTERCEPT_BIN" --config "$config" --check-config \
+            || { err "Existing interception config is invalid: $config"; return 1; }
+        ok "Existing interception config validated and preserved: $config"
+        return 0
+    fi
+    [[ ! -e "$config" && ! -L "$config" ]] \
+        || { err "Refusing unsafe interception config path: $config"; return 1; }
+    inbound_user="module-in-$(openssl rand -hex 12)"
+    inbound_pass="$(openssl rand -hex 24)"
+    upstream_user="module-up-$(openssl rand -hex 12)"
+    upstream_pass="$(openssl rand -hex 24)"
+    candidate="$(mktemp "$INTERCEPT_DIR/.config.json.XXXXXX")" || return 1
+    cat > "$candidate" <<EOF
+{
+  "version": 1,
+  "listen": "127.0.0.1:18080",
+  "username": "${inbound_user}",
+  "password": "${inbound_pass}",
+  "tls_cert": "/etc/5gpn/intercept/tls/fullchain.pem",
+  "tls_key": "/etc/5gpn/intercept/tls/privkey.pem",
+  "upstream_proxy": {
+    "address": "127.0.0.1:17890",
+    "username": "${upstream_user}",
+    "password": "${upstream_pass}"
+  },
+  "wloc": {
+    "enabled": false,
+    "longitude": null,
+    "latitude": null,
+    "accuracy": 25,
+    "fail_closed": true,
+    "max_body_bytes": 8388608
+  },
+  "modules": []
+}
+EOF
+    chown root:"$INTERCEPT_SERVICE_USER" "$candidate" && chmod 0660 "$candidate" \
+        || { rm -f -- "$candidate"; return 1; }
+    "$INTERCEPT_BIN" --config "$candidate" --check-config \
+        || { rm -f -- "$candidate"; err "Generated interception config failed validation."; return 1; }
+    sync -f "$candidate" 2>/dev/null || true
+    mv -f -- "$candidate" "$config"
+    ok "Created disabled-by-default interception config: $config"
+}
+
+intercept_keypair_matches() {
+    local cert="$1" key="$2" cert_pub key_pub
+    cert_pub="$(openssl x509 -in "$cert" -pubkey -noout 2>/dev/null | openssl sha256 2>/dev/null)" || return 1
+    key_pub="$(openssl pkey -in "$key" -pubout 2>/dev/null | openssl sha256 2>/dev/null)" || return 1
+    [[ -n "$cert_pub" && "$cert_pub" == "$key_pub" ]]
+}
+
+validate_intercept_ca() {
+    local root_cert="$INTERCEPT_CA_DIR/root.crt" root_key="$INTERCEPT_CA_DIR/root.key"
+    [[ -f "$root_cert" && ! -L "$root_cert" && -f "$root_key" && ! -L "$root_key" ]] || return 1
+    [[ "$(file_uid "$root_key")" == 0 && "$(file_mode "$root_key")" == 600 ]] || return 1
+    openssl x509 -in "$root_cert" -noout -checkend 2592000 >/dev/null 2>&1 || return 1
+    openssl x509 -in "$root_cert" -noout -text 2>/dev/null | grep -Fq 'CA:TRUE' || return 1
+    intercept_keypair_matches "$root_cert" "$root_key"
+}
+
+validate_intercept_leaf() {
+    local leaf="$INTERCEPT_DIR/tls/leaf.crt" key="$INTERCEPT_DIR/tls/privkey.pem"
+    [[ -f "$leaf" && ! -L "$leaf" && -f "$key" && ! -L "$key" ]] || return 1
+    openssl x509 -in "$leaf" -noout -checkend 2592000 >/dev/null 2>&1 || return 1
+    openssl verify -CAfile "$INTERCEPT_CA_DIR/root.crt" "$leaf" >/dev/null 2>&1 || return 1
+    intercept_keypair_matches "$leaf" "$key" || return 1
+    local host probe digest state request hosts
+    request="$("$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --print-certificate-request 2>/dev/null)" || return 1
+    digest="$(head -n 1 <<<"$request" | tr -d '[:space:]')"
+    hosts="$(tail -n +2 <<<"$request")"
+    state="$(tr -d '[:space:]' < "$INTERCEPT_DIR/cert-state" 2>/dev/null || true)"
+    [[ "$digest" =~ ^[0-9a-f]{64}$ && "$state" == "$digest" ]] || return 1
+    while IFS= read -r host; do
+        probe="$host"
+        [[ "$probe" != \*.* ]] || probe="probe.${probe#*.}"
+        openssl x509 -in "$leaf" -noout -checkhost "$probe" 2>/dev/null | grep -Fq 'does match certificate' || return 1
+    done <<<"$hosts"
+}
+
+ensure_intercept_certificates() {
+    local stage serial fullchain_candidate
+    claim_fixed_owned_dir "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" || return 1
+    install -d -o root -g root -m 0700 "$INTERCEPT_CA_DIR" || return 1
+    stage="$(mktemp -d /var/tmp/5gpn-intercept-cert.XXXXXX)" || return 1
+    chmod 0700 "$stage"
+    claim_temp_dir "$stage" || { rmdir -- "$stage"; return 1; }
+    if [[ -e "$INTERCEPT_CA_DIR/root.crt" || -e "$INTERCEPT_CA_DIR/root.key" ]]; then
+        validate_intercept_ca \
+            || { remove_temp_dir "$stage"; err "Existing interception CA is invalid; refusing replacement."; return 1; }
+    else
+        openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 3650 \
+            -subj '/CN=5gpn Interception Root' \
+            -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' \
+            -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+            -keyout "$stage/root.key" -out "$stage/root.crt" >/dev/null 2>&1 \
+            || { remove_temp_dir "$stage"; err "Could not generate the interception CA."; return 1; }
+        install -m 0600 "$stage/root.key" "$INTERCEPT_CA_DIR/.root.key.new" \
+            && install -m 0644 "$stage/root.crt" "$INTERCEPT_CA_DIR/.root.crt.new" \
+            || { rm -f -- "$INTERCEPT_CA_DIR/.root.key.new" "$INTERCEPT_CA_DIR/.root.crt.new"; remove_temp_dir "$stage"; return 1; }
+        mv -f -- "$INTERCEPT_CA_DIR/.root.key.new" "$INTERCEPT_CA_DIR/root.key"
+        mv -f -- "$INTERCEPT_CA_DIR/.root.crt.new" "$INTERCEPT_CA_DIR/root.crt"
+        validate_intercept_ca \
+            || { remove_temp_dir "$stage"; err "Generated interception CA failed validation."; return 1; }
+    fi
+
+    prepare_intercept_runtime_dirs || { remove_temp_dir "$stage"; return 1; }
+    remove_temp_dir "$stage"
+    "${SCRIPTS_DIR}/intercept-cert-renew.sh" --installer-lock-held \
+        || { err "Dynamic interception leaf publication failed."; return 1; }
+    validate_intercept_leaf \
+        || { err "Dynamic interception leaf validation failed."; return 1; }
+    ok "Dedicated interception CA and module-scoped leaf are ready."
 }
 
 # 5gpn-web: control-console SPA tarball from the same moooyo/5gpn release.
@@ -1814,7 +2034,15 @@ render_mihomo_config() {
     MIHOMO_LISTEN_IPS="${MIHOMO_LISTEN_IPS:-$(cfg_get DNS_MIHOMO_LISTEN_IPS)}"
     MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" || return 1
     export MIHOMO_LISTEN_IPS
-    local listeners candidate line backup
+    local listeners candidate line backup intercept_fields intercept_in_user intercept_in_pass intercept_up_user intercept_up_pass
+    intercept_fields="$("$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --print-mihomo-fields)" \
+        || { err "Could not read validated interception credentials."; return 1; }
+    IFS=$'\t' read -r intercept_in_user intercept_in_pass intercept_up_user intercept_up_pass <<< "$intercept_fields"
+    [[ "$intercept_in_user" =~ ^[A-Za-z0-9._-]{16,255}$ \
+       && "$intercept_in_pass" =~ ^[A-Za-z0-9._-]{24,255}$ \
+       && "$intercept_up_user" =~ ^[A-Za-z0-9._-]{16,255}$ \
+       && "$intercept_up_pass" =~ ^[A-Za-z0-9._-]{24,255}$ ]] \
+        || { err "Interception credentials are unsafe for mihomo YAML."; return 1; }
     listeners="$(render_mihomo_listeners "$MIHOMO_LISTEN_IPS" "$CONSOLE_DOMAIN")"
     candidate="$(mktemp "${MIHOMO_DIR}/.config.yaml.XXXXXX")" \
         || { err "Could not create a mihomo config candidate in $MIHOMO_DIR"; return 1; }
@@ -1831,6 +2059,10 @@ render_mihomo_config() {
         line="${line//__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN}"
         line="${line//__ZASH_DOMAIN__/$ZASH_DOMAIN}"
         line="${line//__CONTROLLER_SECRET__/$secret}"
+        line="${line//__INTERCEPT_INBOUND_USERNAME__/$intercept_in_user}"
+        line="${line//__INTERCEPT_INBOUND_PASSWORD__/$intercept_in_pass}"
+        line="${line//__INTERCEPT_UPSTREAM_USERNAME__/$intercept_up_user}"
+        line="${line//__INTERCEPT_UPSTREAM_PASSWORD__/$intercept_up_pass}"
         printf '%s\n' "$line"
     done < "$template" > "$candidate"; then
         rm -f -- "$candidate"
@@ -2043,7 +2275,7 @@ install_files() {
     # repo systemd units -> /opt/5gpn/etc/systemd (staged copies; install_units
     # installs them into /etc/systemd/system from here or from the checkout).
     install -d -m 0755 "${BASE_DIR}/etc/systemd"
-    for u in "${SCRIPT_DIR}"/etc/systemd/*.service; do
+    for u in "${SCRIPT_DIR}"/etc/systemd/*.service "${SCRIPT_DIR}"/etc/systemd/*.path; do
         [[ -e "$u" ]] || continue
         install -m 0644 "$u" "${BASE_DIR}/etc/systemd/$(basename "$u")"
     done
@@ -2090,8 +2322,8 @@ EOF
     ok "Management command installed: type '5gpn' to manage (status / restart / configure / uninstall / …)."
 }
 
-# restart_services restarts the two 5gpn units (the in-process bot + iOS server
-# come back with 5gpn-dns; mihomo is the data plane + panel SNI split).
+# restart_services restarts the three 5gpn runtime units. The in-process bot and
+# iOS server come back with 5gpn-dns; the interception sidecar remains isolated.
 restart_services() {
     check_root
     info "Restarting 5gpn services..."
@@ -2782,6 +3014,8 @@ install_renewal_automation() {
     preflight_renewal_unit_ownership || return 1
     [[ -x "${SCRIPTS_DIR}/cert-renew.sh" ]] \
         || { err "Scoped renewal helper is missing: ${SCRIPTS_DIR}/cert-renew.sh"; return 1; }
+    [[ -x "${SCRIPTS_DIR}/intercept-cert-renew.sh" ]] \
+        || { err "Interception renewal helper is missing: ${SCRIPTS_DIR}/intercept-cert-renew.sh"; return 1; }
     service_tmp="$(mktemp /etc/systemd/system/.5gpn-certbot-renew.service.XXXXXX)" || return 1
     timer_tmp="$(mktemp /etc/systemd/system/.5gpn-certbot-renew.timer.XXXXXX)" \
         || { rm -f -- "$service_tmp"; return 1; }
@@ -2797,6 +3031,7 @@ Type=oneshot
 TimeoutStartSec=30min
 TimeoutStopSec=2min
 ExecStart=/opt/5gpn/scripts/cert-renew.sh --quiet
+ExecStart=/opt/5gpn/scripts/intercept-cert-renew.sh
 EOF
     cat > "$timer_tmp" <<'EOF'
 # 5gpn-unit-id: 5gpn-certbot-renew.timer:v1
@@ -2934,7 +3169,7 @@ reload_rules() {
 }
 
 preflight_unit_ownership() {
-    preflight_owned_units 5gpn-dns.service mihomo.service 5gpn-journal@.service \
+    preflight_owned_units 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path mihomo.service 5gpn-journal@.service \
         5gpn-certbot-renew.service 5gpn-certbot-renew.timer
     journal_export_instances_clear \
         || { err "Refusing conflicting fixed 5gpn journal exporter instance or drop-in."; return 1; }
@@ -2942,11 +3177,11 @@ preflight_unit_ownership() {
 }
 
 install_units() {
-    info "Installing systemd units (5gpn-dns + mihomo)..."
+    info "Installing systemd units (5gpn-dns + 5gpn-intercept + mihomo)..."
     # Prefer the repo checkout; fall back to the staged copies under /opt/5gpn
     # (a piped curl|bash install has no checkout after install_files staged them).
     local src u
-    for u in 5gpn-dns.service mihomo.service 5gpn-journal@.service; do
+    for u in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path mihomo.service 5gpn-journal@.service; do
         if [[ -f "${SCRIPT_DIR}/etc/systemd/${u}" ]]; then
             src="${SCRIPT_DIR}/etc/systemd/${u}"
         elif [[ -f "${BASE_DIR}/etc/systemd/${u}" ]]; then
@@ -2963,7 +3198,7 @@ install_units() {
     done
     install_polkit_rule || return 1
     systemctl daemon-reload
-    ok "5gpn-dns.service, mihomo.service, and the fixed journal exporter installed."
+    ok "5gpn-dns, modular interception, certificate watcher, mihomo, and fixed journal units installed."
 }
 
 prepare_runtime_permissions() {
@@ -2996,6 +3231,16 @@ prepare_runtime_permissions() {
         -exec chmod 2770 {} + || return 1
     find "$MIHOMO_DIR" -type f -exec chown "root:$MIHOMO_SERVICE_USER" {} + \
         -exec chmod 0660 {} + || return 1
+
+    prepare_intercept_runtime_dirs || return 1
+    prepare_intercept_state_dir || return 1
+    [[ ! -f "$INTERCEPT_DIR/config.json" ]] \
+        || { chown root:"$INTERCEPT_SERVICE_USER" "$INTERCEPT_DIR/config.json" && chmod 0660 "$INTERCEPT_DIR/config.json"; } || return 1
+    if [[ -d "$INTERCEPT_DIR/tls" ]]; then
+        chown -R root:"$INTERCEPT_SERVICE_USER" "$INTERCEPT_DIR/tls" || return 1
+        find "$INTERCEPT_DIR/tls" -type d -exec chmod 0750 {} + || return 1
+        find "$INTERCEPT_DIR/tls" -type f -exec chmod 0640 {} + || return 1
+    fi
 
     install -d -o root -g root -m 0751 "$DNS_CERT_DIR" || return 1
     for role in dot web zash; do
@@ -3077,6 +3322,7 @@ write_dns_env() {
     local policy_rules="$(cfg_get DNS_POLICY_RULES)"; policy_rules="${policy_rules:-${CONF_DIR}/policy.json}"
     local stats_file="$(cfg_get DNS_STATS_FILE)"; stats_file="${stats_file:-${CONF_DIR}/stats.json}"
     local mihomo_config="$(cfg_get DNS_MIHOMO_CONFIG)"; mihomo_config="${mihomo_config:-${MIHOMO_DIR}/config.yaml}"
+    local intercept_config="${INTERCEPT_DIR}/config.json"
     local heartbeat_url="$(cfg_get DNS_HEARTBEAT_URL)"
     local heartbeat_interval="$(cfg_get DNS_HEARTBEAT_INTERVAL)"; heartbeat_interval="${heartbeat_interval:-60s}"
     # full_install has already validated and normalized the China ECS value.
@@ -3178,6 +3424,7 @@ DNS_MIHOMO_CONTROLLER=${dns_mihomo_controller}
 DNS_MIHOMO_SECRET=${dns_mihomo_secret}
 DNS_WHITELIST_FILE=${dns_whitelist_file}
 DNS_MIHOMO_CONFIG=${mihomo_config}
+DNS_INTERCEPT_CONFIG=${intercept_config}
 
 # ZashDir is the unzipped Zephyruso/zashboard
 # dist served by a SECOND loopback HTTPS listener on ZashListen. ZashCert/Key
@@ -3361,9 +3608,11 @@ verify_console_dns() {
 verify_console_endpoint() {
     [[ -s "${WWW_DIR}/ios-dot.mobileconfig" ]] \
         || { warn "iOS profile file is absent; endpoint content probe skipped (profile generation already reported fail-closed)."; return 0; }
+    [[ -s "${WWW_DIR}/ios-intercept-ca.mobileconfig" ]] \
+        || { err "Interception CA profile file is absent after profile generation."; return 1; }
     [[ -n "${CONSOLE_DOMAIN:-}" ]] || load_persisted_domains || return 1
     local console="$CONSOLE_DOMAIN"
-    local bind_ip="${MIHOMO_LISTEN_IPS%%,*}" tmp headers code api_code root_code
+    local bind_ip="${MIHOMO_LISTEN_IPS%%,*}" tmp headers code intercept_code api_code root_code
     [[ -n "$console" && -n "$bind_ip" ]] \
         || { err "Cannot probe console SNI: console domain or mihomo bind address is empty."; return 1; }
     tmp="$(mktemp -d /tmp/5gpn-console-probe.XXXXXX)" || return 1
@@ -3377,6 +3626,11 @@ verify_console_endpoint() {
         err "Public console profile probe failed (HTTP ${code:-none}); operator mihomo config may lack the public ${console} host/rule. Update it or run '5gpn mihomo-reset'."
         return 1
     fi
+    intercept_code="$(curl --silent --show-error --insecure --max-time 5 \
+        --resolve "${console}:443:${bind_ip}" -o /dev/null \
+        -w '%{http_code}' "https://${console}/ios/ios-intercept-ca.mobileconfig" 2>/dev/null || true)"
+    [[ "$intercept_code" == 200 ]] \
+        || { remove_temp_dir "$tmp"; err "Public interception CA profile probe failed (HTTP ${intercept_code:-none})."; return 1; }
     api_code="$(curl --silent --insecure --max-time 5 --resolve "${console}:443:${bind_ip}" \
         -o /dev/null -w '%{http_code}' "https://${console}/api/status" 2>/dev/null || true)"
     root_code="$(curl --silent --insecure --max-time 5 --resolve "${console}:443:${bind_ip}" \
@@ -3436,6 +3690,8 @@ wait_service_ready() {
     local svc="$1" i
     for i in {1..20}; do
         case "$svc" in
+            5gpn-intercept) "$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --healthcheck \
+                && { ok "5gpn-intercept readiness passed (authenticated loopback SOCKS5 TCP/UDP)."; return 0; } ;;
             mihomo)    probe_mihomo_ready && { ok "mihomo readiness passed (controller + local TCP/UDP listeners)."; return 0; } ;;
             5gpn-dns)  probe_dns_ready && { ok "5gpn-dns readiness passed (API + DoT TLS handshake)."; return 0; } ;;
         esac
@@ -3453,13 +3709,15 @@ start_services() {
     MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" || return 1
     export PUBLIC_IP GATEWAY_IP MIHOMO_LISTEN_IPS
     systemctl daemon-reload || { err "systemctl daemon-reload failed."; return 1; }
+    systemctl enable --now 5gpn-intercept-cert.path >/dev/null 2>&1 \
+        || { err "could not enable the interception certificate watcher."; return 1; }
     # mihomo is the data plane + panel SNI split; it was installed by
     # install_units but is enabled/started HERE (nothing started it before).
     # Start mihomo first so DNS cannot advertise gateway answers before the
     # data-plane listener is live. Any enable/start/readiness failure is fatal;
     # full_install must never print success for a broken deployment.
     local svc failed=0
-    for svc in mihomo 5gpn-dns; do
+    for svc in 5gpn-intercept mihomo 5gpn-dns; do
         if ! systemctl enable "$svc" >/dev/null 2>&1; then
             err "could not enable $svc (check: systemctl status $svc)."
             failed=1
@@ -3588,8 +3846,8 @@ show_status() {
         echo "📊 5gpn 状态"
         echo ""
         # Telegram bot + iOS profile path are in-process parts of 5gpn-dns now;
-        # mihomo is the data plane + panel SNI split.
-        for svc in "5gpn-dns" mihomo; do
+        # mihomo is the forwarding data plane; interception is a separate sidecar.
+        for svc in "5gpn-dns" 5gpn-intercept mihomo; do
             s="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
             echo "  $([[ "$s" == active ]] && echo '✅' || echo '❌') ${svc}  (${s})"
         done
@@ -3884,13 +4142,16 @@ full_install() {
     # DNS gate, and existing mihomo config has passed do we enter publication.
     install_service_accounts
     install_5gpndns
+    install_intercept
     install_mihomo
+    ensure_intercept_config
     install_files
     install_manage_cli
     install_web
     install_zashboard
     install_units
     write_dns_env
+    ensure_intercept_certificates
     install_cert "$BASE_DOMAIN"
     render_mihomo_config
     setup_ios_profile
@@ -3911,6 +4172,7 @@ full_install() {
         echo "  DoT 地址         tls://${DOT_DOMAIN}:853"
         echo "  Android 私人DNS  ${DOT_DOMAIN}"
         echo "  iOS 描述文件      https://${CONSOLE_DOMAIN}/ios/ios-dot.mobileconfig"
+        echo "  MITM CA 描述文件  https://${CONSOLE_DOMAIN}/ios/ios-intercept-ca.mobileconfig（需手动完全信任）"
         echo "  Public console   ${CONSOLE_DOMAIN} A -> ${PUBLIC_IP}（NPN 可用客户端可路由 ${GATEWAY_IP}）"
     } | card
     {
@@ -3966,7 +4228,7 @@ uninstall() {
     warn "Uninstalling 5gpn: stopping services and reverting host changes."
 
     local unit
-    for unit in 5gpn-dns.service mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.timer \
+    for unit in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.timer \
                 5gpn-certbot-renew.service; do
         remove_owned_unit "$unit"
     done
@@ -4022,6 +4284,9 @@ uninstall() {
         else
             ok "Deleted 5gpn role/debug certificate material; kept the credential required by the preserved external lineage."
         fi
+        remove_fixed_owned_dir "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" \
+            || { err "Refusing unsafe interception CA removal."; return 1; }
+        ok "Deleted the dedicated interception CA."
     fi
 
     if [[ $purge == 1 ]]; then
@@ -4037,17 +4302,19 @@ uninstall() {
         clear_owned_scope "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
             "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" cert acme debug-cert \
             || { err "Config ownership validation failed; refusing purge."; return 1; }
+        remove_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" \
+            || { err "Refusing unsafe interception state removal."; return 1; }
         if [[ "$decommission" == 1 && "$DECOMMISSION_PRESERVE_ACME" == 0 ]]; then
             remove_fixed_owned_dir "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"
             ok "Decommissioned all 5gpn configuration and certificate credentials."
         elif [[ "$decommission" == 1 ]]; then
             warn "Decommission kept ${CONF_DIR}/acme because the preserved external lineage still references it."
         else
-            warn "Purged ${CONF_DIR} EXCEPT cert/, debug-cert/, and acme/ for safe certificate reuse."
+            warn "Purged ${CONF_DIR} EXCEPT cert/, debug-cert/, and acme/; preserved ${INTERCEPT_CA_DIR} for enrolled interception devices."
             info "Use the explicit TUI-confirmed 'uninstall --decommission' mode to remove the exact lineage and Cloudflare token."
         fi
     else
-        ok "Kept ${CONF_DIR} (cert, acme token, DNS_API_TOKEN, rules, subscriptions). '--purge' removes it EXCEPT cert/ and acme/ (always kept for reuse)."
+        ok "Kept ${CONF_DIR}, ${INTERCEPT_CA_DIR}, and ${INTERCEPT_STATE_DIR}. '--purge' removes module persistent data but preserves certificate state."
     fi
     release_install_cert_lock
     ok "5gpn uninstalled."
@@ -4063,7 +4330,7 @@ Usage: sudo bash install.sh [command]     — or, after install:  5gpn [command]
   configure           Open the full TUI, stage/verify, publish, probe, and rollback on failure
   menu                Open the interactive management menu (this is what bare '5gpn' runs)
   status              Show service states, domains, IP, list counts/age
-  restart             Restart the 5gpn services (5gpn-dns + mihomo)
+  restart             Restart the 5gpn services (5gpn-dns + 5gpn-intercept + mihomo)
   reload-rules        Reload local policy and chnroute state from disk
   add-allow <cidr>    Add a source IP/CIDR to the zashboard allowlist + live refresh
   del-allow <cidr>    Remove a source IP/CIDR from the zashboard allowlist + live refresh
@@ -4074,9 +4341,10 @@ Usage: sudo bash install.sh [command]     — or, after install:  5gpn [command]
   mihomo-reset        Explicitly back up + replace the operator mihomo config
                       with a freshly rendered, validated seed, then restart
   uninstall [--purge|--decommission]
-                      TUI-confirmed ownership-safe removal. Purge preserves cert/
-                      debug-cert/acme; decommission deletes a Certbot lineage only
-                      when provenance proves that 5gpn created it
+                       TUI-confirmed ownership-safe removal. Purge preserves cert/
+                       debug-cert/acme and the interception root CA; decommission also
+                       removes the owned interception CA and deletes a Certbot lineage only
+                       when provenance proves that 5gpn created it
   help                This help
 
 After a full install, `5gpn` opens the management TUI. Configuration commands do

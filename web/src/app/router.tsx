@@ -35,6 +35,7 @@ const PAGE_LOADERS: Record<string, () => Promise<{ default: ComponentType }>> = 
   logs: () => import('../features/logs/LogsPage'),
   'resolve-test': () => import('../features/resolve-test/ResolveTestPage'),
   'policy-rules': () => import('../features/policy-rules/PolicyRulesPage'),
+  modules: () => import('../features/modules/ModulesPage'),
   mihomo: () => import('../features/mihomo/MihomoPage'),
   'mihomo-config': () => import('../features/mihomo-config/MihomoConfigPage'),
   settings: () => import('../features/settings/SettingsPage'),

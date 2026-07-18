@@ -46,7 +46,7 @@ afterEach(async () => {
 })
 
 describe('Sidebar', () => {
-  it('renders all 8 nav item labels in zh, and the item matching the current route gets the active pill', async () => {
+  it('renders every nav item label in zh, and the item matching the current route gets the active pill', async () => {
     renderChrome(<Sidebar />, {
       route: '/logs',
       status: { dnsState: 'healthy', mihomoState: 'healthy', dnsOk: true, mihomoOk: true, loading: false },

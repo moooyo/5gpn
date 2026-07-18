@@ -18,14 +18,15 @@ type iosRoute struct {
 
 // iosRoutes is the closed set of files the iOS profile handler answers. The
 // configuration guide now lives inside the console SPA; this handler only
-// distributes the signed payload. Request paths are never joined into the
+// distributes the signed DoT and opt-in interception CA payloads. Request paths are never joined into the
 // filesystem path, so path traversal is impossible by construction.
 //
 // The mobileconfig's Content-Type "application/x-apple-aspen-config" is the
 // exact type iOS keys on to install the payload as a configuration profile;
 // it is set explicitly rather than sniffed.
 var iosRoutes = map[string]iosRoute{
-	"/ios-dot.mobileconfig": {file: "ios-dot.mobileconfig", ctype: "application/x-apple-aspen-config"},
+	"/ios-dot.mobileconfig":          {file: "ios-dot.mobileconfig", ctype: "application/x-apple-aspen-config"},
+	"/ios-intercept-ca.mobileconfig": {file: "ios-intercept-ca.mobileconfig", ctype: "application/x-apple-aspen-config"},
 }
 
 // iosHandler returns the HTTP handler for the signed iOS DoT profile rooted at

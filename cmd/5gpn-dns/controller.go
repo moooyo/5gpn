@@ -88,6 +88,11 @@ type Controller struct {
 	// ApplyPolicy checks policyEngine specifically.
 	policyRules  *PolicyRuleManager
 	policyEngine *PolicyEngine
+
+	// interceptModules is the single transactional module registry shared by
+	// the Web console and Telegram. Both control surfaces therefore publish the
+	// same sidecar snapshot, certificate request, mihomo rules, and DNS overlay.
+	interceptModules *InterceptModuleManager
 }
 
 // tgbotManager is the subset of the bot supervisor the Controller drives:
@@ -337,6 +342,24 @@ func isValidRuleDomain(entry string) bool {
 func (c *Controller) SetPolicyEngine(mgr *PolicyRuleManager, eng *PolicyEngine) {
 	c.policyRules = mgr
 	c.policyEngine = eng
+}
+
+func (c *Controller) SetInterceptModuleManager(manager *InterceptModuleManager) {
+	c.interceptModules = manager
+}
+
+func (c *Controller) InterceptModules() (interceptModulesView, error) {
+	if c.interceptModules == nil {
+		return interceptModulesView{}, errInterceptModulesUnavailable
+	}
+	return c.interceptModules.View()
+}
+
+func (c *Controller) SetInterceptModuleEnabled(ctx context.Context, id, revision string, enabled bool) (interceptModulesView, error) {
+	if c.interceptModules == nil {
+		return interceptModulesView{}, errInterceptModulesUnavailable
+	}
+	return c.interceptModules.Update(ctx, id, interceptModuleUpdate{Revision: revision, Enabled: &enabled})
 }
 
 // PolicyRules returns the current policy rules in evaluation order. Empty

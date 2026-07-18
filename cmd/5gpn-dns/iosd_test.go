@@ -19,7 +19,22 @@ func writeIOSFixtures(t *testing.T) (dir string, mobileconfig []byte) {
 	if err := os.WriteFile(filepath.Join(dir, "ios-dot.mobileconfig"), mobileconfig, 0o644); err != nil {
 		t.Fatalf("write mobileconfig: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "ios-intercept-ca.mobileconfig"), mobileconfig, 0o644); err != nil {
+		t.Fatalf("write interception CA mobileconfig: %v", err)
+	}
 	return dir, mobileconfig
+}
+
+func TestIOSHandler_WLOCCAMobileconfig(t *testing.T) {
+	dir, want := writeIOSFixtures(t)
+	recorder := httptest.NewRecorder()
+	iosHandler(dir).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/ios-intercept-ca.mobileconfig", nil))
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "application/x-apple-aspen-config" {
+		t.Fatalf("status/type=%d/%q", recorder.Code, recorder.Header().Get("Content-Type"))
+	}
+	if string(recorder.Body.Bytes()) != string(want) {
+		t.Fatal("unexpected interception CA profile body")
+	}
 }
 
 func TestIOSHandler_Mobileconfig(t *testing.T) {

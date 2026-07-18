@@ -4,10 +4,11 @@
 Copyright (c) 2026 moooyo.
 
 This file lists the third-party components that 5gpn **distributes** (compiled
-into the `5gpn-dns` binary or bundled in the `5gpn-web` release tarball) or that
-`install.sh` **downloads onto the gateway** at install time, together with their
-licenses and upstream sources. Development- and test-only tooling (Go test
-dependencies, npm `devDependencies`) is not redistributed and is not listed.
+into the `5gpn-dns` or `5gpn-intercept` binaries or bundled in the `5gpn-web`
+release tarball) or that `install.sh` **downloads onto the gateway** at install
+time, together with their licenses and upstream sources. Development- and
+test-only tooling (Go test dependencies, npm `devDependencies`) is not
+redistributed and is not listed.
 
 Each component remains under its own license. Full license texts are available
 at the linked upstream projects; only attribution is reproduced here.
@@ -114,3 +115,138 @@ Go toolchain on the box). Pins per [`install.sh`](install.sh).
 > not a compiled binary — `install_zashboard()` downloads and unpacks the
 > pinned release archive to `DNS_ZASH_DIR`, served at `DNS_ZASH_LISTEN` and
 > reverse-proxied to mihomo's controller by `5gpn-dns` (see `mihomo_proxy.go`).
+
+---
+
+## 5. Interception sidecar
+
+Surge/Loon modules imported by an operator are stored only on that operator's
+gateway and are not bundled, mirrored, or redistributed by 5gpn. Their own
+licenses and usage terms remain the operator's responsibility.
+
+### quic-go
+
+`5gpn-intercept` includes `github.com/quic-go/quic-go` v0.60.0.
+
+Its redistributed transitive modules are:
+
+| Module | Version | License | Source |
+|---|---|---|---|
+| `github.com/quic-go/qpack` | v0.6.0 | MIT | https://github.com/quic-go/qpack |
+| `golang.org/x/crypto` | v0.51.0 | BSD-3-Clause | https://cs.opensource.google/go/x/crypto |
+| `golang.org/x/net` | v0.55.0 | BSD-3-Clause | https://cs.opensource.google/go/x/net |
+| `golang.org/x/sys` | v0.45.0 | BSD-3-Clause | https://cs.opensource.google/go/x/sys |
+| `golang.org/x/text` | v0.37.0 | BSD-3-Clause | https://cs.opensource.google/go/x/text |
+
+MIT License
+
+Copyright (c) 2016 the quic-go authors & Google, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+### goja
+
+`5gpn-intercept` includes `github.com/dop251/goja`
+v0.0.0-20260701091749-b07b74453ea9.
+
+Its additional redistributed transitive modules are:
+
+| Module | Version | License | Source |
+|---|---|---|---|
+| `github.com/go-sourcemap/sourcemap` | v2.1.3 | BSD-2-Clause | https://github.com/go-sourcemap/sourcemap |
+| `github.com/google/pprof` | v0.0.0-20230207041349-798e818bf904 | Apache-2.0 | https://github.com/google/pprof |
+
+MIT License
+
+Copyright (c) 2016 Dmitry Panov
+
+Copyright (c) 2012 Robert Krimen
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+### regexp2
+
+`5gpn-intercept` directly imports `github.com/dlclark/regexp2/v2` v2.2.1
+to set the timeout on goja's backtracking regular-expression fallback.
+
+MIT License
+
+Copyright (c) Doug Clark
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+### ProxyPin WLOC response transformer
+
+The bounded Go WLOC protobuf transformation logic is derived from the
+MIT-licensed `FFF686868/proxypin-wloc-spoofer` project at commit
+`edee9b955f673cc8c4a52eb0a9c687a2e25dde4a`.
+
+MIT License
+
+Copyright (c) 2026 WLOC ProxyPin Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -17,6 +17,13 @@ log-level: info
 
 listeners:
 __MIHOMO_LISTENERS__
+  - name: intercept-egress
+    type: mixed
+    listen: 127.0.0.1
+    port: 17890
+    udp: true
+    users:
+      - {username: __INTERCEPT_UPSTREAM_USERNAME__, password: __INTERCEPT_UPSTREAM_PASSWORD__}
 
 sniffer:
   enable: true
@@ -44,7 +51,14 @@ rule-providers:
 # node-subscription providers (proxy-providers:), then wire them into
 # proxy-groups as you like; the terminal MATCH rule below routes every
 # gateway-bound query that reached this point to the Proxies group.
-proxies: []
+proxies:
+  - name: MODULE-MITM
+    type: socks5
+    server: 127.0.0.1
+    port: 18080
+    username: __INTERCEPT_INBOUND_USERNAME__
+    password: __INTERCEPT_INBOUND_PASSWORD__
+    udp: true
 proxy-providers: {}
 
 proxy-groups:
@@ -71,4 +85,5 @@ rules:
   - IP-CIDR,192.168.0.0/16,REJECT,no-resolve
   - IP-CIDR,100.64.0.0/10,REJECT,no-resolve
   - IP-CIDR,169.254.0.0/16,REJECT,no-resolve
+  - IN-NAME,intercept-egress,Proxies
   - MATCH,Proxies

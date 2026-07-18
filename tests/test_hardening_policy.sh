@@ -6,6 +6,7 @@ rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
 MIHOMO_SVC="$ROOT/etc/systemd/mihomo.service"
 DNS_SVC="$ROOT/etc/systemd/5gpn-dns.service"
+INTERCEPT_SVC="$ROOT/etc/systemd/5gpn-intercept.service"
 JOURNAL_SVC="$ROOT/etc/systemd/5gpn-journal@.service"
 JOURNAL_EXPORT="$ROOT/scripts/export-journal.sh"
 INSTALL="$ROOT/install.sh"
@@ -39,8 +40,11 @@ grep -Fq 'Environment=SAFE_PATHS=/etc/5gpn/cert/zash' "$MIHOMO_SVC" \
 # deployed daemon unit is the one that must stay hardened.
 grep -Fq 'NoNewPrivileges=yes'  "$DNS_SVC" || fail "5gpn-dns.service: no NoNewPrivileges"
 grep -Fxq 'User=gpn-dns' "$DNS_SVC" || fail "5gpn-dns.service must run as its dedicated user"
-grep -Fxq 'SupplementaryGroups=mihomo' "$DNS_SVC" \
-    || fail "5gpn-dns.service must receive only its shared config supplementary group"
+grep -Fxq 'SupplementaryGroups=mihomo gpn-intercept' "$DNS_SVC" \
+    || fail "5gpn-dns.service must receive only its two narrow shared-config groups"
+grep -Fq -- '-/etc/5gpn/intercept-ca' "$DNS_SVC" \
+    && grep -Fq -- '-/etc/5gpn/intercept/tls' "$DNS_SVC" \
+    || fail "5gpn-dns.service must not read the interception CA key or leaf private key"
 grep -Fq 'systemd-journal' "$DNS_SVC" \
     && fail "5gpn-dns.service must not receive host-wide journal read access"
 grep -Fxq 'CapabilityBoundingSet=CAP_NET_BIND_SERVICE' "$DNS_SVC" \
@@ -50,6 +54,15 @@ grep -Fxq 'AmbientCapabilities=CAP_NET_BIND_SERVICE' "$DNS_SVC" \
 grep -Fq 'ProtectSystem=strict' "$DNS_SVC" || fail "5gpn-dns.service: no ProtectSystem=strict"
 # 5gpn-dns soft-orders after the mihomo data-plane forwarder (was xray).
 grep -Fq 'After=network-online.target mihomo.service' "$DNS_SVC" || fail "5gpn-dns.service must order After=...mihomo.service"
+
+grep -Fxq 'User=gpn-intercept' "$INTERCEPT_SVC" || fail "5gpn-intercept.service must use its dedicated account"
+grep -Fxq 'CapabilityBoundingSet=' "$INTERCEPT_SVC" || fail "5gpn-intercept.service must receive no capabilities"
+grep -Fxq 'RestrictAddressFamilies=AF_INET AF_UNIX' "$INTERCEPT_SVC" \
+    || fail "5gpn-intercept.service must remain IPv4/Unix only"
+grep -Fxq 'ReadOnlyPaths=/etc/5gpn/intercept' "$INTERCEPT_SVC" \
+    || fail "5gpn-intercept.service must have read-only runtime configuration"
+grep -Fq -- '-/etc/5gpn/intercept-ca' "$INTERCEPT_SVC" \
+    || fail "5gpn-intercept.service must not read the CA signing key"
 
 # --- public console keeps token authentication; zashboard keeps the IP ACL ---
 # The daemon still binds loopback behind mihomo. The old in-process token lockout

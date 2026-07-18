@@ -66,6 +66,58 @@ export const ingressModules: T.IngressModulesView = {
   ],
 }
 
+export const wlocIntercept: T.WLOCInterceptView = {
+  revision: '1000000000000000000000000000000000000000000000000000000000000001',
+  enabled: false,
+  longitude: null,
+  latitude: null,
+  accuracy: 25,
+  fail_closed: true,
+  max_body_bytes: 8388608,
+  hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'],
+  profile_url: '/ios/ios-intercept-ca.mobileconfig',
+}
+
+export const interceptModules: T.InterceptModulesView = {
+  revision: wlocIntercept.revision,
+  ca_profile_url: '/ios/ios-intercept-ca.mobileconfig',
+  catalog_url: 'https://hub.kelee.one/',
+  active_hosts: [],
+  modules: [
+    {
+      id: 'builtin-wloc',
+      name: 'Apple WLOC response rewriting',
+      description: 'Built-in bounded protobuf transformation for Apple location responses.',
+      format: 'builtin',
+      enabled: false,
+      ready: true,
+      compatibility: 'full',
+      partial_allowed: false,
+      hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'],
+      script_count: 1,
+      rewrite_count: 0,
+      source_digest: 'a'.repeat(64),
+    },
+    {
+      id: 'mod-1234567890abcdef',
+      name: 'Synthetic response cleaner',
+      description: 'A local test snapshot using the common Surge response-script shape.',
+      format: 'surge',
+      enabled: false,
+      ready: true,
+      compatibility: 'full',
+      partial_allowed: false,
+      hosts: ['api.example.test'],
+      script_count: 1,
+      rewrite_count: 0,
+      source_url: 'https://modules.example.test/clean.sgmodule',
+      source_digest: 'b'.repeat(64),
+      imported_at: '2026-07-18T00:00:00Z',
+      argument: '',
+    },
+  ],
+}
+
 // ---- Unified policy rules (mirrors cmd/5gpn-dns/policy_rules.go's
 // JSON shapes — see types.ts's PolicyRule/PolicyMatcher/PolicyFallback for the
 // field-by-field mapping). `policyFallback` is a `const` object mutated

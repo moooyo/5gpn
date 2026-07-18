@@ -289,6 +289,8 @@ MIHOMO_DIR="$TMP/mihomo"
 MIHOMO_SERVICE_USER="$(id -gn)"
 CONF_DIR="$TMP/conf"
 MIHOMO_BIN="$TMP/fake-mihomo"
+INTERCEPT_BIN="$TMP/fake-intercept"
+INTERCEPT_DIR="$TMP/intercept"
 MIHOMO_TEST_LOG="$TMP/mihomo.log"; export MIHOMO_TEST_LOG
 cat > "$MIHOMO_BIN" <<'EOF'
 #!/usr/bin/env bash
@@ -296,6 +298,12 @@ printf '%s\n' "$*" >> "$MIHOMO_TEST_LOG"
 exit 0
 EOF
 chmod +x "$MIHOMO_BIN"
+mkdir -p "$INTERCEPT_DIR"
+cat > "$INTERCEPT_BIN" <<'EOF'
+#!/usr/bin/env bash
+printf 'test-inbound-user\ttest-inbound-password-123456\ttest-upstream-user\ttest-upstream-password-123456\n'
+EOF
+chmod +x "$INTERCEPT_BIN"
 mkdir -p "$CONF_DIR"
 BASE_DOMAIN=example.com
 MIHOMO_LISTEN_IPS=10.20.30.40

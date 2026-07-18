@@ -292,6 +292,32 @@ func main() {
 		}
 	}
 
+	// Interception modules share one manager across the Web console and
+	// Telegram. Build the verified mihomo client once so raw-config edits and
+	// module transactions also share the same on-disk store lock.
+	var moduleMihomoStore *MihomoConfigStore
+	var moduleMihomoClient *MihomoClient
+	if client, clientErr := NewMihomoClient(cfg.MihomoController, cfg.MihomoSecret, cfg.ZashDomain, cfg.ZashCertFile); clientErr != nil {
+		log.Printf("warning: interception module hot-apply unavailable: %v", clientErr)
+	} else {
+		moduleMihomoStore = NewMihomoConfigStore(cfg.MihomoConfigFile)
+		moduleMihomoClient = client
+	}
+	interceptManager := NewInterceptModuleManager(
+		NewInterceptConfigStore(cfg.InterceptConfigFile),
+		h,
+		trustResolver,
+		moduleMihomoStore,
+		InfraParamsFromConfig(cfg),
+		realMihomoTester{},
+		moduleMihomoClient,
+	)
+	interceptManager.SetSidecarTester(realInterceptConfigTester{})
+	ctrl.SetInterceptModuleManager(interceptManager)
+	if err := interceptManager.PrepareRuntime(); err != nil {
+		log.Printf("warning: interception modules: %v -- DNS interception overlay remains fail-closed", err)
+	}
+
 	// Mihomo always resolves sniffed origins through the loopback Egress DNS
 	// Broker. A bind or resolver-construction failure is fatal because the data
 	// plane would otherwise start while unable to resolve any forwarded SNI.
@@ -329,7 +355,15 @@ func main() {
 		log.Fatalf("control server: %v", err)
 	}
 	if controlSrv != nil {
-		wireMihomoConfigManagement(controlSrv, cfg, log.Printf)
+		if moduleMihomoStore != nil && moduleMihomoClient != nil {
+			controlSrv.SetMihomoConfig(moduleMihomoStore, InfraParamsFromConfig(cfg), realMihomoTester{}, moduleMihomoClient)
+		}
+		controlSrv.SetInterceptModuleManager(interceptManager)
+		interceptManager.SetAppliedHook(func() {
+			controlSrv.mihomoAppliedAtMu.Lock()
+			controlSrv.mihomoAppliedAt = time.Now()
+			controlSrv.mihomoAppliedAtMu.Unlock()
+		})
 		if err := controlSrv.Start(); err != nil {
 			log.Fatalf("control server start: %v", err)
 		}

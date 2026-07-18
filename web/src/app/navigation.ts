@@ -35,6 +35,7 @@ export const NAV_GROUPS: NavGroup[] = [
     labelKey: 'nav.group.rules',
     items: [
       { id: 'policy-rules', path: '/policy-rules', labelKey: 'nav.policyRules', icon: 'ListChecks' },
+      { id: 'modules', path: '/modules', labelKey: 'nav.modules', icon: 'Boxes' },
     ],
   },
   {

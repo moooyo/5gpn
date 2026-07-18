@@ -9,11 +9,18 @@ plans, design handoffs, and git history are context only.
 - `5gpn-dns` is the DNS brain. Client ingress is DoT `:853` only; public DoH
   and plain `:53` must not be reintroduced. `127.0.0.1:5353/udp` is debug-only.
 - mihomo is the data-plane forwarder. It owns application-layer egress after a
-  DNS answer steers traffic to the gateway. Do not add Xray, sing-box,
+  DNS answer steers traffic to the gateway. `5gpn-intercept` is the sole narrow
+  exception for explicitly enabled, allowlisted module hosts over TLS/H1/H2 and
+  QUIC/H3; its upstream TCP and UDP return through authenticated mihomo SOCKS5
+  listeners. External Surge/Loon scripts execute from immutable local snapshots
+  in a no-network/no-filesystem goja sandbox. Do not crawl or mirror module stores.
+  Do not add Xray, sing-box,
   smartdns, chinadns-ng, TUN/TProxy, WireGuard, fwmark, policy-routing tables,
   or host firewall management.
 - DNS policy is an ordered first-match list with block/direct/proxy intents and
-  auto/direct/gateway fallback. It is DNS-only. Do not recreate policy-v2,
+  auto/direct/gateway fallback. It is DNS-only. The only pre-policy overlay is
+  the active interception-host set published by the same certificate/mihomo
+  transaction; it cannot select egress. Do not recreate policy-v2,
   drafts/generations, structured egress, node/selector APIs, or a generated
   mihomo config region.
 - `/etc/5gpn/mihomo/config.yaml` is fully operator-owned. Normal install,
@@ -25,8 +32,12 @@ plans, design handoffs, and git history are context only.
 - `/api/*` requires the console bearer token. Console mihomo logs use a
   short-lived one-use WebSocket ticket. Do not expose the full controller under
   the console `/proxy/`; zashboard has a separate allowlisted pass-through.
-- There is no Python in the repository. Go has exactly three direct dependencies:
+- There is no Python in the repository. The `5gpn-dns` Go module has exactly three direct dependencies:
   `github.com/miekg/dns`, `github.com/go-telegram/bot`, and `gopkg.in/yaml.v3`.
+  The separate `5gpn-intercept` module has exactly three direct dependencies:
+  `github.com/quic-go/quic-go`, `github.com/dop251/goja`, and
+  `github.com/dlclark/regexp2/v2` (the last is imported only to bound goja's
+  backtracking fallback).
   The YAML dependency is the explicit security boundary for structural mihomo
   invariant validation; do not add another direct dependency without an explicit
   design decision.
@@ -106,6 +117,9 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
 - Sidebar active state is pure CSS. Do not reintroduce JS rect measurement or a
   sliding indicator.
 - Theme controls live in the top bar profile menu and Settings appearance only.
+- Interception modules live on the dedicated `/modules` route. Keep immutable
+  digests, compatibility gaps, host allowlists, and the snapshot/trust/traffic
+  transaction visible; do not move them back into Settings.
 - Logs remain virtualized, polling is single-flight/cancellable, and mobile
   uses card rows plus a drawer sidebar.
 - Do not commit `web/dist`. Fonts are runtime-cached by the PWA; keep PWA,
@@ -118,6 +132,7 @@ Run checks proportional to the touched surface:
 ```bash
 for t in tests/test_*.sh; do bash "$t"; done
 (cd cmd/5gpn-dns && test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...)
+(cd cmd/5gpn-intercept && test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...)
 (cd web && npm run typecheck && npx vitest run && npm run build && npm run bundle:check)
 (cd web && npx playwright test)
 ```

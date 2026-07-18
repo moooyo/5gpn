@@ -96,10 +96,12 @@ type ControlServer struct {
 	// via SetMihomoConfig; nil store means the
 	// /api/mihomo/config* endpoints report unavailable (503) rather than
 	// panicking, matching every other optional-manager idiom in this file.
-	mihomoStore *MihomoConfigStore
-	mihomoInfra InfraParams
-	mihomoTest  mihomoTester
-	mihomoCtl   mihomoController
+	mihomoStore      *MihomoConfigStore
+	interceptStore   *InterceptConfigStore
+	interceptModules *InterceptModuleManager
+	mihomoInfra      InfraParams
+	mihomoTest       mihomoTester
+	mihomoCtl        mihomoController
 	// mihomoProxy is the secret-injecting loopback proxy used only by the
 	// authenticated health endpoint and the ticket-gated log WebSocket. It is
 	// deliberately not mounted directly: exposing the raw controller subtree
@@ -153,13 +155,14 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 	}
 
 	s := &ControlServer{
-		ctrl:        ctrl,
-		token:       cfg.APIToken,
-		startTime:   time.Now(),
-		limiter:     newRateLimiter(cfg.APIRate, cfg.APIBurst),
-		dotDomain:   cfg.DotDomain,
-		zashDomain:  cfg.ZashDomain,
-		mihomoProxy: unavailableMihomoProxy(),
+		ctrl:           ctrl,
+		token:          cfg.APIToken,
+		startTime:      time.Now(),
+		limiter:        newRateLimiter(cfg.APIRate, cfg.APIBurst),
+		dotDomain:      cfg.DotDomain,
+		zashDomain:     cfg.ZashDomain,
+		mihomoProxy:    unavailableMihomoProxy(),
+		interceptStore: NewInterceptConfigStore(cfg.InterceptConfigFile),
 	}
 
 	webUI, err := newWebUIHandler(cfg.WebDir)
@@ -185,9 +188,10 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 	// loopback tunnel does not carry PROXY protocol, so public callers must not
 	// be able to drain a bucket keyed by the tunnel's loopback source address.
 	mux.Handle("/api/", s.auditMiddleware(s.authMiddleware(s.rateLimitMiddleware(s.apiMux()))))
-	// iOS .mobileconfig distribution is public,
-	// token-free — the profile carries no secrets (just the DoT hostname), and
-	// an iPhone must be able to fetch it before it is configured for anything.
+	// iOS .mobileconfig distribution is public and token-free. The DoT profile
+	// carries only the resolver identity; the separate interception profile carries a
+	// public root certificate but never its signing key. Both must be fetchable
+	// before the phone has any 5gpn configuration.
 	mux.Handle("/ios/", ios)
 	// WebSocket authentication is enforced by an expiring one-use ticket minted
 	// through the bearer-protected API. Every other controller path is hidden.
@@ -367,6 +371,13 @@ func (s *ControlServer) apiMux() http.Handler {
 	mux.HandleFunc("POST /api/mihomo/config/reset", s.handleMihomoConfigReset)
 	mux.HandleFunc("GET /api/mihomo/ingress-modules", s.handleMihomoIngressModulesGet)
 	mux.HandleFunc("PUT /api/mihomo/ingress-modules/{id}", s.handleMihomoIngressModulePut)
+	mux.HandleFunc("GET /api/interception/wloc", s.handleInterceptWLOCGet)
+	mux.HandleFunc("PUT /api/interception/wloc", s.handleInterceptWLOCPut)
+	mux.HandleFunc("GET /api/interception/modules", s.handleInterceptModulesGet)
+	mux.HandleFunc("GET /api/interception/modules/{id}", s.handleInterceptModuleSnapshotGet)
+	mux.HandleFunc("POST /api/interception/modules/import", s.handleInterceptModulesImport)
+	mux.HandleFunc("PUT /api/interception/modules/{id}", s.handleInterceptModulePut)
+	mux.HandleFunc("DELETE /api/interception/modules/{id}", s.handleInterceptModuleDelete)
 
 	return mux
 }
@@ -796,7 +807,11 @@ func (s *ControlServer) consoleMihomoProxy() http.Handler {
 // size and writing a 400 JSON error on any read/decode failure. Returns
 // false (and has already written the error response) if decoding failed.
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, maxAPIBodyBytes)
+	return decodeJSONBodyLimit(w, r, dst, maxAPIBodyBytes)
+}
+
+func decodeJSONBodyLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	if err := decodeStrictJSON(r.Body, dst); err != nil {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 		return false

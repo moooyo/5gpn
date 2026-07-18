@@ -28,7 +28,9 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: cmd/5gpn-dns/go.mod
-          cache-dependency-path: cmd/5gpn-dns/go.sum
+          cache-dependency-path: |
+            cmd/5gpn-dns/go.sum
+            cmd/5gpn-intercept/go.sum
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -54,6 +56,14 @@ jobs:
             -ldflags "-s -w -X main.version=${VER}" -o 5gpn-dns-linux-amd64 .
           sha256sum 5gpn-dns-linux-amd64 > checksums.txt
 
+      - name: Build interception sidecar
+        working-directory: cmd/5gpn-intercept
+        run: |
+          VER="${GITHUB_REF_NAME}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -ldflags "-s -w -X main.version=${VER}" -o 5gpn-intercept-linux-amd64 .
+          sha256sum 5gpn-intercept-linux-amd64 >> ../5gpn-dns/checksums.txt
+
       - name: Package web UI
         run: |
           VER="${GITHUB_REF_NAME}"
@@ -70,7 +80,7 @@ jobs:
         run: |
           stage="installer-bundle"
           mkdir -p "$stage"
-          cp -r install.sh quick-install.sh etc scripts README.md LICENSE "$stage"/
+          cp -r install.sh quick-install.sh etc scripts README.md LICENSE THIRD_PARTY_NOTICES.md "$stage"/
           sed -i "s/^DNS_VERSION_DEFAULT=.*/DNS_VERSION_DEFAULT=\"${GITHUB_REF_NAME}\"/" "$stage/install.sh"
           # Fail loudly if the stamp did not take (guards against a renamed var).
           grep -q "^DNS_VERSION_DEFAULT=\"${GITHUB_REF_NAME}\"" "$stage/install.sh" \
@@ -84,6 +94,8 @@ jobs:
           generate_release_notes: true
           files: |
             cmd/5gpn-dns/5gpn-dns-linux-amd64
+            cmd/5gpn-intercept/5gpn-intercept-linux-amd64
+            THIRD_PARTY_NOTICES.md
             cmd/5gpn-dns/checksums.txt
             5gpn-web-*.tar.gz
             5gpn-installer.tar.gz

@@ -610,7 +610,8 @@ func mainMenu() *models.InlineKeyboardMarkup {
 	rows := [][]models.InlineKeyboardButton{
 		{btn("📊 状态", "act:status"), btn("🧪 DNS 诊断", "act:diagnose")},
 		{btn("📜 日志", "menu:logs"), btn("🌐 上游 DNS", "menu:upstreams")},
-		{btn("🛠 维护", "menu:maintenance"), btn("📱 iOS 安装", "menu:ios")},
+		{btn("🧩 MITM 模块", "menu:modules"), btn("📱 iOS 安装", "menu:ios")},
+		{btn("🛠 维护", "menu:maintenance")},
 	}
 	if target, ok := webConsoleURL(); ok {
 		rows = append(rows, []models.InlineKeyboardButton{urlBtn("🔗 Web 控制台", target)})
@@ -673,6 +674,92 @@ func iosMenu() *models.InlineKeyboardMarkup {
 	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
+func renderInterceptModules(view interceptModulesView, notice string) string {
+	var out strings.Builder
+	out.WriteString("<b>MITM 模块</b>\n")
+	out.WriteString("启用会同步发布证书、mihomo 路由与 DNS 引流。\n")
+	if notice != "" {
+		out.WriteString("\n")
+		out.WriteString(notice)
+		out.WriteString("\n")
+	}
+	for _, module := range view.Modules {
+		state := "⚪ 已关闭"
+		if module.Enabled && module.Ready {
+			state = "🟢 已启用"
+		} else if module.Enabled {
+			state = "🟠 状态异常"
+		}
+		out.WriteString("\n<b>")
+		out.WriteString(html.EscapeString(telegramModuleName(module)))
+		out.WriteString("</b> · ")
+		out.WriteString(state)
+		out.WriteString("\n<code>")
+		out.WriteString(html.EscapeString(strings.Join(module.Hosts, ", ")))
+		out.WriteString("</code>")
+		if module.Compatibility == "partial" {
+			out.WriteString("\n⚠️ 仅部分兼容")
+		}
+		if module.Reason != "" {
+			out.WriteString("\n原因：<code>")
+			out.WriteString(html.EscapeString(module.Reason))
+			out.WriteString("</code>")
+		}
+	}
+	return out.String()
+}
+
+func interceptModulesMenu(view interceptModulesView) *models.InlineKeyboardMarkup {
+	rows := make([][]models.InlineKeyboardButton, 0, len(view.Modules)+2)
+	for _, module := range view.Modules {
+		action := "on"
+		prefix := "启用"
+		callback := ""
+		if module.Enabled {
+			action = "off"
+			prefix = "关闭"
+		} else if module.Compatibility == "partial" && !module.PartialAllowed {
+			prefix = "需在 Console 审查"
+		} else if !module.Ready {
+			prefix = "不可用"
+		}
+		label := telegramModuleName(module)
+		if utf8.RuneCountInString(label) > 24 {
+			runes := []rune(label)
+			label = string(runes[:23]) + "…"
+		}
+		callback = "module:request:" + action + ":" + module.ID
+		if !module.Enabled && (!module.Ready || (module.Compatibility == "partial" && !module.PartialAllowed)) {
+			callback = "menu:modules"
+		}
+		rows = append(rows, []models.InlineKeyboardButton{btn(prefix+" · "+label, callback)})
+	}
+	rows = append(rows, []models.InlineKeyboardButton{btn("🔄 刷新", "menu:modules")})
+	rows = append(rows, []models.InlineKeyboardButton{btn("« 返回", "menu:main")})
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+func telegramModuleName(module interceptModuleView) string {
+	if module.ID == interceptModuleWLOCID {
+		return "Apple WLOC 响应改写"
+	}
+	return module.Name
+}
+
+func interceptModuleConfirmationMenu(id string, enabled bool) *models.InlineKeyboardMarkup {
+	action := "off"
+	if enabled {
+		action = "on"
+	}
+	if !validInterceptModuleCallbackID(id) {
+		return backKB("menu:modules")
+	}
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{btn("✅ 确认", "module:apply:"+action+":"+id)},
+		{btn("« 返回", "menu:modules")},
+	}}
+}
+
 func confirmationMenu(action botPrivilegedAction, nonce string) *models.InlineKeyboardMarkup {
 	if !validBotPrivilegedAction(action) || !validConfirmationNonce(nonce) {
 		return backKB("menu:maintenance")
@@ -726,7 +813,10 @@ const (
 	cbMenuMaintenance
 	cbMenuLogs
 	cbMenuIOS
+	cbMenuModules
 	cbIOSPhoto
+	cbModuleRequest
+	cbModuleToggle
 	cbRequestConfirm
 	cbConfirmAction
 	cbCancelAction
@@ -773,8 +863,22 @@ func parseCallback(data string) callbackIntent {
 		return callbackIntent{kind: cbMenuLogs}
 	case "menu:ios":
 		return callbackIntent{kind: cbMenuIOS}
+	case "menu:modules":
+		return callbackIntent{kind: cbMenuModules}
 	case "act:ios-photo":
 		return callbackIntent{kind: cbIOSPhoto}
+	}
+	if rest, ok := strings.CutPrefix(payload, "module:"); ok {
+		stage, actionAndID, found := strings.Cut(rest, ":")
+		action, id, foundAction := strings.Cut(actionAndID, ":")
+		if found && foundAction && (action == "on" || action == "off") && validInterceptModuleCallbackID(id) {
+			switch stage {
+			case "request":
+				return callbackIntent{kind: cbModuleRequest, arg: action + ":" + id}
+			case "apply":
+				return callbackIntent{kind: cbModuleToggle, arg: action + ":" + id}
+			}
+		}
 	}
 	if svc, ok := strings.CutPrefix(payload, "logs:"); ok {
 		return callbackIntent{kind: cbLogs, arg: svc}
@@ -799,6 +903,10 @@ func parseCallback(data string) callbackIntent {
 		return callbackIntent{kind: cbUnknown, arg: arg}
 	}
 	return callbackIntent{kind: cbUnknown, arg: payload}
+}
+
+func validInterceptModuleCallbackID(id string) bool {
+	return id == interceptModuleWLOCID || validInterceptModuleID(id)
 }
 
 // disabledPreview is a reusable "no link preview" option for outgoing

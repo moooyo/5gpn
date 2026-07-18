@@ -248,6 +248,44 @@ export async function setupMockApi(page: Page): Promise<void> {
   let ingressEnabled = true
   let mihomoText = MIHOMO_CONFIG_TEXT
   let revision = mihomoRevision(mihomoText)
+  let wlocIntercept: T.WLOCInterceptView = {
+    revision: '1000000000000000000000000000000000000000000000000000000000000001',
+    enabled: false,
+    longitude: null,
+    latitude: null,
+    accuracy: 25,
+    fail_closed: true,
+    max_body_bytes: 8388608,
+    hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'],
+    profile_url: '/ios/ios-intercept-ca.mobileconfig',
+  }
+  let interceptRevision = wlocIntercept.revision
+  let interceptModules: T.InterceptModule[] = [
+    {
+      id: 'builtin-wloc', name: 'Apple WLOC response rewriting', format: 'builtin', enabled: false, ready: true,
+      compatibility: 'full', partial_allowed: false, hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'],
+      script_count: 1, rewrite_count: 0, source_digest: 'a'.repeat(64),
+    },
+    {
+      id: 'mod-1234567890abcdef', name: 'Response Cleaner', description: 'Synthetic Surge fixture', format: 'surge',
+      enabled: false, ready: true, compatibility: 'full', partial_allowed: false, hosts: ['api.example.com'],
+      script_count: 1, rewrite_count: 0, source_url: 'https://example.com/test.sgmodule',
+      source_digest: 'b'.repeat(64), imported_at: '2026-07-18T00:00:00Z', argument: '',
+    },
+  ]
+
+  const currentInterceptModules = (): T.InterceptModulesView => ({
+    revision: interceptRevision,
+    ca_profile_url: '/ios/ios-intercept-ca.mobileconfig',
+    catalog_url: 'https://hub.kelee.one/',
+    active_hosts: interceptModules.filter((module) => module.enabled).flatMap((module) => module.hosts),
+    modules: interceptModules,
+  })
+
+  const advanceInterceptRevision = (): void => {
+    interceptRevision = (BigInt(`0x${interceptRevision}`) + 1n).toString(16).padStart(64, '0')
+    wlocIntercept.revision = interceptRevision
+  }
 
   const currentMihomoConfig = (): T.MihomoConfig => ({
     ...MIHOMO_CONFIG_FIXTURE,
@@ -337,6 +375,63 @@ export async function setupMockApi(page: Page): Promise<void> {
       const withoutMarker = mihomoText.replace(`\n${INGRESS_MARKER}`, '')
       replaceMihomoText(ingressEnabled ? `${withoutMarker}\n${INGRESS_MARKER}` : withoutMarker)
       return json(route, ingressModulesFixture(ingressEnabled, revision))
+    }
+    if (path === '/api/interception/wloc' && method === 'GET') {
+      return json(route, wlocIntercept)
+    }
+    if (path === '/api/interception/wloc' && method === 'PUT') {
+      const body = route.request().postDataJSON() as T.WLOCInterceptUpdate
+      if (body.revision !== wlocIntercept.revision) return json(route, wlocIntercept, 409)
+      advanceInterceptRevision()
+      wlocIntercept = { ...wlocIntercept, ...body, revision: interceptRevision }
+      const builtIn = interceptModules.find((module) => module.id === 'builtin-wloc')
+      if (builtIn) builtIn.enabled = body.enabled
+      return json(route, wlocIntercept)
+    }
+    if (path === '/api/interception/modules' && method === 'GET') {
+      return json(route, currentInterceptModules())
+    }
+    if (path === '/api/interception/modules/import' && method === 'POST') {
+      const body = route.request().postDataJSON() as T.InterceptModuleImport
+      if (body.revision !== interceptRevision) return json(route, { error: 'interception module revision changed' }, 409)
+      interceptModules = [...interceptModules, {
+        id: 'mod-fedcba0987654321', name: 'Imported module snapshot', format: body.format === 'loon' ? 'loon' : 'surge',
+        enabled: false, ready: true, compatibility: 'full', partial_allowed: body.partial_allowed,
+        hosts: ['service.example.test'], script_count: 1, rewrite_count: 0, source_url: body.url,
+        source_digest: 'c'.repeat(64), imported_at: '2026-07-18T01:00:00Z', argument: body.argument,
+      }]
+      advanceInterceptRevision()
+      return json(route, currentInterceptModules(), 201)
+    }
+    const moduleMatch = path.match(/^\/api\/interception\/modules\/([^/]+)$/)
+    if (moduleMatch && method === 'GET') {
+      const id = decodeURIComponent(moduleMatch[1])
+      const module = interceptModules.find((candidate) => candidate.id === id)
+      if (!module) return json(route, { error: 'interception module not found' }, 404)
+      return json(route, {
+        id, name: module.name, format: module.format, source_url: module.source_url,
+        source_digest: module.source_digest,
+        source_body: id === 'builtin-wloc' ? 'Built into the 5gpn-intercept binary.' : '#!name=Response Cleaner\n[MITM]\nhostname=api.example.com\n',
+        scripts: id === 'builtin-wloc' ? [] : [{ id: 'script-001', url: 'https://example.com/clean.js', digest: 'd'.repeat(64), body: '$done({body: $response.body});' }],
+      } satisfies T.InterceptModuleSnapshot)
+    }
+    if (moduleMatch && method === 'PUT') {
+      const body = route.request().postDataJSON() as T.InterceptModuleUpdate
+      if (body.revision !== interceptRevision) return json(route, { error: 'interception module revision changed' }, 409)
+      const module = interceptModules.find((candidate) => candidate.id === decodeURIComponent(moduleMatch[1]))
+      if (!module) return json(route, { error: 'interception module not found' }, 404)
+      if (body.enabled !== undefined) module.enabled = body.enabled
+      if (body.argument !== undefined) module.argument = body.argument
+      if (body.partial_allowed !== undefined) module.partial_allowed = body.partial_allowed
+      advanceInterceptRevision()
+      return json(route, currentInterceptModules())
+    }
+    if (moduleMatch && method === 'DELETE') {
+      const body = route.request().postDataJSON() as { revision?: string }
+      if (body.revision !== interceptRevision) return json(route, { error: 'interception module revision changed' }, 409)
+      interceptModules = interceptModules.filter((module) => module.id !== decodeURIComponent(moduleMatch[1]))
+      advanceInterceptRevision()
+      return json(route, currentInterceptModules())
     }
 
     // Unhandled — return 404

@@ -302,7 +302,7 @@ func TestBotMenusAreVersionedAndUnambiguous(t *testing.T) {
 		}
 	}
 	joined := strings.Join(labels, "|")
-	for _, want := range []string{"状态", "DNS 诊断", "日志", "上游 DNS", "维护", "iOS 安装", "Web 控制台"} {
+	for _, want := range []string{"状态", "DNS 诊断", "日志", "上游 DNS", "MITM 模块", "维护", "iOS 安装", "Web 控制台"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("main menu missing %q: %s", want, joined)
 		}
@@ -333,6 +333,49 @@ func TestBotMenusAreVersionedAndUnambiguous(t *testing.T) {
 	}
 	if !hasURL || !hasPhoto {
 		t.Fatalf("iOS menu missing URL/photo action: %+v", ios.InlineKeyboard)
+	}
+}
+
+func TestInterceptModuleBotMenuAndCallbacks(t *testing.T) {
+	view := interceptModulesView{Modules: []interceptModuleView{
+		{ID: interceptModuleWLOCID, Name: "WLOC", Enabled: false, Ready: true, Hosts: builtInWLOCHosts},
+		{ID: "mod-1234567890abcdef1234567890abcdef", Name: "Fixture", Enabled: true, Ready: true, Hosts: []string{"api.example.com"}},
+	}}
+	menu := interceptModulesMenu(view)
+	if len(menu.InlineKeyboard) != 4 {
+		t.Fatalf("module menu rows = %d", len(menu.InlineKeyboard))
+	}
+	callbacks := []string{
+		menu.InlineKeyboard[0][0].CallbackData,
+		menu.InlineKeyboard[1][0].CallbackData,
+	}
+	for _, callback := range callbacks {
+		if len(callback) > 64 {
+			t.Fatalf("Telegram callback exceeds 64 bytes: %q", callback)
+		}
+		intent := parseCallback(callback)
+		if intent.kind != cbModuleRequest {
+			t.Fatalf("module callback parsed as %+v", intent)
+		}
+	}
+	confirm := interceptModuleConfirmationMenu("mod-1234567890abcdef1234567890abcdef", true)
+	apply := confirm.InlineKeyboard[0][0].CallbackData
+	if len(apply) > 64 || parseCallback(apply).kind != cbModuleToggle {
+		t.Fatalf("module confirmation callback = %q parsed=%+v", apply, parseCallback(apply))
+	}
+	if got := parseCallback(versionedCallback("module:apply:on:../../unsafe")); got.kind != cbUnknown {
+		t.Fatalf("unsafe module callback parsed as %+v", got)
+	}
+	rendered := renderInterceptModules(view, "")
+	if !strings.Contains(rendered, "api.example.com") || !strings.Contains(rendered, "已启用") {
+		t.Fatalf("module render = %s", rendered)
+	}
+	partial := interceptModulesMenu(interceptModulesView{Modules: []interceptModuleView{{
+		ID: "mod-abcdefabcdefabcdefabcdefabcdefab", Name: "Partial", Ready: true,
+		Compatibility: "partial", PartialAllowed: false,
+	}}})
+	if got := partial.InlineKeyboard[0][0]; !strings.Contains(got.Text, "Console 审查") || got.CallbackData != versionedCallback("menu:modules") {
+		t.Fatalf("unreviewed partial module button = %+v", got)
 	}
 }
 
