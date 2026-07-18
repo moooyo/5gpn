@@ -10,9 +10,9 @@ plans, design handoffs, and git history are context only.
   and plain `:53` must not be reintroduced. `127.0.0.1:5353/udp` is debug-only.
 - mihomo is the data-plane forwarder. It owns application-layer egress after a
   DNS answer steers traffic to the gateway. `5gpn-intercept` is the sole narrow
-  exception for explicitly enabled, allowlisted module hosts over TLS/H1/H2 and
-  QUIC/H3; its upstream TCP and UDP return through authenticated mihomo SOCKS5
-  listeners. External Surge/Loon scripts execute from immutable local snapshots
+  exception for explicitly enabled, allowlisted module hosts over plain HTTP,
+  TLS/H1/H2, and QUIC/H3; its upstream TCP and UDP return through authenticated mihomo SOCKS5
+  listeners. External Loon scripts execute from immutable local snapshots
   in a no-network/no-filesystem goja sandbox. Do not crawl or mirror module stores.
   Do not add Xray, sing-box,
   smartdns, chinadns-ng, TUN/TProxy, WireGuard, fwmark, policy-routing tables,
@@ -34,10 +34,10 @@ plans, design handoffs, and git history are context only.
   the console `/proxy/`; zashboard has a separate allowlisted pass-through.
 - There is no Python in the repository. The `5gpn-dns` Go module has exactly three direct dependencies:
   `github.com/miekg/dns`, `github.com/go-telegram/bot`, and `gopkg.in/yaml.v3`.
-  The separate `5gpn-intercept` module has exactly three direct dependencies:
-  `github.com/quic-go/quic-go`, `github.com/dop251/goja`, and
-  `github.com/dlclark/regexp2/v2` (the last is imported only to bound goja's
-  backtracking fallback).
+  The separate `5gpn-intercept` module has exactly four direct dependencies:
+  `github.com/quic-go/quic-go`, `github.com/dop251/goja`,
+  `github.com/dlclark/regexp2/v2` (imported only to bound goja's backtracking
+  fallback), and `github.com/andybalholm/brotli` for bounded Brotli decoding.
   The YAML dependency is the explicit security boundary for structural mihomo
   invariant validation; do not add another direct dependency without an explicit
   design decision.

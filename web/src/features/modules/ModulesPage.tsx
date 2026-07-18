@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from 'react'
 import { useTranslation } from 'react-i18next'
+import { Link } from 'react-router-dom'
 import {
   ArrowRight,
   Boxes,
@@ -29,8 +30,6 @@ import {
 import { api } from '../../lib/api/client'
 import type {
   InterceptModule,
-  InterceptModuleFormat,
-  InterceptModuleImport,
   InterceptModuleSnapshot,
   InterceptModulesView,
   WLOCInterceptView,
@@ -40,18 +39,15 @@ import { WLOCInterceptCard } from './WLOCInterceptCard'
 type ImportMode = 'url' | 'text'
 type PendingAction = { kind: 'toggle' | 'delete' | 'partial'; module: InterceptModule } | null
 
+function compatibilityTone(value: InterceptModule['compatibility']): 'green' | 'amber' | 'blue' | 'red' {
+  if (value === 'full') return 'green'
+  if (value === 'partial') return 'amber'
+  if (value === 'needs_configuration') return 'blue'
+  return 'red'
+}
+
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback
-}
-
-function formatLabel(format: InterceptModuleFormat, t: (key: string, options?: Record<string, unknown>) => string) {
-  return t(`modules.${format}`)
-}
-
-function formatTone(format: InterceptModuleFormat): 'blue' | 'indigo' | 'cyan' {
-  if (format === 'surge') return 'blue'
-  if (format === 'loon') return 'indigo'
-  return 'cyan'
 }
 
 function TransactionRail({ module }: { module: InterceptModule }) {
@@ -85,6 +81,7 @@ function ModuleCard({
   onToggle,
   onDelete,
   onSaveArgument,
+  onSaveParameters,
   onInspect,
   onAcknowledge,
 }: {
@@ -93,19 +90,24 @@ function ModuleCard({
   onToggle: (module: InterceptModule) => void
   onDelete: (module: InterceptModule) => void
   onSaveArgument: (module: InterceptModule, argument: string) => void
+  onSaveParameters: (module: InterceptModule, parameters: Record<string, string>) => void
   onInspect: (module: InterceptModule) => void
   onAcknowledge: (module: InterceptModule) => void
 }) {
   const { t, i18n } = useTranslation()
   const [argument, setArgument] = useState(module.argument ?? '')
+  const [parameters, setParameters] = useState<Record<string, string>>(() => Object.fromEntries((module.parameters ?? []).map((parameter) => [parameter.key, parameter.value ?? ''])))
   const displayName = module.id === 'builtin-wloc' ? t('settings.wlocTitle') : module.name
   const displayDescription = module.id === 'builtin-wloc' ? t('modules.builtinDescription') : module.description
 
   useEffect(() => setArgument(module.argument ?? ''), [module.argument])
+  useEffect(() => setParameters(Object.fromEntries((module.parameters ?? []).map((parameter) => [parameter.key, parameter.value ?? '']))), [module.parameters])
 
   const status = module.enabled ? (module.ready ? t('modules.enabled') : t('modules.degraded')) : t('modules.disabled')
   const statusTone = module.enabled ? (module.ready ? 'green' : 'amber') : 'neutral'
   const imported = module.imported_at ? new Intl.DateTimeFormat(i18n.language, { dateStyle: 'medium' }).format(new Date(module.imported_at)) : ''
+  const parametersComplete = (module.parameters ?? []).every((parameter) => (parameters[parameter.key] ?? '').trim() !== '')
+  const parametersChanged = (module.parameters ?? []).some((parameter) => (parameters[parameter.key] ?? '') !== (parameter.value ?? ''))
 
   return (
     <Card className="overflow-hidden" data-testid={`module-${module.id}`}>
@@ -113,8 +115,10 @@ function ModuleCard({
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="mb-2 flex flex-wrap items-center gap-1.5">
-              <Badge tone={formatTone(module.format)}>{formatLabel(module.format, t)}</Badge>
-              <Badge tone={module.compatibility === 'full' ? 'green' : 'amber'}>
+              <Badge tone={module.id === 'builtin-wloc' ? 'cyan' : 'indigo'}>
+                {module.id === 'builtin-wloc' ? t('modules.builtin') : t('modules.loon')}
+              </Badge>
+              <Badge tone={compatibilityTone(module.compatibility)}>
                 {t(`modules.${module.compatibility}`)}
               </Badge>
               <Badge tone={statusTone}>{status}</Badge>
@@ -122,13 +126,13 @@ function ModuleCard({
             <h2 className="text-[15px] font-extrabold leading-tight text-text-strong">{displayName}</h2>
             {displayDescription ? <p className="mt-1.5 text-[12px] leading-relaxed text-text-soft">{displayDescription}</p> : null}
           </div>
-          {module.format === 'builtin' ? (
+          {module.id === 'builtin-wloc' ? (
             <span className="shrink-0 text-[10.5px] font-semibold text-primary">{t('modules.configureBelow')}</span>
           ) : (
             <Toggle
               checked={module.enabled}
               onCheckedChange={() => onToggle(module)}
-              disabled={busy || (!module.enabled && (!module.ready || (module.compatibility === 'partial' && !module.partial_allowed)))}
+              disabled={busy || (!module.enabled && (!module.ready || module.compatibility === 'incompatible' || module.compatibility === 'needs_configuration' || (module.compatibility === 'partial' && !module.partial_allowed)))}
               aria-label={module.enabled ? t('modules.toggleOff') : t('modules.toggleOn')}
             />
           )}
@@ -144,6 +148,19 @@ function ModuleCard({
             ))}
           </div>
         </div>
+
+        {module.host_mappings?.length ? (
+          <div>
+            <div className="mb-1.5 text-[10.5px] font-bold uppercase tracking-[.08em] text-text-faint">{t('modules.hostMappings')}</div>
+            <div className="space-y-1.5">
+              {module.host_mappings.map((mapping) => (
+                <div key={mapping.pattern} className="flex items-center justify-between gap-3 rounded-[7px] bg-input px-2.5 py-1.5 font-mono text-[10.5px] text-text-mid">
+                  <span className="truncate">{mapping.pattern}</span><ArrowRight className="h-3 w-3 shrink-0 text-text-faint" /><span className="truncate">{mapping.target}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
 
         <div className="grid grid-cols-2 gap-2 text-[11px] text-text-soft">
           <div className="rounded-[8px] bg-input px-2.5 py-2">{t('modules.scripts', { count: module.script_count })}</div>
@@ -165,16 +182,44 @@ function ModuleCard({
           {module.reason ? <div className="text-amber-2">{t('modules.routeReason', { reason: module.reason })}</div> : null}
         </div>
 
-        {module.unsupported?.length ? (
+        {module.issues?.length ? (
           <details className="rounded-[9px] border border-amber-2/25 bg-amber-2/5 px-3 py-2 text-[11px] text-text-soft">
-            <summary className="cursor-pointer font-bold text-amber-2">{t('modules.unsupportedTitle', { count: module.unsupported.length })}</summary>
+            <summary className="cursor-pointer font-bold text-amber-2">{t('modules.compatibilityTitle', { count: module.issues.length })}</summary>
             <ul className="mt-2 space-y-1 break-words font-mono text-[10px]">
-              {module.unsupported.map((line) => <li key={line}>{line}</li>)}
+              {module.issues.map((issue) => <li className={issue.severity === 'error' ? 'text-red' : undefined} key={`${issue.severity}:${issue.message}`}>{issue.message}</li>)}
             </ul>
           </details>
         ) : null}
 
-        {module.format !== 'builtin' ? (
+        {module.id !== 'builtin-wloc' && module.parameters?.length ? (
+          <Field label={t('modules.parameters')}>
+            <div className="space-y-2.5 rounded-[10px] border border-divider bg-input/35 p-3">
+              {module.parameters.map((parameter) => (
+                <label className="block" key={parameter.key}>
+                  <span className="mb-1 block font-mono text-[10.5px] font-semibold text-text-mid">{parameter.key}</span>
+                  {parameter.kind === 'select' ? (
+                    <select
+                      aria-label={parameter.key}
+                      className="w-full rounded-[9px] border border-input-border bg-input px-3 py-2 text-[12px] text-text-strong outline-none"
+                      value={parameters[parameter.key] ?? ''}
+                      onChange={(event) => setParameters((current) => ({ ...current, [parameter.key]: event.target.value }))}
+                    >
+                      <option value="">{t('modules.selectParameter')}</option>
+                      {(parameter.options ?? []).map((option) => <option key={option} value={option}>{option}</option>)}
+                    </select>
+                  ) : (
+                    <Input aria-label={parameter.key} maxLength={4096} value={parameters[parameter.key] ?? ''} onChange={(event) => setParameters((current) => ({ ...current, [parameter.key]: event.target.value }))} />
+                  )}
+                </label>
+              ))}
+              <div className="flex justify-end">
+                <Button type="button" variant="secondary" size="sm" disabled={busy || !parametersComplete || !parametersChanged} onClick={() => onSaveParameters(module, parameters)}>{t('modules.saveParameters')}</Button>
+              </div>
+            </div>
+          </Field>
+        ) : null}
+
+        {module.id !== 'builtin-wloc' ? (
           <Field label={t('modules.argument')}>
             <div className="flex gap-2">
               <Input aria-label={t('modules.argument')} maxLength={4096} className="min-w-0 flex-1" value={argument} onChange={(event) => setArgument(event.target.value)} />
@@ -201,7 +246,7 @@ function ModuleCard({
           <Button type="button" variant="secondary" size="sm" disabled={busy} onClick={() => onInspect(module)}>
             <FileSearch className="h-3.5 w-3.5" /> {t('modules.inspect')}
           </Button>
-          {module.format !== 'builtin' ? (
+          {module.id !== 'builtin-wloc' ? (
             <Button type="button" variant="danger" size="sm" disabled={busy || module.enabled} onClick={() => onDelete(module)}>
               <Trash2 className="h-3.5 w-3.5" /> {t('modules.delete')}
             </Button>
@@ -262,11 +307,13 @@ function SnapshotModal({
 function ImportModuleModal({
   open,
   revision,
+  existingIDs,
   onOpenChange,
   onImported,
 }: {
   open: boolean
   revision: string
+  existingIDs: string[]
   onOpenChange: (open: boolean) => void
   onImported: (view: InterceptModulesView) => void
 }) {
@@ -274,12 +321,13 @@ function ImportModuleModal({
   const [mode, setMode] = useState<ImportMode>('url')
   const [url, setURL] = useState('')
   const [content, setContent] = useState('')
-  const [format, setFormat] = useState<InterceptModuleImport['format']>('auto')
-  const [qx, setQX] = useState(true)
-  const [referer, setReferer] = useState('https://hub.kelee.one/')
-  const [argument, setArgument] = useState('')
-  const [partial, setPartial] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [review, setReview] = useState<InterceptModule | null>(null)
+
+  function changeOpen(next: boolean) {
+    if (!next) setReview(null)
+    onOpenChange(next)
+  }
 
   async function submit() {
     if ((mode === 'url' && !url.trim()) || (mode === 'text' && !content.trim())) {
@@ -291,18 +339,18 @@ function ImportModuleModal({
       const view = await api.importInterceptModule({
         revision,
         ...(mode === 'url' ? { url: url.trim() } : { content }),
-        format,
-        fetch_profile: qx ? 'quantumult-x' : 'standard',
-        referer: qx && referer.trim() ? referer.trim() : undefined,
-        argument: argument || undefined,
-        partial_allowed: partial,
       })
       onImported(view)
-      toast.success(t('modules.import.success'))
-      onOpenChange(false)
+      const imported = view.modules.find((module) => module.id !== 'builtin-wloc' && !existingIDs.includes(module.id)) ?? null
+      if (imported && (imported.compatibility === 'incompatible' || imported.compatibility === 'needs_configuration' || (imported.issues?.length ?? 0) > 0)) {
+        setReview(imported)
+        toast.info(t('modules.import.reviewRequired'))
+      } else {
+        toast.success(t('modules.import.success'))
+        changeOpen(false)
+      }
       setURL('')
       setContent('')
-      setArgument('')
     } catch (error) {
       toast.error(errorMessage(error, t('modules.import.failed')))
     } finally {
@@ -323,19 +371,41 @@ function ImportModuleModal({
   return (
     <Modal
       open={open}
-      onOpenChange={onOpenChange}
+      onOpenChange={changeOpen}
       title={t('modules.import.title')}
       className="w-[min(94vw,660px)]"
       footer={
-        <>
-          <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-          <Button type="button" disabled={busy} onClick={() => void submit()}>
-            {busy ? t('modules.import.importing') : t('modules.import.submit')}
-          </Button>
-        </>
+        review ? <Button type="button" onClick={() => changeOpen(false)}>{t('modules.import.closeReview')}</Button> : (
+          <>
+            <Button type="button" variant="secondary" onClick={() => changeOpen(false)}>{t('common.cancel')}</Button>
+            <Button type="button" disabled={busy} onClick={() => void submit()}>
+              {busy ? t('modules.import.importing') : t('modules.import.submit')}
+            </Button>
+          </>
+        )
       }
     >
-      <div className="space-y-4">
+      {review ? (
+        <div className="space-y-4" data-testid="module-import-review">
+          <div className="rounded-[12px] border border-primary/20 bg-primary/5 p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge tone={compatibilityTone(review.compatibility)}>{t(`modules.${review.compatibility}`)}</Badge>
+              <span className="text-[13px] font-extrabold text-text-strong">{review.name}</span>
+            </div>
+            <p className="mt-2 text-[11px] leading-relaxed text-text-soft">{t('modules.import.reviewBody')}</p>
+          </div>
+          {review.issues?.length ? (
+            <ul className="space-y-2">
+              {review.issues.map((issue) => (
+                <li className={`rounded-[10px] border px-3 py-2 text-[11px] leading-relaxed ${issue.severity === 'error' ? 'border-red/25 bg-red/5 text-red' : 'border-amber-2/25 bg-amber-2/5 text-text-mid'}`} key={`${issue.severity}:${issue.message}`}>
+                  {issue.message}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {review.parameters?.length ? <div className="text-[11px] text-text-soft">{t('modules.import.parametersPending', { count: review.parameters.length })}</div> : null}
+        </div>
+      ) : <div className="space-y-4">
         <SegmentedControl
           value={mode}
           onChange={(value) => setMode(value as ImportMode)}
@@ -360,49 +430,15 @@ function ImportModuleModal({
             />
             <label className="mt-2 inline-flex cursor-pointer items-center gap-2 text-[11px] font-semibold text-primary">
               <Download className="h-3.5 w-3.5" /> {t('modules.import.upload')}
-              <input className="sr-only" type="file" accept=".sgmodule,.lpx,.plugin,.conf,.txt,text/plain" onChange={(event) => void chooseFile(event)} />
+              <input className="sr-only" type="file" accept=".lpx,.plugin,.conf,.txt,text/plain" onChange={(event) => void chooseFile(event)} />
             </label>
           </Field>
         )}
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field label={t('modules.import.format')}>
-            <select
-              className="rounded-[10px] border border-input-border bg-input px-3 py-2.5 text-[13px] text-text-strong outline-none"
-              aria-label={t('modules.import.format')}
-              value={format}
-              onChange={(event) => setFormat(event.target.value as InterceptModuleImport['format'])}
-            >
-              <option value="auto">{t('modules.import.auto')}</option>
-              <option value="surge">Surge</option>
-              <option value="loon">Loon</option>
-            </select>
-          </Field>
-          <Field label={t('modules.import.argument')}>
-            <Input aria-label={t('modules.import.argument')} maxLength={4096} value={argument} onChange={(event) => setArgument(event.target.value)} />
-          </Field>
+        <div className="flex items-start gap-2.5 rounded-[11px] border border-primary/20 bg-primary/5 px-3 py-2.5" data-testid="module-import-automatic">
+          <FileSearch className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+          <p className="text-[11px] leading-relaxed text-text-soft">{t('modules.import.automatic')}</p>
         </div>
-        <div className="rounded-[11px] border border-divider bg-input/50 p-3">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <div className="text-[12px] font-bold text-text-strong">{t('modules.import.qx')}</div>
-              <p className="mt-1 text-[10.5px] leading-relaxed text-text-faint">{t('modules.import.qxHint')}</p>
-            </div>
-            <Toggle checked={qx} onCheckedChange={setQX} aria-label={t('modules.import.qx')} />
-          </div>
-          {qx ? (
-            <Field className="mt-3" label={t('modules.import.referer')}>
-              <Input aria-label={t('modules.import.referer')} maxLength={4096} mono value={referer} placeholder={t('modules.import.refererPlaceholder')} onChange={(event) => setReferer(event.target.value)} />
-            </Field>
-          ) : null}
-        </div>
-        <div className="flex items-start justify-between gap-3 rounded-[11px] border border-amber-2/25 bg-amber-2/5 p-3">
-          <div>
-            <div className="text-[12px] font-bold text-text-strong">{t('modules.import.partial')}</div>
-            <p className="mt-1 text-[10.5px] leading-relaxed text-text-faint">{t('modules.import.partialHint')}</p>
-          </div>
-          <Toggle checked={partial} onCheckedChange={setPartial} aria-label={t('modules.import.partial')} />
-        </div>
-      </div>
+      </div>}
     </Modal>
   )
 }
@@ -432,9 +468,9 @@ export default function ModulesPage() {
 
   useEffect(() => { void load() }, [load])
 
-  const externalCount = useMemo(() => view?.modules.filter((module) => module.format !== 'builtin').length ?? 0, [view])
+  const externalCount = useMemo(() => view?.modules.filter((module) => module.id !== 'builtin-wloc').length ?? 0, [view])
 
-  async function updateModule(module: InterceptModule, update: { enabled?: boolean; argument?: string; partial_allowed?: boolean }, success: string) {
+  async function updateModule(module: InterceptModule, update: { enabled?: boolean; argument?: string; partial_allowed?: boolean; parameters?: Record<string, string> }, success: string) {
     if (!view) return
     setBusyID(module.id)
     try {
@@ -508,11 +544,20 @@ export default function ModulesPage() {
         </CardBody>
       </Card>
 
-      <div className="flex items-center justify-between gap-3 rounded-[11px] border border-amber-2/20 bg-amber-2/5 px-4 py-3">
-        <p className="text-[11.5px] leading-relaxed text-text-soft">{t('modules.trustWarning')}</p>
-        <a href={view?.ca_profile_url ?? '/ios/ios-intercept-ca.mobileconfig'}>
-          <Button type="button" variant="secondary" size="sm"><Download className="h-3.5 w-3.5" />{t('modules.trustProfile')}</Button>
-        </a>
+      <div className="flex flex-col gap-3 rounded-[12px] border border-primary/20 bg-primary/5 px-4 py-3 sm:flex-row sm:items-center sm:justify-between" data-testid="mitm-ca-guide-notice">
+        <div className="flex items-start gap-2.5">
+          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+          <div>
+            <div className="text-[11.5px] font-bold text-text-strong">{t('modules.caGuideTitle')}</div>
+            <p className="mt-0.5 text-[11px] leading-relaxed text-text-soft">{t('modules.caGuideBody')}</p>
+          </div>
+        </div>
+        <Link
+          className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-[10px] border border-input-border bg-card px-3 py-1.5 text-[11.5px] font-semibold text-text-mid transition-colors hover:bg-primary/10"
+          to="/setup-guide"
+        >
+          {t('modules.caGuideAction')}<ArrowRight className="h-3.5 w-3.5" />
+        </Link>
       </div>
 
       {loading && !view ? <Card><CardBody className="text-center text-[12px] text-text-faint">{t('common.loading')}</CardBody></Card> : null}
@@ -530,6 +575,7 @@ export default function ModulesPage() {
               onToggle={(selected) => setPending({ kind: 'toggle', module: selected })}
               onDelete={(selected) => setPending({ kind: 'delete', module: selected })}
               onSaveArgument={(selected, argument) => void updateModule(selected, { argument }, t('modules.argumentSaved'))}
+              onSaveParameters={(selected, parameters) => void updateModule(selected, { parameters }, t('modules.parametersSaved'))}
               onInspect={(selected) => void inspectModule(selected)}
               onAcknowledge={(selected) => setPending({ kind: 'partial', module: selected })}
             />
@@ -562,6 +608,7 @@ export default function ModulesPage() {
         <ImportModuleModal
           open={importOpen}
           revision={view.revision}
+          existingIDs={view.modules.map((module) => module.id)}
           onOpenChange={setImportOpen}
           onImported={(next) => {
             setView(next)

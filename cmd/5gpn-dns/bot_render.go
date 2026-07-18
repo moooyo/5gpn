@@ -697,8 +697,13 @@ func renderInterceptModules(view interceptModulesView, notice string) string {
 		out.WriteString("\n<code>")
 		out.WriteString(html.EscapeString(strings.Join(module.Hosts, ", ")))
 		out.WriteString("</code>")
-		if module.Compatibility == "partial" {
+		switch module.Compatibility {
+		case "partial":
 			out.WriteString("\n⚠️ 仅部分兼容")
+		case "needs_configuration":
+			out.WriteString("\n🔧 需要先在 Console 配置参数")
+		case "incompatible":
+			out.WriteString("\n⛔ 存在不兼容能力")
 		}
 		if module.Reason != "" {
 			out.WriteString("\n原因：<code>")
@@ -718,6 +723,8 @@ func interceptModulesMenu(view interceptModulesView) *models.InlineKeyboardMarku
 		if module.Enabled {
 			action = "off"
 			prefix = "关闭"
+		} else if module.Compatibility == "incompatible" || module.Compatibility == "needs_configuration" {
+			prefix = "需在 Console 处理"
 		} else if module.Compatibility == "partial" && !module.PartialAllowed {
 			prefix = "需在 Console 审查"
 		} else if !module.Ready {

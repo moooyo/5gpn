@@ -17,21 +17,18 @@ import (
 	"unicode/utf8"
 )
 
-const defaultModuleReferer = "https://hub.kelee.one/"
+const (
+	defaultModuleReferer = "https://hub.kelee.one/"
+	moduleLoonUserAgent  = "Loon/3.2.4 CFNetwork/3826.500.131 Darwin/24.5.0"
+)
 
 var loonScriptLine = regexp.MustCompile(`(?i)^(http-request|http-response)\s+(\S+)\s+(.+)$`)
-var headerRewriteLine = regexp.MustCompile(`(?i)^(\S+)\s+(header-del|header-replace|header-replace-regex)\s+(\S+)(?:\s+(.+))?$`)
 var disabledScriptOption = regexp.MustCompile(`(?i)(?:^|,)\s*enabled?\s*=\s*(?:false|0|off|no)(?:\s*,|\s*$)`)
 
 type interceptModuleImportRequest struct {
-	Revision       string `json:"revision"`
-	URL            string `json:"url,omitempty"`
-	Content        string `json:"content,omitempty"`
-	Format         string `json:"format,omitempty"`
-	FetchProfile   string `json:"fetch_profile,omitempty"`
-	Referer        string `json:"referer,omitempty"`
-	Argument       string `json:"argument,omitempty"`
-	PartialAllowed bool   `json:"partial_allowed"`
+	Revision string `json:"revision"`
+	URL      string `json:"url,omitempty"`
+	Content  string `json:"content,omitempty"`
 }
 
 type interceptModuleParser struct {
@@ -41,23 +38,8 @@ type interceptModuleParser struct {
 }
 
 func (p interceptModuleParser) Import(ctx context.Context, request interceptModuleImportRequest) (interceptModuleSnapshot, error) {
-	if request.Format == "" {
-		request.Format = "auto"
-	}
-	if request.Format != "auto" && request.Format != interceptModuleFormatSurge && request.Format != interceptModuleFormatLoon {
-		return interceptModuleSnapshot{}, errors.New("format must be auto, surge, or loon")
-	}
-	if request.FetchProfile == "" {
-		request.FetchProfile = interceptFetchStandard
-	}
-	if request.FetchProfile != interceptFetchStandard && request.FetchProfile != interceptFetchQuantumultX {
-		return interceptModuleSnapshot{}, errors.New("fetch_profile must be standard or quantumult-x")
-	}
-	if len(request.Argument) > maxInterceptModuleArg {
-		return interceptModuleSnapshot{}, fmt.Errorf("argument exceeds %d bytes", maxInterceptModuleArg)
-	}
-	if len(request.URL) > maxInterceptResourceURL || len(request.Referer) > maxInterceptResourceURL {
-		return interceptModuleSnapshot{}, fmt.Errorf("URL or Referer exceeds %d bytes", maxInterceptResourceURL)
+	if len(request.URL) > maxInterceptResourceURL {
+		return interceptModuleSnapshot{}, fmt.Errorf("URL exceeds %d bytes", maxInterceptResourceURL)
 	}
 	if strings.TrimSpace(request.URL) == "" && request.Content == "" {
 		return interceptModuleSnapshot{}, errors.New("exactly one of url or content is required")
@@ -65,20 +47,15 @@ func (p interceptModuleParser) Import(ctx context.Context, request interceptModu
 	if strings.TrimSpace(request.URL) != "" && request.Content != "" {
 		return interceptModuleSnapshot{}, errors.New("url and content are mutually exclusive")
 	}
-	if request.FetchProfile == interceptFetchQuantumultX && strings.TrimSpace(request.Referer) == "" {
-		request.Referer = defaultModuleReferer
-	}
-	if request.Referer != "" {
-		if err := validateModuleReferer(request.Referer); err != nil {
-			return interceptModuleSnapshot{}, err
-		}
-	}
-
 	sourceURL := strings.TrimSpace(request.URL)
 	sourceBody := []byte(request.Content)
 	if sourceURL != "" {
 		var err error
-		sourceBody, sourceURL, err = p.fetchResource(ctx, sourceURL, request.FetchProfile, request.Referer, maxInterceptModuleSource)
+		sourceURL, err = normalizeModuleImportURL(sourceURL)
+		if err != nil {
+			return interceptModuleSnapshot{}, err
+		}
+		sourceBody, sourceURL, err = p.fetchResource(ctx, sourceURL, maxInterceptModuleSource)
 		if err != nil {
 			return interceptModuleSnapshot{}, fmt.Errorf("fetch module: %w", err)
 		}
@@ -93,8 +70,7 @@ func (p interceptModuleParser) Import(ctx context.Context, request interceptModu
 		return interceptModuleSnapshot{}, errors.New("module source must be valid UTF-8")
 	}
 
-	format := detectModuleFormat(request.Format, sourceURL, sourceBody)
-	parsed, err := p.parse(ctx, format, sourceURL, sourceBody, request)
+	parsed, err := p.parse(ctx, sourceURL, sourceBody)
 	if err != nil {
 		return interceptModuleSnapshot{}, err
 	}
@@ -103,18 +79,13 @@ func (p interceptModuleParser) Import(ctx context.Context, request interceptModu
 	}
 	digest := sha256Hex(sourceBody)
 	parsed.ID = "mod-" + digest[:32]
-	parsed.Format = format
 	parsed.Enabled = false
-	parsed.Argument = request.Argument
 	parsed.ImportedAt = p.now().UTC().Format(time.RFC3339)
 	parsed.Source = interceptModuleSource{
-		URL:          sourceURL,
-		Digest:       digest,
-		Body:         string(sourceBody),
-		FetchProfile: request.FetchProfile,
-		Referer:      request.Referer,
+		URL:    sourceURL,
+		Digest: digest,
+		Body:   string(sourceBody),
 	}
-	parsed.PartialAllowed = request.PartialAllowed
 	if err := validateInterceptModule(parsed); err != nil {
 		return interceptModuleSnapshot{}, err
 	}
@@ -123,12 +94,14 @@ func (p interceptModuleParser) Import(ctx context.Context, request interceptModu
 
 func (p interceptModuleParser) parse(
 	ctx context.Context,
-	format, sourceURL string,
+	sourceURL string,
 	sourceBody []byte,
-	request interceptModuleImportRequest,
 ) (interceptModuleSnapshot, error) {
 	lines := moduleLogicalLines(sourceBody)
 	metadata := map[string]string{}
+	parameters := make([]interceptModuleParameter, 0)
+	parameterKeys := make(map[string]struct{})
+	var metadataIssues []string
 	sections := make(map[string][]string)
 	section := ""
 	for _, original := range lines {
@@ -138,7 +111,34 @@ func (p interceptModuleParser) parse(
 		}
 		if strings.HasPrefix(line, "#!") {
 			if key, value, ok := strings.Cut(strings.TrimPrefix(line, "#!"), "="); ok {
-				metadata[strings.ToLower(strings.TrimSpace(key))] = strings.TrimSpace(value)
+				key = strings.ToLower(strings.TrimSpace(key))
+				value = strings.TrimSpace(value)
+				switch key {
+				case "input":
+					if parameter, ok := parseLoonInputParameter(value); ok {
+						if _, duplicate := parameterKeys[parameter.Key]; duplicate {
+							metadataIssues = append(metadataIssues, summarizeUnsupported("Metadata", line, "duplicate plugin parameter"))
+						} else {
+							parameterKeys[parameter.Key] = struct{}{}
+							parameters = append(parameters, parameter)
+						}
+					} else {
+						metadataIssues = append(metadataIssues, summarizeUnsupported("Metadata", line, "invalid #!input declaration"))
+					}
+				case "select":
+					if parameter, ok := parseLoonSelectParameter(value); ok {
+						if _, duplicate := parameterKeys[parameter.Key]; duplicate {
+							metadataIssues = append(metadataIssues, summarizeUnsupported("Metadata", line, "duplicate plugin parameter"))
+						} else {
+							parameterKeys[parameter.Key] = struct{}{}
+							parameters = append(parameters, parameter)
+						}
+					} else {
+						metadataIssues = append(metadataIssues, summarizeUnsupported("Metadata", line, "invalid #!select declaration"))
+					}
+				default:
+					metadata[key] = value
+				}
 			}
 			continue
 		}
@@ -157,13 +157,9 @@ func (p interceptModuleParser) parse(
 	module := interceptModuleSnapshot{
 		Name:        firstNonEmpty(metadata["name"], metadata["title"], moduleNameFromURL(sourceURL), "Imported module"),
 		Description: firstNonEmpty(metadata["desc"], metadata["description"]),
+		Parameters:  parameters,
 	}
-	if arguments := metadata["arguments"]; arguments != "" {
-		module.Unsupported = append(module.Unsupported, summarizeUnsupported("Metadata", "#!arguments="+arguments, "template argument schemas are not expanded; scripts receive the configured raw $argument"))
-	}
-	if strings.Contains(string(sourceBody), "{{{") {
-		module.Unsupported = append(module.Unsupported, "[Template] Triple-brace module placeholders are not expanded")
-	}
+	module.Unsupported = append(module.Unsupported, metadataIssues...)
 	if len(module.Name) > maxInterceptModuleName {
 		module.Name = truncateUTF8Bytes(module.Name, maxInterceptModuleName)
 	}
@@ -184,7 +180,7 @@ func (p interceptModuleParser) parse(
 		if index >= maxInterceptModuleRules {
 			return interceptModuleSnapshot{}, fmt.Errorf("module exceeds %d Script entries", maxInterceptModuleRules)
 		}
-		rule, supported, optionWarnings, parseErr := parseModuleScriptLine(format, line, index)
+		rule, supported, optionWarnings, parseErr := parseModuleScriptLine(line, index)
 		if parseErr != nil {
 			module.Unsupported = append(module.Unsupported, summarizeUnsupported("Script", line, parseErr.Error()))
 			continue
@@ -203,7 +199,7 @@ func (p interceptModuleParser) parse(
 		}
 		scriptBody, cached := scriptCache[scriptURL]
 		if !cached {
-			scriptBody, parseErr = p.fetch(ctx, scriptURL, request.FetchProfile, request.Referer, maxInterceptScriptSource)
+			scriptBody, parseErr = p.fetch(ctx, scriptURL, maxInterceptScriptSource)
 			if parseErr != nil {
 				return interceptModuleSnapshot{}, fmt.Errorf("fetch script %s: %w", scriptURL, parseErr)
 			}
@@ -219,37 +215,35 @@ func (p interceptModuleParser) parse(
 		rule.ScriptURL = scriptURL
 		rule.ScriptBody = string(scriptBody)
 		rule.ScriptDigest = sha256Hex(scriptBody)
-		for _, warning := range scriptCompatibilityWarnings(rule.ScriptBody) {
-			module.Unsupported = append(module.Unsupported, summarizeUnsupported("Script", scriptURL, warning))
+		for _, issue := range scriptIncompatibilities(rule.ScriptBody) {
+			module.Incompatible = append(module.Incompatible, summarizeUnsupported("Script", scriptURL, issue))
 		}
-		if rule.Argument == "" {
-			rule.Argument = request.Argument
+		for _, issue := range scriptCompatibilityWarnings(rule.ScriptBody) {
+			module.Unsupported = append(module.Unsupported, summarizeUnsupported("Script", scriptURL, issue))
 		}
 		module.Scripts = append(module.Scripts, rule)
 	}
 
-	for _, sectionName := range []string{"url rewrite", "rewrite"} {
-		for index, line := range sections[sectionName] {
-			rule, err := parseModuleRewriteLine(line, len(module.Rewrites)+index)
-			if err != nil {
-				module.Unsupported = append(module.Unsupported, summarizeUnsupported(sectionName, line, err.Error()))
-				continue
-			}
-			module.Rewrites = append(module.Rewrites, rule)
-		}
-	}
-	for index, line := range sections["header rewrite"] {
-		rule, err := parseModuleHeaderLine(line, index)
+	for index, line := range sections["rewrite"] {
+		rewrite, header, err := parseLoonRewriteLine(line, index)
 		if err != nil {
-			module.Unsupported = append(module.Unsupported, summarizeUnsupported("Header Rewrite", line, err.Error()))
+			module.Unsupported = append(module.Unsupported, summarizeUnsupported("Rewrite", line, err.Error()))
 			continue
 		}
-		module.Headers = append(module.Headers, rule)
+		if rewrite != nil {
+			module.Rewrites = append(module.Rewrites, *rewrite)
+		}
+		if header != nil {
+			module.Headers = append(module.Headers, *header)
+		}
 	}
+	hostMappings, hostIssues := parseLoonHostMappings(sections["host"])
+	module.HostMappings = hostMappings
+	module.Unsupported = append(module.Unsupported, hostIssues...)
 
 	for sectionName, sectionLines := range sections {
 		switch sectionName {
-		case "mitm", "script", "url rewrite", "rewrite", "header rewrite":
+		case "mitm", "script", "rewrite", "host":
 			continue
 		case "general":
 			for _, line := range sectionLines {
@@ -261,67 +255,31 @@ func (p interceptModuleParser) parse(
 			}
 		}
 	}
+	if len(module.Hosts) == 0 {
+		module.Incompatible = append(module.Incompatible, "[MITM] No supported hostname entries were found")
+	}
+	if len(module.Scripts)+len(module.Rewrites)+len(module.Headers) == 0 {
+		module.Incompatible = append(module.Incompatible, "[Plugin] No supported HTTP actions were found")
+	}
 	module.Unsupported = uniqueSortedStrings(module.Unsupported)
+	module.Incompatible = uniqueSortedStrings(module.Incompatible)
 	if len(module.Unsupported) > 64 {
 		module.Unsupported = append(module.Unsupported[:63], "Additional unsupported directives were omitted from this view")
+	}
+	if len(module.Incompatible) > 64 {
+		module.Incompatible = append(module.Incompatible[:63], "Additional incompatible directives were omitted from this view")
 	}
 	return module, nil
 }
 
-func parseModuleHeaderLine(line string, index int) (interceptHeaderRule, error) {
-	match := headerRewriteLine.FindStringSubmatch(line)
-	if len(match) != 5 {
-		return interceptHeaderRule{}, errors.New("unrecognized Header Rewrite syntax")
-	}
-	rule := interceptHeaderRule{
-		ID:      fmt.Sprintf("header-%03d", index+1),
-		Pattern: match[1],
-		Header:  match[3],
-	}
-	if _, err := regexp.Compile(rule.Pattern); err != nil {
-		return interceptHeaderRule{}, fmt.Errorf("pattern is outside the supported RE2 subset: %w", err)
-	}
-	if !validModuleHeaderName(rule.Header) {
-		return interceptHeaderRule{}, errors.New("header name is invalid")
-	}
-	remainder := strings.TrimSpace(match[4])
-	switch strings.ToLower(match[2]) {
-	case "header-del":
-		if remainder != "" {
-			return interceptHeaderRule{}, errors.New("header-del accepts no value")
-		}
-		rule.Operation = "delete"
-	case "header-replace":
-		if remainder == "" {
-			return interceptHeaderRule{}, errors.New("header-replace requires a value")
-		}
-		rule.Operation = "replace"
-		rule.Value = strings.Trim(remainder, `"'`)
-	case "header-replace-regex":
-		valuePattern, replacement, ok := strings.Cut(remainder, " ")
-		if !ok || strings.TrimSpace(valuePattern) == "" || strings.TrimSpace(replacement) == "" {
-			return interceptHeaderRule{}, errors.New("header-replace-regex requires a value pattern and replacement")
-		}
-		if _, err := regexp.Compile(valuePattern); err != nil {
-			return interceptHeaderRule{}, fmt.Errorf("value pattern is outside the supported RE2 subset: %w", err)
-		}
-		rule.Operation = "replace-regex"
-		rule.ValuePattern = valuePattern
-		rule.Replacement = strings.Trim(strings.TrimSpace(replacement), `"'`)
-	}
-	return rule, nil
-}
-
-func scriptCompatibilityWarnings(source string) []string {
+func scriptIncompatibilities(source string) []string {
 	checks := []struct {
 		needle  string
 		message string
 	}{
 		{"$httpClient", "outbound script networking is disabled"},
-		{"$task.fetch", "outbound script networking is disabled"},
 		{"require(", "CommonJS require is unavailable"},
 		{"setTimeout(", "asynchronous timers are unavailable"},
-		{"bodyBytes", "binary body compatibility is unavailable"},
 	}
 	warnings := make([]string, 0, len(checks))
 	for _, check := range checks {
@@ -332,12 +290,85 @@ func scriptCompatibilityWarnings(source string) []string {
 	return uniqueSortedStrings(warnings)
 }
 
-func (p interceptModuleParser) fetch(ctx context.Context, rawURL, profile, referer string, limit int64) ([]byte, error) {
-	body, _, err := p.fetchResource(ctx, rawURL, profile, referer, limit)
+func scriptCompatibilityWarnings(source string) []string {
+	checks := []struct {
+		needle  string
+		message string
+	}{
+		{"$notification", "notifications are written to the gateway log instead of a device notification"},
+		{"node:", "per-request node selection is ignored"},
+	}
+	var warnings []string
+	for _, check := range checks {
+		if strings.Contains(source, check.needle) {
+			warnings = append(warnings, check.message)
+		}
+	}
+	return uniqueSortedStrings(warnings)
+}
+
+func parseLoonInputParameter(raw string) (interceptModuleParameter, bool) {
+	key := strings.TrimSpace(raw)
+	if !validModuleParameterKey(key) {
+		return interceptModuleParameter{}, false
+	}
+	return interceptModuleParameter{Key: key, Kind: "input"}, true
+}
+
+func parseLoonSelectParameter(raw string) (interceptModuleParameter, bool) {
+	parts := strings.Split(raw, ",")
+	if len(parts) < 2 {
+		return interceptModuleParameter{}, false
+	}
+	key := strings.TrimSpace(parts[0])
+	if !validModuleParameterKey(key) {
+		return interceptModuleParameter{}, false
+	}
+	options := make([]string, 0, len(parts)-1)
+	for _, value := range parts[1:] {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return interceptModuleParameter{}, false
+		}
+		options = append(options, value)
+	}
+	return interceptModuleParameter{Key: key, Kind: "select", Options: options}, true
+}
+
+func parseLoonHostMappings(lines []string) ([]interceptHostMapping, []string) {
+	mappings := make([]interceptHostMapping, 0, len(lines))
+	seen := make(map[string]string)
+	var issues []string
+	for _, line := range lines {
+		left, right, ok := strings.Cut(line, "=")
+		if !ok {
+			issues = append(issues, summarizeUnsupported("Host", line, "mapping must use host = target"))
+			continue
+		}
+		pattern, err := normalizeInterceptHostPattern(left)
+		target := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(right, ".")))
+		if err != nil || !validInterceptHostTarget(target) {
+			issues = append(issues, summarizeUnsupported("Host", line, "only public IPv4 or domain targets are supported"))
+			continue
+		}
+		if previous, duplicate := seen[pattern]; duplicate {
+			if previous != target {
+				issues = append(issues, summarizeUnsupported("Host", line, "conflicts with an earlier host mapping"))
+			}
+			continue
+		}
+		seen[pattern] = target
+		mappings = append(mappings, interceptHostMapping{Pattern: pattern, Target: target})
+	}
+	return mappings, issues
+}
+
+func (p interceptModuleParser) fetch(ctx context.Context, rawURL string, limit int64) ([]byte, error) {
+	body, _, err := p.fetchResource(ctx, rawURL, limit)
 	return body, err
 }
 
-func (p interceptModuleParser) fetchResource(ctx context.Context, rawURL, profile, referer string, limit int64) ([]byte, string, error) {
+func (p interceptModuleParser) fetchResource(ctx context.Context, rawURL string, limit int64) ([]byte, string, error) {
 	if err := validateRemoteModuleURL(rawURL); err != nil {
 		return nil, "", err
 	}
@@ -362,14 +393,14 @@ func (p interceptModuleParser) fetchResource(ctx context.Context, rawURL, profil
 		if err := validateRemoteModuleURL(req.URL.String()); err != nil {
 			return fmt.Errorf("unsafe redirect: %w", err)
 		}
-		setModuleFetchHeaders(req, profile, referer)
+		setModuleFetchHeaders(req)
 		return nil
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, "", err
 	}
-	setModuleFetchHeaders(req, profile, referer)
+	setModuleFetchHeaders(req)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", err
@@ -396,16 +427,56 @@ func (p interceptModuleParser) fetchResource(ctx context.Context, rawURL, profil
 	return body, resp.Request.URL.String(), nil
 }
 
-func setModuleFetchHeaders(request *http.Request, profile, referer string) {
+func setModuleFetchHeaders(request *http.Request) {
 	request.Header.Set("Accept", "text/plain, application/javascript, */*;q=0.1")
-	if profile == interceptFetchQuantumultX {
-		request.Header.Set("User-Agent", "Quantumult X")
-	} else {
-		request.Header.Set("User-Agent", "5gpn-module-import/1")
+	// Loon-only imports always use a stable native client shape. Callers cannot
+	// provide or override request headers.
+	request.Header.Set("User-Agent", moduleLoonUserAgent)
+	request.Header.Set("Referer", defaultModuleReferer)
+}
+
+func normalizeModuleImportURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if len(raw) == 0 || len(raw) > maxInterceptResourceURL {
+		return "", fmt.Errorf("URL must contain 1 to %d bytes", maxInterceptResourceURL)
 	}
-	if referer != "" {
-		request.Header.Set("Referer", referer)
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid URL: %w", err)
 	}
+	if strings.EqualFold(u.Scheme, "https") {
+		if err := validateRemoteModuleURL(raw); err != nil {
+			return "", err
+		}
+		return raw, nil
+	}
+	if !strings.EqualFold(u.Scheme, "loon") {
+		return "", errors.New("module imports must use https or loon://import?plugin=<https-url>")
+	}
+	if u.User != nil || u.Fragment != "" || u.Port() != "" || u.Opaque != "" {
+		return "", errors.New("invalid Loon import URL")
+	}
+	host := strings.ToLower(u.Hostname())
+	pathValue := strings.ToLower(strings.TrimSuffix(u.Path, "/"))
+	if !((host == "import" && pathValue == "") || (host == "" && pathValue == "/import")) {
+		return "", errors.New("Loon import URL must target the import action")
+	}
+	query, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return "", errors.New("Loon import URL has an invalid query")
+	}
+	plugins := query["plugin"]
+	if len(plugins) != 1 || strings.TrimSpace(plugins[0]) == "" {
+		return "", errors.New("Loon import URL must contain exactly one plugin URL")
+	}
+	pluginURL := strings.TrimSpace(plugins[0])
+	if len(pluginURL) > maxInterceptResourceURL {
+		return "", fmt.Errorf("plugin URL exceeds %d bytes", maxInterceptResourceURL)
+	}
+	if err := validateRemoteModuleURL(pluginURL); err != nil {
+		return "", fmt.Errorf("Loon plugin URL is invalid: %w", err)
+	}
+	return pluginURL, nil
 }
 
 func validateRemoteModuleURL(raw string) error {
@@ -423,28 +494,6 @@ func validateRemoteModuleURL(raw string) error {
 		return errors.New("module resource URL must not contain a fragment")
 	}
 	return nil
-}
-
-func validateModuleReferer(raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
-		return errors.New("referer must be an https URL with a host and no userinfo or fragment")
-	}
-	if strings.ContainsAny(raw, "\r\n") {
-		return errors.New("referer contains a newline")
-	}
-	return nil
-}
-
-func detectModuleFormat(requested, sourceURL string, body []byte) string {
-	if requested == interceptModuleFormatSurge || requested == interceptModuleFormatLoon {
-		return requested
-	}
-	lowerURL := strings.ToLower(sourceURL)
-	if strings.HasSuffix(lowerURL, ".lpx") || bytes.Contains(bytes.ToLower(body), []byte("script-path=")) && bytes.Contains(bytes.ToLower(body), []byte("tag=")) {
-		return interceptModuleFormatLoon
-	}
-	return interceptModuleFormatSurge
 }
 
 func moduleLogicalLines(body []byte) []string {
@@ -483,8 +532,6 @@ func parseMITMHosts(lines []string) ([]string, []string) {
 			unsupported = append(unsupported, summarizeUnsupported("MITM", line, "only hostname is supported"))
 			continue
 		}
-		value = strings.ReplaceAll(value, "%APPEND%", "")
-		value = strings.ReplaceAll(value, "%append%", "")
 		for _, rawHost := range strings.Split(value, ",") {
 			rawHost = strings.TrimSpace(rawHost)
 			if rawHost == "" {
@@ -517,24 +564,14 @@ func parseMITMHosts(lines []string) ([]string, []string) {
 	return uniqueSortedStrings(hosts), unsupported
 }
 
-func parseModuleScriptLine(format, line string, index int) (interceptScriptRule, bool, []string, error) {
-	values := map[string]string{}
-	phase := ""
-	pattern := ""
-	if left, right, ok := strings.Cut(line, "="); ok && strings.Contains(strings.ToLower(right), "type=") {
-		values = parseCommaKeyValues(right)
-		phase = normalizeModulePhase(values["type"])
-		pattern = values["pattern"]
-		if values["name"] == "" {
-			values["name"] = strings.TrimSpace(left)
-		}
-	} else if match := loonScriptLine.FindStringSubmatch(line); len(match) == 4 {
-		phase = normalizeModulePhase(match[1])
-		pattern = match[2]
-		values = parseCommaKeyValues(match[3])
-	} else {
+func parseModuleScriptLine(line string, index int) (interceptScriptRule, bool, []string, error) {
+	match := loonScriptLine.FindStringSubmatch(line)
+	if len(match) != 4 {
 		return interceptScriptRule{}, false, nil, errors.New("unrecognized Script syntax")
 	}
+	phase := normalizeModulePhase(match[1])
+	pattern := match[2]
+	values := parseCommaKeyValues(match[3])
 	if phase == "" {
 		return interceptScriptRule{}, false, nil, nil
 	}
@@ -544,12 +581,12 @@ func parseModuleScriptLine(format, line string, index int) (interceptScriptRule,
 	if _, err := regexp.Compile(pattern); err != nil {
 		return interceptScriptRule{}, false, nil, fmt.Errorf("pattern is outside the supported RE2 subset: %w", err)
 	}
-	scriptURL := firstNonEmpty(values["script-path"], values["script_path"], values["script"])
+	scriptURL := values["script-path"]
 	if scriptURL == "" {
 		return interceptScriptRule{}, false, nil, errors.New("script-path is required")
 	}
 	timeoutMS := 5000
-	if raw := firstNonEmpty(values["timeout"], values["script-timeout"]); raw != "" {
+	if raw := values["timeout"]; raw != "" {
 		seconds, err := strconv.ParseFloat(raw, 64)
 		if err != nil || seconds <= 0 {
 			return interceptScriptRule{}, false, nil, errors.New("timeout must be a positive number of seconds")
@@ -563,28 +600,12 @@ func parseModuleScriptLine(format, line string, index int) (interceptScriptRule,
 		}
 	}
 	maxBody := int64(8 << 20)
-	if raw := firstNonEmpty(values["max-size"], values["max_size"]); raw != "" && raw != "0" {
-		if raw == "-1" {
-			maxBody = 64 << 20
-		} else {
-			parsed, err := strconv.ParseInt(raw, 10, 64)
-			if err != nil || parsed < 1 {
-				return interceptScriptRule{}, false, nil, errors.New("max-size must be a positive byte count, zero, or -1")
-			}
-			maxBody = min(parsed, int64(64<<20))
-		}
-	}
-	requiresBody := parseModuleBool(firstNonEmpty(values["requires-body"], values["requires_body"]))
+	requiresBody := parseModuleBool(values["requires-body"])
 	warnings := moduleScriptOptionWarnings(values)
-	if raw := firstNonEmpty(values["timeout"], values["script-timeout"]); raw != "" {
+	if raw := values["timeout"]; raw != "" {
 		if seconds, err := strconv.ParseFloat(raw, 64); err == nil && seconds > 30 {
 			warnings = append(warnings, "script timeout is capped at 30 seconds")
 		}
-	}
-	if raw := firstNonEmpty(values["max-size"], values["max_size"]); raw == "-1" {
-		warnings = append(warnings, "unlimited max-size is capped at 67108864 bytes")
-	} else if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed > 64<<20 {
-		warnings = append(warnings, "max-size is capped at 67108864 bytes")
 	}
 	warnings = uniqueSortedStrings(warnings)
 	return interceptScriptRule{
@@ -593,18 +614,17 @@ func parseModuleScriptLine(format, line string, index int) (interceptScriptRule,
 		Pattern:      pattern,
 		ScriptURL:    scriptURL,
 		RequiresBody: requiresBody,
+		BinaryBody:   parseModuleBool(values["binary-body-mode"]),
 		TimeoutMS:    timeoutMS,
 		MaxBodyBytes: maxBody,
-		Argument:     firstNonEmpty(values["argument"], values["args"]),
+		Argument:     values["argument"],
 	}, true, warnings, nil
 }
 
 func moduleScriptOptionWarnings(values map[string]string) []string {
 	allowed := map[string]struct{}{
-		"type": {}, "pattern": {}, "name": {}, "script-path": {}, "script_path": {}, "script": {},
-		"requires-body": {}, "requires_body": {}, "timeout": {}, "script-timeout": {}, "max-size": {}, "max_size": {},
-		"argument": {}, "args": {}, "tag": {}, "debug": {}, "enable": {}, "enabled": {}, "update-interval": {}, "script-update-interval": {},
-		"binary-body-mode": {}, "binary_body_mode": {}, "engine": {},
+		"script-path": {}, "requires-body": {}, "timeout": {}, "argument": {}, "tag": {},
+		"enable": {}, "enabled": {}, "binary-body-mode": {},
 	}
 	var warnings []string
 	for key := range values {
@@ -612,39 +632,62 @@ func moduleScriptOptionWarnings(values map[string]string) []string {
 			warnings = append(warnings, fmt.Sprintf("script option %q is unsupported", key))
 		}
 	}
-	if parseModuleBool(firstNonEmpty(values["binary-body-mode"], values["binary_body_mode"])) {
-		warnings = append(warnings, "binary body mode is unavailable")
-	}
-	if engine := strings.TrimSpace(values["engine"]); engine != "" && !strings.EqualFold(engine, "auto") {
-		warnings = append(warnings, fmt.Sprintf("script engine %q is unavailable", engine))
-	}
 	return uniqueSortedStrings(warnings)
 }
 
-func parseModuleRewriteLine(line string, index int) (interceptRewriteRule, error) {
+func parseLoonRewriteLine(line string, index int) (*interceptRewriteRule, *interceptHeaderRule, error) {
 	fields := strings.Fields(line)
 	if len(fields) < 2 {
-		return interceptRewriteRule{}, errors.New("rewrite requires a pattern and action")
+		return nil, nil, errors.New("rewrite requires a pattern and action")
 	}
 	pattern := fields[0]
 	if _, err := regexp.Compile(pattern); err != nil {
-		return interceptRewriteRule{}, fmt.Errorf("pattern is outside the supported RE2 subset: %w", err)
+		return nil, nil, fmt.Errorf("pattern is outside the supported RE2 subset: %w", err)
 	}
-	action := strings.ToLower(fields[len(fields)-1])
+	action := strings.ReplaceAll(strings.ToLower(fields[1]), "_", "-")
 	rule := interceptRewriteRule{ID: fmt.Sprintf("rewrite-%03d", index+1), Pattern: pattern}
 	switch action {
-	case "reject", "reject-dict", "reject-array", "reject-200":
+	case "reject", "reject-dict", "reject-array", "reject-200", "reject-img", "reject-drop":
+		if len(fields) != 2 {
+			return nil, nil, fmt.Errorf("%s accepts no replacement", action)
+		}
 		rule.Action = action
 	case "302", "307":
-		if len(fields) < 3 || fields[1] == "-" {
-			return interceptRewriteRule{}, errors.New("redirect rewrite requires a replacement")
+		if len(fields) != 3 || fields[2] == "-" {
+			return nil, nil, errors.New("redirect rewrite requires one replacement")
 		}
 		rule.Action = "redirect-" + action
-		rule.Replacement = fields[1]
+		rule.Replacement = fields[2]
+	case "header":
+		if len(fields) != 3 {
+			return nil, nil, errors.New("header URL rewrite requires one replacement")
+		}
+		rule.Action = "rewrite"
+		rule.Replacement = fields[2]
+	case "header-del":
+		if len(fields) != 3 || !validModuleHeaderName(fields[2]) {
+			return nil, nil, errors.New("header-del requires one valid header name")
+		}
+		header := interceptHeaderRule{ID: fmt.Sprintf("header-%03d", index+1), Pattern: pattern, Operation: "delete", Header: fields[2]}
+		return nil, &header, nil
+	case "header-add", "header-replace":
+		if len(fields) < 4 || !validModuleHeaderName(fields[2]) {
+			return nil, nil, fmt.Errorf("%s requires a valid header name and value", action)
+		}
+		value := strings.Join(fields[3:], " ")
+		if strings.ContainsAny(value, "\r\n") {
+			return nil, nil, errors.New("header value contains a newline")
+		}
+		operation := "replace"
+		if action == "header-add" {
+			operation = "add"
+		}
+		header := interceptHeaderRule{ID: fmt.Sprintf("header-%03d", index+1), Pattern: pattern, Operation: operation, Header: fields[2], Value: value}
+		return nil, &header, nil
 	default:
-		return interceptRewriteRule{}, fmt.Errorf("rewrite action %q is unsupported", action)
+		return nil, nil, fmt.Errorf("rewrite action %q is unsupported", action)
 	}
-	return rule, nil
+	return &rule, nil, nil
 }
 
 func parseCommaKeyValues(raw string) map[string]string {
@@ -767,7 +810,7 @@ func moduleNameFromURL(raw string) string {
 		return ""
 	}
 	name := path.Base(u.Path)
-	for _, suffix := range []string{".sgmodule", ".lpx", ".plugin", ".conf"} {
+	for _, suffix := range []string{".lpx", ".plugin", ".conf"} {
 		name = strings.TrimSuffix(name, suffix)
 	}
 	return strings.TrimSpace(name)

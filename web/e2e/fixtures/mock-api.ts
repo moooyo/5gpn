@@ -257,26 +257,24 @@ export async function setupMockApi(page: Page): Promise<void> {
     fail_closed: true,
     max_body_bytes: 8388608,
     hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'],
-    profile_url: '/ios/ios-intercept-ca.mobileconfig',
   }
   let interceptRevision = wlocIntercept.revision
   let interceptModules: T.InterceptModule[] = [
     {
-      id: 'builtin-wloc', name: 'Apple WLOC response rewriting', format: 'builtin', enabled: false, ready: true,
+      id: 'builtin-wloc', name: 'Apple WLOC response rewriting', enabled: false, ready: true,
       compatibility: 'full', partial_allowed: false, hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'],
       script_count: 1, rewrite_count: 0, source_digest: 'a'.repeat(64),
     },
     {
-      id: 'mod-1234567890abcdef', name: 'Response Cleaner', description: 'Synthetic Surge fixture', format: 'surge',
+      id: 'mod-1234567890abcdef', name: 'Response Cleaner', description: 'Synthetic Loon fixture',
       enabled: false, ready: true, compatibility: 'full', partial_allowed: false, hosts: ['api.example.com'],
-      script_count: 1, rewrite_count: 0, source_url: 'https://example.com/test.sgmodule',
+      script_count: 1, rewrite_count: 0, source_url: 'https://example.com/test.lpx',
       source_digest: 'b'.repeat(64), imported_at: '2026-07-18T00:00:00Z', argument: '',
     },
   ]
 
   const currentInterceptModules = (): T.InterceptModulesView => ({
     revision: interceptRevision,
-    ca_profile_url: '/ios/ios-intercept-ca.mobileconfig',
     catalog_url: 'https://hub.kelee.one/',
     active_hosts: interceptModules.filter((module) => module.enabled).flatMap((module) => module.hosts),
     modules: interceptModules,
@@ -395,10 +393,10 @@ export async function setupMockApi(page: Page): Promise<void> {
       const body = route.request().postDataJSON() as T.InterceptModuleImport
       if (body.revision !== interceptRevision) return json(route, { error: 'interception module revision changed' }, 409)
       interceptModules = [...interceptModules, {
-        id: 'mod-fedcba0987654321', name: 'Imported module snapshot', format: body.format === 'loon' ? 'loon' : 'surge',
-        enabled: false, ready: true, compatibility: 'full', partial_allowed: body.partial_allowed,
+        id: 'mod-fedcba0987654321', name: 'Imported module snapshot',
+        enabled: false, ready: true, compatibility: 'full', partial_allowed: false,
         hosts: ['service.example.test'], script_count: 1, rewrite_count: 0, source_url: body.url,
-        source_digest: 'c'.repeat(64), imported_at: '2026-07-18T01:00:00Z', argument: body.argument,
+        source_digest: 'c'.repeat(64), imported_at: '2026-07-18T01:00:00Z', argument: '',
       }]
       advanceInterceptRevision()
       return json(route, currentInterceptModules(), 201)
@@ -409,7 +407,7 @@ export async function setupMockApi(page: Page): Promise<void> {
       const module = interceptModules.find((candidate) => candidate.id === id)
       if (!module) return json(route, { error: 'interception module not found' }, 404)
       return json(route, {
-        id, name: module.name, format: module.format, source_url: module.source_url,
+        id, name: module.name, source_url: module.source_url,
         source_digest: module.source_digest,
         source_body: id === 'builtin-wloc' ? 'Built into the 5gpn-intercept binary.' : '#!name=Response Cleaner\n[MITM]\nhostname=api.example.com\n',
         scripts: id === 'builtin-wloc' ? [] : [{ id: 'script-001', url: 'https://example.com/clean.js', digest: 'd'.repeat(64), body: '$done({body: $response.body});' }],
@@ -423,6 +421,10 @@ export async function setupMockApi(page: Page): Promise<void> {
       if (body.enabled !== undefined) module.enabled = body.enabled
       if (body.argument !== undefined) module.argument = body.argument
       if (body.partial_allowed !== undefined) module.partial_allowed = body.partial_allowed
+      if (body.parameters !== undefined && module.parameters) {
+        module.parameters = module.parameters.map((parameter) => ({ ...parameter, value: body.parameters?.[parameter.key] ?? '' }))
+        if (module.parameters.every((parameter) => parameter.value)) module.compatibility = (module.issues?.length ?? 0) > 0 ? 'partial' : 'full'
+      }
       advanceInterceptRevision()
       return json(route, currentInterceptModules())
     }

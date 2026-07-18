@@ -115,7 +115,7 @@ main() {
         chmod 0600 "$LOCK_FILE"
         flock -w 10 9 || { err "Another 5gpn certificate operation is running."; return 1; }
     fi
-    validate_root || { err "The dedicated interception root is invalid."; return 1; }
+    validate_root || { err "The shared interception root is invalid."; return 1; }
     [[ -d "$TLS_DIR" && ! -L "$TLS_DIR" && "$(readlink -f -- "$TLS_DIR" 2>/dev/null || true)" == "$TLS_DIR" ]] \
         || { err "The interception TLS directory is unsafe."; return 1; }
 

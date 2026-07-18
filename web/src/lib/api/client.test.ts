@@ -136,7 +136,7 @@ describe('api client — WLOC interception', () => {
     const view = {
       revision: 'r1', enabled: false, longitude: null, latitude: null, accuracy: 25,
       fail_closed: true, max_body_bytes: 8388608,
-      hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'], profile_url: '/ios/ios-intercept-ca.mobileconfig',
+      hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'],
     }
     const update = { revision: 'r1', enabled: true, longitude: 113.9, latitude: 22.5, accuracy: 25, fail_closed: true, max_body_bytes: 8388608 }
     const f = vi.fn().mockResolvedValueOnce(jsonResp(200, view)).mockResolvedValueOnce(jsonResp(200, { ...view, ...update }))
@@ -155,8 +155,8 @@ describe('api client — interception modules', () => {
   it('maps list, snapshot, import, update, and delete to the authenticated module API', async () => {
     vi.stubEnv('VITE_API_MOCK', '0')
     vi.resetModules()
-    const view = { revision: 'r1', ca_profile_url: '/ios/ios-intercept-ca.mobileconfig', catalog_url: 'https://hub.kelee.one/', active_hosts: [], modules: [] }
-    const snapshot = { id: 'mod-1234567890abcdef', name: 'Fixture', format: 'surge', source_digest: 'a'.repeat(64), source_body: '#!name=Fixture', scripts: [] }
+    const view = { revision: 'r1', catalog_url: 'https://hub.kelee.one/', active_hosts: [], modules: [] }
+    const snapshot = { id: 'mod-1234567890abcdef', name: 'Fixture', source_digest: 'a'.repeat(64), source_body: '#!name=Fixture', scripts: [] }
     const f = vi.fn()
       .mockResolvedValueOnce(jsonResp(200, view))
       .mockResolvedValueOnce(jsonResp(200, snapshot))
@@ -165,12 +165,12 @@ describe('api client — interception modules', () => {
       .mockResolvedValueOnce(jsonResp(200, view))
     vi.stubGlobal('fetch', f)
     const { api } = await import('./client')
-    const request = { revision: 'r1', url: 'https://example.com/test.sgmodule', format: 'auto' as const, fetch_profile: 'quantumult-x' as const, referer: 'https://hub.kelee.one/', partial_allowed: false }
+    const request = { revision: 'r1', url: 'loon://import?plugin=https://example.com/test.lpx' }
 
     await api.getInterceptModules()
     await api.getInterceptModuleSnapshot('mod-1234567890abcdef')
     await api.importInterceptModule(request)
-    await api.putInterceptModule('mod-1234567890abcdef', { revision: 'r1', enabled: true })
+    await api.putInterceptModule('mod-1234567890abcdef', { revision: 'r1', parameters: { mode: 'clean' } })
     await api.deleteInterceptModule('mod-1234567890abcdef', 'r1')
 
     expect(f.mock.calls.map((call) => call[0])).toEqual([
@@ -183,6 +183,7 @@ describe('api client — interception modules', () => {
     expect(f.mock.calls[2][1].method).toBe('POST')
     expect(JSON.parse(f.mock.calls[2][1].body as string)).toEqual(request)
     expect(f.mock.calls[3][1].method).toBe('PUT')
+    expect(JSON.parse(f.mock.calls[3][1].body as string)).toEqual({ revision: 'r1', parameters: { mode: 'clean' } })
     expect(f.mock.calls[4][1].method).toBe('DELETE')
   })
 })

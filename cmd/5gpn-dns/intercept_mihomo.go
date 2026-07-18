@@ -25,13 +25,27 @@ type interceptRoutingAnalysis struct {
 }
 
 func interceptMihomoRules(document interceptConfigDocument) []string {
-	hosts := activeInterceptHosts(document)
-	rules := make([]string, 0, len(hosts))
-	for _, host := range hosts {
+	rules := make([]string, 0, len(activeInterceptHosts(document))*2)
+	appendRule := func(host, port string) {
+		kind := "DOMAIN"
 		if strings.HasPrefix(host, "*.") {
-			rules = append(rules, "AND,((DOMAIN-WILDCARD,"+host+"),(DST-PORT,443)),"+interceptMihomoProxyName)
-		} else {
-			rules = append(rules, "AND,((DOMAIN,"+host+"),(DST-PORT,443)),"+interceptMihomoProxyName)
+			kind = "DOMAIN-WILDCARD"
+		}
+		rules = append(rules, "AND,(("+kind+","+host+"),(DST-PORT,"+port+")),"+interceptMihomoProxyName)
+	}
+	if document.WLOC.Enabled {
+		for _, host := range builtInWLOCHosts {
+			appendRule(host, "443")
+		}
+	}
+	for _, module := range document.Modules {
+		if !module.Enabled {
+			continue
+		}
+		for _, host := range module.Hosts {
+			for _, port := range []string{"80", "443"} {
+				appendRule(host, port)
+			}
 		}
 	}
 	sort.Strings(rules)
@@ -151,19 +165,21 @@ func renderInterceptRouting(analysis interceptRoutingAnalysis, nextRules []strin
 }
 
 func validCanonicalInterceptRule(rule string) bool {
-	suffix := "),(DST-PORT,443))," + interceptMihomoProxyName
-	for kind, prefix := range map[string]string{
-		"DOMAIN":          "AND,((DOMAIN,",
-		"DOMAIN-WILDCARD": "AND,((DOMAIN-WILDCARD,",
-	} {
-		if !strings.HasPrefix(rule, prefix) || !strings.HasSuffix(rule, suffix) {
-			continue
+	for _, port := range []string{"80", "443"} {
+		suffix := "),(DST-PORT," + port + "))," + interceptMihomoProxyName
+		for kind, prefix := range map[string]string{
+			"DOMAIN":          "AND,((DOMAIN,",
+			"DOMAIN-WILDCARD": "AND,((DOMAIN-WILDCARD,",
+		} {
+			if !strings.HasPrefix(rule, prefix) || !strings.HasSuffix(rule, suffix) {
+				continue
+			}
+			host := strings.TrimSuffix(strings.TrimPrefix(rule, prefix), suffix)
+			if validateInterceptHostPattern(host) != nil {
+				return false
+			}
+			return (kind == "DOMAIN-WILDCARD") == strings.HasPrefix(host, "*.")
 		}
-		host := strings.TrimSuffix(strings.TrimPrefix(rule, prefix), suffix)
-		if validateInterceptHostPattern(host) != nil {
-			return false
-		}
-		return (kind == "DOMAIN-WILDCARD") == strings.HasPrefix(host, "*.")
 	}
 	return false
 }

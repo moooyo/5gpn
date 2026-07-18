@@ -7,6 +7,9 @@ CERT_UNIT="$ROOT/etc/systemd/5gpn-intercept-cert.service"
 CERT_PATH="$ROOT/etc/systemd/5gpn-intercept-cert.path"
 TEMPLATE="$ROOT/etc/mihomo/config.yaml.tmpl"
 PROFILE="$ROOT/scripts/gen-ios-profile.sh"
+MODULE_PAGE="$ROOT/web/src/features/modules/ModulesPage.tsx"
+SETUP_GUIDE="$ROOT/web/src/features/setup-guide/SetupGuidePage.tsx"
+MODULE_PARSER="$ROOT/cmd/5gpn-dns/intercept_module_parser.go"
 rc=0
 fail() { echo "FAIL: $1"; rc=1; }
 
@@ -17,6 +20,8 @@ grep -Fq 'github.com/dop251/goja v0.0.0-20260701091749-b07b74453ea9' "$ROOT/cmd/
     || fail "goja direct dependency is not pinned"
 grep -Fq 'github.com/dlclark/regexp2/v2 v2.2.1' "$ROOT/cmd/5gpn-intercept/go.mod" \
     || fail "regexp2 timeout dependency is not pinned"
+grep -Fq 'github.com/andybalholm/brotli v1.2.2' "$ROOT/cmd/5gpn-intercept/go.mod" \
+    || fail "Brotli decoding dependency is not pinned"
 find "$ROOT" -path "$ROOT/web/node_modules" -prune -o -type f -name '*.py' -print -quit | grep -q . \
     && fail "Python source was introduced"
 
@@ -60,6 +65,37 @@ grep -Fq 'gs-loc.apple.com' "$ROOT/etc/proxy-domains.txt" \
     && fail "disabled WLOC hosts must not remain in the static proxy policy"
 
 grep -Fq 'ios-intercept-ca.mobileconfig' "$PROFILE" || fail "interception CA profile generation is missing"
-grep -Fq 'com.apple.security.root' "$PROFILE" || fail "WLOC profile is not a root-certificate payload"
+grep -Fq 'com.apple.security.root' "$PROFILE" || fail "shared interception profile is not a root-certificate payload"
+grep -Fq "INTERCEPT_CA_PROFILE_PATH = '/ios/ios-intercept-ca.mobileconfig'" "$SETUP_GUIDE" \
+    || fail "Setup Guide does not own the shared interception CA profile"
+grep -Fq 'data-testid="intercept-ca-guide"' "$SETUP_GUIDE" \
+    || fail "Setup Guide lacks the shared interception trust guide"
+grep -Fq 'to="/setup-guide"' "$MODULE_PAGE" \
+    || fail "Modules page does not direct operators to the shared trust guide"
+grep -Fq 'ios-intercept-ca.mobileconfig' "$MODULE_PAGE" \
+    && fail "Modules page still owns a direct CA profile download"
+grep -Fq 'loon://import?plugin=<https-url>' "$MODULE_PARSER" \
+    || fail "Loon deep-link normalization is missing"
+grep -Fq 'moduleLoonUserAgent' "$MODULE_PARSER" \
+    || fail "automatic Loon fetch headers are missing"
+grep -Fq 'servePlainHTTPConnection' "$ROOT/cmd/5gpn-intercept/proxy.go" \
+    || fail "plain HTTP module interception is missing"
+grep -Fq 'BinaryBody' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
+    || fail "binary body script support is missing"
+grep -Fq 'brotli.NewReader' "$ROOT/cmd/5gpn-intercept/content_encoding.go" \
+    || fail "bounded Brotli decoding is missing"
+grep -Fq 'interceptModuleIssues' "$ROOT/cmd/5gpn-dns/intercept_module_manager.go" \
+    || fail "structured compatibility reporting is missing"
+grep -Fq 'fetch_profile' "$ROOT/web/src/lib/api/types.ts" \
+    && fail "module import API still exposes a fetch-header choice"
+retired_product="$(printf '%s%s' 'sur' 'ge')"
+retired_extension="$(printf '%s%s' 'sg' 'module')"
+grep -RniE "${retired_product}|${retired_extension}" \
+    "$ROOT/AGENTS.md" "$ROOT/README.md" "$ROOT/docs/architecture.md" \
+    "$ROOT/cmd/5gpn-dns" "$ROOT/cmd/5gpn-intercept" \
+    "$ROOT/web/src" "$ROOT/web/e2e" 2>/dev/null | grep -q . \
+    && fail "retired non-Loon interception support is still present"
+grep -Fq 'json:"format"' "$ROOT/cmd/5gpn-dns/intercept_module_types.go" \
+    && fail "Loon-only module snapshots still persist a format discriminator"
 
 exit "$rc"

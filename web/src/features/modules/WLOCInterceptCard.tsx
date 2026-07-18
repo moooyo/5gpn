@@ -120,17 +120,6 @@ export function WLOCInterceptCard({
         <Toggle checked={failClosed} onCheckedChange={setFailClosed} disabled={!value || saving} aria-label={t('settings.wlocFailClosed')} />
       </div>
 
-      {value ? (
-        <div className="mt-3 rounded-[10px] border border-amber/25 bg-amber/5 px-3 py-2.5 text-[10.5px] leading-relaxed text-text-mid">
-          {t('settings.wlocTrustWarning')}{' '}
-          <a className="font-semibold text-primary underline-offset-2 hover:underline" href={value.profile_url}>
-            {t('settings.wlocDownloadProfile')}
-          </a>
-        </div>
-      ) : (
-        <div role="status" className="mt-3 text-[10.5px] text-text-faint">{t('common.loading')}</div>
-      )}
-
       {error ? <div role="alert" className="mt-3 rounded-lg border border-red/25 bg-red/5 px-3 py-2 text-[10.5px] text-red">{error}</div> : null}
       <div className="mt-3 flex justify-end border-t border-divider pt-3">
         <Button

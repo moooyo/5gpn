@@ -6,9 +6,14 @@ import { Card, CardBody, CardHeader } from '../../components/ds'
 import { useStatus } from '../../lib/StatusContext'
 
 export const IOS_PROFILE_PATH = '/ios/ios-dot.mobileconfig'
+export const INTERCEPT_CA_PROFILE_PATH = '/ios/ios-intercept-ca.mobileconfig'
 
 export function profileURL(origin = window.location.origin): string {
   return new URL(IOS_PROFILE_PATH, origin).toString()
+}
+
+export function interceptCAProfileURL(origin = window.location.origin): string {
+  return new URL(INTERCEPT_CA_PROFILE_PATH, origin).toString()
 }
 
 function QRCode({ value, label }: { value: string; label: string }) {
@@ -60,6 +65,7 @@ export default function SetupGuidePage() {
   const { t } = useTranslation()
   const { status, loading } = useStatus()
   const downloadURL = profileURL()
+  const caDownloadURL = interceptCAProfileURL()
   const dotDomain = status?.dot_domain
 
   const iosSteps = [
@@ -73,6 +79,12 @@ export default function SetupGuidePage() {
     { title: t('setupGuide.android.step2Title'), body: t('setupGuide.android.step2Body') },
     { title: t('setupGuide.android.step3Title'), body: t('setupGuide.android.step3Body') },
     { title: t('setupGuide.android.step4Title'), body: t('setupGuide.android.step4Body') },
+  ]
+  const caSteps = [
+    { title: t('setupGuide.interceptCA.step1Title'), body: t('setupGuide.interceptCA.step1Body') },
+    { title: t('setupGuide.interceptCA.step2Title'), body: t('setupGuide.interceptCA.step2Body') },
+    { title: t('setupGuide.interceptCA.step3Title'), body: t('setupGuide.interceptCA.step3Body') },
+    { title: t('setupGuide.interceptCA.step4Title'), body: t('setupGuide.interceptCA.step4Body') },
   ]
 
   return (
@@ -175,6 +187,60 @@ export default function SetupGuidePage() {
           </CardBody>
         </Card>
       </div>
+
+      <Card className="overflow-hidden p-0" data-testid="intercept-ca-guide">
+        <CardHeader
+          title={
+            <span className="flex items-center gap-2">
+              <ShieldCheck className="h-[18px] w-[18px] text-primary" aria-hidden="true" />
+              {t('setupGuide.interceptCA.title')}
+            </span>
+          }
+        >
+          <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10.5px] font-bold text-primary">
+            {t('setupGuide.interceptCA.shared')}
+          </span>
+        </CardHeader>
+        <CardBody className="grid gap-6 sm:grid-cols-[190px_minmax(0,1fr)] lg:grid-cols-[190px_minmax(0,1fr)_minmax(280px,.72fr)]">
+          <div className="flex flex-col gap-3">
+            <a
+              href={caDownloadURL}
+              aria-label={t('setupGuide.interceptCA.scanLabel')}
+              className="rounded-[14px] border border-border bg-white p-2.5 shadow-sm transition-transform hover:scale-[1.01]"
+            >
+              <QRCode value={caDownloadURL} label={t('setupGuide.interceptCA.qrAlt')} />
+            </a>
+            <div className="flex items-start gap-2 text-[11px] leading-relaxed text-text-soft">
+              <ScanLine className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+              {t('setupGuide.interceptCA.scanHint')}
+            </div>
+          </div>
+
+          <div className="flex min-w-0 flex-col gap-5">
+            <div>
+              <p className="text-[12px] leading-relaxed text-text-soft">{t('setupGuide.interceptCA.description')}</p>
+              <a
+                href={caDownloadURL}
+                className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-[10px] bg-[linear-gradient(135deg,var(--color-primary-2),var(--color-primary))] px-4 py-2.5 text-[13px] font-bold text-white shadow-[0_8px_18px_-8px_rgba(37,99,235,.6)] sm:w-auto"
+              >
+                <Download className="h-4 w-4" aria-hidden="true" />
+                {t('setupGuide.interceptCA.download')}
+              </a>
+              <div className="mt-2 break-all font-mono text-[10px] leading-relaxed text-text-faint">{caDownloadURL}</div>
+            </div>
+            <div className="rounded-[10px] border border-primary/20 bg-primary/5 p-3 text-[11px] leading-relaxed text-text-mid">
+              {t('setupGuide.interceptCA.sharedHint')}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-4 border-divider lg:border-l lg:pl-6">
+            <StepList steps={caSteps} />
+            <div className="rounded-[10px] border border-amber-400/30 bg-amber-400/10 p-3 text-[11px] leading-relaxed text-text-mid">
+              {t('setupGuide.interceptCA.note')}
+            </div>
+          </div>
+        </CardBody>
+      </Card>
 
       <Card className="p-4">
         <div className="flex items-start gap-3">

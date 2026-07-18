@@ -168,7 +168,7 @@ func (m *InterceptModuleManager) Snapshot(id string) (interceptModuleSnapshotVie
 	}
 	if id == interceptModuleWLOCID {
 		return interceptModuleSnapshotView{
-			ID: id, Name: "Apple WLOC response rewriting", Format: interceptModuleFormatWLOC,
+			ID: id, Name: "Apple WLOC response rewriting",
 			SourceDigest: sha256Hex([]byte(builtInWLOCSource)),
 			SourceBody:   builtInWLOCSource,
 			Scripts:      []interceptScriptSnapshotView{},
@@ -187,7 +187,7 @@ func (m *InterceptModuleManager) Snapshot(id string) (interceptModuleSnapshotVie
 			continue
 		}
 		view := interceptModuleSnapshotView{
-			ID: module.ID, Name: module.Name, Format: module.Format,
+			ID: module.ID, Name: module.Name,
 			SourceURL: module.Source.URL, SourceDigest: module.Source.Digest, SourceBody: module.Source.Body,
 			Scripts: make([]interceptScriptSnapshotView, 0, len(module.Scripts)),
 		}
@@ -211,7 +211,6 @@ func (m *InterceptModuleManager) viewLocked() (interceptModulesView, error) {
 	ready, reason := m.routingReadyLocked(document)
 	view := interceptModulesView{
 		Revision:    interceptRevision(body),
-		CAProfile:   "/ios/ios-intercept-ca.mobileconfig",
 		CatalogURL:  defaultModuleReferer,
 		ActiveHosts: activeInterceptHosts(document),
 		Modules:     make([]interceptModuleView, 0, len(document.Modules)+1),
@@ -221,7 +220,6 @@ func (m *InterceptModuleManager) viewLocked() (interceptModulesView, error) {
 		ID:            interceptModuleWLOCID,
 		Name:          "Apple WLOC response rewriting",
 		Description:   "Built-in bounded protobuf transformation for Apple Wi-Fi and cellular location responses.",
-		Format:        interceptModuleFormatWLOC,
 		Enabled:       document.WLOC.Enabled,
 		Ready:         wlocReady,
 		Reason:        moduleRuntimeReason(wlocReady, reason),
@@ -231,25 +229,31 @@ func (m *InterceptModuleManager) viewLocked() (interceptModulesView, error) {
 		SourceDigest:  sha256Hex([]byte(builtInWLOCSource)),
 	})
 	for _, module := range document.Modules {
-		compatibility := "full"
-		if len(module.Unsupported) > 0 {
-			compatibility = "partial"
+		compatibility := interceptModuleCompatibility(module)
+		moduleReady := ready && compatibility != "incompatible" && compatibility != "needs_configuration"
+		moduleReason := reason
+		if compatibility == "incompatible" {
+			moduleReason = "incompatible-capabilities"
+		} else if compatibility == "needs_configuration" {
+			moduleReason = "parameters-required"
 		}
-		moduleReady := ready
 		view.Modules = append(view.Modules, interceptModuleView{
 			ID:             module.ID,
 			Name:           module.Name,
 			Description:    module.Description,
-			Format:         module.Format,
 			Enabled:        module.Enabled,
 			Ready:          moduleReady,
-			Reason:         moduleRuntimeReason(moduleReady, reason),
+			Reason:         moduleRuntimeReason(moduleReady, moduleReason),
 			Compatibility:  compatibility,
 			PartialAllowed: module.PartialAllowed,
 			Hosts:          append([]string(nil), module.Hosts...),
 			ScriptCount:    len(module.Scripts),
 			RewriteCount:   len(module.Rewrites) + len(module.Headers),
 			Unsupported:    append([]string(nil), module.Unsupported...),
+			Incompatible:   append([]string(nil), module.Incompatible...),
+			Issues:         interceptModuleIssues(module),
+			Parameters:     append([]interceptModuleParameter(nil), module.Parameters...),
+			HostMappings:   append([]interceptHostMapping(nil), module.HostMappings...),
 			SourceURL:      module.Source.URL,
 			SourceDigest:   module.Source.Digest,
 			ImportedAt:     module.ImportedAt,
@@ -264,6 +268,30 @@ func moduleRuntimeReason(ready bool, reason string) string {
 		return reason
 	}
 	return ""
+}
+
+func interceptModuleCompatibility(module interceptModuleSnapshot) string {
+	if len(module.Incompatible) > 0 {
+		return "incompatible"
+	}
+	if !interceptModuleParametersReady(module.Parameters) {
+		return "needs_configuration"
+	}
+	if len(module.Unsupported) > 0 {
+		return "partial"
+	}
+	return "full"
+}
+
+func interceptModuleIssues(module interceptModuleSnapshot) []interceptCompatibilityIssueView {
+	issues := make([]interceptCompatibilityIssueView, 0, len(module.Incompatible)+len(module.Unsupported))
+	for _, message := range module.Incompatible {
+		issues = append(issues, interceptCompatibilityIssueView{Severity: "error", Message: message})
+	}
+	for _, message := range module.Unsupported {
+		issues = append(issues, interceptCompatibilityIssueView{Severity: "warning", Message: message})
+	}
+	return issues
 }
 
 func (m *InterceptModuleManager) routingReadyLocked(document interceptConfigDocument) (bool, string) {
@@ -384,17 +412,18 @@ func (m *InterceptModuleManager) Delete(id, revision string) (interceptModulesVi
 }
 
 type interceptModuleUpdate struct {
-	Revision       string  `json:"revision"`
-	Enabled        *bool   `json:"enabled,omitempty"`
-	Argument       *string `json:"argument,omitempty"`
-	PartialAllowed *bool   `json:"partial_allowed,omitempty"`
+	Revision       string            `json:"revision"`
+	Enabled        *bool             `json:"enabled,omitempty"`
+	Argument       *string           `json:"argument,omitempty"`
+	PartialAllowed *bool             `json:"partial_allowed,omitempty"`
+	Parameters     map[string]string `json:"parameters,omitempty"`
 }
 
 func (m *InterceptModuleManager) Update(ctx context.Context, id string, update interceptModuleUpdate) (interceptModulesView, error) {
 	if m == nil || m.store == nil {
 		return interceptModulesView{}, errInterceptModulesUnavailable
 	}
-	if !validMihomoConfigRevision(update.Revision) || (update.Enabled == nil && update.Argument == nil && update.PartialAllowed == nil) {
+	if !validMihomoConfigRevision(update.Revision) || (update.Enabled == nil && update.Argument == nil && update.PartialAllowed == nil && update.Parameters == nil) {
 		return interceptModulesView{}, errors.New("revision and at least one update field are required")
 	}
 	if update.Argument != nil && len(*update.Argument) > maxInterceptModuleArg {
@@ -402,7 +431,7 @@ func (m *InterceptModuleManager) Update(ctx context.Context, id string, update i
 	}
 	return m.mutate(ctx, update.Revision, func(document *interceptConfigDocument) (bool, error) {
 		if id == interceptModuleWLOCID {
-			if update.Argument != nil || update.PartialAllowed != nil {
+			if update.Argument != nil || update.PartialAllowed != nil || update.Parameters != nil {
 				return false, errors.New("the built-in WLOC module has no external script compatibility settings")
 			}
 			if update.Enabled == nil {
@@ -419,8 +448,14 @@ func (m *InterceptModuleManager) Update(ctx context.Context, id string, update i
 			}
 			routingChanged := false
 			if update.Enabled != nil {
+				if *update.Enabled && len(module.Incompatible) > 0 {
+					return false, errors.New("this module has incompatible requirements and cannot be enabled")
+				}
+				if *update.Enabled && !interceptModuleParametersReady(module.Parameters) {
+					return false, errors.New("configure every module parameter before enable")
+				}
 				if *update.Enabled && len(module.Unsupported) > 0 && !module.PartialAllowed {
-					return false, errors.New("this module is only partially compatible and was not imported with partial execution acknowledged")
+					return false, errors.New("this module is only partially compatible and has not been acknowledged after review")
 				}
 				routingChanged = module.Enabled != *update.Enabled
 				module.Enabled = *update.Enabled
@@ -434,10 +469,32 @@ func (m *InterceptModuleManager) Update(ctx context.Context, id string, update i
 				}
 				module.PartialAllowed = *update.PartialAllowed
 			}
+			if update.Parameters != nil {
+				if module.Enabled {
+					return false, errors.New("disable the module before changing parameters")
+				}
+				if err := updateInterceptModuleParameters(module, update.Parameters); err != nil {
+					return false, err
+				}
+			}
 			return routingChanged, nil
 		}
 		return false, errInterceptModuleNotFound
 	})
+}
+
+func updateInterceptModuleParameters(module *interceptModuleSnapshot, values map[string]string) error {
+	if len(values) != len(module.Parameters) {
+		return errors.New("submit exactly one value for every module parameter")
+	}
+	for index := range module.Parameters {
+		value, ok := values[module.Parameters[index].Key]
+		if !ok {
+			return fmt.Errorf("missing module parameter %q", module.Parameters[index].Key)
+		}
+		module.Parameters[index].Value = value
+	}
+	return validateInterceptModuleParameters(module.Parameters)
 }
 
 func (m *InterceptModuleManager) UpdateWLOC(ctx context.Context, revision string, settings interceptWLOCSettings) (interceptModulesView, error) {
@@ -469,6 +526,10 @@ func (m *InterceptModuleManager) mutate(
 	}
 	nextDocument := oldDocument
 	nextDocument.Modules = append([]interceptModuleSnapshot(nil), oldDocument.Modules...)
+	for index := range nextDocument.Modules {
+		nextDocument.Modules[index].Parameters = append([]interceptModuleParameter(nil), oldDocument.Modules[index].Parameters...)
+		nextDocument.Modules[index].HostMappings = append([]interceptHostMapping(nil), oldDocument.Modules[index].HostMappings...)
+	}
 	routingChanged, err := mutator(&nextDocument)
 	if err != nil {
 		return interceptModulesView{}, err
@@ -684,13 +745,12 @@ func marshalInterceptDocument(document interceptConfigDocument) ([]byte, error) 
 func modulesViewFromDocument(document interceptConfigDocument, body []byte, ready bool, reason string) interceptModulesView {
 	view := interceptModulesView{
 		Revision:    interceptRevision(body),
-		CAProfile:   "/ios/ios-intercept-ca.mobileconfig",
 		CatalogURL:  defaultModuleReferer,
 		ActiveHosts: activeInterceptHosts(document),
 		Modules:     make([]interceptModuleView, 0, len(document.Modules)+1),
 	}
 	view.Modules = append(view.Modules, interceptModuleView{
-		ID: interceptModuleWLOCID, Name: "Apple WLOC response rewriting", Format: interceptModuleFormatWLOC,
+		ID: interceptModuleWLOCID, Name: "Apple WLOC response rewriting",
 		Description: "Built-in bounded protobuf transformation for Apple Wi-Fi and cellular location responses.",
 		Enabled:     document.WLOC.Enabled, Ready: ready,
 		Reason: moduleRuntimeReason(ready, reason), Compatibility: "full",
@@ -698,17 +758,22 @@ func modulesViewFromDocument(document interceptConfigDocument, body []byte, read
 		SourceDigest: sha256Hex([]byte(builtInWLOCSource)),
 	})
 	for _, module := range document.Modules {
-		compatibility := "full"
-		if len(module.Unsupported) > 0 {
-			compatibility = "partial"
+		compatibility := interceptModuleCompatibility(module)
+		moduleReason := reason
+		if compatibility == "incompatible" {
+			moduleReason = "incompatible-capabilities"
+		} else if compatibility == "needs_configuration" {
+			moduleReason = "parameters-required"
 		}
 		view.Modules = append(view.Modules, interceptModuleView{
-			ID: module.ID, Name: module.Name, Description: module.Description, Format: module.Format,
-			Enabled: module.Enabled, Ready: ready,
-			Reason: moduleRuntimeReason(ready, reason), Compatibility: compatibility,
+			ID: module.ID, Name: module.Name, Description: module.Description,
+			Enabled: module.Enabled, Ready: ready && compatibility != "incompatible" && compatibility != "needs_configuration",
+			Reason: moduleRuntimeReason(ready && compatibility != "incompatible" && compatibility != "needs_configuration", moduleReason), Compatibility: compatibility,
 			PartialAllowed: module.PartialAllowed, Hosts: append([]string(nil), module.Hosts...),
 			ScriptCount: len(module.Scripts), RewriteCount: len(module.Rewrites) + len(module.Headers),
 			Unsupported: append([]string(nil), module.Unsupported...), SourceURL: module.Source.URL,
+			Incompatible: append([]string(nil), module.Incompatible...), Issues: interceptModuleIssues(module),
+			Parameters: append([]interceptModuleParameter(nil), module.Parameters...), HostMappings: append([]interceptHostMapping(nil), module.HostMappings...),
 			SourceDigest: module.Source.Digest, ImportedAt: module.ImportedAt, Argument: module.Argument,
 		})
 	}

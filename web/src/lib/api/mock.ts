@@ -144,14 +144,14 @@ export async function getInterceptModuleSnapshot(id: string): Promise<T.Intercep
   if (!module) throw new ApiError(404, 'Interception module not found.')
   if (id === 'builtin-wloc') {
     return {
-      id, name: module.name, format: 'builtin', source_digest: module.source_digest,
+      id, name: module.name, source_digest: module.source_digest,
       source_body: 'Built into the 5gpn-intercept binary; no remote source is executed.', scripts: [],
     }
   }
   return {
-    id, name: module.name, format: module.format, source_url: module.source_url,
+    id, name: module.name, source_url: module.source_url,
     source_digest: module.source_digest,
-    source_body: '#!name=Synthetic response cleaner\n[Script]\nclean = type=http-response,pattern=^https://api\\.example\\.test/,script-path=https://modules.example.test/clean.js\n[MITM]\nhostname=api.example.test\n',
+    source_body: '#!name=Synthetic response cleaner\n[Script]\nhttp-response ^https://api\\.example\\.test/ script-path=https://modules.example.test/clean.js,tag=Cleaner\n[MITM]\nhostname=api.example.test\n',
     scripts: [{
       id: 'script-001', url: 'https://modules.example.test/clean.js', digest: 'd'.repeat(64),
       body: '$done({body: $response.body});',
@@ -173,19 +173,17 @@ export async function importInterceptModule(request: T.InterceptModuleImport): P
     id,
     name: 'Imported module snapshot',
     description: 'Mock import preview',
-    format: request.format === 'loon' ? 'loon' : 'surge',
     enabled: false,
     ready: true,
-    compatibility: request.partial_allowed ? 'partial' : 'full',
-    partial_allowed: request.partial_allowed,
+    compatibility: 'full',
+    partial_allowed: false,
     hosts: ['service.example.test'],
     script_count: 1,
     rewrite_count: 0,
-    unsupported: request.partial_allowed ? ['[Rule] DOMAIN,example.test,DIRECT (section is not supported)'] : undefined,
     source_url: request.url,
     source_digest: 'c'.repeat(64),
     imported_at: new Date().toISOString(),
-    argument: request.argument,
+    argument: '',
   })
   advanceInterceptRevision()
   return interceptModulesView()
@@ -205,6 +203,12 @@ export async function putInterceptModule(id: string, update: T.InterceptModuleUp
   }
   if (update.argument !== undefined) module.argument = update.argument
   if (update.partial_allowed !== undefined) module.partial_allowed = update.partial_allowed
+  if (update.parameters !== undefined && module.parameters) {
+    module.parameters = module.parameters.map((parameter) => ({ ...parameter, value: update.parameters?.[parameter.key] ?? '' }))
+    if (module.parameters.every((parameter) => parameter.value)) {
+      module.compatibility = (module.issues?.length ?? 0) > 0 ? 'partial' : 'full'
+    }
+  }
   advanceInterceptRevision()
   refreshActiveInterceptHosts()
   return interceptModulesView()

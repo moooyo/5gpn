@@ -54,7 +54,6 @@ type interceptWLOCView struct {
 	FailClosed   bool     `json:"fail_closed"`
 	MaxBodyBytes int64    `json:"max_body_bytes"`
 	Hosts        []string `json:"hosts"`
-	ProfileURL   string   `json:"profile_url"`
 }
 
 type interceptWLOCUpdate struct {
@@ -170,7 +169,6 @@ func interceptView(document interceptConfigDocument, body []byte) interceptWLOCV
 		FailClosed:   document.WLOC.FailClosed,
 		MaxBodyBytes: document.WLOC.MaxBodyBytes,
 		Hosts:        []string{"gs-loc.apple.com", "gs-loc-cn.apple.com"},
-		ProfileURL:   "/ios/ios-intercept-ca.mobileconfig",
 	}
 }
 

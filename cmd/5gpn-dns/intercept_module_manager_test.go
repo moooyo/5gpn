@@ -45,9 +45,8 @@ func testModuleSnapshot(partial bool) interceptModuleSnapshot {
 	return interceptModuleSnapshot{
 		ID:          "mod-1234567890abcdef",
 		Name:        "Fixture module",
-		Format:      interceptModuleFormatSurge,
 		ImportedAt:  time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
-		Source:      interceptModuleSource{Digest: sha256Hex([]byte(source)), Body: source, FetchProfile: interceptFetchStandard},
+		Source:      interceptModuleSource{Digest: sha256Hex([]byte(source)), Body: source},
 		Hosts:       []string{"api.example.com"},
 		Unsupported: unsupported,
 		Scripts: []interceptScriptRule{{
@@ -108,8 +107,12 @@ func TestInterceptModuleManagerEnableDisablePublishesOneTransaction(t *testing.T
 	}
 	mihomoBody, _ := os.ReadFile(mihomoPath)
 	wantRule := "AND,((DOMAIN,api.example.com),(DST-PORT,443)),MODULE-MITM"
+	wantHTTPRule := "AND,((DOMAIN,api.example.com),(DST-PORT,80)),MODULE-MITM"
 	if !strings.Contains(string(mihomoBody), wantRule) {
 		t.Fatalf("mihomo route missing:\n%s", mihomoBody)
+	}
+	if !strings.Contains(string(mihomoBody), wantHTTPRule) {
+		t.Fatalf("mihomo HTTP route missing:\n%s", mihomoBody)
 	}
 	configBody, _ := os.ReadFile(interceptPath)
 	var config interceptConfigDocument
@@ -205,6 +208,33 @@ func TestInterceptModuleManagerRequiresPartialAcknowledgement(t *testing.T) {
 	}
 	if _, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled}); err != nil {
 		t.Fatalf("acknowledged partial module did not enable: %v", err)
+	}
+}
+
+func TestInterceptModuleManagerRequiresParametersBeforeEnable(t *testing.T) {
+	module := testModuleSnapshot(false)
+	module.Parameters = []interceptModuleParameter{
+		{Key: "appName", Kind: "input"},
+		{Key: "mode", Kind: "select", Options: []string{"clean", "full"}},
+	}
+	manager, _, _, _, _ := newInterceptManagerFixture(t, module)
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	if _, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled}); err == nil || !strings.Contains(err.Error(), "parameter") {
+		t.Fatalf("unconfigured enable error = %v", err)
+	}
+	view, err = manager.Update(context.Background(), module.ID, interceptModuleUpdate{
+		Revision:   view.Revision,
+		Parameters: map[string]string{"appName": "Drive", "mode": "clean"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Modules[1].Compatibility != "full" || view.Modules[1].Parameters[0].Value != "Drive" {
+		t.Fatalf("configured view = %+v", view.Modules[1])
 	}
 }
 

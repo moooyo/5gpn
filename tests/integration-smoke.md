@@ -356,20 +356,28 @@ token into recorded command output, screenshots, or issue logs.
   On an owned test iPhone, install it and explicitly enable full trust under
   Certificate Trust Settings. Removing this profile does not remove the DoT
   profile.
-- [ ] From Console `/modules`, import a synthetic Surge fixture by URL with the
-  Quantumult X header preset and Referer. Verify the server snapshots both the
-  module and referenced script, reports unsupported sections, and refuses an
-  unacknowledged partial module. Repeat with a synthetic Loon fixture and a
-  pasted/uploaded source. Do not crawl or mirror the linked external catalog.
+- [ ] From Console `/modules`, import a synthetic Loon fixture by HTTPS URL and
+  repeat through `loon://import?plugin=<https-url>`. Its origin returns 403 unless it receives
+  the bounded Loon client-shape headers; verify the server normalizes the nested
+  URL and snapshots both the module and referenced script. Repeat with a
+  pasted/uploaded source. Every import starts disabled and unacknowledged;
+  configure `#!input`/`#!select` values, set `$argument`, inspect structured
+  warning/error results, and acknowledge an explicitly reported partial module
+  only after inspecting the snapshot. Hard incompatibilities remain impossible
+  to enable. Do not crawl or mirror the linked external catalog.
 - [ ] Enable the synthetic module in the Console, then disable/re-enable it from
   Telegram. Each surface shows the same revision and state. The complete
-  mihomo config passes `mihomo -t`; sorted port-443 `AND` rules containing
+  mihomo config passes `mihomo -t`; sorted port-80/443 `AND` rules containing
   `DOMAIN`/`DOMAIN-WILDCARD` matchers sit
   after `IN-NAME,intercept-egress,<terminal-target>` and before `MATCH`, the DNS
   answer changes to the gateway only while enabled, and certificate/mihomo
   failure injection restores the previous state.
-- [ ] Verify a script can use `$request`, `$response`, `$done`, `$argument`, and
-  durable `$persistentStore`/`$prefs`; `$httpClient`, `$task.fetch`, filesystem,
+- [ ] Verify plain HTTP, TLS/H1/H2, QUIC v1/v2, and H3 apply the same Loon URL/
+  header rewrites and request/response scripts. String and binary-body scripts
+  decode identity, gzip, zlib/raw deflate, and Brotli bodies within their
+  expanded-size bounds. Verify scripts can use `$loon`, `$request`, `$response`,
+  `$done`, `$argument`, configured parameter defaults, and durable
+  `$persistentStore`; `$httpClient`, filesystem,
   process, and module-loader access fail closed. Oversized bodies, VM timeout,
   and backtracking-regexp timeout remain bounded.
 - [ ] Configure WLOC coordinates on the same Modules page and enable

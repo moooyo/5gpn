@@ -52,7 +52,7 @@ architecture.
 | `5gpn-dns` | `127.0.0.1:5354/udp` and `/tcp` | Egress DNS broker used by mihomo after hostname sniffing. |
 | `5gpn-dns` | `127.0.0.1:443/tcp` | Public HTTPS console assets and iOS profile download, plus the bearer-authenticated API. |
 | `5gpn-dns` | `127.0.0.2:443/tcp` | HTTPS zashboard static files and its controller proxy. |
-| `5gpn-intercept` | `127.0.0.1:18080/tcp` | Authenticated SOCKS5 control and TCP interception ingress. Each authenticated UDP ASSOCIATE receives a private ephemeral loopback UDP socket. |
+| `5gpn-intercept` | `127.0.0.1:18080/tcp` | Authenticated SOCKS5 control and plain-HTTP/TLS interception ingress. Each authenticated UDP ASSOCIATE receives a private ephemeral loopback UDP socket. |
 | mihomo | configured local IPv4 addresses on TCP `:80`, `:443`, `:5060`, `:8080`, and `:8443`, plus UDP `:443` and `:5060` | HTTP/TLS/QUIC ingress for traffic steered to the gateway. |
 | mihomo | `127.0.0.1:9090/tcp` | TLS-only external controller. |
 | mihomo | `127.0.0.1:17890/tcp` and UDP associations | Authenticated mixed listener used only for post-transformation egress from `5gpn-intercept`. |
@@ -114,16 +114,18 @@ The interception subsystem is a separate catalog from the fixed mihomo ingress
 catalog. The seed always contains an authenticated loopback `MODULE-MITM`
 SOCKS5 node, the matching `intercept-egress` mixed listener, and an `IN-NAME`
 bypass to the terminal operator egress group. No module-host rule is present in
-a fresh seed. Enabling a module derives exact `DOMAIN` and wildcard
+a fresh seed. Enabling an external module derives exact `DOMAIN` and wildcard
 `DOMAIN-WILDCARD` matchers from its normalized `[MITM]` host list and combines
-each with `DST-PORT,443` in a canonical `AND` rule. Only TCP TLS and UDP QUIC on
-port 443 are sent to the sidecar; HTTP and alternate-port traffic continues to
-the operator's normal rule path. A hostname target must match
+each with canonical `DST-PORT,80` and `DST-PORT,443` rules. Plain HTTP, TCP TLS,
+and UDP QUIC on those ports are sent to the sidecar; alternate-port traffic
+continues to the operator's normal rule path. The built-in WLOC module remains
+port-443-only. A hostname target must match
 the active module set; a pure-IP SOCKS target is accepted only until the TLS or
 QUIC handshake supplies an allowlisted SNI. Unknown SNI fails closed.
 
-The sidecar terminates TLS with HTTP/1.1 or HTTP/2 and QUIC v1/v2 with HTTP/3.
-Its upstream connection is separately certificate-verified and always returns
+The sidecar accepts plain HTTP, terminates TLS with HTTP/1.1 or HTTP/2, and
+terminates QUIC v1/v2 with HTTP/3. HTTPS upstreams are separately certificate-
+verified and every upstream connection returns
 through mihomo's authenticated `intercept-egress` SOCKS5 listener. The HTTP/3
 client starts with QUIC v1 and retries v2 only after an authenticated version-
 negotiation failure, before request data is sent. There is no direct sidecar
@@ -139,25 +141,37 @@ inside an application.
 `builtin-wloc` is the built-in module and is disabled by default. It declares
 only `gs-loc.apple.com` and `gs-loc-cn.apple.com` and applies the bounded WLOC
 protobuf response transformer at `/clls/wloc`. External modules are immutable
-Surge or Loon snapshots imported by one explicit URL, pasted text, or an
+Loon snapshots imported by one explicit URL, pasted text, or an
 uploaded local file. 5gpn does not enumerate, crawl, mirror, or redistribute a
 third-party module store. The Console may link to `https://hub.kelee.one/` as
-an external selection aid. URL imports may opt into the `Quantumult X` user
-agent and an explicit HTTPS Referer; those headers do not bypass an origin's
-authentication or anti-bot policy.
+an external selection aid. URL imports accept either one HTTPS resource or an
+exact `loon://import?plugin=<https-url>` deep link, which is normalized to the
+nested HTTPS resource before validation. Every URL import uses a bounded
+automatic Loon header policy: a stable Loon-shaped user agent and the public
+catalog Referer. Callers cannot submit arbitrary fetch headers. These public compatibility
+headers do not supply authentication or defeat an origin's anti-bot policy.
 
-The supported external-module surface is intentionally finite: `[MITM]
-hostname`, HTTP request/response entries in `[Script]`, request header delete/
-replace/replace-regex actions in `[Header Rewrite]`, and terminal actions in
-`[URL Rewrite]` or `[Rewrite]`. Module and referenced script bodies are fetched
+The supported external-module surface is intentionally finite: `[MITM]`
+hostname, HTTP request/response entries in `[Script]`, URL/header actions in
+`[Rewrite]`, public IPv4/domain mappings in `[Host]`, and `#!input`/`#!select`
+parameter declarations. Module and referenced script bodies are fetched
 once with the subscription-grade HTTPS/redirect/SSRF dial guard, bounded,
 hashed, and stored locally. Relative script URLs are resolved only for a URL-
 based import. Unsupported sections or capabilities are displayed explicitly.
-A partially compatible snapshot remains disabled unless the importer records
-an explicit partial-execution acknowledgement. That acknowledgement may also
-be recorded later from the authenticated Console after inspecting the exact
-snapshot; Telegram cannot bypass this review gate. Unsupported directives
-never execute.
+A newly imported snapshot always starts disabled, with no module-level
+`$argument` and no partial-execution acknowledgement. Import returns a
+structured warning/error report. Incompatible snapshots cannot be enabled;
+parameterized snapshots cannot be enabled until every value is configured; and
+partially compatible snapshots require acknowledgement after source review.
+Configured `#!input`/`#!select` values are exposed as read-only defaults through
+`$persistentStore`. Telegram cannot bypass this review gate. Unsupported
+directives never execute.
+
+`[Host]` mappings are module-scoped upstream overrides, not a second global DNS
+policy. They apply only after an enabled module host has been steered through
+the sidecar, preserve the original HTTP Host and TLS SNI, reject private or
+loopback IPv4 targets, and return through mihomo. Loon `server:` and `ssid:`
+forms remain unsupported and appear in the compatibility report.
 
 The `5gpn-dns` systemd unit is softly ordered after mihomo (`Wants`/`After`),
 not coupled with `Requires` or `BindsTo`: a controller or data-plane failure
@@ -496,7 +510,7 @@ Specialized live state remains in purpose-specific, atomically written files:
   source and script snapshots, normalized hosts/actions, compatibility review,
   and enabled state. The built-in WLOC parameters live in the same document;
 - `/var/lib/5gpn-intercept/store.json` is the size-bounded, sidecar-owned
-  persistence backend for compatible `$persistentStore` and `$prefs` calls.
+  persistence backend for compatible `$persistentStore` calls.
   Scripts cannot choose its path. Normal uninstall preserves its independently
   marked state directory with the module document; purge and decommission
   remove it through the fixed canonical path and ownership marker.
@@ -535,6 +549,9 @@ contains the two stable built-in WLOC names plus the exact and wildcard hosts
 of currently enabled external modules. A wildcard SAN is permitted only in the
 normalized `*.example.com` shape; a module cannot request an all-domain or IP
 certificate.
+There is exactly one interception root for the entire module subsystem, not one
+root per module. Adding or removing a module can change the constrained runtime
+leaf SAN set but never creates, rotates, or distributes another root.
 
 `5gpn-intercept-cert.path` watches the atomically replaced module document and
 starts the root-owned, sandboxed `5gpn-intercept-cert.service`. The helper asks
@@ -704,12 +721,17 @@ interception CA signing key. Only the bounded root certificate oneshot may read
 that key, and only the scoped public-certificate renewal helper may read the
 Cloudflare Zone:DNS:Edit credential.
 
-Each external script action runs in a fresh goja VM. The compatibility globals
-are limited to `$request`, `$response`, `$done`, `$argument`, `$environment`,
-`$script`, `$persistentStore`, `$prefs`, console logging, and no-op notification
-surfaces. `$httpClient` and `$task.fetch` fail closed; there is no filesystem,
+Each external HTTP script action runs in a fresh goja VM. Cron, network-change,
+generic, DNS, and rule scripts are not executed. The compatibility globals
+are limited to `$loon`, `$request`, `$response`, `$done`, `$argument`,
+`$persistentStore`, console logging, and a log-only `$notification` surface.
+`$httpClient` fails closed; there is no filesystem,
 process, module loader, socket, or ambient Go object. Source, request, response,
 per-rule, total-module, persistent-key, and persistent-file sizes are bounded.
+Request and response bodies support string or Uint8Array delivery and bounded
+identity, gzip, deflate, and Brotli decoding. Upstream requests ask for identity
+encoding; transformed responses are returned uncompressed with corrected
+length headers.
 At most two body-buffering transformation flows run concurrently; excess work
 fails closed with service unavailable instead of exceeding the sidecar cgroup.
 VM execution has a rule timeout, and regexp2's non-RE2 JavaScript fallback has
@@ -726,11 +748,12 @@ restored from stale bootstrap defaults.
 
 The repository contains no Python. The `5gpn-dns` Go module has exactly three
 direct dependencies: `github.com/miekg/dns`, `github.com/go-telegram/bot`, and
-`gopkg.in/yaml.v3`. The separate `5gpn-intercept` module has exactly three
+`gopkg.in/yaml.v3`. The separate `5gpn-intercept` module has exactly four
 direct dependencies: `github.com/quic-go/quic-go` for QUIC v1/v2 and HTTP/3,
-`github.com/dop251/goja` for the isolated Surge/Loon JavaScript compatibility
-runtime, and `github.com/dlclark/regexp2/v2` solely to impose the explicit
-backtracking timeout on goja's fallback expression engine. These architecture
+`github.com/dop251/goja` for the isolated Loon JavaScript compatibility
+runtime, `github.com/dlclark/regexp2/v2` solely to impose the explicit
+backtracking timeout on goja's fallback expression engine, and
+`github.com/andybalholm/brotli` for bounded Brotli request/response decoding. These architecture
 decisions add no gateway toolchain. The YAML
 dependency is an explicit security decision: raw
 mihomo edits are parsed structurally before invariant validation so decoy keys,
@@ -762,14 +785,22 @@ source/script digests, normalized MITM hosts, supported action counts,
 compatibility and unsupported-directive details, enabled/runtime state, and a
 visible snapshot-to-trust-to-traffic transaction rail. An authenticated,
 on-demand detail read exposes the exact stored module and script bodies for
-review; list responses do not send those potentially large bodies. Import supports one URL,
-paste, or local upload and exposes the QX header/Referer preset without
-presenting the external catalog as a mirrored store. Enable, disable, delete,
-and argument changes use revision checks and explicit confirmation. The same
-page owns the narrow WLOC coordinate fields and links the separate CA profile.
-It must state that the CA enables decryption only for enabled module hosts,
-requires explicit device authorization and manual trust, and that all devices
-routed into WLOC share the configured coordinates.
+review; list responses do not send those potentially large bodies. Import supports one Loon
+plugin URL, Loon import deep link, paste, or local upload. Store-compatible fetch
+headers are automatic; the import dialog has no format, fetch-header, initial
+argument, or pre-review partial-execution controls. After import, the page shows
+structured compatibility errors/warnings, Host mappings, and generated input or
+select controls. Hard incompatibilities block enable; incomplete parameters
+must be saved first; partial execution still requires explicit acknowledgement.
+The external catalog remains a link, not a mirrored store. Enable, disable, delete, argument, and compatibility
+acknowledgement changes use revision checks and explicit confirmation. The same
+page owns the narrow WLOC coordinate fields and shows an information bar linking
+to `/setup-guide` for trust setup. The Setup Guide owns the one shared
+interception-root QR code, download link, installation steps, and iOS manual
+full-trust instructions. It states that trust applies to every module while
+decryption remains limited to enabled module hosts, requires explicit device
+authorization, and that all devices routed into WLOC share the configured
+coordinates.
 
 ## Verification boundary
 

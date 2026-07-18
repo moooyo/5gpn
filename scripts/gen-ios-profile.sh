@@ -155,7 +155,7 @@ fi
 
 ok "Wrote ${profile_path}"
 
-# Generate a separate, explicitly removable profile for the dedicated modular
+# Generate a separate, explicitly removable profile for the shared modular
 # interception root. Keeping this payload separate from the cellular DoT profile
 # lets an operator revoke interception trust without changing DNS enrollment.
 INTERCEPT_CA="/etc/5gpn/intercept-ca/root.crt"
@@ -180,7 +180,7 @@ cat > "$intercept_profile_path" <<EOF
             <key>PayloadContent</key>
             <data>${INTERCEPT_CA_DER_BASE64}</data>
             <key>PayloadDescription</key>
-            <string>Trusts only the dedicated 5gpn modular interception certificate authority.</string>
+            <string>Trusts the shared root used by all enabled 5gpn modular interception hosts.</string>
             <key>PayloadDisplayName</key>
             <string>5gpn Interception CA</string>
             <key>PayloadIdentifier</key>
@@ -194,7 +194,7 @@ cat > "$intercept_profile_path" <<EOF
         </dict>
     </array>
     <key>PayloadDescription</key>
-    <string>Installs the opt-in CA used only for explicitly enabled 5gpn interception modules.</string>
+    <string>Installs the opt-in shared root used by explicitly enabled 5gpn interception modules.</string>
     <key>PayloadDisplayName</key>
     <string>5gpn Interception Trust</string>
     <key>PayloadIdentifier</key>
