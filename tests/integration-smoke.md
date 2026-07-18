@@ -237,6 +237,15 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   `/etc/5gpn/debug-cert`; hashes under `/etc/letsencrypt/archive` remain
   unchanged.
 - [ ] Pinned quick-install failure does not fall back to a mismatched `main`.
+- [ ] With both channels published, the default quick installer resolves the
+  newest normal `X.Y.Z` release even when a newer beta prerelease exists.
+- [ ] `quick-install.sh --beta` resolves the newest published
+  `X.Y.Z-beta.N` prerelease. Missing beta metadata, a normal release carrying a
+  beta-looking tag, and a beta-tagged bundle selected for the official channel
+  all fail before deployment mutation and never fall back across channels.
+- [ ] GitHub still reports the official release through `/releases/latest` after
+  publishing a beta, and every installed first-party asset reports or records
+  the same exact selected tag.
 - [ ] Missing/invalid Gum checksum falls back to plain output without installing
   the unverified binary.
 - [ ] Compare `nft list ruleset` with `/tmp/nft.before`: install, reinstall, and

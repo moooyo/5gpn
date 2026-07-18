@@ -122,11 +122,16 @@ _HAVE_GUM=0                              # set by install_gum(); helpers fall ba
 export PATH="${BIN_DIR}:${PATH}"
 
 # 5gpn-dns binary + web SPA release selector on moooyo/5gpn. The source-tree
-# sentinel resolves the latest release once before any artifact is downloaded.
+# sentinel delegates to quick-install so the selected channel is resolved once
+# and every installer input comes from the same exact release bundle.
 # The release pipeline STAMPS this exact line to the tag being cut (see
 # .github/workflows/release.yml), so a packaged installer always pulls its OWN
 # release's artifacts and never mixes release binaries with another tag's files.
 DNS_VERSION_DEFAULT="latest"
+DNS_RELEASE_CHANNEL="stable"
+DNS_RELEASE_CHANNEL_EXPLICIT=0
+DNS_STABLE_RELEASE_API="https://api.github.com/repos/moooyo/5gpn/releases/latest"
+DNS_RELEASES_API="https://api.github.com/repos/moooyo/5gpn/releases"
 
 # ----------------------------------------------------------------------------
 # Pretty output helpers
@@ -1073,30 +1078,112 @@ release_checksum() {
     awk -v f="$asset" '$2 == f || $2 == "*" f { print tolower($1); exit }' "$sums"
 }
 
-valid_dns_release_tag() {
+valid_dns_stable_release_tag() {
     local tag="$1"
-    [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+    local number='(0|[1-9][0-9]*)'
+    [[ "$tag" =~ ^${number}\.${number}\.${number}$ ]]
 }
 
-resolve_dns_release_version() { # optional API URL is an internal test seam
+valid_dns_beta_release_tag() {
+    local tag="$1"
+    local number='(0|[1-9][0-9]*)'
+    [[ "$tag" =~ ^${number}\.${number}\.${number}-beta\.([1-9][0-9]*)$ ]]
+}
+
+valid_dns_release_tag() {
+    valid_dns_stable_release_tag "$1" || valid_dns_beta_release_tag "$1"
+}
+
+dns_release_json_tag() {
+    sed -n 's/^.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*$/\1/p' "$1"
+}
+
+dns_beta_tags_from_release_list() {
+    grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+"' "$1" 2>/dev/null \
+        | sed -E 's/^.*"([^"]+)"$/\1/' || true
+}
+
+resolve_dns_latest_beta_version() { # optional list and exact-metadata URLs are internal test seams
+    local list_url="${1:-${DNS_RELEASES_API}?per_page=100}"
+    local metadata_url="${2:-}"
+    local list_json metadata_json candidate="" tag metadata_tag
+
+    list_json="$(mktemp /tmp/5gpn-dns-beta-releases.XXXXXX)" || return 1
+    if ! curl -fsSL "$list_url" -o "$list_json"; then
+        rm -f -- "$list_json"
+        err "Could not list 5gpn prereleases."
+        return 1
+    fi
+    while IFS= read -r tag; do
+        if valid_dns_beta_release_tag "$tag"; then
+            candidate="$tag"
+            break
+        fi
+    done < <(dns_beta_tags_from_release_list "$list_json")
+    rm -f -- "$list_json"
+    [[ -n "$candidate" ]] \
+        || { err "No published 5gpn beta release is available."; return 1; }
+
+    metadata_url="${metadata_url:-${DNS_RELEASES_API}/tags/${candidate}}"
+    metadata_json="$(mktemp /tmp/5gpn-dns-beta-release.XXXXXX)" || return 1
+    if ! curl -fsSL "$metadata_url" -o "$metadata_json"; then
+        rm -f -- "$metadata_json"
+        err "Could not verify beta release ${candidate}."
+        return 1
+    fi
+    metadata_tag="$(dns_release_json_tag "$metadata_json")"
+    if [[ "$metadata_tag" != "$candidate" ]] \
+       || ! grep -Eq '"draft"[[:space:]]*:[[:space:]]*false' "$metadata_json" \
+       || ! grep -Eq '"prerelease"[[:space:]]*:[[:space:]]*true' "$metadata_json"; then
+        rm -f -- "$metadata_json"
+        err "Latest beta candidate is not a published GitHub prerelease."
+        return 1
+    fi
+    rm -f -- "$metadata_json"
+    printf '%s\n' "$candidate"
+}
+
+resolve_dns_release_version() { # optional stable/list/metadata URLs are internal test seams
     local requested="$DNS_VERSION_DEFAULT"
-    local api_url="${1:-https://api.github.com/repos/moooyo/5gpn/releases/latest}"
+    local api_url="${1:-$DNS_STABLE_RELEASE_API}"
+    local beta_list_url="${2:-}"
+    local beta_metadata_url="${3:-}"
     local json tags
 
     if [[ "$requested" != latest ]]; then
-        valid_dns_release_tag "$requested" \
-            || { err "Installer has an invalid pinned release tag."; return 1; }
-        printf '%s\n' "$requested"
-        return 0
+        if valid_dns_stable_release_tag "$requested"; then
+            if [[ "$DNS_RELEASE_CHANNEL_EXPLICIT" == 1 && "$DNS_RELEASE_CHANNEL" == beta ]]; then
+                err "A beta install cannot use an official-release installer bundle."
+                return 1
+            fi
+            printf '%s\n' "$requested"
+            return 0
+        fi
+        if valid_dns_beta_release_tag "$requested"; then
+            if [[ "$DNS_RELEASE_CHANNEL_EXPLICIT" == 1 && "$DNS_RELEASE_CHANNEL" != beta ]]; then
+                err "A beta installer bundle requires the beta release channel."
+                return 1
+            fi
+            printf '%s\n' "$requested"
+            return 0
+        fi
+        err "Installer has an invalid pinned release tag."
+        return 1
     fi
 
+    if [[ "$DNS_RELEASE_CHANNEL" == beta ]]; then
+        resolve_dns_latest_beta_version "$beta_list_url" "$beta_metadata_url"
+        return
+    fi
+    [[ "$DNS_RELEASE_CHANNEL" == stable ]] \
+        || { err "Unknown 5gpn release channel: $DNS_RELEASE_CHANNEL"; return 1; }
     json="$(curl -fsSL "$api_url")" \
-        || { err "Could not resolve the latest 5gpn release."; return 1; }
+        || { err "Could not resolve the latest official 5gpn release."; return 1; }
     tags="$(printf '%s\n' "$json" | sed -n 's/^.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*$/\1/p')"
     [[ -n "$tags" && "$tags" != *$'\n'* ]] \
-        || { err "Latest release response has no unique tag."; return 1; }
-    valid_dns_release_tag "$tags" \
-        || { err "Latest release returned an unsafe tag."; return 1; }
+        || { err "Latest official release response has no unique tag."; return 1; }
+    valid_dns_stable_release_tag "$tags" \
+        || { err "Latest official release returned an unsafe or non-official tag."; return 1; }
     printf '%s\n' "$tags"
 }
 
@@ -3847,9 +3934,25 @@ mihomo_config_matches_install_config() {
 # ----------------------------------------------------------------------------
 # Full install
 # ----------------------------------------------------------------------------
+delegate_unpinned_installer() {
+    local mode="${1:-}" quick
+    local -a args=()
+    [[ "$DNS_VERSION_DEFAULT" == latest ]] || return 0
+    quick="${SCRIPT_DIR}/quick-install.sh"
+    [[ -f "$quick" && ! -L "$quick" ]] \
+        || { err "An unpinned source install requires the sibling quick-install.sh entrypoint."; return 1; }
+    [[ "$DNS_RELEASE_CHANNEL" == stable || "$DNS_RELEASE_CHANNEL" == beta ]] \
+        || { err "Unknown 5gpn release channel: $DNS_RELEASE_CHANNEL"; return 1; }
+    [[ "$DNS_RELEASE_CHANNEL" == stable ]] || args+=(--beta)
+    [[ "$mode" != configure ]] || args+=(configure)
+    info "Resolving a version-matched ${DNS_RELEASE_CHANNEL} installer bundle before installation."
+    exec bash "$quick" "${args[@]}"
+}
+
 full_install() {
     local force_tui=0
     [[ "${1:-}" == configure ]] && force_tui=1
+    delegate_unpinned_installer "${1:-}" || return 1
     check_root
     claim_project_roots
     install_gum
@@ -4056,10 +4159,14 @@ uninstall() {
 usage() {
     cat <<EOF
 5gpn installer (DNS-steering gateway; DoT is the ONLY DNS transport)
-Usage: sudo bash install.sh [command]     — or, after install:  5gpn [command]
+Usage: sudo bash install.sh [--beta] [command] — or, after install:  5gpn [command]
 
-  (no args)           Full install/re-run. First install requires the TUI;
-                      reinstall validates and reuses /etc/5gpn/dns.env.
+  (no channel option) Resolve the latest official release when run from source.
+  --beta              Explicitly resolve the latest beta prerelease when run
+                      from source. A missing beta never falls back to official.
+  (no command)        Full install/re-run. First install requires the TUI;
+                      reinstall validates and reuses /etc/5gpn/dns.env. A
+                      packaged or installed script remains pinned to its tag.
   configure           Open the full TUI, stage/verify, publish, probe, and rollback on failure
   menu                Open the interactive management menu (this is what bare '5gpn' runs)
   status              Show service states, domains, IP, list counts/age
@@ -4155,6 +4262,18 @@ require_command_arity() {
 }
 
 main() {
+    DNS_RELEASE_CHANNEL=stable
+    DNS_RELEASE_CHANNEL_EXPLICIT=0
+    if [[ "${1:-}" == --beta ]]; then
+        DNS_RELEASE_CHANNEL=beta
+        DNS_RELEASE_CHANNEL_EXPLICIT=1
+        shift
+    fi
+    case "${1:-}" in
+        --beta)
+            err "--beta must be specified exactly once as the first argument."
+            return 2 ;;
+    esac
     # Piped install (curl | sudo bash): reattach stdin to the terminal so the
     # prompts below fire. No-op when stdin is already a tty; truly headless first
     # install/configuration fails closed instead of consuming caller environment.

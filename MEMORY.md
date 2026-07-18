@@ -8,20 +8,22 @@ Update the status and the normative documentation when an implementation lands.
 
 ## Stable and beta release channels
 
-**Status: Pending. Recorded 2026-07-19.**
+**Status: Implemented. Recorded and implemented 2026-07-19.**
 
 ### Current repository state
 
-- `main` and `beta` both exist. `beta` contains test functionality that is not
-  yet on `main`.
-- `.github/workflows/release.yml` currently publishes only bare SemVer tags such
-  as `0.0.12`.
-- `quick-install.sh` currently resolves GitHub's `/releases/latest` endpoint,
-  and both installer scripts accept only bare SemVer release tags.
-- A release bundle stamps `DNS_VERSION_DEFAULT` to its exact tag so the daemon,
-  web UI, installer files, and checksums cannot drift across releases.
-- CI already runs the shared `.github/workflows/checks.yml` gate for every
-  branch, but no beta release or beta installer selection exists yet.
+- `main` and `beta` are independent source lines for official and beta releases.
+- `.github/workflows/release.yml` classifies strict official and beta tags,
+  verifies reachability from the required branch, and runs the shared
+  `.github/workflows/checks.yml` gate before building either channel.
+- Official releases remain normal latest-eligible GitHub releases. Beta releases
+  are prereleases with `make_latest=false`.
+- `quick-install.sh` and source `install.sh` default to the latest official
+  release; `--beta` explicitly selects the latest verified beta prerelease.
+- A release bundle stamps `DNS_VERSION_DEFAULT` to its exact tag. Unpinned source
+  installs delegate to that verified bundle, and packaged or installed scripts
+  retain the stamped tag so scripts, daemon binaries, web assets, and checksums
+  cannot drift across releases or channels.
 
 ### Durable branch and release decisions
 
@@ -88,10 +90,9 @@ Update the status and the normative documentation when an implementation lands.
   jobs in one workflow is an implementation detail; the observable channel,
   provenance, and prerelease boundaries above are mandatory.
 
-### Required implementation and maintenance coverage
+### Maintenance coverage
 
-When this pending contract is implemented, update all affected surfaces
-together:
+Future release-channel changes must update all affected surfaces together:
 
 - `install.sh` and `quick-install.sh` argument parsing, tag validation, release
   discovery, help text, and error messages;
@@ -101,8 +102,4 @@ together:
   explicit beta selection, malformed or cross-channel tags, missing beta
   releases, exact-tag pinning, and checksum enforcement;
 - `README.md` installation and release documentation; and
-- `docs/architecture.md` once the release-channel behavior is actually current.
-
-After implementation and verification, change this section's status from
-**Pending** to **Implemented** and replace the current-state bullets with the
-new behavior. Do not leave this file describing completed work as pending.
+- `docs/architecture.md` and this durable decision record.

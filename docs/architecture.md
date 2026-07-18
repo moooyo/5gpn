@@ -470,6 +470,25 @@ its future renewal.
 
 ## Installer publication and host safety
 
+5gpn has two isolated first-party release channels. Official tags use strict
+SemVer `X.Y.Z`, identify commits reachable from `main`, and publish normal
+GitHub releases. Beta tags use `X.Y.Z-beta.N`, identify commits reachable from
+`beta`, and publish GitHub prereleases that are explicitly ineligible for the
+repository's latest-release pointer. `N` is a positive, monotonically
+increasing integer for its base version. The publication workflow rejects a tag
+whose syntax or branch provenance does not match its channel.
+
+The source and quick-install entrypoints default to the latest official
+release. `--beta` is the only beta selector and is an explicit non-interactive
+opt-in; it is not accepted from the caller environment, shown in the TUI, or
+persisted in `dns.env`. Official discovery accepts only an official tag. Beta
+discovery accepts only a published, non-draft GitHub prerelease with a beta tag
+and never falls back to the official channel. An unpinned source installer
+delegates to the verified installer bundle for the resolved tag before making
+deployment changes, so checkout templates cannot be mixed with another
+release's binaries. Packaged and installed scripts remain pinned to their
+stamped exact tag, including management operations such as `configure`.
+
 An install or reinstall is staged before it mutates the working deployment:
 
 1. validate persisted configuration and prerequisites;

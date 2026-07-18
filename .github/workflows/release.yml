@@ -1,7 +1,8 @@
 name: Release
 
-# Cut a release for a bare SemVer tag such as `0.0.1`. The full checks.yml gate
-# runs first (identical to CI); build/publish only runs if the gate is green.
+# Official tags are X.Y.Z and must be reachable from main. Beta tags are
+# X.Y.Z-beta.N and must be reachable from beta. Both channels run the same
+# checks.yml gate and publish assets built from the exact tagged commit.
 on:
   push:
     tags:
@@ -11,24 +12,84 @@ permissions:
   contents: read
 
 jobs:
+  classify:
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.release.outputs.channel }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      make_latest: ${{ steps.release.outputs.make_latest }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Classify tag and verify branch provenance
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          number='(0|[1-9][0-9]*)'
+          stable_re="^${number}\.${number}\.${number}$"
+          beta_re="^${number}\.${number}\.${number}-beta\.([1-9][0-9]*)$"
+
+          if [[ "$tag" =~ $stable_re ]]; then
+            channel=stable
+            required_branch=main
+            prerelease=false
+            make_latest=true
+          elif [[ "$tag" =~ $beta_re ]]; then
+            channel=beta
+            required_branch=beta
+            prerelease=true
+            make_latest=false
+          else
+            echo "Unsupported release tag: $tag" >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin \
+            '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/heads/beta:refs/remotes/origin/beta'
+          git fetch --force --tags origin
+          tagged_commit="$(git rev-list -n 1 "$tag")"
+          git merge-base --is-ancestor "$tagged_commit" "refs/remotes/origin/${required_branch}" \
+            || { echo "Tag $tag is not reachable from ${required_branch}." >&2; exit 1; }
+
+          if [[ "$channel" == beta ]]; then
+            base="${tag%-beta.*}"
+            current_number="${tag##*.}"
+            while IFS= read -r existing; do
+              [[ "$existing" == "$tag" ]] && continue
+              existing_number="${existing#"${base}-beta."}"
+              [[ "$existing_number" =~ ^[1-9][0-9]*$ ]] || continue
+              (( current_number > existing_number )) \
+                || { echo "Beta sequence $tag is not newer than $existing." >&2; exit 1; }
+            done < <(git tag --list "${base}-beta.*")
+          fi
+
+          {
+            echo "channel=$channel"
+            echo "prerelease=$prerelease"
+            echo "make_latest=$make_latest"
+          } >> "$GITHUB_OUTPUT"
+
   gate:
+    needs: classify
     uses: ./.github/workflows/checks.yml
 
   build:
-    needs: gate
+    needs: [classify, gate]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
-      - name: Validate release tag
-        run: '[[ "$GITHUB_REF_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]'
-
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: cmd/5gpn-dns/go.mod
-          cache-dependency-path: cmd/5gpn-dns/go.sum
+          cache-dependency-path: cmd/*/go.sum
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -36,8 +97,8 @@ jobs:
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
 
-      # Build the control-console SPA BEFORE packaging it into the 5gpn-web
-      # tarball (the daemon serves it from disk via DNS_WEB_DIR, not go:embed).
+      # Build the control-console SPA before packaging it into the 5gpn-web
+      # tarball. The daemon serves it from DNS_WEB_DIR rather than go:embed.
       - name: Build web UI
         working-directory: web
         run: |
@@ -47,12 +108,21 @@ jobs:
       - name: Build daemon
         working-directory: cmd/5gpn-dns
         run: |
-          # Stamp the release version into main.version so GET /api/status
-          # reports the exact published build.
           VER="${GITHUB_REF_NAME}"
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
             -ldflags "-s -w -X main.version=${VER}" -o 5gpn-dns-linux-amd64 .
           sha256sum 5gpn-dns-linux-amd64 > checksums.txt
+
+      # Beta may carry an additional first-party binary before that component is
+      # promoted to main. Build and checksum it whenever the tagged tree owns it.
+      - name: Build optional interception sidecar
+        if: ${{ hashFiles('cmd/5gpn-intercept/go.mod') != '' }}
+        working-directory: cmd/5gpn-intercept
+        run: |
+          VER="${GITHUB_REF_NAME}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -ldflags "-s -w -X main.version=${VER}" -o 5gpn-intercept-linux-amd64 .
+          sha256sum 5gpn-intercept-linux-amd64 >> ../5gpn-dns/checksums.txt
 
       - name: Package web UI
         run: |
@@ -60,30 +130,34 @@ jobs:
           tar czf "5gpn-web-${VER}.tar.gz" -C web/dist .
           sha256sum "5gpn-web-${VER}.tar.gz" >> cmd/5gpn-dns/checksums.txt
 
-      # Installer bundle: install.sh + the config templates / scripts it reads at
-      # runtime (etc/, scripts/), version-matched to the binary + SPA in THIS
-      # release. quick-install.sh downloads this instead of cloning git, so config
-      # never drifts ahead of the pinned binary. install.sh's DNS_VERSION_DEFAULT
-      # is stamped to this tag so the bundle pulls its OWN release's binary + SPA.
-      # The asset name is UNVERSIONED so /releases/latest/download/ resolves it.
+      # The bundle contains every first-party installer input and is stamped to
+      # this exact tag. The quick installer never falls back to branch content.
       - name: Package installer bundle
         run: |
           stage="installer-bundle"
           mkdir -p "$stage"
-          cp -r install.sh quick-install.sh etc scripts README.md LICENSE "$stage"/
+          cp -r install.sh quick-install.sh etc scripts README.md LICENSE THIRD_PARTY_NOTICES.md "$stage"/
           sed -i "s/^DNS_VERSION_DEFAULT=.*/DNS_VERSION_DEFAULT=\"${GITHUB_REF_NAME}\"/" "$stage/install.sh"
-          # Fail loudly if the stamp did not take (guards against a renamed var).
           grep -q "^DNS_VERSION_DEFAULT=\"${GITHUB_REF_NAME}\"" "$stage/install.sh" \
             || { echo "DNS_VERSION_DEFAULT stamp failed"; exit 1; }
           tar czf 5gpn-installer.tar.gz -C "$stage" .
           sha256sum 5gpn-installer.tar.gz >> cmd/5gpn-dns/checksums.txt
 
+      - name: Collect exact release assets
+        run: |
+          mkdir release-assets
+          cp cmd/5gpn-dns/5gpn-dns-linux-amd64 release-assets/
+          cp cmd/5gpn-dns/checksums.txt release-assets/
+          cp 5gpn-web-*.tar.gz 5gpn-installer.tar.gz THIRD_PARTY_NOTICES.md release-assets/
+          if [[ -f cmd/5gpn-intercept/5gpn-intercept-linux-amd64 ]]; then
+            cp cmd/5gpn-intercept/5gpn-intercept-linux-amd64 release-assets/
+          fi
+
       - name: Publish release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           generate_release_notes: true
-          files: |
-            cmd/5gpn-dns/5gpn-dns-linux-amd64
-            cmd/5gpn-dns/checksums.txt
-            5gpn-web-*.tar.gz
-            5gpn-installer.tar.gz
+          prerelease: ${{ needs.classify.outputs.prerelease }}
+          make_latest: ${{ needs.classify.outputs.make_latest }}
+          fail_on_unmatched_files: true
+          files: release-assets/*
