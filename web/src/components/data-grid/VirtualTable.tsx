@@ -47,13 +47,13 @@ export function VirtualTable<T>({ columns, data, rowHeight = 44, height = '60vh'
 
   return (
     <div ref={scrollRef} className={cn('overflow-auto', className)} style={{ height }} data-testid="virtual-scroll">
-      <div className="sticky top-0 z-10 flex bg-thead">
+      <div className="sticky top-0 z-10 flex bg-surface-container-low">
         {table.getHeaderGroups().map((headerGroup) =>
           headerGroup.headers.map((header) => (
             <div
               key={header.id}
               style={columnFlexStyle(header.column)}
-              className="min-w-0 px-4 py-2.5 text-left text-[10px] font-semibold uppercase tracking-wide text-text-faint"
+              className="min-w-0 px-4 py-3 text-left text-[10.5px] font-medium tracking-[.04em] text-text-faint"
             >
               {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
             </div>
@@ -69,7 +69,7 @@ export function VirtualTable<T>({ columns, data, rowHeight = 44, height = '60vh'
           return (
             <div
               key={row.id}
-              className="flex border-b border-divider"
+              className="flex border-b border-divider transition-colors hover:bg-surface-container-low"
               style={{
                 position: 'absolute',
                 top: 0,

@@ -48,18 +48,24 @@ export function FallbackControl() {
     [t],
   )
 
-  if (!fb) return <Card className="p-4 text-[13px] text-text-faint">{t('common.loading')}</Card>
+  if (!fb) return <Card variant="tonal" className="p-5 text-[13px] text-text-faint">{t('common.loading')}</Card>
 
   return (
-    <Card className="flex flex-col gap-3 p-4">
-      <div className="text-[13px] font-bold text-text-strong">{t('policyRules.fallback.title')}</div>
-      <div className="text-[11.5px] text-text-mid">{t('policyRules.fallback.hint')}</div>
-      <SegmentedControl
-        value={fb.policy}
-        onChange={(v) => void change(v as FallbackPolicyKind)}
-        options={POLICIES.map((p) => ({ value: p, label: t(`policyRules.fallback.policy.${p}`) }))}
-      />
-      <div className="text-[11px] text-text-faint">{t(`policyRules.fallback.policyHint.${fb.policy}`)}</div>
+    <Card className="grid gap-4 p-5 sm:grid-cols-[minmax(180px,.6fr)_minmax(300px,1fr)] sm:items-center sm:p-6">
+      <div>
+        <div className="text-[15px] font-medium text-text-strong">{t('policyRules.fallback.title')}</div>
+        <div className="mt-1 text-[11.5px] leading-5 text-text-faint">{t('policyRules.fallback.hint')}</div>
+      </div>
+      <div>
+        <SegmentedControl
+          value={fb.policy}
+          onChange={(v) => void change(v as FallbackPolicyKind)}
+          options={POLICIES.map((p) => ({ value: p, label: t(`policyRules.fallback.policy.${p}`) }))}
+          className="grid-cols-3"
+          ariaLabel={t('policyRules.fallback.title')}
+        />
+        <div className="mt-2 text-[11px] text-text-faint">{t(`policyRules.fallback.policyHint.${fb.policy}`)}</div>
+      </div>
     </Card>
   )
 }

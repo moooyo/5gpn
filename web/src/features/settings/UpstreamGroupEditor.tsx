@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Plus, Trash2 } from 'lucide-react'
+import { AddIcon, DeleteIcon } from '../../components/icons'
 import { useTranslation } from 'react-i18next'
 import { Badge, Button, Field, Input, Modal } from '../../components/ds'
 import {
@@ -128,7 +128,7 @@ function UpstreamAddDialog({
       >
         <Field label={t('settings.upstreamsProtocol')}>
           {group === 'trust' ? (
-            <div className="grid grid-cols-2 gap-1.5" role="radiogroup" aria-label={t('settings.upstreamsProtocol')}>
+            <div className="grid grid-cols-2 gap-1 rounded-[12px] bg-surface-container p-1" role="radiogroup" aria-label={t('settings.upstreamsProtocol')}>
               {(['dot', 'udp'] as const).map((value) => (
                 <button
                   key={value}
@@ -139,8 +139,8 @@ function UpstreamAddDialog({
                   onClick={() => handleProtocolChange(value)}
                   className={
                     protocol === value
-                      ? 'rounded-[9px] border border-primary/25 bg-primary/10 px-3 py-2 text-[12px] font-semibold text-primary outline-none focus-visible:ring-2 focus-visible:ring-primary/35'
-                      : 'rounded-[9px] border border-input-border bg-input px-3 py-2 text-[12px] text-text-soft outline-none hover:bg-card focus-visible:ring-2 focus-visible:ring-primary/35'
+                      ? 'zds-state-layer rounded-[9px] bg-card px-3 py-2 text-[12px] font-medium text-primary shadow-[var(--md-sys-elevation-1)]'
+                      : 'zds-state-layer rounded-[9px] px-3 py-2 text-[12px] text-text-soft'
                   }
                 >
                   {value === 'dot' ? t('settings.upstreamsProtocolDot') : t('settings.upstreamsProtocolUdp')}
@@ -148,7 +148,7 @@ function UpstreamAddDialog({
               ))}
             </div>
           ) : (
-            <div className="flex items-center gap-2 rounded-[9px] border border-input-border bg-input px-3 py-2">
+            <div className="flex items-center gap-2 rounded-[12px] bg-surface-container-low px-3 py-2.5">
               <Badge tone="cyan">{t('settings.upstreamsProtocolUdp')}</Badge>
               <span className="text-[11px] text-text-faint">{t('settings.upstreamsUdpDescription')}</span>
             </div>
@@ -232,12 +232,12 @@ export function UpstreamGroupEditor({ group, entries, disabled, onChange }: Upst
           onClick={() => setAddOpen(true)}
           data-testid={`upstreams-add-${group}`}
         >
-          <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+          <AddIcon className="h-4 w-4" aria-hidden="true" />
           {t('common.add')}
         </Button>
       </div>
 
-      <div className="overflow-hidden rounded-[12px] border border-border bg-input/45">
+      <div className="overflow-hidden rounded-[14px] bg-surface-container-low">
         {entries.length > 0 ? (
           <ol>
             {entries.map((entry, index) => {
@@ -263,13 +263,13 @@ export function UpstreamGroupEditor({ group, entries, disabled, onChange }: Upst
                   <button
                     type="button"
                     disabled={disabled}
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-[8px] text-text-faint outline-none transition-colors hover:bg-red/10 hover:text-red focus-visible:ring-2 focus-visible:ring-red/30 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="zds-state-layer inline-flex h-9 w-9 items-center justify-center rounded-full text-text-faint hover:text-red disabled:cursor-not-allowed disabled:opacity-50"
                     aria-label={t('settings.upstreamsDelete', { entry })}
                     title={t('common.delete')}
                     onClick={() => onChange(entries.filter((_, entryIndex) => entryIndex !== index))}
                     data-testid={`upstreams-delete-${group}-${index}`}
                   >
-                    <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                    <DeleteIcon className="h-4 w-4" aria-hidden="true" />
                   </button>
                 </li>
               )

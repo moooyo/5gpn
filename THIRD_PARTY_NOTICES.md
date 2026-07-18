@@ -46,37 +46,23 @@ Runtime dependencies per [`web/package.json`](web/package.json) (`dependencies`)
 
 | Package | Version | License | Copyright / Source |
 |---|---|---|---|
-| `react` | ^19.2.7 | MIT | © Meta Platforms, Inc. and affiliates — https://github.com/facebook/react |
-| `react-dom` | ^19.2.7 | MIT | © Meta Platforms, Inc. and affiliates — https://github.com/facebook/react |
-| `react-router-dom` | ^7.18.1 | MIT | © Remix Software Inc. — https://github.com/remix-run/react-router |
-| `@radix-ui/react-alert-dialog` | ^1.1.19 | MIT | © WorkOS, Inc. — https://github.com/radix-ui/primitives |
-| `@radix-ui/react-dialog` | ^1.1.19 | MIT | © WorkOS, Inc. — https://github.com/radix-ui/primitives |
-| `@radix-ui/react-dropdown-menu` | ^2.1.20 | MIT | © WorkOS, Inc. — https://github.com/radix-ui/primitives |
-| `@radix-ui/react-label` | ^2.1.11 | MIT | © WorkOS, Inc. — https://github.com/radix-ui/primitives |
-| `@radix-ui/react-separator` | ^1.1.11 | MIT | © WorkOS, Inc. — https://github.com/radix-ui/primitives |
-| `@radix-ui/react-slot` | ^1.3.0 | MIT | © WorkOS, Inc. — https://github.com/radix-ui/primitives |
-| `@radix-ui/react-switch` | ^1.3.3 | MIT | © WorkOS, Inc. — https://github.com/radix-ui/primitives |
-| `@radix-ui/react-tabs` | ^1.1.17 | MIT | © WorkOS, Inc. — https://github.com/radix-ui/primitives |
-| `@radix-ui/react-tooltip` | ^1.2.12 | MIT | © WorkOS, Inc. — https://github.com/radix-ui/primitives |
+| `@base-ui/react` | 1.6.0 | MIT | © MUI Team and contributors — https://github.com/mui/base-ui |
+| `@fontsource/jetbrains-mono` | ^5.2.8 | MIT wrapper / OFL-1.1 font | © Fontsource; © JetBrains s.r.o. — https://fontsource.org/fonts/jetbrains-mono |
+| `@material-symbols/svg-400` | 0.45.8 | Apache-2.0 | Material Symbols © Google LLC; package © Marella — https://github.com/marella/material-symbols |
 | `@tanstack/react-table` | ^8.21.3 | MIT | © Tanner Linsley — https://github.com/TanStack/table |
 | `@tanstack/react-virtual` | ^3.13.0 | MIT | © Tanner Linsley — https://github.com/TanStack/virtual |
-| `react-hook-form` | ^7.81.0 | MIT | © react-hook-form contributors — https://github.com/react-hook-form/react-hook-form |
-| `@hookform/resolvers` | ^3.10.0 | MIT | © react-hook-form contributors — https://github.com/react-hook-form/resolvers |
-| `zod` | ^3.25.76 | MIT | © Colin McDonnell — https://github.com/colinhacks/zod |
-| `echarts` | ^6.0.0 | Apache-2.0 | © The Apache Software Foundation — https://github.com/apache/echarts |
-| `zrender` (via echarts) | ^6 | BSD-3-Clause | © Baidu, Inc. / ecomfe — https://github.com/ecomfe/zrender |
-| `lucide-react` | ^1.24.0 | ISC | © Lucide Contributors; portions © Cole Bemis (Feather) — https://github.com/lucide-icons/lucide |
-| `class-variance-authority` | ^0.7.1 | Apache-2.0 | © Joe Bell — https://github.com/joe-bell/cva |
 | `clsx` | ^2.1.1 | MIT | © Luke Edwards — https://github.com/lukeed/clsx |
-| `tailwind-merge` | ^3.6.0 | MIT | © Dany Castillo — https://github.com/dcastil/tailwind-merge |
+| `daisyui` | 5.6.18 | MIT | © Pouya Saadeghi and contributors — https://github.com/saadeghi/daisyui |
 | `i18next` | ^23.16.8 | MIT | © i18next / Jan Mühlemann and contributors — https://github.com/i18next/i18next |
+| `i18next-browser-languagedetector` | ^8.2.1 | MIT | © i18next contributors — https://github.com/i18next/i18next-browser-languageDetector |
+| `react` | ^19.2.7 | MIT | © Meta Platforms, Inc. and affiliates — https://github.com/facebook/react |
+| `react-dom` | ^19.2.7 | MIT | © Meta Platforms, Inc. and affiliates — https://github.com/facebook/react |
+| `react-hook-form` | ^7.81.0 | MIT | © react-hook-form contributors — https://github.com/react-hook-form/react-hook-form |
 | `react-i18next` | ^15.7.4 | MIT | © i18next / Jan Mühlemann and contributors — https://github.com/i18next/react-i18next |
-| `i18next-browser-languagedetector` | ^8.2.1 | MIT | © i18next / Jan Mühlemann and contributors — https://github.com/i18next/i18next-browser-languageDetector |
+| `react-router-dom` | ^7.18.1 | MIT | © Remix Software Inc. — https://github.com/remix-run/react-router |
+| `subsetted-fonts` | ^1.0.4 | MIT wrapper / MiSans Font License | © subsetted-fonts contributors; © Xiaomi Inc. — https://www.npmjs.com/package/subsetted-fonts |
+| `tailwind-merge` | ^3.6.0 | MIT | © Dany Castillo — https://github.com/dcastil/tailwind-merge |
 | `uqr` | ^0.1.3 | MIT | © Anthony Fu — https://github.com/unjs/uqr |
-
-> `echarts` incorporates [`zrender`](https://github.com/ecomfe/zrender) (BSD-3-Clause)
-> and portions of [d3](https://github.com/d3) (BSD-3-Clause, © Mike Bostock); its
-> upstream `NOTICE` (Apache Software Foundation) applies.
 
 ---
 
@@ -87,7 +73,6 @@ their own licenses (listed below). Imported in [`web/src/main.tsx`](web/src/main
 
 | Font | Delivery package | Font license | Copyright / Source |
 |---|---|---|---|
-| Plus Jakarta Sans | `@fontsource/plus-jakarta-sans` ^5.2.8 (MIT) | SIL OFL-1.1 | © 2020 The Plus Jakarta Sans Project Authors (Tokotype) — https://github.com/tokotype/PlusJakartaSans |
 | JetBrains Mono | `@fontsource/jetbrains-mono` ^5.2.8 (MIT) | SIL OFL-1.1 | © 2020 The JetBrains Mono Project Authors (JetBrains s.r.o.) — https://github.com/JetBrains/JetBrainsMono |
 | MiSans VF | `subsetted-fonts` ^1.0.4 (MIT) | MiSans Font License (Xiaomi) | © Xiaomi Inc. — https://hyperos.mi.com/font/ |
 

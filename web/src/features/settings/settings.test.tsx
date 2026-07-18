@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom'
 import i18n from '../../i18n'
 import { Toaster } from '../../components/ds'
 import { StatusContext, type StatusValue } from '../../lib/StatusContext'
+import { ThemeProvider } from '../../lib/theme'
 import { api } from '../../lib/api/client'
 import { ApiError } from '../../lib/api/http'
 import type { ECSView, IngressModulesView, Status, TGBotView, UpstreamsView } from '../../lib/api/types'
@@ -45,6 +46,7 @@ function statusValue(overrides: Partial<StatusValue> = {}): StatusValue {
       version: 'dev+abc1234',
       uptime_seconds: 3600,
       stats: {} as Status['stats'],
+      dot_domain: 'dot.example.com',
       cert: { not_after: '2026-10-01T00:00:00Z', days_remaining: 82, expired: false },
     },
     ...overrides,
@@ -53,12 +55,14 @@ function statusValue(overrides: Partial<StatusValue> = {}): StatusValue {
 
 function renderSettings(status: StatusValue = statusValue()) {
   return render(
-    <StatusContext.Provider value={status}>
-      <MemoryRouter>
-        <SettingsPage />
-        <Toaster />
-      </MemoryRouter>
-    </StatusContext.Provider>,
+    <ThemeProvider>
+      <StatusContext.Provider value={status}>
+        <MemoryRouter>
+          <SettingsPage />
+          <Toaster />
+        </MemoryRouter>
+      </StatusContext.Provider>
+    </ThemeProvider>,
   )
 }
 
@@ -227,17 +231,14 @@ describe('SettingsPage', () => {
     expect(await screen.findByText('cert load failed')).toBeInTheDocument()
   })
 
-  it('the DoT-domain input and 修改密码 button are disabled and carry the greenfield tooltip', async () => {
+  it('the DoT-domain identity is read-only and the console documents bearer authentication', async () => {
     renderSettings()
-    const tip = i18n.t('settings.greenfieldTip')
 
     const domainInput = await screen.findByLabelText(i18n.t('settings.dotDomain'))
     expect(domainInput).toBeDisabled()
-    expect(domainInput).toHaveAttribute('title', tip)
-
-    const changePwBtn = screen.getByRole('button', { name: i18n.t('settings.changePassword') })
-    expect(changePwBtn).toBeDisabled()
-    expect(changePwBtn).toHaveAttribute('title', tip)
+    expect(domainInput).toHaveValue('dot.example.com')
+    expect(screen.getByText(i18n.t('settings.consoleAuth'))).toBeInTheDocument()
+    expect(screen.getByText('Bearer')).toBeInTheDocument()
   })
 
   it('adds and removes validated list entries before saving the ordered groups', async () => {
@@ -342,7 +343,7 @@ describe('SettingsPage', () => {
     })
     renderSettings()
     expect(await screen.findByText(i18n.t('settings.tgbotState_degraded'))).toBeInTheDocument()
-    expect(screen.getByRole('alert')).toHaveTextContent('getUpdates conflict')
+    expect(screen.getByText('getUpdates conflict').closest('[role="alert"]')).toHaveTextContent('getUpdates conflict')
     expect(screen.getByRole('switch', { name: i18n.t('settings.tgbotStatus') })).toBeChecked()
   })
 

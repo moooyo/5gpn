@@ -2,8 +2,8 @@ import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import type { ColumnDef } from '@tanstack/react-table'
-import { ExternalLink } from 'lucide-react'
-import { Badge, type BadgeTone, Card, CardHeader, StatusDot } from '../../components/ds'
+import { ExternalLinkIcon, MemoryIcon, PauseIcon, PlayIcon } from '../../components/icons'
+import { Badge, type BadgeTone, Button, Card, StatusDot } from '../../components/ds'
 import { VirtualTable } from '../../components/data-grid'
 import type { MihomoLogLine } from '../../lib/api/types'
 import { useStatus } from '../../lib/StatusContext'
@@ -89,12 +89,17 @@ export default function MihomoPage() {
   }
 
   return (
-    <div className="flex max-w-[1180px] flex-col gap-4" data-testid="page-mihomo">
-      <p className="text-[12.5px] text-text-faint">{t('mihomo.intro')}</p>
-
-      <Card>
-        <CardHeader title={t('mihomo.healthTitle')} />
-        <div className="flex flex-wrap items-center gap-3 p-4">
+    <div className="flex flex-col gap-4" data-testid="page-mihomo">
+      <Card variant="tonal" className="p-5 sm:p-6">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
+          <div className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-primary-container text-on-primary-container">
+            <MemoryIcon className="h-6 w-6" aria-hidden="true" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h1 className="text-[17px] font-medium text-text-strong">{t('mihomo.healthTitle')}</h1>
+            <p className="mt-1 text-[11.5px] text-text-faint">{t('mihomo.intro')}</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
           {loading ? (
             <span className="text-[12.5px] text-text-faint">{t('mihomo.healthLoading')}</span>
           ) : !mihomoOk ? (
@@ -102,30 +107,25 @@ export default function MihomoPage() {
           ) : (
             <>
               <div className="flex items-center gap-2">
-                <StatusDot color="#16a34a" pulse />
-                <span className="text-[13px] font-bold text-text-strong">{mihomo?.version}</span>
+                <StatusDot color="var(--color-green)" />
+                <span className="font-mono text-[13px] font-medium text-text-strong">{mihomo?.version}</span>
               </div>
               {mihomo?.meta ? <Badge tone="indigo">{t('mihomo.metaBadge')}</Badge> : null}
             </>
           )}
           {zashDomain ? (
-            <button
-              type="button"
-              onClick={() => void openZashboard()}
-              disabled={openingZash}
-              aria-busy={openingZash}
-              className="ml-auto inline-flex items-center gap-1.5 rounded-[10px] border border-input-border bg-card px-3 py-1.5 text-[12px] font-semibold text-text-mid hover:bg-primary/10"
-            >
-              <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+            <Button type="button" variant="elevated" onClick={() => void openZashboard()} disabled={openingZash} aria-busy={openingZash}>
+              <ExternalLinkIcon className="h-4 w-4" aria-hidden="true" />
               {t('mihomo.openZashboard')}
-            </button>
+            </Button>
           ) : null}
+          </div>
         </div>
       </Card>
 
-      <div className="flex flex-wrap items-center justify-between gap-3.5">
-        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-text-soft">
-          <StatusDot color={connected ? '#16a34a' : '#dc2626'} pulse={connected} />
+      <div className="flex flex-wrap items-center justify-between gap-3.5 px-1">
+        <div className="flex items-center gap-2 text-[11.5px] font-medium text-text-soft">
+          <StatusDot color={connected ? 'var(--color-green)' : 'var(--color-red)'} />
           {connected ? t('mihomo.connected') : t('mihomo.disconnected')}
         </div>
         <button
@@ -133,16 +133,16 @@ export default function MihomoPage() {
           onClick={() => setPaused((v) => !v)}
           aria-label={paused ? t('mihomo.resume') : t('mihomo.pause')}
           className={cn(
-            'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[11px] font-bold',
-            !paused ? 'bg-green/10 text-green' : 'bg-divider text-text-soft',
+            'zds-state-layer inline-flex h-8 items-center gap-2 rounded-full px-3 text-[11.5px] font-medium',
+            !paused ? 'bg-[var(--md-sys-color-success-container)] text-[var(--md-sys-color-on-success-container)]' : 'bg-surface-container text-text-soft',
           )}
         >
-          <StatusDot color={!paused ? '#16a34a' : '#93a2bd'} pulse={!paused} />
+          {!paused ? <PauseIcon className="h-4 w-4" aria-hidden="true" /> : <PlayIcon className="h-4 w-4" aria-hidden="true" />}
           {!paused ? t('mihomo.live') : t('mihomo.paused')}
         </button>
       </div>
 
-      <Card className="overflow-hidden p-0">
+      <Card className="overflow-hidden p-0 shadow-none">
         {lines.length === 0 ? (
           <div className="flex flex-col items-center gap-1 p-8 text-center">
             <div className="text-[13px] font-semibold text-text-strong">{t('mihomo.emptyTitle')}</div>

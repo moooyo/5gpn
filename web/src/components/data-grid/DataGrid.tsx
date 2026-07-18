@@ -8,7 +8,7 @@ import {
   getSortedRowModel,
   useReactTable,
 } from '@tanstack/react-table'
-import { ChevronDown, ChevronUp } from 'lucide-react'
+import { ChevronDownIcon, ChevronUpIcon } from '../icons'
 import { cn } from '../../lib/cn'
 import { Pagination } from './Pagination'
 
@@ -77,7 +77,7 @@ export function DataGrid<T>({ columns, data, className, emptyText = 'No data', p
             return <col key={col.id} style={w ? { width: w } : undefined} />
           })}
         </colgroup>
-        <thead className="bg-thead">
+        <thead className="bg-surface-container-low">
           {table.getHeaderGroups().map((headerGroup) => (
             <tr key={headerGroup.id}>
               {headerGroup.headers.map((header) => {
@@ -90,7 +90,7 @@ export function DataGrid<T>({ columns, data, className, emptyText = 'No data', p
                 return (
                   <th
                     key={header.id}
-                    className="px-4 py-2.5 text-left text-[10px] font-semibold uppercase tracking-wide text-text-faint"
+                    className="px-4 py-3 text-left text-[10.5px] font-medium tracking-[.04em] text-text-faint"
                     aria-sort={canSort ? (sorted === 'asc' ? 'ascending' : sorted === 'desc' ? 'descending' : 'none') : undefined}
                   >
                     {canSort ? (
@@ -100,8 +100,8 @@ export function DataGrid<T>({ columns, data, className, emptyText = 'No data', p
                         className="inline-flex cursor-pointer items-center gap-1"
                       >
                         {label}
-                        {sorted === 'asc' && <ChevronUp size={12} aria-hidden="true" />}
-                        {sorted === 'desc' && <ChevronDown size={12} aria-hidden="true" />}
+                        {sorted === 'asc' && <ChevronUpIcon className="h-3.5 w-3.5" aria-hidden="true" />}
+                        {sorted === 'desc' && <ChevronDownIcon className="h-3.5 w-3.5" aria-hidden="true" />}
                       </button>
                     ) : (
                       label
@@ -122,7 +122,7 @@ export function DataGrid<T>({ columns, data, className, emptyText = 'No data', p
           ) : (
             <>
               {pageRows.map((row) => (
-                <tr key={row.id} className="border-b border-divider">
+                <tr key={row.id} className="border-b border-divider transition-colors hover:bg-surface-container-low">
                   {row.getVisibleCells().map((cell) => (
                     <td key={cell.id} className="px-4 py-3 text-[12px]">
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}

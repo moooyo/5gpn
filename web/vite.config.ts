@@ -1,24 +1,13 @@
-import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import svgr from 'vite-plugin-svgr'
 import { VitePWA } from 'vite-plugin-pwa'
 
 export default defineConfig({
-  resolve: {
-    alias: {
-      // react-remove-scroll injects a runtime <style> for body scroll-lock +
-      // scrollbar-gap, which the strict CSP (style-src-elem 'self', no
-      // server-mintable nonce) blocks. Radix's Dialog/AlertDialog/DropdownMenu/
-      // Select all pull it transitively — alias it to a build-time-CSS shim
-      // (web/src/lib/scroll-lock-shim.tsx) that scroll-locks via the
-      // `.ds-scroll-locked` body class instead (scrollbar-gutter: stable
-      // already prevents the layout shift, see index.css).
-      'react-remove-scroll': fileURLToPath(new URL('./src/lib/scroll-lock-shim.tsx', import.meta.url)),
-    },
-  },
   plugins: [
     react(),
+    svgr({ svgrOptions: { svgProps: { fill: 'currentColor' } } }),
     tailwindcss(),
     VitePWA({
       registerType: 'autoUpdate',

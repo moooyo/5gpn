@@ -25,7 +25,7 @@ describe('navigation model', () => {
       id: 'setup-guide',
       path: '/setup-guide',
       labelKey: 'nav.setupGuide',
-      icon: 'BookOpenCheck',
+      icon: 'setup',
     })
   })
 
@@ -37,7 +37,7 @@ describe('navigation model', () => {
     const system = NAV_GROUPS.find((g) => g.id === 'system')
     expect(system).toBeDefined()
     const mihomo = system?.items.find((i) => i.id === 'mihomo')
-    expect(mihomo).toEqual({ id: 'mihomo', path: '/mihomo', labelKey: 'nav.mihomo', icon: 'Gauge' })
+    expect(mihomo).toEqual({ id: 'mihomo', path: '/mihomo', labelKey: 'nav.mihomo', icon: 'mihomo' })
   })
 
   it('has a mihomo-config item in the system group, next to mihomo', () => {
@@ -48,7 +48,7 @@ describe('navigation model', () => {
       id: 'mihomo-config',
       path: '/mihomo-config',
       labelKey: 'nav.mihomoConfig',
-      icon: 'FileCode2',
+      icon: 'config',
     })
   })
 

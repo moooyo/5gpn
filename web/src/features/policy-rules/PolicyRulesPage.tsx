@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Plus } from 'lucide-react'
-import { Button, Modal, toast } from '../../components/ds'
+import { AddIcon, RocketIcon } from '../../components/icons'
+import { Button, Card, Modal, toast } from '../../components/ds'
 import { api } from '../../lib/api/client'
 import type { PolicyRule } from '../../lib/api/types'
 import { PolicyRuleDialog } from './PolicyRuleDialog'
@@ -90,24 +90,28 @@ export default function PolicyRulesPage() {
   }
 
   return (
-    <div className="flex max-w-[1180px] flex-col gap-4" data-testid="page-policy-rules">
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-[11.5px] text-text-faint">{t('policyRules.applyHint')}</div>
-        <div className="flex items-center gap-2">
-          <Button type="button" size="sm" onClick={() => setAddOpen(true)}>
-            <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+    <div className="flex flex-col gap-4" data-testid="page-policy-rules">
+      <Card variant="tonal" className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:p-6">
+        <div className="min-w-[220px] flex-1">
+          <h1 className="text-[17px] font-medium text-text-strong">{t('policyRules.title')}</h1>
+          <p className="mt-1.5 text-[12px] leading-5 text-text-faint">{t('policyRules.applyHint')}</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="button" variant="tonal" onClick={() => setAddOpen(true)}>
+            <AddIcon className="h-[18px] w-[18px]" aria-hidden="true" />
             {t('policyRules.newRule')}
           </Button>
-          <Button type="button" size="sm" onClick={() => void handleApply()} disabled={applying} data-testid="policy-apply">
+          <Button type="button" onClick={() => void handleApply()} disabled={applying} data-testid="policy-apply">
+            <RocketIcon className="h-[18px] w-[18px]" aria-hidden="true" />
             {applying ? t('policyRules.applying') : t('policyRules.apply')}
           </Button>
         </div>
-      </div>
+      </Card>
 
       <FallbackControl />
 
       {loading ? (
-        <div className="p-5 text-sm text-text-faint">{t('common.loading')}</div>
+        <Card variant="tonal" className="p-6 text-center text-sm text-text-faint">{t('common.loading')}</Card>
       ) : (
         <PolicyRulesTable
           rules={rules}

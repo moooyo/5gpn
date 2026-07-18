@@ -58,11 +58,11 @@ describe('Sidebar', () => {
 
     const activeLink = screen.getByText(i18n.t('nav.logs')).closest('a')
     expect(activeLink).not.toBeNull()
-    expect(activeLink!.className).toContain('text-primary')
+    expect(activeLink!.className).toContain('bg-secondary-container')
 
     const inactiveLink = screen.getByText(i18n.t('nav.overview')).closest('a')
     expect(inactiveLink).not.toBeNull()
-    expect(inactiveLink!.className).not.toContain('text-primary')
+    expect(inactiveLink!.className).not.toContain('bg-secondary-container')
   })
 
   it('renders healthy and down kernel states with their distinct labels and colors', () => {
@@ -138,14 +138,16 @@ describe('ProfileMenu', () => {
       </ThemeProvider>,
     )
 
-    await user.click(screen.getByText(i18n.t('topbar.admin')))
+    await user.click(screen.getByRole('button', { name: i18n.t('topbar.openProfile') }))
 
-    expect(await screen.findByText(i18n.t('topbar.superAdmin'))).toBeInTheDocument()
+    expect(await screen.findByText(i18n.t('topbar.authenticated'))).toBeInTheDocument()
     expect(screen.getByText('中文')).toBeInTheDocument()
     expect(screen.getByText('English')).toBeInTheDocument()
-    expect(screen.getByText(i18n.t('topbar.light'))).toBeInTheDocument()
-    expect(screen.getByText(i18n.t('topbar.dark'))).toBeInTheDocument()
-    expect(screen.getByText(i18n.t('topbar.system'))).toBeInTheDocument()
+    expect(screen.getByText(i18n.t('topbar.themeNames.light'))).toBeInTheDocument()
+    expect(screen.getByText(i18n.t('topbar.themeNames.dark'))).toBeInTheDocument()
+    expect(screen.getByText(i18n.t('topbar.themeNames.ocean'))).toBeInTheDocument()
+    expect(screen.getByText(i18n.t('topbar.themeNames.forest'))).toBeInTheDocument()
+    expect(screen.getByText(i18n.t('topbar.themeNames.violet'))).toBeInTheDocument()
     expect(screen.getByText(i18n.t('topbar.logout'))).toBeInTheDocument()
 
     expect(styleCount()).toBe(before)

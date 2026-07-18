@@ -53,7 +53,7 @@ describe('LoginPage submit flow', () => {
     renderLogin()
 
     const submitButton = screen.getByRole('button', { name: i18n.t('auth.submit') })
-    await user.type(screen.getByPlaceholderText(i18n.t('auth.tokenLabel')), 'good-token')
+    await user.type(screen.getByPlaceholderText(i18n.t('auth.tokenPlaceholder')), 'good-token')
     await user.click(submitButton)
 
     // Wait for the whole submit handler (through its `finally`) to settle —
@@ -73,7 +73,7 @@ describe('LoginPage submit flow', () => {
     renderLogin()
 
     const submitButton = screen.getByRole('button', { name: i18n.t('auth.submit') })
-    await user.type(screen.getByPlaceholderText(i18n.t('auth.tokenLabel')), 'bad-token')
+    await user.type(screen.getByPlaceholderText(i18n.t('auth.tokenPlaceholder')), 'bad-token')
     await user.click(submitButton)
 
     expect(await screen.findByText(i18n.t('errors.tokenRejected'))).toBeInTheDocument()

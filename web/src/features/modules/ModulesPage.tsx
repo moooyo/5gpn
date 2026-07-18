@@ -2,18 +2,18 @@ import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from 'rea
 import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router-dom'
 import {
-  ArrowRight,
-  Boxes,
-  Download,
-  ExternalLink,
-  FileLock2,
-  FileSearch,
-  Network,
-  Plus,
-  RefreshCw,
-  ShieldCheck,
-  Trash2,
-} from 'lucide-react'
+  AddIcon,
+  ArrowRightIcon,
+  DeleteIcon,
+  ExternalLinkIcon,
+  FileSearchIcon,
+  NetworkIcon,
+  RefreshIcon,
+  ShieldLockIcon,
+  UploadIcon,
+  VerifiedIcon,
+  WidgetsFilledIcon,
+} from '../../components/icons'
 import {
   Badge,
   Button,
@@ -53,21 +53,20 @@ function errorMessage(error: unknown, fallback: string): string {
 function TransactionRail({ module }: { module: InterceptModule }) {
   const { t } = useTranslation()
   const steps = [
-    { icon: FileLock2, label: t('modules.transaction.snapshot'), active: true },
-    { icon: ShieldCheck, label: t('modules.transaction.trust'), active: module.enabled && module.ready },
-    { icon: Network, label: t('modules.transaction.route'), active: module.enabled && module.ready },
+    { icon: ShieldLockIcon, label: t('modules.transaction.snapshot'), active: true },
+    { icon: VerifiedIcon, label: t('modules.transaction.trust'), active: module.enabled && module.ready },
+    { icon: NetworkIcon, label: t('modules.transaction.route'), active: module.enabled && module.ready },
   ]
   return (
-    <div className="grid grid-cols-[1fr_auto_1fr_auto_1fr] items-center gap-2 rounded-[12px] border border-divider bg-input/60 px-3 py-2.5">
-      {steps.map((step, index) => {
+    <div className="zds-trace-rail [--trace-steps:3] rounded-[14px] bg-surface-container-low px-2 py-3">
+      {steps.map((step) => {
         const Icon = step.icon
         return (
-          <div className="contents" key={step.label}>
-            <div className="flex min-w-0 items-center justify-center gap-1.5">
-              <span className={step.active ? 'text-primary' : 'text-text-faint'}><Icon className="h-3.5 w-3.5" /></span>
-              <span className="truncate text-[10.5px] font-bold text-text-mid">{step.label}</span>
-            </div>
-            {index < steps.length - 1 ? <ArrowRight className="h-3 w-3 text-text-faint" /> : null}
+          <div className="zds-trace-node" key={step.label}>
+            <span className={step.active ? 'zds-trace-dot bg-primary-container text-on-primary-container' : 'zds-trace-dot bg-surface-container-high text-text-faint'}>
+              <Icon className="h-4 w-4" aria-hidden="true" />
+            </span>
+            <span className="truncate text-[10.5px] font-medium text-text-mid">{step.label}</span>
           </div>
         )
       })}
@@ -110,8 +109,8 @@ function ModuleCard({
   const parametersChanged = (module.parameters ?? []).some((parameter) => (parameters[parameter.key] ?? '') !== (parameter.value ?? ''))
 
   return (
-    <Card className="overflow-hidden" data-testid={`module-${module.id}`}>
-      <CardBody className="flex h-full flex-col gap-3.5 p-4">
+    <Card className="overflow-hidden shadow-none" data-testid={`module-${module.id}`}>
+      <CardBody className="flex h-full flex-col gap-4 p-5">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="mb-2 flex flex-wrap items-center gap-1.5">
@@ -123,7 +122,7 @@ function ModuleCard({
               </Badge>
               <Badge tone={statusTone}>{status}</Badge>
             </div>
-            <h2 className="text-[15px] font-extrabold leading-tight text-text-strong">{displayName}</h2>
+            <h2 className="text-[16px] font-medium leading-tight text-text-strong">{displayName}</h2>
             {displayDescription ? <p className="mt-1.5 text-[12px] leading-relaxed text-text-soft">{displayDescription}</p> : null}
           </div>
           {module.id === 'builtin-wloc' ? (
@@ -141,21 +140,21 @@ function ModuleCard({
         <TransactionRail module={module} />
 
         <div>
-          <div className="mb-1.5 text-[10.5px] font-bold uppercase tracking-[.08em] text-text-faint">{t('modules.hosts')}</div>
+          <div className="mb-2 text-[11px] font-medium tracking-[.06em] text-text-faint">{t('modules.hosts')}</div>
           <div className="flex flex-wrap gap-1.5">
             {module.hosts.map((host) => (
-              <code key={host} className="rounded-[6px] border border-border bg-input px-2 py-1 text-[10.5px] text-text-mid">{host}</code>
+              <code key={host} className="rounded-[8px] bg-surface-container px-2.5 py-1 font-mono text-[10.5px] text-text-mid">{host}</code>
             ))}
           </div>
         </div>
 
         {module.host_mappings?.length ? (
           <div>
-            <div className="mb-1.5 text-[10.5px] font-bold uppercase tracking-[.08em] text-text-faint">{t('modules.hostMappings')}</div>
+            <div className="mb-2 text-[11px] font-medium tracking-[.06em] text-text-faint">{t('modules.hostMappings')}</div>
             <div className="space-y-1.5">
               {module.host_mappings.map((mapping) => (
-                <div key={mapping.pattern} className="flex items-center justify-between gap-3 rounded-[7px] bg-input px-2.5 py-1.5 font-mono text-[10.5px] text-text-mid">
-                  <span className="truncate">{mapping.pattern}</span><ArrowRight className="h-3 w-3 shrink-0 text-text-faint" /><span className="truncate">{mapping.target}</span>
+                <div key={mapping.pattern} className="flex items-center justify-between gap-3 rounded-[10px] bg-surface-container-low px-3 py-2 font-mono text-[10.5px] text-text-mid">
+                  <span className="truncate">{mapping.pattern}</span><ArrowRightIcon className="h-4 w-4 shrink-0 text-text-faint" /><span className="truncate">{mapping.target}</span>
                 </div>
               ))}
             </div>
@@ -163,8 +162,8 @@ function ModuleCard({
         ) : null}
 
         <div className="grid grid-cols-2 gap-2 text-[11px] text-text-soft">
-          <div className="rounded-[8px] bg-input px-2.5 py-2">{t('modules.scripts', { count: module.script_count })}</div>
-          <div className="rounded-[8px] bg-input px-2.5 py-2">{t('modules.rewrites', { count: module.rewrite_count })}</div>
+          <div className="rounded-[12px] bg-surface-container-low px-3 py-2.5">{t('modules.scripts', { count: module.script_count })}</div>
+          <div className="rounded-[12px] bg-surface-container-low px-3 py-2.5">{t('modules.rewrites', { count: module.rewrite_count })}</div>
         </div>
 
         <div className="space-y-1 text-[10.5px] text-text-faint">
@@ -183,8 +182,8 @@ function ModuleCard({
         </div>
 
         {module.issues?.length ? (
-          <details className="rounded-[9px] border border-amber-2/25 bg-amber-2/5 px-3 py-2 text-[11px] text-text-soft">
-            <summary className="cursor-pointer font-bold text-amber-2">{t('modules.compatibilityTitle', { count: module.issues.length })}</summary>
+          <details className="rounded-[12px] bg-[var(--md-sys-color-warning-container)] px-3.5 py-3 text-[11px] text-[var(--md-sys-color-on-warning-container)]">
+            <summary className="cursor-pointer font-medium">{t('modules.compatibilityTitle', { count: module.issues.length })}</summary>
             <ul className="mt-2 space-y-1 break-words font-mono text-[10px]">
               {module.issues.map((issue) => <li className={issue.severity === 'error' ? 'text-red' : undefined} key={`${issue.severity}:${issue.message}`}>{issue.message}</li>)}
             </ul>
@@ -237,18 +236,18 @@ function ModuleCard({
           </Field>
         ) : null}
 
-        <div className="mt-auto flex flex-wrap justify-end gap-2 border-t border-divider pt-3">
-          {module.compatibility === 'partial' && !module.partial_allowed ? (
-            <Button type="button" variant="secondary" size="sm" disabled={busy} onClick={() => onAcknowledge(module)}>
-              <ShieldCheck className="h-3.5 w-3.5" /> {t('modules.acknowledge')}
+          <div className="mt-auto flex flex-wrap justify-end gap-2 border-t border-divider pt-4">
+            {module.compatibility === 'partial' && !module.partial_allowed ? (
+            <Button type="button" variant="tonal" size="sm" disabled={busy} onClick={() => onAcknowledge(module)}>
+              <VerifiedIcon className="h-4 w-4" /> {t('modules.acknowledge')}
             </Button>
           ) : null}
           <Button type="button" variant="secondary" size="sm" disabled={busy} onClick={() => onInspect(module)}>
-            <FileSearch className="h-3.5 w-3.5" /> {t('modules.inspect')}
+            <FileSearchIcon className="h-4 w-4" /> {t('modules.inspect')}
           </Button>
           {module.id !== 'builtin-wloc' ? (
             <Button type="button" variant="danger" size="sm" disabled={busy || module.enabled} onClick={() => onDelete(module)}>
-              <Trash2 className="h-3.5 w-3.5" /> {t('modules.delete')}
+              <DeleteIcon className="h-4 w-4" /> {t('modules.delete')}
             </Button>
           ) : null}
         </div>
@@ -285,16 +284,16 @@ function SnapshotModal({
               <span className="font-bold uppercase tracking-[.08em]">{t('modules.snapshotSource')}</span>
               <code className="max-w-[70%] truncate" title={snapshot.source_digest}>{snapshot.source_digest}</code>
             </div>
-            <pre className="max-h-[280px] overflow-auto whitespace-pre-wrap break-words rounded-[10px] border border-border bg-input p-3 font-mono text-[10.5px] leading-relaxed text-text-mid">{snapshot.source_body}</pre>
+            <pre className="max-h-[280px] overflow-auto whitespace-pre-wrap break-words rounded-[14px] bg-surface-container-low p-4 font-mono text-[10.5px] leading-relaxed text-text-mid">{snapshot.source_body}</pre>
           </section>
           {snapshot.scripts.map((script) => (
-            <details key={script.id} className="rounded-[10px] border border-border bg-input/40 px-3 py-2.5">
+            <details key={script.id} className="rounded-[14px] bg-surface-container-low px-4 py-3">
               <summary className="cursor-pointer text-[11px] font-bold text-text-strong">
                 {t('modules.snapshotScript', { id: script.id })}
                 <code className="ml-2 font-normal text-text-faint">{script.digest.slice(0, 12)}…</code>
               </summary>
               {script.url ? <div className="mt-2 break-all text-[10px] text-primary">{script.url}</div> : null}
-              <pre className="mt-2 max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-[8px] bg-card p-3 font-mono text-[10.5px] leading-relaxed text-text-mid">{script.body}</pre>
+              <pre className="mt-2 max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-[10px] bg-card p-3 font-mono text-[10.5px] leading-relaxed text-text-mid">{script.body}</pre>
             </details>
           ))}
           {snapshot.scripts.length === 0 ? <p className="text-[11px] text-text-faint">{t('modules.snapshotNoScripts')}</p> : null}
@@ -387,7 +386,7 @@ function ImportModuleModal({
     >
       {review ? (
         <div className="space-y-4" data-testid="module-import-review">
-          <div className="rounded-[12px] border border-primary/20 bg-primary/5 p-4">
+          <div className="rounded-[16px] bg-primary-container p-4 text-on-primary-container">
             <div className="flex flex-wrap items-center gap-2">
               <Badge tone={compatibilityTone(review.compatibility)}>{t(`modules.${review.compatibility}`)}</Badge>
               <span className="text-[13px] font-extrabold text-text-strong">{review.name}</span>
@@ -397,7 +396,7 @@ function ImportModuleModal({
           {review.issues?.length ? (
             <ul className="space-y-2">
               {review.issues.map((issue) => (
-                <li className={`rounded-[10px] border px-3 py-2 text-[11px] leading-relaxed ${issue.severity === 'error' ? 'border-red/25 bg-red/5 text-red' : 'border-amber-2/25 bg-amber-2/5 text-text-mid'}`} key={`${issue.severity}:${issue.message}`}>
+                <li className={`rounded-[12px] px-3 py-2.5 text-[11px] leading-relaxed ${issue.severity === 'error' ? 'bg-[var(--md-sys-color-error-container)] text-[var(--md-sys-color-on-error-container)]' : 'bg-[var(--md-sys-color-warning-container)] text-[var(--md-sys-color-on-warning-container)]'}`} key={`${issue.severity}:${issue.message}`}>
                   {issue.message}
                 </li>
               ))}
@@ -421,21 +420,21 @@ function ImportModuleModal({
         ) : (
           <Field label={t('modules.import.content')}>
             <textarea
-              className="min-h-[180px] resize-y rounded-[10px] border border-input-border bg-input px-3 py-2.5 font-mono text-[12px] text-text-strong outline-none"
+              className="min-h-[200px] resize-y rounded-[14px] border border-input-border bg-input px-4 py-3 font-mono text-[12px] leading-5 text-text-strong outline-none focus:border-primary focus:bg-card"
               aria-label={t('modules.import.content')}
               value={content}
               maxLength={2097152}
               placeholder={t('modules.import.contentPlaceholder')}
               onChange={(event) => setContent(event.target.value)}
             />
-            <label className="mt-2 inline-flex cursor-pointer items-center gap-2 text-[11px] font-semibold text-primary">
-              <Download className="h-3.5 w-3.5" /> {t('modules.import.upload')}
+            <label className="zds-state-layer mt-2 inline-flex cursor-pointer items-center gap-2 rounded-full px-3 py-2 text-[11.5px] font-medium text-primary">
+              <UploadIcon className="h-4 w-4" /> {t('modules.import.upload')}
               <input className="sr-only" type="file" accept=".lpx,.plugin,.conf,.txt,text/plain" onChange={(event) => void chooseFile(event)} />
             </label>
           </Field>
         )}
-        <div className="flex items-start gap-2.5 rounded-[11px] border border-primary/20 bg-primary/5 px-3 py-2.5" data-testid="module-import-automatic">
-          <FileSearch className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+        <div className="flex items-start gap-2.5 rounded-[14px] bg-surface-container-low px-4 py-3" data-testid="module-import-automatic">
+          <FileSearchIcon className="mt-0.5 h-5 w-5 shrink-0 text-primary" aria-hidden="true" />
           <p className="text-[11px] leading-relaxed text-text-soft">{t('modules.import.automatic')}</p>
         </div>
       </div>}
@@ -518,51 +517,50 @@ export default function ModulesPage() {
   }
 
   return (
-    <div className="flex max-w-[1180px] flex-col gap-4" data-testid="page-modules">
-      <Card className="overflow-hidden">
-        <CardBody className="relative p-5 sm:p-6">
-          <div className="pointer-events-none absolute -right-10 -top-16 h-40 w-40 rounded-full bg-primary/8 blur-2xl" />
-          <div className="relative flex flex-col justify-between gap-5 md:flex-row md:items-center">
+    <div className="flex flex-col gap-4" data-testid="page-modules">
+      <Card variant="hero" className="overflow-hidden">
+        <CardBody className="p-5 sm:p-6">
+          <div className="flex flex-col justify-between gap-5 md:flex-row md:items-center">
             <div className="max-w-[700px]">
-              <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-[10px] bg-primary/10 text-primary"><Boxes className="h-5 w-5" /></div>
-              <h1 className="text-[20px] font-extrabold tracking-[-.02em] text-text-strong">{t('modules.title')}</h1>
-              <p className="mt-2 text-[12.5px] leading-relaxed text-text-soft">{t('modules.intro')}</p>
-              <p className="mt-2 text-[10.5px] text-text-faint">{t('modules.catalogNotice')}</p>
+              <div className="mb-3 grid h-11 w-11 place-items-center rounded-full bg-[rgb(255_255_255_/_36%)]"><WidgetsFilledIcon className="h-6 w-6" /></div>
+              <h1 className="text-[21px] font-medium tracking-[-.02em]">{t('modules.title')}</h1>
+              <p className="mt-2 text-[12.5px] leading-relaxed opacity-80">{t('modules.intro')}</p>
+              <p className="mt-2 text-[10.5px] opacity-65">{t('modules.catalogNotice')}</p>
             </div>
             <div className="flex shrink-0 flex-wrap gap-2">
-              <Button type="button" variant="secondary" onClick={() => void load()} disabled={loading}>
-                <RefreshCw className="h-3.5 w-3.5" />{t('modules.refresh')}
+              <Button type="button" variant="elevated" onClick={() => void load()} disabled={loading}>
+                <RefreshIcon className="h-4 w-4" />{t('modules.refresh')}
               </Button>
               <a href={view?.catalog_url ?? 'https://hub.kelee.one/'} target="_blank" rel="noreferrer">
-                <Button type="button" variant="secondary"><ExternalLink className="h-3.5 w-3.5" />{t('modules.catalog')}</Button>
+                <Button type="button" variant="elevated"><ExternalLinkIcon className="h-4 w-4" />{t('modules.catalog')}</Button>
               </a>
               <Button type="button" onClick={() => setImportOpen(true)} disabled={!view}>
-                <Plus className="h-3.5 w-3.5" />{t('modules.add')}
+                <AddIcon className="h-4 w-4" />{t('modules.add')}
               </Button>
             </div>
           </div>
         </CardBody>
       </Card>
 
-      <div className="flex flex-col gap-3 rounded-[12px] border border-primary/20 bg-primary/5 px-4 py-3 sm:flex-row sm:items-center sm:justify-between" data-testid="mitm-ca-guide-notice">
+      <div className="flex flex-col gap-3 rounded-[16px] bg-secondary-container px-5 py-4 text-on-secondary-container sm:flex-row sm:items-center sm:justify-between" data-testid="mitm-ca-guide-notice">
         <div className="flex items-start gap-2.5">
-          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+          <VerifiedIcon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
           <div>
             <div className="text-[11.5px] font-bold text-text-strong">{t('modules.caGuideTitle')}</div>
             <p className="mt-0.5 text-[11px] leading-relaxed text-text-soft">{t('modules.caGuideBody')}</p>
           </div>
         </div>
         <Link
-          className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-[10px] border border-input-border bg-card px-3 py-1.5 text-[11.5px] font-semibold text-text-mid transition-colors hover:bg-primary/10"
+          className="zds-state-layer inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-full px-4 text-[12px] font-medium"
           to="/setup-guide"
         >
-          {t('modules.caGuideAction')}<ArrowRight className="h-3.5 w-3.5" />
+          {t('modules.caGuideAction')}<ArrowRightIcon className="h-4 w-4" />
         </Link>
       </div>
 
       {loading && !view ? <Card><CardBody className="text-center text-[12px] text-text-faint">{t('common.loading')}</CardBody></Card> : null}
       {loadError && !view ? (
-        <Card><CardBody className="flex items-center justify-between gap-3"><span className="text-[12px] text-red">{t('modules.loadFailed')}</span><Button variant="secondary" size="sm" onClick={() => void load()}><RefreshCw className="h-3.5 w-3.5" />{t('modules.retry')}</Button></CardBody></Card>
+        <Card><CardBody className="flex items-center justify-between gap-3"><span className="text-[12px] text-red">{t('modules.loadFailed')}</span><Button variant="secondary" size="sm" onClick={() => void load()}><RefreshIcon className="h-4 w-4" />{t('modules.retry')}</Button></CardBody></Card>
       ) : null}
 
       {view ? (
@@ -585,7 +583,7 @@ export default function ModulesPage() {
 
       {view && externalCount === 0 ? <p className="rounded-[10px] border border-dashed border-border px-4 py-5 text-center text-[11.5px] text-text-faint">{t('modules.empty')}</p> : null}
 
-      <div className="mt-1 text-[12px] font-extrabold uppercase tracking-[.08em] text-text-faint">{t('modules.wlocSection')}</div>
+      <div className="mt-2 px-1 text-[13px] font-medium tracking-[.04em] text-text-faint">{t('modules.wlocSection')}</div>
       <WLOCInterceptCard
         value={wloc}
         routeEnabled={view?.modules.some((module) => module.id === 'builtin-wloc' && module.enabled && module.ready) ?? false}

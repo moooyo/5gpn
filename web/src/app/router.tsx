@@ -13,7 +13,7 @@ function PageSpinner() {
 
 /** Wraps a route-lazy page loader in its own Suspense boundary. Every page
  *  loads this way so its JS —
- *  and its deps (echarts, tanstack/react-table, …) — code-splits into a
+ *  and its heavier deps (TanStack Table/Virtual, Base UI overlays, …) — code-splits into a
  *  dynamic chunk instead of the entry graph. This is what keeps the initial
  *  bundle within the budget checked by scripts/check-bundle.mjs: the entry
  *  only has to carry the AppShell chrome + shared libs, never page bodies. */

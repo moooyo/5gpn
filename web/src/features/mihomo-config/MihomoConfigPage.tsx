@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { RotateCcw, ShieldCheck } from 'lucide-react'
-import { Badge, Button, Card, CardHeader, ConfirmDialog, StatusDot, toast } from '../../components/ds'
+import { CodeIcon, ResetIcon, VerifiedIcon } from '../../components/icons'
+import { Badge, Button, Card, ConfirmDialog, StatusDot, toast } from '../../components/ds'
 import { api } from '../../lib/api/client'
 import { ApiError } from '../../lib/api/http'
 import type { MihomoConfig } from '../../lib/api/types'
@@ -13,7 +13,7 @@ function errMessage(err: unknown, fallback: string): string {
 }
 
 const textareaClass =
-  'w-full min-h-[440px] resize-y rounded-[10px] border border-input-border bg-input px-3 py-2.5 font-mono text-[12px] leading-relaxed text-text-strong outline-none disabled:opacity-60'
+  'w-full min-h-[480px] resize-y rounded-[16px] border border-input-border bg-surface-container-low px-4 py-4 font-mono text-[12px] leading-5 text-text-strong outline-none transition-[border-color,background-color] focus:border-primary focus:bg-card disabled:opacity-60'
 
 // Kept as data so the JSX below is a plain map rather than seven near-identical
 // list items.
@@ -159,15 +159,22 @@ export default function MihomoConfigPage() {
   }
 
   return (
-    <div className="flex max-w-[1180px] flex-col gap-4" data-testid="page-mihomo-config">
-      <p className="text-[12.5px] text-text-faint">{t('mihomoConfig.intro')}</p>
+    <div className="flex flex-col gap-4" data-testid="page-mihomo-config">
+      <Card variant="tonal" className="flex items-start gap-4 p-5 sm:p-6">
+        <div className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-primary-container text-on-primary-container">
+          <CodeIcon className="h-6 w-6" aria-hidden="true" />
+        </div>
+        <div>
+          <h1 className="text-[17px] font-medium text-text-strong">{t('mihomoConfig.editorLabel')}</h1>
+          <p className="mt-1 text-[12px] leading-5 text-text-faint">{t('mihomoConfig.intro')}</p>
+        </div>
+      </Card>
 
-      <Card className="p-[18px]" data-testid="mihomo-config-editor" data-dirty={dirty ? 'true' : 'false'}>
-        <div className="mb-3 flex flex-wrap items-center gap-2 text-[11.5px] font-semibold text-text-mid">
+      <Card className="p-5 sm:p-6" data-testid="mihomo-config-editor" data-dirty={dirty ? 'true' : 'false'}>
+        <div className="mb-4 flex flex-wrap items-center gap-2 text-[11.5px] font-medium text-text-mid">
           <div className="flex items-center gap-1.5">
             <StatusDot
-              color={!controllerReachable ? '#dc2626' : controllerAuthenticated ? '#16a34a' : '#d97706'}
-              pulse={controllerReachable && controllerAuthenticated}
+              color={!controllerReachable ? 'var(--color-red)' : controllerAuthenticated ? 'var(--color-green)' : 'var(--color-amber)'}
             />
             {!controllerReachable
               ? t('mihomoConfig.controllerUnreachable')
@@ -179,7 +186,10 @@ export default function MihomoConfigPage() {
           <span className="font-normal text-text-faint">{t('mihomoConfig.appliedAt', { time: relativeTime(appliedAt) })}</span>
         </div>
 
-        <div className="mb-1.5 text-[11px] font-semibold text-text-mid">{t('mihomoConfig.editorLabel')}</div>
+        <div className="mb-2 flex items-center justify-between gap-3 text-[11px] font-medium text-text-mid">
+          <span>{t('mihomoConfig.editorLabel')}</span>
+          {dirty ? <Badge tone="amber">{t('mihomoConfig.unsaved')}</Badge> : <Badge tone="green">{t('mihomoConfig.saved')}</Badge>}
+        </div>
         <textarea
           className={textareaClass}
           value={text}
@@ -195,7 +205,7 @@ export default function MihomoConfigPage() {
 
         {error ? (
           <div
-            className="mt-2 flex flex-col gap-2 rounded-[10px] border border-red/30 bg-red/10 p-3 text-[11.5px] text-red sm:flex-row sm:items-center sm:justify-between"
+            className="mt-3 flex flex-col gap-2 rounded-[14px] bg-[var(--md-sys-color-error-container)] p-3.5 text-[11.5px] text-[var(--md-sys-color-on-error-container)] sm:flex-row sm:items-center sm:justify-between"
             data-testid="mihomo-config-error"
             role="alert"
           >
@@ -208,7 +218,7 @@ export default function MihomoConfigPage() {
           </div>
         ) : null}
 
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-divider pt-3.5">
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-divider pt-4">
           <Button
             type="button"
             variant="secondary"
@@ -216,7 +226,7 @@ export default function MihomoConfigPage() {
             disabled={loading || !revision || conflict || applying || resetting}
             data-testid="mihomo-config-reset"
           >
-            <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+            <ResetIcon className="h-4 w-4" aria-hidden="true" />
             {resetting ? t('common.saving') : t('mihomoConfig.reset')}
           </Button>
           <Button
@@ -225,19 +235,22 @@ export default function MihomoConfigPage() {
             disabled={loading || !revision || conflict || applying || resetting}
             data-testid="mihomo-config-apply"
           >
-            <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+            <VerifiedIcon className="h-4 w-4" aria-hidden="true" />
             {applying ? t('mihomoConfig.applying') : t('mihomoConfig.apply')}
           </Button>
         </div>
       </Card>
 
-      <Card>
-        <CardHeader title={t('mihomoConfig.invariantsTitle')} />
-        <ul className="flex flex-col gap-2 p-4">
+      <Card className="p-5 sm:p-6">
+        <h2 className="mb-4 text-[15px] font-medium text-text-strong">{t('mihomoConfig.invariantsTitle')}</h2>
+        <ul className="grid gap-3 md:grid-cols-2">
           {INVARIANT_KEYS.map((key) => (
-            <li key={key} className="flex flex-wrap items-baseline gap-2 text-[11.5px]">
-              <Badge tone="neutral">{t(`mihomoConfig.invariants.${key}.name`)}</Badge>
-              <span className="text-text-faint">{t(`mihomoConfig.invariants.${key}.desc`)}</span>
+            <li key={key} className="flex items-start gap-3 rounded-[14px] bg-surface-container-low p-4 text-[11.5px]">
+              <VerifiedIcon className="mt-0.5 h-4 w-4 shrink-0 text-green" aria-hidden="true" />
+              <div>
+                <div className="font-medium text-text-strong">{t(`mihomoConfig.invariants.${key}.name`)}</div>
+                <div className="mt-1 leading-5 text-text-faint">{t(`mihomoConfig.invariants.${key}.desc`)}</div>
+              </div>
             </li>
           ))}
         </ul>

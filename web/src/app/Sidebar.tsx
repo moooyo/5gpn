@@ -1,42 +1,45 @@
-import type { ComponentType } from 'react'
+import type { ComponentType, SVGProps } from 'react'
 import { NavLink } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import {
-  LayoutGrid,
-  BookOpenCheck,
-  Split,
-  ScrollText,
-  Search,
-  ListChecks,
-  Settings,
-  SlidersHorizontal,
-  Shield,
-  Gauge,
-  FileCode2,
-  Boxes,
-  X,
-  type LucideProps,
-} from 'lucide-react'
-import { NAV_GROUPS } from './navigation'
+  CloseIcon,
+  CodeIcon,
+  DashboardFilledIcon,
+  DashboardIcon,
+  DevicesFilledIcon,
+  DevicesIcon,
+  ExtensionFilledIcon,
+  ExtensionIcon,
+  MemoryIcon,
+  NetworkCheckFilledIcon,
+  NetworkCheckIcon,
+  ReceiptFilledIcon,
+  ReceiptIcon,
+  RuleFilledIcon,
+  RuleIcon,
+  SettingsFilledIcon,
+  SettingsIcon,
+  ShieldFilledIcon,
+  SpeedFilledIcon,
+  SpeedIcon,
+} from '../components/icons'
+import { NAV_GROUPS, type NavIcon } from './navigation'
 import { useStatus, type HealthState } from '../lib/StatusContext'
 import { StatusDot } from '../components/ds'
 import { cn } from '../lib/cn'
 
-// Resolves the string icon name carried by NAV_GROUPS (navigation.ts is kept
-// lucide-free) to an actual component. Keep this map in sync with the icon
-// names used in navigation.ts.
-const ICONS: Record<string, ComponentType<LucideProps>> = {
-  LayoutGrid,
-  BookOpenCheck,
-  Split,
-  ScrollText,
-  Search,
-  ListChecks,
-  Settings,
-  SlidersHorizontal,
-  Gauge,
-  FileCode2,
-  Boxes,
+type Icon = ComponentType<SVGProps<SVGSVGElement>>
+
+const ICONS: Record<NavIcon, { outline: Icon; filled: Icon }> = {
+  dashboard: { outline: DashboardIcon, filled: DashboardFilledIcon },
+  setup: { outline: DevicesIcon, filled: DevicesFilledIcon },
+  logs: { outline: ReceiptIcon, filled: ReceiptFilledIcon },
+  resolve: { outline: NetworkCheckIcon, filled: NetworkCheckFilledIcon },
+  policy: { outline: RuleIcon, filled: RuleFilledIcon },
+  modules: { outline: ExtensionIcon, filled: ExtensionFilledIcon },
+  mihomo: { outline: SpeedIcon, filled: SpeedFilledIcon },
+  config: { outline: CodeIcon, filled: CodeIcon },
+  settings: { outline: SettingsIcon, filled: SettingsFilledIcon },
 }
 
 export interface SidebarProps {
@@ -51,68 +54,59 @@ export function Sidebar({ className, onNavigate, onClose, testId }: SidebarProps
 
   return (
     <aside
-      className={cn('flex w-[236px] shrink-0 flex-col border-r border-border bg-card p-[18px_14px]', className)}
+      className={cn('flex w-[252px] shrink-0 flex-col bg-bg px-3 pb-4 pt-4', className)}
       data-testid={testId}
     >
-      <div className="flex items-center gap-2.5 px-1 pb-5">
-        <div
-          className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[9px]"
-          style={{ background: 'linear-gradient(135deg,#3b82f6,#2563eb)' }}
-        >
-          <Shield className="h-[18px] w-[18px] text-white" strokeWidth={2} />
+      <div className="flex items-center gap-3 px-2 pb-5">
+        <div className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-primary-container text-on-primary-container">
+          <ShieldFilledIcon className="h-6 w-6" aria-hidden="true" />
         </div>
-        <div className="flex flex-col leading-none">
-          <span className="text-[16px] font-extrabold text-text-strong">5GPN</span>
-          <span className="text-[8.5px] font-semibold uppercase tracking-[2.5px] text-text-faint">
-            {t('topbar.consoleTag')}
-          </span>
+        <div className="flex min-w-0 flex-col leading-tight">
+          <span className="text-[18px] font-semibold tracking-[.02em] text-text-strong">5GPN</span>
+          <span className="text-[10px] font-medium tracking-[.14em] text-text-faint">{t('topbar.consoleTag')}</span>
         </div>
         {onClose ? (
           <button
             type="button"
             onClick={onClose}
             aria-label={t('nav.closeMenu')}
-            className="ml-auto inline-flex h-9 w-9 items-center justify-center rounded-[9px] text-text-soft hover:bg-primary/10"
+            className="zds-state-layer ml-auto grid h-10 w-10 place-items-center rounded-full text-text-soft"
           >
-            <X className="h-5 w-5" aria-hidden="true" />
+            <CloseIcon className="h-5 w-5" aria-hidden="true" />
           </button>
         ) : null}
       </div>
 
-      {/* overflow-x-hidden: the active tab's `translateX(3px)` micro-shift
-          pushes it a few px past the nav's content box, and `overflow-y-auto`
-          makes the x-axis compute to `auto` (CSS overflow rule) — which paints
-          a stray horizontal scrollbar right above the kernel-status card.
-          Clipping x kills it; the 3px is empty tint, invisible when trimmed. */}
-      <nav className="flex flex-1 flex-col overflow-y-auto overflow-x-hidden" aria-label={t('nav.primary')}>
-        {NAV_GROUPS.map((group, gi) => (
-          <div key={group.id}>
-            {gi > 0 ? <div className="my-3 h-px bg-divider" /> : null}
-            <div className="px-3 pb-1.5 text-[9.5px] font-bold uppercase tracking-[1.5px] text-text-faint">
+      <nav className="flex flex-1 flex-col overflow-x-hidden overflow-y-auto" aria-label={t('nav.primary')}>
+        {NAV_GROUPS.map((group) => (
+          <div key={group.id} className="mb-2">
+            <div className="px-[18px] pb-1 pt-3 text-[11px] font-medium tracking-[.06em] text-text-faint">
               {t(group.labelKey)}
             </div>
             <div className="flex flex-col gap-0.5">
-              {group.items.map((item) => {
-                const Icon = ICONS[item.icon]
-                return (
-                  <NavLink
-                    key={item.id}
-                    to={item.path}
-                    onClick={onNavigate}
-                    className={({ isActive }) =>
-                      cn(
-                        'sidebar-tab flex items-center gap-2.5 rounded-[9px] px-3 py-2.5 text-[13px] font-semibold',
-                        isActive
-                          ? 'sidebar-tab-active bg-primary/[.09] text-primary shadow-[inset_3px_0_0_var(--color-primary)]'
-                          : 'text-text-soft hover:brightness-[.98]',
-                      )
-                    }
-                  >
-                    {Icon ? <Icon className="h-[18px] w-[18px] shrink-0" strokeWidth={1.9} /> : null}
-                    <span>{t(item.labelKey)}</span>
-                  </NavLink>
-                )
-              })}
+              {group.items.map((item) => (
+                <NavLink
+                  key={item.id}
+                  to={item.path}
+                  onClick={onNavigate}
+                  className={({ isActive }) => cn(
+                    'sidebar-tab zds-state-layer flex h-11 items-center gap-3 rounded-full px-[18px] text-[13.5px] font-medium',
+                    isActive
+                      ? 'sidebar-tab-active bg-secondary-container text-on-secondary-container'
+                      : 'text-text-mid',
+                  )}
+                >
+                  {({ isActive }) => {
+                    const IconComponent = isActive ? ICONS[item.icon].filled : ICONS[item.icon].outline
+                    return (
+                      <>
+                        <IconComponent className="h-[21px] w-[21px] shrink-0" aria-hidden="true" />
+                        <span>{t(item.labelKey)}</span>
+                      </>
+                    )
+                  }}
+                </NavLink>
+              ))}
             </div>
           </div>
         ))}
@@ -128,9 +122,12 @@ function KernelStatusCard() {
   const { dnsState, mihomoState } = useStatus()
 
   return (
-    <div className="mt-auto flex flex-col gap-[9px] rounded-[11px] border border-border bg-bg p-3">
+    <div className="mt-3 flex flex-col gap-2 rounded-[16px] bg-surface-container-low p-3.5">
+      <div className="mb-1 flex items-center gap-2 text-[11px] font-medium text-text-faint">
+        <MemoryIcon className="h-4 w-4" aria-hidden="true" />
+        {t('topbar.runtimeState')}
+      </div>
       <KernelRow title={t('topbar.kernelDns')} sub="5gpn-dns · :853 DoT" state={dnsState} />
-      <div className="h-px bg-divider" />
       <KernelRow title="mihomo" sub="gateway · :443" state={mihomoState} />
     </div>
   )
@@ -138,24 +135,22 @@ function KernelStatusCard() {
 
 const HEALTH_PRESENTATION: Record<HealthState, { color: string; className: string; labelKey: string }> = {
   checking: { color: 'var(--color-amber)', className: 'text-amber', labelKey: 'common.healthChecking' },
-  healthy: { color: '#22c55e', className: 'text-green', labelKey: 'common.healthHealthy' },
+  healthy: { color: 'var(--color-green)', className: 'text-green', labelKey: 'common.healthHealthy' },
   unknown: { color: 'var(--color-text-faint)', className: 'text-text-faint', labelKey: 'common.healthUnknown' },
-  down: { color: '#dc2626', className: 'text-red', labelKey: 'common.healthDown' },
+  down: { color: 'var(--color-red)', className: 'text-red', labelKey: 'common.healthDown' },
 }
 
 function KernelRow({ title, sub, state }: { title: string; sub: string; state: HealthState }) {
   const { t } = useTranslation()
   const presentation = HEALTH_PRESENTATION[state]
   return (
-    <div className="flex items-center gap-2">
-      <StatusDot color={presentation.color} pulse={state === 'checking' || state === 'healthy'} />
-      <div className="flex flex-1 flex-col">
-        <span className="text-[11.5px] font-bold text-text-strong">{title}</span>
-        <span className="text-[9.5px] text-text-faint">{sub}</span>
+    <div className="flex items-center gap-2.5 rounded-[10px] px-1 py-1">
+      <StatusDot color={presentation.color} pulse={state === 'checking'} />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <span className="text-[12px] font-medium text-text-strong">{title}</span>
+        <span className="truncate font-mono text-[9.5px] text-text-faint">{sub}</span>
       </div>
-      <span className={cn('text-[10px] font-bold', presentation.className)}>
-        {t(presentation.labelKey)}
-      </span>
+      <span className={cn('text-[10px] font-medium', presentation.className)}>{t(presentation.labelKey)}</span>
     </div>
   )
 }

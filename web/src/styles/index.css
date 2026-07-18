@@ -1,87 +1,121 @@
 @layer properties, theme, base, components, utilities;
+@layer utilities.daisyui, utilities.zds;
 @import 'tailwindcss';
+@plugin 'daisyui' {
+  themes: false;
+  logs: false;
+  include: properties, rootcolor, button, card, input;
+}
 @import './theme.css';
+@import './zds.css';
 
 @layer base {
-  :root { color-scheme: light; scrollbar-gutter: stable; }
-  :root[data-theme='dark'] { color-scheme: dark; }
-  html, body { height: 100%; }
+  :root {
+    scrollbar-gutter: stable;
+    font-synthesis: none;
+    --motion-standard: cubic-bezier(.2, 0, 0, 1);
+    --motion-emphasized: cubic-bezier(.2, 0, 0, 1.2);
+  }
+
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+
   body {
     margin: 0;
-    background: var(--color-bg);
-    color: var(--color-text-strong);
-    font-family: 'Plus Jakarta Sans', 'MiSans-VF', system-ui, sans-serif;
-    line-height: 1.45;
+    background: var(--md-sys-color-background);
+    color: var(--md-sys-color-on-surface);
+    font-family: 'MiSans-VF', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
     -webkit-font-smoothing: antialiased;
-  }
-  body.ds-scroll-locked { overflow: hidden; }
-  ::-webkit-scrollbar { width: 9px; height: 9px; }
-  ::-webkit-scrollbar-thumb { background: #cdd8e8; border-radius: 9px; border: 2px solid var(--color-bg); }
-  ::-webkit-scrollbar-track { background: transparent; }
-  a { color: var(--color-primary); text-decoration: none; }
-
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: .35; }
-  }
-  .ds-pulse { animation: pulse 1.6s ease-in-out infinite; }
-
-  @keyframes ds-toast-in {
-    from { opacity: 0; transform: translateY(6px) scale(.98); }
-    to { opacity: 1; transform: translateY(0) scale(1); }
-  }
-  .ds-toast-in { animation: ds-toast-in .18s ease-out; }
-
-  /* ---- Animation system (console micro-interactions) ----------------------
-     Easing + entrance keyframes for page / menu / row transitions. Timings:
-     entrances .24–.32s on the standard ease, micro-interactions .18–.22s.
-     `pulse` and `ds-toast-in` above predate this set and are kept as-is. */
-  :root {
-    --ease-out: cubic-bezier(.16, .8, .3, 1);    /* clean fast-out slow-in    */
-    --ease-pop: cubic-bezier(.2, .9, .3, 1.15);  /* slight overshoot (menus)  */
-    --ease-shift: cubic-bezier(.2, .8, .3, 1.2); /* nav-item lateral nudge    */
-    --ease-arrow: cubic-bezier(.2, .8, .3, 1);   /* selector fold arrow       */
+    text-rendering: optimizeLegibility;
   }
 
-  @keyframes ds-page-in {
+  body.ds-scroll-locked {
+    overflow: hidden;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
+  button,
+  [role='button'],
+  a {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  :focus-visible {
+    outline: 3px solid color-mix(in srgb, var(--md-sys-color-primary) 74%, white);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--md-sys-color-primary-container);
+    color: var(--md-sys-color-on-primary-container);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background: var(--md-sys-color-outline);
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  @keyframes zds-page-in {
     from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-  @keyframes ds-pop-in {
-    from { opacity: 0; transform: scale(.95) translateY(-6px); }
-    to { opacity: 1; transform: scale(1) translateY(0); }
-  }
-  @keyframes ds-rows-in {
-    from { opacity: 0; transform: translateY(6px); }
-    to { opacity: 1; transform: translateY(0); }
+    to { opacity: 1; transform: none; }
   }
 
-  /* Entrances end at each element's natural resting style, so `backwards`
-     (not `both`) is used: it applies the from-state before the first frame to
-     avoid an initial flash, but leaves `transform: none` at rest — `forwards`
-     would pin a transform on the element and create a needless containing
-     block / stacking context on the page + row wrappers. */
-  .ds-page-in { animation: ds-page-in .32s var(--ease-out) backwards; }
-  .ds-pop-in { animation: ds-pop-in .18s var(--ease-pop) backwards; transform-origin: top right; }
-  .ds-rows-in { animation: ds-rows-in .26s var(--ease-out) backwards; }
+  @keyframes zds-pop-in {
+    from { opacity: 0; transform: scale(.96) translateY(-4px); }
+    to { opacity: 1; transform: none; }
+  }
 
-  /* Sidebar nav item: smooth colour/indicator transition + a small lateral
-     nudge on the active tab. Pure CSS state change — no JS rect measurement. */
+  @keyframes zds-row-in {
+    from { opacity: 0; transform: translateX(-8px); }
+    to { opacity: 1; transform: none; }
+  }
+
+  @keyframes zds-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .42; }
+  }
+
+  .ds-page-in { animation: zds-page-in 320ms var(--motion-standard) backwards; }
+  .ds-pop-in { animation: zds-pop-in 180ms var(--motion-standard) backwards; transform-origin: top right; }
+  .ds-rows-in { animation: zds-row-in 260ms var(--motion-standard) backwards; }
+  .ds-toast-in { animation: zds-pop-in 200ms var(--motion-standard) backwards; }
+  .ds-pulse { animation: zds-pulse 1.8s ease-in-out infinite; }
+
   .sidebar-tab {
     transform: translateX(0);
-    transition: background-color .2s ease, color .2s ease, box-shadow .2s ease,
-                transform .2s var(--ease-shift);
+    transition: background-color 180ms ease, color 180ms ease, transform 180ms var(--motion-emphasized);
   }
+
   .sidebar-tab-active { transform: translateX(3px); }
 
-  /* Accessibility: honour a reduced-motion preference by collapsing every
-     animation/transition to an imperceptible duration (keeps final states). */
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       animation-duration: .001ms !important;
       animation-iteration-count: 1 !important;
-      transition-duration: .001ms !important;
       scroll-behavior: auto !important;
+      transition-duration: .001ms !important;
     }
   }
 }

@@ -30,7 +30,8 @@ describe('Button', () => {
       </Button>,
     )
     const btn = screen.getByRole('button', { name: 'Save' })
-    expect(btn.className).toContain('bg-card')
+    expect(btn.className).toContain('border-outline')
+    expect(btn.className).toContain('rounded-full')
     await user.click(btn)
     expect(onClick).toHaveBeenCalledTimes(1)
   })
@@ -56,7 +57,7 @@ describe('Card', () => {
         <CardBody>hello</CardBody>
       </Card>,
     )
-    expect(screen.getByTestId('card').className).toContain('rounded-card')
+    expect(screen.getByTestId('card').className).toContain('zds-card')
     expect(screen.getByText('Overview')).toBeInTheDocument()
     expect(screen.getByText('hello')).toBeInTheDocument()
   })
@@ -76,7 +77,7 @@ describe('Field', () => {
 
   it('Label applies expected class', () => {
     render(<Label>Name</Label>)
-    expect(screen.getByText('Name').className).toContain('font-semibold')
+    expect(screen.getByText('Name').className).toContain('font-medium')
   })
 })
 
@@ -84,7 +85,7 @@ describe('Badge / Chip / StatusDot', () => {
   it('Badge renders children with tone class', () => {
     render(<Badge tone="green">Healthy</Badge>)
     const badge = screen.getByText('Healthy')
-    expect(badge.className).toContain('text-green')
+    expect(badge.className).toContain('success-container')
   })
 
   it('Chip renders label + value', () => {
@@ -134,7 +135,7 @@ describe('DataLine / SectionLabel', () => {
 
   it('SectionLabel renders its text', () => {
     render(<SectionLabel>Upstreams</SectionLabel>)
-    expect(screen.getByText('Upstreams').className).toContain('uppercase')
+    expect(screen.getByText('Upstreams').className).toContain('tracking-[.06em]')
   })
 })
 
@@ -144,8 +145,8 @@ describe('Toggle', () => {
     const onCheckedChange = vi.fn()
     render(<Toggle checked={false} onCheckedChange={onCheckedChange} aria-label="enable" />)
     const toggle = screen.getByRole('switch')
-    expect(toggle.className).toContain('h-6')
-    expect(toggle.className).toContain('focus-visible:ring-2')
+    expect(toggle.className).toContain('h-8')
+    expect(toggle.className).toContain('data-checked:bg-primary')
     await user.click(toggle)
     expect(onCheckedChange).toHaveBeenCalledWith(true)
   })

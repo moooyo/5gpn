@@ -102,7 +102,7 @@ export function buildLogColumns(t: TFunction): ColumnDef<QueryLogEntry, any>[] {
       cell: ({ row }) => {
         const decision = resolveDecision(row.original)
         return (
-          <span className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold" style={{ color: decision.color }}>
+          <span className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-text-mid">
             <StatusDot color={decision.color} />
             {t(decision.key)}
           </span>

@@ -1,73 +1,52 @@
-import { useMemo } from 'react'
-import { ReactECharts, type EChartsCoreOption } from './echarts'
+import { useId } from 'react'
+import { cn } from '../../lib/cn'
+import { chartPoints, linePath } from './geometry'
 
 export interface DualAreaChartProps {
-  /** 下行 (download) series values, left→right. */
   down: number[]
-  /** 上行 (upload) series values, left→right. */
   up: number[]
   height?: number
-  /** x-axis category labels; defaults to numeric time ticks (0..n-1). */
   labels?: string[]
   className?: string
-  /** Localized series names (tooltip only — the built-in ECharts legend is
-   *  always hidden below since the caller renders its own localized legend
-   *  row). Defaults to empty when omitted. */
   downName?: string
   upName?: string
 }
 
-const DOWN_COLOR = '#2563eb'
-const UP_COLOR = '#38bdf8'
-
-/** Two stacked-line traffic series (down/up) with a shared time axis. */
 export function DualAreaChart({ down, up, height = 164, labels, className, downName = '', upName = '' }: DualAreaChartProps) {
-  const option = useMemo<EChartsCoreOption>(() => {
-    const categories = labels ?? down.map((_, i) => String(i))
-    return {
-      animation: false,
-      // The OverviewPage already renders its own localized legend row next
-      // to this chart — the built-in ECharts legend would just duplicate it
-      // (and previously hardcoded Chinese series names regardless of locale).
-      legend: { show: false },
-      grid: { left: 8, right: 8, top: 12, bottom: 20, containLabel: true },
-      tooltip: { trigger: 'axis', confine: true },
-      xAxis: {
-        type: 'category',
-        data: categories,
-        boundaryGap: false,
-        axisTick: { show: false },
-        axisLine: { show: false },
-      },
-      yAxis: {
-        type: 'value',
-        splitNumber: 3,
-        splitLine: { lineStyle: { type: 'dashed' } },
-        axisLine: { show: false },
-        axisTick: { show: false },
-      },
-      series: [
-        {
-          name: downName,
-          type: 'line',
-          data: down,
-          smooth: true,
-          symbol: 'none',
-          lineStyle: { color: DOWN_COLOR, width: 1.5 },
-          areaStyle: { color: DOWN_COLOR, opacity: 0.12 },
-        },
-        {
-          name: upName,
-          type: 'line',
-          data: up,
-          smooth: true,
-          symbol: 'none',
-          lineStyle: { color: UP_COLOR, width: 1.5 },
-          areaStyle: { color: UP_COLOR, opacity: 0.12 },
-        },
-      ],
-    }
-  }, [down, up, labels, downName, upName])
+  const width = 480
+  const chartHeight = 150
+  const downPoints = chartPoints(down, width, chartHeight, 8)
+  const upPoints = chartPoints(up, width, chartHeight, 8)
+  const downPath = linePath(downPoints)
+  const upPath = linePath(upPoints)
+  const id = useId().replace(/:/g, '')
 
-  return <ReactECharts option={option} className={className} style={{ height, width: '100%' }} />
+  return (
+    <svg
+      viewBox={`0 0 ${width} ${chartHeight}`}
+      preserveAspectRatio="none"
+      className={cn('block w-full', className)}
+      style={{ height }}
+      role="img"
+      aria-label={[downName, upName].filter(Boolean).join(', ')}
+      data-chart="dual-area"
+    >
+      <defs>
+        <linearGradient id={`${id}-down`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="var(--md-sys-color-primary)" stopOpacity=".18" />
+          <stop offset="1" stopColor="var(--md-sys-color-primary)" stopOpacity="0" />
+        </linearGradient>
+        <linearGradient id={`${id}-up`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="var(--md-sys-color-trace)" stopOpacity=".16" />
+          <stop offset="1" stopColor="var(--md-sys-color-trace)" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {[.25, .5, .75].map((fraction) => <line key={fraction} x1="8" x2={width - 8} y1={chartHeight * fraction} y2={chartHeight * fraction} stroke="var(--md-sys-color-outline-variant)" strokeDasharray="3 5" />)}
+      {downPath ? <path d={`${downPath} L ${width - 8} ${chartHeight} L 8 ${chartHeight} Z`} fill={`url(#${id}-down)`} /> : null}
+      {upPath ? <path d={`${upPath} L ${width - 8} ${chartHeight} L 8 ${chartHeight} Z`} fill={`url(#${id}-up)`} /> : null}
+      <path d={downPath} fill="none" stroke="var(--md-sys-color-primary)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      <path d={upPath} fill="none" stroke="var(--md-sys-color-trace)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      {labels?.length ? <title>{labels.join(', ')}</title> : null}
+    </svg>
+  )
 }

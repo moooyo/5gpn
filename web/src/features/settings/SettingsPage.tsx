@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useStatus } from '../../lib/StatusContext'
 import { api } from '../../lib/api/client'
 import type { ECSView, IngressModulesView, TGBotView, UpstreamsView } from '../../lib/api/types'
-import { AboutStrip, ConsoleCard, DotServiceCard, EcsCard, IngressPortsCard, TgbotCard, UpstreamsCard } from './_cards'
+import { AboutStrip, AppearanceCard, ConsoleCard, DotServiceCard, EcsCard, IngressPortsCard, TgbotCard, UpstreamsCard } from './_cards'
 
 /** 设置 (Settings) page — live config cards for the DoT service/cert, the
  *  control-plane console, the Telegram bot, upstream DNS groups and ECS,
@@ -83,9 +83,10 @@ export default function SettingsPage() {
   }, [])
 
   return (
-    <div className="flex max-w-[1180px] flex-col gap-4" data-testid="page-settings">
+    <div className="flex flex-col gap-4" data-testid="page-settings">
+      <AppearanceCard />
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <DotServiceCard cert={status?.cert} />
+        <DotServiceCard cert={status?.cert} dotDomain={status?.dot_domain} />
         <ConsoleCard />
       </div>
       <IngressPortsCard

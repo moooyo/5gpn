@@ -4,8 +4,10 @@ export interface NavItem {
   id: string
   path: string
   labelKey: string
-  icon: string // lucide-react component name, resolved by the consumer
+  icon: NavIcon
 }
+
+export type NavIcon = 'dashboard' | 'setup' | 'logs' | 'resolve' | 'policy' | 'modules' | 'mihomo' | 'config' | 'settings'
 
 export interface NavGroup {
   id: string
@@ -18,33 +20,33 @@ export const NAV_GROUPS: NavGroup[] = [
     id: 'overview',
     labelKey: 'nav.group.overview',
     items: [
-      { id: 'overview', path: '/overview', labelKey: 'nav.overview', icon: 'LayoutGrid' },
-      { id: 'setup-guide', path: '/setup-guide', labelKey: 'nav.setupGuide', icon: 'BookOpenCheck' },
+      { id: 'overview', path: '/overview', labelKey: 'nav.overview', icon: 'dashboard' },
+      { id: 'setup-guide', path: '/setup-guide', labelKey: 'nav.setupGuide', icon: 'setup' },
     ],
   },
   {
     id: 'parse',
     labelKey: 'nav.group.parse',
     items: [
-      { id: 'logs', path: '/logs', labelKey: 'nav.logs', icon: 'ScrollText' },
-      { id: 'resolve-test', path: '/resolve-test', labelKey: 'nav.resolveTest', icon: 'Search' },
+      { id: 'logs', path: '/logs', labelKey: 'nav.logs', icon: 'logs' },
+      { id: 'resolve-test', path: '/resolve-test', labelKey: 'nav.resolveTest', icon: 'resolve' },
     ],
   },
   {
     id: 'rules',
     labelKey: 'nav.group.rules',
     items: [
-      { id: 'policy-rules', path: '/policy-rules', labelKey: 'nav.policyRules', icon: 'ListChecks' },
-      { id: 'modules', path: '/modules', labelKey: 'nav.modules', icon: 'Boxes' },
+      { id: 'policy-rules', path: '/policy-rules', labelKey: 'nav.policyRules', icon: 'policy' },
+      { id: 'modules', path: '/modules', labelKey: 'nav.modules', icon: 'modules' },
     ],
   },
   {
     id: 'system',
     labelKey: 'nav.group.system',
     items: [
-      { id: 'mihomo', path: '/mihomo', labelKey: 'nav.mihomo', icon: 'Gauge' },
-      { id: 'mihomo-config', path: '/mihomo-config', labelKey: 'nav.mihomoConfig', icon: 'FileCode2' },
-      { id: 'settings', path: '/settings', labelKey: 'nav.settings', icon: 'Settings' },
+      { id: 'mihomo', path: '/mihomo', labelKey: 'nav.mihomo', icon: 'mihomo' },
+      { id: 'mihomo-config', path: '/mihomo-config', labelKey: 'nav.mihomoConfig', icon: 'config' },
+      { id: 'settings', path: '/settings', labelKey: 'nav.settings', icon: 'settings' },
     ],
   },
 ]

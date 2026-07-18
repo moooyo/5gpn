@@ -1,22 +1,17 @@
 import { useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Shield } from 'lucide-react'
-import { Card, Field, Input, Button, toast } from '../../components/ds'
+import { ShieldLockIcon } from '../../components/icons'
+import { Button, Card, Field, Input, toast } from '../../components/ds'
 import { api } from '../../lib/api/client'
-import { setToken, clearToken, AuthError, ApiError } from '../../lib/api/http'
+import { ApiError, AuthError, clearToken, setToken } from '../../lib/api/http'
 
-/** Restyled (ds-tokens) login screen. Submitting stores the token, then
- *  probes it with a live call — a bad token throws AuthError, which we
- *  surface as a toast and roll back (clearToken keeps AuthGate on the login
- *  screen). A good token needs no further action here: setToken already
- *  dispatched '5gpn:auth-changed', which flips AuthGate to the app shell. */
 export function LoginPage() {
   const { t } = useTranslation()
   const [value, setValue] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault()
+  async function handleSubmit(event: FormEvent) {
+    event.preventDefault()
     const token = value.trim()
     if (!token || submitting) return
 
@@ -24,12 +19,12 @@ export function LoginPage() {
     setToken(token)
     try {
       await api.getStatus()
-    } catch (err) {
-      if (err instanceof AuthError) {
+    } catch (error) {
+      if (error instanceof AuthError) {
         clearToken()
         toast.error(t('errors.tokenRejected'))
-      } else if (err instanceof ApiError) {
-        toast.error(err.message)
+      } else if (error instanceof ApiError) {
+        toast.error(error.message)
       } else {
         toast.error(t('errors.network'))
       }
@@ -39,35 +34,38 @@ export function LoginPage() {
   }
 
   return (
-    <div className="flex h-screen w-screen items-center justify-center bg-bg">
-      <Card className="w-[360px] p-7">
-        <div className="mb-6 flex flex-col items-center gap-3 text-center">
-          <div
-            className="flex h-12 w-12 items-center justify-center rounded-[12px]"
-            style={{ background: 'linear-gradient(135deg,#3b82f6,#2563eb)' }}
-          >
-            <Shield className="h-6 w-6 text-white" strokeWidth={2} />
+    <main className="grid min-h-dvh w-full place-items-center bg-bg p-4" data-testid="login-page">
+      <Card className="w-full max-w-[410px] rounded-[28px] border-0 p-7 shadow-[var(--md-sys-elevation-2)] sm:p-9">
+        <div className="mb-7 flex flex-col items-center text-center">
+          <div className="mb-4 grid h-16 w-16 place-items-center rounded-full bg-primary-container text-on-primary-container">
+            <ShieldLockIcon className="h-8 w-8" aria-hidden="true" />
           </div>
-          <div className="text-[17px] font-extrabold text-text-strong">{t('auth.title')}</div>
-          <p className="text-[12px] text-text-faint">{t('auth.hint')}</p>
+          <h1 className="text-[23px] font-medium tracking-[-.01em] text-text-strong">{t('auth.title')}</h1>
+          <p className="mt-2 max-w-[300px] text-[12.5px] leading-5 text-text-faint">{t('auth.hint')}</p>
         </div>
 
-        <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
-          <Field label={t('auth.tokenLabel')}>
+        <form className="flex flex-col gap-5" onSubmit={handleSubmit}>
+          <Field label={t('auth.tokenLabel')} supportingText={t('auth.tokenSupporting')}>
             <Input
               type="password"
               autoFocus
               autoComplete="off"
               value={value}
-              onChange={(e) => setValue(e.target.value)}
-              placeholder={t('auth.tokenLabel')}
+              onChange={(event) => setValue(event.target.value)}
+              placeholder={t('auth.tokenPlaceholder')}
+              mono
             />
           </Field>
-          <Button type="submit" variant="primary" disabled={submitting || !value.trim()}>
-            {t('auth.submit')}
+          <Button type="submit" variant="primary" className="w-full" disabled={submitting || !value.trim()}>
+            {submitting ? t('common.loading') : t('auth.submit')}
           </Button>
         </form>
+
+        <div className="mt-7 flex items-center justify-center gap-2 text-[10.5px] text-text-faint">
+          <span className="h-2 w-2 rounded-full bg-green" />
+          {t('auth.apiBoundary')}
+        </div>
       </Card>
-    </div>
+    </main>
   )
 }
