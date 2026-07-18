@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
-import { ArrowDown, ArrowUp, Search } from 'lucide-react'
+import { ArrowDownIcon, ArrowUpIcon, DeleteIcon, EditIcon, SearchIcon } from '../../components/icons'
 import { Badge, type BadgeTone, Button, Card, Input, SegmentedControl, Toggle } from '../../components/ds'
 import { DataGrid, type ColumnDef } from '../../components/data-grid'
 import type { Intent, PolicyRule } from '../../lib/api/types'
+import { useMediaQuery } from '../../lib/useMediaQuery'
 
 const INTENT_TONE: Record<Intent, BadgeTone> = { block: 'red', direct: 'green', proxy: 'blue' }
 type IntentFilter = 'all' | Intent
@@ -61,18 +62,18 @@ function buildColumns(a: ColArgs): ColumnDef<PolicyRule, any>[] {
                   aria-label={a.t('policyRules.table.moveUp')}
                   disabled={idx <= 0}
                   onClick={() => a.onReorder(moveIds(a.rules, idx, -1))}
-                  className="rounded p-1 text-text-faint transition-colors hover:text-primary disabled:cursor-not-allowed disabled:opacity-30"
+                  className="zds-state-layer grid h-8 w-8 place-items-center rounded-full text-text-faint disabled:cursor-not-allowed disabled:opacity-30"
                 >
-                  <ArrowUp className="h-3.5 w-3.5" aria-hidden="true" />
+                  <ArrowUpIcon className="h-4 w-4" aria-hidden="true" />
                 </button>
                 <button
                   type="button"
                   aria-label={a.t('policyRules.table.moveDown')}
                   disabled={idx < 0 || idx >= a.count - 1}
                   onClick={() => a.onReorder(moveIds(a.rules, idx, 1))}
-                  className="rounded p-1 text-text-faint transition-colors hover:text-primary disabled:cursor-not-allowed disabled:opacity-30"
+                  className="zds-state-layer grid h-8 w-8 place-items-center rounded-full text-text-faint disabled:cursor-not-allowed disabled:opacity-30"
                 >
-                  <ArrowDown className="h-3.5 w-3.5" aria-hidden="true" />
+                  <ArrowDownIcon className="h-4 w-4" aria-hidden="true" />
                 </button>
               </div>
             )}
@@ -87,7 +88,7 @@ function buildColumns(a: ColArgs): ColumnDef<PolicyRule, any>[] {
       cell: ({ row }) => (
         <div className="flex items-center gap-2">
           <Badge tone="neutral">{a.t(`policyRules.kind.${row.original.matcher.kind}`)}</Badge>
-          <span className="font-mono text-[12px] text-text-strong">{row.original.matcher.value}</span>
+          <span className="min-w-0 truncate font-mono text-[12px] text-text-strong" title={row.original.matcher.value}>{row.original.matcher.value}</span>
         </div>
       ),
     },
@@ -120,6 +121,7 @@ function buildColumns(a: ColArgs): ColumnDef<PolicyRule, any>[] {
       cell: ({ row }) => (
         <div className="flex items-center justify-end gap-1.5">
           <Button type="button" variant="secondary" size="sm" onClick={() => a.onEdit(row.original)}>
+            <EditIcon className="h-4 w-4" aria-hidden="true" />
             {a.t('common.edit')}
           </Button>
           <Button
@@ -129,6 +131,7 @@ function buildColumns(a: ColArgs): ColumnDef<PolicyRule, any>[] {
             onClick={() => a.onDelete(row.original)}
             aria-label={`${a.t('common.delete')} ${row.original.id}`}
           >
+            <DeleteIcon className="h-4 w-4" aria-hidden="true" />
             {a.t('common.delete')}
           </Button>
         </div>
@@ -152,6 +155,7 @@ export function PolicyRulesTable({ rules, onEdit, onDelete, onToggle, onReorder 
   const { t } = useTranslation()
   const [search, setSearch] = useState('')
   const [intent, setIntent] = useState<IntentFilter>('all')
+  const isMobile = useMediaQuery('(max-width: 767px)')
   const filtering = search.trim() !== '' || intent !== 'all'
 
   const indexById = useMemo(() => new Map(rules.map((r, i) => [r.id, i])), [rules])
@@ -175,8 +179,8 @@ export function PolicyRulesTable({ rules, onEdit, onDelete, onToggle, onReorder 
   })
 
   return (
-    <Card className="overflow-hidden p-0">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-divider px-4 py-3">
+    <Card className="overflow-hidden p-0 shadow-none">
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-surface-container-low px-4 py-3.5">
         <SegmentedControl
           value={intent}
           onChange={(v) => setIntent(v as IntentFilter)}
@@ -184,11 +188,12 @@ export function PolicyRulesTable({ rules, onEdit, onDelete, onToggle, onReorder 
             value: i,
             label: i === 'all' ? t('policyRules.table.filterAll') : t(`policyRules.intent.${i}`),
           }))}
-          className="w-full sm:w-[320px]"
+          className="w-full grid-cols-4 sm:w-[360px]"
+          ariaLabel={t('policyRules.table.colIntent')}
         />
-        <div className="relative">
-          <Search
-            className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-text-faint"
+        <div className="relative w-full sm:w-60">
+          <SearchIcon
+            className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-text-faint"
             aria-hidden="true"
           />
           <Input
@@ -196,7 +201,7 @@ export function PolicyRulesTable({ rules, onEdit, onDelete, onToggle, onReorder 
             onChange={(e) => setSearch(e.target.value)}
             placeholder={t('policyRules.table.searchPlaceholder')}
             data-testid="policy-rules-search"
-            className="w-56 pl-9"
+            className="w-full rounded-full pl-10"
           />
         </div>
       </div>
@@ -205,9 +210,42 @@ export function PolicyRulesTable({ rules, onEdit, onDelete, onToggle, onReorder 
           {t('policyRules.table.reorderDisabledHint')}
         </div>
       ) : null}
-      <div className="max-h-[560px] overflow-auto">
-        <DataGrid columns={columns} data={filtered} emptyText={t('policyRules.table.empty')} />
-      </div>
+      {isMobile ? (
+        <div className="divide-y divide-border">
+          {filtered.length === 0 ? <div className="p-8 text-center text-[12px] text-text-faint">{t('policyRules.table.empty')}</div> : filtered.map((rule) => {
+            const index = indexById.get(rule.id) ?? -1
+            return (
+              <article key={rule.id} className="p-4">
+                <div className="flex items-start gap-3">
+                  <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-surface-container font-mono text-[11px] text-text-faint">{index + 1}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge tone="neutral">{t(`policyRules.kind.${rule.matcher.kind}`)}</Badge>
+                      <Badge tone={INTENT_TONE[rule.intent]}>{t(`policyRules.intent.${rule.intent}`)}</Badge>
+                    </div>
+                    <div className="mt-2 break-all font-mono text-[12px] text-text-strong">{rule.matcher.value}</div>
+                  </div>
+                  <Toggle checked={rule.enabled} onCheckedChange={() => onToggle(rule)} aria-label={t('policyRules.table.colEnabled')} />
+                </div>
+                <div className="mt-3 flex items-center justify-end gap-1">
+                  {!filtering ? (
+                    <>
+                      <button type="button" aria-label={t('policyRules.table.moveUp')} disabled={index <= 0} onClick={() => onReorder(moveIds(rules, index, -1))} className="zds-state-layer grid h-9 w-9 place-items-center rounded-full text-text-soft disabled:opacity-30"><ArrowUpIcon className="h-4 w-4" /></button>
+                      <button type="button" aria-label={t('policyRules.table.moveDown')} disabled={index < 0 || index >= rules.length - 1} onClick={() => onReorder(moveIds(rules, index, 1))} className="zds-state-layer grid h-9 w-9 place-items-center rounded-full text-text-soft disabled:opacity-30"><ArrowDownIcon className="h-4 w-4" /></button>
+                    </>
+                  ) : null}
+                  <Button variant="ghost" size="sm" onClick={() => onEdit(rule)}><EditIcon className="h-4 w-4" />{t('common.edit')}</Button>
+                  <Button variant="danger" size="sm" onClick={() => onDelete(rule)}><DeleteIcon className="h-4 w-4" />{t('common.delete')}</Button>
+                </div>
+              </article>
+            )
+          })}
+        </div>
+      ) : (
+        <div className="max-h-[560px] overflow-auto">
+          <DataGrid columns={columns} data={filtered} emptyText={t('policyRules.table.empty')} />
+        </div>
+      )}
     </Card>
   )
 }

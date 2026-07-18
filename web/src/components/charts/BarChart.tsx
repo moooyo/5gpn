@@ -1,62 +1,68 @@
-import { useMemo } from 'react'
-import { ReactECharts, type EChartsCoreOption } from './echarts'
+import { cn } from '../../lib/cn'
 
 export interface BarSeries {
-  /** Localized series name — tooltip only, the built-in legend is always
-   *  hidden below (callers render their own legend, matching `DualAreaChart`). */
   name: string
   data: number[]
   color: string
 }
 
 export interface BarChartProps {
-  /** x-axis category labels, one per group (e.g. china/trust). */
   categories: string[]
   series: BarSeries[]
   height?: number
   className?: string
 }
 
-/** A grouped bar chart (N named series across shared categories) — for the
- *  上游健康与延迟 card's ok/err counts per upstream group. Mirrors
- *  `DualAreaChart`'s shape (own legend, hidden built-in one, shared grid/axis
- *  styling) with `type: 'bar'` series instead of `'line'`. */
 export function BarChart({ categories, series, height = 160, className }: BarChartProps) {
-  const option = useMemo<EChartsCoreOption>(
-    () => ({
-      animation: false,
-      legend: { show: false },
-      grid: { left: 8, right: 8, top: 12, bottom: 20, containLabel: true },
-      tooltip: { trigger: 'axis', confine: true, axisPointer: { type: 'shadow' } },
-      xAxis: {
-        type: 'category',
-        data: categories,
-        axisTick: { show: false },
-        axisLine: { show: false },
-      },
-      yAxis: {
-        type: 'value',
-        splitNumber: 3,
-        minInterval: 1,
-        splitLine: { lineStyle: { type: 'dashed' } },
-        axisLine: { show: false },
-        axisTick: { show: false },
-        // Hidden: the tiny count numbers pushed the plot area right and threw
-        // the per-bar labels below out of alignment; the dashed splitlines +
-        // tooltip convey the scale. Keeps the two bars symmetric so the
-        // latency labels (grid-cols-2) sit centered under each.
-        axisLabel: { show: false },
-      },
-      series: series.map((s) => ({
-        name: s.name,
-        type: 'bar',
-        data: s.data,
-        barMaxWidth: 28,
-        itemStyle: { color: s.color, borderRadius: [4, 4, 0, 0] },
-      })),
-    }),
-    [categories, series],
-  )
+  const width = 360
+  const plotTop = 10
+  const plotBottom = 34
+  const plotHeight = 120 - plotTop - plotBottom
+  const max = Math.max(1, ...series.flatMap((item) => item.data).map((value) => Number.isFinite(value) ? Math.max(0, value) : 0))
+  const groupWidth = width / Math.max(1, categories.length)
+  const barWidth = Math.min(28, (groupWidth - 28) / Math.max(1, series.length))
 
-  return <ReactECharts option={option} className={className} style={{ height, width: '100%' }} />
+  return (
+    <svg
+      viewBox={`0 0 ${width} 120`}
+      preserveAspectRatio="none"
+      className={cn('block w-full', className)}
+      style={{ height }}
+      role="img"
+      aria-label={categories.join(', ')}
+      data-chart="bar"
+    >
+      {[.25, .5, .75].map((fraction) => (
+        <line key={fraction} x1="8" x2={width - 8} y1={plotTop + plotHeight * fraction} y2={plotTop + plotHeight * fraction} stroke="var(--md-sys-color-outline-variant)" strokeDasharray="3 4" />
+      ))}
+      {categories.map((category, categoryIndex) => {
+        const totalBarsWidth = series.length * barWidth + Math.max(0, series.length - 1) * 6
+        const start = categoryIndex * groupWidth + (groupWidth - totalBarsWidth) / 2
+        return (
+          <g key={category}>
+            {series.map((item, seriesIndex) => {
+              const value = Math.max(0, item.data[categoryIndex] ?? 0)
+              const barHeight = (value / max) * plotHeight
+              return (
+                <rect
+                  key={`${category}-${item.name}`}
+                  x={start + seriesIndex * (barWidth + 6)}
+                  y={plotTop + plotHeight - barHeight}
+                  width={barWidth}
+                  height={barHeight}
+                  rx="5"
+                  fill={item.color}
+                >
+                  <title>{`${category} · ${item.name}: ${value}`}</title>
+                </rect>
+              )
+            })}
+            <text x={categoryIndex * groupWidth + groupWidth / 2} y="112" textAnchor="middle" fill="var(--md-sys-color-on-surface-variant)" fontSize="11">
+              {category}
+            </text>
+          </g>
+        )
+      })}
+    </svg>
+  )
 }

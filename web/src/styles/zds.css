@@ -1,0 +1,168 @@
+@layer utilities.zds {
+  .zds-surface {
+    background: var(--md-sys-color-surface);
+    color: var(--md-sys-color-on-surface);
+  }
+
+  .zds-surface-low {
+    background: var(--md-sys-color-surface-container-low);
+    color: var(--md-sys-color-on-surface);
+  }
+
+  .zds-card {
+    border: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 62%, transparent);
+    border-radius: 16px;
+    background: var(--md-sys-color-surface);
+    box-shadow: var(--md-sys-elevation-1);
+    color: var(--md-sys-color-on-surface);
+  }
+
+  .zds-card-tonal {
+    border-color: transparent;
+    background: var(--md-sys-color-surface-container-low);
+    box-shadow: none;
+  }
+
+  .zds-card-hero {
+    border-color: transparent;
+    border-radius: 24px;
+    background: var(--md-sys-color-primary-container);
+    box-shadow: none;
+    color: var(--md-sys-color-on-primary-container);
+  }
+
+  .zds-dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+    min-height: 100dvh;
+    background: var(--md-sys-color-scrim);
+    transition: opacity 160ms linear;
+  }
+
+  .zds-dialog-backdrop[data-starting-style],
+  .zds-dialog-backdrop[data-ending-style] {
+    opacity: 0;
+  }
+
+  .zds-dialog-popup {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    z-index: 71;
+    width: min(560px, calc(100vw - 32px));
+    max-height: min(90dvh, 760px);
+    overflow: auto;
+    translate: -50% -50%;
+    border-radius: 28px;
+    background: var(--md-sys-color-surface);
+    box-shadow: var(--md-sys-elevation-3);
+    color: var(--md-sys-color-on-surface);
+    transition: opacity 180ms var(--motion-standard), scale 180ms var(--motion-standard);
+  }
+
+  .zds-dialog-popup[data-starting-style],
+  .zds-dialog-popup[data-ending-style] {
+    opacity: 0;
+    scale: .96;
+  }
+
+  .zds-navigation-drawer {
+    position: fixed;
+    z-index: 71;
+    inset-block: 0;
+    inset-inline-start: 0;
+    width: min(86vw, 272px);
+    overflow: hidden;
+    border-radius: 0 24px 24px 0;
+    background: var(--md-sys-color-background);
+    box-shadow: var(--md-sys-elevation-3);
+    transition: opacity 220ms var(--motion-standard), translate 220ms var(--motion-standard);
+  }
+
+  .zds-navigation-drawer[data-starting-style],
+  .zds-navigation-drawer[data-ending-style] {
+    opacity: .75;
+    translate: -100% 0;
+  }
+
+  .zds-menu-popup {
+    z-index: 80;
+    min-width: 220px;
+    max-width: min(360px, calc(100vw - 24px));
+    border: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 72%, transparent);
+    border-radius: 16px;
+    background: var(--md-sys-color-surface);
+    box-shadow: var(--md-sys-elevation-3);
+    color: var(--md-sys-color-on-surface);
+    transform-origin: var(--transform-origin);
+    transition: opacity 150ms var(--motion-standard), scale 150ms var(--motion-standard);
+  }
+
+  .zds-menu-popup[data-starting-style],
+  .zds-menu-popup[data-ending-style] {
+    opacity: 0;
+    scale: .96;
+  }
+
+  .zds-state-layer {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+  }
+
+  .zds-state-layer::before {
+    position: absolute;
+    z-index: -1;
+    inset: 0;
+    border-radius: inherit;
+    background: currentColor;
+    content: '';
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 140ms linear;
+  }
+
+  .zds-state-layer:hover::before { opacity: .08; }
+  .zds-state-layer:active::before { opacity: .12; }
+  .zds-state-layer:focus-visible::before { opacity: .1; }
+
+  .zds-trace-rail {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(var(--trace-steps, 3), minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .zds-trace-rail::before {
+    position: absolute;
+    top: 15px;
+    right: calc(50% / var(--trace-steps, 3));
+    left: calc(50% / var(--trace-steps, 3));
+    height: 2px;
+    background: var(--md-sys-color-outline-variant);
+    content: '';
+  }
+
+  .zds-trace-node {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    text-align: center;
+  }
+
+  .zds-trace-dot {
+    display: grid;
+    width: 32px;
+    height: 32px;
+    place-items: center;
+    border: 4px solid var(--md-sys-color-surface);
+    border-radius: 50%;
+    background: var(--md-sys-color-primary-container);
+    color: var(--md-sys-color-on-primary-container);
+  }
+}

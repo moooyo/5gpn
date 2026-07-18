@@ -1,4 +1,5 @@
-import * as SwitchPrimitive from '@radix-ui/react-switch'
+import { Switch } from '@base-ui/react/switch'
+import { CheckIcon } from '../icons'
 import { cn } from '../../lib/cn'
 
 export interface ToggleProps {
@@ -12,21 +13,29 @@ export interface ToggleProps {
 
 export function Toggle({ checked, onCheckedChange, disabled, className, title, ...aria }: ToggleProps) {
   return (
-    <SwitchPrimitive.Root
+    <Switch.Root
+      nativeButton
+      render={<button type="button" />}
       checked={checked}
-      onCheckedChange={onCheckedChange}
+      onCheckedChange={(next) => onCheckedChange(next)}
       disabled={disabled}
       title={title}
       className={cn(
-        'relative h-6 w-10 shrink-0 cursor-pointer rounded-full bg-input-border p-1 outline-none transition-colors',
-        'focus-visible:ring-2 focus-visible:ring-primary/35',
-        'data-[state=checked]:bg-primary',
-        'disabled:cursor-not-allowed disabled:opacity-50',
+        'relative h-8 w-[52px] shrink-0 cursor-pointer rounded-full border-2 border-outline bg-surface-container-high p-0 outline-none',
+        'transition-[background-color,border-color] duration-150 data-checked:border-primary data-checked:bg-primary',
+        'disabled:cursor-not-allowed disabled:opacity-[.38]',
         className,
       )}
       {...aria}
     >
-      <SwitchPrimitive.Thumb className="block h-4 w-4 shrink-0 translate-x-0 rounded-full bg-white shadow-sm transition-transform data-[state=checked]:translate-x-4" />
-    </SwitchPrimitive.Root>
+      <Switch.Thumb
+        className={cn(
+          'absolute left-1 top-1/2 grid h-4 w-4 -translate-y-1/2 place-items-center rounded-full bg-outline text-primary',
+          'transition-[width,height,translate,background-color] duration-150 data-checked:h-6 data-checked:w-6 data-checked:translate-x-5 data-checked:bg-[var(--md-sys-color-on-primary)]',
+        )}
+      >
+        {checked ? <CheckIcon className="h-3.5 w-3.5" aria-hidden="true" /> : null}
+      </Switch.Thumb>
+    </Switch.Root>
   )
 }

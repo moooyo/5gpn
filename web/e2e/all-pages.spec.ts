@@ -28,16 +28,12 @@ test('ProfileMenu dropdown + theme + language switch stay CSP-clean', async ({ p
   await page.goto('/overview')
   await page.waitForLoadState('networkidle')
 
-  // Open the ProfileMenu dropdown (A-M6 react-remove-scroll consumer
-  // coverage) — the trigger button's accessible name is topbar.admin
-  // ("admin" in both locales; see ProfileMenu.tsx).
-  await page.getByRole('button', { name: /admin/i }).click()
+  // The Base UI profile menu is loaded on demand to keep its focus and
+  // positioning runtime out of the initial bundle.
+  await page.getByRole('button', { name: /打开控制台菜单|Open console menu/i }).click()
 
   // Switch language to English via the language SegmentedControl, then
-  // theme to dark via the theme SegmentedControl — both render as
-  // role="tab" buttons inside the open dropdown (see ProfileMenu.tsx /
-  // SegmentedControl.tsx). The theme label is localized ("Dark" once the
-  // language switch above lands, "深色" if it hadn't), so match either.
+  // theme to dark via the five-theme catalog.
   await page.getByRole('tab', { name: 'English' }).click()
   await page.getByRole('tab', { name: /^(dark|深色)$/i }).click()
 

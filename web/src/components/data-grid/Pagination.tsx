@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next'
-import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { ChevronLeftIcon, ChevronRightIcon } from '../icons'
 import { cn } from '../../lib/cn'
 
 export interface PaginationProps {
@@ -17,7 +17,7 @@ export function Pagination({ page, pageCount, onPageChange, className }: Paginat
   const canPrev = page > 1
   const canNext = page < pageCount
   const btn =
-    'inline-flex items-center gap-1 rounded-[7px] px-2 py-1 text-[11.5px] text-text-soft outline-none enabled:hover:bg-input disabled:opacity-40'
+    'zds-state-layer inline-flex h-8 items-center gap-1 rounded-full px-3 text-[11.5px] text-text-soft outline-none disabled:opacity-40'
   return (
     <div className={cn('flex items-center justify-end gap-2 border-t border-divider px-4 py-2', className)}>
       <button
@@ -27,7 +27,7 @@ export function Pagination({ page, pageCount, onPageChange, className }: Paginat
         onClick={() => onPageChange(page - 1)}
         className={btn}
       >
-        <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
+        <ChevronLeftIcon className="h-3.5 w-3.5" aria-hidden="true" />
         {t('common.pagePrev')}
       </button>
       <span data-testid="pagination-status" className="font-mono text-[11px] tabular-nums text-text-faint">
@@ -41,7 +41,7 @@ export function Pagination({ page, pageCount, onPageChange, className }: Paginat
         className={btn}
       >
         {t('common.pageNext')}
-        <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+        <ChevronRightIcon className="h-3.5 w-3.5" aria-hidden="true" />
       </button>
     </div>
   )

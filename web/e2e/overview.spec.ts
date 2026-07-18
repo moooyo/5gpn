@@ -10,17 +10,15 @@ test('overview page renders the live QPS + decision-distribution charts with zer
 
   // QPS and decision distribution both come from /api/status.
   await expect(page.getByText('决策分布', { exact: true })).toBeVisible()
-  await expect(page.getByText('拦截')).toBeVisible()
+  await expect(page.getByText('拦截', { exact: true })).toBeVisible()
   await expect(page.getByText('QPS 实时', { exact: true })).toBeVisible()
 
-  // ECharts (CanvasRenderer, core-only registration) actually
-  // renders real <canvas> elements under the strict production CSP — the
-  // proof this e2e exists for. Three charts at this commit: the compact QPS
-  // metric-card sparkline, the larger "QPS 实时" sparkline, and the 决策分布
-  // donut.
-  await page.waitForFunction(() => document.querySelectorAll('canvas').length >= 3)
-  const canvasCount = await page.locator('canvas').count()
-  expect(canvasCount).toBeGreaterThanOrEqual(3)
+  // All dashboard charts are build-time SVG, with no canvas runtime or eval.
+  await expect(page.locator('[data-chart="sparkline"]')).toHaveCount(1)
+  await expect(page.locator('[data-chart="donut"]')).toHaveCount(2)
+  await expect(page.locator('[data-chart="gauge"]')).toHaveCount(1)
+  await expect(page.locator('[data-chart="bar"]')).toHaveCount(1)
+  await expect(page.locator('canvas')).toHaveCount(0)
 
   expect(await csp.all()).toEqual([])
 })

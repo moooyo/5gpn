@@ -78,11 +78,11 @@ export function WLOCInterceptCard({
   }
 
   return (
-    <Card className="p-[18px]" data-testid="wloc-intercept-card">
+    <Card variant="tonal" className="p-5 sm:p-6" data-testid="wloc-intercept-card">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[13px] font-bold text-text-strong">{t('settings.wlocTitle')}</span>
+            <span className="text-[16px] font-medium text-text-strong">{t('settings.wlocTitle')}</span>
             <Badge tone={enabled && routeEnabled ? 'green' : enabled ? 'amber' : 'neutral'}>
               {enabled && routeEnabled ? t('settings.wlocActive') : enabled ? t('settings.wlocAwaitingRoute') : t('settings.ingressDisabled')}
             </Badge>
@@ -100,7 +100,7 @@ export function WLOCInterceptCard({
         />
       </div>
 
-      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
         <Field label={t('settings.wlocLongitude')}>
           <Input aria-label={t('settings.wlocLongitude')} type="number" step="any" min={-180} max={180} value={longitude} onChange={(event) => setLongitude(event.target.value)} disabled={!value || saving} />
         </Field>
@@ -112,7 +112,7 @@ export function WLOCInterceptCard({
         </Field>
       </div>
 
-      <div className="mt-3 flex flex-col gap-3 rounded-[10px] border border-divider bg-input/40 p-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="mt-4 flex flex-col gap-3 rounded-[14px] bg-card p-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <div className="text-[11px] font-semibold text-text-mid">{t('settings.wlocFailClosed')}</div>
           <p className="mt-0.5 text-[10.5px] text-text-faint">{t('settings.wlocFailClosedHint')}</p>
@@ -120,8 +120,8 @@ export function WLOCInterceptCard({
         <Toggle checked={failClosed} onCheckedChange={setFailClosed} disabled={!value || saving} aria-label={t('settings.wlocFailClosed')} />
       </div>
 
-      {error ? <div role="alert" className="mt-3 rounded-lg border border-red/25 bg-red/5 px-3 py-2 text-[10.5px] text-red">{error}</div> : null}
-      <div className="mt-3 flex justify-end border-t border-divider pt-3">
+      {error ? <div role="alert" className="mt-3 rounded-[12px] bg-[var(--md-sys-color-error-container)] px-3 py-2.5 text-[11px] text-[var(--md-sys-color-on-error-container)]">{error}</div> : null}
+      <div className="mt-4 flex justify-end border-t border-divider pt-4">
         <Button
           type="button"
           size="sm"

@@ -27,9 +27,10 @@ test('settings page renders all config cards with zero CSP violations', async ({
   // Installer-owned controls stay read-only in the web console.
   const domainInput = page.getByLabel('DoT 域名')
   await expect(domainInput).toBeDisabled()
-  await expect(domainInput).toHaveAttribute('title', '请通过安装/管理 TUI 配置')
-  const changePwBtn = page.getByRole('button', { name: '修改密码' })
-  await expect(changePwBtn).toBeDisabled()
+  await expect(domainInput).toHaveValue('dot.example.test')
+  await expect(page.getByText('API 鉴权')).toBeVisible()
+  await expect(page.getByText('Bearer', { exact: true })).toBeVisible()
+  await expect(page.getByTestId('appearance-card')).toBeVisible()
 
   expect(await csp.all()).toEqual([])
 })

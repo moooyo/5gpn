@@ -1,6 +1,6 @@
-import type { ReactNode } from 'react'
-import * as DialogPrimitive from '@radix-ui/react-dialog'
-import { X } from 'lucide-react'
+import { useEffect, type ReactNode } from 'react'
+import { Dialog } from '@base-ui/react/dialog'
+import { CloseIcon } from '../icons'
 import { cn } from '../../lib/cn'
 
 export interface ModalProps {
@@ -14,31 +14,34 @@ export interface ModalProps {
 }
 
 export function Modal({ open, onOpenChange, title, descriptionId, children, footer, className }: ModalProps) {
+  useEffect(() => {
+    if (!open) return
+    document.body.classList.add('ds-scroll-locked')
+    return () => document.body.classList.remove('ds-scroll-locked')
+  }, [open])
+
   return (
-    <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
-      <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 bg-[rgba(16,24,40,.35)]" />
-        <DialogPrimitive.Content
-          aria-describedby={descriptionId}
-          className={cn(
-            'fixed left-1/2 top-1/2 w-[min(92vw,480px)] -translate-x-1/2 -translate-y-1/2 rounded-card border border-border bg-card p-5 shadow-pop',
-            className,
-          )}
-        >
-          <div className="mb-3 flex items-center justify-between">
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Backdrop className="zds-dialog-backdrop" />
+        <Dialog.Popup aria-describedby={descriptionId} className={cn('zds-dialog-popup p-6', className)}>
+          <div className="mb-4 flex items-start justify-between gap-4">
             {title !== undefined ? (
-              <DialogPrimitive.Title className="text-[15px] font-bold text-text-strong">{title}</DialogPrimitive.Title>
+              <Dialog.Title className="text-[20px] font-medium leading-7 text-text-strong">{title}</Dialog.Title>
             ) : (
-              <DialogPrimitive.Title className="sr-only">Dialog</DialogPrimitive.Title>
+              <Dialog.Title className="sr-only">Dialog</Dialog.Title>
             )}
-            <DialogPrimitive.Close aria-label="Close" className="cursor-pointer text-text-soft outline-none">
-              <X className="h-4 w-4" />
-            </DialogPrimitive.Close>
+            <Dialog.Close
+              aria-label="Close"
+              className="zds-state-layer -mr-2 -mt-2 grid h-10 w-10 shrink-0 cursor-pointer place-items-center rounded-full text-text-soft"
+            >
+              <CloseIcon className="h-5 w-5" aria-hidden="true" />
+            </Dialog.Close>
           </div>
           {children}
-          {footer !== undefined ? <div className="mt-4 flex items-center justify-end gap-2">{footer}</div> : null}
-        </DialogPrimitive.Content>
-      </DialogPrimitive.Portal>
-    </DialogPrimitive.Root>
+          {footer !== undefined ? <div className="mt-6 flex flex-wrap items-center justify-end gap-2">{footer}</div> : null}
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
   )
 }

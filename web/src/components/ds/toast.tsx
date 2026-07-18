@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { CheckCircle2, Info, XCircle } from 'lucide-react'
+import { CheckCircleIcon, ErrorIcon, InfoIcon } from '../icons'
 import { cn } from '../../lib/cn'
 
 export type ToastKind = 'success' | 'error' | 'info'
@@ -12,16 +12,14 @@ interface ToastItem {
 }
 
 const DISMISS_MS = 3500
-
 let items: ToastItem[] = []
-const listeners = new Set<(items: ToastItem[]) => void>()
+const listeners = new Set<(next: ToastItem[]) => void>()
 
 function emit() {
-  const snapshot = items
-  listeners.forEach((listener) => listener(snapshot))
+  listeners.forEach((listener) => listener(items))
 }
 
-function subscribe(listener: (items: ToastItem[]) => void): () => void {
+function subscribe(listener: (next: ToastItem[]) => void): () => void {
   listeners.add(listener)
   return () => listeners.delete(listener)
 }
@@ -33,7 +31,7 @@ function dismiss(id: number) {
 
 function push(kind: ToastKind, message: string) {
   const id = Date.now() + Math.random()
-  items = [...items, { id, kind, message }]
+  items = [...items, { id, kind, message }].slice(-4)
   emit()
   setTimeout(() => dismiss(id), DISMISS_MS)
 }
@@ -44,10 +42,10 @@ export const toast = {
   info: (message: string) => push('info', message),
 }
 
-const KIND_ICON: Record<ToastKind, typeof CheckCircle2> = {
-  success: CheckCircle2,
-  error: XCircle,
-  info: Info,
+const KIND_ICON = {
+  success: CheckCircleIcon,
+  error: ErrorIcon,
+  info: InfoIcon,
 }
 
 const KIND_COLOR: Record<ToastKind, string> = {
@@ -58,22 +56,24 @@ const KIND_COLOR: Record<ToastKind, string> = {
 
 export function Toaster() {
   const [current, setCurrent] = useState<ToastItem[]>(() => items)
-
   useEffect(() => subscribe(setCurrent), [])
 
   return createPortal(
-    <div className="fixed bottom-4 right-4 z-[60] flex flex-col gap-2 items-end">
+    <div
+      className="pointer-events-none fixed bottom-4 left-4 right-4 z-[90] flex flex-col items-end gap-2 sm:left-auto sm:max-w-[420px]"
+      aria-live="polite"
+      aria-atomic="false"
+    >
       {current.map((item) => {
         const Icon = KIND_ICON[item.kind]
         return (
           <div
             key={item.id}
-            className={cn(
-              'ds-toast-in flex min-w-[220px] max-w-[360px] items-center gap-2 rounded-[10px] border border-border bg-card px-3.5 py-2.5 text-[12.5px] shadow-pop',
-            )}
+            role={item.kind === 'error' ? 'alert' : 'status'}
+            className="ds-toast-in pointer-events-auto flex w-full items-center gap-3 rounded-[12px] bg-[var(--md-sys-color-inverse-surface)] px-4 py-3 text-[13px] text-[var(--md-sys-color-inverse-on-surface)] shadow-pop sm:min-w-[280px]"
           >
-            <Icon className={cn('h-4 w-4 shrink-0', KIND_COLOR[item.kind])} />
-            <span className="text-text-strong">{item.message}</span>
+            <Icon className={cn('h-5 w-5 shrink-0', KIND_COLOR[item.kind])} aria-hidden="true" />
+            <span className="min-w-0 flex-1">{item.message}</span>
           </div>
         )
       })}

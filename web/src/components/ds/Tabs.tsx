@@ -1,4 +1,4 @@
-import * as TabsPrimitive from '@radix-ui/react-tabs'
+import { Tabs as BaseTabs } from '@base-ui/react/tabs'
 import { cn } from '../../lib/cn'
 
 export interface TabItem {
@@ -13,31 +13,23 @@ export interface TabsProps {
   className?: string
 }
 
-// Triggers only — the tab panel content is rendered by the caller based on `value`.
 export function Tabs({ value, onValueChange, items, className }: TabsProps) {
   return (
-    <TabsPrimitive.Root value={value} onValueChange={onValueChange}>
-      <TabsPrimitive.List className={cn('flex', className)}>
-        {items.map((item) => {
-          const active = item.value === value
-          return (
-            <TabsPrimitive.Trigger
-              key={item.value}
-              value={item.value}
-              className={cn(
-                // font-weight stays constant across states: a bold-vs-semibold
-                // swap on activation changes the label's width and makes the
-                // tab row jitter. The active tab is distinguished by colour +
-                // the primary underline, not by getting heavier.
-                'cursor-pointer border-b-[2.5px] px-4 pb-3.5 pt-3 text-[13px] font-semibold outline-none',
-                active ? 'border-primary text-primary' : 'border-transparent text-text-soft',
-              )}
-            >
-              {item.label}
-            </TabsPrimitive.Trigger>
-          )
-        })}
-      </TabsPrimitive.List>
-    </TabsPrimitive.Root>
+    <BaseTabs.Root value={value} onValueChange={(next) => onValueChange(String(next))}>
+      <BaseTabs.List className={cn('flex gap-1 rounded-full bg-surface-container p-1', className)}>
+        {items.map((item) => (
+          <BaseTabs.Tab
+            key={item.value}
+            value={item.value}
+            className={(state) => cn(
+              'zds-state-layer min-h-9 cursor-pointer rounded-full px-4 text-[12.5px] font-medium outline-none transition-colors',
+              state.active ? 'bg-secondary-container text-on-secondary-container' : 'text-text-soft',
+            )}
+          >
+            {item.label}
+          </BaseTabs.Tab>
+        ))}
+      </BaseTabs.List>
+    </BaseTabs.Root>
   )
 }

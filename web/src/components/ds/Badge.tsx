@@ -3,17 +3,14 @@ import { cn } from '../../lib/cn'
 
 export type BadgeTone = 'green' | 'blue' | 'red' | 'amber' | 'cyan' | 'indigo' | 'neutral'
 
-// Tint classes map 1:1 to the @theme color tokens in styles/theme.css so the
-// rendered rgba matches the handoff exactly (green=--color-green, blue=--color-primary,
-// amber=--color-amber-2, cyan=--color-cyan-3, indigo=--color-indigo, neutral=divider/text-soft).
 const toneClass: Record<BadgeTone, string> = {
-  green: 'bg-green/10 text-green',
-  blue: 'bg-primary/10 text-primary',
-  red: 'bg-red/10 text-red',
-  amber: 'bg-amber-2/12 text-amber-2',
-  cyan: 'bg-cyan-3/12 text-cyan-3',
-  indigo: 'bg-indigo/12 text-indigo',
-  neutral: 'bg-divider text-text-soft',
+  green: 'bg-[var(--md-sys-color-success-container)] text-[var(--md-sys-color-on-success-container)]',
+  blue: 'bg-primary-container text-on-primary-container',
+  red: 'bg-[var(--md-sys-color-error-container)] text-[var(--md-sys-color-on-error-container)]',
+  amber: 'bg-[var(--md-sys-color-warning-container)] text-[var(--md-sys-color-on-warning-container)]',
+  cyan: 'bg-secondary-container text-on-secondary-container',
+  indigo: 'bg-tertiary-container text-tertiary',
+  neutral: 'bg-surface-container text-text-soft',
 }
 
 export interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
@@ -22,10 +19,7 @@ export interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
 
 export function Badge({ tone = 'neutral', className, children, ...props }: BadgeProps) {
   return (
-    <span
-      className={cn('inline-flex items-center rounded-[7px] px-2.5 py-1 text-[11px] font-semibold', toneClass[tone], className)}
-      {...props}
-    >
+    <span className={cn('badge h-auto rounded-full border-0 px-3 py-1 text-[11px] font-medium', toneClass[tone], className)} {...props}>
       {children}
     </span>
   )
@@ -39,12 +33,7 @@ export interface ChipProps {
 
 export function Chip({ label, value, className }: ChipProps) {
   return (
-    <span
-      className={cn(
-        'inline-flex items-center gap-1 rounded-[6px] border border-border bg-input px-2 py-0.5 text-[10.5px] text-text-mid',
-        className,
-      )}
-    >
+    <span className={cn('inline-flex items-center gap-1 rounded-[8px] bg-surface-container px-2.5 py-1 text-[10.5px] text-text-mid', className)}>
       {label !== undefined ? <span className="font-mono text-text-faint">{label}</span> : null}
       <span>{value}</span>
     </span>
@@ -57,14 +46,10 @@ export interface StatusDotProps {
   className?: string
 }
 
-// `color` is a runtime value (per-row health status etc.) so it is applied via
-// inline style, never a runtime-injected <style> tag. The pulse animation itself
-// is a static, build-time class (`ds-pulse`) backed by the `@keyframes pulse`
-// declared in styles/index.css's base layer.
 export function StatusDot({ color, pulse, className }: StatusDotProps) {
   return (
     <span
-      className={cn('inline-block h-[7px] w-[7px] rounded-full', pulse && 'ds-pulse', className)}
+      className={cn('inline-block h-2 w-2 rounded-full', pulse && 'ds-pulse', className)}
       style={{ background: color } satisfies CSSProperties}
     />
   )

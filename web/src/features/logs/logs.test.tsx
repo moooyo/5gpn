@@ -94,7 +94,7 @@ describe('LogsPage', () => {
 
     const table = await screen.findByTestId('virtual-scroll')
     const label = within(table).getByText('国内直连')
-    expect(label.style.color).toBe('rgb(8, 145, 178)') // #0891b2
+    expect(label.className).toContain('text-text-mid')
     const dot = label.querySelector('span')
     expect(dot?.style.background).toBe('rgb(8, 145, 178)')
   })
@@ -105,7 +105,7 @@ describe('LogsPage', () => {
 
     const table = await screen.findByTestId('virtual-scroll')
     const label = within(table).getByText('拦截')
-    expect(label.style.color).toBe('rgb(220, 38, 38)') // #dc2626
+    expect(label.className).toContain('text-text-mid')
     const dot = label.querySelector('span')
     expect(dot?.style.background).toBe('rgb(220, 38, 38)')
   })

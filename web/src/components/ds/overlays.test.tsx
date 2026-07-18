@@ -5,9 +5,8 @@ import userEvent from '@testing-library/user-event'
 import { DropdownItem, DropdownMenu, DropdownSeparator, Modal, Select } from './index'
 
 // Count of <style> elements anywhere in the document — the CSP proxy assertion.
-// react-remove-scroll (aliased to the Task 2.0 shim) is the only thing that would
-// inject one; Radix's own positioning uses inline style="" attributes, which are
-// allowed by style-src-attr 'unsafe-inline' and don't add <style> elements.
+// Base UI positioning uses inline style attributes (allowed by style-src-attr),
+// while the Select wrapper disables Base UI's optional scrollbar style element.
 const styleCount = () => document.querySelectorAll('style').length
 
 describe('Modal', () => {
@@ -78,12 +77,8 @@ describe('Select', () => {
     expect(await screen.findByRole('option', { name: 'Alpha' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'Beta' })).toBeInTheDocument()
 
-    // Rebuilt on Radix DropdownMenu (Task 2B-fix): @radix-ui/react-select's
-    // <Select.Viewport> unconditionally injected a literal scrollbar-hider
-    // <style> element with no way to disable it — a real violation under the
-    // production `style-src-elem 'self'` CSP. DropdownMenu injects none (see
-    // the DropdownMenu tests below), so this must now be EXACT zero, not the
-    // old known-shape allowance.
+    // The DS wrapper sets Base UI's CSPProvider disableStyleElements flag, so
+    // the optional scrollbar-hider style never appears under strict CSP.
     expect(styleCount()).toBe(before)
   })
 
