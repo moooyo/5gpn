@@ -3753,11 +3753,30 @@ start_services() {
     # Start mihomo first so DNS cannot advertise gateway answers before the
     # data-plane listener is live. Any enable/start/readiness failure is fatal;
     # full_install must never print success for a broken deployment.
-    local svc failed=0
+    local svc failed=0 check_rc=0
     for svc in 5gpn-intercept mihomo 5gpn-dns; do
         if ! systemctl enable "$svc" >/dev/null 2>&1; then
             err "could not enable $svc (check: systemctl status $svc)."
             failed=1
+        fi
+        if [[ "$svc" == 5gpn-intercept ]]; then
+            if "$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --check-enabled >/dev/null 2>&1; then
+                :
+            else
+                check_rc=$?
+                if [[ "$check_rc" == 3 ]]; then
+                    if systemctl stop 5gpn-intercept.service 2>/dev/null; then
+                        ok "5gpn-intercept remains stopped because MITM is disabled."
+                    else
+                        err "could not stop disabled 5gpn-intercept (check: journalctl -u 5gpn-intercept)."
+                        failed=1
+                    fi
+                    continue
+                fi
+                err "could not validate the MITM master setting before starting 5gpn-intercept."
+                failed=1
+                continue
+            fi
         fi
         if ! systemctl restart "$svc" 2>/dev/null && ! systemctl start "$svc" 2>/dev/null; then
             err "could not start $svc (check: journalctl -u $svc)."

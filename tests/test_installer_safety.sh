@@ -564,6 +564,40 @@ else
     pass "service start failure propagates as a non-zero installer result"
 fi
 
+# A disabled MITM service is a successful steady state. systemd reports a
+# skipped ExecCondition as a non-zero start, so start_services must inspect the
+# persisted master setting before attempting restart/start.
+if (
+    calls="$TMP/disabled-mitm-systemctl.log"
+    check_bin="$TMP/5gpn-intercept-check"
+    cat > "$check_bin" <<'EOF'
+#!/bin/sh
+case " $* " in
+    *' --check-enabled '*) exit 3 ;;
+esac
+exit 0
+EOF
+    chmod +x "$check_bin"
+    INTERCEPT_BIN="$check_bin"
+    INTERCEPT_DIR="$TMP/intercept-disabled"
+    MIHOMO_LISTEN_IPS=10.20.30.40
+    resolve_mihomo_listen_ips() { printf '%s\n' "$1"; }
+    cfg_get() { return 0; }
+    wait_service_ready() { return 0; }
+    systemctl() {
+        printf '%s\n' "$*" >> "$calls"
+        return 0
+    }
+    start_services >/dev/null 2>&1
+    grep -Fxq 'enable 5gpn-intercept' "$calls"
+    grep -Fxq 'stop 5gpn-intercept.service' "$calls"
+    ! grep -Eq '^(restart|start) 5gpn-intercept($|\.service)' "$calls"
+); then
+    pass "disabled MITM remains stopped without failing service activation"
+else
+    fail "disabled MITM was started or treated as an activation failure"
+fi
+
 # Public/certificate DNS is fail-closed and always uses the independent
 # resolver instead of the host's possibly synthetic resolver.
 CONSOLE_DOMAIN=console.example.com
