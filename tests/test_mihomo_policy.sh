@@ -23,6 +23,11 @@ check install.sh 'mihomo\.service' 'install_units installs mihomo.service'
 # Task 3: mihomo config template shape
 T=etc/mihomo/config.yaml.tmpl
 check "$T" '__MIHOMO_LISTENERS__'                      'dynamic local-listener placeholder'
+SNI_REGRESSION=tests/mihomo-sniff-cache-regression.sh
+check "$SNI_REGRESSION" '__INTERCEPT_INBOUND_USERNAME__'  'sniff-cache fixture renders interception inbound username'
+check "$SNI_REGRESSION" '__INTERCEPT_INBOUND_PASSWORD__'  'sniff-cache fixture renders interception inbound password'
+check "$SNI_REGRESSION" '__INTERCEPT_UPSTREAM_USERNAME__' 'sniff-cache fixture renders interception upstream username'
+check "$SNI_REGRESSION" '__INTERCEPT_UPSTREAM_PASSWORD__' 'sniff-cache fixture renders interception upstream password'
 check "$T" 'external-controller: ""'                   'plaintext controller disabled in seed'
 check "$T" 'external-controller-tls: 127\.0\.0\.1:9090' 'TLS controller loopback listener'
 check "$T" 'certificate: /etc/5gpn/cert/zash/current/fullchain\.pem' 'controller TLS certificate key pinned'
