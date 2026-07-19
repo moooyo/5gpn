@@ -374,7 +374,7 @@ export function IngressPortsCard({
           const blocksQUIC = module.id === 'block-quic-443'
           return (
             <div key={module.id} className="rounded-[16px] bg-surface-container-low p-4" data-testid={`ingress-module-${module.id}`}>
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-[12.5px] font-semibold text-text-mid">{t(`settings.ingressModules.${module.id}.name`)}</span>
