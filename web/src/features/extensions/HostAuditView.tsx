@@ -33,11 +33,11 @@ export function HostAuditView({
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<HostFilter>('all')
 
-  const activeHosts = useMemo(() => new Set(view.active_hosts ?? []), [view.active_hosts])
+  const activeHosts = useMemo(() => new Set(view.active_capture_hosts ?? []), [view.active_capture_hosts])
   const declarations = useMemo(() => {
     const owners = new Map<string, number>()
     for (const module of view.modules) {
-      for (const host of module.hosts) owners.set(host, (owners.get(host) ?? 0) + 1)
+      for (const host of module.capture_hosts) owners.set(host, (owners.get(host) ?? 0) + 1)
     }
     return owners
   }, [view.modules])
@@ -47,7 +47,7 @@ export function HostAuditView({
     return view.modules.flatMap((module) => {
       if (moduleID && module.id !== moduleID) return []
       const moduleMatch = `${module.name} ${module.source_url ?? ''} ${module.source_digest}`.toLocaleLowerCase().includes(needle)
-      const entries = module.hosts
+      const entries = module.capture_hosts
         .map((host) => ({
           host,
           active: activeHosts.has(host),
@@ -67,8 +67,8 @@ export function HostAuditView({
     }).sort((left, right) => Number(right.module.ready) - Number(left.module.ready) || left.module.name.localeCompare(right.module.name))
   }, [activeHosts, declarations, filter, moduleID, query, view.modules])
 
-  const declaredCount = view.modules.reduce((count, module) => count + module.hosts.length, 0)
-  const wildcardCount = view.modules.reduce((count, module) => count + module.hosts.filter((host) => host.startsWith('*.')).length, 0)
+  const declaredCount = view.modules.reduce((count, module) => count + module.capture_hosts.length, 0)
+  const wildcardCount = view.modules.reduce((count, module) => count + module.capture_hosts.filter((host) => host.startsWith('*.')).length, 0)
 
   return (
     <div className="flex flex-col gap-4" data-testid="host-audit-view">
@@ -77,7 +77,7 @@ export function HostAuditView({
           [t('extensions.hostAudit.declared'), declaredCount],
           [t('extensions.hostAudit.active'), activeHosts.size],
           [t('extensions.hostAudit.wildcards'), wildcardCount],
-          [t('extensions.hostAudit.extensions'), view.modules.filter((module) => module.hosts.length > 0).length],
+          [t('extensions.hostAudit.extensions'), view.modules.filter((module) => module.capture_hosts.length > 0).length],
         ].map(([label, value]) => (
           <Card key={String(label)} className="p-4 shadow-none">
             <div className="text-[10.5px] font-medium text-text-faint">{label}</div>
@@ -141,7 +141,7 @@ export function HostAuditView({
                   <ShieldLockIcon className="h-4.5 w-4.5" aria-hidden="true" />
                 </span>
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-[13px] font-medium text-text-strong">{module.id === 'builtin-wloc' ? t('settings.wlocTitle') : module.name}</div>
+                  <div className="truncate text-[13px] font-medium text-text-strong">{module.name}</div>
                   <div className="mt-0.5 truncate font-mono text-[9.5px] text-text-faint">{module.snapshot_digest}</div>
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5">

@@ -71,12 +71,6 @@ export const api = {
     MOCK
       ? mock.putMITMSettings(update)
       : apiFetch<T.MITMSettingsView>('/api/interception/settings', { method: 'PUT', body: JSON.stringify(update) }),
-  getWLOCIntercept: () =>
-    MOCK ? mock.getWLOCIntercept() : apiFetch<T.WLOCInterceptView>('/api/interception/wloc'),
-  putWLOCIntercept: (update: T.WLOCInterceptUpdate) =>
-    MOCK
-      ? mock.putWLOCIntercept(update)
-      : apiFetch<T.WLOCInterceptView>('/api/interception/wloc', { method: 'PUT', body: JSON.stringify(update) }),
   getInterceptModules: () =>
     MOCK ? mock.getInterceptModules() : apiFetch<T.InterceptModulesView>('/api/interception/modules'),
   getInterceptModuleSnapshot: (id: string) =>
@@ -118,6 +112,10 @@ export const api = {
           method: 'DELETE',
           body: JSON.stringify({ revision }),
         }),
+  searchCities: (query: string, language: string, signal?: AbortSignal) =>
+    MOCK
+      ? mock.searchCities(query, language)
+      : apiFetch<T.CitySearchResult[]>(`/api/geocode/cities?q=${encodeURIComponent(query)}&lang=${encodeURIComponent(language)}`, { signal }),
 
   // ---- unified policy rules ----------------------------------------------
   getPolicyRules: () => (MOCK ? mock.getPolicyRules() : apiFetch<T.PolicyRule[]>('/api/policy/rules')),

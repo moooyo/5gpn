@@ -82,7 +82,7 @@ type Handler struct {
 	// interceptHosts is a system-owned overlay published only after an explicit
 	// interception-module transaction has installed the matching certificate
 	// and mihomo rules. It is evaluated before the operator policy so a module
-	// cannot be enabled while its declared MITM host still resolves directly.
+	// cannot be enabled while its declared capture host still resolves directly.
 	interceptHosts atomic.Pointer[interceptHostSnapshot]
 
 	// CN is a construction-time test seam. Runtime publishes it through

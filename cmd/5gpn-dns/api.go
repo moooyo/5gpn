@@ -130,6 +130,9 @@ type ControlServer struct {
 	// which can race.
 	mihomoAppliedAtMu sync.Mutex
 	mihomoAppliedAt   time.Time
+
+	geocodeHTTP     *http.Client
+	geocodeEndpoint string
 }
 
 // NewControlServer builds a ControlServer from cfg and ctrl.
@@ -155,14 +158,16 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 	}
 
 	s := &ControlServer{
-		ctrl:           ctrl,
-		token:          cfg.APIToken,
-		startTime:      time.Now(),
-		limiter:        newRateLimiter(cfg.APIRate, cfg.APIBurst),
-		dotDomain:      cfg.DotDomain,
-		zashDomain:     cfg.ZashDomain,
-		mihomoProxy:    unavailableMihomoProxy(),
-		interceptStore: NewInterceptConfigStore(cfg.InterceptConfigFile),
+		ctrl:            ctrl,
+		token:           cfg.APIToken,
+		startTime:       time.Now(),
+		limiter:         newRateLimiter(cfg.APIRate, cfg.APIBurst),
+		dotDomain:       cfg.DotDomain,
+		zashDomain:      cfg.ZashDomain,
+		mihomoProxy:     unavailableMihomoProxy(),
+		interceptStore:  NewInterceptConfigStore(cfg.InterceptConfigFile),
+		geocodeHTTP:     newGeocodeHTTPClient(nil),
+		geocodeEndpoint: defaultGeocodeEndpoint,
 	}
 
 	webUI, err := newWebUIHandler(cfg.WebDir)
@@ -287,17 +292,15 @@ func buildPanelServer(addr string, handler http.Handler, certFile, keyFile strin
 // by default-src 'self', but the explicit allowance survives any future
 // tightening of default-src.
 //
-// connect-src 'self' is explicit for the same reason: the StatusContext poll
-// fetches same-origin /api/mihomo/health, and the mihomo-logs monitoring view
-// opens a ticket-gated same-origin wss:// to /proxy/logs. Both are already
-// same-origin and would be allowed by default-src 'self', but spelling out
-// connect-src means fetch/WebSocket allowance survives any future tightening
-// of default-src, matching the worker-src/font-src precedent above.
+// connect-src keeps the control plane, city-search projection, and log socket
+// same-origin. img-src permits only the fixed OpenStreetMap tile origin used by
+// the location setting editor. No third-party script, style, or browser-fetch
+// origin is added.
 func securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Content-Security-Policy",
-			"default-src 'self'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; style-src-elem 'self'; style-src-attr 'unsafe-inline'; worker-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
+			"default-src 'self'; img-src 'self' data: https://tile.openstreetmap.org; font-src 'self'; style-src 'self' 'unsafe-inline'; style-src-elem 'self'; style-src-attr 'unsafe-inline'; worker-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
@@ -373,8 +376,6 @@ func (s *ControlServer) apiMux() http.Handler {
 	mux.HandleFunc("PUT /api/mihomo/ingress-modules/{id}", s.handleMihomoIngressModulePut)
 	mux.HandleFunc("GET /api/interception/settings", s.handleInterceptSettingsGet)
 	mux.HandleFunc("PUT /api/interception/settings", s.handleInterceptSettingsPut)
-	mux.HandleFunc("GET /api/interception/wloc", s.handleInterceptWLOCGet)
-	mux.HandleFunc("PUT /api/interception/wloc", s.handleInterceptWLOCPut)
 	mux.HandleFunc("GET /api/interception/modules", s.handleInterceptModulesGet)
 	mux.HandleFunc("GET /api/interception/modules/{id}", s.handleInterceptModuleSnapshotGet)
 	mux.HandleFunc("POST /api/interception/modules/import", s.handleInterceptModulesImport)
@@ -382,6 +383,7 @@ func (s *ControlServer) apiMux() http.Handler {
 	mux.HandleFunc("POST /api/interception/modules/{id}/update-apply", s.handleInterceptModuleUpdateApply)
 	mux.HandleFunc("PUT /api/interception/modules/{id}", s.handleInterceptModulePut)
 	mux.HandleFunc("DELETE /api/interception/modules/{id}", s.handleInterceptModuleDelete)
+	mux.HandleFunc("GET /api/geocode/cities", s.handleGeocodeCities)
 
 	return mux
 }

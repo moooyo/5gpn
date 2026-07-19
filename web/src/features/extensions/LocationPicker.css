@@ -1,0 +1,64 @@
+@import 'leaflet/dist/leaflet.css' layer(components);
+
+@layer utilities.zds {
+  .extension-location-map.leaflet-container {
+    min-height: 300px;
+    border-radius: 18px;
+    background: var(--md-sys-color-surface-container);
+    font-family: 'MiSans-VF', system-ui, sans-serif;
+  }
+
+  .extension-location-map .leaflet-control-zoom,
+  .extension-location-map .leaflet-control-attribution {
+    border: 0;
+    border-radius: 12px;
+    box-shadow: var(--md-sys-elevation-1);
+  }
+
+  .extension-location-map .leaflet-control-zoom a {
+    color: var(--md-sys-color-primary);
+    background: var(--md-sys-color-surface);
+  }
+
+  .extension-location-map .leaflet-control-attribution {
+    color: var(--md-sys-color-on-surface-variant);
+    background: color-mix(in srgb, var(--md-sys-color-surface) 88%, transparent);
+  }
+
+  .extension-location-pin {
+    position: relative;
+    width: 28px !important;
+    height: 36px !important;
+    border: 0;
+    background: transparent;
+  }
+
+  .extension-location-pin::before {
+    position: absolute;
+    top: 1px;
+    left: 3px;
+    width: 22px;
+    height: 22px;
+    content: '';
+    transform: rotate(45deg);
+    border: 3px solid var(--md-sys-color-on-primary);
+    border-radius: 50% 50% 50% 8px;
+    background: var(--md-sys-color-primary);
+    box-shadow: var(--md-sys-elevation-2);
+  }
+
+  .extension-location-pin::after {
+    position: absolute;
+    top: 9px;
+    left: 11px;
+    width: 6px;
+    height: 6px;
+    content: '';
+    border-radius: 50%;
+    background: var(--md-sys-color-on-primary);
+  }
+
+  @media (max-width: 639px) {
+    .extension-location-map.leaflet-container { min-height: 250px; }
+  }
+}

@@ -152,64 +152,48 @@ export interface MITMSettingsUpdate {
   quic_fallback_protection: boolean
 }
 
-export interface WLOCInterceptView {
-  revision: string
-  enabled: boolean
-  longitude: number | null
-  latitude: number | null
+export type InterceptSettingType = 'text' | 'select' | 'boolean' | 'number' | 'location'
+export interface InterceptLocationValue {
+  longitude?: number
+  latitude?: number
   accuracy: number
-  fail_closed: boolean
-  max_body_bytes: number
-  hosts: string[]
 }
-
-export interface WLOCInterceptUpdate {
-  revision: string
-  enabled: boolean
-  longitude: number | null
-  latitude: number | null
-  accuracy: number
-  fail_closed: boolean
-  max_body_bytes: number
-}
-
-export type InterceptModuleCompatibility = 'full' | 'partial' | 'needs_configuration' | 'incompatible'
-export interface InterceptModuleParameter {
+export interface InterceptModuleSetting {
   key: string
-  kind: 'input' | 'select'
+  type: InterceptSettingType
+  label?: string
+  description?: string
+  required: boolean
   options?: string[]
-  value?: string
+  min?: number
+  max?: number
+  default?: unknown
+  value?: unknown
 }
-export interface InterceptHostMapping { pattern: string; target: string }
-export interface InterceptCompatibilityIssue { severity: 'warning' | 'error'; message: string }
+export interface InterceptHostMapping { host: string; target: string }
 export interface InterceptModule {
   id: string
+  extension_version: string
   name: string
   description?: string
   enabled: boolean
   ready: boolean
   reason?: string
-  compatibility: InterceptModuleCompatibility
-  partial_allowed: boolean
-  hosts: string[]
+  capture_hosts: string[]
   script_count: number
-  rewrite_count: number
-  unsupported?: string[]
-  incompatible?: string[]
-  issues?: InterceptCompatibilityIssue[]
-  parameters?: InterceptModuleParameter[]
-  host_mappings?: InterceptHostMapping[]
+  settings?: InterceptModuleSetting[]
+  upstream_mappings?: InterceptHostMapping[]
+  persistent_storage: boolean
   source_url?: string
   source_digest: string
   snapshot_digest: string
   imported_at?: string
-  argument?: string
 }
 export interface InterceptModulesView {
   revision: string
   catalog_url: string
   modules: InterceptModule[]
-  active_hosts: string[]
+  active_capture_hosts: string[]
 }
 export interface InterceptScriptSnapshot {
   id: string
@@ -233,14 +217,19 @@ export interface InterceptModuleImport {
 export interface InterceptModuleUpdate {
   revision: string
   enabled?: boolean
-  argument?: string
-  partial_allowed?: boolean
-  parameters?: Record<string, string>
+  settings?: Record<string, unknown>
 }
 export interface InterceptModuleUpdateCheck {
   revision: string
   state: 'unchanged' | 'available'
   candidate?: InterceptModule
+}
+
+export interface CitySearchResult {
+  place_id: number
+  display_name: string
+  lat: string
+  lon: string
 }
 
 // ---- Unified policy rules -----------------------------------------------

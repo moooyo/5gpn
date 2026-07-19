@@ -259,17 +259,7 @@ export async function setupMockApi(page: Page): Promise<void> {
   let blockQUICEnabled = true
   let mihomoText = MIHOMO_CONFIG_TEXT
   let revision = mihomoRevision(mihomoText)
-  let wlocIntercept: T.WLOCInterceptView = {
-    revision: '1000000000000000000000000000000000000000000000000000000000000001',
-    enabled: false,
-    longitude: null,
-    latitude: null,
-    accuracy: 25,
-    fail_closed: true,
-    max_body_bytes: 8388608,
-    hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'],
-  }
-  let interceptRevision = wlocIntercept.revision
+  let interceptRevision = '1000000000000000000000000000000000000000000000000000000000000001'
   let mitmSettings: T.MITMSettingsView = {
     revision: interceptRevision,
     enabled: false,
@@ -278,32 +268,35 @@ export async function setupMockApi(page: Page): Promise<void> {
   }
   let interceptModules: T.InterceptModule[] = [
     {
-      id: 'builtin-wloc', name: 'Apple WLOC response rewriting', enabled: false, ready: true,
-      compatibility: 'full', partial_allowed: false, hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'],
-      script_count: 1, rewrite_count: 0, source_digest: 'a'.repeat(64), snapshot_digest: 'a'.repeat(64),
+      id: 'io.5gpn.apple-wloc', extension_version: '1.0.0', name: 'Apple WLOC Location Override', enabled: false, ready: false, reason: 'settings-required',
+      capture_hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'], script_count: 1,
+      settings: [
+        { key: 'location', type: 'location', label: 'Target location', required: true, value: { accuracy: 25 } },
+        { key: 'failClosed', type: 'boolean', label: 'Block on transformation failure', required: true, value: true },
+      ],
+      persistent_storage: false, source_url: 'https://raw.githubusercontent.com/moooyo/5gpn/main/extensions/apple-wloc/extension.yaml',
+      source_digest: 'a'.repeat(64), snapshot_digest: 'a'.repeat(64),
     },
     {
-      id: 'mod-1234567890abcdef', name: 'Response Cleaner', description: 'Synthetic Loon fixture',
-      enabled: false, ready: true, compatibility: 'full', partial_allowed: false, hosts: ['api.example.com'],
-      script_count: 1, rewrite_count: 0, source_url: 'https://example.com/test.lpx',
-      source_digest: 'b'.repeat(64), snapshot_digest: 'b'.repeat(64), imported_at: '2026-07-18T00:00:00Z', argument: '',
+      id: 'io.example.response-cleaner', extension_version: '1.0.0', name: 'Response Cleaner', description: 'Synthetic native extension fixture',
+      enabled: false, ready: true, capture_hosts: ['api.example.com'], script_count: 1, settings: [], persistent_storage: false,
+      source_url: 'https://example.com/extension.yaml', source_digest: 'b'.repeat(64), snapshot_digest: 'b'.repeat(64), imported_at: '2026-07-18T00:00:00Z',
     },
   ]
 
   const currentInterceptModules = (): T.InterceptModulesView => ({
     revision: interceptRevision,
-    catalog_url: 'https://hub.kelee.one/',
-    active_hosts: mitmSettings.enabled ? interceptModules.filter((module) => module.enabled).flatMap((module) => module.hosts) : [],
+    catalog_url: 'https://github.com/moooyo/5gpn/tree/main/extensions',
+    active_capture_hosts: mitmSettings.enabled ? interceptModules.filter((module) => module.enabled).flatMap((module) => module.capture_hosts) : [],
     modules: interceptModules.map((module) => ({
       ...module,
-      ready: mitmSettings.enabled && module.compatibility !== 'incompatible' && module.compatibility !== 'needs_configuration',
-      reason: mitmSettings.enabled ? module.reason : 'mitm-disabled',
+      ready: mitmSettings.enabled && module.reason !== 'settings-required',
+      reason: module.reason === 'settings-required' ? 'settings-required' : mitmSettings.enabled ? undefined : 'mitm-disabled',
     })),
   })
 
   const advanceInterceptRevision = (): void => {
     interceptRevision = (BigInt(`0x${interceptRevision}`) + 1n).toString(16).padStart(64, '0')
-    wlocIntercept.revision = interceptRevision
     mitmSettings.revision = interceptRevision
   }
 
@@ -411,29 +404,19 @@ export async function setupMockApi(page: Page): Promise<void> {
       mitmSettings = { ...body, revision: interceptRevision }
       return json(route, mitmSettings)
     }
-    if (path === '/api/interception/wloc' && method === 'GET') {
-      return json(route, wlocIntercept)
-    }
-    if (path === '/api/interception/wloc' && method === 'PUT') {
-      const body = route.request().postDataJSON() as T.WLOCInterceptUpdate
-      if (body.revision !== wlocIntercept.revision) return json(route, wlocIntercept, 409)
-      advanceInterceptRevision()
-      wlocIntercept = { ...wlocIntercept, ...body, revision: interceptRevision }
-      const builtIn = interceptModules.find((module) => module.id === 'builtin-wloc')
-      if (builtIn) builtIn.enabled = body.enabled
-      return json(route, wlocIntercept)
-    }
     if (path === '/api/interception/modules' && method === 'GET') {
       return json(route, currentInterceptModules())
+    }
+    if (path === '/api/geocode/cities' && method === 'GET') {
+      return json(route, [{ place_id: 1, display_name: '深圳市, 广东省, 中国', lat: '22.544577', lon: '113.94114' }])
     }
     if (path === '/api/interception/modules/import' && method === 'POST') {
       const body = route.request().postDataJSON() as T.InterceptModuleImport
       if (body.revision !== interceptRevision) return json(route, { error: 'interception module revision changed' }, 409)
       interceptModules = [...interceptModules, {
-        id: 'mod-fedcba0987654321', name: 'Imported module snapshot',
-        enabled: false, ready: true, compatibility: 'full', partial_allowed: false,
-        hosts: ['service.example.test'], script_count: 1, rewrite_count: 0, source_url: body.url,
-        source_digest: 'c'.repeat(64), snapshot_digest: 'c'.repeat(64), imported_at: '2026-07-18T01:00:00Z', argument: '',
+        id: 'io.example.imported', extension_version: '1.0.0', name: 'Imported native extension',
+        enabled: false, ready: true, capture_hosts: ['service.example.test'], script_count: 1, settings: [], persistent_storage: false, source_url: body.url,
+        source_digest: 'c'.repeat(64), snapshot_digest: 'c'.repeat(64), imported_at: '2026-07-18T01:00:00Z',
       }]
       advanceInterceptRevision()
       return json(route, currentInterceptModules(), 201)
@@ -449,9 +432,9 @@ export async function setupMockApi(page: Page): Promise<void> {
         revision: interceptRevision,
         state: 'available',
         candidate: {
-          ...module, id: 'mod-fedcba0987654321', name: `${module.name} update`, enabled: false,
-          ready: true, reason: undefined, partial_allowed: false, source_digest: 'e'.repeat(64), snapshot_digest: 'f'.repeat(64),
-          imported_at: '2026-07-19T00:00:00Z', hosts: [...module.hosts],
+          ...module, extension_version: '1.1.0', enabled: false,
+          ready: true, reason: undefined, source_digest: 'e'.repeat(64), snapshot_digest: 'f'.repeat(64),
+          imported_at: '2026-07-19T00:00:00Z', capture_hosts: [...module.capture_hosts],
         },
       } satisfies T.InterceptModuleUpdateCheck)
     }
@@ -464,8 +447,8 @@ export async function setupMockApi(page: Page): Promise<void> {
       if (interceptModules[index].enabled) return json(route, { error: 'disable the extension before applying an update' }, 400)
       if (body.snapshot_digest !== 'f'.repeat(64)) return json(route, { error: 'reviewed candidate changed' }, 409)
       interceptModules[index] = {
-        ...interceptModules[index], id: 'mod-fedcba0987654321', name: `${interceptModules[index].name} update`,
-        enabled: false, ready: true, reason: undefined, partial_allowed: false,
+        ...interceptModules[index], extension_version: '1.1.0',
+        enabled: false, ready: true, reason: undefined,
         source_digest: 'e'.repeat(64), snapshot_digest: body.snapshot_digest, imported_at: '2026-07-19T00:00:00Z',
       }
       advanceInterceptRevision()
@@ -479,8 +462,8 @@ export async function setupMockApi(page: Page): Promise<void> {
       return json(route, {
         id, name: module.name, source_url: module.source_url,
         source_digest: module.source_digest,
-        source_body: id === 'builtin-wloc' ? 'Built into the 5gpn-intercept binary.' : '#!name=Response Cleaner\n[MITM]\nhostname=api.example.com\n',
-        scripts: id === 'builtin-wloc' ? [] : [{ id: 'script-001', url: 'https://example.com/clean.js', digest: 'd'.repeat(64), body: '$done({body: $response.body});' }],
+        source_body: 'apiVersion: 5gpn.io/v1\nkind: Extension\n',
+        scripts: [{ id: 'action', url: 'https://example.com/action.js', digest: 'd'.repeat(64), body: 'function transform(context) { return { response: { body: context.response.body } } }' }],
       } satisfies T.InterceptModuleSnapshot)
     }
     if (moduleMatch && method === 'PUT') {
@@ -489,11 +472,10 @@ export async function setupMockApi(page: Page): Promise<void> {
       const module = interceptModules.find((candidate) => candidate.id === decodeURIComponent(moduleMatch[1]))
       if (!module) return json(route, { error: 'interception module not found' }, 404)
       if (body.enabled !== undefined) module.enabled = body.enabled
-      if (body.argument !== undefined) module.argument = body.argument
-      if (body.partial_allowed !== undefined) module.partial_allowed = body.partial_allowed
-      if (body.parameters !== undefined && module.parameters) {
-        module.parameters = module.parameters.map((parameter) => ({ ...parameter, value: body.parameters?.[parameter.key] ?? '' }))
-        if (module.parameters.every((parameter) => parameter.value)) module.compatibility = (module.issues?.length ?? 0) > 0 ? 'partial' : 'full'
+      if (body.settings !== undefined && module.settings) {
+        module.settings = module.settings.map((setting) => ({ ...setting, value: body.settings?.[setting.key] }))
+        module.reason = undefined
+        module.ready = true
       }
       advanceInterceptRevision()
       return json(route, currentInterceptModules())

@@ -34,7 +34,7 @@
   · 其余 SNI/QUIC → mihomo 内置嗅探器（sniffer）取域名，经 5gpn-dns 的回环 Egress DNS
     Broker (127.0.0.1:5354) re-resolves through DNS_EGRESS_RESOLVER
     (operational default: plain-UDP 22.22.22.22)
-  · enabled interception module host + MITM master on → authenticated SOCKS5 TCP/UDP → 5gpn-intercept
+  · enabled native extension capture host + MITM master on → authenticated SOCKS5 TCP/UDP → 5gpn-intercept
     (configurable TLS/H1/H2 + QUIC v1/v2/HTTP3 termination or QUIC fallback protection) →
     authenticated SOCKS5 TCP/UDP → mihomo intercept-egress → operator egress
         │
@@ -47,7 +47,7 @@
 Modular MITM uses a completely separate private root CA. It is not
 part of the public lineage above and never replaces the DoT or console
 certificate. Only the root-owned certificate publisher can use its signing key
-to create a leaf for the enabled module host set; the runtime sidecar cannot
+to create a leaf for the enabled extension capture-host set; the runtime sidecar cannot
 read that key.
 
 | 场景 | DNS 行为 | 数据路径 |
@@ -72,12 +72,13 @@ read that key.
   - **HTTPS REST API + React Web 控制台 + iOS 描述文件**：console SPA 资源与 profile 下载公开，所有 API 需 bearer token；iOS/Android 配置说明、二维码与下载入口统一位于控制台“配置向导”；zashboard 仍由 mihomo `whitelist.txt` 来源白名单保护。
   - **zashboard 面板**：同样经 mihomo SNI 分流 + 白名单暴露到本机另一回环端口。
   - **进程内 Telegram bot**（`github.com/go-telegram/bot`，管理员门控，直接调 `Controller`、不走 HTTP/token）。
-  - **插件控制一致性**：Console `/extensions` 与 Telegram 插件菜单调用同一个事务管理器；启用或关闭会一并更新证书、mihomo 规则和 DNS 引流，任一步失败都会回滚或保持旧状态。`/extensions/hosts` 提供按插件分组的 MITM Host 审计。
+  - **插件控制一致性**：Console `/extensions` 与 Telegram 插件菜单调用同一个事务管理器；启用或关闭会一并更新证书、mihomo 规则和 DNS 引流，任一步失败都会回滚或保持旧状态。`/extensions/hosts` 提供按插件分组的接管域名审计。
   - **Mihomo controller TLS**：zash 证书角色由 zashboard 与 mihomo controller 共用。`DNS_MIHOMO_CONTROLLER` 是回环拨号地址；客户端以派生的 `zash.<base>` 校验 TLS 身份并信任 `DNS_ZASH_CERT`。Mihomo v1.19.28 通过只读 `SAFE_PATHS=/etc/5gpn/cert/zash` 读取位于 `-d /etc/5gpn/mihomo` 外的证书。普通重装逐字节保留已通过校验的 operator-owned 配置；若 verified controller transport 无法构造，DNS 与其余控制面继续运行，Mihomo 健康、配置和代理端点返回 unavailable/503，绝不降级到明文 HTTP。
 - **出口由 mihomo 原生配置拥有**：被代理流量经 mihomo 的 `tunnel` 监听 + 内置嗅探器透明转发；完整 `/etc/5gpn/mihomo/config.yaml` 由运维者管理，默认 `Proxies` 组只有 `DIRECT`，也可加入 mihomo 支持的应用层节点/组。The allowlisted module sidecar is the only TLS-termination exception, and every transformed upstream returns through mihomo. DNS 策略只决定“是否进入网关”，绝不生成 mihomo 出口。仍禁止 TUN/TProxy、WireGuard、fwmark、策略路由表或把本项目变成客户端默认路由器。
 - **Explicit alternate Web ports**: the initial mihomo seed accepts TCP `:8080` and `:8443` in addition to `:80` and `:443`. HTTP Host or TLS SNI replaces the synthetic gateway destination while preserving the accepted port. This does not provide arbitrary-port, raw-UDP, no-SNI, or ECH-inner-name forwarding.
 - **Ingress modules**: Settings exposes a fixed, explicit catalog backed by the complete operator-owned mihomo YAML. The `speedtest-5060` module is enabled in fresh and explicitly reset seeds, adding TCP/UDP `:5060`, a same-port `console.<base>:5060` forced-sniff target, HTTP/TLS/QUIC sniffing, and port-scoped rejects for the loopback console panels. Operators can disable or re-enable it with revision checks, full `mihomo -t` validation, backup, atomic publication, and hot-apply rollback. Its hostname target isolates malformed traffic from the other default ingress ports. TCP needs a visible Host/SNI and UDP supports recognizable QUIC only — Ookla native UDP and other raw UDP remain unsupported. Because `5060` is also a common SIP port and the listener is an unauthenticated Host/SNI relay, restrict its sources with the provider security group or an independently managed firewall.
-- **Modular Loon HTTP interception**: the dedicated Console page imports one HTTPS Loon plugin URL, `loon://import?plugin=…` deep link, pasted plugin, or local upload into immutable SHA-256 snapshots. Bounded Loon-store compatibility headers are automatic. Import reports hard incompatibilities, partial support, Host mappings, and `#!input`/`#!select` settings before enable. Supported `[Rewrite]` URL/header actions and `http-request`/`http-response` scripts run over plain HTTP `:80`, TLS/H1/H2, QUIC v1/v2, and HTTP/3; string and Uint8Array bodies support bounded identity, gzip, deflate, and Brotli decoding. Scripts run in a bounded goja VM with no network, filesystem, process, or module-loader access. `builtin-wloc` remains disabled by default and applies the bounded Apple protobuf transformer. All transformed upstream TCP/UDP returns through mihomo. Every module shares one private interception root; its Setup Guide profile requires manual full trust and may be used only on owned or explicitly authorized devices.
+- **Native interception extensions**: the dedicated Console page accepts only strict `5gpn.io/v1` YAML manifests from one HTTPS URL or a local paste/upload. A manifest explicitly declares immutable metadata, `captureHosts`, structured request/response actions, typed settings, optional bounded storage permission, and safe upstream mappings. Unknown fields and unsafe YAML features fail installation; there is no third-party client-format compatibility layer. Every script defines `transform(context)` and runs in a fresh bounded goja VM with no network, filesystem, process, timer, or module-loader access. Text and Uint8Array bodies support bounded identity, gzip, deflate, and Brotli decoding. All transformed upstream TCP/UDP returns through mihomo, which exclusively owns egress selection. Apple WLOC lives under `extensions/apple-wloc` as a normal URL-installable plugin and uses the generic map-backed `location` setting; it is not compiled into either daemon.
+  The complete author contract is documented in [`docs/native-extensions.md`](docs/native-extensions.md).
 - **MITM runtime controls**: Settings owns a disabled-by-default master switch plus `MitM over HTTP/2` and `QUIC fallback protection`. The master atomically publishes or removes the DNS/mihomo host routes and starts or stops `5gpn-intercept`, while preserving armed module snapshots. HTTP/2 can be disabled for new client/upstream connections. QUIC fallback protection discards only already-matched IETF QUIC v1/v2 traffic so capable clients can retry over TCP/HTTPS; it does not claim legacy GQUIC support.
 - **Default HTTP/3 / QUIC compatibility guard**: fresh and explicitly reset mihomo configs enable a Settings-controlled fixed rule that rejects gateway UDP/443 after the authenticated interception-egress bypass. Capable clients fall back to TCP/HTTPS. Existing valid operator configs are preserved, and this is not host-firewall management.
 - **无宿主防火墙**：项目不管理宿主 nftables；zashboard 的网络访问控制由 mihomo 来源白名单承担，console API 依赖 bearer 鉴权。

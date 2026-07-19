@@ -33,7 +33,7 @@ const SEP = path.sep
 // Verbatim production CSP (cmd/5gpn-dns/api.go securityHeadersMiddleware).
 // Do not alter this string.
 const CSP =
-  "default-src 'self'; img-src 'self' data:; font-src 'self'; " +
+  "default-src 'self'; img-src 'self' data: https://tile.openstreetmap.org; font-src 'self'; " +
   "style-src 'self' 'unsafe-inline'; style-src-elem 'self'; " +
   "style-src-attr 'unsafe-inline'; worker-src 'self'; connect-src 'self'; object-src 'none'; " +
   "base-uri 'self'; frame-ancestors 'none'"

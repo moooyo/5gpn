@@ -1,15 +1,16 @@
 import { expect, test } from '@playwright/test'
 import { gotoWithMock } from './fixtures/mock-api'
 
-test('extension console imports and atomically toggles a Loon snapshot', async ({ page }) => {
+test('extension console installs and atomically toggles a native snapshot', async ({ page }) => {
   await gotoWithMock(page, '/extensions')
 
   await expect(page.getByTestId('page-extensions')).toBeVisible()
   await expect(page.getByTestId('mitm-readiness-notice')).toContainText('5GPN CA 证书')
   await expect(page.getByRole('link', { name: '前往配置向导安装' })).toHaveAttribute('href', '/setup-guide')
-  const module = page.getByTestId('extension-mod-1234567890abcdef')
+  await expect(page.getByTestId('extension-traffic-contract')).toContainText('mihomo 决定出口')
+  const module = page.getByTestId('extension-io.example.response-cleaner')
   await expect(module.getByText('Response Cleaner')).toBeVisible()
-  await expect(module.getByText('MITM · 1')).toBeVisible()
+  await expect(module.getByText('接管 · 1')).toBeVisible()
 
   await module.getByRole('switch').click()
   await page.getByRole('dialog').getByRole('button', { name: '启用' }).click()
@@ -18,17 +19,16 @@ test('extension console imports and atomically toggles a Loon snapshot', async (
 
   await page.getByRole('button', { name: '从 URL 安装' }).click()
   const dialog = page.getByRole('dialog')
-  await expect(dialog.getByTestId('extension-import-automatic')).toContainText('loon://import')
-  await expect(dialog.getByLabel('格式')).toHaveCount(0)
-  await expect(dialog.getByLabel('初始 $argument')).toHaveCount(0)
-  await dialog.getByLabel('插件 URL').fill('loon://import?plugin=https://example.com/another.lpx')
+  await expect(dialog.getByTestId('extension-install-url-info')).toContainText('5gpn.io/v1')
+  await expect(dialog.getByLabel('原生插件 manifest')).toHaveCount(0)
+  await dialog.getByLabel('Manifest URL').fill('https://example.com/extension.yaml')
   await dialog.getByRole('button', { name: '获取、固化并检查' }).click()
-  await expect(page.getByText('Imported module snapshot')).toBeVisible()
+  await expect(page.getByTestId('extension-io.example.imported').getByText('Imported native extension')).toBeVisible()
 })
 
 test('URL extension update requires candidate review before replacement', async ({ page }) => {
   await gotoWithMock(page, '/extensions')
-  const extension = page.getByTestId('extension-mod-1234567890abcdef')
+  const extension = page.getByTestId('extension-io.example.response-cleaner')
   await extension.getByRole('button', { name: '检查更新' }).click()
 
   const dialog = page.getByRole('dialog', { name: /审查更新/ })
@@ -40,5 +40,5 @@ test('URL extension update requires candidate review before replacement', async 
   await dialog.getByRole('button', { name: '替换快照' }).click()
   const request = await requestPromise
   expect(request.postDataJSON()).toMatchObject({ snapshot_digest: 'f'.repeat(64) })
-  await expect(page.getByText('Response Cleaner update')).toBeVisible()
+  await expect(page.getByText('v1.1.0')).toBeVisible()
 })

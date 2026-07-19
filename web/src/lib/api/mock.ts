@@ -100,42 +100,19 @@ export async function putMITMSettings(update: T.MITMSettingsUpdate): Promise<T.M
   const revision = (BigInt(`0x${fixtures.mitmSettings.revision}`) + 1n).toString(16).padStart(64, '0')
   Object.assign(fixtures.mitmSettings, update, { revision })
   fixtures.interceptModules.revision = revision
-  fixtures.wlocIntercept.revision = revision
   refreshActiveInterceptHosts()
   return { ...fixtures.mitmSettings }
-}
-
-export async function getWLOCIntercept(): Promise<T.WLOCInterceptView> {
-  await delay(100)
-  return { ...fixtures.wlocIntercept, hosts: [...fixtures.wlocIntercept.hosts] }
-}
-
-export async function putWLOCIntercept(update: T.WLOCInterceptUpdate): Promise<T.WLOCInterceptView> {
-  await delay(150)
-  if (update.revision !== fixtures.wlocIntercept.revision) {
-    throw new ApiError(409, 'The WLOC interception configuration changed. Refresh and try again.')
-  }
-  const revision = (BigInt(`0x${fixtures.wlocIntercept.revision}`) + 1n).toString(16).padStart(64, '0')
-  Object.assign(fixtures.wlocIntercept, update, { revision })
-  fixtures.interceptModules.revision = revision
-  fixtures.mitmSettings.revision = revision
-  const builtIn = fixtures.interceptModules.modules.find((module) => module.id === 'builtin-wloc')
-  if (builtIn) {
-    builtIn.enabled = update.enabled
-    builtIn.ready = true
-  }
-  refreshActiveInterceptHosts()
-  return { ...fixtures.wlocIntercept, hosts: [...fixtures.wlocIntercept.hosts] }
 }
 
 function interceptModulesView(): T.InterceptModulesView {
   return {
     ...fixtures.interceptModules,
-    active_hosts: [...fixtures.interceptModules.active_hosts],
+    active_capture_hosts: [...fixtures.interceptModules.active_capture_hosts],
     modules: fixtures.interceptModules.modules.map((module) => ({
       ...module,
-      hosts: [...module.hosts],
-      unsupported: module.unsupported ? [...module.unsupported] : undefined,
+      capture_hosts: [...module.capture_hosts],
+      settings: module.settings?.map((setting) => ({ ...setting })),
+      upstream_mappings: module.upstream_mappings?.map((mapping) => ({ ...mapping })),
     })),
   }
 }
@@ -143,22 +120,21 @@ function interceptModulesView(): T.InterceptModulesView {
 function advanceInterceptRevision(): void {
   const revision = (BigInt(`0x${fixtures.interceptModules.revision}`) + 1n).toString(16).padStart(64, '0')
   fixtures.interceptModules.revision = revision
-  fixtures.wlocIntercept.revision = revision
   fixtures.mitmSettings.revision = revision
 }
 
 function refreshActiveInterceptHosts(): void {
   const masterEnabled = fixtures.mitmSettings.enabled
-  fixtures.interceptModules.active_hosts = masterEnabled
+  fixtures.interceptModules.active_capture_hosts = masterEnabled
     ? Array.from(
-        new Set(fixtures.interceptModules.modules.filter((module) => module.enabled).flatMap((module) => module.hosts)),
+        new Set(fixtures.interceptModules.modules.filter((module) => module.enabled).flatMap((module) => module.capture_hosts)),
       ).sort()
     : []
   for (const module of fixtures.interceptModules.modules) {
     if (!masterEnabled) {
       module.ready = false
       module.reason = 'mitm-disabled'
-    } else if (module.compatibility !== 'incompatible' && module.compatibility !== 'needs_configuration') {
+    } else if (module.reason !== 'settings-required') {
       module.ready = true
       module.reason = undefined
     }
@@ -174,19 +150,13 @@ export async function getInterceptModuleSnapshot(id: string): Promise<T.Intercep
   await delay(80)
   const module = fixtures.interceptModules.modules.find((candidate) => candidate.id === id)
   if (!module) throw new ApiError(404, 'Interception module not found.')
-  if (id === 'builtin-wloc') {
-    return {
-      id, name: module.name, source_digest: module.source_digest,
-      source_body: 'Built into the 5gpn-intercept binary; no remote source is executed.', scripts: [],
-    }
-  }
   return {
     id, name: module.name, source_url: module.source_url,
     source_digest: module.source_digest,
-    source_body: '#!name=Synthetic response cleaner\n[Script]\nhttp-response ^https://api\\.example\\.test/ script-path=https://modules.example.test/clean.js,tag=Cleaner\n[MITM]\nhostname=api.example.test\n',
+    source_body: 'apiVersion: 5gpn.io/v1\nkind: Extension\nmetadata:\n  id: io.example.response-cleaner\n  name: Synthetic response cleaner\n  version: 1.0.0\n',
     scripts: [{
-      id: 'script-001', url: 'https://modules.example.test/clean.js', digest: 'd'.repeat(64),
-      body: '$done({body: $response.body});',
+      id: 'clean-response', url: 'https://extensions.example.test/clean.js', digest: 'd'.repeat(64),
+      body: 'function transform(context) { return { response: { body: context.response.body } } }',
     }],
   }
 }
@@ -197,26 +167,25 @@ export async function importInterceptModule(request: T.InterceptModuleImport): P
     throw new ApiError(409, 'The interception module registry changed. Refresh and try again.')
   }
   const seed = (request.url || request.content || 'module').length.toString(16).padStart(16, '0').slice(-16)
-  const id = `mod-${seed}`
+  const id = `io.example.imported-${seed}`
   if (fixtures.interceptModules.modules.some((module) => module.id === id)) {
     throw new ApiError(409, 'This immutable snapshot is already imported.')
   }
   fixtures.interceptModules.modules.push({
     id,
-    name: 'Imported module snapshot',
-    description: 'Mock import preview',
+    extension_version: '1.0.0',
+    name: 'Imported native extension',
+    description: 'Mock native manifest preview',
     enabled: false,
     ready: true,
-    compatibility: 'full',
-    partial_allowed: false,
-    hosts: ['service.example.test'],
+    capture_hosts: ['service.example.test'],
     script_count: 1,
-    rewrite_count: 0,
+    settings: [],
+    persistent_storage: false,
     source_url: request.url,
     source_digest: 'c'.repeat(64),
     snapshot_digest: 'c'.repeat(64),
     imported_at: new Date().toISOString(),
-    argument: '',
   })
   advanceInterceptRevision()
   refreshActiveInterceptHosts()
@@ -226,17 +195,15 @@ export async function importInterceptModule(request: T.InterceptModuleImport): P
 function mockUpdateCandidate(module: T.InterceptModule): T.InterceptModule {
   return {
     ...module,
-    id: 'mod-fedcba0987654321',
-    name: `${module.name} update`,
+    extension_version: '1.1.0',
     enabled: false,
     ready: true,
     reason: undefined,
-    partial_allowed: false,
     source_digest: 'e'.repeat(64),
     snapshot_digest: 'f'.repeat(64),
     imported_at: new Date().toISOString(),
-    hosts: [...module.hosts],
-    parameters: module.parameters?.map((parameter) => ({ ...parameter, value: '' })),
+    capture_hosts: [...module.capture_hosts],
+    settings: module.settings?.map((setting) => ({ ...setting })),
   }
 }
 
@@ -274,15 +241,11 @@ export async function putInterceptModule(id: string, update: T.InterceptModuleUp
   if (update.enabled !== undefined) {
     module.enabled = update.enabled
     module.ready = true
-    if (id === 'builtin-wloc') fixtures.wlocIntercept.enabled = update.enabled
   }
-  if (update.argument !== undefined) module.argument = update.argument
-  if (update.partial_allowed !== undefined) module.partial_allowed = update.partial_allowed
-  if (update.parameters !== undefined && module.parameters) {
-    module.parameters = module.parameters.map((parameter) => ({ ...parameter, value: update.parameters?.[parameter.key] ?? '' }))
-    if (module.parameters.every((parameter) => parameter.value)) {
-      module.compatibility = (module.issues?.length ?? 0) > 0 ? 'partial' : 'full'
-    }
+  if (update.settings !== undefined && module.settings) {
+    module.settings = module.settings.map((setting) => ({ ...setting, value: update.settings?.[setting.key] }))
+    module.ready = module.settings.every((setting) => !setting.required || setting.value !== undefined)
+    module.reason = module.ready ? undefined : 'settings-required'
   }
   advanceInterceptRevision()
   refreshActiveInterceptHosts()
@@ -301,6 +264,12 @@ export async function deleteInterceptModule(id: string, revision: string): Promi
   advanceInterceptRevision()
   refreshActiveInterceptHosts()
   return interceptModulesView()
+}
+
+export async function searchCities(query: string, _language: string): Promise<T.CitySearchResult[]> {
+  await delay(120)
+  if (!query.trim()) return []
+  return [{ place_id: 1, display_name: `${query}, China`, lat: '22.544577', lon: '113.94114' }]
 }
 
 // ---- Unified policy rules -------------------------------------------------

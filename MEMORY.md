@@ -6,6 +6,30 @@ in [`docs/architecture.md`](docs/architecture.md). A section marked **Pending**
 describes required future behavior, not behavior that is already implemented.
 Update the status and the normative documentation when an implementation lands.
 
+## Native interception extensions
+
+**Status: Implemented. Recorded and implemented 2026-07-19.**
+
+- The extension system accepts only strict `5gpn.io/v1` native YAML manifests.
+  It does not parse or emulate third-party proxy-client plugin formats.
+- `traffic.captureHosts` is the sole traffic-acquisition permission. Action
+  matchers and upstream mappings must be subsets of the same extension's
+  capture hosts, and runtime checks repeat that ownership boundary.
+- Native scripts define `transform(context)`. They receive only structured
+  request/response data, typed settings, console logging, and optional bounded
+  storage when explicitly permitted. They have no ambient network, filesystem,
+  process, timer, or module-loader access.
+- Extensions cannot select application egress. Every transformed TCP or UDP
+  flow returns through authenticated mihomo `intercept-egress`; the complete
+  operator-owned mihomo configuration selects DIRECT, nodes, and proxy groups.
+- URL install and local add are separate Console actions. URL install accepts
+  one HTTPS manifest and may snapshot relative HTTPS scripts. Local add accepts
+  one pasted or uploaded manifest and uses inline or absolute HTTPS scripts.
+- Apple WLOC is not built into either Go binary and is not seeded. The project
+  maintains it under `extensions/apple-wloc` as a normal URL-installable native
+  extension. Its target coordinates use the generic `location` setting and map
+  editor available to any native extension.
+
 ## Stable and beta release channels
 
 **Status: Implemented. Recorded and implemented 2026-07-19.**

@@ -55,7 +55,7 @@ load_desired_hosts() {
     "$INTERCEPT_BIN" --config "$CONFIG" --print-certificate-request > "$stage/request"
     head -n 1 "$stage/request" > "$stage/digest"
     tail -n +2 "$stage/request" > "$stage/hosts"
-    [[ -s "$stage/hosts" && -s "$stage/digest" ]] || return 1
+    [[ -f "$stage/hosts" && -s "$stage/digest" ]] || return 1
     desired_digest="$(tr -d '[:space:]' < "$stage/digest")"
     [[ "$desired_digest" =~ ^[0-9a-f]{64}$ ]] || return 1
     local host count=0
@@ -64,7 +64,7 @@ load_desired_hosts() {
         ((count += 1))
         (( count <= 256 )) || return 1
     done < "$stage/hosts"
-    (( count > 0 ))
+    return 0
 }
 
 validate_leaf() {
@@ -125,9 +125,13 @@ main() {
     chmod 0644 "$stage/$TEMP_MARKER"
     trap cleanup_stage EXIT
     chmod 0700 "$stage"
-    load_desired_hosts || { err "The enabled module host set is invalid."; return 1; }
+    load_desired_hosts || { err "The enabled extension capture-host set is invalid."; return 1; }
+    if [[ ! -s "$stage/hosts" ]]; then
+        info "No enabled extension requests interception hosts; keeping any previous leaf unused."
+        return 0
+    fi
     if validate_leaf; then
-        info "The interception leaf already covers the enabled module set."
+        info "The interception leaf already covers the enabled extension set."
         return 0
     fi
 
@@ -165,7 +169,7 @@ EOF
     mv -f -- "$TLS_DIR/.privkey.pem.new" "$TLS_DIR/privkey.pem"
     mv -Tf -- "$TLS_DIR/.cert-state.new" "$CERT_STATE"
     validate_leaf || { err "Published interception leaf failed validation."; return 1; }
-    ok "Published the interception leaf for the enabled module host set."
+    ok "Published the interception leaf for the enabled extension capture-host set."
 }
 
 main "$@"

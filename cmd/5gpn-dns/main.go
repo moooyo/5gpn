@@ -355,6 +355,7 @@ func main() {
 		log.Fatalf("control server: %v", err)
 	}
 	if controlSrv != nil {
+		controlSrv.SetGeocodeResolver(trustResolver)
 		if moduleMihomoStore != nil && moduleMihomoClient != nil {
 			controlSrv.SetMihomoConfig(moduleMihomoStore, InfraParamsFromConfig(cfg), realMihomoTester{}, moduleMihomoClient)
 		}

@@ -248,15 +248,14 @@ func TestAPIRoutes_RequireAuth(t *testing.T) {
 		{http.MethodPut, "/api/mihomo/ingress-modules/block-quic-443"},
 		{http.MethodGet, "/api/interception/settings"},
 		{http.MethodPut, "/api/interception/settings"},
-		{http.MethodGet, "/api/interception/wloc"},
-		{http.MethodPut, "/api/interception/wloc"},
 		{http.MethodGet, "/api/interception/modules"},
-		{http.MethodGet, "/api/interception/modules/mod-1234567890abcdef"},
+		{http.MethodGet, "/api/interception/modules/io.example.fixture"},
 		{http.MethodPost, "/api/interception/modules/import"},
-		{http.MethodPost, "/api/interception/modules/mod-1234567890abcdef/update-check"},
-		{http.MethodPost, "/api/interception/modules/mod-1234567890abcdef/update-apply"},
-		{http.MethodPut, "/api/interception/modules/mod-1234567890abcdef"},
-		{http.MethodDelete, "/api/interception/modules/mod-1234567890abcdef"},
+		{http.MethodPost, "/api/interception/modules/io.example.fixture/update-check"},
+		{http.MethodPost, "/api/interception/modules/io.example.fixture/update-apply"},
+		{http.MethodPut, "/api/interception/modules/io.example.fixture"},
+		{http.MethodDelete, "/api/interception/modules/io.example.fixture"},
+		{http.MethodGet, "/api/geocode/cities?q=Shenzhen"},
 	}
 
 	for _, rt := range routes {
@@ -729,13 +728,13 @@ func TestSecurityHeaders_CSPStyleSplit(t *testing.T) {
 		}
 		for _, directive := range []string{
 			"default-src 'self'",
-			"img-src 'self' data:",
+			"img-src 'self' data: https://tile.openstreetmap.org",
 			"font-src 'self'",                  // bundled MiSans-VF, explicit same-origin allowance
 			"style-src 'self' 'unsafe-inline'", // baseline browser fallback
 			"style-src-elem 'self'",            // no inline <style> elements in the built SPA
 			"style-src-attr 'unsafe-inline'",   // React dynamic style={} attributes
 			"worker-src 'self'",                // PWA service worker (vite-plugin-pwa /sw.js)
-			"connect-src 'self'",               // same-origin /proxy/* mihomo REST + wss logs
+			"connect-src 'self'",               // same-origin control plane, city search, and wss logs
 			"object-src 'none'",
 			"base-uri 'self'",
 			"frame-ancestors 'none'",

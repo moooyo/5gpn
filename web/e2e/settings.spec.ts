@@ -167,34 +167,37 @@ test('the default HTTP3 and QUIC guard confirms before allowing UDP 443', async 
   await expect(page.getByText('已应用 mihomo 功能模块配置。')).toBeVisible()
 })
 
-test('WLOC interception requires coordinates and explicit confirmation', async ({ page }) => {
+test('online WLOC extension uses the native location setting and generic enable confirmation', async ({ page }) => {
   await setupMockApiWithToken(page)
+  await page.route('https://tile.openstreetmap.org/**', (route) => route.abort())
   await page.goto('/extensions')
   await page.waitForLoadState('networkidle')
 
-  await page.getByTestId('extension-builtin-wloc').getByRole('button', { name: '配置' }).click()
-  const card = page.getByTestId('wloc-intercept-card')
-  const fields = card.getByRole('spinbutton')
+  const extension = page.getByTestId('extension-io.5gpn.apple-wloc')
+  await extension.getByRole('button', { name: '设置 · 2' }).click()
+  const dialog = page.getByRole('dialog', { name: /Apple WLOC/ })
+  await dialog.getByLabel('搜索城市').fill('深圳')
+  await dialog.getByRole('button', { name: '搜索', exact: true }).click()
+  await dialog.getByRole('option', { name: /深圳市/ }).click()
+  const fields = dialog.getByRole('spinbutton')
   await expect(fields).toHaveCount(3)
-  await fields.nth(0).fill('113.94114')
-  await fields.nth(1).fill('22.544577')
+  await expect(fields.nth(0)).toHaveValue('113.94114')
+  await expect(fields.nth(1)).toHaveValue('22.544577')
   await fields.nth(2).fill('25')
-  await card.getByRole('switch', { name: '启用 WLOC 响应改写' }).click()
-  const requestPromise = page.waitForRequest((request) =>
-    request.url().endsWith('/api/interception/wloc') && request.method() === 'PUT',
+  const settingsRequest = page.waitForRequest((request) =>
+    request.url().includes('/api/interception/modules/io.5gpn.apple-wloc') && request.method() === 'PUT',
   )
-  await card.getByRole('button', { name: '保存' }).click()
-  const dialog = page.getByRole('dialog', { name: '启用 WLOC MITM？' })
-  await expect(dialog).toBeVisible()
   await dialog.getByRole('button', { name: '保存' }).click()
-
-  const request = await requestPromise
-  expect(request.postDataJSON()).toMatchObject({
-    enabled: true,
-    longitude: 113.94114,
-    latitude: 22.544577,
-    accuracy: 25,
-    fail_closed: true,
+  expect((await settingsRequest).postDataJSON()).toMatchObject({
+    settings: {
+      location: { longitude: 113.94114, latitude: 22.544577, accuracy: 25 },
+      failClosed: true,
+    },
   })
-  await expect(page.getByText('WLOC 响应改写配置已保存。')).toBeVisible()
+  await expect(page.getByText('插件设置已保存。')).toBeVisible()
+
+  await extension.getByRole('switch').click()
+  const confirm = page.getByRole('dialog', { name: /启用 Apple WLOC/ })
+  await expect(confirm).toBeVisible()
+  await confirm.getByRole('button', { name: '启用' }).click()
 })

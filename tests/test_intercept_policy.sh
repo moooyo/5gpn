@@ -49,12 +49,13 @@ grep -Fq 'intercept_asset="5gpn-intercept-linux-amd64"' "$INSTALL" || fail "inte
 grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/5gpn-intercept"' "$INSTALL" || fail "interception release asset is not checksum-verified"
 grep -Fq 'ensure_service_account "$INTERCEPT_SERVICE_USER"' "$INSTALL" || fail "interception service account is not installed"
 grep -Fq 'ensure_intercept_certificates' "$INSTALL" || fail "interception certificate lifecycle is missing"
-grep -Fq '"version": 2' "$INSTALL" || fail "current interception config schema is not installed"
+grep -Fq '"version": 3' "$INSTALL" || fail "current interception config schema is not installed"
 grep -Fq '"quic_fallback_protection": true' "$INSTALL" || fail "QUIC fallback protection is not configured by default"
 grep -Fq 'systemctl enable --now 5gpn-intercept-runtime.path' "$INSTALL" || fail "MITM runtime watcher is not enabled"
 grep -Fq 'intercept-cert-renew.sh" --installer-lock-held' "$INSTALL" || fail "installer does not reuse its held certificate lock"
 grep -Fq '/proc/$$/fd/8' "$ROOT/scripts/intercept-cert-renew.sh" || fail "interception helper does not validate the inherited installer lock"
 grep -Fq -- '--print-certificate-request' "$ROOT/scripts/intercept-cert-renew.sh" || fail "certificate helper does not consume one atomic host-set request"
+grep -Fq 'if [[ ! -s "$stage/hosts" ]]' "$ROOT/scripts/intercept-cert-renew.sh" || fail "certificate helper does not accept a fresh zero-extension host set"
 grep -Fq 'ExecStart=/opt/5gpn/scripts/intercept-cert-renew.sh' "$INSTALL" || fail "interception leaf renewal is not scheduled"
 grep -Fq 'INTERCEPT_CA_MARKER_VALUE="5gpn-intercept-ca-v1"' "$INSTALL" || fail "interception CA ownership marker is missing"
 grep -Fq 'INTERCEPT_STATE_MARKER_VALUE="5gpn-intercept-state-v1"' "$INSTALL" || fail "interception state ownership marker is missing"
@@ -62,14 +63,14 @@ grep -Fq 'remove_fixed_owned_dir "$INTERCEPT_STATE_DIR"' "$INSTALL" || fail "pur
 
 grep -Fq 'name: intercept-egress' "$TEMPLATE" || fail "mihomo interception egress listener is missing"
 grep -Fq 'listen: 127.0.0.1' "$TEMPLATE" || fail "interception egress listener is not loopback"
-grep -Fq 'name: MODULE-MITM' "$TEMPLATE" || fail "mihomo module SOCKS node is missing"
+grep -Fq 'name: MODULE-INTERCEPT' "$TEMPLATE" || fail "mihomo extension SOCKS node is missing"
 grep -Fq 'type: socks5' "$TEMPLATE" || fail "module node is not SOCKS5"
 grep -Fq 'udp: true' "$TEMPLATE" || fail "module node does not carry QUIC"
 grep -Fq 'IN-NAME,intercept-egress,Proxies' "$TEMPLATE" || fail "interception recursion bypass is missing"
 grep -Fq 'After=network-online.target 5gpn-intercept.service' "$ROOT/etc/systemd/mihomo.service" \
     || fail "mihomo is not ordered after the interception sidecar"
-grep -Eq '^  - AND,.*MODULE-MITM' "$TEMPLATE" \
-    && fail "interception modules must remain disabled in the seed"
+grep -Eq '^  - AND,.*MODULE-INTERCEPT' "$TEMPLATE" \
+    && fail "interception extensions must remain disabled in the seed"
 grep -Fq 'gs-loc.apple.com' "$ROOT/etc/proxy-domains.txt" \
     && fail "disabled WLOC hosts must not remain in the static proxy policy"
 
@@ -82,31 +83,38 @@ grep -Fq 'data-testid="intercept-ca-guide"' "$SETUP_GUIDE" \
 grep -Fq "'/setup-guide'" "$MODULE_PAGE" \
     || fail "Extensions page does not direct operators to the shared trust guide"
 grep -Fq "'/extensions/hosts'" "$MODULE_PAGE" \
-    || fail "Extensions page does not expose the MITM host audit"
+    || fail "Extensions page does not expose the capture-host audit"
 grep -Fq 'ios-intercept-ca.mobileconfig' "$MODULE_PAGE" \
     && fail "Modules page still owns a direct CA profile download"
-grep -Fq 'loon://import?plugin=<https-url>' "$MODULE_PARSER" \
-    || fail "Loon deep-link normalization is missing"
-grep -Fq 'moduleLoonUserAgent' "$MODULE_PARSER" \
-    || fail "automatic Loon fetch headers are missing"
+grep -Fq 'nativeExtensionAPIVersion = "5gpn.io/v1"' "$MODULE_PARSER" \
+    || fail "native extension manifest version is missing"
+grep -Fq 'decoder.KnownFields(true)' "$MODULE_PARSER" \
+    || fail "native extension manifest does not reject unknown fields"
+grep -Fq 'rejectUnsafeYAML' "$MODULE_PARSER" \
+    || fail "native extension manifest does not reject aliases, anchors, and merges"
 grep -Fq 'servePlainHTTPConnection' "$ROOT/cmd/5gpn-intercept/proxy.go" \
     || fail "plain HTTP module interception is missing"
-grep -Fq 'BinaryBody' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
+grep -Fq 'BodyMode' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
     || fail "binary body script support is missing"
 grep -Fq 'brotli.NewReader' "$ROOT/cmd/5gpn-intercept/content_encoding.go" \
     || fail "bounded Brotli decoding is missing"
-grep -Fq 'interceptModuleIssues' "$ROOT/cmd/5gpn-dns/intercept_module_manager.go" \
-    || fail "structured compatibility reporting is missing"
+grep -Fq 'transform(context)' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
+    || fail "native transform entry point is missing"
+grep -Fq 'moduleOwnsHost' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
+    || fail "native actions are not scoped to their extension capture hosts"
+grep -Fq 'type: location' "$ROOT/extensions/apple-wloc/extension.yaml" \
+    || fail "online WLOC extension does not use the generic location setting"
+grep -Fq 'source: ./wloc.js' "$ROOT/extensions/apple-wloc/extension.yaml" \
+    || fail "online WLOC extension script is missing"
 grep -Fq 'fetch_profile' "$ROOT/web/src/lib/api/types.ts" \
     && fail "module import API still exposes a fetch-header choice"
-retired_product="$(printf '%s%s' 'sur' 'ge')"
-retired_extension="$(printf '%s%s' 'sg' 'module')"
-grep -RniE "${retired_product}|${retired_extension}" \
-    "$ROOT/AGENTS.md" "$ROOT/README.md" "$ROOT/docs/architecture.md" \
-    "$ROOT/cmd/5gpn-dns" "$ROOT/cmd/5gpn-intercept" \
-    "$ROOT/web/src" "$ROOT/web/e2e" 2>/dev/null | grep -q . \
-    && fail "retired non-Loon interception support is still present"
-grep -Fq 'json:"format"' "$ROOT/cmd/5gpn-dns/intercept_module_types.go" \
-    && fail "Loon-only module snapshots still persist a format discriminator"
+retired_client="$(printf '%s%s' 'lo' 'on')"
+grep -Rni "$retired_client" \
+    "$ROOT/README.md" "$ROOT/docs/architecture.md" "$ROOT/cmd/5gpn-dns" \
+    "$ROOT/cmd/5gpn-intercept" "$ROOT/web/src" "$ROOT/web/e2e" 2>/dev/null | grep -q . \
+    && fail "retired third-party plugin compatibility is still present"
+grep -RniE 'builtin-wloc|MODULE-MITM' \
+    "$ROOT/README.md" "$ROOT/docs/architecture.md" "$ROOT/cmd" "$ROOT/web/src" 2>/dev/null | grep -q . \
+    && fail "retired built-in interception identifiers are still present"
 
 exit "$rc"

@@ -9,7 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const interceptMihomoProxyName = "MODULE-MITM"
+const interceptMihomoProxyName = "MODULE-INTERCEPT"
 
 var safeInterceptCredential = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
@@ -36,16 +36,11 @@ func interceptMihomoRules(document interceptConfigDocument) []string {
 		}
 		rules = append(rules, "AND,(("+kind+","+host+"),(DST-PORT,"+port+")),"+interceptMihomoProxyName)
 	}
-	if document.WLOC.Enabled {
-		for _, host := range builtInWLOCHosts {
-			appendRule(host, "443")
-		}
-	}
 	for _, module := range document.Modules {
 		if !module.Enabled {
 			continue
 		}
-		for _, host := range module.Hosts {
+		for _, host := range module.CaptureHosts {
 			for _, port := range []string{"80", "443"} {
 				appendRule(host, port)
 			}

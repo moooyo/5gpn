@@ -1823,7 +1823,7 @@ ensure_intercept_config() {
     candidate="$(mktemp "$INTERCEPT_DIR/.config.json.XXXXXX")" || return 1
     cat > "$candidate" <<EOF
 {
-  "version": 2,
+  "version": 3,
   "listen": "127.0.0.1:18080",
   "username": "${inbound_user}",
   "password": "${inbound_pass}",
@@ -1838,14 +1838,6 @@ ensure_intercept_config() {
     "enabled": false,
     "http2": true,
     "quic_fallback_protection": true
-  },
-  "wloc": {
-    "enabled": false,
-    "longitude": null,
-    "latitude": null,
-    "accuracy": 25,
-    "fail_closed": true,
-    "max_body_bytes": 8388608
   },
   "modules": []
 }
@@ -1922,11 +1914,15 @@ ensure_intercept_certificates() {
 
     prepare_intercept_runtime_dirs || { remove_temp_dir "$stage"; return 1; }
     remove_temp_dir "$stage"
-    "${SCRIPTS_DIR}/intercept-cert-renew.sh" --installer-lock-held \
-        || { err "Dynamic interception leaf publication failed."; return 1; }
-    validate_intercept_leaf \
-        || { err "Dynamic interception leaf validation failed."; return 1; }
-    ok "Dedicated interception CA and module-scoped leaf are ready."
+	"${SCRIPTS_DIR}/intercept-cert-renew.sh" --installer-lock-held \
+		|| { err "Dynamic interception leaf publication failed."; return 1; }
+	if [[ -n "$("$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --print-certificate-hosts 2>/dev/null)" ]]; then
+		validate_intercept_leaf \
+			|| { err "Dynamic interception leaf validation failed."; return 1; }
+		ok "Dedicated interception CA and extension-scoped leaf are ready."
+	else
+		ok "Dedicated interception CA is ready; no extension leaf is needed yet."
+	fi
 }
 
 # 5gpn-web: control-console SPA tarball from the same moooyo/5gpn release.
@@ -3807,7 +3803,7 @@ wait_service_ready() {
                         && { ok "5gpn-intercept readiness passed (authenticated loopback SOCKS5 TCP/UDP)."; return 0; }
                 elif [[ "$?" == 3 ]]; then
                     systemctl stop 5gpn-intercept.service 2>/dev/null || true
-                    ok "5gpn-intercept remains stopped because MITM is disabled."
+					ok "5gpn-intercept remains stopped because no interception extension is active."
                     return 0
                 else
                     err "5gpn-intercept configuration could not be read while checking the MITM master setting."

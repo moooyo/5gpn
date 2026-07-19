@@ -132,28 +132,6 @@ describe('api client — ingress modules', () => {
   })
 })
 
-describe('api client — WLOC interception', () => {
-  it('gets and updates the narrow WLOC configuration', async () => {
-    vi.stubEnv('VITE_API_MOCK', '0')
-    vi.resetModules()
-    const view = {
-      revision: 'r1', enabled: false, longitude: null, latitude: null, accuracy: 25,
-      fail_closed: true, max_body_bytes: 8388608,
-      hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'],
-    }
-    const update = { revision: 'r1', enabled: true, longitude: 113.9, latitude: 22.5, accuracy: 25, fail_closed: true, max_body_bytes: 8388608 }
-    const f = vi.fn().mockResolvedValueOnce(jsonResp(200, view)).mockResolvedValueOnce(jsonResp(200, { ...view, ...update }))
-    vi.stubGlobal('fetch', f)
-    const { api } = await import('./client')
-    await expect(api.getWLOCIntercept()).resolves.toEqual(view)
-    await api.putWLOCIntercept(update)
-    expect(f.mock.calls[0][0]).toBe('/api/interception/wloc')
-    expect(f.mock.calls[1][0]).toBe('/api/interception/wloc')
-    expect(f.mock.calls[1][1].method).toBe('PUT')
-    expect(JSON.parse(f.mock.calls[1][1].body as string)).toEqual(update)
-  })
-})
-
 describe('api client — MITM runtime settings', () => {
   it('gets and updates the master, HTTP/2, and QUIC fallback settings', async () => {
     vi.stubEnv('VITE_API_MOCK', '0')
@@ -177,8 +155,8 @@ describe('api client — interception modules', () => {
   it('maps list, snapshot, import, update, and delete to the authenticated module API', async () => {
     vi.stubEnv('VITE_API_MOCK', '0')
     vi.resetModules()
-    const view = { revision: 'r1', catalog_url: 'https://hub.kelee.one/', active_hosts: [], modules: [] }
-    const snapshot = { id: 'mod-1234567890abcdef', name: 'Fixture', source_digest: 'a'.repeat(64), source_body: '#!name=Fixture', scripts: [] }
+    const view = { revision: 'r1', catalog_url: 'https://github.com/moooyo/5gpn/tree/main/extensions', active_capture_hosts: [], modules: [] }
+    const snapshot = { id: 'io.example.fixture', name: 'Fixture', source_digest: 'a'.repeat(64), source_body: 'apiVersion: 5gpn.io/v1', scripts: [] }
     const f = vi.fn()
       .mockResolvedValueOnce(jsonResp(200, view))
       .mockResolvedValueOnce(jsonResp(200, snapshot))
@@ -187,43 +165,57 @@ describe('api client — interception modules', () => {
       .mockResolvedValueOnce(jsonResp(200, view))
     vi.stubGlobal('fetch', f)
     const { api } = await import('./client')
-    const request = { revision: 'r1', url: 'loon://import?plugin=https://example.com/test.lpx' }
+    const request = { revision: 'r1', url: 'https://example.com/extension.yaml' }
 
     await api.getInterceptModules()
-    await api.getInterceptModuleSnapshot('mod-1234567890abcdef')
+    await api.getInterceptModuleSnapshot('io.example.fixture')
     await api.importInterceptModule(request)
-    await api.putInterceptModule('mod-1234567890abcdef', { revision: 'r1', parameters: { mode: 'clean' } })
-    await api.deleteInterceptModule('mod-1234567890abcdef', 'r1')
+    await api.putInterceptModule('io.example.fixture', { revision: 'r1', settings: { mode: 'clean' } })
+    await api.deleteInterceptModule('io.example.fixture', 'r1')
 
     expect(f.mock.calls.map((call) => call[0])).toEqual([
       '/api/interception/modules',
-      '/api/interception/modules/mod-1234567890abcdef',
+      '/api/interception/modules/io.example.fixture',
       '/api/interception/modules/import',
-      '/api/interception/modules/mod-1234567890abcdef',
-      '/api/interception/modules/mod-1234567890abcdef',
+      '/api/interception/modules/io.example.fixture',
+      '/api/interception/modules/io.example.fixture',
     ])
     expect(f.mock.calls[2][1].method).toBe('POST')
     expect(JSON.parse(f.mock.calls[2][1].body as string)).toEqual(request)
     expect(f.mock.calls[3][1].method).toBe('PUT')
-    expect(JSON.parse(f.mock.calls[3][1].body as string)).toEqual({ revision: 'r1', parameters: { mode: 'clean' } })
+    expect(JSON.parse(f.mock.calls[3][1].body as string)).toEqual({ revision: 'r1', settings: { mode: 'clean' } })
     expect(f.mock.calls[4][1].method).toBe('DELETE')
   })
 
   it('checks and applies an immutable URL extension update through explicit endpoints', async () => {
     vi.stubEnv('VITE_API_MOCK', '0')
     vi.resetModules()
-    const check = { revision: 'r1', state: 'available', candidate: { id: 'mod-new', source_digest: 'e'.repeat(64), snapshot_digest: 'f'.repeat(64) } }
-    const view = { revision: 'r2', catalog_url: '', active_hosts: [], modules: [] }
+    const check = { revision: 'r1', state: 'available', candidate: { id: 'io.example.fixture', source_digest: 'e'.repeat(64), snapshot_digest: 'f'.repeat(64) } }
+    const view = { revision: 'r2', catalog_url: '', active_capture_hosts: [], modules: [] }
     const f = vi.fn().mockResolvedValueOnce(jsonResp(200, check)).mockResolvedValueOnce(jsonResp(200, view))
     vi.stubGlobal('fetch', f)
     const { api } = await import('./client')
 
-    await expect(api.checkInterceptModuleUpdate('mod-old', 'r1')).resolves.toEqual(check)
-    await expect(api.applyInterceptModuleUpdate('mod-old', 'r1', 'f'.repeat(64))).resolves.toEqual(view)
-    expect(f.mock.calls[0][0]).toBe('/api/interception/modules/mod-old/update-check')
+    await expect(api.checkInterceptModuleUpdate('io.example.fixture', 'r1')).resolves.toEqual(check)
+    await expect(api.applyInterceptModuleUpdate('io.example.fixture', 'r1', 'f'.repeat(64))).resolves.toEqual(view)
+    expect(f.mock.calls[0][0]).toBe('/api/interception/modules/io.example.fixture/update-check')
     expect(JSON.parse(f.mock.calls[0][1].body as string)).toEqual({ revision: 'r1' })
-    expect(f.mock.calls[1][0]).toBe('/api/interception/modules/mod-old/update-apply')
+    expect(f.mock.calls[1][0]).toBe('/api/interception/modules/io.example.fixture/update-apply')
     expect(JSON.parse(f.mock.calls[1][1].body as string)).toEqual({ revision: 'r1', snapshot_digest: 'f'.repeat(64) })
+  })
+
+  it('uses the authenticated same-origin city-search projection', async () => {
+    vi.stubEnv('VITE_API_MOCK', '0')
+    vi.resetModules()
+    const results = [{ place_id: 1, display_name: 'Shenzhen', lat: '22.544577', lon: '113.94114' }]
+    const f = vi.fn().mockResolvedValueOnce(jsonResp(200, results))
+    vi.stubGlobal('fetch', f)
+    localStorage.setItem('5gpn_token', 'valid-token')
+    const { api } = await import('./client')
+
+    await expect(api.searchCities('深圳 南山', 'zh-CN')).resolves.toEqual(results)
+    expect(f.mock.calls[0][0]).toBe('/api/geocode/cities?q=%E6%B7%B1%E5%9C%B3%20%E5%8D%97%E5%B1%B1&lang=zh-CN')
+    expect(f.mock.calls[0][1].headers.Authorization).toBe('Bearer valid-token')
   })
 })
 

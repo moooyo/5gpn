@@ -48,7 +48,7 @@ export default function SettingsPage() {
       ])
       if (sequence !== mitmLoadSequence.current) return null
       if (extensionsResult.status === 'fulfilled') {
-        setMITMHostCount(extensionsResult.value.modules.reduce((count, extension) => count + extension.hosts.length, 0))
+        setMITMHostCount(extensionsResult.value.modules.reduce((count, extension) => count + extension.capture_hosts.length, 0))
       }
       if (settingsResult.status === 'rejected') throw settingsResult.reason
       const value = settingsResult.value

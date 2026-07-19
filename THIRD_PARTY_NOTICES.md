@@ -55,6 +55,7 @@ Runtime dependencies per [`web/package.json`](web/package.json) (`dependencies`)
 | `daisyui` | 5.6.18 | MIT | © Pouya Saadeghi and contributors — https://github.com/saadeghi/daisyui |
 | `i18next` | ^23.16.8 | MIT | © i18next / Jan Mühlemann and contributors — https://github.com/i18next/i18next |
 | `i18next-browser-languagedetector` | ^8.2.1 | MIT | © i18next contributors — https://github.com/i18next/i18next-browser-languageDetector |
+| `leaflet` | 1.9.4 | BSD-2-Clause | © 2010–2023 Vladimir Agafonkin; © 2010–2011 CloudMade — https://leafletjs.com/ |
 | `react` | ^19.2.7 | MIT | © Meta Platforms, Inc. and affiliates — https://github.com/facebook/react |
 | `react-dom` | ^19.2.7 | MIT | © Meta Platforms, Inc. and affiliates — https://github.com/facebook/react |
 | `react-hook-form` | ^7.81.0 | MIT | © react-hook-form contributors — https://github.com/react-hook-form/react-hook-form |
@@ -63,6 +64,13 @@ Runtime dependencies per [`web/package.json`](web/package.json) (`dependencies`)
 | `subsetted-fonts` | ^1.0.4 | MIT wrapper / MiSans Font License | © subsetted-fonts contributors; © Xiaomi Inc. — https://www.npmjs.com/package/subsetted-fonts |
 | `tailwind-merge` | ^3.6.0 | MIT | © Dany Castillo — https://github.com/dcastil/tailwind-merge |
 | `uqr` | ^0.1.3 | MIT | © Anthony Fu — https://github.com/unjs/uqr |
+
+The optional location-setting editor requests map tiles from OpenStreetMap and
+explicit city searches from Nominatim. OpenStreetMap data is © OpenStreetMap
+contributors under ODbL; attribution is rendered on the map. These services
+are not bundled or mirrored by 5gpn. The browser loads tiles directly; explicit
+city searches use a bounded authenticated same-origin projection that contacts
+only the fixed Nominatim origin.
 
 ---
 
@@ -105,9 +113,9 @@ Go toolchain on the box). Pins per [`install.sh`](install.sh).
 
 ## 5. Interception sidecar
 
-Surge/Loon modules imported by an operator are stored only on that operator's
-gateway and are not bundled, mirrored, or redistributed by 5gpn. Their own
-licenses and usage terms remain the operator's responsibility.
+Third-party native extension manifests installed by an operator are stored only
+on that operator's gateway and are not crawled, mirrored, or redistributed by
+5gpn. Their own licenses and usage terms remain the operator's responsibility.
 
 ### quic-go
 
@@ -237,7 +245,8 @@ SOFTWARE.
 
 ### ProxyPin WLOC response transformer
 
-The bounded Go WLOC protobuf transformation logic is derived from the
+The bounded JavaScript WLOC protobuf transformation in
+`extensions/apple-wloc/wloc.js` is derived from the
 MIT-licensed `FFF686868/proxypin-wloc-spoofer` project at commit
 `edee9b955f673cc8c4a52eb0a9c687a2e25dde4a`.
 

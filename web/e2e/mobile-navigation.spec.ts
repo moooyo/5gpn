@@ -68,12 +68,12 @@ test('iPhone extension layout stacks snapshots and keeps the import dialog in vi
   await page.goto('/extensions')
 
   await expect(page.getByTestId('page-extensions')).toBeVisible()
-  const builtIn = page.getByTestId('extension-builtin-wloc')
-  const imported = page.getByTestId('extension-mod-1234567890abcdef')
-  const [builtInBox, importedBox] = await Promise.all([builtIn.boundingBox(), imported.boundingBox()])
-  expect(builtInBox).not.toBeNull()
+  const wlocExtension = page.getByTestId('extension-io.5gpn.apple-wloc')
+  const imported = page.getByTestId('extension-io.example.response-cleaner')
+  const [wlocBox, importedBox] = await Promise.all([wlocExtension.boundingBox(), imported.boundingBox()])
+  expect(wlocBox).not.toBeNull()
   expect(importedBox).not.toBeNull()
-  expect(importedBox!.y).toBeGreaterThan(builtInBox!.y + builtInBox!.height)
+  expect(importedBox!.y).toBeGreaterThan(wlocBox!.y + wlocBox!.height)
   await expectNoHorizontalOverflow(page)
 
   await page.getByRole('button', { name: /从 URL 安装|Install from URL/ }).click()
@@ -91,7 +91,23 @@ test('iPhone host audit remains searchable and grouped without overflow', async 
 
   await expect(page.getByTestId('host-audit-view')).toBeVisible()
   await page.getByTestId('host-audit-search').fill('api.example.com')
-  await expect(page.getByTestId('host-group-mod-1234567890abcdef')).toContainText('api.example.com')
+  await expect(page.getByTestId('host-group-io.example.response-cleaner')).toContainText('api.example.com')
+  await expectNoHorizontalOverflow(page)
+})
+
+test('iPhone native location setting keeps the map and precision fields inside the dialog', async ({ page }) => {
+  await setupMockApiWithToken(page)
+  await page.route('https://tile.openstreetmap.org/**', (route) => route.abort())
+  await page.goto('/extensions')
+
+  const extension = page.getByTestId('extension-io.5gpn.apple-wloc')
+  await extension.getByRole('button', { name: /设置 · 2|Settings · 2/ }).click()
+  const dialog = page.getByRole('dialog', { name: /Apple WLOC/ })
+  await expect(dialog.getByTestId('extension-location-picker')).toBeVisible()
+  const box = await dialog.boundingBox()
+  expect(box).not.toBeNull()
+  expect(box!.x).toBeGreaterThanOrEqual(0)
+  expect(box!.x + box!.width).toBeLessThanOrEqual(await page.evaluate(() => window.innerWidth))
   await expectNoHorizontalOverflow(page)
 })
 

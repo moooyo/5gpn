@@ -1,11 +1,9 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import type { InterceptModule, InterceptModulesView } from '../../lib/api/types'
 import i18n from '../../i18n'
-import { Toaster } from '../../components/ds'
-import { api } from '../../lib/api/client'
-import type { InterceptModulesView, WLOCInterceptView } from '../../lib/api/types'
 import ExtensionsPage from './ExtensionsPage'
 
 vi.mock('../../lib/api/client', () => ({
@@ -13,265 +11,169 @@ vi.mock('../../lib/api/client', () => ({
     getInterceptModules: vi.fn(),
     getInterceptModuleSnapshot: vi.fn(),
     importInterceptModule: vi.fn(),
-    putInterceptModule: vi.fn(),
-    deleteInterceptModule: vi.fn(),
-    getWLOCIntercept: vi.fn(),
-    putWLOCIntercept: vi.fn(),
-    getMITMSettings: vi.fn(),
     checkInterceptModuleUpdate: vi.fn(),
     applyInterceptModuleUpdate: vi.fn(),
+    putInterceptModule: vi.fn(),
+    deleteInterceptModule: vi.fn(),
+    getMITMSettings: vi.fn(),
   },
 }))
 
-const VIEW: InterceptModulesView = {
-  revision: '1'.repeat(64),
-  catalog_url: 'https://hub.kelee.one/',
-  active_hosts: [],
-  modules: [
-    {
-      id: 'builtin-wloc', name: 'Apple WLOC response rewriting', enabled: false, ready: true,
-      compatibility: 'full', partial_allowed: false, hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'],
-      script_count: 1, rewrite_count: 0, source_digest: 'a'.repeat(64), snapshot_digest: 'a'.repeat(64),
-    },
-    {
-      id: 'mod-1234567890abcdef', name: 'Response Cleaner', description: 'Synthetic Loon fixture',
-      enabled: false, ready: true, compatibility: 'partial', partial_allowed: true, hosts: ['api.example.com'],
-      script_count: 1, rewrite_count: 1, source_url: 'https://example.com/test.lpx', source_digest: 'b'.repeat(64), snapshot_digest: 'b'.repeat(64),
-      imported_at: '2026-07-18T00:00:00Z', argument: '', unsupported: ['[Rule] unsupported'],
-      issues: [{ severity: 'warning', message: '[Rule] unsupported' }],
-      host_mappings: [{ pattern: 'api.example.com', target: 'origin.example.net' }],
-    },
+vi.mock('./LocationPicker', () => ({
+  LocationPicker: ({ onChange }: { onChange: (value: unknown) => void }) => (
+    <button type="button" data-testid="mock-location-picker" onClick={() => onChange({ longitude: 113.94114, latitude: 22.544577, accuracy: 25 })}>pick location</button>
+  ),
+}))
+
+import { api } from '../../lib/api/client'
+
+const WLOC: InterceptModule = {
+  id: 'io.5gpn.apple-wloc', extension_version: '1.0.0', name: 'Apple WLOC Location Override',
+  description: 'Native online extension for Apple location responses.', enabled: false, ready: false,
+  reason: 'settings-required', capture_hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'], script_count: 1,
+  settings: [
+    { key: 'location', type: 'location', label: 'Target location', required: true, value: { accuracy: 25 } },
+    { key: 'failClosed', type: 'boolean', label: 'Block on transformation failure', required: true, value: true },
   ],
+  persistent_storage: false,
+  source_url: 'https://raw.githubusercontent.com/moooyo/5gpn/main/extensions/apple-wloc/extension.yaml',
+  source_digest: 'a'.repeat(64), snapshot_digest: 'a'.repeat(64), imported_at: '2026-07-18T00:00:00Z',
 }
 
-const WLOC: WLOCInterceptView = {
-  revision: VIEW.revision,
-  enabled: false,
-  longitude: null,
-  latitude: null,
-  accuracy: 25,
-  fail_closed: true,
-  max_body_bytes: 8388608,
-  hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'],
+const CLEANER: InterceptModule = {
+  id: 'io.example.response-cleaner', extension_version: '1.0.0', name: 'Response Cleaner',
+  description: 'Native response action fixture.', enabled: false, ready: true, reason: undefined,
+  capture_hosts: ['api.example.com'], script_count: 1, settings: [], persistent_storage: false,
+  upstream_mappings: [{ host: 'api.example.com', target: 'origin.example.net' }],
+  source_url: 'https://extensions.example.test/clean.yaml', source_digest: 'b'.repeat(64), snapshot_digest: 'b'.repeat(64), imported_at: '2026-07-18T00:00:00Z',
+}
+
+const VIEW: InterceptModulesView = {
+  revision: '1'.repeat(64),
+  catalog_url: 'https://github.com/moooyo/5gpn/tree/main/extensions',
+  active_capture_hosts: [],
+  modules: [WLOC, CLEANER],
 }
 
 function cloneView(): InterceptModulesView {
-  return { ...VIEW, active_hosts: [...VIEW.active_hosts], modules: VIEW.modules.map((module) => ({ ...module, hosts: [...module.hosts], unsupported: module.unsupported ? [...module.unsupported] : undefined })) }
+  return structuredClone(VIEW)
+}
+
+function renderPage(path = '/extensions') {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route path="/extensions" element={<ExtensionsPage />} />
+        <Route path="/extensions/hosts" element={<ExtensionsPage />} />
+      </Routes>
+    </MemoryRouter>,
+  )
 }
 
 beforeEach(async () => {
   await i18n.changeLanguage('zh')
-  vi.mocked(api.getInterceptModules).mockReset().mockResolvedValue(cloneView())
-  vi.mocked(api.getInterceptModuleSnapshot).mockReset().mockResolvedValue({
-    id: 'mod-1234567890abcdef', name: 'Response Cleaner',
-    source_url: 'https://example.com/test.lpx', source_digest: 'b'.repeat(64),
-    source_body: '#!name=Response Cleaner\n[MITM]\nhostname=api.example.com',
-    scripts: [{ id: 'script-001', url: 'https://example.com/clean.js', digest: 'd'.repeat(64), body: '$done({body: $response.body});' }],
+  localStorage.clear()
+  vi.clearAllMocks()
+  vi.mocked(api.getInterceptModules).mockResolvedValue(cloneView())
+  vi.mocked(api.getMITMSettings).mockResolvedValue({ revision: '1'.repeat(64), enabled: false, http2: true, quic_fallback_protection: true })
+  vi.mocked(api.putInterceptModule).mockImplementation(async (_id, update) => {
+    const next = cloneView()
+    const module = next.modules.find((candidate) => candidate.id === _id)!
+    if (update.enabled !== undefined) module.enabled = update.enabled
+    if (update.settings) module.settings = module.settings?.map((setting) => ({ ...setting, value: update.settings?.[setting.key] }))
+    return next
   })
-  vi.mocked(api.getWLOCIntercept).mockReset().mockResolvedValue({ ...WLOC })
-  vi.mocked(api.putInterceptModule).mockReset().mockResolvedValue(cloneView())
-  vi.mocked(api.deleteInterceptModule).mockReset().mockResolvedValue(cloneView())
-  vi.mocked(api.importInterceptModule).mockReset().mockResolvedValue(cloneView())
-  vi.mocked(api.putWLOCIntercept).mockReset().mockResolvedValue({ ...WLOC })
-  vi.mocked(api.getMITMSettings).mockReset().mockResolvedValue({
-    revision: VIEW.revision, enabled: false, http2: true, quic_fallback_protection: true,
-  })
-  vi.mocked(api.checkInterceptModuleUpdate).mockReset().mockResolvedValue({ revision: VIEW.revision, state: 'unchanged' })
-  vi.mocked(api.applyInterceptModuleUpdate).mockReset().mockResolvedValue(cloneView())
+  vi.mocked(api.deleteInterceptModule).mockResolvedValue(cloneView())
+  vi.mocked(api.getInterceptModuleSnapshot).mockResolvedValue({ id: CLEANER.id, name: CLEANER.name, source_digest: CLEANER.source_digest, source_body: 'apiVersion: 5gpn.io/v1', scripts: [] })
 })
 
-afterEach(() => vi.restoreAllMocks())
-
-function renderPage(path = '/extensions') {
-  return render(<MemoryRouter initialEntries={[path]}><ExtensionsPage /><Toaster /></MemoryRouter>)
-}
-
-describe('ExtensionsPage', () => {
-  it('renders immutable snapshots, compatibility, and the external catalog link', async () => {
+describe('ExtensionsPage native extension contract', () => {
+  it('renders the capture-transform-egress rail and native extension snapshots', async () => {
     renderPage()
     expect(await screen.findByText('Response Cleaner')).toBeInTheDocument()
-    expect(screen.getByText('部分兼容')).toBeInTheDocument()
-    expect(screen.getByText('MITM · 1')).toBeInTheDocument()
-    expect(screen.getByText('Host · 1')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /打开插件目录/ })).toHaveAttribute('href', 'https://hub.kelee.one/')
-    expect(screen.getByTestId('mitm-readiness-notice')).toHaveTextContent('启用 MITM 前，请先安装并信任 5GPN CA 证书')
-    expect(screen.getByRole('link', { name: /前往配置向导安装/ })).toHaveAttribute('href', '/setup-guide')
-    expect(screen.queryByRole('link', { name: /下载.*CA/ })).toBeNull()
+    expect(screen.getByTestId('extension-traffic-contract')).toHaveTextContent('声明接管域名')
+    expect(screen.getByTestId('extension-traffic-contract')).toHaveTextContent('mihomo 决定出口')
+    expect(screen.getByText('接管 · 1')).toBeInTheDocument()
+    expect(screen.getByText('上游映射 · 1')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /打开插件目录/ })).toHaveAttribute('href', VIEW.catalog_url)
   })
 
-  it('confirms and publishes a module toggle with the registry revision', async () => {
+  it('arms a valid native extension while the MITM master is off after confirmation', async () => {
     const user = userEvent.setup()
     renderPage()
-    const card = await screen.findByTestId('extension-mod-1234567890abcdef')
+    const card = await screen.findByTestId(`extension-${CLEANER.id}`)
     await user.click(within(card).getByRole('switch'))
-    const dialog = await screen.findByRole('dialog')
-    await user.click(within(dialog).getByRole('button', { name: '启用' }))
-    await waitFor(() => expect(api.putInterceptModule).toHaveBeenCalledWith('mod-1234567890abcdef', {
-      revision: VIEW.revision,
-      enabled: true,
-    }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '启用' }))
+    await waitFor(() => expect(api.putInterceptModule).toHaveBeenCalledWith(CLEANER.id, { revision: VIEW.revision, enabled: true }))
   })
 
-  it('loads the exact source and script snapshot only when the operator inspects it', async () => {
+  it('uses the generic location setting editor for the online WLOC extension', async () => {
     const user = userEvent.setup()
     renderPage()
-    const card = await screen.findByTestId('extension-mod-1234567890abcdef')
-    await user.click(within(card).getByRole('button', { name: '审查快照' }))
-    await waitFor(() => expect(api.getInterceptModuleSnapshot).toHaveBeenCalledWith('mod-1234567890abcdef'))
-    const dialog = await screen.findByRole('dialog')
-    expect(within(dialog).getByText(/hostname=api\.example\.com/)).toBeInTheDocument()
-    expect(within(dialog).getByText(/\$done/)).toBeInTheDocument()
-  })
-
-  it('requires an explicit compatibility acknowledgement before partial execution', async () => {
-    const partial = cloneView()
-    partial.modules[1].partial_allowed = false
-    vi.mocked(api.getInterceptModules).mockResolvedValueOnce(partial)
-    const user = userEvent.setup()
-    renderPage()
-    const card = await screen.findByTestId('extension-mod-1234567890abcdef')
-    expect(within(card).getByRole('switch')).toBeDisabled()
-    await user.click(within(card).getByRole('button', { name: '允许部分执行' }))
-    const dialog = await screen.findByRole('dialog')
-    await user.click(within(dialog).getByRole('button', { name: '允许部分执行' }))
-    await waitFor(() => expect(api.putInterceptModule).toHaveBeenCalledWith('mod-1234567890abcdef', {
-      revision: VIEW.revision,
-      partial_allowed: true,
-    }))
-  })
-
-  it('requires post-import parameter configuration before enable', async () => {
-    const configurable = cloneView()
-    configurable.modules[1].compatibility = 'needs_configuration'
-    configurable.modules[1].ready = false
-    configurable.modules[1].parameters = [
-      { key: 'appName', kind: 'input', value: '' },
-      { key: 'mode', kind: 'select', options: ['clean', 'full'], value: '' },
-    ]
-    vi.mocked(api.getInterceptModules).mockResolvedValueOnce(configurable)
-    const user = userEvent.setup()
-    renderPage()
-    const card = await screen.findByTestId('extension-mod-1234567890abcdef')
-    expect(within(card).getByRole('switch')).toBeDisabled()
-    await user.click(within(card).getByRole('button', { name: '参数 · 2' }))
-    const dialog = await screen.findByRole('dialog')
-    await user.type(within(dialog).getByLabelText('appName'), 'Drive')
-    await user.selectOptions(within(dialog).getByLabelText('mode'), 'clean')
+    const card = await screen.findByTestId(`extension-${WLOC.id}`)
+    await user.click(within(card).getByRole('button', { name: '设置 · 2' }))
+    const dialog = await screen.findByRole('dialog', { name: /Apple WLOC/ })
+    await user.click(within(dialog).getByTestId('mock-location-picker'))
     await user.click(within(dialog).getByRole('button', { name: '保存' }))
-    await waitFor(() => expect(api.putInterceptModule).toHaveBeenCalledWith('mod-1234567890abcdef', {
+    await waitFor(() => expect(api.putInterceptModule).toHaveBeenCalledWith(WLOC.id, {
       revision: VIEW.revision,
-      argument: '',
-      parameters: { appName: 'Drive', mode: 'clean' },
+      settings: {
+        location: { longitude: 113.94114, latitude: 22.544577, accuracy: 25 },
+        failClosed: true,
+      },
     }))
   })
 
-  it('opens built-in WLOC settings from the compact catalog card', async () => {
-    const user = userEvent.setup()
-    renderPage()
-    const card = await screen.findByTestId('extension-builtin-wloc')
-    await user.click(within(card).getByRole('button', { name: '配置' }))
-    expect(await screen.findByTestId('wloc-intercept-card')).toBeInTheDocument()
-    expect(screen.getByRole('dialog', { name: 'Apple WLOC 响应改写' })).toBeInTheDocument()
-  })
-
-  it('imports a Loon deep link without pre-import format, header, argument, or compatibility controls', async () => {
+  it('keeps URL installation and local add as distinct dialogs', async () => {
     const user = userEvent.setup()
     renderPage()
     await user.click(await screen.findByRole('button', { name: '从 URL 安装' }))
-    const dialog = await screen.findByRole('dialog')
-    expect(within(dialog).getByTestId('extension-import-automatic')).toHaveTextContent('loon://import')
-    expect(within(dialog).queryByLabelText('格式')).toBeNull()
-    expect(within(dialog).queryByLabelText('初始 $argument')).toBeNull()
-    expect(within(dialog).queryByLabelText('使用 Quantumult X 请求头')).toBeNull()
-    expect(within(dialog).queryByLabelText('允许明确列出的未支持指令')).toBeNull()
-    const deepLink = 'loon://import?plugin=https://example.com/test.lpx'
-    await user.type(within(dialog).getByLabelText('插件 URL'), deepLink)
-    await user.click(within(dialog).getByRole('button', { name: '获取、固化并检查' }))
-    await waitFor(() => expect(api.importInterceptModule).toHaveBeenCalledWith({
-      revision: VIEW.revision,
-      url: deepLink,
-    }))
+    let dialog = await screen.findByRole('dialog', { name: '从 URL 安装原生插件' })
+    expect(within(dialog).getByLabelText('Manifest URL')).toBeInTheDocument()
+    expect(within(dialog).queryByLabelText('原生插件 manifest')).not.toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: '取消' }))
+
+    await user.click(screen.getByRole('button', { name: '本地新增' }))
+    dialog = await screen.findByRole('dialog', { name: '本地新增原生插件' })
+    expect(within(dialog).getByLabelText('原生插件 manifest')).toBeInTheDocument()
+    expect(within(dialog).queryByLabelText('Manifest URL')).not.toBeInTheDocument()
   })
 
-  it('opens the local-add action directly in paste or upload mode', async () => {
+  it('installs and reviews a native manifest URL without exposing source-mode tabs', async () => {
     const user = userEvent.setup()
-    renderPage()
-    await user.click(await screen.findByRole('button', { name: '本地新增' }))
-    const dialog = await screen.findByRole('dialog')
-    expect(within(dialog).getByLabelText('插件内容')).toBeInTheDocument()
-    expect(within(dialog).queryByLabelText('插件 URL')).toBeNull()
-  })
-
-  it('keeps the import dialog open for structured incompatibility review', async () => {
-    const imported = cloneView()
-    imported.modules.push({
-      id: 'mod-fedcba0987654321', name: 'Needs review', enabled: false, ready: false,
-      compatibility: 'incompatible', partial_allowed: false, hosts: ['api.review.test'],
-      script_count: 1, rewrite_count: 0, source_digest: 'e'.repeat(64), snapshot_digest: 'f'.repeat(64),
-      issues: [{ severity: 'error', message: '[Script] outbound networking is disabled' }],
-      incompatible: ['[Script] outbound networking is disabled'],
-    })
-    vi.mocked(api.importInterceptModule).mockResolvedValueOnce(imported)
-    const user = userEvent.setup()
+    const installed = cloneView()
+    installed.modules.push({ ...CLEANER, id: 'io.example.installed', name: 'Installed extension', source_digest: 'c'.repeat(64), snapshot_digest: 'c'.repeat(64) })
+    vi.mocked(api.importInterceptModule).mockResolvedValueOnce(installed)
     renderPage()
     await user.click(await screen.findByRole('button', { name: '从 URL 安装' }))
     const dialog = await screen.findByRole('dialog')
-    await user.type(within(dialog).getByLabelText('插件 URL'), 'https://example.com/review.lpx')
+    await user.type(within(dialog).getByLabelText('Manifest URL'), 'https://example.com/extension.yaml')
     await user.click(within(dialog).getByRole('button', { name: '获取、固化并检查' }))
-    expect(await within(dialog).findByTestId('extension-import-review')).toHaveTextContent('outbound networking is disabled')
-    expect(within(dialog).getByRole('button', { name: '我已了解，继续配置' })).toBeInTheDocument()
+    expect(await within(dialog).findByTestId('extension-install-review')).toHaveTextContent('Installed extension')
+    expect(api.importInterceptModule).toHaveBeenCalledWith({ revision: VIEW.revision, url: 'https://example.com/extension.yaml' })
   })
 
-  it('audits MITM hosts by extension and supports host search', async () => {
-    const active = cloneView()
-    active.active_hosts = ['api.example.com']
-    active.modules[1].enabled = true
-    active.modules[1].ready = true
-    vi.mocked(api.getInterceptModules).mockResolvedValueOnce(active)
-    vi.mocked(api.getMITMSettings).mockResolvedValueOnce({
-      revision: VIEW.revision, enabled: true, http2: true, quic_fallback_protection: true,
-    })
+  it('audits capture hosts by extension and supports host search', async () => {
     const user = userEvent.setup()
     renderPage('/extensions/hosts')
-
     expect(await screen.findByTestId('host-audit-view')).toBeInTheDocument()
-    expect(screen.getByTestId('host-group-mod-1234567890abcdef')).toHaveTextContent('api.example.com')
-    expect(screen.getByTestId('host-group-mod-1234567890abcdef')).toHaveTextContent('运行中')
-
-    await user.type(screen.getByTestId('host-audit-search'), 'gs-loc')
-    expect(screen.getByTestId('host-group-builtin-wloc')).toHaveTextContent('gs-loc.apple.com')
-    expect(screen.queryByTestId('host-group-mod-1234567890abcdef')).not.toBeInTheDocument()
+    expect(screen.getByTestId(`host-group-${WLOC.id}`)).toHaveTextContent('gs-loc.apple.com')
+    await user.type(screen.getByTestId('host-audit-search'), 'api.example.com')
+    expect(screen.getByTestId(`host-group-${CLEANER.id}`)).toBeInTheDocument()
+    expect(screen.queryByTestId(`host-group-${WLOC.id}`)).not.toBeInTheDocument()
   })
 
-  it('links a plugin card to its scoped host audit', async () => {
+  it('reviews a same-id native update before replacement', async () => {
     const user = userEvent.setup()
+    const candidate = { ...CLEANER, extension_version: '1.1.0', snapshot_digest: 'f'.repeat(64) }
+    vi.mocked(api.checkInterceptModuleUpdate).mockResolvedValueOnce({ revision: VIEW.revision, state: 'available', candidate })
+    vi.mocked(api.applyInterceptModuleUpdate).mockResolvedValueOnce(cloneView())
     renderPage()
-    const card = await screen.findByTestId('extension-mod-1234567890abcdef')
-    await user.click(within(card).getByRole('button', { name: '审计 Hosts' }))
-    expect(await screen.findByTestId('host-audit-view')).toBeInTheDocument()
-    expect(screen.getByText('当前仅显示一个插件。')).toBeInTheDocument()
-    expect(screen.getByTestId('host-group-mod-1234567890abcdef')).toBeInTheDocument()
-    expect(screen.queryByTestId('host-group-builtin-wloc')).not.toBeInTheDocument()
-  })
-
-  it('reviews a URL update candidate before atomically replacing the disabled snapshot', async () => {
-    const candidate = { ...VIEW.modules[1], id: 'mod-fedcba0987654321', name: 'Response Cleaner update', source_digest: 'e'.repeat(64), snapshot_digest: 'f'.repeat(64) }
-    vi.mocked(api.checkInterceptModuleUpdate).mockResolvedValueOnce({
-      revision: VIEW.revision,
-      state: 'available',
-      candidate,
-    })
-    const user = userEvent.setup()
-    renderPage()
-    const card = await screen.findByTestId('extension-mod-1234567890abcdef')
+    const card = await screen.findByTestId(`extension-${CLEANER.id}`)
     await user.click(within(card).getByRole('button', { name: '检查更新' }))
-
     const dialog = await screen.findByRole('dialog', { name: /审查更新/ })
-    expect(within(dialog).getByText('已审查候选')).toBeInTheDocument()
-    expect(within(dialog).getByText('f'.repeat(64))).toBeInTheDocument()
+    expect(dialog).toHaveTextContent('v1.1.0')
     await user.click(within(dialog).getByRole('button', { name: '替换快照' }))
-    await waitFor(() => expect(api.applyInterceptModuleUpdate).toHaveBeenCalledWith(
-      'mod-1234567890abcdef', VIEW.revision, 'f'.repeat(64),
-    ))
+    await waitFor(() => expect(api.applyInterceptModuleUpdate).toHaveBeenCalledWith(CLEANER.id, VIEW.revision, candidate.snapshot_digest))
   })
 })

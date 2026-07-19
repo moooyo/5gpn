@@ -338,8 +338,8 @@ func TestBotMenusAreVersionedAndUnambiguous(t *testing.T) {
 
 func TestInterceptModuleBotMenuAndCallbacks(t *testing.T) {
 	view := interceptModulesView{Modules: []interceptModuleView{
-		{ID: interceptModuleWLOCID, Name: "WLOC", Enabled: false, Ready: true, Hosts: builtInWLOCHosts},
-		{ID: "mod-1234567890abcdef1234567890abcdef", Name: "Fixture", Enabled: true, Ready: true, Hosts: []string{"api.example.com"}},
+		{ID: "io.5gpn.apple-wloc", Name: "Apple WLOC", Enabled: false, Ready: true, CaptureHosts: []string{"gs-loc.apple.com"}},
+		{ID: "io.example.fixture", Name: "Fixture", Enabled: true, Ready: true, CaptureHosts: []string{"api.example.com"}},
 	}}
 	menu := interceptModulesMenu(view)
 	if len(menu.InlineKeyboard) != 4 {
@@ -358,7 +358,7 @@ func TestInterceptModuleBotMenuAndCallbacks(t *testing.T) {
 			t.Fatalf("module callback parsed as %+v", intent)
 		}
 	}
-	confirm := interceptModuleConfirmationMenu("mod-1234567890abcdef1234567890abcdef", true)
+	confirm := interceptModuleConfirmationMenu("io.example.fixture", true)
 	apply := confirm.InlineKeyboard[0][0].CallbackData
 	if len(apply) > 64 || parseCallback(apply).kind != cbModuleToggle {
 		t.Fatalf("module confirmation callback = %q parsed=%+v", apply, parseCallback(apply))
@@ -370,12 +370,11 @@ func TestInterceptModuleBotMenuAndCallbacks(t *testing.T) {
 	if !strings.Contains(rendered, "api.example.com") || !strings.Contains(rendered, "已启用") {
 		t.Fatalf("module render = %s", rendered)
 	}
-	partial := interceptModulesMenu(interceptModulesView{Modules: []interceptModuleView{{
-		ID: "mod-abcdefabcdefabcdefabcdefabcdefab", Name: "Partial", Ready: true,
-		Compatibility: "partial", PartialAllowed: false,
+	requiresSettings := interceptModulesMenu(interceptModulesView{Modules: []interceptModuleView{{
+		ID: "io.example.needs-settings", Name: "Needs settings", Ready: false, Reason: "settings-required",
 	}}})
-	if got := partial.InlineKeyboard[0][0]; !strings.Contains(got.Text, "Console 审查") || got.CallbackData != versionedCallback("menu:modules") {
-		t.Fatalf("unreviewed partial module button = %+v", got)
+	if got := requiresSettings.InlineKeyboard[0][0]; !strings.Contains(got.Text, "Console 配置") || got.CallbackData != versionedCallback("menu:modules") {
+		t.Fatalf("unconfigured extension button = %+v", got)
 	}
 }
 

@@ -676,8 +676,8 @@ func iosMenu() *models.InlineKeyboardMarkup {
 
 func renderInterceptModules(view interceptModulesView, notice string) string {
 	var out strings.Builder
-	out.WriteString("<b>MITM 模块</b>\n")
-	out.WriteString("启用会同步发布证书、mihomo 路由与 DNS 引流。\n")
+	out.WriteString("<b>拦截插件</b>\n")
+	out.WriteString("启用会同步发布接管域名、证书、mihomo 路由与 DNS 引流；出口始终由 mihomo 决定。\n")
 	if notice != "" {
 		out.WriteString("\n")
 		out.WriteString(notice)
@@ -695,15 +695,10 @@ func renderInterceptModules(view interceptModulesView, notice string) string {
 		out.WriteString("</b> · ")
 		out.WriteString(state)
 		out.WriteString("\n<code>")
-		out.WriteString(html.EscapeString(strings.Join(module.Hosts, ", ")))
+		out.WriteString(html.EscapeString(strings.Join(module.CaptureHosts, ", ")))
 		out.WriteString("</code>")
-		switch module.Compatibility {
-		case "partial":
-			out.WriteString("\n⚠️ 仅部分兼容")
-		case "needs_configuration":
-			out.WriteString("\n🔧 需要先在 Console 配置参数")
-		case "incompatible":
-			out.WriteString("\n⛔ 存在不兼容能力")
+		if module.Reason == "settings-required" {
+			out.WriteString("\n🔧 需要先在 Console 配置必填设置")
 		}
 		if module.Reason != "" {
 			out.WriteString("\n原因：<code>")
@@ -723,11 +718,9 @@ func interceptModulesMenu(view interceptModulesView) *models.InlineKeyboardMarku
 		if module.Enabled {
 			action = "off"
 			prefix = "关闭"
-		} else if module.Compatibility == "incompatible" || module.Compatibility == "needs_configuration" {
-			prefix = "需在 Console 处理"
-		} else if module.Compatibility == "partial" && !module.PartialAllowed {
-			prefix = "需在 Console 审查"
-		} else if !module.Ready {
+		} else if module.Reason == "settings-required" {
+			prefix = "需在 Console 配置"
+		} else if !module.Ready && module.Reason != "mitm-disabled" {
 			prefix = "不可用"
 		}
 		label := telegramModuleName(module)
@@ -736,7 +729,7 @@ func interceptModulesMenu(view interceptModulesView) *models.InlineKeyboardMarku
 			label = string(runes[:23]) + "…"
 		}
 		callback = "module:request:" + action + ":" + module.ID
-		if !module.Enabled && (!module.Ready || (module.Compatibility == "partial" && !module.PartialAllowed)) {
+		if !module.Enabled && ((!module.Ready && module.Reason != "mitm-disabled") || module.Reason == "settings-required") {
 			callback = "menu:modules"
 		}
 		rows = append(rows, []models.InlineKeyboardButton{btn(prefix+" · "+label, callback)})
@@ -747,9 +740,6 @@ func interceptModulesMenu(view interceptModulesView) *models.InlineKeyboardMarku
 }
 
 func telegramModuleName(module interceptModuleView) string {
-	if module.ID == interceptModuleWLOCID {
-		return "Apple WLOC 响应改写"
-	}
 	return module.Name
 }
 
@@ -913,7 +903,7 @@ func parseCallback(data string) callbackIntent {
 }
 
 func validInterceptModuleCallbackID(id string) bool {
-	return id == interceptModuleWLOCID || validInterceptModuleID(id)
+	return validInterceptModuleID(id)
 }
 
 // disabledPreview is a reusable "no link preview" option for outgoing

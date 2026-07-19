@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"regexp"
 	"sort"
@@ -17,23 +19,21 @@ const (
 	interceptPhaseRequest  = "request"
 	interceptPhaseResponse = "response"
 
-	interceptModuleWLOCID = "builtin-wloc"
-	builtInWLOCSource     = "Built into the 5gpn-intercept binary; no remote source is executed."
-
 	maxInterceptModules       = 64
 	maxInterceptModuleHosts   = 256
 	maxInterceptModuleRules   = 256
+	maxInterceptSettings      = 128
 	maxInterceptModuleName    = 128
 	maxInterceptModuleDesc    = 1024
-	maxInterceptModuleArg     = 4096
 	maxInterceptModuleSource  = 2 << 20
 	maxInterceptScriptSource  = 1 << 20
 	maxInterceptScriptTotal   = 8 << 20
 	maxInterceptModulePattern = 4096
 	maxInterceptResourceURL   = 4096
+	maxInterceptSettingValue  = 64 << 10
 )
 
-var builtInWLOCHosts = []string{"gs-loc.apple.com", "gs-loc-cn.apple.com"}
+var nativeExtensionIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{1,126}[a-z0-9])$`)
 
 type interceptModuleSource struct {
 	URL    string `json:"url,omitempty"`
@@ -41,100 +41,89 @@ type interceptModuleSource struct {
 	Body   string `json:"body"`
 }
 
-type interceptScriptRule struct {
-	ID           string `json:"id"`
-	Phase        string `json:"phase"`
-	Pattern      string `json:"pattern"`
-	ScriptURL    string `json:"script_url,omitempty"`
-	ScriptDigest string `json:"script_digest"`
-	ScriptBody   string `json:"script_body"`
-	RequiresBody bool   `json:"requires_body"`
-	BinaryBody   bool   `json:"binary_body"`
-	TimeoutMS    int    `json:"timeout_ms"`
-	MaxBodyBytes int64  `json:"max_body_bytes"`
-	Argument     string `json:"argument,omitempty"`
+type interceptActionMatch struct {
+	Hosts       []string `json:"hosts"`
+	Schemes     []string `json:"schemes"`
+	Methods     []string `json:"methods,omitempty"`
+	PathRegex   string   `json:"path_regex"`
+	StatusCodes []int    `json:"status_codes,omitempty"`
 }
 
-type interceptModuleParameter struct {
-	Key     string   `json:"key"`
-	Kind    string   `json:"kind"`
-	Options []string `json:"options,omitempty"`
-	Value   string   `json:"value,omitempty"`
+type interceptScriptRule struct {
+	ID           string               `json:"id"`
+	Phase        string               `json:"phase"`
+	Match        interceptActionMatch `json:"match"`
+	ScriptURL    string               `json:"script_url,omitempty"`
+	ScriptDigest string               `json:"script_digest"`
+	ScriptBody   string               `json:"script_body"`
+	BodyMode     string               `json:"body_mode"`
+	TimeoutMS    int                  `json:"timeout_ms"`
+	MaxBodyBytes int64                `json:"max_body_bytes"`
+}
+
+type interceptLocationValue struct {
+	Longitude *float64 `json:"longitude,omitempty"`
+	Latitude  *float64 `json:"latitude,omitempty"`
+	Accuracy  uint32   `json:"accuracy"`
+}
+
+type interceptModuleSetting struct {
+	Key         string          `json:"key"`
+	Type        string          `json:"type"`
+	Label       string          `json:"label,omitempty"`
+	Description string          `json:"description,omitempty"`
+	Required    bool            `json:"required"`
+	Options     []string        `json:"options,omitempty"`
+	Min         *float64        `json:"min,omitempty"`
+	Max         *float64        `json:"max,omitempty"`
+	Default     json.RawMessage `json:"default,omitempty"`
+	Value       json.RawMessage `json:"value,omitempty"`
 }
 
 type interceptHostMapping struct {
-	Pattern string `json:"pattern"`
+	Pattern string `json:"host"`
 	Target  string `json:"target"`
 }
 
-type interceptRewriteRule struct {
-	ID          string `json:"id"`
-	Pattern     string `json:"pattern"`
-	Replacement string `json:"replacement,omitempty"`
-	Action      string `json:"action"`
-}
-
-type interceptHeaderRule struct {
-	ID        string `json:"id"`
-	Pattern   string `json:"pattern"`
-	Operation string `json:"operation"`
-	Header    string `json:"header"`
-	Value     string `json:"value,omitempty"`
-}
-
 type interceptModuleSnapshot struct {
-	ID             string                     `json:"id"`
-	Name           string                     `json:"name"`
-	Description    string                     `json:"description,omitempty"`
-	Enabled        bool                       `json:"enabled"`
-	Argument       string                     `json:"argument,omitempty"`
-	ImportedAt     string                     `json:"imported_at"`
-	Source         interceptModuleSource      `json:"source"`
-	Hosts          []string                   `json:"hosts"`
-	HostMappings   []interceptHostMapping     `json:"host_mappings,omitempty"`
-	Parameters     []interceptModuleParameter `json:"parameters,omitempty"`
-	Scripts        []interceptScriptRule      `json:"scripts,omitempty"`
-	Rewrites       []interceptRewriteRule     `json:"rewrites,omitempty"`
-	Headers        []interceptHeaderRule      `json:"headers,omitempty"`
-	Unsupported    []string                   `json:"unsupported,omitempty"`
-	Incompatible   []string                   `json:"incompatible,omitempty"`
-	PartialAllowed bool                       `json:"partial_allowed"`
+	ID                string                   `json:"id"`
+	Version           string                   `json:"extension_version"`
+	Name              string                   `json:"name"`
+	Description       string                   `json:"description,omitempty"`
+	Enabled           bool                     `json:"enabled"`
+	ImportedAt        string                   `json:"imported_at"`
+	Source            interceptModuleSource    `json:"source"`
+	CaptureHosts      []string                 `json:"capture_hosts"`
+	HostMappings      []interceptHostMapping   `json:"upstream_mappings,omitempty"`
+	Settings          []interceptModuleSetting `json:"settings,omitempty"`
+	Scripts           []interceptScriptRule    `json:"actions,omitempty"`
+	PersistentStorage bool                     `json:"persistent_storage"`
 }
 
 type interceptModuleView struct {
-	ID             string                            `json:"id"`
-	Name           string                            `json:"name"`
-	Description    string                            `json:"description,omitempty"`
-	Enabled        bool                              `json:"enabled"`
-	Ready          bool                              `json:"ready"`
-	Reason         string                            `json:"reason,omitempty"`
-	Compatibility  string                            `json:"compatibility"`
-	PartialAllowed bool                              `json:"partial_allowed"`
-	Hosts          []string                          `json:"hosts"`
-	ScriptCount    int                               `json:"script_count"`
-	RewriteCount   int                               `json:"rewrite_count"`
-	Unsupported    []string                          `json:"unsupported,omitempty"`
-	Incompatible   []string                          `json:"incompatible,omitempty"`
-	Issues         []interceptCompatibilityIssueView `json:"issues,omitempty"`
-	Parameters     []interceptModuleParameter        `json:"parameters,omitempty"`
-	HostMappings   []interceptHostMapping            `json:"host_mappings,omitempty"`
-	SourceURL      string                            `json:"source_url,omitempty"`
-	SourceDigest   string                            `json:"source_digest"`
-	SnapshotDigest string                            `json:"snapshot_digest"`
-	ImportedAt     string                            `json:"imported_at,omitempty"`
-	Argument       string                            `json:"argument,omitempty"`
-}
-
-type interceptCompatibilityIssueView struct {
-	Severity string `json:"severity"`
-	Message  string `json:"message"`
+	ID                string                   `json:"id"`
+	Version           string                   `json:"extension_version"`
+	Name              string                   `json:"name"`
+	Description       string                   `json:"description,omitempty"`
+	Enabled           bool                     `json:"enabled"`
+	Ready             bool                     `json:"ready"`
+	Reason            string                   `json:"reason,omitempty"`
+	CaptureHosts      []string                 `json:"capture_hosts"`
+	ScriptCount       int                      `json:"script_count"`
+	Settings          []interceptModuleSetting `json:"settings,omitempty"`
+	HostMappings      []interceptHostMapping   `json:"upstream_mappings,omitempty"`
+	PersistentStorage bool                     `json:"persistent_storage"`
+	SourceURL         string                   `json:"source_url,omitempty"`
+	SourceDigest      string                   `json:"source_digest"`
+	SnapshotDigest    string                   `json:"snapshot_digest"`
+	ImportedAt        string                   `json:"imported_at,omitempty"`
 }
 
 type interceptModulesView struct {
-	Revision    string                `json:"revision"`
-	CatalogURL  string                `json:"catalog_url"`
-	Modules     []interceptModuleView `json:"modules"`
-	ActiveHosts []string              `json:"active_hosts"`
+	Revision           string                `json:"revision"`
+	CatalogURL         string                `json:"catalog_url"`
+	Modules            []interceptModuleView `json:"modules"`
+	ActiveCaptureHosts []string              `json:"active_capture_hosts"`
 }
 
 type interceptModuleUpdateCheckView struct {
@@ -161,26 +150,26 @@ type interceptModuleSnapshotView struct {
 
 func validateInterceptModules(modules []interceptModuleSnapshot) error {
 	if len(modules) > maxInterceptModules {
-		return fmt.Errorf("at most %d interception modules are allowed", maxInterceptModules)
+		return fmt.Errorf("at most %d interception extensions are allowed", maxInterceptModules)
 	}
 	seen := make(map[string]struct{}, len(modules))
 	activeMappings := make(map[string]string)
 	for index := range modules {
 		module := &modules[index]
-		if module.ID == interceptModuleWLOCID || !validInterceptModuleID(module.ID) {
-			return fmt.Errorf("module %d has an invalid id", index)
+		if !validInterceptModuleID(module.ID) {
+			return fmt.Errorf("extension %d has an invalid id", index)
 		}
 		if _, duplicate := seen[module.ID]; duplicate {
-			return fmt.Errorf("duplicate interception module id %q", module.ID)
+			return fmt.Errorf("duplicate interception extension id %q", module.ID)
 		}
 		seen[module.ID] = struct{}{}
 		if err := validateInterceptModule(*module); err != nil {
-			return fmt.Errorf("module %q: %w", module.ID, err)
+			return fmt.Errorf("extension %q: %w", module.ID, err)
 		}
 		if module.Enabled {
 			for _, mapping := range module.HostMappings {
 				if target, exists := activeMappings[mapping.Pattern]; exists && target != mapping.Target {
-					return fmt.Errorf("enabled modules conflict on host mapping %q", mapping.Pattern)
+					return fmt.Errorf("enabled extensions conflict on upstream mapping %q", mapping.Pattern)
 				}
 				activeMappings[mapping.Pattern] = mapping.Target
 			}
@@ -190,14 +179,17 @@ func validateInterceptModules(modules []interceptModuleSnapshot) error {
 }
 
 func validateInterceptModule(module interceptModuleSnapshot) error {
+	if !validInterceptModuleID(module.ID) {
+		return errors.New("id must be a lowercase dotted extension identifier")
+	}
+	if strings.TrimSpace(module.Version) == "" || len(module.Version) > 64 {
+		return errors.New("extension_version must contain 1 to 64 bytes")
+	}
 	if strings.TrimSpace(module.Name) == "" || len(module.Name) > maxInterceptModuleName {
 		return fmt.Errorf("name must contain 1 to %d bytes", maxInterceptModuleName)
 	}
 	if len(module.Description) > maxInterceptModuleDesc {
 		return fmt.Errorf("description exceeds %d bytes", maxInterceptModuleDesc)
-	}
-	if len(module.Argument) > maxInterceptModuleArg {
-		return fmt.Errorf("argument exceeds %d bytes", maxInterceptModuleArg)
 	}
 	if len(module.Source.URL) > maxInterceptResourceURL {
 		return fmt.Errorf("source URL exceeds %d bytes", maxInterceptResourceURL)
@@ -208,173 +200,282 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 		}
 	}
 	if !validSHA256(module.Source.Digest) || module.Source.Digest != sha256Hex([]byte(module.Source.Body)) {
-		return errors.New("source digest does not match the immutable source snapshot")
+		return errors.New("source digest does not match the immutable manifest snapshot")
 	}
 	if len(module.Source.Body) == 0 || len(module.Source.Body) > maxInterceptModuleSource {
-		return fmt.Errorf("source snapshot must contain 1 to %d bytes", maxInterceptModuleSource)
+		return fmt.Errorf("manifest snapshot must contain 1 to %d bytes", maxInterceptModuleSource)
 	}
 	if _, err := time.Parse(time.RFC3339, module.ImportedAt); err != nil {
 		return errors.New("imported_at must be RFC3339")
 	}
-	if len(module.Hosts) > maxInterceptModuleHosts {
-		return fmt.Errorf("module exceeds %d MITM hosts", maxInterceptModuleHosts)
+	if len(module.CaptureHosts) == 0 || len(module.CaptureHosts) > maxInterceptModuleHosts {
+		return fmt.Errorf("capture_hosts must contain 1 to %d entries", maxInterceptModuleHosts)
 	}
-	for _, host := range module.Hosts {
+	if !sort.StringsAreSorted(module.CaptureHosts) {
+		return errors.New("capture_hosts must be canonical and sorted")
+	}
+	for _, host := range module.CaptureHosts {
 		if err := validateInterceptHostPattern(host); err != nil {
 			return err
 		}
 	}
-	if len(module.Scripts)+len(module.Rewrites)+len(module.Headers) > maxInterceptModuleRules {
-		return fmt.Errorf("module exceeds %d supported actions", maxInterceptModuleRules)
+	if len(module.Scripts)+len(module.HostMappings) == 0 {
+		return errors.New("extension has no actions or upstream mappings")
 	}
-	if err := validateInterceptModuleParameters(module.Parameters); err != nil {
+	if len(module.Scripts)+len(module.HostMappings) > maxInterceptModuleRules {
+		return fmt.Errorf("extension exceeds %d actions and upstream mappings", maxInterceptModuleRules)
+	}
+	if err := validateInterceptModuleSettings(module.Settings, module.Enabled); err != nil {
 		return err
 	}
-	if err := validateInterceptHostMappings(module.HostMappings); err != nil {
+	if err := validateInterceptHostMappings(module.CaptureHosts, module.HostMappings); err != nil {
 		return err
-	}
-	if len(module.Unsupported) > 64 || len(module.Incompatible) > 64 {
-		return errors.New("module compatibility report exceeds 64 entries")
-	}
-	if module.Enabled {
-		if len(module.Hosts) == 0 {
-			return errors.New("enabled module has no MITM hosts")
-		}
-		if len(module.Scripts)+len(module.Rewrites)+len(module.Headers) == 0 {
-			return errors.New("enabled module has no supported request or response actions")
-		}
-		if len(module.Incompatible) > 0 {
-			return errors.New("incompatible module cannot be enabled")
-		}
-		if !interceptModuleParametersReady(module.Parameters) {
-			return errors.New("module parameters must be configured before enable")
-		}
 	}
 	totalScriptBytes := 0
+	seenActions := make(map[string]struct{}, len(module.Scripts))
 	for index, rule := range module.Scripts {
-		if rule.Phase != interceptPhaseRequest && rule.Phase != interceptPhaseResponse {
-			return fmt.Errorf("script %d has an invalid phase", index)
+		if !validModuleSettingKey(rule.ID) {
+			return fmt.Errorf("action %d has an invalid id", index)
 		}
-		if rule.ID == "" || len(rule.Pattern) == 0 || len(rule.Pattern) > maxInterceptModulePattern {
-			return fmt.Errorf("script %d has an invalid id or pattern", index)
+		if _, duplicate := seenActions[rule.ID]; duplicate {
+			return fmt.Errorf("duplicate action id %q", rule.ID)
+		}
+		seenActions[rule.ID] = struct{}{}
+		if rule.Phase != interceptPhaseRequest && rule.Phase != interceptPhaseResponse {
+			return fmt.Errorf("action %q has an invalid phase", rule.ID)
+		}
+		if err := validateInterceptActionMatch(module.CaptureHosts, rule.Phase, rule.Match); err != nil {
+			return fmt.Errorf("action %q: %w", rule.ID, err)
 		}
 		if len(rule.ScriptURL) > maxInterceptResourceURL {
-			return fmt.Errorf("script %d URL exceeds %d bytes", index, maxInterceptResourceURL)
+			return fmt.Errorf("action %q URL exceeds %d bytes", rule.ID, maxInterceptResourceURL)
 		}
-		if err := validateRemoteModuleURL(rule.ScriptURL); err != nil {
-			return fmt.Errorf("script %d URL is invalid: %w", index, err)
-		}
-		if _, err := regexp.Compile(rule.Pattern); err != nil {
-			return fmt.Errorf("script %d pattern is outside the supported RE2 subset: %w", index, err)
+		if rule.ScriptURL != "" {
+			if err := validateRemoteModuleURL(rule.ScriptURL); err != nil {
+				return fmt.Errorf("action %q URL is invalid: %w", rule.ID, err)
+			}
 		}
 		if len(rule.ScriptBody) == 0 || len(rule.ScriptBody) > maxInterceptScriptSource {
-			return fmt.Errorf("script %d source must contain 1 to %d bytes", index, maxInterceptScriptSource)
+			return fmt.Errorf("action %q source must contain 1 to %d bytes", rule.ID, maxInterceptScriptSource)
 		}
 		if !validSHA256(rule.ScriptDigest) || rule.ScriptDigest != sha256Hex([]byte(rule.ScriptBody)) {
-			return fmt.Errorf("script %d digest does not match its immutable snapshot", index)
+			return fmt.Errorf("action %q digest does not match its immutable script snapshot", rule.ID)
+		}
+		if rule.BodyMode != "none" && rule.BodyMode != "text" && rule.BodyMode != "binary" {
+			return fmt.Errorf("action %q body_mode must be none, text, or binary", rule.ID)
 		}
 		if rule.TimeoutMS < 50 || rule.TimeoutMS > 30000 {
-			return fmt.Errorf("script %d timeout_ms must be between 50 and 30000", index)
+			return fmt.Errorf("action %q timeout_ms must be between 50 and 30000", rule.ID)
 		}
 		if rule.MaxBodyBytes < 1024 || rule.MaxBodyBytes > 64<<20 {
-			return fmt.Errorf("script %d max_body_bytes must be between 1024 and 67108864", index)
-		}
-		if len(rule.Argument) > maxInterceptModuleArg {
-			return fmt.Errorf("script %d argument exceeds %d bytes", index, maxInterceptModuleArg)
+			return fmt.Errorf("action %q max_body_bytes must be between 1024 and 67108864", rule.ID)
 		}
 		totalScriptBytes += len(rule.ScriptBody)
 	}
 	if totalScriptBytes > maxInterceptScriptTotal {
-		return fmt.Errorf("module script snapshots exceed %d bytes", maxInterceptScriptTotal)
+		return fmt.Errorf("extension script snapshots exceed %d bytes", maxInterceptScriptTotal)
 	}
-	for index, rule := range module.Rewrites {
-		if rule.ID == "" || len(rule.Pattern) == 0 || len(rule.Pattern) > maxInterceptModulePattern {
-			return fmt.Errorf("rewrite %d has an invalid id or pattern", index)
-		}
-		if _, err := regexp.Compile(rule.Pattern); err != nil {
-			return fmt.Errorf("rewrite %d pattern is outside the supported RE2 subset: %w", index, err)
-		}
-		switch rule.Action {
-		case "reject", "reject-200", "reject-dict", "reject-array", "reject-img", "reject-drop":
-		case "rewrite", "redirect-302", "redirect-307":
-			if strings.TrimSpace(rule.Replacement) == "" {
-				return fmt.Errorf("rewrite %d requires a replacement", index)
-			}
-		default:
-			return fmt.Errorf("rewrite %d has an unsupported action", index)
-		}
-	}
-	for index, rule := range module.Headers {
-		if rule.ID == "" || len(rule.Pattern) == 0 || len(rule.Pattern) > maxInterceptModulePattern {
-			return fmt.Errorf("header rewrite %d has an invalid id or pattern", index)
-		}
-		if _, err := regexp.Compile(rule.Pattern); err != nil {
-			return fmt.Errorf("header rewrite %d pattern is outside the supported RE2 subset: %w", index, err)
-		}
-		if !validModuleHeaderName(rule.Header) {
-			return fmt.Errorf("header rewrite %d has an invalid header name", index)
-		}
-		switch rule.Operation {
-		case "delete":
-		case "add", "replace":
-			if strings.ContainsAny(rule.Value, "\r\n") {
-				return fmt.Errorf("header rewrite %d contains a newline", index)
-			}
-		default:
-			return fmt.Errorf("header rewrite %d has an unsupported operation", index)
-		}
-	}
-	if module.Enabled && len(module.Unsupported) > 0 && !module.PartialAllowed {
-		return errors.New("partially compatible module requires explicit partial_allowed acknowledgement")
+	if module.Enabled && !interceptModuleSettingsReady(module.Settings) {
+		return errors.New("required extension settings must be configured before enable")
 	}
 	return nil
 }
 
-func validateInterceptModuleParameters(parameters []interceptModuleParameter) error {
-	seen := make(map[string]struct{}, len(parameters))
-	for index, parameter := range parameters {
-		if !validModuleParameterKey(parameter.Key) {
-			return fmt.Errorf("parameter %d has an invalid key", index)
+func validateInterceptActionMatch(captureHosts []string, phase string, match interceptActionMatch) error {
+	if len(match.Hosts) == 0 || len(match.Hosts) > maxInterceptModuleHosts {
+		return errors.New("match.hosts must not be empty")
+	}
+	for _, host := range match.Hosts {
+		if err := validateInterceptHostPattern(host); err != nil {
+			return err
 		}
-		if _, duplicate := seen[parameter.Key]; duplicate {
-			return fmt.Errorf("duplicate module parameter %q", parameter.Key)
+		if !interceptHostCoveredBy(captureHosts, host) {
+			return fmt.Errorf("match host %q is outside capture_hosts", host)
 		}
-		seen[parameter.Key] = struct{}{}
-		if len(parameter.Value) > maxInterceptModuleArg {
-			return fmt.Errorf("parameter %q value exceeds %d bytes", parameter.Key, maxInterceptModuleArg)
+	}
+	if len(match.Schemes) == 0 || len(match.Schemes) > 2 {
+		return errors.New("match.schemes must contain http or https")
+	}
+	for _, scheme := range match.Schemes {
+		if scheme != "http" && scheme != "https" {
+			return fmt.Errorf("unsupported scheme %q", scheme)
 		}
-		switch parameter.Kind {
-		case "input":
-			if len(parameter.Options) != 0 {
-				return fmt.Errorf("input parameter %q cannot declare options", parameter.Key)
-			}
-		case "select":
-			if len(parameter.Options) == 0 || len(parameter.Options) > 64 {
-				return fmt.Errorf("select parameter %q must declare 1 to 64 options", parameter.Key)
-			}
-			optionSeen := make(map[string]struct{}, len(parameter.Options))
-			for _, option := range parameter.Options {
-				if option == "" || len(option) > 256 {
-					return fmt.Errorf("select parameter %q has an invalid option", parameter.Key)
-				}
-				if _, duplicate := optionSeen[option]; duplicate {
-					return fmt.Errorf("select parameter %q has duplicate options", parameter.Key)
-				}
-				optionSeen[option] = struct{}{}
-			}
-			if parameter.Value != "" {
-				if _, ok := optionSeen[parameter.Value]; !ok {
-					return fmt.Errorf("select parameter %q value is not an option", parameter.Key)
-				}
-			}
-		default:
-			return fmt.Errorf("parameter %q has an invalid kind", parameter.Key)
+	}
+	for _, method := range match.Methods {
+		if method == "" || method != strings.ToUpper(method) || strings.ContainsAny(method, " \t\r\n") {
+			return fmt.Errorf("invalid HTTP method %q", method)
+		}
+	}
+	if len(match.PathRegex) == 0 || len(match.PathRegex) > maxInterceptModulePattern {
+		return errors.New("match.path_regex is required")
+	}
+	if _, err := regexp.Compile(match.PathRegex); err != nil {
+		return fmt.Errorf("path_regex is outside the supported RE2 subset: %w", err)
+	}
+	if phase == interceptPhaseRequest && len(match.StatusCodes) > 0 {
+		return errors.New("request actions cannot match response status codes")
+	}
+	for _, status := range match.StatusCodes {
+		if status < 100 || status > 599 {
+			return fmt.Errorf("invalid response status code %d", status)
 		}
 	}
 	return nil
 }
 
-func validModuleParameterKey(value string) bool {
+func validateInterceptModuleSettings(settings []interceptModuleSetting, requireReady bool) error {
+	if len(settings) > maxInterceptSettings {
+		return fmt.Errorf("extension exceeds %d settings", maxInterceptSettings)
+	}
+	seen := make(map[string]struct{}, len(settings))
+	for index := range settings {
+		setting := settings[index]
+		if !validModuleSettingKey(setting.Key) {
+			return fmt.Errorf("setting %d has an invalid key", index)
+		}
+		if _, duplicate := seen[setting.Key]; duplicate {
+			return fmt.Errorf("duplicate setting %q", setting.Key)
+		}
+		seen[setting.Key] = struct{}{}
+		if len(setting.Label) > 128 || len(setting.Description) > 512 {
+			return fmt.Errorf("setting %q metadata exceeds its bounds", setting.Key)
+		}
+		if err := validateInterceptSettingDefinition(setting); err != nil {
+			return fmt.Errorf("setting %q: %w", setting.Key, err)
+		}
+		if requireReady && setting.Required && !interceptSettingReady(setting) {
+			return fmt.Errorf("required setting %q is not configured", setting.Key)
+		}
+	}
+	return nil
+}
+
+func validateInterceptSettingDefinition(setting interceptModuleSetting) error {
+	switch setting.Type {
+	case "text":
+		if len(setting.Options) > 0 || setting.Min != nil || setting.Max != nil {
+			return errors.New("text settings cannot declare options or numeric bounds")
+		}
+	case "select":
+		if len(setting.Options) == 0 || len(setting.Options) > 64 || setting.Min != nil || setting.Max != nil {
+			return errors.New("select settings require 1 to 64 options and no numeric bounds")
+		}
+		seen := make(map[string]struct{}, len(setting.Options))
+		for _, option := range setting.Options {
+			if option == "" || len(option) > 256 {
+				return errors.New("select setting contains an invalid option")
+			}
+			if _, duplicate := seen[option]; duplicate {
+				return errors.New("select setting contains duplicate options")
+			}
+			seen[option] = struct{}{}
+		}
+	case "boolean", "location":
+		if len(setting.Options) > 0 || setting.Min != nil || setting.Max != nil {
+			return fmt.Errorf("%s settings cannot declare options or numeric bounds", setting.Type)
+		}
+	case "number":
+		if len(setting.Options) > 0 {
+			return errors.New("number settings cannot declare options")
+		}
+		if setting.Min != nil && setting.Max != nil && *setting.Min > *setting.Max {
+			return errors.New("minimum exceeds maximum")
+		}
+	default:
+		return fmt.Errorf("unsupported setting type %q", setting.Type)
+	}
+	if len(setting.Default) > 0 {
+		if err := validateInterceptSettingValue(setting, setting.Default, false); err != nil {
+			return fmt.Errorf("invalid default: %w", err)
+		}
+	}
+	if len(setting.Value) > 0 {
+		if err := validateInterceptSettingValue(setting, setting.Value, false); err != nil {
+			return fmt.Errorf("invalid value: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateInterceptSettingValue(setting interceptModuleSetting, raw json.RawMessage, complete bool) error {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		if complete {
+			return errors.New("value is required")
+		}
+		return nil
+	}
+	if len(raw) > maxInterceptSettingValue {
+		return fmt.Errorf("value exceeds %d bytes", maxInterceptSettingValue)
+	}
+	switch setting.Type {
+	case "text", "select":
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return errors.New("value must be a string")
+		}
+		if len(value) > 4096 {
+			return errors.New("string value exceeds 4096 bytes")
+		}
+		if complete && strings.TrimSpace(value) == "" {
+			return errors.New("value must not be empty")
+		}
+		if setting.Type == "select" && value != "" && !containsString(setting.Options, value) {
+			return errors.New("value is not a declared option")
+		}
+	case "boolean":
+		var value bool
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return errors.New("value must be a boolean")
+		}
+	case "number":
+		var value float64
+		if err := json.Unmarshal(raw, &value); err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+			return errors.New("value must be a finite number")
+		}
+		if setting.Min != nil && value < *setting.Min {
+			return errors.New("value is below the minimum")
+		}
+		if setting.Max != nil && value > *setting.Max {
+			return errors.New("value exceeds the maximum")
+		}
+	case "location":
+		var value interceptLocationValue
+		if err := unmarshalStrictJSON(raw, &value); err != nil {
+			return fmt.Errorf("value must be a location object: %w", err)
+		}
+		if value.Accuracy == 0 || value.Accuracy > 100000 {
+			return errors.New("accuracy must be between 1 and 100000")
+		}
+		if (value.Longitude == nil) != (value.Latitude == nil) {
+			return errors.New("longitude and latitude must be set together")
+		}
+		if value.Longitude != nil && (math.IsNaN(*value.Longitude) || math.IsInf(*value.Longitude, 0) || *value.Longitude < -180 || *value.Longitude > 180) {
+			return errors.New("longitude must be between -180 and 180")
+		}
+		if value.Latitude != nil && (math.IsNaN(*value.Latitude) || math.IsInf(*value.Latitude, 0) || *value.Latitude < -90 || *value.Latitude > 90) {
+			return errors.New("latitude must be between -90 and 90")
+		}
+		if complete && value.Longitude == nil {
+			return errors.New("coordinates are required")
+		}
+	}
+	return nil
+}
+
+func interceptSettingReady(setting interceptModuleSetting) bool {
+	return validateInterceptSettingValue(setting, setting.Value, true) == nil
+}
+
+func interceptModuleSettingsReady(settings []interceptModuleSetting) bool {
+	for _, setting := range settings {
+		if setting.Required && !interceptSettingReady(setting) {
+			return false
+		}
+	}
+	return true
+}
+
+func validModuleSettingKey(value string) bool {
 	if len(value) == 0 || len(value) > 64 {
 		return false
 	}
@@ -387,28 +488,22 @@ func validModuleParameterKey(value string) bool {
 	return true
 }
 
-func interceptModuleParametersReady(parameters []interceptModuleParameter) bool {
-	for _, parameter := range parameters {
-		if strings.TrimSpace(parameter.Value) == "" {
-			return false
-		}
-	}
-	return true
-}
-
-func validateInterceptHostMappings(mappings []interceptHostMapping) error {
+func validateInterceptHostMappings(captureHosts []string, mappings []interceptHostMapping) error {
 	seen := make(map[string]struct{}, len(mappings))
 	for index, mapping := range mappings {
 		pattern, err := normalizeInterceptHostPattern(mapping.Pattern)
 		if err != nil || pattern != mapping.Pattern {
-			return fmt.Errorf("host mapping %d has an invalid pattern", index)
+			return fmt.Errorf("upstream mapping %d has an invalid host", index)
+		}
+		if !interceptHostCoveredBy(captureHosts, pattern) {
+			return fmt.Errorf("upstream mapping host %q is outside capture_hosts", pattern)
 		}
 		if _, duplicate := seen[pattern]; duplicate {
-			return fmt.Errorf("duplicate host mapping %q", pattern)
+			return fmt.Errorf("duplicate upstream mapping %q", pattern)
 		}
 		seen[pattern] = struct{}{}
 		if !validInterceptHostTarget(mapping.Target) {
-			return fmt.Errorf("host mapping %q has an unsafe target", pattern)
+			return fmt.Errorf("upstream mapping %q has an unsafe target", pattern)
 		}
 	}
 	return nil
@@ -422,33 +517,8 @@ func validInterceptHostTarget(value string) bool {
 	return isValidDomain(value) && value != "localhost" && !strings.HasSuffix(value, ".local")
 }
 
-func validModuleHeaderName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for _, r := range name {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("!#$%&'*+-.^_`|~", r) {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
 func validInterceptModuleID(id string) bool {
-	if len(id) < 20 || len(id) > 36 || !strings.HasPrefix(id, "mod-") {
-		return false
-	}
-	suffix := id[4:]
-	if suffix[0] == '-' || suffix[len(suffix)-1] == '-' {
-		return false
-	}
-	for _, r := range suffix {
-		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
-			return false
-		}
-	}
-	return true
+	return len(id) >= 3 && len(id) <= 40 && nativeExtensionIDPattern.MatchString(id)
 }
 
 func validateInterceptHostPattern(raw string) error {
@@ -456,12 +526,12 @@ func validateInterceptHostPattern(raw string) error {
 	if strings.HasPrefix(host, "*.") {
 		base := strings.TrimPrefix(host, "*.")
 		if !isValidDomain(base) || strings.Count(base, ".") < 1 {
-			return fmt.Errorf("invalid wildcard MITM host %q", raw)
+			return fmt.Errorf("invalid wildcard capture host %q", raw)
 		}
 		return nil
 	}
 	if strings.Contains(host, "*") || !isValidDomain(host) {
-		return fmt.Errorf("invalid exact MITM host %q", raw)
+		return fmt.Errorf("invalid exact capture host %q", raw)
 	}
 	return nil
 }
@@ -474,30 +544,45 @@ func normalizeInterceptHostPattern(raw string) (string, error) {
 	return host, nil
 }
 
+func interceptHostPatternCovers(allowed, candidate string) bool {
+	if allowed == candidate {
+		return true
+	}
+	if !strings.HasPrefix(allowed, "*.") {
+		return false
+	}
+	base := strings.TrimPrefix(allowed, "*.")
+	candidateBase := strings.TrimPrefix(candidate, "*.")
+	return strings.HasSuffix(candidateBase, "."+base)
+}
+
+func interceptHostCoveredBy(patterns []string, candidate string) bool {
+	for _, pattern := range patterns {
+		if interceptHostPatternCovers(pattern, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
 func activeInterceptHosts(document interceptConfigDocument) []string {
 	if !document.MITM.Enabled {
 		return nil
 	}
-	hosts := make([]string, 0, len(builtInWLOCHosts)+16)
-	if document.WLOC.Enabled {
-		hosts = append(hosts, builtInWLOCHosts...)
-	}
+	hosts := make([]string, 0, 16)
 	for _, module := range document.Modules {
 		if module.Enabled {
-			hosts = append(hosts, module.Hosts...)
+			hosts = append(hosts, module.CaptureHosts...)
 		}
 	}
 	return uniqueSortedStrings(hosts)
 }
 
-// certificateInterceptHosts retains the two built-in WLOC SANs even while the
-// module is disabled. This gives a fresh install a stable, non-empty leaf while
-// the runtime allowlist still rejects WLOC until the operator enables it.
 func certificateInterceptHosts(document interceptConfigDocument) []string {
-	hosts := append([]string(nil), builtInWLOCHosts...)
+	hosts := make([]string, 0, 16)
 	for _, module := range document.Modules {
 		if module.Enabled {
-			hosts = append(hosts, module.Hosts...)
+			hosts = append(hosts, module.CaptureHosts...)
 		}
 	}
 	return uniqueSortedStrings(hosts)
@@ -526,6 +611,29 @@ func uniqueSortedStrings(values []string) []string {
 	return out
 }
 
+func uniqueSortedInts(values []int) []int {
+	seen := make(map[int]struct{}, len(values))
+	out := make([]int, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Ints(out)
+	return out
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func sha256Hex(body []byte) string {
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:])
@@ -534,13 +642,11 @@ func sha256Hex(body []byte) string {
 func interceptModuleSnapshotDigest(module interceptModuleSnapshot) string {
 	canonical := module
 	canonical.Enabled = false
-	canonical.Argument = ""
 	canonical.ImportedAt = ""
-	canonical.PartialAllowed = false
 	canonical.Source.Body = ""
-	canonical.Parameters = append([]interceptModuleParameter(nil), module.Parameters...)
-	for index := range canonical.Parameters {
-		canonical.Parameters[index].Value = ""
+	canonical.Settings = append([]interceptModuleSetting(nil), module.Settings...)
+	for index := range canonical.Settings {
+		canonical.Settings[index].Value = nil
 	}
 	canonical.Scripts = append([]interceptScriptRule(nil), module.Scripts...)
 	for index := range canonical.Scripts {

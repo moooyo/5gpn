@@ -1,0 +1,188 @@
+# 5GPN native extension manifest v1
+
+5GPN accepts one extension format: a strict YAML document with
+`apiVersion: 5gpn.io/v1` and `kind: Extension`. The manifest is a permission
+request and an immutable execution description, not a general proxy
+configuration language.
+
+## Complete shape
+
+```yaml
+apiVersion: 5gpn.io/v1
+kind: Extension
+
+metadata:
+  id: io.example.response-cleaner
+  name: Response Cleaner
+  version: 1.0.0
+  description: Rewrites a bounded API response.
+
+permissions:
+  persistentStorage: false
+
+traffic:
+  captureHosts:
+    - api.example.com
+    - "*.cdn.example.com"
+  upstreamMappings:
+    - host: api.example.com
+      target: origin.example.net
+
+settings:
+  - key: mode
+    type: select
+    label: Cleaning mode
+    description: Selects the response transformation profile.
+    required: true
+    options:
+      - clean
+      - full
+    default: clean
+
+actions:
+  - id: clean-response
+    phase: response
+    match:
+      hosts:
+        - api.example.com
+      schemes:
+        - https
+      methods:
+        - GET
+      pathRegex: ^/v1/items
+      statusCodes:
+        - 200
+    script:
+      source: ./clean.js
+      bodyMode: text
+      timeoutMs: 1000
+      maxBodyBytes: 1048576
+```
+
+Unknown fields, duplicate keys, multiple YAML documents, aliases, anchors, and
+merge keys are rejected. Extension IDs are stable lowercase dotted identifiers
+from 3 to 40 bytes. The short limit keeps every authenticated Telegram
+confirmation callback within its protocol boundary. Versions use semantic
+version syntax.
+
+## Traffic acquisition and egress
+
+`traffic.captureHosts` is the only way an extension can request client traffic.
+Entries are exact DNS names or constrained `*.example.com` wildcards. 5GPN
+never infers hosts from a regular expression.
+
+When an enabled extension and the global MITM master are active, the same
+capture-host set is published atomically to:
+
+1. the DNS overlay that returns the gateway address;
+2. the constrained interception certificate SAN set; and
+3. the reserved mihomo `MODULE-INTERCEPT` rules for ports 80 and 443.
+
+Every action `match.hosts` and every upstream mapping host must be covered by
+the same extension's `captureHosts`. The control plane validates this relation,
+and the sidecar repeats it at runtime. A plugin cannot act on a host captured
+only by another plugin.
+
+`upstreamMappings` changes only the sidecar's upstream target. It preserves the
+original HTTP Host and TLS SNI and rejects private, loopback, link-local, or
+otherwise unsafe IPv4 targets. The manifest has no egress selector. Every
+upstream TCP or UDP flow returns through authenticated mihomo
+`intercept-egress`, and the complete operator-owned mihomo configuration makes
+the final DIRECT or proxy choice.
+
+## Typed settings
+
+Supported setting types are:
+
+- `text`: a bounded string;
+- `select`: one value from 1–64 declared options;
+- `boolean`: `true` or `false`;
+- `number`: a finite number with optional `min` and `max`; and
+- `location`: `{longitude, latitude, accuracy}` with accuracy from 1 to 100000
+  metres.
+
+Required settings must be complete before enable. A `location` setting is
+rendered by the Console with city search, a draggable OpenStreetMap point,
+accuracy visualization, and direct coordinate fields. The browser calls one
+authenticated same-origin city-search endpoint; that bounded server projection
+contacts the fixed Nominatim origin only after an explicit Search action and
+never forwards the Console bearer token.
+
+## Script actions
+
+An action phase is `request` or `response`. Its structured matcher contains:
+
+- `hosts`: a non-empty subset of `captureHosts`;
+- `schemes`: `http`, `https`, or both;
+- optional uppercase HTTP `methods`;
+- a required RE2 `pathRegex`, matched against path plus query; and
+- optional response `statusCodes` from 100 through 599.
+
+The script declares exactly one of:
+
+- `source`: an HTTPS URL, or a relative URL when the manifest itself was
+  installed by URL; or
+- `inline`: source embedded in the manifest.
+
+`bodyMode` is `none`, `text`, or `binary`. Binary bodies are `Uint8Array`
+values. `timeoutMs` is 50–30000 and `maxBodyBytes` is 1024–67108864. Source,
+aggregate script, response, and VM resource limits are enforced independently.
+
+Every script defines one global entry point:
+
+```javascript
+function transform(context) {
+  return {
+    response: {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: '{"ok":true}',
+    },
+  }
+}
+```
+
+The context contains:
+
+```text
+context.phase
+context.request.url
+context.request.method
+context.request.headers
+context.request.body          # only when bodyMode requests it
+context.response.status       # response actions only
+context.response.headers      # response actions only
+context.response.body         # response actions only when requested
+context.settings
+context.storage               # only with persistentStorage permission
+```
+
+A request action may return a `request` patch or a synthetic `response` patch.
+A response action may return only a `response` patch. Either phase may return
+`{abort: true}`, `null`, or `undefined`. Unknown result fields fail closed.
+Changed request URLs must remain inside that action's extension capture-host
+boundary.
+
+Scripts receive console logging but no ambient network, filesystem, process,
+timer, socket, module loader, or Go object. The optional storage object exposes
+bounded `get`, `set`, `delete`, and `clear` methods scoped to the extension ID.
+
+## Installation and updates
+
+**Install from URL** accepts one HTTPS manifest and snapshots its referenced
+scripts. **Add locally** accepts one pasted or uploaded manifest; local
+manifests use inline scripts or absolute HTTPS script URLs. Both actions install
+the extension disabled.
+
+An update check refetches only the installed manifest URL. The candidate must
+keep the same `metadata.id`. The Console displays the candidate version,
+snapshot digest, capture hosts, actions, and settings before replacement.
+Replacement requires the current extension to be disabled, refetches the exact
+reviewed digest, preserves still-valid setting values by key and type, and
+leaves the new snapshot disabled.
+
+The project-maintained Apple WLOC example is available at:
+
+```text
+https://raw.githubusercontent.com/moooyo/5gpn/main/extensions/apple-wloc/extension.yaml
+```

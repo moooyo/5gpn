@@ -174,14 +174,6 @@ func (m *InterceptModuleManager) Snapshot(id string) (interceptModuleSnapshotVie
 	if m == nil || m.store == nil {
 		return interceptModuleSnapshotView{}, errInterceptModulesUnavailable
 	}
-	if id == interceptModuleWLOCID {
-		return interceptModuleSnapshotView{
-			ID: id, Name: "Apple WLOC response rewriting",
-			SourceDigest: sha256Hex([]byte(builtInWLOCSource)),
-			SourceBody:   builtInWLOCSource,
-			Scripts:      []interceptScriptSnapshotView{},
-		}, nil
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.store.mu.Lock()
@@ -218,56 +210,25 @@ func (m *InterceptModuleManager) viewLocked() (interceptModulesView, error) {
 	}
 	ready, reason := m.routingReadyLocked(document)
 	view := interceptModulesView{
-		Revision:    interceptRevision(body),
-		CatalogURL:  defaultModuleReferer,
-		ActiveHosts: activeInterceptHosts(document),
-		Modules:     make([]interceptModuleView, 0, len(document.Modules)+1),
+		Revision:           interceptRevision(body),
+		CatalogURL:         nativeExtensionCatalogURL,
+		ActiveCaptureHosts: activeInterceptHosts(document),
+		Modules:            make([]interceptModuleView, 0, len(document.Modules)),
 	}
-	wlocReady := ready
-	view.Modules = append(view.Modules, interceptModuleView{
-		ID:             interceptModuleWLOCID,
-		Name:           "Apple WLOC response rewriting",
-		Description:    "Built-in bounded protobuf transformation for Apple Wi-Fi and cellular location responses.",
-		Enabled:        document.WLOC.Enabled,
-		Ready:          wlocReady,
-		Reason:         moduleRuntimeReason(wlocReady, reason),
-		Compatibility:  "full",
-		Hosts:          append([]string(nil), builtInWLOCHosts...),
-		ScriptCount:    1,
-		SourceDigest:   sha256Hex([]byte(builtInWLOCSource)),
-		SnapshotDigest: sha256Hex([]byte(builtInWLOCSource)),
-	})
 	for _, module := range document.Modules {
-		compatibility := interceptModuleCompatibility(module)
-		moduleReady := ready && compatibility != "incompatible" && compatibility != "needs_configuration"
+		settingsReady := interceptModuleSettingsReady(module.Settings)
+		moduleReady := ready && settingsReady
 		moduleReason := reason
-		if compatibility == "incompatible" {
-			moduleReason = "incompatible-capabilities"
-		} else if compatibility == "needs_configuration" {
-			moduleReason = "parameters-required"
+		if !settingsReady {
+			moduleReason = "settings-required"
 		}
 		view.Modules = append(view.Modules, interceptModuleView{
-			ID:             module.ID,
-			Name:           module.Name,
-			Description:    module.Description,
-			Enabled:        module.Enabled,
-			Ready:          moduleReady,
-			Reason:         moduleRuntimeReason(moduleReady, moduleReason),
-			Compatibility:  compatibility,
-			PartialAllowed: module.PartialAllowed,
-			Hosts:          append([]string(nil), module.Hosts...),
-			ScriptCount:    len(module.Scripts),
-			RewriteCount:   len(module.Rewrites) + len(module.Headers),
-			Unsupported:    append([]string(nil), module.Unsupported...),
-			Incompatible:   append([]string(nil), module.Incompatible...),
-			Issues:         interceptModuleIssues(module),
-			Parameters:     append([]interceptModuleParameter(nil), module.Parameters...),
-			HostMappings:   append([]interceptHostMapping(nil), module.HostMappings...),
-			SourceURL:      module.Source.URL,
-			SourceDigest:   module.Source.Digest,
-			SnapshotDigest: interceptModuleSnapshotDigest(module),
-			ImportedAt:     module.ImportedAt,
-			Argument:       module.Argument,
+			ID: module.ID, Version: module.Version, Name: module.Name, Description: module.Description,
+			Enabled: module.Enabled, Ready: moduleReady, Reason: moduleRuntimeReason(moduleReady, moduleReason),
+			CaptureHosts: append([]string(nil), module.CaptureHosts...), ScriptCount: len(module.Scripts),
+			Settings: cloneInterceptSettings(module.Settings), HostMappings: append([]interceptHostMapping(nil), module.HostMappings...),
+			PersistentStorage: module.PersistentStorage, SourceURL: module.Source.URL,
+			SourceDigest: module.Source.Digest, SnapshotDigest: interceptModuleSnapshotDigest(module), ImportedAt: module.ImportedAt,
 		})
 	}
 	return view, nil
@@ -278,30 +239,6 @@ func moduleRuntimeReason(ready bool, reason string) string {
 		return reason
 	}
 	return ""
-}
-
-func interceptModuleCompatibility(module interceptModuleSnapshot) string {
-	if len(module.Incompatible) > 0 {
-		return "incompatible"
-	}
-	if !interceptModuleParametersReady(module.Parameters) {
-		return "needs_configuration"
-	}
-	if len(module.Unsupported) > 0 {
-		return "partial"
-	}
-	return "full"
-}
-
-func interceptModuleIssues(module interceptModuleSnapshot) []interceptCompatibilityIssueView {
-	issues := make([]interceptCompatibilityIssueView, 0, len(module.Incompatible)+len(module.Unsupported))
-	for _, message := range module.Incompatible {
-		issues = append(issues, interceptCompatibilityIssueView{Severity: "error", Message: message})
-	}
-	for _, message := range module.Unsupported {
-		issues = append(issues, interceptCompatibilityIssueView{Severity: "warning", Message: message})
-	}
-	return issues
 }
 
 func (m *InterceptModuleManager) routingReadyLocked(document interceptConfigDocument) (bool, string) {
@@ -324,7 +261,7 @@ func (m *InterceptModuleManager) routingReadyLocked(document interceptConfigDocu
 	if !interceptCredentialsMatch(text, document) {
 		return false, "credential-mismatch"
 	}
-	if !m.certificateReady(document) {
+	if len(activeInterceptHosts(document)) > 0 && !m.certificateReady(document) {
 		return false, "certificate-not-ready"
 	}
 	return true, ""
@@ -354,7 +291,7 @@ func (m *InterceptModuleManager) Import(ctx context.Context, request interceptMo
 	}
 	for _, existing := range document.Modules {
 		if existing.ID == module.ID {
-			return interceptModulesView{}, fmt.Errorf("%w: this immutable snapshot is already imported", errInterceptModuleConflict)
+			return interceptModulesView{}, fmt.Errorf("%w: extension id %q is already installed", errInterceptModuleConflict, module.ID)
 		}
 	}
 	document.Modules = append(document.Modules, module)
@@ -412,6 +349,9 @@ func (m *InterceptModuleManager) CheckUpdate(ctx context.Context, id, revision s
 	if err != nil {
 		return interceptModuleUpdateCheckView{}, err
 	}
+	if candidate.ID != current.ID {
+		return interceptModuleUpdateCheckView{}, errors.New("updated manifest changed metadata.id")
+	}
 
 	m.store.mu.Lock()
 	latest, latestBody, err := m.store.Read()
@@ -423,9 +363,32 @@ func (m *InterceptModuleManager) CheckUpdate(ctx context.Context, id, revision s
 		m.store.mu.Unlock()
 		return interceptModuleUpdateCheckView{}, errInterceptRevisionConflict
 	}
-	m.store.mu.Unlock()
 	if interceptModuleSnapshotDigest(candidate) == interceptModuleSnapshotDigest(current) {
+		m.store.mu.Unlock()
 		return interceptModuleUpdateCheckView{Revision: revision, State: "unchanged"}, nil
+	}
+	candidate.Settings = mergeInterceptSettingValues(current.Settings, candidate.Settings)
+	candidateDocument := latest
+	candidateDocument.Modules = append([]interceptModuleSnapshot(nil), latest.Modules...)
+	found = false
+	for index := range candidateDocument.Modules {
+		if candidateDocument.Modules[index].ID == id {
+			candidateDocument.Modules[index] = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		m.store.mu.Unlock()
+		return interceptModuleUpdateCheckView{}, errInterceptModuleNotFound
+	}
+	candidateBody, err := marshalInterceptDocument(candidateDocument)
+	m.store.mu.Unlock()
+	if err != nil {
+		return interceptModuleUpdateCheckView{}, err
+	}
+	if err := m.validateSidecarCandidate(ctx, candidateBody); err != nil {
+		return interceptModuleUpdateCheckView{}, err
 	}
 	view := interceptCandidateView(candidate)
 	return interceptModuleUpdateCheckView{Revision: revision, State: "available", Candidate: &view}, nil
@@ -471,6 +434,9 @@ func (m *InterceptModuleManager) ApplyUpdate(ctx context.Context, id, revision, 
 	if err != nil {
 		return interceptModulesView{}, err
 	}
+	if candidate.ID != current.ID {
+		return interceptModulesView{}, errors.New("updated manifest changed metadata.id")
+	}
 	if interceptModuleSnapshotDigest(candidate) != digest {
 		return interceptModulesView{}, errInterceptRevisionConflict
 	}
@@ -491,17 +457,13 @@ func (m *InterceptModuleManager) ApplyUpdate(ctx context.Context, id, revision, 
 	for i, module := range latest.Modules {
 		if module.ID == id {
 			index = i
-			continue
-		}
-		if module.ID == candidate.ID {
-			m.store.mu.Unlock()
-			return interceptModulesView{}, fmt.Errorf("%w: candidate snapshot is already imported", errInterceptModuleConflict)
 		}
 	}
 	if index < 0 {
 		m.store.mu.Unlock()
 		return interceptModulesView{}, errInterceptModuleNotFound
 	}
+	candidate.Settings = mergeInterceptSettingValues(latest.Modules[index].Settings, candidate.Settings)
 	latest.Modules[index] = candidate
 	newBody, err := marshalInterceptDocument(latest)
 	if err == nil {
@@ -529,9 +491,6 @@ func interceptModuleSourceUnchanged(document interceptConfigDocument, id, source
 func (m *InterceptModuleManager) Delete(id, revision string) (interceptModulesView, error) {
 	if m == nil || m.store == nil {
 		return interceptModulesView{}, errInterceptModulesUnavailable
-	}
-	if id == interceptModuleWLOCID {
-		return interceptModulesView{}, errors.New("the built-in WLOC module cannot be deleted")
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -576,35 +535,19 @@ func (m *InterceptModuleManager) Delete(id, revision string) (interceptModulesVi
 }
 
 type interceptModuleUpdate struct {
-	Revision       string            `json:"revision"`
-	Enabled        *bool             `json:"enabled,omitempty"`
-	Argument       *string           `json:"argument,omitempty"`
-	PartialAllowed *bool             `json:"partial_allowed,omitempty"`
-	Parameters     map[string]string `json:"parameters,omitempty"`
+	Revision string                     `json:"revision"`
+	Enabled  *bool                      `json:"enabled,omitempty"`
+	Settings map[string]json.RawMessage `json:"settings,omitempty"`
 }
 
 func (m *InterceptModuleManager) Update(ctx context.Context, id string, update interceptModuleUpdate) (interceptModulesView, error) {
 	if m == nil || m.store == nil {
 		return interceptModulesView{}, errInterceptModulesUnavailable
 	}
-	if !validMihomoConfigRevision(update.Revision) || (update.Enabled == nil && update.Argument == nil && update.PartialAllowed == nil && update.Parameters == nil) {
+	if !validMihomoConfigRevision(update.Revision) || (update.Enabled == nil && update.Settings == nil) {
 		return interceptModulesView{}, errors.New("revision and at least one update field are required")
 	}
-	if update.Argument != nil && len(*update.Argument) > maxInterceptModuleArg {
-		return interceptModulesView{}, fmt.Errorf("argument exceeds %d bytes", maxInterceptModuleArg)
-	}
 	return m.mutate(ctx, update.Revision, func(document *interceptConfigDocument) (bool, error) {
-		if id == interceptModuleWLOCID {
-			if update.Argument != nil || update.PartialAllowed != nil || update.Parameters != nil {
-				return false, errors.New("the built-in WLOC module has no external script compatibility settings")
-			}
-			if update.Enabled == nil {
-				return false, errors.New("enabled is required for the built-in WLOC module")
-			}
-			changed := document.MITM.Enabled && document.WLOC.Enabled != *update.Enabled
-			document.WLOC.Enabled = *update.Enabled
-			return changed, nil
-		}
 		for index := range document.Modules {
 			module := &document.Modules[index]
 			if module.ID != id {
@@ -612,32 +555,14 @@ func (m *InterceptModuleManager) Update(ctx context.Context, id string, update i
 			}
 			routingChanged := false
 			if update.Enabled != nil {
-				if *update.Enabled && len(module.Incompatible) > 0 {
-					return false, errors.New("this module has incompatible requirements and cannot be enabled")
-				}
-				if *update.Enabled && !interceptModuleParametersReady(module.Parameters) {
-					return false, errors.New("configure every module parameter before enable")
-				}
-				if *update.Enabled && len(module.Unsupported) > 0 && !module.PartialAllowed {
-					return false, errors.New("this module is only partially compatible and has not been acknowledged after review")
+				if *update.Enabled && !interceptModuleSettingsReady(module.Settings) {
+					return false, errors.New("configure every required extension setting before enable")
 				}
 				routingChanged = document.MITM.Enabled && module.Enabled != *update.Enabled
 				module.Enabled = *update.Enabled
 			}
-			if update.Argument != nil {
-				module.Argument = *update.Argument
-			}
-			if update.PartialAllowed != nil {
-				if module.Enabled && len(module.Unsupported) > 0 && !*update.PartialAllowed {
-					return false, errors.New("disable the partially compatible module before revoking acknowledgement")
-				}
-				module.PartialAllowed = *update.PartialAllowed
-			}
-			if update.Parameters != nil {
-				if module.Enabled {
-					return false, errors.New("disable the module before changing parameters")
-				}
-				if err := updateInterceptModuleParameters(module, update.Parameters); err != nil {
+			if update.Settings != nil {
+				if err := updateInterceptModuleSettings(module, update.Settings); err != nil {
 					return false, err
 				}
 			}
@@ -647,29 +572,18 @@ func (m *InterceptModuleManager) Update(ctx context.Context, id string, update i
 	})
 }
 
-func updateInterceptModuleParameters(module *interceptModuleSnapshot, values map[string]string) error {
-	if len(values) != len(module.Parameters) {
-		return errors.New("submit exactly one value for every module parameter")
+func updateInterceptModuleSettings(module *interceptModuleSnapshot, values map[string]json.RawMessage) error {
+	if len(values) != len(module.Settings) {
+		return errors.New("submit exactly one value for every extension setting")
 	}
-	for index := range module.Parameters {
-		value, ok := values[module.Parameters[index].Key]
+	for index := range module.Settings {
+		value, ok := values[module.Settings[index].Key]
 		if !ok {
-			return fmt.Errorf("missing module parameter %q", module.Parameters[index].Key)
+			return fmt.Errorf("missing extension setting %q", module.Settings[index].Key)
 		}
-		module.Parameters[index].Value = value
+		module.Settings[index].Value = append(json.RawMessage(nil), value...)
 	}
-	return validateInterceptModuleParameters(module.Parameters)
-}
-
-func (m *InterceptModuleManager) UpdateWLOC(ctx context.Context, revision string, settings interceptWLOCSettings) (interceptModulesView, error) {
-	if err := validateInterceptWLOC(settings); err != nil {
-		return interceptModulesView{}, err
-	}
-	return m.mutate(ctx, revision, func(document *interceptConfigDocument) (bool, error) {
-		changed := document.MITM.Enabled && document.WLOC.Enabled != settings.Enabled
-		document.WLOC = settings
-		return changed, nil
-	})
+	return validateInterceptModuleSettings(module.Settings, module.Enabled)
 }
 
 func (m *InterceptModuleManager) UpdateSettings(ctx context.Context, revision string, settings interceptMITMSettings) (interceptModulesView, error) {
@@ -699,7 +613,7 @@ func (m *InterceptModuleManager) mutate(
 	nextDocument := oldDocument
 	nextDocument.Modules = append([]interceptModuleSnapshot(nil), oldDocument.Modules...)
 	for index := range nextDocument.Modules {
-		nextDocument.Modules[index].Parameters = append([]interceptModuleParameter(nil), oldDocument.Modules[index].Parameters...)
+		nextDocument.Modules[index].Settings = cloneInterceptSettings(oldDocument.Modules[index].Settings)
 		nextDocument.Modules[index].HostMappings = append([]interceptHostMapping(nil), oldDocument.Modules[index].HostMappings...)
 	}
 	routingChanged, err := mutator(&nextDocument)
@@ -920,61 +834,69 @@ func modulesViewFromDocument(document interceptConfigDocument, body []byte, read
 		reason = "mitm-disabled"
 	}
 	view := interceptModulesView{
-		Revision:    interceptRevision(body),
-		CatalogURL:  defaultModuleReferer,
-		ActiveHosts: activeInterceptHosts(document),
-		Modules:     make([]interceptModuleView, 0, len(document.Modules)+1),
+		Revision:           interceptRevision(body),
+		CatalogURL:         nativeExtensionCatalogURL,
+		ActiveCaptureHosts: activeInterceptHosts(document),
+		Modules:            make([]interceptModuleView, 0, len(document.Modules)),
 	}
-	view.Modules = append(view.Modules, interceptModuleView{
-		ID: interceptModuleWLOCID, Name: "Apple WLOC response rewriting",
-		Description: "Built-in bounded protobuf transformation for Apple Wi-Fi and cellular location responses.",
-		Enabled:     document.WLOC.Enabled, Ready: ready,
-		Reason: moduleRuntimeReason(ready, reason), Compatibility: "full",
-		Hosts: append([]string(nil), builtInWLOCHosts...), ScriptCount: 1,
-		SourceDigest: sha256Hex([]byte(builtInWLOCSource)), SnapshotDigest: sha256Hex([]byte(builtInWLOCSource)),
-	})
 	for _, module := range document.Modules {
-		compatibility := interceptModuleCompatibility(module)
+		settingsReady := interceptModuleSettingsReady(module.Settings)
+		moduleReady := ready && settingsReady
 		moduleReason := reason
-		if compatibility == "incompatible" {
-			moduleReason = "incompatible-capabilities"
-		} else if compatibility == "needs_configuration" {
-			moduleReason = "parameters-required"
+		if !settingsReady {
+			moduleReason = "settings-required"
 		}
-		view.Modules = append(view.Modules, interceptModuleView{
-			ID: module.ID, Name: module.Name, Description: module.Description,
-			Enabled: module.Enabled, Ready: ready && compatibility != "incompatible" && compatibility != "needs_configuration",
-			Reason: moduleRuntimeReason(ready && compatibility != "incompatible" && compatibility != "needs_configuration", moduleReason), Compatibility: compatibility,
-			PartialAllowed: module.PartialAllowed, Hosts: append([]string(nil), module.Hosts...),
-			ScriptCount: len(module.Scripts), RewriteCount: len(module.Rewrites) + len(module.Headers),
-			Unsupported: append([]string(nil), module.Unsupported...), SourceURL: module.Source.URL,
-			Incompatible: append([]string(nil), module.Incompatible...), Issues: interceptModuleIssues(module),
-			Parameters: append([]interceptModuleParameter(nil), module.Parameters...), HostMappings: append([]interceptHostMapping(nil), module.HostMappings...),
-			SourceDigest: module.Source.Digest, SnapshotDigest: interceptModuleSnapshotDigest(module), ImportedAt: module.ImportedAt, Argument: module.Argument,
-		})
+		view.Modules = append(view.Modules, interceptModuleViewFromSnapshot(module, moduleReady, moduleReason))
 	}
 	return view
 }
 
 func interceptCandidateView(module interceptModuleSnapshot) interceptModuleView {
-	compatibility := interceptModuleCompatibility(module)
+	ready := interceptModuleSettingsReady(module.Settings)
 	reason := ""
-	if compatibility == "incompatible" {
-		reason = "incompatible-capabilities"
-	} else if compatibility == "needs_configuration" {
-		reason = "parameters-required"
+	if !ready {
+		reason = "settings-required"
 	}
+	return interceptModuleViewFromSnapshot(module, ready, reason)
+}
+
+func interceptModuleViewFromSnapshot(module interceptModuleSnapshot, ready bool, reason string) interceptModuleView {
 	return interceptModuleView{
-		ID: module.ID, Name: module.Name, Description: module.Description,
-		Enabled: false, Ready: compatibility != "incompatible" && compatibility != "needs_configuration",
-		Reason: reason, Compatibility: compatibility, PartialAllowed: false,
-		Hosts: append([]string(nil), module.Hosts...), ScriptCount: len(module.Scripts),
-		RewriteCount: len(module.Rewrites) + len(module.Headers),
-		Unsupported:  append([]string(nil), module.Unsupported...), Incompatible: append([]string(nil), module.Incompatible...),
-		Issues: interceptModuleIssues(module), Parameters: append([]interceptModuleParameter(nil), module.Parameters...),
-		HostMappings: append([]interceptHostMapping(nil), module.HostMappings...), SourceURL: module.Source.URL,
+		ID: module.ID, Version: module.Version, Name: module.Name, Description: module.Description,
+		Enabled: module.Enabled, Ready: ready, Reason: moduleRuntimeReason(ready, reason),
+		CaptureHosts: append([]string(nil), module.CaptureHosts...), ScriptCount: len(module.Scripts),
+		Settings: cloneInterceptSettings(module.Settings), HostMappings: append([]interceptHostMapping(nil), module.HostMappings...),
+		PersistentStorage: module.PersistentStorage, SourceURL: module.Source.URL,
 		SourceDigest: module.Source.Digest, SnapshotDigest: interceptModuleSnapshotDigest(module), ImportedAt: module.ImportedAt,
 	}
+}
+
+func cloneInterceptSettings(settings []interceptModuleSetting) []interceptModuleSetting {
+	cloned := append([]interceptModuleSetting(nil), settings...)
+	for index := range cloned {
+		cloned[index].Options = append([]string(nil), settings[index].Options...)
+		cloned[index].Default = append(json.RawMessage(nil), settings[index].Default...)
+		cloned[index].Value = append(json.RawMessage(nil), settings[index].Value...)
+	}
+	return cloned
+}
+
+func mergeInterceptSettingValues(current, candidate []interceptModuleSetting) []interceptModuleSetting {
+	values := make(map[string]interceptModuleSetting, len(current))
+	for _, setting := range current {
+		values[setting.Key] = setting
+	}
+	merged := cloneInterceptSettings(candidate)
+	for index := range merged {
+		previous, ok := values[merged[index].Key]
+		if !ok || previous.Type != merged[index].Type {
+			continue
+		}
+		if validateInterceptSettingValue(merged[index], previous.Value, false) == nil {
+			merged[index].Value = append(json.RawMessage(nil), previous.Value...)
+		}
+	}
+	return merged
 }
 
 func containsNewStrings(oldValues, nextValues []string) bool {

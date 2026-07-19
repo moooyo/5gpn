@@ -91,7 +91,7 @@ beforeEach(async () => {
   }))
   vi.mocked(api.getMITMSettings).mockReset().mockResolvedValue(MITM)
   vi.mocked(api.putMITMSettings).mockReset().mockImplementation(async (update) => ({ ...update, revision: 'mitm-r2' }))
-  vi.mocked(api.getInterceptModules).mockReset().mockResolvedValue({ revision: 'extensions-r1', catalog_url: '', active_hosts: [], modules: [] })
+  vi.mocked(api.getInterceptModules).mockReset().mockResolvedValue({ revision: 'extensions-r1', catalog_url: '', active_capture_hosts: [], modules: [] })
 })
 
 afterEach(async () => {

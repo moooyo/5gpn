@@ -5,253 +5,264 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestInterceptModuleParserImportsLoonSnapshotWithAutomaticHeaders(t *testing.T) {
+func TestNativeExtensionParserImportsStrictManifestAndRelativeScript(t *testing.T) {
 	t.Parallel()
 	var server *httptest.Server
-	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("User-Agent") != moduleLoonUserAgent || r.Header.Get("Referer") != defaultModuleReferer {
-			t.Errorf("fetch headers = UA %q Referer %q", r.Header.Get("User-Agent"), r.Header.Get("Referer"))
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("User-Agent") != nativeExtensionUserAgent || request.Header.Get("Referer") != "" {
+			t.Errorf("fetch headers = UA %q Referer %q", request.Header.Get("User-Agent"), request.Header.Get("Referer"))
 		}
-		switch r.URL.Path {
-		case "/module.lpx":
-			fmt.Fprintf(w, `#!name=Response Cleaner
-#!desc=synthetic parser fixture
-[Script]
-http-response ^https://api\.example\.com/v1 script-path=%s/clean.js,requires-body=true,timeout=2,tag=Cleaner
-[Rewrite]
-^https://api\.example\.com/old 302 https://api.example.com/new
-[MITM]
-hostname = api.example.com, *.cdn.example.com
-`, server.URL)
+		switch request.URL.Path {
+		case "/extension.yaml":
+			fmt.Fprint(w, `apiVersion: 5gpn.io/v1
+kind: Extension
+metadata:
+  id: io.example.cleaner
+  name: Response Cleaner
+  version: 1.2.0
+  description: Native fixture
+permissions:
+  persistentStorage: true
+traffic:
+  captureHosts:
+    - api.example.com
+    - "*.cdn.example.com"
+  upstreamMappings:
+    - host: api.example.com
+      target: origin.example.net
+settings:
+  - key: mode
+    type: select
+    label: Mode
+    required: true
+    options: [clean, full]
+    default: clean
+actions:
+  - id: clean-response
+    phase: response
+    match:
+      hosts: [api.example.com]
+      schemes: [https]
+      pathRegex: ^/v1/
+      statusCodes: [200]
+    script:
+      source: ./clean.js
+      bodyMode: text
+      timeoutMs: 2000
+      maxBodyBytes: 1048576
+`)
 		case "/clean.js":
-			_, _ = w.Write([]byte(`$done({body: $response.body.replace("secret", "redacted")});`))
+			fmt.Fprint(w, `function transform(context) { return { response: { body: context.response.body } } }`)
 		default:
-			http.NotFound(w, r)
+			http.NotFound(w, request)
 		}
 	}))
 	defer server.Close()
 
-	parser := interceptModuleParser{
-		client: server.Client(),
-		now:    func() time.Time { return time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC) },
-	}
-	module, err := parser.Import(context.Background(), interceptModuleImportRequest{
-		URL: server.URL + "/module.lpx",
-	})
+	parser := interceptModuleParser{client: server.Client(), now: func() time.Time { return time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC) }}
+	module, err := parser.Import(context.Background(), interceptModuleImportRequest{URL: server.URL + "/extension.yaml"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if module.Name != "Response Cleaner" || len(module.Scripts) != 1 || len(module.Rewrites) != 1 {
-		t.Fatalf("parsed module = %+v", module)
+	if module.ID != "io.example.cleaner" || module.Version != "1.2.0" || !module.PersistentStorage || len(module.Scripts) != 1 {
+		t.Fatalf("parsed extension = %+v", module)
 	}
-	if len(module.ID) != len("mod-")+32 {
-		t.Fatalf("module id = %q", module.ID)
+	if got := strings.Join(module.CaptureHosts, ","); got != "*.cdn.example.com,api.example.com" {
+		t.Fatalf("capture hosts = %q", got)
 	}
-	if got := strings.Join(module.Hosts, ","); got != "*.cdn.example.com,api.example.com" {
-		t.Fatalf("hosts = %q", got)
+	if module.Scripts[0].ScriptURL != server.URL+"/clean.js" || module.Scripts[0].BodyMode != "text" {
+		t.Fatalf("action snapshot = %+v", module.Scripts[0])
 	}
-	if module.Scripts[0].TimeoutMS != 2000 || !module.Scripts[0].RequiresBody || module.Scripts[0].ScriptDigest != sha256Hex([]byte(module.Scripts[0].ScriptBody)) {
-		t.Fatalf("script snapshot = %+v", module.Scripts[0])
+	if len(module.Settings) != 1 || string(module.Settings[0].Value) != `"clean"` {
+		t.Fatalf("settings = %+v", module.Settings)
 	}
-	if module.Source.Digest != sha256Hex([]byte(module.Source.Body)) || module.ImportedAt != "2026-07-18T00:00:00Z" {
-		t.Fatalf("source snapshot = %+v", module.Source)
+	if len(module.HostMappings) != 1 || module.HostMappings[0].Target != "origin.example.net" {
+		t.Fatalf("upstream mappings = %+v", module.HostMappings)
 	}
 }
 
-func TestInterceptModuleParserImportsLoonAndReportsUnsupportedSections(t *testing.T) {
+func TestNativeExtensionParserAcceptsInlineLocalScriptAndLocationSetting(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`$done({headers: $request.headers});`))
-	}))
-	defer server.Close()
-	content := fmt.Sprintf(`#!name=Loon Fixture
-#!input=appName
-#!select=mode,clean,full
-[Script]
-http-request ^https://service\.example\.com/ script-path=%s/script.js, requires-body=true, binary-body-mode=true, timeout=1, tag=Request, enable=true, argument=[{player},{scheme}]
-[Rewrite]
-^https://service\.example\.com/old 302 https://service.example.com/new
-^https://service\.example\.com/ header-del Cookie
-^https://service\.example\.com/ header-add X-Module active
-^https://service\.example\.com/ header-replace User-Agent Loon
-[Host]
-service.example.com = 8.8.8.8
-[Rule]
-DOMAIN,service.example.com,DIRECT
-[MITM]
-hostname = service.example.com
-`, server.URL)
-	parser := interceptModuleParser{client: server.Client(), now: time.Now}
-	module, err := parser.Import(context.Background(), interceptModuleImportRequest{
-		Content: content,
-	})
+	content := `apiVersion: 5gpn.io/v1
+kind: Extension
+metadata:
+  id: io.example.location
+  name: Location fixture
+  version: 1.0.0
+permissions:
+  persistentStorage: false
+traffic:
+  captureHosts: [location.example.com]
+settings:
+  - key: location
+    type: location
+    required: true
+    default:
+      accuracy: 25
+actions:
+  - id: patch
+    phase: response
+    match:
+      hosts: [location.example.com]
+      schemes: [https]
+      pathRegex: ^/location$
+    script:
+      inline: |
+        function transform(context) {
+          return { response: { body: context.response.body } }
+        }
+      bodyMode: binary
+      timeoutMs: 1000
+      maxBodyBytes: 8388608
+`
+	module, err := (interceptModuleParser{now: time.Now}).Import(context.Background(), interceptModuleImportRequest{Content: content})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(module.Scripts) != 1 || len(module.Rewrites) != 1 || len(module.Headers) != 3 {
-		t.Fatalf("parsed Loon module = %+v", module)
+	if module.Source.URL != "" || module.Scripts[0].ScriptURL != "" || module.Scripts[0].BodyMode != "binary" {
+		t.Fatalf("local extension = %+v", module)
 	}
-	if module.Scripts[0].Argument != "[{player},{scheme}]" {
-		t.Fatalf("script argument = %q", module.Scripts[0].Argument)
-	}
-	if !module.Scripts[0].BinaryBody {
-		t.Fatal("binary-body-mode was not preserved")
-	}
-	if len(module.Parameters) != 2 || module.Parameters[0].Key != "appName" || module.Parameters[1].Key != "mode" || len(module.Parameters[1].Options) != 2 {
-		t.Fatalf("parameters = %+v", module.Parameters)
-	}
-	if len(module.HostMappings) != 1 || module.HostMappings[0].Target != "8.8.8.8" {
-		t.Fatalf("host mappings = %+v", module.HostMappings)
-	}
-	if len(module.Unsupported) != 1 || !strings.Contains(strings.ToLower(module.Unsupported[0]), "[rule]") {
-		t.Fatalf("unsupported = %v", module.Unsupported)
-	}
-	if module.PartialAllowed {
-		t.Fatal("partial compatibility must be acknowledged only after import")
+	if interceptModuleSettingsReady(module.Settings) {
+		t.Fatal("required location without coordinates was marked ready")
 	}
 }
 
-func TestInterceptModuleParserImportsLoonDeepLinkWithAutomaticHeaders(t *testing.T) {
+func TestRepositoryWLOCManifestIsInstallableFromURL(t *testing.T) {
 	t.Parallel()
-	var server *httptest.Server
-	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("User-Agent") != moduleLoonUserAgent || r.Header.Get("Referer") != defaultModuleReferer {
-			t.Errorf("fetch headers = UA %q Referer %q", r.Header.Get("User-Agent"), r.Header.Get("Referer"))
-			http.Error(w, "native Loon client required", http.StatusForbidden)
-			return
-		}
-		switch r.URL.Path {
-		case "/module.lpx":
-			fmt.Fprintf(w, `#!name=Loon deep-link fixture
-[Script]
-http-response ^https://service\.example\.com/ script-path=%s/script.js,tag=Cleaner
-[MITM]
-hostname=service.example.com
-`, server.URL)
-		case "/script.js":
-			_, _ = w.Write([]byte(`$done({body: $response.body});`))
+	manifest, err := os.ReadFile(filepath.Join("..", "..", "extensions", "apple-wloc", "extension.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile(filepath.Join("..", "..", "extensions", "apple-wloc", "wloc.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/extension.yaml":
+			_, _ = w.Write(manifest)
+		case "/wloc.js":
+			_, _ = w.Write(script)
 		default:
-			http.NotFound(w, r)
+			http.NotFound(w, request)
 		}
 	}))
 	defer server.Close()
-
-	parser := interceptModuleParser{client: server.Client(), now: time.Now}
-	nested := server.URL + "/module.lpx"
-	module, err := parser.Import(context.Background(), interceptModuleImportRequest{
-		URL: "loon://import?plugin=" + url.QueryEscape(nested),
-	})
+	module, err := (interceptModuleParser{client: server.Client(), now: time.Now}).Import(context.Background(), interceptModuleImportRequest{URL: server.URL + "/extension.yaml"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if module.Source.URL != nested || len(module.Scripts) != 1 {
-		t.Fatalf("imported module = %+v", module)
+	if module.ID != "io.5gpn.apple-wloc" || len(module.Settings) != 2 || len(module.Scripts) != 1 || module.Enabled {
+		t.Fatalf("repository WLOC extension = %+v", module)
 	}
 }
 
-func TestInterceptModuleParserFlagsNetworkedScriptAsIncompatible(t *testing.T) {
+func TestNativeExtensionParserRejectsUnknownFieldsAndUnsafeYAML(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`$httpClient.get("https://example.com/", function() {});`))
-	}))
-	defer server.Close()
-	content := fmt.Sprintf(`#!name=Networked fixture
-[Script]
-http-response ^https://api\.example\.com/ script-path=%s/script.js,tag=Networked
-[MITM]
-hostname=api.example.com
-`, server.URL)
-	parser := interceptModuleParser{client: server.Client(), now: time.Now}
-	module, err := parser.Import(context.Background(), interceptModuleImportRequest{Content: content})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(module.Incompatible) != 1 || !strings.Contains(module.Incompatible[0], "networking is disabled") {
-		t.Fatalf("incompatible report = %v", module.Incompatible)
-	}
-}
-
-func TestParseLoonRewriteActions(t *testing.T) {
-	t.Parallel()
-	lines := []string{
-		`^http://example\.com/ header http://origin.example.com/`,
-		`^https://example\.com/ 302 https://origin.example.com/`,
-		`^https://example\.com/ 307 https://origin.example.com/`,
-		`^https://example\.com/ad reject`,
-		`^https://example\.com/ad reject-200`,
-		`^https://example\.com/ad reject-img`,
-		`^https://example\.com/ad reject-dict`,
-		`^https://example\.com/ad reject-array`,
-		`^https://example\.com/ header-del Cookie`,
-		`^https://example\.com/ header-add X-Module active`,
-		`^https://example\.com/ header-replace User-Agent Loon`,
-	}
-	for index, line := range lines {
-		rewrite, header, err := parseLoonRewriteLine(line, index)
-		if err != nil || (rewrite == nil) == (header == nil) {
-			t.Fatalf("parse %q = rewrite=%+v header=%+v err=%v", line, rewrite, header, err)
-		}
-	}
-}
-
-func TestNormalizeModuleImportURL(t *testing.T) {
-	t.Parallel()
-	plugin := "https://kelee.one/Tool/Loon/Lpx/example.lpx"
-	for _, raw := range []string{
-		"loon://import?plugin=" + plugin,
-		"loon:///import?plugin=" + url.QueryEscape(plugin),
-	} {
-		normalized, err := normalizeModuleImportURL(raw)
-		if err != nil || normalized != plugin {
-			t.Fatalf("normalize %q = %q, %v", raw, normalized, err)
-		}
-	}
-	for _, raw := range []string{
-		"loon://install?plugin=" + url.QueryEscape(plugin),
-		"loon://import?plugin=http%3A%2F%2Fexample.com%2Fmodule.lpx",
-		"loon://import?plugin=" + url.QueryEscape(plugin) + "&plugin=" + url.QueryEscape(plugin),
-		"custom://install?url=" + url.QueryEscape(plugin),
-	} {
-		if _, err := normalizeModuleImportURL(raw); err == nil {
-			t.Fatalf("unsafe import URL accepted: %q", raw)
-		}
-	}
-}
-
-func TestInterceptModuleImportRequestRejectsRetiredPreImportControls(t *testing.T) {
-	t.Parallel()
-	for _, retired := range []string{
-		`"format":"loon"`,
-		`"fetch_profile":"quantumult-x"`,
-		`"referer":"https://hub.kelee.one/"`,
-		`"argument":"value"`,
-		`"partial_allowed":true`,
-	} {
-		body := []byte(`{"revision":"r1","url":"https://example.com/module.lpx",` + retired + `}`)
-		var request interceptModuleImportRequest
-		if err := unmarshalStrictJSON(body, &request); err == nil {
-			t.Fatalf("retired import control accepted: %s", retired)
-		}
-	}
-}
-
-func TestInterceptModuleParserRejectsUnsafeAndIncompleteModules(t *testing.T) {
-	t.Parallel()
+	base := `apiVersion: 5gpn.io/v1
+kind: Extension
+metadata:
+  id: io.example.fixture
+  name: Fixture
+  version: 1.0.0
+permissions:
+  persistentStorage: false
+traffic:
+  captureHosts: [api.example.com]
+actions:
+  - id: pass
+    phase: response
+    match:
+      hosts: [api.example.com]
+      schemes: [https]
+      pathRegex: ^/
+    script:
+      inline: "function transform() { return null }"
+      bodyMode: none
+      timeoutMs: 1000
+      maxBodyBytes: 1024
+`
 	parser := interceptModuleParser{now: time.Now}
-	if _, err := parser.Import(context.Background(), interceptModuleImportRequest{URL: "http://example.com/module.lpx"}); err == nil {
-		t.Fatal("non-HTTPS URL was accepted")
+	for name, content := range map[string]string{
+		"unknown field":      strings.Replace(base, "kind: Extension", "kind: Extension\nlegacy: true", 1),
+		"multiple documents": base + "---\n{}\n",
+		"anchor":             strings.Replace(base, "captureHosts: [api.example.com]", "captureHosts: &hosts [api.example.com]", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parser.Import(context.Background(), interceptModuleImportRequest{Content: content}); err == nil {
+				t.Fatalf("%s was accepted", name)
+			}
+		})
 	}
-	module, err := parser.Import(context.Background(), interceptModuleImportRequest{Content: "#!name=Empty\n[Rule]\nDOMAIN,example.com,DIRECT\n"})
+}
+
+func TestNativeExtensionParserEnforcesCaptureBoundary(t *testing.T) {
+	t.Parallel()
+	manifest := `apiVersion: 5gpn.io/v1
+kind: Extension
+metadata:
+  id: io.example.boundary
+  name: Boundary fixture
+  version: 1.0.0
+permissions:
+  persistentStorage: false
+traffic:
+  captureHosts: [api.example.com]
+actions:
+  - id: escape
+    phase: response
+    match:
+      hosts: [other.example.com]
+      schemes: [https]
+      pathRegex: ^/
+    script:
+      inline: "function transform() { return null }"
+      bodyMode: none
+      timeoutMs: 1000
+      maxBodyBytes: 1024
+`
+	if _, err := (interceptModuleParser{now: time.Now}).Import(context.Background(), interceptModuleImportRequest{Content: manifest}); err == nil || !strings.Contains(err.Error(), "outside capture_hosts") {
+		t.Fatalf("capture boundary error = %v", err)
+	}
+}
+
+func TestNativeExtensionAllowsMappingOnlyAction(t *testing.T) {
+	t.Parallel()
+	manifest := `apiVersion: 5gpn.io/v1
+kind: Extension
+metadata:
+  id: io.example.upstream
+  name: Upstream override
+  version: 1.0.0
+permissions:
+  persistentStorage: false
+traffic:
+  captureHosts: [api.example.com]
+  upstreamMappings:
+    - host: api.example.com
+      target: origin.example.net
+`
+	module, err := (interceptModuleParser{now: time.Now}).Import(context.Background(), interceptModuleImportRequest{Content: manifest})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(module.Incompatible) == 0 || module.Enabled {
-		t.Fatalf("incomplete module was not retained as disabled incompatible state: %+v", module)
+	if len(module.Scripts) != 0 || len(module.HostMappings) != 1 {
+		t.Fatalf("mapping-only extension = %+v", module)
+	}
+}
+
+func TestNativeExtensionImportURLRequiresHTTPS(t *testing.T) {
+	t.Parallel()
+	for _, raw := range []string{"http://example.com/extension.yaml", "file:///tmp/extension.yaml", "not-a-url"} {
+		if _, err := normalizeModuleImportURL(raw); err == nil {
+			t.Fatalf("unsafe URL %q was accepted", raw)
+		}
 	}
 }

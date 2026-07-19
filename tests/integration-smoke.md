@@ -350,24 +350,27 @@ token into recorded command output, screenshots, or issue logs.
 
 ## Modular HTTP/3 interception
 
-- [ ] On a fresh install the Console MITM master is off,
-  `5gpn-intercept.service` is inactive, and `--check-enabled` exits nonzero.
-  `5gpn-intercept-runtime.path` remains active. Enable the master and verify the
-  service starts as `gpn-intercept`, has no capabilities, listens only on
+- [ ] On a fresh install the Console MITM master is off, there are no installed
+  extensions, `5gpn-intercept.service` is inactive, and `--check-enabled` exits
+  nonzero. `5gpn-intercept-runtime.path` remains active. Enabling the master
+  without an enabled extension still leaves the sidecar stopped. Install and
+  enable a valid native extension, then verify the service starts as
+  `gpn-intercept`, has no capabilities, listens only on
   `127.0.0.1:18080/tcp`, and passes
   `/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json --healthcheck`.
   Its private `/var/lib/5gpn-intercept/store.json` survives a sidecar restart,
   while purge removes the independently marked state directory.
 - [ ] On a fresh or explicitly reset mihomo config, Settings reports
   `block-quic-443` enabled and the canonical UDP/443 reject appears exactly once
-  after `IN-NAME,intercept-egress,Proxies` and before every `MODULE-MITM` rule.
+  after `IN-NAME,intercept-egress,Proxies` and before every `MODULE-INTERCEPT` rule.
   Disable and re-enable it through the authenticated module API; each change
   must revision-check, pass full `mihomo -t`, hot-apply, and preserve unrelated
   operator YAML. Confirm that the UDP listener remains bound and that traffic
   bypassing the gateway is unaffected.
 - [ ] `/etc/5gpn/intercept-ca/root.key` is root-only and is inaccessible from
   `5gpn-dns`, mihomo, and `5gpn-intercept`; the runtime leaf is not a CA and
-  covers the stable WLOC names plus every enabled synthetic module host.
+  covers only the capture hosts of enabled native extensions. With none enabled,
+  the private root remains valid but no leaf is required.
 - [ ] `5gpn-intercept-cert.path` and `5gpn-intercept-runtime.path` react to an atomic module config replacement,
   the root-owned publisher writes the expected `cert-state` digest, and neither
   long-running daemon can read the signing key. Turning the Console master off
@@ -377,18 +380,16 @@ token into recorded command output, screenshots, or issue logs.
   On an owned test iPhone, install it and explicitly enable full trust under
   Certificate Trust Settings. Removing this profile does not remove the DoT
   profile.
-- [ ] From Console `/extensions`, import a synthetic Loon fixture by HTTPS URL and
-  repeat through `loon://import?plugin=<https-url>`. Its origin returns 403 unless it receives
-  the bounded Loon client-shape headers; verify the server normalizes the nested
-  URL and snapshots both the module and referenced script. Repeat with a
-  pasted/uploaded source. Every import starts disabled and unacknowledged;
-  configure `#!input`/`#!select` values, set `$argument`, inspect structured
-  warning/error results, and acknowledge an explicitly reported partial module
-  only after inspecting the snapshot. Hard incompatibilities remain impossible
-  to enable. Do not crawl or mirror the linked external catalog.
+- [ ] From Console `/extensions`, install a strict `5gpn.io/v1` synthetic
+  manifest by HTTPS URL and verify the server snapshots both the manifest and a
+  relative script. Repeat through the separate local-add dialog with an inline
+  script. Unknown fields, duplicate keys, YAML aliases/anchors/merges, multiple
+  documents, non-HTTPS resources, unsafe redirects, and out-of-scope action
+  hosts must fail installation. Every valid install starts disabled; required
+  typed settings remain a hard enable gate.
 - [ ] With the master off, enable the synthetic module in the Console and verify
   it remains armed but has no DNS overlay or mihomo host rule. Turn the master
-  on, then disable/re-enable the module from
+  on, then disable/re-enable the extension from
   Telegram. Each surface shows the same revision and state. The complete
   mihomo config passes `mihomo -t`; sorted port-80/443 `AND` rules containing
   `DOMAIN`/`DOMAIN-WILDCARD` matchers sit
@@ -396,28 +397,30 @@ token into recorded command output, screenshots, or issue logs.
   answer changes to the gateway only while enabled, and certificate/mihomo
   failure injection restores the previous state.
 - [ ] With `MitM over HTTP/2` on and QUIC fallback protection off, verify plain
-  HTTP, TLS/H1/H2, QUIC v1/v2, and H3 apply the same Loon URL/
-  header rewrites and request/response scripts. String and binary-body scripts
+  HTTP, TLS/H1/H2, QUIC v1/v2, and H3 apply the same native request/response
+  actions. Text and binary-body scripts
   decode identity, gzip, zlib/raw deflate, and Brotli bodies within their
-  expanded-size bounds. Verify scripts can use `$loon`, `$request`, `$response`,
-  `$done`, `$argument`, configured parameter defaults, and durable
-  `$persistentStore`; `$httpClient`, filesystem,
-  process, and module-loader access fail closed. Oversized bodies, VM timeout,
+  expanded-size bounds. Verify `transform(context)` receives only the structured
+  request/response projection and typed settings. `context.storage` exists only
+  when the manifest requests it; ambient network, filesystem, process, timer,
+  compatibility globals, and module-loader access fail closed. Oversized bodies, VM timeout,
   and backtracking-regexp timeout remain bounded.
 - [ ] Turn `MitM over HTTP/2` off and verify new TLS connections negotiate
   HTTP/1.1 only. Turn QUIC fallback protection on and verify matched IETF QUIC
   v1/v2 receives no forwarded response while a capable client retries over
   TCP/HTTPS. Record clients that fail instead of falling back; do not claim
   legacy GQUIC coverage.
-- [ ] Configure WLOC coordinates on the same Modules page and enable
-  `builtin-wloc`.
+- [ ] Install
+  `https://raw.githubusercontent.com/moooyo/5gpn/main/extensions/apple-wloc/extension.yaml`,
+  search for a city in its generic map-backed `location` setting, fine-tune the
+  marker/coordinates and accuracy, save settings, and enable the extension.
 - [ ] Exercise WLOC over TCP/H2, QUIC v1/H3, and QUIC v2/H3. In every case the
   response is patched, the upstream certificate is verified, and packet capture
   shows the sidecar's upstream TCP/UDP entering mihomo's authenticated
   `intercept-egress` listener rather than dialing Apple directly.
 - [ ] With malformed protobuf, a client that does not trust the private CA, a
-  wrong SNI, or any inactive module target, interception fails closed. Disabling
-  the module restores ordinary end-to-end forwarding without changing the
+  wrong SNI, or any inactive extension target, interception fails closed. Disabling
+  the extension restores ordinary end-to-end forwarding without changing the
   operator's terminal egress group.
 
 After the run, restore temporary policy/upstream/config changes and compare the

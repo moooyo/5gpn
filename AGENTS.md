@@ -12,9 +12,9 @@ plans, design handoffs, and git history are context only.
   and plain `:53` must not be reintroduced. `127.0.0.1:5353/udp` is debug-only.
 - mihomo is the data-plane forwarder. It owns application-layer egress after a
   DNS answer steers traffic to the gateway. `5gpn-intercept` is the sole narrow
-  exception for explicitly enabled, allowlisted module hosts over plain HTTP,
+  exception for explicitly enabled native-extension capture hosts over plain HTTP,
   TLS/H1/H2, and QUIC/H3; its upstream TCP and UDP return through authenticated mihomo SOCKS5
-  listeners. External Loon scripts execute from immutable local snapshots
+  listeners. Native `5gpn.io/v1` scripts execute from immutable local snapshots
   in a no-network/no-filesystem goja sandbox. Do not crawl or mirror module stores.
   Do not add Xray, sing-box,
   smartdns, chinadns-ng, TUN/TProxy, WireGuard, fwmark, policy-routing tables,
@@ -120,8 +120,8 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   sliding indicator.
 - Theme controls live in the top bar profile menu and Settings appearance only.
 - Plugin modules live on the dedicated `/extensions` route. Keep immutable
-  digests, compatibility gaps, host allowlists, and the snapshot/trust/traffic
-  transaction visible. `/extensions/hosts` owns searchable, per-plugin MITM
+  digests, typed settings, permissions, capture-host allowlists, and the
+  snapshot/trust/traffic transaction visible. `/extensions/hosts` owns searchable, per-plugin capture-host
   host auditing; do not move plugin management back into Settings.
 - Logs remain virtualized, polling is single-flight/cancellable, and mobile
   uses card rows plus a drawer sidebar.

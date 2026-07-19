@@ -10,7 +10,7 @@ current behavior.
 5gpn is an IPv4 DNS-steering gateway with three runtime components:
 
 - `5gpn-dns` is the DNS decision engine and control-plane process.
-- `5gpn-intercept` is an allowlisted, module-driven TLS and HTTP/3
+- `5gpn-intercept` is an allowlisted, native-extension-driven TLS and HTTP/3
   transformation sidecar that runs only while the MITM master setting is on.
 - mihomo is the application-layer forwarding data plane.
 
@@ -29,7 +29,7 @@ client
   v                         v
 client direct          mihomo :80/:443/:5060/:8080/:8443 -- operator-defined application egress
                               |
-                              | enabled module hosts, authenticated SOCKS5 TCP/UDP
+                              | enabled extension capture hosts, authenticated SOCKS5 TCP/UDP
                               v
                        5gpn-intercept -- optional TLS/H1/H2 and QUIC v1/v2/H3 termination
                               |
@@ -100,8 +100,8 @@ The rule boundary is exact: eight base panel protocol/port rejects, the two
 `:5060` panel rejects, the console and allowlisted zashboard routes, the
 zashboard deny-by-default rule, seven anti-loop destination guards, the
 interception egress bypass, zero or one canonical global UDP/443 reject, zero or
-more canonical module-host rules, and the terminal `MATCH`. Module-host rules
-use the reserved `MODULE-MITM` action and must be a contiguous, sorted block
+more canonical extension-capture rules, and the terminal `MATCH`. Capture rules
+use the reserved `MODULE-INTERCEPT` action and must be a contiguous, sorted block
 immediately after the optional global reject.
 The anti-loop guards must follow the panel routes because
 mihomo resolves the synthetic console target through `hosts` before matching
@@ -124,26 +124,36 @@ operator-owned YAML and never reconcile or enable a missing module implicitly.
 
 The interception subsystem is a separate catalog from the fixed mihomo ingress
 catalog. Its global master is disabled in a fresh installation. The seed always
-contains an authenticated loopback `MODULE-MITM`
+contains an authenticated loopback `MODULE-INTERCEPT`
 SOCKS5 node, the matching `intercept-egress` mixed listener, and an `IN-NAME`
-bypass to the terminal operator egress group. No module-host rule is present in
-a fresh seed. Modules may be configured and armed while the master is off, but
-they publish no DNS overlay or mihomo host rule until the master is explicitly
-enabled. An active external module derives exact `DOMAIN` and wildcard
-`DOMAIN-WILDCARD` matchers from its normalized `[MITM]` host list and combines
+bypass to the terminal operator egress group. No extension-capture rule is
+present in a fresh seed. Extensions may be configured and armed while the
+master is off, but they publish no DNS overlay or mihomo capture rule until the
+master is explicitly enabled. An active native extension derives exact
+`DOMAIN` and wildcard `DOMAIN-WILDCARD` matchers only from its normalized
+`traffic.captureHosts` list and combines
 each with canonical `DST-PORT,80` and `DST-PORT,443` rules. Plain HTTP, TCP TLS,
 and UDP QUIC on those ports are sent to the sidecar; alternate-port traffic
-continues to the operator's normal rule path. The built-in WLOC module remains
-port-443-only. A hostname target must match
-the active module set; a pure-IP SOCKS target is accepted only until the TLS or
+continues to the operator's normal rule path. A hostname target must match
+the active extension set; a pure-IP SOCKS target is accepted only until the TLS or
 QUIC handshake supplies an allowlisted SNI. Unknown SNI fails closed.
+
+`captureHosts` is the sole traffic-acquisition permission. It accepts only
+canonical exact domains and constrained `*.example.com` wildcards. Hosts are
+never inferred from a URL or path regular expression. Every action carries a
+second structured host matcher that must be a subset of its own extension's
+`captureHosts`; the sidecar repeats that ownership check at runtime. One
+extension therefore cannot execute a broad script or upstream mapping against a
+host captured only by another extension. Duplicate host declarations remain
+visible for audit and intentionally compose only when each extension declared
+the host itself.
 
 The sidecar accepts plain HTTP and terminates TLS. The `http2` setting controls
 both client-side HTTP/2 negotiation and upstream HTTP/2 attempts; disabling it
 leaves HTTP/1.1 only for new TLS connections. With
 `quic_fallback_protection` off, the sidecar terminates QUIC v1/v2 with HTTP/3.
 With it on, authenticated UDP associations discard only IETF QUIC v1/v2 traffic
-already selected by the active module-host rules, allowing a capable client to
+already selected by the active extension-capture rules, allowing a capable client to
 retry over TCP/HTTPS. This does not claim legacy GQUIC support, and a client is
 permitted to fail instead of falling back. HTTPS upstreams are separately certificate-
 verified and every upstream connection returns
@@ -153,7 +163,7 @@ negotiation failure, before request data is sent. There is no direct sidecar
 egress.
 
 The sidecar `quic_fallback_protection` setting is narrower than
-`block-quic-443`: it affects only QUIC already routed to an enabled MITM host.
+`block-quic-443`: it affects only QUIC already routed to an enabled capture host.
 The data-plane capability rejects all public gateway UDP/443 before those host
 rules and is the default compatibility guard while reported QUIC behavior is
 unreliable.
@@ -165,39 +175,41 @@ closed. The DNS engine's existing HTTPS/SVCB NODATA behavior prevents ordinary
 DNS-discovered ECH on the steered path, but it cannot remove keys provisioned
 inside an application.
 
-`builtin-wloc` is the built-in module and is disabled by default. It declares
-only `gs-loc.apple.com` and `gs-loc-cn.apple.com` and applies the bounded WLOC
-protobuf response transformer at `/clls/wloc`. External modules are immutable
-Loon snapshots imported by one explicit URL, pasted text, or an
-uploaded local file. 5gpn does not enumerate, crawl, mirror, or redistribute a
-third-party module store. The Console may link to `https://hub.kelee.one/` as
-an external selection aid. URL imports accept either one HTTPS resource or an
-exact `loon://import?plugin=<https-url>` deep link, which is normalized to the
-nested HTTPS resource before validation. Every URL import uses a bounded
-automatic Loon header policy: a stable Loon-shaped user agent and the public
-catalog Referer. Callers cannot submit arbitrary fetch headers. These public compatibility
-headers do not supply authentication or defeat an origin's anti-bot policy.
+5gpn accepts only the strict native `5gpn.io/v1` YAML manifest. There is no
+third-party client-format parser, compatibility mode, deep-link alias, or
+partial-execution acknowledgement. Unknown fields, duplicate keys, multiple
+documents, YAML aliases, anchors, and merge keys are rejected. A manifest
+declares stable metadata identity and semantic version, explicit capture hosts,
+optional public-domain or public-IPv4 upstream mappings, typed settings,
+permissions, and structured request/response script actions. URL install accepts
+one HTTPS manifest; local add accepts one pasted or uploaded manifest. A URL
+manifest may reference relative HTTPS script resources, while a local manifest
+must use inline script source or an absolute HTTPS resource.
 
-The supported external-module surface is intentionally finite: `[MITM]`
-hostname, HTTP request/response entries in `[Script]`, URL/header actions in
-`[Rewrite]`, public IPv4/domain mappings in `[Host]`, and `#!input`/`#!select`
-parameter declarations. Module and referenced script bodies are fetched
-once with the subscription-grade HTTPS/redirect/SSRF dial guard, bounded,
-hashed, and stored locally. Relative script URLs are resolved only for a URL-
-based import. Unsupported sections or capabilities are displayed explicitly.
-A newly imported snapshot always starts disabled, with no module-level
-`$argument` and no partial-execution acknowledgement. Import returns a
-structured warning/error report. Incompatible snapshots cannot be enabled;
-parameterized snapshots cannot be enabled until every value is configured; and
-partially compatible snapshots require acknowledgement after source review.
-Configured `#!input`/`#!select` values are exposed as read-only defaults through
-`$persistentStore`. Telegram cannot bypass this review gate. Unsupported
-directives never execute.
+The manifest and every referenced script are fetched once through the
+subscription-grade HTTPS/redirect/SSRF dial guard, bounded, hashed, and stored
+as an immutable local snapshot. Imported extensions always start disabled.
+`text`, `select`, `boolean`, `number`, and `location` settings are structurally
+validated; all required settings must be complete before enable. A script action
+declares request or response phase, capture-host subset, schemes, methods,
+path RE2 expression, optional response statuses, body representation, timeout,
+and body limit. Its single `transform(context)` entry point receives only the
+bounded request/response projection, typed settings, console logging, and—when
+explicitly permitted—a quota-bound per-extension storage object. It has no
+network, filesystem, process, timer, or module-loader access.
+
+The repository's `extensions/apple-wloc` directory maintains Apple WLOC as a
+normal online-installable native extension. It is not compiled into either Go
+binary and is not seeded automatically. Its manifest declares the two Apple
+capture hosts, a reusable `location` setting rendered by the Console map picker,
+and a bounded binary response action. Its JavaScript snapshot implements the
+protobuf transformation through the same sandbox and permission checks as every
+other extension.
 
 URL-sourced plugins may be checked for updates only through an explicit,
 authenticated action. A check fetches a bounded candidate through the same
-HTTPS, redirect, SSRF, parsing, and compatibility guards as import, then shows
-its immutable snapshot digest, capabilities, and host set without mutating the
+HTTPS, redirect, SSRF, strict-schema, and permission guards as install, then shows
+its immutable snapshot digest, capabilities, and capture-host set without mutating the
 installed snapshot. The snapshot digest covers the plugin source, every fetched
 script digest, and the parsed immutable capability shape. Applying an update
 requires the installed plugin to remain disabled, refetches the exact reviewed
@@ -205,11 +217,15 @@ snapshot digest, atomically replaces the snapshot, and leaves the replacement
 disabled. Update checks and applies never auto-enable a plugin or alter the
 interception transaction implicitly.
 
-`[Host]` mappings are module-scoped upstream overrides, not a second global DNS
-policy. They apply only after an enabled module host has been steered through
-the sidecar, preserve the original HTTP Host and TLS SNI, reject private or
-loopback IPv4 targets, and return through mihomo. Loon `server:` and `ssid:`
-forms remain unsupported and appear in the compatibility report.
+Native `traffic.upstreamMappings` are extension-scoped upstream overrides, not
+a second global DNS policy. Their host must be covered by the same extension's
+`captureHosts`. They apply only after that host has been steered through the
+sidecar, preserve the original HTTP Host and TLS SNI, reject private, loopback,
+link-local, and otherwise unsafe IPv4 targets, and return through mihomo. The
+native manifest deliberately has no egress, node, selector, or proxy-group
+field: every transformed TCP or UDP flow returns through authenticated
+`intercept-egress`, and the operator-owned mihomo configuration makes the final
+DIRECT or proxy choice.
 
 The `5gpn-dns` systemd unit is softly ordered after mihomo (`Wants`/`After`),
 not coupled with `Requires` or `BindsTo`: a controller or data-plane failure
@@ -232,15 +248,15 @@ subscriptions, but policy apply is DNS-only. It must never render, patch, or
 apply mihomo configuration. There are no policy drafts, generations,
 policy-v2 objects, structured egress targets, node APIs, or selector APIs.
 
-Enabled interception hosts form a separate system overlay before this operator
-list. The overlay is empty after a fresh install and is published only after an
-explicit module transaction has prepared the module snapshot and certificate,
+Enabled extension capture hosts form a separate system overlay before this
+operator list. The overlay is empty after a fresh install and is published only
+after an explicit extension transaction has prepared the immutable snapshot and certificate,
 validated and hot-applied the matching mihomo rules, and committed the sidecar
 state. A matching name receives the same gateway action and `force-proxy`
 observability reason as an explicit proxy-intent rule. Disabling a module
 removes its overlay and flushes the response cache. This overlay is not a
 second general policy language: it accepts only the normalized host patterns
-owned by enabled interception modules and cannot select an egress node.
+owned by enabled native extensions and cannot select an egress node.
 
 An unmatched name uses one of three fallbacks:
 
@@ -364,27 +380,28 @@ restores and reapplies the previous bytes. There is no separate ingress-capabili
 generated region, startup reconciliation, or daemon-owned YAML fragment; the
 result remains fully operator-owned and visible in the raw editor.
 
-The `MODULE-MITM` action and its contiguous rule block are reserved for the
-interception manager. A raw reset or safe partial deletion makes active modules
-degraded and immediately removes their DNS overlay. A later explicit module
+The `MODULE-INTERCEPT` action and its contiguous rule block are reserved for the
+interception manager. A raw reset or safe partial deletion makes active extensions
+degraded and immediately removes their DNS overlay. A later explicit extension
 toggle may reconcile a missing/subset reserved block, but it refuses any extra,
-reordered, duplicate, non-canonical, or non-module rule targeting the reserved
+reordered, duplicate, non-canonical, or non-extension rule targeting the reserved
 action.
 
-Interception modules are managed through the authenticated
+Interception extensions are managed through the authenticated
 `/api/interception/modules` surface. The global master, HTTP/2, and QUIC
 fallback settings use authenticated `GET`/`PUT /api/interception/settings` over
 the same complete-document revision. The Console and Telegram bot call the same
 in-process `InterceptModuleManager`; neither has a private toggle path. Import,
 argument update, delete, and enable/disable operations carry the SHA-256
-revision of the complete sidecar document. The WLOC coordinate endpoint is a
-narrow view over the same revision and manager.
+revision of the complete sidecar document. Typed setting updates, including a
+`location` value selected through the map editor, use that same revision and
+manager; there is no plugin-specific settings endpoint.
 Telegram lists the same readiness and host state and uses a separate
 confirmation message before applying an enable or disable. It cannot import,
-inspect source bodies, edit arguments, or acknowledge partial compatibility;
+inspect source bodies, or edit typed settings;
 those higher-context operations remain in the authenticated Console.
 
-An active-module or master enable/disable transaction holds the sidecar and mihomo store locks in a
+An active-extension or master enable/disable transaction holds the sidecar and mihomo store locks in a
 fixed order. It validates the candidate sidecar with the installed
 `5gpn-intercept --check-config`, structurally renders the reserved mihomo rule
 block, validates the complete YAML invariants, runs `mihomo -t`, and preserves
@@ -396,10 +413,11 @@ restores the old sidecar bytes; mihomo failure also restores and reapplies the
 old operator configuration. Disable operations may leave a temporary
 certificate SAN superset, but the runtime allowlist rejects disabled hosts.
 
-`/etc/5gpn/intercept/config.json` version 2 preserves installer-owned SOCKS credentials,
+`/etc/5gpn/intercept/config.json` version 3 preserves installer-owned SOCKS credentials,
 loopback addresses, and certificate paths across every API write. It also
-stores the MITM master and protocol settings, built-in WLOC settings, and immutable external module/source/script
-snapshots. The sidecar reloads only a fully valid document by mtime and retains
+stores the MITM master and protocol settings plus immutable native extension,
+manifest, script, permission, typed-setting, and capture-host snapshots. The
+sidecar reloads only a fully valid document by mtime and retains
 the last valid snapshot after an invalid external replacement. A running
 sidecar exits cleanly when the master turns off. The continuously enabled
 `5gpn-intercept-runtime.path` starts the conditioned sidecar when an atomic
@@ -550,14 +568,16 @@ Specialized live state remains in purpose-specific, atomically written files:
   instead of restoring a possibly revoked bootstrap administrator;
 - `mihomo/config.yaml` and `mihomo/whitelist.txt` are operator data-plane state.
 - `intercept/config.json` is the sidecar runtime document. Its SOCKS credentials
-  and fixed paths are installer-owned; module imports store bounded immutable
-  source and script snapshots, normalized hosts/actions, compatibility review,
-  and enabled state. The global MITM master, HTTP/2 negotiation, QUIC fallback
-  protection, and built-in WLOC parameters live in the same document;
+  and fixed paths are installer-owned; native extension installs store bounded
+  immutable manifests and scripts, normalized capture hosts, structured action
+  matchers, typed settings, permissions, upstream mappings, and enabled state.
+  The global MITM master, HTTP/2 negotiation, and QUIC fallback protection live
+  in the same document;
 - `/var/lib/5gpn-intercept/store.json` is the size-bounded, sidecar-owned
-  persistence backend for compatible `$persistentStore` calls.
+  persistence backend exposed as `context.storage` only when a native manifest
+  explicitly requests `persistentStorage`.
   Scripts cannot choose its path. Normal uninstall preserves its independently
-  marked state directory with the module document; purge and decommission
+  marked state directory with the extension document; purge and decommission
   remove it through the fixed canonical path and ownership marker.
 
 Adding a daemon knob requires config parsing, installer persistence, the
@@ -590,28 +610,29 @@ Modular interception uses a separate private trust domain. Its root certificate
 and signing key live under the independently ownership-marked
 `/etc/5gpn/intercept-ca`; no runtime service can read the signing key. The
 sidecar receives only a non-CA leaf under `/etc/5gpn/intercept/tls`. Its SAN set
-contains the two stable built-in WLOC names plus the exact and wildcard hosts
-of currently enabled external modules. A wildcard SAN is permitted only in the
-normalized `*.example.com` shape; a module cannot request an all-domain or IP
-certificate.
-There is exactly one interception root for the entire module subsystem, not one
-root per module. Adding or removing a module can change the constrained runtime
+contains only the exact and wildcard `captureHosts` of currently enabled native
+extensions. A wildcard SAN is permitted only in the normalized
+`*.example.com` shape; an extension cannot request an all-domain or IP
+certificate. With no enabled extension the private root remains available but
+no runtime leaf or sidecar process is required.
+There is exactly one interception root for the entire extension subsystem, not one
+root per extension. Adding or removing an extension can change the constrained runtime
 leaf SAN set but never creates, rotates, or distributes another root.
 
-`5gpn-intercept-cert.path` watches the atomically replaced module document and
+`5gpn-intercept-cert.path` watches the atomically replaced extension document and
 starts the root-owned, sandboxed `5gpn-intercept-cert.service`. The helper asks
 the sidecar binary's minimal duplicate-key-safe certificate-request parser for
 one canonical SAN list and digest. This root path never compiles or executes
-module JavaScript. The helper signs a new
+extension JavaScript. The helper signs a new
 397-day leaf, publishes both staged keypair files, then writes the public
-`intercept/cert-state` digest that unblocks the module transaction only after
+`intercept/cert-state` digest that unblocks the extension transaction only after
 the pair validates. The sidecar retains its last valid in-memory leaf across a
 transient mixed-file reload attempt. The daily
 scoped certificate service invokes the same idempotent helper for expiry. The
 root is never rotated implicitly and the sidecar loads a new leaf on the next
 handshake without a restart.
 `5gpn-intercept.service` also requires and orders itself after the idempotent
-certificate oneshot, so a module document changed while the gateway was off
+certificate oneshot, so an extension document changed while the gateway was off
 cannot start the sidecar with a stale SAN set. Its separate runtime path unit
 reacts to the same atomic document replacement, while the service condition
 prevents a disabled MITM runtime from remaining started.
@@ -787,17 +808,17 @@ interception CA signing key. Only the bounded root certificate oneshot may read
 that key, and only the scoped public-certificate renewal helper may read the
 Cloudflare Zone:DNS:Edit credential.
 
-Each external HTTP script action runs in a fresh goja VM. Cron, network-change,
-generic, DNS, and rule scripts are not executed. The compatibility globals
-are limited to `$loon`, `$request`, `$response`, `$done`, `$argument`,
-`$persistentStore`, console logging, and a log-only `$notification` surface.
-`$httpClient` fails closed; there is no filesystem,
-process, module loader, socket, or ambient Go object. Source, request, response,
-per-rule, total-module, persistent-key, and persistent-file sizes are bounded.
-Request and response bodies support string or Uint8Array delivery and bounded
-identity, gzip, deflate, and Brotli decoding. Upstream requests ask for identity
-encoding; transformed responses are returned uncompressed with corrected
-length headers.
+Each native HTTP action runs in a fresh goja VM and must define exactly
+`transform(context)`. The context contains only the declared phase's bounded
+request/response projection, typed settings, console logging, and an optional
+quota-bound storage object when the immutable manifest requested that
+permission. There are no compatibility globals, ambient network client,
+filesystem, process, timer, module loader, socket, or ambient Go object.
+Source, request, response, per-action, total-extension, persistent-key, and
+persistent-file sizes are bounded. Request and response bodies support omitted,
+string, or Uint8Array delivery as declared by `bodyMode`, plus bounded identity,
+gzip, deflate, and Brotli decoding. Upstream requests ask for identity encoding;
+transformed responses are returned uncompressed with corrected length headers.
 At most two body-buffering transformation flows run concurrently; excess work
 fails closed with service unavailable instead of exceeding the sidecar cgroup.
 VM execution has a rule timeout, and regexp2's non-RE2 JavaScript fallback has
@@ -816,8 +837,8 @@ The repository contains no Python. The `5gpn-dns` Go module has exactly three
 direct dependencies: `github.com/miekg/dns`, `github.com/go-telegram/bot`, and
 `gopkg.in/yaml.v3`. The separate `5gpn-intercept` module has exactly four
 direct dependencies: `github.com/quic-go/quic-go` for QUIC v1/v2 and HTTP/3,
-`github.com/dop251/goja` for the isolated Loon JavaScript compatibility
-runtime, `github.com/dlclark/regexp2/v2` solely to impose the explicit
+`github.com/dop251/goja` for the isolated native extension JavaScript runtime,
+`github.com/dlclark/regexp2/v2` solely to impose the explicit
 backtracking timeout on goja's fallback expression engine, and
 `github.com/andybalholm/brotli` for bounded Brotli request/response decoding. These architecture
 decisions add no gateway toolchain. The YAML
@@ -853,37 +874,39 @@ MITM-only QUIC fallback control.
 Settings also owns the MITM master, HTTP/2, and QUIC fallback controls. They are
 revision-protected immediate controls: changing the master requires an explicit
 dialog confirmation, while either protocol capability applies immediately once
-MITM is enabled. Disabling the master removes the DNS overlay and mihomo MITM
-host rules and stops the sidecar; plugin snapshots stay
+MITM is enabled. Disabling the master removes the DNS overlay and mihomo
+extension-capture rules and stops the sidecar; plugin snapshots stay
 stored and subsequent traffic follows the normal operator-owned mihomo rules.
 The page must state that QUIC fallback is guaranteed for already matched IETF
 QUIC v1/v2 traffic and other variants are not guaranteed.
 
-The dedicated `/extensions` route owns plugin modules. It shows immutable
-source/script digests, normalized MITM hosts, supported action counts,
-compatibility and unsupported-directive details, enabled/runtime state, and a
-visible snapshot-to-trust-to-traffic transaction rail. An authenticated,
-on-demand detail read exposes the exact stored module and script bodies for
-review; list responses do not send those potentially large bodies. Import supports one Loon
-plugin URL, Loon import deep link, paste, or local upload. Store-compatible fetch
-headers are automatic; the import dialog has no format, fetch-header, initial
-argument, or pre-review partial-execution controls. After import, the page shows
-structured compatibility errors/warnings, Host mappings, and generated input or
-select controls. Hard incompatibilities block enable; incomplete parameters
-must be saved first; partial execution still requires explicit acknowledgement.
-The external catalog remains a link, not a mirrored store. Enable, disable, delete, argument, and compatibility
-acknowledgement changes use revision checks and explicit confirmation. The same
-page owns the narrow WLOC coordinate fields and shows an information bar linking
-to `/setup-guide` for trust setup. The Setup Guide owns the one shared
+The dedicated `/extensions` route owns native plugins. It shows immutable
+manifest/script digests, semantic version, normalized capture hosts, actions,
+permissions, typed settings, upstream mappings, enabled/runtime state, and a
+visible capture-to-transform-to-mihomo traffic rail. An authenticated,
+on-demand detail read exposes the exact stored manifest and script bodies for
+review; list responses do not send those potentially large bodies. “Install
+from URL” and “Add locally” are separate dialogs with no source-mode switch.
+The former accepts one HTTPS native manifest; the latter accepts pasted or
+uploaded YAML. Invalid native manifests fail installation rather than entering a
+compatibility mode. Required settings must be complete before enable. Enable,
+disable, delete, settings, and update changes use revision checks and explicit
+confirmation. A `location` setting uses the shared map point picker with
+explicit city search, draggable point, accuracy, and direct coordinate fields.
+City search calls bearer-protected `GET /api/geocode/cities`; the daemon sends
+only the bounded query and language to the fixed Nominatim origin through the
+same post-resolution SSRF dial guard used by subscription fetches. It never
+forwards the bearer token, arbitrary headers, or an operator-selected URL.
+The project extension directory remains a source link, not an automatically
+installed or mirrored store. The Setup Guide owns the one shared
 interception-root QR code, download link, installation steps, and iOS manual
-full-trust instructions. It states that trust applies to every module while
-decryption remains limited to enabled module hosts, requires explicit device
-authorization, and that all devices routed into WLOC share the configured
-coordinates.
+full-trust instructions. It states that trust applies to every plugin while
+decryption remains limited to enabled capture hosts and requires explicit device
+authorization.
 
-`/extensions/hosts` is the authenticated MITM host-audit view. It groups every
-declared host pattern by plugin, distinguishes running/configured/disabled
-state using the global master plus `active_hosts`, highlights exact duplicate
+`/extensions/hosts` is the authenticated capture-host audit view. It groups
+every declared host pattern by plugin, distinguishes running/configured/disabled
+state using the global master plus `active_capture_hosts`, highlights exact duplicate
 declarations, and supports local search and filtering. Modern Android Private
 DNS remains supported, but the Setup Guide does not offer Android MITM CA
 installation because modern Android applications generally reject user CAs.
