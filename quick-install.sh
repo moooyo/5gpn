@@ -2,14 +2,15 @@
 # 5gpn one-shot entrypoint.
 #   curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash
 #
-# Resolve the newest published release once, then obtain every installer input
-# from that exact tag.  The release bundle is preferred; a tag checkout is only
-# used when the bundle asset itself is unavailable.  We never fall forward to a
-# branch, and a downloaded bundle is never used without its published digest.
+# Resolve the selected official or beta release once, then obtain every
+# installer input from that exact tag. We never fall forward to a branch or
+# across channels, and a downloaded bundle is never used without its published
+# digest.
 set -euo pipefail
 
 readonly RELEASE_REPO="https://github.com/moooyo/5gpn"
 readonly LATEST_RELEASE_API="https://api.github.com/repos/moooyo/5gpn/releases/latest"
+readonly RELEASES_API="https://api.github.com/repos/moooyo/5gpn/releases"
 readonly SOURCE_MARKER=".5gpn-quick-install-owned"
 readonly SOURCE_MARKER_VALUE="5gpn-quick-install-v1"
 readonly WORK_MARKER=".5gpn-quick-install-work-owned"
@@ -177,9 +178,25 @@ remove_work_dir() {
     rmdir -- "$canonical"
 }
 
-valid_release_tag() {
+valid_stable_release_tag() {
     local tag="$1"
-    [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+    local number='(0|[1-9][0-9]*)'
+    [[ "$tag" =~ ^${number}\.${number}\.${number}$ ]]
+}
+
+valid_beta_release_tag() {
+    local tag="$1"
+    local number='(0|[1-9][0-9]*)'
+    [[ "$tag" =~ ^${number}\.${number}\.${number}-beta\.([1-9][0-9]*)$ ]]
+}
+
+valid_release_tag_for_channel() {
+    local channel="$1" tag="$2"
+    case "$channel" in
+        stable) valid_stable_release_tag "$tag" ;;
+        beta)   valid_beta_release_tag "$tag" ;;
+        *)      return 1 ;;
+    esac
 }
 
 resolve_latest_tag() { # optional API URL is an internal test seam
@@ -194,8 +211,67 @@ resolve_latest_tag() { # optional API URL is an internal test seam
     rm -f -- "$json"
     [[ -n "$tags" && "$tags" != *$'\n'* ]] || { red "Latest release response has no unique tag."; return 1; }
     tag="$tags"
-    valid_release_tag "$tag" || { red "Latest release returned an unsafe tag."; return 1; }
+    valid_stable_release_tag "$tag" \
+        || { red "Latest official release returned an unsafe or non-official tag."; return 1; }
     printf '%s\n' "$tag"
+}
+
+release_json_tag() {
+    sed -n 's/^.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*$/\1/p' "$1"
+}
+
+beta_tags_from_release_list() {
+    grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+"' "$1" 2>/dev/null \
+        | sed -E 's/^.*"([^"]+)"$/\1/' || true
+}
+
+resolve_latest_beta_tag() { # optional list and exact-metadata URLs are internal test seams
+    local list_url="${1:-${RELEASES_API}?per_page=100}"
+    local metadata_url="${2:-}"
+    local list_json metadata_json candidate="" tag metadata_tag
+
+    list_json="$(mktemp /tmp/5gpn-beta-releases.json.XXXXXX)" || return 1
+    if ! dl "$list_url" "$list_json"; then
+        rm -f -- "$list_json"
+        red "Could not list 5gpn prereleases."
+        return 1
+    fi
+    while IFS= read -r tag; do
+        if valid_beta_release_tag "$tag"; then
+            candidate="$tag"
+            break
+        fi
+    done < <(beta_tags_from_release_list "$list_json")
+    rm -f -- "$list_json"
+    [[ -n "$candidate" ]] \
+        || { red "No published 5gpn beta release is available."; return 1; }
+
+    metadata_url="${metadata_url:-${RELEASES_API}/tags/${candidate}}"
+    metadata_json="$(mktemp /tmp/5gpn-beta-release.json.XXXXXX)" || return 1
+    if ! dl "$metadata_url" "$metadata_json"; then
+        rm -f -- "$metadata_json"
+        red "Could not verify beta release ${candidate}."
+        return 1
+    fi
+    metadata_tag="$(release_json_tag "$metadata_json")"
+    if [[ "$metadata_tag" != "$candidate" ]] \
+       || ! grep -Eq '"draft"[[:space:]]*:[[:space:]]*false' "$metadata_json" \
+       || ! grep -Eq '"prerelease"[[:space:]]*:[[:space:]]*true' "$metadata_json"; then
+        rm -f -- "$metadata_json"
+        red "Latest beta candidate is not a published GitHub prerelease."
+        return 1
+    fi
+    rm -f -- "$metadata_json"
+    printf '%s\n' "$candidate"
+}
+
+resolve_release_tag() { # resolve_release_tag <stable|beta> [discovery-url] [metadata-url]
+    local channel="$1"
+    case "$channel" in
+        stable) resolve_latest_tag "${2:-}" ;;
+        beta)   resolve_latest_beta_tag "${2:-}" "${3:-}" ;;
+        *)      red "Unknown 5gpn release channel: $channel"; return 1 ;;
+    esac
 }
 
 sha256_file() {
@@ -284,9 +360,9 @@ publish_stage() {
     [[ -f "$_QI_SOURCE_DIR/install.sh" && ! -L "$_QI_SOURCE_DIR/install.sh" ]]
 }
 
-fetch_bundle() { # fetch_bundle <repo> <release-tag>; 10=asset absent, 20=hard failure
-    local repo="$1" tag="$2" tgz checksums stage bundle_url checksums_url
-    valid_release_tag "$tag" || return 20
+fetch_bundle() { # fetch_bundle <repo> <channel> <release-tag>; 10=asset absent, 20=hard failure
+    local repo="$1" channel="$2" tag="$3" tgz checksums stage bundle_url checksums_url
+    valid_release_tag_for_channel "$channel" "$tag" || return 20
     tgz="$(mktemp /tmp/5gpn-installer.tgz.XXXXXX)" || return 20
     checksums="$(mktemp /tmp/5gpn-checksums.txt.XXXXXX)" || { rm -f -- "$tgz"; return 20; }
     bundle_url="${repo}/releases/download/${tag}/${BUNDLE_NAME}"
@@ -325,17 +401,45 @@ fetch_bundle() { # fetch_bundle <repo> <release-tag>; 10=asset absent, 20=hard f
     remove_work_dir "$stage" || { red "Could not clean the installer staging directory."; return 20; }
 }
 
+usage() {
+    cat <<'EOF'
+5gpn quick installer
+Usage: quick-install.sh [--beta] [installer-command]
+
+  (no channel option)  Download the latest official release.
+  --beta              Download the latest published beta prerelease.
+
+The selected release is pinned to one exact tag. A missing beta never falls
+back to the official channel.
+EOF
+}
+
 main() {
-    local release_tag status install
+    local release_tag status install channel=stable
+    local -a install_args
+    if [[ "${1:-}" == --beta ]]; then
+        channel=beta
+        shift
+    fi
+    case "${1:-}" in
+        -h|--help) usage; return 0 ;;
+    esac
+    if [[ "${1:-}" == --beta ]]; then
+        red "--beta must be specified exactly once as the first argument."
+        return 2
+    fi
+    install_args=("$@")
+    [[ "$channel" == stable ]] || install_args=(--beta "${install_args[@]}")
+
     if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
         red "Please run as root (e.g. pipe into 'sudo bash')."
         return 1
     fi
 
     prepare_source_dir "" || return 1
-    release_tag="$(resolve_latest_tag)" || return 1
+    release_tag="$(resolve_release_tag "$channel")" || return 1
 
-    if fetch_bundle "$RELEASE_REPO" "$release_tag"; then
+    if fetch_bundle "$RELEASE_REPO" "$channel" "$release_tag"; then
         green "Verified installer bundle ready at ${_QI_SOURCE_DIR}."
     else
         status=$?
@@ -353,7 +457,7 @@ main() {
     chmod +x "$install" 2>/dev/null || true
     green "Source ready at ${_QI_SOURCE_DIR}. Launching installer..."
     cd "$_QI_SOURCE_DIR"
-    exec bash ./install.sh "$@"
+    exec bash ./install.sh "${install_args[@]}"
 }
 
 if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then

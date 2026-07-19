@@ -1,7 +1,9 @@
 # AGENTS.md
 
 Project guidance for this repository. Read `docs/architecture.md` before making
-architectural changes; it is the sole current-architecture document. Historical
+architectural changes; it is the sole current-architecture document. Read
+`MEMORY.md` for durable owner decisions and pending contracts, taking care not
+to treat its explicitly pending requirements as current behavior. Historical
 plans, design handoffs, and git history are context only.
 
 ## Non-negotiable architecture

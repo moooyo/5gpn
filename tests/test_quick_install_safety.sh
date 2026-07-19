@@ -98,18 +98,60 @@ prepare_source_dir /etc/5gpn-quick-test >/dev/null 2>&1
 [[ "$?" != 0 ]] && pass "system directory descendants are refused" \
     || fail "system directory descendant was accepted"
 
-# Latest is resolved once to a validated tag; branch shortcuts are absent.
+# Stable and beta channels accept disjoint strict SemVer forms.
+if valid_stable_release_tag 9.8.7 \
+   && ! valid_stable_release_tag 9.8.7-beta.1 \
+   && ! valid_stable_release_tag 09.8.7 \
+   && valid_beta_release_tag 9.8.8-beta.1 \
+   && valid_beta_release_tag 9.8.8-beta.12 \
+   && ! valid_beta_release_tag 9.8.8-beta.0 \
+   && ! valid_beta_release_tag 9.8.8-beta.01 \
+   && ! valid_beta_release_tag 9.8.8-rc.1; then
+    pass "stable and beta tag grammars are strict and disjoint"
+else
+    fail "release tag grammar accepted a cross-channel or malformed tag"
+fi
+
+# Latest official is resolved once to a validated stable tag.
 latest_json="$TMP/latest.json"
 printf '{"tag_name":"9.8.7"}\n' > "$latest_json"
 dl() { cp -- "$1" "$2"; }
-got="$(resolve_latest_tag "$latest_json" 2>/dev/null)"
+got="$(resolve_release_tag stable "$latest_json" 2>/dev/null)"
 [[ "$got" == 9.8.7 ]] && pass "latest release response resolves to one safe tag" \
     || fail "latest tag resolution returned '$got'"
 
+printf '{"tag_name":"9.8.8-beta.1"}\n' > "$latest_json"
+resolve_release_tag stable "$latest_json" >/dev/null 2>&1
+[[ "$?" != 0 ]] && pass "official resolution refuses a beta tag" \
+    || fail "official resolution accepted a beta tag"
+
 printf '{"tag_name":"../main"}\n' > "$latest_json"
-resolve_latest_tag "$latest_json" >/dev/null 2>&1
+resolve_release_tag stable "$latest_json" >/dev/null 2>&1
 [[ "$?" != 0 ]] && pass "unsafe release tag is rejected" \
     || fail "unsafe release tag was accepted"
+
+# Beta discovery selects only a strict tag and verifies its exact GitHub
+# metadata. It must fail closed when no beta exists or it is not a prerelease.
+beta_list="$TMP/beta-list.json"
+beta_metadata="$TMP/beta-metadata.json"
+printf '%s\n' \
+    '[{"tag_name":"9.8.7","draft":false,"prerelease":false},{"tag_name":"9.9.0-beta.2","draft":false,"prerelease":true},{"tag_name":"9.9.0-beta.1","draft":false,"prerelease":true}]' \
+    > "$beta_list"
+printf '{"tag_name":"9.9.0-beta.2","draft":false,"prerelease":true}\n' > "$beta_metadata"
+got="$(resolve_release_tag beta "$beta_list" "$beta_metadata" 2>/dev/null)"
+[[ "$got" == 9.9.0-beta.2 ]] && pass "beta resolution selects and verifies the newest beta candidate" \
+    || fail "beta resolution returned '$got'"
+
+printf '{"tag_name":"9.9.0-beta.2","draft":false,"prerelease":false}\n' > "$beta_metadata"
+resolve_release_tag beta "$beta_list" "$beta_metadata" >/dev/null 2>&1
+[[ "$?" != 0 ]] && pass "beta resolution refuses a non-prerelease candidate" \
+    || fail "beta resolution accepted a non-prerelease candidate"
+
+printf '[{"tag_name":"9.8.7","draft":false,"prerelease":false}]\n' > "$beta_list"
+resolve_release_tag beta "$beta_list" "$beta_metadata" >/dev/null 2>&1
+[[ "$?" != 0 ]] && pass "missing beta fails without an official fallback" \
+    || fail "missing beta fell back to an official release"
+
 if ! grep -Eq 'REPO="\$\{|SRC_REQUESTED=|DNS_VERSION:-|releases/latest/download|origin main' "$QUICK"; then
     pass "quick install exposes no environment or branch release override"
 else
@@ -144,7 +186,7 @@ dl() {
 
 bundle_target="$TMP/bundle-target"
 prepare_source_dir "$bundle_target" >/dev/null 2>&1
-fetch_bundle https://fixture.invalid 9.8.7 >/dev/null 2>&1
+fetch_bundle https://fixture.invalid stable 9.8.7 >/dev/null 2>&1
 if [[ "$?" == 0 && -f "$_QI_SOURCE_DIR/install.sh" && -f "$_QI_SOURCE_DIR/template.txt" ]] \
    && marker_matches "$_QI_SOURCE_DIR/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE"; then
     pass "digest-verified bundle is staged and published"
@@ -152,11 +194,21 @@ else
     fail "valid release bundle was not published"
 fi
 
+beta_bundle_target="$TMP/beta-bundle-target"
+prepare_source_dir "$beta_bundle_target" >/dev/null 2>&1
+fetch_bundle https://fixture.invalid beta 9.9.0-beta.2 >/dev/null 2>&1
+if [[ "$?" == 0 && -f "$_QI_SOURCE_DIR/install.sh" ]] \
+   && marker_matches "$_QI_SOURCE_DIR/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE"; then
+    pass "verified beta bundle is accepted only with a beta tag"
+else
+    fail "valid beta release bundle was not published"
+fi
+
 mismatch_target="$TMP/mismatch-target"
 prepare_source_dir "$mismatch_target" >/dev/null 2>&1
 echo keep > "$_QI_SOURCE_DIR/keep"
 printf '%064d  %s\n' 0 "$BUNDLE_NAME" > "$FIXTURE_CHECKSUMS"
-fetch_bundle https://fixture.invalid 9.8.7 >/dev/null 2>&1
+fetch_bundle https://fixture.invalid stable 9.8.7 >/dev/null 2>&1
 rc=$?
 if [[ "$rc" == 20 && -f "$_QI_SOURCE_DIR/keep" && ! -e "$_QI_SOURCE_DIR/install.sh" ]]; then
     pass "bundle digest mismatch fails closed before source cleanup"
@@ -165,13 +217,19 @@ else
 fi
 
 DL_MODE=missing_checksums
-fetch_bundle https://fixture.invalid 9.8.7 >/dev/null 2>&1
+fetch_bundle https://fixture.invalid stable 9.8.7 >/dev/null 2>&1
 [[ "$?" == 20 ]] && pass "missing checksums fail closed" \
     || fail "bundle without checksums did not hard-fail"
 DL_MODE=missing_bundle
-fetch_bundle https://fixture.invalid 9.8.7 >/dev/null 2>&1
+fetch_bundle https://fixture.invalid stable 9.8.7 >/dev/null 2>&1
 [[ "$?" == 10 ]] && pass "an absent bundle is reported distinctly and still fails closed" \
     || fail "absent bundle did not return the bundle-missing status"
+fetch_bundle https://fixture.invalid stable 9.8.8-beta.1 >/dev/null 2>&1
+[[ "$?" == 20 ]] && pass "bundle fetch rejects a beta tag on the official channel" \
+    || fail "bundle fetch accepted a cross-channel beta tag"
+fetch_bundle https://fixture.invalid beta 9.8.7 >/dev/null 2>&1
+[[ "$?" == 20 ]] && pass "bundle fetch rejects an official tag on the beta channel" \
+    || fail "bundle fetch accepted a cross-channel official tag"
 if ! grep -Eq '^fetch_git\(\)|git -C .*fetch|git -C .*checkout' "$QUICK"; then
     pass "missing bundles cannot fall back to unsigned git content"
 else

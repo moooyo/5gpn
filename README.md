@@ -91,9 +91,22 @@ read that key.
 在一台 root 权限的 Linux 网关上：
 
 ```bash
+# Latest official release (default)
 curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash
-# 或在 checkout 内：sudo bash install.sh
+
+# Latest published beta prerelease (explicit opt-in)
+curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash -s -- --beta
+
+# A checkout delegates to the same exact-tag bundle selection
+sudo bash install.sh
+sudo bash install.sh --beta
 ```
+
+Official and beta selection is per installer invocation. The default path only
+accepts `X.Y.Z`; `--beta` only accepts a published `X.Y.Z-beta.N` prerelease.
+Missing or malformed beta metadata fails closed and never falls back to an
+official release. Release channels select only first-party 5gpn artifacts;
+third-party version and checksum pins remain unchanged.
 
 > First installation requires the TUI. It collects the certificate mode, base domain, certificate email, and Cloudflare token when selected. `PUBLIC_IP` is detected automatically; the gateway and listener default to it. `5gpn configure` retains advanced public/gateway/listener overrides for special network layouts. China DNS defaults to `223.5.5.5` over UDP/53, trust DNS and the egress resolver default to `22.22.22.22` over UDP/53, China ECS defaults to `112.96.32.0/24`, and cache size is selected from the memory profile. Caller environment variables never override configuration; a first install without a TTY fails closed, while reinstall can reuse a valid `dns.env` non-interactively.
 
@@ -214,7 +227,13 @@ Uninstall preserves the verified `/opt/5gpn/bin/gum` binary for reuse by other h
 
 - `5gpn-dns` **在 CI 构建**（网关上不放 Go 工具链）：`release.yml` 先 `npm run build` 前端 → `go build`（`-X main.version` 打版本号）→ 发布 `5gpn-dns-linux-amd64` + `5gpn-web-<ver>.tar.gz`（前端 SPA）+ **`5gpn-installer.tar.gz`（install.sh + 配置模板 + 脚本，`DNS_VERSION_DEFAULT` 已 stamp 到本 tag）** + `checksums.txt`。
 - CI（`ci.yml`）：`go vet` + `go test -race`、前端 build+typecheck、shell policy 测试（含 mihomo 配置模板的 grep 断言）。
-- **发布**：release 流程把唯一的 `DNS_VERSION_DEFAULT` 固定为当前 tag。quick installer 先解析 latest tag，只接受该 tag 的 bundle，强制核对 `checksums.txt`；bundle 缺失时也只 checkout 同一 tag，绝不回退 `main`。5gpn-dns、Web、mihomo 与 zashboard 均在 staging 校验摘要后发布。
+- **Release channels**: official `X.Y.Z` tags must be reachable from `main` and
+  publish normal latest-eligible releases. Beta `X.Y.Z-beta.N` tags must be
+  reachable from `beta` and publish prereleases with `make_latest=false`. Both
+  channels run the shared checks gate, stamp `DNS_VERSION_DEFAULT` to the exact
+  tag, and publish the matching installer, daemon, Web, checksum, and optional
+  tagged-tree first-party assets. The quick installer verifies the bundle from
+  that exact tag and never falls back to branch content or the other channel.
 
 ---
 

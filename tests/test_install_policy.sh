@@ -9,6 +9,7 @@ rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 INSTALL="$ROOT/install.sh"
 CERT_RENEW="$ROOT/scripts/cert-renew.sh"
 BOT_OPS="$ROOT/cmd/5gpn-dns/bot_ops.go"
+RELEASE="$ROOT/.github/workflows/release.yml"
 
 # --- Production renewal is unattended through one mode-aware, cert-name-scoped
 # helper. Cloudflare never needs a :80 handoff; due HTTP-01 renewals coordinate
@@ -225,6 +226,23 @@ grep -Eq '^[[:space:]]*stage_artifacts$' "$INSTALL" || fail "full_install does n
 grep -Eq '^[[:space:]]*capture_install_rollback$' "$INSTALL" || fail "full_install does not capture rollback state"
 grep -Eq '^remove_legacy_|^clean_previous_install\(\)' "$INSTALL" \
     && fail "installer still contains an old-release teardown helper"
+
+# Official and beta publications share one gate but have disjoint tag,
+# provenance, and GitHub release metadata boundaries.
+grep -Fq 'required_branch=main' "$RELEASE" \
+    || fail "official release tags are not tied to main"
+grep -Fq 'required_branch=beta' "$RELEASE" \
+    || fail "beta release tags are not tied to beta"
+grep -Fq 'git merge-base --is-ancestor' "$RELEASE" \
+    || fail "release workflow does not verify tag branch provenance"
+grep -Fq 'prerelease: ${{ needs.classify.outputs.prerelease }}' "$RELEASE" \
+    || fail "release workflow does not publish beta as a prerelease"
+grep -Fq 'make_latest: ${{ needs.classify.outputs.make_latest }}' "$RELEASE" \
+    || fail "release workflow does not protect the official latest pointer"
+grep -Fq 'uses: ./.github/workflows/checks.yml' "$RELEASE" \
+    || fail "release channels do not share the repository checks gate"
+grep -Fq 'DNS_VERSION_DEFAULT=\"${GITHUB_REF_NAME}\"' "$RELEASE" \
+    || fail "release installer bundle is not stamped to the exact tag"
 
 # --- Certs are DELIBERATELY preserved (re-issuing an LE cert is rate-limited) ---
 un_fn="$(sed -n '/^uninstall()/,/^}/p' "$INSTALL")"
