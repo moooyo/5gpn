@@ -66,6 +66,13 @@ export const ingressModules: T.IngressModulesView = {
   ],
 }
 
+export const mitmSettings: T.MITMSettingsView = {
+  revision: '1000000000000000000000000000000000000000000000000000000000000001',
+  enabled: false,
+  http2: true,
+  quic_fallback_protection: true,
+}
+
 export const wlocIntercept: T.WLOCInterceptView = {
   revision: '1000000000000000000000000000000000000000000000000000000000000001',
   enabled: false,
@@ -87,7 +94,8 @@ export const interceptModules: T.InterceptModulesView = {
       name: 'Apple WLOC response rewriting',
       description: 'Built-in bounded protobuf transformation for Apple location responses.',
       enabled: false,
-      ready: true,
+      ready: false,
+      reason: 'mitm-disabled',
       compatibility: 'full',
       partial_allowed: false,
       hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'],
@@ -100,7 +108,8 @@ export const interceptModules: T.InterceptModulesView = {
       name: 'Synthetic response cleaner',
       description: 'A local test snapshot using the Loon response-script shape.',
       enabled: false,
-      ready: true,
+      ready: false,
+      reason: 'mitm-disabled',
       compatibility: 'full',
       partial_allowed: false,
       hosts: ['api.example.test'],

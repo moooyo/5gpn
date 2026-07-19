@@ -889,6 +889,9 @@ unit_file_owned_by_5gpn() {
             grep -Fqx 'ExecStart=/opt/5gpn/scripts/intercept-cert-renew.sh' "$file" ;;
         5gpn-intercept-cert.path)
             grep -Fqx 'PathChanged=/etc/5gpn/intercept/config.json' "$file" ;;
+        5gpn-intercept-runtime.path)
+            grep -Fqx 'PathChanged=/etc/5gpn/intercept/config.json' "$file" \
+                && grep -Fqx 'Unit=5gpn-intercept.service' "$file" ;;
         5gpn-journal@.service)
             grep -Fqx 'ExecStart=/opt/5gpn/scripts/export-journal.sh %i' "$file" \
                 && journal_export_instances_clear ;;
@@ -1333,7 +1336,7 @@ capture_install_rollback() {
     cp -a -- "$INTERCEPT_STATE_DIR" "$ROLLBACK_DIR/intercept-state"
     local unit
     install -d -m 0700 "$ROLLBACK_DIR/units"
-    for unit in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
+    for unit in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
         if [[ -f "/etc/systemd/system/$unit" && ! -L "/etc/systemd/system/$unit" ]]; then
             cp -p -- "/etc/systemd/system/$unit" "$ROLLBACK_DIR/units/$unit"
         else
@@ -1358,6 +1361,12 @@ capture_install_rollback() {
     fi
     if systemctl is-active --quiet 5gpn-intercept-cert.path 2>/dev/null; then
         : > "$ROLLBACK_DIR/units/5gpn-intercept-cert.path.active"
+    fi
+    if systemctl is-enabled --quiet 5gpn-intercept-runtime.path 2>/dev/null; then
+        : > "$ROLLBACK_DIR/units/5gpn-intercept-runtime.path.enabled"
+    fi
+    if systemctl is-active --quiet 5gpn-intercept-runtime.path 2>/dev/null; then
+        : > "$ROLLBACK_DIR/units/5gpn-intercept-runtime.path.active"
     fi
     if systemctl is-active --quiet 5gpn-certbot-renew.timer 2>/dev/null; then
         : > "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.active"
@@ -1439,7 +1448,7 @@ rollback_install() {
         sed -i "\|^${SWAP_FILE} none swap sw 0 0 ${SWAP_FSTAB_MARKER}$|d" /etc/fstab 2>/dev/null || true
         SWAP_CREATED_THIS_RUN=0
     fi
-    systemctl stop 5gpn-dns.service mihomo.service 5gpn-intercept.service 5gpn-intercept-cert.path 2>/dev/null || true
+    systemctl stop 5gpn-dns.service mihomo.service 5gpn-intercept.service 5gpn-intercept-cert.path 5gpn-intercept-runtime.path 2>/dev/null || true
     if verify_ownership_marker "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"; then
         remove_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"
     fi
@@ -1467,7 +1476,7 @@ rollback_install() {
     [[ "$rollback_state_failed" != 0 ]] || cp -a -- "$ROLLBACK_DIR/intercept-state" "$INTERCEPT_STATE_DIR" \
         || rollback_state_failed=1
     local unit
-    for unit in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
+    for unit in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
         if [[ -f "$ROLLBACK_DIR/units/$unit" ]]; then
             cp -p -- "$ROLLBACK_DIR/units/$unit" "/etc/systemd/system/$unit"
         elif [[ -f "$ROLLBACK_DIR/units/$unit.absent" ]] \
@@ -1597,6 +1606,16 @@ rollback_install() {
     else
         systemctl stop 5gpn-intercept-cert.path 2>/dev/null || true
     fi
+    if [[ -f "$ROLLBACK_DIR/units/5gpn-intercept-runtime.path.enabled" ]]; then
+        systemctl enable 5gpn-intercept-runtime.path 2>/dev/null || true
+    else
+        systemctl disable 5gpn-intercept-runtime.path 2>/dev/null || true
+    fi
+    if [[ -f "$ROLLBACK_DIR/units/5gpn-intercept-runtime.path.active" ]]; then
+        systemctl start 5gpn-intercept-runtime.path 2>/dev/null || true
+    else
+        systemctl stop 5gpn-intercept-runtime.path 2>/dev/null || true
+    fi
     if [[ "$rollback_cert_failed" == 0 ]]; then
         if [[ -f "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.enabled" ]]; then
             systemctl enable 5gpn-certbot-renew.timer 2>/dev/null || true
@@ -1717,7 +1736,7 @@ ensure_intercept_config() {
     candidate="$(mktemp "$INTERCEPT_DIR/.config.json.XXXXXX")" || return 1
     cat > "$candidate" <<EOF
 {
-  "version": 1,
+  "version": 2,
   "listen": "127.0.0.1:18080",
   "username": "${inbound_user}",
   "password": "${inbound_pass}",
@@ -1727,6 +1746,11 @@ ensure_intercept_config() {
     "address": "127.0.0.1:17890",
     "username": "${upstream_user}",
     "password": "${upstream_pass}"
+  },
+  "mitm": {
+    "enabled": false,
+    "http2": true,
+    "quic_fallback_protection": true
   },
   "wloc": {
     "enabled": false,
@@ -3169,7 +3193,7 @@ reload_rules() {
 }
 
 preflight_unit_ownership() {
-    preflight_owned_units 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path mihomo.service 5gpn-journal@.service \
+    preflight_owned_units 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service \
         5gpn-certbot-renew.service 5gpn-certbot-renew.timer
     journal_export_instances_clear \
         || { err "Refusing conflicting fixed 5gpn journal exporter instance or drop-in."; return 1; }
@@ -3181,7 +3205,7 @@ install_units() {
     # Prefer the repo checkout; fall back to the staged copies under /opt/5gpn
     # (a piped curl|bash install has no checkout after install_files staged them).
     local src u
-    for u in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path mihomo.service 5gpn-journal@.service; do
+    for u in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service; do
         if [[ -f "${SCRIPT_DIR}/etc/systemd/${u}" ]]; then
             src="${SCRIPT_DIR}/etc/systemd/${u}"
         elif [[ -f "${BASE_DIR}/etc/systemd/${u}" ]]; then
@@ -3690,8 +3714,19 @@ wait_service_ready() {
     local svc="$1" i
     for i in {1..20}; do
         case "$svc" in
-            5gpn-intercept) "$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --healthcheck \
-                && { ok "5gpn-intercept readiness passed (authenticated loopback SOCKS5 TCP/UDP)."; return 0; } ;;
+            5gpn-intercept)
+                if "$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --check-enabled >/dev/null 2>&1; then
+                    "$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --healthcheck \
+                        && { ok "5gpn-intercept readiness passed (authenticated loopback SOCKS5 TCP/UDP)."; return 0; }
+                elif [[ "$?" == 3 ]]; then
+                    systemctl stop 5gpn-intercept.service 2>/dev/null || true
+                    ok "5gpn-intercept remains stopped because MITM is disabled."
+                    return 0
+                else
+                    err "5gpn-intercept configuration could not be read while checking the MITM master setting."
+                    return 1
+                fi
+                ;;
             mihomo)    probe_mihomo_ready && { ok "mihomo readiness passed (controller + local TCP/UDP listeners)."; return 0; } ;;
             5gpn-dns)  probe_dns_ready && { ok "5gpn-dns readiness passed (API + DoT TLS handshake)."; return 0; } ;;
         esac
@@ -3711,6 +3746,8 @@ start_services() {
     systemctl daemon-reload || { err "systemctl daemon-reload failed."; return 1; }
     systemctl enable --now 5gpn-intercept-cert.path >/dev/null 2>&1 \
         || { err "could not enable the interception certificate watcher."; return 1; }
+    systemctl enable --now 5gpn-intercept-runtime.path >/dev/null 2>&1 \
+        || { err "could not enable the MITM runtime watcher."; return 1; }
     # mihomo is the data plane + panel SNI split; it was installed by
     # install_units but is enabled/started HERE (nothing started it before).
     # Start mihomo first so DNS cannot advertise gateway answers before the
@@ -3848,6 +3885,14 @@ show_status() {
         # Telegram bot + iOS profile path are in-process parts of 5gpn-dns now;
         # mihomo is the forwarding data plane; interception is a separate sidecar.
         for svc in "5gpn-dns" 5gpn-intercept mihomo; do
+            if [[ "$svc" == 5gpn-intercept ]]; then
+                if "$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --check-enabled >/dev/null 2>&1; then
+                    :
+                elif [[ "$?" == 3 ]]; then
+                    echo "  ⏸️  ${svc}  (disabled by MITM setting)"
+                    continue
+                fi
+            fi
             s="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
             echo "  $([[ "$s" == active ]] && echo '✅' || echo '❌') ${svc}  (${s})"
         done
@@ -4228,7 +4273,7 @@ uninstall() {
     warn "Uninstalling 5gpn: stopping services and reverting host changes."
 
     local unit
-    for unit in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.timer \
+    for unit in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.timer \
                 5gpn-certbot-renew.service; do
         remove_owned_unit "$unit"
     done

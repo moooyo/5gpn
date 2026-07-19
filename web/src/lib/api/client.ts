@@ -65,6 +65,12 @@ export const api = {
           method: 'PUT',
           body: JSON.stringify({ enabled, revision }),
         }),
+  getMITMSettings: () =>
+    MOCK ? mock.getMITMSettings() : apiFetch<T.MITMSettingsView>('/api/interception/settings'),
+  putMITMSettings: (update: T.MITMSettingsUpdate) =>
+    MOCK
+      ? mock.putMITMSettings(update)
+      : apiFetch<T.MITMSettingsView>('/api/interception/settings', { method: 'PUT', body: JSON.stringify(update) }),
   getWLOCIntercept: () =>
     MOCK ? mock.getWLOCIntercept() : apiFetch<T.WLOCInterceptView>('/api/interception/wloc'),
   putWLOCIntercept: (update: T.WLOCInterceptUpdate) =>

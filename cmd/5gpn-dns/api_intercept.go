@@ -15,13 +15,19 @@ import (
 	"sync"
 )
 
-const interceptConfigVersion = 1
+const interceptConfigVersion = 2
 const maxInterceptConfigBytes = 16 << 20
 
 type interceptProxyConfig struct {
 	Address  string `json:"address"`
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+type interceptMITMSettings struct {
+	Enabled                bool `json:"enabled"`
+	HTTP2                  bool `json:"http2"`
+	QUICFallbackProtection bool `json:"quic_fallback_protection"`
 }
 
 type interceptWLOCSettings struct {
@@ -41,6 +47,7 @@ type interceptConfigDocument struct {
 	TLSCert       string                    `json:"tls_cert"`
 	TLSKey        string                    `json:"tls_key"`
 	UpstreamProxy interceptProxyConfig      `json:"upstream_proxy"`
+	MITM          interceptMITMSettings     `json:"mitm"`
 	WLOC          interceptWLOCSettings     `json:"wloc"`
 	Modules       []interceptModuleSnapshot `json:"modules,omitempty"`
 }
@@ -64,6 +71,20 @@ type interceptWLOCUpdate struct {
 	Accuracy     *uint32  `json:"accuracy"`
 	FailClosed   *bool    `json:"fail_closed"`
 	MaxBodyBytes *int64   `json:"max_body_bytes"`
+}
+
+type interceptSettingsView struct {
+	Revision               string `json:"revision"`
+	Enabled                bool   `json:"enabled"`
+	HTTP2                  bool   `json:"http2"`
+	QUICFallbackProtection bool   `json:"quic_fallback_protection"`
+}
+
+type interceptSettingsUpdate struct {
+	Revision               string `json:"revision"`
+	Enabled                *bool  `json:"enabled"`
+	HTTP2                  *bool  `json:"http2"`
+	QUICFallbackProtection *bool  `json:"quic_fallback_protection"`
 }
 
 type InterceptConfigStore struct {
@@ -170,6 +191,62 @@ func interceptView(document interceptConfigDocument, body []byte) interceptWLOCV
 		MaxBodyBytes: document.WLOC.MaxBodyBytes,
 		Hosts:        []string{"gs-loc.apple.com", "gs-loc-cn.apple.com"},
 	}
+}
+
+func interceptSettings(document interceptConfigDocument, body []byte) interceptSettingsView {
+	return interceptSettingsView{
+		Revision:               interceptRevision(body),
+		Enabled:                document.MITM.Enabled,
+		HTTP2:                  document.MITM.HTTP2,
+		QUICFallbackProtection: document.MITM.QUICFallbackProtection,
+	}
+}
+
+func (s *ControlServer) handleInterceptSettingsGet(w http.ResponseWriter, _ *http.Request) {
+	if s.interceptStore == nil {
+		writeErr(w, http.StatusServiceUnavailable, "interception config management unavailable")
+		return
+	}
+	s.interceptStore.mu.Lock()
+	defer s.interceptStore.mu.Unlock()
+	document, body, err := s.interceptStore.Read()
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, interceptSettings(document, body))
+}
+
+func (s *ControlServer) handleInterceptSettingsPut(w http.ResponseWriter, r *http.Request) {
+	if s.interceptStore == nil || s.interceptModules == nil {
+		writeErr(w, http.StatusServiceUnavailable, "interception config management unavailable")
+		return
+	}
+	var update interceptSettingsUpdate
+	if !decodeJSONBody(w, r, &update) {
+		return
+	}
+	if !validMihomoConfigRevision(update.Revision) || update.Enabled == nil || update.HTTP2 == nil || update.QUICFallbackProtection == nil {
+		writeErr(w, http.StatusBadRequest, "revision, enabled, http2, and quic_fallback_protection are required")
+		return
+	}
+	next := interceptMITMSettings{
+		Enabled:                *update.Enabled,
+		HTTP2:                  *update.HTTP2,
+		QUICFallbackProtection: *update.QUICFallbackProtection,
+	}
+	if _, err := s.interceptModules.UpdateSettings(r.Context(), update.Revision, next); err != nil {
+		writeInterceptModuleError(w, err)
+		return
+	}
+	s.interceptStore.mu.Lock()
+	document, body, err := s.interceptStore.Read()
+	s.interceptStore.mu.Unlock()
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, interceptSettings(document, body))
 }
 
 func (s *ControlServer) handleInterceptWLOCGet(w http.ResponseWriter, _ *http.Request) {

@@ -1,0 +1,10 @@
+# 5gpn-unit-id: 5gpn-intercept-runtime.path:v1
+[Unit]
+Description=Start the 5gpn MITM sidecar when its runtime setting changes
+
+[Path]
+PathChanged=/etc/5gpn/intercept/config.json
+Unit=5gpn-intercept.service
+
+[Install]
+WantedBy=multi-user.target

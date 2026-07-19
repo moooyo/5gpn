@@ -467,6 +467,9 @@ func normalizeInterceptHostPattern(raw string) (string, error) {
 }
 
 func activeInterceptHosts(document interceptConfigDocument) []string {
+	if !document.MITM.Enabled {
+		return nil
+	}
 	hosts := make([]string, 0, len(builtInWLOCHosts)+16)
 	if document.WLOC.Enabled {
 		hosts = append(hosts, builtInWLOCHosts...)

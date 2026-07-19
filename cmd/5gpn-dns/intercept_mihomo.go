@@ -25,6 +25,9 @@ type interceptRoutingAnalysis struct {
 }
 
 func interceptMihomoRules(document interceptConfigDocument) []string {
+	if !document.MITM.Enabled {
+		return nil
+	}
 	rules := make([]string, 0, len(activeInterceptHosts(document))*2)
 	appendRule := func(host, port string) {
 		kind := "DOMAIN"

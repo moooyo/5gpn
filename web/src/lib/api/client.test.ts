@@ -151,6 +151,25 @@ describe('api client — WLOC interception', () => {
   })
 })
 
+describe('api client — MITM runtime settings', () => {
+  it('gets and updates the master, HTTP/2, and QUIC fallback settings', async () => {
+    vi.stubEnv('VITE_API_MOCK', '0')
+    vi.resetModules()
+    const view = { revision: 'r1', enabled: false, http2: true, quic_fallback_protection: true }
+    const update = { ...view, enabled: true, http2: false }
+    const f = vi.fn().mockResolvedValueOnce(jsonResp(200, view)).mockResolvedValueOnce(jsonResp(200, update))
+    vi.stubGlobal('fetch', f)
+    const { api } = await import('./client')
+
+    await expect(api.getMITMSettings()).resolves.toEqual(view)
+    await expect(api.putMITMSettings(update)).resolves.toEqual(update)
+    expect(f.mock.calls[0][0]).toBe('/api/interception/settings')
+    expect(f.mock.calls[1][0]).toBe('/api/interception/settings')
+    expect(f.mock.calls[1][1].method).toBe('PUT')
+    expect(JSON.parse(f.mock.calls[1][1].body as string)).toEqual(update)
+  })
+})
+
 describe('api client — interception modules', () => {
   it('maps list, snapshot, import, update, and delete to the authenticated module API', async () => {
     vi.stubEnv('VITE_API_MOCK', '0')

@@ -101,6 +101,10 @@ func (m *InterceptModuleManager) PrepareRuntime() error {
 	if err != nil {
 		return err
 	}
+	if !document.MITM.Enabled {
+		m.publishHosts(nil)
+		return nil
+	}
 	if m.mihomo == nil || m.controller == nil {
 		if len(activeInterceptHosts(document)) > 0 {
 			return errors.New("enabled interception modules cannot be reconciled without mihomo management")
@@ -139,6 +143,10 @@ func (m *InterceptModuleManager) ReconcileMihomoText(text string) error {
 	if err != nil {
 		m.publishHosts(nil)
 		return err
+	}
+	if !document.MITM.Enabled {
+		m.publishHosts(nil)
+		return nil
 	}
 	analysis := analyzeInterceptRouting(text, interceptMihomoRules(document))
 	if !analysis.Manageable || !interceptCredentialsMatch(text, document) {
@@ -295,6 +303,9 @@ func interceptModuleIssues(module interceptModuleSnapshot) []interceptCompatibil
 }
 
 func (m *InterceptModuleManager) routingReadyLocked(document interceptConfigDocument) (bool, string) {
+	if !document.MITM.Enabled {
+		return false, "mitm-disabled"
+	}
 	if m.mihomo == nil || m.controller == nil {
 		return false, "mihomo-management-unavailable"
 	}
@@ -437,7 +448,7 @@ func (m *InterceptModuleManager) Update(ctx context.Context, id string, update i
 			if update.Enabled == nil {
 				return false, errors.New("enabled is required for the built-in WLOC module")
 			}
-			changed := document.WLOC.Enabled != *update.Enabled
+			changed := document.MITM.Enabled && document.WLOC.Enabled != *update.Enabled
 			document.WLOC.Enabled = *update.Enabled
 			return changed, nil
 		}
@@ -457,7 +468,7 @@ func (m *InterceptModuleManager) Update(ctx context.Context, id string, update i
 				if *update.Enabled && len(module.Unsupported) > 0 && !module.PartialAllowed {
 					return false, errors.New("this module is only partially compatible and has not been acknowledged after review")
 				}
-				routingChanged = module.Enabled != *update.Enabled
+				routingChanged = document.MITM.Enabled && module.Enabled != *update.Enabled
 				module.Enabled = *update.Enabled
 			}
 			if update.Argument != nil {
@@ -502,9 +513,17 @@ func (m *InterceptModuleManager) UpdateWLOC(ctx context.Context, revision string
 		return interceptModulesView{}, err
 	}
 	return m.mutate(ctx, revision, func(document *interceptConfigDocument) (bool, error) {
-		changed := document.WLOC.Enabled != settings.Enabled
+		changed := document.MITM.Enabled && document.WLOC.Enabled != settings.Enabled
 		document.WLOC = settings
 		return changed, nil
+	})
+}
+
+func (m *InterceptModuleManager) UpdateSettings(ctx context.Context, revision string, settings interceptMITMSettings) (interceptModulesView, error) {
+	return m.mutate(ctx, revision, func(document *interceptConfigDocument) (bool, error) {
+		hadActiveHosts := len(activeInterceptHosts(*document)) > 0
+		document.MITM = settings
+		return hadActiveHosts != (len(activeInterceptHosts(*document)) > 0), nil
 	})
 }
 
@@ -743,6 +762,10 @@ func marshalInterceptDocument(document interceptConfigDocument) ([]byte, error) 
 }
 
 func modulesViewFromDocument(document interceptConfigDocument, body []byte, ready bool, reason string) interceptModulesView {
+	if !document.MITM.Enabled {
+		ready = false
+		reason = "mitm-disabled"
+	}
 	view := interceptModulesView{
 		Revision:    interceptRevision(body),
 		CatalogURL:  defaultModuleReferer,

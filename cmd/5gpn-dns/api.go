@@ -371,6 +371,8 @@ func (s *ControlServer) apiMux() http.Handler {
 	mux.HandleFunc("POST /api/mihomo/config/reset", s.handleMihomoConfigReset)
 	mux.HandleFunc("GET /api/mihomo/ingress-modules", s.handleMihomoIngressModulesGet)
 	mux.HandleFunc("PUT /api/mihomo/ingress-modules/{id}", s.handleMihomoIngressModulePut)
+	mux.HandleFunc("GET /api/interception/settings", s.handleInterceptSettingsGet)
+	mux.HandleFunc("PUT /api/interception/settings", s.handleInterceptSettingsPut)
 	mux.HandleFunc("GET /api/interception/wloc", s.handleInterceptWLOCGet)
 	mux.HandleFunc("PUT /api/interception/wloc", s.handleInterceptWLOCPut)
 	mux.HandleFunc("GET /api/interception/modules", s.handleInterceptModulesGet)

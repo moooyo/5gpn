@@ -12,6 +12,9 @@ test('settings page renders all config cards with zero CSP violations', async ({
   await expect(main.getByText('DoT 服务')).toBeVisible()
   await expect(main.getByText('控制台', { exact: true })).toBeVisible()
   await expect(main.getByText('127.0.0.1:443')).toBeVisible()
+  await expect(main.getByText('HTTPS 解密（MITM）')).toBeVisible()
+  await expect(main.getByRole('switch', { name: 'MitM over HTTP/2' })).toBeChecked()
+  await expect(main.getByRole('switch', { name: 'QUIC 回退保护' })).toBeChecked()
   await expect(main.getByText('mihomo 功能模块')).toBeVisible()
   await expect(main.getByText(':5060', { exact: true })).toBeVisible()
   await expect(main.getByText('TCP · Host/SNI')).toHaveCount(1)
@@ -33,6 +36,35 @@ test('settings page renders all config cards with zero CSP violations', async ({
   await expect(page.getByTestId('appearance-card')).toBeVisible()
 
   expect(await csp.all()).toEqual([])
+})
+
+test('MITM master remains a draft until explicit confirmation', async ({ page }) => {
+  await setupMockApiWithToken(page)
+  await page.goto('/settings')
+  await page.waitForLoadState('networkidle')
+
+  const card = page.getByTestId('mitm-settings-card')
+  const master = card.getByRole('switch', { name: '启用 MITM' })
+  await expect(master).not.toBeChecked()
+  await master.click()
+  await expect(master).toBeChecked()
+
+  await card.getByTestId('mitm-settings-save').click()
+  const dialog = page.getByRole('dialog', { name: '启用 MITM？' })
+  await expect(dialog).toContainText('启动 sidecar')
+  const requestPromise = page.waitForRequest((request) =>
+    request.url().endsWith('/api/interception/settings') && request.method() === 'PUT',
+  )
+  await dialog.getByRole('button', { name: '保存并应用' }).click()
+
+  const request = await requestPromise
+  expect(request.postDataJSON()).toMatchObject({
+    enabled: true,
+    http2: true,
+    quic_fallback_protection: true,
+  })
+  expect((request.postDataJSON() as { revision?: string }).revision).toMatch(/^[0-9a-f]{64}$/)
+  await expect(page.getByText('MITM 运行配置已应用。')).toBeVisible()
 })
 
 test('saving the ECS card (mock accepts) shows a success toast', async ({ page }) => {

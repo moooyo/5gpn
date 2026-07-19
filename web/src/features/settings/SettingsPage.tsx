@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useStatus } from '../../lib/StatusContext'
 import { api } from '../../lib/api/client'
-import type { ECSView, IngressModulesView, TGBotView, UpstreamsView } from '../../lib/api/types'
-import { AboutStrip, AppearanceCard, ConsoleCard, DotServiceCard, EcsCard, IngressPortsCard, TgbotCard, UpstreamsCard } from './_cards'
+import type { ECSView, IngressModulesView, MITMSettingsView, TGBotView, UpstreamsView } from '../../lib/api/types'
+import { AboutStrip, AppearanceCard, ConsoleCard, DotServiceCard, EcsCard, IngressPortsCard, MITMSettingsCard, TgbotCard, UpstreamsCard } from './_cards'
 
 /** 设置 (Settings) page — live config cards for the DoT service/cert, the
  *  control-plane console, the Telegram bot, upstream DNS groups and ECS,
@@ -17,6 +17,9 @@ export default function SettingsPage() {
   const [ingressModules, setIngressModules] = useState<IngressModulesView | null>(null)
   const [ingressLoadState, setIngressLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
   const ingressLoadSequence = useRef(0)
+  const [mitmSettings, setMITMSettings] = useState<MITMSettingsView | null>(null)
+  const [mitmLoadState, setMITMLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const mitmLoadSequence = useRef(0)
 
   const loadIngressModules = useCallback(async (): Promise<IngressModulesView | null> => {
     const sequence = ++ingressLoadSequence.current
@@ -34,6 +37,22 @@ export default function SettingsPage() {
     }
   }, [])
 
+  const loadMITMSettings = useCallback(async (): Promise<MITMSettingsView | null> => {
+    const sequence = ++mitmLoadSequence.current
+    setMITMLoadState('loading')
+    try {
+      const value = await api.getMITMSettings()
+      if (sequence !== mitmLoadSequence.current) return null
+      setMITMSettings(value)
+      setMITMLoadState('ready')
+      return value
+    } catch {
+      if (sequence !== mitmLoadSequence.current) return null
+      setMITMLoadState('error')
+      return null
+    }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
 
@@ -46,11 +65,13 @@ export default function SettingsPage() {
 
     void load()
     void loadIngressModules()
+    void loadMITMSettings()
     return () => {
       cancelled = true
       ingressLoadSequence.current++
+      mitmLoadSequence.current++
     }
-  }, [loadIngressModules])
+  }, [loadIngressModules, loadMITMSettings])
 
   // Bot lifecycle can move starting → healthy/degraded independently after a
   // save or gateway-network recovery. Poll single-flight and abort on unmount;
@@ -89,6 +110,12 @@ export default function SettingsPage() {
         <DotServiceCard cert={status?.cert} dotDomain={status?.dot_domain} />
         <ConsoleCard />
       </div>
+      <MITMSettingsCard
+        settings={mitmSettings}
+        loadState={mitmLoadState}
+        onReload={loadMITMSettings}
+        onSaved={setMITMSettings}
+      />
       <IngressPortsCard
         modules={ingressModules}
         loadState={ingressLoadState}

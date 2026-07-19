@@ -87,6 +87,24 @@ export async function putIngressModule(id: string, enabled: boolean, revision: s
   return ingressModulesView()
 }
 
+export async function getMITMSettings(): Promise<T.MITMSettingsView> {
+  await delay(100)
+  return { ...fixtures.mitmSettings }
+}
+
+export async function putMITMSettings(update: T.MITMSettingsUpdate): Promise<T.MITMSettingsView> {
+  await delay(150)
+  if (update.revision !== fixtures.mitmSettings.revision) {
+    throw new ApiError(409, 'The MITM configuration changed. Refresh and try again.')
+  }
+  const revision = (BigInt(`0x${fixtures.mitmSettings.revision}`) + 1n).toString(16).padStart(64, '0')
+  Object.assign(fixtures.mitmSettings, update, { revision })
+  fixtures.interceptModules.revision = revision
+  fixtures.wlocIntercept.revision = revision
+  refreshActiveInterceptHosts()
+  return { ...fixtures.mitmSettings }
+}
+
 export async function getWLOCIntercept(): Promise<T.WLOCInterceptView> {
   await delay(100)
   return { ...fixtures.wlocIntercept, hosts: [...fixtures.wlocIntercept.hosts] }
@@ -100,6 +118,7 @@ export async function putWLOCIntercept(update: T.WLOCInterceptUpdate): Promise<T
   const revision = (BigInt(`0x${fixtures.wlocIntercept.revision}`) + 1n).toString(16).padStart(64, '0')
   Object.assign(fixtures.wlocIntercept, update, { revision })
   fixtures.interceptModules.revision = revision
+  fixtures.mitmSettings.revision = revision
   const builtIn = fixtures.interceptModules.modules.find((module) => module.id === 'builtin-wloc')
   if (builtIn) {
     builtIn.enabled = update.enabled
@@ -125,12 +144,25 @@ function advanceInterceptRevision(): void {
   const revision = (BigInt(`0x${fixtures.interceptModules.revision}`) + 1n).toString(16).padStart(64, '0')
   fixtures.interceptModules.revision = revision
   fixtures.wlocIntercept.revision = revision
+  fixtures.mitmSettings.revision = revision
 }
 
 function refreshActiveInterceptHosts(): void {
-  fixtures.interceptModules.active_hosts = Array.from(
-    new Set(fixtures.interceptModules.modules.filter((module) => module.enabled).flatMap((module) => module.hosts)),
-  ).sort()
+  const masterEnabled = fixtures.mitmSettings.enabled
+  fixtures.interceptModules.active_hosts = masterEnabled
+    ? Array.from(
+        new Set(fixtures.interceptModules.modules.filter((module) => module.enabled).flatMap((module) => module.hosts)),
+      ).sort()
+    : []
+  for (const module of fixtures.interceptModules.modules) {
+    if (!masterEnabled) {
+      module.ready = false
+      module.reason = 'mitm-disabled'
+    } else if (module.compatibility !== 'incompatible' && module.compatibility !== 'needs_configuration') {
+      module.ready = true
+      module.reason = undefined
+    }
+  }
 }
 
 export async function getInterceptModules(): Promise<T.InterceptModulesView> {
@@ -186,6 +218,7 @@ export async function importInterceptModule(request: T.InterceptModuleImport): P
     argument: '',
   })
   advanceInterceptRevision()
+  refreshActiveInterceptHosts()
   return interceptModulesView()
 }
 

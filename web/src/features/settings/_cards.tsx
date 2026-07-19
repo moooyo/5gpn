@@ -7,7 +7,7 @@ import { cn } from '../../lib/cn'
 import { THEME_CATALOG, useTheme, type ThemeName } from '../../lib/theme'
 import { api } from '../../lib/api/client'
 import { ApiError } from '../../lib/api/http'
-import type { CertStatus, ECSView, IngressModule, IngressModulesView, TGBotUpdate, TGBotView, UpstreamsView } from '../../lib/api/types'
+import type { CertStatus, ECSView, IngressModule, IngressModulesView, MITMSettingsView, TGBotUpdate, TGBotView, UpstreamsView } from '../../lib/api/types'
 import { UpstreamGroupEditor } from './UpstreamGroupEditor'
 
 function errMessage(err: unknown, fallback: string): string {
@@ -123,7 +123,184 @@ export function ConsoleCard() {
   )
 }
 
-// ---- 3. Ingress ports ----------------------------------------------------
+// ---- 3. MITM runtime ------------------------------------------------------
+
+type MITMDraft = Pick<MITMSettingsView, 'enabled' | 'http2' | 'quic_fallback_protection'>
+
+export function MITMSettingsCard({
+  settings,
+  loadState,
+  onReload,
+  onSaved,
+}: {
+  settings: MITMSettingsView | null
+  loadState: 'loading' | 'ready' | 'error'
+  onReload: () => Promise<MITMSettingsView | null>
+  onSaved: (value: MITMSettingsView) => void
+}) {
+  const { t } = useTranslation()
+  const [draft, setDraft] = useState<MITMDraft | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!settings) return
+    setDraft({
+      enabled: settings.enabled,
+      http2: settings.http2,
+      quic_fallback_protection: settings.quic_fallback_protection,
+    })
+  }, [settings])
+
+  const changed = !!settings && !!draft && (
+    settings.enabled !== draft.enabled ||
+    settings.http2 !== draft.http2 ||
+    settings.quic_fallback_protection !== draft.quic_fallback_protection
+  )
+  const masterChanged = !!settings && !!draft && settings.enabled !== draft.enabled
+
+  async function save() {
+    if (!settings || !draft || !changed || saving) return
+    setSaving(true)
+    setError(null)
+    try {
+      const next = await api.putMITMSettings({ revision: settings.revision, ...draft })
+      onSaved(next)
+      toast.success(t('settings.mitmSaved'))
+    } catch (err) {
+      const conflict = err instanceof ApiError && err.status === 409
+      if (conflict || (err instanceof ApiError && err.status === 502)) await onReload()
+      setError(conflict ? t('settings.mitmConflict') : errMessage(err, t('settings.mitmSaveFailed')))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function requestSave() {
+    if (masterChanged) setConfirmOpen(true)
+    else void save()
+  }
+
+  const ready = !!settings && !!draft && loadState === 'ready'
+  const statusEnabled = draft?.enabled ?? settings?.enabled ?? false
+  const statusPending = !!settings && !!draft && settings.enabled !== draft.enabled
+
+  return (
+    <Card className="p-5 sm:p-6" data-testid="mitm-settings-card">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <div className="text-[15px] font-medium text-text-strong">{t('settings.mitmTitle')}</div>
+          <p className="mt-1 max-w-3xl text-[10.5px] leading-relaxed text-text-faint">{t('settings.mitmHint')}</p>
+        </div>
+        <Badge tone={statusPending ? 'amber' : statusEnabled ? 'green' : 'neutral'}>
+          {statusPending
+            ? statusEnabled
+              ? t('settings.mitmPendingEnable')
+              : t('settings.mitmPendingDisable')
+            : statusEnabled
+              ? t('settings.mitmRunning')
+              : t('settings.mitmStopped')}
+        </Badge>
+      </div>
+
+      {loadState === 'loading' && !settings ? (
+        <div role="status" className="mt-4 rounded-[16px] bg-surface-container-low px-4 py-4 text-[10.5px] text-text-faint">
+          {t('common.loading')}
+        </div>
+      ) : null}
+      {loadState === 'error' ? (
+        <div role="alert" className="mt-4 flex flex-col gap-2 rounded-[16px] bg-[var(--md-sys-color-error-container)] px-4 py-3 text-[10.5px] text-[var(--md-sys-color-on-error-container)] sm:flex-row sm:items-center sm:justify-between">
+          <span>{t('settings.mitmLoadFailed')}</span>
+          <Button type="button" variant="secondary" size="sm" onClick={() => void onReload()}>
+            {t('common.reload')}
+          </Button>
+        </div>
+      ) : null}
+
+      <div className="mt-4 overflow-hidden rounded-[20px] bg-surface-container-low">
+        <div className="flex items-start justify-between gap-4 px-4 py-4 sm:px-5">
+          <div className="min-w-0">
+            <div className="text-[13px] font-semibold text-text-strong">{t('settings.mitmMaster')}</div>
+            <p className="mt-1 text-[10.5px] leading-relaxed text-text-faint">{t('settings.mitmMasterHint')}</p>
+          </div>
+          <Toggle
+            checked={draft?.enabled ?? false}
+            onCheckedChange={(enabled) => {
+              setDraft((current) => current ? { ...current, enabled } : current)
+              setError(null)
+            }}
+            disabled={!ready || saving}
+            aria-label={t('settings.mitmMaster')}
+          />
+        </div>
+
+        <div className="mx-4 border-t border-divider sm:mx-5" />
+
+        <div className="grid grid-cols-1 gap-2 p-2 sm:p-3 lg:grid-cols-2">
+          <div className="flex min-h-[112px] items-start justify-between gap-4 rounded-[16px] bg-card px-4 py-4 shadow-[var(--md-sys-elevation-1)]">
+            <div className="min-w-0">
+              <div className="text-[12.5px] font-semibold text-text-mid">{t('settings.mitmHTTP2')}</div>
+              <p className="mt-1 text-[10.5px] leading-relaxed text-text-faint">{t('settings.mitmHTTP2Hint')}</p>
+            </div>
+            <Toggle
+              checked={draft?.http2 ?? false}
+              onCheckedChange={(http2) => {
+                setDraft((current) => current ? { ...current, http2 } : current)
+                setError(null)
+              }}
+              disabled={!ready || saving}
+              aria-label={t('settings.mitmHTTP2')}
+            />
+          </div>
+
+          <div className="flex min-h-[112px] items-start justify-between gap-4 rounded-[16px] bg-card px-4 py-4 shadow-[var(--md-sys-elevation-1)]">
+            <div className="min-w-0">
+              <div className="text-[12.5px] font-semibold text-text-mid">{t('settings.mitmQUICFallback')}</div>
+              <p className="mt-1 text-[10.5px] leading-relaxed text-text-faint">{t('settings.mitmQUICFallbackHint')}</p>
+            </div>
+            <Toggle
+              checked={draft?.quic_fallback_protection ?? false}
+              onCheckedChange={(quic_fallback_protection) => {
+                setDraft((current) => current ? { ...current, quic_fallback_protection } : current)
+                setError(null)
+              }}
+              disabled={!ready || saving}
+              aria-label={t('settings.mitmQUICFallback')}
+            />
+          </div>
+        </div>
+      </div>
+
+      <p className="mt-3 rounded-[14px] bg-[var(--md-sys-color-warning-container)] px-4 py-3 text-[10.5px] leading-relaxed text-[var(--md-sys-color-on-warning-container)]">
+        {t('settings.mitmSafety')}
+      </p>
+      {error ? (
+        <div role="alert" className="mt-3 rounded-[12px] bg-[var(--md-sys-color-error-container)] px-3 py-2.5 text-[10.5px] leading-relaxed text-[var(--md-sys-color-on-error-container)]" data-testid="mitm-settings-error">
+          {error}
+        </div>
+      ) : null}
+      <div className="mt-3 flex justify-end border-t border-divider pt-3">
+        <Button type="button" size="sm" disabled={!ready || saving || !changed} onClick={requestSave} data-testid="mitm-settings-save">
+          {saving ? t('common.saving') : t('settings.mitmSave')}
+        </Button>
+      </div>
+
+      <ConfirmDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        title={draft?.enabled ? t('settings.mitmEnableConfirmTitle') : t('settings.mitmDisableConfirmTitle')}
+        description={draft?.enabled ? t('settings.mitmEnableConfirmBody') : t('settings.mitmDisableConfirmBody')}
+        confirmLabel={t('settings.mitmSave')}
+        cancelLabel={t('common.cancel')}
+        danger={!draft?.enabled}
+        onConfirm={() => void save()}
+      />
+    </Card>
+  )
+}
+
+// ---- 4. Ingress ports ----------------------------------------------------
 
 function ingressDraft(modules: IngressModule[]): Record<string, boolean> {
   return Object.fromEntries(modules.map((module) => [module.id, module.enabled]))

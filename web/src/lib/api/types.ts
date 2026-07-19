@@ -138,6 +138,20 @@ export interface IngressModulesView {
   modules: IngressModule[]
 }
 
+export interface MITMSettingsView {
+  revision: string
+  enabled: boolean
+  http2: boolean
+  quic_fallback_protection: boolean
+}
+
+export interface MITMSettingsUpdate {
+  revision: string
+  enabled: boolean
+  http2: boolean
+  quic_fallback_protection: boolean
+}
+
 export interface WLOCInterceptView {
   revision: string
   enabled: boolean

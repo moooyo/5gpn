@@ -341,17 +341,22 @@ token into recorded command output, screenshots, or issue logs.
 
 ## Modular HTTP/3 interception
 
-- [ ] `5gpn-intercept.service` runs as `gpn-intercept`, has no capabilities,
-  listens only on `127.0.0.1:18080/tcp`, and passes
+- [ ] On a fresh install the Console MITM master is off,
+  `5gpn-intercept.service` is inactive, and `--check-enabled` exits nonzero.
+  `5gpn-intercept-runtime.path` remains active. Enable the master and verify the
+  service starts as `gpn-intercept`, has no capabilities, listens only on
+  `127.0.0.1:18080/tcp`, and passes
   `/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json --healthcheck`.
   Its private `/var/lib/5gpn-intercept/store.json` survives a sidecar restart,
   while purge removes the independently marked state directory.
 - [ ] `/etc/5gpn/intercept-ca/root.key` is root-only and is inaccessible from
   `5gpn-dns`, mihomo, and `5gpn-intercept`; the runtime leaf is not a CA and
   covers the stable WLOC names plus every enabled synthetic module host.
-- [ ] `5gpn-intercept-cert.path` reacts to an atomic module config replacement,
+- [ ] `5gpn-intercept-cert.path` and `5gpn-intercept-runtime.path` react to an atomic module config replacement,
   the root-owned publisher writes the expected `cert-state` digest, and neither
-  long-running daemon can read the signing key.
+  long-running daemon can read the signing key. Turning the Console master off
+  removes DNS/mihomo interception state and cleanly stops the sidecar; turning
+  it back on starts the sidecar and restores only the armed hosts.
 - [ ] `/ios/ios-intercept-ca.mobileconfig` downloads as a CMS-signed Apple profile.
   On an owned test iPhone, install it and explicitly enable full trust under
   Certificate Trust Settings. Removing this profile does not remove the DoT
@@ -365,14 +370,17 @@ token into recorded command output, screenshots, or issue logs.
   warning/error results, and acknowledge an explicitly reported partial module
   only after inspecting the snapshot. Hard incompatibilities remain impossible
   to enable. Do not crawl or mirror the linked external catalog.
-- [ ] Enable the synthetic module in the Console, then disable/re-enable it from
+- [ ] With the master off, enable the synthetic module in the Console and verify
+  it remains armed but has no DNS overlay or mihomo host rule. Turn the master
+  on, then disable/re-enable the module from
   Telegram. Each surface shows the same revision and state. The complete
   mihomo config passes `mihomo -t`; sorted port-80/443 `AND` rules containing
   `DOMAIN`/`DOMAIN-WILDCARD` matchers sit
   after `IN-NAME,intercept-egress,<terminal-target>` and before `MATCH`, the DNS
   answer changes to the gateway only while enabled, and certificate/mihomo
   failure injection restores the previous state.
-- [ ] Verify plain HTTP, TLS/H1/H2, QUIC v1/v2, and H3 apply the same Loon URL/
+- [ ] With `MitM over HTTP/2` on and QUIC fallback protection off, verify plain
+  HTTP, TLS/H1/H2, QUIC v1/v2, and H3 apply the same Loon URL/
   header rewrites and request/response scripts. String and binary-body scripts
   decode identity, gzip, zlib/raw deflate, and Brotli bodies within their
   expanded-size bounds. Verify scripts can use `$loon`, `$request`, `$response`,
@@ -380,6 +388,11 @@ token into recorded command output, screenshots, or issue logs.
   `$persistentStore`; `$httpClient`, filesystem,
   process, and module-loader access fail closed. Oversized bodies, VM timeout,
   and backtracking-regexp timeout remain bounded.
+- [ ] Turn `MitM over HTTP/2` off and verify new TLS connections negotiate
+  HTTP/1.1 only. Turn QUIC fallback protection on and verify matched IETF QUIC
+  v1/v2 receives no forwarded response while a capable client retries over
+  TCP/HTTPS. Record clients that fail instead of falling back; do not claim
+  legacy GQUIC coverage.
 - [ ] Configure WLOC coordinates on the same Modules page and enable
   `builtin-wloc`.
 - [ ] Exercise WLOC over TCP/H2, QUIC v1/H3, and QUIC v2/H3. In every case the

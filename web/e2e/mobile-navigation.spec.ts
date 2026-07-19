@@ -25,6 +25,14 @@ test('390px settings layout stacks upstream lists and keeps the add dialog in vi
   await setupMockApiWithToken(page)
   await page.goto('/settings')
 
+  const mitm = page.getByTestId('mitm-settings-card')
+  await expect(mitm).toBeVisible()
+  await expect(mitm.getByRole('switch')).toHaveCount(3)
+  const mitmBox = await mitm.boundingBox()
+  expect(mitmBox).not.toBeNull()
+  expect(mitmBox!.x).toBeGreaterThanOrEqual(0)
+  expect(mitmBox!.x + mitmBox!.width).toBeLessThanOrEqual(390)
+
   const card = page.getByTestId('upstreams-card')
   await expect(card).toBeVisible()
   const china = card.getByRole('region', { name: '境内组（china）' })

@@ -25,6 +25,7 @@ func testInterceptDocument(t *testing.T, modules ...interceptModuleSnapshot) (in
 		UpstreamProxy: interceptProxyConfig{
 			Address: "127.0.0.1:17890", Username: "interception-upstream-unavailable", Password: "interception-upstream-unavailable-password",
 		},
+		MITM:    interceptMITMSettings{Enabled: true, HTTP2: true, QUICFallbackProtection: true},
 		WLOC:    interceptWLOCSettings{Accuracy: 25, FailClosed: true, MaxBodyBytes: 8 << 20},
 		Modules: modules,
 	}
@@ -134,6 +135,88 @@ func TestInterceptModuleManagerEnableDisablePublishesOneTransaction(t *testing.T
 	mihomoBody, _ = os.ReadFile(mihomoPath)
 	if strings.Contains(string(mihomoBody), wantRule) {
 		t.Fatal("disabled module retained its mihomo rule")
+	}
+}
+
+func TestInterceptMasterSwitchStopsAndRestoresArmedModules(t *testing.T) {
+	module := testModuleSnapshot(false)
+	manager, controller, handler, interceptPath, mihomoPath := newInterceptManagerFixture(t, module)
+	manager.certWait = func(context.Context, string) error { return nil }
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	view, err = manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	disabledSettings := interceptMITMSettings{HTTP2: false, QUICFallbackProtection: true}
+	view, err = manager.UpdateSettings(context.Background(), view.Revision, disabledSettings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Modules[1].Enabled != true || view.Modules[1].Ready || view.Modules[1].Reason != "mitm-disabled" || len(view.ActiveHosts) != 0 {
+		t.Fatalf("disabled master view = %+v", view)
+	}
+	if got := handler.decideName("api.example.com"); got.Action == actionGateway {
+		t.Fatalf("disabled master retained DNS steering: %+v", got)
+	}
+	mihomoBody, _ := os.ReadFile(mihomoPath)
+	if strings.Contains(string(mihomoBody), "MODULE-MITM") && strings.Contains(string(mihomoBody), "api.example.com") {
+		t.Fatalf("disabled master retained module routing:\n%s", mihomoBody)
+	}
+	configBody, _ := os.ReadFile(interceptPath)
+	document, err := decodeInterceptConfig(configBody)
+	if err != nil || document.MITM.Enabled || document.MITM.HTTP2 || !document.MITM.QUICFallbackProtection || !document.Modules[0].Enabled {
+		t.Fatalf("disabled master config = %+v err=%v", document, err)
+	}
+
+	enabledSettings := disabledSettings
+	enabledSettings.Enabled = true
+	view, err = manager.UpdateSettings(context.Background(), view.Revision, enabledSettings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.Modules[1].Ready || len(view.ActiveHosts) != 1 || handler.decideName("api.example.com").Action != actionGateway {
+		t.Fatalf("re-enabled master view = %+v", view)
+	}
+	if controller.putCalls != 3 {
+		t.Fatalf("mihomo apply calls = %d, want 3", controller.putCalls)
+	}
+}
+
+func TestInterceptModuleCanBeArmedWhileMasterIsOff(t *testing.T) {
+	module := testModuleSnapshot(false)
+	manager, controller, handler, _, _ := newInterceptManagerFixture(t, module)
+	manager.certWait = func(context.Context, string) error { return nil }
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err = manager.UpdateSettings(context.Background(), view.Revision, interceptMITMSettings{HTTP2: true, QUICFallbackProtection: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	view, err = manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.Modules[1].Enabled || view.Modules[1].Ready || len(view.ActiveHosts) != 0 || controller.putCalls != 0 {
+		t.Fatalf("armed module changed runtime state: view=%+v calls=%d", view, controller.putCalls)
+	}
+	if handler.decideName("api.example.com").Action == actionGateway {
+		t.Fatal("armed module published DNS steering while the master was off")
+	}
+	settings := interceptMITMSettings{Enabled: true, HTTP2: true, QUICFallbackProtection: true}
+	view, err = manager.UpdateSettings(context.Background(), view.Revision, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.Modules[1].Ready || controller.putCalls != 1 || handler.decideName("api.example.com").Action != actionGateway {
+		t.Fatalf("master enable did not activate armed module: view=%+v calls=%d", view, controller.putCalls)
 	}
 }
 

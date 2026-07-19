@@ -107,6 +107,7 @@ function ModuleCard({
   const imported = module.imported_at ? new Intl.DateTimeFormat(i18n.language, { dateStyle: 'medium' }).format(new Date(module.imported_at)) : ''
   const parametersComplete = (module.parameters ?? []).every((parameter) => (parameters[parameter.key] ?? '').trim() !== '')
   const parametersChanged = (module.parameters ?? []).some((parameter) => (parameters[parameter.key] ?? '') !== (parameter.value ?? ''))
+  const canArmWhileRuntimeStopped = module.reason === 'mitm-disabled'
 
   return (
     <Card className="overflow-hidden shadow-none" data-testid={`module-${module.id}`}>
@@ -131,7 +132,7 @@ function ModuleCard({
             <Toggle
               checked={module.enabled}
               onCheckedChange={() => onToggle(module)}
-              disabled={busy || (!module.enabled && (!module.ready || module.compatibility === 'incompatible' || module.compatibility === 'needs_configuration' || (module.compatibility === 'partial' && !module.partial_allowed)))}
+              disabled={busy || (!module.enabled && ((!module.ready && !canArmWhileRuntimeStopped) || module.compatibility === 'incompatible' || module.compatibility === 'needs_configuration' || (module.compatibility === 'partial' && !module.partial_allowed)))}
               aria-label={module.enabled ? t('modules.toggleOff') : t('modules.toggleOn')}
             />
           )}
@@ -178,7 +179,13 @@ function ModuleCard({
             </div>
           ) : null}
           {imported ? <div>{t('modules.importedAt', { date: imported })}</div> : null}
-          {module.reason ? <div className="text-amber-2">{t('modules.routeReason', { reason: module.reason })}</div> : null}
+          {module.reason ? (
+            <div className="text-amber-2">
+              {t('modules.routeReason', {
+                reason: module.reason === 'mitm-disabled' ? t('modules.mitmDisabledReason') : module.reason,
+              })}
+            </div>
+          ) : null}
         </div>
 
         {module.issues?.length ? (

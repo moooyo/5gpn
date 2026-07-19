@@ -259,6 +259,12 @@ export async function setupMockApi(page: Page): Promise<void> {
     hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'],
   }
   let interceptRevision = wlocIntercept.revision
+  let mitmSettings: T.MITMSettingsView = {
+    revision: interceptRevision,
+    enabled: false,
+    http2: true,
+    quic_fallback_protection: true,
+  }
   let interceptModules: T.InterceptModule[] = [
     {
       id: 'builtin-wloc', name: 'Apple WLOC response rewriting', enabled: false, ready: true,
@@ -276,13 +282,18 @@ export async function setupMockApi(page: Page): Promise<void> {
   const currentInterceptModules = (): T.InterceptModulesView => ({
     revision: interceptRevision,
     catalog_url: 'https://hub.kelee.one/',
-    active_hosts: interceptModules.filter((module) => module.enabled).flatMap((module) => module.hosts),
-    modules: interceptModules,
+    active_hosts: mitmSettings.enabled ? interceptModules.filter((module) => module.enabled).flatMap((module) => module.hosts) : [],
+    modules: interceptModules.map((module) => ({
+      ...module,
+      ready: mitmSettings.enabled && module.compatibility !== 'incompatible' && module.compatibility !== 'needs_configuration',
+      reason: mitmSettings.enabled ? module.reason : 'mitm-disabled',
+    })),
   })
 
   const advanceInterceptRevision = (): void => {
     interceptRevision = (BigInt(`0x${interceptRevision}`) + 1n).toString(16).padStart(64, '0')
     wlocIntercept.revision = interceptRevision
+    mitmSettings.revision = interceptRevision
   }
 
   const currentMihomoConfig = (): T.MihomoConfig => ({
@@ -373,6 +384,16 @@ export async function setupMockApi(page: Page): Promise<void> {
       const withoutMarker = mihomoText.replace(`\n${INGRESS_MARKER}`, '')
       replaceMihomoText(ingressEnabled ? `${withoutMarker}\n${INGRESS_MARKER}` : withoutMarker)
       return json(route, ingressModulesFixture(ingressEnabled, revision))
+    }
+    if (path === '/api/interception/settings' && method === 'GET') {
+      return json(route, mitmSettings)
+    }
+    if (path === '/api/interception/settings' && method === 'PUT') {
+      const body = route.request().postDataJSON() as T.MITMSettingsUpdate
+      if (body.revision !== mitmSettings.revision) return json(route, mitmSettings, 409)
+      advanceInterceptRevision()
+      mitmSettings = { ...body, revision: interceptRevision }
+      return json(route, mitmSettings)
     }
     if (path === '/api/interception/wloc' && method === 'GET') {
       return json(route, wlocIntercept)

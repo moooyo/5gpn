@@ -1,12 +1,13 @@
 # 5gpn-unit-id: 5gpn-intercept.service:v1
 [Unit]
-Description=5gpn modular allowlisted TLS and HTTP/3 interception sidecar
+Description=5gpn modular allowlisted MITM sidecar
 After=network-online.target 5gpn-intercept-cert.service
 Wants=network-online.target
 Requires=5gpn-intercept-cert.service
 
 [Service]
 Type=simple
+ExecCondition=/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json --check-enabled
 ExecStart=/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json
 Restart=on-failure
 RestartSec=5

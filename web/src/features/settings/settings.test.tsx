@@ -8,7 +8,7 @@ import { StatusContext, type StatusValue } from '../../lib/StatusContext'
 import { ThemeProvider } from '../../lib/theme'
 import { api } from '../../lib/api/client'
 import { ApiError } from '../../lib/api/http'
-import type { ECSView, IngressModulesView, Status, TGBotView, UpstreamsView } from '../../lib/api/types'
+import type { ECSView, IngressModulesView, MITMSettingsView, Status, TGBotView, UpstreamsView } from '../../lib/api/types'
 import SettingsPage from './SettingsPage'
 import { TgbotCard } from './_cards'
 
@@ -22,6 +22,8 @@ vi.mock('../../lib/api/client', () => ({
     putTgbot: vi.fn(),
     getIngressModules: vi.fn(),
     putIngressModule: vi.fn(),
+    getMITMSettings: vi.fn(),
+    putMITMSettings: vi.fn(),
   },
 }))
 
@@ -33,6 +35,12 @@ const INGRESS: IngressModulesView = {
   modules: [
     { id: 'speedtest-5060', port: 5060, networks: ['tcp', 'udp'], sniffers: ['http', 'tls', 'quic'], enabled: true, manageable: true },
   ],
+}
+const MITM: MITMSettingsView = {
+  revision: 'mitm-r1',
+  enabled: false,
+  http2: true,
+  quic_fallback_protection: true,
 }
 
 function statusValue(overrides: Partial<StatusValue> = {}): StatusValue {
@@ -79,6 +87,8 @@ beforeEach(async () => {
     revision: 'r2',
     modules: [{ ...INGRESS.modules[0], enabled: false }],
   })
+  vi.mocked(api.getMITMSettings).mockReset().mockResolvedValue(MITM)
+  vi.mocked(api.putMITMSettings).mockReset().mockImplementation(async (update) => ({ ...update, revision: 'mitm-r2' }))
 })
 
 afterEach(async () => {
@@ -94,6 +104,7 @@ describe('SettingsPage', () => {
     expect(api.getEcs).toHaveBeenCalled()
     expect(api.getTgbot).toHaveBeenCalled()
     expect(api.getIngressModules).toHaveBeenCalled()
+    expect(api.getMITMSettings).toHaveBeenCalled()
 
     expect(await screen.findByText('223.5.5.5')).toBeInTheDocument()
     expect(screen.getByText('119.29.29.29')).toBeInTheDocument()
@@ -102,6 +113,45 @@ describe('SettingsPage', () => {
     expect(screen.getByText('DoT')).toBeInTheDocument()
     expect(screen.getByDisplayValue('122.96.30.0/24')).toBeInTheDocument()
     expect(screen.getByDisplayValue('123456789')).toBeInTheDocument()
+  })
+
+  it('saves HTTP/2 and QUIC capabilities without changing the MITM master state', async () => {
+    const user = userEvent.setup()
+    renderSettings()
+
+    const http2 = await screen.findByRole('switch', { name: i18n.t('settings.mitmHTTP2') })
+    await waitFor(() => expect(http2).toBeChecked())
+    await user.click(http2)
+    await user.click(screen.getByTestId('mitm-settings-save'))
+
+    await waitFor(() => expect(api.putMITMSettings).toHaveBeenCalledWith({
+      revision: 'mitm-r1',
+      enabled: false,
+      http2: false,
+      quic_fallback_protection: true,
+    }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('confirms the master switch before starting MITM', async () => {
+    const user = userEvent.setup()
+    renderSettings()
+
+    const master = await screen.findByRole('switch', { name: i18n.t('settings.mitmMaster') })
+    await waitFor(() => expect(master).not.toBeDisabled())
+    await user.click(master)
+    await user.click(screen.getByTestId('mitm-settings-save'))
+    expect(api.putMITMSettings).not.toHaveBeenCalled()
+
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(i18n.t('settings.mitmEnableConfirmBody'))).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: i18n.t('settings.mitmSave') }))
+    await waitFor(() => expect(api.putMITMSettings).toHaveBeenCalledWith({
+      revision: 'mitm-r1',
+      enabled: true,
+      http2: true,
+      quic_fallback_protection: true,
+    }))
   })
 
   it('loads the default-enabled ingress module, keeps changes as a draft, then confirms disable', async () => {

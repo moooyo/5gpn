@@ -13,7 +13,9 @@ test('module console imports and atomically toggles a Loon snapshot', async ({ p
 
   await module.getByRole('switch').click()
   await page.getByRole('dialog').getByRole('button', { name: '启用' }).click()
-  await expect(module.getByText('已启用')).toBeVisible()
+  await expect(module.getByRole('switch')).toBeChecked()
+  await expect(module.getByText('需要处理')).toBeVisible()
+  await expect(module).toContainText('请先在设置中启用 MITM 总开关')
 
   await page.getByRole('button', { name: /导入模块/ }).click()
   const dialog = page.getByRole('dialog')

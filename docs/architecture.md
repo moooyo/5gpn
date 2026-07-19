@@ -11,7 +11,7 @@ current behavior.
 
 - `5gpn-dns` is the DNS decision engine and control-plane process.
 - `5gpn-intercept` is an allowlisted, module-driven TLS and HTTP/3
-  transformation sidecar.
+  transformation sidecar that runs only while the MITM master setting is on.
 - mihomo is the application-layer forwarding data plane.
 
 The DNS answer determines whether a client connects directly to an origin or
@@ -31,7 +31,7 @@ client direct          mihomo :80/:443/:5060/:8080/:8443 -- operator-defined app
                               |
                               | enabled module hosts, authenticated SOCKS5 TCP/UDP
                               v
-                       5gpn-intercept -- TLS/H1/H2 and QUIC v1/v2/H3 termination
+                       5gpn-intercept -- optional TLS/H1/H2 and QUIC v1/v2/H3 termination
                               |
                               | authenticated loopback SOCKS5 TCP/UDP
                               v
@@ -52,7 +52,7 @@ architecture.
 | `5gpn-dns` | `127.0.0.1:5354/udp` and `/tcp` | Egress DNS broker used by mihomo after hostname sniffing. |
 | `5gpn-dns` | `127.0.0.1:443/tcp` | Public HTTPS console assets and iOS profile download, plus the bearer-authenticated API. |
 | `5gpn-dns` | `127.0.0.2:443/tcp` | HTTPS zashboard static files and its controller proxy. |
-| `5gpn-intercept` | `127.0.0.1:18080/tcp` | Authenticated SOCKS5 control and plain-HTTP/TLS interception ingress. Each authenticated UDP ASSOCIATE receives a private ephemeral loopback UDP socket. |
+| `5gpn-intercept` | `127.0.0.1:18080/tcp`, only while MITM is enabled | Authenticated SOCKS5 control and plain-HTTP/TLS interception ingress. Each authenticated UDP ASSOCIATE receives a private ephemeral loopback UDP socket. |
 | mihomo | configured local IPv4 addresses on TCP `:80`, `:443`, `:5060`, `:8080`, and `:8443`, plus UDP `:443` and `:5060` | HTTP/TLS/QUIC ingress for traffic steered to the gateway. |
 | mihomo | `127.0.0.1:9090/tcp` | TLS-only external controller. |
 | mihomo | `127.0.0.1:17890/tcp` and UDP associations | Authenticated mixed listener used only for post-transformation egress from `5gpn-intercept`. |
@@ -111,10 +111,13 @@ enabled. Reinstall, configure, daemon startup, and reload preserve the current
 operator-owned YAML and never reconcile or enable a missing module implicitly.
 
 The interception subsystem is a separate catalog from the fixed mihomo ingress
-catalog. The seed always contains an authenticated loopback `MODULE-MITM`
+catalog. Its global master is disabled in a fresh installation. The seed always
+contains an authenticated loopback `MODULE-MITM`
 SOCKS5 node, the matching `intercept-egress` mixed listener, and an `IN-NAME`
 bypass to the terminal operator egress group. No module-host rule is present in
-a fresh seed. Enabling an external module derives exact `DOMAIN` and wildcard
+a fresh seed. Modules may be configured and armed while the master is off, but
+they publish no DNS overlay or mihomo host rule until the master is explicitly
+enabled. An active external module derives exact `DOMAIN` and wildcard
 `DOMAIN-WILDCARD` matchers from its normalized `[MITM]` host list and combines
 each with canonical `DST-PORT,80` and `DST-PORT,443` rules. Plain HTTP, TCP TLS,
 and UDP QUIC on those ports are sent to the sidecar; alternate-port traffic
@@ -123,8 +126,14 @@ port-443-only. A hostname target must match
 the active module set; a pure-IP SOCKS target is accepted only until the TLS or
 QUIC handshake supplies an allowlisted SNI. Unknown SNI fails closed.
 
-The sidecar accepts plain HTTP, terminates TLS with HTTP/1.1 or HTTP/2, and
-terminates QUIC v1/v2 with HTTP/3. HTTPS upstreams are separately certificate-
+The sidecar accepts plain HTTP and terminates TLS. The `http2` setting controls
+both client-side HTTP/2 negotiation and upstream HTTP/2 attempts; disabling it
+leaves HTTP/1.1 only for new TLS connections. With
+`quic_fallback_protection` off, the sidecar terminates QUIC v1/v2 with HTTP/3.
+With it on, authenticated UDP associations discard only IETF QUIC v1/v2 traffic
+already selected by the active module-host rules, allowing a capable client to
+retry over TCP/HTTPS. This does not claim legacy GQUIC support, and a client is
+permitted to fail instead of falling back. HTTPS upstreams are separately certificate-
 verified and every upstream connection returns
 through mihomo's authenticated `intercept-egress` SOCKS5 listener. The HTTP/3
 client starts with QUIC v1 and retries v2 only after an authenticated version-
@@ -334,7 +343,9 @@ reordered, duplicate, non-canonical, or non-module rule targeting the reserved
 action.
 
 Interception modules are managed through the authenticated
-`/api/interception/modules` surface. The Console and Telegram bot call the same
+`/api/interception/modules` surface. The global master, HTTP/2, and QUIC
+fallback settings use authenticated `GET`/`PUT /api/interception/settings` over
+the same complete-document revision. The Console and Telegram bot call the same
 in-process `InterceptModuleManager`; neither has a private toggle path. Import,
 argument update, delete, and enable/disable operations carry the SHA-256
 revision of the complete sidecar document. The WLOC coordinate endpoint is a
@@ -344,7 +355,7 @@ confirmation message before applying an enable or disable. It cannot import,
 inspect source bodies, edit arguments, or acknowledge partial compatibility;
 those higher-context operations remain in the authenticated Console.
 
-An enable/disable transaction holds the sidecar and mihomo store locks in a
+An active-module or master enable/disable transaction holds the sidecar and mihomo store locks in a
 fixed order. It validates the candidate sidecar with the installed
 `5gpn-intercept --check-config`, structurally renders the reserved mihomo rule
 block, validates the complete YAML invariants, runs `mihomo -t`, and preserves
@@ -356,11 +367,15 @@ restores the old sidecar bytes; mihomo failure also restores and reapplies the
 old operator configuration. Disable operations may leave a temporary
 certificate SAN superset, but the runtime allowlist rejects disabled hosts.
 
-`/etc/5gpn/intercept/config.json` preserves installer-owned SOCKS credentials,
+`/etc/5gpn/intercept/config.json` version 2 preserves installer-owned SOCKS credentials,
 loopback addresses, and certificate paths across every API write. It also
-stores the built-in WLOC settings and immutable external module/source/script
+stores the MITM master and protocol settings, built-in WLOC settings, and immutable external module/source/script
 snapshots. The sidecar reloads only a fully valid document by mtime and retains
-the last valid snapshot after an invalid external replacement.
+the last valid snapshot after an invalid external replacement. A running
+sidecar exits cleanly when the master turns off. The continuously enabled
+`5gpn-intercept-runtime.path` starts the conditioned sidecar when an atomic
+configuration replacement turns the master on; `ExecCondition=--check-enabled`
+keeps it inactive while the master is off.
 
 New seeds use mihomo's native TLS controller only:
 
@@ -508,7 +523,8 @@ Specialized live state remains in purpose-specific, atomically written files:
 - `intercept/config.json` is the sidecar runtime document. Its SOCKS credentials
   and fixed paths are installer-owned; module imports store bounded immutable
   source and script snapshots, normalized hosts/actions, compatibility review,
-  and enabled state. The built-in WLOC parameters live in the same document;
+  and enabled state. The global MITM master, HTTP/2 negotiation, QUIC fallback
+  protection, and built-in WLOC parameters live in the same document;
 - `/var/lib/5gpn-intercept/store.json` is the size-bounded, sidecar-owned
   persistence backend for compatible `$persistentStore` calls.
   Scripts cannot choose its path. Normal uninstall preserves its independently
@@ -567,7 +583,9 @@ root is never rotated implicitly and the sidecar loads a new leaf on the next
 handshake without a restart.
 `5gpn-intercept.service` also requires and orders itself after the idempotent
 certificate oneshot, so a module document changed while the gateway was off
-cannot start the sidecar with a stale SAN set.
+cannot start the sidecar with a stale SAN set. Its separate runtime path unit
+reacts to the same atomic document replacement, while the service condition
+prevents a disabled MITM runtime from remaining started.
 
 The root is distributed in a separate, removable, CMS-signed
 `/ios/ios-intercept-ca.mobileconfig`. A manually downloaded profile still
@@ -779,6 +797,12 @@ only a local draft until the operator reviews a capability and exposure warning
 and explicitly confirms the apply. The UI must distinguish a bound UDP socket
 from supported raw UDP forwarding, show revision/custom-config conflicts, and
 state that external firewall policy remains the operator's responsibility.
+
+Settings also owns the MITM master, HTTP/2, and QUIC fallback controls. They are
+edited as one revision-protected draft with explicit confirmation when the
+master changes. The page must state that the master starts or stops the sidecar,
+that armed modules remain stored while it is off, and that QUIC fallback is
+limited to already matched IETF QUIC v1/v2 traffic.
 
 The dedicated `/modules` route owns interception modules. It shows immutable
 source/script digests, normalized MITM hosts, supported action counts,

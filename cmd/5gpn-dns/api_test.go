@@ -245,6 +245,8 @@ func TestAPIRoutes_RequireAuth(t *testing.T) {
 		{http.MethodPut, "/api/tgbot"},
 		{http.MethodGet, "/api/mihomo/ingress-modules"},
 		{http.MethodPut, "/api/mihomo/ingress-modules/speedtest-5060"},
+		{http.MethodGet, "/api/interception/settings"},
+		{http.MethodPut, "/api/interception/settings"},
 		{http.MethodGet, "/api/interception/wloc"},
 		{http.MethodPut, "/api/interception/wloc"},
 		{http.MethodGet, "/api/interception/modules"},
