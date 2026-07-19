@@ -309,6 +309,7 @@ rules:
   - IP-CIDR,100.64.0.0/10,REJECT,no-resolve
   - IP-CIDR,169.254.0.0/16,REJECT,no-resolve
   - IN-NAME,intercept-egress,Proxies
+  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
   - MATCH,Proxies
 `
 

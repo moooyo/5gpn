@@ -70,6 +70,17 @@ check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(NETWORK,UDP\)\),REJECT' 'conso
 check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(DST-PORT,80\)\),REJECT' 'console HTTP fast-reject rule'
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__,DIRECT'             'public console SNI direct route'
 check "$T" 'AND,\(\(DOMAIN,__ZASH_DOMAIN__\),\(NETWORK,UDP\)\),REJECT' 'zashboard UDP fast-reject rule'
+check "$T" 'AND,\(\(NETWORK,UDP\),\(DST-PORT,443\)\),REJECT' 'HTTP3/QUIC UDP 443 block enabled by default'
+bypass_line="$(grep -nF '  - IN-NAME,intercept-egress,Proxies' "$root/$T" | cut -d: -f1 || true)"
+quic_block_line="$(grep -nF '  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' "$root/$T" | cut -d: -f1 || true)"
+match_line="$(grep -nF '  - MATCH,Proxies' "$root/$T" | cut -d: -f1 || true)"
+if [ -n "$bypass_line" ] && [ -n "$quic_block_line" ] && [ -n "$match_line" ] \
+   && [ "$bypass_line" -lt "$quic_block_line" ] && [ "$quic_block_line" -lt "$match_line" ]; then
+    echo 'ok: QUIC block follows sidecar egress bypass and precedes terminal policy'
+else
+    echo 'FAIL: QUIC block ordering is unsafe'
+    FAIL=1
+fi
 console_direct_line="$(grep -nF '  - DOMAIN,__CONSOLE_DOMAIN__,DIRECT' "$root/$T" | cut -d: -f1 || true)"
 zash_direct_line="$(grep -nF '  - AND,((DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
 panel_order_ok=1

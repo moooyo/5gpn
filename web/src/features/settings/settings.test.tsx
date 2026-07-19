@@ -35,6 +35,7 @@ const INGRESS: IngressModulesView = {
   revision: 'r1',
   modules: [
     { id: 'speedtest-5060', port: 5060, networks: ['tcp', 'udp'], sniffers: ['http', 'tls', 'quic'], enabled: true, manageable: true },
+    { id: 'block-quic-443', port: 443, networks: ['udp'], sniffers: [], enabled: true, manageable: true },
   ],
 }
 const MITM: MITMSettingsView = {
@@ -84,10 +85,10 @@ beforeEach(async () => {
   vi.mocked(api.getTgbot).mockReset().mockResolvedValue(TGBOT)
   vi.mocked(api.putTgbot).mockReset().mockResolvedValue(TGBOT)
   vi.mocked(api.getIngressModules).mockReset().mockResolvedValue(INGRESS)
-  vi.mocked(api.putIngressModule).mockReset().mockResolvedValue({
+  vi.mocked(api.putIngressModule).mockReset().mockImplementation(async (id, enabled) => ({
     revision: 'r2',
-    modules: [{ ...INGRESS.modules[0], enabled: false }],
-  })
+    modules: INGRESS.modules.map((module) => module.id === id ? { ...module, enabled } : module),
+  }))
   vi.mocked(api.getMITMSettings).mockReset().mockResolvedValue(MITM)
   vi.mocked(api.putMITMSettings).mockReset().mockImplementation(async (update) => ({ ...update, revision: 'mitm-r2' }))
   vi.mocked(api.getInterceptModules).mockReset().mockResolvedValue({ revision: 'extensions-r1', catalog_url: '', active_hosts: [], modules: [] })
@@ -177,6 +178,26 @@ describe('SettingsPage', () => {
     await waitFor(() => expect(api.putIngressModule).toHaveBeenCalledWith('speedtest-5060', false, 'r1'))
   })
 
+  it('defaults to blocking HTTP/3 and QUIC, then confirms before allowing UDP 443', async () => {
+    const user = userEvent.setup()
+    renderSettings()
+
+    const card = await screen.findByTestId('ingress-module-block-quic-443')
+    expect(within(card).getByText('阻止 HTTP/3 / QUIC')).toBeInTheDocument()
+    expect(within(card).getByText('UDP · 目标端口 443')).toBeInTheDocument()
+    expect(within(card).getByText('由 mihomo 拒绝')).toBeInTheDocument()
+    const toggle = within(card).getByRole('switch', { name: '切换 阻止 HTTP/3 / QUIC' })
+    expect(toggle).toBeChecked()
+
+    await user.click(toggle)
+    expect(screen.getByRole('switch', { name: '切换 Speedtest 兼容' })).toBeDisabled()
+    await user.click(screen.getByTestId('ingress-ports-save'))
+    const dialog = await screen.findByRole('dialog', { name: '允许 HTTP/3 与 QUIC？' })
+    expect(within(dialog).getByText(i18n.t('settings.quicBlockDisableConfirmBody'))).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: i18n.t('settings.ingressSave') }))
+    await waitFor(() => expect(api.putIngressModule).toHaveBeenCalledWith('block-quic-443', false, 'r1'))
+  })
+
   it('keeps a module unavailable for custom YAML and links to the mihomo editor', async () => {
     vi.mocked(api.getIngressModules).mockResolvedValue({
       revision: 'custom',
@@ -194,7 +215,7 @@ describe('SettingsPage', () => {
     vi.mocked(api.getIngressModules).mockRejectedValueOnce(new ApiError(0, 'offline'))
     renderSettings()
 
-    expect(await screen.findByTestId('ingress-ports-load-error')).toHaveTextContent('无法加载当前入口端口配置')
+    expect(await screen.findByTestId('ingress-ports-load-error')).toHaveTextContent('无法加载当前 mihomo 功能模块配置')
     await user.click(screen.getByRole('button', { name: '重新加载' }))
 
     expect(await screen.findByText('Speedtest 兼容')).toBeInTheDocument()

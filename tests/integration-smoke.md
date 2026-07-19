@@ -349,6 +349,13 @@ token into recorded command output, screenshots, or issue logs.
   `/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json --healthcheck`.
   Its private `/var/lib/5gpn-intercept/store.json` survives a sidecar restart,
   while purge removes the independently marked state directory.
+- [ ] On a fresh or explicitly reset mihomo config, Settings reports
+  `block-quic-443` enabled and the canonical UDP/443 reject appears exactly once
+  after `IN-NAME,intercept-egress,Proxies` and before every `MODULE-MITM` rule.
+  Disable and re-enable it through the authenticated module API; each change
+  must revision-check, pass full `mihomo -t`, hot-apply, and preserve unrelated
+  operator YAML. Confirm that the UDP listener remains bound and that traffic
+  bypassing the gateway is unaffected.
 - [ ] `/etc/5gpn/intercept-ca/root.key` is root-only and is inaccessible from
   `5gpn-dns`, mihomo, and `5gpn-intercept`; the runtime leaf is not a CA and
   covers the stable WLOC names plus every enabled synthetic module host.

@@ -114,7 +114,10 @@ describe('api client — ingress modules', () => {
     vi.resetModules()
     const view = {
       revision: 'r1',
-      modules: [{ id: 'speedtest-5060', port: 5060, networks: ['tcp', 'udp'], sniffers: ['http', 'tls', 'quic'], enabled: false, manageable: true }],
+      modules: [
+        { id: 'speedtest-5060', port: 5060, networks: ['tcp', 'udp'], sniffers: ['http', 'tls', 'quic'], enabled: false, manageable: true },
+        { id: 'block-quic-443', port: 443, networks: ['udp'], sniffers: [], enabled: true, manageable: true },
+      ],
     }
     const f = vi.fn().mockResolvedValueOnce(jsonResp(200, view)).mockResolvedValueOnce(jsonResp(200, view))
     vi.stubGlobal('fetch', f)

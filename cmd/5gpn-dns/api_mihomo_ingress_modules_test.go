@@ -19,6 +19,15 @@ func getIngressModules(t *testing.T, fx *mihomoTestFixture) mihomoIngressModules
 	return decodeJSON[mihomoIngressModulesResponse](t, rec)
 }
 
+func requireIngressModule(t *testing.T, response mihomoIngressModulesResponse, id string) mihomoIngressModuleView {
+	t.Helper()
+	module := ingressModuleViewByID(response.Modules, id)
+	if module == nil {
+		t.Fatalf("module %q missing from catalog: %+v", id, response.Modules)
+	}
+	return *module
+}
+
 func TestMihomoIngressModules_EnableDisableRoundTrip(t *testing.T) {
 	fx := newMihomoConfigTestFixture(t)
 	operatorText := "# operator-owned comment\ncustom-extension:\n  untouched: true\n" + fx.golden
@@ -27,7 +36,7 @@ func TestMihomoIngressModules_EnableDisableRoundTrip(t *testing.T) {
 	}
 
 	before := getIngressModules(t, fx)
-	if before.Revision != mihomoConfigRevision(operatorText) || len(before.Modules) != 1 {
+	if before.Revision != mihomoConfigRevision(operatorText) || len(before.Modules) != 2 {
 		t.Fatalf("unexpected initial catalog: %+v", before)
 	}
 	module := before.Modules[0]
@@ -119,6 +128,68 @@ func TestMihomoIngressModules_EnableDisableRoundTrip(t *testing.T) {
 	}
 	if string(backup) != disabledText {
 		t.Fatal("module enable backup does not contain the exact disabled bytes")
+	}
+}
+
+func TestMihomoIngressModules_BlockQUIC443RoundTrip(t *testing.T) {
+	fx := newMihomoConfigTestFixture(t)
+	before := getIngressModules(t, fx)
+	module := requireIngressModule(t, before, blockQUICModuleID)
+	if !module.Enabled || !module.Manageable || module.Port != 443 || strings.Join(module.Networks, ",") != "udp" || len(module.Sniffers) != 0 {
+		t.Fatalf("initial QUIC block module = %+v", module)
+	}
+
+	disableBody, _ := json.Marshal(map[string]any{"enabled": false, "revision": before.Revision})
+	disabledRec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/ingress-modules/"+blockQUICModuleID, disableBody, fx.token, true)
+	if disabledRec.Code != http.StatusOK {
+		t.Fatalf("disable status=%d body=%s", disabledRec.Code, disabledRec.Body.String())
+	}
+	disabled := decodeJSON[mihomoIngressModulesResponse](t, disabledRec)
+	if module := requireIngressModule(t, disabled, blockQUICModuleID); module.Enabled || !module.Manageable {
+		t.Fatalf("disabled QUIC block module = %+v", module)
+	}
+	disabledText, err := fx.store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(disabledText, blockQUICRuleBase) {
+		t.Fatalf("disabled QUIC block retained its rule:\n%s", disabledText)
+	}
+
+	enableBody, _ := json.Marshal(map[string]any{"enabled": true, "revision": disabled.Revision})
+	enabledRec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/ingress-modules/"+blockQUICModuleID, enableBody, fx.token, true)
+	if enabledRec.Code != http.StatusOK {
+		t.Fatalf("enable status=%d body=%s", enabledRec.Code, enabledRec.Body.String())
+	}
+	enabled := decodeJSON[mihomoIngressModulesResponse](t, enabledRec)
+	if module := requireIngressModule(t, enabled, blockQUICModuleID); !module.Enabled || !module.Manageable {
+		t.Fatalf("enabled QUIC block module = %+v", module)
+	}
+	onDisk, err := fx.store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bypassIndex := strings.Index(onDisk, "IN-NAME,intercept-egress,Proxies")
+	blockIndex := strings.Index(onDisk, blockQUICRuleBase+",REJECT")
+	matchIndex := strings.Index(onDisk, "MATCH,Proxies")
+	if bypassIndex < 0 || blockIndex <= bypassIndex || matchIndex <= blockIndex || strings.Count(onDisk, blockQUICRuleBase) != 1 {
+		t.Fatalf("QUIC block rule ordering is not canonical:\n%s", onDisk)
+	}
+	if fx.tester.calls != 2 || fx.ctl.putCalls != 2 {
+		t.Fatalf("QUIC block validation/apply calls = %d/%d, want 2/2", fx.tester.calls, fx.ctl.putCalls)
+	}
+}
+
+func TestMihomoIngressModules_BlockQUIC443RejectsCustomShape(t *testing.T) {
+	fx := newMihomoConfigTestFixture(t)
+	custom := strings.Replace(fx.golden, blockQUICRuleBase+",REJECT", blockQUICRuleBase+",DIRECT", 1)
+	if err := os.WriteFile(fx.store.Path(), []byte(custom), 0o660); err != nil {
+		t.Fatal(err)
+	}
+	response := getIngressModules(t, fx)
+	module := requireIngressModule(t, response, blockQUICModuleID)
+	if module.Manageable || module.Reason != "partial-or-custom-quic-block" {
+		t.Fatalf("custom QUIC block module = %+v", module)
 	}
 }
 

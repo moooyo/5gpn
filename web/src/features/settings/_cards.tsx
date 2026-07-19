@@ -24,7 +24,7 @@ function parseAdmins(raw: string): number[] {
     .filter((n) => Number.isFinite(n))
 }
 
-// ---- 1. DoT 服务 ------------------------------------------------------------
+// ---- 1. DoT service ---------------------------------------------------------
 
 export function AppearanceCard() {
   const { t } = useTranslation()
@@ -105,7 +105,7 @@ export function DotServiceCard({ cert, dotDomain }: { cert?: CertStatus; dotDoma
   )
 }
 
-// ---- 2. 控制台 --------------------------------------------------------------
+// ---- 2. Console -------------------------------------------------------------
 
 export function ConsoleCard() {
   const { t } = useTranslation()
@@ -318,21 +318,20 @@ export function IngressPortsCard({
 
   const changed =
     modules?.modules.filter((module) => (draft[module.id] ?? module.enabled) !== module.enabled) ?? []
+  const pendingModule = changed.length === 1 ? changed[0] : null
   const enabling = changed.some((module) => draft[module.id])
+  const changingQUICBlock = pendingModule?.id === 'block-quic-443'
 
   async function save() {
     if (!modules || changed.length === 0 || saving) return
     setSaving(true)
     setError(null)
     try {
-      // The catalog currently has one fixed module. If it grows, the API must
-      // gain an atomic batch operation before the UI permits multi-module
-      // drafts; sequential writes would expose a partially applied selection.
+      // Keep exactly one pending module change. Sequential writes would expose
+      // a partially applied selection without an atomic batch API.
       if (changed.length !== 1) throw new Error(t('settings.ingressSaveFailed'))
-      let next = modules
-      for (const module of changed) {
-        next = await api.putIngressModule(module.id, !!draft[module.id], next.revision)
-      }
+      const module = changed[0]
+      const next = await api.putIngressModule(module.id, !!draft[module.id], modules.revision)
       onSaved(next)
       toast.success(t('settings.ingressSaved'))
     } catch (err) {
@@ -371,9 +370,10 @@ export function IngressPortsCard({
         {modules?.modules.map((module) => {
           const enabled = draft[module.id] ?? module.enabled
           const pending = enabled !== module.enabled
-          const manageable = module.manageable && !saving && loadState === 'ready'
+          const manageable = module.manageable && !saving && loadState === 'ready' && (!pendingModule || pendingModule.id === module.id)
+          const blocksQUIC = module.id === 'block-quic-443'
           return (
-            <div key={module.id} className="rounded-[16px] bg-surface-container-low p-4">
+            <div key={module.id} className="rounded-[16px] bg-surface-container-low p-4" data-testid={`ingress-module-${module.id}`}>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
@@ -408,8 +408,9 @@ export function IngressPortsCard({
                   :{module.port}
                 </span>
                 <div className="flex flex-wrap gap-1.5" aria-label={t('settings.ingressProtocols')}>
-                  {module.networks.includes('tcp') ? <Badge tone="blue">{t('settings.ingressTcp')}</Badge> : null}
-                  {module.networks.includes('udp') ? <Badge tone="cyan">{t('settings.ingressUdp')}</Badge> : null}
+                  {blocksQUIC ? <Badge tone="amber">{t('settings.ingressBlocked')}</Badge> : null}
+                  {!blocksQUIC && module.networks.includes('tcp') ? <Badge tone="blue">{t('settings.ingressTcp')}</Badge> : null}
+                  {module.networks.includes('udp') ? <Badge tone="cyan">{blocksQUIC ? t('settings.ingressUdp443') : t('settings.ingressUdp')}</Badge> : null}
                 </div>
               </div>
 
@@ -447,8 +448,12 @@ export function IngressPortsCard({
       <ConfirmDialog
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
-        title={enabling ? t('settings.ingressEnableConfirmTitle') : t('settings.ingressDisableConfirmTitle')}
-        description={enabling ? t('settings.ingressEnableConfirmBody') : t('settings.ingressDisableConfirmBody')}
+        title={changingQUICBlock
+          ? t(enabling ? 'settings.quicBlockEnableConfirmTitle' : 'settings.quicBlockDisableConfirmTitle')
+          : t(enabling ? 'settings.ingressEnableConfirmTitle' : 'settings.ingressDisableConfirmTitle')}
+        description={changingQUICBlock
+          ? t(enabling ? 'settings.quicBlockEnableConfirmBody' : 'settings.quicBlockDisableConfirmBody')
+          : t(enabling ? 'settings.ingressEnableConfirmBody' : 'settings.ingressDisableConfirmBody')}
         confirmLabel={t('settings.ingressSave')}
         cancelLabel={t('common.cancel')}
         onConfirm={() => void save()}
@@ -457,7 +462,7 @@ export function IngressPortsCard({
   )
 }
 
-// ---- 4. Telegram Bot --------------------------------------------------------
+// ---- 5. Telegram bot --------------------------------------------------------
 
 interface TgbotFormValues {
   token: string
@@ -571,7 +576,7 @@ export function TgbotCard({
   )
 }
 
-// ---- 5. 上游 DNS -------------------------------------------------------------
+// ---- 6. Upstream DNS --------------------------------------------------------
 
 export function UpstreamsCard({
   upstreams,
@@ -637,7 +642,7 @@ export function UpstreamsCard({
   )
 }
 
-// ---- 6. ECS -----------------------------------------------------------------
+// ---- 7. ECS -----------------------------------------------------------------
 
 interface EcsFormValues {
   subnet: string
@@ -682,7 +687,7 @@ export function EcsCard({ ecs, onSaved }: { ecs: ECSView | null; onSaved: (v: EC
   )
 }
 
-// ---- 7. About strip ----------------------------------------------------------
+// ---- 8. About strip ---------------------------------------------------------
 
 export function AboutStrip({ version, className }: { version?: string; className?: string }) {
   const { t } = useTranslation()

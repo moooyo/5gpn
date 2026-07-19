@@ -20,6 +20,10 @@ test('settings page renders all config cards with zero CSP violations', async ({
   await expect(main.getByText(':5060', { exact: true })).toBeVisible()
   await expect(main.getByText('TCP · Host/SNI')).toHaveCount(1)
   await expect(main.getByText('UDP · 仅 QUIC')).toHaveCount(1)
+  const quicBlock = page.getByTestId('ingress-module-block-quic-443')
+  await expect(quicBlock.getByText('阻止 HTTP/3 / QUIC')).toBeVisible()
+  await expect(quicBlock.getByText('UDP · 目标端口 443')).toBeVisible()
+  await expect(quicBlock.getByRole('switch', { name: '切换 阻止 HTTP/3 / QUIC' })).toBeChecked()
   await expect(main.getByText('Telegram 机器人')).toBeVisible()
   await expect(main.getByText('上游 DNS')).toBeVisible()
   await expect(main.getByText('国内解析 ECS')).toBeVisible()
@@ -135,7 +139,32 @@ test('the default-enabled Speedtest ingress module stays a draft until disable c
   const body = request.postDataJSON() as { enabled?: unknown; revision?: unknown }
   expect(body.enabled).toBe(false)
   expect(body.revision).toMatch(/^[0-9a-f]{64}$/)
-  await expect(page.getByText('已应用入口端口配置。')).toBeVisible()
+  await expect(page.getByText('已应用 mihomo 功能模块配置。')).toBeVisible()
+})
+
+test('the default HTTP3 and QUIC guard confirms before allowing UDP 443', async ({ page }) => {
+  await setupMockApiWithToken(page)
+  await page.goto('/settings')
+  await page.waitForLoadState('networkidle')
+
+  const card = page.getByTestId('ingress-ports-card')
+  const module = page.getByTestId('ingress-module-block-quic-443')
+  const toggle = module.getByRole('switch', { name: '切换 阻止 HTTP/3 / QUIC' })
+  await expect(toggle).toBeChecked()
+  await toggle.click()
+
+  const requestPromise = page.waitForRequest((request) =>
+    request.url().endsWith('/api/mihomo/ingress-modules/block-quic-443') && request.method() === 'PUT',
+  )
+  await card.getByTestId('ingress-ports-save').click()
+  const dialog = page.getByRole('dialog', { name: '允许 HTTP/3 与 QUIC？' })
+  await expect(dialog).toContainText('兼容性异常')
+  await dialog.getByRole('button', { name: '保存并应用' }).click()
+
+  const body = (await requestPromise).postDataJSON() as { enabled?: unknown; revision?: unknown }
+  expect(body.enabled).toBe(false)
+  expect(body.revision).toMatch(/^[0-9a-f]{64}$/)
+  await expect(page.getByText('已应用 mihomo 功能模块配置。')).toBeVisible()
 })
 
 test('WLOC interception requires coordinates and explicit confirmation', async ({ page }) => {

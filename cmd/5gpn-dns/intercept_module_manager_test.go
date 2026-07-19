@@ -117,6 +117,9 @@ func TestInterceptModuleManagerEnableDisablePublishesOneTransaction(t *testing.T
 	if !strings.Contains(string(mihomoBody), wantHTTPRule) {
 		t.Fatalf("mihomo HTTP route missing:\n%s", mihomoBody)
 	}
+	if blockIndex, moduleIndex := strings.Index(string(mihomoBody), blockQUICRuleBase+",REJECT"), strings.Index(string(mihomoBody), wantRule); blockIndex < 0 || moduleIndex <= blockIndex {
+		t.Fatalf("global QUIC block must precede MITM host routes:\n%s", mihomoBody)
+	}
 	configBody, _ := os.ReadFile(interceptPath)
 	var config interceptConfigDocument
 	if err := json.Unmarshal(configBody, &config); err != nil || !config.Modules[0].Enabled {
@@ -137,6 +140,9 @@ func TestInterceptModuleManagerEnableDisablePublishesOneTransaction(t *testing.T
 	mihomoBody, _ = os.ReadFile(mihomoPath)
 	if strings.Contains(string(mihomoBody), wantRule) {
 		t.Fatal("disabled module retained its mihomo rule")
+	}
+	if !strings.Contains(string(mihomoBody), blockQUICRuleBase+",REJECT") {
+		t.Fatal("global QUIC block was removed with the MITM host routes")
 	}
 }
 

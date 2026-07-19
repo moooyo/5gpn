@@ -63,6 +63,14 @@ export const ingressModules: T.IngressModulesView = {
       enabled: true,
       manageable: true,
     },
+    {
+      id: 'block-quic-443',
+      port: 443,
+      networks: ['udp'],
+      sniffers: [],
+      enabled: true,
+      manageable: true,
+    },
   ],
 }
 

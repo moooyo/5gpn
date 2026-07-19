@@ -106,15 +106,20 @@ func analyzeInterceptRouting(text string, expected []string) interceptRoutingAna
 		analysis.Reason = "interception-bypass-missing"
 		return analysis
 	}
+	moduleStart := bypassIndex + 1
+	if moduleStart < matchIndex && rules.Content[moduleStart].Kind == yaml.ScalarNode &&
+		matchesDenyRule(compactMihomoRule(rules.Content[moduleStart].Value), blockQUICRuleBase, false) {
+		moduleStart++
+	}
 	expected = append([]string(nil), expected...)
 	sort.Strings(expected)
 	analysis.Document = document
 	analysis.Rules = rules
-	analysis.InsertAt = bypassIndex + 1
+	analysis.InsertAt = moduleStart
 	analysis.Current = current
 	seenCurrent := make(map[string]struct{}, len(current))
 	for index, rule := range current {
-		if indices[index] != bypassIndex+1+index || !validCanonicalInterceptRule(rule) {
+		if indices[index] != moduleStart+index || !validCanonicalInterceptRule(rule) {
 			analysis.Reason = "interception-rules-out-of-sync"
 			return analysis
 		}
@@ -134,7 +139,7 @@ func analyzeInterceptRouting(text string, expected []string) interceptRoutingAna
 		return analysis
 	}
 	for index := range expected {
-		if current[index] != expected[index] || indices[index] != bypassIndex+1+index {
+		if current[index] != expected[index] || indices[index] != moduleStart+index {
 			analysis.Reason = "interception-rules-out-of-sync"
 			return analysis
 		}

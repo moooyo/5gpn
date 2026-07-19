@@ -183,9 +183,11 @@ dns: {nameserver: ["udp://127.0.0.1:5354"]}
 hosts: {console.example.test: 127.0.0.1, zash.example.test: 127.0.0.2}
 rules: ["DOMAIN,console.example.test,DIRECT", "IP-CIDR,10.0.0.1/32,REJECT", "MATCH,DIRECT"]
 # e2e speedtest-5060 enabled
+# e2e block-quic-443 enabled
 `
 
 const INGRESS_MARKER = '# e2e speedtest-5060 enabled\n'
+const QUIC_BLOCK_MARKER = '# e2e block-quic-443 enabled\n'
 
 function mihomoRevision(text: string): string {
   return createHash('sha256').update(text).digest('hex')
@@ -199,7 +201,7 @@ const MIHOMO_CONFIG_FIXTURE: T.MihomoConfig = {
   controller_authenticated: true,
 }
 
-function ingressModulesFixture(enabled: boolean, revision: string): T.IngressModulesView {
+function ingressModulesFixture(speedtestEnabled: boolean, blockQUICEnabled: boolean, revision: string): T.IngressModulesView {
   return {
     revision,
     modules: [
@@ -208,7 +210,15 @@ function ingressModulesFixture(enabled: boolean, revision: string): T.IngressMod
         port: 5060,
         networks: ['tcp', 'udp'],
         sniffers: ['http', 'tls', 'quic'],
-        enabled,
+        enabled: speedtestEnabled,
+        manageable: true,
+      },
+      {
+        id: 'block-quic-443',
+        port: 443,
+        networks: ['udp'],
+        sniffers: [],
+        enabled: blockQUICEnabled,
         manageable: true,
       },
     ],
@@ -246,6 +256,7 @@ function json(route: Route, body: unknown, status = 200): Promise<void> {
  */
 export async function setupMockApi(page: Page): Promise<void> {
   let ingressEnabled = true
+  let blockQUICEnabled = true
   let mihomoText = MIHOMO_CONFIG_TEXT
   let revision = mihomoRevision(mihomoText)
   let wlocIntercept: T.WLOCInterceptView = {
@@ -360,19 +371,22 @@ export async function setupMockApi(page: Page): Promise<void> {
       if (typeof body.text !== 'string') return json(route, { error: 'text is required' }, 400)
       replaceMihomoText(body.text)
       ingressEnabled = mihomoText.includes(INGRESS_MARKER)
+      blockQUICEnabled = mihomoText.includes(QUIC_BLOCK_MARKER)
       return json(route, currentMihomoConfig())
     }
     if (path === '/api/mihomo/config/reset' && method === 'POST') {
       const body = route.request().postDataJSON() as { revision?: unknown }
       if (body.revision !== revision) return json(route, { error: 'mihomo config revision changed', revision }, 409)
       ingressEnabled = true
+      blockQUICEnabled = true
       replaceMihomoText(MIHOMO_CONFIG_TEXT)
       return json(route, currentMihomoConfig())
     }
     if (path === '/api/mihomo/ingress-modules' && method === 'GET') {
-      return json(route, ingressModulesFixture(ingressEnabled, revision))
+      return json(route, ingressModulesFixture(ingressEnabled, blockQUICEnabled, revision))
     }
-    if (path === '/api/mihomo/ingress-modules/speedtest-5060' && method === 'PUT') {
+    const ingressModuleMatch = path.match(/^\/api\/mihomo\/ingress-modules\/(speedtest-5060|block-quic-443)$/)
+    if (ingressModuleMatch && method === 'PUT') {
       const body = route.request().postDataJSON() as { enabled?: unknown; revision?: unknown }
       if (body.revision !== revision) {
         return json(route, { error: 'ingress module revision changed', revision }, 409)
@@ -380,10 +394,12 @@ export async function setupMockApi(page: Page): Promise<void> {
       if (typeof body.enabled !== 'boolean') {
         return json(route, { error: 'enabled must be a boolean' }, 400)
       }
-      ingressEnabled = body.enabled
-      const withoutMarker = mihomoText.replace(`\n${INGRESS_MARKER}`, '')
-      replaceMihomoText(ingressEnabled ? `${withoutMarker}\n${INGRESS_MARKER}` : withoutMarker)
-      return json(route, ingressModulesFixture(ingressEnabled, revision))
+      const marker = ingressModuleMatch[1] === 'speedtest-5060' ? INGRESS_MARKER : QUIC_BLOCK_MARKER
+      if (ingressModuleMatch[1] === 'speedtest-5060') ingressEnabled = body.enabled
+      else blockQUICEnabled = body.enabled
+      const withoutMarker = mihomoText.replace(`\n${marker}`, '')
+      replaceMihomoText(body.enabled ? `${withoutMarker}\n${marker}` : withoutMarker)
+      return json(route, ingressModulesFixture(ingressEnabled, blockQUICEnabled, revision))
     }
     if (path === '/api/interception/settings' && method === 'GET') {
       return json(route, mitmSettings)

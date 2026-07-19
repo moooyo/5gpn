@@ -85,12 +85,24 @@ recognizable QUIC with a visible SNI;
 Ookla's native UDP protocol, SIP, and other raw UDP cannot recover the original
 server after DNS steering and therefore fail closed.
 
+Fresh and explicitly reset seeds also enable the fixed `block-quic-443`
+capability. It keeps the UDP `:443` listener bound but places one canonical
+`AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` rule after the authenticated
+`intercept-egress` bypass and before interception-host rules. UDP/443 traffic
+that reaches the public gateway therefore fails immediately so clients that
+support fallback can retry over TCP/HTTPS, while sidecar upstream traffic keeps
+its authenticated bypass. This is a mihomo ingress rule, not a host firewall;
+traffic that bypasses the gateway is unaffected. Normal install and configure
+operations continue to preserve an existing valid operator config byte-for-byte,
+so only fresh/reset configs receive the default implicitly.
+
 The rule boundary is exact: eight base panel protocol/port rejects, the two
 `:5060` panel rejects, the console and allowlisted zashboard routes, the
 zashboard deny-by-default rule, seven anti-loop destination guards, the
-interception egress bypass, zero or more canonical module-host rules, and the
-terminal `MATCH`. Module-host rules use the reserved `MODULE-MITM` action and
-must be a contiguous, sorted block immediately after the recursion bypass.
+interception egress bypass, zero or one canonical global UDP/443 reject, zero or
+more canonical module-host rules, and the terminal `MATCH`. Module-host rules
+use the reserved `MODULE-MITM` action and must be a contiguous, sorted block
+immediately after the optional global reject.
 The anti-loop guards must follow the panel routes because
 mihomo resolves the synthetic console target through `hosts` before matching
 rules; moving those guards earlier would reject the legitimate console
@@ -139,6 +151,12 @@ through mihomo's authenticated `intercept-egress` SOCKS5 listener. The HTTP/3
 client starts with QUIC v1 and retries v2 only after an authenticated version-
 negotiation failure, before request data is sent. There is no direct sidecar
 egress.
+
+The sidecar `quic_fallback_protection` setting is narrower than
+`block-quic-443`: it affects only QUIC already routed to an enabled MITM host.
+The data-plane capability rejects all public gateway UDP/443 before those host
+rules and is the default compatibility guard while reported QUIC behavior is
+unreliable.
 
 Installing the private root is necessary but not sufficient for every app.
 Certificate pinning, mutual TLS, an independently provisioned ECH configuration,
@@ -807,7 +825,11 @@ Settings may expose the fixed mihomo ingress-capability catalog. A capability to
 only a local draft until the operator reviews a capability and exposure warning
 and explicitly confirms the apply. The UI must distinguish a bound UDP socket
 from supported raw UDP forwarding, show revision/custom-config conflicts, and
-state that external firewall policy remains the operator's responsibility.
+state that external firewall policy remains the operator's responsibility. The
+catalog includes default-enabled `block-quic-443`; its copy must say that it
+rejects gateway UDP/443, forces only capable clients to fall back, does not
+close the listener or manage the host firewall, and is distinct from the
+MITM-only QUIC fallback control.
 
 Settings also owns the MITM master, HTTP/2, and QUIC fallback controls. They are
 revision-protected immediate controls: changing the master requires an explicit

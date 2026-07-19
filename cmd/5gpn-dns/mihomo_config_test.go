@@ -213,6 +213,7 @@ func TestMihomoSeedUsesFastRejectGuards(t *testing.T) {
 		"DOMAIN,zash.5gpn.test,REJECT",
 		"AND,((DOMAIN,console.5gpn.test),(DST-PORT,5060)),REJECT",
 		"AND,((DOMAIN,zash.5gpn.test),(DST-PORT,5060)),REJECT",
+		"AND,((NETWORK,UDP),(DST-PORT,443)),REJECT",
 		"IP-CIDR,10.0.1.20/32,REJECT,no-resolve",
 		"IP-CIDR,127.0.0.0/8,REJECT,no-resolve",
 		"IP-CIDR,10.0.0.0/8,REJECT,no-resolve",

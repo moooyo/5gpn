@@ -18,6 +18,9 @@ import (
 const (
 	speedtestModuleID   = "speedtest-5060"
 	speedtestModulePort = 5060
+	blockQUICModuleID   = "block-quic-443"
+	blockQUICModulePort = 443
+	blockQUICRuleBase   = "AND,((NETWORK,UDP),(DST-PORT,443))"
 	mihomoRollbackLimit = 10 * time.Second
 )
 
@@ -61,6 +64,13 @@ type speedtestModuleAnalysis struct {
 	Gateways      []gatewayBind
 }
 
+type blockQUICModuleAnalysis struct {
+	View     mihomoIngressModuleView
+	Document *yaml.Node
+	Rules    *yaml.Node
+	InsertAt int
+}
+
 func speedtestModuleView(enabled, manageable bool, reason string) mihomoIngressModuleView {
 	return mihomoIngressModuleView{
 		ID:         speedtestModuleID,
@@ -73,12 +83,34 @@ func speedtestModuleView(enabled, manageable bool, reason string) mihomoIngressM
 	}
 }
 
+func blockQUICModuleView(enabled, manageable bool, reason string) mihomoIngressModuleView {
+	return mihomoIngressModuleView{
+		ID:         blockQUICModuleID,
+		Enabled:    enabled,
+		Manageable: manageable,
+		Reason:     reason,
+		Port:       blockQUICModulePort,
+		Networks:   []string{"udp"},
+		Sniffers:   []string{},
+	}
+}
+
 func ingressModulesResponse(text string, infra InfraParams) mihomoIngressModulesResponse {
-	analysis := analyzeSpeedtestModule(text, infra)
+	speedtest := analyzeSpeedtestModule(text, infra)
+	blockQUIC := analyzeBlockQUICModule(text, infra)
 	return mihomoIngressModulesResponse{
 		Revision: mihomoConfigRevision(text),
-		Modules:  []mihomoIngressModuleView{analysis.View},
+		Modules:  []mihomoIngressModuleView{speedtest.View, blockQUIC.View},
 	}
+}
+
+func ingressModuleViewByID(modules []mihomoIngressModuleView, id string) *mihomoIngressModuleView {
+	for index := range modules {
+		if modules[index].ID == id {
+			return &modules[index]
+		}
+	}
+	return nil
 }
 
 func (s *ControlServer) handleMihomoIngressModulesGet(w http.ResponseWriter, _ *http.Request) {
@@ -101,7 +133,8 @@ func (s *ControlServer) handleMihomoIngressModulePut(w http.ResponseWriter, r *h
 		writeErr(w, http.StatusServiceUnavailable, "mihomo config management unavailable")
 		return
 	}
-	if r.PathValue("id") != speedtestModuleID {
+	moduleID := r.PathValue("id")
+	if moduleID != speedtestModuleID && moduleID != blockQUICModuleID {
 		writeErr(w, http.StatusNotFound, "unknown mihomo ingress module")
 		return
 	}
@@ -133,8 +166,8 @@ func (s *ControlServer) handleMihomoIngressModulePut(w http.ResponseWriter, r *h
 		return
 	}
 
-	analysis := analyzeSpeedtestModule(oldText, s.mihomoInfra)
-	if !analysis.View.Manageable {
+	module := ingressModuleViewByID(current.Modules, moduleID)
+	if module == nil || !module.Manageable {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error":    "mihomo ingress module conflicts with the operator config",
 			"revision": current.Revision,
@@ -142,12 +175,18 @@ func (s *ControlServer) handleMihomoIngressModulePut(w http.ResponseWriter, r *h
 		})
 		return
 	}
-	if analysis.View.Enabled == *body.Enabled {
+	if module.Enabled == *body.Enabled {
 		writeJSON(w, http.StatusOK, current)
 		return
 	}
 
-	candidate, err := renderSpeedtestModule(analysis, *body.Enabled)
+	var candidate string
+	switch moduleID {
+	case speedtestModuleID:
+		candidate, err = renderSpeedtestModule(analyzeSpeedtestModule(oldText, s.mihomoInfra), *body.Enabled)
+	case blockQUICModuleID:
+		candidate, err = renderBlockQUICModule(analyzeBlockQUICModule(oldText, s.mihomoInfra), *body.Enabled)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error":    err.Error(),
@@ -156,8 +195,9 @@ func (s *ControlServer) handleMihomoIngressModulePut(w http.ResponseWriter, r *h
 		})
 		return
 	}
-	candidateAnalysis := analyzeSpeedtestModule(candidate, s.mihomoInfra)
-	if !candidateAnalysis.View.Manageable || candidateAnalysis.View.Enabled != *body.Enabled {
+	candidateResponse := ingressModulesResponse(candidate, s.mihomoInfra)
+	candidateModule := ingressModuleViewByID(candidateResponse.Modules, moduleID)
+	if candidateModule == nil || !candidateModule.Manageable || candidateModule.Enabled != *body.Enabled {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error":    "rendered mihomo ingress module failed structural verification",
 			"revision": current.Revision,
@@ -328,6 +368,72 @@ func analyzeSpeedtestModule(text string, infra InfraParams) speedtestModuleAnaly
 	}
 	analysis.View.Reason = "partial-or-custom-5060"
 	return analysis
+}
+
+func analyzeBlockQUICModule(text string, infra InfraParams) blockQUICModuleAnalysis {
+	analysis := blockQUICModuleAnalysis{View: blockQUICModuleView(false, false, "invalid-config")}
+	if err := ValidateInvariants(text, infra); err != nil {
+		return analysis
+	}
+	document, err := parseMihomoNodeDocument(text)
+	if err != nil || len(document.Content) != 1 || hasYAMLAliasOrMerge(document.Content[0]) {
+		return analysis
+	}
+	rules := mappingNodeValue(document.Content[0], "rules")
+	if rules == nil || rules.Kind != yaml.SequenceNode {
+		analysis.View.Reason = "rules-structure-conflict"
+		return analysis
+	}
+	_, matchTarget, ok := terminalMatchRule(rules)
+	if !ok {
+		analysis.View.Reason = "terminal-match-missing"
+		return analysis
+	}
+	bypass := "IN-NAME,intercept-egress," + matchTarget
+	bypassIndex := -1
+	canonicalIndex := -1
+	touchingRules := 0
+	for index, item := range rules.Content {
+		if item.Kind != yaml.ScalarNode {
+			analysis.View.Reason = "rules-structure-conflict"
+			return analysis
+		}
+		rule := compactMihomoRule(item.Value)
+		if rule == bypass {
+			if bypassIndex != -1 {
+				analysis.View.Reason = "interception-bypass-duplicate"
+				return analysis
+			}
+			bypassIndex = index
+		}
+		if ruleTouchesBlockQUIC(rule) {
+			touchingRules++
+			if matchesDenyRule(rule, blockQUICRuleBase, false) {
+				canonicalIndex = index
+			}
+		}
+	}
+	if bypassIndex < 0 {
+		analysis.View.Reason = "interception-bypass-missing"
+		return analysis
+	}
+	analysis.Document = document
+	analysis.Rules = rules
+	analysis.InsertAt = bypassIndex + 1
+	if touchingRules == 0 {
+		analysis.View = blockQUICModuleView(false, true, "")
+		return analysis
+	}
+	if touchingRules == 1 && canonicalIndex == analysis.InsertAt {
+		analysis.View = blockQUICModuleView(true, true, "")
+		return analysis
+	}
+	analysis.View.Reason = "partial-or-custom-quic-block"
+	return analysis
+}
+
+func ruleTouchesBlockQUIC(rule string) bool {
+	return strings.HasPrefix(rule, "AND,(") && strings.Contains(rule, "(NETWORK,UDP)") && strings.Contains(rule, "(DST-PORT,443)")
 }
 
 func parseMihomoNodeDocument(text string) (*yaml.Node, error) {
@@ -722,6 +828,32 @@ func renderSpeedtestModule(analysis speedtestModuleAnalysis, enabled bool) (stri
 			filteredRules = append(filteredRules, item)
 		}
 		analysis.Rules.Content = filteredRules
+	}
+	return encodeMihomoNode(analysis.Document)
+}
+
+func renderBlockQUICModule(analysis blockQUICModuleAnalysis, enabled bool) (string, error) {
+	if !analysis.View.Manageable || analysis.Document == nil || analysis.Rules == nil {
+		return "", fmt.Errorf("mihomo QUIC blocking module is not manageable")
+	}
+	if enabled == analysis.View.Enabled {
+		return encodeMihomoNode(analysis.Document)
+	}
+	if enabled {
+		analysis.Rules.Content = insertNodes(
+			analysis.Rules.Content,
+			analysis.InsertAt,
+			scalarNode(blockQUICRuleBase+",REJECT"),
+		)
+	} else {
+		filtered := analysis.Rules.Content[:0]
+		for _, item := range analysis.Rules.Content {
+			if item.Kind == yaml.ScalarNode && matchesDenyRule(compactMihomoRule(item.Value), blockQUICRuleBase, false) {
+				continue
+			}
+			filtered = append(filtered, item)
+		}
+		analysis.Rules.Content = filtered
 	}
 	return encodeMihomoNode(analysis.Document)
 }
