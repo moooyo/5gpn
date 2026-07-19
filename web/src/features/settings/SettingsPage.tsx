@@ -136,10 +136,8 @@ export default function SettingsPage() {
         <TgbotCard tgbot={tgbot} onSaved={setTgbot} />
       </div>
       <UpstreamsCard upstreams={upstreams} onSaved={setUpstreams} />
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-stretch">
-        <EcsCard ecs={ecs} onSaved={setEcs} />
-        <AboutStrip version={status?.version} className="min-w-[250px]" />
-      </div>
+      <EcsCard ecs={ecs} onSaved={setEcs} />
+      <AboutStrip version={status?.version} />
     </div>
   )
 }

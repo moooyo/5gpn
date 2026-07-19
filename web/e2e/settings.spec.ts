@@ -172,6 +172,7 @@ test('WLOC interception requires coordinates and explicit confirmation', async (
   await page.goto('/extensions')
   await page.waitForLoadState('networkidle')
 
+  await page.getByTestId('extension-builtin-wloc').getByRole('button', { name: '配置' }).click()
   const card = page.getByTestId('wloc-intercept-card')
   const fields = card.getByRole('spinbutton')
   await expect(fields).toHaveCount(3)

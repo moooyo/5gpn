@@ -3,17 +3,21 @@ import { useTranslation } from 'react-i18next'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   AddIcon,
+  CloudIcon,
   CodeIcon,
   DeleteIcon,
+  EditIcon,
+  ExtensionFilledIcon,
   ExternalLinkIcon,
+  FileIcon,
   FileSearchIcon,
+  LinkIcon,
   RefreshIcon,
   SearchIcon,
   ShieldLockIcon,
   TuneIcon,
   UploadIcon,
   VerifiedIcon,
-  WidgetsFilledIcon,
 } from '../../components/icons'
 import {
   Badge,
@@ -25,7 +29,6 @@ import {
   Input,
   Modal,
   SegmentedControl,
-  Tabs,
   Toggle,
   toast,
 } from '../../components/ds'
@@ -68,6 +71,7 @@ function sourceHost(value?: string): string {
 function ExtensionCard({
   module,
   busy,
+  trusted,
   onToggle,
   onDelete,
   onInspect,
@@ -78,6 +82,7 @@ function ExtensionCard({
 }: {
   module: InterceptModule
   busy: boolean
+  trusted: boolean
   onToggle: (module: InterceptModule) => void
   onDelete: (module: InterceptModule) => void
   onInspect: (module: InterceptModule) => void
@@ -89,73 +94,60 @@ function ExtensionCard({
   const { t, i18n } = useTranslation()
   const displayName = module.id === 'builtin-wloc' ? t('settings.wlocTitle') : module.name
   const displayDescription = module.id === 'builtin-wloc' ? t('extensions.builtinDescription') : module.description
-
-  const status = module.enabled ? (module.ready ? t('extensions.enabled') : t('extensions.configured')) : t('extensions.disabled')
-  const statusTone = module.enabled ? (module.ready ? 'green' : 'amber') : 'neutral'
+  const isBuiltin = module.id === 'builtin-wloc'
   const imported = module.imported_at ? new Intl.DateTimeFormat(i18n.language, { dateStyle: 'medium' }).format(new Date(module.imported_at)) : ''
   const canArmWhileRuntimeStopped = module.reason === 'mitm-disabled'
+  const parameterCount = module.parameters?.length ?? 0
+  const sourceLabel = isBuiltin ? t('extensions.builtin') : sourceHost(module.source_url) || t('extensions.localSnapshot')
+  const toggleDisabled = busy || (!module.enabled && ((!module.ready && !canArmWhileRuntimeStopped) || module.compatibility === 'incompatible' || module.compatibility === 'needs_configuration' || (module.compatibility === 'partial' && !module.partial_allowed)))
+  const trustWarning = module.enabled && module.hosts.length > 0 && !trusted
 
   return (
-    <Card className="overflow-hidden shadow-none" data-testid={`extension-${module.id}`}>
-      <CardBody className="flex h-full flex-col gap-3.5 p-4.5 sm:p-5">
-        <div className="flex items-start justify-between gap-3">
+    <Card className="min-w-0 overflow-hidden border-0 shadow-[var(--md-sys-elevation-1)]" data-testid={`extension-${module.id}`}>
+      <CardBody className="flex h-full min-h-[248px] flex-col gap-3 p-4.5">
+        <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <span className={cn(
               'grid h-11 w-11 shrink-0 place-items-center rounded-[12px]',
-              module.ready ? 'bg-primary-container text-on-primary-container' : 'bg-surface-container text-text-faint',
+              module.enabled ? 'bg-primary-container text-on-primary-container' : 'bg-surface-container text-text-faint',
             )}>
-              {module.hosts.length > 0 ? <ShieldLockIcon className="h-5 w-5" aria-hidden="true" /> : <CodeIcon className="h-5 w-5" aria-hidden="true" />}
+              {isBuiltin ? <ShieldLockIcon className="h-5 w-5" aria-hidden="true" /> : module.hosts.length > 0 ? <ExtensionFilledIcon className="h-5 w-5" aria-hidden="true" /> : <CodeIcon className="h-5 w-5" aria-hidden="true" />}
             </span>
             <div className="min-w-0">
               <h2 className="truncate text-[14.5px] font-medium leading-tight text-text-strong">{displayName}</h2>
               <p className="mt-1 truncate text-[10.5px] text-text-faint">
-                {module.id === 'builtin-wloc' ? t('extensions.builtin') : sourceHost(module.source_url) || t('extensions.localSnapshot')}
+                {sourceLabel}
                 {imported ? ` · ${imported}` : ''}
               </p>
             </div>
           </div>
-          {module.id === 'builtin-wloc' ? (
-            <a href="#wloc-config" className="zds-state-layer shrink-0 rounded-full px-3 py-2 text-[10.5px] font-semibold text-primary">
-              {t('extensions.configureBelow')}
-            </a>
-          ) : (
-            <Toggle
-              checked={module.enabled}
-              onCheckedChange={() => onToggle(module)}
-              disabled={busy || (!module.enabled && ((!module.ready && !canArmWhileRuntimeStopped) || module.compatibility === 'incompatible' || module.compatibility === 'needs_configuration' || (module.compatibility === 'partial' && !module.partial_allowed)))}
-              aria-label={module.enabled ? t('extensions.toggleOff') : t('extensions.toggleOn')}
-            />
-          )}
+          <Toggle
+            checked={module.enabled}
+            onCheckedChange={() => onToggle(module)}
+            disabled={toggleDisabled}
+            aria-label={`${module.enabled ? t('extensions.toggleOff') : t('extensions.toggleOn')} · ${displayName}`}
+          />
         </div>
 
-        {displayDescription ? <p className="line-clamp-2 min-h-10 text-[11.5px] leading-5 text-text-soft">{displayDescription}</p> : null}
+        {displayDescription ? <p className="line-clamp-2 min-h-10 text-[11.5px] leading-5 text-text-soft">{displayDescription}</p> : <div className="min-h-10" />}
 
         <div className="flex flex-wrap items-center gap-1.5">
-          <Badge tone={statusTone}>{status}</Badge>
-          <Badge tone={compatibilityTone(module.compatibility)}>{t(`extensions.${module.compatibility}`)}</Badge>
-          {module.script_count > 0 ? <Badge tone="amber">{t('extensions.scripts', { count: module.script_count })}</Badge> : null}
-          {module.rewrite_count > 0 ? <Badge tone="indigo">{t('extensions.rewrites', { count: module.rewrite_count })}</Badge> : null}
-          {module.hosts.length > 0 ? <Badge tone="blue">MITM · {module.hosts.length}</Badge> : null}
-          {(module.host_mappings?.length ?? 0) > 0 ? <Badge tone="cyan">{t('extensions.hostMappingsCount', { count: module.host_mappings?.length ?? 0 })}</Badge> : null}
-          {(module.unsupported?.length ?? 0) > 0 ? <Badge tone="amber">{t('extensions.unsupportedCount', { count: module.unsupported?.length ?? 0 })}</Badge> : null}
-        </div>
-
-        <div className="space-y-1 rounded-[12px] bg-surface-container-low px-3 py-2.5 text-[10px] text-text-faint">
-          <div className="flex items-center justify-between gap-3">
-            <span>{t('extensions.digest')}</span>
-            <code className="max-w-[72%] truncate text-text-mid" title={module.snapshot_digest}>{module.snapshot_digest}</code>
-          </div>
-          {module.reason ? (
-            <div className="text-amber-2">
-              {t('extensions.routeReason', {
-                reason: module.reason === 'mitm-disabled' ? t('extensions.mitmDisabledReason') : module.reason,
-              })}
-            </div>
+          {!module.enabled ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="neutral">{t('extensions.disabled')}</Badge> : null}
+          {module.rewrite_count > 0 ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="indigo">{t('extensions.capabilityRewrite')}</Badge> : null}
+          {module.script_count > 0 ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber">{t('extensions.capabilityScript')}</Badge> : null}
+          {module.hosts.length > 0 ? (
+            <button type="button" aria-label={t('extensions.auditHosts')} onClick={() => onAudit(module)} className="zds-state-layer inline-flex items-center gap-1 rounded-[6px] bg-primary-container px-2.5 py-0.5 text-[11px] font-medium text-on-primary-container">
+              <ShieldLockIcon className="h-3.5 w-3.5" aria-hidden="true" /> MITM · {module.hosts.length}
+            </button>
           ) : null}
+          {(module.host_mappings?.length ?? 0) > 0 ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="cyan">{t('extensions.capabilityHost', { count: module.host_mappings?.length ?? 0 })}</Badge> : null}
+          {module.compatibility !== 'full' ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone={compatibilityTone(module.compatibility)}>{t(`extensions.${module.compatibility}`)}</Badge> : null}
+          {trustWarning ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber">{t('extensions.trustPending')}</Badge> : null}
+          {module.enabled && module.reason === 'mitm-disabled' ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber">{t('extensions.masterPending')}</Badge> : null}
         </div>
 
         {module.issues?.length ? (
-          <details className="rounded-[12px] bg-[var(--md-sys-color-warning-container)] px-3.5 py-3 text-[11px] text-[var(--md-sys-color-on-warning-container)]">
+          <details className="rounded-[10px] bg-[var(--md-sys-color-warning-container)] px-3 py-2.5 text-[10.5px] text-[var(--md-sys-color-on-warning-container)]">
             <summary className="cursor-pointer font-medium">{t('extensions.compatibilityTitle', { count: module.issues.length })}</summary>
             <ul className="mt-2 space-y-1 break-words font-mono text-[10px]">
               {module.issues.map((issue) => <li className={issue.severity === 'error' ? 'text-red' : undefined} key={`${issue.severity}:${issue.message}`}>{issue.message}</li>)}
@@ -163,33 +155,37 @@ function ExtensionCard({
           </details>
         ) : null}
 
-        <div className="mt-auto flex flex-wrap justify-end gap-2 border-t border-divider pt-3">
+        <div className="mt-auto flex min-w-0 items-center gap-1 border-t border-divider pt-3">
+          <span className="flex min-w-0 flex-1 items-center gap-1.5 text-[10.5px] text-text-faint">
+            {module.source_url ? <CloudIcon className="h-4 w-4 shrink-0" aria-hidden="true" /> : <FileIcon className="h-4 w-4 shrink-0" aria-hidden="true" />}
+            <span className="max-w-[104px] truncate">{sourceLabel}</span>
+            <code className="shrink-0 font-mono text-[9px] text-text-faint" title={module.snapshot_digest}>· {module.snapshot_digest.slice(0, 8)}</code>
+          </span>
           {module.compatibility === 'partial' && !module.partial_allowed ? (
-            <Button type="button" variant="tonal" size="sm" disabled={busy} onClick={() => onAcknowledge(module)}>
+            <Button type="button" variant="tonal" size="sm" className="shrink-0" disabled={busy} onClick={() => onAcknowledge(module)}>
               <VerifiedIcon className="h-4 w-4" /> {t('extensions.acknowledge')}
             </Button>
           ) : null}
-          {module.hosts.length > 0 ? (
-            <Button type="button" variant="secondary" size="sm" onClick={() => onAudit(module)}>
-              <SearchIcon className="h-4 w-4" /> {t('extensions.auditHosts')}
-            </Button>
-          ) : null}
           {module.source_url ? (
-            <Button type="button" variant="secondary" size="sm" disabled={busy} onClick={() => onCheckUpdate(module)}>
-              <RefreshIcon className="h-4 w-4" /> {t('extensions.checkUpdate')}
+            <Button type="button" variant="ghost" size="sm" className="w-8 shrink-0 px-0" aria-label={t('extensions.checkUpdate')} title={t('extensions.checkUpdate')} disabled={busy} onClick={() => onCheckUpdate(module)}>
+              <RefreshIcon className="h-4 w-4" />
             </Button>
           ) : null}
-          {module.id !== 'builtin-wloc' ? (
-            <Button type="button" variant="secondary" size="sm" onClick={() => onConfigure(module)}>
-              <TuneIcon className="h-4 w-4" /> {t('extensions.configure')}
+          {parameterCount > 0 ? (
+            <Button type="button" variant="secondary" size="sm" className="shrink-0" onClick={() => onConfigure(module)}>
+              <TuneIcon className="h-4 w-4" /> {t('extensions.parametersAction', { count: parameterCount })}
             </Button>
-          ) : null}
-          <Button type="button" variant="secondary" size="sm" disabled={busy} onClick={() => onInspect(module)}>
-            <FileSearchIcon className="h-4 w-4" /> {t('extensions.inspect')}
+          ) : (
+            <Button type="button" variant="ghost" size="sm" className="w-8 shrink-0 px-0" aria-label={t('extensions.configure')} title={t('extensions.configure')} onClick={() => onConfigure(module)}>
+              <EditIcon className="h-4 w-4" />
+            </Button>
+          )}
+          <Button type="button" variant="ghost" size="sm" className="w-8 shrink-0 px-0" aria-label={t('extensions.inspect')} title={t('extensions.inspect')} disabled={busy} onClick={() => onInspect(module)}>
+            <FileSearchIcon className="h-4 w-4" />
           </Button>
-          {module.id !== 'builtin-wloc' ? (
-            <Button type="button" variant="danger" size="sm" disabled={busy || module.enabled} onClick={() => onDelete(module)}>
-              <DeleteIcon className="h-4 w-4" /> {t('extensions.delete')}
+          {!isBuiltin ? (
+            <Button type="button" variant="ghost" size="sm" className="w-8 shrink-0 px-0 text-[var(--md-sys-color-error)]" aria-label={t('extensions.delete')} title={t('extensions.delete')} disabled={busy || module.enabled} onClick={() => onDelete(module)}>
+              <DeleteIcon className="h-4 w-4" />
             </Button>
           ) : null}
         </div>
@@ -410,23 +406,29 @@ function SnapshotModal({
 
 function ImportModuleModal({
   open,
+  initialMode,
   revision,
   existingIDs,
   onOpenChange,
   onImported,
 }: {
   open: boolean
+  initialMode: ImportMode
   revision: string
   existingIDs: string[]
   onOpenChange: (open: boolean) => void
   onImported: (view: InterceptModulesView) => void
 }) {
   const { t } = useTranslation()
-  const [mode, setMode] = useState<ImportMode>('url')
+  const [mode, setMode] = useState<ImportMode>(initialMode)
   const [url, setURL] = useState('')
   const [content, setContent] = useState('')
   const [busy, setBusy] = useState(false)
   const [review, setReview] = useState<InterceptModule | null>(null)
+
+  useEffect(() => {
+    if (open) setMode(initialMode)
+  }, [initialMode, open])
 
   function changeOpen(next: boolean) {
     if (!next) setReview(null)
@@ -560,6 +562,8 @@ export default function ExtensionsPage() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  const [importMode, setImportMode] = useState<ImportMode>('url')
+  const [wlocConfigOpen, setWlocConfigOpen] = useState(false)
   const [filter, setFilter] = useState<ExtensionFilter>('all')
   const [search, setSearch] = useState('')
   const [configTarget, setConfigTarget] = useState<InterceptModule | null>(null)
@@ -588,7 +592,6 @@ export default function ExtensionsPage() {
 
   useEffect(() => { void load() }, [load])
 
-  const externalCount = useMemo(() => view?.modules.filter((module) => module.id !== 'builtin-wloc').length ?? 0, [view])
   const visibleModules = useMemo(() => {
     const needle = search.trim().toLocaleLowerCase()
     return (view?.modules ?? []).filter((module) => {
@@ -600,6 +603,7 @@ export default function ExtensionsPage() {
     })
   }, [filter, search, view?.modules])
   const hostCount = useMemo(() => view?.modules.reduce((count, module) => count + module.hosts.length, 0) ?? 0, [view?.modules])
+  const activeMITMCount = useMemo(() => view?.modules.filter((module) => module.enabled && module.hosts.length > 0).length ?? 0, [view?.modules])
   const showingHosts = location.pathname === '/extensions/hosts'
   const scopedModuleID = new URLSearchParams(location.search).get('plugin') ?? undefined
   const trustState = !acknowledged ? 'trust' : !settings?.enabled ? 'master' : 'ready'
@@ -703,48 +707,20 @@ export default function ExtensionsPage() {
           {trustState === 'ready' ? <VerifiedIcon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" /> : <ShieldLockIcon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />}
           <div>
             <div className="text-[12.5px] font-semibold">{t(`extensions.readiness.${trustState}.title`)}</div>
-            <p className="mt-0.5 text-[11px] leading-relaxed opacity-80">{t(`extensions.readiness.${trustState}.body`)}</p>
+            <p className="mt-0.5 text-[11px] leading-relaxed opacity-80">{t(`extensions.readiness.${trustState}.body`, { count: activeMITMCount })}</p>
           </div>
         </div>
         <Link
-          className="zds-state-layer inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-full px-4 text-[12px] font-medium"
+          className={cn(
+            'zds-state-layer inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-full px-5 text-[12px] font-medium',
+            trustState === 'ready' ? 'bg-[rgb(0_0_0_/_8%)]' : 'bg-primary text-[var(--md-sys-color-on-primary)]',
+          )}
           to={trustState === 'master' ? '/settings' : '/setup-guide'}
         >
+          {trustState !== 'ready' ? <LinkIcon className="h-4 w-4" aria-hidden="true" /> : null}
           {t(`extensions.readiness.${trustState}.action`)}
         </Link>
       </div>
-
-      <Card className="p-4 shadow-none sm:p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center">
-          <div className="flex min-w-0 flex-1 items-start gap-3">
-            <span className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-primary-container text-on-primary-container"><WidgetsFilledIcon className="h-5 w-5" /></span>
-            <div className="min-w-0">
-              <h1 className="text-[17px] font-medium text-text-strong">{t('extensions.title')}</h1>
-              <p className="mt-1 text-[11.5px] leading-5 text-text-faint">{t('extensions.intro', { total: view?.modules.length ?? 0, enabled: view?.modules.filter((module) => module.enabled).length ?? 0 })}</p>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button type="button" variant="secondary" size="sm" onClick={() => void load()} disabled={loading}>
-              <RefreshIcon className="h-4 w-4" />{t('extensions.refresh')}
-            </Button>
-            <a href={view?.catalog_url ?? 'https://hub.kelee.one/'} target="_blank" rel="noreferrer">
-              <Button type="button" variant="secondary" size="sm"><ExternalLinkIcon className="h-4 w-4" />{t('extensions.catalog')}</Button>
-            </a>
-            <Button type="button" size="sm" onClick={() => setImportOpen(true)} disabled={!view}>
-              <AddIcon className="h-4 w-4" />{t('extensions.add')}
-            </Button>
-          </div>
-        </div>
-        <Tabs
-          value={showingHosts ? 'hosts' : 'catalog'}
-          onValueChange={(value) => void navigate(value === 'hosts' ? '/extensions/hosts' : '/extensions')}
-          className="mt-4 w-fit"
-          items={[
-            { value: 'catalog', label: t('extensions.tabs.catalog') },
-            { value: 'hosts', label: t('extensions.tabs.hosts', { count: hostCount }) },
-          ]}
-        />
-      </Card>
 
       {loading && !view ? <Card><CardBody className="text-center text-[12px] text-text-faint">{t('common.loading')}</CardBody></Card> : null}
       {loadError && !view ? (
@@ -753,7 +729,37 @@ export default function ExtensionsPage() {
 
       {!showingHosts && view ? (
         <>
-          <Card className="flex flex-col gap-3 p-4 shadow-none lg:flex-row lg:items-center">
+          <div className="flex flex-col gap-3 px-1 lg:flex-row lg:items-center">
+            <p className="min-w-[240px] flex-1 text-[12.5px] leading-5 text-text-faint">
+              {t('extensions.catalogSummary', { total: view.modules.length, enabled: view.modules.filter((module) => module.enabled).length })}{' '}
+              <button type="button" className="zds-state-layer rounded-full px-2 py-1 font-medium text-primary" onClick={() => void navigate('/extensions/hosts')}>
+                {t('extensions.tabs.hosts', { count: hostCount })}
+              </button>
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button type="button" variant="ghost" size="sm" className="w-9 px-0" aria-label={t('extensions.refresh')} title={t('extensions.refresh')} onClick={() => void load()} disabled={loading}>
+                <RefreshIcon className="h-4 w-4" />
+              </Button>
+              <a
+                href={view.catalog_url ?? 'https://hub.kelee.one/'}
+                target="_blank"
+                rel="noreferrer"
+                aria-label={t('extensions.catalog')}
+                title={t('extensions.catalog')}
+                className="zds-state-layer grid h-9 w-9 place-items-center rounded-full text-primary"
+              >
+                <ExternalLinkIcon className="h-4 w-4" aria-hidden="true" />
+              </a>
+              <Button type="button" variant="tonal" size="sm" onClick={() => { setImportMode('url'); setImportOpen(true) }}>
+                <LinkIcon className="h-4 w-4" />{t('extensions.addUrl')}
+              </Button>
+              <Button type="button" size="sm" onClick={() => { setImportMode('text'); setImportOpen(true) }}>
+                <AddIcon className="h-4 w-4" />{t('extensions.addLocal')}
+              </Button>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-3 px-1 sm:flex-row sm:items-center">
             <SegmentedControl
               value={filter}
               onChange={(value) => setFilter(value as ExtensionFilter)}
@@ -766,7 +772,7 @@ export default function ExtensionsPage() {
                 ['local', t('extensions.filters.local')],
               ] as Array<[ExtensionFilter, string]>).map(([value, label]) => ({ value, label }))}
             />
-            <div className="relative min-w-0 flex-1">
+            <div className="relative min-w-0 sm:ml-auto sm:w-[280px] sm:flex-none">
               <SearchIcon className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-text-faint" aria-hidden="true" />
               <Input
                 value={search}
@@ -776,19 +782,26 @@ export default function ExtensionsPage() {
                 className="pl-10"
               />
             </div>
-          </Card>
+          </div>
 
-          {visibleModules.length > 0 ? <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {visibleModules.length > 0 ? <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           {visibleModules.map((module) => (
             <ExtensionCard
               key={module.id}
               module={module}
               busy={busyID === module.id}
-              onToggle={(selected) => setPending({ kind: 'toggle', module: selected })}
+              trusted={acknowledged}
+              onToggle={(selected) => {
+                if (selected.id === 'builtin-wloc' && !selected.enabled && (!wloc || wloc.longitude === null || wloc.latitude === null)) {
+                  setWlocConfigOpen(true)
+                  return
+                }
+                setPending({ kind: 'toggle', module: selected })
+              }}
               onDelete={(selected) => setPending({ kind: 'delete', module: selected })}
               onInspect={(selected) => void inspectModule(selected)}
               onAcknowledge={(selected) => setPending({ kind: 'partial', module: selected })}
-              onConfigure={setConfigTarget}
+              onConfigure={(selected) => selected.id === 'builtin-wloc' ? setWlocConfigOpen(true) : setConfigTarget(selected)}
               onAudit={(selected) => void navigate(`/extensions/hosts?plugin=${encodeURIComponent(selected.id)}`)}
               onCheckUpdate={(selected) => void checkExtensionUpdate(selected)}
             />
@@ -800,41 +813,28 @@ export default function ExtensionsPage() {
             </Card>
           )}
 
-          {view && externalCount === 0 ? <p className="rounded-[10px] border border-dashed border-border px-4 py-5 text-center text-[11.5px] text-text-faint">{t('extensions.empty')}</p> : null}
-
-          <div id="wloc-config" className="mt-2 px-1 text-[13px] font-medium tracking-[.04em] text-text-faint">{t('extensions.wlocSection')}</div>
-          <WLOCInterceptCard
-            value={wloc}
-            routeEnabled={view?.modules.some((module) => module.id === 'builtin-wloc' && module.enabled && module.ready) ?? false}
-            onReload={async () => {
-              try {
-                const next = await api.getWLOCIntercept()
-                setWloc(next)
-                return next
-              } catch {
-                return null
-              }
-            }}
-            onSaved={(next) => {
-              setWloc(next)
-              void load()
-            }}
-          />
         </>
       ) : null}
 
       {showingHosts && view ? (
-        <HostAuditView
-          view={view}
-          settings={settings}
-          moduleID={scopedModuleID}
-          onClearModule={() => void navigate('/extensions/hosts')}
-        />
+        <>
+          <div className="flex items-center justify-between gap-3 px-1">
+            <p className="text-[12.5px] text-text-faint">{t('extensions.hostAudit.intro')}</p>
+            <Button type="button" variant="secondary" size="sm" onClick={() => void navigate('/extensions')}>{t('extensions.backToCatalog')}</Button>
+          </div>
+          <HostAuditView
+            view={view}
+            settings={settings}
+            moduleID={scopedModuleID}
+            onClearModule={() => void navigate('/extensions/hosts')}
+          />
+        </>
       ) : null}
 
       {view ? (
         <ImportModuleModal
           open={importOpen}
+          initialMode={importMode}
           revision={view.revision}
           existingIDs={view.modules.map((module) => module.id)}
           onOpenChange={setImportOpen}
@@ -844,6 +844,33 @@ export default function ExtensionsPage() {
           }}
         />
       ) : null}
+
+      <Modal
+        open={wlocConfigOpen}
+        onOpenChange={setWlocConfigOpen}
+        title={t('settings.wlocTitle')}
+        className="w-[min(94vw,760px)]"
+      >
+        <WLOCInterceptCard
+          embedded
+          value={wloc}
+          routeEnabled={view?.modules.some((module) => module.id === 'builtin-wloc' && module.enabled && module.ready) ?? false}
+          onReload={async () => {
+            try {
+              const next = await api.getWLOCIntercept()
+              setWloc(next)
+              return next
+            } catch {
+              return null
+            }
+          }}
+          onSaved={(next) => {
+            setWloc(next)
+            setWlocConfigOpen(false)
+            void load()
+          }}
+        />
+      </Modal>
 
       <SnapshotModal open={snapshotOpen} loading={snapshotLoading} snapshot={snapshot} onOpenChange={setSnapshotOpen} />
 

@@ -72,4 +72,19 @@ describe('BarChart', () => {
     expect(screen.getByText('china')).toBeInTheDocument()
     expect(screen.getByText('trust')).toBeInTheDocument()
   })
+
+  it('centres a lone visible series on its category label', () => {
+    const { container } = render(
+      <BarChart
+        categories={['china', 'trust']}
+        series={[
+          { name: 'ok', data: [10, 8], color: '#16a34a' },
+          { name: 'err', data: [0, 0], color: '#dc2626' },
+        ]}
+      />,
+    )
+    const bars = container.querySelectorAll('[data-chart="bar"] rect')
+    expect(Number(bars[0].getAttribute('x')) + Number(bars[0].getAttribute('width')) / 2).toBe(90)
+    expect(Number(bars[2].getAttribute('x')) + Number(bars[2].getAttribute('width')) / 2).toBe(270)
+  })
 })

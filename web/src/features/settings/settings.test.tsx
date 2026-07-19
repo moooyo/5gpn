@@ -118,6 +118,7 @@ describe('SettingsPage', () => {
     expect(screen.getByDisplayValue('123456789')).toBeInTheDocument()
     expect(screen.getByTestId('mitm-host-audit-link')).toHaveAttribute('href', '/extensions/hosts')
     expect(screen.queryByTestId('mitm-capabilities')).not.toBeInTheDocument()
+    expect(screen.getByText('Material 3 · 安全 DNS 网关')).toBeInTheDocument()
   })
 
   it('saves HTTP/2 and QUIC capabilities without changing the MITM master state', async () => {

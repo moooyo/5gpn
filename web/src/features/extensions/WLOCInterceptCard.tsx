@@ -4,6 +4,7 @@ import { Badge, Button, Card, ConfirmDialog, Field, Input, Toggle, toast } from 
 import { api } from '../../lib/api/client'
 import { ApiError } from '../../lib/api/http'
 import type { WLOCInterceptView } from '../../lib/api/types'
+import { cn } from '../../lib/cn'
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback
@@ -12,11 +13,13 @@ function errorMessage(error: unknown, fallback: string): string {
 export function WLOCInterceptCard({
   value,
   routeEnabled,
+  embedded = false,
   onReload,
   onSaved,
 }: {
   value: WLOCInterceptView | null
   routeEnabled: boolean
+  embedded?: boolean
   onReload: () => Promise<WLOCInterceptView | null>
   onSaved: (value: WLOCInterceptView) => void
 }) {
@@ -78,7 +81,11 @@ export function WLOCInterceptCard({
   }
 
   return (
-    <Card variant="tonal" className="p-5 sm:p-6" data-testid="wloc-intercept-card">
+    <Card
+      variant="tonal"
+      className={cn(embedded ? 'border-0 bg-transparent p-0 shadow-none' : 'p-5 sm:p-6')}
+      data-testid="wloc-intercept-card"
+    >
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <div className="flex flex-wrap items-center gap-2">

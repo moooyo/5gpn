@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { CodeIcon, ResetIcon, VerifiedIcon } from '../../components/icons'
+import { ResetIcon, VerifiedIcon } from '../../components/icons'
 import { Badge, Button, Card, ConfirmDialog, StatusDot, toast } from '../../components/ds'
 import { api } from '../../lib/api/client'
 import { ApiError } from '../../lib/api/http'
@@ -13,7 +13,7 @@ function errMessage(err: unknown, fallback: string): string {
 }
 
 const textareaClass =
-  'w-full min-h-[480px] resize-y rounded-[16px] border border-input-border bg-surface-container-low px-4 py-4 font-mono text-[12px] leading-5 text-text-strong outline-none transition-[border-color,background-color] focus:border-primary focus:bg-card disabled:opacity-60'
+  'w-full min-h-[430px] resize-y rounded-[12px] border border-transparent bg-surface-container-low px-4 py-4 font-mono text-[12.5px] leading-[1.7] text-text-strong outline-none transition-[border-color,background-color,box-shadow] focus:border-primary focus:bg-card focus:shadow-[inset_0_0_0_1px_var(--md-sys-color-primary)] disabled:opacity-60'
 
 // Kept as data so the JSX below is a plain map rather than seven near-identical
 // list items.
@@ -160,18 +160,10 @@ export default function MihomoConfigPage() {
 
   return (
     <div className="flex flex-col gap-4" data-testid="page-mihomo-config">
-      <Card variant="tonal" className="flex items-start gap-4 p-5 sm:p-6">
-        <div className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-primary-container text-on-primary-container">
-          <CodeIcon className="h-6 w-6" aria-hidden="true" />
-        </div>
-        <div>
-          <h1 className="text-[17px] font-medium text-text-strong">{t('mihomoConfig.editorLabel')}</h1>
-          <p className="mt-1 text-[12px] leading-5 text-text-faint">{t('mihomoConfig.intro')}</p>
-        </div>
-      </Card>
+      <p className="px-1 text-[12.5px] leading-5 text-text-faint">{t('mihomoConfig.intro')}</p>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,.55fr)] xl:items-start">
-      <Card className="p-5 sm:p-6" data-testid="mihomo-config-editor" data-dirty={dirty ? 'true' : 'false'}>
+      <div className="grid gap-4 xl:grid-cols-2 xl:items-start">
+      <Card className="p-5" data-testid="mihomo-config-editor" data-dirty={dirty ? 'true' : 'false'}>
         <div className="mb-4 flex flex-wrap items-center gap-2 text-[11.5px] font-medium text-text-mid">
           <div className="flex items-center gap-1.5">
             <StatusDot
@@ -185,12 +177,11 @@ export default function MihomoConfigPage() {
           </div>
           <span className="text-text-faint">·</span>
           <span className="font-normal text-text-faint">{t('mihomoConfig.appliedAt', { time: relativeTime(appliedAt) })}</span>
+          <div className="flex-1" />
+          {dirty ? <Badge tone="amber">{t('mihomoConfig.unsaved')}</Badge> : null}
+          {revision ? <code className="rounded-[7px] bg-surface-container px-2.5 py-1 font-mono text-[10px] text-text-faint">rev {revision.slice(0, 4)}…{revision.slice(-4)}</code> : null}
         </div>
 
-        <div className="mb-2 flex items-center justify-between gap-3 text-[11px] font-medium text-text-mid">
-          <span>{t('mihomoConfig.editorLabel')}</span>
-          {dirty ? <Badge tone="amber">{t('mihomoConfig.unsaved')}</Badge> : <Badge tone="green">{t('mihomoConfig.saved')}</Badge>}
-        </div>
         <textarea
           className={textareaClass}
           value={text}
@@ -242,11 +233,12 @@ export default function MihomoConfigPage() {
         </div>
       </Card>
 
-      <Card className="p-5 sm:p-6">
-        <h2 className="mb-4 text-[15px] font-medium text-text-strong">{t('mihomoConfig.invariantsTitle')}</h2>
-        <ul className="grid gap-3">
+      <Card className="p-5">
+        <h2 className="text-[15px] font-medium text-text-strong">{t('mihomoConfig.invariantsTitle')}</h2>
+        <p className="mt-1 text-[11px] text-text-faint">{t('mihomoConfig.invariantsHint')}</p>
+        <ul className="mt-4 divide-y divide-divider">
           {INVARIANT_KEYS.map((key) => (
-            <li key={key} className="flex items-start gap-3 rounded-[14px] bg-surface-container-low p-4 text-[11.5px]">
+            <li key={key} className="flex items-start gap-3 px-1 py-3.5 text-[11.5px]">
               <VerifiedIcon className="mt-0.5 h-4 w-4 shrink-0 text-green" aria-hidden="true" />
               <div>
                 <div className="font-medium text-text-strong">{t(`mihomoConfig.invariants.${key}.name`)}</div>

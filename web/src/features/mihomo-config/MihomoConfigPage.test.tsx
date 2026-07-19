@@ -52,6 +52,10 @@ describe('MihomoConfigPage', () => {
     expect(screen.getByText('Gateway ingress')).toBeInTheDocument()
     expect(screen.getByText('Controller secret')).toBeInTheDocument()
     expect(screen.getByText('Console SNI split')).toBeInTheDocument()
+    expect(screen.getByText('Validation rejects the complete document when any item is missing.')).toBeInTheDocument()
+    expect(screen.getByText('rev curr…sion')).toBeInTheDocument()
+    expect(screen.queryByText('Saved snapshot')).not.toBeInTheDocument()
+    expect(screen.queryByText('mihomo config (YAML)')).not.toBeInTheDocument()
   })
 
   it('keeps an unsaved edit when the UI language changes', async () => {

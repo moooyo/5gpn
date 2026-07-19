@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router-dom'
 import { CheckCircleIcon, DownloadIcon, ExternalLinkIcon, IosIcon, KeyIcon, QrCodeIcon, ShieldLockIcon, SmartphoneIcon, VerifiedIcon } from '../../components/icons'
 import { encode } from 'uqr'
-import { Badge, Button, Card, CardBody, CardHeader, StatusDot } from '../../components/ds'
+import { Badge, Button, Card, CardBody, CardHeader } from '../../components/ds'
 import { useStatus } from '../../lib/StatusContext'
 import { api } from '../../lib/api/client'
 import type { MITMSettingsView } from '../../lib/api/types'
@@ -216,28 +216,34 @@ export default function SetupGuidePage() {
             {t('setupGuide.interceptCA.shared')}
           </span>
         </CardHeader>
-        <div className="grid gap-2 border-b border-divider bg-surface-container-low px-5 py-4 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_auto] lg:items-center">
-          <div className="flex items-center gap-2.5 rounded-[12px] bg-card px-3.5 py-3">
-            <StatusDot color={acknowledged ? 'var(--color-green)' : 'var(--color-amber)'} />
+        <div className="grid gap-3 border-b border-divider px-5 py-3.5 sm:grid-cols-2">
+          <div className="flex min-w-0 items-center gap-3 rounded-[16px] bg-surface-container-low px-4 py-3.5">
+            <span className={acknowledged ? 'grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[var(--md-sys-color-success-container)] text-[var(--md-sys-color-on-success-container)]' : 'grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[var(--md-sys-color-warning-container)] text-[var(--md-sys-color-on-warning-container)]'}>
+              {acknowledged ? <CheckCircleIcon className="h-5 w-5" aria-hidden="true" /> : <ShieldLockIcon className="h-5 w-5" aria-hidden="true" />}
+            </span>
             <div className="min-w-0 flex-1">
-              <div className="text-[11.5px] font-medium text-text-strong">{t('setupGuide.interceptCA.clientTrust')}</div>
-              <div className="mt-0.5 text-[10px] text-text-faint">{t(acknowledged ? 'setupGuide.interceptCA.locallyConfirmed' : 'setupGuide.interceptCA.notConfirmed')}</div>
+              <div className="text-[12px] font-medium text-text-strong">{t('setupGuide.interceptCA.clientTrust')}</div>
+              <div className="mt-0.5 text-[10.5px] leading-4 text-text-faint">{t(acknowledged ? 'setupGuide.interceptCA.locallyConfirmed' : 'setupGuide.interceptCA.notConfirmed')}</div>
             </div>
-            <Badge tone={acknowledged ? 'green' : 'amber'}>{acknowledged ? t('setupGuide.interceptCA.complete') : t('setupGuide.interceptCA.required')}</Badge>
+            <Badge className="shrink-0" tone={acknowledged ? 'green' : 'amber'}>{acknowledged ? t('setupGuide.interceptCA.complete') : t('setupGuide.interceptCA.required')}</Badge>
           </div>
-          <div className="flex items-center gap-2.5 rounded-[12px] bg-card px-3.5 py-3">
-            <StatusDot color={mitmSettings?.enabled ? 'var(--color-green)' : 'var(--color-amber)'} />
+          <div className="flex min-w-0 items-center gap-3 rounded-[16px] bg-surface-container-low px-4 py-3.5">
+            <span className={mitmSettings?.enabled ? 'grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[var(--md-sys-color-success-container)] text-[var(--md-sys-color-on-success-container)]' : 'grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[var(--md-sys-color-warning-container)] text-[var(--md-sys-color-on-warning-container)]'}>
+              <ShieldLockIcon className="h-5 w-5" aria-hidden="true" />
+            </span>
             <div className="min-w-0 flex-1">
-              <div className="text-[11.5px] font-medium text-text-strong">{t('setupGuide.interceptCA.gatewayMaster')}</div>
-              <div className="mt-0.5 text-[10px] text-text-faint">{t(mitmSettings?.enabled ? 'setupGuide.interceptCA.masterEnabled' : 'setupGuide.interceptCA.masterDisabled')}</div>
+              <div className="text-[12px] font-medium text-text-strong">{t('setupGuide.interceptCA.gatewayMaster')}</div>
+              <div className="mt-0.5 text-[10.5px] leading-4 text-text-faint">{t(mitmSettings?.enabled ? 'setupGuide.interceptCA.masterEnabled' : 'setupGuide.interceptCA.masterDisabled')}</div>
             </div>
-            <Badge tone={mitmSettings?.enabled ? 'green' : 'amber'}>{mitmSettings?.enabled ? t('settings.mitmRunning') : t('settings.mitmStopped')}</Badge>
+            <div className="flex shrink-0 flex-col items-end gap-1.5">
+              <Badge tone={mitmSettings?.enabled ? 'green' : 'amber'}>{mitmSettings?.enabled ? t('settings.mitmRunning') : t('settings.mitmStopped')}</Badge>
+              {!mitmSettings?.enabled ? (
+                <Link to="/settings" className="zds-state-layer rounded-full px-2.5 py-1 text-[10.5px] font-medium text-primary">
+                  {t('setupGuide.interceptCA.openMITMSettings')}
+                </Link>
+              ) : null}
+            </div>
           </div>
-          {!mitmSettings?.enabled ? (
-            <Link to="/settings" className="zds-state-layer inline-flex h-10 items-center justify-center rounded-full bg-primary px-4 text-[11.5px] font-medium text-[var(--md-sys-color-on-primary)]">
-              {t('setupGuide.interceptCA.openMITMSettings')}
-            </Link>
-          ) : null}
         </div>
         <CardBody className="grid gap-6 sm:grid-cols-[190px_minmax(0,1fr)] lg:grid-cols-[190px_minmax(0,1fr)_minmax(280px,.72fr)]">
           <div className="flex flex-col gap-3">

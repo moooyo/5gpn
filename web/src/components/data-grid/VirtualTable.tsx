@@ -10,6 +10,10 @@ export interface VirtualTableProps<T> {
   rowHeight?: number
   /** Scroll-container height (CSS value or px number). */
   height?: number | string
+  /** Hide the sticky column header for compact stream-style lists. */
+  showHeader?: boolean
+  /** Keep row separators off for stream-style lists while preserving them for tables. */
+  showRowDividers?: boolean
   className?: string
 }
 
@@ -27,7 +31,15 @@ function columnFlexStyle<T>(column: Column<T, unknown>): { flex: string } {
  * virtualized list can't rely on native `<table>` layout, header + rows are
  * `display:flex` rows sharing the same per-column widths.
  */
-export function VirtualTable<T>({ columns, data, rowHeight = 44, height = '60vh', className }: VirtualTableProps<T>) {
+export function VirtualTable<T>({
+  columns,
+  data,
+  rowHeight = 44,
+  height = '60vh',
+  showHeader = true,
+  showRowDividers = true,
+  className,
+}: VirtualTableProps<T>) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const table = useReactTable({
@@ -47,7 +59,7 @@ export function VirtualTable<T>({ columns, data, rowHeight = 44, height = '60vh'
 
   return (
     <div ref={scrollRef} className={cn('overflow-auto', className)} style={{ height }} data-testid="virtual-scroll">
-      <div className="sticky top-0 z-10 flex bg-surface-container-low">
+      {showHeader ? <div className="sticky top-0 z-10 flex bg-surface-container-low">
         {table.getHeaderGroups().map((headerGroup) =>
           headerGroup.headers.map((header) => (
             <div
@@ -59,7 +71,7 @@ export function VirtualTable<T>({ columns, data, rowHeight = 44, height = '60vh'
             </div>
           )),
         )}
-      </div>
+      </div> : null}
       <div
         style={{ position: 'relative', height: virtualizer.getTotalSize() }}
         data-testid="virtual-spacer"
@@ -69,7 +81,10 @@ export function VirtualTable<T>({ columns, data, rowHeight = 44, height = '60vh'
           return (
             <div
               key={row.id}
-              className="flex border-b border-divider transition-colors hover:bg-surface-container-low"
+              className={cn(
+                'flex items-center transition-colors hover:bg-surface-container-low',
+                showRowDividers && 'border-b border-divider',
+              )}
               style={{
                 position: 'absolute',
                 top: 0,
@@ -80,7 +95,7 @@ export function VirtualTable<T>({ columns, data, rowHeight = 44, height = '60vh'
               }}
             >
               {row.getVisibleCells().map((cell) => (
-                <div key={cell.id} style={columnFlexStyle(cell.column)} className="min-w-0 px-4 py-3 text-[12px]">
+                <div key={cell.id} style={columnFlexStyle(cell.column)} className={cn('min-w-0 px-4 text-[12px]', rowHeight <= 36 ? 'py-1.5' : 'py-3')}>
                   {flexRender(cell.column.columnDef.cell, cell.getContext())}
                 </div>
               ))}

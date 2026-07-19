@@ -5,8 +5,8 @@ test('extension console imports and atomically toggles a Loon snapshot', async (
   await gotoWithMock(page, '/extensions')
 
   await expect(page.getByTestId('page-extensions')).toBeVisible()
-  await expect(page.getByTestId('mitm-readiness-notice')).toContainText('MITM 信任')
-  await expect(page.getByRole('link', { name: '打开配置向导' })).toHaveAttribute('href', '/setup-guide')
+  await expect(page.getByTestId('mitm-readiness-notice')).toContainText('5GPN CA 证书')
+  await expect(page.getByRole('link', { name: '前往配置向导安装' })).toHaveAttribute('href', '/setup-guide')
   const module = page.getByTestId('extension-mod-1234567890abcdef')
   await expect(module.getByText('Response Cleaner')).toBeVisible()
   await expect(module.getByText('MITM · 1')).toBeVisible()
@@ -14,10 +14,9 @@ test('extension console imports and atomically toggles a Loon snapshot', async (
   await module.getByRole('switch').click()
   await page.getByRole('dialog').getByRole('button', { name: '启用' }).click()
   await expect(module.getByRole('switch')).toBeChecked()
-  await expect(module.getByText('已配置、未生效')).toBeVisible()
-  await expect(module).toContainText('请先在设置中启用 MITM 总开关')
+  await expect(module.getByText('MITM 总开关未开')).toBeVisible()
 
-  await page.getByRole('button', { name: /导入插件/ }).click()
+  await page.getByRole('button', { name: '从 URL 安装' }).click()
   const dialog = page.getByRole('dialog')
   await expect(dialog.getByTestId('extension-import-automatic')).toContainText('loon://import')
   await expect(dialog.getByLabel('格式')).toHaveCount(0)

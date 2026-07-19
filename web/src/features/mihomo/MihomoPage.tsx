@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import type { ColumnDef } from '@tanstack/react-table'
-import { ExternalLinkIcon, MemoryIcon, PauseIcon, PlayIcon } from '../../components/icons'
+import { ExternalLinkIcon, PauseIcon, PlayIcon } from '../../components/icons'
 import { Badge, type BadgeTone, Button, Card, StatusDot } from '../../components/ds'
 import { VirtualTable } from '../../components/data-grid'
 import type { MihomoLogLine } from '../../lib/api/types'
@@ -27,10 +27,10 @@ function buildColumns(t: TFunction): ColumnDef<MihomoLogLine, unknown>[] {
     {
       accessorKey: 'type',
       header: t('mihomo.colLevel'),
-      meta: { width: 96 },
+      meta: { width: 86 },
       cell: (info) => {
         const level = String(info.getValue() ?? '')
-        return <Badge tone={LEVEL_TONE[level] ?? 'neutral'}>{level || '-'}</Badge>
+        return <Badge className="min-w-16 justify-center rounded-[6px] px-2 py-0.5 font-mono" tone={LEVEL_TONE[level] ?? 'neutral'}>{level || '-'}</Badge>
       },
     },
     {
@@ -43,7 +43,7 @@ function buildColumns(t: TFunction): ColumnDef<MihomoLogLine, unknown>[] {
   ]
 }
 
-/** 出口内核 (mihomo) — READ-ONLY monitoring: a health card (version/meta
+/** mihomo kernel — read-only monitoring: a health card (version/meta
  *  from the shared `useStatus()` poll, the bearer-protected
  *  `/api/mihomo/health` liveness check the Sidebar's kernel-status dot reads — see
  *  StatusContext.tsx) plus a virtualized live-log list streamed over the
@@ -90,16 +90,10 @@ export default function MihomoPage() {
 
   return (
     <div className="flex flex-col gap-4" data-testid="page-mihomo">
-      <Card variant="tonal" className="p-5 sm:p-6">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
-          <div className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-primary-container text-on-primary-container">
-            <MemoryIcon className="h-6 w-6" aria-hidden="true" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h1 className="text-[17px] font-medium text-text-strong">{t('mihomo.healthTitle')}</h1>
-            <p className="mt-1 text-[11.5px] text-text-faint">{t('mihomo.intro')}</p>
-          </div>
-          <div className="flex flex-wrap items-center gap-3">
+      <p className="px-1 text-[12.5px] leading-5 text-text-faint">{t('mihomo.intro')}</p>
+
+      <Card className="p-5 shadow-none">
+        <div className="flex flex-wrap items-center gap-3.5">
           {loading ? (
             <span className="text-[12.5px] text-text-faint">{t('mihomo.healthLoading')}</span>
           ) : !mihomoOk ? (
@@ -113,13 +107,13 @@ export default function MihomoPage() {
               {mihomo?.meta ? <Badge tone="indigo">{t('mihomo.metaBadge')}</Badge> : null}
             </>
           )}
+          <div className="min-w-2 flex-1" />
           {zashDomain ? (
-            <Button type="button" variant="elevated" onClick={() => void openZashboard()} disabled={openingZash} aria-busy={openingZash}>
+            <Button type="button" variant="secondary" onClick={() => void openZashboard()} disabled={openingZash} aria-busy={openingZash}>
               <ExternalLinkIcon className="h-4 w-4" aria-hidden="true" />
               {t('mihomo.openZashboard')}
             </Button>
           ) : null}
-          </div>
         </div>
       </Card>
 
@@ -142,14 +136,21 @@ export default function MihomoPage() {
         </button>
       </div>
 
-      <Card className="overflow-hidden p-0 shadow-none">
+      <Card className="overflow-hidden border-0 p-0 shadow-none">
         {lines.length === 0 ? (
           <div className="flex flex-col items-center gap-1 p-8 text-center">
             <div className="text-[13px] font-semibold text-text-strong">{t('mihomo.emptyTitle')}</div>
             <div className="text-[12px] text-text-faint">{t('mihomo.emptyHint')}</div>
           </div>
         ) : (
-          <VirtualTable columns={columns} data={lines} rowHeight={30} height="50vh" />
+          <VirtualTable
+            columns={columns}
+            data={lines}
+            rowHeight={34}
+            height={Math.min(520, Math.max(170, lines.length * 34))}
+            showHeader={false}
+            showRowDividers={false}
+          />
         )}
       </Card>
     </div>

@@ -148,4 +148,11 @@ describe('VirtualTable', () => {
       expect(spacer.style.height).not.toBe('')
     }
   })
+
+  it('supports a headerless stream without table row dividers', () => {
+    render(<VirtualTable columns={columns} data={rows} showHeader={false} showRowDividers={false} />)
+    expect(screen.queryByText('Name')).not.toBeInTheDocument()
+    const firstRow = screen.getByTestId('virtual-spacer').firstElementChild
+    if (firstRow) expect(firstRow).not.toHaveClass('border-b')
+  })
 })

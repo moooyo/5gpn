@@ -3,6 +3,7 @@ import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router-dom'
 import { Badge, Button, Card, ConfirmDialog, DataLine, Field, Input, Toggle, toast } from '../../components/ds'
+import { ShieldFilledIcon } from '../../components/icons'
 import { cn } from '../../lib/cn'
 import { THEME_CATALOG, useTheme, type ThemeName } from '../../lib/theme'
 import { api } from '../../lib/api/client'
@@ -692,9 +693,15 @@ export function EcsCard({ ecs, onSaved }: { ecs: ECSView | null; onSaved: (v: EC
 export function AboutStrip({ version, className }: { version?: string; className?: string }) {
   const { t } = useTranslation()
   return (
-    <Card variant="tonal" className={cn('flex items-center justify-between p-4', className)}>
-      <div className="text-[11.5px] text-text-faint">{t('settings.aboutTitle')}</div>
-      <div className="font-mono text-[11px] text-text-faint">
+    <Card className={cn('flex flex-col gap-3 border-0 p-4 shadow-none sm:flex-row sm:items-center', className)}>
+      <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-primary-container text-on-primary-container">
+        <ShieldFilledIcon className="h-5 w-5" aria-hidden="true" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="text-[13.5px] font-medium text-text-strong">{t('settings.aboutTitle')}</div>
+        <div className="mt-0.5 text-[10.5px] text-text-faint">{t('settings.aboutSubtitle')}</div>
+      </div>
+      <div className="shrink-0 rounded-[8px] bg-surface-container px-3 py-2 font-mono text-[10.5px] text-text-faint">
         {t('settings.aboutVersion', { version: version ?? '—' })}
       </div>
     </Card>

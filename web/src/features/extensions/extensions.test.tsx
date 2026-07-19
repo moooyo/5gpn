@@ -92,10 +92,10 @@ describe('ExtensionsPage', () => {
     expect(await screen.findByText('Response Cleaner')).toBeInTheDocument()
     expect(screen.getByText('部分兼容')).toBeInTheDocument()
     expect(screen.getByText('MITM · 1')).toBeInTheDocument()
-    expect(screen.getByText('1 条 Host 映射')).toBeInTheDocument()
+    expect(screen.getByText('Host · 1')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /打开插件目录/ })).toHaveAttribute('href', 'https://hub.kelee.one/')
-    expect(screen.getByTestId('mitm-readiness-notice')).toHaveTextContent('请确认客户端已建立 MITM 信任')
-    expect(screen.getByRole('link', { name: /打开配置向导/ })).toHaveAttribute('href', '/setup-guide')
+    expect(screen.getByTestId('mitm-readiness-notice')).toHaveTextContent('启用 MITM 前，请先安装并信任 5GPN CA 证书')
+    expect(screen.getByRole('link', { name: /前往配置向导安装/ })).toHaveAttribute('href', '/setup-guide')
     expect(screen.queryByRole('link', { name: /下载.*CA/ })).toBeNull()
   })
 
@@ -153,7 +153,7 @@ describe('ExtensionsPage', () => {
     renderPage()
     const card = await screen.findByTestId('extension-mod-1234567890abcdef')
     expect(within(card).getByRole('switch')).toBeDisabled()
-    await user.click(within(card).getByRole('button', { name: '配置' }))
+    await user.click(within(card).getByRole('button', { name: '参数 · 2' }))
     const dialog = await screen.findByRole('dialog')
     await user.type(within(dialog).getByLabelText('appName'), 'Drive')
     await user.selectOptions(within(dialog).getByLabelText('mode'), 'clean')
@@ -165,10 +165,19 @@ describe('ExtensionsPage', () => {
     }))
   })
 
+  it('opens built-in WLOC settings from the compact catalog card', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    const card = await screen.findByTestId('extension-builtin-wloc')
+    await user.click(within(card).getByRole('button', { name: '配置' }))
+    expect(await screen.findByTestId('wloc-intercept-card')).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Apple WLOC 响应改写' })).toBeInTheDocument()
+  })
+
   it('imports a Loon deep link without pre-import format, header, argument, or compatibility controls', async () => {
     const user = userEvent.setup()
     renderPage()
-    await user.click(await screen.findByRole('button', { name: /导入插件/ }))
+    await user.click(await screen.findByRole('button', { name: '从 URL 安装' }))
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByTestId('extension-import-automatic')).toHaveTextContent('loon://import')
     expect(within(dialog).queryByLabelText('格式')).toBeNull()
@@ -184,6 +193,15 @@ describe('ExtensionsPage', () => {
     }))
   })
 
+  it('opens the local-add action directly in paste or upload mode', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByRole('button', { name: '本地新增' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByLabelText('插件内容')).toBeInTheDocument()
+    expect(within(dialog).queryByLabelText('插件 URL')).toBeNull()
+  })
+
   it('keeps the import dialog open for structured incompatibility review', async () => {
     const imported = cloneView()
     imported.modules.push({
@@ -196,7 +214,7 @@ describe('ExtensionsPage', () => {
     vi.mocked(api.importInterceptModule).mockResolvedValueOnce(imported)
     const user = userEvent.setup()
     renderPage()
-    await user.click(await screen.findByRole('button', { name: /导入插件/ }))
+    await user.click(await screen.findByRole('button', { name: '从 URL 安装' }))
     const dialog = await screen.findByRole('dialog')
     await user.type(within(dialog).getByLabelText('插件 URL'), 'https://example.com/review.lpx')
     await user.click(within(dialog).getByRole('button', { name: '获取、固化并检查' }))

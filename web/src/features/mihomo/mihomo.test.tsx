@@ -115,6 +115,8 @@ describe('MihomoPage', () => {
 
     expect(await screen.findByText('v1.19.0')).toBeInTheDocument()
     expect(screen.getByText(i18n.t('mihomo.metaBadge'))).toBeInTheDocument()
+    expect(screen.getByText(i18n.t('mihomo.intro'))).toBeInTheDocument()
+    expect(screen.queryByText(i18n.t('mihomo.healthTitle'))).not.toBeInTheDocument()
   })
 
   it('renders emitted log lines live, and pause stops appending new ones', async () => {
@@ -135,6 +137,8 @@ describe('MihomoPage', () => {
       ws.emit({ type: 'warning', payload: 'second line' })
     })
     expect(await screen.findByText('second line')).toBeInTheDocument()
+    expect(screen.queryByText(i18n.t('mihomo.colLevel'))).not.toBeInTheDocument()
+    expect(screen.queryByText(i18n.t('mihomo.colMessage'))).not.toBeInTheDocument()
 
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: i18n.t('mihomo.pause') }))

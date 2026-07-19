@@ -36,17 +36,25 @@ export function BarChart({ categories, series, height = 160, className }: BarCha
         <line key={fraction} x1="8" x2={width - 8} y1={plotTop + plotHeight * fraction} y2={plotTop + plotHeight * fraction} stroke="var(--md-sys-color-outline-variant)" strokeDasharray="3 4" />
       ))}
       {categories.map((category, categoryIndex) => {
-        const totalBarsWidth = series.length * barWidth + Math.max(0, series.length - 1) * 6
+        const visibleSeries = series
+          .map((item, seriesIndex) => ({ seriesIndex, value: Math.max(0, item.data[categoryIndex] ?? 0) }))
+          .filter((item) => item.value > 0)
+        const visibleCount = Math.max(1, visibleSeries.length)
+        const totalBarsWidth = visibleCount * barWidth + Math.max(0, visibleCount - 1) * 6
         const start = categoryIndex * groupWidth + (groupWidth - totalBarsWidth) / 2
         return (
           <g key={category}>
             {series.map((item, seriesIndex) => {
               const value = Math.max(0, item.data[categoryIndex] ?? 0)
               const barHeight = (value / max) * plotHeight
+              const visibleIndex = visibleSeries.findIndex((entry) => entry.seriesIndex === seriesIndex)
+              const x = visibleIndex >= 0
+                ? start + visibleIndex * (barWidth + 6)
+                : categoryIndex * groupWidth + (groupWidth - barWidth) / 2
               return (
                 <rect
                   key={`${category}-${item.name}`}
-                  x={start + seriesIndex * (barWidth + 6)}
+                  x={x}
                   y={plotTop + plotHeight - barHeight}
                   width={barWidth}
                   height={barHeight}

@@ -76,7 +76,7 @@ test('iPhone extension layout stacks snapshots and keeps the import dialog in vi
   expect(importedBox!.y).toBeGreaterThan(builtInBox!.y + builtInBox!.height)
   await expectNoHorizontalOverflow(page)
 
-  await page.getByRole('button', { name: /导入插件|Import extension/ }).click()
+  await page.getByRole('button', { name: /从 URL 安装|Install from URL/ }).click()
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
   const dialogBox = await dialog.boundingBox()
