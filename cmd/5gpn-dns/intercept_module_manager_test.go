@@ -17,6 +17,10 @@ import (
 
 func testInterceptDocument(t *testing.T, modules ...interceptModuleSnapshot) (interceptConfigDocument, []byte) {
 	t.Helper()
+	executionOrder := make([]string, 0, len(modules))
+	for _, module := range modules {
+		executionOrder = append(executionOrder, module.ID)
+	}
 	document := interceptConfigDocument{
 		Version:  interceptConfigVersion,
 		Listen:   "127.0.0.1:18080",
@@ -27,14 +31,27 @@ func testInterceptDocument(t *testing.T, modules ...interceptModuleSnapshot) (in
 		UpstreamProxy: interceptProxyConfig{
 			Address: "127.0.0.1:17890", Username: "interception-upstream-unavailable", Password: "interception-upstream-unavailable-password",
 		},
-		MITM:    interceptMITMSettings{Enabled: true, HTTP2: true, QUICFallbackProtection: true},
-		Modules: modules,
+		MITM:           interceptMITMSettings{Enabled: true, HTTP2: true, QUICFallbackProtection: true},
+		ExecutionOrder: executionOrder,
+		Modules:        modules,
 	}
 	body, err := marshalInterceptDocument(document)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return document, body
+}
+
+func TestInterceptModuleViewAlwaysMarshalsNetworkOriginsAsArray(t *testing.T) {
+	view := interceptModuleViewFromSnapshot(testModuleSnapshot(), true, "")
+	view.NetworkOrigins = append([]string{}, view.NetworkOrigins...)
+	body, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"network_origins":[]`) {
+		t.Fatalf("empty network origins were omitted or null: %s", body)
+	}
 }
 
 func testModuleSnapshot() interceptModuleSnapshot {
@@ -54,11 +71,11 @@ func testModuleSnapshot() interceptModuleSnapshot {
 	}
 }
 
-func newInterceptManagerFixture(t *testing.T, module interceptModuleSnapshot) (*InterceptModuleManager, *fakeMihomoController, *Handler, string, string) {
+func newInterceptManagerFixture(t *testing.T, modules ...interceptModuleSnapshot) (*InterceptModuleManager, *fakeMihomoController, *Handler, string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	interceptPath := filepath.Join(dir, "config.json")
-	_, body := testInterceptDocument(t, module)
+	_, body := testInterceptDocument(t, modules...)
 	if err := os.WriteFile(interceptPath, body, 0o660); err != nil {
 		t.Fatal(err)
 	}
@@ -299,6 +316,21 @@ func TestInterceptModulesAPIListsAndTogglesThroughSharedManager(t *testing.T) {
 	if get.Code != http.StatusOK || len(view.Modules) != 1 || view.Modules[0].ID != module.ID {
 		t.Fatalf("module view = %+v status=%d", view, get.Code)
 	}
+	reorderBody, _ := json.Marshal(map[string]any{
+		"revision": view.Revision, "execution_order": []string{module.ID},
+	})
+	reorder := doAPI(fx.cs, http.MethodPut, "/api/interception/modules/reorder", reorderBody, fx.token, true)
+	view = decodeJSON[interceptModulesView](t, reorder)
+	if reorder.Code != http.StatusOK || !stringSlicesEqual(view.ExecutionOrder, []string{module.ID}) || view.Modules[0].ExecutionOrder != 1 {
+		t.Fatalf("reorder view = %+v status=%d", view, reorder.Code)
+	}
+	badReorderBody, _ := json.Marshal(map[string]any{
+		"revision": view.Revision, "execution_order": []string{"io.example.unknown"},
+	})
+	badReorder := doAPI(fx.cs, http.MethodPut, "/api/interception/modules/reorder", badReorderBody, fx.token, true)
+	if badReorder.Code != http.StatusBadRequest {
+		t.Fatalf("invalid reorder status=%d body=%s", badReorder.Code, badReorder.Body.String())
+	}
 	snapshotRecorder := doAPI(fx.cs, http.MethodGet, "/api/interception/modules/"+module.ID, nil, fx.token, true)
 	snapshot := decodeJSON[interceptModuleSnapshotView](t, snapshotRecorder)
 	if snapshot.SourceBody != module.Source.Body || len(snapshot.Scripts) != 1 {
@@ -309,6 +341,109 @@ func TestInterceptModulesAPIListsAndTogglesThroughSharedManager(t *testing.T) {
 	updated := decodeJSON[interceptModulesView](t, put)
 	if put.Code != http.StatusOK || !updated.Modules[0].Enabled || handler.decideName("api.example.com").Action != actionGateway {
 		t.Fatalf("updated modules = %+v status=%d", updated, put.Code)
+	}
+}
+
+func TestInterceptModuleRequiresExistingEgressGroupBeforeEnable(t *testing.T) {
+	module := testModuleSnapshot()
+	module.EgressGroupRequired = true
+	manager, _, _, _, mihomoPath := newInterceptManagerFixture(t, module)
+	manager.certWait = func(context.Context, string) error { return nil }
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.AvailableEgressGroups) != 2 || !containsString(view.AvailableEgressGroups, "DIRECT") || !containsString(view.AvailableEgressGroups, "Proxies") {
+		t.Fatalf("available egress groups = %v", view.AvailableEgressGroups)
+	}
+	enabled := true
+	if _, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled}); err == nil || !strings.Contains(err.Error(), "egress group") {
+		t.Fatalf("required egress group error = %v", err)
+	}
+	missing := "Missing"
+	if _, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, EgressGroup: &missing}); !errors.Is(err, errInterceptModuleConflict) {
+		t.Fatalf("missing egress group error = %v", err)
+	}
+	group := "Proxies"
+	updated, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{
+		Revision: view.Revision, Enabled: &enabled, EgressGroup: &group,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.Modules[0].Ready || updated.Modules[0].EgressGroup != group || updated.Modules[0].ExecutionOrder != 1 {
+		t.Fatalf("updated module = %+v", updated.Modules[0])
+	}
+	if !strings.Contains(mustRead(t, mihomoPath), "(IN-NAME,intercept-egress),(DOMAIN,api.example.com),(DST-PORT,443)),Proxies") {
+		t.Fatal("selected egress group rule was not published")
+	}
+}
+
+func TestInterceptModuleReorderChangesFirstMatchingEgress(t *testing.T) {
+	first := testModuleSnapshot()
+	first.EgressGroup = "Proxies"
+	second := testModuleSnapshot()
+	second.ID = "io.example.second"
+	second.Name = "Second extension"
+	second.EgressGroup = "DIRECT"
+	manager, _, _, _, mihomoPath := newInterceptManagerFixture(t, first, second)
+	manager.certWait = func(context.Context, string) error { return nil }
+	view, _ := manager.View()
+	enabled := true
+	view, err := manager.Update(context.Background(), first.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err = manager.Update(context.Background(), second.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := mustRead(t, mihomoPath)
+	selector := "(IN-NAME,intercept-egress),(DOMAIN,api.example.com),(DST-PORT,443))"
+	if strings.Count(before, selector) != 1 || !strings.Contains(before, selector+",Proxies") {
+		t.Fatalf("initial first-match rule is wrong:\n%s", before)
+	}
+	view, err = manager.Reorder(context.Background(), view.Revision, []string{second.ID, first.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := mustRead(t, mihomoPath)
+	if strings.Count(after, selector) != 1 || !strings.Contains(after, selector+",DIRECT") {
+		t.Fatalf("reordered first-match rule is wrong:\n%s", after)
+	}
+	if !stringSlicesEqual(view.ExecutionOrder, []string{second.ID, first.ID}) || view.Modules[0].ExecutionOrder != 1 || view.Modules[1].ExecutionOrder != 2 {
+		t.Fatalf("reordered view = %+v", view)
+	}
+}
+
+func TestInterceptExternalEgressGroupLossFailsClosed(t *testing.T) {
+	module := testModuleSnapshot()
+	module.EgressGroupRequired = true
+	module.EgressGroup = "Proxies"
+	manager, _, handler, _, mihomoPath := newInterceptManagerFixture(t, module)
+	manager.certWait = func(context.Context, string) error { return nil }
+	view, _ := manager.View()
+	enabled := true
+	view, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	external := strings.Replace(mustRead(t, mihomoPath), "name: Proxies", "name: Other", 1)
+	if err := os.WriteFile(mihomoPath, []byte(external), 0o660); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ReconcileMihomoText(external); err == nil || !strings.Contains(err.Error(), "egress-group-missing") {
+		t.Fatalf("external reconcile error = %v", err)
+	}
+	if handler.decideName("api.example.com").Action == actionGateway {
+		t.Fatal("DNS overlay remained active after its egress group disappeared")
+	}
+	view, err = manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Modules[0].Ready || view.Modules[0].Reason != "egress-group-missing" || len(view.ActiveCaptureHosts) != 0 {
+		t.Fatalf("failed-closed view = %+v", view)
 	}
 }
 

@@ -13,7 +13,7 @@ import (
 	"sync"
 )
 
-const interceptConfigVersion = 3
+const interceptConfigVersion = 4
 const maxInterceptConfigBytes = 16 << 20
 
 type interceptProxyConfig struct {
@@ -29,15 +29,16 @@ type interceptMITMSettings struct {
 }
 
 type interceptConfigDocument struct {
-	Version       int                       `json:"version"`
-	Listen        string                    `json:"listen"`
-	Username      string                    `json:"username"`
-	Password      string                    `json:"password"`
-	TLSCert       string                    `json:"tls_cert"`
-	TLSKey        string                    `json:"tls_key"`
-	UpstreamProxy interceptProxyConfig      `json:"upstream_proxy"`
-	MITM          interceptMITMSettings     `json:"mitm"`
-	Modules       []interceptModuleSnapshot `json:"modules,omitempty"`
+	Version        int                       `json:"version"`
+	Listen         string                    `json:"listen"`
+	Username       string                    `json:"username"`
+	Password       string                    `json:"password"`
+	TLSCert        string                    `json:"tls_cert"`
+	TLSKey         string                    `json:"tls_key"`
+	UpstreamProxy  interceptProxyConfig      `json:"upstream_proxy"`
+	MITM           interceptMITMSettings     `json:"mitm"`
+	ExecutionOrder []string                  `json:"execution_order"`
+	Modules        []interceptModuleSnapshot `json:"modules,omitempty"`
 }
 
 type interceptSettingsView struct {
@@ -114,10 +115,73 @@ func validateInterceptDocument(document interceptConfigDocument) error {
 	if err := validateInterceptModules(document.Modules); err != nil {
 		return err
 	}
+	if err := validateInterceptExecutionOrder(document.Modules, document.ExecutionOrder); err != nil {
+		return err
+	}
 	if len(certificateInterceptHosts(document)) > maxInterceptModuleHosts {
 		return fmt.Errorf("enabled interception modules exceed %d unique certificate hosts", maxInterceptModuleHosts)
 	}
 	return nil
+}
+
+func validateInterceptExecutionOrder(modules []interceptModuleSnapshot, executionOrder []string) error {
+	if executionOrder == nil {
+		return errors.New("execution_order is required")
+	}
+	if len(executionOrder) != len(modules) {
+		return errors.New("execution_order must contain every interception extension id exactly once")
+	}
+	moduleIDs := make(map[string]struct{}, len(modules))
+	for _, module := range modules {
+		moduleIDs[module.ID] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(executionOrder))
+	for _, id := range executionOrder {
+		if _, exists := moduleIDs[id]; !exists {
+			return fmt.Errorf("execution_order contains unknown interception extension id %q", id)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return fmt.Errorf("execution_order contains duplicate interception extension id %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
+func removeInterceptModuleID(ids []string, remove string) []string {
+	result := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id != remove {
+			result = append(result, id)
+		}
+	}
+	return result
+}
+
+func stringSlicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func orderedInterceptModules(document interceptConfigDocument) []interceptModuleSnapshot {
+	byID := make(map[string]interceptModuleSnapshot, len(document.Modules))
+	for _, module := range document.Modules {
+		byID[module.ID] = module
+	}
+	ordered := make([]interceptModuleSnapshot, 0, len(document.ExecutionOrder))
+	for _, id := range document.ExecutionOrder {
+		if module, exists := byID[id]; exists {
+			ordered = append(ordered, module)
+		}
+	}
+	return ordered
 }
 
 func interceptRevision(body []byte) string {

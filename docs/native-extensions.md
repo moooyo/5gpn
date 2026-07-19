@@ -19,6 +19,13 @@ metadata:
 
 permissions:
   persistentStorage: false
+  network:
+    origins:
+      - https://api.example.net
+
+requirements:
+  egressGroup:
+    required: true
 
 traffic:
   captureHosts:
@@ -85,10 +92,45 @@ only by another plugin.
 
 `upstreamMappings` changes only the sidecar's upstream target. It preserves the
 original HTTP Host and TLS SNI and rejects private, loopback, link-local, or
-otherwise unsafe IPv4 targets. The manifest has no egress selector. Every
-upstream TCP or UDP flow returns through authenticated mihomo
-`intercept-egress`, and the complete operator-owned mihomo configuration makes
-the final DIRECT or proxy choice.
+otherwise unsafe IPv4 targets. Every upstream TCP or UDP flow returns through
+authenticated mihomo `intercept-egress`.
+
+An extension may declare `requirements.egressGroup.required: true`, but the
+manifest and script never name or choose a group. The operator selects one
+existing mihomo proxy group or `DIRECT` before enable. Extensions without that requirement
+use the operator's terminal mihomo target unless an optional binding was
+selected. Ordered, host-and-port-scoped `intercept-egress` rules enforce the
+binding, and the first matching bound extension in the operator's explicit
+execution order wins. A missing or removed group makes the extension not ready
+and never silently falls back to DIRECT or another group.
+
+The same execution order is used for request and response actions, top to
+bottom. Every action sees the output produced by earlier actions in its phase.
+Import appends an extension to the order; delete removes it; the Console can
+move an extension up or down with a revision-protected complete reorder.
+
+## Origin-scoped network permission
+
+`permissions.network.origins` is an optional list of exact HTTP(S) origins. An
+origin contains only scheme, canonical hostname, and effective port. Userinfo,
+paths other than `/`, query, fragment, wildcard hosts, IP literals, localhost,
+and private names are rejected. Default ports are canonicalized, so
+`https://api.example.net` and `https://api.example.net:443` request the same
+permission.
+
+The permission is part of the immutable snapshot digest. It provides no global
+`fetch`, XHR, socket, DNS, cookie jar, or ambient credentials. Instead the
+script receives a synchronous `context.network.request` function. Every call
+must stay inside the declared origin set and travels through authenticated
+mihomo SOCKS5. Redirects are returned to the script rather than followed.
+Fixed process-wide time, body, header, call-count, and concurrency bounds apply;
+they are runtime safety limits, not manifest-controlled permissions.
+
+Once granted, a script can deliberately send any request, response, setting,
+or storage data visible to it to an approved origin. The enable review must list
+the origins and state this consequence explicitly. Adding or changing an
+origin changes the snapshot and therefore requires a disabled update followed
+by a new enable confirmation.
 
 ## Typed settings
 
@@ -155,6 +197,7 @@ context.response.headers      # response actions only
 context.response.body         # response actions only when requested
 context.settings
 context.storage               # only with persistentStorage permission
+context.network.request       # only with declared and confirmed origins
 ```
 
 A request action may return a `request` patch or a synthetic `response` patch.
@@ -166,6 +209,21 @@ boundary.
 Scripts receive console logging but no ambient network, filesystem, process,
 timer, socket, module loader, or Go object. The optional storage object exposes
 bounded `get`, `set`, `delete`, and `clear` methods scoped to the extension ID.
+When network origins were declared, a script can make a bounded request:
+
+```javascript
+const result = context.network.request({
+  url: 'https://api.example.net/v1/data',
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ value: context.settings.value }),
+})
+```
+
+The returned object contains `url`, `status`, `headers`, binary `body`, and a
+`text` field when the body is valid UTF-8. Non-2xx responses are returned
+normally; permission, transport, or bound failures throw an exception that the
+script may catch.
 
 ## Installation and updates
 
@@ -179,7 +237,10 @@ keep the same `metadata.id`. The Console displays the candidate version,
 snapshot digest, capture hosts, actions, and settings before replacement.
 Replacement requires the current extension to be disabled, refetches the exact
 reviewed digest, preserves still-valid setting values by key and type, and
-leaves the new snapshot disabled.
+leaves the new snapshot disabled. Enabling reviews capture hosts, network
+origins, execution position, and the current operator egress binding before
+the transaction publishes certificates, mihomo rules, sidecar state, and the
+DNS overlay.
 
 The project-maintained Apple WLOC example is available at:
 

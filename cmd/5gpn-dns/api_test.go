@@ -249,6 +249,7 @@ func TestAPIRoutes_RequireAuth(t *testing.T) {
 		{http.MethodGet, "/api/interception/settings"},
 		{http.MethodPut, "/api/interception/settings"},
 		{http.MethodGet, "/api/interception/modules"},
+		{http.MethodPut, "/api/interception/modules/reorder"},
 		{http.MethodGet, "/api/interception/modules/io.example.fixture"},
 		{http.MethodPost, "/api/interception/modules/import"},
 		{http.MethodPost, "/api/interception/modules/io.example.fixture/update-check"},

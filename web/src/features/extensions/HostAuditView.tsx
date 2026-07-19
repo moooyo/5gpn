@@ -11,6 +11,8 @@ interface HostEntry {
   active: boolean
   wildcard: boolean
   duplicate: boolean
+  egressWinner?: InterceptModule
+  egressShadowed: boolean
 }
 
 interface HostGroup {
@@ -35,9 +37,9 @@ export function HostAuditView({
 
   const activeHosts = useMemo(() => new Set(view.active_capture_hosts ?? []), [view.active_capture_hosts])
   const declarations = useMemo(() => {
-    const owners = new Map<string, number>()
+    const owners = new Map<string, InterceptModule[]>()
     for (const module of view.modules) {
-      for (const host of module.capture_hosts) owners.set(host, (owners.get(host) ?? 0) + 1)
+      for (const host of module.capture_hosts) owners.set(host, [...(owners.get(host) ?? []), module].sort((left, right) => left.execution_order - right.execution_order))
     }
     return owners
   }, [view.modules])
@@ -48,12 +50,17 @@ export function HostAuditView({
       if (moduleID && module.id !== moduleID) return []
       const moduleMatch = `${module.name} ${module.source_url ?? ''} ${module.source_digest}`.toLocaleLowerCase().includes(needle)
       const entries = module.capture_hosts
-        .map((host) => ({
-          host,
-          active: activeHosts.has(host),
-          wildcard: host.startsWith('*.'),
-          duplicate: (declarations.get(host) ?? 0) > 1,
-        }))
+        .map((host) => {
+          const egressWinner = declarations.get(host)?.find((owner) => owner.enabled && !!owner.egress_group)
+          return {
+            host,
+            active: activeHosts.has(host),
+            wildcard: host.startsWith('*.'),
+            duplicate: (declarations.get(host) ?? []).length > 1,
+            egressWinner,
+            egressShadowed: !!egressWinner && egressWinner.id !== module.id,
+          }
+        })
         .filter((entry) => {
           if (needle && !moduleMatch && !entry.host.toLocaleLowerCase().includes(needle)) return false
           if (filter === 'active') return entry.active
@@ -64,7 +71,7 @@ export function HostAuditView({
         })
         .sort((left, right) => Number(right.active) - Number(left.active) || Number(left.wildcard) - Number(right.wildcard) || left.host.localeCompare(right.host))
       return entries.length > 0 ? [{ module, entries }] : []
-    }).sort((left, right) => Number(right.module.ready) - Number(left.module.ready) || left.module.name.localeCompare(right.module.name))
+    }).sort((left, right) => left.module.execution_order - right.module.execution_order)
   }, [activeHosts, declarations, filter, moduleID, query, view.modules])
 
   const declaredCount = view.modules.reduce((count, module) => count + module.capture_hosts.length, 0)
@@ -148,6 +155,7 @@ export function HostAuditView({
                   <Badge tone={module.ready ? 'green' : module.enabled ? 'amber' : 'neutral'}>
                     {module.ready ? t('extensions.enabled') : module.enabled ? t('extensions.configured') : t('extensions.disabled')}
                   </Badge>
+                  <Badge>{t('extensions.hostAudit.executionOrder', { order: module.execution_order })}</Badge>
                   <Badge>{t('extensions.hostAudit.hostCount', { count: entries.length })}</Badge>
                 </div>
               </div>
@@ -160,6 +168,9 @@ export function HostAuditView({
                         {entry.wildcard ? t('extensions.hostAudit.wildcard') : t('extensions.hostAudit.exact')}
                       </Badge>
                       {entry.duplicate ? <Badge tone="amber">{t('extensions.hostAudit.duplicate')}</Badge> : null}
+                      {entry.duplicate ? <Badge tone="blue">{t('extensions.hostAudit.composed')}</Badge> : null}
+                      {entry.egressWinner?.id === module.id ? <Badge tone="green">{t('extensions.hostAudit.egressWinner', { group: entry.egressWinner.egress_group })}</Badge> : null}
+                      {entry.egressShadowed ? <Badge tone="amber">{t('extensions.hostAudit.egressShadowed', { name: entry.egressWinner?.name ?? '' })}</Badge> : null}
                       <Badge tone={entry.active ? 'green' : module.enabled ? 'amber' : 'neutral'}>
                         {entry.active ? t('extensions.hostAudit.running') : module.enabled ? t('extensions.hostAudit.notEffective') : t('extensions.disabled')}
                       </Badge>

@@ -105,6 +105,13 @@ export const api = {
           method: 'PUT',
           body: JSON.stringify(update),
         }),
+  reorderInterceptModules: (revision: string, executionOrder: string[]) =>
+    MOCK
+      ? mock.reorderInterceptModules(revision, executionOrder)
+      : apiFetch<T.InterceptModulesView>('/api/interception/modules/reorder', {
+          method: 'PUT',
+          body: JSON.stringify({ revision, execution_order: executionOrder }),
+        }),
   deleteInterceptModule: (id: string, revision: string) =>
     MOCK
       ? mock.deleteInterceptModule(id, revision)

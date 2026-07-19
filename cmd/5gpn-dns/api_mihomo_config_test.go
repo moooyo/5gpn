@@ -155,6 +155,45 @@ func TestMihomoConfigAPI_Get(t *testing.T) {
 	}
 }
 
+func TestMihomoConfigAPIRejectsDeletingBoundInterceptionGroup(t *testing.T) {
+	fx := newMihomoConfigTestFixture(t)
+	withJapan := strings.Replace(fx.golden,
+		"  - {name: Proxies, type: select, proxies: [DIRECT]}",
+		"  - {name: Proxies, type: select, proxies: [DIRECT]}\n  - {name: Japan, type: select, proxies: [DIRECT]}", 1)
+	if err := os.WriteFile(fx.store.Path(), []byte(withJapan), 0o660); err != nil {
+		t.Fatal(err)
+	}
+	module := testModuleSnapshot()
+	module.EgressGroup = "Japan"
+	interceptPath := filepath.Join(t.TempDir(), "config.json")
+	_, body := testInterceptDocument(t, module)
+	if err := os.WriteFile(interceptPath, body, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewInterceptModuleManager(NewInterceptConfigStore(interceptPath), nil, nil, fx.store, fx.infra, fx.tester, fx.ctl)
+	fx.cs.SetInterceptModuleManager(manager)
+
+	put := doAPI(fx.cs, http.MethodPut, "/api/mihomo/config",
+		mihomoConfigPutBody(t, fx.golden, mihomoConfigRevision(withJapan)), fx.token, true)
+	if put.Code != http.StatusConflict || !strings.Contains(put.Body.String(), "Japan") {
+		t.Fatalf("bound group deletion status=%d body=%s", put.Code, put.Body.String())
+	}
+	if got, _ := fx.store.Read(); got != withJapan || fx.tester.calls != 0 || fx.ctl.putCalls != 0 {
+		t.Fatalf("rejected deletion changed config or reached apply: tester=%d controller=%d", fx.tester.calls, fx.ctl.putCalls)
+	}
+
+	t.Setenv("DNS_BASE_DOMAIN", "5gpn.test")
+	t.Setenv("DNS_MIHOMO_LISTEN_IPS", "203.0.113.10")
+	t.Setenv("DNS_GATEWAY_IP", fx.infra.GatewayIP)
+	t.Setenv("DNS_MIHOMO_SECRET", "s3cr3t")
+	t.Setenv("DNS_PUBLIC_IP", "203.0.113.10")
+	reset := doAPI(fx.cs, http.MethodPost, "/api/mihomo/config/reset",
+		mihomoConfigResetBody(t, mihomoConfigRevision(withJapan)), fx.token, true)
+	if reset.Code != http.StatusConflict || !strings.Contains(reset.Body.String(), "Japan") {
+		t.Fatalf("bound group reset status=%d body=%s", reset.Code, reset.Body.String())
+	}
+}
+
 func TestMihomoConfigAPI_Get_Unwired(t *testing.T) {
 	cs, token := newAPITestServer(t) // SetMihomoConfig never called
 	rec := doAPI(cs, http.MethodGet, "/api/mihomo/config", nil, token, true)
@@ -398,6 +437,45 @@ func TestMihomoConfigAPI_Put_ApplyFails_DiskStillUpdated(t *testing.T) {
 	}
 	if onDisk != newText {
 		t.Fatalf("disk must reflect the new (validated) text even though hot-apply failed")
+	}
+}
+
+func TestMihomoConfigAPI_AmbiguousHotApplyFailureWithdrawsInterceptionOverlay(t *testing.T) {
+	fx := newMihomoConfigTestFixture(t)
+	module := testModuleSnapshot()
+	interceptPath := filepath.Join(t.TempDir(), "config.json")
+	_, interceptBody := testInterceptDocument(t, module)
+	if err := os.WriteFile(interceptPath, interceptBody, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	handler := &Handler{}
+	manager := NewInterceptModuleManager(
+		NewInterceptConfigStore(interceptPath), handler, nil, fx.store, fx.infra, fx.tester, fx.ctl,
+	)
+	fx.cs.SetInterceptModuleManager(manager)
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	if _, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled}); err != nil {
+		t.Fatal(err)
+	}
+	if handler.decideName("api.example.com").Action != actionGateway {
+		t.Fatal("interception overlay was not active before the ambiguous apply")
+	}
+	current, err := fx.store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx.ctl.putErr = errors.New("controller response lost after request transmission")
+	recorder := doAPI(fx.cs, http.MethodPut, "/api/mihomo/config",
+		mihomoConfigPutBody(t, fx.golden, mihomoConfigRevision(current)), fx.token, true)
+	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), `"written":true`) {
+		t.Fatalf("ambiguous apply status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if handler.decideName("api.example.com").Action == actionGateway {
+		t.Fatal("interception overlay remained active after an ambiguous apply removed its routing block")
 	}
 }
 

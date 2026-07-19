@@ -15,6 +15,7 @@ vi.mock('../../lib/api/client', () => ({
     applyInterceptModuleUpdate: vi.fn(),
     putInterceptModule: vi.fn(),
     deleteInterceptModule: vi.fn(),
+    reorderInterceptModules: vi.fn(),
     getMITMSettings: vi.fn(),
   },
 }))
@@ -35,7 +36,7 @@ const WLOC: InterceptModule = {
     { key: 'location', type: 'location', label: 'Target location', required: true, value: { accuracy: 25 } },
     { key: 'failClosed', type: 'boolean', label: 'Block on transformation failure', required: true, value: true },
   ],
-  persistent_storage: false,
+  persistent_storage: false, execution_order: 1, network_origins: [], egress_group_required: false,
   source_url: 'https://raw.githubusercontent.com/moooyo/5gpn/main/extensions/apple-wloc/extension.yaml',
   source_digest: 'a'.repeat(64), snapshot_digest: 'a'.repeat(64), imported_at: '2026-07-18T00:00:00Z',
 }
@@ -46,12 +47,15 @@ const CLEANER: InterceptModule = {
   capture_hosts: ['api.example.com'], script_count: 1, settings: [], persistent_storage: false,
   upstream_mappings: [{ host: 'api.example.com', target: 'origin.example.net' }],
   source_url: 'https://extensions.example.test/clean.yaml', source_digest: 'b'.repeat(64), snapshot_digest: 'b'.repeat(64), imported_at: '2026-07-18T00:00:00Z',
+  execution_order: 2, network_origins: ['https://origin.example.net'], egress_group_required: true, egress_group: 'Proxies',
 }
 
 const VIEW: InterceptModulesView = {
   revision: '1'.repeat(64),
   catalog_url: 'https://github.com/moooyo/5gpn/tree/main/extensions',
   active_capture_hosts: [],
+  execution_order: [WLOC.id, CLEANER.id],
+  available_egress_groups: ['DIRECT', 'Proxies'],
   modules: [WLOC, CLEANER],
 }
 
@@ -84,6 +88,13 @@ beforeEach(async () => {
     return next
   })
   vi.mocked(api.deleteInterceptModule).mockResolvedValue(cloneView())
+  vi.mocked(api.reorderInterceptModules).mockImplementation(async (_revision, order) => {
+    const next = cloneView()
+    const byID = new Map(next.modules.map((module) => [module.id, module]))
+    next.execution_order = order
+    next.modules = order.map((id, index) => ({ ...byID.get(id)!, execution_order: index + 1 }))
+    return next
+  })
   vi.mocked(api.getInterceptModuleSnapshot).mockResolvedValue({ id: CLEANER.id, name: CLEANER.name, source_digest: CLEANER.source_digest, source_body: 'apiVersion: 5gpn.io/v1', scripts: [] })
 })
 
@@ -103,7 +114,10 @@ describe('ExtensionsPage native extension contract', () => {
     renderPage()
     const card = await screen.findByTestId(`extension-${CLEANER.id}`)
     await user.click(within(card).getByRole('switch'))
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '启用' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('可将其看到的已解密请求、响应、设置和存储数据发送到以下 origins')
+    expect(dialog).toHaveTextContent('https://origin.example.net')
+    await user.click(within(dialog).getByRole('button', { name: '启用' }))
     await waitFor(() => expect(api.putInterceptModule).toHaveBeenCalledWith(CLEANER.id, { revision: VIEW.revision, enabled: true }))
   })
 
@@ -161,6 +175,65 @@ describe('ExtensionsPage native extension contract', () => {
     await user.type(screen.getByTestId('host-audit-search'), 'api.example.com')
     expect(screen.getByTestId(`host-group-${CLEANER.id}`)).toBeInTheDocument()
     expect(screen.queryByTestId(`host-group-${WLOC.id}`)).not.toBeInTheDocument()
+  })
+
+  it('moves an extension with keyboard-accessible order controls', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    const card = await screen.findByTestId(`extension-${CLEANER.id}`)
+    await user.click(within(card).getByRole('button', { name: '上移 Response Cleaner' }))
+    await waitFor(() => expect(api.reorderInterceptModules).toHaveBeenCalledWith(VIEW.revision, [CLEANER.id, WLOC.id]))
+  })
+
+  it('marks a missing required egress group as not ready and prevents enable', async () => {
+    const missing = cloneView()
+    const module = missing.modules.find((candidate) => candidate.id === CLEANER.id)!
+    module.egress_group = 'RemovedGroup'
+    vi.mocked(api.getInterceptModules).mockResolvedValueOnce(missing)
+    renderPage()
+    const card = await screen.findByTestId(`extension-${CLEANER.id}`)
+    expect(within(card).getByText('出口组缺失')).toBeInTheDocument()
+    expect(within(card).getByRole('switch')).toBeDisabled()
+  })
+
+  it('configures a required egress group even when the extension has no typed settings', async () => {
+    const user = userEvent.setup()
+    const unbound = cloneView()
+    const module = unbound.modules.find((candidate) => candidate.id === CLEANER.id)!
+    module.egress_group = undefined
+    vi.mocked(api.getInterceptModules).mockResolvedValueOnce(unbound)
+    renderPage()
+    const card = await screen.findByTestId(`extension-${CLEANER.id}`)
+    await user.click(within(card).getByRole('button', { name: '配置' }))
+    const dialog = await screen.findByRole('dialog', { name: /Response Cleaner/ })
+    await user.click(within(dialog).getByRole('combobox'))
+    await user.click(await screen.findByRole('option', { name: 'Proxies' }))
+    await user.click(within(dialog).getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(api.putInterceptModule).toHaveBeenCalledWith(CLEANER.id, {
+      revision: VIEW.revision,
+      settings: {},
+      egress_group: 'Proxies',
+    }))
+  })
+
+  it('clears an optional egress binding back to the terminal target', async () => {
+    const user = userEvent.setup()
+    const optional = cloneView()
+    const module = optional.modules.find((candidate) => candidate.id === CLEANER.id)!
+    module.egress_group_required = false
+    vi.mocked(api.getInterceptModules).mockResolvedValueOnce(optional)
+    renderPage()
+    const card = await screen.findByTestId(`extension-${CLEANER.id}`)
+    await user.click(within(card).getByRole('button', { name: '配置' }))
+    const dialog = await screen.findByRole('dialog', { name: /Response Cleaner/ })
+    await user.click(within(dialog).getByRole('combobox'))
+    await user.click(await screen.findByRole('option', { name: '使用 mihomo 终端默认出口' }))
+    await user.click(within(dialog).getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(api.putInterceptModule).toHaveBeenCalledWith(CLEANER.id, {
+      revision: VIEW.revision,
+      settings: {},
+      egress_group: '',
+    }))
   })
 
   it('reviews a same-id native update before replacement', async () => {

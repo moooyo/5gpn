@@ -9,10 +9,14 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -31,6 +35,7 @@ const (
 	maxInterceptModulePattern = 4096
 	maxInterceptResourceURL   = 4096
 	maxInterceptSettingValue  = 64 << 10
+	maxInterceptEgressGroup   = 128
 )
 
 var nativeExtensionIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{1,126}[a-z0-9])$`)
@@ -86,44 +91,53 @@ type interceptHostMapping struct {
 }
 
 type interceptModuleSnapshot struct {
-	ID                string                   `json:"id"`
-	Version           string                   `json:"extension_version"`
-	Name              string                   `json:"name"`
-	Description       string                   `json:"description,omitempty"`
-	Enabled           bool                     `json:"enabled"`
-	ImportedAt        string                   `json:"imported_at"`
-	Source            interceptModuleSource    `json:"source"`
-	CaptureHosts      []string                 `json:"capture_hosts"`
-	HostMappings      []interceptHostMapping   `json:"upstream_mappings,omitempty"`
-	Settings          []interceptModuleSetting `json:"settings,omitempty"`
-	Scripts           []interceptScriptRule    `json:"actions,omitempty"`
-	PersistentStorage bool                     `json:"persistent_storage"`
+	ID                  string                   `json:"id"`
+	Version             string                   `json:"extension_version"`
+	Name                string                   `json:"name"`
+	Description         string                   `json:"description,omitempty"`
+	Enabled             bool                     `json:"enabled"`
+	ImportedAt          string                   `json:"imported_at"`
+	Source              interceptModuleSource    `json:"source"`
+	CaptureHosts        []string                 `json:"capture_hosts"`
+	HostMappings        []interceptHostMapping   `json:"upstream_mappings,omitempty"`
+	Settings            []interceptModuleSetting `json:"settings,omitempty"`
+	Scripts             []interceptScriptRule    `json:"actions,omitempty"`
+	PersistentStorage   bool                     `json:"persistent_storage"`
+	NetworkOrigins      []string                 `json:"network_origins"`
+	EgressGroupRequired bool                     `json:"egress_group_required"`
+	EgressGroup         string                   `json:"egress_group,omitempty"`
 }
 
 type interceptModuleView struct {
-	ID                string                   `json:"id"`
-	Version           string                   `json:"extension_version"`
-	Name              string                   `json:"name"`
-	Description       string                   `json:"description,omitempty"`
-	Enabled           bool                     `json:"enabled"`
-	Ready             bool                     `json:"ready"`
-	Reason            string                   `json:"reason,omitempty"`
-	CaptureHosts      []string                 `json:"capture_hosts"`
-	ScriptCount       int                      `json:"script_count"`
-	Settings          []interceptModuleSetting `json:"settings,omitempty"`
-	HostMappings      []interceptHostMapping   `json:"upstream_mappings,omitempty"`
-	PersistentStorage bool                     `json:"persistent_storage"`
-	SourceURL         string                   `json:"source_url,omitempty"`
-	SourceDigest      string                   `json:"source_digest"`
-	SnapshotDigest    string                   `json:"snapshot_digest"`
-	ImportedAt        string                   `json:"imported_at,omitempty"`
+	ID                  string                   `json:"id"`
+	Version             string                   `json:"extension_version"`
+	Name                string                   `json:"name"`
+	Description         string                   `json:"description,omitempty"`
+	Enabled             bool                     `json:"enabled"`
+	Ready               bool                     `json:"ready"`
+	Reason              string                   `json:"reason,omitempty"`
+	CaptureHosts        []string                 `json:"capture_hosts"`
+	ScriptCount         int                      `json:"script_count"`
+	Settings            []interceptModuleSetting `json:"settings,omitempty"`
+	HostMappings        []interceptHostMapping   `json:"upstream_mappings,omitempty"`
+	PersistentStorage   bool                     `json:"persistent_storage"`
+	ExecutionOrder      int                      `json:"execution_order"`
+	NetworkOrigins      []string                 `json:"network_origins"`
+	EgressGroupRequired bool                     `json:"egress_group_required"`
+	EgressGroup         string                   `json:"egress_group,omitempty"`
+	SourceURL           string                   `json:"source_url,omitempty"`
+	SourceDigest        string                   `json:"source_digest"`
+	SnapshotDigest      string                   `json:"snapshot_digest"`
+	ImportedAt          string                   `json:"imported_at,omitempty"`
 }
 
 type interceptModulesView struct {
-	Revision           string                `json:"revision"`
-	CatalogURL         string                `json:"catalog_url"`
-	Modules            []interceptModuleView `json:"modules"`
-	ActiveCaptureHosts []string              `json:"active_capture_hosts"`
+	Revision              string                `json:"revision"`
+	CatalogURL            string                `json:"catalog_url"`
+	ExecutionOrder        []string              `json:"execution_order"`
+	AvailableEgressGroups []string              `json:"available_egress_groups"`
+	Modules               []interceptModuleView `json:"modules"`
+	ActiveCaptureHosts    []string              `json:"active_capture_hosts"`
 }
 
 type interceptModuleUpdateCheckView struct {
@@ -218,6 +232,15 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 		if err := validateInterceptHostPattern(host); err != nil {
 			return err
 		}
+	}
+	if err := validateInterceptNetworkOrigins(module.NetworkOrigins); err != nil {
+		return err
+	}
+	if err := validateInterceptEgressGroupBinding(module.EgressGroup); err != nil {
+		return err
+	}
+	if module.Enabled && module.EgressGroupRequired && module.EgressGroup == "" {
+		return errors.New("egress_group is required before enable")
 	}
 	if len(module.Scripts)+len(module.HostMappings) == 0 {
 		return errors.New("extension has no actions or upstream mappings")
@@ -517,6 +540,126 @@ func validInterceptHostTarget(value string) bool {
 	return isValidDomain(value) && value != "localhost" && !strings.HasSuffix(value, ".local")
 }
 
+type interceptNetworkOriginTarget struct {
+	Host string
+	Port int
+}
+
+func normalizeInterceptNetworkOrigins(raw []string) ([]string, error) {
+	if len(raw) > maxInterceptModuleHosts {
+		return nil, fmt.Errorf("at most %d network origins are allowed", maxInterceptModuleHosts)
+	}
+	origins := make([]string, 0, len(raw))
+	for index, value := range raw {
+		origin, err := normalizeInterceptNetworkOrigin(value)
+		if err != nil {
+			return nil, fmt.Errorf("origin %d: %w", index, err)
+		}
+		origins = append(origins, origin)
+	}
+	return uniqueSortedStrings(origins), nil
+}
+
+func validateInterceptNetworkOrigins(origins []string) error {
+	if len(origins) > maxInterceptModuleHosts {
+		return fmt.Errorf("network_origins exceeds %d entries", maxInterceptModuleHosts)
+	}
+	if !sort.StringsAreSorted(origins) {
+		return errors.New("network_origins must be canonical and sorted")
+	}
+	for index, origin := range origins {
+		canonical, err := normalizeInterceptNetworkOrigin(origin)
+		if err != nil {
+			return fmt.Errorf("network origin %d: %w", index, err)
+		}
+		if canonical != origin {
+			return fmt.Errorf("network origin %d is not canonical", index)
+		}
+		if index > 0 && origins[index-1] == origin {
+			return fmt.Errorf("duplicate network origin %q", origin)
+		}
+	}
+	return nil
+}
+
+func normalizeInterceptNetworkOrigin(raw string) (string, error) {
+	canonical, _, err := parseInterceptNetworkOrigin(raw)
+	return canonical, err
+}
+
+func interceptNetworkOriginHostPort(origin string) (string, int, error) {
+	canonical, target, err := parseInterceptNetworkOrigin(origin)
+	if err != nil {
+		return "", 0, err
+	}
+	if canonical != origin {
+		return "", 0, errors.New("network origin is not canonical")
+	}
+	return target.Host, target.Port, nil
+}
+
+func parseInterceptNetworkOrigin(raw string) (string, interceptNetworkOriginTarget, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" || len(value) > maxInterceptResourceURL {
+		return "", interceptNetworkOriginTarget{}, fmt.Errorf("origin must contain 1 to %d bytes", maxInterceptResourceURL)
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return "", interceptNetworkOriginTarget{}, fmt.Errorf("invalid origin: %w", err)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", interceptNetworkOriginTarget{}, errors.New("origin scheme must be http or https")
+	}
+	if parsed.Opaque != "" || parsed.User != nil || parsed.Hostname() == "" {
+		return "", interceptNetworkOriginTarget{}, errors.New("origin must have a host and no userinfo")
+	}
+	if (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || strings.Contains(value, "#") {
+		return "", interceptNetworkOriginTarget{}, errors.New("origin must not contain a path, query, or fragment")
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	if strings.Contains(host, "*") || net.ParseIP(host) != nil || !isValidDomain(host) || host == "localhost" || strings.HasSuffix(host, ".local") {
+		return "", interceptNetworkOriginTarget{}, errors.New("origin host must be an exact public DNS hostname")
+	}
+	if strings.HasSuffix(parsed.Host, ":") {
+		return "", interceptNetworkOriginTarget{}, errors.New("origin port is empty")
+	}
+	defaultPort := 80
+	if scheme == "https" {
+		defaultPort = 443
+	}
+	port := defaultPort
+	if parsed.Port() != "" {
+		port, err = strconv.Atoi(parsed.Port())
+		if err != nil || port < 1 || port > 65535 {
+			return "", interceptNetworkOriginTarget{}, errors.New("origin port must be between 1 and 65535")
+		}
+	}
+	canonical := scheme + "://" + host
+	if port != defaultPort {
+		canonical += ":" + strconv.Itoa(port)
+	}
+	return canonical, interceptNetworkOriginTarget{Host: host, Port: port}, nil
+}
+
+func validateInterceptEgressGroupBinding(group string) error {
+	if group == "" {
+		return nil
+	}
+	if group == interceptTerminalMatchTarget {
+		return errors.New("egress_group uses a reserved internal name")
+	}
+	if !utf8.ValidString(group) || strings.TrimSpace(group) != group || len(group) > maxInterceptEgressGroup {
+		return fmt.Errorf("egress_group must contain 1 to %d canonical bytes", maxInterceptEgressGroup)
+	}
+	for _, r := range group {
+		if r == ',' || unicode.IsControl(r) {
+			return errors.New("egress_group must not contain commas or control characters")
+		}
+	}
+	return nil
+}
+
 func validInterceptModuleID(id string) bool {
 	return len(id) >= 3 && len(id) <= 40 && nativeExtensionIDPattern.MatchString(id)
 }
@@ -642,6 +785,7 @@ func sha256Hex(body []byte) string {
 func interceptModuleSnapshotDigest(module interceptModuleSnapshot) string {
 	canonical := module
 	canonical.Enabled = false
+	canonical.EgressGroup = ""
 	canonical.ImportedAt = ""
 	canonical.Source.Body = ""
 	canonical.Settings = append([]interceptModuleSetting(nil), module.Settings...)

@@ -71,12 +71,12 @@ check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(DST-PORT,80\)\),REJECT' 'conso
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__,DIRECT'             'public console SNI direct route'
 check "$T" 'AND,\(\(DOMAIN,__ZASH_DOMAIN__\),\(NETWORK,UDP\)\),REJECT' 'zashboard UDP fast-reject rule'
 check "$T" 'AND,\(\(NETWORK,UDP\),\(DST-PORT,443\)\),REJECT' 'HTTP3/QUIC UDP 443 block enabled by default'
-bypass_line="$(grep -nF '  - IN-NAME,intercept-egress,Proxies' "$root/$T" | cut -d: -f1 || true)"
+egress_guard_line="$(grep -nF '  - IN-NAME,intercept-egress,REJECT' "$root/$T" | cut -d: -f1 || true)"
 quic_block_line="$(grep -nF '  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' "$root/$T" | cut -d: -f1 || true)"
 match_line="$(grep -nF '  - MATCH,Proxies' "$root/$T" | cut -d: -f1 || true)"
-if [ -n "$bypass_line" ] && [ -n "$quic_block_line" ] && [ -n "$match_line" ] \
-   && [ "$bypass_line" -lt "$quic_block_line" ] && [ "$quic_block_line" -lt "$match_line" ]; then
-    echo 'ok: QUIC block follows sidecar egress bypass and precedes terminal policy'
+if [ -n "$egress_guard_line" ] && [ -n "$quic_block_line" ] && [ -n "$match_line" ] \
+   && [ "$egress_guard_line" -lt "$quic_block_line" ] && [ "$quic_block_line" -lt "$match_line" ]; then
+    echo 'ok: QUIC block follows sidecar fail-closed egress guard and precedes terminal policy'
 else
     echo 'FAIL: QUIC block ordering is unsafe'
     FAIL=1

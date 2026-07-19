@@ -108,9 +108,12 @@ function interceptModulesView(): T.InterceptModulesView {
   return {
     ...fixtures.interceptModules,
     active_capture_hosts: [...fixtures.interceptModules.active_capture_hosts],
+    execution_order: [...fixtures.interceptModules.execution_order],
+    available_egress_groups: [...fixtures.interceptModules.available_egress_groups],
     modules: fixtures.interceptModules.modules.map((module) => ({
       ...module,
       capture_hosts: [...module.capture_hosts],
+      network_origins: [...module.network_origins],
       settings: module.settings?.map((setting) => ({ ...setting })),
       upstream_mappings: module.upstream_mappings?.map((mapping) => ({ ...mapping })),
     })),
@@ -127,13 +130,19 @@ function refreshActiveInterceptHosts(): void {
   const masterEnabled = fixtures.mitmSettings.enabled
   fixtures.interceptModules.active_capture_hosts = masterEnabled
     ? Array.from(
-        new Set(fixtures.interceptModules.modules.filter((module) => module.enabled).flatMap((module) => module.capture_hosts)),
+        new Set(fixtures.interceptModules.modules.filter((module) => module.enabled &&
+          (!module.egress_group_required || !!module.egress_group) &&
+          (!module.egress_group || fixtures.interceptModules.available_egress_groups.includes(module.egress_group)))
+          .flatMap((module) => module.capture_hosts)),
       ).sort()
     : []
   for (const module of fixtures.interceptModules.modules) {
     if (!masterEnabled) {
       module.ready = false
       module.reason = 'mitm-disabled'
+    } else if (module.egress_group_required && (!module.egress_group || !fixtures.interceptModules.available_egress_groups.includes(module.egress_group))) {
+      module.ready = false
+      module.reason = 'egress-group-missing'
     } else if (module.reason !== 'settings-required') {
       module.ready = true
       module.reason = undefined
@@ -186,7 +195,11 @@ export async function importInterceptModule(request: T.InterceptModuleImport): P
     source_digest: 'c'.repeat(64),
     snapshot_digest: 'c'.repeat(64),
     imported_at: new Date().toISOString(),
+    execution_order: fixtures.interceptModules.modules.length + 1,
+    network_origins: [],
+    egress_group_required: false,
   })
+  fixtures.interceptModules.execution_order = fixtures.interceptModules.modules.map((module) => module.id)
   advanceInterceptRevision()
   refreshActiveInterceptHosts()
   return interceptModulesView()
@@ -247,8 +260,25 @@ export async function putInterceptModule(id: string, update: T.InterceptModuleUp
     module.ready = module.settings.every((setting) => !setting.required || setting.value !== undefined)
     module.reason = module.ready ? undefined : 'settings-required'
   }
+  if (update.egress_group !== undefined) module.egress_group = update.egress_group
   advanceInterceptRevision()
   refreshActiveInterceptHosts()
+  return interceptModulesView()
+}
+
+export async function reorderInterceptModules(revision: string, executionOrder: string[]): Promise<T.InterceptModulesView> {
+  await delay(150)
+  if (revision !== fixtures.interceptModules.revision) {
+    throw new ApiError(409, 'The interception module registry changed. Refresh and try again.')
+  }
+  const modules = fixtures.interceptModules.modules
+  if (executionOrder.length !== modules.length || new Set(executionOrder).size !== modules.length || executionOrder.some((id) => !modules.some((module) => module.id === id))) {
+    throw new ApiError(400, 'Execution order must include every installed extension exactly once.')
+  }
+  const byID = new Map(modules.map((module) => [module.id, module]))
+  fixtures.interceptModules.modules.splice(0, modules.length, ...executionOrder.map((id, index) => ({ ...byID.get(id)!, execution_order: index + 1 })))
+  fixtures.interceptModules.execution_order = [...executionOrder]
+  advanceInterceptRevision()
   return interceptModulesView()
 }
 
@@ -261,6 +291,10 @@ export async function deleteInterceptModule(id: string, revision: string): Promi
   if (index < 0) throw new ApiError(404, 'Interception module not found.')
   if (fixtures.interceptModules.modules[index].enabled) throw new ApiError(400, 'Disable the module before deleting it.')
   fixtures.interceptModules.modules.splice(index, 1)
+  fixtures.interceptModules.execution_order = fixtures.interceptModules.modules.map((module, order) => {
+    module.execution_order = order + 1
+    return module.id
+  })
   advanceInterceptRevision()
   refreshActiveInterceptHosts()
   return interceptModulesView()

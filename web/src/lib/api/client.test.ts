@@ -152,7 +152,7 @@ describe('api client — MITM runtime settings', () => {
 })
 
 describe('api client — interception modules', () => {
-  it('maps list, snapshot, import, update, and delete to the authenticated module API', async () => {
+  it('maps list, snapshot, import, update, reorder, and delete to the authenticated module API', async () => {
     vi.stubEnv('VITE_API_MOCK', '0')
     vi.resetModules()
     const view = { revision: 'r1', catalog_url: 'https://github.com/moooyo/5gpn/tree/main/extensions', active_capture_hosts: [], modules: [] }
@@ -163,6 +163,7 @@ describe('api client — interception modules', () => {
       .mockResolvedValueOnce(jsonResp(201, view))
       .mockResolvedValueOnce(jsonResp(200, view))
       .mockResolvedValueOnce(jsonResp(200, view))
+      .mockResolvedValueOnce(jsonResp(200, view))
     vi.stubGlobal('fetch', f)
     const { api } = await import('./client')
     const request = { revision: 'r1', url: 'https://example.com/extension.yaml' }
@@ -171,6 +172,7 @@ describe('api client — interception modules', () => {
     await api.getInterceptModuleSnapshot('io.example.fixture')
     await api.importInterceptModule(request)
     await api.putInterceptModule('io.example.fixture', { revision: 'r1', settings: { mode: 'clean' } })
+    await api.reorderInterceptModules('r1', ['io.example.fixture'])
     await api.deleteInterceptModule('io.example.fixture', 'r1')
 
     expect(f.mock.calls.map((call) => call[0])).toEqual([
@@ -178,13 +180,16 @@ describe('api client — interception modules', () => {
       '/api/interception/modules/io.example.fixture',
       '/api/interception/modules/import',
       '/api/interception/modules/io.example.fixture',
+      '/api/interception/modules/reorder',
       '/api/interception/modules/io.example.fixture',
     ])
     expect(f.mock.calls[2][1].method).toBe('POST')
     expect(JSON.parse(f.mock.calls[2][1].body as string)).toEqual(request)
     expect(f.mock.calls[3][1].method).toBe('PUT')
     expect(JSON.parse(f.mock.calls[3][1].body as string)).toEqual({ revision: 'r1', settings: { mode: 'clean' } })
-    expect(f.mock.calls[4][1].method).toBe('DELETE')
+    expect(f.mock.calls[4][1].method).toBe('PUT')
+    expect(JSON.parse(f.mock.calls[4][1].body as string)).toEqual({ revision: 'r1', execution_order: ['io.example.fixture'] })
+    expect(f.mock.calls[5][1].method).toBe('DELETE')
   })
 
   it('checks and applies an immutable URL extension update through explicit endpoints', async () => {

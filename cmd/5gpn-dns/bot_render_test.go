@@ -376,6 +376,17 @@ func TestInterceptModuleBotMenuAndCallbacks(t *testing.T) {
 	if got := requiresSettings.InlineKeyboard[0][0]; !strings.Contains(got.Text, "Console 配置") || got.CallbackData != versionedCallback("menu:modules") {
 		t.Fatalf("unconfigured extension button = %+v", got)
 	}
+	networkView := interceptModulesView{Modules: []interceptModuleView{{
+		ID: "io.example.network", Name: "Network extension", Ready: true, ExecutionOrder: 1,
+		NetworkOrigins: []string{"https://api.example.com"},
+	}}}
+	networkMenu := interceptModulesMenu(networkView)
+	if got := networkMenu.InlineKeyboard[0][0]; !strings.Contains(got.Text, "Console 审查网络权限") || got.CallbackData != versionedCallback("menu:modules") {
+		t.Fatalf("network extension button = %+v", got)
+	}
+	if rendered := renderInterceptModules(networkView, ""); !strings.Contains(rendered, "1 个网络 origin") {
+		t.Fatalf("network permission summary missing: %s", rendered)
+	}
 }
 
 func TestConfirmationCallbacks(t *testing.T) {

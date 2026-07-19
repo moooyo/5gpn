@@ -30,6 +30,13 @@ metadata:
   description: Native fixture
 permissions:
   persistentStorage: true
+  network:
+    origins:
+      - HTTPS://Assets.Example.COM:443/
+      - http://assets.example.com:8080
+requirements:
+  egressGroup:
+    required: true
 traffic:
   captureHosts:
     - api.example.com
@@ -73,6 +80,9 @@ actions:
 	}
 	if module.ID != "io.example.cleaner" || module.Version != "1.2.0" || !module.PersistentStorage || len(module.Scripts) != 1 {
 		t.Fatalf("parsed extension = %+v", module)
+	}
+	if !module.EgressGroupRequired || strings.Join(module.NetworkOrigins, ",") != "http://assets.example.com:8080,https://assets.example.com" {
+		t.Fatalf("network capabilities = origins=%v required=%v", module.NetworkOrigins, module.EgressGroupRequired)
 	}
 	if got := strings.Join(module.CaptureHosts, ","); got != "*.cdn.example.com,api.example.com" {
 		t.Fatalf("capture hosts = %q", got)
@@ -264,5 +274,150 @@ func TestNativeExtensionImportURLRequiresHTTPS(t *testing.T) {
 		if _, err := normalizeModuleImportURL(raw); err == nil {
 			t.Fatalf("unsafe URL %q was accepted", raw)
 		}
+	}
+}
+
+func TestNormalizeInterceptNetworkOrigin(t *testing.T) {
+	t.Parallel()
+	for raw, want := range map[string]string{
+		"HTTPS://API.Example.COM:443/": "https://api.example.com",
+		"http://api.example.com:80":    "http://api.example.com",
+		"https://api.example.com:8443": "https://api.example.com:8443",
+		"http://api.example.com./":     "http://api.example.com",
+	} {
+		got, err := normalizeInterceptNetworkOrigin(raw)
+		if err != nil || got != want {
+			t.Errorf("normalize origin %q = %q, %v; want %q", raw, got, err, want)
+		}
+	}
+
+	for _, raw := range []string{
+		"ftp://api.example.com",
+		"https://user@api.example.com",
+		"https://api.example.com/path",
+		"https://api.example.com?query",
+		"https://api.example.com#fragment",
+		"https://*.example.com",
+		"https://127.0.0.1",
+		"https://[2001:db8::1]",
+		"https://localhost",
+		"https://api.example.com:0",
+		"https://api.example.com:65536",
+	} {
+		if got, err := normalizeInterceptNetworkOrigin(raw); err == nil {
+			t.Errorf("unsafe origin %q normalized to %q", raw, got)
+		}
+	}
+}
+
+func TestNativeExtensionParserRejectsInvalidNetworkOriginShape(t *testing.T) {
+	t.Parallel()
+	base := `apiVersion: 5gpn.io/v1
+kind: Extension
+metadata:
+  id: io.example.network
+  name: Network fixture
+  version: 1.0.0
+permissions:
+  persistentStorage: false
+  network:
+    origins: [https://api.example.com]
+traffic:
+  captureHosts: [api.example.com]
+actions:
+  - id: pass
+    phase: response
+    match:
+      hosts: [api.example.com]
+      schemes: [https]
+      pathRegex: ^/
+    script:
+      inline: "function transform() { return null }"
+      bodyMode: none
+      timeoutMs: 1000
+      maxBodyBytes: 1024
+`
+	parser := interceptModuleParser{now: time.Now}
+	for name, content := range map[string]string{
+		"unknown network field": strings.Replace(base, "origins: [https://api.example.com]", "origins: [https://api.example.com]\n    wildcard: true", 1),
+		"wrong origins type":    strings.Replace(base, "origins: [https://api.example.com]", "origins: https://api.example.com", 1),
+		"path is not origin":    strings.Replace(base, "https://api.example.com]", "https://api.example.com/path]", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parser.Import(context.Background(), interceptModuleImportRequest{Content: content}); err == nil {
+				t.Fatalf("%s was accepted", name)
+			}
+		})
+	}
+}
+
+func TestNativeExtensionParserRejectsInvalidEgressRequirementShape(t *testing.T) {
+	t.Parallel()
+	base := `apiVersion: 5gpn.io/v1
+kind: Extension
+metadata:
+  id: io.example.requirement
+  name: Requirement fixture
+  version: 1.0.0
+permissions:
+  persistentStorage: false
+requirements:
+  egressGroup:
+    required: true
+traffic:
+  captureHosts: [api.example.com]
+actions:
+  - id: pass
+    phase: response
+    match:
+      hosts: [api.example.com]
+      schemes: [https]
+      pathRegex: ^/
+    script:
+      inline: "function transform() { return null }"
+      bodyMode: none
+      timeoutMs: 1000
+      maxBodyBytes: 1024
+`
+	parser := interceptModuleParser{now: time.Now}
+	for name, content := range map[string]string{
+		"unknown requirement": strings.Replace(base, "required: true", "required: true\n    selector: Japan", 1),
+		"wrong required type": strings.Replace(base, "required: true", "required: selected", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parser.Import(context.Background(), interceptModuleImportRequest{Content: content}); err == nil {
+				t.Fatalf("%s was accepted", name)
+			}
+		})
+	}
+}
+
+func TestInterceptNetworkOriginHostPortRequiresCanonicalOrigin(t *testing.T) {
+	t.Parallel()
+	host, port, err := interceptNetworkOriginHostPort("https://api.example.com:8443")
+	if err != nil || host != "api.example.com" || port != 8443 {
+		t.Fatalf("origin target = %q:%d, %v", host, port, err)
+	}
+	if _, _, err := interceptNetworkOriginHostPort("HTTPS://API.EXAMPLE.COM:443/"); err == nil {
+		t.Fatal("non-canonical stored origin was accepted")
+	}
+}
+
+func TestInterceptModuleSnapshotDigestIncludesCapabilitiesButNotEgressBinding(t *testing.T) {
+	t.Parallel()
+	module := testModuleSnapshot()
+	baseline := interceptModuleSnapshotDigest(module)
+	module.EgressGroup = "Japan"
+	if got := interceptModuleSnapshotDigest(module); got != baseline {
+		t.Fatalf("operator egress binding changed snapshot digest: %s != %s", got, baseline)
+	}
+	module.NetworkOrigins = []string{"https://api.example.com"}
+	if got := interceptModuleSnapshotDigest(module); got == baseline {
+		t.Fatal("immutable network capability did not change snapshot digest")
+	}
+	module.NetworkOrigins = nil
+	module.EgressGroupRequired = true
+	if got := interceptModuleSnapshotDigest(module); got == baseline {
+		t.Fatal("immutable egress requirement did not change snapshot digest")
 	}
 }

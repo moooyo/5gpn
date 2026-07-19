@@ -8,20 +8,28 @@ Update the status and the normative documentation when an implementation lands.
 
 ## Native interception extensions
 
-**Status: Implemented. Recorded and implemented 2026-07-19.**
+**Status: Implemented. Recorded 2026-07-19 and superseded in place by the
+current pre-release contract on 2026-07-20.**
 
 - The extension system accepts only strict `5gpn.io/v1` native YAML manifests.
   It does not parse or emulate third-party proxy-client plugin formats.
 - `traffic.captureHosts` is the sole traffic-acquisition permission. Action
   matchers and upstream mappings must be subsets of the same extension's
   capture hosts, and runtime checks repeat that ownership boundary.
-- Native scripts define `transform(context)`. They receive only structured
-  request/response data, typed settings, console logging, and optional bounded
-  storage when explicitly permitted. They have no ambient network, filesystem,
-  process, timer, or module-loader access.
-- Extensions cannot select application egress. Every transformed TCP or UDP
-  flow returns through authenticated mihomo `intercept-egress`; the complete
-  operator-owned mihomo configuration selects DIRECT, nodes, and proxy groups.
+- Native scripts define `transform(context)`. They receive structured
+  request/response data, typed settings, console logging, optional bounded
+  storage, and—only when explicitly declared and operator-confirmed—a
+  synchronous network capability restricted to exact HTTP(S) origins. They
+  still have no filesystem, process, timer, module-loader, socket, or ambient
+  network API. A permitted script can deliberately send any data visible to it
+  to those origins, and the Console must say so plainly before enable.
+- Extensions cannot name or change application egress. A manifest may require
+  an operator egress binding; the operator selects an existing mihomo group,
+  and ordered domain/port rules on the shared authenticated
+  `intercept-egress` listener enforce it. Missing or removed bindings fail
+  closed without a default fallback. The explicit extension execution order
+  determines both action composition and the first binding that wins for an
+  overlapping destination.
 - URL install and local add are separate Console actions. URL install accepts
   one HTTPS manifest and may snapshot relative HTTPS scripts. Local add accepts
   one pasted or uploaded manifest and uses inline or absolute HTTPS scripts.

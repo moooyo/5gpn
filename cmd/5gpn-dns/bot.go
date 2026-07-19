@@ -818,6 +818,12 @@ func (bt *Bot) handleCallback(ctx context.Context, b *bot.Bot, update *models.Up
 			return
 		}
 		enabled := parts[0] == "on"
+		if enabled && len(selected.NetworkOrigins) > 0 {
+			bt.edit(ctx, b, cq,
+				"⚠️ 该插件声明了额外网络 origins，必须在 Console 查看完整列表和数据外发风险后启用。",
+				backKB("menu:modules"))
+			return
+		}
 		action := "关闭"
 		impact := "这会移除 DNS 与 mihomo 拦截路由。"
 		if enabled {
@@ -838,6 +844,15 @@ func (bt *Bot) handleCallback(ctx context.Context, b *bot.Bot, update *models.Up
 			auditBotOutcome("module:"+intent.arg, uid, false)
 			bt.edit(ctx, b, cq, "❌ 模块状态不可用："+pre(viewErr.Error()), backKB("menu:main"))
 			return
+		}
+		if enabled {
+			for _, module := range view.Modules {
+				if module.ID == parts[1] && len(module.NetworkOrigins) > 0 {
+					auditBotOutcome("module:"+intent.arg, uid, false)
+					bt.renderModules(ctx, b, cq, "⚠️ 含网络权限的插件只能在 Console 完成风险审查后启用。")
+					return
+				}
+			}
 		}
 		updated, updateErr := bt.ctrl.SetInterceptModuleEnabled(ctx, parts[1], view.Revision, enabled)
 		if updateErr != nil {

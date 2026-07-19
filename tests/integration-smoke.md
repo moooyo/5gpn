@@ -362,7 +362,7 @@ token into recorded command output, screenshots, or issue logs.
   while purge removes the independently marked state directory.
 - [ ] On a fresh or explicitly reset mihomo config, Settings reports
   `block-quic-443` enabled and the canonical UDP/443 reject appears exactly once
-  after `IN-NAME,intercept-egress,Proxies` and before every `MODULE-INTERCEPT` rule.
+  after `IN-NAME,intercept-egress,REJECT` and before every `MODULE-INTERCEPT` rule.
   Disable and re-enable it through the authenticated module API; each change
   must revision-check, pass full `mihomo -t`, hot-apply, and preserve unrelated
   operator YAML. Confirm that the UDP listener remains bound and that traffic
@@ -386,25 +386,45 @@ token into recorded command output, screenshots, or issue logs.
   script. Unknown fields, duplicate keys, YAML aliases/anchors/merges, multiple
   documents, non-HTTPS resources, unsafe redirects, and out-of-scope action
   hosts must fail installation. Every valid install starts disabled; required
-  typed settings remain a hard enable gate.
+  typed settings and required operator egress-group bindings remain hard enable
+  gates. Exact network origins are normalized into the immutable snapshot and
+  changing them changes the reviewed digest.
+- [ ] Reorder installed extensions through the Console. Request and response
+  actions execute top-to-bottom in the displayed order. For a host or network
+  origin shared by extensions with different bindings, the first matching
+  bound extension wins; moving it changes the ordered mihomo egress rule block
+  only after revision check, `mihomo -t`, and hot apply. A stale reorder is
+  rejected without changing either config.
 - [ ] With the master off, enable the synthetic module in the Console and verify
   it remains armed but has no DNS overlay or mihomo host rule. Turn the master
   on, then disable/re-enable the extension from
   Telegram. Each surface shows the same revision and state. The complete
-  mihomo config passes `mihomo -t`; sorted port-80/443 `AND` rules containing
-  `DOMAIN`/`DOMAIN-WILDCARD` matchers sit
-  after `IN-NAME,intercept-egress,<terminal-target>` and before `MATCH`, the DNS
-  answer changes to the gateway only while enabled, and certificate/mihomo
-  failure injection restores the previous state.
+  mihomo config passes `mihomo -t`; ordered `intercept-egress` domain/port rules
+  sit before the fail-closed `IN-NAME,intercept-egress,REJECT` terminator, while
+  sorted port-80/443 `MODULE-INTERCEPT` rules sit after it and the optional QUIC
+  guard. The DNS answer changes to the gateway only while enabled, and
+  certificate/mihomo failure injection restores the previous state.
 - [ ] With `MitM over HTTP/2` on and QUIC fallback protection off, verify plain
   HTTP, TLS/H1/H2, QUIC v1/v2, and H3 apply the same native request/response
   actions. Text and binary-body scripts
   decode identity, gzip, zlib/raw deflate, and Brotli bodies within their
   expanded-size bounds. Verify `transform(context)` receives only the structured
   request/response projection and typed settings. `context.storage` exists only
-  when the manifest requests it; ambient network, filesystem, process, timer,
-  compatibility globals, and module-loader access fail closed. Oversized bodies, VM timeout,
-  and backtracking-regexp timeout remain bounded.
+  when the manifest requests it; ambient `fetch`, filesystem, process, timer,
+  compatibility globals, and module-loader access fail closed. A plugin with
+  declared network origins receives only `context.network.request`; exact
+  scheme/host/effective-port matches succeed through authenticated mihomo
+  SOCKS5, while cross-origin calls, redirects, implicit cookies/authorization,
+  oversized responses, excessive calls, caller cancellation, VM timeout, and
+  backtracking-regexp timeout remain bounded. The enable dialog must state that
+  the plugin can send any decrypted request, response, setting, or storage data
+  visible to it to every listed origin.
+- [ ] Bind a required extension to an existing mihomo group and verify only
+  group names plus `DIRECT` are offered. Removing or renaming a referenced group
+  through the raw config API is rejected before publication. An out-of-band
+  invalidation marks the extension not-ready, withdraws the DNS overlay, and
+  never falls back to DIRECT or the terminal group; rebinding restores service
+  through the normal transaction.
 - [ ] Turn `MitM over HTTP/2` off and verify new TLS connections negotiate
   HTTP/1.1 only. Turn QUIC fallback protection on and verify matched IETF QUIC
   v1/v2 receives no forwarded response while a capable client retries over

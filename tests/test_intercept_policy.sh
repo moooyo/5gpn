@@ -49,7 +49,8 @@ grep -Fq 'intercept_asset="5gpn-intercept-linux-amd64"' "$INSTALL" || fail "inte
 grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/5gpn-intercept"' "$INSTALL" || fail "interception release asset is not checksum-verified"
 grep -Fq 'ensure_service_account "$INTERCEPT_SERVICE_USER"' "$INSTALL" || fail "interception service account is not installed"
 grep -Fq 'ensure_intercept_certificates' "$INSTALL" || fail "interception certificate lifecycle is missing"
-grep -Fq '"version": 3' "$INSTALL" || fail "current interception config schema is not installed"
+grep -Fq '"version": 4' "$INSTALL" || fail "current interception config schema is not installed"
+grep -Fq '"execution_order": []' "$INSTALL" || fail "current interception config has no explicit execution order"
 grep -Fq '"quic_fallback_protection": true' "$INSTALL" || fail "QUIC fallback protection is not configured by default"
 grep -Fq 'systemctl enable --now 5gpn-intercept-runtime.path' "$INSTALL" || fail "MITM runtime watcher is not enabled"
 grep -Fq 'intercept-cert-renew.sh" --installer-lock-held' "$INSTALL" || fail "installer does not reuse its held certificate lock"
@@ -66,7 +67,7 @@ grep -Fq 'listen: 127.0.0.1' "$TEMPLATE" || fail "interception egress listener i
 grep -Fq 'name: MODULE-INTERCEPT' "$TEMPLATE" || fail "mihomo extension SOCKS node is missing"
 grep -Fq 'type: socks5' "$TEMPLATE" || fail "module node is not SOCKS5"
 grep -Fq 'udp: true' "$TEMPLATE" || fail "module node does not carry QUIC"
-grep -Fq 'IN-NAME,intercept-egress,Proxies' "$TEMPLATE" || fail "interception recursion bypass is missing"
+grep -Fq 'IN-NAME,intercept-egress,REJECT' "$TEMPLATE" || fail "interception fail-closed egress guard is missing"
 grep -Fq 'After=network-online.target 5gpn-intercept.service' "$ROOT/etc/systemd/mihomo.service" \
     || fail "mihomo is not ordered after the interception sidecar"
 grep -Eq '^  - AND,.*MODULE-INTERCEPT' "$TEMPLATE" \
@@ -102,6 +103,16 @@ grep -Fq 'transform(context)' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
     || fail "native transform entry point is missing"
 grep -Fq 'moduleOwnsHost' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
     || fail "native actions are not scoped to their extension capture hosts"
+grep -Fq 'contextObject["network"]' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
+    || fail "declared origin permissions do not expose the bounded network capability"
+grep -Fq 'dialSOCKS5TCP' "$ROOT/cmd/5gpn-intercept/module_network.go" \
+    || fail "extension network requests do not return through authenticated mihomo SOCKS5"
+grep -Fq 'ExecutionOrder' "$ROOT/cmd/5gpn-intercept/config.go" \
+    || fail "sidecar config has no explicit extension execution order"
+grep -Fq 'NetworkOrigins' "$MODULE_PARSER" \
+    || fail "native manifest parser does not snapshot exact network origins"
+grep -Fq 'EgressGroupRequired' "$MODULE_PARSER" \
+    || fail "native manifest parser does not support operator egress requirements"
 grep -Fq 'type: location' "$ROOT/extensions/apple-wloc/extension.yaml" \
     || fail "online WLOC extension does not use the generic location setting"
 grep -Fq 'source: ./wloc.js' "$ROOT/extensions/apple-wloc/extension.yaml" \

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -150,8 +151,18 @@ func (s *ControlServer) handleMihomoConfigPut(w http.ResponseWriter, r *http.Req
 		writeErr(w, http.StatusBadRequest, "text and a valid revision are required")
 		return
 	}
+	unlock, err := s.lockInterceptMihomoCandidate(*body.Text)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errInterceptModuleConflict) {
+			status = http.StatusConflict
+		}
+		writeErr(w, status, err.Error())
+		return
+	}
 	status, resp := s.applyMihomoConfig(r.Context(), *body.Text, false, body.Revision)
-	if status == http.StatusOK && s.interceptModules != nil {
+	unlock()
+	if s.interceptModules != nil && (status == http.StatusOK || mihomoConfigWritten(resp)) {
 		_ = s.interceptModules.ReconcileMihomoText(*body.Text)
 	}
 	writeJSON(w, status, resp)
@@ -175,11 +186,29 @@ func (s *ControlServer) handleMihomoConfigReset(w http.ResponseWriter, r *http.R
 		writeErr(w, http.StatusBadRequest, "a valid revision is required")
 		return
 	}
-	status, resp := s.applyMihomoConfig(r.Context(), s.mihomoStore.Default(), true, body.Revision)
-	if status == http.StatusOK && s.interceptModules != nil {
-		_ = s.interceptModules.ReconcileMihomoText(s.mihomoStore.Default())
+	candidate := s.mihomoStore.Default()
+	unlock, err := s.lockInterceptMihomoCandidate(candidate)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errInterceptModuleConflict) {
+			status = http.StatusConflict
+		}
+		writeErr(w, status, err.Error())
+		return
+	}
+	status, resp := s.applyMihomoConfig(r.Context(), candidate, true, body.Revision)
+	unlock()
+	if s.interceptModules != nil && (status == http.StatusOK || mihomoConfigWritten(resp)) {
+		_ = s.interceptModules.ReconcileMihomoText(candidate)
 	}
 	writeJSON(w, status, resp)
+}
+
+func (s *ControlServer) lockInterceptMihomoCandidate(text string) (func(), error) {
+	if s.interceptModules == nil {
+		return func() {}, nil
+	}
+	return s.interceptModules.LockMihomoCandidate(text)
 }
 
 func validMihomoConfigRevision(revision string) bool {
@@ -188,6 +217,11 @@ func validMihomoConfigRevision(revision string) bool {
 	}
 	_, err := hex.DecodeString(revision)
 	return err == nil
+}
+
+func mihomoConfigWritten(response map[string]any) bool {
+	written, _ := response["written"].(bool)
+	return written
 }
 
 func mihomoConfigRevision(text string) string {

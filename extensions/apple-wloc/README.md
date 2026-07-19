@@ -12,5 +12,5 @@ https://raw.githubusercontent.com/moooyo/5gpn/main/extensions/apple-wloc/extensi
 The Console renders the manifest's required `location` setting with the shared
 map point picker. Enabling the extension captures only the two hosts declared
 in `traffic.captureHosts`. The response script runs in the standard isolated
-extension sandbox and the transformed upstream request still exits through
-mihomo.
+extension sandbox, declares no additional network origin or required egress
+binding, and the transformed upstream request still exits through mihomo.

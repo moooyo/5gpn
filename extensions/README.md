@@ -2,7 +2,9 @@
 
 Each subdirectory is an independently installable `5gpn.io/v1` extension. None
 is seeded or enabled by the gateway installer. Operators review and install an
-explicit raw manifest URL from the Console.
+explicit raw manifest URL from the Console, then review capture hosts, exact
+network origins, execution position, and any required operator egress-group
+binding before enable.
 
 | Extension | Manifest |
 |---|---|

@@ -3,7 +3,9 @@ import { useTranslation } from 'react-i18next'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   AddIcon,
+  ArrowDownIcon,
   ArrowRightIcon,
+  ArrowUpIcon,
   CloudIcon,
   DeleteIcon,
   ExtensionFilledIcon,
@@ -19,6 +21,7 @@ import {
   TuneIcon,
   UploadIcon,
   VerifiedIcon,
+  WarningIcon,
 } from '../../components/icons'
 import {
   Badge,
@@ -29,6 +32,7 @@ import {
   Field,
   Input,
   Modal,
+  Select,
   SegmentedControl,
   Toggle,
   toast,
@@ -50,6 +54,7 @@ import { LocationPicker, type LocationPoint } from './LocationPicker'
 type InstallMode = 'url' | 'local'
 type ExtensionFilter = 'all' | 'enabled' | 'capture' | 'local'
 type PendingAction = { kind: 'toggle' | 'delete'; module: InterceptModule } | null
+const DEFAULT_EGRESS_GROUP = '__5gpn_ui_terminal_target__'
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback
@@ -94,22 +99,30 @@ function ExtensionCard({
   module,
   busy,
   trusted,
+  egressGroups,
+  reorderEnabled,
+  total,
   onToggle,
   onDelete,
   onInspect,
   onConfigure,
   onAudit,
   onCheckUpdate,
+  onMove,
 }: {
   module: InterceptModule
   busy: boolean
   trusted: boolean
+  egressGroups: string[]
+  reorderEnabled: boolean
+  total: number
   onToggle: (module: InterceptModule) => void
   onDelete: (module: InterceptModule) => void
   onInspect: (module: InterceptModule) => void
   onConfigure: (module: InterceptModule) => void
   onAudit: (module: InterceptModule) => void
   onCheckUpdate: (module: InterceptModule) => void
+  onMove: (module: InterceptModule, direction: -1 | 1) => void
 }) {
   const { t, i18n } = useTranslation()
   const imported = module.imported_at ? new Intl.DateTimeFormat(i18n.language, { dateStyle: 'medium' }).format(new Date(module.imported_at)) : ''
@@ -117,12 +130,13 @@ function ExtensionCard({
   const mappingsCount = module.upstream_mappings?.length ?? 0
   const sourceLabel = sourceHost(module.source_url) || t('extensions.localSnapshot')
   const canArmWhileMasterOff = module.reason === 'mitm-disabled'
-  const toggleDisabled = busy || (!module.enabled && !module.ready && !canArmWhileMasterOff)
+  const groupMissing = (module.egress_group_required && !module.egress_group) || (!!module.egress_group && !egressGroups.includes(module.egress_group))
+  const toggleDisabled = busy || (!module.enabled && (groupMissing || (!module.ready && !canArmWhileMasterOff)))
   const trustWarning = module.enabled && !trusted
 
   return (
     <Card className="min-w-0 overflow-hidden border-0 shadow-[var(--md-sys-elevation-1)]" data-testid={`extension-${module.id}`}>
-      <CardBody className="flex h-full min-h-[258px] flex-col gap-3 p-4.5">
+      <CardBody className="flex h-full min-h-[210px] flex-col gap-3 p-4.5">
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <span className={cn(
@@ -138,7 +152,10 @@ function ExtensionCard({
               </p>
             </div>
           </div>
-          <Toggle checked={module.enabled} onCheckedChange={() => onToggle(module)} disabled={toggleDisabled} aria-label={`${module.enabled ? t('extensions.toggleOff') : t('extensions.toggleOn')} · ${module.name}`} />
+          <div className="flex shrink-0 items-center gap-1">
+            <span className="rounded-full bg-surface-container-low px-2 py-1 font-mono text-[10px] text-text-faint" aria-label={t('extensions.executionOrder', { order: module.execution_order })}>{String(module.execution_order).padStart(2, '0')}</span>
+            <Toggle checked={module.enabled} onCheckedChange={() => onToggle(module)} disabled={toggleDisabled} aria-label={`${module.enabled ? t('extensions.toggleOff') : t('extensions.toggleOn')} · ${module.name}`} />
+          </div>
         </div>
 
         {module.description ? <p className="line-clamp-2 min-h-10 text-[11.5px] leading-5 text-text-soft">{module.description}</p> : <div className="min-h-10" />}
@@ -146,6 +163,8 @@ function ExtensionCard({
         <div className="flex flex-wrap items-center gap-1.5">
           {!module.enabled ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="neutral">{t('extensions.disabled')}</Badge> : null}
           {module.script_count > 0 ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber">{t('extensions.capabilityAction', { count: module.script_count })}</Badge> : null}
+          {module.network_origins.length > 0 ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="indigo"><NetworkIcon className="mr-1 inline h-3.5 w-3.5" aria-hidden="true" />{t('extensions.capabilityNetwork', { count: module.network_origins.length })}</Badge> : null}
+          {module.egress_group ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="cyan"><RouteIcon className="mr-1 inline h-3.5 w-3.5" aria-hidden="true" />{t('extensions.capabilityEgress', { group: module.egress_group })}</Badge> : null}
           <button type="button" aria-label={t('extensions.auditHosts')} onClick={() => onAudit(module)} className="zds-state-layer inline-flex items-center gap-1 rounded-[6px] bg-primary-container px-2.5 py-0.5 text-[11px] font-medium text-on-primary-container">
             <ShieldLockIcon className="h-3.5 w-3.5" aria-hidden="true" /> {t('extensions.captureCount', { count: module.capture_hosts.length })}
           </button>
@@ -154,12 +173,17 @@ function ExtensionCard({
           {trustWarning ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber">{t('extensions.trustPending')}</Badge> : null}
           {module.enabled && module.reason === 'mitm-disabled' ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber">{t('extensions.masterPending')}</Badge> : null}
           {module.reason === 'settings-required' ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="blue">{t('extensions.settingsRequired')}</Badge> : null}
+          {groupMissing ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber"><WarningIcon className="mr-1 inline h-3.5 w-3.5" aria-hidden="true" />{t('extensions.egressGroupMissing')}</Badge> : null}
         </div>
 
-        <div className="mt-auto flex min-w-0 items-center gap-1 border-t border-divider pt-3">
-          <span className="flex min-w-0 flex-1 items-center gap-1.5 text-[10.5px] text-text-faint">
+        <div className="mt-auto flex min-w-0 flex-wrap items-center gap-1 border-t border-divider pt-3">
+          <div className="flex shrink-0 items-center gap-0.5">
+            <Button type="button" variant="ghost" size="sm" className="h-10 w-10 px-0 sm:h-8 sm:w-8" aria-label={t('extensions.moveUp', { name: module.name })} title={t('extensions.moveUp', { name: module.name })} disabled={!reorderEnabled || module.execution_order <= 1 || busy} onClick={() => onMove(module, -1)}><ArrowUpIcon className="h-4 w-4" /></Button>
+            <Button type="button" variant="ghost" size="sm" className="h-10 w-10 px-0 sm:h-8 sm:w-8" aria-label={t('extensions.moveDown', { name: module.name })} title={t('extensions.moveDown', { name: module.name })} disabled={!reorderEnabled || module.execution_order >= total || busy} onClick={() => onMove(module, 1)}><ArrowDownIcon className="h-4 w-4" /></Button>
+          </div>
+          <span className="order-first flex min-w-0 basis-full items-center gap-1.5 pb-1 text-[10.5px] text-text-faint sm:order-none sm:basis-auto sm:pb-0 sm:flex-1">
             {module.source_url ? <CloudIcon className="h-4 w-4 shrink-0" aria-hidden="true" /> : <FileIcon className="h-4 w-4 shrink-0" aria-hidden="true" />}
-            <span className="max-w-[104px] truncate">{sourceLabel}</span>
+            <span className="max-w-[180px] truncate sm:max-w-[104px]">{sourceLabel}</span>
             <code className="shrink-0 font-mono text-[9px] text-text-faint" title={module.snapshot_digest}>· {module.snapshot_digest.slice(0, 8)}</code>
           </span>
           {module.source_url ? (
@@ -167,11 +191,9 @@ function ExtensionCard({
               <RefreshIcon className="h-4 w-4" />
             </Button>
           ) : null}
-          {settingsCount > 0 ? (
-            <Button type="button" variant="secondary" size="sm" className="shrink-0" onClick={() => onConfigure(module)}>
-              <TuneIcon className="h-4 w-4" /> {t('extensions.settingsAction', { count: settingsCount })}
-            </Button>
-          ) : null}
+          <Button type="button" variant="secondary" size="sm" className="shrink-0" onClick={() => onConfigure(module)}>
+            <TuneIcon className="h-4 w-4" /> {settingsCount > 0 ? t('extensions.settingsAction', { count: settingsCount }) : t('extensions.configureAction')}
+          </Button>
           <Button type="button" variant="ghost" size="sm" className="w-8 shrink-0 px-0" aria-label={t('extensions.inspect')} title={t('extensions.inspect')} disabled={busy} onClick={() => onInspect(module)}>
             <FileSearchIcon className="h-4 w-4" />
           </Button>
@@ -186,23 +208,30 @@ function ExtensionCard({
 
 function ExtensionSettingsModal({
   module,
+  egressGroups,
   onOpenChange,
   onSave,
 }: {
   module: InterceptModule | null
+  egressGroups: string[]
   onOpenChange: (open: boolean) => void
-  onSave: (module: InterceptModule, settings: Record<string, unknown>) => void
+  onSave: (module: InterceptModule, settings: Record<string, unknown>, egressGroup?: string) => void
 }) {
   const { t } = useTranslation()
   const [values, setValues] = useState<Record<string, unknown>>({})
+  const [egressGroup, setEgressGroup] = useState(DEFAULT_EGRESS_GROUP)
 
   useEffect(() => {
     setValues(Object.fromEntries((module?.settings ?? []).map((setting) => [setting.key, settingInitialValue(setting)])))
-  }, [module])
+    setEgressGroup(module?.egress_group && egressGroups.includes(module.egress_group) ? module.egress_group : DEFAULT_EGRESS_GROUP)
+  }, [egressGroups, module])
 
   const initial = Object.fromEntries((module?.settings ?? []).map((setting) => [setting.key, settingInitialValue(setting)]))
   const changed = !!module && JSON.stringify(values) !== JSON.stringify(initial)
   const ready = (module?.settings ?? []).every((setting) => settingReady(setting, values[setting.key]))
+  const selectedEgressGroup = egressGroup === DEFAULT_EGRESS_GROUP ? '' : egressGroup
+  const egressChanged = !!module && selectedEgressGroup !== (module.egress_group ?? '')
+  const egressReady = !module?.egress_group_required || (selectedEgressGroup !== '' && egressGroups.includes(selectedEgressGroup))
   const hasLocation = module?.settings?.some((setting) => setting.type === 'location') ?? false
 
   return (
@@ -214,12 +243,18 @@ function ExtensionSettingsModal({
       footer={
         <>
           <Button type="button" variant="secondary" size="sm" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-          <Button type="button" size="sm" disabled={!module || !changed || !ready} onClick={() => module && onSave(module, Object.fromEntries((module.settings ?? []).map((setting) => [setting.key, values[setting.key] ?? null])))}>{t('common.save')}</Button>
+          <Button type="button" size="sm" disabled={!module || (!changed && !egressChanged) || !ready || !egressReady} onClick={() => module && onSave(module, Object.fromEntries((module.settings ?? []).map((setting) => [setting.key, values[setting.key] ?? null])), egressChanged ? selectedEgressGroup : undefined)}>{t('common.save')}</Button>
         </>
       }
     >
       {module ? (
         <div className="space-y-5">
+          <section className="rounded-[14px] bg-surface-container-low p-4">
+            <div className="text-[12px] font-medium text-text-strong">{t('extensions.egressGroupTitle')}</div>
+            <p className="mt-1 text-[10.5px] leading-4 text-text-faint">{t('extensions.egressGroupHint')}</p>
+            {((module.egress_group_required && !module.egress_group) || (!!module.egress_group && !egressGroups.includes(module.egress_group))) ? <p role="alert" className="mt-3 text-[11px] font-medium text-[var(--md-sys-color-error)]">{t('extensions.egressGroupMissingDetail', { group: module.egress_group || t('extensions.egressGroupUnset') })}</p> : null}
+            <Select value={egressGroup} onValueChange={setEgressGroup} items={[{ value: DEFAULT_EGRESS_GROUP, label: t('extensions.egressGroupDefault') }, ...egressGroups.map((group) => ({ value: group, label: group }))]} placeholder={t('extensions.selectEgressGroup')} className="mt-3 w-full" />
+          </section>
           {(module.settings ?? []).map((setting) => {
             const label = setting.label || setting.key
             const description = setting.description
@@ -318,6 +353,8 @@ function ExtensionUpdateModal({
           <div className="flex flex-wrap items-center gap-2">
             <Badge tone="blue">{t('extensions.captureCount', { count: review.candidate.capture_hosts.length })}</Badge>
             <Badge tone="amber">{t('extensions.capabilityAction', { count: review.candidate.script_count })}</Badge>
+            {review.candidate.network_origins.length > 0 ? <Badge tone="indigo">{t('extensions.capabilityNetwork', { count: review.candidate.network_origins.length })}</Badge> : null}
+            {review.candidate.egress_group_required ? <Badge tone="cyan">{t('extensions.egressGroupTitle')}</Badge> : null}
             {(review.candidate.settings?.length ?? 0) > 0 ? <Badge tone="indigo">{t('extensions.settingsAction', { count: review.candidate.settings?.length ?? 0 })}</Badge> : null}
           </div>
           <div>
@@ -326,9 +363,48 @@ function ExtensionUpdateModal({
               {review.candidate.capture_hosts.map((host) => <code key={host} className="rounded-[7px] bg-card px-2 py-1 font-mono text-[10px] text-text-mid">{host}</code>)}
             </div>
           </div>
+          {review.candidate.network_origins.length > 0 ? <div>
+            <div className="mb-2 text-[11px] font-medium text-text-faint">{t('extensions.networkOriginsTitle')}</div>
+            <div className="flex max-h-36 flex-wrap gap-1.5 overflow-y-auto rounded-[12px] bg-[var(--md-sys-color-warning-container)] p-3 text-[var(--md-sys-color-on-warning-container)]">
+              {review.candidate.network_origins.map((origin) => <code key={origin} className="rounded-[7px] bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-[10px]">{origin}</code>)}
+            </div>
+          </div> : null}
           <p className="text-[10.5px] leading-5 text-text-faint">{t('extensions.updateSafety')}</p>
         </div>
       ) : null}
+    </Modal>
+  )
+}
+
+function EnableExtensionModal({
+  module,
+  onOpenChange,
+  onConfirm,
+}: {
+  module: InterceptModule | null
+  onOpenChange: (open: boolean) => void
+  onConfirm: () => void
+}) {
+  const { t } = useTranslation()
+  return (
+    <Modal
+      open={!!module}
+      onOpenChange={onOpenChange}
+      title={module ? t('extensions.enableTitle', { name: module.name }) : ''}
+      className="w-[min(94vw,580px)]"
+      footer={<><Button type="button" variant="secondary" size="sm" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button><Button type="button" size="sm" onClick={onConfirm}>{t('extensions.toggleOn')}</Button></>}
+    >
+      {module ? <div className="space-y-4">
+        <p className="text-[12.5px] leading-6 text-text-soft">{t('extensions.enableBody')}</p>
+        {module.network_origins.length > 0 ? <section className="rounded-[14px] bg-[var(--md-sys-color-warning-container)] p-4 text-[11.5px] leading-5 text-[var(--md-sys-color-on-warning-container)]">
+          <div className="font-semibold">{t('extensions.networkOriginsTitle')}</div>
+          <p className="mt-1">{t('extensions.networkOriginsWarning')}</p>
+          <div className="mt-3 flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">
+            {module.network_origins.map((origin) => <code key={origin} className="rounded-[7px] bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-[10px]">{origin}</code>)}
+          </div>
+        </section> : <section className="rounded-[14px] bg-surface-container-low p-4 text-[11.5px] text-text-soft"><div className="font-medium text-text-strong">{t('extensions.networkOriginsTitle')}</div><p className="mt-1">{t('extensions.networkOriginsNone')}</p></section>}
+        {module.egress_group_required || module.egress_group ? <section className="rounded-[14px] bg-surface-container-low p-4"><div className="text-[11px] font-medium text-text-faint">{t('extensions.egressGroupTitle')}</div><code className="mt-1.5 block font-mono text-[12px] text-text-strong">{module.egress_group || t('extensions.egressGroupUnset')}</code></section> : null}
+      </div> : null}
     </Modal>
   )
 }
@@ -517,7 +593,7 @@ export default function ExtensionsPage() {
       if (filter === 'local' && module.source_url) return false
       if (!needle) return true
       return `${module.id} ${module.name} ${module.description ?? ''} ${module.source_url ?? ''} ${module.capture_hosts.join(' ')}`.toLocaleLowerCase().includes(needle)
-    })
+    }).sort((left, right) => left.execution_order - right.execution_order)
   }, [filter, search, view?.modules])
   const hostCount = useMemo(() => view?.modules.reduce((count, module) => count + module.capture_hosts.length, 0) ?? 0, [view?.modules])
   const activeCount = useMemo(() => view?.modules.filter((module) => module.enabled).length ?? 0, [view?.modules])
@@ -525,7 +601,7 @@ export default function ExtensionsPage() {
   const scopedModuleID = new URLSearchParams(location.search).get('plugin') ?? undefined
   const trustState = !acknowledged ? 'trust' : !settings?.enabled ? 'master' : 'ready'
 
-  async function updateModule(module: InterceptModule, update: { enabled?: boolean; settings?: Record<string, unknown> }, success: string) {
+  async function updateModule(module: InterceptModule, update: { enabled?: boolean; settings?: Record<string, unknown>; egress_group?: string }, success: string) {
     if (!view) return
     setBusyID(module.id)
     try {
@@ -533,6 +609,25 @@ export default function ExtensionsPage() {
       toast.success(success)
     } catch (error) {
       toast.error(errorMessage(error, t('extensions.updateFailed')))
+      void load()
+    } finally {
+      setBusyID(null)
+    }
+  }
+
+  async function moveModule(module: InterceptModule, direction: -1 | 1) {
+    if (!view || filter !== 'all' || search.trim()) return
+    const order = [...view.execution_order]
+    const index = order.indexOf(module.id)
+    const target = index + direction
+    if (index < 0 || target < 0 || target >= order.length) return
+    ;[order[index], order[target]] = [order[target], order[index]]
+    setBusyID(module.id)
+    try {
+      setView(await api.reorderInterceptModules(view.revision, order))
+      toast.success(t('extensions.orderSaved'))
+    } catch (error) {
+      toast.error(errorMessage(error, t('extensions.orderFailed')))
       void load()
     } finally {
       setBusyID(null)
@@ -622,16 +717,17 @@ export default function ExtensionsPage() {
           <SegmentedControl value={filter} onChange={(value) => setFilter(value as ExtensionFilter)} ariaLabel={t('extensions.filterLabel')} className="grid-cols-2 sm:grid-cols-4" options={([['all', t('extensions.filters.all')], ['enabled', t('extensions.filters.enabled')], ['capture', t('extensions.filters.capture')], ['local', t('extensions.filters.local')]] as Array<[ExtensionFilter, string]>).map(([value, label]) => ({ value, label }))} />
           <div className="relative min-w-0 sm:ml-auto sm:w-[300px] sm:flex-none"><SearchIcon className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-text-faint" aria-hidden="true" /><Input value={search} onChange={(event) => setSearch(event.target.value)} aria-label={t('extensions.search')} placeholder={t('extensions.searchPlaceholder')} className="pl-10" /></div>
         </div>
-        {visibleModules.length > 0 ? <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">{visibleModules.map((module) => <ExtensionCard key={module.id} module={module} busy={busyID === module.id} trusted={acknowledged} onToggle={(selected) => setPending({ kind: 'toggle', module: selected })} onDelete={(selected) => setPending({ kind: 'delete', module: selected })} onInspect={(selected) => void inspectModule(selected)} onConfigure={setConfigTarget} onAudit={(selected) => void navigate(`/extensions/hosts?plugin=${encodeURIComponent(selected.id)}`)} onCheckUpdate={(selected) => void checkExtensionUpdate(selected)} />)}</div> : <Card className="p-10 text-center shadow-none"><div className="text-[13px] font-medium text-text-strong">{t('extensions.noMatches')}</div><div className="mt-1 text-[11.5px] text-text-faint">{t('extensions.noMatchesHint')}</div></Card>}
+        {visibleModules.length > 0 ? <div className="space-y-3">{visibleModules.map((module) => <ExtensionCard key={module.id} module={module} busy={busyID === module.id} trusted={acknowledged} egressGroups={view.available_egress_groups} reorderEnabled={filter === 'all' && !search.trim()} total={view.modules.length} onMove={(selected, direction) => void moveModule(selected, direction)} onToggle={(selected) => setPending({ kind: 'toggle', module: selected })} onDelete={(selected) => setPending({ kind: 'delete', module: selected })} onInspect={(selected) => void inspectModule(selected)} onConfigure={setConfigTarget} onAudit={(selected) => void navigate(`/extensions/hosts?plugin=${encodeURIComponent(selected.id)}`)} onCheckUpdate={(selected) => void checkExtensionUpdate(selected)} />)}</div> : <Card className="p-10 text-center shadow-none"><div className="text-[13px] font-medium text-text-strong">{t('extensions.noMatches')}</div><div className="mt-1 text-[11.5px] text-text-faint">{t('extensions.noMatchesHint')}</div></Card>}
       </> : null}
 
       {showingHosts && view ? <><div className="flex items-center justify-between gap-3 px-1"><p className="text-[12.5px] text-text-faint">{t('extensions.hostAudit.intro')}</p><Button type="button" variant="secondary" size="sm" onClick={() => void navigate('/extensions')}>{t('extensions.backToCatalog')}</Button></div><HostAuditView view={view} settings={settings} moduleID={scopedModuleID} onClearModule={() => void navigate('/extensions/hosts')} /></> : null}
 
       {view ? <InstallExtensionModal mode={installMode} revision={view.revision} existingIDs={view.modules.map((module) => module.id)} onOpenChange={(open) => { if (!open) setInstallMode(null) }} onInstalled={setView} /> : null}
       <SnapshotModal open={snapshotOpen} loading={snapshotLoading} snapshot={snapshot} onOpenChange={setSnapshotOpen} />
-      <ExtensionSettingsModal module={configTarget} onOpenChange={(open) => { if (!open) setConfigTarget(null) }} onSave={(module, nextSettings) => { setConfigTarget(null); void updateModule(module, { settings: nextSettings }, t('extensions.settingsSaved')) }} />
+      <ExtensionSettingsModal module={configTarget} egressGroups={view?.available_egress_groups ?? []} onOpenChange={(open) => { if (!open) setConfigTarget(null) }} onSave={(module, nextSettings, egressGroup) => { setConfigTarget(null); void updateModule(module, { settings: nextSettings, ...(egressGroup !== undefined ? { egress_group: egressGroup } : {}) }, t('extensions.settingsSaved')) }} />
       <ExtensionUpdateModal review={updateReview} busy={updateBusy} onOpenChange={(open) => { if (!open) setUpdateReview(null) }} onApply={() => void applyExtensionUpdate()} />
-      <ConfirmDialog open={pending?.kind === 'toggle'} onOpenChange={(open) => { if (!open) setPending(null) }} title={pending?.module.enabled ? t('extensions.disableTitle', { name: pending.module.name }) : t('extensions.enableTitle', { name: pending?.module.name ?? '' })} description={pending?.module.enabled ? t('extensions.disableBody') : t('extensions.enableBody')} confirmLabel={pending?.module.enabled ? t('extensions.toggleOff') : t('extensions.toggleOn')} cancelLabel={t('common.cancel')} danger={pending?.module.enabled} onConfirm={() => { if (pending) void updateModule(pending.module, { enabled: !pending.module.enabled }, t('extensions.updated')); setPending(null) }} />
+      <EnableExtensionModal module={pending?.kind === 'toggle' && !pending.module.enabled ? pending.module : null} onOpenChange={(open) => { if (!open) setPending(null) }} onConfirm={() => { if (pending) void updateModule(pending.module, { enabled: true }, t('extensions.updated')); setPending(null) }} />
+      <ConfirmDialog open={pending?.kind === 'toggle' && !!pending.module.enabled} onOpenChange={(open) => { if (!open) setPending(null) }} title={t('extensions.disableTitle', { name: pending?.module.name ?? '' })} description={t('extensions.disableBody')} confirmLabel={t('extensions.toggleOff')} cancelLabel={t('common.cancel')} danger onConfirm={() => { if (pending) void updateModule(pending.module, { enabled: false }, t('extensions.updated')); setPending(null) }} />
       <ConfirmDialog open={pending?.kind === 'delete'} onOpenChange={(open) => { if (!open) setPending(null) }} title={t('extensions.deleteTitle', { name: pending?.module.name ?? '' })} description={t('extensions.deleteBody')} confirmLabel={t('extensions.delete')} cancelLabel={t('common.cancel')} danger onConfirm={() => { if (pending) void deleteModule(pending.module); setPending(null) }} />
     </div>
   )

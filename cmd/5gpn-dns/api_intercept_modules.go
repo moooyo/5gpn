@@ -25,6 +25,26 @@ func (s *ControlServer) handleInterceptModulesGet(w http.ResponseWriter, _ *http
 	writeJSON(w, http.StatusOK, view)
 }
 
+func (s *ControlServer) handleInterceptModulesReorder(w http.ResponseWriter, r *http.Request) {
+	if s.interceptModules == nil {
+		writeErr(w, http.StatusServiceUnavailable, errInterceptModulesUnavailable.Error())
+		return
+	}
+	var request struct {
+		Revision       string   `json:"revision"`
+		ExecutionOrder []string `json:"execution_order"`
+	}
+	if !decodeJSONBody(w, r, &request) {
+		return
+	}
+	view, err := s.interceptModules.Reorder(r.Context(), request.Revision, request.ExecutionOrder)
+	if err != nil {
+		writeInterceptModuleError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
 func (s *ControlServer) handleInterceptModuleSnapshotGet(w http.ResponseWriter, r *http.Request) {
 	if s.interceptModules == nil {
 		writeErr(w, http.StatusServiceUnavailable, errInterceptModulesUnavailable.Error())

@@ -1823,7 +1823,7 @@ ensure_intercept_config() {
     candidate="$(mktemp "$INTERCEPT_DIR/.config.json.XXXXXX")" || return 1
     cat > "$candidate" <<EOF
 {
-  "version": 3,
+  "version": 4,
   "listen": "127.0.0.1:18080",
   "username": "${inbound_user}",
   "password": "${inbound_pass}",
@@ -1839,6 +1839,7 @@ ensure_intercept_config() {
     "http2": true,
     "quic_fallback_protection": true
   },
+  "execution_order": [],
   "modules": []
 }
 EOF

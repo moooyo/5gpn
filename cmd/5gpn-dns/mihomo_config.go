@@ -308,7 +308,10 @@ rules:
   - IP-CIDR,192.168.0.0/16,REJECT,no-resolve
   - IP-CIDR,100.64.0.0/10,REJECT,no-resolve
   - IP-CIDR,169.254.0.0/16,REJECT,no-resolve
-  - IN-NAME,intercept-egress,Proxies
+  # Every sidecar egress selector is published immediately above this
+  # fail-closed terminator. Unknown or stale sidecar traffic must never fall
+  # through to the operator's terminal MATCH rule.
+  - IN-NAME,intercept-egress,REJECT
   - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
   - MATCH,Proxies
 `

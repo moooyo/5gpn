@@ -188,12 +188,18 @@ export interface InterceptModule {
   source_digest: string
   snapshot_digest: string
   imported_at?: string
+  execution_order: number
+  network_origins: string[]
+  egress_group_required: boolean
+  egress_group?: string
 }
 export interface InterceptModulesView {
   revision: string
   catalog_url: string
   modules: InterceptModule[]
   active_capture_hosts: string[]
+  execution_order: string[]
+  available_egress_groups: string[]
 }
 export interface InterceptScriptSnapshot {
   id: string
@@ -218,6 +224,7 @@ export interface InterceptModuleUpdate {
   revision: string
   enabled?: boolean
   settings?: Record<string, unknown>
+  egress_group?: string
 }
 export interface InterceptModuleUpdateCheck {
   revision: string

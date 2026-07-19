@@ -276,11 +276,13 @@ export async function setupMockApi(page: Page): Promise<void> {
       ],
       persistent_storage: false, source_url: 'https://raw.githubusercontent.com/moooyo/5gpn/main/extensions/apple-wloc/extension.yaml',
       source_digest: 'a'.repeat(64), snapshot_digest: 'a'.repeat(64),
+      execution_order: 1, network_origins: [], egress_group_required: false,
     },
     {
       id: 'io.example.response-cleaner', extension_version: '1.0.0', name: 'Response Cleaner', description: 'Synthetic native extension fixture',
       enabled: false, ready: true, capture_hosts: ['api.example.com'], script_count: 1, settings: [], persistent_storage: false,
       source_url: 'https://example.com/extension.yaml', source_digest: 'b'.repeat(64), snapshot_digest: 'b'.repeat(64), imported_at: '2026-07-18T00:00:00Z',
+      execution_order: 2, network_origins: ['https://origin.example.net'], egress_group_required: true, egress_group: 'Proxies',
     },
   ]
 
@@ -288,6 +290,8 @@ export async function setupMockApi(page: Page): Promise<void> {
     revision: interceptRevision,
     catalog_url: 'https://github.com/moooyo/5gpn/tree/main/extensions',
     active_capture_hosts: mitmSettings.enabled ? interceptModules.filter((module) => module.enabled).flatMap((module) => module.capture_hosts) : [],
+    execution_order: interceptModules.map((module) => module.id),
+    available_egress_groups: ['DIRECT', 'Proxies'],
     modules: interceptModules.map((module) => ({
       ...module,
       ready: mitmSettings.enabled && module.reason !== 'settings-required',
@@ -417,6 +421,7 @@ export async function setupMockApi(page: Page): Promise<void> {
         id: 'io.example.imported', extension_version: '1.0.0', name: 'Imported native extension',
         enabled: false, ready: true, capture_hosts: ['service.example.test'], script_count: 1, settings: [], persistent_storage: false, source_url: body.url,
         source_digest: 'c'.repeat(64), snapshot_digest: 'c'.repeat(64), imported_at: '2026-07-18T01:00:00Z',
+        execution_order: interceptModules.length + 1, network_origins: [], egress_group_required: false,
       }]
       advanceInterceptRevision()
       return json(route, currentInterceptModules(), 201)
@@ -455,6 +460,16 @@ export async function setupMockApi(page: Page): Promise<void> {
       return json(route, currentInterceptModules())
     }
     const moduleMatch = path.match(/^\/api\/interception\/modules\/([^/]+)$/)
+    if (path === '/api/interception/modules/reorder' && method === 'PUT') {
+      const body = route.request().postDataJSON() as { revision?: string; execution_order?: string[] }
+      if (body.revision !== interceptRevision) return json(route, { error: 'interception module revision changed' }, 409)
+      if (!Array.isArray(body.execution_order) || body.execution_order.length !== interceptModules.length || new Set(body.execution_order).size !== interceptModules.length) return json(route, { error: 'invalid execution order' }, 400)
+      const byID = new Map(interceptModules.map((module) => [module.id, module]))
+      if (body.execution_order.some((id) => !byID.has(id))) return json(route, { error: 'invalid execution order' }, 400)
+      interceptModules = body.execution_order.map((id, index) => ({ ...byID.get(id)!, execution_order: index + 1 }))
+      advanceInterceptRevision()
+      return json(route, currentInterceptModules())
+    }
     if (moduleMatch && method === 'GET') {
       const id = decodeURIComponent(moduleMatch[1])
       const module = interceptModules.find((candidate) => candidate.id === id)
@@ -477,6 +492,7 @@ export async function setupMockApi(page: Page): Promise<void> {
         module.reason = undefined
         module.ready = true
       }
+      if (body.egress_group !== undefined) module.egress_group = body.egress_group
       advanceInterceptRevision()
       return json(route, currentInterceptModules())
     }

@@ -2,39 +2,57 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"net"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 const interceptMihomoProxyName = "MODULE-INTERCEPT"
+const interceptTerminalMatchTarget = "__5GPN_TERMINAL_MATCH__"
+
+const interceptEgressRejectRule = "IN-NAME,intercept-egress,REJECT"
 
 var safeInterceptCredential = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 type interceptRoutingAnalysis struct {
-	Manageable    bool
-	Reconcileable bool
-	Ready         bool
-	Reason        string
-	Document      *yaml.Node
-	Rules         *yaml.Node
-	InsertAt      int
-	Current       []string
+	Manageable            bool
+	Reconcileable         bool
+	Ready                 bool
+	Reason                string
+	Document              *yaml.Node
+	Rules                 *yaml.Node
+	EgressInsertAt        int
+	MatchTarget           string
+	AvailableEgressGroups []string
 }
 
-func interceptMihomoRules(document interceptConfigDocument) []string {
+type interceptRoutingRules struct {
+	Capture []string
+	Egress  []string
+}
+
+type interceptEgressSelector struct {
+	Kind  string
+	Value string
+	Port  int
+}
+
+func interceptMihomoRouting(document interceptConfigDocument) interceptRoutingRules {
 	if !document.MITM.Enabled {
-		return nil
+		return interceptRoutingRules{}
 	}
-	rules := make([]string, 0, len(activeInterceptHosts(document))*2)
+	capture := make([]string, 0, len(activeInterceptHosts(document))*2)
 	appendRule := func(host, port string) {
 		kind := "DOMAIN"
 		if strings.HasPrefix(host, "*.") {
 			kind = "DOMAIN-WILDCARD"
 		}
-		rules = append(rules, "AND,(("+kind+","+host+"),(DST-PORT,"+port+")),"+interceptMihomoProxyName)
+		capture = append(capture, "AND,(("+kind+","+host+"),(DST-PORT,"+port+")),"+interceptMihomoProxyName)
 	}
 	for _, module := range document.Modules {
 		if !module.Enabled {
@@ -46,11 +64,111 @@ func interceptMihomoRules(document interceptConfigDocument) []string {
 			}
 		}
 	}
-	sort.Strings(rules)
-	return rules
+	capture = uniqueSortedStrings(capture)
+
+	moduleByID := make(map[string]interceptModuleSnapshot, len(document.Modules))
+	for _, module := range document.Modules {
+		moduleByID[module.ID] = module
+	}
+	order := append([]string(nil), document.ExecutionOrder...)
+	seenModules := make(map[string]struct{}, len(order))
+	for _, id := range order {
+		seenModules[id] = struct{}{}
+	}
+	for _, module := range document.Modules {
+		if _, exists := seenModules[module.ID]; !exists {
+			order = append(order, module.ID)
+		}
+	}
+
+	orderedModules := make([]interceptModuleSnapshot, 0, len(order))
+	for _, id := range order {
+		module, exists := moduleByID[id]
+		if !exists || !module.Enabled {
+			continue
+		}
+		orderedModules = append(orderedModules, module)
+	}
+
+	egress := make([]string, 0, len(capture))
+	seenSelectors := make(map[string]struct{})
+	appendSelectors := func(bound bool) {
+		for _, module := range orderedModules {
+			if (module.EgressGroup != "") != bound {
+				continue
+			}
+			target := module.EgressGroup
+			if target == "" {
+				target = interceptTerminalMatchTarget
+			}
+			for _, selector := range interceptModuleEgressSelectors(module) {
+				identity := selector.Kind + "\x00" + selector.Value + "\x00" + strconv.Itoa(selector.Port)
+				if _, duplicate := seenSelectors[identity]; duplicate {
+					continue
+				}
+				seenSelectors[identity] = struct{}{}
+				egress = append(egress, renderInterceptEgressRule(selector, target))
+			}
+		}
+	}
+	// Explicit operator bindings win over default terminal routing. Execution
+	// order resolves conflicts among bound extensions and, separately, among
+	// unbound extensions that share the terminal target.
+	appendSelectors(true)
+	appendSelectors(false)
+	return interceptRoutingRules{Capture: capture, Egress: egress}
 }
 
-func analyzeInterceptRouting(text string, expected []string) interceptRoutingAnalysis {
+func interceptModuleEgressSelectors(module interceptModuleSnapshot) []interceptEgressSelector {
+	selectors := make([]interceptEgressSelector, 0, len(module.CaptureHosts)*2+len(module.NetworkOrigins)+len(module.HostMappings)*2)
+	for _, host := range module.CaptureHosts {
+		kind := "DOMAIN"
+		if strings.HasPrefix(host, "*.") {
+			kind = "DOMAIN-WILDCARD"
+		}
+		selectors = append(selectors,
+			interceptEgressSelector{Kind: kind, Value: host, Port: 80},
+			interceptEgressSelector{Kind: kind, Value: host, Port: 443},
+		)
+	}
+	for _, origin := range module.NetworkOrigins {
+		host, port, err := interceptNetworkOriginHostPort(origin)
+		if err == nil {
+			selectors = append(selectors, interceptEgressSelector{Kind: "DOMAIN", Value: host, Port: port})
+		}
+	}
+	for _, mapping := range module.HostMappings {
+		kind, target := "DOMAIN", strings.ToLower(strings.TrimSuffix(mapping.Target, "."))
+		if ip := net.ParseIP(target); ip != nil && ip.To4() != nil {
+			kind, target = "IP-CIDR", ip.To4().String()+"/32"
+		}
+		selectors = append(selectors,
+			interceptEgressSelector{Kind: kind, Value: target, Port: 80},
+			interceptEgressSelector{Kind: kind, Value: target, Port: 443},
+		)
+	}
+	sort.Slice(selectors, func(i, j int) bool {
+		left := selectors[i].Kind + "\x00" + selectors[i].Value + "\x00" + fmt.Sprintf("%05d", selectors[i].Port)
+		right := selectors[j].Kind + "\x00" + selectors[j].Value + "\x00" + fmt.Sprintf("%05d", selectors[j].Port)
+		return left < right
+	})
+	return selectors
+}
+
+func renderInterceptEgressRule(selector interceptEgressSelector, target string) string {
+	matcher := "(" + selector.Kind + "," + selector.Value
+	if selector.Kind == "IP-CIDR" {
+		matcher += ",no-resolve"
+	}
+	matcher += ")"
+	return "AND,((IN-NAME,intercept-egress)," + matcher + ",(DST-PORT," + strconv.Itoa(selector.Port) + "))," + target
+}
+
+func analyzeInterceptRoutingDocument(text string, document interceptConfigDocument) interceptRoutingAnalysis {
+	return analyzeInterceptRoutingExpected(text, interceptMihomoRouting(document))
+}
+
+func analyzeInterceptRoutingExpected(text string, expected interceptRoutingRules) interceptRoutingAnalysis {
 	analysis := interceptRoutingAnalysis{Reason: "invalid-config"}
 	document, err := parseMihomoNodeDocument(text)
 	if err != nil || len(document.Content) != 1 || hasYAMLAliasOrMerge(document.Content[0]) {
@@ -75,46 +193,84 @@ func analyzeInterceptRouting(text string, expected []string) interceptRoutingAna
 		analysis.Reason = "terminal-match-missing"
 		return analysis
 	}
-	bypass := "IN-NAME,intercept-egress," + matchTarget
-	bypassIndex := -1
-	current := make([]string, 0, len(expected))
-	indices := make([]int, 0, len(expected))
+	available, err := interceptAvailableEgressGroupsNode(root)
+	if err != nil {
+		analysis.Reason = "proxy-groups-structure-conflict"
+		return analysis
+	}
+	availableSet := make(map[string]struct{}, len(available))
+	for _, group := range available {
+		availableSet[group] = struct{}{}
+	}
+	for _, rule := range expected.Egress {
+		target, ok := interceptRuleTarget(rule)
+		if !ok || target == interceptTerminalMatchTarget {
+			continue
+		}
+		if _, exists := availableSet[target]; !exists {
+			analysis.Reason = "egress-group-missing"
+			return analysis
+		}
+	}
+	expected = materializeInterceptRoutingRules(expected, matchTarget)
+
+	rejectIndex := -1
+	currentCapture := make([]string, 0, len(expected.Capture))
+	captureIndices := make([]int, 0, len(expected.Capture))
+	currentEgress := make([]string, 0, len(expected.Egress))
+	egressIndices := make([]int, 0, len(expected.Egress))
 	for index, item := range rules.Content {
 		if item.Kind != yaml.ScalarNode {
 			analysis.Reason = "rules-structure-conflict"
 			return analysis
 		}
+		rawRule := strings.TrimSpace(item.Value)
 		compact := compactMihomoRule(item.Value)
-		if compact == bypass {
-			if bypassIndex != -1 {
-				analysis.Reason = "interception-bypass-duplicate"
+		if rawRule == interceptEgressRejectRule {
+			if rejectIndex != -1 {
+				analysis.Reason = "interception-egress-terminator-duplicate"
 				return analysis
 			}
-			bypassIndex = index
+			rejectIndex = index
+			continue
+		}
+		if ruleTouchesInterceptEgress(rawRule) {
+			if _, _, ok := parseCanonicalInterceptEgressRule(rawRule); !ok {
+				analysis.Reason = "interception-egress-rules-out-of-sync"
+				return analysis
+			}
+			currentEgress = append(currentEgress, rawRule)
+			egressIndices = append(egressIndices, index)
 		}
 		if strings.HasSuffix(compact, ","+interceptMihomoProxyName) {
-			current = append(current, compact)
-			indices = append(indices, index)
+			currentCapture = append(currentCapture, compact)
+			captureIndices = append(captureIndices, index)
 		}
 	}
-	if bypassIndex < 0 || bypassIndex >= matchIndex {
-		analysis.Reason = "interception-bypass-missing"
+	if rejectIndex < 0 || rejectIndex >= matchIndex {
+		analysis.Reason = "interception-egress-terminator-missing"
 		return analysis
 	}
-	moduleStart := bypassIndex + 1
+	egressStart := rejectIndex - len(currentEgress)
+	for index := range currentEgress {
+		if egressIndices[index] != egressStart+index {
+			analysis.Reason = "interception-egress-rules-out-of-sync"
+			return analysis
+		}
+	}
+	moduleStart := rejectIndex + 1
 	if moduleStart < matchIndex && rules.Content[moduleStart].Kind == yaml.ScalarNode &&
 		matchesDenyRule(compactMihomoRule(rules.Content[moduleStart].Value), blockQUICRuleBase, false) {
 		moduleStart++
 	}
-	expected = append([]string(nil), expected...)
-	sort.Strings(expected)
 	analysis.Document = document
 	analysis.Rules = rules
-	analysis.InsertAt = moduleStart
-	analysis.Current = current
-	seenCurrent := make(map[string]struct{}, len(current))
-	for index, rule := range current {
-		if indices[index] != moduleStart+index || !validCanonicalInterceptRule(rule) {
+	analysis.EgressInsertAt = egressStart
+	analysis.MatchTarget = matchTarget
+	analysis.AvailableEgressGroups = available
+	seenCurrent := make(map[string]struct{}, len(currentCapture))
+	for index, rule := range currentCapture {
+		if captureIndices[index] != moduleStart+index || !validCanonicalInterceptRule(rule) {
 			analysis.Reason = "interception-rules-out-of-sync"
 			return analysis
 		}
@@ -123,19 +279,47 @@ func analyzeInterceptRouting(text string, expected []string) interceptRoutingAna
 			return analysis
 		}
 		seenCurrent[rule] = struct{}{}
-		if index > 0 && current[index-1] > rule {
+		if index > 0 && currentCapture[index-1] > rule {
 			analysis.Reason = "interception-rules-out-of-sync"
 			return analysis
 		}
 	}
-	analysis.Reconcileable = true
-	if len(current) != len(expected) {
+	if moduleStart+len(currentCapture) != matchIndex {
 		analysis.Reason = "interception-rules-out-of-sync"
 		return analysis
 	}
-	for index := range expected {
-		if current[index] != expected[index] || indices[index] != moduleStart+index {
+	seenSelectors := make(map[string]struct{}, len(currentEgress))
+	for _, rule := range currentEgress {
+		selector, _, ok := parseCanonicalInterceptEgressRule(rule)
+		if !ok {
+			analysis.Reason = "interception-egress-rules-out-of-sync"
+			return analysis
+		}
+		identity := selector.Kind + "\x00" + selector.Value + "\x00" + strconv.Itoa(selector.Port)
+		if _, duplicate := seenSelectors[identity]; duplicate {
+			analysis.Reason = "interception-egress-rules-out-of-sync"
+			return analysis
+		}
+		seenSelectors[identity] = struct{}{}
+	}
+	analysis.Reconcileable = true
+	if len(currentCapture) != len(expected.Capture) {
+		analysis.Reason = "interception-rules-out-of-sync"
+		return analysis
+	}
+	for index := range expected.Capture {
+		if currentCapture[index] != expected.Capture[index] || captureIndices[index] != moduleStart+index {
 			analysis.Reason = "interception-rules-out-of-sync"
+			return analysis
+		}
+	}
+	if len(currentEgress) != len(expected.Egress) {
+		analysis.Reason = "interception-egress-rules-out-of-sync"
+		return analysis
+	}
+	for index := range expected.Egress {
+		if currentEgress[index] != expected.Egress[index] {
+			analysis.Reason = "interception-egress-rules-out-of-sync"
 			return analysis
 		}
 	}
@@ -145,26 +329,166 @@ func analyzeInterceptRouting(text string, expected []string) interceptRoutingAna
 	return analysis
 }
 
-func renderInterceptRouting(analysis interceptRoutingAnalysis, nextRules []string) (string, error) {
+func renderInterceptRoutingDocument(analysis interceptRoutingAnalysis, document interceptConfigDocument) (string, error) {
+	next := interceptMihomoRouting(document)
+	available := make(map[string]struct{}, len(analysis.AvailableEgressGroups))
+	for _, group := range analysis.AvailableEgressGroups {
+		available[group] = struct{}{}
+	}
+	for _, rule := range next.Egress {
+		target, ok := interceptRuleTarget(rule)
+		if ok && target != interceptTerminalMatchTarget {
+			if _, exists := available[target]; !exists {
+				return "", fmt.Errorf("interception egress group %q does not exist", target)
+			}
+		}
+	}
+	return renderInterceptRoutingRules(analysis, materializeInterceptRoutingRules(next, analysis.MatchTarget))
+}
+
+func renderInterceptRoutingRules(analysis interceptRoutingAnalysis, next interceptRoutingRules) (string, error) {
 	if !analysis.Reconcileable || analysis.Document == nil || analysis.Rules == nil {
 		return "", errors.New("interception routing is not manageable")
 	}
-	kept := analysis.Rules.Content[:0]
+	kept := make([]*yaml.Node, 0, len(analysis.Rules.Content))
 	for _, item := range analysis.Rules.Content {
-		if strings.HasSuffix(compactMihomoRule(item.Value), ","+interceptMihomoProxyName) {
+		rawRule := strings.TrimSpace(item.Value)
+		compact := compactMihomoRule(item.Value)
+		if rawRule == interceptEgressRejectRule || ruleTouchesInterceptEgress(rawRule) || strings.HasSuffix(compact, ","+interceptMihomoProxyName) {
 			continue
 		}
 		kept = append(kept, item)
 	}
 	analysis.Rules.Content = kept
-	nextRules = append([]string(nil), nextRules...)
-	sort.Strings(nextRules)
-	nodes := make([]*yaml.Node, 0, len(nextRules))
-	for _, rule := range nextRules {
+	egressNodes := make([]*yaml.Node, 0, len(next.Egress)+1)
+	for _, rule := range next.Egress {
+		egressNodes = append(egressNodes, scalarNode(rule))
+	}
+	egressNodes = append(egressNodes, scalarNode(interceptEgressRejectRule))
+	analysis.Rules.Content = insertNodes(analysis.Rules.Content, analysis.EgressInsertAt, egressNodes...)
+
+	captureInsertAt := analysis.EgressInsertAt + len(egressNodes)
+	if captureInsertAt < len(analysis.Rules.Content) && matchesDenyRule(compactMihomoRule(analysis.Rules.Content[captureInsertAt].Value), blockQUICRuleBase, false) {
+		captureInsertAt++
+	}
+	nodes := make([]*yaml.Node, 0, len(next.Capture))
+	for _, rule := range uniqueSortedStrings(next.Capture) {
 		nodes = append(nodes, scalarNode(rule))
 	}
-	analysis.Rules.Content = insertNodes(analysis.Rules.Content, analysis.InsertAt, nodes...)
+	analysis.Rules.Content = insertNodes(analysis.Rules.Content, captureInsertAt, nodes...)
 	return encodeMihomoNode(analysis.Document)
+}
+
+func materializeInterceptRoutingRules(rules interceptRoutingRules, matchTarget string) interceptRoutingRules {
+	out := interceptRoutingRules{Capture: append([]string(nil), rules.Capture...), Egress: append([]string(nil), rules.Egress...)}
+	for index, rule := range out.Egress {
+		if target, ok := interceptRuleTarget(rule); ok && target == interceptTerminalMatchTarget {
+			out.Egress[index] = strings.TrimSuffix(rule, ","+interceptTerminalMatchTarget) + "," + matchTarget
+		}
+	}
+	return out
+}
+
+func ruleTouchesInterceptEgress(rule string) bool {
+	return strings.HasPrefix(rule, "IN-NAME,intercept-egress,") || strings.Contains(rule, "(IN-NAME,intercept-egress)")
+}
+
+func interceptRuleTarget(rule string) (string, bool) {
+	index := strings.LastIndex(rule, ")),")
+	if index < 0 || index+3 >= len(rule) {
+		return "", false
+	}
+	target := rule[index+3:]
+	if target != interceptTerminalMatchTarget && validateInterceptEgressGroupBinding(target) != nil {
+		return "", false
+	}
+	return target, target != ""
+}
+
+func parseCanonicalInterceptEgressRule(rule string) (interceptEgressSelector, string, bool) {
+	const prefix = "AND,((IN-NAME,intercept-egress),("
+	if !strings.HasPrefix(rule, prefix) {
+		return interceptEgressSelector{}, "", false
+	}
+	target, ok := interceptRuleTarget(rule)
+	if !ok {
+		return interceptEgressSelector{}, "", false
+	}
+	body := strings.TrimSuffix(strings.TrimPrefix(rule, prefix), ","+target)
+	portMarker := "),(DST-PORT,"
+	portAt := strings.LastIndex(body, portMarker)
+	if portAt < 0 || !strings.HasSuffix(body, "))") {
+		return interceptEgressSelector{}, "", false
+	}
+	matcher := body[:portAt]
+	portText := strings.TrimSuffix(body[portAt+len(portMarker):], "))")
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != portText {
+		return interceptEgressSelector{}, "", false
+	}
+	selector := interceptEgressSelector{Port: port}
+	switch {
+	case strings.HasPrefix(matcher, "DOMAIN,"):
+		selector.Kind, selector.Value = "DOMAIN", strings.TrimPrefix(matcher, "DOMAIN,")
+		if strings.HasPrefix(selector.Value, "*.") || validateInterceptHostPattern(selector.Value) != nil {
+			return interceptEgressSelector{}, "", false
+		}
+	case strings.HasPrefix(matcher, "DOMAIN-WILDCARD,"):
+		selector.Kind, selector.Value = "DOMAIN-WILDCARD", strings.TrimPrefix(matcher, "DOMAIN-WILDCARD,")
+		if !strings.HasPrefix(selector.Value, "*.") || validateInterceptHostPattern(selector.Value) != nil {
+			return interceptEgressSelector{}, "", false
+		}
+	case strings.HasPrefix(matcher, "IP-CIDR,") && strings.HasSuffix(matcher, ",no-resolve"):
+		selector.Kind = "IP-CIDR"
+		selector.Value = strings.TrimSuffix(strings.TrimPrefix(matcher, "IP-CIDR,"), ",no-resolve")
+		ipText := strings.TrimSuffix(selector.Value, "/32")
+		ip := net.ParseIP(ipText)
+		if !strings.HasSuffix(selector.Value, "/32") || ip == nil || ip.To4() == nil || ip.To4().String() != ipText {
+			return interceptEgressSelector{}, "", false
+		}
+	default:
+		return interceptEgressSelector{}, "", false
+	}
+	if renderInterceptEgressRule(selector, target) != rule {
+		return interceptEgressSelector{}, "", false
+	}
+	return selector, target, true
+}
+
+func interceptAvailableEgressGroups(text string) ([]string, error) {
+	document, err := parseMihomoNodeDocument(text)
+	if err != nil || len(document.Content) != 1 || hasYAMLAliasOrMerge(document.Content[0]) {
+		if err == nil {
+			err = errors.New("mihomo YAML is not a canonical single document")
+		}
+		return nil, err
+	}
+	return interceptAvailableEgressGroupsNode(document.Content[0])
+}
+
+func interceptAvailableEgressGroupsNode(root *yaml.Node) ([]string, error) {
+	groups := []string{"DIRECT"}
+	seen := map[string]struct{}{"DIRECT": {}}
+	node := mappingNodeValue(root, "proxy-groups")
+	if node == nil {
+		return groups, nil
+	}
+	if node.Kind != yaml.SequenceNode {
+		return nil, errors.New("proxy-groups must be a sequence")
+	}
+	for index, item := range node.Content {
+		name, ok := mappingScalar(item, "name")
+		if !ok || validateInterceptEgressGroupBinding(name) != nil || name == "" {
+			return nil, fmt.Errorf("proxy group %d has an invalid name", index)
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return nil, fmt.Errorf("duplicate proxy group name %q", name)
+		}
+		seen[name] = struct{}{}
+		groups = append(groups, name)
+	}
+	sort.Strings(groups[1:])
+	return groups, nil
 }
 
 func validCanonicalInterceptRule(rule string) bool {
@@ -272,12 +596,14 @@ func terminalMatchRule(rules *yaml.Node) (int, string, bool) {
 		if item.Kind != yaml.ScalarNode {
 			return 0, "", false
 		}
-		parts := strings.Split(compactMihomoRule(item.Value), ",")
-		if len(parts) == 2 && parts[0] == "MATCH" {
-			if matchIndex != -1 || index != len(rules.Content)-1 || parts[1] == "" {
+		raw := strings.TrimSpace(item.Value)
+		kind, candidate, found := strings.Cut(raw, ",")
+		if found && strings.TrimSpace(kind) == "MATCH" {
+			candidate = strings.TrimSpace(candidate)
+			if matchIndex != -1 || index != len(rules.Content)-1 || strings.Contains(candidate, ",") || validateInterceptEgressGroupBinding(candidate) != nil || candidate == "" {
 				return 0, "", false
 			}
-			matchIndex, target = index, parts[1]
+			matchIndex, target = index, candidate
 		}
 	}
 	return matchIndex, target, matchIndex >= 0

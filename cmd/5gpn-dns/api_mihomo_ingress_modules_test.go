@@ -169,10 +169,10 @@ func TestMihomoIngressModules_BlockQUIC443RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bypassIndex := strings.Index(onDisk, "IN-NAME,intercept-egress,Proxies")
+	egressTerminatorIndex := strings.Index(onDisk, interceptEgressRejectRule)
 	blockIndex := strings.Index(onDisk, blockQUICRuleBase+",REJECT")
 	matchIndex := strings.Index(onDisk, "MATCH,Proxies")
-	if bypassIndex < 0 || blockIndex <= bypassIndex || matchIndex <= blockIndex || strings.Count(onDisk, blockQUICRuleBase) != 1 {
+	if egressTerminatorIndex < 0 || blockIndex <= egressTerminatorIndex || matchIndex <= blockIndex || strings.Count(onDisk, blockQUICRuleBase) != 1 {
 		t.Fatalf("QUIC block rule ordering is not canonical:\n%s", onDisk)
 	}
 	if fx.tester.calls != 2 || fx.ctl.putCalls != 2 {

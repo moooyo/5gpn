@@ -35,7 +35,7 @@ client direct          mihomo :80/:443/:5060/:8080/:8443 -- operator-defined app
                               |
                               | authenticated loopback SOCKS5 TCP/UDP
                               v
-                       mihomo intercept-egress -- operator-defined application egress
+                       mihomo intercept-egress -- ordered operator group bindings, then operator egress
 ```
 
 This is not a host router or VPN. The project does not install or manage TUN,
@@ -88,21 +88,25 @@ server after DNS steering and therefore fail closed.
 Fresh and explicitly reset seeds also enable the fixed `block-quic-443`
 capability. It keeps the UDP `:443` listener bound but places one canonical
 `AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` rule after the authenticated
-`intercept-egress` bypass and before interception-host rules. UDP/443 traffic
+`intercept-egress` binding rules and fail-closed terminator, and before
+interception-host rules. UDP/443 traffic
 that reaches the public gateway therefore fails immediately so clients that
-support fallback can retry over TCP/HTTPS, while sidecar upstream traffic keeps
-its authenticated bypass. This is a mihomo ingress rule, not a host firewall;
+support fallback can retry over TCP/HTTPS, while declared sidecar upstream
+traffic matches its authenticated binding rule first. This is a mihomo ingress rule, not a host firewall;
 traffic that bypasses the gateway is unaffected. Normal install and configure
 operations continue to preserve an existing valid operator config byte-for-byte,
 so only fresh/reset configs receive the default implicitly.
 
 The rule boundary is exact: eight base panel protocol/port rejects, the two
 `:5060` panel rejects, the console and allowlisted zashboard routes, the
-zashboard deny-by-default rule, seven anti-loop destination guards, the
-interception egress bypass, zero or one canonical global UDP/443 reject, zero or
-more canonical extension-capture rules, and the terminal `MATCH`. Capture rules
-use the reserved `MODULE-INTERCEPT` action and must be a contiguous, sorted block
-immediately after the optional global reject.
+zashboard deny-by-default rule, seven anti-loop destination guards, the ordered
+interception-egress domain/port binding block, the fail-closed
+`IN-NAME,intercept-egress,REJECT` terminator, zero or one canonical global
+UDP/443 reject, zero or more canonical extension-capture rules, and the terminal
+`MATCH`. Egress rules follow explicit extension execution order and use mihomo
+first-match semantics; capture rules use the reserved `MODULE-INTERCEPT` action
+and remain a contiguous, sorted block immediately after the optional global
+reject.
 The anti-loop guards must follow the panel routes because
 mihomo resolves the synthetic console target through `hosts` before matching
 rules; moving those guards earlier would reject the legitimate console
@@ -126,7 +130,7 @@ The interception subsystem is a separate catalog from the fixed mihomo ingress
 catalog. Its global master is disabled in a fresh installation. The seed always
 contains an authenticated loopback `MODULE-INTERCEPT`
 SOCKS5 node, the matching `intercept-egress` mixed listener, and an `IN-NAME`
-bypass to the terminal operator egress group. No extension-capture rule is
+fail-closed terminator. No extension-capture or bound egress rule is
 present in a fresh seed. Extensions may be configured and armed while the
 master is off, but they publish no DNS overlay or mihomo capture rule until the
 master is explicitly enabled. An active native extension derives exact
@@ -155,9 +159,13 @@ leaves HTTP/1.1 only for new TLS connections. With
 With it on, authenticated UDP associations discard only IETF QUIC v1/v2 traffic
 already selected by the active extension-capture rules, allowing a capable client to
 retry over TCP/HTTPS. This does not claim legacy GQUIC support, and a client is
-permitted to fail instead of falling back. HTTPS upstreams are separately certificate-
-verified and every upstream connection returns
-through mihomo's authenticated `intercept-egress` SOCKS5 listener. The HTTP/3
+permitted to fail instead of falling back. HTTPS upstreams are separately
+certificate-verified and every upstream connection, including an explicitly
+permitted script network request, returns through mihomo's authenticated
+`intercept-egress` SOCKS5 listener. Ordered domain/port rules select an
+operator-bound group when present and otherwise the terminal operator target
+declared by the complete mihomo configuration. Unknown sidecar egress hits the
+dedicated REJECT terminator. The HTTP/3
 client starts with QUIC v1 and retries v2 only after an authenticated version-
 negotiation failure, before request data is sent. There is no direct sidecar
 egress.
@@ -181,7 +189,9 @@ partial-execution acknowledgement. Unknown fields, duplicate keys, multiple
 documents, YAML aliases, anchors, and merge keys are rejected. A manifest
 declares stable metadata identity and semantic version, explicit capture hosts,
 optional public-domain or public-IPv4 upstream mappings, typed settings,
-permissions, and structured request/response script actions. URL install accepts
+permissions, optional exact HTTP(S) network origins, an optional
+operator-egress-group requirement, and structured request/response script
+actions. URL install accepts
 one HTTPS manifest; local add accepts one pasted or uploaded manifest. A URL
 manifest may reference relative HTTPS script resources, while a local manifest
 must use inline script source or an absolute HTTPS resource.
@@ -195,8 +205,13 @@ declares request or response phase, capture-host subset, schemes, methods,
 path RE2 expression, optional response statuses, body representation, timeout,
 and body limit. Its single `transform(context)` entry point receives only the
 bounded request/response projection, typed settings, console logging, and—when
-explicitly permitted—a quota-bound per-extension storage object. It has no
-network, filesystem, process, timer, or module-loader access.
+explicitly permitted—a quota-bound per-extension storage object and synchronous
+network requests constrained to exact approved origins. It has no ambient
+network client, filesystem, process, timer, socket, or module-loader access. A
+permitted script can deliberately send any data visible to it to those origins;
+the Console states that risk before enable. Fixed process-wide network time,
+body, call-count, and concurrency limits are runtime safety bounds rather than
+manifest knobs.
 
 The repository's `extensions/apple-wloc` directory maintains Apple WLOC as a
 normal online-installable native extension. It is not compiled into either Go
@@ -221,11 +236,14 @@ Native `traffic.upstreamMappings` are extension-scoped upstream overrides, not
 a second global DNS policy. Their host must be covered by the same extension's
 `captureHosts`. They apply only after that host has been steered through the
 sidecar, preserve the original HTTP Host and TLS SNI, reject private, loopback,
-link-local, and otherwise unsafe IPv4 targets, and return through mihomo. The
-native manifest deliberately has no egress, node, selector, or proxy-group
-field: every transformed TCP or UDP flow returns through authenticated
-`intercept-egress`, and the operator-owned mihomo configuration makes the final
-DIRECT or proxy choice.
+link-local, and otherwise unsafe IPv4 targets, and return through mihomo. A
+manifest may require an operator egress-group binding but cannot name, inspect,
+or change the selected group. The Console exposes only existing proxy-group
+names plus `DIRECT`; the binding is operator state stored outside the immutable
+snapshot. Every transformed TCP or UDP flow returns through authenticated
+`intercept-egress`, where ordered domain/port rules apply the first matching
+bound extension's group. Missing and removed required bindings fail closed
+without fallback.
 
 The `5gpn-dns` systemd unit is softly ordered after mihomo (`Wants`/`After`),
 not coupled with `Requires` or `BindsTo`: a controller or data-plane failure
@@ -250,13 +268,15 @@ policy-v2 objects, structured egress targets, node APIs, or selector APIs.
 
 Enabled extension capture hosts form a separate system overlay before this
 operator list. The overlay is empty after a fresh install and is published only
-after an explicit extension transaction has prepared the immutable snapshot and certificate,
-validated and hot-applied the matching mihomo rules, and committed the sidecar
-state. A matching name receives the same gateway action and `force-proxy`
+after an explicit extension transaction has prepared the immutable snapshot and
+certificate, validated every required operator group, validated and hot-applied
+the ordered egress and capture rules, and committed the sidecar state. A
+matching name receives the same gateway action and `force-proxy`
 observability reason as an explicit proxy-intent rule. Disabling a module
 removes its overlay and flushes the response cache. This overlay is not a
 second general policy language: it accepts only the normalized host patterns
-owned by enabled native extensions and cannot select an egress node.
+owned by enabled native extensions. DNS policy still cannot select egress; the
+separate operator-confirmed extension binding transaction owns that choice.
 
 An unmatched name uses one of three fallbacks:
 
@@ -314,7 +334,8 @@ must state that limitation rather than implying network-level enforcement.
 
 `/etc/5gpn/mihomo/config.yaml` is a complete, operator-owned mihomo
 configuration. The initial seed provides listeners, hostname sniffing, the
-loopback egress broker, panel routing, anti-loop rules, and a `Proxies` group
+loopback egress broker, panel routing, anti-loop rules, a fail-closed sidecar
+egress terminator, and a `Proxies` group
 whose initial choice is `DIRECT`. After publication there is no generated or
 daemon-managed region.
 
@@ -392,19 +413,25 @@ Interception extensions are managed through the authenticated
 fallback settings use authenticated `GET`/`PUT /api/interception/settings` over
 the same complete-document revision. The Console and Telegram bot call the same
 in-process `InterceptModuleManager`; neither has a private toggle path. Import,
-argument update, delete, and enable/disable operations carry the SHA-256
-revision of the complete sidecar document. Typed setting updates, including a
+argument update, delete, reorder, operator group binding, and enable/disable
+operations carry the SHA-256 revision of the complete sidecar document. Typed
+setting updates, including a
 `location` value selected through the map editor, use that same revision and
 manager; there is no plugin-specific settings endpoint.
 Telegram lists the same readiness and host state and uses a separate
 confirmation message before applying an enable or disable. It cannot import,
 inspect source bodies, or edit typed settings;
-those higher-context operations remain in the authenticated Console.
+those higher-context operations remain in the authenticated Console. A plugin
+with network origins cannot be enabled from Telegram because that surface cannot
+show the complete origin permission review; it directs the operator to the
+Console instead. Disable remains available as a fail-safe operation.
 
-An active-extension or master enable/disable transaction holds the sidecar and mihomo store locks in a
-fixed order. It validates the candidate sidecar with the installed
+An active-extension, reorder, binding, or master enable/disable transaction
+holds the sidecar and mihomo store locks in a fixed order. It validates the
+candidate sidecar with the installed
 `5gpn-intercept --check-config`, structurally renders the reserved mihomo rule
-block, validates the complete YAML invariants, runs `mihomo -t`, and preserves
+blocks, verifies every selected group exists, validates the complete YAML
+invariants, runs `mihomo -t`, and preserves
 the old bytes for rollback. When new SANs are needed, it atomically publishes
 the candidate sidecar document, waits for the root-owned certificate publisher
 to acknowledge the exact host-set digest, then atomically publishes and hot-
@@ -413,11 +440,19 @@ restores the old sidecar bytes; mihomo failure also restores and reapplies the
 old operator configuration. Disable operations may leave a temporary
 certificate SAN superset, but the runtime allowlist rejects disabled hosts.
 
-`/etc/5gpn/intercept/config.json` version 3 preserves installer-owned SOCKS credentials,
+`/etc/5gpn/intercept/config.json` version 4 preserves installer-owned SOCKS credentials,
 loopback addresses, and certificate paths across every API write. It also
 stores the MITM master and protocol settings plus immutable native extension,
-manifest, script, permission, typed-setting, and capture-host snapshots. The
-sidecar reloads only a fully valid document by mtime and retains
+manifest, script, origin-permission, typed-setting, and capture-host snapshots,
+the complete execution-order permutation, and mutable operator egress-group
+bindings. Both request and response actions execute top-to-bottom in that
+order; the same order determines the first egress binding that wins for a
+shared domain and port. A raw mihomo PUT or reset cannot remove a group that is
+still referenced by any installed extension, including a disabled one. An
+out-of-band missing group makes routing not-ready; reconciliation withdraws the
+DNS overlay and never substitutes DIRECT or the terminal group.
+
+The sidecar reloads only a fully valid document by mtime and retains
 the last valid snapshot after an invalid external replacement. A running
 sidecar exits cleanly when the master turns off. The continuously enabled
 `5gpn-intercept-runtime.path` starts the conditioned sidecar when an atomic
@@ -570,7 +605,9 @@ Specialized live state remains in purpose-specific, atomically written files:
 - `intercept/config.json` is the sidecar runtime document. Its SOCKS credentials
   and fixed paths are installer-owned; native extension installs store bounded
   immutable manifests and scripts, normalized capture hosts, structured action
-  matchers, typed settings, permissions, upstream mappings, and enabled state.
+  matchers, typed settings, exact network origins, permissions, upstream
+  mappings, enabled state, explicit execution order, and operator group
+  bindings.
   The global MITM master, HTTP/2 negotiation, and QUIC fallback protection live
   in the same document;
 - `/var/lib/5gpn-intercept/store.json` is the size-bounded, sidecar-owned
@@ -812,8 +849,11 @@ Each native HTTP action runs in a fresh goja VM and must define exactly
 `transform(context)`. The context contains only the declared phase's bounded
 request/response projection, typed settings, console logging, and an optional
 quota-bound storage object when the immutable manifest requested that
-permission. There are no compatibility globals, ambient network client,
-filesystem, process, timer, module loader, socket, or ambient Go object.
+permission. A declared and operator-confirmed network permission adds only
+`context.network.request`, restricted to the immutable exact-origin list and
+routed through authenticated mihomo SOCKS5. There are no compatibility globals,
+ambient `fetch`, filesystem, process, timer, module loader, socket, or ambient
+Go object.
 Source, request, response, per-action, total-extension, persistent-key, and
 persistent-file sizes are bounded. Request and response bodies support omitted,
 string, or Uint8Array delivery as declared by `bodyMode`, plus bounded identity,
@@ -882,16 +922,21 @@ QUIC v1/v2 traffic and other variants are not guaranteed.
 
 The dedicated `/extensions` route owns native plugins. It shows immutable
 manifest/script digests, semantic version, normalized capture hosts, actions,
-permissions, typed settings, upstream mappings, enabled/runtime state, and a
-visible capture-to-transform-to-mihomo traffic rail. An authenticated,
+permissions, exact network origins, typed settings, upstream mappings, explicit
+execution position, operator egress binding, enabled/runtime state, and a
+visible capture-to-transform-to-mihomo traffic rail. Enabling a plugin with
+network permission opens a dedicated review that lists every origin and states
+that the plugin can send any decrypted request, response, setting, or storage
+data visible to it there. An authenticated,
 on-demand detail read exposes the exact stored manifest and script bodies for
 review; list responses do not send those potentially large bodies. “Install
 from URL” and “Add locally” are separate dialogs with no source-mode switch.
 The former accepts one HTTPS native manifest; the latter accepts pasted or
 uploaded YAML. Invalid native manifests fail installation rather than entering a
 compatibility mode. Required settings must be complete before enable. Enable,
-disable, delete, settings, and update changes use revision checks and explicit
-confirmation. A `location` setting uses the shared map point picker with
+disable, delete, reorder, binding, settings, and update changes use revision
+checks and explicit confirmation. Required missing or removed group bindings
+render the plugin not-ready and cannot silently fall back. A `location` setting uses the shared map point picker with
 explicit city search, draggable point, accuracy, and direct coordinate fields.
 City search calls bearer-protected `GET /api/geocode/cities`; the daemon sends
 only the bounded query and language to the fixed Nominatim origin through the
@@ -907,7 +952,8 @@ authorization.
 `/extensions/hosts` is the authenticated capture-host audit view. It groups
 every declared host pattern by plugin, distinguishes running/configured/disabled
 state using the global master plus `active_capture_hosts`, highlights exact duplicate
-declarations, and supports local search and filtering. Modern Android Private
+declarations, shows action order and the first effective egress winner for a
+duplicate host, and supports local search and filtering. Modern Android Private
 DNS remains supported, but the Setup Guide does not offer Android MITM CA
 installation because modern Android applications generally reject user CAs.
 

@@ -677,7 +677,7 @@ func iosMenu() *models.InlineKeyboardMarkup {
 func renderInterceptModules(view interceptModulesView, notice string) string {
 	var out strings.Builder
 	out.WriteString("<b>拦截插件</b>\n")
-	out.WriteString("启用会同步发布接管域名、证书、mihomo 路由与 DNS 引流；出口始终由 mihomo 决定。\n")
+	out.WriteString("启用会同步发布接管域名、证书、mihomo 路由与 DNS 引流；用户绑定与 operator-owned mihomo 配置共同决定出口。\n")
 	if notice != "" {
 		out.WriteString("\n")
 		out.WriteString(notice)
@@ -697,6 +697,15 @@ func renderInterceptModules(view interceptModulesView, notice string) string {
 		out.WriteString("\n<code>")
 		out.WriteString(html.EscapeString(strings.Join(module.CaptureHosts, ", ")))
 		out.WriteString("</code>")
+		out.WriteString(fmt.Sprintf("\n顺序：<code>%d</code>", module.ExecutionOrder))
+		if module.EgressGroup != "" {
+			out.WriteString(" · 出口：<code>")
+			out.WriteString(html.EscapeString(module.EgressGroup))
+			out.WriteString("</code>")
+		}
+		if len(module.NetworkOrigins) > 0 {
+			out.WriteString(fmt.Sprintf("\n🌐 需在 Console 审查 %d 个网络 origin", len(module.NetworkOrigins)))
+		}
 		if module.Reason == "settings-required" {
 			out.WriteString("\n🔧 需要先在 Console 配置必填设置")
 		}
@@ -718,7 +727,9 @@ func interceptModulesMenu(view interceptModulesView) *models.InlineKeyboardMarku
 		if module.Enabled {
 			action = "off"
 			prefix = "关闭"
-		} else if module.Reason == "settings-required" {
+		} else if len(module.NetworkOrigins) > 0 {
+			prefix = "需在 Console 审查网络权限"
+		} else if module.Reason == "settings-required" || module.Reason == "egress-group-required" {
 			prefix = "需在 Console 配置"
 		} else if !module.Ready && module.Reason != "mitm-disabled" {
 			prefix = "不可用"
@@ -729,7 +740,7 @@ func interceptModulesMenu(view interceptModulesView) *models.InlineKeyboardMarku
 			label = string(runes[:23]) + "…"
 		}
 		callback = "module:request:" + action + ":" + module.ID
-		if !module.Enabled && ((!module.Ready && module.Reason != "mitm-disabled") || module.Reason == "settings-required") {
+		if !module.Enabled && (len(module.NetworkOrigins) > 0 || (!module.Ready && module.Reason != "mitm-disabled") || module.Reason == "settings-required") {
 			callback = "menu:modules"
 		}
 		rows = append(rows, []models.InlineKeyboardButton{btn(prefix+" · "+label, callback)})

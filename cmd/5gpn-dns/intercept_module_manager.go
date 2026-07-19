@@ -118,7 +118,7 @@ func (m *InterceptModuleManager) PrepareRuntime() error {
 	if err != nil {
 		return err
 	}
-	analysis := analyzeInterceptRouting(text, interceptMihomoRules(document))
+	analysis := analyzeInterceptRoutingDocument(text, document)
 	if !analysis.Manageable || !interceptCredentialsMatch(text, document) {
 		m.publishHosts(nil)
 		return fmt.Errorf("interception routing is not ready: %s", firstNonEmpty(analysis.Reason, "credential-mismatch"))
@@ -148,7 +148,7 @@ func (m *InterceptModuleManager) ReconcileMihomoText(text string) error {
 		m.publishHosts(nil)
 		return nil
 	}
-	analysis := analyzeInterceptRouting(text, interceptMihomoRules(document))
+	analysis := analyzeInterceptRoutingDocument(text, document)
 	if !analysis.Manageable || !interceptCredentialsMatch(text, document) {
 		m.publishHosts(nil)
 		return fmt.Errorf("interception routing is not ready: %s", firstNonEmpty(analysis.Reason, "credential-mismatch"))
@@ -159,6 +159,34 @@ func (m *InterceptModuleManager) ReconcileMihomoText(text string) error {
 	}
 	m.publishHosts(activeInterceptHosts(document))
 	return nil
+}
+
+// LockMihomoCandidate prevents an interception mutation from racing a raw
+// mihomo config apply. The caller must invoke the returned unlock function
+// after the candidate has either been rejected or fully applied.
+func (m *InterceptModuleManager) LockMihomoCandidate(text string) (func(), error) {
+	if m == nil || m.store == nil {
+		return func() {}, nil
+	}
+	m.mu.Lock()
+	unlock := func() { m.mu.Unlock() }
+	m.store.mu.Lock()
+	document, _, err := m.store.Read()
+	m.store.mu.Unlock()
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	available, err := interceptAvailableEgressGroups(text)
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	if err := validateInterceptEgressBindings(document, available); err != nil {
+		unlock()
+		return nil, fmt.Errorf("%w: %v", errInterceptModuleConflict, err)
+	}
+	return unlock, nil
 }
 
 func (m *InterceptModuleManager) View() (interceptModulesView, error) {
@@ -208,28 +236,41 @@ func (m *InterceptModuleManager) viewLocked() (interceptModulesView, error) {
 	if err != nil {
 		return interceptModulesView{}, err
 	}
-	ready, reason := m.routingReadyLocked(document)
+	ready, reason, availableGroups := m.routingReadyLocked(document)
 	view := interceptModulesView{
-		Revision:           interceptRevision(body),
-		CatalogURL:         nativeExtensionCatalogURL,
-		ActiveCaptureHosts: activeInterceptHosts(document),
-		Modules:            make([]interceptModuleView, 0, len(document.Modules)),
+		Revision:              interceptRevision(body),
+		CatalogURL:            nativeExtensionCatalogURL,
+		ExecutionOrder:        append([]string(nil), document.ExecutionOrder...),
+		AvailableEgressGroups: append([]string(nil), availableGroups...),
+		Modules:               make([]interceptModuleView, 0, len(document.Modules)),
 	}
-	for _, module := range document.Modules {
+	if ready {
+		view.ActiveCaptureHosts = activeInterceptHosts(document)
+	}
+	orderByID := interceptExecutionOrderIndex(document.ExecutionOrder)
+	availableSet := make(map[string]struct{}, len(availableGroups))
+	for _, group := range availableGroups {
+		availableSet[group] = struct{}{}
+	}
+	for _, module := range orderedInterceptModules(document) {
 		settingsReady := interceptModuleSettingsReady(module.Settings)
 		moduleReady := ready && settingsReady
 		moduleReason := reason
 		if !settingsReady {
 			moduleReason = "settings-required"
 		}
-		view.Modules = append(view.Modules, interceptModuleView{
-			ID: module.ID, Version: module.Version, Name: module.Name, Description: module.Description,
-			Enabled: module.Enabled, Ready: moduleReady, Reason: moduleRuntimeReason(moduleReady, moduleReason),
-			CaptureHosts: append([]string(nil), module.CaptureHosts...), ScriptCount: len(module.Scripts),
-			Settings: cloneInterceptSettings(module.Settings), HostMappings: append([]interceptHostMapping(nil), module.HostMappings...),
-			PersistentStorage: module.PersistentStorage, SourceURL: module.Source.URL,
-			SourceDigest: module.Source.Digest, SnapshotDigest: interceptModuleSnapshotDigest(module), ImportedAt: module.ImportedAt,
-		})
+		if module.EgressGroupRequired && module.EgressGroup == "" {
+			moduleReady = false
+			moduleReason = "egress-group-required"
+		} else if module.EgressGroup != "" {
+			if _, exists := availableSet[module.EgressGroup]; !exists {
+				moduleReady = false
+				moduleReason = "egress-group-missing"
+			}
+		}
+		moduleView := interceptModuleViewFromSnapshot(module, moduleReady, moduleReason)
+		moduleView.ExecutionOrder = orderByID[module.ID]
+		view.Modules = append(view.Modules, moduleView)
 	}
 	return view, nil
 }
@@ -241,30 +282,58 @@ func moduleRuntimeReason(ready bool, reason string) string {
 	return ""
 }
 
-func (m *InterceptModuleManager) routingReadyLocked(document interceptConfigDocument) (bool, string) {
-	if !document.MITM.Enabled {
-		return false, "mitm-disabled"
-	}
+func (m *InterceptModuleManager) routingReadyLocked(document interceptConfigDocument) (bool, string, []string) {
 	if m.mihomo == nil || m.controller == nil {
-		return false, "mihomo-management-unavailable"
+		return false, "mihomo-management-unavailable", nil
 	}
 	m.mihomo.Lock()
 	text, err := m.mihomo.Read()
 	m.mihomo.Unlock()
 	if err != nil {
-		return false, "mihomo-config-unreadable"
+		return false, "mihomo-config-unreadable", nil
 	}
-	analysis := analyzeInterceptRouting(text, interceptMihomoRules(document))
+	availableGroups, groupErr := interceptAvailableEgressGroups(text)
+	if groupErr != nil {
+		return false, "proxy-groups-structure-conflict", nil
+	}
+	if !document.MITM.Enabled {
+		return false, "mitm-disabled", availableGroups
+	}
+	analysis := analyzeInterceptRoutingDocument(text, document)
 	if !analysis.Manageable {
-		return false, analysis.Reason
+		return false, analysis.Reason, availableGroups
 	}
 	if !interceptCredentialsMatch(text, document) {
-		return false, "credential-mismatch"
+		return false, "credential-mismatch", availableGroups
 	}
 	if len(activeInterceptHosts(document)) > 0 && !m.certificateReady(document) {
-		return false, "certificate-not-ready"
+		return false, "certificate-not-ready", availableGroups
 	}
-	return true, ""
+	return true, "", availableGroups
+}
+
+func interceptExecutionOrderIndex(order []string) map[string]int {
+	indices := make(map[string]int, len(order))
+	for index, id := range order {
+		indices[id] = index + 1
+	}
+	return indices
+}
+
+func validateInterceptEgressBindings(document interceptConfigDocument, available []string) error {
+	groups := make(map[string]struct{}, len(available))
+	for _, group := range available {
+		groups[group] = struct{}{}
+	}
+	for _, module := range document.Modules {
+		if module.EgressGroup == "" {
+			continue
+		}
+		if _, exists := groups[module.EgressGroup]; !exists {
+			return fmt.Errorf("egress group %q selected by extension %q does not exist", module.EgressGroup, module.ID)
+		}
+	}
+	return nil
 }
 
 func (m *InterceptModuleManager) Import(ctx context.Context, request interceptModuleImportRequest) (interceptModulesView, error) {
@@ -295,6 +364,7 @@ func (m *InterceptModuleManager) Import(ctx context.Context, request interceptMo
 		}
 	}
 	document.Modules = append(document.Modules, module)
+	document.ExecutionOrder = append(document.ExecutionOrder, module.ID)
 	newBody, err := marshalInterceptDocument(document)
 	if err != nil {
 		return interceptModulesView{}, err
@@ -368,6 +438,7 @@ func (m *InterceptModuleManager) CheckUpdate(ctx context.Context, id, revision s
 		return interceptModuleUpdateCheckView{Revision: revision, State: "unchanged"}, nil
 	}
 	candidate.Settings = mergeInterceptSettingValues(current.Settings, candidate.Settings)
+	candidate.EgressGroup = current.EgressGroup
 	candidateDocument := latest
 	candidateDocument.Modules = append([]interceptModuleSnapshot(nil), latest.Modules...)
 	found = false
@@ -464,6 +535,7 @@ func (m *InterceptModuleManager) ApplyUpdate(ctx context.Context, id, revision, 
 		return interceptModulesView{}, errInterceptModuleNotFound
 	}
 	candidate.Settings = mergeInterceptSettingValues(latest.Modules[index].Settings, candidate.Settings)
+	candidate.EgressGroup = latest.Modules[index].EgressGroup
 	latest.Modules[index] = candidate
 	newBody, err := marshalInterceptDocument(latest)
 	if err == nil {
@@ -520,6 +592,7 @@ func (m *InterceptModuleManager) Delete(id, revision string) (interceptModulesVi
 		return interceptModulesView{}, errInterceptModuleNotFound
 	}
 	document.Modules = append(document.Modules[:index], document.Modules[index+1:]...)
+	document.ExecutionOrder = removeInterceptModuleID(document.ExecutionOrder, id)
 	newBody, err := marshalInterceptDocument(document)
 	if err == nil {
 		err = m.validateSidecarCandidate(context.Background(), newBody)
@@ -535,16 +608,17 @@ func (m *InterceptModuleManager) Delete(id, revision string) (interceptModulesVi
 }
 
 type interceptModuleUpdate struct {
-	Revision string                     `json:"revision"`
-	Enabled  *bool                      `json:"enabled,omitempty"`
-	Settings map[string]json.RawMessage `json:"settings,omitempty"`
+	Revision    string                     `json:"revision"`
+	Enabled     *bool                      `json:"enabled,omitempty"`
+	EgressGroup *string                    `json:"egress_group,omitempty"`
+	Settings    map[string]json.RawMessage `json:"settings,omitempty"`
 }
 
 func (m *InterceptModuleManager) Update(ctx context.Context, id string, update interceptModuleUpdate) (interceptModulesView, error) {
 	if m == nil || m.store == nil {
 		return interceptModulesView{}, errInterceptModulesUnavailable
 	}
-	if !validMihomoConfigRevision(update.Revision) || (update.Enabled == nil && update.Settings == nil) {
+	if !validMihomoConfigRevision(update.Revision) || (update.Enabled == nil && update.EgressGroup == nil && update.Settings == nil) {
 		return interceptModulesView{}, errors.New("revision and at least one update field are required")
 	}
 	return m.mutate(ctx, update.Revision, func(document *interceptConfigDocument) (bool, error) {
@@ -554,21 +628,50 @@ func (m *InterceptModuleManager) Update(ctx context.Context, id string, update i
 				continue
 			}
 			routingChanged := false
-			if update.Enabled != nil {
-				if *update.Enabled && !interceptModuleSettingsReady(module.Settings) {
-					return false, errors.New("configure every required extension setting before enable")
-				}
-				routingChanged = document.MITM.Enabled && module.Enabled != *update.Enabled
-				module.Enabled = *update.Enabled
-			}
 			if update.Settings != nil {
 				if err := updateInterceptModuleSettings(module, update.Settings); err != nil {
 					return false, err
 				}
 			}
+			if update.EgressGroup != nil {
+				group := *update.EgressGroup
+				if err := validateInterceptEgressGroupBinding(group); err != nil {
+					return false, err
+				}
+				routingChanged = true
+				module.EgressGroup = group
+			}
+			if update.Enabled != nil {
+				if *update.Enabled && !interceptModuleSettingsReady(module.Settings) {
+					return false, errors.New("configure every required extension setting before enable")
+				}
+				if *update.Enabled && module.EgressGroupRequired && module.EgressGroup == "" {
+					return false, errors.New("select an egress group before enabling this extension")
+				}
+				routingChanged = routingChanged || (document.MITM.Enabled && module.Enabled != *update.Enabled)
+				module.Enabled = *update.Enabled
+			}
 			return routingChanged, nil
 		}
 		return false, errInterceptModuleNotFound
+	})
+}
+
+func (m *InterceptModuleManager) Reorder(ctx context.Context, revision string, executionOrder []string) (interceptModulesView, error) {
+	if m == nil || m.store == nil {
+		return interceptModulesView{}, errInterceptModulesUnavailable
+	}
+	if !validMihomoConfigRevision(revision) {
+		return interceptModulesView{}, errors.New("a valid revision is required")
+	}
+	requested := append([]string(nil), executionOrder...)
+	return m.mutate(ctx, revision, func(document *interceptConfigDocument) (bool, error) {
+		if err := validateInterceptExecutionOrder(document.Modules, requested); err != nil {
+			return false, err
+		}
+		changed := !stringSlicesEqual(document.ExecutionOrder, requested)
+		document.ExecutionOrder = requested
+		return changed, nil
 	})
 }
 
@@ -611,8 +714,10 @@ func (m *InterceptModuleManager) mutate(
 		return interceptModulesView{}, errInterceptRevisionConflict
 	}
 	nextDocument := oldDocument
+	nextDocument.ExecutionOrder = append([]string(nil), oldDocument.ExecutionOrder...)
 	nextDocument.Modules = append([]interceptModuleSnapshot(nil), oldDocument.Modules...)
 	for index := range nextDocument.Modules {
+		nextDocument.Modules[index].NetworkOrigins = append([]string(nil), oldDocument.Modules[index].NetworkOrigins...)
 		nextDocument.Modules[index].Settings = cloneInterceptSettings(oldDocument.Modules[index].Settings)
 		nextDocument.Modules[index].HostMappings = append([]interceptHostMapping(nil), oldDocument.Modules[index].HostMappings...)
 	}
@@ -627,7 +732,7 @@ func (m *InterceptModuleManager) mutate(
 	if err := m.validateSidecarCandidate(ctx, newBody); err != nil {
 		return interceptModulesView{}, err
 	}
-	if bytesEqual(oldBody, newBody) {
+	if bytesEqual(oldBody, newBody) && !routingChanged {
 		m.store.mu.Unlock()
 		view, viewErr := m.viewLocked()
 		m.store.mu.Lock()
@@ -654,17 +759,18 @@ func (m *InterceptModuleManager) mutate(
 	if !interceptCredentialsMatch(oldMihomo, oldDocument) {
 		return interceptModulesView{}, fmt.Errorf("%w: mihomo and sidecar credentials differ", errInterceptModuleConflict)
 	}
-	oldRules := interceptMihomoRules(oldDocument)
-	nextRules := interceptMihomoRules(nextDocument)
-	analysis := analyzeInterceptRouting(oldMihomo, oldRules)
-	if !analysis.Reconcileable || !interceptRuleSubset(analysis.Current, append(append([]string(nil), oldRules...), nextRules...)) {
+	analysis := analyzeInterceptRoutingDocument(oldMihomo, oldDocument)
+	if !analysis.Manageable {
 		return interceptModulesView{}, fmt.Errorf("%w: %s", errInterceptModuleConflict, analysis.Reason)
 	}
-	nextMihomo, err := renderInterceptRouting(analysis, nextRules)
+	if err := validateInterceptEgressBindings(nextDocument, analysis.AvailableEgressGroups); err != nil {
+		return interceptModulesView{}, fmt.Errorf("%w: %v", errInterceptModuleConflict, err)
+	}
+	nextMihomo, err := renderInterceptRoutingDocument(analysis, nextDocument)
 	if err != nil {
 		return interceptModulesView{}, err
 	}
-	verification := analyzeInterceptRouting(nextMihomo, nextRules)
+	verification := analyzeInterceptRoutingDocument(nextMihomo, nextDocument)
 	if !verification.Manageable {
 		return interceptModulesView{}, errors.New("rendered interception routing failed structural verification")
 	}
@@ -696,7 +802,7 @@ func (m *InterceptModuleManager) mutate(
 	if !certificateReady {
 		reason = "certificate-not-ready"
 	}
-	return modulesViewFromDocument(nextDocument, newBody, certificateReady, reason), nil
+	return modulesViewFromDocument(nextDocument, newBody, certificateReady, reason, analysis.AvailableEgressGroups), nil
 }
 
 func (m *InterceptModuleManager) certificateReady(document interceptConfigDocument) bool {
@@ -828,25 +934,45 @@ func marshalInterceptDocument(document interceptConfigDocument) ([]byte, error) 
 	return append(body, '\n'), nil
 }
 
-func modulesViewFromDocument(document interceptConfigDocument, body []byte, ready bool, reason string) interceptModulesView {
+func modulesViewFromDocument(document interceptConfigDocument, body []byte, ready bool, reason string, availableGroups []string) interceptModulesView {
 	if !document.MITM.Enabled {
 		ready = false
 		reason = "mitm-disabled"
 	}
 	view := interceptModulesView{
-		Revision:           interceptRevision(body),
-		CatalogURL:         nativeExtensionCatalogURL,
-		ActiveCaptureHosts: activeInterceptHosts(document),
-		Modules:            make([]interceptModuleView, 0, len(document.Modules)),
+		Revision:              interceptRevision(body),
+		CatalogURL:            nativeExtensionCatalogURL,
+		ExecutionOrder:        append([]string(nil), document.ExecutionOrder...),
+		AvailableEgressGroups: append([]string(nil), availableGroups...),
+		Modules:               make([]interceptModuleView, 0, len(document.Modules)),
 	}
-	for _, module := range document.Modules {
+	if ready {
+		view.ActiveCaptureHosts = activeInterceptHosts(document)
+	}
+	orderByID := interceptExecutionOrderIndex(document.ExecutionOrder)
+	availableSet := make(map[string]struct{}, len(availableGroups))
+	for _, group := range availableGroups {
+		availableSet[group] = struct{}{}
+	}
+	for _, module := range orderedInterceptModules(document) {
 		settingsReady := interceptModuleSettingsReady(module.Settings)
 		moduleReady := ready && settingsReady
 		moduleReason := reason
 		if !settingsReady {
 			moduleReason = "settings-required"
 		}
-		view.Modules = append(view.Modules, interceptModuleViewFromSnapshot(module, moduleReady, moduleReason))
+		if module.EgressGroupRequired && module.EgressGroup == "" {
+			moduleReady = false
+			moduleReason = "egress-group-required"
+		} else if module.EgressGroup != "" {
+			if _, exists := availableSet[module.EgressGroup]; !exists {
+				moduleReady = false
+				moduleReason = "egress-group-missing"
+			}
+		}
+		moduleView := interceptModuleViewFromSnapshot(module, moduleReady, moduleReason)
+		moduleView.ExecutionOrder = orderByID[module.ID]
+		view.Modules = append(view.Modules, moduleView)
 	}
 	return view
 }
@@ -866,7 +992,8 @@ func interceptModuleViewFromSnapshot(module interceptModuleSnapshot, ready bool,
 		Enabled: module.Enabled, Ready: ready, Reason: moduleRuntimeReason(ready, reason),
 		CaptureHosts: append([]string(nil), module.CaptureHosts...), ScriptCount: len(module.Scripts),
 		Settings: cloneInterceptSettings(module.Settings), HostMappings: append([]interceptHostMapping(nil), module.HostMappings...),
-		PersistentStorage: module.PersistentStorage, SourceURL: module.Source.URL,
+		PersistentStorage: module.PersistentStorage, NetworkOrigins: append([]string{}, module.NetworkOrigins...),
+		EgressGroupRequired: module.EgressGroupRequired, EgressGroup: module.EgressGroup, SourceURL: module.Source.URL,
 		SourceDigest: module.Source.Digest, SnapshotDigest: interceptModuleSnapshotDigest(module), ImportedAt: module.ImportedAt,
 	}
 }

@@ -39,13 +39,14 @@ type interceptModuleParser struct {
 }
 
 type nativeExtensionManifest struct {
-	APIVersion  string                    `yaml:"apiVersion"`
-	Kind        string                    `yaml:"kind"`
-	Metadata    nativeExtensionMetadata   `yaml:"metadata"`
-	Permissions nativeExtensionPermission `yaml:"permissions"`
-	Traffic     nativeExtensionTraffic    `yaml:"traffic"`
-	Settings    []nativeExtensionSetting  `yaml:"settings"`
-	Actions     []nativeExtensionAction   `yaml:"actions"`
+	APIVersion   string                      `yaml:"apiVersion"`
+	Kind         string                      `yaml:"kind"`
+	Metadata     nativeExtensionMetadata     `yaml:"metadata"`
+	Permissions  nativeExtensionPermission   `yaml:"permissions"`
+	Requirements nativeExtensionRequirements `yaml:"requirements"`
+	Traffic      nativeExtensionTraffic      `yaml:"traffic"`
+	Settings     []nativeExtensionSetting    `yaml:"settings"`
+	Actions      []nativeExtensionAction     `yaml:"actions"`
 }
 
 type nativeExtensionMetadata struct {
@@ -56,7 +57,20 @@ type nativeExtensionMetadata struct {
 }
 
 type nativeExtensionPermission struct {
-	PersistentStorage bool `yaml:"persistentStorage"`
+	PersistentStorage bool                             `yaml:"persistentStorage"`
+	Network           nativeExtensionNetworkPermission `yaml:"network"`
+}
+
+type nativeExtensionNetworkPermission struct {
+	Origins []string `yaml:"origins"`
+}
+
+type nativeExtensionRequirements struct {
+	EgressGroup nativeExtensionEgressGroupRequirement `yaml:"egressGroup"`
+}
+
+type nativeExtensionEgressGroupRequirement struct {
+	Required bool `yaml:"required"`
 }
 
 type nativeExtensionTraffic struct {
@@ -179,6 +193,10 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 	if err != nil {
 		return interceptModuleSnapshot{}, fmt.Errorf("traffic.captureHosts: %w", err)
 	}
+	networkOrigins, err := normalizeInterceptNetworkOrigins(manifest.Permissions.Network.Origins)
+	if err != nil {
+		return interceptModuleSnapshot{}, fmt.Errorf("permissions.network.origins: %w", err)
+	}
 	mappings := make([]interceptHostMapping, 0, len(manifest.Traffic.UpstreamMappings))
 	for index, raw := range manifest.Traffic.UpstreamMappings {
 		host, err := normalizeInterceptHostPattern(raw.Host)
@@ -269,7 +287,8 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 		ID: manifest.Metadata.ID, Version: manifest.Metadata.Version,
 		Name: strings.TrimSpace(manifest.Metadata.Name), Description: strings.TrimSpace(manifest.Metadata.Description),
 		CaptureHosts: captureHosts, HostMappings: mappings, Settings: settings, Scripts: scripts,
-		PersistentStorage: manifest.Permissions.PersistentStorage,
+		PersistentStorage: manifest.Permissions.PersistentStorage, NetworkOrigins: networkOrigins,
+		EgressGroupRequired: manifest.Requirements.EgressGroup.Required,
 	}
 	if err := validateInterceptModule(moduleWithSyntheticSource(module)); err != nil {
 		return interceptModuleSnapshot{}, err

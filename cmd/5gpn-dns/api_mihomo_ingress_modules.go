@@ -384,13 +384,13 @@ func analyzeBlockQUICModule(text string, infra InfraParams) blockQUICModuleAnaly
 		analysis.View.Reason = "rules-structure-conflict"
 		return analysis
 	}
-	_, matchTarget, ok := terminalMatchRule(rules)
+	_, _, ok := terminalMatchRule(rules)
 	if !ok {
 		analysis.View.Reason = "terminal-match-missing"
 		return analysis
 	}
-	bypass := "IN-NAME,intercept-egress," + matchTarget
-	bypassIndex := -1
+	egressTerminator := interceptEgressRejectRule
+	egressTerminatorIndex := -1
 	canonicalIndex := -1
 	touchingRules := 0
 	for index, item := range rules.Content {
@@ -399,12 +399,12 @@ func analyzeBlockQUICModule(text string, infra InfraParams) blockQUICModuleAnaly
 			return analysis
 		}
 		rule := compactMihomoRule(item.Value)
-		if rule == bypass {
-			if bypassIndex != -1 {
-				analysis.View.Reason = "interception-bypass-duplicate"
+		if rule == egressTerminator {
+			if egressTerminatorIndex != -1 {
+				analysis.View.Reason = "interception-egress-terminator-duplicate"
 				return analysis
 			}
-			bypassIndex = index
+			egressTerminatorIndex = index
 		}
 		if ruleTouchesBlockQUIC(rule) {
 			touchingRules++
@@ -413,13 +413,13 @@ func analyzeBlockQUICModule(text string, infra InfraParams) blockQUICModuleAnaly
 			}
 		}
 	}
-	if bypassIndex < 0 {
-		analysis.View.Reason = "interception-bypass-missing"
+	if egressTerminatorIndex < 0 {
+		analysis.View.Reason = "interception-egress-terminator-missing"
 		return analysis
 	}
 	analysis.Document = document
 	analysis.Rules = rules
-	analysis.InsertAt = bypassIndex + 1
+	analysis.InsertAt = egressTerminatorIndex + 1
 	if touchingRules == 0 {
 		analysis.View = blockQUICModuleView(false, true, "")
 		return analysis
