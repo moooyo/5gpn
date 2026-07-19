@@ -22,6 +22,13 @@ test('an unknown route redirects explicitly to the overview page', async ({ page
   await expect(page.getByTestId('page-overview')).toBeVisible()
 })
 
+test('the retired modules route has no compatibility alias', async ({ page }) => {
+  await setupMockApiWithToken(page)
+  await page.goto('/modules')
+  await expect(page).toHaveURL(/\/overview$/)
+  await expect(page.getByTestId('page-overview')).toBeVisible()
+})
+
 test('ProfileMenu dropdown + theme + language switch stay CSP-clean', async ({ page }) => {
   const csp = collectCSPViolations(page)
   await setupMockApiWithToken(page)

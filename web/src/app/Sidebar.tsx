@@ -36,7 +36,7 @@ const ICONS: Record<NavIcon, { outline: Icon; filled: Icon }> = {
   logs: { outline: ReceiptIcon, filled: ReceiptFilledIcon },
   resolve: { outline: NetworkCheckIcon, filled: NetworkCheckFilledIcon },
   policy: { outline: RuleIcon, filled: RuleFilledIcon },
-  modules: { outline: ExtensionIcon, filled: ExtensionFilledIcon },
+  extensions: { outline: ExtensionIcon, filled: ExtensionFilledIcon },
   mihomo: { outline: SpeedIcon, filled: SpeedFilledIcon },
   config: { outline: CodeIcon, filled: CodeIcon },
   settings: { outline: SettingsIcon, filled: SettingsFilledIcon },

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { NetworkCheckIcon, RuleIcon, SpeedIcon } from '../../components/icons'
-import { BarChart, DonutChart, GaugeChart, Sparkline, type DonutSegment } from '../../components/charts'
+import { BarChart, DonutChart, Sparkline, type DonutSegment } from '../../components/charts'
 import { Card, StatusDot } from '../../components/ds'
 import { useStatus } from '../../lib/StatusContext'
 import { cn } from '../../lib/cn'
@@ -19,9 +19,31 @@ import {
 
 const SERIES_CAP = 48
 
-function Metric({ label, value, supporting, accent }: { label: string; value: string; supporting?: string; accent?: boolean }) {
+function Metric({
+  label,
+  value,
+  supporting,
+  accent,
+  meterValue,
+}: {
+  label: string
+  value: string
+  supporting?: string
+  accent?: boolean
+  meterValue?: number
+}) {
   return (
-    <Card variant="tonal" className="flex min-h-[116px] flex-col justify-between p-4.5">
+    <Card
+      variant="tonal"
+      className="flex min-h-[116px] flex-col justify-between p-4.5"
+      {...(meterValue === undefined ? {} : {
+        role: 'meter',
+        'aria-label': label,
+        'aria-valuemin': 0,
+        'aria-valuemax': 100,
+        'aria-valuenow': meterValue,
+      })}
+    >
       <span className="text-[12px] font-medium text-text-soft">{label}</span>
       <div>
         <span className={cn('font-mono text-[26px] font-medium tracking-[-.03em]', accent ? 'text-primary' : 'text-text-strong')}>{value}</span>
@@ -98,14 +120,13 @@ export default function OverviewPage() {
         </button>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1.65fr)_minmax(280px,.8fr)]">
-        <Card variant="hero" className="min-h-[230px] overflow-hidden p-5 sm:p-6">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <Card variant="hero" className="min-h-[150px] overflow-hidden p-5">
           <div className="flex items-start justify-between gap-4">
             <div>
               <div className="text-[13px] font-medium">{t('overview.qpsLive')}</div>
               <div className="mt-2 flex items-baseline gap-2">
-                <span className="font-mono text-[46px] font-medium leading-none tracking-[-.05em] sm:text-[56px]">{qpsNow}</span>
-                <span className="text-[12px] opacity-70">{t('overview.queriesPerSecond')}</span>
+                <span className="font-mono text-[38px] font-medium leading-none tracking-[-.05em]">{qpsNow}</span>
               </div>
             </div>
             {delta !== null ? (
@@ -117,15 +138,24 @@ export default function OverviewPage() {
           <Sparkline
             data={qpsSeries.length > 0 ? qpsSeries : [0, 0]}
             color="var(--md-sys-color-on-primary-container)"
-            height={104}
-            className="mt-5"
+            height={42}
+            className="mt-4"
           />
         </Card>
-
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-1">
-          <Metric label={t('overview.totalQueries')} value={formatter.format(status?.stats?.total ?? 0)} supporting={t('overview.sinceStartup')} accent />
-          <Metric label={t('overview.cacheEntries')} value={formatter.format(status?.stats?.cache_entries ?? 0)} supporting={`${t('overview.cacheHitRate')} ${hitRate.toFixed(1)}%`} />
-        </div>
+        <Metric label={t('overview.totalQueries')} value={formatter.format(status?.stats?.total ?? 0)} supporting={t('overview.sinceStartup')} accent />
+        <Metric
+          label={t('overview.cacheHitRate')}
+          value={`${hitRate.toFixed(1)}%`}
+          supporting={`${formatter.format(status?.stats?.cache_hits ?? 0)} / ${formatter.format((status?.stats?.cache_hits ?? 0) + (status?.stats?.cache_misses ?? 0))}`}
+          meterValue={hitRate}
+        />
+        <Card variant="tonal" className="flex min-h-[116px] flex-col justify-between p-4.5">
+          <span className="text-[12px] font-medium text-text-soft">{t('overview.upstreamHealthLatency')}</span>
+          <div className="space-y-2">
+            <div className="flex items-center gap-2"><StatusDot color="var(--color-green)" /><span className="flex-1 text-[10.5px] text-text-faint">china</span><b className="font-mono text-[17px] font-medium text-text-strong">{health.china.avgMs.toFixed(1)}ms</b></div>
+            <div className="flex items-center gap-2"><StatusDot color="var(--color-primary)" /><span className="flex-1 text-[10.5px] text-text-faint">trust</span><b className="font-mono text-[17px] font-medium text-text-strong">{health.trust.avgMs.toFixed(1)}ms</b></div>
+          </div>
+        </Card>
       </div>
 
       <Card variant="tonal" className="p-5 sm:p-6">
@@ -145,6 +175,17 @@ export default function OverviewPage() {
 
       <div className="grid gap-4 md:grid-cols-2">
         <Card className="p-5">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-[15px] font-medium text-text-strong">{t('overview.qpsLive')}</h2>
+              <p className="mt-1 text-[10.5px] text-text-faint">{t('overview.queriesPerSecond')}</p>
+            </div>
+            <span className="font-mono text-[22px] font-medium text-primary">{qpsNow}</span>
+          </div>
+          <Sparkline data={qpsSeries.length > 0 ? qpsSeries : [0, 0]} color="var(--color-primary)" height={152} />
+        </Card>
+
+        <Card className="p-5">
           <h2 className="mb-4 text-[15px] font-medium text-text-strong">{t('overview.decisionDistribution')}</h2>
           <div className="flex items-center gap-5">
             <DonutChart segments={decisionSegments} height={132} width={132} centerLabel={formatter.format(decisionTotal)} className="shrink-0" />
@@ -158,11 +199,6 @@ export default function OverviewPage() {
               ))}
             </div>
           </div>
-        </Card>
-
-        <Card className="p-5">
-          <h2 className="text-[15px] font-medium text-text-strong">{t('overview.cacheHitRate')}</h2>
-          <GaugeChart value={hitRate} height={150} color="var(--color-green)" ariaLabel={t('overview.cacheHitRate')} />
         </Card>
 
         <Card className="p-5">

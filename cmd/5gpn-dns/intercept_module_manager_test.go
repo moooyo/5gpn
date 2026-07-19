@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -217,6 +219,91 @@ func TestInterceptModuleCanBeArmedWhileMasterIsOff(t *testing.T) {
 	}
 	if !view.Modules[1].Ready || controller.putCalls != 1 || handler.decideName("api.example.com").Action != actionGateway {
 		t.Fatalf("master enable did not activate armed module: view=%+v calls=%d", view, controller.putCalls)
+	}
+}
+
+func TestInterceptModuleUpdateUsesReviewedImmutableCandidate(t *testing.T) {
+	oldScript := `$done({body: "old"});`
+	newScript := `$done({body: "reviewed"});`
+	unreviewedScript := `$done({body: "changed-after-review"});`
+	var script atomic.Value
+	script.Store(oldScript)
+	moduleSource := ""
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/extension.lpx":
+			_, _ = w.Write([]byte(moduleSource))
+		case "/extension.js":
+			_, _ = w.Write([]byte(script.Load().(string)))
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer server.Close()
+	moduleSource = fmt.Sprintf("#!name=Fixture\n[Script]\nhttp-response ^https://api\\.example\\.com/ script-path=%s/extension.js,requires-body=true,tag=Cleaner\n[MITM]\nhostname=api.example.com\n", server.URL)
+	parser := interceptModuleParser{
+		client: server.Client(),
+		now:    func() time.Time { return time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC) },
+	}
+	module, err := parser.Import(context.Background(), interceptModuleImportRequest{URL: server.URL + "/extension.lpx"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manager, _, _, interceptPath, _ := newInterceptManagerFixture(t, module)
+	manager.parser = parser
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unchanged, err := manager.CheckUpdate(context.Background(), module.ID, view.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.State != "unchanged" || unchanged.Candidate != nil {
+		t.Fatalf("unchanged update view = %+v", unchanged)
+	}
+
+	script.Store(newScript)
+	available, err := manager.CheckUpdate(context.Background(), module.ID, view.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if available.State != "available" || available.Candidate == nil || available.Candidate.SourceDigest != module.Source.Digest || available.Candidate.SnapshotDigest == interceptModuleSnapshotDigest(module) || available.Candidate.Enabled {
+		t.Fatalf("available update view = %+v", available)
+	}
+	wantDigest := available.Candidate.SnapshotDigest
+
+	script.Store(unreviewedScript)
+	if _, err := manager.ApplyUpdate(context.Background(), module.ID, view.Revision, wantDigest); !errors.Is(err, errInterceptRevisionConflict) {
+		t.Fatalf("apply after referenced script changed = %v, want revision conflict", err)
+	}
+	body, err := os.ReadFile(interceptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := decodeInterceptConfig(body)
+	if err != nil || len(document.Modules) != 1 || interceptModuleSnapshotDigest(document.Modules[0]) != interceptModuleSnapshotDigest(module) {
+		t.Fatalf("snapshot changed after rejected apply = %+v err=%v", document.Modules, err)
+	}
+
+	script.Store(newScript)
+	replaced, err := manager.ApplyUpdate(context.Background(), module.ID, view.Revision, wantDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replaced.Modules) != 2 || replaced.Modules[1].ID != module.ID || replaced.Modules[1].SourceDigest != module.Source.Digest || replaced.Modules[1].SnapshotDigest != wantDigest || replaced.Modules[1].Enabled {
+		t.Fatalf("replacement view = %+v", replaced)
+	}
+	body, err = os.ReadFile(interceptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err = decodeInterceptConfig(body)
+	if err != nil || len(document.Modules) != 1 || document.Modules[0].Source.Digest != module.Source.Digest || interceptModuleSnapshotDigest(document.Modules[0]) != wantDigest {
+		t.Fatalf("stored replacement = %+v err=%v", document.Modules, err)
 	}
 }
 

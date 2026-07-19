@@ -55,6 +55,45 @@ func (s *ControlServer) handleInterceptModulesImport(w http.ResponseWriter, r *h
 	writeJSON(w, http.StatusCreated, view)
 }
 
+func (s *ControlServer) handleInterceptModuleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	if s.interceptModules == nil {
+		writeErr(w, http.StatusServiceUnavailable, errInterceptModulesUnavailable.Error())
+		return
+	}
+	var request struct {
+		Revision string `json:"revision"`
+	}
+	if !decodeJSONBody(w, r, &request) {
+		return
+	}
+	view, err := s.interceptModules.CheckUpdate(r.Context(), r.PathValue("id"), request.Revision)
+	if err != nil {
+		writeInterceptModuleError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+func (s *ControlServer) handleInterceptModuleUpdateApply(w http.ResponseWriter, r *http.Request) {
+	if s.interceptModules == nil {
+		writeErr(w, http.StatusServiceUnavailable, errInterceptModulesUnavailable.Error())
+		return
+	}
+	var request struct {
+		Revision       string `json:"revision"`
+		SnapshotDigest string `json:"snapshot_digest"`
+	}
+	if !decodeJSONBody(w, r, &request) {
+		return
+	}
+	view, err := s.interceptModules.ApplyUpdate(r.Context(), r.PathValue("id"), request.Revision, request.SnapshotDigest)
+	if err != nil {
+		writeInterceptModuleError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
 func (s *ControlServer) handleInterceptModulePut(w http.ResponseWriter, r *http.Request) {
 	if s.interceptModules == nil {
 		writeErr(w, http.StatusServiceUnavailable, errInterceptModulesUnavailable.Error())

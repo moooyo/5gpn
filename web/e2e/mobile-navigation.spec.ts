@@ -1,14 +1,19 @@
 import { expect, test } from '@playwright/test'
 import { setupMockApiWithToken } from './fixtures/mock-api'
 
-test('390px layout uses a drawer without squeezing or overflowing the page', async ({ page }) => {
+async function expectNoHorizontalOverflow(page: import('@playwright/test').Page) {
+  const dimensions = await page.evaluate(() => ({ width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth }))
+  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.width)
+}
+
+test('iPhone layout uses a drawer without squeezing or overflowing the page', async ({ page }) => {
   await setupMockApiWithToken(page)
   await page.goto('/overview')
 
   await expect(page.getByTestId('page-overview')).toBeVisible()
   await expect(page.getByTestId('desktop-sidebar')).toBeHidden()
   await expect(page.getByTestId('mobile-nav-open')).toBeVisible()
-  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+  await expectNoHorizontalOverflow(page)
 
   await page.getByTestId('mobile-nav-open').click()
   const drawer = page.getByTestId('mobile-sidebar-drawer')
@@ -18,20 +23,26 @@ test('390px layout uses a drawer without squeezing or overflowing the page', asy
   await expect(page).toHaveURL(/\/logs$/)
   await expect(page.getByTestId('page-logs')).toBeVisible()
   await expect(drawer).toBeHidden()
-  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+  await expectNoHorizontalOverflow(page)
 })
 
-test('390px settings layout stacks upstream lists and keeps the add dialog in view', async ({ page }) => {
+test('iPhone settings layout stacks controls and keeps dialogs in view', async ({ page }) => {
   await setupMockApiWithToken(page)
   await page.goto('/settings')
 
   const mitm = page.getByTestId('mitm-settings-card')
   await expect(mitm).toBeVisible()
+  await expect(mitm.getByRole('switch')).toHaveCount(1)
+  await mitm.getByRole('switch', { name: '启用 MITM' }).click()
+  const mitmDialog = page.getByRole('dialog', { name: '启用 MITM？' })
+  await expect(mitmDialog).toBeVisible()
+  await mitmDialog.getByRole('button', { name: '启用 MITM' }).click()
   await expect(mitm.getByRole('switch')).toHaveCount(3)
   const mitmBox = await mitm.boundingBox()
+  const viewportWidth = await page.evaluate(() => window.innerWidth)
   expect(mitmBox).not.toBeNull()
   expect(mitmBox!.x).toBeGreaterThanOrEqual(0)
-  expect(mitmBox!.x + mitmBox!.width).toBeLessThanOrEqual(390)
+  expect(mitmBox!.x + mitmBox!.width).toBeLessThanOrEqual(viewportWidth)
 
   const card = page.getByTestId('upstreams-card')
   await expect(card).toBeVisible()
@@ -41,7 +52,7 @@ test('390px settings layout stacks upstream lists and keeps the add dialog in vi
   expect(chinaBox).not.toBeNull()
   expect(trustBox).not.toBeNull()
   expect(trustBox!.y).toBeGreaterThan(chinaBox!.y + chinaBox!.height)
-  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+  await expectNoHorizontalOverflow(page)
 
   await card.getByTestId('upstreams-add-trust').click()
   const dialog = page.getByRole('dialog', { name: '添加境外 DNS' })
@@ -49,27 +60,47 @@ test('390px settings layout stacks upstream lists and keeps the add dialog in vi
   const dialogBox = await dialog.boundingBox()
   expect(dialogBox).not.toBeNull()
   expect(dialogBox!.x).toBeGreaterThanOrEqual(0)
-  expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(390)
+  expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(viewportWidth)
 })
 
-test('390px module layout stacks snapshots and keeps the import dialog in view', async ({ page }) => {
+test('iPhone extension layout stacks snapshots and keeps the import dialog in view', async ({ page }) => {
   await setupMockApiWithToken(page)
-  await page.goto('/modules')
+  await page.goto('/extensions')
 
-  await expect(page.getByTestId('page-modules')).toBeVisible()
-  const builtIn = page.getByTestId('module-builtin-wloc')
-  const imported = page.getByTestId('module-mod-1234567890abcdef')
+  await expect(page.getByTestId('page-extensions')).toBeVisible()
+  const builtIn = page.getByTestId('extension-builtin-wloc')
+  const imported = page.getByTestId('extension-mod-1234567890abcdef')
   const [builtInBox, importedBox] = await Promise.all([builtIn.boundingBox(), imported.boundingBox()])
   expect(builtInBox).not.toBeNull()
   expect(importedBox).not.toBeNull()
   expect(importedBox!.y).toBeGreaterThan(builtInBox!.y + builtInBox!.height)
-  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+  await expectNoHorizontalOverflow(page)
 
-  await page.getByRole('button', { name: /导入模块|Import module/ }).click()
+  await page.getByRole('button', { name: /导入插件|Import extension/ }).click()
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
   const dialogBox = await dialog.boundingBox()
   expect(dialogBox).not.toBeNull()
   expect(dialogBox!.x).toBeGreaterThanOrEqual(0)
-  expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(390)
+  expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(await page.evaluate(() => window.innerWidth))
+})
+
+test('iPhone host audit remains searchable and grouped without overflow', async ({ page }) => {
+  await setupMockApiWithToken(page)
+  await page.goto('/extensions/hosts')
+
+  await expect(page.getByTestId('host-audit-view')).toBeVisible()
+  await page.getByTestId('host-audit-search').fill('api.example.com')
+  await expect(page.getByTestId('host-group-mod-1234567890abcdef')).toContainText('api.example.com')
+  await expectNoHorizontalOverflow(page)
+})
+
+test('iPhone setup guide distinguishes Android DoT from unsupported Android MITM', async ({ page }) => {
+  await setupMockApiWithToken(page)
+  await page.goto('/setup-guide')
+
+  await expect(page.getByText('Android 9+')).toBeVisible()
+  await expect(page.getByText('现代 Android 应用不支持 MITM 配置')).toBeVisible()
+  await expect(page.getByRole('link', { name: '前往 MITM 设置' })).toHaveAttribute('href', '/settings')
+  await expectNoHorizontalOverflow(page)
 })

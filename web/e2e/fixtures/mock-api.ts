@@ -269,13 +269,13 @@ export async function setupMockApi(page: Page): Promise<void> {
     {
       id: 'builtin-wloc', name: 'Apple WLOC response rewriting', enabled: false, ready: true,
       compatibility: 'full', partial_allowed: false, hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'],
-      script_count: 1, rewrite_count: 0, source_digest: 'a'.repeat(64),
+      script_count: 1, rewrite_count: 0, source_digest: 'a'.repeat(64), snapshot_digest: 'a'.repeat(64),
     },
     {
       id: 'mod-1234567890abcdef', name: 'Response Cleaner', description: 'Synthetic Loon fixture',
       enabled: false, ready: true, compatibility: 'full', partial_allowed: false, hosts: ['api.example.com'],
       script_count: 1, rewrite_count: 0, source_url: 'https://example.com/test.lpx',
-      source_digest: 'b'.repeat(64), imported_at: '2026-07-18T00:00:00Z', argument: '',
+      source_digest: 'b'.repeat(64), snapshot_digest: 'b'.repeat(64), imported_at: '2026-07-18T00:00:00Z', argument: '',
     },
   ]
 
@@ -417,10 +417,43 @@ export async function setupMockApi(page: Page): Promise<void> {
         id: 'mod-fedcba0987654321', name: 'Imported module snapshot',
         enabled: false, ready: true, compatibility: 'full', partial_allowed: false,
         hosts: ['service.example.test'], script_count: 1, rewrite_count: 0, source_url: body.url,
-        source_digest: 'c'.repeat(64), imported_at: '2026-07-18T01:00:00Z', argument: '',
+        source_digest: 'c'.repeat(64), snapshot_digest: 'c'.repeat(64), imported_at: '2026-07-18T01:00:00Z', argument: '',
       }]
       advanceInterceptRevision()
       return json(route, currentInterceptModules(), 201)
+    }
+    const updateCheckMatch = path.match(/^\/api\/interception\/modules\/([^/]+)\/update-check$/)
+    if (updateCheckMatch && method === 'POST') {
+      const body = route.request().postDataJSON() as { revision?: string }
+      if (body.revision !== interceptRevision) return json(route, { error: 'interception module revision changed' }, 409)
+      const module = interceptModules.find((candidate) => candidate.id === decodeURIComponent(updateCheckMatch[1]))
+      if (!module) return json(route, { error: 'extension not found' }, 404)
+      if (!module.source_url) return json(route, { error: 'only URL-sourced extensions can check for updates' }, 400)
+      return json(route, {
+        revision: interceptRevision,
+        state: 'available',
+        candidate: {
+          ...module, id: 'mod-fedcba0987654321', name: `${module.name} update`, enabled: false,
+          ready: true, reason: undefined, partial_allowed: false, source_digest: 'e'.repeat(64), snapshot_digest: 'f'.repeat(64),
+          imported_at: '2026-07-19T00:00:00Z', hosts: [...module.hosts],
+        },
+      } satisfies T.InterceptModuleUpdateCheck)
+    }
+    const updateApplyMatch = path.match(/^\/api\/interception\/modules\/([^/]+)\/update-apply$/)
+    if (updateApplyMatch && method === 'POST') {
+      const body = route.request().postDataJSON() as { revision?: string; snapshot_digest?: string }
+      if (body.revision !== interceptRevision) return json(route, { error: 'interception module revision changed' }, 409)
+      const index = interceptModules.findIndex((candidate) => candidate.id === decodeURIComponent(updateApplyMatch[1]))
+      if (index < 0) return json(route, { error: 'extension not found' }, 404)
+      if (interceptModules[index].enabled) return json(route, { error: 'disable the extension before applying an update' }, 400)
+      if (body.snapshot_digest !== 'f'.repeat(64)) return json(route, { error: 'reviewed candidate changed' }, 409)
+      interceptModules[index] = {
+        ...interceptModules[index], id: 'mod-fedcba0987654321', name: `${interceptModules[index].name} update`,
+        enabled: false, ready: true, reason: undefined, partial_allowed: false,
+        source_digest: 'e'.repeat(64), snapshot_digest: body.snapshot_digest, imported_at: '2026-07-19T00:00:00Z',
+      }
+      advanceInterceptRevision()
+      return json(route, currentInterceptModules())
     }
     const moduleMatch = path.match(/^\/api\/interception\/modules\/([^/]+)$/)
     if (moduleMatch && method === 'GET') {

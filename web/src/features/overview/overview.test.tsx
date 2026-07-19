@@ -59,7 +59,7 @@ afterEach(async () => {
 describe('OverviewPage', () => {
   it('derives first-paint QPS from total/uptime and renders the M3 hero', async () => {
     const { container } = renderOverview()
-    expect(await screen.findByText('2')).toBeInTheDocument()
+    expect(await screen.findAllByText('2')).toHaveLength(2)
     expect(screen.getByText(i18n.t('overview.queriesPerSecond'))).toBeInTheDocument()
     expect(container.querySelector('[data-chart="sparkline"]')).toBeInTheDocument()
   })
@@ -83,20 +83,20 @@ describe('OverviewPage', () => {
   it('computes cache hit rate and exposes meter semantics', () => {
     renderOverview()
     expect(screen.getByRole('meter')).toHaveAttribute('aria-valuenow', '50')
-    expect(screen.getByText('50%')).toBeInTheDocument()
+    expect(screen.getByText('50.0%')).toBeInTheDocument()
   })
 
   it('renders a fresh cache as 0% rather than NaN%', () => {
     renderOverview(statusValue({ status: { ...STATUS, stats: { ...STATS, cache_hits: 0, cache_misses: 0 } } }))
     expect(screen.getByRole('meter')).toHaveAttribute('aria-valuenow', '0')
-    expect(screen.getByText('0%')).toBeInTheDocument()
+    expect(screen.getByText('0.0%')).toBeInTheDocument()
   })
 
   it('renders upstream bars and both average latency values', () => {
     const { container } = renderOverview()
     expect(container.querySelectorAll('[data-chart="bar"] rect')).toHaveLength(4)
-    expect(screen.getByText('5.0ms')).toBeInTheDocument()
-    expect(screen.getByText('10.0ms')).toBeInTheDocument()
+    expect(screen.getAllByText('5.0ms')).toHaveLength(2)
+    expect(screen.getAllByText('10.0ms')).toHaveLength(2)
   })
 
   it('renders the chnroute-only arbitration split separately', () => {

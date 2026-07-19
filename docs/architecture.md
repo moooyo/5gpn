@@ -176,6 +176,17 @@ Configured `#!input`/`#!select` values are exposed as read-only defaults through
 `$persistentStore`. Telegram cannot bypass this review gate. Unsupported
 directives never execute.
 
+URL-sourced plugins may be checked for updates only through an explicit,
+authenticated action. A check fetches a bounded candidate through the same
+HTTPS, redirect, SSRF, parsing, and compatibility guards as import, then shows
+its immutable snapshot digest, capabilities, and host set without mutating the
+installed snapshot. The snapshot digest covers the plugin source, every fetched
+script digest, and the parsed immutable capability shape. Applying an update
+requires the installed plugin to remain disabled, refetches the exact reviewed
+snapshot digest, atomically replaces the snapshot, and leaves the replacement
+disabled. Update checks and applies never auto-enable a plugin or alter the
+interception transaction implicitly.
+
 `[Host]` mappings are module-scoped upstream overrides, not a second global DNS
 policy. They apply only after an enabled module host has been steered through
 the sidecar, preserve the original HTTP Host and TLS SNI, reject private or
@@ -799,12 +810,15 @@ from supported raw UDP forwarding, show revision/custom-config conflicts, and
 state that external firewall policy remains the operator's responsibility.
 
 Settings also owns the MITM master, HTTP/2, and QUIC fallback controls. They are
-edited as one revision-protected draft with explicit confirmation when the
-master changes. The page must state that the master starts or stops the sidecar,
-that armed modules remain stored while it is off, and that QUIC fallback is
-limited to already matched IETF QUIC v1/v2 traffic.
+revision-protected immediate controls: changing the master requires an explicit
+dialog confirmation, while either protocol capability applies immediately once
+MITM is enabled. Disabling the master removes the DNS overlay and mihomo MITM
+host rules and stops the sidecar; plugin snapshots stay
+stored and subsequent traffic follows the normal operator-owned mihomo rules.
+The page must state that QUIC fallback is guaranteed for already matched IETF
+QUIC v1/v2 traffic and other variants are not guaranteed.
 
-The dedicated `/modules` route owns interception modules. It shows immutable
+The dedicated `/extensions` route owns plugin modules. It shows immutable
 source/script digests, normalized MITM hosts, supported action counts,
 compatibility and unsupported-directive details, enabled/runtime state, and a
 visible snapshot-to-trust-to-traffic transaction rail. An authenticated,
@@ -825,6 +839,13 @@ full-trust instructions. It states that trust applies to every module while
 decryption remains limited to enabled module hosts, requires explicit device
 authorization, and that all devices routed into WLOC share the configured
 coordinates.
+
+`/extensions/hosts` is the authenticated MITM host-audit view. It groups every
+declared host pattern by plugin, distinguishes running/configured/disabled
+state using the global master plus `active_hosts`, highlights exact duplicate
+declarations, and supports local search and filtering. Modern Android Private
+DNS remains supported, but the Setup Guide does not offer Android MITM CA
+installation because modern Android applications generally reject user CAs.
 
 ## Verification boundary
 

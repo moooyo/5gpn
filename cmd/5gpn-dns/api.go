@@ -378,6 +378,8 @@ func (s *ControlServer) apiMux() http.Handler {
 	mux.HandleFunc("GET /api/interception/modules", s.handleInterceptModulesGet)
 	mux.HandleFunc("GET /api/interception/modules/{id}", s.handleInterceptModuleSnapshotGet)
 	mux.HandleFunc("POST /api/interception/modules/import", s.handleInterceptModulesImport)
+	mux.HandleFunc("POST /api/interception/modules/{id}/update-check", s.handleInterceptModuleUpdateCheck)
+	mux.HandleFunc("POST /api/interception/modules/{id}/update-apply", s.handleInterceptModuleUpdateApply)
 	mux.HandleFunc("PUT /api/interception/modules/{id}", s.handleInterceptModulePut)
 	mux.HandleFunc("DELETE /api/interception/modules/{id}", s.handleInterceptModuleDelete)
 

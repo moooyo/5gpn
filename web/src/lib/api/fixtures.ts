@@ -102,6 +102,7 @@ export const interceptModules: T.InterceptModulesView = {
       script_count: 1,
       rewrite_count: 0,
       source_digest: 'a'.repeat(64),
+      snapshot_digest: 'a'.repeat(64),
     },
     {
       id: 'mod-1234567890abcdef',
@@ -117,6 +118,7 @@ export const interceptModules: T.InterceptModulesView = {
       rewrite_count: 0,
       source_url: 'https://modules.example.test/clean.lpx',
       source_digest: 'b'.repeat(64),
+      snapshot_digest: 'b'.repeat(64),
       imported_at: '2026-07-18T00:00:00Z',
       argument: '',
     },

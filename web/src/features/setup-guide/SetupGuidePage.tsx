@@ -1,9 +1,13 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { Link } from 'react-router-dom'
 import { CheckCircleIcon, DownloadIcon, ExternalLinkIcon, IosIcon, KeyIcon, QrCodeIcon, ShieldLockIcon, SmartphoneIcon, VerifiedIcon } from '../../components/icons'
 import { encode } from 'uqr'
-import { Card, CardBody, CardHeader } from '../../components/ds'
+import { Badge, Button, Card, CardBody, CardHeader, StatusDot } from '../../components/ds'
 import { useStatus } from '../../lib/StatusContext'
+import { api } from '../../lib/api/client'
+import type { MITMSettingsView } from '../../lib/api/types'
+import { useMITMTrustAcknowledgement } from '../../lib/mitmTrust'
 
 export const IOS_PROFILE_PATH = '/ios/ios-dot.mobileconfig'
 export const INTERCEPT_CA_PROFILE_PATH = '/ios/ios-intercept-ca.mobileconfig'
@@ -64,9 +68,19 @@ function StepList({ steps }: { steps: Array<{ title: string; body: string }> }) 
 export default function SetupGuidePage() {
   const { t } = useTranslation()
   const { status, loading } = useStatus()
+  const [mitmSettings, setMITMSettings] = useState<MITMSettingsView | null>(null)
+  const { acknowledged, setAcknowledged } = useMITMTrustAcknowledgement()
   const downloadURL = profileURL()
   const caDownloadURL = interceptCAProfileURL()
   const dotDomain = status?.dot_domain
+
+  useEffect(() => {
+    let cancelled = false
+    void api.getMITMSettings().then((value) => {
+      if (!cancelled) setMITMSettings(value)
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [])
 
   const iosSteps = [
     { title: t('setupGuide.ios.step1Title'), body: t('setupGuide.ios.step1Body') },
@@ -85,6 +99,7 @@ export default function SetupGuidePage() {
     { title: t('setupGuide.interceptCA.step2Title'), body: t('setupGuide.interceptCA.step2Body') },
     { title: t('setupGuide.interceptCA.step3Title'), body: t('setupGuide.interceptCA.step3Body') },
     { title: t('setupGuide.interceptCA.step4Title'), body: t('setupGuide.interceptCA.step4Body') },
+    { title: t('setupGuide.interceptCA.step5Title'), body: t('setupGuide.interceptCA.step5Body') },
   ]
 
   return (
@@ -201,6 +216,29 @@ export default function SetupGuidePage() {
             {t('setupGuide.interceptCA.shared')}
           </span>
         </CardHeader>
+        <div className="grid gap-2 border-b border-divider bg-surface-container-low px-5 py-4 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_auto] lg:items-center">
+          <div className="flex items-center gap-2.5 rounded-[12px] bg-card px-3.5 py-3">
+            <StatusDot color={acknowledged ? 'var(--color-green)' : 'var(--color-amber)'} />
+            <div className="min-w-0 flex-1">
+              <div className="text-[11.5px] font-medium text-text-strong">{t('setupGuide.interceptCA.clientTrust')}</div>
+              <div className="mt-0.5 text-[10px] text-text-faint">{t(acknowledged ? 'setupGuide.interceptCA.locallyConfirmed' : 'setupGuide.interceptCA.notConfirmed')}</div>
+            </div>
+            <Badge tone={acknowledged ? 'green' : 'amber'}>{acknowledged ? t('setupGuide.interceptCA.complete') : t('setupGuide.interceptCA.required')}</Badge>
+          </div>
+          <div className="flex items-center gap-2.5 rounded-[12px] bg-card px-3.5 py-3">
+            <StatusDot color={mitmSettings?.enabled ? 'var(--color-green)' : 'var(--color-amber)'} />
+            <div className="min-w-0 flex-1">
+              <div className="text-[11.5px] font-medium text-text-strong">{t('setupGuide.interceptCA.gatewayMaster')}</div>
+              <div className="mt-0.5 text-[10px] text-text-faint">{t(mitmSettings?.enabled ? 'setupGuide.interceptCA.masterEnabled' : 'setupGuide.interceptCA.masterDisabled')}</div>
+            </div>
+            <Badge tone={mitmSettings?.enabled ? 'green' : 'amber'}>{mitmSettings?.enabled ? t('settings.mitmRunning') : t('settings.mitmStopped')}</Badge>
+          </div>
+          {!mitmSettings?.enabled ? (
+            <Link to="/settings" className="zds-state-layer inline-flex h-10 items-center justify-center rounded-full bg-primary px-4 text-[11.5px] font-medium text-[var(--md-sys-color-on-primary)]">
+              {t('setupGuide.interceptCA.openMITMSettings')}
+            </Link>
+          ) : null}
+        </div>
         <CardBody className="grid gap-6 sm:grid-cols-[190px_minmax(0,1fr)] lg:grid-cols-[190px_minmax(0,1fr)_minmax(280px,.72fr)]">
           <div className="flex flex-col gap-3">
             <a
@@ -240,6 +278,19 @@ export default function SetupGuidePage() {
             </div>
           </div>
         </CardBody>
+        <div className="mx-5 mb-5 flex flex-col gap-3 rounded-[14px] bg-[var(--md-sys-color-warning-container)] p-4 text-[11px] leading-5 text-[var(--md-sys-color-on-warning-container)] sm:flex-row sm:items-center">
+          <SmartphoneIcon className="h-5 w-5 shrink-0" aria-hidden="true" />
+          <div className="min-w-0 flex-1">
+            <div className="font-medium">{t('setupGuide.interceptCA.androidUnsupportedTitle')}</div>
+            <div className="mt-0.5 opacity-85">{t('setupGuide.interceptCA.androidUnsupportedBody')}</div>
+          </div>
+        </div>
+        <div className="flex flex-col gap-3 border-t border-divider px-5 py-4 sm:flex-row sm:items-center">
+          <div className="min-w-0 flex-1 text-[10.5px] leading-5 text-text-faint">{t('setupGuide.interceptCA.acknowledgementHint')}</div>
+          <Button type="button" variant={acknowledged ? 'secondary' : 'primary'} size="sm" onClick={() => setAcknowledged(!acknowledged)}>
+            {acknowledged ? t('setupGuide.interceptCA.clearAcknowledgement') : t('setupGuide.interceptCA.confirmAcknowledgement')}
+          </Button>
+        </div>
       </Card>
 
       <Card variant="tonal" className="p-5">

@@ -225,16 +225,17 @@ func (m *InterceptModuleManager) viewLocked() (interceptModulesView, error) {
 	}
 	wlocReady := ready
 	view.Modules = append(view.Modules, interceptModuleView{
-		ID:            interceptModuleWLOCID,
-		Name:          "Apple WLOC response rewriting",
-		Description:   "Built-in bounded protobuf transformation for Apple Wi-Fi and cellular location responses.",
-		Enabled:       document.WLOC.Enabled,
-		Ready:         wlocReady,
-		Reason:        moduleRuntimeReason(wlocReady, reason),
-		Compatibility: "full",
-		Hosts:         append([]string(nil), builtInWLOCHosts...),
-		ScriptCount:   1,
-		SourceDigest:  sha256Hex([]byte(builtInWLOCSource)),
+		ID:             interceptModuleWLOCID,
+		Name:           "Apple WLOC response rewriting",
+		Description:    "Built-in bounded protobuf transformation for Apple Wi-Fi and cellular location responses.",
+		Enabled:        document.WLOC.Enabled,
+		Ready:          wlocReady,
+		Reason:         moduleRuntimeReason(wlocReady, reason),
+		Compatibility:  "full",
+		Hosts:          append([]string(nil), builtInWLOCHosts...),
+		ScriptCount:    1,
+		SourceDigest:   sha256Hex([]byte(builtInWLOCSource)),
+		SnapshotDigest: sha256Hex([]byte(builtInWLOCSource)),
 	})
 	for _, module := range document.Modules {
 		compatibility := interceptModuleCompatibility(module)
@@ -264,6 +265,7 @@ func (m *InterceptModuleManager) viewLocked() (interceptModulesView, error) {
 			HostMappings:   append([]interceptHostMapping(nil), module.HostMappings...),
 			SourceURL:      module.Source.URL,
 			SourceDigest:   module.Source.Digest,
+			SnapshotDigest: interceptModuleSnapshotDigest(module),
 			ImportedAt:     module.ImportedAt,
 			Argument:       module.Argument,
 		})
@@ -371,6 +373,157 @@ func (m *InterceptModuleManager) Import(ctx context.Context, request interceptMo
 	view, viewErr := m.viewLocked()
 	m.store.mu.Lock()
 	return view, viewErr
+}
+
+func (m *InterceptModuleManager) CheckUpdate(ctx context.Context, id, revision string) (interceptModuleUpdateCheckView, error) {
+	if m == nil || m.store == nil {
+		return interceptModuleUpdateCheckView{}, errInterceptModulesUnavailable
+	}
+	if !validMihomoConfigRevision(revision) {
+		return interceptModuleUpdateCheckView{}, errors.New("a valid revision is required")
+	}
+	m.store.mu.Lock()
+	document, body, err := m.store.Read()
+	if err != nil {
+		m.store.mu.Unlock()
+		return interceptModuleUpdateCheckView{}, err
+	}
+	if interceptRevision(body) != revision {
+		m.store.mu.Unlock()
+		return interceptModuleUpdateCheckView{}, errInterceptRevisionConflict
+	}
+	var current interceptModuleSnapshot
+	found := false
+	for _, module := range document.Modules {
+		if module.ID == id {
+			current = module
+			found = true
+			break
+		}
+	}
+	m.store.mu.Unlock()
+	if !found {
+		return interceptModuleUpdateCheckView{}, errInterceptModuleNotFound
+	}
+	if strings.TrimSpace(current.Source.URL) == "" {
+		return interceptModuleUpdateCheckView{}, errors.New("only URL-sourced extensions can check for updates")
+	}
+	candidate, err := m.parser.Import(ctx, interceptModuleImportRequest{URL: current.Source.URL})
+	if err != nil {
+		return interceptModuleUpdateCheckView{}, err
+	}
+
+	m.store.mu.Lock()
+	latest, latestBody, err := m.store.Read()
+	if err != nil {
+		m.store.mu.Unlock()
+		return interceptModuleUpdateCheckView{}, err
+	}
+	if interceptRevision(latestBody) != revision || !interceptModuleSourceUnchanged(latest, id, current.Source.URL, current.Source.Digest) {
+		m.store.mu.Unlock()
+		return interceptModuleUpdateCheckView{}, errInterceptRevisionConflict
+	}
+	m.store.mu.Unlock()
+	if interceptModuleSnapshotDigest(candidate) == interceptModuleSnapshotDigest(current) {
+		return interceptModuleUpdateCheckView{Revision: revision, State: "unchanged"}, nil
+	}
+	view := interceptCandidateView(candidate)
+	return interceptModuleUpdateCheckView{Revision: revision, State: "available", Candidate: &view}, nil
+}
+
+func (m *InterceptModuleManager) ApplyUpdate(ctx context.Context, id, revision, digest string) (interceptModulesView, error) {
+	if m == nil || m.store == nil {
+		return interceptModulesView{}, errInterceptModulesUnavailable
+	}
+	if !validMihomoConfigRevision(revision) || !validSHA256(digest) {
+		return interceptModulesView{}, errors.New("a valid revision and candidate digest are required")
+	}
+	m.store.mu.Lock()
+	document, body, err := m.store.Read()
+	if err != nil {
+		m.store.mu.Unlock()
+		return interceptModulesView{}, err
+	}
+	if interceptRevision(body) != revision {
+		m.store.mu.Unlock()
+		return interceptModulesView{}, errInterceptRevisionConflict
+	}
+	var current interceptModuleSnapshot
+	found := false
+	for _, module := range document.Modules {
+		if module.ID == id {
+			current = module
+			found = true
+			break
+		}
+	}
+	m.store.mu.Unlock()
+	if !found {
+		return interceptModulesView{}, errInterceptModuleNotFound
+	}
+	if current.Enabled {
+		return interceptModulesView{}, errors.New("disable the extension before replacing its immutable snapshot")
+	}
+	if strings.TrimSpace(current.Source.URL) == "" {
+		return interceptModulesView{}, errors.New("only URL-sourced extensions can be updated")
+	}
+	candidate, err := m.parser.Import(ctx, interceptModuleImportRequest{URL: current.Source.URL})
+	if err != nil {
+		return interceptModulesView{}, err
+	}
+	if interceptModuleSnapshotDigest(candidate) != digest {
+		return interceptModulesView{}, errInterceptRevisionConflict
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.store.mu.Lock()
+	latest, latestBody, err := m.store.Read()
+	if err != nil {
+		m.store.mu.Unlock()
+		return interceptModulesView{}, err
+	}
+	if interceptRevision(latestBody) != revision || !interceptModuleSourceUnchanged(latest, id, current.Source.URL, current.Source.Digest) {
+		m.store.mu.Unlock()
+		return interceptModulesView{}, errInterceptRevisionConflict
+	}
+	index := -1
+	for i, module := range latest.Modules {
+		if module.ID == id {
+			index = i
+			continue
+		}
+		if module.ID == candidate.ID {
+			m.store.mu.Unlock()
+			return interceptModulesView{}, fmt.Errorf("%w: candidate snapshot is already imported", errInterceptModuleConflict)
+		}
+	}
+	if index < 0 {
+		m.store.mu.Unlock()
+		return interceptModulesView{}, errInterceptModuleNotFound
+	}
+	latest.Modules[index] = candidate
+	newBody, err := marshalInterceptDocument(latest)
+	if err == nil {
+		err = m.validateSidecarCandidate(ctx, newBody)
+	}
+	if err == nil {
+		err = writeInterceptConfigAtomic(m.store.Path, newBody)
+	}
+	m.store.mu.Unlock()
+	if err != nil {
+		return interceptModulesView{}, err
+	}
+	return m.viewLocked()
+}
+
+func interceptModuleSourceUnchanged(document interceptConfigDocument, id, sourceURL, digest string) bool {
+	for _, module := range document.Modules {
+		if module.ID == id {
+			return module.Source.URL == sourceURL && module.Source.Digest == digest
+		}
+	}
+	return false
 }
 
 func (m *InterceptModuleManager) Delete(id, revision string) (interceptModulesView, error) {
@@ -778,7 +931,7 @@ func modulesViewFromDocument(document interceptConfigDocument, body []byte, read
 		Enabled:     document.WLOC.Enabled, Ready: ready,
 		Reason: moduleRuntimeReason(ready, reason), Compatibility: "full",
 		Hosts: append([]string(nil), builtInWLOCHosts...), ScriptCount: 1,
-		SourceDigest: sha256Hex([]byte(builtInWLOCSource)),
+		SourceDigest: sha256Hex([]byte(builtInWLOCSource)), SnapshotDigest: sha256Hex([]byte(builtInWLOCSource)),
 	})
 	for _, module := range document.Modules {
 		compatibility := interceptModuleCompatibility(module)
@@ -797,10 +950,31 @@ func modulesViewFromDocument(document interceptConfigDocument, body []byte, read
 			Unsupported: append([]string(nil), module.Unsupported...), SourceURL: module.Source.URL,
 			Incompatible: append([]string(nil), module.Incompatible...), Issues: interceptModuleIssues(module),
 			Parameters: append([]interceptModuleParameter(nil), module.Parameters...), HostMappings: append([]interceptHostMapping(nil), module.HostMappings...),
-			SourceDigest: module.Source.Digest, ImportedAt: module.ImportedAt, Argument: module.Argument,
+			SourceDigest: module.Source.Digest, SnapshotDigest: interceptModuleSnapshotDigest(module), ImportedAt: module.ImportedAt, Argument: module.Argument,
 		})
 	}
 	return view
+}
+
+func interceptCandidateView(module interceptModuleSnapshot) interceptModuleView {
+	compatibility := interceptModuleCompatibility(module)
+	reason := ""
+	if compatibility == "incompatible" {
+		reason = "incompatible-capabilities"
+	} else if compatibility == "needs_configuration" {
+		reason = "parameters-required"
+	}
+	return interceptModuleView{
+		ID: module.ID, Name: module.Name, Description: module.Description,
+		Enabled: false, Ready: compatibility != "incompatible" && compatibility != "needs_configuration",
+		Reason: reason, Compatibility: compatibility, PartialAllowed: false,
+		Hosts: append([]string(nil), module.Hosts...), ScriptCount: len(module.Scripts),
+		RewriteCount: len(module.Rewrites) + len(module.Headers),
+		Unsupported:  append([]string(nil), module.Unsupported...), Incompatible: append([]string(nil), module.Incompatible...),
+		Issues: interceptModuleIssues(module), Parameters: append([]interceptModuleParameter(nil), module.Parameters...),
+		HostMappings: append([]interceptHostMapping(nil), module.HostMappings...), SourceURL: module.Source.URL,
+		SourceDigest: module.Source.Digest, SnapshotDigest: interceptModuleSnapshotDigest(module), ImportedAt: module.ImportedAt,
+	}
 }
 
 func containsNewStrings(oldValues, nextValues []string) bool {

@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -119,6 +120,7 @@ type interceptModuleView struct {
 	HostMappings   []interceptHostMapping            `json:"host_mappings,omitempty"`
 	SourceURL      string                            `json:"source_url,omitempty"`
 	SourceDigest   string                            `json:"source_digest"`
+	SnapshotDigest string                            `json:"snapshot_digest"`
 	ImportedAt     string                            `json:"imported_at,omitempty"`
 	Argument       string                            `json:"argument,omitempty"`
 }
@@ -133,6 +135,12 @@ type interceptModulesView struct {
 	CatalogURL  string                `json:"catalog_url"`
 	Modules     []interceptModuleView `json:"modules"`
 	ActiveHosts []string              `json:"active_hosts"`
+}
+
+type interceptModuleUpdateCheckView struct {
+	Revision  string               `json:"revision"`
+	State     string               `json:"state"`
+	Candidate *interceptModuleView `json:"candidate,omitempty"`
 }
 
 type interceptScriptSnapshotView struct {
@@ -521,6 +529,28 @@ func uniqueSortedStrings(values []string) []string {
 func sha256Hex(body []byte) string {
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:])
+}
+
+func interceptModuleSnapshotDigest(module interceptModuleSnapshot) string {
+	canonical := module
+	canonical.Enabled = false
+	canonical.Argument = ""
+	canonical.ImportedAt = ""
+	canonical.PartialAllowed = false
+	canonical.Source.Body = ""
+	canonical.Parameters = append([]interceptModuleParameter(nil), module.Parameters...)
+	for index := range canonical.Parameters {
+		canonical.Parameters[index].Value = ""
+	}
+	canonical.Scripts = append([]interceptScriptRule(nil), module.Scripts...)
+	for index := range canonical.Scripts {
+		canonical.Scripts[index].ScriptBody = ""
+	}
+	body, err := json.Marshal(canonical)
+	if err != nil {
+		panic("interception snapshot digest contains an unsupported value: " + err.Error())
+	}
+	return sha256Hex(body)
 }
 
 func validSHA256(value string) bool {

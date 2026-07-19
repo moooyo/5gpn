@@ -90,6 +90,20 @@ export const api = {
           method: 'POST',
           body: JSON.stringify(request),
         }),
+  checkInterceptModuleUpdate: (id: string, revision: string) =>
+    MOCK
+      ? mock.checkInterceptModuleUpdate(id, revision)
+      : apiFetch<T.InterceptModuleUpdateCheck>(`/api/interception/modules/${encodeURIComponent(id)}/update-check`, {
+          method: 'POST',
+          body: JSON.stringify({ revision }),
+        }),
+  applyInterceptModuleUpdate: (id: string, revision: string, snapshotDigest: string) =>
+    MOCK
+      ? mock.applyInterceptModuleUpdate(id, revision, snapshotDigest)
+      : apiFetch<T.InterceptModulesView>(`/api/interception/modules/${encodeURIComponent(id)}/update-apply`, {
+          method: 'POST',
+          body: JSON.stringify({ revision, snapshot_digest: snapshotDigest }),
+        }),
   putInterceptModule: (id: string, update: T.InterceptModuleUpdate) =>
     MOCK
       ? mock.putInterceptModule(id, update)

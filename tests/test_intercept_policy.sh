@@ -8,7 +8,7 @@ CERT_PATH="$ROOT/etc/systemd/5gpn-intercept-cert.path"
 RUNTIME_PATH="$ROOT/etc/systemd/5gpn-intercept-runtime.path"
 TEMPLATE="$ROOT/etc/mihomo/config.yaml.tmpl"
 PROFILE="$ROOT/scripts/gen-ios-profile.sh"
-MODULE_PAGE="$ROOT/web/src/features/modules/ModulesPage.tsx"
+MODULE_PAGE="$ROOT/web/src/features/extensions/ExtensionsPage.tsx"
 SETUP_GUIDE="$ROOT/web/src/features/setup-guide/SetupGuidePage.tsx"
 MODULE_PARSER="$ROOT/cmd/5gpn-dns/intercept_module_parser.go"
 rc=0
@@ -79,8 +79,10 @@ grep -Fq "INTERCEPT_CA_PROFILE_PATH = '/ios/ios-intercept-ca.mobileconfig'" "$SE
     || fail "Setup Guide does not own the shared interception CA profile"
 grep -Fq 'data-testid="intercept-ca-guide"' "$SETUP_GUIDE" \
     || fail "Setup Guide lacks the shared interception trust guide"
-grep -Fq 'to="/setup-guide"' "$MODULE_PAGE" \
-    || fail "Modules page does not direct operators to the shared trust guide"
+grep -Fq "'/setup-guide'" "$MODULE_PAGE" \
+    || fail "Extensions page does not direct operators to the shared trust guide"
+grep -Fq "'/extensions/hosts'" "$MODULE_PAGE" \
+    || fail "Extensions page does not expose the MITM host audit"
 grep -Fq 'ios-intercept-ca.mobileconfig' "$MODULE_PAGE" \
     && fail "Modules page still owns a direct CA profile download"
 grep -Fq 'loon://import?plugin=<https-url>' "$MODULE_PARSER" \

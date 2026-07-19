@@ -24,6 +24,7 @@ vi.mock('../../lib/api/client', () => ({
     putIngressModule: vi.fn(),
     getMITMSettings: vi.fn(),
     putMITMSettings: vi.fn(),
+    getInterceptModules: vi.fn(),
   },
 }))
 
@@ -89,6 +90,7 @@ beforeEach(async () => {
   })
   vi.mocked(api.getMITMSettings).mockReset().mockResolvedValue(MITM)
   vi.mocked(api.putMITMSettings).mockReset().mockImplementation(async (update) => ({ ...update, revision: 'mitm-r2' }))
+  vi.mocked(api.getInterceptModules).mockReset().mockResolvedValue({ revision: 'extensions-r1', catalog_url: '', active_hosts: [], modules: [] })
 })
 
 afterEach(async () => {
@@ -113,20 +115,22 @@ describe('SettingsPage', () => {
     expect(screen.getByText('DoT')).toBeInTheDocument()
     expect(screen.getByDisplayValue('122.96.30.0/24')).toBeInTheDocument()
     expect(screen.getByDisplayValue('123456789')).toBeInTheDocument()
+    expect(screen.getByTestId('mitm-host-audit-link')).toHaveAttribute('href', '/extensions/hosts')
+    expect(screen.queryByTestId('mitm-capabilities')).not.toBeInTheDocument()
   })
 
   it('saves HTTP/2 and QUIC capabilities without changing the MITM master state', async () => {
+    vi.mocked(api.getMITMSettings).mockResolvedValue({ ...MITM, enabled: true })
     const user = userEvent.setup()
     renderSettings()
 
     const http2 = await screen.findByRole('switch', { name: i18n.t('settings.mitmHTTP2') })
     await waitFor(() => expect(http2).toBeChecked())
     await user.click(http2)
-    await user.click(screen.getByTestId('mitm-settings-save'))
 
     await waitFor(() => expect(api.putMITMSettings).toHaveBeenCalledWith({
       revision: 'mitm-r1',
-      enabled: false,
+      enabled: true,
       http2: false,
       quic_fallback_protection: true,
     }))
@@ -140,18 +144,18 @@ describe('SettingsPage', () => {
     const master = await screen.findByRole('switch', { name: i18n.t('settings.mitmMaster') })
     await waitFor(() => expect(master).not.toBeDisabled())
     await user.click(master)
-    await user.click(screen.getByTestId('mitm-settings-save'))
     expect(api.putMITMSettings).not.toHaveBeenCalled()
 
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByText(i18n.t('settings.mitmEnableConfirmBody'))).toBeInTheDocument()
-    await user.click(within(dialog).getByRole('button', { name: i18n.t('settings.mitmSave') }))
+    await user.click(within(dialog).getByRole('button', { name: i18n.t('settings.mitmEnableAction') }))
     await waitFor(() => expect(api.putMITMSettings).toHaveBeenCalledWith({
       revision: 'mitm-r1',
       enabled: true,
       http2: true,
       quic_fallback_protection: true,
     }))
+    expect(await screen.findByTestId('mitm-capabilities')).toBeInTheDocument()
   })
 
   it('loads the default-enabled ingress module, keeps changes as a draft, then confirms disable', async () => {

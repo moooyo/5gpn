@@ -11,12 +11,12 @@ test('overview page renders the live QPS + decision-distribution charts with zer
   // QPS and decision distribution both come from /api/status.
   await expect(page.getByText('决策分布', { exact: true })).toBeVisible()
   await expect(page.getByText('拦截', { exact: true })).toBeVisible()
-  await expect(page.getByText('QPS 实时', { exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'QPS 实时' })).toBeVisible()
 
   // All dashboard charts are build-time SVG, with no canvas runtime or eval.
-  await expect(page.locator('[data-chart="sparkline"]')).toHaveCount(1)
+  await expect(page.locator('[data-chart="sparkline"]')).toHaveCount(2)
   await expect(page.locator('[data-chart="donut"]')).toHaveCount(2)
-  await expect(page.locator('[data-chart="gauge"]')).toHaveCount(1)
+  await expect(page.locator('[data-chart="gauge"]')).toHaveCount(0)
   await expect(page.locator('[data-chart="bar"]')).toHaveCount(1)
   await expect(page.locator('canvas')).toHaveCount(0)
 

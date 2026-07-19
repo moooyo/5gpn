@@ -361,7 +361,7 @@ token into recorded command output, screenshots, or issue logs.
   On an owned test iPhone, install it and explicitly enable full trust under
   Certificate Trust Settings. Removing this profile does not remove the DoT
   profile.
-- [ ] From Console `/modules`, import a synthetic Loon fixture by HTTPS URL and
+- [ ] From Console `/extensions`, import a synthetic Loon fixture by HTTPS URL and
   repeat through `loon://import?plugin=<https-url>`. Its origin returns 403 unless it receives
   the bounded Loon client-shape headers; verify the server normalizes the nested
   URL and snapshots both the module and referenced script. Repeat with a

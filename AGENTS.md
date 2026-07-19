@@ -117,9 +117,10 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
 - Sidebar active state is pure CSS. Do not reintroduce JS rect measurement or a
   sliding indicator.
 - Theme controls live in the top bar profile menu and Settings appearance only.
-- Interception modules live on the dedicated `/modules` route. Keep immutable
+- Plugin modules live on the dedicated `/extensions` route. Keep immutable
   digests, compatibility gaps, host allowlists, and the snapshot/trust/traffic
-  transaction visible; do not move them back into Settings.
+  transaction visible. `/extensions/hosts` owns searchable, per-plugin MITM
+  host auditing; do not move plugin management back into Settings.
 - Logs remain virtualized, polling is single-flight/cancellable, and mobile
   uses card rows plus a drawer sidebar.
 - Do not commit `web/dist`. Fonts are runtime-cached by the PWA; keep PWA,

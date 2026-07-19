@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { MemoryRouter } from 'react-router-dom'
 import { StatusContext } from '../../lib/StatusContext'
 import i18n from '../../i18n'
 import SetupGuidePage, {
@@ -8,15 +9,23 @@ import SetupGuidePage, {
   interceptCAProfileURL,
   profileURL,
 } from './SetupGuidePage'
+import { api } from '../../lib/api/client'
+
+vi.mock('../../lib/api/client', () => ({
+  api: { getMITMSettings: vi.fn() },
+}))
 
 beforeEach(async () => {
   await i18n.changeLanguage('zh')
+  vi.mocked(api.getMITMSettings).mockReset().mockResolvedValue({
+    revision: '1'.repeat(64), enabled: false, http2: true, quic_fallback_protection: true,
+  })
 })
 
 describe('SetupGuidePage', () => {
   it('shows the real DoT hostname, iOS download link, and locally rendered QR code', () => {
     render(
-      <StatusContext.Provider
+      <MemoryRouter><StatusContext.Provider
         value={{
           dnsState: 'healthy',
           mihomoState: 'healthy',
@@ -32,7 +41,7 @@ describe('SetupGuidePage', () => {
         }}
       >
         <SetupGuidePage />
-      </StatusContext.Provider>,
+      </StatusContext.Provider></MemoryRouter>,
     )
 
     expect(screen.getByTestId('page-setup-guide')).toBeInTheDocument()
@@ -49,7 +58,9 @@ describe('SetupGuidePage', () => {
     expect(caLinks.length).toBeGreaterThanOrEqual(2)
     for (const link of caLinks) expect(link).toHaveAttribute('href', interceptCAProfileURL())
     expect(screen.getByRole('img', { name: 'MITM 共享根证书描述文件下载二维码' }).querySelector('path')).toHaveAttribute('d')
-    expect(screen.getByText(/所有 MITM 模块共用/)).toBeInTheDocument()
+    expect(screen.getByText(/必须在设置中开启网关 MITM 总开关/)).toBeInTheDocument()
+    expect(screen.getByText('现代 Android 应用不支持 MITM 配置')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '前往 MITM 设置' })).toHaveAttribute('href', '/settings')
   })
 
   it('builds an absolute same-origin profile URL', () => {

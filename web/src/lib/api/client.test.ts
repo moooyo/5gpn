@@ -205,6 +205,23 @@ describe('api client — interception modules', () => {
     expect(JSON.parse(f.mock.calls[3][1].body as string)).toEqual({ revision: 'r1', parameters: { mode: 'clean' } })
     expect(f.mock.calls[4][1].method).toBe('DELETE')
   })
+
+  it('checks and applies an immutable URL extension update through explicit endpoints', async () => {
+    vi.stubEnv('VITE_API_MOCK', '0')
+    vi.resetModules()
+    const check = { revision: 'r1', state: 'available', candidate: { id: 'mod-new', source_digest: 'e'.repeat(64), snapshot_digest: 'f'.repeat(64) } }
+    const view = { revision: 'r2', catalog_url: '', active_hosts: [], modules: [] }
+    const f = vi.fn().mockResolvedValueOnce(jsonResp(200, check)).mockResolvedValueOnce(jsonResp(200, view))
+    vi.stubGlobal('fetch', f)
+    const { api } = await import('./client')
+
+    await expect(api.checkInterceptModuleUpdate('mod-old', 'r1')).resolves.toEqual(check)
+    await expect(api.applyInterceptModuleUpdate('mod-old', 'r1', 'f'.repeat(64))).resolves.toEqual(view)
+    expect(f.mock.calls[0][0]).toBe('/api/interception/modules/mod-old/update-check')
+    expect(JSON.parse(f.mock.calls[0][1].body as string)).toEqual({ revision: 'r1' })
+    expect(f.mock.calls[1][0]).toBe('/api/interception/modules/mod-old/update-apply')
+    expect(JSON.parse(f.mock.calls[1][1].body as string)).toEqual({ revision: 'r1', snapshot_digest: 'f'.repeat(64) })
+  })
 })
 
 describe('api client — mihomo config mock ON (VITE_API_MOCK=1)', () => {

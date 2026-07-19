@@ -201,6 +201,7 @@ export interface InterceptModule {
   host_mappings?: InterceptHostMapping[]
   source_url?: string
   source_digest: string
+  snapshot_digest: string
   imported_at?: string
   argument?: string
 }
@@ -235,6 +236,11 @@ export interface InterceptModuleUpdate {
   argument?: string
   partial_allowed?: boolean
   parameters?: Record<string, string>
+}
+export interface InterceptModuleUpdateCheck {
+  revision: string
+  state: 'unchanged' | 'available'
+  candidate?: InterceptModule
 }
 
 // ---- Unified policy rules -----------------------------------------------

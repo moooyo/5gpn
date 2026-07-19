@@ -125,66 +125,58 @@ export function ConsoleCard() {
 
 // ---- 3. MITM runtime ------------------------------------------------------
 
-type MITMDraft = Pick<MITMSettingsView, 'enabled' | 'http2' | 'quic_fallback_protection'>
-
 export function MITMSettingsCard({
   settings,
+  hostCount,
   loadState,
   onReload,
   onSaved,
 }: {
   settings: MITMSettingsView | null
+  hostCount: number
   loadState: 'loading' | 'ready' | 'error'
   onReload: () => Promise<MITMSettingsView | null>
   onSaved: (value: MITMSettingsView) => void
 }) {
   const { t } = useTranslation()
-  const [draft, setDraft] = useState<MITMDraft | null>(null)
-  const [saving, setSaving] = useState(false)
+  const [busyField, setBusyField] = useState<'master' | 'http2' | 'quic' | null>(null)
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const [pendingMaster, setPendingMaster] = useState<boolean | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    if (!settings) return
-    setDraft({
-      enabled: settings.enabled,
-      http2: settings.http2,
-      quic_fallback_protection: settings.quic_fallback_protection,
-    })
-  }, [settings])
-
-  const changed = !!settings && !!draft && (
-    settings.enabled !== draft.enabled ||
-    settings.http2 !== draft.http2 ||
-    settings.quic_fallback_protection !== draft.quic_fallback_protection
-  )
-  const masterChanged = !!settings && !!draft && settings.enabled !== draft.enabled
-
-  async function save() {
-    if (!settings || !draft || !changed || saving) return
-    setSaving(true)
+  async function apply(
+    field: 'master' | 'http2' | 'quic',
+    patch: Partial<Pick<MITMSettingsView, 'enabled' | 'http2' | 'quic_fallback_protection'>>,
+  ) {
+    if (!settings || busyField) return
+    setBusyField(field)
     setError(null)
     try {
-      const next = await api.putMITMSettings({ revision: settings.revision, ...draft })
+      const next = await api.putMITMSettings({
+        revision: settings.revision,
+        enabled: settings.enabled,
+        http2: settings.http2,
+        quic_fallback_protection: settings.quic_fallback_protection,
+        ...patch,
+      })
       onSaved(next)
-      toast.success(t('settings.mitmSaved'))
+      toast.success(field === 'master' ? t(next.enabled ? 'settings.mitmEnabled' : 'settings.mitmDisabled') : t('settings.mitmCapabilitySaved'))
     } catch (err) {
       const conflict = err instanceof ApiError && err.status === 409
       if (conflict || (err instanceof ApiError && err.status === 502)) await onReload()
       setError(conflict ? t('settings.mitmConflict') : errMessage(err, t('settings.mitmSaveFailed')))
     } finally {
-      setSaving(false)
+      setBusyField(null)
     }
   }
 
-  function requestSave() {
-    if (masterChanged) setConfirmOpen(true)
-    else void save()
+  function requestMaster(enabled: boolean) {
+    setPendingMaster(enabled)
+    setConfirmOpen(true)
   }
 
-  const ready = !!settings && !!draft && loadState === 'ready'
-  const statusEnabled = draft?.enabled ?? settings?.enabled ?? false
-  const statusPending = !!settings && !!draft && settings.enabled !== draft.enabled
+  const ready = !!settings && loadState === 'ready'
+  const statusEnabled = settings?.enabled ?? false
 
   return (
     <Card className="p-5 sm:p-6" data-testid="mitm-settings-card">
@@ -193,14 +185,8 @@ export function MITMSettingsCard({
           <div className="text-[15px] font-medium text-text-strong">{t('settings.mitmTitle')}</div>
           <p className="mt-1 max-w-3xl text-[10.5px] leading-relaxed text-text-faint">{t('settings.mitmHint')}</p>
         </div>
-        <Badge tone={statusPending ? 'amber' : statusEnabled ? 'green' : 'neutral'}>
-          {statusPending
-            ? statusEnabled
-              ? t('settings.mitmPendingEnable')
-              : t('settings.mitmPendingDisable')
-            : statusEnabled
-              ? t('settings.mitmRunning')
-              : t('settings.mitmStopped')}
+        <Badge tone={statusEnabled ? 'green' : 'neutral'}>
+          {busyField === 'master' ? t('common.saving') : statusEnabled ? t('settings.mitmRunning') : t('settings.mitmStopped')}
         </Badge>
       </div>
 
@@ -225,31 +211,23 @@ export function MITMSettingsCard({
             <p className="mt-1 text-[10.5px] leading-relaxed text-text-faint">{t('settings.mitmMasterHint')}</p>
           </div>
           <Toggle
-            checked={draft?.enabled ?? false}
-            onCheckedChange={(enabled) => {
-              setDraft((current) => current ? { ...current, enabled } : current)
-              setError(null)
-            }}
-            disabled={!ready || saving}
+            checked={settings?.enabled ?? false}
+            onCheckedChange={requestMaster}
+            disabled={!ready || busyField !== null}
             aria-label={t('settings.mitmMaster')}
           />
         </div>
 
-        <div className="mx-4 border-t border-divider sm:mx-5" />
-
-        <div className="grid grid-cols-1 gap-2 p-2 sm:p-3 lg:grid-cols-2">
+        {settings?.enabled ? <div className="grid grid-cols-1 gap-2 border-t border-divider p-2 sm:p-3 lg:grid-cols-2" data-testid="mitm-capabilities">
           <div className="flex min-h-[112px] items-start justify-between gap-4 rounded-[16px] bg-card px-4 py-4 shadow-[var(--md-sys-elevation-1)]">
             <div className="min-w-0">
               <div className="text-[12.5px] font-semibold text-text-mid">{t('settings.mitmHTTP2')}</div>
               <p className="mt-1 text-[10.5px] leading-relaxed text-text-faint">{t('settings.mitmHTTP2Hint')}</p>
             </div>
             <Toggle
-              checked={draft?.http2 ?? false}
-              onCheckedChange={(http2) => {
-                setDraft((current) => current ? { ...current, http2 } : current)
-                setError(null)
-              }}
-              disabled={!ready || saving}
+              checked={settings.http2}
+              onCheckedChange={(http2) => void apply('http2', { http2 })}
+              disabled={!ready || busyField !== null}
               aria-label={t('settings.mitmHTTP2')}
             />
           </div>
@@ -260,16 +238,17 @@ export function MITMSettingsCard({
               <p className="mt-1 text-[10.5px] leading-relaxed text-text-faint">{t('settings.mitmQUICFallbackHint')}</p>
             </div>
             <Toggle
-              checked={draft?.quic_fallback_protection ?? false}
-              onCheckedChange={(quic_fallback_protection) => {
-                setDraft((current) => current ? { ...current, quic_fallback_protection } : current)
-                setError(null)
-              }}
-              disabled={!ready || saving}
+              checked={settings.quic_fallback_protection}
+              onCheckedChange={(quic_fallback_protection) => void apply('quic', { quic_fallback_protection })}
+              disabled={!ready || busyField !== null}
               aria-label={t('settings.mitmQUICFallback')}
             />
           </div>
-        </div>
+        </div> : (
+          <div className="border-t border-divider px-4 py-3 text-[10.5px] leading-5 text-text-faint sm:px-5">
+            {t('settings.mitmCapabilitiesWhenEnabled')}
+          </div>
+        )}
       </div>
 
       <p className="mt-3 rounded-[14px] bg-[var(--md-sys-color-warning-container)] px-4 py-3 text-[10.5px] leading-relaxed text-[var(--md-sys-color-on-warning-container)]">
@@ -280,21 +259,31 @@ export function MITMSettingsCard({
           {error}
         </div>
       ) : null}
-      <div className="mt-3 flex justify-end border-t border-divider pt-3">
-        <Button type="button" size="sm" disabled={!ready || saving || !changed} onClick={requestSave} data-testid="mitm-settings-save">
-          {saving ? t('common.saving') : t('settings.mitmSave')}
-        </Button>
+      <div className="mt-3 flex justify-start border-t border-divider pt-3">
+        <Link
+          to="/extensions/hosts"
+          className="zds-state-layer inline-flex min-h-9 items-center gap-2 rounded-full px-3 text-[11.5px] font-medium text-primary"
+          data-testid="mitm-host-audit-link"
+        >
+          {t('settings.mitmAuditHosts', { count: hostCount })}
+        </Link>
       </div>
 
       <ConfirmDialog
         open={confirmOpen}
-        onOpenChange={setConfirmOpen}
-        title={draft?.enabled ? t('settings.mitmEnableConfirmTitle') : t('settings.mitmDisableConfirmTitle')}
-        description={draft?.enabled ? t('settings.mitmEnableConfirmBody') : t('settings.mitmDisableConfirmBody')}
-        confirmLabel={t('settings.mitmSave')}
+        onOpenChange={(open) => {
+          setConfirmOpen(open)
+          if (!open) setPendingMaster(null)
+        }}
+        title={pendingMaster ? t('settings.mitmEnableConfirmTitle') : t('settings.mitmDisableConfirmTitle')}
+        description={pendingMaster ? t('settings.mitmEnableConfirmBody') : t('settings.mitmDisableConfirmBody')}
+        confirmLabel={pendingMaster ? t('settings.mitmEnableAction') : t('settings.mitmDisableAction')}
         cancelLabel={t('common.cancel')}
-        danger={!draft?.enabled}
-        onConfirm={() => void save()}
+        danger={pendingMaster === false}
+        onConfirm={() => {
+          if (pendingMaster !== null) void apply('master', { enabled: pendingMaster })
+          setPendingMaster(null)
+        }}
       />
     </Card>
   )

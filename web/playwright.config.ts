@@ -8,8 +8,9 @@ const serverURL = `http://${serverHost}:${serverPort}`
  * Playwright config for the 5gpn-dns console e2e gate.
  *
  * The desktop project exercises every route under the exact production CSP;
- * the 390x844 Chromium project pins responsive drawer behavior and horizontal
- * overflow. Both serve the prebuilt dist through e2e/server/csp-server.mjs.
+ * three iPhone-sized Chromium projects pin responsive drawer behavior,
+ * touch targets, dialogs, and horizontal overflow. All projects serve the
+ * prebuilt dist through e2e/server/csp-server.mjs.
  */
 export default defineConfig({
   testDir: './e2e',
@@ -47,11 +48,36 @@ export default defineConfig({
       },
     },
     {
-      name: 'mobile-390x844',
+      name: 'iphone-15-393x852',
       testMatch: '**/mobile-*.spec.ts',
       use: {
         ...devices['Desktop Chrome'],
-        viewport: { width: 390, height: 844 },
+        viewport: { width: 393, height: 852 },
+        deviceScaleFactor: 3,
+        isMobile: true,
+        hasTouch: true,
+        baseURL: serverURL,
+      },
+    },
+    {
+      name: 'iphone-16-pro-402x874',
+      testMatch: '**/mobile-*.spec.ts',
+      use: {
+        ...devices['Desktop Chrome'],
+        viewport: { width: 402, height: 874 },
+        deviceScaleFactor: 3,
+        isMobile: true,
+        hasTouch: true,
+        baseURL: serverURL,
+      },
+    },
+    {
+      name: 'iphone-17-pro-max-440x956',
+      testMatch: '**/mobile-*.spec.ts',
+      use: {
+        ...devices['Desktop Chrome'],
+        viewport: { width: 440, height: 956 },
+        deviceScaleFactor: 3,
         isMobile: true,
         hasTouch: true,
         baseURL: serverURL,

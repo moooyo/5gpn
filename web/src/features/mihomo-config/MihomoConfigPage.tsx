@@ -170,6 +170,7 @@ export default function MihomoConfigPage() {
         </div>
       </Card>
 
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,.55fr)] xl:items-start">
       <Card className="p-5 sm:p-6" data-testid="mihomo-config-editor" data-dirty={dirty ? 'true' : 'false'}>
         <div className="mb-4 flex flex-wrap items-center gap-2 text-[11.5px] font-medium text-text-mid">
           <div className="flex items-center gap-1.5">
@@ -243,7 +244,7 @@ export default function MihomoConfigPage() {
 
       <Card className="p-5 sm:p-6">
         <h2 className="mb-4 text-[15px] font-medium text-text-strong">{t('mihomoConfig.invariantsTitle')}</h2>
-        <ul className="grid gap-3 md:grid-cols-2">
+        <ul className="grid gap-3">
           {INVARIANT_KEYS.map((key) => (
             <li key={key} className="flex items-start gap-3 rounded-[14px] bg-surface-container-low p-4 text-[11.5px]">
               <VerifiedIcon className="mt-0.5 h-4 w-4 shrink-0 text-green" aria-hidden="true" />
@@ -255,6 +256,7 @@ export default function MihomoConfigPage() {
           ))}
         </ul>
       </Card>
+      </div>
 
       <ConfirmDialog
         open={resetOpen}

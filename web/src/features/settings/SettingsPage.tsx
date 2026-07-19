@@ -4,7 +4,7 @@ import { api } from '../../lib/api/client'
 import type { ECSView, IngressModulesView, MITMSettingsView, TGBotView, UpstreamsView } from '../../lib/api/types'
 import { AboutStrip, AppearanceCard, ConsoleCard, DotServiceCard, EcsCard, IngressPortsCard, MITMSettingsCard, TgbotCard, UpstreamsCard } from './_cards'
 
-/** 设置 (Settings) page — live config cards for the DoT service/cert, the
+/** Settings page — live config cards for the DoT service/cert, the
  *  control-plane console, the Telegram bot, upstream DNS groups and ECS,
  *  plus a build-info strip. DoT-domain change and admin-password change have
  *  no API yet (greenfield) and render as disabled controls with a tooltip. */
@@ -18,6 +18,7 @@ export default function SettingsPage() {
   const [ingressLoadState, setIngressLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
   const ingressLoadSequence = useRef(0)
   const [mitmSettings, setMITMSettings] = useState<MITMSettingsView | null>(null)
+  const [mitmHostCount, setMITMHostCount] = useState(0)
   const [mitmLoadState, setMITMLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
   const mitmLoadSequence = useRef(0)
 
@@ -41,8 +42,16 @@ export default function SettingsPage() {
     const sequence = ++mitmLoadSequence.current
     setMITMLoadState('loading')
     try {
-      const value = await api.getMITMSettings()
+      const [settingsResult, extensionsResult] = await Promise.allSettled([
+        api.getMITMSettings(),
+        api.getInterceptModules(),
+      ])
       if (sequence !== mitmLoadSequence.current) return null
+      if (extensionsResult.status === 'fulfilled') {
+        setMITMHostCount(extensionsResult.value.modules.reduce((count, extension) => count + extension.hosts.length, 0))
+      }
+      if (settingsResult.status === 'rejected') throw settingsResult.reason
+      const value = settingsResult.value
       setMITMSettings(value)
       setMITMLoadState('ready')
       return value
@@ -112,20 +121,25 @@ export default function SettingsPage() {
       </div>
       <MITMSettingsCard
         settings={mitmSettings}
+        hostCount={mitmHostCount}
         loadState={mitmLoadState}
         onReload={loadMITMSettings}
         onSaved={setMITMSettings}
       />
-      <IngressPortsCard
-        modules={ingressModules}
-        loadState={ingressLoadState}
-        onReload={loadIngressModules}
-        onSaved={setIngressModules}
-      />
-      <TgbotCard tgbot={tgbot} onSaved={setTgbot} />
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2 xl:items-start">
+        <IngressPortsCard
+          modules={ingressModules}
+          loadState={ingressLoadState}
+          onReload={loadIngressModules}
+          onSaved={setIngressModules}
+        />
+        <TgbotCard tgbot={tgbot} onSaved={setTgbot} />
+      </div>
       <UpstreamsCard upstreams={upstreams} onSaved={setUpstreams} />
-      <EcsCard ecs={ecs} onSaved={setEcs} />
-      <AboutStrip version={status?.version} />
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-stretch">
+        <EcsCard ecs={ecs} onSaved={setEcs} />
+        <AboutStrip version={status?.version} className="min-w-[250px]" />
+      </div>
     </div>
   )
 }

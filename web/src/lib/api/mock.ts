@@ -214,9 +214,51 @@ export async function importInterceptModule(request: T.InterceptModuleImport): P
     rewrite_count: 0,
     source_url: request.url,
     source_digest: 'c'.repeat(64),
+    snapshot_digest: 'c'.repeat(64),
     imported_at: new Date().toISOString(),
     argument: '',
   })
+  advanceInterceptRevision()
+  refreshActiveInterceptHosts()
+  return interceptModulesView()
+}
+
+function mockUpdateCandidate(module: T.InterceptModule): T.InterceptModule {
+  return {
+    ...module,
+    id: 'mod-fedcba0987654321',
+    name: `${module.name} update`,
+    enabled: false,
+    ready: true,
+    reason: undefined,
+    partial_allowed: false,
+    source_digest: 'e'.repeat(64),
+    snapshot_digest: 'f'.repeat(64),
+    imported_at: new Date().toISOString(),
+    hosts: [...module.hosts],
+    parameters: module.parameters?.map((parameter) => ({ ...parameter, value: '' })),
+  }
+}
+
+export async function checkInterceptModuleUpdate(id: string, revision: string): Promise<T.InterceptModuleUpdateCheck> {
+  await delay(150)
+  if (revision !== fixtures.interceptModules.revision) throw new ApiError(409, 'The extension registry changed. Refresh and try again.')
+  const module = fixtures.interceptModules.modules.find((candidate) => candidate.id === id)
+  if (!module) throw new ApiError(404, 'Extension not found.')
+  if (!module.source_url) throw new ApiError(400, 'Only URL-sourced extensions can check for updates.')
+  return { revision, state: 'available', candidate: mockUpdateCandidate(module) }
+}
+
+export async function applyInterceptModuleUpdate(id: string, revision: string, snapshotDigest: string): Promise<T.InterceptModulesView> {
+  await delay(180)
+  if (revision !== fixtures.interceptModules.revision) throw new ApiError(409, 'The extension registry changed. Refresh and try again.')
+  const index = fixtures.interceptModules.modules.findIndex((candidate) => candidate.id === id)
+  if (index < 0) throw new ApiError(404, 'Extension not found.')
+  const current = fixtures.interceptModules.modules[index]
+  if (current.enabled) throw new ApiError(400, 'Disable the extension before applying an update.')
+  const candidate = mockUpdateCandidate(current)
+  if (candidate.snapshot_digest !== snapshotDigest) throw new ApiError(409, 'The reviewed candidate changed. Check again.')
+  fixtures.interceptModules.modules[index] = candidate
   advanceInterceptRevision()
   refreshActiveInterceptHosts()
   return interceptModulesView()
