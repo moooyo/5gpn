@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
@@ -191,7 +191,7 @@ function ExtensionCard({
               <RefreshIcon className="h-4 w-4" />
             </Button>
           ) : null}
-          <Button type="button" variant="secondary" size="sm" className="shrink-0" onClick={() => onConfigure(module)}>
+          <Button type="button" variant="secondary" size="sm" className="shrink-0" disabled={busy} onClick={() => onConfigure(module)}>
             <TuneIcon className="h-4 w-4" /> {settingsCount > 0 ? t('extensions.settingsAction', { count: settingsCount }) : t('extensions.configureAction')}
           </Button>
           <Button type="button" variant="ghost" size="sm" className="w-8 shrink-0 px-0" aria-label={t('extensions.inspect')} title={t('extensions.inspect')} disabled={busy} onClick={() => onInspect(module)}>
@@ -366,7 +366,7 @@ function ExtensionUpdateModal({
           {review.candidate.network_origins.length > 0 ? <div>
             <div className="mb-2 text-[11px] font-medium text-text-faint">{t('extensions.networkOriginsTitle')}</div>
             <div className="flex max-h-36 flex-wrap gap-1.5 overflow-y-auto rounded-[12px] bg-[var(--md-sys-color-warning-container)] p-3 text-[var(--md-sys-color-on-warning-container)]">
-              {review.candidate.network_origins.map((origin) => <code key={origin} className="rounded-[7px] bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-[10px]">{origin}</code>)}
+              {review.candidate.network_origins.map((origin) => <code key={origin} title={origin} className="inline-block min-w-0 max-w-full break-all rounded-[7px] bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-[10px]">{origin}</code>)}
             </div>
           </div> : null}
           <p className="text-[10.5px] leading-5 text-text-faint">{t('extensions.updateSafety')}</p>
@@ -400,7 +400,7 @@ function EnableExtensionModal({
           <div className="font-semibold">{t('extensions.networkOriginsTitle')}</div>
           <p className="mt-1">{t('extensions.networkOriginsWarning')}</p>
           <div className="mt-3 flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">
-            {module.network_origins.map((origin) => <code key={origin} className="rounded-[7px] bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-[10px]">{origin}</code>)}
+            {module.network_origins.map((origin) => <code key={origin} title={origin} className="inline-block min-w-0 max-w-full break-all rounded-[7px] bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-[10px]">{origin}</code>)}
           </div>
         </section> : <section className="rounded-[14px] bg-surface-container-low p-4 text-[11.5px] text-text-soft"><div className="font-medium text-text-strong">{t('extensions.networkOriginsTitle')}</div><p className="mt-1">{t('extensions.networkOriginsNone')}</p></section>}
         {module.egress_group_required || module.egress_group ? <section className="rounded-[14px] bg-surface-container-low p-4"><div className="text-[11px] font-medium text-text-faint">{t('extensions.egressGroupTitle')}</div><code className="mt-1.5 block font-mono text-[12px] text-text-strong">{module.egress_group || t('extensions.egressGroupUnset')}</code></section> : null}
@@ -568,6 +568,7 @@ export default function ExtensionsPage() {
   const [updateReview, setUpdateReview] = useState<{ current: InterceptModule; candidate: InterceptModule } | null>(null)
   const [updateBusy, setUpdateBusy] = useState(false)
   const [busyID, setBusyID] = useState<string | null>(null)
+  const mutationLock = useRef(false)
   const [pending, setPending] = useState<PendingAction>(null)
   const [snapshotOpen, setSnapshotOpen] = useState(false)
   const [snapshotLoading, setSnapshotLoading] = useState(false)
@@ -597,13 +598,25 @@ export default function ExtensionsPage() {
   }, [filter, search, view?.modules])
   const hostCount = useMemo(() => view?.modules.reduce((count, module) => count + module.capture_hosts.length, 0) ?? 0, [view?.modules])
   const activeCount = useMemo(() => view?.modules.filter((module) => module.enabled).length ?? 0, [view?.modules])
+  const reorderModeAvailable = filter === 'all' && search.trim() === ''
   const showingHosts = location.pathname === '/extensions/hosts'
   const scopedModuleID = new URLSearchParams(location.search).get('plugin') ?? undefined
   const trustState = !acknowledged ? 'trust' : !settings?.enabled ? 'master' : 'ready'
 
+  function beginModuleMutation(id: string): boolean {
+    if (mutationLock.current) return false
+    mutationLock.current = true
+    setBusyID(id)
+    return true
+  }
+
+  function finishModuleMutation() {
+    mutationLock.current = false
+    setBusyID(null)
+  }
+
   async function updateModule(module: InterceptModule, update: { enabled?: boolean; settings?: Record<string, unknown>; egress_group?: string }, success: string) {
-    if (!view) return
-    setBusyID(module.id)
+    if (!view || !beginModuleMutation(module.id)) return
     try {
       setView(await api.putInterceptModule(module.id, { revision: view.revision, ...update }))
       toast.success(success)
@@ -611,18 +624,20 @@ export default function ExtensionsPage() {
       toast.error(errorMessage(error, t('extensions.updateFailed')))
       void load()
     } finally {
-      setBusyID(null)
+      finishModuleMutation()
     }
   }
 
   async function moveModule(module: InterceptModule, direction: -1 | 1) {
-    if (!view || filter !== 'all' || search.trim()) return
+    if (!view || !reorderModeAvailable || !beginModuleMutation(module.id)) return
     const order = [...view.execution_order]
     const index = order.indexOf(module.id)
     const target = index + direction
-    if (index < 0 || target < 0 || target >= order.length) return
+    if (index < 0 || target < 0 || target >= order.length) {
+      finishModuleMutation()
+      return
+    }
     ;[order[index], order[target]] = [order[target], order[index]]
-    setBusyID(module.id)
     try {
       setView(await api.reorderInterceptModules(view.revision, order))
       toast.success(t('extensions.orderSaved'))
@@ -630,13 +645,12 @@ export default function ExtensionsPage() {
       toast.error(errorMessage(error, t('extensions.orderFailed')))
       void load()
     } finally {
-      setBusyID(null)
+      finishModuleMutation()
     }
   }
 
   async function deleteModule(module: InterceptModule) {
-    if (!view) return
-    setBusyID(module.id)
+    if (!view || !beginModuleMutation(module.id)) return
     try {
       setView(await api.deleteInterceptModule(module.id, view.revision))
       toast.success(t('extensions.deleted'))
@@ -644,7 +658,7 @@ export default function ExtensionsPage() {
       toast.error(errorMessage(error, t('extensions.updateFailed')))
       void load()
     } finally {
-      setBusyID(null)
+      finishModuleMutation()
     }
   }
 
@@ -663,8 +677,7 @@ export default function ExtensionsPage() {
   }
 
   async function checkExtensionUpdate(module: InterceptModule) {
-    if (!view || !module.source_url) return
-    setBusyID(module.id)
+    if (!view || !module.source_url || !beginModuleMutation(module.id)) return
     try {
       const result = await api.checkInterceptModuleUpdate(module.id, view.revision)
       if (result.state === 'unchanged' || !result.candidate) toast.success(t('extensions.updateUnchanged'))
@@ -673,7 +686,7 @@ export default function ExtensionsPage() {
       toast.error(errorMessage(error, t('extensions.updateCheckFailed')))
       void load()
     } finally {
-      setBusyID(null)
+      finishModuleMutation()
     }
   }
 
@@ -709,15 +722,16 @@ export default function ExtensionsPage() {
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" variant="ghost" size="sm" className="w-9 px-0" aria-label={t('extensions.refresh')} title={t('extensions.refresh')} onClick={() => void load()} disabled={loading}><RefreshIcon className="h-4 w-4" /></Button>
             <a href={view.catalog_url} target="_blank" rel="noreferrer" aria-label={t('extensions.catalog')} title={t('extensions.catalog')} className="zds-state-layer grid h-9 w-9 place-items-center rounded-full text-primary"><ExternalLinkIcon className="h-4 w-4" aria-hidden="true" /></a>
-            <Button type="button" variant="tonal" size="sm" onClick={() => setInstallMode('url')}><LinkIcon className="h-4 w-4" />{t('extensions.addUrl')}</Button>
-            <Button type="button" size="sm" onClick={() => setInstallMode('local')}><AddIcon className="h-4 w-4" />{t('extensions.addLocal')}</Button>
+            <Button type="button" variant="tonal" size="sm" disabled={busyID !== null} onClick={() => setInstallMode('url')}><LinkIcon className="h-4 w-4" />{t('extensions.addUrl')}</Button>
+            <Button type="button" size="sm" disabled={busyID !== null} onClick={() => setInstallMode('local')}><AddIcon className="h-4 w-4" />{t('extensions.addLocal')}</Button>
           </div>
         </div>
         <div className="flex flex-col gap-3 px-1 sm:flex-row sm:items-center">
           <SegmentedControl value={filter} onChange={(value) => setFilter(value as ExtensionFilter)} ariaLabel={t('extensions.filterLabel')} className="grid-cols-2 sm:grid-cols-4" options={([['all', t('extensions.filters.all')], ['enabled', t('extensions.filters.enabled')], ['capture', t('extensions.filters.capture')], ['local', t('extensions.filters.local')]] as Array<[ExtensionFilter, string]>).map(([value, label]) => ({ value, label }))} />
           <div className="relative min-w-0 sm:ml-auto sm:w-[300px] sm:flex-none"><SearchIcon className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-text-faint" aria-hidden="true" /><Input value={search} onChange={(event) => setSearch(event.target.value)} aria-label={t('extensions.search')} placeholder={t('extensions.searchPlaceholder')} className="pl-10" /></div>
         </div>
-        {visibleModules.length > 0 ? <div className="space-y-3">{visibleModules.map((module) => <ExtensionCard key={module.id} module={module} busy={busyID === module.id} trusted={acknowledged} egressGroups={view.available_egress_groups} reorderEnabled={filter === 'all' && !search.trim()} total={view.modules.length} onMove={(selected, direction) => void moveModule(selected, direction)} onToggle={(selected) => setPending({ kind: 'toggle', module: selected })} onDelete={(selected) => setPending({ kind: 'delete', module: selected })} onInspect={(selected) => void inspectModule(selected)} onConfigure={setConfigTarget} onAudit={(selected) => void navigate(`/extensions/hosts?plugin=${encodeURIComponent(selected.id)}`)} onCheckUpdate={(selected) => void checkExtensionUpdate(selected)} />)}</div> : <Card className="p-10 text-center shadow-none"><div className="text-[13px] font-medium text-text-strong">{t('extensions.noMatches')}</div><div className="mt-1 text-[11.5px] text-text-faint">{t('extensions.noMatchesHint')}</div></Card>}
+        {!reorderModeAvailable && view.modules.length > 1 ? <p role="status" data-testid="extension-order-hint" className="px-1 text-[10.5px] leading-4 text-text-faint">{t('extensions.orderUnavailableHint')}</p> : null}
+        {visibleModules.length > 0 ? <div className="space-y-3" aria-busy={busyID !== null}>{visibleModules.map((module) => <ExtensionCard key={module.id} module={module} busy={busyID !== null} trusted={acknowledged} egressGroups={view.available_egress_groups} reorderEnabled={reorderModeAvailable} total={view.modules.length} onMove={(selected, direction) => void moveModule(selected, direction)} onToggle={(selected) => setPending({ kind: 'toggle', module: selected })} onDelete={(selected) => setPending({ kind: 'delete', module: selected })} onInspect={(selected) => void inspectModule(selected)} onConfigure={setConfigTarget} onAudit={(selected) => void navigate(`/extensions/hosts?plugin=${encodeURIComponent(selected.id)}`)} onCheckUpdate={(selected) => void checkExtensionUpdate(selected)} />)}</div> : <Card className="p-10 text-center shadow-none"><div className="text-[13px] font-medium text-text-strong">{t('extensions.noMatches')}</div><div className="mt-1 text-[11.5px] text-text-faint">{t('extensions.noMatchesHint')}</div></Card>}
       </> : null}
 
       {showingHosts && view ? <><div className="flex items-center justify-between gap-3 px-1"><p className="text-[12.5px] text-text-faint">{t('extensions.hostAudit.intro')}</p><Button type="button" variant="secondary" size="sm" onClick={() => void navigate('/extensions')}>{t('extensions.backToCatalog')}</Button></div><HostAuditView view={view} settings={settings} moduleID={scopedModuleID} onClearModule={() => void navigate('/extensions/hosts')} /></> : null}

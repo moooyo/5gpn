@@ -85,6 +85,32 @@ test('iPhone extension layout stacks snapshots and keeps the import dialog in vi
   expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(await page.evaluate(() => window.innerWidth))
 })
 
+test('iPhone extension permission and egress dialogs stay inside the viewport', async ({ page }) => {
+  await setupMockApiWithToken(page)
+  await page.goto('/extensions')
+
+  const extension = page.getByTestId('extension-io.example.response-cleaner')
+  await extension.getByRole('switch').click()
+  const permissionDialog = page.getByRole('dialog', { name: /启用|Enable/ })
+  await expect(permissionDialog.getByText('https://origin.example.net')).toHaveClass(/break-all/)
+  let box = await permissionDialog.boundingBox()
+  const viewportWidth = await page.evaluate(() => window.innerWidth)
+  expect(box).not.toBeNull()
+  expect(box!.x).toBeGreaterThanOrEqual(0)
+  expect(box!.x + box!.width).toBeLessThanOrEqual(viewportWidth)
+  await expectNoHorizontalOverflow(page)
+  await permissionDialog.getByRole('button', { name: 'Close' }).click()
+
+  await extension.getByRole('button', { name: /配置|Configure/ }).click()
+  const egressDialog = page.getByRole('dialog', { name: /Response Cleaner/ })
+  await expect(egressDialog.getByRole('combobox')).toBeVisible()
+  box = await egressDialog.boundingBox()
+  expect(box).not.toBeNull()
+  expect(box!.x).toBeGreaterThanOrEqual(0)
+  expect(box!.x + box!.width).toBeLessThanOrEqual(viewportWidth)
+  await expectNoHorizontalOverflow(page)
+})
+
 test('iPhone host audit remains searchable and grouped without overflow', async ({ page }) => {
   await setupMockApiWithToken(page)
   await page.goto('/extensions/hosts')

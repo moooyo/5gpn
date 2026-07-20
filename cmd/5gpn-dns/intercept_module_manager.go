@@ -240,12 +240,13 @@ func (m *InterceptModuleManager) viewLocked() (interceptModulesView, error) {
 	view := interceptModulesView{
 		Revision:              interceptRevision(body),
 		CatalogURL:            nativeExtensionCatalogURL,
-		ExecutionOrder:        append([]string(nil), document.ExecutionOrder...),
+		ExecutionOrder:        append([]string{}, document.ExecutionOrder...),
 		AvailableEgressGroups: append([]string(nil), availableGroups...),
 		Modules:               make([]interceptModuleView, 0, len(document.Modules)),
+		ActiveCaptureHosts:    []string{},
 	}
 	if ready {
-		view.ActiveCaptureHosts = activeInterceptHosts(document)
+		view.ActiveCaptureHosts = append([]string{}, activeInterceptHosts(document)...)
 	}
 	orderByID := interceptExecutionOrderIndex(document.ExecutionOrder)
 	availableSet := make(map[string]struct{}, len(availableGroups))
@@ -783,7 +784,8 @@ func (m *InterceptModuleManager) mutate(
 	oldCertificateHosts := certificateInterceptHosts(oldDocument)
 	nextCertificateHosts := certificateInterceptHosts(nextDocument)
 	firstActivation := len(activeInterceptHosts(oldDocument)) == 0 && len(activeInterceptHosts(nextDocument)) > 0
-	if containsNewStrings(oldCertificateHosts, nextCertificateHosts) || (firstActivation && !m.certificateReady(nextDocument)) {
+	certificateHostsChanged := !stringSlicesEqual(oldCertificateHosts, nextCertificateHosts)
+	if len(nextCertificateHosts) > 0 && (certificateHostsChanged || (firstActivation && !m.certificateReady(nextDocument))) {
 		if err := m.waitForCertificate(ctx, interceptCertificateDigest(nextCertificateHosts)); err != nil {
 			rollbackErr := writeInterceptConfigAtomic(m.store.Path, oldBody)
 			return interceptModulesView{}, fmt.Errorf("%w: certificate publication: %v; sidecar rollback: %v", errInterceptApplyFailed, err, rollbackErr)
@@ -797,7 +799,7 @@ func (m *InterceptModuleManager) mutate(
 	if m.onApplied != nil {
 		m.onApplied()
 	}
-	certificateReady := m.certificateReady(nextDocument) || !containsNewStrings(oldCertificateHosts, nextCertificateHosts)
+	certificateReady := len(activeInterceptHosts(nextDocument)) == 0 || m.certificateReady(nextDocument)
 	reason := ""
 	if !certificateReady {
 		reason = "certificate-not-ready"
@@ -942,12 +944,13 @@ func modulesViewFromDocument(document interceptConfigDocument, body []byte, read
 	view := interceptModulesView{
 		Revision:              interceptRevision(body),
 		CatalogURL:            nativeExtensionCatalogURL,
-		ExecutionOrder:        append([]string(nil), document.ExecutionOrder...),
+		ExecutionOrder:        append([]string{}, document.ExecutionOrder...),
 		AvailableEgressGroups: append([]string(nil), availableGroups...),
 		Modules:               make([]interceptModuleView, 0, len(document.Modules)),
+		ActiveCaptureHosts:    []string{},
 	}
 	if ready {
-		view.ActiveCaptureHosts = activeInterceptHosts(document)
+		view.ActiveCaptureHosts = append([]string{}, activeInterceptHosts(document)...)
 	}
 	orderByID := interceptExecutionOrderIndex(document.ExecutionOrder)
 	availableSet := make(map[string]struct{}, len(availableGroups))

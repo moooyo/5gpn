@@ -54,6 +54,20 @@ func TestInterceptModuleViewAlwaysMarshalsNetworkOriginsAsArray(t *testing.T) {
 	}
 }
 
+func TestInterceptModulesViewAlwaysMarshalsCollectionFieldsAsArrays(t *testing.T) {
+	document, body := testInterceptDocument(t)
+	view := modulesViewFromDocument(document, body, false, "mitm-disabled", []string{"DIRECT"})
+	encoded, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"execution_order":[]`, `"modules":[]`, `"active_capture_hosts":[]`} {
+		if !strings.Contains(string(encoded), field) {
+			t.Fatalf("empty collection %s was omitted or null: %s", field, encoded)
+		}
+	}
+}
+
 func testModuleSnapshot() interceptModuleSnapshot {
 	manifest := "apiVersion: 5gpn.io/v1\nkind: Extension\n"
 	script := `function transform(context) { return { response: { body: context.response.body } } }`
@@ -136,6 +150,42 @@ func TestInterceptModuleManagerEnableDisablePublishesOneTransaction(t *testing.T
 	}
 	if final.Modules[0].Enabled || controller.putCalls != 2 || len(final.ActiveCaptureHosts) != 0 {
 		t.Fatalf("disabled view/calls = %+v %d", final, controller.putCalls)
+	}
+}
+
+func TestInterceptModuleManagerWaitsForCertificateWhenEnabledHostSetShrinks(t *testing.T) {
+	first := testModuleSnapshot()
+	second := testModuleSnapshot()
+	second.ID = "io.example.second"
+	second.Name = "Second extension"
+	second.CaptureHosts = []string{"second.example.com"}
+	second.Scripts[0].Match.Hosts = []string{"second.example.com"}
+	manager, _, _, _, _ := newInterceptManagerFixture(t, first, second)
+	var certificateDigests []string
+	manager.certWait = func(_ context.Context, digest string) error {
+		certificateDigests = append(certificateDigests, digest)
+		return nil
+	}
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	view, err = manager.Update(context.Background(), first.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err = manager.Update(context.Background(), second.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled := false
+	if _, err := manager.Update(context.Background(), second.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &disabled}); err != nil {
+		t.Fatal(err)
+	}
+	want := interceptCertificateDigest([]string{"api.example.com"})
+	if len(certificateDigests) != 3 || certificateDigests[2] != want {
+		t.Fatalf("certificate waits = %v, want final digest %s", certificateDigests, want)
 	}
 }
 

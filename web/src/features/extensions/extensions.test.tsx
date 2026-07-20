@@ -37,7 +37,7 @@ const WLOC: InterceptModule = {
     { key: 'failClosed', type: 'boolean', label: 'Block on transformation failure', required: true, value: true },
   ],
   persistent_storage: false, execution_order: 1, network_origins: [], egress_group_required: false,
-  source_url: 'https://raw.githubusercontent.com/moooyo/5gpn/main/extensions/apple-wloc/extension.yaml',
+  source_url: 'https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml',
   source_digest: 'a'.repeat(64), snapshot_digest: 'a'.repeat(64), imported_at: '2026-07-18T00:00:00Z',
 }
 
@@ -52,7 +52,7 @@ const CLEANER: InterceptModule = {
 
 const VIEW: InterceptModulesView = {
   revision: '1'.repeat(64),
-  catalog_url: 'https://github.com/moooyo/5gpn/tree/main/extensions',
+  catalog_url: 'https://github.com/moooyo/5gpn-extensions',
   active_capture_hosts: [],
   execution_order: [WLOC.id, CLEANER.id],
   available_egress_groups: ['DIRECT', 'Proxies'],
@@ -115,8 +115,8 @@ describe('ExtensionsPage native extension contract', () => {
     const card = await screen.findByTestId(`extension-${CLEANER.id}`)
     await user.click(within(card).getByRole('switch'))
     const dialog = await screen.findByRole('dialog')
-    expect(dialog).toHaveTextContent('可将其看到的已解密请求、响应、设置和存储数据发送到以下 origins')
-    expect(dialog).toHaveTextContent('https://origin.example.net')
+    expect(dialog).toHaveTextContent('可以把它读取到的解密请求、响应、设置和存储数据发送到以下地址')
+    expect(within(dialog).getByText('https://origin.example.net')).toHaveClass('min-w-0', 'max-w-full', 'break-all')
     await user.click(within(dialog).getByRole('button', { name: '启用' }))
     await waitFor(() => expect(api.putInterceptModule).toHaveBeenCalledWith(CLEANER.id, { revision: VIEW.revision, enabled: true }))
   })
@@ -185,6 +185,34 @@ describe('ExtensionsPage native extension contract', () => {
     await waitFor(() => expect(api.reorderInterceptModules).toHaveBeenCalledWith(VIEW.revision, [CLEANER.id, WLOC.id]))
   })
 
+  it('locks every extension action while a reorder transaction is pending', async () => {
+    const user = userEvent.setup()
+    let releaseReorder!: (value: InterceptModulesView) => void
+    vi.mocked(api.reorderInterceptModules).mockReturnValueOnce(new Promise((resolve) => { releaseReorder = resolve }))
+    renderPage()
+    const wlocCard = await screen.findByTestId(`extension-${WLOC.id}`)
+    const cleanerCard = screen.getByTestId(`extension-${CLEANER.id}`)
+    const wlocMoveDown = within(wlocCard).getByRole('button', { name: '下移 Apple WLOC Location Override' })
+    expect(wlocMoveDown).toBeEnabled()
+
+    await user.click(within(cleanerCard).getByRole('button', { name: '上移 Response Cleaner' }))
+    await waitFor(() => expect(wlocMoveDown).toBeDisabled())
+    expect(within(wlocCard).getByRole('button', { name: '设置 · 2' })).toBeDisabled()
+    expect(wlocCard.parentElement).toHaveAttribute('aria-busy', 'true')
+
+    releaseReorder(cloneView())
+    await waitFor(() => expect(wlocMoveDown).toBeEnabled())
+  })
+
+  it('explains how to restore ordering controls while search is active', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.type(await screen.findByRole('textbox', { name: '搜索插件' }), 'Response Cleaner')
+    expect(screen.getByTestId('extension-order-hint')).toHaveTextContent('切换到“全部”并清空搜索')
+    const card = screen.getByTestId(`extension-${CLEANER.id}`)
+    expect(within(card).getByRole('button', { name: '上移 Response Cleaner' })).toBeDisabled()
+  })
+
   it('marks a missing required egress group as not ready and prevents enable', async () => {
     const missing = cloneView()
     const module = missing.modules.find((candidate) => candidate.id === CLEANER.id)!
@@ -227,7 +255,7 @@ describe('ExtensionsPage native extension contract', () => {
     await user.click(within(card).getByRole('button', { name: '配置' }))
     const dialog = await screen.findByRole('dialog', { name: /Response Cleaner/ })
     await user.click(within(dialog).getByRole('combobox'))
-    await user.click(await screen.findByRole('option', { name: '使用 mihomo 终端默认出口' }))
+    await user.click(await screen.findByRole('option', { name: '使用 mihomo 配置中的默认出口' }))
     await user.click(within(dialog).getByRole('button', { name: '保存' }))
     await waitFor(() => expect(api.putInterceptModule).toHaveBeenCalledWith(CLEANER.id, {
       revision: VIEW.revision,
@@ -246,6 +274,7 @@ describe('ExtensionsPage native extension contract', () => {
     await user.click(within(card).getByRole('button', { name: '检查更新' }))
     const dialog = await screen.findByRole('dialog', { name: /审查更新/ })
     expect(dialog).toHaveTextContent('v1.1.0')
+    expect(within(dialog).getByText('https://origin.example.net')).toHaveClass('min-w-0', 'max-w-full', 'break-all')
     await user.click(within(dialog).getByRole('button', { name: '替换快照' }))
     await waitFor(() => expect(api.applyInterceptModuleUpdate).toHaveBeenCalledWith(CLEANER.id, VIEW.revision, candidate.snapshot_digest))
   })
