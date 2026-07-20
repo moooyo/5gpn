@@ -13,6 +13,11 @@ current architecture is `docs/architecture.md`.
   (`cloudflare`, `http-01`, or an explicitly accepted `debug` certificate), and
   a reachable `DNS_EGRESS_RESOLVER` (the operational default is `22.22.22.22`).
 - At least two controllable upstreams when testing sequential fallback.
+- For cross-channel upgrade acceptance, either the immutable official `0.0.13`
+  release or an equivalent checked-in `0.0.13` installation fixture, plus a
+  locally built release bundle stamped with the exact beta candidate tag. Do
+  not substitute the latest published beta unless it actually contains the
+  candidate revision under test.
 
 Capture before-state for host-owned facilities. In particular:
 
@@ -243,6 +248,39 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   `X.Y.Z-beta.N` prerelease. Missing beta metadata, a normal release carrying a
   beta-looking tag, and a beta-tagged bundle selected for the official channel
   all fail before deployment mutation and never fall back across channels.
+- [ ] Starting from a clean `0.0.13` release/fixture, populate every common JSON
+  state file and install a valid customized legacy mihomo config. Upgrade with
+  the exact stamped beta bundle through ordinary `--beta`. The common policy,
+  upstream, ECS, Telegram, subscription, and statistics state remains readable,
+  the new interception state uses the current schema, a missing marketplace
+  file is exposed as an empty source list, and the legacy mihomo hash is
+  byte-for-byte unchanged. DNS, Console, Telegram,
+  and the existing data plane remain healthy, while completion explicitly says
+  core install complete and Extensions unavailable. Enabling interception must
+  fail closed until its mihomo boundary is made ready.
+- [ ] Restore the same `0.0.13` baseline and run the exact stamped beta bundle as
+  `--beta upgrade-reset-mihomo` from a real TTY. Review and accept the destructive
+  warning. The retained backup must hash-identically to the old customized file;
+  the replacement must pass pinned `mihomo -t`, match the sidecar credentials,
+  contain exactly one canonical listener/node/fail-closed boundary, and permit a
+  synthetic extension to enable and pass end-to-end traffic verification. Run
+  the command without a TTY and cancel its confirmation in separate attempts;
+  both must stop before the mihomo or deployment transaction is mutated.
+- [ ] Repeat both `0.0.13` upgrade paths with injected failures before and after
+  CA creation, state-root creation, service-account creation, mihomo candidate
+  validation, publication, and service readiness. Paths absent before the
+  attempt are absent afterward; pre-existing owned CA/state trees are restored
+  byte-for-byte; unowned lookalike paths are refused; a newly created
+  `gpn-intercept` user/group is removed only when still in its expected isolated
+  shape; and pre-existing accounts remain untouched. The original mihomo file,
+  services, nftables state, and installed release stay runnable after rollback.
+- [ ] With a future stamped stable fixture that includes cross-channel
+  delegation, invoke its installed `5gpn --beta` and verify that it executes the
+  root-owned quick installer retained from the verified bundle, selects one
+  exact beta tag, and uses only that tag's scripts and artifacts. A missing,
+  symlinked, or non-root-owned retained quick installer fails closed and directs
+  the operator to the remote verified quick path. Do not expect this behavior
+  from the historical `0.0.13` installer.
 - [ ] GitHub still reports the official release through `/releases/latest` after
   publishing a beta, and every installed first-party asset reports or records
   the same exact selected tag.

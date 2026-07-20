@@ -109,6 +109,51 @@ Missing or malformed beta metadata fails closed and never falls back to an
 official release. Release channels select only first-party 5gpn artifacts;
 third-party version and checksum pins remain unchanged.
 
+### Stable-to-beta upgrades
+
+The upgrade behavior described here is present in this repository revision but
+must be published in a new beta prerelease before the public quick installer can
+resolve it. Do not assume that an earlier published beta contains these changes.
+
+A normal stable-to-beta upgrade is the conservative, core-preserving path:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash -s -- --beta
+```
+
+The common persisted JSON schemas are compatible. The beta installer adds its
+new interception state and treats a missing marketplace document as an empty
+source list without migrating the existing policy, upstream, ECS, Telegram,
+subscription, or statistics documents. A valid legacy mihomo configuration is
+validated and preserved byte-for-byte. The installer
+then checks the interception boundary structurally. If the legacy configuration
+lacks the authenticated `intercept-egress` listener, `MODULE-INTERCEPT` node, or
+fail-closed rule, the DNS, Console, Telegram, and existing mihomo data plane are
+installed as a core-only upgrade and the completion output explicitly reports
+that Extensions are unavailable. It never silently patches operator YAML.
+
+Use the following path only when replacing the complete operator-owned mihomo
+configuration is acceptable:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash -s -- --beta upgrade-reset-mihomo
+```
+
+`upgrade-reset-mihomo` requires an existing installation and an interactive
+TTY confirmation. In the same install transaction it retains a byte-for-byte
+backup, renders the current beta seed, runs pinned `mihomo -t`, and publishes the
+candidate atomically. Custom proxies, providers, groups, and rules are not
+merged automatically and must be restored manually from the backup. Normal
+install, reinstall, and `configure` never select this reset path.
+
+The currently released stable installer predates this delegation mechanism, so
+use the remote quick installer for the first transition. A future stable release
+that includes it may accept `sudo 5gpn --beta` (and the explicit reset command)
+by handing the entire invocation to its stored, verified quick installer. A
+successful beta upgrade does not promise an in-place downgrade to stable; use a
+pre-upgrade system snapshot or the install transaction's automatic failure
+rollback instead of running the stable installer over beta state.
+
 > First installation requires the TUI. It collects the certificate mode, base domain, certificate email, and Cloudflare token when selected. `PUBLIC_IP` is detected automatically; the gateway and listener default to it. `5gpn configure` retains advanced public/gateway/listener overrides for special network layouts. China DNS defaults to `223.5.5.5` over UDP/53, trust DNS and the egress resolver default to `22.22.22.22` over UDP/53, China ECS defaults to `112.96.32.0/24`, and cache size is selected from the memory profile. Caller environment variables never override configuration; a first install without a TTY fails closed, while reinstall can reuse a valid `dns.env` non-interactively.
 
 > TCP `:8080`, TCP/UDP `:5060`, and TCP `:8443` are present in new seeds and explicit `5gpn mihomo-reset` output. Reinstall preserves an existing valid operator-owned mihomo config byte-for-byte, so existing deployments do not gain missing listeners automatically; use the module switch where manageable, edit the YAML manually, or use the explicit reset path after reviewing its backup-and-replace behavior. Provider security groups or upstream firewalls must allow only the intended clients.
@@ -122,7 +167,7 @@ third-party version and checksum pins remain unchanged.
 运行 `sudo bash install.sh`，在 TUI 的“客户端可达网关 IPv4”中填写内网地址；证书模式也在同一向导选择。`console.`、`zash.`、`dot.` 三个域名自动从主域名派生。
 
 - **配置只有一个持久入口**：安装器配置由 TUI 写入 `/etc/5gpn/dns.env`；重装只读该文件，明确忽略调用者环境。仅 Cloudflare 模式需要的 API token 单独保存在 root-only 的 `/etc/5gpn/acme/cloudflare.ini`，不会进入 `dns.env`、调用者环境或日志。
-- **重跑刷新程序、保留运维配置**：每次运行安装脚本都会刷新 systemd 单元、`/opt/5gpn` 运行目录以及 pin 版本的 5gpn-dns/mihomo/Web 产物；`/etc/5gpn` 和 `/etc/letsencrypt` 持久保留。已有且通过 `mihomo -t` 的完整 mihomo 配置会逐字节保留；只有显式 `mihomo-reset` 才会在备份和校验后替换它。下载或校验失败会中止且不预删工作二进制。
+- **重跑刷新程序、保留运维配置**：每次运行安装脚本都会刷新 systemd 单元、`/opt/5gpn` 运行目录以及 pin 版本的 5gpn-dns/mihomo/Web 产物；`/etc/5gpn` 和 `/etc/letsencrypt` 持久保留。已有且通过 `mihomo -t` 的完整 mihomo 配置会逐字节保留；只有显式 `mihomo-reset` 或 TTY 确认的 `--beta upgrade-reset-mihomo` 才会在备份和校验后替换它。下载或校验失败会中止且不预删工作二进制。
 - **一个主域名、一条 lineage、三个证书角色目录**：两种生产模式都只使用 cert-name 为 `<base>` 的**一条** scoped Certbot lineage，并部署到 `/etc/5gpn/cert/{dot,web,zash}`。所有身份和证书模式修改统一进入 `5gpn configure` TUI；`CERT_MODE` 只允许 `cloudflare`、`http-01`、`debug`。
   - **cloudflare** — TUI 输入 Cloudflare API token，DNS-01 签发 apex `<base>` + `*.<base>`；签发和续期都不停止 mihomo。即使当前证书可复用，也必须保留受保护的 token 以保证自动续期；`zash.<base>` 可继续只由 5gpn 合成解析。
   - **http-01** — 签发且只签发 `console.<base>`、`zash.<base>`、`dot.<base>` 三个精确 SAN，不包含 apex 或 wildcard。TUI 会展示三条所需 A 记录并要求确认，再通过固定解析器 `1.1.1.1` 等待三个名字各自只有一条 A 且均为 `DNS_PUBLIC_IP`；三者都不得发布 AAAA。初签及到期续签会短暂停止 mihomo 释放 TCP `:80`，并在成功或失败后恢复。
@@ -194,6 +239,7 @@ sudo bash install.sh setup-tgbot
 5gpn restart               # 重启 5gpn-dns + 5gpn-intercept + mihomo
 5gpn configure             # 打开完整配置 TUI，事务化应用并在失败时回滚
 5gpn mihomo-reset          # 显式备份当前配置，以通过 mihomo -t 的最新种子原子替换
+5gpn --beta upgrade-reset-mihomo # 跨频道升级并在 TTY 确认后事务化替换完整 mihomo 配置
 5gpn reload-rules          # 重载规则缓存与 chnroute（SIGHUP）
 5gpn add-allow cidr        # 添加 zashboard 来源 IP 白名单（live 生效）
 5gpn del-allow cidr        # 从 zashboard 白名单移除
@@ -202,7 +248,7 @@ sudo bash install.sh setup-tgbot
 5gpn rotate-token          # 轮换控制台 DNS_API_TOKEN（旧 token 立即失效 + 重启）
 5gpn set-cf-token          # 在 TUI 中设置/更新 Cloudflare API token
 5gpn uninstall             # TUI 确认卸载，默认保留 /etc/5gpn
-5gpn uninstall --purge     # 清除非证书状态，仍保留 cert/debug-cert/acme 供复用
+5gpn uninstall --purge     # 清除非证书状态，仍保留 cert/debug-cert/acme/intercept-ca 供复用
 5gpn uninstall --decommission # 仅在 provenance 证明 5gpn 创建时删除精确 lineage，并安全处理凭据
 ```
 

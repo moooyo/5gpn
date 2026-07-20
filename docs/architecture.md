@@ -390,12 +390,27 @@ configuration; explicit reset publishes the safer seed.
 
 Normal install, reinstall, and `configure` operations must validate and
 preserve an existing valid file byte-for-byte. They must not silently rewrite
-it. Only an explicit `mihomo-reset` may replace it, and reset must:
+it. Only an explicit reset action, either `mihomo-reset` or the TTY-confirmed
+installer command `upgrade-reset-mihomo`, may replace it, and reset must:
 
 1. render a complete candidate outside the live path;
 2. validate the candidate with the pinned `mihomo -t`;
 3. back up the current file;
 4. publish the candidate with an atomic rename.
+
+This ownership rule also applies across release channels. A normal
+stable-to-beta upgrade accepts the common persisted JSON schemas and creates
+the beta-only interception state separately; a missing marketplace document
+continues to mean no configured sources. It does not migrate or patch legacy
+mihomo YAML. After preserving the file, the
+installer uses the daemon's structural parser to check the authenticated
+`intercept-egress` listener, `MODULE-INTERCEPT` node, fail-closed rule, and
+credential agreement with the sidecar document. When those boundaries are not
+ready and no interception runtime is active, the installer may complete only
+the DNS, Console, Telegram, and existing mihomo data plane and must explicitly
+report Extensions unavailable. An active interception configuration with an
+incompatible mihomo boundary aborts and rolls back instead of degrading active
+traffic silently.
 
 The raw console editor follows the same validation and atomic-publication
 rules. Required infrastructure invariants cannot be edited away: the plaintext
@@ -831,7 +846,27 @@ and never falls back to the official channel. An unpinned source installer
 delegates to the verified installer bundle for the resolved tag before making
 deployment changes, so checkout templates cannot be mixed with another
 release's binaries. Packaged and installed scripts remain pinned to their
-stamped exact tag, including management operations such as `configure`.
+stamped exact tag, including management operations such as `configure`. A
+stable package that includes the cross-channel upgrade mechanism also stores
+the verified quick installer from its own bundle. When that installed stable
+script receives an explicit `--beta`, it delegates the entire invocation to
+that resolver instead of combining stable templates with beta artifacts.
+
+Stable-to-beta upgrade has two explicit modes. Normal `--beta` installation
+preserves a valid legacy mihomo file byte-for-byte and performs the structural
+interception-readiness check described above. `--beta upgrade-reset-mihomo` is
+available only from a pinned beta bundle, requires an existing installation and
+an interactive TTY confirmation, and replaces the complete mihomo file with the
+validated current seed inside the same install transaction. It does not merge
+operator proxies, providers, groups, or rules. No non-interactive, ordinary
+install, reinstall, or `configure` path may select that reset implicitly.
+
+This source behavior is not deployable through the public beta selector until
+a new beta prerelease containing it is published. Release documentation and
+integration results must distinguish the repository revision under test from
+the latest published prerelease. A completed stable-to-beta upgrade establishes
+no direct beta-to-stable downgrade contract; restoration uses the failed-install
+rollback or an operator-created pre-upgrade snapshot.
 
 An install or reinstall is staged before it mutates the working deployment:
 
@@ -847,6 +882,14 @@ leave the previously runnable binaries, units, renewal hook, and operator
 configuration in place. Third-party tools are prebuilt and version-pinned; no
 compiler toolchain is installed on the gateway. Gum bootstrap failure is
 non-fatal and falls back to plain output.
+
+Rollback records whether each beta-only interception CA and state root was
+absent before mutation. On failure it removes a root created by the transaction
+only after validating its canonical fixed path and ownership marker, or restores
+the exact owned prior tree. A `gpn-intercept` service user or group created by
+the same failed transaction is removed only while it still has the expected
+isolated shape; pre-existing accounts are retained. Ownership validation must
+fail before either path is claimed or deleted.
 
 Replacement or removal of the current `5gpn-dns`, `5gpn-intercept`, mihomo, and certificate-
 renewal service/timer units is gated by an explicit 5gpn ownership fingerprint.

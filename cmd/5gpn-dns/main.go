@@ -54,6 +54,9 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "--check-interception-routing" {
+		os.Exit(runInterceptionRoutingCheck(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 {
 		log.Fatalf("unknown command %q", os.Args[1])
 	}

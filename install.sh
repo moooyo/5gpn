@@ -77,6 +77,12 @@ CERT_RENEW_LOCK_FILE="/run/5gpn/cert-renew.lock"
 LE_PRODUCTION_SERVER="https://acme-v02.api.letsencrypt.org/directory"
 INSTALL_CERT_LOCK_HELD=0
 DECOMMISSION_PRESERVE_ACME=0
+INTERCEPT_ROUTING_READY=0
+INTERCEPT_ROUTING_REASON="not-checked"
+INTERCEPT_USER_CREATED_THIS_RUN=0
+INTERCEPT_GROUP_CREATED_THIS_RUN=0
+INTERCEPT_CREATED_UID=""
+INTERCEPT_CREATED_GID=""
 DNS_WEB_DIR_DEFAULT="/opt/5gpn/web"         # resolved from dns.env after cfg_get is defined
 # DNS_ZASH_DIR (zashboard SPA dist, config.go's ZashDir) is resolved just below
 # cfg_get()'s definition -- NOT here: the daemon reads DNS_ZASH_DIR out of dns.env,
@@ -413,11 +419,31 @@ claim_fixed_owned_dir() {
 }
 
 claim_project_roots() {
-    claim_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"
-    claim_fixed_owned_dir "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"
-    claim_fixed_owned_dir "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE"
-    claim_fixed_owned_dir "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE"
-    claim_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE"
+    claim_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" || return 1
+    claim_fixed_owned_dir "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" || return 1
+    claim_fixed_owned_dir "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE" || return 1
+}
+
+# New fixed roots must be inspected without mutating the host before the
+# install transaction records whether each path was absent. Existing paths are
+# accepted only when their ownership marker is already valid.
+preflight_intercept_roots() {
+    local dir marker value
+    while read -r dir marker value; do
+        if [[ ! -e "$dir" && ! -L "$dir" ]]; then
+            continue
+        fi
+        owned_root_canonical "$dir" "$marker" "$value" >/dev/null \
+            || { err "Refusing pre-existing unowned interception root: $dir"; return 1; }
+    done <<EOF
+$INTERCEPT_CA_DIR $INTERCEPT_CA_MARKER $INTERCEPT_CA_MARKER_VALUE
+$INTERCEPT_STATE_DIR $INTERCEPT_STATE_MARKER $INTERCEPT_STATE_MARKER_VALUE
+EOF
+}
+
+claim_intercept_roots() {
+    claim_fixed_owned_dir "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" || return 1
+    claim_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" || return 1
 }
 
 remove_fixed_owned_dir() {
@@ -955,7 +981,10 @@ service_account_name_is_valid() {
 }
 
 ensure_service_account() {
-    local user="$1" group="$2" nologin members
+    local user="$1" group="$2" user_created_name="${3:-}" group_created_name="${4:-}"
+    local nologin members group_created=0 user_created=0
+    [[ -z "$user_created_name" ]] || printf -v "$user_created_name" '%s' 0
+    [[ -z "$group_created_name" ]] || printf -v "$group_created_name" '%s' 0
     service_account_name_is_valid "$user" && service_account_name_is_valid "$group" \
         || { err "Invalid strict service account name: $user/$group"; return 1; }
     if getent group "$group" >/dev/null 2>&1; then
@@ -964,27 +993,56 @@ ensure_service_account() {
             || { err "Refusing shared service group with explicit members: $group"; return 1; }
     else
         groupadd --system "$group" || return 1
+        group_created=1
     fi
     if getent passwd "$user" >/dev/null 2>&1; then
-        service_account_is_safe "$user" "$group" \
-            || { err "Refusing incompatible pre-existing service account: $user"; return 1; }
+        if ! service_account_is_safe "$user" "$group"; then
+            [[ "$group_created" == 0 ]] || groupdel "$group" 2>/dev/null || true
+            err "Refusing incompatible pre-existing service account: $user"
+            return 1
+        fi
+        [[ -z "$group_created_name" ]] || printf -v "$group_created_name" '%s' "$group_created"
         return 0
     fi
     nologin="$(command -v nologin 2>/dev/null || true)"
     nologin="${nologin:-/usr/sbin/nologin}"
-    useradd --system --gid "$group" --home-dir /nonexistent --shell "$nologin" \
-        --no-create-home "$user" || return 1
-    service_account_is_safe "$user" "$group"
+    if ! useradd --system --gid "$group" --home-dir /nonexistent --shell "$nologin" \
+        --no-create-home "$user"; then
+        [[ "$group_created" == 0 ]] || groupdel "$group" 2>/dev/null || true
+        return 1
+    fi
+    user_created=1
+    if ! service_account_is_safe "$user" "$group"; then
+        [[ "$user_created" == 0 ]] || userdel "$user" 2>/dev/null || true
+        [[ "$group_created" == 0 ]] || groupdel "$group" 2>/dev/null || true
+        return 1
+    fi
+    [[ -z "$user_created_name" ]] || printf -v "$user_created_name" '%s' "$user_created"
+    [[ -z "$group_created_name" ]] || printf -v "$group_created_name" '%s' "$group_created"
 }
 
 install_service_accounts() {
     command -v getent >/dev/null 2>&1 \
         && command -v groupadd >/dev/null 2>&1 \
         && command -v useradd >/dev/null 2>&1 \
-        || { err "getent, groupadd, and useradd are required for service isolation."; return 1; }
+        && command -v groupdel >/dev/null 2>&1 \
+        && command -v userdel >/dev/null 2>&1 \
+        || { err "getent and service account management tools are required for service isolation."; return 1; }
     ensure_service_account "$DNS_SERVICE_USER" "$DNS_SERVICE_USER" || return 1
     ensure_service_account "$MIHOMO_SERVICE_USER" "$MIHOMO_SERVICE_USER" || return 1
-    ensure_service_account "$INTERCEPT_SERVICE_USER" "$INTERCEPT_SERVICE_USER" || return 1
+    ensure_service_account "$INTERCEPT_SERVICE_USER" "$INTERCEPT_SERVICE_USER" \
+        INTERCEPT_USER_CREATED_THIS_RUN INTERCEPT_GROUP_CREATED_THIS_RUN || return 1
+    if [[ "$INTERCEPT_USER_CREATED_THIS_RUN" == 1 ]]; then
+        INTERCEPT_CREATED_UID="$(id -u "$INTERCEPT_SERVICE_USER" 2>/dev/null || true)"
+        INTERCEPT_CREATED_GID="$(id -g "$INTERCEPT_SERVICE_USER" 2>/dev/null || true)"
+    elif [[ "$INTERCEPT_GROUP_CREATED_THIS_RUN" == 1 ]]; then
+        INTERCEPT_CREATED_GID="$(getent group "$INTERCEPT_SERVICE_USER" | cut -d: -f3)"
+    fi
+    [[ "$INTERCEPT_USER_CREATED_THIS_RUN" == 0 \
+       || ( "$INTERCEPT_CREATED_UID" =~ ^[0-9]+$ && "$INTERCEPT_CREATED_GID" =~ ^[0-9]+$ ) ]] \
+        || { err "Could not record the created interception service UID/GID."; return 1; }
+    [[ "$INTERCEPT_GROUP_CREATED_THIS_RUN" == 0 || "$INTERCEPT_CREATED_GID" =~ ^[0-9]+$ ]] \
+        || { err "Could not record the created interception service GID."; return 1; }
     ok "Dedicated service accounts are ready: ${DNS_SERVICE_USER}, ${MIHOMO_SERVICE_USER}, ${INTERCEPT_SERVICE_USER}."
 }
 
@@ -1410,17 +1468,26 @@ release_install_cert_lock() {
     INSTALL_CERT_LOCK_HELD=0
 }
 
+capture_optional_owned_root() {
+    local dir="$1" marker="$2" value="$3" name="$4"
+    if [[ ! -e "$dir" && ! -L "$dir" ]]; then
+        : > "$ROLLBACK_DIR/${name}.absent"
+        return 0
+    fi
+    owned_root_canonical "$dir" "$marker" "$value" >/dev/null \
+        || { err "Cannot capture unowned rollback root: $dir"; return 1; }
+    cp -a -- "$dir" "$ROLLBACK_DIR/$name"
+}
+
 capture_install_rollback() {
     ROLLBACK_DIR="$ARTIFACT_STAGE/rollback"
     install -d -m 0700 "$ROLLBACK_DIR"
     cp -a -- "$BASE_DIR" "$ROLLBACK_DIR/base"
     cp -a -- "$CONF_DIR" "$ROLLBACK_DIR/conf"
-    verify_ownership_marker "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" \
-        || { err "Interception CA directory lost its ownership marker before rollback capture."; return 1; }
-    cp -a -- "$INTERCEPT_CA_DIR" "$ROLLBACK_DIR/intercept-ca"
-    verify_ownership_marker "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" \
-        || { err "Interception state directory lost its ownership marker before rollback capture."; return 1; }
-    cp -a -- "$INTERCEPT_STATE_DIR" "$ROLLBACK_DIR/intercept-state"
+    capture_optional_owned_root "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" \
+        "$INTERCEPT_CA_MARKER_VALUE" intercept-ca || return 1
+    capture_optional_owned_root "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" \
+        "$INTERCEPT_STATE_MARKER_VALUE" intercept-state || return 1
     local unit
     install -d -m 0700 "$ROLLBACK_DIR/units"
     for unit in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
@@ -1524,6 +1591,83 @@ capture_install_rollback() {
     INSTALL_TRANSACTION_ACTIVE=1
 }
 
+restore_optional_owned_root() {
+    local dir="$1" marker="$2" value="$3" name="$4" failed_name="$5"
+    local -n failed_ref="$failed_name"
+    [[ "$failed_ref" == 0 ]] || return 0
+    if [[ -e "$dir" || -L "$dir" ]]; then
+        if verify_ownership_marker "$dir" "$marker" "$value"; then
+            remove_fixed_owned_dir "$dir" "$marker" "$value" || failed_ref=1
+        else
+            warn "Could not restore $dir because its live path is no longer 5gpn-owned."
+            failed_ref=1
+        fi
+    fi
+    [[ "$failed_ref" == 0 ]] || return 0
+    if [[ -f "$ROLLBACK_DIR/${name}.absent" ]]; then
+        return 0
+    fi
+    [[ -d "$ROLLBACK_DIR/$name" ]] \
+        || { warn "Rollback snapshot for $dir is missing."; failed_ref=1; return 0; }
+    cp -a -- "$ROLLBACK_DIR/$name" "$dir" || failed_ref=1
+}
+
+restore_config_root_without_intercept_ca() {
+    local failed_name="$1" source
+    local -n failed_ref="$failed_name"
+    if ! verify_ownership_marker "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"; then
+        warn "Could not restore the config root because its live ownership marker changed."
+        failed_ref=1
+        return 0
+    fi
+    clear_owned_scope "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
+        "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" intercept-ca || { failed_ref=1; return 0; }
+    (
+        shopt -s dotglob nullglob
+        for source in "$ROLLBACK_DIR/conf"/*; do
+            [[ "$(basename -- "$source")" == intercept-ca ]] && continue
+            cp -a -- "$source" "$CONF_DIR/" || exit 1
+        done
+    ) || failed_ref=1
+    [[ "$failed_ref" != 0 ]] \
+        || chown --reference="$ROLLBACK_DIR/conf" "$CONF_DIR" || failed_ref=1
+    [[ "$failed_ref" != 0 ]] \
+        || chmod --reference="$ROLLBACK_DIR/conf" "$CONF_DIR" || failed_ref=1
+}
+
+rollback_created_intercept_account() {
+    local failed_name="$1" members current_uid current_gid user_groups primary_gid primary_users
+    local -n failed_ref="$failed_name"
+    if [[ "$INTERCEPT_USER_CREATED_THIS_RUN" == 1 ]]; then
+        current_uid="$(id -u "$INTERCEPT_SERVICE_USER" 2>/dev/null || true)"
+        user_groups="$(id -G "$INTERCEPT_SERVICE_USER" 2>/dev/null || true)"
+        primary_gid="$(id -g "$INTERCEPT_SERVICE_USER" 2>/dev/null || true)"
+        if [[ "$current_uid" == "$INTERCEPT_CREATED_UID" \
+           && "$primary_gid" == "$INTERCEPT_CREATED_GID" \
+           && "$user_groups" == "$primary_gid" ]] \
+           && service_account_is_safe "$INTERCEPT_SERVICE_USER" "$INTERCEPT_SERVICE_USER"; then
+            userdel "$INTERCEPT_SERVICE_USER" 2>/dev/null || failed_ref=1
+        else
+            warn "Refusing to remove a changed interception service account."
+            failed_ref=1
+        fi
+        INTERCEPT_USER_CREATED_THIS_RUN=0
+    fi
+    if [[ "$INTERCEPT_GROUP_CREATED_THIS_RUN" == 1 ]]; then
+        if getent group "$INTERCEPT_SERVICE_USER" >/dev/null 2>&1; then
+            members="$(getent group "$INTERCEPT_SERVICE_USER" | cut -d: -f4)"
+            current_gid="$(getent group "$INTERCEPT_SERVICE_USER" | cut -d: -f3)"
+            primary_users="$(getent passwd | awk -F: -v gid="$current_gid" '$4 == gid { print $1 }')"
+            [[ "$current_gid" == "$INTERCEPT_CREATED_GID" && -z "$members" && -z "$primary_users" ]] \
+                && groupdel "$INTERCEPT_SERVICE_USER" 2>/dev/null \
+                || failed_ref=1
+        fi
+        INTERCEPT_GROUP_CREATED_THIS_RUN=0
+    fi
+    INTERCEPT_CREATED_UID=""
+    INTERCEPT_CREATED_GID=""
+}
+
 rollback_install() {
     [[ "$INSTALL_TRANSACTION_ACTIVE" == 1 && -d "$ROLLBACK_DIR" ]] || return 0
     local rollback_cert_failed=0 rollback_host_failed=0 rollback_state_failed=0 polkit_candidate=""
@@ -1540,28 +1684,11 @@ rollback_install() {
         remove_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"
     fi
     cp -a -- "$ROLLBACK_DIR/base" "$BASE_DIR"
-    if verify_ownership_marker "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"; then
-        remove_fixed_owned_dir "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"
-    fi
-    cp -a -- "$ROLLBACK_DIR/conf" "$CONF_DIR"
-    if verify_ownership_marker "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE"; then
-        remove_fixed_owned_dir "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" \
-            || rollback_host_failed=1
-    elif [[ -e "$INTERCEPT_CA_DIR" || -L "$INTERCEPT_CA_DIR" ]]; then
-        warn "Could not restore the interception CA because its live path is no longer 5gpn-owned."
-        rollback_host_failed=1
-    fi
-    [[ "$rollback_host_failed" != 0 ]] || cp -a -- "$ROLLBACK_DIR/intercept-ca" "$INTERCEPT_CA_DIR" \
-        || rollback_host_failed=1
-    if verify_ownership_marker "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE"; then
-        remove_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" \
-            || rollback_state_failed=1
-    elif [[ -e "$INTERCEPT_STATE_DIR" || -L "$INTERCEPT_STATE_DIR" ]]; then
-        warn "Could not restore interception state because its live path is no longer 5gpn-owned."
-        rollback_state_failed=1
-    fi
-    [[ "$rollback_state_failed" != 0 ]] || cp -a -- "$ROLLBACK_DIR/intercept-state" "$INTERCEPT_STATE_DIR" \
-        || rollback_state_failed=1
+    restore_config_root_without_intercept_ca rollback_host_failed
+    restore_optional_owned_root "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" \
+        "$INTERCEPT_CA_MARKER_VALUE" intercept-ca rollback_host_failed
+    restore_optional_owned_root "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" \
+        "$INTERCEPT_STATE_MARKER_VALUE" intercept-state rollback_state_failed
     local unit
     for unit in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
         if [[ -f "$ROLLBACK_DIR/units/$unit" ]]; then
@@ -1682,6 +1809,7 @@ rollback_install() {
         fi
         cp -a -- "$ROLLBACK_DIR/external-zash" "$DNS_ZASH_DIR"
     fi
+    rollback_created_intercept_account rollback_host_failed
     systemctl daemon-reload 2>/dev/null || true
     if [[ -f "$ROLLBACK_DIR/units/5gpn-intercept-cert.path.enabled" ]]; then
         systemctl enable 5gpn-intercept-cert.path 2>/dev/null || true
@@ -2223,6 +2351,40 @@ reset_mihomo_config() {
     ok "mihomo seed restored; backup retained beside ${MIHOMO_DIR}/config.yaml."
 }
 
+check_interception_routing_compatibility() {
+    local output rc=0 enabled_rc=0
+    INTERCEPT_ROUTING_READY=0
+    INTERCEPT_ROUTING_REASON="not-checked"
+    output="$("$DNS_BIN" --check-interception-routing \
+        --mihomo-config "$MIHOMO_DIR/config.yaml" \
+        --intercept-config "$INTERCEPT_DIR/config.json" 2>&1)" || rc=$?
+    case "$rc" in
+        0)
+            INTERCEPT_ROUTING_READY=1
+            INTERCEPT_ROUTING_REASON="ready"
+            return 0 ;;
+        3)
+            INTERCEPT_ROUTING_REASON="${output##*$'\n'}"
+            [[ -n "$INTERCEPT_ROUTING_REASON" ]] || INTERCEPT_ROUTING_REASON="legacy-mihomo-config"
+            "$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --check-enabled >/dev/null 2>&1 \
+                || enabled_rc=$?
+            case "$enabled_rc" in
+                0)
+                    err "Active interception cannot be preserved on an incompatible mihomo config (${INTERCEPT_ROUTING_REASON})."
+                    return 1 ;;
+                3) ;;
+                *)
+                    err "Could not determine whether interception is active (exit ${enabled_rc})."
+                    return 1 ;;
+            esac
+            warn "Core services can use the preserved mihomo config, but extension interception is unavailable: ${INTERCEPT_ROUTING_REASON}."
+            return 0 ;;
+        *)
+            err "Could not validate mihomo interception compatibility: ${output:-unknown error}"
+            return 1 ;;
+    esac
+}
+
 # ----------------------------------------------------------------------------
 # Zashboard source-IP allowlist (whitelist.txt) — TUI-managed OUT-OF-BAND, never
 # web-editable. add/del edit the file directly, then apply_whitelist pushes it
@@ -2419,6 +2581,10 @@ install_manage_cli() {
     [[ -f "$SCRIPT_PATH" && ! -L "$SCRIPT_PATH" ]] \
         || { err "Installer must come from the verified quick-install bundle or a local checkout."; return 1; }
     publish_executable "$SCRIPT_PATH" "${BASE_DIR}/install.sh" || return 1
+    local quick_source="${SCRIPT_DIR}/quick-install.sh"
+    [[ -f "$quick_source" && ! -L "$quick_source" ]] \
+        || { err "Verified quick-install.sh is required for future release-channel upgrades."; return 1; }
+    publish_executable "$quick_source" "${BASE_DIR}/quick-install.sh" || return 1
     if [[ -e /usr/local/bin/5gpn ]] && ! launcher_owned; then
         err "Refusing to overwrite an unowned /usr/local/bin/5gpn."
         return 1
@@ -4283,6 +4449,17 @@ mihomo_config_matches_install_config() {
 # ----------------------------------------------------------------------------
 # Full install
 # ----------------------------------------------------------------------------
+confirm_upgrade_mihomo_reset() {
+    [[ -f "${CONF_DIR}/dns.env" && -f "${MIHOMO_DIR}/config.yaml" ]] \
+        || { err "upgrade-reset-mihomo requires an existing 5gpn installation."; return 1; }
+    [[ -t 0 && -t 1 ]] \
+        || { err "upgrade-reset-mihomo requires an interactive TTY."; return 1; }
+    warn "The explicit upgrade will replace the complete operator-owned mihomo config with the current seed."
+    warn "A byte-for-byte backup will be retained, but custom proxies, providers, groups, and rules must be merged back manually."
+    ask_yesno "Continue with the transactional mihomo reset?" \
+        || { warn "Explicit upgrade reset cancelled."; return 1; }
+}
+
 delegate_unpinned_installer() {
     local mode="${1:-}" quick
     local -a args=()
@@ -4293,17 +4470,55 @@ delegate_unpinned_installer() {
     [[ "$DNS_RELEASE_CHANNEL" == stable || "$DNS_RELEASE_CHANNEL" == beta ]] \
         || { err "Unknown 5gpn release channel: $DNS_RELEASE_CHANNEL"; return 1; }
     [[ "$DNS_RELEASE_CHANNEL" == stable ]] || args+=(--beta)
-    [[ "$mode" != configure ]] || args+=(configure)
+    case "$mode" in
+        "") ;;
+        configure|upgrade-reset-mihomo) args+=("$mode") ;;
+        *) err "Unsupported delegated installer mode: $mode"; return 1 ;;
+    esac
     info "Resolving a version-matched ${DNS_RELEASE_CHANNEL} installer bundle before installation."
     exec bash "$quick" "${args[@]}"
 }
 
+# A stamped stable installer must never reuse its own pinned artifacts for a
+# beta request. Future installed management scripts keep a verified copy of
+# quick-install.sh and hand the channel transition back to that resolver.
+delegate_pinned_channel_switch() {
+    local mode="${1:-}" quick quick_mode base_mode
+    local -a args=(--beta)
+    [[ "$DNS_RELEASE_CHANNEL_EXPLICIT" == 1 && "$DNS_RELEASE_CHANNEL" == beta ]] || return 0
+    [[ "$DNS_VERSION_DEFAULT" != latest ]] || return 0
+    valid_dns_stable_release_tag "$DNS_VERSION_DEFAULT" || return 0
+    quick="${SCRIPT_DIR}/quick-install.sh"
+    quick_mode="$(file_mode "$quick")"
+    [[ -f "$quick" && ! -L "$quick" && "$(file_uid "$quick")" == 0 \
+       && "$quick_mode" =~ ^[4-7][0145][0145]$ ]] \
+        || { err "This stable installer is pinned and cannot switch channels by itself."; \
+             err "Run the verified remote quick installer with --beta."; return 1; }
+    if [[ "$SCRIPT_DIR" == "$BASE_DIR" ]]; then
+        base_mode="$(file_mode "$BASE_DIR")"
+        [[ "$(file_uid "$BASE_DIR")" == 0 && "$base_mode" =~ ^[4-7][0145][0145]$ ]] \
+            || { err "Installed runtime root is writable by an untrusted account."; return 1; }
+        owned_root_canonical "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" >/dev/null \
+            || { err "Installed quick installer is outside a valid owned runtime root."; return 1; }
+    fi
+    [[ -z "$mode" ]] || args+=("$mode")
+    info "Handing the stable-to-beta channel upgrade to verified quick-install.sh."
+    exec bash "$quick" "${args[@]}"
+}
+
 full_install() {
-    local force_tui=0
-    [[ "${1:-}" == configure ]] && force_tui=1
-    delegate_unpinned_installer "${1:-}" || return 1
+    local mode="${1:-}" force_tui=0 reset_mihomo=0
+    [[ "$mode" == configure ]] && force_tui=1
+    [[ "$mode" == upgrade-reset-mihomo ]] && reset_mihomo=1
+    delegate_pinned_channel_switch "$mode" || return 1
+    delegate_unpinned_installer "$mode" || return 1
+    if [[ "$reset_mihomo" == 1 ]] && ! valid_dns_beta_release_tag "$DNS_VERSION_DEFAULT"; then
+        err "upgrade-reset-mihomo is available only from a pinned beta installer bundle."
+        return 1
+    fi
     check_root
-    claim_project_roots
+    claim_project_roots || return 1
+    preflight_intercept_roots || return 1
     install_gum
     detect_os
     check_arch
@@ -4316,6 +4531,7 @@ full_install() {
         err "Edit and validate the operator-owned file explicitly before rerunning configuration."
         return 1
     }
+    [[ "$reset_mihomo" == 0 ]] || confirm_upgrade_mihomo_reset || return 1
     preflight_unit_ownership
     claim_web_dir
     claim_zashboard_dir
@@ -4330,6 +4546,7 @@ full_install() {
     capture_install_rollback
     trap install_transaction_error ERR
     trap install_transaction_exit EXIT
+    claim_intercept_roots
     ensure_swap
 
     # Only after every input, host conflict, download, digest, archive, console
@@ -4347,7 +4564,16 @@ full_install() {
     write_dns_env
     ensure_intercept_certificates
     install_cert "$BASE_DOMAIN"
-    render_mihomo_config
+    if [[ "$reset_mihomo" == 1 ]]; then
+        render_mihomo_config --reset
+    else
+        render_mihomo_config
+    fi
+    check_interception_routing_compatibility
+    if [[ "$reset_mihomo" == 1 && "$INTERCEPT_ROUTING_READY" != 1 ]]; then
+        err "Explicit mihomo reset did not produce a manageable interception boundary."
+        return 1
+    fi
     setup_ios_profile
     prepare_runtime_permissions
     start_services_with_cert_lock_handoff
@@ -4359,9 +4585,19 @@ full_install() {
     trap - ERR EXIT
 
     echo ""
-    ok "5gpn install complete."
+    if [[ "$INTERCEPT_ROUTING_READY" == 1 ]]; then
+        ok "5gpn install complete."
+    else
+        ok "5gpn core install complete."
+        warn "Extensions remain disabled because the preserved mihomo config is not interception-ready (${INTERCEPT_ROUTING_REASON})."
+        info "Run '5gpn mihomo-reset' only if replacing the complete operator-owned mihomo config is acceptable."
+    fi
     {
-        echo "✅ 5gpn 安装完成"
+        if [[ "$INTERCEPT_ROUTING_READY" == 1 ]]; then
+            echo "✅ 5gpn 安装完成"
+        else
+            echo "✅ 5gpn 核心安装完成（Extensions 暂不可启用）"
+        fi
         echo ""
         echo "  DoT 地址         tls://${DOT_DOMAIN}:853"
         echo "  Android 私人DNS  ${DOT_DOMAIN}"
@@ -4494,7 +4730,7 @@ uninstall() {
         # need to issue (no valid cert survived) must not hard-abort for a token
         # that was needlessly wiped. Remove everything else under CONF_DIR.
         clear_owned_scope "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
-            "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" cert acme debug-cert \
+            "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" cert acme debug-cert intercept-ca \
             || { err "Config ownership validation failed; refusing purge."; return 1; }
         remove_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" \
             || { err "Refusing unsafe interception state removal."; return 1; }
@@ -4520,12 +4756,16 @@ usage() {
 Usage: sudo bash install.sh [--beta] [command] — or, after install:  5gpn [command]
 
   (no channel option) Resolve the latest official release when run from source.
-  --beta              Explicitly resolve the latest beta prerelease when run
-                      from source. A missing beta never falls back to official.
+  --beta              Resolve the latest beta prerelease through verified
+                      quick-install.sh. A missing beta never falls back to official.
   (no command)        Full install/re-run. First install requires the TUI;
                       reinstall validates and reuses /etc/5gpn/dns.env. A
-                      packaged or installed script remains pinned to its tag.
+                      packaged script remains pinned to its tag unless an
+                      explicit stable-to-beta handoff invokes verified quick-install.sh.
   configure           Open the full TUI, stage/verify, publish, probe, and rollback on failure
+  upgrade-reset-mihomo
+                      Explicit TTY-confirmed upgrade that replaces the complete
+                      operator-owned mihomo config with the backed-up current seed
   menu                Open the interactive management menu (this is what bare '5gpn' runs)
   status              Show service states, domains, IP, list counts/age
   restart             Restart the 5gpn services (5gpn-dns + 5gpn-intercept + mihomo)
@@ -4642,6 +4882,8 @@ main() {
     case "$cmd" in
         "")             require_command_arity install "$#" 0 0 && full_install ;;
         configure)      require_command_arity "$cmd" "$#" 1 1 && full_install configure ;;
+        upgrade-reset-mihomo)
+                         require_command_arity "$cmd" "$#" 1 1 && full_install upgrade-reset-mihomo ;;
         menu)           require_command_arity "$cmd" "$#" 1 1 && manage_menu ;;
         restart)        require_command_arity "$cmd" "$#" 1 1 && restart_services ;;
         reload-rules)   require_command_arity "$cmd" "$#" 1 1 && reload_rules ;;

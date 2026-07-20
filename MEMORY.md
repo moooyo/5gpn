@@ -78,7 +78,8 @@ current pre-release contract, including trusted Telegram management, on
 
 ## Stable and beta release channels
 
-**Status: Implemented. Recorded and implemented 2026-07-19.**
+**Status: Implemented. Recorded 2026-07-19 and extended with the explicit
+stable-to-beta upgrade contract on 2026-07-21.**
 
 ### Current repository state
 
@@ -94,6 +95,11 @@ current pre-release contract, including trusted Telegram management, on
   installs delegate to that verified bundle, and packaged or installed scripts
   retain the stamped tag so scripts, daemon binaries, web assets, and checksums
   cannot drift across releases or channels.
+- The current repository revision contains the cross-channel compatibility
+  check and `upgrade-reset-mihomo` flow, but a new beta prerelease must publish
+  this revision before the public `--beta` selector can deploy that behavior.
+  An older published beta must not be represented as equivalent to the current
+  repository state.
 
 ### Durable branch and release decisions
 
@@ -140,6 +146,29 @@ current pre-release contract, including trusted Telegram management, on
   release when no beta release exists.
 - A packaged installer remains stamped to its own exact tag. It must not mix its
   scripts or templates with daemon or web artifacts from another tag or channel.
+- A stable release that includes the upgrade mechanism stores the verified
+  quick installer from its own release bundle. An explicit `--beta` invocation
+  of that installed stable script delegates the complete operation to the quick
+  installer; it never uses stable templates with beta binaries. Stable releases
+  that predate this mechanism still require the remote verified quick installer.
+- A normal stable-to-beta install accepts the common persisted JSON schemas,
+  creates beta-only interception state separately, and treats a missing
+  marketplace document as an empty source list. It validates
+  and preserves a valid legacy mihomo config byte-for-byte, then structurally
+  checks the required interception listener, node, fail-closed rule, and
+  credentials. If interception is inactive and that boundary is not ready, the
+  core install may complete only with an explicit Extensions-unavailable result.
+  It must not claim a complete interception upgrade or patch the YAML.
+- `--beta upgrade-reset-mihomo` is the only installer upgrade mode authorized to
+  replace the full operator mihomo config. It requires an existing installation,
+  a pinned beta bundle, and an interactive TTY confirmation. It must back up the
+  old bytes, validate the complete current seed with pinned `mihomo -t`, publish
+  atomically inside the install transaction, and state that custom proxies,
+  providers, groups, and rules require manual restoration. Normal install,
+  reinstall, and `configure` never choose this reset.
+- A successful stable-to-beta upgrade does not define or promise a direct
+  beta-to-stable downgrade. Operators who need reversal retain a pre-upgrade
+  system snapshot; automatic installer rollback covers failure before commit.
 - The channel option affects only 5gpn's first-party release. Existing explicit
   third-party version pins remain independent.
 
@@ -170,6 +199,8 @@ Future release-channel changes must update all affected surfaces together:
   workflow, while retaining `.github/workflows/checks.yml` as the common gate;
 - installer and quick-installer safety tests, including default-stable behavior,
   explicit beta selection, malformed or cross-channel tags, missing beta
-  releases, exact-tag pinning, and checksum enforcement;
+  releases, exact-tag pinning, checksum enforcement, and a fixed `0.0.13` to
+  stamped-beta upgrade fixture covering both core-preserve and explicit-reset
+  paths plus rollback of newly created CA/state roots and service accounts;
 - `README.md` installation and release documentation; and
 - `docs/architecture.md` and this durable decision record.

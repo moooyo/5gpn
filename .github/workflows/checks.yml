@@ -162,6 +162,7 @@ jobs:
             exit 1
           fi
           /tmp/mihomo -t -f "$runtime/config.yaml" -d "$runtime"
+          /tmp/mihomo -t -f tests/fixtures/stable-0.0.13/mihomo-config.yaml -d "$runtime"
           grep -Fq 'name: gateway5060' "$runtime/config.yaml"
           grep -Fq 'target: console.example.test:5060' "$runtime/config.yaml"
           grep -Fq 'QUIC: { ports: [443, 5060] }' "$runtime/config.yaml"

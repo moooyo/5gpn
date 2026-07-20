@@ -1,0 +1,70 @@
+# Source: 5gpn release 0.0.13, etc/mihomo/config.yaml.tmpl, rendered by
+# install.sh for example.com and 192.0.2.10 with a deterministic test secret.
+# This is the legacy main seed before the interception routing scaffold.
+external-controller: ""
+external-controller-tls: 127.0.0.1:9090
+secret: fixture-controller-secret
+tls:
+  certificate: /etc/5gpn/cert/zash/current/fullchain.pem
+  private-key: /etc/5gpn/cert/zash/current/privkey.pem
+profile: { store-selected: true }
+mode: rule
+log-level: info
+
+listeners:
+  - {name: gateway, type: tunnel, listen: 192.0.2.10, port: 443, network: [tcp, udp], target: console.example.com:443}
+  - {name: gateway80, type: tunnel, listen: 192.0.2.10, port: 80, network: [tcp], target: console.example.com:80}
+  - {name: gateway8080, type: tunnel, listen: 192.0.2.10, port: 8080, network: [tcp], target: console.example.com:8080}
+  - {name: gateway8443, type: tunnel, listen: 192.0.2.10, port: 8443, network: [tcp], target: console.example.com:8443}
+  - {name: gateway5060, type: tunnel, listen: 192.0.2.10, port: 5060, network: [tcp, udp], target: console.example.com:5060}
+
+sniffer:
+  enable: true
+  parse-pure-ip: true
+  override-destination: true
+  force-domain: [console.example.com]
+  sniff:
+    TLS:  { ports: [443, 8080, 8443, 5060] }
+    QUIC: { ports: [443, 5060] }
+    HTTP: { ports: [80, 8080, 8443, 5060] }
+
+dns:
+  enable: true
+  enhanced-mode: normal
+  nameserver: ["udp://127.0.0.1:5354"]
+
+hosts:
+  console.example.com: 127.0.0.1
+  zash.example.com:    127.0.0.2
+
+rule-providers:
+  whitelist: {type: file, behavior: ipcidr, format: text, path: ./whitelist.txt}
+
+proxies: []
+proxy-providers: {}
+
+proxy-groups:
+  - {name: Proxies, type: select, proxies: [DIRECT]}
+
+rules:
+  - AND,((DOMAIN,console.example.com),(NETWORK,UDP)),REJECT
+  - AND,((DOMAIN,console.example.com),(DST-PORT,80)),REJECT
+  - AND,((DOMAIN,console.example.com),(DST-PORT,8080)),REJECT
+  - AND,((DOMAIN,console.example.com),(DST-PORT,8443)),REJECT
+  - AND,((DOMAIN,zash.example.com),(NETWORK,UDP)),REJECT
+  - AND,((DOMAIN,zash.example.com),(DST-PORT,80)),REJECT
+  - AND,((DOMAIN,zash.example.com),(DST-PORT,8080)),REJECT
+  - AND,((DOMAIN,zash.example.com),(DST-PORT,8443)),REJECT
+  - AND,((DOMAIN,console.example.com),(DST-PORT,5060)),REJECT
+  - AND,((DOMAIN,zash.example.com),(DST-PORT,5060)),REJECT
+  - DOMAIN,console.example.com,DIRECT
+  - AND,((DOMAIN,zash.example.com),(RULE-SET,whitelist,DIRECT,src)),DIRECT
+  - DOMAIN,zash.example.com,REJECT
+  - IP-CIDR,192.0.2.10/32,REJECT,no-resolve
+  - IP-CIDR,127.0.0.0/8,REJECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,REJECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,REJECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,REJECT,no-resolve
+  - IP-CIDR,100.64.0.0/10,REJECT,no-resolve
+  - IP-CIDR,169.254.0.0/16,REJECT,no-resolve
+  - MATCH,Proxies

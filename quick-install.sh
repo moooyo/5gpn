@@ -409,6 +409,10 @@ Usage: quick-install.sh [--beta] [installer-command]
   (no channel option)  Download the latest official release.
   --beta              Download the latest published beta prerelease.
 
+Installer command:
+  upgrade-reset-mihomo  Explicit TTY-confirmed upgrade that backs up and replaces
+                        the complete operator-owned mihomo config.
+
 The selected release is pinned to one exact tag. A missing beta never falls
 back to the official channel.
 EOF
