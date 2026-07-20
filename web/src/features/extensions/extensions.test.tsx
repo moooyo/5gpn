@@ -99,14 +99,14 @@ beforeEach(async () => {
 })
 
 describe('ExtensionsPage native extension contract', () => {
-  it('renders the capture-transform-egress rail and native extension snapshots', async () => {
+  it('renders native extension snapshots', async () => {
     renderPage()
     expect(await screen.findByText('Response Cleaner')).toBeInTheDocument()
-    expect(screen.getByTestId('extension-traffic-contract')).toHaveTextContent('声明接管域名')
-    expect(screen.getByTestId('extension-traffic-contract')).toHaveTextContent('mihomo 决定出口')
     expect(screen.getByText('接管 · 1')).toBeInTheDocument()
     expect(screen.getByText('上游映射 · 1')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /打开插件目录/ })).toHaveAttribute('href', VIEW.catalog_url)
+    expect(screen.queryByTestId('extension-traffic-contract')).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: '插件市场' })).not.toBeInTheDocument()
   })
 
   it('arms a valid native extension while the MITM master is off after confirmation', async () => {

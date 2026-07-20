@@ -111,6 +111,7 @@ describe('Topbar', () => {
     expect(pageMeta('/logs')).toBe('logs')
     expect(pageMeta('/setup-guide')).toBe('setup-guide')
     expect(pageMeta('/resolve-test')).toBe('resolve-test')
+    expect(pageMeta('/marketplace')).toBe('marketplace')
     expect(pageMeta('/does-not-exist')).toBe('overview')
     expect(pageMeta('/')).toBe('overview')
   })

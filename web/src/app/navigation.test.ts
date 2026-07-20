@@ -12,6 +12,7 @@ describe('navigation model', () => {
       { id: 'resolve-test', path: '/resolve-test' },
       { id: 'policy-rules', path: '/policy-rules' },
       { id: 'extensions', path: '/extensions' },
+      { id: 'marketplace', path: '/marketplace' },
       { id: 'mihomo', path: '/mihomo' },
       { id: 'mihomo-config', path: '/mihomo-config' },
       { id: 'settings', path: '/settings' },

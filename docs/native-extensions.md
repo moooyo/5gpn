@@ -232,12 +232,15 @@ scripts. **Add locally** accepts one pasted or uploaded manifest; local
 manifests use inline scripts or absolute HTTPS script URLs. Both actions install
 the extension disabled.
 
-The Console also accepts explicit HTTPS marketplace indexes using the strict
+The top-level Console Marketplace page also accepts explicit HTTPS marketplace indexes using the strict
 `5gpn.io/marketplace/v1` JSON contract. A marketplace is only a bounded
 discovery list. The daemon fetches and caches it through the same redirect and
 post-resolution SSRF guard, while the browser renders only the authenticated
 normalized API projection. Adding or refreshing a marketplace never installs,
 updates, enables, or executes an extension.
+
+An optional source display name is local operator text only. It does not replace
+the index metadata identity, prove publisher ownership, or alter any digest.
 
 Selecting a marketplace entry refetches its manifest through this same native
 parser and verifies the index's manifest and script SHA-256 digests, byte sizes,

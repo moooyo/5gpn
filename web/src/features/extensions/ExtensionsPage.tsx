@@ -1,10 +1,9 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   AddIcon,
   ArrowDownIcon,
-  ArrowRightIcon,
   ArrowUpIcon,
   CloudIcon,
   DeleteIcon,
@@ -34,7 +33,6 @@ import {
   Modal,
   Select,
   SegmentedControl,
-  Tabs,
   Toggle,
   toast,
 } from '../../components/ds'
@@ -52,7 +50,6 @@ import { useMITMTrustAcknowledgement } from '../../lib/mitmTrust'
 import { HostAuditView } from './HostAuditView'
 import { ExtensionInstallReview } from './ExtensionInstallReview'
 
-const MarketplaceView = lazy(() => import('./MarketplaceView'))
 import { LocationPicker, type LocationPoint } from './LocationPicker'
 
 type InstallMode = 'url' | 'local'
@@ -518,30 +515,6 @@ function InstallExtensionModal({
   )
 }
 
-function TrafficContractRail() {
-  const { t } = useTranslation()
-  const steps = [
-    { icon: ShieldLockIcon, title: t('extensions.traffic.capture'), body: t('extensions.traffic.captureHint') },
-    { icon: NetworkIcon, title: t('extensions.traffic.transform'), body: t('extensions.traffic.transformHint') },
-    { icon: RouteIcon, title: t('extensions.traffic.egress'), body: t('extensions.traffic.egressHint') },
-  ]
-  return (
-    <Card className="border-0 bg-surface-container-low p-3.5 shadow-none" data-testid="extension-traffic-contract">
-      <div className="grid gap-2 md:grid-cols-[1fr_auto_1fr_auto_1fr] md:items-center">
-        {steps.map((step, index) => (
-          <div key={step.title} className="contents">
-            <div className="flex min-w-0 items-center gap-3 rounded-[12px] bg-card px-3.5 py-3">
-              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-primary-container text-on-primary-container"><step.icon className="h-4.5 w-4.5" aria-hidden="true" /></span>
-              <div><div className="text-[11.5px] font-medium text-text-strong">{step.title}</div><div className="mt-0.5 text-[10px] leading-4 text-text-faint">{step.body}</div></div>
-            </div>
-            {index < steps.length - 1 ? <ArrowRightIcon className="mx-auto hidden h-5 w-5 text-text-faint md:block" aria-hidden="true" /> : null}
-          </div>
-        ))}
-      </div>
-    </Card>
-  )
-}
-
 export default function ExtensionsPage() {
   const { t } = useTranslation()
   const location = useLocation()
@@ -552,7 +525,6 @@ export default function ExtensionsPage() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
   const [installMode, setInstallMode] = useState<InstallMode | null>(null)
-  const [tab, setTab] = useState<'installed' | 'marketplace'>('installed')
   const [filter, setFilter] = useState<ExtensionFilter>('all')
   const [search, setSearch] = useState('')
   const [configTarget, setConfigTarget] = useState<InterceptModule | null>(null)
@@ -698,18 +670,15 @@ export default function ExtensionsPage() {
 
   return (
     <div className="flex flex-col gap-4" data-testid="page-extensions">
-      {(showingHosts || tab === 'installed') ? <div className={cn('flex flex-col gap-3 rounded-[20px] px-5 py-4 sm:flex-row sm:items-center sm:justify-between', trustState === 'ready' ? 'bg-[var(--md-sys-color-success-container)] text-[var(--md-sys-color-on-success-container)]' : trustState === 'master' ? 'bg-[var(--md-sys-color-warning-container)] text-[var(--md-sys-color-on-warning-container)]' : 'bg-primary-container text-on-primary-container')} data-testid="mitm-readiness-notice">
+      <div className={cn('flex flex-col gap-3 rounded-[20px] px-5 py-4 sm:flex-row sm:items-center sm:justify-between', trustState === 'ready' ? 'bg-[var(--md-sys-color-success-container)] text-[var(--md-sys-color-on-success-container)]' : trustState === 'master' ? 'bg-[var(--md-sys-color-warning-container)] text-[var(--md-sys-color-on-warning-container)]' : 'bg-primary-container text-on-primary-container')} data-testid="mitm-readiness-notice">
         <div className="flex items-start gap-2.5">{trustState === 'ready' ? <VerifiedIcon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" /> : <ShieldLockIcon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />}<div><div className="text-[12.5px] font-semibold">{t(`extensions.readiness.${trustState}.title`)}</div><p className="mt-0.5 text-[11px] leading-relaxed opacity-80">{t(`extensions.readiness.${trustState}.body`, { count: activeCount })}</p></div></div>
         <Link className={cn('zds-state-layer inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-full px-5 text-[12px] font-medium', trustState === 'ready' ? 'bg-[rgb(0_0_0_/_8%)]' : 'bg-primary text-[var(--md-sys-color-on-primary)]')} to={trustState === 'master' ? '/settings' : '/setup-guide'}>{trustState !== 'ready' ? <LinkIcon className="h-4 w-4" aria-hidden="true" /> : null}{t(`extensions.readiness.${trustState}.action`)}</Link>
-      </div> : null}
+      </div>
 
-      {!showingHosts && tab === 'installed' ? <TrafficContractRail /> : null}
       {loading && !view ? <Card><CardBody className="text-center text-[12px] text-text-faint">{t('common.loading')}</CardBody></Card> : null}
       {loadError && !view ? <Card><CardBody className="flex items-center justify-between gap-3"><span className="text-[12px] text-red">{t('extensions.loadFailed')}</span><Button variant="secondary" size="sm" onClick={() => void load()}><RefreshIcon className="h-4 w-4" />{t('extensions.retry')}</Button></CardBody></Card> : null}
 
       {!showingHosts && view ? <>
-        <Tabs value={tab} onValueChange={(value) => setTab(value as 'installed' | 'marketplace')} items={[{ value: 'installed', label: t('extensions.tabs.catalog') }, { value: 'marketplace', label: t('extensions.tabs.marketplace') }]} />
-        {tab === 'marketplace' ? <Suspense fallback={<Card><CardBody className="text-center text-[12px] text-text-faint">{t('common.loading')}</CardBody></Card>}><MarketplaceView modulesView={view} onModulesInstalled={setView} /></Suspense> : <>
         <div className="flex flex-col gap-3 px-1 lg:flex-row lg:items-center">
           <p className="min-w-[240px] flex-1 text-[12.5px] leading-5 text-text-faint">{t('extensions.catalogSummary', { total: view.modules.length, enabled: activeCount })}{' '}<button type="button" className="zds-state-layer rounded-full px-2 py-1 font-medium text-primary" onClick={() => void navigate('/extensions/hosts')}>{t('extensions.tabs.hosts', { count: hostCount })}</button></p>
           <div className="flex flex-wrap items-center gap-2">
@@ -725,7 +694,7 @@ export default function ExtensionsPage() {
         </div>
         {!reorderModeAvailable && view.modules.length > 1 ? <p role="status" data-testid="extension-order-hint" className="px-1 text-[10.5px] leading-4 text-text-faint">{t('extensions.orderUnavailableHint')}</p> : null}
         {visibleModules.length > 0 ? <div className="space-y-3" aria-busy={busyID !== null}>{visibleModules.map((module) => <ExtensionCard key={module.id} module={module} busy={busyID !== null} trusted={acknowledged} egressGroups={view.available_egress_groups} reorderEnabled={reorderModeAvailable} total={view.modules.length} onMove={(selected, direction) => void moveModule(selected, direction)} onToggle={(selected) => setPending({ kind: 'toggle', module: selected })} onDelete={(selected) => setPending({ kind: 'delete', module: selected })} onInspect={(selected) => void inspectModule(selected)} onConfigure={setConfigTarget} onAudit={(selected) => void navigate(`/extensions/hosts?plugin=${encodeURIComponent(selected.id)}`)} onCheckUpdate={(selected) => void checkExtensionUpdate(selected)} />)}</div> : <Card className="p-10 text-center shadow-none"><div className="text-[13px] font-medium text-text-strong">{t('extensions.noMatches')}</div><div className="mt-1 text-[11.5px] text-text-faint">{t('extensions.noMatchesHint')}</div></Card>}
-        </>}</> : null}
+        </> : null}
 
       {showingHosts && view ? <><div className="flex items-center justify-between gap-3 px-1"><p className="text-[12.5px] text-text-faint">{t('extensions.hostAudit.intro')}</p><Button type="button" variant="secondary" size="sm" onClick={() => void navigate('/extensions')}>{t('extensions.backToCatalog')}</Button></div><HostAuditView view={view} settings={settings} moduleID={scopedModuleID} onClearModule={() => void navigate('/extensions/hosts')} /></> : null}
 

@@ -47,6 +47,11 @@ current pre-release contract on 2026-07-20.**
   the listed manifest/script digests and derived capability summary, and stores
   the normal disabled immutable snapshot. There is no automatic install,
   enable, update, crawling, remote artwork, or source mirroring.
+- Marketplace discovery is a top-level `/marketplace` Console route. Installed
+  snapshot configuration and execution remain on `/extensions`, with host audit
+  on `/extensions/hosts`; the installed-extensions page has no decorative
+  traffic rail or embedded marketplace tab. Optional marketplace display names
+  are local labels and never publisher identity.
 
 ## Stable and beta release channels
 

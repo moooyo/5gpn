@@ -32,6 +32,7 @@ const (
 	maxMarketplaceTagBytes    = 64
 	maxMarketplaceResources   = 256
 	maxMarketplaceLicense     = 64
+	maxMarketplaceDisplayName = 128
 )
 
 var (
@@ -107,6 +108,7 @@ type marketplaceCapabilities struct {
 
 type marketplaceSourceSnapshot struct {
 	ID          string              `json:"id"`
+	DisplayName string              `json:"display_name,omitempty"`
 	URL         string              `json:"url"`
 	FinalURL    string              `json:"final_url"`
 	IndexDigest string              `json:"index_digest"`
@@ -122,15 +124,16 @@ type marketplaceView struct {
 }
 
 type marketplaceSourceView struct {
-	ID          string                 `json:"id"`
-	Name        string                 `json:"name"`
-	Description string                 `json:"description"`
-	Homepage    string                 `json:"homepage"`
-	URL         string                 `json:"url"`
-	FinalURL    string                 `json:"final_url"`
-	Digest      string                 `json:"digest"`
-	FetchedAt   string                 `json:"fetched_at"`
-	Entries     []marketplaceEntryView `json:"entries"`
+	ID           string                 `json:"id"`
+	Name         string                 `json:"name"`
+	MetadataName string                 `json:"metadata_name"`
+	Description  string                 `json:"description"`
+	Homepage     string                 `json:"homepage"`
+	URL          string                 `json:"url"`
+	FinalURL     string                 `json:"final_url"`
+	Digest       string                 `json:"digest"`
+	FetchedAt    string                 `json:"fetched_at"`
+	Entries      []marketplaceEntryView `json:"entries"`
 }
 
 type marketplaceEntryView struct {
@@ -246,7 +249,7 @@ func (m *ExtensionMarketplaceManager) View() (marketplaceView, error) {
 	return marketplaceViewFromDocument(document, body), nil
 }
 
-func (m *ExtensionMarketplaceManager) Add(ctx context.Context, revision, rawURL string) (marketplaceView, error) {
+func (m *ExtensionMarketplaceManager) Add(ctx context.Context, revision, rawURL, rawDisplayName string) (marketplaceView, error) {
 	if m == nil || m.store == nil {
 		return marketplaceView{}, errMarketplaceUnavailable
 	}
@@ -257,6 +260,10 @@ func (m *ExtensionMarketplaceManager) Add(ctx context.Context, revision, rawURL 
 	if err != nil {
 		return marketplaceView{}, err
 	}
+	displayName, err := normalizeMarketplaceDisplayName(rawDisplayName)
+	if err != nil {
+		return marketplaceView{}, err
+	}
 	if err := m.preflightRevision(revision); err != nil {
 		return marketplaceView{}, err
 	}
@@ -264,6 +271,7 @@ func (m *ExtensionMarketplaceManager) Add(ctx context.Context, revision, rawURL 
 	if err != nil {
 		return marketplaceView{}, err
 	}
+	source.DisplayName = displayName
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -303,6 +311,7 @@ func (m *ExtensionMarketplaceManager) Refresh(ctx context.Context, id, revision 
 	if refreshed.ID != current.ID {
 		return marketplaceView{}, fmt.Errorf("%w: refreshed marketplace changed metadata.id", errMarketplaceConflict)
 	}
+	refreshed.DisplayName = current.DisplayName
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -487,8 +496,12 @@ func marketplaceViewFromDocument(document marketplaceDocument, body []byte) mark
 		Sources:        make([]marketplaceSourceView, 0, len(document.Sources)),
 	}
 	for _, source := range document.Sources {
+		name := source.Metadata.Name
+		if source.DisplayName != "" {
+			name = source.DisplayName
+		}
 		sourceView := marketplaceSourceView{
-			ID: source.ID, Name: source.Metadata.Name, Description: source.Metadata.Description,
+			ID: source.ID, Name: name, MetadataName: source.Metadata.Name, Description: source.Metadata.Description,
 			Homepage: source.Metadata.Homepage, URL: source.URL, FinalURL: source.FinalURL,
 			Digest: source.IndexDigest, FetchedAt: source.FetchedAt,
 			Entries: make([]marketplaceEntryView, 0, len(source.Entries)),
@@ -565,6 +578,11 @@ func validateMarketplaceSourceSnapshot(source marketplaceSourceSnapshot) error {
 	if source.ID != source.Metadata.ID || !validInterceptModuleID(source.ID) {
 		return errors.New("source id must match a lowercase dotted metadata id")
 	}
+	if source.DisplayName != "" {
+		if err := validateMarketplaceText("display_name", source.DisplayName, 1, maxMarketplaceDisplayName); err != nil {
+			return err
+		}
+	}
 	if err := validateRemoteModuleURL(source.URL); err != nil {
 		return fmt.Errorf("invalid configured URL: %w", err)
 	}
@@ -579,6 +597,17 @@ func validateMarketplaceSourceSnapshot(source marketplaceSourceSnapshot) error {
 	}
 	copyIndex := marketplaceIndex{APIVersion: marketplaceAPIVersion, Kind: marketplaceKind, Metadata: source.Metadata, Entries: source.Entries}
 	return validateNormalizedMarketplaceIndex(copyIndex)
+}
+
+func normalizeMarketplaceDisplayName(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return "", nil
+	}
+	if err := validateMarketplaceText("marketplace name", name, 1, maxMarketplaceDisplayName); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 func normalizeAndValidateMarketplaceIndex(index *marketplaceIndex, baseURL string) error {

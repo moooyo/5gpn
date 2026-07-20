@@ -15,9 +15,10 @@ export interface SelectProps {
   placeholder?: string
   className?: string
   disabled?: boolean
+  ariaLabel?: string
 }
 
-export function Select({ value, onValueChange, items, placeholder, className, disabled }: SelectProps) {
+export function Select({ value, onValueChange, items, placeholder, className, disabled, ariaLabel }: SelectProps) {
   return (
     <CSPProvider disableStyleElements>
     <BaseSelect.Root
@@ -29,6 +30,7 @@ export function Select({ value, onValueChange, items, placeholder, className, di
       disabled={disabled}
     >
       <BaseSelect.Trigger
+        aria-label={ariaLabel}
         className={cn(
           'flex min-h-11 items-center justify-between gap-3 rounded-[12px] border border-input-border bg-input px-3.5 text-[13px] text-text-strong outline-none',
           'transition-[border-color,background-color] data-[popup-open]:border-primary data-[popup-open]:bg-card',

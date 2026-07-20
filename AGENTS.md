@@ -135,6 +135,10 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   states that all data visible to the script can be sent there.
   `/extensions/hosts` owns searchable, per-plugin capture-host and egress-winner
   auditing; do not move plugin management back into Settings.
+- Marketplace discovery lives on the separate top-level `/marketplace` route,
+  never inside the installed-plugin page. Source aliases are local display text,
+  not publisher identity. Do not fabricate popularity, author, health, or update
+  metadata that the authenticated marketplace API does not provide.
 - Logs remain virtualized, polling is single-flight/cancellable, and mobile
   uses card rows plus a drawer sidebar.
 - Do not commit `web/dist`. Fonts are runtime-cached by the PWA; keep PWA,

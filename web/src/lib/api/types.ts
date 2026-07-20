@@ -257,6 +257,7 @@ export interface MarketplaceEntry {
 export interface MarketplaceSource {
   id: string
   name: string
+  metadata_name: string
   description?: string
   homepage?: string
   url: string

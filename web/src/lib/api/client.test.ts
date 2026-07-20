@@ -240,7 +240,7 @@ describe('api client — marketplaces', () => {
     const { api } = await import('./client')
 
     await api.getMarketplaces()
-    await api.addMarketplace('m1', 'https://example.test/marketplace.json')
+    await api.addMarketplace('m1', 'https://example.test/marketplace.json', 'Community mirror')
     await api.refreshMarketplace('official', 'm1')
     await api.deleteMarketplace('official', 'm1')
     await api.installMarketplaceEntry('official', 'io.example.cleaner', 'm1', 'r1')
@@ -252,7 +252,7 @@ describe('api client — marketplaces', () => {
       '/api/interception/marketplaces/official',
       '/api/interception/marketplaces/official/entries/io.example.cleaner/install',
     ])
-    expect(JSON.parse(f.mock.calls[1][1].body as string)).toEqual({ revision: 'm1', url: 'https://example.test/marketplace.json' })
+    expect(JSON.parse(f.mock.calls[1][1].body as string)).toEqual({ revision: 'm1', url: 'https://example.test/marketplace.json', name: 'Community mirror' })
     expect(JSON.parse(f.mock.calls[2][1].body as string)).toEqual({ revision: 'm1' })
     expect(f.mock.calls[3][1].method).toBe('DELETE')
     expect(JSON.parse(f.mock.calls[4][1].body as string)).toEqual({ marketplace_revision: 'm1', module_revision: 'r1' })

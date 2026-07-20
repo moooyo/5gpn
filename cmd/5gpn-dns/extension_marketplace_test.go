@@ -143,7 +143,7 @@ func TestMarketplaceAddRefreshDeleteAndStaleFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	added, err := manager.Add(context.Background(), empty.Revision, fixture.server.URL+"/redirect")
+	added, err := manager.Add(context.Background(), empty.Revision, fixture.server.URL+"/redirect", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,6 +169,71 @@ func TestMarketplaceAddRefreshDeleteAndStaleFailure(t *testing.T) {
 	}
 }
 
+func TestMarketplaceDisplayNamePersistsAcrossRefresh(t *testing.T) {
+	fixture := newMarketplaceFixture(t, nil)
+	manager, _, storePath := newMarketplaceManagerFixture(t, fixture)
+	empty, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	added, err := manager.Add(context.Background(), empty.Revision, fixture.server.URL+"/index.json", "  Team catalog  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(added.Sources) != 1 || added.Sources[0].Name != "Team catalog" || added.Sources[0].MetadataName != "Example marketplace" {
+		t.Fatalf("added source = %+v", added.Sources)
+	}
+	if persisted := mustRead(t, storePath); !strings.Contains(persisted, `"display_name": "Team catalog"`) {
+		t.Fatalf("persisted marketplace omitted display name: %s", persisted)
+	}
+	refreshed, err := manager.Refresh(context.Background(), added.Sources[0].ID, added.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refreshed.Sources) != 1 || refreshed.Sources[0].Name != "Team catalog" || refreshed.Sources[0].MetadataName != "Example marketplace" {
+		t.Fatalf("refreshed source = %+v", refreshed.Sources)
+	}
+}
+
+func TestMarketplaceEmptyDisplayNameFallsBackToMetadata(t *testing.T) {
+	fixture := newMarketplaceFixture(t, nil)
+	manager, _, storePath := newMarketplaceManagerFixture(t, fixture)
+	empty, _ := manager.View()
+	added, err := manager.Add(context.Background(), empty.Revision, fixture.server.URL+"/index.json", " \t ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(added.Sources) != 1 || added.Sources[0].Name != "Example marketplace" || added.Sources[0].MetadataName != "Example marketplace" {
+		t.Fatalf("source without display name = %+v", added.Sources)
+	}
+	if persisted := mustRead(t, storePath); strings.Contains(persisted, `"display_name"`) {
+		t.Fatalf("empty display name was persisted: %s", persisted)
+	}
+	if _, _, err := manager.store.Read(); err != nil {
+		t.Fatalf("read snapshot without display_name: %v", err)
+	}
+}
+
+func TestMarketplaceInvalidDisplayNameDoesNotWrite(t *testing.T) {
+	for name, displayName := range map[string]string{
+		"too long":      strings.Repeat("a", maxMarketplaceDisplayName+1),
+		"control":       "bad\nname",
+		"invalid UTF-8": string([]byte{0xff}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newMarketplaceFixture(t, nil)
+			manager, _, storePath := newMarketplaceManagerFixture(t, fixture)
+			empty, _ := manager.View()
+			if _, err := manager.Add(context.Background(), empty.Revision, fixture.server.URL+"/index.json", displayName); err == nil {
+				t.Fatal("invalid display name was accepted")
+			}
+			if _, err := os.Stat(storePath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("invalid display name changed the store: %v", err)
+			}
+		})
+	}
+}
+
 func TestMarketplaceStrictSchemaAndBounds(t *testing.T) {
 	for name, mutateBody := range map[string]func([]byte) []byte{
 		"unknown field": func(body []byte) []byte {
@@ -183,7 +248,7 @@ func TestMarketplaceStrictSchemaAndBounds(t *testing.T) {
 			fixture.index = mutateBody(fixture.index)
 			manager, _, _ := newMarketplaceManagerFixture(t, fixture)
 			view, _ := manager.View()
-			if _, err := manager.Add(context.Background(), view.Revision, fixture.server.URL+"/index.json"); !errors.Is(err, errMarketplaceFetch) {
+			if _, err := manager.Add(context.Background(), view.Revision, fixture.server.URL+"/index.json", ""); !errors.Is(err, errMarketplaceFetch) {
 				t.Fatalf("strict schema error = %v", err)
 			}
 		})
@@ -197,7 +262,7 @@ func TestMarketplaceStrictSchemaAndBounds(t *testing.T) {
 			fixture := newMarketplaceFixture(t, mutate)
 			manager, _, _ := newMarketplaceManagerFixture(t, fixture)
 			view, _ := manager.View()
-			if _, err := manager.Add(context.Background(), view.Revision, fixture.server.URL+"/index.json"); !errors.Is(err, errMarketplaceFetch) {
+			if _, err := manager.Add(context.Background(), view.Revision, fixture.server.URL+"/index.json", ""); !errors.Is(err, errMarketplaceFetch) {
 				t.Fatalf("strict value error = %v", err)
 			}
 		})
@@ -213,7 +278,7 @@ func TestMarketplaceStrictSchemaAndBounds(t *testing.T) {
 		}
 		manager, _, _ := newMarketplaceManagerFixture(t, fixture)
 		view, _ := manager.View()
-		if _, err := manager.Add(context.Background(), view.Revision, fixture.server.URL+"/index.json"); !errors.Is(err, errMarketplaceFetch) {
+		if _, err := manager.Add(context.Background(), view.Revision, fixture.server.URL+"/index.json", ""); !errors.Is(err, errMarketplaceFetch) {
 			t.Fatalf("invalid UTF-8 error = %v", err)
 		}
 	})
@@ -229,7 +294,7 @@ func TestMarketplaceStrictSchemaAndBounds(t *testing.T) {
 		})
 		manager, _, _ := newMarketplaceManagerFixture(t, fixture)
 		view, _ := manager.View()
-		if _, err := manager.Add(context.Background(), view.Revision, fixture.server.URL+"/index.json"); !errors.Is(err, errMarketplaceFetch) {
+		if _, err := manager.Add(context.Background(), view.Revision, fixture.server.URL+"/index.json", ""); !errors.Is(err, errMarketplaceFetch) {
 			t.Fatalf("entry limit error = %v", err)
 		}
 	})
@@ -237,7 +302,7 @@ func TestMarketplaceStrictSchemaAndBounds(t *testing.T) {
 		fixture := newMarketplaceFixture(t, nil)
 		manager, _, _ := newMarketplaceManagerFixture(t, fixture)
 		empty, _ := manager.View()
-		added, err := manager.Add(context.Background(), empty.Revision, fixture.server.URL+"/index.json")
+		added, err := manager.Add(context.Background(), empty.Revision, fixture.server.URL+"/index.json", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -267,7 +332,7 @@ func TestMarketplaceFetchRejectsUnsafeRedirect(t *testing.T) {
 	fixture := newMarketplaceFixture(t, nil)
 	manager, _, _ := newMarketplaceManagerFixture(t, fixture)
 	view, _ := manager.View()
-	if _, err := manager.Add(context.Background(), view.Revision, fixture.server.URL+"/unsafe-redirect"); !errors.Is(err, errMarketplaceFetch) || !strings.Contains(err.Error(), "https") {
+	if _, err := manager.Add(context.Background(), view.Revision, fixture.server.URL+"/unsafe-redirect", ""); !errors.Is(err, errMarketplaceFetch) || !strings.Contains(err.Error(), "https") {
 		t.Fatalf("unsafe redirect error = %v", err)
 	}
 }
@@ -276,7 +341,7 @@ func TestMarketplaceInstallVerifiesSnapshotAndLeavesModuleDisabled(t *testing.T)
 	fixture := newMarketplaceFixture(t, nil)
 	manager, moduleManager, _ := newMarketplaceManagerFixture(t, fixture)
 	empty, _ := manager.View()
-	marketplaces, err := manager.Add(context.Background(), empty.Revision, fixture.server.URL+"/index.json")
+	marketplaces, err := manager.Add(context.Background(), empty.Revision, fixture.server.URL+"/index.json", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +371,7 @@ func TestMarketplaceInstallRejectsManifestAndResourceMismatch(t *testing.T) {
 			fixture := newMarketplaceFixture(t, mutate)
 			manager, moduleManager, _ := newMarketplaceManagerFixture(t, fixture)
 			empty, _ := manager.View()
-			marketplaces, err := manager.Add(context.Background(), empty.Revision, fixture.server.URL+"/index.json")
+			marketplaces, err := manager.Add(context.Background(), empty.Revision, fixture.server.URL+"/index.json", "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -326,7 +391,7 @@ func TestMarketplaceAPIViewOmitsInstallationInternals(t *testing.T) {
 	fixture := newMarketplaceFixture(t, nil)
 	manager, _, _ := newMarketplaceManagerFixture(t, fixture)
 	empty, _ := manager.View()
-	view, err := manager.Add(context.Background(), empty.Revision, fixture.server.URL+"/index.json")
+	view, err := manager.Add(context.Background(), empty.Revision, fixture.server.URL+"/index.json", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +405,7 @@ func TestMarketplaceAPIViewOmitsInstallationInternals(t *testing.T) {
 			t.Fatalf("API view leaked internal field %s: %s", forbidden, encoded)
 		}
 	}
-	for _, required := range []string{`"recommended_url"`, `"manifest_url"`, `"manifest_digest"`, `"documentation_url"`, `"capture_host_count"`, `"network_origins"`} {
+	for _, required := range []string{`"recommended_url"`, `"metadata_name"`, `"manifest_url"`, `"manifest_digest"`, `"documentation_url"`, `"capture_host_count"`, `"network_origins"`} {
 		if !strings.Contains(encoded, required) {
 			t.Fatalf("API view omitted %s: %s", required, encoded)
 		}
@@ -371,10 +436,10 @@ func TestMarketplaceAPIRoundTripAndInstall(t *testing.T) {
 	if get.Code != http.StatusOK || len(view.Sources) != 0 {
 		t.Fatalf("initial marketplace view = %+v status=%d", view, get.Code)
 	}
-	addBody, _ := json.Marshal(map[string]string{"revision": view.Revision, "url": fixture.server.URL + "/index.json"})
+	addBody, _ := json.Marshal(map[string]string{"revision": view.Revision, "url": fixture.server.URL + "/index.json", "name": "API catalog"})
 	add := doAPI(fx.cs, http.MethodPost, "/api/interception/marketplaces", addBody, fx.token, true)
 	view = decodeJSON[marketplaceView](t, add)
-	if add.Code != http.StatusCreated || len(view.Sources) != 1 {
+	if add.Code != http.StatusCreated || len(view.Sources) != 1 || view.Sources[0].Name != "API catalog" {
 		t.Fatalf("added marketplace view = %+v status=%d body=%s", view, add.Code, add.Body.String())
 	}
 	refreshBody, _ := json.Marshal(map[string]string{"revision": view.Revision})
@@ -402,11 +467,11 @@ func TestMarketplaceStoreRejectsDuplicateSourcesAndURLs(t *testing.T) {
 	fixture := newMarketplaceFixture(t, nil)
 	manager, _, storePath := newMarketplaceManagerFixture(t, fixture)
 	empty, _ := manager.View()
-	added, err := manager.Add(context.Background(), empty.Revision, fixture.server.URL+"/index.json")
+	added, err := manager.Add(context.Background(), empty.Revision, fixture.server.URL+"/index.json", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Add(context.Background(), added.Revision, fixture.server.URL+"/index.json"); !errors.Is(err, errMarketplaceConflict) {
+	if _, err := manager.Add(context.Background(), added.Revision, fixture.server.URL+"/index.json", ""); !errors.Is(err, errMarketplaceConflict) {
 		t.Fatalf("duplicate source error = %v", err)
 	}
 	if _, err := os.Stat(storePath); err != nil {

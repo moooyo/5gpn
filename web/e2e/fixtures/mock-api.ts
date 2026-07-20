@@ -300,7 +300,7 @@ export async function setupMockApi(page: Page): Promise<void> {
   })
   let marketplaceRevision = '2000000000000000000000000000000000000000000000000000000000000001'
   let marketplaceSources: T.MarketplaceSource[] = [{
-    id: 'io.5gpn.official', name: '5GPN Extensions', description: 'Maintained native extensions.', homepage: 'https://github.com/moooyo/5gpn-extensions',
+    id: 'io.5gpn.official', name: '5GPN Extensions', metadata_name: '5GPN Extensions', description: 'Maintained native extensions.', homepage: 'https://github.com/moooyo/5gpn-extensions',
     url: 'https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json', final_url: 'https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json', digest: '9'.repeat(64), fetched_at: '2026-07-20T00:00:00Z',
     entries: [{ id: 'io.example.marketplace-cleaner', name: 'Marketplace Response Cleaner', version: '1.0.0', description: 'A marketplace native extension.', tags: ['response'], license: { spdx: 'MIT' }, manifest_url: 'https://extensions.example.test/marketplace-cleaner.yaml', manifest_digest: '7'.repeat(64), capabilities: { capture_host_count: 1, action_count: 1, setting_count: 0, network_origins: [], persistent_storage: false, upstream_mapping_count: 0, egress_group_required: false } }],
   }]
@@ -420,9 +420,9 @@ export async function setupMockApi(page: Page): Promise<void> {
     }
     if (path === '/api/interception/marketplaces' && method === 'GET') return json(route, currentMarketplaces())
     if (path === '/api/interception/marketplaces' && method === 'POST') {
-      const body = route.request().postDataJSON() as { revision?: string; url?: string }
+      const body = route.request().postDataJSON() as { revision?: string; url?: string; name?: string }
       if (body.revision !== marketplaceRevision || !body.url) return json(route, { error: 'marketplace revision changed' }, 409)
-      marketplaceSources = [...marketplaceSources, { id: `source-${marketplaceSources.length + 1}`, name: 'Added marketplace', url: body.url, final_url: body.url, digest: '8'.repeat(64), fetched_at: new Date().toISOString(), entries: [] }]
+      marketplaceSources = [...marketplaceSources, { id: `source-${marketplaceSources.length + 1}`, name: body.name?.trim() || 'Added marketplace', metadata_name: 'Added marketplace', url: body.url, final_url: body.url, digest: '8'.repeat(64), fetched_at: new Date().toISOString(), entries: [] }]
       marketplaceRevision = (BigInt(`0x${marketplaceRevision}`) + 1n).toString(16).padStart(64, '0')
       return json(route, currentMarketplaces(), 201)
     }

@@ -1,7 +1,7 @@
 import { lazy, Suspense, useMemo, useState, type FocusEvent, type KeyboardEvent } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { MenuIcon, SearchIcon } from '../components/icons'
+import { MenuIcon, SearchIcon, StorefrontFilledIcon } from '../components/icons'
 import { ALL_NAV_ITEMS } from './navigation'
 
 const ProfileMenu = lazy(() => import('./ProfileMenu').then((module) => ({ default: module.ProfileMenu })))
@@ -110,7 +110,10 @@ export function Topbar({ onOpenNavigation }: { onOpenNavigation?: () => void } =
       ) : null}
 
       <div className="flex min-w-0 flex-col gap-0.5">
-        <span className="truncate text-[19px] font-medium tracking-[-.01em] text-text-strong">{t(item.labelKey)}</span>
+        <span className="flex min-w-0 items-center gap-2 truncate text-[19px] font-medium tracking-[-.01em] text-text-strong">
+          {id === 'marketplace' ? <StorefrontFilledIcon className="h-[22px] w-[22px] shrink-0 text-primary" aria-hidden="true" /> : null}
+          <span className="truncate">{t(item.labelKey)}</span>
+        </span>
         <span className="hidden max-w-[52vw] truncate text-[11.5px] text-text-faint sm:block">{t(subKey)}</span>
       </div>
       <div className="flex-1" />

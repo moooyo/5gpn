@@ -947,12 +947,10 @@ stored and subsequent traffic follows the normal operator-owned mihomo rules.
 The page must state that QUIC fallback is guaranteed for already matched IETF
 QUIC v1/v2 traffic and other variants are not guaranteed.
 
-The dedicated `/extensions` route owns native plugins and marketplace
-discovery. Its Installed view shows immutable
+The dedicated `/extensions` route owns installed native plugins. It shows immutable
 manifest/script digests, semantic version, normalized capture hosts, actions,
 permissions, exact network origins, typed settings, upstream mappings, explicit
-execution position, operator egress binding, enabled/runtime state, and a
-visible capture-to-transform-to-mihomo traffic rail. Enabling a plugin with
+execution position, operator egress binding, and enabled/runtime state. Enabling a plugin with
 network permission opens a dedicated review that lists every origin and states
 that the plugin can send any decrypted request, response, setting, or storage
 data visible to it there. An authenticated,
@@ -961,12 +959,7 @@ review; list responses do not send those potentially large bodies. “Install
 from URL” and “Add locally” are separate dialogs with no source-mode switch.
 The former accepts one HTTPS native manifest; the latter accepts pasted or
 uploaded YAML. Invalid native manifests fail installation rather than entering a
-compatibility mode. Its Marketplace view loads only authenticated, daemon-
-validated cached indexes, keeps marketplace source identity, refresh state, and
-digest visible, and supports adding, refreshing, and removing explicit sources.
-Each entry shows bounded descriptive and capability metadata, but installation
-always ends in a review of the actual disabled native snapshot. Remote images
-and browser-side marketplace fetches are forbidden. Required settings must be complete before enable. Enable,
+compatibility mode. Required settings must be complete before enable. Enable,
 disable, delete, reorder, binding, settings, and update changes use revision
 checks and explicit confirmation. Required missing or removed group bindings
 render the plugin not-ready and cannot silently fall back. A `location` setting uses the shared map point picker with
@@ -975,6 +968,19 @@ City search calls bearer-protected `GET /api/geocode/cities`; the daemon sends
 only the bounded query and language to the fixed Nominatim origin through the
 same post-resolution SSRF dial guard used by subscription fetches. It never
 forwards the bearer token, arbitrary headers, or an operator-selected URL.
+
+The top-level `/marketplace` route owns extension discovery. It loads only
+authenticated, daemon-validated cached indexes, exposes source filters, local
+search and truthful sorting, and supports adding, refreshing, and removing
+explicit sources. An operator may assign a bounded local display name; that
+alias never replaces or authenticates the marketplace metadata identity. Each
+entry shows bounded descriptive metadata, declared capability counts, license,
+source domain, and manifest digest. Selecting Install first confirms the cached
+scope, then the daemon refetches and verifies the exact manifest and scripts;
+success ends in review of the actual disabled immutable snapshot. Remote images,
+browser-side marketplace fetches, invented popularity/author claims, and
+automatic installation or enablement are forbidden.
+
 The project extension repository remains external and is never automatically
 installed or mirrored. The Setup Guide owns the one shared
 interception-root QR code, download link, installation steps, and iOS manual

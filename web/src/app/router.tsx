@@ -36,6 +36,7 @@ const PAGE_LOADERS: Record<string, () => Promise<{ default: ComponentType }>> = 
   'resolve-test': () => import('../features/resolve-test/ResolveTestPage'),
   'policy-rules': () => import('../features/policy-rules/PolicyRulesPage'),
   extensions: () => import('../features/extensions/ExtensionsPage'),
+  marketplace: () => import('../features/marketplace/MarketplacePage'),
   mihomo: () => import('../features/mihomo/MihomoPage'),
   'mihomo-config': () => import('../features/mihomo-config/MihomoConfigPage'),
   settings: () => import('../features/settings/SettingsPage'),

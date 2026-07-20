@@ -30,11 +30,12 @@ func (s *ControlServer) handleMarketplaceAdd(w http.ResponseWriter, r *http.Requ
 	var request struct {
 		Revision string `json:"revision"`
 		URL      string `json:"url"`
+		Name     string `json:"name"`
 	}
 	if !decodeJSONBody(w, r, &request) {
 		return
 	}
-	view, err := s.marketplaces.Add(r.Context(), request.Revision, request.URL)
+	view, err := s.marketplaces.Add(r.Context(), request.Revision, request.URL, request.Name)
 	if err != nil {
 		writeMarketplaceError(w, err)
 		return

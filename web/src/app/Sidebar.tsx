@@ -22,6 +22,8 @@ import {
   ShieldFilledIcon,
   SpeedFilledIcon,
   SpeedIcon,
+  StorefrontFilledIcon,
+  StorefrontIcon,
 } from '../components/icons'
 import { NAV_GROUPS, type NavIcon } from './navigation'
 import { useStatus, type HealthState } from '../lib/StatusContext'
@@ -37,6 +39,7 @@ const ICONS: Record<NavIcon, { outline: Icon; filled: Icon }> = {
   resolve: { outline: NetworkCheckIcon, filled: NetworkCheckFilledIcon },
   policy: { outline: RuleIcon, filled: RuleFilledIcon },
   extensions: { outline: ExtensionIcon, filled: ExtensionFilledIcon },
+  marketplace: { outline: StorefrontIcon, filled: StorefrontFilledIcon },
   mihomo: { outline: SpeedIcon, filled: SpeedFilledIcon },
   config: { outline: CodeIcon, filled: CodeIcon },
   settings: { outline: SettingsIcon, filled: SettingsFilledIcon },

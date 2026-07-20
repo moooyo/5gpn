@@ -7,7 +7,7 @@ export interface NavItem {
   icon: NavIcon
 }
 
-export type NavIcon = 'dashboard' | 'setup' | 'logs' | 'resolve' | 'policy' | 'extensions' | 'mihomo' | 'config' | 'settings'
+export type NavIcon = 'dashboard' | 'setup' | 'logs' | 'resolve' | 'policy' | 'extensions' | 'marketplace' | 'mihomo' | 'config' | 'settings'
 
 export interface NavGroup {
   id: string
@@ -38,6 +38,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'policy-rules', path: '/policy-rules', labelKey: 'nav.policyRules', icon: 'policy' },
       { id: 'extensions', path: '/extensions', labelKey: 'nav.extensions', icon: 'extensions' },
+      { id: 'marketplace', path: '/marketplace', labelKey: 'nav.marketplace', icon: 'marketplace' },
     ],
   },
   {

@@ -121,9 +121,9 @@ export const api = {
         }),
   getMarketplaces: () =>
     MOCK ? mock.getMarketplaces() : apiFetch<T.MarketplacesView>('/api/interception/marketplaces'),
-  addMarketplace: (revision: string, url: string) =>
-    MOCK ? mock.addMarketplace(revision, url) : apiFetch<T.MarketplacesView>('/api/interception/marketplaces', {
-      method: 'POST', body: JSON.stringify({ revision, url }),
+  addMarketplace: (revision: string, url: string, name?: string) =>
+    MOCK ? mock.addMarketplace(revision, url, name) : apiFetch<T.MarketplacesView>('/api/interception/marketplaces', {
+      method: 'POST', body: JSON.stringify({ revision, url, ...(name ? { name } : {}) }),
     }),
   refreshMarketplace: (id: string, revision: string) =>
     MOCK ? mock.refreshMarketplace(id, revision) : apiFetch<T.MarketplacesView>(`/api/interception/marketplaces/${encodeURIComponent(id)}/refresh`, {

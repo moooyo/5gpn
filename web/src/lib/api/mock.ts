@@ -304,6 +304,7 @@ let marketplaceRevision = '20000000000000000000000000000000000000000000000000000
 let marketplaces: T.MarketplaceSource[] = [{
   id: 'io.5gpn.official',
   name: '5GPN Extensions',
+  metadata_name: '5GPN Extensions',
   description: 'Maintained native extensions for explicit review and snapshot installation.',
   homepage: 'https://github.com/moooyo/5gpn-extensions',
   url: 'https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json',
@@ -340,11 +341,11 @@ export async function getMarketplaces(): Promise<T.MarketplacesView> {
   return marketplacesView()
 }
 
-export async function addMarketplace(revision: string, url: string): Promise<T.MarketplacesView> {
+export async function addMarketplace(revision: string, url: string, name?: string): Promise<T.MarketplacesView> {
   await delay(160)
   if (revision !== marketplaceRevision) throw new ApiError(409, 'The marketplace ledger changed. Refresh and try again.')
   if (!url.startsWith('https://')) throw new ApiError(400, 'Marketplace URLs must use HTTPS.')
-  marketplaces.push({ id: `source-${marketplaces.length + 1}`, name: 'Added marketplace', url, final_url: url, digest: '8'.repeat(64), fetched_at: new Date().toISOString(), entries: [] })
+  marketplaces.push({ id: `source-${marketplaces.length + 1}`, name: name?.trim() || 'Added marketplace', metadata_name: 'Added marketplace', url, final_url: url, digest: '8'.repeat(64), fetched_at: new Date().toISOString(), entries: [] })
   advanceMarketplaceRevision()
   return marketplacesView()
 }
