@@ -213,7 +213,7 @@ the Console states that risk before enable. Fixed process-wide network time,
 body, call-count, and concurrency limits are runtime safety bounds rather than
 manifest knobs.
 
-First-party extension source is maintained independently in the private
+First-party extension source is maintained independently in the public
 `moooyo/5gpn-extensions` catalog repository. The core repository does not
 vendor, mirror, seed, or release extension manifests or scripts. The Console
 links that catalog for operator review, while installation still snapshots one

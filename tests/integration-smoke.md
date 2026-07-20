@@ -430,10 +430,9 @@ token into recorded command output, screenshots, or issue logs.
   v1/v2 receives no forwarded response while a capable client retries over
   TCP/HTTPS. Record clients that fail instead of falling back; do not claim
   legacy GQUIC coverage.
-- [ ] From a reviewed checkout of the private `moooyo/5gpn-extensions`
-  catalog, install `apple-wloc/extension.yaml` through local add/upload (or use
-  a separately published gateway-reachable HTTPS URL without embedding GitHub
-  credentials), search for a city in its generic map-backed `location` setting, fine-tune the
+- [ ] Install
+  `https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml`,
+  search for a city in its generic map-backed `location` setting, fine-tune the
   marker/coordinates and accuracy, save settings, and enable the extension.
 - [ ] Exercise WLOC over TCP/H2, QUIC v1/H3, and QUIC v2/H3. In every case the
   response is patched, the upstream certificate is verified, and packet capture

@@ -244,8 +244,7 @@ DNS overlay.
 
 Project-maintained examples, including Apple WLOC, live in the separate
 `moooyo/5gpn-extensions` catalog. The core repository intentionally contains no
-extension source. When the catalog is published through a gateway-reachable
-HTTPS origin, Apple WLOC is available at:
+extension source. The public catalog exposes Apple WLOC at:
 
 ```text
 https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml
