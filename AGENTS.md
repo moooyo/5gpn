@@ -19,7 +19,9 @@ plans, design handoffs, and git history are context only.
   capability only when its manifest declares exact HTTP(S) origins and the
   operator confirms that permission; every such request returns through
   authenticated mihomo SOCKS5 and cannot escape the approved origin set. Do not
-  crawl or mirror module stores.
+  crawl or mirror module stores. First-party extension source lives exclusively
+  in `moooyo/5gpn-extensions`; do not add an `extensions/` source tree back to
+  this core repository.
   Do not add Xray, sing-box,
   smartdns, chinadns-ng, TUN/TProxy, WireGuard, fwmark, policy-routing tables,
   or host firewall management.

@@ -242,8 +242,11 @@ origins, execution position, and the current operator egress binding before
 the transaction publishes certificates, mihomo rules, sidecar state, and the
 DNS overlay.
 
-The project-maintained Apple WLOC example is available at:
+Project-maintained examples, including Apple WLOC, live in the separate
+`moooyo/5gpn-extensions` catalog. The core repository intentionally contains no
+extension source. When the catalog is published through a gateway-reachable
+HTTPS origin, Apple WLOC is available at:
 
 ```text
-https://raw.githubusercontent.com/moooyo/5gpn/main/extensions/apple-wloc/extension.yaml
+https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml
 ```

@@ -274,7 +274,7 @@ export async function setupMockApi(page: Page): Promise<void> {
         { key: 'location', type: 'location', label: 'Target location', required: true, value: { accuracy: 25 } },
         { key: 'failClosed', type: 'boolean', label: 'Block on transformation failure', required: true, value: true },
       ],
-      persistent_storage: false, source_url: 'https://raw.githubusercontent.com/moooyo/5gpn/main/extensions/apple-wloc/extension.yaml',
+      persistent_storage: false, source_url: 'https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml',
       source_digest: 'a'.repeat(64), snapshot_digest: 'a'.repeat(64),
       execution_order: 1, network_origins: [], egress_group_required: false,
     },
@@ -288,7 +288,7 @@ export async function setupMockApi(page: Page): Promise<void> {
 
   const currentInterceptModules = (): T.InterceptModulesView => ({
     revision: interceptRevision,
-    catalog_url: 'https://github.com/moooyo/5gpn/tree/main/extensions',
+    catalog_url: 'https://github.com/moooyo/5gpn-extensions',
     active_capture_hosts: mitmSettings.enabled ? interceptModules.filter((module) => module.enabled).flatMap((module) => module.capture_hosts) : [],
     execution_order: interceptModules.map((module) => module.id),
     available_egress_groups: ['DIRECT', 'Proxies'],

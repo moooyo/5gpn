@@ -20,7 +20,7 @@ import (
 const (
 	nativeExtensionAPIVersion = "5gpn.io/v1"
 	nativeExtensionKind       = "Extension"
-	nativeExtensionCatalogURL = "https://github.com/moooyo/5gpn/tree/main/extensions"
+	nativeExtensionCatalogURL = "https://github.com/moooyo/5gpn-extensions"
 	nativeExtensionUserAgent  = "5gpn-extension-fetch/1"
 )
 

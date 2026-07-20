@@ -113,10 +113,11 @@ grep -Fq 'NetworkOrigins' "$MODULE_PARSER" \
     || fail "native manifest parser does not snapshot exact network origins"
 grep -Fq 'EgressGroupRequired' "$MODULE_PARSER" \
     || fail "native manifest parser does not support operator egress requirements"
-grep -Fq 'type: location' "$ROOT/extensions/apple-wloc/extension.yaml" \
-    || fail "online WLOC extension does not use the generic location setting"
-grep -Fq 'source: ./wloc.js' "$ROOT/extensions/apple-wloc/extension.yaml" \
-    || fail "online WLOC extension script is missing"
+grep -Fq 'https://github.com/moooyo/5gpn-extensions' "$MODULE_PARSER" \
+    || fail "native extension catalog does not point to the independent repository"
+if [[ -d "$ROOT/extensions" ]] && find "$ROOT/extensions" -mindepth 1 -print -quit 2>/dev/null | grep -q .; then
+    fail "core repository still vendors extension source"
+fi
 grep -Fq 'fetch_profile' "$ROOT/web/src/lib/api/types.ts" \
     && fail "module import API still exposes a fetch-header choice"
 retired_client="$(printf '%s%s' 'lo' 'on')"

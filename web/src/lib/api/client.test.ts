@@ -155,7 +155,7 @@ describe('api client — interception modules', () => {
   it('maps list, snapshot, import, update, reorder, and delete to the authenticated module API', async () => {
     vi.stubEnv('VITE_API_MOCK', '0')
     vi.resetModules()
-    const view = { revision: 'r1', catalog_url: 'https://github.com/moooyo/5gpn/tree/main/extensions', active_capture_hosts: [], modules: [] }
+    const view = { revision: 'r1', catalog_url: 'https://github.com/moooyo/5gpn-extensions', active_capture_hosts: [], modules: [] }
     const snapshot = { id: 'io.example.fixture', name: 'Fixture', source_digest: 'a'.repeat(64), source_body: 'apiVersion: 5gpn.io/v1', scripts: [] }
     const f = vi.fn()
       .mockResolvedValueOnce(jsonResp(200, view))

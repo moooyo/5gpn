@@ -213,13 +213,13 @@ the Console states that risk before enable. Fixed process-wide network time,
 body, call-count, and concurrency limits are runtime safety bounds rather than
 manifest knobs.
 
-The repository's `extensions/apple-wloc` directory maintains Apple WLOC as a
-normal online-installable native extension. It is not compiled into either Go
-binary and is not seeded automatically. Its manifest declares the two Apple
-capture hosts, a reusable `location` setting rendered by the Console map picker,
-and a bounded binary response action. Its JavaScript snapshot implements the
-protobuf transformation through the same sandbox and permission checks as every
-other extension.
+First-party extension source is maintained independently in the private
+`moooyo/5gpn-extensions` catalog repository. The core repository does not
+vendor, mirror, seed, or release extension manifests or scripts. The Console
+links that catalog for operator review, while installation still snapshots one
+explicit HTTPS manifest or local upload through the same strict parser. Apple
+WLOC and every other maintained extension follow this external-catalog
+boundary and are never compiled into either Go binary.
 
 URL-sourced plugins may be checked for updates only through an explicit,
 authenticated action. A check fetches a bounded candidate through the same

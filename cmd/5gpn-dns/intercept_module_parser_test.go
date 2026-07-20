@@ -144,33 +144,62 @@ actions:
 	}
 }
 
-func TestRepositoryWLOCManifestIsInstallableFromURL(t *testing.T) {
-	t.Parallel()
-	manifest, err := os.ReadFile(filepath.Join("..", "..", "extensions", "apple-wloc", "extension.yaml"))
+func TestExternalMaintainedExtensionsAreInstallableFromURL(t *testing.T) {
+	root := strings.TrimSpace(os.Getenv("FIVEGPN_EXTENSIONS_ROOT"))
+	if root == "" {
+		t.Skip("FIVEGPN_EXTENSIONS_ROOT is not set")
+	}
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	script, err := os.ReadFile(filepath.Join("..", "..", "extensions", "apple-wloc", "wloc.js"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/extension.yaml":
-			_, _ = w.Write(manifest)
-		case "/wloc.js":
-			_, _ = w.Write(script)
-		default:
-			http.NotFound(w, request)
+	seenIDs := make(map[string]string)
+	validated := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
 		}
-	}))
-	defer server.Close()
-	module, err := (interceptModuleParser{client: server.Client(), now: time.Now}).Import(context.Background(), interceptModuleImportRequest{URL: server.URL + "/extension.yaml"})
-	if err != nil {
-		t.Fatal(err)
+		directory := filepath.Join(root, entry.Name())
+		if _, err := os.Stat(filepath.Join(directory, "extension.yaml")); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			t.Fatal(err)
+		}
+		t.Run(entry.Name(), func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				requested := strings.TrimPrefix(request.URL.Path, "/")
+				if requested == "" || filepath.Base(requested) != requested || strings.Contains(requested, "..") {
+					http.NotFound(w, request)
+					return
+				}
+				body, readErr := os.ReadFile(filepath.Join(directory, requested))
+				if readErr != nil {
+					http.NotFound(w, request)
+					return
+				}
+				_, _ = w.Write(body)
+			}))
+			defer server.Close()
+			module, importErr := (interceptModuleParser{client: server.Client(), now: time.Now}).Import(
+				context.Background(),
+				interceptModuleImportRequest{URL: server.URL + "/extension.yaml"},
+			)
+			if importErr != nil {
+				t.Fatal(importErr)
+			}
+			if previous, duplicate := seenIDs[module.ID]; duplicate {
+				t.Fatalf("extension id %q is also used by %s", module.ID, previous)
+			}
+			seenIDs[module.ID] = entry.Name()
+			if module.Enabled || len(module.CaptureHosts) == 0 || len(module.Scripts)+len(module.HostMappings) == 0 {
+				t.Fatalf("invalid maintained extension snapshot: %+v", module)
+			}
+			validated++
+		})
 	}
-	if module.ID != "io.5gpn.apple-wloc" || len(module.Settings) != 2 || len(module.Scripts) != 1 || module.Enabled {
-		t.Fatalf("repository WLOC extension = %+v", module)
+	if validated == 0 {
+		t.Fatal("no maintained extensions were found")
 	}
 }
 

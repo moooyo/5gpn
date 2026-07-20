@@ -117,6 +117,10 @@ Third-party native extension manifests installed by an operator are stored only
 on that operator's gateway and are not crawled, mirrored, or redistributed by
 5gpn. Their own licenses and usage terms remain the operator's responsibility.
 
+First-party extension source and its third-party notices are maintained in the
+separate `moooyo/5gpn-extensions` repository. They are not part of this core
+repository or its release artifacts.
+
 ### quic-go
 
 `5gpn-intercept` includes `github.com/quic-go/quic-go` v0.60.0.
@@ -224,35 +228,6 @@ to set the timeout on goja's backtracking regular-expression fallback.
 MIT License
 
 Copyright (c) Doug Clark
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-### ProxyPin WLOC response transformer
-
-The bounded JavaScript WLOC protobuf transformation in
-`extensions/apple-wloc/wloc.js` is derived from the
-MIT-licensed `FFF686868/proxypin-wloc-spoofer` project at commit
-`edee9b955f673cc8c4a52eb0a9c687a2e25dde4a`.
-
-MIT License
-
-Copyright (c) 2026 WLOC ProxyPin Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

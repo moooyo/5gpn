@@ -33,10 +33,11 @@ current pre-release contract on 2026-07-20.**
 - URL install and local add are separate Console actions. URL install accepts
   one HTTPS manifest and may snapshot relative HTTPS scripts. Local add accepts
   one pasted or uploaded manifest and uses inline or absolute HTTPS scripts.
-- Apple WLOC is not built into either Go binary and is not seeded. The project
-  maintains it under `extensions/apple-wloc` as a normal URL-installable native
-  extension. Its target coordinates use the generic `location` setting and map
-  editor available to any native extension.
+- First-party extension source, including Apple WLOC, is maintained in the
+  separate `moooyo/5gpn-extensions` repository. The core repository does not
+  vendor, seed, or release extension manifests or scripts. Its target
+  coordinates still use the generic `location` setting and map editor available
+  to any native extension.
 
 ## Stable and beta release channels
 

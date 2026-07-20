@@ -83,7 +83,7 @@ export const mitmSettings: T.MITMSettingsView = {
 
 export const interceptModules: T.InterceptModulesView = {
   revision: mitmSettings.revision,
-  catalog_url: 'https://github.com/moooyo/5gpn/tree/main/extensions',
+  catalog_url: 'https://github.com/moooyo/5gpn-extensions',
   active_capture_hosts: [],
   execution_order: ['io.5gpn.apple-wloc', 'io.example.response-cleaner'],
   available_egress_groups: ['DIRECT', 'Proxies'],
@@ -103,7 +103,7 @@ export const interceptModules: T.InterceptModulesView = {
         { key: 'failClosed', type: 'boolean', label: 'Block on transformation failure', required: true, default: true, value: true },
       ],
       persistent_storage: false,
-      source_url: 'https://raw.githubusercontent.com/moooyo/5gpn/main/extensions/apple-wloc/extension.yaml',
+      source_url: 'https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml',
       source_digest: 'a'.repeat(64),
       snapshot_digest: 'a'.repeat(64),
       execution_order: 1,
