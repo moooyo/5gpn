@@ -82,6 +82,10 @@ if [[ -z "$cfg_line" || -z "$dns_line" || -z "$cert_line" \
    || "$lock_line" -ge "$capture_line" || "$capture_line" -ge "$cert_line" ]]; then
     fail "configuration/DNS-gate/certificate issuance order is not fail-closed"
 fi
+grep -Fqx '    start_services_with_cert_lock_handoff' <<<"$full_fn" \
+    || fail "full install does not hand the certificate lock to sidecar startup"
+grep -Fqx '    start_services' <<<"$full_fn" \
+    && fail "full install still starts the sidecar while holding the certificate lock"
 
 # ===== iOS profile is served at the web console's public /ios/ path; the
 # standalone :8111 responder and the host firewall are both gone =====

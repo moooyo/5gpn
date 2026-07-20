@@ -1738,6 +1738,8 @@ install_transaction_exit() {
     local rc=$?
     trap - ERR EXIT
     if [[ "$rc" != 0 && "$INSTALL_TRANSACTION_ACTIVE" == 1 ]]; then
+        ensure_install_cert_lock_for_rollback \
+            || { err "Could not reacquire the certificate lock; refusing an unsafe concurrent rollback."; exit "$rc"; }
         rollback_install || true
     fi
     cleanup_artifact_stage || true
@@ -1747,9 +1749,16 @@ install_transaction_exit() {
 install_transaction_error() {
     local rc=$?
     trap - ERR
+    ensure_install_cert_lock_for_rollback \
+        || { err "Could not reacquire the certificate lock; refusing an unsafe concurrent rollback."; trap - EXIT; exit "$rc"; }
     rollback_install || true
     cleanup_artifact_stage || true
     exit "$rc"
+}
+
+ensure_install_cert_lock_for_rollback() {
+    [[ "$INSTALL_CERT_LOCK_HELD" == 1 ]] && return 0
+    acquire_install_cert_lock
 }
 
 publish_executable() {
@@ -3878,6 +3887,21 @@ start_services() {
     [[ "$failed" == 0 ]] || return 1
 }
 
+# The installer holds the shared certificate lock while publishing certificate
+# and runtime state. Starting 5gpn-intercept synchronously starts its required
+# certificate oneshot, which must acquire that same lock. Hand the lock to
+# systemd for the bounded service-start phase, then reacquire it before final
+# verification or any rollback can run.
+start_services_with_cert_lock_handoff() {
+    local start_rc=0
+    [[ "$INSTALL_CERT_LOCK_HELD" == 1 ]] \
+        || { err "The installer certificate lock is not held before service start."; return 1; }
+    release_install_cert_lock || return 1
+    start_services || start_rc=$?
+    acquire_install_cert_lock || return 1
+    [[ "$start_rc" == 0 ]] || return "$start_rc"
+}
+
 # ----------------------------------------------------------------------------
 # Optional control plane: Telegram bot (an in-process goroutine of 5gpn-dns).
 # dns.env supplies startup defaults; the validated runtime override at
@@ -4326,7 +4350,7 @@ full_install() {
     render_mihomo_config
     setup_ios_profile
     prepare_runtime_permissions
-    start_services
+    start_services_with_cert_lock_handoff
     verify_console_endpoint
     reload_rules
     INSTALL_TRANSACTION_ACTIVE=0

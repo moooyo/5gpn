@@ -884,6 +884,49 @@ if grep -Fq 'CERT_RENEW_LOCK_FILE="/run/5gpn/cert-renew.lock"' "$INSTALL" \
 else
     fail "certificate lock can clobber or follow files in a shared runtime directory"
 fi
+
+# An enabled MITM sidecar requires its certificate oneshot during service
+# startup. The installer must release the shared certificate lock for that
+# dependency and reacquire it before success or rollback processing.
+handoff_log="$TMP/cert-lock-handoff.log"
+if (
+    INSTALL_CERT_LOCK_HELD=1
+    release_install_cert_lock() { printf 'release\n' >> "$handoff_log"; INSTALL_CERT_LOCK_HELD=0; }
+    start_services() { [[ "$INSTALL_CERT_LOCK_HELD" == 0 ]] || return 91; printf 'start\n' >> "$handoff_log"; }
+    acquire_install_cert_lock() { printf 'acquire\n' >> "$handoff_log"; INSTALL_CERT_LOCK_HELD=1; }
+    start_services_with_cert_lock_handoff
+    [[ "$INSTALL_CERT_LOCK_HELD" == 1 \
+       && "$(tr '\n' ' ' < "$handoff_log")" == "release start acquire " ]]
+); then
+    pass "service start hands off and reacquires the certificate lock"
+else
+    fail "service start can deadlock its required certificate oneshot"
+fi
+if (
+    : > "$handoff_log"
+    INSTALL_CERT_LOCK_HELD=1
+    release_install_cert_lock() { printf 'release\n' >> "$handoff_log"; INSTALL_CERT_LOCK_HELD=0; }
+    start_services() { printf 'start-failed\n' >> "$handoff_log"; return 7; }
+    acquire_install_cert_lock() { printf 'acquire\n' >> "$handoff_log"; INSTALL_CERT_LOCK_HELD=1; }
+    start_services_with_cert_lock_handoff
+    handoff_rc=$?
+    [[ "$handoff_rc" == 7 && "$INSTALL_CERT_LOCK_HELD" == 1 \
+       && "$(tr '\n' ' ' < "$handoff_log")" == "release start-failed acquire " ]]
+); then
+    pass "failed service start reacquires the certificate lock before rollback"
+else
+    fail "failed service start can enter rollback without the certificate lock"
+fi
+rollback_lock_fn="$(sed -n '/^ensure_install_cert_lock_for_rollback()/,/^}/p' "$INSTALL")"
+exit_trap_fn="$(sed -n '/^install_transaction_exit()/,/^}/p' "$INSTALL")"
+error_trap_fn="$(sed -n '/^install_transaction_error()/,/^}/p' "$INSTALL")"
+if grep -Fq 'acquire_install_cert_lock' <<<"$rollback_lock_fn" \
+   && grep -Fq 'ensure_install_cert_lock_for_rollback' <<<"$exit_trap_fn" \
+   && grep -Fq 'ensure_install_cert_lock_for_rollback' <<<"$error_trap_fn"; then
+    pass "transaction traps reacquire the certificate lock before rollback"
+else
+    fail "a signal or error during service lock handoff can race rollback"
+fi
 debug_fn="$(sed -n '/^issue_selfsigned_wildcard()/,/^}/p' "$INSTALL")"
 if grep -Fq '/etc/letsencrypt/live' <<<"$debug_fn"; then
     fail "debug certificate writer still targets a Certbot lineage"

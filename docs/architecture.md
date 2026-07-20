@@ -743,7 +743,12 @@ certificates, including `zash/current`, have been published. The normal
 `full_install` service-start phase then restores the data plane.
 
 Install/configure, the timer, the bot action, and decommission serialize on one
-root-owned private runtime lock. Installer rollback restores the exact prior
+root-owned private runtime lock. After an installer has published and validated
+all certificate state, it briefly releases that lock while systemd starts the
+sidecar's required certificate oneshot, then reacquires it before final endpoint
+verification or rollback. This bounded handoff prevents the oneshot from
+deadlocking against its parent installer without allowing a rollback to race a
+renewal. Installer rollback restores the exact prior
 live/archive/renewal state and the timer's enabled/active state after a failed
 mode change; it never consumes an unscoped or partial Certbot lineage.
 

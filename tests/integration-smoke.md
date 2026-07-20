@@ -360,6 +360,13 @@ token into recorded command output, screenshots, or issue logs.
   `/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json --healthcheck`.
   Its private `/var/lib/5gpn-intercept/store.json` survives a sidecar restart,
   while purge removes the independently marked state directory.
+- [ ] With the MITM master and at least one extension enabled, reinstall the
+  same release. The installer must hand the private certificate lock to the
+  required `5gpn-intercept-cert.service`, start and health-check the sidecar,
+  reacquire the lock before final verification, and preserve the interception
+  document, marketplace cache, and operator-owned mihomo bytes. Inject a
+  sidecar start failure and verify rollback runs only after the lock is held
+  again.
 - [ ] On a fresh or explicitly reset mihomo config, Settings reports
   `block-quic-443` enabled and the canonical UDP/443 reject appears exactly once
   after `IN-NAME,intercept-egress,REJECT` and before every `MODULE-INTERCEPT` rule.
