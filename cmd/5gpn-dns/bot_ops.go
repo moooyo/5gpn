@@ -268,6 +268,20 @@ func (g *botActionGuard) Cancel(nonce string, adminID, chatID int64) bool {
 	return true
 }
 
+// RevokeAdmin invalidates every unconsumed maintenance confirmation issued to
+// an administrator whose authorization was removed. Already running actions
+// remain governed by their process-wide single-flight lifecycle.
+func (g *botActionGuard) RevokeAdmin(adminID int64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.initLocked()
+	for nonce, confirmation := range g.confirmations {
+		if confirmation.adminID == adminID {
+			delete(g.confirmations, nonce)
+		}
+	}
+}
+
 // TryStart/Finish form the single-flight boundary around the actual command.
 // Exclusion is per action and shared by all updates handled by one Bot, which
 // prevents two admins from concurrently restarting mihomo or renewing the same

@@ -610,7 +610,8 @@ func mainMenu() *models.InlineKeyboardMarkup {
 	rows := [][]models.InlineKeyboardButton{
 		{btn("📊 状态", "act:status"), btn("🧪 DNS 诊断", "act:diagnose")},
 		{btn("📜 日志", "menu:logs"), btn("🌐 上游 DNS", "menu:upstreams")},
-		{btn("🧩 MITM 模块", "menu:modules"), btn("📱 iOS 安装", "menu:ios")},
+		{btn("🧩 插件管理", "ext:modules"), btn("🛍 插件市场", "ext:market")},
+		{btn("📱 iOS 安装", "menu:ios")},
 		{btn("🛠 维护", "menu:maintenance")},
 	}
 	if target, ok := webConsoleURL(); ok {
@@ -674,100 +675,6 @@ func iosMenu() *models.InlineKeyboardMarkup {
 	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-func renderInterceptModules(view interceptModulesView, notice string) string {
-	var out strings.Builder
-	out.WriteString("<b>拦截插件</b>\n")
-	out.WriteString("启用会同步发布接管域名、证书、mihomo 路由与 DNS 引流；用户绑定与 operator-owned mihomo 配置共同决定出口。\n")
-	if notice != "" {
-		out.WriteString("\n")
-		out.WriteString(notice)
-		out.WriteString("\n")
-	}
-	for _, module := range view.Modules {
-		state := "⚪ 已关闭"
-		if module.Enabled && module.Ready {
-			state = "🟢 已启用"
-		} else if module.Enabled {
-			state = "🟠 状态异常"
-		}
-		out.WriteString("\n<b>")
-		out.WriteString(html.EscapeString(telegramModuleName(module)))
-		out.WriteString("</b> · ")
-		out.WriteString(state)
-		out.WriteString("\n<code>")
-		out.WriteString(html.EscapeString(strings.Join(module.CaptureHosts, ", ")))
-		out.WriteString("</code>")
-		out.WriteString(fmt.Sprintf("\n顺序：<code>%d</code>", module.ExecutionOrder))
-		if module.EgressGroup != "" {
-			out.WriteString(" · 出口：<code>")
-			out.WriteString(html.EscapeString(module.EgressGroup))
-			out.WriteString("</code>")
-		}
-		if len(module.NetworkOrigins) > 0 {
-			out.WriteString(fmt.Sprintf("\n🌐 需在 Console 审查 %d 个网络 origin", len(module.NetworkOrigins)))
-		}
-		if module.Reason == "settings-required" {
-			out.WriteString("\n🔧 需要先在 Console 配置必填设置")
-		}
-		if module.Reason != "" {
-			out.WriteString("\n原因：<code>")
-			out.WriteString(html.EscapeString(module.Reason))
-			out.WriteString("</code>")
-		}
-	}
-	return out.String()
-}
-
-func interceptModulesMenu(view interceptModulesView) *models.InlineKeyboardMarkup {
-	rows := make([][]models.InlineKeyboardButton, 0, len(view.Modules)+2)
-	for _, module := range view.Modules {
-		action := "on"
-		prefix := "启用"
-		callback := ""
-		if module.Enabled {
-			action = "off"
-			prefix = "关闭"
-		} else if len(module.NetworkOrigins) > 0 {
-			prefix = "需在 Console 审查网络权限"
-		} else if module.Reason == "settings-required" || module.Reason == "egress-group-required" {
-			prefix = "需在 Console 配置"
-		} else if !module.Ready && module.Reason != "mitm-disabled" {
-			prefix = "不可用"
-		}
-		label := telegramModuleName(module)
-		if utf8.RuneCountInString(label) > 24 {
-			runes := []rune(label)
-			label = string(runes[:23]) + "…"
-		}
-		callback = "module:request:" + action + ":" + module.ID
-		if !module.Enabled && (len(module.NetworkOrigins) > 0 || (!module.Ready && module.Reason != "mitm-disabled") || module.Reason == "settings-required") {
-			callback = "menu:modules"
-		}
-		rows = append(rows, []models.InlineKeyboardButton{btn(prefix+" · "+label, callback)})
-	}
-	rows = append(rows, []models.InlineKeyboardButton{btn("🔄 刷新", "menu:modules")})
-	rows = append(rows, []models.InlineKeyboardButton{btn("« 返回", "menu:main")})
-	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
-}
-
-func telegramModuleName(module interceptModuleView) string {
-	return module.Name
-}
-
-func interceptModuleConfirmationMenu(id string, enabled bool) *models.InlineKeyboardMarkup {
-	action := "off"
-	if enabled {
-		action = "on"
-	}
-	if !validInterceptModuleCallbackID(id) {
-		return backKB("menu:modules")
-	}
-	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
-		{btn("✅ 确认", "module:apply:"+action+":"+id)},
-		{btn("« 返回", "menu:modules")},
-	}}
-}
-
 func confirmationMenu(action botPrivilegedAction, nonce string) *models.InlineKeyboardMarkup {
 	if !validBotPrivilegedAction(action) || !validConfirmationNonce(nonce) {
 		return backKB("menu:maintenance")
@@ -821,10 +728,8 @@ const (
 	cbMenuMaintenance
 	cbMenuLogs
 	cbMenuIOS
-	cbMenuModules
 	cbIOSPhoto
-	cbModuleRequest
-	cbModuleToggle
+	cbExtension
 	cbRequestConfirm
 	cbConfirmAction
 	cbCancelAction
@@ -871,22 +776,11 @@ func parseCallback(data string) callbackIntent {
 		return callbackIntent{kind: cbMenuLogs}
 	case "menu:ios":
 		return callbackIntent{kind: cbMenuIOS}
-	case "menu:modules":
-		return callbackIntent{kind: cbMenuModules}
 	case "act:ios-photo":
 		return callbackIntent{kind: cbIOSPhoto}
 	}
-	if rest, ok := strings.CutPrefix(payload, "module:"); ok {
-		stage, actionAndID, found := strings.Cut(rest, ":")
-		action, id, foundAction := strings.Cut(actionAndID, ":")
-		if found && foundAction && (action == "on" || action == "off") && validInterceptModuleCallbackID(id) {
-			switch stage {
-			case "request":
-				return callbackIntent{kind: cbModuleRequest, arg: action + ":" + id}
-			case "apply":
-				return callbackIntent{kind: cbModuleToggle, arg: action + ":" + id}
-			}
-		}
+	if rest, ok := strings.CutPrefix(payload, "ext:"); ok && rest != "" && len(rest) <= 57 {
+		return callbackIntent{kind: cbExtension, arg: rest}
 	}
 	if svc, ok := strings.CutPrefix(payload, "logs:"); ok {
 		return callbackIntent{kind: cbLogs, arg: svc}
@@ -911,10 +805,6 @@ func parseCallback(data string) callbackIntent {
 		return callbackIntent{kind: cbUnknown, arg: arg}
 	}
 	return callbackIntent{kind: cbUnknown, arg: payload}
-}
-
-func validInterceptModuleCallbackID(id string) bool {
-	return validInterceptModuleID(id)
 }
 
 // disabledPreview is a reusable "no link preview" option for outgoing

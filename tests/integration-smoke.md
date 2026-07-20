@@ -327,8 +327,36 @@ token into recorded command output, screenshots, or issue logs.
   token/admin apply cannot later restore the revoked account or replace a newer
   configuration.
 - [ ] Menu navigation and refresh work for status, DNS diagnosis, logs,
-  upstreams, maintenance, iOS install, and the Web-console link. DNS diagnosis
-  agrees with `/api/resolve-test`; policy/subscription/YAML editing is absent.
+  upstreams, maintenance, iOS install, marketplace, installed extensions, and
+  the Web-console link. DNS diagnosis agrees with `/api/resolve-test`;
+  policy/subscription/YAML editing is absent.
+- [ ] From an authorized private chat, add and refresh the official marketplace,
+  browse its normalized entries, install one entry, remove/re-add its source,
+  and verify the installed immutable snapshot is unaffected. Repeat installation
+  through an HTTPS manifest URL and pasted local manifest text. Exercise
+  uninstall, enable/disable, update check/apply, egress binding, and complete
+  reorder. Every install and applied update finishes disabled, and all results
+  agree with the Console and the underlying marketplace/sidecar revisions.
+- [ ] For every Telegram marketplace or extension mutation, verify that the bot
+  renders the complete normalized impact before exposing Confirm. Capture a
+  confirmation and try it after expiry, twice, from the second administrator,
+  from a different private chat, and from the group. Then change the marketplace
+  revision/index digest, sidecar revision/installed snapshot digest, and
+  install/update candidate digest between review and confirmation. Every stale,
+  replayed, cross-user, cross-chat, or digest-mismatched attempt must fail without
+  state changes and require a fresh review.
+- [ ] Install a synthetic extension with multiple exact network origins. Each
+  affected Telegram review lists every origin, and enable states that the script
+  can send any decrypted request, response, setting, or storage data visible to
+  it to each origin. Paginate or attach an oversized review and verify Confirm
+  appears only after the final review part. Change one origin through a disabled
+  update and verify the old confirmation cannot authorize the new snapshot.
+- [ ] Edit `text`, `select`, `boolean`, `number`, and `location` values from
+  Telegram, with revision conflict injection for each save. Set `location` once
+  with a Telegram native location message and once with manual longitude,
+  latitude, and accuracy. Both paths warn before collection that coordinates
+  pass through Telegram and the Bot API; the bot does not claim to embed the
+  Console's city-search/draggable-map/accuracy-visualization editor.
 - [ ] Mihomo restart and certificate renewal require an unexpired one-use
   confirmation. Replaying or double-clicking it cannot start a second job, and
   the final message/audit record contains the real success or failure result.

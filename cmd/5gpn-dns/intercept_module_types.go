@@ -85,6 +85,19 @@ type interceptModuleSetting struct {
 	Value       json.RawMessage `json:"value,omitempty"`
 }
 
+// interceptModuleActionView exposes immutable action metadata for operator
+// review without returning the potentially large stored script body.
+type interceptModuleActionView struct {
+	ID           string               `json:"id"`
+	Phase        string               `json:"phase"`
+	Match        interceptActionMatch `json:"match"`
+	ScriptURL    string               `json:"script_url,omitempty"`
+	ScriptDigest string               `json:"script_digest"`
+	BodyMode     string               `json:"body_mode"`
+	TimeoutMS    int                  `json:"timeout_ms"`
+	MaxBodyBytes int64                `json:"max_body_bytes"`
+}
+
 type interceptHostMapping struct {
 	Pattern string `json:"host"`
 	Target  string `json:"target"`
@@ -109,26 +122,27 @@ type interceptModuleSnapshot struct {
 }
 
 type interceptModuleView struct {
-	ID                  string                   `json:"id"`
-	Version             string                   `json:"extension_version"`
-	Name                string                   `json:"name"`
-	Description         string                   `json:"description,omitempty"`
-	Enabled             bool                     `json:"enabled"`
-	Ready               bool                     `json:"ready"`
-	Reason              string                   `json:"reason,omitempty"`
-	CaptureHosts        []string                 `json:"capture_hosts"`
-	ScriptCount         int                      `json:"script_count"`
-	Settings            []interceptModuleSetting `json:"settings,omitempty"`
-	HostMappings        []interceptHostMapping   `json:"upstream_mappings,omitempty"`
-	PersistentStorage   bool                     `json:"persistent_storage"`
-	ExecutionOrder      int                      `json:"execution_order"`
-	NetworkOrigins      []string                 `json:"network_origins"`
-	EgressGroupRequired bool                     `json:"egress_group_required"`
-	EgressGroup         string                   `json:"egress_group,omitempty"`
-	SourceURL           string                   `json:"source_url,omitempty"`
-	SourceDigest        string                   `json:"source_digest"`
-	SnapshotDigest      string                   `json:"snapshot_digest"`
-	ImportedAt          string                   `json:"imported_at,omitempty"`
+	ID                  string                      `json:"id"`
+	Version             string                      `json:"extension_version"`
+	Name                string                      `json:"name"`
+	Description         string                      `json:"description,omitempty"`
+	Enabled             bool                        `json:"enabled"`
+	Ready               bool                        `json:"ready"`
+	Reason              string                      `json:"reason,omitempty"`
+	CaptureHosts        []string                    `json:"capture_hosts"`
+	ScriptCount         int                         `json:"script_count"`
+	Actions             []interceptModuleActionView `json:"actions"`
+	Settings            []interceptModuleSetting    `json:"settings,omitempty"`
+	HostMappings        []interceptHostMapping      `json:"upstream_mappings,omitempty"`
+	PersistentStorage   bool                        `json:"persistent_storage"`
+	ExecutionOrder      int                         `json:"execution_order"`
+	NetworkOrigins      []string                    `json:"network_origins"`
+	EgressGroupRequired bool                        `json:"egress_group_required"`
+	EgressGroup         string                      `json:"egress_group,omitempty"`
+	SourceURL           string                      `json:"source_url,omitempty"`
+	SourceDigest        string                      `json:"source_digest"`
+	SnapshotDigest      string                      `json:"snapshot_digest"`
+	ImportedAt          string                      `json:"imported_at,omitempty"`
 }
 
 type interceptModulesView struct {

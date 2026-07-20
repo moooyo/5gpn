@@ -54,6 +54,26 @@ func TestInterceptModuleViewAlwaysMarshalsNetworkOriginsAsArray(t *testing.T) {
 	}
 }
 
+func TestInterceptModuleViewExposesActionReviewWithoutScriptBody(t *testing.T) {
+	module := testModuleSnapshot()
+	view := interceptModuleViewFromSnapshot(module, true, "")
+	if len(view.Actions) != 1 {
+		t.Fatalf("action reviews = %+v", view.Actions)
+	}
+	action := view.Actions[0]
+	if action.ID != module.Scripts[0].ID || action.Phase != interceptPhaseResponse ||
+		action.ScriptDigest != module.Scripts[0].ScriptDigest || action.Match.PathRegex != "^/" {
+		t.Fatalf("action review = %+v", action)
+	}
+	body, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), module.Scripts[0].ScriptBody) || !strings.Contains(string(body), `"actions":[`) {
+		t.Fatalf("action review leaked or omitted script metadata: %s", body)
+	}
+}
+
 func TestInterceptModulesViewAlwaysMarshalsCollectionFieldsAsArrays(t *testing.T) {
 	document, body := testInterceptDocument(t)
 	view := modulesViewFromDocument(document, body, false, "mitm-disabled", []string{"DIRECT"})
@@ -315,6 +335,9 @@ actions:
 	available, err := manager.CheckUpdate(context.Background(), module.ID, view.Revision)
 	if err != nil || available.Candidate == nil {
 		t.Fatalf("available update = %+v err=%v", available, err)
+	}
+	if available.Candidate.ExecutionOrder != 1 {
+		t.Fatalf("candidate execution order = %d, want 1", available.Candidate.ExecutionOrder)
 	}
 	wantDigest := available.Candidate.SnapshotDigest
 	script.Store(unreviewedScript)

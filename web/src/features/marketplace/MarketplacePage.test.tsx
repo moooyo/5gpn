@@ -50,6 +50,7 @@ const OFFICIAL: MarketplaceSource = {
   url: 'https://market.example.test/index.json',
   final_url: 'https://market.example.test/index.json',
   digest: 'c'.repeat(64),
+  snapshot_digest: 'e'.repeat(64),
   fetched_at: '2026-07-20T10:00:00Z',
   entries: [APPLE],
 }
@@ -60,6 +61,7 @@ const COMMUNITY: MarketplaceSource = {
   url: 'https://community.example.test/index.json',
   final_url: 'https://community.example.test/index.json',
   digest: 'd'.repeat(64),
+  snapshot_digest: 'f'.repeat(64),
   fetched_at: '2026-07-21T10:00:00Z',
   entries: [CLEANER],
 }

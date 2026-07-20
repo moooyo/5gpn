@@ -124,16 +124,18 @@ type marketplaceView struct {
 }
 
 type marketplaceSourceView struct {
-	ID           string                 `json:"id"`
-	Name         string                 `json:"name"`
-	MetadataName string                 `json:"metadata_name"`
-	Description  string                 `json:"description"`
-	Homepage     string                 `json:"homepage"`
-	URL          string                 `json:"url"`
-	FinalURL     string                 `json:"final_url"`
-	Digest       string                 `json:"digest"`
-	FetchedAt    string                 `json:"fetched_at"`
-	Entries      []marketplaceEntryView `json:"entries"`
+	ID             string                 `json:"id"`
+	Name           string                 `json:"name"`
+	DisplayName    string                 `json:"display_name,omitempty"`
+	MetadataName   string                 `json:"metadata_name"`
+	Description    string                 `json:"description"`
+	Homepage       string                 `json:"homepage"`
+	URL            string                 `json:"url"`
+	FinalURL       string                 `json:"final_url"`
+	Digest         string                 `json:"digest"`
+	SnapshotDigest string                 `json:"snapshot_digest"`
+	FetchedAt      string                 `json:"fetched_at"`
+	Entries        []marketplaceEntryView `json:"entries"`
 }
 
 type marketplaceEntryView struct {
@@ -220,6 +222,16 @@ func marshalMarketplaceDocument(document marketplaceDocument) ([]byte, error) {
 
 func marketplaceRevision(body []byte) string { return sha256Hex(body) }
 
+func marketplaceSourceSnapshotDigest(source marketplaceSourceSnapshot) string {
+	canonical := source
+	canonical.FetchedAt = ""
+	body, err := json.Marshal(canonical)
+	if err != nil {
+		panic("marketplace snapshot digest contains an unsupported value: " + err.Error())
+	}
+	return sha256Hex(body)
+}
+
 type ExtensionMarketplaceManager struct {
 	mu      sync.Mutex
 	store   *ExtensionMarketplaceStore
@@ -250,28 +262,62 @@ func (m *ExtensionMarketplaceManager) View() (marketplaceView, error) {
 }
 
 func (m *ExtensionMarketplaceManager) Add(ctx context.Context, revision, rawURL, rawDisplayName string) (marketplaceView, error) {
+	return m.addWithExpected(ctx, revision, rawURL, rawDisplayName, "")
+}
+
+// PreviewAdd fetches and normalizes a marketplace without changing the
+// configured source document. The returned snapshot digest can be confirmed
+// and passed to AddExpected.
+func (m *ExtensionMarketplaceManager) PreviewAdd(ctx context.Context, rawURL, rawDisplayName string) (marketplaceSourceView, error) {
+	if m == nil || m.store == nil {
+		return marketplaceSourceView{}, errMarketplaceUnavailable
+	}
+	source, err := m.fetchAddCandidate(ctx, rawURL, rawDisplayName)
+	if err != nil {
+		return marketplaceSourceView{}, err
+	}
+	if err := m.validateAddCandidate(source); err != nil {
+		return marketplaceSourceView{}, err
+	}
+	return marketplaceSourceViewFromSnapshot(source), nil
+}
+
+// AddExpected refetches the marketplace and verifies the exact normalized
+// source snapshot selected during preview before the existing marketplace
+// revision CAS writes it. Legacy callers use Add.
+func (m *ExtensionMarketplaceManager) AddExpected(
+	ctx context.Context,
+	revision, rawURL, rawDisplayName, expectedSnapshotDigest string,
+) (marketplaceView, error) {
+	if m == nil || m.store == nil {
+		return marketplaceView{}, errMarketplaceUnavailable
+	}
+	if !validSHA256(expectedSnapshotDigest) {
+		return marketplaceView{}, errors.New("a valid expected marketplace snapshot digest is required")
+	}
+	return m.addWithExpected(ctx, revision, rawURL, rawDisplayName, expectedSnapshotDigest)
+}
+
+func (m *ExtensionMarketplaceManager) addWithExpected(
+	ctx context.Context,
+	revision, rawURL, rawDisplayName, expectedSnapshotDigest string,
+) (marketplaceView, error) {
 	if m == nil || m.store == nil {
 		return marketplaceView{}, errMarketplaceUnavailable
 	}
 	if !validSHA256(revision) {
 		return marketplaceView{}, errors.New("a valid marketplace revision is required")
 	}
-	configuredURL, err := normalizeModuleImportURL(rawURL)
-	if err != nil {
-		return marketplaceView{}, err
-	}
-	displayName, err := normalizeMarketplaceDisplayName(rawDisplayName)
-	if err != nil {
-		return marketplaceView{}, err
-	}
 	if err := m.preflightRevision(revision); err != nil {
 		return marketplaceView{}, err
 	}
-	source, err := m.fetch(ctx, configuredURL)
+	source, err := m.fetchAddCandidate(ctx, rawURL, rawDisplayName)
 	if err != nil {
 		return marketplaceView{}, err
 	}
-	source.DisplayName = displayName
+	if expectedSnapshotDigest != "" && marketplaceSourceSnapshotDigest(source) != expectedSnapshotDigest {
+		return marketplaceView{}, fmt.Errorf("%w: marketplace snapshot changed since preview", errMarketplaceRevision)
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -293,25 +339,103 @@ func (m *ExtensionMarketplaceManager) Add(ctx context.Context, revision, rawURL,
 	return m.writeLocked(document)
 }
 
+func (m *ExtensionMarketplaceManager) fetchAddCandidate(ctx context.Context, rawURL, rawDisplayName string) (marketplaceSourceSnapshot, error) {
+	configuredURL, err := normalizeModuleImportURL(rawURL)
+	if err != nil {
+		return marketplaceSourceSnapshot{}, err
+	}
+	displayName, err := normalizeMarketplaceDisplayName(rawDisplayName)
+	if err != nil {
+		return marketplaceSourceSnapshot{}, err
+	}
+	source, err := m.fetch(ctx, configuredURL)
+	if err != nil {
+		return marketplaceSourceSnapshot{}, err
+	}
+	source.DisplayName = displayName
+	return source, nil
+}
+
+func (m *ExtensionMarketplaceManager) validateAddCandidate(source marketplaceSourceSnapshot) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.store.mu.Lock()
+	defer m.store.mu.Unlock()
+	document, _, err := m.store.Read()
+	if err != nil {
+		return err
+	}
+	for _, existing := range document.Sources {
+		if existing.ID == source.ID || existing.URL == source.URL || existing.URL == source.FinalURL || existing.FinalURL == source.URL || existing.FinalURL == source.FinalURL {
+			return fmt.Errorf("%w: marketplace id or URL is already configured", errMarketplaceConflict)
+		}
+	}
+	document.Sources = append(document.Sources, source)
+	_, err = marshalMarketplaceDocument(document)
+	return err
+}
+
 func (m *ExtensionMarketplaceManager) Refresh(ctx context.Context, id, revision string) (marketplaceView, error) {
+	return m.refreshWithExpected(ctx, id, revision, "")
+}
+
+// PreviewRefresh fetches and normalizes a replacement snapshot without
+// changing the configured marketplace. The caller's revision must remain
+// current for the preview to be returned.
+func (m *ExtensionMarketplaceManager) PreviewRefresh(ctx context.Context, id, revision string) (marketplaceSourceView, error) {
+	if m == nil || m.store == nil {
+		return marketplaceSourceView{}, errMarketplaceUnavailable
+	}
+	if !validSHA256(revision) {
+		return marketplaceSourceView{}, errors.New("a valid marketplace revision is required")
+	}
+	current, refreshed, err := m.fetchRefreshCandidate(ctx, id, revision)
+	if err != nil {
+		return marketplaceSourceView{}, err
+	}
+	latest, err := m.sourceAtRevision(id, revision)
+	if err != nil {
+		return marketplaceSourceView{}, err
+	}
+	if latest.URL != current.URL || latest.IndexDigest != current.IndexDigest {
+		return marketplaceSourceView{}, errMarketplaceRevision
+	}
+	return marketplaceSourceViewFromSnapshot(refreshed), nil
+}
+
+// RefreshExpected refetches a marketplace and verifies the previewed normalized
+// source snapshot before the existing revision and source-identity checks
+// commit it. Legacy callers use Refresh.
+func (m *ExtensionMarketplaceManager) RefreshExpected(
+	ctx context.Context,
+	id, revision, expectedSnapshotDigest string,
+) (marketplaceView, error) {
+	if m == nil || m.store == nil {
+		return marketplaceView{}, errMarketplaceUnavailable
+	}
+	if !validSHA256(expectedSnapshotDigest) {
+		return marketplaceView{}, errors.New("a valid expected marketplace snapshot digest is required")
+	}
+	return m.refreshWithExpected(ctx, id, revision, expectedSnapshotDigest)
+}
+
+func (m *ExtensionMarketplaceManager) refreshWithExpected(
+	ctx context.Context,
+	id, revision, expectedSnapshotDigest string,
+) (marketplaceView, error) {
 	if m == nil || m.store == nil {
 		return marketplaceView{}, errMarketplaceUnavailable
 	}
 	if !validSHA256(revision) {
 		return marketplaceView{}, errors.New("a valid marketplace revision is required")
 	}
-	current, err := m.sourceAtRevision(id, revision)
+	current, refreshed, err := m.fetchRefreshCandidate(ctx, id, revision)
 	if err != nil {
 		return marketplaceView{}, err
 	}
-	refreshed, err := m.fetch(ctx, current.URL)
-	if err != nil {
-		return marketplaceView{}, err
+	if expectedSnapshotDigest != "" && marketplaceSourceSnapshotDigest(refreshed) != expectedSnapshotDigest {
+		return marketplaceView{}, fmt.Errorf("%w: marketplace snapshot changed since preview", errMarketplaceRevision)
 	}
-	if refreshed.ID != current.ID {
-		return marketplaceView{}, fmt.Errorf("%w: refreshed marketplace changed metadata.id", errMarketplaceConflict)
-	}
-	refreshed.DisplayName = current.DisplayName
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -335,6 +459,25 @@ func (m *ExtensionMarketplaceManager) Refresh(ctx context.Context, id, revision 
 	}
 	document.Sources[index] = refreshed
 	return m.writeLocked(document)
+}
+
+func (m *ExtensionMarketplaceManager) fetchRefreshCandidate(
+	ctx context.Context,
+	id, revision string,
+) (marketplaceSourceSnapshot, marketplaceSourceSnapshot, error) {
+	current, err := m.sourceAtRevision(id, revision)
+	if err != nil {
+		return marketplaceSourceSnapshot{}, marketplaceSourceSnapshot{}, err
+	}
+	refreshed, err := m.fetch(ctx, current.URL)
+	if err != nil {
+		return marketplaceSourceSnapshot{}, marketplaceSourceSnapshot{}, err
+	}
+	if refreshed.ID != current.ID {
+		return marketplaceSourceSnapshot{}, marketplaceSourceSnapshot{}, fmt.Errorf("%w: refreshed marketplace changed metadata.id", errMarketplaceConflict)
+	}
+	refreshed.DisplayName = current.DisplayName
+	return current, refreshed, nil
 }
 
 func (m *ExtensionMarketplaceManager) Delete(id, revision string) (marketplaceView, error) {
@@ -364,50 +507,133 @@ func (m *ExtensionMarketplaceManager) Delete(id, revision string) (marketplaceVi
 }
 
 func (m *ExtensionMarketplaceManager) Install(ctx context.Context, marketplaceID, extensionID, marketplaceRev, moduleRev string) (interceptModulesView, error) {
+	return m.installWithExpected(ctx, marketplaceID, extensionID, marketplaceRev, moduleRev, "", "")
+}
+
+// PreviewInstall fetches and verifies the selected marketplace entry without
+// changing the installed module document. Both marketplace and module
+// revisions must remain current while the candidate is prepared.
+func (m *ExtensionMarketplaceManager) PreviewInstall(
+	ctx context.Context,
+	marketplaceID, extensionID, marketplaceRev, moduleRev string,
+) (interceptModuleView, error) {
+	if m == nil || m.store == nil || m.modules == nil {
+		return interceptModuleView{}, errMarketplaceUnavailable
+	}
+	if !validSHA256(marketplaceRev) || !validSHA256(moduleRev) {
+		return interceptModuleView{}, errors.New("valid marketplace_revision and module_revision are required")
+	}
+	source, module, err := m.fetchInstallCandidate(ctx, marketplaceID, extensionID, marketplaceRev)
+	if err != nil {
+		return interceptModuleView{}, err
+	}
+	candidate, err := m.modules.previewSnapshot(ctx, moduleRev, module)
+	if err != nil {
+		return interceptModuleView{}, err
+	}
+	latestSource, _, err := m.entryAtRevision(marketplaceID, extensionID, marketplaceRev)
+	if err != nil {
+		return interceptModuleView{}, err
+	}
+	if marketplaceSourceSnapshotDigest(latestSource) != marketplaceSourceSnapshotDigest(source) {
+		return interceptModuleView{}, errMarketplaceRevision
+	}
+	return candidate, nil
+}
+
+// InstallExpected refetches and verifies the selected entry, then requires the
+// confirmed normalized marketplace source and immutable extension snapshot
+// digests before entering the existing module revision CAS.
+func (m *ExtensionMarketplaceManager) InstallExpected(
+	ctx context.Context,
+	marketplaceID, extensionID, marketplaceRev, moduleRev string,
+	expectedSourceSnapshotDigest, expectedCandidateSnapshotDigest string,
+) (interceptModulesView, error) {
+	if m == nil || m.store == nil || m.modules == nil {
+		return interceptModulesView{}, errMarketplaceUnavailable
+	}
+	if !validSHA256(expectedSourceSnapshotDigest) || !validSHA256(expectedCandidateSnapshotDigest) {
+		return interceptModulesView{}, errors.New("valid expected source and extension snapshot digests are required")
+	}
+	return m.installWithExpected(
+		ctx,
+		marketplaceID,
+		extensionID,
+		marketplaceRev,
+		moduleRev,
+		expectedSourceSnapshotDigest,
+		expectedCandidateSnapshotDigest,
+	)
+}
+
+func (m *ExtensionMarketplaceManager) installWithExpected(
+	ctx context.Context,
+	marketplaceID, extensionID, marketplaceRev, moduleRev string,
+	expectedSourceSnapshotDigest, expectedCandidateSnapshotDigest string,
+) (interceptModulesView, error) {
 	if m == nil || m.store == nil || m.modules == nil {
 		return interceptModulesView{}, errMarketplaceUnavailable
 	}
 	if !validSHA256(marketplaceRev) || !validSHA256(moduleRev) {
 		return interceptModulesView{}, errors.New("valid marketplace_revision and module_revision are required")
 	}
-	source, entry, err := m.entryAtRevision(marketplaceID, extensionID, marketplaceRev)
+	if expectedSourceSnapshotDigest != "" {
+		confirmedSource, err := m.sourceAtRevision(marketplaceID, marketplaceRev)
+		if err != nil {
+			return interceptModulesView{}, err
+		}
+		if marketplaceSourceSnapshotDigest(confirmedSource) != expectedSourceSnapshotDigest {
+			return interceptModulesView{}, fmt.Errorf("%w: marketplace source changed since preview", errMarketplaceRevision)
+		}
+	}
+	source, module, err := m.fetchInstallCandidate(ctx, marketplaceID, extensionID, marketplaceRev)
 	if err != nil {
 		return interceptModulesView{}, err
 	}
-	module, err := m.modules.parser.Import(ctx, interceptModuleImportRequest{URL: entry.Manifest.URL})
-	if err != nil {
-		return interceptModulesView{}, err
-	}
-	if err := validateMarketplaceInstall(source, entry, module); err != nil {
-		return interceptModulesView{}, fmt.Errorf("%w: %v", errMarketplaceIntegrity, err)
+	if expectedCandidateSnapshotDigest != "" && interceptModuleSnapshotDigest(module) != expectedCandidateSnapshotDigest {
+		return interceptModulesView{}, fmt.Errorf("%w: extension snapshot changed since preview", errInterceptRevisionConflict)
 	}
 
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.store.mu.Lock()
+	defer m.store.mu.Unlock()
 	document, body, err := m.store.Read()
 	if err != nil {
-		m.store.mu.Unlock()
-		m.mu.Unlock()
 		return interceptModulesView{}, err
 	}
 	if marketplaceRevision(body) != marketplaceRev {
-		m.store.mu.Unlock()
-		m.mu.Unlock()
 		return interceptModulesView{}, errMarketplaceRevision
 	}
 	latestSourceIndex := marketplaceSourceIndex(document.Sources, marketplaceID)
-	if latestSourceIndex < 0 || marketplaceEntryIndex(document.Sources[latestSourceIndex].Entries, extensionID) < 0 {
-		m.store.mu.Unlock()
-		m.mu.Unlock()
+	if latestSourceIndex < 0 ||
+		marketplaceSourceSnapshotDigest(document.Sources[latestSourceIndex]) != marketplaceSourceSnapshotDigest(source) ||
+		marketplaceEntryIndex(document.Sources[latestSourceIndex].Entries, extensionID) < 0 {
 		return interceptModulesView{}, errMarketplaceRevision
 	}
-	// The exact persisted entry has now been revalidated. Release marketplace
-	// locks before entering the independent module transaction; the module CAS
-	// protects its own document while the already fetched snapshot remains bound
-	// to the caller's explicit marketplace revision.
-	m.store.mu.Unlock()
-	m.mu.Unlock()
+	// Keep the marketplace proof locked through the module CAS. Marketplace
+	// operations never acquire the module store first, so this fixed
+	// marketplace-to-module order prevents the reviewed source revision from
+	// changing in the final commit window without introducing a lock cycle.
 	return m.modules.importSnapshot(ctx, moduleRev, module)
+}
+
+func (m *ExtensionMarketplaceManager) fetchInstallCandidate(
+	ctx context.Context,
+	marketplaceID, extensionID, marketplaceRev string,
+) (marketplaceSourceSnapshot, interceptModuleSnapshot, error) {
+	source, entry, err := m.entryAtRevision(marketplaceID, extensionID, marketplaceRev)
+	if err != nil {
+		return marketplaceSourceSnapshot{}, interceptModuleSnapshot{}, err
+	}
+	module, err := m.modules.parser.Import(ctx, interceptModuleImportRequest{URL: entry.Manifest.URL})
+	if err != nil {
+		return marketplaceSourceSnapshot{}, interceptModuleSnapshot{}, err
+	}
+	if err := validateMarketplaceInstall(source, entry, module); err != nil {
+		return marketplaceSourceSnapshot{}, interceptModuleSnapshot{}, fmt.Errorf("%w: %v", errMarketplaceIntegrity, err)
+	}
+	return source, module, nil
 }
 
 func (m *ExtensionMarketplaceManager) preflightRevision(revision string) error {
@@ -496,31 +722,35 @@ func marketplaceViewFromDocument(document marketplaceDocument, body []byte) mark
 		Sources:        make([]marketplaceSourceView, 0, len(document.Sources)),
 	}
 	for _, source := range document.Sources {
-		name := source.Metadata.Name
-		if source.DisplayName != "" {
-			name = source.DisplayName
+		view.Sources = append(view.Sources, marketplaceSourceViewFromSnapshot(source))
+	}
+	return view
+}
+
+func marketplaceSourceViewFromSnapshot(source marketplaceSourceSnapshot) marketplaceSourceView {
+	name := source.Metadata.Name
+	if source.DisplayName != "" {
+		name = source.DisplayName
+	}
+	view := marketplaceSourceView{
+		ID: source.ID, Name: name, DisplayName: source.DisplayName, MetadataName: source.Metadata.Name, Description: source.Metadata.Description,
+		Homepage: source.Metadata.Homepage, URL: source.URL, FinalURL: source.FinalURL,
+		Digest: source.IndexDigest, SnapshotDigest: marketplaceSourceSnapshotDigest(source), FetchedAt: source.FetchedAt,
+		Entries: make([]marketplaceEntryView, 0, len(source.Entries)),
+	}
+	for _, entry := range source.Entries {
+		capabilities := marketplaceCapabilitiesView{
+			CaptureHostCount: entry.Capabilities.CaptureHostCount, ActionCount: entry.Capabilities.ActionCount,
+			SettingCount: entry.Capabilities.SettingCount, NetworkOrigins: append([]string{}, entry.Capabilities.NetworkOrigins...),
+			PersistentStorage: entry.Capabilities.PersistentStorage, UpstreamMappingCount: entry.Capabilities.UpstreamMappingCount,
+			EgressGroupRequired: entry.Capabilities.EgressGroupRequired,
 		}
-		sourceView := marketplaceSourceView{
-			ID: source.ID, Name: name, MetadataName: source.Metadata.Name, Description: source.Metadata.Description,
-			Homepage: source.Metadata.Homepage, URL: source.URL, FinalURL: source.FinalURL,
-			Digest: source.IndexDigest, FetchedAt: source.FetchedAt,
-			Entries: make([]marketplaceEntryView, 0, len(source.Entries)),
-		}
-		for _, entry := range source.Entries {
-			capabilities := marketplaceCapabilitiesView{
-				CaptureHostCount: entry.Capabilities.CaptureHostCount, ActionCount: entry.Capabilities.ActionCount,
-				SettingCount: entry.Capabilities.SettingCount, NetworkOrigins: append([]string{}, entry.Capabilities.NetworkOrigins...),
-				PersistentStorage: entry.Capabilities.PersistentStorage, UpstreamMappingCount: entry.Capabilities.UpstreamMappingCount,
-				EgressGroupRequired: entry.Capabilities.EgressGroupRequired,
-			}
-			sourceView.Entries = append(sourceView.Entries, marketplaceEntryView{
-				ID: entry.ID, Name: entry.Name, Version: entry.Version, Description: entry.Description,
-				Tags: append([]string(nil), entry.Tags...), License: entry.License,
-				DocumentationURL: entry.DocumentationURL, ManifestURL: entry.Manifest.URL,
-				ManifestDigest: entry.Manifest.SHA256, Capabilities: capabilities,
-			})
-		}
-		view.Sources = append(view.Sources, sourceView)
+		view.Entries = append(view.Entries, marketplaceEntryView{
+			ID: entry.ID, Name: entry.Name, Version: entry.Version, Description: entry.Description,
+			Tags: append([]string(nil), entry.Tags...), License: entry.License,
+			DocumentationURL: entry.DocumentationURL, ManifestURL: entry.Manifest.URL,
+			ManifestDigest: entry.Manifest.SHA256, Capabilities: capabilities,
+		})
 	}
 	return view
 }

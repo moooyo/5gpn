@@ -198,6 +198,21 @@ func (m *InterceptModuleManager) View() (interceptModulesView, error) {
 	return m.viewLocked()
 }
 
+func (m *InterceptModuleManager) SettingsView() (interceptSettingsView, error) {
+	if m == nil || m.store == nil {
+		return interceptSettingsView{}, errInterceptModulesUnavailable
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.store.mu.Lock()
+	defer m.store.mu.Unlock()
+	document, body, err := m.store.Read()
+	if err != nil {
+		return interceptSettingsView{}, err
+	}
+	return interceptSettings(document, body), nil
+}
+
 func (m *InterceptModuleManager) Snapshot(id string) (interceptModuleSnapshotView, error) {
 	if m == nil || m.store == nil {
 		return interceptModuleSnapshotView{}, errInterceptModulesUnavailable
@@ -338,17 +353,113 @@ func validateInterceptEgressBindings(document interceptConfigDocument, available
 }
 
 func (m *InterceptModuleManager) Import(ctx context.Context, request interceptModuleImportRequest) (interceptModulesView, error) {
+	return m.importWithExpected(ctx, request, "")
+}
+
+// PreviewImport fetches and validates an extension without changing the
+// persisted module document. The returned snapshot digest can be bound to an
+// explicit confirmation and supplied to ImportExpected.
+func (m *InterceptModuleManager) PreviewImport(ctx context.Context, request interceptModuleImportRequest) (interceptModuleView, error) {
+	if m == nil || m.store == nil {
+		return interceptModuleView{}, errInterceptModulesUnavailable
+	}
+	if !validMihomoConfigRevision(request.Revision) {
+		return interceptModuleView{}, errors.New("a valid revision is required")
+	}
+	module, err := m.parser.Import(ctx, request)
+	if err != nil {
+		return interceptModuleView{}, err
+	}
+	return m.previewSnapshot(ctx, request.Revision, module)
+}
+
+// ImportExpected refetches or reparses the requested extension and verifies
+// that its immutable snapshot still matches the confirmed preview before the
+// existing module revision CAS commits it. Legacy callers use Import, while
+// confirmation workflows must supply a non-empty expected digest here.
+func (m *InterceptModuleManager) ImportExpected(
+	ctx context.Context,
+	request interceptModuleImportRequest,
+	expectedSnapshotDigest string,
+) (interceptModulesView, error) {
+	if m == nil || m.store == nil {
+		return interceptModulesView{}, errInterceptModulesUnavailable
+	}
+	if !validSHA256(expectedSnapshotDigest) {
+		return interceptModulesView{}, errors.New("a valid expected snapshot digest is required")
+	}
+	return m.importWithExpected(ctx, request, expectedSnapshotDigest)
+}
+
+func (m *InterceptModuleManager) importWithExpected(
+	ctx context.Context,
+	request interceptModuleImportRequest,
+	expectedSnapshotDigest string,
+) (interceptModulesView, error) {
 	if m == nil || m.store == nil {
 		return interceptModulesView{}, errInterceptModulesUnavailable
 	}
 	if !validMihomoConfigRevision(request.Revision) {
 		return interceptModulesView{}, errors.New("a valid revision is required")
 	}
+	if expectedSnapshotDigest != "" && !validSHA256(expectedSnapshotDigest) {
+		return interceptModulesView{}, errors.New("a valid expected snapshot digest is required")
+	}
 	module, err := m.parser.Import(ctx, request)
 	if err != nil {
 		return interceptModulesView{}, err
 	}
+	if expectedSnapshotDigest != "" && interceptModuleSnapshotDigest(module) != expectedSnapshotDigest {
+		return interceptModulesView{}, fmt.Errorf("%w: extension snapshot changed since preview", errInterceptRevisionConflict)
+	}
 	return m.importSnapshot(ctx, request.Revision, module)
+}
+
+func (m *InterceptModuleManager) previewSnapshot(
+	ctx context.Context,
+	revision string,
+	module interceptModuleSnapshot,
+) (interceptModuleView, error) {
+	if m == nil || m.store == nil {
+		return interceptModuleView{}, errInterceptModulesUnavailable
+	}
+	if !validMihomoConfigRevision(revision) {
+		return interceptModuleView{}, errors.New("a valid revision is required")
+	}
+	if err := validateInterceptModule(module); err != nil {
+		return interceptModuleView{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.store.mu.Lock()
+	document, body, err := m.store.Read()
+	if err != nil {
+		m.store.mu.Unlock()
+		return interceptModuleView{}, err
+	}
+	if interceptRevision(body) != revision {
+		m.store.mu.Unlock()
+		return interceptModuleView{}, errInterceptRevisionConflict
+	}
+	for _, existing := range document.Modules {
+		if existing.ID == module.ID {
+			m.store.mu.Unlock()
+			return interceptModuleView{}, fmt.Errorf("%w: extension id %q is already installed", errInterceptModuleConflict, module.ID)
+		}
+	}
+	document.Modules = append(document.Modules, module)
+	document.ExecutionOrder = append(document.ExecutionOrder, module.ID)
+	candidateBody, err := marshalInterceptDocument(document)
+	m.store.mu.Unlock()
+	if err != nil {
+		return interceptModuleView{}, err
+	}
+	if err := m.validateSidecarCandidate(ctx, candidateBody); err != nil {
+		return interceptModuleView{}, err
+	}
+	view := interceptCandidateView(module)
+	view.ExecutionOrder = len(document.ExecutionOrder)
+	return view, nil
 }
 
 // importSnapshot publishes a module that has already been fetched and parsed by
@@ -480,6 +591,7 @@ func (m *InterceptModuleManager) CheckUpdate(ctx context.Context, id, revision s
 		return interceptModuleUpdateCheckView{}, err
 	}
 	view := interceptCandidateView(candidate)
+	view.ExecutionOrder = interceptExecutionOrderIndex(latest.ExecutionOrder)[id]
 	return interceptModuleUpdateCheckView{Revision: revision, State: "available", Candidate: &view}, nil
 }
 
@@ -732,7 +844,7 @@ func (m *InterceptModuleManager) mutate(
 		return interceptModulesView{}, errInterceptRevisionConflict
 	}
 	nextDocument := oldDocument
-	nextDocument.ExecutionOrder = append([]string(nil), oldDocument.ExecutionOrder...)
+	nextDocument.ExecutionOrder = append([]string{}, oldDocument.ExecutionOrder...)
 	nextDocument.Modules = append([]interceptModuleSnapshot(nil), oldDocument.Modules...)
 	for index := range nextDocument.Modules {
 		nextDocument.Modules[index].NetworkOrigins = append([]string(nil), oldDocument.Modules[index].NetworkOrigins...)
@@ -1002,6 +1114,9 @@ func interceptCandidateView(module interceptModuleSnapshot) interceptModuleView 
 	reason := ""
 	if !ready {
 		reason = "settings-required"
+	} else if module.EgressGroupRequired && module.EgressGroup == "" {
+		ready = false
+		reason = "egress-group-required"
 	}
 	return interceptModuleViewFromSnapshot(module, ready, reason)
 }
@@ -1011,11 +1126,29 @@ func interceptModuleViewFromSnapshot(module interceptModuleSnapshot, ready bool,
 		ID: module.ID, Version: module.Version, Name: module.Name, Description: module.Description,
 		Enabled: module.Enabled, Ready: ready, Reason: moduleRuntimeReason(ready, reason),
 		CaptureHosts: append([]string(nil), module.CaptureHosts...), ScriptCount: len(module.Scripts),
+		Actions:  interceptModuleActionViews(module.Scripts),
 		Settings: cloneInterceptSettings(module.Settings), HostMappings: append([]interceptHostMapping(nil), module.HostMappings...),
 		PersistentStorage: module.PersistentStorage, NetworkOrigins: append([]string{}, module.NetworkOrigins...),
 		EgressGroupRequired: module.EgressGroupRequired, EgressGroup: module.EgressGroup, SourceURL: module.Source.URL,
 		SourceDigest: module.Source.Digest, SnapshotDigest: interceptModuleSnapshotDigest(module), ImportedAt: module.ImportedAt,
 	}
+}
+
+func interceptModuleActionViews(actions []interceptScriptRule) []interceptModuleActionView {
+	views := make([]interceptModuleActionView, 0, len(actions))
+	for _, action := range actions {
+		match := action.Match
+		match.Hosts = append([]string{}, action.Match.Hosts...)
+		match.Schemes = append([]string{}, action.Match.Schemes...)
+		match.Methods = append([]string{}, action.Match.Methods...)
+		match.StatusCodes = append([]int{}, action.Match.StatusCodes...)
+		views = append(views, interceptModuleActionView{
+			ID: action.ID, Phase: action.Phase, Match: match,
+			ScriptURL: action.ScriptURL, ScriptDigest: action.ScriptDigest,
+			BodyMode: action.BodyMode, TimeoutMS: action.TimeoutMS, MaxBodyBytes: action.MaxBodyBytes,
+		})
+	}
+	return views
 }
 
 func cloneInterceptSettings(settings []interceptModuleSetting) []interceptModuleSetting {

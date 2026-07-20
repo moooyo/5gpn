@@ -209,9 +209,9 @@ explicitly permitted—a quota-bound per-extension storage object and synchronou
 network requests constrained to exact approved origins. It has no ambient
 network client, filesystem, process, timer, socket, or module-loader access. A
 permitted script can deliberately send any data visible to it to those origins;
-the Console states that risk before enable. Fixed process-wide network time,
-body, call-count, and concurrency limits are runtime safety bounds rather than
-manifest knobs.
+every management surface states that risk before enable. Fixed process-wide
+network time, body, call-count, and concurrency limits are runtime safety bounds
+rather than manifest knobs.
 
 First-party extension source is maintained independently in the public
 `moooyo/5gpn-extensions` repository. That repository publishes the strict,
@@ -221,8 +221,9 @@ repository does not vendor, mirror, seed, or release extension manifests or
 scripts. Apple WLOC and every other maintained extension follow this external
 source boundary and are never compiled into either Go binary.
 
-An authenticated operator may add an explicit HTTPS marketplace index to the
-Console. The daemon fetches it through the same redirect and post-resolution
+An authenticated operator may add an explicit HTTPS marketplace index through
+the Console or an authorized private-chat Telegram bot session. The daemon
+fetches it through the same redirect and post-resolution
 SSRF guard as extension resources, strictly rejects unknown or duplicate JSON
 fields, applies finite source, entry, URL, string, and response-size limits, and
 atomically retains one complete normalized index snapshot. A failed add or
@@ -256,9 +257,9 @@ a second global DNS policy. Their host must be covered by the same extension's
 sidecar, preserve the original HTTP Host and TLS SNI, reject private, loopback,
 link-local, and otherwise unsafe IPv4 targets, and return through mihomo. A
 manifest may require an operator egress-group binding but cannot name, inspect,
-or change the selected group. The Console exposes only existing proxy-group
-names plus `DIRECT`; the binding is operator state stored outside the immutable
-snapshot. Every transformed TCP or UDP flow returns through authenticated
+or change the selected group. The management surfaces expose only existing
+proxy-group names plus `DIRECT`; the binding is operator state stored outside
+the immutable snapshot. Every transformed TCP or UDP flow returns through authenticated
 `intercept-egress`, where ordered domain/port rules apply the first matching
 bound extension's group. Missing and removed required bindings fail closed
 without fallback.
@@ -433,16 +434,56 @@ the same complete-document revision. The Console and Telegram bot call the same
 in-process `InterceptModuleManager`; neither has a private toggle path. Import,
 argument update, delete, reorder, operator group binding, and enable/disable
 operations carry the SHA-256 revision of the complete sidecar document. Typed
-setting updates, including a
-`location` value selected through the map editor, use that same revision and
-manager; there is no plugin-specific settings endpoint.
-Telegram lists the same readiness and host state and uses a separate
-confirmation message before applying an enable or disable. It cannot import,
-inspect source bodies, or edit typed settings;
-those higher-context operations remain in the authenticated Console. A plugin
-with network origins cannot be enabled from Telegram because that surface cannot
-show the complete origin permission review; it directs the operator to the
-Console instead. Disable remains available as a fail-safe operation.
+setting updates, including a `location` value supplied through the Console map
+editor or Telegram input flow, use that same revision and manager; there is no
+plugin-specific settings endpoint.
+
+The Telegram bot is a trusted plugin-management surface only for allowlisted
+administrators in private chats. It exposes the same normalized marketplace and
+extension state needed to add, refresh, browse, and remove marketplace sources;
+install from a marketplace entry or HTTPS manifest URL; import a pasted local
+manifest; uninstall, enable, or disable an extension; edit every typed setting;
+bind an operator egress group; reorder extensions; and check and apply updates.
+It does not gain a separate state store or mutation path. Marketplace operations
+use the marketplace manager, while extension operations use the same
+`InterceptModuleManager` transactions as the Console. An install or applied
+update always finishes disabled; enabling is a separate confirmed operation.
+
+Every Telegram write is a two-step review and confirmation. The review renders
+the complete normalized impact relevant to the operation, including the source,
+identity, versions, immutable snapshot digest, changed settings, capture hosts,
+action match/execution metadata and script digests (but not script bodies),
+permissions, exact network origins, execution position, egress binding, and
+enabled/runtime transition. Long reviews may be split across protected
+messages or a protected document, but the confirmation control is sent only
+after the complete review. The daemon stores only an opaque, short-lived,
+one-use confirmation reference in callback data. Its server-side record is bound
+to the allowlisted administrator user ID, the exact private chat ID, the exact
+operation payload, and every applicable current-state proof: the complete
+sidecar revision and affected extension snapshot digest, or the marketplace
+document revision and exact normalized marketplace snapshot digest. Marketplace
+installation and extension update additionally bind the exact candidate
+extension snapshot digest. Cross-user or cross-chat use, expiry, replay, a
+changed revision, or any digest mismatch fails closed and requires a new review.
+The normalized marketplace proof covers the local display label, configured and
+redirect-final URLs, normalized metadata, entries, and resolved resources; it
+excludes only the observation timestamp. Remote index, manifest, and script
+digests remain independent publisher data.
+
+When a candidate or installed extension declares network origins, every review
+lists each exact origin. An enable review additionally states that the script
+may send any decrypted request, response, setting, or storage data visible to it
+to every listed origin. Telegram never compresses this into a generic permission
+label or treats an earlier acknowledgement as approval for a changed snapshot.
+
+Telegram supports `location` settings through the client's native location
+sharing flow and through explicit longitude, latitude, and accuracy input. The
+bot warns before collection that native or manually entered coordinates travel
+through Telegram and the Telegram Bot API. The Console remains the richer
+editor for city search, a draggable OpenStreetMap point, accuracy visualization,
+and direct coordinate fields; Telegram does not embed or proxy that full map.
+When Telegram omits horizontal accuracy, the bot records the contract's
+conservative 100000-metre maximum rather than inventing precision.
 
 An active-extension, reorder, binding, or master enable/disable transaction
 holds the sidecar and mihomo store locks in a fixed order. It validates the
@@ -553,11 +594,13 @@ private chat. The bot explicitly subscribes to message and callback-query
 updates and owns a configured token's long-polling mode rather than exposing a
 webhook listener.
 
-The bot is a compact operations surface, not a second full console. Its menu
-covers status and refresh, DNS diagnosis, recent logs, upstream visibility,
-rule reload, confirmed mihomo restart and certificate renewal, iOS bootstrap,
-and a link to the console. Complex ordered-policy editing, subscriptions, and
-the complete operator-owned mihomo YAML stay in the Web console. Privileged
+The bot is a trusted private-chat operations surface, not a second full console.
+Its menu covers status and refresh, DNS diagnosis, recent logs, upstream
+visibility, rule reload, confirmed mihomo restart and certificate renewal, iOS
+bootstrap, complete marketplace and extension lifecycle management, and a link
+to the console. Complex ordered-policy editing, subscriptions, the complete
+operator-owned mihomo YAML, and the rich draggable location map stay in the Web
+console. Privileged
 operations do not weaken the daemon sandbox: narrowly scoped system-service and
 certificate jobs are delegated to systemd. Destructive or disruptive actions
 use expiring one-use confirmations and process-wide single-flight exclusion.
@@ -628,8 +671,9 @@ Specialized live state remains in purpose-specific, atomically written files:
   bindings.
   The global MITM master, HTTP/2 negotiation, and QUIC fallback protection live
   in the same document;
-- `extension-marketplaces.json` is the Console-managed list of explicitly added
-  marketplace URLs and their last complete, bounded index snapshots. It has an
+- `extension-marketplaces.json` is the operator-managed list of explicitly added
+  marketplace URLs and their last complete, bounded index snapshots. The
+  Console and the trusted private-chat Telegram bot share this state. It has an
   independent byte revision, so refreshing discovery metadata cannot change a
   sidecar runtime revision. A missing file means no configured marketplaces;
 - `/var/lib/5gpn-intercept/store.json` is the size-bounded, sidecar-owned
@@ -947,7 +991,8 @@ stored and subsequent traffic follows the normal operator-owned mihomo rules.
 The page must state that QUIC fallback is guaranteed for already matched IETF
 QUIC v1/v2 traffic and other variants are not guaranteed.
 
-The dedicated `/extensions` route owns installed native plugins. It shows immutable
+Within the Web Console, the dedicated `/extensions` route owns installed native
+plugins. It shows immutable
 manifest/script digests, semantic version, normalized capture hosts, actions,
 permissions, exact network origins, typed settings, upstream mappings, explicit
 execution position, operator egress binding, and enabled/runtime state. Enabling a plugin with
@@ -969,7 +1014,8 @@ only the bounded query and language to the fixed Nominatim origin through the
 same post-resolution SSRF dial guard used by subscription fetches. It never
 forwards the bearer token, arbitrary headers, or an operator-selected URL.
 
-The top-level `/marketplace` route owns extension discovery. It loads only
+Within the Web Console, the top-level `/marketplace` route owns browser-based
+extension discovery. It loads only
 authenticated, daemon-validated cached indexes, exposes source filters, local
 search and truthful sorting, and supports adding, refreshing, and removing
 explicit sources. An operator may assign a bounded local display name; that

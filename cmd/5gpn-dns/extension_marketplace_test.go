@@ -17,18 +17,19 @@ import (
 )
 
 type marketplaceFixture struct {
-	server   *httptest.Server
-	mu       sync.Mutex
-	index    []byte
-	manifest string
-	script   string
-	fail     bool
-	referer  string
+	server         *httptest.Server
+	mu             sync.Mutex
+	index          []byte
+	manifest       string
+	script         string
+	fail           bool
+	referer        string
+	redirectTarget string
 }
 
 func newMarketplaceFixture(t *testing.T, mutate func(*marketplaceIndex)) *marketplaceFixture {
 	t.Helper()
-	fixture := &marketplaceFixture{}
+	fixture := &marketplaceFixture{redirectTarget: "/index.json"}
 	fixture.script = `function transform(context) { return { response: { body: context.response.body } } }`
 	fixture.manifest = `apiVersion: 5gpn.io/v1
 kind: Extension
@@ -59,10 +60,10 @@ actions:
 		defer fixture.mu.Unlock()
 		switch r.URL.Path {
 		case "/redirect":
-			http.Redirect(w, r, "/index.json", http.StatusFound)
+			http.Redirect(w, r, fixture.redirectTarget, http.StatusFound)
 		case "/unsafe-redirect":
 			http.Redirect(w, r, "http://127.0.0.1/internal", http.StatusFound)
-		case "/index.json":
+		case "/index.json", "/a/index.json", "/b/index.json":
 			fixture.referer = r.Header.Get("Referer")
 			if fixture.fail {
 				http.Error(w, "failed", http.StatusBadGateway)
@@ -405,7 +406,7 @@ func TestMarketplaceAPIViewOmitsInstallationInternals(t *testing.T) {
 			t.Fatalf("API view leaked internal field %s: %s", forbidden, encoded)
 		}
 	}
-	for _, required := range []string{`"recommended_url"`, `"metadata_name"`, `"manifest_url"`, `"manifest_digest"`, `"documentation_url"`, `"capture_host_count"`, `"network_origins"`} {
+	for _, required := range []string{`"recommended_url"`, `"metadata_name"`, `"snapshot_digest"`, `"manifest_url"`, `"manifest_digest"`, `"documentation_url"`, `"capture_host_count"`, `"network_origins"`} {
 		if !strings.Contains(encoded, required) {
 			t.Fatalf("API view omitted %s: %s", required, encoded)
 		}

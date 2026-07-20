@@ -170,6 +170,23 @@ export interface InterceptModuleSetting {
   default?: unknown
   value?: unknown
 }
+export interface InterceptActionMatch {
+  hosts: string[]
+  schemes: string[]
+  methods?: string[]
+  path_regex: string
+  status_codes?: number[]
+}
+export interface InterceptModuleAction {
+  id: string
+  phase: 'request' | 'response'
+  match: InterceptActionMatch
+  script_url?: string
+  script_digest: string
+  body_mode: 'none' | 'text' | 'binary'
+  timeout_ms: number
+  max_body_bytes: number
+}
 export interface InterceptHostMapping { host: string; target: string }
 export interface InterceptModule {
   id: string
@@ -181,6 +198,7 @@ export interface InterceptModule {
   reason?: string
   capture_hosts: string[]
   script_count: number
+  actions?: InterceptModuleAction[]
   settings?: InterceptModuleSetting[]
   upstream_mappings?: InterceptHostMapping[]
   persistent_storage: boolean
@@ -257,12 +275,14 @@ export interface MarketplaceEntry {
 export interface MarketplaceSource {
   id: string
   name: string
+  display_name?: string
   metadata_name: string
   description?: string
   homepage?: string
   url: string
   final_url: string
   digest: string
+  snapshot_digest: string
   fetched_at: string
   entries: MarketplaceEntry[]
 }

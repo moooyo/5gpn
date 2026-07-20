@@ -319,6 +319,7 @@ func main() {
 		trustResolver,
 		interceptManager,
 	)
+	ctrl.SetExtensionMarketplaceManager(marketplaceManager)
 	if err := interceptManager.PrepareRuntime(); err != nil {
 		log.Printf("warning: interception modules: %v -- DNS interception overlay remains fail-closed", err)
 	}

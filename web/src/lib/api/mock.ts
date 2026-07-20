@@ -310,6 +310,7 @@ let marketplaces: T.MarketplaceSource[] = [{
   url: 'https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json',
   final_url: 'https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json',
   digest: '9'.repeat(64),
+  snapshot_digest: '6'.repeat(64),
   fetched_at: '2026-07-20T00:00:00Z',
   entries: [{
     id: 'io.5gpn.apple-wloc', name: 'Apple WLOC Location Override', version: '1.0.0',
@@ -345,7 +346,7 @@ export async function addMarketplace(revision: string, url: string, name?: strin
   await delay(160)
   if (revision !== marketplaceRevision) throw new ApiError(409, 'The marketplace ledger changed. Refresh and try again.')
   if (!url.startsWith('https://')) throw new ApiError(400, 'Marketplace URLs must use HTTPS.')
-  marketplaces.push({ id: `source-${marketplaces.length + 1}`, name: name?.trim() || 'Added marketplace', metadata_name: 'Added marketplace', url, final_url: url, digest: '8'.repeat(64), fetched_at: new Date().toISOString(), entries: [] })
+  marketplaces.push({ id: `source-${marketplaces.length + 1}`, name: name?.trim() || 'Added marketplace', metadata_name: 'Added marketplace', url, final_url: url, digest: '8'.repeat(64), snapshot_digest: '5'.repeat(64), fetched_at: new Date().toISOString(), entries: [] })
   advanceMarketplaceRevision()
   return marketplacesView()
 }

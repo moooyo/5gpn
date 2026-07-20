@@ -6,10 +6,22 @@ in [`docs/architecture.md`](docs/architecture.md). A section marked **Pending**
 describes required future behavior, not behavior that is already implemented.
 Update the status and the normative documentation when an implementation lands.
 
+## Current worktree handoff
+
+**Status: Telegram plugin-management implementation is feature-complete. Final
+broad regression was paused by the owner on 2026-07-20, and direct delivery to
+the `beta` branch was authorized on 2026-07-21.**
+
+- Continue from [`docs/tg-bot-plugin-management-handoff.md`](docs/tg-bot-plugin-management-handoff.md).
+- The handoff records completed verification, final edits made afterward,
+  known Windows limitations, and follow-up checks that were intentionally
+  deferred.
+
 ## Native interception extensions
 
 **Status: Implemented. Recorded 2026-07-19 and superseded in place by the
-current pre-release contract on 2026-07-20.**
+current pre-release contract, including trusted Telegram management, on
+2026-07-20.**
 
 - The extension system accepts only strict `5gpn.io/v1` native YAML manifests.
   It does not parse or emulate third-party proxy-client plugin formats.
@@ -22,7 +34,8 @@ current pre-release contract on 2026-07-20.**
   synchronous network capability restricted to exact HTTP(S) origins. They
   still have no filesystem, process, timer, module-loader, socket, or ambient
   network API. A permitted script can deliberately send any data visible to it
-  to those origins, and the Console must say so plainly before enable.
+  to those origins, and every management surface must say so plainly before
+  enable.
 - Extensions cannot name or change application egress. A manifest may require
   an operator egress binding; the operator selects an existing mihomo group,
   and ordered domain/port rules on the shared authenticated
@@ -30,9 +43,11 @@ current pre-release contract on 2026-07-20.**
   closed without a default fallback. The explicit extension execution order
   determines both action composition and the first binding that wins for an
   overlapping destination.
-- URL install and local add are separate Console actions. URL install accepts
-  one HTTPS manifest and may snapshot relative HTTPS scripts. Local add accepts
-  one pasted or uploaded manifest and uses inline or absolute HTTPS scripts.
+- URL install and local add are separate actions. URL install accepts one HTTPS
+  manifest and may snapshot relative HTTPS scripts. Local add accepts one
+  pasted or uploaded manifest and uses inline or absolute HTTPS scripts. The
+  Telegram local-add flow accepts pasted text rather than claiming an embedded
+  file or Web form.
 - First-party extension source, including Apple WLOC, is maintained in the
   separate `moooyo/5gpn-extensions` repository. The core repository does not
   vendor, seed, or release extension manifests or scripts. Its target
@@ -40,18 +55,37 @@ current pre-release contract on 2026-07-20.**
   to any native extension.
 - The extensions repository publishes a deterministic
   `5gpn.io/marketplace/v1` index through GitHub Pages. Operators explicitly add
-  marketplace URLs in the authenticated Console; successful refreshes retain a
-  complete bounded index snapshot and failures preserve the prior snapshot.
+  marketplace URLs through the authenticated Console or the trusted Telegram
+  administrator private-chat surface; successful refreshes retain a complete
+  bounded index snapshot and failures preserve the prior snapshot.
   Marketplace data is discovery metadata, never an execution or trust root.
   Selecting an entry refetches one manifest through the native parser, verifies
   the listed manifest/script digests and derived capability summary, and stores
   the normal disabled immutable snapshot. There is no automatic install,
   enable, update, crawling, remote artwork, or source mirroring.
-- Marketplace discovery is a top-level `/marketplace` Console route. Installed
-  snapshot configuration and execution remain on `/extensions`, with host audit
-  on `/extensions/hosts`; the installed-extensions page has no decorative
-  traffic rail or embedded marketplace tab. Optional marketplace display names
-  are local labels and never publisher identity.
+- In the Web Console, marketplace discovery is a top-level `/marketplace`
+  route. Installed snapshot configuration and execution remain on
+  `/extensions`, with host audit on `/extensions/hosts`; the
+  installed-extensions page has no decorative traffic rail or embedded
+  marketplace tab. Optional marketplace display names are local labels and
+  never publisher identity.
+- The Telegram bot is a trusted plugin-management endpoint only for configured
+  administrators in private chats. It supports marketplace source management
+  and browsing, marketplace/URL/pasted-text installation, uninstall,
+  enable/disable, all typed settings, `location`, egress binding, execution
+  order, and update checks/applies through the same managers and state as the
+  Console. Install and update apply always leave the extension disabled.
+- Every Telegram mutation has a complete review followed by a short-lived,
+  one-use confirmation bound to the administrator, exact private chat,
+  operation payload, current revision, and exact extension snapshot or
+  marketplace index digest. Stale, replayed, cross-user, cross-chat, or
+  digest-mismatched confirmations fail closed. Reviews list every declared
+  network origin and explicitly warn that the script can send any visible
+  decrypted request, response, setting, or storage data there.
+- Telegram `location` editing accepts the client's native location message or
+  explicit longitude, latitude, and accuracy. The bot warns that coordinates
+  pass through Telegram. City search, the draggable OpenStreetMap point, and
+  accuracy visualization remain in the Console.
 
 ## Stable and beta release channels
 

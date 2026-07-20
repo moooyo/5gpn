@@ -50,14 +50,19 @@ func isValidDomain(s string) bool {
 // (long-polling) and calls the in-memory Controller directly — no HTTP, no
 // bearer token.
 type Bot struct {
-	tg         *bot.Bot
-	ctrl       *Controller
-	admins     map[int64]bool
-	adminsMu   sync.RWMutex
-	healthMu   sync.RWMutex
-	healthFn   func(error)
-	actionOnce sync.Once
-	actions    *botActionGuard
+	tg                *bot.Bot
+	ctrl              *Controller
+	admins            map[int64]bool
+	adminsMu          sync.RWMutex
+	healthMu          sync.RWMutex
+	healthFn          func(error)
+	actionOnce        sync.Once
+	actions           *botActionGuard
+	extensionOnce     sync.Once
+	extensionState    *botExtensionStateStore
+	extensionReviewMu sync.Mutex
+	extensionOpsOnce  sync.Once
+	extensionOps      *botExtensionOperationGuard
 
 	// pending is the per-chat conversational state machine: chat_id -> action.
 	// The current "diagnose" action consumes the next domain message for
@@ -289,6 +294,14 @@ func (bt *Bot) ReplaceAdmins(ids []int64) {
 	previous := adminIDsFromSet(bt.admins)
 	bt.admins = next
 	bt.adminsMu.Unlock()
+	for _, oldID := range previous {
+		if next[oldID] {
+			continue
+		}
+		bt.actionGuard().RevokeAdmin(oldID)
+		bt.extensionStateStore().CancelOwner(oldID, oldID)
+		bt.cancelBotExtensionOperation(oldID, oldID)
+	}
 
 	if bt.tg == nil {
 		return
@@ -469,6 +482,12 @@ func (bt *Bot) handleID(ctx context.Context, b *bot.Bot, update *models.Update) 
 	if update.Message == nil || update.Message.From == nil {
 		return
 	}
+	if bt.isAdmin(update.Message.From.ID) && update.Message.Chat.Type == models.ChatTypePrivate {
+		if bt.handleExtensionInput(ctx, b, update, update.Message.From.ID) {
+			return
+		}
+		bt.cancelExtensionState(update)
+	}
 	if _, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:         update.Message.Chat.ID,
 		Text:           fmt.Sprintf("你的 Telegram 数字 ID：<code>%d</code>", update.Message.From.ID),
@@ -513,6 +532,28 @@ func (bt *Bot) actionGuard() *botActionGuard {
 		bt.actions = newBotActionGuard()
 	})
 	return bt.actions
+}
+
+func (bt *Bot) extensionStateStore() *botExtensionStateStore {
+	bt.extensionOnce.Do(func() {
+		if bt.extensionState == nil {
+			bt.extensionState = newBotExtensionStateStore()
+		}
+	})
+	return bt.extensionState
+}
+
+func (bt *Bot) cancelExtensionState(update *models.Update) bool {
+	if update == nil || update.Message == nil {
+		return false
+	}
+	uid, ok := senderID(update)
+	if !ok {
+		return false
+	}
+	removed := bt.extensionStateStore().CancelOwner(uid, update.Message.Chat.ID)
+	cancelled := bt.cancelBotExtensionOperation(uid, update.Message.Chat.ID)
+	return removed || cancelled
 }
 
 // --------------------------------------------------------------------------- //
@@ -603,13 +644,18 @@ func callbackTarget(cq *models.CallbackQuery) (chatID int64, msgID int, ok bool)
 // Command handlers
 // --------------------------------------------------------------------------- //
 
-// handleMenu opens the main menu (for /start, /menu, /help). Any slash command
-// also aborts an in-progress conversational flow, mirroring tgbot.py.
+// handleMenu opens the main menu (for /start and /menu). While an extension
+// value is pending, command-shaped text is data; /cancel is the explicit exit.
 func (bt *Bot) handleMenu(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
+	uid, _ := senderID(update)
+	if bt.handleExtensionInput(ctx, b, update, uid) {
+		return
+	}
 	bt.clearPending(update.Message.Chat.ID)
+	bt.cancelExtensionState(update)
 	bt.send(ctx, b, update.Message.Chat.ID, "<b>5gpn 控制台</b>\n选择一个操作：", mainMenu())
 }
 
@@ -617,15 +663,21 @@ func (bt *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update
 	if update.Message == nil {
 		return
 	}
+	uid, _ := senderID(update)
+	if bt.handleExtensionInput(ctx, b, update, uid) {
+		return
+	}
 	bt.clearPending(update.Message.Chat.ID)
+	bt.cancelExtensionState(update)
 	bt.send(ctx, b, update.Message.Chat.ID,
 		"<b>5gpn Telegram 运维助手</b>\n\n"+
 			"• 仅允许已配置管理员私聊操作。\n"+
 			"• <code>/lookup example.com</code> 查看规则判定与逐上游结果。\n"+
 			"• 重启 Mihomo 和续证需二次确认，并且同类操作只能同时运行一个。\n"+
-			"• MITM 模块可在菜单中审查状态并二次确认启停；部分兼容模块必须先在 Web 控制台确认。\n"+
+			"• 插件市场、安装卸载、启停、参数、位置、出口、排序和更新均可在菜单中管理。\n"+
+			"• 每个写操作都会先显示完整影响，并要求短期一次性确认；联网插件会逐项列出 origin 风险。\n"+
 			"• 复杂策略、上游编辑和 Mihomo YAML 请使用 Web 控制台。\n"+
-			"• <code>/cancel</code> 只取消当前等待的域名输入，不会中断已启动的系统操作。",
+			"• <code>/cancel</code> 取消当前等待的输入或确认，不会中断已经开始执行的操作。",
 		mainMenu())
 }
 
@@ -634,7 +686,12 @@ func (bt *Bot) handleStatus(ctx context.Context, b *bot.Bot, update *models.Upda
 	if update.Message == nil {
 		return
 	}
+	uid, _ := senderID(update)
+	if bt.handleExtensionInput(ctx, b, update, uid) {
+		return
+	}
 	bt.clearPending(update.Message.Chat.ID)
+	bt.cancelExtensionState(update)
 	bt.send(ctx, b, update.Message.Chat.ID, bt.doStatus(), statusKB())
 }
 
@@ -642,7 +699,12 @@ func (bt *Bot) handleLookup(ctx context.Context, b *bot.Bot, update *models.Upda
 	if update.Message == nil {
 		return
 	}
+	uid, _ := senderID(update)
+	if bt.handleExtensionInput(ctx, b, update, uid) {
+		return
+	}
 	chatID := update.Message.Chat.ID
+	bt.cancelExtensionState(update)
 	parts := strings.Fields(update.Message.Text)
 	if len(parts) < 2 {
 		bt.setPending(chatID, "diagnose")
@@ -675,8 +737,9 @@ func (bt *Bot) handleCancel(ctx context.Context, b *bot.Bot, update *models.Upda
 	chatID := update.Message.Chat.ID
 	_, pending := bt.getPending(chatID)
 	bt.clearPending(chatID)
-	if pending {
-		bt.send(ctx, b, chatID, "已取消待输入的 DNS 诊断。", mainMenu())
+	extensionPending := bt.cancelExtensionState(update)
+	if pending || extensionPending {
+		bt.send(ctx, b, chatID, "已取消当前待输入内容或确认，未执行任何变更。", mainMenu())
 		return
 	}
 	bt.send(ctx, b, chatID, "当前没有待取消的输入。", mainMenu())
@@ -699,9 +762,14 @@ func (bt *Bot) defaultHandler(ctx context.Context, b *bot.Bot, update *models.Up
 	chatID := update.Message.Chat.ID
 	text := strings.TrimSpace(update.Message.Text)
 
-	// Any slash command aborts an in-progress flow. (/start,/menu,/help,
-	// /status,/cancel,/id have their own handlers; this catches everything
-	// else, e.g. a typo.)
+	uid, _ := senderID(update)
+	if bt.handleExtensionInput(ctx, b, update, uid) {
+		return
+	}
+
+	// Unknown slash commands cancel only the DNS text prompt. Extension input
+	// is checked first because a valid typed text value or local manifest may
+	// legitimately begin with '/'; /cancel remains the explicit escape hatch.
 	if strings.HasPrefix(text, "/") {
 		bt.clearPending(chatID)
 		bt.send(ctx, b, chatID, "未知命令。发送 /menu 打开操作面板。", nil)
@@ -736,8 +804,6 @@ func auditableCallbackOp(intent callbackIntent) (op string, mutating bool) {
 		return "logs:" + intent.arg, true // privileged journal exfil to Telegram
 	case cbIOSPhoto:
 		return "ios-profile-photo", true
-	case cbModuleToggle:
-		return "module:" + intent.arg, true
 	default:
 		return "", false
 	}
@@ -769,6 +835,10 @@ func (bt *Bot) handleCallback(ctx context.Context, b *bot.Bot, update *models.Up
 	intent := parseCallback(cq.Data)
 
 	uid, _ := senderID(update) // adminGate already rejected an absent/unauthorized sender.
+	if intent.kind != cbExtension {
+		bt.extensionStateStore().CancelOwner(uid, chatID)
+		bt.cancelBotExtensionOperation(uid, chatID)
+	}
 
 	switch intent.kind {
 	case cbMenuMain:
@@ -793,75 +863,8 @@ func (bt *Bot) handleCallback(ctx context.Context, b *bot.Bot, update *models.Up
 		bt.edit(ctx, b, cq, "选择要查看日志的服务：", logsMenu())
 	case cbMenuIOS:
 		bt.edit(ctx, b, cq, bt.opIOSResult().HTML(), iosMenu())
-	case cbMenuModules:
-		bt.renderModules(ctx, b, cq, "")
-	case cbModuleRequest:
-		parts := strings.SplitN(intent.arg, ":", 2)
-		if len(parts) != 2 {
-			bt.edit(ctx, b, cq, "模块操作无效。", backKB("menu:modules"))
-			return
-		}
-		view, viewErr := bt.ctrl.InterceptModules()
-		if viewErr != nil {
-			bt.edit(ctx, b, cq, "❌ 模块状态不可用："+pre(viewErr.Error()), backKB("menu:main"))
-			return
-		}
-		var selected *interceptModuleView
-		for index := range view.Modules {
-			if view.Modules[index].ID == parts[1] {
-				selected = &view.Modules[index]
-				break
-			}
-		}
-		if selected == nil {
-			bt.edit(ctx, b, cq, "模块不存在或已被删除。", backKB("menu:modules"))
-			return
-		}
-		enabled := parts[0] == "on"
-		if enabled && len(selected.NetworkOrigins) > 0 {
-			bt.edit(ctx, b, cq,
-				"⚠️ 该插件声明了额外网络 origins，必须在 Console 查看完整列表和数据外发风险后启用。",
-				backKB("menu:modules"))
-			return
-		}
-		action := "关闭"
-		impact := "这会移除 DNS 与 mihomo 拦截路由。"
-		if enabled {
-			action = "启用"
-			impact = "这会发布模块证书、mihomo TCP/QUIC 规则与 DNS 引流，并允许脚本读取解密后的流量。"
-		}
-		bt.edit(ctx, b, cq, fmt.Sprintf("⚠️ <b>确认%s %s？</b>\n%s", action, html.EscapeString(telegramModuleName(*selected)), impact), interceptModuleConfirmationMenu(selected.ID, enabled))
-	case cbModuleToggle:
-		auditBot("module:"+intent.arg, uid, "invoked")
-		parts := strings.SplitN(intent.arg, ":", 2)
-		if len(parts) != 2 {
-			bt.edit(ctx, b, cq, "模块操作无效。", backKB("menu:modules"))
-			return
-		}
-		enabled := parts[0] == "on"
-		view, viewErr := bt.ctrl.InterceptModules()
-		if viewErr != nil {
-			auditBotOutcome("module:"+intent.arg, uid, false)
-			bt.edit(ctx, b, cq, "❌ 模块状态不可用："+pre(viewErr.Error()), backKB("menu:main"))
-			return
-		}
-		if enabled {
-			for _, module := range view.Modules {
-				if module.ID == parts[1] && len(module.NetworkOrigins) > 0 {
-					auditBotOutcome("module:"+intent.arg, uid, false)
-					bt.renderModules(ctx, b, cq, "⚠️ 含网络权限的插件只能在 Console 完成风险审查后启用。")
-					return
-				}
-			}
-		}
-		updated, updateErr := bt.ctrl.SetInterceptModuleEnabled(ctx, parts[1], view.Revision, enabled)
-		if updateErr != nil {
-			auditBotOutcome("module:"+intent.arg, uid, false)
-			bt.renderModules(ctx, b, cq, "❌ 操作失败："+pre(updateErr.Error()))
-			return
-		}
-		auditBotOutcome("module:"+intent.arg, uid, true)
-		bt.edit(ctx, b, cq, renderInterceptModules(updated, "✅ 模块状态已更新。"), interceptModulesMenu(updated))
+	case cbExtension:
+		bt.handleExtensionCallback(ctx, b, cq, uid, chatID, intent.arg)
 	case cbIOSPhoto:
 		auditBot("ios-profile-photo", uid, "invoked")
 		ok := bt.sendIOSPhoto(ctx, b, chatID)
@@ -900,15 +903,6 @@ func (bt *Bot) handleCallback(ctx context.Context, b *bot.Bot, update *models.Up
 	default:
 		bt.edit(ctx, b, cq, "未知操作。", backKB("menu:main"))
 	}
-}
-
-func (bt *Bot) renderModules(ctx context.Context, b *bot.Bot, cq *models.CallbackQuery, notice string) {
-	view, err := bt.ctrl.InterceptModules()
-	if err != nil {
-		bt.edit(ctx, b, cq, "❌ 模块状态不可用："+pre(err.Error()), backKB("menu:main"))
-		return
-	}
-	bt.edit(ctx, b, cq, renderInterceptModules(view, notice), interceptModulesMenu(view))
 }
 
 func confirmationPrompt(action botPrivilegedAction, expires time.Time) string {

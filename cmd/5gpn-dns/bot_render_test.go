@@ -302,7 +302,7 @@ func TestBotMenusAreVersionedAndUnambiguous(t *testing.T) {
 		}
 	}
 	joined := strings.Join(labels, "|")
-	for _, want := range []string{"状态", "DNS 诊断", "日志", "上游 DNS", "MITM 模块", "维护", "iOS 安装", "Web 控制台"} {
+	for _, want := range []string{"状态", "DNS 诊断", "日志", "上游 DNS", "插件管理", "插件市场", "维护", "iOS 安装", "Web 控制台"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("main menu missing %q: %s", want, joined)
 		}
@@ -336,56 +336,26 @@ func TestBotMenusAreVersionedAndUnambiguous(t *testing.T) {
 	}
 }
 
-func TestInterceptModuleBotMenuAndCallbacks(t *testing.T) {
-	view := interceptModulesView{Modules: []interceptModuleView{
-		{ID: "io.5gpn.apple-wloc", Name: "Apple WLOC", Enabled: false, Ready: true, CaptureHosts: []string{"gs-loc.apple.com"}},
-		{ID: "io.example.fixture", Name: "Fixture", Enabled: true, Ready: true, CaptureHosts: []string{"api.example.com"}},
-	}}
-	menu := interceptModulesMenu(view)
-	if len(menu.InlineKeyboard) != 4 {
-		t.Fatalf("module menu rows = %d", len(menu.InlineKeyboard))
-	}
-	callbacks := []string{
-		menu.InlineKeyboard[0][0].CallbackData,
-		menu.InlineKeyboard[1][0].CallbackData,
-	}
-	for _, callback := range callbacks {
+func TestExtensionCallbacksRequireCurrentTrustedFlow(t *testing.T) {
+	for _, action := range []string{"modules", "market", "module:AAAAAAAAAAAAAAAA", "confirm:enable:AAAAAAAAAAAAAAAA"} {
+		callback := botExtensionCallbackData(action)
 		if len(callback) > 64 {
 			t.Fatalf("Telegram callback exceeds 64 bytes: %q", callback)
 		}
 		intent := parseCallback(callback)
-		if intent.kind != cbModuleRequest {
-			t.Fatalf("module callback parsed as %+v", intent)
+		if intent.kind != cbExtension || intent.arg != action {
+			t.Fatalf("extension callback %q parsed as %+v", callback, intent)
 		}
 	}
-	confirm := interceptModuleConfirmationMenu("io.example.fixture", true)
-	apply := confirm.InlineKeyboard[0][0].CallbackData
-	if len(apply) > 64 || parseCallback(apply).kind != cbModuleToggle {
-		t.Fatalf("module confirmation callback = %q parsed=%+v", apply, parseCallback(apply))
-	}
-	if got := parseCallback(versionedCallback("module:apply:on:../../unsafe")); got.kind != cbUnknown {
-		t.Fatalf("unsafe module callback parsed as %+v", got)
-	}
-	rendered := renderInterceptModules(view, "")
-	if !strings.Contains(rendered, "api.example.com") || !strings.Contains(rendered, "已启用") {
-		t.Fatalf("module render = %s", rendered)
-	}
-	requiresSettings := interceptModulesMenu(interceptModulesView{Modules: []interceptModuleView{{
-		ID: "io.example.needs-settings", Name: "Needs settings", Ready: false, Reason: "settings-required",
-	}}})
-	if got := requiresSettings.InlineKeyboard[0][0]; !strings.Contains(got.Text, "Console 配置") || got.CallbackData != versionedCallback("menu:modules") {
-		t.Fatalf("unconfigured extension button = %+v", got)
-	}
-	networkView := interceptModulesView{Modules: []interceptModuleView{{
-		ID: "io.example.network", Name: "Network extension", Ready: true, ExecutionOrder: 1,
-		NetworkOrigins: []string{"https://api.example.com"},
-	}}}
-	networkMenu := interceptModulesMenu(networkView)
-	if got := networkMenu.InlineKeyboard[0][0]; !strings.Contains(got.Text, "Console 审查网络权限") || got.CallbackData != versionedCallback("menu:modules") {
-		t.Fatalf("network extension button = %+v", got)
-	}
-	if rendered := renderInterceptModules(networkView, ""); !strings.Contains(rendered, "1 个网络 origin") {
-		t.Fatalf("network permission summary missing: %s", rendered)
+
+	for _, retired := range []string{
+		"menu:modules",
+		"module:request:on:io.example.fixture",
+		"module:apply:off:io.example.fixture",
+	} {
+		if got := parseCallback(versionedCallback(retired)); got.kind != cbUnknown {
+			t.Fatalf("retired callback %q remained actionable: %+v", retired, got)
+		}
 	}
 }
 

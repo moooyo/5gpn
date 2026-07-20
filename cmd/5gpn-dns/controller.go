@@ -93,6 +93,11 @@ type Controller struct {
 	// the Web console and Telegram. Both control surfaces therefore publish the
 	// same sidecar snapshot, certificate request, mihomo rules, and DNS overlay.
 	interceptModules *InterceptModuleManager
+
+	// extensionMarketplaces is the shared marketplace registry used by the Web
+	// console and Telegram. Marketplace installation delegates to the same
+	// InterceptModuleManager, preserving both marketplace and module CAS checks.
+	extensionMarketplaces *ExtensionMarketplaceManager
 }
 
 // tgbotManager is the subset of the bot supervisor the Controller drives:
@@ -348,6 +353,10 @@ func (c *Controller) SetInterceptModuleManager(manager *InterceptModuleManager) 
 	c.interceptModules = manager
 }
 
+func (c *Controller) SetExtensionMarketplaceManager(manager *ExtensionMarketplaceManager) {
+	c.extensionMarketplaces = manager
+}
+
 func (c *Controller) InterceptModules() (interceptModulesView, error) {
 	if c.interceptModules == nil {
 		return interceptModulesView{}, errInterceptModulesUnavailable
@@ -355,11 +364,190 @@ func (c *Controller) InterceptModules() (interceptModulesView, error) {
 	return c.interceptModules.View()
 }
 
-func (c *Controller) SetInterceptModuleEnabled(ctx context.Context, id, revision string, enabled bool) (interceptModulesView, error) {
+func (c *Controller) InterceptSettings() (interceptSettingsView, error) {
+	if c.interceptModules == nil {
+		return interceptSettingsView{}, errInterceptModulesUnavailable
+	}
+	return c.interceptModules.SettingsView()
+}
+
+func (c *Controller) UpdateInterceptSettings(ctx context.Context, revision string, settings interceptMITMSettings) (interceptModulesView, error) {
 	if c.interceptModules == nil {
 		return interceptModulesView{}, errInterceptModulesUnavailable
 	}
-	return c.interceptModules.Update(ctx, id, interceptModuleUpdate{Revision: revision, Enabled: &enabled})
+	return c.interceptModules.UpdateSettings(ctx, revision, settings)
+}
+
+func (c *Controller) SetInterceptModuleEnabled(ctx context.Context, id, revision string, enabled bool) (interceptModulesView, error) {
+	return c.UpdateInterceptModule(ctx, id, interceptModuleUpdate{Revision: revision, Enabled: &enabled})
+}
+
+func (c *Controller) InterceptModuleSnapshot(id string) (interceptModuleSnapshotView, error) {
+	if c.interceptModules == nil {
+		return interceptModuleSnapshotView{}, errInterceptModulesUnavailable
+	}
+	return c.interceptModules.Snapshot(id)
+}
+
+func (c *Controller) ImportInterceptModule(ctx context.Context, request interceptModuleImportRequest) (interceptModulesView, error) {
+	if c.interceptModules == nil {
+		return interceptModulesView{}, errInterceptModulesUnavailable
+	}
+	return c.interceptModules.Import(ctx, request)
+}
+
+func (c *Controller) PreviewInterceptModuleImport(ctx context.Context, request interceptModuleImportRequest) (interceptModuleView, error) {
+	if c.interceptModules == nil {
+		return interceptModuleView{}, errInterceptModulesUnavailable
+	}
+	return c.interceptModules.PreviewImport(ctx, request)
+}
+
+func (c *Controller) ImportInterceptModuleExpected(
+	ctx context.Context,
+	request interceptModuleImportRequest,
+	expectedSnapshotDigest string,
+) (interceptModulesView, error) {
+	if c.interceptModules == nil {
+		return interceptModulesView{}, errInterceptModulesUnavailable
+	}
+	return c.interceptModules.ImportExpected(ctx, request, expectedSnapshotDigest)
+}
+
+func (c *Controller) CheckInterceptModuleUpdate(ctx context.Context, id, revision string) (interceptModuleUpdateCheckView, error) {
+	if c.interceptModules == nil {
+		return interceptModuleUpdateCheckView{}, errInterceptModulesUnavailable
+	}
+	return c.interceptModules.CheckUpdate(ctx, id, revision)
+}
+
+func (c *Controller) ApplyInterceptModuleUpdate(ctx context.Context, id, revision, digest string) (interceptModulesView, error) {
+	if c.interceptModules == nil {
+		return interceptModulesView{}, errInterceptModulesUnavailable
+	}
+	return c.interceptModules.ApplyUpdate(ctx, id, revision, digest)
+}
+
+func (c *Controller) DeleteInterceptModule(id, revision string) (interceptModulesView, error) {
+	if c.interceptModules == nil {
+		return interceptModulesView{}, errInterceptModulesUnavailable
+	}
+	return c.interceptModules.Delete(id, revision)
+}
+
+func (c *Controller) UpdateInterceptModule(ctx context.Context, id string, update interceptModuleUpdate) (interceptModulesView, error) {
+	if c.interceptModules == nil {
+		return interceptModulesView{}, errInterceptModulesUnavailable
+	}
+	return c.interceptModules.Update(ctx, id, update)
+}
+
+func (c *Controller) ReorderInterceptModules(ctx context.Context, revision string, executionOrder []string) (interceptModulesView, error) {
+	if c.interceptModules == nil {
+		return interceptModulesView{}, errInterceptModulesUnavailable
+	}
+	return c.interceptModules.Reorder(ctx, revision, executionOrder)
+}
+
+func (c *Controller) ExtensionMarketplaces() (marketplaceView, error) {
+	if c.extensionMarketplaces == nil {
+		return marketplaceView{}, errMarketplaceUnavailable
+	}
+	return c.extensionMarketplaces.View()
+}
+
+func (c *Controller) AddExtensionMarketplace(ctx context.Context, revision, rawURL, rawDisplayName string) (marketplaceView, error) {
+	if c.extensionMarketplaces == nil {
+		return marketplaceView{}, errMarketplaceUnavailable
+	}
+	return c.extensionMarketplaces.Add(ctx, revision, rawURL, rawDisplayName)
+}
+
+func (c *Controller) PreviewExtensionMarketplaceAdd(ctx context.Context, rawURL, rawDisplayName string) (marketplaceSourceView, error) {
+	if c.extensionMarketplaces == nil {
+		return marketplaceSourceView{}, errMarketplaceUnavailable
+	}
+	return c.extensionMarketplaces.PreviewAdd(ctx, rawURL, rawDisplayName)
+}
+
+func (c *Controller) AddExtensionMarketplaceExpected(
+	ctx context.Context,
+	revision, rawURL, rawDisplayName, expectedSnapshotDigest string,
+) (marketplaceView, error) {
+	if c.extensionMarketplaces == nil {
+		return marketplaceView{}, errMarketplaceUnavailable
+	}
+	return c.extensionMarketplaces.AddExpected(ctx, revision, rawURL, rawDisplayName, expectedSnapshotDigest)
+}
+
+func (c *Controller) RefreshExtensionMarketplace(ctx context.Context, id, revision string) (marketplaceView, error) {
+	if c.extensionMarketplaces == nil {
+		return marketplaceView{}, errMarketplaceUnavailable
+	}
+	return c.extensionMarketplaces.Refresh(ctx, id, revision)
+}
+
+func (c *Controller) PreviewExtensionMarketplaceRefresh(ctx context.Context, id, revision string) (marketplaceSourceView, error) {
+	if c.extensionMarketplaces == nil {
+		return marketplaceSourceView{}, errMarketplaceUnavailable
+	}
+	return c.extensionMarketplaces.PreviewRefresh(ctx, id, revision)
+}
+
+func (c *Controller) RefreshExtensionMarketplaceExpected(
+	ctx context.Context,
+	id, revision, expectedSnapshotDigest string,
+) (marketplaceView, error) {
+	if c.extensionMarketplaces == nil {
+		return marketplaceView{}, errMarketplaceUnavailable
+	}
+	return c.extensionMarketplaces.RefreshExpected(ctx, id, revision, expectedSnapshotDigest)
+}
+
+func (c *Controller) DeleteExtensionMarketplace(id, revision string) (marketplaceView, error) {
+	if c.extensionMarketplaces == nil {
+		return marketplaceView{}, errMarketplaceUnavailable
+	}
+	return c.extensionMarketplaces.Delete(id, revision)
+}
+
+func (c *Controller) InstallMarketplaceExtension(
+	ctx context.Context,
+	marketplaceID, extensionID, marketplaceRevision, moduleRevision string,
+) (interceptModulesView, error) {
+	if c.extensionMarketplaces == nil {
+		return interceptModulesView{}, errMarketplaceUnavailable
+	}
+	return c.extensionMarketplaces.Install(ctx, marketplaceID, extensionID, marketplaceRevision, moduleRevision)
+}
+
+func (c *Controller) PreviewMarketplaceExtensionInstall(
+	ctx context.Context,
+	marketplaceID, extensionID, marketplaceRevision, moduleRevision string,
+) (interceptModuleView, error) {
+	if c.extensionMarketplaces == nil {
+		return interceptModuleView{}, errMarketplaceUnavailable
+	}
+	return c.extensionMarketplaces.PreviewInstall(ctx, marketplaceID, extensionID, marketplaceRevision, moduleRevision)
+}
+
+func (c *Controller) InstallMarketplaceExtensionExpected(
+	ctx context.Context,
+	marketplaceID, extensionID, marketplaceRevision, moduleRevision string,
+	expectedSourceSnapshotDigest, expectedCandidateSnapshotDigest string,
+) (interceptModulesView, error) {
+	if c.extensionMarketplaces == nil {
+		return interceptModulesView{}, errMarketplaceUnavailable
+	}
+	return c.extensionMarketplaces.InstallExpected(
+		ctx,
+		marketplaceID,
+		extensionID,
+		marketplaceRevision,
+		moduleRevision,
+		expectedSourceSnapshotDigest,
+		expectedCandidateSnapshotDigest,
+	)
 }
 
 // PolicyRules returns the current policy rules in evaluation order. Empty

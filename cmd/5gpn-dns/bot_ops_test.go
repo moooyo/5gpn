@@ -325,7 +325,12 @@ func TestBotActionGuardConfirmationAndSingleFlight(t *testing.T) {
 	now := time.Unix(1000, 0)
 	guard := newBotActionGuard()
 	guard.now = func() time.Time { return now }
-	guard.entropy = bytes.NewReader(bytes.Repeat([]byte{0x5a}, botConfirmationBytes*3))
+	guard.entropy = bytes.NewReader(bytes.Join([][]byte{
+		bytes.Repeat([]byte{0x5a}, botConfirmationBytes),
+		bytes.Repeat([]byte{0x5b}, botConfirmationBytes),
+		bytes.Repeat([]byte{0x5c}, botConfirmationBytes),
+		bytes.Repeat([]byte{0x5d}, botConfirmationBytes),
+	}, nil))
 
 	nonce, expires, err := guard.Issue(botActionRestartMihomo, 7, 11)
 	if err != nil {
@@ -351,6 +356,21 @@ func TestBotActionGuardConfirmationAndSingleFlight(t *testing.T) {
 	now = now.Add(botConfirmationTTL)
 	if guard.Consume(expired, botActionRenewCert, 7, 11) {
 		t.Fatal("expired confirmation succeeded")
+	}
+	revoked, _, err := guard.Issue(botActionRenewCert, 7, 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherAdmin, _, err := guard.Issue(botActionRenewCert, 8, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard.RevokeAdmin(7)
+	if guard.Consume(revoked, botActionRenewCert, 7, 11) {
+		t.Fatal("revoked administrator retained a confirmation")
+	}
+	if !guard.Consume(otherAdmin, botActionRenewCert, 8, 8) {
+		t.Fatal("revoking one administrator removed another administrator's confirmation")
 	}
 
 	if !guard.TryStart(botActionRestartMihomo) {
