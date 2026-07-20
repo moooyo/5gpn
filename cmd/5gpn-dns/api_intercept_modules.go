@@ -142,7 +142,7 @@ func (s *ControlServer) handleInterceptModuleDelete(w http.ResponseWriter, r *ht
 	if !decodeJSONBody(w, r, &request) {
 		return
 	}
-	view, err := s.interceptModules.Delete(r.PathValue("id"), request.Revision)
+	view, err := s.interceptModules.Delete(r.Context(), r.PathValue("id"), request.Revision)
 	if err != nil {
 		writeInterceptModuleError(w, err)
 		return

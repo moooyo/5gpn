@@ -383,6 +383,33 @@ func TestBotExtensionStateTotalByteBudgetAndCancelOwner(t *testing.T) {
 	}
 }
 
+func TestBotExtensionStateCancelOwnerDistinguishesActiveWorkFromGenerationTombstone(t *testing.T) {
+	store := newBotExtensionStateStore()
+	owner, generation, err := store.BeginOperation(7, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation := botExtensionOperationContext{owner: owner, generation: generation}
+	if !store.CancelOwner(7, 7) {
+		t.Fatal("active operation was not reported as cancelled")
+	}
+	if store.OperationCurrent(operation) {
+		t.Fatal("cancelled operation remained current")
+	}
+	if store.CancelOwner(7, 7) {
+		t.Fatal("generation tombstone was reported as pending work")
+	}
+
+	owner, generation, err = store.BeginOperation(8, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.FinishOperation(botExtensionOperationContext{owner: owner, generation: generation})
+	if store.CancelOwner(8, 8) {
+		t.Fatal("finished operation was reported as pending work")
+	}
+}
+
 func TestBotExtensionStateEntropyCollisionAndValidation(t *testing.T) {
 	collisionEntropy := append(bytes.Repeat([]byte{0x42}, botExtensionTokenBytes), bytes.Repeat([]byte{0x42}, botExtensionTokenBytes)...)
 	collisionEntropy = append(collisionEntropy, bytes.Repeat([]byte{0x43}, botExtensionTokenBytes)...)

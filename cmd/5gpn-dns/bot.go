@@ -299,8 +299,8 @@ func (bt *Bot) ReplaceAdmins(ids []int64) {
 			continue
 		}
 		bt.actionGuard().RevokeAdmin(oldID)
-		bt.extensionStateStore().CancelOwner(oldID, oldID)
-		bt.cancelBotExtensionOperation(oldID, oldID)
+		_, cutoff := bt.extensionStateStore().CancelOwnerWithGeneration(oldID, oldID)
+		bt.cancelBotExtensionOperationThrough(oldID, oldID, cutoff)
 	}
 
 	if bt.tg == nil {
@@ -551,8 +551,8 @@ func (bt *Bot) cancelExtensionState(update *models.Update) bool {
 	if !ok {
 		return false
 	}
-	removed := bt.extensionStateStore().CancelOwner(uid, update.Message.Chat.ID)
-	cancelled := bt.cancelBotExtensionOperation(uid, update.Message.Chat.ID)
+	removed, cutoff := bt.extensionStateStore().CancelOwnerWithGeneration(uid, update.Message.Chat.ID)
+	cancelled := bt.cancelBotExtensionOperationThrough(uid, update.Message.Chat.ID, cutoff)
 	return removed || cancelled
 }
 
@@ -836,8 +836,8 @@ func (bt *Bot) handleCallback(ctx context.Context, b *bot.Bot, update *models.Up
 
 	uid, _ := senderID(update) // adminGate already rejected an absent/unauthorized sender.
 	if intent.kind != cbExtension {
-		bt.extensionStateStore().CancelOwner(uid, chatID)
-		bt.cancelBotExtensionOperation(uid, chatID)
+		_, cutoff := bt.extensionStateStore().CancelOwnerWithGeneration(uid, chatID)
+		bt.cancelBotExtensionOperationThrough(uid, chatID, cutoff)
 	}
 
 	switch intent.kind {

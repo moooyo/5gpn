@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -246,6 +247,16 @@ func (s *ControlServer) handleInterceptSettingsPut(w http.ResponseWriter, r *htt
 }
 
 func writeInterceptConfigAtomic(path string, body []byte) error {
+	return writeInterceptConfigAtomicContext(context.Background(), path, body)
+}
+
+func writeInterceptConfigAtomicContext(ctx context.Context, path string, body []byte) error {
+	if ctx == nil {
+		return errors.New("interception config write context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	dir := filepath.Dir(path)
 	info, err := os.Stat(path)
 	if err != nil {
@@ -273,6 +284,12 @@ func writeInterceptConfigAtomic(path string, body []byte) error {
 		return err
 	}
 	if err := temp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	// The rename is the commit point. Observe cancellation after all candidate
+	// I/O and immediately before entering that non-interruptible operation.
+	if err := ctx.Err(); err != nil {
 		cleanup()
 		return err
 	}

@@ -601,16 +601,44 @@ func marketplaceSourceReviewHTML(source marketplaceSourceView) string {
 	if source.DisplayName != "" {
 		displayName = "<b>" + html.EscapeString(source.DisplayName) + "</b>"
 	}
-	return fmt.Sprintf(
-		"本地显示名称：%s\n远端 metadata.name：<b>%s</b>\n远端 metadata.id：<code>%s</code>\n索引 URL：<code>%s</code>\n最终 URL：<code>%s</code>\n条目数：<code>%d</code>\n索引快照：<code>%s</code>",
+	var text strings.Builder
+	fmt.Fprintf(&text,
+		"本地显示名称：%s\n远端 metadata.name：<b>%s</b>\n远端 metadata.id：<code>%s</code>\n远端描述：%s\n远端主页：<code>%s</code>\n索引 URL：<code>%s</code>\n最终 URL：<code>%s</code>\n条目数：<code>%d</code>\n远端索引摘要：<code>%s</code>\n规范化索引快照：<code>%s</code>",
 		displayName,
 		html.EscapeString(source.MetadataName),
 		html.EscapeString(source.ID),
+		html.EscapeString(source.Description),
+		html.EscapeString(source.Homepage),
 		html.EscapeString(source.URL),
 		html.EscapeString(source.FinalURL),
 		len(source.Entries),
+		html.EscapeString(source.Digest),
 		html.EscapeString(source.SnapshotDigest),
 	)
+	for index, entry := range source.Entries {
+		fmt.Fprintf(&text,
+			"\n\n<b>条目 %d/%d</b>\n名称：<b>%s</b>\nID：<code>%s</code>\n版本：<code>%s</code>\n描述：%s\n许可证：<code>%s</code>\nManifest URL：<code>%s</code>\nManifest 摘要：<code>%s</code>"+
+				"\n能力：<code>%d</code> capture hosts · <code>%d</code> actions · <code>%d</code> settings · <code>%d</code> mappings · storage=<code>%t</code> · egress-required=<code>%t</code>",
+			index+1, len(source.Entries),
+			html.EscapeString(entry.Name), html.EscapeString(entry.ID), html.EscapeString(entry.Version),
+			html.EscapeString(entry.Description), html.EscapeString(entry.License.SPDX),
+			html.EscapeString(entry.ManifestURL), html.EscapeString(entry.ManifestDigest),
+			entry.Capabilities.CaptureHostCount, entry.Capabilities.ActionCount,
+			entry.Capabilities.SettingCount, entry.Capabilities.UpstreamMappingCount,
+			entry.Capabilities.PersistentStorage, entry.Capabilities.EgressGroupRequired,
+		)
+		text.WriteString("\n声明的 network origins（仅市场元数据；安装与启用仍需独立审查）：")
+		if len(entry.Capabilities.NetworkOrigins) == 0 {
+			text.WriteString("<i>无</i>")
+			continue
+		}
+		for _, origin := range entry.Capabilities.NetworkOrigins {
+			text.WriteString("\n• <code>")
+			text.WriteString(html.EscapeString(origin))
+			text.WriteString("</code>")
+		}
+	}
+	return text.String()
 }
 
 func (bt *Bot) handleBotExtensionSourceCallback(
@@ -772,8 +800,8 @@ func (bt *Bot) previewBotExtensionMarketplaceRefresh(
 		Digest:   candidate.SnapshotDigest,
 		RawJSON:  raw,
 	}
-	prompt := "⚠️ <b>确认替换市场索引快照？</b>\n当前快照：<code>" + html.EscapeString(source.SnapshotDigest) +
-		"</code>\n候选快照：<code>" + html.EscapeString(candidate.SnapshotDigest) + "</code>\n" + marketplaceSourceReviewHTML(candidate) +
+	prompt := "⚠️ <b>确认替换市场索引快照？</b>\n\n<b>当前规范化来源</b>\n" + marketplaceSourceReviewHTML(source) +
+		"\n\n<b>候选规范化来源</b>\n" + marketplaceSourceReviewHTML(candidate) +
 		"\n\n确认时会重新获取并要求候选快照完全一致；冲突不会静默重试。"
 	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
 }

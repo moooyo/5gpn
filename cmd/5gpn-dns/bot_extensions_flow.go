@@ -43,6 +43,11 @@ func (s *botExtensionStateStore) BeginOperation(adminID, chatID int64) (botExten
 		s.deleteInputLocked(owner, entry)
 	}
 	generation, err := s.advanceGenerationLocked(owner, now)
+	if err == nil {
+		entry := s.generations[owner]
+		entry.active = true
+		s.generations[owner] = entry
+	}
 	return owner, generation, err
 }
 
@@ -64,9 +69,25 @@ func (s *botExtensionStateStore) ClaimInput(adminID, chatID int64) (botExtension
 	if err != nil {
 		return botExtensionInputState{}, owner, 0, false
 	}
+	generationEntry := s.generations[owner]
+	generationEntry.active = true
+	s.generations[owner] = generationEntry
 	state := cloneBotExtensionInputState(entry.state)
 	s.deleteInputLocked(owner, entry)
 	return state, owner, generation, true
+}
+
+func (s *botExtensionStateStore) FinishOperation(operation botExtensionOperationContext) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.initLocked()
+	s.pruneLocked(s.now())
+	entry, ok := s.generations[operation.owner]
+	if !ok || entry.value != operation.generation {
+		return
+	}
+	entry.active = false
+	s.generations[operation.owner] = entry
 }
 
 func (s *botExtensionStateStore) OperationCurrent(operation botExtensionOperationContext) bool {
@@ -692,7 +713,7 @@ func (bt *Bot) applyBotExtensionConfirmation(ctx context.Context, payload botExt
 		if err != nil {
 			return err
 		}
-		_, err = bt.ctrl.DeleteExtensionMarketplace(source.ID, view.Revision)
+		_, err = bt.ctrl.DeleteExtensionMarketplace(ctx, source.ID, view.Revision)
 		return err
 
 	case botExtensionPayloadInstall:
@@ -709,7 +730,7 @@ func (bt *Bot) applyBotExtensionConfirmation(ctx context.Context, payload botExt
 		if module.Enabled {
 			return errors.New("disable the extension before uninstalling it")
 		}
-		_, err = bt.ctrl.DeleteInterceptModule(module.ID, view.Revision)
+		_, err = bt.ctrl.DeleteInterceptModule(ctx, module.ID, view.Revision)
 		return err
 
 	case botExtensionPayloadEnable, botExtensionPayloadDisable:

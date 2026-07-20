@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,6 +26,52 @@ type marketplaceFixture struct {
 	fail           bool
 	referer        string
 	redirectTarget string
+}
+
+type marketplaceCancelOnEOFTransport struct {
+	base   http.RoundTripper
+	cancel context.CancelFunc
+}
+
+func (transport marketplaceCancelOnEOFTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := transport.base.RoundTrip(request)
+	if err != nil {
+		return nil, err
+	}
+	response.Body = &marketplaceCancelOnEOFBody{ReadCloser: response.Body, cancel: transport.cancel}
+	return response, nil
+}
+
+type marketplaceCancelOnEOFBody struct {
+	io.ReadCloser
+	once   sync.Once
+	cancel context.CancelFunc
+}
+
+type testSignalingContext struct {
+	context.Context
+	once    sync.Once
+	checked chan struct{}
+}
+
+func (ctx *testSignalingContext) Err() error {
+	err := ctx.Context.Err()
+	ctx.once.Do(func() { close(ctx.checked) })
+	return err
+}
+
+func (body *marketplaceCancelOnEOFBody) Read(buffer []byte) (int, error) {
+	count, err := body.ReadCloser.Read(buffer)
+	if errors.Is(err, io.EOF) {
+		body.once.Do(body.cancel)
+	}
+	return count, err
+}
+
+func setMarketplaceCancelOnEOFClient(manager *ExtensionMarketplaceManager, fixture *marketplaceFixture, cancel context.CancelFunc) {
+	client := *fixture.server.Client()
+	client.Transport = marketplaceCancelOnEOFTransport{base: client.Transport, cancel: cancel}
+	manager.parser.client = &client
 }
 
 func newMarketplaceFixture(t *testing.T, mutate func(*marketplaceIndex)) *marketplaceFixture {
@@ -161,12 +208,94 @@ func TestMarketplaceAddRefreshDeleteAndStaleFailure(t *testing.T) {
 	if got := mustRead(t, storePath); got != persistedBefore {
 		t.Fatal("failed refresh changed the persisted snapshot")
 	}
-	if _, err := manager.Delete(added.Sources[0].ID, empty.Revision); !errors.Is(err, errMarketplaceRevision) {
+	if _, err := manager.Delete(context.Background(), added.Sources[0].ID, empty.Revision); !errors.Is(err, errMarketplaceRevision) {
 		t.Fatalf("stale delete error = %v", err)
 	}
-	deleted, err := manager.Delete(added.Sources[0].ID, added.Revision)
+	deleted, err := manager.Delete(context.Background(), added.Sources[0].ID, added.Revision)
 	if err != nil || len(deleted.Sources) != 0 {
 		t.Fatalf("deleted view = %+v err=%v", deleted, err)
+	}
+}
+
+func TestMarketplaceAddAndRefreshRejectCancellationBeforeFinalCommit(t *testing.T) {
+	fixture := newMarketplaceFixture(t, nil)
+	manager, _, _ := newMarketplaceManagerFixture(t, fixture)
+	empty, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	addCtx, cancelAdd := context.WithCancel(context.Background())
+	setMarketplaceCancelOnEOFClient(manager, fixture, cancelAdd)
+	if _, err := manager.Add(addCtx, empty.Revision, fixture.server.URL+"/index.json", ""); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled add error = %v", err)
+	}
+	afterCancelledAdd, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterCancelledAdd.Revision != empty.Revision || len(afterCancelledAdd.Sources) != 0 {
+		t.Fatalf("cancelled add committed state: %+v", afterCancelledAdd)
+	}
+
+	manager.parser.client = fixture.server.Client()
+	added, err := manager.Add(context.Background(), empty.Revision, fixture.server.URL+"/index.json", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.mu.Lock()
+	var updated marketplaceIndex
+	if err := json.Unmarshal(fixture.index, &updated); err != nil {
+		fixture.mu.Unlock()
+		t.Fatal(err)
+	}
+	updated.Metadata.Description = "Changed description"
+	fixture.index, err = json.Marshal(updated)
+	fixture.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	refreshCtx, cancelRefresh := context.WithCancel(context.Background())
+	setMarketplaceCancelOnEOFClient(manager, fixture, cancelRefresh)
+	if _, err := manager.Refresh(refreshCtx, added.Sources[0].ID, added.Revision); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled refresh error = %v", err)
+	}
+	afterCancelledRefresh, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterCancelledRefresh.Revision != added.Revision || afterCancelledRefresh.Sources[0].Description != added.Sources[0].Description {
+		t.Fatalf("cancelled refresh committed state: before=%+v after=%+v", added, afterCancelledRefresh)
+	}
+
+	manager.mu.Lock()
+	deleteBaseCtx, cancelDelete := context.WithCancel(context.Background())
+	deleteCtx := &testSignalingContext{Context: deleteBaseCtx, checked: make(chan struct{})}
+	deleteDone := make(chan error, 1)
+	go func() {
+		_, deleteErr := manager.Delete(deleteCtx, added.Sources[0].ID, added.Revision)
+		deleteDone <- deleteErr
+	}()
+	<-deleteCtx.checked
+	cancelDelete()
+	select {
+	case err := <-deleteDone:
+		if !errors.Is(err, context.Canceled) {
+			manager.mu.Unlock()
+			t.Fatalf("cancelled delete error = %v", err)
+		}
+	case <-time.After(time.Second):
+		manager.mu.Unlock()
+		t.Fatal("cancelled delete remained blocked on the marketplace lock")
+	}
+	manager.mu.Unlock()
+	afterCancelledDelete, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterCancelledDelete.Revision != added.Revision || len(afterCancelledDelete.Sources) != 1 {
+		t.Fatalf("cancelled delete committed state: before=%+v after=%+v", added, afterCancelledDelete)
 	}
 }
 

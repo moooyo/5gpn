@@ -104,7 +104,7 @@ func TestControllerExtensionManagersDelegateSharedTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	moduleView, err = controller.DeleteInterceptModule("io.example.fixture", moduleView.Revision)
+	moduleView, err = controller.DeleteInterceptModule(ctx, "io.example.fixture", moduleView.Revision)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestControllerExtensionManagersDelegateSharedTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := controller.DeleteInterceptModule("io.example.fixture", moduleView.Revision); err != nil {
+	if _, err := controller.DeleteInterceptModule(ctx, "io.example.fixture", moduleView.Revision); err != nil {
 		t.Fatal(err)
 	}
 
@@ -123,7 +123,7 @@ func TestControllerExtensionManagersDelegateSharedTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	marketplaceView, err = controller.DeleteExtensionMarketplace("io.example.marketplace", marketplaceView.Revision)
+	marketplaceView, err = controller.DeleteExtensionMarketplace(ctx, "io.example.marketplace", marketplaceView.Revision)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +541,7 @@ func TestMarketplaceInstallHoldsReviewedSourceThroughModuleCommit(t *testing.T) 
 	deleteStarted := make(chan struct{})
 	go func() {
 		close(deleteStarted)
-		_, deleteErr := controller.DeleteExtensionMarketplace(market.Sources[0].ID, market.Revision)
+		_, deleteErr := controller.DeleteExtensionMarketplace(ctx, market.Sources[0].ID, market.Revision)
 		deleteDone <- deleteErr
 	}()
 	<-deleteStarted

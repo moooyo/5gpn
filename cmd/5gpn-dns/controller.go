@@ -428,11 +428,11 @@ func (c *Controller) ApplyInterceptModuleUpdate(ctx context.Context, id, revisio
 	return c.interceptModules.ApplyUpdate(ctx, id, revision, digest)
 }
 
-func (c *Controller) DeleteInterceptModule(id, revision string) (interceptModulesView, error) {
+func (c *Controller) DeleteInterceptModule(ctx context.Context, id, revision string) (interceptModulesView, error) {
 	if c.interceptModules == nil {
 		return interceptModulesView{}, errInterceptModulesUnavailable
 	}
-	return c.interceptModules.Delete(id, revision)
+	return c.interceptModules.Delete(ctx, id, revision)
 }
 
 func (c *Controller) UpdateInterceptModule(ctx context.Context, id string, update interceptModuleUpdate) (interceptModulesView, error) {
@@ -504,11 +504,11 @@ func (c *Controller) RefreshExtensionMarketplaceExpected(
 	return c.extensionMarketplaces.RefreshExpected(ctx, id, revision, expectedSnapshotDigest)
 }
 
-func (c *Controller) DeleteExtensionMarketplace(id, revision string) (marketplaceView, error) {
+func (c *Controller) DeleteExtensionMarketplace(ctx context.Context, id, revision string) (marketplaceView, error) {
 	if c.extensionMarketplaces == nil {
 		return marketplaceView{}, errMarketplaceUnavailable
 	}
-	return c.extensionMarketplaces.Delete(id, revision)
+	return c.extensionMarketplaces.Delete(ctx, id, revision)
 }
 
 func (c *Controller) InstallMarketplaceExtension(

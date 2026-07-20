@@ -66,13 +66,13 @@ func (bt *Bot) startBotExtensionOperation(
 	operation := botExtensionOperationContext{owner: owner, generation: generation}
 	if !bt.extensionStateStore().OperationCurrent(operation) {
 		cancel()
-		return ctx, func() {}
+		return ctx, func() { bt.extensionStateStore().FinishOperation(operation) }
 	}
 	guard.mu.Lock()
 	if previous, ok := guard.active[owner]; ok && previous.generation > generation {
 		guard.mu.Unlock()
 		cancel()
-		return ctx, func() {}
+		return ctx, func() { bt.extensionStateStore().FinishOperation(operation) }
 	} else if ok {
 		previous.cancel()
 	}
@@ -97,18 +97,23 @@ func (bt *Bot) startBotExtensionOperation(
 			delete(guard.active, owner)
 		}
 		guard.mu.Unlock()
+		bt.extensionStateStore().FinishOperation(operation)
 	}
 }
 
 func (bt *Bot) cancelBotExtensionOperation(adminID, chatID int64) bool {
+	return bt.cancelBotExtensionOperationThrough(adminID, chatID, ^uint64(0))
+}
+
+func (bt *Bot) cancelBotExtensionOperationThrough(adminID, chatID int64, maxGeneration uint64) bool {
 	owner, err := newBotExtensionStateOwner(adminID, chatID)
-	if err != nil {
+	if err != nil || maxGeneration == 0 {
 		return false
 	}
 	guard := bt.extensionOperationGuard()
 	guard.mu.Lock()
 	cancelled := false
-	if current, ok := guard.active[owner]; ok {
+	if current, ok := guard.active[owner]; ok && current.generation <= maxGeneration {
 		current.cancel()
 		delete(guard.active, owner)
 		cancelled = true

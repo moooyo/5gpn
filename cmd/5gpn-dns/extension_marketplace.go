@@ -308,7 +308,13 @@ func (m *ExtensionMarketplaceManager) addWithExpected(
 	if !validSHA256(revision) {
 		return marketplaceView{}, errors.New("a valid marketplace revision is required")
 	}
-	if err := m.preflightRevision(revision); err != nil {
+	if ctx == nil {
+		return marketplaceView{}, errors.New("a marketplace operation context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return marketplaceView{}, err
+	}
+	if err := m.preflightRevision(ctx, revision); err != nil {
 		return marketplaceView{}, err
 	}
 	source, err := m.fetchAddCandidate(ctx, rawURL, rawDisplayName)
@@ -319,10 +325,17 @@ func (m *ExtensionMarketplaceManager) addWithExpected(
 		return marketplaceView{}, fmt.Errorf("%w: marketplace snapshot changed since preview", errMarketplaceRevision)
 	}
 
-	m.mu.Lock()
+	if err := lockMutexContext(ctx, &m.mu); err != nil {
+		return marketplaceView{}, err
+	}
 	defer m.mu.Unlock()
-	m.store.mu.Lock()
+	if err := lockMutexContext(ctx, &m.store.mu); err != nil {
+		return marketplaceView{}, err
+	}
 	defer m.store.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return marketplaceView{}, err
+	}
 	document, body, err := m.store.Read()
 	if err != nil {
 		return marketplaceView{}, err
@@ -336,7 +349,10 @@ func (m *ExtensionMarketplaceManager) addWithExpected(
 		}
 	}
 	document.Sources = append(document.Sources, source)
-	return m.writeLocked(document)
+	if err := ctx.Err(); err != nil {
+		return marketplaceView{}, err
+	}
+	return m.writeLocked(ctx, document)
 }
 
 func (m *ExtensionMarketplaceManager) fetchAddCandidate(ctx context.Context, rawURL, rawDisplayName string) (marketplaceSourceSnapshot, error) {
@@ -393,7 +409,7 @@ func (m *ExtensionMarketplaceManager) PreviewRefresh(ctx context.Context, id, re
 	if err != nil {
 		return marketplaceSourceView{}, err
 	}
-	latest, err := m.sourceAtRevision(id, revision)
+	latest, err := m.sourceAtRevision(ctx, id, revision)
 	if err != nil {
 		return marketplaceSourceView{}, err
 	}
@@ -429,6 +445,12 @@ func (m *ExtensionMarketplaceManager) refreshWithExpected(
 	if !validSHA256(revision) {
 		return marketplaceView{}, errors.New("a valid marketplace revision is required")
 	}
+	if ctx == nil {
+		return marketplaceView{}, errors.New("a marketplace operation context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return marketplaceView{}, err
+	}
 	current, refreshed, err := m.fetchRefreshCandidate(ctx, id, revision)
 	if err != nil {
 		return marketplaceView{}, err
@@ -437,10 +459,17 @@ func (m *ExtensionMarketplaceManager) refreshWithExpected(
 		return marketplaceView{}, fmt.Errorf("%w: marketplace snapshot changed since preview", errMarketplaceRevision)
 	}
 
-	m.mu.Lock()
+	if err := lockMutexContext(ctx, &m.mu); err != nil {
+		return marketplaceView{}, err
+	}
 	defer m.mu.Unlock()
-	m.store.mu.Lock()
+	if err := lockMutexContext(ctx, &m.store.mu); err != nil {
+		return marketplaceView{}, err
+	}
 	defer m.store.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return marketplaceView{}, err
+	}
 	document, body, err := m.store.Read()
 	if err != nil {
 		return marketplaceView{}, err
@@ -458,14 +487,17 @@ func (m *ExtensionMarketplaceManager) refreshWithExpected(
 		}
 	}
 	document.Sources[index] = refreshed
-	return m.writeLocked(document)
+	if err := ctx.Err(); err != nil {
+		return marketplaceView{}, err
+	}
+	return m.writeLocked(ctx, document)
 }
 
 func (m *ExtensionMarketplaceManager) fetchRefreshCandidate(
 	ctx context.Context,
 	id, revision string,
 ) (marketplaceSourceSnapshot, marketplaceSourceSnapshot, error) {
-	current, err := m.sourceAtRevision(id, revision)
+	current, err := m.sourceAtRevision(ctx, id, revision)
 	if err != nil {
 		return marketplaceSourceSnapshot{}, marketplaceSourceSnapshot{}, err
 	}
@@ -480,17 +512,30 @@ func (m *ExtensionMarketplaceManager) fetchRefreshCandidate(
 	return current, refreshed, nil
 }
 
-func (m *ExtensionMarketplaceManager) Delete(id, revision string) (marketplaceView, error) {
+func (m *ExtensionMarketplaceManager) Delete(ctx context.Context, id, revision string) (marketplaceView, error) {
 	if m == nil || m.store == nil {
 		return marketplaceView{}, errMarketplaceUnavailable
 	}
 	if !validSHA256(revision) {
 		return marketplaceView{}, errors.New("a valid marketplace revision is required")
 	}
-	m.mu.Lock()
+	if ctx == nil {
+		return marketplaceView{}, errors.New("a marketplace operation context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return marketplaceView{}, err
+	}
+	if err := lockMutexContext(ctx, &m.mu); err != nil {
+		return marketplaceView{}, err
+	}
 	defer m.mu.Unlock()
-	m.store.mu.Lock()
+	if err := lockMutexContext(ctx, &m.store.mu); err != nil {
+		return marketplaceView{}, err
+	}
 	defer m.store.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return marketplaceView{}, err
+	}
 	document, body, err := m.store.Read()
 	if err != nil {
 		return marketplaceView{}, err
@@ -503,7 +548,10 @@ func (m *ExtensionMarketplaceManager) Delete(id, revision string) (marketplaceVi
 		return marketplaceView{}, errMarketplaceNotFound
 	}
 	document.Sources = append(document.Sources[:index], document.Sources[index+1:]...)
-	return m.writeLocked(document)
+	if err := ctx.Err(); err != nil {
+		return marketplaceView{}, err
+	}
+	return m.writeLocked(ctx, document)
 }
 
 func (m *ExtensionMarketplaceManager) Install(ctx context.Context, marketplaceID, extensionID, marketplaceRev, moduleRev string) (interceptModulesView, error) {
@@ -531,7 +579,7 @@ func (m *ExtensionMarketplaceManager) PreviewInstall(
 	if err != nil {
 		return interceptModuleView{}, err
 	}
-	latestSource, _, err := m.entryAtRevision(marketplaceID, extensionID, marketplaceRev)
+	latestSource, _, err := m.entryAtRevision(ctx, marketplaceID, extensionID, marketplaceRev)
 	if err != nil {
 		return interceptModuleView{}, err
 	}
@@ -578,7 +626,7 @@ func (m *ExtensionMarketplaceManager) installWithExpected(
 		return interceptModulesView{}, errors.New("valid marketplace_revision and module_revision are required")
 	}
 	if expectedSourceSnapshotDigest != "" {
-		confirmedSource, err := m.sourceAtRevision(marketplaceID, marketplaceRev)
+		confirmedSource, err := m.sourceAtRevision(ctx, marketplaceID, marketplaceRev)
 		if err != nil {
 			return interceptModulesView{}, err
 		}
@@ -594,9 +642,13 @@ func (m *ExtensionMarketplaceManager) installWithExpected(
 		return interceptModulesView{}, fmt.Errorf("%w: extension snapshot changed since preview", errInterceptRevisionConflict)
 	}
 
-	m.mu.Lock()
+	if err := lockMutexContext(ctx, &m.mu); err != nil {
+		return interceptModulesView{}, err
+	}
 	defer m.mu.Unlock()
-	m.store.mu.Lock()
+	if err := lockMutexContext(ctx, &m.store.mu); err != nil {
+		return interceptModulesView{}, err
+	}
 	defer m.store.mu.Unlock()
 	document, body, err := m.store.Read()
 	if err != nil {
@@ -622,7 +674,7 @@ func (m *ExtensionMarketplaceManager) fetchInstallCandidate(
 	ctx context.Context,
 	marketplaceID, extensionID, marketplaceRev string,
 ) (marketplaceSourceSnapshot, interceptModuleSnapshot, error) {
-	source, entry, err := m.entryAtRevision(marketplaceID, extensionID, marketplaceRev)
+	source, entry, err := m.entryAtRevision(ctx, marketplaceID, extensionID, marketplaceRev)
 	if err != nil {
 		return marketplaceSourceSnapshot{}, interceptModuleSnapshot{}, err
 	}
@@ -636,8 +688,10 @@ func (m *ExtensionMarketplaceManager) fetchInstallCandidate(
 	return source, module, nil
 }
 
-func (m *ExtensionMarketplaceManager) preflightRevision(revision string) error {
-	m.store.mu.Lock()
+func (m *ExtensionMarketplaceManager) preflightRevision(ctx context.Context, revision string) error {
+	if err := lockMutexContext(ctx, &m.store.mu); err != nil {
+		return err
+	}
 	defer m.store.mu.Unlock()
 	_, body, err := m.store.Read()
 	if err != nil {
@@ -649,8 +703,10 @@ func (m *ExtensionMarketplaceManager) preflightRevision(revision string) error {
 	return nil
 }
 
-func (m *ExtensionMarketplaceManager) sourceAtRevision(id, revision string) (marketplaceSourceSnapshot, error) {
-	m.store.mu.Lock()
+func (m *ExtensionMarketplaceManager) sourceAtRevision(ctx context.Context, id, revision string) (marketplaceSourceSnapshot, error) {
+	if err := lockMutexContext(ctx, &m.store.mu); err != nil {
+		return marketplaceSourceSnapshot{}, err
+	}
 	defer m.store.mu.Unlock()
 	document, body, err := m.store.Read()
 	if err != nil {
@@ -666,8 +722,8 @@ func (m *ExtensionMarketplaceManager) sourceAtRevision(id, revision string) (mar
 	return document.Sources[index], nil
 }
 
-func (m *ExtensionMarketplaceManager) entryAtRevision(marketplaceID, extensionID, revision string) (marketplaceSourceSnapshot, marketplaceEntry, error) {
-	source, err := m.sourceAtRevision(marketplaceID, revision)
+func (m *ExtensionMarketplaceManager) entryAtRevision(ctx context.Context, marketplaceID, extensionID, revision string) (marketplaceSourceSnapshot, marketplaceEntry, error) {
+	source, err := m.sourceAtRevision(ctx, marketplaceID, revision)
 	if err != nil {
 		return marketplaceSourceSnapshot{}, marketplaceEntry{}, err
 	}
@@ -704,12 +760,12 @@ func (m *ExtensionMarketplaceManager) fetch(ctx context.Context, configuredURL s
 	}, nil
 }
 
-func (m *ExtensionMarketplaceManager) writeLocked(document marketplaceDocument) (marketplaceView, error) {
+func (m *ExtensionMarketplaceManager) writeLocked(ctx context.Context, document marketplaceDocument) (marketplaceView, error) {
 	body, err := marshalMarketplaceDocument(document)
 	if err != nil {
 		return marketplaceView{}, err
 	}
-	if err := atomicWriteFile(m.store.Path, body, 0o640); err != nil {
+	if err := atomicWriteFileContext(ctx, m.store.Path, body, 0o640); err != nil {
 		return marketplaceView{}, err
 	}
 	return marketplaceViewFromDocument(document, body), nil

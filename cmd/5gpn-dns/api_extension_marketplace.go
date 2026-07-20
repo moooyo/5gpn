@@ -73,7 +73,7 @@ func (s *ControlServer) handleMarketplaceDelete(w http.ResponseWriter, r *http.R
 	if !decodeJSONBody(w, r, &request) {
 		return
 	}
-	view, err := s.marketplaces.Delete(r.PathValue("id"), request.Revision)
+	view, err := s.marketplaces.Delete(r.Context(), r.PathValue("id"), request.Revision)
 	if err != nil {
 		writeMarketplaceError(w, err)
 		return

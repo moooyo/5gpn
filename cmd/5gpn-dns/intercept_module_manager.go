@@ -501,7 +501,7 @@ func (m *InterceptModuleManager) importSnapshot(ctx context.Context, revision st
 	if err := m.validateSidecarCandidate(ctx, newBody); err != nil {
 		return interceptModulesView{}, err
 	}
-	if err := writeInterceptConfigAtomic(m.store.Path, newBody); err != nil {
+	if err := writeInterceptConfigAtomicContext(ctx, m.store.Path, newBody); err != nil {
 		return interceptModulesView{}, err
 	}
 	// viewLocked takes the store mutex, so release it before composing the view.
@@ -672,7 +672,7 @@ func (m *InterceptModuleManager) ApplyUpdate(ctx context.Context, id, revision, 
 		err = m.validateSidecarCandidate(ctx, newBody)
 	}
 	if err == nil {
-		err = writeInterceptConfigAtomic(m.store.Path, newBody)
+		err = writeInterceptConfigAtomicContext(ctx, m.store.Path, newBody)
 	}
 	m.store.mu.Unlock()
 	if err != nil {
@@ -690,13 +690,27 @@ func interceptModuleSourceUnchanged(document interceptConfigDocument, id, source
 	return false
 }
 
-func (m *InterceptModuleManager) Delete(id, revision string) (interceptModulesView, error) {
+func (m *InterceptModuleManager) Delete(ctx context.Context, id, revision string) (interceptModulesView, error) {
 	if m == nil || m.store == nil {
 		return interceptModulesView{}, errInterceptModulesUnavailable
 	}
-	m.mu.Lock()
+	if ctx == nil {
+		return interceptModulesView{}, errors.New("an interception operation context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return interceptModulesView{}, err
+	}
+	if err := lockMutexContext(ctx, &m.mu); err != nil {
+		return interceptModulesView{}, err
+	}
 	defer m.mu.Unlock()
-	m.store.mu.Lock()
+	if err := lockMutexContext(ctx, &m.store.mu); err != nil {
+		return interceptModulesView{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		m.store.mu.Unlock()
+		return interceptModulesView{}, err
+	}
 	document, oldBody, err := m.store.Read()
 	if err != nil {
 		m.store.mu.Unlock()
@@ -725,10 +739,13 @@ func (m *InterceptModuleManager) Delete(id, revision string) (interceptModulesVi
 	document.ExecutionOrder = removeInterceptModuleID(document.ExecutionOrder, id)
 	newBody, err := marshalInterceptDocument(document)
 	if err == nil {
-		err = m.validateSidecarCandidate(context.Background(), newBody)
+		err = m.validateSidecarCandidate(ctx, newBody)
 	}
 	if err == nil {
-		err = writeInterceptConfigAtomic(m.store.Path, newBody)
+		err = ctx.Err()
+	}
+	if err == nil {
+		err = writeInterceptConfigAtomicContext(ctx, m.store.Path, newBody)
 	}
 	m.store.mu.Unlock()
 	if err != nil {
@@ -869,7 +886,7 @@ func (m *InterceptModuleManager) mutate(
 		return view, viewErr
 	}
 	if !routingChanged {
-		if err := writeInterceptConfigAtomic(m.store.Path, newBody); err != nil {
+		if err := writeInterceptConfigAtomicContext(ctx, m.store.Path, newBody); err != nil {
 			return interceptModulesView{}, err
 		}
 		m.store.mu.Unlock()
@@ -907,7 +924,7 @@ func (m *InterceptModuleManager) mutate(
 	if err := m.validateMihomoCandidateLocked(ctx, nextMihomo); err != nil {
 		return interceptModulesView{}, err
 	}
-	if err := writeInterceptConfigAtomic(m.store.Path, newBody); err != nil {
+	if err := writeInterceptConfigAtomicContext(ctx, m.store.Path, newBody); err != nil {
 		return interceptModulesView{}, err
 	}
 	oldCertificateHosts := certificateInterceptHosts(oldDocument)

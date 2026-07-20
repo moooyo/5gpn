@@ -371,6 +371,84 @@ func TestInterceptModuleManagerRollsBackWhenCertificatePublicationFails(t *testi
 	}
 }
 
+func TestInterceptModuleDeleteHonorsCancellationDuringValidation(t *testing.T) {
+	module := testModuleSnapshot()
+	module.Enabled = false
+	manager, _, _, _, _ := newInterceptManagerFixture(t, module)
+	before, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tester := blockingInterceptConfigTester{entered: make(chan struct{}), release: make(chan struct{})}
+	manager.SetSidecarTester(tester)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, deleteErr := manager.Delete(ctx, module.ID, before.Revision)
+		done <- deleteErr
+	}()
+	select {
+	case <-tester.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("delete did not reach sidecar validation")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled delete error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		close(tester.release)
+		t.Fatal("cancelled delete did not stop validation")
+	}
+	after, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != before.Revision || len(after.Modules) != 1 || after.Modules[0].ID != module.ID {
+		t.Fatalf("cancelled delete committed state: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestInterceptModuleDeleteRejectsCancellationAfterLockWait(t *testing.T) {
+	module := testModuleSnapshot()
+	module.Enabled = false
+	manager, _, _, _, _ := newInterceptManagerFixture(t, module)
+	before, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.mu.Lock()
+	baseCtx, cancel := context.WithCancel(context.Background())
+	ctx := &testSignalingContext{Context: baseCtx, checked: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		_, deleteErr := manager.Delete(ctx, module.ID, before.Revision)
+		done <- deleteErr
+	}()
+	<-ctx.checked
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			manager.mu.Unlock()
+			t.Fatalf("cancelled delete error = %v", err)
+		}
+	case <-time.After(time.Second):
+		manager.mu.Unlock()
+		t.Fatal("cancelled delete remained blocked on the module lock")
+	}
+	manager.mu.Unlock()
+	after, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != before.Revision || len(after.Modules) != 1 || after.Modules[0].ID != module.ID {
+		t.Fatalf("cancelled delete committed state: before=%+v after=%+v", before, after)
+	}
+}
+
 func TestInterceptModulesAPIListsAndTogglesThroughSharedManager(t *testing.T) {
 	fx := newMihomoConfigTestFixture(t)
 	module := testModuleSnapshot()

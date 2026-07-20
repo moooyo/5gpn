@@ -13,6 +13,7 @@
 package main
 
 import (
+	"context"
 	crand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -197,6 +198,16 @@ var ErrPolicyRevisionChanged = errors.New("policy model changed during apply")
 // rename (create-temp + rename), so a reader never observes a partially
 // written file. The parent directory is created if missing.
 func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
+	return atomicWriteFileContext(context.Background(), path, data, mode)
+}
+
+func atomicWriteFileContext(ctx context.Context, path string, data []byte, mode os.FileMode) error {
+	if ctx == nil {
+		return errors.New("policy: write context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("policy: mkdir %s: %w", dir, err)
@@ -226,6 +237,12 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("policy: close %s: %w", tmpPath, err)
+	}
+	// Enter the non-interruptible atomic rename only while the caller still
+	// owns a live operation. Cancellation after this check races with a commit
+	// already in progress and is handled as normal commit-point semantics.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("policy: rename to %s: %w", path, err)

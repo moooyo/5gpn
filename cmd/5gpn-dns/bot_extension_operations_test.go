@@ -66,6 +66,50 @@ func TestBotExtensionOperationGuardRejectsLateOlderGeneration(t *testing.T) {
 	}
 }
 
+func TestBotExtensionCancellationCutoffDoesNotCancelNewerWork(t *testing.T) {
+	bt := &Bot{}
+	owner, oldGeneration, err := bt.extensionStateStore().BeginOperation(111, 111)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCtx, finishOld := bt.startBotExtensionOperation(context.Background(), owner, oldGeneration)
+	defer finishOld()
+	removed, cutoff := bt.extensionStateStore().CancelOwnerWithGeneration(111, 111)
+	if !removed || cutoff <= oldGeneration {
+		t.Fatalf("cancellation state = removed:%v cutoff:%d old:%d", removed, cutoff, oldGeneration)
+	}
+	owner, newGeneration, err := bt.extensionStateStore().BeginOperation(111, 111)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newCtx, finishNew := bt.startBotExtensionOperation(context.Background(), owner, newGeneration)
+	defer finishNew()
+	if bt.cancelBotExtensionOperationThrough(111, 111, cutoff) {
+		t.Fatal("older cancellation cutoff cancelled newer work")
+	}
+	if newCtx.Err() != nil {
+		t.Fatalf("newer operation error = %v", newCtx.Err())
+	}
+	if !errors.Is(oldCtx.Err(), context.Canceled) {
+		t.Fatalf("older operation error = %v", oldCtx.Err())
+	}
+
+	other := &Bot{}
+	otherOwner, generation, err := other.extensionStateStore().BeginOperation(222, 222)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, finish := other.startBotExtensionOperation(context.Background(), otherOwner, generation)
+	defer finish()
+	_, cutoff = other.extensionStateStore().CancelOwnerWithGeneration(222, 222)
+	if !other.cancelBotExtensionOperationThrough(222, 222, cutoff) {
+		t.Fatal("cancellation cutoff did not cancel older work")
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("cancelled operation error = %v", ctx.Err())
+	}
+}
+
 func TestBotExtensionFetchConcurrencyIsBounded(t *testing.T) {
 	bt := &Bot{}
 	releaseOne, err := bt.acquireBotExtensionFetch(context.Background())

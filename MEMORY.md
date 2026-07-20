@@ -6,17 +6,6 @@ in [`docs/architecture.md`](docs/architecture.md). A section marked **Pending**
 describes required future behavior, not behavior that is already implemented.
 Update the status and the normative documentation when an implementation lands.
 
-## Current worktree handoff
-
-**Status: Telegram plugin-management implementation is feature-complete. Final
-broad regression was paused by the owner on 2026-07-20, and direct delivery to
-the `beta` branch was authorized on 2026-07-21.**
-
-- Continue from [`docs/tg-bot-plugin-management-handoff.md`](docs/tg-bot-plugin-management-handoff.md).
-- The handoff records completed verification, final edits made afterward,
-  known Windows limitations, and follow-up checks that were intentionally
-  deferred.
-
 ## Native interception extensions
 
 **Status: Implemented. Recorded 2026-07-19 and superseded in place by the

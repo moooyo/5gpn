@@ -132,6 +132,7 @@ type botExtensionInputEntry struct {
 type botExtensionGenerationEntry struct {
 	value     uint64
 	expiresAt time.Time
+	active    bool
 }
 
 type botExtensionStateStoreOptions struct {
@@ -262,6 +263,7 @@ func (s *botExtensionStateStore) advanceGenerationLocked(owner botExtensionState
 	}
 	entry.value = s.nextGeneration
 	entry.expiresAt = now.Add(s.selectionTTL)
+	entry.active = false
 	s.generations[owner] = entry
 	return entry.value, nil
 }
@@ -540,18 +542,27 @@ func (s *botExtensionStateStore) CancelInput(adminID, chatID int64) bool {
 // CancelOwner clears every ephemeral plugin token and input belonging to one
 // administrator/private-chat pair. It is intended for /cancel and menu resets.
 func (s *botExtensionStateStore) CancelOwner(adminID, chatID int64) bool {
+	removed, _ := s.CancelOwnerWithGeneration(adminID, chatID)
+	return removed
+}
+
+// CancelOwnerWithGeneration invalidates all existing owner state and returns
+// the new generation as a cutoff for cancelling only operations that began
+// before this cancellation. A later operation receives a greater generation
+// and must survive cleanup of the earlier request.
+func (s *botExtensionStateStore) CancelOwnerWithGeneration(adminID, chatID int64) (bool, uint64) {
 	owner, err := newBotExtensionStateOwner(adminID, chatID)
 	if err != nil {
-		return false
+		return false, 0
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.initLocked()
 	now := s.now()
 	s.pruneLocked(now)
-	_, hadOperation := s.generations[owner]
-	_, _ = s.advanceGenerationLocked(owner, now)
-	removed := hadOperation
+	generation := s.generations[owner]
+	cutoff, _ := s.advanceGenerationLocked(owner, now)
+	removed := generation.active
 	for token, entry := range s.tokens {
 		if entry.owner == owner {
 			s.deleteTokenLocked(token, entry)
@@ -562,7 +573,7 @@ func (s *botExtensionStateStore) CancelOwner(adminID, chatID int64) bool {
 		s.deleteInputLocked(owner, entry)
 		removed = true
 	}
-	return removed
+	return removed, cutoff
 }
 
 func newBotExtensionStateOwner(adminID, chatID int64) (botExtensionStateOwner, error) {

@@ -1047,17 +1047,15 @@ func (bt *Bot) handleBotExtensionMITMCallback(
 	switch field {
 	case "master":
 		next.Enabled = !next.Enabled
-		prompt, err = bt.botExtensionMITMMasterReview(settings.Revision, next.Enabled)
-		if err != nil {
-			bt.edit(ctx, b, cq, "❌ 无法完整审查 armed 插件，未创建确认："+pre(err.Error()), botExtensionBack("mitm"))
-			return
-		}
 	case "http2":
 		next.HTTP2 = !next.HTTP2
-		prompt = "⚠️ <b>确认切换 HTTP/2？</b>\n新值：<code>" + strconv.FormatBool(next.HTTP2) + "</code>\n这会同时控制新连接的客户端 HTTP/2 协商和上游 HTTP/2 尝试；关闭后只使用 HTTP/1.1。"
 	case "quic":
 		next.QUICFallbackProtection = !next.QUICFallbackProtection
-		prompt = "⚠️ <b>确认切换 QUIC fallback protection？</b>\n新值：<code>" + strconv.FormatBool(next.QUICFallbackProtection) + "</code>\n开启时，已经被 active extension capture rules 选中的 IETF QUIC v1/v2 会被丢弃，让支持回退的客户端重试 TCP/HTTPS；其他变体不保证回退。"
+	}
+	prompt, err = bt.botExtensionMITMReview(settings.Revision, field, next)
+	if err != nil {
+		bt.edit(ctx, b, cq, "❌ 无法完整审查 armed 插件，未创建确认："+pre(err.Error()), botExtensionBack("mitm"))
+		return
 	}
 	raw, err := marshalBotExtensionMutation(botExtensionMutation{MITM: &next})
 	if err != nil {
@@ -1074,7 +1072,7 @@ func (bt *Bot) handleBotExtensionMITMCallback(
 	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
 }
 
-func (bt *Bot) botExtensionMITMMasterReview(revision string, enabling bool) (string, error) {
+func (bt *Bot) botExtensionMITMReview(revision, field string, next interceptMITMSettings) (string, error) {
 	view, err := bt.ctrl.InterceptModules()
 	if err != nil {
 		return "", err
@@ -1083,10 +1081,21 @@ func (bt *Bot) botExtensionMITMMasterReview(revision string, enabling bool) (str
 		return "", errInterceptRevisionConflict
 	}
 	var text strings.Builder
-	if enabling {
-		text.WriteString("⚠️ <b>确认开启 MITM master？</b>\n这会对所有已经 armed 的插件启动共享证书、mihomo capture rules、DNS overlay 与 sidecar transaction。")
-	} else {
-		text.WriteString("⚠️ <b>确认关闭 MITM master？</b>\n这会撤销下列 armed 插件当前发布的 DNS overlay 和 mihomo capture rules，并停止 sidecar 流量接管；不可变快照、参数、出口绑定与 armed 状态保留。")
+	switch field {
+	case "master":
+		if next.Enabled {
+			text.WriteString("⚠️ <b>确认开启 MITM master？</b>\n这会对所有已经 armed 的插件启动共享证书、mihomo capture rules、DNS overlay 与 sidecar transaction。")
+		} else {
+			text.WriteString("⚠️ <b>确认关闭 MITM master？</b>\n这会撤销下列 armed 插件当前发布的 DNS overlay 和 mihomo capture rules，并停止 sidecar 流量接管；不可变快照、参数、出口绑定与 armed 状态保留。")
+		}
+	case "http2":
+		text.WriteString("⚠️ <b>确认切换 HTTP/2？</b>\n新值：<code>" + strconv.FormatBool(next.HTTP2) + "</code>\n这会同时控制新连接的客户端 HTTP/2 协商和上游 HTTP/2 尝试；关闭后只使用 HTTP/1.1。")
+	case "quic":
+		text.WriteString("⚠️ <b>确认切换 QUIC fallback protection？</b>\n新值：<code>" + strconv.FormatBool(next.QUICFallbackProtection) + "</code>\n开启时，已经被 active extension capture rules 选中的 IETF QUIC v1/v2 会被丢弃，让支持回退的客户端重试 TCP/HTTPS；其他变体不保证回退。")
+	default:
+		return "", errors.New("unsupported MITM review field")
+	}
+	if field == "master" && !next.Enabled {
 		text.WriteString("\n当前 active capture hosts：")
 		if len(view.ActiveCaptureHosts) == 0 {
 			text.WriteString("<i>无</i>")
@@ -1098,6 +1107,7 @@ func (bt *Bot) botExtensionMITMMasterReview(revision string, enabling bool) (str
 			}
 		}
 	}
+	text.WriteString("\n\n<b>受影响的 armed 插件完整审查</b>")
 	armed := 0
 	for _, module := range view.Modules {
 		if !module.Enabled {
@@ -1107,8 +1117,8 @@ func (bt *Bot) botExtensionMITMMasterReview(revision string, enabling bool) (str
 		text.WriteString("\n\n")
 		text.WriteString(botExtensionModuleDetailHTML(module))
 	}
-	if armed == 0 && enabling {
-		text.WriteString("\n\n当前没有 armed 插件；master 开启后暂时不会发布 capture hosts。")
+	if armed == 0 {
+		text.WriteString("\n当前没有 armed 插件；该设置暂时不会改变插件流量。")
 	}
 	return text.String(), nil
 }

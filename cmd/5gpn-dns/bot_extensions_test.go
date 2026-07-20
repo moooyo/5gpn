@@ -313,6 +313,64 @@ func TestBotExtensionNetworkEnableReviewListsEveryOrigin(t *testing.T) {
 	}
 }
 
+func TestMarketplaceSourceReviewRendersEveryEntryAndNetworkOrigin(t *testing.T) {
+	source := marketplaceSourceView{
+		ID: "io.example.marketplace", MetadataName: "Example marketplace", Description: "Catalog description",
+		Homepage: "https://catalog.example/", URL: "https://catalog.example/index.json", FinalURL: "https://cdn.example/index.json",
+		Digest: strings.Repeat("a", 64), SnapshotDigest: strings.Repeat("b", 64),
+		Entries: []marketplaceEntryView{
+			{
+				ID: "io.example.one", Name: "Extension one", Version: "1.2.3", Description: "First extension",
+				License: marketplaceLicense{SPDX: "MIT"}, ManifestURL: "https://catalog.example/one.yaml", ManifestDigest: strings.Repeat("c", 64),
+				Capabilities: marketplaceCapabilitiesView{CaptureHostCount: 2, ActionCount: 3, SettingCount: 4, UpstreamMappingCount: 5,
+					NetworkOrigins: []string{"https://audit.example.com", "https://upload.example.net:8443"}, PersistentStorage: true, EgressGroupRequired: true},
+			},
+			{
+				ID: "io.example.two", Name: "Extension two", Version: "2.0.0", Description: "Second extension",
+				License: marketplaceLicense{SPDX: "Apache-2.0"}, ManifestURL: "https://catalog.example/two.yaml", ManifestDigest: strings.Repeat("d", 64),
+			},
+		},
+	}
+	review := marketplaceSourceReviewHTML(source)
+	for _, required := range []string{
+		"io.example.one", "1.2.3", strings.Repeat("c", 64), "https://audit.example.com", "https://upload.example.net:8443",
+		"io.example.two", "2.0.0", strings.Repeat("d", 64), "storage=<code>true</code>", "egress-required=<code>true</code>",
+	} {
+		if !strings.Contains(review, required) {
+			t.Fatalf("marketplace source review omitted %q: %s", required, review)
+		}
+	}
+}
+
+func TestBotExtensionProtocolReviewsListEveryArmedNetworkOrigin(t *testing.T) {
+	module := testModuleSnapshot()
+	module.Enabled = true
+	module.NetworkOrigins = []string{"https://audit.example.com", "https://upload.example.net:8443"}
+	manager, _, _, _, _ := newInterceptManagerFixture(t, module)
+	ctrl := NewController(func() error { return nil }, nil, nil, nil)
+	ctrl.SetInterceptModuleManager(manager)
+	bt := &Bot{ctrl: ctrl}
+	settings, err := ctrl.InterceptSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := interceptMITMSettings{Enabled: settings.Enabled, HTTP2: !settings.HTTP2, QUICFallbackProtection: !settings.QUICFallbackProtection}
+	for _, field := range []string{"http2", "quic"} {
+		review, reviewErr := bt.botExtensionMITMReview(settings.Revision, field, next)
+		if reviewErr != nil {
+			t.Fatalf("%s review: %v", field, reviewErr)
+		}
+		for _, origin := range module.NetworkOrigins {
+			if !strings.Contains(review, origin) {
+				t.Fatalf("%s review omitted network origin %q: %s", field, origin, review)
+			}
+		}
+		if !strings.Contains(review, "解密请求、响应、参数和存储数据") {
+			t.Fatalf("%s review omitted explicit network exfiltration warning: %s", field, review)
+		}
+	}
+}
+
 func TestBotExtensionMarketplaceInstallBindsBothRevisionsAndDigests(t *testing.T) {
 	ctx := context.Background()
 	fixture := newMarketplaceFixture(t, nil)
