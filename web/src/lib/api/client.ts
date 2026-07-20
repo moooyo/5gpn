@@ -119,6 +119,24 @@ export const api = {
           method: 'DELETE',
           body: JSON.stringify({ revision }),
         }),
+  getMarketplaces: () =>
+    MOCK ? mock.getMarketplaces() : apiFetch<T.MarketplacesView>('/api/interception/marketplaces'),
+  addMarketplace: (revision: string, url: string) =>
+    MOCK ? mock.addMarketplace(revision, url) : apiFetch<T.MarketplacesView>('/api/interception/marketplaces', {
+      method: 'POST', body: JSON.stringify({ revision, url }),
+    }),
+  refreshMarketplace: (id: string, revision: string) =>
+    MOCK ? mock.refreshMarketplace(id, revision) : apiFetch<T.MarketplacesView>(`/api/interception/marketplaces/${encodeURIComponent(id)}/refresh`, {
+      method: 'POST', body: JSON.stringify({ revision }),
+    }),
+  deleteMarketplace: (id: string, revision: string) =>
+    MOCK ? mock.deleteMarketplace(id, revision) : apiFetch<T.MarketplacesView>(`/api/interception/marketplaces/${encodeURIComponent(id)}`, {
+      method: 'DELETE', body: JSON.stringify({ revision }),
+    }),
+  installMarketplaceEntry: (marketplace: string, extension: string, marketplaceRevision: string, moduleRevision: string) =>
+    MOCK ? mock.installMarketplaceEntry(marketplace, extension, marketplaceRevision, moduleRevision) : apiFetch<T.InterceptModulesView>(`/api/interception/marketplaces/${encodeURIComponent(marketplace)}/entries/${encodeURIComponent(extension)}/install`, {
+      method: 'POST', body: JSON.stringify({ marketplace_revision: marketplaceRevision, module_revision: moduleRevision }),
+    }),
   searchCities: (query: string, language: string, signal?: AbortSignal) =>
     MOCK
       ? mock.searchCities(query, language)

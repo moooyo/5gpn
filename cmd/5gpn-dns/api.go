@@ -99,6 +99,7 @@ type ControlServer struct {
 	mihomoStore      *MihomoConfigStore
 	interceptStore   *InterceptConfigStore
 	interceptModules *InterceptModuleManager
+	marketplaces     *ExtensionMarketplaceManager
 	mihomoInfra      InfraParams
 	mihomoTest       mihomoTester
 	mihomoCtl        mihomoController
@@ -384,6 +385,11 @@ func (s *ControlServer) apiMux() http.Handler {
 	mux.HandleFunc("POST /api/interception/modules/{id}/update-apply", s.handleInterceptModuleUpdateApply)
 	mux.HandleFunc("PUT /api/interception/modules/{id}", s.handleInterceptModulePut)
 	mux.HandleFunc("DELETE /api/interception/modules/{id}", s.handleInterceptModuleDelete)
+	mux.HandleFunc("GET /api/interception/marketplaces", s.handleMarketplacesGet)
+	mux.HandleFunc("POST /api/interception/marketplaces", s.handleMarketplaceAdd)
+	mux.HandleFunc("POST /api/interception/marketplaces/{id}/refresh", s.handleMarketplaceRefresh)
+	mux.HandleFunc("DELETE /api/interception/marketplaces/{id}", s.handleMarketplaceDelete)
+	mux.HandleFunc("POST /api/interception/marketplaces/{marketplace}/entries/{extension}/install", s.handleMarketplaceInstall)
 	mux.HandleFunc("GET /api/geocode/cities", s.handleGeocodeCities)
 
 	return mux

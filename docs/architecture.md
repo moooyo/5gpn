@@ -214,12 +214,30 @@ body, call-count, and concurrency limits are runtime safety bounds rather than
 manifest knobs.
 
 First-party extension source is maintained independently in the public
-`moooyo/5gpn-extensions` catalog repository. The core repository does not
-vendor, mirror, seed, or release extension manifests or scripts. The Console
-links that catalog for operator review, while installation still snapshots one
-explicit HTTPS manifest or local upload through the same strict parser. Apple
-WLOC and every other maintained extension follow this external-catalog
-boundary and are never compiled into either Go binary.
+`moooyo/5gpn-extensions` repository. That repository publishes the strict,
+bounded `5gpn.io/marketplace/v1` JSON index at
+`https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json`. The core
+repository does not vendor, mirror, seed, or release extension manifests or
+scripts. Apple WLOC and every other maintained extension follow this external
+source boundary and are never compiled into either Go binary.
+
+An authenticated operator may add an explicit HTTPS marketplace index to the
+Console. The daemon fetches it through the same redirect and post-resolution
+SSRF guard as extension resources, strictly rejects unknown or duplicate JSON
+fields, applies finite source, entry, URL, string, and response-size limits, and
+atomically retains one complete normalized index snapshot. A failed add or
+refresh never replaces an older complete snapshot. Marketplace metadata is a
+discovery aid, not a trust root: there is no automatic install, enable, update,
+crawl, or script mirroring, and the browser never fetches marketplace content
+or remote artwork directly.
+
+Selecting an entry is an explicit install. The daemon refetches exactly one
+listed HTTPS manifest through the existing native parser, verifies the listed
+manifest and script byte sizes and SHA-256 digests plus the derived identity and
+capability summary, and only then commits the same disabled immutable local
+snapshot used by direct URL install. Any list/source mismatch fails before the
+extension document changes. Local add and direct URL install remain available
+as separate flows and do not pass through a marketplace.
 
 URL-sourced plugins may be checked for updates only through an explicit,
 authenticated action. A check fetches a bounded candidate through the same
@@ -610,6 +628,10 @@ Specialized live state remains in purpose-specific, atomically written files:
   bindings.
   The global MITM master, HTTP/2 negotiation, and QUIC fallback protection live
   in the same document;
+- `extension-marketplaces.json` is the Console-managed list of explicitly added
+  marketplace URLs and their last complete, bounded index snapshots. It has an
+  independent byte revision, so refreshing discovery metadata cannot change a
+  sidecar runtime revision. A missing file means no configured marketplaces;
 - `/var/lib/5gpn-intercept/store.json` is the size-bounded, sidecar-owned
   persistence backend exposed as `context.storage` only when a native manifest
   explicitly requests `persistentStorage`.
@@ -920,7 +942,8 @@ stored and subsequent traffic follows the normal operator-owned mihomo rules.
 The page must state that QUIC fallback is guaranteed for already matched IETF
 QUIC v1/v2 traffic and other variants are not guaranteed.
 
-The dedicated `/extensions` route owns native plugins. It shows immutable
+The dedicated `/extensions` route owns native plugins and marketplace
+discovery. Its Installed view shows immutable
 manifest/script digests, semantic version, normalized capture hosts, actions,
 permissions, exact network origins, typed settings, upstream mappings, explicit
 execution position, operator egress binding, enabled/runtime state, and a
@@ -933,7 +956,12 @@ review; list responses do not send those potentially large bodies. “Install
 from URL” and “Add locally” are separate dialogs with no source-mode switch.
 The former accepts one HTTPS native manifest; the latter accepts pasted or
 uploaded YAML. Invalid native manifests fail installation rather than entering a
-compatibility mode. Required settings must be complete before enable. Enable,
+compatibility mode. Its Marketplace view loads only authenticated, daemon-
+validated cached indexes, keeps marketplace source identity, refresh state, and
+digest visible, and supports adding, refreshing, and removing explicit sources.
+Each entry shows bounded descriptive and capability metadata, but installation
+always ends in a review of the actual disabled native snapshot. Remote images
+and browser-side marketplace fetches are forbidden. Required settings must be complete before enable. Enable,
 disable, delete, reorder, binding, settings, and update changes use revision
 checks and explicit confirmation. Required missing or removed group bindings
 render the plugin not-ready and cannot silently fall back. A `location` setting uses the shared map point picker with
@@ -942,8 +970,8 @@ City search calls bearer-protected `GET /api/geocode/cities`; the daemon sends
 only the bounded query and language to the fixed Nominatim origin through the
 same post-resolution SSRF dial guard used by subscription fetches. It never
 forwards the bearer token, arbitrary headers, or an operator-selected URL.
-The project extension directory remains a source link, not an automatically
-installed or mirrored store. The Setup Guide owns the one shared
+The project extension repository remains external and is never automatically
+installed or mirrored. The Setup Guide owns the one shared
 interception-root QR code, download link, installation steps, and iOS manual
 full-trust instructions. It states that trust applies to every plugin while
 decryption remains limited to enabled capture hosts and requires explicit device
@@ -962,5 +990,8 @@ installation because modern Android applications generally reject user CAs.
 Changes are tested in proportion to their surface. The complete local gates
 are the repository shell tests, formatting/vet/race tests for both Go modules, Web typecheck and
 Vitest/build/bundle checks, and Playwright tests. CI also renders the mihomo
-seed and validates it with the digest-pinned mihomo version. Real gateway
+seed and validates it with the digest-pinned mihomo version. The separate
+extensions repository deterministically generates its marketplace index and
+passes both that index and every maintained manifest to the current core
+`beta` parser tests, so either side rejects a contract drift. Real gateway
 behavior is accepted with `tests/integration-smoke.md`.

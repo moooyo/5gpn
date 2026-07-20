@@ -389,6 +389,20 @@ token into recorded command output, screenshots, or issue logs.
   typed settings and required operator egress-group bindings remain hard enable
   gates. Exact network origins are normalized into the immutable snapshot and
   changing them changes the reviewed digest.
+- [ ] Open the Marketplace view with no configured sources. Add
+  `https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json`, verify
+  the source name, final URL, fetch time, and digest are visible, then search
+  the published entries. Refreshing a valid source atomically updates the
+  complete list. Inject an unreachable origin, unsafe redirect, private dial
+  target, malformed/oversized JSON, duplicate field, and partial entry; each
+  failure must leave the previous complete marketplace snapshot unchanged.
+- [ ] Select one official marketplace entry and verify the daemon refetches the
+  listed manifest, checks its byte size and SHA-256 plus every referenced script
+  size/digest and derived capability summary, then shows the actual imported
+  snapshot review. A changed manifest, script, identity, version, permission,
+  or capability count must abort before the module revision changes. A valid
+  install starts disabled and never turns on the MITM master. Remove and re-add
+  the marketplace; installed immutable extension snapshots must be unaffected.
 - [ ] Reorder installed extensions through the Console. Request and response
   actions execute top-to-bottom in the displayed order. For a host or network
   origin shared by extensions with different bindings, the first matching

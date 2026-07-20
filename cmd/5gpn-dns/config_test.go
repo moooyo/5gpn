@@ -25,7 +25,7 @@ var allDNSEnvKeys = []string{
 	"DNS_EGRESS_RESOLVER",
 	"DNS_BASE_DOMAIN",
 	"DNS_MIHOMO_CONTROLLER", "DNS_MIHOMO_SECRET", "DNS_WHITELIST_FILE",
-	"DNS_MIHOMO_CONFIG", "DNS_INTERCEPT_CONFIG",
+	"DNS_MIHOMO_CONFIG", "DNS_INTERCEPT_CONFIG", "DNS_MARKETPLACES_FILE",
 	"DNS_ZASH_DIR", "DNS_ZASH_LISTEN", "DNS_ZASH_CERT", "DNS_ZASH_KEY",
 }
 
@@ -933,6 +933,9 @@ func TestLoadConfig_MihomoConfigFileKnob(t *testing.T) {
 		if cfg.InterceptConfigFile != "/etc/5gpn/intercept/config.json" {
 			t.Errorf("InterceptConfigFile default = %q", cfg.InterceptConfigFile)
 		}
+		if cfg.MarketplacesFile != "/etc/5gpn/extension-marketplaces.json" {
+			t.Errorf("MarketplacesFile default = %q", cfg.MarketplacesFile)
+		}
 	})
 
 	t.Run("override", func(t *testing.T) {
@@ -957,6 +960,16 @@ func TestLoadConfig_MihomoConfigFileKnob(t *testing.T) {
 		t.Setenv("DNS_INTERCEPT_CONFIG", "/opt/5gpn/intercept/config.json")
 		if _, err := LoadConfig(); err == nil {
 			t.Fatal("LoadConfig accepted a non-canonical interception config path")
+		}
+	})
+
+	t.Run("reject marketplace path override", func(t *testing.T) {
+		clearAllDNSEnv(t)
+		t.Setenv("DNS_CERT", "/c")
+		t.Setenv("DNS_KEY", "/k")
+		t.Setenv("DNS_MARKETPLACES_FILE", "/opt/5gpn/extension-marketplaces.json")
+		if _, err := LoadConfig(); err == nil {
+			t.Fatal("LoadConfig accepted a non-canonical marketplace config path")
 		}
 	})
 }

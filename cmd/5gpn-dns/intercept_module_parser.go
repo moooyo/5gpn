@@ -470,7 +470,11 @@ func (p interceptModuleParser) fetchResource(ctx context.Context, rawURL string,
 }
 
 func setModuleFetchHeaders(request *http.Request) {
-	request.Header.Set("Accept", "application/yaml, text/yaml, application/javascript, text/plain, */*;q=0.1")
+	// net/http may synthesize Referer while following a redirect. Extension and
+	// marketplace URLs can contain opaque query data, so never disclose the
+	// previous URL to another origin.
+	request.Header.Del("Referer")
+	request.Header.Set("Accept", "application/json, application/yaml, text/yaml, application/javascript, text/plain, */*;q=0.1")
 	request.Header.Set("User-Agent", nativeExtensionUserAgent)
 }
 

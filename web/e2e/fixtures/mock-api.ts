@@ -298,6 +298,13 @@ export async function setupMockApi(page: Page): Promise<void> {
       reason: module.reason === 'settings-required' ? 'settings-required' : mitmSettings.enabled ? undefined : 'mitm-disabled',
     })),
   })
+  let marketplaceRevision = '2000000000000000000000000000000000000000000000000000000000000001'
+  let marketplaceSources: T.MarketplaceSource[] = [{
+    id: 'io.5gpn.official', name: '5GPN Extensions', description: 'Maintained native extensions.', homepage: 'https://github.com/moooyo/5gpn-extensions',
+    url: 'https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json', final_url: 'https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json', digest: '9'.repeat(64), fetched_at: '2026-07-20T00:00:00Z',
+    entries: [{ id: 'io.example.marketplace-cleaner', name: 'Marketplace Response Cleaner', version: '1.0.0', description: 'A marketplace native extension.', tags: ['response'], license: { spdx: 'MIT' }, manifest_url: 'https://extensions.example.test/marketplace-cleaner.yaml', manifest_digest: '7'.repeat(64), capabilities: { capture_host_count: 1, action_count: 1, setting_count: 0, network_origins: [], persistent_storage: false, upstream_mapping_count: 0, egress_group_required: false } }],
+  }]
+  const currentMarketplaces = (): T.MarketplacesView => ({ revision: marketplaceRevision, recommended_url: 'https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json', sources: structuredClone(marketplaceSources) })
 
   const advanceInterceptRevision = (): void => {
     interceptRevision = (BigInt(`0x${interceptRevision}`) + 1n).toString(16).padStart(64, '0')
@@ -410,6 +417,40 @@ export async function setupMockApi(page: Page): Promise<void> {
     }
     if (path === '/api/interception/modules' && method === 'GET') {
       return json(route, currentInterceptModules())
+    }
+    if (path === '/api/interception/marketplaces' && method === 'GET') return json(route, currentMarketplaces())
+    if (path === '/api/interception/marketplaces' && method === 'POST') {
+      const body = route.request().postDataJSON() as { revision?: string; url?: string }
+      if (body.revision !== marketplaceRevision || !body.url) return json(route, { error: 'marketplace revision changed' }, 409)
+      marketplaceSources = [...marketplaceSources, { id: `source-${marketplaceSources.length + 1}`, name: 'Added marketplace', url: body.url, final_url: body.url, digest: '8'.repeat(64), fetched_at: new Date().toISOString(), entries: [] }]
+      marketplaceRevision = (BigInt(`0x${marketplaceRevision}`) + 1n).toString(16).padStart(64, '0')
+      return json(route, currentMarketplaces(), 201)
+    }
+    const marketplaceSource = path.match(/^\/api\/interception\/marketplaces\/([^/]+)$/)
+    if (marketplaceSource && method === 'DELETE') {
+      const body = route.request().postDataJSON() as { revision?: string }
+      if (body.revision !== marketplaceRevision) return json(route, { error: 'marketplace revision changed' }, 409)
+      marketplaceSources = marketplaceSources.filter((source) => source.id !== decodeURIComponent(marketplaceSource[1]))
+      marketplaceRevision = (BigInt(`0x${marketplaceRevision}`) + 1n).toString(16).padStart(64, '0')
+      return json(route, currentMarketplaces())
+    }
+    const marketplaceRefresh = path.match(/^\/api\/interception\/marketplaces\/([^/]+)\/refresh$/)
+    if (marketplaceRefresh && method === 'POST') {
+      const body = route.request().postDataJSON() as { revision?: string }
+      const source = marketplaceSources.find((candidate) => candidate.id === decodeURIComponent(marketplaceRefresh[1]))
+      if (!source || body.revision !== marketplaceRevision) return json(route, { error: 'marketplace revision changed' }, 409)
+      source.fetched_at = new Date().toISOString()
+      marketplaceRevision = (BigInt(`0x${marketplaceRevision}`) + 1n).toString(16).padStart(64, '0')
+      return json(route, currentMarketplaces())
+    }
+    const marketplaceEntry = path.match(/^\/api\/interception\/marketplaces\/([^/]+)\/entries\/([^/]+)\/install$/)
+    if (marketplaceEntry && method === 'POST') {
+      const body = route.request().postDataJSON() as { marketplace_revision?: string; module_revision?: string }
+      const entry = marketplaceSources.find((source) => source.id === decodeURIComponent(marketplaceEntry[1]))?.entries.find((candidate) => candidate.id === decodeURIComponent(marketplaceEntry[2]))
+      if (!entry || body.marketplace_revision !== marketplaceRevision || body.module_revision !== interceptRevision) return json(route, { error: 'marketplace revision changed' }, 409)
+      interceptModules = [...interceptModules, { id: entry.id, extension_version: entry.version, name: entry.name, description: entry.description, enabled: false, ready: true, capture_hosts: ['capture.example.test'], script_count: entry.capabilities.action_count, settings: [], persistent_storage: false, source_url: entry.manifest_url, source_digest: entry.manifest_digest, snapshot_digest: entry.manifest_digest, execution_order: interceptModules.length + 1, network_origins: [], egress_group_required: false }]
+      advanceInterceptRevision()
+      return json(route, currentInterceptModules(), 201)
     }
     if (path === '/api/geocode/cities' && method === 'GET') {
       return json(route, [{ place_id: 1, display_name: '深圳市, 广东省, 中国', lat: '22.544577', lon: '113.94114' }])

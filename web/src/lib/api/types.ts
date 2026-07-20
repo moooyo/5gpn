@@ -232,6 +232,45 @@ export interface InterceptModuleUpdateCheck {
   candidate?: InterceptModule
 }
 
+export interface MarketplaceEntryCapabilities {
+  capture_host_count: number
+  action_count: number
+  setting_count: number
+  network_origins: string[]
+  persistent_storage: boolean
+  upstream_mapping_count: number
+  egress_group_required: boolean
+}
+export interface MarketplaceEntryLicense { spdx: string; url?: string }
+export interface MarketplaceEntry {
+  id: string
+  name: string
+  version: string
+  description?: string
+  tags: string[]
+  license?: MarketplaceEntryLicense
+  documentation_url?: string
+  manifest_url: string
+  manifest_digest: string
+  capabilities: MarketplaceEntryCapabilities
+}
+export interface MarketplaceSource {
+  id: string
+  name: string
+  description?: string
+  homepage?: string
+  url: string
+  final_url: string
+  digest: string
+  fetched_at: string
+  entries: MarketplaceEntry[]
+}
+export interface MarketplacesView {
+  revision: string
+  recommended_url?: string
+  sources: MarketplaceSource[]
+}
+
 export interface CitySearchResult {
   place_id: number
   display_name: string

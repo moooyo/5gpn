@@ -256,6 +256,11 @@ func TestAPIRoutes_RequireAuth(t *testing.T) {
 		{http.MethodPost, "/api/interception/modules/io.example.fixture/update-apply"},
 		{http.MethodPut, "/api/interception/modules/io.example.fixture"},
 		{http.MethodDelete, "/api/interception/modules/io.example.fixture"},
+		{http.MethodGet, "/api/interception/marketplaces"},
+		{http.MethodPost, "/api/interception/marketplaces"},
+		{http.MethodPost, "/api/interception/marketplaces/io.example.marketplace/refresh"},
+		{http.MethodDelete, "/api/interception/marketplaces/io.example.marketplace"},
+		{http.MethodPost, "/api/interception/marketplaces/io.example.marketplace/entries/io.example.fixture/install"},
 		{http.MethodGet, "/api/geocode/cities?q=Shenzhen"},
 	}
 

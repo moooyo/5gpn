@@ -38,6 +38,15 @@ current pre-release contract on 2026-07-20.**
   vendor, seed, or release extension manifests or scripts. Its target
   coordinates still use the generic `location` setting and map editor available
   to any native extension.
+- The extensions repository publishes a deterministic
+  `5gpn.io/marketplace/v1` index through GitHub Pages. Operators explicitly add
+  marketplace URLs in the authenticated Console; successful refreshes retain a
+  complete bounded index snapshot and failures preserve the prior snapshot.
+  Marketplace data is discovery metadata, never an execution or trust root.
+  Selecting an entry refetches one manifest through the native parser, verifies
+  the listed manifest/script digests and derived capability summary, and stores
+  the normal disabled immutable snapshot. There is no automatic install,
+  enable, update, crawling, remote artwork, or source mirroring.
 
 ## Stable and beta release channels
 

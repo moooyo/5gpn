@@ -171,6 +171,9 @@ type Config struct {
 	// InterceptConfigFile is the modular sidecar document managed by the
 	// authenticated module API. It never contains a CA private key.
 	InterceptConfigFile string
+	// MarketplacesFile is the authenticated extension marketplace source
+	// document. It is separate from the immutable extension snapshots.
+	MarketplacesFile string
 
 	// PolicyRulesFile is the console-managed plain-JSON rule list (env
 	// DNS_POLICY_RULES, default /etc/5gpn/policy.json). An explicit empty value disables the store
@@ -258,6 +261,7 @@ type Config struct {
 //	DNS_BASE_DOMAIN     (none — dot/console/zash names derive from it)
 //	DNS_MIHOMO_CONFIG   /etc/5gpn/mihomo/config.yaml (operator-owned mihomo config; console raw editor)
 //	DNS_INTERCEPT_CONFIG /etc/5gpn/intercept/config.json (allowlisted module sidecar config)
+//	DNS_MARKETPLACES_FILE /etc/5gpn/extension-marketplaces.json (extension marketplace sources)
 //	DNS_POLICY_RULES    /etc/5gpn/policy.json (unified policy-rule model; plain JSON, public subscription URLs; empty disables)
 //	DNS_ZASH_DIR        /opt/5gpn/zash (unzipped zashboard dist, served by the zash panel)
 //	DNS_ZASH_LISTEN     127.0.0.2:443 (second loopback HTTPS listener for the zash panel)
@@ -292,6 +296,7 @@ func LoadConfig() (Config, error) {
 		WhitelistFile:       envOr("DNS_WHITELIST_FILE", "/etc/5gpn/mihomo/whitelist.txt"),
 		MihomoConfigFile:    envOr("DNS_MIHOMO_CONFIG", "/etc/5gpn/mihomo/config.yaml"),
 		InterceptConfigFile: envOr("DNS_INTERCEPT_CONFIG", "/etc/5gpn/intercept/config.json"),
+		MarketplacesFile:    envOr("DNS_MARKETPLACES_FILE", "/etc/5gpn/extension-marketplaces.json"),
 		PolicyRulesFile:     envListen("DNS_POLICY_RULES", "/etc/5gpn/policy.json"),
 		ZashDir:             envOr("DNS_ZASH_DIR", "/opt/5gpn/zash"),
 		ZashListen:          envListen("DNS_ZASH_LISTEN", "127.0.0.2:443"),
@@ -308,6 +313,9 @@ func LoadConfig() (Config, error) {
 	}
 	if cfg.InterceptConfigFile != "/etc/5gpn/intercept/config.json" {
 		return Config{}, fmt.Errorf("DNS_INTERCEPT_CONFIG must be /etc/5gpn/intercept/config.json")
+	}
+	if cfg.MarketplacesFile != "/etc/5gpn/extension-marketplaces.json" {
+		return Config{}, fmt.Errorf("DNS_MARKETPLACES_FILE must be /etc/5gpn/extension-marketplaces.json")
 	}
 	for key, addr := range map[string]string{
 		"DNS_LISTEN_DEBUG": cfg.ListenDebug,

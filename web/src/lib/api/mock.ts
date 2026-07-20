@@ -300,6 +300,93 @@ export async function deleteInterceptModule(id: string, revision: string): Promi
   return interceptModulesView()
 }
 
+let marketplaceRevision = '2000000000000000000000000000000000000000000000000000000000000001'
+let marketplaces: T.MarketplaceSource[] = [{
+  id: 'io.5gpn.official',
+  name: '5GPN Extensions',
+  description: 'Maintained native extensions for explicit review and snapshot installation.',
+  homepage: 'https://github.com/moooyo/5gpn-extensions',
+  url: 'https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json',
+  final_url: 'https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json',
+  digest: '9'.repeat(64),
+  fetched_at: '2026-07-20T00:00:00Z',
+  entries: [{
+    id: 'io.5gpn.apple-wloc', name: 'Apple WLOC Location Override', version: '1.0.0',
+    description: 'Override Apple location responses with an operator-selected point.',
+    tags: ['location', 'apple'], license: { spdx: 'MIT' },
+    documentation_url: 'https://github.com/moooyo/5gpn-extensions',
+    manifest_url: 'https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml',
+    manifest_digest: 'a'.repeat(64),
+    capabilities: { capture_host_count: 2, action_count: 1, setting_count: 2, network_origins: [], persistent_storage: false, upstream_mapping_count: 0, egress_group_required: false },
+  }, {
+    id: 'io.example.marketplace-cleaner', name: 'Marketplace Response Cleaner', version: '1.0.0',
+    description: 'A native response transformation example from the marketplace.',
+    tags: ['response', 'example'], license: { spdx: 'Apache-2.0' },
+    manifest_url: 'https://extensions.example.test/marketplace-cleaner.yaml', manifest_digest: '7'.repeat(64),
+    capabilities: { capture_host_count: 1, action_count: 1, setting_count: 0, network_origins: ['https://origin.example.net'], persistent_storage: false, upstream_mapping_count: 1, egress_group_required: true },
+  }],
+}]
+
+function marketplacesView(): T.MarketplacesView {
+  return { revision: marketplaceRevision, recommended_url: 'https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json', sources: structuredClone(marketplaces) }
+}
+
+function advanceMarketplaceRevision(): void {
+  marketplaceRevision = (BigInt(`0x${marketplaceRevision}`) + 1n).toString(16).padStart(64, '0')
+}
+
+export async function getMarketplaces(): Promise<T.MarketplacesView> {
+  await delay(100)
+  return marketplacesView()
+}
+
+export async function addMarketplace(revision: string, url: string): Promise<T.MarketplacesView> {
+  await delay(160)
+  if (revision !== marketplaceRevision) throw new ApiError(409, 'The marketplace ledger changed. Refresh and try again.')
+  if (!url.startsWith('https://')) throw new ApiError(400, 'Marketplace URLs must use HTTPS.')
+  marketplaces.push({ id: `source-${marketplaces.length + 1}`, name: 'Added marketplace', url, final_url: url, digest: '8'.repeat(64), fetched_at: new Date().toISOString(), entries: [] })
+  advanceMarketplaceRevision()
+  return marketplacesView()
+}
+
+export async function refreshMarketplace(id: string, revision: string): Promise<T.MarketplacesView> {
+  await delay(140)
+  if (revision !== marketplaceRevision) throw new ApiError(409, 'The marketplace ledger changed. Refresh and try again.')
+  const source = marketplaces.find((candidate) => candidate.id === id)
+  if (!source) throw new ApiError(404, 'Marketplace source not found.')
+  source.fetched_at = new Date().toISOString()
+  advanceMarketplaceRevision()
+  return marketplacesView()
+}
+
+export async function deleteMarketplace(id: string, revision: string): Promise<T.MarketplacesView> {
+  await delay(120)
+  if (revision !== marketplaceRevision) throw new ApiError(409, 'The marketplace ledger changed. Refresh and try again.')
+  marketplaces = marketplaces.filter((candidate) => candidate.id !== id)
+  advanceMarketplaceRevision()
+  return marketplacesView()
+}
+
+export async function installMarketplaceEntry(marketplace: string, extension: string, sourceRevision: string, moduleRevision: string): Promise<T.InterceptModulesView> {
+  await delay(180)
+  if (sourceRevision !== marketplaceRevision || moduleRevision !== fixtures.interceptModules.revision) throw new ApiError(409, 'The marketplace changed. Refresh and try again.')
+  const entry = marketplaces.find((source) => source.id === marketplace)?.entries.find((candidate) => candidate.id === extension)
+  if (!entry) throw new ApiError(404, 'Marketplace extension not found.')
+  if (fixtures.interceptModules.modules.some((module) => module.id === entry.id)) throw new ApiError(409, 'This extension is already installed.')
+  fixtures.interceptModules.modules.push({
+    id: entry.id, extension_version: entry.version, name: entry.name, description: entry.description,
+    enabled: false, ready: true, capture_hosts: Array.from({ length: entry.capabilities.capture_host_count }, (_, index) => `capture-${index + 1}.example.test`),
+    script_count: entry.capabilities.action_count, settings: [], persistent_storage: entry.capabilities.persistent_storage,
+    source_url: entry.manifest_url, source_digest: entry.manifest_digest, snapshot_digest: entry.manifest_digest,
+    imported_at: new Date().toISOString(), execution_order: fixtures.interceptModules.modules.length + 1,
+    network_origins: [...entry.capabilities.network_origins], egress_group_required: entry.capabilities.egress_group_required,
+  })
+  fixtures.interceptModules.execution_order = fixtures.interceptModules.modules.map((module) => module.id)
+  advanceInterceptRevision()
+  refreshActiveInterceptHosts()
+  return interceptModulesView()
+}
+
 export async function searchCities(query: string, _language: string): Promise<T.CitySearchResult[]> {
   await delay(120)
   if (!query.trim()) return []

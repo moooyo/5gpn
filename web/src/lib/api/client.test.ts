@@ -224,6 +224,41 @@ describe('api client — interception modules', () => {
   })
 })
 
+describe('api client — marketplaces', () => {
+  it('maps marketplace ledger and immutable entry installation endpoints', async () => {
+    vi.stubEnv('VITE_API_MOCK', '0')
+    vi.resetModules()
+    const markets = { revision: 'm1', sources: [] }
+    const modules = { revision: 'r2', catalog_url: '', active_capture_hosts: [], execution_order: [], available_egress_groups: [], modules: [] }
+    const f = vi.fn()
+      .mockResolvedValueOnce(jsonResp(200, markets))
+      .mockResolvedValueOnce(jsonResp(201, markets))
+      .mockResolvedValueOnce(jsonResp(200, markets))
+      .mockResolvedValueOnce(jsonResp(200, markets))
+      .mockResolvedValueOnce(jsonResp(201, modules))
+    vi.stubGlobal('fetch', f)
+    const { api } = await import('./client')
+
+    await api.getMarketplaces()
+    await api.addMarketplace('m1', 'https://example.test/marketplace.json')
+    await api.refreshMarketplace('official', 'm1')
+    await api.deleteMarketplace('official', 'm1')
+    await api.installMarketplaceEntry('official', 'io.example.cleaner', 'm1', 'r1')
+
+    expect(f.mock.calls.map((call) => call[0])).toEqual([
+      '/api/interception/marketplaces',
+      '/api/interception/marketplaces',
+      '/api/interception/marketplaces/official/refresh',
+      '/api/interception/marketplaces/official',
+      '/api/interception/marketplaces/official/entries/io.example.cleaner/install',
+    ])
+    expect(JSON.parse(f.mock.calls[1][1].body as string)).toEqual({ revision: 'm1', url: 'https://example.test/marketplace.json' })
+    expect(JSON.parse(f.mock.calls[2][1].body as string)).toEqual({ revision: 'm1' })
+    expect(f.mock.calls[3][1].method).toBe('DELETE')
+    expect(JSON.parse(f.mock.calls[4][1].body as string)).toEqual({ marketplace_revision: 'm1', module_revision: 'r1' })
+  })
+})
+
 describe('api client — mihomo config mock ON (VITE_API_MOCK=1)', () => {
   it('getMihomoConfig resolves the fixture', async () => {
     vi.stubEnv('VITE_API_MOCK', '1')

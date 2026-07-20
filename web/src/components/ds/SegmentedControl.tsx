@@ -27,7 +27,7 @@ export function SegmentedControl({ value, onChange, options, className, ariaLabe
             key={option.value}
             value={option.value}
             className={(state) => cn(
-              'zds-state-layer flex min-h-8 min-w-0 flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-[9px] px-2 text-[11.5px] font-medium outline-none transition-colors',
+              'zds-state-layer flex min-h-11 min-w-0 flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-[9px] px-2 text-[11.5px] font-medium outline-none transition-colors sm:min-h-8',
               state.active ? 'bg-card text-primary shadow-[var(--md-sys-elevation-1)]' : 'text-text-faint',
             )}
           >

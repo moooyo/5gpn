@@ -120,7 +120,7 @@ readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_LISTEN_API DNS_CERT D
 DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL DNS_CHINA DNS_TRUST DNS_UPSTREAMS \
 DNS_CHINA_ECS DNS_CHINA_0X20 DNS_ECS_FILE DNS_RULES_DIR DNS_CHNROUTE DNS_EGRESS_RESOLVER DNS_EGRESS_BROKER \
 DNS_SUBSCRIPTIONS DNS_POLICY_RULES DNS_API_TOKEN DNS_API_RATE DNS_API_BURST DNS_MIHOMO_CONTROLLER DNS_MIHOMO_SECRET \
-DNS_WHITELIST_FILE DNS_MIHOMO_CONFIG DNS_INTERCEPT_CONFIG DNS_ZASH_DIR DNS_ZASH_LISTEN DNS_WEB_DIR WWW_DIR TGBOT_TOKEN TGBOT_ADMINS \
+DNS_WHITELIST_FILE DNS_MIHOMO_CONFIG DNS_INTERCEPT_CONFIG DNS_MARKETPLACES_FILE DNS_ZASH_DIR DNS_ZASH_LISTEN DNS_WEB_DIR WWW_DIR TGBOT_TOKEN TGBOT_ADMINS \
 DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS DNS_CACHE_SIZE DNS_MAX_INFLIGHT DNS_TTL_MIN DNS_TTL_MAX DNS_QUERY_TIMEOUT \
 DNS_STATS_FILE DNS_HEARTBEAT_URL DNS_HEARTBEAT_INTERVAL"
 # EDNS Client Subnet uses the operational default above. Operators can disable
@@ -3431,6 +3431,7 @@ write_dns_env() {
     local stats_file="$(cfg_get DNS_STATS_FILE)"; stats_file="${stats_file:-${CONF_DIR}/stats.json}"
     local mihomo_config="$(cfg_get DNS_MIHOMO_CONFIG)"; mihomo_config="${mihomo_config:-${MIHOMO_DIR}/config.yaml}"
     local intercept_config="${INTERCEPT_DIR}/config.json"
+    local marketplaces_file="${CONF_DIR}/extension-marketplaces.json"
     local heartbeat_url="$(cfg_get DNS_HEARTBEAT_URL)"
     local heartbeat_interval="$(cfg_get DNS_HEARTBEAT_INTERVAL)"; heartbeat_interval="${heartbeat_interval:-60s}"
     # full_install has already validated and normalized the China ECS value.
@@ -3533,6 +3534,11 @@ DNS_MIHOMO_SECRET=${dns_mihomo_secret}
 DNS_WHITELIST_FILE=${dns_whitelist_file}
 DNS_MIHOMO_CONFIG=${mihomo_config}
 DNS_INTERCEPT_CONFIG=${intercept_config}
+# Console-managed extension marketplace source snapshots. The daemon writes
+# this file atomically; marketplace indexes never contain executable runtime
+# state and every selected extension is still imported through the strict
+# native manifest snapshot pipeline.
+DNS_MARKETPLACES_FILE=${marketplaces_file}
 
 # ZashDir is the unzipped Zephyruso/zashboard
 # dist served by a SECOND loopback HTTPS listener on ZashListen. ZashCert/Key

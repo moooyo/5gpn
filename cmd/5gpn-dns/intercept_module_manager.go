@@ -348,6 +348,23 @@ func (m *InterceptModuleManager) Import(ctx context.Context, request interceptMo
 	if err != nil {
 		return interceptModulesView{}, err
 	}
+	return m.importSnapshot(ctx, request.Revision, module)
+}
+
+// importSnapshot publishes a module that has already been fetched and parsed by
+// the native extension parser. Marketplace installation uses this path so the
+// manifest and scripts are fetched exactly once before catalog integrity checks
+// and the normal module revision CAS.
+func (m *InterceptModuleManager) importSnapshot(ctx context.Context, revision string, module interceptModuleSnapshot) (interceptModulesView, error) {
+	if m == nil || m.store == nil {
+		return interceptModulesView{}, errInterceptModulesUnavailable
+	}
+	if !validMihomoConfigRevision(revision) {
+		return interceptModulesView{}, errors.New("a valid revision is required")
+	}
+	if err := validateInterceptModule(module); err != nil {
+		return interceptModulesView{}, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.store.mu.Lock()
@@ -356,7 +373,7 @@ func (m *InterceptModuleManager) Import(ctx context.Context, request interceptMo
 	if err != nil {
 		return interceptModulesView{}, err
 	}
-	if interceptRevision(oldBody) != request.Revision {
+	if interceptRevision(oldBody) != revision {
 		return interceptModulesView{}, errInterceptRevisionConflict
 	}
 	for _, existing := range document.Modules {

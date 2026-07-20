@@ -314,6 +314,11 @@ func main() {
 	)
 	interceptManager.SetSidecarTester(realInterceptConfigTester{})
 	ctrl.SetInterceptModuleManager(interceptManager)
+	marketplaceManager := NewExtensionMarketplaceManager(
+		NewExtensionMarketplaceStore(cfg.MarketplacesFile),
+		trustResolver,
+		interceptManager,
+	)
 	if err := interceptManager.PrepareRuntime(); err != nil {
 		log.Printf("warning: interception modules: %v -- DNS interception overlay remains fail-closed", err)
 	}
@@ -360,6 +365,7 @@ func main() {
 			controlSrv.SetMihomoConfig(moduleMihomoStore, InfraParamsFromConfig(cfg), realMihomoTester{}, moduleMihomoClient)
 		}
 		controlSrv.SetInterceptModuleManager(interceptManager)
+		controlSrv.SetExtensionMarketplaceManager(marketplaceManager)
 		interceptManager.SetAppliedHook(func() {
 			controlSrv.mihomoAppliedAtMu.Lock()
 			controlSrv.mihomoAppliedAt = time.Now()

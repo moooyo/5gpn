@@ -83,7 +83,8 @@ ProcSubset=pid
 RestrictAddressFamilies=AF_INET AF_UNIX
 # The in-process subscription manager writes rule caches to
 # /etc/5gpn/rules/<category>/<name>.txt, and the control-plane API rewrites the
-# subscription config /etc/5gpn/subscriptions.json (atomic temp-create+rename,
+# subscription config /etc/5gpn/subscriptions.json and extension marketplace
+# snapshots /etc/5gpn/extension-marketplaces.json (atomic temp-create+rename,
 # which needs the *directory* writable — a file-level RW path is insufficient).
 # So the whole conf dir is writable, with dns.env and TLS material re-protected
 # as read-only carve-outs. Certificate publishers replace role files outside

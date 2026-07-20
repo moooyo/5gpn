@@ -232,6 +232,21 @@ scripts. **Add locally** accepts one pasted or uploaded manifest; local
 manifests use inline scripts or absolute HTTPS script URLs. Both actions install
 the extension disabled.
 
+The Console also accepts explicit HTTPS marketplace indexes using the strict
+`5gpn.io/marketplace/v1` JSON contract. A marketplace is only a bounded
+discovery list. The daemon fetches and caches it through the same redirect and
+post-resolution SSRF guard, while the browser renders only the authenticated
+normalized API projection. Adding or refreshing a marketplace never installs,
+updates, enables, or executes an extension.
+
+Selecting a marketplace entry refetches its manifest through this same native
+parser and verifies the index's manifest and script SHA-256 digests, byte sizes,
+identity, and derived capability summary. A mismatch aborts before local state
+changes. A successful selection creates the ordinary disabled immutable
+snapshot and still requires the complete settings, permission, capture-host,
+execution-order, and egress review described above. Marketplace descriptions,
+tags, and licenses are informational and do not replace source review.
+
 An update check refetches only the installed manifest URL. The candidate must
 keep the same `metadata.id`. The Console displays the candidate version,
 snapshot digest, capture hosts, actions, and settings before replacement.
@@ -244,7 +259,13 @@ DNS overlay.
 
 Project-maintained examples, including Apple WLOC, live in the separate
 `moooyo/5gpn-extensions` catalog. The core repository intentionally contains no
-extension source. The public catalog exposes Apple WLOC at:
+extension source. The official marketplace index is:
+
+```text
+https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json
+```
+
+The public repository also exposes Apple WLOC directly at:
 
 ```text
 https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml
