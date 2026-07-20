@@ -168,9 +168,9 @@ jobs:
           grep -Fq 'AND,((DOMAIN,console.example.test),(DST-PORT,5060)),REJECT' "$runtime/config.yaml"
           grep -Fq 'AND,((DOMAIN,zash.example.test),(DST-PORT,5060)),REJECT' "$runtime/config.yaml"
           grep -Fq 'name: intercept-egress' "$runtime/config.yaml"
-          grep -Fq 'name: MODULE-MITM' "$runtime/config.yaml"
-          grep -Fq 'IN-NAME,intercept-egress,Proxies' "$runtime/config.yaml"
-          sed '/  - MATCH,Proxies/i\  - AND,((DOMAIN,api.example.test),(DST-PORT,443)),MODULE-MITM\n  - AND,((DOMAIN-WILDCARD,*.cdn.example.test),(DST-PORT,443)),MODULE-MITM' \
+          grep -Fq 'name: MODULE-INTERCEPT' "$runtime/config.yaml"
+          grep -Fq 'IN-NAME,intercept-egress,REJECT' "$runtime/config.yaml"
+          sed '/  - MATCH,Proxies/i\  - AND,((DOMAIN,api.example.test),(DST-PORT,443)),MODULE-INTERCEPT\n  - AND,((DOMAIN-WILDCARD,*.cdn.example.test),(DST-PORT,443)),MODULE-INTERCEPT' \
             "$runtime/config.yaml" > "$runtime/config-module-enabled.yaml"
           /tmp/mihomo -t -f "$runtime/config-module-enabled.yaml" -d "$runtime"
           sed \
