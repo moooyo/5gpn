@@ -745,10 +745,11 @@ extension JavaScript. The helper signs a new
 397-day leaf, publishes both staged keypair files, then writes the public
 `intercept/cert-state` digest that unblocks the extension transaction only after
 the pair validates. The sidecar retains its last valid in-memory leaf across a
-transient mixed-file reload attempt. The daily
-scoped certificate service invokes the same idempotent helper for expiry. The
-root is never rotated implicitly and the sidecar loads a new leaf on the next
-handshake without a restart.
+transient mixed-file reload attempt. The independent, always-enabled
+`5gpn-intercept-cert.timer` invokes the same idempotent helper daily for expiry;
+it does not depend on the public Certbot timer, lineage availability, or
+certificate mode. The root is never rotated implicitly and the sidecar loads a
+new leaf on the next handshake without a restart.
 `5gpn-intercept.service` also requires and orders itself after the idempotent
 certificate oneshot, so an extension document changed while the gateway was off
 cannot start the sidecar with a stale SAN set. Its separate runtime path unit
@@ -769,26 +770,38 @@ therefore observe either the old pair or the new pair, never one file from each.
 Reinstall must prefer safe reuse over issuance. Before reusing material, it
 verifies the configured mode/provenance, validity window, the exact SAN shape
 required by that mode, certificate/private-key match, and (for production) a
-trusted issuer chain. A pre-existing external lineage without provenance may be reused only
-when its exact live/archive paths, authenticator parameters, and absence of
-persistent per-lineage hooks form the strict expected 5gpn fingerprint; the
-installer then writes provenance. Provenance records the selected mode and
-whether the Certbot lineage was created by 5gpn, reused from an existing
-operator lineage, or is currently missing. Cloudflare reuse requires the apex
-and wildcard, while HTTP-01 reuse requires the three exact service SANs and no
-apex or wildcard. A debug self-signed certificate can never satisfy production
-reuse. Debug mode stores its source only below `/etc/5gpn/debug-cert`, and
+trusted issuer chain. A pre-existing external lineage without provenance may be
+reused read-only only when its exact live/archive paths, authenticator
+parameters, absence of persistent per-lineage hooks, validity window, identity,
+and key form the strict expected 5gpn fingerprint. The installer records it as
+reused but never invokes Certbot to renew, reconfigure, or replace it and never
+gains deletion ownership. It installs only the exact-lineage deploy hook so the
+external owner's renewal can update the role copies; the public 5gpn renewal
+timer remains disabled. Invalid, expiring, partial, or mode-mismatched unowned
+lineages fail closed with an operator repair instruction. Provenance records the
+selected mode and whether the Certbot lineage was created by 5gpn, reused from
+an existing operator lineage, or is currently missing. Cloudflare reuse requires
+the apex and wildcard, while HTTP-01 reuse requires the three exact service SANs
+and no apex or wildcard. A debug self-signed certificate can never satisfy
+production reuse. Debug mode stores its source only below the independently
+root-marked `/etc/5gpn/debug-cert` tree, and
 repeated debug installs reuse a still-valid matching debug keypair instead of
 generating a new one each time. When the canonical lineage is entirely absent,
 a valid mode-matching preserved role copy may recover service without issuing a
 new certificate; renewal automation stays disabled until the lineage is repaired
 or reissued.
 
-Only missing, expiring, mismatched, or invalid material causes issuance. Role
-copies are staged completely before replacement. Production renewal is scoped
-to `--cert-name <base>`; a 5gpn timer must not run an unscoped renewal over
-every lineage on the host. Both the timer and the confirmed Telegram bot action
-invoke the same mode-aware renewal helper. It returns without disruption when
+Active role-certificate provenance is separate from the root-only retained
+Certbot ownership record. Switching an owned production lineage to debug does
+not discard the proof needed to return to production or to decommission that
+retained lineage safely; external reuse never creates such ownership proof.
+
+Only a missing lineage or provenance-confirmed owned lineage may enter issuance
+or forced renewal. Role copies are staged completely before replacement.
+Production renewal is scoped to `--cert-name <base>`; a 5gpn timer must not run
+an unscoped renewal over every lineage on the host. For an owned lineage, both
+the timer and the confirmed Telegram bot action invoke the same mode-aware
+renewal helper. It returns without disruption when
 the lineage is not due only after validating the Let's Encrypt production
 server, authenticator, hook-free scoped renewal config, trusted live chain, and
 all three deployed role copies. A stale role copy is repaired through the owned
@@ -801,8 +814,23 @@ success keeps it stopped until the new lineage has been validated and all role
 certificates, including `zash/current`, have been published. The normal
 `full_install` service-start phase then restores the data plane.
 
-Install/configure, the timer, the bot action, and decommission serialize on one
-root-owned private runtime lock. After an installer has published and validated
+Install/configure, the project timer, the bot action, external deploy-hook role
+publication, and decommission serialize on one root-owned private certificate
+lock. Install/configure/uninstall also hold an outer installer transaction lock.
+The public timer and Bot helper acquire that installer gate non-blockingly before
+the certificate lock, so they cannot enter the sidecar certificate-lock handoff;
+the required sidecar certificate oneshot takes only the certificate lock.
+Before inspecting Certbot state, the installer transaction stops the distro
+`certbot.timer` and fails if `certbot.service` is already active. An owned 5gpn
+lineage may keep that unscoped timer disabled only when no unrelated lineage
+depends on it; otherwise installation fails closed. A read-only reused lineage
+keeps external renewal ownership, so the transaction restores the distro timer
+after publication. The first owned takeover persists the distro unit's exact
+existence, enablement, and activity in a root-only state file and later owned
+reinstalls never overwrite it. Switching to debug/external ownership, normal
+uninstall, and decommission restore and clear that saved state. Rollback always
+restores the current transaction's exact prior enabled/active state. After an
+installer has published and validated
 all certificate state, it briefly releases that lock while systemd starts the
 sidecar's required certificate oneshot, then reacquires it before final endpoint
 verification or rollback. This bounded handoff prevents the oneshot from
@@ -936,12 +964,25 @@ receives no capabilities because all of its sockets use high loopback ports.
 `5gpn-dns` and `5gpn-intercept` receive only IPv4 and Unix socket families,
 while mihomo additionally needs IPv6 and netlink for its
 own direct egress and route lookup. Runtime state owned by `5gpn-dns` is
-private to that account. `/etc/5gpn/mihomo` is a setgid `root:mihomo` directory
-with group-writable `0660` files so mihomo can read its operator-owned config
-and the control plane can atomically edit it through its `mihomo` supplementary
-group. Writes remain confined to those declared paths. `SAFE_PATHS` grants
+private to that account. `/etc/5gpn` is a sticky, setgid `root:gpn-dns`
+directory: the control plane can atomically replace the files it owns, but it
+cannot rename root-owned certificate, ACME, mihomo, or interception roots.
+`/etc/5gpn/mihomo` and `/etc/5gpn/intercept` use the same sticky-directory
+boundary. Their control-plane documents are owned by `gpn-dns` with the runtime
+account as group and mode `0640`, while mihomo-owned cache files remain owned by mihomo and TLS
+material remains root-owned. This preserves atomic control-plane publication
+without letting one compromised service replace another service's fixed root or
+critical file. Writes remain confined to those declared paths. `SAFE_PATHS` grants
 mihomo read access only to the zash certificate role and does not broaden
 filesystem writes.
+
+The marked `/etc/5gpn/cert` root is `root:root` mode `0751`: runtime accounts
+can traverse to their role but cannot list or change the root. Each role and its
+generation directory is root-owned, mode `0750`, and grouped only to its reader;
+keypair files are root-owned mode `0640`. Root deploy helpers reject symlinked,
+hardlinked, special, non-canonical, or metadata-drifted role trees before
+publication. The interception CA and runtime TLS roots apply the same
+root-owned, single-link validation under their sticky parents.
 
 The `gpn-dns` account is not a member of `systemd-journal` and cannot read the
 host journal directly. For an authorized private-chat Bot log request, polkit

@@ -39,9 +39,9 @@ else
     pass "Cloudflare token is TUI/saved-file only"
 fi
 
-stage_line="$(grep -n '^[[:space:]]*stage_artifacts$' "$INSTALL" | tail -1 | cut -d: -f1)"
-capture_line="$(grep -n '^[[:space:]]*capture_install_rollback$' "$INSTALL" | tail -1 | cut -d: -f1)"
-publish_line="$(grep -n '^[[:space:]]*install_5gpndns$' "$INSTALL" | tail -1 | cut -d: -f1)"
+stage_line="$(grep -n '^[[:space:]]*stage_artifacts' "$INSTALL" | tail -1 | cut -d: -f1)"
+capture_line="$(grep -n '^[[:space:]]*capture_install_rollback' "$INSTALL" | tail -1 | cut -d: -f1)"
+publish_line="$(grep -n '^[[:space:]]*install_5gpndns' "$INSTALL" | tail -1 | cut -d: -f1)"
 if [[ -n "$stage_line" && -n "$capture_line" && -n "$publish_line" \
    && "$stage_line" -lt "$capture_line" && "$capture_line" -lt "$publish_line" ]]; then
     pass "artifact verification and rollback capture precede publication"
@@ -65,10 +65,14 @@ if grep -Fq '/etc/letsencrypt/renewal/${b}.conf' <<<"$capture_fn" \
 else
     fail "transaction rollback can leave cert mode/authenticator/lineage split-brain"
 fi
-if grep -Fq '5gpn-certbot-renew.timer.enabled' <<<"$capture_fn" \
-   && grep -Fq '5gpn-certbot-renew.timer.active' <<<"$capture_fn" \
-   && grep -Fq 'systemctl enable 5gpn-certbot-renew.timer' <<<"$rollback_fn" \
-   && grep -Fq 'systemctl start 5gpn-certbot-renew.timer' <<<"$rollback_fn"; then
+unit_capture_fn="$(sed -n '/^capture_managed_unit_states()/,/^}/p' "$INSTALL")"
+unit_restore_fn="$(sed -n '/^restore_managed_unit_states()/,/^}/p' "$INSTALL")"
+if grep -Fq 'TRANSACTION_STATE_UNITS' <<<"$unit_capture_fn" \
+   && grep -Fq '.enabled-state' <<<"$unit_capture_fn" \
+   && grep -Fq '.active-state' <<<"$unit_capture_fn" \
+   && grep -Fq 'restore_unit_enablement' <<<"$unit_restore_fn" \
+   && grep -Fq 'restore_unit_activity' <<<"$unit_restore_fn" \
+   && grep -Fq '5gpn-certbot-renew.timer' "$INSTALL"; then
     pass "rollback preserves certificate timer enabled/active state"
 else
     fail "certificate timer state is lost across a failed mode switch"
@@ -96,6 +100,136 @@ if grep -Fq -- '--cert-name "$base"' <<<"$ic" \
 else
     fail "certificate issuance/renewal is not cert-name scoped"
 fi
+
+cert_ownership_tmp="$(mktemp -d)"
+if (
+    CERT_MODE=cloudflare
+    DNS_CERT_DIR="$cert_ownership_tmp/cert"
+    certbot_lineage_owned_by_5gpn() { return 1; }
+    certbot_lineage_artifacts_exist() { return 0; }
+    pause_global_certbot_timer() { return 0; }
+    validate_cert_pair() { return 1; }
+    certbot() { : > "$cert_ownership_tmp/certbot-called"; }
+    ! install_cert example.com >/dev/null 2>&1 \
+        && [[ ! -e "$cert_ownership_tmp/certbot-called" ]]
+); then
+    pass "invalid unowned canonical lineage fails before any Certbot mutation"
+else
+    fail "invalid unowned canonical lineage can reach Certbot"
+fi
+
+: > "$cert_ownership_tmp/external.log"
+if (
+    CERT_MODE=cloudflare
+    DNS_CERT_DIR="$cert_ownership_tmp/cert"
+    certbot_lineage_owned_by_5gpn() { return 1; }
+    certbot_lineage_artifacts_exist() { return 0; }
+    pause_global_certbot_timer() { return 0; }
+    validate_cert_pair() { return 0; }
+    certbot_renewal_mode_matches() { return 0; }
+    deploy_cert_roles() { printf '%s\n' deploy >> "$cert_ownership_tmp/external.log"; }
+    write_cert_provenance() { printf 'provenance:%s\n' "$3" >> "$cert_ownership_tmp/external.log"; }
+    install_cert_deploy_hook() { printf '%s\n' hook >> "$cert_ownership_tmp/external.log"; }
+    remove_owned_renewal_automation() { printf '%s\n' no-project-timer >> "$cert_ownership_tmp/external.log"; }
+    certbot() { : > "$cert_ownership_tmp/certbot-called"; }
+    install_cert example.com >/dev/null \
+        && grep -qx 'provenance:reused' "$cert_ownership_tmp/external.log" \
+        && grep -qx 'hook' "$cert_ownership_tmp/external.log" \
+        && grep -qx 'no-project-timer' "$cert_ownership_tmp/external.log" \
+        && [[ ! -e "$cert_ownership_tmp/certbot-called" ]]
+); then
+    pass "valid external lineage is reused read-only with deploy hook but no project timer"
+else
+    fail "external lineage reuse claimed renewal ownership or lost role deployment"
+fi
+
+mkdir -p "$cert_ownership_tmp/le/live/example.com" \
+    "$cert_ownership_tmp/le/archive/example.com" "$cert_ownership_tmp/le/renewal"
+: > "$cert_ownership_tmp/le/renewal/example.com.conf"
+if (
+    LE_LIVE_ROOT="$cert_ownership_tmp/le/live"
+    LE_ARCHIVE_ROOT="$cert_ownership_tmp/le/archive"
+    LE_RENEWAL_ROOT="$cert_ownership_tmp/le/renewal"
+    certbot_lineage_set_is_exclusive example.com >/dev/null
+); then
+    pass "owned canonical lineage can exclusively replace the distro timer"
+else
+    fail "exclusive canonical lineage was rejected"
+fi
+: > "$cert_ownership_tmp/le/renewal/other.example.conf"
+if (
+    LE_LIVE_ROOT="$cert_ownership_tmp/le/live"
+    LE_ARCHIVE_ROOT="$cert_ownership_tmp/le/archive"
+    LE_RENEWAL_ROOT="$cert_ownership_tmp/le/renewal"
+    ! certbot_lineage_set_is_exclusive example.com >/dev/null 2>&1
+); then
+    pass "unrelated Certbot lineage blocks global timer takeover"
+else
+    fail "installer can disable renewal needed by an unrelated lineage"
+fi
+: > "$cert_ownership_tmp/timer.log"
+if (
+    systemctl() {
+        case "${1:-}:${2:-}:${3:-}" in
+            cat:certbot.timer:*) return 0 ;;
+            stop:certbot.timer:*) printf '%s\n' stopped >> "$cert_ownership_tmp/timer.log"; return 0 ;;
+            is-active:--quiet:certbot.timer) return 1 ;;
+            is-active:--quiet:certbot.service) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+    ! pause_global_certbot_timer >/dev/null 2>&1
+) && grep -qx stopped "$cert_ownership_tmp/timer.log"; then
+    pass "installer stops the distro timer and rejects an already running certbot service"
+else
+    fail "active external Certbot can race the lineage snapshot"
+fi
+
+printf '%s\n' 'version=1' 'exists=1' 'enabled=enabled' 'active=active' \
+    > "$cert_ownership_tmp/certbot.timer.state"
+if (
+    GLOBAL_CERTBOT_TIMER_STATE="$cert_ownership_tmp/certbot.timer.state"
+    ACME_DIR="$cert_ownership_tmp"
+    timer_enabled=disabled
+    timer_active=inactive
+    global_certbot_timer_state_is_safe() { return 0; }
+    systemctl() {
+        case "${1:-}" in
+            stop) timer_active=inactive ;;
+            start) timer_active=active ;;
+            enable) timer_enabled=enabled ;;
+            disable) timer_enabled=disabled ;;
+            is-enabled) printf '%s\n' "$timer_enabled"; [[ "$timer_enabled" == enabled ]] ;;
+            is-active) printf '%s\n' "$timer_active"; [[ "$timer_active" == active ]] ;;
+            *) return 1 ;;
+        esac
+    }
+    restore_persisted_global_certbot_timer \
+        && [[ "$timer_enabled" == enabled && "$timer_active" == active \
+           && ! -e "$GLOBAL_CERTBOT_TIMER_STATE" ]]
+); then
+    pass "released ownership restores and clears the original distro timer state"
+else
+    fail "debug/external/uninstall can strand the distro timer disabled"
+fi
+disable_global_fn="$(sed -n '/^disable_global_certbot_timer_for_owned_lineage()/,/^}/p' "$INSTALL")"
+persist_line="$(grep -nF 'persist_global_certbot_timer_state' <<<"$disable_global_fn" | head -1 | cut -d: -f1)"
+disable_line="$(grep -nF 'systemctl disable --now certbot.timer' <<<"$disable_global_fn" | head -1 | cut -d: -f1)"
+[[ -n "$persist_line" && -n "$disable_line" && "$persist_line" -lt "$disable_line" ]] \
+    && pass "first global-timer takeover persists restorable state before disable" \
+    || fail "global-timer takeover can lose its pre-disable state"
+printf '%s\n' original-state > "$cert_ownership_tmp/existing-timer-state"
+if (
+    GLOBAL_CERTBOT_TIMER_STATE="$cert_ownership_tmp/existing-timer-state"
+    global_certbot_timer_state_is_safe() { return 0; }
+    persist_global_certbot_timer_state \
+        && grep -qx original-state "$GLOBAL_CERTBOT_TIMER_STATE"
+); then
+    pass "owned reinstall never overwrites the first global-timer takeover state"
+else
+    fail "owned reinstall replaced the only record of the original distro timer state"
+fi
+rm -rf -- "$cert_ownership_tmp"
 
 if grep -Eq 'swapoff[[:space:]]+/swapfile|rm -f[[:space:]]+/swapfile' "$INSTALL"; then
     fail "generic host /swapfile is still touched"
@@ -197,6 +331,29 @@ if command -v openssl >/dev/null 2>&1; then
     rm -rf -- "$cert_tmp"
 fi
 
+ownership_tmp="$(mktemp -d)"
+if (
+    DNS_CERT_DIR="$ownership_tmp/cert"
+    CERTBOT_OWNERSHIP_FILE="$DNS_CERT_DIR/.certbot-ownership"
+    mkdir -p "$DNS_CERT_DIR"
+    ensure_dns_cert_root() { return 0; }
+    cert_root_is_safe() { return 0; }
+    chown() { return 0; }
+    root_plain_file_metadata_is_safe() {
+        [[ -f "$1" && ! -L "$1" && "$(file_mode "$1")" == "$3" \
+           && "$(file_nlink "$1")" == 1 ]]
+    }
+    persist_certbot_lineage_ownership example.com \
+        && write_cert_provenance cloudflare example.com owned \
+        && write_cert_provenance debug example.com none \
+        && certbot_lineage_owned_by_5gpn example.com
+); then
+    pass "production-to-debug switch preserves independent Certbot ownership proof"
+else
+    fail "debug mode overwrote the only proof needed to return to production or decommission"
+fi
+rm -rf -- "$ownership_tmp"
+
 cert_state_tmp="$(mktemp -d)"
 DNS_CERT_DIR="$cert_state_tmp/cert"
 DOT_CERT_DIR="$DNS_CERT_DIR/dot"
@@ -208,6 +365,11 @@ LE_LIVE_ROOT="$cert_state_tmp/letsencrypt/live"
 LE_ARCHIVE_ROOT="$cert_state_tmp/letsencrypt/archive"
 LE_RENEWAL_ROOT="$cert_state_tmp/letsencrypt/renewal"
 mkdir -p "$DOT_CERT_DIR/current" "$LE_LIVE_ROOT/example.com" "$LE_ARCHIVE_ROOT" "$LE_RENEWAL_ROOT"
+# This fixture exercises provenance semantics, not the separately covered fixed
+# certificate-root ownership boundary.
+ensure_dns_cert_root() { mkdir -p "$DNS_CERT_DIR"; }
+cert_root_is_safe() { return 0; }
+persist_certbot_lineage_ownership() { return 0; }
 
 write_cert_provenance cloudflare example.com reused
 if certbot_lineage_owned_by_5gpn example.com; then

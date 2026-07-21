@@ -24,6 +24,10 @@ grep -Fiq 'xray' "$CERT_RENEW" && fail "certificate renewal helper must not refe
 # The persistent timer and the Telegram bot must both enter through the helper,
 # never invoke an unscoped `certbot renew` of every host lineage.
 renew_auto_fn="$(sed -n '/^install_renewal_automation()/,/^}/p' "$INSTALL")"
+grep -Fq 'certbot_lineage_owned_by_5gpn "$base"' <<<"$renew_auto_fn" \
+    || fail "public renewal automation is not restricted to a provenance-owned lineage"
+grep -Fq 'acquire_install_gate || return 1' "$CERT_RENEW" \
+    || fail "public renewal can enter the installer certificate-lock handoff window"
 grep -Fq '5gpn-certbot-renew.timer' <<<"$renew_auto_fn" || fail "no certificate renewal timer installed"
 grep -Fq 'Persistent=true' <<<"$renew_auto_fn" || fail "renewal timer not Persistent (missed runs will not catch up)"
 grep -Fq 'ExecStart=/opt/5gpn/scripts/cert-renew.sh --quiet' <<<"$renew_auto_fn" \
@@ -38,6 +42,8 @@ grep -Fq 'TimeoutStopSec=2min' <<<"$renew_auto_fn" \
     || fail "renewal service does not leave a bounded TERM/restore window"
 grep -Eq 'ExecStart=.*certbot renew' <<<"$renew_auto_fn" \
     && fail "renewal timer bypasses the scoped helper with direct certbot renew"
+grep -Fq 'intercept-cert-renew.sh' <<<"$renew_auto_fn" \
+    && fail "public renewal failure can still skip the coupled interception leaf renewal"
 grep -Fq 'EnvironmentFile=/etc/5gpn/dns.env' <<<"$renew_auto_fn" \
     && fail "renewal service imports arbitrary persisted keys into a root shell environment"
 head -1 "$CERT_RENEW" | grep -Fxq '#!/bin/bash' \
@@ -72,17 +78,17 @@ grep -Fxq '# 5gpn-unit-id: 5gpn-journal@.service:v1' "$ROOT/etc/systemd/5gpn-jou
 # fixed-resolver DNS gate, and only then publish or issue certificate material.
 full_fn="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
 cfg_line="$(grep -n 'resolve_install_configuration' <<<"$full_fn" | head -1 | cut -d: -f1)"
-dns_line="$(grep -n '^[[:space:]]*verify_console_dns$' <<<"$full_fn" | head -1 | cut -d: -f1)"
+dns_line="$(grep -n '^[[:space:]]*verify_console_dns' <<<"$full_fn" | head -1 | cut -d: -f1)"
 cert_line="$(grep -n '^[[:space:]]*install_cert "\$BASE_DOMAIN"' <<<"$full_fn" | head -1 | cut -d: -f1)"
-lock_line="$(grep -n '^[[:space:]]*acquire_install_cert_lock$' <<<"$full_fn" | head -1 | cut -d: -f1)"
-capture_line="$(grep -n '^[[:space:]]*capture_install_rollback$' <<<"$full_fn" | head -1 | cut -d: -f1)"
+lock_line="$(grep -n '^[[:space:]]*acquire_install_cert_lock' <<<"$full_fn" | head -1 | cut -d: -f1)"
+capture_line="$(grep -n '^[[:space:]]*capture_install_rollback' <<<"$full_fn" | head -1 | cut -d: -f1)"
 if [[ -z "$cfg_line" || -z "$dns_line" || -z "$cert_line" \
    || -z "$lock_line" || -z "$capture_line" \
    || "$cfg_line" -ge "$dns_line" || "$dns_line" -ge "$lock_line" \
    || "$lock_line" -ge "$capture_line" || "$capture_line" -ge "$cert_line" ]]; then
     fail "configuration/DNS-gate/certificate issuance order is not fail-closed"
 fi
-grep -Fqx '    start_services_with_cert_lock_handoff' <<<"$full_fn" \
+grep -Fq '    start_services_with_cert_lock_handoff' <<<"$full_fn" \
     || fail "full install does not hand the certificate lock to sidecar startup"
 grep -Fqx '    start_services' <<<"$full_fn" \
     && fail "full install still starts the sidecar while holding the certificate lock"
@@ -116,7 +122,7 @@ grep -Eq 'DNS_WEB_DIR'          "$INSTALL" || fail "DNS_WEB_DIR not wired in ins
 
 # --- `5gpn` management command: installed on PATH, backed by a copy of install.sh ---
 grep -Eq '^install_manage_cli\(\)' "$INSTALL" || fail "no install_manage_cli() (the 5gpn management command)"
-grep -Eq '^[[:space:]]*install_manage_cli$' "$INSTALL" || fail "install_manage_cli defined but never called in full_install"
+grep -Eq '^[[:space:]]*install_manage_cli( \|\| return 1)?$' "$INSTALL" || fail "install_manage_cli defined but never called in full_install"
 grep -Fq '/usr/local/bin/5gpn' "$INSTALL" || fail "5gpn launcher not written to /usr/local/bin/5gpn"
 grep -Fq 'exec bash "$BK" menu' "$INSTALL" || fail "5gpn launcher does not open the management menu with no args"
 # The current menu, restart, and transactional configure operations are dispatchable.
@@ -226,8 +232,8 @@ grep -Eq '^[[:space:]]*attach_tty$' "$INSTALL" \
 grep -Eq '^stage_artifacts\(\)' "$INSTALL" || fail "release artifacts are not staged"
 grep -Eq '^capture_install_rollback\(\)' "$INSTALL" || fail "install rollback snapshot is missing"
 grep -Eq '^rollback_install\(\)' "$INSTALL" || fail "install rollback path is missing"
-grep -Eq '^[[:space:]]*stage_artifacts$' "$INSTALL" || fail "full_install does not stage artifacts"
-grep -Eq '^[[:space:]]*capture_install_rollback$' "$INSTALL" || fail "full_install does not capture rollback state"
+grep -Eq '^[[:space:]]*stage_artifacts( \|\| return 1)?$' "$INSTALL" || fail "full_install does not stage artifacts"
+grep -Eq '^[[:space:]]*capture_install_rollback( \|\| return 1)?$' "$INSTALL" || fail "full_install does not capture rollback state"
 grep -Eq '^remove_legacy_|^clean_previous_install\(\)' "$INSTALL" \
     && fail "installer still contains an old-release teardown helper"
 
@@ -404,6 +410,16 @@ printf '%s' "$rmc_fn" | grep -Fq 'openssl rand -hex 16' \
     && fail "render_mihomo_config must not generate the controller secret via the old openssl rand -hex 16"
 printf '%s' "$rmc_fn" | grep -Fq 'mihomo_config_secret "$config"' \
     || fail "render_mihomo_config does not read back an existing secret across re-renders"
+parser_guards="$(printf '%s' "$rmc_fn" | grep -Fc 'Existing mihomo controller secret could not be parsed safely.' || true)"
+[[ "$parser_guards" == 2 ]] \
+    || fail "render_mihomo_config must fail closed on secret parsing in preserve and reset paths"
+mcs_fn="$(sed -n '/^mihomo_config_secret()/,/^}/p' "$INSTALL")"
+printf '%s' "$mcs_fn" | grep -Fq '"$DNS_BIN" --print-mihomo-secret --config "$f"' \
+    || fail "mihomo_config_secret must use the structural 5gpn-dns YAML reader"
+printf '%s' "$mcs_fn" | grep -Eq 'sed|head -1' \
+    && fail "mihomo_config_secret must not parse operator YAML as text"
+grep -Fq -- '--print-mihomo-secret' "$ROOT/cmd/5gpn-dns/main.go" \
+    || fail "5gpn-dns does not expose the installer-only mihomo secret reader"
 printf '%s' "$rmc_fn" | grep -Fq 'Existing operator-owned mihomo config' \
     || fail "render_mihomo_config does not preserve an existing operator-owned config"
 printf '%s' "$rmc_fn" | grep -Fq 'mktemp "${MIHOMO_DIR}/.config.yaml.' \

@@ -343,6 +343,36 @@ validate_stage() {
     [[ -z "$(find "$stage" -mindepth 1 -type f -links +1 -print -quit 2>/dev/null)" ]] || return 1
 }
 
+validate_bundle_release_stamp() { # validate_bundle_release_stamp <stage> <channel> <expected-tag>
+    local stage="$1" channel="$2" expected="$3" install assignment_count stamps stamp
+    install="$stage/install.sh"
+    [[ -f "$install" && ! -L "$install" ]] || return 1
+
+    # The release workflow writes one exact, column-zero literal assignment.
+    # Refuse absent, malformed, or repeated declarations without evaluating
+    # any downloaded shell content.
+    assignment_count="$(awk '/^DNS_VERSION_DEFAULT=/{ count++ } END { print count + 0 }' "$install")" \
+        || return 1
+    if [[ "$assignment_count" != 1 ]]; then
+        red "Installer bundle has no unique DNS_VERSION_DEFAULT release stamp."
+        return 1
+    fi
+    stamps="$(sed -n 's/^DNS_VERSION_DEFAULT="\([^"]*\)"$/\1/p' "$install")" || return 1
+    if [[ -z "$stamps" || "$stamps" == *$'\n'* ]]; then
+        red "Installer bundle has a malformed DNS_VERSION_DEFAULT release stamp."
+        return 1
+    fi
+    stamp="$stamps"
+    if ! valid_release_tag_for_channel "$channel" "$stamp"; then
+        red "Installer bundle release stamp does not match the selected channel."
+        return 1
+    fi
+    if [[ "$stamp" != "$expected" ]]; then
+        red "Installer bundle release stamp does not match resolved tag ${expected}."
+        return 1
+    fi
+}
+
 publish_stage() {
     local stage="$1" entry base
     validate_stage "$stage" || { red "Staged installer content is unsafe or incomplete."; return 1; }
@@ -394,6 +424,10 @@ fetch_bundle() { # fetch_bundle <repo> <channel> <release-tag>; 10=asset absent,
         return 20
     fi
     rm -f -- "$tgz" "$checksums"
+    if ! validate_bundle_release_stamp "$stage" "$channel" "$tag"; then
+        remove_work_dir "$stage" || true
+        return 20
+    fi
     if ! publish_stage "$stage"; then
         remove_work_dir "$stage" || true
         return 20

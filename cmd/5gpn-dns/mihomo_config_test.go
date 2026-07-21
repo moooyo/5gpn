@@ -326,7 +326,7 @@ func TestMihomoInvariants_RejectsInvalidYAMLDocuments(t *testing.T) {
 	}{
 		{
 			name: "duplicate top-level key",
-			text: strings.Replace(goldenMihomoConfig(), "secret: s3cr3t\n", "secret: s3cr3t\nsecret: attacker\n", 1),
+			text: strings.Replace(goldenMihomoConfig(), "secret: 's3cr3t'\n", "secret: 's3cr3t'\nsecret: attacker\n", 1),
 		},
 		{
 			name: "duplicate nested key",
@@ -473,7 +473,7 @@ func TestMihomoInvariants_MissingElement(t *testing.T) {
 		{
 			name: "controller secret changed",
 			mutate: func(cfg string) string {
-				return strings.Replace(cfg, "secret: s3cr3t", "secret: attacker-controlled", 1)
+				return strings.Replace(cfg, "secret: 's3cr3t'", "secret: 'attacker-controlled'", 1)
 			},
 			wantName: "controller-secret",
 		},
@@ -578,6 +578,36 @@ func TestMihomoConfigStore_ReadAndDefault(t *testing.T) {
 	}
 	if err := ValidateInvariants(def, goldenInfraParams()); err != nil {
 		t.Fatalf("Default() output should satisfy all invariants: %v", err)
+	}
+}
+
+func TestMihomoConfigDefaultPreservesSpecialControllerSecrets(t *testing.T) {
+	for _, secret := range []string{
+		"actual # secret",
+		`controller"secret`,
+		`controller\secret`,
+		"controller'secret",
+		"12345",
+	} {
+		t.Run(secret, func(t *testing.T) {
+			t.Setenv("DNS_BASE_DOMAIN", "5gpn.test")
+			t.Setenv("DNS_MIHOMO_LISTEN_IPS", "203.0.113.10")
+			t.Setenv("DNS_GATEWAY_IP", "10.0.1.20")
+			t.Setenv("DNS_MIHOMO_SECRET", secret)
+			got := NewMihomoConfigStore(filepath.Join(t.TempDir(), "config.yaml")).Default()
+			parsed, err := parseMihomoRootSecret([]byte(got))
+			if err != nil {
+				t.Fatalf("parse rendered secret: %v", err)
+			}
+			if parsed != secret {
+				t.Fatalf("rendered secret = %q, want %q", parsed, secret)
+			}
+			infra := goldenInfraParams()
+			infra.ControllerSecret = secret
+			if err := ValidateInvariants(got, infra); err != nil {
+				t.Fatalf("special-secret seed violates invariants: %v", err)
+			}
+		})
 	}
 }
 

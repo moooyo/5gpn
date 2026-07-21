@@ -127,6 +127,7 @@ jobs:
       - name: Package web UI
         run: |
           VER="${GITHUB_REF_NAME}"
+          printf '%s\n' "$VER" > web/dist/.web_version
           tar czf "5gpn-web-${VER}.tar.gz" -C web/dist .
           sha256sum "5gpn-web-${VER}.tar.gz" >> cmd/5gpn-dns/checksums.txt
 

@@ -101,6 +101,46 @@ if systemd_unit_has_dropins 5gpn-dns.service "$unit_conflicts"; then
 else
     fail "systemd unit drop-in was ignored by ownership validation"
 fi
+rmdir "$unit_conflicts/5gpn-dns.service.d"
+mkdir "$unit_conflicts/5gpn-.service.d"
+if systemd_unit_has_dropins 5gpn-dns.service "$unit_conflicts" \
+   && [[ "$SYSTEMD_UNIT_CONFLICT_REASON" == *5gpn-.service.d* ]]; then
+    pass "systemd dash-prefix drop-ins invalidate managed unit ownership"
+else
+    fail "systemd dash-prefix drop-in was ignored by ownership validation"
+fi
+rmdir "$unit_conflicts/5gpn-.service.d"
+
+mkdir "$unit_conflicts/service.d"
+cat > "$unit_conflicts/service.d/10-host-defaults.conf" <<'EOF'
+[Service]
+TimeoutStopSec=90s
+EOF
+if systemd_unit_has_dropins 5gpn-dns.service "$unit_conflicts"; then
+    fail "unrelated global service default was treated as an execution override"
+else
+    pass "unrelated global service defaults remain compatible"
+fi
+cat > "$unit_conflicts/service.d/20-exec.conf" <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/tmp/not-5gpn
+EOF
+if systemd_unit_has_dropins 5gpn-dns.service "$unit_conflicts" \
+   && [[ "$SYSTEMD_UNIT_CONFLICT_REASON" == *global*service.d* ]]; then
+    pass "global service execution overrides invalidate managed unit ownership"
+else
+    fail "global service ExecStart override was ignored"
+fi
+rm -rf -- "$unit_conflicts/service.d"
+
+mkdir "$unit_conflicts/5gpn-intercept-.service.d"
+if systemd_unit_has_dropins 5gpn-intercept-cert.service "$unit_conflicts"; then
+    pass "multi-segment systemd dash-prefix overrides are rejected"
+else
+    fail "multi-segment systemd dash-prefix override was ignored"
+fi
+rm -rf -- "$unit_conflicts/5gpn-intercept-.service.d"
 
 # Stable and beta release tags are strict, disjoint SemVer forms.
 if valid_dns_stable_release_tag 9.8.7 \
@@ -213,6 +253,378 @@ else
     fail "ownership marker verification aborts under set -u"
 fi
 
+# Fixed roots must distinguish a root-published marker from attacker-controlled
+# bytes in a service-writable directory. Mock only stat/account lookups so the
+# canonical-path and marker-content checks still exercise the real boundary.
+if (
+    BASE_DIR="$TMP/fixed-root-safe"
+    mkdir -p "$BASE_DIR"
+    printf '%s\n' "$BASE_OWNERSHIP_VALUE" > "$BASE_DIR/$BASE_OWNERSHIP_MARKER"
+    file_uid() { printf '0\n'; }
+    file_gid() { printf '0\n'; }
+    file_mode() {
+        [[ "$1" == "$BASE_DIR/$BASE_OWNERSHIP_MARKER" ]] && printf '644\n' || printf '755\n'
+    }
+    fixed_owned_dir_is_safe "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"
+); then
+    pass "root-owned fixed runtime metadata is accepted"
+else
+    fail "valid fixed runtime metadata was rejected"
+fi
+
+if (
+    marker_root="$TMP/hardlinked-marker"
+    mkdir -p "$marker_root"
+    printf 'marker-v1\n' > "$marker_root/.owner"
+    ln "$marker_root/.owner" "$marker_root/.owner-alias"
+    file_uid() { printf '0\n'; }
+    file_gid() { printf '0\n'; }
+    file_mode() { printf '644\n'; }
+    ! root_ownership_marker_is_safe "$marker_root" .owner marker-v1
+); then
+    pass "root ownership markers must be single-link files"
+else
+    fail "hardlinked ownership marker was accepted"
+fi
+
+if (
+    BASE_DIR="$TMP/fixed-root-forged"
+    mkdir -p "$BASE_DIR"
+    printf '%s\n' "$BASE_OWNERSHIP_VALUE" > "$BASE_DIR/$BASE_OWNERSHIP_MARKER"
+    file_uid() {
+        [[ "$1" == "$BASE_DIR/$BASE_OWNERSHIP_MARKER" ]] && printf '1001\n' || printf '0\n'
+    }
+    file_gid() { printf '0\n'; }
+    file_mode() {
+        [[ "$1" == "$BASE_DIR/$BASE_OWNERSHIP_MARKER" ]] && printf '644\n' || printf '755\n'
+    }
+    ! claim_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" >/dev/null 2>&1
+); then
+    pass "service-forgeable ownership marker content is rejected"
+else
+    fail "non-root ownership marker was accepted on a fixed root"
+fi
+
+if (
+    BASE_DIR="$TMP/fixed-root-empty-untrusted"
+    mkdir -p "$BASE_DIR"
+    file_uid() { printf '1001\n'; }
+    file_gid() { printf '1001\n'; }
+    file_mode() { printf '755\n'; }
+    ! claim_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" >/dev/null 2>&1 \
+        && [[ ! -e "$BASE_DIR/$BASE_OWNERSHIP_MARKER" ]]
+); then
+    pass "empty fixed roots are trusted before marker publication"
+else
+    fail "fixed-root marker was written into an untrusted empty directory"
+fi
+
+if (
+    CONF_DIR="$TMP/fixed-conf"
+    DNS_SERVICE_USER=gpn-dns
+    mkdir -p "$CONF_DIR"
+    printf '%s\n' "$CONF_OWNERSHIP_VALUE" > "$CONF_DIR/$CONF_OWNERSHIP_MARKER"
+    getent() {
+        [[ "$1" == group && "$2" == gpn-dns ]] && printf 'gpn-dns:x:4242:\n'
+    }
+    file_uid() { printf '0\n'; }
+    file_gid() {
+        [[ "$1" == "$CONF_DIR" ]] && printf '4242\n' || printf '0\n'
+    }
+    file_mode() {
+        [[ "$1" == "$CONF_DIR" ]] && printf '3771\n' || printf '644\n'
+    }
+    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"
+); then
+    pass "sticky root:gpn-dns configuration root remains valid"
+else
+    fail "sticky configuration-root design was rejected"
+fi
+
+if (
+    INTERCEPT_CA_DIR="$TMP/legacy-intercept-ca"
+    DNS_SERVICE_USER=gpn-dns
+    normalized=0
+    mkdir -p "$INTERCEPT_CA_DIR"
+    printf '%s\n' "$INTERCEPT_CA_MARKER_VALUE" > "$INTERCEPT_CA_DIR/$INTERCEPT_CA_MARKER"
+    printf '%s\n' cert > "$INTERCEPT_CA_DIR/root.crt"
+    printf '%s\n' key > "$INTERCEPT_CA_DIR/root.key"
+    getent() { [[ "$1" == group && "$2" == gpn-dns ]] && printf 'gpn-dns:x:4242:\n'; }
+    file_uid() { printf '0\n'; }
+    file_gid() {
+        if [[ "$1" == "$INTERCEPT_CA_DIR/$INTERCEPT_CA_MARKER" && "$normalized" == 0 ]]; then
+            printf '4242\n'
+        else
+            printf '0\n'
+        fi
+    }
+    file_mode() {
+        case "$1" in
+            "$INTERCEPT_CA_DIR") [[ "$normalized" == 1 ]] && printf '700\n' || printf '2700\n' ;;
+            "$INTERCEPT_CA_DIR/root.key") printf '600\n' ;;
+            *) printf '644\n' ;;
+        esac
+    }
+    file_nlink() { printf '1\n'; }
+    chown() { return 0; }
+    chmod() {
+        [[ "$1" != 0700 || "$2" != "$INTERCEPT_CA_DIR" ]] || normalized=1
+        return 0
+    }
+    legacy_intercept_ca_root_is_safe \
+        && normalize_legacy_intercept_ca_root \
+        && [[ "$normalized" == 1 ]]
+); then
+    pass "legacy setgid interception CA metadata normalizes after strict validation"
+else
+    fail "valid legacy interception CA metadata cannot upgrade safely"
+fi
+
+if (
+    CONF_DIR="$TMP/cfg-get-safe"
+    DNS_SERVICE_USER=gpn-dns
+    mkdir -p "$CONF_DIR"
+    printf '%s\n' "$CONF_OWNERSHIP_VALUE" > "$CONF_DIR/$CONF_OWNERSHIP_MARKER"
+    printf 'DNS_BASE_DOMAIN=example.com\n' > "$CONF_DIR/dns.env"
+    getent() { [[ "$1" == group && "$2" == gpn-dns ]] && printf 'gpn-dns:x:4242:\n'; }
+    file_uid() { printf '0\n'; }
+    file_gid() {
+        [[ "$1" == "$CONF_DIR/dns.env" ]] && printf '4242\n' || printf '0\n'
+    }
+    file_mode() {
+        case "$1" in
+            "$CONF_DIR") printf '755\n' ;;
+            "$CONF_DIR/$CONF_OWNERSHIP_MARKER") printf '644\n' ;;
+            *) printf '640\n' ;;
+        esac
+    }
+    [[ "$(cfg_get DNS_BASE_DOMAIN)" == example.com ]] || exit 1
+    ln "$CONF_DIR/dns.env" "$CONF_DIR/dns.env.alias"
+    ! cfg_get DNS_BASE_DOMAIN >/dev/null 2>&1 || exit 1
+    rm -f -- "$CONF_DIR/dns.env" "$CONF_DIR/dns.env.alias"
+    printf 'DNS_BASE_DOMAIN=attacker.example\n' > "$CONF_DIR/elsewhere"
+    ln -s "$CONF_DIR/elsewhere" "$CONF_DIR/dns.env"
+    ! cfg_get DNS_BASE_DOMAIN >/dev/null 2>&1
+); then
+    pass "cfg_get accepts only single-link regular dns.env under a trusted config root"
+else
+    fail "cfg_get followed or accepted an unsafe persisted configuration"
+fi
+
+certificate_boundary_modes_ok=1
+for initial_mode in 755 2771; do
+    if ! (
+        boundary_mode="$initial_mode"
+        CONF_DIR="$TMP/early-cert-conf-$initial_mode"
+        INTERCEPT_DIR="$CONF_DIR/intercept"
+        INTERCEPT_CA_DIR="$CONF_DIR/intercept-ca"
+        DNS_CERT_DIR="$CONF_DIR/cert"
+        CERT_MODE=cloudflare
+        preflight_runtime_publication_paths() { :; }
+        install() {
+            [[ "$*" != *'-m 3771'*"$CONF_DIR"* ]] || boundary_mode=3771
+            return 0
+        }
+        fixed_owned_dir_is_safe() {
+            [[ "$1" != "$CONF_DIR" || "$boundary_mode" == 3771 ]]
+        }
+        prepare_intercept_runtime_dirs() { :; }
+        runtime_file_slot_is_safe() { :; }
+        runtime_tree_has_only_plain_entries() { :; }
+        claim_fixed_owned_dir() { :; }
+        ensure_dns_cert_root() { :; }
+        chown() { :; }
+        chmod() { :; }
+        find() { :; }
+        prepare_certificate_publication_boundaries \
+            && [[ "$boundary_mode" == 3771 ]]
+    ); then
+        certificate_boundary_modes_ok=0
+    fi
+done
+prep_boundary_line="$(grep -n '^[[:space:]]*prepare_certificate_publication_boundaries$' "$INSTALL" | tail -1 | cut -d: -f1)"
+install_files_line="$(grep -n '^[[:space:]]*install_files$' "$INSTALL" | tail -1 | cut -d: -f1)"
+intercept_cert_line="$(grep -n '^[[:space:]]*ensure_intercept_certificates$' "$INSTALL" | tail -1 | cut -d: -f1)"
+if [[ "$certificate_boundary_modes_ok" == 1 \
+   && -n "$prep_boundary_line" && -n "$install_files_line" && -n "$intercept_cert_line" \
+   && "$prep_boundary_line" -lt "$install_files_line" \
+   && "$prep_boundary_line" -lt "$intercept_cert_line" ]]; then
+    pass "fresh 0755 and legacy 2771 config roots seal before certificate helpers"
+else
+    fail "certificate publication can run before the sticky config boundary"
+fi
+
+runtime_slots="$TMP/runtime-slots"
+mkdir -p "$runtime_slots/root" "$runtime_slots/outside"
+ln -s "$runtime_slots/outside" "$runtime_slots/root/rules"
+if runtime_directory_slot_is_safe "$runtime_slots/root/rules/cache" "$runtime_slots/root"; then
+    fail "runtime directory validation accepted an escaping symlink component"
+else
+    pass "runtime directory validation rejects symlink components before install -d"
+fi
+rm -f -- "$runtime_slots/root/rules"
+mkdir -p "$runtime_slots/root/rules"
+printf 'safe\n' > "$runtime_slots/root/policy.json"
+ln -s "$runtime_slots/outside/file" "$runtime_slots/root/tgbot.json"
+if runtime_file_slot_is_safe "$runtime_slots/root/policy.json" "$runtime_slots/root" \
+   && ! runtime_file_slot_is_safe "$runtime_slots/root/tgbot.json" "$runtime_slots/root"; then
+    pass "direct runtime files must be regular and non-symlinked"
+else
+    fail "direct runtime file validation did not distinguish regular files and symlinks"
+fi
+
+tls_tree="$TMP/tls-tree"
+mkdir -p "$tls_tree"
+printf 'cert\n' > "$tls_tree/fullchain.pem"
+printf 'key\n' > "$tls_tree/privkey.pem"
+if runtime_tree_has_only_plain_entries "$tls_tree"; then
+    pass "ordinary interception TLS trees are accepted"
+else
+    fail "ordinary interception TLS tree was rejected"
+fi
+ln -s "$runtime_slots/outside/file" "$tls_tree/escaped.pem"
+if runtime_tree_has_only_plain_entries "$tls_tree"; then
+    fail "interception TLS tree accepted a planted symlink"
+else
+    pass "interception TLS tree rejects planted symlinks before recursive chown"
+fi
+rm -f -- "$tls_tree/escaped.pem"
+if mkfifo "$tls_tree/special"; then
+    if runtime_tree_has_only_plain_entries "$tls_tree"; then
+        fail "interception TLS tree accepted a special file"
+    else
+        pass "interception TLS tree rejects special files before recursive chown"
+    fi
+    rm -f -- "$tls_tree/special"
+fi
+
+if (
+    DNS_CERT_DIR="$TMP/cert-roles"
+    DNS_SERVICE_USER=gpn-dns
+    role="$DNS_CERT_DIR/dot"
+    generation="$role/generations/generation-20260721T010203Z-10-20"
+    mkdir -p "$generation"
+    printf '%s\n' "${CERT_ROLE_VALUE_PREFIX}:dot" > "$role/$CERT_ROLE_MARKER"
+    printf 'cert\n' > "$generation/fullchain.pem"
+    printf 'key\n' > "$generation/privkey.pem"
+    ln -s "generations/$(basename -- "$generation")" "$role/current"
+    account_gid() { printf '4242\n'; }
+    file_uid() { printf '0\n'; }
+    file_gid() {
+        case "$1" in "$role/$CERT_ROLE_MARKER"|"$role/current") printf '0\n' ;; *) printf '4242\n' ;; esac
+    }
+    file_mode() {
+        case "$1" in
+            "$role"|"$role/generations"|"$generation") printf '750\n' ;;
+            "$role/$CERT_ROLE_MARKER") printf '644\n' ;;
+            *) printf '640\n' ;;
+        esac
+    }
+    file_nlink() { printf '1\n'; }
+    cert_role_tree_is_safe_for_recursive_metadata "$role" || exit 1
+    rm -f -- "$role/current"
+    ln -s ../../outside "$role/current"
+    ! cert_role_tree_is_safe_for_recursive_metadata "$role"
+); then
+    pass "certificate role permits only its bounded generation pointer"
+else
+    fail "certificate role tree validation missed a valid or escaping current pointer"
+fi
+
+if (
+    CONF_DIR="$TMP/cert-migration-conf"
+    DNS_CERT_DIR="$CONF_DIR/cert"
+    DNS_SERVICE_USER=gpn-dns
+    role="$DNS_CERT_DIR/dot"
+    generation="$role/generations/generation-20260721T020304Z-30-40"
+    mkdir -p "$generation"
+    printf '%s\n' "$CONF_OWNERSHIP_VALUE" > "$CONF_DIR/$CONF_OWNERSHIP_MARKER"
+    printf '%s\n' "${CERT_ROLE_VALUE_PREFIX}:dot" > "$role/$CERT_ROLE_MARKER"
+    printf 'cert\n' > "$generation/fullchain.pem"
+    printf 'key\n' > "$generation/privkey.pem"
+    command ln -s "generations/$(basename -- "$generation")" "$role/current"
+    role_marker_normalized=0
+    current_normalized=0
+    root_marker_written=0
+    account_gid() { printf '4242\n'; }
+    file_uid() { printf '0\n'; }
+    file_gid() {
+        case "$1" in
+            "$CONF_DIR"|"$CONF_DIR/$CONF_OWNERSHIP_MARKER"|"$DNS_CERT_DIR"|"$DNS_CERT_DIR/$CERT_ROOT_MARKER")
+                printf '0\n' ;;
+            "$role/$CERT_ROLE_MARKER")
+                [[ "$role_marker_normalized" == 1 ]] && printf '0\n' || printf '4242\n' ;;
+            "$role/current")
+                [[ "$current_normalized" == 1 ]] && printf '0\n' || printf '4242\n' ;;
+            *) printf '4242\n' ;;
+        esac
+    }
+    file_mode() {
+        case "$1" in
+            "$CONF_DIR") printf '755\n' ;;
+            "$CONF_DIR/$CONF_OWNERSHIP_MARKER"|"$DNS_CERT_DIR/$CERT_ROOT_MARKER") printf '644\n' ;;
+            "$DNS_CERT_DIR") printf '751\n' ;;
+            "$role"|"$role/generations"|"$generation") printf '750\n' ;;
+            "$role/$CERT_ROLE_MARKER")
+                [[ "$role_marker_normalized" == 1 ]] && printf '644\n' || printf '640\n' ;;
+            *) printf '640\n' ;;
+        esac
+    }
+    file_nlink() { printf '1\n'; }
+    write_ownership_marker() {
+        local dir="$1" name="$2" value="$3"
+        printf '%s\n' "$value" > "$dir/$name" || return 1
+        case "$name" in
+            "$CERT_ROLE_MARKER") role_marker_normalized=1 ;;
+            "$CERT_ROOT_MARKER") root_marker_written=1 ;;
+        esac
+    }
+    ln() {
+        command ln "$@" || return 1
+        [[ "$*" != *'.current.normalize.'* ]] || current_normalized=1
+    }
+    legacy_cert_role_tree_is_migratable "$role" \
+        && ensure_dns_cert_root \
+        && cert_root_is_safe \
+        && [[ "$role_marker_normalized" == 1 \
+           && "$current_normalized" == 1 \
+           && "$root_marker_written" == 1 ]]
+); then
+    pass "legacy 0751 certificate trees normalize safely before root-marker claim"
+else
+    fail "legacy certificate tree could not be normalized to the current boundary"
+fi
+
+debug_root="$TMP/debug-cert-root"
+mkdir -p "$debug_root"
+ln -s "$runtime_slots/outside" "$debug_root/example.com"
+if (
+    DEBUG_CERT_DIR="$debug_root"
+    ! debug_cert_lineage_slot_is_safe "$debug_root/example.com"
+); then
+    pass "debug certificate lineage rejects symlinked base directories"
+else
+    fail "debug certificate lineage accepted a symlinked base directory"
+fi
+rm -f -- "$debug_root/example.com"
+
+if (
+    CONF_DIR="$TMP/debug-conf"
+    DEBUG_CERT_DIR="$CONF_DIR/debug-cert"
+    mkdir -p "$DEBUG_CERT_DIR"
+    fixed_owned_dir_is_safe() { :; }
+    runtime_directory_slot_is_safe() { :; }
+    file_uid() { [[ "$1" == "$DEBUG_CERT_DIR" ]] && printf '1001\n' || printf '0\n'; }
+    file_gid() { printf '0\n'; }
+    file_mode() { printf '700\n'; }
+    ! ensure_debug_cert_root >/dev/null 2>&1 \
+        && [[ ! -e "$DEBUG_CERT_DIR/$DEBUG_CERT_MARKER" ]]
+); then
+    pass "debug root ownership is validated before writing its marker"
+else
+    fail "debug root marker was written into an untrusted directory"
+fi
+
 # Static publication must override restrictive source modes before the atomic
 # swap. The console, zashboard, and iOS profile are all served by the
 # unprivileged gpn-dns account, while their source trees can originate from
@@ -222,6 +634,20 @@ if (
     umask 077
     src="$static_root/source"
     dest="$static_root/live"
+    file_uid() { printf '0\n'; }
+    file_gid() { printf '0\n'; }
+    file_mode() {
+        case "$1" in
+            "$src"|"$src"/*|"$dest"|"$dest"/*|"$static_root"/.live.new.*)
+                if [[ "$POSIX_MODES" == 0 ]]; then
+                    [[ -d "$1" ]] && printf '755\n' || printf '644\n'
+                else
+                    stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || true
+                fi ;;
+            *) printf '755\n' ;;
+        esac
+    }
+    normalize_static_tree_ownership() { :; }
     mkdir -p "$src/assets"
     printf 'index\n' > "$src/index.html"
     printf 'asset\n' > "$src/assets/app.js"
@@ -241,6 +667,79 @@ else
     fail "static publication retained modes that block the gpn-dns service"
 fi
 
+if (
+    custom_parent="$TMP/custom-static-writable"
+    mkdir -p "$custom_parent"
+    file_uid() { printf '0\n'; }
+    file_mode() {
+        [[ "$1" == "$custom_parent" ]] && printf '777\n' || printf '755\n'
+    }
+    ! static_publish_parent_is_safe "$custom_parent/web"
+); then
+    pass "custom static publication rejects a group/world-writable parent"
+else
+    fail "custom static publication accepted a writable parent"
+fi
+
+if (
+    custom_parent="$TMP/custom-static-marker"
+    DNS_WEB_DIR="$custom_parent/web"
+    mkdir -p "$DNS_WEB_DIR"
+    printf '%s\n' "$WEB_OWNERSHIP_VALUE" > "$DNS_WEB_DIR/$WEB_OWNERSHIP_MARKER"
+    file_uid() {
+        [[ "$1" == "$DNS_WEB_DIR/$WEB_OWNERSHIP_MARKER" ]] \
+            && printf '1001\n' || printf '0\n'
+    }
+    file_gid() { printf '0\n'; }
+    file_mode() {
+        [[ "$1" == "$DNS_WEB_DIR/$WEB_OWNERSHIP_MARKER" ]] \
+            && printf '644\n' || printf '755\n'
+    }
+    ! claim_web_dir >/dev/null 2>&1
+); then
+    pass "custom static ownership markers must be root-published"
+else
+    fail "custom static tree accepted a non-root ownership marker"
+fi
+
+if (
+    custom_parent="$TMP/custom-static-empty-owner"
+    DNS_WEB_DIR="$custom_parent/web"
+    mkdir -p "$DNS_WEB_DIR"
+    file_uid() {
+        [[ "$1" == "$DNS_WEB_DIR" ]] && printf '1001\n' || printf '0\n'
+    }
+    file_gid() { printf '0\n'; }
+    file_mode() { printf '755\n'; }
+    ! claim_web_dir >/dev/null 2>&1 \
+        && [[ ! -e "$DNS_WEB_DIR/$WEB_OWNERSHIP_MARKER" ]]
+); then
+    pass "empty custom asset roots are trusted before marker publication"
+else
+    fail "public-tree marker was written into an untrusted empty directory"
+fi
+
+if (
+    race_root="$TMP/custom-static-race"
+    src="$race_root/source"
+    dest="$race_root/live"
+    mkdir -p "$src" "$dest"
+    printf 'new\n' > "$src/index.html"
+    printf 'old\n' > "$dest/index.html"
+    ensure_static_publish_parent() { :; }
+    static_publish_parent_is_safe() { return 1; }
+    file_uid() { printf '0\n'; }
+    file_gid() { printf '0\n'; }
+    file_mode() { [[ -d "$1" ]] && printf '755\n' || printf '644\n'; }
+    normalize_static_tree_ownership() { :; }
+    ! publish_owned_tree "$src" "$dest" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE" >/dev/null 2>&1 \
+        && grep -qxF old "$dest/index.html"
+); then
+    pass "static publication revalidates its trusted parent before the swap"
+else
+    fail "static publication swapped after its parent boundary changed"
+fi
+
 # Uninstall keeps Gum while deleting the rest of an owned runtime, and falls
 # back to plain output before deleting a runtime where Gum is already absent.
 if (
@@ -250,6 +749,11 @@ if (
     _HAVE_GUM=0
     mkdir -p "$BIN_DIR" "$BASE_DIR/scripts"
     printf '%s\n' "$BASE_OWNERSHIP_VALUE" > "$BASE_DIR/$BASE_OWNERSHIP_MARKER"
+    file_uid() { printf '0\n'; }
+    file_gid() { printf '0\n'; }
+    file_mode() {
+        [[ "$1" == "$BASE_DIR/$BASE_OWNERSHIP_MARKER" ]] && printf '644\n' || printf '755\n'
+    }
     printf '#!/bin/sh\nexit 0\n' > "$GUM_BIN"
     chmod 0755 "$GUM_BIN"
     printf 'runtime\n' > "$BIN_DIR/5gpn-dns"
@@ -268,6 +772,11 @@ if (
     _HAVE_GUM=1
     mkdir -p "$BIN_DIR"
     printf '%s\n' "$BASE_OWNERSHIP_VALUE" > "$BASE_DIR/$BASE_OWNERSHIP_MARKER"
+    file_uid() { printf '0\n'; }
+    file_gid() { printf '0\n'; }
+    file_mode() {
+        [[ "$1" == "$BASE_DIR/$BASE_OWNERSHIP_MARKER" ]] && printf '644\n' || printf '755\n'
+    }
     remove_runtime_preserving_gum >/dev/null
     [[ ! -e "$BASE_DIR" && "$_HAVE_GUM" == 0 ]]
 ); then
@@ -364,12 +873,14 @@ BASE_DIR="$source_base_dir"
 SCRIPT_DIR="$runtime_root"
 
 # Seed -> preserve byte-for-byte -> explicit validated reset with backup.
-MIHOMO_DIR="$TMP/mihomo"
-MIHOMO_SERVICE_USER="$(id -gn)"
 CONF_DIR="$TMP/conf"
+MIHOMO_DIR="$CONF_DIR/mihomo"
+MIHOMO_SERVICE_USER="$(id -gn)"
+DNS_SERVICE_USER="$(id -un)"
 MIHOMO_BIN="$TMP/fake-mihomo"
+DNS_BIN="$TMP/fake-dns"
 INTERCEPT_BIN="$TMP/fake-intercept"
-INTERCEPT_DIR="$TMP/intercept"
+INTERCEPT_DIR="$CONF_DIR/intercept"
 MIHOMO_TEST_LOG="$TMP/mihomo.log"; export MIHOMO_TEST_LOG
 cat > "$MIHOMO_BIN" <<'EOF'
 #!/usr/bin/env bash
@@ -377,6 +888,15 @@ printf '%s\n' "$*" >> "$MIHOMO_TEST_LOG"
 exit 0
 EOF
 chmod +x "$MIHOMO_BIN"
+cat > "$DNS_BIN" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == --print-mihomo-secret && "${2:-}" == --config && -f "${3:-}" ]]; then
+    sed -n 's/^secret:[[:space:]]*//p' "$3"
+    exit 0
+fi
+exit 1
+EOF
+chmod +x "$DNS_BIN"
 mkdir -p "$INTERCEPT_DIR"
 cat > "$INTERCEPT_BIN" <<'EOF'
 #!/usr/bin/env bash
@@ -384,6 +904,28 @@ printf 'test-inbound-user\ttest-inbound-password-123456\ttest-upstream-user\ttes
 EOF
 chmod +x "$INTERCEPT_BIN"
 mkdir -p "$CONF_DIR"
+printf '%s\n' "$CONF_OWNERSHIP_VALUE" > "$CONF_DIR/$CONF_OWNERSHIP_MARKER"
+file_uid() {
+    case "$1" in
+        "$CONF_DIR"|"$CONF_DIR/$CONF_OWNERSHIP_MARKER"|"$CONF_DIR/dns.env") printf '0\n' ;;
+        *) stat -c %u -- "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null || true ;;
+    esac
+}
+file_gid() {
+    case "$1" in
+        "$CONF_DIR"|"$CONF_DIR/$CONF_OWNERSHIP_MARKER") printf '0\n' ;;
+        *) stat -c %g -- "$1" 2>/dev/null || stat -f %g "$1" 2>/dev/null || true ;;
+    esac
+}
+file_mode() {
+    case "$1" in
+        "$CONF_DIR") printf '755\n' ;;
+        "$CONF_DIR/$CONF_OWNERSHIP_MARKER") printf '644\n' ;;
+        "$CONF_DIR/dns.env") printf '640\n' ;;
+        *) stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || true ;;
+    esac
+}
+persist_mihomo_secret() { :; }
 BASE_DOMAIN=example.com
 MIHOMO_LISTEN_IPS=10.20.30.40
 render_mihomo_config >/dev/null
@@ -392,9 +934,9 @@ config="$MIHOMO_DIR/config.yaml"
     && pass "first-install seed requires alternate-port readiness" \
     || fail "first-install seed did not enable alternate-port readiness"
 config_mode="$(stat -c %a "$config" 2>/dev/null || stat -f %Lp "$config")"
-[[ -s "$config" && ( "$POSIX_MODES" == 0 || "$config_mode" == 660 ) ]] \
+[[ -s "$config" && ( "$POSIX_MODES" == 0 || "$config_mode" == 640 ) ]] \
     && pass "first install seeds a private mihomo config" \
-    || fail "first-install mihomo config missing or not mode 0660"
+    || fail "first-install mihomo config missing or not mode 0640"
 grep -Fq 'console.example.com: 127.0.0.1' "$config" \
     && grep -Fq 'DOMAIN,console.example.com,DIRECT' "$config" \
     && grep -Fq 'name: gateway5060' "$config" \
@@ -516,8 +1058,12 @@ fi
 
 # Allowlist mutations accept only canonical IPv4/IP-CIDR entries, are exact,
 # and refuse symlink targets.
-allow_dir="$TMP/allowlist"
+allow_conf="$TMP/allow-conf"
+allow_dir="$allow_conf/mihomo"
+mkdir -p "$allow_conf"
+printf '%s\n' "$CONF_OWNERSHIP_VALUE" > "$allow_conf/$CONF_OWNERSHIP_MARKER"
 if (
+    CONF_DIR="$allow_conf"
     MIHOMO_DIR="$allow_dir"
     check_root() { :; }
     install_gum() { :; }
@@ -546,6 +1092,7 @@ rm -rf -- "$allow_dir"
 mkdir -p "$allow_dir"
 ln -s "$symlink_target" "$allow_dir/whitelist.txt"
 if (
+    CONF_DIR="$allow_conf"
     MIHOMO_DIR="$allow_dir"
     check_root() { :; }
     install_gum() { :; }
@@ -599,6 +1146,12 @@ BASE_DIR="$TMP/base"
 if (
     safe_zashboard_path() { printf '%s\n' "$DNS_ZASH_DIR"; }
     DNS_ZASH_DIR="$TMP/external/zash"
+    file_uid() { printf '0\n'; }
+    file_gid() { printf '0\n'; }
+    file_mode() {
+        [[ "$1" == "$DNS_ZASH_DIR/$ZASH_OWNERSHIP_MARKER" ]] \
+            && printf '644\n' || printf '755\n'
+    }
     mkdir -p "$DNS_ZASH_DIR"
     echo foreign > "$DNS_ZASH_DIR/file"
     ! claim_zashboard_dir >/dev/null 2>&1
@@ -833,7 +1386,7 @@ HTTP_INSTALL_LOG="$TMP/http-install-order.log"
     cert_provenance_matches() { return 1; }
     validate_cert_pair() {
         validation_calls=$((validation_calls + 1))
-        [[ "$validation_calls" -ge 2 ]]
+        [[ "$validation_calls" -ge 1 ]]
     }
     certbot_renewal_mode_matches() { return 0; }
     check_http_challenge_dns_once() { return 0; }
@@ -843,6 +1396,9 @@ HTTP_INSTALL_LOG="$TMP/http-install-order.log"
     deploy_cert_roles() { printf 'deploy_cert_roles zash/current\n' >> "$HTTP_INSTALL_LOG"; }
     systemctl() {
         printf 'systemctl %s\n' "$*" >> "$HTTP_INSTALL_LOG"
+        case "$*" in
+            'cat certbot.timer'|'is-active --quiet certbot.service') return 1 ;;
+        esac
         return 0
     }
     certbot() {
@@ -876,9 +1432,11 @@ else
     pass "installer contains no global nftables mutation"
 fi
 lock_fn="$(sed -n '/^acquire_install_cert_lock()/,/^}/p' "$INSTALL")"
+lock_dir_fn="$(sed -n '/^ensure_private_lock_dir()/,/^}/p' "$INSTALL")"
 if grep -Fq 'CERT_RENEW_LOCK_FILE="/run/5gpn/cert-renew.lock"' "$INSTALL" \
-   && grep -Fq '! -L "$lock_dir"' <<<"$lock_fn" \
-   && grep -Fq 'file_uid "$lock_dir"' <<<"$lock_fn" \
+   && grep -Fq '! -L "$lock_dir"' <<<"$lock_dir_fn" \
+   && grep -Fq 'file_uid "$lock_dir"' <<<"$lock_dir_fn" \
+   && grep -Fq 'ensure_private_lock_dir' <<<"$lock_fn" \
    && ! grep -Fq '/run/lock/' "$INSTALL"; then
     pass "certificate lock uses a root-owned private non-symlink runtime directory"
 else
@@ -920,9 +1478,11 @@ fi
 rollback_lock_fn="$(sed -n '/^ensure_install_cert_lock_for_rollback()/,/^}/p' "$INSTALL")"
 exit_trap_fn="$(sed -n '/^install_transaction_exit()/,/^}/p' "$INSTALL")"
 error_trap_fn="$(sed -n '/^install_transaction_error()/,/^}/p' "$INSTALL")"
+finish_trap_fn="$(sed -n '/^finish_install_transaction()/,/^}/p' "$INSTALL")"
 if grep -Fq 'acquire_install_cert_lock' <<<"$rollback_lock_fn" \
-   && grep -Fq 'ensure_install_cert_lock_for_rollback' <<<"$exit_trap_fn" \
-   && grep -Fq 'ensure_install_cert_lock_for_rollback' <<<"$error_trap_fn"; then
+   && grep -Fq 'finish_install_transaction' <<<"$exit_trap_fn" \
+   && grep -Fq 'finish_install_transaction' <<<"$error_trap_fn" \
+   && grep -Fq 'ensure_install_cert_lock_for_rollback' <<<"$finish_trap_fn"; then
     pass "transaction traps reacquire the certificate lock before rollback"
 else
     fail "a signal or error during service lock handoff can race rollback"

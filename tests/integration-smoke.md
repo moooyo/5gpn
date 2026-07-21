@@ -303,6 +303,22 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
 - [ ] Both production modes use only the canonical
   `/etc/letsencrypt/live/<base>` lineage with Certbot name `<base>`; no numbered
   duplicate or unscoped host lineage is issued or renewed.
+- [ ] Place an invalid, expiring, partial, or mode-mismatched canonical lineage
+  at `<base>` without 5gpn-owned provenance. Install fails before invoking
+  Certbot and leaves the lineage bytes/config unchanged. A fully valid external
+  fingerprint is reused read-only, remains non-deletable by decommission, gets
+  the exact-lineage deploy hook, and does not enable the 5gpn public timer.
+- [ ] With only an owned `<base>` lineage, the installer disables the distro
+  `certbot.timer` so renewal cannot bypass the project lock. With another
+  lineage present and depending on that global timer, installation fails closed
+  instead of disabling unrelated renewal. Forced failure restores the exact
+  pre-transaction enabled/active state; an already active `certbot.service`
+  also aborts before lineage inspection.
+- [ ] Record an enabled/active distro `certbot.timer`, complete the first owned
+  takeover, and verify the root-only saved state survives an owned reinstall
+  without changing. Switch to debug or uninstall normally: the original
+  enabled/active state is restored exactly and the saved takeover state is
+  removed.
 - [ ] In `cloudflare` mode, the certificate has the exact apex `<base>` and
   `*.<base>` SAN shape. Initial issuance and a due timer renewal use Cloudflare
   DNS-01 without stopping mihomo or binding an ACME `:80` listener; a synthetic
@@ -328,8 +344,20 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
 - [ ] The systemd timer and the Telegram bot's confirmed renewal action invoke
   the same mode-aware scoped helper. Their result and journal output agree for
   not-due, success, DNS-gate failure, Certbot failure, and mihomo-restore failure.
+- [ ] Hold `/run/5gpn/install.lock`, then start the public renewal service: it
+  exits without reaching the certificate lock or Certbot. The interception
+  certificate oneshot still succeeds during the installer's explicit
+  certificate-lock handoff.
 - [ ] A successful production renewal runs the deploy hook, updates all three
   role copies, and regenerates/signs the iOS profile.
+- [ ] After a fresh install and an in-place upgrade, `/etc/5gpn` is
+  `root:gpn-dns` mode `3771`, `/etc/5gpn/cert` is `root:root` mode `0751`, and
+  its root marker is `root:root` mode `0644`. Verify the runtime traversal
+  contract directly:
+  `sudo -u gpn-dns test -r /etc/5gpn/cert/dot/current/fullchain.pem` and
+  `sudo -u mihomo test -r /etc/5gpn/cert/zash/current/privkey.pem` both succeed.
+  Neither runtime account can rename the root-owned `cert`, `mihomo`,
+  `intercept`, or interception `tls` directory through its sticky parent.
 - [ ] New TLS handshakes observe renewed files by mtime without daemon restart.
 - [ ] After Cloudflare renewal, a new Controller TLS handshake presents the
   renewed certificate without restarting mihomo. HTTP-01 needs no additional
@@ -449,6 +477,16 @@ token into recorded command output, screenshots, or issue logs.
   long-running daemon can read the signing key. Turning the Console master off
   removes DNS/mihomo interception state and cleanly stops the sidecar; turning
   it back on starts the sidecar and restores only the armed hosts.
+- [ ] `5gpn-intercept-cert.timer` remains enabled and active in Cloudflare,
+  HTTP-01, debug, and missing-public-lineage installations. Trigger it directly
+  and verify it invokes only `5gpn-intercept-cert.service`; a public renewal
+  failure cannot skip the interception-leaf expiry check.
+- [ ] Replace `/etc/5gpn/cert`, one certificate role, or
+  `/etc/5gpn/intercept/tls` with a symlink, drift a root marker to a runtime
+  owner, or add a hardlink to a keypair file. The corresponding root helper
+  fails before publication and preserves every prior live keypair. Replacing a
+  lock pathname while the inherited descriptor still references the old inode
+  is also rejected.
 - [ ] `/ios/ios-intercept-ca.mobileconfig` downloads as a CMS-signed Apple profile.
   On an owned test iPhone, install it and explicitly enable full trust under
   Certificate Trust Settings. Removing this profile does not remove the DoT

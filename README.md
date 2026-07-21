@@ -172,10 +172,10 @@ rollback instead of running the stable installer over beta state.
   - **cloudflare** — TUI 输入 Cloudflare API token，DNS-01 签发 apex `<base>` + `*.<base>`；签发和续期都不停止 mihomo。即使当前证书可复用，也必须保留受保护的 token 以保证自动续期；`zash.<base>` 可继续只由 5gpn 合成解析。
   - **http-01** — 签发且只签发 `console.<base>`、`zash.<base>`、`dot.<base>` 三个精确 SAN，不包含 apex 或 wildcard。TUI 会展示三条所需 A 记录并要求确认，再通过固定解析器 `1.1.1.1` 等待三个名字各自只有一条 A 且均为 `DNS_PUBLIC_IP`；三者都不得发布 AAAA。初签及到期续签会短暂停止 mihomo 释放 TCP `:80`，并在成功或失败后恢复。
   - **debug** — TUI 选择的自签模式；无 Certbot。仍有效且 SAN/IP/私钥匹配时复用，不会每次重签。
-  - **安全复用**：生产复用要求有效期、可信链、cert/key 匹配，以及与模式完全一致的 SAN；debug 自签永远不能进入生产复用路径。
+  - **安全复用**：生产复用要求有效期、可信链、cert/key 匹配，以及与模式完全一致的 SAN。没有 5gpn ownership provenance 的外部 lineage 只允许严格只读复用：安装器不会强制续期、改 SAN、改 authenticator 或取得删除权限，且不会为它启用 5gpn 公网证书 timer；失效、临期、部分损坏或模式不匹配会直接拒绝。debug 自签永远不能进入生产复用路径。
 - **按域名访问**：`console.<base>` 必须提前有指向公网或客户端可路由网关 IP 的 A 记录；该检查没有环境变量 bypass。HTTP-01 进一步要求三个服务名都满足上述公网 A/无 AAAA 约束。SPA 资源与 iOS profile 下载公开，所有 `/api/*` 仍需 bearer token。
   The Cloudflare API token manages ACME TXT records only; the operator must create the displayed `console.<base>` A record before confirming the installer prompt.
-- **统一续期入口**：systemd timer 与 Telegram bot 的确认续期动作调用同一个 mode-aware helper，只处理 `--cert-name <base>`。未到期时不打断数据面；Cloudflare 到期续签仍不停机，HTTP-01 到期续签会再次等待 `1.1.1.1` DNS 检查通过后再执行 `:80` 的短暂停机窗口。
+- **分离续期入口**：5gpn-owned 公网 lineage 的 systemd timer 与 Telegram bot 确认动作调用同一个 mode-aware helper，只处理 `--cert-name <base>`。独立且始终启用的 `5gpn-intercept-cert.timer` 只检查私有 interception leaf，不依赖公网 lineage 或证书模式。未到期时不打断数据面；Cloudflare 到期续签仍不停机，HTTP-01 到期续签会再次等待 `1.1.1.1` DNS 检查通过后再执行 `:80` 的短暂停机窗口。
 - **IPv4 前提**：本方案全链路 **IPv4-only**（AAAA 一律 SOA、chnroute/网关改写仅 IPv4、守护进程沙箱仅 `AF_INET`）。要求 5G/APN 给客户端分配 **可路由到网关的 IPv4**（或 CLAT）；IPv6-only 接入的客户端够不到网关。
 
 安装版本和第三方版本/摘要固定在发布包中，不接受 `DNS_VERSION`、`MIHOMO_VERSION` 或 `*_SHA256` 环境覆盖。Telegram token、管理员、代理和告警也从管理 TUI 配置。

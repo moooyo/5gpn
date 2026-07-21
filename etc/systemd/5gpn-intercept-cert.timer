@@ -1,0 +1,12 @@
+# 5gpn-unit-id: 5gpn-intercept-cert.timer:v1
+[Unit]
+Description=5gpn daily interception certificate renewal check
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=6h
+Persistent=true
+Unit=5gpn-intercept-cert.service
+
+[Install]
+WantedBy=timers.target

@@ -328,12 +328,12 @@ func (s *ControlServer) applyMihomoConfigLockedCAS(ctx context.Context, text str
 				return http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("mihomo: read config for backup: %v", err)}, false
 			}
 		}
-		if err := atomicWriteFile(s.mihomoStore.Path()+".bak", []byte(currentBeforePublish), 0o660); err != nil {
+		if err := atomicWriteFile(s.mihomoStore.Path()+".bak", []byte(currentBeforePublish), 0o640); err != nil {
 			return http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("mihomo: write backup: %v", err)}, false
 		}
 	}
 
-	if err := atomicWriteFile(s.mihomoStore.Path(), []byte(text), 0o660); err != nil {
+	if err := atomicWriteFile(s.mihomoStore.Path(), []byte(text), 0o640); err != nil {
 		return http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("mihomo: write config: %v", err)}, false
 	}
 

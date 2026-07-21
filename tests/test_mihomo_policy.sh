@@ -176,7 +176,7 @@ nocheck install.sh 'xray\.service|/usr/local/bin/xray' 'no old Xray teardown rem
 check install.sh 'install_zashboard\(\)' 'install_zashboard function exists'
 check install.sh 'ZASH_VERSION="v3\.15\.0"' 'ZASH_VERSION fixed pin'
 check install.sh 'Zephyruso/zashboard/releases/download' 'downloads zashboard from Zephyruso/zashboard'
-if grep -A1 -E '^\s*install_web\s*$' "$root/install.sh" | grep -q 'install_zashboard'; then
+if grep -A1 -E '^\s*install_web(\s*\|\| return 1)?\s*$' "$root/install.sh" | grep -q 'install_zashboard'; then
     echo "ok: full_install calls install_zashboard right after install_web"
 else
     echo "FAIL: full_install calls install_zashboard right after install_web"; FAIL=1

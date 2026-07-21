@@ -249,7 +249,7 @@ func (s *ControlServer) rollbackMihomoConfigLocked(oldBytes []byte) map[string]a
 		"controller_restore_attempted": false,
 		"controller_restored":          false,
 	}
-	if err := atomicWriteFile(s.mihomoStore.Path(), oldBytes, 0o660); err != nil {
+	if err := atomicWriteFile(s.mihomoStore.Path(), oldBytes, 0o640); err != nil {
 		result["error"] = fmt.Sprintf("restore previous config on disk: %v", err)
 		return result
 	}

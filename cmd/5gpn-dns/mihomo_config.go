@@ -203,13 +203,17 @@ func (s *MihomoConfigStore) Default() string {
 		"__ZASH_DOMAIN__", zashDomain,
 		"__MIHOMO_LISTENERS__", renderMihomoListeners(mihomoSeedListenerIPs(), consoleDomain),
 		"__GATEWAY_IP__", os.Getenv("DNS_GATEWAY_IP"),
-		"__CONTROLLER_SECRET__", os.Getenv("DNS_MIHOMO_SECRET"),
+		"__CONTROLLER_SECRET__", yamlSingleQuotedValue(os.Getenv("DNS_MIHOMO_SECRET")),
 		"__INTERCEPT_INBOUND_USERNAME__", interceptInUser,
 		"__INTERCEPT_INBOUND_PASSWORD__", interceptInPass,
 		"__INTERCEPT_UPSTREAM_USERNAME__", interceptUpUser,
 		"__INTERCEPT_UPSTREAM_PASSWORD__", interceptUpPass,
 	)
 	return r.Replace(mihomoConfigSeedTemplate)
+}
+
+func yamlSingleQuotedValue(value string) string {
+	return strings.ReplaceAll(value, "'", "''")
 }
 
 // mihomoConfigSeedTemplate is a Go-side copy of etc/mihomo/config.yaml.tmpl,
@@ -230,7 +234,7 @@ const mihomoConfigSeedTemplate = `# 5gpn mihomo data plane — install-time seed
 # about what happens to gateway-bound traffic is yours to shape.
 external-controller: ""
 external-controller-tls: 127.0.0.1:9090
-secret: __CONTROLLER_SECRET__
+secret: '__CONTROLLER_SECRET__'
 tls:
   certificate: /etc/5gpn/cert/zash/current/fullchain.pem
   private-key: /etc/5gpn/cert/zash/current/privkey.pem

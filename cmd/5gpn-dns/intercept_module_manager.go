@@ -1015,17 +1015,17 @@ func (m *InterceptModuleManager) validateMihomoCandidateLocked(ctx context.Conte
 }
 
 func (m *InterceptModuleManager) publishMihomoLocked(ctx context.Context, oldText, nextText string) error {
-	if err := atomicWriteFile(m.mihomo.Path()+".bak", []byte(oldText), 0o660); err != nil {
+	if err := atomicWriteFile(m.mihomo.Path()+".bak", []byte(oldText), 0o640); err != nil {
 		return fmt.Errorf("write mihomo backup: %w", err)
 	}
-	if err := atomicWriteFile(m.mihomo.Path(), []byte(nextText), 0o660); err != nil {
+	if err := atomicWriteFile(m.mihomo.Path(), []byte(nextText), 0o640); err != nil {
 		return fmt.Errorf("write mihomo config: %w", err)
 	}
 	if err := m.controller.PutConfigs(ctx, m.mihomo.Path()); err == nil {
 		return nil
 	} else {
 		applyErr := err
-		rollbackDiskErr := atomicWriteFile(m.mihomo.Path(), []byte(oldText), 0o660)
+		rollbackDiskErr := atomicWriteFile(m.mihomo.Path(), []byte(oldText), 0o640)
 		var rollbackApplyErr error
 		if rollbackDiskErr == nil {
 			rollbackCtx, cancel := context.WithTimeout(context.Background(), mihomoRollbackLimit)

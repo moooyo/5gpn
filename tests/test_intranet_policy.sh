@@ -196,13 +196,15 @@ grep -Eq 'systemctl (restart|reload) mihomo' "$RENEW" \
 grep -iq 'xray' "$RENEW" && fail "renew-hook.sh: must not reference xray (mihomo is the data plane)"
 
 # ===== gen-ios-profile.sh — unsigned profile fails CLOSED =====
-fc="$(sed -n '/sign_ok -ne 1/,/^fi$/p' "$IOSGEN")"
 grep -Fq 'ALLOW_UNSIGNED_PROFILE' "$IOSGEN" \
     && fail "gen-ios-profile.sh: caller environment can still allow unsigned profiles"
-printf '%s' "$fc" | grep -Fq 'rm -f "$profile_path"' \
-    || fail "gen-ios-profile.sh: unsigned profile is not removed (must fail closed, not serve tamperable)"
-printf '%s' "$fc" | grep -Eq 'exit 1' \
+grep -Fq 'Refusing to serve an UNSIGNED .mobileconfig' "$IOSGEN" \
     || fail "gen-ios-profile.sh: refusing an unsigned profile must exit non-zero"
+grep -Fq 'stage_dir="$(mktemp -d "${WWW_DIR}/.ios-profile.XXXXXX")"' "$IOSGEN" \
+    || fail "gen-ios-profile.sh: profiles are not staged privately on the destination filesystem"
+grep -Fq 'mv -Tf -- "$staged_profile" "$profile_path"' "$IOSGEN" \
+    && grep -Fq 'mv -Tf -- "$staged_intercept_profile" "$intercept_profile_path"' "$IOSGEN" \
+    || fail "gen-ios-profile.sh: signed profiles are not atomically renamed into place"
 # The configuration guide lives in the console SPA. The profile generator must
 # publish only the signed payload, never recreate a second landing-page bundle.
 grep -Eq '(index\.html|ios\.css|ios\.js)' "$IOSGEN" \
@@ -234,7 +236,7 @@ grep -Eq '^get_public_ip\(\)' "$INSTALL" \
     || fail "install.sh: no get_public_ip() auto-detection"
 # ===== Persisted resolver is validated BEFORE install_files =====
 resolver_line="$(grep -n '^[[:space:]]*resolve_install_configuration ' "$INSTALL" | tail -1 | cut -d: -f1)"
-files_line="$(grep -n '^[[:space:]]*install_files$' "$INSTALL" | tail -1 | cut -d: -f1)"
+files_line="$(grep -nE '^[[:space:]]*install_files([[:space:]]*\|\| return 1)?$' "$INSTALL" | tail -1 | cut -d: -f1)"
 if [ -z "${resolver_line:-}" ] || [ -z "${files_line:-}" ]; then
     fail "install.sh: could not locate configuration resolution or install_files"
 elif [ "$resolver_line" -ge "$files_line" ]; then
@@ -242,7 +244,7 @@ elif [ "$resolver_line" -ge "$files_line" ]; then
 fi
 
 # ===== The mihomo config must be rendered AFTER configuration resolution =====
-webdom_line="$(grep -nE '^[[:space:]]*render_mihomo_config( --reset)?$' "$INSTALL" | tail -1 | cut -d: -f1)"
+webdom_line="$(grep -nE '^[[:space:]]*render_mihomo_config( --reset)?([[:space:]]*\|\| return 1)?$' "$INSTALL" | tail -1 | cut -d: -f1)"
 domains_line="$resolver_line"
 if [ -z "${webdom_line:-}" ] || [ -z "${domains_line:-}" ]; then
     fail "install.sh: could not locate render_mihomo_config or configuration resolution"
@@ -253,7 +255,7 @@ fi
 # ===== CPU arch guard — amd64-only prebuilts must refuse other arches early =====
 grep -Eq '^check_arch\(\)' "$INSTALL" \
     || fail "install.sh: no check_arch() guard (ARM box would install to the end then hit exec format error)"
-grep -Eq '^[[:space:]]*check_arch$' "$INSTALL" \
+grep -Eq '^[[:space:]]*check_arch([[:space:]]*\|\| return 1)?$' "$INSTALL" \
     || fail "install.sh: check_arch is defined but never called in full_install"
 
 # ===== DNS_CACHE_SIZE — the RAM-derived cache size must reach dns.env =====

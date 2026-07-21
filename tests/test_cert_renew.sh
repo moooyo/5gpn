@@ -42,8 +42,39 @@ for role in dot web zash; do
     chmod 0640 "$TEST_CERT_ROOT/$role/generations/fixture/fullchain.pem" "$TEST_CERT_ROOT/$role/generations/fixture/privkey.pem"
     ln -sfn generations/fixture "$TEST_CERT_ROOT/$role/current"
 done
+touch "$TEST_CERT_ROOT/.deploy-ran"
 EOF
 chmod +x "$DEPLOY_HOOK"
+
+# The production helper resolves the required group names through NSS and
+# compares numeric GIDs. Synthetic IDs make the role mapping testable on hosts
+# that do not have the gateway service accounts.
+MOCK_BAD_GROUP_ROLE=""
+MOCK_BAD_GROUP_FILE=""
+named_group_gid() {
+    case "$1" in
+        5gpn-dns) printf '%s\n' 61001 ;;
+        mihomo) printf '%s\n' 61002 ;;
+        *) return 1 ;;
+    esac
+}
+file_gid() {
+    local path="$1" role expected basename
+    case "$path" in
+        "$CERT_ROOT"/dot/*) role=dot; expected=61001 ;;
+        "$CERT_ROOT"/web/*) role=web; expected=61001 ;;
+        "$CERT_ROOT"/zash/*) role=zash; expected=61002 ;;
+        *) return 1 ;;
+    esac
+    basename="${path##*/}"
+    if [[ "$role" == "$MOCK_BAD_GROUP_ROLE" \
+       && ( -z "$MOCK_BAD_GROUP_FILE" || "$basename" == "$MOCK_BAD_GROUP_FILE" ) \
+       && ! -e "$CERT_ROOT/.deploy-ran" ]]; then
+        printf '%s\n' 61999
+    else
+        printf '%s\n' "$expected"
+    fi
+}
 
 sync_role_copies() {
     local role
@@ -86,11 +117,20 @@ MOCK_MIHOMO_ACTIVE=1
 MOCK_CERTBOT_RC=0
 MOCK_STOP_RC=0
 MOCK_START_RC=0
+MOCK_PROVENANCE=owned
 write_renewal_conf
 
 # Keep every case inside the temporary tree and bypass the real global lock.
-acquire_renew_lock() { return 0; }
+LOCK_ORDER=""
+acquire_install_gate() { LOCK_ORDER=install; }
+acquire_renew_lock() {
+    [[ "$LOCK_ORDER" == install ]] || return 1
+    LOCK_ORDER=install-cert
+}
 cf_credential_safe() { return 0; }
+cert_provenance_owned() { [[ "$MOCK_PROVENANCE" == owned ]]; }
+MOCK_ROLE_TREE_SAFE=1
+certificate_role_tree_safe() { [[ "$MOCK_ROLE_TREE_SAFE" == 1 ]]; }
 
 cfg_get() {
     case "$1" in
@@ -151,6 +191,7 @@ certbot() {
 
 reset_case() {
     : > "$LOG"
+    rm -f -- "$CERT_ROOT/.deploy-ran"
     CFG_BASE=example.com
     CFG_MODE=http-01
     CFG_PUBLIC=203.0.113.9
@@ -160,6 +201,11 @@ reset_case() {
     MOCK_CERTBOT_RC=0
     MOCK_STOP_RC=0
     MOCK_START_RC=0
+    MOCK_PROVENANCE=owned
+    MOCK_ROLE_TREE_SAFE=1
+    MOCK_BAD_GROUP_ROLE=""
+    MOCK_BAD_GROUP_FILE=""
+    LOCK_ORDER=""
     sync_role_copies
     write_renewal_conf
 }
@@ -203,9 +249,21 @@ expect_before() {
 reset_case
 MOCK_CERT_FRESH=1
 expect_success "not-due HTTP certificate exits successfully" cert_renew_main --cert-name example.com
+[[ "$LOCK_ORDER" == install-cert ]] \
+    && pass "public renewal takes the install gate before the certificate lock" \
+    || fail "public renewal lock order is not install then certificate"
 expect_no_log "dig " "not-due certificate does not query DNS"
 expect_no_log "systemctl " "not-due certificate does not inspect/stop mihomo"
 expect_no_log "certbot " "not-due certificate does not invoke Certbot"
+[[ ! -e "$CERT_ROOT/.deploy-ran" ]] \
+    && pass "correct role groups preserve the not-due fast path" \
+    || fail "correct role groups caused an unnecessary redeploy"
+
+reset_case
+MOCK_CERT_FRESH=1
+MOCK_ROLE_TREE_SAFE=0
+expect_failure "unsafe certificate root tree fails the not-due fast path" cert_renew_main --cert-name example.com
+expect_no_log "certbot " "unsafe role tree never reaches Certbot"
 
 # A fresh live lineage with a stale role copy is repaired through the owned
 # deploy hook instead of being skipped forever as "not due".
@@ -216,6 +274,27 @@ expect_success "not-due lineage repairs stale role copies" cert_renew_main --cer
 cmp -s "$LE_LIVE_ROOT/example.com/fullchain.pem" "$CERT_ROOT/web/current/fullchain.pem" \
     && pass "stale role certificate was redeployed from the live lineage" \
     || fail "stale role certificate survived the not-due fast path"
+
+# Content, owner, and mode are insufficient: the DNS copies must be readable
+# only through gpn-dns and the zashboard copy only through mihomo. A wrong role
+# group is treated as stale and repaired by the owned deploy hook.
+reset_case
+MOCK_CERT_FRESH=1
+MOCK_BAD_GROUP_ROLE=zash
+MOCK_BAD_GROUP_FILE=privkey.pem
+expect_success "not-due lineage repairs a role copy with the wrong group" cert_renew_main --cert-name example.com
+[[ -e "$CERT_ROOT/.deploy-ran" ]] \
+    && pass "wrong zash group forced deploy-hook recovery" \
+    || fail "wrong zash group was accepted without deploy-hook recovery"
+
+reset_case
+MOCK_CERT_FRESH=1
+MOCK_BAD_GROUP_ROLE=web
+MOCK_BAD_GROUP_FILE=fullchain.pem
+expect_success "not-due lineage repairs a DNS role copy with the wrong group" cert_renew_main --cert-name example.com
+[[ -e "$CERT_ROOT/.deploy-ran" ]] \
+    && pass "wrong web group forced deploy-hook recovery" \
+    || fail "wrong web group was accepted without deploy-hook recovery"
 
 # A stale AAAA record fails the fixed-resolver gate before any :80 disruption.
 reset_case
@@ -293,6 +372,16 @@ expect_failure "mismatched requested cert name is rejected" cert_renew_main --ce
 expect_no_log "openssl " "cert-name mismatch fails before certificate inspection"
 expect_no_log "certbot " "cert-name mismatch never reaches Certbot"
 expect_no_log "systemctl " "cert-name mismatch never touches mihomo"
+
+# The fixed public helper is never renewal authority for a reused external
+# lineage, even if an old unit or a confirmed Bot action still starts it.
+reset_case
+CFG_MODE=cloudflare
+MOCK_PROVENANCE=reused
+expect_failure "reused external lineage rejects project-managed renewal" cert_renew_main --cert-name example.com
+expect_no_log "openssl " "external lineage rejection precedes certificate inspection"
+expect_no_log "certbot " "external lineage rejection never reaches Certbot"
+expect_no_log "systemctl " "external lineage rejection never touches mihomo"
 
 echo "----"
 if [[ "$FAIL" == 0 ]]; then

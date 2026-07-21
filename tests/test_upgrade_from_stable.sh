@@ -52,18 +52,41 @@ fi
 
 # Exercise the real current rendering function with harmless validators. A
 # normal upgrade must validate and preserve the legacy operator file exactly.
-MIHOMO_DIR="$TMP/mihomo"
-INTERCEPT_DIR="$TMP/intercept"
+fixture_conf="$CONF_DIR"
+MIHOMO_DIR="$CONF_DIR/mihomo"
+INTERCEPT_DIR="$CONF_DIR/intercept"
 MIHOMO_BIN="$TMP/fake-mihomo"
 INTERCEPT_BIN="$TMP/fake-intercept"
 DNS_BIN="$TMP/fake-dns"
 MIHOMO_SERVICE_USER="$(id -gn)"
+DNS_SERVICE_USER="$(id -un)"
 SCRIPT_DIR="$ROOT"
 BASE_DOMAIN=example.com
 PUBLIC_IP=192.0.2.10
 GATEWAY_IP=192.0.2.10
 MIHOMO_LISTEN_IPS=192.0.2.10
 mkdir -p "$MIHOMO_DIR" "$INTERCEPT_DIR"
+printf '%s\n' "$CONF_OWNERSHIP_VALUE" > "$CONF_DIR/$CONF_OWNERSHIP_MARKER"
+file_uid() {
+    case "$1" in
+        "$fixture_conf"|"$fixture_conf/$CONF_OWNERSHIP_MARKER"|"$fixture_conf/dns.env") printf '0\n' ;;
+        *) stat -c %u -- "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null || true ;;
+    esac
+}
+file_gid() {
+    case "$1" in
+        "$fixture_conf"|"$fixture_conf/$CONF_OWNERSHIP_MARKER") printf '0\n' ;;
+        *) stat -c %g -- "$1" 2>/dev/null || stat -f %g "$1" 2>/dev/null || true ;;
+    esac
+}
+file_mode() {
+    case "$1" in
+        "$fixture_conf") printf '755\n' ;;
+        "$fixture_conf/$CONF_OWNERSHIP_MARKER") printf '644\n' ;;
+        "$fixture_conf/dns.env") printf '640\n' ;;
+        *) stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || true ;;
+    esac
+}
 cp -- "$FIXTURE/mihomo-config.yaml" "$MIHOMO_DIR/config.yaml"
 printf '{}\n' > "$INTERCEPT_DIR/config.json"
 
@@ -84,6 +107,10 @@ EOF
 cat > "$DNS_BIN" <<'EOF'
 #!/usr/bin/env bash
 set -u
+if [[ "${1:-}" == --print-mihomo-secret && "${2:-}" == --config && -f "${3:-}" ]]; then
+    sed -n 's/^secret:[[:space:]]*//p' "$3"
+    exit 0
+fi
 [[ "${1:-}" == --check-interception-routing ]] || exit 1
 shift
 mihomo=""
@@ -109,7 +136,15 @@ chmod +x "$MIHOMO_BIN" "$INTERCEPT_BIN" "$DNS_BIN"
 local_ipv4_present() { return 0; }
 
 legacy_hash="$(hash_file "$MIHOMO_DIR/config.yaml")"
-if render_mihomo_config >/dev/null 2>&1 \
+if (
+    runtime_directory_slot_is_safe() { return 0; }
+    runtime_file_slot_is_safe() { return 0; }
+    runtime_tree_has_only_plain_entries() { return 0; }
+    seed_mihomo_whitelist() { return 0; }
+    persist_mihomo_secret() { return 0; }
+    install() { return 0; }
+    render_mihomo_config
+) >/dev/null 2>&1 \
    && [[ "$legacy_hash" == "$(hash_file "$MIHOMO_DIR/config.yaml")" ]] \
    && cmp -s "$FIXTURE/mihomo-config.yaml" "$MIHOMO_DIR/config.yaml"; then
     pass "normal beta rendering preserves the legacy mihomo config byte-for-byte"
@@ -159,7 +194,15 @@ INTERCEPT_BIN="$saved_intercept_bin"
 
 # The explicit reset path is the only allowed replacement. It must retain an
 # exact backup and add all three routing boundaries needed by interception.
-if render_mihomo_config --reset >/dev/null 2>&1; then
+if (
+    runtime_directory_slot_is_safe() { return 0; }
+    runtime_file_slot_is_safe() { return 0; }
+    runtime_tree_has_only_plain_entries() { return 0; }
+    seed_mihomo_whitelist() { return 0; }
+    persist_mihomo_secret() { return 0; }
+    install() { return 0; }
+    render_mihomo_config --reset
+) >/dev/null 2>&1; then
     backups=("$MIHOMO_DIR"/config.yaml.bak.*)
     if [[ "${#backups[@]}" == 1 && -f "${backups[0]}" ]] \
        && cmp -s "$FIXTURE/mihomo-config.yaml" "${backups[0]}" \
@@ -238,6 +281,10 @@ fi
 INTERCEPT_CA_DIR="$TMP/optional-intercept-ca"
 INTERCEPT_STATE_DIR="$TMP/optional-intercept-state"
 mkdir -p "$ROLLBACK_DIR"
+saved_fixed_owned_dir_is_safe="$(declare -f fixed_owned_dir_is_safe)"
+saved_unmarked_fixed_dir_is_safe_to_claim="$(declare -f unmarked_fixed_dir_is_safe_to_claim)"
+fixed_owned_dir_is_safe() { return 0; }
+unmarked_fixed_dir_is_safe_to_claim() { return 0; }
 optional_snapshot_ok=1
 capture_optional_owned_root "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" \
     "$INTERCEPT_CA_MARKER_VALUE" intercept-ca || optional_snapshot_ok=0
@@ -252,6 +299,8 @@ restore_optional_owned_root "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" \
     "$INTERCEPT_CA_MARKER_VALUE" intercept-ca rollback_host_failed
 restore_optional_owned_root "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" \
     "$INTERCEPT_STATE_MARKER_VALUE" intercept-state rollback_state_failed
+eval "$saved_fixed_owned_dir_is_safe"
+eval "$saved_unmarked_fixed_dir_is_safe_to_claim"
 if [[ "$optional_snapshot_ok" == 1 && "$rollback_host_failed" == 0 \
    && "$rollback_state_failed" == 0 \
    && ! -e "$INTERCEPT_CA_DIR" && ! -L "$INTERCEPT_CA_DIR" \
@@ -262,7 +311,180 @@ else
 fi
 
 # Service accounts created by a failed transaction are removed only through
-# the explicit run-local flags; pre-existing accounts never set those flags.
+# the run-local creation registry; pre-existing accounts never enter it.
+if (
+    getent() {
+        case "$1" in
+            group) printf 'gpn-test:x:999:\n' ;;
+            passwd)
+                if [[ "$#" == 2 ]]; then
+                    printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n'
+                else
+                    printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n'
+                    printf 'other-service:x:997:999::/nonexistent:/usr/sbin/nologin\n'
+                fi
+                ;;
+            *) return 1 ;;
+        esac
+    }
+    id() {
+        case "$1" in
+            -gn) printf 'gpn-test\n' ;;
+            -g) printf '999\n' ;;
+            -G) printf '999\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    ! service_account_is_safe gpn-test gpn-test
+); then
+    pass "service account validation rejects another passwd user sharing the primary GID"
+else
+    fail "service account validation ignored a shared primary GID"
+fi
+if (
+    getent() {
+        case "$1" in
+            group) printf 'gpn-test:x:999:\n' ;;
+            passwd)
+                if [[ "$#" == 2 ]]; then
+                    printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n'
+                else
+                    printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n'
+                    printf 'uid-alias:x:998:997::/nonexistent:/usr/sbin/nologin\n'
+                fi
+                ;;
+            *) return 1 ;;
+        esac
+    }
+    id() {
+        case "$1" in
+            -gn) printf 'gpn-test\n' ;;
+            -g|-G) printf '999\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    ! service_account_is_safe gpn-test gpn-test
+); then
+    pass "service account validation rejects a duplicate numeric UID"
+else
+    fail "service account validation accepted a duplicate numeric UID"
+fi
+if (
+    getent() {
+        case "$1" in
+            group)
+                if [[ "$#" == 2 ]]; then
+                    printf 'gpn-test:x:999:\n'
+                else
+                    printf 'gpn-test:x:999:\n'
+                    printf 'gid-alias:x:999:other-user\n'
+                fi
+                ;;
+            passwd) printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    id() {
+        case "$1" in
+            -gn) printf 'gpn-test\n' ;;
+            -g|-G) printf '999\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    ! service_account_is_safe gpn-test gpn-test
+); then
+    pass "service account validation rejects a duplicate numeric GID alias"
+else
+    fail "service account validation accepted a duplicate numeric GID alias"
+fi
+if (
+    getent() {
+        case "$1" in
+            group) printf 'gpn-test:x:999:\n' ;;
+            passwd) printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    id() {
+        case "$1" in
+            -gn) printf 'gpn-test\n' ;;
+            -g) printf '999\n' ;;
+            -G) printf '999 1000\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    ! service_account_is_safe gpn-test gpn-test
+); then
+    pass "service account validation rejects unexpected supplementary groups"
+else
+    fail "service account validation accepted an unexpected supplementary group"
+fi
+if (
+    getent() {
+        case "$1" in
+            group) printf 'gpn-test:x:999:\n' ;;
+            passwd) printf 'gpn-test:x:0:999::/nonexistent:/usr/sbin/nologin\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    id() {
+        case "$1" in
+            -gn) printf 'gpn-test\n' ;;
+            -g|-G) printf '999\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    ! service_account_is_safe gpn-test gpn-test
+); then
+    pass "service account validation rejects a UID-zero account alias"
+else
+    fail "service account validation accepted a root-equivalent account"
+fi
+if (
+    getent() {
+        case "$1" in
+            group) printf 'gpn-test:x:999:\n' ;;
+            passwd) printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    id() {
+        case "$1" in
+            -gn) printf 'gpn-test\n' ;;
+            -g|-G) printf '999\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    service_account_is_safe gpn-test gpn-test
+); then
+    pass "an isolated system service account remains valid"
+else
+    fail "service account validation rejected the isolated control account"
+fi
+if (
+    calls="$TMP/account-shared-primary.log"
+    getent() {
+        case "$1" in
+            group) printf 'gpn-test:x:999:\n' ;;
+            passwd)
+                if [[ "$#" == 2 ]]; then
+                    return 1
+                fi
+                printf 'other-service:x:997:999::/nonexistent:/usr/sbin/nologin\n'
+                ;;
+            *) return 1 ;;
+        esac
+    }
+    groupadd() { printf 'unexpected-groupadd\n' >> "$calls"; }
+    useradd() { printf 'unexpected-useradd\n' >> "$calls"; }
+    groupdel() { printf 'unexpected-groupdel\n' >> "$calls"; }
+    userdel() { printf 'unexpected-userdel\n' >> "$calls"; }
+    ! ensure_service_account gpn-test gpn-test && [[ ! -e "$calls" ]]
+); then
+    pass "service account creation refuses a group used as another user's primary group"
+else
+    fail "service account creation adopted a shared primary group"
+fi
 if (
     group_exists=0
     user_exists=0
@@ -277,54 +499,186 @@ if (
     useradd() { user_exists=1; }
     groupdel() { group_exists=0; }
     userdel() { user_exists=0; }
+    service_group_is_exclusive_for_user() { [[ "$group_exists" == 1 ]]; }
     service_account_is_safe() { [[ "$user_exists" == 1 && "$group_exists" == 1 ]]; }
+    id() {
+        case "$1" in
+            -u) printf '998\n' ;;
+            -g) printf '999\n' ;;
+            *) return 1 ;;
+        esac
+    }
     created_user=0
     created_group=0
-    ensure_service_account gpn-intercept gpn-intercept created_user created_group
-    [[ "$created_user" == 1 && "$created_group" == 1 ]]
+    created_uid=""
+    created_gid=""
+    ensure_service_account gpn-intercept gpn-intercept created_user created_group created_uid created_gid
+    [[ "$created_user" == 1 && "$created_group" == 1 \
+       && "$created_uid" == 998 && "$created_gid" == 999 ]]
 ); then
-    pass "service account creation reports the exact resources created by the call"
+    pass "service account creation reports the exact resources and IDs created by the call"
 else
     fail "service account creation did not report its own mutation results"
+fi
+if (
+    CREATED_SERVICE_ACCOUNT_USERS=()
+    CREATED_SERVICE_ACCOUNT_GROUPS=()
+    CREATED_SERVICE_ACCOUNT_UIDS=()
+    CREATED_SERVICE_ACCOUNT_GIDS=()
+    CREATED_SERVICE_ACCOUNT_USER_FLAGS=()
+    CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=()
+    group_exists=0
+    getent() {
+        case "$1" in
+            group) [[ "$group_exists" == 1 ]] && printf 'gpn-test:x:999:\n' ;;
+            passwd) [[ "$#" == 1 ]] && printf 'root:x:0:0::/root:/bin/bash\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    groupadd() { group_exists=1; }
+    groupdel() { return 1; }
+    service_group_is_exclusive_for_user() { return 1; }
+    ! install_service_account gpn-test gpn-test \
+        && [[ "$group_exists" == 1 \
+           && "${#CREATED_SERVICE_ACCOUNT_USERS[@]}" == 1 \
+           && "${CREATED_SERVICE_ACCOUNT_USERS[0]}" == gpn-test \
+           && "${CREATED_SERVICE_ACCOUNT_UIDS[0]}" == '' \
+           && "${CREATED_SERVICE_ACCOUNT_GIDS[0]}" == 999 \
+           && "${CREATED_SERVICE_ACCOUNT_USER_FLAGS[0]}" == 0 \
+           && "${CREATED_SERVICE_ACCOUNT_GROUP_FLAGS[0]}" == 1 ]]
+); then
+    pass "a newly created group remains registered when immediate cleanup fails"
+else
+    fail "failed group cleanup left an unregistered service group"
+fi
+if (
+    CREATED_SERVICE_ACCOUNT_USERS=()
+    CREATED_SERVICE_ACCOUNT_GROUPS=()
+    CREATED_SERVICE_ACCOUNT_UIDS=()
+    CREATED_SERVICE_ACCOUNT_GIDS=()
+    CREATED_SERVICE_ACCOUNT_USER_FLAGS=()
+    CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=()
+    group_exists=0
+    user_exists=0
+    getent() {
+        case "$1" in
+            group) [[ "$group_exists" == 1 ]] && printf 'gpn-test:x:999:\n' ;;
+            passwd)
+                if [[ "$#" == 2 ]]; then
+                    [[ "$user_exists" == 1 ]] \
+                        && printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n'
+                else
+                    printf 'root:x:0:0::/root:/bin/bash\n'
+                    [[ "$user_exists" == 0 ]] \
+                        || printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n'
+                fi
+                ;;
+            *) return 1 ;;
+        esac
+    }
+    groupadd() { group_exists=1; }
+    useradd() { user_exists=1; }
+    groupdel() { return 1; }
+    userdel() { return 1; }
+    service_group_is_exclusive_for_user() { return 0; }
+    service_account_is_safe() { return 1; }
+    id() {
+        case "$1" in
+            -u) printf '998\n' ;;
+            -g) printf '999\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    ! install_service_account gpn-test gpn-test \
+        && [[ "$group_exists" == 1 && "$user_exists" == 1 \
+           && "${#CREATED_SERVICE_ACCOUNT_USERS[@]}" == 1 \
+           && "${CREATED_SERVICE_ACCOUNT_USERS[0]}" == gpn-test \
+           && "${CREATED_SERVICE_ACCOUNT_UIDS[0]}" == 998 \
+           && "${CREATED_SERVICE_ACCOUNT_GIDS[0]}" == 999 \
+           && "${CREATED_SERVICE_ACCOUNT_USER_FLAGS[0]}" == 1 \
+           && "${CREATED_SERVICE_ACCOUNT_GROUP_FLAGS[0]}" == 1 ]]
+); then
+    pass "a newly created user and group remain registered when post-check cleanup fails"
+else
+    fail "failed user cleanup left an unregistered service account"
 fi
 if (
     DNS_SERVICE_USER=gpn-dns
     MIHOMO_SERVICE_USER=mihomo
     INTERCEPT_SERVICE_USER=gpn-intercept
-    INTERCEPT_USER_CREATED_THIS_RUN=0
-    INTERCEPT_GROUP_CREATED_THIS_RUN=0
-    INTERCEPT_CREATED_UID=""
-    INTERCEPT_CREATED_GID=""
+    CREATED_SERVICE_ACCOUNT_USERS=()
+    CREATED_SERVICE_ACCOUNT_GROUPS=()
+    CREATED_SERVICE_ACCOUNT_UIDS=()
+    CREATED_SERVICE_ACCOUNT_GIDS=()
+    CREATED_SERVICE_ACCOUNT_USER_FLAGS=()
+    CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=()
     ensure_service_account() {
         if [[ "$1" == gpn-intercept ]]; then
             printf -v "$3" '%s' 1
             printf -v "$4" '%s' 0
+            printf -v "$5" '%s' 998
+            printf -v "$6" '%s' 777
         fi
     }
-    id() {
+    install_service_accounts >/dev/null
+    [[ "${#CREATED_SERVICE_ACCOUNT_USERS[@]}" == 1 \
+       && "${CREATED_SERVICE_ACCOUNT_USERS[0]}" == gpn-intercept \
+       && "${CREATED_SERVICE_ACCOUNT_GROUPS[0]}" == gpn-intercept \
+       && "${CREATED_SERVICE_ACCOUNT_UIDS[0]}" == 998 \
+       && "${CREATED_SERVICE_ACCOUNT_GIDS[0]}" == 777 \
+       && "${CREATED_SERVICE_ACCOUNT_USER_FLAGS[0]}" == 1 \
+       && "${CREATED_SERVICE_ACCOUNT_GROUP_FLAGS[0]}" == 0 ]]
+); then
+    pass "new service users are recorded generically with their actual primary GID"
+else
+    fail "generic service-account creation tracking is incomplete"
+fi
+if (
+    DNS_SERVICE_USER=gpn-dns
+    MIHOMO_SERVICE_USER=mihomo
+    INTERCEPT_SERVICE_USER=gpn-intercept
+    CREATED_SERVICE_ACCOUNT_USERS=()
+    CREATED_SERVICE_ACCOUNT_GROUPS=()
+    CREATED_SERVICE_ACCOUNT_UIDS=()
+    CREATED_SERVICE_ACCOUNT_GIDS=()
+    CREATED_SERVICE_ACCOUNT_USER_FLAGS=()
+    CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=()
+    ensure_service_account() {
+        local uid
         case "$1" in
-            -u) printf '998\n' ;;
-            -g) printf '777\n' ;;
+            gpn-dns) uid=995 ;;
+            mihomo) uid=996 ;;
+            gpn-intercept) uid=997 ;;
             *) return 1 ;;
         esac
+        printf -v "$3" '%s' 1
+        printf -v "$4" '%s' 1
+        printf -v "$5" '%s' "$uid"
+        printf -v "$6" '%s' "$uid"
     }
     install_service_accounts >/dev/null
-    [[ "$INTERCEPT_USER_CREATED_THIS_RUN" == 1 \
-       && "$INTERCEPT_GROUP_CREATED_THIS_RUN" == 0 \
-       && "$INTERCEPT_CREATED_UID" == 998 \
-       && "$INTERCEPT_CREATED_GID" == 777 ]]
+    [[ "${#CREATED_SERVICE_ACCOUNT_USERS[@]}" == 3 \
+       && "${CREATED_SERVICE_ACCOUNT_USERS[*]}" == 'gpn-dns mihomo gpn-intercept' \
+       && "${CREATED_SERVICE_ACCOUNT_GROUPS[*]}" == 'gpn-dns mihomo gpn-intercept' \
+       && "${CREATED_SERVICE_ACCOUNT_UIDS[*]}" == '995 996 997' \
+       && "${CREATED_SERVICE_ACCOUNT_GIDS[*]}" == '995 996 997' \
+       && "${CREATED_SERVICE_ACCOUNT_USER_FLAGS[*]}" == '1 1 1' \
+       && "${CREATED_SERVICE_ACCOUNT_GROUP_FLAGS[*]}" == '1 1 1' ]]
 ); then
-    pass "new interception users record their actual pre-existing primary GID"
+    pass "all newly created service accounts are registered for failed-install rollback"
 else
-    fail "interception user creation did not record its primary GID"
+    fail "service-account tracking omitted a newly created runtime account"
 fi
 if (
     calls="$TMP/account-rollback.log"
-    INTERCEPT_SERVICE_USER=gpn-intercept
-    INTERCEPT_USER_CREATED_THIS_RUN=1
-    INTERCEPT_GROUP_CREATED_THIS_RUN=1
-    INTERCEPT_CREATED_UID=998
-    INTERCEPT_CREATED_GID=999
+    user_exists=1
+    group_exists=1
+    CREATED_SERVICE_ACCOUNT_USERS=(gpn-intercept)
+    CREATED_SERVICE_ACCOUNT_GROUPS=(gpn-intercept)
+    CREATED_SERVICE_ACCOUNT_UIDS=(998)
+    CREATED_SERVICE_ACCOUNT_GIDS=(999)
+    CREATED_SERVICE_ACCOUNT_USER_FLAGS=(1)
+    CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=(1)
     service_account_is_safe() { return 0; }
     id() {
         case "$1" in
@@ -334,19 +688,27 @@ if (
             *) return 1 ;;
         esac
     }
-    userdel() { printf 'userdel:%s\n' "$1" >> "$calls"; }
+    userdel() { printf 'userdel:%s\n' "$1" >> "$calls"; user_exists=0; }
     getent() {
         case "${1:-}" in
-            group) printf 'gpn-intercept:x:999:\n' ;;
-            passwd) return 0 ;;
+            group) [[ "$group_exists" == 1 ]] && printf 'gpn-intercept:x:999:\n' ;;
+            passwd)
+                if [[ "$#" == 2 ]]; then
+                    [[ "$user_exists" == 1 ]] \
+                        && printf 'gpn-intercept:x:998:999::/nonexistent:/usr/sbin/nologin\n'
+                else
+                    printf 'root:x:0:0::/root:/bin/bash\n'
+                    [[ "$user_exists" == 0 ]] \
+                        || printf 'gpn-intercept:x:998:999::/nonexistent:/usr/sbin/nologin\n'
+                fi
+                ;;
             *) return 1 ;;
         esac
     }
-    groupdel() { printf 'groupdel:%s\n' "$1" >> "$calls"; }
+    groupdel() { printf 'groupdel:%s\n' "$1" >> "$calls"; group_exists=0; }
     failed=0
-    rollback_created_intercept_account failed
-    [[ "$failed" == 0 && "$INTERCEPT_USER_CREATED_THIS_RUN" == 0 \
-       && "$INTERCEPT_GROUP_CREATED_THIS_RUN" == 0 \
+    rollback_created_service_accounts failed
+    [[ "$failed" == 0 && "${#CREATED_SERVICE_ACCOUNT_USERS[@]}" == 0 \
        && "$(tr '\n' ' ' < "$calls")" == 'userdel:gpn-intercept groupdel:gpn-intercept ' ]]
 ); then
     pass "failed-install rollback removes only the service account created by that run"
@@ -354,12 +716,39 @@ else
     fail "failed-install service-account rollback is incomplete"
 fi
 if (
+    calls="$TMP/account-group-only-rollback.log"
+    group_exists=1
+    CREATED_SERVICE_ACCOUNT_USERS=(gpn-test)
+    CREATED_SERVICE_ACCOUNT_GROUPS=(gpn-test)
+    CREATED_SERVICE_ACCOUNT_UIDS=('')
+    CREATED_SERVICE_ACCOUNT_GIDS=(999)
+    CREATED_SERVICE_ACCOUNT_USER_FLAGS=(0)
+    CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=(1)
+    getent() {
+        case "${1:-}" in
+            group) [[ "$group_exists" == 1 ]] && printf 'gpn-test:x:999:\n' ;;
+            passwd) printf 'root:x:0:0::/root:/bin/bash\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    groupdel() { printf 'groupdel:%s\n' "$1" >> "$calls"; group_exists=0; }
+    failed=0
+    rollback_created_service_accounts failed
+    [[ "$failed" == 0 && "$group_exists" == 0 \
+       && "$(cat "$calls")" == 'groupdel:gpn-test' ]]
+); then
+    pass "failed-install rollback removes a group created before user creation failed"
+else
+    fail "failed-install rollback left a group-only creation behind"
+fi
+if (
     calls="$TMP/account-gid-mismatch.log"
-    INTERCEPT_SERVICE_USER=gpn-intercept
-    INTERCEPT_USER_CREATED_THIS_RUN=1
-    INTERCEPT_GROUP_CREATED_THIS_RUN=0
-    INTERCEPT_CREATED_UID=998
-    INTERCEPT_CREATED_GID=999
+    CREATED_SERVICE_ACCOUNT_USERS=(gpn-intercept)
+    CREATED_SERVICE_ACCOUNT_GROUPS=(gpn-intercept)
+    CREATED_SERVICE_ACCOUNT_UIDS=(998)
+    CREATED_SERVICE_ACCOUNT_GIDS=(999)
+    CREATED_SERVICE_ACCOUNT_USER_FLAGS=(1)
+    CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=(0)
     service_account_is_safe() { return 0; }
     id() {
         case "$1" in
@@ -368,9 +757,15 @@ if (
             *) return 1 ;;
         esac
     }
+    getent() {
+        case "${1:-}" in
+            passwd) printf 'gpn-intercept:x:998:997::/nonexistent:/usr/sbin/nologin\n' ;;
+            *) return 1 ;;
+        esac
+    }
     userdel() { printf 'unexpected\n' >> "$calls"; }
     failed=0
-    rollback_created_intercept_account failed
+    rollback_created_service_accounts failed
     [[ "$failed" == 1 && ! -e "$calls" ]]
 ); then
     pass "service-account rollback refuses a changed primary GID"

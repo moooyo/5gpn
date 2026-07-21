@@ -161,15 +161,21 @@ fi
 # Build a fixture release bundle and verify that only the matching digest can
 # be published. A checksum failure leaves the existing source untouched.
 payload="$TMP/bundle-payload"
-mkdir -p "$payload"
-printf '#!/usr/bin/env bash\nDNS_VERSION_DEFAULT="fixture"\n' > "$payload/install.sh"
-echo template > "$payload/template.txt"
 bundle="$TMP/$BUNDLE_NAME"
 checksums="$TMP/$CHECKSUMS_NAME"
-tar -czf "$bundle" -C "$payload" .
-printf '%s  %s\n' "$(sha256_file "$bundle")" "$BUNDLE_NAME" > "$checksums"
 FIXTURE_BUNDLE="$bundle"
 FIXTURE_CHECKSUMS="$checksums"
+
+build_fixture_bundle() { # build_fixture_bundle <install.sh contents>
+    rm -rf -- "$payload"
+    mkdir -p "$payload"
+    printf '%s\n' "$1" > "$payload/install.sh"
+    echo template > "$payload/template.txt"
+    tar -czf "$bundle" -C "$payload" .
+    printf '%s  %s\n' "$(sha256_file "$bundle")" "$BUNDLE_NAME" > "$checksums"
+}
+
+build_fixture_bundle $'#!/usr/bin/env bash\nDNS_VERSION_DEFAULT="9.8.7"'
 
 DL_MODE=valid
 dl() {
@@ -196,6 +202,7 @@ fi
 
 beta_bundle_target="$TMP/beta-bundle-target"
 prepare_source_dir "$beta_bundle_target" >/dev/null 2>&1
+build_fixture_bundle $'#!/usr/bin/env bash\nDNS_VERSION_DEFAULT="9.9.0-beta.2"'
 fetch_bundle https://fixture.invalid beta 9.9.0-beta.2 >/dev/null 2>&1
 if [[ "$?" == 0 && -f "$_QI_SOURCE_DIR/install.sh" ]] \
    && marker_matches "$_QI_SOURCE_DIR/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE"; then
@@ -203,6 +210,30 @@ if [[ "$?" == 0 && -f "$_QI_SOURCE_DIR/install.sh" ]] \
 else
     fail "valid beta release bundle was not published"
 fi
+
+expect_stamp_rejected() { # expect_stamp_rejected <name> <channel> <tag> <install.sh contents>
+    local name="$1" channel="$2" tag="$3" contents="$4" target rc
+    target="$TMP/stamp-${name}-target"
+    prepare_source_dir "$target" >/dev/null 2>&1
+    echo keep > "$_QI_SOURCE_DIR/keep"
+    build_fixture_bundle "$contents"
+    fetch_bundle https://fixture.invalid "$channel" "$tag" >/dev/null 2>&1
+    rc=$?
+    if [[ "$rc" == 20 && -f "$_QI_SOURCE_DIR/keep" && ! -e "$_QI_SOURCE_DIR/install.sh" ]]; then
+        pass "$name bundle stamp is rejected before publication"
+    else
+        fail "$name bundle stamp returned $rc or modified the existing source"
+    fi
+}
+
+expect_stamp_rejected missing stable 9.8.7 \
+    $'#!/usr/bin/env bash\necho missing-stamp'
+expect_stamp_rejected duplicate stable 9.8.7 \
+    $'#!/usr/bin/env bash\nDNS_VERSION_DEFAULT="9.8.7"\nDNS_VERSION_DEFAULT="9.8.7"'
+expect_stamp_rejected wrong-tag stable 9.8.7 \
+    $'#!/usr/bin/env bash\nDNS_VERSION_DEFAULT="9.8.6"'
+expect_stamp_rejected cross-channel stable 9.8.7 \
+    $'#!/usr/bin/env bash\nDNS_VERSION_DEFAULT="9.8.7-beta.1"'
 
 mismatch_target="$TMP/mismatch-target"
 prepare_source_dir "$mismatch_target" >/dev/null 2>&1

@@ -248,8 +248,8 @@ func TestMihomoConfigAPI_Put_Valid(t *testing.T) {
 		t.Fatalf("on-disk config not updated:\n--- got ---\n%s\n--- want ---\n%s", onDisk, newText)
 	}
 	posixModes := filesystemSupportsPOSIXModes(t, fx.store.Dir())
-	if info, err := os.Stat(fx.store.Path()); err != nil || posixModes && info.Mode().Perm() != 0o660 {
-		t.Fatalf("config mode = %v, %v; want 0660", func() os.FileMode {
+	if info, err := os.Stat(fx.store.Path()); err != nil || posixModes && info.Mode().Perm() != 0o640 {
+		t.Fatalf("config mode = %v, %v; want 0640", func() os.FileMode {
 			if info == nil {
 				return 0
 			}
@@ -373,7 +373,7 @@ func TestMihomoConfigAPI_Put_FailsMihomoTest(t *testing.T) {
 
 func TestMihomoConfigAPI_Put_RejectsDuplicateKeyBeforeMihomoTest(t *testing.T) {
 	fx := newMihomoConfigTestFixture(t)
-	duplicate := strings.Replace(fx.golden, "secret: s3cr3t\n", "secret: s3cr3t\nsecret: attacker\n", 1)
+	duplicate := strings.Replace(fx.golden, "secret: 's3cr3t'\n", "secret: 's3cr3t'\nsecret: attacker\n", 1)
 	body := mihomoConfigPutBody(t, duplicate, mihomoConfigRevision(fx.golden))
 	rec := doAPI(fx.cs, http.MethodPut, "/api/mihomo/config", body, fx.token, true)
 
@@ -685,7 +685,7 @@ func TestMihomoConfigAPI_Reset(t *testing.T) {
 	if err != nil || string(backup) != "garbage: not a real config" {
 		t.Fatalf("reset backup = %q, %v", backup, err)
 	}
-	if info, err := os.Stat(fx.store.Path() + ".bak"); err != nil || filesystemSupportsPOSIXModes(t, fx.store.Dir()) && info.Mode().Perm() != 0o660 {
+	if info, err := os.Stat(fx.store.Path() + ".bak"); err != nil || filesystemSupportsPOSIXModes(t, fx.store.Dir()) && info.Mode().Perm() != 0o640 {
 		t.Fatalf("reset backup mode: info=%v err=%v", info, err)
 	}
 	if fx.ctl.putCalls != 1 {

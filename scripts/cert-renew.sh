@@ -30,6 +30,15 @@ DNS_WAIT_INTERVAL=10
 RENEW_BEFORE_SECONDS=$((30 * 86400))
 MIHOMO_RESTORE_NEEDED=0
 RENEW_LOCK_FILE=/run/5gpn/cert-renew.lock
+INSTALL_LOCK_FILE=/run/5gpn/install.lock
+DNS_CERT_GROUP=5gpn-dns
+MIHOMO_CERT_GROUP=mihomo
+CONFIG_ROOT_MARKER=.5gpn-owned
+CONFIG_ROOT_MARKER_VALUE=5gpn-config-v1
+CERT_ROOT_MARKER=.5gpn-cert-root-owned
+CERT_ROOT_MARKER_VALUE=5gpn-cert-root-v1
+CERT_ROLE_MARKER=.5gpn-cert-role-owned
+CERT_ROLE_VALUE_PREFIX=5gpn-cert-role-v1
 
 cfg_get() {
     [[ -f "$DNS_ENV" && ! -L "$DNS_ENV" ]] || return 0
@@ -52,7 +61,20 @@ valid_ipv4() {
 }
 
 file_uid() { stat -c %u -- "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null || true; }
+file_gid() { stat -c %g -- "$1" 2>/dev/null || stat -f %g "$1" 2>/dev/null || true; }
 file_mode() { stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || true; }
+file_nlink() { stat -c %h -- "$1" 2>/dev/null || stat -f %l "$1" 2>/dev/null || true; }
+
+# Resolve by name but compare numeric IDs so aliases or NSS display behavior
+# cannot make a certificate copy appear to belong to the required role group.
+# Kept as a helper so tests can provide deterministic synthetic group IDs.
+named_group_gid() {
+    local entry gid
+    entry="$(getent group "$1" 2>/dev/null)" || return 1
+    IFS=: read -r _ _ gid _ <<<"$entry"
+    [[ "$gid" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$gid"
+}
 
 normalized_mode() {
     case "${1:-}" in
@@ -61,6 +83,19 @@ normalized_mode() {
         debug) printf '%s\n' debug ;;
         *) return 1 ;;
     esac
+}
+
+cert_provenance_owned() {
+    local base="$1" mode="$2" file="${CERT_ROOT}/.provenance"
+    local -a lines=()
+    [[ -f "$file" && ! -L "$file" \
+       && "$(file_uid "$file")" == 0 \
+       && "$(file_mode "$file")" == 640 ]] || return 1
+    mapfile -t lines < "$file" || return 1
+    [[ "${#lines[@]}" == 3 \
+       && "${lines[0]}" == "mode=${mode}" \
+       && "${lines[1]}" == "base=${base}" \
+       && "${lines[2]}" == 'certbot_lineage=owned' ]]
 }
 
 cf_credential_safe() {
@@ -128,9 +163,108 @@ deploy_hook_owned() {
         && grep -qF '/etc/5gpn/cert' "$DEPLOY_HOOK" 2>/dev/null
 }
 
-role_copies_match_live() {
-    local live="$1" role cert key current
+plain_file_metadata_safe() {
+    local path="$1" gid="$2" mode="$3"
+    [[ -f "$path" && ! -L "$path" \
+       && "$(file_uid "$path")" == "$EUID" \
+       && "$(file_gid "$path")" == "$gid" \
+       && "$(file_mode "$path")" == "$mode" \
+       && "$(file_nlink "$path")" == 1 ]]
+}
+
+canonical_directory_metadata_safe() {
+    local path="$1" gid="$2" mode="$3"
+    [[ -d "$path" && ! -L "$path" \
+       && "$(readlink -f -- "$path" 2>/dev/null || true)" == "$path" \
+       && "$(file_uid "$path")" == "$EUID" \
+       && "$(file_gid "$path")" == "$gid" \
+       && "$(file_mode "$path")" == "$mode" ]]
+}
+
+role_generation_tree_safe() {
+    local generation="$1" expected_gid="$2" entry name count=0
+    canonical_directory_metadata_safe "$generation" "$expected_gid" 750 || return 1
+    while IFS= read -r -d '' entry; do
+        name="$(basename -- "$entry")"
+        case "$name" in
+            fullchain.pem|privkey.pem)
+                plain_file_metadata_safe "$entry" "$expected_gid" 640 || return 1 ;;
+            *) return 1 ;;
+        esac
+        ((count += 1))
+    done < <(find "$generation" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    [[ "$count" == 2 ]]
+}
+
+certificate_role_tree_safe() {
+    local config_root root_gid dns_gid role group expected_gid dest marker generations
+    local entry name current target
+    config_root="$(dirname -- "$CERT_ROOT")"
+    root_gid="$(named_group_gid root)" || return 1
+    dns_gid="$(named_group_gid "$DNS_CERT_GROUP")" || return 1
+    canonical_directory_metadata_safe "$config_root" "$dns_gid" 3771 || return 1
+    plain_file_metadata_safe "$config_root/$CONFIG_ROOT_MARKER" "$root_gid" 644 \
+        && [[ "$(cat "$config_root/$CONFIG_ROOT_MARKER" 2>/dev/null || true)" == "$CONFIG_ROOT_MARKER_VALUE" ]] \
+        || return 1
+    canonical_directory_metadata_safe "$CERT_ROOT" "$root_gid" 751 || return 1
+    plain_file_metadata_safe "$CERT_ROOT/$CERT_ROOT_MARKER" "$root_gid" 644 \
+        && [[ "$(cat "$CERT_ROOT/$CERT_ROOT_MARKER" 2>/dev/null || true)" == "$CERT_ROOT_MARKER_VALUE" ]] \
+        || return 1
+    while IFS= read -r -d '' entry; do
+        name="$(basename -- "$entry")"
+        case "$name" in
+            "$CERT_ROOT_MARKER") ;;
+            .provenance) plain_file_metadata_safe "$entry" "$root_gid" 640 || return 1 ;;
+            .certbot-ownership) plain_file_metadata_safe "$entry" "$root_gid" 640 || return 1 ;;
+            dot|web|zash) [[ -d "$entry" && ! -L "$entry" ]] || return 1 ;;
+            *) return 1 ;;
+        esac
+    done < <(find "$CERT_ROOT" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
     for role in dot web zash; do
+        group="$DNS_CERT_GROUP"
+        [[ "$role" == zash ]] && group="$MIHOMO_CERT_GROUP"
+        expected_gid="$(named_group_gid "$group")" || return 1
+        dest="$CERT_ROOT/$role"
+        canonical_directory_metadata_safe "$dest" "$expected_gid" 750 || return 1
+        marker="$dest/$CERT_ROLE_MARKER"
+        plain_file_metadata_safe "$marker" "$root_gid" 644 \
+            && [[ "$(cat "$marker" 2>/dev/null || true)" == "${CERT_ROLE_VALUE_PREFIX}:${role}" ]] \
+            || return 1
+        generations="$dest/generations"
+        canonical_directory_metadata_safe "$generations" "$expected_gid" 750 || return 1
+        current="$dest/current"
+        while IFS= read -r -d '' entry; do
+            name="$(basename -- "$entry")"
+            case "$name" in
+                "$CERT_ROLE_MARKER"|generations) ;;
+                current)
+                    [[ -L "$entry" \
+                       && "$(file_uid "$entry")" == "$EUID" \
+                       && "$(file_gid "$entry")" == "$root_gid" \
+                       && "$(file_nlink "$entry")" == 1 ]] || return 1 ;;
+                *) return 1 ;;
+            esac
+        done < <(find "$dest" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+        while IFS= read -r -d '' entry; do
+            name="$(basename -- "$entry")"
+            [[ "$name" =~ ^generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] || return 1
+            role_generation_tree_safe "$entry" "$expected_gid" || return 1
+        done < <(find "$generations" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+        [[ -L "$current" ]] || return 1
+        target="$(readlink -- "$current")" || return 1
+        [[ "$target" =~ ^generations/generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] \
+            || return 1
+        role_generation_tree_safe "$dest/$target" "$expected_gid" || return 1
+    done
+}
+
+role_copies_match_live() {
+    local live="$1" role cert key current group expected_gid
+    certificate_role_tree_safe || return 1
+    for role in dot web zash; do
+        group="$DNS_CERT_GROUP"
+        [[ "$role" == zash ]] && group="$MIHOMO_CERT_GROUP"
+        expected_gid="$(named_group_gid "$group")" || return 1
         current="${CERT_ROOT}/${role}/current"
         [[ -L "$current" && "$(readlink -- "$current")" =~ ^generations/[A-Za-z0-9._-]+$ ]] \
             || return 1
@@ -139,6 +273,8 @@ role_copies_match_live() {
         [[ -f "$cert" && ! -L "$cert" && -f "$key" && ! -L "$key" \
            && "$(file_uid "$cert")" == "$EUID" \
            && "$(file_uid "$key")" == "$EUID" \
+           && "$(file_gid "$cert")" == "$expected_gid" \
+           && "$(file_gid "$key")" == "$expected_gid" \
            && "$(file_mode "$cert")" == 640 \
            && "$(file_mode "$key")" == 640 ]] || return 1
         cmp -s "${live}/fullchain.pem" "$cert" || return 1
@@ -152,11 +288,11 @@ ensure_live_deployed() {
     local live="$1"
     deploy_hook_owned \
         || { err "Owned 5gpn certificate deploy hook is missing or invalid: ${DEPLOY_HOOK}."; return 1; }
-    RENEW_HOOK_VALIDATE_ONLY=1 RENEWED_LINEAGE="$live" "$DEPLOY_HOOK" >/dev/null \
+    GPN_CERT_LOCK_HELD=1 RENEW_HOOK_VALIDATE_ONLY=1 RENEWED_LINEAGE="$live" "$DEPLOY_HOOK" >/dev/null \
         || { err "Live lineage failed the configured mode/SAN/key validation."; return 1; }
     role_copies_match_live "$live" && return 0
     warn "Certificate role copies differ from the live lineage; redeploying them before returning."
-    RENEWED_LINEAGE="$live" "$DEPLOY_HOOK" || return 1
+    GPN_CERT_LOCK_HELD=1 RENEWED_LINEAGE="$live" "$DEPLOY_HOOK" || return 1
     role_copies_match_live "$live" \
         || { err "Certificate role copies still differ after deploy-hook recovery."; return 1; }
 }
@@ -234,12 +370,70 @@ run_http_renewal() (
         systemctl stop mihomo \
             || { err "Could not stop mihomo; refusing to start Certbot with :80 still occupied."; return 1; }
     fi
-    certbot "${certbot_args[@]}" || certbot_rc=$?
+    GPN_CERT_LOCK_HELD=1 certbot "${certbot_args[@]}" || certbot_rc=$?
     restore_mihomo || restore_rc=$?
     trap - EXIT INT TERM
     [[ "$certbot_rc" == 0 ]] || return "$certbot_rc"
     [[ "$restore_rc" == 0 ]] || return "$restore_rc"
 )
+
+private_lock_dir_safe() {
+    local lock_dir="$1" root_gid
+    root_gid="$(named_group_gid root)" || return 1
+    [[ -d "$lock_dir" && ! -L "$lock_dir" \
+       && "$(readlink -f -- "$lock_dir" 2>/dev/null || true)" == "$lock_dir" \
+       && "$(file_uid "$lock_dir")" == 0 \
+       && "$(file_gid "$lock_dir")" == "$root_gid" \
+       && "$(file_mode "$lock_dir")" == 700 ]]
+}
+
+private_lock_file_safe() {
+    local lock_file="$1" root_gid
+    root_gid="$(named_group_gid root)" || return 1
+    [[ -f "$lock_file" && ! -L "$lock_file" \
+       && "$(file_uid "$lock_file")" == 0 \
+       && "$(file_gid "$lock_file")" == "$root_gid" \
+       && "$(file_mode "$lock_file")" == 600 \
+       && "$(file_nlink "$lock_file")" == 1 ]]
+}
+
+lock_fd_targets_file() {
+    local fd="$1" lock_file="$2" fd_identity file_identity
+    [[ -e "/proc/$$/fd/${fd}" ]] || return 1
+    private_lock_file_safe "$lock_file" || return 1
+    fd_identity="$(stat -Lc '%d:%i' -- "/proc/$$/fd/${fd}" 2>/dev/null || true)"
+    file_identity="$(stat -Lc '%d:%i' -- "$lock_file" 2>/dev/null || true)"
+    [[ -n "$fd_identity" && "$fd_identity" == "$file_identity" ]]
+}
+
+ensure_private_lock_dir() {
+    local lock_dir="$1"
+    if [[ ! -e "$lock_dir" && ! -L "$lock_dir" ]]; then
+        install -d -o root -g root -m 0700 "$lock_dir" || return 1
+    fi
+    private_lock_dir_safe "$lock_dir"
+}
+
+acquire_install_gate() {
+    local lock_dir
+    [[ "$EUID" == 0 ]] || { err "Certificate renewal must run as root."; return 1; }
+    command -v flock >/dev/null 2>&1 \
+        || { err "flock is required for certificate-renewal exclusion."; return 1; }
+    lock_dir="$(dirname -- "$INSTALL_LOCK_FILE")"
+    ensure_private_lock_dir "$lock_dir" \
+        || { err "Unsafe installer lock directory: ${lock_dir}"; return 1; }
+    if [[ -e "$INSTALL_LOCK_FILE" || -L "$INSTALL_LOCK_FILE" ]]; then
+        private_lock_file_safe "$INSTALL_LOCK_FILE" \
+            || { err "Unsafe installer lock file: ${INSTALL_LOCK_FILE}"; return 1; }
+    fi
+    exec 8>"$INSTALL_LOCK_FILE"
+    chmod 0600 "$INSTALL_LOCK_FILE" \
+        || { exec 8>&-; err "Could not protect the installer lock file."; return 1; }
+    lock_fd_targets_file 8 "$INSTALL_LOCK_FILE" \
+        || { exec 8>&-; err "The installer lock descriptor is unsafe."; return 1; }
+    flock -n 8 \
+        || { err "A 5gpn install/configure transaction is active; deferring certificate renewal."; return 1; }
+}
 
 acquire_renew_lock() {
     local lock_dir
@@ -247,22 +441,17 @@ acquire_renew_lock() {
     command -v flock >/dev/null 2>&1 \
         || { err "flock is required for certificate-renewal exclusion."; return 1; }
     lock_dir="$(dirname -- "$RENEW_LOCK_FILE")"
-    if [[ ! -e "$lock_dir" ]]; then
-        install -d -o root -g root -m 0700 "$lock_dir" || return 1
-    fi
-    [[ -d "$lock_dir" && ! -L "$lock_dir" \
-       && "$(readlink -f -- "$lock_dir" 2>/dev/null || true)" == "$lock_dir" \
-       && "$(file_uid "$lock_dir")" == 0 \
-       && "$(file_mode "$lock_dir")" == 700 ]] \
+    ensure_private_lock_dir "$lock_dir" \
         || { err "Unsafe certificate-renewal lock directory: ${lock_dir}"; return 1; }
-    if [[ -e "$RENEW_LOCK_FILE" ]]; then
-        [[ -f "$RENEW_LOCK_FILE" && ! -L "$RENEW_LOCK_FILE" \
-           && "$(file_uid "$RENEW_LOCK_FILE")" == 0 ]] \
+    if [[ -e "$RENEW_LOCK_FILE" || -L "$RENEW_LOCK_FILE" ]]; then
+        private_lock_file_safe "$RENEW_LOCK_FILE" \
             || { err "Unsafe certificate-renewal lock file: ${RENEW_LOCK_FILE}"; return 1; }
     fi
     exec 9>"$RENEW_LOCK_FILE"
     chmod 0600 "$RENEW_LOCK_FILE" \
         || { exec 9>&-; err "Could not protect the certificate-renewal lock file."; return 1; }
+    lock_fd_targets_file 9 "$RENEW_LOCK_FILE" \
+        || { exec 9>&-; err "The certificate-renewal lock descriptor is unsafe."; return 1; }
     flock -n 9 \
         || { err "Another 5gpn certificate renewal is already running."; return 1; }
 }
@@ -280,6 +469,9 @@ cert_renew_main() {
         esac
     done
 
+    # Preserve the global lock order used by the installer. The public timer and
+    # Bot action must not enter the certificate-lock handoff window.
+    acquire_install_gate || return 1
     acquire_renew_lock || return 1
 
     local configured base mode public cert
@@ -295,6 +487,8 @@ cert_renew_main() {
         info "No renewals were attempted: CERT_MODE=debug has no ACME renewal."
         return 0
     fi
+    cert_provenance_owned "$base" "$mode" \
+        || { err "The canonical lineage is not provenance-confirmed as 5gpn-owned; refusing project-managed renewal."; return 1; }
     renewal_conf_safe "$base" "$mode" \
         || { err "Certbot renewal config is missing, unscoped, mode-mismatched, or contains persistent hooks."; return 1; }
 
@@ -318,7 +512,7 @@ cert_renew_main() {
         run_http_renewal "${certbot_args[@]}" \
             || { err "Scoped HTTP-01 certificate renewal failed."; return 1; }
     else
-        certbot "${certbot_args[@]}" \
+        GPN_CERT_LOCK_HELD=1 certbot "${certbot_args[@]}" \
             || { err "Scoped Cloudflare DNS-01 certificate renewal failed."; return 1; }
     fi
     ensure_live_deployed "${LE_LIVE_ROOT}/${base}" || return 1

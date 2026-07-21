@@ -25,6 +25,9 @@ func main() {
 		fmt.Println(version)
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "--print-mihomo-secret" {
+		os.Exit(runMihomoSecretPrint(os.Args[2:], os.Stdout, os.Stderr))
+	}
 
 	// --seed-defaults: write the default policy.json, then exit. install.sh
 	// runs this once at install time (before start_services) so the daemon's

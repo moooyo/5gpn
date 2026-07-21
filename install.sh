@@ -60,12 +60,18 @@ DNS_BIN="${BIN_DIR}/5gpn-dns"            # 5gpn-dns binary (DoT resolver + web c
 INTERCEPT_BIN="${BIN_DIR}/5gpn-intercept" # allowlisted TLS/HTTP3 interception sidecar
 DNS_CERT_DIR="/etc/5gpn/cert"            # selected cert copied into dot/, web/, zash/ roles
 DEBUG_CERT_DIR="/etc/5gpn/debug-cert"     # self-signed debug certs; NEVER under /etc/letsencrypt
+DEBUG_CERT_MARKER=".5gpn-debug-cert-owned"
+DEBUG_CERT_MARKER_VALUE="5gpn-debug-cert-v1"
 DOT_CERT_DIR="${DNS_CERT_DIR}/dot"       # DoT :853 cert copy (hot-reloaded on mtime change)
 WEB_CERT_DIR="${DNS_CERT_DIR}/web"       # loopback HTTPS console :443 cert copy
 ZASH_CERT_DIR="${DNS_CERT_DIR}/zash"     # zashboard panel cert copy
+CERT_ROOT_MARKER=".5gpn-cert-root-owned"
+CERT_ROOT_MARKER_VALUE="5gpn-cert-root-v1"
+CERTBOT_OWNERSHIP_FILE="${DNS_CERT_DIR}/.certbot-ownership"
 CERT_ROLE_MARKER=".5gpn-cert-role-owned"
 CERT_ROLE_VALUE_PREFIX="5gpn-cert-role-v1"
 ACME_DIR="/etc/5gpn/acme"                # root-only Cloudflare API-token credentials dir
+GLOBAL_CERTBOT_TIMER_STATE="${ACME_DIR}/certbot.timer.state"
 LE_ROOT="/etc/letsencrypt"
 LE_LIVE_ROOT="${LE_ROOT}/live"
 LE_ARCHIVE_ROOT="${LE_ROOT}/archive"
@@ -73,16 +79,25 @@ LE_RENEWAL_ROOT="${LE_ROOT}/renewal"
 CERT_DNS_RESOLVER="1.1.1.1"              # fixed independent resolver for ACME A/AAAA gates
 CERT_DNS_WAIT_TIMEOUT=600                 # bounded install/configure propagation wait
 CERT_DNS_WAIT_INTERVAL=10
+INSTALL_LOCK_FILE="/run/5gpn/install.lock"
 CERT_RENEW_LOCK_FILE="/run/5gpn/cert-renew.lock"
 LE_PRODUCTION_SERVER="https://acme-v02.api.letsencrypt.org/directory"
+INSTALL_LOCK_HELD=0
 INSTALL_CERT_LOCK_HELD=0
+# The transaction layer restores the pre-install distro certbot.timer state on
+# rollback and after non-owning certificate flows. Owned 5gpn lineages set this
+# flag so the unscoped distro timer stays disabled after commit.
+KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=0
+RELEASE_PERSISTED_GLOBAL_CERTBOT_TIMER=0
 DECOMMISSION_PRESERVE_ACME=0
 INTERCEPT_ROUTING_READY=0
 INTERCEPT_ROUTING_REASON="not-checked"
-INTERCEPT_USER_CREATED_THIS_RUN=0
-INTERCEPT_GROUP_CREATED_THIS_RUN=0
-INTERCEPT_CREATED_UID=""
-INTERCEPT_CREATED_GID=""
+CREATED_SERVICE_ACCOUNT_USERS=()
+CREATED_SERVICE_ACCOUNT_GROUPS=()
+CREATED_SERVICE_ACCOUNT_UIDS=()
+CREATED_SERVICE_ACCOUNT_GIDS=()
+CREATED_SERVICE_ACCOUNT_USER_FLAGS=()
+CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=()
 DNS_WEB_DIR_DEFAULT="/opt/5gpn/web"         # resolved from dns.env after cfg_get is defined
 # DNS_ZASH_DIR (zashboard SPA dist, config.go's ZashDir) is resolved just below
 # cfg_get()'s definition -- NOT here: the daemon reads DNS_ZASH_DIR out of dns.env,
@@ -132,6 +147,9 @@ DNS_STATS_FILE DNS_HEARTBEAT_URL DNS_HEARTBEAT_INTERVAL"
 # EDNS Client Subnet uses the operational default above. Operators can disable
 # or change it through the web console, which persists the runtime value.
 GUM_VERSION="0.17.0"                     # charmbracelet/gum (prebuilt; installer TUI)
+GUM_SHA256_X86_64="69ee169bd6387331928864e94d47ed01ef649fbfe875baed1bbf27b5377a6fdb"
+GUM_SHA256_ARM64="b0b9ed95cbf7c8b7073f17b9591811f5c001e33c7cfd066ca83ce8a07c576f9c"
+GUM_SHA256_ARMV7="25711c2fbc6887cde79ed586972834121a04955968808dd688c688381ac50ab2"
 GUM_BIN="${BIN_DIR}/gum"
 _HAVE_GUM=0                              # set by install_gum(); helpers fall back to echo when 0
 export PATH="${BIN_DIR}:${PATH}"
@@ -147,6 +165,8 @@ DNS_RELEASE_CHANNEL="stable"
 DNS_RELEASE_CHANNEL_EXPLICIT=0
 DNS_STABLE_RELEASE_API="https://api.github.com/repos/moooyo/5gpn/releases/latest"
 DNS_RELEASES_API="https://api.github.com/repos/moooyo/5gpn/releases"
+SERVICE_READY_TIMEOUT=20
+INTERCEPT_HEALTHCHECK_MAX_TIMEOUT=10
 
 # ----------------------------------------------------------------------------
 # Pretty output helpers
@@ -156,16 +176,49 @@ if [[ -t 1 ]]; then
 else
     RED=''; GREEN=''; YELLOW=''; BLUE=''; NC=''
 fi
-info() { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level info  -- "$*"; else echo "${BLUE}[INFO]${NC} $*"; fi; }
-ok()   { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level info  -- "✔ $*"; else echo "${GREEN}[OK]${NC}   $*"; fi; }
-warn() { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level warn  -- "$*"; else echo "${YELLOW}[WARN]${NC} $*"; fi; }
-err()  { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level error -- "$*" >&2; else echo "${RED}[ERR]${NC}  $*" >&2; fi; }
+info() {
+    if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then
+        gum log --level info -- "$*" || echo "${BLUE}[INFO]${NC} $*"
+    else
+        echo "${BLUE}[INFO]${NC} $*"
+    fi
+}
+ok() {
+    if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then
+        gum log --level info -- "✔ $*" || echo "${GREEN}[OK]${NC}   $*"
+    else
+        echo "${GREEN}[OK]${NC}   $*"
+    fi
+}
+warn() {
+    if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then
+        gum log --level warn -- "$*" || echo "${YELLOW}[WARN]${NC} $*"
+    else
+        echo "${YELLOW}[WARN]${NC} $*"
+    fi
+}
+err() {
+    if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then
+        gum log --level error -- "$*" >&2 || echo "${RED}[ERR]${NC}  $*" >&2
+    else
+        echo "${RED}[ERR]${NC}  $*" >&2
+    fi
+}
 
 # Interactive helpers (gum vs read). Callers gate on [[ -t 0 ]]; main() runs
 # attach_tty first, so a piped `curl | sudo bash` install still has a terminal on
 # stdin and these prompts fire as intended.
 ask_text()   { if [[ "$_HAVE_GUM" == 1 ]]; then gum input --prompt "$1 " --placeholder "${2:-}"; else local v; read -r -p "$1 " v; printf '%s' "$v"; fi; }
-ask_secret() { if [[ "$_HAVE_GUM" == 1 ]]; then gum input --password --prompt "$1 "; else local v; read -r -p "$1 " v; printf '%s' "$v"; fi; }
+ask_secret() {
+    if [[ "$_HAVE_GUM" == 1 ]]; then
+        gum input --password --prompt "$1 "
+    else
+        local v
+        read -r -s -p "$1 " v
+        printf '\n' >&2
+        printf '%s' "$v"
+    fi
+}
 ask_yesno()  { if [[ "$_HAVE_GUM" == 1 ]]; then gum confirm "$1"; else local a; read -r -p "$1 [y/N] " a; [[ "$a" == [yY]* ]]; fi; }
 ask_choice() {
     local prompt="$1"; shift
@@ -205,12 +258,88 @@ attach_tty() {
 # are NO per-key .state files. Reinstall reads this file; first install writes it
 # from the TUI. cfg_get reads one key from dns.env (empty if absent); it greps rather
 # than sourcing so a value can contain any shell-special character safely.
+file_uid() { stat -c %u -- "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null || true; }
+file_gid() { stat -c %g -- "$1" 2>/dev/null || stat -f %g "$1" 2>/dev/null || true; }
+file_mode() { stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || true; }
+file_nlink() { stat -c %h -- "$1" 2>/dev/null || stat -f %l "$1" 2>/dev/null || true; }
+
+persisted_dns_env_is_safe() {
+    local env="${CONF_DIR}/dns.env" marker="${CONF_DIR}/${CONF_OWNERSHIP_MARKER}"
+    local canonical expected_gid conf_mode conf_gid
+    [[ -d "$CONF_DIR" && ! -L "$CONF_DIR" ]] || return 1
+    canonical="$(readlink -f -- "$CONF_DIR" 2>/dev/null || true)"
+    [[ "$canonical" == "$CONF_DIR" && "$(file_uid "$CONF_DIR")" == 0 ]] || return 1
+    expected_gid="$(getent group "$DNS_SERVICE_USER" 2>/dev/null | awk -F: 'NR == 1 { print $3 }')"
+    [[ -n "$expected_gid" ]] || return 1
+    conf_mode="$(file_mode "$CONF_DIR")"
+    conf_gid="$(file_gid "$CONF_DIR")"
+    case "$conf_mode:$conf_gid" in
+        755:0|2771:"$expected_gid"|3771:"$expected_gid") ;;
+        *) return 1 ;;
+    esac
+    [[ -f "$marker" && ! -L "$marker" \
+       && "$(file_uid "$marker")" == 0 \
+       && "$(file_gid "$marker")" == 0 \
+       && "$(file_mode "$marker")" == 644 \
+       && "$(file_nlink "$marker")" == 1 \
+       && "$(cat "$marker" 2>/dev/null || true)" == "$CONF_OWNERSHIP_VALUE" ]] \
+        || return 1
+    [[ -f "$env" && ! -L "$env" \
+       && "$(file_uid "$env")" == 0 \
+       && "$(file_gid "$env")" == "$expected_gid" \
+       && "$(file_mode "$env")" == 640 \
+       && "$(file_nlink "$env")" == 1 ]]
+}
+
+dns_env_encode_value() {
+    local value="$1"
+    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '"%s"' "$value"
+}
+
+dns_env_decode_value() {
+    local raw="$1" body out="" char next i
+    if [[ "$raw" != \"* ]]; then
+        printf '%s' "$raw"
+        return 0
+    fi
+    [[ ${#raw} -ge 2 && "$raw" == *\" ]] || return 1
+    body="${raw:1:${#raw}-2}"
+    for ((i = 0; i < ${#body}; i++)); do
+        char="${body:i:1}"
+        if [[ "$char" == \\ ]]; then
+            ((i += 1))
+            (( i < ${#body} )) || return 1
+            next="${body:i:1}"
+            case "$next" in
+                '"'|'\'|'$'|'`') out+="$next" ;;
+                *) out+="\\$next" ;;
+            esac
+        else
+            [[ "$char" != '"' ]] || return 1
+            out+="$char"
+        fi
+    done
+    printf '%s' "$out"
+}
+
 cfg_get() {
-    [[ -f "${CONF_DIR}/dns.env" ]] || return 0
+    local env="${CONF_DIR}/dns.env" raw
+    [[ "$1" =~ ^[A-Z][A-Z0-9_]*$ ]] || return 1
+    [[ ! -e "$env" && ! -L "$env" ]] && return 0
+    persisted_dns_env_is_safe \
+        || { err "Refusing unsafe persisted configuration: $env"; return 1; }
     # `|| true` keeps cfg_get exit 0 even when the key is absent: under
     # `set -euo pipefail` a grep no-match (pipeline rc=1) inside a bare
     # `VAR="$(cfg_get X)"` assignment would otherwise abort the whole install.
-    grep -E "^${1}=" "${CONF_DIR}/dns.env" 2>/dev/null | tail -1 | cut -d= -f2- || true
+    raw="$(grep -E "^${1}=" "$env" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+    if [[ "$1" == DNS_MIHOMO_SECRET ]]; then
+        dns_env_decode_value "$raw"
+    else
+        printf '%s' "$raw"
+    fi
 }
 
 # Caller configuration is discarded before command dispatch. systemd still
@@ -286,6 +415,504 @@ verify_ownership_marker() {
     marker="$dir/$name"
     [[ -f "$marker" && ! -L "$marker" ]] || return 1
     [[ "$(cat "$marker" 2>/dev/null || true)" == "$value" ]]
+}
+
+# A marker inside a service-writable directory is not proof of ownership by
+# content alone: the service account can recreate the same bytes. Fixed runtime
+# roots therefore accept only the marker atomically published by root.
+root_ownership_marker_is_safe() {
+    local dir="$1" name="$2" value="$3" marker="$1/$2"
+    verify_ownership_marker "$dir" "$name" "$value" || return 1
+    [[ "$(file_uid "$marker")" == 0 \
+       && "$(file_gid "$marker")" == 0 \
+       && "$(file_mode "$marker")" == 644 \
+       && "$(file_nlink "$marker")" == 1 ]]
+}
+
+account_uid() {
+    getent passwd "$1" 2>/dev/null | awk -F: 'NR == 1 { print $3 }'
+}
+
+account_gid() {
+    getent group "$1" 2>/dev/null | awk -F: 'NR == 1 { print $3 }'
+}
+
+# Fixed roots have a deliberately small metadata state machine. A new root is
+# initially root:root 0755. The prior non-sticky config mode is accepted only so
+# this transaction can normalize an installed beta to the current 3771 boundary.
+fixed_owned_dir_metadata_is_safe() {
+    local dir="$1" uid gid mode expected_uid expected_gid
+    uid="$(file_uid "$dir")"
+    gid="$(file_gid "$dir")"
+    mode="$(file_mode "$dir")"
+    case "$dir" in
+        "$BASE_DIR"|"$STATE_DIR")
+            [[ "$uid" == 0 && "$gid" == 0 && "$mode" == 755 ]] ;;
+        "$CONF_DIR")
+            [[ "$uid" == 0 ]] || return 1
+            if [[ "$gid" == 0 && "$mode" == 755 ]]; then
+                return 0
+            fi
+            expected_gid="$(account_gid "$DNS_SERVICE_USER")"
+            [[ -n "$expected_gid" && "$gid" == "$expected_gid" \
+               && ( "$mode" == 3771 || "$mode" == 2771 ) ]] ;;
+        "$INTERCEPT_CA_DIR")
+            [[ "$uid" == 0 && "$gid" == 0 && ( "$mode" == 700 || "$mode" == 755 ) ]] ;;
+        "$INTERCEPT_STATE_DIR")
+            if [[ "$uid" == 0 && "$gid" == 0 && "$mode" == 755 ]]; then
+                return 0
+            fi
+            expected_uid="$(account_uid "$INTERCEPT_SERVICE_USER")"
+            expected_gid="$(account_gid "$INTERCEPT_SERVICE_USER")"
+            [[ -n "$expected_uid" && -n "$expected_gid" \
+               && "$uid" == "$expected_uid" && "$gid" == "$expected_gid" \
+               && "$mode" == 700 ]] ;;
+        *)
+            return 1 ;;
+    esac
+}
+
+fixed_owned_dir_is_safe() {
+    local dir="$1" marker="$2" value="$3" canonical
+    [[ -d "$dir" && ! -L "$dir" ]] || return 1
+    canonical="$(canonical_dir_path "$dir")" || return 1
+    [[ "$canonical" == "$dir" ]] || return 1
+    fixed_owned_dir_metadata_is_safe "$dir" || return 1
+    root_ownership_marker_is_safe "$dir" "$marker" "$value"
+}
+
+unmarked_fixed_dir_is_safe_to_claim() {
+    local dir="$1" canonical mode
+    [[ -d "$dir" && ! -L "$dir" ]] || return 1
+    canonical="$(canonical_dir_path "$dir")" || return 1
+    [[ "$canonical" == "$dir" \
+       && "$(file_uid "$dir")" == 0 \
+       && "$(file_gid "$dir")" == 0 ]] || return 1
+    mode="$(file_mode "$dir")"
+    case "$dir" in
+        "$INTERCEPT_CA_DIR") [[ "$mode" == 700 || "$mode" == 755 ]] ;;
+        *) [[ "$mode" == 755 ]] ;;
+    esac
+}
+
+# Validate an installer-managed directory slot before a root operation can
+# follow it. canonical_dir_path catches aliases in existing ancestors, while
+# the component walk also rejects a non-directory or a broken symlink.
+runtime_directory_slot_is_safe() {
+    local path="$1" root="$2" canonical_root canonical_path relative component current
+    [[ "$path" == /* && "$root" == /* ]] || return 1
+    [[ -d "$root" && ! -L "$root" ]] || return 1
+    canonical_root="$(canonical_dir_path "$root")" || return 1
+    [[ "$canonical_root" == "$root" ]] || return 1
+    case "$path" in "$root"|"$root"/*) ;; *) return 1 ;; esac
+    canonical_path="$(canonical_dir_path "$path")" || return 1
+    [[ "$canonical_path" == "$path" ]] || return 1
+    relative="${path#"$root"}"
+    relative="${relative#/}"
+    current="$root"
+    while [[ -n "$relative" ]]; do
+        component="${relative%%/*}"
+        [[ -n "$component" && "$component" != . && "$component" != .. ]] || return 1
+        current="${current}/${component}"
+        if [[ -e "$current" || -L "$current" ]]; then
+            [[ -d "$current" && ! -L "$current" ]] || return 1
+        fi
+        if [[ "$relative" == */* ]]; then
+            relative="${relative#*/}"
+        else
+            relative=""
+        fi
+    done
+}
+
+runtime_file_slot_is_safe() {
+    local path="$1" root="$2" parent
+    parent="$(dirname -- "$path")" || return 1
+    runtime_directory_slot_is_safe "$parent" "$root" || return 1
+    [[ ! -e "$path" && ! -L "$path" ]] && return 0
+    [[ -f "$path" && ! -L "$path" ]]
+}
+
+runtime_tree_has_only_plain_entries() {
+    local root="$1" unsafe
+    runtime_directory_slot_is_safe "$root" "$root" || return 1
+    unsafe="$(find "$root" -mindepth 1 ! -type d ! -type f -print -quit 2>/dev/null)" \
+        || return 1
+    [[ -z "$unsafe" ]] || return 1
+    unsafe="$(find "$root" -mindepth 1 -type f -links +1 -print -quit 2>/dev/null)" \
+        || return 1
+    [[ -z "$unsafe" ]]
+}
+
+# Certificate roles deliberately contain one symlink used as their atomic
+# publication pointer. It is safe only when it is the exact `current` entry and
+# resolves to an ordinary generation directory below the same role.
+root_plain_file_metadata_is_safe() {
+    local path="$1" expected_gid="$2" expected_mode="$3"
+    [[ -f "$path" && ! -L "$path" \
+       && "$(file_uid "$path")" == 0 \
+       && "$(file_gid "$path")" == "$expected_gid" \
+       && "$(file_mode "$path")" == "$expected_mode" \
+       && "$(file_nlink "$path")" == 1 ]]
+}
+
+cert_generation_is_safe() {
+    local generation="$1" expected_gid="$2" entry name count=0
+    root_owned_nonwritable_directory_is_safe "$generation" || return 1
+    [[ "$(file_gid "$generation")" == "$expected_gid" \
+       && "$(file_mode "$generation")" == 750 ]] || return 1
+    while IFS= read -r -d '' entry; do
+        name="$(basename -- "$entry")"
+        case "$name" in fullchain.pem|privkey.pem) ;; *) return 1 ;; esac
+        root_plain_file_metadata_is_safe "$entry" "$expected_gid" 640 || return 1
+        count=$((count + 1))
+    done < <(find "$generation" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    [[ "$count" == 2 ]]
+}
+
+cert_role_tree_is_safe_for_recursive_metadata() {
+    local role="$1" role_name group expected_gid current target canonical entry name generations
+    role_name="$(basename -- "$role")"
+    case "$role_name" in
+        dot|web) group="$DNS_SERVICE_USER" ;;
+        zash) group="$MIHOMO_SERVICE_USER" ;;
+        *) return 1 ;;
+    esac
+    expected_gid="$(account_gid "$group")"
+    [[ -n "$expected_gid" ]] || return 1
+    runtime_directory_slot_is_safe "$role" "$DNS_CERT_DIR" || return 1
+    root_owned_nonwritable_directory_is_safe "$role" \
+        && [[ "$(file_gid "$role")" == "$expected_gid" \
+           && "$(file_mode "$role")" == 750 ]] \
+        && root_ownership_marker_is_safe "$role" "$CERT_ROLE_MARKER" \
+            "${CERT_ROLE_VALUE_PREFIX}:${role_name}" \
+        || return 1
+    generations="$role/generations"
+    root_owned_nonwritable_directory_is_safe "$generations" \
+        && [[ "$(file_gid "$generations")" == "$expected_gid" \
+           && "$(file_mode "$generations")" == 750 ]] \
+        || return 1
+    current="$role/current"
+    while IFS= read -r -d '' entry; do
+        name="$(basename -- "$entry")"
+        case "$name" in
+            "$CERT_ROLE_MARKER"|generations) ;;
+            current)
+                [[ -L "$entry" && "$(file_uid "$entry")" == 0 \
+                   && "$(file_gid "$entry")" == 0 \
+                   && "$(file_nlink "$entry")" == 1 ]] || return 1 ;;
+            *) return 1 ;;
+        esac
+    done < <(find "$role" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    while IFS= read -r -d '' entry; do
+        name="$(basename -- "$entry")"
+        [[ "$name" =~ ^generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] \
+            || return 1
+        cert_generation_is_safe "$entry" "$expected_gid" || return 1
+    done < <(find "$generations" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    if [[ -e "$current" || -L "$current" ]]; then
+        [[ -L "$current" ]] || return 1
+        target="$(readlink -- "$current")" || return 1
+        [[ "$target" =~ ^generations/generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] \
+            || return 1
+        [[ -d "$role/$target" && ! -L "$role/$target" ]] || return 1
+        canonical="$(canonical_dir_path "$role/$target")" || return 1
+        [[ "$canonical" == "$role/$target" ]] || return 1
+    fi
+}
+
+# The immediately preceding beta normalized role markers and `current` symlinks
+# to the role group. Accept that exact structure only while no certificate-root
+# marker exists, then atomically republish those metadata entries in final form.
+legacy_cert_role_tree_is_migratable() {
+    local role="$1" role_name group expected_gid current target canonical entry name generations marker
+    role_name="$(basename -- "$role")"
+    case "$role_name" in
+        dot|web) group="$DNS_SERVICE_USER" ;;
+        zash) group="$MIHOMO_SERVICE_USER" ;;
+        *) return 1 ;;
+    esac
+    expected_gid="$(account_gid "$group")"
+    [[ -n "$expected_gid" ]] || return 1
+    runtime_directory_slot_is_safe "$role" "$DNS_CERT_DIR" || return 1
+    root_owned_nonwritable_directory_is_safe "$role" \
+        && [[ "$(file_gid "$role")" == "$expected_gid" \
+           && "$(file_mode "$role")" == 750 ]] || return 1
+    marker="$role/$CERT_ROLE_MARKER"
+    if ! root_ownership_marker_is_safe "$role" "$CERT_ROLE_MARKER" \
+            "${CERT_ROLE_VALUE_PREFIX}:${role_name}"; then
+        root_plain_file_metadata_is_safe "$marker" "$expected_gid" 640 \
+            && [[ "$(cat "$marker" 2>/dev/null || true)" == "${CERT_ROLE_VALUE_PREFIX}:${role_name}" ]] \
+            || return 1
+    fi
+    generations="$role/generations"
+    root_owned_nonwritable_directory_is_safe "$generations" \
+        && [[ "$(file_gid "$generations")" == "$expected_gid" \
+           && "$(file_mode "$generations")" == 750 ]] || return 1
+    current="$role/current"
+    while IFS= read -r -d '' entry; do
+        name="$(basename -- "$entry")"
+        case "$name" in
+            "$CERT_ROLE_MARKER"|generations) ;;
+            current)
+                [[ -L "$entry" && "$(file_uid "$entry")" == 0 \
+                   && ( "$(file_gid "$entry")" == 0 || "$(file_gid "$entry")" == "$expected_gid" ) \
+                   && "$(file_nlink "$entry")" == 1 ]] || return 1 ;;
+            *) return 1 ;;
+        esac
+    done < <(find "$role" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    while IFS= read -r -d '' entry; do
+        name="$(basename -- "$entry")"
+        [[ "$name" =~ ^generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] \
+            || return 1
+        cert_generation_is_safe "$entry" "$expected_gid" || return 1
+    done < <(find "$generations" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    if [[ -e "$current" || -L "$current" ]]; then
+        [[ -L "$current" ]] || return 1
+        target="$(readlink -- "$current")" || return 1
+        [[ "$target" =~ ^generations/generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] \
+            || return 1
+        [[ -d "$role/$target" && ! -L "$role/$target" ]] || return 1
+        canonical="$(canonical_dir_path "$role/$target")" || return 1
+        [[ "$canonical" == "$role/$target" ]] || return 1
+    fi
+}
+
+normalize_legacy_cert_role_metadata() {
+    local role="$1" role_name current target candidate
+    role_name="$(basename -- "$role")"
+    legacy_cert_role_tree_is_migratable "$role" || return 1
+    write_ownership_marker "$role" "$CERT_ROLE_MARKER" "${CERT_ROLE_VALUE_PREFIX}:${role_name}" \
+        || return 1
+    current="$role/current"
+    if [[ -e "$current" || -L "$current" ]]; then
+        target="$(readlink -- "$current")" || return 1
+        candidate="$role/.current.normalize.${BASHPID}.${RANDOM}"
+        [[ ! -e "$candidate" && ! -L "$candidate" ]] || return 1
+        ln -s "$target" "$candidate" \
+            && mv -Tf -- "$candidate" "$current" \
+            || { rm -f -- "$candidate"; return 1; }
+    fi
+    cert_role_tree_is_safe_for_recursive_metadata "$role"
+}
+
+legacy_cert_root_contents_are_migratable() {
+    local entry name
+    while IFS= read -r -d '' entry; do
+        name="$(basename -- "$entry")"
+        case "$name" in
+            .provenance) root_plain_file_metadata_is_safe "$entry" 0 640 || return 1 ;;
+            dot|web|zash) legacy_cert_role_tree_is_migratable "$entry" || return 1 ;;
+            *) return 1 ;;
+        esac
+    done < <(find "$DNS_CERT_DIR" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+}
+
+cert_root_contents_are_safe() {
+    local entry name
+    while IFS= read -r -d '' entry; do
+        name="$(basename -- "$entry")"
+        case "$name" in
+            "$CERT_ROOT_MARKER") ;;
+            .provenance) root_plain_file_metadata_is_safe "$entry" 0 640 || return 1 ;;
+            .certbot-ownership) root_plain_file_metadata_is_safe "$entry" 0 640 || return 1 ;;
+            dot|web|zash) cert_role_tree_is_safe_for_recursive_metadata "$entry" || return 1 ;;
+            *) return 1 ;;
+        esac
+    done < <(find "$DNS_CERT_DIR" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+}
+
+cert_root_is_safe() {
+    runtime_directory_slot_is_safe "$DNS_CERT_DIR" "$CONF_DIR" \
+        && root_owned_nonwritable_directory_is_safe "$DNS_CERT_DIR" \
+        && [[ "$(file_gid "$DNS_CERT_DIR")" == 0 \
+           && "$(file_mode "$DNS_CERT_DIR")" == 751 ]] \
+        && root_ownership_marker_is_safe "$DNS_CERT_DIR" "$CERT_ROOT_MARKER" "$CERT_ROOT_MARKER_VALUE" \
+        && cert_root_contents_are_safe
+}
+
+ensure_dns_cert_root() {
+    local mode
+    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
+        && runtime_directory_slot_is_safe "$DNS_CERT_DIR" "$CONF_DIR" \
+        || { err "Refusing unsafe certificate root slot: $DNS_CERT_DIR"; return 1; }
+    if [[ ! -e "$DNS_CERT_DIR" && ! -L "$DNS_CERT_DIR" ]]; then
+        install -d -o root -g root -m 0751 "$DNS_CERT_DIR" || return 1
+    fi
+    [[ -d "$DNS_CERT_DIR" && ! -L "$DNS_CERT_DIR" \
+       && "$(file_uid "$DNS_CERT_DIR")" == 0 \
+       && "$(file_gid "$DNS_CERT_DIR")" == 0 ]] \
+        || { err "Certificate root ownership is unsafe: $DNS_CERT_DIR"; return 1; }
+    if root_ownership_marker_is_safe "$DNS_CERT_DIR" "$CERT_ROOT_MARKER" "$CERT_ROOT_MARKER_VALUE"; then
+        if [[ "$(file_mode "$DNS_CERT_DIR")" == 750 ]] \
+           && cert_root_contents_are_safe; then
+            chmod 0751 "$DNS_CERT_DIR" || return 1
+        fi
+        cert_root_is_safe \
+            || { err "Existing certificate root failed structural validation: $DNS_CERT_DIR"; return 1; }
+        return 0
+    fi
+    [[ ! -e "$DNS_CERT_DIR/$CERT_ROOT_MARKER" && ! -L "$DNS_CERT_DIR/$CERT_ROOT_MARKER" ]] \
+        || { err "Certificate root marker is unsafe: $DNS_CERT_DIR/$CERT_ROOT_MARKER"; return 1; }
+    mode="$(file_mode "$DNS_CERT_DIR")"
+    [[ "$mode" == 750 || "$mode" == 751 || "$mode" == 755 ]] \
+        && legacy_cert_root_contents_are_migratable \
+        || { err "Refusing to claim an unknown certificate root: $DNS_CERT_DIR"; return 1; }
+    local role
+    for role in dot web zash; do
+        [[ ! -e "$DNS_CERT_DIR/$role" && ! -L "$DNS_CERT_DIR/$role" ]] \
+            || normalize_legacy_cert_role_metadata "$DNS_CERT_DIR/$role" || return 1
+    done
+    chmod 0751 "$DNS_CERT_DIR" || return 1
+    write_ownership_marker "$DNS_CERT_DIR" "$CERT_ROOT_MARKER" "$CERT_ROOT_MARKER_VALUE" \
+        || return 1
+    cert_root_is_safe \
+        || { err "Could not establish the certificate root boundary: $DNS_CERT_DIR"; return 1; }
+}
+
+debug_cert_lineage_slot_is_safe() {
+    local live="$1" entry name
+    runtime_directory_slot_is_safe "$live" "$DEBUG_CERT_DIR" \
+        && root_owned_nonwritable_directory_is_safe "$live" \
+        && [[ "$(file_gid "$live")" == 0 \
+           && "$(file_mode "$live")" == 700 ]] || return 1
+    while IFS= read -r -d '' entry; do
+        name="$(basename -- "$entry")"
+        case "$name" in fullchain.pem|privkey.pem) ;; *) return 1 ;; esac
+        root_plain_file_metadata_is_safe "$entry" 0 600 || return 1
+    done < <(find "$live" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+}
+
+debug_cert_root_contents_are_safe() {
+    local entry name
+    while IFS= read -r -d '' entry; do
+        name="$(basename -- "$entry")"
+        if [[ "$name" == "$DEBUG_CERT_MARKER" ]]; then
+            continue
+        fi
+        is_valid_domain "$name" || return 1
+        debug_cert_lineage_slot_is_safe "$entry" || return 1
+    done < <(find "$DEBUG_CERT_DIR" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+}
+
+debug_cert_root_is_safe() {
+    runtime_directory_slot_is_safe "$DEBUG_CERT_DIR" "$CONF_DIR" \
+        && root_owned_nonwritable_directory_is_safe "$DEBUG_CERT_DIR" \
+        && [[ "$(file_gid "$DEBUG_CERT_DIR")" == 0 \
+           && "$(file_mode "$DEBUG_CERT_DIR")" == 700 ]] \
+        && root_ownership_marker_is_safe "$DEBUG_CERT_DIR" "$DEBUG_CERT_MARKER" "$DEBUG_CERT_MARKER_VALUE" \
+        && debug_cert_root_contents_are_safe
+}
+
+ensure_debug_cert_root() {
+    local mode
+    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
+        && runtime_directory_slot_is_safe "$DEBUG_CERT_DIR" "$CONF_DIR" \
+        || { err "Refusing unsafe debug-certificate root slot: $DEBUG_CERT_DIR"; return 1; }
+    if [[ ! -e "$DEBUG_CERT_DIR" && ! -L "$DEBUG_CERT_DIR" ]]; then
+        install -d -o root -g root -m 0700 "$DEBUG_CERT_DIR" || return 1
+    fi
+    [[ -d "$DEBUG_CERT_DIR" && ! -L "$DEBUG_CERT_DIR" \
+       && "$(file_uid "$DEBUG_CERT_DIR")" == 0 \
+       && "$(file_gid "$DEBUG_CERT_DIR")" == 0 ]] \
+        || { err "Debug-certificate root ownership is unsafe: $DEBUG_CERT_DIR"; return 1; }
+    if root_ownership_marker_is_safe "$DEBUG_CERT_DIR" "$DEBUG_CERT_MARKER" "$DEBUG_CERT_MARKER_VALUE"; then
+        debug_cert_root_is_safe \
+            || { err "Existing debug-certificate root failed structural validation."; return 1; }
+        return 0
+    fi
+    [[ ! -e "$DEBUG_CERT_DIR/$DEBUG_CERT_MARKER" && ! -L "$DEBUG_CERT_DIR/$DEBUG_CERT_MARKER" ]] \
+        || { err "Debug-certificate root marker is unsafe."; return 1; }
+    mode="$(file_mode "$DEBUG_CERT_DIR")"
+    [[ "$mode" == 700 || "$mode" == 755 ]] \
+        && debug_cert_root_contents_are_safe \
+        || { err "Refusing to claim an unknown debug-certificate root."; return 1; }
+    chmod 0700 "$DEBUG_CERT_DIR" || return 1
+    write_ownership_marker "$DEBUG_CERT_DIR" "$DEBUG_CERT_MARKER" "$DEBUG_CERT_MARKER_VALUE" \
+        || return 1
+    debug_cert_root_is_safe \
+        || { err "Could not establish the debug-certificate root boundary."; return 1; }
+}
+
+remove_debug_cert_root() {
+    [[ ! -e "$DEBUG_CERT_DIR" && ! -L "$DEBUG_CERT_DIR" ]] && return 0
+    ensure_debug_cert_root || return 1
+    debug_cert_root_is_safe || return 1
+    remove_owned_root "$DEBUG_CERT_DIR" "$DEBUG_CERT_MARKER" "$DEBUG_CERT_MARKER_VALUE"
+}
+
+preflight_runtime_publication_paths() {
+    local path
+    fixed_owned_dir_is_safe "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
+        || { err "Unsafe installed-runtime root: $BASE_DIR"; return 1; }
+    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
+        || { err "Unsafe configuration root: $CONF_DIR"; return 1; }
+
+    for path in \
+        "$SCRIPTS_DIR" "$WWW_DIR" "${BASE_DIR}/etc" "${BASE_DIR}/etc/systemd" \
+        "${BASE_DIR}/etc/mihomo" \
+        "${BASE_DIR}/etc/polkit-1" "${BASE_DIR}/etc/polkit-1/rules.d"; do
+        runtime_directory_slot_is_safe "$path" "$BASE_DIR" \
+            || { err "Refusing unsafe runtime directory slot: $path"; return 1; }
+    done
+    for path in \
+        "$DNS_RULES_DIR_DEFAULT" "${DNS_RULES_DIR_DEFAULT}/block" \
+        "${DNS_RULES_DIR_DEFAULT}/direct" "${DNS_RULES_DIR_DEFAULT}/proxy" \
+        "${DNS_RULES_DIR_DEFAULT}/chnroute" "$MIHOMO_DIR" "$INTERCEPT_DIR" \
+        "${INTERCEPT_DIR}/tls" "$DNS_CERT_DIR" "${DNS_CERT_DIR}/dot" \
+        "${DNS_CERT_DIR}/web" "${DNS_CERT_DIR}/zash"; do
+        runtime_directory_slot_is_safe "$path" "$CONF_DIR" \
+            || { err "Refusing unsafe configuration directory slot: $path"; return 1; }
+    done
+    for path in \
+        "${CONF_DIR}/dns.env" "${CONF_DIR}/subscriptions.json" \
+        "${CONF_DIR}/policy.json" "${CONF_DIR}/upstreams.json" \
+        "${CONF_DIR}/ecs.json" "${CONF_DIR}/stats.json" \
+        "${CONF_DIR}/tgbot.json" "${CONF_DIR}/extension-marketplaces.json" \
+        "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" \
+        "${MIHOMO_DIR}/config.yaml" "${MIHOMO_DIR}/whitelist.txt" \
+        "${INTERCEPT_DIR}/config.json" "${INTERCEPT_DIR}/cert-state"; do
+        runtime_file_slot_is_safe "$path" "$CONF_DIR" \
+            || { err "Refusing unsafe configuration file slot: $path"; return 1; }
+    done
+}
+
+shared_runtime_directory_metadata_is_safe() {
+    local dir="$1" group="$2" mode="$3" expected_gid
+    expected_gid="$(account_gid "$group")"
+    [[ -n "$expected_gid" && -d "$dir" && ! -L "$dir" \
+       && "$(canonical_dir_path "$dir")" == "$dir" \
+       && "$(file_uid "$dir")" == 0 \
+       && "$(file_gid "$dir")" == "$expected_gid" \
+       && "$(file_mode "$dir")" == "$mode" ]]
+}
+
+runtime_control_file_metadata_is_safe() {
+    local path="$1" owner="$2" group="$3" mode="$4" expected_uid expected_gid
+    [[ ! -e "$path" && ! -L "$path" ]] && return 0
+    expected_uid="$(account_uid "$owner")"
+    expected_gid="$(account_gid "$group")"
+    [[ -n "$expected_uid" && -n "$expected_gid" \
+       && -f "$path" && ! -L "$path" \
+       && "$(file_uid "$path")" == "$expected_uid" \
+       && "$(file_gid "$path")" == "$expected_gid" \
+       && "$(file_mode "$path")" == "$mode" \
+       && "$(file_nlink "$path")" == 1 ]]
+}
+
+runtime_permission_boundary_is_safe() {
+    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
+        && shared_runtime_directory_metadata_is_safe "$MIHOMO_DIR" "$MIHOMO_SERVICE_USER" 3770 \
+        && shared_runtime_directory_metadata_is_safe "$INTERCEPT_DIR" "$INTERCEPT_SERVICE_USER" 3770 \
+        && runtime_control_file_metadata_is_safe "$MIHOMO_DIR/config.yaml" \
+            "$DNS_SERVICE_USER" "$MIHOMO_SERVICE_USER" 640 \
+        && runtime_control_file_metadata_is_safe "$MIHOMO_DIR/whitelist.txt" \
+            "$DNS_SERVICE_USER" "$MIHOMO_SERVICE_USER" 640 \
+        && runtime_control_file_metadata_is_safe "$INTERCEPT_DIR/config.json" \
+            "$DNS_SERVICE_USER" "$INTERCEPT_SERVICE_USER" 640 \
+        && runtime_control_file_metadata_is_safe "$INTERCEPT_DIR/cert-state" \
+            root "$INTERCEPT_SERVICE_USER" 640 \
+        && cert_root_is_safe
 }
 
 owned_root_canonical() {
@@ -395,7 +1022,7 @@ remove_temp_dir() {
 }
 
 claim_fixed_owned_dir() {
-    local dir="$1" marker="$2" value="$3" canonical nonempty=0
+    local dir="$1" marker="$2" value="$3" canonical nonempty=0 created_dir=0
     canonical="$(canonical_dir_path "$dir")" \
         || { err "Could not canonicalize project directory: $dir"; return 1; }
     [[ "$canonical" == "$dir" ]] \
@@ -404,6 +1031,8 @@ claim_fixed_owned_dir() {
         || { err "Project path exists but is not a directory: $dir"; return 1; }
     [[ -d "$dir" && -n "$(find "$dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]] && nonempty=1
     if verify_ownership_marker "$dir" "$marker" "$value"; then
+        fixed_owned_dir_is_safe "$dir" "$marker" "$value" \
+            || { err "Unsafe ownership or mode on fixed project directory: $dir"; return 1; }
         return 0
     fi
     if [[ -e "$dir/$marker" ]]; then
@@ -414,14 +1043,73 @@ claim_fixed_owned_dir() {
         err "Refusing non-empty unowned project directory: $dir"
         return 1
     fi
+    if [[ -e "$dir" || -L "$dir" ]]; then
+        unmarked_fixed_dir_is_safe_to_claim "$dir" \
+            || { err "Refusing unsafe empty fixed directory before marker publication: $dir"; return 1; }
+    else
+        created_dir=1
+    fi
     write_ownership_marker "$dir" "$marker" "$value" \
         || { err "Could not write ownership marker under $dir"; return 1; }
+    if ! fixed_owned_dir_is_safe "$dir" "$marker" "$value"; then
+        rm -f -- "$dir/$marker"
+        [[ "$created_dir" == 0 ]] || rmdir -- "$dir" 2>/dev/null || true
+        err "Could not establish safe ownership on fixed project directory: $dir"
+        return 1
+    fi
 }
 
 claim_project_roots() {
     claim_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" || return 1
     claim_fixed_owned_dir "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" || return 1
     claim_fixed_owned_dir "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE" || return 1
+}
+
+# Older beta installs used a setgid CA directory and inherited the gpn-dns
+# group on its root-published marker. Accept only that exact, closed legacy
+# shape during read-only preflight; normalization happens after the rollback
+# snapshot and while runtime writers are stopped.
+legacy_intercept_ca_root_is_safe() {
+    local marker="$INTERCEPT_CA_DIR/$INTERCEPT_CA_MARKER" dns_gid entry name count=0
+    dns_gid="$(account_gid "$DNS_SERVICE_USER")"
+    [[ -n "$dns_gid" \
+       && -d "$INTERCEPT_CA_DIR" && ! -L "$INTERCEPT_CA_DIR" \
+       && "$(canonical_dir_path "$INTERCEPT_CA_DIR")" == "$INTERCEPT_CA_DIR" \
+       && "$(file_uid "$INTERCEPT_CA_DIR")" == 0 \
+       && "$(file_gid "$INTERCEPT_CA_DIR")" == 0 \
+       && ( "$(file_mode "$INTERCEPT_CA_DIR")" == 2700 \
+          || "$(file_mode "$INTERCEPT_CA_DIR")" == 700 ) \
+       && -f "$marker" && ! -L "$marker" \
+       && "$(file_uid "$marker")" == 0 \
+       && ( "$(file_gid "$marker")" == 0 || "$(file_gid "$marker")" == "$dns_gid" ) \
+       && "$(file_mode "$marker")" == 644 \
+       && "$(file_nlink "$marker")" == 1 \
+       && "$(cat "$marker" 2>/dev/null || true)" == "$INTERCEPT_CA_MARKER_VALUE" ]] \
+        || return 1
+    while IFS= read -r -d '' entry; do
+        name="$(basename -- "$entry")"
+        case "$name" in
+            "$INTERCEPT_CA_MARKER") ;;
+            root.crt) root_plain_file_metadata_is_safe "$entry" 0 644 || return 1 ;;
+            root.key) root_plain_file_metadata_is_safe "$entry" 0 600 || return 1 ;;
+            *) return 1 ;;
+        esac
+        count=$((count + 1))
+    done < <(find "$INTERCEPT_CA_DIR" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    [[ "$count" == 3 ]]
+}
+
+normalize_legacy_intercept_ca_root() {
+    local marker="$INTERCEPT_CA_DIR/$INTERCEPT_CA_MARKER"
+    legacy_intercept_ca_root_is_safe \
+        || { err "Legacy interception CA root failed strict migration validation."; return 1; }
+    chown root:root "$marker" \
+        && chmod 0644 "$marker" \
+        && chmod 0700 "$INTERCEPT_CA_DIR" \
+        && chmod g-s "$INTERCEPT_CA_DIR" \
+        || { err "Could not normalize the legacy interception CA root metadata."; return 1; }
+    fixed_owned_dir_is_safe "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" \
+        || { err "Normalized interception CA root failed validation."; return 1; }
 }
 
 # New fixed roots must be inspected without mutating the host before the
@@ -433,8 +1121,14 @@ preflight_intercept_roots() {
         if [[ ! -e "$dir" && ! -L "$dir" ]]; then
             continue
         fi
-        owned_root_canonical "$dir" "$marker" "$value" >/dev/null \
-            || { err "Refusing pre-existing unowned interception root: $dir"; return 1; }
+        if [[ "$dir" == "$INTERCEPT_CA_DIR" ]]; then
+            fixed_owned_dir_is_safe "$dir" "$marker" "$value" \
+                || legacy_intercept_ca_root_is_safe \
+                || { err "Refusing pre-existing unowned interception root: $dir"; return 1; }
+        else
+            fixed_owned_dir_is_safe "$dir" "$marker" "$value" \
+                || { err "Refusing pre-existing unowned interception root: $dir"; return 1; }
+        fi
     done <<EOF
 $INTERCEPT_CA_DIR $INTERCEPT_CA_MARKER $INTERCEPT_CA_MARKER_VALUE
 $INTERCEPT_STATE_DIR $INTERCEPT_STATE_MARKER $INTERCEPT_STATE_MARKER_VALUE
@@ -442,6 +1136,11 @@ EOF
 }
 
 claim_intercept_roots() {
+    if [[ -e "$INTERCEPT_CA_DIR" || -L "$INTERCEPT_CA_DIR" ]]; then
+        if ! fixed_owned_dir_is_safe "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE"; then
+            normalize_legacy_intercept_ca_root || return 1
+        fi
+    fi
     claim_fixed_owned_dir "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" || return 1
     claim_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" || return 1
 }
@@ -449,6 +1148,12 @@ claim_intercept_roots() {
 remove_fixed_owned_dir() {
     local dir="$1" marker="$2" value="$3"
     [[ -e "$dir" ]] || return 0
+    case "$dir" in
+        "$BASE_DIR"|"$CONF_DIR"|"$STATE_DIR"|"$INTERCEPT_CA_DIR"|"$INTERCEPT_STATE_DIR") ;;
+        *) err "Refusing non-fixed directory through fixed-root removal: $dir"; return 1 ;;
+    esac
+    fixed_owned_dir_is_safe "$dir" "$marker" "$value" \
+        || { err "Refusing to remove unsafe or unowned fixed directory: $dir"; return 1; }
     remove_owned_root "$dir" "$marker" "$value" \
         || { err "Refusing to remove unsafe or unowned directory: $dir"; return 1; }
 }
@@ -464,7 +1169,7 @@ remove_runtime_preserving_gum() {
     canonical="$(canonical_dir_path "$BASE_DIR")" || return 1
     [[ "$canonical" == "$BASE_DIR" ]] \
         || { err "Refusing runtime directory alias during removal: $BASE_DIR"; return 1; }
-    verify_ownership_marker "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
+    fixed_owned_dir_is_safe "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
         || { err "Refusing to remove unowned runtime directory: $BASE_DIR"; return 1; }
 
     if [[ -d "$BIN_DIR" && ! -L "$BIN_DIR" && -f "$GUM_BIN" && ! -L "$GUM_BIN" ]]; then
@@ -482,6 +1187,114 @@ remove_runtime_preserving_gum() {
     remove_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"
 }
 
+mode_has_no_group_or_other_write() {
+    local mode="$1" value
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+    value=$((8#$mode))
+    (( (value & 0022) == 0 ))
+}
+
+root_owned_nonwritable_directory_is_safe() {
+    local dir="$1" canonical
+    [[ -d "$dir" && ! -L "$dir" ]] || return 1
+    canonical="$(canonical_dir_path "$dir")" || return 1
+    [[ "$canonical" == "$dir" && "$(file_uid "$dir")" == 0 ]] || return 1
+    mode_has_no_group_or_other_write "$(file_mode "$dir")"
+}
+
+# A local user must not be able to rename the publication parent after it was
+# checked but before root creates or swaps a static tree. Validate every existing
+# component, including the direct parent, and reject aliases and writable dirs.
+secure_directory_chain_is_safe() {
+    local path="$1" canonical relative component current="/"
+    [[ "$path" == /* ]] || return 1
+    canonical="$(canonical_dir_path "$path")" || return 1
+    [[ "$canonical" == "$path" ]] || return 1
+    root_owned_nonwritable_directory_is_safe / || return 1
+    relative="${path#/}"
+    while [[ -n "$relative" ]]; do
+        component="${relative%%/*}"
+        [[ -n "$component" && "$component" != . && "$component" != .. ]] || return 1
+        current="${current%/}/${component}"
+        if [[ -e "$current" || -L "$current" ]]; then
+            root_owned_nonwritable_directory_is_safe "$current" || return 1
+        fi
+        if [[ "$relative" == */* ]]; then
+            relative="${relative#*/}"
+        else
+            relative=""
+        fi
+    done
+}
+
+ensure_static_publish_parent() {
+    local dest="$1" parent
+    parent="$(dirname -- "$dest")" || return 1
+    secure_directory_chain_is_safe "$parent" || return 1
+    root_owned_nonwritable_directory_is_safe "$parent"
+}
+
+static_publish_parent_is_safe() {
+    local parent
+    parent="$(dirname -- "$1")" || return 1
+    secure_directory_chain_is_safe "$parent" \
+        && root_owned_nonwritable_directory_is_safe "$parent"
+}
+
+static_owned_tree_is_safe() {
+    local dir="$1" marker="$2" value="$3"
+    root_owned_nonwritable_directory_is_safe "$dir" \
+        && root_ownership_marker_is_safe "$dir" "$marker" "$value"
+}
+
+claim_empty_public_owned_tree() {
+    local dir="$1" marker="$2" value="$3" created_dir=0
+    if [[ -e "$dir" || -L "$dir" ]]; then
+        root_owned_nonwritable_directory_is_safe "$dir" || return 1
+        [[ -z "$(find "$dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]] \
+            || return 1
+    else
+        created_dir=1
+    fi
+    write_ownership_marker "$dir" "$marker" "$value" || return 1
+    if ! static_owned_tree_is_safe "$dir" "$marker" "$value"; then
+        rm -f -- "$dir/$marker"
+        [[ "$created_dir" == 0 ]] || rmdir -- "$dir" 2>/dev/null || true
+        return 1
+    fi
+}
+
+remove_public_owned_tree() {
+    local dir="$1" marker="$2" value="$3"
+    [[ ! -e "$dir" && ! -L "$dir" ]] && return 0
+    static_publish_parent_is_safe "$dir" \
+        && static_owned_tree_is_safe "$dir" "$marker" "$value" \
+        || { err "Refusing to remove unsafe or unowned public tree: $dir"; return 1; }
+    remove_owned_root "$dir" "$marker" "$value"
+}
+
+normalize_static_tree_ownership() {
+    find "$1" -exec chown root:root {} +
+}
+
+preflight_public_owned_tree() {
+    local path="$1" marker="$2" value="$3" parent nonempty=0
+    parent="$(dirname -- "$path")" || return 1
+    secure_directory_chain_is_safe "$parent" \
+        && root_owned_nonwritable_directory_is_safe "$parent" || return 1
+    [[ ! -e "$path" && ! -L "$path" ]] && return 0
+    [[ -d "$path" && ! -L "$path" ]] || return 1
+    if verify_ownership_marker "$path" "$marker" "$value"; then
+        static_owned_tree_is_safe "$path" "$marker" "$value"
+        return
+    fi
+    [[ ! -e "$path/$marker" && ! -L "$path/$marker" ]] || return 1
+    [[ -n "$(find "$path" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]] \
+        && nonempty=1
+    [[ "$nonempty" == 0 ]] || return 1
+    root_owned_nonwritable_directory_is_safe "$path"
+}
+
 safe_zashboard_path() {
     local p
     [[ -n "${DNS_ZASH_DIR:-}" && "$DNS_ZASH_DIR" != *$'\n'* && "$DNS_ZASH_DIR" != *$'\r'* ]] \
@@ -495,26 +1308,37 @@ safe_zashboard_path() {
     printf '%s\n' "$p"
 }
 
+preflight_zashboard_dir() {
+    local p
+    p="$(safe_zashboard_path)" || return 1
+    DNS_ZASH_DIR="$p"
+    preflight_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1' \
+        || { err "Refusing unsafe or unowned DNS_ZASH_DIR before staging: $p"; return 1; }
+    export DNS_ZASH_DIR
+}
+
 # Claim the zashboard directory before ever clearing it. A non-empty directory
 # must already carry the exact current ownership marker.
 claim_zashboard_dir() {
-    local p marker current nonempty=0
+    local p marker nonempty=0
+    preflight_zashboard_dir || return 1
     p="$(safe_zashboard_path)" || return 1
     DNS_ZASH_DIR="$p"
     marker="$p/$ZASH_OWNERSHIP_MARKER"
-    if [[ -e "$p" && ! -d "$p" ]]; then
+    ensure_static_publish_parent "$p" \
+        || { err "DNS_ZASH_DIR parent is not root-owned and non-writable: $(dirname -- "$p")"; return 1; }
+    if [[ ( -e "$p" || -L "$p" ) && ( ! -d "$p" || -L "$p" ) ]]; then
         err "DNS_ZASH_DIR exists but is not a directory: $p"; return 1
     fi
     [[ -d "$p" && -n "$(find "$p" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]] && nonempty=1
-    if [[ -e "$marker" ]]; then
-        [[ -f "$marker" && ! -L "$marker" ]] \
-            || { err "Invalid zashboard ownership marker: $marker"; return 1; }
-        current="$(cat "$marker" 2>/dev/null || true)"
-        [[ "$current" == '5gpn-zashboard-v1' ]] \
-            || { err "Unknown zashboard ownership marker contents in $marker"; return 1; }
+    if verify_ownership_marker "$p" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1'; then
+        static_owned_tree_is_safe "$p" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1' \
+            || { err "Unsafe zashboard directory or ownership marker: $p"; return 1; }
     elif [[ "$nonempty" == 0 ]]; then
-        mkdir -p -- "$p"
-        printf '%s\n' '5gpn-zashboard-v1' > "$marker"
+        [[ ! -e "$marker" && ! -L "$marker" ]] \
+            || { err "Invalid zashboard ownership marker: $marker"; return 1; }
+        claim_empty_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1' \
+            || { err "Could not establish safe zashboard ownership: $p"; return 1; }
     else
         err "Refusing non-empty external DNS_ZASH_DIR without a 5gpn ownership marker: $p"
         return 1
@@ -529,14 +1353,13 @@ clear_zashboard_dir() {
 }
 
 remove_zashboard_dir() {
-    local p marker
+    local p
     p="$(safe_zashboard_path)" || return 1
     [[ -e "$p" ]] || return 0
-    marker="$p/$ZASH_OWNERSHIP_MARKER"
-    [[ -f "$marker" && ! -L "$marker" ]] \
-        && [[ "$(cat "$marker" 2>/dev/null || true)" == '5gpn-zashboard-v1' ]] \
+    static_publish_parent_is_safe "$p" \
+        && static_owned_tree_is_safe "$p" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1' \
         || { err "Refusing to remove unowned zashboard directory: $p"; return 1; }
-    remove_owned_root "$p" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1'
+    remove_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1'
 }
 
 safe_web_path() {
@@ -550,20 +1373,34 @@ safe_web_path() {
     printf '%s\n' "$p"
 }
 
+preflight_web_dir() {
+    local p
+    p="$(safe_web_path)" || return 1
+    DNS_WEB_DIR="$p"
+    preflight_public_owned_tree "$p" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE" \
+        || { err "Refusing unsafe or unowned DNS_WEB_DIR before staging: $p"; return 1; }
+}
+
 claim_web_dir() {
     local p marker nonempty=0
+    preflight_web_dir || return 1
     p="$(safe_web_path)" || return 1
     DNS_WEB_DIR="$p"
     marker="$p/$WEB_OWNERSHIP_MARKER"
-    [[ ! -e "$p" || -d "$p" ]] || { err "DNS_WEB_DIR is not a directory: $p"; return 1; }
+    ensure_static_publish_parent "$p" \
+        || { err "DNS_WEB_DIR parent is not root-owned and non-writable: $(dirname -- "$p")"; return 1; }
+    [[ ( ! -e "$p" && ! -L "$p" ) || ( -d "$p" && ! -L "$p" ) ]] \
+        || { err "DNS_WEB_DIR is not a directory: $p"; return 1; }
     [[ -d "$p" && -n "$(find "$p" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]] && nonempty=1
     if verify_ownership_marker "$p" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"; then
+        static_owned_tree_is_safe "$p" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE" \
+            || { err "Unsafe web directory or ownership marker: $p"; return 1; }
         return 0
     fi
     [[ ! -e "$marker" ]] || { err "Invalid web ownership marker: $marker"; return 1; }
     [[ "$nonempty" == 0 ]] \
         || { err "Refusing non-empty DNS_WEB_DIR without the current ownership marker: $p"; return 1; }
-    write_ownership_marker "$p" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"
+    claim_empty_public_owned_tree "$p" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"
 }
 
 # Atomically publish a tree of public static assets. Source trees may come from
@@ -574,6 +1411,8 @@ claim_web_dir() {
 publish_owned_tree() {
     local src="$1" dest="$2" marker="$3" value="$4" parent leaf candidate backup
     parent="$(dirname -- "$dest")"; leaf="$(basename -- "$dest")"
+    ensure_static_publish_parent "$dest" \
+        || { err "Refusing unsafe static publication parent: $parent"; return 1; }
     candidate="$(mktemp -d "${parent}/.${leaf}.new.XXXXXX")" || return 1
     write_ownership_marker "$candidate" "$marker" "$value" \
         || { rmdir -- "$candidate"; return 1; }
@@ -581,12 +1420,20 @@ publish_owned_tree() {
         || { remove_owned_root "$candidate" "$marker" "$value" || true; return 1; }
     write_ownership_marker "$candidate" "$marker" "$value" \
         || { remove_owned_root "$candidate" "$marker" "$value" || true; return 1; }
-    find "$candidate" -type d -exec chmod 0755 {} + \
+    runtime_tree_has_only_plain_entries "$candidate" \
+        && normalize_static_tree_ownership "$candidate" \
+        && find "$candidate" -type d -exec chmod 0755 {} + \
         && find "$candidate" -type f -exec chmod 0644 {} + \
         || { remove_owned_root "$candidate" "$marker" "$value" || true; return 1; }
+    static_owned_tree_is_safe "$candidate" "$marker" "$value" \
+        || { remove_owned_root "$candidate" "$marker" "$value" || true; return 1; }
     backup="${parent}/.${leaf}.old.$$"
-    if [[ -e "$dest" ]]; then
-        verify_ownership_marker "$dest" "$marker" "$value" \
+    static_publish_parent_is_safe "$dest" \
+        || { remove_owned_root "$candidate" "$marker" "$value" || true; err "Static publication parent changed before swap: $parent"; return 1; }
+    [[ ! -e "$backup" && ! -L "$backup" ]] \
+        || { remove_owned_root "$candidate" "$marker" "$value" || true; err "Static publication backup path already exists: $backup"; return 1; }
+    if [[ -e "$dest" || -L "$dest" ]]; then
+        static_owned_tree_is_safe "$dest" "$marker" "$value" \
             || { remove_owned_root "$candidate" "$marker" "$value" || true; err "Refusing to replace unowned tree: $dest"; return 1; }
         mv -- "$dest" "$backup" \
             || { remove_owned_root "$candidate" "$marker" "$value" || true; return 1; }
@@ -617,7 +1464,7 @@ claim_ios_dir() {
 # _HAVE_GUM stays 0 and all helpers fall back to plain echo.
 install_gum() {
     claim_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
-        || { _HAVE_GUM=0; return 1; }
+        || { _HAVE_GUM=0; warn "gum bootstrap could not claim the runtime directory; using plain output."; return 0; }
     # Only trust a gum that THIS process already verified. An arbitrary binary
     # on PATH with a matching --version is not supply-chain evidence.
     if [[ "$_HAVE_GUM" == 1 ]] && command -v gum >/dev/null 2>&1 \
@@ -626,28 +1473,25 @@ install_gum() {
     local arch url tmp exp got bin m
     m="$(uname -m 2>/dev/null || echo x86_64)"
     case "$m" in
-        x86_64|amd64)  arch="x86_64" ;;
-        aarch64|arm64) arch="arm64"  ;;
-        armv7l|armhf)  arch="armv7"  ;;
-        *)             arch="x86_64" ;;
+        x86_64|amd64)  arch="x86_64"; exp="$GUM_SHA256_X86_64" ;;
+        aarch64|arm64) arch="arm64";  exp="$GUM_SHA256_ARM64" ;;
+        armv7l|armhf)  arch="armv7";  exp="$GUM_SHA256_ARMV7" ;;
+        *)             arch="x86_64"; exp="$GUM_SHA256_X86_64" ;;
     esac
     url="https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/gum_${GUM_VERSION}_Linux_${arch}.tar.gz"
     tmp="$(mktemp -d /tmp/5gpn-gum.XXXXXX 2>/dev/null)" || { warn "gum: mktemp failed; using plain output."; _HAVE_GUM=0; return 0; }
     claim_temp_dir "$tmp" || { rmdir -- "$tmp" 2>/dev/null || true; warn "gum: could not claim temp directory; using plain output."; return 0; }
     if ! command -v curl >/dev/null 2>&1 \
-       || ! curl -fsSL "$url" -o "$tmp/gum.tgz" 2>/dev/null; then
+       || ! curl -fsSL --connect-timeout 10 --max-time 60 \
+            "$url" -o "$tmp/gum.tgz" 2>/dev/null; then
         warn "gum download failed; using plain output."
-        remove_temp_dir "$tmp"; return 0
+        remove_temp_dir "$tmp" 2>/dev/null || true
+        return 0
     fi
-
-    exp=""
-    curl -fsSL "https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/checksums.txt" \
-         -o "$tmp/sums.txt" 2>/dev/null \
-        && exp="$(awk -v f="gum_${GUM_VERSION}_Linux_${arch}.tar.gz" '$2 == f || $2 == "*" f { print $1; exit }' "$tmp/sums.txt" 2>/dev/null || true)"
-    exp="${exp,,}"
     if [[ ! "$exp" =~ ^[0-9a-f]{64}$ ]]; then
-        warn "gum checksum is missing or invalid; refusing to install it and using plain output."
-        remove_temp_dir "$tmp"; return 0
+        warn "gum pinned checksum is missing or invalid; refusing to install it and using plain output."
+        remove_temp_dir "$tmp" 2>/dev/null || true
+        return 0
     fi
     if command -v sha256sum >/dev/null 2>&1; then
         got="$(sha256sum "$tmp/gum.tgz" 2>/dev/null | awk '{print $1}' || true)"
@@ -655,25 +1499,29 @@ install_gum() {
         got="$(shasum -a 256 "$tmp/gum.tgz" 2>/dev/null | awk '{print $1}' || true)"
     else
         warn "no SHA-256 tool is available; refusing to install gum and using plain output."
-        remove_temp_dir "$tmp"; return 0
+        remove_temp_dir "$tmp" 2>/dev/null || true
+        return 0
     fi
     got="${got,,}"
     if [[ "$got" != "$exp" ]]; then
         warn "gum sha256 mismatch; refusing to install it and using plain output."
-        remove_temp_dir "$tmp"; return 0
+        remove_temp_dir "$tmp" 2>/dev/null || true
+        return 0
     fi
     if ! archive_paths_safe tar "$tmp/gum.tgz" \
        || ! tar --no-same-owner --no-same-permissions --delay-directory-restore \
             -xzf "$tmp/gum.tgz" -C "$tmp" 2>/dev/null \
        || ! extracted_tree_safe "$tmp"; then
         warn "gum archive extraction failed; using plain output."
-        remove_temp_dir "$tmp"; return 0
+        remove_temp_dir "$tmp" 2>/dev/null || true
+        return 0
     fi
     bin="$(find "$tmp" -type f -name gum 2>/dev/null | head -1 || true)"
     if [[ -z "$bin" ]] || ! "$bin" --version 2>/dev/null | grep -qF "$GUM_VERSION" \
        || ! publish_executable "$bin" "$GUM_BIN" 2>/dev/null; then
         warn "verified gum archive did not contain an installable ${GUM_VERSION} binary; using plain output."
-        remove_temp_dir "$tmp"; return 0
+        remove_temp_dir "$tmp" 2>/dev/null || true
+        return 0
     fi
     remove_temp_dir "$tmp" 2>/dev/null || true
     if command -v gum >/dev/null 2>&1 \
@@ -683,6 +1531,19 @@ install_gum() {
         _HAVE_GUM=0; warn "gum verification succeeded but the installed binary is unavailable; using plain output."
     fi
     return 0
+}
+
+activate_verified_installed_gum() {
+    _HAVE_GUM=0
+    fixed_owned_dir_is_safe "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
+        || return 0
+    [[ -f "$GUM_BIN" && ! -L "$GUM_BIN" \
+       && "$(file_uid "$GUM_BIN")" == 0 \
+       && "$(file_gid "$GUM_BIN")" == 0 \
+       && "$(file_mode "$GUM_BIN")" == 755 \
+       && "$(file_nlink "$GUM_BIN")" == 1 ]] || return 0
+    "$GUM_BIN" --version 2>/dev/null | grep -qF "$GUM_VERSION" || return 0
+    _HAVE_GUM=1
 }
 
 check_root() {
@@ -859,10 +1720,89 @@ render_mihomo_listeners() {
 # ----------------------------------------------------------------------------
 # Dependencies and installed-unit ownership
 # ----------------------------------------------------------------------------
+SYSTEMD_UNIT_CONFLICT_REASON=""
+
+# systemd applies both exact drop-ins and dash-prefix drop-ins. For example,
+# 5gpn-intercept-cert.service inherits 5gpn-intercept-.service.d and
+# 5gpn-.service.d in addition to its exact directory.
+systemd_unit_specific_dropin_names() {
+    local unit="$1" type="${1##*.}" stem="${1%.*}" truncated template
+    printf '%s.d\n' "$unit"
+    if [[ "$stem" == *@* && "$stem" != *@ ]]; then
+        template="${stem%%@*}@.${type}.d"
+        printf '%s\n' "$template"
+    fi
+    truncated="$stem"
+    while [[ "$truncated" == *-* ]]; do
+        truncated="${truncated%-*}"
+        printf '%s-.%s.d\n' "$truncated" "$type"
+    done
+}
+
+systemd_global_dropin_key_is_managed() {
+    local type="$1" key="$2"
+    case "$type" in
+        service)
+            case "$key" in
+                Exec*|User|Group|SupplementaryGroups|DynamicUser|Environment|EnvironmentFile|PassEnvironment|UnsetEnvironment|\
+                WorkingDirectory|RootDirectory|RootDirectoryStartOnly|RootImage|RootEphemeral|UMask|PermissionsStartOnly|\
+                Protect*|Private*|Restrict*|ReadWritePaths|ReadOnlyPaths|InaccessiblePaths|BindPaths|BindReadOnlyPaths|\
+                TemporaryFileSystem|MountImages|ExtensionImages|NoExecPaths|ExecPaths|CapabilityBoundingSet|AmbientCapabilities|\
+                NoNewPrivileges|SystemCall*|LockPersonality|MemoryDenyWriteExecute|SecureBits|KeyringMode|ProtectProc|ProcSubset|\
+                IPAddressAllow|IPAddressDeny|SocketBindAllow|SocketBindDeny|NetworkNamespacePath|JoinsNamespaceOf|Device*|\
+                LoadCredential*|SetCredential*|ImportCredential*|StateDirectory*|CacheDirectory*|LogsDirectory*|\
+                ConfigurationDirectory*|RuntimeDirectory*|Type|PIDFile|BusName)
+                    return 0 ;;
+            esac ;;
+        path)
+            case "$key" in PathExists|PathExistsGlob|PathChanged|PathModified|DirectoryNotEmpty|Unit|MakeDirectory)
+                return 0 ;;
+            esac ;;
+        timer)
+            case "$key" in OnActiveSec|OnBootSec|OnStartupSec|OnUnitActiveSec|OnUnitInactiveSec|OnCalendar|Unit|Persistent|RandomizedDelaySec)
+                return 0 ;;
+            esac ;;
+    esac
+    return 1
+}
+
+systemd_global_dropin_has_managed_override() {
+    local dir="$1" type="$2" conf line section key
+    local -a files=()
+    [[ -e "$dir" || -L "$dir" ]] || return 1
+    [[ -d "$dir" && ! -L "$dir" ]] || return 0
+    shopt -s nullglob
+    files=("$dir"/*.conf)
+    shopt -u nullglob
+    for conf in "${files[@]}"; do
+        [[ -f "$conf" && ! -L "$conf" ]] || return 0
+        section=""
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line%$'\r'}"
+            line="${line#"${line%%[![:space:]]*}"}"
+            [[ -n "$line" && "$line" != \#* && "$line" != \;* ]] || continue
+            if [[ "$line" == \[*\] ]]; then
+                section="$line"
+                continue
+            fi
+            case "$type:$section" in
+                service:'[Service]'|path:'[Path]'|timer:'[Timer]') ;;
+                *) continue ;;
+            esac
+            [[ "$line" == *=* ]] || continue
+            key="${line%%=*}"
+            key="${key//[[:space:]]/}"
+            systemd_global_dropin_key_is_managed "$type" "$key" && return 0
+        done < "$conf"
+    done
+    return 1
+}
+
 systemd_unit_has_dropins() {
-    local unit="$1" root
+    local unit="$1" root name type="${1##*.}" global
     shift
     local -a roots=("$@")
+    SYSTEMD_UNIT_CONFLICT_REASON=""
     if [[ "${#roots[@]}" == 0 ]]; then
         roots=(/etc/systemd/system.control /run/systemd/system.control \
                /run/systemd/transient /run/systemd/generator.early \
@@ -873,10 +1813,23 @@ systemd_unit_has_dropins() {
                /run/systemd/generator.late)
     fi
     for root in "${roots[@]}"; do
-        [[ ! -e "${root}/${unit}.d" && ! -L "${root}/${unit}.d" ]] || return 0
+        while IFS= read -r name; do
+            if [[ -e "${root}/${name}" || -L "${root}/${name}" ]]; then
+                SYSTEMD_UNIT_CONFLICT_REASON="drop-in directory ${root}/${name}"
+                return 0
+            fi
+        done < <(systemd_unit_specific_dropin_names "$unit")
+        global="${root}/${type}.d"
+        if systemd_global_dropin_has_managed_override "$global" "$type"; then
+            SYSTEMD_UNIT_CONFLICT_REASON="managed directive in global drop-in directory ${global}"
+            return 0
+        fi
         case "$root" in
             /etc/systemd/system.control|/run/systemd/system.control|/run/systemd/transient|/run/systemd/generator.early)
-                [[ ! -e "${root}/${unit}" && ! -L "${root}/${unit}" ]] || return 0 ;;
+                if [[ -e "${root}/${unit}" || -L "${root}/${unit}" ]]; then
+                    SYSTEMD_UNIT_CONFLICT_REASON="control or transient unit ${root}/${unit}"
+                    return 0
+                fi ;;
         esac
     done
     return 1
@@ -895,9 +1848,9 @@ journal_export_instances_clear() {
                /run/systemd/generator.late)
     fi
     for unit in 5gpn-journal@5gpn-dns.service 5gpn-journal@mihomo.service; do
+        systemd_unit_has_dropins "$unit" "${roots[@]}" && return 1
         for root in "${roots[@]}"; do
-            [[ ! -e "${root}/${unit}" && ! -L "${root}/${unit}" \
-               && ! -e "${root}/${unit}.d" && ! -L "${root}/${unit}.d" ]] \
+            [[ ! -e "${root}/${unit}" && ! -L "${root}/${unit}" ]] \
                 || return 1
         done
     done
@@ -905,6 +1858,7 @@ journal_export_instances_clear() {
 
 unit_file_owned_by_5gpn() {
     local unit="$1" file="/etc/systemd/system/$1"
+    SYSTEMD_UNIT_CONFLICT_REASON=""
     [[ -f "$file" && ! -L "$file" ]] || return 1
     ! systemd_unit_has_dropins "$unit" || return 1
     grep -Fqx "# 5gpn-unit-id: ${unit}:v1" "$file" || return 1
@@ -920,6 +1874,10 @@ unit_file_owned_by_5gpn() {
             grep -Fqx 'ExecStart=/opt/5gpn/scripts/intercept-cert-renew.sh' "$file" ;;
         5gpn-intercept-cert.path)
             grep -Fqx 'PathChanged=/etc/5gpn/intercept/config.json' "$file" ;;
+        5gpn-intercept-cert.timer)
+            grep -Fqx 'OnCalendar=*-*-* 02:00:00' "$file" \
+                && grep -Fqx 'Persistent=true' "$file" \
+                && grep -Fqx 'Unit=5gpn-intercept-cert.service' "$file" ;;
         5gpn-intercept-runtime.path)
             grep -Fqx 'PathChanged=/etc/5gpn/intercept/config.json' "$file" \
                 && grep -Fqx 'Unit=5gpn-intercept.service' "$file" ;;
@@ -940,7 +1898,7 @@ preflight_owned_units() {
     for unit in "$@"; do
         if systemctl cat "$unit" >/dev/null 2>&1 || [[ -e "/etc/systemd/system/$unit" ]]; then
             unit_file_owned_by_5gpn "$unit" \
-                || { err "Refusing to replace an existing non-5gpn unit: $unit"; return 1; }
+                || { err "Refusing to replace an existing non-5gpn or overridden unit: $unit${SYSTEMD_UNIT_CONFLICT_REASON:+ ($SYSTEMD_UNIT_CONFLICT_REASON)}"; return 1; }
         fi
     done
 }
@@ -948,8 +1906,12 @@ preflight_owned_units() {
 remove_owned_unit() {
     local unit="$1"
     if unit_file_owned_by_5gpn "$unit"; then
-        systemctl disable --now "$unit" 2>/dev/null || true
-        rm -f -- "/etc/systemd/system/$unit"
+        systemctl disable --now "$unit" 2>/dev/null \
+            || { err "Could not stop and disable owned unit $unit; refusing to delete its unit file."; return 1; }
+        rm -f -- "/etc/systemd/system/$unit" \
+            || { err "Could not delete owned unit file: $unit"; return 1; }
+        [[ ! -e "/etc/systemd/system/$unit" && ! -L "/etc/systemd/system/$unit" ]] \
+            || { err "Owned unit file still exists after removal: $unit"; return 1; }
         ok "Removed 5gpn-owned unit: $unit"
         return 0
     fi
@@ -962,17 +1924,49 @@ preflight_renewal_unit_ownership() {
     preflight_owned_units 5gpn-certbot-renew.service 5gpn-certbot-renew.timer
 }
 
+service_group_is_exclusive_for_user() {
+    local group="$1" user="$2" entry gid members passwd_entries primary_users group_entries gid_groups gid_members
+    entry="$(getent group "$group" 2>/dev/null)" || return 1
+    gid="$(printf '%s\n' "$entry" | cut -d: -f3)"
+    members="$(printf '%s\n' "$entry" | cut -d: -f4)"
+    [[ "$gid" =~ ^[0-9]+$ && -z "$members" ]] || return 1
+    group_entries="$(getent group 2>/dev/null)" || return 1
+    gid_groups="$(printf '%s\n' "$group_entries" | awk -F: -v gid="$gid" '$3 == gid { print $1 }')"
+    gid_members="$(printf '%s\n' "$group_entries" | awk -F: -v gid="$gid" '$3 == gid && $4 != "" { print $1 }')"
+    [[ "$gid_groups" == "$group" && -z "$gid_members" ]] || return 1
+    passwd_entries="$(getent passwd 2>/dev/null)" || return 1
+    primary_users="$(printf '%s\n' "$passwd_entries" | awk -F: -v gid="$gid" '$4 == gid { print $1 }')"
+    [[ -z "$primary_users" || "$primary_users" == "$user" ]]
+}
+
 service_account_is_safe() {
-    local user="$1" group="$2" entry uid home shell primary uid_min
+    local user="$1" group="$2" entry uid home shell primary primary_gid user_groups uid_min
+    local group_entry group_gid members passwd_entries primary_users uid_users group_entries gid_groups gid_members
     entry="$(getent passwd "$user" 2>/dev/null)" || return 1
+    group_entry="$(getent group "$group" 2>/dev/null)" || return 1
     uid="$(printf '%s\n' "$entry" | cut -d: -f3)"
     home="$(printf '%s\n' "$entry" | cut -d: -f6)"
     shell="$(printf '%s\n' "$entry" | cut -d: -f7)"
+    group_gid="$(printf '%s\n' "$group_entry" | cut -d: -f3)"
+    members="$(printf '%s\n' "$group_entry" | cut -d: -f4)"
     primary="$(id -gn "$user" 2>/dev/null)" || return 1
+    primary_gid="$(id -g "$user" 2>/dev/null)" || return 1
+    user_groups="$(id -G "$user" 2>/dev/null)" || return 1
+    passwd_entries="$(getent passwd 2>/dev/null)" || return 1
+    primary_users="$(printf '%s\n' "$passwd_entries" | awk -F: -v gid="$group_gid" '$4 == gid { print $1 }')"
+    uid_users="$(printf '%s\n' "$passwd_entries" | awk -F: -v uid="$uid" '$3 == uid { print $1 }')"
+    group_entries="$(getent group 2>/dev/null)" || return 1
+    gid_groups="$(printf '%s\n' "$group_entries" | awk -F: -v gid="$group_gid" '$3 == gid { print $1 }')"
+    gid_members="$(printf '%s\n' "$group_entries" | awk -F: -v gid="$group_gid" '$3 == gid && $4 != "" { print $1 }')"
     uid_min="$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs 2>/dev/null)"
     uid_min="${uid_min:-1000}"
-    [[ "$uid" =~ ^[0-9]+$ && "$uid_min" =~ ^[0-9]+$ && "$uid" -lt "$uid_min" ]] || return 1
+    [[ "$uid" =~ ^[0-9]+$ && "$uid_min" =~ ^[0-9]+$ \
+       && "$uid" -gt 0 && "$uid" -lt "$uid_min" ]] || return 1
+    [[ "$group_gid" =~ ^[0-9]+$ && "$primary_gid" == "$group_gid" ]] || return 1
     [[ "$home" == /nonexistent && "$primary" == "$group" ]] || return 1
+    [[ -z "$members" && "$primary_users" == "$user" && "$uid_users" == "$user" \
+       && "$gid_groups" == "$group" && -z "$gid_members" \
+       && "$user_groups" == "$group_gid" ]] || return 1
     case "$shell" in */nologin|/bin/false) ;; *) return 1 ;; esac
 }
 
@@ -982,43 +1976,93 @@ service_account_name_is_valid() {
 
 ensure_service_account() {
     local user="$1" group="$2" user_created_name="${3:-}" group_created_name="${4:-}"
-    local nologin members group_created=0 user_created=0
+    local uid_created_name="${5:-}" gid_created_name="${6:-}"
+    local nologin group_created=0 user_created=0 user_preexists=0 account_uid="" account_gid=""
     [[ -z "$user_created_name" ]] || printf -v "$user_created_name" '%s' 0
     [[ -z "$group_created_name" ]] || printf -v "$group_created_name" '%s' 0
+    [[ -z "$uid_created_name" ]] || printf -v "$uid_created_name" '%s' ''
+    [[ -z "$gid_created_name" ]] || printf -v "$gid_created_name" '%s' ''
     service_account_name_is_valid "$user" && service_account_name_is_valid "$group" \
         || { err "Invalid strict service account name: $user/$group"; return 1; }
+    if getent passwd "$user" >/dev/null 2>&1; then
+        user_preexists=1
+    fi
     if getent group "$group" >/dev/null 2>&1; then
-        members="$(getent group "$group" | cut -d: -f4)"
-        [[ -z "$members" ]] \
-            || { err "Refusing shared service group with explicit members: $group"; return 1; }
+        service_group_is_exclusive_for_user "$group" "$user" \
+            || { err "Refusing shared service group: $group"; return 1; }
     else
+        [[ "$user_preexists" == 0 ]] \
+            || { err "Refusing a pre-existing service account without its named primary group: $user/$group"; return 1; }
         groupadd --system "$group" || return 1
         group_created=1
+        account_gid="$(getent group "$group" 2>/dev/null | cut -d: -f3 || true)"
+        [[ -z "$group_created_name" ]] || printf -v "$group_created_name" '%s' "$group_created"
+        [[ -z "$gid_created_name" ]] || printf -v "$gid_created_name" '%s' "$account_gid"
+        if ! service_group_is_exclusive_for_user "$group" "$user"; then
+            groupdel "$group" 2>/dev/null || true
+            err "Refusing non-exclusive service group: $group"
+            return 1
+        fi
     fi
-    if getent passwd "$user" >/dev/null 2>&1; then
+    if [[ "$user_preexists" == 1 ]]; then
         if ! service_account_is_safe "$user" "$group"; then
             [[ "$group_created" == 0 ]] || groupdel "$group" 2>/dev/null || true
             err "Refusing incompatible pre-existing service account: $user"
             return 1
         fi
+    else
+        nologin="$(command -v nologin 2>/dev/null || true)"
+        nologin="${nologin:-/usr/sbin/nologin}"
+        if ! useradd --system --gid "$group" --home-dir /nonexistent --shell "$nologin" \
+            --no-create-home "$user"; then
+            [[ "$group_created" == 0 ]] || groupdel "$group" 2>/dev/null || true
+            return 1
+        fi
+        user_created=1
+        account_uid="$(id -u "$user" 2>/dev/null || true)"
+        if [[ -z "$account_gid" ]]; then
+            account_gid="$(id -g "$user" 2>/dev/null || true)"
+        fi
+        [[ -z "$user_created_name" ]] || printf -v "$user_created_name" '%s' "$user_created"
         [[ -z "$group_created_name" ]] || printf -v "$group_created_name" '%s' "$group_created"
-        return 0
+        [[ -z "$uid_created_name" ]] || printf -v "$uid_created_name" '%s' "$account_uid"
+        [[ -z "$gid_created_name" ]] || printf -v "$gid_created_name" '%s' "$account_gid"
+        if ! service_account_is_safe "$user" "$group"; then
+            userdel "$user" 2>/dev/null || true
+            [[ "$group_created" == 0 ]] || groupdel "$group" 2>/dev/null || true
+            return 1
+        fi
     fi
-    nologin="$(command -v nologin 2>/dev/null || true)"
-    nologin="${nologin:-/usr/sbin/nologin}"
-    if ! useradd --system --gid "$group" --home-dir /nonexistent --shell "$nologin" \
-        --no-create-home "$user"; then
-        [[ "$group_created" == 0 ]] || groupdel "$group" 2>/dev/null || true
-        return 1
-    fi
-    user_created=1
-    if ! service_account_is_safe "$user" "$group"; then
-        [[ "$user_created" == 0 ]] || userdel "$user" 2>/dev/null || true
-        [[ "$group_created" == 0 ]] || groupdel "$group" 2>/dev/null || true
-        return 1
+    if [[ "$user_created" == 1 || "$group_created" == 1 ]]; then
+        account_uid="$(id -u "$user" 2>/dev/null || true)"
+        account_gid="$(id -g "$user" 2>/dev/null || true)"
+        if [[ ! "$account_uid" =~ ^[0-9]+$ || ! "$account_gid" =~ ^[0-9]+$ ]]; then
+            [[ "$user_created" == 0 ]] || userdel "$user" 2>/dev/null || true
+            [[ "$group_created" == 0 ]] || groupdel "$group" 2>/dev/null || true
+            err "Could not record the created service account identity: $user/$group"
+            return 1
+        fi
     fi
     [[ -z "$user_created_name" ]] || printf -v "$user_created_name" '%s' "$user_created"
     [[ -z "$group_created_name" ]] || printf -v "$group_created_name" '%s' "$group_created"
+    [[ -z "$uid_created_name" ]] || printf -v "$uid_created_name" '%s' "$account_uid"
+    [[ -z "$gid_created_name" ]] || printf -v "$gid_created_name" '%s' "$account_gid"
+}
+
+install_service_account() {
+    local user="$1" group="$2"
+    local created_user_flag=0 created_group_flag=0 created_uid_value="" created_gid_value="" result=0
+    ensure_service_account "$user" "$group" created_user_flag created_group_flag \
+        created_uid_value created_gid_value || result=$?
+    if [[ "$created_user_flag" == 1 || "$created_group_flag" == 1 ]]; then
+        CREATED_SERVICE_ACCOUNT_USERS+=("$user")
+        CREATED_SERVICE_ACCOUNT_GROUPS+=("$group")
+        CREATED_SERVICE_ACCOUNT_UIDS+=("$created_uid_value")
+        CREATED_SERVICE_ACCOUNT_GIDS+=("$created_gid_value")
+        CREATED_SERVICE_ACCOUNT_USER_FLAGS+=("$created_user_flag")
+        CREATED_SERVICE_ACCOUNT_GROUP_FLAGS+=("$created_group_flag")
+    fi
+    return "$result"
 }
 
 install_service_accounts() {
@@ -1028,21 +2072,9 @@ install_service_accounts() {
         && command -v groupdel >/dev/null 2>&1 \
         && command -v userdel >/dev/null 2>&1 \
         || { err "getent and service account management tools are required for service isolation."; return 1; }
-    ensure_service_account "$DNS_SERVICE_USER" "$DNS_SERVICE_USER" || return 1
-    ensure_service_account "$MIHOMO_SERVICE_USER" "$MIHOMO_SERVICE_USER" || return 1
-    ensure_service_account "$INTERCEPT_SERVICE_USER" "$INTERCEPT_SERVICE_USER" \
-        INTERCEPT_USER_CREATED_THIS_RUN INTERCEPT_GROUP_CREATED_THIS_RUN || return 1
-    if [[ "$INTERCEPT_USER_CREATED_THIS_RUN" == 1 ]]; then
-        INTERCEPT_CREATED_UID="$(id -u "$INTERCEPT_SERVICE_USER" 2>/dev/null || true)"
-        INTERCEPT_CREATED_GID="$(id -g "$INTERCEPT_SERVICE_USER" 2>/dev/null || true)"
-    elif [[ "$INTERCEPT_GROUP_CREATED_THIS_RUN" == 1 ]]; then
-        INTERCEPT_CREATED_GID="$(getent group "$INTERCEPT_SERVICE_USER" | cut -d: -f3)"
-    fi
-    [[ "$INTERCEPT_USER_CREATED_THIS_RUN" == 0 \
-       || ( "$INTERCEPT_CREATED_UID" =~ ^[0-9]+$ && "$INTERCEPT_CREATED_GID" =~ ^[0-9]+$ ) ]] \
-        || { err "Could not record the created interception service UID/GID."; return 1; }
-    [[ "$INTERCEPT_GROUP_CREATED_THIS_RUN" == 0 || "$INTERCEPT_CREATED_GID" =~ ^[0-9]+$ ]] \
-        || { err "Could not record the created interception service GID."; return 1; }
+    install_service_account "$DNS_SERVICE_USER" "$DNS_SERVICE_USER" || return 1
+    install_service_account "$MIHOMO_SERVICE_USER" "$MIHOMO_SERVICE_USER" || return 1
+    install_service_account "$INTERCEPT_SERVICE_USER" "$INTERCEPT_SERVICE_USER" || return 1
     ok "Dedicated service accounts are ready: ${DNS_SERVICE_USER}, ${MIHOMO_SERVICE_USER}, ${INTERCEPT_SERVICE_USER}."
 }
 
@@ -1075,9 +2107,10 @@ install_polkit_rule() {
 }
 
 remove_owned_renewal_automation() {
-    remove_owned_unit 5gpn-certbot-renew.timer
-    remove_owned_unit 5gpn-certbot-renew.service
-    systemctl daemon-reload 2>/dev/null || true
+    remove_owned_unit 5gpn-certbot-renew.timer || return 1
+    remove_owned_unit 5gpn-certbot-renew.service || return 1
+    systemctl daemon-reload 2>/dev/null \
+        || { err "Could not reload systemd after removing certificate renewal units."; return 1; }
 }
 install_deps() {
     info "Installing dependencies..."
@@ -1116,7 +2149,7 @@ install_deps() {
             ;;
     esac
     local cmd
-    for cmd in curl openssl tar gzip unzip sha256sum ip flock; do
+    for cmd in curl openssl tar gzip unzip sha256sum ip flock timeout; do
         command -v "$cmd" >/dev/null 2>&1 \
             || { err "Required command is missing after dependency install: $cmd"; return 1; }
     done
@@ -1140,6 +2173,54 @@ install_deps() {
 ARTIFACT_STAGE=""
 ROLLBACK_DIR=""
 INSTALL_TRANSACTION_ACTIVE=0
+ROLLBACK_SNAPSHOT_READY=0
+ROLLBACK_IN_PROGRESS=0
+PRESERVE_ROLLBACK_STAGE=0
+PRETRANSACTION_ROOTS_ACTIVE=0
+BASE_ROOT_WAS_ABSENT=0
+CONF_ROOT_WAS_ABSENT=0
+STATE_ROOT_WAS_ABSENT=0
+POSTCOMMIT_TIMER_RESTORE_PENDING=0
+
+# Unit files are snapshotted only for project-owned units. Runtime state also
+# includes the distro Certbot timer because an owned-lineage install may
+# deliberately coordinate it, but the installer never replaces its unit file.
+TRANSACTION_UNIT_FILES=(
+    5gpn-dns.service
+    5gpn-intercept.service
+    5gpn-intercept-cert.service
+    5gpn-intercept-cert.path
+    5gpn-intercept-cert.timer
+    5gpn-intercept-runtime.path
+    mihomo.service
+    5gpn-journal@.service
+    5gpn-certbot-renew.service
+    5gpn-certbot-renew.timer
+)
+TRANSACTION_STATE_UNITS=(
+    mihomo.service
+    5gpn-intercept.service
+    5gpn-dns.service
+    5gpn-intercept-cert.path
+    5gpn-intercept-cert.timer
+    5gpn-intercept-runtime.path
+    5gpn-intercept-cert.service
+    5gpn-certbot-renew.service
+    5gpn-certbot-renew.timer
+    certbot.timer
+)
+TRANSACTION_STOP_UNITS=(
+    certbot.timer
+    5gpn-certbot-renew.timer
+    5gpn-intercept-cert.timer
+    5gpn-intercept-cert.path
+    5gpn-intercept-runtime.path
+    5gpn-certbot-renew.service
+    5gpn-intercept-cert.service
+    5gpn-dns.service
+    5gpn-intercept.service
+    mihomo.service
+)
 
 sha256_of() { sha256sum "$1" | awk '{print tolower($1)}'; }
 
@@ -1150,6 +2231,51 @@ verify_sha256() {
     got="$(sha256_of "$file")"
     [[ "$got" == "$expected" ]] \
         || { err "SHA-256 mismatch for $(basename "$file") (want $expected got $got)."; return 1; }
+}
+
+# A release version declaration is one exact LF-terminated byte sequence.
+# Bytewise comparison rejects NULs that shell line readers would silently drop.
+release_tag_file_matches() {
+    local file="$1" expected="$2"
+    [[ -f "$file" && ! -L "$file" ]] || return 1
+    [[ "$(file_nlink "$file")" == 1 ]] || return 1
+    printf '%s\n' "$expected" | cmp -s - "$file"
+}
+
+binary_reports_exact_version() {
+    local binary="$1" flag="$2" expected="$3" output result=1
+    [[ -d "$ARTIFACT_STAGE" && ! -L "$ARTIFACT_STAGE" ]] || return 1
+    output="$(mktemp "${ARTIFACT_STAGE}/.version-output.XXXXXX")" || return 1
+    chmod 0600 "$output" || { rm -f -- "$output"; return 1; }
+    if "$binary" "$flag" > "$output" 2>/dev/null \
+       && release_tag_file_matches "$output" "$expected"; then
+        result=0
+    fi
+    rm -f -- "$output" || return 1
+    return "$result"
+}
+
+# Upstream mihomo prints build metadata and feature tags as well as its release
+# version. Require its documented amd64 first-line shape, then compare the
+# complete version token rather than accepting a substring match.
+mihomo_reports_exact_version() {
+    local binary="$1" expected="$2" output first actual result=1
+    [[ -d "$ARTIFACT_STAGE" && ! -L "$ARTIFACT_STAGE" ]] || return 1
+    output="$(mktemp "${ARTIFACT_STAGE}/.mihomo-version.XXXXXX")" || return 1
+    chmod 0600 "$output" || { rm -f -- "$output"; return 1; }
+    "$binary" -v > "$output" 2>/dev/null \
+        || { rm -f -- "$output"; return 1; }
+    LC_ALL=C tr -d '\000' < "$output" | cmp -s - "$output" \
+        || { rm -f -- "$output"; return 1; }
+    IFS= read -r first < "$output" \
+        || { rm -f -- "$output"; return 1; }
+    [[ "$first" != *$'\r'* ]] || { rm -f -- "$output"; return 1; }
+    [[ "$first" =~ ^Mihomo\ Meta\ ([^[:space:]]+)\ linux\ amd64\ with\ go[^[:space:]]+\ .+$ ]] \
+        && actual="${BASH_REMATCH[1]}" \
+        && [[ "$actual" == "$expected" ]] \
+        && result=0
+    rm -f -- "$output" || return 1
+    return "$result"
 }
 
 release_checksum() {
@@ -1345,16 +2471,16 @@ stage_artifacts() {
     verify_sha256 "$ARTIFACT_STAGE/5gpn-dns" \
         "$(release_checksum "$ARTIFACT_STAGE/checksums.txt" "$dns_asset")" || return 1
     chmod 0755 "$ARTIFACT_STAGE/5gpn-dns"
-    "$ARTIFACT_STAGE/5gpn-dns" --version >/dev/null 2>&1 \
-        || { err "Staged 5gpn-dns binary did not execute."; return 1; }
+    binary_reports_exact_version "$ARTIFACT_STAGE/5gpn-dns" --version "$ver" \
+        || { err "Staged 5gpn-dns version does not match pinned release ${ver}."; return 1; }
 
     curl -fsSL "$release/$intercept_asset" -o "$ARTIFACT_STAGE/5gpn-intercept" \
         || { err "Could not download $intercept_asset."; return 1; }
     verify_sha256 "$ARTIFACT_STAGE/5gpn-intercept" \
         "$(release_checksum "$ARTIFACT_STAGE/checksums.txt" "$intercept_asset")" || return 1
     chmod 0755 "$ARTIFACT_STAGE/5gpn-intercept"
-    "$ARTIFACT_STAGE/5gpn-intercept" --version >/dev/null 2>&1 \
-        || { err "Staged 5gpn-intercept binary did not execute."; return 1; }
+    binary_reports_exact_version "$ARTIFACT_STAGE/5gpn-intercept" --version "$ver" \
+        || { err "Staged 5gpn-intercept version does not match pinned release ${ver}."; return 1; }
 
     curl -fsSL "$release/$web_asset" -o "$ARTIFACT_STAGE/web.tgz" \
         || { err "Could not download $web_asset."; return 1; }
@@ -1369,14 +2495,16 @@ stage_artifacts() {
         || { err "Unsafe object found after web archive extraction."; return 1; }
     [[ -f "$ARTIFACT_STAGE/web/index.html" ]] \
         || { err "Staged web archive has no index.html."; return 1; }
+    release_tag_file_matches "$ARTIFACT_STAGE/web/.web_version" "$ver" \
+        || { err "Staged web archive version does not match pinned release ${ver}."; return 1; }
 
     curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz" \
         -o "$ARTIFACT_STAGE/mihomo.gz" || { err "Could not download mihomo ${MIHOMO_VERSION}."; return 1; }
     verify_sha256 "$ARTIFACT_STAGE/mihomo.gz" "$MIHOMO_SHA256" || return 1
     gzip -dc "$ARTIFACT_STAGE/mihomo.gz" > "$ARTIFACT_STAGE/mihomo"
     chmod 0755 "$ARTIFACT_STAGE/mihomo"
-    "$ARTIFACT_STAGE/mihomo" -v >/dev/null 2>&1 \
-        || { err "Staged mihomo binary did not execute."; return 1; }
+    mihomo_reports_exact_version "$ARTIFACT_STAGE/mihomo" "$MIHOMO_VERSION" \
+        || { err "Staged mihomo version does not match pinned release ${MIHOMO_VERSION}."; return 1; }
 
     curl -fsSL "https://github.com/Zephyruso/zashboard/releases/download/${ZASH_VERSION}/dist.zip" \
         -o "$ARTIFACT_STAGE/zash.zip" || { err "Could not download zashboard ${ZASH_VERSION}."; return 1; }
@@ -1430,28 +2558,106 @@ cleanup_artifact_stage() {
     ARTIFACT_STAGE=""
 }
 
-file_uid() { stat -c %u -- "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null || true; }
-file_mode() { stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || true; }
-
-acquire_install_cert_lock() {
-    [[ "$INSTALL_CERT_LOCK_HELD" == 0 ]] || return 0
-    command -v flock >/dev/null 2>&1 \
-        || { err "flock is required for certificate-operation exclusion."; return 1; }
-    local lock_dir; lock_dir="$(dirname -- "$CERT_RENEW_LOCK_FILE")"
+ensure_private_lock_dir() {
+    local lock_dir; lock_dir="$(dirname -- "$INSTALL_LOCK_FILE")"
     if [[ ! -e "$lock_dir" ]]; then
         install -d -o root -g root -m 0700 "$lock_dir" \
-            || { err "Could not create the certificate-renewal lock directory."; return 1; }
+            || { err "Could not create the installer lock directory."; return 1; }
     fi
     [[ -d "$lock_dir" && ! -L "$lock_dir" \
        && "$(readlink -f -- "$lock_dir" 2>/dev/null || true)" == "$lock_dir" \
        && "$(file_uid "$lock_dir")" == 0 \
        && "$(file_mode "$lock_dir")" == 700 ]] \
-        || { err "Unsafe certificate-renewal lock directory: ${lock_dir}"; return 1; }
-    if [[ -e "$CERT_RENEW_LOCK_FILE" ]]; then
-        [[ -f "$CERT_RENEW_LOCK_FILE" && ! -L "$CERT_RENEW_LOCK_FILE" \
-           && "$(file_uid "$CERT_RENEW_LOCK_FILE")" == 0 ]] \
-            || { err "Unsafe certificate-renewal lock file: ${CERT_RENEW_LOCK_FILE}"; return 1; }
+        || { err "Unsafe installer lock directory: ${lock_dir}"; return 1; }
+}
+
+lock_file_safe() {
+    local lock_file="$1"
+    [[ ! -e "$lock_file" ]] && return 0
+    [[ -f "$lock_file" && ! -L "$lock_file" \
+       && "$(file_uid "$lock_file")" == 0 ]]
+}
+
+lock_fd_targets_file() {
+    local fd="$1" lock_file="$2" fd_identity file_identity
+    [[ -e "/proc/${BASHPID}/fd/${fd}" && -f "$lock_file" && ! -L "$lock_file" ]] || return 1
+    fd_identity="$(stat -Lc '%d:%i' -- "/proc/self/fd/${fd}" 2>/dev/null || true)"
+    file_identity="$(stat -Lc '%d:%i' -- "$lock_file" 2>/dev/null || true)"
+    [[ -n "$fd_identity" && "$fd_identity" == "$file_identity" ]]
+}
+
+acquire_install_lock() {
+    command -v flock >/dev/null 2>&1 \
+        || { err "flock is required for installer transaction exclusion."; return 1; }
+    ensure_private_lock_dir || return 1
+    lock_file_safe "$INSTALL_LOCK_FILE" \
+        || { err "Unsafe installer transaction lock file: ${INSTALL_LOCK_FILE}"; return 1; }
+    if lock_fd_targets_file 7 "$INSTALL_LOCK_FILE"; then
+        flock -w 900 7 \
+            || { err "Timed out revalidating the installer transaction lock."; return 1; }
+        INSTALL_LOCK_HELD=1
+        return 0
     fi
+    exec 7>&- 2>/dev/null || true
+    exec 7>"$INSTALL_LOCK_FILE"
+    chmod 0600 "$INSTALL_LOCK_FILE" \
+        || { exec 7>&-; err "Could not protect the installer transaction lock file."; return 1; }
+    info "Waiting for any active 5gpn install, configure, or uninstall transaction to finish..."
+    flock -w 900 7 \
+        || { exec 7>&-; err "Timed out waiting for the 5gpn installer transaction lock."; return 1; }
+    INSTALL_LOCK_HELD=1
+}
+
+release_install_lock() {
+    local rc=0
+    if [[ "$INSTALL_LOCK_HELD" == 1 ]]; then
+        lock_fd_targets_file 7 "$INSTALL_LOCK_FILE" || rc=1
+        flock -u 7 2>/dev/null || rc=1
+    fi
+    exec 7>&- 2>/dev/null || true
+    INSTALL_LOCK_HELD=0
+    [[ "$rc" == 0 ]] || { err "The installer transaction lock descriptor was invalid during release."; return 1; }
+}
+
+run_management_with_install_lock() (
+    local rc
+    acquire_install_lock || exit $?
+    trap 'rc=$?; trap - EXIT HUP INT TERM; release_install_lock || true; exit "$rc"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    "$@"
+)
+
+run_management_with_install_and_cert_lock() (
+    local rc
+    acquire_install_lock || exit $?
+    trap 'rc=$?; trap - EXIT HUP INT TERM; release_install_cert_lock || true; release_install_lock || true; exit "$rc"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    acquire_install_cert_lock || exit $?
+    "$@"
+)
+
+acquire_install_cert_lock() {
+    command -v flock >/dev/null 2>&1 \
+        || { err "flock is required for certificate-operation exclusion."; return 1; }
+    lock_fd_targets_file 7 "$INSTALL_LOCK_FILE" \
+        || { err "The installer transaction lock must be held before the certificate lock."; return 1; }
+    flock -n 7 \
+        || { err "The installer transaction lock is no longer held."; return 1; }
+    INSTALL_LOCK_HELD=1
+    ensure_private_lock_dir || return 1
+    lock_file_safe "$CERT_RENEW_LOCK_FILE" \
+        || { err "Unsafe certificate-renewal lock file: ${CERT_RENEW_LOCK_FILE}"; return 1; }
+    if lock_fd_targets_file 8 "$CERT_RENEW_LOCK_FILE"; then
+        flock -w 900 8 \
+            || { err "Timed out revalidating the certificate-renewal lock."; return 1; }
+        INSTALL_CERT_LOCK_HELD=1
+        return 0
+    fi
+    exec 8>&- 2>/dev/null || true
     exec 8>"$CERT_RENEW_LOCK_FILE"
     chmod 0600 "$CERT_RENEW_LOCK_FILE" \
         || { exec 8>&-; err "Could not protect the certificate-renewal lock file."; return 1; }
@@ -1462,10 +2668,44 @@ acquire_install_cert_lock() {
 }
 
 release_install_cert_lock() {
-    [[ "$INSTALL_CERT_LOCK_HELD" == 1 ]] || return 0
-    flock -u 8 2>/dev/null || true
-    exec 8>&-
+    local rc=0
+    if [[ "$INSTALL_CERT_LOCK_HELD" == 1 ]]; then
+        lock_fd_targets_file 8 "$CERT_RENEW_LOCK_FILE" || rc=1
+        flock -u 8 2>/dev/null || rc=1
+    fi
+    exec 8>&- 2>/dev/null || true
     INSTALL_CERT_LOCK_HELD=0
+    [[ "$rc" == 0 ]] || { err "The certificate lock descriptor was invalid during release."; return 1; }
+}
+
+record_project_root_prestate() {
+    BASE_ROOT_WAS_ABSENT=0
+    CONF_ROOT_WAS_ABSENT=0
+    STATE_ROOT_WAS_ABSENT=0
+    POSTCOMMIT_TIMER_RESTORE_PENDING=0
+    [[ -e "$BASE_DIR" || -L "$BASE_DIR" ]] || BASE_ROOT_WAS_ABSENT=1
+    [[ -e "$CONF_DIR" || -L "$CONF_DIR" ]] || CONF_ROOT_WAS_ABSENT=1
+    [[ -e "$STATE_DIR" || -L "$STATE_DIR" ]] || STATE_ROOT_WAS_ABSENT=1
+    PRETRANSACTION_ROOTS_ACTIVE=1
+}
+
+cleanup_pretransaction_project_roots() {
+    local failed_name="$1"
+    local -n failed_ref="$failed_name"
+    [[ "$PRETRANSACTION_ROOTS_ACTIVE" == 1 ]] || return 0
+    if [[ "$STATE_ROOT_WAS_ABSENT" == 1 && ( -e "$STATE_DIR" || -L "$STATE_DIR" ) ]]; then
+        remove_fixed_owned_dir "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE" \
+            || failed_ref=1
+    fi
+    if [[ "$CONF_ROOT_WAS_ABSENT" == 1 && ( -e "$CONF_DIR" || -L "$CONF_DIR" ) ]]; then
+        remove_fixed_owned_dir "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
+            || failed_ref=1
+    fi
+    if [[ "$BASE_ROOT_WAS_ABSENT" == 1 && ( -e "$BASE_DIR" || -L "$BASE_DIR" ) ]]; then
+        remove_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
+            || failed_ref=1
+    fi
+    [[ "$failed_ref" != 0 ]] || PRETRANSACTION_ROOTS_ACTIVE=0
 }
 
 capture_optional_owned_root() {
@@ -1479,74 +2719,291 @@ capture_optional_owned_root() {
     cp -a -- "$dir" "$ROLLBACK_DIR/$name"
 }
 
+capture_managed_unit_states() {
+    local unit enabled_state active_state fragment_path load_state enabled_rc active_rc
+    install -d -m 0700 "$ROLLBACK_DIR/unit-state" || return 1
+    for unit in "${TRANSACTION_STATE_UNITS[@]}"; do
+        load_state="$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)"
+        [[ -n "$load_state" ]] \
+            || { err "Could not determine systemd load state for $unit."; return 1; }
+        if [[ -n "$load_state" && "$load_state" != not-found ]]; then
+            : > "$ROLLBACK_DIR/unit-state/${unit}.exists" || return 1
+        else
+            : > "$ROLLBACK_DIR/unit-state/${unit}.absent" || return 1
+        fi
+        if enabled_state="$(systemctl is-enabled "$unit" 2>/dev/null)"; then
+            enabled_rc=0
+        else
+            enabled_rc=$?
+        fi
+        if active_state="$(systemctl is-active "$unit" 2>/dev/null)"; then
+            active_rc=0
+        else
+            active_rc=$?
+        fi
+        fragment_path="$(systemctl show -p FragmentPath --value "$unit" 2>/dev/null || true)"
+        [[ "$enabled_state" != *$'\n'* && "$active_state" != *$'\n'* \
+           && "$fragment_path" != *$'\n'* ]] || return 1
+        case "${enabled_state:-not-found}" in
+            enabled|enabled-runtime|masked|masked-runtime|static|indirect|disabled|not-found) ;;
+            *) err "Unsupported systemd enablement state for $unit: ${enabled_state:-empty}"; return 1 ;;
+        esac
+        if [[ "$load_state" == not-found ]]; then
+            [[ "${enabled_state:-not-found}" == not-found \
+               && ( "${active_state:-unknown}" == inactive || "${active_state:-unknown}" == unknown ) ]] \
+                || { err "Inconsistent absent-unit state for $unit."; return 1; }
+        else
+            [[ "$enabled_state" != not-found \
+               && ( "$active_state" == active || "$active_state" == inactive ) ]] \
+                || { err "Unstable systemd state for $unit (${enabled_state:-empty}/${active_state:-empty}); retry when it is active or inactive."; return 1; }
+        fi
+        printf '%s\n' "${enabled_state:-not-found}" \
+            > "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" || return 1
+        printf '%s\n' "${active_state:-unknown}" \
+            > "$ROLLBACK_DIR/unit-state/${unit}.active-state" || return 1
+        printf '%s\n' "$fragment_path" \
+            > "$ROLLBACK_DIR/unit-state/${unit}.fragment-path" || return 1
+        if [[ "$enabled_rc" == 0 ]]; then
+            : > "$ROLLBACK_DIR/unit-state/${unit}.enabled" || return 1
+            # Keep the legacy path while older rollback tests and snapshots are
+            # still consumed by pre-release installers.
+            : > "$ROLLBACK_DIR/units/${unit}.enabled" || return 1
+        else
+            : > "$ROLLBACK_DIR/unit-state/${unit}.disabled" || return 1
+            : > "$ROLLBACK_DIR/units/${unit}.disabled" || return 1
+        fi
+        if [[ "$active_rc" == 0 ]]; then
+            : > "$ROLLBACK_DIR/unit-state/${unit}.active" || return 1
+            : > "$ROLLBACK_DIR/units/${unit}.active" || return 1
+        else
+            : > "$ROLLBACK_DIR/unit-state/${unit}.inactive" || return 1
+            : > "$ROLLBACK_DIR/units/${unit}.inactive" || return 1
+        fi
+    done
+}
+
+stop_units_for_install_snapshot() {
+    local unit
+    for unit in "${TRANSACTION_STOP_UNITS[@]}"; do
+        [[ -f "$ROLLBACK_DIR/unit-state/${unit}.exists" ]] || continue
+        systemctl stop "$unit" >/dev/null 2>&1 \
+            || { err "Could not stop $unit before the install snapshot."; return 1; }
+        ! systemctl is-active --quiet "$unit" 2>/dev/null \
+            || { err "$unit remained active before the install snapshot."; return 1; }
+    done
+    if systemctl is-active --quiet certbot.service 2>/dev/null; then
+        err "certbot.service is active after its timer was stopped; retry after that external renewal completes."
+        return 1
+    fi
+}
+
+snapshot_has_exactly_one_file() {
+    local first="$1" second="$2" count=0
+    [[ -f "$first" && ! -L "$first" ]] && count=$((count + 1))
+    [[ -f "$second" && ! -L "$second" ]] && count=$((count + 1))
+    [[ "$count" == 1 ]]
+}
+
+snapshot_has_dir_or_absent() {
+    local dir="$1" absent="$2" count=0
+    [[ -d "$dir" && ! -L "$dir" ]] && count=$((count + 1))
+    [[ -f "$absent" && ! -L "$absent" ]] && count=$((count + 1))
+    [[ "$count" == 1 ]]
+}
+
+snapshot_has_exactly_one_public_tree_state() {
+    local owned="$1" empty="$2" absent="$3" count=0
+    [[ -d "$owned" && ! -L "$owned" ]] && count=$((count + 1))
+    [[ -d "$empty" && ! -L "$empty" ]] && count=$((count + 1))
+    [[ -f "$absent" && ! -L "$absent" ]] && count=$((count + 1))
+    [[ "$count" == 1 ]]
+}
+
+empty_unowned_public_tree_is_safe() {
+    local dir="$1" marker="$2" entry
+    root_owned_nonwritable_directory_is_safe "$dir" || return 1
+    [[ ! -e "$dir/$marker" && ! -L "$dir/$marker" ]] || return 1
+    entry="$(find "$dir" -mindepth 1 -print -quit 2>/dev/null)" || return 1
+    [[ -z "$entry" ]]
+}
+
+validate_install_rollback_snapshot() {
+    local unit b seen=" "
+    [[ -d "$ROLLBACK_DIR" && ! -L "$ROLLBACK_DIR" \
+       && -f "$ROLLBACK_DIR/.complete" && ! -L "$ROLLBACK_DIR/.complete" \
+       && "$(cat "$ROLLBACK_DIR/.complete" 2>/dev/null || true)" == 5gpn-install-rollback-v2 \
+       && -d "$ROLLBACK_DIR/units" && ! -L "$ROLLBACK_DIR/units" \
+       && -d "$ROLLBACK_DIR/unit-state" && ! -L "$ROLLBACK_DIR/unit-state" \
+       && -d "$ROLLBACK_DIR/polkit" && ! -L "$ROLLBACK_DIR/polkit" \
+       && -d "$ROLLBACK_DIR/renewal-conf" && ! -L "$ROLLBACK_DIR/renewal-conf" \
+       && -f "$ROLLBACK_DIR/renewal-names" && ! -L "$ROLLBACK_DIR/renewal-names" ]] \
+        || return 1
+    snapshot_has_dir_or_absent "$ROLLBACK_DIR/base" "$ROLLBACK_DIR/base.absent" || return 1
+    snapshot_has_dir_or_absent "$ROLLBACK_DIR/conf" "$ROLLBACK_DIR/conf.absent" || return 1
+    snapshot_has_exactly_one_file "$ROLLBACK_DIR/state.present" "$ROLLBACK_DIR/state.absent" || return 1
+    [[ ! -d "$ROLLBACK_DIR/base" ]] \
+        || verify_ownership_marker "$ROLLBACK_DIR/base" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" || return 1
+    [[ ! -d "$ROLLBACK_DIR/conf" ]] \
+        || verify_ownership_marker "$ROLLBACK_DIR/conf" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" || return 1
+    snapshot_has_exactly_one_file "$ROLLBACK_DIR/launcher" "$ROLLBACK_DIR/launcher.absent" || return 1
+    snapshot_has_exactly_one_file "$ROLLBACK_DIR/polkit/50-5gpn.rules" \
+        "$ROLLBACK_DIR/polkit/50-5gpn.rules.absent" || return 1
+    snapshot_has_exactly_one_file "$ROLLBACK_DIR/renew-hook" "$ROLLBACK_DIR/renew-hook.absent" || return 1
+    snapshot_has_dir_or_absent "$ROLLBACK_DIR/intercept-ca" "$ROLLBACK_DIR/intercept-ca.absent" || return 1
+    snapshot_has_dir_or_absent "$ROLLBACK_DIR/intercept-state" "$ROLLBACK_DIR/intercept-state.absent" || return 1
+    [[ ! -d "$ROLLBACK_DIR/intercept-ca" ]] \
+        || verify_ownership_marker "$ROLLBACK_DIR/intercept-ca" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" || return 1
+    [[ ! -d "$ROLLBACK_DIR/intercept-state" ]] \
+        || verify_ownership_marker "$ROLLBACK_DIR/intercept-state" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" || return 1
+    for unit in "${TRANSACTION_UNIT_FILES[@]}"; do
+        snapshot_has_exactly_one_file "$ROLLBACK_DIR/units/$unit" "$ROLLBACK_DIR/units/$unit.absent" || return 1
+    done
+    for unit in "${TRANSACTION_STATE_UNITS[@]}"; do
+        snapshot_has_exactly_one_file "$ROLLBACK_DIR/unit-state/${unit}.exists" \
+            "$ROLLBACK_DIR/unit-state/${unit}.absent" || return 1
+        [[ -f "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" \
+           && ! -L "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" \
+           && -f "$ROLLBACK_DIR/unit-state/${unit}.active-state" \
+           && ! -L "$ROLLBACK_DIR/unit-state/${unit}.active-state" \
+           && -f "$ROLLBACK_DIR/unit-state/${unit}.fragment-path" \
+           && ! -L "$ROLLBACK_DIR/unit-state/${unit}.fragment-path" ]] || return 1
+        if [[ -f "$ROLLBACK_DIR/unit-state/${unit}.exists" ]]; then
+            grep -Eq '^(enabled|enabled-runtime|masked|masked-runtime|static|indirect|disabled)$' \
+                "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" || return 1
+            grep -Eq '^(active|inactive)$' "$ROLLBACK_DIR/unit-state/${unit}.active-state" || return 1
+        else
+            grep -Eq '^not-found$' "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" || return 1
+            grep -Eq '^(inactive|unknown)$' "$ROLLBACK_DIR/unit-state/${unit}.active-state" || return 1
+        fi
+        snapshot_has_exactly_one_file "$ROLLBACK_DIR/unit-state/${unit}.enabled" \
+            "$ROLLBACK_DIR/unit-state/${unit}.disabled" || return 1
+        snapshot_has_exactly_one_file "$ROLLBACK_DIR/unit-state/${unit}.active" \
+            "$ROLLBACK_DIR/unit-state/${unit}.inactive" || return 1
+    done
+    while IFS= read -r b; do
+        is_valid_domain "$b" || return 1
+        case "$seen" in *" $b "*) return 1 ;; *) seen+="$b " ;; esac
+        snapshot_has_exactly_one_file "$ROLLBACK_DIR/renewal-conf/${b}.conf" \
+            "$ROLLBACK_DIR/renewal-conf/${b}.absent" || return 1
+        snapshot_has_exactly_one_file "$ROLLBACK_DIR/renewal-conf/${b}.lineage-present" \
+            "$ROLLBACK_DIR/renewal-conf/${b}.lineage-absent" || return 1
+        if [[ -f "$ROLLBACK_DIR/renewal-conf/${b}.lineage-present" ]]; then
+            [[ -d "$ROLLBACK_DIR/le-live/${b}" && ! -L "$ROLLBACK_DIR/le-live/${b}" \
+               && -d "$ROLLBACK_DIR/le-archive/${b}" && ! -L "$ROLLBACK_DIR/le-archive/${b}" \
+               && -s "$ROLLBACK_DIR/lineage-leaf/${b}/fullchain.pem" \
+               && -f "$ROLLBACK_DIR/lineage-leaf/${b}/fullchain.pem" \
+               && ! -L "$ROLLBACK_DIR/lineage-leaf/${b}/fullchain.pem" \
+               && -s "$ROLLBACK_DIR/lineage-leaf/${b}/privkey.pem" \
+               && -f "$ROLLBACK_DIR/lineage-leaf/${b}/privkey.pem" \
+               && ! -L "$ROLLBACK_DIR/lineage-leaf/${b}/privkey.pem" ]] || return 1
+        fi
+    done < "$ROLLBACK_DIR/renewal-names"
+    if [[ "$DNS_WEB_DIR" != "$BASE_DIR"/* ]]; then
+        snapshot_has_exactly_one_public_tree_state "$ROLLBACK_DIR/external-web" \
+            "$ROLLBACK_DIR/external-web.empty-unowned" "$ROLLBACK_DIR/external-web.absent" || return 1
+        [[ ! -d "$ROLLBACK_DIR/external-web" ]] \
+            || verify_ownership_marker "$ROLLBACK_DIR/external-web" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE" || return 1
+        if [[ -d "$ROLLBACK_DIR/external-web.empty-unowned" ]]; then
+            empty_unowned_public_tree_is_safe "$ROLLBACK_DIR/external-web.empty-unowned" \
+                "$WEB_OWNERSHIP_MARKER" || return 1
+        fi
+    fi
+    if [[ "$DNS_ZASH_DIR" != "$BASE_DIR"/* ]]; then
+        snapshot_has_exactly_one_public_tree_state "$ROLLBACK_DIR/external-zash" \
+            "$ROLLBACK_DIR/external-zash.empty-unowned" "$ROLLBACK_DIR/external-zash.absent" || return 1
+        [[ ! -d "$ROLLBACK_DIR/external-zash" ]] \
+            || verify_ownership_marker "$ROLLBACK_DIR/external-zash" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1' || return 1
+        if [[ -d "$ROLLBACK_DIR/external-zash.empty-unowned" ]]; then
+            empty_unowned_public_tree_is_safe "$ROLLBACK_DIR/external-zash.empty-unowned" \
+                "$ZASH_OWNERSHIP_MARKER" || return 1
+        fi
+    fi
+}
+
 capture_install_rollback() {
     ROLLBACK_DIR="$ARTIFACT_STAGE/rollback"
-    install -d -m 0700 "$ROLLBACK_DIR"
-    cp -a -- "$BASE_DIR" "$ROLLBACK_DIR/base"
-    cp -a -- "$CONF_DIR" "$ROLLBACK_DIR/conf"
+    local unit
+    install -d -m 0700 "$ROLLBACK_DIR" "$ROLLBACK_DIR/units" || return 1
+    for unit in "${TRANSACTION_UNIT_FILES[@]}"; do
+        if [[ -e "/etc/systemd/system/$unit" || -L "/etc/systemd/system/$unit" ]]; then
+            [[ -f "/etc/systemd/system/$unit" && ! -L "/etc/systemd/system/$unit" ]] \
+                || { err "Unsafe managed unit path before rollback capture: /etc/systemd/system/$unit"; return 1; }
+            cp -p -- "/etc/systemd/system/$unit" "$ROLLBACK_DIR/units/$unit" || return 1
+        else
+            : > "$ROLLBACK_DIR/units/$unit.absent" || return 1
+        fi
+    done
+    capture_managed_unit_states || return 1
+    INSTALL_TRANSACTION_ACTIVE=1
+    ROLLBACK_SNAPSHOT_READY=0
+    stop_units_for_install_snapshot || return 1
+    if [[ -s "$CONF_DIR/dns.env" ]]; then
+        validate_dns_env_schema \
+            || { err "dns.env changed before the transaction fence; refusing a stale snapshot."; return 1; }
+    fi
+    mihomo_config_matches_install_config \
+        || { err "The operator-owned mihomo config changed before the transaction fence; refusing a stale snapshot."; return 1; }
+
+    # Daemons that can rewrite operator state are now stopped. Snapshot live
+    # files only after this fence so a rollback never overwrites a later daemon
+    # write that raced the copy.
+    if [[ "$BASE_ROOT_WAS_ABSENT" == 1 ]]; then
+        : > "$ROLLBACK_DIR/base.absent" || return 1
+    else
+        cp -a -- "$BASE_DIR" "$ROLLBACK_DIR/base" || return 1
+    fi
+    if [[ "$CONF_ROOT_WAS_ABSENT" == 1 ]]; then
+        : > "$ROLLBACK_DIR/conf.absent" || return 1
+    else
+        cp -a -- "$CONF_DIR" "$ROLLBACK_DIR/conf" || return 1
+    fi
+    if [[ "$STATE_ROOT_WAS_ABSENT" == 1 ]]; then
+        : > "$ROLLBACK_DIR/state.absent" || return 1
+    else
+        : > "$ROLLBACK_DIR/state.present" || return 1
+    fi
+    if [[ -e /usr/local/bin/5gpn || -L /usr/local/bin/5gpn ]]; then
+        launcher_owned \
+            || { err "Refusing to snapshot an unowned /usr/local/bin/5gpn launcher."; return 1; }
+        cp -p -- /usr/local/bin/5gpn "$ROLLBACK_DIR/launcher" || return 1
+    else
+        : > "$ROLLBACK_DIR/launcher.absent" || return 1
+    fi
     capture_optional_owned_root "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" \
         "$INTERCEPT_CA_MARKER_VALUE" intercept-ca || return 1
     capture_optional_owned_root "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" \
         "$INTERCEPT_STATE_MARKER_VALUE" intercept-state || return 1
-    local unit
-    install -d -m 0700 "$ROLLBACK_DIR/units"
-    for unit in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
-        if [[ -f "/etc/systemd/system/$unit" && ! -L "/etc/systemd/system/$unit" ]]; then
-            cp -p -- "/etc/systemd/system/$unit" "$ROLLBACK_DIR/units/$unit"
-        else
-            : > "$ROLLBACK_DIR/units/$unit.absent"
-        fi
-    done
-    install -d -m 0700 "$ROLLBACK_DIR/polkit"
+    install -d -m 0700 "$ROLLBACK_DIR/polkit" || return 1
     if [[ -e "$POLKIT_RULE_PATH" || -L "$POLKIT_RULE_PATH" ]]; then
         polkit_rule_owned_by_5gpn \
             || { err "Unsafe polkit rule appeared before rollback capture: $POLKIT_RULE_PATH"; return 1; }
-        cp -p -- "$POLKIT_RULE_PATH" "$ROLLBACK_DIR/polkit/50-5gpn.rules"
+        cp -p -- "$POLKIT_RULE_PATH" "$ROLLBACK_DIR/polkit/50-5gpn.rules" || return 1
     else
-        : > "$ROLLBACK_DIR/polkit/50-5gpn.rules.absent"
+        : > "$ROLLBACK_DIR/polkit/50-5gpn.rules.absent" || return 1
     fi
-    if systemctl is-enabled --quiet 5gpn-certbot-renew.timer 2>/dev/null; then
-        : > "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.enabled"
+    if [[ -e /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh \
+       || -L /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh ]]; then
+        renew_hook_owned \
+            || { err "Unsafe Certbot deploy hook before rollback capture."; return 1; }
+        cp -p -- /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh "$ROLLBACK_DIR/renew-hook" || return 1
     else
-        : > "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.disabled"
-    fi
-    if systemctl is-enabled --quiet 5gpn-intercept-cert.path 2>/dev/null; then
-        : > "$ROLLBACK_DIR/units/5gpn-intercept-cert.path.enabled"
-    fi
-    if systemctl is-active --quiet 5gpn-intercept-cert.path 2>/dev/null; then
-        : > "$ROLLBACK_DIR/units/5gpn-intercept-cert.path.active"
-    fi
-    if systemctl is-enabled --quiet 5gpn-intercept-runtime.path 2>/dev/null; then
-        : > "$ROLLBACK_DIR/units/5gpn-intercept-runtime.path.enabled"
-    fi
-    if systemctl is-active --quiet 5gpn-intercept-runtime.path 2>/dev/null; then
-        : > "$ROLLBACK_DIR/units/5gpn-intercept-runtime.path.active"
-    fi
-    if systemctl is-active --quiet 5gpn-certbot-renew.timer 2>/dev/null; then
-        : > "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.active"
-    else
-        : > "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.inactive"
-    fi
-    if [[ -f /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh ]]; then
-        cp -p -- /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh "$ROLLBACK_DIR/renew-hook"
-    else
-        : > "$ROLLBACK_DIR/renew-hook.absent"
+        : > "$ROLLBACK_DIR/renew-hook.absent" || return 1
     fi
     # A certificate-method switch rewrites this scoped Certbot renewal file.
     # Snapshot both the currently persisted base and the newly selected base so
     # a later publication failure cannot leave dns.env and the authenticator in
     # different modes. No other host lineage is read or touched.
-    install -d -m 0700 "$ROLLBACK_DIR/renewal-conf"
+    install -d -m 0700 "$ROLLBACK_DIR/renewal-conf" || return 1
     local old_base selected_base b seen="" conf_present live_present archive_present present_count
-    old_base="$(cfg_get DNS_BASE_DOMAIN)"
+    old_base="$(cfg_get DNS_BASE_DOMAIN)" || return 1
     selected_base="${BASE_DOMAIN:-}"
-    : > "$ROLLBACK_DIR/renewal-names"
+    : > "$ROLLBACK_DIR/renewal-names" || return 1
     for b in "$old_base" "$selected_base"; do
-        b="$(printf '%s' "${b%.}" | tr '[:upper:]' '[:lower:]')"
+        b="$(printf '%s' "${b%.}" | tr '[:upper:]' '[:lower:]')" || return 1
         is_valid_domain "$b" || continue
         case " $seen " in *" $b "*) continue ;; esac
         seen+=" $b"
-        printf '%s\n' "$b" >> "$ROLLBACK_DIR/renewal-names"
+        printf '%s\n' "$b" >> "$ROLLBACK_DIR/renewal-names" || return 1
         conf_present=0; live_present=0; archive_present=0
         [[ -e "/etc/letsencrypt/renewal/${b}.conf" || -L "/etc/letsencrypt/renewal/${b}.conf" ]] && conf_present=1
         [[ -e "/etc/letsencrypt/live/${b}" || -L "/etc/letsencrypt/live/${b}" ]] && live_present=1
@@ -1557,38 +3014,63 @@ capture_install_rollback() {
         if [[ -f "/etc/letsencrypt/renewal/${b}.conf" && ! -L "/etc/letsencrypt/renewal/${b}.conf" ]]; then
             certbot_renewal_conf_scoped "/etc/letsencrypt/renewal/${b}.conf" "$b" \
                 || { err "Certbot renewal config for ${b} escapes its exact live/archive paths; refusing replacement."; return 1; }
-            cp -p -- "/etc/letsencrypt/renewal/${b}.conf" "$ROLLBACK_DIR/renewal-conf/${b}.conf"
+            cp -p -- "/etc/letsencrypt/renewal/${b}.conf" "$ROLLBACK_DIR/renewal-conf/${b}.conf" || return 1
         elif [[ -e "/etc/letsencrypt/renewal/${b}.conf" || -L "/etc/letsencrypt/renewal/${b}.conf" ]]; then
             err "Refusing unsafe Certbot renewal config path: /etc/letsencrypt/renewal/${b}.conf"
             return 1
         else
-            : > "$ROLLBACK_DIR/renewal-conf/${b}.absent"
+            : > "$ROLLBACK_DIR/renewal-conf/${b}.absent" || return 1
         fi
         if [[ "$live_present" == 1 ]]; then
-            : > "$ROLLBACK_DIR/renewal-conf/${b}.lineage-present"
+            : > "$ROLLBACK_DIR/renewal-conf/${b}.lineage-present" || return 1
             [[ -d "/etc/letsencrypt/live/${b}" && ! -L "/etc/letsencrypt/live/${b}" \
                && -d "/etc/letsencrypt/archive/${b}" && ! -L "/etc/letsencrypt/archive/${b}" \
                && -s "/etc/letsencrypt/live/${b}/fullchain.pem" \
                && -s "/etc/letsencrypt/live/${b}/privkey.pem" ]] \
                 || { err "Existing Certbot lineage ${b} has an unsafe or incomplete layout; refusing transactional replacement."; return 1; }
-            install -d -m 0700 "$ROLLBACK_DIR/le-live" "$ROLLBACK_DIR/le-archive" "$ROLLBACK_DIR/lineage-leaf/${b}"
-            cp -a -- "/etc/letsencrypt/live/${b}" "$ROLLBACK_DIR/le-live/${b}"
-            cp -a -- "/etc/letsencrypt/archive/${b}" "$ROLLBACK_DIR/le-archive/${b}"
-            cp -L -- "/etc/letsencrypt/live/${b}/fullchain.pem" "$ROLLBACK_DIR/lineage-leaf/${b}/fullchain.pem"
-            cp -L -- "/etc/letsencrypt/live/${b}/privkey.pem" "$ROLLBACK_DIR/lineage-leaf/${b}/privkey.pem"
+            install -d -m 0700 "$ROLLBACK_DIR/le-live" "$ROLLBACK_DIR/le-archive" "$ROLLBACK_DIR/lineage-leaf/${b}" || return 1
+            cp -a -- "/etc/letsencrypt/live/${b}" "$ROLLBACK_DIR/le-live/${b}" || return 1
+            cp -a -- "/etc/letsencrypt/archive/${b}" "$ROLLBACK_DIR/le-archive/${b}" || return 1
+            cp -L -- "/etc/letsencrypt/live/${b}/fullchain.pem" "$ROLLBACK_DIR/lineage-leaf/${b}/fullchain.pem" || return 1
+            cp -L -- "/etc/letsencrypt/live/${b}/privkey.pem" "$ROLLBACK_DIR/lineage-leaf/${b}/privkey.pem" || return 1
         else
-            : > "$ROLLBACK_DIR/renewal-conf/${b}.lineage-absent"
+            : > "$ROLLBACK_DIR/renewal-conf/${b}.lineage-absent" || return 1
         fi
     done
-    if [[ "$DNS_WEB_DIR" != "$BASE_DIR"/* && -d "$DNS_WEB_DIR" ]] \
-       && verify_ownership_marker "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"; then
-        cp -a -- "$DNS_WEB_DIR" "$ROLLBACK_DIR/external-web"
+    if [[ "$DNS_WEB_DIR" != "$BASE_DIR"/* ]]; then
+        if [[ -e "$DNS_WEB_DIR" || -L "$DNS_WEB_DIR" ]]; then
+            if verify_ownership_marker "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"; then
+                static_owned_tree_is_safe "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE" \
+                    || { err "Cannot capture unsafe external web root: $DNS_WEB_DIR"; return 1; }
+                cp -a -- "$DNS_WEB_DIR" "$ROLLBACK_DIR/external-web" || return 1
+            else
+                empty_unowned_public_tree_is_safe "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" \
+                    || { err "Cannot capture non-empty or unsafe unowned web root: $DNS_WEB_DIR"; return 1; }
+                cp -a -- "$DNS_WEB_DIR" "$ROLLBACK_DIR/external-web.empty-unowned" || return 1
+            fi
+        else
+            : > "$ROLLBACK_DIR/external-web.absent" || return 1
+        fi
     fi
-    if [[ "$DNS_ZASH_DIR" != "$BASE_DIR"/* && -d "$DNS_ZASH_DIR" ]] \
-       && verify_ownership_marker "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1'; then
-        cp -a -- "$DNS_ZASH_DIR" "$ROLLBACK_DIR/external-zash"
+    if [[ "$DNS_ZASH_DIR" != "$BASE_DIR"/* ]]; then
+        if [[ -e "$DNS_ZASH_DIR" || -L "$DNS_ZASH_DIR" ]]; then
+            if verify_ownership_marker "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1'; then
+                static_owned_tree_is_safe "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1' \
+                    || { err "Cannot capture unsafe external zashboard root: $DNS_ZASH_DIR"; return 1; }
+                cp -a -- "$DNS_ZASH_DIR" "$ROLLBACK_DIR/external-zash" || return 1
+            else
+                empty_unowned_public_tree_is_safe "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" \
+                    || { err "Cannot capture non-empty or unsafe unowned zashboard root: $DNS_ZASH_DIR"; return 1; }
+                cp -a -- "$DNS_ZASH_DIR" "$ROLLBACK_DIR/external-zash.empty-unowned" || return 1
+            fi
+        else
+            : > "$ROLLBACK_DIR/external-zash.absent" || return 1
+        fi
     fi
-    INSTALL_TRANSACTION_ACTIVE=1
+    printf '%s\n' 5gpn-install-rollback-v2 > "$ROLLBACK_DIR/.complete" || return 1
+    validate_install_rollback_snapshot \
+        || { rm -f -- "$ROLLBACK_DIR/.complete" 2>/dev/null || true; err "Rollback snapshot completeness validation failed."; return 1; }
+    ROLLBACK_SNAPSHOT_READY=1
 }
 
 restore_optional_owned_root() {
@@ -1635,107 +3117,539 @@ restore_config_root_without_intercept_ca() {
         || chmod --reference="$ROLLBACK_DIR/conf" "$CONF_DIR" || failed_ref=1
 }
 
-rollback_created_intercept_account() {
-    local failed_name="$1" members current_uid current_gid user_groups primary_gid primary_users
+rollback_created_service_accounts() {
+    local failed_name="$1" count index user group recorded_uid recorded_gid user_flag group_flag
+    local current_uid current_gid user_groups group_entry members passwd_entries primary_users
     local -n failed_ref="$failed_name"
-    if [[ "$INTERCEPT_USER_CREATED_THIS_RUN" == 1 ]]; then
-        current_uid="$(id -u "$INTERCEPT_SERVICE_USER" 2>/dev/null || true)"
-        user_groups="$(id -G "$INTERCEPT_SERVICE_USER" 2>/dev/null || true)"
-        primary_gid="$(id -g "$INTERCEPT_SERVICE_USER" 2>/dev/null || true)"
-        if [[ "$current_uid" == "$INTERCEPT_CREATED_UID" \
-           && "$primary_gid" == "$INTERCEPT_CREATED_GID" \
-           && "$user_groups" == "$primary_gid" ]] \
-           && service_account_is_safe "$INTERCEPT_SERVICE_USER" "$INTERCEPT_SERVICE_USER"; then
-            userdel "$INTERCEPT_SERVICE_USER" 2>/dev/null || failed_ref=1
+    count="${#CREATED_SERVICE_ACCOUNT_USERS[@]}"
+    if [[ "${#CREATED_SERVICE_ACCOUNT_GROUPS[@]}" != "$count" \
+       || "${#CREATED_SERVICE_ACCOUNT_UIDS[@]}" != "$count" \
+       || "${#CREATED_SERVICE_ACCOUNT_GIDS[@]}" != "$count" \
+       || "${#CREATED_SERVICE_ACCOUNT_USER_FLAGS[@]}" != "$count" \
+       || "${#CREATED_SERVICE_ACCOUNT_GROUP_FLAGS[@]}" != "$count" ]]; then
+        warn "Refusing service-account rollback because its creation registry is inconsistent."
+        failed_ref=1
+        return 0
+    fi
+    for (( index=count - 1; index >= 0; index-- )); do
+        user="${CREATED_SERVICE_ACCOUNT_USERS[index]}"
+        group="${CREATED_SERVICE_ACCOUNT_GROUPS[index]}"
+        recorded_uid="${CREATED_SERVICE_ACCOUNT_UIDS[index]}"
+        recorded_gid="${CREATED_SERVICE_ACCOUNT_GIDS[index]}"
+        user_flag="${CREATED_SERVICE_ACCOUNT_USER_FLAGS[index]}"
+        group_flag="${CREATED_SERVICE_ACCOUNT_GROUP_FLAGS[index]}"
+        if ! service_account_name_is_valid "$user" || ! service_account_name_is_valid "$group" \
+           || [[ ! "$user_flag" =~ ^[01]$ || ! "$group_flag" =~ ^[01]$ ]] \
+           || [[ "$user_flag" == 0 && "$group_flag" == 0 ]]; then
+            warn "Refusing an invalid service-account rollback registry entry."
+            failed_ref=1
+            continue
+        fi
+        if [[ ! "$recorded_gid" =~ ^[0-9]+$ \
+           || ( "$user_flag" == 1 && ! "$recorded_uid" =~ ^[0-9]+$ ) ]]; then
+            warn "Refusing a service-account rollback entry without its recorded identity."
+            failed_ref=1
+            continue
+        fi
+        if [[ "$user_flag" == 1 ]] && getent passwd "$user" >/dev/null 2>&1; then
+            current_uid="$(id -u "$user" 2>/dev/null || true)"
+            current_gid="$(id -g "$user" 2>/dev/null || true)"
+            user_groups="$(id -G "$user" 2>/dev/null || true)"
+            if [[ "$current_uid" == "$recorded_uid" \
+               && "$current_gid" == "$recorded_gid" \
+               && "$user_groups" == "$recorded_gid" ]] \
+               && service_account_is_safe "$user" "$group"; then
+                if ! userdel "$user" 2>/dev/null \
+                   || getent passwd "$user" >/dev/null 2>&1; then
+                    warn "Could not remove the service user created by this run: $user"
+                    failed_ref=1
+                fi
+            else
+                warn "Refusing to remove a changed service user: $user"
+                failed_ref=1
+            fi
+        fi
+        if [[ "$group_flag" == 1 ]] && getent group "$group" >/dev/null 2>&1; then
+            group_entry="$(getent group "$group" 2>/dev/null || true)"
+            current_gid="$(printf '%s\n' "$group_entry" | cut -d: -f3)"
+            members="$(printf '%s\n' "$group_entry" | cut -d: -f4)"
+            passwd_entries="$(getent passwd 2>/dev/null)" || passwd_entries="__enumeration_failed__"
+            primary_users="$(printf '%s\n' "$passwd_entries" | awk -F: -v gid="$current_gid" '$4 == gid { print $1 }')"
+            if [[ "$passwd_entries" != __enumeration_failed__ \
+               && "$current_gid" == "$recorded_gid" \
+               && -z "$members" && -z "$primary_users" ]]; then
+                if ! groupdel "$group" 2>/dev/null \
+                   || getent group "$group" >/dev/null 2>&1; then
+                    warn "Could not remove the service group created by this run: $group"
+                    failed_ref=1
+                fi
+            else
+                warn "Refusing to remove a changed or non-empty service group: $group"
+                failed_ref=1
+            fi
+        fi
+    done
+    CREATED_SERVICE_ACCOUNT_USERS=()
+    CREATED_SERVICE_ACCOUNT_GROUPS=()
+    CREATED_SERVICE_ACCOUNT_UIDS=()
+    CREATED_SERVICE_ACCOUNT_GIDS=()
+    CREATED_SERVICE_ACCOUNT_USER_FLAGS=()
+    CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=()
+}
+
+atomic_restore_regular_file() {
+    local source="$1" dest="$2" candidate
+    [[ -f "$source" && ! -L "$source" ]] || return 1
+    [[ -d "$(dirname -- "$dest")" && ! -L "$(dirname -- "$dest")" ]] || return 1
+    candidate="$(mktemp "$(dirname -- "$dest")/.$(basename -- "$dest").rollback.XXXXXX")" \
+        || return 1
+    if ! cp -p -- "$source" "$candidate" || ! mv -f -- "$candidate" "$dest"; then
+        rm -f -- "$candidate" 2>/dev/null || true
+        return 1
+    fi
+}
+
+restore_managed_unit_files() {
+    local failed_name="$1" unit live candidate
+    local -n failed_ref="$failed_name"
+    [[ -d /etc/systemd/system && ! -L /etc/systemd/system ]] \
+        || { warn "Unsafe systemd unit root during rollback."; failed_ref=1; return 0; }
+    for unit in "${TRANSACTION_UNIT_FILES[@]}"; do
+        live="/etc/systemd/system/$unit"
+        if [[ -f "$ROLLBACK_DIR/units/$unit" && ! -L "$ROLLBACK_DIR/units/$unit" ]]; then
+            if [[ -e "$live" || -L "$live" ]]; then
+                unit_file_owned_by_5gpn "$unit" \
+                    || { warn "Refusing to overwrite a changed unit during rollback: $unit"; failed_ref=1; continue; }
+            fi
+            atomic_restore_regular_file "$ROLLBACK_DIR/units/$unit" "$live" \
+                || { warn "Could not restore unit file: $unit"; failed_ref=1; }
+        elif [[ -f "$ROLLBACK_DIR/units/$unit.absent" ]]; then
+            if [[ -e "$live" || -L "$live" ]]; then
+                if unit_file_owned_by_5gpn "$unit"; then
+                    rm -f -- "$live" \
+                        || { warn "Could not remove newly installed unit: $unit"; failed_ref=1; }
+                else
+                    warn "Refusing to remove a changed unit during rollback: $unit"
+                    failed_ref=1
+                fi
+            fi
         else
-            warn "Refusing to remove a changed interception service account."
+            warn "Rollback snapshot is missing the unit state for $unit."
             failed_ref=1
         fi
-        INTERCEPT_USER_CREATED_THIS_RUN=0
-    fi
-    if [[ "$INTERCEPT_GROUP_CREATED_THIS_RUN" == 1 ]]; then
-        if getent group "$INTERCEPT_SERVICE_USER" >/dev/null 2>&1; then
-            members="$(getent group "$INTERCEPT_SERVICE_USER" | cut -d: -f4)"
-            current_gid="$(getent group "$INTERCEPT_SERVICE_USER" | cut -d: -f3)"
-            primary_users="$(getent passwd | awk -F: -v gid="$current_gid" '$4 == gid { print $1 }')"
-            [[ "$current_gid" == "$INTERCEPT_CREATED_GID" && -z "$members" && -z "$primary_users" ]] \
-                && groupdel "$INTERCEPT_SERVICE_USER" 2>/dev/null \
-                || failed_ref=1
+    done
+}
+
+restore_management_launcher() {
+    local failed_name="$1" launcher=/usr/local/bin/5gpn
+    local -n failed_ref="$failed_name"
+    if [[ -f "$ROLLBACK_DIR/launcher" && ! -L "$ROLLBACK_DIR/launcher" ]]; then
+        if [[ -e "$launcher" || -L "$launcher" ]]; then
+            launcher_owned \
+                || { warn "Refusing to overwrite a changed management launcher during rollback."; failed_ref=1; return 0; }
         fi
-        INTERCEPT_GROUP_CREATED_THIS_RUN=0
+        atomic_restore_regular_file "$ROLLBACK_DIR/launcher" "$launcher" \
+            || { failed_ref=1; return 0; }
+        launcher_owned || failed_ref=1
+    elif [[ -f "$ROLLBACK_DIR/launcher.absent" ]]; then
+        if [[ -e "$launcher" || -L "$launcher" ]]; then
+            if launcher_owned; then
+                rm -f -- "$launcher" || failed_ref=1
+            else
+                warn "Refusing to remove a changed management launcher during rollback."
+                failed_ref=1
+            fi
+        fi
+    else
+        warn "Rollback snapshot is missing the management-launcher state."
+        failed_ref=1
     fi
-    INTERCEPT_CREATED_UID=""
-    INTERCEPT_CREATED_GID=""
+}
+
+restore_renew_hook() {
+    local failed_name="$1" hook="/etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh"
+    local -n failed_ref="$failed_name"
+    if [[ -f "$ROLLBACK_DIR/renew-hook" && ! -L "$ROLLBACK_DIR/renew-hook" ]]; then
+        if [[ -e "$hook" || -L "$hook" ]]; then
+            renew_hook_owned \
+                || { warn "Refusing to overwrite a changed Certbot deploy hook during rollback."; failed_ref=1; return 0; }
+        fi
+        install -d -o root -g root -m 0755 "$(dirname -- "$hook")" \
+            || { failed_ref=1; return 0; }
+        atomic_restore_regular_file "$ROLLBACK_DIR/renew-hook" "$hook" \
+            || failed_ref=1
+    elif [[ -f "$ROLLBACK_DIR/renew-hook.absent" ]]; then
+        if [[ -e "$hook" || -L "$hook" ]]; then
+            if renew_hook_owned; then
+                rm -f -- "$hook" || failed_ref=1
+            else
+                warn "Refusing to remove a changed Certbot deploy hook during rollback."
+                failed_ref=1
+            fi
+        fi
+    else
+        warn "Rollback snapshot is missing the Certbot deploy-hook state."
+        failed_ref=1
+    fi
+}
+
+restore_external_owned_tree() {
+    local dir="$1" marker="$2" value="$3" name="$4" failed_name="$5"
+    local component_failed=0
+    local -n failed_ref="$failed_name"
+    if [[ -e "$dir" || -L "$dir" ]]; then
+        if verify_ownership_marker "$dir" "$marker" "$value"; then
+            remove_public_owned_tree "$dir" "$marker" "$value" || component_failed=1
+        elif empty_unowned_public_tree_is_safe "$dir" "$marker"; then
+            rmdir -- "$dir" || component_failed=1
+        else
+            warn "Refusing to replace a changed external asset root during rollback: $dir"
+            component_failed=1
+        fi
+    fi
+    if [[ "$component_failed" != 0 ]]; then
+        failed_ref=1
+        return 0
+    fi
+    if [[ -d "$ROLLBACK_DIR/$name" && ! -L "$ROLLBACK_DIR/$name" ]]; then
+        static_publish_parent_is_safe "$dir" \
+            && cp -a -- "$ROLLBACK_DIR/$name" "$dir" \
+            && static_owned_tree_is_safe "$dir" "$marker" "$value" \
+            || component_failed=1
+    elif [[ -d "$ROLLBACK_DIR/${name}.empty-unowned" \
+         && ! -L "$ROLLBACK_DIR/${name}.empty-unowned" ]]; then
+        static_publish_parent_is_safe "$dir" \
+            && cp -a -- "$ROLLBACK_DIR/${name}.empty-unowned" "$dir" \
+            && empty_unowned_public_tree_is_safe "$dir" "$marker" \
+            || component_failed=1
+    elif [[ ! -f "$ROLLBACK_DIR/${name}.absent" ]]; then
+        warn "Rollback snapshot is missing the external asset state for $dir."
+        component_failed=1
+    fi
+    [[ "$component_failed" == 0 ]] || failed_ref=1
+}
+
+unit_enablement_links_absent() {
+    local unit="$1" root found
+    for root in /etc/systemd/system /run/systemd/system; do
+        [[ -d "$root" && ! -L "$root" ]] || continue
+        found="$(find "$root" -type l -name "$unit" -print -quit 2>/dev/null || true)"
+        [[ -z "$found" ]] || return 1
+    done
+    return 0
+}
+
+restore_unit_enablement() {
+    local unit="$1" failed_name="$2" state current
+    local -n failed_ref="$failed_name"
+    if [[ -f "$ROLLBACK_DIR/unit-state/${unit}.absent" ]]; then
+        systemctl disable "$unit" >/dev/null 2>&1 || true
+        unit_enablement_links_absent "$unit" \
+            || { warn "Dangling enablement links remain for absent unit $unit."; failed_ref=1; }
+        return 0
+    fi
+    [[ -f "$ROLLBACK_DIR/unit-state/${unit}.exists" \
+       && -f "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" ]] \
+        || { warn "Rollback snapshot is missing enablement state for $unit."; failed_ref=1; return 0; }
+    IFS= read -r state < "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" || state=""
+    systemctl unmask "$unit" >/dev/null 2>&1 || failed_ref=1
+    systemctl unmask --runtime "$unit" >/dev/null 2>&1 || failed_ref=1
+    systemctl disable "$unit" >/dev/null 2>&1 || true
+    case "$state" in
+        enabled) systemctl enable "$unit" >/dev/null 2>&1 || failed_ref=1 ;;
+        enabled-runtime) systemctl enable --runtime "$unit" >/dev/null 2>&1 || failed_ref=1 ;;
+        disabled) ;;
+        masked) systemctl mask "$unit" >/dev/null 2>&1 || failed_ref=1 ;;
+        masked-runtime) systemctl mask --runtime "$unit" >/dev/null 2>&1 || failed_ref=1 ;;
+        static|indirect) ;;
+        *) warn "Unsupported saved enablement state '$state' for $unit."; failed_ref=1; return 0 ;;
+    esac
+    current="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+    [[ "$current" == "$state" ]] \
+        || { warn "Could not restore exact enablement state '$state' for $unit (got '${current:-unknown}')."; failed_ref=1; }
+}
+
+restore_unit_activity() {
+    local unit="$1" failed_name="$2"
+    local -n failed_ref="$failed_name"
+    [[ -f "$ROLLBACK_DIR/unit-state/${unit}.exists" ]] || return 0
+    if [[ -f "$ROLLBACK_DIR/unit-state/${unit}.active" ]]; then
+        systemctl start "$unit" >/dev/null 2>&1 || failed_ref=1
+        systemctl is-active --quiet "$unit" 2>/dev/null || failed_ref=1
+        case "$unit" in
+            5gpn-intercept.service|mihomo.service|5gpn-dns.service)
+                [[ "$failed_ref" != 0 ]] \
+                    || wait_service_ready "${unit%.service}" || failed_ref=1
+                ;;
+        esac
+    elif [[ -f "$ROLLBACK_DIR/unit-state/${unit}.inactive" ]]; then
+        systemctl stop "$unit" >/dev/null 2>&1 || failed_ref=1
+        ! systemctl is-active --quiet "$unit" 2>/dev/null || failed_ref=1
+    else
+        warn "Rollback snapshot is missing activity state for $unit."
+        failed_ref=1
+    fi
+}
+
+disable_and_verify_quarantined_unit() {
+    local unit="$1" failed_name="$2" load_state active_state enabled_state
+    local -n failed_ref="$failed_name"
+    systemctl disable --now "$unit" >/dev/null 2>&1 || true
+    systemctl stop "$unit" >/dev/null 2>&1 || true
+    load_state="$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)"
+    active_state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    enabled_state="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+    if [[ -z "$load_state" || -z "$active_state" || -z "$enabled_state" ]]; then
+        warn "Could not verify quarantine state for $unit."
+        failed_ref=1
+        return 0
+    fi
+    case "$active_state" in inactive|failed) ;; unknown) [[ "$load_state" == not-found ]] || failed_ref=1 ;; *) failed_ref=1 ;; esac
+    case "$enabled_state" in disabled|static|indirect|masked|masked-runtime|linked|linked-runtime|alias|generated|transient|not-found) ;; *) failed_ref=1 ;; esac
+}
+
+quarantine_managed_units_after_failed_rollback() {
+    local failed_name="$1" cert_failed="${2:-0}" unit base global_failed=0
+    local -n failed_ref="$failed_name"
+    for unit in "${TRANSACTION_UNIT_FILES[@]}"; do
+        disable_and_verify_quarantined_unit "$unit" "$failed_name"
+    done
+
+    # certbot.timer is distro-owned and may renew unrelated lineages. Preserve
+    # its exact pre-transaction state unless the failed 5gpn lineage is proven
+    # to be the only Certbot lineage on the host.
+    base="$(awk -F= '$1 == "DNS_BASE_DOMAIN" { print substr($0, index($0, "=") + 1); exit }' \
+        "$ROLLBACK_DIR/conf/dns.env" 2>/dev/null || true)"
+    if [[ "$cert_failed" == 1 && -n "$base" ]] \
+       && is_valid_domain "$base" \
+       && certbot_lineage_set_is_exclusive "$base"; then
+        disable_and_verify_quarantined_unit certbot.timer global_failed
+    else
+        restore_unit_enablement certbot.timer global_failed
+        restore_unit_activity certbot.timer global_failed
+        if [[ "$cert_failed" == 1 ]]; then
+            warn "The distro certbot.timer was restored to protect unrelated lineages; isolate and repair only the 5gpn lineage manually."
+        fi
+    fi
+    [[ "$global_failed" == 0 ]] || failed_ref=1
+}
+
+restore_managed_unit_states() {
+    local failed_name="$1" cert_failed="$2" allow_start="$3" unit
+    local -n failed_ref="$failed_name"
+    if [[ "$allow_start" != 1 ]]; then
+        quarantine_managed_units_after_failed_rollback "$failed_name" "$cert_failed"
+        return 0
+    fi
+    for unit in "${TRANSACTION_STATE_UNITS[@]}"; do
+        restore_unit_enablement "$unit" "$failed_name"
+    done
+    if [[ "$allow_start" == 1 ]]; then
+        for unit in "${TRANSACTION_STATE_UNITS[@]}"; do
+            restore_unit_activity "$unit" "$failed_name"
+        done
+        # Starting an active unit may pull in a unit that was originally
+        # inactive through Wants=/Requires=. Normalize inactive units once more,
+        # then verify the final active set and runtime readiness.
+        for unit in "${TRANSACTION_STATE_UNITS[@]}"; do
+            [[ -f "$ROLLBACK_DIR/unit-state/${unit}.exists" \
+               && -f "$ROLLBACK_DIR/unit-state/${unit}.inactive" ]] || continue
+            systemctl stop "$unit" >/dev/null 2>&1 || failed_ref=1
+            ! systemctl is-active --quiet "$unit" 2>/dev/null || failed_ref=1
+        done
+        for unit in "${TRANSACTION_STATE_UNITS[@]}"; do
+            [[ -f "$ROLLBACK_DIR/unit-state/${unit}.exists" \
+               && -f "$ROLLBACK_DIR/unit-state/${unit}.active" ]] || continue
+            if ! systemctl is-active --quiet "$unit" 2>/dev/null; then
+                failed_ref=1
+                continue
+            fi
+            case "$unit" in
+                5gpn-intercept.service|mihomo.service|5gpn-dns.service)
+                    wait_service_ready "${unit%.service}" || failed_ref=1 ;;
+            esac
+        done
+    fi
+}
+
+restore_global_certbot_timer_after_success() {
+    local failed=0 load_state active_state enabled_state
+    if [[ "$RELEASE_PERSISTED_GLOBAL_CERTBOT_TIMER" == 1 \
+       && ( -e "$GLOBAL_CERTBOT_TIMER_STATE" || -L "$GLOBAL_CERTBOT_TIMER_STATE" ) ]]; then
+        restore_persisted_global_certbot_timer
+        return
+    fi
+    if [[ "$KEEP_GLOBAL_CERTBOT_TIMER_DISABLED" == 1 ]]; then
+        systemctl disable --now certbot.timer >/dev/null 2>&1 || true
+        systemctl stop certbot.timer >/dev/null 2>&1 || true
+        load_state="$(systemctl show -p LoadState --value certbot.timer 2>/dev/null || true)"
+        active_state="$(systemctl is-active certbot.timer 2>/dev/null || true)"
+        enabled_state="$(systemctl is-enabled certbot.timer 2>/dev/null || true)"
+        if [[ -z "$load_state" || -z "$active_state" || -z "$enabled_state" ]] \
+           || [[ "$active_state" != inactive && "$active_state" != failed \
+              && ! ( "$active_state" == unknown && "$load_state" == not-found ) ]] \
+           || [[ "$enabled_state" == enabled || "$enabled_state" == enabled-runtime ]]; then
+            err "Could not keep the unscoped distro certbot.timer disabled."
+            return 1
+        fi
+        return 0
+    fi
+    if [[ -e "$GLOBAL_CERTBOT_TIMER_STATE" || -L "$GLOBAL_CERTBOT_TIMER_STATE" ]]; then
+        err "A saved distro Certbot timer takeover state exists, but this flow did not authorize releasing it."
+        return 1
+    fi
+    restore_unit_enablement certbot.timer failed
+    restore_unit_activity certbot.timer failed
+    [[ "$failed" == 0 ]] \
+        || { err "Could not restore the distro certbot.timer after the non-owning certificate flow."; return 1; }
 }
 
 rollback_install() {
     [[ "$INSTALL_TRANSACTION_ACTIVE" == 1 && -d "$ROLLBACK_DIR" ]] || return 0
-    local rollback_cert_failed=0 rollback_host_failed=0 rollback_state_failed=0 polkit_candidate=""
-    INSTALL_TRANSACTION_ACTIVE=0
+    local rollback_cert_failed=0 rollback_host_failed=0 rollback_state_failed=0
+    local rollback_base_failed=0 rollback_config_failed=0 rollback_unit_failed=0
+    local rollback_asset_failed=0 rollback_account_failed=0 rollback_polkit_failed=0
+    local rollback_launcher_failed=0
+    local rollback_service_failed=0
+    local rollback_lock_failed=0 polkit_candidate="" unit load_state content_failed=0 restore_ok=0
     warn "Install publication failed; restoring the previous 5gpn deployment."
+
+    # A capture failure before the immutable file snapshot has not published
+    # anything. Only the services stopped by the capture fence need restoring.
+    if [[ "$ROLLBACK_SNAPSHOT_READY" != 1 ]]; then
+        release_install_cert_lock || rollback_lock_failed=1
+        if [[ "$rollback_lock_failed" == 0 ]]; then
+            restore_managed_unit_states rollback_service_failed 0 1
+            [[ "$rollback_service_failed" == 0 ]] \
+                || quarantine_managed_units_after_failed_rollback rollback_service_failed 0
+        else
+            restore_managed_unit_states rollback_service_failed 0 0
+        fi
+        if [[ "$rollback_lock_failed" == 0 && "$rollback_service_failed" == 0 ]]; then
+            INSTALL_TRANSACTION_ACTIVE=0
+            warn "Install snapshot failed before publication; prior service states were restored."
+            return 0
+        fi
+        return 1
+    fi
+
+    if ! validate_install_rollback_snapshot; then
+        rollback_state_failed=1
+        release_install_cert_lock || rollback_lock_failed=1
+        restore_managed_unit_states rollback_service_failed 0 0
+        err "Rollback snapshot completeness validation failed; live files were not removed or overwritten."
+        return 1
+    fi
+
+    # Publication may already have restarted the runtime. Stop every current
+    # writer before replacing live state; failure leaves the snapshot intact.
+    for unit in "${TRANSACTION_STOP_UNITS[@]}"; do
+        load_state="$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)"
+        if [[ ( -z "$load_state" || "$load_state" == not-found ) ]] \
+           && ! systemctl is-active --quiet "$unit" 2>/dev/null; then
+            continue
+        fi
+        systemctl stop "$unit" >/dev/null 2>&1 || rollback_service_failed=1
+        ! systemctl is-active --quiet "$unit" 2>/dev/null || rollback_service_failed=1
+    done
+    if [[ "$rollback_service_failed" != 0 ]]; then
+        release_install_cert_lock || rollback_lock_failed=1
+        restore_managed_unit_states rollback_service_failed 0 0
+        err "Rollback could not stop all live writers; no filesystem snapshot was applied."
+        return 1
+    fi
+
     if [[ "$SWAP_CREATED_THIS_RUN" == 1 ]]; then
-        swapoff "$SWAP_FILE" 2>/dev/null || true
-        rm -f -- "$SWAP_FILE"
-        sed -i "\|^${SWAP_FILE} none swap sw 0 0 ${SWAP_FSTAB_MARKER}$|d" /etc/fstab 2>/dev/null || true
-        SWAP_CREATED_THIS_RUN=0
+        if swapon --show=NAME --noheadings 2>/dev/null | grep -Fxq "$SWAP_FILE"; then
+            swapoff "$SWAP_FILE" 2>/dev/null || rollback_host_failed=1
+        fi
+        rm -f -- "$SWAP_FILE" || rollback_host_failed=1
+        [[ ! -e "$SWAP_FILE" && ! -L "$SWAP_FILE" ]] || rollback_host_failed=1
+        sed -i "\|^${SWAP_FILE} none swap sw 0 0 ${SWAP_FSTAB_MARKER}$|d" /etc/fstab 2>/dev/null \
+            || rollback_host_failed=1
+        grep -Fq "$SWAP_FSTAB_MARKER" /etc/fstab 2>/dev/null && rollback_host_failed=1
+        [[ "$rollback_host_failed" != 0 ]] || SWAP_CREATED_THIS_RUN=0
     fi
-    systemctl stop 5gpn-dns.service mihomo.service 5gpn-intercept.service 5gpn-intercept-cert.path 5gpn-intercept-runtime.path 2>/dev/null || true
-    if verify_ownership_marker "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"; then
-        remove_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"
+
+    if [[ ! -d "$ROLLBACK_DIR/base" && ! -f "$ROLLBACK_DIR/base.absent" ]]; then
+        rollback_base_failed=1
     fi
-    cp -a -- "$ROLLBACK_DIR/base" "$BASE_DIR"
-    restore_config_root_without_intercept_ca rollback_host_failed
+    if [[ -e "$BASE_DIR" || -L "$BASE_DIR" ]]; then
+        if verify_ownership_marker "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"; then
+            remove_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
+                || rollback_base_failed=1
+        else
+            warn "Refusing to replace a changed runtime root during rollback: $BASE_DIR"
+            rollback_base_failed=1
+        fi
+    fi
+    # Never copy over BASE_DIR after a failed removal. A partial copy is also a
+    # hard rollback failure and the pristine snapshot remains retained.
+    if [[ "$rollback_base_failed" == 0 && -d "$ROLLBACK_DIR/base" ]]; then
+        [[ ! -e "$BASE_DIR" && ! -L "$BASE_DIR" ]] || rollback_base_failed=1
+        [[ "$rollback_base_failed" != 0 ]] \
+            || cp -a -- "$ROLLBACK_DIR/base" "$BASE_DIR" || rollback_base_failed=1
+    fi
+
+    if [[ -f "$ROLLBACK_DIR/conf.absent" ]]; then
+        if [[ -e "$CONF_DIR" || -L "$CONF_DIR" ]]; then
+            remove_fixed_owned_dir "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
+                || rollback_config_failed=1
+        fi
+    else
+        restore_config_root_without_intercept_ca rollback_config_failed
+    fi
     restore_optional_owned_root "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" \
-        "$INTERCEPT_CA_MARKER_VALUE" intercept-ca rollback_host_failed
+        "$INTERCEPT_CA_MARKER_VALUE" intercept-ca rollback_config_failed
     restore_optional_owned_root "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" \
         "$INTERCEPT_STATE_MARKER_VALUE" intercept-state rollback_state_failed
-    local unit
-    for unit in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
-        if [[ -f "$ROLLBACK_DIR/units/$unit" ]]; then
-            cp -p -- "$ROLLBACK_DIR/units/$unit" "/etc/systemd/system/$unit"
-        elif [[ -f "$ROLLBACK_DIR/units/$unit.absent" ]] \
-             && unit_file_owned_by_5gpn "$unit"; then
-            rm -f -- "/etc/systemd/system/$unit"
-        fi
-    done
+    restore_managed_unit_files rollback_unit_failed
+    restore_management_launcher rollback_launcher_failed
+    if [[ -f "$ROLLBACK_DIR/state.absent" && ( -e "$STATE_DIR" || -L "$STATE_DIR" ) ]]; then
+        remove_fixed_owned_dir "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE" \
+            || rollback_state_failed=1
+    fi
+
     if [[ -f "$ROLLBACK_DIR/polkit/50-5gpn.rules" ]]; then
         if [[ ( -e "$POLKIT_RULE_PATH" || -L "$POLKIT_RULE_PATH" ) ]] \
            && ! polkit_rule_owned_by_5gpn; then
             warn "Could not restore the previous polkit rule because the live path is no longer 5gpn-owned."
-            rollback_host_failed=1
+            rollback_polkit_failed=1
         else
             install -d -o root -g root -m 0755 "$(dirname -- "$POLKIT_RULE_PATH")" \
-                || rollback_host_failed=1
-            if [[ "$rollback_host_failed" == 0 ]]; then
+                || rollback_polkit_failed=1
+            if [[ "$rollback_polkit_failed" == 0 ]]; then
                 polkit_candidate="$(mktemp "$(dirname -- "$POLKIT_RULE_PATH")/.50-5gpn.rollback.XXXXXX")" \
-                    || rollback_host_failed=1
+                    || rollback_polkit_failed=1
             fi
-            if [[ "$rollback_host_failed" == 0 ]]; then
+            if [[ "$rollback_polkit_failed" == 0 ]]; then
                 install -o root -g root -m 0644 "$ROLLBACK_DIR/polkit/50-5gpn.rules" "$polkit_candidate" \
                     && mv -f -- "$polkit_candidate" "$POLKIT_RULE_PATH" \
-                    || rollback_host_failed=1
+                    || rollback_polkit_failed=1
             fi
-            [[ "$rollback_host_failed" == 0 || -z "$polkit_candidate" ]] \
-                || rm -f -- "$polkit_candidate"
+            [[ "$rollback_polkit_failed" == 0 || -z "$polkit_candidate" ]] \
+                || rm -f -- "$polkit_candidate" || rollback_polkit_failed=1
         fi
     elif [[ -f "$ROLLBACK_DIR/polkit/50-5gpn.rules.absent" ]]; then
         if polkit_rule_owned_by_5gpn; then
-            rm -f -- "$POLKIT_RULE_PATH" || rollback_host_failed=1
+            rm -f -- "$POLKIT_RULE_PATH" || rollback_polkit_failed=1
         elif [[ -e "$POLKIT_RULE_PATH" || -L "$POLKIT_RULE_PATH" ]]; then
             warn "Could not restore an absent polkit rule because the live path is no longer 5gpn-owned."
-            rollback_host_failed=1
+            rollback_polkit_failed=1
         fi
+    else
+        warn "Rollback snapshot is missing the polkit rule state."
+        rollback_polkit_failed=1
     fi
-    if [[ -f "$ROLLBACK_DIR/renew-hook" ]]; then
-        install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
-        cp -p -- "$ROLLBACK_DIR/renew-hook" /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh
-    elif [[ -f "$ROLLBACK_DIR/renew-hook.absent" ]]; then
-        rm -f -- /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh
-    fi
+
+    restore_renew_hook rollback_cert_failed
     if [[ -f "$ROLLBACK_DIR/renewal-names" ]]; then
         local renewal_base lineage_changed restore_ok
         while IFS= read -r renewal_base; do
-            is_valid_domain "$renewal_base" || continue
+            if ! is_valid_domain "$renewal_base"; then
+                rollback_cert_failed=1
+                continue
+            fi
             if [[ -f "$ROLLBACK_DIR/renewal-conf/${renewal_base}.lineage-present" ]]; then
                 lineage_changed=0
                 cmp -s "$ROLLBACK_DIR/lineage-leaf/${renewal_base}/fullchain.pem" \
@@ -1781,112 +3695,188 @@ rollback_install() {
                         fi
                         if [[ "$restore_ok" != 1 ]]; then
                             rollback_cert_failed=1
-                            systemctl disable --now 5gpn-certbot-renew.timer 2>/dev/null || true
                             warn "Certbot lineage ${renewal_base} could not be fully restored; automatic renewal was disabled."
                         fi
                     else
                         rollback_cert_failed=1
-                        systemctl disable --now 5gpn-certbot-renew.timer 2>/dev/null || true
                         warn "Could not restore Certbot lineage ${renewal_base}; automatic renewal was disabled to avoid a mode mismatch."
                     fi
                 fi
             elif [[ -f "$ROLLBACK_DIR/renewal-conf/${renewal_base}.lineage-absent" ]] \
-               && [[ -e "/etc/letsencrypt/live/${renewal_base}" || -e "/etc/letsencrypt/renewal/${renewal_base}.conf" ]]; then
-                certbot delete --non-interactive --cert-name "$renewal_base" >/dev/null 2>&1 \
-                    || warn "Could not remove newly created rollback lineage ${renewal_base}; it is not referenced by restored dns.env."
+               && [[ -e "/etc/letsencrypt/live/${renewal_base}" \
+                  || -e "/etc/letsencrypt/archive/${renewal_base}" \
+                  || -e "/etc/letsencrypt/renewal/${renewal_base}.conf" ]]; then
+                if ! certbot delete --non-interactive --cert-name "$renewal_base" >/dev/null 2>&1 \
+                   || [[ -e "/etc/letsencrypt/live/${renewal_base}" \
+                      || -e "/etc/letsencrypt/archive/${renewal_base}" \
+                      || -e "/etc/letsencrypt/renewal/${renewal_base}.conf" ]]; then
+                    rollback_cert_failed=1
+                    warn "Could not remove the Certbot lineage created by the failed transaction: ${renewal_base}."
+                fi
             fi
         done < "$ROLLBACK_DIR/renewal-names"
-    fi
-    if [[ -d "$ROLLBACK_DIR/external-web" ]]; then
-        if verify_ownership_marker "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"; then
-            remove_fixed_owned_dir "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"
-        fi
-        cp -a -- "$ROLLBACK_DIR/external-web" "$DNS_WEB_DIR"
-    fi
-    if [[ -d "$ROLLBACK_DIR/external-zash" ]]; then
-        if verify_ownership_marker "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1'; then
-            remove_fixed_owned_dir "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1'
-        fi
-        cp -a -- "$ROLLBACK_DIR/external-zash" "$DNS_ZASH_DIR"
-    fi
-    rollback_created_intercept_account rollback_host_failed
-    systemctl daemon-reload 2>/dev/null || true
-    if [[ -f "$ROLLBACK_DIR/units/5gpn-intercept-cert.path.enabled" ]]; then
-        systemctl enable 5gpn-intercept-cert.path 2>/dev/null || true
     else
-        systemctl disable 5gpn-intercept-cert.path 2>/dev/null || true
+        rollback_cert_failed=1
     fi
-    if [[ -f "$ROLLBACK_DIR/units/5gpn-intercept-cert.path.active" ]]; then
-        systemctl start 5gpn-intercept-cert.path 2>/dev/null || true
+
+    if [[ "$DNS_WEB_DIR" != "$BASE_DIR"/* ]]; then
+        restore_external_owned_tree "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" \
+            "$WEB_OWNERSHIP_VALUE" external-web rollback_asset_failed
+    fi
+    if [[ "$DNS_ZASH_DIR" != "$BASE_DIR"/* ]]; then
+        restore_external_owned_tree "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" \
+            '5gpn-zashboard-v1' external-zash rollback_asset_failed
+    fi
+    rollback_created_service_accounts rollback_account_failed
+    systemctl daemon-reload >/dev/null 2>&1 || rollback_unit_failed=1
+
+    # Starting 5gpn-intercept may synchronously start its required certificate
+    # oneshot. Release the certificate lock before restoring any active state.
+    release_install_cert_lock || rollback_lock_failed=1
+    content_failed=$((rollback_cert_failed + rollback_host_failed + rollback_state_failed \
+        + rollback_base_failed + rollback_config_failed + rollback_unit_failed \
+        + rollback_asset_failed + rollback_account_failed + rollback_polkit_failed \
+        + rollback_launcher_failed + rollback_lock_failed))
+    if [[ "$content_failed" == 0 ]]; then
+        restore_managed_unit_states rollback_service_failed 0 1
+        [[ "$rollback_service_failed" == 0 ]] \
+            || quarantine_managed_units_after_failed_rollback rollback_service_failed
     else
-        systemctl stop 5gpn-intercept-cert.path 2>/dev/null || true
+        restore_managed_unit_states rollback_service_failed "$rollback_cert_failed" 0
     fi
-    if [[ -f "$ROLLBACK_DIR/units/5gpn-intercept-runtime.path.enabled" ]]; then
-        systemctl enable 5gpn-intercept-runtime.path 2>/dev/null || true
-    else
-        systemctl disable 5gpn-intercept-runtime.path 2>/dev/null || true
-    fi
-    if [[ -f "$ROLLBACK_DIR/units/5gpn-intercept-runtime.path.active" ]]; then
-        systemctl start 5gpn-intercept-runtime.path 2>/dev/null || true
-    else
-        systemctl stop 5gpn-intercept-runtime.path 2>/dev/null || true
-    fi
-    if [[ "$rollback_cert_failed" == 0 ]]; then
-        if [[ -f "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.enabled" ]]; then
-            systemctl enable 5gpn-certbot-renew.timer 2>/dev/null || true
-        else
-            systemctl disable 5gpn-certbot-renew.timer 2>/dev/null || true
-        fi
-        if [[ -f "$ROLLBACK_DIR/units/5gpn-certbot-renew.timer.active" ]]; then
-            systemctl start 5gpn-certbot-renew.timer 2>/dev/null || true
-        else
-            systemctl stop 5gpn-certbot-renew.timer 2>/dev/null || true
-        fi
-    else
-        systemctl disable --now 5gpn-certbot-renew.timer 2>/dev/null || true
-    fi
-    systemctl restart 5gpn-intercept.service 2>/dev/null || true
-    systemctl restart mihomo.service 2>/dev/null || true
-    systemctl restart 5gpn-dns.service 2>/dev/null || true
-    release_install_cert_lock
-    if [[ "$rollback_cert_failed" == 0 && "$rollback_host_failed" == 0 && "$rollback_state_failed" == 0 ]]; then
+
+    if [[ "$content_failed" == 0 && "$rollback_service_failed" == 0 ]]; then
+        INSTALL_TRANSACTION_ACTIVE=0
+        ROLLBACK_SNAPSHOT_READY=0
+        PRETRANSACTION_ROOTS_ACTIVE=0
         warn "Previous deployment restored; inspect the reported error before retrying."
+        return 0
     else
         [[ "$rollback_cert_failed" == 0 ]] \
             || err "Certificate-lineage rollback was incomplete; automatic renewal is disabled pending repair."
-        [[ "$rollback_host_failed" == 0 ]] \
+        [[ "$rollback_host_failed" == 0 && "$rollback_base_failed" == 0 \
+           && "$rollback_config_failed" == 0 && "$rollback_unit_failed" == 0 \
+           && "$rollback_asset_failed" == 0 && "$rollback_account_failed" == 0 \
+           && "$rollback_polkit_failed" == 0 && "$rollback_launcher_failed" == 0 ]] \
             || err "Host authorization rollback was incomplete; inspect $POLKIT_RULE_PATH before retrying."
         [[ "$rollback_state_failed" == 0 ]] \
             || err "Interception state rollback was incomplete; inspect $INTERCEPT_STATE_DIR before retrying."
+        [[ "$rollback_service_failed" == 0 ]] \
+            || err "Service enablement, activity, or readiness could not be restored."
+        err "Project-managed services, paths, and timers were quarantined (disabled/stopped); verify them before reboot."
+        [[ "$rollback_lock_failed" == 0 ]] \
+            || err "A transaction lock descriptor became invalid during rollback."
         return 1
     fi
 }
 
 install_transaction_exit() {
     local rc=$?
-    trap - ERR EXIT
-    if [[ "$rc" != 0 && "$INSTALL_TRANSACTION_ACTIVE" == 1 ]]; then
-        ensure_install_cert_lock_for_rollback \
-            || { err "Could not reacquire the certificate lock; refusing an unsafe concurrent rollback."; exit "$rc"; }
-        rollback_install || true
-    fi
-    cleanup_artifact_stage || true
-    exit "$rc"
+    finish_install_transaction "$rc"
 }
 
 install_transaction_error() {
     local rc=$?
-    trap - ERR
-    ensure_install_cert_lock_for_rollback \
-        || { err "Could not reacquire the certificate lock; refusing an unsafe concurrent rollback."; trap - EXIT; exit "$rc"; }
-    rollback_install || true
-    cleanup_artifact_stage || true
-    exit "$rc"
+    finish_install_transaction "$rc"
+}
+
+install_transaction_signal() {
+    finish_install_transaction "$1"
+}
+
+ensure_install_lock_for_rollback() {
+    if lock_fd_targets_file 7 "$INSTALL_LOCK_FILE"; then
+        flock -w 900 7 \
+            || { err "Timed out revalidating the installer lock for rollback."; return 1; }
+        INSTALL_LOCK_HELD=1
+        return 0
+    fi
+    INSTALL_LOCK_HELD=0
+    acquire_install_lock
 }
 
 ensure_install_cert_lock_for_rollback() {
-    [[ "$INSTALL_CERT_LOCK_HELD" == 1 ]] && return 0
+    ensure_install_lock_for_rollback || return 1
+    if lock_fd_targets_file 8 "$CERT_RENEW_LOCK_FILE"; then
+        flock -w 900 8 \
+            || { err "Timed out revalidating the certificate lock for rollback."; return 1; }
+        INSTALL_CERT_LOCK_HELD=1
+        return 0
+    fi
+    INSTALL_CERT_LOCK_HELD=0
     acquire_install_cert_lock
+}
+
+finish_install_transaction() {
+    local original_rc="$1" rollback_rc=0 cleanup_rc=0 root_cleanup_rc=0 lock_rc=0
+    local active_was_set=0 postcommit_was_pending=0 final_rc
+    final_rc="$original_rc"
+    trap '' HUP INT TERM
+    trap - ERR EXIT
+    if [[ "$ROLLBACK_IN_PROGRESS" == 1 ]]; then
+        PRESERVE_ROLLBACK_STAGE=1
+        rollback_rc=1
+        err "A second failure reached the installer while rollback was already running."
+    elif [[ "$INSTALL_TRANSACTION_ACTIVE" == 1 ]]; then
+        active_was_set=1
+        ROLLBACK_IN_PROGRESS=1
+        set +e
+        ensure_install_cert_lock_for_rollback
+        lock_rc=$?
+        if [[ "$lock_rc" == 0 ]]; then
+            rollback_install
+            rollback_rc=$?
+        else
+            rollback_rc=1
+            err "Could not reacquire both transaction locks; refusing an unsafe concurrent rollback."
+        fi
+        set -e
+        [[ "$rollback_rc" == 0 ]] || PRESERVE_ROLLBACK_STAGE=1
+    fi
+
+    if [[ "$POSTCOMMIT_TIMER_RESTORE_PENDING" == 1 ]]; then
+        postcommit_was_pending=1
+        set +e
+        restore_global_certbot_timer_after_success
+        cleanup_rc=$?
+        set -e
+        POSTCOMMIT_TIMER_RESTORE_PENDING=0
+        [[ "$cleanup_rc" == 0 ]] || PRESERVE_ROLLBACK_STAGE=1
+    fi
+
+    if [[ "$PRESERVE_ROLLBACK_STAGE" == 0 && "$PRETRANSACTION_ROOTS_ACTIVE" == 1 ]]; then
+        set +e
+        cleanup_pretransaction_project_roots root_cleanup_rc
+        set -e
+        [[ "$root_cleanup_rc" == 0 ]] || PRESERVE_ROLLBACK_STAGE=1
+    fi
+    if [[ "$PRESERVE_ROLLBACK_STAGE" == 0 ]]; then
+        set +e
+        cleanup_artifact_stage
+        cleanup_rc=$?
+        set -e
+        [[ "$cleanup_rc" == 0 ]] || PRESERVE_ROLLBACK_STAGE=1
+    fi
+    if [[ "$PRESERVE_ROLLBACK_STAGE" == 1 ]]; then
+        [[ "$root_cleanup_rc" == 0 ]] \
+            || err "Could not restore one or more project roots that were absent before this run."
+        [[ -z "$ROLLBACK_DIR" ]] \
+            || err "Rollback was incomplete; the recovery snapshot was preserved at: $ROLLBACK_DIR"
+        [[ -z "$ARTIFACT_STAGE" ]] \
+            || err "Do not remove the retained transaction directory: $ARTIFACT_STAGE"
+    fi
+
+    set +e
+    release_install_cert_lock
+    [[ "$?" == 0 ]] || lock_rc=1
+    release_install_lock
+    [[ "$?" == 0 ]] || lock_rc=1
+    set -e
+    if [[ "$active_was_set" == 1 || "$postcommit_was_pending" == 1 || "$rollback_rc" != 0 \
+       || "$cleanup_rc" != 0 || "$root_cleanup_rc" != 0 || "$lock_rc" != 0 ]]; then
+        [[ "$final_rc" != 0 ]] || final_rc=1
+    fi
+    exit "$final_rc"
 }
 
 publish_executable() {
@@ -1910,30 +3900,39 @@ publish_executable() {
 install_5gpndns() {
     [[ -n "$ARTIFACT_STAGE" && -x "$ARTIFACT_STAGE/5gpn-dns" ]] \
         || { err "5gpn-dns was not staged."; return 1; }
-    publish_executable "$ARTIFACT_STAGE/5gpn-dns" "$DNS_BIN"
-    [[ -x "$DNS_BIN" ]] || { err "5gpn-dns install failed."; exit 1; }
+    publish_executable "$ARTIFACT_STAGE/5gpn-dns" "$DNS_BIN" \
+        || { err "5gpn-dns publication failed."; return 1; }
+    [[ -x "$DNS_BIN" ]] && cmp -s "$ARTIFACT_STAGE/5gpn-dns" "$DNS_BIN" \
+        && binary_reports_exact_version "$DNS_BIN" --version "$DNS_VERSION_DEFAULT" \
+        || { err "Published 5gpn-dns failed identity/version verification."; return 1; }
     ok "Verified 5gpn-dns ${DNS_VERSION_DEFAULT} published to $DNS_BIN."
 }
 
 install_intercept() {
     [[ -n "$ARTIFACT_STAGE" && -x "$ARTIFACT_STAGE/5gpn-intercept" ]] \
         || { err "5gpn-intercept was not staged."; return 1; }
-    publish_executable "$ARTIFACT_STAGE/5gpn-intercept" "$INTERCEPT_BIN"
-    [[ -x "$INTERCEPT_BIN" ]] || { err "5gpn-intercept install failed."; return 1; }
+    publish_executable "$ARTIFACT_STAGE/5gpn-intercept" "$INTERCEPT_BIN" \
+        || { err "5gpn-intercept publication failed."; return 1; }
+    [[ -x "$INTERCEPT_BIN" ]] && cmp -s "$ARTIFACT_STAGE/5gpn-intercept" "$INTERCEPT_BIN" \
+        && binary_reports_exact_version "$INTERCEPT_BIN" --version "$DNS_VERSION_DEFAULT" \
+        || { err "Published 5gpn-intercept failed identity/version verification."; return 1; }
     ok "Verified 5gpn-intercept ${DNS_VERSION_DEFAULT} published to $INTERCEPT_BIN."
 }
 
 prepare_intercept_runtime_dirs() {
     local path canonical
+    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
+        || { err "Unsafe configuration root: $CONF_DIR"; return 1; }
     for path in "$INTERCEPT_DIR" "$INTERCEPT_DIR/tls"; do
-        [[ ! -e "$path" && ! -L "$path" ]] || [[ -d "$path" && ! -L "$path" ]] \
+        runtime_directory_slot_is_safe "$path" "$CONF_DIR" \
             || { err "Refusing unsafe interception runtime path: $path"; return 1; }
         install -d -o root -g "$INTERCEPT_SERVICE_USER" -m 0750 "$path" || return 1
         canonical="$(canonical_dir_path "$path")" || return 1
         [[ "$canonical" == "$path" ]] \
             || { err "Refusing interception runtime path alias: $path -> $canonical"; return 1; }
     done
-    chmod 2770 "$INTERCEPT_DIR" || return 1
+    chmod g-s "$INTERCEPT_DIR/tls" || return 1
+    chmod 3770 "$INTERCEPT_DIR" || return 1
 }
 
 prepare_intercept_state_dir() {
@@ -1980,7 +3979,7 @@ ensure_intercept_config() {
   "modules": []
 }
 EOF
-    chown root:"$INTERCEPT_SERVICE_USER" "$candidate" && chmod 0660 "$candidate" \
+    chown "$DNS_SERVICE_USER:$INTERCEPT_SERVICE_USER" "$candidate" && chmod 0640 "$candidate" \
         || { rm -f -- "$candidate"; return 1; }
     "$INTERCEPT_BIN" --config "$candidate" --check-config \
         || { rm -f -- "$candidate"; err "Generated interception config failed validation."; return 1; }
@@ -2028,6 +4027,7 @@ ensure_intercept_certificates() {
     local stage serial fullchain_candidate
     claim_fixed_owned_dir "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" || return 1
     install -d -o root -g root -m 0700 "$INTERCEPT_CA_DIR" || return 1
+    chmod g-s "$INTERCEPT_CA_DIR" || return 1
     stage="$(mktemp -d /var/tmp/5gpn-intercept-cert.XXXXXX)" || return 1
     chmod 0700 "$stage"
     claim_temp_dir "$stage" || { rmdir -- "$stage"; return 1; }
@@ -2071,8 +4071,9 @@ ensure_intercept_certificates() {
 install_web() {
     [[ -n "$ARTIFACT_STAGE" && -f "$ARTIFACT_STAGE/web/index.html" ]] \
         || { err "Control-console SPA was not staged."; return 1; }
+    release_tag_file_matches "$ARTIFACT_STAGE/web/.web_version" "$DNS_VERSION_DEFAULT" \
+        || { err "Control-console SPA version does not match ${DNS_VERSION_DEFAULT}."; return 1; }
     claim_web_dir || return 1
-    printf '%s\n' "$DNS_VERSION_DEFAULT" > "$ARTIFACT_STAGE/web/.web_version"
     publish_owned_tree "$ARTIFACT_STAGE/web" "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE" \
         || { err "Could not atomically publish control-console SPA."; return 1; }
     ok "Verified control-console SPA published to ${DNS_WEB_DIR}/ (${DNS_VERSION_DEFAULT})."
@@ -2107,8 +4108,11 @@ install_zashboard() {
 install_mihomo() {
     [[ -n "$ARTIFACT_STAGE" && -x "$ARTIFACT_STAGE/mihomo" ]] \
         || { err "mihomo was not staged."; return 1; }
-    publish_executable "$ARTIFACT_STAGE/mihomo" "$MIHOMO_BIN"
-    [[ -x "$MIHOMO_BIN" ]] || { err "mihomo install failed."; return 1; }
+    publish_executable "$ARTIFACT_STAGE/mihomo" "$MIHOMO_BIN" \
+        || { err "mihomo publication failed."; return 1; }
+    [[ -x "$MIHOMO_BIN" ]] && cmp -s "$ARTIFACT_STAGE/mihomo" "$MIHOMO_BIN" \
+        && mihomo_reports_exact_version "$MIHOMO_BIN" "$MIHOMO_VERSION" \
+        || { err "Published mihomo failed identity/version verification."; return 1; }
     ok "Verified mihomo ${MIHOMO_VERSION} published to $MIHOMO_BIN."
 }
 
@@ -2215,7 +4219,7 @@ seed_mihomo_whitelist() {
         local seed="${SCRIPT_DIR}/etc/mihomo/whitelist.seed.txt"
         [[ -f "$seed" && -r "$seed" && -s "$seed" ]] \
             || { err "Bundled mihomo whitelist seed is missing, unreadable, or empty: $seed"; return 1; }
-        install -g "$MIHOMO_SERVICE_USER" -m 0660 \
+        install -o "$DNS_SERVICE_USER" -g "$MIHOMO_SERVICE_USER" -m 0640 \
             "$seed" "$MIHOMO_DIR/whitelist.txt" \
             || { err "Could not seed the mihomo source allowlist."; return 1; }
         warn "Zashboard is unreachable until you explicitly add a source CIDR with '5gpn add-allow'."
@@ -2223,19 +4227,24 @@ seed_mihomo_whitelist() {
 }
 
 mihomo_config_secret() {
-    local f="$1" secret=""
-    [[ -f "$f" ]] && secret="$(sed -n 's/^[[:space:]]*secret:[[:space:]]*//p' "$f" | head -1)"
-    secret="${secret%$'\r'}"
-    if [[ "$secret" == \"*\" && "$secret" == *\" ]]; then secret="${secret:1:${#secret}-2}"; fi
-    if [[ "$secret" == \'*\' && "$secret" == *\' ]]; then secret="${secret:1:${#secret}-2}"; fi
-    printf '%s' "$secret"
+    local f="$1"
+    [[ -x "$DNS_BIN" ]] \
+        || { err "5gpn-dns is unavailable for structural mihomo secret parsing."; return 1; }
+    "$DNS_BIN" --print-mihomo-secret --config "$f"
+}
+
+yaml_single_quoted_value() {
+    local value="$1"
+    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
+    value="${value//\'/\'\'}"
+    printf '%s' "$value"
 }
 
 persist_mihomo_secret() {
     local secret="$1"
     [[ -n "$secret" ]] || { warn "mihomo config has no readable controller secret; DNS_MIHOMO_SECRET was not changed."; return 0; }
     set_dns_env_kv "${CONF_DIR}/dns.env" DNS_MIHOMO_SECRET "$secret" \
-        || warn "could not persist DNS_MIHOMO_SECRET to dns.env; the daemon reverse-proxy may not match the mihomo controller secret."
+        || { err "Could not persist DNS_MIHOMO_SECRET to dns.env."; return 1; }
 }
 
 # Seed mihomo's fully operator-owned config only when it is missing. A normal
@@ -2246,7 +4255,16 @@ persist_mihomo_secret() {
 render_mihomo_config() {
     local mode="${1:-seed}" config="${MIHOMO_DIR}/config.yaml" secret="" template=""
     MIHOMO_SEED_PORTS_REQUIRED=0
-    install -d -g "$MIHOMO_SERVICE_USER" -m 2770 "$MIHOMO_DIR"
+    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
+        || { err "Unsafe configuration root: $CONF_DIR"; return 1; }
+    runtime_directory_slot_is_safe "$MIHOMO_DIR" "$CONF_DIR" \
+        || { err "Refusing unsafe mihomo directory slot: $MIHOMO_DIR"; return 1; }
+    runtime_file_slot_is_safe "$config" "$CONF_DIR" \
+        && runtime_file_slot_is_safe "$MIHOMO_DIR/whitelist.txt" "$CONF_DIR" \
+        || { err "Refusing unsafe mihomo configuration file slot."; return 1; }
+    install -d -g "$MIHOMO_SERVICE_USER" -m 3770 "$MIHOMO_DIR"
+    runtime_tree_has_only_plain_entries "$MIHOMO_DIR" \
+        || { err "Refusing unsafe link, hardlink, or special entry below $MIHOMO_DIR"; return 1; }
     seed_mihomo_whitelist || return 1
 
     if [[ -f "$config" && "$mode" != "--reset" ]]; then
@@ -2254,10 +4272,11 @@ render_mihomo_config() {
             err "Existing operator-owned mihomo config is invalid; it was NOT overwritten: $config"
             return 1
         fi
-        chgrp "$MIHOMO_SERVICE_USER" "$config" 2>/dev/null || true
-        chmod 0660 "$config" 2>/dev/null || true
-        secret="$(mihomo_config_secret "$config")"
-        persist_mihomo_secret "$secret"
+        chown "$DNS_SERVICE_USER:$MIHOMO_SERVICE_USER" "$config" 2>/dev/null || true
+        chmod 0640 "$config" 2>/dev/null || true
+        secret="$(mihomo_config_secret "$config")" \
+            || { err "Existing mihomo controller secret could not be parsed safely."; return 1; }
+        persist_mihomo_secret "$secret" || return 1
         ok "Existing operator-owned mihomo config validated and preserved: $config"
         return 0
     fi
@@ -2268,7 +4287,10 @@ render_mihomo_config() {
 
     # Controller secret survives an explicit reset. On first install, prefer a
     # persisted value and otherwise generate a strong mixed secret.
-    [[ -f "$config" ]] && secret="$(mihomo_config_secret "$config")"
+    if [[ -f "$config" ]]; then
+        secret="$(mihomo_config_secret "$config")" \
+            || { err "Existing mihomo controller secret could not be parsed safely."; return 1; }
+    fi
     [[ -n "$secret" ]] || secret="$(cfg_get DNS_MIHOMO_SECRET)"
     [[ -n "$secret" ]] || secret="$(openssl rand -base64 24)"
 
@@ -2279,7 +4301,9 @@ render_mihomo_config() {
     MIHOMO_LISTEN_IPS="${MIHOMO_LISTEN_IPS:-$(cfg_get DNS_MIHOMO_LISTEN_IPS)}"
     MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" || return 1
     export MIHOMO_LISTEN_IPS
-    local listeners candidate line backup intercept_fields intercept_in_user intercept_in_pass intercept_up_user intercept_up_pass
+    local listeners candidate line backup intercept_fields intercept_in_user intercept_in_pass intercept_up_user intercept_up_pass secret_yaml_value
+    secret_yaml_value="$(yaml_single_quoted_value "$secret")" \
+        || { err "The mihomo controller secret cannot be represented safely in YAML."; return 1; }
     intercept_fields="$("$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --print-mihomo-fields)" \
         || { err "Could not read validated interception credentials."; return 1; }
     IFS=$'\t' read -r intercept_in_user intercept_in_pass intercept_up_user intercept_up_pass <<< "$intercept_fields"
@@ -2291,8 +4315,8 @@ render_mihomo_config() {
     listeners="$(render_mihomo_listeners "$MIHOMO_LISTEN_IPS" "$CONSOLE_DOMAIN")"
     candidate="$(mktemp "${MIHOMO_DIR}/.config.yaml.XXXXXX")" \
         || { err "Could not create a mihomo config candidate in $MIHOMO_DIR"; return 1; }
-    chgrp "$MIHOMO_SERVICE_USER" "$candidate" \
-        && chmod 0660 "$candidate" \
+    chown "$DNS_SERVICE_USER:$MIHOMO_SERVICE_USER" "$candidate" \
+        && chmod 0640 "$candidate" \
         || { rm -f -- "$candidate"; err "Could not secure the mihomo config candidate."; return 1; }
 
     if ! while IFS= read -r line || [[ -n "$line" ]]; do
@@ -2303,7 +4327,7 @@ render_mihomo_config() {
         line="${line//__GATEWAY_IP__/$gw}"
         line="${line//__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN}"
         line="${line//__ZASH_DOMAIN__/$ZASH_DOMAIN}"
-        line="${line//__CONTROLLER_SECRET__/$secret}"
+        line="${line//__CONTROLLER_SECRET__/$secret_yaml_value}"
         line="${line//__INTERCEPT_INBOUND_USERNAME__/$intercept_in_user}"
         line="${line//__INTERCEPT_INBOUND_PASSWORD__/$intercept_in_pass}"
         line="${line//__INTERCEPT_UPSTREAM_USERNAME__/$intercept_up_user}"
@@ -2327,7 +4351,7 @@ render_mihomo_config() {
         cp -p -- "$config" "$backup" \
             || { rm -f -- "$candidate" "$backup"; err "Could not back up the operator mihomo config; live config was not changed."; return 1; }
         chgrp "$MIHOMO_SERVICE_USER" "$backup" \
-            && chmod 0660 "$backup" \
+            && chmod 0640 "$backup" \
             || { rm -f -- "$candidate" "$backup"; err "Could not secure the mihomo config backup; live config was not changed."; return 1; }
         sync -f "$backup" 2>/dev/null || true
         info "Backed up operator mihomo config to $backup"
@@ -2335,7 +4359,7 @@ render_mihomo_config() {
     mv -f -- "$candidate" "$config" \
         || { rm -f -- "$candidate"; err "Could not atomically publish the mihomo config candidate."; return 1; }
     sync -f "$MIHOMO_DIR" 2>/dev/null || true
-    persist_mihomo_secret "$secret"
+    persist_mihomo_secret "$secret" || return 1
     MIHOMO_SEED_PORTS_REQUIRED=1
 
     ok "mihomo config ${mode/--/} candidate validated and atomically installed at $config."
@@ -2441,7 +4465,11 @@ add_allow_ip() {
     is_valid_ipv4_or_cidr "$ip" \
         || { err "Allowlist entry must be a canonical IPv4 address or IPv4 CIDR."; return 1; }
     [[ "$ip" == */* ]] || ip="${ip}/32"
-    install -d -g "$MIHOMO_SERVICE_USER" -m 2770 "$MIHOMO_DIR"
+    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
+        && runtime_directory_slot_is_safe "$MIHOMO_DIR" "$CONF_DIR" \
+        && runtime_file_slot_is_safe "$file" "$CONF_DIR" \
+        || { err "Refusing unsafe mihomo allowlist path: $file"; return 1; }
+    install -d -g "$MIHOMO_SERVICE_USER" -m 3770 "$MIHOMO_DIR"
     [[ ! -e "$file" || ( -f "$file" && ! -L "$file" ) ]] \
         || { err "Refusing unsafe allowlist path: $file"; return 1; }
     tmp="$(mktemp "${MIHOMO_DIR}/.whitelist.XXXXXX")" || return 1
@@ -2454,8 +4482,8 @@ add_allow_ip() {
         printf '%s\n' "$ip" >> "$tmp" \
             || { rm -f -- "$tmp"; err "Could not update the allowlist candidate."; return 1; }
     fi
-    chgrp "$MIHOMO_SERVICE_USER" "$tmp" \
-        && chmod 0660 "$tmp" \
+    chown "$DNS_SERVICE_USER:$MIHOMO_SERVICE_USER" "$tmp" \
+        && chmod 0640 "$tmp" \
         || { rm -f -- "$tmp"; err "Could not secure the allowlist candidate."; return 1; }
     sync -f "$tmp" 2>/dev/null || true
     mv -f -- "$tmp" "$file" \
@@ -2477,6 +4505,10 @@ del_allow_ip() {
     is_valid_ipv4_or_cidr "$ip" \
         || { err "Allowlist entry must be a canonical IPv4 address or IPv4 CIDR."; return 1; }
     [[ "$ip" == */* ]] || ip="${ip}/32"
+    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
+        && runtime_directory_slot_is_safe "$MIHOMO_DIR" "$CONF_DIR" \
+        && runtime_file_slot_is_safe "$file" "$CONF_DIR" \
+        || { err "Refusing unsafe mihomo allowlist path: $file"; return 1; }
     [[ -f "$file" && ! -L "$file" ]] || {
         [[ -e "$file" ]] \
             && { err "Refusing unsafe allowlist path: $file"; return 1; }
@@ -2486,8 +4518,8 @@ del_allow_ip() {
     tmp="$(mktemp "${MIHOMO_DIR}/.whitelist.XXXXXX")" || return 1
     awk -v entry="$ip" '$0 != entry' "$file" > "$tmp" \
         || { rm -f -- "$tmp"; err "Could not update the allowlist candidate."; return 1; }
-    chgrp "$MIHOMO_SERVICE_USER" "$tmp" \
-        && chmod 0660 "$tmp" \
+    chown "$DNS_SERVICE_USER:$MIHOMO_SERVICE_USER" "$tmp" \
+        && chmod 0640 "$tmp" \
         || { rm -f -- "$tmp"; err "Could not secure the allowlist candidate."; return 1; }
     sync -f "$tmp" 2>/dev/null || true
     mv -f -- "$tmp" "$file" \
@@ -2521,6 +4553,7 @@ install_mihomo_runtime_assets() {
 
 install_files() {
     info "Installing config files and scripts..."
+    preflight_runtime_publication_paths || return 1
     mkdir -p "$BASE_DIR" "$SCRIPTS_DIR" "$WWW_DIR" \
              "$CONF_DIR" "$DNS_CERT_DIR" "$DNS_RULES_DIR_DEFAULT"
 
@@ -2554,7 +4587,8 @@ install_files() {
     # repo systemd units -> /opt/5gpn/etc/systemd (staged copies; install_units
     # installs them into /etc/systemd/system from here or from the checkout).
     install -d -m 0755 "${BASE_DIR}/etc/systemd"
-    for u in "${SCRIPT_DIR}"/etc/systemd/*.service "${SCRIPT_DIR}"/etc/systemd/*.path; do
+    for u in "${SCRIPT_DIR}"/etc/systemd/*.service "${SCRIPT_DIR}"/etc/systemd/*.path \
+             "${SCRIPT_DIR}"/etc/systemd/*.timer; do
         [[ -e "$u" ]] || continue
         install -m 0644 "$u" "${BASE_DIR}/etc/systemd/$(basename "$u")"
     done
@@ -2577,7 +4611,7 @@ launcher_owned() {
 }
 
 install_manage_cli() {
-    install -d -m 0755 "$BASE_DIR"
+    install -d -m 0755 "$BASE_DIR" || return 1
     [[ -f "$SCRIPT_PATH" && ! -L "$SCRIPT_PATH" ]] \
         || { err "Installer must come from the verified quick-install bundle or a local checkout."; return 1; }
     publish_executable "$SCRIPT_PATH" "${BASE_DIR}/install.sh" || return 1
@@ -2585,13 +4619,13 @@ install_manage_cli() {
     [[ -f "$quick_source" && ! -L "$quick_source" ]] \
         || { err "Verified quick-install.sh is required for future release-channel upgrades."; return 1; }
     publish_executable "$quick_source" "${BASE_DIR}/quick-install.sh" || return 1
-    if [[ -e /usr/local/bin/5gpn ]] && ! launcher_owned; then
+    if [[ ( -e /usr/local/bin/5gpn || -L /usr/local/bin/5gpn ) ]] && ! launcher_owned; then
         err "Refusing to overwrite an unowned /usr/local/bin/5gpn."
         return 1
     fi
     local launcher
     launcher="$(mktemp /usr/local/bin/.5gpn.XXXXXX)" || return 1
-    cat > "$launcher" <<'EOF'
+    if ! cat > "$launcher" <<'EOF'
 #!/usr/bin/env bash
 # Managed by 5gpn installer
 # 5gpn management launcher. `5gpn` opens the menu; `5gpn <subcommand>` runs it
@@ -2600,8 +4634,14 @@ BK=/opt/5gpn/install.sh
 [ -f "$BK" ] || { echo "5gpn backend missing ($BK); re-run the installer." >&2; exit 1; }
 if [ $# -eq 0 ]; then exec bash "$BK" menu; else exec bash "$BK" "$@"; fi
 EOF
-    chmod 0755 "$launcher"
-    mv -f -- "$launcher" /usr/local/bin/5gpn
+    then
+        rm -f -- "$launcher" 2>/dev/null || true
+        return 1
+    fi
+    chmod 0755 "$launcher" || { rm -f -- "$launcher" 2>/dev/null || true; return 1; }
+    mv -f -- "$launcher" /usr/local/bin/5gpn \
+        || { rm -f -- "$launcher" 2>/dev/null || true; return 1; }
+    launcher_owned || { err "Management launcher verification failed after publication."; return 1; }
     ok "Management command installed: type '5gpn' to manage (status / restart / configure / uninstall / …)."
 }
 
@@ -2650,7 +4690,8 @@ load_persisted_domains() {
 # available on a TTY; a numbered read-menu otherwise. Loops until Quit.
 manage_menu() {
     check_root
-    install_gum
+    run_management_with_install_lock install_gum
+    activate_verified_installed_gum
     if [[ ! -t 0 ]]; then
         err "The 5gpn menu is interactive. Run a subcommand directly, e.g.:"
         echo "  5gpn status | 5gpn restart | 5gpn uninstall" >&2
@@ -2683,17 +4724,17 @@ manage_menu() {
         fi
         case "$choice" in
             "状态 Status")                          show_status ;;
-            "重启服务 Restart services")            restart_services ;;
+            "重启服务 Restart services")            run_management_with_install_lock restart_services ;;
             "编辑安装配置 Configure installation")  full_install configure ;;
-            "重载规则 Reload rules")                       reload_rules ;;
-            "添加 zashboard 白名单IP Add zashboard allowlist IP")    add_allow_ip ;;
-            "移除 zashboard 白名单IP Remove zashboard allowlist IP") del_allow_ip ;;
-            "重新生成 iOS 描述文件 Regenerate iOS profile") regen_ios ;;
-            "轮换控制台令牌 Rotate console token")   rotate_token ;;
-            "设置 Cloudflare Token Set Cloudflare token") set_cf_token ;;
+            "重载规则 Reload rules")                       run_management_with_install_lock reload_rules ;;
+            "添加 zashboard 白名单IP Add zashboard allowlist IP")    run_management_with_install_lock add_allow_ip ;;
+            "移除 zashboard 白名单IP Remove zashboard allowlist IP") run_management_with_install_lock del_allow_ip ;;
+            "重新生成 iOS 描述文件 Regenerate iOS profile") run_management_with_install_and_cert_lock regen_ios ;;
+            "轮换控制台令牌 Rotate console token")   run_management_with_install_lock rotate_token ;;
+            "设置 Cloudflare Token Set Cloudflare token") run_management_with_install_and_cert_lock set_cf_token ;;
             "重置 mihomo 配置 Reset mihomo config")
-                if ask_yesno "确认备份并重置 operator-owned mihomo config?"; then reset_mihomo_config; fi ;;
-            "配置 Telegram Bot")                    setup_tgbot ;;
+                if ask_yesno "确认备份并重置 operator-owned mihomo config?"; then run_management_with_install_lock reset_mihomo_config; fi ;;
+            "配置 Telegram Bot")                    run_management_with_install_lock setup_tgbot ;;
             "卸载 Uninstall")                       uninstall; break ;;
             "退出 Quit"|"") break ;;
         esac
@@ -2756,10 +4797,10 @@ is_valid_ipv4_or_cidr() {
 #   zash -> ${ZASH_CERT_DIR} (serves the zashboard panel)
 # Three modes (resolved from persisted dns.env or the TUI):
 #   cloudflare (default) — Let's Encrypt DNS-01 through the Cloudflare API
-#                       for apex + *.<base>; auto-renews unattended
-#                       via the daily certbot timer (see install_renewal_automation).
-#                       A protected token is required for unattended renewal,
-#                       even when the current lineage is reusable. ensure_cf_token
+#                       for apex + *.<base>; an owned lineage auto-renews
+#                       unattended via the daily scoped timer. A protected token
+#                       is required for owned issuance and renewal, including
+#                       reuse of an owned lineage. ensure_cf_token
 #                       obtains it with this precedence:
 #                         1. Valid saved /etc/5gpn/acme/cloudflare.ini — reused.
 #                         2. Interactive ask_secret on a TTY (guarded || true).
@@ -2856,8 +4897,71 @@ cert_provenance_base_matches() {
     [[ "$mode" == cloudflare || "$mode" == http-01 || "$mode" == debug ]]
 }
 
+certbot_ownership_record_is_safe() {
+    local file="$CERTBOT_OWNERSHIP_FILE" line base previous="" count=0 index=0
+    local -a lines=()
+    root_plain_file_metadata_is_safe "$file" 0 640 || return 1
+    mapfile -t lines < "$file" || return 1
+    [[ "${#lines[@]}" -ge 2 && "${#lines[@]}" -le 17 \
+       && "${lines[0]}" == 'version=1' ]] || return 1
+    for ((index = 1; index < ${#lines[@]}; index++)); do
+        line="${lines[$index]}"
+        [[ "$line" == owned=* ]] || return 1
+        base="${line#owned=}"
+        is_valid_domain "$base" || return 1
+        [[ -z "$previous" || "$previous" < "$base" ]] || return 1
+        previous="$base"
+        ((count += 1))
+    done
+    [[ "$count" -ge 1 && "$count" -le 16 ]]
+}
+
+certbot_ownership_record_has() {
+    local base="$1"
+    certbot_ownership_record_is_safe \
+        && grep -Fqx "owned=${base}" "$CERTBOT_OWNERSHIP_FILE"
+}
+
+persist_certbot_lineage_ownership() {
+    local base="$1" tmp
+    local -a owned=()
+    is_valid_domain "$base" || return 1
+    ensure_dns_cert_root || return 1
+    if [[ -e "$CERTBOT_OWNERSHIP_FILE" || -L "$CERTBOT_OWNERSHIP_FILE" ]]; then
+        certbot_ownership_record_is_safe \
+            || { err "The retained Certbot ownership record is unsafe."; return 1; }
+        certbot_ownership_record_has "$base" && return 0
+        mapfile -t owned < <(sed -n 's/^owned=//p' "$CERTBOT_OWNERSHIP_FILE")
+    fi
+    owned+=("$base")
+    [[ "${#owned[@]}" -le 16 ]] \
+        || { err "Too many retained 5gpn Certbot lineage ownership records."; return 1; }
+    tmp="$(mktemp "${DNS_CERT_DIR}/.certbot-ownership.XXXXXX")" || return 1
+    {
+        printf 'version=1\n'
+        printf '%s\n' "${owned[@]}" | sort -u | sed 's/^/owned=/'
+    } > "$tmp" \
+        && chown root:root "$tmp" \
+        && chmod 0640 "$tmp" \
+        || { rm -f -- "$tmp"; return 1; }
+    sync -f "$tmp" 2>/dev/null \
+        || { rm -f -- "$tmp"; err "Could not durably write the Certbot ownership record."; return 1; }
+    mv -f -- "$tmp" "$CERTBOT_OWNERSHIP_FILE" \
+        || { rm -f -- "$tmp"; return 1; }
+    sync -f "$DNS_CERT_DIR" 2>/dev/null \
+        || { err "Could not durably publish the Certbot ownership record."; return 1; }
+    certbot_ownership_record_has "$base" \
+        || { err "Could not persist Certbot lineage ownership for ${base}."; return 1; }
+}
+
 certbot_lineage_owned_by_5gpn() {
     local base="$1" mode
+    if [[ -e "$CERTBOT_OWNERSHIP_FILE" || -L "$CERTBOT_OWNERSHIP_FILE" ]]; then
+        certbot_ownership_record_has "$base"
+        return
+    fi
+    # One-time compatibility with the immediately preceding beta: preserve its
+    # ownership proof before any mode switch overwrites active-role provenance.
     cert_provenance_base_matches "$base" || return 1
     mode="$(cert_provenance_get mode)"
     [[ "$mode" == cloudflare || "$mode" == http-01 ]] \
@@ -2872,6 +4976,159 @@ certbot_lineage_artifacts_exist() {
         || compgen -G "${LE_LIVE_ROOT}/${base}-[0-9][0-9][0-9][0-9]" >/dev/null \
         || compgen -G "${LE_ARCHIVE_ROOT}/${base}-[0-9][0-9][0-9][0-9]" >/dev/null \
         || compgen -G "${LE_RENEWAL_ROOT}/${base}-[0-9][0-9][0-9][0-9].conf" >/dev/null
+}
+
+global_certbot_timer_exists() {
+    systemctl cat certbot.timer >/dev/null 2>&1
+}
+
+# Stop the distro-wide unscoped timer before inspecting or mutating certificate
+# state. The install transaction records its enabled/active state and restores
+# it on rollback. A non-owning certificate flow also restores it before commit.
+pause_global_certbot_timer() {
+    if global_certbot_timer_exists; then
+        systemctl stop certbot.timer \
+            || { err "Could not stop the distro certbot.timer before the certificate transaction."; return 1; }
+        systemctl is-active --quiet certbot.timer 2>/dev/null \
+            && { err "The distro certbot.timer remained active after stop; refusing a certificate race."; return 1; }
+    fi
+    if systemctl is-active --quiet certbot.service 2>/dev/null; then
+        err "certbot.service is already running outside the 5gpn certificate lock."
+        err "Wait for it to finish, then rerun the installer."
+        return 1
+    fi
+}
+
+# The distro timer invokes an unscoped `certbot renew`. It can be disabled only
+# when every visible Certbot lineage belongs to this exact 5gpn base; otherwise
+# disabling it would silently break renewal for unrelated services.
+certbot_lineage_set_is_exclusive() {
+    local base="$1" root entry name expected
+    local -a roots=("$LE_LIVE_ROOT" "$LE_ARCHIVE_ROOT" "$LE_RENEWAL_ROOT")
+    for root in "${roots[@]}"; do
+        [[ ! -e "$root" && ! -L "$root" ]] && continue
+        [[ -d "$root" && ! -L "$root" \
+           && "$(readlink -f -- "$root" 2>/dev/null || true)" == "$root" ]] \
+            || { err "Unsafe Certbot lineage root: $root"; return 1; }
+        while IFS= read -r -d '' entry; do
+            name="$(basename -- "$entry")"
+            if [[ "$root" == "$LE_RENEWAL_ROOT" ]]; then
+                expected="${base}.conf"
+            else
+                expected="$base"
+                [[ "$name" == README && -f "$entry" && ! -L "$entry" ]] && continue
+            fi
+            if [[ "$name" != "$expected" ]]; then
+                err "Unrelated Certbot lineage state prevents disabling the distro certbot.timer: $entry"
+                err "Configure independent locked renewal for every lineage before installing an owned 5gpn lineage."
+                return 1
+            fi
+        done < <(find "$root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    done
+}
+
+global_certbot_timer_state_is_safe() {
+    local file="$GLOBAL_CERTBOT_TIMER_STATE" root_gid enabled active
+    root_gid="$(account_gid root)"
+    [[ -n "$root_gid" \
+       && -f "$file" && ! -L "$file" \
+       && "$(file_uid "$file")" == 0 \
+       && "$(file_gid "$file")" == "$root_gid" \
+       && "$(file_mode "$file")" == 600 \
+       && "$(file_nlink "$file")" == 1 ]] || return 1
+    grep -Eq '^version=1$' "$file" \
+        && grep -Eq '^exists=1$' "$file" \
+        && grep -Eq '^enabled=(enabled|enabled-runtime|disabled|masked|masked-runtime|static|indirect)$' "$file" \
+        && grep -Eq '^active=(active|inactive)$' "$file" \
+        && [[ "$(wc -l < "$file" | tr -d '[:space:]')" == 4 ]] \
+        || return 1
+    enabled="$(grep -E '^enabled=' "$file" | cut -d= -f2-)"
+    active="$(grep -E '^active=' "$file" | cut -d= -f2-)"
+    [[ "$active" != active || ( "$enabled" != masked && "$enabled" != masked-runtime ) ]]
+}
+
+persist_global_certbot_timer_state() {
+    local enabled active tmp
+    if [[ -e "$GLOBAL_CERTBOT_TIMER_STATE" || -L "$GLOBAL_CERTBOT_TIMER_STATE" ]]; then
+        global_certbot_timer_state_is_safe \
+            || { err "The persisted distro Certbot timer state is unsafe."; return 1; }
+        return 0
+    fi
+    [[ -n "$ROLLBACK_DIR" \
+       && -f "$ROLLBACK_DIR/unit-state/certbot.timer.exists" \
+       && -f "$ROLLBACK_DIR/unit-state/certbot.timer.enabled-state" \
+       && -f "$ROLLBACK_DIR/unit-state/certbot.timer.active-state" ]] \
+        || { err "The pre-takeover distro Certbot timer state was not captured."; return 1; }
+    enabled="$(<"$ROLLBACK_DIR/unit-state/certbot.timer.enabled-state")"
+    active="$(<"$ROLLBACK_DIR/unit-state/certbot.timer.active-state")"
+    [[ "$enabled" =~ ^(enabled|enabled-runtime|disabled|masked|masked-runtime|static|indirect)$ \
+       && "$active" =~ ^(active|inactive)$ ]] \
+        || { err "The distro Certbot timer is in a state that cannot be restored exactly: ${enabled}/${active}"; return 1; }
+    [[ "$active" != active || ( "$enabled" != masked && "$enabled" != masked-runtime ) ]] \
+        || { err "An active masked distro Certbot timer cannot be restored exactly; refusing takeover."; return 1; }
+    ensure_acme_dir || return 1
+    tmp="$(mktemp "${ACME_DIR}/.certbot.timer.state.XXXXXX")" || return 1
+    printf 'version=1\nexists=1\nenabled=%s\nactive=%s\n' "$enabled" "$active" > "$tmp" \
+        && chown root:root "$tmp" \
+        && chmod 0600 "$tmp" \
+        || { rm -f -- "$tmp"; return 1; }
+    sync -f "$tmp" 2>/dev/null || true
+    mv -f -- "$tmp" "$GLOBAL_CERTBOT_TIMER_STATE" \
+        || { rm -f -- "$tmp"; return 1; }
+    sync -f "$ACME_DIR" 2>/dev/null \
+        || { err "Could not durably persist the distro Certbot timer takeover state."; return 1; }
+    global_certbot_timer_state_is_safe \
+        || { err "Could not persist the distro Certbot timer takeover state."; return 1; }
+}
+
+restore_persisted_global_certbot_timer() {
+    local enabled active actual
+    [[ -e "$GLOBAL_CERTBOT_TIMER_STATE" || -L "$GLOBAL_CERTBOT_TIMER_STATE" ]] || return 0
+    global_certbot_timer_state_is_safe \
+        || { err "The persisted distro Certbot timer state is unsafe; refusing restoration."; return 1; }
+    enabled="$(grep -E '^enabled=' "$GLOBAL_CERTBOT_TIMER_STATE" | cut -d= -f2-)"
+    active="$(grep -E '^active=' "$GLOBAL_CERTBOT_TIMER_STATE" | cut -d= -f2-)"
+    systemctl stop certbot.timer >/dev/null 2>&1 \
+        || { err "Could not stop certbot.timer before restoring its saved state."; return 1; }
+    case "$enabled" in
+        enabled) systemctl enable certbot.timer >/dev/null 2>&1 || return 1 ;;
+        enabled-runtime) systemctl enable --runtime certbot.timer >/dev/null 2>&1 || return 1 ;;
+        disabled) systemctl disable certbot.timer >/dev/null 2>&1 || return 1 ;;
+        masked) systemctl mask certbot.timer >/dev/null 2>&1 || return 1 ;;
+        masked-runtime) systemctl mask --runtime certbot.timer >/dev/null 2>&1 || return 1 ;;
+        static|indirect) ;;
+        *) return 1 ;;
+    esac
+    if [[ "$active" == active ]]; then
+        systemctl start certbot.timer >/dev/null 2>&1 || return 1
+    fi
+    actual="$(systemctl is-enabled certbot.timer 2>/dev/null || true)"
+    [[ "$actual" == "$enabled" ]] \
+        || { err "certbot.timer enablement restore mismatch: expected ${enabled}, got ${actual:-unknown}."; return 1; }
+    actual="$(systemctl is-active certbot.timer 2>/dev/null || true)"
+    [[ "$actual" == "$active" ]] \
+        || { err "certbot.timer activity restore mismatch: expected ${active}, got ${actual:-unknown}."; return 1; }
+    rm -f -- "$GLOBAL_CERTBOT_TIMER_STATE" || return 1
+    sync -f "$ACME_DIR" 2>/dev/null || true
+    if [[ "$enabled" != enabled && "$enabled" != enabled-runtime ]] \
+       || [[ "$active" != active ]]; then
+        warn "Restored the original distro certbot.timer state (${enabled}/${active}); it does not provide active automatic renewal."
+    fi
+}
+
+disable_global_certbot_timer_for_owned_lineage() {
+    local base="$1"
+    if global_certbot_timer_exists; then
+        certbot_lineage_set_is_exclusive "$base" || return 1
+        persist_global_certbot_timer_state || return 1
+        systemctl disable --now certbot.timer \
+            || { err "Could not disable the unscoped distro certbot.timer."; return 1; }
+        systemctl is-active --quiet certbot.timer 2>/dev/null \
+            && { err "The distro certbot.timer is still active."; return 1; }
+        systemctl is-enabled --quiet certbot.timer 2>/dev/null \
+            && { err "The distro certbot.timer is still enabled."; return 1; }
+    fi
+    KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=1
 }
 
 certbot_renewal_conf_scoped() {
@@ -2943,13 +5200,16 @@ write_cert_provenance() {
         debug:none|cloudflare:owned|cloudflare:reused|cloudflare:missing|http-01:owned|http-01:reused|http-01:missing) ;;
         *) err "Invalid certificate provenance state: ${mode}:${lineage}"; return 1 ;;
     esac
-    install -d -m 0750 "$DNS_CERT_DIR"
+    ensure_dns_cert_root || return 1
+    [[ "$lineage" != owned ]] || persist_certbot_lineage_ownership "$base" || return 1
     tmp="$(mktemp "${DNS_CERT_DIR}/.provenance.XXXXXX")" || return 1
     printf 'mode=%s\nbase=%s\ncertbot_lineage=%s\n' "$mode" "$base" "$lineage" > "$tmp"
     chmod 0640 "$tmp"
     sync -f "$tmp" 2>/dev/null || true
     mv -f -- "$tmp" "$DNS_CERT_DIR/.provenance"
     sync -f "$DNS_CERT_DIR" 2>/dev/null || true
+    cert_root_is_safe \
+        || { err "Certificate provenance publication broke the root boundary."; return 1; }
 }
 
 decommission_certbot_lineage() {
@@ -2960,6 +5220,14 @@ decommission_certbot_lineage() {
         || { err "Cannot decommission: persisted base domain is invalid."; return 1; }
     if ! certbot_lineage_artifacts_exist "$base"; then
         info "No Certbot lineage artifacts exist for '${base}'."
+        return 0
+    fi
+    if [[ ( -e "$CERTBOT_OWNERSHIP_FILE" || -L "$CERTBOT_OWNERSHIP_FILE" ) ]] \
+       && ! certbot_ownership_record_is_safe; then
+        warn "Preserving Certbot lineage '${base}': the retained ownership record is unsafe and cannot authorize deletion."
+        if grep -qF -- "$ACME_DIR/cloudflare.ini" "$conf" 2>/dev/null; then
+            DECOMMISSION_PRESERVE_ACME=1
+        fi
         return 0
     fi
     if ! certbot_lineage_owned_by_5gpn "$base"; then
@@ -3054,9 +5322,24 @@ install_cert() {
     local base="${1:?install_cert needs a base domain}"
     local mode="$CERT_MODE"
     local live="${LE_LIVE_ROOT}/${base}"
-    local lineage_origin="" lineage_preexisting=0 lineage_was_owned=0
+    local lineage_origin="" lineage_artifacts=0 lineage_was_owned=0
     local force=0 cf_token_ready=0
+    if [[ -e "$CERTBOT_OWNERSHIP_FILE" || -L "$CERTBOT_OWNERSHIP_FILE" ]]; then
+        certbot_ownership_record_is_safe \
+            || { err "The retained Certbot ownership record is unsafe."; return 1; }
+    fi
     certbot_lineage_owned_by_5gpn "$base" && lineage_was_owned=1
+    certbot_lineage_artifacts_exist "$base" && lineage_artifacts=1
+    KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=0
+    RELEASE_PERSISTED_GLOBAL_CERTBOT_TIMER=0
+
+    [[ "$mode" == cloudflare || "$mode" == http-01 || "$mode" == debug ]] \
+        || { err "CERT_MODE must be cloudflare, http-01, or debug."; return 1; }
+    if [[ -e "$GLOBAL_CERTBOT_TIMER_STATE" || -L "$GLOBAL_CERTBOT_TIMER_STATE" ]]; then
+        global_certbot_timer_state_is_safe \
+            || { err "The persisted distro Certbot timer takeover state is unsafe."; return 1; }
+    fi
+    pause_global_certbot_timer || return 1
 
     if [ "$mode" = "debug" ]; then
         local debug_src="${DEBUG_CERT_DIR}/${base}"
@@ -3069,48 +5352,79 @@ install_cert() {
         else
             issue_selfsigned_wildcard "$base" || return 1
         fi
-        deploy_cert_roles "$base" "$debug_src"
-        write_cert_provenance debug "$base" none
+        deploy_cert_roles "$base" "$debug_src" || return 1
+        if [[ "$lineage_was_owned" == 1 && "$lineage_artifacts" == 1 ]]; then
+            persist_certbot_lineage_ownership "$base" || return 1
+        fi
+        write_cert_provenance debug "$base" none || return 1
         remove_owned_renew_hook
-        remove_owned_renewal_automation
+        remove_owned_renewal_automation || return 1
+        RELEASE_PERSISTED_GLOBAL_CERTBOT_TIMER=1
         return 0
     fi
 
-    [[ "$mode" == cloudflare || "$mode" == http-01 ]] \
-        || { err "CERT_MODE must be cloudflare, http-01, or debug."; return 1; }
+    # A canonical lineage without owned provenance is operator state. A strict,
+    # still-valid fingerprint may be consumed read-only, but 5gpn never invokes
+    # Certbot to renew, change SANs, or replace its authenticator. Its external
+    # renewal remains responsible for the lineage; the exact deploy hook keeps
+    # the role copies synchronized without transferring deletion ownership.
+    if [[ "$lineage_artifacts" == 1 && "$lineage_was_owned" == 0 ]]; then
+        if validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
+                "$base" "$((30*86400))" production "$mode" \
+           && certbot_renewal_mode_matches "$base" "$mode" \
+           && { [[ ! -e "$DNS_CERT_DIR/.provenance" ]] || cert_provenance_matches "$mode" "$base"; }; then
+            info "Reusing the valid externally owned ${mode} lineage for ${base} without changing it."
+            deploy_cert_roles "$base" "$live" "$mode" || return 1
+            write_cert_provenance "$mode" "$base" reused || return 1
+            install_cert_deploy_hook || return 1
+            remove_owned_renewal_automation || return 1
+            RELEASE_PERSISTED_GLOBAL_CERTBOT_TIMER=1
+            warn "The external lineage remains operator-owned; 5gpn did not install a public renewal timer or gain deletion authority."
+            return 0
+        fi
+        err "The canonical Certbot lineage '${base}' exists but is not provenance-confirmed as 5gpn-owned."
+        err "It is expiring, invalid, mode-mismatched, partial, or has an unsafe renewal fingerprint."
+        err "Renew or repair it with its owner, or move it out of the canonical name before asking 5gpn to issue a new lineage."
+        return 1
+    fi
+
+    # Purge preserves deployed role copies. If the canonical lineage is
+    # entirely absent, a matching trusted role copy may recover service without
+    # consuming a new issuance. Renewal stays disabled until repair.
+    if [[ "$lineage_artifacts" == 0 ]] \
+       && cert_provenance_matches "$mode" "$base" \
+       && validate_cert_pair "${DOT_CERT_DIR}/current/fullchain.pem" "${DOT_CERT_DIR}/current/privkey.pem" \
+            "$base" "$((30*86400))" production "$mode"; then
+        info "Certbot lineage is missing; reusing the validated preserved ${mode} role certificate for ${base}."
+        deploy_cert_roles "$base" "$DOT_CERT_DIR/current" "$mode" || return 1
+        write_cert_provenance "$mode" "$base" missing || return 1
+        remove_owned_renew_hook
+        remove_owned_renewal_automation || return 1
+        RELEASE_PERSISTED_GLOBAL_CERTBOT_TIMER=1
+        warn "The preserved certificate is active, but automatic renewal is disabled until the Certbot lineage is repaired or reissued."
+        return 0
+    fi
+
+    # From here the lineage is either absent or provenance-confirmed as owned.
+    # Only this path may disable the distro-wide timer and invoke Certbot.
+    disable_global_certbot_timer_for_owned_lineage "$base" || return 1
 
     # Reuse is mode-aware. The SAN shape distinguishes wildcard DNS-01 from
-    # exact-name HTTP-01; renewal.conf and provenance prevent a mode switch
-    # from silently retaining the previous authenticator.
-    if validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
+    # exact-name HTTP-01; renewal.conf and owned provenance prevent a mode
+    # switch from silently retaining the previous authenticator.
+    if [[ "$lineage_was_owned" == 1 ]] \
+       && validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
             "$base" "$((30*86400))" production "$mode" \
        && certbot_renewal_mode_matches "$base" "$mode" \
-       && { [[ ! -e "$DNS_CERT_DIR/.provenance" ]] || cert_provenance_matches "$mode" "$base"; }; then
-        lineage_origin=reused
-        [[ "$lineage_was_owned" == 1 ]] && lineage_origin=owned
-        info "Valid ${mode} certificate and matching renewal authenticator for ${base} (>30d); reusing."
+       && cert_provenance_matches "$mode" "$base"; then
+        lineage_origin=owned
+        info "Valid owned ${mode} certificate and matching renewal authenticator for ${base} (>30d); reusing."
     else
         if [[ ! -e "$live" ]] && compgen -G "${LE_LIVE_ROOT}/${base}-[0-9][0-9][0-9][0-9]" >/dev/null; then
             err "A duplicate Certbot lineage exists for ${base}, but the canonical ${live} lineage is absent."
             err "Resolve that lineage explicitly before reinstalling; refusing silent reuse without scoped renewal."
             return 1
         fi
-        # Purge preserves deployed role copies. If the canonical lineage is
-        # entirely absent, a matching trusted role copy may recover service
-        # without consuming a new issuance. Renewal stays disabled until repair.
-        if ! certbot_lineage_artifacts_exist "$base" \
-           && cert_provenance_matches "$mode" "$base" \
-           && validate_cert_pair "${DOT_CERT_DIR}/current/fullchain.pem" "${DOT_CERT_DIR}/current/privkey.pem" \
-                "$base" "$((30*86400))" production "$mode"; then
-            info "Certbot lineage is missing; reusing the validated preserved ${mode} role certificate for ${base}."
-            deploy_cert_roles "$base" "$DOT_CERT_DIR/current" "$mode" || return 1
-            write_cert_provenance "$mode" "$base" missing || return 1
-            remove_owned_renew_hook
-            remove_owned_renewal_automation
-            warn "The preserved certificate is active, but automatic renewal is disabled until the Certbot lineage is repaired or reissued."
-            return 0
-        fi
-        certbot_lineage_artifacts_exist "$base" && lineage_preexisting=1
         [[ -e "$live" ]] && force=1
         local -a certbot_args=(certonly --cert-name "$base" --server "$LE_PRODUCTION_SERVER" --agree-tos -n \
             -m "${CERT_EMAIL:-admin@${base}}" --keep-until-expiring --no-directory-hooks)
@@ -3132,17 +5446,13 @@ install_cert() {
         # same cert-name switches between wildcard DNS-01 and exact HTTP-01.
         [[ "$force" == 1 ]] && certbot_args+=(--force-renewal --renew-with-new-domains)
         if [[ "$mode" == http-01 ]]; then
-            run_http_certbot "${certbot_args[@]}" \
+            GPN_CERT_LOCK_HELD=1 run_http_certbot "${certbot_args[@]}" \
                 || { err "Certbot HTTP-01 failed. Check all three public A records, absence of AAAA, TCP/80/NAT/security-group reachability, and rate limits."; return 1; }
         else
-            certbot "${certbot_args[@]}" \
+            GPN_CERT_LOCK_HELD=1 certbot "${certbot_args[@]}" \
                 || { err "Certbot DNS-01 failed for *.${base} (check the Cloudflare token's Zone:DNS:Edit scope + zone match)."; return 1; }
         fi
-        if [[ "$lineage_was_owned" == 1 || "$lineage_preexisting" == 0 ]]; then
-            lineage_origin=owned
-        else
-            lineage_origin=reused
-        fi
+        lineage_origin=owned
     fi
 
     validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" "$base" 86400 production "$mode" \
@@ -3150,12 +5460,14 @@ install_cert() {
     certbot_renewal_mode_matches "$base" "$mode" \
         || { err "Certbot renewal config is unscoped, mode-mismatched, or contains persistent hooks."; return 1; }
     if [[ "$mode" == cloudflare && "$cf_token_ready" == 0 ]]; then
-        ensure_cf_token || { err "Cloudflare renewal requires a protected API token even when the current certificate is reusable."; return 1; }
+        ensure_cf_token || { err "Owned Cloudflare renewal requires a protected API token even when its certificate is reusable."; return 1; }
     fi
-    deploy_cert_roles "$base" "$live" "$mode"
-    write_cert_provenance "$mode" "$base" "$lineage_origin"
-    install_cert_deploy_hook
-    install_renewal_automation
+    [[ "$lineage_origin" == owned ]] \
+        || { err "Internal error: public renewal automation requires an owned lineage."; return 1; }
+    deploy_cert_roles "$base" "$live" "$mode" || return 1
+    write_cert_provenance "$mode" "$base" owned || return 1
+    install_cert_deploy_hook || return 1
+    install_renewal_automation "$base" || return 1
 }
 
 # issue_selfsigned_wildcard <base> — CERT_MODE=debug: a long-lived (825d)
@@ -3168,7 +5480,15 @@ install_cert() {
 issue_selfsigned_wildcard() {
     local base="$1"
     local live="${DEBUG_CERT_DIR}/${base}" tmp
-    install -d -m 0700 "$live"
+    ensure_debug_cert_root || return 1
+    runtime_directory_slot_is_safe "$live" "$DEBUG_CERT_DIR" \
+        || { err "CERT_MODE=debug: unsafe lineage path: $live"; return 1; }
+    if [[ -e "$live" || -L "$live" ]]; then
+        debug_cert_lineage_slot_is_safe "$live" \
+            || { err "CERT_MODE=debug: unsafe existing lineage tree: $live"; return 1; }
+    else
+        install -d -o root -g root -m 0700 "$live" || return 1
+    fi
     tmp="$(mktemp -d "${live}/.new.XXXXXX")" \
         || { err "CERT_MODE=debug: could not create a certificate staging directory."; return 1; }
     write_ownership_marker "$tmp" "$TEMP_OWNERSHIP_MARKER" "$TEMP_OWNERSHIP_VALUE" \
@@ -3188,6 +5508,8 @@ issue_selfsigned_wildcard() {
     mv -f -- "${tmp}/fullchain.pem" "${live}/fullchain.pem"
     rm -f -- "${tmp}/${TEMP_OWNERSHIP_MARKER}"
     rmdir -- "$tmp"
+    debug_cert_root_is_safe \
+        || { err "CERT_MODE=debug: published lineage failed filesystem validation."; return 1; }
     warn "CERT_MODE=debug: SELF-SIGNED WILDCARD cert for *.${base} (CN=${base}, SAN=${san}). NOT trusted by clients — test/dev only."
     # Dismantle production renewal machinery when switching to debug mode.
     remove_owned_renew_hook
@@ -3205,6 +5527,7 @@ deploy_cert_roles() {
     [[ "$src" == "$DEBUG_CERT_DIR"/* ]] && { trust=debug; mode=debug; }
     validate_cert_pair "${src}/fullchain.pem" "${src}/privkey.pem" "$base" 0 "$trust" "$mode" \
         || { err "Certificate source failed validation: $src"; return 1; }
+    ensure_dns_cert_root || return 1
 
     # Each role publishes one complete generation through an atomically replaced
     # relative symlink. Readers therefore see the old pair or the new pair,
@@ -3213,12 +5536,19 @@ deploy_cert_roles() {
         dest="${DNS_CERT_DIR}/$r"
         group="$DNS_SERVICE_USER"
         [[ "$r" == zash ]] && group="$MIHOMO_SERVICE_USER"
-        install -d -g "$group" -m 0750 "$dest" \
-            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
-        write_ownership_marker "$dest" "$CERT_ROLE_MARKER" "${CERT_ROLE_VALUE_PREFIX}:${r}" \
-            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
-        install -d -g "$group" -m 0750 "${dest}/generations" \
-            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
+        if [[ -e "$dest" || -L "$dest" ]]; then
+            cert_role_tree_is_safe_for_recursive_metadata "$dest" \
+                || { cleanup_cert_role_candidates roles dests generations links; err "Certificate role boundary is unsafe: $dest"; return 1; }
+        else
+            install -d -o root -g "$group" -m 0750 "$dest" \
+                || { cleanup_cert_role_candidates roles dests generations links; return 1; }
+            write_ownership_marker "$dest" "$CERT_ROLE_MARKER" "${CERT_ROLE_VALUE_PREFIX}:${r}" \
+                || { cleanup_cert_role_candidates roles dests generations links; return 1; }
+            install -d -o root -g "$group" -m 0750 "${dest}/generations" \
+                || { cleanup_cert_role_candidates roles dests generations links; return 1; }
+            cert_role_tree_is_safe_for_recursive_metadata "$dest" \
+                || { cleanup_cert_role_candidates roles dests generations links; err "Could not establish certificate role boundary: $dest"; return 1; }
+        fi
         if [[ -e "${dest}/current" || -L "${dest}/current" ]]; then
             [[ -L "${dest}/current" ]] \
                 || { cleanup_cert_role_candidates roles dests generations links; err "Certificate role current path is not a symlink: ${dest}/current"; return 1; }
@@ -3236,7 +5566,7 @@ deploy_cert_roles() {
         links+=("")
         old_targets+=("$old")
         i=$((${#generations[@]} - 1))
-        chgrp "$group" "$generation" && chmod 0750 "$generation" \
+        chown "root:$group" "$generation" && chmod 0750 "$generation" \
             || { cleanup_cert_role_candidates roles dests generations links; return 1; }
         install -g "$group" -m 0640 "${src}/fullchain.pem" "${generation}/fullchain.pem" \
             && install -g "$group" -m 0640 "${src}/privkey.pem" "${generation}/privkey.pem" \
@@ -3285,20 +5615,25 @@ deploy_cert_roles() {
             "${dest}/generations" "$(basename -- "$final")" || return 1
         rm -f -- "${dest}/fullchain.pem" "${dest}/privkey.pem"
     done
+    cert_root_is_safe \
+        || { err "Published certificate role tree failed ownership validation."; return 1; }
     ok "${mode} certificate for ${base} deployed to dot/web/zash role dirs."
 }
 
-# install_renewal_automation installs a daily systemd timer running the single
-# mode-aware renewal helper. It checks the exact cert-name and due window;
-# Cloudflare renews without interruption, while HTTP-01 first validates DNS via
-# 1.1.1.1 and safely releases/restores mihomo's TCP :80 listeners.
+# install_renewal_automation installs a daily systemd timer running only the
+# mode-aware public-certificate helper. The independent static
+# 5gpn-intercept-cert.timer always owns interception-leaf expiry checks.
+# The public helper checks the exact cert-name and due window; Cloudflare renews
+# without interruption, while HTTP-01 first validates DNS via 1.1.1.1 and safely
+# releases/restores mihomo's TCP :80 listeners.
 install_renewal_automation() {
+    local base="${1:?install_renewal_automation needs a base domain}"
     local service_tmp timer_tmp
+    certbot_lineage_owned_by_5gpn "$base" \
+        || { err "Refusing to install project renewal automation for a non-owned Certbot lineage."; return 1; }
     preflight_renewal_unit_ownership || return 1
     [[ -x "${SCRIPTS_DIR}/cert-renew.sh" ]] \
         || { err "Scoped renewal helper is missing: ${SCRIPTS_DIR}/cert-renew.sh"; return 1; }
-    [[ -x "${SCRIPTS_DIR}/intercept-cert-renew.sh" ]] \
-        || { err "Interception renewal helper is missing: ${SCRIPTS_DIR}/intercept-cert-renew.sh"; return 1; }
     service_tmp="$(mktemp /etc/systemd/system/.5gpn-certbot-renew.service.XXXXXX)" || return 1
     timer_tmp="$(mktemp /etc/systemd/system/.5gpn-certbot-renew.timer.XXXXXX)" \
         || { rm -f -- "$service_tmp"; return 1; }
@@ -3314,7 +5649,6 @@ Type=oneshot
 TimeoutStartSec=30min
 TimeoutStopSec=2min
 ExecStart=/opt/5gpn/scripts/cert-renew.sh --quiet
-ExecStart=/opt/5gpn/scripts/intercept-cert-renew.sh
 EOF
     cat > "$timer_tmp" <<'EOF'
 # 5gpn-unit-id: 5gpn-certbot-renew.timer:v1
@@ -3398,7 +5732,8 @@ write_cf_credential() {
 
 # ensure_cf_token guarantees a valid Cloudflare API token exists in
 # ${ACME_DIR}/cloudflare.ini before Certbot issuance or renewal automation is
-# enabled. A reusable lineage still requires the credential for future renewal.
+# enabled. A reusable owned lineage still requires the credential for renewal;
+# a read-only external lineage retains its owner's renewal mechanism.
 # Precedence:
 #   1. Valid saved credential (has_valid_cf_credential) — reuse, no prompt.
 #   2. Interactive ask_secret    — TTY only, guarded with || true under set -e.
@@ -3452,7 +5787,7 @@ reload_rules() {
 }
 
 preflight_unit_ownership() {
-    preflight_owned_units 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service \
+    preflight_owned_units 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-cert.timer 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service \
         5gpn-certbot-renew.service 5gpn-certbot-renew.timer
     journal_export_instances_clear \
         || { err "Refusing conflicting fixed 5gpn journal exporter instance or drop-in."; return 1; }
@@ -3464,7 +5799,7 @@ install_units() {
     # Prefer the repo checkout; fall back to the staged copies under /opt/5gpn
     # (a piped curl|bash install has no checkout after install_files staged them).
     local src u
-    for u in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service; do
+    for u in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-cert.timer 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service; do
         if [[ -f "${SCRIPT_DIR}/etc/systemd/${u}" ]]; then
             src="${SCRIPT_DIR}/etc/systemd/${u}"
         elif [[ -f "${BASE_DIR}/etc/systemd/${u}" ]]; then
@@ -3481,12 +5816,13 @@ install_units() {
     done
     install_polkit_rule || return 1
     systemctl daemon-reload
-    ok "5gpn-dns, modular interception, certificate watcher, mihomo, and fixed journal units installed."
+    ok "5gpn-dns, modular interception, certificate watcher/timer, mihomo, and fixed journal units installed."
 }
 
 prepare_runtime_permissions() {
-    local path role group
-    install -d -o root -g "$DNS_SERVICE_USER" -m 2771 "$CONF_DIR" || return 1
+    local path role
+    preflight_runtime_publication_paths || return 1
+    install -d -o root -g "$DNS_SERVICE_USER" -m 3771 "$CONF_DIR" || return 1
     if [[ -f "${CONF_DIR}/dns.env" ]]; then
         chown root:"$DNS_SERVICE_USER" "${CONF_DIR}/dns.env" || return 1
         chmod 0640 "${CONF_DIR}/dns.env" || return 1
@@ -3494,12 +5830,14 @@ prepare_runtime_permissions() {
 
     install -d -o "$DNS_SERVICE_USER" -g "$DNS_SERVICE_USER" -m 2770 \
         "$DNS_RULES_DIR_DEFAULT" || return 1
+    runtime_tree_has_only_plain_entries "$DNS_RULES_DIR_DEFAULT" \
+        || { err "Refusing unsafe link, hardlink, or special entry below $DNS_RULES_DIR_DEFAULT"; return 1; }
     find "$DNS_RULES_DIR_DEFAULT" -type d -exec chown "$DNS_SERVICE_USER:$DNS_SERVICE_USER" {} + \
         -exec chmod 2770 {} + || return 1
     find "$DNS_RULES_DIR_DEFAULT" -type f -exec chown "$DNS_SERVICE_USER:$DNS_SERVICE_USER" {} + \
         -exec chmod 0640 {} + || return 1
 
-    for path in subscriptions.json policy.json upstreams.json ecs.json stats.json; do
+    for path in subscriptions.json policy.json upstreams.json ecs.json stats.json extension-marketplaces.json; do
         [[ -f "${CONF_DIR}/${path}" ]] || continue
         chown "$DNS_SERVICE_USER:$DNS_SERVICE_USER" "${CONF_DIR}/${path}" || return 1
         chmod 0640 "${CONF_DIR}/${path}" || return 1
@@ -3509,38 +5847,102 @@ prepare_runtime_permissions() {
         chmod 0600 "${CONF_DIR}/tgbot.json" || return 1
     fi
 
-    install -d -o root -g "$MIHOMO_SERVICE_USER" -m 2770 "$MIHOMO_DIR" || return 1
-    find "$MIHOMO_DIR" -type d -exec chown "root:$MIHOMO_SERVICE_USER" {} + \
+    runtime_tree_has_only_plain_entries "$MIHOMO_DIR" \
+        || { err "Refusing unsafe link, hardlink, or special entry below $MIHOMO_DIR"; return 1; }
+    install -d -o root -g "$MIHOMO_SERVICE_USER" -m 3770 "$MIHOMO_DIR" || return 1
+    find "$MIHOMO_DIR" -mindepth 1 -type d \
+        -exec chown "$MIHOMO_SERVICE_USER:$MIHOMO_SERVICE_USER" {} + \
         -exec chmod 2770 {} + || return 1
-    find "$MIHOMO_DIR" -type f -exec chown "root:$MIHOMO_SERVICE_USER" {} + \
+    find "$MIHOMO_DIR" -mindepth 1 -type f \
+        ! -path "$MIHOMO_DIR/config.yaml" ! -path "$MIHOMO_DIR/whitelist.txt" \
+        ! -name 'config.yaml.bak.*' \
+        -exec chown "$MIHOMO_SERVICE_USER:$MIHOMO_SERVICE_USER" {} + \
         -exec chmod 0660 {} + || return 1
+    find "$MIHOMO_DIR" -mindepth 1 -maxdepth 1 -type f -name 'config.yaml.bak.*' \
+        -exec chown "root:$MIHOMO_SERVICE_USER" {} + \
+        -exec chmod 0640 {} + || return 1
+    for path in config.yaml whitelist.txt; do
+        [[ -f "$MIHOMO_DIR/$path" ]] || continue
+        chown "$DNS_SERVICE_USER:$MIHOMO_SERVICE_USER" "$MIHOMO_DIR/$path" || return 1
+        chmod 0640 "$MIHOMO_DIR/$path" || return 1
+    done
 
     prepare_intercept_runtime_dirs || return 1
     prepare_intercept_state_dir || return 1
     [[ ! -f "$INTERCEPT_DIR/config.json" ]] \
-        || { chown root:"$INTERCEPT_SERVICE_USER" "$INTERCEPT_DIR/config.json" && chmod 0660 "$INTERCEPT_DIR/config.json"; } || return 1
+        || { chown "$DNS_SERVICE_USER:$INTERCEPT_SERVICE_USER" "$INTERCEPT_DIR/config.json" && chmod 0640 "$INTERCEPT_DIR/config.json"; } || return 1
+    [[ ! -f "$INTERCEPT_DIR/cert-state" ]] \
+        || { chown "root:$INTERCEPT_SERVICE_USER" "$INTERCEPT_DIR/cert-state" && chmod 0640 "$INTERCEPT_DIR/cert-state"; } || return 1
     if [[ -d "$INTERCEPT_DIR/tls" ]]; then
+        runtime_tree_has_only_plain_entries "$INTERCEPT_DIR/tls" \
+            || { err "Refusing unsafe link, hardlink, or special entry below $INTERCEPT_DIR/tls"; return 1; }
         chown -R root:"$INTERCEPT_SERVICE_USER" "$INTERCEPT_DIR/tls" || return 1
         find "$INTERCEPT_DIR/tls" -type d -exec chmod 0750 {} + || return 1
+        find "$INTERCEPT_DIR/tls" -type d -exec chmod g-s {} + || return 1
         find "$INTERCEPT_DIR/tls" -type f -exec chmod 0640 {} + || return 1
     fi
 
-    install -d -o root -g root -m 0751 "$DNS_CERT_DIR" || return 1
+    ensure_dns_cert_root || return 1
     for role in dot web zash; do
-        group="$DNS_SERVICE_USER"
-        [[ "$role" == zash ]] && group="$MIHOMO_SERVICE_USER"
         [[ -d "${DNS_CERT_DIR}/${role}" ]] || continue
-        chown -R "root:${group}" "${DNS_CERT_DIR}/${role}" || return 1
-        find "${DNS_CERT_DIR}/${role}" -type d -exec chmod 0750 {} + || return 1
-        find "${DNS_CERT_DIR}/${role}" -type f -exec chmod 0640 {} + || return 1
+        cert_role_tree_is_safe_for_recursive_metadata "${DNS_CERT_DIR}/${role}" \
+            || { err "Refusing unsafe certificate-role tree: ${DNS_CERT_DIR}/${role}"; return 1; }
     done
+    runtime_permission_boundary_is_safe \
+        || { err "Runtime ownership boundary validation failed after permission publication."; return 1; }
     ok "Runtime state and TLS material are scoped to dedicated service accounts."
+}
+
+# Certificate publishers run before the final all-runtime permission pass. Seal
+# their parent directories immediately after service accounts exist and the
+# transaction has stopped the runtime services, so fresh 0755 and prior 2771
+# installs both reach the same sticky boundary before any renewal helper runs.
+prepare_certificate_publication_boundaries() {
+    preflight_runtime_publication_paths || return 1
+    install -d -o root -g "$DNS_SERVICE_USER" -m 3771 "$CONF_DIR" || return 1
+    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
+        || { err "Could not seal the configuration root before certificate publication."; return 1; }
+
+    prepare_intercept_runtime_dirs || return 1
+    runtime_file_slot_is_safe "$INTERCEPT_DIR/config.json" "$CONF_DIR" \
+        && runtime_file_slot_is_safe "$INTERCEPT_DIR/cert-state" "$CONF_DIR" \
+        || { err "Unsafe interception certificate-control file slot."; return 1; }
+    if [[ -f "$INTERCEPT_DIR/config.json" ]]; then
+        chown "$DNS_SERVICE_USER:$INTERCEPT_SERVICE_USER" "$INTERCEPT_DIR/config.json" \
+            && chmod 0640 "$INTERCEPT_DIR/config.json" || return 1
+    fi
+    if [[ -f "$INTERCEPT_DIR/cert-state" ]]; then
+        chown "root:$INTERCEPT_SERVICE_USER" "$INTERCEPT_DIR/cert-state" \
+            && chmod 0640 "$INTERCEPT_DIR/cert-state" || return 1
+    fi
+    runtime_tree_has_only_plain_entries "$INTERCEPT_DIR/tls" \
+        || { err "Unsafe interception TLS tree before certificate publication."; return 1; }
+    chown -R "root:$INTERCEPT_SERVICE_USER" "$INTERCEPT_DIR/tls" || return 1
+    find "$INTERCEPT_DIR/tls" -type d -exec chmod 0750 {} + \
+        && find "$INTERCEPT_DIR/tls" -type f -exec chmod 0640 {} + || return 1
+    find "$INTERCEPT_DIR/tls" -type d -exec chmod g-s {} + || return 1
+
+    claim_fixed_owned_dir "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" \
+        || return 1
+    install -d -o root -g root -m 0700 "$INTERCEPT_CA_DIR" || return 1
+    chmod g-s "$INTERCEPT_CA_DIR" || return 1
+    fixed_owned_dir_is_safe "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" \
+        || { err "Could not seal the interception CA root."; return 1; }
+    ensure_dns_cert_root || return 1
+
+    if [[ "${CERT_MODE:-}" == debug ]]; then
+        ensure_debug_cert_root || return 1
+    fi
 }
 
 write_dns_env() {
     # Write /etc/5gpn/dns.env from install-time collected vars.
     # cert paths always point at the /etc/5gpn/cert copies (maintained by renew-hook.sh).
-    mkdir -p "$CONF_DIR"
+    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
+        && runtime_file_slot_is_safe "${CONF_DIR}/dns.env" "$CONF_DIR" \
+        || { err "Refusing unsafe dns.env path: ${CONF_DIR}/dns.env"; return 1; }
+    [[ -d "$CONF_DIR" && ! -L "$CONF_DIR" ]] \
+        || { err "Configuration root disappeared before dns.env publication."; return 1; }
 
     # DNS_API_TOKEN: reuse an existing token across re-installs (never rotate a
     # working token); otherwise generate one.
@@ -3555,7 +5957,11 @@ write_dns_env() {
     existing_tgalerts="$(cfg_get TGBOT_ALERTS)"
     existing_china="$(cfg_get DNS_CHINA)"
     existing_trust="$(cfg_get DNS_TRUST)"
-	DNS_API_TOKEN="${existing_token:-$(openssl rand -hex 32)}"
+	DNS_API_TOKEN="$existing_token"
+	if [[ -z "$DNS_API_TOKEN" ]]; then
+		DNS_API_TOKEN="$(openssl rand -hex 32)" \
+			|| { err "Could not generate DNS_API_TOKEN."; return 1; }
+	fi
 	local tg_token="$existing_tgtoken"
 	local tg_admins="$existing_tgadmins"
 	local tg_file="${existing_tgfile:-${CONF_DIR}/tgbot.json}"
@@ -3573,13 +5979,15 @@ write_dns_env() {
     # *.<base> wildcard install_cert issues, so dns.env and the rendered
     # config.yaml agree instead of drifting.
     local base_domain="$BASE_DOMAIN"
-    derive_domains "$base_domain"
+    derive_domains "$base_domain" || return 1
     # Mihomo's loopback external-controller API + the zashboard source-IP
     # allowlist file it reloads from (add_allow_ip/del_allow_ip/apply_whitelist
     # already hardcode these same two values; persisting them here lets the
     # daemon read back what it's actually being served against).
     local dns_mihomo_controller="$(cfg_get DNS_MIHOMO_CONTROLLER)"; dns_mihomo_controller="${dns_mihomo_controller:-127.0.0.1:9090}"
-    local dns_mihomo_secret="$(cfg_get DNS_MIHOMO_SECRET)"
+    local dns_mihomo_secret="$(cfg_get DNS_MIHOMO_SECRET)" dns_mihomo_secret_env
+    dns_mihomo_secret_env="$(dns_env_encode_value "$dns_mihomo_secret")" \
+        || { err "DNS_MIHOMO_SECRET cannot be represented safely in dns.env."; return 1; }
     local dns_whitelist_file="$(cfg_get DNS_WHITELIST_FILE)"; dns_whitelist_file="${dns_whitelist_file:-${MIHOMO_DIR}/whitelist.txt}"
     # SP-3 zashboard panel: dir + listen address for the second loopback HTTPS
     # panel (Task A1). DNS_ZASH_DIR is already resolved (dns.env > default)
@@ -3612,8 +6020,10 @@ write_dns_env() {
     # full_install has already validated and normalized the China ECS value.
     local china_ecs="$CHINA_ECS"
 
-    local dns_env_tmp; dns_env_tmp="$(mktemp "${CONF_DIR}/.dns.env.XXXXXX")"
-    cat > "$dns_env_tmp" <<EOF
+    local dns_env_tmp
+    dns_env_tmp="$(mktemp "${CONF_DIR}/.dns.env.XXXXXX")" \
+        || { err "Could not create the dns.env candidate."; return 1; }
+    if ! cat > "$dns_env_tmp" <<EOF
 # 5gpn-dns config — the SINGLE source of truth (written by install.sh).
 # 'systemctl reload 5gpn-dns' (SIGHUP) reloads ONLY the rule files under
 # /etc/5gpn/rules/ + chnroute, NOT this file — a daemon knob here needs
@@ -3705,7 +6115,7 @@ DNS_API_BURST=${api_burst}
 # (DNS_WHITELIST_FILE) mihomo's rule-provider reloads from. add_allow_ip /
 # del_allow_ip / apply_whitelist use these same values directly.
 DNS_MIHOMO_CONTROLLER=${dns_mihomo_controller}
-DNS_MIHOMO_SECRET=${dns_mihomo_secret}
+DNS_MIHOMO_SECRET=${dns_mihomo_secret_env}
 DNS_WHITELIST_FILE=${dns_whitelist_file}
 DNS_MIHOMO_CONFIG=${mihomo_config}
 DNS_INTERCEPT_CONFIG=${intercept_config}
@@ -3762,10 +6172,28 @@ DNS_STATS_FILE=${stats_file}
 DNS_HEARTBEAT_URL=${heartbeat_url}
 DNS_HEARTBEAT_INTERVAL=${heartbeat_interval}
 EOF
-    chmod 0640 "$dns_env_tmp"
-    sync -f "$dns_env_tmp" 2>/dev/null || true
-    mv -f -- "$dns_env_tmp" "${CONF_DIR}/dns.env"
-    sync -f "$CONF_DIR" 2>/dev/null || true
+    then
+        rm -f -- "$dns_env_tmp"
+        err "Could not write the dns.env candidate."
+        return 1
+    fi
+    chown root:"$DNS_SERVICE_USER" "$dns_env_tmp" \
+        && chmod 0640 "$dns_env_tmp" \
+        && sync -f "$dns_env_tmp" 2>/dev/null \
+        || { rm -f -- "$dns_env_tmp"; err "Could not protect or sync the dns.env candidate."; return 1; }
+    validate_dns_env_schema "$dns_env_tmp" \
+        || { rm -f -- "$dns_env_tmp"; err "dns.env candidate failed schema validation."; return 1; }
+    mv -f -- "$dns_env_tmp" "${CONF_DIR}/dns.env" \
+        || { rm -f -- "$dns_env_tmp"; err "Could not atomically publish dns.env."; return 1; }
+    sync -f "$CONF_DIR" 2>/dev/null \
+        || { err "Could not sync the dns.env directory publication."; return 1; }
+    [[ -f "${CONF_DIR}/dns.env" && ! -L "${CONF_DIR}/dns.env" \
+       && "$(file_uid "${CONF_DIR}/dns.env")" == 0 \
+       && "$(file_gid "${CONF_DIR}/dns.env")" == "$(account_gid "$DNS_SERVICE_USER")" \
+       && "$(file_mode "${CONF_DIR}/dns.env")" == 640 \
+       && "$(file_nlink "${CONF_DIR}/dns.env")" == 1 ]] \
+        && validate_dns_env_schema \
+        || { err "Published dns.env failed metadata or schema validation."; return 1; }
     ok "Written ${CONF_DIR}/dns.env (current schema only)."
 }
 
@@ -3935,6 +6363,17 @@ verify_console_endpoint() {
 # ----------------------------------------------------------------------------
 # Service lifecycle
 # ----------------------------------------------------------------------------
+ss_has_exact_listener() {
+    local kind="$1" ip="$2" port="$3" flags
+    case "$kind" in
+        tcp) flags=-ltn ;;
+        udp) flags=-lun ;;
+        *) return 1 ;;
+    esac
+    ss -H "$flags" 2>/dev/null \
+        | awk -v target="${ip}:${port}" '$4 == target { found=1 } END { exit !found }'
+}
+
 probe_mihomo_ready() {
     systemctl is-active --quiet mihomo || return 1
     local secret ip port
@@ -3953,10 +6392,10 @@ probe_mihomo_ready() {
     while IFS= read -r ip; do
         [[ -n "$ip" ]] || continue
         for port in "${tcp_ports[@]}"; do
-            ss -H -ltn 2>/dev/null | grep -Fq "${ip}:${port} " || return 1
+            ss_has_exact_listener tcp "$ip" "$port" || return 1
         done
         for port in "${udp_ports[@]}"; do
-            ss -H -lun 2>/dev/null | grep -Fq "${ip}:${port} " || return 1
+            ss_has_exact_listener udp "$ip" "$port" || return 1
         done
     done < <(printf '%s\n' "$MIHOMO_LISTEN_IPS" | tr ',' '\n')
 }
@@ -3976,18 +6415,27 @@ probe_dns_ready() {
 }
 
 wait_service_ready() {
-    local svc="$1" i
-    for i in {1..20}; do
+    local svc="$1" deadline remaining probe_timeout check_rc
+    deadline=$((SECONDS + SERVICE_READY_TIMEOUT))
+    while (( SECONDS < deadline )); do
         case "$svc" in
             5gpn-intercept)
                 if "$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --check-enabled >/dev/null 2>&1; then
-                    "$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --healthcheck \
+                    remaining=$((deadline - SECONDS))
+                    (( remaining > 0 )) || break
+                    probe_timeout="$remaining"
+                    (( probe_timeout <= INTERCEPT_HEALTHCHECK_MAX_TIMEOUT )) \
+                        || probe_timeout="$INTERCEPT_HEALTHCHECK_MAX_TIMEOUT"
+                    timeout --signal=TERM --kill-after=2s "${probe_timeout}s" \
+                        "$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --healthcheck \
                         && { ok "5gpn-intercept readiness passed (authenticated loopback SOCKS5 TCP/UDP)."; return 0; }
-                elif [[ "$?" == 3 ]]; then
+                else
+                    check_rc=$?
+                    if [[ "$check_rc" == 3 ]]; then
                     systemctl stop 5gpn-intercept.service 2>/dev/null || true
 					ok "5gpn-intercept remains stopped because no interception extension is active."
                     return 0
-                else
+                    fi
                     err "5gpn-intercept configuration could not be read while checking the MITM master setting."
                     return 1
                 fi
@@ -3995,9 +6443,9 @@ wait_service_ready() {
             mihomo)    probe_mihomo_ready && { ok "mihomo readiness passed (controller + local TCP/UDP listeners)."; return 0; } ;;
             5gpn-dns)  probe_dns_ready && { ok "5gpn-dns readiness passed (API + DoT TLS handshake)."; return 0; } ;;
         esac
-        sleep 1
+        (( SECONDS < deadline )) && sleep 1
     done
-    err "$svc did not become ready within 20s (journalctl -u $svc)."
+    err "$svc did not become ready within ${SERVICE_READY_TIMEOUT}s (journalctl -u $svc)."
     return 1
 }
 
@@ -4011,6 +6459,8 @@ start_services() {
     systemctl daemon-reload || { err "systemctl daemon-reload failed."; return 1; }
     systemctl enable --now 5gpn-intercept-cert.path >/dev/null 2>&1 \
         || { err "could not enable the interception certificate watcher."; return 1; }
+    systemctl enable --now 5gpn-intercept-cert.timer >/dev/null 2>&1 \
+        || { err "could not enable the interception certificate renewal timer."; return 1; }
     systemctl enable --now 5gpn-intercept-runtime.path >/dev/null 2>&1 \
         || { err "could not enable the MITM runtime watcher."; return 1; }
     # mihomo is the data plane + panel SNI split; it was installed by
@@ -4019,7 +6469,7 @@ start_services() {
     # data-plane listener is live. Any enable/start/readiness failure is fatal;
     # full_install must never print success for a broken deployment.
     local svc failed=0 check_rc=0
-    for svc in 5gpn-intercept mihomo 5gpn-dns; do
+    for svc in mihomo 5gpn-intercept 5gpn-dns; do
         if ! systemctl enable "$svc" >/dev/null 2>&1; then
             err "could not enable $svc (check: systemctl status $svc)."
             failed=1
@@ -4076,25 +6526,49 @@ start_services_with_cert_lock_handoff() {
 # Set (or replace) a KEY=VALUE line in a dotenv file, preserving all other keys.
 # Appends the key if absent without clobbering unrelated settings.
 set_dns_env_kv() {
-    local f="$1" key="$2" val="$3" tmp
+    local f="$1" key="$2" val="$3" tmp encoded_val
+    [[ "$f" == "${CONF_DIR}/dns.env" ]] \
+        || { err "Refusing a non-canonical dns.env path: $f"; return 1; }
+    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
+        && runtime_file_slot_is_safe "$f" "$CONF_DIR" \
+        || { err "Refusing unsafe dns.env path: $f"; return 1; }
+    if [[ -e "$f" || -L "$f" ]]; then
+        persisted_dns_env_is_safe \
+            || { err "Refusing unsafe persisted dns.env before update: $f"; return 1; }
+    fi
     case " $DNS_ENV_KEYS " in
         *" $key "*) ;;
         *) err "Refusing unsupported dns.env key: $key"; return 1 ;;
     esac
     [[ "$val" != *$'\n'* && "$val" != *$'\r'* ]] \
         || { err "Refusing a multiline dns.env value for $key."; return 1; }
+    encoded_val="$val"
+    if [[ "$key" == DNS_MIHOMO_SECRET ]]; then
+        encoded_val="$(dns_env_encode_value "$val")" || return 1
+    fi
     if [[ "$f" == "${CONF_DIR}/dns.env" && -s "$f" ]]; then
         validate_dns_env_schema || return 1
     fi
-    mkdir -p "$(dirname "$f")"; touch "$f"
-    tmp="$(mktemp "${f}.XXXXXX")"
+    tmp="$(mktemp "${f}.XXXXXX")" \
+        || { err "Could not create a dns.env update candidate."; return 1; }
     # Drop any existing (commented or live) definition of this key, then append the new one.
-    grep -vE "^#?[[:space:]]*${key}=" "$f" > "$tmp" 2>/dev/null || true
-    printf '%s=%s\n' "$key" "$val" >> "$tmp"
-    chmod 0640 "$tmp"
-    sync -f "$tmp" 2>/dev/null || true
-    mv -f -- "$tmp" "$f"
-    sync -f "$(dirname "$f")" 2>/dev/null || true
+    if [[ -f "$f" ]]; then
+        awk -v key="$key" '$0 !~ ("^#?[[:space:]]*" key "=") { print }' "$f" > "$tmp" \
+            || { rm -f -- "$tmp"; return 1; }
+    else
+        : > "$tmp" || { rm -f -- "$tmp"; return 1; }
+    fi
+    printf '%s=%s\n' "$key" "$encoded_val" >> "$tmp" \
+        || { rm -f -- "$tmp"; return 1; }
+    chown root:"$DNS_SERVICE_USER" "$tmp" \
+        && chmod 0640 "$tmp" \
+        && sync -f "$tmp" 2>/dev/null \
+        || { rm -f -- "$tmp"; return 1; }
+    validate_dns_env_schema "$tmp" || { rm -f -- "$tmp"; return 1; }
+    mv -f -- "$tmp" "$f" \
+        || { rm -f -- "$tmp"; return 1; }
+    sync -f "$CONF_DIR" 2>/dev/null || return 1
+    persisted_dns_env_is_safe && validate_dns_env_schema
 }
 
 # Call the live, bearer-authenticated control API on its loopback listener.
@@ -4219,7 +6693,9 @@ prompt_default() {
 }
 
 validate_dns_env_schema() {
-    local line key seen=" "
+    local file="${1:-${CONF_DIR}/dns.env}" line key seen=" "
+    [[ -f "$file" && ! -L "$file" ]] \
+        || { err "Persisted dns.env is missing or unsafe: $file"; return 1; }
     while IFS= read -r line || [[ -n "$line" ]]; do
         case "$line" in ''|\#*) continue ;; esac
         [[ "$line" == *=* ]] \
@@ -4233,7 +6709,7 @@ validate_dns_env_schema() {
             *" $key "*) err "Persisted dns.env contains duplicate key: $key"; return 1 ;;
             *) seen="${seen}${key} " ;;
         esac
-    done < "${CONF_DIR}/dns.env"
+    done < "$file"
 }
 
 load_persisted_install_config() {
@@ -4507,7 +6983,7 @@ delegate_pinned_channel_switch() {
 }
 
 full_install() {
-    local mode="${1:-}" force_tui=0 reset_mihomo=0
+    local mode="${1:-}" force_tui=0 reset_mihomo=0 postcommit_failed=0
     [[ "$mode" == configure ]] && force_tui=1
     [[ "$mode" == upgrade-reset-mihomo ]] && reset_mihomo=1
     delegate_pinned_channel_switch "$mode" || return 1
@@ -4516,10 +6992,24 @@ full_install() {
         err "upgrade-reset-mihomo is available only from a pinned beta installer bundle."
         return 1
     fi
-    check_root
-    claim_project_roots || return 1
-    preflight_intercept_roots || return 1
-    install_gum
+    check_root || return 1
+    acquire_install_lock || return 1
+    INSTALL_TRANSACTION_ACTIVE=0
+    ROLLBACK_SNAPSHOT_READY=0
+    ROLLBACK_IN_PROGRESS=0
+    PRESERVE_ROLLBACK_STAGE=0
+    PRETRANSACTION_ROOTS_ACTIVE=0
+    BASE_ROOT_WAS_ABSENT=0
+    CONF_ROOT_WAS_ABSENT=0
+    STATE_ROOT_WAS_ABSENT=0
+    trap install_transaction_error ERR
+    trap install_transaction_exit EXIT
+    trap 'install_transaction_signal 129' HUP
+    trap 'install_transaction_signal 130' INT
+    trap 'install_transaction_signal 143' TERM
+    record_project_root_prestate
+    claim_project_roots
+    preflight_intercept_roots
     detect_os
     check_arch
     detect_memory_profile
@@ -4533,19 +7023,19 @@ full_install() {
     }
     [[ "$reset_mihomo" == 0 ]] || confirm_upgrade_mihomo_reset || return 1
     preflight_unit_ownership
-    claim_web_dir
-    claim_zashboard_dir
+    preflight_web_dir
+    preflight_zashboard_dir
 
     # Package installation may add shared OS packages, but no live 5gpn file has
     # been removed or replaced yet. Debug mode deliberately skips Certbot.
     install_deps
-    trap cleanup_artifact_stage EXIT
     verify_console_dns
     stage_artifacts
     acquire_install_cert_lock
     capture_install_rollback
-    trap install_transaction_error ERR
-    trap install_transaction_exit EXIT
+    claim_web_dir
+    claim_zashboard_dir
+    install_gum
     claim_intercept_roots
     ensure_swap
 
@@ -4556,6 +7046,7 @@ full_install() {
     install_intercept
     install_mihomo
     ensure_intercept_config
+    prepare_certificate_publication_boundaries
     install_files
     install_manage_cli
     install_web
@@ -4579,10 +7070,31 @@ full_install() {
     start_services_with_cert_lock_handoff
     verify_console_endpoint
     reload_rules
-    INSTALL_TRANSACTION_ACTIVE=0
+    # Shield the short commit/timer-restore critical section. A disconnect must
+    # not leave an external/unrelated distro renewal timer stopped forever.
+    trap '' HUP INT TERM
     release_install_cert_lock
-    cleanup_artifact_stage
-    trap - ERR EXIT
+    # The deployment is fully verified at this point. Commit before starting a
+    # distro-wide timer or deleting the rollback snapshot; post-commit cleanup
+    # failures must never roll a healthy deployment back.
+    INSTALL_TRANSACTION_ACTIVE=0 ROLLBACK_SNAPSHOT_READY=0 PRETRANSACTION_ROOTS_ACTIVE=0
+    POSTCOMMIT_TIMER_RESTORE_PENDING=1
+    restore_global_certbot_timer_after_success \
+        || { err "The deployment committed, but the distro Certbot timer state needs repair."; postcommit_failed=1; }
+    POSTCOMMIT_TIMER_RESTORE_PENDING=0
+    trap 'install_transaction_signal 129' HUP
+    trap 'install_transaction_signal 130' INT
+    trap 'install_transaction_signal 143' TERM
+    if [[ "$postcommit_failed" == 0 ]]; then
+        cleanup_artifact_stage \
+            || { err "The deployment committed, but transaction staging was retained at: $ARTIFACT_STAGE"; postcommit_failed=1; }
+    else
+        err "The committed transaction snapshot was retained for timer-state recovery at: $ROLLBACK_DIR"
+    fi
+    release_install_lock \
+        || { err "The deployment committed, but the installer lock descriptor ended unexpectedly."; postcommit_failed=1; }
+    trap - ERR EXIT HUP INT TERM
+    [[ "$postcommit_failed" == 0 ]] || return 1
 
     echo ""
     if [[ "$INTERCEPT_ROUTING_READY" == 1 ]]; then
@@ -4633,7 +7145,7 @@ full_install() {
 # and any 5gpn credential they still reference remain intact.
 # ----------------------------------------------------------------------------
 uninstall() {
-    check_root
+    check_root || return 1
     local purge=0 decommission=0 base=""
     case "${1:-}" in
         '') ;;
@@ -4646,19 +7158,35 @@ uninstall() {
     [[ "$decommission" == 1 ]] \
         && prompt="确认卸载并删除可证明由 5gpn 拥有的证书材料?（共享 lineage/凭据会保留）"
     ask_yesno "$prompt" || return 0
-    claim_project_roots
-    acquire_install_cert_lock
+    acquire_install_lock || return 1
+    INSTALL_TRANSACTION_ACTIVE=0
+    ROLLBACK_SNAPSHOT_READY=0
+    ROLLBACK_IN_PROGRESS=0
+    PRESERVE_ROLLBACK_STAGE=0
+    trap install_transaction_error ERR
+    trap install_transaction_exit EXIT
+    trap 'install_transaction_signal 129' HUP
+    trap 'install_transaction_signal 130' INT
+    trap 'install_transaction_signal 143' TERM
+    claim_project_roots || return 1
+    acquire_install_cert_lock || return 1
+    if [[ -e "$GLOBAL_CERTBOT_TIMER_STATE" || -L "$GLOBAL_CERTBOT_TIMER_STATE" ]]; then
+        global_certbot_timer_state_is_safe \
+            || { err "The saved distro Certbot timer state is unsafe; refusing partial uninstall."; return 1; }
+    fi
     if [[ "$decommission" == 1 ]]; then
         base="$(cfg_get DNS_BASE_DOMAIN)"
         if ! decommission_certbot_lineage "$base"; then
-            release_install_cert_lock
+            release_install_cert_lock || true
+            release_install_lock || true
+            trap - ERR EXIT HUP INT TERM
             return 1
         fi
     fi
     warn "Uninstalling 5gpn: stopping services and reverting host changes."
 
     local unit
-    for unit in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.timer \
+    for unit in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-cert.timer 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.timer \
                 5gpn-certbot-renew.service; do
         remove_owned_unit "$unit"
     done
@@ -4673,6 +7201,8 @@ uninstall() {
 
     # Remove the exact deploy hook installed by the current release.
     remove_owned_renew_hook
+    restore_persisted_global_certbot_timer \
+        || { err "Could not restore the distro Certbot timer state during uninstall."; return 1; }
 
     # Remove only the project-private swapfile under a marked state directory.
     if verify_ownership_marker "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE" \
@@ -4691,7 +7221,7 @@ uninstall() {
     if [[ "$DNS_WEB_DIR" != "$BASE_DIR"/* && -e "$DNS_WEB_DIR" ]]; then
         if [[ "$(safe_web_path 2>/dev/null || true)" == "$DNS_WEB_DIR" ]] \
            && verify_ownership_marker "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"; then
-            remove_fixed_owned_dir "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"
+            remove_public_owned_tree "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"
         else
             warn "Kept unowned/unsafe DNS_WEB_DIR '$DNS_WEB_DIR'."
         fi
@@ -4703,9 +7233,13 @@ uninstall() {
     remove_fixed_owned_dir "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE"
 
     if [[ "$decommission" == 1 ]]; then
-        remove_owned_child "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" cert \
-            || { err "Refusing unsafe certificate-role removal."; return 1; }
-        remove_owned_child "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" debug-cert \
+        if [[ -e "$DNS_CERT_DIR" || -L "$DNS_CERT_DIR" ]]; then
+            ensure_dns_cert_root \
+                && cert_root_is_safe \
+                && remove_owned_root "$DNS_CERT_DIR" "$CERT_ROOT_MARKER" "$CERT_ROOT_MARKER_VALUE" \
+                || { err "Refusing unsafe certificate-role removal."; return 1; }
+        fi
+        remove_debug_cert_root \
             || { err "Refusing unsafe debug-certificate removal."; return 1; }
         if [[ "$DECOMMISSION_PRESERVE_ACME" == 0 ]]; then
             remove_owned_child "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" acme \
@@ -4746,7 +7280,9 @@ uninstall() {
     else
         ok "Kept ${CONF_DIR}, ${INTERCEPT_CA_DIR}, and ${INTERCEPT_STATE_DIR}. '--purge' removes module persistent data but preserves certificate state."
     fi
-    release_install_cert_lock
+    release_install_cert_lock || return 1
+    release_install_lock || return 1
+    trap - ERR EXIT HUP INT TERM
     ok "5gpn uninstalled."
 }
 
@@ -4801,10 +7337,11 @@ Domains + certificates: ONE base domain and ONE scoped Let's Encrypt lineage.
                                      Values are collected by the TUI.
   cloudflare mode (default)          apex + WILDCARD *.<base> cert via Let's
                      Encrypt DNS-01 through the Cloudflare API (no :80, no public
-                     A-record needed for certificate issuance); auto-renews unattended
-                     via the daily 5gpn-certbot-renew.timer. A protected Cloudflare
-                     API token is required even when reusing a valid cert so future
-                     renewal remains unattended; missing credentials prompt in the TUI. The token
+                     A-record needed for certificate issuance). A 5gpn-owned lineage
+                     auto-renews through the daily 5gpn-certbot-renew.timer. A protected
+                     Cloudflare API token is required for owned issuance/renewal;
+                     missing credentials prompt in the TUI. A strictly validated external
+                     lineage remains externally renewed and is never force-modified. The token
                      is stored in /etc/5gpn/acme/cloudflare.ini
                      (dir 0700, file 0600) and is NEVER written to dns.env or logs.
                      Use '5gpn set-cf-token' (or the menu) to update it at any time.
@@ -4814,6 +7351,8 @@ Domains + certificates: ONE base domain and ONE scoped Let's Encrypt lineage.
                      Initial issuance keeps mihomo stopped until role certificates
                      are published and full_install starts services. Due renewal
                      briefly stops and restores mihomo with the scoped helper.
+  interception leaf independent 5gpn-intercept-cert.timer checks the private
+                     extension leaf daily in every certificate mode.
   debug mode         self-signed WILDCARD cert for a test/dev box with
                      no public domain — no certbot, no DNS-01, no renewal; clients
                      see it untrusted.
@@ -4880,23 +7419,23 @@ main() {
     clear_external_config_env
     local cmd="${1:-}"
     case "$cmd" in
-        "")             require_command_arity install "$#" 0 0 && full_install ;;
-        configure)      require_command_arity "$cmd" "$#" 1 1 && full_install configure ;;
+        "")             require_command_arity install "$#" 0 0 || return $?; full_install ;;
+        configure)      require_command_arity "$cmd" "$#" 1 1 || return $?; full_install configure ;;
         upgrade-reset-mihomo)
-                         require_command_arity "$cmd" "$#" 1 1 && full_install upgrade-reset-mihomo ;;
-        menu)           require_command_arity "$cmd" "$#" 1 1 && manage_menu ;;
-        restart)        require_command_arity "$cmd" "$#" 1 1 && restart_services ;;
-        reload-rules)   require_command_arity "$cmd" "$#" 1 1 && reload_rules ;;
-        status)         require_command_arity "$cmd" "$#" 1 1 && show_status ;;
-        add-allow)      require_command_arity "$cmd" "$#" 2 2 && add_allow_ip "$2" ;;
-        del-allow)      require_command_arity "$cmd" "$#" 2 2 && del_allow_ip "$2" ;;
-        ios)            require_command_arity "$cmd" "$#" 1 1 && regen_ios ;;
-        setup-tgbot)    require_command_arity "$cmd" "$#" 1 1 && setup_tgbot ;;
-        rotate-token)   require_command_arity "$cmd" "$#" 1 1 && rotate_token ;;
-        set-cf-token)   require_command_arity "$cmd" "$#" 1 1 && set_cf_token ;;
-        mihomo-reset)   require_command_arity "$cmd" "$#" 1 1 && reset_mihomo_config ;;
-        uninstall)      require_command_arity "$cmd" "$#" 1 2 && uninstall "${2:-}" ;;
-        help)           require_command_arity "$cmd" "$#" 1 1 && usage ;;
+                         require_command_arity "$cmd" "$#" 1 1 || return $?; full_install upgrade-reset-mihomo ;;
+        menu)           require_command_arity "$cmd" "$#" 1 1 || return $?; manage_menu ;;
+        restart)        require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_lock restart_services ;;
+        reload-rules)   require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_lock reload_rules ;;
+        status)         require_command_arity "$cmd" "$#" 1 1 || return $?; show_status ;;
+        add-allow)      require_command_arity "$cmd" "$#" 2 2 || return $?; run_management_with_install_lock add_allow_ip "$2" ;;
+        del-allow)      require_command_arity "$cmd" "$#" 2 2 || return $?; run_management_with_install_lock del_allow_ip "$2" ;;
+        ios)            require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_and_cert_lock regen_ios ;;
+        setup-tgbot)    require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_lock setup_tgbot ;;
+        rotate-token)   require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_lock rotate_token ;;
+        set-cf-token)   require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_and_cert_lock set_cf_token ;;
+        mihomo-reset)   require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_lock reset_mihomo_config ;;
+        uninstall)      require_command_arity "$cmd" "$#" 1 2 || return $?; uninstall "${2:-}" ;;
+        help)           require_command_arity "$cmd" "$#" 1 1 || return $?; usage ;;
         *)              err "Unknown command: $cmd"; echo ""; usage; exit 2 ;;
     esac
 }
