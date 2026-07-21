@@ -1051,6 +1051,14 @@ claim_fixed_owned_dir() {
             || { err "Refusing unsafe empty fixed directory before marker publication: $dir"; return 1; }
     else
         created_dir=1
+        # CONF_DIR is intentionally setgid. A child created there without an
+        # explicit group inherits gpn-dns and immediately fails the root-owned
+        # fixed-root boundary. Establish fresh roots with exact metadata before
+        # publishing the ownership marker.
+        install -d -o root -g root -m 0755 -- "$dir" \
+            && chmod g-s -- "$dir" \
+            && chmod 0755 -- "$dir" \
+            || { err "Could not create fixed project directory: $dir"; return 1; }
     fi
     write_ownership_marker "$dir" "$marker" "$value" \
         || { err "Could not write ownership marker under $dir"; return 1; }
