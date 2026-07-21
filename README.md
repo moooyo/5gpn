@@ -146,10 +146,10 @@ candidate atomically. Custom proxies, providers, groups, and rules are not
 merged automatically and must be restored manually from the backup. Normal
 install, reinstall, and `configure` never select this reset path.
 
-The currently released stable installer predates this delegation mechanism, so
-use the remote quick installer for the first transition. A future stable release
-that includes it may accept `sudo 5gpn --beta` (and the explicit reset command)
-by handing the entire invocation to its stored, verified quick installer. A
+The `0.0.13` stable installer predates this delegation mechanism, so use the
+remote quick installer for its first transition. Starting with `0.0.14`, an
+installed stable release accepts `sudo 5gpn --beta` (and the explicit reset
+command) by handing the entire invocation to its stored, verified quick installer. A
 successful beta upgrade does not promise an in-place downgrade to stable; use a
 pre-upgrade system snapshot or the install transaction's automatic failure
 rollback instead of running the stable installer over beta state.
