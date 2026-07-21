@@ -4339,7 +4339,7 @@ render_mihomo_config() {
         return 0
     fi
 
-    template="${SCRIPT_DIR}/etc/mihomo/config.yaml.tmpl"
+    template="${BASE_DIR}/etc/mihomo/config.yaml.tmpl"
     [[ -f "$template" && -r "$template" && -s "$template" ]] \
         || { err "Bundled mihomo seed template is missing, unreadable, or empty: $template"; return 1; }
 
@@ -4373,9 +4373,6 @@ render_mihomo_config() {
     listeners="$(render_mihomo_listeners "$MIHOMO_LISTEN_IPS" "$CONSOLE_DOMAIN")"
     candidate="$(mktemp "${MIHOMO_DIR}/.config.yaml.XXXXXX")" \
         || { err "Could not create a mihomo config candidate in $MIHOMO_DIR"; return 1; }
-    chown "$DNS_SERVICE_USER:$MIHOMO_SERVICE_USER" "$candidate" \
-        && chmod 0640 "$candidate" \
-        || { rm -f -- "$candidate"; err "Could not secure the mihomo config candidate."; return 1; }
 
     if ! while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$line" == '__MIHOMO_LISTENERS__' ]]; then
@@ -4396,6 +4393,11 @@ render_mihomo_config() {
         err "Could not render the mihomo config candidate from $template"
         return 1
     fi
+    [[ -s "$candidate" ]] \
+        || { rm -f -- "$candidate"; err "Rendered mihomo config candidate is empty."; return 1; }
+    chown "$DNS_SERVICE_USER:$MIHOMO_SERVICE_USER" "$candidate" \
+        && chmod 0640 "$candidate" \
+        || { rm -f -- "$candidate"; err "Could not secure the rendered mihomo config candidate."; return 1; }
 
     if ! "$MIHOMO_BIN" -t -f "$candidate" -d "$MIHOMO_DIR"; then
         rm -f -- "$candidate"

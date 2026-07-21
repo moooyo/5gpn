@@ -865,11 +865,26 @@ if install_mihomo_runtime_assets >/dev/null \
         "$runtime_root/etc/mihomo/config.yaml.tmpl" \
    && cmp -s "$source_script_dir/etc/mihomo/whitelist.seed.txt" \
         "$runtime_root/etc/mihomo/whitelist.seed.txt"; then
-    pass "installed management runtime retains all mihomo reset assets"
+pass "installed management runtime retains all mihomo reset assets"
+
+render_fn="$(sed -n '/^render_mihomo_config()/,/^}/p' "$INSTALL")"
+render_line="$(grep -nF 'done < "$template" > "$candidate"' <<<"$render_fn" | cut -d: -f1)"
+nonempty_line="$(grep -nF '[[ -s "$candidate" ]]' <<<"$render_fn" | cut -d: -f1)"
+secure_line="$(grep -nF 'chown "$DNS_SERVICE_USER:$MIHOMO_SERVICE_USER" "$candidate"' <<<"$render_fn" | cut -d: -f1)"
+validate_line="$(grep -nF '"$MIHOMO_BIN" -t -f "$candidate"' <<<"$render_fn" | cut -d: -f1)"
+if grep -Fq 'template="${BASE_DIR}/etc/mihomo/config.yaml.tmpl"' <<<"$render_fn" \
+   && [[ -n "$render_line" && -n "$nonempty_line" && -n "$secure_line" && -n "$validate_line" \
+      && "$render_line" -lt "$nonempty_line" && "$nonempty_line" -lt "$secure_line" \
+      && "$secure_line" -lt "$validate_line" ]]; then
+    pass "mihomo seed renders from the installed snapshot before ownership and validation"
+else
+    fail "mihomo seed can be validated empty or written after service ownership transfer"
+fi
 else
     fail "installed management runtime is missing mihomo reset assets"
 fi
-BASE_DIR="$source_base_dir"
+# Installed management resolves immutable seed assets from BASE_DIR.
+BASE_DIR="$runtime_root"
 SCRIPT_DIR="$runtime_root"
 
 # Seed -> preserve byte-for-byte -> explicit validated reset with backup.
@@ -981,8 +996,8 @@ else
 fi
 
 before="$(sha256sum "$config" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$config" | awk '{print $1}')"
-SCRIPT_DIR="$TMP/runtime-without-mihomo-template"
-mkdir -p "$SCRIPT_DIR/etc/mihomo"
+BASE_DIR="$TMP/runtime-without-mihomo-template"
+mkdir -p "$BASE_DIR/etc/mihomo"
 if missing_template_output="$(render_mihomo_config --reset 2>&1)"; then
     fail "explicit reset succeeded without its installed mihomo template"
 elif [[ "$before" != "$(sha256sum "$config" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$config" | awk '{print $1}')" ]]; then
@@ -995,6 +1010,7 @@ else
     pass "missing installed template fails before candidate creation and preserves live config"
 fi
 SCRIPT_DIR="$source_script_dir"
+BASE_DIR="$source_base_dir"
 
 # dns.env accepts exactly the current key set and rejects ambiguous state.
 saved_dns_env="$(cat "$CONF_DIR/dns.env" 2>/dev/null || true)"
