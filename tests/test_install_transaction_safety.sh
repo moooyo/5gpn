@@ -217,7 +217,17 @@ CONF_DIR="$fresh_root/etc"
 STATE_DIR="$fresh_root/state"
 file_gid() { printf '0\n'; }
 record_project_root_prestate
+install() {
+    if [[ "$#" == 9 && "$1" == -d && "$2" == -o && "$3" == root \
+       && "$4" == -g && "$5" == root && "$6" == -m && "$7" == 0755 \
+       && "$8" == -- ]]; then
+        command install -d -m 0755 -- "$9"
+        return
+    fi
+    command install "$@"
+}
 claim_project_roots || fail "could not claim fresh project roots in the regression fixture"
+unset -f install
 [[ -d "$BASE_DIR" && -d "$CONF_DIR" && -d "$STATE_DIR" ]] \
     || fail "fresh root fixture was not created"
 fresh_cleanup_failed=0

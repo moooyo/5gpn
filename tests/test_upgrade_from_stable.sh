@@ -242,6 +242,12 @@ if [[ "$claim_failures_propagate" == 1 ]]; then
 else
     fail "claim_project_roots hid or continued past a root claim failure"
 fi
+claim_fixed_fn="$(sed -n '/^claim_fixed_owned_dir()/,/^}/p' "$INSTALL")"
+grep -Fq 'install -d -o root -g root -m 0755 -- "$dir"' <<<"$claim_fixed_fn" \
+    && grep -Fq 'chmod g-s -- "$dir"' <<<"$claim_fixed_fn" \
+    && grep -Fq 'chmod 0755 -- "$dir"' <<<"$claim_fixed_fn" \
+    || fail "fresh fixed roots can inherit a setgid parent service group"
+pass "fresh fixed roots force root ownership below setgid parents"
 intercept_claim_failures_propagate=1
 for fail_at in 1 2; do
     if ! (
@@ -285,6 +291,17 @@ saved_fixed_owned_dir_is_safe="$(declare -f fixed_owned_dir_is_safe)"
 saved_unmarked_fixed_dir_is_safe_to_claim="$(declare -f unmarked_fixed_dir_is_safe_to_claim)"
 fixed_owned_dir_is_safe() { return 0; }
 unmarked_fixed_dir_is_safe_to_claim() { return 0; }
+# The production installer runs as root. This non-root fixture keeps its focus
+# on rollback semantics while accepting the exact root-owned creation request.
+install() {
+    if [[ "$#" == 9 && "$1" == -d && "$2" == -o && "$3" == root \
+       && "$4" == -g && "$5" == root && "$6" == -m && "$7" == 0755 \
+       && "$8" == -- ]]; then
+        command install -d -m 0755 -- "$9"
+        return
+    fi
+    command install "$@"
+}
 optional_snapshot_ok=1
 capture_optional_owned_root "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" \
     "$INTERCEPT_CA_MARKER_VALUE" intercept-ca || optional_snapshot_ok=0
@@ -293,6 +310,7 @@ capture_optional_owned_root "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" \
 [[ -f "$ROLLBACK_DIR/intercept-ca.absent" \
    && -f "$ROLLBACK_DIR/intercept-state.absent" ]] || optional_snapshot_ok=0
 claim_intercept_roots >/dev/null 2>&1 || optional_snapshot_ok=0
+unset -f install
 rollback_host_failed=0
 rollback_state_failed=0
 restore_optional_owned_root "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" \
