@@ -81,6 +81,9 @@ CERT_DNS_WAIT_TIMEOUT=600                 # bounded install/configure propagatio
 CERT_DNS_WAIT_INTERVAL=10
 INSTALL_LOCK_FILE="/run/5gpn/install.lock"
 CERT_RENEW_LOCK_FILE="/run/5gpn/cert-renew.lock"
+INSTALL_LOCK_WAIT_TIMEOUT=900
+CERT_LOCK_WAIT_TIMEOUT=30
+LOCK_WAIT_REPORT_INTERVAL=5
 LE_PRODUCTION_SERVER="https://acme-v02.api.letsencrypt.org/directory"
 INSTALL_LOCK_HELD=0
 INSTALL_CERT_LOCK_HELD=0
@@ -2586,6 +2589,31 @@ lock_fd_targets_file() {
     [[ -n "$fd_identity" && "$fd_identity" == "$file_identity" ]]
 }
 
+wait_for_exclusive_lock() {
+    local fd="$1" timeout="$2" subject="$3"
+    local waited=0 remaining slice
+    [[ "$timeout" =~ ^[1-9][0-9]*$ \
+       && "$LOCK_WAIT_REPORT_INTERVAL" =~ ^[1-9][0-9]*$ ]] || return 2
+    if flock -n "$fd"; then
+        return 0
+    fi
+    info "${subject} is active; waiting up to ${timeout}s for its transaction lock."
+    while (( waited < timeout )); do
+        remaining=$((timeout - waited))
+        slice="$LOCK_WAIT_REPORT_INTERVAL"
+        (( slice <= remaining )) || slice="$remaining"
+        if flock -w "$slice" "$fd"; then
+            info "${subject} released its transaction lock; continuing."
+            return 0
+        fi
+        waited=$((waited + slice))
+        if (( waited < timeout )); then
+            info "Still waiting for ${subject} (${waited}s elapsed, $((timeout - waited))s remaining)..."
+        fi
+    done
+    return 1
+}
+
 acquire_install_lock() {
     command -v flock >/dev/null 2>&1 \
         || { err "flock is required for installer transaction exclusion."; return 1; }
@@ -2593,7 +2621,7 @@ acquire_install_lock() {
     lock_file_safe "$INSTALL_LOCK_FILE" \
         || { err "Unsafe installer transaction lock file: ${INSTALL_LOCK_FILE}"; return 1; }
     if lock_fd_targets_file 7 "$INSTALL_LOCK_FILE"; then
-        flock -w 900 7 \
+        flock -w "$INSTALL_LOCK_WAIT_TIMEOUT" 7 \
             || { err "Timed out revalidating the installer transaction lock."; return 1; }
         INSTALL_LOCK_HELD=1
         return 0
@@ -2602,8 +2630,8 @@ acquire_install_lock() {
     exec 7>"$INSTALL_LOCK_FILE"
     chmod 0600 "$INSTALL_LOCK_FILE" \
         || { exec 7>&-; err "Could not protect the installer transaction lock file."; return 1; }
-    info "Waiting for any active 5gpn install, configure, or uninstall transaction to finish..."
-    flock -w 900 7 \
+    wait_for_exclusive_lock 7 "$INSTALL_LOCK_WAIT_TIMEOUT" \
+        "Another 5gpn install, configure, or uninstall transaction" \
         || { exec 7>&-; err "Timed out waiting for the 5gpn installer transaction lock."; return 1; }
     INSTALL_LOCK_HELD=1
 }
@@ -2652,7 +2680,7 @@ acquire_install_cert_lock() {
     lock_file_safe "$CERT_RENEW_LOCK_FILE" \
         || { err "Unsafe certificate-renewal lock file: ${CERT_RENEW_LOCK_FILE}"; return 1; }
     if lock_fd_targets_file 8 "$CERT_RENEW_LOCK_FILE"; then
-        flock -w 900 8 \
+        flock -w "$CERT_LOCK_WAIT_TIMEOUT" 8 \
             || { err "Timed out revalidating the certificate-renewal lock."; return 1; }
         INSTALL_CERT_LOCK_HELD=1
         return 0
@@ -2661,9 +2689,13 @@ acquire_install_cert_lock() {
     exec 8>"$CERT_RENEW_LOCK_FILE"
     chmod 0600 "$CERT_RENEW_LOCK_FILE" \
         || { exec 8>&-; err "Could not protect the certificate-renewal lock file."; return 1; }
-    info "Waiting for any active 5gpn certificate renewal to finish..."
-    flock -w 900 8 \
-        || { exec 8>&-; err "Timed out waiting for the 5gpn certificate-renewal lock."; return 1; }
+    wait_for_exclusive_lock 8 "$CERT_LOCK_WAIT_TIMEOUT" \
+        "Another 5gpn certificate update" \
+        || { exec 8>&-; \
+             err "Another certificate update still holds the transaction lock after ${CERT_LOCK_WAIT_TIMEOUT}s."; \
+             err "Existing certificates are preserved, but they do not bypass concurrent certificate publication safety."; \
+             err "Installation stopped before live publication; inspect 5gpn certificate services and retry."; \
+             return 1; }
     INSTALL_CERT_LOCK_HELD=1
 }
 
@@ -3786,7 +3818,7 @@ install_transaction_signal() {
 
 ensure_install_lock_for_rollback() {
     if lock_fd_targets_file 7 "$INSTALL_LOCK_FILE"; then
-        flock -w 900 7 \
+        flock -w "$INSTALL_LOCK_WAIT_TIMEOUT" 7 \
             || { err "Timed out revalidating the installer lock for rollback."; return 1; }
         INSTALL_LOCK_HELD=1
         return 0
@@ -3798,7 +3830,7 @@ ensure_install_lock_for_rollback() {
 ensure_install_cert_lock_for_rollback() {
     ensure_install_lock_for_rollback || return 1
     if lock_fd_targets_file 8 "$CERT_RENEW_LOCK_FILE"; then
-        flock -w 900 8 \
+        flock -w "$CERT_LOCK_WAIT_TIMEOUT" 8 \
             || { err "Timed out revalidating the certificate lock for rollback."; return 1; }
         INSTALL_CERT_LOCK_HELD=1
         return 0
