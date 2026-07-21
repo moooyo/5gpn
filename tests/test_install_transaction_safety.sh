@@ -147,6 +147,18 @@ info() { :; }
 LOCK_WAIT_REPORT_INTERVAL=5
 pass "certificate lock contention is visible and capped at 30 seconds"
 
+failure_log="$TMP/install-failure.log"
+INSTALL_PHASE="capturing the pre-install rollback snapshot"
+INSTALL_FAILURE_REPORTED=0
+err() { printf '%s\n' "$*" >> "$failure_log"; }
+report_install_failure 73
+report_install_failure 74
+grep -Fq "phase 'capturing the pre-install rollback snapshot' (exit 73)" "$failure_log" \
+    && [[ "$(grep -c '^Installation failed during phase' "$failure_log")" == 1 ]] \
+    || fail "installer failure reporting omitted the phase or reported one failure twice"
+err() { printf '%s\n' "$*" >&2; }
+pass "installer failures report the active phase exactly once"
+
 # A management command launched by a separate process must wait behind the
 # installer fence and cannot mutate state or restart services mid-snapshot.
 management_runner="$TMP/management-runner.sh"

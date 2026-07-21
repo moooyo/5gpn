@@ -2184,6 +2184,8 @@ BASE_ROOT_WAS_ABSENT=0
 CONF_ROOT_WAS_ABSENT=0
 STATE_ROOT_WAS_ABSENT=0
 POSTCOMMIT_TIMER_RESTORE_PENDING=0
+INSTALL_PHASE="initialization"
+INSTALL_FAILURE_REPORTED=0
 
 # Unit files are snapshotted only for project-owned units. Runtime state also
 # includes the distro Certbot timer because an owned-lineage install may
@@ -2955,17 +2957,22 @@ validate_install_rollback_snapshot() {
 capture_install_rollback() {
     ROLLBACK_DIR="$ARTIFACT_STAGE/rollback"
     local unit
-    install -d -m 0700 "$ROLLBACK_DIR" "$ROLLBACK_DIR/units" || return 1
+    info "Capturing the pre-install rollback snapshot before live publication..."
+    install -d -m 0700 "$ROLLBACK_DIR" "$ROLLBACK_DIR/units" \
+        || { err "Could not create the rollback snapshot directories."; return 1; }
     for unit in "${TRANSACTION_UNIT_FILES[@]}"; do
         if [[ -e "/etc/systemd/system/$unit" || -L "/etc/systemd/system/$unit" ]]; then
             [[ -f "/etc/systemd/system/$unit" && ! -L "/etc/systemd/system/$unit" ]] \
                 || { err "Unsafe managed unit path before rollback capture: /etc/systemd/system/$unit"; return 1; }
-            cp -p -- "/etc/systemd/system/$unit" "$ROLLBACK_DIR/units/$unit" || return 1
+            cp -p -- "/etc/systemd/system/$unit" "$ROLLBACK_DIR/units/$unit" \
+                || { err "Could not snapshot the managed unit file: $unit"; return 1; }
         else
-            : > "$ROLLBACK_DIR/units/$unit.absent" || return 1
+            : > "$ROLLBACK_DIR/units/$unit.absent" \
+                || { err "Could not record the absent managed unit: $unit"; return 1; }
         fi
     done
-    capture_managed_unit_states || return 1
+    capture_managed_unit_states \
+        || { err "Could not capture the complete systemd state for the rollback snapshot."; return 1; }
     INSTALL_TRANSACTION_ACTIVE=1
     ROLLBACK_SNAPSHOT_READY=0
     stop_units_for_install_snapshot || return 1
@@ -3103,6 +3110,7 @@ capture_install_rollback() {
     validate_install_rollback_snapshot \
         || { rm -f -- "$ROLLBACK_DIR/.complete" 2>/dev/null || true; err "Rollback snapshot completeness validation failed."; return 1; }
     ROLLBACK_SNAPSHOT_READY=1
+    ok "Pre-install rollback snapshot captured and validated."
 }
 
 restore_optional_owned_root() {
@@ -3802,13 +3810,23 @@ rollback_install() {
     fi
 }
 
+report_install_failure() {
+    local rc="$1"
+    [[ "$INSTALL_FAILURE_REPORTED" == 0 ]] || return 0
+    INSTALL_FAILURE_REPORTED=1
+    err "Installation failed during phase '${INSTALL_PHASE:-unknown}' (exit ${rc})."
+    err "No success message was emitted; this run did not complete."
+}
+
 install_transaction_exit() {
     local rc=$?
+    [[ "$rc" == 0 ]] || report_install_failure "$rc"
     finish_install_transaction "$rc"
 }
 
 install_transaction_error() {
     local rc=$?
+    report_install_failure "$rc"
     finish_install_transaction "$rc"
 }
 
@@ -7026,6 +7044,8 @@ full_install() {
     fi
     check_root || return 1
     acquire_install_lock || return 1
+    INSTALL_PHASE="initializing the install transaction"
+    INSTALL_FAILURE_REPORTED=0
     INSTALL_TRANSACTION_ACTIVE=0
     ROLLBACK_SNAPSHOT_READY=0
     ROLLBACK_IN_PROGRESS=0
@@ -7039,9 +7059,11 @@ full_install() {
     trap 'install_transaction_signal 129' HUP
     trap 'install_transaction_signal 130' INT
     trap 'install_transaction_signal 143' TERM
+    INSTALL_PHASE="claiming project roots"
     record_project_root_prestate
     claim_project_roots
     preflight_intercept_roots
+    INSTALL_PHASE="checking the host and persisted configuration"
     detect_os
     check_arch
     detect_memory_profile
@@ -7054,29 +7076,40 @@ full_install() {
         return 1
     }
     [[ "$reset_mihomo" == 0 ]] || confirm_upgrade_mihomo_reset || return 1
+    INSTALL_PHASE="checking existing unit and static-asset ownership"
     preflight_unit_ownership
     preflight_web_dir
     preflight_zashboard_dir
 
     # Package installation may add shared OS packages, but no live 5gpn file has
     # been removed or replaced yet. Debug mode deliberately skips Certbot.
+    INSTALL_PHASE="installing host dependencies"
     install_deps
+    INSTALL_PHASE="verifying public console DNS"
     verify_console_dns
+    INSTALL_PHASE="staging and verifying release artifacts"
     stage_artifacts
+    INSTALL_PHASE="acquiring the certificate transaction lock"
     acquire_install_cert_lock
+    INSTALL_PHASE="capturing the pre-install rollback snapshot"
     capture_install_rollback
+    INSTALL_PHASE="claiming publication directories"
     claim_web_dir
     claim_zashboard_dir
     install_gum
     claim_intercept_roots
+    INSTALL_PHASE="preparing low-memory runtime support"
     ensure_swap
 
     # Only after every input, host conflict, download, digest, archive, console
     # DNS gate, and existing mihomo config has passed do we enter publication.
+    INSTALL_PHASE="installing service accounts"
     install_service_accounts
+    INSTALL_PHASE="publishing verified executables"
     install_5gpndns
     install_intercept
     install_mihomo
+    INSTALL_PHASE="publishing runtime configuration and assets"
     ensure_intercept_config
     prepare_certificate_publication_boundaries
     install_files
