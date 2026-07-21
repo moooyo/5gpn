@@ -119,6 +119,34 @@ flock -n "$INSTALL_LOCK_FILE" -c true \
     || fail "install lock remained held after transaction completion"
 pass "lock descriptors are independently exclusive and rollback revalidates the real FD"
 
+# Uncontended locks should be silent. A contended certificate lock must report
+# progress in bounded slices rather than hiding a 15-minute flock wait.
+lock_wait_log="$TMP/lock-wait.log"
+lock_wait_calls="$TMP/lock-wait.calls"
+: > "$lock_wait_log"
+: > "$lock_wait_calls"
+LOCK_WAIT_REPORT_INTERVAL=1
+flock() {
+    printf '%s\n' "$*" >> "$lock_wait_calls"
+    return 1
+}
+info() { printf '%s\n' "$*" >> "$lock_wait_log"; }
+if wait_for_exclusive_lock 8 3 "Another 5gpn certificate update"; then
+    fail "contended certificate lock did not honor its timeout"
+fi
+[[ "$(grep -c '^-w 1 8$' "$lock_wait_calls")" == 3 ]] \
+    || fail "certificate lock timeout was not split into bounded progress intervals"
+grep -Fq 'waiting up to 3s' "$lock_wait_log" \
+    && grep -Fq '1s elapsed, 2s remaining' "$lock_wait_log" \
+    && grep -Fq '2s elapsed, 1s remaining' "$lock_wait_log" \
+    || fail "certificate lock wait did not report visible progress"
+grep -Fq 'CERT_LOCK_WAIT_TIMEOUT=30' "$INSTALL" \
+    || fail "installer certificate-lock wait is not capped at 30 seconds"
+unset -f flock
+info() { :; }
+LOCK_WAIT_REPORT_INTERVAL=5
+pass "certificate lock contention is visible and capped at 30 seconds"
+
 # A management command launched by a separate process must wait behind the
 # installer fence and cannot mutate state or restart services mid-snapshot.
 management_runner="$TMP/management-runner.sh"
