@@ -201,6 +201,9 @@ if (
     seed_mihomo_whitelist() { return 0; }
     persist_mihomo_secret() { return 0; }
     install() { return 0; }
+    BASE_DIR="$TMP/reset-runtime"
+    mkdir -p "$BASE_DIR/etc/mihomo"
+    cp -- "$ROOT/etc/mihomo/config.yaml.tmpl" "$BASE_DIR/etc/mihomo/config.yaml.tmpl"
     render_mihomo_config --reset
 ) >/dev/null 2>&1; then
     backups=("$MIHOMO_DIR"/config.yaml.bak.*)
