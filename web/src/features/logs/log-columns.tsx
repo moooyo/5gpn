@@ -14,8 +14,7 @@ export interface Decision {
  * reason -> decision map (amendment A-H1, authoritative): the label + color
  * shown for a log row come from `reason`, NOT `verdict` — verdict only
  * carries {block,direct,proxy} and collapses the design's 5 labels / 4
- * colors down to 3. Colors match the design handoff's log legend exactly
- * (`design_handoff_5gpn_console/5GPN 控制台.dc.html` ~L311-314).
+ * colors down to 3. Colors retain the established query-log legend palette.
  */
 export const DECISION: Record<string, Decision> = {
   'block': { key: 'logs.decision.block', color: '#dc2626' }, // 拦截 red
