@@ -540,7 +540,11 @@ func TestMihomoInvariants_EmptyInfraParamsFailClosed(t *testing.T) {
 }
 
 func TestMihomoConfigStore_ReadAndDefault(t *testing.T) {
-	dir := t.TempDir()
+	root := t.TempDir()
+	dir := filepath.Join(root, "mihomo")
+	if err := os.Mkdir(dir, 0o770); err != nil {
+		t.Fatalf("create config directory: %v", err)
+	}
 	path := filepath.Join(dir, "config.yaml")
 	store := NewMihomoConfigStore(path)
 
@@ -549,6 +553,18 @@ func TestMihomoConfigStore_ReadAndDefault(t *testing.T) {
 	}
 	if store.Dir() != dir {
 		t.Fatalf("Dir() = %q, want %q", store.Dir(), dir)
+	}
+	wantBackupPath := filepath.Join(root, ".mihomo-config.yaml.bak")
+	if store.BackupPath() != wantBackupPath {
+		t.Fatalf("BackupPath() = %q, want %q", store.BackupPath(), wantBackupPath)
+	}
+	if store.BackupPath() == store.Path()+".bak" {
+		t.Fatal("daemon backup must not reuse the legacy config-directory path")
+	}
+	productionStore := NewMihomoConfigStore(filepath.FromSlash("/etc/5gpn/mihomo/config.yaml"))
+	wantProductionBackup := filepath.FromSlash("/etc/5gpn/.mihomo-config.yaml.bak")
+	if productionStore.BackupPath() != wantProductionBackup {
+		t.Fatalf("production BackupPath() = %q, want %q", productionStore.BackupPath(), wantProductionBackup)
 	}
 
 	if _, err := store.Read(); err == nil {

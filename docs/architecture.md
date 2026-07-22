@@ -454,7 +454,8 @@ complete file, not a second configuration source. It derives state from the
 current YAML, accepts only fixed catalog entries, and modifies a module only
 when all of its listener and sniffer objects match the canonical shape. Each
 write is protected by a revision of the original bytes, validates the complete
-candidate, retains a backup, atomically publishes it, and hot-applies it. A
+candidate, retains the daemon-owned backup at
+`/etc/5gpn/.mihomo-config.yaml.bak`, atomically publishes it, and hot-applies it. A
 stale revision or partial/custom module shape is rejected. A failed hot apply
 restores and reapplies the previous bytes. There is no separate ingress-capability state file,
 generated region, startup reconciliation, or daemon-owned YAML fragment; the
@@ -1001,7 +1002,11 @@ boundary. Their control-plane documents are owned by `gpn-dns` with the runtime
 account as group and mode `0640`, while mihomo-owned cache files remain owned by mihomo and TLS
 material remains root-owned. This preserves atomic control-plane publication
 without letting one compromised service replace another service's fixed root or
-critical file. Writes remain confined to those declared paths. `SAFE_PATHS` grants
+critical file. The daemon's fixed mihomo rollback backup is
+`/etc/5gpn/.mihomo-config.yaml.bak`, owned by `gpn-dns`, grouped to `gpn-dns`,
+and mode `0640`. It deliberately remains in the outer sticky directory and
+never reuses a legacy `/etc/5gpn/mihomo/config.yaml.bak` that mihomo may own.
+Writes remain confined to those declared paths. `SAFE_PATHS` grants
 mihomo read access only to the zash certificate role and does not broaden
 filesystem writes.
 

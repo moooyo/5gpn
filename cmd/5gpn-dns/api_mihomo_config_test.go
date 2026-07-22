@@ -121,6 +121,21 @@ func newMihomoConfigTestFixture(t *testing.T) *mihomoTestFixture {
 	return &mihomoTestFixture{cs: cs, token: token, store: store, tester: tester, ctl: ctl, infra: infra, golden: golden}
 }
 
+func seedLegacyMihomoBackup(t *testing.T, store *MihomoConfigStore) (string, string) {
+	t.Helper()
+	legacyPath := store.Path() + ".bak"
+	legacyBody := "mihomo-owned legacy backup\n"
+	if err := os.WriteFile(legacyPath, []byte(legacyBody), 0o660); err != nil {
+		t.Fatalf("seed legacy mihomo backup: %v", err)
+	}
+	if filesystemSupportsPOSIXModes(t, store.Dir()) {
+		if err := os.Chmod(store.Dir(), 0o770|os.ModeSetgid|os.ModeSticky); err != nil {
+			t.Fatalf("set sticky mihomo config directory: %v", err)
+		}
+	}
+	return legacyPath, legacyBody
+}
+
 func TestMihomoConfigAPI_Get(t *testing.T) {
 	fx := newMihomoConfigTestFixture(t)
 
@@ -650,6 +665,7 @@ func TestMihomoConfigAPI_Reset(t *testing.T) {
 	t.Setenv("DNS_GATEWAY_IP", fx.infra.GatewayIP)
 	t.Setenv("DNS_MIHOMO_SECRET", "s3cr3t")
 	t.Setenv("DNS_PUBLIC_IP", "203.0.113.10")
+	legacyBackupPath, legacyBackupBody := seedLegacyMihomoBackup(t, fx.store)
 
 	// Break the on-disk config first (simulating a prior bad edit).
 	if err := os.WriteFile(fx.store.Path(), []byte("garbage: not a real config"), 0o644); err != nil {
@@ -681,12 +697,15 @@ func TestMihomoConfigAPI_Reset(t *testing.T) {
 	if onDisk != goldenMihomoConfig() {
 		t.Fatalf("reset should restore the seed default:\n--- got ---\n%s\n--- want ---\n%s", onDisk, goldenMihomoConfig())
 	}
-	backup, err := os.ReadFile(fx.store.Path() + ".bak")
+	backup, err := os.ReadFile(fx.store.BackupPath())
 	if err != nil || string(backup) != "garbage: not a real config" {
 		t.Fatalf("reset backup = %q, %v", backup, err)
 	}
-	if info, err := os.Stat(fx.store.Path() + ".bak"); err != nil || filesystemSupportsPOSIXModes(t, fx.store.Dir()) && info.Mode().Perm() != 0o640 {
+	if info, err := os.Stat(fx.store.BackupPath()); err != nil || filesystemSupportsPOSIXModes(t, filepath.Dir(fx.store.BackupPath())) && info.Mode().Perm() != 0o640 {
 		t.Fatalf("reset backup mode: info=%v err=%v", info, err)
+	}
+	if legacyBackup, err := os.ReadFile(legacyBackupPath); err != nil || string(legacyBackup) != legacyBackupBody {
+		t.Fatalf("reset changed legacy backup: body=%q err=%v", legacyBackup, err)
 	}
 	if fx.ctl.putCalls != 1 {
 		t.Fatalf("reset should hot-apply the restored default, got %d PutConfigs calls", fx.ctl.putCalls)

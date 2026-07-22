@@ -173,6 +173,71 @@ func TestInterceptModuleManagerEnableDisablePublishesOneTransaction(t *testing.T
 	}
 }
 
+func TestInterceptModuleManagerUsesDaemonBackupOutsideStickyMihomoDir(t *testing.T) {
+	module := testModuleSnapshot()
+	for _, tc := range []struct {
+		name         string
+		rollback     bool
+		wantPutCalls int
+	}{
+		{name: "publish", wantPutCalls: 1},
+		{name: "controller rollback", rollback: true, wantPutCalls: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, controller, _, interceptPath, mihomoPath := newInterceptManagerFixture(t, module)
+			legacyBackupPath, legacyBackupBody := seedLegacyMihomoBackup(t, manager.mihomo)
+			originalIntercept := mustRead(t, interceptPath)
+			originalMihomo := mustRead(t, mihomoPath)
+			manager.certWait = func(context.Context, string) error { return nil }
+			var rollbackController *rollbackTestController
+			if tc.rollback {
+				rollbackController = &rollbackTestController{}
+				manager.controller = rollbackController
+			}
+
+			view, err := manager.View()
+			if err != nil {
+				t.Fatal(err)
+			}
+			enabled := true
+			_, err = manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled})
+			if tc.rollback {
+				if !errors.Is(err, errInterceptApplyFailed) {
+					t.Fatalf("rollback update error = %v", err)
+				}
+				if rollbackController.putCalls != tc.wantPutCalls {
+					t.Fatalf("rollback controller calls = %d, want %d", rollbackController.putCalls, tc.wantPutCalls)
+				}
+				if mustRead(t, mihomoPath) != originalMihomo || mustRead(t, interceptPath) != originalIntercept {
+					t.Fatal("failed extension transaction did not restore the exact old files")
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if controller.putCalls != tc.wantPutCalls {
+					t.Fatalf("controller calls = %d, want %d", controller.putCalls, tc.wantPutCalls)
+				}
+				if !strings.Contains(mustRead(t, mihomoPath), "DOMAIN,api.example.com") {
+					t.Fatal("successful extension transaction did not publish its mihomo rule")
+				}
+			}
+
+			backup, err := os.ReadFile(manager.mihomo.BackupPath())
+			if err != nil || string(backup) != originalMihomo {
+				t.Fatalf("daemon backup = %q, %v", backup, err)
+			}
+			if info, err := os.Stat(manager.mihomo.BackupPath()); err != nil || filesystemSupportsPOSIXModes(t, filepath.Dir(manager.mihomo.BackupPath())) && info.Mode().Perm() != 0o640 {
+				t.Fatalf("daemon backup mode: info=%v err=%v", info, err)
+			}
+			legacyBackup, err := os.ReadFile(legacyBackupPath)
+			if err != nil || string(legacyBackup) != legacyBackupBody {
+				t.Fatalf("extension transaction changed legacy backup: body=%q err=%v", legacyBackup, err)
+			}
+		})
+	}
+}
+
 func TestInterceptModuleManagerExplicitToggleRepairsMissingOwnedRouting(t *testing.T) {
 	module := testModuleSnapshot()
 	module.Enabled = true

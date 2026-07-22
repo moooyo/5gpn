@@ -70,10 +70,14 @@ func (e *ErrMissingInfra) Error() string {
 // live config file (env DNS_MIHOMO_CONFIG, default /etc/5gpn/mihomo/config.yaml);
 // dir is its parent directory, passed to `mihomo -t -d <dir>` so relative
 // paths inside the config (e.g. the whitelist rule-provider's `./whitelist.txt`)
-// resolve the same way they do for the real running config.
+// resolve the same way they do for the real running config. backupPath is the
+// daemon-owned rollback copy in dir's parent. Keeping it outside dir prevents
+// a mihomo-owned legacy config.yaml.bak from blocking atomic replacement under
+// the sticky shared-directory boundary.
 type MihomoConfigStore struct {
-	path string
-	dir  string
+	path       string
+	dir        string
+	backupPath string
 
 	// mu serializes the apply pipeline (validate -> mihomo -t -> atomic write
 	// -> hot-apply, see api_mihomo_config.go's applyMihomoConfig), mirroring
@@ -89,7 +93,9 @@ type MihomoConfigStore struct {
 
 // NewMihomoConfigStore builds a store rooted at path.
 func NewMihomoConfigStore(path string) *MihomoConfigStore {
-	return &MihomoConfigStore{path: path, dir: filepath.Dir(path)}
+	dir := filepath.Dir(path)
+	backupPath := filepath.Join(filepath.Dir(dir), ".mihomo-"+filepath.Base(path)+".bak")
+	return &MihomoConfigStore{path: path, dir: dir, backupPath: backupPath}
 }
 
 // Lock acquires the store's apply-pipeline mutex. Callers must Unlock when
@@ -104,6 +110,9 @@ func (s *MihomoConfigStore) Path() string { return s.path }
 
 // Dir returns the config file's parent directory.
 func (s *MihomoConfigStore) Dir() string { return s.dir }
+
+// BackupPath returns the daemon-owned rollback backup path.
+func (s *MihomoConfigStore) BackupPath() string { return s.backupPath }
 
 // Read returns the current on-disk config text.
 func (s *MihomoConfigStore) Read() (string, error) {

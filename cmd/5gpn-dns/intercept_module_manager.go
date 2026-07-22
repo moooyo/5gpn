@@ -1016,7 +1016,7 @@ func (m *InterceptModuleManager) validateMihomoCandidateLocked(ctx context.Conte
 }
 
 func (m *InterceptModuleManager) publishMihomoLocked(ctx context.Context, oldText, nextText string) error {
-	if err := atomicWriteFile(m.mihomo.Path()+".bak", []byte(oldText), 0o640); err != nil {
+	if err := atomicWriteFile(m.mihomo.BackupPath(), []byte(oldText), 0o640); err != nil {
 		return fmt.Errorf("write mihomo backup: %w", err)
 	}
 	if err := atomicWriteFile(m.mihomo.Path(), []byte(nextText), 0o640); err != nil {

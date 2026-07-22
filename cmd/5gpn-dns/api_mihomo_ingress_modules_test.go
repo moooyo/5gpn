@@ -75,7 +75,7 @@ func TestMihomoIngressModules_EnableDisableRoundTrip(t *testing.T) {
 			t.Fatalf("disabled module retained local-service guard %q", rule)
 		}
 	}
-	backup, err := os.ReadFile(fx.store.Path() + ".bak")
+	backup, err := os.ReadFile(fx.store.BackupPath())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestMihomoIngressModules_EnableDisableRoundTrip(t *testing.T) {
 	if strings.Index(onDisk, moduleRules[0]) > strings.Index(onDisk, "DOMAIN,"+fx.infra.ConsoleDomain+",DIRECT") {
 		t.Fatal("module local-service guards must precede console/zash accepting rules")
 	}
-	backup, err = os.ReadFile(fx.store.Path() + ".bak")
+	backup, err = os.ReadFile(fx.store.BackupPath())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -604,7 +604,7 @@ func TestMihomoIngressModules_HotApplyFailureRollsBackDiskAndController(t *testi
 	if resp.Revision != before.Revision {
 		t.Fatalf("rollback revision=%q want old revision %q", resp.Revision, before.Revision)
 	}
-	backup, err := os.ReadFile(fx.store.Path() + ".bak")
+	backup, err := os.ReadFile(fx.store.BackupPath())
 	if err != nil || string(backup) != fx.golden {
 		t.Fatalf("backup missing or wrong after rollback: err=%v", err)
 	}
@@ -625,7 +625,7 @@ func TestMihomoIngressModules_ValidationFailureLeavesLiveConfigUntouched(t *test
 	if got, _ := fx.store.Read(); got != fx.golden {
 		t.Fatal("validation failure changed the live config")
 	}
-	if _, err := os.Stat(fx.store.Path() + ".bak"); !os.IsNotExist(err) {
+	if _, err := os.Stat(fx.store.BackupPath()); !os.IsNotExist(err) {
 		t.Fatalf("validation failure unexpectedly wrote backup: %v", err)
 	}
 }
