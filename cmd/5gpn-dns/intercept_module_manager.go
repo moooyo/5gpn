@@ -22,6 +22,12 @@ var (
 	errInterceptApplyFailed        = errors.New("interception module apply failed")
 )
 
+const (
+	interceptCertificatePollInterval      = 100 * time.Millisecond
+	interceptCertificateRetriggerInterval = 500 * time.Millisecond
+	interceptCertificateWaitLimit         = 15 * time.Second
+)
+
 type InterceptModuleManager struct {
 	mu sync.Mutex
 
@@ -35,6 +41,7 @@ type InterceptModuleManager struct {
 
 	certStatePath string
 	certWait      func(context.Context, string) error
+	certRepublish func(context.Context, string, []byte) error
 	sidecarTest   interceptConfigTester
 	onApplied     func()
 }
@@ -933,7 +940,7 @@ func (m *InterceptModuleManager) mutate(
 	firstActivation := len(activeInterceptHosts(oldDocument)) == 0 && len(activeInterceptHosts(nextDocument)) > 0
 	certificateHostsChanged := !stringSlicesEqual(oldCertificateHosts, nextCertificateHosts)
 	if len(nextCertificateHosts) > 0 && (certificateHostsChanged || (firstActivation && !m.certificateReady(nextDocument))) {
-		if err := m.waitForCertificate(ctx, interceptCertificateDigest(nextCertificateHosts)); err != nil {
+		if err := m.waitForCertificate(ctx, interceptCertificateDigest(nextCertificateHosts), newBody); err != nil {
 			rollbackErr := writeInterceptConfigAtomic(m.store.Path, oldBody)
 			return interceptModulesView{}, fmt.Errorf("%w: certificate publication: %v; sidecar rollback: %v", errInterceptApplyFailed, err, rollbackErr)
 		}
@@ -1037,17 +1044,19 @@ func (m *InterceptModuleManager) publishMihomoLocked(ctx context.Context, oldTex
 	}
 }
 
-func (m *InterceptModuleManager) waitForCertificate(ctx context.Context, digest string) error {
+func (m *InterceptModuleManager) waitForCertificate(ctx context.Context, digest string, candidate []byte) error {
 	if m.certWait != nil {
 		return m.certWait(ctx, digest)
 	}
 	if m.certStatePath == "" {
 		return nil
 	}
-	deadline := time.NewTimer(15 * time.Second)
+	deadline := time.NewTimer(interceptCertificateWaitLimit)
 	defer deadline.Stop()
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	poll := time.NewTicker(interceptCertificatePollInterval)
+	defer poll.Stop()
+	retrigger := time.NewTicker(interceptCertificateRetriggerInterval)
+	defer retrigger.Stop()
 	for {
 		body, err := os.ReadFile(m.certStatePath)
 		if err == nil && strings.TrimSpace(string(body)) == digest {
@@ -1058,9 +1067,27 @@ func (m *InterceptModuleManager) waitForCertificate(ctx context.Context, digest 
 			return ctx.Err()
 		case <-deadline.C:
 			return errors.New("timed out waiting for the root-owned certificate publisher")
-		case <-ticker.C:
+		case <-poll.C:
+		case <-retrigger.C:
+			if err := m.republishCertificateCandidate(ctx, candidate); err != nil {
+				return fmt.Errorf("retrigger root-owned certificate publisher: %w", err)
+			}
 		}
 	}
+}
+
+func (m *InterceptModuleManager) republishCertificateCandidate(ctx context.Context, candidate []byte) error {
+	current, err := os.ReadFile(m.store.Path)
+	if err != nil {
+		return fmt.Errorf("read certificate candidate: %w", err)
+	}
+	if !bytesEqual(current, candidate) {
+		return errors.New("certificate candidate changed during publication")
+	}
+	if m.certRepublish != nil {
+		return m.certRepublish(ctx, m.store.Path, candidate)
+	}
+	return writeInterceptConfigAtomicContext(ctx, m.store.Path, candidate)
 }
 
 func (m *InterceptModuleManager) publishHosts(hosts []string) {

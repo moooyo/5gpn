@@ -541,7 +541,12 @@ the candidate sidecar document, waits for the root-owned certificate publisher
 to acknowledge the exact host-set digest, then atomically publishes and hot-
 applies mihomo before publishing the DNS overlay. Certificate or mihomo failure
 restores the old sidecar bytes; mihomo failure also restores and reapplies the
-old operator configuration. Disable operations may leave a temporary
+old operator configuration. While that bounded certificate wait is active, a
+missing target digest causes the manager to atomically republish the exact same
+candidate bytes at a fixed interval. This preserves the revision and content
+while retriggering `PathChanged` after an earlier event was coalesced into an
+already-running certificate oneshot; the complete wait still fails closed after
+15 seconds. Disable operations may leave a temporary
 certificate SAN superset, but the runtime allowlist rejects disabled hosts.
 
 `/etc/5gpn/intercept/config.json` version 4 preserves installer-owned SOCKS credentials,

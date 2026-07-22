@@ -485,6 +485,105 @@ func TestInterceptModuleManagerRollsBackWhenCertificatePublicationFails(t *testi
 	}
 }
 
+func TestInterceptModuleManagerRetriggersMissedCertificatePathEvent(t *testing.T) {
+	module := testModuleSnapshot()
+	manager, controller, _, interceptPath, _ := newInterceptManagerFixture(t, module)
+	manager.certStatePath = filepath.Join(t.TempDir(), "cert-state")
+	wantDigest := interceptCertificateDigest(module.CaptureHosts)
+	var republishCalls atomic.Int32
+	var publishedCandidate string
+	manager.certRepublish = func(ctx context.Context, path string, candidate []byte) error {
+		if path != interceptPath {
+			t.Fatalf("republish path = %q, want %q", path, interceptPath)
+		}
+		if current := mustRead(t, path); current != string(candidate) {
+			t.Fatalf("republished candidate changed after the initial publication:\ncurrent=%s\ncandidate=%s", current, candidate)
+		}
+		if call := republishCalls.Add(1); call != 1 {
+			t.Fatalf("republish calls = %d, want 1", call)
+		}
+		publishedCandidate = string(candidate)
+		if err := writeInterceptConfigAtomicContext(ctx, path, candidate); err != nil {
+			return err
+		}
+		return os.WriteFile(manager.certStatePath, []byte(wantDigest+"\n"), 0o640)
+	}
+
+	before, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	after, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: before.Revision, Enabled: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if republishCalls.Load() != 1 || controller.putCalls != 1 {
+		t.Fatalf("republish/controller calls = %d/%d", republishCalls.Load(), controller.putCalls)
+	}
+	if publishedCandidate == "" || mustRead(t, interceptPath) != publishedCandidate {
+		t.Fatal("successful certificate retry did not preserve the exact candidate bytes")
+	}
+	if after.Revision != interceptRevision([]byte(publishedCandidate)) || after.Revision == before.Revision {
+		t.Fatalf("revision after retry = %q, before = %q", after.Revision, before.Revision)
+	}
+}
+
+func TestInterceptModuleManagerRollsBackWhenCertificateRetriggerFails(t *testing.T) {
+	module := testModuleSnapshot()
+	manager, controller, handler, interceptPath, mihomoPath := newInterceptManagerFixture(t, module)
+	manager.certStatePath = filepath.Join(t.TempDir(), "cert-state")
+	originalConfig := mustRead(t, interceptPath)
+	originalMihomo := mustRead(t, mihomoPath)
+	manager.certRepublish = func(context.Context, string, []byte) error {
+		return errors.New("retry write failed")
+	}
+
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	_, err = manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled})
+	if !errors.Is(err, errInterceptApplyFailed) || !strings.Contains(err.Error(), "retry write failed") {
+		t.Fatalf("certificate retrigger error = %v", err)
+	}
+	if mustRead(t, interceptPath) != originalConfig || mustRead(t, mihomoPath) != originalMihomo || controller.putCalls != 0 || handler.decideName("api.example.com").Action == actionGateway {
+		t.Fatal("failed certificate retrigger changed durable or published state")
+	}
+}
+
+func TestInterceptModuleManagerRollsBackWhenCertificateRetryTimesOut(t *testing.T) {
+	module := testModuleSnapshot()
+	manager, controller, handler, interceptPath, mihomoPath := newInterceptManagerFixture(t, module)
+	manager.certStatePath = filepath.Join(t.TempDir(), "cert-state")
+	originalConfig := mustRead(t, interceptPath)
+	originalMihomo := mustRead(t, mihomoPath)
+	var republishCalls atomic.Int32
+	manager.certRepublish = func(ctx context.Context, path string, candidate []byte) error {
+		republishCalls.Add(1)
+		return writeInterceptConfigAtomicContext(ctx, path, candidate)
+	}
+
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1100*time.Millisecond)
+	defer cancel()
+	enabled := true
+	_, err = manager.Update(ctx, module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled})
+	if !errors.Is(err, errInterceptApplyFailed) || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("certificate retry timeout error = %v", err)
+	}
+	if republishCalls.Load() == 0 {
+		t.Fatal("certificate wait timed out without retrying the missed path event")
+	}
+	if mustRead(t, interceptPath) != originalConfig || mustRead(t, mihomoPath) != originalMihomo || controller.putCalls != 0 || handler.decideName("api.example.com").Action == actionGateway {
+		t.Fatal("timed-out certificate retry changed durable or published state")
+	}
+}
+
 func TestInterceptModuleDeleteHonorsCancellationDuringValidation(t *testing.T) {
 	module := testModuleSnapshot()
 	module.Enabled = false
