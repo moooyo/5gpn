@@ -35,6 +35,9 @@ func (bt *Bot) renderBotExtensionModules(
 	if _, err := bt.extensionStateStore().CancelSelectionsByKindForOperation(ctx, botExtensionPayloadEgress); err != nil {
 		return
 	}
+	if _, err := bt.extensionStateStore().CancelSelectionsByKindForOperation(ctx, botExtensionPayloadCaptureDNS); err != nil {
+		return
+	}
 	settings, settingsErr := bt.ctrl.InterceptSettings()
 	start, end, pages := pageBounds(len(view.Modules), page, botExtensionPageSize)
 	page = start / botExtensionPageSize
@@ -151,6 +154,7 @@ func (bt *Bot) renderBotExtensionModule(
 	if module.EgressGroupRequired || len(view.AvailableEgressGroups) > 0 {
 		rows = append(rows, []models.InlineKeyboardButton{botExtensionButton("🚪 出口绑定", "egress:"+token+":0")})
 	}
+	rows = append(rows, []models.InlineKeyboardButton{botExtensionButton("🧭 Capture DNS", "capture-dns:"+token)})
 	rows = append(rows, []models.InlineKeyboardButton{
 		botExtensionButton("⬆️ 上移", "module:up:"+token),
 		botExtensionButton("⬇️ 下移", "module:down:"+token),
@@ -168,13 +172,24 @@ func (bt *Bot) renderBotExtensionModule(
 		bt.edit(ctx, b, cq, "<b>"+html.EscapeString(module.Name)+"</b>\n完整详情较长，已作为受保护的 HTML 文档发送。", keyboard)
 		if bt.botExtensionOperationCurrent(ctx) {
 			if err := sendBotExtensionDetailDocument(ctx, b, callbackChatID(cq), "5gpn-extension-detail.html",
-				"📄 <b>完整插件详情</b>\n包含不可变摘要、actions、typed settings、权限、hosts、mappings 与出口信息。", content); err != nil {
+				"📄 <b>完整插件详情</b>\n包含不可变摘要、actions、typed settings、权限、hosts、mappings、Capture DNS 与出口信息。", content); err != nil {
 				bt.edit(ctx, b, cq, "❌ 完整详情文档发送失败："+pre(err.Error()), keyboard)
 			}
 		}
 		return
 	}
 	bt.edit(ctx, b, cq, content, keyboard)
+}
+
+func botExtensionCaptureDNSLabel(value string) string {
+	switch value {
+	case interceptCaptureDNSTrust:
+		return "Trust"
+	case interceptCaptureDNSChina:
+		return "China"
+	default:
+		return value
+	}
 }
 
 func botExtensionModuleDetailHTML(module interceptModuleView) string {
@@ -237,6 +252,9 @@ func botExtensionModuleDetailHTML(module interceptModuleView) string {
 		text.WriteString(html.EscapeString(module.EgressGroup))
 		text.WriteString("</code>")
 	}
+	text.WriteString("\nCapture DNS：<code>")
+	text.WriteString(html.EscapeString(botExtensionCaptureDNSLabel(module.CaptureDNS)))
+	text.WriteString("</code>")
 	if len(module.HostMappings) > 0 {
 		text.WriteString("\nUpstream mappings：")
 		for _, mapping := range module.HostMappings {
@@ -304,11 +322,11 @@ func (bt *Bot) previewBotExtensionToggle(
 	}
 	kind := botExtensionPayloadDisable
 	action := "关闭"
-	impact := "这会撤销该插件的 armed 状态；若 MITM master 已启用，也会从共享事务移除其 DNS 与 mihomo capture overlay。"
+	impact := "这会撤销该插件的 armed 状态；若 MITM master 已启用，也会从共享事务移除其 DNS 与 mihomo capture overlay。重叠 capture host 将由执行顺序中的下一个 enabled 插件接管 mihomo origin re-resolution DNS 绑定。"
 	if next {
 		kind = botExtensionPayloadEnable
 		action = "启用"
-		impact = "这会将插件设为 armed；MITM master 开启时会发布证书、mihomo capture 规则、已审查的 REJECT/DIRECT 路由规则和 DNS 引流，并允许脚本读取命中的解密流量。"
+		impact = "这会将插件设为 armed；MITM master 开启时会发布证书、mihomo capture 规则、已审查的 REJECT/DIRECT 路由规则和 DNS 引流，并允许脚本读取命中的解密流量。重叠 capture host 的 mihomo origin re-resolution DNS 绑定按执行顺序由第一个 enabled 插件获胜；China 绑定使用运行时实时 China group 与当前 ECS 配置。"
 	}
 	payload := botExtensionStatePayload{
 		Kind:      kind,
@@ -392,7 +410,7 @@ func (bt *Bot) previewBotExtensionReorder(
 		"</b>\n当前位置：<code>" + strconv.Itoa(index+1) + "</code>\n新位置：<code>" + strconv.Itoa(next+1) +
 		"</code>\n完整旧顺序：" + botExtensionExecutionOrderHTML(view, view.ExecutionOrder) +
 		"\n完整新顺序：" + botExtensionExecutionOrderHTML(view, order) +
-		"\n\n执行顺序同时决定 action composition、capture host 重叠时第一个生效的出口绑定，以及重叠全局 REJECT/DIRECT 规则的 first-match 优先级。"
+		"\n\n执行顺序同时决定 action composition、capture host 重叠时第一个生效的出口绑定、重叠 capture host 的第一个 enabled mihomo origin re-resolution DNS 绑定赢家，以及重叠全局 REJECT/DIRECT 规则的 first-match 优先级。China 绑定使用运行时实时 China group 与当前 ECS 配置。"
 	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
 }
 
@@ -423,6 +441,8 @@ func botExtensionExecutionOrderHTML(view interceptModulesView, order []string) s
 			egress = "operator 终端目标"
 		}
 		text.WriteString(html.EscapeString(egress))
+		text.WriteString("</code> · capture_dns=<code>")
+		text.WriteString(html.EscapeString(botExtensionCaptureDNSLabel(module.CaptureDNS)))
 		text.WriteString("</code> · routing_rules=<code>")
 		text.WriteString(strconv.Itoa(len(module.RoutingRules)))
 		text.WriteString("</code>")
@@ -982,6 +1002,86 @@ func (bt *Bot) previewBotExtensionEgressSelection(
 	if len(module.NetworkOrigins) > 0 {
 		prompt += "\n\n" + botExtensionNetworkRiskHTML(module.NetworkOrigins)
 	}
+	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
+}
+
+func (bt *Bot) handleBotExtensionCaptureDNSCallback(
+	ctx context.Context,
+	b *bot.Bot,
+	cq *models.CallbackQuery,
+	uid, chatID int64,
+	rest string,
+) {
+	if token, ok := strings.CutPrefix(rest, "set:"); ok {
+		bt.previewBotExtensionCaptureDNSSelection(ctx, b, cq, uid, chatID, token)
+		return
+	}
+	view, module, _, err := bt.resolveBotExtensionModule(uid, chatID, rest)
+	if err != nil {
+		bt.edit(ctx, b, cq, "⚠️ 无法打开 Capture DNS 绑定："+pre(err.Error()), botExtensionBack("modules"))
+		return
+	}
+	if _, err := bt.extensionStateStore().CancelSelectionsByKindForOperation(ctx, botExtensionPayloadCaptureDNS); err != nil {
+		return
+	}
+	text := "<b>" + html.EscapeString(module.Name) + " · Capture DNS</b>\n" +
+		"选择 active capture host 在 mihomo 经 <code>127.0.0.1:5354</code> 重新解析 origin 时使用的 DNS group。该设置不改变客户端 DNS policy、网关引流或 mihomo 应用出口。\n" +
+		"• <b>Trust</b>：使用运行时当前 Trust group。\n" +
+		"• <b>China</b>：使用运行时实时 China group 与当前 ECS 配置；China upstream 或 ECS 更新会立即影响后续解析。"
+	rows := make([][]models.InlineKeyboardButton, 0, 3)
+	for _, resolver := range []string{interceptCaptureDNSTrust, interceptCaptureDNSChina} {
+		selection := botExtensionStatePayload{
+			Kind:        botExtensionPayloadCaptureDNS,
+			Revision:    view.Revision,
+			ModuleID:    module.ID,
+			Digest:      module.SnapshotDigest,
+			StringValue: resolver,
+		}
+		token, _, issueErr := bt.extensionStateStore().IssueSelectionForOperation(ctx, selection)
+		if issueErr != nil {
+			bt.edit(ctx, b, cq, "❌ 无法创建 Capture DNS 选择："+pre(issueErr.Error()), botExtensionBack("modules"))
+			return
+		}
+		label := botExtensionCaptureDNSLabel(resolver)
+		if resolver == module.CaptureDNS {
+			label = "✓ " + label
+		}
+		rows = append(rows, []models.InlineKeyboardButton{botExtensionButton(label, "capture-dns:set:"+token)})
+	}
+	rows = append(rows, []models.InlineKeyboardButton{botExtensionButton("« 返回", "module:"+rest)})
+	bt.edit(ctx, b, cq, text, &models.InlineKeyboardMarkup{InlineKeyboard: rows})
+}
+
+func (bt *Bot) previewBotExtensionCaptureDNSSelection(
+	ctx context.Context,
+	b *bot.Bot,
+	cq *models.CallbackQuery,
+	uid, chatID int64,
+	token string,
+) {
+	payload, ok := bt.extensionStateStore().ResolveSelection(token, uid, chatID, botExtensionPayloadCaptureDNS)
+	if !ok {
+		bt.edit(ctx, b, cq, "⚠️ Capture DNS 选择已过期或不属于当前管理员。", botExtensionBack("modules"))
+		return
+	}
+	view, module, err := requireBotExtensionModule(bt, payload)
+	if err != nil {
+		bt.edit(ctx, b, cq, "⚠️ 插件状态已变化："+pre(err.Error()), botExtensionBack("modules"))
+		return
+	}
+	if err := validateInterceptCaptureDNS(payload.StringValue); err != nil {
+		bt.edit(ctx, b, cq, "❌ Capture DNS 选择无效："+pre(err.Error()), botExtensionBack("modules"))
+		return
+	}
+	payload.Kind = botExtensionPayloadCaptureDNS
+	prompt := "⚠️ <b>确认修改插件 Capture DNS？</b>\n" + botExtensionModuleDetailHTML(module) +
+		"\n\n当前绑定：<code>" + html.EscapeString(botExtensionCaptureDNSLabel(module.CaptureDNS)) +
+		"</code>\n新绑定：<code>" + html.EscapeString(botExtensionCaptureDNSLabel(payload.StringValue)) +
+		"</code>\n配置 revision：<code>" + html.EscapeString(view.Revision) +
+		"</code>\n执行位置：<code>" + strconv.Itoa(module.ExecutionOrder) + "</code>\n" +
+		"Trust 使用运行时当前 Trust group；China 使用运行时实时 China group 与当前 ECS 配置。\n" +
+		"该选择只控制 active capture host 的 mihomo loopback origin re-resolution，不改变客户端 DNS policy、网关引流或 mihomo 应用出口。\n" +
+		"若多个 enabled 插件声明重叠 capture host，执行顺序中的第一个插件是 DNS 绑定赢家。"
 	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
 }
 

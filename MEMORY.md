@@ -9,8 +9,8 @@ Update the status and the normative documentation when an implementation lands.
 ## Native interception extensions
 
 **Status: Implemented. Recorded 2026-07-19 and superseded in place by the
-current pre-release contract, including trusted Telegram management, on
-2026-07-20.**
+current pre-release contract, including trusted Telegram management and
+operator capture-DNS bindings, on 2026-07-22.**
 
 - The extension system accepts only strict `5gpn.io/v1` native YAML manifests.
   It does not parse or emulate third-party proxy-client plugin formats.
@@ -37,6 +37,18 @@ current pre-release contract, including trusted Telegram management, on
   network API. A permitted script can deliberately send any data visible to it
   to those origins, and every management surface must say so plainly before
   enable.
+- The same exact-origin network permission authorizes a bounded request-phase
+  URL rewrite to a canonical absolute HTTP(S) URL at a declared origin.
+  Userinfo and fragments are forbidden, HTTPS cannot downgrade to HTTP, and
+  same-origin rewrites from the captured origin remain inside the extension's
+  capture-host boundary. After an authorized cross-origin rewrite, a later
+  action may execute against or rewrite within that current external origin
+  only when its own extension declares the same exact origin.
+  The rewritten request sends its complete method, decoded body, and end-to-end
+  headers, potentially including `Cookie` or `Authorization`; framing and
+  hop-by-hop fields remain runtime-owned. The single enable review names every
+  origin, states this disclosure explicitly, and all resulting traffic returns
+  through authenticated mihomo SOCKS5.
 - Extensions cannot name, inspect, or change arbitrary application egress
   groups. A manifest may require an operator egress binding; the operator
   selects an existing mihomo group, and ordered domain/port rules on the shared
@@ -46,6 +58,19 @@ current pre-release contract, including trusted Telegram management, on
   without a default fallback. The explicit extension execution order determines
   action composition, the first binding that wins for an overlapping
   destination, and global routing first-match precedence.
+- Every installed extension has an operator-owned `capture_dns` binding with
+  the exact values `trust` and `china`; imported extensions default to `trust`.
+  The binding is mutable state outside the immutable snapshot digest and is
+  preserved across update checks and applies. Mihomo still resolves only
+  through `127.0.0.1:5354`: an active captured hostname uses the first enabled
+  declaring extension in execution order, `china` forces the live China group
+  with its current ECS, and `trust` forces the live trust group. Non-extension
+  hostnames default to trust. Client DNS policy and chnroute arbitration do not
+  select this egress resolver, and URL paths cannot participate in DNS choice.
+- One extension, one action host matcher, and the enabled interception
+  certificate set are each bounded to 512 capture-host patterns. The routing
+  and action/upstream-mapping declaration limits remain independently bounded
+  at 256.
 - URL install and local add are separate actions. URL install accepts one HTTPS
   manifest and may snapshot relative HTTPS scripts. Local add accepts one
   pasted or uploaded manifest and uses inline or absolute HTTPS scripts. The
@@ -174,6 +199,18 @@ stable-to-beta upgrade contract on 2026-07-21.**
   credentials. If interception is inactive and that boundary is not ready, the
   core install may complete only with an explicit Extensions-unavailable result.
   It must not claim a complete interception upgrade or patch the YAML.
+- The installer still accepts only the one current `dns.env` key schema. The
+  retired `DNS_EGRESS_RESOLVER` key is not ignored or migrated. Every pre-v5
+  deployment, including `0.0.19`, `test-env`, and `kfchost`, must first use its
+  old v4 control plane to snapshot active state, disable MITM, remove the old
+  managed rules, and retain a separate clean post-disable baseline. A fixed
+  explicit rebuild then preserves the listener, SOCKS credentials, TLS paths,
+  upstream proxy, and protocol booleans in a checked, atomically published,
+  disabled empty v5 document. The current sidecar check and current DNS routing
+  check must both pass against the clean mihomo file before config and env
+  candidates publish with rollback copies. Never delete v4 and accept randomized credentials against a preserved
+  mihomo file. Extensions are re-imported and reviewed; this is not a lossless
+  automatic migration.
 - `--beta upgrade-reset-mihomo` is the only installer upgrade mode authorized to
   replace the full operator mihomo config. It requires an existing installation,
   a pinned beta bundle, and an interactive TTY confirmation. It must back up the
@@ -214,8 +251,9 @@ Future release-channel changes must update all affected surfaces together:
   workflow, while retaining `.github/workflows/checks.yml` as the common gate;
 - installer and quick-installer safety tests, including default-stable behavior,
   explicit beta selection, malformed or cross-channel tags, missing beta
-  releases, exact-tag pinning, checksum enforcement, and a fixed `0.0.13` to
-  stamped-beta upgrade fixture covering both core-preserve and explicit-reset
-  paths plus rollback of newly created CA/state roots and service accounts;
+  releases, exact-tag pinning, checksum enforcement, and a frozen raw `0.0.13`
+  fixture whose test performs the explicit checked rebuild before covering both
+  core-preserve and explicit-reset paths plus rollback of newly created
+  CA/state roots and service accounts;
 - `README.md` installation and release documentation; and
 - `docs/architecture.md` and this durable decision record.

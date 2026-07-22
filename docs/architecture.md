@@ -19,6 +19,15 @@ connects to the gateway. When the gateway address is returned, mihomo sniffs
 the original hostname and owns every subsequent egress choice. DNS policy does
 not choose a mihomo node, proxy group, selector, or transport.
 
+When mihomo re-resolves a sniffed hostname, it queries the loopback resolver
+boundary owned by `5gpn-dns`. That path does not run client DNS policy. An
+active extension may have an operator-selected `trust` or `china` capture-DNS
+binding; `trust` is the default for every imported extension and for every
+hostname not captured by an active extension. A `china` binding forces the
+live China upstream group, including the current operator ECS value. Overlaps
+use the first enabled extension in explicit execution order. DNS can select
+only by hostname, so URL schemes, ports, and paths cannot select a resolver.
+
 ```text
 client
   | DoT :853
@@ -49,7 +58,7 @@ architecture.
 | --- | --- | --- |
 | `5gpn-dns` | `:853/tcp` | The only client DNS ingress, DNS over TLS. |
 | `5gpn-dns` | `127.0.0.1:5353/udp` | Local debugging only; it must remain loopback. |
-| `5gpn-dns` | `127.0.0.1:5354/udp` and `/tcp` | Egress DNS broker used by mihomo after hostname sniffing. |
+| `5gpn-dns` | `127.0.0.1:5354/udp` and `/tcp` | Loopback origin resolver used by mihomo after hostname sniffing; active extension bindings select China/trust and all other names use trust. |
 | `5gpn-dns` | `127.0.0.1:443/tcp` | Public HTTPS console assets and iOS profile download, plus the bearer-authenticated API. |
 | `5gpn-dns` | `127.0.0.2:443/tcp` | HTTPS zashboard static files and its controller proxy. |
 | `5gpn-intercept` | `127.0.0.1:18080/tcp`, only while MITM is enabled | Authenticated SOCKS5 control and plain-HTTP/TLS interception ingress. Each authenticated UDP ASSOCIATE receives a private ephemeral loopback UDP socket. |
@@ -145,6 +154,26 @@ continues to the operator's normal rule path. A hostname target must match
 the active extension set; a pure-IP SOCKS target is accepted only until the TLS or
 QUIC handshake supplies an allowlisted SNI. Unknown SNI fails closed.
 
+The mihomo transaction may compact one extension's exact apex plus matching
+wildcard pair (`example.com` and `*.example.com`) into one
+`DOMAIN-SUFFIX,example.com` selector when the action, destination port, egress
+target, and ordered owner are identical. This is only a data-plane rendering
+optimization: the immutable manifest, DNS matcher, capture-host audit, and
+certificate SAN set retain both declarations. Exact-only, wildcard-only,
+cross-extension pairs, different egress winners, and reviewed routing rules are
+never compacted. The reserved-block parser accepts only this canonical suffix
+shape and rollback restores the exact previously published bytes.
+
+Every installed extension also has mutable operator state named `capture_dns`.
+It is exactly `trust` or `china`, defaults to `trust`, is excluded from the
+immutable extension snapshot digest, and is preserved across extension update
+checks and applies. It affects only mihomo's loopback origin re-resolution for
+an actively captured hostname. `china` uses the live China group and its ECS;
+`trust` uses the live trust group. For overlapping exact or wildcard capture
+patterns, the first enabled extension in `execution_order` owns the resolver
+binding. Reordering therefore changes action, egress, global routing, and
+capture-DNS precedence and remains a reviewed transaction.
+
 An active extension may also publish normalized `traffic.routingRules` into
 the reserved mihomo transaction. Each rule has exactly one domain, domain
 suffix, IP CIDR, or bounded domain-keyword selector, optionally constrained by
@@ -166,6 +195,11 @@ extension therefore cannot execute a broad script or upstream mapping against a
 host captured only by another extension. Duplicate host declarations remain
 visible for audit and intentionally compose only when each extension declared
 the host itself.
+
+One extension may declare at most 512 capture hosts, one action may match at
+most 512 hosts, and the enabled certificate set may contain at most 512 unique
+host patterns. These matching limits are independent from the existing 256
+action/upstream-mapping and 256 routing-rule limits.
 
 The sidecar accepts plain HTTP and terminates TLS. The `http2` setting controls
 both client-side HTTP/2 negotiation and upstream HTTP/2 attempts; disabling it
@@ -221,10 +255,20 @@ path RE2 expression, optional response statuses, body representation, timeout,
 and body limit. Its single `transform(context)` entry point receives only the
 bounded request/response projection, typed settings, console logging, and—when
 explicitly permitted—a quota-bound per-extension storage object and synchronous
-network requests constrained to exact approved origins. It has no ambient
+network requests constrained to exact approved origins. The same permission
+also authorizes a request-phase URL rewrite to a canonical absolute HTTP(S)
+URL whose origin exactly matches the approved list; userinfo and fragments are
+forbidden, HTTPS cannot be downgraded to HTTP, and same-origin rewrites remain
+inside the extension's capture-host boundary while the request is still at its
+captured origin. After an authorized cross-origin rewrite, a later action may
+execute against or rewrite within the current external origin only when its own
+extension also declares that exact origin. It has no ambient
 network client, filesystem, process, timer, socket, or module-loader access. A
-permitted script can deliberately send any data visible to it to those origins;
-every management surface states that risk before enable. Fixed process-wide
+permitted script can deliberately send any data visible to it to those origins.
+A rewritten captured request sends its complete method, decoded body, and
+end-to-end headers, potentially including `Cookie` or `Authorization`; framing
+and hop-by-hop fields remain runtime-owned. Every management surface states
+that risk before enable. Fixed process-wide
 network time, body, call-count, and concurrency limits are runtime safety bounds
 rather than manifest knobs.
 
@@ -337,6 +381,11 @@ remaining caller deadline so one failed member cannot starve later members.
 Caller cancellation is not recorded as an upstream breaker failure; an
 individual attempt deadline may fall through to the next member.
 
+This client-resolution arbitration is separate from mihomo origin
+re-resolution. The loopback origin resolver never evaluates ordered DNS policy
+or chnroute arbitration: it forces the operator-selected group for an active
+extension capture host and otherwise forces trust.
+
 New installations default to one plain-UDP member in each group:
 `223.5.5.5:53` for China and `22.22.22.22:53` for trust. The default China ECS
 subnet is `112.96.32.0/24`; an operator may override or disable it explicitly.
@@ -378,7 +427,7 @@ must state that limitation rather than implying network-level enforcement.
 
 `/etc/5gpn/mihomo/config.yaml` is a complete, operator-owned mihomo
 configuration. The initial seed provides listeners, hostname sniffing, the
-loopback egress broker, panel routing, anti-loop rules, a fail-closed sidecar
+loopback origin resolver boundary, panel routing, anti-loop rules, a fail-closed sidecar
 egress terminator, and a `Proxies` group
 whose initial choice is `DIRECT`. After publication there is no generated or
 daemon-managed region.
@@ -437,11 +486,30 @@ report Extensions unavailable. An active interception configuration with an
 incompatible mihomo boundary aborts and rolls back instead of degrading active
 traffic silently.
 
+`dns.env` itself has only the current key schema. The retired
+`DNS_EGRESS_RESOLVER` key is neither accepted nor ignored. Every pre-v5
+deployment, including `0.0.19`, `test-env`, and `kfchost`, requires an
+operator-reviewed lockstep rebuild before upgrade. The old v4 control plane must
+first retain an active-state recovery copy, then disable the MITM master,
+withdraw its owned egress/policy/capture rules, stop the sidecar, and retain a
+second clean post-disable routing baseline. A fixed `jq` projection preserves the
+listener, both SOCKS credential pairs, TLS paths, upstream proxy, and protocol
+booleans while setting version 5, master disabled, and empty modules/order. The
+candidate is checked by both verified current binaries: the sidecar validates
+the document and `5gpn-dns --check-interception-routing` must report `ready`
+against the live clean mihomo file, proving credentials match and no old managed
+rules remain. Checked config and `dns.env` candidates are synced and published
+with same-directory atomic renames plus pre-commit rollback copies. Deleting v4
+and accepting newly randomized credentials would break the preserved mihomo
+boundary. Extensions are explicitly re-imported and reviewed. Neither file nor
+plugin state is represented as a lossless automatic migration.
+
 The raw console editor follows the same validation and atomic-publication
 rules. Required infrastructure invariants cannot be edited away: the plaintext
 controller remains disabled, the TLS controller stays on loopback, the shared
 zash certificate paths and controller secret remain fixed, and the egress DNS
-broker remains loopback. GET returns a SHA-256 revision of the original config
+broker remains loopback. Its upstream choice remains inside `5gpn-dns`; mihomo
+must not be pointed directly at one external resolver. GET returns a SHA-256 revision of the original config
 bytes; raw PUT and console reset must submit that revision. The daemon compares
 it under the shared store lock and again after `mihomo -t`, immediately before
 publication, so stale editors and external changes observed before that final
@@ -475,7 +543,8 @@ Interception extensions are managed through the authenticated
 fallback settings use authenticated `GET`/`PUT /api/interception/settings` over
 the same complete-document revision. The Console and Telegram bot call the same
 in-process `InterceptModuleManager`; neither has a private toggle path. Import,
-argument update, delete, reorder, operator group binding, and enable/disable
+argument update, delete, reorder, operator group binding, operator capture-DNS
+binding, and enable/disable
 operations carry the SHA-256 revision of the complete sidecar document. Typed
 setting updates, including a `location` value supplied through the Console map
 editor or Telegram input flow, use that same revision and manager; there is no
@@ -486,7 +555,8 @@ administrators in private chats. It exposes the same normalized marketplace and
 extension state needed to add, refresh, browse, and remove marketplace sources;
 install from a marketplace entry or HTTPS manifest URL; import a pasted local
 manifest; uninstall, enable, or disable an extension; edit every typed setting;
-bind an operator egress group; reorder extensions; and check and apply updates.
+bind an operator egress group; select China/trust capture DNS; reorder
+extensions; and check and apply updates.
 It does not gain a separate state store or mutation path. Marketplace operations
 use the marketplace manager, while extension operations use the same
 `InterceptModuleManager` transactions as the Console. An install or applied
@@ -496,10 +566,11 @@ Every Telegram write is a two-step review and confirmation. The review renders
 the complete normalized impact relevant to the operation, including the source,
 identity, versions, immutable snapshot digest, changed settings, capture hosts,
 action match/execution metadata and script digests (but not script bodies),
-permissions, exact network origins, execution position, egress binding, and
-enabled/runtime transition. Enable reviews also list every exact normalized
+permissions, exact network origins, execution position, egress and capture-DNS
+bindings, and enabled/runtime transition. Enable reviews also list every exact normalized
 global routing rule. Reorder reviews show the complete before/after order and
-state that overlapping routing first-match can change. Long reviews may be split across protected
+state that overlapping routing, egress, and capture-DNS first-match can change.
+Long reviews may be split across protected
 messages or a protected document, but the confirmation control is sent only
 after the complete review. The daemon stores only an opaque, short-lived,
 one-use confirmation reference in callback data. Its server-side record is bound
@@ -518,7 +589,9 @@ digests remain independent publisher data.
 When a candidate or installed extension declares network origins, every review
 lists each exact origin. An enable review additionally states that the script
 may send any decrypted request, response, setting, or storage data visible to it
-to every listed origin. Telegram never compresses this into a generic permission
+to every listed origin, and may rewrite a captured request there with its
+method, decoded body, and end-to-end headers, including possible cookies or
+authorization. Telegram never compresses this into a generic permission
 label or treats an earlier acknowledgement as approval for a changed snapshot.
 
 Telegram supports `location` settings through the client's native location
@@ -549,12 +622,13 @@ already-running certificate oneshot; the complete wait still fails closed after
 15 seconds. Disable operations may leave a temporary
 certificate SAN superset, but the runtime allowlist rejects disabled hosts.
 
-`/etc/5gpn/intercept/config.json` version 4 preserves installer-owned SOCKS credentials,
+`/etc/5gpn/intercept/config.json` version 5 preserves installer-owned SOCKS credentials,
 loopback addresses, and certificate paths across every API write. It also
 stores the MITM master and protocol settings plus immutable native extension,
 manifest, script, origin-permission, typed-setting, and capture-host snapshots,
 normalized routing-rule declarations, the complete execution-order permutation,
-and mutable operator egress-group bindings. Both request and response actions
+and mutable operator egress-group and capture-DNS bindings. Both request and
+response actions
 execute top-to-bottom in that order; the same order determines the first egress
 binding and first overlapping extension routing rule that wins. A raw mihomo PUT or reset cannot remove a group that is
 still referenced by any installed extension, including a disabled one. An
@@ -1043,9 +1117,10 @@ Each native HTTP action runs in a fresh goja VM and must define exactly
 `transform(context)`. The context contains only the declared phase's bounded
 request/response projection, typed settings, console logging, and an optional
 quota-bound storage object when the immutable manifest requested that
-permission. A declared and operator-confirmed network permission adds only
-`context.network.request`, restricted to the immutable exact-origin list and
-routed through authenticated mihomo SOCKS5. There are no compatibility globals,
+permission. A declared and operator-confirmed network permission adds
+`context.network.request` and the bounded cross-origin request-rewrite
+capability described above, both restricted to the immutable exact-origin list
+and routed through authenticated mihomo SOCKS5. There are no compatibility globals,
 ambient `fetch`, filesystem, process, timer, module loader, socket, or ambient
 Go object.
 Source, request, response, per-action, total-extension, persistent-key, and
@@ -1064,7 +1139,10 @@ At most two body-buffering transformation flows run concurrently; excess work
 fails closed with service unavailable instead of exceeding the sidecar cgroup.
 VM execution has a rule timeout, and regexp2's non-RE2 JavaScript fallback has
 an independent 250 ms match limit so catastrophic backtracking cannot evade the
-VM interrupt. Script errors fail the transformed request closed.
+VM interrupt. Validated action path RE2 expressions, active/per-extension/action
+host matchers, and execution-order lookup are compiled once per immutable
+sidecar configuration snapshot; reload replaces that bounded snapshot and does
+not populate a global cache. Script errors fail the transformed request closed.
 
 The control API is disabled when no bearer token is configured; it is never
 served unauthenticated. Certificate or TLS identity errors fail closed. A bad
@@ -1126,7 +1204,8 @@ plugins. It shows immutable
 manifest/script digests, semantic version, normalized capture hosts, actions,
 permissions, exact network origins, typed settings, upstream mappings, exact
 typed routing rules, explicit execution position, operator egress binding, and
-enabled/runtime state. Enabling uses one review for the complete snapshot. It
+operator capture-DNS binding, and enabled/runtime state. Enabling uses one
+review for the complete snapshot. It
 lists every global routing rule and, when network permission exists, every
 origin while stating that the plugin can send any decrypted request, response,
 setting, or storage data visible to it there. Reordering opens a separate
@@ -1171,7 +1250,8 @@ authorization.
 every declared host pattern by plugin, distinguishes running/configured/disabled
 state using the global master plus `active_capture_hosts`, highlights exact duplicate
 declarations, shows action order and the first effective egress winner for a
-duplicate host, and supports local search and filtering. Modern Android Private
+duplicate host, shows the first effective capture-DNS winner and its
+China/trust binding, and supports local search and filtering. Modern Android Private
 DNS remains supported, but the Setup Guide does not offer Android MITM CA
 installation because modern Android applications generally reject user CAs.
 

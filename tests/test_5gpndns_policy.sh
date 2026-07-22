@@ -163,7 +163,7 @@ grep -Fq 'DNS_LISTEN_API=:18443' "$INSTALL" \
     && fail "install.sh: the old xray-era :18443 control-plane port must not come back"
 grep -Fq 'existing_token'    "$INSTALL" || fail "install.sh: does not preserve an existing token across re-install"
 
-# --- Unified policy state + mihomo egress DNS broker ---
+# --- Unified policy state + mihomo loopback origin DNS selector ---
 grep -Fq 'ReadOnlyPaths=/etc/5gpn/dns.env' "$DNS_SVC" \
     || fail "5gpn-dns.service: dns.env is not re-protected read-only"
 grep -Eq '^ReadWritePaths=/etc/5gpn$' "$DNS_SVC" \
@@ -177,26 +177,33 @@ grep -Fq '127.0.0.1:5354' "$POLICY_CFG" \
 grep -Fq 'DNS_EGRESS_BROKER=127.0.0.1:5354' "$ROOT/etc/5gpn-dns/dns.env.example" \
     || fail "dns.env.example: DNS_EGRESS_BROKER not documented with default 127.0.0.1:5354"
 
-BROKER_FALLBACK="$ROOT/cmd/5gpn-dns/broker_fallback.go"
+BROKER_SELECTOR="$ROOT/cmd/5gpn-dns/egress_dns_selector.go"
 BROKER_GO="$ROOT/cmd/5gpn-dns/egress_dns_broker.go"
 INSTALL_SH="$ROOT/install.sh"
 grep -Fq 'newDefaultEgressDNSBroker' "$POLICY_MAIN" \
     || fail "main.go: egress broker must be built unconditionally"
-grep -Fq 'newDefaultEgressDNSBroker' "$BROKER_FALLBACK" \
-    || fail "broker_fallback.go: no newDefaultEgressDNSBroker constructor"
+grep -Fq 'newDefaultEgressDNSBroker' "$BROKER_SELECTOR" \
+    || fail "egress_dns_selector.go: no newDefaultEgressDNSBroker constructor"
+grep -Fq 'captureDNSForName' "$BROKER_SELECTOR" \
+    || fail "egress_dns_selector.go: active extension capture DNS binding is not consulted"
 grep -Fq 'type EgressDNSBroker struct' "$BROKER_GO" \
     || fail "egress_dns_broker.go: no EgressDNSBroker"
 # An empty broker address must be a config error there (not a silent disable).
-grep -Fq 'mihomo requires a loopback broker listener' "$BROKER_FALLBACK" \
-    || fail "broker_fallback.go: empty broker address must be a config error"
+grep -Fq 'mihomo requires a loopback broker listener' "$BROKER_SELECTOR" \
+    || fail "egress_dns_selector.go: empty broker address must be a config error"
 # A broker bind failure must be fatal in main (fail-loud), not warn-disable.
 grep -Eq 'log\.Fatalf\("egress DNS broker' "$POLICY_MAIN" \
     || fail "main.go: broker bind failure must be fatal (log.Fatalf)"
-# The egress resolver has one current key and field.
-grep -Fq 'DNS_EGRESS_RESOLVER' "$POLICY_CFG" \
-    || fail "config.go: DNS_EGRESS_RESOLVER must be read by the daemon"
+# The retired single-upstream fallback must stay gone. The broker uses the live
+# China/trust groups instead of a second resolver contract.
+grep -Fq 'DNS_EGRESS_RESOLVER is retired' "$POLICY_CFG" \
+    || fail "config.go: retired DNS_EGRESS_RESOLVER is not rejected explicitly"
 grep -Fq 'EgressResolver string' "$POLICY_CFG" \
-    || fail "config.go: no EgressResolver field"
+    && fail "config.go: retired EgressResolver field remains"
+grep -Fq 'Pre-v5 dns.env contains retired DNS_EGRESS_RESOLVER' "$INSTALL_SH" \
+    || fail "install.sh: retired DNS_EGRESS_RESOLVER is not rejected explicitly"
+grep -Eq '^[[:space:]]*DNS_EGRESS_RESOLVER=' "$INSTALL_SH" \
+    && fail "install.sh: retired DNS_EGRESS_RESOLVER is still persisted"
 grep -Fq 'XRAY_RESOLVER' "$POLICY_CFG" \
     && fail "config.go: removed XRAY_RESOLVER key is still read"
 grep -Fq 'XRAY_RESOLVER' "$INSTALL_SH" \

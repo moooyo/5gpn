@@ -31,7 +31,7 @@ import { api } from '../../lib/api/client'
 const WLOC: InterceptModule = {
   id: 'io.5gpn.apple-wloc', extension_version: '1.0.0', name: 'Apple WLOC Location Override',
   description: 'Native online extension for Apple location responses.', enabled: false, ready: false,
-  reason: 'settings-required', capture_hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'], script_count: 1,
+  reason: 'settings-required', capture_hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'], capture_dns: 'trust', script_count: 1,
   settings: [
     { key: 'location', type: 'location', label: 'Target location', required: true, value: { accuracy: 25 } },
     { key: 'failClosed', type: 'boolean', label: 'Block on transformation failure', required: true, value: true },
@@ -44,7 +44,7 @@ const WLOC: InterceptModule = {
 const CLEANER: InterceptModule = {
   id: 'io.example.response-cleaner', extension_version: '1.0.0', name: 'Response Cleaner',
   description: 'Native response action fixture.', enabled: false, ready: true, reason: undefined,
-  capture_hosts: ['api.example.com'], script_count: 1, settings: [], persistent_storage: false,
+  capture_hosts: ['api.example.com'], capture_dns: 'china', script_count: 1, settings: [], persistent_storage: false,
   upstream_mappings: [{ host: 'api.example.com', target: 'origin.example.net' }],
   routing_rules: [{ action: 'reject', domain_suffix: 'ads.example.com', network: 'udp' }],
   source_url: 'https://extensions.example.test/clean.yaml', source_digest: 'b'.repeat(64), snapshot_digest: 'b'.repeat(64), imported_at: '2026-07-18T00:00:00Z',
@@ -86,6 +86,7 @@ beforeEach(async () => {
     const module = next.modules.find((candidate) => candidate.id === _id)!
     if (update.enabled !== undefined) module.enabled = update.enabled
     if (update.settings) module.settings = module.settings?.map((setting) => ({ ...setting, value: update.settings?.[setting.key] }))
+    if (update.capture_dns !== undefined) module.capture_dns = update.capture_dns
     return next
   })
   vi.mocked(api.deleteInterceptModule).mockResolvedValue(cloneView())
@@ -120,10 +121,12 @@ describe('ExtensionsPage native extension contract', () => {
     const card = await screen.findByTestId(`extension-${CLEANER.id}`)
     await user.click(within(card).getByRole('switch'))
     const dialog = await screen.findByRole('dialog')
-    expect(dialog).toHaveTextContent('可以把它读取到的解密请求、响应、设置和存储数据发送到以下地址')
+    expect(dialog).toHaveTextContent('改写会转发完整的方法、解码后的请求体和端到端请求头，其中可能包含 Cookie 和 Authorization 凭据')
     expect(within(dialog).getByText('https://origin.example.net')).toHaveClass('min-w-0', 'max-w-full', 'break-all')
     expect(dialog).toHaveTextContent('本次启用确认同时授权这些已审查的 REJECT/DIRECT 规则')
     expect(dialog).toHaveTextContent('{"action":"reject","domain_suffix":"ads.example.com","network":"udp"}')
+    expect(within(dialog).getByTestId('enable-capture-dns')).toHaveTextContent('China 组')
+    expect(dialog).toHaveTextContent('实时 China group（默认 223.5.5.5）及当前 ECS 设置')
     await user.click(within(dialog).getByRole('button', { name: '启用' }))
     await waitFor(() => expect(api.putInterceptModule).toHaveBeenCalledWith(CLEANER.id, { revision: VIEW.revision, enabled: true }))
   })
@@ -142,6 +145,22 @@ describe('ExtensionsPage native extension contract', () => {
         location: { longitude: 113.94114, latitude: 22.544577, accuracy: 25 },
         failClosed: true,
       },
+    }))
+  })
+
+  it('edits the operator-selected capture DNS group', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    const card = await screen.findByTestId(`extension-${CLEANER.id}`)
+    await user.click(within(card).getByRole('button', { name: '配置' }))
+    const dialog = await screen.findByRole('dialog', { name: /Response Cleaner/ })
+    expect(within(dialog).getByTestId('capture-dns-editor')).toHaveTextContent('China 组')
+    await user.click(within(dialog).getByRole('tab', { name: 'Trust 组' }))
+    await user.click(within(dialog).getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(api.putInterceptModule).toHaveBeenCalledWith(CLEANER.id, {
+      revision: VIEW.revision,
+      settings: {},
+      capture_dns: 'trust',
     }))
   })
 
@@ -171,6 +190,7 @@ describe('ExtensionsPage native extension contract', () => {
     await user.type(within(dialog).getByLabelText('Manifest URL'), 'https://example.com/extension.yaml')
     await user.click(within(dialog).getByRole('button', { name: '获取、固化并检查' }))
     expect(await within(dialog).findByTestId('extension-install-review')).toHaveTextContent('Installed extension')
+    expect(within(dialog).getByTestId('install-capture-dns')).toHaveTextContent('China 组')
     expect(api.importInterceptModule).toHaveBeenCalledWith({ revision: VIEW.revision, url: 'https://example.com/extension.yaml' })
   })
 
@@ -182,6 +202,31 @@ describe('ExtensionsPage native extension contract', () => {
     await user.type(screen.getByTestId('host-audit-search'), 'api.example.com')
     expect(screen.getByTestId(`host-group-${CLEANER.id}`)).toBeInTheDocument()
     expect(screen.queryByTestId(`host-group-${WLOC.id}`)).not.toBeInTheDocument()
+  })
+
+  it('shows the first enabled DNS winner for exact and wildcard overlap', async () => {
+    const overlap = cloneView()
+    const first = overlap.modules[0]
+    const second = overlap.modules[1]
+    first.capture_hosts = ['*.example.com']
+    first.capture_dns = 'trust'
+    first.enabled = true
+    first.ready = true
+    first.reason = undefined
+    second.capture_hosts = ['api.example.com']
+    second.capture_dns = 'china'
+    second.enabled = true
+    second.ready = true
+    overlap.active_capture_hosts = ['*.example.com', 'api.example.com']
+    vi.mocked(api.getInterceptModules).mockResolvedValueOnce(overlap)
+    vi.mocked(api.getMITMSettings).mockResolvedValueOnce({ revision: overlap.revision, enabled: true, http2: true, quic_fallback_protection: true })
+
+    renderPage('/extensions/hosts')
+    const firstGroup = await screen.findByTestId(`host-group-${WLOC.id}`)
+    const secondGroup = screen.getByTestId(`host-group-${CLEANER.id}`)
+    expect(firstGroup).toHaveTextContent('DNS 赢家 · Trust 组')
+    expect(secondGroup).toHaveTextContent('DNS 由 Apple WLOC Location Override 决定 · Trust 组')
+    expect(secondGroup).toHaveTextContent('范围重叠')
   })
 
   it('reviews before and after order before moving an extension', async () => {
@@ -197,7 +242,9 @@ describe('ExtensionsPage native extension contract', () => {
     const before = within(dialog).getByTestId('extension-reorder-before')
     const after = within(dialog).getByTestId('extension-reorder-after')
     expect(within(before).getAllByRole('listitem')[0]).toHaveTextContent(WLOC.name)
+    expect(within(before).getAllByRole('listitem')[0]).toHaveTextContent('Trust 组')
     expect(within(before).getAllByRole('listitem')[1]).toHaveTextContent(CLEANER.name)
+    expect(within(before).getAllByRole('listitem')[1]).toHaveTextContent('China 组')
     expect(within(after).getAllByRole('listitem')[0]).toHaveTextContent(CLEANER.name)
     expect(within(after).getAllByRole('listitem')[1]).toHaveTextContent(WLOC.name)
     await user.click(within(dialog).getByRole('button', { name: '确认调整顺序' }))
@@ -309,6 +356,7 @@ describe('ExtensionsPage native extension contract', () => {
     await user.click(within(card).getByRole('button', { name: '检查更新' }))
     const dialog = await screen.findByRole('dialog', { name: /审查更新/ })
     expect(dialog).toHaveTextContent('v1.1.0')
+    expect(within(dialog).getByTestId('update-capture-dns')).toHaveTextContent('China 组')
     expect(within(dialog).getByText('https://origin.example.net')).toHaveClass('min-w-0', 'max-w-full', 'break-all')
     expect(dialog).toHaveTextContent('{"action":"reject","domain_suffix":"ads.example.com","network":"udp"}')
     await user.click(within(dialog).getByRole('button', { name: '替换快照' }))

@@ -171,7 +171,7 @@ describe('api client — interception modules', () => {
     await api.getInterceptModules()
     await api.getInterceptModuleSnapshot('io.example.fixture')
     await api.importInterceptModule(request)
-    await api.putInterceptModule('io.example.fixture', { revision: 'r1', settings: { mode: 'clean' } })
+    await api.putInterceptModule('io.example.fixture', { revision: 'r1', settings: { mode: 'clean' }, capture_dns: 'china' })
     await api.reorderInterceptModules('r1', ['io.example.fixture'])
     await api.deleteInterceptModule('io.example.fixture', 'r1')
 
@@ -186,7 +186,7 @@ describe('api client — interception modules', () => {
     expect(f.mock.calls[2][1].method).toBe('POST')
     expect(JSON.parse(f.mock.calls[2][1].body as string)).toEqual(request)
     expect(f.mock.calls[3][1].method).toBe('PUT')
-    expect(JSON.parse(f.mock.calls[3][1].body as string)).toEqual({ revision: 'r1', settings: { mode: 'clean' } })
+    expect(JSON.parse(f.mock.calls[3][1].body as string)).toEqual({ revision: 'r1', settings: { mode: 'clean' }, capture_dns: 'china' })
     expect(f.mock.calls[4][1].method).toBe('PUT')
     expect(JSON.parse(f.mock.calls[4][1].body as string)).toEqual({ revision: 'r1', execution_order: ['io.example.fixture'] })
     expect(f.mock.calls[5][1].method).toBe('DELETE')

@@ -108,8 +108,10 @@ grep -Eq '^clear_external_config_env\(\)' "$INSTALL" || fail "caller environment
 grep -Fq "First install/configuration requires an attached TTY" "$INSTALL" \
     || fail "headless first install does not fail closed"
 grep -Eq "prompt_default .*网关|prompt_default .*Gateway" "$INSTALL" || fail "TUI has no gateway prompt"
-grep -Fq 'EGRESS_RESOLVER="$DNS_EGRESS_RESOLVER_DEFAULT"' "$INSTALL" \
-    || fail "first-install TUI does not apply the default resolver automatically"
+grep -Fq 'Pre-v5 dns.env contains retired DNS_EGRESS_RESOLVER' "$INSTALL" \
+    || fail "installer does not reject the retired single egress resolver explicitly"
+grep -Eq '^[[:space:]]*DNS_EGRESS_RESOLVER=' "$INSTALL" \
+    && fail "installer still persists the retired single egress resolver"
 full_install_fn="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
 printf '%s' "$full_install_fn" | grep -Fq 'echo "Console token: ${DNS_API_TOKEN}"' \
     && ! printf '%s' "$full_install_fn" | grep -Fq 'token_was_present' \

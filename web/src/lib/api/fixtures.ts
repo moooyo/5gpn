@@ -97,6 +97,7 @@ export const interceptModules: T.InterceptModulesView = {
       ready: false,
       reason: 'mitm-disabled',
       capture_hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'],
+      capture_dns: 'trust',
       script_count: 1,
       settings: [
         { key: 'location', type: 'location', label: 'Target location', required: true, default: { accuracy: 25 }, value: { accuracy: 25 } },
@@ -119,6 +120,7 @@ export const interceptModules: T.InterceptModulesView = {
       ready: false,
       reason: 'mitm-disabled',
       capture_hosts: ['api.example.test'],
+      capture_dns: 'china',
       script_count: 1,
       settings: [],
       persistent_storage: false,

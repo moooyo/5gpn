@@ -274,7 +274,7 @@ sniffer:
 dns:
   enable: true
   enhanced-mode: normal
-  nameserver: ["udp://127.0.0.1:5354"]   # 5gpn-dns egress broker: returns REAL upstream IPs
+  nameserver: ["udp://127.0.0.1:5354"]   # 5gpn-dns loopback selector: extension China/trust binding, otherwise trust
 
 hosts:
   __CONSOLE_DOMAIN__: 127.0.0.1
@@ -581,7 +581,7 @@ func hasGatewayInbound(doc *mihomoInvariantDocument, p InfraParams) bool {
 }
 
 // hasDNSBrokerInvariant asserts the actual dns.nameserver sequence includes
-// the loopback egress broker.
+// the loopback origin resolver boundary.
 func hasDNSBrokerInvariant(doc *mihomoInvariantDocument) bool {
 	if doc.DNS == nil {
 		return false

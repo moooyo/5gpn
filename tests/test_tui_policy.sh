@@ -38,8 +38,8 @@ printf '%s' "$tui_fn" | grep -Fq 'ensure_cf_token || return 1' \
     || fail "Cloudflare selection does not collect or reuse the API token inside the TUI"
 printf '%s' "$tui_fn" | grep -Eq "国内解析 ECS|DNS cache entries" \
     && fail "installer still prompts for automatic ECS/cache values"
-printf '%s' "$tui_fn" | grep -Fq 'EGRESS_RESOLVER="$DNS_EGRESS_RESOLVER_DEFAULT"' \
-    || fail "first install does not apply the default egress resolver automatically"
+printf '%s' "$tui_fn" | grep -Fq 'EGRESS_RESOLVER' \
+    && fail "installer still exposes the retired single egress resolver"
 printf '%s' "$tui_fn" | grep -Fq 'CACHE_SIZE="${CACHE_SIZE:-${_CACHE_SIZE_DEFAULT:-4096}}"' \
     || fail "installer does not apply the memory-derived cache default automatically"
 printf '%s' "$tui_fn" | grep -Fq 'CHINA_ECS="$DNS_CHINA_ECS_DEFAULT"' \
@@ -58,8 +58,9 @@ printf '%s' "$tui_fn" | grep -Fq 'GATEWAY_IP="$PUBLIC_IP"' \
 printf '%s' "$tui_fn" | grep -Fq 'if [[ "$advanced" == 1 ]]' \
     && printf '%s' "$tui_fn" | grep -Fq '公网 IPv4 Public IPv4' \
     && printf '%s' "$tui_fn" | grep -Fq 'mihomo 本机监听 IPv4' \
-    && printf '%s' "$tui_fn" | grep -Fq 'SNI 回源解析器' \
-    || fail "advanced configure TUI lost public/gateway/listener/resolver overrides"
+    || fail "advanced configure TUI lost public/gateway/listener overrides"
+printf '%s' "$tui_fn" | grep -Fq 'SNI 回源解析器' \
+    && fail "advanced configure TUI still prompts for the retired single egress resolver"
 printf '%s' "$tui_fn" | grep -Fq "|| true)" \
     || fail "certificate-mode TUI prompt capture is not cancellation-safe under set -e"
 for domain in CONSOLE_DOMAIN ZASH_DOMAIN DOT_DOMAIN; do

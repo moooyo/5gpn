@@ -133,12 +133,6 @@ type Config struct {
 	// bot token + admin set can be changed without editing the read-only dns.env.
 	TGBotFile string
 
-	// EgressResolver is the resolver used by the loopback egress DNS broker
-	// when mihomo asks for a sniffed origin (env DNS_EGRESS_RESOLVER). It accepts
-	// a plain IPv4 over UDP (with TC-to-TCP retry) or an HTTPS DoH URL. The
-	// operational default is 22.22.22.22.
-	EgressResolver string
-
 	// The operator's base domain (env DNS_BASE_DOMAIN) and its derived service
 	// names. DNS_BASE_DOMAIN is the only hostname identity read from the
 	// environment.
@@ -221,8 +215,7 @@ type Config struct {
 	// It must be a loopback IPv4 literal — LoadConfig rejects a routable
 	// address, an IPv6 literal (this architecture has no IPv6 support yet),
 	// or a bare hostname (the invariant must be checkable without a DNS
-	// lookup at config-load time). An explicitly-empty value disables the
-	// broker, matching every other listener's empty-disables convention.
+	// lookup at config-load time). The boundary is required and cannot be empty.
 	EgressBrokerAddr string
 }
 
@@ -271,6 +264,9 @@ type Config struct {
 // If the DoT listener has a non-empty address, DNS_CERT and DNS_KEY must also
 // be non-empty, or an error is returned.
 func LoadConfig() (Config, error) {
+	if _, exists := os.LookupEnv("DNS_EGRESS_RESOLVER"); exists {
+		return Config{}, errors.New("config: pre-v5 DNS_EGRESS_RESOLVER is retired; disable the old MITM master, then perform the documented credential-preserving v4-to-v5 rebuild before removing that exact key")
+	}
 	cfg := Config{
 		ListenDoT:           envListen("DNS_LISTEN_DOT", ":853"),
 		ListenDebug:         envListen("DNS_LISTEN_DEBUG", "127.0.0.1:5353"),
@@ -372,21 +368,6 @@ func LoadConfig() (Config, error) {
 	// TGBOT_TOKEN/TGBOT_ADMINS at startup, rewritten by PUT /api/tgbot).
 	cfg.TGBotFile = envListen("DNS_TGBOT_FILE", "/etc/5gpn/tgbot.json")
 
-	// Egress SNI re-resolver (env DNS_EGRESS_RESOLVER). Consumed by the egress
-	// DNS broker. Default is 22.22.22.22; a malformed value is
-	// FATAL (ValidateResolver):
-	// a broken resolver would silently break the sniffed-origin data path, so
-	// surface it at load time. The 22.22.22.22 default passes ValidateResolver
-	// as a plain IPv4.
-	egressResolver := strings.TrimSpace(os.Getenv("DNS_EGRESS_RESOLVER"))
-	if egressResolver == "" {
-		egressResolver = "22.22.22.22"
-	}
-	cfg.EgressResolver = egressResolver
-	if err := ValidateResolver(cfg.EgressResolver); err != nil {
-		return Config{}, fmt.Errorf("config: invalid DNS_EGRESS_RESOLVER: %w", err)
-	}
-
 	// China-group EDNS Client Subnet. An unset environment uses the operational
 	// default; an explicitly empty value or "off" disables it. A typo must never
 	// crash-loop the sole resolver, so invalid values degrade to disabled.
@@ -446,17 +427,19 @@ func LoadConfig() (Config, error) {
 	cfg.HeartbeatInterval = envDurationOr("DNS_HEARTBEAT_INTERVAL", 60*time.Second)
 
 	// Loopback Egress DNS Broker. An explicit
-	// empty value disables it; otherwise the host must be a loopback IPv4
+	// empty value is invalid because mihomo depends on this boundary. The host
+	// must be a loopback IPv4
 	// literal (never IPv6, never a hostname) — see Config.EgressBrokerAddr.
 	// Unlike the warn-and-fallback numeric knobs above, a bad value here is
 	// FATAL: silently falling back to the default would mask an operator
 	// mistake that could otherwise widen the broker onto a routable or
 	// public address, which the spec forbids outright.
 	brokerRaw := envListen("DNS_EGRESS_BROKER", "127.0.0.1:5354")
-	if brokerRaw != "" {
-		if err := validateLoopbackIPv4Addr(brokerRaw); err != nil {
-			return Config{}, fmt.Errorf("config: invalid DNS_EGRESS_BROKER %q: %w", brokerRaw, err)
-		}
+	if brokerRaw == "" {
+		return Config{}, errors.New("config: DNS_EGRESS_BROKER is required for mihomo origin resolution")
+	}
+	if err := validateLoopbackIPv4Addr(brokerRaw); err != nil {
+		return Config{}, fmt.Errorf("config: invalid DNS_EGRESS_BROKER %q: %w", brokerRaw, err)
 	}
 	cfg.EgressBrokerAddr = brokerRaw
 	// Control-plane API rate limit (requests/sec per source IP). Tolerant

@@ -156,6 +156,31 @@ func botExtensionOnlyConfirmation(t *testing.T, store *botExtensionStateStore) (
 	return token, payload
 }
 
+func botExtensionSelectionToken(
+	t *testing.T,
+	store *botExtensionStateStore,
+	kind botExtensionPayloadKind,
+	stringValue string,
+) string {
+	t.Helper()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	var token string
+	for candidate, entry := range store.tokens {
+		if entry.purpose != botExtensionTokenSelection || entry.payload.Kind != kind || entry.payload.StringValue != stringValue {
+			continue
+		}
+		if token != "" {
+			t.Fatalf("more than one %s selection was issued for %q", kind, stringValue)
+		}
+		token = candidate
+	}
+	if token == "" {
+		t.Fatalf("no %s selection was issued for %q", kind, stringValue)
+	}
+	return token
+}
+
 func TestBotExtensionCallbackDataStaysWithinTelegramLimit(t *testing.T) {
 	token := strings.Repeat("A", 16)
 	for _, action := range []string{
@@ -166,6 +191,7 @@ func TestBotExtensionCallbackDataStaysWithinTelegramLimit(t *testing.T) {
 		"settings:" + token + ":10000",
 		"setting:value:" + token,
 		"egress:set:" + token,
+		"capture-dns:set:" + token,
 	} {
 		if data := botExtensionCallbackData(action); len(data) > 64 {
 			t.Fatalf("callback_data %q has %d bytes", data, len(data))
@@ -182,6 +208,7 @@ func TestBotExtensionCallbackDataStaysWithinTelegramLimit(t *testing.T) {
 		botExtensionPayloadUpdate,
 		botExtensionPayloadSetting,
 		botExtensionPayloadEgress,
+		botExtensionPayloadCaptureDNS,
 		botExtensionPayloadReorder,
 		botExtensionPayloadMITM,
 	} {
@@ -301,10 +328,17 @@ func TestBotExtensionNetworkEnableReviewListsEveryOrigin(t *testing.T) {
 		"https://audit.example.com",
 		"https://upload.example.net:8443",
 		"解密请求、响应、参数和存储数据",
+		"完整请求方法、解码后的请求体和端到端请求头",
+		"Cookie 和 Authorization 凭据",
 		"clean-response",
 		view.Modules[0].Actions[0].ScriptDigest,
 		"Global routing rules",
 		`{&#34;action&#34;:&#34;reject&#34;,&#34;domain&#34;:&#34;ads.example.com&#34;,&#34;network&#34;:&#34;udp&#34;}`,
+		"Capture DNS",
+		"<code>Trust</code>",
+		"第一个 enabled 插件",
+		"实时 China group",
+		"当前 ECS",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("network risk review omitted %q:\n%s", want, text)
@@ -313,6 +347,166 @@ func TestBotExtensionNetworkEnableReviewListsEveryOrigin(t *testing.T) {
 	_, payload := botExtensionOnlyConfirmation(t, bt.extensionStateStore())
 	if payload.Kind != botExtensionPayloadEnable || payload.Digest != view.Modules[0].SnapshotDigest {
 		t.Fatalf("enable confirmation payload = %+v", payload)
+	}
+}
+
+func TestBotExtensionCaptureDNSReviewIsOneUseAndAppliesMutableBinding(t *testing.T) {
+	module := testModuleSnapshot()
+	manager, _, _, _, _ := newInterceptManagerFixture(t, module)
+	ctrl := NewController(func() error { return nil }, nil, nil, nil)
+	ctrl.SetInterceptModuleManager(manager)
+	bt, recorder := newBotExtensionTelegramFixture(t, ctrl)
+	view, err := ctrl.InterceptModules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeDigest := view.Modules[0].SnapshotDigest
+	moduleToken, _, err := bt.extensionStateStore().IssueSelection(111, 111, botExtensionStatePayload{
+		Kind: botExtensionPayloadModule, Revision: view.Revision,
+		ModuleID: module.ID, Digest: beforeDigest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opCtx := botExtensionTestOperation(t, bt)
+	bt.renderBotExtensionModule(opCtx, bt.tg, botExtensionTestCallback(), 111, moduleToken, "")
+	bt.handleExtensionCallback(context.Background(), bt.tg, botExtensionTestCallback(), 111, 111, "capture-dns:"+moduleToken)
+	chinaToken := botExtensionSelectionToken(t, bt.extensionStateStore(), botExtensionPayloadCaptureDNS, interceptCaptureDNSChina)
+	bt.handleExtensionCallback(context.Background(), bt.tg, botExtensionTestCallback(), 111, 111, "capture-dns:set:"+chinaToken)
+
+	var delivered strings.Builder
+	var markup strings.Builder
+	for _, call := range recorder.snapshot() {
+		delivered.WriteString(call.form.Get("text"))
+		markup.WriteString(call.form.Get("reply_markup"))
+	}
+	for _, required := range []string{
+		"Capture DNS", "capture host", "Action metadata", beforeDigest, view.Revision,
+		"当前绑定：<code>Trust</code>", "新绑定：<code>China</code>",
+		"实时 China group", "当前 ECS", "mihomo loopback origin re-resolution",
+		"不改变客户端 DNS policy", "第一个插件是 DNS 绑定赢家",
+	} {
+		if !strings.Contains(delivered.String(), required) {
+			t.Fatalf("Capture DNS review omitted %q: %s", required, delivered.String())
+		}
+	}
+	if !strings.Contains(markup.String(), "capture-dns:") || !strings.Contains(markup.String(), "capture-dns:set:") {
+		t.Fatalf("Capture DNS detail/menu buttons missing: %s", markup.String())
+	}
+
+	confirmationToken, confirmation := botExtensionOnlyConfirmation(t, bt.extensionStateStore())
+	if confirmation.Kind != botExtensionPayloadCaptureDNS || confirmation.Revision != view.Revision ||
+		confirmation.ModuleID != module.ID || confirmation.Digest != beforeDigest || confirmation.StringValue != interceptCaptureDNSChina {
+		t.Fatalf("Capture DNS confirmation payload = %+v", confirmation)
+	}
+	confirmed, ok := bt.extensionStateStore().ConsumeConfirmation(
+		confirmationToken, 111, 111, botExtensionPayloadCaptureDNS,
+	)
+	if !ok {
+		t.Fatal("Capture DNS confirmation could not be consumed")
+	}
+	if _, reused := bt.extensionStateStore().ConsumeConfirmation(
+		confirmationToken, 111, 111, botExtensionPayloadCaptureDNS,
+	); reused {
+		t.Fatal("Capture DNS confirmation was reusable")
+	}
+	if err := bt.applyBotExtensionConfirmation(context.Background(), confirmed); err != nil {
+		t.Fatal(err)
+	}
+	after, err := ctrl.InterceptModules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision == view.Revision || after.Modules[0].CaptureDNS != interceptCaptureDNSChina {
+		t.Fatalf("Capture DNS apply result = revision %q module %+v", after.Revision, after.Modules[0])
+	}
+	if after.Modules[0].SnapshotDigest != beforeDigest {
+		t.Fatalf("mutable Capture DNS changed snapshot digest: %q -> %q", beforeDigest, after.Modules[0].SnapshotDigest)
+	}
+}
+
+func TestBotExtensionCaptureDNSConfirmationRejectsStaleRevisionAndSnapshot(t *testing.T) {
+	module := testModuleSnapshot()
+	manager, _, _, _, _ := newInterceptManagerFixture(t, module)
+	ctrl := NewController(func() error { return nil }, nil, nil, nil)
+	ctrl.SetInterceptModuleManager(manager)
+	bt := &Bot{ctrl: ctrl}
+	before, err := ctrl.InterceptModules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := botExtensionStatePayload{
+		Kind: botExtensionPayloadCaptureDNS, Revision: before.Revision,
+		ModuleID: module.ID, Digest: before.Modules[0].SnapshotDigest, StringValue: interceptCaptureDNSChina,
+	}
+	china := interceptCaptureDNSChina
+	changed, err := ctrl.UpdateInterceptModule(context.Background(), module.ID, interceptModuleUpdate{
+		Revision: before.Revision, CaptureDNS: &china,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bt.applyBotExtensionConfirmation(context.Background(), payload); !errors.Is(err, errInterceptRevisionConflict) {
+		t.Fatalf("stale Capture DNS revision error = %v", err)
+	}
+	payload.Revision = changed.Revision
+	payload.Digest = strings.Repeat("f", 64)
+	payload.StringValue = interceptCaptureDNSTrust
+	if err := bt.applyBotExtensionConfirmation(context.Background(), payload); err == nil || !strings.Contains(err.Error(), "snapshot") {
+		t.Fatalf("stale Capture DNS snapshot error = %v", err)
+	}
+	payload.Digest = changed.Modules[0].SnapshotDigest
+	payload.StringValue = "automatic"
+	if err := bt.applyBotExtensionConfirmation(context.Background(), payload); err == nil || !strings.Contains(err.Error(), "capture_dns") {
+		t.Fatalf("invalid Capture DNS confirmation error = %v", err)
+	}
+	current, err := ctrl.InterceptModules()
+	if err != nil || current.Modules[0].CaptureDNS != interceptCaptureDNSChina {
+		t.Fatalf("stale confirmation mutated Capture DNS: view=%+v err=%v", current, err)
+	}
+}
+
+func TestBotExtensionReorderReviewShowsCaptureDNSWinnerSemantics(t *testing.T) {
+	first := testModuleSnapshot()
+	first.Enabled = true
+	first.Name = "Trust first"
+	second := testModuleSnapshot()
+	second.ID = "io.example.second"
+	second.Name = "China second"
+	second.Enabled = true
+	second.CaptureDNS = interceptCaptureDNSChina
+	manager, _, _, _, _ := newInterceptManagerFixture(t, first, second)
+	ctrl := NewController(func() error { return nil }, nil, nil, nil)
+	ctrl.SetInterceptModuleManager(manager)
+	bt, recorder := newBotExtensionTelegramFixture(t, ctrl)
+	view, err := ctrl.InterceptModules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := bt.extensionStateStore().IssueSelection(111, 111, botExtensionStatePayload{
+		Kind: botExtensionPayloadModule, Revision: view.Revision,
+		ModuleID: second.ID, Digest: view.Modules[1].SnapshotDigest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bt.previewBotExtensionReorder(botExtensionTestOperation(t, bt), bt.tg, botExtensionTestCallback(), 111, 111, token, "up")
+	var delivered strings.Builder
+	for _, call := range recorder.snapshot() {
+		delivered.WriteString(call.form.Get("text"))
+	}
+	text := delivered.String()
+	for _, required := range []string{
+		"完整旧顺序", "完整新顺序", "capture_dns=<code>Trust</code>", "capture_dns=<code>China</code>",
+		"第一个 enabled mihomo origin re-resolution DNS 绑定赢家", "实时 China group", "当前 ECS",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("reorder review omitted %q: %s", required, text)
+		}
+	}
+	_, payload := botExtensionOnlyConfirmation(t, bt.extensionStateStore())
+	if payload.Kind != botExtensionPayloadReorder || payload.Revision != view.Revision || payload.Digest != view.Modules[1].SnapshotDigest {
+		t.Fatalf("reorder confirmation payload = %+v", payload)
 	}
 }
 
@@ -368,7 +562,8 @@ func TestBotExtensionProtocolReviewsListEveryArmedNetworkOrigin(t *testing.T) {
 				t.Fatalf("%s review omitted network origin %q: %s", field, origin, review)
 			}
 		}
-		if !strings.Contains(review, "解密请求、响应、参数和存储数据") {
+		if !strings.Contains(review, "解密请求、响应、参数和存储数据") ||
+			!strings.Contains(review, "Cookie 和 Authorization 凭据") {
 			t.Fatalf("%s review omitted explicit network exfiltration warning: %s", field, review)
 		}
 	}

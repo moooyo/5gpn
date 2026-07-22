@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 const maxInstallerMihomoConfigBytes int64 = 32 << 20
@@ -36,7 +38,8 @@ func runInterceptionRoutingCheck(args []string, stdout, stderr io.Writer) int {
 		return interceptionRoutingCheckError(stdout, stderr, "mihomo-config-unreadable", fmt.Errorf("read mihomo config: %w", err))
 	}
 	mihomoText := string(mihomoBody)
-	if _, err := parseMihomoNodeDocument(mihomoText); err != nil {
+	mihomoDocument, err := parseMihomoNodeDocument(mihomoText)
+	if err != nil {
 		return interceptionRoutingCheckError(stdout, stderr, "mihomo-config-invalid", fmt.Errorf("parse mihomo config: %w", err))
 	}
 
@@ -45,6 +48,9 @@ func runInterceptionRoutingCheck(args []string, stdout, stderr io.Writer) int {
 		reason := analysis.Reason
 		if reason == "" {
 			reason = "interception-routing-not-ready"
+		}
+		if reason == "interception-listener-missing" && len(mihomoDocument.Content) == 1 && cleanLegacyMihomoInterceptionBoundary(mihomoDocument.Content[0]) {
+			reason = "legacy-mihomo-boundary-missing-clean"
 		}
 		fmt.Fprintln(stdout, reason)
 		return 3
@@ -56,6 +62,39 @@ func runInterceptionRoutingCheck(args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintln(stdout, "ready")
 	return 0
+}
+
+func cleanLegacyMihomoInterceptionBoundary(root *yaml.Node) bool {
+	if sequenceContainsNamedMapping(mappingNodeValue(root, "listeners"), "intercept-egress") ||
+		sequenceContainsNamedMapping(mappingNodeValue(root, "proxies"), interceptMihomoProxyName) {
+		return false
+	}
+	rules := mappingNodeValue(root, "rules")
+	if rules == nil || rules.Kind != yaml.SequenceNode {
+		return false
+	}
+	for _, item := range rules.Content {
+		if item.Kind != yaml.ScalarNode {
+			return false
+		}
+		rule := strings.TrimSpace(item.Value)
+		if rule == interceptEgressRejectRule || ruleTouchesInterceptEgress(rule) || strings.HasSuffix(compactMihomoRule(rule), ","+interceptMihomoProxyName) {
+			return false
+		}
+	}
+	return true
+}
+
+func sequenceContainsNamedMapping(sequence *yaml.Node, name string) bool {
+	if sequence == nil || sequence.Kind != yaml.SequenceNode {
+		return false
+	}
+	for _, item := range sequence.Content {
+		if value, ok := mappingScalar(item, "name"); ok && value == name {
+			return true
+		}
+	}
+	return false
 }
 
 func readInstallerRoutingCheckFile(path string, limit int64) ([]byte, error) {

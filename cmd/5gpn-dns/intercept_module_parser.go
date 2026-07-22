@@ -308,7 +308,8 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 	module := interceptModuleSnapshot{
 		ID: manifest.Metadata.ID, Version: manifest.Metadata.Version,
 		Name: strings.TrimSpace(manifest.Metadata.Name), Description: strings.TrimSpace(manifest.Metadata.Description),
-		CaptureHosts: captureHosts, HostMappings: mappings, RoutingRules: routingRules, Settings: settings, Scripts: scripts,
+		CaptureHosts: captureHosts, CaptureDNS: interceptCaptureDNSTrust,
+		HostMappings: mappings, RoutingRules: routingRules, Settings: settings, Scripts: scripts,
 		PersistentStorage: manifest.Permissions.PersistentStorage, NetworkOrigins: networkOrigins,
 		EgressGroupRequired: manifest.Requirements.EgressGroup.Required,
 	}

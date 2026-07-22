@@ -198,6 +198,7 @@ export interface InterceptRoutingRule {
   network?: 'tcp' | 'udp'
   destination_port?: number
 }
+export type InterceptCaptureDNS = 'trust' | 'china'
 export interface InterceptModule {
   id: string
   extension_version: string
@@ -207,6 +208,9 @@ export interface InterceptModule {
   ready: boolean
   reason?: string
   capture_hosts: string[]
+  // Operator-owned resolver choice for capture-host origin answers. It is
+  // persisted outside the immutable manifest and preserved across updates.
+  capture_dns: InterceptCaptureDNS
   script_count: number
   actions?: InterceptModuleAction[]
   settings?: InterceptModuleSetting[]
@@ -254,6 +258,7 @@ export interface InterceptModuleUpdate {
   enabled?: boolean
   settings?: Record<string, unknown>
   egress_group?: string
+  capture_dns?: InterceptCaptureDNS
 }
 export interface InterceptModuleUpdateCheck {
   revision: string

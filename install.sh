@@ -4,8 +4,9 @@
 #   client DoT:853 (the ONLY DNS transport) -> 5gpn-dns (NXDOMAIN for block,
 #   real IP for direct, gateway IP for proxy/foreign) -> mihomo
 #   (:80/:443/:5060/:8080/:8443) sniffs HTTP Host or TLS SNI
-#   (sniffer override-destination), the loopback DNS broker re-resolves the real
-#   IP via DNS_EGRESS_RESOLVER, then egresses through its operator-owned policy.
+#   (sniffer override-destination), then the loopback DNS broker resolves the
+#   real IP through an extension's operator-selected China/trust group (trust by
+#   default) before mihomo applies its operator-owned policy.
 #   mihomo also SNI-splits the panels
 #   (console./zash.<base>) to the daemon's loopback :443 listener.
 #
@@ -132,17 +133,12 @@ MIHOMO_VERSION="v1.19.28"
 MIHOMO_SHA256="70d01cfb8cb7bf7a92fd1af16cb4b9553d90bb4eecde3b5c4849103e27c80ddb"
 ZASH_VERSION="v3.15.0"                   # Zephyruso/zashboard prebuilt dist.zip
 ZASH_SHA256="adba7b03f3bec792a354e65469fb8ac5513e48e0f646650f78aa313bcf5b18e9"
-# Egress SNI re-resolver: the resolver the loopback DNS broker uses to turn a
-# sniffed SNI into the real server IP before egress. An IPv4 value uses plain
-# UDP; an https://…/dns-query value uses DoH. 22.22.22.22 is the operational
-# project default and is consumed directly by 5gpn-dns.
-DNS_EGRESS_RESOLVER_DEFAULT="22.22.22.22"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
 readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_LISTEN_API DNS_CERT DNS_KEY DNS_WEB_CERT DNS_WEB_KEY DNS_ZASH_CERT DNS_ZASH_KEY \
 DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL DNS_CHINA DNS_TRUST DNS_UPSTREAMS \
-DNS_CHINA_ECS DNS_CHINA_0X20 DNS_ECS_FILE DNS_RULES_DIR DNS_CHNROUTE DNS_EGRESS_RESOLVER DNS_EGRESS_BROKER \
+DNS_CHINA_ECS DNS_CHINA_0X20 DNS_ECS_FILE DNS_RULES_DIR DNS_CHNROUTE DNS_EGRESS_BROKER \
 DNS_SUBSCRIPTIONS DNS_POLICY_RULES DNS_API_TOKEN DNS_API_RATE DNS_API_BURST DNS_MIHOMO_CONTROLLER DNS_MIHOMO_SECRET \
 DNS_WHITELIST_FILE DNS_MIHOMO_CONFIG DNS_INTERCEPT_CONFIG DNS_MARKETPLACES_FILE DNS_ZASH_DIR DNS_ZASH_LISTEN DNS_WEB_DIR WWW_DIR TGBOT_TOKEN TGBOT_ADMINS \
 DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS DNS_CACHE_SIZE DNS_MAX_INFLIGHT DNS_TTL_MIN DNS_TTL_MAX DNS_QUERY_TIMEOUT \
@@ -243,7 +239,7 @@ card()       { if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then gum style --border round
 
 # attach_tty makes a PIPED install interactive. Run via `curl | sudo bash`, fd 0 is
 # the pipe/script, not the terminal, so [[ -t 0 ]] is false and EVERY prompt below
-# is skipped — BASE_DOMAIN/GATEWAY_IP/EGRESS_RESOLVER stay unset and the run aborts on the
+# is skipped — BASE_DOMAIN/GATEWAY_IP stay unset and the run aborts on the
 # missing domain. If a controlling terminal exists, reattach stdin to it so the
 # install prompts as intended. A first install with no /dev/tty fails closed;
 # reinstall may reuse an already persisted valid dns.env. Called once from
@@ -350,7 +346,7 @@ cfg_get() {
 clear_external_config_env() {
     local key
     unset BASE_DOMAIN CONSOLE_DOMAIN ZASH_DOMAIN DOT_DOMAIN PUBLIC_IP GATEWAY_IP \
-        MIHOMO_LISTEN_IPS EGRESS_RESOLVER CHINA_ECS CACHE_SIZE LOWMEM
+        MIHOMO_LISTEN_IPS CHINA_ECS CACHE_SIZE LOWMEM
     for key in $DNS_ENV_KEYS; do
         # The web/zashboard paths were already resolved from dns.env immediately
         # after cfg_get was defined. WWW_DIR is an installer-owned constant that
@@ -4003,8 +3999,17 @@ ensure_intercept_config() {
     local config="$INTERCEPT_DIR/config.json" candidate inbound_user inbound_pass upstream_user upstream_pass
     prepare_intercept_runtime_dirs || return 1
     if [[ -f "$config" && ! -L "$config" ]]; then
-        "$INTERCEPT_BIN" --config "$config" --check-config \
-            || { err "Existing interception config is invalid: $config"; return 1; }
+        if ! "$INTERCEPT_BIN" --config "$config" --check-config; then
+            if grep -Eq '"version"[[:space:]]*:[[:space:]]*4([,[:space:]}]|$)' "$config"; then
+                err "Pre-v5 interception config detected: $config"
+                err "Do not delete it: back up active env/intercept/mihomo state, use the old v4 control plane to disable MITM and withdraw managed rules, then save the clean post-disable boundary."
+                err "Follow README's jq rebuild preserving SOCKS/TLS infrastructure; require current sidecar --check-config and 5gpn-dns --check-interception-routing to report ready before synced atomic publication."
+                err "Modules/order are cleared and extensions must be re-imported and reviewed."
+            else
+                err "Existing interception config is invalid: $config"
+            fi
+            return 1
+        fi
         ok "Existing interception config validated and preserved: $config"
         return 0
     fi
@@ -4017,7 +4022,7 @@ ensure_intercept_config() {
     candidate="$(mktemp "$INTERCEPT_DIR/.config.json.XXXXXX")" || return 1
     cat > "$candidate" <<EOF
 {
-  "version": 4,
+  "version": 5,
   "listen": "127.0.0.1:18080",
   "username": "${inbound_user}",
   "password": "${inbound_pass}",
@@ -4249,23 +4254,6 @@ seed_policy_defaults() {
 # ----------------------------------------------------------------------------
 # Install config + scripts + control-plane sources
 # ----------------------------------------------------------------------------
-# validate_egress_resolver <resolver> -- validate the format of the Egress DNS
-# Broker's fallback resolver (DNS_EGRESS_RESOLVER; 22.22.22.22 by default). The
-# runtime data path is the fixed loopback
-# broker (udp://127.0.0.1:5354, wired into mihomo's dns.nameserver in the
-# committed template), so there is no per-install file substitution to do here.
-# The resolver is NOT inert: the 5gpn-dns daemon consumes it directly to build
-# the broker's fallback exchanger. A bad value is an installation error.
-validate_egress_resolver() {
-    local xr="${1:-}"
-    if [[ "$xr" =~ ^https://[A-Za-z0-9./_:-]+$ ]] || is_valid_ipv4 "$xr"; then
-        info "Sniffed-origin resolution uses the loopback DNS broker (127.0.0.1:5354); DNS_EGRESS_RESOLVER='${xr}' is the broker fallback upstream (consumed by 5gpn-dns)."
-    else
-        warn "DNS_EGRESS_RESOLVER='${xr}' is neither an IPv4 nor an https:// DoH URL; the broker fallback cannot use it -- fix it."
-        return 1
-    fi
-}
-
 # render_mihomo_config renders /etc/5gpn/mihomo/config.yaml from the committed
 # template (etc/mihomo/config.yaml.tmpl), substituting the box-specific
 # sentinels, seeds the zashboard whitelist.txt on first run, then validates the
@@ -4436,10 +4424,11 @@ reset_mihomo_config() {
 }
 
 check_interception_routing_compatibility() {
+    local dns_binary="${1:-$DNS_BIN}" intercept_binary="${2:-$INTERCEPT_BIN}"
     local output rc=0 enabled_rc=0
     INTERCEPT_ROUTING_READY=0
     INTERCEPT_ROUTING_REASON="not-checked"
-    output="$("$DNS_BIN" --check-interception-routing \
+    output="$("$dns_binary" --check-interception-routing \
         --mihomo-config "$MIHOMO_DIR/config.yaml" \
         --intercept-config "$INTERCEPT_DIR/config.json" 2>&1)" || rc=$?
     case "$rc" in
@@ -4450,7 +4439,11 @@ check_interception_routing_compatibility() {
         3)
             INTERCEPT_ROUTING_REASON="${output##*$'\n'}"
             [[ -n "$INTERCEPT_ROUTING_REASON" ]] || INTERCEPT_ROUTING_REASON="legacy-mihomo-config"
-            "$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --check-enabled >/dev/null 2>&1 \
+            if [[ "$INTERCEPT_ROUTING_REASON" != legacy-mihomo-boundary-missing-clean ]]; then
+                err "Interception routing is structurally incompatible or contains residual managed rules (${INTERCEPT_ROUTING_REASON}); refusing to publish or preserve a dead sidecar route."
+                return 1
+            fi
+            "$intercept_binary" --config "$INTERCEPT_DIR/config.json" --check-enabled >/dev/null 2>&1 \
                 || enabled_rc=$?
             case "$enabled_rc" in
                 0)
@@ -4461,12 +4454,30 @@ check_interception_routing_compatibility() {
                     err "Could not determine whether interception is active (exit ${enabled_rc})."
                     return 1 ;;
             esac
-            warn "Core services can use the preserved mihomo config, but extension interception is unavailable: ${INTERCEPT_ROUTING_REASON}."
+            warn "Core services can use the clean legacy mihomo config, but extension interception is unavailable: ${INTERCEPT_ROUTING_REASON}."
             return 0 ;;
         *)
             err "Could not validate mihomo interception compatibility: ${output:-unknown error}"
             return 1 ;;
     esac
+}
+
+preflight_existing_interception_state() {
+    local config="$INTERCEPT_DIR/config.json"
+    [[ -e "$config" || -L "$config" ]] || return 0
+    [[ -f "$config" && ! -L "$config" ]] \
+        || { err "Existing interception config path is unsafe before publication: $config"; return 1; }
+    if ! "$ARTIFACT_STAGE/5gpn-intercept" --config "$config" --check-config; then
+        if grep -Eq '"version"[[:space:]]*:[[:space:]]*4([,[:space:]}]|$)' "$config"; then
+            err "Pre-v5 interception config detected before publication: $config"
+            err "Back up active state, disable the old v4 MITM transaction, then follow README's credential-preserving checked jq rebuild. No live 5gpn bytes were changed."
+        else
+            err "Existing interception config is invalid under the target release: $config"
+        fi
+        return 1
+    fi
+    [[ -f "$MIHOMO_DIR/config.yaml" && ! -L "$MIHOMO_DIR/config.yaml" ]] || return 0
+    check_interception_routing_compatibility "$ARTIFACT_STAGE/5gpn-dns" "$ARTIFACT_STAGE/5gpn-intercept"
 }
 
 # ----------------------------------------------------------------------------
@@ -6143,12 +6154,9 @@ DNS_ECS_FILE=${ecs_file}
 DNS_RULES_DIR=${DNS_RULES_DIR_DEFAULT}
 DNS_CHNROUTE=${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt
 
-# Egress DNS Broker's fallback resolver (consumed by 5gpn-dns to build the
-# broker's fallback exchanger; mihomo's config.yaml never references it -- its
-# dns.nameserver always points at the fixed loopback broker). Persisted here so
-# a bare re-run preserves it.
-# The operational default is the plain-UDP resolver 22.22.22.22.
-DNS_EGRESS_RESOLVER=${EGRESS_RESOLVER}
+# Mihomo resolves sniffed hostnames only through this loopback broker. The
+# broker uses each active extension's operator-selected China/trust binding and
+# defaults all other hostnames to the live trust group.
 DNS_EGRESS_BROKER=127.0.0.1:5354
 
 # Remote rule-list subscriptions (fetched in-process; caches written to
@@ -6763,7 +6771,15 @@ validate_dns_env_schema() {
         key="${line%%=*}"
         case " $DNS_ENV_KEYS " in
             *" $key "*) ;;
-            *) err "Persisted dns.env contains unsupported key: $key"; return 1 ;;
+            *)
+                if [[ "$key" == DNS_EGRESS_RESOLVER ]]; then
+                    err "Pre-v5 dns.env contains retired DNS_EGRESS_RESOLVER. Back up active dns.env/mihomo/intercept state, disable the old MITM master, and save the clean boundary."
+                    err "Follow README's credential-preserving jq rebuild and require the current sidecar/routing checks before removing only that exact key."
+                else
+                    err "Persisted dns.env contains unsupported key: $key"
+                fi
+                return 1
+                ;;
         esac
         case "$seen" in
             *" $key "*) err "Persisted dns.env contains duplicate key: $key"; return 1 ;;
@@ -6784,7 +6800,6 @@ load_persisted_install_config() {
     CERT_EMAIL="$(cfg_get CERT_EMAIL)"
     CACHE_SIZE="$(cfg_get DNS_CACHE_SIZE)"
     CHINA_ECS="$(cfg_get DNS_CHINA_ECS)"
-    EGRESS_RESOLVER="$(cfg_get DNS_EGRESS_RESOLVER)"
     derive_domains "$BASE_DOMAIN"
 }
 
@@ -6804,11 +6819,9 @@ validate_install_config() {
         ""|off|none|disable|0) ;;
         *) is_valid_ipv4 "${CHINA_ECS%%/*}" || { err "Persisted DNS_CHINA_ECS is invalid."; return 1; } ;;
     esac
-    validate_egress_resolver "$EGRESS_RESOLVER" >/dev/null \
-        || { err "Persisted DNS_EGRESS_RESOLVER is invalid."; return 1; }
     MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" || return 1
     export BASE_DOMAIN PUBLIC_IP GATEWAY_IP MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL \
-        CACHE_SIZE CHINA_ECS EGRESS_RESOLVER
+        CACHE_SIZE CHINA_ECS
 }
 
 configure_install_tui() {
@@ -6871,16 +6884,6 @@ configure_install_tui() {
         GATEWAY_IP="$PUBLIC_IP"
     fi
 
-    if [[ "$advanced" == 1 ]]; then
-        while true; do
-            EGRESS_RESOLVER="$(prompt_default 'SNI 回源解析器 (IPv4 或 https://…/dns-query)' "${EGRESS_RESOLVER:-$DNS_EGRESS_RESOLVER_DEFAULT}")"
-            validate_egress_resolver "$EGRESS_RESOLVER" >/dev/null && break
-            warn "Invalid resolver."
-        done
-    else
-        EGRESS_RESOLVER="$DNS_EGRESS_RESOLVER_DEFAULT"
-    fi
-
     default_listen="$(resolve_mihomo_listen_ips "${MIHOMO_LISTEN_IPS:-}" 2>/dev/null || true)"
     if [[ -z "$default_listen" ]]; then
         default_listen="$(resolve_mihomo_listen_ips "$PUBLIC_IP" 2>/dev/null || true)"
@@ -6920,7 +6923,6 @@ configure_install_tui() {
         echo "  public:     $PUBLIC_IP"
         echo "  gateway:    $GATEWAY_IP"
         echo "  listeners:  $MIHOMO_LISTEN_IPS"
-        echo "  resolver:   $EGRESS_RESOLVER"
         echo "  ECS:        ${CHINA_ECS:-disabled (configure in WebUI)}"
         echo "  cache:      $CACHE_SIZE"
     } | card
@@ -6953,7 +6955,7 @@ configure_install_tui() {
             || { warn "Configuration cancelled."; return 1; }
     fi
     export BASE_DOMAIN PUBLIC_IP GATEWAY_IP MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL \
-        CACHE_SIZE CHINA_ECS EGRESS_RESOLVER
+        CACHE_SIZE CHINA_ECS
 }
 
 resolve_install_configuration() {
@@ -7079,7 +7081,6 @@ full_install() {
     detect_memory_profile
     resolve_install_configuration "$force_tui"
     derive_domains "$BASE_DOMAIN"
-    EGRESS_RESOLVER="${EGRESS_RESOLVER:?validated resolver missing}"
     mihomo_config_matches_install_config || {
         err "The operator-owned mihomo config does not match the selected domains, gateway, and listener addresses."
         err "Edit and validate the operator-owned file explicitly before rerunning configuration."
@@ -7099,6 +7100,8 @@ full_install() {
     verify_console_dns
     INSTALL_PHASE="staging and verifying release artifacts"
     stage_artifacts
+    INSTALL_PHASE="checking existing interception routing before publication"
+    preflight_existing_interception_state
     INSTALL_PHASE="acquiring the certificate transaction lock"
     acquire_install_cert_lock
     INSTALL_PHASE="capturing the pre-install rollback snapshot"
@@ -7445,8 +7448,11 @@ in mihomo's whitelist.txt allowlist.
 
   TUI configuration:
     certificate mode/email, base domain, public/gateway/listener IPv4,
-    poison-resistant egress resolver, China ECS, cache size, Cloudflare token,
-    Telegram identity/admins/proxy/alerts.
+    Cloudflare token, and Telegram identity/admins/proxy/alerts.
+
+  Automatic runtime defaults:
+    China/trust upstream groups, China ECS, and cache size. The authenticated
+    Console can change the upstream groups and ECS at runtime.
 
   Fixed release inputs:
     DNS/mihomo/zashboard/Gum versions and SHA-256 values are embedded in the

@@ -11,13 +11,25 @@ current architecture is `docs/architecture.md`.
 - A client with L3 reachability to one address in `DNS_MIHOMO_LISTEN_IPS`.
 - A test `BASE_DOMAIN`, a certificate matching the selected `CERT_MODE`
   (`cloudflare`, `http-01`, or an explicitly accepted `debug` certificate), and
-  a reachable `DNS_EGRESS_RESOLVER` (the operational default is `22.22.22.22`).
+  reachable China and trust upstream groups (operational defaults are
+  `223.5.5.5` and `22.22.22.22`).
 - At least two controllable upstreams when testing sequential fallback.
-- For cross-channel upgrade acceptance, either the immutable official `0.0.13`
-  release or an equivalent checked-in `0.0.13` installation fixture, plus a
+- For cross-channel upgrade acceptance, use an immutable pre-v5 deployment
+  (`0.0.13`, `0.0.19`, or an equivalent `test-env`/`kfchost` snapshot) plus a
   locally built release bundle stamped with the exact beta candidate tag. Do
   not substitute the latest published beta unless it actually contains the
   candidate revision under test.
+- Preserve active `dns.env`, interception v4, and mihomo files before any
+  mutation, then retain a separate clean post-disable v4/mihomo baseline. The
+  raw environment containing retired `DNS_EGRESS_RESOLVER` and the v4
+  document must each fail with the actionable pre-v5 repair message. Remove only
+  that exact environment key only after the old v4 control plane has disabled
+  MITM and removed its managed rules. Use the documented fixed `jq` projection
+  to preserve listener/SOCKS/TLS/upstream/protocol infrastructure in disabled
+  empty v5, validate it with the verified current sidecar and require the current
+  DNS routing checker to report `ready` against clean mihomo, atomically publish it,
+  and re-import extensions. Never accept randomized credentials against the
+  preserved mihomo file or represent the rebuild as an automatic migration.
 
 Capture before-state for host-owned facilities. In particular:
 
@@ -197,8 +209,10 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
 - [ ] The reset seed contains no `REJECT-DROP`. Non-allowlisted zashboard and
   anti-loop traffic match `REJECT`, create no outbound dial retries, and leave
   no connection tracker after the client closes.
-- [ ] Mihomo's re-resolution reaches `127.0.0.1:5354`, then the configured real
-  egress resolver; it does not loop back into DoT `:853` or gateway ingress.
+- [ ] Mihomo's re-resolution reaches `127.0.0.1:5354`. A non-extension hostname
+  reaches trust; an active extension bound to China reaches the live China
+  group with the configured ECS; the same extension bound to trust reaches
+  trust. No case loops into DoT `:853` or gateway ingress.
 - [ ] Direct/CN DNS answers bypass the gateway and connect to the real address.
 - [ ] Anti-loop rules reject gateway-self, loopback, private, link-local,
   CGNAT, and other protected destinations before the terminal egress group.
@@ -248,17 +262,27 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   `X.Y.Z-beta.N` prerelease. Missing beta metadata, a normal release carrying a
   beta-looking tag, and a beta-tagged bundle selected for the official channel
   all fail before deployment mutation and never fall back across channels.
-- [ ] Starting from a clean `0.0.13` release/fixture, populate every common JSON
-  state file and install a valid customized legacy mihomo config. Upgrade with
+- [ ] Starting from a clean pre-v5 release/fixture, populate every common JSON
+  state file and install a valid customized legacy mihomo config. First prove
+  the untouched `dns.env` and interception v4 document fail with the explicit
+  rebuild instructions. Through the old v4 API, disable MITM and verify the
+  sidecar stops and old reserved rules disappear. Create recoverable copies,
+  build the fixed credential-preserving empty v5 candidate, validate it with the
+  current sidecar, atomically replace v4, remove only the retired key, and verify
+  the preserved mihomo infrastructure still authenticates. Record that the old
+  master-disable transaction changed the mihomo hash by removing its managed
+  blocks, then treat that clean post-disable hash as the preservation baseline.
+  Upgrade with
   the exact stamped beta bundle through ordinary `--beta`. The common policy,
   upstream, ECS, Telegram, subscription, and statistics state remains readable,
   the new interception state uses the current schema, a missing marketplace
-  file is exposed as an empty source list, and the legacy mihomo hash is
-  byte-for-byte unchanged. DNS, Console, Telegram,
+  file is exposed as an empty source list, and the clean post-disable mihomo
+  hash is byte-for-byte unchanged by the installer. DNS, Console, Telegram,
   and the existing data plane remain healthy, while completion explicitly says
   core install complete and Extensions unavailable. Enabling interception must
   fail closed until its mihomo boundary is made ready.
-- [ ] Restore the same `0.0.13` baseline and run the exact stamped beta bundle as
+- [ ] Restore the same pre-v5 baseline, repeat the explicit schema rebuild, and
+  run the exact stamped beta bundle as
   `--beta upgrade-reset-mihomo` from a real TTY. Review and accept the destructive
   warning. The retained backup must hash-identically to the old customized file;
   the replacement must pass pinned `mihomo -t`, match the sidecar credentials,
@@ -266,7 +290,7 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   synthetic extension to enable and pass end-to-end traffic verification. Run
   the command without a TTY and cancel its confirmation in separate attempts;
   both must stop before the mihomo or deployment transaction is mutated.
-- [ ] Repeat both `0.0.13` upgrade paths with injected failures before and after
+- [ ] Repeat both pre-v5 upgrade paths with injected failures before and after
   CA creation, state-root creation, service-account creation, mihomo candidate
   validation, publication, and service readiness. Paths absent before the
   attempt are absent afterward; pre-existing owned CA/state trees are restored
@@ -525,6 +549,13 @@ token into recorded command output, screenshots, or issue logs.
   bound extension wins; moving it changes the ordered mihomo egress rule block
   only after revision check, `mihomo -t`, and hot apply. A stale reorder is
   rejected without changing either config.
+- [ ] Verify every installed extension defaults its capture-host DNS binding to
+  trust. Switch one to China and confirm its captured hostname resolves through
+  the live China group with `DNS_CHINA_ECS`; non-captured names remain on trust.
+  Create an exact/wildcard overlap with different bindings and verify the first
+  enabled extension in execution order wins. Reorder and confirm the winner
+  changes only after the reviewed revision-protected transaction. URL paths
+  under one hostname must not change the selected resolver.
 - [ ] With the master off, enable the synthetic module in the Console and verify
   it remains armed but has no DNS overlay or mihomo host rule. Turn the master
   on, then disable/re-enable the extension from

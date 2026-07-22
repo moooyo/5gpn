@@ -11,13 +11,46 @@ interface HostEntry {
   active: boolean
   wildcard: boolean
   duplicate: boolean
+  overlap: boolean
   egressWinner?: InterceptModule
   egressShadowed: boolean
+  dnsWinner?: InterceptModule
+  dnsShadowed: boolean
+  dnsPartialWinner?: InterceptModule
 }
 
 interface HostGroup {
   module: InterceptModule
   entries: HostEntry[]
+}
+
+function wildcardSuffix(pattern: string): string | null {
+  const normalized = pattern.toLowerCase()
+  return normalized.startsWith('*.') ? normalized.slice(2) : null
+}
+
+function patternMatchesHost(pattern: string, host: string): boolean {
+  const normalizedPattern = pattern.toLowerCase()
+  const normalizedHost = host.toLowerCase()
+  const suffix = wildcardSuffix(normalizedPattern)
+  return suffix === null
+    ? normalizedPattern === normalizedHost
+    : normalizedHost.length > suffix.length && normalizedHost.endsWith(`.${suffix}`)
+}
+
+function patternCovers(cover: string, target: string): boolean {
+  const targetSuffix = wildcardSuffix(target)
+  if (targetSuffix === null) return patternMatchesHost(cover, target)
+  const coverSuffix = wildcardSuffix(cover)
+  return coverSuffix !== null && (targetSuffix === coverSuffix || targetSuffix.endsWith(`.${coverSuffix}`))
+}
+
+function patternsOverlap(left: string, right: string): boolean {
+  const leftSuffix = wildcardSuffix(left)
+  const rightSuffix = wildcardSuffix(right)
+  if (leftSuffix === null) return patternMatchesHost(right, left)
+  if (rightSuffix === null) return patternMatchesHost(left, right)
+  return leftSuffix === rightSuffix || leftSuffix.endsWith(`.${rightSuffix}`) || rightSuffix.endsWith(`.${leftSuffix}`)
 }
 
 export function HostAuditView({
@@ -46,19 +79,31 @@ export function HostAuditView({
 
   const groups = useMemo<HostGroup[]>(() => {
     const needle = query.trim().toLocaleLowerCase()
+    const orderedEnabled = [...view.modules].filter((candidate) => candidate.enabled).sort((left, right) => left.execution_order - right.execution_order)
     return view.modules.flatMap((module) => {
       if (moduleID && module.id !== moduleID) return []
       const moduleMatch = `${module.name} ${module.source_url ?? ''} ${module.source_digest}`.toLocaleLowerCase().includes(needle)
       const entries = module.capture_hosts
         .map((host) => {
           const egressWinner = declarations.get(host)?.find((owner) => owner.enabled && !!owner.egress_group)
+          const overlappingModules = view.modules.filter((owner) => owner.id !== module.id && owner.capture_hosts.some((pattern) => patternsOverlap(pattern, host)))
+          const dnsWinner = orderedEnabled.find((owner) => owner.capture_hosts.some((pattern) => patternCovers(pattern, host)))
+          const dnsPartialWinner = dnsWinner?.id === module.id
+            ? orderedEnabled.find((owner) => owner.execution_order < module.execution_order && owner.capture_hosts.some((pattern) => patternsOverlap(pattern, host) && !patternCovers(pattern, host)))
+            : dnsWinner
+              ? undefined
+              : orderedEnabled.find((owner) => owner.capture_hosts.some((pattern) => patternsOverlap(pattern, host) && !patternCovers(pattern, host)))
           return {
             host,
             active: activeHosts.has(host),
             wildcard: host.startsWith('*.'),
             duplicate: (declarations.get(host) ?? []).length > 1,
+            overlap: overlappingModules.length > 0,
             egressWinner,
             egressShadowed: !!egressWinner && egressWinner.id !== module.id,
+            dnsWinner,
+            dnsShadowed: !!dnsWinner && dnsWinner.id !== module.id,
+            dnsPartialWinner,
           }
         })
         .filter((entry) => {
@@ -155,6 +200,7 @@ export function HostAuditView({
                   <Badge tone={module.ready ? 'green' : module.enabled ? 'amber' : 'neutral'}>
                     {module.ready ? t('extensions.enabled') : module.enabled ? t('extensions.configured') : t('extensions.disabled')}
                   </Badge>
+                  <Badge tone={module.capture_dns === 'china' ? 'amber' : 'blue'}>{t('extensions.captureDNS.badge', { group: t(`extensions.captureDNS.${module.capture_dns}`) })}</Badge>
                   <Badge>{t('extensions.hostAudit.executionOrder', { order: module.execution_order })}</Badge>
                   <Badge>{t('extensions.hostAudit.hostCount', { count: entries.length })}</Badge>
                 </div>
@@ -168,7 +214,11 @@ export function HostAuditView({
                         {entry.wildcard ? t('extensions.hostAudit.wildcard') : t('extensions.hostAudit.exact')}
                       </Badge>
                       {entry.duplicate ? <Badge tone="amber">{t('extensions.hostAudit.duplicate')}</Badge> : null}
+                      {entry.overlap && !entry.duplicate ? <Badge tone="amber">{t('extensions.hostAudit.overlap')}</Badge> : null}
                       {entry.duplicate ? <Badge tone="blue">{t('extensions.hostAudit.composed')}</Badge> : null}
+                      {entry.dnsWinner?.id === module.id ? <Badge tone="green">{t('extensions.hostAudit.dnsWinner', { group: t(`extensions.captureDNS.${module.capture_dns}`) })}</Badge> : null}
+                      {entry.dnsShadowed ? <Badge tone="amber">{t('extensions.hostAudit.dnsShadowed', { name: entry.dnsWinner?.name ?? '', group: entry.dnsWinner ? t(`extensions.captureDNS.${entry.dnsWinner.capture_dns}`) : '' })}</Badge> : null}
+                      {entry.dnsPartialWinner ? <Badge tone="amber">{t('extensions.hostAudit.dnsPartiallyShadowed', { name: entry.dnsPartialWinner.name, group: t(`extensions.captureDNS.${entry.dnsPartialWinner.capture_dns}`) })}</Badge> : null}
                       {entry.egressWinner?.id === module.id ? <Badge tone="green">{t('extensions.hostAudit.egressWinner', { group: entry.egressWinner.egress_group })}</Badge> : null}
                       {entry.egressShadowed ? <Badge tone="amber">{t('extensions.hostAudit.egressShadowed', { name: entry.egressWinner?.name ?? '' })}</Badge> : null}
                       <Badge tone={entry.active ? 'green' : module.enabled ? 'amber' : 'neutral'}>

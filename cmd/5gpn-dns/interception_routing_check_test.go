@@ -31,8 +31,34 @@ rules:
   - MATCH,Proxies
 `
 	code, stdout, stderr := runInstallerRoutingCheck(t, legacy, mustMarshalInstallerInterceptConfig(t, installerRoutingCheckDocument()))
-	if code != 3 || stdout != "interception-listener-missing\n" || stderr != "" {
+	if code != 3 || stdout != "legacy-mihomo-boundary-missing-clean\n" || stderr != "" {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
+func TestInterceptionRoutingCheckRejectsResidualManagedRulesWithDisabledMaster(t *testing.T) {
+	document := installerRoutingCheckDocument()
+	mihomo := currentInstallerRoutingSeed(t, document)
+	residualEgress := "AND,((IN-NAME,intercept-egress),(DOMAIN,example.com),(DST-PORT,443)),Proxies"
+	residualCapture := "AND,((DOMAIN,example.com),(DST-PORT,443)),MODULE-INTERCEPT"
+	mihomo = strings.Replace(mihomo, "  - "+interceptEgressRejectRule, "  - "+residualEgress+"\n  - "+interceptEgressRejectRule, 1)
+	mihomo = strings.Replace(mihomo, "  - MATCH,Proxies", "  - "+residualCapture+"\n  - MATCH,Proxies", 1)
+	code, stdout, stderr := runInstallerRoutingCheck(t, mihomo, mustMarshalInstallerInterceptConfig(t, document))
+	if code != 3 || stdout != "interception-egress-rules-out-of-sync\n" || stderr != "" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+
+	legacyWithResidual := `listeners: []
+proxies: []
+proxy-groups:
+  - {name: Proxies, type: select, proxies: [DIRECT]}
+rules:
+  - AND,((DOMAIN,example.com),(DST-PORT,443)),MODULE-INTERCEPT
+  - MATCH,Proxies
+`
+	code, stdout, stderr = runInstallerRoutingCheck(t, legacyWithResidual, mustMarshalInstallerInterceptConfig(t, document))
+	if code != 3 || stdout != "interception-listener-missing\n" || stderr != "" {
+		t.Fatalf("legacy residual code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
 
@@ -100,7 +126,7 @@ func TestInterceptionRoutingCheckCLIExitContract(t *testing.T) {
 		wantStderrSet bool
 	}{
 		{name: "ready", mihomo: ready, intercept: mustMarshalInstallerInterceptConfig(t, document), wantCode: 0, wantStdout: "ready\n"},
-		{name: "legacy", mihomo: legacy, intercept: mustMarshalInstallerInterceptConfig(t, document), wantCode: 3, wantStdout: "interception-listener-missing\n"},
+		{name: "legacy", mihomo: legacy, intercept: mustMarshalInstallerInterceptConfig(t, document), wantCode: 3, wantStdout: "legacy-mihomo-boundary-missing-clean\n"},
 		{name: "invalid", mihomo: ready, intercept: []byte(`{"version":`), wantCode: 1, wantStdout: "intercept-config-invalid\n", wantStderrSet: true},
 	}
 	for _, test := range tests {

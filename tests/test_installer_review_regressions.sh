@@ -14,11 +14,11 @@ source "$INSTALL"
 
 BASE_DOMAIN=env.example
 PUBLIC_IP=203.0.113.9
-EGRESS_RESOLVER=https://untrusted.example/dns-query
+DNS_TRUST=203.0.113.53
 CERT_MODE=debug
 TGBOT_TOKEN=123:secret
 clear_external_config_env
-if [[ -z "${BASE_DOMAIN+x}" && -z "${PUBLIC_IP+x}" && -z "${EGRESS_RESOLVER+x}" \
+if [[ -z "${BASE_DOMAIN+x}" && -z "${PUBLIC_IP+x}" && -z "${DNS_TRUST+x}" \
    && -z "${CERT_MODE+x}" && -z "${TGBOT_TOKEN+x}" \
    && "${WWW_DIR:-}" == "${BASE_DIR}/www" ]]; then
     pass "caller configuration environment is discarded"

@@ -65,7 +65,7 @@ check "$T" 'format: text'                              'whitelist provider uses 
 check "$T" 'RULE-SET,whitelist,DIRECT,src'             'source-IP allowlist rule'
 check "$T" 'DOMAIN,__ZASH_DOMAIN__,REJECT'              'fast deny for non-allowlisted zashboard traffic'
 nocheck "$T" 'REJECT-DROP'                             'seed avoids connection-retaining reject rules'
-check "$T" '127\.0\.0\.1:5354'                         'DNS broker → egress resolver'
+check "$T" '127\.0\.0\.1:5354'                         'loopback origin DNS selector'
 check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(NETWORK,UDP\)\),REJECT' 'console UDP fallback fast-reject rule'
 check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(DST-PORT,80\)\),REJECT' 'console HTTP fast-reject rule'
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__,DIRECT'             'public console SNI direct route'

@@ -134,7 +134,7 @@ func (m *InterceptModuleManager) PrepareRuntime() error {
 		m.publishHosts(nil)
 		return errors.New("interception certificate state is not ready")
 	}
-	m.publishHosts(activeInterceptHosts(document))
+	m.publishHosts(&document)
 	return nil
 }
 
@@ -164,7 +164,7 @@ func (m *InterceptModuleManager) ReconcileMihomoText(text string) error {
 		m.publishHosts(nil)
 		return errors.New("interception certificate state is not ready")
 	}
-	m.publishHosts(activeInterceptHosts(document))
+	m.publishHosts(&document)
 	return nil
 }
 
@@ -575,6 +575,7 @@ func (m *InterceptModuleManager) CheckUpdate(ctx context.Context, id, revision s
 	}
 	candidate.Settings = mergeInterceptSettingValues(current.Settings, candidate.Settings)
 	candidate.EgressGroup = current.EgressGroup
+	candidate.CaptureDNS = current.CaptureDNS
 	candidateDocument := latest
 	candidateDocument.Modules = append([]interceptModuleSnapshot(nil), latest.Modules...)
 	found = false
@@ -673,6 +674,7 @@ func (m *InterceptModuleManager) ApplyUpdate(ctx context.Context, id, revision, 
 	}
 	candidate.Settings = mergeInterceptSettingValues(latest.Modules[index].Settings, candidate.Settings)
 	candidate.EgressGroup = latest.Modules[index].EgressGroup
+	candidate.CaptureDNS = latest.Modules[index].CaptureDNS
 	latest.Modules[index] = candidate
 	newBody, err := marshalInterceptDocument(latest)
 	if err == nil {
@@ -765,6 +767,7 @@ type interceptModuleUpdate struct {
 	Revision    string                     `json:"revision"`
 	Enabled     *bool                      `json:"enabled,omitempty"`
 	EgressGroup *string                    `json:"egress_group,omitempty"`
+	CaptureDNS  *string                    `json:"capture_dns,omitempty"`
 	Settings    map[string]json.RawMessage `json:"settings,omitempty"`
 }
 
@@ -772,7 +775,7 @@ func (m *InterceptModuleManager) Update(ctx context.Context, id string, update i
 	if m == nil || m.store == nil {
 		return interceptModulesView{}, errInterceptModulesUnavailable
 	}
-	if !validMihomoConfigRevision(update.Revision) || (update.Enabled == nil && update.EgressGroup == nil && update.Settings == nil) {
+	if !validMihomoConfigRevision(update.Revision) || (update.Enabled == nil && update.EgressGroup == nil && update.CaptureDNS == nil && update.Settings == nil) {
 		return interceptModulesView{}, errors.New("revision and at least one update field are required")
 	}
 	return m.mutate(ctx, update.Revision, func(document *interceptConfigDocument) (bool, error) {
@@ -794,6 +797,13 @@ func (m *InterceptModuleManager) Update(ctx context.Context, id string, update i
 				}
 				routingChanged = true
 				module.EgressGroup = group
+			}
+			if update.CaptureDNS != nil {
+				if err := validateInterceptCaptureDNS(*update.CaptureDNS); err != nil {
+					return false, err
+				}
+				routingChanged = routingChanged || (document.MITM.Enabled && module.Enabled && module.CaptureDNS != *update.CaptureDNS)
+				module.CaptureDNS = *update.CaptureDNS
 			}
 			if update.Enabled != nil {
 				if *update.Enabled && !interceptModuleSettingsReady(module.Settings) {
@@ -949,7 +959,7 @@ func (m *InterceptModuleManager) mutate(
 		rollbackErr := writeInterceptConfigAtomic(m.store.Path, oldBody)
 		return interceptModulesView{}, fmt.Errorf("%w: %v; sidecar rollback: %v", errInterceptApplyFailed, err, rollbackErr)
 	}
-	m.publishHosts(activeInterceptHosts(nextDocument))
+	m.publishHosts(&nextDocument)
 	if m.onApplied != nil {
 		m.onApplied()
 	}
@@ -1090,9 +1100,9 @@ func (m *InterceptModuleManager) republishCertificateCandidate(ctx context.Conte
 	return writeInterceptConfigAtomicContext(ctx, m.store.Path, candidate)
 }
 
-func (m *InterceptModuleManager) publishHosts(hosts []string) {
+func (m *InterceptModuleManager) publishHosts(document *interceptConfigDocument) {
 	if m.handler != nil {
-		m.handler.setInterceptHosts(hosts)
+		m.handler.setInterceptDocument(document)
 	}
 }
 
@@ -1170,7 +1180,7 @@ func interceptModuleViewFromSnapshot(module interceptModuleSnapshot, ready bool,
 	return interceptModuleView{
 		ID: module.ID, Version: module.Version, Name: module.Name, Description: module.Description,
 		Enabled: module.Enabled, Ready: ready, Reason: moduleRuntimeReason(ready, reason),
-		CaptureHosts: append([]string(nil), module.CaptureHosts...), ScriptCount: len(module.Scripts),
+		CaptureHosts: append([]string(nil), module.CaptureHosts...), CaptureDNS: module.CaptureDNS, ScriptCount: len(module.Scripts),
 		Actions:  interceptModuleActionViews(module.Scripts),
 		Settings: cloneInterceptSettings(module.Settings), HostMappings: append([]interceptHostMapping(nil), module.HostMappings...),
 		RoutingRules:      cloneInterceptRoutingRules(module.RoutingRules),

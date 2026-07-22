@@ -476,44 +476,100 @@ func (h *Handler) decideName(name string) resolutionDecision {
 }
 
 type interceptHostSnapshot struct {
-	exact    map[string]struct{}
-	wildcard []string
+	exact    map[string]interceptHostBinding
+	wildcard []interceptWildcardBinding
 }
 
-func newInterceptHostSnapshot(patterns []string) *interceptHostSnapshot {
-	snapshot := &interceptHostSnapshot{exact: make(map[string]struct{})}
-	for _, pattern := range patterns {
-		pattern = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(pattern), "."))
-		if strings.HasPrefix(pattern, "*.") {
-			snapshot.wildcard = append(snapshot.wildcard, strings.TrimPrefix(pattern, "*."))
+type interceptHostBinding struct {
+	moduleID   string
+	captureDNS string
+	order      int
+}
+
+type interceptWildcardBinding struct {
+	suffix  string
+	binding interceptHostBinding
+}
+
+func newInterceptHostSnapshot(document interceptConfigDocument) *interceptHostSnapshot {
+	snapshot := &interceptHostSnapshot{exact: make(map[string]interceptHostBinding)}
+	if !document.MITM.Enabled {
+		return snapshot
+	}
+	seenWildcard := make(map[string]struct{})
+	for order, module := range orderedInterceptModules(document) {
+		if !module.Enabled {
 			continue
 		}
-		if pattern != "" {
-			snapshot.exact[pattern] = struct{}{}
+		binding := interceptHostBinding{
+			moduleID:   module.ID,
+			captureDNS: module.CaptureDNS,
+			order:      order,
+		}
+		for _, pattern := range module.CaptureHosts {
+			pattern = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(pattern), "."))
+			if strings.HasPrefix(pattern, "*.") {
+				suffix := strings.TrimPrefix(pattern, "*.")
+				if _, exists := seenWildcard[suffix]; !exists {
+					seenWildcard[suffix] = struct{}{}
+					snapshot.wildcard = append(snapshot.wildcard, interceptWildcardBinding{suffix: suffix, binding: binding})
+				}
+				continue
+			}
+			if pattern != "" {
+				if _, exists := snapshot.exact[pattern]; !exists {
+					snapshot.exact[pattern] = binding
+				}
+			}
 		}
 	}
 	return snapshot
 }
 
 func (s *interceptHostSnapshot) Match(name string) bool {
-	if s == nil {
-		return false
-	}
-	name = strings.ToLower(stripDot(name))
-	if _, ok := s.exact[name]; ok {
-		return true
-	}
-	for _, suffix := range s.wildcard {
-		if len(name) > len(suffix)+1 && strings.HasSuffix(name, "."+suffix) {
-			return true
-		}
-	}
-	return false
+	_, _, matched := s.CaptureDNS(name)
+	return matched
 }
 
-func (h *Handler) setInterceptHosts(patterns []string) {
-	h.interceptHosts.Store(newInterceptHostSnapshot(patterns))
+// CaptureDNS returns the operator-selected resolver group and the owning
+// extension for name. Bindings are evaluated in execution_order, so the first
+// enabled extension that declared an overlapping capture host wins.
+func (s *interceptHostSnapshot) CaptureDNS(name string) (resolver, moduleID string, matched bool) {
+	if s == nil {
+		return "", "", false
+	}
+	name = strings.ToLower(stripDot(name))
+	exact, exactMatch := s.exact[name]
+	for _, wildcard := range s.wildcard {
+		if exactMatch && wildcard.binding.order >= exact.order {
+			break
+		}
+		if len(name) > len(wildcard.suffix)+1 && strings.HasSuffix(name, "."+wildcard.suffix) {
+			return wildcard.binding.captureDNS, wildcard.binding.moduleID, true
+		}
+	}
+	if exactMatch {
+		return exact.captureDNS, exact.moduleID, true
+	}
+	return "", "", false
+}
+
+func (h *Handler) setInterceptDocument(document *interceptConfigDocument) {
+	if document == nil {
+		h.interceptHosts.Store(&interceptHostSnapshot{})
+	} else {
+		h.interceptHosts.Store(newInterceptHostSnapshot(*document))
+	}
 	h.Cache.Flush()
+}
+
+func (h *Handler) captureDNSForName(name string) (resolver, moduleID string) {
+	if snapshot := h.interceptHosts.Load(); snapshot != nil {
+		if resolver, moduleID, matched := snapshot.CaptureDNS(name); matched {
+			return resolver, moduleID
+		}
+	}
+	return interceptCaptureDNSTrust, ""
 }
 
 func classifyPolicySnapshot(snap *runtimePolicySnapshot, name string) Verdict {

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -579,21 +580,24 @@ func TestLoadConfig_EgressBroker_Default(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_EgressBroker_EmptyDisables verifies an explicit empty
-// DNS_EGRESS_BROKER disables the broker (matches every other listener's
-// empty-disables convention) without failing LoadConfig.
-func TestLoadConfig_EgressBroker_EmptyDisables(t *testing.T) {
+// TestLoadConfig_EgressBroker_EmptyRejected verifies mihomo's resolver
+// boundary cannot be disabled.
+func TestLoadConfig_EgressBroker_EmptyRejected(t *testing.T) {
 	clearAllDNSEnv(t)
 	t.Setenv("DNS_CERT", "/etc/5gpn/cert/cert.pem")
 	t.Setenv("DNS_KEY", "/etc/5gpn/cert/key.pem")
 	t.Setenv("DNS_EGRESS_BROKER", "")
 
-	cfg, err := LoadConfig()
-	if err != nil {
-		t.Fatalf("LoadConfig() unexpected error: %v", err)
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig accepted an empty DNS_EGRESS_BROKER")
 	}
-	if cfg.EgressBrokerAddr != "" {
-		t.Errorf("EgressBrokerAddr = %q, want empty (disabled)", cfg.EgressBrokerAddr)
+}
+
+func TestLoadConfigRejectsRetiredEgressResolver(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_EGRESS_RESOLVER", "203.0.113.53")
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "retired") {
+		t.Fatalf("retired resolver error = %v", err)
 	}
 }
 
@@ -678,59 +682,6 @@ func TestLoadConfig_EgressBroker_RejectsBadPort(t *testing.T) {
 				t.Fatalf("LoadConfig must reject DNS_EGRESS_BROKER=%q", addr)
 			}
 		})
-	}
-}
-
-// --- DNS_EGRESS_RESOLVER daemon-config tests ---
-
-func TestLoadConfig_EgressResolverDefault(t *testing.T) {
-	clearAllDNSEnv(t)
-	t.Setenv("DNS_CERT", "/c")
-	t.Setenv("DNS_KEY", "/k")
-	cfg, err := LoadConfig()
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if cfg.EgressResolver != "22.22.22.22" {
-		t.Fatalf("EgressResolver default = %q, want 22.22.22.22", cfg.EgressResolver)
-	}
-}
-
-func TestLoadConfig_EgressResolverPlainIPv4(t *testing.T) {
-	clearAllDNSEnv(t)
-	t.Setenv("DNS_CERT", "/c")
-	t.Setenv("DNS_KEY", "/k")
-	t.Setenv("DNS_EGRESS_RESOLVER", "1.1.1.1")
-	cfg, err := LoadConfig()
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if cfg.EgressResolver != "1.1.1.1" {
-		t.Fatalf("EgressResolver = %q, want 1.1.1.1", cfg.EgressResolver)
-	}
-}
-
-func TestLoadConfig_EgressResolverDoH(t *testing.T) {
-	clearAllDNSEnv(t)
-	t.Setenv("DNS_CERT", "/c")
-	t.Setenv("DNS_KEY", "/k")
-	t.Setenv("DNS_EGRESS_RESOLVER", "https://dns.google/dns-query")
-	cfg, err := LoadConfig()
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if cfg.EgressResolver != "https://dns.google/dns-query" {
-		t.Fatalf("EgressResolver = %q", cfg.EgressResolver)
-	}
-}
-
-// TestLoadConfig_EgressResolverInvalid rejects a bare hostname (fatal config
-// error): validated via ValidateResolver.
-func TestLoadConfig_EgressResolverInvalid(t *testing.T) {
-	clearAllDNSEnv(t)
-	t.Setenv("DNS_EGRESS_RESOLVER", "dns.google")
-	if _, err := LoadConfig(); err == nil {
-		t.Fatalf("LoadConfig accepted invalid DNS_EGRESS_RESOLVER, want error")
 	}
 }
 

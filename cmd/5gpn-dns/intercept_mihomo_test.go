@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -76,6 +78,124 @@ func TestInterceptMihomoRoutingUsesExecutionOrderAndDeduplicatesSelectors(t *tes
 	}
 	if !sortStringsEqual(routing.Capture, uniqueSortedStrings(routing.Capture)) {
 		t.Fatalf("capture block is not canonical: %v", routing.Capture)
+	}
+}
+
+func TestInterceptMihomoRoutingCompactsSameOwnerApexWildcard(t *testing.T) {
+	module := testModuleSnapshot()
+	module.Enabled = true
+	module.EgressGroup = "Japan"
+	module.CaptureDNS = interceptCaptureDNSChina
+	module.CaptureHosts = []string{"*.example.com", "example.com"}
+	module.RoutingRules = []interceptRoutingRule{
+		{Action: "reject", Domain: "example.com"},
+		{Action: "reject", DomainSuffix: "example.com"},
+	}
+	document, _ := testInterceptDocument(t, module)
+	routing := interceptMihomoRouting(document)
+
+	for _, port := range []int{80, 443} {
+		selector := interceptEgressSelector{Kind: "DOMAIN-SUFFIX", Value: "example.com", Port: port}
+		if !containsString(routing.Capture, renderInterceptCaptureRule(selector)) {
+			t.Errorf("missing compact capture selector for port %d: %v", port, routing.Capture)
+		}
+		if !containsString(routing.Egress, renderInterceptEgressRule(selector, "Japan")) {
+			t.Errorf("missing compact egress selector for port %d: %v", port, routing.Egress)
+		}
+	}
+	if len(routing.Capture) != 2 || len(routing.Egress) != 2 || strings.Contains(strings.Join(routing.Capture, "\n"), "DOMAIN-WILDCARD") || strings.Contains(strings.Join(routing.Egress, "\n"), "(DOMAIN,example.com)") {
+		t.Fatalf("same-owner pair was not compacted exactly once per port: %+v", routing)
+	}
+	if !stringSlicesEqual(routing.Policy, []string{"DOMAIN,example.com,REJECT", "DOMAIN-SUFFIX,example.com,REJECT"}) {
+		t.Fatalf("reviewed routing rules were incorrectly compacted: %v", routing.Policy)
+	}
+	if got := activeInterceptHosts(document); !stringSlicesEqual(got, []string{"*.example.com", "example.com"}) {
+		t.Fatalf("DNS overlay hosts changed by mihomo compaction: %v", got)
+	}
+	if got := certificateInterceptHosts(document); !stringSlicesEqual(got, []string{"*.example.com", "example.com"}) {
+		t.Fatalf("certificate hosts changed by mihomo compaction: %v", got)
+	}
+	snapshot := newInterceptHostSnapshot(document)
+	for _, host := range []string{"example.com", "api.example.com"} {
+		resolver, owner, matched := snapshot.CaptureDNS(host)
+		if !matched || resolver != interceptCaptureDNSChina || owner != module.ID {
+			t.Fatalf("DNS matcher changed for %s: matched=%t resolver=%s owner=%s", host, matched, resolver, owner)
+		}
+	}
+}
+
+func TestInterceptMihomoRoutingDoesNotCompactUnpairedOrCrossOwnerHosts(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		host      string
+		wantKind  string
+		wantValue string
+	}{
+		{name: "exact only", host: "example.com", wantKind: "DOMAIN", wantValue: "example.com"},
+		{name: "wildcard only", host: "*.example.com", wantKind: "DOMAIN-WILDCARD", wantValue: "*.example.com"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			module := testModuleSnapshot()
+			module.Enabled = true
+			module.CaptureHosts = []string{test.host}
+			module.Scripts[0].Match.Hosts = []string{test.host}
+			document, _ := testInterceptDocument(t, module)
+			routing := interceptMihomoRouting(document)
+			want := renderInterceptCaptureRule(interceptEgressSelector{Kind: test.wantKind, Value: test.wantValue, Port: 443})
+			if len(routing.Capture) != 2 || !containsString(routing.Capture, want) || strings.Contains(strings.Join(routing.Capture, "\n"), "DOMAIN-SUFFIX") {
+				t.Fatalf("unpaired host changed shape: %v", routing.Capture)
+			}
+		})
+	}
+
+	document := interceptConfigDocument{
+		MITM:           interceptMITMSettings{Enabled: true},
+		ExecutionOrder: []string{"io.example.exact", "io.example.wildcard"},
+		Modules: []interceptModuleSnapshot{
+			{ID: "io.example.exact", Enabled: true, EgressGroup: "Japan", CaptureHosts: []string{"example.com"}},
+			{ID: "io.example.wildcard", Enabled: true, EgressGroup: "Proxies", CaptureHosts: []string{"*.example.com"}},
+		},
+	}
+	routing := interceptMihomoRouting(document)
+	if strings.Contains(strings.Join(append(append([]string{}, routing.Egress...), routing.Capture...), "\n"), "DOMAIN-SUFFIX") {
+		t.Fatalf("different owners were compacted: %+v", routing)
+	}
+	exact := renderInterceptEgressRule(interceptEgressSelector{Kind: "DOMAIN", Value: "example.com", Port: 443}, "Japan")
+	wildcard := renderInterceptEgressRule(interceptEgressSelector{Kind: "DOMAIN-WILDCARD", Value: "*.example.com", Port: 443}, "Proxies")
+	if !containsString(routing.Egress, exact) || !containsString(routing.Egress, wildcard) || stringIndex(routing.Egress, exact) >= stringIndex(routing.Egress, wildcard) {
+		t.Fatalf("cross-owner target/order changed: %v", routing.Egress)
+	}
+}
+
+func TestInterceptMihomoRoutingCompactionPreservesCrossPluginPrecedence(t *testing.T) {
+	pair := interceptModuleSnapshot{ID: "io.example.pair", Enabled: true, EgressGroup: "Proxies", CaptureHosts: []string{"*.example.com", "example.com"}}
+	exact := interceptModuleSnapshot{ID: "io.example.api", Enabled: true, EgressGroup: "Japan", CaptureHosts: []string{"api.example.com"}}
+	document := interceptConfigDocument{MITM: interceptMITMSettings{Enabled: true}, Modules: []interceptModuleSnapshot{pair, exact}}
+	pairRule := renderInterceptEgressRule(interceptEgressSelector{Kind: "DOMAIN-SUFFIX", Value: "example.com", Port: 443}, "Proxies")
+	exactRule := renderInterceptEgressRule(interceptEgressSelector{Kind: "DOMAIN", Value: "api.example.com", Port: 443}, "Japan")
+
+	document.ExecutionOrder = []string{exact.ID, pair.ID}
+	routing := interceptMihomoRouting(document)
+	exactAt, pairAt := stringIndex(routing.Egress, exactRule), stringIndex(routing.Egress, pairRule)
+	if exactAt < 0 || pairAt < 0 || exactAt >= pairAt {
+		t.Fatalf("earlier exact owner no longer wins: %v", routing.Egress)
+	}
+	document.ExecutionOrder = []string{pair.ID, exact.ID}
+	routing = interceptMihomoRouting(document)
+	exactAt, pairAt = stringIndex(routing.Egress, exactRule), stringIndex(routing.Egress, pairRule)
+	if exactAt < 0 || pairAt < 0 || pairAt >= exactAt {
+		t.Fatalf("earlier compact suffix owner no longer wins: %v", routing.Egress)
+	}
+
+	// A bound exact selector still precedes an earlier unbound compact pair.
+	pair.EgressGroup = ""
+	document.Modules = []interceptModuleSnapshot{pair, exact}
+	document.ExecutionOrder = []string{pair.ID, exact.ID}
+	routing = interceptMihomoRouting(document)
+	pairTerminal := renderInterceptEgressRule(interceptEgressSelector{Kind: "DOMAIN-SUFFIX", Value: "example.com", Port: 443}, interceptTerminalMatchTarget)
+	exactAt, pairAt = stringIndex(routing.Egress, exactRule), stringIndex(routing.Egress, pairTerminal)
+	if exactAt < 0 || pairAt < 0 || exactAt >= pairAt {
+		t.Fatalf("explicit binding priority changed by compaction: %v", routing.Egress)
 	}
 }
 
@@ -187,6 +307,64 @@ func TestAnalyzeInterceptRoutingReconcilesMissingPolicyButRejectsExtraRules(t *t
 	extraCapture := testInterceptMihomoYAML(extraCaptureRules, "Proxies")
 	if analysis := analyzeInterceptRoutingDocument(extraCapture, document); analysis.Reconcileable || analysis.Reason != "interception-rules-out-of-sync" {
 		t.Fatalf("unexpected canonical capture rule was claimable: %+v", analysis)
+	}
+}
+
+func TestAnalyzeInterceptRoutingParsesAndRebuildsCompactSuffixRules(t *testing.T) {
+	document := interceptConfigDocument{
+		MITM:           interceptMITMSettings{Enabled: true},
+		ExecutionOrder: []string{"io.example.pair"},
+		Modules: []interceptModuleSnapshot{{
+			ID: "io.example.pair", Enabled: true, EgressGroup: "Proxies", CaptureHosts: []string{"*.example.com", "example.com"},
+		}},
+	}
+	routing := materializeInterceptRoutingRules(interceptMihomoRouting(document), "Proxies")
+	if len(routing.Egress) != 2 || len(routing.Capture) != 2 {
+		t.Fatalf("compact routing size = egress:%d capture:%d", len(routing.Egress), len(routing.Capture))
+	}
+	selector, target, ok := parseCanonicalInterceptEgressRule(routing.Egress[0])
+	if !ok || selector.Kind != "DOMAIN-SUFFIX" || selector.Value != "example.com" || target != "Proxies" {
+		t.Fatalf("compact egress parser = %+v/%q/%t", selector, target, ok)
+	}
+	if !validCanonicalInterceptRule(routing.Capture[0]) {
+		t.Fatalf("compact capture rule is not canonical: %s", routing.Capture[0])
+	}
+
+	partialRules := []string{routing.Egress[0], interceptEgressRejectRule, routing.Capture[0], "MATCH,Proxies"}
+	partial := testInterceptMihomoYAML(partialRules, "Proxies")
+	analysis := analyzeInterceptRoutingDocument(partial, document)
+	if !analysis.Reconcileable || analysis.Manageable || analysis.Reason == "" {
+		t.Fatalf("partial compact block was not safely reconcileable: %+v", analysis)
+	}
+	rebuilt, err := renderInterceptRoutingDocument(analysis, document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified := analyzeInterceptRoutingDocument(rebuilt, document); !verified.Manageable || !verified.Ready {
+		t.Fatalf("rebuilt compact block rejected: %+v\n%s", verified, rebuilt)
+	}
+	for _, rule := range append(append([]string{}, routing.Egress...), routing.Capture...) {
+		if !strings.Contains(rebuilt, rule) {
+			t.Errorf("rebuilt config is missing %q", rule)
+		}
+	}
+
+	extraRules := append([]string(nil), routing.Egress...)
+	extraRules = append(extraRules,
+		"AND,((IN-NAME,intercept-egress),(DOMAIN-SUFFIX,operator.example),(DST-PORT,443)),Proxies",
+		interceptEgressRejectRule,
+	)
+	extraRules = append(extraRules, routing.Capture...)
+	extraRules = append(extraRules, "MATCH,Proxies")
+	if extra := analyzeInterceptRoutingDocument(testInterceptMihomoYAML(extraRules, "Proxies"), document); extra.Reconcileable || extra.Reason != "interception-egress-rules-out-of-sync" {
+		t.Fatalf("unexpected compact egress selector was claimable: %+v", extra)
+	}
+	if _, _, ok := parseCanonicalInterceptEgressRule("AND,((IN-NAME,intercept-egress),(DOMAIN-SUFFIX,*.example.com),(DST-PORT,443)),Proxies"); ok {
+		t.Fatal("wildcard value was accepted inside DOMAIN-SUFFIX")
+	}
+	expanded := expandedPairRouting(document.Modules[0], "Proxies")
+	if legacy := analyzeInterceptRoutingDocument(routingFixture(expanded, "Proxies"), document); legacy.Reconcileable || legacy.Manageable {
+		t.Fatalf("expanded pre-compaction blocks were silently migrated: %+v", legacy)
 	}
 }
 
@@ -316,6 +494,129 @@ func TestInterceptAvailableEgressGroups(t *testing.T) {
 	}
 }
 
+func TestInterceptMihomoRoutingAdScaleCompactionSaves404RulesAndConfigBytes(t *testing.T) {
+	document := apexWildcardPairDocument(101)
+	compact := materializeInterceptRoutingRules(interceptMihomoRouting(document), "Proxies")
+	expanded := expandedPairRouting(document.Modules[0], "Proxies")
+	compactCount := len(compact.Egress) + len(compact.Capture)
+	expandedCount := len(expanded.Egress) + len(expanded.Capture)
+	if compactCount != 404 || expandedCount != 808 || expandedCount-compactCount != 404 {
+		t.Fatalf("managed rule counts compact=%d expanded=%d saved=%d, want 404/808/404", compactCount, expandedCount, expandedCount-compactCount)
+	}
+	compactConfig := routingFixture(compact, "Proxies")
+	expandedConfig := routingFixture(expanded, "Proxies")
+	if len(compactConfig) >= len(expandedConfig) {
+		t.Fatalf("compact config bytes=%d, expanded=%d", len(compactConfig), len(expandedConfig))
+	}
+	t.Logf("101 apex/wildcard pairs: managed rules %d -> %d (saved %d); mihomo YAML %d -> %d bytes (saved %d)",
+		expandedCount, compactCount, expandedCount-compactCount, len(expandedConfig), len(compactConfig), len(expandedConfig)-len(compactConfig))
+}
+
+func TestPreV5ExplicitRebuildPreservesBoundaryAndRejectsResidualExpandedRules(t *testing.T) {
+	legacyModule := testModuleSnapshot()
+	legacyModule.Enabled = true
+	legacyModule.CaptureHosts = []string{"*.example.com", "example.com"}
+	legacy := interceptConfigDocument{
+		Version: 4,
+		Listen:  "127.0.0.1:18080", Username: "interception-unavailable", Password: "interception-unavailable-password",
+		TLSCert: "/etc/5gpn/intercept/tls/fullchain.pem", TLSKey: "/etc/5gpn/intercept/tls/privkey.pem",
+		UpstreamProxy: interceptProxyConfig{
+			Address: "127.0.0.1:17890", Username: "interception-upstream-unavailable", Password: "interception-upstream-unavailable-password",
+		},
+		MITM:           interceptMITMSettings{Enabled: true, HTTP2: false, QUICFallbackProtection: true},
+		ExecutionOrder: []string{legacyModule.ID}, Modules: []interceptModuleSnapshot{legacyModule},
+	}
+	candidate := explicitV5RebuildCandidate(legacy)
+	if err := validateInterceptDocument(candidate); err != nil {
+		t.Fatalf("explicit v5 candidate rejected: %v", err)
+	}
+	if candidate.Listen != legacy.Listen || candidate.Username != legacy.Username || candidate.Password != legacy.Password ||
+		candidate.TLSCert != legacy.TLSCert || candidate.TLSKey != legacy.TLSKey || candidate.UpstreamProxy != legacy.UpstreamProxy ||
+		candidate.MITM.Enabled || candidate.MITM.HTTP2 != legacy.MITM.HTTP2 || candidate.MITM.QUICFallbackProtection != legacy.MITM.QUICFallbackProtection ||
+		len(candidate.Modules) != 0 || len(candidate.ExecutionOrder) != 0 {
+		t.Fatalf("explicit rebuild did not preserve infrastructure and clear plugin state: %+v", candidate)
+	}
+	clean := goldenMihomoConfig()
+	if !interceptCredentialsMatch(clean, candidate) {
+		t.Fatal("credential-preserving v5 candidate no longer matches the preserved mihomo boundary")
+	}
+	if analysis := analyzeInterceptRoutingDocument(clean, candidate); !analysis.Manageable || !analysis.Ready {
+		t.Fatalf("clean old-master-disable output is not manageable by empty v5: %+v", analysis)
+	}
+
+	expandedDocument := apexWildcardPairDocument(1)
+	expanded := expandedPairRouting(expandedDocument.Modules[0], "Proxies")
+	residual := routingFixture(expanded, "Proxies")
+	if residual == clean {
+		t.Fatal("old master disable did not change the mihomo bytes")
+	}
+	if analysis := analyzeInterceptRoutingDocument(residual, candidate); analysis.Reconcileable || analysis.Manageable {
+		t.Fatalf("empty v5 candidate claimed residual expanded v4 rules: %+v", analysis)
+	}
+}
+
+var benchmarkInterceptMihomoRouting interceptRoutingRules
+
+func BenchmarkInterceptMihomoRoutingApexWildcardCompaction(b *testing.B) {
+	document := apexWildcardPairDocument(101)
+	b.ReportAllocs()
+	for iteration := 0; iteration < b.N; iteration++ {
+		benchmarkInterceptMihomoRouting = interceptMihomoRouting(document)
+	}
+}
+
+func apexWildcardPairDocument(pairCount int) interceptConfigDocument {
+	hosts := make([]string, 0, pairCount*2)
+	for index := 0; index < pairCount; index++ {
+		base := fmt.Sprintf("ad%03d.example.com", index)
+		hosts = append(hosts, base, "*."+base)
+	}
+	sort.Strings(hosts)
+	module := interceptModuleSnapshot{ID: "io.example.ad-scale", Enabled: true, EgressGroup: "Proxies", CaptureHosts: hosts}
+	return interceptConfigDocument{
+		MITM: interceptMITMSettings{Enabled: true}, ExecutionOrder: []string{module.ID}, Modules: []interceptModuleSnapshot{module},
+	}
+}
+
+func expandedPairRouting(module interceptModuleSnapshot, target string) interceptRoutingRules {
+	routing := interceptRoutingRules{}
+	for _, host := range module.CaptureHosts {
+		kind := "DOMAIN"
+		if strings.HasPrefix(host, "*.") {
+			kind = "DOMAIN-WILDCARD"
+		}
+		for _, port := range []int{80, 443} {
+			selector := interceptEgressSelector{Kind: kind, Value: host, Port: port}
+			routing.Capture = append(routing.Capture, renderInterceptCaptureRule(selector))
+			routing.Egress = append(routing.Egress, renderInterceptEgressRule(selector, target))
+		}
+	}
+	sort.Strings(routing.Capture)
+	sort.Strings(routing.Egress)
+	return routing
+}
+
+func routingFixture(routing interceptRoutingRules, matchTarget string) string {
+	rules := append([]string(nil), routing.Egress...)
+	rules = append(rules, interceptEgressRejectRule)
+	rules = append(rules, routing.Policy...)
+	rules = append(rules, routing.Capture...)
+	rules = append(rules, "MATCH,"+matchTarget)
+	return testInterceptMihomoYAML(rules, matchTarget)
+}
+
+func explicitV5RebuildCandidate(legacy interceptConfigDocument) interceptConfigDocument {
+	return interceptConfigDocument{
+		Version: interceptConfigVersion,
+		Listen:  legacy.Listen, Username: legacy.Username, Password: legacy.Password,
+		TLSCert: legacy.TLSCert, TLSKey: legacy.TLSKey, UpstreamProxy: legacy.UpstreamProxy,
+		MITM: interceptMITMSettings{
+			Enabled: false, HTTP2: legacy.MITM.HTTP2, QUICFallbackProtection: legacy.MITM.QUICFallbackProtection,
+		},
+		ExecutionOrder: []string{}, Modules: []interceptModuleSnapshot{},
+	}
+}
+
 func countString(values []string, want string) int {
 	count := 0
 	for _, value := range values {
@@ -324,6 +625,15 @@ func countString(values []string, want string) int {
 		}
 	}
 	return count
+}
+
+func stringIndex(values []string, want string) int {
+	for index, value := range values {
+		if value == want {
+			return index
+		}
+	}
+	return -1
 }
 
 func sortStringsEqual(left, right []string) bool {

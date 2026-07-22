@@ -38,6 +38,7 @@ import {
 } from '../../components/ds'
 import { api } from '../../lib/api/client'
 import type {
+  InterceptCaptureDNS,
   InterceptLocationValue,
   InterceptModule,
   InterceptModuleSetting,
@@ -177,6 +178,9 @@ function ExtensionCard({
           <button type="button" aria-label={t('extensions.auditHosts')} onClick={() => onAudit(module)} className="zds-state-layer inline-flex items-center gap-1 rounded-[6px] bg-primary-container px-2.5 py-0.5 text-[11px] font-medium text-on-primary-container">
             <ShieldLockIcon className="h-3.5 w-3.5" aria-hidden="true" /> {t('extensions.captureCount', { count: module.capture_hosts.length })}
           </button>
+          <Badge className="rounded-[6px] px-2.5 py-0.5" tone={module.capture_dns === 'china' ? 'amber' : 'blue'}>
+            <RouteIcon className="mr-1 inline h-3.5 w-3.5" aria-hidden="true" />{t('extensions.captureDNS.badge', { group: t(`extensions.captureDNS.${module.capture_dns}`) })}
+          </Badge>
           {mappingsCount > 0 ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="cyan">{t('extensions.capabilityHost', { count: mappingsCount })}</Badge> : null}
           {routingRuleCount > 0 ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber">{t('extensions.capabilityRouting', { count: routingRuleCount })}</Badge> : null}
           {module.persistent_storage ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="indigo">{t('extensions.capabilityStorage')}</Badge> : null}
@@ -232,15 +236,17 @@ function ExtensionSettingsModal({
   module: InterceptModule | null
   egressGroups: string[]
   onOpenChange: (open: boolean) => void
-  onSave: (module: InterceptModule, settings: Record<string, unknown>, egressGroup?: string) => void
+  onSave: (module: InterceptModule, settings: Record<string, unknown>, egressGroup?: string, captureDNS?: InterceptCaptureDNS) => void
 }) {
   const { t } = useTranslation()
   const [values, setValues] = useState<Record<string, unknown>>({})
   const [egressGroup, setEgressGroup] = useState(DEFAULT_EGRESS_GROUP)
+  const [captureDNS, setCaptureDNS] = useState<InterceptCaptureDNS>('trust')
 
   useEffect(() => {
     setValues(Object.fromEntries((module?.settings ?? []).map((setting) => [setting.key, settingInitialValue(setting)])))
     setEgressGroup(module?.egress_group && egressGroups.includes(module.egress_group) ? module.egress_group : DEFAULT_EGRESS_GROUP)
+    setCaptureDNS(module?.capture_dns ?? 'trust')
   }, [egressGroups, module])
 
   const initial = Object.fromEntries((module?.settings ?? []).map((setting) => [setting.key, settingInitialValue(setting)]))
@@ -248,6 +254,7 @@ function ExtensionSettingsModal({
   const ready = (module?.settings ?? []).every((setting) => settingReady(setting, values[setting.key]))
   const selectedEgressGroup = egressGroup === DEFAULT_EGRESS_GROUP ? '' : egressGroup
   const egressChanged = !!module && selectedEgressGroup !== (module.egress_group ?? '')
+  const captureDNSChanged = !!module && captureDNS !== module.capture_dns
   const egressReady = !module?.egress_group_required || (selectedEgressGroup !== '' && egressGroups.includes(selectedEgressGroup))
   const hasLocation = module?.settings?.some((setting) => setting.type === 'location') ?? false
 
@@ -260,12 +267,27 @@ function ExtensionSettingsModal({
       footer={
         <>
           <Button type="button" variant="secondary" size="sm" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-          <Button type="button" size="sm" disabled={!module || (!changed && !egressChanged) || !ready || !egressReady} onClick={() => module && onSave(module, Object.fromEntries((module.settings ?? []).map((setting) => [setting.key, values[setting.key] ?? null])), egressChanged ? selectedEgressGroup : undefined)}>{t('common.save')}</Button>
+          <Button type="button" size="sm" disabled={!module || (!changed && !egressChanged && !captureDNSChanged) || !ready || !egressReady} onClick={() => module && onSave(module, Object.fromEntries((module.settings ?? []).map((setting) => [setting.key, values[setting.key] ?? null])), egressChanged ? selectedEgressGroup : undefined, captureDNSChanged ? captureDNS : undefined)}>{t('common.save')}</Button>
         </>
       }
     >
       {module ? (
         <div className="space-y-5">
+          <section className="rounded-[14px] bg-surface-container-low p-4" data-testid="capture-dns-editor">
+            <div className="text-[12px] font-medium text-text-strong">{t('extensions.captureDNS.title')}</div>
+            <p className="mt-1 text-[10.5px] leading-4 text-text-faint">{t('extensions.captureDNS.hint')}</p>
+            <SegmentedControl
+              value={captureDNS}
+              onChange={(value) => setCaptureDNS(value as InterceptCaptureDNS)}
+              ariaLabel={t('extensions.captureDNS.title')}
+              className="mt-3 grid-cols-2"
+              options={([
+                ['trust', t('extensions.captureDNS.trust')],
+                ['china', t('extensions.captureDNS.china')],
+              ] as Array<[InterceptCaptureDNS, string]>).map(([value, label]) => ({ value, label }))}
+            />
+            <p className="mt-3 text-[10.5px] leading-4 text-text-soft">{t(`extensions.captureDNS.${captureDNS}Hint`)}</p>
+          </section>
           <section className="rounded-[14px] bg-surface-container-low p-4">
             <div className="text-[12px] font-medium text-text-strong">{t('extensions.egressGroupTitle')}</div>
             <p className="mt-1 text-[10.5px] leading-4 text-text-faint">{t('extensions.egressGroupHint')}</p>
@@ -375,6 +397,13 @@ function ExtensionUpdateModal({
             {review.candidate.egress_group_required ? <Badge tone="cyan">{t('extensions.egressGroupTitle')}</Badge> : null}
             {(review.candidate.settings?.length ?? 0) > 0 ? <Badge tone="indigo">{t('extensions.settingsAction', { count: review.candidate.settings?.length ?? 0 })}</Badge> : null}
           </div>
+          <section className="rounded-[14px] bg-surface-container-low p-3.5" data-testid="update-capture-dns">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-[11px] font-medium text-text-faint">{t('extensions.captureDNS.title')}</div>
+              <Badge tone={review.candidate.capture_dns === 'china' ? 'amber' : 'blue'}>{t(`extensions.captureDNS.${review.candidate.capture_dns}`)}</Badge>
+            </div>
+            <p className="mt-1.5 text-[10.5px] leading-4 text-text-soft">{t(`extensions.captureDNS.${review.candidate.capture_dns}Hint`)}</p>
+          </section>
           <div>
             <div className="mb-2 text-[11px] font-medium text-text-faint">{t('extensions.captureHosts')}</div>
             <div className="flex max-h-36 flex-wrap gap-1.5 overflow-y-auto rounded-[12px] bg-surface-container-low p-3">
@@ -420,6 +449,13 @@ function EnableExtensionModal({
     >
       {module ? <div className="space-y-4">
         <p className="text-[12.5px] leading-6 text-text-soft">{t('extensions.enableBody')}</p>
+        <section className="rounded-[14px] bg-primary-container p-4 text-on-primary-container" data-testid="enable-capture-dns">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-[11px] font-semibold">{t('extensions.captureDNS.title')}</div>
+            <Badge tone={module.capture_dns === 'china' ? 'amber' : 'blue'}>{t(`extensions.captureDNS.${module.capture_dns}`)}</Badge>
+          </div>
+          <p className="mt-1.5 text-[10.5px] leading-4 opacity-80">{t(`extensions.captureDNS.${module.capture_dns}Hint`)}</p>
+        </section>
         {module.network_origins.length > 0 ? <section className="rounded-[14px] bg-[var(--md-sys-color-warning-container)] p-4 text-[11.5px] leading-5 text-[var(--md-sys-color-on-warning-container)]">
           <div className="font-semibold">{t('extensions.networkOriginsTitle')}</div>
           <p className="mt-1">{t('extensions.networkOriginsWarning')}</p>
@@ -452,18 +488,22 @@ function ReorderExtensionModal({
   onConfirm: () => void
 }) {
   const { t } = useTranslation()
-  const names = new Map(modules.map((module) => [module.id, module.name]))
+  const modulesByID = new Map(modules.map((module) => [module.id, module]))
 
   function renderOrder(order: string[], testID: string) {
     return (
       <ol className="space-y-1.5" data-testid={testID}>
-        {order.map((id, index) => (
-          <li key={id} className="flex min-w-0 items-center gap-2 rounded-[9px] bg-card px-2.5 py-2">
-            <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-surface-container text-[10px] font-semibold text-text-faint">{index + 1}</span>
-            <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-text-strong">{names.get(id) ?? id}</span>
-            <code className="max-w-[42%] truncate font-mono text-[9.5px] text-text-faint" title={id}>{id}</code>
-          </li>
-        ))}
+        {order.map((id, index) => {
+          const module = modulesByID.get(id)
+          return (
+            <li key={id} className="flex min-w-0 flex-wrap items-center gap-2 rounded-[9px] bg-card px-2.5 py-2">
+              <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-surface-container text-[10px] font-semibold text-text-faint">{index + 1}</span>
+              <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-text-strong">{module?.name ?? id}</span>
+              {module ? <Badge tone={module.capture_dns === 'china' ? 'amber' : 'blue'}>{t(`extensions.captureDNS.${module.capture_dns}`)}</Badge> : null}
+              <code className="max-w-[42%] truncate font-mono text-[9.5px] text-text-faint" title={id}>{id}</code>
+            </li>
+          )
+        })}
       </ol>
     )
   }
@@ -661,7 +701,7 @@ export default function ExtensionsPage() {
     setBusyID(null)
   }
 
-  async function updateModule(module: InterceptModule, update: { enabled?: boolean; settings?: Record<string, unknown>; egress_group?: string }, success: string) {
+  async function updateModule(module: InterceptModule, update: { enabled?: boolean; settings?: Record<string, unknown>; egress_group?: string; capture_dns?: InterceptCaptureDNS }, success: string) {
     if (!view || !beginModuleMutation(module.id)) return
     try {
       setView(await api.putInterceptModule(module.id, { revision: view.revision, ...update }))
@@ -791,7 +831,7 @@ export default function ExtensionsPage() {
 
       {view ? <InstallExtensionModal mode={installMode} revision={view.revision} existingIDs={view.modules.map((module) => module.id)} onOpenChange={(open) => { if (!open) setInstallMode(null) }} onInstalled={setView} /> : null}
       <SnapshotModal open={snapshotOpen} loading={snapshotLoading} snapshot={snapshot} onOpenChange={setSnapshotOpen} />
-      <ExtensionSettingsModal module={configTarget} egressGroups={view?.available_egress_groups ?? []} onOpenChange={(open) => { if (!open) setConfigTarget(null) }} onSave={(module, nextSettings, egressGroup) => { setConfigTarget(null); void updateModule(module, { settings: nextSettings, ...(egressGroup !== undefined ? { egress_group: egressGroup } : {}) }, t('extensions.settingsSaved')) }} />
+      <ExtensionSettingsModal module={configTarget} egressGroups={view?.available_egress_groups ?? []} onOpenChange={(open) => { if (!open) setConfigTarget(null) }} onSave={(module, nextSettings, egressGroup, captureDNS) => { setConfigTarget(null); void updateModule(module, { settings: nextSettings, ...(egressGroup !== undefined ? { egress_group: egressGroup } : {}), ...(captureDNS !== undefined ? { capture_dns: captureDNS } : {}) }, t('extensions.settingsSaved')) }} />
       <ExtensionUpdateModal review={updateReview} busy={updateBusy} onOpenChange={(open) => { if (!open) setUpdateReview(null) }} onApply={() => void applyExtensionUpdate()} />
       <EnableExtensionModal module={pending?.kind === 'toggle' && !pending.module.enabled ? pending.module : null} onOpenChange={(open) => { if (!open) setPending(null) }} onConfirm={() => { if (pending) void updateModule(pending.module, { enabled: true }, t('extensions.updated')); setPending(null) }} />
       <ReorderExtensionModal action={pending?.kind === 'reorder' ? pending : null} modules={view?.modules ?? []} onOpenChange={(open) => { if (!open) setPending(null) }} onConfirm={() => { if (pending?.kind === 'reorder') void confirmModuleMove(pending); setPending(null) }} />

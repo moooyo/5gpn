@@ -55,6 +55,7 @@ const (
 	botExtensionPayloadUpdate             botExtensionPayloadKind = "update"
 	botExtensionPayloadSetting            botExtensionPayloadKind = "setting"
 	botExtensionPayloadEgress             botExtensionPayloadKind = "egress"
+	botExtensionPayloadCaptureDNS         botExtensionPayloadKind = "capture-dns"
 	botExtensionPayloadReorder            botExtensionPayloadKind = "reorder"
 )
 

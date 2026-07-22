@@ -188,6 +188,7 @@ export async function importInterceptModule(request: T.InterceptModuleImport): P
     enabled: false,
     ready: true,
     capture_hosts: ['service.example.test'],
+    capture_dns: 'trust',
     script_count: 1,
     settings: [],
     persistent_storage: false,
@@ -261,6 +262,7 @@ export async function putInterceptModule(id: string, update: T.InterceptModuleUp
     module.reason = module.ready ? undefined : 'settings-required'
   }
   if (update.egress_group !== undefined) module.egress_group = update.egress_group
+  if (update.capture_dns !== undefined) module.capture_dns = update.capture_dns
   advanceInterceptRevision()
   refreshActiveInterceptHosts()
   return interceptModulesView()
@@ -377,7 +379,7 @@ export async function installMarketplaceEntry(marketplace: string, extension: st
   if (fixtures.interceptModules.modules.some((module) => module.id === entry.id)) throw new ApiError(409, 'This extension is already installed.')
   fixtures.interceptModules.modules.push({
     id: entry.id, extension_version: entry.version, name: entry.name, description: entry.description,
-    enabled: false, ready: true, capture_hosts: Array.from({ length: entry.capabilities.capture_host_count }, (_, index) => `capture-${index + 1}.example.test`),
+    enabled: false, ready: true, capture_hosts: Array.from({ length: entry.capabilities.capture_host_count }, (_, index) => `capture-${index + 1}.example.test`), capture_dns: 'trust',
     script_count: entry.capabilities.action_count, settings: [], persistent_storage: entry.capabilities.persistent_storage,
     source_url: entry.manifest_url, source_digest: entry.manifest_digest, snapshot_digest: entry.manifest_digest,
     imported_at: new Date().toISOString(), execution_order: fixtures.interceptModules.modules.length + 1,

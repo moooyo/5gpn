@@ -49,26 +49,58 @@ func interceptMihomoRouting(document interceptConfigDocument) interceptRoutingRu
 	if !document.MITM.Enabled {
 		return interceptRoutingRules{}
 	}
+	orderedModules := orderedEnabledInterceptModules(document)
 	capture := make([]string, 0, len(activeInterceptHosts(document))*2)
-	appendRule := func(host, port string) {
-		kind := "DOMAIN"
-		if strings.HasPrefix(host, "*.") {
-			kind = "DOMAIN-WILDCARD"
-		}
-		capture = append(capture, "AND,(("+kind+","+host+"),(DST-PORT,"+port+")),"+interceptMihomoProxyName)
-	}
-	for _, module := range document.Modules {
-		if !module.Enabled {
-			continue
-		}
-		for _, host := range module.CaptureHosts {
-			for _, port := range []string{"80", "443"} {
-				appendRule(host, port)
-			}
+	for _, module := range orderedModules {
+		for _, selector := range interceptModuleCaptureSelectors(module) {
+			capture = append(capture, renderInterceptCaptureRule(selector))
 		}
 	}
 	capture = uniqueSortedStrings(capture)
 
+	// Explicit operator bindings win over default terminal routing. Execution
+	// order resolves conflicts among bound extensions and, separately, among
+	// unbound extensions that share the terminal target.
+	egress := make([]string, 0, len(capture))
+	seenSelectors := make(map[string]struct{})
+	appendSelectors := func(bound bool) {
+		for _, module := range orderedModules {
+			if (module.EgressGroup != "") != bound {
+				continue
+			}
+			target := module.EgressGroup
+			if target == "" {
+				target = interceptTerminalMatchTarget
+			}
+			for _, selector := range interceptModuleEgressSelectors(module) {
+				identity := selector.Kind + "\x00" + selector.Value + "\x00" + strconv.Itoa(selector.Port)
+				if _, duplicate := seenSelectors[identity]; duplicate {
+					continue
+				}
+				seenSelectors[identity] = struct{}{}
+				egress = append(egress, renderInterceptEgressRule(selector, target))
+			}
+		}
+	}
+	appendSelectors(true)
+	appendSelectors(false)
+
+	policy := make([]string, 0)
+	seenPolicy := make(map[string]struct{})
+	for _, module := range orderedModules {
+		for _, route := range module.RoutingRules {
+			rule := renderInterceptPolicyRule(route)
+			if _, duplicate := seenPolicy[rule]; duplicate {
+				continue
+			}
+			seenPolicy[rule] = struct{}{}
+			policy = append(policy, rule)
+		}
+	}
+	return interceptRoutingRules{Capture: capture, Egress: egress, Policy: policy}
+}
+
+func orderedEnabledInterceptModules(document interceptConfigDocument) []interceptModuleSnapshot {
 	moduleByID := make(map[string]interceptModuleSnapshot, len(document.Modules))
 	for _, module := range document.Modules {
 		moduleByID[module.ID] = module
@@ -92,46 +124,7 @@ func interceptMihomoRouting(document interceptConfigDocument) interceptRoutingRu
 		}
 		orderedModules = append(orderedModules, module)
 	}
-
-	egress := make([]string, 0, len(capture))
-	seenSelectors := make(map[string]struct{})
-	appendSelectors := func(bound bool) {
-		for _, module := range orderedModules {
-			if (module.EgressGroup != "") != bound {
-				continue
-			}
-			target := module.EgressGroup
-			if target == "" {
-				target = interceptTerminalMatchTarget
-			}
-			for _, selector := range interceptModuleEgressSelectors(module) {
-				identity := selector.Kind + "\x00" + selector.Value + "\x00" + strconv.Itoa(selector.Port)
-				if _, duplicate := seenSelectors[identity]; duplicate {
-					continue
-				}
-				seenSelectors[identity] = struct{}{}
-				egress = append(egress, renderInterceptEgressRule(selector, target))
-			}
-		}
-	}
-	// Explicit operator bindings win over default terminal routing. Execution
-	// order resolves conflicts among bound extensions and, separately, among
-	// unbound extensions that share the terminal target.
-	appendSelectors(true)
-	appendSelectors(false)
-	policy := make([]string, 0)
-	seenPolicy := make(map[string]struct{})
-	for _, module := range orderedModules {
-		for _, route := range module.RoutingRules {
-			rule := renderInterceptPolicyRule(route)
-			if _, duplicate := seenPolicy[rule]; duplicate {
-				continue
-			}
-			seenPolicy[rule] = struct{}{}
-			policy = append(policy, rule)
-		}
-	}
-	return interceptRoutingRules{Capture: capture, Egress: egress, Policy: policy}
+	return orderedModules
 }
 
 func renderInterceptPolicyRule(rule interceptRoutingRule) string {
@@ -186,16 +179,7 @@ func renderInterceptPolicyRule(rule interceptRoutingRule) string {
 
 func interceptModuleEgressSelectors(module interceptModuleSnapshot) []interceptEgressSelector {
 	selectors := make([]interceptEgressSelector, 0, len(module.CaptureHosts)*2+len(module.NetworkOrigins)+len(module.HostMappings)*2)
-	for _, host := range module.CaptureHosts {
-		kind := "DOMAIN"
-		if strings.HasPrefix(host, "*.") {
-			kind = "DOMAIN-WILDCARD"
-		}
-		selectors = append(selectors,
-			interceptEgressSelector{Kind: kind, Value: host, Port: 80},
-			interceptEgressSelector{Kind: kind, Value: host, Port: 443},
-		)
-	}
+	selectors = append(selectors, interceptModuleCaptureSelectors(module)...)
 	for _, origin := range module.NetworkOrigins {
 		host, port, err := interceptNetworkOriginHostPort(origin)
 		if err == nil {
@@ -218,6 +202,50 @@ func interceptModuleEgressSelectors(module interceptModuleSnapshot) []interceptE
 		return left < right
 	})
 	return selectors
+}
+
+// interceptModuleCaptureSelectors compacts only an apex and its wildcard when
+// the same extension owns both. DOMAIN-SUFFIX is exactly their mihomo union;
+// compacting before selectors from different modules are combined preserves
+// execution-order ownership and distinct egress targets.
+func interceptModuleCaptureSelectors(module interceptModuleSnapshot) []interceptEgressSelector {
+	hosts := make(map[string]struct{}, len(module.CaptureHosts))
+	for _, host := range module.CaptureHosts {
+		hosts[host] = struct{}{}
+	}
+	handled := make(map[string]struct{}, len(module.CaptureHosts))
+	selectors := make([]interceptEgressSelector, 0, len(module.CaptureHosts)*2)
+	for _, host := range module.CaptureHosts {
+		if _, done := handled[host]; done {
+			continue
+		}
+		kind, value := "DOMAIN", host
+		base := host
+		if strings.HasPrefix(host, "*.") {
+			base = strings.TrimPrefix(host, "*.")
+			kind = "DOMAIN-WILDCARD"
+		}
+		wildcard := "*." + base
+		if _, hasApex := hosts[base]; hasApex {
+			if _, hasWildcard := hosts[wildcard]; hasWildcard {
+				kind, value = "DOMAIN-SUFFIX", base
+				handled[base] = struct{}{}
+				handled[wildcard] = struct{}{}
+			}
+		}
+		if kind != "DOMAIN-SUFFIX" {
+			handled[host] = struct{}{}
+		}
+		selectors = append(selectors,
+			interceptEgressSelector{Kind: kind, Value: value, Port: 80},
+			interceptEgressSelector{Kind: kind, Value: value, Port: 443},
+		)
+	}
+	return selectors
+}
+
+func renderInterceptCaptureRule(selector interceptEgressSelector) string {
+	return "AND,((" + selector.Kind + "," + selector.Value + "),(DST-PORT," + strconv.Itoa(selector.Port) + "))," + interceptMihomoProxyName
 }
 
 func renderInterceptEgressRule(selector interceptEgressSelector, target string) string {
@@ -544,6 +572,11 @@ func parseCanonicalInterceptEgressRule(rule string) (interceptEgressSelector, st
 		if !strings.HasPrefix(selector.Value, "*.") || validateInterceptHostPattern(selector.Value) != nil {
 			return interceptEgressSelector{}, "", false
 		}
+	case strings.HasPrefix(matcher, "DOMAIN-SUFFIX,"):
+		selector.Kind, selector.Value = "DOMAIN-SUFFIX", strings.TrimPrefix(matcher, "DOMAIN-SUFFIX,")
+		if strings.HasPrefix(selector.Value, "*.") || validateInterceptHostPattern(selector.Value) != nil {
+			return interceptEgressSelector{}, "", false
+		}
 	case strings.HasPrefix(matcher, "IP-CIDR,") && strings.HasSuffix(matcher, ",no-resolve"):
 		selector.Kind = "IP-CIDR"
 		selector.Value = strings.TrimSuffix(strings.TrimPrefix(matcher, "IP-CIDR,"), ",no-resolve")
@@ -602,6 +635,7 @@ func validCanonicalInterceptRule(rule string) bool {
 		suffix := "),(DST-PORT," + port + "))," + interceptMihomoProxyName
 		for kind, prefix := range map[string]string{
 			"DOMAIN":          "AND,((DOMAIN,",
+			"DOMAIN-SUFFIX":   "AND,((DOMAIN-SUFFIX,",
 			"DOMAIN-WILDCARD": "AND,((DOMAIN-WILDCARD,",
 		} {
 			if !strings.HasPrefix(rule, prefix) || !strings.HasSuffix(rule, suffix) {
@@ -611,7 +645,10 @@ func validCanonicalInterceptRule(rule string) bool {
 			if validateInterceptHostPattern(host) != nil {
 				return false
 			}
-			return (kind == "DOMAIN-WILDCARD") == strings.HasPrefix(host, "*.")
+			if kind == "DOMAIN-WILDCARD" {
+				return strings.HasPrefix(host, "*.")
+			}
+			return !strings.HasPrefix(host, "*.")
 		}
 	}
 	return false

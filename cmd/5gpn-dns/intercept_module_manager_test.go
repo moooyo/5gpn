@@ -95,7 +95,7 @@ func testModuleSnapshot() interceptModuleSnapshot {
 		ID: "io.example.fixture", Version: "1.0.0", Name: "Fixture extension",
 		ImportedAt:   time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
 		Source:       interceptModuleSource{Digest: sha256Hex([]byte(manifest)), Body: manifest},
-		CaptureHosts: []string{"api.example.com"},
+		CaptureHosts: []string{"api.example.com"}, CaptureDNS: interceptCaptureDNSTrust,
 		Scripts: []interceptScriptRule{{
 			ID: "clean-response", Phase: interceptPhaseResponse,
 			Match:     interceptActionMatch{Hosts: []string{"api.example.com"}, Schemes: []string{"https"}, PathRegex: "^/"},
@@ -235,6 +235,45 @@ func TestInterceptModuleManagerUsesDaemonBackupOutsideStickyMihomoDir(t *testing
 				t.Fatalf("extension transaction changed legacy backup: body=%q err=%v", legacyBackup, err)
 			}
 		})
+	}
+}
+
+func TestInterceptModuleManagerRollsBackCompactSuffixBlockOnControllerFailure(t *testing.T) {
+	module := testModuleSnapshot()
+	module.CaptureHosts = []string{"*.example.com", "example.com"}
+	manager, _, handler, interceptPath, mihomoPath := newInterceptManagerFixture(t, module)
+	manager.certWait = func(context.Context, string) error { return nil }
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	view, err = manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeIntercept, activeMihomo := mustRead(t, interceptPath), mustRead(t, mihomoPath)
+	if strings.Count(activeMihomo, "DOMAIN-SUFFIX,example.com") != 4 {
+		t.Fatalf("active compact block does not contain two egress and two capture rules:\n%s", activeMihomo)
+	}
+
+	controller := &rollbackTestController{}
+	manager.controller = controller
+	disabled := false
+	if _, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &disabled}); !errors.Is(err, errInterceptApplyFailed) {
+		t.Fatalf("disable error = %v, want controller apply failure", err)
+	}
+	if controller.putCalls != 2 {
+		t.Fatalf("controller calls = %d, want candidate + rollback", controller.putCalls)
+	}
+	if got := mustRead(t, interceptPath); got != activeIntercept {
+		t.Fatal("sidecar document was not restored exactly")
+	}
+	if got := mustRead(t, mihomoPath); got != activeMihomo {
+		t.Fatal("compact suffix mihomo block was not restored exactly")
+	}
+	if decision := handler.decideName("api.example.com"); decision.Action != actionGateway {
+		t.Fatalf("DNS overlay changed after rollback: %+v", decision)
 	}
 }
 
@@ -438,6 +477,7 @@ actions:
 	if err != nil {
 		t.Fatal(err)
 	}
+	module.CaptureDNS = interceptCaptureDNSChina
 	manager, _, _, interceptPath, _ := newInterceptManagerFixture(t, module)
 	manager.parser = parser
 	view, _ := manager.View()
@@ -450,8 +490,8 @@ actions:
 	if err != nil || available.Candidate == nil {
 		t.Fatalf("available update = %+v err=%v", available, err)
 	}
-	if available.Candidate.ExecutionOrder != 1 {
-		t.Fatalf("candidate execution order = %d, want 1", available.Candidate.ExecutionOrder)
+	if available.Candidate.ExecutionOrder != 1 || available.Candidate.CaptureDNS != interceptCaptureDNSChina {
+		t.Fatalf("candidate order/capture DNS = %d/%s, want 1/china", available.Candidate.ExecutionOrder, available.Candidate.CaptureDNS)
 	}
 	wantDigest := available.Candidate.SnapshotDigest
 	script.Store(unreviewedScript)
@@ -460,11 +500,11 @@ actions:
 	}
 	script.Store(newScript)
 	replaced, err := manager.ApplyUpdate(context.Background(), module.ID, view.Revision, wantDigest)
-	if err != nil || len(replaced.Modules) != 1 || replaced.Modules[0].SnapshotDigest != wantDigest {
+	if err != nil || len(replaced.Modules) != 1 || replaced.Modules[0].SnapshotDigest != wantDigest || replaced.Modules[0].CaptureDNS != interceptCaptureDNSChina {
 		t.Fatalf("replacement = %+v err=%v", replaced, err)
 	}
 	document, err := decodeInterceptConfig([]byte(mustRead(t, interceptPath)))
-	if err != nil || interceptModuleSnapshotDigest(document.Modules[0]) != wantDigest {
+	if err != nil || interceptModuleSnapshotDigest(document.Modules[0]) != wantDigest || document.Modules[0].CaptureDNS != interceptCaptureDNSChina {
 		t.Fatalf("stored replacement = %+v err=%v", document.Modules, err)
 	}
 }
@@ -777,6 +817,55 @@ func TestInterceptModuleReorderChangesFirstMatchingEgress(t *testing.T) {
 	}
 	if !stringSlicesEqual(view.ExecutionOrder, []string{second.ID, first.ID}) || view.Modules[0].ExecutionOrder != 1 || view.Modules[1].ExecutionOrder != 2 {
 		t.Fatalf("reordered view = %+v", view)
+	}
+}
+
+func TestInterceptModuleCaptureDNSBindingUsesExecutionOrder(t *testing.T) {
+	first := testModuleSnapshot()
+	first.ID = "io.example.first"
+	first.CaptureDNS = interceptCaptureDNSChina
+	second := testModuleSnapshot()
+	second.ID = "io.example.second"
+	second.Name = "Second extension"
+	manager, _, handler, _, _ := newInterceptManagerFixture(t, first, second)
+	manager.certWait = func(context.Context, string) error { return nil }
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	view, err = manager.Update(context.Background(), first.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err = manager.Update(context.Background(), second.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolver, owner := handler.captureDNSForName("api.example.com"); resolver != interceptCaptureDNSChina || owner != first.ID {
+		t.Fatalf("initial binding = %s/%s, want china/%s", resolver, owner, first.ID)
+	}
+	view, err = manager.Reorder(context.Background(), view.Revision, []string{second.ID, first.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolver, owner := handler.captureDNSForName("api.example.com"); resolver != interceptCaptureDNSTrust || owner != second.ID {
+		t.Fatalf("reordered binding = %s/%s, want trust/%s", resolver, owner, second.ID)
+	}
+	china := interceptCaptureDNSChina
+	view, err = manager.Update(context.Background(), second.ID, interceptModuleUpdate{Revision: view.Revision, CaptureDNS: &china})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Modules[0].CaptureDNS != interceptCaptureDNSChina {
+		t.Fatalf("module view capture_dns = %q", view.Modules[0].CaptureDNS)
+	}
+	if resolver, owner := handler.captureDNSForName("api.example.com"); resolver != interceptCaptureDNSChina || owner != second.ID {
+		t.Fatalf("updated binding = %s/%s, want china/%s", resolver, owner, second.ID)
+	}
+	invalid := "automatic"
+	if _, err := manager.Update(context.Background(), second.ID, interceptModuleUpdate{Revision: view.Revision, CaptureDNS: &invalid}); err == nil || !strings.Contains(err.Error(), "capture_dns") {
+		t.Fatalf("invalid capture_dns error = %v", err)
 	}
 }
 

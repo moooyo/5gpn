@@ -91,7 +91,7 @@ RestrictAddressFamilies=AF_INET AF_UNIX
 # are also read-only carve-outs. Certificate publishers replace role files
 # outside this sandbox; TLS readers notice file mtimes without using rules-only SIGHUP.
 # The Cloudflare credential is entirely inaccessible below.
-# Mihomo Egress DNS Broker: binds 127.0.0.1:5354 (UDP+TCP).
+# Mihomo origin DNS selector: binds 127.0.0.1:5354 (UDP+TCP).
 ReadWritePaths=/etc/5gpn
 ReadOnlyPaths=/etc/5gpn/dns.env -/etc/5gpn/cert -/opt/5gpn/web
 # ACME credentials are consumed only by the out-of-sandbox renewal helper.

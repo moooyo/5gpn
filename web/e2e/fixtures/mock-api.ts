@@ -269,7 +269,7 @@ export async function setupMockApi(page: Page): Promise<void> {
   let interceptModules: T.InterceptModule[] = [
     {
       id: 'io.5gpn.apple-wloc', extension_version: '1.0.0', name: 'Apple WLOC Location Override', enabled: false, ready: false, reason: 'settings-required',
-      capture_hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'], script_count: 1,
+      capture_hosts: ['gs-loc.apple.com', 'gs-loc-cn.apple.com'], capture_dns: 'trust', script_count: 1,
       settings: [
         { key: 'location', type: 'location', label: 'Target location', required: true, value: { accuracy: 25 } },
         { key: 'failClosed', type: 'boolean', label: 'Block on transformation failure', required: true, value: true },
@@ -280,7 +280,7 @@ export async function setupMockApi(page: Page): Promise<void> {
     },
     {
       id: 'io.example.response-cleaner', extension_version: '1.0.0', name: 'Response Cleaner', description: 'Synthetic native extension fixture',
-      enabled: false, ready: true, capture_hosts: ['api.example.com'], script_count: 1, settings: [], persistent_storage: false,
+      enabled: false, ready: true, capture_hosts: ['api.example.com'], capture_dns: 'china', script_count: 1, settings: [], persistent_storage: false,
       source_url: 'https://example.com/extension.yaml', source_digest: 'b'.repeat(64), snapshot_digest: 'b'.repeat(64), imported_at: '2026-07-18T00:00:00Z',
       execution_order: 2, network_origins: ['https://origin.example.net'], egress_group_required: true, egress_group: 'Proxies',
     },
@@ -448,7 +448,7 @@ export async function setupMockApi(page: Page): Promise<void> {
       const body = route.request().postDataJSON() as { marketplace_revision?: string; module_revision?: string }
       const entry = marketplaceSources.find((source) => source.id === decodeURIComponent(marketplaceEntry[1]))?.entries.find((candidate) => candidate.id === decodeURIComponent(marketplaceEntry[2]))
       if (!entry || body.marketplace_revision !== marketplaceRevision || body.module_revision !== interceptRevision) return json(route, { error: 'marketplace revision changed' }, 409)
-      interceptModules = [...interceptModules, { id: entry.id, extension_version: entry.version, name: entry.name, description: entry.description, enabled: false, ready: true, capture_hosts: ['capture.example.test'], script_count: entry.capabilities.action_count, settings: [], persistent_storage: false, source_url: entry.manifest_url, source_digest: entry.manifest_digest, snapshot_digest: entry.manifest_digest, execution_order: interceptModules.length + 1, network_origins: [], egress_group_required: false }]
+      interceptModules = [...interceptModules, { id: entry.id, extension_version: entry.version, name: entry.name, description: entry.description, enabled: false, ready: true, capture_hosts: ['capture.example.test'], capture_dns: 'trust', script_count: entry.capabilities.action_count, settings: [], persistent_storage: false, source_url: entry.manifest_url, source_digest: entry.manifest_digest, snapshot_digest: entry.manifest_digest, execution_order: interceptModules.length + 1, network_origins: [], egress_group_required: false }]
       advanceInterceptRevision()
       return json(route, currentInterceptModules(), 201)
     }
@@ -460,7 +460,7 @@ export async function setupMockApi(page: Page): Promise<void> {
       if (body.revision !== interceptRevision) return json(route, { error: 'interception module revision changed' }, 409)
       interceptModules = [...interceptModules, {
         id: 'io.example.imported', extension_version: '1.0.0', name: 'Imported native extension',
-        enabled: false, ready: true, capture_hosts: ['service.example.test'], script_count: 1, settings: [], persistent_storage: false, source_url: body.url,
+        enabled: false, ready: true, capture_hosts: ['service.example.test'], capture_dns: 'trust', script_count: 1, settings: [], persistent_storage: false, source_url: body.url,
         source_digest: 'c'.repeat(64), snapshot_digest: 'c'.repeat(64), imported_at: '2026-07-18T01:00:00Z',
         execution_order: interceptModules.length + 1, network_origins: [], egress_group_required: false,
       }]
@@ -534,6 +534,7 @@ export async function setupMockApi(page: Page): Promise<void> {
         module.ready = true
       }
       if (body.egress_group !== undefined) module.egress_group = body.egress_group
+      if (body.capture_dns !== undefined) module.capture_dns = body.capture_dns
       advanceInterceptRevision()
       return json(route, currentInterceptModules())
     }

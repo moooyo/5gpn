@@ -797,6 +797,21 @@ func (bt *Bot) applyBotExtensionConfirmation(ctx context.Context, payload botExt
 		})
 		return err
 
+	case botExtensionPayloadCaptureDNS:
+		view, module, err := requireBotExtensionModule(bt, payload)
+		if err != nil {
+			return err
+		}
+		if err := validateInterceptCaptureDNS(payload.StringValue); err != nil {
+			return fmt.Errorf("confirmed capture DNS binding is invalid: %w", err)
+		}
+		resolver := payload.StringValue
+		_, err = bt.ctrl.UpdateInterceptModule(ctx, module.ID, interceptModuleUpdate{
+			Revision:   view.Revision,
+			CaptureDNS: &resolver,
+		})
+		return err
+
 	case botExtensionPayloadReorder:
 		if mutationErr != nil {
 			return mutationErr

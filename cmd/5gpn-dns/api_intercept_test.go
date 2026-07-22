@@ -50,19 +50,19 @@ func TestInterceptSettingsAPIUpdatesCapabilitiesAndMasterState(t *testing.T) {
 
 func TestInterceptConfigRejectsDuplicateJSONKeys(t *testing.T) {
 	_, body := testInterceptDocument(t)
-	duplicate := strings.Replace(string(body), `"version": 4`, `"version": 4, "Version": 4`, 1)
+	duplicate := strings.Replace(string(body), `"version": 5`, `"version": 5, "Version": 5`, 1)
 	if _, err := decodeInterceptConfig([]byte(duplicate)); err == nil || !strings.Contains(err.Error(), "duplicate JSON key") {
 		t.Fatalf("duplicate config error = %v", err)
 	}
 }
 
-func TestInterceptConfigRequiresVersionFourAndCompleteExecutionOrder(t *testing.T) {
+func TestInterceptConfigRequiresCurrentVersionAndCompleteExecutionOrder(t *testing.T) {
 	module := testModuleSnapshot()
 	_, body := testInterceptDocument(t, module)
 
-	v3 := strings.Replace(string(body), `"version": 4`, `"version": 3`, 1)
-	if _, err := decodeInterceptConfig([]byte(v3)); err == nil || !strings.Contains(err.Error(), "version must be 4") {
-		t.Fatalf("v3 config error = %v", err)
+	stale := strings.Replace(string(body), `"version": 5`, `"version": 4`, 1)
+	if _, err := decodeInterceptConfig([]byte(stale)); err == nil || !strings.Contains(err.Error(), "version must be 5") {
+		t.Fatalf("stale config error = %v", err)
 	}
 
 	missing := strings.Replace(string(body), `"execution_order": [

@@ -806,7 +806,7 @@ got="$(resolve_mihomo_listen_ips '10.20.30.40,10.20.30.40')" || got=""
     || fail "listener dedupe = '$got'"
 
 # Fresh-install automatic values are a complete valid configuration: the
-# operational resolver and ECS subnet are accepted, and cache size is the
+# operational upstream groups and ECS subnet are accepted, and cache size is the
 # memory-profile default selected before the TUI runs.
 BASE_DOMAIN=example.com
 MIHOMO_LISTEN_IPS=10.20.30.40
@@ -814,9 +814,8 @@ CERT_MODE=debug
 CERT_EMAIL=""
 CACHE_SIZE=20000
 CHINA_ECS="112.96.32.0/24"
-EGRESS_RESOLVER=22.22.22.22
 if validate_install_config >/dev/null 2>&1; then
-    pass "automatic resolver, ECS, and cache defaults validate"
+    pass "automatic upstream, ECS, and cache defaults validate"
 else
     fail "fresh-install automatic defaults were rejected"
 fi

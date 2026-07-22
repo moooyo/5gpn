@@ -15,9 +15,9 @@ import (
 // cannot hold a mihomo connection indefinitely.
 const brokerQueryTimeout = 5 * time.Second
 
-// EgressDNSBroker is mihomo's loopback DNS resolver for sniffed origins. It
-// returns the configured resolver's canonical answer without applying the
-// client-facing gateway rewrite, and never falls back to the host resolver.
+// EgressDNSBroker is mihomo's loopback DNS resolver for sniffed origins. Its
+// selector returns a canonical China- or trust-group answer without applying
+// the client-facing gateway rewrite, and never falls back to the host resolver.
 type EgressDNSBroker struct {
 	addr     string
 	upstream Exchanger

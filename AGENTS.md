@@ -137,7 +137,10 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   routing rules, and the snapshot/trust/traffic transaction visible. Enabling
   an extension uses one confirmation that includes every declared routing rule
   and, when network origins exist, names every origin and states that all data
-  visible to the script can be sent there. Reordering also requires review
+  visible to the script can be sent there. It must also state that a reviewed
+  cross-origin URL rewrite forwards the complete request method, decoded body,
+  and end-to-end headers, potentially including `Cookie` or `Authorization`.
+  Reordering also requires review
   because it changes action, egress, and global routing first-match precedence.
   `/extensions/hosts` owns searchable, per-plugin capture-host and egress-winner
   auditing; do not move plugin management back into Settings.

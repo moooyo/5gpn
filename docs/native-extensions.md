@@ -99,6 +99,18 @@ the same extension's `captureHosts`. The control plane validates this relation,
 and the sidecar repeats it at runtime. A plugin cannot act on a host captured
 only by another plugin.
 
+An extension may declare at most 512 capture hosts, an action may match at most
+512 hosts, and all enabled extensions may contribute at most 512 unique host
+patterns to the interception certificate. These bounds include exact apex
+names and wildcards separately.
+
+Capture-host origin DNS is operator state, not a manifest capability. Every
+import defaults to `trust`; the operator may select `china`. Mihomo continues
+to query the `127.0.0.1:5354` loopback boundary. `china` forces the live China
+group with its current ECS, while `trust` and non-extension hostnames use the
+live trust group. The first enabled matching extension in execution order wins
+overlaps. DNS sees a hostname only, so a URL path cannot choose a resolver.
+
 `upstreamMappings` changes only the sidecar's upstream target. It preserves the
 original HTTP Host and TLS SNI and rejects private, loopback, link-local, or
 otherwise unsafe IPv4 targets. Every upstream TCP or UDP flow returns through
@@ -125,8 +137,9 @@ sidecar capture. They exist only while both the extension and MITM master are
 enabled. The one enable confirmation lists every normalized rule and authorizes
 the complete snapshot; there is no second routing-only confirmation. Reordering
 requires a before/after confirmation because it can change action, egress, and
-global routing precedence. Rules affect only traffic that reaches mihomo on the
-DNS-steering gateway; they cannot block a hard-coded IP path that bypasses it.
+capture-DNS, and global routing precedence. Rules affect only traffic that
+reaches mihomo on the DNS-steering gateway; they cannot block a hard-coded IP
+path that bypasses it.
 
 An extension may declare `requirements.egressGroup.required: true`, but the
 manifest and script never name or choose an arbitrary group. The operator selects one
@@ -154,16 +167,26 @@ and private names are rejected. Default ports are canonicalized, so
 permission.
 
 The permission is part of the immutable snapshot digest. It provides no global
-`fetch`, XHR, socket, DNS, cookie jar, or ambient credentials. Instead the
-script receives a synchronous `context.network.request` function. Every call
-must stay inside the declared origin set and travels through authenticated
-mihomo SOCKS5. Redirects are returned to the script rather than followed.
+`fetch`, XHR, socket, DNS, cookie jar, or ambient credentials. It authorizes
+both the synchronous `context.network.request` function and a request-phase URL
+rewrite to an exact declared origin. Every such call or rewritten request
+travels through authenticated mihomo SOCKS5. A cross-origin rewritten URL must
+be canonical absolute HTTP(S), match the declared origin exactly, contain no
+userinfo or fragment, and never downgrade an HTTPS request to HTTP. A
+same-origin rewrite from the captured origin remains inside the extension's
+capture-host boundary. After an earlier action moves the request to an approved
+external origin, a later action may execute against or rewrite within that
+current origin only when its own extension also declares that exact origin.
+Redirects from `context.network.request` are returned to the script rather than followed.
 Fixed process-wide time, body, header, call-count, and concurrency bounds apply;
 they are runtime safety limits, not manifest-controlled permissions.
 
 Once granted, a script can deliberately send any request, response, setting,
-or storage data visible to it to an approved origin. Every management surface's
-enable review must list the origins and state this consequence explicitly.
+or storage data visible to it to an approved origin. A rewritten captured
+request sends its complete method, decoded body, and end-to-end headers,
+potentially including `Cookie` or `Authorization`; framing and hop-by-hop fields
+remain runtime-owned. Every management surface's enable review must list the
+origins and state these consequences explicitly.
 Adding or changing an origin changes the snapshot and therefore requires a
 disabled update followed by a new enable confirmation.
 
@@ -245,7 +268,8 @@ A request action may return a `request` patch or a synthetic `response` patch.
 A response action may return only a `response` patch. Either phase may return
 `{abort: true}`, `null`, or `undefined`. Unknown result fields fail closed.
 Changed request URLs must remain inside that action's extension capture-host
-boundary.
+boundary unless an exact declared network origin authorizes the cross-origin
+rewrite under the constraints above.
 
 Response trailers are exposed after the upstream body is read and may be
 replaced through `response.trailers`. Request patches cannot create trailers.
@@ -353,7 +377,9 @@ requires a new review.
 Every review of a candidate or installed extension lists each declared network
 origin. Before enable, it also states that the script can send any decrypted
 request, response, setting, or storage data visible to it to every listed
-origin. Enable review uses the same single confirmation for the complete
+origin, and may rewrite a captured request there with its method, decoded body,
+and end-to-end headers, including possible cookies or authorization. Enable
+review uses the same single confirmation for the complete
 snapshot, including all listed routing rules. Reorder review shows the complete
 before/after order and warns that routing first-match may change. Approval of
 one immutable snapshot never grants a changed origin or routing-rule set.

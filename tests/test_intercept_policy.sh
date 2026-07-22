@@ -12,6 +12,9 @@ PROFILE="$ROOT/scripts/gen-ios-profile.sh"
 MODULE_PAGE="$ROOT/web/src/features/extensions/ExtensionsPage.tsx"
 SETUP_GUIDE="$ROOT/web/src/features/setup-guide/SetupGuidePage.tsx"
 MODULE_PARSER="$ROOT/cmd/5gpn-dns/intercept_module_parser.go"
+MODULE_TYPES="$ROOT/cmd/5gpn-dns/intercept_module_types.go"
+SIDECAR_CONFIG="$ROOT/cmd/5gpn-intercept/config.go"
+CHECKS_WORKFLOW="$ROOT/.github/workflows/checks.yml"
 rc=0
 fail() { echo "FAIL: $1"; rc=1; }
 
@@ -57,7 +60,18 @@ grep -Fq 'intercept_asset="5gpn-intercept-linux-amd64"' "$INSTALL" || fail "inte
 grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/5gpn-intercept"' "$INSTALL" || fail "interception release asset is not checksum-verified"
 grep -Fq 'install_service_account "$INTERCEPT_SERVICE_USER" "$INTERCEPT_SERVICE_USER"' "$INSTALL" || fail "interception service account is not installed"
 grep -Fq 'ensure_intercept_certificates' "$INSTALL" || fail "interception certificate lifecycle is missing"
-grep -Fq '"version": 4' "$INSTALL" || fail "current interception config schema is not installed"
+grep -Fq '"version": 5' "$INSTALL" || fail "current interception config schema is not installed"
+grep -Fq 'CaptureDNS' "$MODULE_TYPES" && grep -Fq 'json:"capture_dns' "$MODULE_TYPES" \
+    || fail "operator capture DNS binding is missing from the module schema"
+grep -Fq 'maxInterceptModuleHosts' "$MODULE_TYPES" && grep -Fq '= 512' "$MODULE_TYPES" \
+    || fail "core capture-host bound is not 512"
+grep -Fq 'maxModuleCaptureHosts = 512' "$SIDECAR_CONFIG" \
+    && grep -Fq 'maxActionMatchHosts = 512' "$SIDECAR_CONFIG" \
+    && grep -Fq 'maxCertificateHosts = 512' "$SIDECAR_CONFIG" \
+    || fail "sidecar capture/action/certificate host bounds are not 512"
+grep -Fq 'IN-NAME,intercept-egress),(DOMAIN-SUFFIX,compact.example.test' "$CHECKS_WORKFLOW" \
+    && grep -Fq 'DOMAIN-SUFFIX,compact.example.test),(DST-PORT,443)),MODULE-INTERCEPT' "$CHECKS_WORKFLOW" \
+    || fail "pinned mihomo CI fixture does not validate compact suffix egress and capture rules"
 grep -Fq '"execution_order": []' "$INSTALL" || fail "current interception config has no explicit execution order"
 grep -Fq '"quic_fallback_protection": true' "$INSTALL" || fail "QUIC fallback protection is not configured by default"
 grep -Fq 'systemctl enable --now 5gpn-intercept-runtime.path' "$INSTALL" || fail "MITM runtime watcher is not enabled"
@@ -116,8 +130,8 @@ grep -Fq 'brotli.NewReader' "$ROOT/cmd/5gpn-intercept/content_encoding.go" \
     || fail "bounded Brotli decoding is missing"
 grep -Fq 'transform(context)' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
     || fail "native transform entry point is missing"
-grep -Fq 'moduleOwnsHost' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
-    || fail "native actions are not scoped to their extension capture hosts"
+grep -Fq 'compiledRule.hosts.Match' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
+    || fail "native actions do not use the per-snapshot capture-host matcher"
 grep -Fq 'contextObject["network"]' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
     || fail "declared origin permissions do not expose the bounded network capability"
 grep -Fq 'dialSOCKS5TCP' "$ROOT/cmd/5gpn-intercept/module_network.go" \

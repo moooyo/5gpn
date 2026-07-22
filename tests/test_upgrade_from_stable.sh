@@ -27,27 +27,129 @@ TMP="$(mktemp -d /tmp/5gpn-upgrade-from-stable.XXXXXX)"
 claim_temp_dir "$TMP" || { rmdir -- "$TMP"; exit 1; }
 trap 'remove_temp_dir "$TMP"' EXIT
 
-# The frozen stable environment must remain valid under the beta parser. Its
-# complete key set differs from the current contract only by the two beta files.
+# The frozen fixture retains the raw stable key set. The current schema must
+# reject it first; this test then performs the same explicit one-key removal an
+# operator reviews before continuing the upgrade.
 CONF_DIR="$TMP/conf"
 mkdir -p "$CONF_DIR"
 cp -- "$FIXTURE/dns.env.example" "$CONF_DIR/dns.env"
-if validate_dns_env_schema >/dev/null 2>&1; then
-    pass "0.0.13 dns.env is accepted by the current strict schema"
+raw_validation="$(validate_dns_env_schema 2>&1)" && raw_validation_rc=0 || raw_validation_rc=$?
+if [[ "$raw_validation_rc" == 0 ]]; then
+    fail "raw stable dns.env was accepted as a compatibility alias"
 else
-    fail "0.0.13 dns.env was rejected by the current strict schema"
+    pass "raw stable dns.env requires explicit rebuild after DNS_EGRESS_RESOLVER retirement"
+fi
+if [[ "$raw_validation" == *"Pre-v5 dns.env contains retired DNS_EGRESS_RESOLVER"* ]]; then
+    pass "raw stable dns.env failure provides the exact rebuild instruction"
+else
+    fail "raw stable dns.env failure is not actionable: $raw_validation"
+fi
+grep -Fq 'Pre-v5 interception config detected' "$INSTALL" \
+    && grep -Fq 'Do not delete it' "$INSTALL" \
+    && grep -Fq "jq rebuild preserving SOCKS/TLS infrastructure" "$INSTALL" \
+    && grep -Fq -- '--check-interception-routing to report ready' "$INSTALL" \
+    && pass "interception v4 failure provides the lockstep v5 rebuild instruction" \
+    || fail "interception v4 failure lacks the lockstep v5 rebuild instruction"
+for recipe_token in \
+    'set -euo pipefail' \
+    'NEW_INSTALL_SH' \
+    'old v4 daemon still owns the transaction' \
+    'Disable MITM through the old authenticated API' \
+    '.active_capture_hosts | length == 0' \
+    'systemctl is-active --quiet 5gpn-intercept.service' \
+    'listen: .listen' \
+    'username: .username' \
+    'password: .password' \
+    'tls_cert: .tls_cert' \
+    'tls_key: .tls_key' \
+    'upstream_proxy: .upstream_proxy' \
+    '.version == 4 and .mitm.enabled == false' \
+    'enabled: false' \
+    'execution_order: []' \
+    'modules: []' \
+    '"$NEW_5GPN_INTERCEPT" --config "$candidate" --check-config' \
+    '"$NEW_5GPN_DNS" --check-interception-routing' \
+    '--mihomo-config /etc/5gpn/mihomo/config.yaml' \
+    '--intercept-config "$candidate"' \
+    'sync -f "$candidate"' \
+    'validate_dns_env_schema "$2"' \
+    'config_published=1' \
+    'env_published=1' \
+    'committed=1' \
+    'mv -fT -- "$candidate" "$old"' \
+    'mv -fT -- "$env_candidate" "$env_file"'; do
+    grep -Fq -- "$recipe_token" "$ROOT/README.md" \
+        || fail "pre-v5 explicit rebuild recipe is missing: $recipe_token"
+done
+
+# Execute the publish-critical README segment with a routing checker that
+# returns rc=3. Under the documented set -e contract, no live config or env
+# publication may run after that failure.
+recipe_critical="$(sed -n '/^if ! sudo "\$NEW_5GPN_INTERCEPT" --config "\$candidate" --check-config; then$/,/^trap - EXIT HUP INT TERM$/p' "$ROOT/README.md")"
+recipe_test="$TMP/recipe-fail-closed"
+mkdir -p "$recipe_test"
+printf '%s\n' old-config > "$recipe_test/config.json"
+printf '%s\n' candidate-config > "$recipe_test/candidate.json"
+printf '%s\n' 'DNS_EGRESS_RESOLVER=203.0.113.53' keep=yes > "$recipe_test/dns.env"
+cp -- "$recipe_test/config.json" "$recipe_test/config.before"
+cp -- "$recipe_test/dns.env" "$recipe_test/dns.before"
+cat > "$recipe_test/check-sidecar" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$recipe_test/check-routing" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' interception-egress-rules-out-of-sync
+exit 3
+EOF
+chmod +x "$recipe_test/check-sidecar" "$recipe_test/check-routing"
+recipe_rc=0
+set +e
+(
+    set -euo pipefail
+    sudo() { "$@"; }
+    NEW_5GPN_INTERCEPT="$recipe_test/check-sidecar"
+    NEW_5GPN_DNS="$recipe_test/check-routing"
+    candidate="$recipe_test/candidate.json"
+    old="$recipe_test/config.json"
+    eval "$recipe_critical"
+) >/dev/null 2>&1
+recipe_rc=$?
+set -e
+if [[ "$recipe_rc" == 3 ]] \
+   && cmp -s "$recipe_test/config.before" "$recipe_test/config.json" \
+   && cmp -s "$recipe_test/dns.before" "$recipe_test/dns.env"; then
+    pass "routing rc=3 aborts the documented rebuild before config/env publication"
+else
+    fail "routing rc=3 did not fail closed (rc=$recipe_rc)"
 fi
 
 fixture_keys="$(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$FIXTURE/dns.env.example" | sort)"
 current_keys="$(for key in $DNS_ENV_KEYS; do printf '%s\n' "$key"; done | sort)"
-missing_keys="$(comm -23 <(printf '%s\n' "$current_keys") <(printf '%s\n' "$fixture_keys"))"
-extra_keys="$(comm -13 <(printf '%s\n' "$current_keys") <(printf '%s\n' "$fixture_keys"))"
+raw_missing_keys="$(comm -23 <(printf '%s\n' "$current_keys") <(printf '%s\n' "$fixture_keys"))"
+raw_extra_keys="$(comm -13 <(printf '%s\n' "$current_keys") <(printf '%s\n' "$fixture_keys"))"
 expected_missing="$(printf '%s\n' DNS_INTERCEPT_CONFIG DNS_MARKETPLACES_FILE | sort)"
-if [[ "$missing_keys" == "$expected_missing" && -z "$extra_keys" \
+if [[ "$raw_missing_keys" == "$expected_missing" && "$raw_extra_keys" == DNS_EGRESS_RESOLVER \
    && "$(printf '%s\n' "$fixture_keys" | grep -c .)" == 51 ]]; then
-    pass "0.0.13 dns.env lacks only the two additive beta keys"
+    pass "raw stable key delta is the two additive files plus the retired resolver"
 else
-    fail "0.0.13 dns.env key delta is unexpected (missing='$missing_keys', extra='$extra_keys')"
+    fail "raw stable dns.env key delta is unexpected (missing='$raw_missing_keys', extra='$raw_extra_keys')"
+fi
+
+grep -v '^DNS_EGRESS_RESOLVER=' "$FIXTURE/dns.env.example" > "$CONF_DIR/dns.env"
+if validate_dns_env_schema >/dev/null 2>&1; then
+    pass "operator-rebuilt stable dns.env is accepted by the current strict schema"
+else
+    fail "operator-rebuilt stable dns.env was rejected by the current strict schema"
+fi
+rebuilt_keys="$(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$CONF_DIR/dns.env" | sort)"
+rebuilt_missing_keys="$(comm -23 <(printf '%s\n' "$current_keys") <(printf '%s\n' "$rebuilt_keys"))"
+rebuilt_extra_keys="$(comm -13 <(printf '%s\n' "$current_keys") <(printf '%s\n' "$rebuilt_keys"))"
+if [[ "$rebuilt_missing_keys" == "$expected_missing" && -z "$rebuilt_extra_keys" \
+   && "$(printf '%s\n' "$rebuilt_keys" | grep -c .)" == 50 ]]; then
+    pass "rebuilt 0.0.13 dns.env lacks only the two additive beta keys"
+else
+    fail "rebuilt stable dns.env key delta is unexpected (missing='$rebuilt_missing_keys', extra='$rebuilt_extra_keys')"
 fi
 
 # Exercise the real current rendering function with harmless validators. A
@@ -124,7 +226,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 [[ -f "$mihomo" && -f "$intercept" ]] || exit 1
 if ! grep -Fq 'name: intercept-egress' "$mihomo"; then
-    printf '%s\n' interception-listener-missing
+    printf '%s\n' legacy-mihomo-boundary-missing-clean
     exit 3
 fi
 printf '%s\n' ready
@@ -154,10 +256,71 @@ fi
 
 if check_interception_routing_compatibility >/dev/null 2>&1 \
    && [[ "$INTERCEPT_ROUTING_READY" == 0 \
-      && "$INTERCEPT_ROUTING_REASON" == interception-listener-missing ]]; then
+      && "$INTERCEPT_ROUTING_REASON" == legacy-mihomo-boundary-missing-clean ]]; then
     pass "the installer compatibility seam classifies the preserved seed as legacy"
 else
     fail "the installer compatibility seam did not classify the preserved seed as legacy"
+fi
+
+cat > "$TMP/fake-dns-residual" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == --check-interception-routing ]]; then
+    printf '%s\n' interception-egress-rules-out-of-sync
+    exit 3
+fi
+exit 1
+EOF
+cat > "$TMP/fake-intercept-disabled" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+    *' --check-config '*) exit 0 ;;
+    *' --check-enabled '*) exit 3 ;;
+esac
+exit 1
+EOF
+chmod +x "$TMP/fake-dns-residual" "$TMP/fake-intercept-disabled"
+saved_dns_bin="$DNS_BIN"
+saved_intercept_bin="$INTERCEPT_BIN"
+DNS_BIN="$TMP/fake-dns-residual"
+INTERCEPT_BIN="$TMP/fake-intercept-disabled"
+before_residual_mihomo="$(hash_file "$MIHOMO_DIR/config.yaml")"
+before_residual_intercept="$(hash_file "$INTERCEPT_DIR/config.json")"
+if check_interception_routing_compatibility >/dev/null 2>&1; then
+    fail "disabled v5 with residual managed rules was allowed to degrade"
+elif [[ "$INTERCEPT_ROUTING_REASON" == interception-egress-rules-out-of-sync \
+     && "$before_residual_mihomo" == "$(hash_file "$MIHOMO_DIR/config.yaml")" \
+     && "$before_residual_intercept" == "$(hash_file "$INTERCEPT_DIR/config.json")" ]]; then
+    pass "residual managed rules hard-fail without changing mihomo/intercept bytes"
+else
+    fail "residual managed-rule preflight did not preserve bytes"
+fi
+
+saved_artifact_stage="${ARTIFACT_STAGE:-}"
+ARTIFACT_STAGE="$TMP/residual-stage"
+mkdir -p "$ARTIFACT_STAGE"
+cp -- "$TMP/fake-dns-residual" "$ARTIFACT_STAGE/5gpn-dns"
+cp -- "$TMP/fake-intercept-disabled" "$ARTIFACT_STAGE/5gpn-intercept"
+if preflight_existing_interception_state >/dev/null 2>&1; then
+    fail "target-release preflight accepted residual managed rules"
+elif [[ "$before_residual_mihomo" == "$(hash_file "$MIHOMO_DIR/config.yaml")" \
+     && "$before_residual_intercept" == "$(hash_file "$INTERCEPT_DIR/config.json")" ]]; then
+    pass "target-release preflight aborts residual rules before publication"
+else
+    fail "target-release residual preflight changed live bytes"
+fi
+ARTIFACT_STAGE="$saved_artifact_stage"
+DNS_BIN="$saved_dns_bin"
+INTERCEPT_BIN="$saved_intercept_bin"
+
+full_install_fn="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
+preflight_line="$(grep -n 'preflight_existing_interception_state' <<<"$full_install_fn" | head -1 | cut -d: -f1)"
+snapshot_line="$(grep -n 'capture_install_rollback' <<<"$full_install_fn" | head -1 | cut -d: -f1)"
+publish_line="$(grep -n 'install_5gpndns' <<<"$full_install_fn" | head -1 | cut -d: -f1)"
+if [[ -n "$preflight_line" && -n "$snapshot_line" && -n "$publish_line" \
+   && "$preflight_line" -lt "$snapshot_line" && "$preflight_line" -lt "$publish_line" ]]; then
+    pass "interception routing preflight runs before rollback snapshot and live publication"
+else
+    fail "interception routing preflight is too late in full_install"
 fi
 
 cat > "$TMP/fake-intercept-active" <<'EOF'

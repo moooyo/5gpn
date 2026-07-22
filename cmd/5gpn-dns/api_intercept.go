@@ -14,7 +14,7 @@ import (
 	"sync"
 )
 
-const interceptConfigVersion = 4
+const interceptConfigVersion = 5
 const maxInterceptConfigBytes = 16 << 20
 
 type interceptProxyConfig struct {

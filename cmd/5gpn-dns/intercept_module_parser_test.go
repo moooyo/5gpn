@@ -92,8 +92,8 @@ actions:
 	if !module.EgressGroupRequired || strings.Join(module.NetworkOrigins, ",") != "http://assets.example.com:8080,https://assets.example.com" {
 		t.Fatalf("network capabilities = origins=%v required=%v", module.NetworkOrigins, module.EgressGroupRequired)
 	}
-	if got := strings.Join(module.CaptureHosts, ","); got != "*.cdn.example.com,api.example.com" {
-		t.Fatalf("capture hosts = %q", got)
+	if got := strings.Join(module.CaptureHosts, ","); got != "*.cdn.example.com,api.example.com" || module.CaptureDNS != interceptCaptureDNSTrust {
+		t.Fatalf("capture hosts/default DNS = %q/%q", got, module.CaptureDNS)
 	}
 	if module.Scripts[0].ScriptURL != server.URL+"/clean.js" || module.Scripts[0].BodyMode != "text" {
 		t.Fatalf("action snapshot = %+v", module.Scripts[0])
@@ -602,7 +602,7 @@ func TestInterceptNetworkOriginHostPortRequiresCanonicalOrigin(t *testing.T) {
 	}
 }
 
-func TestInterceptModuleSnapshotDigestIncludesCapabilitiesButNotEgressBinding(t *testing.T) {
+func TestInterceptModuleSnapshotDigestExcludesOperatorBindings(t *testing.T) {
 	t.Parallel()
 	module := testModuleSnapshot()
 	baseline := interceptModuleSnapshotDigest(module)
@@ -610,6 +610,11 @@ func TestInterceptModuleSnapshotDigestIncludesCapabilitiesButNotEgressBinding(t 
 	if got := interceptModuleSnapshotDigest(module); got != baseline {
 		t.Fatalf("operator egress binding changed snapshot digest: %s != %s", got, baseline)
 	}
+	module.CaptureDNS = interceptCaptureDNSChina
+	if got := interceptModuleSnapshotDigest(module); got != baseline {
+		t.Fatalf("operator capture DNS binding changed snapshot digest: %s != %s", got, baseline)
+	}
+	module.CaptureDNS = interceptCaptureDNSTrust
 	module.NetworkOrigins = []string{"https://api.example.com"}
 	if got := interceptModuleSnapshotDigest(module); got == baseline {
 		t.Fatal("immutable network capability did not change snapshot digest")
@@ -646,5 +651,50 @@ func TestValidateInterceptModulesBoundsEnabledRoutingRules(t *testing.T) {
 	}
 	if err := validateInterceptModules(modules); err == nil || !strings.Contains(err.Error(), "declared routing rules") {
 		t.Fatalf("active routing overflow error = %v", err)
+	}
+}
+
+func TestInterceptCaptureHostBoundsAre512(t *testing.T) {
+	t.Parallel()
+	hosts := make([]string, maxInterceptModuleHosts)
+	for index := range hosts {
+		hosts[index] = fmt.Sprintf("h%03d.example.com", index)
+	}
+	module := testModuleSnapshot()
+	module.CaptureHosts = hosts
+	module.Scripts[0].Match.Hosts = append([]string(nil), hosts...)
+	if err := validateInterceptModule(module); err != nil {
+		t.Fatalf("512 capture/action hosts rejected: %v", err)
+	}
+	module.CaptureHosts = append(module.CaptureHosts, "h512.example.com")
+	module.Scripts[0].Match.Hosts = append(module.Scripts[0].Match.Hosts, "h512.example.com")
+	if err := validateInterceptModule(module); err == nil || !strings.Contains(err.Error(), "512") {
+		t.Fatalf("513 capture/action hosts error = %v", err)
+	}
+}
+
+func TestInterceptGlobalCertificateHostBoundIs512(t *testing.T) {
+	t.Parallel()
+	makeModule := func(id, prefix string, count int) interceptModuleSnapshot {
+		module := testModuleSnapshot()
+		module.ID = id
+		module.Enabled = true
+		module.CaptureHosts = make([]string, count)
+		for index := range module.CaptureHosts {
+			module.CaptureHosts[index] = fmt.Sprintf("%s%03d.example.com", prefix, index)
+		}
+		module.Scripts[0].Match.Hosts = []string{module.CaptureHosts[0]}
+		return module
+	}
+	first := makeModule("io.example.first", "a", 256)
+	second := makeModule("io.example.second", "b", 256)
+	document, _ := testInterceptDocument(t, first, second)
+	if err := validateInterceptDocument(document); err != nil {
+		t.Fatalf("512 certificate hosts rejected: %v", err)
+	}
+	second = makeModule("io.example.second", "b", 257)
+	document.Modules[1] = second
+	if err := validateInterceptDocument(document); err == nil || !strings.Contains(err.Error(), "512") {
+		t.Fatalf("513 certificate hosts error = %v", err)
 	}
 }

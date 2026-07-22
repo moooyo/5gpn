@@ -23,22 +23,23 @@ const (
 	interceptPhaseRequest  = "request"
 	interceptPhaseResponse = "response"
 
-	maxInterceptModules       = 64
-	maxInterceptModuleHosts   = 256
-	maxInterceptModuleRules   = 256
-	maxInterceptSettings      = 128
-	maxInterceptModuleName    = 128
-	maxInterceptModuleDesc    = 1024
-	maxInterceptModuleSource  = 2 << 20
-	maxInterceptScriptSource  = 1 << 20
-	maxInterceptScriptTotal   = 8 << 20
-	maxInterceptModulePattern = 4096
-	maxInterceptResourceURL   = 4096
-	maxInterceptSettingValue  = 64 << 10
-	maxInterceptEgressGroup   = 128
-	maxInterceptRoutingRules  = 256
-	maxInterceptActiveRoutes  = 2048
-	maxInterceptRouteKeywords = 8
+	maxInterceptModules        = 64
+	maxInterceptModuleHosts    = 512
+	maxInterceptNetworkOrigins = 256
+	maxInterceptModuleRules    = 256
+	maxInterceptSettings       = 128
+	maxInterceptModuleName     = 128
+	maxInterceptModuleDesc     = 1024
+	maxInterceptModuleSource   = 2 << 20
+	maxInterceptScriptSource   = 1 << 20
+	maxInterceptScriptTotal    = 8 << 20
+	maxInterceptModulePattern  = 4096
+	maxInterceptResourceURL    = 4096
+	maxInterceptSettingValue   = 64 << 10
+	maxInterceptEgressGroup    = 128
+	maxInterceptRoutingRules   = 256
+	maxInterceptActiveRoutes   = 2048
+	maxInterceptRouteKeywords  = 8
 )
 
 var nativeExtensionIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{1,126}[a-z0-9])$`)
@@ -242,6 +243,7 @@ type interceptModuleSnapshot struct {
 	ImportedAt          string                   `json:"imported_at"`
 	Source              interceptModuleSource    `json:"source"`
 	CaptureHosts        []string                 `json:"capture_hosts"`
+	CaptureDNS          string                   `json:"capture_dns,omitempty"`
 	HostMappings        []interceptHostMapping   `json:"upstream_mappings,omitempty"`
 	RoutingRules        interceptRoutingRuleList `json:"routing_rules,omitempty"`
 	Settings            []interceptModuleSetting `json:"settings,omitempty"`
@@ -261,6 +263,7 @@ type interceptModuleView struct {
 	Ready               bool                        `json:"ready"`
 	Reason              string                      `json:"reason,omitempty"`
 	CaptureHosts        []string                    `json:"capture_hosts"`
+	CaptureDNS          string                      `json:"capture_dns"`
 	ScriptCount         int                         `json:"script_count"`
 	Actions             []interceptModuleActionView `json:"actions"`
 	Settings            []interceptModuleSetting    `json:"settings,omitempty"`
@@ -383,6 +386,9 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 		if err := validateInterceptHostPattern(host); err != nil {
 			return err
 		}
+	}
+	if err := validateInterceptCaptureDNS(module.CaptureDNS); err != nil {
+		return err
 	}
 	if err := validateInterceptNetworkOrigins(module.NetworkOrigins); err != nil {
 		return err
@@ -793,8 +799,8 @@ type interceptNetworkOriginTarget struct {
 }
 
 func normalizeInterceptNetworkOrigins(raw []string) ([]string, error) {
-	if len(raw) > maxInterceptModuleHosts {
-		return nil, fmt.Errorf("at most %d network origins are allowed", maxInterceptModuleHosts)
+	if len(raw) > maxInterceptNetworkOrigins {
+		return nil, fmt.Errorf("at most %d network origins are allowed", maxInterceptNetworkOrigins)
 	}
 	origins := make([]string, 0, len(raw))
 	for index, value := range raw {
@@ -808,8 +814,8 @@ func normalizeInterceptNetworkOrigins(raw []string) ([]string, error) {
 }
 
 func validateInterceptNetworkOrigins(origins []string) error {
-	if len(origins) > maxInterceptModuleHosts {
-		return fmt.Errorf("network_origins exceeds %d entries", maxInterceptModuleHosts)
+	if len(origins) > maxInterceptNetworkOrigins {
+		return fmt.Errorf("network_origins exceeds %d entries", maxInterceptNetworkOrigins)
 	}
 	if !sort.StringsAreSorted(origins) {
 		return errors.New("network_origins must be canonical and sorted")
@@ -1033,6 +1039,7 @@ func interceptModuleSnapshotDigest(module interceptModuleSnapshot) string {
 	canonical := module
 	canonical.Enabled = false
 	canonical.EgressGroup = ""
+	canonical.CaptureDNS = ""
 	canonical.ImportedAt = ""
 	canonical.Source.Body = ""
 	canonical.Settings = append([]interceptModuleSetting(nil), module.Settings...)
@@ -1048,6 +1055,18 @@ func interceptModuleSnapshotDigest(module interceptModuleSnapshot) string {
 		panic("interception snapshot digest contains an unsupported value: " + err.Error())
 	}
 	return sha256Hex(body)
+}
+
+const (
+	interceptCaptureDNSTrust = "trust"
+	interceptCaptureDNSChina = "china"
+)
+
+func validateInterceptCaptureDNS(value string) error {
+	if value != interceptCaptureDNSTrust && value != interceptCaptureDNSChina {
+		return errors.New("capture_dns must be trust or china")
+	}
+	return nil
 }
 
 func validSHA256(value string) bool {

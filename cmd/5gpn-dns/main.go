@@ -330,14 +330,16 @@ func main() {
 		log.Printf("warning: interception modules: %v -- DNS interception overlay remains fail-closed", err)
 	}
 
-	// Mihomo always resolves sniffed origins through the loopback Egress DNS
-	// Broker. A bind or resolver-construction failure is fatal because the data
-	// plane would otherwise start while unable to resolve any forwarded SNI.
-	pb, pbCloser, pbErr := newDefaultEgressDNSBroker(cfg)
+	// Mihomo always resolves sniffed origins through the loopback egress DNS
+	// broker. The broker selects the live China or trust group from the active
+	// extension binding and defaults non-extension names to trust; it never
+	// applies client DNS policy. A bind or selector-construction failure is fatal
+	// because the data plane would otherwise be unable to resolve forwarded SNI.
+	pb, pbErr := newDefaultEgressDNSBroker(cfg, h)
 	if pbErr != nil {
 		log.Fatalf("egress DNS broker: %v", pbErr)
 	}
-	egressBroker, brokerCloser := pb, pbCloser
+	egressBroker := pb
 	if err := egressBroker.Start(); err != nil {
 		log.Fatalf("egress DNS broker: %v", err)
 	}
@@ -471,9 +473,6 @@ func main() {
 	servers.Shutdown(shutdownCtx)
 	if egressBroker != nil {
 		egressBroker.Shutdown(shutdownCtx)
-	}
-	if brokerCloser != nil {
-		_ = brokerCloser.Close()
 	}
 	persistWG.Wait() // ensure the stats persister's final save completes before exit
 	log.Println("shutdown complete")

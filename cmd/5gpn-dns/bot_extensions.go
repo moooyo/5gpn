@@ -294,6 +294,7 @@ func knownBotExtensionConfirmationKind(kind botExtensionPayloadKind) bool {
 		botExtensionPayloadUpdate,
 		botExtensionPayloadSetting,
 		botExtensionPayloadEgress,
+		botExtensionPayloadCaptureDNS,
 		botExtensionPayloadReorder,
 		botExtensionPayloadMITM:
 		return true
@@ -378,6 +379,9 @@ func (bt *Bot) handleExtensionCallback(
 			return
 		case "egress":
 			bt.handleBotExtensionEgressCallback(ctx, b, cq, uid, chatID, rest)
+			return
+		case "capture-dns":
+			bt.handleBotExtensionCaptureDNSCallback(ctx, b, cq, uid, chatID, rest)
 			return
 		case "mitm":
 			bt.handleBotExtensionMITMCallback(ctx, b, cq, uid, chatID, rest)
@@ -956,7 +960,7 @@ func botExtensionNetworkRiskHTML(origins []string) string {
 		return ""
 	}
 	var text strings.Builder
-	text.WriteString("🌐 <b>联网权限风险</b>\n该脚本可以把它可见的全部解密请求、响应、参数和存储数据发送到以下每一个 origin：")
+	text.WriteString("🌐 <b>联网权限风险</b>\n该脚本可以把它可见的全部解密请求、响应、参数和存储数据发送到以下每一个 origin，也可以把捕获的请求改写到这些 origin。改写会转发完整请求方法、解码后的请求体和端到端请求头，其中可能包含 Cookie 和 Authorization 凭据：")
 	for _, origin := range origins {
 		text.WriteString("\n• <code>")
 		text.WriteString(html.EscapeString(origin))
@@ -1111,6 +1115,9 @@ func botExtensionCandidateReviewHTML(module interceptModuleView) string {
 		text.WriteString(html.EscapeString(module.EgressGroup))
 		text.WriteString("</code>")
 	}
+	text.WriteString("\nCapture DNS：<code>")
+	text.WriteString(html.EscapeString(botExtensionCaptureDNSLabel(module.CaptureDNS)))
+	text.WriteString("</code>")
 	text.WriteString("\nCapture hosts：")
 	if len(module.CaptureHosts) == 0 {
 		text.WriteString("<i>无</i>")

@@ -462,6 +462,35 @@ func TestMarketplaceStrictSchemaAndBounds(t *testing.T) {
 	})
 }
 
+func TestMarketplaceCaptureHostCapabilityBoundIs512(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		count   int
+		wantErr bool
+	}{
+		{name: "maximum", count: 512},
+		{name: "over maximum", count: 513, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newMarketplaceFixture(t, func(index *marketplaceIndex) {
+				index.Entries[0].Capabilities.CaptureHostCount = test.count
+			})
+			manager, _, _ := newMarketplaceManagerFixture(t, fixture)
+			view, err := manager.View()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = manager.Add(context.Background(), view.Revision, fixture.server.URL+"/index.json", "")
+			if test.wantErr && !errors.Is(err, errMarketplaceFetch) {
+				t.Fatalf("513 capability hosts error = %v", err)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("512 capability hosts rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestMarketplaceFetchRejectsUnsafeRedirect(t *testing.T) {
 	fixture := newMarketplaceFixture(t, nil)
 	manager, _, _ := newMarketplaceManagerFixture(t, fixture)
