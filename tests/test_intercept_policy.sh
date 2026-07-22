@@ -45,6 +45,9 @@ grep -Fxq 'Group=root' "$CERT_UNIT" || fail "certificate publisher primary group
 grep -Fxq 'SupplementaryGroups=gpn-intercept' "$CERT_UNIT" || fail "capability-free certificate publisher lacks the runtime file group"
 grep -Fxq 'RuntimeDirectory=5gpn' "$CERT_UNIT" || fail "certificate publisher cannot create its fresh-boot lock directory"
 grep -Fxq 'RuntimeDirectoryMode=0700' "$CERT_UNIT" || fail "certificate publisher runtime directory is not private"
+grep -Fxq 'StartLimitIntervalSec=30' "$CERT_UNIT" \
+    && grep -Fxq 'StartLimitBurst=64' "$CERT_UNIT" \
+    || fail "certificate publisher start limit does not cover the bounded PathChanged retry window"
 grep -Fxq 'RuntimeDirectoryPreserve=yes' "$CERT_UNIT" || fail "certificate lock directory is not preserved between oneshot runs"
 grep -Fxq 'ReadOnlyPaths=/etc/5gpn/intercept-ca /opt/5gpn/bin/5gpn-intercept /opt/5gpn/scripts/intercept-cert-renew.sh' "$CERT_UNIT" \
     || fail "certificate publisher does not scope root-key access"

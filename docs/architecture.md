@@ -619,7 +619,9 @@ missing target digest causes the manager to atomically republish the exact same
 candidate bytes at a fixed interval. This preserves the revision and content
 while retriggering `PathChanged` after an earlier event was coalesced into an
 already-running certificate oneshot; the complete wait still fails closed after
-15 seconds. Disable operations may leave a temporary
+15 seconds. The root oneshot's systemd start guard permits 64 starts per 30
+seconds, enough for that bounded 500 ms retry window while retaining a finite
+rate limit. Disable operations may leave a temporary
 certificate SAN superset, but the runtime allowlist rejects disabled hosts.
 
 `/etc/5gpn/intercept/config.json` version 5 preserves installer-owned SOCKS credentials,

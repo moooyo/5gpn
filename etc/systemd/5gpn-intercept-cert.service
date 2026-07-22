@@ -2,6 +2,11 @@
 [Unit]
 Description=Publish the module-scoped 5gpn interception leaf
 After=local-fs.target
+# The manager can republish one unchanged candidate every 500 ms for at most
+# 15 seconds to recover a coalesced PathChanged event. Keep that bounded retry
+# inside systemd's guard without inheriting the default five-start burst.
+StartLimitIntervalSec=30
+StartLimitBurst=64
 
 [Service]
 Type=oneshot
