@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -76,6 +78,18 @@ type nativeExtensionEgressGroupRequirement struct {
 type nativeExtensionTraffic struct {
 	CaptureHosts     []string                     `yaml:"captureHosts"`
 	UpstreamMappings []nativeExtensionHostMapping `yaml:"upstreamMappings"`
+	RoutingRules     []nativeExtensionRoutingRule `yaml:"routingRules"`
+}
+
+type nativeExtensionRoutingRule struct {
+	Action            string    `yaml:"action"`
+	Domain            *string   `yaml:"domain"`
+	DomainSuffix      *string   `yaml:"domainSuffix"`
+	DomainKeywords    *[]string `yaml:"domainKeywords"`
+	AllDomainKeywords *[]string `yaml:"allDomainKeywords"`
+	IPCIDR            *string   `yaml:"ipCIDR"`
+	Network           *string   `yaml:"network"`
+	DestinationPort   *int      `yaml:"destinationPort"`
 }
 
 type nativeExtensionHostMapping struct {
@@ -206,6 +220,14 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 		target := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(raw.Target, ".")))
 		mappings = append(mappings, interceptHostMapping{Pattern: host, Target: target})
 	}
+	routingRules := make([]interceptRoutingRule, 0, len(manifest.Traffic.RoutingRules))
+	for index, raw := range manifest.Traffic.RoutingRules {
+		rule, err := normalizeNativeExtensionRoutingRule(raw)
+		if err != nil {
+			return interceptModuleSnapshot{}, fmt.Errorf("traffic.routingRules[%d]: %w", index, err)
+		}
+		routingRules = append(routingRules, rule)
+	}
 	settings := make([]interceptModuleSetting, 0, len(manifest.Settings))
 	for index, raw := range manifest.Settings {
 		defaultValue, err := yamlNodeToJSON(raw.Default)
@@ -286,7 +308,7 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 	module := interceptModuleSnapshot{
 		ID: manifest.Metadata.ID, Version: manifest.Metadata.Version,
 		Name: strings.TrimSpace(manifest.Metadata.Name), Description: strings.TrimSpace(manifest.Metadata.Description),
-		CaptureHosts: captureHosts, HostMappings: mappings, Settings: settings, Scripts: scripts,
+		CaptureHosts: captureHosts, HostMappings: mappings, RoutingRules: routingRules, Settings: settings, Scripts: scripts,
 		PersistentStorage: manifest.Permissions.PersistentStorage, NetworkOrigins: networkOrigins,
 		EgressGroupRequired: manifest.Requirements.EgressGroup.Required,
 	}
@@ -303,6 +325,100 @@ func moduleWithSyntheticSource(module interceptModuleSnapshot) interceptModuleSn
 	module.Source.Digest = sha256Hex([]byte(module.Source.Body))
 	module.ImportedAt = time.Unix(0, 0).UTC().Format(time.RFC3339)
 	return module
+}
+
+func normalizeNativeExtensionRoutingRule(raw nativeExtensionRoutingRule) (interceptRoutingRule, error) {
+	rule := interceptRoutingRule{
+		Action: strings.ToLower(strings.TrimSpace(raw.Action)),
+	}
+	var err error
+	if raw.Domain != nil {
+		if strings.TrimSpace(*raw.Domain) == "" {
+			return interceptRoutingRule{}, errors.New("domain must not be empty when declared")
+		}
+		rule.Domain, err = normalizeInterceptHostPattern(*raw.Domain)
+		if err != nil || strings.HasPrefix(rule.Domain, "*.") {
+			return interceptRoutingRule{}, errors.New("domain must be one canonical exact hostname")
+		}
+	}
+	if raw.DomainSuffix != nil {
+		if strings.TrimSpace(*raw.DomainSuffix) == "" {
+			return interceptRoutingRule{}, errors.New("domainSuffix must not be empty when declared")
+		}
+		rule.DomainSuffix, err = normalizeInterceptHostPattern(*raw.DomainSuffix)
+		if err != nil || strings.HasPrefix(rule.DomainSuffix, "*.") {
+			return interceptRoutingRule{}, errors.New("domainSuffix must be one canonical suffix without '*.'")
+		}
+	}
+	if raw.IPCIDR != nil {
+		value := strings.TrimSpace(*raw.IPCIDR)
+		if value == "" {
+			return interceptRoutingRule{}, errors.New("ipCIDR must not be empty when declared")
+		}
+		_, network, parseErr := net.ParseCIDR(value)
+		if parseErr != nil {
+			return interceptRoutingRule{}, errors.New("ipCIDR must be one IPv4 or IPv6 CIDR")
+		}
+		rule.IPCIDR = network.String()
+	}
+	if raw.Network != nil {
+		rule.Network = strings.ToLower(strings.TrimSpace(*raw.Network))
+		if rule.Network == "" {
+			return interceptRoutingRule{}, errors.New("network must not be empty when declared")
+		}
+	}
+	if raw.DestinationPort != nil {
+		if *raw.DestinationPort < 1 || *raw.DestinationPort > 65535 {
+			return interceptRoutingRule{}, errors.New("destinationPort must be between 1 and 65535 when declared")
+		}
+		rule.DestinationPort = *raw.DestinationPort
+	}
+	if raw.DomainKeywords != nil && len(*raw.DomainKeywords) == 0 {
+		return interceptRoutingRule{}, errors.New("domainKeywords must not be empty when declared")
+	}
+	domainKeywords := []string(nil)
+	if raw.DomainKeywords != nil {
+		domainKeywords = *raw.DomainKeywords
+	}
+	rule.DomainKeywords = make([]string, 0, len(domainKeywords))
+	seenKeywords := make(map[string]struct{}, len(domainKeywords))
+	for _, value := range domainKeywords {
+		keyword := strings.ToLower(strings.TrimSpace(value))
+		if keyword == "" || len(keyword) > 64 || !nativeExtensionRouteKeywordPattern.MatchString(keyword) {
+			return interceptRoutingRule{}, errors.New("domainKeywords entries must contain 1 to 64 safe bytes")
+		}
+		if _, duplicate := seenKeywords[keyword]; duplicate {
+			return interceptRoutingRule{}, fmt.Errorf("duplicate domain keyword %q", keyword)
+		}
+		seenKeywords[keyword] = struct{}{}
+		rule.DomainKeywords = append(rule.DomainKeywords, keyword)
+	}
+	sort.Strings(rule.DomainKeywords)
+	if raw.AllDomainKeywords != nil && len(*raw.AllDomainKeywords) == 0 {
+		return interceptRoutingRule{}, errors.New("allDomainKeywords must not be empty when declared")
+	}
+	allDomainKeywords := []string(nil)
+	if raw.AllDomainKeywords != nil {
+		allDomainKeywords = *raw.AllDomainKeywords
+	}
+	rule.AllDomainKeywords = make([]string, 0, len(allDomainKeywords))
+	for _, value := range allDomainKeywords {
+		keyword := strings.ToLower(strings.TrimSpace(value))
+		if keyword == "" || len(keyword) > 64 || !nativeExtensionRouteKeywordPattern.MatchString(keyword) {
+			return interceptRoutingRule{}, errors.New("allDomainKeywords entries must contain 1 to 64 safe bytes")
+		}
+		rule.AllDomainKeywords = append(rule.AllDomainKeywords, keyword)
+	}
+	sort.Strings(rule.AllDomainKeywords)
+	if len(rule.DomainKeywords) == 1 {
+		rule.AllDomainKeywords = append(rule.AllDomainKeywords, rule.DomainKeywords[0])
+		sort.Strings(rule.AllDomainKeywords)
+		rule.DomainKeywords = nil
+	}
+	if err := validateInterceptRoutingRule(rule); err != nil {
+		return interceptRoutingRule{}, err
+	}
+	return rule, nil
 }
 
 func decodeNativeExtensionManifest(body []byte) (nativeExtensionManifest, error) {
@@ -327,7 +443,61 @@ func decodeNativeExtensionManifest(body []byte) (nativeExtensionManifest, error)
 	if err := rejectUnsafeYAML(&root); err != nil {
 		return nativeExtensionManifest{}, err
 	}
+	if err := rejectNullNativeExtensionRoutingFields(&root); err != nil {
+		return nativeExtensionManifest{}, err
+	}
 	return manifest, nil
+}
+
+func rejectNullNativeExtensionRoutingFields(root *yaml.Node) error {
+	if root == nil || root.Kind != yaml.DocumentNode || len(root.Content) != 1 {
+		return nil
+	}
+	traffic := yamlMappingValue(root.Content[0], "traffic")
+	rules := yamlMappingValue(traffic, "routingRules")
+	if rules == nil {
+		return nil
+	}
+	if rules.Tag == "!!null" {
+		return errors.New("traffic.routingRules must not be null")
+	}
+	if rules.Kind != yaml.SequenceNode {
+		return nil
+	}
+	fields := map[string]struct{}{
+		"action":            {},
+		"domain":            {},
+		"domainSuffix":      {},
+		"domainKeywords":    {},
+		"allDomainKeywords": {},
+		"ipCIDR":            {},
+		"network":           {},
+		"destinationPort":   {},
+	}
+	for ruleIndex, rule := range rules.Content {
+		if rule.Kind != yaml.MappingNode {
+			continue
+		}
+		for index := 0; index+1 < len(rule.Content); index += 2 {
+			name := rule.Content[index].Value
+			if _, tracked := fields[name]; tracked && rule.Content[index+1].Tag == "!!null" {
+				return fmt.Errorf("traffic.routingRules[%d].%s must not be null", ruleIndex, name)
+			}
+		}
+	}
+	return nil
+}
+
+func yamlMappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		if node.Content[index].Value == key {
+			return node.Content[index+1]
+		}
+	}
+	return nil
 }
 
 func rejectUnsafeYAML(node *yaml.Node) error {

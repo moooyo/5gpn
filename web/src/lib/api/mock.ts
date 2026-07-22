@@ -319,13 +319,13 @@ let marketplaces: T.MarketplaceSource[] = [{
     documentation_url: 'https://github.com/moooyo/5gpn-extensions',
     manifest_url: 'https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml',
     manifest_digest: 'a'.repeat(64),
-    capabilities: { capture_host_count: 2, action_count: 1, setting_count: 2, network_origins: [], persistent_storage: false, upstream_mapping_count: 0, egress_group_required: false },
+    capabilities: { capture_host_count: 2, action_count: 1, setting_count: 2, network_origins: [], persistent_storage: false, upstream_mapping_count: 0, routing_rule_count: 0, egress_group_required: false },
   }, {
     id: 'io.example.marketplace-cleaner', name: 'Marketplace Response Cleaner', version: '1.0.0',
     description: 'A native response transformation example from the marketplace.',
     tags: ['response', 'example'], license: { spdx: 'Apache-2.0' },
     manifest_url: 'https://extensions.example.test/marketplace-cleaner.yaml', manifest_digest: '7'.repeat(64),
-    capabilities: { capture_host_count: 1, action_count: 1, setting_count: 0, network_origins: ['https://origin.example.net'], persistent_storage: false, upstream_mapping_count: 1, egress_group_required: true },
+    capabilities: { capture_host_count: 1, action_count: 1, setting_count: 0, network_origins: ['https://origin.example.net'], persistent_storage: false, upstream_mapping_count: 1, routing_rule_count: 0, egress_group_required: true },
   }],
 }]
 

@@ -273,6 +273,7 @@ func TestBotExtensionFailedReviewDocumentNeverIssuesConfirmation(t *testing.T) {
 func TestBotExtensionNetworkEnableReviewListsEveryOrigin(t *testing.T) {
 	module := testModuleSnapshot()
 	module.NetworkOrigins = []string{"https://audit.example.com", "https://upload.example.net:8443"}
+	module.RoutingRules = []interceptRoutingRule{{Action: "reject", Domain: "ads.example.com", Network: "udp"}}
 	manager, _, _, _, _ := newInterceptManagerFixture(t, module)
 	ctrl := NewController(func() error { return nil }, nil, nil, nil)
 	ctrl.SetInterceptModuleManager(manager)
@@ -302,6 +303,8 @@ func TestBotExtensionNetworkEnableReviewListsEveryOrigin(t *testing.T) {
 		"解密请求、响应、参数和存储数据",
 		"clean-response",
 		view.Modules[0].Actions[0].ScriptDigest,
+		"Global routing rules",
+		`{&#34;action&#34;:&#34;reject&#34;,&#34;domain&#34;:&#34;ads.example.com&#34;,&#34;network&#34;:&#34;udp&#34;}`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("network risk review omitted %q:\n%s", want, text)
@@ -322,7 +325,7 @@ func TestMarketplaceSourceReviewRendersEveryEntryAndNetworkOrigin(t *testing.T) 
 			{
 				ID: "io.example.one", Name: "Extension one", Version: "1.2.3", Description: "First extension",
 				License: marketplaceLicense{SPDX: "MIT"}, ManifestURL: "https://catalog.example/one.yaml", ManifestDigest: strings.Repeat("c", 64),
-				Capabilities: marketplaceCapabilitiesView{CaptureHostCount: 2, ActionCount: 3, SettingCount: 4, UpstreamMappingCount: 5,
+				Capabilities: marketplaceCapabilitiesView{CaptureHostCount: 2, ActionCount: 3, SettingCount: 4, UpstreamMappingCount: 5, RoutingRuleCount: 6,
 					NetworkOrigins: []string{"https://audit.example.com", "https://upload.example.net:8443"}, PersistentStorage: true, EgressGroupRequired: true},
 			},
 			{
@@ -334,7 +337,7 @@ func TestMarketplaceSourceReviewRendersEveryEntryAndNetworkOrigin(t *testing.T) 
 	review := marketplaceSourceReviewHTML(source)
 	for _, required := range []string{
 		"io.example.one", "1.2.3", strings.Repeat("c", 64), "https://audit.example.com", "https://upload.example.net:8443",
-		"io.example.two", "2.0.0", strings.Repeat("d", 64), "storage=<code>true</code>", "egress-required=<code>true</code>",
+		"io.example.two", "2.0.0", strings.Repeat("d", 64), "<code>6</code> global routing rules", "storage=<code>true</code>", "egress-required=<code>true</code>",
 	} {
 		if !strings.Contains(review, required) {
 			t.Fatalf("marketplace source review omitted %q: %s", required, review)

@@ -28,7 +28,7 @@ const APPLE: MarketplaceEntry = {
   documentation_url: 'https://example.test/apple',
   manifest_url: 'https://cdn.example.test/apple/extension.yaml',
   manifest_digest: 'a'.repeat(64),
-  capabilities: { capture_host_count: 2, action_count: 1, setting_count: 2, network_origins: [], persistent_storage: false, upstream_mapping_count: 0, egress_group_required: false },
+  capabilities: { capture_host_count: 2, action_count: 1, setting_count: 2, network_origins: [], persistent_storage: false, upstream_mapping_count: 0, routing_rule_count: 0, egress_group_required: false },
 }
 const CLEANER: MarketplaceEntry = {
   id: 'io.example.response-cleaner',
@@ -39,7 +39,7 @@ const CLEANER: MarketplaceEntry = {
   license: { spdx: 'Apache-2.0' },
   manifest_url: 'https://mirror.example.test/cleaner/extension.yaml',
   manifest_digest: 'b'.repeat(64),
-  capabilities: { capture_host_count: 4, action_count: 3, setting_count: 0, network_origins: ['https://api.example.test'], persistent_storage: true, upstream_mapping_count: 0, egress_group_required: true },
+  capabilities: { capture_host_count: 4, action_count: 3, setting_count: 0, network_origins: ['https://api.example.test'], persistent_storage: true, upstream_mapping_count: 0, routing_rule_count: 2, egress_group_required: true },
 }
 const OFFICIAL: MarketplaceSource = {
   id: 'io.5gpn.official',
@@ -109,6 +109,7 @@ describe('MarketplacePage', () => {
     renderPage()
     await screen.findByText('Response Cleaner')
     expect(screen.getByText('Apple WLOC Location Override')).toBeInTheDocument()
+    expect(screen.getByText('路由 · 2')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /Community mirror/ }))
     expect(screen.queryByText('Apple WLOC Location Override')).not.toBeInTheDocument()
     expect(screen.getByText('Response Cleaner')).toBeInTheDocument()
@@ -122,7 +123,7 @@ describe('MarketplacePage', () => {
     await screen.findByText('Response Cleaner')
     expect(within(screen.getAllByRole('article')[0]).getByText('Response Cleaner')).toBeInTheDocument()
     await user.click(screen.getByRole('combobox', { name: '排序市场插件' }))
-    await user.click(screen.getByRole('option', { name: '名称' }))
+    await user.click(await screen.findByRole('option', { name: '名称' }))
     await waitFor(() => expect(within(screen.getAllByRole('article')[0]).getByText('Apple WLOC Location Override')).toBeInTheDocument())
   })
 
@@ -166,6 +167,7 @@ describe('MarketplacePage', () => {
       capture_hosts: ['api.example.test'],
       script_count: 3,
       settings: [],
+      routing_rules: [{ action: 'reject', domain: 'ads.example.test' }],
       persistent_storage: true,
       source_url: CLEANER.manifest_url,
       source_digest: CLEANER.manifest_digest,
@@ -182,12 +184,15 @@ describe('MarketplacePage', () => {
     const dialog = await screen.findByRole('dialog', { name: /安装快照前确认/ })
     expect(dialog).toHaveTextContent('接管域名')
     expect(dialog).toHaveTextContent('4')
+    expect(dialog).toHaveTextContent('全局路由规则')
+    expect(dialog).toHaveTextContent('2')
     expect(api.installMarketplaceEntry).not.toHaveBeenCalled()
     await user.click(within(dialog).getByRole('button', { name: '确认安装' }))
     await waitFor(() => expect(api.installMarketplaceEntry).toHaveBeenCalledWith(COMMUNITY.id, CLEANER.id, MARKETPLACES.revision, MODULES.revision))
     expect(await screen.findByText(/Actual verified cleaner/)).toBeInTheDocument()
     expect(dialog).toHaveTextContent('已关闭')
     expect(dialog).toHaveTextContent('f'.repeat(64))
+    expect(dialog).toHaveTextContent('{"action":"reject","domain":"ads.example.test"}')
   })
 
   it('shows installed entries as management actions rather than update claims', async () => {

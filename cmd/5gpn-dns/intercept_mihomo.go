@@ -29,11 +29,14 @@ type interceptRoutingAnalysis struct {
 	EgressInsertAt        int
 	MatchTarget           string
 	AvailableEgressGroups []string
+	PolicyStart           int
+	PolicyCount           int
 }
 
 type interceptRoutingRules struct {
 	Capture []string
 	Egress  []string
+	Policy  []string
 }
 
 type interceptEgressSelector struct {
@@ -116,7 +119,69 @@ func interceptMihomoRouting(document interceptConfigDocument) interceptRoutingRu
 	// unbound extensions that share the terminal target.
 	appendSelectors(true)
 	appendSelectors(false)
-	return interceptRoutingRules{Capture: capture, Egress: egress}
+	policy := make([]string, 0)
+	seenPolicy := make(map[string]struct{})
+	for _, module := range orderedModules {
+		for _, route := range module.RoutingRules {
+			rule := renderInterceptPolicyRule(route)
+			if _, duplicate := seenPolicy[rule]; duplicate {
+				continue
+			}
+			seenPolicy[rule] = struct{}{}
+			policy = append(policy, rule)
+		}
+	}
+	return interceptRoutingRules{Capture: capture, Egress: egress, Policy: policy}
+}
+
+func renderInterceptPolicyRule(rule interceptRoutingRule) string {
+	matchers := make([]string, 0, 4)
+	if rule.Domain != "" {
+		matchers = append(matchers, "(DOMAIN,"+rule.Domain+")")
+	}
+	if rule.DomainSuffix != "" {
+		matchers = append(matchers, "(DOMAIN-SUFFIX,"+rule.DomainSuffix+")")
+	}
+	if rule.IPCIDR != "" {
+		kind := "IP-CIDR"
+		if strings.Contains(rule.IPCIDR, ":") {
+			kind = "IP-CIDR6"
+		}
+		matchers = append(matchers, "("+kind+","+rule.IPCIDR+",no-resolve)")
+	}
+	if len(rule.DomainKeywords) == 1 {
+		matchers = append(matchers, "(DOMAIN-KEYWORD,"+rule.DomainKeywords[0]+")")
+	} else if len(rule.DomainKeywords) > 1 {
+		keywords := make([]string, 0, len(rule.DomainKeywords))
+		for _, keyword := range rule.DomainKeywords {
+			keywords = append(keywords, "(DOMAIN-KEYWORD,"+keyword+")")
+		}
+		matchers = append(matchers, "(OR,("+strings.Join(keywords, ",")+"))")
+	}
+	for _, keyword := range rule.AllDomainKeywords {
+		matchers = append(matchers, "(DOMAIN-KEYWORD,"+keyword+")")
+	}
+	if rule.Network != "" {
+		matchers = append(matchers, "(NETWORK,"+strings.ToUpper(rule.Network)+")")
+	}
+	if rule.DestinationPort != 0 {
+		matchers = append(matchers, "(DST-PORT,"+strconv.Itoa(rule.DestinationPort)+")")
+	}
+	target := strings.ToUpper(rule.Action)
+	if len(matchers) == 1 {
+		matcher := strings.TrimSuffix(strings.TrimPrefix(matchers[0], "("), ")")
+		parts := strings.Split(matcher, ",")
+		if len(parts) >= 2 {
+			if parts[0] == "OR" {
+				return matcher + "," + target
+			}
+			if strings.HasPrefix(parts[0], "IP-CIDR") {
+				return parts[0] + "," + parts[1] + "," + target + ",no-resolve"
+			}
+			return matcher + "," + target
+		}
+	}
+	return "AND,(" + strings.Join(matchers, ",") + ")," + target
 }
 
 func interceptModuleEgressSelectors(module interceptModuleSnapshot) []interceptEgressSelector {
@@ -263,11 +328,33 @@ func analyzeInterceptRoutingExpected(text string, expected interceptRoutingRules
 		matchesDenyRule(compactMihomoRule(rules.Content[moduleStart].Value), blockQUICRuleBase, false) {
 		moduleStart++
 	}
+	policyStart := moduleStart
+	policyCount := matchIndex - policyStart - len(currentCapture)
+	if policyCount < 0 || policyCount > len(expected.Policy) {
+		analysis.Reason = "interception-policy-rules-out-of-sync"
+		return analysis
+	}
+	currentPolicy := make([]string, 0, policyCount)
+	for index := 0; index < policyCount; index++ {
+		item := rules.Content[policyStart+index]
+		if item.Kind != yaml.ScalarNode {
+			analysis.Reason = "interception-policy-rules-out-of-sync"
+			return analysis
+		}
+		currentPolicy = append(currentPolicy, compactMihomoRule(item.Value))
+		if currentPolicy[index] != compactMihomoRule(expected.Policy[index]) {
+			analysis.Reason = "interception-policy-rules-out-of-sync"
+			return analysis
+		}
+	}
+	moduleStart += policyCount
 	analysis.Document = document
 	analysis.Rules = rules
 	analysis.EgressInsertAt = egressStart
 	analysis.MatchTarget = matchTarget
 	analysis.AvailableEgressGroups = available
+	analysis.PolicyStart = policyStart
+	analysis.PolicyCount = policyCount
 	seenCurrent := make(map[string]struct{}, len(currentCapture))
 	for index, rule := range currentCapture {
 		if captureIndices[index] != moduleStart+index || !validCanonicalInterceptRule(rule) {
@@ -302,6 +389,14 @@ func analyzeInterceptRoutingExpected(text string, expected interceptRoutingRules
 		}
 		seenSelectors[identity] = struct{}{}
 	}
+	if !interceptRuleOrderedSubset(currentEgress, expected.Egress) {
+		analysis.Reason = "interception-egress-rules-out-of-sync"
+		return analysis
+	}
+	if !interceptRuleOrderedSubset(currentCapture, expected.Capture) {
+		analysis.Reason = "interception-rules-out-of-sync"
+		return analysis
+	}
 	analysis.Reconcileable = true
 	if len(currentCapture) != len(expected.Capture) {
 		analysis.Reason = "interception-rules-out-of-sync"
@@ -312,6 +407,10 @@ func analyzeInterceptRoutingExpected(text string, expected interceptRoutingRules
 			analysis.Reason = "interception-rules-out-of-sync"
 			return analysis
 		}
+	}
+	if len(currentPolicy) != len(expected.Policy) {
+		analysis.Reason = "interception-policy-rules-out-of-sync"
+		return analysis
 	}
 	if len(currentEgress) != len(expected.Egress) {
 		analysis.Reason = "interception-egress-rules-out-of-sync"
@@ -351,10 +450,11 @@ func renderInterceptRoutingRules(analysis interceptRoutingAnalysis, next interce
 		return "", errors.New("interception routing is not manageable")
 	}
 	kept := make([]*yaml.Node, 0, len(analysis.Rules.Content))
-	for _, item := range analysis.Rules.Content {
+	for index, item := range analysis.Rules.Content {
 		rawRule := strings.TrimSpace(item.Value)
 		compact := compactMihomoRule(item.Value)
-		if rawRule == interceptEgressRejectRule || ruleTouchesInterceptEgress(rawRule) || strings.HasSuffix(compact, ","+interceptMihomoProxyName) {
+		if rawRule == interceptEgressRejectRule || ruleTouchesInterceptEgress(rawRule) || strings.HasSuffix(compact, ","+interceptMihomoProxyName) ||
+			(index >= analysis.PolicyStart && index < analysis.PolicyStart+analysis.PolicyCount) {
 			continue
 		}
 		kept = append(kept, item)
@@ -371,6 +471,12 @@ func renderInterceptRoutingRules(analysis interceptRoutingAnalysis, next interce
 	if captureInsertAt < len(analysis.Rules.Content) && matchesDenyRule(compactMihomoRule(analysis.Rules.Content[captureInsertAt].Value), blockQUICRuleBase, false) {
 		captureInsertAt++
 	}
+	policyNodes := make([]*yaml.Node, 0, len(next.Policy))
+	for _, rule := range next.Policy {
+		policyNodes = append(policyNodes, scalarNode(rule))
+	}
+	analysis.Rules.Content = insertNodes(analysis.Rules.Content, captureInsertAt, policyNodes...)
+	captureInsertAt += len(policyNodes)
 	nodes := make([]*yaml.Node, 0, len(next.Capture))
 	for _, rule := range uniqueSortedStrings(next.Capture) {
 		nodes = append(nodes, scalarNode(rule))
@@ -380,7 +486,7 @@ func renderInterceptRoutingRules(analysis interceptRoutingAnalysis, next interce
 }
 
 func materializeInterceptRoutingRules(rules interceptRoutingRules, matchTarget string) interceptRoutingRules {
-	out := interceptRoutingRules{Capture: append([]string(nil), rules.Capture...), Egress: append([]string(nil), rules.Egress...)}
+	out := interceptRoutingRules{Capture: append([]string(nil), rules.Capture...), Egress: append([]string(nil), rules.Egress...), Policy: append([]string(nil), rules.Policy...)}
 	for index, rule := range out.Egress {
 		if target, ok := interceptRuleTarget(rule); ok && target == interceptTerminalMatchTarget {
 			out.Egress[index] = strings.TrimSuffix(rule, ","+interceptTerminalMatchTarget) + "," + matchTarget
@@ -511,15 +617,16 @@ func validCanonicalInterceptRule(rule string) bool {
 	return false
 }
 
-func interceptRuleSubset(current, allowed []string) bool {
-	set := make(map[string]struct{}, len(allowed))
-	for _, rule := range allowed {
-		set[rule] = struct{}{}
-	}
+func interceptRuleOrderedSubset(current, allowed []string) bool {
+	allowedIndex := 0
 	for _, rule := range current {
-		if _, ok := set[rule]; !ok {
+		for allowedIndex < len(allowed) && allowed[allowedIndex] != rule {
+			allowedIndex++
+		}
+		if allowedIndex == len(allowed) {
 			return false
 		}
+		allowedIndex++
 	}
 	return true
 }

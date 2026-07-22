@@ -34,6 +34,15 @@ traffic:
   upstreamMappings:
     - host: api.example.com
       target: origin.example.net
+  routingRules:
+    - action: reject
+      domainSuffix: ads.example.com
+      allDomainKeywords:
+        - tracker
+      network: udp
+      destinationPort: 443
+    - action: direct
+      ipCIDR: 203.0.113.7/32
 
 settings:
   - key: mode
@@ -72,7 +81,7 @@ from 3 to 40 bytes. The short limit keeps every authenticated Telegram
 confirmation callback within its protocol boundary. Versions use semantic
 version syntax.
 
-## Traffic acquisition and egress
+## Traffic acquisition, routing, and egress
 
 `traffic.captureHosts` is the only way an extension can request client traffic.
 Entries are exact DNS names or constrained `*.example.com` wildcards. 5GPN
@@ -95,20 +104,45 @@ original HTTP Host and TLS SNI and rejects private, loopback, link-local, or
 otherwise unsafe IPv4 targets. Every upstream TCP or UDP flow returns through
 authenticated mihomo `intercept-egress`.
 
+`traffic.routingRules` is a separate global gateway capability. It does not
+acquire or decrypt traffic and it does not extend `captureHosts`. Each rule has
+exactly one action, `reject` or `direct`, and cannot name a proxy group. A rule
+may declare at most one of `domain`, `domainSuffix`, or `ipCIDR`, or may use a
+domain-keyword expression without one. `domainKeywords` contains 2–8 sorted,
+unique alternatives combined with OR; `allDomainKeywords` contains 1–8 sorted,
+unique requirements combined with AND. The two groups may be combined but may
+not repeat a keyword. A single keyword uses `allDomainKeywords`. Optional
+`network` is `tcp` or `udp`, and optional `destinationPort` is 1–65535. Empty
+declared fields, non-canonical stored values, unsafe matcher characters, and
+duplicate normalized rules are rejected.
+
+An extension may declare at most 256 rules, and enabled extensions may declare
+at most 2048 in total. Rules follow explicit extension execution order and
+mihomo first-match semantics. They are published after the fixed gateway
+UDP/443 guard and before `MODULE-INTERCEPT` capture rules, so a reviewed
+`direct` match deliberately bypasses both the normal operator target and
+sidecar capture. They exist only while both the extension and MITM master are
+enabled. The one enable confirmation lists every normalized rule and authorizes
+the complete snapshot; there is no second routing-only confirmation. Reordering
+requires a before/after confirmation because it can change action, egress, and
+global routing precedence. Rules affect only traffic that reaches mihomo on the
+DNS-steering gateway; they cannot block a hard-coded IP path that bypasses it.
+
 An extension may declare `requirements.egressGroup.required: true`, but the
-manifest and script never name or choose a group. The operator selects one
+manifest and script never name or choose an arbitrary group. The operator selects one
 existing mihomo proxy group or `DIRECT` before enable. Extensions without that requirement
 use the operator's terminal mihomo target unless an optional binding was
 selected. Ordered, host-and-port-scoped `intercept-egress` rules enforce the
 binding, and the first matching bound extension in the operator's explicit
 execution order wins. A missing or removed group makes the extension not ready
-and never silently falls back to DIRECT or another group.
+and never silently falls back to DIRECT or another group. A separately reviewed
+`routingRules` action may still explicitly select `direct` for its own matcher.
 
 The same execution order is used for request and response actions, top to
 bottom. Every action sees the output produced by earlier actions in its phase.
 Import appends an extension to the order; delete removes it; the Console and
 trusted private-chat Telegram bot can move an extension up or down with a
-revision-protected complete reorder.
+revision-protected, explicitly confirmed complete reorder.
 
 ## Origin-scoped network permission
 
@@ -183,6 +217,7 @@ function transform(context) {
     response: {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
+      trailers: { 'Grpc-Status': '0' },
       body: '{"ok":true}',
     },
   }
@@ -199,6 +234,7 @@ context.request.headers
 context.request.body          # only when bodyMode requests it
 context.response.status       # response actions only
 context.response.headers      # response actions only
+context.response.trailers     # response actions only
 context.response.body         # response actions only when requested
 context.settings
 context.storage               # only with persistentStorage permission
@@ -210,6 +246,14 @@ A response action may return only a `response` patch. Either phase may return
 `{abort: true}`, `null`, or `undefined`. Unknown result fields fail closed.
 Changed request URLs must remain inside that action's extension capture-host
 boundary.
+
+Response trailers are exposed after the upstream body is read and may be
+replaced through `response.trailers`. Request patches cannot create trailers.
+Trailer names and values use the same bounded, control-character-safe shape as
+headers, while framing and otherwise forbidden trailer fields are rejected.
+The sidecar declares and publishes them correctly over HTTP/1.1, HTTP/2, and
+HTTP/3, including when an H2/H3 upstream did not announce them before an H1
+downstream response starts.
 
 Scripts receive console logging but no ambient network, filesystem, process,
 timer, socket, module loader, or Go object. The optional storage object exposes
@@ -225,8 +269,8 @@ const result = context.network.request({
 })
 ```
 
-The returned object contains `url`, `status`, `headers`, binary `body`, and a
-`text` field when the body is valid UTF-8. Non-2xx responses are returned
+The returned object contains `url`, `status`, `headers`, `trailers`, binary
+`body`, and a `text` field when the body is valid UTF-8. Non-2xx responses are returned
 normally; permission, transport, or bound failures throw an exception that the
 script may catch.
 
@@ -256,7 +300,10 @@ parser and verifies the index's manifest and script SHA-256 digests, byte sizes,
 identity, and derived capability summary. A mismatch aborts before local state
 changes. A successful selection creates the ordinary disabled immutable
 snapshot and still requires the complete settings, permission, capture-host,
-execution-order, and egress review described above. Marketplace descriptions,
+routing-rule, execution-order, and egress review described above. The
+marketplace capability summary carries a required `routingRuleCount`, but the
+actual normalized rules come only from the refetched manifest snapshot.
+Marketplace descriptions,
 tags, and licenses are informational and do not replace source review.
 
 An update check refetches only the installed manifest URL. The candidate must
@@ -265,7 +312,7 @@ version, snapshot digest, capture hosts, actions, and settings before
 replacement. Replacement requires the current extension to be disabled, refetches the exact
 reviewed digest, preserves still-valid setting values by key and type, and
 leaves the new snapshot disabled. Enabling reviews capture hosts, network
-origins, execution position, and the current operator egress binding before
+origins, every exact normalized routing rule, execution position, and the current operator egress binding before
 the transaction publishes certificates, mihomo rules, sidecar state, and the
 DNS overlay.
 
@@ -284,7 +331,7 @@ Browsing and update checks may be read-only, but every state-changing Telegram
 action uses a two-step review. The bot first renders the complete normalized
 impact relevant to the operation: source, identity, old and new versions,
 immutable snapshot digest, settings, capture hosts, permissions, exact network
-origins, execution position, operator egress binding, and action match/execution
+origins, exact routing rules, execution position, operator egress binding, and action match/execution
 metadata with script digests, plus the resulting enabled/runtime state. Script
 bodies remain available through
 the separate authenticated snapshot review rather than being placed in every
@@ -306,7 +353,10 @@ requires a new review.
 Every review of a candidate or installed extension lists each declared network
 origin. Before enable, it also states that the script can send any decrypted
 request, response, setting, or storage data visible to it to every listed
-origin. Approval of one immutable snapshot never grants a changed origin set.
+origin. Enable review uses the same single confirmation for the complete
+snapshot, including all listed routing rules. Reorder review shows the complete
+before/after order and warns that routing first-match may change. Approval of
+one immutable snapshot never grants a changed origin or routing-rule set.
 
 Project-maintained examples, including Apple WLOC, live in the separate
 `moooyo/5gpn-extensions` catalog. The core repository intentionally contains no

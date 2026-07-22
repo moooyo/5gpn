@@ -618,13 +618,14 @@ func marketplaceSourceReviewHTML(source marketplaceSourceView) string {
 	for index, entry := range source.Entries {
 		fmt.Fprintf(&text,
 			"\n\n<b>条目 %d/%d</b>\n名称：<b>%s</b>\nID：<code>%s</code>\n版本：<code>%s</code>\n描述：%s\n许可证：<code>%s</code>\nManifest URL：<code>%s</code>\nManifest 摘要：<code>%s</code>"+
-				"\n能力：<code>%d</code> capture hosts · <code>%d</code> actions · <code>%d</code> settings · <code>%d</code> mappings · storage=<code>%t</code> · egress-required=<code>%t</code>",
+				"\n能力：<code>%d</code> capture hosts · <code>%d</code> actions · <code>%d</code> settings · <code>%d</code> mappings · <code>%d</code> global routing rules · storage=<code>%t</code> · egress-required=<code>%t</code>",
 			index+1, len(source.Entries),
 			html.EscapeString(entry.Name), html.EscapeString(entry.ID), html.EscapeString(entry.Version),
 			html.EscapeString(entry.Description), html.EscapeString(entry.License.SPDX),
 			html.EscapeString(entry.ManifestURL), html.EscapeString(entry.ManifestDigest),
 			entry.Capabilities.CaptureHostCount, entry.Capabilities.ActionCount,
 			entry.Capabilities.SettingCount, entry.Capabilities.UpstreamMappingCount,
+			entry.Capabilities.RoutingRuleCount,
 			entry.Capabilities.PersistentStorage, entry.Capabilities.EgressGroupRequired,
 		)
 		text.WriteString("\n声明的 network origins（仅市场元数据；安装与启用仍需独立审查）：")
@@ -855,8 +856,8 @@ func (bt *Bot) handleBotExtensionEntryCallback(
 	text.WriteString(html.EscapeString(entry.Description))
 	text.WriteString(fmt.Sprintf("\n\n来源：<b>%s</b>\nID：<code>%s</code>\n许可证：<code>%s</code>\nManifest：<code>%s</code>",
 		html.EscapeString(source.Name), html.EscapeString(entry.ID), html.EscapeString(entry.License.SPDX), html.EscapeString(entry.ManifestDigest)))
-	text.WriteString(fmt.Sprintf("\n\n能力：<code>%d</code> hosts · <code>%d</code> actions · <code>%d</code> settings · <code>%d</code> mappings",
-		entry.Capabilities.CaptureHostCount, entry.Capabilities.ActionCount, entry.Capabilities.SettingCount, entry.Capabilities.UpstreamMappingCount))
+	text.WriteString(fmt.Sprintf("\n\n能力：<code>%d</code> hosts · <code>%d</code> actions · <code>%d</code> settings · <code>%d</code> mappings · <code>%d</code> global routing rules",
+		entry.Capabilities.CaptureHostCount, entry.Capabilities.ActionCount, entry.Capabilities.SettingCount, entry.Capabilities.UpstreamMappingCount, entry.Capabilities.RoutingRuleCount))
 	if len(entry.Capabilities.NetworkOrigins) > 0 {
 		text.WriteString("\n\n")
 		text.WriteString(botExtensionNetworkRiskHTML(entry.Capabilities.NetworkOrigins))
@@ -1136,12 +1137,30 @@ func botExtensionCandidateReviewHTML(module interceptModuleView) string {
 			text.WriteString("</code>")
 		}
 	}
+	if len(module.RoutingRules) > 0 {
+		text.WriteString("\nGlobal routing rules：")
+		text.WriteString(botExtensionRoutingRulesHTML(module.RoutingRules))
+	}
 	if module.EgressGroupRequired && module.EgressGroup == "" {
 		text.WriteString("\n需要管理员选择 mihomo 出口组后才能启用。")
 	}
 	if len(module.NetworkOrigins) > 0 {
 		text.WriteString("\n\n")
 		text.WriteString(botExtensionNetworkRiskHTML(module.NetworkOrigins))
+	}
+	return text.String()
+}
+
+func botExtensionRoutingRulesHTML(rules []interceptRoutingRule) string {
+	if len(rules) == 0 {
+		return "<i>无</i>"
+	}
+	var text strings.Builder
+	for _, rule := range rules {
+		body, _ := json.Marshal(rule)
+		text.WriteString("\n• <code>")
+		text.WriteString(html.EscapeString(string(body)))
+		text.WriteString("</code>")
 	}
 	return text.String()
 }

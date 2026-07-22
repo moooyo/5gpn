@@ -36,9 +36,13 @@ const (
 	maxInterceptResourceURL   = 4096
 	maxInterceptSettingValue  = 64 << 10
 	maxInterceptEgressGroup   = 128
+	maxInterceptRoutingRules  = 256
+	maxInterceptActiveRoutes  = 2048
+	maxInterceptRouteKeywords = 8
 )
 
 var nativeExtensionIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{1,126}[a-z0-9])$`)
+var nativeExtensionRouteKeywordPattern = regexp.MustCompile(`^[a-z0-9._-]+$`)
 
 type interceptModuleSource struct {
 	URL    string `json:"url,omitempty"`
@@ -103,6 +107,132 @@ type interceptHostMapping struct {
 	Target  string `json:"target"`
 }
 
+// interceptRoutingRule is the normalized, reviewable subset of mihomo routing
+// that an enabled extension may request. It deliberately cannot name a proxy
+// group: activation can only reject matching traffic or bypass the operator's
+// proxy selection with DIRECT after the operator confirms the impact.
+type interceptRoutingRule struct {
+	Action            string   `json:"action"`
+	Domain            string   `json:"domain,omitempty"`
+	DomainSuffix      string   `json:"domain_suffix,omitempty"`
+	DomainKeywords    []string `json:"domain_keywords,omitempty"`
+	AllDomainKeywords []string `json:"all_domain_keywords,omitempty"`
+	IPCIDR            string   `json:"ip_cidr,omitempty"`
+	Network           string   `json:"network,omitempty"`
+	DestinationPort   int      `json:"destination_port,omitempty"`
+}
+
+type interceptRoutingRuleList []interceptRoutingRule
+
+func (rules *interceptRoutingRuleList) UnmarshalJSON(body []byte) error {
+	if isJSONNull(body) {
+		return errors.New("routing_rules must not be null")
+	}
+	var decoded []interceptRoutingRule
+	if err := decodeStrictJSON(bytes.NewReader(body), &decoded); err != nil {
+		return err
+	}
+	*rules = decoded
+	return nil
+}
+
+type rawInterceptRoutingRule struct {
+	Action            json.RawMessage `json:"action"`
+	Domain            json.RawMessage `json:"domain"`
+	DomainSuffix      json.RawMessage `json:"domain_suffix"`
+	DomainKeywords    json.RawMessage `json:"domain_keywords"`
+	AllDomainKeywords json.RawMessage `json:"all_domain_keywords"`
+	IPCIDR            json.RawMessage `json:"ip_cidr"`
+	Network           json.RawMessage `json:"network"`
+	DestinationPort   json.RawMessage `json:"destination_port"`
+}
+
+// UnmarshalJSON preserves the distinction between an omitted optional field
+// and a declared null or empty value. The nested strict decode is intentional:
+// implementing this method must not bypass unknown-field or duplicate-key
+// rejection when a routing rule is decoded outside the complete document.
+func (rule *interceptRoutingRule) UnmarshalJSON(body []byte) error {
+	var raw rawInterceptRoutingRule
+	if err := decodeStrictJSON(bytes.NewReader(body), &raw); err != nil {
+		return err
+	}
+
+	var decoded interceptRoutingRule
+	if err := decodeStoredRoutingString(raw.Action, "action", &decoded.Action, true); err != nil {
+		return err
+	}
+	if err := decodeStoredRoutingString(raw.Domain, "domain", &decoded.Domain, false); err != nil {
+		return err
+	}
+	if err := decodeStoredRoutingString(raw.DomainSuffix, "domain_suffix", &decoded.DomainSuffix, false); err != nil {
+		return err
+	}
+	if err := decodeStoredRoutingStrings(raw.DomainKeywords, "domain_keywords", &decoded.DomainKeywords); err != nil {
+		return err
+	}
+	if err := decodeStoredRoutingStrings(raw.AllDomainKeywords, "all_domain_keywords", &decoded.AllDomainKeywords); err != nil {
+		return err
+	}
+	if err := decodeStoredRoutingString(raw.IPCIDR, "ip_cidr", &decoded.IPCIDR, false); err != nil {
+		return err
+	}
+	if err := decodeStoredRoutingString(raw.Network, "network", &decoded.Network, false); err != nil {
+		return err
+	}
+	if len(raw.DestinationPort) > 0 {
+		if isJSONNull(raw.DestinationPort) {
+			return errors.New("destination_port must not be null")
+		}
+		if err := json.Unmarshal(raw.DestinationPort, &decoded.DestinationPort); err != nil {
+			return fmt.Errorf("destination_port must be an integer: %w", err)
+		}
+		if decoded.DestinationPort == 0 {
+			return errors.New("destination_port must not be zero when declared")
+		}
+	}
+	*rule = decoded
+	return nil
+}
+
+func decodeStoredRoutingString(raw json.RawMessage, name string, target *string, required bool) error {
+	if len(raw) == 0 {
+		if required {
+			return fmt.Errorf("%s is required", name)
+		}
+		return nil
+	}
+	if isJSONNull(raw) {
+		return fmt.Errorf("%s must not be null", name)
+	}
+	if err := json.Unmarshal(raw, target); err != nil {
+		return fmt.Errorf("%s must be a string: %w", name, err)
+	}
+	if *target == "" {
+		return fmt.Errorf("%s must not be empty when declared", name)
+	}
+	return nil
+}
+
+func decodeStoredRoutingStrings(raw json.RawMessage, name string, target *[]string) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	if isJSONNull(raw) {
+		return fmt.Errorf("%s must not be null", name)
+	}
+	if err := json.Unmarshal(raw, target); err != nil {
+		return fmt.Errorf("%s must be an array of strings: %w", name, err)
+	}
+	if len(*target) == 0 {
+		return fmt.Errorf("%s must not be empty when declared", name)
+	}
+	return nil
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
 type interceptModuleSnapshot struct {
 	ID                  string                   `json:"id"`
 	Version             string                   `json:"extension_version"`
@@ -113,6 +243,7 @@ type interceptModuleSnapshot struct {
 	Source              interceptModuleSource    `json:"source"`
 	CaptureHosts        []string                 `json:"capture_hosts"`
 	HostMappings        []interceptHostMapping   `json:"upstream_mappings,omitempty"`
+	RoutingRules        interceptRoutingRuleList `json:"routing_rules,omitempty"`
 	Settings            []interceptModuleSetting `json:"settings,omitempty"`
 	Scripts             []interceptScriptRule    `json:"actions,omitempty"`
 	PersistentStorage   bool                     `json:"persistent_storage"`
@@ -134,6 +265,7 @@ type interceptModuleView struct {
 	Actions             []interceptModuleActionView `json:"actions"`
 	Settings            []interceptModuleSetting    `json:"settings,omitempty"`
 	HostMappings        []interceptHostMapping      `json:"upstream_mappings,omitempty"`
+	RoutingRules        []interceptRoutingRule      `json:"routing_rules,omitempty"`
 	PersistentStorage   bool                        `json:"persistent_storage"`
 	ExecutionOrder      int                         `json:"execution_order"`
 	NetworkOrigins      []string                    `json:"network_origins"`
@@ -182,6 +314,7 @@ func validateInterceptModules(modules []interceptModuleSnapshot) error {
 	}
 	seen := make(map[string]struct{}, len(modules))
 	activeMappings := make(map[string]string)
+	activeRoutingRules := 0
 	for index := range modules {
 		module := &modules[index]
 		if !validInterceptModuleID(module.ID) {
@@ -195,6 +328,10 @@ func validateInterceptModules(modules []interceptModuleSnapshot) error {
 			return fmt.Errorf("extension %q: %w", module.ID, err)
 		}
 		if module.Enabled {
+			activeRoutingRules += len(module.RoutingRules)
+			if activeRoutingRules > maxInterceptActiveRoutes {
+				return fmt.Errorf("enabled extensions exceed %d declared routing rules", maxInterceptActiveRoutes)
+			}
 			for _, mapping := range module.HostMappings {
 				if target, exists := activeMappings[mapping.Pattern]; exists && target != mapping.Target {
 					return fmt.Errorf("enabled extensions conflict on upstream mapping %q", mapping.Pattern)
@@ -268,6 +405,9 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 	if err := validateInterceptHostMappings(module.CaptureHosts, module.HostMappings); err != nil {
 		return err
 	}
+	if err := validateInterceptRoutingRules(module.RoutingRules); err != nil {
+		return err
+	}
 	totalScriptBytes := 0
 	seenActions := make(map[string]struct{}, len(module.Scripts))
 	for index, rule := range module.Scripts {
@@ -316,6 +456,99 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 		return errors.New("required extension settings must be configured before enable")
 	}
 	return nil
+}
+
+func validateInterceptRoutingRules(rules []interceptRoutingRule) error {
+	if len(rules) > maxInterceptRoutingRules {
+		return fmt.Errorf("routing_rules exceeds %d entries", maxInterceptRoutingRules)
+	}
+	seen := make(map[string]struct{}, len(rules))
+	for index, rule := range rules {
+		if err := validateInterceptRoutingRule(rule); err != nil {
+			return fmt.Errorf("routing rule %d: %w", index, err)
+		}
+		body, _ := json.Marshal(rule)
+		key := string(body)
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("routing rule %d duplicates an earlier rule", index)
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func validateInterceptRoutingRule(rule interceptRoutingRule) error {
+	if rule.Action != "reject" && rule.Action != "direct" {
+		return errors.New("action must be reject or direct")
+	}
+	primary := 0
+	if rule.Domain != "" {
+		primary++
+		if !validCanonicalInterceptRouteDomain(rule.Domain) {
+			return errors.New("domain must be one canonical exact hostname")
+		}
+	}
+	if rule.DomainSuffix != "" {
+		primary++
+		if !validCanonicalInterceptRouteDomain(rule.DomainSuffix) {
+			return errors.New("domain_suffix must be one canonical suffix")
+		}
+	}
+	if rule.IPCIDR != "" {
+		primary++
+		_, network, err := net.ParseCIDR(rule.IPCIDR)
+		if err != nil || network.String() != rule.IPCIDR {
+			return errors.New("ip_cidr must be canonical")
+		}
+	}
+	if primary > 1 || (primary == 0 && len(rule.DomainKeywords) == 0 && len(rule.AllDomainKeywords) == 0) {
+		return errors.New("declare exactly one of domain, domain_suffix, or ip_cidr, or at least one domain keyword")
+	}
+	if rule.IPCIDR != "" && (len(rule.DomainKeywords) > 0 || len(rule.AllDomainKeywords) > 0) {
+		return errors.New("ip_cidr cannot be combined with domain keywords")
+	}
+	if len(rule.DomainKeywords) > maxInterceptRouteKeywords || !sort.StringsAreSorted(rule.DomainKeywords) {
+		return fmt.Errorf("domain_keywords must be canonical, sorted, and contain at most %d entries", maxInterceptRouteKeywords)
+	}
+	if len(rule.DomainKeywords) == 1 {
+		return errors.New("a single domain keyword must use all_domain_keywords")
+	}
+	seenKeywords := make(map[string]struct{}, len(rule.DomainKeywords))
+	for _, keyword := range rule.DomainKeywords {
+		if keyword == "" || len(keyword) > 64 || keyword != strings.ToLower(strings.TrimSpace(keyword)) || !nativeExtensionRouteKeywordPattern.MatchString(keyword) {
+			return errors.New("domain_keywords contains an unsafe entry")
+		}
+		if _, duplicate := seenKeywords[keyword]; duplicate {
+			return errors.New("domain_keywords contains a duplicate")
+		}
+		seenKeywords[keyword] = struct{}{}
+	}
+	if len(rule.AllDomainKeywords) > maxInterceptRouteKeywords || !sort.StringsAreSorted(rule.AllDomainKeywords) {
+		return fmt.Errorf("all_domain_keywords must be canonical, sorted, and contain at most %d entries", maxInterceptRouteKeywords)
+	}
+	for _, keyword := range rule.AllDomainKeywords {
+		if keyword == "" || len(keyword) > 64 || keyword != strings.ToLower(strings.TrimSpace(keyword)) || !nativeExtensionRouteKeywordPattern.MatchString(keyword) {
+			return errors.New("all_domain_keywords contains an unsafe entry")
+		}
+		if _, duplicate := seenKeywords[keyword]; duplicate {
+			return errors.New("routing rule repeats a keyword across any/all groups")
+		}
+		seenKeywords[keyword] = struct{}{}
+	}
+	if rule.Network != "" && rule.Network != "tcp" && rule.Network != "udp" {
+		return errors.New("network must be tcp or udp")
+	}
+	if rule.DestinationPort < 0 || rule.DestinationPort > 65535 {
+		return errors.New("destination_port must be 1 to 65535 when set")
+	}
+	return nil
+}
+
+func validCanonicalInterceptRouteDomain(value string) bool {
+	return value == strings.TrimSpace(value) &&
+		value == strings.ToLower(value) &&
+		!strings.HasSuffix(value, ".") &&
+		isValidDomain(value)
 }
 
 func validateInterceptActionMatch(captureHosts []string, phase string, match interceptActionMatch) error {
@@ -694,7 +927,7 @@ func validateInterceptHostPattern(raw string) error {
 }
 
 func normalizeInterceptHostPattern(raw string) (string, error) {
-	host := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(raw, ".")))
+	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
 	if err := validateInterceptHostPattern(host); err != nil {
 		return "", err
 	}

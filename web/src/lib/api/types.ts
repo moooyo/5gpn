@@ -188,6 +188,16 @@ export interface InterceptModuleAction {
   max_body_bytes: number
 }
 export interface InterceptHostMapping { host: string; target: string }
+export interface InterceptRoutingRule {
+  action: 'reject' | 'direct'
+  domain?: string
+  domain_suffix?: string
+  domain_keywords?: string[]
+  all_domain_keywords?: string[]
+  ip_cidr?: string
+  network?: 'tcp' | 'udp'
+  destination_port?: number
+}
 export interface InterceptModule {
   id: string
   extension_version: string
@@ -201,6 +211,7 @@ export interface InterceptModule {
   actions?: InterceptModuleAction[]
   settings?: InterceptModuleSetting[]
   upstream_mappings?: InterceptHostMapping[]
+  routing_rules?: InterceptRoutingRule[]
   persistent_storage: boolean
   source_url?: string
   source_digest: string
@@ -258,6 +269,7 @@ export interface MarketplaceEntryCapabilities {
   persistent_storage: boolean
   upstream_mapping_count: number
   egress_group_required: boolean
+  routing_rule_count: number
 }
 export interface MarketplaceEntryLicense { spdx: string; url?: string }
 export interface MarketplaceEntry {

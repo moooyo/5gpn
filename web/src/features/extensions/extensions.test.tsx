@@ -46,6 +46,7 @@ const CLEANER: InterceptModule = {
   description: 'Native response action fixture.', enabled: false, ready: true, reason: undefined,
   capture_hosts: ['api.example.com'], script_count: 1, settings: [], persistent_storage: false,
   upstream_mappings: [{ host: 'api.example.com', target: 'origin.example.net' }],
+  routing_rules: [{ action: 'reject', domain_suffix: 'ads.example.com', network: 'udp' }],
   source_url: 'https://extensions.example.test/clean.yaml', source_digest: 'b'.repeat(64), snapshot_digest: 'b'.repeat(64), imported_at: '2026-07-18T00:00:00Z',
   execution_order: 2, network_origins: ['https://origin.example.net'], egress_group_required: true, egress_group: 'Proxies',
 }
@@ -100,10 +101,14 @@ beforeEach(async () => {
 
 describe('ExtensionsPage native extension contract', () => {
   it('renders native extension snapshots', async () => {
+    const user = userEvent.setup()
     renderPage()
     expect(await screen.findByText('Response Cleaner')).toBeInTheDocument()
     expect(screen.getByText('接管 · 1')).toBeInTheDocument()
     expect(screen.getByText('上游映射 · 1')).toBeInTheDocument()
+    expect(screen.getByText('路由规则 · 1')).toBeInTheDocument()
+    await user.click(screen.getByText('查看精确路由规则 · 1'))
+    expect(screen.getByText('{"action":"reject","domain_suffix":"ads.example.com","network":"udp"}')).toBeVisible()
     expect(screen.getByRole('link', { name: /打开插件目录/ })).toHaveAttribute('href', VIEW.catalog_url)
     expect(screen.queryByTestId('extension-traffic-contract')).not.toBeInTheDocument()
     expect(screen.queryByRole('tab', { name: '插件市场' })).not.toBeInTheDocument()
@@ -117,6 +122,8 @@ describe('ExtensionsPage native extension contract', () => {
     const dialog = await screen.findByRole('dialog')
     expect(dialog).toHaveTextContent('可以把它读取到的解密请求、响应、设置和存储数据发送到以下地址')
     expect(within(dialog).getByText('https://origin.example.net')).toHaveClass('min-w-0', 'max-w-full', 'break-all')
+    expect(dialog).toHaveTextContent('本次启用确认同时授权这些已审查的 REJECT/DIRECT 规则')
+    expect(dialog).toHaveTextContent('{"action":"reject","domain_suffix":"ads.example.com","network":"udp"}')
     await user.click(within(dialog).getByRole('button', { name: '启用' }))
     await waitFor(() => expect(api.putInterceptModule).toHaveBeenCalledWith(CLEANER.id, { revision: VIEW.revision, enabled: true }))
   })
@@ -177,12 +184,37 @@ describe('ExtensionsPage native extension contract', () => {
     expect(screen.queryByTestId(`host-group-${WLOC.id}`)).not.toBeInTheDocument()
   })
 
-  it('moves an extension with keyboard-accessible order controls', async () => {
+  it('reviews before and after order before moving an extension', async () => {
     const user = userEvent.setup()
     renderPage()
     const card = await screen.findByTestId(`extension-${CLEANER.id}`)
     await user.click(within(card).getByRole('button', { name: '上移 Response Cleaner' }))
+    const dialog = await screen.findByRole('dialog', { name: /确认调整执行顺序/ })
+    expect(api.reorderInterceptModules).not.toHaveBeenCalled()
+    expect(dialog).toHaveTextContent('插件 actions 的组合顺序')
+    expect(dialog).toHaveTextContent('重叠 egress 的选择优先级')
+    expect(dialog).toHaveTextContent('全局 REJECT/DIRECT 路由规则的优先级')
+    const before = within(dialog).getByTestId('extension-reorder-before')
+    const after = within(dialog).getByTestId('extension-reorder-after')
+    expect(within(before).getAllByRole('listitem')[0]).toHaveTextContent(WLOC.name)
+    expect(within(before).getAllByRole('listitem')[1]).toHaveTextContent(CLEANER.name)
+    expect(within(after).getAllByRole('listitem')[0]).toHaveTextContent(CLEANER.name)
+    expect(within(after).getAllByRole('listitem')[1]).toHaveTextContent(WLOC.name)
+    await user.click(within(dialog).getByRole('button', { name: '确认调整顺序' }))
     await waitFor(() => expect(api.reorderInterceptModules).toHaveBeenCalledWith(VIEW.revision, [CLEANER.id, WLOC.id]))
+  })
+
+  it('uses the same reorder confirmation without routing rules and cancels without an API call', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    const card = await screen.findByTestId(`extension-${WLOC.id}`)
+    expect(WLOC.routing_rules).toBeUndefined()
+    await user.click(within(card).getByRole('button', { name: '下移 Apple WLOC Location Override' }))
+    const dialog = await screen.findByRole('dialog', { name: /Apple WLOC Location Override/ })
+    expect(dialog).toHaveTextContent('即使某个插件没有声明路由规则')
+    await user.click(within(dialog).getByRole('button', { name: '取消' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /Apple WLOC Location Override/ })).not.toBeInTheDocument())
+    expect(api.reorderInterceptModules).not.toHaveBeenCalled()
   })
 
   it('locks every extension action while a reorder transaction is pending', async () => {
@@ -196,6 +228,9 @@ describe('ExtensionsPage native extension contract', () => {
     expect(wlocMoveDown).toBeEnabled()
 
     await user.click(within(cleanerCard).getByRole('button', { name: '上移 Response Cleaner' }))
+    const dialog = await screen.findByRole('dialog', { name: /确认调整执行顺序/ })
+    expect(wlocMoveDown).toBeEnabled()
+    await user.click(within(dialog).getByRole('button', { name: '确认调整顺序' }))
     await waitFor(() => expect(wlocMoveDown).toBeDisabled())
     expect(within(wlocCard).getByRole('button', { name: '设置 · 2' })).toBeDisabled()
     expect(wlocCard.parentElement).toHaveAttribute('aria-busy', 'true')
@@ -275,6 +310,7 @@ describe('ExtensionsPage native extension contract', () => {
     const dialog = await screen.findByRole('dialog', { name: /审查更新/ })
     expect(dialog).toHaveTextContent('v1.1.0')
     expect(within(dialog).getByText('https://origin.example.net')).toHaveClass('min-w-0', 'max-w-full', 'break-all')
+    expect(dialog).toHaveTextContent('{"action":"reject","domain_suffix":"ads.example.com","network":"udp"}')
     await user.click(within(dialog).getByRole('button', { name: '替换快照' }))
     await waitFor(() => expect(api.applyInterceptModuleUpdate).toHaveBeenCalledWith(CLEANER.id, VIEW.revision, candidate.snapshot_digest))
   })

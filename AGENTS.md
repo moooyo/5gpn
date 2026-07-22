@@ -28,11 +28,15 @@ plans, design handoffs, and git history are context only.
 - DNS policy is an ordered first-match list with block/direct/proxy intents and
   auto/direct/gateway fallback. It is DNS-only. The only pre-policy overlay is
   the active interception-host set published by the same certificate/mihomo
-  transaction; it cannot select egress. An extension may declare that an
-  operator-selected mihomo egress group is required, but the manifest and script
-  cannot name or change that group. The Console exposes only the narrow group
-  list needed for this binding; do not recreate policy-v2, drafts/generations,
-  node/selector APIs, or a generated mihomo config region.
+  transaction; it cannot select DNS egress. Separately, a reviewed native
+  manifest may declare bounded typed mihomo `REJECT` or `DIRECT` rules. Those
+  rules cannot name a proxy group, are shown exactly in the single enable
+  confirmation, and exist only while both the extension and MITM master are
+  enabled. An extension may also require an operator-selected mihomo egress
+  group, but the manifest and script cannot name or change that group. The
+  Console exposes only the narrow group list needed for this binding; do not
+  recreate policy-v2, drafts/generations, node/selector APIs, or a generated
+  mihomo config region.
 - `/etc/5gpn/mihomo/config.yaml` is fully operator-owned. Normal install,
   reinstall, and `configure` operations preserve a valid existing file. Only
   explicit reset may replace it, after `mihomo -t`, backup, and atomic rename.
@@ -129,10 +133,12 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
 - Theme controls live in the top bar profile menu and Settings appearance only.
 - Plugin modules live on the dedicated `/extensions` route. Keep immutable
   digests, typed settings, origin-scoped network permissions, operator egress
-  bindings, explicit execution order, capture-host allowlists, and the
-  snapshot/trust/traffic transaction visible. Enabling an extension with
-  network origins requires a risk confirmation that names every origin and
-  states that all data visible to the script can be sent there.
+  bindings, explicit execution order, capture-host allowlists, exact typed
+  routing rules, and the snapshot/trust/traffic transaction visible. Enabling
+  an extension uses one confirmation that includes every declared routing rule
+  and, when network origins exist, names every origin and states that all data
+  visible to the script can be sent there. Reordering also requires review
+  because it changes action, egress, and global routing first-match precedence.
   `/extensions/hosts` owns searchable, per-plugin capture-host and egress-winner
   auditing; do not move plugin management back into Settings.
 - Marketplace discovery lives on the separate top-level `/marketplace` route,

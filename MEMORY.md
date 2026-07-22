@@ -17,6 +17,18 @@ current pre-release contract, including trusted Telegram management, on
 - `traffic.captureHosts` is the sole traffic-acquisition permission. Action
   matchers and upstream mappings must be subsets of the same extension's
   capture hosts, and runtime checks repeat that ownership boundary.
+- `traffic.routingRules` is a separate, bounded, reviewable mihomo capability.
+  A rule may select one canonical exact domain, domain suffix, IPv4/IPv6 CIDR,
+  or bounded any/all domain-keyword expression, with optional TCP/UDP and
+  destination-port constraints. Its action is exactly `reject` or `direct`; it
+  cannot name a proxy group. Each extension may declare at most 256 rules and
+  enabled extensions may declare at most 2048 in total. Rules exist only while
+  both the extension and MITM master are enabled, follow explicit extension
+  order, and are published in the same rollback-safe mihomo transaction as the
+  capture block. One enable confirmation lists the exact normalized rules and
+  authorizes them together with the extension; there is no second routing-only
+  confirmation. Reordering requires its own review because it can change global
+  first-match behavior.
 - Native scripts define `transform(context)`. They receive structured
   request/response data, typed settings, console logging, optional bounded
   storage, and—only when explicitly declared and operator-confirmed—a
@@ -25,13 +37,15 @@ current pre-release contract, including trusted Telegram management, on
   network API. A permitted script can deliberately send any data visible to it
   to those origins, and every management surface must say so plainly before
   enable.
-- Extensions cannot name or change application egress. A manifest may require
-  an operator egress binding; the operator selects an existing mihomo group,
-  and ordered domain/port rules on the shared authenticated
-  `intercept-egress` listener enforce it. Missing or removed bindings fail
-  closed without a default fallback. The explicit extension execution order
-  determines both action composition and the first binding that wins for an
-  overlapping destination.
+- Extensions cannot name, inspect, or change arbitrary application egress
+  groups. A manifest may require an operator egress binding; the operator
+  selects an existing mihomo group, and ordered domain/port rules on the shared
+  authenticated `intercept-egress` listener enforce it. A separately reviewed
+  typed routing rule may bypass the normal operator target with `DIRECT`, but
+  cannot choose any other target. Missing or removed bindings fail closed
+  without a default fallback. The explicit extension execution order determines
+  action composition, the first binding that wins for an overlapping
+  destination, and global routing first-match precedence.
 - URL install and local add are separate actions. URL install accepts one HTTPS
   manifest and may snapshot relative HTTPS scripts. Local add accepts one
   pasted or uploaded manifest and uses inline or absolute HTTPS scripts. The
@@ -68,9 +82,10 @@ current pre-release contract, including trusted Telegram management, on
   one-use confirmation bound to the administrator, exact private chat,
   operation payload, current revision, and exact extension snapshot or
   marketplace index digest. Stale, replayed, cross-user, cross-chat, or
-  digest-mismatched confirmations fail closed. Reviews list every declared
-  network origin and explicitly warn that the script can send any visible
-  decrypted request, response, setting, or storage data there.
+  digest-mismatched confirmations fail closed. Enable reviews list every exact
+  normalized routing rule. Reviews also list every declared network origin and
+  explicitly warn that the script can send any visible decrypted request,
+  response, setting, or storage data there.
 - Telegram `location` editing accepts the client's native location message or
   explicit longitude, latitude, and accuracy. The bot warns that coordinates
   pass through Telegram. City search, the draggable OpenStreetMap point, and

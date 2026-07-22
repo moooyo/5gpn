@@ -102,11 +102,14 @@ The rule boundary is exact: eight base panel protocol/port rejects, the two
 zashboard deny-by-default rule, seven anti-loop destination guards, the ordered
 interception-egress domain/port binding block, the fail-closed
 `IN-NAME,intercept-egress,REJECT` terminator, zero or one canonical global
-UDP/443 reject, zero or more canonical extension-capture rules, and the terminal
-`MATCH`. Egress rules follow explicit extension execution order and use mihomo
-first-match semantics; capture rules use the reserved `MODULE-INTERCEPT` action
-and remain a contiguous, sorted block immediately after the optional global
-reject.
+UDP/443 reject, zero or more reviewed extension routing rules, zero or more
+canonical extension-capture rules, and the terminal `MATCH`. Egress and
+extension routing rules follow explicit extension execution order and use
+mihomo first-match semantics. Identical rendered routing rules are published
+once at their first declaration. Extension routing rules remain a contiguous
+reserved block after the optional global UDP/443 reject and before capture
+rules. Capture rules use the reserved `MODULE-INTERCEPT` action and remain a
+contiguous, sorted block immediately after that policy block.
 The anti-loop guards must follow the panel routes because
 mihomo resolves the synthetic console target through `hosts` before matching
 rules; moving those guards earlier would reject the legitimate console
@@ -142,7 +145,19 @@ continues to the operator's normal rule path. A hostname target must match
 the active extension set; a pure-IP SOCKS target is accepted only until the TLS or
 QUIC handshake supplies an allowlisted SNI. Unknown SNI fails closed.
 
-`captureHosts` is the sole traffic-acquisition permission. It accepts only
+An active extension may also publish normalized `traffic.routingRules` into
+the reserved mihomo transaction. Each rule has exactly one domain, domain
+suffix, IP CIDR, or bounded domain-keyword selector, optionally constrained by
+TCP/UDP and destination port. The only actions are `REJECT` and `DIRECT`; a
+manifest cannot name a proxy group. These are global gateway data-plane rules,
+not DNS policy and not traffic-acquisition permission. A matching `DIRECT` rule
+placed before the capture block therefore deliberately bypasses both normal
+operator selection and sidecar capture. The fixed global UDP/443 rejection
+still precedes extension rules. Each extension is limited to 256 declarations,
+and all enabled extensions together are limited to 2048. Hard-coded IP traffic
+that never reaches the DNS-steering gateway remains outside their reach.
+
+`captureHosts` remains the sole traffic-acquisition permission. It accepts only
 canonical exact domains and constrained `*.example.com` wildcards. Hosts are
 never inferred from a URL or path regular expression. Every action carries a
 second structured host matcher that must be a subset of its own extension's
@@ -190,8 +205,8 @@ documents, YAML aliases, anchors, and merge keys are rejected. A manifest
 declares stable metadata identity and semantic version, explicit capture hosts,
 optional public-domain or public-IPv4 upstream mappings, typed settings,
 permissions, optional exact HTTP(S) network origins, an optional
-operator-egress-group requirement, and structured request/response script
-actions. URL install accepts
+operator-egress-group requirement, optional bounded typed `REJECT`/`DIRECT`
+routing rules, and structured request/response script actions. URL install accepts
 one HTTPS manifest; local add accepts one pasted or uploaded manifest. A URL
 manifest may reference relative HTTPS script resources, while a local manifest
 must use inline script source or an absolute HTTPS resource.
@@ -263,6 +278,16 @@ the immutable snapshot. Every transformed TCP or UDP flow returns through authen
 `intercept-egress`, where ordered domain/port rules apply the first matching
 bound extension's group. Missing and removed required bindings fail closed
 without fallback.
+
+Routing declarations are immutable snapshot capability, while activation is an
+operator decision. Install and update always store the snapshot disabled. The
+single enable review lists every normalized routing rule together with the
+capture, script, storage, network-origin, and egress impact; confirming enable
+authorizes the complete snapshot once, without a second routing-only prompt.
+Changing execution order is separately confirmed because it can change action
+composition, egress winners, and overlapping global `REJECT`/`DIRECT`
+first-match results. Disable, MITM-master disable, or uninstall removes the
+published rules through the same structurally validated rollback transaction.
 
 The `5gpn-dns` systemd unit is softly ordered after mihomo (`Wants`/`After`),
 not coupled with `Requires` or `BindsTo`: a controller or data-plane failure
@@ -435,12 +460,14 @@ restores and reapplies the previous bytes. There is no separate ingress-capabili
 generated region, startup reconciliation, or daemon-owned YAML fragment; the
 result remains fully operator-owned and visible in the raw editor.
 
-The `MODULE-INTERCEPT` action and its contiguous rule block are reserved for the
-interception manager. A raw reset or safe partial deletion makes active extensions
-degraded and immediately removes their DNS overlay. A later explicit extension
-toggle may reconcile a missing/subset reserved block, but it refuses any extra,
-reordered, duplicate, non-canonical, or non-extension rule targeting the reserved
-action.
+The interception-egress, extension-routing, and `MODULE-INTERCEPT` contiguous
+rule blocks are reserved for the interception manager. A raw reset or safe
+partial deletion makes active extensions degraded and immediately removes their
+DNS overlay. A later explicit extension toggle may reconcile only an ordered
+subset of exact old-snapshot egress/capture rules and a prefix of exact old-
+snapshot routing rules. It refuses any extra, reordered, duplicate,
+non-canonical, or otherwise unowned rule, so reconciliation cannot claim or
+delete an operator rule merely because it sits near the reserved block.
 
 Interception extensions are managed through the authenticated
 `/api/interception/modules` surface. The global master, HTTP/2, and QUIC
@@ -469,7 +496,9 @@ the complete normalized impact relevant to the operation, including the source,
 identity, versions, immutable snapshot digest, changed settings, capture hosts,
 action match/execution metadata and script digests (but not script bodies),
 permissions, exact network origins, execution position, egress binding, and
-enabled/runtime transition. Long reviews may be split across protected
+enabled/runtime transition. Enable reviews also list every exact normalized
+global routing rule. Reorder reviews show the complete before/after order and
+state that overlapping routing first-match can change. Long reviews may be split across protected
 messages or a protected document, but the confirmation control is sent only
 after the complete review. The daemon stores only an opaque, short-lived,
 one-use confirmation reference in callback data. Its server-side record is bound
@@ -504,7 +533,7 @@ An active-extension, reorder, binding, or master enable/disable transaction
 holds the sidecar and mihomo store locks in a fixed order. It validates the
 candidate sidecar with the installed
 `5gpn-intercept --check-config`, structurally renders the reserved mihomo rule
-blocks, verifies every selected group exists, validates the complete YAML
+blocks, including reviewed extension routing rules, verifies every selected group exists, validates the complete YAML
 invariants, runs `mihomo -t`, and preserves
 the old bytes for rollback. When new SANs are needed, it atomically publishes
 the candidate sidecar document, waits for the root-owned certificate publisher
@@ -518,10 +547,10 @@ certificate SAN superset, but the runtime allowlist rejects disabled hosts.
 loopback addresses, and certificate paths across every API write. It also
 stores the MITM master and protocol settings plus immutable native extension,
 manifest, script, origin-permission, typed-setting, and capture-host snapshots,
-the complete execution-order permutation, and mutable operator egress-group
-bindings. Both request and response actions execute top-to-bottom in that
-order; the same order determines the first egress binding that wins for a
-shared domain and port. A raw mihomo PUT or reset cannot remove a group that is
+normalized routing-rule declarations, the complete execution-order permutation,
+and mutable operator egress-group bindings. Both request and response actions
+execute top-to-bottom in that order; the same order determines the first egress
+binding and first overlapping extension routing rule that wins. A raw mihomo PUT or reset cannot remove a group that is
 still referenced by any installed extension, including a disabled one. An
 out-of-band missing group makes routing not-ready; reconciliation withdraws the
 DNS overlay and never substitutes DIRECT or the terminal group.
@@ -682,7 +711,7 @@ Specialized live state remains in purpose-specific, atomically written files:
   and fixed paths are installer-owned; native extension installs store bounded
   immutable manifests and scripts, normalized capture hosts, structured action
   matchers, typed settings, exact network origins, permissions, upstream
-  mappings, enabled state, explicit execution order, and operator group
+  mappings, normalized typed routing rules, enabled state, explicit execution order, and operator group
   bindings.
   The global MITM master, HTTP/2 negotiation, and QUIC fallback protection live
   in the same document;
@@ -1014,6 +1043,13 @@ persistent-file sizes are bounded. Request and response bodies support omitted,
 string, or Uint8Array delivery as declared by `bodyMode`, plus bounded identity,
 gzip, deflate, and Brotli decoding. Upstream requests ask for identity encoding;
 transformed responses are returned uncompressed with corrected length headers.
+Response projections and patches include validated HTTP trailers, and a
+permitted synchronous network response exposes its trailers only after the
+bounded body has been read. Forbidden framing fields, invalid names, and
+control characters fail closed. Unmodified and transformed trailers are
+declared and published correctly across HTTP/1.1, HTTP/2, and HTTP/3, including
+an H2/H3-to-H1 conversion where upstream trailers were not announced in
+advance.
 At most two body-buffering transformation flows run concurrently; excess work
 fails closed with service unavailable instead of exceeding the sidecar cgroup.
 VM execution has a rule timeout, and regexp2's non-RE2 JavaScript fallback has
@@ -1078,11 +1114,14 @@ QUIC v1/v2 traffic and other variants are not guaranteed.
 Within the Web Console, the dedicated `/extensions` route owns installed native
 plugins. It shows immutable
 manifest/script digests, semantic version, normalized capture hosts, actions,
-permissions, exact network origins, typed settings, upstream mappings, explicit
-execution position, operator egress binding, and enabled/runtime state. Enabling a plugin with
-network permission opens a dedicated review that lists every origin and states
-that the plugin can send any decrypted request, response, setting, or storage
-data visible to it there. An authenticated,
+permissions, exact network origins, typed settings, upstream mappings, exact
+typed routing rules, explicit execution position, operator egress binding, and
+enabled/runtime state. Enabling uses one review for the complete snapshot. It
+lists every global routing rule and, when network permission exists, every
+origin while stating that the plugin can send any decrypted request, response,
+setting, or storage data visible to it there. Reordering opens a separate
+before/after review because it changes action, egress, and global routing
+precedence. An authenticated,
 on-demand detail read exposes the exact stored manifest and script bodies for
 review; list responses do not send those potentially large bodies. “Install
 from URL” and “Add locally” are separate dialogs with no source-mode switch.
@@ -1105,7 +1144,7 @@ search and truthful sorting, and supports adding, refreshing, and removing
 explicit sources. An operator may assign a bounded local display name; that
 alias never replaces or authenticates the marketplace metadata identity. Each
 entry shows bounded descriptive metadata, declared capability counts, license,
-source domain, and manifest digest. Selecting Install first confirms the cached
+source domain, manifest digest, and the required routing-rule count. Selecting Install first confirms the cached
 scope, then the daemon refetches and verifies the exact manifest and scripts;
 success ends in review of the actual disabled immutable snapshot. Remote images,
 browser-side marketplace fetches, invented popularity/author claims, and

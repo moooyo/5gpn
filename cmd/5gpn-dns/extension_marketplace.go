@@ -104,6 +104,7 @@ type marketplaceCapabilities struct {
 	PersistentStorage    bool     `json:"persistentStorage"`
 	UpstreamMappingCount int      `json:"upstreamMappingCount"`
 	EgressGroupRequired  bool     `json:"egressGroupRequired"`
+	RoutingRuleCount     *int     `json:"routingRuleCount"`
 }
 
 type marketplaceSourceSnapshot struct {
@@ -159,6 +160,7 @@ type marketplaceCapabilitiesView struct {
 	PersistentStorage    bool     `json:"persistent_storage"`
 	UpstreamMappingCount int      `json:"upstream_mapping_count"`
 	EgressGroupRequired  bool     `json:"egress_group_required"`
+	RoutingRuleCount     int      `json:"routing_rule_count"`
 }
 
 type ExtensionMarketplaceStore struct {
@@ -800,6 +802,7 @@ func marketplaceSourceViewFromSnapshot(source marketplaceSourceSnapshot) marketp
 			SettingCount: entry.Capabilities.SettingCount, NetworkOrigins: append([]string{}, entry.Capabilities.NetworkOrigins...),
 			PersistentStorage: entry.Capabilities.PersistentStorage, UpstreamMappingCount: entry.Capabilities.UpstreamMappingCount,
 			EgressGroupRequired: entry.Capabilities.EgressGroupRequired,
+			RoutingRuleCount:    *entry.Capabilities.RoutingRuleCount,
 		}
 		view.Entries = append(view.Entries, marketplaceEntryView{
 			ID: entry.ID, Name: entry.Name, Version: entry.Version, Description: entry.Description,
@@ -1066,10 +1069,11 @@ func validateNormalizedMarketplaceIndex(index marketplaceIndex) error {
 			return fmt.Errorf("entry %q resources exceed %d bytes", entry.ID, maxInterceptScriptTotal)
 		}
 		capabilities := entry.Capabilities
-		if capabilities.CaptureHostCount < 1 || capabilities.CaptureHostCount > maxInterceptModuleHosts ||
+		if capabilities.RoutingRuleCount == nil || capabilities.CaptureHostCount < 1 || capabilities.CaptureHostCount > maxInterceptModuleHosts ||
 			capabilities.ActionCount < 0 || capabilities.ActionCount > maxInterceptModuleRules ||
 			capabilities.SettingCount < 0 || capabilities.SettingCount > maxInterceptSettings ||
 			capabilities.UpstreamMappingCount < 0 || capabilities.UpstreamMappingCount > maxInterceptModuleRules ||
+			*capabilities.RoutingRuleCount < 0 || *capabilities.RoutingRuleCount > maxInterceptRoutingRules ||
 			capabilities.ActionCount+capabilities.UpstreamMappingCount < 1 ||
 			capabilities.ActionCount+capabilities.UpstreamMappingCount > maxInterceptModuleRules {
 			return fmt.Errorf("entry %q has invalid capability counts", entry.ID)
@@ -1164,6 +1168,7 @@ func validateMarketplaceInstall(_ marketplaceSourceSnapshot, entry marketplaceEn
 		capabilities.SettingCount != len(module.Settings) ||
 		capabilities.PersistentStorage != module.PersistentStorage ||
 		capabilities.UpstreamMappingCount != len(module.HostMappings) ||
+		capabilities.RoutingRuleCount == nil || *capabilities.RoutingRuleCount != len(module.RoutingRules) ||
 		capabilities.EgressGroupRequired != module.EgressGroupRequired ||
 		!stringSlicesEqual(capabilities.NetworkOrigins, module.NetworkOrigins) {
 		return errors.New("manifest capabilities mismatch")

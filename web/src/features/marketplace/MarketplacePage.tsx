@@ -185,6 +185,7 @@ function MarketplaceCard({ item, installed, busy, onInstall, onManage }: {
           <MetaChip icon={TagIcon} mono>{entry.manifest_digest.slice(0, 10)}…</MetaChip>
           {entry.capabilities.setting_count > 0 ? <MetaChip tone="indigo">{t('marketplace.settingCount', { count: entry.capabilities.setting_count })}</MetaChip> : null}
           {entry.capabilities.network_origins.length > 0 ? <MetaChip tone="cyan">{t('marketplace.networkCount', { count: entry.capabilities.network_origins.length })}</MetaChip> : null}
+          {(entry.capabilities.routing_rule_count ?? 0) > 0 ? <MetaChip tone="amber">{t('marketplace.routingCount', { count: entry.capabilities.routing_rule_count })}</MetaChip> : null}
           {entry.capabilities.persistent_storage ? <MetaChip tone="indigo">{t('marketplace.persistentStorage')}</MetaChip> : null}
           {entry.capabilities.egress_group_required ? <MetaChip tone="cyan">{t('marketplace.egressRequired')}</MetaChip> : null}
         </div>
@@ -545,6 +546,7 @@ export default function MarketplacePage() {
           <div className="rounded-[14px] bg-surface-container p-1.5">
             <ScopeRow icon={DnsIcon} label={t('marketplace.captureHosts')} value={pendingInstall.entry.capabilities.capture_host_count} tone="blue" />
             <ScopeRow icon={BoltIcon} label={t('marketplace.gatewayActions')} value={pendingInstall.entry.capabilities.action_count} tone="amber" />
+            <ScopeRow icon={NetworkIcon} label={t('marketplace.routingRules')} value={pendingInstall.entry.capabilities.routing_rule_count} tone="amber" />
             <ScopeRow icon={CloudIcon} label={t('marketplace.source')} value={hostFromURL(pendingInstall.entry.manifest_url)} />
             <ScopeRow icon={BalanceIcon} label={t('marketplace.license')} value={pendingInstall.entry.license?.spdx ?? t('marketplace.notDeclared')} />
           </div>

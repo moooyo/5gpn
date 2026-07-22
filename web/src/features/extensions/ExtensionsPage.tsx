@@ -54,7 +54,14 @@ import { LocationPicker, type LocationPoint } from './LocationPicker'
 
 type InstallMode = 'url' | 'local'
 type ExtensionFilter = 'all' | 'enabled' | 'capture' | 'local'
-type PendingAction = { kind: 'toggle' | 'delete'; module: InterceptModule } | null
+type PendingReorderAction = {
+  kind: 'reorder'
+  module: InterceptModule
+  revision: string
+  beforeOrder: string[]
+  afterOrder: string[]
+}
+type PendingAction = { kind: 'toggle' | 'delete'; module: InterceptModule } | PendingReorderAction | null
 const DEFAULT_EGRESS_GROUP = '__5gpn_ui_terminal_target__'
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -129,6 +136,7 @@ function ExtensionCard({
   const imported = module.imported_at ? new Intl.DateTimeFormat(i18n.language, { dateStyle: 'medium' }).format(new Date(module.imported_at)) : ''
   const settingsCount = module.settings?.length ?? 0
   const mappingsCount = module.upstream_mappings?.length ?? 0
+  const routingRuleCount = module.routing_rules?.length ?? 0
   const sourceLabel = sourceHost(module.source_url) || t('extensions.localSnapshot')
   const canArmWhileMasterOff = module.reason === 'mitm-disabled'
   const groupMissing = (module.egress_group_required && !module.egress_group) || (!!module.egress_group && !egressGroups.includes(module.egress_group))
@@ -170,12 +178,20 @@ function ExtensionCard({
             <ShieldLockIcon className="h-3.5 w-3.5" aria-hidden="true" /> {t('extensions.captureCount', { count: module.capture_hosts.length })}
           </button>
           {mappingsCount > 0 ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="cyan">{t('extensions.capabilityHost', { count: mappingsCount })}</Badge> : null}
+          {routingRuleCount > 0 ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber">{t('extensions.capabilityRouting', { count: routingRuleCount })}</Badge> : null}
           {module.persistent_storage ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="indigo">{t('extensions.capabilityStorage')}</Badge> : null}
           {trustWarning ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber">{t('extensions.trustPending')}</Badge> : null}
           {module.enabled && module.reason === 'mitm-disabled' ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber">{t('extensions.masterPending')}</Badge> : null}
           {module.reason === 'settings-required' ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="blue">{t('extensions.settingsRequired')}</Badge> : null}
           {groupMissing ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber"><WarningIcon className="mr-1 inline h-3.5 w-3.5" aria-hidden="true" />{t('extensions.egressGroupMissing')}</Badge> : null}
         </div>
+
+        {routingRuleCount > 0 ? <details className="group rounded-[10px] bg-[var(--md-sys-color-warning-container)] text-[var(--md-sys-color-on-warning-container)]" data-testid={`routing-rules-${module.id}`}>
+          <summary className="zds-state-layer cursor-pointer list-none rounded-[10px] px-3 py-2 text-[10.5px] font-semibold marker:hidden">{t('extensions.routingRulesInspect', { count: routingRuleCount })}</summary>
+          <div className="max-h-40 space-y-1.5 overflow-y-auto border-t border-[rgb(0_0_0_/_10%)] px-3 py-2.5">
+            {module.routing_rules!.map((rule, index) => <code key={`${index}:${JSON.stringify(rule)}`} className="block break-all rounded-[7px] bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-[9.5px]">{JSON.stringify(rule)}</code>)}
+          </div>
+        </details> : null}
 
         <div className="mt-auto flex min-w-0 flex-wrap items-center gap-1 border-t border-divider pt-3">
           <div className="flex shrink-0 items-center gap-0.5">
@@ -354,6 +370,7 @@ function ExtensionUpdateModal({
           <div className="flex flex-wrap items-center gap-2">
             <Badge tone="blue">{t('extensions.captureCount', { count: review.candidate.capture_hosts.length })}</Badge>
             <Badge tone="amber">{t('extensions.capabilityAction', { count: review.candidate.script_count })}</Badge>
+            {(review.candidate.routing_rules?.length ?? 0) > 0 ? <Badge tone="amber">{t('extensions.capabilityRouting', { count: review.candidate.routing_rules!.length })}</Badge> : null}
             {review.candidate.network_origins.length > 0 ? <Badge tone="indigo">{t('extensions.capabilityNetwork', { count: review.candidate.network_origins.length })}</Badge> : null}
             {review.candidate.egress_group_required ? <Badge tone="cyan">{t('extensions.egressGroupTitle')}</Badge> : null}
             {(review.candidate.settings?.length ?? 0) > 0 ? <Badge tone="indigo">{t('extensions.settingsAction', { count: review.candidate.settings?.length ?? 0 })}</Badge> : null}
@@ -368,6 +385,12 @@ function ExtensionUpdateModal({
             <div className="mb-2 text-[11px] font-medium text-text-faint">{t('extensions.networkOriginsTitle')}</div>
             <div className="flex max-h-36 flex-wrap gap-1.5 overflow-y-auto rounded-[12px] bg-[var(--md-sys-color-warning-container)] p-3 text-[var(--md-sys-color-on-warning-container)]">
               {review.candidate.network_origins.map((origin) => <code key={origin} title={origin} className="inline-block min-w-0 max-w-full break-all rounded-[7px] bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-[10px]">{origin}</code>)}
+            </div>
+          </div> : null}
+          {(review.candidate.routing_rules?.length ?? 0) > 0 ? <div>
+            <div className="mb-2 text-[11px] font-medium text-text-faint">{t('extensions.routingRulesTitle')}</div>
+            <div className="max-h-40 space-y-1.5 overflow-y-auto rounded-[12px] bg-[var(--md-sys-color-warning-container)] p-3 text-[var(--md-sys-color-on-warning-container)]">
+              {review.candidate.routing_rules!.map((rule, index) => <code key={`${index}:${JSON.stringify(rule)}`} className="block break-all rounded-[7px] bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-[10px]">{JSON.stringify(rule)}</code>)}
             </div>
           </div> : null}
           <p className="text-[10.5px] leading-5 text-text-faint">{t('extensions.updateSafety')}</p>
@@ -405,6 +428,66 @@ function EnableExtensionModal({
           </div>
         </section> : <section className="rounded-[14px] bg-surface-container-low p-4 text-[11.5px] text-text-soft"><div className="font-medium text-text-strong">{t('extensions.networkOriginsTitle')}</div><p className="mt-1">{t('extensions.networkOriginsNone')}</p></section>}
         {module.egress_group_required || module.egress_group ? <section className="rounded-[14px] bg-surface-container-low p-4"><div className="text-[11px] font-medium text-text-faint">{t('extensions.egressGroupTitle')}</div><code className="mt-1.5 block font-mono text-[12px] text-text-strong">{module.egress_group || t('extensions.egressGroupUnset')}</code></section> : null}
+        {(module.routing_rules?.length ?? 0) > 0 ? <section className="rounded-[14px] bg-[var(--md-sys-color-warning-container)] p-4 text-[11.5px] leading-5 text-[var(--md-sys-color-on-warning-container)]">
+          <div className="font-semibold">{t('extensions.routingRulesTitle')}</div>
+          <p className="mt-1">{t('extensions.routingRulesWarning')}</p>
+          <div className="mt-3 max-h-40 space-y-1.5 overflow-y-auto">
+            {module.routing_rules!.map((rule, index) => <code key={`${index}:${JSON.stringify(rule)}`} className="block break-all rounded-[7px] bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-[10px]">{JSON.stringify(rule)}</code>)}
+          </div>
+        </section> : null}
+      </div> : null}
+    </Modal>
+  )
+}
+
+function ReorderExtensionModal({
+  action,
+  modules,
+  onOpenChange,
+  onConfirm,
+}: {
+  action: PendingReorderAction | null
+  modules: InterceptModule[]
+  onOpenChange: (open: boolean) => void
+  onConfirm: () => void
+}) {
+  const { t } = useTranslation()
+  const names = new Map(modules.map((module) => [module.id, module.name]))
+
+  function renderOrder(order: string[], testID: string) {
+    return (
+      <ol className="space-y-1.5" data-testid={testID}>
+        {order.map((id, index) => (
+          <li key={id} className="flex min-w-0 items-center gap-2 rounded-[9px] bg-card px-2.5 py-2">
+            <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-surface-container text-[10px] font-semibold text-text-faint">{index + 1}</span>
+            <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-text-strong">{names.get(id) ?? id}</span>
+            <code className="max-w-[42%] truncate font-mono text-[9.5px] text-text-faint" title={id}>{id}</code>
+          </li>
+        ))}
+      </ol>
+    )
+  }
+
+  return (
+    <Modal
+      open={!!action}
+      onOpenChange={onOpenChange}
+      title={action ? t('extensions.reorderConfirmTitle', { name: action.module.name }) : ''}
+      className="w-[min(94vw,760px)]"
+      footer={<><Button type="button" variant="secondary" size="sm" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button><Button type="button" size="sm" onClick={onConfirm}>{t('extensions.reorderConfirmAction')}</Button></>}
+    >
+      {action ? <div className="space-y-4">
+        <p className="text-[12.5px] leading-6 text-text-soft">{t('extensions.reorderConfirmBody')}</p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <section className="min-w-0 rounded-[14px] bg-surface-container-low p-3">
+            <h3 className="mb-2 text-[11px] font-semibold text-text-faint">{t('extensions.reorderBefore')}</h3>
+            {renderOrder(action.beforeOrder, 'extension-reorder-before')}
+          </section>
+          <section className="min-w-0 rounded-[14px] bg-primary-container p-3">
+            <h3 className="mb-2 text-[11px] font-semibold text-on-primary-container">{t('extensions.reorderAfter')}</h3>
+            {renderOrder(action.afterOrder, 'extension-reorder-after')}
+          </section>
+        </div>
       </div> : null}
     </Modal>
   )
@@ -591,18 +674,26 @@ export default function ExtensionsPage() {
     }
   }
 
-  async function moveModule(module: InterceptModule, direction: -1 | 1) {
-    if (!view || !reorderModeAvailable || !beginModuleMutation(module.id)) return
-    const order = [...view.execution_order]
-    const index = order.indexOf(module.id)
+  function requestModuleMove(module: InterceptModule, direction: -1 | 1) {
+    if (!view || !reorderModeAvailable || mutationLock.current) return
+    const beforeOrder = [...view.execution_order]
+    const afterOrder = [...beforeOrder]
+    const index = afterOrder.indexOf(module.id)
     const target = index + direction
-    if (index < 0 || target < 0 || target >= order.length) {
-      finishModuleMutation()
+    if (index < 0 || target < 0 || target >= afterOrder.length) return
+    ;[afterOrder[index], afterOrder[target]] = [afterOrder[target], afterOrder[index]]
+    setPending({ kind: 'reorder', module, revision: view.revision, beforeOrder, afterOrder })
+  }
+
+  async function confirmModuleMove(action: PendingReorderAction) {
+    if (!view || view.revision !== action.revision || view.execution_order.join('\n') !== action.beforeOrder.join('\n')) {
+      toast.error(t('extensions.orderChanged'))
+      void load()
       return
     }
-    ;[order[index], order[target]] = [order[target], order[index]]
+    if (!beginModuleMutation(action.module.id)) return
     try {
-      setView(await api.reorderInterceptModules(view.revision, order))
+      setView(await api.reorderInterceptModules(action.revision, action.afterOrder))
       toast.success(t('extensions.orderSaved'))
     } catch (error) {
       toast.error(errorMessage(error, t('extensions.orderFailed')))
@@ -693,7 +784,7 @@ export default function ExtensionsPage() {
           <div className="relative min-w-0 sm:ml-auto sm:w-[300px] sm:flex-none"><SearchIcon className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-text-faint" aria-hidden="true" /><Input value={search} onChange={(event) => setSearch(event.target.value)} aria-label={t('extensions.search')} placeholder={t('extensions.searchPlaceholder')} className="pl-10" /></div>
         </div>
         {!reorderModeAvailable && view.modules.length > 1 ? <p role="status" data-testid="extension-order-hint" className="px-1 text-[10.5px] leading-4 text-text-faint">{t('extensions.orderUnavailableHint')}</p> : null}
-        {visibleModules.length > 0 ? <div className="space-y-3" aria-busy={busyID !== null}>{visibleModules.map((module) => <ExtensionCard key={module.id} module={module} busy={busyID !== null} trusted={acknowledged} egressGroups={view.available_egress_groups} reorderEnabled={reorderModeAvailable} total={view.modules.length} onMove={(selected, direction) => void moveModule(selected, direction)} onToggle={(selected) => setPending({ kind: 'toggle', module: selected })} onDelete={(selected) => setPending({ kind: 'delete', module: selected })} onInspect={(selected) => void inspectModule(selected)} onConfigure={setConfigTarget} onAudit={(selected) => void navigate(`/extensions/hosts?plugin=${encodeURIComponent(selected.id)}`)} onCheckUpdate={(selected) => void checkExtensionUpdate(selected)} />)}</div> : <Card className="p-10 text-center shadow-none"><div className="text-[13px] font-medium text-text-strong">{t('extensions.noMatches')}</div><div className="mt-1 text-[11.5px] text-text-faint">{t('extensions.noMatchesHint')}</div></Card>}
+        {visibleModules.length > 0 ? <div className="space-y-3" aria-busy={busyID !== null}>{visibleModules.map((module) => <ExtensionCard key={module.id} module={module} busy={busyID !== null} trusted={acknowledged} egressGroups={view.available_egress_groups} reorderEnabled={reorderModeAvailable} total={view.modules.length} onMove={requestModuleMove} onToggle={(selected) => setPending({ kind: 'toggle', module: selected })} onDelete={(selected) => setPending({ kind: 'delete', module: selected })} onInspect={(selected) => void inspectModule(selected)} onConfigure={setConfigTarget} onAudit={(selected) => void navigate(`/extensions/hosts?plugin=${encodeURIComponent(selected.id)}`)} onCheckUpdate={(selected) => void checkExtensionUpdate(selected)} />)}</div> : <Card className="p-10 text-center shadow-none"><div className="text-[13px] font-medium text-text-strong">{t('extensions.noMatches')}</div><div className="mt-1 text-[11.5px] text-text-faint">{t('extensions.noMatchesHint')}</div></Card>}
         </> : null}
 
       {showingHosts && view ? <><div className="flex items-center justify-between gap-3 px-1"><p className="text-[12.5px] text-text-faint">{t('extensions.hostAudit.intro')}</p><Button type="button" variant="secondary" size="sm" onClick={() => void navigate('/extensions')}>{t('extensions.backToCatalog')}</Button></div><HostAuditView view={view} settings={settings} moduleID={scopedModuleID} onClearModule={() => void navigate('/extensions/hosts')} /></> : null}
@@ -703,6 +794,7 @@ export default function ExtensionsPage() {
       <ExtensionSettingsModal module={configTarget} egressGroups={view?.available_egress_groups ?? []} onOpenChange={(open) => { if (!open) setConfigTarget(null) }} onSave={(module, nextSettings, egressGroup) => { setConfigTarget(null); void updateModule(module, { settings: nextSettings, ...(egressGroup !== undefined ? { egress_group: egressGroup } : {}) }, t('extensions.settingsSaved')) }} />
       <ExtensionUpdateModal review={updateReview} busy={updateBusy} onOpenChange={(open) => { if (!open) setUpdateReview(null) }} onApply={() => void applyExtensionUpdate()} />
       <EnableExtensionModal module={pending?.kind === 'toggle' && !pending.module.enabled ? pending.module : null} onOpenChange={(open) => { if (!open) setPending(null) }} onConfirm={() => { if (pending) void updateModule(pending.module, { enabled: true }, t('extensions.updated')); setPending(null) }} />
+      <ReorderExtensionModal action={pending?.kind === 'reorder' ? pending : null} modules={view?.modules ?? []} onOpenChange={(open) => { if (!open) setPending(null) }} onConfirm={() => { if (pending?.kind === 'reorder') void confirmModuleMove(pending); setPending(null) }} />
       <ConfirmDialog open={pending?.kind === 'toggle' && !!pending.module.enabled} onOpenChange={(open) => { if (!open) setPending(null) }} title={t('extensions.disableTitle', { name: pending?.module.name ?? '' })} description={t('extensions.disableBody')} confirmLabel={t('extensions.toggleOff')} cancelLabel={t('common.cancel')} danger onConfirm={() => { if (pending) void updateModule(pending.module, { enabled: false }, t('extensions.updated')); setPending(null) }} />
       <ConfirmDialog open={pending?.kind === 'delete'} onOpenChange={(open) => { if (!open) setPending(null) }} title={t('extensions.deleteTitle', { name: pending?.module.name ?? '' })} description={t('extensions.deleteBody')} confirmLabel={t('extensions.delete')} cancelLabel={t('common.cancel')} danger onConfirm={() => { if (pending) void deleteModule(pending.module); setPending(null) }} />
     </div>

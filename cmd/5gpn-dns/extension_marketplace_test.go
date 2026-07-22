@@ -126,6 +126,7 @@ actions:
 			http.NotFound(w, r)
 		}
 	}))
+	routingRuleCount := 0
 	index := marketplaceIndex{
 		APIVersion: marketplaceAPIVersion,
 		Kind:       marketplaceKind,
@@ -141,7 +142,7 @@ actions:
 			Resources: []marketplaceResource{{Path: "clean.js", URL: "./clean.js", SHA256: sha256Hex([]byte(fixture.script)), Size: int64(len(fixture.script))}},
 			Capabilities: marketplaceCapabilities{
 				CaptureHostCount: 1, ActionCount: 1, SettingCount: 0, NetworkOrigins: []string{},
-				PersistentStorage: false, UpstreamMappingCount: 0, EgressGroupRequired: false,
+				PersistentStorage: false, UpstreamMappingCount: 0, RoutingRuleCount: &routingRuleCount, EgressGroupRequired: false,
 			},
 		}},
 	}
@@ -372,6 +373,9 @@ func TestMarketplaceStrictSchemaAndBounds(t *testing.T) {
 		"duplicate key": func(body []byte) []byte {
 			return []byte(strings.Replace(string(body), `"kind":"ExtensionMarketplace"`, `"kind":"ExtensionMarketplace","Kind":"ExtensionMarketplace"`, 1))
 		},
+		"missing routing rule count": func(body []byte) []byte {
+			return []byte(strings.Replace(string(body), `,"routingRuleCount":0`, "", 1))
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := newMarketplaceFixture(t, nil)
@@ -535,7 +539,7 @@ func TestMarketplaceAPIViewOmitsInstallationInternals(t *testing.T) {
 			t.Fatalf("API view leaked internal field %s: %s", forbidden, encoded)
 		}
 	}
-	for _, required := range []string{`"recommended_url"`, `"metadata_name"`, `"snapshot_digest"`, `"manifest_url"`, `"manifest_digest"`, `"documentation_url"`, `"capture_host_count"`, `"network_origins"`} {
+	for _, required := range []string{`"recommended_url"`, `"metadata_name"`, `"snapshot_digest"`, `"manifest_url"`, `"manifest_digest"`, `"documentation_url"`, `"capture_host_count"`, `"network_origins"`, `"routing_rule_count"`} {
 		if !strings.Contains(encoded, required) {
 			t.Fatalf("API view omitted %s: %s", required, encoded)
 		}

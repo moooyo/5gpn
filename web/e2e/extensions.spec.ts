@@ -13,10 +13,15 @@ test('extension console installs and atomically toggles a native snapshot', asyn
   await expect(module.getByText('Response Cleaner')).toBeVisible()
   await expect(module.getByText('接管 · 1')).toBeVisible()
 
+  await module.getByRole('button', { name: '上移 Response Cleaner' }).click()
+  const reorderDialog = page.getByRole('dialog', { name: /确认调整执行顺序/ })
+  await expect(reorderDialog).toContainText('first-match')
+  await expect(reorderDialog).toContainText('调整前')
+  await expect(reorderDialog).toContainText('调整后')
   const reorderRequest = page.waitForRequest((request) =>
     request.url().endsWith('/api/interception/modules/reorder') && request.method() === 'PUT',
   )
-  await module.getByRole('button', { name: '上移 Response Cleaner' }).click()
+  await reorderDialog.getByRole('button', { name: '确认调整顺序' }).click()
   expect((await reorderRequest).postDataJSON()).toMatchObject({ execution_order: ['io.example.response-cleaner', 'io.5gpn.apple-wloc'] })
 
   await module.getByRole('switch').click()

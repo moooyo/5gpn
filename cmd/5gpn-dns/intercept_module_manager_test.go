@@ -173,6 +173,55 @@ func TestInterceptModuleManagerEnableDisablePublishesOneTransaction(t *testing.T
 	}
 }
 
+func TestInterceptModuleManagerExplicitToggleRepairsMissingOwnedRouting(t *testing.T) {
+	module := testModuleSnapshot()
+	module.Enabled = true
+	module.RoutingRules = []interceptRoutingRule{{Action: "reject", Domain: "ads.example.com"}}
+	manager, controller, _, _, mihomoPath := newInterceptManagerFixture(t, module)
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Modules[0].Ready || view.Modules[0].Reason == "" {
+		t.Fatalf("missing routing was not reported as degraded: %+v", view.Modules[0])
+	}
+	disabled := false
+	updated, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &disabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Modules[0].Enabled || controller.putCalls != 1 {
+		t.Fatalf("explicit repair result = %+v, apply calls=%d", updated.Modules[0], controller.putCalls)
+	}
+	mihomo := mustRead(t, mihomoPath)
+	if strings.Contains(mihomo, "ads.example.com") || strings.Contains(mihomo, "api.example.com),(DST-PORT") {
+		t.Fatalf("disabled repair retained extension-owned routing:\n%s", mihomo)
+	}
+}
+
+func TestInterceptModuleManagerRefusesToClaimUnexpectedPolicyRule(t *testing.T) {
+	module := testModuleSnapshot()
+	module.Enabled = true
+	module.RoutingRules = []interceptRoutingRule{{Action: "reject", Domain: "ads.example.com"}}
+	manager, controller, _, interceptPath, mihomoPath := newInterceptManagerFixture(t, module)
+	tampered := strings.Replace(mustRead(t, mihomoPath), "  - MATCH,Proxies\n", "  - DOMAIN,operator.example,DIRECT\n  - MATCH,Proxies\n", 1)
+	if err := os.WriteFile(mihomoPath, []byte(tampered), 0o660); err != nil {
+		t.Fatal(err)
+	}
+	beforeConfig := mustRead(t, interceptPath)
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled := false
+	if _, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &disabled}); !errors.Is(err, errInterceptModuleConflict) {
+		t.Fatalf("unexpected operator rule conflict = %v", err)
+	}
+	if controller.putCalls != 0 || mustRead(t, interceptPath) != beforeConfig || mustRead(t, mihomoPath) != tampered {
+		t.Fatal("failed reconciliation mutated operator or extension state")
+	}
+}
+
 func TestInterceptModuleManagerWaitsForCertificateWhenEnabledHostSetShrinks(t *testing.T) {
 	first := testModuleSnapshot()
 	second := testModuleSnapshot()

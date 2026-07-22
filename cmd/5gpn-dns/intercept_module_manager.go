@@ -865,6 +865,7 @@ func (m *InterceptModuleManager) mutate(
 	nextDocument.Modules = append([]interceptModuleSnapshot(nil), oldDocument.Modules...)
 	for index := range nextDocument.Modules {
 		nextDocument.Modules[index].NetworkOrigins = append([]string(nil), oldDocument.Modules[index].NetworkOrigins...)
+		nextDocument.Modules[index].RoutingRules = cloneInterceptRoutingRules(oldDocument.Modules[index].RoutingRules)
 		nextDocument.Modules[index].Settings = cloneInterceptSettings(oldDocument.Modules[index].Settings)
 		nextDocument.Modules[index].HostMappings = append([]interceptHostMapping(nil), oldDocument.Modules[index].HostMappings...)
 	}
@@ -907,7 +908,7 @@ func (m *InterceptModuleManager) mutate(
 		return interceptModulesView{}, fmt.Errorf("%w: mihomo and sidecar credentials differ", errInterceptModuleConflict)
 	}
 	analysis := analyzeInterceptRoutingDocument(oldMihomo, oldDocument)
-	if !analysis.Manageable {
+	if !analysis.Reconcileable {
 		return interceptModulesView{}, fmt.Errorf("%w: %s", errInterceptModuleConflict, analysis.Reason)
 	}
 	if err := validateInterceptEgressBindings(nextDocument, analysis.AvailableEgressGroups); err != nil {
@@ -1145,10 +1146,20 @@ func interceptModuleViewFromSnapshot(module interceptModuleSnapshot, ready bool,
 		CaptureHosts: append([]string(nil), module.CaptureHosts...), ScriptCount: len(module.Scripts),
 		Actions:  interceptModuleActionViews(module.Scripts),
 		Settings: cloneInterceptSettings(module.Settings), HostMappings: append([]interceptHostMapping(nil), module.HostMappings...),
+		RoutingRules:      cloneInterceptRoutingRules(module.RoutingRules),
 		PersistentStorage: module.PersistentStorage, NetworkOrigins: append([]string{}, module.NetworkOrigins...),
 		EgressGroupRequired: module.EgressGroupRequired, EgressGroup: module.EgressGroup, SourceURL: module.Source.URL,
 		SourceDigest: module.Source.Digest, SnapshotDigest: interceptModuleSnapshotDigest(module), ImportedAt: module.ImportedAt,
 	}
+}
+
+func cloneInterceptRoutingRules(rules []interceptRoutingRule) []interceptRoutingRule {
+	cloned := append([]interceptRoutingRule(nil), rules...)
+	for index := range cloned {
+		cloned[index].DomainKeywords = append([]string(nil), rules[index].DomainKeywords...)
+		cloned[index].AllDomainKeywords = append([]string(nil), rules[index].AllDomainKeywords...)
+	}
+	return cloned
 }
 
 func interceptModuleActionViews(actions []interceptScriptRule) []interceptModuleActionView {

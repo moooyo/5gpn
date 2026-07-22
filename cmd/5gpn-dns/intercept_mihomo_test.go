@@ -79,6 +79,135 @@ func TestInterceptMihomoRoutingUsesExecutionOrderAndDeduplicatesSelectors(t *tes
 	}
 }
 
+func TestInterceptMihomoRoutingRendersReviewedPolicyRulesInExecutionOrder(t *testing.T) {
+	document := interceptConfigDocument{
+		MITM:           interceptMITMSettings{Enabled: true},
+		ExecutionOrder: []string{"io.example.first", "io.example.second"},
+		Modules: []interceptModuleSnapshot{
+			{ID: "io.example.second", Enabled: true, CaptureHosts: []string{"two.example.com"}, RoutingRules: []interceptRoutingRule{
+				{Action: "direct", IPCIDR: "203.0.113.7/32"},
+			}},
+			{ID: "io.example.first", Enabled: true, CaptureHosts: []string{"one.example.com"}, RoutingRules: []interceptRoutingRule{
+				{Action: "reject", DomainSuffix: "chat.example.com", DomainKeywords: []string{"stun", "tracker"}, Network: "udp"},
+				{Action: "reject", Domain: "ads.example.com"},
+				{Action: "reject", DomainKeywords: []string{"ads", "tracker"}},
+			}},
+		},
+	}
+	routing := interceptMihomoRouting(document)
+	want := []string{
+		"AND,((DOMAIN-SUFFIX,chat.example.com),(OR,((DOMAIN-KEYWORD,stun),(DOMAIN-KEYWORD,tracker))),(NETWORK,UDP)),REJECT",
+		"DOMAIN,ads.example.com,REJECT",
+		"OR,((DOMAIN-KEYWORD,ads),(DOMAIN-KEYWORD,tracker)),REJECT",
+		"IP-CIDR,203.0.113.7/32,DIRECT,no-resolve",
+	}
+	if strings.Join(routing.Policy, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("policy rules = %v, want %v", routing.Policy, want)
+	}
+	base := testInterceptMihomoYAML([]string{interceptEgressRejectRule, "MATCH,Proxies"}, "Proxies")
+	analysis := analyzeInterceptRoutingDocument(base, document)
+	if !analysis.Reconcileable {
+		t.Fatalf("base routing is not reconcileable: %+v", analysis)
+	}
+	rendered, err := renderInterceptRoutingDocument(analysis, document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified := analyzeInterceptRoutingDocument(rendered, document)
+	if !verified.Manageable || !verified.Ready {
+		t.Fatalf("rendered routing rejected: %+v\n%s", verified, rendered)
+	}
+	for _, rule := range want {
+		if !strings.Contains(rendered, rule) {
+			t.Errorf("rendered config is missing %q", rule)
+		}
+	}
+}
+
+func TestAnalyzeInterceptRoutingReconcilesMissingPolicyButRejectsExtraRules(t *testing.T) {
+	document := interceptConfigDocument{
+		MITM:           interceptMITMSettings{Enabled: true},
+		ExecutionOrder: []string{"io.example.fixture"},
+		Modules: []interceptModuleSnapshot{{
+			ID: "io.example.fixture", Enabled: true, CaptureHosts: []string{"api.example.com"},
+			RoutingRules: []interceptRoutingRule{{Action: "reject", Domain: "ads.example.com"}},
+		}},
+	}
+	routing := materializeInterceptRoutingRules(interceptMihomoRouting(document), "Proxies")
+	missingRules := append([]string(nil), routing.Egress...)
+	missingRules = append(missingRules, interceptEgressRejectRule)
+	missingRules = append(missingRules, routing.Capture...)
+	missingRules = append(missingRules, "MATCH,Proxies")
+	missing := testInterceptMihomoYAML(missingRules, "Proxies")
+	missingAnalysis := analyzeInterceptRoutingDocument(missing, document)
+	if !missingAnalysis.Reconcileable || missingAnalysis.Manageable || missingAnalysis.Reason != "interception-policy-rules-out-of-sync" {
+		t.Fatalf("missing reviewed policy was not safely reconcileable: %+v", missingAnalysis)
+	}
+	restored, err := renderInterceptRoutingDocument(missingAnalysis, document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analysis := analyzeInterceptRoutingDocument(restored, document); !analysis.Manageable || !analysis.Ready {
+		t.Fatalf("restored routing did not verify: %+v\n%s", analysis, restored)
+	}
+
+	extraRules := append([]string(nil), routing.Egress...)
+	extraRules = append(extraRules, interceptEgressRejectRule)
+	extraRules = append(extraRules, routing.Policy...)
+	extraRules = append(extraRules, "DOMAIN,operator.example,DIRECT")
+	extraRules = append(extraRules, routing.Capture...)
+	extraRules = append(extraRules, "MATCH,Proxies")
+	extra := testInterceptMihomoYAML(extraRules, "Proxies")
+	extraAnalysis := analyzeInterceptRoutingDocument(extra, document)
+	if extraAnalysis.Reconcileable || extraAnalysis.Manageable || extraAnalysis.Reason != "interception-policy-rules-out-of-sync" {
+		t.Fatalf("unexpected operator rule was claimed by the extension transaction: %+v", extraAnalysis)
+	}
+	if _, err := renderInterceptRoutingDocument(extraAnalysis, document); err == nil {
+		t.Fatal("unexpected operator rule was removable by extension reconciliation")
+	}
+
+	extraEgressRules := append([]string{
+		"AND,((IN-NAME,intercept-egress),(DOMAIN,operator.example),(DST-PORT,443)),Proxies",
+	}, routing.Egress...)
+	extraEgressRules = append(extraEgressRules, interceptEgressRejectRule)
+	extraEgressRules = append(extraEgressRules, routing.Policy...)
+	extraEgressRules = append(extraEgressRules, routing.Capture...)
+	extraEgressRules = append(extraEgressRules, "MATCH,Proxies")
+	extraEgress := testInterceptMihomoYAML(extraEgressRules, "Proxies")
+	if analysis := analyzeInterceptRoutingDocument(extraEgress, document); analysis.Reconcileable || analysis.Reason != "interception-egress-rules-out-of-sync" {
+		t.Fatalf("unexpected canonical egress rule was claimable: %+v", analysis)
+	}
+
+	extraCaptureRules := append([]string(nil), routing.Egress...)
+	extraCaptureRules = append(extraCaptureRules, interceptEgressRejectRule)
+	extraCaptureRules = append(extraCaptureRules, routing.Policy...)
+	extraCaptureRules = append(extraCaptureRules, routing.Capture...)
+	extraCaptureRules = append(extraCaptureRules, "AND,((DOMAIN,operator.example),(DST-PORT,443)),MODULE-INTERCEPT")
+	extraCaptureRules = append(extraCaptureRules, "MATCH,Proxies")
+	extraCapture := testInterceptMihomoYAML(extraCaptureRules, "Proxies")
+	if analysis := analyzeInterceptRoutingDocument(extraCapture, document); analysis.Reconcileable || analysis.Reason != "interception-rules-out-of-sync" {
+		t.Fatalf("unexpected canonical capture rule was claimable: %+v", analysis)
+	}
+}
+
+func TestInterceptMihomoRoutingPolicyRequiresEnabledModuleAndMaster(t *testing.T) {
+	document := interceptConfigDocument{
+		ExecutionOrder: []string{"io.example.fixture"},
+		Modules: []interceptModuleSnapshot{{
+			ID: "io.example.fixture", Enabled: true, CaptureHosts: []string{"api.example.com"},
+			RoutingRules: []interceptRoutingRule{{Action: "reject", Domain: "ads.example.com"}},
+		}},
+	}
+	if routing := interceptMihomoRouting(document); len(routing.Policy) != 0 {
+		t.Fatalf("policy activated while MITM was disabled: %v", routing.Policy)
+	}
+	document.MITM.Enabled = true
+	document.Modules[0].Enabled = false
+	if routing := interceptMihomoRouting(document); len(routing.Policy) != 0 {
+		t.Fatalf("policy activated while extension was disabled: %v", routing.Policy)
+	}
+}
+
 func TestInterceptMihomoRoutingBoundExtensionWinsOverEarlierUnboundExtension(t *testing.T) {
 	document := interceptConfigDocument{
 		MITM:           interceptMITMSettings{Enabled: true},

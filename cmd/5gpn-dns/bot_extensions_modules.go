@@ -245,6 +245,10 @@ func botExtensionModuleDetailHTML(module interceptModuleView) string {
 			text.WriteString("</code>")
 		}
 	}
+	if len(module.RoutingRules) > 0 {
+		text.WriteString("\nGlobal routing rules：")
+		text.WriteString(botExtensionRoutingRulesHTML(module.RoutingRules))
+	}
 	if len(module.NetworkOrigins) > 0 {
 		text.WriteString("\n\n")
 		text.WriteString(botExtensionNetworkRiskHTML(module.NetworkOrigins))
@@ -304,7 +308,7 @@ func (bt *Bot) previewBotExtensionToggle(
 	if next {
 		kind = botExtensionPayloadEnable
 		action = "启用"
-		impact = "这会将插件设为 armed；MITM master 开启时会发布证书、mihomo capture 规则和 DNS 引流，并允许脚本读取命中的解密流量。"
+		impact = "这会将插件设为 armed；MITM master 开启时会发布证书、mihomo capture 规则、已审查的 REJECT/DIRECT 路由规则和 DNS 引流，并允许脚本读取命中的解密流量。"
 	}
 	payload := botExtensionStatePayload{
 		Kind:      kind,
@@ -386,8 +390,9 @@ func (bt *Bot) previewBotExtensionReorder(
 	}
 	prompt := "⚠️ <b>确认调整插件执行顺序？</b>\n插件：<b>" + html.EscapeString(module.Name) +
 		"</b>\n当前位置：<code>" + strconv.Itoa(index+1) + "</code>\n新位置：<code>" + strconv.Itoa(next+1) +
-		"</code>\n完整新顺序：" + botExtensionExecutionOrderHTML(view, order) +
-		"\n\n执行顺序同时决定 action composition，以及 capture host 重叠时第一个生效的出口绑定。"
+		"</code>\n完整旧顺序：" + botExtensionExecutionOrderHTML(view, view.ExecutionOrder) +
+		"\n完整新顺序：" + botExtensionExecutionOrderHTML(view, order) +
+		"\n\n执行顺序同时决定 action composition、capture host 重叠时第一个生效的出口绑定，以及重叠全局 REJECT/DIRECT 规则的 first-match 优先级。"
 	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
 }
 
@@ -418,6 +423,8 @@ func botExtensionExecutionOrderHTML(view interceptModulesView, order []string) s
 			egress = "operator 终端目标"
 		}
 		text.WriteString(html.EscapeString(egress))
+		text.WriteString("</code> · routing_rules=<code>")
+		text.WriteString(strconv.Itoa(len(module.RoutingRules)))
 		text.WriteString("</code>")
 		if len(module.NetworkOrigins) > 0 {
 			text.WriteString("\n   ")
