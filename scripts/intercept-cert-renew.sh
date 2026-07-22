@@ -212,7 +212,7 @@ load_desired_hosts() {
     while IFS= read -r host; do
         [[ "$host" =~ ^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || return 1
         ((count += 1))
-        (( count <= 256 )) || return 1
+        (( count <= 512 )) || return 1
     done < "$stage/hosts"
     return 0
 }

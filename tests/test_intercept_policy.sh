@@ -65,6 +65,8 @@ grep -Fq 'CaptureDNS' "$MODULE_TYPES" && grep -Fq 'json:"capture_dns' "$MODULE_T
     || fail "operator capture DNS binding is missing from the module schema"
 grep -Fq 'maxInterceptModuleHosts' "$MODULE_TYPES" && grep -Fq '= 512' "$MODULE_TYPES" \
     || fail "core capture-host bound is not 512"
+grep -Fq '(( count <= 512 ))' "$ROOT/scripts/intercept-cert-renew.sh" \
+    || fail "certificate publisher capture-host bound is not 512"
 grep -Fq 'maxModuleCaptureHosts = 512' "$SIDECAR_CONFIG" \
     && grep -Fq 'maxActionMatchHosts = 512' "$SIDECAR_CONFIG" \
     && grep -Fq 'maxCertificateHosts = 512' "$SIDECAR_CONFIG" \

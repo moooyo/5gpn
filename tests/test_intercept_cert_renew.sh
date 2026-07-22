@@ -42,6 +42,36 @@ ca_boundary_safe || fail "canonical root-owned interception CA tree was rejected
 tls_tree_safe || fail "empty canonical interception TLS tree was rejected"
 pass "canonical CA and TLS publication boundaries validate"
 
+# The root publisher must enforce the same 512-host contract as both Go
+# validators. Exercise the actual request parser so a stale shell-only bound
+# cannot reject a document already accepted by the control plane and sidecar.
+INTERCEPT_BIN="$TMP/fake-intercept"
+printf '%s\n' '{}' > "$CONFIG"
+chmod 0640 "$CONFIG"
+write_fake_certificate_request() {
+    local count="$1" index
+    {
+        printf '%064d\n' 0
+        for ((index = 0; index < count; index++)); do
+            printf 'h%03d.example.com\n' "$index"
+        done
+    } > "$TMP/request"
+    cat > "$INTERCEPT_BIN" <<EOF
+#!/usr/bin/env bash
+cat '$TMP/request'
+EOF
+    chmod 0755 "$INTERCEPT_BIN"
+}
+stage="$TMP/host-limit-stage"
+mkdir -p "$stage"
+write_fake_certificate_request 512
+load_desired_hosts || fail "certificate publisher rejected 512 hosts"
+write_fake_certificate_request 513
+if load_desired_hosts; then
+    fail "certificate publisher accepted 513 hosts"
+fi
+pass "certificate publisher enforces the shared 512-host bound"
+
 # A stale inherited descriptor must not be accepted merely because readlink
 # prints the same pathname after the lock file was replaced.
 : > "$LOCK_FILE"
