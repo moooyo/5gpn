@@ -24,6 +24,8 @@ import {
   SpeedIcon,
   StorefrontFilledIcon,
   StorefrontIcon,
+  TerminalFilledIcon,
+  TerminalIcon,
 } from '../components/icons'
 import { NAV_GROUPS, type NavIcon } from './navigation'
 import { useStatus, type HealthState } from '../lib/StatusContext'
@@ -40,6 +42,7 @@ const ICONS: Record<NavIcon, { outline: Icon; filled: Icon }> = {
   policy: { outline: RuleIcon, filled: RuleFilledIcon },
   extensions: { outline: ExtensionIcon, filled: ExtensionFilledIcon },
   marketplace: { outline: StorefrontIcon, filled: StorefrontFilledIcon },
+  pluginLogs: { outline: TerminalIcon, filled: TerminalFilledIcon },
   mihomo: { outline: SpeedIcon, filled: SpeedFilledIcon },
   config: { outline: CodeIcon, filled: CodeIcon },
   settings: { outline: SettingsIcon, filled: SettingsFilledIcon },
@@ -122,7 +125,7 @@ export function Sidebar({ className, onNavigate, onClose, testId }: SidebarProps
 
 function KernelStatusCard() {
   const { t } = useTranslation()
-  const { dnsState, mihomoState } = useStatus()
+  const { dnsState, mihomoState, intercept, interceptState } = useStatus()
 
   return (
     <div className="mt-3 flex flex-col gap-2 rounded-[16px] bg-surface-container-low p-3.5">
@@ -132,6 +135,11 @@ function KernelStatusCard() {
       </div>
       <KernelRow title={t('topbar.kernelDns')} sub="5gpn-dns · :853 DoT" state={dnsState} />
       <KernelRow title="mihomo" sub="gateway · :443" state={mihomoState} />
+      <KernelRow
+        title={t('sidebar.intercept')}
+        sub={intercept ? t('sidebar.interceptSub', { count: intercept.active_plugins }) : t('sidebar.interceptSubUnknown')}
+        state={interceptState}
+      />
     </div>
   )
 }

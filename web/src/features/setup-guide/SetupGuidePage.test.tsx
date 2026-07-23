@@ -29,9 +29,12 @@ describe('SetupGuidePage', () => {
         value={{
           dnsState: 'healthy',
           mihomoState: 'healthy',
+          interceptState: 'healthy',
           dnsOk: true,
           mihomoOk: true,
+          interceptOk: true,
           loading: false,
+          interceptLoading: false,
           status: {
             version: 'test',
             uptime_seconds: 1,

@@ -37,6 +37,33 @@ operator capture-DNS bindings, on 2026-07-22.**
   network API. A permitted script can deliberately send any data visible to it
   to those origins, and every management surface must say so plainly before
   enable.
+- Plugin engine observability is memory-only. The active sidecar retains a
+  bounded 1000-entry ring of structured script-console and action lifecycle
+  events and exposes it only through the group-restricted fixed Unix socket.
+  `5gpn-dns` mints a separate 30-second, one-use WebSocket ticket through
+  bearer-protected `POST /api/intercept/logs/ticket` and consumes it only at
+  `/intercept/logs`; script console text and detailed action errors are not
+  persisted to journald or another file. The Console owns the
+  virtualized `/plugin-logs` view, local filters, pause snapshot, and clear
+  watermark.
+- Compiled JavaScript Programs and decoded settings belong to immutable config
+  snapshots, but every action still executes in a fresh goja VM. Main upstream
+  transports are reused only within one config generation, and explicit script
+  network transports only within one action and exact origin. Pooled transports
+  and inbound UDP associations retain only narrow immutable transport and host-
+  authorization projections, never the complete config, Programs, or settings.
+  This reuse must never retain JS globals or stale permissions across requests.
+- `bodyMode` limits only an action's input projection, not its possible result.
+  Every matching request action therefore reserves bounded body admission
+  before execution, including for a bodyless request. Fixed-length,
+  identity-coded H1/H2 requests whose matching actions all use `none` may
+  release that reservation and stream after ordered actions produce no URL or
+  body mutation. Synthetic responses and aborts do not materialize or forward
+  the input body; replacement bodies boundedly drain it to retain late
+  trailers; URL rewrites retain the complete decoded-body contract. Replacement
+  and synthetic result bodies are
+  bounded by both action and process-wide limits. Response actions remain
+  buffered because final trailers are part of their projection.
 - The same exact-origin network permission authorizes a bounded request-phase
   URL rewrite to a canonical absolute HTTP(S) URL at a declared origin.
   Userinfo and fragments are forbidden, HTTPS cannot downgrade to HTTP, and

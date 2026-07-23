@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useEffect, useRef, type ReactNode } from 'react'
 import { type ColumnDef, type Column, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { cn } from '../../lib/cn'
@@ -15,6 +15,17 @@ export interface VirtualTableProps<T> {
   /** Keep row separators off for stream-style lists while preserving them for tables. */
   showRowDividers?: boolean
   className?: string
+  headerClassName?: string
+  rowClassName?: string
+  /** Stable identities are important when newest-first streams prepend rows. */
+  getRowId?: (row: T, index: number) => string
+  /** Optional deterministic height for rows that expose inline details. */
+  getRowHeight?: (row: T) => number
+  getRowClassName?: (row: T) => string | undefined
+  getRowAriaLabel?: (row: T) => string
+  isRowExpanded?: (row: T) => boolean
+  onRowClick?: (row: T) => void
+  renderRowDetails?: (row: T) => ReactNode
 }
 
 function columnFlexStyle<T>(column: Column<T, unknown>): { flex: string } {
@@ -22,6 +33,11 @@ function columnFlexStyle<T>(column: Column<T, unknown>): { flex: string } {
   if (width === undefined) return { flex: '1 1 0%' }
   const px = typeof width === 'number' ? `${width}px` : width
   return { flex: `0 0 ${px}` }
+}
+
+function columnClassName<T>(column: Column<T, unknown>, kind: 'header' | 'cell'): string | undefined {
+  const meta = column.columnDef.meta as { headerClassName?: string; cellClassName?: string } | undefined
+  return kind === 'header' ? meta?.headerClassName : meta?.cellClassName
 }
 
 /**
@@ -39,6 +55,15 @@ export function VirtualTable<T>({
   showHeader = true,
   showRowDividers = true,
   className,
+  headerClassName,
+  rowClassName,
+  getRowId,
+  getRowHeight,
+  getRowClassName,
+  getRowAriaLabel,
+  isRowExpanded,
+  onRowClick,
+  renderRowDetails,
 }: VirtualTableProps<T>) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -46,6 +71,7 @@ export function VirtualTable<T>({
     data,
     columns,
     getCoreRowModel: getCoreRowModel(),
+    ...(getRowId ? { getRowId } : {}),
   })
 
   const rows = table.getRowModel().rows
@@ -53,19 +79,29 @@ export function VirtualTable<T>({
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => rowHeight,
+    estimateSize: (index) => {
+      const row = rows[index]
+      return row && getRowHeight ? getRowHeight(row.original) : rowHeight
+    },
+    getItemKey: (index) => rows[index]?.id ?? index,
     overscan: 12,
   })
 
+  // Expansion changes a stable row's deterministic size without changing
+  // its key, so explicitly discard the virtualizer's cached measurement.
+  useEffect(() => {
+    virtualizer.measure()
+  }, [getRowHeight, virtualizer])
+
   return (
     <div ref={scrollRef} className={cn('overflow-auto', className)} style={{ height }} data-testid="virtual-scroll">
-      {showHeader ? <div className="sticky top-0 z-10 flex bg-surface-container-low">
+      {showHeader ? <div className={cn('sticky top-0 z-10 flex bg-surface-container-low', headerClassName)}>
         {table.getHeaderGroups().map((headerGroup) =>
           headerGroup.headers.map((header) => (
             <div
               key={header.id}
               style={columnFlexStyle(header.column)}
-              className="min-w-0 px-4 py-3 text-left text-[10.5px] font-medium tracking-[.04em] text-text-faint"
+              className={cn('min-w-0 px-4 py-3 text-left text-[10.5px] font-medium tracking-[.04em] text-text-faint', columnClassName(header.column, 'header'))}
             >
               {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
             </div>
@@ -78,27 +114,46 @@ export function VirtualTable<T>({
       >
         {virtualizer.getVirtualItems().map((virtualRow) => {
           const row = rows[virtualRow.index]
+          const original = row.original
+          const expanded = isRowExpanded?.(original)
+          const interactive = onRowClick !== undefined
           return (
             <div
               key={row.id}
               className={cn(
-                'flex items-center transition-colors hover:bg-surface-container-low',
+                'flex flex-col transition-colors hover:bg-surface-container-low',
                 showRowDividers && 'border-b border-divider',
+                interactive && 'cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary',
+                rowClassName,
+                getRowClassName?.(original),
               )}
               style={{
                 position: 'absolute',
                 top: 0,
                 left: 0,
                 right: 0,
-                height: rowHeight,
+                height: getRowHeight ? getRowHeight(original) : rowHeight,
                 transform: `translateY(${virtualRow.start}px)`,
               }}
+              role={interactive ? 'button' : undefined}
+              tabIndex={interactive ? 0 : undefined}
+              aria-label={getRowAriaLabel?.(original)}
+              aria-expanded={renderRowDetails ? Boolean(expanded) : undefined}
+              onClick={interactive ? () => onRowClick(original) : undefined}
+              onKeyDown={interactive ? (event) => {
+                if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return
+                event.preventDefault()
+                onRowClick(original)
+              } : undefined}
             >
-              {row.getVisibleCells().map((cell) => (
-                <div key={cell.id} style={columnFlexStyle(cell.column)} className={cn('min-w-0 px-4 text-[12px]', rowHeight <= 36 ? 'py-1.5' : 'py-3')}>
-                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                </div>
-              ))}
+              <div className="flex w-full shrink-0 items-center" style={{ height: rowHeight }}>
+                {row.getVisibleCells().map((cell) => (
+                  <div key={cell.id} style={columnFlexStyle(cell.column)} className={cn('min-w-0 px-4 text-[12px]', rowHeight <= 36 ? 'py-1.5' : 'py-3', columnClassName(cell.column, 'cell'))}>
+                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                  </div>
+                ))}
+              </div>
+              {expanded && renderRowDetails ? renderRowDetails(original) : null}
             </div>
           )
         })}

@@ -13,6 +13,7 @@ describe('navigation model', () => {
       { id: 'policy-rules', path: '/policy-rules' },
       { id: 'extensions', path: '/extensions' },
       { id: 'marketplace', path: '/marketplace' },
+      { id: 'plugin-logs', path: '/plugin-logs' },
       { id: 'mihomo', path: '/mihomo' },
       { id: 'mihomo-config', path: '/mihomo-config' },
       { id: 'settings', path: '/settings' },
@@ -30,8 +31,17 @@ describe('navigation model', () => {
     })
   })
 
-  it('exposes the unified policy-rules item', () => {
-    expect(ALL_NAV_ITEMS.some((i) => i.id === 'policy-rules' && i.path === '/policy-rules')).toBe(true)
+  it('keeps policy rules in parse and plugin surfaces in their own group', () => {
+    const parse = NAV_GROUPS.find((group) => group.id === 'parse')
+    const plugins = NAV_GROUPS.find((group) => group.id === 'plugins')
+    expect(parse?.items.map((item) => item.id)).toEqual(['logs', 'resolve-test', 'policy-rules'])
+    expect(plugins?.items.map((item) => item.id)).toEqual(['extensions', 'marketplace', 'plugin-logs'])
+    expect(plugins?.items[2]).toEqual({
+      id: 'plugin-logs',
+      path: '/plugin-logs',
+      labelKey: 'nav.pluginLogs',
+      icon: 'pluginLogs',
+    })
   })
 
   it('has a mihomo item in the system group', () => {

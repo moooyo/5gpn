@@ -1,11 +1,11 @@
 /*
  * Shared kernel-status poller (amendment A-M3).
  *
- * Polls the two liveness surfaces the chrome needs — api.getStatus() (the
+ * Polls the three liveness surfaces the chrome needs — api.getStatus() (the
  * 5gpn-dns daemon itself) and api.getMihomoHealth() (the mihomo gateway
- * forwarder, via the daemon's bearer-protected /api/mihomo/health endpoint) —
- * on a completion-scheduled interval, and exposes both raw payloads plus
- * four-state health values via context.
+ * forwarder), plus api.getInterceptHealth() (the optional interception
+ * sidecar) — on a completion-scheduled interval, and exposes their raw
+ * payloads plus four-state health values via context.
  *
  * mihomo liveness is DELIBERATELY not derived from status.version (that
  * field is the 5gpn-dns build version, unrelated to whether mihomo is up) —
@@ -15,28 +15,38 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import { api } from './api/client'
 import { ApiError } from './api/http'
-import type { Status, MihomoHealth } from './api/types'
+import type { Status, MihomoHealth, InterceptHealth } from './api/types'
 
 export type HealthState = 'checking' | 'healthy' | 'unknown' | 'down'
 
 export interface StatusValue {
   status?: Status
   mihomo?: MihomoHealth
+  intercept?: InterceptHealth
   dnsState: HealthState
   mihomoState: HealthState
+  interceptState: HealthState
   /** Compatibility flag for consumers that only distinguish healthy from all other states. */
   dnsOk: boolean
   /** Compatibility flag for consumers that only distinguish healthy from all other states. */
   mihomoOk: boolean
+  /** True when the sidecar matches its configured expected running state. */
+  interceptOk: boolean
+  /** Initial DNS/mihomo loading state retained for existing page consumers. */
   loading: boolean
+  /** Initial sidecar health request state, kept separate from `loading`. */
+  interceptLoading: boolean
 }
 
 const INITIAL: StatusValue = {
   dnsState: 'checking',
   mihomoState: 'checking',
+  interceptState: 'checking',
   dnsOk: false,
   mihomoOk: false,
+  interceptOk: false,
   loading: true,
+  interceptLoading: true,
 }
 
 // Exported (not just useStatus) so tests can inject a manual value via
@@ -101,6 +111,15 @@ function isExplicitServerFailure(reason: unknown): boolean {
   return reason instanceof ApiError && reason.status >= 500 && reason.status <= 599
 }
 
+function isInterceptHealth(value: unknown): value is InterceptHealth {
+  if (!value || typeof value !== 'object') return false
+  const health = value as Partial<InterceptHealth>
+  return typeof health.running === 'boolean'
+    && typeof health.expected === 'boolean'
+    && Number.isInteger(health.installed_plugins) && Number(health.installed_plugins) >= 0
+    && Number.isInteger(health.active_plugins) && Number(health.active_plugins) >= 0
+}
+
 export function StatusProvider({ children, intervalMs = 5000, requestTimeoutMs = 4000 }: StatusProviderProps) {
   const [value, setValue] = useState<StatusValue>(INITIAL)
 
@@ -114,7 +133,8 @@ export function StatusProvider({ children, intervalMs = 5000, requestTimeoutMs =
       const currentGeneration = ++generation
       const statusController = new AbortController()
       const healthController = new AbortController()
-      controllers = [statusController, healthController]
+      const interceptController = new AbortController()
+      controllers = [statusController, healthController, interceptController]
       let statusResult: PromiseSettledResult<Status> | undefined
       let healthResult: PromiseSettledResult<MihomoHealth> | undefined
 
@@ -128,6 +148,10 @@ export function StatusProvider({ children, intervalMs = 5000, requestTimeoutMs =
             ? 'down'
             : 'unknown',
         mihomoOk: false,
+      })
+      const updateInterceptFailure = (reason: unknown): Pick<StatusValue, 'interceptState' | 'interceptOk'> => ({
+        interceptState: isExplicitServerFailure(reason) ? 'down' : 'unknown',
+        interceptOk: false,
       })
 
       const statusTask = requestWithDeadline(api.getStatus, statusController, requestTimeoutMs).then(
@@ -161,7 +185,39 @@ export function StatusProvider({ children, intervalMs = 5000, requestTimeoutMs =
         }))
       })
 
-      await Promise.all([statusTask, healthTask])
+      const interceptTask = requestWithDeadline(api.getInterceptHealth, interceptController, requestTimeoutMs).then(
+        (intercept) => ({ status: 'fulfilled', value: intercept }) as const,
+        (reason: unknown) => ({ status: 'rejected', reason }) as const,
+      ).then((result) => {
+        if (!active()) return
+        setValue((prev) => {
+          if (result.status === 'rejected') {
+            return {
+              ...prev,
+              ...updateInterceptFailure(result.reason),
+              interceptLoading: false,
+            }
+          }
+          if (!isInterceptHealth(result.value)) {
+            return {
+              ...prev,
+              interceptState: 'unknown',
+              interceptOk: false,
+              interceptLoading: false,
+            }
+          }
+          const healthy = result.value.running === result.value.expected
+          return {
+            ...prev,
+            intercept: result.value,
+            interceptState: healthy ? 'healthy' : 'down',
+            interceptOk: healthy,
+            interceptLoading: false,
+          }
+        })
+      })
+
+      await Promise.all([statusTask, healthTask, interceptTask])
       if (cancelled || currentGeneration !== generation) return
       // Schedule from completion, not from start: a slow status endpoint can
       // never overlap the next poll or let an older response win a race.

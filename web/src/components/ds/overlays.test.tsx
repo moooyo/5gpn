@@ -110,6 +110,29 @@ describe('Select', () => {
     expect(onValueChange).toHaveBeenCalledWith('b')
     expect(screen.getByRole('combobox')).toHaveTextContent('Beta')
   })
+
+  it('renders the compact count variant without a check-indicator column', async () => {
+    const user = userEvent.setup()
+    render(
+      <Select
+        value="a"
+        onValueChange={() => {}}
+        variant="compact-count"
+        items={[
+          { value: 'a', label: 'Alpha', count: 12 },
+          { value: 'b', label: 'Beta', count: 0 },
+        ]}
+      />,
+    )
+
+    await user.click(screen.getByRole('combobox'))
+    const alpha = await screen.findByRole('option', { name: 'Alpha 12' })
+    const beta = screen.getByRole('option', { name: 'Beta' })
+    expect(alpha).toHaveTextContent('12')
+    expect(alpha.querySelector('svg')).toBeNull()
+    expect(beta).not.toHaveTextContent('0')
+    expect(alpha.className).toContain('grid-cols-[minmax(0,1fr)_auto]')
+  })
 })
 
 describe('DropdownMenu', () => {

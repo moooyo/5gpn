@@ -14,6 +14,10 @@ SETUP_GUIDE="$ROOT/web/src/features/setup-guide/SetupGuidePage.tsx"
 MODULE_PARSER="$ROOT/cmd/5gpn-dns/intercept_module_parser.go"
 MODULE_TYPES="$ROOT/cmd/5gpn-dns/intercept_module_types.go"
 SIDECAR_CONFIG="$ROOT/cmd/5gpn-intercept/config.go"
+SIDECAR_LOGS="$ROOT/cmd/5gpn-intercept/engine_logs.go"
+SIDECAR_RUNTIME="$ROOT/cmd/5gpn-intercept/module_runtime.go"
+SIDECAR_MAIN="$ROOT/cmd/5gpn-intercept/main.go"
+SIDECAR_PROXY="$ROOT/cmd/5gpn-intercept/proxy.go"
 CHECKS_WORKFLOW="$ROOT/.github/workflows/checks.yml"
 rc=0
 fail() { echo "FAIL: $1"; rc=1; }
@@ -35,6 +39,8 @@ grep -Fxq 'User=gpn-intercept' "$UNIT" || fail "interception unit lacks its dedi
 grep -Fxq 'CapabilityBoundingSet=' "$UNIT" || fail "interception unit has capabilities"
 grep -Fxq 'RestrictAddressFamilies=AF_INET AF_UNIX' "$UNIT" || fail "interception unit address families are too broad"
 grep -Fxq 'StateDirectory=5gpn-intercept' "$UNIT" || fail "module persistent store has no private state directory"
+grep -Fxq 'RuntimeDirectory=5gpn-intercept' "$UNIT" || fail "sidecar engine log socket has no private runtime directory"
+grep -Fxq 'RuntimeDirectoryMode=0750' "$UNIT" || fail "sidecar engine log runtime directory is not group-readable"
 grep -Fxq 'Requires=5gpn-intercept-cert.service' "$UNIT" || fail "sidecar startup does not gate on certificate publication"
 grep -Fxq 'ExecCondition=/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json --check-enabled' "$UNIT" \
     || fail "sidecar startup is not gated by the MITM master setting"
@@ -143,6 +149,29 @@ grep -Fq 'dialSOCKS5TCP' "$ROOT/cmd/5gpn-intercept/module_network.go" \
     || fail "extension network requests do not return through authenticated mihomo SOCKS5"
 grep -Fq 'ExecutionOrder' "$ROOT/cmd/5gpn-intercept/config.go" \
     || fail "sidecar config has no explicit extension execution order"
+grep -Fq 'engineLogsSocketPath' "$SIDECAR_LOGS" \
+    && grep -Fq '"/run/5gpn-intercept/logs.sock"' "$SIDECAR_LOGS" \
+    && grep -Fq 'os.Chmod(path, 0o660)' "$SIDECAR_LOGS" \
+    || fail "sidecar engine log UDS path or permissions are not fixed"
+grep -Fq 'engineLogRingCapacity' "$SIDECAR_LOGS" \
+    && grep -Fq '= 1000' "$SIDECAR_LOGS" \
+    && grep -Fq 'maxEngineLogWebSockets' "$SIDECAR_LOGS" \
+    && grep -Fq '= 8' "$SIDECAR_LOGS" \
+    || fail "sidecar engine log memory or connection bounds are missing"
+grep -Fq 'console.Set("warn", logger("warn"))' "$SIDECAR_RUNTIME" \
+    && grep -Fq 'console.Set("error", logger("error"))' "$SIDECAR_RUNTIME" \
+    || fail "native console levels are not mapped into structured engine logs"
+grep -Fq 'script=%q' "$SIDECAR_RUNTIME" \
+    && fail "native console text is still written to journald"
+grep -Fq 'engine log service unavailable; continuing without UI log streaming' "$SIDECAR_MAIN" \
+    && grep -Fq 'engine log service stopped unexpectedly; data plane remains active' "$SIDECAR_MAIN" \
+    || fail "engine log IPC failures can still stop the interception data plane"
+grep -Fq 'log.Print("intercept: request transformation failed")' "$SIDECAR_PROXY" \
+    && grep -Fq 'log.Print("intercept: response transformation failed")' "$SIDECAR_PROXY" \
+    || fail "script transformation details can still reach journald"
+grep -Fq 'log.Print("intercept: could not read replacement config; retaining the last valid snapshot")' "$SIDECAR_CONFIG" \
+    && grep -Fq 'log.Print("intercept: ignoring invalid replacement config; retaining the last valid snapshot")' "$SIDECAR_CONFIG" \
+    || fail "config rejection summaries are not journald-safe"
 grep -Fq 'NetworkOrigins' "$MODULE_PARSER" \
     || fail "native manifest parser does not snapshot exact network origins"
 grep -Fq 'EgressGroupRequired' "$MODULE_PARSER" \

@@ -62,6 +62,7 @@ architecture.
 | `5gpn-dns` | `127.0.0.1:443/tcp` | Public HTTPS console assets and iOS profile download, plus the bearer-authenticated API. |
 | `5gpn-dns` | `127.0.0.2:443/tcp` | HTTPS zashboard static files and its controller proxy. |
 | `5gpn-intercept` | `127.0.0.1:18080/tcp`, only while MITM is enabled | Authenticated SOCKS5 control and plain-HTTP/TLS interception ingress. Each authenticated UDP ASSOCIATE receives a private ephemeral loopback UDP socket. |
+| `5gpn-intercept` | `/run/5gpn-intercept/logs.sock`, only while the sidecar is active | Group-restricted, read-only HTTP/1.1 health and plugin-engine log WebSocket for `5gpn-dns`; never exposed directly to browsers. |
 | mihomo | configured local IPv4 addresses on TCP `:80`, `:443`, `:5060`, `:8080`, and `:8443`, plus UDP `:443` and `:5060` | HTTP/TLS/QUIC ingress for traffic steered to the gateway. |
 | mihomo | `127.0.0.1:9090/tcp` | TLS-only external controller. |
 | mihomo | `127.0.0.1:17890/tcp` and UDP associations | Authenticated mixed listener used only for post-transformation egress from `5gpn-intercept`. |
@@ -637,8 +638,11 @@ still referenced by any installed extension, including a disabled one. An
 out-of-band missing group makes routing not-ready; reconciliation withdraws the
 DNS overlay and never substitutes DIRECT or the terminal group.
 
-The sidecar reloads only a fully valid document by mtime and retains
-the last valid snapshot after an invalid external replacement. A running
+The sidecar reloads only a fully valid document after its file identity,
+metadata, or content changes and retains the last valid snapshot after an
+invalid external replacement. Byte-identical atomic replacements reuse the
+compiled snapshot, deterministic invalid documents are negative-cached by file
+identity, and transient read errors remain retryable. A running
 sidecar exits cleanly when the master turns off. The continuously enabled
 `5gpn-intercept-runtime.path` starts the conditioned sidecar when an atomic
 configuration replacement turns the master on; `ExecCondition=--check-enabled`
@@ -712,6 +716,24 @@ placeholder. Every controller request requires that session; the daemon strips
 browser authorization and injects the controller secret server-side. The secret
 is never returned by `/api/status` or placed in a URL, referrer, history, DOM, or
 localStorage.
+
+Plugin engine logs use an independent credential and transport boundary.
+Bearer-authenticated `POST /api/intercept/logs/ticket` mints a 30-second,
+one-use credential stored only as a SHA-256 digest. A same-origin, syntactically
+valid WebSocket upgrade to `/intercept/logs` consumes it before the daemon
+strips the query and browser credentials and proxies HTTP/1.1 over the fixed
+Unix socket. The public gate accepts no other path or query. The authenticated
+`GET /api/intercept/health` distinguishes an intentionally idle sidecar from a
+missing expected runtime and supplies the Sidebar's active-plugin count.
+
+The sidecar publishes script `console.log`/`info`/`warn`/`error`, bounded action
+completion, timeout, failure, and configuration lifecycle events into a
+1000-entry process-memory ring. At most eight read-only WebSockets may consume
+it, new subscribers start at the current tail, and slow readers never block an
+action. Script console text and detailed action errors are not copied to
+journald or another file. Event URLs omit user information, query strings, and
+fragments. The ring disappears on sidecar exit; reconnect resumes with new
+events and does not backfill the disconnected interval.
 
 The Telegram bot runs inside `5gpn-dns` and calls the same in-process
 `Controller` used by the HTTP API. `/id` provides the caller's numeric user ID;
@@ -805,6 +827,9 @@ Specialized live state remains in purpose-specific, atomically written files:
 - `/var/lib/5gpn-intercept/store.json` is the size-bounded, sidecar-owned
   persistence backend exposed as `context.storage` only when a native manifest
   explicitly requests `persistentStorage`.
+  An existing unreadable, malformed, or structurally invalid store disables
+  storage mutations until a later restart can load a valid store; it is never
+  replaced with an empty candidate.
   Scripts cannot choose its path. Normal uninstall preserves its independently
   marked state directory with the extension document; purge and decommission
   remove it through the fixed canonical path and ownership marker.
@@ -1071,7 +1096,10 @@ for superseded pre-release implementations.
 
 All three long-running services run as dedicated non-root accounts under hardened systemd units.
 Mihomo and `5gpn-dns` receive only `CAP_NET_BIND_SERVICE`; `5gpn-intercept`
-receives no capabilities because all of its sockets use high loopback ports.
+receives no capabilities because all of its network sockets use high loopback
+ports. Its systemd-owned `/run/5gpn-intercept` directory is mode `0750`, and the
+log socket is explicitly mode `0660`; `5gpn-dns` reaches it only through its
+existing `gpn-intercept` supplementary group.
 `5gpn-dns` and `5gpn-intercept` receive only IPv4 and Unix socket families,
 while mihomo additionally needs IPv6 and netlink for its
 own direct egress and route lookup. Runtime state owned by `5gpn-dns` is
@@ -1125,11 +1153,42 @@ capability described above, both restricted to the immutable exact-origin list
 and routed through authenticated mihomo SOCKS5. There are no compatibility globals,
 ambient `fetch`, filesystem, process, timer, module loader, socket, or ambient
 Go object.
+Validated JavaScript Programs, typed settings, host/path matchers, and ordered
+lookup data belong to one immutable configuration snapshot. They are compiled
+once and reclaimed with that snapshot; an executed VM and its heap are never
+pooled or reused. Main upstream HTTP/1.1, HTTP/2, and HTTP/3 transports are
+reused only within the same monotonically numbered configuration generation.
+New generations retire the prior pools, while already accepted requests may
+finish against their captured old snapshot. Long-lived transport pools and
+inbound UDP associations retain only immutable proxy, host-mapping, network-
+target, protocol, and host-authorization projections; they never retain script
+Programs, decoded settings, or the complete configuration snapshot. Script
+`context.network` keepalive is narrower still: it is reusable only inside one
+action and exact origin, and is synchronously closed when that action returns.
 Source, request, response, per-action, total-extension, persistent-key, and
 persistent-file sizes are bounded. Request and response bodies support omitted,
 string, or Uint8Array delivery as declared by `bodyMode`, plus bounded identity,
 gzip, deflate, and Brotli decoding. Upstream requests ask for identity encoding;
 transformed responses are returned uncompressed with corrected length headers.
+When no request action matches, a non-H3 request with a known body length at or
+below the same limit streams without materializing the body and preserves its
+content coding and late trailers. A known-length, identity-coded H1/H2 request
+whose matching request actions all declare `bodyMode: none` may also take a
+conditional streaming path. The sidecar reserves body admission before running
+those actions because `bodyMode` limits only the input projection and an action
+may still create a replacement or synthetic body. Actions retain their exact
+order and execute without a body projection. If none rewrites the URL or
+replaces the body, their final header projection is applied and the original
+body plus late trailers stream upstream; the unused reservation is released
+before the round trip. A synthetic response or abort does not materialize or
+forward the request body. A replacement body remains replayable and the
+original body is boundedly drained, but not materialized, so its late trailers
+remain intact.
+Every URL rewrite still forwards a complete decoded body unless a prior action
+has supplied the final replacement. Unknown-length, chunked, encoded,
+H3-replayable, and action-visible request bodies retain the bounded buffering
+path. Every replacement and synthetic result body is independently bounded by
+the action and process-wide body limits.
 Response projections and patches include validated HTTP trailers, and a
 permitted synchronous network response exposes its trailers only after the
 bounded body has been read. Forbidden framing fields, invalid names, and
@@ -1137,8 +1196,12 @@ control characters fail closed. Unmodified and transformed trailers are
 declared and published correctly across HTTP/1.1, HTTP/2, and HTTP/3, including
 an H2/H3-to-H1 conversion where upstream trailers were not announced in
 advance.
-At most two body-buffering transformation flows run concurrently; excess work
-fails closed with service unavailable instead of exceeding the sidecar cgroup.
+At most two body-buffering transformation flows run concurrently. Every
+matching request action reserves that admission before it can produce side
+effects or a dynamic body, including for a bodyless request, and releases an
+unused reservation as soon as preparation proves that no materialized body is
+retained. Excess work fails closed with service unavailable instead of
+exceeding the sidecar cgroup.
 VM execution has a rule timeout, and regexp2's non-RE2 JavaScript fallback has
 an independent 250 ms match limit so catastrophic backtracking cannot evade the
 VM interrupt. Validated action path RE2 expressions, active/per-extension/action
@@ -1181,6 +1244,14 @@ mobile uses card rows with a drawer sidebar. Route metadata is centralized in
 `web/src/app/navigation.ts`. The built `web/dist` directory is a release
 artifact, not committed source; PWA, initial asset, lazy-route, and font budgets
 remain enforced.
+
+The Plugin navigation group owns installed modules, marketplace discovery, and
+the dedicated `/plugin-logs` route; Policy Rules belongs to Parse. The plugin
+log page is a compact single-card console with a virtualized 32-pixel desktop
+stream and virtualized two-line mobile cards. Search, level/plugin filters,
+pause, expansion, and clear are browser-local. Pause retains an independent
+view snapshot while the live 1000-entry ring continues ingesting; clear advances
+only a local watermark and never mutates the sidecar ring.
 
 Settings may expose the fixed mihomo ingress-capability catalog. A capability toggle is
 only a local draft until the operator reviews a capability and exposure warning

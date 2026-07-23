@@ -322,6 +322,21 @@ export async function setupMockApi(page: Page): Promise<void> {
     revision = mihomoRevision(text)
   }
 
+  await page.routeWebSocket('/intercept/logs', (socket) => {
+    socket.send(JSON.stringify({
+      time: '2026-07-23T08:00:00Z',
+      level: 'info',
+      source: 'engine',
+      extension: 'io.5gpn.apple-wloc',
+      action: 'rewrite-wloc',
+      phase: 'request',
+      duration_ms: 8.4,
+      url: 'https://gs-loc.apple.com/clls/wloc',
+      script_digest: 'a'.repeat(64),
+      message: 'request action completed',
+    } satisfies T.PluginEngineLogLine))
+  })
+
   await page.route('/api/**', async (route) => {
     const url = new URL(route.request().url())
     const path = url.pathname
@@ -334,8 +349,21 @@ export async function setupMockApi(page: Page): Promise<void> {
     if (path === '/api/mihomo/health' && method === 'GET') {
       return json(route, { version: 'v1.19.28', meta: true } satisfies T.MihomoHealth)
     }
+    if (path === '/api/intercept/health' && method === 'GET') {
+      const activePlugins = mitmSettings.enabled ? interceptModules.filter((module) => module.enabled).length : 0
+      return json(route, {
+        running: mitmSettings.enabled,
+        expected: mitmSettings.enabled,
+        installed_plugins: interceptModules.length,
+        active_plugins: activePlugins,
+        version: 'dev',
+      } satisfies T.InterceptHealth)
+    }
     if (path === '/api/mihomo/log-ticket' && method === 'POST') {
       return json(route, { ticket: 'e2e-log-ticket' } satisfies T.MihomoLogTicket)
+    }
+    if (path === '/api/intercept/logs/ticket' && method === 'POST') {
+      return json(route, { ticket: 'e2e-plugin-log-ticket', expires_in_seconds: 30 } satisfies T.InterceptLogTicket)
     }
 
     // Resolve test

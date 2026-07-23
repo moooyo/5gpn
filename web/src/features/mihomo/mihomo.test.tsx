@@ -69,10 +69,13 @@ function statusWith(
     status,
     dnsState: 'healthy',
     mihomoState: opts.mihomoOk === false ? 'down' : 'healthy',
+    interceptState: 'healthy',
     dnsOk: true,
     mihomoOk: opts.mihomoOk ?? true,
+    interceptOk: true,
     mihomo: opts.mihomo ?? { version: 'v1.19.0', meta: true },
     loading: opts.loading ?? false,
+    interceptLoading: false,
   }
 }
 

@@ -43,9 +43,13 @@ plans, design handoffs, and git history are context only.
 - `console.<base>` is the public bootstrap/console SNI: the SPA and `/ios/` are
   public, while every `/api/*` request still requires the console bearer token.
   Do not introduce a separate bootstrap hostname. zashboard remains source-allowlisted.
-- `/api/*` requires the console bearer token. Console mihomo logs use a
-  short-lived one-use WebSocket ticket. Do not expose the full controller under
-  the console `/proxy/`; zashboard has a separate allowlisted pass-through.
+- `/api/*` requires the console bearer token. Console mihomo logs and plugin
+  engine logs use separate short-lived one-use WebSocket tickets. Plugin logs
+  remain in the sidecar's bounded memory ring and cross only the fixed,
+  group-restricted `/run/5gpn-intercept/logs.sock`; do not persist script
+  console output or expose another controller path. Do not expose the full
+  mihomo controller under the console `/proxy/`; zashboard has a separate
+  allowlisted pass-through.
 - There is no Python in the repository. The `5gpn-dns` Go module has exactly three direct dependencies:
   `github.com/miekg/dns`, `github.com/go-telegram/bot`, and `gopkg.in/yaml.v3`.
   The separate `5gpn-intercept` module has exactly four direct dependencies:
@@ -149,7 +153,10 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   not publisher identity. Do not fabricate popularity, author, health, or update
   metadata that the authenticated marketplace API does not provide.
 - Logs remain virtualized, polling is single-flight/cancellable, and mobile
-  uses card rows plus a drawer sidebar.
+  uses card rows plus a drawer sidebar. Plugin engine logs live on the dedicated
+  `/plugin-logs` route in the Plugin navigation group; DNS policy rules remain
+  in Parse. Pausing that stream freezes only the view while its bounded memory
+  ring continues ingesting, and clearing changes only the browser watermark.
 - Do not commit `web/dist`. Fonts are runtime-cached by the PWA; keep PWA,
   initial JS/CSS, lazy-route, and font budgets green.
 

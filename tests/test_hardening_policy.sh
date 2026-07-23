@@ -59,6 +59,9 @@ grep -Fxq 'User=gpn-intercept' "$INTERCEPT_SVC" || fail "5gpn-intercept.service 
 grep -Fxq 'CapabilityBoundingSet=' "$INTERCEPT_SVC" || fail "5gpn-intercept.service must receive no capabilities"
 grep -Fxq 'RestrictAddressFamilies=AF_INET AF_UNIX' "$INTERCEPT_SVC" \
     || fail "5gpn-intercept.service must remain IPv4/Unix only"
+grep -Fxq 'RuntimeDirectory=5gpn-intercept' "$INTERCEPT_SVC" \
+    && grep -Fxq 'RuntimeDirectoryMode=0750' "$INTERCEPT_SVC" \
+    || fail "5gpn-intercept.service must expose only its group-scoped runtime directory"
 grep -Fxq 'ReadOnlyPaths=/etc/5gpn/intercept' "$INTERCEPT_SVC" \
     || fail "5gpn-intercept.service must have read-only runtime configuration"
 grep -Fq -- '-/etc/5gpn/intercept-ca' "$INTERCEPT_SVC" \

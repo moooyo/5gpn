@@ -117,6 +117,14 @@ type ControlServer struct {
 	mihomoLogTicketsMu sync.Mutex
 	mihomoLogTickets   map[string]time.Time
 
+	// Plugin-engine logs stay in the 5gpn-intercept process and are exposed over
+	// a group-restricted Unix socket. The console receives only a narrowly gated
+	// WebSocket proxy backed by its own purpose-bound, one-use ticket namespace.
+	// Constructing this client never dials the sidecar, so an intentionally idle
+	// or unavailable sidecar cannot prevent the DNS control plane from starting.
+	interceptLogs       *interceptLogUpstream
+	interceptLogTickets *interceptLogTicketStore
+
 	// An authenticated console request mints a one-use zashboard handoff ticket.
 	// The zash origin consumes it, sets a host-only HttpOnly session cookie, and
 	// injects the controller credential server-side for that session. The
@@ -158,15 +166,22 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 		return nil, fmt.Errorf("control server: DNS_ZASH_CERT and DNS_ZASH_KEY are required for zashboard/controller TLS")
 	}
 
+	interceptLogs := newInterceptLogUpstream(defaultInterceptLogSocketPath)
 	s := &ControlServer{
-		ctrl:            ctrl,
-		token:           cfg.APIToken,
-		startTime:       time.Now(),
-		limiter:         newRateLimiter(cfg.APIRate, cfg.APIBurst),
-		dotDomain:       cfg.DotDomain,
-		zashDomain:      cfg.ZashDomain,
-		mihomoProxy:     unavailableMihomoProxy(),
-		interceptStore:  NewInterceptConfigStore(cfg.InterceptConfigFile),
+		ctrl:           ctrl,
+		token:          cfg.APIToken,
+		startTime:      time.Now(),
+		limiter:        newRateLimiter(cfg.APIRate, cfg.APIBurst),
+		dotDomain:      cfg.DotDomain,
+		zashDomain:     cfg.ZashDomain,
+		mihomoProxy:    unavailableMihomoProxy(),
+		interceptStore: NewInterceptConfigStore(cfg.InterceptConfigFile),
+		interceptLogs:  interceptLogs,
+		interceptLogTickets: newInterceptLogTicketStore(
+			interceptLogTicketTTL,
+			interceptLogTicketLimit,
+			crand.Reader,
+		),
 		geocodeHTTP:     newGeocodeHTTPClient(nil),
 		geocodeEndpoint: defaultGeocodeEndpoint,
 	}
@@ -202,6 +217,10 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 	// WebSocket authentication is enforced by an expiring one-use ticket minted
 	// through the bearer-protected API. Every other controller path is hidden.
 	mux.Handle("/proxy/", s.consoleMihomoProxy())
+	// Plugin-engine logs use an independent ticket namespace and a fixed Unix
+	// socket upstream. The exact public path is intentionally outside /api/
+	// because browser WebSocket handshakes cannot attach the bearer header.
+	mux.Handle("/intercept/logs", s.consoleInterceptLogProxy())
 	mux.Handle("/", webUI)
 
 	s.srv = buildPanelServer(cfg.ListenAPI, securityHeadersMiddleware(mux), webCert, webKey)
@@ -358,6 +377,8 @@ func (s *ControlServer) apiMux() http.Handler {
 	mux.HandleFunc("GET /api/mihomo/health", s.handleMihomoHealth)
 	mux.HandleFunc("POST /api/mihomo/log-ticket", s.handleMihomoLogTicket)
 	mux.HandleFunc("POST /api/mihomo/zashboard-handoff", s.handleZashboardHandoffTicket)
+	mux.HandleFunc("GET /api/intercept/health", s.handleInterceptHealth)
+	mux.HandleFunc("POST /api/intercept/logs/ticket", s.handleInterceptLogTicket)
 
 	mux.HandleFunc("GET /api/policy/rules", s.handlePolicyRulesList)
 	mux.HandleFunc("POST /api/policy/rules", s.handlePolicyRulesCreate)
@@ -975,6 +996,9 @@ func (s *ControlServer) Shutdown(ctx context.Context) error {
 		if zerr := s.zashSrv.Shutdown(ctx); err == nil {
 			err = zerr
 		}
+	}
+	if s.interceptLogs != nil {
+		s.interceptLogs.closeIdleConnections()
 	}
 	return err
 }

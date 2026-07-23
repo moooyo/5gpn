@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-func testInterceptDocument(t *testing.T, modules ...interceptModuleSnapshot) (interceptConfigDocument, []byte) {
+func testInterceptDocument(t testing.TB, modules ...interceptModuleSnapshot) (interceptConfigDocument, []byte) {
 	t.Helper()
 	executionOrder := make([]string, 0, len(modules))
 	for _, module := range modules {
@@ -126,6 +126,243 @@ func newInterceptManagerFixture(t *testing.T, modules ...interceptModuleSnapshot
 	controller := &fakeMihomoController{reachable: true, authenticated: true}
 	manager := NewInterceptModuleManager(NewInterceptConfigStore(interceptPath), handler, nil, NewMihomoConfigStore(mihomoPath), goldenInfraParams(), &fakeMihomoTester{}, controller)
 	return manager, controller, handler, interceptPath, mihomoPath
+}
+
+type countingInterceptConfigTester struct {
+	calls int
+}
+
+func (t *countingInterceptConfigTester) Test(context.Context, string) error {
+	t.calls++
+	return nil
+}
+
+func TestInterceptModuleManagerNoOpSkipsSidecarAndMihomoWork(t *testing.T) {
+	module := testModuleSnapshot()
+	module.EgressGroup = "Proxies"
+	manager, controller, _, interceptPath, mihomoPath := newInterceptManagerFixture(t, module)
+	manager.certWait = func(context.Context, string) error { return nil }
+	mihomoTester := manager.tester.(*fakeMihomoTester)
+	initial, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	before, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{
+		Revision: initial.Revision, Enabled: &enabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.putCalls = 0
+	mihomoTester.calls = 0
+	sidecarTester := &countingInterceptConfigTester{}
+	manager.SetSidecarTester(sidecarTester)
+
+	beforeConfig := mustRead(t, interceptPath)
+	beforeMihomo := mustRead(t, mihomoPath)
+	group := module.EgressGroup
+	after, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{
+		Revision: before.Revision, EgressGroup: &group,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err = manager.Reorder(context.Background(), after.Revision, []string{module.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err = manager.UpdateSettings(context.Background(), after.Revision, interceptMITMSettings{
+		Enabled: true, HTTP2: true, QUICFallbackProtection: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != before.Revision {
+		t.Fatalf("no-op revision changed: before=%s after=%s", before.Revision, after.Revision)
+	}
+	if sidecarTester.calls != 0 || mihomoTester.calls != 0 || controller.putCalls != 0 {
+		t.Fatalf("no-op work calls: sidecar=%d mihomo-test=%d apply=%d", sidecarTester.calls, mihomoTester.calls, controller.putCalls)
+	}
+	if mustRead(t, interceptPath) != beforeConfig || mustRead(t, mihomoPath) != beforeMihomo {
+		t.Fatal("no-op update changed durable configuration")
+	}
+}
+
+func TestInterceptModuleManagerSameMissingEgressBindingStillFails(t *testing.T) {
+	module := testModuleSnapshot()
+	module.EgressGroup = "Missing"
+	manager, controller, _, interceptPath, _ := newInterceptManagerFixture(t, module)
+	sidecarTester := &countingInterceptConfigTester{}
+	manager.SetSidecarTester(sidecarTester)
+	mihomoTester := manager.tester.(*fakeMihomoTester)
+	before, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeConfig := mustRead(t, interceptPath)
+	group := module.EgressGroup
+	if _, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{
+		Revision: before.Revision, EgressGroup: &group,
+	}); !errors.Is(err, errInterceptModuleConflict) {
+		t.Fatalf("same missing egress binding error = %v", err)
+	}
+	if sidecarTester.calls != 0 || mihomoTester.calls != 0 || controller.putCalls != 0 {
+		t.Fatalf("missing binding work calls: sidecar=%d mihomo-test=%d apply=%d", sidecarTester.calls, mihomoTester.calls, controller.putCalls)
+	}
+	if mustRead(t, interceptPath) != beforeConfig {
+		t.Fatal("rejected missing binding changed the sidecar document")
+	}
+}
+
+func TestInterceptModuleManagerDisabledEgressBindingSkipsMihomoApply(t *testing.T) {
+	module := testModuleSnapshot()
+	manager, controller, _, _, mihomoPath := newInterceptManagerFixture(t, module)
+	sidecarTester := &countingInterceptConfigTester{}
+	manager.SetSidecarTester(sidecarTester)
+	mihomoTester := manager.tester.(*fakeMihomoTester)
+	before, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeMihomo := mustRead(t, mihomoPath)
+	group := "Proxies"
+	after, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{
+		Revision: before.Revision, EgressGroup: &group,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Modules[0].EgressGroup != group || after.Revision == before.Revision {
+		t.Fatalf("disabled binding update = %+v", after.Modules[0])
+	}
+	if sidecarTester.calls != 1 || mihomoTester.calls != 0 || controller.putCalls != 0 {
+		t.Fatalf("disabled binding work calls: sidecar=%d mihomo-test=%d apply=%d", sidecarTester.calls, mihomoTester.calls, controller.putCalls)
+	}
+	if mustRead(t, mihomoPath) != beforeMihomo {
+		t.Fatal("disabled binding update changed mihomo configuration")
+	}
+}
+
+func TestInterceptModuleManagerMasterOffReorderSkipsMihomoApply(t *testing.T) {
+	first := testModuleSnapshot()
+	first.Enabled = true
+	first.EgressGroup = "Proxies"
+	second := testModuleSnapshot()
+	second.ID = "io.example.second"
+	second.Name = "Second extension"
+	second.Enabled = true
+	manager, controller, _, interceptPath, mihomoPath := newInterceptManagerFixture(t, first, second)
+	document, _, err := manager.store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.MITM.Enabled = false
+	body, err := marshalInterceptDocument(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(interceptPath, body, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	sidecarTester := &countingInterceptConfigTester{}
+	manager.SetSidecarTester(sidecarTester)
+	mihomoTester := manager.tester.(*fakeMihomoTester)
+	before, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeMihomo := mustRead(t, mihomoPath)
+	after, err := manager.Reorder(context.Background(), before.Revision, []string{second.ID, first.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stringSlicesEqual(after.ExecutionOrder, []string{second.ID, first.ID}) || after.Revision == before.Revision {
+		t.Fatalf("master-off reorder = %+v", after.ExecutionOrder)
+	}
+	if sidecarTester.calls != 1 || mihomoTester.calls != 0 || controller.putCalls != 0 {
+		t.Fatalf("master-off reorder work calls: sidecar=%d mihomo-test=%d apply=%d", sidecarTester.calls, mihomoTester.calls, controller.putCalls)
+	}
+	if mustRead(t, mihomoPath) != beforeMihomo {
+		t.Fatal("master-off reorder changed mihomo configuration")
+	}
+}
+
+func TestInterceptModuleManagerMasterOffReorderRejectsMissingBinding(t *testing.T) {
+	first := testModuleSnapshot()
+	first.Enabled = true
+	first.EgressGroup = "Missing"
+	second := testModuleSnapshot()
+	second.ID = "io.example.second"
+	second.Name = "Second extension"
+	second.Enabled = true
+	manager, controller, _, interceptPath, _ := newInterceptManagerFixture(t, first, second)
+	document, _, err := manager.store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.MITM.Enabled = false
+	body, err := marshalInterceptDocument(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(interceptPath, body, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	sidecarTester := &countingInterceptConfigTester{}
+	manager.SetSidecarTester(sidecarTester)
+	mihomoTester := manager.tester.(*fakeMihomoTester)
+	before, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Reorder(context.Background(), before.Revision, []string{second.ID, first.ID}); !errors.Is(err, errInterceptModuleConflict) {
+		t.Fatalf("master-off missing binding reorder error = %v", err)
+	}
+	if sidecarTester.calls != 0 || mihomoTester.calls != 0 || controller.putCalls != 0 {
+		t.Fatalf("missing reorder work calls: sidecar=%d mihomo-test=%d apply=%d", sidecarTester.calls, mihomoTester.calls, controller.putCalls)
+	}
+}
+
+func TestInterceptModuleManagerInactiveOnlyReorderSkipsMihomoApply(t *testing.T) {
+	first := testModuleSnapshot()
+	first.ID = "io.example.first"
+	first.EgressGroup = "Proxies"
+	second := testModuleSnapshot()
+	second.ID = "io.example.second"
+	second.Name = "Second extension"
+	manager, controller, _, _, mihomoPath := newInterceptManagerFixture(t, first, second)
+	manager.certWait = func(context.Context, string) error { return nil }
+	initial, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	before, err := manager.Update(context.Background(), first.ID, interceptModuleUpdate{
+		Revision: initial.Revision, Enabled: &enabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.putCalls = 0
+	mihomoTester := manager.tester.(*fakeMihomoTester)
+	mihomoTester.calls = 0
+	sidecarTester := &countingInterceptConfigTester{}
+	manager.SetSidecarTester(sidecarTester)
+	beforeMihomo := mustRead(t, mihomoPath)
+	after, err := manager.Reorder(context.Background(), before.Revision, []string{second.ID, first.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stringSlicesEqual(after.ExecutionOrder, []string{second.ID, first.ID}) || after.Revision == before.Revision {
+		t.Fatalf("inactive-only reorder = %+v", after.ExecutionOrder)
+	}
+	if sidecarTester.calls != 1 || mihomoTester.calls != 0 || controller.putCalls != 0 {
+		t.Fatalf("inactive-only reorder work calls: sidecar=%d mihomo-test=%d apply=%d", sidecarTester.calls, mihomoTester.calls, controller.putCalls)
+	}
+	if mustRead(t, mihomoPath) != beforeMihomo {
+		t.Fatal("inactive-only reorder changed mihomo configuration")
+	}
 }
 
 func TestInterceptModuleManagerEnableDisablePublishesOneTransaction(t *testing.T) {

@@ -243,6 +243,8 @@ func TestAPIRoutes_RequireAuth(t *testing.T) {
 		{http.MethodPut, "/api/ecs"},
 		{http.MethodGet, "/api/tgbot"},
 		{http.MethodPut, "/api/tgbot"},
+		{http.MethodGet, "/api/intercept/health"},
+		{http.MethodPost, "/api/intercept/logs/ticket"},
 		{http.MethodGet, "/api/mihomo/ingress-modules"},
 		{http.MethodPut, "/api/mihomo/ingress-modules/speedtest-5060"},
 		{http.MethodPut, "/api/mihomo/ingress-modules/block-quic-443"},

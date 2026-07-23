@@ -49,9 +49,12 @@ function statusValue(overrides: Partial<StatusValue> = {}): StatusValue {
   return {
     dnsState: 'healthy',
     mihomoState: 'healthy',
+    interceptState: 'healthy',
     dnsOk: true,
     mihomoOk: true,
+    interceptOk: true,
     loading: false,
+    interceptLoading: false,
     status: {
       version: 'dev+abc1234',
       uptime_seconds: 3600,

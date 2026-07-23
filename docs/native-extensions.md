@@ -231,6 +231,14 @@ The script declares exactly one of:
 `bodyMode` is `none`, `text`, or `binary`. Binary bodies are `Uint8Array`
 values. `timeoutMs` is 50–30000 and `maxBodyBytes` is 1024–67108864. Source,
 aggregate script, response, and VM resource limits are enforced independently.
+`bodyMode` controls only whether the input projection contains a body; it does
+not restrict which valid patch the action may return. Replacement and synthetic
+result bodies remain subject to both the action limit and the process-wide body
+limit. For a fixed-length, identity-coded H1/H2 request whose matching actions
+all use `none`, actions may execute before the request body is consumed. A
+header-only result can then stream the original body and late trailers, while a
+URL rewrite still requires the complete decoded body and a replacement drains
+the original body to preserve its late trailers without materializing it.
 
 Every script defines one global entry point:
 
@@ -279,8 +287,12 @@ The sidecar declares and publishes them correctly over HTTP/1.1, HTTP/2, and
 HTTP/3, including when an H2/H3 upstream did not announce them before an H1
 downstream response starts.
 
-Scripts receive console logging but no ambient network, filesystem, process,
-timer, socket, module loader, or Go object. The optional storage object exposes
+Scripts receive bounded `console.log`/`info`/`warn`/`error` logging but no
+ambient network, filesystem, process, timer, socket, module loader, or Go
+object. Console output and structured action completion/error/timeout events
+live only in the sidecar's 1000-entry memory ring and the authenticated
+`/plugin-logs` stream; they are not written to journald or another file. Event
+URLs retain only scheme, host, and path. The optional storage object exposes
 bounded `get`, `set`, `delete`, and `clear` methods scoped to the extension ID.
 When network origins were declared, a script can make a bounded request:
 

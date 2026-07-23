@@ -508,7 +508,7 @@ func (m *InterceptModuleManager) importSnapshot(ctx context.Context, revision st
 	if err := m.validateSidecarCandidate(ctx, newBody); err != nil {
 		return interceptModulesView{}, err
 	}
-	if err := writeInterceptConfigAtomicContext(ctx, m.store.Path, newBody); err != nil {
+	if err := m.store.writeAtomicContext(ctx, newBody); err != nil {
 		return interceptModulesView{}, err
 	}
 	// viewLocked takes the store mutex, so release it before composing the view.
@@ -681,7 +681,7 @@ func (m *InterceptModuleManager) ApplyUpdate(ctx context.Context, id, revision, 
 		err = m.validateSidecarCandidate(ctx, newBody)
 	}
 	if err == nil {
-		err = writeInterceptConfigAtomicContext(ctx, m.store.Path, newBody)
+		err = m.store.writeAtomicContext(ctx, newBody)
 	}
 	m.store.mu.Unlock()
 	if err != nil {
@@ -754,7 +754,7 @@ func (m *InterceptModuleManager) Delete(ctx context.Context, id, revision string
 		err = ctx.Err()
 	}
 	if err == nil {
-		err = writeInterceptConfigAtomicContext(ctx, m.store.Path, newBody)
+		err = m.store.writeAtomicContext(ctx, newBody)
 	}
 	m.store.mu.Unlock()
 	if err != nil {
@@ -771,6 +771,11 @@ type interceptModuleUpdate struct {
 	Settings    map[string]json.RawMessage `json:"settings,omitempty"`
 }
 
+type interceptMutationEffects struct {
+	routingChanged         bool
+	validateEgressBindings bool
+}
+
 func (m *InterceptModuleManager) Update(ctx context.Context, id string, update interceptModuleUpdate) (interceptModulesView, error) {
 	if m == nil || m.store == nil {
 		return interceptModulesView{}, errInterceptModulesUnavailable
@@ -778,46 +783,51 @@ func (m *InterceptModuleManager) Update(ctx context.Context, id string, update i
 	if !validMihomoConfigRevision(update.Revision) || (update.Enabled == nil && update.EgressGroup == nil && update.CaptureDNS == nil && update.Settings == nil) {
 		return interceptModulesView{}, errors.New("revision and at least one update field are required")
 	}
-	return m.mutate(ctx, update.Revision, func(document *interceptConfigDocument) (bool, error) {
+	return m.mutate(ctx, update.Revision, func(document *interceptConfigDocument) (interceptMutationEffects, error) {
 		for index := range document.Modules {
 			module := &document.Modules[index]
 			if module.ID != id {
 				continue
 			}
-			routingChanged := false
+			effects := interceptMutationEffects{}
 			if update.Settings != nil {
 				if err := updateInterceptModuleSettings(module, update.Settings); err != nil {
-					return false, err
+					return interceptMutationEffects{}, err
 				}
 			}
 			if update.EgressGroup != nil {
 				group := *update.EgressGroup
 				if err := validateInterceptEgressGroupBinding(group); err != nil {
-					return false, err
+					return interceptMutationEffects{}, err
 				}
-				routingChanged = true
+				// A non-empty binding must still exist even when this update is a
+				// byte-for-byte no-op or the extension is not currently active.
+				effects.validateEgressBindings = group != ""
+				effects.routingChanged = document.MITM.Enabled && module.Enabled && module.EgressGroup != group
 				module.EgressGroup = group
 			}
 			if update.CaptureDNS != nil {
 				if err := validateInterceptCaptureDNS(*update.CaptureDNS); err != nil {
-					return false, err
+					return interceptMutationEffects{}, err
 				}
-				routingChanged = routingChanged || (document.MITM.Enabled && module.Enabled && module.CaptureDNS != *update.CaptureDNS)
+				effects.routingChanged = effects.routingChanged ||
+					(document.MITM.Enabled && module.Enabled && module.CaptureDNS != *update.CaptureDNS)
 				module.CaptureDNS = *update.CaptureDNS
 			}
 			if update.Enabled != nil {
 				if *update.Enabled && !interceptModuleSettingsReady(module.Settings) {
-					return false, errors.New("configure every required extension setting before enable")
+					return interceptMutationEffects{}, errors.New("configure every required extension setting before enable")
 				}
 				if *update.Enabled && module.EgressGroupRequired && module.EgressGroup == "" {
-					return false, errors.New("select an egress group before enabling this extension")
+					return interceptMutationEffects{}, errors.New("select an egress group before enabling this extension")
 				}
-				routingChanged = routingChanged || (document.MITM.Enabled && module.Enabled != *update.Enabled)
+				effects.routingChanged = effects.routingChanged ||
+					(document.MITM.Enabled && module.Enabled != *update.Enabled)
 				module.Enabled = *update.Enabled
 			}
-			return routingChanged, nil
+			return effects, nil
 		}
-		return false, errInterceptModuleNotFound
+		return interceptMutationEffects{}, errInterceptModuleNotFound
 	})
 }
 
@@ -829,14 +839,47 @@ func (m *InterceptModuleManager) Reorder(ctx context.Context, revision string, e
 		return interceptModulesView{}, errors.New("a valid revision is required")
 	}
 	requested := append([]string(nil), executionOrder...)
-	return m.mutate(ctx, revision, func(document *interceptConfigDocument) (bool, error) {
+	return m.mutate(ctx, revision, func(document *interceptConfigDocument) (interceptMutationEffects, error) {
 		if err := validateInterceptExecutionOrder(document.Modules, requested); err != nil {
-			return false, err
+			return interceptMutationEffects{}, err
 		}
+		effects := interceptMutationEffects{}
 		changed := !stringSlicesEqual(document.ExecutionOrder, requested)
+		if changed {
+			// Reordering an inactive document does not require a mihomo apply, but
+			// it must preserve the existing contract that every stored binding
+			// names a currently available group.
+			for _, module := range document.Modules {
+				if module.EgressGroup != "" {
+					effects.validateEgressBindings = true
+					break
+				}
+			}
+			if document.MITM.Enabled {
+				oldActive := enabledInterceptExecutionOrder(document.Modules, document.ExecutionOrder)
+				nextActive := enabledInterceptExecutionOrder(document.Modules, requested)
+				effects.routingChanged = !stringSlicesEqual(oldActive, nextActive)
+			}
+		}
 		document.ExecutionOrder = requested
-		return changed, nil
+		return effects, nil
 	})
+}
+
+func enabledInterceptExecutionOrder(modules []interceptModuleSnapshot, order []string) []string {
+	enabled := make(map[string]struct{}, len(modules))
+	for _, module := range modules {
+		if module.Enabled {
+			enabled[module.ID] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(enabled))
+	for _, id := range order {
+		if _, exists := enabled[id]; exists {
+			result = append(result, id)
+		}
+	}
+	return result
 }
 
 func updateInterceptModuleSettings(module *interceptModuleSnapshot, values map[string]json.RawMessage) error {
@@ -854,17 +897,17 @@ func updateInterceptModuleSettings(module *interceptModuleSnapshot, values map[s
 }
 
 func (m *InterceptModuleManager) UpdateSettings(ctx context.Context, revision string, settings interceptMITMSettings) (interceptModulesView, error) {
-	return m.mutate(ctx, revision, func(document *interceptConfigDocument) (bool, error) {
+	return m.mutate(ctx, revision, func(document *interceptConfigDocument) (interceptMutationEffects, error) {
 		hadActiveHosts := len(activeInterceptHosts(*document)) > 0
 		document.MITM = settings
-		return hadActiveHosts != (len(activeInterceptHosts(*document)) > 0), nil
+		return interceptMutationEffects{routingChanged: hadActiveHosts != (len(activeInterceptHosts(*document)) > 0)}, nil
 	})
 }
 
 func (m *InterceptModuleManager) mutate(
 	ctx context.Context,
 	revision string,
-	mutator func(*interceptConfigDocument) (bool, error),
+	mutator func(*interceptConfigDocument) (interceptMutationEffects, error),
 ) (interceptModulesView, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -886,7 +929,7 @@ func (m *InterceptModuleManager) mutate(
 		nextDocument.Modules[index].Settings = cloneInterceptSettings(oldDocument.Modules[index].Settings)
 		nextDocument.Modules[index].HostMappings = append([]interceptHostMapping(nil), oldDocument.Modules[index].HostMappings...)
 	}
-	routingChanged, err := mutator(&nextDocument)
+	effects, err := mutator(&nextDocument)
 	if err != nil {
 		return interceptModulesView{}, err
 	}
@@ -894,17 +937,22 @@ func (m *InterceptModuleManager) mutate(
 	if err != nil {
 		return interceptModulesView{}, err
 	}
-	if err := m.validateSidecarCandidate(ctx, newBody); err != nil {
-		return interceptModulesView{}, err
+	if effects.validateEgressBindings && !effects.routingChanged {
+		if err := m.validateEgressBindingsOnly(nextDocument); err != nil {
+			return interceptModulesView{}, err
+		}
 	}
-	if bytesEqual(oldBody, newBody) && !routingChanged {
+	if bytesEqual(oldBody, newBody) && !effects.routingChanged {
 		m.store.mu.Unlock()
 		view, viewErr := m.viewLocked()
 		m.store.mu.Lock()
 		return view, viewErr
 	}
-	if !routingChanged {
-		if err := writeInterceptConfigAtomicContext(ctx, m.store.Path, newBody); err != nil {
+	if err := m.validateSidecarCandidate(ctx, newBody); err != nil {
+		return interceptModulesView{}, err
+	}
+	if !effects.routingChanged {
+		if err := m.store.writeAtomicContext(ctx, newBody); err != nil {
 			return interceptModulesView{}, err
 		}
 		m.store.mu.Unlock()
@@ -942,7 +990,7 @@ func (m *InterceptModuleManager) mutate(
 	if err := m.validateMihomoCandidateLocked(ctx, nextMihomo); err != nil {
 		return interceptModulesView{}, err
 	}
-	if err := writeInterceptConfigAtomicContext(ctx, m.store.Path, newBody); err != nil {
+	if err := m.store.writeAtomicContext(ctx, newBody); err != nil {
 		return interceptModulesView{}, err
 	}
 	oldCertificateHosts := certificateInterceptHosts(oldDocument)
@@ -951,12 +999,12 @@ func (m *InterceptModuleManager) mutate(
 	certificateHostsChanged := !stringSlicesEqual(oldCertificateHosts, nextCertificateHosts)
 	if len(nextCertificateHosts) > 0 && (certificateHostsChanged || (firstActivation && !m.certificateReady(nextDocument))) {
 		if err := m.waitForCertificate(ctx, interceptCertificateDigest(nextCertificateHosts), newBody); err != nil {
-			rollbackErr := writeInterceptConfigAtomic(m.store.Path, oldBody)
+			rollbackErr := m.store.writeAtomic(oldBody)
 			return interceptModulesView{}, fmt.Errorf("%w: certificate publication: %v; sidecar rollback: %v", errInterceptApplyFailed, err, rollbackErr)
 		}
 	}
 	if err := m.publishMihomoLocked(ctx, oldMihomo, nextMihomo); err != nil {
-		rollbackErr := writeInterceptConfigAtomic(m.store.Path, oldBody)
+		rollbackErr := m.store.writeAtomic(oldBody)
 		return interceptModulesView{}, fmt.Errorf("%w: %v; sidecar rollback: %v", errInterceptApplyFailed, err, rollbackErr)
 	}
 	m.publishHosts(&nextDocument)
@@ -969,6 +1017,26 @@ func (m *InterceptModuleManager) mutate(
 		reason = "certificate-not-ready"
 	}
 	return modulesViewFromDocument(nextDocument, newBody, certificateReady, reason, analysis.AvailableEgressGroups), nil
+}
+
+func (m *InterceptModuleManager) validateEgressBindingsOnly(document interceptConfigDocument) error {
+	if m.mihomo == nil {
+		return errInterceptModulesUnavailable
+	}
+	m.mihomo.Lock()
+	defer m.mihomo.Unlock()
+	text, err := m.mihomo.Read()
+	if err != nil {
+		return err
+	}
+	available, err := interceptAvailableEgressGroups(text)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errInterceptModuleConflict, err)
+	}
+	if err := validateInterceptEgressBindings(document, available); err != nil {
+		return fmt.Errorf("%w: %v", errInterceptModuleConflict, err)
+	}
+	return nil
 }
 
 func (m *InterceptModuleManager) certificateReady(document interceptConfigDocument) bool {
@@ -1095,9 +1163,13 @@ func (m *InterceptModuleManager) republishCertificateCandidate(ctx context.Conte
 		return errors.New("certificate candidate changed during publication")
 	}
 	if m.certRepublish != nil {
-		return m.certRepublish(ctx, m.store.Path, candidate)
+		if err := m.certRepublish(ctx, m.store.Path, candidate); err != nil {
+			return err
+		}
+		m.store.invalidateHealthCache()
+		return nil
 	}
-	return writeInterceptConfigAtomicContext(ctx, m.store.Path, candidate)
+	return m.store.writeAtomicContext(ctx, candidate)
 }
 
 func (m *InterceptModuleManager) publishHosts(document *interceptConfigDocument) {

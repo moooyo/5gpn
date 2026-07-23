@@ -102,6 +102,48 @@ export interface MihomoLogTicket { ticket: string }
 // validate against.
 export interface MihomoLogLine { type: string; payload: string }
 
+// Narrow liveness projection for the optional interception sidecar. `expected`
+// tells the console whether the current MITM configuration should have started
+// the process, so an intentionally idle sidecar is not reported as failed.
+export interface InterceptHealth {
+  running: boolean
+  expected: boolean
+  installed_plugins: number
+  active_plugins: number
+  version?: string
+}
+
+// Short-lived, single-use credential for one same-origin plugin-engine log
+// WebSocket. The bearer token never appears in the WebSocket URL.
+export interface InterceptLogTicket {
+  ticket: string
+  expires_in_seconds: number
+}
+
+export type PluginEngineLogLevel = 'info' | 'warn' | 'error'
+export type PluginEngineLogSource = 'script' | 'engine'
+export type PluginEngineLogPhase = 'request' | 'response'
+
+// One JSON text frame emitted by the sidecar's in-memory log stream.
+export interface PluginEngineLogLine {
+  time: string
+  level: PluginEngineLogLevel
+  source: PluginEngineLogSource
+  extension?: string
+  action?: string
+  phase?: PluginEngineLogPhase
+  duration_ms?: number
+  url?: string
+  script_digest?: string
+  message: string
+}
+
+// Browser-local identity used for ring watermarks, expansion state, and stable
+// virtual-row keys. It is never part of the wire contract.
+export interface PluginEngineLogEntry extends PluginEngineLogLine {
+  id: number
+}
+
 // Verbatim GET /api/mihomo/config response. The operator edits the complete
 // effective mihomo config as raw text, so this is the single
 // source of truth for `/etc/5gpn/mihomo/config.yaml`. `applied_at` is the

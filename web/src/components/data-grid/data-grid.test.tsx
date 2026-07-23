@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -154,5 +155,37 @@ describe('VirtualTable', () => {
     expect(screen.queryByText('Name')).not.toBeInTheDocument()
     const firstRow = screen.getByTestId('virtual-spacer').firstElementChild
     if (firstRow) expect(firstRow).not.toHaveClass('border-b')
+  })
+
+  it('supports stable, keyboard-accessible inline row details with deterministic heights', async () => {
+    const user = userEvent.setup()
+
+    function Harness() {
+      const [expanded, setExpanded] = useState<string | null>(null)
+      return (
+        <VirtualTable
+          columns={columns}
+          data={rows}
+          rowHeight={32}
+          getRowId={(row) => row.name}
+          getRowHeight={(row) => expanded === row.name ? 96 : 32}
+          getRowAriaLabel={(row) => `Details for ${row.name}`}
+          isRowExpanded={(row) => expanded === row.name}
+          onRowClick={(row) => setExpanded((current) => current === row.name ? null : row.name)}
+          renderRowDetails={(row) => <div>Expanded {row.name}</div>}
+        />
+      )
+    }
+
+    render(<Harness />)
+    const row = await screen.findByRole('button', { name: 'Details for bravo' })
+    expect(row).toHaveAttribute('aria-expanded', 'false')
+    row.focus()
+    await user.keyboard('{Enter}')
+    expect(row).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('Expanded bravo')).toBeInTheDocument()
+    expect(row).toHaveStyle({ height: '96px' })
+    await user.keyboard(' ')
+    expect(screen.queryByText('Expanded bravo')).not.toBeInTheDocument()
   })
 })

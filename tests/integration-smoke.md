@@ -535,6 +535,16 @@ token into recorded command output, screenshots, or issue logs.
   complete list. Inject an unreachable origin, unsafe redirect, private dial
   target, malformed/oversized JSON, duplicate field, and partial entry; each
   failure must leave the previous complete marketplace snapshot unchanged.
+- [ ] Open `/plugin-logs` with an enabled synthetic extension. Verify
+  `console.log`/`info`/`warn`/`error` levels, action completion and timeout
+  metadata, plugin/action filters, debounced search, one-row expansion, local
+  clear, and pause-with-buffer behavior on desktop and mobile. Disconnect the
+  sidecar Unix socket: the current WebSocket closes, the page mints a different
+  one-use ticket every three seconds, and recovery appends only new events.
+  Confirm `/run/5gpn-intercept/logs.sock` is `0660` inside a `0750` runtime
+  directory, a ninth stream is refused, invalid Origin/query/non-Upgrade
+  requests do not consume a ticket, and script console text does not appear in
+  the persistent journal.
 - [ ] Select one official marketplace entry, review the cached scope in the
   install-confirm dialog, and verify the daemon then refetches the
   listed manifest, checks its byte size and SHA-256 plus every referenced script

@@ -6,21 +6,23 @@ import { AppShell } from './AppShell'
 import { ThemeProvider } from '../lib/theme'
 import i18n from '../i18n'
 import { api } from '../lib/api/client'
-import type { Status, MihomoHealth } from '../lib/api/types'
+import type { Status, MihomoHealth, InterceptHealth } from '../lib/api/types'
 
 // StatusProvider (mounted inside AppShell) polls these on render — mock so
 // the test never touches the network.
 vi.mock('../lib/api/client', () => ({
-  api: { getStatus: vi.fn(), getMihomoHealth: vi.fn() },
+  api: { getStatus: vi.fn(), getMihomoHealth: vi.fn(), getInterceptHealth: vi.fn() },
 }))
 
 const OK_STATUS: Status = { version: 'dev', uptime_seconds: 42, stats: {} as Status['stats'] }
 const OK_MIHOMO: MihomoHealth = { version: 'v1.19.0' }
+const OK_INTERCEPT: InterceptHealth = { running: false, expected: false, installed_plugins: 2, active_plugins: 0 }
 
 beforeEach(async () => {
   await i18n.changeLanguage('zh')
   vi.mocked(api.getStatus).mockResolvedValue(OK_STATUS)
   vi.mocked(api.getMihomoHealth).mockResolvedValue(OK_MIHOMO)
+  vi.mocked(api.getInterceptHealth).mockResolvedValue(OK_INTERCEPT)
 })
 
 afterEach(async () => {

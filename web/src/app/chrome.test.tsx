@@ -11,10 +11,10 @@ import { ThemeProvider } from '../lib/theme'
 import i18n from '../i18n'
 import { api } from '../lib/api/client'
 import { ApiError } from '../lib/api/http'
-import type { Status, MihomoHealth } from '../lib/api/types'
+import type { Status, MihomoHealth, InterceptHealth } from '../lib/api/types'
 
 vi.mock('../lib/api/client', () => ({
-  api: { getStatus: vi.fn(), getMihomoHealth: vi.fn() },
+  api: { getStatus: vi.fn(), getMihomoHealth: vi.fn(), getInterceptHealth: vi.fn() },
 }))
 
 // Count of <style> elements anywhere in the document — the CSP proxy
@@ -24,6 +24,24 @@ const styleCount = () => document.querySelectorAll('style').length
 
 const OK_STATUS: Status = { version: 'dev', uptime_seconds: 42, stats: {} as Status['stats'] }
 const OK_MIHOMO: MihomoHealth = { version: 'v1.19.0' }
+const OK_INTERCEPT: InterceptHealth = { running: true, expected: true, installed_plugins: 3, active_plugins: 2, version: 'dev' }
+
+function statusValue(overrides: Partial<StatusValue> = {}): StatusValue {
+  return {
+    status: OK_STATUS,
+    mihomo: OK_MIHOMO,
+    intercept: OK_INTERCEPT,
+    dnsState: 'healthy',
+    mihomoState: 'healthy',
+    interceptState: 'healthy',
+    dnsOk: true,
+    mihomoOk: true,
+    interceptOk: true,
+    loading: false,
+    interceptLoading: false,
+    ...overrides,
+  }
+}
 
 function renderChrome(ui: React.ReactNode, { route = '/logs', status }: { route?: string; status: StatusValue }) {
   return render(
@@ -49,7 +67,7 @@ describe('Sidebar', () => {
   it('renders every nav item label in zh, and the item matching the current route gets the active pill', async () => {
     renderChrome(<Sidebar />, {
       route: '/logs',
-      status: { dnsState: 'healthy', mihomoState: 'healthy', dnsOk: true, mihomoOk: true, loading: false },
+      status: statusValue(),
     })
 
     for (const item of ALL_NAV_ITEMS) {
@@ -68,14 +86,17 @@ describe('Sidebar', () => {
   it('renders healthy and down kernel states with their distinct labels and colors', () => {
     renderChrome(<Sidebar />, {
       route: '/overview',
-      status: { dnsState: 'healthy', mihomoState: 'down', dnsOk: true, mihomoOk: false, loading: false },
+      status: statusValue({ mihomoState: 'down', mihomoOk: false }),
     })
 
     expect(screen.getByText('DNS 服务器')).toBeInTheDocument()
     expect(screen.getByText('mihomo')).toBeInTheDocument()
+    expect(screen.getByText('5gpn-intercept')).toBeInTheDocument()
+    expect(screen.getByText('sidecar · 2 个活动插件')).toBeInTheDocument()
 
-    const runningEl = screen.getByText(i18n.t('common.healthHealthy'))
-    expect(runningEl.className).toContain('text-green')
+    const runningEls = screen.getAllByText(i18n.t('common.healthHealthy'))
+    expect(runningEls).toHaveLength(2)
+    for (const runningEl of runningEls) expect(runningEl.className).toContain('text-green')
 
     const stoppedEl = screen.getByText(i18n.t('common.healthDown'))
     expect(stoppedEl.className).toContain('text-red')
@@ -84,24 +105,46 @@ describe('Sidebar', () => {
   it('renders initial checking and transport-failure unknown states without claiming either service is down', () => {
     const { rerender } = renderChrome(<Sidebar />, {
       route: '/overview',
-      status: { dnsState: 'checking', mihomoState: 'checking', dnsOk: false, mihomoOk: false, loading: true },
+      status: statusValue({
+        status: undefined,
+        mihomo: undefined,
+        intercept: undefined,
+        dnsState: 'checking',
+        mihomoState: 'checking',
+        interceptState: 'checking',
+        dnsOk: false,
+        mihomoOk: false,
+        interceptOk: false,
+        loading: true,
+        interceptLoading: true,
+      }),
     })
 
-    expect(screen.getAllByText(i18n.t('common.healthChecking'))).toHaveLength(2)
+    expect(screen.getAllByText(i18n.t('common.healthChecking'))).toHaveLength(3)
     expect(screen.queryByText(i18n.t('common.healthDown'))).not.toBeInTheDocument()
 
     rerender(
       <MemoryRouter initialEntries={['/overview']}>
         <ThemeProvider>
           <StatusContext.Provider
-            value={{ dnsState: 'unknown', mihomoState: 'unknown', dnsOk: false, mihomoOk: false, loading: false }}
+            value={statusValue({
+              status: undefined,
+              mihomo: undefined,
+              intercept: undefined,
+              dnsState: 'unknown',
+              mihomoState: 'unknown',
+              interceptState: 'unknown',
+              dnsOk: false,
+              mihomoOk: false,
+              interceptOk: false,
+            })}
           >
             <Sidebar />
           </StatusContext.Provider>
         </ThemeProvider>
       </MemoryRouter>,
     )
-    expect(screen.getAllByText(i18n.t('common.healthUnknown'))).toHaveLength(2)
+    expect(screen.getAllByText(i18n.t('common.healthUnknown'))).toHaveLength(3)
     expect(screen.queryByText(i18n.t('common.healthDown'))).not.toBeInTheDocument()
   })
 })
@@ -112,6 +155,7 @@ describe('Topbar', () => {
     expect(pageMeta('/setup-guide')).toBe('setup-guide')
     expect(pageMeta('/resolve-test')).toBe('resolve-test')
     expect(pageMeta('/marketplace')).toBe('marketplace')
+    expect(pageMeta('/plugin-logs')).toBe('plugin-logs')
     expect(pageMeta('/does-not-exist')).toBe('overview')
     expect(pageMeta('/')).toBe('overview')
   })
@@ -119,11 +163,21 @@ describe('Topbar', () => {
   it('shows the title and subtitle for the current route (/logs)', () => {
     renderChrome(<Topbar />, {
       route: '/logs',
-      status: { dnsState: 'healthy', mihomoState: 'healthy', dnsOk: true, mihomoOk: true, loading: false },
+      status: statusValue(),
     })
 
     expect(screen.getByText('解析日志')).toBeInTheDocument()
     expect(screen.getByText(i18n.t('topbar.sub.logs'))).toBeInTheDocument()
+  })
+
+  it('derives the plugin-log title and subtitle from the navigation manifest', () => {
+    renderChrome(<Topbar />, {
+      route: '/plugin-logs',
+      status: statusValue(),
+    })
+
+    expect(screen.getByText(i18n.t('nav.pluginLogs'))).toBeInTheDocument()
+    expect(screen.getByText(i18n.t('topbar.sub.pluginLogs'))).toBeInTheDocument()
   })
 })
 
@@ -162,18 +216,44 @@ describe('StatusProvider / useStatus', () => {
   beforeEach(() => {
     vi.mocked(api.getStatus).mockReset()
     vi.mocked(api.getMihomoHealth).mockReset()
+    vi.mocked(api.getInterceptHealth).mockReset()
+    vi.mocked(api.getInterceptHealth).mockResolvedValue(OK_INTERCEPT)
   })
 
   function Probe() {
-    const { status, mihomo, dnsState, mihomoState, dnsOk, mihomoOk, loading } = useStatus()
+    const {
+      status,
+      mihomo,
+      intercept,
+      dnsState,
+      mihomoState,
+      interceptState,
+      dnsOk,
+      mihomoOk,
+      interceptOk,
+      loading,
+      interceptLoading,
+    } = useStatus()
     return (
       <div data-testid="probe">
-        {JSON.stringify({ dnsState, mihomoState, dnsOk, mihomoOk, loading, hasStatus: status !== undefined, hasMihomo: mihomo !== undefined })}
+        {JSON.stringify({
+          dnsState,
+          mihomoState,
+          interceptState,
+          dnsOk,
+          mihomoOk,
+          interceptOk,
+          loading,
+          interceptLoading,
+          hasStatus: status !== undefined,
+          hasMihomo: mihomo !== undefined,
+          hasIntercept: intercept !== undefined,
+        })}
       </div>
     )
   }
 
-  it('polls getStatus + getMihomoHealth on mount and derives dnsOk/mihomoOk (mihomo liveness from getMihomoHealth, NOT status.version)', async () => {
+  it('polls all three health surfaces and derives their independent health flags', async () => {
     vi.mocked(api.getStatus).mockResolvedValue(OK_STATUS)
     vi.mocked(api.getMihomoHealth).mockResolvedValue(OK_MIHOMO)
 
@@ -185,7 +265,19 @@ describe('StatusProvider / useStatus', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('probe').textContent).toBe(
-        JSON.stringify({ dnsState: 'healthy', mihomoState: 'healthy', dnsOk: true, mihomoOk: true, loading: false, hasStatus: true, hasMihomo: true }),
+        JSON.stringify({
+          dnsState: 'healthy',
+          mihomoState: 'healthy',
+          interceptState: 'healthy',
+          dnsOk: true,
+          mihomoOk: true,
+          interceptOk: true,
+          loading: false,
+          interceptLoading: false,
+          hasStatus: true,
+          hasMihomo: true,
+          hasIntercept: true,
+        }),
       )
     })
   })
@@ -193,6 +285,7 @@ describe('StatusProvider / useStatus', () => {
   it('maps a shared console or network failure to unknown instead of down', async () => {
     vi.mocked(api.getStatus).mockRejectedValue(new Error('network'))
     vi.mocked(api.getMihomoHealth).mockRejectedValue(new Error('network'))
+    vi.mocked(api.getInterceptHealth).mockRejectedValue(new Error('network'))
 
     render(
       <StatusProvider intervalMs={100_000}>
@@ -202,7 +295,19 @@ describe('StatusProvider / useStatus', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('probe').textContent).toBe(
-        JSON.stringify({ dnsState: 'unknown', mihomoState: 'unknown', dnsOk: false, mihomoOk: false, loading: false, hasStatus: false, hasMihomo: false }),
+        JSON.stringify({
+          dnsState: 'unknown',
+          mihomoState: 'unknown',
+          interceptState: 'unknown',
+          dnsOk: false,
+          mihomoOk: false,
+          interceptOk: false,
+          loading: false,
+          interceptLoading: false,
+          hasStatus: false,
+          hasMihomo: false,
+          hasIntercept: false,
+        }),
       )
     })
   })
@@ -247,6 +352,92 @@ describe('StatusProvider / useStatus', () => {
     )
 
     await waitFor(() => expect(screen.getByTestId('probe').textContent).toContain('"mihomoState":"unknown"'))
+  })
+
+  it('treats an intentionally idle sidecar as healthy and a running-state mismatch as down', async () => {
+    vi.mocked(api.getStatus).mockResolvedValue(OK_STATUS)
+    vi.mocked(api.getMihomoHealth).mockResolvedValue(OK_MIHOMO)
+    vi.mocked(api.getInterceptHealth).mockResolvedValue({
+      running: false,
+      expected: false,
+      installed_plugins: 3,
+      active_plugins: 0,
+    })
+
+    const first = render(
+      <StatusProvider intervalMs={100_000}>
+        <Probe />
+      </StatusProvider>,
+    )
+    await waitFor(() => expect(screen.getByTestId('probe').textContent).toContain('"interceptState":"healthy"'))
+    first.unmount()
+
+    vi.mocked(api.getInterceptHealth).mockResolvedValue({
+      running: false,
+      expected: true,
+      installed_plugins: 3,
+      active_plugins: 2,
+    })
+    render(
+      <StatusProvider intervalMs={100_000}>
+        <Probe />
+      </StatusProvider>,
+    )
+    await waitFor(() => expect(screen.getByTestId('probe').textContent).toContain('"interceptState":"down"'))
+  })
+
+  it('maps an explicit sidecar server failure to down and a transport failure to unknown', async () => {
+    vi.mocked(api.getStatus).mockResolvedValue(OK_STATUS)
+    vi.mocked(api.getMihomoHealth).mockResolvedValue(OK_MIHOMO)
+    vi.mocked(api.getInterceptHealth).mockRejectedValue(new ApiError(503, 'sidecar unavailable'))
+
+    const first = render(
+      <StatusProvider intervalMs={100_000}>
+        <Probe />
+      </StatusProvider>,
+    )
+    await waitFor(() => expect(screen.getByTestId('probe').textContent).toContain('"interceptState":"down"'))
+    first.unmount()
+
+    vi.mocked(api.getInterceptHealth).mockRejectedValue(new ApiError(0, 'network'))
+    render(
+      <StatusProvider intervalMs={100_000}>
+        <Probe />
+      </StatusProvider>,
+    )
+    await waitFor(() => expect(screen.getByTestId('probe').textContent).toContain('"interceptState":"unknown"'))
+  })
+
+  it('treats a malformed sidecar health payload as unknown without crashing the shell', async () => {
+    vi.mocked(api.getStatus).mockResolvedValue(OK_STATUS)
+    vi.mocked(api.getMihomoHealth).mockResolvedValue(OK_MIHOMO)
+    vi.mocked(api.getInterceptHealth).mockResolvedValue(null as unknown as InterceptHealth)
+
+    render(
+      <StatusProvider intervalMs={100_000}>
+        <Probe />
+      </StatusProvider>,
+    )
+
+    await waitFor(() => expect(screen.getByTestId('probe').textContent).toContain('"interceptState":"unknown"'))
+    expect(screen.getByTestId('probe').textContent).toContain('"loading":false')
+  })
+
+  it('does not let a pending sidecar health request prolong the shared loading state', async () => {
+    vi.useFakeTimers()
+    vi.mocked(api.getStatus).mockResolvedValue(OK_STATUS)
+    vi.mocked(api.getMihomoHealth).mockResolvedValue(OK_MIHOMO)
+    vi.mocked(api.getInterceptHealth).mockImplementation(() => new Promise<InterceptHealth>(() => undefined))
+
+    render(
+      <StatusProvider intervalMs={100_000} requestTimeoutMs={1_000}>
+        <Probe />
+      </StatusProvider>,
+    )
+    await act(async () => { await Promise.resolve() })
+
+    expect(screen.getByTestId('probe').textContent).toContain('"loading":false')
+    expect(screen.getByTestId('probe').textContent).toContain('"interceptLoading":true')
   })
 
   it('updates a completed result while the other request is still pending', async () => {

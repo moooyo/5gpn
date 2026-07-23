@@ -59,6 +59,28 @@ type interceptSettingsUpdate struct {
 type InterceptConfigStore struct {
 	Path string
 	mu   sync.Mutex
+
+	// Callers that need both locks acquire mu before healthMu. The projection
+	// lookup never acquires mu itself, so manager transactions cannot deadlock
+	// with direct cache inspection.
+	healthMu     sync.Mutex
+	healthCache  interceptHealthCacheEntry
+	healthReads  uint64
+	healthParses uint64
+}
+
+type interceptHealthProjection struct {
+	InstalledPlugins int
+	ActivePlugins    int
+}
+
+type interceptHealthCacheEntry struct {
+	valid      bool
+	info       os.FileInfo
+	digest     [sha256.Size]byte
+	hasDigest  bool
+	projection interceptHealthProjection
+	err        error
 }
 
 func NewInterceptConfigStore(path string) *InterceptConfigStore {
@@ -86,6 +108,135 @@ func (s *InterceptConfigStore) Read() (interceptConfigDocument, []byte, error) {
 		return interceptConfigDocument{}, nil, err
 	}
 	return document, body, nil
+}
+
+// HealthProjection returns the small control-plane projection needed by the
+// periodic health endpoint. Every lookup opens and stats the actual file so an
+// atomic replacement cannot hide behind path metadata. Unchanged file
+// identities avoid reading or parsing the potentially large document; a
+// changed identity with identical bytes reuses the already validated result.
+// This fast path relies on the control plane's atomic-replacement contract. It
+// deliberately does not reread a file whose identity, size, and mtime all
+// remain unchanged, so an out-of-band writer that restores all three metadata
+// values after an in-place rewrite is outside that contract.
+func (s *InterceptConfigStore) HealthProjection() (interceptHealthProjection, error) {
+	if s == nil || strings.TrimSpace(s.Path) == "" {
+		return interceptHealthProjection{}, errors.New("interception config management unavailable")
+	}
+
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+
+	file, err := os.Open(s.Path)
+	if err != nil {
+		return interceptHealthProjection{}, fmt.Errorf("read interception config: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return interceptHealthProjection{}, fmt.Errorf("stat interception config: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return interceptHealthProjection{}, errors.New("interception config is not a regular file")
+	}
+	// Windows may resolve the file ID stored in FileInfo lazily. Comparing the
+	// opened value with itself pins that identity before a later atomic rename.
+	if !os.SameFile(info, info) {
+		return interceptHealthProjection{}, errors.New("could not establish interception config file identity")
+	}
+	if s.healthCache.matches(info) {
+		return s.healthCache.projection, s.healthCache.err
+	}
+	if info.Size() > maxInterceptConfigBytes {
+		err := fmt.Errorf("interception config exceeds %d bytes", maxInterceptConfigBytes)
+		s.healthCache = interceptHealthCacheEntry{valid: true, info: info, err: err}
+		return interceptHealthProjection{}, err
+	}
+
+	s.healthReads++
+	body, err := io.ReadAll(io.LimitReader(file, maxInterceptConfigBytes+1))
+	if err != nil {
+		// Transient reads are intentionally not cached. A previous projection is
+		// never returned for a different observed file.
+		return interceptHealthProjection{}, fmt.Errorf("read interception config: %w", err)
+	}
+	if len(body) > maxInterceptConfigBytes {
+		err := fmt.Errorf("interception config exceeds %d bytes", maxInterceptConfigBytes)
+		s.healthCache = interceptHealthCacheEntry{valid: true, info: info, err: err}
+		return interceptHealthProjection{}, err
+	}
+	finalInfo, err := file.Stat()
+	if err != nil {
+		return interceptHealthProjection{}, fmt.Errorf("stat interception config: %w", err)
+	}
+	if !os.SameFile(finalInfo, finalInfo) {
+		return interceptHealthProjection{}, errors.New("could not establish interception config file identity")
+	}
+	if !sameInterceptConfigFile(info, finalInfo) {
+		return interceptHealthProjection{}, errors.New("interception config changed while it was being read")
+	}
+	info = finalInfo
+
+	digest := sha256.Sum256(body)
+	if s.healthCache.valid && s.healthCache.hasDigest && s.healthCache.digest == digest {
+		s.healthCache.info = info
+		return s.healthCache.projection, s.healthCache.err
+	}
+
+	s.healthParses++
+	document, err := decodeInterceptConfig(body)
+	entry := interceptHealthCacheEntry{
+		valid:     true,
+		info:      info,
+		digest:    digest,
+		hasDigest: true,
+		err:       err,
+	}
+	if err == nil {
+		entry.projection.InstalledPlugins = len(document.Modules)
+		if document.MITM.Enabled {
+			for _, module := range document.Modules {
+				if module.Enabled {
+					entry.projection.ActivePlugins++
+				}
+			}
+		}
+	}
+	s.healthCache = entry
+	return entry.projection, entry.err
+}
+
+func (entry interceptHealthCacheEntry) matches(info os.FileInfo) bool {
+	return entry.valid && sameInterceptConfigFile(entry.info, info)
+}
+
+func sameInterceptConfigFile(left, right os.FileInfo) bool {
+	return left != nil && right != nil && os.SameFile(left, right) &&
+		left.Size() == right.Size() && left.ModTime().Equal(right.ModTime())
+}
+
+func (s *InterceptConfigStore) invalidateHealthCache() {
+	if s == nil {
+		return
+	}
+	s.healthMu.Lock()
+	s.healthCache = interceptHealthCacheEntry{}
+	s.healthMu.Unlock()
+}
+
+func (s *InterceptConfigStore) writeAtomicContext(ctx context.Context, body []byte) error {
+	if s == nil || strings.TrimSpace(s.Path) == "" {
+		return errors.New("interception config management unavailable")
+	}
+	if err := writeInterceptConfigAtomicContext(ctx, s.Path, body); err != nil {
+		return err
+	}
+	s.invalidateHealthCache()
+	return nil
+}
+
+func (s *InterceptConfigStore) writeAtomic(body []byte) error {
+	return s.writeAtomicContext(context.Background(), body)
 }
 
 func decodeInterceptConfig(body []byte) (interceptConfigDocument, error) {

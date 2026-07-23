@@ -35,7 +35,10 @@ export const api = {
   getTgbot: (signal?: AbortSignal) => apiFetch<T.TGBotView>('/api/tgbot', { signal }),
   putTgbot: (u: T.TGBotUpdate) => apiFetch<T.TGBotView>('/api/tgbot', { method: 'PUT', body: JSON.stringify(u) }),
   getMihomoHealth: (signal?: AbortSignal) => apiFetch<T.MihomoHealth>('/api/mihomo/health', { signal }),
+  getInterceptHealth: (signal?: AbortSignal) => apiFetch<T.InterceptHealth>('/api/intercept/health', { signal }),
   createMihomoLogTicket: () => apiFetch<T.MihomoLogTicket>('/api/mihomo/log-ticket', { method: 'POST' }),
+  createPluginLogTicket: (signal?: AbortSignal) =>
+    apiFetch<T.InterceptLogTicket>('/api/intercept/logs/ticket', { method: 'POST', signal }),
   createZashboardHandoff: () => apiFetch<T.ZashboardHandoff>('/api/mihomo/zashboard-handoff', { method: 'POST' }),
   // ---- mihomo config editor ----------------------------------------------
   // The operator edits the WHOLE mihomo config as raw text. PUT/reset both

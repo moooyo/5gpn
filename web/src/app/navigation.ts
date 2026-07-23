@@ -7,7 +7,7 @@ export interface NavItem {
   icon: NavIcon
 }
 
-export type NavIcon = 'dashboard' | 'setup' | 'logs' | 'resolve' | 'policy' | 'extensions' | 'marketplace' | 'mihomo' | 'config' | 'settings'
+export type NavIcon = 'dashboard' | 'setup' | 'logs' | 'resolve' | 'policy' | 'extensions' | 'marketplace' | 'pluginLogs' | 'mihomo' | 'config' | 'settings'
 
 export interface NavGroup {
   id: string
@@ -30,15 +30,16 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'logs', path: '/logs', labelKey: 'nav.logs', icon: 'logs' },
       { id: 'resolve-test', path: '/resolve-test', labelKey: 'nav.resolveTest', icon: 'resolve' },
+      { id: 'policy-rules', path: '/policy-rules', labelKey: 'nav.policyRules', icon: 'policy' },
     ],
   },
   {
-    id: 'rules',
-    labelKey: 'nav.group.rules',
+    id: 'plugins',
+    labelKey: 'nav.group.plugins',
     items: [
-      { id: 'policy-rules', path: '/policy-rules', labelKey: 'nav.policyRules', icon: 'policy' },
       { id: 'extensions', path: '/extensions', labelKey: 'nav.extensions', icon: 'extensions' },
       { id: 'marketplace', path: '/marketplace', labelKey: 'nav.marketplace', icon: 'marketplace' },
+      { id: 'plugin-logs', path: '/plugin-logs', labelKey: 'nav.pluginLogs', icon: 'pluginLogs' },
     ],
   },
   {
