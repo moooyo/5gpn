@@ -177,7 +177,7 @@ sudo sed -n 's/^DNS_API_TOKEN=//p' /etc/5gpn/dns.env
 - **iOS**: download and install `/ios/ios-dot.mobileconfig` from the Setup Guide. If extensions are needed, install `/ios/ios-intercept-ca.mobileconfig` separately and manually enable Full SSL Trust in system settings.
 - **zashboard**: add the source CIDR to the allowlist, then start a one-use handoff from the Console. The source allowlist and short-lived session at `https://zash.<base>/` are separate from the Console token.
 
-The Console includes `/overview`, `/setup-guide`, `/logs`, `/resolve-test`, `/policy-rules`, `/extensions`, `/extensions/hosts`, `/marketplace`, `/plugin-logs`, `/mihomo`, `/mihomo-config`, and `/settings`. It exposes only narrow mihomo operations; general controller pass-through belongs exclusively to the separately protected zashboard. Mihomo logs and plugin logs use distinct short-lived, one-use WebSocket tickets.
+The Console includes `/overview`, `/setup-guide`, `/logs`, `/resolve-test`, `/policy-rules`, `/extensions`, `/extensions/hosts`, `/marketplace`, `/plugin-logs`, `/mihomo`, `/mihomo-config`, and `/settings`. It exposes only narrow mihomo operations; full controller pass-through belongs exclusively to the separately protected zashboard. Mihomo logs and plugin logs use distinct short-lived, one-use WebSocket tickets.
 
 The Telegram bot runs inside `5gpn-dns` and can be configured from Console Settings or with this TUI:
 
