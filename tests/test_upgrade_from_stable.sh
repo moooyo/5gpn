@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL="$ROOT/install.sh"
 QUICK="$ROOT/quick-install.sh"
 FIXTURE="$ROOT/tests/fixtures/stable-0.0.13"
+MIGRATION_GUIDE="$ROOT/docs/pre-v5-upgrade.md"
 FAIL=0
 
 pass() { echo "ok: $*"; }
@@ -54,7 +55,10 @@ for recipe_token in \
     'set -euo pipefail' \
     'NEW_INSTALL_SH' \
     'old v4 daemon still owns the transaction' \
+    'Prove this is the exact retired shape before any live-state mutation' \
     'Disable MITM through the old authenticated API' \
+    'chmod 0600 "$api_header"' \
+    '-H "@${api_header}"' \
     '.active_capture_hosts | length == 0' \
     'systemctl is-active --quiet 5gpn-intercept.service' \
     'listen: .listen' \
@@ -78,14 +82,17 @@ for recipe_token in \
     'committed=1' \
     'mv -fT -- "$candidate" "$old"' \
     'mv -fT -- "$env_candidate" "$env_file"'; do
-    grep -Fq -- "$recipe_token" "$ROOT/README.md" \
+    grep -Fq -- "$recipe_token" "$MIGRATION_GUIDE" \
         || fail "pre-v5 explicit rebuild recipe is missing: $recipe_token"
 done
+if grep -Fq -- '-H "Authorization: Bearer ${token}"' "$MIGRATION_GUIDE"; then
+    fail "pre-v5 rebuild exposes the Console bearer in curl argv"
+fi
 
-# Execute the publish-critical README segment with a routing checker that
+# Execute the publish-critical migration-guide segment with a routing checker that
 # returns rc=3. Under the documented set -e contract, no live config or env
 # publication may run after that failure.
-recipe_critical="$(sed -n '/^if ! sudo "\$NEW_5GPN_INTERCEPT" --config "\$candidate" --check-config; then$/,/^trap - EXIT HUP INT TERM$/p' "$ROOT/README.md")"
+recipe_critical="$(sed -n '/^if ! sudo "\$NEW_5GPN_INTERCEPT" --config "\$candidate" --check-config; then$/,/^trap - EXIT HUP INT TERM$/p' "$MIGRATION_GUIDE")"
 recipe_test="$TMP/recipe-fail-closed"
 mkdir -p "$recipe_test"
 printf '%s\n' old-config > "$recipe_test/config.json"

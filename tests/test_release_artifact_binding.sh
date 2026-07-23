@@ -175,4 +175,12 @@ else
     fail "release workflow does not embed the exact tag before packaging"
 fi
 
+if grep -Fq 'README.en.md' "$RELEASE" \
+   && grep -Fq 'docs/pre-v5-upgrade.md' "$RELEASE" \
+   && grep -Fq 'tests/integration-smoke.md' "$RELEASE"; then
+    pass "installer bundle retains both README languages and linked operator runbooks"
+else
+    fail "installer bundle omits a README language or linked operator runbook"
+fi
+
 exit "$FAIL"
