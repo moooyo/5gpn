@@ -68,9 +68,11 @@ is the required v5 routing baseline.
 Use `jq` to project only installer-owned infrastructure from v4 into a disabled,
 empty v5 document. This preserves both authenticated SOCKS credential pairs,
 the listener, TLS paths, upstream proxy, and protocol choices while clearing
-extension snapshots and execution order. `NEW_5GPN_INTERCEPT`, `NEW_5GPN_DNS`,
-and `NEW_INSTALL_SH` must point to checksum-verified current artifacts extracted
-from the exact target release bundle.
+extension snapshots and execution order. All three `NEW_*` paths must come from
+the same exact GitHub release. `NEW_5GPN_INTERCEPT` and `NEW_5GPN_DNS` are
+standalone release assets verified against that release's `checksums.txt`;
+`NEW_INSTALL_SH` is extracted from the `5gpn-installer.tar.gz` whose digest is
+verified by the same file.
 
 ```bash
 set -euo pipefail
@@ -85,6 +87,7 @@ env_rollback=""
 old=""
 env_file=""
 api_header=""
+backup_dir=""
 config_published=0
 env_published=0
 committed=0
@@ -117,12 +120,14 @@ if [[ "$(sudo grep -c '^DNS_EGRESS_RESOLVER=' /etc/5gpn/dns.env || true)" != 1 ]
   exit 1
 fi
 
-sudo install -d -m 0700 /root/5gpn-pre-v5
+backup_dir="$(sudo mktemp -d /root/5gpn-pre-v5.XXXXXX)"
+sudo chmod 0700 "$backup_dir"
+printf 'Recovery snapshots will remain in %s\n' "$backup_dir"
 
 # Before any mutation: retain the original active state.
-sudo cp -a /etc/5gpn/dns.env /root/5gpn-pre-v5/dns.env.active
-sudo cp -a /etc/5gpn/intercept/config.json /root/5gpn-pre-v5/intercept-v4.active.json
-sudo cp -a /etc/5gpn/mihomo/config.yaml /root/5gpn-pre-v5/mihomo.active.yaml
+sudo cp -a /etc/5gpn/dns.env "$backup_dir/dns.env.active"
+sudo cp -a /etc/5gpn/intercept/config.json "$backup_dir/intercept-v4.active.json"
+sudo cp -a /etc/5gpn/mihomo/config.yaml "$backup_dir/mihomo.active.yaml"
 
 # Disable MITM through the old authenticated API before stopping its daemon.
 base="$(sudo sed -n 's/^DNS_BASE_DOMAIN=//p' /etc/5gpn/dns.env)"
@@ -132,13 +137,13 @@ token="$(sudo sed -n 's/^DNS_API_TOKEN=//p' /etc/5gpn/dns.env)"
   exit 1
 }
 console="console.${base}"
-api_header="$(sudo mktemp /root/5gpn-pre-v5/.api-header.XXXXXX)"
+api_header="$(sudo mktemp "$backup_dir/.api-header.XXXXXX")"
 sudo chmod 0600 "$api_header"
 if ! printf 'Authorization: Bearer %s\n' "$token" | sudo tee "$api_header" >/dev/null; then
   exit 1
 fi
 token=""
-api=(--fail --silent --show-error --cacert /etc/5gpn/cert/web/current/fullchain.pem \
+api=(--fail --silent --show-error --noproxy '*' --cacert /etc/5gpn/cert/web/current/fullchain.pem \
   --resolve "${console}:443:127.0.0.1" -H "@${api_header}")
 settings="$(sudo curl "${api[@]}" "https://${console}/api/interception/settings")"
 jq -e '(.http2 | type) == "boolean" and (.quic_fallback_protection | type) == "boolean"' <<<"$settings" >/dev/null
@@ -165,8 +170,8 @@ if sudo systemctl is-active --quiet 5gpn-intercept.service; then
 fi
 
 # Snapshot that clean post-disable boundary separately, then stop the writer.
-sudo cp -a /etc/5gpn/intercept/config.json /root/5gpn-pre-v5/intercept-v4.disabled.json
-sudo cp -a /etc/5gpn/mihomo/config.yaml /root/5gpn-pre-v5/mihomo.post-disable.yaml
+sudo cp -a /etc/5gpn/intercept/config.json "$backup_dir/intercept-v4.disabled.json"
+sudo cp -a /etc/5gpn/mihomo/config.yaml "$backup_dir/mihomo.post-disable.yaml"
 sudo systemctl stop 5gpn-dns.service
 
 old=/etc/5gpn/intercept/config.json
@@ -256,6 +261,7 @@ sudo rm -f -- "$config_rollback" "$env_rollback"
 config_rollback=""
 env_rollback=""
 trap - EXIT HUP INT TERM
+printf 'Recovery snapshots retained in %s\n' "$backup_dir"
 ```
 
 The old master-disable and `ready` routing check are mandatory. An empty v5

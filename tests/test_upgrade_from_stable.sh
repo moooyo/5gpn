@@ -56,6 +56,8 @@ for recipe_token in \
     'NEW_INSTALL_SH' \
     'old v4 daemon still owns the transaction' \
     'Prove this is the exact retired shape before any live-state mutation' \
+    'mktemp -d /root/5gpn-pre-v5.XXXXXX' \
+    "--noproxy '*'" \
     'Disable MITM through the old authenticated API' \
     'chmod 0600 "$api_header"' \
     '-H "@${api_header}"' \

@@ -84,7 +84,7 @@ Before you start, provide:
 - An interactive TTY for the first installation. `curl | sudo bash` attempts to reattach `/dev/tty`; a first install without a TTY fails closed.
 - At least one non-loopback IPv4 address assigned to a local interface and routable from clients. The 5gpn steering path is IPv4-only; IPv6-only clients cannot reach the gateway unless the network provides IPv4 reachability such as CLAT.
 - A base domain you control. The system derives `dot.<base>`, `console.<base>`, and `zash.<base>`.
-- An A record for `console.<base>` pointing to the public or otherwise client-routable gateway IPv4. Before Android enables Private DNS, `dot.<base>` must also resolve through the client's existing resolver.
+- Production modes require an A record for `console.<base>` pointing to the public or otherwise client-routable gateway IPv4; `debug` skips the public DNS gate. Before Android enables Private DNS, `dot.<base>` must also resolve through the client's existing resolver.
 - A cloud security group or independently managed firewall that restricts ingress. 5gpn never creates, changes, or removes host firewall rules.
 
 Three IPv4 settings have distinct roles:

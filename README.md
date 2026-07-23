@@ -84,7 +84,7 @@ DNS 策略是一个全局有序、first-match 的规则列表：
 - 首次安装可用的交互 TTY。`curl | sudo bash` 会尝试重新连接 `/dev/tty`；没有 TTY 时首次安装会 fail closed。
 - 至少一个已分配给本机接口、客户端可路由到达的非回环 IPv4。5gpn 的 steering 路径是 IPv4-only；IPv6-only 客户端无法到达网关，除非网络提供 CLAT 等 IPv4 可达性。
 - 一个自有 base domain。系统会派生 `dot.<base>`、`console.<base>` 和 `zash.<base>`。
-- `console.<base>` 指向公网或客户端可路由网关 IPv4 的 A 记录。Android 首次启用 Private DNS 前，`dot.<base>` 还必须能通过客户端原有 resolver 解析。
+- 生产模式需要 `console.<base>` 指向公网或客户端可路由网关 IPv4 的 A 记录；`debug` 会跳过公共 DNS gate。Android 首次启用 Private DNS 前，`dot.<base>` 还必须能通过客户端原有 resolver 解析。
 - 由云安全组或独立防火墙控制入口来源。5gpn 不创建、修改或删除宿主防火墙规则。
 
 三个 IPv4 配置承担不同角色：
