@@ -74,11 +74,84 @@ standalone release assets verified against that release's `checksums.txt`;
 `NEW_INSTALL_SH` is extracted from the `5gpn-installer.tar.gz` whose digest is
 verified by the same file.
 
+Enter a root shell, place the three verified artifacts in root-owned,
+single-link paths that are not group- or world-writable, assign the `NEW_*`
+variables to their absolute paths, and run the block from a root-only local file.
+Do not pipe this recovery script from the network. It acquires the same installer
+transaction lock as normal 5gpn management commands and refuses to start unless
+all target artifacts pass local preflight checks.
+
 ```bash
 set -euo pipefail
 : "${NEW_5GPN_INTERCEPT:?set this to the verified current sidecar binary}"
 : "${NEW_5GPN_DNS:?set this to the verified current DNS binary}"
 : "${NEW_INSTALL_SH:?set this to the verified current installer}"
+
+if (( EUID != 0 )); then
+  echo 'save this block in a root-only file, set the three NEW_* paths inside it, and run it as root' >&2
+  exit 1
+fi
+artifact_is_root_safe() {
+  local path="$1" mode parent
+  [[ "$path" == /* && -f "$path" && ! -L "$path" ]] || return 1
+  [[ "$(readlink -f -- "$path")" == "$path" ]] || return 1
+  [[ "$(stat -c %u -- "$path")" == 0 && "$(stat -c %h -- "$path")" == 1 ]] || return 1
+  mode="$(stat -c %a -- "$path")"
+  [[ "$mode" =~ ^[0-7]+$ ]] || return 1
+  (( (8#$mode & 8#022) == 0 )) || return 1
+  parent="$(dirname -- "$path")"
+  while true; do
+    [[ -d "$parent" && ! -L "$parent" ]] || return 1
+    [[ "$(readlink -f -- "$parent")" == "$parent" ]] || return 1
+    [[ "$(stat -c %u -- "$parent")" == 0 ]] || return 1
+    mode="$(stat -c %a -- "$parent")"
+    [[ "$mode" =~ ^[0-7]+$ ]] || return 1
+    (( (8#$mode & 8#022) == 0 )) || return 1
+    [[ "$parent" == / ]] && break
+    parent="$(dirname -- "$parent")"
+  done
+}
+artifact_is_root_safe "$NEW_5GPN_INTERCEPT" && [[ -x "$NEW_5GPN_INTERCEPT" ]] || {
+  echo 'NEW_5GPN_INTERCEPT must be a root-owned, single-link, non-symlink executable that is not group/world-writable' >&2
+  exit 1
+}
+artifact_is_root_safe "$NEW_5GPN_DNS" && [[ -x "$NEW_5GPN_DNS" ]] || {
+  echo 'NEW_5GPN_DNS must be a root-owned, single-link, non-symlink executable that is not group/world-writable' >&2
+  exit 1
+}
+artifact_is_root_safe "$NEW_INSTALL_SH" && [[ -r "$NEW_INSTALL_SH" ]] || {
+  echo 'NEW_INSTALL_SH must be a root-owned, single-link, non-symlink readable file that is not group/world-writable' >&2
+  exit 1
+}
+export INSTALL_SH_LIB_ONLY=1
+source "$NEW_INSTALL_SH"
+declare -F validate_dns_env_schema >/dev/null
+declare -F acquire_install_lock >/dev/null
+declare -F release_install_lock >/dev/null
+declare -F valid_dns_release_tag >/dev/null
+valid_dns_release_tag "$DNS_VERSION_DEFAULT" || {
+  echo 'NEW_INSTALL_SH is not stamped to an exact official or beta release tag' >&2
+  exit 1
+}
+binary_reports_target_version() {
+  local binary="$1" output result=1
+  output="$(mktemp /root/.5gpn-target-version.XXXXXX)" || return 1
+  chmod 0600 "$output" || { rm -f -- "$output"; return 1; }
+  if "$binary" --version > "$output" 2>/dev/null \
+     && printf '%s\n' "$DNS_VERSION_DEFAULT" | cmp -s - "$output"; then
+    result=0
+  fi
+  rm -f -- "$output" || return 1
+  return "$result"
+}
+binary_reports_target_version "$NEW_5GPN_INTERCEPT" || {
+  echo 'NEW_5GPN_INTERCEPT does not report the installer release tag exactly' >&2
+  exit 1
+}
+binary_reports_target_version "$NEW_5GPN_DNS" || {
+  echo 'NEW_5GPN_DNS does not report the installer release tag exactly' >&2
+  exit 1
+}
 
 candidate=""
 env_candidate=""
@@ -86,32 +159,60 @@ config_rollback=""
 env_rollback=""
 old=""
 env_file=""
-api_header=""
+api_config=""
 backup_dir=""
+dns_was_active=0
+dns_stop_attempted=0
 config_published=0
 env_published=0
 committed=0
 cleanup_candidates() {
+  local exit_rc=$? rollback_failed=0
+  trap - EXIT HUP INT TERM
+  set +e
   if (( committed == 0 )); then
     if (( env_published == 1 )) && [[ -n "$env_rollback" && -n "$env_file" ]]; then
-      sudo mv -fT -- "$env_rollback" "$env_file" || true
+      if ! sudo mv -fT -- "$env_rollback" "$env_file"; then
+        echo 'ROLLBACK FAILED: could not restore dns.env' >&2
+        rollback_failed=1
+      fi
       env_rollback=""
     fi
     if (( config_published == 1 )) && [[ -n "$config_rollback" && -n "$old" ]]; then
-      sudo mv -fT -- "$config_rollback" "$old" || true
+      if ! sudo mv -fT -- "$config_rollback" "$old"; then
+        echo 'ROLLBACK FAILED: could not restore the v4 interception document' >&2
+        rollback_failed=1
+      fi
       config_rollback=""
     fi
-    sudo sync -d /etc/5gpn/intercept 2>/dev/null || true
-    sudo sync -d /etc/5gpn 2>/dev/null || true
+    sudo sync -d /etc/5gpn/intercept 2>/dev/null || rollback_failed=1
+    sudo sync -d /etc/5gpn 2>/dev/null || rollback_failed=1
   fi
-  for path in "$candidate" "$env_candidate" "$config_rollback" "$env_rollback" "$api_header"; do
+  for path in "$candidate" "$env_candidate" "$config_rollback" "$env_rollback" "$api_config"; do
     [[ -z "$path" ]] || sudo rm -f -- "$path"
   done
+  if (( committed == 0 && dns_stop_attempted == 1 && dns_was_active == 1 )); then
+    if (( rollback_failed == 0 )); then
+      if ! sudo systemctl start 5gpn-dns.service \
+         || ! sudo systemctl is-active --quiet 5gpn-dns.service; then
+        echo 'RECOVERY FAILED: the old 5gpn-dns service is not active' >&2
+      fi
+    else
+      echo 'RECOVERY REQUIRED: files could not be rolled back, so 5gpn-dns was not restarted' >&2
+    fi
+  fi
+  if [[ "${INSTALL_LOCK_HELD:-0}" == 1 ]]; then
+    release_install_lock \
+      || echo 'RECOVERY WARNING: could not release the 5gpn installer lock cleanly' >&2
+  fi
+  exit "$exit_rc"
 }
 trap cleanup_candidates EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+acquire_install_lock
 
 # Prove this is the exact retired shape before any live-state mutation.
 sudo jq -e '.version == 4' /etc/5gpn/intercept/config.json >/dev/null
@@ -119,32 +220,48 @@ if [[ "$(sudo grep -c '^DNS_EGRESS_RESOLVER=' /etc/5gpn/dns.env || true)" != 1 ]
   echo 'expected interception schema v4 and exactly one retired DNS_EGRESS_RESOLVER key' >&2
   exit 1
 fi
+if sudo systemctl is-active --quiet 5gpn-dns.service; then
+  dns_was_active=1
+else
+  echo 'the old 5gpn-dns service must be active so its authenticated v4 control plane owns the disable transaction' >&2
+  exit 1
+fi
 
 backup_dir="$(sudo mktemp -d /root/5gpn-pre-v5.XXXXXX)"
 sudo chmod 0700 "$backup_dir"
+sudo sync -d /root
 printf 'Recovery snapshots will remain in %s\n' "$backup_dir"
 
 # Before any mutation: retain the original active state.
 sudo cp -a /etc/5gpn/dns.env "$backup_dir/dns.env.active"
 sudo cp -a /etc/5gpn/intercept/config.json "$backup_dir/intercept-v4.active.json"
 sudo cp -a /etc/5gpn/mihomo/config.yaml "$backup_dir/mihomo.active.yaml"
+sudo sync -f "$backup_dir/dns.env.active"
+sudo sync -f "$backup_dir/intercept-v4.active.json"
+sudo sync -f "$backup_dir/mihomo.active.yaml"
+sudo sync -d "$backup_dir"
 
 # Disable MITM through the old authenticated API before stopping its daemon.
 base="$(sudo sed -n 's/^DNS_BASE_DOMAIN=//p' /etc/5gpn/dns.env)"
 token="$(sudo sed -n 's/^DNS_API_TOKEN=//p' /etc/5gpn/dns.env)"
 [[ -n "$token" && "$token" != *$'\n'* && "$token" != *$'\r'* ]] || {
-  echo 'invalid DNS_API_TOKEN' >&2
+  echo 'DNS_API_TOKEN must be non-empty and contain no CR or LF' >&2
   exit 1
 }
+token_escaped="${token//\\/\\\\}"
+token_escaped="${token_escaped//\"/\\\"}"
+token_escaped="${token_escaped//$'\t'/\\t}"
+token_escaped="${token_escaped//$'\v'/\\v}"
 console="console.${base}"
-api_header="$(sudo mktemp "$backup_dir/.api-header.XXXXXX")"
-sudo chmod 0600 "$api_header"
-if ! printf 'Authorization: Bearer %s\n' "$token" | sudo tee "$api_header" >/dev/null; then
+api_config="$(sudo mktemp "$backup_dir/.curl-config.XXXXXX")"
+sudo chmod 0600 "$api_config"
+if ! printf 'header = "Authorization: Bearer %s"\n' "$token_escaped" | sudo tee "$api_config" >/dev/null; then
   exit 1
 fi
 token=""
-api=(--fail --silent --show-error --noproxy '*' --cacert /etc/5gpn/cert/web/current/fullchain.pem \
-  --resolve "${console}:443:127.0.0.1" -H "@${api_header}")
+token_escaped=""
+api=(--disable --fail --silent --show-error --noproxy '*' --cacert /etc/5gpn/cert/web/current/fullchain.pem \
+  --resolve "${console}:443:127.0.0.1" --config "$api_config")
 settings="$(sudo curl "${api[@]}" "https://${console}/api/interception/settings")"
 jq -e '(.http2 | type) == "boolean" and (.quic_fallback_protection | type) == "boolean"' <<<"$settings" >/dev/null
 revision="$(jq -er '.revision' <<<"$settings")"
@@ -158,8 +275,8 @@ sudo curl "${api[@]}" -X PUT -H 'Content-Type: application/json' --data "$payloa
 # Prove the old transaction withdrew its overlay and stopped the sidecar.
 modules="$(sudo curl "${api[@]}" "https://${console}/api/interception/modules")"
 jq -e '.active_capture_hosts | length == 0' <<<"$modules" >/dev/null
-sudo rm -f -- "$api_header"
-api_header=""
+sudo rm -f -- "$api_config"
+api_config=""
 for _ in {1..20}; do
   sudo systemctl is-active --quiet 5gpn-intercept.service || break
   sleep 0.25
@@ -172,7 +289,15 @@ fi
 # Snapshot that clean post-disable boundary separately, then stop the writer.
 sudo cp -a /etc/5gpn/intercept/config.json "$backup_dir/intercept-v4.disabled.json"
 sudo cp -a /etc/5gpn/mihomo/config.yaml "$backup_dir/mihomo.post-disable.yaml"
+sudo sync -f "$backup_dir/intercept-v4.disabled.json"
+sudo sync -f "$backup_dir/mihomo.post-disable.yaml"
+sudo sync -d "$backup_dir"
+dns_stop_attempted=1
 sudo systemctl stop 5gpn-dns.service
+if sudo systemctl is-active --quiet 5gpn-dns.service; then
+  echo 'old 5gpn-dns remained active after stop' >&2
+  exit 1
+fi
 
 old=/etc/5gpn/intercept/config.json
 sudo jq -e '.version == 4 and .mitm.enabled == false' "$old" >/dev/null
@@ -244,6 +369,8 @@ sudo cp -a -- "$old" "$config_rollback"
 sudo cp -a -- "$env_file" "$env_rollback"
 sudo sync -f "$config_rollback"
 sudo sync -f "$env_rollback"
+sudo sync -d /etc/5gpn/intercept
+sudo sync -d /etc/5gpn
 config_published=1
 if ! sudo mv -fT -- "$candidate" "$old"; then
   exit 1
@@ -258,8 +385,11 @@ sudo sync -d /etc/5gpn/intercept
 sudo sync -d /etc/5gpn
 committed=1
 sudo rm -f -- "$config_rollback" "$env_rollback"
+sudo sync -d /etc/5gpn/intercept
+sudo sync -d /etc/5gpn
 config_rollback=""
 env_rollback=""
+release_install_lock
 trap - EXIT HUP INT TERM
 printf 'Recovery snapshots retained in %s\n' "$backup_dir"
 ```

@@ -65,7 +65,7 @@ The table describes successful A answers. When adopting or rewriting an upstream
 
 `auto` queries the China and trust upstream groups concurrently. Members within each group are attempted sequentially in configured order with fair slices of the remaining deadline. Fresh installations default to the UDP upstreams `223.5.5.5:53` and `22.22.22.22:53`, which can then be changed in the Console. A queries follow the policy above; AAAA, HTTPS, and SVCB return NODATA with authority data, while other types use the trust group.
 
-When extensions are enabled, their capture-host overlay steers matching names to the gateway before operator DNS rules. It still cannot select a mihomo node or group. Extension egress and capture-DNS bindings belong to a separate, confirmed data-plane transaction.
+When both the MITM master and an extension are enabled and active, the capture-host overlay steers matching names to the gateway before operator DNS rules. It still cannot select a mihomo node or group. Extension egress and capture-DNS bindings belong to a separate, confirmed data-plane transaction.
 
 ## Core capabilities
 
@@ -73,7 +73,7 @@ When extensions are enabled, their capture-host overlay steers matching names to
 - **Auditable DNS policy**: exact, suffix, keyword, and subscription matchers feed one ordered set of `block`, `direct`, and `proxy` rules plus one fallback.
 - **Operator-owned data plane**: the complete mihomo YAML has no daemon-generated region; normal install, reinstall, and `configure` preserve a valid file byte for byte.
 - **Unified control plane**: the React Console covers status, setup, DNS logs and diagnosis, policy, upstreams, mihomo health and configuration, extensions, marketplace discovery, and logs. The Telegram bot uses the same backend state and transactions.
-- **Optional native extensions**: strict `5gpn.io/v1` snapshots, exact capture hosts, typed settings, permission review, explicit execution order, and operator-selected egress binding.
+- **Optional native extensions**: strict `5gpn.io/v1` snapshots, explicitly declared exact and constrained-wildcard capture-host allowlists, typed settings, permission review, explicit execution order, and operator-selected egress binding.
 - **Transactional installation**: exact tags, SHA-256 verification, staging, atomic publication, readiness probes, and rollback. No Go or Node toolchain is installed on the gateway.
 
 ## Requirements
@@ -114,8 +114,8 @@ The first-install TUI asks for one of the following modes. Both production modes
 
 | Mode | Certificate and DNS requirements | Renewal behavior |
 | --- | --- | --- |
-| `cloudflare` | DNS-01; SANs are `<base>` and `*.<base>`; requires a token limited to `Zone:DNS:Edit`. Through fixed resolver `1.1.1.1`, `console.<base>` must have exactly one direct A pointing to `DNS_PUBLIC_IP` or, for a private deployment, `DNS_GATEWAY_IP` | Does not stop mihomo |
-| `http-01` | Through fixed resolver `1.1.1.1`, `console.<base>`, `zash.<base>`, and `dot.<base>` must each have exactly one public A equal to `DNS_PUBLIC_IP`, no AAAA, and public TCP `80` reachability | Briefly stops mihomo to release `:80` for initial issuance and due renewal, then restores it |
+| `cloudflare` | DNS-01; SANs are `<base>` and `*.<base>`; requires a token limited to `Zone:DNS:Edit`. When queried through the fixed resolver `1.1.1.1`, `console.<base>` must return only one A, without a CNAME, pointing to `DNS_PUBLIC_IP` or, for a private deployment, `DNS_GATEWAY_IP` | Does not stop mihomo |
+| `http-01` | When queried through the fixed resolver `1.1.1.1`, `console.<base>`, `zash.<base>`, and `dot.<base>` must each return only one public A equal to `DNS_PUBLIC_IP`, without a CNAME or any AAAA, and public TCP `80` must be reachable | Initial issuance stops mihomo only when it was active; failure or a signal restores it immediately, while success leaves restoration to the install flow after the lineage and role certificates are fully published. Renewal when due briefly releases `:80` and restores mihomo after success or failure |
 | `debug` | Isolated self-signed certificate, no Certbot, and not trusted by clients by default | Testing only |
 
 The Cloudflare token is written only to `/etc/5gpn/acme/cloudflare.ini`, which is root-only; it never enters `dns.env`, the caller environment, or logs. Optional interception uses a completely separate private root CA and never replaces the public DoT or Console certificate.
@@ -153,19 +153,23 @@ Start by checking service state:
 sudo 5gpn status
 ```
 
-Run a minimal service and DNS check:
+Run a minimal service and configuration check:
 
 ```bash
 sudo systemctl is-active 5gpn-dns mihomo
 sudo /opt/5gpn/bin/mihomo -t -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo
+```
 
+Then verify DNS with a `dig` build that supports DoT:
+
+```bash
 DOT=dot.example.com
 GW=203.0.113.10
 dig +tls @"$GW" -p 853 example.com A +tls-host="$DOT"
 dig @127.0.0.1 -p 5353 example.com A
 ```
 
-Replace the example domain and address with actual values. Public plain DNS `:53` failing, remote access to `:5353` failing, and `5gpn-intercept.service` being inactive after a fresh install are all expected. See [tests/integration-smoke.md](tests/integration-smoke.md) for the complete real-host checklist, and run it only on a disposable or explicitly designated Linux gateway.
+Replace the example domain and address with actual values; skip the first DNS command when an older `dig` lacks `+tls`. Public plain DNS `:53` failing, remote access to `:5353` failing, and `5gpn-intercept.service` being inactive after a fresh install are all expected. See [tests/integration-smoke.md](tests/integration-smoke.md) for the complete real-host checklist, and run it only on a disposable or explicitly designated Linux gateway.
 
 Then open `https://console.<base>/`. SPA assets and the two iOS profile download endpoints are public, but every `/api/*` request requires the Console bearer token; the frontend login page is not itself the security boundary. To recover the token on the host:
 
@@ -173,7 +177,7 @@ Then open `https://console.<base>/`. SPA assets and the two iOS profile download
 sudo sed -n 's/^DNS_API_TOKEN=//p' /etc/5gpn/dns.env
 ```
 
-- **Android**: find `dot.<base>` in the Console Setup Guide and enter it as the system Private DNS provider. Modern Android apps generally reject user CAs, so the project does not offer an Android MITM CA workflow.
+- **Android**: find `dot.<base>` in the Console Setup Guide and enter it as the system Private DNS provider. Modern Android apps generally do not trust user-installed CAs by default, so the project does not offer an Android MITM CA workflow.
 - **iOS**: download and install `/ios/ios-dot.mobileconfig` from the Setup Guide. If extensions are needed, install `/ios/ios-intercept-ca.mobileconfig` separately and manually enable Full SSL Trust in system settings.
 - **zashboard**: add the source CIDR to the allowlist, then start a one-use handoff from the Console. The source allowlist and short-lived session at `https://zash.<base>/` are separate from the Console token.
 
@@ -230,33 +234,33 @@ The fresh/reset seed starts its `Proxies` group with `DIRECT` only; 5gpn ships n
 Native extensions are optional, and a fresh installation has the MITM master disabled. `5gpn-intercept.service` remains inactive until the master is on and at least one extension is enabled:
 
 - Only strict `5gpn.io/v1` YAML is accepted. URL manifests and referenced remote scripts are fetched once through HTTPS, redirect, and SSRF guards; local add accepts one pasted or uploaded manifest. Every input is size-bounded, hashed, and stored as an immutable local snapshot. Installs and updates always finish disabled.
-- `traffic.captureHosts` is the sole traffic-acquisition permission. An enabled extension matches only declared exact or constrained wildcard hosts and captures only HTTP, TLS, and recognizable QUIC on ports `80` and `443`.
+- `traffic.captureHosts` is the sole traffic-acquisition permission. Only when both the extension and MITM master are enabled and active does it match declared exact or constrained wildcard hosts and capture HTTP, TLS, and recognizable QUIC on ports `80` and `443`.
 - An extension may remain armed while the MITM master is off, but it is not ready and publishes no DNS overlay or mihomo capture rules, and the sidecar does not start. Traffic is captured only when both the extension and master are enabled.
-- Every action runs in a fresh, bounded goja VM. Quota-bound `context.storage` exists only when the manifest explicitly requests it, and there is no filesystem, process, timer, module loader, socket, ambient `fetch`, or direct egress. All upstream TCP/UDP traffic and permitted script network requests return through mihomo.
+- Every action runs in a fresh, bounded goja VM. Quota-bound `context.storage` exists only when the manifest explicitly requests it, and there is no filesystem, process, timer, module loader, socket, ambient `fetch`, or direct egress. All upstream TCP/UDP traffic and permitted script network requests are forwarded through authenticated mihomo SOCKS5.
 - An extension may require the operator to choose from existing mihomo groups, but its manifest and scripts cannot name or change a group. Global routing rules reviewed in the enablement confirmation may select only `REJECT` or `DIRECT` and exist only while both the extension and MITM master are enabled.
 - Execution order affects action composition, egress and capture-DNS winners for overlapping hosts, and routing first-match behavior, so reordering also requires confirmation.
 - Marketplace data is discovery metadata, not a trust root. Nothing is installed, enabled, updated, crawled, or mirrored automatically. First-party extension source lives in the separate [moooyo/5gpn-extensions](https://github.com/moooyo/5gpn-extensions) repository, which publishes the [official marketplace index](https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json).
 - Plugin engine logs exist only in the sidecar's 1000-entry memory ring. Pausing or clearing the Console view neither stops ingestion nor deletes the sidecar ring; the log disappears when the process exits.
 
 > [!CAUTION]
-> When a manifest declares exact HTTP(S) origins and the operator confirms them, the script may send any decrypted request, response, setting, or storage data visible to it to those origins. An authorized cross-origin URL rewrite forwards the complete method, decoded body, and end-to-end headers, potentially including `Cookie` or `Authorization`. The enablement confirmation lists every origin and routing rule, and any changed snapshot requires a new review.
+> When a manifest declares exact HTTP(S) origins and the operator confirms them, the script may send any request or response data visible to it, including decrypted content, as well as any visible setting or storage data, to those origins. An authorized cross-origin URL rewrite forwards the complete method, decoded body, and end-to-end headers, potentially including `Cookie` or `Authorization`. The enablement confirmation lists every origin and routing rule, and any changed snapshot requires a new review.
 
-Only the root-owned certificate publisher can read the private CA signing key; the runtime sidecar receives a constrained leaf and cannot access the root key. Installing the private CA does not guarantee that every application can be captured. Certificate pinning, mTLS, application-provisioned ECH, and protocols without HTTP semantics fail closed. See [docs/native-extensions.md](docs/native-extensions.md) for the full manifest contract.
+Only the root-owned certificate publisher can read the private CA signing key; the runtime sidecar receives a constrained leaf and cannot access the root key. Installing the private CA does not guarantee that every application can be captured. Certificate pinning, mTLS, application-provisioned ECH, and protocols without HTTP semantics are unsupported: the connection fails closed instead of bypassing interception. See [docs/native-extensions.md](docs/native-extensions.md) for the full manifest contract.
 
 ## Upgrades and release channels
 
 - The default quick installer selects only the latest official release. `--beta` is an explicit, per-invocation beta opt-in and is never persisted in `dns.env`.
-- A normal stable-to-beta upgrade preserves a valid operator-owned mihomo YAML. When legacy YAML lacks the interception scaffold and no interception runtime is active, core DNS, Console, Telegram, and the existing data plane may upgrade, but Extensions are explicitly reported unavailable. An incompatible active interception deployment aborts and rolls back.
+- A normal stable-to-beta upgrade preserves a valid operator-owned mihomo YAML. When legacy YAML lacks the interception scaffold and no interception runtime is active, core DNS, Console, Telegram, and the existing data plane may upgrade, but Extensions are explicitly reported unavailable. If an incompatible interception runtime is active, the upgrade aborts and rolls back.
 - `upgrade-reset-mihomo` replaces the complete YAML. Custom proxies, providers, groups, and rules are not merged and must be restored manually from the backup.
-- A successful beta upgrade does not promise an in-place downgrade to the official channel. Keep a system snapshot before upgrading when reversal is required.
+- A successful beta upgrade does not guarantee that an in-place downgrade to the stable release channel is supported. Keep a system snapshot before upgrading when reversal is required.
 - Every pre-v5 deployment that still uses interception config schema v4 requires an explicit, recoverable lockstep rebuild first. Never delete the old interception file or change only its schema version. Follow the [pre-v5 rebuild runbook](docs/pre-v5-upgrade.md) exactly.
 
 ## Security boundaries and known limitations
 
 - Name-based encrypted-DNS blocking cannot stop a client that uses a hard-coded resolver IP and can route around the gateway. 5gpn does not claim network-layer enforcement.
-- Steering depends on DNS and a visible hostname. Arbitrary ports, generic raw UDP, traffic without a usable Host/SNI, application-provisioned ECH inner names, and connections that bypass 5gpn DNS are unsupported.
+- Steering depends on DNS and a visible hostname. Arbitrary ports, generic raw UDP, traffic without a usable Host/SNI, inner names hidden by application-provisioned ECH, and connections that bypass 5gpn DNS are unsupported.
 - `block-quic-443` rejects only UDP/443 that reaches the gateway. It does not manage a firewall or affect traffic that bypasses the gateway. MITM QUIC fallback protection is a separate control limited to already matched capture hosts.
-- Console SPA assets and profile downloads are public, but every `/api/*` endpoint requires a bearer token; without a token the API is entirely disabled. zashboard has a separate source allowlist and one-use handoff session.
+- Console SPA assets and profile downloads are public, but every `/api/*` endpoint requires a bearer token. The API is entirely disabled when no server-side token is configured, and requests without a valid token are rejected. zashboard has a separate source allowlist and one-use handoff session.
 - Trust in the extension root CA spans the whole extension subsystem, while actual decryption remains limited to enabled capture hosts. Normal uninstall and purge preserve this CA for enrolled devices; only explicit decommission attempts to remove an ownership-proven CA and public lineage.
 - 5gpn never modifies nftables or another host firewall. Public ingress, especially `:5060`, must be restricted to intended clients by the operator.
 
