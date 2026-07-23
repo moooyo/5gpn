@@ -122,6 +122,29 @@ export default function SetupGuidePage() {
         </div>
       </Card>
 
+      {mitmSettings?.enabled && !acknowledged ? (
+        <div
+          role="alert"
+          data-testid="intercept-ca-trust-warning"
+          className="flex flex-col gap-3 rounded-[18px] bg-[var(--md-sys-color-warning-container)] p-4 text-[var(--md-sys-color-on-warning-container)] sm:flex-row sm:items-center"
+        >
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[rgb(255_255_255_/_34%)]">
+            <ShieldLockIcon className="h-5 w-5" aria-hidden="true" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="text-[13px] font-medium">{t('setupGuide.interceptCA.trustWarningTitle')}</div>
+            <div className="mt-1 text-[11.5px] leading-relaxed opacity-90">{t('setupGuide.interceptCA.trustWarningBody')}</div>
+          </div>
+          <a
+            href={caDownloadURL}
+            className="zds-state-layer inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-full bg-primary px-4 text-[12px] font-medium text-[var(--md-sys-color-on-primary)]"
+          >
+            <DownloadIcon className="h-4 w-4" aria-hidden="true" />
+            {t('setupGuide.interceptCA.trustWarningAction')}
+          </a>
+        </div>
+      ) : null}
+
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(340px,.8fr)]">
         <Card className="overflow-hidden p-0">
           <CardHeader

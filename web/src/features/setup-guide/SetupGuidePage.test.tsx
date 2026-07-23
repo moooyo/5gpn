@@ -16,6 +16,7 @@ vi.mock('../../lib/api/client', () => ({
 }))
 
 beforeEach(async () => {
+  localStorage.clear()
   await i18n.changeLanguage('zh')
   vi.mocked(api.getMITMSettings).mockReset().mockResolvedValue({
     revision: '1'.repeat(64), enabled: false, http2: true, quic_fallback_protection: true,
@@ -73,5 +74,39 @@ describe('SetupGuidePage', () => {
     expect(interceptCAProfileURL('https://console.5gpn.example.com')).toBe(
       `https://console.5gpn.example.com${INTERCEPT_CA_PROFILE_PATH}`,
     )
+  })
+
+  it('prominently warns when MITM is enabled but client trust is not acknowledged', async () => {
+    vi.mocked(api.getMITMSettings).mockResolvedValue({
+      revision: '1'.repeat(64), enabled: true, http2: true, quic_fallback_protection: true,
+    })
+    render(
+      <MemoryRouter><StatusContext.Provider
+        value={{
+          dnsState: 'healthy',
+          mihomoState: 'healthy',
+          interceptState: 'healthy',
+          dnsOk: true,
+          mihomoOk: true,
+          interceptOk: true,
+          loading: false,
+          interceptLoading: false,
+          status: {
+            version: 'test',
+            uptime_seconds: 1,
+            stats: {} as never,
+            dot_domain: 'dot.5gpn.example.com',
+          },
+        }}
+      >
+        <SetupGuidePage />
+      </StatusContext.Provider></MemoryRouter>,
+    )
+
+    const warning = await screen.findByTestId('intercept-ca-trust-warning')
+    expect(warning).toHaveAttribute('role', 'alert')
+    expect(warning).toHaveTextContent('仅安装 DoT 或 CA 描述文件还不够')
+    expect(warning).toHaveTextContent('YouTube 等被接管的应用会因 TLS 证书校验失败而无法加载')
+    expect(screen.getByRole('link', { name: '下载 MITM 根证书' })).toHaveAttribute('href', interceptCAProfileURL())
   })
 })
