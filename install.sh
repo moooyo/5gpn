@@ -4003,7 +4003,7 @@ ensure_intercept_config() {
             if grep -Eq '"version"[[:space:]]*:[[:space:]]*4([,[:space:]}]|$)' "$config"; then
                 err "Pre-v5 interception config detected: $config"
                 err "Do not delete it: back up active env/intercept/mihomo state, use the old v4 control plane to disable MITM and withdraw managed rules, then save the clean post-disable boundary."
-                err "Follow README's jq rebuild preserving SOCKS/TLS infrastructure; require current sidecar --check-config and 5gpn-dns --check-interception-routing to report ready before synced atomic publication."
+                err "Follow the pre-v5 upgrade guide linked from README: use its jq rebuild preserving SOCKS/TLS infrastructure, and require current sidecar --check-config plus 5gpn-dns --check-interception-routing to report ready before synced atomic publication."
                 err "Modules/order are cleared and extensions must be re-imported and reviewed."
             else
                 err "Existing interception config is invalid: $config"
@@ -4470,7 +4470,7 @@ preflight_existing_interception_state() {
     if ! "$ARTIFACT_STAGE/5gpn-intercept" --config "$config" --check-config; then
         if grep -Eq '"version"[[:space:]]*:[[:space:]]*4([,[:space:]}]|$)' "$config"; then
             err "Pre-v5 interception config detected before publication: $config"
-            err "Back up active state, disable the old v4 MITM transaction, then follow README's credential-preserving checked jq rebuild. No live 5gpn bytes were changed."
+            err "Back up active state, disable the old v4 MITM transaction, then follow the credential-preserving checked jq rebuild in the pre-v5 upgrade guide linked from README. No live 5gpn bytes were changed."
         else
             err "Existing interception config is invalid under the target release: $config"
         fi
@@ -6774,7 +6774,7 @@ validate_dns_env_schema() {
             *)
                 if [[ "$key" == DNS_EGRESS_RESOLVER ]]; then
                     err "Pre-v5 dns.env contains retired DNS_EGRESS_RESOLVER. Back up active dns.env/mihomo/intercept state, disable the old MITM master, and save the clean boundary."
-                    err "Follow README's credential-preserving jq rebuild and require the current sidecar/routing checks before removing only that exact key."
+                    err "Follow the credential-preserving jq rebuild in the pre-v5 upgrade guide linked from README, and require the current sidecar/routing checks before removing only that exact key."
                 else
                     err "Persisted dns.env contains unsupported key: $key"
                 fi

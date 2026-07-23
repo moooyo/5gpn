@@ -66,7 +66,7 @@ sudo cp -a /etc/5gpn/mihomo/config.yaml /tmp/mihomo-config.before
     configured local listen IP when testing a fresh or explicitly reset seed.
 - [ ] Nothing exposes public DNS `:53`, a DoH handler, or a standalone profile
   port. TCP `:8443` is mihomo application ingress, not DoH.
-- [ ] `mihomo -t -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo` succeeds.
+- [ ] `/opt/5gpn/bin/mihomo -t -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo` succeeds.
 - [ ] Every `DNS_MIHOMO_LISTEN_IPS` value appears on a local interface. A
   non-local NAT/public address is rejected by installer validation.
 

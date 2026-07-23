@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL="$ROOT/install.sh"
 QUICK="$ROOT/quick-install.sh"
 FIXTURE="$ROOT/tests/fixtures/stable-0.0.13"
+MIGRATION_GUIDE="$ROOT/docs/pre-v5-upgrade.md"
 FAIL=0
 
 pass() { echo "ok: $*"; }
@@ -53,10 +54,34 @@ grep -Fq 'Pre-v5 interception config detected' "$INSTALL" \
 for recipe_token in \
     'set -euo pipefail' \
     'NEW_INSTALL_SH' \
+    'artifact_is_root_safe()' \
+    '[[ "$path" == /*' \
+    'while true; do' \
+    'NEW_5GPN_INTERCEPT must be a root-owned, single-link' \
+    'source "$NEW_INSTALL_SH"' \
+    'declare -F validate_dns_env_schema' \
+    'valid_dns_release_tag "$DNS_VERSION_DEFAULT"' \
+    'binary_reports_target_version()' \
+    'binary_reports_target_version "$NEW_5GPN_INTERCEPT"' \
+    'acquire_install_lock' \
+    'release_install_lock' \
     'old v4 daemon still owns the transaction' \
+    'Prove this is the exact retired shape before any live-state mutation' \
+    'mktemp -d /root/5gpn-pre-v5.XXXXXX' \
+    "--noproxy '*'" \
+    'api=(--disable --fail' \
+    'sync -f "$backup_dir/dns.env.active"' \
+    'sync -f "$backup_dir/intercept-v4.disabled.json"' \
+    'sync -d /root' \
     'Disable MITM through the old authenticated API' \
+    '[[ -n "$token" && "$token" != *$'"'"'\n'"'"'* && "$token" != *$'"'"'\r'"'"'* ]]' \
+    'token_escaped=' \
+    'chmod 0600 "$api_config"' \
+    '--config "$api_config"' \
     '.active_capture_hosts | length == 0' \
     'systemctl is-active --quiet 5gpn-intercept.service' \
+    'dns_stop_attempted=1' \
+    'systemctl start 5gpn-dns.service' \
     'listen: .listen' \
     'username: .username' \
     'password: .password' \
@@ -78,14 +103,81 @@ for recipe_token in \
     'committed=1' \
     'mv -fT -- "$candidate" "$old"' \
     'mv -fT -- "$env_candidate" "$env_file"'; do
-    grep -Fq -- "$recipe_token" "$ROOT/README.md" \
+    grep -Fq -- "$recipe_token" "$MIGRATION_GUIDE" \
         || fail "pre-v5 explicit rebuild recipe is missing: $recipe_token"
 done
+if grep -Fq -- '-H "Authorization: Bearer ${token}"' "$MIGRATION_GUIDE"; then
+    fail "pre-v5 rebuild exposes the Console bearer in curl argv"
+fi
+if grep -Fq -- '^[0-9a-f]{64}$' "$MIGRATION_GUIDE"; then
+    fail "pre-v5 rebuild rejects valid legacy non-hex Console tokens"
+fi
+fixture_api_token="$(sed -n 's/^DNS_API_TOKEN=//p' "$FIXTURE/dns.env.example")"
+if [[ -n "$fixture_api_token" && ! "$fixture_api_token" =~ ^[0-9a-f]{64}$ ]]; then
+    pass "frozen legacy fixture exercises the non-hex Console token contract"
+else
+    fail "frozen legacy fixture no longer exercises the non-hex Console token contract"
+fi
+artifact_preflight_line="$(grep -n '^binary_reports_target_version "\$NEW_5GPN_INTERCEPT"' "$MIGRATION_GUIDE" | head -1 | cut -d: -f1)"
+install_lock_line="$(grep -n '^acquire_install_lock$' "$MIGRATION_GUIDE" | head -1 | cut -d: -f1)"
+live_mutation_line="$(grep -n ' -X PUT ' "$MIGRATION_GUIDE" | head -1 | cut -d: -f1)"
+if [[ -n "$artifact_preflight_line" && -n "$install_lock_line" && -n "$live_mutation_line" \
+   && "$artifact_preflight_line" -lt "$install_lock_line" \
+   && "$install_lock_line" -lt "$live_mutation_line" ]]; then
+    pass "documented artifact preflight and installer lock precede live mutation"
+else
+    fail "documented artifact preflight or installer lock occurs after live mutation"
+fi
+artifact_guard_fn="$(sed -n '/^artifact_is_root_safe() {$/,/^}$/p' "$MIGRATION_GUIDE")"
+hostile_parent="$TMP/world-writable-parent"
+hostile_artifact="$hostile_parent/target-binary"
+mkdir -p "$hostile_parent"
+printf 'fixture\n' > "$hostile_artifact"
+chmod 0755 "$hostile_artifact"
+if (
+    eval "$artifact_guard_fn"
+    stat() {
+        local format="${2:-}" path="${4:-}"
+        case "$format" in
+            %u) printf '0\n' ;;
+            %h) printf '1\n' ;;
+            %a)
+                if [[ "$path" == /tmp ]]; then printf '1777\n'; else printf '0755\n'; fi ;;
+            *) return 1 ;;
+        esac
+    }
+    artifact_is_root_safe "$hostile_artifact"
+); then
+    fail "documented artifact guard accepts a root-owned file below a world-writable ancestor"
+else
+    pass "documented artifact guard rejects world-writable ancestor replacement"
+fi
+version_guard_fn="$(sed -n '/^binary_reports_target_version() {$/,/^}$/p' "$MIGRATION_GUIDE")"
+wrong_version_binary="$TMP/wrong-version-binary"
+cat > "$wrong_version_binary" <<'EOF'
+#!/usr/bin/env bash
+printf '9.9.9\n'
+EOF
+chmod 0755 "$wrong_version_binary"
+if (
+    eval "$version_guard_fn"
+    DNS_VERSION_DEFAULT=1.2.3
+    mktemp() {
+        local output="$TMP/documented-version-output"
+        : > "$output"
+        printf '%s\n' "$output"
+    }
+    binary_reports_target_version "$wrong_version_binary"
+); then
+    fail "documented artifact preflight accepts a binary from another release"
+else
+    pass "documented artifact preflight rejects a binary from another release"
+fi
 
-# Execute the publish-critical README segment with a routing checker that
+# Execute the publish-critical migration-guide segment with a routing checker that
 # returns rc=3. Under the documented set -e contract, no live config or env
 # publication may run after that failure.
-recipe_critical="$(sed -n '/^if ! sudo "\$NEW_5GPN_INTERCEPT" --config "\$candidate" --check-config; then$/,/^trap - EXIT HUP INT TERM$/p' "$ROOT/README.md")"
+recipe_critical="$(sed -n '/^if ! sudo "\$NEW_5GPN_INTERCEPT" --config "\$candidate" --check-config; then$/,/^trap - EXIT HUP INT TERM$/p' "$MIGRATION_GUIDE")"
 recipe_test="$TMP/recipe-fail-closed"
 mkdir -p "$recipe_test"
 printf '%s\n' old-config > "$recipe_test/config.json"
@@ -122,6 +214,46 @@ if [[ "$recipe_rc" == 3 ]] \
     pass "routing rc=3 aborts the documented rebuild before config/env publication"
 else
     fail "routing rc=3 did not fail closed (rc=$recipe_rc)"
+fi
+
+cleanup_fn="$(sed -n '/^cleanup_candidates() {$/,/^}$/p' "$MIGRATION_GUIDE")"
+cleanup_calls="$TMP/documented-cleanup.calls"
+set +e
+(
+    eval "$cleanup_fn"
+    candidate=""
+    env_candidate=""
+    config_rollback=""
+    env_rollback=""
+    api_config=""
+    old=""
+    env_file=""
+    committed=0
+    config_published=0
+    env_published=0
+    dns_stop_attempted=1
+    dns_was_active=1
+    INSTALL_LOCK_HELD=1
+    sudo() {
+        if [[ "${1:-}" == systemctl && "${2:-}" == start ]]; then
+            printf 'start:%s\n' "${3:-}" >> "$cleanup_calls"
+        fi
+        return 0
+    }
+    release_install_lock() {
+        printf 'release-lock\n' >> "$cleanup_calls"
+        INSTALL_LOCK_HELD=0
+    }
+    false
+    cleanup_candidates
+) >/dev/null 2>&1
+cleanup_rc=$?
+set -e
+if [[ "$cleanup_rc" == 1 \
+   && "$(tr '\n' ' ' < "$cleanup_calls")" == 'start:5gpn-dns.service release-lock ' ]]; then
+    pass "documented failure cleanup restarts the old DNS service before releasing the installer lock"
+else
+    fail "documented failure cleanup did not restore service availability and release the lock"
 fi
 
 fixture_keys="$(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$FIXTURE/dns.env.example" | sort)"

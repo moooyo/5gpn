@@ -185,11 +185,13 @@ grep -Fq 'fetch_profile' "$ROOT/web/src/lib/api/types.ts" \
     && fail "module import API still exposes a fetch-header choice"
 retired_client="$(printf '%s%s' 'lo' 'on')"
 grep -Rni "$retired_client" \
-    "$ROOT/README.md" "$ROOT/docs/architecture.md" "$ROOT/cmd/5gpn-dns" \
+    "$ROOT/README.md" "$ROOT/README.en.md" "$ROOT/docs/architecture.md" \
+    "$ROOT/docs/pre-v5-upgrade.md" "$ROOT/cmd/5gpn-dns" \
     "$ROOT/cmd/5gpn-intercept" "$ROOT/web/src" "$ROOT/web/e2e" 2>/dev/null | grep -q . \
     && fail "retired third-party plugin compatibility is still present"
 grep -RniE 'builtin-wloc|MODULE-MITM' \
-    "$ROOT/README.md" "$ROOT/docs/architecture.md" "$ROOT/cmd" "$ROOT/web/src" 2>/dev/null | grep -q . \
+    "$ROOT/README.md" "$ROOT/README.en.md" "$ROOT/docs/architecture.md" \
+    "$ROOT/docs/pre-v5-upgrade.md" "$ROOT/cmd" "$ROOT/web/src" 2>/dev/null | grep -q . \
     && fail "retired built-in interception identifiers are still present"
 
 exit "$rc"

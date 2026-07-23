@@ -136,8 +136,10 @@ jobs:
       - name: Package installer bundle
         run: |
           stage="installer-bundle"
-          mkdir -p "$stage"
-          cp -r install.sh quick-install.sh etc scripts README.md LICENSE THIRD_PARTY_NOTICES.md "$stage"/
+          mkdir -p "$stage/docs" "$stage/tests"
+          cp -r install.sh quick-install.sh etc scripts README.md README.en.md LICENSE THIRD_PARTY_NOTICES.md "$stage"/
+          cp docs/architecture.md docs/native-extensions.md docs/pre-v5-upgrade.md "$stage/docs"/
+          cp tests/integration-smoke.md "$stage/tests"/
           sed -i "s/^DNS_VERSION_DEFAULT=.*/DNS_VERSION_DEFAULT=\"${GITHUB_REF_NAME}\"/" "$stage/install.sh"
           grep -q "^DNS_VERSION_DEFAULT=\"${GITHUB_REF_NAME}\"" "$stage/install.sh" \
             || { echo "DNS_VERSION_DEFAULT stamp failed"; exit 1; }
