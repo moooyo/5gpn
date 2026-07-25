@@ -653,12 +653,35 @@ func failClosedGuardBoundary(root *yaml.Node, infra InfraParams) (int, bool) {
 		}
 		cursor++
 	}
-	wantRoutes := []string{
-		"DOMAIN," + infra.ConsoleDomain + ",DIRECT",
-		"AND,((DOMAIN," + infra.ZashDomain + "),(RULE-SET,whitelist,DIRECT,src)),DIRECT",
+	// Each panel route has two accepted spellings: the bare one, and the one
+	// carrying the negative intercept-egress qualifier. Both are the same
+	// routing decision for client traffic; the qualified form additionally
+	// keeps processor-originated traffic on the egress terminator's side.
+	// Accepting both is what lets an existing deployment keep working while
+	// requalification is applied.
+	wantRoutes := [][]string{
+		{
+			directDomainRule(infra.ConsoleDomain),
+			qualifiedDirectDomainRule(infra.ConsoleDomain),
+		},
+		{
+			allowlistedDomainRule(infra.ZashDomain),
+			qualifiedAllowlistedDomainRule(infra.ZashDomain),
+		},
 	}
-	for _, want := range wantRoutes {
-		if cursor >= len(rules.Content) || rules.Content[cursor].Kind != yaml.ScalarNode || compactMihomoRule(rules.Content[cursor].Value) != want {
+	for _, accepted := range wantRoutes {
+		if cursor >= len(rules.Content) || rules.Content[cursor].Kind != yaml.ScalarNode {
+			return 0, false
+		}
+		actual := compactMihomoRule(rules.Content[cursor].Value)
+		matched := false
+		for _, want := range accepted {
+			if actual == want {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			return 0, false
 		}
 		cursor++

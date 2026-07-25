@@ -68,7 +68,11 @@ nocheck "$T" 'REJECT-DROP'                             'seed avoids connection-r
 check "$T" '127\.0\.0\.1:5354'                         'loopback origin DNS selector'
 check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(NETWORK,UDP\)\),REJECT' 'console UDP fallback fast-reject rule'
 check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(DST-PORT,80\)\),REJECT' 'console HTTP fast-reject rule'
-check "$T" 'DOMAIN,__CONSOLE_DOMAIN__,DIRECT'             'public console SNI direct route'
+# The panel allow rules exclude intercept-egress: they sit above the loopback
+# deny and therefore above the egress terminator, so without the exclusion a
+# compromised sidecar would reach the gateway's own management plane.
+check "$T" 'AND,\(\(NOT,\(\(IN-NAME,intercept-egress\)\)\),\(DOMAIN,__CONSOLE_DOMAIN__\)\),DIRECT' 'public console SNI direct route excludes intercept-egress'
+check "$T" 'AND,\(\(NOT,\(\(IN-NAME,intercept-egress\)\)\),\(DOMAIN,__ZASH_DOMAIN__\),\(RULE-SET,whitelist,DIRECT,src\)\),DIRECT' 'zashboard allowlisted route excludes intercept-egress'
 check "$T" 'AND,\(\(DOMAIN,__ZASH_DOMAIN__\),\(NETWORK,UDP\)\),REJECT' 'zashboard UDP fast-reject rule'
 check "$T" 'AND,\(\(NETWORK,UDP\),\(DST-PORT,443\)\),REJECT' 'HTTP3/QUIC UDP 443 block enabled by default'
 egress_guard_line="$(grep -nF '  - IN-NAME,intercept-egress,REJECT' "$root/$T" | cut -d: -f1 || true)"
@@ -81,8 +85,8 @@ else
     echo 'FAIL: QUIC block ordering is unsafe'
     FAIL=1
 fi
-console_direct_line="$(grep -nF '  - DOMAIN,__CONSOLE_DOMAIN__,DIRECT' "$root/$T" | cut -d: -f1 || true)"
-zash_direct_line="$(grep -nF '  - AND,((DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
+console_direct_line="$(grep -nF '  - AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
+zash_direct_line="$(grep -nF '  - AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
 panel_order_ok=1
 for rule in \
     'AND,((DOMAIN,__CONSOLE_DOMAIN__),(NETWORK,UDP)),REJECT' \

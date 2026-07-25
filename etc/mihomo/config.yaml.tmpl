@@ -75,8 +75,12 @@ rules:
   - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8443)),REJECT
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,5060)),REJECT
   - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,5060)),REJECT
-  - DOMAIN,__CONSOLE_DOMAIN__,DIRECT
-  - AND,((DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
+  # Both panel allow rules exclude intercept-egress. They must sit above the
+  # loopback deny (the console resolves to 127.0.0.1) and therefore above the
+  # egress terminator; without the exclusion a compromised sidecar dialling
+  # either hostname would reach the gateway's own management plane.
+  - AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT
+  - AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
   - DOMAIN,__ZASH_DOMAIN__,REJECT
   - IP-CIDR,__GATEWAY_IP__/32,REJECT,no-resolve
   - IP-CIDR,127.0.0.0/8,REJECT,no-resolve

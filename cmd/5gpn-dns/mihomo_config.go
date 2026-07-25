@@ -311,8 +311,12 @@ rules:
   - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8443)),REJECT
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,5060)),REJECT
   - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,5060)),REJECT
-  - DOMAIN,__CONSOLE_DOMAIN__,DIRECT
-  - AND,((DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
+  # Both panel allow rules exclude intercept-egress. They must sit above the
+  # loopback deny (the console resolves to 127.0.0.1) and therefore above the
+  # egress terminator; without the exclusion a compromised sidecar dialling
+  # either hostname would reach the gateway's own management plane.
+  - AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT
+  - AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
   - DOMAIN,__ZASH_DOMAIN__,REJECT
   - IP-CIDR,__GATEWAY_IP__/32,REJECT,no-resolve
   - IP-CIDR,127.0.0.0/8,REJECT,no-resolve
@@ -612,12 +616,33 @@ func containsRule(rules []string, want string) bool {
 	return false
 }
 
+// interceptEgressExclusion is the negative inbound qualifier that keeps a
+// panel allow rule out of reach of processor-originated traffic.
+//
+// The console and dashboard allow rules must sit above the loopback deny — the
+// console resolves to 127.0.0.1 — and therefore above the intercept-egress
+// terminator. Without this qualifier a compromised sidecar dialling either
+// hostname reaches the gateway's own management plane without ever meeting the
+// egress boundary.
+const interceptEgressExclusion = "(NOT,((IN-NAME,intercept-egress)))"
+
 func directDomainRule(domain string) string {
 	return "DOMAIN," + domain + ",DIRECT"
 }
 
+// qualifiedDirectDomainRule is the console split with the exclusion applied.
+func qualifiedDirectDomainRule(domain string) string {
+	return "AND,(" + interceptEgressExclusion + ",(DOMAIN," + domain + ")),DIRECT"
+}
+
 func allowlistedDomainRule(domain string) string {
 	return "AND,((DOMAIN," + domain + "),(RULE-SET,whitelist,DIRECT,src)),DIRECT"
+}
+
+// qualifiedAllowlistedDomainRule is the dashboard split with the exclusion
+// applied.
+func qualifiedAllowlistedDomainRule(domain string) string {
+	return "AND,(" + interceptEgressExclusion + ",(DOMAIN," + domain + "),(RULE-SET,whitelist,DIRECT,src)),DIRECT"
 }
 
 func denyDomainRule(domain, action string) string {
@@ -639,7 +664,14 @@ func hasAllowlistedSNISplit(doc *mihomoInvariantDocument, domain, hostsIP string
 	if strings.TrimSpace(domain) == "" || doc.Hosts[domain] != hostsIP {
 		return false
 	}
-	return containsRule(doc.Rules, allowlistedDomainRule(domain)) &&
+	// Either form satisfies the invariant. The qualified one is what the
+	// current seed renders; the bare one is accepted so an operator config
+	// written before the qualifier existed is still valid — the invariant is
+	// "the dashboard split is present", and requalification is a separate,
+	// explicit hardening step rather than something that invalidates a
+	// working deployment on upgrade.
+	return (containsRule(doc.Rules, allowlistedDomainRule(domain)) ||
+		containsRule(doc.Rules, qualifiedAllowlistedDomainRule(domain))) &&
 		hasDenyDomainRule(doc, domain)
 }
 
@@ -650,9 +682,11 @@ func hasPublicSNISplit(doc *mihomoInvariantDocument, domain, hostsIP string) boo
 	if strings.TrimSpace(domain) == "" || doc.Hosts[domain] != hostsIP {
 		return false
 	}
-	return containsRule(doc.Rules, directDomainRule(domain)) &&
-		!containsRule(doc.Rules, allowlistedDomainRule(domain)) &&
-		!hasDenyDomainRule(doc, domain)
+	hasDirect := containsRule(doc.Rules, directDomainRule(domain)) ||
+		containsRule(doc.Rules, qualifiedDirectDomainRule(domain))
+	hasAllowlisted := containsRule(doc.Rules, allowlistedDomainRule(domain)) ||
+		containsRule(doc.Rules, qualifiedAllowlistedDomainRule(domain))
+	return hasDirect && !hasAllowlisted && !hasDenyDomainRule(doc, domain)
 }
 
 // hasAntiLoopInvariant asserts an exact gateway /32 deny guard. The action is
