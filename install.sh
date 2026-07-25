@@ -1875,6 +1875,41 @@ render_overlay_placeholder() {
     esac
 }
 
+# Expands the seed template. One implementation, two callers.
+#
+# Artifact staging and the live render used to carry the same expansion inline,
+# differing only in the values they substituted and in whether the overlay
+# probe was allowed placeholder identities. A placeholder added to the template
+# therefore had to be taught to both, and the day one of them was missed is the
+# day a release run failed on a config that was not YAML.
+#
+# Values arrive through the environment under the placeholder's own name, so a
+# caller that forgets one substitutes empty rather than leaving the literal —
+# and tests/test_seed_template_renderers.sh is what fails when a placeholder is
+# added here and nowhere else.
+render_mihomo_seed() {
+    local template="$1" overlay="$2" mode="${3:-live}" listeners="$4" line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in
+            __MIHOMO_LISTENERS__)
+                printf '%s\n' "$listeners"
+                continue ;;
+            __OVERLAY_EGRESS_ANCHOR__|__OVERLAY_CLIENT_ANCHOR__|__OVERLAY_RUNTIME_BLOCK__)
+                render_overlay_placeholder "$line" "$overlay" "$mode" || return 1
+                continue ;;
+        esac
+        line="${line//__GATEWAY_IP__/$SEED_GATEWAY_IP}"
+        line="${line//__CONSOLE_DOMAIN__/$SEED_CONSOLE_DOMAIN}"
+        line="${line//__ZASH_DOMAIN__/$SEED_ZASH_DOMAIN}"
+        line="${line//__CONTROLLER_SECRET__/$SEED_CONTROLLER_SECRET}"
+        line="${line//__INTERCEPT_INBOUND_USERNAME__/$SEED_INTERCEPT_INBOUND_USERNAME}"
+        line="${line//__INTERCEPT_INBOUND_PASSWORD__/$SEED_INTERCEPT_INBOUND_PASSWORD}"
+        line="${line//__INTERCEPT_UPSTREAM_USERNAME__/$SEED_INTERCEPT_UPSTREAM_USERNAME}"
+        line="${line//__INTERCEPT_UPSTREAM_PASSWORD__/$SEED_INTERCEPT_UPSTREAM_PASSWORD}"
+        printf '%s\n' "$line"
+    done < "$template"
+}
+
 render_mihomo_listeners() {
     local ips="$1" console_domain="$2" ip idx=0 suffix
     while IFS= read -r ip; do
@@ -2738,27 +2773,19 @@ stage_artifacts() {
         # Anchored first. A core that does not implement the overlay rejects
         # the candidate and the unanchored render is retried, so the probe is
         # the validation itself rather than a version comparison.
+        # Placeholder credentials: this candidate is fed to `mihomo -t` to
+        # find out whether the core parses the anchors, then discarded.
+        SEED_GATEWAY_IP="$GATEWAY_IP"
+        SEED_CONSOLE_DOMAIN="$CONSOLE_DOMAIN"
+        SEED_ZASH_DOMAIN="$ZASH_DOMAIN"
+        SEED_CONTROLLER_SECRET="preflight-only-secret"
+        SEED_INTERCEPT_INBOUND_USERNAME="preflight-inbound-user"
+        SEED_INTERCEPT_INBOUND_PASSWORD="preflight-inbound-password-123456"
+        SEED_INTERCEPT_UPSTREAM_USERNAME="preflight-upstream-user"
+        SEED_INTERCEPT_UPSTREAM_PASSWORD="preflight-upstream-password-123456"
         for overlay in 1 0; do
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            if [[ "$line" == '__MIHOMO_LISTENERS__' ]]; then
-                printf '%s\n' "$listeners"
-                continue
-            fi
-            case "$line" in
-                __OVERLAY_EGRESS_ANCHOR__|__OVERLAY_CLIENT_ANCHOR__|__OVERLAY_RUNTIME_BLOCK__)
-                    render_overlay_placeholder "$line" "$overlay" probe || return 1
-                    continue ;;
-            esac
-            line="${line//__GATEWAY_IP__/$GATEWAY_IP}"
-            line="${line//__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN}"
-            line="${line//__ZASH_DOMAIN__/$ZASH_DOMAIN}"
-            line="${line//__CONTROLLER_SECRET__/preflight-only-secret}"
-            line="${line//__INTERCEPT_INBOUND_USERNAME__/preflight-inbound-user}"
-            line="${line//__INTERCEPT_INBOUND_PASSWORD__/preflight-inbound-password-123456}"
-            line="${line//__INTERCEPT_UPSTREAM_USERNAME__/preflight-upstream-user}"
-            line="${line//__INTERCEPT_UPSTREAM_PASSWORD__/preflight-upstream-password-123456}"
-            printf '%s\n' "$line"
-        done < "${SCRIPT_DIR}/etc/mihomo/config.yaml.tmpl" > "$seed"
+        render_mihomo_seed "${SCRIPT_DIR}/etc/mihomo/config.yaml.tmpl" \
+            "$overlay" probe "$listeners" > "$seed" || return 1
         if "$ARTIFACT_STAGE/mihomo" -t -f "$seed" -d "$ARTIFACT_STAGE/mihomo-home"; then
             if [[ "$overlay" == 1 ]]; then
                 ok "Staged mihomo implements the runtime overlay; seeding the anchored config."
@@ -4617,35 +4644,15 @@ render_mihomo_config() {
     candidate="$(mktemp "${MIHOMO_DIR}/.config.yaml.XXXXXX")" \
         || { err "Could not create a mihomo config candidate in $MIHOMO_DIR"; return 1; }
 
-    if ! while IFS= read -r line || [[ -n "$line" ]]; do
-        if [[ "$line" == '__MIHOMO_LISTENERS__' ]]; then
-            printf '%s\n' "$listeners"
-            continue
-        fi
-        case "$line" in
-            __OVERLAY_EGRESS_ANCHOR__|__OVERLAY_CLIENT_ANCHOR__|__OVERLAY_RUNTIME_BLOCK__)
-                # Not `exit`: this loop carries a redirection but is not a
-                # subshell, so exiting here would end the installer outright —
-                # leaving the candidate behind and skipping the transaction
-                # rollback that every other failure in this function goes
-                # through.
-                render_overlay_placeholder "$line" "$overlay" || {
-                    rm -f -- "$candidate"
-                    err "Could not render the runtime-overlay block for the mihomo candidate."
-                    return 1
-                }
-                continue ;;
-        esac
-        line="${line//__GATEWAY_IP__/$gw}"
-        line="${line//__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN}"
-        line="${line//__ZASH_DOMAIN__/$ZASH_DOMAIN}"
-        line="${line//__CONTROLLER_SECRET__/$secret_yaml_value}"
-        line="${line//__INTERCEPT_INBOUND_USERNAME__/$intercept_in_user}"
-        line="${line//__INTERCEPT_INBOUND_PASSWORD__/$intercept_in_pass}"
-        line="${line//__INTERCEPT_UPSTREAM_USERNAME__/$intercept_up_user}"
-        line="${line//__INTERCEPT_UPSTREAM_PASSWORD__/$intercept_up_pass}"
-        printf '%s\n' "$line"
-    done < "$template" > "$candidate"; then
+    SEED_GATEWAY_IP="$gw"
+    SEED_CONSOLE_DOMAIN="$CONSOLE_DOMAIN"
+    SEED_ZASH_DOMAIN="$ZASH_DOMAIN"
+    SEED_CONTROLLER_SECRET="$secret_yaml_value"
+    SEED_INTERCEPT_INBOUND_USERNAME="$intercept_in_user"
+    SEED_INTERCEPT_INBOUND_PASSWORD="$intercept_in_pass"
+    SEED_INTERCEPT_UPSTREAM_USERNAME="$intercept_up_user"
+    SEED_INTERCEPT_UPSTREAM_PASSWORD="$intercept_up_pass"
+    if ! render_mihomo_seed "$template" "$overlay" live "$listeners" > "$candidate"; then
         rm -f -- "$candidate"
         err "Could not render the mihomo config candidate from $template"
         return 1
