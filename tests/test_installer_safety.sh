@@ -1257,12 +1257,17 @@ GATEWAY_IP=10.20.30.40
 DIG_LOG="$TMP/dig.log"
 DIG_A=198.51.100.9
 DIG_AAAA=""
+# Real dig exits 0 when it successfully receives a NODATA answer and 9 when it
+# gets no reply at all. The stub must keep those apart, because the gate now
+# distinguishes "observed: no AAAA" from "the AAAA query never answered".
+DIG_RC=0
 dig() {
     printf '%s\n' "$*" >> "$DIG_LOG"
     case " $* " in
         *' AAAA '*) [[ -n "$DIG_AAAA" ]] && echo "$DIG_AAAA" ;;
         *' A '*) [[ -n "$DIG_A" ]] && echo "$DIG_A" ;;
     esac
+    return "$DIG_RC"
 }
 CERT_MODE=cloudflare
 verify_console_dns >/dev/null \
@@ -1310,6 +1315,16 @@ else
     pass "HTTP-01 rejects published AAAA records"
 fi
 DIG_AAAA=""
+# An unanswered AAAA lookup is not evidence of absence. Passing here would stop
+# mihomo for a standalone challenge that Let's Encrypt may then attempt over an
+# IPv6 address nobody verified.
+DIG_RC=9
+if verify_console_dns >/dev/null 2>&1; then
+    fail "HTTP-01 treated an unanswered AAAA lookup as proof of no AAAA"
+else
+    pass "HTTP-01 fails closed when the AAAA lookup does not answer"
+fi
+DIG_RC=0
 CERT_MODE=debug
 : > "$DIG_LOG"
 verify_console_dns >/dev/null \

@@ -60,12 +60,19 @@ function isValidPort(value: string): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65_535
 }
 
-/** Mirrors the daemon's IP-with-optional-port grammar. */
+/**
+ * Mirrors the daemon's IP-with-optional-port grammar, which is IPv4-only:
+ * validIPPort in cmd/5gpn-dns/upstreams.go requires `ip.To4() != nil` because
+ * the 5gpn-dns systemd sandbox excludes AF_INET6, so an IPv6 upstream could
+ * never be dialled even if it were stored. Accepting one here would only move
+ * the rejection from this form to the API response.
+ *
+ * isValidIP (IPv4 or IPv6) is deliberately still used by isValidServerName:
+ * the daemon accepts `hostnameRE || net.ParseIP` there, and that value is only
+ * ever a TLS SNI, never a dial target.
+ */
 export function isValidIPPort(value: string): boolean {
-  if (isValidIP(value)) return true
-
-  const bracketed = /^\[([^\]]+)]:(.+)$/.exec(value)
-  if (bracketed) return isIPv6(bracketed[1]) && isValidPort(bracketed[2])
+  if (isIPv4(value)) return true
 
   const separator = value.lastIndexOf(':')
   if (separator <= 0 || value.indexOf(':') !== separator) return false

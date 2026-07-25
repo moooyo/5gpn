@@ -5,11 +5,19 @@ describe('upstream validation', () => {
   it.each([
     '223.5.5.5',
     '223.5.5.5:53',
+  ])('accepts a valid IP endpoint: %s', (value) => {
+    expect(isValidIPPort(value)).toBe(true)
+  })
+
+  // The daemon is IPv4-only (validIPPort in cmd/5gpn-dns/upstreams.go requires
+  // ip.To4() != nil, because the systemd sandbox excludes AF_INET6). Accepting
+  // these in the form would only defer the rejection to the API.
+  it.each([
     '::1',
     '2001:db8::53',
     '[2001:db8::53]:853',
-  ])('accepts a valid IP endpoint: %s', (value) => {
-    expect(isValidIPPort(value)).toBe(true)
+  ])('rejects an IPv6 upstream the daemon could never dial: %s', (value) => {
+    expect(isValidIPPort(value)).toBe(false)
   })
 
   it.each([

@@ -358,7 +358,7 @@ describe('SettingsPage', () => {
     await user.type(screen.getByTestId('upstreams-address'), 'dns.google')
     await user.click(screen.getByTestId('upstreams-add-trust-confirm'))
     expect(screen.getByText('请输入 TLS 服务器名称。')).toBeInTheDocument()
-    expect(screen.getByText('请输入合法 IP；端口可选，范围为 1–65535。')).toBeInTheDocument()
+    expect(screen.getByText('请输入合法 IPv4 地址；端口可选，范围为 1–65535。')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '取消' }))
     await user.click(screen.getByTestId('upstreams-add-china'))

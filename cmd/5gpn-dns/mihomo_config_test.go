@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // goldenInfraParams returns the InfraParams matching goldenMihomoConfig's
@@ -802,5 +804,35 @@ func TestSeedResetWithoutAnOverlayBlockDropsTheAnchors(t *testing.T) {
 		if strings.Contains(restored, placeholder) {
 			t.Errorf("%s was left unexpanded, so the config is not YAML", placeholder)
 		}
+	}
+}
+
+// TestMihomoConfigSeedTemplate_DisablesIPv6 pins the top-level `ipv6: false`.
+// mihomo's own DefaultRawConfig sets IPv6 TRUE, and that flag becomes
+// resolver.DisableIPv6 = false, which makes mihomo resolve AAAA for every
+// outbound name and race an IPv6 egress. Once its TCP dial succeeds no
+// dual-stack fallback can fire, so a destination that refuses the gateway's
+// datacenter v6 prefix fails at the application layer with no recovery. 5gpn is
+// an IPv4-only steering gateway; omitting this key silently opts every fresh
+// seed back into IPv6.
+//
+// This asserts the SEED only. /etc/5gpn/mihomo/config.yaml is operator-owned and
+// preserved byte-for-byte, so it is deliberately NOT a structural invariant --
+// that would reject every existing operator config on the next PUT. The
+// enforcing guard for existing deployments is the broker's AAAA NODATA (see
+// TestEgressDNSBroker_AAAAIsSyntheticNODATA).
+func TestMihomoConfigSeedTemplate_DisablesIPv6(t *testing.T) {
+	if !strings.Contains(mihomoConfigSeedTemplate, "\nipv6: false\n") {
+		t.Fatal("seed template must set top-level `ipv6: false`; mihomo defaults it to true")
+	}
+	seed := goldenMihomoConfig()
+	var doc struct {
+		IPv6 *bool `yaml:"ipv6"`
+	}
+	if err := yaml.Unmarshal([]byte(seed), &doc); err != nil {
+		t.Fatalf("rendered seed is not valid YAML: %v", err)
+	}
+	if doc.IPv6 == nil || *doc.IPv6 {
+		t.Fatalf("rendered seed ipv6 = %v, want false", doc.IPv6)
 	}
 }

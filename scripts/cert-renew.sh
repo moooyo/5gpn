@@ -298,7 +298,7 @@ ensure_live_deployed() {
 }
 
 dns_records_match() {
-    local expected="$1" domain raw ips aaaa raw_count ip_count
+    local expected="$1" domain raw ips aaaa aaaa_raw raw_count ip_count
     shift
     command -v dig >/dev/null 2>&1 \
         || { err "dig is required for the 1.1.1.1 certificate DNS check."; return 1; }
@@ -317,8 +317,19 @@ dns_records_match() {
         fi
         # Let's Encrypt prefers a published IPv6 route when one exists. This
         # gateway is IPv4-only, so a stale AAAA would make HTTP-01 nondeterministic.
-        aaaa="$(dig +time=3 +tries=1 +short AAAA "$domain" @"$DNS_RESOLVER" 2>/dev/null \
-            | awk '/:/' || true)"
+        # Absence must be OBSERVED: dig prints nothing on stdout when it gets no
+        # reply, and piping it into awk replaces dig's exit status with awk's, so
+        # the earlier `dig ... | awk '/:/' || true` read a failed lookup as
+        # "no AAAA" and passed. This gate runs unattended from the renewal timer
+        # and is what keeps a due renewal from stopping mihomo for a challenge
+        # that cannot succeed, so an unanswered query must fail closed and be
+        # retried by wait_for_http_dns rather than assumed away.
+        if aaaa_raw="$(dig +time=3 +tries=1 +short AAAA "$domain" @"$DNS_RESOLVER" 2>/dev/null)"; then
+            aaaa="$(printf '%s\n' "$aaaa_raw" | awk '/:/')"
+        else
+            warn "DNS not ready via ${DNS_RESOLVER}: ${domain} AAAA lookup did not answer; refusing to assume it has none."
+            return 1
+        fi
         if [[ -n "$aaaa" ]]; then
             warn "DNS mismatch via ${DNS_RESOLVER}: ${domain} has unsupported AAAA [${aaaa//$'\n'/, }]."
             return 1

@@ -258,6 +258,12 @@ tls:
 profile: { store-selected: true }
 mode: rule
 log-level: info
+# 5gpn is an IPv4-only steering gateway. mihomo defaults this to TRUE, which
+# makes it resolve AAAA and race an IPv6 egress it cannot fall back from once
+# the TCP dial succeeds. 5gpn-dns also answers AAAA with NODATA on the
+# 127.0.0.1:5354 origin resolver below, so this line is belt-and-braces for the
+# paths that do not go through it (e.g. a proxy node named by hostname).
+ipv6: false
 
 listeners:
 __MIHOMO_LISTENERS__
