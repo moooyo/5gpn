@@ -2066,6 +2066,21 @@ service_group_is_exclusive_for_user() {
     [[ -z "$primary_users" || "$primary_users" == "$user" ]]
 }
 
+# The gids a service account may carry: its own, plus the overlay socket
+# groups if they exist. Absent groups are simply not in the set, so this is
+# equally correct before they are created.
+service_account_groups_are_permitted() {
+    local user_groups="$1" primary_gid="$2" gid allowed
+    allowed=" ${primary_gid} "
+    for gid in "$(getent group "$OVERLAY_CONTROL_GROUP" 2>/dev/null | cut -d: -f3)" \
+               "$(getent group "$OVERLAY_GENERATION_GROUP" 2>/dev/null | cut -d: -f3)"; do
+        [[ "$gid" =~ ^[0-9]+$ ]] && allowed="${allowed}${gid} "
+    done
+    for gid in $user_groups; do
+        [[ "$allowed" == *" ${gid} "* ]] || return 1
+    done
+}
+
 service_account_is_safe() {
     local user="$1" group="$2" entry uid home shell primary primary_gid user_groups uid_min
     local group_entry group_gid members passwd_entries primary_users uid_users group_entries gid_groups gid_members
@@ -2092,8 +2107,14 @@ service_account_is_safe() {
     [[ "$group_gid" =~ ^[0-9]+$ && "$primary_gid" == "$group_gid" ]] || return 1
     [[ "$home" == /nonexistent && "$primary" == "$group" ]] || return 1
     [[ -z "$members" && "$primary_users" == "$user" && "$uid_users" == "$user" \
-       && "$gid_groups" == "$group" && -z "$gid_members" \
-       && "$user_groups" == "$group_gid" ]] || return 1
+       && "$gid_groups" == "$group" && -z "$gid_members" ]] || return 1
+    # A service account may belong to its own group and to the overlay socket
+    # groups, and to nothing else. The isolation this protects is real — an
+    # account that can join arbitrary groups can reach whatever those groups
+    # own — so the exception is enumerated rather than opened: those two groups
+    # exist solely to own one socket each and own nothing else, which is what
+    # makes membership of them grant no reach beyond the socket.
+    service_account_groups_are_permitted "$user_groups" "$group_gid" || return 1
     case "$shell" in */nologin|/bin/false) ;; *) return 1 ;; esac
 }
 
