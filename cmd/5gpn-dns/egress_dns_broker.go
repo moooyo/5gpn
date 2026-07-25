@@ -18,8 +18,32 @@ const brokerQueryTimeout = 5 * time.Second
 // EgressDNSBroker is mihomo's loopback DNS resolver for sniffed origins. Its
 // selector returns a canonical China- or trust-group answer without applying
 // the client-facing gateway rewrite, and never falls back to the host resolver.
-// AAAA is answered with synthetic NODATA so the data plane stays IPv4-only; see
-// ServeDNS.
+//
+// It holds one contract of its own: NO IPv6 ADDRESS LEAVES THIS RESOLVER, in
+// any section, in any record type. 5gpn is an IPv4-only steering gateway, and
+// this is the boundary where that becomes true for the data plane -- the seed's
+// `ipv6: false` cannot be relied on, because /etc/5gpn/mihomo/config.yaml is
+// operator-owned and every deployment published before that seed keeps its own
+// bytes forever.
+//
+// The contract is stated as a property of THIS resolver, not as a list of what
+// mihomo happens to read. mihomo's Resolver.LookupIP fires an AAAA query
+// unconditionally today and its msgToIP harvests A and AAAA from the Answer
+// section without checking the qtype, but pinning the guard to those internals
+// would make our correctness a function of a third party's private
+// implementation: a future mihomo that reads another section, or another
+// consumer on this socket, would silently escape a filter tuned to v1.19.28.
+//
+// What an unfiltered IPv6 answer costs: mihomo races it against the IPv4 one,
+// and when the v6 leg wins its TCP dial SUCCEEDS -- so the dual-stack fallback
+// never fires -- while a destination that refuses or mislocates the gateway's
+// datacenter IPv6 prefix fails at the application layer, where nothing can
+// recover it. That is the "resolves to IPv6, no fallback, unreachable" report
+// this exists to prevent.
+//
+// Accepted deliberately: an origin, or an operator proxy node named by
+// hostname, published only as AAAA is unreachable through the gateway. On an
+// IPv4-only data plane an IPv6 answer would not have been dialable either.
 type EgressDNSBroker struct {
 	addr     string
 	upstream Exchanger
@@ -140,31 +164,14 @@ func (b *EgressDNSBroker) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	// AAAA -> synthetic NODATA, exactly like the client-facing handler.
+	// The IPv4-only contract on the type is enforced in two halves, because a
+	// question and an answer can each carry IPv6 independently of the other.
 	//
-	// This is not cosmetic symmetry; it is the only place an IPv4-only gateway
-	// can enforce IPv4-only egress. mihomo v1.19.28 resolves a sniffed origin
-	// through this broker, and its Resolver.LookupIP fires the AAAA query
-	// UNCONDITIONALLY -- it never consults the resolver's own `ipv6` field, so a
-	// `dns.ipv6: false` in the operator's config does not suppress it. Only the
-	// top-level `ipv6: false` does, by flipping resolver.DisableIPv6, and
-	// /etc/5gpn/mihomo/config.yaml is fully operator-owned: existing deployments
-	// keep their own bytes forever, so the seed cannot be relied on to carry it.
-	//
-	// Left unfiltered, mihomo learns the origin's real IPv6 addresses and races
-	// them against the IPv4 ones. When the v6 leg wins, the gateway egresses from
-	// a datacenter IPv6 prefix that many destinations refuse or geolocate
-	// differently -- and because the TCP dial SUCCEEDED, mihomo's dual-stack
-	// fallback never fires. The failure surfaces at the application layer, where
-	// nothing can recover it, which is exactly the "resolves to IPv6, no
-	// fallback, unreachable" report this guard exists to prevent.
-	//
-	// With no AAAA answer mihomo has only IPv4 candidates and the box stays
-	// IPv4-only end to end. The synthetic SOA lets mihomo negatively cache it
-	// instead of re-asking per connection. Trade-off, accepted deliberately: an
-	// origin (or an operator proxy node named by hostname) that publishes ONLY
-	// AAAA is unreachable through the gateway. That is inherent to an IPv4-only
-	// data plane -- an IPv6 answer here would not have been dialable either.
+	// Half one: an AAAA question never reaches an upstream. Answering it here
+	// costs nothing, and the synthetic SOA lets the asker negatively cache it
+	// instead of re-asking per connection. This runs before the nil-upstream
+	// check on purpose -- it is a property of the resolver, not of whether an
+	// upstream happens to be configured.
 	if r.Question[0].Qtype == dns.TypeAAAA {
 		_ = w.WriteMsg(syntheticNODATA(r))
 		return
@@ -182,14 +189,11 @@ func (b *EgressDNSBroker) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		b.servfail(w, r)
 		return
 	}
-	// Gating the AAAA QUESTION is not enough on its own. mihomo's msgToIP
-	// iterates the Answer section and collects every *dns.A AND *dns.AAAA it
-	// finds, without checking what was asked -- so an AAAA record riding inside
-	// the reply to an A query becomes a dial candidate just the same. A
-	// well-behaved resolver does not do that, but this broker is the boundary
-	// that has to hold when one misbehaves, and "the upstream is well-behaved"
-	// is not something an IPv4-only guarantee can rest on. Strip the same RR
-	// set the client path strips, for the same reason.
+	// Half two: no reply carries an IPv6 address out, whatever was asked. This
+	// is not redundant with half one -- an address can ride in the answer to a
+	// different question, and a conforming upstream is not something an
+	// IPv4-only guarantee can rest on. Same filter as the client boundary, so
+	// there is one definition of "records that defeat steering" to audit.
 	resp = filterSteeringBypassRRs(resp)
 	resp.Id = r.Id
 	resp.Response = true
