@@ -951,8 +951,12 @@ config_mode="$(stat -c %a "$config" 2>/dev/null || stat -f %Lp "$config")"
 [[ -s "$config" && ( "$POSIX_MODES" == 0 || "$config_mode" == 640 ) ]] \
     && pass "first install seeds a private mihomo config" \
     || fail "first-install mihomo config missing or not mode 0640"
+# The panel allow rule is requalified to exclude processor traffic: without that
+# exclusion a compromised sidecar dialling the console reaches the gateway's own
+# management plane without ever meeting the overlay's egress anchor, and the core
+# refuses the unqualified form outright.
 grep -Fq 'console.example.com: 127.0.0.1' "$config" \
-    && grep -Fq 'DOMAIN,console.example.com,DIRECT' "$config" \
+    && grep -Fq 'AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,console.example.com)),DIRECT' "$config" \
     && grep -Fq 'name: gateway5060' "$config" \
     && grep -Fq 'QUIC: { ports: [443, 5060] }' "$config" \
     && pass "seed contains public console mapping" \
