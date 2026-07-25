@@ -867,7 +867,10 @@ if install_mihomo_runtime_assets >/dev/null \
 pass "installed management runtime retains all mihomo reset assets"
 
 render_fn="$(sed -n '/^render_mihomo_config()/,/^}/p' "$INSTALL")"
-render_line="$(grep -nF 'done < "$template" > "$candidate"' <<<"$render_fn" | cut -d: -f1)"
+# The render is one call now rather than an inline loop; the property under test
+# is the ORDER — rendered, then checked non-empty, then handed to the service
+# accounts, then validated — not how the rendering is spelled.
+render_line="$(grep -nF 'render_mihomo_seed "$template"' <<<"$render_fn" | cut -d: -f1)"
 nonempty_line="$(grep -nF '[[ -s "$candidate" ]]' <<<"$render_fn" | cut -d: -f1)"
 secure_line="$(grep -nF 'chown "$DNS_SERVICE_USER:$MIHOMO_SERVICE_USER" "$candidate"' <<<"$render_fn" | cut -d: -f1)"
 validate_line="$(grep -nF '"$MIHOMO_BIN" -t -f "$candidate"' <<<"$render_fn" | cut -d: -f1)"
