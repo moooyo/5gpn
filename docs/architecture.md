@@ -58,7 +58,7 @@ architecture.
 | --- | --- | --- |
 | `5gpn-dns` | `:853/tcp` | The only client DNS ingress, DNS over TLS. |
 | `5gpn-dns` | `127.0.0.1:5353/udp` | Local debugging only; it must remain loopback. |
-| `5gpn-dns` | `127.0.0.1:5354/udp` and `/tcp` | Loopback origin resolver used by mihomo after hostname sniffing; active extension bindings select China/trust and all other names use trust. |
+| `5gpn-dns` | `127.0.0.1:5354/udp` and `/tcp` | Loopback origin resolver used by mihomo after hostname sniffing; active extension bindings select China/trust and all other names use trust. AAAA is answered with synthetic NODATA so egress stays IPv4-only. |
 | `5gpn-dns` | `127.0.0.1:443/tcp` | Public HTTPS console assets and iOS profile download, plus the bearer-authenticated API. |
 | `5gpn-dns` | `127.0.0.2:443/tcp` | HTTPS zashboard static files and its controller proxy. |
 | `5gpn-intercept` | `127.0.0.1:18080/tcp`, only while MITM is enabled | Authenticated SOCKS5 control and plain-HTTP/TLS interception ingress. Each authenticated UDP ASSOCIATE receives a private ephemeral loopback UDP socket. |
@@ -385,7 +385,9 @@ individual attempt deadline may fall through to the next member.
 This client-resolution arbitration is separate from mihomo origin
 re-resolution. The loopback origin resolver never evaluates ordered DNS policy
 or chnroute arbitration: it forces the operator-selected group for an active
-extension capture host and otherwise forces trust.
+extension capture host and otherwise forces trust. It does, however, share the
+AAAA stance below: both resolver boundaries answer AAAA with the same synthetic
+NODATA, so neither a client nor mihomo can obtain an IPv6 address from 5gpn.
 
 New installations default to one plain-UDP member in each group:
 `223.5.5.5:53` for China and `22.22.22.22:53` for trust. The default China ECS
@@ -398,6 +400,23 @@ Query-type behavior is intentionally IPv4-oriented:
 - HTTPS and SVCB return synthetic NODATA so address hints or ECH cannot bypass
   A-record steering and hostname sniffing.
 - Other types are forwarded through the trust group.
+
+The AAAA rule is not client-only. The loopback origin resolver on
+`127.0.0.1:5354` answers AAAA with the same synthetic NODATA before consulting
+any upstream group, and it is the boundary that actually keeps egress on IPv4.
+mihomo resolves every sniffed origin there and issues the AAAA query
+unconditionally: its `dns.ipv6` setting does not suppress that query, only the
+top-level `ipv6` key does, and `/etc/5gpn/mihomo/config.yaml` is operator-owned,
+so no seed value can be assumed present in a deployed configuration. Were the
+AAAA forwarded, mihomo would learn the origin's real IPv6 addresses and race
+them against the IPv4 ones; a winning IPv6 leg completes its TCP dial, which
+retires mihomo's dual-stack fallback, and a destination that refuses or
+mislocates the gateway's datacenter IPv6 prefix then fails at the application
+layer with nothing left to fall back to. Answering NODATA leaves mihomo only
+IPv4 candidates. The accepted consequence is that an origin — or an operator
+proxy node named by hostname — published only as AAAA is unreachable through the
+gateway; an IPv6 answer would not have been dialable on an IPv4-only data plane
+either.
 
 Rewrites must preserve the upstream Rcode and authority section. In particular,
 NXDOMAIN and SERVFAIL must never become NOERROR merely because an answer name
@@ -432,6 +451,15 @@ loopback origin resolver boundary, panel routing, anti-loop rules, a fail-closed
 egress terminator, and a `Proxies` group
 whose initial choice is `DIRECT`. After publication there is no generated or
 daemon-managed region.
+
+The seed also sets the top-level `ipv6: false`, because mihomo's own default for
+that key is `true` and an IPv4-only steering gateway must not resolve or dial
+IPv6. This is defence in depth for the paths that do not pass through the
+loopback origin resolver, such as a proxy node named by hostname. It is
+deliberately not a structural invariant: the file is operator-owned and
+preserved byte-for-byte, so requiring the key would reject every configuration
+published before it existed. The enforcing guard for already-deployed
+configurations is the origin resolver's AAAA NODATA.
 
 The public mihomo `:80` listener remains general data-plane ingress for
 DNS-steered HTTP traffic; it is not an ACME-only socket. The seed rejects

@@ -851,7 +851,9 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 //     direct           ? arbitrate, return the real IPs as-is (never rewrite to GatewayIP).
 //     gateway          ? synthetic A = GatewayIP for every name, no upstream consulted.
 //
-// For all other qtypes (MX/TXT/CNAME/NS/PTR/SOA/?) forward to Trust verbatim.
+// For all other qtypes (MX/TXT/CNAME/NS/PTR/SOA/ANY/…) forward to Trust, with
+// AAAA records stripped from every section (see filterAAAA) so glue or an ANY
+// RRset cannot hand the client an address that bypasses A-record steering.
 // Cache is consulted first for steps 4/6 and for the other-type forwarding path.
 func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg, ri *resolveInfo) *dns.Msg {
 	name := q.Name // already FQDN from the wire
@@ -1066,8 +1068,8 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 
 // ?? helpers ??????????????????????????????????????????????????????????????????
 
-// forwardTrust sends q to the given trust exchanger and returns the reply
-// verbatim. The result is cached.
+// forwardTrust sends q to the given trust exchanger and returns the reply with
+// AAAA records removed from every section. The result is cached.
 func (h *Handler) forwardTrust(ctx context.Context, trust Exchanger, q dns.Question, r *dns.Msg, scope dnsFlightScope, ri *resolveInfo) *dns.Msg {
 	name, qtype := q.Name, q.Qtype
 	if ri != nil && ri.reason == "" {
@@ -1091,6 +1093,16 @@ func (h *Handler) forwardTrust(ctx context.Context, trust Exchanger, q dns.Quest
 			return h.staleOrServerFail(flightReq, name, qtype, flightInfo)
 		}
 		flightInfo.noteUpstream("trust")
+		// "Verbatim" stops at AAAA. This path carries every qtype the steps
+		// above do not special-case, and several of them hand back IPv6 the
+		// client never asked for: QTYPE=ANY returns the AAAA RRset in Answer,
+		// and MX/NS/SRV/PTR replies carry the target's AAAA as
+		// additional-section glue. A client that consumes either reaches the
+		// origin over IPv6 and bypasses the A-to-gateway rewrite entirely --
+		// which is the same steering hole the step-1 synthetic NODATA closes
+		// for a direct AAAA question. Filtering before the cache write keeps
+		// stale/served entries clean too.
+		resolved = filterAAAA(resolved)
 		meta := cacheMetadata{Upstream: "trust", Verdict: flightInfo.verdict, Reason: flightInfo.reason}
 		h.cachePutForRequest(flightReq, name, qtype, resolved, scope.epoch, meta)
 		return resolved
@@ -1190,21 +1202,65 @@ func stripDNSSECRRs(rrs []dns.RR) []dns.RR {
 	return out
 }
 
-// filterAAAA returns a copy of m with all AAAA records removed from Answer.
+// filterAAAA returns a copy of m with every AAAA record removed from the
+// Answer, Authority, and Additional sections.
+//
+// All three sections matter, not just Answer. An MX, NS, or SRV reply routinely
+// carries the target's AAAA as additional-section glue, and QTYPE=ANY can return
+// the AAAA RRset outright -- addresses a client would learn without ever having
+// sent an AAAA query, which is exactly what the step-1 synthetic NODATA exists
+// to prevent. This box is IPv4-only, so no section may carry one.
+//
+// When a section actually loses a record its DNSSEC RRs are stripped too, for
+// the same reason rewriteA does it: a signature left behind no longer matches
+// the data it covers, and a DO=1 validating stub SERVFAILs on it. A section
+// that contained no AAAA is returned untouched, signatures intact. OPT is not a
+// DNSSEC RR and always survives.
 func filterAAAA(m *dns.Msg) *dns.Msg {
 	cp := m.Copy()
-	var kept []dns.RR
-	for _, rr := range cp.Answer {
+	cp.Answer = dropAAAARRs(cp.Answer)
+	cp.Ns = dropAAAARRs(cp.Ns)
+	cp.Extra = dropAAAARRs(cp.Extra)
+	return cp
+}
+
+// dropAAAARRs removes AAAA records from one section, returning the input
+// unchanged (same slice, same signatures) when there was nothing to remove.
+func dropAAAARRs(rrs []dns.RR) []dns.RR {
+	removed := false
+	for _, rr := range rrs {
+		if _, isAAAA := rr.(*dns.AAAA); isAAAA {
+			removed = true
+			break
+		}
+	}
+	if !removed {
+		return rrs
+	}
+	kept := make([]dns.RR, 0, len(rrs))
+	for _, rr := range rrs {
 		if _, isAAAA := rr.(*dns.AAAA); !isAAAA {
 			kept = append(kept, rr)
 		}
 	}
-	cp.Answer = kept
-	return cp
+	return stripDNSSECRRs(kept)
 }
 
 // soaReply returns a NOERROR reply with a synthetic SOA in the Authority section.
 func (h *Handler) soaReply(r *dns.Msg) *dns.Msg {
+	return syntheticNODATA(r)
+}
+
+// syntheticNODATA is the NOERROR + synthetic-SOA answer this box returns for a
+// name that exists but has no record of the requested type here. It carries a
+// SOA rather than a bare empty NOERROR so the asker can negatively cache the
+// answer instead of re-querying on every connection.
+//
+// It is package-level, not a Handler method, because BOTH resolver boundaries
+// 5gpn owns must answer AAAA with these exact bytes: the client-facing handler
+// (DoT :853) and the mihomo egress broker (127.0.0.1:5354). See the AAAA note in
+// EgressDNSBroker.ServeDNS for why the second one is load-bearing.
+func syntheticNODATA(r *dns.Msg) *dns.Msg {
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.RecursionAvailable = true

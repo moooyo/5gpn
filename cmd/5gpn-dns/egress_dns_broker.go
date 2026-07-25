@@ -18,6 +18,8 @@ const brokerQueryTimeout = 5 * time.Second
 // EgressDNSBroker is mihomo's loopback DNS resolver for sniffed origins. Its
 // selector returns a canonical China- or trust-group answer without applying
 // the client-facing gateway rewrite, and never falls back to the host resolver.
+// AAAA is answered with synthetic NODATA so the data plane stays IPv4-only; see
+// ServeDNS.
 type EgressDNSBroker struct {
 	addr     string
 	upstream Exchanger
@@ -137,6 +139,37 @@ func (b *EgressDNSBroker) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		_ = w.WriteMsg(m)
 		return
 	}
+
+	// AAAA -> synthetic NODATA, exactly like the client-facing handler.
+	//
+	// This is not cosmetic symmetry; it is the only place an IPv4-only gateway
+	// can enforce IPv4-only egress. mihomo v1.19.28 resolves a sniffed origin
+	// through this broker, and its Resolver.LookupIP fires the AAAA query
+	// UNCONDITIONALLY -- it never consults the resolver's own `ipv6` field, so a
+	// `dns.ipv6: false` in the operator's config does not suppress it. Only the
+	// top-level `ipv6: false` does, by flipping resolver.DisableIPv6, and
+	// /etc/5gpn/mihomo/config.yaml is fully operator-owned: existing deployments
+	// keep their own bytes forever, so the seed cannot be relied on to carry it.
+	//
+	// Left unfiltered, mihomo learns the origin's real IPv6 addresses and races
+	// them against the IPv4 ones. When the v6 leg wins, the gateway egresses from
+	// a datacenter IPv6 prefix that many destinations refuse or geolocate
+	// differently -- and because the TCP dial SUCCEEDED, mihomo's dual-stack
+	// fallback never fires. The failure surfaces at the application layer, where
+	// nothing can recover it, which is exactly the "resolves to IPv6, no
+	// fallback, unreachable" report this guard exists to prevent.
+	//
+	// With no AAAA answer mihomo has only IPv4 candidates and the box stays
+	// IPv4-only end to end. The synthetic SOA lets mihomo negatively cache it
+	// instead of re-asking per connection. Trade-off, accepted deliberately: an
+	// origin (or an operator proxy node named by hostname) that publishes ONLY
+	// AAAA is unreachable through the gateway. That is inherent to an IPv4-only
+	// data plane -- an IPv6 answer here would not have been dialable either.
+	if r.Question[0].Qtype == dns.TypeAAAA {
+		_ = w.WriteMsg(syntheticNODATA(r))
+		return
+	}
+
 	if b.upstream == nil {
 		b.servfail(w, r)
 		return

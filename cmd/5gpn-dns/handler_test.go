@@ -1133,3 +1133,173 @@ func TestClassifyNameFirstRuleDirect(t *testing.T) {
 		t.Errorf("classifyName(directandproxy.test) = %+v, want %+v", got, want)
 	}
 }
+
+// ── AAAA suppression on the forwardTrust path ────────────────────────────────
+
+func aaaaHdr(name string) dns.RR_Header {
+	return dns.RR_Header{Name: dns.Fqdn(name), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 300}
+}
+
+func hasAAAA(rrs []dns.RR) bool {
+	for _, rr := range rrs {
+		if _, ok := rr.(*dns.AAAA); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// QTYPE=ANY is the cleanest AAAA-to-client leak in the engine: it is not A,
+// AAAA, HTTPS or SVCB, so it falls through every qtype gate to forwardTrust and
+// the upstream returns the full RRset -- AAAA included -- straight into Answer.
+// A client that uses it reaches the origin over IPv6 and never sees the
+// A-record gateway rewrite.
+func TestForwardTrustStripsAAAAFromAnswer(t *testing.T) {
+	upstream := new(dns.Msg)
+	q0 := new(dns.Msg)
+	q0.SetQuestion("any.test.", dns.TypeANY)
+	upstream.SetReply(q0)
+	upstream.Answer = []dns.RR{
+		&dns.A{Hdr: dns.RR_Header{Name: "any.test.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("203.0.113.9").To4()},
+		&dns.AAAA{Hdr: aaaaHdr("any.test"), AAAA: net.ParseIP("2001:db8::1")},
+	}
+
+	fake := &fakeExchanger{reply: upstream}
+	h := newTestHandler(t, fake, fake)
+
+	req := new(dns.Msg)
+	req.SetQuestion("any.test.", dns.TypeANY)
+	resp := h.resolve(context.Background(), dns.Question{Name: "any.test.", Qtype: dns.TypeANY, Qclass: dns.ClassINET}, req)
+
+	if resp == nil {
+		t.Fatal("nil reply")
+	}
+	if hasAAAA(resp.Answer) {
+		t.Fatalf("ANY answer still carries AAAA: %v", resp.Answer)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("Answer = %v, want the A record kept", resp.Answer)
+	}
+}
+
+// MX/NS/SRV/PTR replies carry the target's addresses as additional-section
+// glue. Stripping only Answer would leave the origin's real IPv6 sitting in
+// Extra for any client that consumes glue.
+func TestForwardTrustStripsAAAAGlueFromExtra(t *testing.T) {
+	upstream := new(dns.Msg)
+	q0 := new(dns.Msg)
+	q0.SetQuestion("mail.test.", dns.TypeMX)
+	upstream.SetReply(q0)
+	upstream.Answer = []dns.RR{
+		&dns.MX{Hdr: dns.RR_Header{Name: "mail.test.", Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: 300}, Preference: 10, Mx: "mx.mail.test."},
+	}
+	upstream.Extra = []dns.RR{
+		&dns.A{Hdr: dns.RR_Header{Name: "mx.mail.test.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("203.0.113.9").To4()},
+		&dns.AAAA{Hdr: aaaaHdr("mx.mail.test"), AAAA: net.ParseIP("2001:db8::2")},
+	}
+
+	fake := &fakeExchanger{reply: upstream}
+	h := newTestHandler(t, fake, fake)
+
+	req := new(dns.Msg)
+	req.SetQuestion("mail.test.", dns.TypeMX)
+	resp := h.resolve(context.Background(), dns.Question{Name: "mail.test.", Qtype: dns.TypeMX, Qclass: dns.ClassINET}, req)
+
+	if hasAAAA(resp.Extra) {
+		t.Fatalf("MX additional section still carries AAAA glue: %v", resp.Extra)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("Answer = %v, want the MX record preserved", resp.Answer)
+	}
+	var keptA bool
+	for _, rr := range resp.Extra {
+		if _, ok := rr.(*dns.A); ok {
+			keptA = true
+		}
+	}
+	if !keptA {
+		t.Fatalf("IPv4 glue must survive; Extra = %v", resp.Extra)
+	}
+}
+
+// The filtered reply is what gets cached, so a cache hit cannot resurrect the
+// AAAA the live path just removed.
+func TestForwardTrustCachesWithoutAAAA(t *testing.T) {
+	upstream := new(dns.Msg)
+	q0 := new(dns.Msg)
+	q0.SetQuestion("any2.test.", dns.TypeANY)
+	upstream.SetReply(q0)
+	upstream.Answer = []dns.RR{
+		&dns.AAAA{Hdr: aaaaHdr("any2.test"), AAAA: net.ParseIP("2001:db8::3")},
+		&dns.A{Hdr: dns.RR_Header{Name: "any2.test.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("203.0.113.9").To4()},
+	}
+
+	calls := 0
+	tracked := &countingExchanger{inner: &fakeExchanger{reply: upstream}, count: &calls}
+	h := newTestHandler(t, tracked, tracked)
+	q := dns.Question{Name: "any2.test.", Qtype: dns.TypeANY, Qclass: dns.ClassINET}
+
+	req := new(dns.Msg)
+	req.SetQuestion("any2.test.", dns.TypeANY)
+	_ = h.resolve(context.Background(), q, req)
+	afterFirst := calls
+
+	req2 := new(dns.Msg)
+	req2.SetQuestion("any2.test.", dns.TypeANY)
+	resp := h.resolve(context.Background(), q, req2)
+
+	if calls != afterFirst {
+		t.Fatalf("second query went upstream (calls %d -> %d); expected a cache hit", afterFirst, calls)
+	}
+	if hasAAAA(resp.Answer) {
+		t.Fatalf("cached reply served AAAA: %v", resp.Answer)
+	}
+}
+
+// A signature left covering an RRset we just edited makes a DO=1 validating
+// stub SERVFAIL, so a section that loses an AAAA loses its DNSSEC RRs too --
+// and a section we did not touch must keep them.
+func TestFilterAAAAStripsDNSSECOnlyFromEditedSections(t *testing.T) {
+	rrsig := func(name string, covers uint16) *dns.RRSIG {
+		return &dns.RRSIG{
+			Hdr:         dns.RR_Header{Name: dns.Fqdn(name), Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 300},
+			TypeCovered: covers,
+			SignerName:  dns.Fqdn(name),
+		}
+	}
+
+	m := new(dns.Msg)
+	q := new(dns.Msg)
+	q.SetQuestion("sig.test.", dns.TypeMX)
+	m.SetReply(q)
+	// Answer holds an AAAA -> it is edited, so its RRSIG must go.
+	m.Answer = []dns.RR{
+		&dns.AAAA{Hdr: aaaaHdr("sig.test"), AAAA: net.ParseIP("2001:db8::4")},
+		rrsig("sig.test", dns.TypeAAAA),
+	}
+	// Authority has no AAAA -> untouched, signature preserved.
+	m.Ns = []dns.RR{
+		&dns.SOA{Hdr: dns.RR_Header{Name: "sig.test.", Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 300}, Ns: "ns.sig.test.", Mbox: "hostmaster.sig.test."},
+		rrsig("sig.test", dns.TypeSOA),
+	}
+
+	out := filterAAAA(m)
+
+	if hasAAAA(out.Answer) {
+		t.Fatalf("Answer still has AAAA: %v", out.Answer)
+	}
+	for _, rr := range out.Answer {
+		if _, ok := rr.(*dns.RRSIG); ok {
+			t.Fatalf("edited Answer kept a dangling RRSIG: %v", out.Answer)
+		}
+	}
+	var keptSig bool
+	for _, rr := range out.Ns {
+		if _, ok := rr.(*dns.RRSIG); ok {
+			keptSig = true
+		}
+	}
+	if !keptSig {
+		t.Fatalf("untouched Authority section lost its RRSIG: %v", out.Ns)
+	}
+}
