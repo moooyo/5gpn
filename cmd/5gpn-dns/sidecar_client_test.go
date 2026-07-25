@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,6 +46,7 @@ func startRealSidecar(t *testing.T) (*SidecarClient, string) {
 	if err != nil {
 		t.Skipf("sidecar fixture unavailable: %v", err)
 	}
+	requireInterceptionBoundary(t)
 	if err := os.WriteFile(bootstrap, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -207,4 +209,41 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// requireInterceptionBoundary skips unless this machine can actually host the
+// sidecar.
+//
+// The sidecar refuses to start unless its TLS material is at exactly
+// /etc/5gpn/intercept/tls/. That is a deployment boundary, not an inconvenience:
+// it is what stops a compromised or misconfigured document pointing the
+// processor's identity somewhere else. So this test cannot relocate the
+// fixture, and must not be a reason to add an escape hatch to a real check.
+//
+// What it can do is say so plainly. Without this, an ordinary `go test` run
+// spent fifteen seconds per case waiting for a process that had already exited,
+// then reported a timeout — which reads like the control API is broken rather
+// than like the machine is not a gateway.
+func requireInterceptionBoundary(t *testing.T) {
+	t.Helper()
+	for _, path := range []string{
+		"/etc/5gpn/intercept/tls/fullchain.pem",
+		"/etc/5gpn/intercept/tls/privkey.pem",
+	} {
+		f, err := os.Open(path)
+		if err != nil {
+			t.Skipf("this end-to-end test runs on a gateway: %v", err)
+		}
+		_ = f.Close()
+	}
+	// The boundary fixes the SOCKS listener too, so a running sidecar and a
+	// test sidecar cannot coexist. Checking for the port is what turns
+	// "somebody left the service running" into a sentence rather than five
+	// fifteen-second timeouts.
+	l, err := net.Listen("tcp", "127.0.0.1:18080")
+	if err != nil {
+		t.Skipf("127.0.0.1:18080 is in use, so a second sidecar cannot start; "+
+			"stop 5gpn-intercept to run this: %v", err)
+	}
+	_ = l.Close()
 }
