@@ -399,7 +399,13 @@ Query-type behavior is intentionally IPv4-oriented:
 - AAAA returns synthetic NODATA with authority information.
 - HTTPS and SVCB return synthetic NODATA so address hints or ECH cannot bypass
   A-record steering and hostname sniffing.
-- Other types are forwarded through the trust group.
+- Other types are forwarded through the trust group, with AAAA, HTTPS, and SVCB
+  records removed from every section of the reply before it is cached or
+  returned. Refusing those two RRsets only when they are the question would
+  leave them reachable under another qtype: `ANY` returns both outright, and an
+  MX, NS, SRV, or PTR reply carries the target's AAAA as additional-section
+  glue. An address, or an ECH key, is just as effective at bypassing steering
+  when it arrives in the additional section of some other lookup.
 
 The AAAA rule is not client-only. The loopback origin resolver on
 `127.0.0.1:5354` answers AAAA with the same synthetic NODATA before consulting

@@ -852,8 +852,9 @@ func (h *Handler) resolve(ctx context.Context, q dns.Question, r *dns.Msg) *dns.
 //     gateway          ? synthetic A = GatewayIP for every name, no upstream consulted.
 //
 // For all other qtypes (MX/TXT/CNAME/NS/PTR/SOA/ANY/…) forward to Trust, with
-// AAAA records stripped from every section (see filterAAAA) so glue or an ANY
-// RRset cannot hand the client an address that bypasses A-record steering.
+// AAAA and HTTPS/SVCB records stripped from every section (see
+// filterSteeringBypassRRs) so glue or an ANY RRset cannot hand the client an
+// address, or an ECH key, that bypasses A-record steering.
 // Cache is consulted first for steps 4/6 and for the other-type forwarding path.
 func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg, ri *resolveInfo) *dns.Msg {
 	name := q.Name // already FQDN from the wire
@@ -978,7 +979,7 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 					return h.staleOrServerFail(flightReq, name, q.Qtype, flightInfo)
 				}
 				flightInfo.noteUpstream(src)
-				resolved = filterAAAA(resolved)
+				resolved = filterSteeringBypassRRs(resolved)
 				h.cachePutForRequest(flightReq, name, q.Qtype, resolved, flightScope.epoch, cacheMetadata{
 					Verdict: verdict.Verdict, Reason: verdict.Reason, Upstream: src,
 				})
@@ -1043,7 +1044,7 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 				return h.staleOrServerFail(flightReq, name, q.Qtype, flightInfo)
 			}
 			flightInfo.noteUpstream(src)
-			resolved = filterAAAA(resolved)
+			resolved = filterSteeringBypassRRs(resolved)
 			resolved = h.rewriteA(resolved, flightReq, cn)
 			resolvedVerdict := h.defaultVerdictOf(resolved)
 			flightInfo.noteVerdict(resolvedVerdict)
@@ -1069,7 +1070,7 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 // ?? helpers ??????????????????????????????????????????????????????????????????
 
 // forwardTrust sends q to the given trust exchanger and returns the reply with
-// AAAA records removed from every section. The result is cached.
+// AAAA and HTTPS/SVCB records removed from every section. The result is cached.
 func (h *Handler) forwardTrust(ctx context.Context, trust Exchanger, q dns.Question, r *dns.Msg, scope dnsFlightScope, ri *resolveInfo) *dns.Msg {
 	name, qtype := q.Name, q.Qtype
 	if ri != nil && ri.reason == "" {
@@ -1093,16 +1094,16 @@ func (h *Handler) forwardTrust(ctx context.Context, trust Exchanger, q dns.Quest
 			return h.staleOrServerFail(flightReq, name, qtype, flightInfo)
 		}
 		flightInfo.noteUpstream("trust")
-		// "Verbatim" stops at AAAA. This path carries every qtype the steps
-		// above do not special-case, and several of them hand back IPv6 the
-		// client never asked for: QTYPE=ANY returns the AAAA RRset in Answer,
-		// and MX/NS/SRV/PTR replies carry the target's AAAA as
-		// additional-section glue. A client that consumes either reaches the
-		// origin over IPv6 and bypasses the A-to-gateway rewrite entirely --
-		// which is the same steering hole the step-1 synthetic NODATA closes
-		// for a direct AAAA question. Filtering before the cache write keeps
-		// stale/served entries clean too.
-		resolved = filterAAAA(resolved)
+		// "Verbatim" stops at anything that defeats steering. This path carries
+		// every qtype the steps above do not special-case, and several of them
+		// hand back what those steps withhold: QTYPE=ANY returns the AAAA and
+		// HTTPS/SVCB RRsets outright, and MX/NS/SRV/PTR replies carry the
+		// target's AAAA as additional-section glue. A client that consumes any
+		// of them reaches the origin over IPv6, or hides its SNI behind ECH, and
+		// bypasses the A-to-gateway rewrite entirely -- the same holes steps 1
+		// and 2 close for a direct question. Filtering before the cache write
+		// keeps cached and served-stale entries clean too.
+		resolved = filterSteeringBypassRRs(resolved)
 		meta := cacheMetadata{Upstream: "trust", Verdict: flightInfo.verdict, Reason: flightInfo.reason}
 		h.cachePutForRequest(flightReq, name, qtype, resolved, scope.epoch, meta)
 		return resolved
@@ -1202,34 +1203,53 @@ func stripDNSSECRRs(rrs []dns.RR) []dns.RR {
 	return out
 }
 
-// filterAAAA returns a copy of m with every AAAA record removed from the
-// Answer, Authority, and Additional sections.
+// filterSteeringBypassRRs returns a copy of m with every record removed that
+// could hand a client a way around IPv4 A-record steering, from the Answer,
+// Authority, and Additional sections:
 //
-// All three sections matter, not just Answer. An MX, NS, or SRV reply routinely
-// carries the target's AAAA as additional-section glue, and QTYPE=ANY can return
-// the AAAA RRset outright -- addresses a client would learn without ever having
-// sent an AAAA query, which is exactly what the step-1 synthetic NODATA exists
-// to prevent. This box is IPv4-only, so no section may carry one.
+//   - AAAA: the origin's real IPv6 address.
+//   - HTTPS/SVCB: `ipv6hint`/`ipv4hint` carry the origin's real addresses
+//     directly, and `ech` encrypts the ClientHello SNI that mihomo must read in
+//     cleartext to recover the destination.
+//
+// Those are exactly the two things resolveTraced's step 1 and step 2 refuse to
+// answer when they are asked for directly. Filtering them here closes the same
+// hole for the qtypes those steps do not special-case: QTYPE=ANY returns both
+// RRsets outright, and MX/NS/SRV/PTR replies carry the target's AAAA as
+// additional-section glue. All three sections matter -- an address is just as
+// usable to a client from Additional as it is from Answer.
 //
 // When a section actually loses a record its DNSSEC RRs are stripped too, for
 // the same reason rewriteA does it: a signature left behind no longer matches
 // the data it covers, and a DO=1 validating stub SERVFAILs on it. A section
-// that contained no AAAA is returned untouched, signatures intact. OPT is not a
+// that lost nothing is returned untouched, signatures intact. OPT is not a
 // DNSSEC RR and always survives.
-func filterAAAA(m *dns.Msg) *dns.Msg {
+func filterSteeringBypassRRs(m *dns.Msg) *dns.Msg {
 	cp := m.Copy()
-	cp.Answer = dropAAAARRs(cp.Answer)
-	cp.Ns = dropAAAARRs(cp.Ns)
-	cp.Extra = dropAAAARRs(cp.Extra)
+	cp.Answer = dropSteeringBypassRRs(cp.Answer)
+	cp.Ns = dropSteeringBypassRRs(cp.Ns)
+	cp.Extra = dropSteeringBypassRRs(cp.Extra)
 	return cp
 }
 
-// dropAAAARRs removes AAAA records from one section, returning the input
-// unchanged (same slice, same signatures) when there was nothing to remove.
-func dropAAAARRs(rrs []dns.RR) []dns.RR {
+// isSteeringBypassRR reports whether rr is one of the record types above.
+// Deliberately narrow: APL, IPSECKEY, and HIP can also encode IPv6 addresses,
+// but none of them is used to establish an ordinary client connection, so
+// removing them would cost correctness without closing a steering hole.
+func isSteeringBypassRR(rr dns.RR) bool {
+	switch rr.(type) {
+	case *dns.AAAA, *dns.HTTPS, *dns.SVCB:
+		return true
+	}
+	return false
+}
+
+// dropSteeringBypassRRs filters one section, returning the input unchanged
+// (same slice, signatures intact) when there was nothing to remove.
+func dropSteeringBypassRRs(rrs []dns.RR) []dns.RR {
 	removed := false
 	for _, rr := range rrs {
-		if _, isAAAA := rr.(*dns.AAAA); isAAAA {
+		if isSteeringBypassRR(rr) {
 			removed = true
 			break
 		}
@@ -1239,7 +1259,7 @@ func dropAAAARRs(rrs []dns.RR) []dns.RR {
 	}
 	kept := make([]dns.RR, 0, len(rrs))
 	for _, rr := range rrs {
-		if _, isAAAA := rr.(*dns.AAAA); !isAAAA {
+		if !isSteeringBypassRR(rr) {
 			kept = append(kept, rr)
 		}
 	}

@@ -1283,7 +1283,7 @@ func TestFilterAAAAStripsDNSSECOnlyFromEditedSections(t *testing.T) {
 		rrsig("sig.test", dns.TypeSOA),
 	}
 
-	out := filterAAAA(m)
+	out := filterSteeringBypassRRs(m)
 
 	if hasAAAA(out.Answer) {
 		t.Fatalf("Answer still has AAAA: %v", out.Answer)
@@ -1301,5 +1301,87 @@ func TestFilterAAAAStripsDNSSECOnlyFromEditedSections(t *testing.T) {
 	}
 	if !keptSig {
 		t.Fatalf("untouched Authority section lost its RRSIG: %v", out.Ns)
+	}
+}
+
+// A QTYPE=ANY reply carries the HTTPS RRset too, and that RRset is a second way
+// to defeat steering: `ipv6hint` hands over the origin's real IPv6 addresses,
+// and `ech` encrypts the ClientHello SNI that mihomo has to read in cleartext to
+// recover the destination. Step 2 of resolveTraced refuses a direct HTTPS/SVCB
+// question for exactly those reasons; forwarding the same RRset under a
+// different qtype would reopen the hole.
+func TestForwardTrustStripsHTTPSAndSVCB(t *testing.T) {
+	upstream := new(dns.Msg)
+	q0 := new(dns.Msg)
+	q0.SetQuestion("svc.test.", dns.TypeANY)
+	upstream.SetReply(q0)
+	https := &dns.HTTPS{SVCB: dns.SVCB{
+		Hdr:      dns.RR_Header{Name: "svc.test.", Rrtype: dns.TypeHTTPS, Class: dns.ClassINET, Ttl: 300},
+		Priority: 1,
+		Target:   "svc.test.",
+		Value: []dns.SVCBKeyValue{
+			&dns.SVCBIPv6Hint{Hint: []net.IP{net.ParseIP("2001:db8::7")}},
+			&dns.SVCBECHConfig{ECH: []byte{0x01, 0x02}},
+		},
+	}}
+	svcb := &dns.SVCB{
+		Hdr:      dns.RR_Header{Name: "svc.test.", Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 300},
+		Priority: 1,
+		Target:   "svc.test.",
+		Value:    []dns.SVCBKeyValue{&dns.SVCBIPv6Hint{Hint: []net.IP{net.ParseIP("2001:db8::8")}}},
+	}
+	upstream.Answer = []dns.RR{
+		https,
+		svcb,
+		&dns.A{Hdr: dns.RR_Header{Name: "svc.test.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("203.0.113.9").To4()},
+	}
+
+	fake := &fakeExchanger{reply: upstream}
+	h := newTestHandler(t, fake, fake)
+
+	req := new(dns.Msg)
+	req.SetQuestion("svc.test.", dns.TypeANY)
+	resp := h.resolve(context.Background(), dns.Question{Name: "svc.test.", Qtype: dns.TypeANY, Qclass: dns.ClassINET}, req)
+
+	for _, rr := range resp.Answer {
+		switch rr.(type) {
+		case *dns.HTTPS, *dns.SVCB:
+			t.Fatalf("ANY reply still carries an address-hint/ECH RRset: %s", rr)
+		}
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("Answer = %v, want only the A record", resp.Answer)
+	}
+}
+
+// The additional section is not a loophole either.
+func TestForwardTrustStripsHTTPSFromExtra(t *testing.T) {
+	upstream := new(dns.Msg)
+	q0 := new(dns.Msg)
+	q0.SetQuestion("glue.test.", dns.TypeMX)
+	upstream.SetReply(q0)
+	upstream.Answer = []dns.RR{
+		&dns.MX{Hdr: dns.RR_Header{Name: "glue.test.", Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: 300}, Preference: 10, Mx: "mx.glue.test."},
+	}
+	upstream.Extra = []dns.RR{
+		&dns.HTTPS{SVCB: dns.SVCB{
+			Hdr:      dns.RR_Header{Name: "mx.glue.test.", Rrtype: dns.TypeHTTPS, Class: dns.ClassINET, Ttl: 300},
+			Priority: 1, Target: "mx.glue.test.",
+			Value: []dns.SVCBKeyValue{&dns.SVCBIPv6Hint{Hint: []net.IP{net.ParseIP("2001:db8::9")}}},
+		}},
+	}
+
+	fake := &fakeExchanger{reply: upstream}
+	h := newTestHandler(t, fake, fake)
+
+	req := new(dns.Msg)
+	req.SetQuestion("glue.test.", dns.TypeMX)
+	resp := h.resolve(context.Background(), dns.Question{Name: "glue.test.", Qtype: dns.TypeMX, Qclass: dns.ClassINET}, req)
+
+	for _, rr := range resp.Extra {
+		switch rr.(type) {
+		case *dns.HTTPS, *dns.SVCB:
+			t.Fatalf("MX additional section still carries an HTTPS/SVCB RR: %s", rr)
+		}
 	}
 }
