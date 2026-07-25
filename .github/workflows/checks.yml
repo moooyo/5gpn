@@ -118,14 +118,19 @@ jobs:
   mihomo-config:
     runs-on: ubuntu-latest
     env:
-      MIHOMO_VERSION: v1.19.28
-      MIHOMO_SHA256: 70d01cfb8cb7bf7a92fd1af16cb4b9553d90bb4eecde3b5c4849103e27c80ddb
+      # The core the installer actually ships. Validating against a different
+      # one checks a configuration nobody will run — and until this was pinned
+      # here too, CI exercised only the unanchored fallback while the installer
+      # seeded the anchored form.
+      MIHOMO_REPO: moooyo/mihomo
+      MIHOMO_VERSION: v1.19.28-overlay.1
+      MIHOMO_SHA256: 816eca7e6f932a2aee07a8113ce762fbc3b258b5c5c8091b7fdfb617895873b0
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Download pinned mihomo
         run: |
           set -euo pipefail
-          url="https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz"
+          url="https://github.com/${MIHOMO_REPO}/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz"
           curl -fsSL "$url" -o /tmp/mihomo.gz
           echo "${MIHOMO_SHA256}  /tmp/mihomo.gz" | sha256sum -c -
           gunzip /tmp/mihomo.gz
@@ -194,5 +199,11 @@ jobs:
           ! grep -Fq '5060' "$runtime/config-speedtest-5060-disabled.yaml"
           /tmp/mihomo -t -f "$runtime/config-speedtest-5060-disabled.yaml" -d "$runtime"
           bash tests/mihomo-compact-suffix-regression.sh /tmp/mihomo
+      - name: Validate the anchored seed the installer actually produces
+        run: |
+          set -euo pipefail
+          # Both renders, on a machine with neither the service accounts nor the
+          # socket groups — which is what a fresh install is.
+          bash test/overlay/verify-seed-render.sh /tmp/mihomo
       - name: Exercise sniff-cache isolation
         run: bash tests/mihomo-sniff-cache-regression.sh /tmp/mihomo
