@@ -277,3 +277,47 @@ func TestEgressDNSBroker_LogsNoQueryData(t *testing.T) {
 		t.Fatal("broker log leaked a query name")
 	}
 }
+
+// Gating the AAAA question alone leaves a hole: mihomo's msgToIP walks the
+// Answer section collecting every A and AAAA it finds, irrespective of the
+// qtype that was asked. An upstream that puts an AAAA in the reply to an A
+// query therefore hands mihomo an IPv6 dial candidate through the front door.
+// Observed live: mihomo's own /dns/query returned type 28 for an A lookup
+// until the broker filtered its forwarded replies.
+func TestEgressDNSBroker_StripsAAAAFromForwardedReplies(t *testing.T) {
+	upstream := new(dns.Msg)
+	q := new(dns.Msg)
+	q.SetQuestion("mixed.example.", dns.TypeA)
+	upstream.SetReply(q)
+	upstream.Answer = []dns.RR{
+		&dns.A{Hdr: dns.RR_Header{Name: "mixed.example.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("203.0.113.9").To4()},
+		&dns.AAAA{Hdr: dns.RR_Header{Name: "mixed.example.", Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 300}, AAAA: net.ParseIP("2001:db8::dead")},
+		&dns.HTTPS{SVCB: dns.SVCB{
+			Hdr:      dns.RR_Header{Name: "mixed.example.", Rrtype: dns.TypeHTTPS, Class: dns.ClassINET, Ttl: 300},
+			Priority: 1, Target: "mixed.example.",
+			Value: []dns.SVCBKeyValue{&dns.SVCBIPv6Hint{Hint: []net.IP{net.ParseIP("2001:db8::beef")}}},
+		}},
+	}
+	upstream.Extra = []dns.RR{
+		&dns.AAAA{Hdr: dns.RR_Header{Name: "glue.example.", Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 300}, AAAA: net.ParseIP("2001:db8::cafe")},
+	}
+
+	b := NewEgressDNSBroker("127.0.0.1:0", &brokerFakeExchanger{resp: upstream})
+	w := &captureDNSWriter{}
+	b.ServeDNS(w, q)
+
+	if w.msg == nil {
+		t.Fatal("broker wrote no reply")
+	}
+	for _, section := range [][]dns.RR{w.msg.Answer, w.msg.Ns, w.msg.Extra} {
+		for _, rr := range section {
+			switch rr.(type) {
+			case *dns.AAAA, *dns.HTTPS, *dns.SVCB:
+				t.Fatalf("forwarded reply still carries %T: %s", rr, rr)
+			}
+		}
+	}
+	if len(w.msg.Answer) != 1 {
+		t.Fatalf("Answer = %v, want the A record preserved", w.msg.Answer)
+	}
+}

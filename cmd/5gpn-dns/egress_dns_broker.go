@@ -182,6 +182,15 @@ func (b *EgressDNSBroker) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		b.servfail(w, r)
 		return
 	}
+	// Gating the AAAA QUESTION is not enough on its own. mihomo's msgToIP
+	// iterates the Answer section and collects every *dns.A AND *dns.AAAA it
+	// finds, without checking what was asked -- so an AAAA record riding inside
+	// the reply to an A query becomes a dial candidate just the same. A
+	// well-behaved resolver does not do that, but this broker is the boundary
+	// that has to hold when one misbehaves, and "the upstream is well-behaved"
+	// is not something an IPv4-only guarantee can rest on. Strip the same RR
+	// set the client path strips, for the same reason.
+	resp = filterSteeringBypassRRs(resp)
 	resp.Id = r.Id
 	resp.Response = true
 	resp.RecursionAvailable = true
