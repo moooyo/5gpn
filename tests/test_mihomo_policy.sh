@@ -8,7 +8,14 @@ nocheck() { if grep -qE "$2" "$root/$1"; then echo "FAIL: $3 ($1 =~ $2)"; FAIL=1
 
 # Task 1: mihomo binary install
 check install.sh 'install_mihomo\(\)' 'install_mihomo function exists'
-check install.sh 'MetaCubeX/mihomo/releases' 'downloads mihomo from MetaCubeX'
+# The data plane no longer comes from upstream: upstream does not implement the
+# RUNTIME-OVERLAY anchors, so an upstream core makes the overlay a mechanism that
+# can never switch on. What has to stay true is that the source is pinned and
+# auditable — a named repository, an exact version, and a digest — rather than
+# assembled from anything an operator or an environment can influence.
+check install.sh '^MIHOMO_REPO="[A-Za-z0-9._-]+/[A-Za-z0-9._-]+"$' 'mihomo source repository is a pinned literal'
+check install.sh 'github.com/\$\{MIHOMO_REPO\}/releases/download' 'downloads mihomo from the pinned repository'
+check install.sh '^MIHOMO_SHA256="[0-9a-f]{64}"$' 'mihomo artifact is pinned by digest'
 check install.sh 'mihomo-linux-amd64-compatible' 'uses amd64-compatible asset'
 check install.sh 'MIHOMO_VERSION' 'mihomo version pin knob'
 nocheck install.sh 'install_xray\(\)' 'install_xray removed'
