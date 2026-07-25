@@ -144,8 +144,13 @@ IOS_OWNERSHIP_MARKER=".5gpn-ios-owned"
 IOS_OWNERSHIP_VALUE="5gpn-ios-v1"
 TEMP_OWNERSHIP_MARKER=".5gpn-temp-owned"
 TEMP_OWNERSHIP_VALUE="5gpn-temp-v1"
-MIHOMO_VERSION="v1.19.28"
-MIHOMO_SHA256="70d01cfb8cb7bf7a92fd1af16cb4b9553d90bb4eecde3b5c4849103e27c80ddb"
+# Upstream v1.19.28 plus the runtime overlay, built from moooyo/mihomo's
+# 5gpn-ext branch. Upstream does not implement the RUNTIME-OVERLAY anchors,
+# so against an upstream core the installer's probe fails and it seeds the
+# rendered config instead: the mechanism ships but never switches on.
+MIHOMO_REPO="moooyo/mihomo"
+MIHOMO_VERSION="v1.19.28-overlay.1"
+MIHOMO_SHA256="816eca7e6f932a2aee07a8113ce762fbc3b258b5c5c8091b7fdfb617895873b0"
 ZASH_VERSION="v3.15.0"                   # Zephyruso/zashboard prebuilt dist.zip
 ZASH_SHA256="adba7b03f3bec792a354e65469fb8ac5513e48e0f646650f78aa313bcf5b18e9"
 DNS_CHINA_DEFAULT="223.5.5.5"
@@ -2624,7 +2629,7 @@ stage_artifacts() {
     release_tag_file_matches "$ARTIFACT_STAGE/web/.web_version" "$ver" \
         || { err "Staged web archive version does not match pinned release ${ver}."; return 1; }
 
-    curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz" \
+    curl -fsSL "https://github.com/${MIHOMO_REPO}/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz" \
         -o "$ARTIFACT_STAGE/mihomo.gz" || { err "Could not download mihomo ${MIHOMO_VERSION}."; return 1; }
     verify_sha256 "$ARTIFACT_STAGE/mihomo.gz" "$MIHOMO_SHA256" || return 1
     gzip -dc "$ARTIFACT_STAGE/mihomo.gz" > "$ARTIFACT_STAGE/mihomo"
