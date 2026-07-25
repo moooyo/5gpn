@@ -7152,7 +7152,14 @@ mihomo_config_matches_install_config() {
     local config="$MIHOMO_DIR/config.yaml" ip
     [[ -f "$config" ]] || return 0
     grep -Fq -- "$CONSOLE_DOMAIN" "$config" || return 1
-    grep -Eq "^[[:space:]]*-[[:space:]]*DOMAIN,[[:space:]]*${CONSOLE_DOMAIN//./\\.},[[:space:]]*DIRECT[[:space:]]*$" "$config" || return 1
+    # The console must route DIRECT. Both spellings say that: the plain rule,
+    # and the form that additionally excludes processor-originated traffic —
+    # without that exclusion a compromised sidecar dialling the console
+    # reaches the gateway's own management plane, and the core refuses the
+    # unqualified form outright once the overlay anchors are present. The seed
+    # ships the qualified one, so accepting only the plain rule made this
+    # check reject the config the installer itself had just written.
+    grep -Eq "^[[:space:]]*-[[:space:]]*DOMAIN,[[:space:]]*${CONSOLE_DOMAIN//./\\.},[[:space:]]*DIRECT[[:space:]]*$|^[[:space:]]*-[[:space:]]*AND,\\(\\(NOT,\\(\\(IN-NAME,intercept-egress\\)\\)\\),\\(DOMAIN,${CONSOLE_DOMAIN//./\\.}\\)\\),[[:space:]]*DIRECT[[:space:]]*$" "$config" || return 1
     ! grep -Eq "DOMAIN,[[:space:]]*${CONSOLE_DOMAIN//./\\.},[[:space:]]*REJECT(-DROP)?" "$config" || return 1
     ! grep -Eq "AND,.*DOMAIN,[[:space:]]*${CONSOLE_DOMAIN//./\\.}.*RULE-SET,[[:space:]]*whitelist" "$config" || return 1
     ! grep -Fq -- "profile.${BASE_DOMAIN}" "$config" || return 1

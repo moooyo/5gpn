@@ -311,7 +311,7 @@ func LoadConfig() (Config, error) {
 		InterceptConfigFile:    envOr("DNS_INTERCEPT_CONFIG", "/etc/5gpn/intercept/config.json"),
 		InterceptControlSocket: envOr("DNS_INTERCEPT_CONTROL_SOCKET", "/run/5gpn-intercept/control.sock"),
 		OverlayControlSocket:   envOr("DNS_OVERLAY_CONTROL_SOCKET", "/run/mihomo/overlay-control.sock"),
-		OverlayJournalFile:     envOr("DNS_OVERLAY_JOURNAL", "/var/lib/5gpn/overlay-journal.json"),
+		OverlayJournalFile:     envOr("DNS_OVERLAY_JOURNAL", "/var/lib/5gpn-dns/overlay-journal.json"),
 		MarketplacesFile:       envOr("DNS_MARKETPLACES_FILE", "/etc/5gpn/extension-marketplaces.json"),
 		PolicyRulesFile:        envListen("DNS_POLICY_RULES", "/etc/5gpn/policy.json"),
 		ZashDir:                envOr("DNS_ZASH_DIR", "/opt/5gpn/zash"),
