@@ -996,18 +996,28 @@ if (
     CREATED_SERVICE_ACCOUNT_USER_FLAGS=(1)
     CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=(1)
     service_account_is_safe() { return 0; }
+    # id -G reports the primary gid AND the overlay socket group, because
+    # install_service_accounts adds every account it creates to those groups
+    # moments after creating them. Stubbing a lone primary gid described a state
+    # the installer never produces, and that is why this test passed while
+    # rollback refused to remove any account on a real host.
     id() {
         case "$1" in
             -u) printf '998\n' ;;
             -g) printf '999\n' ;;
-            -G) printf '999\n' ;;
+            -G) printf '999 983\n' ;;
             *) return 1 ;;
         esac
     }
     userdel() { printf 'userdel:%s\n' "$1" >> "$calls"; user_exists=0; }
     getent() {
         case "${1:-}" in
-            group) [[ "$group_exists" == 1 ]] && printf 'gpn-intercept:x:999:\n' ;;
+            group)
+                case "${2:-}" in
+                    5gpn-overlay-ctl) printf '5gpn-overlay-ctl:x:984:\n'; return 0 ;;
+                    5gpn-overlay-gen) printf '5gpn-overlay-gen:x:983:\n'; return 0 ;;
+                esac
+                [[ "$group_exists" == 1 ]] && printf 'gpn-intercept:x:999:\n' ;;
             passwd)
                 if [[ "$#" == 2 ]]; then
                     [[ "$user_exists" == 1 ]] \
@@ -1069,12 +1079,19 @@ if (
     id() {
         case "$1" in
             -u) printf '998\n' ;;
-            -g|-G) printf '997\n' ;;
+            -g) printf '997\n' ;;
+            -G) printf '997 983\n' ;;
             *) return 1 ;;
         esac
     }
     getent() {
         case "${1:-}" in
+            group)
+                case "${2:-}" in
+                    5gpn-overlay-ctl) printf '5gpn-overlay-ctl:x:984:\n'; return 0 ;;
+                    5gpn-overlay-gen) printf '5gpn-overlay-gen:x:983:\n'; return 0 ;;
+                esac
+                return 1 ;;
             passwd) printf 'gpn-intercept:x:998:997::/nonexistent:/usr/sbin/nologin\n' ;;
             *) return 1 ;;
         esac
