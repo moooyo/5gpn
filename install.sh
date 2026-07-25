@@ -124,6 +124,12 @@ OVERLAY_OWNER="5gpn"
 MIHOMO_SEED_OVERLAY=0
 OVERLAY_CONTROL_SOCKET="/run/mihomo/overlay-control.sock"
 OVERLAY_GENERATION_SOCKET="/run/mihomo/overlay-generation.sock"
+# One group per socket, owning nothing else. mihomo joins both so it can hand
+# each socket to the right one; the admitted peer joins exactly one. Reusing the
+# peers' own primary groups would have required mihomo to join those instead,
+# widening what the core can read for no benefit.
+OVERLAY_CONTROL_GROUP="5gpn-overlay-ctl"
+OVERLAY_GENERATION_GROUP="5gpn-overlay-gen"
 INTERCEPT_STATE_MARKER=".5gpn-intercept-state-owned"
 INTERCEPT_STATE_MARKER_VALUE="5gpn-intercept-state-v1"
 DNS_SERVICE_USER="gpn-dns"
@@ -1746,6 +1752,10 @@ render_overlay_runtime_block() {
     intercept_gid="$(id -g "$INTERCEPT_SERVICE_USER" 2>/dev/null)" || return 1
     [[ "$dns_uid" =~ ^[0-9]+$ && "$dns_gid" =~ ^[0-9]+$ ]] || return 1
     [[ "$intercept_uid" =~ ^[0-9]+$ && "$intercept_gid" =~ ^[0-9]+$ ]] || return 1
+    local control_gid generation_gid
+    control_gid="$(getent group "$OVERLAY_CONTROL_GROUP" | cut -d: -f3)" || return 1
+    generation_gid="$(getent group "$OVERLAY_GENERATION_GROUP" | cut -d: -f3)" || return 1
+    [[ "$control_gid" =~ ^[0-9]+$ && "$generation_gid" =~ ^[0-9]+$ ]] || return 1
     cat <<EOF_OVERLAY
 
 runtime-overlay:
@@ -1755,10 +1765,31 @@ runtime-overlay:
   # Only the coordinator may commit a generation.
   control-peer-uid: ${dns_uid}
   control-peer-gid: ${dns_gid}
+  control-socket-gid: ${control_gid}
   # Only the processor may read the generation it is serving.
   generation-peer-uid: ${intercept_uid}
   generation-peer-gid: ${intercept_gid}
+  generation-socket-gid: ${generation_gid}
 EOF_OVERLAY
+}
+
+# Creates the two socket groups and puts the right accounts in each.
+#
+# Membership is the whole mechanism: mihomo needs both so it can hand each
+# socket to its group, and each peer needs exactly the one for the socket it is
+# entitled to open. Neither group owns anything else, so this grants no reach
+# beyond the sockets themselves.
+ensure_overlay_socket_groups() {
+    local group member
+    for group in "$OVERLAY_CONTROL_GROUP" "$OVERLAY_GENERATION_GROUP"; do
+        getent group "$group" >/dev/null 2>&1             || groupadd --system "$group"             || { err "Could not create the overlay socket group $group"; return 1; }
+    done
+    for member in "$MIHOMO_SERVICE_USER" "$DNS_SERVICE_USER"; do
+        usermod -aG "$OVERLAY_CONTROL_GROUP" "$member"             || { err "Could not add $member to $OVERLAY_CONTROL_GROUP"; return 1; }
+    done
+    for member in "$MIHOMO_SERVICE_USER" "$INTERCEPT_SERVICE_USER"; do
+        usermod -aG "$OVERLAY_GENERATION_GROUP" "$member"             || { err "Could not add $member to $OVERLAY_GENERATION_GROUP"; return 1; }
+    done
 }
 
 # Expands one overlay placeholder line, or drops it when the overlay is off.
@@ -2148,6 +2179,8 @@ install_service_accounts() {
     install_service_account "$DNS_SERVICE_USER" "$DNS_SERVICE_USER" || return 1
     install_service_account "$MIHOMO_SERVICE_USER" "$MIHOMO_SERVICE_USER" || return 1
     install_service_account "$INTERCEPT_SERVICE_USER" "$INTERCEPT_SERVICE_USER" || return 1
+    command -v usermod >/dev/null 2>&1         || { err "usermod is required to grant overlay socket group membership."; return 1; }
+    ensure_overlay_socket_groups || return 1
     ok "Dedicated service accounts are ready: ${DNS_SERVICE_USER}, ${MIHOMO_SERVICE_USER}, ${INTERCEPT_SERVICE_USER}."
 }
 

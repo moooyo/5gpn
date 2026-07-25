@@ -26,6 +26,11 @@ import (
 const (
 	overlayClientAnchorRule = "RUNTIME-OVERLAY," + overlayOwner + ",client"
 	overlayEgressAnchorRule = "RUNTIME-OVERLAY," + overlayOwner + ",egress"
+	// overlayProcessorProxyKey marks an outbound as the overlay's processor.
+	// The core will not stage a generation whose capture rules name an outbound
+	// that has not declared this, so an overlay cannot be made to hand traffic
+	// to an arbitrary proxy by naming it.
+	overlayProcessorProxyKey = "runtime-overlay-processor"
 )
 
 // analyzeOverlayAnchoredDocument checks an anchored config and extracts what
@@ -49,7 +54,7 @@ func analyzeOverlayAnchoredDocument(text string) interceptRoutingAnalysis {
 		analysis.Reason = "interception-listener-missing"
 		return analysis
 	}
-	if !hasExactModuleProxy(mappingNodeValue(root, "proxies")) {
+	if !hasExactModuleProxyOverlay(mappingNodeValue(root, "proxies")) {
 		analysis.Reason = "interception-proxy-missing"
 		return analysis
 	}

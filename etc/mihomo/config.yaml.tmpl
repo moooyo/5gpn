@@ -59,6 +59,12 @@ proxies:
     username: __INTERCEPT_INBOUND_USERNAME__
     password: __INTERCEPT_INBOUND_PASSWORD__
     udp: true
+    # Names this outbound as the runtime overlay's processor. A generation's
+    # capture rules steer at a processor target, and the core refuses to stage
+    # one that names an outbound not declared here — so an overlay cannot be
+    # made to hand traffic to an arbitrary proxy by naming it. Harmless on a
+    # core without the overlay, which ignores the key.
+    runtime-overlay-processor: true
 proxy-providers: {}
 
 proxy-groups:
