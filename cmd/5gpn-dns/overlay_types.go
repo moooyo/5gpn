@@ -73,13 +73,28 @@ type overlayClientRule struct {
 	Owner       string              `json:"owner,omitempty"`
 }
 
+type overlayDestinationRule struct {
+	Kind  overlaySelectorKind `json:"kind"`
+	Value string              `json:"value"`
+	Ports []overlayPortRange  `json:"ports,omitempty"`
+}
+
 type overlayEgressCapability struct {
-	ID              string `json:"id"`
-	Group           string `json:"group"`
-	AllowDirect     bool   `json:"allowDirect"`
-	PublicOnly      bool   `json:"publicOnly"`
-	ResolverProfile string `json:"resolverProfile,omitempty"`
-	Owner           string `json:"owner,omitempty"`
+	// ID must be exactly the credential the processor authenticates with on the
+	// egress listener. A capability the processor cannot present authorizes
+	// nothing, and the failure is silent: every egress dial simply rejects.
+	ID string `json:"id"`
+	// Listener is the inbound this capability is valid on.
+	Listener string `json:"listener"`
+	// Destinations is the endpoint allowlist. It mirrors the per-destination,
+	// per-port egress rules the legacy renderer emitted; without it the
+	// capability would authorize the operator's egress group for anything.
+	Destinations    []overlayDestinationRule `json:"destinations"`
+	Group           string                   `json:"group"`
+	AllowDirect     bool                     `json:"allowDirect"`
+	PublicOnly      bool                     `json:"publicOnly"`
+	ResolverProfile string                   `json:"resolverProfile,omitempty"`
+	Owner           string                   `json:"owner,omitempty"`
 }
 
 type overlayProcessorTarget struct {

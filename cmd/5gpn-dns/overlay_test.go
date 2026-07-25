@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -80,29 +82,78 @@ func TestOverlayCompilePutsPolicyBeforeCapture(t *testing.T) {
 	}
 }
 
-// One capability per distinct egress group, not per module: the capability is
-// the authority to leave through a group, and two modules bound to the same
-// group ask for the same authority.
-func TestOverlayCompileMintsOneCapabilityPerGroup(t *testing.T) {
+// The capability id must be exactly the credential the processor authenticates
+// with. Anything else authorizes nothing, and the failure is silent: every
+// egress dial simply rejects, which looks like a network problem rather than a
+// configuration one.
+func TestOverlayCapabilityIsThePresentedCredential(t *testing.T) {
 	src := overlayTestDocument()
-	// alpha -> Proxies (explicit), beta -> Proxies (via the terminal target).
 	doc := compileForTest(t, src, overlayTransitionRevoke)
+
 	if len(doc.Egress.Capabilities) != 1 {
-		t.Fatalf("got %d capabilities, want 1: %+v", len(doc.Egress.Capabilities), doc.Egress.Capabilities)
+		t.Fatalf("got %d capabilities, want exactly 1: the egress listener carries one credential", len(doc.Egress.Capabilities))
+	}
+	cap := doc.Egress.Capabilities[0]
+	if cap.ID != src.UpstreamProxy.Username {
+		t.Fatalf("capability id = %q, want the processor's credential %q", cap.ID, src.UpstreamProxy.Username)
+	}
+	if cap.Listener != interceptEgressListenerName {
+		t.Fatalf("capability listener = %q, want %q", cap.Listener, interceptEgressListenerName)
+	}
+	if len(cap.Destinations) == 0 {
+		t.Fatal("the capability carries no destination allowlist; it would authorize any endpoint")
+	}
+}
+
+// One credential can select one group. Enabled extensions bound to different
+// groups are not representable, and picking one silently would route an
+// extension through a group its operator did not choose.
+func TestOverlayRefusesMultipleEgressGroups(t *testing.T) {
+	src := overlayTestDocument()
+	src.Modules[1].EgressGroup = "SecondGroup"
+
+	_, err := compileOverlayGeneration(overlayCompileInput{
+		Document: src, MatchTarget: "Proxies", DocumentRevision: "rev-1",
+		Transition: overlayTransitionRevoke,
+	})
+	if err == nil {
+		t.Fatal("two distinct egress groups compiled; one credential cannot select between them")
+	}
+	if !strings.Contains(err.Error(), "distinct egress groups") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// The allowlist must cover exactly what the legacy renderer emitted egress
+// rules for. A destination it omits was reachable before and would now be
+// denied; one it adds was denied before and would now be reachable.
+func TestOverlayDestinationAllowlistMirrorsTheLegacyEgressRules(t *testing.T) {
+	src := overlayTestDocument()
+	doc := compileForTest(t, src, overlayTransitionRevoke)
+
+	want := map[string]struct{}{}
+	for _, module := range orderedEnabledInterceptModules(src) {
+		for _, sel := range interceptModuleEgressSelectors(module) {
+			kind, ok := overlayKindFor(sel.Kind)
+			if !ok {
+				continue
+			}
+			want[string(kind)+"|"+sel.Value+"|"+strconv.Itoa(sel.Port)] = struct{}{}
+		}
+	}
+	got := map[string]struct{}{}
+	for _, d := range doc.Egress.Capabilities[0].Destinations {
+		got[string(d.Kind)+"|"+d.Value+"|"+strconv.Itoa(int(d.Ports[0].From))] = struct{}{}
 	}
 
-	src.Modules[1].EgressGroup = "SecondGroup"
-	doc = compileForTest(t, src, overlayTransitionRevoke)
-	if len(doc.Egress.Capabilities) != 2 {
-		t.Fatalf("got %d capabilities, want 2: %+v", len(doc.Egress.Capabilities), doc.Egress.Capabilities)
-	}
-	for _, c := range doc.Egress.Capabilities {
-		if c.ID == "" || c.Group == "" {
-			t.Fatalf("capability is incomplete: %+v", c)
+	for k := range want {
+		if _, ok := got[k]; !ok {
+			t.Errorf("the allowlist omits %s, which the legacy path permitted", k)
 		}
-		// A group the operator explicitly bound must not silently become DIRECT.
-		if c.Group == "SecondGroup" && c.AllowDirect {
-			t.Fatal("an explicitly bound group was allowed to resolve to DIRECT")
+	}
+	for k := range got {
+		if _, ok := want[k]; !ok {
+			t.Errorf("the allowlist adds %s, which the legacy path denied", k)
 		}
 	}
 }

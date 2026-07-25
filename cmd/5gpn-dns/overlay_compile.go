@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -31,6 +32,11 @@ func overlayCapabilityFor(baseUser, group string) string {
 	sum := sha256.Sum256([]byte(baseUser + "\x00" + group))
 	return "cap-" + hex.EncodeToString(sum[:8])
 }
+
+// interceptEgressListenerName is the inbound the processor's upstream traffic
+// arrives on. It is fixed by the mihomo boundary check, which validates that
+// exactly one listener with this name exists and carries exactly one user.
+const interceptEgressListenerName = "intercept-egress"
 
 // overlayGenerationID derives a deterministic generation id from the desired
 // state's own digest.
@@ -96,37 +102,87 @@ func compileOverlayGeneration(in overlayCompileInput) (overlayDocument, error) {
 	}
 
 	ordered := orderedEnabledInterceptModules(in.Document)
-	baseUser := in.Document.UpstreamProxy.Username
 
-	// --- egress capabilities -------------------------------------------------
-	// Collect the distinct groups the enabled extensions bind to. An unbound
-	// extension resolves to the operator's terminal target.
-	groups := make(map[string]struct{}, len(ordered)+1)
+	// --- egress capability ---------------------------------------------------
+	// The capability id must be the credential the processor actually presents.
+	// The egress listener is validated to carry exactly one user, so there is
+	// exactly one credential and therefore exactly one capability.
+	credential := in.Document.UpstreamProxy.Username
+	if credential == "" {
+		return doc, fmt.Errorf("overlay: the interception document carries no upstream credential to mint a capability from")
+	}
+
+	// Which group does that single capability resolve to? Every enabled module
+	// bound to an explicit group must agree, because one credential cannot
+	// select among several. Refusing here is the honest answer: silently
+	// picking one would route an extension's traffic through a group its
+	// operator did not choose.
+	groups := make(map[string][]string)
 	for _, module := range ordered {
 		target := module.EgressGroup
 		if target == "" {
 			target = in.MatchTarget
 		}
-		groups[target] = struct{}{}
+		groups[target] = append(groups[target], module.ID)
 	}
-	groupNames := make([]string, 0, len(groups))
+	if len(groups) > 1 {
+		names := make([]string, 0, len(groups))
+		for g := range groups {
+			names = append(names, g)
+		}
+		sort.Strings(names)
+		return doc, fmt.Errorf("overlay: enabled extensions bind %d distinct egress groups (%s), "+
+			"but the processor listener carries one credential and so can present one capability; "+
+			"bind them to a single group or keep the legacy driver", len(groups), strings.Join(names, ", "))
+	}
+	group := in.MatchTarget
 	for g := range groups {
-		groupNames = append(groupNames, g)
+		group = g
 	}
-	sort.Strings(groupNames)
 
-	capabilities := make([]overlayEgressCapability, 0, len(groupNames))
-	for _, group := range groupNames {
-		capabilities = append(capabilities, overlayEgressCapability{
-			ID:    overlayCapabilityFor(baseUser, group),
-			Group: group,
-			// The operator's terminal target may legitimately resolve to
-			// DIRECT; a group the operator explicitly bound may not silently
-			// become one.
-			AllowDirect: group == in.MatchTarget,
-		})
+	// The destination allowlist is exactly the set of endpoints the legacy
+	// renderer emitted egress rules for. Anything outside it reached the deny
+	// terminator before and must keep reaching it.
+	destinations := make([]overlayDestinationRule, 0, 64)
+	seenDest := make(map[string]struct{})
+	for _, module := range ordered {
+		for _, selector := range interceptModuleEgressSelectors(module) {
+			kind, ok := overlayKindFor(selector.Kind)
+			if !ok {
+				continue
+			}
+			identity := string(kind) + "\x00" + selector.Value + "\x00" + strconv.Itoa(selector.Port)
+			if _, dup := seenDest[identity]; dup {
+				continue
+			}
+			seenDest[identity] = struct{}{}
+			destinations = append(destinations, overlayDestinationRule{
+				Kind:  kind,
+				Value: selector.Value,
+				Ports: []overlayPortRange{{From: uint16(selector.Port), To: uint16(selector.Port)}},
+			})
+		}
 	}
-	doc.Egress.Capabilities = capabilities
+	sort.SliceStable(destinations, func(i, j int) bool {
+		a, b := destinations[i], destinations[j]
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		if a.Value != b.Value {
+			return a.Value < b.Value
+		}
+		return a.Ports[0].From < b.Ports[0].From
+	})
+
+	doc.Egress.Capabilities = []overlayEgressCapability{{
+		ID:           credential,
+		Listener:     interceptEgressListenerName,
+		Group:        group,
+		Destinations: destinations,
+		// The operator's terminal target may legitimately resolve to DIRECT; a
+		// group the operator explicitly bound may not silently become one.
+		AllowDirect: group == in.MatchTarget,
+	}}
 
 	// --- client stage --------------------------------------------------------
 	// Order is the contract: the extensions' own reject/direct rules first,
