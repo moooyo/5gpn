@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -663,5 +664,72 @@ func TestExternalMaintainedMarketplaceMatchesCoreContract(t *testing.T) {
 	}
 	if index.Metadata.ID != "io.5gpn.official" || len(index.Entries) == 0 {
 		t.Fatalf("unexpected maintained marketplace identity or entries: id=%q entries=%d", index.Metadata.ID, len(index.Entries))
+	}
+}
+
+// The marketplace index is a wire contract with every deployed gateway, and
+// this package decodes it with DisallowUnknownFields. A field added to the
+// index is therefore not additive: a core that does not know it refuses the
+// whole index and the gateway loses its extension catalogue.
+//
+// Caught by the extensions repository's own CI, which validates its generated
+// index against this parser — the gate that exists precisely because the two
+// repositories ship separately.
+func TestMarketplaceEntryAcceptsThePublishedPolicyProjection(t *testing.T) {
+	body := []byte(`{
+	  "apiVersion": "5gpn.io/marketplace/v1",
+	  "kind": "ExtensionMarketplace",
+	  "metadata": {"id":"io.5gpn.official","name":"n","description":"d",
+	    "homepage":"https://github.com/moooyo/5gpn-extensions",
+	    "source":{"repository":"https://github.com/moooyo/5gpn-extensions","revision":"` + strings.Repeat("a", 40) + `"}},
+	  "entries": [{
+	    "id":"io.5gpn.apple-wloc","name":"n","version":"1.0.0","description":"d","tags":["x"],
+	    "license":{"spdx":"MIT","url":"https://example.test/l"},
+	    "documentationUrl":"https://example.test/d",
+	    "manifest":{"url":"https://example.test/m","sha256":"` + strings.Repeat("b", 64) + `","size":1},
+	    "resources":[],
+	    "capabilities":{"captureHostCount":1,"actionCount":0,"settingCount":0,"networkOrigins":[],
+	      "persistentStorage":false,"upstreamMappingCount":0,"routingRuleCount":0,"egressGroupRequired":false},
+	    "policy":{"clientRules":4,"policyRules":0,"captureRules":4,"digest":"` + strings.Repeat("c", 64) + `"}
+	  }]
+	}`)
+	var index marketplaceIndex
+	if err := decodeStrictJSON(bytes.NewReader(body), &index); err != nil {
+		t.Fatalf("an index carrying the policy projection was rejected: %v", err)
+	}
+	if len(index.Entries) != 1 {
+		t.Fatalf("entries = %d", len(index.Entries))
+	}
+	got := index.Entries[0].Policy
+	if got.ClientRules != 4 || got.CaptureRules != 4 || len(got.Digest) != 64 {
+		t.Fatalf("policy projection decoded as %+v", got)
+	}
+}
+
+// An index without the field must still decode: every entry published before
+// the projection existed has none.
+func TestMarketplaceEntryWithoutAPolicyProjectionStillDecodes(t *testing.T) {
+	body := []byte(`{
+	  "apiVersion": "5gpn.io/marketplace/v1",
+	  "kind": "ExtensionMarketplace",
+	  "metadata": {"id":"io.5gpn.official","name":"n","description":"d",
+	    "homepage":"https://github.com/moooyo/5gpn-extensions",
+	    "source":{"repository":"https://github.com/moooyo/5gpn-extensions","revision":"` + strings.Repeat("a", 40) + `"}},
+	  "entries": [{
+	    "id":"io.5gpn.apple-wloc","name":"n","version":"1.0.0","description":"d","tags":["x"],
+	    "license":{"spdx":"MIT","url":"https://example.test/l"},
+	    "documentationUrl":"https://example.test/d",
+	    "manifest":{"url":"https://example.test/m","sha256":"` + strings.Repeat("b", 64) + `","size":1},
+	    "resources":[],
+	    "capabilities":{"captureHostCount":1,"actionCount":0,"settingCount":0,"networkOrigins":[],
+	      "persistentStorage":false,"upstreamMappingCount":0,"routingRuleCount":0,"egressGroupRequired":false}
+	  }]
+	}`)
+	var index marketplaceIndex
+	if err := decodeStrictJSON(bytes.NewReader(body), &index); err != nil {
+		t.Fatalf("an index without the policy projection was rejected: %v", err)
+	}
+	if index.Entries[0].Policy.Digest != "" {
+		t.Fatal("an absent projection decoded as present")
 	}
 }
