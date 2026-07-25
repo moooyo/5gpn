@@ -113,10 +113,20 @@ code=$(curl -sk --max-time 6 -H "Authorization: Bearer $SECRET" \
 check "GET is served, so the console can render state" "$code" 200
 
 echo
-echo "== 8. the control socket admits only the coordinator =="
+echo "== 8. the sockets admit only the process they name =="
 curl -s --max-time 6 --unix-socket $SOCKET http://x/capabilities >/dev/null 2>&1 \
-  && bad "root reached the control socket" \
-  || ok "a process that is not the coordinator is refused"
+  && bad "root reached the overlay control socket" \
+  || ok "root is refused by the overlay control socket"
+# The interesting case is not root, which the filesystem would stop anyway. It
+# is a service account the filesystem lets through: gpn-intercept is in the
+# sidecar socket's group and can open it, and is still refused because the
+# credential check is a separate gate from the mode.
+coord=$(setpriv --reuid=999 --regid=989 --groups 985 curl -s --max-time 6 \
+  --unix-socket /run/5gpn-intercept/control.sock http://x/state -o /dev/null -w '%{http_code}')
+check "the coordinator reaches the sidecar control API" "$coord" 200
+other=$(setpriv --reuid=994 --regid=985 --groups 985 curl -s --max-time 6 \
+  --unix-socket /run/5gpn-intercept/control.sock http://x/state -o /dev/null -w '%{http_code}')
+check "a group member that is not the coordinator is refused" "$other" 000
 
 echo
 printf '%d passed, %d failed\n' "$pass" "$fail"

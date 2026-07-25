@@ -1973,7 +1973,7 @@ unit_file_owned_by_5gpn() {
         mihomo.service)
             grep -Fqx 'ExecStart=/opt/5gpn/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' "$file" ;;
         5gpn-intercept.service)
-            grep -Fqx 'ExecStart=/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json' "$file" ;;
+            grep -Fqx 'ExecStart=/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json --control-peer-user gpn-dns' "$file" ;;
         5gpn-intercept-cert.service)
             grep -Fqx 'ExecStart=/opt/5gpn/scripts/intercept-cert-renew.sh' "$file" ;;
         5gpn-intercept-cert.path)
