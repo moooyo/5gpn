@@ -6308,7 +6308,7 @@ CERT_DNS_LAST_OBSERVATION=""
 
 cert_dns_name_matches() {
     local domain="$1" require_no_aaaa="$2"; shift 2
-    local raw="" ips="" aaaa="" ip expected matched raw_count ip_count
+    local raw="" ips="" aaaa="" aaaa_raw="" aaaa_answered=1 ip expected matched raw_count ip_count
     command -v dig >/dev/null 2>&1 \
         || { CERT_DNS_LAST_OBSERVATION="dig is unavailable"; return 1; }
     raw="$(dig +time=3 +tries=1 +short A "$domain" @"$CERT_DNS_RESOLVER" 2>/dev/null || true)"
@@ -6316,12 +6316,31 @@ cert_dns_name_matches() {
     raw_count="$(printf '%s\n' "$raw" | awk 'NF { n++ } END { print n+0 }')"
     ip_count="$(printf '%s\n' "$ips" | awk 'NF { n++ } END { print n+0 }')"
     if [[ "$require_no_aaaa" == 1 ]]; then
-        aaaa="$(dig +time=3 +tries=1 +short AAAA "$domain" @"$CERT_DNS_RESOLVER" 2>/dev/null \
-            | awk '/:/' || true)"
+        # Absence of AAAA has to be OBSERVED, not inferred from empty output.
+        # dig prints nothing on stdout when it gets no reply, and piping it into
+        # awk replaces dig's exit status with awk's -- so the earlier
+        # `dig ... | awk '/:/' || true` could not tell "this name has no AAAA"
+        # apart from "the query never answered", and silently passed on the
+        # second. That matters because this gate is the last thing standing
+        # before run_http_certbot stops mihomo to free :80: passing it without
+        # evidence drops the data plane for an issuance that then loses to
+        # Let's Encrypt's IPv6 preference. Keep dig's own status by not piping
+        # it, and treat a failed lookup as unproven rather than as absence.
+        # wait_for_cert_dns retries, so a transient failure resolves itself and
+        # a persistent one ends with an explicit operator-facing error.
+        if aaaa_raw="$(dig +time=3 +tries=1 +short AAAA "$domain" @"$CERT_DNS_RESOLVER" 2>/dev/null)"; then
+            aaaa="$(printf '%s\n' "$aaaa_raw" | awk '/:/')"
+        else
+            aaaa_answered=0
+        fi
     else
         aaaa="not-required"
     fi
     CERT_DNS_LAST_OBSERVATION="${domain}: raw-A=[${raw//$'\n'/, }] A=[${ips//$'\n'/, }] AAAA=[${aaaa//$'\n'/, }]"
+    [[ "$aaaa_answered" == 1 ]] || {
+        CERT_DNS_LAST_OBSERVATION="${domain}: AAAA lookup through ${CERT_DNS_RESOLVER} did not answer; absence of AAAA is unproven"
+        return 1
+    }
     [[ "$raw_count" == 1 && "$ip_count" == 1 ]] || return 1
     [[ "$require_no_aaaa" != 1 || -z "$aaaa" ]] || return 1
     ip="$ips"; matched=0
