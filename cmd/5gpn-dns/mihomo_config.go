@@ -314,6 +314,7 @@ proxy-providers: {}
 proxy-groups:
   - {name: Proxies, type: select, proxies: [DIRECT]}
 
+__OVERLAY_RUNTIME_BLOCK__
 rules:
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(NETWORK,UDP)),REJECT
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,80)),REJECT
@@ -354,7 +355,6 @@ __OVERLAY_EGRESS_ANCHOR__
   # through to the operator's own routing.
 __OVERLAY_CLIENT_ANCHOR__
   - MATCH,Proxies
-__OVERLAY_RUNTIME_BLOCK__
 `
 
 // literalControllerTLSAddr, literalControllerCert, literalControllerKey, and

@@ -212,7 +212,7 @@ func extractOverlayRuntimeBlock(text string) string {
 	if err != nil {
 		return ""
 	}
-	return "\n" + strings.TrimRight(string(encoded), "\n")
+	return strings.TrimRight(string(encoded), "\n")
 }
 
 // renderSeedOverlay expands the seed template's overlay placeholders.
