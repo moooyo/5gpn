@@ -1744,18 +1744,36 @@ resolve_mihomo_listen_ips() {
 # mutate the overlay; the processor may only read the generation it serves. One
 # policy covering both would have to admit the processor to the mutation
 # endpoint, which is the reach the split exists to deny.
+# $1 selects "probe" to render with placeholder identities.
+#
+# Artifact staging validates an anchored candidate before the service accounts
+# and socket groups exist, because whether the core can parse the anchors is the
+# thing that decides whether they are emitted at all. That candidate is fed to
+# `mihomo -t` and discarded; no identity in it reaches the live config, which is
+# rendered later by render_mihomo_config once the accounts are real. Failing the
+# probe for want of a group that installation has not created yet would abort
+# every fresh install.
 render_overlay_runtime_block() {
-    local dns_uid dns_gid intercept_uid intercept_gid
-    dns_uid="$(id -u "$DNS_SERVICE_USER" 2>/dev/null)" || return 1
-    dns_gid="$(id -g "$DNS_SERVICE_USER" 2>/dev/null)" || return 1
-    intercept_uid="$(id -u "$INTERCEPT_SERVICE_USER" 2>/dev/null)" || return 1
-    intercept_gid="$(id -g "$INTERCEPT_SERVICE_USER" 2>/dev/null)" || return 1
-    [[ "$dns_uid" =~ ^[0-9]+$ && "$dns_gid" =~ ^[0-9]+$ ]] || return 1
-    [[ "$intercept_uid" =~ ^[0-9]+$ && "$intercept_gid" =~ ^[0-9]+$ ]] || return 1
-    local control_gid generation_gid
-    control_gid="$(getent group "$OVERLAY_CONTROL_GROUP" | cut -d: -f3)" || return 1
-    generation_gid="$(getent group "$OVERLAY_GENERATION_GROUP" | cut -d: -f3)" || return 1
-    [[ "$control_gid" =~ ^[0-9]+$ && "$generation_gid" =~ ^[0-9]+$ ]] || return 1
+    local mode="${1:-live}"
+    local dns_uid dns_gid intercept_uid intercept_gid control_gid generation_gid
+    dns_uid="$(id -u "$DNS_SERVICE_USER" 2>/dev/null || true)"
+    dns_gid="$(id -g "$DNS_SERVICE_USER" 2>/dev/null || true)"
+    intercept_uid="$(id -u "$INTERCEPT_SERVICE_USER" 2>/dev/null || true)"
+    intercept_gid="$(id -g "$INTERCEPT_SERVICE_USER" 2>/dev/null || true)"
+    control_gid="$(getent group "$OVERLAY_CONTROL_GROUP" 2>/dev/null | cut -d: -f3)"
+    generation_gid="$(getent group "$OVERLAY_GENERATION_GROUP" 2>/dev/null | cut -d: -f3)"
+
+    if [[ "$mode" == probe ]]; then
+        # Any well-formed number parses identically. These are never installed.
+        local id
+        for id in dns_uid dns_gid intercept_uid intercept_gid control_gid generation_gid; do
+            [[ "${!id}" =~ ^[0-9]+$ ]] || printf -v "$id" '%s' 65534
+        done
+    else
+        [[ "$dns_uid" =~ ^[0-9]+$ && "$dns_gid" =~ ^[0-9]+$ ]]             || { err "Cannot resolve $DNS_SERVICE_USER for the overlay control socket."; return 1; }
+        [[ "$intercept_uid" =~ ^[0-9]+$ && "$intercept_gid" =~ ^[0-9]+$ ]]             || { err "Cannot resolve $INTERCEPT_SERVICE_USER for the overlay generation socket."; return 1; }
+        [[ "$control_gid" =~ ^[0-9]+$ && "$generation_gid" =~ ^[0-9]+$ ]]             || { err "The overlay socket groups do not exist yet."; return 1; }
+    fi
     cat <<EOF_OVERLAY
 
 runtime-overlay:
@@ -1794,7 +1812,7 @@ ensure_overlay_socket_groups() {
 
 # Expands one overlay placeholder line, or drops it when the overlay is off.
 render_overlay_placeholder() {
-    local placeholder="$1" enabled="$2"
+    local placeholder="$1" enabled="$2" mode="${3:-live}"
     if [[ "$enabled" != 1 ]]; then
         return 0
     fi
@@ -1803,7 +1821,7 @@ render_overlay_placeholder() {
 ' "$OVERLAY_OWNER" ;;
         __OVERLAY_CLIENT_ANCHOR__) printf '  - RUNTIME-OVERLAY,%s,client
 ' "$OVERLAY_OWNER" ;;
-        __OVERLAY_RUNTIME_BLOCK__) render_overlay_runtime_block || return 1 ;;
+        __OVERLAY_RUNTIME_BLOCK__) render_overlay_runtime_block "$mode" || return 1 ;;
     esac
 }
 
@@ -2646,7 +2664,7 @@ stage_artifacts() {
             fi
             case "$line" in
                 __OVERLAY_EGRESS_ANCHOR__|__OVERLAY_CLIENT_ANCHOR__|__OVERLAY_RUNTIME_BLOCK__)
-                    render_overlay_placeholder "$line" "$overlay" || return 1
+                    render_overlay_placeholder "$line" "$overlay" probe || return 1
                     continue ;;
             esac
             line="${line//__GATEWAY_IP__/$GATEWAY_IP}"
