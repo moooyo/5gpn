@@ -44,6 +44,11 @@ type InterceptModuleManager struct {
 	certRepublish func(context.Context, string, []byte) error
 	sidecarTest   interceptConfigTester
 	onApplied     func()
+	// sidecar, when set, is the sidecar's control API. Publishing through it
+	// replaces writing the sidecar's private file: the file made this package
+	// responsible for the sidecar's on-disk layout, and neither side could name
+	// a version or say which state the other believed was live.
+	sidecar *SidecarClient
 }
 
 type interceptConfigTester interface {
@@ -88,6 +93,41 @@ func (m *InterceptModuleManager) SetAppliedHook(hook func()) {
 	m.mu.Lock()
 	m.onApplied = hook
 	m.mu.Unlock()
+}
+
+// SetSidecarClient installs the sidecar control API client. Without one the
+// manager keeps writing the sidecar's file, which is the rollback position and
+// the state of a deployment that has not migrated yet.
+func (m *InterceptModuleManager) SetSidecarClient(client *SidecarClient) {
+	m.mu.Lock()
+	m.sidecar = client
+	m.mu.Unlock()
+}
+
+// publishSidecarDocument puts the candidate document into effect in the sidecar.
+//
+// Both paths preserve the ordering the transaction depends on: the sidecar
+// holds the new document before the certificate wait and before mihomo
+// publishes, so capture traffic never arrives at a processor that cannot serve
+// it.
+func (m *InterceptModuleManager) publishSidecarDocument(ctx context.Context, body []byte) error {
+	if m.sidecar == nil {
+		return m.store.writeAtomicContext(ctx, body)
+	}
+	if _, err := m.sidecar.PublishBundle(ctx, interceptBundleID(body), body); err != nil {
+		return err
+	}
+	// The file is still written while both paths are supported, so a downgrade
+	// to a build without the API finds the state it expects. It is no longer
+	// what the sidecar reads.
+	return m.store.writeAtomicContext(ctx, body)
+}
+
+// interceptBundleID derives a stable bundle identity from the document itself,
+// so re-publishing identical desired state addresses the same bundle rather
+// than accumulating one per attempt.
+func interceptBundleID(body []byte) string {
+	return "b-" + interceptRevision(body)[:24]
 }
 
 func (m *InterceptModuleManager) SetSidecarTester(tester interceptConfigTester) {
@@ -990,7 +1030,7 @@ func (m *InterceptModuleManager) mutate(
 	if err := m.validateMihomoCandidateLocked(ctx, nextMihomo); err != nil {
 		return interceptModulesView{}, err
 	}
-	if err := m.store.writeAtomicContext(ctx, newBody); err != nil {
+	if err := m.publishSidecarDocument(ctx, newBody); err != nil {
 		return interceptModulesView{}, err
 	}
 	oldCertificateHosts := certificateInterceptHosts(oldDocument)
