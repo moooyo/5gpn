@@ -1150,6 +1150,32 @@ normalize_legacy_intercept_ca_root() {
 # New fixed roots must be inspected without mutating the host before the
 # install transaction records whether each path was absent. Existing paths are
 # accepted only when their ownership marker is already valid.
+# Explains an unowned root when the cause is an orphaned owner.
+#
+# Removing a service account leaves every directory it owned with a uid that no
+# longer resolves, and the installer then refuses to claim those roots — which is
+# the right call, because a future account recreated at that uid would inherit
+# them. But "unowned" alone gives an operator nothing to act on, and the refusal
+# has no self-repair path: it is reached on every subsequent run, including the
+# one that would have recreated the account.
+#
+# Diagnose, do not repair. Silently chowning a directory whose owner the
+# installer does not recognise is precisely what this check exists to prevent.
+report_orphaned_root_owner() {
+    local dir="$1" uid gid
+    [[ -e "$dir" ]] || return 0
+    uid="$(file_uid "$dir")"
+    gid="$(file_gid "$dir")"
+    if [[ "$uid" =~ ^[0-9]+$ ]] && ! getent passwd "$uid" >/dev/null 2>&1; then
+        err "Its owner is uid ${uid}, which no longer exists — a removed service account."
+        err "Restore it with: chown root:root '${dir}' && chmod 755 '${dir}'"
+        err "and check the ownership marker inside it is root:root mode 644."
+    elif [[ "$gid" =~ ^[0-9]+$ ]] && ! getent group "$gid" >/dev/null 2>&1; then
+        err "Its group is gid ${gid}, which no longer exists — a removed service group."
+        err "Restore it with: chgrp root '${dir}'"
+    fi
+}
+
 preflight_intercept_roots() {
     local dir marker value
     while read -r dir marker value; do
@@ -1159,10 +1185,12 @@ preflight_intercept_roots() {
         if [[ "$dir" == "$INTERCEPT_CA_DIR" ]]; then
             fixed_owned_dir_is_safe "$dir" "$marker" "$value" \
                 || legacy_intercept_ca_root_is_safe \
-                || { err "Refusing pre-existing unowned interception root: $dir"; return 1; }
+                || { err "Refusing pre-existing unowned interception root: $dir"
+                     report_orphaned_root_owner "$dir"; return 1; }
         else
             fixed_owned_dir_is_safe "$dir" "$marker" "$value" \
-                || { err "Refusing pre-existing unowned interception root: $dir"; return 1; }
+                || { err "Refusing pre-existing unowned interception root: $dir"
+                     report_orphaned_root_owner "$dir"; return 1; }
         fi
     done <<EOF
 $INTERCEPT_CA_DIR $INTERCEPT_CA_MARKER $INTERCEPT_CA_MARKER_VALUE
