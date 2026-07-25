@@ -58,36 +58,6 @@ jobs:
       - name: go test -race
         run: go test -race ./...
 
-  intercept-go:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: plugin-sidecar
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version-file: plugin-sidecar/go.mod
-          cache-dependency-path: plugin-sidecar/go.sum
-      - name: gofmt
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "These files are not gofmt-clean:"; echo "$unformatted"
-            exit 1
-          fi
-      - name: go vet
-        run: go vet ./...
-      - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
-      - name: go test -race
-        run: go test -race ./...
-
-  # Web gate: unit tests, production build, explicit bundle budgets, and the
-  # real-browser desktop + 390x844 mobile suites under production CSP.
-  # (npm run build == tsc && vite build; tsconfig includes tests, so this
-  # type-checks the whole SPA). The release workflow runs the same build to
-  # produce the 5gpn-web tarball.
   web:
     runs-on: ubuntu-latest
     defaults:

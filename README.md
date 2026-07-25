@@ -277,7 +277,6 @@ for s in install.sh quick-install.sh scripts/*.sh; do bash -n "$s"; done
 for t in tests/test_*.sh; do bash "$t"; done
 
 (cd cmd/5gpn-dns && test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...)
-(cd plugin-sidecar && test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...)
 
 (cd web && npm ci && npm run typecheck && npx vitest run && npm run build && npm run bundle:check)
 (cd web && npx playwright install --with-deps chromium && npx playwright test)
@@ -290,7 +289,7 @@ CI 还会执行 `govulncheck`，并使用 digest-pinned mihomo 渲染和验证 s
 | 路径 | 内容 |
 | --- | --- |
 | `cmd/5gpn-dns/` | DNS 决策引擎、控制面 API、Console backend 与 Telegram bot |
-| `plugin-sidecar/` | 按需启动的原生扩展 HTTP/TLS/QUIC sidecar |
+| *(外部)* | 原生扩展的 HTTP/TLS/QUIC sidecar 在 `moooyo/mihomo-extension-sidecar` 独立维护，像 mihomo 一样按版本+摘要作为发布制品消费。 |
 | `web/` | React、Vite、DaisyUI Console，Vitest 与 Playwright 测试 |
 | `etc/` | 配置样例、mihomo seed、systemd/polkit 单元与规则种子 |
 | `scripts/` | 证书、规则、iOS profile 和 Telegram 运维 helper |

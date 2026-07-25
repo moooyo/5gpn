@@ -277,7 +277,6 @@ for s in install.sh quick-install.sh scripts/*.sh; do bash -n "$s"; done
 for t in tests/test_*.sh; do bash "$t"; done
 
 (cd cmd/5gpn-dns && test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...)
-(cd plugin-sidecar && test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...)
 
 (cd web && npm ci && npm run typecheck && npx vitest run && npm run build && npm run bundle:check)
 (cd web && npx playwright install --with-deps chromium && npx playwright test)
@@ -290,7 +289,7 @@ CI also runs `govulncheck` and renders and validates the seed with a digest-pinn
 | Path | Contents |
 | --- | --- |
 | `cmd/5gpn-dns/` | DNS decision engine, control-plane API, Console backend, and Telegram bot |
-| `plugin-sidecar/` | On-demand native-extension HTTP/TLS/QUIC sidecar |
+| *(external)* | The native-extension HTTP/TLS/QUIC sidecar is maintained at `moooyo/mihomo-extension-sidecar` and consumed as a pinned release artifact, like mihomo. |
 | `web/` | React, Vite, and DaisyUI Console with Vitest and Playwright tests |
 | `etc/` | Configuration examples, mihomo seed, systemd/polkit units, and rule seeds |
 | `scripts/` | Certificate, rule, iOS profile, and Telegram operations helpers |

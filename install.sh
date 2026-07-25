@@ -156,6 +156,15 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp-v1"
 # 5gpn-ext branch. Upstream does not implement the RUNTIME-OVERLAY anchors,
 # so against an upstream core the installer's probe fails and it seeds the
 # rendered config instead: the mechanism ships but never switches on.
+# The interception sidecar is maintained in its own repository and consumed
+# as a released artifact, like mihomo and gum. It used to be built from a copy
+# carried inside this tree, which meant the component and the gateway could
+# only ever ship together and a change to one implied a release of the other.
+# They share no Go types — only a versioned control-API wire format — so the
+# thing that keeps them working together is a schema number, not a build.
+SIDECAR_REPO="moooyo/mihomo-extension-sidecar"
+SIDECAR_VERSION="0.1.0-beta.1"
+SIDECAR_SHA256="4c701214f269ee87457f507ea9d9d02f612bf63dbe74226cb8f6d585ef1f1832"
 MIHOMO_REPO="moooyo/mihomo"
 MIHOMO_VERSION="v1.19.28-overlay.1"
 MIHOMO_SHA256="816eca7e6f932a2aee07a8113ce762fbc3b258b5c5c8091b7fdfb617895873b0"
@@ -2669,13 +2678,17 @@ stage_artifacts() {
     binary_reports_exact_version "$ARTIFACT_STAGE/5gpn-dns" --version "$ver" \
         || { err "Staged 5gpn-dns version does not match pinned release ${ver}."; return 1; }
 
-    curl -fsSL "$release/$intercept_asset" -o "$ARTIFACT_STAGE/5gpn-intercept" \
+    curl -fsSL "https://github.com/${SIDECAR_REPO}/releases/download/${SIDECAR_VERSION}/${intercept_asset}" \
+        -o "$ARTIFACT_STAGE/5gpn-intercept" \
         || { err "Could not download $intercept_asset."; return 1; }
-    verify_sha256 "$ARTIFACT_STAGE/5gpn-intercept" \
-        "$(release_checksum "$ARTIFACT_STAGE/checksums.txt" "$intercept_asset")" || return 1
+    # Verified against the digest pinned here, not against this project's
+    # checksums file: the artifact no longer comes from this project's release,
+    # and its version is its own. Asserting the gateway's version against it was
+    # only ever correct while the two were built together.
+    verify_sha256 "$ARTIFACT_STAGE/5gpn-intercept" "$SIDECAR_SHA256" || return 1
     chmod 0755 "$ARTIFACT_STAGE/5gpn-intercept"
-    binary_reports_exact_version "$ARTIFACT_STAGE/5gpn-intercept" --version "$ver" \
-        || { err "Staged 5gpn-intercept version does not match pinned release ${ver}."; return 1; }
+    binary_reports_exact_version "$ARTIFACT_STAGE/5gpn-intercept" --version "$SIDECAR_VERSION" \
+        || { err "Staged 5gpn-intercept version does not match pinned ${SIDECAR_VERSION}."; return 1; }
 
     curl -fsSL "$release/$web_asset" -o "$ARTIFACT_STAGE/web.tgz" \
         || { err "Could not download $web_asset."; return 1; }
@@ -4185,14 +4198,16 @@ install_5gpndns() {
 }
 
 install_intercept() {
+    # The sidecar carries its own version now; asserting the gateway's was
+    # only ever correct while the two were built from one tree.
     [[ -n "$ARTIFACT_STAGE" && -x "$ARTIFACT_STAGE/5gpn-intercept" ]] \
         || { err "5gpn-intercept was not staged."; return 1; }
     publish_executable "$ARTIFACT_STAGE/5gpn-intercept" "$INTERCEPT_BIN" \
         || { err "5gpn-intercept publication failed."; return 1; }
     [[ -x "$INTERCEPT_BIN" ]] && cmp -s "$ARTIFACT_STAGE/5gpn-intercept" "$INTERCEPT_BIN" \
-        && binary_reports_exact_version "$INTERCEPT_BIN" --version "$DNS_VERSION_DEFAULT" \
+        && binary_reports_exact_version "$INTERCEPT_BIN" --version "$SIDECAR_VERSION" \
         || { err "Published 5gpn-intercept failed identity/version verification."; return 1; }
-    ok "Verified 5gpn-intercept ${DNS_VERSION_DEFAULT} published to $INTERCEPT_BIN."
+    ok "Verified 5gpn-intercept ${SIDECAR_VERSION} published to $INTERCEPT_BIN."
 }
 
 prepare_intercept_runtime_dirs() {

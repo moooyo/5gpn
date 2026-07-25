@@ -22,7 +22,7 @@ import (
 //
 // Build the sidecar first:
 //
-//	(cd ../../plugin-sidecar && go build -o /tmp/5gpn-intercept .)
+//	(cd /path/to/mihomo-extension-sidecar && go build -o /tmp/5gpn-intercept .)
 //	SIDECAR_BINARY=/tmp/5gpn-intercept go test -run Sidecar ./...
 
 const sidecarBinaryEnv = "SIDECAR_BINARY"
@@ -42,7 +42,7 @@ func startRealSidecar(t *testing.T) (*SidecarClient, string) {
 	// A bootstrap document so the sidecar can start before anything is pushed.
 	// This is the migration state: file-configured, API-capable.
 	bootstrap := filepath.Join(dir, "config.json")
-	raw, err := os.ReadFile(filepath.Join("..", "..", "plugin-sidecar", "testdata", "bundle.json"))
+	raw, err := os.ReadFile(filepath.Join("testdata", "sidecar-bundle.json"))
 	if err != nil {
 		t.Skipf("sidecar fixture unavailable: %v", err)
 	}

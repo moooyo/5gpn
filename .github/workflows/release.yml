@@ -113,17 +113,6 @@ jobs:
             -ldflags "-s -w -X main.version=${VER}" -o 5gpn-dns-linux-amd64 .
           sha256sum 5gpn-dns-linux-amd64 > checksums.txt
 
-      # Beta may carry an additional first-party binary before that component is
-      # promoted to main. Build and checksum it whenever the tagged tree owns it.
-      - name: Build optional interception sidecar
-        if: ${{ hashFiles('plugin-sidecar/go.mod') != '' }}
-        working-directory: plugin-sidecar
-        run: |
-          VER="${GITHUB_REF_NAME}"
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
-            -ldflags "-s -w -X main.version=${VER}" -o 5gpn-intercept-linux-amd64 .
-          sha256sum 5gpn-intercept-linux-amd64 >> ../cmd/5gpn-dns/checksums.txt
-
       - name: Package web UI
         run: |
           VER="${GITHUB_REF_NAME}"
@@ -152,9 +141,6 @@ jobs:
           cp cmd/5gpn-dns/5gpn-dns-linux-amd64 release-assets/
           cp cmd/5gpn-dns/checksums.txt release-assets/
           cp 5gpn-web-*.tar.gz 5gpn-installer.tar.gz THIRD_PARTY_NOTICES.md release-assets/
-          if [[ -f plugin-sidecar/5gpn-intercept-linux-amd64 ]]; then
-            cp plugin-sidecar/5gpn-intercept-linux-amd64 release-assets/
-          fi
 
       - name: Publish release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
