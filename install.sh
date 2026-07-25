@@ -2773,7 +2773,12 @@ acquire_install_lock() {
         INSTALL_LOCK_HELD=1
         return 0
     fi
-    exec 7>&- 2>/dev/null || true
+    # No 2>/dev/null here. `exec` carrying only redirections applies them to the
+    # shell itself and does not restore them, so that spelling silenced every
+    # error message for the rest of the run — including the ones that explain
+    # why an install aborted. Closing an fd that was never opened is not an
+    # error in bash, so there is nothing to suppress.
+    exec 7>&- || true
     exec 7>"$INSTALL_LOCK_FILE"
     chmod 0600 "$INSTALL_LOCK_FILE" \
         || { exec 7>&-; err "Could not protect the installer transaction lock file."; return 1; }
@@ -2789,7 +2794,12 @@ release_install_lock() {
         lock_fd_targets_file 7 "$INSTALL_LOCK_FILE" || rc=1
         flock -u 7 2>/dev/null || rc=1
     fi
-    exec 7>&- 2>/dev/null || true
+    # No 2>/dev/null here. `exec` carrying only redirections applies them to the
+    # shell itself and does not restore them, so that spelling silenced every
+    # error message for the rest of the run — including the ones that explain
+    # why an install aborted. Closing an fd that was never opened is not an
+    # error in bash, so there is nothing to suppress.
+    exec 7>&- || true
     INSTALL_LOCK_HELD=0
     [[ "$rc" == 0 ]] || { err "The installer transaction lock descriptor was invalid during release."; return 1; }
 }
@@ -2832,7 +2842,7 @@ acquire_install_cert_lock() {
         INSTALL_CERT_LOCK_HELD=1
         return 0
     fi
-    exec 8>&- 2>/dev/null || true
+    exec 8>&- || true
     exec 8>"$CERT_RENEW_LOCK_FILE"
     chmod 0600 "$CERT_RENEW_LOCK_FILE" \
         || { exec 8>&-; err "Could not protect the certificate-renewal lock file."; return 1; }
@@ -2852,7 +2862,7 @@ release_install_cert_lock() {
         lock_fd_targets_file 8 "$CERT_RENEW_LOCK_FILE" || rc=1
         flock -u 8 2>/dev/null || rc=1
     fi
-    exec 8>&- 2>/dev/null || true
+    exec 8>&- || true
     INSTALL_CERT_LOCK_HELD=0
     [[ "$rc" == 0 ]] || { err "The certificate lock descriptor was invalid during release."; return 1; }
 }
