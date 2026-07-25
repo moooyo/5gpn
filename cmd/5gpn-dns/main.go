@@ -322,15 +322,18 @@ func main() {
 	// Drive the sidecar through its control API when the socket is present.
 	// Its absence is not an error: a deployment that has not migrated, or one
 	// deliberately rolled back with --control-socket "", keeps the file path.
+	var sidecarClient *SidecarClient
 	if socket := cfg.InterceptControlSocket; socket != "" {
 		if _, err := os.Stat(socket); err == nil {
-			interceptManager.SetSidecarClient(NewSidecarClient(socket))
+			sidecarClient = NewSidecarClient(socket)
+			interceptManager.SetSidecarClient(sidecarClient)
 			log.Printf("intercept: driving the sidecar through %s", socket)
 		} else {
 			log.Printf("intercept: sidecar control socket %s is absent; using the configuration file", socket)
 		}
 	}
 	ctrl.SetInterceptModuleManager(interceptManager)
+	selectInterceptRoutingDriver(cfg, interceptManager, moduleMihomoStore, sidecarClient)
 	marketplaceManager := NewExtensionMarketplaceManager(
 		NewExtensionMarketplaceStore(cfg.MarketplacesFile),
 		trustResolver,

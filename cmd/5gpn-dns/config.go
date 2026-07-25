@@ -171,6 +171,17 @@ type Config struct {
 	// of a deployment that has not migrated, and of one deliberately rolled
 	// back by starting the sidecar with --control-socket "".
 	InterceptControlSocket string
+	// OverlayControlSocket is mihomo's runtime-overlay control API. When it is
+	// present and the mihomo config carries the overlay anchors, routing
+	// changes publish as typed generations instead of rewriting the operator's
+	// YAML. Its absence selects the legacy renderer, which is also the state of
+	// a core that does not implement the overlay.
+	OverlayControlSocket string
+	// OverlayJournalFile records the in-flight generation transition, so a
+	// coordinator that dies between the commit call and its response can read
+	// back and roll forward rather than blindly undo a generation that may
+	// already be serving traffic.
+	OverlayJournalFile string
 	// MarketplacesFile is the authenticated extension marketplace source
 	// document. It is separate from the immutable extension snapshots.
 	MarketplacesFile string
@@ -299,6 +310,8 @@ func LoadConfig() (Config, error) {
 		MihomoConfigFile:       envOr("DNS_MIHOMO_CONFIG", "/etc/5gpn/mihomo/config.yaml"),
 		InterceptConfigFile:    envOr("DNS_INTERCEPT_CONFIG", "/etc/5gpn/intercept/config.json"),
 		InterceptControlSocket: envOr("DNS_INTERCEPT_CONTROL_SOCKET", "/run/5gpn-intercept/control.sock"),
+		OverlayControlSocket:   envOr("DNS_OVERLAY_CONTROL_SOCKET", "/run/mihomo/overlay-control.sock"),
+		OverlayJournalFile:     envOr("DNS_OVERLAY_JOURNAL", "/var/lib/5gpn/overlay-journal.json"),
 		MarketplacesFile:       envOr("DNS_MARKETPLACES_FILE", "/etc/5gpn/extension-marketplaces.json"),
 		PolicyRulesFile:        envListen("DNS_POLICY_RULES", "/etc/5gpn/policy.json"),
 		ZashDir:                envOr("DNS_ZASH_DIR", "/opt/5gpn/zash"),

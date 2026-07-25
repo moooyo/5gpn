@@ -148,15 +148,20 @@ type overlayReadback struct {
 	ProcessorState      string   `json:"processorState"`
 	DependencyErrors    []string `json:"dependencyErrors"`
 	ProcessorInstance   string   `json:"processorInstanceId"`
-	BundleDigest        string   `json:"sidecarBundleDigest"`
-	CapabilitySet       string   `json:"capabilitySetDigest"`
-	LeaseState          string   `json:"leaseState"`
-	LeaseExpiresAt      int64    `json:"leaseExpiresAt"`
-	FencingToken        uint64   `json:"fencingToken"`
-	Prepared            []string `json:"preparedGenerations"`
-	Draining            []string `json:"drainingGenerations"`
-	BootEpoch           string   `json:"bootEpoch"`
-	SchemaVersion       int      `json:"schemaVersion"`
+	// BundleDigest is what the last attestation claimed. ActiveBundleDigest and
+	// ActiveCertHostSet are what the live generation requires — a renewal has to
+	// carry those, because the core matches the lease against the document.
+	BundleDigest       string   `json:"sidecarBundleDigest"`
+	ActiveBundleDigest string   `json:"activeSidecarBundleDigest"`
+	ActiveCertHostSet  string   `json:"activeCertificateHostSetDigest"`
+	CapabilitySet      string   `json:"capabilitySetDigest"`
+	LeaseState         string   `json:"leaseState"`
+	LeaseExpiresAt     int64    `json:"leaseExpiresAt"`
+	FencingToken       uint64   `json:"fencingToken"`
+	Prepared           []string `json:"preparedGenerations"`
+	Draining           []string `json:"drainingGenerations"`
+	BootEpoch          string   `json:"bootEpoch"`
+	SchemaVersion      int      `json:"schemaVersion"`
 }
 
 // Serviceable reports whether capture traffic can actually be processed.

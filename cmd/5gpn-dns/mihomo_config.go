@@ -218,7 +218,15 @@ func (s *MihomoConfigStore) Default() string {
 		"__INTERCEPT_UPSTREAM_USERNAME__", interceptUpUser,
 		"__INTERCEPT_UPSTREAM_PASSWORD__", interceptUpPass,
 	)
-	return r.Replace(mihomoConfigSeedTemplate)
+	// The restored seed must describe the arrangement this box runs. Carry the
+	// live config's overlay block across rather than re-deriving it; a box that
+	// has none gets the rendered form, which is also what first boot produces
+	// before the installer has written anything.
+	runtimeBlock := ""
+	if body, err := os.ReadFile(s.path); err == nil {
+		runtimeBlock = extractOverlayRuntimeBlock(string(body))
+	}
+	return r.Replace(renderSeedOverlay(mihomoConfigSeedTemplate, runtimeBlock))
 }
 
 func yamlSingleQuotedValue(value string) string {
@@ -327,10 +335,20 @@ rules:
   - IP-CIDR,169.254.0.0/16,REJECT,no-resolve
   # Every sidecar egress selector is published immediately above this
   # fail-closed terminator. Unknown or stale sidecar traffic must never fall
-  # through to the operator's terminal MATCH rule.
+  # through to the operator's terminal MATCH rule. Under the runtime overlay
+  # the selectors are not written here at all: the egress anchor resolves them
+  # from the committed generation, and must sit immediately above the
+  # terminator so a declined lookup still reaches the deny.
+__OVERLAY_EGRESS_ANCHOR__
   - IN-NAME,intercept-egress,REJECT
   - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
+  # The client anchor resolves the capture rules. It sits below every deny
+  # above and above the terminal MATCH, so an extension can never capture the
+  # management plane or private ranges, and captured traffic never falls
+  # through to the operator's own routing.
+__OVERLAY_CLIENT_ANCHOR__
   - MATCH,Proxies
+__OVERLAY_RUNTIME_BLOCK__
 `
 
 // literalControllerTLSAddr, literalControllerCert, literalControllerKey, and

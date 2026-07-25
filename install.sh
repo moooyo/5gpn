@@ -115,6 +115,15 @@ INTERCEPT_CA_DIR="/etc/5gpn/intercept-ca"
 INTERCEPT_CA_MARKER=".5gpn-intercept-ca-owned"
 INTERCEPT_CA_MARKER_VALUE="5gpn-intercept-ca-v1"
 INTERCEPT_STATE_DIR="/var/lib/5gpn-intercept"
+# The runtime overlay's machine-only sockets. mihomo creates both inside its
+# systemd RuntimeDirectory, so they cannot outlive the process that served them.
+OVERLAY_OWNER="5gpn"
+# Set by artifact staging once the installed mihomo has been shown to parse an
+# anchored config. 0 until then, so a render that runs first cannot seed anchors
+# no core was proven to understand.
+MIHOMO_SEED_OVERLAY=0
+OVERLAY_CONTROL_SOCKET="/run/mihomo/overlay-control.sock"
+OVERLAY_GENERATION_SOCKET="/run/mihomo/overlay-generation.sock"
 INTERCEPT_STATE_MARKER=".5gpn-intercept-state-owned"
 INTERCEPT_STATE_MARKER_VALUE="5gpn-intercept-state-v1"
 DNS_SERVICE_USER="gpn-dns"
@@ -1710,6 +1719,63 @@ resolve_mihomo_listen_ips() {
     printf '%s\n' "$out"
 }
 
+# Renders the runtime-overlay parts of the mihomo seed.
+#
+# The overlay replaces rewriting the operator's config on every routing change
+# with committing a typed generation over a machine-only socket. Two anchors
+# splice it into rule resolution, and a `runtime-overlay:` block names the
+# sockets and who may use them.
+#
+# All of it is emitted only when the mihomo binary being installed actually
+# implements the feature. That is established by validating the rendered
+# candidate with `mihomo -t`, not by comparing version strings: a core that
+# cannot parse RUNTIME-OVERLAY rejects the config outright, and seeding one it
+# rejects would leave the gateway unable to start. The caller falls back to the
+# unanchored form on failure, which is the legacy arrangement and fully
+# supported.
+#
+# The two sockets carry different peer policies on purpose. The coordinator may
+# mutate the overlay; the processor may only read the generation it serves. One
+# policy covering both would have to admit the processor to the mutation
+# endpoint, which is the reach the split exists to deny.
+render_overlay_runtime_block() {
+    local dns_uid dns_gid intercept_uid intercept_gid
+    dns_uid="$(id -u "$DNS_SERVICE_USER" 2>/dev/null)" || return 1
+    dns_gid="$(id -g "$DNS_SERVICE_USER" 2>/dev/null)" || return 1
+    intercept_uid="$(id -u "$INTERCEPT_SERVICE_USER" 2>/dev/null)" || return 1
+    intercept_gid="$(id -g "$INTERCEPT_SERVICE_USER" 2>/dev/null)" || return 1
+    [[ "$dns_uid" =~ ^[0-9]+$ && "$dns_gid" =~ ^[0-9]+$ ]] || return 1
+    [[ "$intercept_uid" =~ ^[0-9]+$ && "$intercept_gid" =~ ^[0-9]+$ ]] || return 1
+    cat <<EOF_OVERLAY
+
+runtime-overlay:
+  owner: ${OVERLAY_OWNER}
+  control-socket: ${OVERLAY_CONTROL_SOCKET}
+  generation-socket: ${OVERLAY_GENERATION_SOCKET}
+  # Only the coordinator may commit a generation.
+  control-peer-uid: ${dns_uid}
+  control-peer-gid: ${dns_gid}
+  # Only the processor may read the generation it is serving.
+  generation-peer-uid: ${intercept_uid}
+  generation-peer-gid: ${intercept_gid}
+EOF_OVERLAY
+}
+
+# Expands one overlay placeholder line, or drops it when the overlay is off.
+render_overlay_placeholder() {
+    local placeholder="$1" enabled="$2"
+    if [[ "$enabled" != 1 ]]; then
+        return 0
+    fi
+    case "$placeholder" in
+        __OVERLAY_EGRESS_ANCHOR__) printf '  - RUNTIME-OVERLAY,%s,egress
+' "$OVERLAY_OWNER" ;;
+        __OVERLAY_CLIENT_ANCHOR__) printf '  - RUNTIME-OVERLAY,%s,client
+' "$OVERLAY_OWNER" ;;
+        __OVERLAY_RUNTIME_BLOCK__) render_overlay_runtime_block || return 1 ;;
+    esac
+}
+
 render_mihomo_listeners() {
     local ips="$1" console_domain="$2" ip idx=0 suffix
     while IFS= read -r ip; do
@@ -2532,13 +2598,24 @@ stage_artifacts() {
         || { err "Staged zashboard archive has no index.html."; return 1; }
 
     if [[ ! -f "$MIHOMO_DIR/config.yaml" ]]; then
-        local seed="$ARTIFACT_STAGE/mihomo-seed.yaml" line listeners
+        local seed="$ARTIFACT_STAGE/mihomo-seed.yaml" line listeners overlay
         listeners="$(render_mihomo_listeners "$MIHOMO_LISTEN_IPS" "$CONSOLE_DOMAIN")"
+        install -d -m 0700 "$ARTIFACT_STAGE/mihomo-home"
+        : > "$ARTIFACT_STAGE/mihomo-home/whitelist.txt"
+        # Anchored first. A core that does not implement the overlay rejects
+        # the candidate and the unanchored render is retried, so the probe is
+        # the validation itself rather than a version comparison.
+        for overlay in 1 0; do
         while IFS= read -r line || [[ -n "$line" ]]; do
             if [[ "$line" == '__MIHOMO_LISTENERS__' ]]; then
                 printf '%s\n' "$listeners"
                 continue
             fi
+            case "$line" in
+                __OVERLAY_EGRESS_ANCHOR__|__OVERLAY_CLIENT_ANCHOR__|__OVERLAY_RUNTIME_BLOCK__)
+                    render_overlay_placeholder "$line" "$overlay" || return 1
+                    continue ;;
+            esac
             line="${line//__GATEWAY_IP__/$GATEWAY_IP}"
             line="${line//__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN}"
             line="${line//__ZASH_DOMAIN__/$ZASH_DOMAIN}"
@@ -2549,10 +2626,18 @@ stage_artifacts() {
             line="${line//__INTERCEPT_UPSTREAM_PASSWORD__/preflight-upstream-password-123456}"
             printf '%s\n' "$line"
         done < "${SCRIPT_DIR}/etc/mihomo/config.yaml.tmpl" > "$seed"
-        install -d -m 0700 "$ARTIFACT_STAGE/mihomo-home"
-        : > "$ARTIFACT_STAGE/mihomo-home/whitelist.txt"
-        "$ARTIFACT_STAGE/mihomo" -t -f "$seed" -d "$ARTIFACT_STAGE/mihomo-home" \
+        if "$ARTIFACT_STAGE/mihomo" -t -f "$seed" -d "$ARTIFACT_STAGE/mihomo-home"; then
+            if [[ "$overlay" == 1 ]]; then
+                ok "Staged mihomo implements the runtime overlay; seeding the anchored config."
+            else
+                warn "Staged mihomo does not implement the runtime overlay; seeding the rendered config."
+            fi
+            MIHOMO_SEED_OVERLAY="$overlay"
+            break
+        fi
+        [[ "$overlay" == 1 ]] \
             || { err "Staged mihomo seed candidate is invalid; live deployment was not touched."; return 1; }
+        done
     else
         "$ARTIFACT_STAGE/mihomo" -t -f "$MIHOMO_DIR/config.yaml" -d "$MIHOMO_DIR" \
             || { err "Existing operator-owned mihomo config is invalid; live deployment was not touched."; return 1; }
@@ -4300,6 +4385,11 @@ persist_mihomo_secret() {
 # old file, fsyncs, and atomically renames it into place.
 render_mihomo_config() {
     local mode="${1:-seed}" config="${MIHOMO_DIR}/config.yaml" secret="" template=""
+    # Staging established whether the mihomo being installed implements the
+    # runtime overlay, by validating an anchored candidate against that exact
+    # binary. Reuse the answer rather than re-deriving it: this render must
+    # produce the arrangement the daemon was told to expect.
+    local overlay="${MIHOMO_SEED_OVERLAY:-0}"
     MIHOMO_SEED_PORTS_REQUIRED=0
     fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
         || { err "Unsafe configuration root: $CONF_DIR"; return 1; }
@@ -4367,6 +4457,11 @@ render_mihomo_config() {
             printf '%s\n' "$listeners"
             continue
         fi
+        case "$line" in
+            __OVERLAY_EGRESS_ANCHOR__|__OVERLAY_CLIENT_ANCHOR__|__OVERLAY_RUNTIME_BLOCK__)
+                render_overlay_placeholder "$line" "$overlay" || exit 1
+                continue ;;
+        esac
         line="${line//__GATEWAY_IP__/$gw}"
         line="${line//__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN}"
         line="${line//__ZASH_DOMAIN__/$ZASH_DOMAIN}"

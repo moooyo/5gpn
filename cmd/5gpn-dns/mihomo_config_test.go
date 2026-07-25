@@ -24,6 +24,23 @@ func goldenInfraParams() InfraParams {
 // MihomoConfigStore.Default's env-var indirection) so this test file's
 // golden text and goldenInfraParams stay obviously in sync.
 func goldenMihomoConfig() string {
+	// Unanchored: these invariants describe the rendered arrangement, which is
+	// what a core without the overlay gets. The anchored form is covered by the
+	// interception routing check, which is where anchor placement matters.
+	return goldenMihomoConfigForm(false)
+}
+
+func goldenMihomoConfigForm(overlay bool) string {
+	return goldenMihomoValues(renderSeedOverlayPlaceholders(mihomoConfigSeedTemplate, overlay))
+}
+
+// goldenMihomoConfigWithBlock renders through the production expander, so a
+// test of what a reset produces exercises the code a reset actually runs.
+func goldenMihomoConfigWithBlock(runtimeBlock string) string {
+	return goldenMihomoValues(renderSeedOverlay(mihomoConfigSeedTemplate, runtimeBlock))
+}
+
+func goldenMihomoValues(template string) string {
 	r := strings.NewReplacer(
 		"__CONSOLE_DOMAIN__", "console.5gpn.test",
 		"__ZASH_DOMAIN__", "zash.5gpn.test",
@@ -35,7 +52,7 @@ func goldenMihomoConfig() string {
 		"__INTERCEPT_UPSTREAM_USERNAME__", "interception-upstream-unavailable",
 		"__INTERCEPT_UPSTREAM_PASSWORD__", "interception-upstream-unavailable-password",
 	)
-	return r.Replace(mihomoConfigSeedTemplate)
+	return r.Replace(template)
 }
 
 func TestMihomoInvariants_GoldenPasses(t *testing.T) {
@@ -744,5 +761,46 @@ func TestMihomoConfigSeedTemplate_MatchesRepoFile(t *testing.T) {
 	if mihomoConfigSeedTemplate != string(want) {
 		t.Fatalf("mihomoConfigSeedTemplate (mihomo_config.go) has drifted from %s -- update both in lockstep.\n--- Go copy ---\n%s\n--- repo file ---\n%s",
 			repoRelPath, mihomoConfigSeedTemplate, string(want))
+	}
+}
+
+// Restoring the install-time seed must reproduce the arrangement the box runs.
+// Dropping the overlay block would leave a config whose anchors point at a
+// feature that is no longer configured — which mihomo refuses to parse, turning
+// a reset into an outage.
+func TestSeedResetPreservesTheOverlayBlock(t *testing.T) {
+	live := goldenMihomoConfigForm(true)
+	block := extractOverlayRuntimeBlock(live)
+	if strings.TrimSpace(block) == "" {
+		t.Fatal("no overlay block was recovered from an anchored config")
+	}
+	for _, want := range []string{"runtime-overlay:", "control-peer-uid:", "generation-peer-uid:"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("the recovered block does not carry %q:\n%s", want, block)
+		}
+	}
+
+	restored := goldenMihomoConfigWithBlock(block)
+	if !mihomoConfigIsOverlayAnchored(restored) {
+		t.Fatal("the restored seed lost its anchors")
+	}
+	if extractOverlayRuntimeBlock(restored) == "" {
+		t.Fatal("the restored seed lost its overlay block")
+	}
+}
+
+// A box without the overlay must get the rendered form. Leaving an anchor in a
+// config with no runtime-overlay block would make it unparseable.
+func TestSeedResetWithoutAnOverlayBlockDropsTheAnchors(t *testing.T) {
+	restored := goldenMihomoConfigWithBlock("")
+	if mihomoConfigIsOverlayAnchored(restored) {
+		t.Fatal("anchors survived into a config with no overlay configured")
+	}
+	for _, placeholder := range []string{
+		"__OVERLAY_EGRESS_ANCHOR__", "__OVERLAY_CLIENT_ANCHOR__", "__OVERLAY_RUNTIME_BLOCK__",
+	} {
+		if strings.Contains(restored, placeholder) {
+			t.Errorf("%s was left unexpanded, so the config is not YAML", placeholder)
+		}
 	}
 }

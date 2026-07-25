@@ -91,7 +91,17 @@ rules:
   - IP-CIDR,169.254.0.0/16,REJECT,no-resolve
   # Every sidecar egress selector is published immediately above this
   # fail-closed terminator. Unknown or stale sidecar traffic must never fall
-  # through to the operator's terminal MATCH rule.
+  # through to the operator's terminal MATCH rule. Under the runtime overlay
+  # the selectors are not written here at all: the egress anchor resolves them
+  # from the committed generation, and must sit immediately above the
+  # terminator so a declined lookup still reaches the deny.
+__OVERLAY_EGRESS_ANCHOR__
   - IN-NAME,intercept-egress,REJECT
   - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
+  # The client anchor resolves the capture rules. It sits below every deny
+  # above and above the terminal MATCH, so an extension can never capture the
+  # management plane or private ranges, and captured traffic never falls
+  # through to the operator's own routing.
+__OVERLAY_CLIENT_ANCHOR__
   - MATCH,Proxies
+__OVERLAY_RUNTIME_BLOCK__

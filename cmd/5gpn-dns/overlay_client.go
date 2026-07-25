@@ -213,6 +213,32 @@ func (c *OverlayClient) Readback(ctx context.Context) (overlayReadback, error) {
 	return out, err
 }
 
+// overlayReadinessRequest attests that the processor is serving one generation.
+//
+// The processor does not send this itself: its socket is read-only, deliberately,
+// because a compromised processor that could register readiness could also claim
+// to be serving a generation it is not. The coordinator asserts it instead, and
+// only after reading the sidecar's own view of what it has live — so the claim
+// is something the coordinator verified rather than something it assumed.
+type overlayReadinessRequest struct {
+	ProcessorID     string `json:"processorId"`
+	ProcessInstance string `json:"processInstanceId"`
+	GenerationID    string `json:"generationId"`
+	BundleDigest    string `json:"sidecarBundleDigest"`
+	CertHostSet     string `json:"certificateHostSetDigest"`
+}
+
+// RegisterReadiness renews the processor's lease.
+//
+// The lease has a short TTL and the core fails capture closed when it lapses,
+// so this is a heartbeat rather than a one-time announcement: a coordinator
+// that registers once and stops leaves every capture rule rejecting within
+// seconds.
+func (c *OverlayClient) RegisterReadiness(ctx context.Context, req overlayReadinessRequest) error {
+	path := "/runtime-overlays/" + url.PathEscape(overlayOwner) + "/readiness"
+	return c.do(ctx, http.MethodPost, path, req, nil)
+}
+
 // Purge removes every durable overlay artifact from the core.
 //
 // This is the downgrade contract's purge step, and it is destructive by design:

@@ -178,6 +178,13 @@ func installerRoutingCheckDocument() interceptConfigDocument {
 }
 
 func currentInstallerRoutingSeed(t *testing.T, document interceptConfigDocument) string {
+	return currentInstallerRoutingSeedForm(t, document, false)
+}
+
+// currentInstallerRoutingSeedForm renders either arrangement the installer can
+// produce: anchored when the core implements the overlay, rendered when it does
+// not.
+func currentInstallerRoutingSeedForm(t *testing.T, document interceptConfigDocument, overlay bool) string {
 	t.Helper()
 	body, err := os.ReadFile(filepath.Join("..", "..", "etc", "mihomo", "config.yaml.tmpl"))
 	if err != nil {
@@ -194,7 +201,7 @@ func currentInstallerRoutingSeed(t *testing.T, document interceptConfigDocument)
 		"__INTERCEPT_UPSTREAM_USERNAME__": document.UpstreamProxy.Username,
 		"__INTERCEPT_UPSTREAM_PASSWORD__": document.UpstreamProxy.Password,
 	}
-	text := string(body)
+	text := renderSeedOverlayPlaceholders(string(body), overlay)
 	for from, to := range replacements {
 		text = strings.ReplaceAll(text, from, to)
 	}
@@ -228,4 +235,61 @@ func runInstallerRoutingCheck(t *testing.T, mihomo string, intercept []byte) (in
 		"--intercept-config", interceptPath,
 	}, &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
+}
+
+// The installer's check has to accept the arrangement the installer produces.
+// Anchored is what a current core gets, and a check that only understood the
+// rendered form would report a healthy migrated gateway as broken.
+func TestInterceptionRoutingCheckAcceptsAnchoredSeed(t *testing.T) {
+	document := installerRoutingCheckDocument()
+	seed := currentInstallerRoutingSeedForm(t, document, true)
+	if !mihomoConfigIsOverlayAnchored(seed) {
+		t.Fatal("the anchored seed does not read as anchored")
+	}
+	analysis := analyzeOverlayAnchoredDocument(seed)
+	if !analysis.Manageable || !analysis.Ready {
+		t.Fatalf("anchored seed rejected: %s", analysis.Reason)
+	}
+	if analysis.MatchTarget == "" {
+		t.Fatal("no terminal MATCH target was extracted, so no capability could be minted")
+	}
+}
+
+// Anchor placement is the security property, not formatting. An egress anchor
+// separated from the fail-closed terminator leaves rules that processor traffic
+// reaches after the overlay declines it and before the deny catches it — the
+// fall-through the terminator exists to prevent.
+func TestOverlayEgressAnchorMustAbutTheTerminator(t *testing.T) {
+	document := installerRoutingCheckDocument()
+	seed := currentInstallerRoutingSeedForm(t, document, true)
+
+	moved := strings.Replace(seed,
+		"  - "+overlayEgressAnchorRule+"\n  - "+interceptEgressRejectRule,
+		"  - "+overlayEgressAnchorRule+"\n  - DOMAIN,interposed.example.com,DIRECT\n  - "+interceptEgressRejectRule,
+		1)
+	if moved == seed {
+		t.Fatal("the anchor/terminator pair was not found, so this test proves nothing")
+	}
+	if analysis := analyzeOverlayAnchoredDocument(moved); analysis.Manageable {
+		t.Fatal("a rule interposed between the egress anchor and the terminator was accepted")
+	} else if analysis.Reason != "overlay-egress-anchor-misplaced" {
+		t.Fatalf("reason = %q, want overlay-egress-anchor-misplaced", analysis.Reason)
+	}
+}
+
+// A missing client anchor must not read as "no capture configured": under the
+// overlay it means captured traffic reaches the operator's own routing instead
+// of the processor.
+func TestOverlayClientAnchorIsRequired(t *testing.T) {
+	document := installerRoutingCheckDocument()
+	seed := currentInstallerRoutingSeedForm(t, document, true)
+	stripped := strings.Replace(seed, "  - "+overlayClientAnchorRule+"\n", "", 1)
+	if stripped == seed {
+		t.Fatal("the client anchor was not found, so this test proves nothing")
+	}
+	if analysis := analyzeOverlayAnchoredDocument(stripped); analysis.Manageable {
+		t.Fatal("a config with no client anchor was accepted as manageable")
+	} else if analysis.Reason != "overlay-client-anchor-missing" {
+		t.Fatalf("reason = %q, want overlay-client-anchor-missing", analysis.Reason)
+	}
 }
