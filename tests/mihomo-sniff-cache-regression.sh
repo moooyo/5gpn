@@ -63,6 +63,11 @@ CONSOLE_PID=$!
 ORIGIN_PID=$!
 
 awk -v cert="$RUNTIME/cert.pem" -v key="$RUNTIME/key.pem" -v listener="$GATEWAY_LISTENER" '
+  # Rendered against a core that predates the runtime overlay, so the anchors
+  # are dropped: one it cannot resolve makes the config unparseable.
+  $0 == "__OVERLAY_EGRESS_ANCHOR__" || $0 == "__OVERLAY_CLIENT_ANCHOR__" || $0 == "__OVERLAY_RUNTIME_BLOCK__" {
+    next
+  }
   $0 == "__MIHOMO_LISTENERS__" {
     print listener
     next
