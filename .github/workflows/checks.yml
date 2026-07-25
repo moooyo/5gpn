@@ -144,6 +144,14 @@ jobs:
               print "  - {name: gateway5060, type: tunnel, listen: 203.0.113.10, port: 5060, network: [tcp, udp], target: console.example.test:5060}"
               next
             }
+            # The pinned core predates the runtime overlay, so render the
+            # unanchored form: an anchor it cannot resolve makes the config
+            # unparseable, which is exactly why the installer probes before
+            # emitting them. Dropping the lines rather than blanking them keeps
+            # the "no unresolved placeholder" check below meaningful.
+            $0 == "__OVERLAY_EGRESS_ANCHOR__" || $0 == "__OVERLAY_CLIENT_ANCHOR__" || $0 == "__OVERLAY_RUNTIME_BLOCK__" {
+              next
+            }
             {
               gsub(/__GATEWAY_IP__/, "10.0.0.1")
               gsub(/__CONSOLE_DOMAIN__/, "console.example.test")
