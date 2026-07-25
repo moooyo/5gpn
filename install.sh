@@ -80,6 +80,13 @@ LE_RENEWAL_ROOT="${LE_ROOT}/renewal"
 CERT_DNS_RESOLVER="1.1.1.1"              # fixed independent resolver for ACME A/AAAA gates
 CERT_DNS_WAIT_TIMEOUT=600                 # bounded install/configure propagation wait
 CERT_DNS_WAIT_INTERVAL=10
+# certbot writes the DNS-01 TXT record itself and then sleeps this long before
+# asking Let's Encrypt to validate. It cannot be replaced by a check — the
+# record does not exist until certbot creates it — and it is the only
+# unconditional wait on the certificate path; our own DNS verification checks
+# first and sleeps only after a failed check. Lower it if the zone's
+# authoritative servers converge quickly; too low fails validation outright.
+CERT_DNS_PROPAGATION_SECONDS="${CERT_DNS_PROPAGATION_SECONDS:-30}"
 INSTALL_LOCK_FILE="/run/5gpn/install.lock"
 CERT_RENEW_LOCK_FILE="/run/5gpn/cert-renew.lock"
 INSTALL_LOCK_WAIT_TIMEOUT=900
@@ -5696,7 +5703,7 @@ install_cert() {
             info "Issuing Let's Encrypt WILDCARD cert for *.${base} (Cloudflare DNS-01)..."
             certbot_args+=(--dns-cloudflare \
                 --dns-cloudflare-credentials "${ACME_DIR}/cloudflare.ini" \
-                --dns-cloudflare-propagation-seconds 30 -d "*.${base}" -d "${base}")
+                --dns-cloudflare-propagation-seconds "$CERT_DNS_PROPAGATION_SECONDS" -d "*.${base}" -d "${base}")
         else
             check_http_challenge_dns_once \
                 || { err "HTTP-01 DNS changed after preflight: ${CERT_DNS_LAST_OBSERVATION:-no answer}."; return 1; }

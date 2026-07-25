@@ -56,27 +56,26 @@ before=$(sha256sum /etc/5gpn/mihomo/config.yaml | cut -d' ' -f1)
 
 echo
 echo "== 3. real traffic, both directions =="
-SECRET=$(secret)
-for i in 1 2 3; do curl -sk --max-time 6 --resolve "$CAPTURED:443:$GW" "https://$CAPTURED/clls/wloc" -o /dev/null 2>/dev/null; done &
+# Read what the core logged rather than snapshotting /connections. A capture and
+# its onward connection can complete inside the gap between driving the traffic
+# and taking the snapshot, so the snapshot reports honestly that nothing is live
+# — and a test that calls that a failure is testing its own timing. The log is
+# the durable record of every match the data plane actually made.
+mark=$(date -u '+%Y-%m-%d %H:%M:%S')
 sleep 1
-curl -sk --max-time 8 -H "Authorization: Bearer $SECRET" https://127.0.0.1:9090/connections > /tmp/verify-conns.json 2>/dev/null
-wait
-python3 - <<'EOF' > /tmp/verify-rules.txt
-import json
-try:
-    cs = json.load(open('/tmp/verify-conns.json')).get('connections') or []
-except Exception:
-    cs = []
-for c in cs:
-    print(c.get('rule', ''), '|', ','.join(c.get('chains') or []))
-EOF
-grep -q '^RuntimeOverlayClient' /tmp/verify-rules.txt \
+for i in 1 2 3; do
+  curl -sk --max-time 8 --resolve "$CAPTURED:443:$GW" "https://$CAPTURED/clls/wloc" -o /dev/null 2>/dev/null
+done
+sleep 2
+journalctl -u mihomo --since "$mark" --no-pager 2>/dev/null > /tmp/verify-match.txt
+
+grep -q "match RuntimeOverlayClient" /tmp/verify-match.txt \
   && ok "captured traffic resolved through the client anchor" \
   || bad "captured traffic did not reach the client anchor"
-grep -q 'RuntimeOverlayClient.*MODULE-INTERCEPT' /tmp/verify-rules.txt \
+grep -q "match RuntimeOverlayClient.*using MODULE-INTERCEPT" /tmp/verify-match.txt \
   && ok "and was steered at the processor" \
   || bad "it was not steered at the processor"
-grep -q '^RuntimeOverlayEgress' /tmp/verify-rules.txt \
+grep -q "match RuntimeOverlayEgress" /tmp/verify-match.txt \
   && ok "the processor's onward traffic resolved through the egress anchor" \
   || bad "the processor's onward traffic did not reach the egress anchor"
 
@@ -103,6 +102,7 @@ check "config digest unchanged" "$after" "$before"
 
 echo
 echo "== 7. mutation is not reachable over HTTP =="
+SECRET=$(secret)
 for verb in PUT POST DELETE; do
   code=$(curl -sk --max-time 6 -X $verb -H "Authorization: Bearer $SECRET" \
     https://127.0.0.1:9090/runtime-overlays/5gpn -o /dev/null -w '%{http_code}')
