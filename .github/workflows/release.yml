@@ -122,7 +122,7 @@ jobs:
           VER="${GITHUB_REF_NAME}"
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
             -ldflags "-s -w -X main.version=${VER}" -o 5gpn-intercept-linux-amd64 .
-          sha256sum 5gpn-intercept-linux-amd64 >> ../5gpn-dns/checksums.txt
+          sha256sum 5gpn-intercept-linux-amd64 >> ../cmd/5gpn-dns/checksums.txt
 
       - name: Package web UI
         run: |
