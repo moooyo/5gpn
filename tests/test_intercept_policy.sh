@@ -13,23 +13,23 @@ MODULE_PAGE="$ROOT/web/src/features/extensions/ExtensionsPage.tsx"
 SETUP_GUIDE="$ROOT/web/src/features/setup-guide/SetupGuidePage.tsx"
 MODULE_PARSER="$ROOT/cmd/5gpn-dns/intercept_module_parser.go"
 MODULE_TYPES="$ROOT/cmd/5gpn-dns/intercept_module_types.go"
-SIDECAR_CONFIG="$ROOT/cmd/5gpn-intercept/config.go"
-SIDECAR_LOGS="$ROOT/cmd/5gpn-intercept/engine_logs.go"
-SIDECAR_RUNTIME="$ROOT/cmd/5gpn-intercept/module_runtime.go"
-SIDECAR_MAIN="$ROOT/cmd/5gpn-intercept/main.go"
-SIDECAR_PROXY="$ROOT/cmd/5gpn-intercept/proxy.go"
+SIDECAR_CONFIG="$ROOT/plugin-sidecar/config.go"
+SIDECAR_LOGS="$ROOT/plugin-sidecar/engine_logs.go"
+SIDECAR_RUNTIME="$ROOT/plugin-sidecar/module_runtime.go"
+SIDECAR_MAIN="$ROOT/plugin-sidecar/main.go"
+SIDECAR_PROXY="$ROOT/plugin-sidecar/proxy.go"
 CHECKS_WORKFLOW="$ROOT/.github/workflows/checks.yml"
 rc=0
 fail() { echo "FAIL: $1"; rc=1; }
 
-[[ -f "$ROOT/cmd/5gpn-intercept/go.mod" ]] || fail "interception Go module is missing"
-grep -Fq 'github.com/quic-go/quic-go v0.60.0' "$ROOT/cmd/5gpn-intercept/go.mod" \
+[[ -f "$ROOT/plugin-sidecar/go.mod" ]] || fail "interception Go module is missing"
+grep -Fq 'github.com/quic-go/quic-go v0.60.0' "$ROOT/plugin-sidecar/go.mod" \
     || fail "quic-go direct dependency is not pinned"
-grep -Fq 'github.com/dop251/goja v0.0.0-20260701091749-b07b74453ea9' "$ROOT/cmd/5gpn-intercept/go.mod" \
+grep -Fq 'github.com/dop251/goja v0.0.0-20260701091749-b07b74453ea9' "$ROOT/plugin-sidecar/go.mod" \
     || fail "goja direct dependency is not pinned"
-grep -Fq 'github.com/dlclark/regexp2/v2 v2.2.1' "$ROOT/cmd/5gpn-intercept/go.mod" \
+grep -Fq 'github.com/dlclark/regexp2/v2 v2.2.1' "$ROOT/plugin-sidecar/go.mod" \
     || fail "regexp2 timeout dependency is not pinned"
-grep -Fq 'github.com/andybalholm/brotli v1.2.2' "$ROOT/cmd/5gpn-intercept/go.mod" \
+grep -Fq 'github.com/andybalholm/brotli v1.2.2' "$ROOT/plugin-sidecar/go.mod" \
     || fail "Brotli decoding dependency is not pinned"
 find "$ROOT" -path "$ROOT/web/node_modules" -prune -o -type f -name '*.py' -print -quit | grep -q . \
     && fail "Python source was introduced"
@@ -133,21 +133,21 @@ grep -Fq 'decoder.KnownFields(true)' "$MODULE_PARSER" \
     || fail "native extension manifest does not reject unknown fields"
 grep -Fq 'rejectUnsafeYAML' "$MODULE_PARSER" \
     || fail "native extension manifest does not reject aliases, anchors, and merges"
-grep -Fq 'servePlainHTTPConnection' "$ROOT/cmd/5gpn-intercept/proxy.go" \
+grep -Fq 'servePlainHTTPConnection' "$ROOT/plugin-sidecar/proxy.go" \
     || fail "plain HTTP module interception is missing"
-grep -Fq 'BodyMode' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
+grep -Fq 'BodyMode' "$ROOT/plugin-sidecar/module_runtime.go" \
     || fail "binary body script support is missing"
-grep -Fq 'brotli.NewReader' "$ROOT/cmd/5gpn-intercept/content_encoding.go" \
+grep -Fq 'brotli.NewReader' "$ROOT/plugin-sidecar/content_encoding.go" \
     || fail "bounded Brotli decoding is missing"
-grep -Fq 'transform(context)' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
+grep -Fq 'transform(context)' "$ROOT/plugin-sidecar/module_runtime.go" \
     || fail "native transform entry point is missing"
-grep -Fq 'compiledRule.hosts.Match' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
+grep -Fq 'compiledRule.hosts.Match' "$ROOT/plugin-sidecar/module_runtime.go" \
     || fail "native actions do not use the per-snapshot capture-host matcher"
-grep -Fq 'contextObject["network"]' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
+grep -Fq 'contextObject["network"]' "$ROOT/plugin-sidecar/module_runtime.go" \
     || fail "declared origin permissions do not expose the bounded network capability"
-grep -Fq 'dialSOCKS5TCP' "$ROOT/cmd/5gpn-intercept/module_network.go" \
+grep -Fq 'dialSOCKS5TCP' "$ROOT/plugin-sidecar/module_network.go" \
     || fail "extension network requests do not return through authenticated mihomo SOCKS5"
-grep -Fq 'ExecutionOrder' "$ROOT/cmd/5gpn-intercept/config.go" \
+grep -Fq 'ExecutionOrder' "$ROOT/plugin-sidecar/config.go" \
     || fail "sidecar config has no explicit extension execution order"
 grep -Fq 'engineLogsSocketPath' "$SIDECAR_LOGS" \
     && grep -Fq '"/run/5gpn-intercept/logs.sock"' "$SIDECAR_LOGS" \
@@ -187,7 +187,7 @@ retired_client="$(printf '%s%s' 'lo' 'on')"
 grep -Rni "$retired_client" \
     "$ROOT/README.md" "$ROOT/README.en.md" "$ROOT/docs/architecture.md" \
     "$ROOT/docs/pre-v5-upgrade.md" "$ROOT/cmd/5gpn-dns" \
-    "$ROOT/cmd/5gpn-intercept" "$ROOT/web/src" "$ROOT/web/e2e" 2>/dev/null | grep -q . \
+    "$ROOT/plugin-sidecar" "$ROOT/web/src" "$ROOT/web/e2e" 2>/dev/null | grep -q . \
     && fail "retired third-party plugin compatibility is still present"
 grep -RniE 'builtin-wloc|MODULE-MITM' \
     "$ROOT/README.md" "$ROOT/README.en.md" "$ROOT/docs/architecture.md" \

@@ -167,7 +167,7 @@ Run checks proportional to the touched surface:
 ```bash
 for t in tests/test_*.sh; do bash "$t"; done
 (cd cmd/5gpn-dns && test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...)
-(cd cmd/5gpn-intercept && test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...)
+(cd plugin-sidecar && test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...)
 (cd web && npm run typecheck && npx vitest run && npm run build && npm run bundle:check)
 (cd web && npx playwright test)
 ```

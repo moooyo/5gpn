@@ -116,8 +116,8 @@ jobs:
       # Beta may carry an additional first-party binary before that component is
       # promoted to main. Build and checksum it whenever the tagged tree owns it.
       - name: Build optional interception sidecar
-        if: ${{ hashFiles('cmd/5gpn-intercept/go.mod') != '' }}
-        working-directory: cmd/5gpn-intercept
+        if: ${{ hashFiles('plugin-sidecar/go.mod') != '' }}
+        working-directory: plugin-sidecar
         run: |
           VER="${GITHUB_REF_NAME}"
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
@@ -152,8 +152,8 @@ jobs:
           cp cmd/5gpn-dns/5gpn-dns-linux-amd64 release-assets/
           cp cmd/5gpn-dns/checksums.txt release-assets/
           cp 5gpn-web-*.tar.gz 5gpn-installer.tar.gz THIRD_PARTY_NOTICES.md release-assets/
-          if [[ -f cmd/5gpn-intercept/5gpn-intercept-linux-amd64 ]]; then
-            cp cmd/5gpn-intercept/5gpn-intercept-linux-amd64 release-assets/
+          if [[ -f plugin-sidecar/5gpn-intercept-linux-amd64 ]]; then
+            cp plugin-sidecar/5gpn-intercept-linux-amd64 release-assets/
           fi
 
       - name: Publish release

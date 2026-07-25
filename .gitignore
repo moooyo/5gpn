@@ -28,3 +28,10 @@ __pycache__/
 
 # Isolated feature worktrees
 /.worktrees/
+
+# Scratch probes written by exploratory tooling; never part of the tree.
+zz_*_test.go
+*_probe_test.go
+plugin-sidecar/5gpn-intercept
+cmd/5gpn-dns/5gpn-dns
+*.exe

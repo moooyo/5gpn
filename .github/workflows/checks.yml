@@ -62,13 +62,13 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: cmd/5gpn-intercept
+        working-directory: plugin-sidecar
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: cmd/5gpn-intercept/go.mod
-          cache-dependency-path: cmd/5gpn-intercept/go.sum
+          go-version-file: plugin-sidecar/go.mod
+          cache-dependency-path: plugin-sidecar/go.sum
       - name: gofmt
         run: |
           unformatted="$(gofmt -l .)"
