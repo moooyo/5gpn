@@ -4510,7 +4510,16 @@ render_mihomo_config() {
         fi
         case "$line" in
             __OVERLAY_EGRESS_ANCHOR__|__OVERLAY_CLIENT_ANCHOR__|__OVERLAY_RUNTIME_BLOCK__)
-                render_overlay_placeholder "$line" "$overlay" || exit 1
+                # Not `exit`: this loop carries a redirection but is not a
+                # subshell, so exiting here would end the installer outright —
+                # leaving the candidate behind and skipping the transaction
+                # rollback that every other failure in this function goes
+                # through.
+                render_overlay_placeholder "$line" "$overlay" || {
+                    rm -f -- "$candidate"
+                    err "Could not render the runtime-overlay block for the mihomo candidate."
+                    return 1
+                }
                 continue ;;
         esac
         line="${line//__GATEWAY_IP__/$gw}"
