@@ -25,9 +25,15 @@ field() { readback | python3 -c "import sys,json;print(json.load(sys.stdin).get(
 hit()  { curl -sk --max-time 12 --resolve "$1:443:$GW" "https://$1/" -o /dev/null -w '%{http_code}' 2>/dev/null; }
 
 echo "== 1. the overlay is the driver =="
+# Scoped to the running process, not the whole journal. Without --since the
+# match can come from an incarnation that has since been restarted onto the
+# legacy driver, so the check would claim the overlay is driving a gateway that
+# has stopped driving with it — the one thing it exists to detect.
+#
 # grep -q closes the pipe on its first match, so with pipefail the producer's
 # SIGPIPE becomes the pipeline's status and a found match reads as a failure.
-driver_log=$(journalctl -u 5gpn-dns --no-pager | grep -c "publishing routing as typed generations" || true)
+dns_started=$(systemctl show 5gpn-dns -p ActiveEnterTimestamp --value 2>/dev/null)
+driver_log=$(journalctl -u 5gpn-dns --since "${dns_started:--10min}" --no-pager   | grep -c "publishing routing as typed generations" || true)
 [[ "$driver_log" -gt 0 ]] \
   && ok "the coordinator selected the overlay driver" \
   || bad "the coordinator did not select the overlay driver"

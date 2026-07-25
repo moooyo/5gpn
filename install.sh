@@ -126,9 +126,10 @@ INTERCEPT_STATE_DIR="/var/lib/5gpn-intercept"
 # systemd RuntimeDirectory, so they cannot outlive the process that served them.
 OVERLAY_OWNER="5gpn"
 # Set by artifact staging once the installed mihomo has been shown to parse an
-# anchored config. 0 until then, so a render that runs first cannot seed anchors
-# no core was proven to understand.
-MIHOMO_SEED_OVERLAY=0
+# anchored config. Empty until then — not 0 — so that a render which staging
+# never reached can tell 'not probed' from 'probed and unsupported' and fall
+# back to what the live config already says.
+MIHOMO_SEED_OVERLAY=""
 OVERLAY_CONTROL_SOCKET="/run/mihomo/overlay-control.sock"
 OVERLAY_GENERATION_SOCKET="/run/mihomo/overlay-generation.sock"
 # One group per socket, owning nothing else. mihomo joins both so it can hand
@@ -2185,6 +2186,13 @@ ensure_service_account() {
         if ! service_account_is_safe "$user" "$group"; then
             userdel "$user" 2>/dev/null || true
             [[ "$group_created" == 0 ]] || groupdel "$group" 2>/dev/null || true
+            # The pre-existing-account branch above says why it refuses; this one
+            # did not, so an account the installer created and then rejected
+            # aborted the run with no reason given at all. The usual cause is a
+            # host whose UID_MIN leaves useradd --system no system uid to
+            # allocate, which is worth naming rather than leaving to be guessed.
+            err "Created service account $user does not satisfy the isolation rules; removed it again."
+            err "Check that /etc/login.defs leaves a free system uid below UID_MIN for --system accounts."
             return 1
         fi
     fi
@@ -3378,9 +3386,16 @@ rollback_created_service_accounts() {
             current_uid="$(id -u "$user" 2>/dev/null || true)"
             current_gid="$(id -g "$user" 2>/dev/null || true)"
             user_groups="$(id -G "$user" 2>/dev/null || true)"
+            # The same rule as service_account_is_safe, and for the same
+            # reason: install_service_accounts adds these accounts to the two
+            # overlay socket groups moments after creating them, so demanding
+            # that id -G equal the primary gid refuses every account this run
+            # created. Rollback then reports failure, which downgrades an
+            # otherwise clean restore into quarantining every unit and leaves
+            # the accounts behind — the worst place for a check to be wrong.
             if [[ "$current_uid" == "$recorded_uid" \
-               && "$current_gid" == "$recorded_gid" \
-               && "$user_groups" == "$recorded_gid" ]] \
+               && "$current_gid" == "$recorded_gid" ]] \
+               && service_account_groups_are_permitted "$user_groups" "$recorded_gid" \
                && service_account_is_safe "$user" "$group"; then
                 if ! userdel "$user" 2>/dev/null \
                    || getent passwd "$user" >/dev/null 2>&1; then
@@ -4479,11 +4494,24 @@ persist_mihomo_secret() {
 # old file, fsyncs, and atomically renames it into place.
 render_mihomo_config() {
     local mode="${1:-seed}" config="${MIHOMO_DIR}/config.yaml" secret="" template=""
-    # Staging established whether the mihomo being installed implements the
+    # Staging establishes whether the mihomo being installed implements the
     # runtime overlay, by validating an anchored candidate against that exact
-    # binary. Reuse the answer rather than re-deriving it: this render must
-    # produce the arrangement the daemon was told to expect.
-    local overlay="${MIHOMO_SEED_OVERLAY:-0}"
+    # binary. Reuse that answer when there is one.
+    #
+    # But staging only probes when it is seeding a config that does not exist
+    # yet, so on a box that already has one — every `mihomo-reset`, every
+    # re-render — the flag is still its default. Taking that at face value
+    # renders the unanchored form, which on an anchored gateway means a reset
+    # silently removes the anchors and drops the overlay. Fall back to what
+    # the live config says instead: it is the arrangement this box runs.
+    local overlay="${MIHOMO_SEED_OVERLAY:-}"
+    if [[ -z "$overlay" ]]; then
+        if [[ -f "$config" ]] && grep -Eq "^[[:space:]]*-[[:space:]]*RUNTIME-OVERLAY," "$config"; then
+            overlay=1
+        else
+            overlay=0
+        fi
+    fi
     MIHOMO_SEED_PORTS_REQUIRED=0
     fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
         || { err "Unsafe configuration root: $CONF_DIR"; return 1; }
@@ -5681,19 +5709,39 @@ install_cert() {
     # Reuse is mode-aware. The SAN shape distinguishes wildcard DNS-01 from
     # exact-name HTTP-01; renewal.conf and owned provenance prevent a mode
     # switch from silently retaining the previous authenticator.
-    if [[ "$lineage_was_owned" == 1 ]] \
-       && validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
-            "$base" "$((30*86400))" production "$mode" \
-       && certbot_renewal_mode_matches "$base" "$mode" \
-       && cert_provenance_matches "$mode" "$base"; then
+    #
+    # Each condition is evaluated separately so that declining to reuse can say
+    # which one declined. Collapsed into a single &&-chain it could not: the
+    # installer went quiet and then certbot ran, and because an existing lineage
+    # also sets --force-renewal below, "I already have a certificate" turned
+    # into a full re-issuance — including the propagation wait — with nothing
+    # said about why.
+    local reuse_declined=""
+    if [[ "$lineage_was_owned" != 1 ]]; then
+        reuse_declined="the lineage is not one this installer owns"
+    elif ! validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
+            "$base" "$((30*86400))" production "$mode"; then
+        reuse_declined="the certificate is missing, untrusted, wrong for ${mode}, or expires within 30 days"
+    elif ! certbot_renewal_mode_matches "$base" "$mode"; then
+        reuse_declined="its renewal configuration does not use the ${mode} authenticator"
+    elif ! cert_provenance_matches "$mode" "$base"; then
+        reuse_declined="its recorded provenance does not match ${mode}"
+    fi
+
+    if [[ -z "$reuse_declined" ]]; then
         lineage_origin=owned
         info "Valid owned ${mode} certificate and matching renewal authenticator for ${base} (>30d); reusing."
     else
+        info "Not reusing the existing certificate for ${base}: ${reuse_declined}."
         if [[ ! -e "$live" ]] && compgen -G "${LE_LIVE_ROOT}/${base}-[0-9][0-9][0-9][0-9]" >/dev/null; then
             err "A duplicate Certbot lineage exists for ${base}, but the canonical ${live} lineage is absent."
             err "Resolve that lineage explicitly before reinstalling; refusing silent reuse without scoped renewal."
             return 1
         fi
+        # An existing lineage is re-issued rather than renewed in place,
+        # because certbot otherwise refuses a changed SAN set under the same
+        # cert-name. This is why declining to reuse is expensive, and why the
+        # reason above is worth printing.
         [[ -e "$live" ]] && force=1
         local -a certbot_args=(certonly --cert-name "$base" --server "$LE_PRODUCTION_SERVER" --agree-tos -n \
             -m "${CERT_EMAIL:-admin@${base}}" --keep-until-expiring --no-directory-hooks)
@@ -6648,15 +6696,33 @@ verify_console_endpoint() {
 # ----------------------------------------------------------------------------
 # Service lifecycle
 # ----------------------------------------------------------------------------
+# Asks whether the NAMED process is listening, not merely whether something is.
+#
+# Without the process test this answers "is anything bound to ip:port", so a
+# pre-existing nginx or haproxy holding the same LAN address satisfies mihomo's
+# readiness probe and the installer declares a data plane ready that never
+# started. -p needs no privilege for sockets the caller owns and the installer
+# runs as root, so attribution is available; where it is not, the probe falls
+# back to the address test rather than failing a healthy gateway.
 ss_has_exact_listener() {
-    local kind="$1" ip="$2" port="$3" flags
+    local kind="$1" ip="$2" port="$3" process="${4:-}" flags out
     case "$kind" in
         tcp) flags=-ltn ;;
         udp) flags=-lun ;;
         *) return 1 ;;
     esac
-    ss -H "$flags" 2>/dev/null \
-        | awk -v target="${ip}:${port}" '$4 == target { found=1 } END { exit !found }'
+    out="$(ss -H -p "$flags" 2>/dev/null)" || out=""
+    if [[ -z "$out" ]]; then
+        ss -H "$flags" 2>/dev/null \
+            | awk -v target="${ip}:${port}" '$4 == target { found=1 } END { exit !found }'
+        return $?
+    fi
+    printf '%s\n' "$out" \
+        | awk -v target="${ip}:${port}" -v want="$process" '
+            $4 != target { next }
+            want == "" { found=1; next }
+            index($0, "\"" want "\"") { found=1 }
+            END { exit !found }'
 }
 
 probe_mihomo_ready() {
@@ -6677,10 +6743,10 @@ probe_mihomo_ready() {
     while IFS= read -r ip; do
         [[ -n "$ip" ]] || continue
         for port in "${tcp_ports[@]}"; do
-            ss_has_exact_listener tcp "$ip" "$port" || return 1
+            ss_has_exact_listener tcp "$ip" "$port" mihomo || return 1
         done
         for port in "${udp_ports[@]}"; do
-            ss_has_exact_listener udp "$ip" "$port" || return 1
+            ss_has_exact_listener udp "$ip" "$port" mihomo || return 1
         done
     done < <(printf '%s\n' "$MIHOMO_LISTEN_IPS" | tr ',' '\n')
 }
@@ -6700,7 +6766,7 @@ probe_dns_ready() {
 }
 
 wait_service_ready() {
-    local svc="$1" deadline remaining probe_timeout check_rc
+    local svc="$1" deadline remaining probe_timeout check_rc announced=0
     deadline=$((SECONDS + SERVICE_READY_TIMEOUT))
     while (( SECONDS < deadline )); do
         case "$svc" in
@@ -6728,6 +6794,14 @@ wait_service_ready() {
             mihomo)    probe_mihomo_ready && { ok "mihomo readiness passed (controller + local TCP/UDP listeners)."; return 0; } ;;
             5gpn-dns)  probe_dns_ready && { ok "5gpn-dns readiness passed (API + DoT TLS handshake)."; return 0; } ;;
         esac
+        # Speak up only once the first probe has failed, so a service that
+        # starts promptly stays quiet. Without this a slow start is up to
+        # SERVICE_READY_TIMEOUT seconds of silence per service, which reads as a
+        # hang rather than as waiting.
+        if (( announced == 0 )); then
+            announced=1
+            info "Waiting for ${svc} to become ready (up to ${SERVICE_READY_TIMEOUT}s)..."
+        fi
         (( SECONDS < deadline )) && sleep 1
     done
     err "$svc did not become ready within ${SERVICE_READY_TIMEOUT}s (journalctl -u $svc)."
