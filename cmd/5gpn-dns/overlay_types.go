@@ -34,6 +34,10 @@ const (
 	overlaySelectorDomainKeyword  overlaySelectorKind = "domain-keyword"
 	overlaySelectorDomainWildcard overlaySelectorKind = "domain-wildcard"
 	overlaySelectorIPCIDR         overlaySelectorKind = "ip-cidr"
+	// overlaySelectorAny carries no primary selector; the keyword constraints
+	// alone decide. It exists so a keyword-only reviewed rule can be expressed
+	// without inventing a domain to hang it on.
+	overlaySelectorAny overlaySelectorKind = "any"
 )
 
 type overlayTransitionMode string
@@ -55,13 +59,18 @@ type overlayPortRange struct {
 }
 
 type overlayClientRule struct {
-	Kind      overlaySelectorKind `json:"kind"`
-	Value     string              `json:"value"`
-	Network   string              `json:"network,omitempty"`
-	Ports     []overlayPortRange  `json:"ports,omitempty"`
-	Action    overlayClientAction `json:"action"`
-	Processor string              `json:"processor,omitempty"`
-	Owner     string              `json:"owner,omitempty"`
+	Kind    overlaySelectorKind `json:"kind"`
+	Value   string              `json:"value"`
+	Network string              `json:"network,omitempty"`
+	Ports   []overlayPortRange  `json:"ports,omitempty"`
+	// KeywordsAny requires at least one to match; KeywordsAll requires all.
+	// They narrow the primary selector rather than replacing it, which is the
+	// shape reviewed extension rules actually use.
+	KeywordsAny []string            `json:"keywordsAny,omitempty"`
+	KeywordsAll []string            `json:"keywordsAll,omitempty"`
+	Action      overlayClientAction `json:"action"`
+	Processor   string              `json:"processor,omitempty"`
+	Owner       string              `json:"owner,omitempty"`
 }
 
 type overlayEgressCapability struct {

@@ -149,28 +149,97 @@ func TestOverlayCompileDisabledMasterIsAnEmptyGeneration(t *testing.T) {
 	}
 }
 
-// A rule the typed model cannot express must be refused, not silently narrowed
-// — narrowing changes what the operator approved.
-func TestOverlayCompileRefusesInexpressibleRules(t *testing.T) {
-	if _, ok := overlayPolicyRule(interceptRoutingRule{
-		Action:         "reject",
-		DomainKeywords: []string{"a", "b"},
-	}, "m"); ok {
-		t.Fatal("a multi-keyword rule was accepted")
-	}
-	if _, ok := overlayPolicyRule(interceptRoutingRule{
-		Action: "reject",
-		Domain: "a.test", DomainSuffix: "b.test",
-	}, "m"); ok {
-		t.Fatal("a rule with two primary selectors was accepted")
-	}
-	if rule, ok := overlayPolicyRule(interceptRoutingRule{
-		Action: "direct", DomainSuffix: "b.test", DestinationPort: 443,
-	}, "m"); !ok {
-		t.Fatal("a single-selector rule was refused")
-	} else if rule.Action != overlayActionDirect || len(rule.Ports) != 1 {
-		t.Fatalf("unexpected compilation: %+v", rule)
-	}
+// What the typed model must still refuse, and what it must now accept.
+//
+// The accept half is the regression guard for a real bug: these keyword shapes
+// used to be refused, and refusing them meant the coordinator silently dropped
+// 21 of 323 reviewed rules from a live deployment.
+func TestOverlayPolicyRuleExpressiveness(t *testing.T) {
+	t.Run("two primary selectors are refused", func(t *testing.T) {
+		// The source model permits exactly one; more than one means the rule
+		// came from something this compiler does not model, and narrowing it
+		// would change what was approved.
+		if _, ok := overlayPolicyRule(interceptRoutingRule{
+			Action: "reject", Domain: "a.test", DomainSuffix: "b.test",
+		}, "m"); ok {
+			t.Fatal("a rule with two primary selectors was accepted")
+		}
+	})
+
+	t.Run("a rule with no constraint at all is refused", func(t *testing.T) {
+		if _, ok := overlayPolicyRule(interceptRoutingRule{Action: "reject"}, "m"); ok {
+			t.Fatal("an unconstrained rule was accepted; it would match everything")
+		}
+	})
+
+	t.Run("suffix narrowed by one keyword", func(t *testing.T) {
+		rule, ok := overlayPolicyRule(interceptRoutingRule{
+			Action: "direct", DomainSuffix: "capcutapi.com", DomainKeywords: []string{"tnc"},
+		}, "m")
+		if !ok {
+			t.Fatal("suffix + keyword was refused; that drops a reviewed rule")
+		}
+		if rule.Kind != overlaySelectorDomainSuffix || rule.Value != "capcutapi.com" {
+			t.Fatalf("primary selector lost: %+v", rule)
+		}
+		if len(rule.KeywordsAny) != 1 || rule.KeywordsAny[0] != "tnc" {
+			t.Fatalf("keyword constraint lost: %+v", rule)
+		}
+	})
+
+	t.Run("suffix narrowed by an any-of keyword set", func(t *testing.T) {
+		rule, ok := overlayPolicyRule(interceptRoutingRule{
+			Action: "reject", DomainSuffix: "chat.bilibili.com",
+			DomainKeywords: []string{"p2p", "stun", "tracker"},
+		}, "m")
+		if !ok {
+			t.Fatal("suffix + any-of keywords was refused")
+		}
+		if len(rule.KeywordsAny) != 3 || len(rule.KeywordsAll) != 0 {
+			t.Fatalf("any-of set was not preserved as any-of: %+v", rule)
+		}
+	})
+
+	t.Run("all-of keywords stay all-of", func(t *testing.T) {
+		rule, ok := overlayPolicyRule(interceptRoutingRule{
+			Action: "reject", AllDomainKeywords: []string{"tnc", "alisg"},
+		}, "m")
+		if !ok {
+			t.Fatal("all-of keywords were refused")
+		}
+		// Conflating any-of with all-of would widen the rule, which for a
+		// direct action means more traffic escaping interception.
+		if len(rule.KeywordsAll) != 2 || len(rule.KeywordsAny) != 0 {
+			t.Fatalf("all-of set was not preserved as all-of: %+v", rule)
+		}
+		if rule.Kind != overlaySelectorAny {
+			t.Fatalf("a keyword-only rule should use the any selector: %+v", rule)
+		}
+	})
+
+	t.Run("a lone keyword reads as a keyword selector", func(t *testing.T) {
+		rule, ok := overlayPolicyRule(interceptRoutingRule{
+			Action: "reject", DomainKeywords: []string{"tnc"},
+		}, "m")
+		if !ok {
+			t.Fatal("a lone keyword was refused")
+		}
+		if rule.Kind != overlaySelectorDomainKeyword || rule.Value != "tnc" {
+			t.Fatalf("expected a keyword selector, got %+v", rule)
+		}
+	})
+
+	t.Run("network and port constraints survive", func(t *testing.T) {
+		rule, ok := overlayPolicyRule(interceptRoutingRule{
+			Action: "direct", DomainSuffix: "b.test", Network: "udp", DestinationPort: 443,
+		}, "m")
+		if !ok {
+			t.Fatal("a constrained rule was refused")
+		}
+		if rule.Network != "udp" || len(rule.Ports) != 1 || rule.Ports[0].From != 443 {
+			t.Fatalf("constraints lost: %+v", rule)
+		}
+	})
 }
 
 // --- journal ----------------------------------------------------------------

@@ -196,38 +196,58 @@ func overlayCaptureRule(selector interceptEgressSelector, owner string) (overlay
 
 // overlayPolicyRule converts one reviewed extension routing rule.
 //
-// The typed overlay carries exactly one primary selector per rule, so a rule
-// with several matchers cannot be represented and is refused rather than
-// silently narrowed — narrowing would change what the operator approved.
+// A reviewed rule is a conjunction: at most one primary selector (domain,
+// suffix or CIDR) narrowed by optional keyword, network and port constraints.
+// The typed overlay mirrors that shape exactly, so every rule the operator
+// approved survives the translation.
+//
+// This used to accept only a single selector and silently refuse anything
+// combining one with keywords. Shadow comparison against real operator state
+// found 21 of 323 reviewed rules being dropped that way — each one a deny or
+// direct decision that would simply have stopped being enforced.
 func overlayPolicyRule(rule interceptRoutingRule, owner string) (overlayClientRule, bool) {
 	out := overlayClientRule{Action: overlayActionReject, Owner: owner}
 	if strings.EqualFold(rule.Action, "direct") {
 		out.Action = overlayActionDirect
 	}
 
-	selectors := 0
+	primaries := 0
 	if rule.Domain != "" {
 		out.Kind, out.Value = overlaySelectorDomain, rule.Domain
-		selectors++
+		primaries++
 	}
 	if rule.DomainSuffix != "" {
 		out.Kind, out.Value = overlaySelectorDomainSuffix, rule.DomainSuffix
-		selectors++
+		primaries++
 	}
 	if rule.IPCIDR != "" {
 		out.Kind, out.Value = overlaySelectorIPCIDR, rule.IPCIDR
-		selectors++
+		primaries++
 	}
-	// A single keyword maps directly. Several keywords are a conjunction or a
-	// disjunction the typed model has no form for.
-	if len(rule.DomainKeywords) == 1 && len(rule.AllDomainKeywords) == 0 {
-		out.Kind, out.Value = overlaySelectorDomainKeyword, rule.DomainKeywords[0]
-		selectors++
-	} else if len(rule.DomainKeywords) > 0 || len(rule.AllDomainKeywords) > 0 {
+	if primaries > 1 {
+		// The source model permits exactly one primary selector; more than one
+		// means the rule was built by something this compiler does not model,
+		// and narrowing it would change what was approved.
 		return overlayClientRule{}, false
 	}
-	if selectors != 1 {
-		return overlayClientRule{}, false
+
+	// DomainKeywords is an any-of set; AllDomainKeywords is an all-of set.
+	out.KeywordsAny = append([]string(nil), rule.DomainKeywords...)
+	out.KeywordsAll = append([]string(nil), rule.AllDomainKeywords...)
+
+	if primaries == 0 {
+		if len(out.KeywordsAny) == 0 && len(out.KeywordsAll) == 0 {
+			return overlayClientRule{}, false
+		}
+		// A lone any-of keyword is more precisely a keyword selector than an
+		// unconstrained rule with one constraint; both match identically, but
+		// the former reads correctly in readback and diagnostics.
+		if len(out.KeywordsAny) == 1 && len(out.KeywordsAll) == 0 {
+			out.Kind, out.Value = overlaySelectorDomainKeyword, out.KeywordsAny[0]
+			out.KeywordsAny = nil
+		} else {
+			out.Kind, out.Value = overlaySelectorAny, ""
+		}
 	}
 
 	if rule.Network != "" {
@@ -266,6 +286,16 @@ func overlayRuleIdentity(rule overlayClientRule) string {
 	b.WriteByte(0)
 	for _, p := range rule.Ports {
 		fmt.Fprintf(&b, "%05d-%05d,", p.From, p.To)
+	}
+	b.WriteByte(0)
+	for _, kw := range rule.KeywordsAny {
+		b.WriteString(kw)
+		b.WriteByte(1)
+	}
+	b.WriteByte(0)
+	for _, kw := range rule.KeywordsAll {
+		b.WriteString(kw)
+		b.WriteByte(1)
 	}
 	b.WriteByte(0)
 	b.WriteString(string(rule.Action))
