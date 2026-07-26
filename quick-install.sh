@@ -23,9 +23,9 @@ _QI_SOURCE_DIR=""
 # Gum-or-ANSI helpers. This entrypoint runs before install.sh bootstraps Gum, so
 # Gum is merely detected here; failure or absence always has a plain fallback.
 if command -v gum >/dev/null 2>&1 && [[ -t 1 ]]; then _HAVE_GUM=1; else _HAVE_GUM=0; fi
-red()   { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level error -- "$*" >&2; else printf '\033[0;31m%s\033[0m\n' "$*" >&2; fi; }
-green() { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level info  -- "$*";     else printf '\033[0;32m%s\033[0m\n' "$*"; fi; }
-info()  { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level info  -- "$*";     else printf '\033[0;34m%s\033[0m\n' "$*"; fi; }
+red()   { if [[ "$_HAVE_GUM" == 1 ]]; then CI=1 gum log --level error -- "$*" >&2; else printf '\033[0;31m%s\033[0m\n' "$*" >&2; fi; }
+green() { if [[ "$_HAVE_GUM" == 1 ]]; then CI=1 gum log --level info  -- "$*";     else printf '\033[0;32m%s\033[0m\n' "$*"; fi; }
+info()  { if [[ "$_HAVE_GUM" == 1 ]]; then CI=1 gum log --level info  -- "$*";     else printf '\033[0;34m%s\033[0m\n' "$*"; fi; }
 
 dl() { # dl <url> <out> -- curl or wget, whichever exists
     if command -v curl >/dev/null 2>&1; then

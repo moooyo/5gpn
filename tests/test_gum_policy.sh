@@ -26,6 +26,10 @@ grep -Fq 'return 1' <<<"$gum_fn" && fail "gum bootstrap has a fatal failure path
 grep -Fq 'gum sha256 mismatch' "$INSTALL"             || fail "gum verify is not fail-closed"
 grep -Fq -- '--connect-timeout 10 --max-time 60' <<<"$gum_fn" \
     || fail "optional gum download has no bounded network timeout"
+reuse_line="$(grep -nF 'activate_verified_installed_gum' <<<"$gum_fn" | head -1 | cut -d: -f1)"
+download_line="$(grep -nF 'curl -fsSL' <<<"$gum_fn" | head -1 | cut -d: -f1)"
+[[ -n "$reuse_line" && -n "$download_line" && "$reuse_line" -lt "$download_line" ]] \
+    || fail "install_gum does not verify and reuse the owned binary before downloading"
 
 # --- helpers gum-or-echo (fallback must exist) ---
 grep -Fq 'gum log --level info' "$INSTALL"            || fail "info() has no gum branch"
@@ -34,6 +38,21 @@ grep -Eq 'ask_secret\(\)' "$INSTALL"                  || fail "no ask_secret() p
 grep -Fq 'gum input --password' "$INSTALL"            || fail "bot token not collected via gum --password"
 ask_secret_fn="$(sed -n '/^ask_secret()/,/^}/p' "$INSTALL")"
 grep -Fq 'read -r -s' <<<"$ask_secret_fn"              || fail "plain secret fallback echoes operator input"
+
+# Gum must not probe OSC/CSI terminal capabilities. On TTYs that do not answer
+# those queries, one unscoped Gum process can otherwise block for many seconds.
+for f in "$INSTALL" "$ROOT/quick-install.sh" \
+    "$ROOT/scripts/cert-renew.sh" "$ROOT/scripts/gen-ios-profile.sh" \
+    "$ROOT/scripts/intercept-cert-renew.sh" "$ROOT/scripts/reload-rules.sh" \
+    "$ROOT/scripts/renew-hook.sh" "$ROOT/scripts/setup-tgbot.sh"; do
+    unsafe_gum="$(grep -E 'gum (log|input|confirm|choose|spin|style)([[:space:]]|$)' "$f" \
+        | grep -Fv 'CI=1 gum ' || true)"
+    [[ -z "$unsafe_gum" ]] || fail "$f has a Gum interaction that can block on terminal probing"
+done
+gum_spin_fn="$(sed -n '/^gum_spin()/,/^}/p' "$INSTALL")"
+grep -Fq 'env -u CI' <<<"$gum_spin_fn" \
+    && grep -Fq 'env "CI=$CI"' <<<"$gum_spin_fn" \
+    || fail "gum_spin leaks Gum's synthetic CI=1 into wrapped commands"
 
 # --- non-TTY safety: Telegram configuration fails before prompts without a TTY ---
 grep -Fq 'Telegram configuration requires the TUI' "$INSTALL" \

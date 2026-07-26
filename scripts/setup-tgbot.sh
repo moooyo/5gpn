@@ -181,7 +181,7 @@ setup_tgbot_live() {
     fi
 
     if [[ -t 0 && "${_HAVE_GUM:-0}" == 1 ]]; then
-        gum style --border rounded --padding "0 1" \
+        CI=1 gum style --border rounded --padding "0 1" \
           "未知自己的 Telegram ID?" \
           "1) 给你的 bot 发 /id" \
           "2) 再运行 5gpn setup-tgbot，或在 Web 设置中加入该 ID"

@@ -17,10 +17,10 @@ export PATH
 # --- Gum-or-echo status helpers. As a certbot deploy hook this normally runs
 # without a TTY, so output stays as plain, journald-friendly lines. ---
 if command -v gum >/dev/null 2>&1 && [[ -t 1 ]]; then _HAVE_GUM=1; else _HAVE_GUM=0; fi
-info() { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level info  -- "$*"; else echo "[INFO] $*"; fi; }
-ok()   { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level info  -- "$*"; else echo "[OK]   $*"; fi; }
-warn() { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level warn  -- "$*" >&2; else echo "[!]    $*" >&2; fi; }
-err()  { if [[ "$_HAVE_GUM" == 1 ]]; then gum log --level error -- "$*" >&2; else echo "[ERR]  $*" >&2; fi; }
+info() { if [[ "$_HAVE_GUM" == 1 ]]; then CI=1 gum log --level info  -- "$*"; else echo "[INFO] $*"; fi; }
+ok()   { if [[ "$_HAVE_GUM" == 1 ]]; then CI=1 gum log --level info  -- "$*"; else echo "[OK]   $*"; fi; }
+warn() { if [[ "$_HAVE_GUM" == 1 ]]; then CI=1 gum log --level warn  -- "$*" >&2; else echo "[!]    $*" >&2; fi; }
+err()  { if [[ "$_HAVE_GUM" == 1 ]]; then CI=1 gum log --level error -- "$*" >&2; else echo "[ERR]  $*" >&2; fi; }
 
 # Fixed production paths. Tests source the hook in library mode and override
 # these globals only after the production defaults have been established.

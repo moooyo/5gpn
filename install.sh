@@ -208,6 +208,10 @@ INTERCEPT_HEALTHCHECK_MAX_TIMEOUT=10
 # ----------------------------------------------------------------------------
 # Pretty output helpers
 # ----------------------------------------------------------------------------
+# Gum v0.17 probes terminal colors with OSC/CSI queries. Some otherwise valid
+# TTYs do not answer those queries, making every short-lived Gum process pause
+# for seconds. Scope CI=1 to Gum itself so it uses its non-querying renderer;
+# do not export it across the installer process.
 if [[ -t 1 ]]; then
     RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BLUE=$'\033[0;34m'; NC=$'\033[0m'
 else
@@ -215,28 +219,28 @@ else
 fi
 info() {
     if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then
-        gum log --level info -- "$*" || echo "${BLUE}[INFO]${NC} $*"
+        CI=1 gum log --level info -- "$*" || echo "${BLUE}[INFO]${NC} $*"
     else
         echo "${BLUE}[INFO]${NC} $*"
     fi
 }
 ok() {
     if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then
-        gum log --level info -- "✔ $*" || echo "${GREEN}[OK]${NC}   $*"
+        CI=1 gum log --level info -- "✔ $*" || echo "${GREEN}[OK]${NC}   $*"
     else
         echo "${GREEN}[OK]${NC}   $*"
     fi
 }
 warn() {
     if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then
-        gum log --level warn -- "$*" || echo "${YELLOW}[WARN]${NC} $*"
+        CI=1 gum log --level warn -- "$*" || echo "${YELLOW}[WARN]${NC} $*"
     else
         echo "${YELLOW}[WARN]${NC} $*"
     fi
 }
 err() {
     if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then
-        gum log --level error -- "$*" >&2 || echo "${RED}[ERR]${NC}  $*" >&2
+        CI=1 gum log --level error -- "$*" >&2 || echo "${RED}[ERR]${NC}  $*" >&2
     else
         echo "${RED}[ERR]${NC}  $*" >&2
     fi
@@ -245,10 +249,10 @@ err() {
 # Interactive helpers (gum vs read). Callers gate on [[ -t 0 ]]; main() runs
 # attach_tty first, so a piped `curl | sudo bash` install still has a terminal on
 # stdin and these prompts fire as intended.
-ask_text()   { if [[ "$_HAVE_GUM" == 1 ]]; then gum input --prompt "$1 " --placeholder "${2:-}"; else local v; read -r -p "$1 " v; printf '%s' "$v"; fi; }
+ask_text()   { if [[ "$_HAVE_GUM" == 1 ]]; then CI=1 gum input --prompt "$1 " --placeholder "${2:-}"; else local v; read -r -p "$1 " v; printf '%s' "$v"; fi; }
 ask_secret() {
     if [[ "$_HAVE_GUM" == 1 ]]; then
-        gum input --password --prompt "$1 "
+        CI=1 gum input --password --prompt "$1 "
     else
         local v
         read -r -s -p "$1 " v
@@ -256,11 +260,11 @@ ask_secret() {
         printf '%s' "$v"
     fi
 }
-ask_yesno()  { if [[ "$_HAVE_GUM" == 1 ]]; then gum confirm "$1"; else local a; read -r -p "$1 [y/N] " a; [[ "$a" == [yY]* ]]; fi; }
+ask_yesno()  { if [[ "$_HAVE_GUM" == 1 ]]; then CI=1 gum confirm "$1"; else local a; read -r -p "$1 [y/N] " a; [[ "$a" == [yY]* ]]; fi; }
 ask_choice() {
     local prompt="$1"; shift
     if [[ "$_HAVE_GUM" == 1 ]]; then
-        printf '%s\n' "$@" | gum choose --header "$prompt"
+        printf '%s\n' "$@" | CI=1 gum choose --header "$prompt"
     else
         local i=1 answer="" item
         echo "$prompt" >&2
@@ -271,9 +275,22 @@ ask_choice() {
     fi
 }
 # Run an opaque wait command behind a spinner when interactive; else run it plainly.
-gum_spin()   { local t="$1"; shift; if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then gum spin --title "$t" -- "$@"; else "$@"; fi; }
+# Restore the caller's CI state for the wrapped command because Gum inherits its
+# own non-querying environment into child processes.
+gum_spin() {
+    local t="$1"; shift
+    if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then
+        if [[ -n "${CI+x}" ]]; then
+            CI=1 gum spin --title "$t" -- env "CI=$CI" "$@"
+        else
+            CI=1 gum spin --title "$t" -- env -u CI "$@"
+        fi
+    else
+        "$@"
+    fi
+}
 # Frame multi-line stdin in a rounded box when interactive; else pass it through.
-card()       { if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then gum style --border rounded --padding "0 1" --border-foreground 212; else cat; fi; }
+card()       { if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then CI=1 gum style --border rounded --padding "0 1" --border-foreground 212; else cat; fi; }
 
 # attach_tty makes a PIPED install interactive. Run via `curl | sudo bash`, fd 0 is
 # the pipe/script, not the terminal, so [[ -t 0 ]] is false and EVERY prompt below
@@ -1538,6 +1555,9 @@ claim_ios_dir() {
 install_gum() {
     claim_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
         || { _HAVE_GUM=0; warn "gum bootstrap could not claim the runtime directory; using plain output."; return 0; }
+    # Reuse only the project-owned binary after repeating its local ownership
+    # and version checks. This avoids a silent network download on every run.
+    activate_verified_installed_gum
     # Only trust a gum that THIS process already verified. An arbitrary binary
     # on PATH with a matching --version is not supply-chain evidence.
     if [[ "$_HAVE_GUM" == 1 ]] && command -v gum >/dev/null 2>&1 \
@@ -1552,6 +1572,7 @@ install_gum() {
         *)             arch="x86_64"; exp="$GUM_SHA256_X86_64" ;;
     esac
     url="https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/gum_${GUM_VERSION}_Linux_${arch}.tar.gz"
+    info "Downloading optional Gum ${GUM_VERSION} TUI helper (up to 60s; plain output remains available)."
     tmp="$(mktemp -d /tmp/5gpn-gum.XXXXXX 2>/dev/null)" || { warn "gum: mktemp failed; using plain output."; _HAVE_GUM=0; return 0; }
     claim_temp_dir "$tmp" || { rmdir -- "$tmp" 2>/dev/null || true; warn "gum: could not claim temp directory; using plain output."; return 0; }
     if ! command -v curl >/dev/null 2>&1 \
@@ -5064,7 +5085,7 @@ manage_menu() {
     while true; do
         local choice=""
         if [[ "$_HAVE_GUM" == 1 ]]; then
-            choice="$(printf '%s\n' "${labels[@]}" | gum choose --header '5gpn 管理 (↑/↓ 选择, Enter 确认)' || true)"
+            choice="$(printf '%s\n' "${labels[@]}" | CI=1 gum choose --header '5gpn 管理 (↑/↓ 选择, Enter 确认)' || true)"
         else
             echo ""; echo "5gpn 管理菜单:"
             local i=1; for l in "${labels[@]}"; do echo "  $i) $l"; i=$((i+1)); done
@@ -5800,7 +5821,7 @@ install_cert() {
         if [[ "$mode" == cloudflare ]]; then
             ensure_cf_token || return 1
             cf_token_ready=1
-            info "Issuing Let's Encrypt WILDCARD cert for *.${base} (Cloudflare DNS-01)..."
+            info "Issuing Let's Encrypt WILDCARD cert for *.${base} (Cloudflare DNS-01; propagation wait is at least 30s)..."
             certbot_args+=(--dns-cloudflare \
                 --dns-cloudflare-credentials "${ACME_DIR}/cloudflare.ini" \
                 --dns-cloudflare-propagation-seconds "$CERT_DNS_PROPAGATION_SECONDS" -d "*.${base}" -d "${base}")
