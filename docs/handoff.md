@@ -183,8 +183,23 @@ done——除了 §4.1 末尾那个浏览器确认。但状态表本身仍然只
 - **transport-level pinned-IP dialing**。`Metadata.RemoteAddress()` 在 `Host`
   非空时返回它，于是 DIRECT / HTTP / SOCKS5-out / VMess 全都转发域名、忽略已
   填充的 `DstIP`。真正的 pin 需要新增一个 metadata 字段并让每个 adapter 的
-  目标格式化都尊重它——改的是全树 churn 最高的目录。`public-only` 目前**携带
-  并校验，但未在传输层强制执行**。
+  目标格式化都尊重它——改的是全树 churn 最高的目录。
+  **`public-only` 比之前记的更糟，这一轮实测确认（每条断言都亲手核对，非转述）**：
+  它不只是"未在传输层强制"，而是**协调者从未把该字段设为 true**，所以
+  `snapshot.go:186` 的 `if c.PublicOnly && …` 左操作数恒假、整条是死代码；就算
+  设了，`forbiddenEgressScope` 对空 `DstIP`（域名形态）也返回放行。加上 IP-CIDR
+  私网拒绝全带 `no-resolve`（只拦已是 IP 的目标），**一个解析到私网的域名会一路
+  通过、被 DIRECT 在拨号时解析并连上**。可达路径：扩展声明一个 network origin →
+  自动生成 DOMAIN egress selector（`intercept_mihomo.go:180`）→ 攻击者审查后把该
+  域名 DNS 翻成 `127.x`/`10.x`/`169.254.169.254` → 响应 body 回传给扩展 VM
+  （`sidecar/module_network.go:259`）。**读型 SSRF**，触发者是恶意/被劫持的扩展，
+  非外部未认证方；网关自己的 `:9090` 仍需 bearer secret，但云元数据不需要。
+  详见记忆 `public-only-egress-gap`。
+  **本轮已做**：修正两处会骗人的注释（`types.go` 的 PublicOnly 说"forces
+  pinned-IP dialing"、tmpl 的"an extension can never capture private ranges"）——
+  纯注释、无规则变化。**未做**：真正的缓解。便宜候选＝给 egress 路径的私网拒绝
+  去掉 `no-resolve`（代价：每次求值多一次解析 + 更窄的 TOCTOU 残留 + 需评估
+  resolver 归属/性能），未验证；真正修法＝传输层 pin，deferred。
 - **processor 侧 generation 轮询与事务绑定**（计划第 15 项）。现在由协调者
   attest 就绪；processor 的 socket 按设计是只读的。
 - **DNS quarantine cacheable negatives**（review 6.15）。
