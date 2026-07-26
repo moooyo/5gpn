@@ -174,6 +174,17 @@ ZASH_SHA256="b5d003f55f9424eaaa78f901a5b37912dbd9ac07cb37e17c527b209c52947bf4"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
+# Keys this installer used to manage and no longer writes. An existing dns.env
+# from before their removal still contains them, so validate_dns_env_schema must
+# TOLERATE them — rejecting one would abort every upgrade — while set_dns_env_kv
+# still refuses to write one back. write_dns_env drops them from the rewritten
+# file, so they disappear on the first upgrade rather than lingering forever.
+#
+# DNS_CHINA/DNS_TRUST moved to upstreams.json, which the daemon can write and
+# dns.env cannot be. seed_upstreams_json reads them one last time on upgrade so
+# a hand-edited value is carried across instead of being reset.
+readonly DNS_ENV_RETIRED_KEYS="DNS_CHINA DNS_TRUST"
+
 readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_LISTEN_API DNS_CERT DNS_KEY DNS_WEB_CERT DNS_WEB_KEY DNS_ZASH_CERT DNS_ZASH_KEY \
 DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL DNS_UPSTREAMS \
 DNS_CHINA_ECS DNS_CHINA_0X20 DNS_ECS_FILE DNS_RULES_DIR DNS_CHNROUTE DNS_EGRESS_BROKER \
@@ -7210,6 +7221,9 @@ validate_dns_env_schema() {
         [[ "$line" == *=* ]] \
             || { err "Persisted dns.env contains a malformed line."; return 1; }
         key="${line%%=*}"
+        case " $DNS_ENV_RETIRED_KEYS " in
+            *" $key "*) continue ;;
+        esac
         case " $DNS_ENV_KEYS " in
             *" $key "*) ;;
             *)
