@@ -42,6 +42,11 @@ export interface Status {
   zash_version?: string
 }
 
+/** Post-reset snapshot returned by POST /api/stats/reset — every counter zero. */
+export interface StatsResetResult {
+  stats: Stats
+}
+
 export interface ZashboardHandoff {
   url: string
   expires_in_seconds: number

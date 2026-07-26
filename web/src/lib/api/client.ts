@@ -25,6 +25,11 @@ const qs = (params: Record<string, string | number | undefined>) => {
 export const api = {
   // ---- live --------------------------------------------------------------
   getStatus: (signal?: AbortSignal) => apiFetch<T.Status>('/api/status', { signal }),
+  // Zeroes the cumulative counters behind getStatus. They are cumulative since
+  // the installation's first boot and survive restarts, so a single
+  // pathological exchange stays in the averages forever otherwise. Returns the
+  // cleared snapshot, so the caller can render it without re-polling.
+  resetStats: () => apiFetch<T.StatsResetResult>('/api/stats/reset', { method: 'POST' }),
   getQueryLog: (q = '', limit?: number, signal?: AbortSignal) =>
     apiFetch<T.QueryLogResponse>('/api/querylog' + qs({ q, limit }), { signal }),
   resolveTest: (domain: string) => apiFetch<T.ResolveTestResult>('/api/resolve-test' + qs({ domain })),

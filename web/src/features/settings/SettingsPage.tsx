@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useStatus } from '../../lib/StatusContext'
 import { api } from '../../lib/api/client'
 import type { ECSView, IngressModulesView, MITMSettingsView, TGBotView, UpstreamsView } from '../../lib/api/types'
-import { AboutStrip, AppearanceCard, ConsoleCard, DotServiceCard, EcsCard, IngressPortsCard, MITMSettingsCard, TgbotCard, UpstreamsCard } from './_cards'
+import { AboutStrip, AppearanceCard, ConsoleCard, DotServiceCard, EcsCard, IngressPortsCard, MITMSettingsCard, StatsResetCard, TgbotCard, UpstreamsCard } from './_cards'
 
 /** Settings page — live config cards for the DoT service/cert, the
  *  control-plane console, the Telegram bot, upstream DNS groups and ECS,
@@ -119,6 +119,7 @@ export default function SettingsPage() {
         <DotServiceCard cert={status?.cert} dotDomain={status?.dot_domain} />
         <ConsoleCard />
       </div>
+      <StatsResetCard stats={status?.stats} />
       <MITMSettingsCard
         settings={mitmSettings}
         hostCount={mitmHostCount}

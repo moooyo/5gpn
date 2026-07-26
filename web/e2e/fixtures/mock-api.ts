@@ -346,6 +346,13 @@ export async function setupMockApi(page: Page): Promise<void> {
 
     // Status
     if (path === '/api/status') return json(route, STATUS_FIXTURE)
+    // Zeroes the cumulative counters. The real daemon returns the cleared
+    // snapshot so the console can render it without waiting for a poll.
+    if (path === '/api/stats/reset' && method === 'POST') {
+      return json(route, {
+        stats: Object.fromEntries(Object.keys(STATS_FIXTURE).map((key) => [key, 0])) as T.Stats,
+      })
+    }
     if (path === '/api/mihomo/health' && method === 'GET') {
       return json(route, { version: 'v1.19.28', meta: true } satisfies T.MihomoHealth)
     }

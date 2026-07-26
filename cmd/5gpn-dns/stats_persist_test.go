@@ -23,6 +23,15 @@ func bumpAllStats(s *statsCounters) {
 	s.chinaErr.Store(81)
 	s.trustOK.Store(91)
 	s.trustErr.Store(101)
+	// The observability counters are persisted and restored like the rest, so
+	// they belong in the round-trip fixture too — without them a field could be
+	// dropped from save or restore and every test here would still pass.
+	s.cacheHits.Store(111)
+	s.cacheMisses.Store(121)
+	s.chinaLatNanos.Store(131)
+	s.chinaLatCount.Store(141)
+	s.trustLatNanos.Store(151)
+	s.trustLatCount.Store(161)
 }
 
 func TestStatsPersist_RoundTrip(t *testing.T) {
@@ -208,5 +217,112 @@ func TestStatsPersist_PersisterDisabled(t *testing.T) {
 	case <-done2:
 	case <-time.After(2 * time.Second):
 		t.Fatal("RunStatsPersister with nil stats did not return immediately")
+	}
+}
+
+// The counters are cumulative since first boot, so an operator's only escape
+// from a skewed average used to be stopping the daemon and deleting the file.
+// reset() zeroes every field — asserted against the zero snapshot rather than
+// field by field, so a counter added later cannot be forgotten here.
+func TestStatsReset_ZeroesEveryCounter(t *testing.T) {
+	s := &statsCounters{}
+	bumpAllStats(s)
+	if s.snapshot() == (statsSnapshot{}) {
+		t.Fatal("fixture did not bump anything; the test would pass vacuously")
+	}
+
+	s.reset()
+
+	if got := s.snapshot(); got != (statsSnapshot{}) {
+		t.Errorf("reset left counters set: %+v", got)
+	}
+}
+
+func TestStatsReset_NilCountersDoesNotPanic(t *testing.T) {
+	var s *statsCounters
+	s.reset()
+}
+
+// A reset that lived only in memory would be undone by the next restart, since
+// boot restores from this file. ResetStats must write it straight away rather
+// than wait for the persister's tick.
+func TestControllerResetStats_PersistsImmediately(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stats.json")
+	s := &statsCounters{}
+	bumpAllStats(s)
+	if err := SaveStats(path, s); err != nil {
+		t.Fatalf("SaveStats: %v", err)
+	}
+
+	c := NewController(func() error { return nil }, s, nil, nil)
+	c.SetStatsFile(path)
+	if err := c.ResetStats(); err != nil {
+		t.Fatalf("ResetStats: %v", err)
+	}
+
+	if got := s.snapshot(); got != (statsSnapshot{}) {
+		t.Errorf("in-memory counters not zeroed: %+v", got)
+	}
+	// Reload from disk exactly as boot would.
+	restored := &statsCounters{}
+	if err := LoadStats(path, restored); err != nil {
+		t.Fatalf("LoadStats: %v", err)
+	}
+	if got := restored.snapshot(); got != (statsSnapshot{}) {
+		t.Errorf("reset did not survive a reload — a restart would resurrect the old numbers: %+v", got)
+	}
+}
+
+// Persistence disabled (DNS_STATS_FILE=""): the reset is memory-only, must
+// succeed, and must not create a file at some guessed default path.
+func TestControllerResetStats_PersistenceDisabled(t *testing.T) {
+	dir := t.TempDir()
+	s := &statsCounters{}
+	bumpAllStats(s)
+
+	c := NewController(func() error { return nil }, s, nil, nil)
+	if err := c.ResetStats(); err != nil {
+		t.Fatalf("ResetStats with no stats file: %v", err)
+	}
+	if got := s.snapshot(); got != (statsSnapshot{}) {
+		t.Errorf("counters not zeroed: %+v", got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("reset wrote %d file(s) with persistence disabled", len(entries))
+	}
+}
+
+// A nil stats pointer is valid (Controllers built without stats wiring).
+func TestControllerResetStats_NilStats(t *testing.T) {
+	c := NewController(func() error { return nil }, nil, nil, nil)
+	if err := c.ResetStats(); err != nil {
+		t.Fatalf("ResetStats with nil stats: %v", err)
+	}
+}
+
+// An unwritable path must surface an error, because the in-memory counters are
+// already zero by then: reporting success would tell the operator the reset is
+// durable when a restart will undo it.
+func TestControllerResetStats_ReportsPersistFailure(t *testing.T) {
+	s := &statsCounters{}
+	bumpAllStats(s)
+	c := NewController(func() error { return nil }, s, nil, nil)
+	// A path whose parent is a regular file can never be written on any OS.
+	parent := filepath.Join(t.TempDir(), "notadir")
+	if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	c.SetStatsFile(filepath.Join(parent, "stats.json"))
+
+	err := c.ResetStats()
+	if err == nil {
+		t.Fatal("expected an error when the reset cannot be persisted")
+	}
+	if got := s.snapshot(); got != (statsSnapshot{}) {
+		t.Errorf("counters must still be zeroed in memory even when the write fails: %+v", got)
 	}
 }

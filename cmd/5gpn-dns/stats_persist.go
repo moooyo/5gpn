@@ -83,6 +83,22 @@ func (s *statsCounters) restore(snap statsSnapshot) {
 	s.trustLatCount.Store(snap.TrustLatCount)
 }
 
+// reset zeroes every counter. Expressed through restore of a zero snapshot so
+// a counter added to statsSnapshot cannot be zeroed here and forgotten there,
+// or vice versa — the two lists are the same list.
+//
+// The fields are stored independently, so a concurrent in-flight query can land
+// between two Stores and survive the reset. That is deliberate: the alternative
+// is a lock on the hot query path to make an operator-triggered administrative
+// action atomic, which is the wrong trade for a counter whose whole purpose is
+// observability.
+func (s *statsCounters) reset() {
+	if s == nil {
+		return
+	}
+	s.restore(statsSnapshot{})
+}
+
 // LoadStats reads a statsSnapshot from path and restores it into s. A missing
 // file is not an error — it means a fresh start, and s is left untouched
 // (all-zero). A malformed file returns an error so the caller can log it, but

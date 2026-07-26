@@ -52,6 +52,13 @@ type Controller struct {
 	stats    *statsCounters
 	cacheLen func() int
 
+	// statsFile is the same path RunStatsPersister writes on its ticker, wired
+	// post-construction via SetStatsFile. ResetStats writes it directly so a
+	// reset is durable the moment it is acknowledged instead of at the next
+	// tick. Empty means persistence is disabled (DNS_STATS_FILE=""), and a
+	// reset is then purely in-memory.
+	statsFile string
+
 	// certStatusFn, when set, returns the TLS-cert expiry view for /status and
 	// the bot status. nil when no TLS listener / cert monitor is wired.
 	certStatusFn func() (CertStatus, bool)
@@ -118,6 +125,10 @@ func NewController(reload func() error, stats *statsCounters, cacheLen func() in
 		handler:  handler,
 	}
 }
+
+// SetStatsFile wires the stats persistence path so ResetStats can make a reset
+// durable immediately. Optional; unset means a reset only clears memory.
+func (c *Controller) SetStatsFile(path string) { c.statsFile = path }
 
 // SetCertStatusFn wires the TLS-cert expiry source (the certMonitor). Optional;
 // unset means CertStatus reports ok=false.
@@ -295,6 +306,33 @@ func (c *Controller) Stats() Stats {
 		s.CacheEntries = c.cacheLen()
 	}
 	return s
+}
+
+// ResetStats zeroes every cumulative counter and persists the zeroed set
+// immediately.
+//
+// The persist is not an optimisation. The counters are restored from
+// statsFile at boot, so a reset that lived only in memory would be undone by
+// any restart before the next periodic save — the operator would see the old
+// numbers come back and have no way to tell that from the reset silently
+// failing. Writing straight away makes the reset durable at the moment it is
+// acknowledged.
+//
+// A write failure is returned rather than swallowed: the in-memory counters
+// are already zero by then, so the caller must be able to say that the reset
+// took effect now but will not survive a restart.
+func (c *Controller) ResetStats() error {
+	if c.stats == nil {
+		return nil
+	}
+	c.stats.reset()
+	if c.statsFile == "" {
+		return nil // persistence disabled; zeroing memory is the whole operation
+	}
+	if err := SaveStats(c.statsFile, c.stats); err != nil {
+		return fmt.Errorf("stats reset applied in memory but not persisted: %w", err)
+	}
+	return nil
 }
 
 // avgMs returns the mean of a nanosecond sum over count, in milliseconds, or 0

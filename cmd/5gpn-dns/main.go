@@ -230,6 +230,9 @@ func main() {
 	}
 	// ctrl is shared by the HTTP API and Telegram bot.
 	ctrl := NewController(reload, h.stats, h.Cache.Len, h)
+	// Same path RunStatsPersister uses below, so POST /api/stats/reset can make
+	// a reset durable at once rather than leaving it to the next 60s tick.
+	ctrl.SetStatsFile(cfg.StatsFile)
 
 	// Upstream hot-swap hook (PUT /api/upstreams): rebuild both groups from the
 	// validated specs, swap them into the live engine (flushes the response

@@ -370,6 +370,7 @@ func (s *ControlServer) apiMux() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/status", s.handleStatus)
+	mux.HandleFunc("POST /api/stats/reset", s.handleStatsReset)
 	mux.HandleFunc("GET /api/resolve-test", s.handleResolveTest)
 	mux.HandleFunc("GET /api/querylog", s.handleQueryLog)
 
@@ -425,6 +426,30 @@ func (s *ControlServer) apiMux() http.Handler {
 	mux.HandleFunc("GET /api/geocode/cities", s.handleGeocodeCities)
 
 	return mux
+}
+
+// handleStatsReset zeroes every cumulative counter behind GET /api/status.
+//
+// The counters are cumulative since the installation's first boot and are
+// restored from stats.json at every start, so without this the only way to
+// clear them is to stop the daemon and delete that file. That matters most for
+// the per-group average latencies: they are unweighted means over every sample
+// ever taken, so one pathological exchange stays visible in the number
+// indefinitely and no amount of subsequent healthy traffic dilutes it.
+//
+// Deliberately resets ALL counters rather than just the latency pair. A partial
+// reset would leave china_ok/china_err counting exchanges whose durations are
+// no longer represented, so the card's "N 次交换" and its average would describe
+// different populations.
+func (s *ControlServer) handleStatsReset(w http.ResponseWriter, r *http.Request) {
+	if err := s.ctrl.ResetStats(); err != nil {
+		// The in-memory counters ARE zero at this point; only durability failed.
+		// Say so explicitly rather than reporting a plain failure the operator
+		// would read as "nothing happened".
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"stats": s.ctrl.Stats()})
 }
 
 // handleStatus reports build/runtime identity plus a stats snapshot. Controller

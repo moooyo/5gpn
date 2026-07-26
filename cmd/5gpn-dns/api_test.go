@@ -1136,3 +1136,82 @@ func TestStatusReportsInstalledZashboardVersion(t *testing.T) {
 		}
 	}
 }
+
+// POST /api/stats/reset zeroes the cumulative counters that GET /api/status
+// reports. Without it the only way to clear a skewed cumulative average is to
+// stop the daemon and delete stats.json.
+func TestStatsResetEndpoint(t *testing.T) {
+	certPath, keyPath := generateSelfSignedCert(t, t.TempDir())
+	statsPath := filepath.Join(t.TempDir(), "stats.json")
+
+	counters := &statsCounters{}
+	bumpAllStats(counters)
+	ctrl := NewController(func() error { return nil }, counters, nil, nil)
+	ctrl.SetStatsFile(statsPath)
+
+	cs, err := NewControlServer(Config{
+		APIToken: "tok", WebCertFile: certPath, WebKeyFile: keyPath,
+	}, ctrl)
+	if err != nil {
+		t.Fatalf("NewControlServer: %v", err)
+	}
+
+	// Pre-condition: /api/status reports the bumped values.
+	before := decodeJSON[struct {
+		Stats Stats `json:"stats"`
+	}](t, doAPI(cs, http.MethodGet, "/api/status", nil, "tok", true))
+	if before.Stats.Total == 0 {
+		t.Fatal("fixture not visible through /api/status; the test would pass vacuously")
+	}
+
+	rec := doAPI(cs, http.MethodPost, "/api/stats/reset", nil, "tok", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reset status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	// The response carries the post-reset snapshot so the console can render
+	// the cleared state without a second round trip.
+	got := decodeJSON[struct {
+		Stats Stats `json:"stats"`
+	}](t, rec)
+	if got.Stats != (Stats{}) {
+		t.Errorf("reset response stats = %+v, want zero", got.Stats)
+	}
+
+	after := decodeJSON[struct {
+		Stats Stats `json:"stats"`
+	}](t, doAPI(cs, http.MethodGet, "/api/status", nil, "tok", true))
+	if after.Stats != (Stats{}) {
+		t.Errorf("/api/status after reset = %+v, want zero", after.Stats)
+	}
+
+	// Durable: a restart reloads from the file, so it must be zeroed on disk.
+	reloaded := &statsCounters{}
+	if err := LoadStats(statsPath, reloaded); err != nil {
+		t.Fatalf("LoadStats: %v", err)
+	}
+	if snap := reloaded.snapshot(); snap != (statsSnapshot{}) {
+		t.Errorf("stats file after reset = %+v, want zero", snap)
+	}
+}
+
+// The endpoint mutates state, so it must sit behind the same bearer gate as
+// every other /api/* route.
+func TestStatsResetRequiresAuth(t *testing.T) {
+	cs := newTestControlServer(t, "tok")
+	if rec := doAPI(cs, http.MethodPost, "/api/stats/reset", nil, "", false); rec.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated reset status=%d, want 401", rec.Code)
+	}
+	if rec := doAPI(cs, http.MethodPost, "/api/stats/reset", nil, "wrong", true); rec.Code != http.StatusUnauthorized {
+		t.Errorf("bad-token reset status=%d, want 401", rec.Code)
+	}
+}
+
+// GET must not clear counters — a link prefetch or a crawler hitting the URL
+// would otherwise wipe the operator's statistics.
+func TestStatsResetRejectsGet(t *testing.T) {
+	cs := newTestControlServer(t, "tok")
+	rec := doAPI(cs, http.MethodGet, "/api/stats/reset", nil, "tok", true)
+	if rec.Code == http.StatusOK {
+		t.Errorf("GET /api/stats/reset returned 200; the route must be POST-only")
+	}
+}
