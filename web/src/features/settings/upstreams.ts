@@ -1,5 +1,5 @@
 export type UpstreamGroup = 'china' | 'trust'
-export type UpstreamProtocol = 'udp' | 'dot'
+export type UpstreamProtocol = 'udp' | 'dot' | 'doh'
 
 export type UpstreamFieldError = 'required' | 'invalid'
 
@@ -7,6 +7,7 @@ export interface UpstreamInputErrors {
   protocol?: 'invalid'
   address?: UpstreamFieldError
   serverName?: UpstreamFieldError
+  endpoint?: UpstreamFieldError
 }
 
 export type UpstreamSpecResult =
@@ -18,12 +19,15 @@ export interface UpstreamSpecInput {
   protocol: UpstreamProtocol
   address: string
   serverName?: string
+  /** DoH only: the absolute https:// endpoint, e.g. https://dns.google/dns-query */
+  endpoint?: string
 }
 
 export interface ParsedUpstreamSpec {
   protocol: UpstreamProtocol
   address: string
   serverName?: string
+  endpoint?: string
 }
 
 const hostnameRE = /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$/
@@ -84,6 +88,24 @@ export function isValidServerName(value: string): boolean {
   return hostnameRE.test(value) || isValidIP(value)
 }
 
+/**
+ * Mirrors the daemon's DoH endpoint grammar (ValidateUpstreams in
+ * cmd/5gpn-dns/upstreams.go): an absolute https:// URL with a real host and a
+ * non-root path. The path matters — every DoH resolver publishes one
+ * (/dns-query by convention) and a bare origin would POST to "/".
+ */
+export function isValidDoHEndpoint(value: string): boolean {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return false
+  }
+  if (url.protocol !== 'https:' || !url.hostname) return false
+  if (url.pathname === '' || url.pathname === '/') return false
+  return hostnameRE.test(url.hostname) || isValidIP(url.hostname)
+}
+
 export function createUpstreamSpec(input: UpstreamSpecInput): UpstreamSpecResult {
   const address = input.address.trim()
   const serverName = input.serverName?.trim() ?? ''
@@ -98,19 +120,28 @@ export function createUpstreamSpec(input: UpstreamSpecInput): UpstreamSpecResult
     else if (!isValidServerName(serverName)) errors.serverName = 'invalid'
   }
 
+  const endpoint = input.endpoint?.trim() ?? ''
+  if (input.protocol === 'doh') {
+    if (!endpoint) errors.endpoint = 'required'
+    else if (!isValidDoHEndpoint(endpoint)) errors.endpoint = 'invalid'
+  }
+
   if (Object.keys(errors).length > 0) return { ok: false, errors }
-  return { ok: true, spec: input.protocol === 'dot' ? `${serverName}@${address}` : address }
+  if (input.protocol === 'doh') return { ok: true, spec: `${endpoint}@${address}` }
+  if (input.protocol === 'dot') return { ok: true, spec: `${serverName}@${address}` }
+  return { ok: true, spec: address }
 }
 
 export function parseUpstreamSpec(group: UpstreamGroup, raw: string): ParsedUpstreamSpec {
   const spec = raw.trim()
   const separator = group === 'trust' ? spec.lastIndexOf('@') : -1
   if (separator > 0) {
-    return {
-      protocol: 'dot',
-      serverName: spec.slice(0, separator),
-      address: spec.slice(separator + 1),
-    }
+    const head = spec.slice(0, separator)
+    const address = spec.slice(separator + 1)
+    // The https:// prefix is what distinguishes a DoH endpoint from a DoT
+    // server name; both use the same @-suffix to pin the dial address.
+    if (head.startsWith('https://')) return { protocol: 'doh', endpoint: head, address }
+    return { protocol: 'dot', serverName: head, address }
   }
   return { protocol: 'udp', address: spec }
 }

@@ -75,3 +75,65 @@ describe('upstream validation', () => {
     })
   })
 })
+
+// DoH shares the @-suffix pinning with DoT: the https:// prefix is what
+// distinguishes an endpoint URL from a TLS server name.
+describe('DoH upstream specs', () => {
+  it('builds an endpoint@address spec', () => {
+    const result = createUpstreamSpec({
+      group: 'trust',
+      protocol: 'doh',
+      endpoint: 'https://dns.google/dns-query',
+      address: '8.8.8.8',
+    })
+    expect(result).toEqual({ ok: true, spec: 'https://dns.google/dns-query@8.8.8.8' })
+  })
+
+  it('round-trips through parseUpstreamSpec without being mistaken for DoT', () => {
+    expect(parseUpstreamSpec('trust', 'https://dns.google/dns-query@8.8.8.8')).toEqual({
+      protocol: 'doh',
+      endpoint: 'https://dns.google/dns-query',
+      address: '8.8.8.8',
+    })
+    // A DoT entry must still parse as DoT.
+    expect(parseUpstreamSpec('trust', 'dns.google@8.8.8.8')).toEqual({
+      protocol: 'dot',
+      serverName: 'dns.google',
+      address: '8.8.8.8',
+    })
+  })
+
+  it.each([
+    ['', 'required'],
+    ['http://dns.google/dns-query', 'invalid'],
+    ['dns.google/dns-query', 'invalid'],
+    ['https://dns.google', 'invalid'],
+    ['https://dns.google/', 'invalid'],
+  ])('rejects endpoint %s', (endpoint, kind) => {
+    const result = createUpstreamSpec({ group: 'trust', protocol: 'doh', endpoint, address: '8.8.8.8' })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.errors.endpoint).toBe(kind)
+  })
+
+  it('still requires a pinned IPv4 dial address', () => {
+    const result = createUpstreamSpec({
+      group: 'trust',
+      protocol: 'doh',
+      endpoint: 'https://dns.google/dns-query',
+      address: 'dns.google',
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.errors.address).toBe('invalid')
+  })
+
+  it('is not offered for the china group', () => {
+    const result = createUpstreamSpec({
+      group: 'china',
+      protocol: 'doh',
+      endpoint: 'https://dns.google/dns-query',
+      address: '8.8.8.8',
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.errors.protocol).toBe('invalid')
+  })
+})

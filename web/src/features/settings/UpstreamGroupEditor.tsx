@@ -23,7 +23,7 @@ function initialProtocol(group: UpstreamGroup): UpstreamProtocol {
 
 function fieldError(
   errors: UpstreamInputErrors,
-  field: 'address' | 'serverName',
+  field: 'address' | 'serverName' | 'endpoint',
   requiredMessage: string,
   invalidMessage: string,
 ): string | undefined {
@@ -48,6 +48,7 @@ function UpstreamAddDialog({
   const { t } = useTranslation()
   const [protocol, setProtocol] = useState<UpstreamProtocol>(() => initialProtocol(group))
   const [serverName, setServerName] = useState('')
+  const [endpoint, setEndpoint] = useState('')
   const [address, setAddress] = useState('')
   const [errors, setErrors] = useState<UpstreamInputErrors>({})
   const [formError, setFormError] = useState<string | null>(null)
@@ -56,6 +57,7 @@ function UpstreamAddDialog({
   function reset() {
     setProtocol(initialProtocol(group))
     setServerName('')
+    setEndpoint('')
     setAddress('')
     setErrors({})
     setFormError(null)
@@ -73,7 +75,7 @@ function UpstreamAddDialog({
   }
 
   function handleAdd() {
-    const result = createUpstreamSpec({ group, protocol, address, serverName })
+    const result = createUpstreamSpec({ group, protocol, address, serverName, endpoint })
     if (!result.ok) {
       setErrors(result.errors)
       setFormError(null)
@@ -100,6 +102,12 @@ function UpstreamAddDialog({
     'serverName',
     t('settings.upstreamsServerNameRequired'),
     t('settings.upstreamsServerNameInvalid'),
+  )
+  const endpointError = fieldError(
+    errors,
+    'endpoint',
+    t('settings.upstreamsEndpointRequired'),
+    t('settings.upstreamsEndpointInvalid'),
   )
 
   return (
@@ -128,8 +136,8 @@ function UpstreamAddDialog({
       >
         <Field label={t('settings.upstreamsProtocol')}>
           {group === 'trust' ? (
-            <div className="grid grid-cols-2 gap-1 rounded-[12px] bg-surface-container p-1" role="radiogroup" aria-label={t('settings.upstreamsProtocol')}>
-              {(['dot', 'udp'] as const).map((value) => (
+            <div className="grid grid-cols-3 gap-1 rounded-[12px] bg-surface-container p-1" role="radiogroup" aria-label={t('settings.upstreamsProtocol')}>
+              {(['doh', 'dot', 'udp'] as const).map((value) => (
                 <button
                   key={value}
                   type="button"
@@ -143,7 +151,11 @@ function UpstreamAddDialog({
                       : 'zds-state-layer rounded-[9px] px-3 py-2 text-[12px] text-text-soft'
                   }
                 >
-                  {value === 'dot' ? t('settings.upstreamsProtocolDot') : t('settings.upstreamsProtocolUdp')}
+                  {value === 'doh'
+                    ? t('settings.upstreamsProtocolDoh')
+                    : value === 'dot'
+                      ? t('settings.upstreamsProtocolDot')
+                      : t('settings.upstreamsProtocolUdp')}
                 </button>
               ))}
             </div>
@@ -154,6 +166,29 @@ function UpstreamAddDialog({
             </div>
           )}
         </Field>
+
+        {protocol === 'doh' ? (
+          <Field label={t('settings.upstreamsEndpoint')} error={endpointError}>
+            <Input
+              mono
+              autoFocus
+              autoComplete="off"
+              spellCheck={false}
+              value={endpoint}
+              onChange={(event) => {
+                setEndpoint(event.target.value)
+                setErrors((current) => ({ ...current, endpoint: undefined }))
+                setFormError(null)
+              }}
+              placeholder="https://dns.google/dns-query"
+              aria-label={t('settings.upstreamsEndpoint')}
+              aria-invalid={endpointError !== undefined}
+              className={endpointError ? 'border-red/55 focus-visible:ring-2 focus-visible:ring-red/20' : undefined}
+              data-testid="upstreams-endpoint"
+            />
+            <span className="text-[10.5px] text-text-faint">{t('settings.upstreamsEndpointHint')}</span>
+          </Field>
+        ) : null}
 
         {protocol === 'dot' ? (
           <Field label={t('settings.upstreamsServerName')} error={serverNameError}>
@@ -179,7 +214,7 @@ function UpstreamAddDialog({
         ) : null}
 
         <Field
-          label={protocol === 'dot' ? t('settings.upstreamsDialAddress') : t('settings.upstreamsAddress')}
+          label={protocol === 'udp' ? t('settings.upstreamsAddress') : t('settings.upstreamsDialAddress')}
           error={addressError}
         >
           <Input
@@ -193,14 +228,18 @@ function UpstreamAddDialog({
               setErrors((current) => ({ ...current, address: undefined }))
               setFormError(null)
             }}
-            placeholder={protocol === 'dot' ? '8.8.8.8' : '223.5.5.5'}
-            aria-label={protocol === 'dot' ? t('settings.upstreamsDialAddress') : t('settings.upstreamsAddress')}
+            placeholder={protocol === 'udp' ? '223.5.5.5' : '8.8.8.8'}
+            aria-label={protocol === 'udp' ? t('settings.upstreamsAddress') : t('settings.upstreamsDialAddress')}
             aria-invalid={addressError !== undefined}
             className={addressError ? 'border-red/55 focus-visible:ring-2 focus-visible:ring-red/20' : undefined}
             data-testid="upstreams-address"
           />
           <span className="text-[10.5px] text-text-faint">
-            {protocol === 'dot' ? t('settings.upstreamsDotAddressHint') : t('settings.upstreamsUdpAddressHint')}
+            {protocol === 'doh'
+              ? t('settings.upstreamsDohAddressHint')
+              : protocol === 'dot'
+                ? t('settings.upstreamsDotAddressHint')
+                : t('settings.upstreamsUdpAddressHint')}
           </span>
         </Field>
 
