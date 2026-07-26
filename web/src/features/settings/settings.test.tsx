@@ -481,6 +481,7 @@ describe('SettingsPage about strip versions', () => {
     renderSettings(
       statusValue({
         mihomo: { version: 'v1.19.28-overlay.2', meta: true },
+        intercept: { running: true, expected: true, installed_plugins: 6, active_plugins: 6, version: '0.1.0-beta.1' },
         status: {
           version: 'dev+abc1234',
           uptime_seconds: 3600,
@@ -492,6 +493,7 @@ describe('SettingsPage about strip versions', () => {
 
     expect(await screen.findByText('5gpn-dns dev+abc1234')).toBeInTheDocument()
     expect(screen.getByText('mihomo v1.19.28-overlay.2')).toBeInTheDocument()
+    expect(screen.getByText('sidecar 0.1.0-beta.1')).toBeInTheDocument()
     expect(screen.getByText('zashboard v3.16.0-overlay.1')).toBeInTheDocument()
   })
 
@@ -515,5 +517,8 @@ describe('SettingsPage about strip versions', () => {
 
     expect(await screen.findByText('mihomo —')).toBeInTheDocument()
     expect(screen.queryByText(/^zashboard /)).not.toBeInTheDocument()
+    // The sidecar only reports a version while it is running with active
+    // plugins, so like zashboard it is omitted rather than dashed.
+    expect(screen.queryByText(/^sidecar /)).not.toBeInTheDocument()
   })
 })

@@ -91,8 +91,10 @@ describe('Sidebar', () => {
 
     expect(screen.getByText('DNS 服务器')).toBeInTheDocument()
     expect(screen.getByText('mihomo')).toBeInTheDocument()
-    expect(screen.getByText('5gpn-intercept')).toBeInTheDocument()
-    expect(screen.getByText('sidecar · 2 个活动插件')).toBeInTheDocument()
+    // Named for the component; the systemd unit name stays in the subtitle so
+    // an operator still knows what to type into systemctl.
+    expect(screen.getByText('sidecar')).toBeInTheDocument()
+    expect(screen.getByText('5gpn-intercept · 2 个活动插件')).toBeInTheDocument()
 
     const runningEls = screen.getAllByText(i18n.t('common.healthHealthy'))
     expect(runningEls).toHaveLength(2)

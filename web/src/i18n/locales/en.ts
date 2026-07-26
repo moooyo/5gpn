@@ -83,9 +83,12 @@ const en = {
     },
   },
   sidebar: {
-    intercept: '5gpn-intercept',
-    interceptSub: 'sidecar · {{count}} active plugins',
-    interceptSubUnknown: 'sidecar · — active plugins',
+    // Named for the component, not the unit. The unit name moves to the
+    // subtitle rather than being dropped: it is still what an operator types
+    // into systemctl, so losing it would trade one mismatch for another.
+    intercept: 'sidecar',
+    interceptSub: '5gpn-intercept · {{count}} active plugins',
+    interceptSubUnknown: '5gpn-intercept · — active plugins',
   },
   setupGuide: {
     title: 'Connect a device to 5gpn',
@@ -265,6 +268,7 @@ const en = {
     aboutSubtitle: 'Material 3 · secure DNS gateway',
     aboutVersion: '5gpn-dns {{version}}',
     aboutMihomoVersion: 'mihomo {{version}}',
+    aboutSidecarVersion: 'sidecar {{version}}',
     aboutZashVersion: 'zashboard {{version}}',
     ingressPorts: 'mihomo capability modules',
     ingressPortsHint: 'Manage fixed-shape public ingress and protocol-safety capabilities. Saving validates and hot-reloads the complete configuration.',

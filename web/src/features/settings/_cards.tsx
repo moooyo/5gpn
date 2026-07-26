@@ -694,11 +694,13 @@ export function AboutStrip({
   version,
   zashVersion,
   mihomoVersion,
+  sidecarVersion,
   className,
 }: {
   version?: string
   zashVersion?: string
   mihomoVersion?: string
+  sidecarVersion?: string
   className?: string
 }) {
   const { t } = useTranslation()
@@ -711,14 +713,16 @@ export function AboutStrip({
         <div className="text-[13.5px] font-medium text-text-strong">{t('settings.aboutTitle')}</div>
         <div className="mt-0.5 text-[10.5px] text-text-faint">{t('settings.aboutSubtitle')}</div>
       </div>
-      {/* Three separately-sourced versions, so an operator can tell which build
-          of each part is actually installed rather than inferring all three
+      {/* Four separately-sourced versions, so an operator can tell which build
+          of each part is actually installed rather than inferring all four
           from the release they think they ran.
 
-          mihomo is always rendered, zashboard only when present. That is not
-          cosmetic: mihomo is always part of an install, so "unknown" is a
-          signal worth showing, whereas the zashboard panel is optional and
-          omitting it says "not installed" rather than "installed, unidentified". */}
+          mihomo is always rendered; zashboard and the sidecar only when known.
+          That is not cosmetic: mihomo is always part of an install, so
+          "unknown" is a signal worth showing. The zashboard panel is optional,
+          and the sidecar only reports a version while it is running with
+          active plugins — for both, rendering a dash would say "installed but
+          unidentified" about something that may simply not be there. */}
       <div className="flex shrink-0 flex-wrap gap-1.5">
         <span className="rounded-[8px] bg-surface-container px-3 py-2 font-mono text-[10.5px] text-text-faint">
           {t('settings.aboutVersion', { version: version ?? '—' })}
@@ -726,6 +730,11 @@ export function AboutStrip({
         <span className="rounded-[8px] bg-surface-container px-3 py-2 font-mono text-[10.5px] text-text-faint">
           {t('settings.aboutMihomoVersion', { version: mihomoVersion ?? '—' })}
         </span>
+        {sidecarVersion ? (
+          <span className="rounded-[8px] bg-surface-container px-3 py-2 font-mono text-[10.5px] text-text-faint">
+            {t('settings.aboutSidecarVersion', { version: sidecarVersion })}
+          </span>
+        ) : null}
         {zashVersion ? (
           <span className="rounded-[8px] bg-surface-container px-3 py-2 font-mono text-[10.5px] text-text-faint">
             {t('settings.aboutZashVersion', { version: zashVersion })}

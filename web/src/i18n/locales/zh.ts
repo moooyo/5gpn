@@ -70,9 +70,11 @@ const zh: typeof en = {
     },
   },
   sidebar: {
-    intercept: '5gpn-intercept',
-    interceptSub: 'sidecar · {{count}} 个活动插件',
-    interceptSubUnknown: 'sidecar · — 个活动插件',
+    // 用组件名而不是单元名。单元名移到副标题而不是删掉：它仍然是运维敲
+    // systemctl 时要用的名字，丢掉等于把一个不一致换成另一个。
+    intercept: 'sidecar',
+    interceptSub: '5gpn-intercept · {{count}} 个活动插件',
+    interceptSubUnknown: '5gpn-intercept · — 个活动插件',
   },
   setupGuide: {
     title: '将设备接入 5gpn',
@@ -252,6 +254,7 @@ const zh: typeof en = {
     aboutSubtitle: 'Material 3 · 安全 DNS 网关',
     aboutVersion: '5gpn-dns {{version}}',
     aboutMihomoVersion: 'mihomo {{version}}',
+    aboutSidecarVersion: 'sidecar {{version}}',
     aboutZashVersion: 'zashboard {{version}}',
     ingressPorts: 'mihomo 功能模块',
     ingressPortsHint: '管理固定形状的公网入口与协议安全能力。保存后会验证完整配置并热加载。',
