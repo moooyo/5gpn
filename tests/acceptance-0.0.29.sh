@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# Post-upgrade acceptance for 0.0.29 on test-env.
+#
+# 0.0.29 changes three things that only a real upgrade can exercise, because
+# each one depends on state a fresh install never has:
+#
+#   * DNS_CHINA / DNS_TRUST were retired from dns.env. Every existing box still
+#     has them, and validate_dns_env_schema rejects unknown keys, so the
+#     upgrade aborts unless retired keys are tolerated.
+#   * upstreams.json becomes the sole source of truth. The installer must seed
+#     it, and must carry the previous dns.env values across rather than
+#     resetting to the shipped defaults.
+#   * stats.json went from schema 1 to 2 (latency left the file). An old file
+#     must be rejected cleanly and the daemon must start with zeroed counters,
+#     not refuse to boot.
+#
+# Read-only. Run after the upgrade completes.
+
+set -uo pipefail
+PASS=0; FAIL=0; WARN=0
+ok()   { echo "  PASS  $*"; PASS=$((PASS+1)); }
+bad()  { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
+warn() { echo "  WARN  $*"; WARN=$((WARN+1)); }
+note() { echo "        $*"; }
+
+echo "== version and service health =="
+ver="$(/opt/5gpn/bin/5gpn-dns --version 2>/dev/null)"
+note "daemon version: ${ver:-<unknown>}"
+[[ "$ver" == "0.0.29" ]] && ok "running 0.0.29" || bad "expected 0.0.29, got ${ver:-<unknown>}"
+for u in 5gpn-dns mihomo 5gpn-intercept; do
+    st="$(systemctl is-active "$u" 2>/dev/null)"
+    [[ "$st" == active ]] && ok "$u active" || bad "$u is $st"
+done
+
+echo
+echo "== the retired dns.env keys =="
+if grep -qE '^DNS_CHINA=|^DNS_TRUST=' /etc/5gpn/dns.env 2>/dev/null; then
+    bad "dns.env still carries DNS_CHINA/DNS_TRUST — the installer did not rewrite it"
+else
+    ok "dns.env no longer carries the retired upstream keys"
+fi
+grep -q '^DNS_UPSTREAMS=' /etc/5gpn/dns.env && ok "DNS_UPSTREAMS still points at the file" \
+    || bad "DNS_UPSTREAMS missing from dns.env"
+
+echo
+echo "== upstreams.json is the source of truth =="
+if [[ -f /etc/5gpn/upstreams.json ]]; then
+    ok "upstreams.json exists"
+    note "$(tr -d '\n ' < /etc/5gpn/upstreams.json)"
+    python3 -c "
+import json,sys
+d=json.load(open('/etc/5gpn/upstreams.json'))
+assert d['version']==1, d['version']
+assert d['china'] and d['trust'], d
+print('        china=%s trust=%s' % (d['china'], d['trust']))
+" || bad "upstreams.json is malformed"
+    # The boot log states which file won and with what contents.
+    if journalctl -u 5gpn-dns -b --no-pager 2>/dev/null | grep -q 'upstreams: loaded'; then
+        ok "daemon loaded upstreams.json at boot"
+        note "$(journalctl -u 5gpn-dns -b --no-pager | grep 'upstreams: loaded' | tail -1 | sed 's/.*upstreams:/upstreams:/')"
+    else
+        bad "no 'upstreams: loaded' line — the daemon fell back to built-in defaults"
+        journalctl -u 5gpn-dns -b --no-pager 2>/dev/null | grep -i 'upstream' | tail -3 | sed 's/^/        /'
+    fi
+else
+    bad "upstreams.json was not seeded by the installer"
+fi
+
+echo
+echo "== stats schema migration =="
+if [[ -f /etc/5gpn/stats.json ]]; then
+    v="$(python3 -c "import json;print(json.load(open('/etc/5gpn/stats.json')).get('version'))" 2>/dev/null)"
+    [[ "$v" == 2 ]] && ok "stats.json is at schema 2" || warn "stats.json version=${v:-?} (expected 2 once the daemon has saved once)"
+    python3 -c "
+import json
+d=json.load(open('/etc/5gpn/stats.json'))
+stale=[k for k in d if 'lat_nanos' in k or 'lat_count' in k]
+print('        stale latency fields:', stale or 'none')
+raise SystemExit(1 if stale else 0)
+" || bad "stats.json still carries the retired cumulative latency fields"
+else
+    note "no stats.json yet (the persister writes on a 60s tick)"
+fi
+journalctl -u 5gpn-dns -b --no-pager 2>/dev/null | grep -q 'stats:.*unsupported schema version' \
+    && ok "an old-schema stats.json was rejected cleanly at boot (counters start at zero)" \
+    || note "no schema-rejection line (the file may already have been rewritten)"
+
+echo
+echo "== trust upstream sanity probe =="
+if journalctl -u 5gpn-dns -b --no-pager 2>/dev/null | grep -q 'trust upstream probe'; then
+    line="$(journalctl -u 5gpn-dns -b --no-pager | grep 'trust upstream probe' | tail -1)"
+    note "${line#*5gpn-dns\[*\]: }"
+    if grep -q "resolver's own /24\|fabricated\|private or loopback" <<<"$line"; then
+        ok "probe correctly flagged the placeholder trust resolver"
+    else
+        ok "probe ran and the trust answer looked genuine"
+    fi
+else
+    bad "the trust probe did not run (or did not log)"
+fi
+
+echo
+echo "== API surface =="
+TOKEN="$(grep -E '^DNS_API_TOKEN=' /etc/5gpn/dns.env | cut -d= -f2-)"
+api() { curl -sk -H "Authorization: Bearer $TOKEN" "https://127.0.0.1$1" ${2:+-X "$2"}; }
+st="$(api /api/status)"
+if python3 -c "
+import json,sys
+d=json.loads(sys.stdin.read())['stats']
+need=['china_p50_ms','china_p95_ms','china_lat_samples','trust_p50_ms','trust_p95_ms','trust_lat_samples']
+missing=[k for k in need if k not in d]
+gone=[k for k in ('china_avg_ms','trust_avg_ms') if k in d]
+print('        p50/p95 fields present:', not missing, '| retired avg fields gone:', not gone)
+raise SystemExit(1 if (missing or gone) else 0)
+" <<<"$st"; then ok "/api/status reports latency percentiles"; else bad "/api/status latency fields are wrong"; fi
+
+code="$(curl -sk -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" https://127.0.0.1/api/stats/reset)"
+[[ "$code" == 200 ]] && ok "POST /api/stats/reset returns 200" || bad "POST /api/stats/reset returned $code"
+
+mods="$(api /api/mihomo/ingress-modules)"
+python3 -c "
+import json,sys
+d=json.loads(sys.stdin.read())
+for m in d['modules']:
+    print('        %-18s enabled=%-5s manageable=%-5s %s' % (m['id'], m['enabled'], m['manageable'], m.get('reason','')))
+" <<<"$mods"
+if python3 -c "
+import json,sys
+d=json.loads(sys.stdin.read())
+q=[m for m in d['modules'] if m['id']=='block-quic-443'][0]
+raise SystemExit(0 if q['manageable'] else 1)
+" <<<"$mods"; then ok "block-quic-443 is manageable (capture rules no longer lock it)"
+else bad "block-quic-443 is still locked"; fi
+
+echo
+echo "== summary: ${PASS} passed, ${FAIL} failed, ${WARN} warnings =="
+[[ "$FAIL" -eq 0 ]]

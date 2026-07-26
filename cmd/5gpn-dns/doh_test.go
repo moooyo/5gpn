@@ -62,9 +62,12 @@ func newTestDoHClient(t *testing.T, srv *httptest.Server, addr string) *dohClien
 	if err != nil {
 		t.Fatalf("newDoHClient: %v", err)
 	}
-	// Trust the httptest CA and keep the pinned dial; ServerName stays the
-	// endpoint hostname so the cert-name path is still exercised.
-	c.transport.TLSClientConfig = srv.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	// Trust the httptest CA and point verification at a name its certificate
+	// actually carries, but mutate the transport's OWN config rather than
+	// swapping in a different object: replacing it drops the ALPN settings
+	// net/http arranged for HTTP/2, which makes negotiation depend on
+	// construction order and fail non-deterministically.
+	c.transport.TLSClientConfig.RootCAs = srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
 	c.transport.TLSClientConfig.ServerName = "example.com"
 	return c
 }
@@ -171,11 +174,8 @@ func TestDoHExchange_ReusesTheConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newDoHClient: %v", err)
 	}
-	base := srv.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
-	base.ServerName = "example.com"
-	// Count full handshakes by observing session establishment.
-	base.ClientSessionCache = nil
-	c.transport.TLSClientConfig = base
+	c.transport.TLSClientConfig.RootCAs = srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+	c.transport.TLSClientConfig.ServerName = "example.com"
 	c.transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		handshakes.Add(1)
 		return (&net.Dialer{}).DialContext(ctx, network, addr)
