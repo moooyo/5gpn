@@ -144,7 +144,7 @@ func main() {
 		TTLMin:        cfg.TTLMin,
 		TTLMax:        cfg.TTLMax,
 		Timeout:       cfg.QueryTimeout,
-		stats:         &statsCounters{},
+		stats:         newStatsCounters(),
 	}
 	// Admission control: cap concurrent in-flight resolutions so an overload
 	// sheds with REFUSED rather than growing goroutines/sockets without bound.

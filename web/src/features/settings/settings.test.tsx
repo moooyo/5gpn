@@ -550,7 +550,7 @@ describe('StatsResetCard', () => {
     total: 14831, block: 120, force_direct: 30, force_proxy: 5,
     chnroute_cn: 2800, chnroute_foreign: 1200, cache_entries: 440,
     china_ok: 28, china_err: 0, trust_ok: 1, trust_err: 0,
-    cache_hits: 3100, cache_misses: 1100, china_avg_ms: 140.2, trust_avg_ms: 51.2,
+    cache_hits: 3100, cache_misses: 1100, china_p50_ms: 140.2, china_p95_ms: 140.2, china_lat_samples: 12, trust_p50_ms: 51.2, trust_p95_ms: 51.2, trust_lat_samples: 12,
   }
 
   function renderCard(stats: Stats | undefined = STATS) {
@@ -584,7 +584,7 @@ describe('StatsResetCard', () => {
 
   it('clears the counters and reflects the cleared snapshot without waiting for a poll', async () => {
     const user = userEvent.setup()
-    const zeroed: Stats = { ...STATS, total: 0, china_ok: 0, china_err: 0, trust_ok: 0, trust_err: 0, china_avg_ms: 0, trust_avg_ms: 0 }
+    const zeroed: Stats = { ...STATS, total: 0, china_ok: 0, china_err: 0, trust_ok: 0, trust_err: 0, china_p50_ms: 0, china_p95_ms: 0, china_lat_samples: 0, trust_p50_ms: 0, trust_p95_ms: 0, trust_lat_samples: 0 }
     vi.mocked(api.resetStats).mockResolvedValue({ stats: zeroed })
 
     renderCard()

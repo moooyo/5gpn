@@ -56,12 +56,26 @@ type statsCounters struct {
 	// answerable. cacheHits/Misses are bumped in Handler.cacheGet; the latency
 	// sums (nanoseconds) + counts are bumped from Arbitrate's exchange
 	// goroutines. None of these feed any routing decision.
-	cacheHits     atomic.Uint64
-	cacheMisses   atomic.Uint64
-	chinaLatNanos atomic.Uint64
-	chinaLatCount atomic.Uint64
-	trustLatNanos atomic.Uint64
-	trustLatCount atomic.Uint64
+	cacheHits   atomic.Uint64
+	cacheMisses atomic.Uint64
+
+	// Per-group upstream latency as a rolling window of recent completed
+	// exchanges, reported as percentiles. Not a cumulative mean: that never
+	// decayed, survived restarts, and let one multi-second outlier dominate a
+	// small sample — a 5ms resolver reported as 140ms over 28 samples. Lazily
+	// created so a zero-value statsCounters stays valid.
+	chinaLatency *latencyWindow
+	trustLatency *latencyWindow
+}
+
+// newStatsCounters returns counters with their latency windows ready. The zero
+// value is still usable — recording into a nil window is a no-op — so tests
+// that build a bare &statsCounters{} keep working, just without latency.
+func newStatsCounters() *statsCounters {
+	return &statsCounters{
+		chinaLatency: newLatencyWindow(),
+		trustLatency: newLatencyWindow(),
+	}
 }
 
 // Handler is a dns.Handler that implements the ordered 5gpn DNS policy.
@@ -214,26 +228,24 @@ func (s *statsCounters) bumpTrust(ok bool) {
 	}
 }
 
-// recordChinaLatency adds one china-exchange duration to the cumulative sum +
-// count (observability-only). Callers record only exchanges that completed
-// without error — see the note at the goroutines in arbitrateSrc. Nil-safe.
+// recordChinaLatency adds one china-exchange duration to the rolling window
+// (observability-only). Callers record only exchanges that completed without
+// error — see the note at the goroutines in arbitrateSrc. Nil-safe.
 func (s *statsCounters) recordChinaLatency(d time.Duration) {
 	if s == nil {
 		return
 	}
-	s.chinaLatNanos.Add(uint64(d.Nanoseconds()))
-	s.chinaLatCount.Add(1)
+	s.chinaLatency.record(d)
 }
 
-// recordTrustLatency adds one trust-exchange duration to the cumulative sum +
-// count (observability-only). Callers record only exchanges that completed
-// without error — see the note at the goroutines in arbitrateSrc. Nil-safe.
+// recordTrustLatency adds one trust-exchange duration to the rolling window
+// (observability-only). Callers record only exchanges that completed without
+// error — see the note at the goroutines in arbitrateSrc. Nil-safe.
 func (s *statsCounters) recordTrustLatency(d time.Duration) {
 	if s == nil {
 		return
 	}
-	s.trustLatNanos.Add(uint64(d.Nanoseconds()))
-	s.trustLatCount.Add(1)
+	s.trustLatency.record(d)
 }
 
 // bumpBlock increments the block-reason counter. Safe to call when h.stats is nil.
@@ -1091,7 +1103,19 @@ func (h *Handler) forwardTrust(ctx context.Context, trust Exchanger, q dns.Quest
 		initial = *ri
 	}
 	resp, info, ok := h.coalesceResolution(ctx, q, r, scope, initial, func(runCtx context.Context, flightReq *dns.Msg, flightInfo *resolveInfo) *dns.Msg {
+		// This is the second, independent trust exchange site — arbitrateSrc is
+		// the other. It was never instrumented, so every qtype that lands here
+		// (everything the steps above do not special-case: AAAA, MX, TXT,
+		// HTTPS, SVCB, PTR, ...) was invisible to the trust latency and health
+		// counters, and the reported sample set matched neither the query total
+		// nor trust_ok+trust_err. Count it the same way arbitrateSrc does:
+		// latency only for a completed exchange, health either way.
+		start := time.Now()
 		resolved, err := trust.Exchange(runCtx, flightReq)
+		if err == nil {
+			h.stats.recordTrustLatency(time.Since(start))
+		}
+		h.stats.bumpTrust(err == nil)
 		if err != nil || resolved == nil {
 			return h.staleOrServerFail(flightReq, name, qtype, flightInfo)
 		}

@@ -13,8 +13,12 @@ export interface Stats {
   trust_err: number
   cache_hits: number
   cache_misses: number
-  china_avg_ms: number
-  trust_avg_ms: number
+  china_p50_ms: number
+  china_p95_ms: number
+  china_lat_samples: number
+  trust_p50_ms: number
+  trust_p95_ms: number
+  trust_lat_samples: number
 }
 export interface CertStatus {
   not_after: string // RFC3339; Go zero-time when never loaded — don't render as a date then

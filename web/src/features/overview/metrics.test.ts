@@ -33,25 +33,29 @@ describe('cacheHitRate', () => {
 })
 
 describe('upstreamHealth', () => {
-  it('lifts china/trust ok/err counts and avg latencies off stats', () => {
+  it('lifts china/trust ok/err counts and latency percentiles off stats', () => {
     const health = upstreamHealth({
       china_ok: 10,
       china_err: 2,
-      china_avg_ms: 5,
+      china_p50_ms: 5,
+      china_p95_ms: 9,
+      china_lat_samples: 120,
       trust_ok: 8,
       trust_err: 1,
-      trust_avg_ms: 40,
+      trust_p50_ms: 40,
+      trust_p95_ms: 180,
+      trust_lat_samples: 30,
     })
     expect(health).toEqual({
-      china: { ok: 10, err: 2, avgMs: 5 },
-      trust: { ok: 8, err: 1, avgMs: 40 },
+      china: { ok: 10, err: 2, p50Ms: 5, p95Ms: 9, latSamples: 120 },
+      trust: { ok: 8, err: 1, p50Ms: 40, p95Ms: 180, latSamples: 30 },
     })
   })
 
   it('zeroes everything when stats is absent (pre-first-poll)', () => {
     expect(upstreamHealth(undefined)).toEqual({
-      china: { ok: 0, err: 0, avgMs: 0 },
-      trust: { ok: 0, err: 0, avgMs: 0 },
+      china: { ok: 0, err: 0, p50Ms: 0, p95Ms: 0, latSamples: 0 },
+      trust: { ok: 0, err: 0, p50Ms: 0, p95Ms: 0, latSamples: 0 },
     })
   })
 })

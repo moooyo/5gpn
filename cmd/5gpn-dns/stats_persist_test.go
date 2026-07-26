@@ -23,15 +23,14 @@ func bumpAllStats(s *statsCounters) {
 	s.chinaErr.Store(81)
 	s.trustOK.Store(91)
 	s.trustErr.Store(101)
-	// The observability counters are persisted and restored like the rest, so
-	// they belong in the round-trip fixture too — without them a field could be
+	// The cache counters are persisted and restored like the rest, so they
+	// belong in the round-trip fixture too — without them a field could be
 	// dropped from save or restore and every test here would still pass.
+	//
+	// Latency is deliberately absent: it is a rolling window of recent
+	// exchanges now, not a persisted counter, so there is nothing to round-trip.
 	s.cacheHits.Store(111)
 	s.cacheMisses.Store(121)
-	s.chinaLatNanos.Store(131)
-	s.chinaLatCount.Store(141)
-	s.trustLatNanos.Store(151)
-	s.trustLatCount.Store(161)
 }
 
 func TestStatsPersist_RoundTrip(t *testing.T) {

@@ -577,8 +577,10 @@ const en = {
     // States plainly which latency this is: the round trip to the upstream DNS
     // resolver, not to the address that resolver answers with.
     upstreamLatencyScope: 'Resolver round-trip',
+    upstreamP95: 'p95 {{value}} over {{n}} exchanges',
+    upstreamNoSamples: 'No recent samples',
     upstreamLatencyHint: 'Round trip of one query to this group’s upstream DNS resolver — not the latency to the destination IP it resolves to. Cache hits and failed exchanges are excluded.',
-    upstreamMeasured: 'Cumulative mean, preserved across restarts in stats.json.',
+    upstreamMeasured: 'Median over a rolling window of recent exchanges, so one slow query cannot skew it and a restart starts fresh.',
     upstreamSuccessRate: '{{rate}} success',
     upstreamSuccessRateUnknown: 'No samples yet',
     upstreamExchanges: '{{n}} exchanges',

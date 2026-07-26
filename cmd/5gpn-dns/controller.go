@@ -37,13 +37,21 @@ type Stats struct {
 	ChinaErr        uint64 `json:"china_err"`
 	TrustOK         uint64 `json:"trust_ok"`
 	TrustErr        uint64 `json:"trust_err"`
-	// Observability: cache effectiveness + per-group upstream latency. Hits/
-	// misses are cumulative; the *AvgMs are derived (latency-sum/count) so a
-	// degraded china or trust leg is visible as a rising average.
-	CacheHits   uint64  `json:"cache_hits"`
-	CacheMisses uint64  `json:"cache_misses"`
-	ChinaAvgMs  float64 `json:"china_avg_ms"`
-	TrustAvgMs  float64 `json:"trust_avg_ms"`
+	// Observability: cache effectiveness. Cumulative.
+	CacheHits   uint64 `json:"cache_hits"`
+	CacheMisses uint64 `json:"cache_misses"`
+	// Upstream latency percentiles over a rolling window of recent completed
+	// exchanges. Not a mean, and not cumulative: a mean over a small sample is
+	// dominated by one outlier (a 5ms resolver read as 140ms over 28 samples),
+	// and a cumulative one never forgot. *LatSamples is how many exchanges the
+	// percentiles were computed from — zero means the window is empty and the
+	// millisecond values carry no information.
+	ChinaP50Ms      float64 `json:"china_p50_ms"`
+	ChinaP95Ms      float64 `json:"china_p95_ms"`
+	ChinaLatSamples int     `json:"china_lat_samples"`
+	TrustP50Ms      float64 `json:"trust_p50_ms"`
+	TrustP95Ms      float64 `json:"trust_p95_ms"`
+	TrustLatSamples int     `json:"trust_lat_samples"`
 }
 
 // Controller is the in-process facade used by the HTTP API and Telegram bot.
@@ -299,8 +307,8 @@ func (c *Controller) Stats() Stats {
 		s.TrustErr = c.stats.trustErr.Load()
 		s.CacheHits = c.stats.cacheHits.Load()
 		s.CacheMisses = c.stats.cacheMisses.Load()
-		s.ChinaAvgMs = avgMs(c.stats.chinaLatNanos.Load(), c.stats.chinaLatCount.Load())
-		s.TrustAvgMs = avgMs(c.stats.trustLatNanos.Load(), c.stats.trustLatCount.Load())
+		s.ChinaP50Ms, s.ChinaP95Ms, s.ChinaLatSamples = c.stats.chinaLatency.stats()
+		s.TrustP50Ms, s.TrustP95Ms, s.TrustLatSamples = c.stats.trustLatency.stats()
 	}
 	if c.cacheLen != nil {
 		s.CacheEntries = c.cacheLen()
@@ -335,14 +343,6 @@ func (c *Controller) ResetStats() error {
 	return nil
 }
 
-// avgMs returns the mean of a nanosecond sum over count, in milliseconds, or 0
-// when count is 0 (no samples yet).
-func avgMs(sumNanos, count uint64) float64 {
-	if count == 0 {
-		return 0
-	}
-	return float64(sumNanos) / float64(count) / 1e6
-}
 
 // isValidRuleDomain reports whether entry looks like a plausible FQDN: after
 // trimming whitespace, non-empty, no internal whitespace, contains at least

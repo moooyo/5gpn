@@ -11,7 +11,7 @@ import (
 )
 
 // statsSchemaVersion is the exact stats.json schema version accepted.
-const statsSchemaVersion = 1
+const statsSchemaVersion = 2
 
 // statsSnapshot is the serializable, cumulative-since-first-boot form of
 // statsCounters. cache_entries is intentionally NOT included here: it's a
@@ -31,12 +31,14 @@ type statsSnapshot struct {
 	TrustOK         uint64 `json:"trust_ok"`
 	TrustErr        uint64 `json:"trust_err"`
 	// Observability counters (cumulative).
-	CacheHits     uint64 `json:"cache_hits"`
-	CacheMisses   uint64 `json:"cache_misses"`
-	ChinaLatNanos uint64 `json:"china_lat_nanos"`
-	ChinaLatCount uint64 `json:"china_lat_count"`
-	TrustLatNanos uint64 `json:"trust_lat_nanos"`
-	TrustLatCount uint64 `json:"trust_lat_count"`
+	//
+	// Upstream latency is deliberately NOT here. It is a rolling window of
+	// recent exchanges now, and "recent" cannot survive a restart: replaying
+	// yesterday's samples into today's window would recreate exactly the
+	// staleness the window exists to remove. A restarted daemon reports no
+	// latency until it has made some exchanges, which is the truth.
+	CacheHits   uint64 `json:"cache_hits"`
+	CacheMisses uint64 `json:"cache_misses"`
 }
 
 // snapshot atomically reads every counter field into a statsSnapshot. Version
@@ -56,10 +58,6 @@ func (s *statsCounters) snapshot() statsSnapshot {
 		TrustErr:        s.trustErr.Load(),
 		CacheHits:       s.cacheHits.Load(),
 		CacheMisses:     s.cacheMisses.Load(),
-		ChinaLatNanos:   s.chinaLatNanos.Load(),
-		ChinaLatCount:   s.chinaLatCount.Load(),
-		TrustLatNanos:   s.trustLatNanos.Load(),
-		TrustLatCount:   s.trustLatCount.Load(),
 	}
 }
 
@@ -77,10 +75,6 @@ func (s *statsCounters) restore(snap statsSnapshot) {
 	s.trustErr.Store(snap.TrustErr)
 	s.cacheHits.Store(snap.CacheHits)
 	s.cacheMisses.Store(snap.CacheMisses)
-	s.chinaLatNanos.Store(snap.ChinaLatNanos)
-	s.chinaLatCount.Store(snap.ChinaLatCount)
-	s.trustLatNanos.Store(snap.TrustLatNanos)
-	s.trustLatCount.Store(snap.TrustLatCount)
 }
 
 // reset zeroes every counter. Expressed through restore of a zero snapshot so

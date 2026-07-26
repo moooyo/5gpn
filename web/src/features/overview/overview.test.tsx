@@ -20,8 +20,12 @@ const STATS: Status['stats'] = {
   trust_err: 0,
   cache_hits: 1,
   cache_misses: 1,
-  china_avg_ms: 5,
-  trust_avg_ms: 10,
+  china_p50_ms: 5,
+  china_p95_ms: 5,
+  china_lat_samples: 12,
+  trust_p50_ms: 10,
+  trust_p95_ms: 10,
+  trust_lat_samples: 12,
 }
 const STATUS: Status = { version: 'dev+abc1234', uptime_seconds: 3600, stats: STATS }
 

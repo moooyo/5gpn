@@ -38,8 +38,12 @@ const STATS_FIXTURE: T.Stats = {
   trust_err: 2,
   cache_hits: 3100,
   cache_misses: 1100,
-  china_avg_ms: 8,
-  trust_avg_ms: 42,
+  china_p50_ms: 8,
+  china_p95_ms: 24,
+  china_lat_samples: 240,
+  trust_p50_ms: 42,
+  trust_p95_ms: 126,
+  trust_lat_samples: 60,
 }
 
 const STATUS_FIXTURE: T.Status = {

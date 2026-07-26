@@ -23,7 +23,7 @@ func TestCacheHitMissCounters(t *testing.T) {
 	china := &fakeExchanger{reply: makeAMsg("obs.test", "9.9.9.9")}
 	trust := &fakeExchanger{reply: makeAMsg("obs.test", "9.9.9.9")}
 	h := newTestHandler(t, china, trust)
-	h.stats = &statsCounters{}
+	h.stats = newStatsCounters()
 
 	q := dns.Question{Name: "obs.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	req := new(dns.Msg)
@@ -52,18 +52,18 @@ func TestUpstreamLatencyRecorded(t *testing.T) {
 	china := &fakeExchanger{reply: makeAMsg("obs.test", "9.9.9.9")} // foreign → trust consulted
 	trust := &fakeExchanger{reply: makeAMsg("obs.test", "9.9.9.9")}
 	h := newTestHandler(t, china, trust)
-	h.stats = &statsCounters{}
+	h.stats = newStatsCounters()
 
 	q := dns.Question{Name: "obs.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	req := new(dns.Msg)
 	req.SetQuestion("obs.test.", dns.TypeA)
 	h.resolve(context.Background(), q, req)
 
-	if got := h.stats.chinaLatCount.Load(); got < 1 {
-		t.Errorf("chinaLatCount = %d, want >=1", got)
+	if _, _, n := h.stats.chinaLatency.stats(); n < 1 {
+		t.Errorf("china latency samples = %d, want >=1", n)
 	}
-	if got := h.stats.trustLatCount.Load(); got < 1 {
-		t.Errorf("trustLatCount = %d, want >=1", got)
+	if _, _, n := h.stats.trustLatency.stats(); n < 1 {
+		t.Errorf("trust latency samples = %d, want >=1", n)
 	}
 
 	c := NewController(func() error { return nil }, h.stats, nil, nil)
@@ -81,33 +81,33 @@ func TestUpstreamLatencyExcludesFailedExchanges(t *testing.T) {
 	q.SetQuestion(dns.Fqdn("obs.test"), dns.TypeA)
 
 	t.Run("errored leg records no sample", func(t *testing.T) {
-		s := &statsCounters{}
+		s := newStatsCounters()
 		china := &fakeExchanger{err: errors.New("boom")}
 		trust := &fakeExchanger{reply: buildMsg("obs.test", "9.9.9.9")}
 		if _, err := Arbitrate(context.Background(), q, china, trust, cn, s); err != nil {
 			t.Fatalf("Arbitrate: %v", err)
 		}
-		if got := s.chinaLatCount.Load(); got != 0 {
-			t.Errorf("chinaLatCount = %d, want 0 (exchange failed)", got)
+		if _, _, n := s.chinaLatency.stats(); n != 0 {
+			t.Errorf("china latency samples = %d, want 0 (exchange failed)", n)
 		}
 		if got := s.chinaErr.Load(); got != 1 {
 			t.Errorf("chinaErr = %d, want 1 — health is still counted", got)
 		}
-		if got := s.trustLatCount.Load(); got != 1 {
-			t.Errorf("trustLatCount = %d, want 1 (exchange succeeded)", got)
+		if _, _, n := s.trustLatency.stats(); n != 1 {
+			t.Errorf("trust latency samples = %d, want 1 (exchange succeeded)", n)
 		}
 	})
 
 	t.Run("trust aborted by a china CN win records no sample", func(t *testing.T) {
-		s := &statsCounters{}
+		s := newStatsCounters()
 		china := &fakeExchanger{reply: buildMsg("obs.test", "1.2.3.4")} // CN → china wins
 		// Outlives the china win, so the deferred cancel aborts it mid-flight.
 		trust := &ctxAwareExchanger{delay: 2 * time.Second, reply: buildMsg("obs.test", "9.9.9.9")}
 		if _, err := Arbitrate(context.Background(), q, china, trust, cn, s); err != nil {
 			t.Fatalf("Arbitrate: %v", err)
 		}
-		if got := s.chinaLatCount.Load(); got != 1 {
-			t.Errorf("chinaLatCount = %d, want 1", got)
+		if _, _, n := s.chinaLatency.stats(); n != 1 {
+			t.Errorf("china latency samples = %d, want 1", n)
 		}
 		// Wait for the abandoned goroutine to unwind before asserting on it.
 		deadline := time.Now().Add(2 * time.Second)
@@ -117,8 +117,8 @@ func TestUpstreamLatencyExcludesFailedExchanges(t *testing.T) {
 		if trust.finished.Load() == 0 {
 			t.Fatal("trust exchange never returned; cancellation did not propagate")
 		}
-		if got := s.trustLatCount.Load(); got != 0 {
-			t.Errorf("trustLatCount = %d, want 0 — a cancelled dial is not a latency sample", got)
+		if _, _, n := s.trustLatency.stats(); n != 0 {
+			t.Errorf("trust latency samples = %d, want 0 — a cancelled dial is not a latency sample", n)
 		}
 	})
 }
@@ -141,14 +141,6 @@ func (e *ctxAwareExchanger) Exchange(ctx context.Context, _ *dns.Msg) (*dns.Msg,
 	}
 }
 
-func TestAvgMs(t *testing.T) {
-	if got := avgMs(0, 0); got != 0 {
-		t.Errorf("avgMs(0,0) = %v, want 0", got)
-	}
-	if got := avgMs(3_000_000, 3); got != 1.0 { // 3ms over 3 samples = 1ms
-		t.Errorf("avgMs(3e6,3) = %v, want 1.0", got)
-	}
-}
 
 // #6: a failed subscription fetch is logged to the daemon's log sink (journald
 // in prod) — the silent-failure class this subsystem exists to survive.

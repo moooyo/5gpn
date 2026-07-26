@@ -109,7 +109,12 @@ export function cacheHitRate(stats?: CacheHitStatsLike): number {
 export interface UpstreamGroupHealth {
   ok: number
   err: number
-  avgMs: number
+  /** Median round trip over the daemon's rolling window, in ms. */
+  p50Ms: number
+  /** 95th percentile over the same window, in ms — the slow tail. */
+  p95Ms: number
+  /** How many exchanges the percentiles cover. Zero means no live samples. */
+  latSamples: number
 }
 
 export interface UpstreamHealth {
@@ -120,21 +125,37 @@ export interface UpstreamHealth {
 interface UpstreamHealthStatsLike {
   china_ok: number
   china_err: number
-  china_avg_ms: number
+  china_p50_ms: number
+  china_p95_ms: number
+  china_lat_samples: number
   trust_ok: number
   trust_err: number
-  trust_avg_ms: number
+  trust_p50_ms: number
+  trust_p95_ms: number
+  trust_lat_samples: number
 }
 
-/** Lifts the china/trust success+error counters and average latencies off
- *  `/api/status` for the upstream-health card. `avgMs` is the mean round trip
- *  of one query to that group's upstream *resolver* — not the latency to the
- *  address it answers with. Tolerates an absent `stats` (pre-first-poll) by
- *  zeroing. */
+/** Lifts the china/trust success+error counters and latency percentiles off
+ *  `/api/status` for the upstream-health card. The percentiles measure the
+ *  round trip to that group's upstream *resolver* — not the latency to the
+ *  address it answers with — over a rolling window of recent exchanges.
+ *  Tolerates an absent `stats` (pre-first-poll) by zeroing. */
 export function upstreamHealth(stats?: UpstreamHealthStatsLike): UpstreamHealth {
   return {
-    china: { ok: stats?.china_ok ?? 0, err: stats?.china_err ?? 0, avgMs: stats?.china_avg_ms ?? 0 },
-    trust: { ok: stats?.trust_ok ?? 0, err: stats?.trust_err ?? 0, avgMs: stats?.trust_avg_ms ?? 0 },
+    china: {
+      ok: stats?.china_ok ?? 0,
+      err: stats?.china_err ?? 0,
+      p50Ms: stats?.china_p50_ms ?? 0,
+      p95Ms: stats?.china_p95_ms ?? 0,
+      latSamples: stats?.china_lat_samples ?? 0,
+    },
+    trust: {
+      ok: stats?.trust_ok ?? 0,
+      err: stats?.trust_err ?? 0,
+      p50Ms: stats?.trust_p50_ms ?? 0,
+      p95Ms: stats?.trust_p95_ms ?? 0,
+      latSamples: stats?.trust_lat_samples ?? 0,
+    },
   }
 }
 

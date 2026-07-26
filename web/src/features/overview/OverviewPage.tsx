@@ -102,6 +102,12 @@ function UpstreamMeta({
           : t('overview.upstreamSuccessRate', { rate: formatRate(rate) })}
       </span>
       <span aria-hidden="true">·</span>
+      <span>
+        {group.latSamples > 0
+          ? t('overview.upstreamP95', { value: formatMs(group.p95Ms), n: formatter.format(group.latSamples) })
+          : t('overview.upstreamNoSamples')}
+      </span>
+      <span aria-hidden="true">·</span>
       <span>{t('overview.upstreamExchanges', { n: formatter.format(group.ok + group.err) })}</span>
       <span aria-hidden="true">·</span>
       <span style={failed > 0 ? { color: 'var(--color-red)' } : undefined}>
@@ -157,8 +163,11 @@ export default function OverviewPage() {
     { name: t('overview.upstreamHealthTrust'), group: health.trust },
   ].map(({ name, group }) => ({
     name,
-    value: group.avgMs,
-    display: formatMs(group.avgMs),
+    // The bar encodes the median: it is what a typical query costs, and the
+    // one an operator compares between groups. p95 rides alongside as text
+    // rather than as a second bar, so the two are never read as series.
+    value: group.p50Ms,
+    display: group.latSamples > 0 ? formatMs(group.p50Ms) : t('overview.upstreamNoSamples'),
     meta: <UpstreamMeta group={group} formatter={formatter} />,
   }))
   const delta = pctDelta(qpsSeries)
