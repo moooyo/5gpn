@@ -112,11 +112,11 @@ test-env 上已验证：`.zash_version` = `v3.16.0-overlay.1`，loopback 监听�
 `runtime-overlays` v1（发现会解析成 `supported`），readback 的
 `activeProjectionDigest` 非空。
 
-**还差最后一步，我做不了**：`https://zash.5gpn.test/` 只对白名单来源 IP 开放，
-而 `/etc/5gpn/mihomo/whitelist.txt` 全新安装后是空的。浏览器打开之前先
-`5gpn add-allow <你的CIDR>`。真正用眼睛确认的是：面板渲染出真实状态、
-新增的"策略投影"一行显示摘要前 16 位、且在不支持 overlay 的后端上整个面板
-被正确隐藏。
+**还差最后一步，我做不了**：面板要用眼睛看一次。`10.0.0.0/8` 已加入来源 IP
+白名单，从内网浏览器打开 `https://zash.5gpn.test/` 现在可达（端到端已验证：
+经网关 IP 返回 200，交付的 index 引用的正是含改动的 bundle）。要确认的是：
+面板渲染出真实状态、新增的"策略投影"一行显示摘要前 16 位
+（当前应为 `efc69d78cc90148b`）、且在不支持 overlay 的后端上整个面板被隐藏。
 
 ### 4.2 extensions 的 `policy` 字段合 main —— 现在是安全的
 
@@ -224,12 +224,14 @@ ssh test-env 'cd /tmp && sudo bash overlay/verify-live.sh'   # 期望 22 passed,
   所以只有 sidecar 的落盘摘要会与钉住值相符；mihomo 的不符是预期的，不是缺陷。
 - Git Bash 的 ssh 读不到 Windows 的 ssh config（Include 用了反斜杠路径），
   连 test-env 要走 PowerShell 的 ssh。
-- **zashboard 不在公网 IP 上**：`DNS_ZASH_LISTEN=127.0.0.2:443`，是第二个
-  loopback HTTPS 监听器。在机器上自测要
-  `curl --resolve zash.5gpn.test:443:127.0.0.2`；resolve 到 10.0.1.20 会得到
-  连接失败，那不是故障。
-- **全新安装后来源 IP 白名单是空的**（`/etc/5gpn/mihomo/whitelist.txt`，
-  注释里写明"Intentionally empty"）。浏览器打不开 `https://zash.5gpn.test/`
-  的第一嫌疑就是它：先 `5gpn add-allow <CIDR>`。
+- **zashboard 的监听器在 loopback 上**（`DNS_ZASH_LISTEN=127.0.0.2:443`，第二个
+  HTTPS 监听器），但它**确实可以通过网关 IP 访问** —— mihomo 按来源 IP 白名单
+  转发过去。`curl --resolve zash.5gpn.test:443:10.0.1.20` 在来源被放行时返回 200。
+- **白名单未放行时的失败是连接失败（curl `000`），不是 HTTP 403。**
+  这一点值得单独记：它和"地址写错了"长得一模一样。我就是这样误判过一次，
+  以为面板不在公网 IP 上，其实只是全新安装后
+  `/etc/5gpn/mihomo/whitelist.txt` 是空的（注释写明 "Intentionally empty"）。
+  打不开先查白名单：`5gpn add-allow <CIDR>`，它会写盘并让 mihomo 的
+  rule-provider 实时重载（`5gpn add-allow 10.0.0.0/8` 已在 test-env 上放行内网）。
 - `verify-live.sh` 里**没有任何 zashboard 相关检查**。22/22 全绿不代表面板
   可用——这正是 §4.1 最后那一步必须用眼睛确认的原因。
