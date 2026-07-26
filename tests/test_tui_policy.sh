@@ -48,9 +48,22 @@ grep -Fq 'DNS_CHINA_DEFAULT="223.5.5.5"' "$INSTALL" \
     && grep -Fq 'DNS_TRUST_DEFAULT="22.22.22.22"' "$INSTALL" \
     && grep -Fq 'DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"' "$INSTALL" \
     || fail "installer operational DNS/ECS defaults drifted"
-grep -Fq 'local dns_china="${existing_china:-$DNS_CHINA_DEFAULT}"' "$INSTALL" \
-    && grep -Fq 'local dns_trust="${existing_trust:-$DNS_TRUST_DEFAULT}"' "$INSTALL" \
-    || fail "dns.env writer does not consume the operational upstream defaults"
+# The upstream groups live in upstreams.json, not dns.env: the daemon cannot
+# write dns.env under its systemd sandbox, so a copy there could only ever go
+# stale and silently disagree with the live configuration. The seeder consumes
+# the operational defaults, refuses to clobber an operator-configured file, and
+# carries a pre-existing dns.env value forward once so the first upgrade past
+# this change does not reset a hand-edited value.
+seed_fn="$(sed -n '/^seed_upstreams_json() {/,/^    ok /p' "$INSTALL")"
+printf '%s' "$seed_fn" | grep -Fq 'local china="${prev_china:-$DNS_CHINA_DEFAULT}"' \
+    && printf '%s' "$seed_fn" | grep -Fq 'local trust="${prev_trust:-$DNS_TRUST_DEFAULT}"' \
+    || fail "upstreams.json seeder does not consume the operational upstream defaults"
+printf '%s' "$seed_fn" | grep -Fq 'if [[ -f "$target" ]]; then' \
+    || fail "upstreams.json seeder would overwrite an operator-configured file"
+grep -Eq '^DNS_CHINA=|^DNS_TRUST=' "$INSTALL" \
+    && fail "DNS_CHINA/DNS_TRUST must no longer be written into dns.env"
+grep -Eq '^[[:space:]]+seed_upstreams_json$' "$INSTALL" \
+    || fail "full_install does not seed upstreams.json"
 printf '%s' "$tui_fn" | grep -Fq 'GATEWAY_IP="$PUBLIC_IP"' \
     && printf '%s' "$tui_fn" | grep -Fq 'MIHOMO_LISTEN_IPS="$default_listen"' \
     && printf '%s' "$tui_fn" | grep -Fq 'PUBLIC_IP="$detected"' \

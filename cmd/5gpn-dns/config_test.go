@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -186,8 +185,6 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	t.Setenv("DNS_LISTEN_DOT", "")
 	t.Setenv("DNS_LISTEN_DEBUG", "127.0.0.1:1053")
 	t.Setenv("DNS_GATEWAY_IP", "10.0.0.1")
-	t.Setenv("DNS_CHINA", "8.8.8.8")
-	t.Setenv("DNS_TRUST", "dns.google@8.8.8.8,one.one.one.one@1.1.1.1")
 	t.Setenv("DNS_TTL_MIN", "60")
 	t.Setenv("DNS_TTL_MAX", "3600")
 	t.Setenv("DNS_QUERY_TIMEOUT", "3s")
@@ -218,8 +215,10 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	if cfg.GatewayIP.String() != "10.0.0.1" {
 		t.Errorf("GatewayIP = %v, want 10.0.0.1", cfg.GatewayIP)
 	}
-	if len(cfg.ChinaAddrs) != 1 || cfg.ChinaAddrs[0] != "8.8.8.8" {
-		t.Errorf("ChinaAddrs = %v, want [8.8.8.8]", cfg.ChinaAddrs)
+	// Upstreams are no longer environment-configurable — they come from
+	// upstreams.json, so LoadConfig always reports the built-in defaults here.
+	if len(cfg.ChinaAddrs) != 1 || cfg.ChinaAddrs[0] != defaultChinaUpstreams {
+		t.Errorf("ChinaAddrs = %v, want the built-in default [%s]", cfg.ChinaAddrs, defaultChinaUpstreams)
 	}
 	if cfg.TTLMin != 60*time.Second {
 		t.Errorf("TTLMin = %v, want 60s", cfg.TTLMin)
@@ -774,44 +773,28 @@ func TestLoadConfig_MihomoKnobs(t *testing.T) {
 
 }
 
-func TestLoadConfigRejectsOutOfRangeUpstreamPorts(t *testing.T) {
-	for _, tc := range []struct {
-		key, value string
-	}{
-		{"DNS_CHINA", "223.5.5.5:0"},
-		{"DNS_TRUST", "1.1.1.1:99999"},
-		{"DNS_CHINA", "[2001:db8::1]:53"},
-		{"DNS_TRUST", "dns.example@[2001:db8::1]:853"},
-	} {
-		t.Run(tc.key, func(t *testing.T) {
-			clearAllDNSEnv(t)
-			t.Setenv("DNS_CERT", "/c")
-			t.Setenv("DNS_KEY", "/k")
-			t.Setenv(tc.key, tc.value)
-			if _, err := LoadConfig(); !errors.Is(err, ErrInvalidUpstream) {
-				t.Fatalf("LoadConfig error = %v, want ErrInvalidUpstream", err)
-			}
-		})
-	}
-}
+// Upstream specs are no longer read from the environment, so LoadConfig can no
+// longer be crash-looped by a typo in a value it would immediately discard.
+// The shape checks live in ValidateUpstreams (see upstreams_test.go) and run
+// when upstreams.json is loaded, where a bad value is logged and the built-in
+// defaults apply instead of killing the sole resolver.
+func TestLoadConfigIgnoresRetiredUpstreamEnvKeys(t *testing.T) {
+	clearAllDNSEnv(t)
+	t.Setenv("DNS_CERT", "/c")
+	t.Setenv("DNS_KEY", "/k")
+	// Values that would previously have been fatal.
+	t.Setenv("DNS_CHINA", "223.5.5.5:0")
+	t.Setenv("DNS_TRUST", "dns.example@[2001:db8::1]:853")
 
-func TestLoadConfigRejectsUnsafeListenerBindings(t *testing.T) {
-	for _, tc := range []struct {
-		key, value string
-	}{
-		{"DNS_LISTEN_DEBUG", "0.0.0.0:5353"},
-		{"DNS_LISTEN_API", "192.0.2.10:443"},
-		{"DNS_ZASH_LISTEN", "[::1]:443"},
-		{"DNS_LISTEN_DOT", ":8853"},
-	} {
-		t.Run(tc.key, func(t *testing.T) {
-			clearAllDNSEnv(t)
-			t.Setenv("DNS_LISTEN_DOT", "")
-			t.Setenv(tc.key, tc.value)
-			if _, err := LoadConfig(); err == nil {
-				t.Fatalf("LoadConfig accepted %s=%q", tc.key, tc.value)
-			}
-		})
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig must ignore the retired keys, got %v", err)
+	}
+	if len(cfg.ChinaAddrs) != 1 || cfg.ChinaAddrs[0] != defaultChinaUpstreams {
+		t.Errorf("ChinaAddrs = %v, want the built-in default %q", cfg.ChinaAddrs, defaultChinaUpstreams)
+	}
+	if len(cfg.TrustRaw) != 1 || cfg.TrustRaw[0] != defaultTrustUpstreams {
+		t.Errorf("TrustRaw = %v, want the built-in default %q", cfg.TrustRaw, defaultTrustUpstreams)
 	}
 }
 

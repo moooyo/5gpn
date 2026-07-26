@@ -69,16 +69,20 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	// Runtime upstream override (web-console managed): when upstreams.json
-	// exists and is valid, its lists override DNS_CHINA/DNS_TRUST. A malformed
-	// file is logged and ignored — never a reason to crash the sole resolver.
+	// The upstream groups come from upstreams.json, which the installer seeds
+	// and PUT /api/upstreams rewrites. A missing or malformed file falls back
+	// to the compiled-in defaults and is logged loudly rather than fatal: this
+	// is the sole resolver, and refusing to start would leave no console to
+	// fix it from — the same reasoning as the empty-chnroute path below.
 	if uc, err := LoadUpstreams(cfg.UpstreamsFile); err != nil {
-		log.Printf("warning: %v — using dns.env upstreams", err)
+		log.Printf("warning: %v — falling back to built-in defaults (china=%v trust=%v); fix it in the console under Settings → upstream DNS", err, cfg.ChinaAddrs, cfg.TrustRaw)
 	} else if uc != nil {
 		cfg.ChinaAddrs = uc.China
 		cfg.TrustRaw = uc.Trust
 		cfg.TrustEntries = parseTrustEntryList(uc.Trust)
-		log.Printf("upstreams: %s overrides dns.env (china=%v trust=%v)", cfg.UpstreamsFile, uc.China, uc.Trust)
+		log.Printf("upstreams: loaded %s (china=%v trust=%v)", cfg.UpstreamsFile, uc.China, uc.Trust)
+	} else {
+		log.Printf("warning: %s absent — falling back to built-in defaults (china=%v trust=%v); set them in the console under Settings → upstream DNS", cfg.UpstreamsFile, cfg.ChinaAddrs, cfg.TrustRaw)
 	}
 
 	applyTGBotOverride(&cfg)

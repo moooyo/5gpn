@@ -175,7 +175,7 @@ DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
 readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_LISTEN_API DNS_CERT DNS_KEY DNS_WEB_CERT DNS_WEB_KEY DNS_ZASH_CERT DNS_ZASH_KEY \
-DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL DNS_CHINA DNS_TRUST DNS_UPSTREAMS \
+DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL DNS_UPSTREAMS \
 DNS_CHINA_ECS DNS_CHINA_0X20 DNS_ECS_FILE DNS_RULES_DIR DNS_CHNROUTE DNS_EGRESS_BROKER \
 DNS_SUBSCRIPTIONS DNS_POLICY_RULES DNS_API_TOKEN DNS_API_RATE DNS_API_BURST DNS_MIHOMO_CONTROLLER DNS_MIHOMO_SECRET \
 DNS_WHITELIST_FILE DNS_MIHOMO_CONFIG DNS_INTERCEPT_CONFIG DNS_MARKETPLACES_FILE DNS_ZASH_DIR DNS_ZASH_LISTEN DNS_WEB_DIR WWW_DIR TGBOT_TOKEN TGBOT_ADMINS \
@@ -6325,6 +6325,85 @@ prepare_certificate_publication_boundaries() {
     fi
 }
 
+# Seed /etc/5gpn/upstreams.json when it is absent. This file is the single
+# source of truth for the china/trust upstream groups: the daemon reads it at
+# startup and the web console rewrites it (Settings → upstream DNS, hot-applied
+# without a restart). dns.env carries no copy, because the daemon cannot write
+# dns.env under its systemd sandbox and a second copy could only go stale.
+#
+# Never overwrites an existing file — that would discard whatever the operator
+# configured in the console. On the first upgrade past the dns.env removal it
+# carries the old DNS_CHINA/DNS_TRUST values forward, so a hand-edited value is
+# preserved rather than silently reset to the defaults.
+#
+# The installer does not prompt: these are operational defaults, changeable in
+# the console at any time.
+seed_upstreams_json() {
+    local target="${CONF_DIR}/upstreams.json"
+    if [[ -f "$target" ]]; then
+        info "Upstream groups already configured (${target}) — preserved."
+        return 0
+    fi
+
+    # Read the retired keys straight from the current dns.env. This must run
+    # BEFORE write_dns_env rewrites that file without them, which is why the
+    # call site is ordered that way.
+    local prev_china prev_trust
+    prev_china="$(cfg_get DNS_CHINA)"
+    prev_trust="$(cfg_get DNS_TRUST)"
+    local china="${prev_china:-$DNS_CHINA_DEFAULT}"
+    local trust="${prev_trust:-$DNS_TRUST_DEFAULT}"
+    if [[ -n "$prev_china" || -n "$prev_trust" ]]; then
+        info "Carrying the previous dns.env upstream values into ${target}."
+    fi
+
+    # Build the JSON arrays from the comma-separated spec lists.
+    local china_json trust_json entry
+    china_json=""; trust_json=""
+    local IFS=','
+    for entry in $china; do
+        entry="$(printf '%s' "$entry" | tr -d '[:space:]')"
+        [[ -n "$entry" ]] || continue
+        china_json="${china_json}${china_json:+,}"$'
+    "'"${entry}"'"'
+    done
+    for entry in $trust; do
+        entry="$(printf '%s' "$entry" | tr -d '[:space:]')"
+        [[ -n "$entry" ]] || continue
+        trust_json="${trust_json}${trust_json:+,}"$'
+    "'"${entry}"'"'
+    done
+    unset IFS
+
+    if [[ -z "$china_json" || -z "$trust_json" ]]; then
+        err "Refusing to seed an empty upstream group into ${target}."
+        return 1
+    fi
+
+    local tmp
+    tmp="$(mktemp "${CONF_DIR}/.upstreams.XXXXXX")"         || { err "Could not create the upstreams.json candidate."; return 1; }
+    if ! cat > "$tmp" <<EOF
+{
+  "version": 1,
+  "china": [${china_json}
+  ],
+  "trust": [${trust_json}
+  ]
+}
+EOF
+    then
+        rm -f "$tmp"
+        err "Could not write the upstreams.json candidate."
+        return 1
+    fi
+    # Owned by the service account: unlike dns.env, the daemon must be able to
+    # replace this file when the console saves a change.
+    chown "${DNS_SERVICE_USER}:${DNS_SERVICE_USER}" "$tmp" 2>/dev/null || true
+    chmod 0640 "$tmp"
+    mv -f "$tmp" "$target" || { rm -f "$tmp"; err "Could not install ${target}."; return 1; }
+    ok "Seeded upstream groups (china=${china} trust=${trust})."
+}
+
 write_dns_env() {
     # Write /etc/5gpn/dns.env from install-time collected vars.
     # cert paths always point at the /etc/5gpn/cert copies (maintained by renew-hook.sh).
@@ -6357,11 +6436,10 @@ write_dns_env() {
 	local tg_file="${existing_tgfile:-${CONF_DIR}/tgbot.json}"
 	local tg_proxy="$existing_tgproxy"
     local tg_alerts="${existing_tgalerts:-false}"
-    # A bare DNS_TRUST IP is queried over plain UDP; "host@IP" entries use DoT.
-    # Operators change it post-install via the web console
-    # (Settings → upstream DNS), which persists to /etc/5gpn/upstreams.json.
-    local dns_china="${existing_china:-$DNS_CHINA_DEFAULT}"
-    local dns_trust="${existing_trust:-$DNS_TRUST_DEFAULT}"
+    # Upstream groups are seeded into upstreams.json (see seed_upstreams_json),
+    # not written here. existing_china/existing_trust are read only to carry a
+    # pre-existing dns.env value forward on the first upgrade past this change,
+    # so an operator who hand-edited the old keys does not silently lose them.
 
     # Obtain console/zash/base domains from the single derivation of the
     # operator's base (apex) domain
@@ -6454,13 +6532,12 @@ DNS_MIHOMO_LISTEN_IPS=${MIHOMO_LISTEN_IPS}
 CERT_MODE=${CERT_MODE}
 CERT_EMAIL=${CERT_EMAIL}
 
-# Upstream resolver groups. DNS_CHINA entries are plain-UDP IPs; DNS_TRUST
-# entries are bare "IP" (plain UDP — e.g. the 22.22.22.22 resolver) or
-# "serverName@IP" (DoT). These are the INSTALL-TIME defaults:
-# when /etc/5gpn/upstreams.json exists (written by the web console via
-# Settings → upstream DNS, hot-applied without a restart) it overrides both.
-DNS_CHINA=${dns_china}
-DNS_TRUST=${dns_trust}
+# Upstream resolver groups live in upstreams.json, not here. That file is the
+# single source of truth: seeded by this installer, read at startup, and
+# rewritten by the web console (Settings → upstream DNS) which hot-applies
+# without a restart. There is deliberately no DNS_CHINA/DNS_TRUST key — the
+# daemon cannot write dns.env under its systemd sandbox, so a second copy here
+# could only ever go stale and silently disagree with the live configuration.
 DNS_UPSTREAMS=${upstreams_file}
 
 # EDNS Client Subnet attached to china-group queries. New installations use
@@ -7501,6 +7578,7 @@ full_install() {
     install_web
     install_zashboard
     install_units
+    seed_upstreams_json
     write_dns_env
     ensure_intercept_certificates
     install_cert "$BASE_DOMAIN"

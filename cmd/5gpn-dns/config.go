@@ -78,15 +78,18 @@ type Config struct {
 	// Networking.
 	GatewayIP    net.IP       // foreign-address rewrite target
 	ChinaAddrs   []string     // UDP upstream addresses (no port → :53 appended later)
-	TrustEntries []TrustEntry // trust upstream entries (bare IP=UDP, host@IP=DoT)
+	TrustEntries []TrustEntry // trust upstream entries (bare IP=UDP, host@IP=DoT, https://…@IP=DoH)
 	TrustRaw     []string     // the raw trust specs (for display/persistence)
 
-	// UpstreamsFile is the runtime upstream-override file (env DNS_UPSTREAMS,
-	// default /etc/5gpn/upstreams.json). Written by the web console via
-	// PUT /api/upstreams; when present at startup its china/trust lists
-	// override DNS_CHINA/DNS_TRUST. It lives beside subscriptions.json in the
-	// daemon-writable part of /etc/5gpn — dns.env stays read-only to the
-	// sandboxed daemon. Empty disables both the override and persistence.
+	// UpstreamsFile is THE upstream source of truth (env DNS_UPSTREAMS,
+	// default /etc/5gpn/upstreams.json): seeded by the installer, read at
+	// startup, and rewritten by PUT /api/upstreams. It lives beside
+	// subscriptions.json in the daemon-writable part of /etc/5gpn because the
+	// systemd sandbox keeps dns.env read-only to the daemon, and the console
+	// must be able to persist a change itself.
+	//
+	// There is no dns.env counterpart. Empty disables the file entirely and
+	// pins the compiled-in defaults.
 	UpstreamsFile string
 
 	// ChinaECS is the EDNS Client Subnet (RFC 7871) attached to china-group
@@ -257,9 +260,8 @@ type Config struct {
 //
 //	DNS_LISTEN_DOT      :853
 //	DNS_LISTEN_DEBUG    127.0.0.1:5353
-//	DNS_CHINA           223.5.5.5  (plain UDP)
-//	DNS_TRUST           22.22.22.22  (bare IP=plain UDP; "host@IP"=DoT)
-//	DNS_UPSTREAMS       /etc/5gpn/upstreams.json (web-console override; empty disables)
+//	DNS_UPSTREAMS       /etc/5gpn/upstreams.json (the upstream groups; empty
+//	                    disables the file and pins the compiled-in defaults)
 //	DNS_CHINA_ECS       112.96.32.0/24 (china-group EDNS Client Subnet; empty or "off" disables)
 //	DNS_ECS_FILE        /etc/5gpn/ecs.json (web-console ECS override; empty disables)
 //	DNS_RULES_DIR       /etc/5gpn/rules
@@ -383,18 +385,19 @@ func LoadConfig() (Config, error) {
 		cfg.GatewayIP = ip.To4()
 	}
 
-	// China upstreams.
-	chinaRaw := envOr("DNS_CHINA", defaultChinaUpstreams)
-	cfg.ChinaAddrs = splitTrim(chinaRaw)
-
-	// Trust upstreams. Default is 22.22.22.22, queried over plain UDP. Operators
-	// can replace it through the web console (Settings → upstream DNS).
-	trustRaw := envOr("DNS_TRUST", defaultTrustUpstreams)
-	cfg.TrustRaw = splitTrim(trustRaw)
+	// Upstream groups come from upstreams.json alone (loaded in main). These
+	// are the last-resort values used only when that file is absent or
+	// unreadable — the installer seeds it, so in practice they apply on a
+	// hand-broken install and nowhere else.
+	//
+	// There is deliberately no DNS_CHINA / DNS_TRUST env key. Two writable
+	// sources meant the console could silently outrank a hand-edited dns.env,
+	// with nothing but a startup log line to say so; worse, the shadowed keys
+	// were still validated here and a typo in a value with zero runtime effect
+	// crash-looped the sole resolver.
+	cfg.ChinaAddrs = splitTrim(defaultChinaUpstreams)
+	cfg.TrustRaw = splitTrim(defaultTrustUpstreams)
 	cfg.TrustEntries = parseTrustEntryList(cfg.TrustRaw)
-	if err := ValidateUpstreams(cfg.ChinaAddrs, cfg.TrustRaw); err != nil {
-		return Config{}, fmt.Errorf("config: upstreams: %w", err)
-	}
 
 	// Runtime upstream-override file (web-console managed).
 	cfg.UpstreamsFile = envListen("DNS_UPSTREAMS", "/etc/5gpn/upstreams.json")
