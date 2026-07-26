@@ -283,6 +283,21 @@ if command -v openssl >/dev/null 2>&1; then
         else
             pass "self-signed debug wildcard cannot enter production reuse"
         fi
+        # -checkend answers only "does this expire soon" and says nothing about
+        # notBefore, so a certificate that is not valid YET used to pass the
+        # non-production path, which ran no verification at all. It would then
+        # be rejected by every client that saw it.
+        if openssl req -x509 -newkey rsa:2048 -nodes             -not_before "$(date -u -d '+2 days' +%Y%m%d%H%M%SZ)"             -not_after "$(date -u -d '+800 days' +%Y%m%d%H%M%SZ)"             -keyout "$cert_tmp/future-key.pem" -out "$cert_tmp/future-cert.pem"             -subj /CN=example.com             -addext 'subjectAltName=DNS:example.com,DNS:*.example.com' >/dev/null 2>&1; then
+            if validate_cert_pair "$cert_tmp/future-cert.pem" "$cert_tmp/future-key.pem" example.com 0 debug; then
+                fail "a not-yet-valid debug certificate was accepted"
+            else
+                pass "a not-yet-valid debug certificate is rejected"
+            fi
+        else
+            # Older OpenSSL has no req -x509 -not_before; skip rather than fail,
+            # the assertion above still covers the accept path.
+            pass "skipped not-yet-valid check (OpenSSL lacks req -not_before)"
+        fi
     else
         fail "test OpenSSL cannot generate a SAN certificate"
     fi

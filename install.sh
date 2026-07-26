@@ -5256,7 +5256,22 @@ validate_cert_pair() {
     [[ "$trust" == debug ]] && mode=debug
     openssl x509 -checkend "$seconds" -noout -in "$cert" >/dev/null 2>&1 || return 1
     cert_identity_matches_mode "$cert" "$key" "$base" "$mode" || return 1
-    [[ "$trust" != production ]] || cert_chain_trusted "$cert"
+    # -checkend only answers "does this expire soon"; it says nothing about
+    # notBefore, so a certificate that is not valid YET passes it. For a
+    # production cert cert_chain_trusted closes that gap already — openssl
+    # verify checks the whole validity window — but the non-production path ran
+    # no verification at all, so a debug leaf with a future notBefore was
+    # accepted and then rejected by every client that saw it.
+    #
+    # A debug cert is self-signed (issue_selfsigned_wildcard uses
+    # `openssl req -x509` with no CA), so it is its own trust anchor and can be
+    # verified against itself. That checks the validity window without needing
+    # a public anchor a self-signed cert would never chain to.
+    if [[ "$trust" == production ]]; then
+        cert_chain_trusted "$cert"
+    else
+        openssl verify -purpose sslserver -CAfile "$cert" "$cert" >/dev/null 2>&1
+    fi
 }
 
 cert_provenance_get() {
