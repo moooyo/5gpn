@@ -13,28 +13,34 @@ export interface Decision {
 /**
  * reason -> decision map (amendment A-H1, authoritative): the label + color
  * shown for a log row come from `reason`, NOT `verdict` — verdict only
- * carries {block,direct,proxy} and collapses the design's 5 labels / 4
- * colors down to 3. Colors retain the established query-log legend palette.
+ * carries {block,direct,proxy} and collapses the design's 5 labels / 5
+ * colors down to 3.
+ *
+ * Colors are the shared categorical chart slots, assigned to the same entity
+ * as the overview decision donut so a reader who learned a hue on one page
+ * reads it the same on the other. They are not literal hex: the previous
+ * fixed values were selected for a light surface and dropped below usable
+ * contrast on the dark theme's card.
  */
 export const DECISION: Record<string, Decision> = {
-  'block': { key: 'logs.decision.block', color: '#dc2626' }, // 拦截 red
-  'force-direct': { key: 'logs.decision.forceDirect', color: '#16a34a' }, // 强制直连 green
-  'force-proxy': { key: 'logs.decision.forceProxy', color: '#2563eb' }, // 强制代理 blue
-  'chnroute-cn': { key: 'logs.decision.chnrouteCn', color: '#0891b2' }, // 国内直连 cyan
-  'chnroute-foreign': { key: 'logs.decision.chnrouteForeign', color: '#2563eb' }, // 境外代理 blue
+  'block': { key: 'logs.decision.block', color: 'var(--color-chart-1)' },
+  'force-direct': { key: 'logs.decision.forceDirect', color: 'var(--color-chart-2)' },
+  'force-proxy': { key: 'logs.decision.forceProxy', color: 'var(--color-chart-3)' },
+  'chnroute-cn': { key: 'logs.decision.chnrouteCn', color: 'var(--color-chart-4)' },
+  'chnroute-foreign': { key: 'logs.decision.chnrouteForeign', color: 'var(--color-chart-5)' },
 }
 
 /** Fallback when `reason` is missing/unknown — derived from the coarser
- *  `verdict` enum ({block,direct,proxy}), reusing the same 3 colors. */
+ *  `verdict` enum ({block,direct,proxy}), reusing the matching reason slots. */
 const VERDICT_FALLBACK: Record<string, Decision> = {
-  block: { key: 'logs.decision.block', color: '#dc2626' },
-  direct: { key: 'logs.decision.direct', color: '#16a34a' },
-  proxy: { key: 'logs.decision.proxy', color: '#2563eb' },
+  block: { key: 'logs.decision.block', color: 'var(--color-chart-1)' },
+  direct: { key: 'logs.decision.direct', color: 'var(--color-chart-2)' },
+  proxy: { key: 'logs.decision.proxy', color: 'var(--color-chart-3)' },
 }
 
 /** Neutral last-resort fallback when neither `reason` nor `verdict` is a
  *  recognized value (should not happen against a well-behaved backend). */
-const UNKNOWN_DECISION: Decision = { key: 'verdicts.noVerdict', color: '#93a2bd' }
+const UNKNOWN_DECISION: Decision = { key: 'verdicts.noVerdict', color: 'var(--color-text-faint)' }
 
 export function resolveDecision(entry: Pick<QueryLogEntry, 'reason' | 'verdict'>): Decision {
   if (entry.reason && DECISION[entry.reason]) return DECISION[entry.reason]

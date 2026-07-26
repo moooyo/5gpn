@@ -16,15 +16,18 @@ const LIMIT = 300
 
 type LoadState = 'loading' | 'ready' | 'error'
 
-// The four legend colors from the design handoff's log view (~L311-314) —
-// each reuses an existing `logs.decision.*` key rather than inventing
-// legend-only copy, since the 5 reason-driven labels collapse onto exactly
-// these 4 colors (force-proxy and chnroute-foreign share blue).
+// The legend mirrors the reason -> color map in log-columns.tsx one-for-one.
+// It previously carried four entries because force-proxy and chnroute-foreign
+// shared a hue; they now hold distinct categorical slots, so collapsing them
+// here would leave the legend unable to name a colour the table actually
+// paints. Colours come from the shared chart slots, not semantic UI roles,
+// which several themes alias onto each other.
 const LEGEND: Array<{ color: string; labelKey: string }> = [
-  { color: 'var(--color-green)', labelKey: 'logs.decision.direct' },
-  { color: 'var(--color-cyan)', labelKey: 'logs.decision.chnrouteCn' },
-  { color: 'var(--color-primary)', labelKey: 'logs.decision.proxy' },
-  { color: 'var(--color-red)', labelKey: 'logs.decision.block' },
+  { color: 'var(--color-chart-1)', labelKey: 'logs.decision.block' },
+  { color: 'var(--color-chart-2)', labelKey: 'logs.decision.forceDirect' },
+  { color: 'var(--color-chart-3)', labelKey: 'logs.decision.forceProxy' },
+  { color: 'var(--color-chart-4)', labelKey: 'logs.decision.chnrouteCn' },
+  { color: 'var(--color-chart-5)', labelKey: 'logs.decision.chnrouteForeign' },
 ]
 
 /** Two-line stacked card row used below the `md` breakpoint instead of the

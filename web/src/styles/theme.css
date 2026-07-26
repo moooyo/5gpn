@@ -18,6 +18,19 @@
   --color-green-2: var(--md-sys-color-success-strong);
   --color-red: var(--md-sys-color-error);
 
+  /* Categorical chart series. Deliberately NOT aliases of semantic UI roles:
+     several themes give primary/success/tertiary/trace byte-identical values
+     (ocean primary == trace, forest primary == success and tertiary == trace),
+     which collapsed distinct donut segments to the same colour. Each theme
+     block below defines its own --chart-cat-*, validated as a set for
+     colour-vision deficiency and for contrast against that theme's card
+     surface. Slots are assigned to an entity in fixed order and never cycled. */
+  --color-chart-1: var(--chart-cat-1);
+  --color-chart-2: var(--chart-cat-2);
+  --color-chart-3: var(--chart-cat-3);
+  --color-chart-4: var(--chart-cat-4);
+  --color-chart-5: var(--chart-cat-5);
+
   --color-bg: var(--md-sys-color-background);
   --color-card: var(--md-sys-color-surface);
   --color-surface: var(--md-sys-color-surface);
@@ -85,6 +98,13 @@
     --md-sys-color-inverse-surface: #303030;
     --md-sys-color-inverse-on-surface: #f2f2f2;
     --md-sys-color-scrim: rgb(0 0 0 / 38%);
+    /* Categorical chart series — validated on this theme's #ffffff card
+       surface (adjacent + ring-wrap pairs, protan/deutan/tritan). */
+    --chart-cat-1: #2a78d6;
+    --chart-cat-2: #eb6834;
+    --chart-cat-3: #1baf7a;
+    --chart-cat-4: #eda100;
+    --chart-cat-5: #e87ba4;
     --md-sys-elevation-1: 0 1px 2px rgb(0 0 0 / 8%), 0 1px 3px 1px rgb(0 0 0 / 5%);
     --md-sys-elevation-2: 0 1px 2px rgb(0 0 0 / 10%), 0 2px 8px 2px rgb(0 0 0 / 8%);
     --md-sys-elevation-3: 0 6px 14px 4px rgb(0 0 0 / 12%), 0 1px 3px rgb(0 0 0 / 14%);
@@ -128,6 +148,13 @@
     --md-sys-color-inverse-surface: #e3e3e3;
     --md-sys-color-inverse-on-surface: #303030;
     --md-sys-color-scrim: rgb(0 0 0 / 55%);
+    /* Categorical chart series — the same five hues stepped for the dark
+       card surface (#1e1f20), selected and validated for it, not flipped. */
+    --chart-cat-1: #3987e5;
+    --chart-cat-2: #d95926;
+    --chart-cat-3: #199e70;
+    --chart-cat-4: #c98500;
+    --chart-cat-5: #d55181;
     --md-sys-elevation-1: 0 1px 2px rgb(0 0 0 / 45%);
     --md-sys-elevation-2: 0 1px 2px rgb(0 0 0 / 45%), 0 2px 8px 2px rgb(0 0 0 / 30%);
     --md-sys-elevation-3: 0 6px 14px 4px rgb(0 0 0 / 45%), 0 1px 3px rgb(0 0 0 / 42%);
@@ -171,6 +198,13 @@
     --md-sys-color-inverse-surface: #2b3232;
     --md-sys-color-inverse-on-surface: #edf2f1;
     --md-sys-color-scrim: rgb(0 0 0 / 38%);
+    /* Categorical chart series — validated on this theme's #ffffff card
+       surface (adjacent + ring-wrap pairs, protan/deutan/tritan). */
+    --chart-cat-1: #2a78d6;
+    --chart-cat-2: #eb6834;
+    --chart-cat-3: #1baf7a;
+    --chart-cat-4: #eda100;
+    --chart-cat-5: #e87ba4;
     --md-sys-elevation-1: 0 1px 2px rgb(0 75 75 / 9%);
     --md-sys-elevation-2: 0 1px 2px rgb(0 75 75 / 10%), 0 2px 8px 2px rgb(0 75 75 / 8%);
     --md-sys-elevation-3: 0 6px 14px 4px rgb(0 75 75 / 13%), 0 1px 3px rgb(0 75 75 / 14%);
@@ -214,6 +248,13 @@
     --md-sys-color-inverse-surface: #2e312d;
     --md-sys-color-inverse-on-surface: #f0f1ec;
     --md-sys-color-scrim: rgb(0 0 0 / 38%);
+    /* Categorical chart series — validated on this theme's #ffffff card
+       surface (adjacent + ring-wrap pairs, protan/deutan/tritan). */
+    --chart-cat-1: #2a78d6;
+    --chart-cat-2: #eb6834;
+    --chart-cat-3: #1baf7a;
+    --chart-cat-4: #eda100;
+    --chart-cat-5: #e87ba4;
     --md-sys-elevation-1: 0 1px 2px rgb(20 70 35 / 9%);
     --md-sys-elevation-2: 0 1px 2px rgb(20 70 35 / 10%), 0 2px 8px 2px rgb(20 70 35 / 8%);
     --md-sys-elevation-3: 0 6px 14px 4px rgb(20 70 35 / 13%), 0 1px 3px rgb(20 70 35 / 14%);
@@ -257,6 +298,13 @@
     --md-sys-color-inverse-surface: #322f35;
     --md-sys-color-inverse-on-surface: #f5eff7;
     --md-sys-color-scrim: rgb(0 0 0 / 38%);
+    /* Categorical chart series — validated on this theme's #ffffff card
+       surface (adjacent + ring-wrap pairs, protan/deutan/tritan). */
+    --chart-cat-1: #2a78d6;
+    --chart-cat-2: #eb6834;
+    --chart-cat-3: #1baf7a;
+    --chart-cat-4: #eda100;
+    --chart-cat-5: #e87ba4;
     --md-sys-elevation-1: 0 1px 2px rgb(70 40 110 / 9%);
     --md-sys-elevation-2: 0 1px 2px rgb(70 40 110 / 10%), 0 2px 8px 2px rgb(70 40 110 / 8%);
     --md-sys-elevation-3: 0 6px 14px 4px rgb(70 40 110 / 13%), 0 1px 3px rgb(70 40 110 / 14%);

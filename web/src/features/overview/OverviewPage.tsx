@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { NetworkCheckIcon, RuleIcon, SpeedIcon } from '../../components/icons'
-import { BarChart, DonutChart, Sparkline, type DonutSegment } from '../../components/charts'
+import { DonutChart, HBarChart, Sparkline, type DonutSegment, type HBarRow } from '../../components/charts'
 import { Card, StatusDot } from '../../components/ds'
 import { useStatus } from '../../lib/StatusContext'
 import { cn } from '../../lib/cn'
@@ -14,10 +14,24 @@ import {
   pctDelta,
   pushCapped,
   upstreamHealth,
+  upstreamSuccessRate,
   type QpsPoint,
+  type UpstreamGroupHealth,
 } from './metrics'
 
 const SERIES_CAP = 48
+
+/** One decimal + an explicit unit, shared by every place a group's average
+ *  resolver round-trip is printed so the two never drift apart. */
+function formatMs(ms: number): string {
+  return `${ms.toFixed(1)} ms`
+}
+
+/** Two decimals, except an exact 100% which reads as "100%" rather than the
+ *  falsely precise "100.00%". */
+function formatRate(rate: number): string {
+  return rate === 100 ? '100%' : `${rate.toFixed(2)}%`
+}
 
 function Metric({
   label,
@@ -63,6 +77,40 @@ function TraceNode({ icon, label, value }: { icon: ReactNode; label: string; val
   )
 }
 
+/**
+ * Supporting line under one upstream group's latency bar: health as a rate plus
+ * an absolute failure count, rather than a second bar. Errors here run a few
+ * against tens of thousands, so an error bar sharing the success bar's linear
+ * scale is sub-pixel — invisible, yet still taking layout space.
+ */
+function UpstreamMeta({
+  group,
+  formatter,
+}: {
+  group: UpstreamGroupHealth
+  formatter: Intl.NumberFormat
+}) {
+  const { t } = useTranslation()
+  const rate = upstreamSuccessRate(group)
+  const failed = group.err
+  return (
+    <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+      <StatusDot color={failed > 0 ? 'var(--color-amber)' : 'var(--color-green)'} />
+      <span>
+        {rate === null
+          ? t('overview.upstreamSuccessRateUnknown')
+          : t('overview.upstreamSuccessRate', { rate: formatRate(rate) })}
+      </span>
+      <span aria-hidden="true">·</span>
+      <span>{t('overview.upstreamExchanges', { n: formatter.format(group.ok + group.err) })}</span>
+      <span aria-hidden="true">·</span>
+      <span style={failed > 0 ? { color: 'var(--color-red)' } : undefined}>
+        {t('overview.upstreamFailures', { n: formatter.format(failed) })}
+      </span>
+    </span>
+  )
+}
+
 export default function OverviewPage() {
   const { t, i18n } = useTranslation()
   const { status } = useStatus()
@@ -82,23 +130,37 @@ export default function OverviewPage() {
   }, [live, status?.stats?.total, status?.uptime_seconds])
 
   const counts = useMemo(() => decisionCounts(status?.stats), [status?.stats])
+  // Fixed slot per decision, never by rank — a reader who learned "国内直连 is
+  // slot 4" must see the same hue in the arbitration card below, which plots
+  // the chnroute-only half of these very counters.
   const decisionSegments: DonutSegment[] = useMemo(() => [
-    { name: t('overview.decision.block'), value: counts.block, color: 'var(--color-red)' },
-    { name: t('overview.decision.forceDirect'), value: counts.forceDirect, color: 'var(--color-green)' },
-    { name: t('overview.decision.forceProxy'), value: counts.forceProxy, color: 'var(--color-primary)' },
-    { name: t('overview.decision.chnrouteCn'), value: counts.chnrouteCn, color: 'var(--color-cyan)' },
-    { name: t('overview.decision.chnrouteForeign'), value: counts.chnrouteForeign, color: 'var(--color-indigo)' },
+    { name: t('overview.decision.block'), value: counts.block, color: 'var(--color-chart-1)' },
+    { name: t('overview.decision.forceDirect'), value: counts.forceDirect, color: 'var(--color-chart-2)' },
+    { name: t('overview.decision.forceProxy'), value: counts.forceProxy, color: 'var(--color-chart-3)' },
+    { name: t('overview.decision.chnrouteCn'), value: counts.chnrouteCn, color: 'var(--color-chart-4)' },
+    { name: t('overview.decision.chnrouteForeign'), value: counts.chnrouteForeign, color: 'var(--color-chart-5)' },
   ], [counts, t])
   const decisionTotal = decisionSegments.reduce((sum, segment) => sum + segment.value, 0)
   const hitRate = cacheHitRate(status?.stats)
   const health = upstreamHealth(status?.stats)
   const arbitration = arbitrationSegments(status?.stats)
   const arbitrationSegmentsView: DonutSegment[] = [
-    { name: t('overview.arbitrationCn'), value: arbitration.cn, color: 'var(--color-cyan)' },
-    { name: t('overview.arbitrationForeign'), value: arbitration.foreign, color: 'var(--color-indigo)' },
+    { name: t('overview.arbitrationCn'), value: arbitration.cn, color: 'var(--color-chart-4)' },
+    { name: t('overview.arbitrationForeign'), value: arbitration.foreign, color: 'var(--color-chart-5)' },
   ]
   const arbitrationTotal = arbitration.cn + arbitration.foreign
   const formatter = useMemo(() => new Intl.NumberFormat(i18n.language), [i18n.language])
+  // One row per upstream group, both bars on a single shared ms scale so
+  // "which leg is slower" is readable at a glance without a second axis.
+  const upstreamRows: HBarRow[] = [
+    { name: t('overview.upstreamHealthChina'), group: health.china },
+    { name: t('overview.upstreamHealthTrust'), group: health.trust },
+  ].map(({ name, group }) => ({
+    name,
+    value: group.avgMs,
+    display: formatMs(group.avgMs),
+    meta: <UpstreamMeta group={group} formatter={formatter} />,
+  }))
   const delta = pctDelta(qpsSeries)
   const gatewayCount = counts.forceProxy + counts.chnrouteForeign
 
@@ -152,8 +214,12 @@ export default function OverviewPage() {
         <Card variant="tonal" className="flex min-h-[116px] flex-col justify-between p-4.5">
           <span className="text-[12px] font-medium text-text-soft">{t('overview.upstreamHealthLatency')}</span>
           <div className="space-y-2">
-            <div className="flex items-center gap-2"><StatusDot color="var(--color-green)" /><span className="flex-1 text-[10.5px] text-text-faint">china</span><b className="font-mono text-[17px] font-medium text-text-strong">{health.china.avgMs.toFixed(1)}ms</b></div>
-            <div className="flex items-center gap-2"><StatusDot color="var(--color-primary)" /><span className="flex-1 text-[10.5px] text-text-faint">trust</span><b className="font-mono text-[17px] font-medium text-text-strong">{health.trust.avgMs.toFixed(1)}ms</b></div>
+            {upstreamRows.map((row) => (
+              <div key={row.name} className="flex items-baseline gap-2">
+                <span className="flex-1 text-[10.5px] text-text-faint">{row.name}</span>
+                <b className="font-mono text-[17px] font-medium tabular-nums text-text-strong">{row.display}</b>
+              </div>
+            ))}
           </div>
         </Card>
       </div>
@@ -202,25 +268,17 @@ export default function OverviewPage() {
         </Card>
 
         <Card className="p-5">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="mb-1 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
             <h2 className="text-[15px] font-medium text-text-strong">{t('overview.upstreamHealth')}</h2>
-            <div className="flex gap-3 text-[10.5px] text-text-faint">
-              <span className="flex items-center gap-1.5"><StatusDot color="var(--color-green)" />{t('overview.upstreamHealthOk')}</span>
-              <span className="flex items-center gap-1.5"><StatusDot color="var(--color-red)" />{t('overview.upstreamHealthErr')}</span>
-            </div>
+            <span className="rounded-full bg-secondary-container px-2.5 py-0.5 text-[10.5px] text-on-secondary-container">
+              {t('overview.upstreamLatencyScope')}
+            </span>
           </div>
-          <BarChart
-            categories={[t('overview.upstreamHealthChina'), t('overview.upstreamHealthTrust')]}
-            series={[
-              { name: t('overview.upstreamHealthOk'), data: [health.china.ok, health.trust.ok], color: 'var(--color-green)' },
-              { name: t('overview.upstreamHealthErr'), data: [health.china.err, health.trust.err], color: 'var(--color-red)' },
-            ]}
-            height={130}
-          />
-          <div className="grid grid-cols-2 text-center text-[10.5px] text-text-faint">
-            <span>{t('overview.upstreamHealthLatency')} <b className="font-mono font-medium text-text-mid">{health.china.avgMs.toFixed(1)}ms</b></span>
-            <span>{t('overview.upstreamHealthLatency')} <b className="font-mono font-medium text-text-mid">{health.trust.avgMs.toFixed(1)}ms</b></span>
-          </div>
+          <p className="mb-4 text-[11px] leading-relaxed text-text-faint">{t('overview.upstreamLatencyHint')}</p>
+          <HBarChart rows={upstreamRows} />
+          <p className="mt-4 text-[10px] leading-relaxed text-text-faint">
+            {t('overview.upstreamMeasured')} {t('overview.upstreamTrustNote')}
+          </p>
         </Card>
 
         <Card className="p-5">

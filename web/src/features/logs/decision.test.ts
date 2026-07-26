@@ -8,14 +8,19 @@ import { resolveDecision } from './log-columns'
  * every one of the 5 reasons is asserted individually (a regression that
  * collapses any two of them back onto the same color/label would slip past
  * a test that only spot-checks one or two).
+ *
+ * Colors are theme-scoped categorical slots rather than literal hex: fixed
+ * values could not answer the dark theme, and several themes alias the
+ * semantic roles the page used to borrow (forest primary == success, ocean
+ * primary == trace), which painted distinct decisions the same.
  */
 describe('resolveDecision (amendment A-H1)', () => {
   it.each([
-    ['block', 'logs.decision.block', '#dc2626'],
-    ['force-direct', 'logs.decision.forceDirect', '#16a34a'],
-    ['force-proxy', 'logs.decision.forceProxy', '#2563eb'],
-    ['chnroute-cn', 'logs.decision.chnrouteCn', '#0891b2'],
-    ['chnroute-foreign', 'logs.decision.chnrouteForeign', '#2563eb'],
+    ['block', 'logs.decision.block', 'var(--color-chart-1)'],
+    ['force-direct', 'logs.decision.forceDirect', 'var(--color-chart-2)'],
+    ['force-proxy', 'logs.decision.forceProxy', 'var(--color-chart-3)'],
+    ['chnroute-cn', 'logs.decision.chnrouteCn', 'var(--color-chart-4)'],
+    ['chnroute-foreign', 'logs.decision.chnrouteForeign', 'var(--color-chart-5)'],
   ])('reason=%s -> { key: %s, color: %s }', (reason, key, color) => {
     expect(resolveDecision({ reason, verdict: undefined })).toEqual({ key, color })
   })
@@ -23,20 +28,20 @@ describe('resolveDecision (amendment A-H1)', () => {
   it('reason takes priority over verdict when both are present', () => {
     expect(resolveDecision({ reason: 'block', verdict: 'proxy' })).toEqual({
       key: 'logs.decision.block',
-      color: '#dc2626',
+      color: 'var(--color-chart-1)',
     })
   })
 
   it.each([
-    ['block', 'logs.decision.block', '#dc2626'],
-    ['direct', 'logs.decision.direct', '#16a34a'],
-    ['proxy', 'logs.decision.proxy', '#2563eb'],
+    ['block', 'logs.decision.block', 'var(--color-chart-1)'],
+    ['direct', 'logs.decision.direct', 'var(--color-chart-2)'],
+    ['proxy', 'logs.decision.proxy', 'var(--color-chart-3)'],
   ])('falls back to the coarser verdict=%s when reason is missing -> { key: %s, color: %s }', (verdict, key, color) => {
     expect(resolveDecision({ reason: undefined, verdict })).toEqual({ key, color })
   })
 
   it('falls back to the neutral unknown decision when neither reason nor verdict is a recognized value', () => {
-    const unknown = { key: 'verdicts.noVerdict', color: '#93a2bd' }
+    const unknown = { key: 'verdicts.noVerdict', color: 'var(--color-text-faint)' }
     expect(resolveDecision({ reason: 'not-a-real-reason', verdict: 'not-a-real-verdict' })).toEqual(unknown)
     expect(resolveDecision({})).toEqual(unknown)
     expect(resolveDecision({ reason: undefined, verdict: undefined })).toEqual(unknown)

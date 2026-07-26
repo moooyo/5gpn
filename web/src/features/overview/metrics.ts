@@ -9,9 +9,10 @@
  *
  * The dashboard charts are live snapshots recomputed from `status.stats` on
  * every render:
- * `cacheHitRate` (缓存命中率 gauge), `upstreamHealth` (上游健康与延迟 bar
- * chart, china vs trust), `arbitrationSegments` (境内/境外分流比 donut — the
- * chnroute-only half of `decisionCounts`, split out for its own focused card).
+ * `cacheHitRate` (缓存命中率 gauge), `upstreamHealth` + `upstreamSuccessRate`
+ * (上游健康与延迟 card, china vs trust), `arbitrationSegments` (境内/境外分流比
+ * donut — the chnroute-only half of `decisionCounts`, split out for its own
+ * focused card).
  */
 
 export interface QpsPoint {
@@ -126,13 +127,30 @@ interface UpstreamHealthStatsLike {
 }
 
 /** Lifts the china/trust success+error counters and average latencies off
- *  `/api/status` for the upstream-health bar chart. Tolerates an absent
- *  `stats` (pre-first-poll) by zeroing. */
+ *  `/api/status` for the upstream-health card. `avgMs` is the mean round trip
+ *  of one query to that group's upstream *resolver* — not the latency to the
+ *  address it answers with. Tolerates an absent `stats` (pre-first-poll) by
+ *  zeroing. */
 export function upstreamHealth(stats?: UpstreamHealthStatsLike): UpstreamHealth {
   return {
     china: { ok: stats?.china_ok ?? 0, err: stats?.china_err ?? 0, avgMs: stats?.china_avg_ms ?? 0 },
     trust: { ok: stats?.trust_ok ?? 0, err: stats?.trust_err ?? 0, avgMs: stats?.trust_avg_ms ?? 0 },
   }
+}
+
+/** Share of a group's counted exchanges that succeeded, as a 0–100 percentage.
+ *  Null when the group has no counted exchanges yet — a fresh daemon has not
+ *  earned a 100% health claim, and rendering "—" is honest where "100%" is not.
+ *
+ *  Success rate, not a success/error bar pair, is what this card plots: errors
+ *  are typically a handful against tens of thousands of successes, so on a
+ *  shared linear scale the error mark is sub-pixel and invisible while still
+ *  occupying layout. The rate makes the same information legible, and the raw
+ *  failure count is printed beside it. */
+export function upstreamSuccessRate(group: UpstreamGroupHealth): number | null {
+  const total = group.ok + group.err
+  if (total <= 0) return null
+  return (group.ok / total) * 100
 }
 
 // ---- 境内/境外分流比 (CN vs foreign arbitration split donut) ----------------

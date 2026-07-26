@@ -95,11 +95,37 @@ describe('OverviewPage', () => {
     expect(screen.getByText('0.0%')).toBeInTheDocument()
   })
 
-  it('renders upstream bars and both average latency values', () => {
+  it('plots both upstream latencies on one shared scale with health beside them', () => {
     const { container } = renderOverview()
-    expect(container.querySelectorAll('[data-chart="bar"] rect')).toHaveLength(4)
-    expect(screen.getAllByText('5.0ms')).toHaveLength(2)
-    expect(screen.getAllByText('10.0ms')).toHaveLength(2)
+    const fills = container.querySelectorAll<HTMLElement>('[data-chart="hbar"] [role="img"] > div')
+    expect(fills).toHaveLength(2)
+    // trust (10ms) is the slower leg here, so it owns the full-width bar and
+    // china (5ms) is drawn at half of it — one scale, no second axis.
+    expect(fills[0].style.width).toBe('50%')
+    expect(fills[1].style.width).toBe('100%')
+    expect(screen.getAllByText('5.0 ms')).toHaveLength(2)
+    expect(screen.getAllByText('10.0 ms')).toHaveLength(2)
+  })
+
+  it('states which latency it is measuring so the card cannot be misread', () => {
+    renderOverview()
+    expect(screen.getByText(i18n.t('overview.upstreamLatencyHint'))).toBeInTheDocument()
+    expect(screen.getByText(i18n.t('overview.upstreamLatencyScope'))).toBeInTheDocument()
+  })
+
+  it('reports upstream health as a rate plus an absolute failure count', () => {
+    renderOverview()
+    // china_ok 1 / china_err 0 in STATS — an exact 100% is printed without
+    // false precision, and the zero-failure case still shows its count.
+    expect(screen.getAllByText(i18n.t('overview.upstreamSuccessRate', { rate: '100%' }))).toHaveLength(2)
+    expect(screen.getAllByText(i18n.t('overview.upstreamFailures', { n: '0' }))).toHaveLength(2)
+  })
+
+  it('renders "no samples yet" rather than a fabricated 100% before any exchange', () => {
+    renderOverview(statusValue({
+      status: { ...STATUS, stats: { ...STATS, china_ok: 0, china_err: 0, trust_ok: 0, trust_err: 0 } },
+    }))
+    expect(screen.getAllByText(i18n.t('overview.upstreamSuccessRateUnknown'))).toHaveLength(2)
   })
 
   it('renders the chnroute-only arbitration split separately', () => {

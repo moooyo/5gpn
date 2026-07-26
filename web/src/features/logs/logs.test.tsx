@@ -88,7 +88,7 @@ describe('LogsPage', () => {
     expect(within(table).getByText('ads.tracking.io.')).toBeInTheDocument()
   })
 
-  it('an entry with reason=chnroute-cn shows the 国内直连 label + cyan dot', async () => {
+  it('an entry with reason=chnroute-cn shows the 国内直连 label on its own categorical slot', async () => {
     mockLog()
     render(<LogsPage />)
 
@@ -96,10 +96,10 @@ describe('LogsPage', () => {
     const label = within(table).getByText('国内直连')
     expect(label.className).toContain('text-text-mid')
     const dot = label.querySelector('span')
-    expect(dot?.style.background).toBe('rgb(8, 145, 178)')
+    expect(dot?.style.background).toBe('var(--color-chart-4)')
   })
 
-  it('an entry with reason=block shows 拦截 + red', async () => {
+  it('an entry with reason=block shows 拦截 on its own categorical slot', async () => {
     mockLog()
     render(<LogsPage />)
 
@@ -107,7 +107,7 @@ describe('LogsPage', () => {
     const label = within(table).getByText('拦截')
     expect(label.className).toContain('text-text-mid')
     const dot = label.querySelector('span')
-    expect(dot?.style.background).toBe('rgb(220, 38, 38)')
+    expect(dot?.style.background).toBe('var(--color-chart-1)')
   })
 
   it('shows the reason as a chip in the 命中规则 column', async () => {
