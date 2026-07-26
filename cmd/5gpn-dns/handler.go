@@ -215,7 +215,8 @@ func (s *statsCounters) bumpTrust(ok bool) {
 }
 
 // recordChinaLatency adds one china-exchange duration to the cumulative sum +
-// count (observability-only). Nil-safe.
+// count (observability-only). Callers record only exchanges that completed
+// without error — see the note at the goroutines in arbitrateSrc. Nil-safe.
 func (s *statsCounters) recordChinaLatency(d time.Duration) {
 	if s == nil {
 		return
@@ -225,7 +226,8 @@ func (s *statsCounters) recordChinaLatency(d time.Duration) {
 }
 
 // recordTrustLatency adds one trust-exchange duration to the cumulative sum +
-// count (observability-only). Nil-safe.
+// count (observability-only). Callers record only exchanges that completed
+// without error — see the note at the goroutines in arbitrateSrc. Nil-safe.
 func (s *statsCounters) recordTrustLatency(d time.Duration) {
 	if s == nil {
 		return

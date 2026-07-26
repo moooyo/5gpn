@@ -74,16 +74,30 @@ func arbitrateSrc(ctx context.Context, q *dns.Msg, china, trust Exchanger, cn *C
 	trustCh := make(chan exchangeResult, 1)
 
 	// Launch both concurrently on the caller's ctx.
+	// Only a COMPLETED exchange is a latency sample. Timing failures too would
+	// make the average move in contradictory directions: a dead upstream
+	// contributes full-timeout samples that inflate it, while an open circuit
+	// breaker contributes ~0ms non-attempts that deflate it, so an unhealthy
+	// group could read faster than a healthy one. Cancellation is the sharper
+	// case — when china answers CN this function returns and the deferred
+	// cancel aborts a trust exchange that may still be dialing, and timing that
+	// abort would record "how long until china answered" as trust's round trip,
+	// dragging trust's average toward china's on CN-heavy traffic. Group health
+	// is carried by the ok/err counters below, not by these samples.
 	go func() {
 		start := time.Now()
 		m, err := china.Exchange(ctx, q)
-		stats.recordChinaLatency(time.Since(start))
+		if err == nil {
+			stats.recordChinaLatency(time.Since(start))
+		}
 		chinaCh <- exchangeResult{m, err}
 	}()
 	go func() {
 		start := time.Now()
 		m, err := trust.Exchange(ctx, q)
-		stats.recordTrustLatency(time.Since(start))
+		if err == nil {
+			stats.recordTrustLatency(time.Since(start))
+		}
 		trustCh <- exchangeResult{m, err}
 	}()
 

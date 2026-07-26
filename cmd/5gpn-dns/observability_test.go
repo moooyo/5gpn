@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -66,6 +68,77 @@ func TestUpstreamLatencyRecorded(t *testing.T) {
 
 	c := NewController(func() error { return nil }, h.stats, nil, nil)
 	_ = c.Stats() // must not panic; avg may be ~0 with a no-delay fake exchanger
+}
+
+// A failed exchange is NOT a latency sample. Timing failures lets a 5s timeout
+// and a ~0ms circuit-breaker fast-fail land in the same mean, so an unhealthy
+// group can display a lower average than a healthy one; and a trust exchange
+// aborted by the china-CN-win cancellation would record "how long until china
+// answered" as trust's round trip.
+func TestUpstreamLatencyExcludesFailedExchanges(t *testing.T) {
+	cn := loadTestChnroute(t)
+	q := new(dns.Msg)
+	q.SetQuestion(dns.Fqdn("obs.test"), dns.TypeA)
+
+	t.Run("errored leg records no sample", func(t *testing.T) {
+		s := &statsCounters{}
+		china := &fakeExchanger{err: errors.New("boom")}
+		trust := &fakeExchanger{reply: buildMsg("obs.test", "9.9.9.9")}
+		if _, err := Arbitrate(context.Background(), q, china, trust, cn, s); err != nil {
+			t.Fatalf("Arbitrate: %v", err)
+		}
+		if got := s.chinaLatCount.Load(); got != 0 {
+			t.Errorf("chinaLatCount = %d, want 0 (exchange failed)", got)
+		}
+		if got := s.chinaErr.Load(); got != 1 {
+			t.Errorf("chinaErr = %d, want 1 — health is still counted", got)
+		}
+		if got := s.trustLatCount.Load(); got != 1 {
+			t.Errorf("trustLatCount = %d, want 1 (exchange succeeded)", got)
+		}
+	})
+
+	t.Run("trust aborted by a china CN win records no sample", func(t *testing.T) {
+		s := &statsCounters{}
+		china := &fakeExchanger{reply: buildMsg("obs.test", "1.2.3.4")} // CN → china wins
+		// Outlives the china win, so the deferred cancel aborts it mid-flight.
+		trust := &ctxAwareExchanger{delay: 2 * time.Second, reply: buildMsg("obs.test", "9.9.9.9")}
+		if _, err := Arbitrate(context.Background(), q, china, trust, cn, s); err != nil {
+			t.Fatalf("Arbitrate: %v", err)
+		}
+		if got := s.chinaLatCount.Load(); got != 1 {
+			t.Errorf("chinaLatCount = %d, want 1", got)
+		}
+		// Wait for the abandoned goroutine to unwind before asserting on it.
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) && trust.finished.Load() == 0 {
+			time.Sleep(time.Millisecond)
+		}
+		if trust.finished.Load() == 0 {
+			t.Fatal("trust exchange never returned; cancellation did not propagate")
+		}
+		if got := s.trustLatCount.Load(); got != 0 {
+			t.Errorf("trustLatCount = %d, want 0 — a cancelled dial is not a latency sample", got)
+		}
+	})
+}
+
+// ctxAwareExchanger blocks until its delay elapses or ctx is cancelled,
+// modelling an upstream that is still dialing when arbitration abandons it.
+type ctxAwareExchanger struct {
+	delay    time.Duration
+	reply    *dns.Msg
+	finished atomic.Uint32
+}
+
+func (e *ctxAwareExchanger) Exchange(ctx context.Context, _ *dns.Msg) (*dns.Msg, error) {
+	defer e.finished.Store(1)
+	select {
+	case <-time.After(e.delay):
+		return e.reply.Copy(), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func TestAvgMs(t *testing.T) {
