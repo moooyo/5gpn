@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Post-upgrade acceptance for 0.0.29 on test-env.
+# Post-upgrade acceptance for a released version on a real box.
 #
-# 0.0.29 changes three things that only a real upgrade can exercise, because
+# usage: acceptance.sh <expected-version>
+#
+# 0.0.29 changed three things that only a real upgrade can exercise, because
 # each one depends on state a fresh install never has:
 #
 #   * DNS_CHINA / DNS_TRUST were retired from dns.env. Every existing box still
@@ -14,9 +16,20 @@
 #     must be rejected cleanly and the daemon must start with zeroed counters,
 #     not refuse to boot.
 #
-# Read-only. Run after the upgrade completes.
+# Those checks stay: they are the ones that regress silently, and every future
+# upgrade crosses the same code. 0.0.30 adds the trust probe's reserved-range
+# detection.
+#
+# Read-only apart from one stats reset. Run after the upgrade completes.
 
 set -uo pipefail
+
+WANT_VERSION="${1:-}"
+if [[ -z "$WANT_VERSION" ]]; then
+    echo "usage: $0 <expected-version>" >&2
+    exit 2
+fi
+
 PASS=0; FAIL=0; WARN=0
 ok()   { echo "  PASS  $*"; PASS=$((PASS+1)); }
 bad()  { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
@@ -26,7 +39,7 @@ note() { echo "        $*"; }
 echo "== version and service health =="
 ver="$(/opt/5gpn/bin/5gpn-dns --version 2>/dev/null)"
 note "daemon version: ${ver:-<unknown>}"
-[[ "$ver" == "0.0.29" ]] && ok "running 0.0.29" || bad "expected 0.0.29, got ${ver:-<unknown>}"
+[[ "$ver" == "$WANT_VERSION" ]] && ok "running $WANT_VERSION" || bad "expected $WANT_VERSION, got ${ver:-<unknown>}"
 for u in 5gpn-dns mihomo 5gpn-intercept; do
     st="$(systemctl is-active "$u" 2>/dev/null)"
     [[ "$st" == active ]] && ok "$u active" || bad "$u is $st"
@@ -104,10 +117,32 @@ echo "== trust upstream sanity probe =="
 if grep -q 'trust upstream probe' <<<"$boot_log"; then
     line="$(grep 'trust upstream probe' <<<"$boot_log" | tail -1)"
     note "${line#*5gpn-dns\[*\]: }"
-    if grep -qE "resolver's own /24|fabricated|private or loopback|never a real answer" <<<"$line"; then
-        ok "probe correctly flagged an implausible trust answer"
+    # Don't accept either verdict blindly — decide independently whether the
+    # address the probe got back is one a real recursive resolver could return,
+    # then assert the probe agreed. 0.0.29 endorsed 198.18.1.12 (RFC 2544
+    # benchmarking space) as genuine; ip.IsPrivate() is false for it, so the
+    # private/loopback check alone never caught it.
+    probe_ip="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' <<<"$line" | tail -1)"
+    flagged=no
+    grep -qE "resolver's own /24|fabricated|never a real answer" <<<"$line" && flagged=yes
+    should_flag="$(python3 -c "
+import ipaddress,sys
+ip=ipaddress.ip_address('$probe_ip')
+print('yes' if not ip.is_global else 'no')
+" 2>/dev/null)"
+    note "resolved ${probe_ip:-?} | reserved=${should_flag:-?} | probe flagged=${flagged}"
+    if [[ -z "$should_flag" ]]; then
+        warn "could not classify ${probe_ip:-<none>} — probe verdict not checked"
+    elif [[ "$should_flag" == "$flagged" ]]; then
+        if [[ "$flagged" == yes ]]; then
+            ok "probe flagged a reserved-range answer (the 0.0.30 widening)"
+        else
+            ok "probe ran and correctly accepted a globally-routable answer"
+        fi
+    elif [[ "$should_flag" == yes ]]; then
+        bad "probe endorsed $probe_ip, which is not globally routable — the heuristic is too narrow"
     else
-        ok "probe ran and the trust answer looked genuine"
+        bad "probe flagged $probe_ip, which is a legitimate public address — false positive"
     fi
 else
     bad "the trust probe did not run (or did not log)"
