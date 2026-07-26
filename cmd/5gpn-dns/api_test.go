@@ -1078,3 +1078,61 @@ func TestZashSecurityHeaders(t *testing.T) {
 		t.Errorf("zash X-Frame-Options = %q, want DENY", got)
 	}
 }
+
+// The console reports which zashboard build is installed, and it reports it
+// from the marker the installer wrote next to the dist rather than from
+// anything the daemon was compiled with. Those differ exactly when an install
+// half-completed, which is when an operator most needs the real answer.
+//
+// Absence is reported by omission, never as a placeholder: "no zashboard here"
+// and "a zashboard of unknown provenance" call for different operator
+// responses, and inventing a value for the second would collapse them.
+func TestStatusReportsInstalledZashboardVersion(t *testing.T) {
+	cs, token := newAPITestServer(t)
+
+	statusField := func() (any, bool) {
+		t.Helper()
+		rec := doAPI(cs, http.MethodGet, "/api/status", nil, token, true)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status code=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode status: %v", err)
+		}
+		v, ok := body["zash_version"]
+		return v, ok
+	}
+
+	if _, ok := statusField(); ok {
+		t.Fatal("zash_version was reported with no zashboard directory configured")
+	}
+
+	dir := t.TempDir()
+	cs.zashDir = dir
+
+	if _, ok := statusField(); ok {
+		t.Fatal("zash_version was reported when the marker file does not exist")
+	}
+
+	marker := filepath.Join(dir, ".zash_version")
+	if err := os.WriteFile(marker, []byte("v3.16.0-overlay.1\n"), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	got, ok := statusField()
+	if !ok || got != "v3.16.0-overlay.1" {
+		t.Fatalf("zash_version = %v (present=%v), want v3.16.0-overlay.1", got, ok)
+	}
+
+	// A marker that is not a release tag is refused rather than forwarded. It
+	// reaches the console as display content, and a truncated or tampered file
+	// must not decide what that content is.
+	for _, bad := range []string{"", "   ", "not a tag\nsecond line", "<script>x</script>", strings.Repeat("v", 200)} {
+		if err := os.WriteFile(marker, []byte(bad), 0o644); err != nil {
+			t.Fatalf("write marker: %v", err)
+		}
+		if v, ok := statusField(); ok {
+			t.Fatalf("zash_version reported %q for a malformed marker %q", v, bad)
+		}
+	}
+}

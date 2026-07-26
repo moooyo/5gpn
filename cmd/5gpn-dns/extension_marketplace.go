@@ -22,7 +22,7 @@ const (
 	marketplaceAPIVersion      = "5gpn.io/marketplace/v1"
 	marketplaceKind            = "ExtensionMarketplace"
 
-	recommendedMarketplaceURL = "https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json"
+	recommendedMarketplaceURL = "https://moooyo.github.io/5gpn-extensions/marketplace/v1beta/index.json"
 
 	maxMarketplaceSources     = 16
 	maxMarketplaceEntries     = 512

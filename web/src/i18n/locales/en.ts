@@ -264,6 +264,8 @@ const en = {
     aboutTitle: '5GPN Console',
     aboutSubtitle: 'Material 3 · secure DNS gateway',
     aboutVersion: '5gpn-dns {{version}}',
+    aboutMihomoVersion: 'mihomo {{version}}',
+    aboutZashVersion: 'zashboard {{version}}',
     ingressPorts: 'mihomo capability modules',
     ingressPortsHint: 'Manage fixed-shape public ingress and protocol-safety capabilities. Saving validates and hot-reloads the complete configuration.',
     ingressEnabled: 'Enabled',

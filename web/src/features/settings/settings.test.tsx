@@ -475,3 +475,45 @@ describe('SettingsPage', () => {
     expect(api.putTgbot).not.toHaveBeenCalled()
   })
 })
+
+describe('SettingsPage about strip versions', () => {
+  it('reports the 5gpn-dns, mihomo and zashboard builds that are actually installed', async () => {
+    renderSettings(
+      statusValue({
+        mihomo: { version: 'v1.19.28-overlay.2', meta: true },
+        status: {
+          version: 'dev+abc1234',
+          uptime_seconds: 3600,
+          stats: {} as Status['stats'],
+          zash_version: 'v3.16.0-overlay.1',
+        },
+      }),
+    )
+
+    expect(await screen.findByText('5gpn-dns dev+abc1234')).toBeInTheDocument()
+    expect(screen.getByText('mihomo v1.19.28-overlay.2')).toBeInTheDocument()
+    expect(screen.getByText('zashboard v3.16.0-overlay.1')).toBeInTheDocument()
+  })
+
+  // The two unknowns are not the same unknown. mihomo is always part of an
+  // install, so not knowing its version is a fact worth showing; the zashboard
+  // panel is optional, and rendering a dash for it would say "installed but
+  // unidentified" about something that is simply not there.
+  it('shows mihomo as unknown but omits zashboard entirely when it is not installed', async () => {
+    renderSettings(
+      statusValue({
+        mihomo: undefined,
+        mihomoOk: false,
+        mihomoState: 'down',
+        status: {
+          version: 'dev+abc1234',
+          uptime_seconds: 3600,
+          stats: {} as Status['stats'],
+        },
+      }),
+    )
+
+    expect(await screen.findByText('mihomo —')).toBeInTheDocument()
+    expect(screen.queryByText(/^zashboard /)).not.toBeInTheDocument()
+  })
+})
