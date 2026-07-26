@@ -219,6 +219,12 @@ func main() {
 	// never blocks serving.
 	StartChina0x20Probe(ctx, china)
 
+	// Trust sanity probe: nothing else can tell a working trust resolver from
+	// a placeholder that answers everything with itself, because the gateway
+	// rewrite hides the fabricated address from clients. Warn-only, background,
+	// never blocks serving.
+	StartTrustProbe(ctx, trust, cfg.TrustEntries)
+
 	// The subscription fetcher's trust-host resolver delegates to the CURRENT
 	// trust group on every call (not the boot-time one), so a hot upstream swap
 	// (PUT /api/upstreams) is picked up without re-wiring the manager.
@@ -269,6 +275,7 @@ func main() {
 			time.AfterFunc(2*h.Timeout, retiring.Close)
 		}
 		StartChina0x20Probe(ctx, cg)
+		StartTrustProbe(ctx, tg, entries)
 		log.Printf("upstreams: hot-swapped (china=%v trust=%v)", chinaList, trustList)
 		if err := SaveUpstreams(cfg.UpstreamsFile, UpstreamsConfig{China: chinaList, Trust: trustList}); err != nil {
 			return fmt.Errorf("applied live, but persisting failed (will revert to dns.env on restart): %w", err)
