@@ -8,9 +8,9 @@ import { StatusContext, type StatusValue } from '../../lib/StatusContext'
 import { ThemeProvider } from '../../lib/theme'
 import { api } from '../../lib/api/client'
 import { ApiError } from '../../lib/api/http'
-import type { ECSView, IngressModulesView, MITMSettingsView, Status, TGBotView, UpstreamsView } from '../../lib/api/types'
+import type { ECSView, IngressModulesView, MITMSettingsView, Stats, Status, TGBotView, UpstreamsView } from '../../lib/api/types'
 import SettingsPage from './SettingsPage'
-import { TgbotCard } from './_cards'
+import { StatsResetCard, TgbotCard } from './_cards'
 
 vi.mock('../../lib/api/client', () => ({
   api: {
@@ -25,6 +25,7 @@ vi.mock('../../lib/api/client', () => ({
     getMITMSettings: vi.fn(),
     putMITMSettings: vi.fn(),
     getInterceptModules: vi.fn(),
+    resetStats: vi.fn(),
   },
 }))
 
@@ -520,5 +521,119 @@ describe('SettingsPage about strip versions', () => {
     // The sidecar only reports a version while it is running with active
     // plugins, so like zashboard it is omitted rather than dashed.
     expect(screen.queryByText(/^sidecar /)).not.toBeInTheDocument()
+  })
+})
+
+describe('StatsResetCard', () => {
+  const STATS: Stats = {
+    total: 14831, block: 120, force_direct: 30, force_proxy: 5,
+    chnroute_cn: 2800, chnroute_foreign: 1200, cache_entries: 440,
+    china_ok: 28, china_err: 0, trust_ok: 1, trust_err: 0,
+    cache_hits: 3100, cache_misses: 1100, china_avg_ms: 140.2, trust_avg_ms: 51.2,
+  }
+
+  function renderCard(stats: Stats | undefined = STATS) {
+    return render(
+      <ThemeProvider>
+        <StatsResetCard stats={stats} />
+        <Toaster />
+      </ThemeProvider>,
+    )
+  }
+
+  beforeEach(() => {
+    vi.mocked(api.resetStats).mockReset()
+  })
+
+  it('shows the counters that feed the dashboard averages', () => {
+    renderCard()
+    expect(screen.getByText('14,831')).toBeInTheDocument()
+    // china_ok + china_err + trust_ok + trust_err — the population the
+    // per-upstream averages are computed over.
+    expect(screen.getByText('29')).toBeInTheDocument()
+  })
+
+  // Irreversible, so it must never fire straight off the button.
+  it('does not reset until the confirmation is accepted', async () => {
+    const user = userEvent.setup()
+    renderCard()
+    await user.click(screen.getByTestId('stats-reset'))
+    expect(api.resetStats).not.toHaveBeenCalled()
+  })
+
+  it('clears the counters and reflects the cleared snapshot without waiting for a poll', async () => {
+    const user = userEvent.setup()
+    const zeroed: Stats = { ...STATS, total: 0, china_ok: 0, china_err: 0, trust_ok: 0, trust_err: 0, china_avg_ms: 0, trust_avg_ms: 0 }
+    vi.mocked(api.resetStats).mockResolvedValue({ stats: zeroed })
+
+    renderCard()
+    await user.click(screen.getByTestId('stats-reset'))
+    await user.click(screen.getByRole('button', { name: i18n.t('settings.statsReset') }))
+
+    await waitFor(() => expect(api.resetStats).toHaveBeenCalledTimes(1))
+    // The prop still carries the stale totals; the card must show the cleared
+    // ones it was handed rather than leaving the old number on screen.
+    await waitFor(() => expect(screen.queryByText('14,831')).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(i18n.t('settings.statsResetDone'))).toBeInTheDocument())
+  })
+
+  it('surfaces a failed reset instead of implying it worked', async () => {
+    const user = userEvent.setup()
+    vi.mocked(api.resetStats).mockRejectedValue(new ApiError(500, 'stats reset applied in memory but not persisted'))
+
+    renderCard()
+    await user.click(screen.getByTestId('stats-reset'))
+    await user.click(screen.getByRole('button', { name: i18n.t('settings.statsReset') }))
+
+    await waitFor(() => expect(screen.getByText(/not persisted/)).toBeInTheDocument())
+    // The stale total stays on screen: nothing was cleared.
+    expect(screen.getByText('14,831')).toBeInTheDocument()
+  })
+})
+
+// A module 5gpn will not manage used to render one generic sentence for all
+// twelve reason codes, so the operator learned that something was wrong but
+// never which edit would fix it. Each code must now speak for itself.
+describe('IngressPortsCard unmanageable reasons', () => {
+  function modulesWithReason(reason: string): IngressModulesView {
+    return {
+      revision: 'r1',
+      modules: [
+        { id: 'speedtest-5060', port: 5060, networks: ['tcp', 'udp'], sniffers: ['http', 'tls', 'quic'], enabled: true, manageable: true },
+        { id: 'block-quic-443', port: 443, networks: ['udp'], sniffers: [], enabled: false, manageable: false, reason },
+      ],
+    }
+  }
+
+  async function cardWithReason(reason: string): Promise<HTMLElement> {
+    vi.mocked(api.getIngressModules).mockResolvedValue(modulesWithReason(reason))
+    renderSettings()
+    return await screen.findByTestId('ingress-ports-card')
+  }
+
+  it.each([
+    'partial-or-custom-quic-block',
+    'interception-egress-terminator-missing',
+    'terminal-match-missing',
+    'invalid-config',
+    'alias-or-merge-conflict',
+  ])('explains %s specifically rather than generically', async (reason) => {
+    const card = await cardWithReason(reason)
+    const specific = i18n.t(`settings.ingressReason.${reason}`)
+    await waitFor(() => expect(card.textContent).toContain(specific))
+    expect(card.textContent).not.toContain(i18n.t('settings.ingressCustomConfig'))
+  })
+
+  // A newer daemon may report a code this build predates; a blank hint would
+  // be worse than the generic sentence.
+  it('falls back to the generic sentence for an unknown reason code', async () => {
+    const card = await cardWithReason('some-future-reason')
+    await waitFor(() => expect(card.textContent).toContain(i18n.t('settings.ingressCustomConfig')))
+  })
+
+  // The link out to the editor must survive the per-reason rewrite.
+  it('still links to the mihomo config editor', async () => {
+    const card = await cardWithReason('partial-or-custom-quic-block')
+    await waitFor(() => expect(within(card).getByRole('link', { name: i18n.t('settings.ingressOpenConfig') })).toBeInTheDocument())
   })
 })

@@ -1,14 +1,15 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import type { TFunction } from 'i18next'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router-dom'
 import { Badge, Button, Card, ConfirmDialog, DataLine, Field, Input, Toggle, toast } from '../../components/ds'
-import { ShieldFilledIcon } from '../../components/icons'
+import { ResetIcon, ShieldFilledIcon } from '../../components/icons'
 import { cn } from '../../lib/cn'
 import { THEME_CATALOG, useTheme, type ThemeName } from '../../lib/theme'
 import { api } from '../../lib/api/client'
 import { ApiError } from '../../lib/api/http'
-import type { CertStatus, ECSView, IngressModule, IngressModulesView, MITMSettingsView, TGBotUpdate, TGBotView, UpstreamsView } from '../../lib/api/types'
+import type { CertStatus, ECSView, IngressModule, IngressModulesView, MITMSettingsView, Stats, TGBotUpdate, TGBotView, UpstreamsView } from '../../lib/api/types'
 import { UpstreamGroupEditor } from './UpstreamGroupEditor'
 
 function errMessage(err: unknown, fallback: string): string {
@@ -124,7 +125,82 @@ export function ConsoleCard() {
   )
 }
 
-// ---- 3. MITM runtime ------------------------------------------------------
+// ---- 3. Cumulative statistics ----------------------------------------------
+
+/**
+ * Clears the counters behind the dashboard. They accumulate from the
+ * installation's first boot and are restored from stats.json on every start,
+ * so nothing dilutes them with time — one pathological exchange stays in the
+ * per-group average latency permanently. Before this existed the only remedy
+ * was stopping the daemon and deleting that file by hand.
+ */
+export function StatsResetCard({ stats }: { stats?: Stats }) {
+  const { t, i18n } = useTranslation()
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  // The shared status poller owns `stats` and refreshes on its own 5s cadence.
+  // Without this the card would keep showing the old totals for up to a poll
+  // after a successful reset, which reads as the button having done nothing.
+  // Dropped as soon as a fresh poll arrives, so the server stays authoritative.
+  const [cleared, setCleared] = useState<Stats | null>(null)
+  useEffect(() => setCleared(null), [stats])
+  const formatter = useMemo(() => new Intl.NumberFormat(i18n.language), [i18n.language])
+
+  const shown = cleared ?? stats
+  const total = shown?.total ?? 0
+  const samples = (shown?.china_ok ?? 0) + (shown?.china_err ?? 0) + (shown?.trust_ok ?? 0) + (shown?.trust_err ?? 0)
+
+  async function reset() {
+    setBusy(true)
+    try {
+      const result = await api.resetStats()
+      setCleared(result.stats)
+      toast.success(t('settings.statsResetDone'))
+    } catch (err) {
+      toast.error(errMessage(err, t('settings.statsResetFailed')))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card className="p-5 sm:p-6">
+      <div className="mb-1 text-[15px] font-medium text-text-strong">{t('settings.statsTitle')}</div>
+      <p className="mb-3 text-[11.5px] leading-relaxed text-text-faint">{t('settings.statsHint')}</p>
+      <DataLine label={t('settings.statsQueries')} sub={t('settings.statsQueriesHint')}>
+        <span className="font-mono text-[12.5px] font-medium tabular-nums text-text-strong">{formatter.format(total)}</span>
+      </DataLine>
+      <DataLine className="border-b-0" label={t('settings.statsSamples')} sub={t('settings.statsSamplesHint')}>
+        <span className="font-mono text-[12.5px] font-medium tabular-nums text-text-strong">{formatter.format(samples)}</span>
+      </DataLine>
+      <div className="mt-4 flex justify-end">
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          disabled={busy}
+          onClick={() => setConfirmOpen(true)}
+          data-testid="stats-reset"
+        >
+          <ResetIcon className="h-4 w-4" aria-hidden="true" />
+          {busy ? t('common.saving') : t('settings.statsReset')}
+        </Button>
+      </div>
+
+      <ConfirmDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        title={t('settings.statsResetConfirmTitle')}
+        description={t('settings.statsResetConfirmBody')}
+        confirmLabel={t('settings.statsReset')}
+        cancelLabel={t('common.cancel')}
+        onConfirm={() => void reset()}
+      />
+    </Card>
+  )
+}
+
+// ---- 4. MITM runtime ------------------------------------------------------
 
 export function MITMSettingsCard({
   settings,
@@ -290,7 +366,42 @@ export function MITMSettingsCard({
   )
 }
 
-// ---- 4. Ingress ports ----------------------------------------------------
+// ---- 5. Ingress ports ----------------------------------------------------
+
+/**
+ * The `reason` codes the daemon reports for a module it will not manage
+ * (cmd/5gpn-dns/api_mihomo_ingress_modules.go). They are not interchangeable:
+ * `invalid-config` means the whole file failed the infra gate and has nothing
+ * to do with this module, while `partial-or-custom-quic-block` means the
+ * module's own rule is present in a shape or position 5gpn will not touch.
+ * The card used to render one sentence for every code, which told an operator
+ * that something was wrong but never which of a dozen edits would fix it.
+ */
+const INGRESS_REASON_KEYS = new Set([
+  'invalid-config',
+  'alias-or-merge-conflict',
+  'listener-structure-conflict',
+  'sniffer-structure-conflict',
+  'rules-structure-conflict',
+  'terminal-match-missing',
+  'canonical-gateway-missing',
+  'canonical-gateway-conflict',
+  'fail-closed-guards-missing',
+  'interception-egress-terminator-missing',
+  'interception-egress-terminator-duplicate',
+  'partial-or-custom-5060',
+  'partial-or-custom-quic-block',
+])
+
+/**
+ * Explanation for one reason code, falling back to the generic sentence for a
+ * code this build does not know — a newer daemon must not render a blank hint,
+ * and an absent reason is still possible from an older one.
+ */
+function ingressReasonText(t: TFunction, reason?: string): string {
+  if (reason && INGRESS_REASON_KEYS.has(reason)) return t(`settings.ingressReason.${reason}`)
+  return t('settings.ingressCustomConfig')
+}
 
 function ingressDraft(modules: IngressModule[]): Record<string, boolean> {
   return Object.fromEntries(modules.map((module) => [module.id, module.enabled]))
@@ -417,7 +528,7 @@ export function IngressPortsCard({
 
               {module.manageable ? null : (
                 <p className="mt-2 text-[10.5px] leading-relaxed text-text-faint">
-                  {t('settings.ingressCustomConfig')}{' '}
+                  {ingressReasonText(t, module.reason)}{' '}
                   <Link to="/mihomo-config" className="font-semibold text-primary underline-offset-2 hover:underline">
                     {t('settings.ingressOpenConfig')}
                   </Link>
@@ -463,7 +574,7 @@ export function IngressPortsCard({
   )
 }
 
-// ---- 5. Telegram bot --------------------------------------------------------
+// ---- 6. Telegram bot --------------------------------------------------------
 
 interface TgbotFormValues {
   token: string
@@ -577,7 +688,7 @@ export function TgbotCard({
   )
 }
 
-// ---- 6. Upstream DNS --------------------------------------------------------
+// ---- 7. Upstream DNS --------------------------------------------------------
 
 export function UpstreamsCard({
   upstreams,
@@ -643,7 +754,7 @@ export function UpstreamsCard({
   )
 }
 
-// ---- 7. ECS -----------------------------------------------------------------
+// ---- 8. ECS -----------------------------------------------------------------
 
 interface EcsFormValues {
   subnet: string
@@ -688,7 +799,7 @@ export function EcsCard({ ecs, onSaved }: { ecs: ECSView | null; onSaved: (v: EC
   )
 }
 
-// ---- 8. About strip ---------------------------------------------------------
+// ---- 9. About strip ---------------------------------------------------------
 
 export function AboutStrip({
   version,
