@@ -389,9 +389,32 @@ extension capture host and otherwise forces trust. It does, however, share the
 AAAA stance below: both resolver boundaries answer AAAA with the same synthetic
 NODATA, so neither a client nor mihomo can obtain an IPv6 address from 5gpn.
 
-New installations default to one plain-UDP member in each group:
-`223.5.5.5:53` for China and `22.22.22.22:53` for trust. The default China ECS
-subnet is `112.96.32.0/24`; an operator may override or disable it explicitly.
+A trust member declares its transport by spec form: a bare `IP[:port]` is
+plain UDP `:53`, `serverName@IP[:port]` is DoT `:853`, and
+`https://host/path@IP[:port]` is DoH over a pooled HTTP/2 connection `:443`.
+The address after `@` is always the dial target, because resolving the
+member's own hostname would have to go through this daemon. DoH reuses its
+connection across queries, so a query costs one round trip rather than the
+three a per-query TCP+TLS handshake costs; the pool is retired on a grace
+timer after an upstream hot-swap so in-flight queries finish against the
+snapshot they loaded. China members are always plain UDP.
+
+The upstream groups are configured in `upstreams.json` alone — there is no
+`dns.env` counterpart. The installer seeds that file with one plain-UDP member
+per group (`223.5.5.5:53` for China and `22.22.22.22:53` for trust) and never
+overwrites an existing one; the console rewrites it and hot-applies without a
+restart. A missing or malformed file falls back to the compiled-in defaults
+with a warning rather than refusing to start, because the console that would
+repair it is served by this process. The default China ECS subnet is
+`112.96.32.0/24`; an operator may override or disable it explicitly.
+
+`22.22.22.22` is a placeholder for a trusted internal resolver on a clean
+path, not a public recursive one. A warn-only startup probe resolves a control
+name through the trust group and logs when the answer looks fabricated — an
+address inside a member's own `/24`, or a private address for a public name —
+because the gateway rewrite replaces any non-CN address with `GatewayIP`
+before a client sees it, so a trust leg answering nonsense is otherwise
+invisible.
 
 Query-type behavior is intentionally IPv4-oriented:
 
@@ -839,8 +862,10 @@ Specialized live state remains in purpose-specific, atomically written files:
 - `policy.json` is the ordered DNS policy;
 - `subscriptions.json` and `/etc/5gpn/rules/` contain subscription definitions
   and complete caches;
-- `upstreams.json`, `ecs.json`, and `tgbot.json` are control-API-managed runtime
-  overrides. `tgbot.json` contains the validated token/admin set, is written
+- `upstreams.json` is the sole source of truth for the china/trust upstream
+  groups: installer-seeded, control-API-managed, with no `dns.env` counterpart.
+  `ecs.json` and `tgbot.json` are control-API-managed runtime overrides.
+  `tgbot.json` contains the validated token/admin set, is written
   atomically with mode `0600`, and overrides the `dns.env` bootstrap defaults.
   A present but unreadable/malformed bot override disables the bot fail-closed
   instead of restoring a possibly revoked bootstrap administrator;

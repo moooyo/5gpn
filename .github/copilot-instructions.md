@@ -74,8 +74,10 @@ the installer's version pin and renderer placeholders.
 - Keep certificate modes exact: `cloudflare`, `http-01`, or `debug`; do not add
   aliases. HTTP-01 uses the three derived service names and its scoped renewal
   helper, while Cloudflare credentials remain DNS-01-only.
-- Keep Go's direct dependencies limited to `miekg/dns` and
-  `go-telegram/bot` unless a design explicitly changes the policy.
+- Keep the `5gpn-dns` module's direct dependencies limited to `miekg/dns`,
+  `go-telegram/bot`, and `gopkg.in/yaml.v3` unless a design explicitly changes
+  the policy. AGENTS.md and docs/architecture.md state the same three; keep all
+  three lists in step.
 - Preserve sequential member order inside each upstream group and concurrent
   china/trust auto arbitration. Preserve Rcode/authority when rewriting.
 - Subscription parse/scan/network failure keeps the old cache. SSRF checks

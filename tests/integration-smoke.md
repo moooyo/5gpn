@@ -11,8 +11,13 @@ current architecture is `docs/architecture.md`.
 - A client with L3 reachability to one address in `DNS_MIHOMO_LISTEN_IPS`.
 - A test `BASE_DOMAIN`, a certificate matching the selected `CERT_MODE`
   (`cloudflare`, `http-01`, or an explicitly accepted `debug` certificate), and
-  reachable China and trust upstream groups (operational defaults are
-  `223.5.5.5` and `22.22.22.22`).
+  reachable China and trust upstream groups. The seeded defaults are
+  `223.5.5.5` and `22.22.22.22`; `22.22.22.22` is a placeholder for a trusted
+  internal resolver, NOT a public recursive one, so a smoke run that depends on
+  real foreign resolution must point trust at a resolver that actually
+  recurses. The daemon logs a warn-only startup probe when the trust answer
+  looks fabricated — treat that warning as a signal the fixture is wrong, not
+  as noise.
 - At least two controllable upstreams when testing sequential fallback.
 - For cross-channel upgrade acceptance, use an immutable pre-v5 deployment
   (`0.0.13`, `0.0.19`, or an equivalent `test-env`/`kfchost` snapshot) plus a
