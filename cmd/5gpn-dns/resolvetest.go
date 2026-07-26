@@ -144,11 +144,12 @@ func (c *Controller) ResolveTest(ctx context.Context, name string) ResolveTestRe
 // order), then trust members.
 func (h *Handler) probeUpstreams(ctx context.Context, name string, snap *upstreamSnapshot) []ResolveProbe {
 	type spec struct {
-		display string
-		addr    string
-		group   string
-		proto   string
-		sni     string
+		display  string
+		addr     string
+		group    string
+		proto    string
+		sni      string
+		endpoint string // DoH only: the absolute https:// URL to POST to
 	}
 	var specs []spec
 	for _, a := range snap.ChinaRaw {
@@ -160,18 +161,25 @@ func (h *Handler) probeUpstreams(ctx context.Context, name string, snap *upstrea
 		if i < len(snap.TrustRaw) {
 			display = snap.TrustRaw[i]
 		}
-		if e.Plain {
-			addr := addDefaultPort(e.DialAddr, "53")
+		switch e.Transport {
+		case TrustDoH:
+			addr := addDefaultPort(e.DialAddr, "443")
 			if display == "" {
-				display = addr
+				display = e.Endpoint + "@" + addr
 			}
-			specs = append(specs, spec{display: display, addr: addr, group: "trust", proto: "udp"})
-		} else {
+			specs = append(specs, spec{display: display, addr: addr, group: "trust", proto: "doh", sni: e.ServerName, endpoint: e.Endpoint})
+		case TrustDoT:
 			addr := addDefaultPort(e.DialAddr, "853")
 			if display == "" {
 				display = e.ServerName + "@" + addr
 			}
 			specs = append(specs, spec{display: display, addr: addr, group: "trust", proto: "dot", sni: e.ServerName})
+		default:
+			addr := addDefaultPort(e.DialAddr, "53")
+			if display == "" {
+				display = addr
+			}
+			specs = append(specs, spec{display: display, addr: addr, group: "trust", proto: "udp"})
 		}
 	}
 
@@ -192,13 +200,26 @@ func (h *Handler) probeUpstreams(ctx context.Context, name string, snap *upstrea
 			q := new(dns.Msg)
 			q.SetQuestion(dns.Fqdn(name), dns.TypeA)
 
-			c := &dns.Client{Net: "udp"}
-			if sp.proto == "dot" {
-				c.Net = "tcp-tls"
-				c.TLSConfig = &tls.Config{ServerName: sp.sni}
-			}
 			start := time.Now()
-			reply, _, err := c.ExchangeContext(pctx, q, sp.addr)
+			var reply *dns.Msg
+			var err error
+			if sp.proto == "doh" {
+				// A throwaway client per probe: this is a diagnostic, and
+				// borrowing the live group's pool would let a probe evict a
+				// warm connection the query path is using.
+				var client *dohClient
+				if client, err = newDoHClient(sp.endpoint, sp.addr, nil); err == nil {
+					reply, err = client.exchange(pctx, q)
+					client.closeIdle()
+				}
+			} else {
+				c := &dns.Client{Net: "udp"}
+				if sp.proto == "dot" {
+					c.Net = "tcp-tls"
+					c.TLSConfig = &tls.Config{ServerName: sp.sni}
+				}
+				reply, _, err = c.ExchangeContext(pctx, q, sp.addr)
+			}
 			p := ResolveProbe{
 				Server:     sp.display,
 				Group:      sp.group,

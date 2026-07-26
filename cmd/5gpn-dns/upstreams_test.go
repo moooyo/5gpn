@@ -107,8 +107,8 @@ func TestUpstreamsFileRoundtrip(t *testing.T) {
 
 func TestNewTrustGroupMixedTransports(t *testing.T) {
 	g, ok := NewTrustGroup([]TrustEntry{
-		{ServerName: "22.22.22.22", DialAddr: "22.22.22.22", Plain: true},
-		{ServerName: "dns.google", DialAddr: "8.8.8.8"},
+		{ServerName: "22.22.22.22", DialAddr: "22.22.22.22", Transport: TrustPlainUDP},
+		{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: TrustDoT},
 	}).(*group)
 	if !ok {
 		t.Fatal("NewTrustGroup did not return a *group")
@@ -398,7 +398,7 @@ func TestResolveTest_PoolOrderAdoption(t *testing.T) {
 		China: h.China, Trust: h.Trust,
 		ChinaRaw:     []string{slowCN, fastCN},
 		TrustRaw:     []string{trustAddr},
-		TrustEntries: []TrustEntry{{ServerName: trustAddr, DialAddr: trustAddr, Plain: true}},
+		TrustEntries: []TrustEntry{{ServerName: trustAddr, DialAddr: trustAddr, Transport: TrustPlainUDP}},
 	})
 	c := NewController(func() error { return nil }, nil, nil, h)
 
@@ -463,7 +463,7 @@ func TestResolveTest_ProbesAndArbitration(t *testing.T) {
 		China: h.China, Trust: h.Trust,
 		ChinaRaw:     []string{cnAddr},
 		TrustRaw:     []string{foreignAddr},
-		TrustEntries: []TrustEntry{{ServerName: foreignAddr, DialAddr: foreignAddr, Plain: true}},
+		TrustEntries: []TrustEntry{{ServerName: foreignAddr, DialAddr: foreignAddr, Transport: TrustPlainUDP}},
 	})
 	c := NewController(func() error { return nil }, nil, nil, h)
 
@@ -499,7 +499,7 @@ func TestResolveTest_ProbesAndArbitration(t *testing.T) {
 		China: h.China, Trust: h.Trust,
 		ChinaRaw:     []string{foreignAddr},
 		TrustRaw:     []string{foreignAddr},
-		TrustEntries: []TrustEntry{{ServerName: foreignAddr, DialAddr: foreignAddr, Plain: true}},
+		TrustEntries: []TrustEntry{{ServerName: foreignAddr, DialAddr: foreignAddr, Transport: TrustPlainUDP}},
 	})
 	got = c.ResolveTest(context.Background(), "foreign.example")
 	if got.Chosen != "trust" {
@@ -523,4 +523,64 @@ func TestResolveTest_ProbesAndArbitration(t *testing.T) {
 		len(got.ClientIPs) != 1 || got.ClientIPs[0] != "9.9.9.9" {
 		t.Errorf("direct fallback resolve-test = %+v", got)
 	}
+}
+
+// DoH spec form: "https://host/path@dialIP[:port]". The pinned address is
+// mandatory — resolving the endpoint host would have to go through this
+// daemon, which is the thing being configured.
+func TestValidateUpstreams_DoHSpecForm(t *testing.T) {
+	china := []string{"223.5.5.5"}
+	for _, tc := range []struct {
+		trust string
+		ok    bool
+		why   string
+	}{
+		{"https://dns.google/dns-query@8.8.8.8", true, "canonical"},
+		{"https://cloudflare-dns.com/dns-query@1.1.1.1:443", true, "explicit port"},
+		{"https://dns.google/dns-query", false, "no pinned address"},
+		{"https://dns.google@8.8.8.8", false, "no path"},
+		{"https://dns.google/@8.8.8.8", false, "root path is not an endpoint"},
+		{"http://dns.google/dns-query@8.8.8.8", false, "plaintext http is not a DoH endpoint"},
+		{"https://dns.google/dns-query@not-an-ip", false, "dial part must be an IP"},
+		{"https://dns.google/dns-query@[::1]", false, "gateway is IPv4-only"},
+	} {
+		err := ValidateUpstreams(china, []string{tc.trust})
+		if tc.ok && err != nil {
+			t.Errorf("ValidateUpstreams(trust=%q) = %v, want nil (%s)", tc.trust, err, tc.why)
+		}
+		if !tc.ok && err == nil {
+			t.Errorf("ValidateUpstreams(trust=%q) = nil, want an error (%s)", tc.trust, tc.why)
+		}
+	}
+}
+
+// A DoH entry must build a pooled member, and the other two forms must keep
+// working alongside it in one group.
+func TestNewTrustGroup_DoHMemberIsPooled(t *testing.T) {
+	g, ok := NewTrustGroup([]TrustEntry{
+		{ServerName: "22.22.22.22", DialAddr: "22.22.22.22", Transport: TrustPlainUDP},
+		{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: TrustDoT},
+		{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: TrustDoH, Endpoint: "https://dns.google/dns-query"},
+	}).(*group)
+	if !ok {
+		t.Fatal("NewTrustGroup did not return a *group")
+	}
+	if len(g.members) != 3 {
+		t.Fatalf("members = %d, want 3", len(g.members))
+	}
+	if g.members[2].doh == nil {
+		t.Fatal("DoH member has no pooled client")
+	}
+	if g.members[2].addr != "8.8.8.8:443" {
+		t.Errorf("DoH dial addr = %q, want 8.8.8.8:443", g.members[2].addr)
+	}
+	if g.members[2].doh.endpoint != "https://dns.google/dns-query" {
+		t.Errorf("DoH endpoint = %q", g.members[2].doh.endpoint)
+	}
+	// The earlier members must be untouched by the new branch.
+	if g.members[0].net != "udp" || g.members[1].net != "tcp-tls" {
+		t.Errorf("mixed group transports = %q / %q, want udp / tcp-tls", g.members[0].net, g.members[1].net)
+	}
+	// Close must be safe on a group with a mix of pooled and pool-less members.
+	g.Close()
 }

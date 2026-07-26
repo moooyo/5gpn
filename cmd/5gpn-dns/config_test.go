@@ -91,7 +91,7 @@ func TestLoadConfig_Defaults(t *testing.T) {
 
 	// Default trust upstream: 22.22.22.22, bare IP ⇒ plain UDP.
 	wantTrust := []TrustEntry{
-		{ServerName: "22.22.22.22", DialAddr: "22.22.22.22", Plain: true},
+		{ServerName: "22.22.22.22", DialAddr: "22.22.22.22", Transport: TrustPlainUDP},
 	}
 	if len(cfg.TrustEntries) != len(wantTrust) {
 		t.Fatalf("TrustEntries len = %d, want %d", len(cfg.TrustEntries), len(wantTrust))
@@ -498,20 +498,20 @@ func TestParseTrustEntryList(t *testing.T) {
 	}{
 		{
 			input: []string{"dns.google@8.8.8.8"},
-			want:  []TrustEntry{{ServerName: "dns.google", DialAddr: "8.8.8.8"}},
+			want:  []TrustEntry{{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: TrustDoT}},
 		},
 		{
 			// Bare IP ⇒ plain UDP (deliberate reversal 2026-07-10: it used to
 			// mean DoT-with-IP-SAN, which made an internal-resolver default
 			// like 22.22.22.22 unusable).
 			input: []string{"1.1.1.1"},
-			want:  []TrustEntry{{ServerName: "1.1.1.1", DialAddr: "1.1.1.1", Plain: true}},
+			want:  []TrustEntry{{ServerName: "1.1.1.1", DialAddr: "1.1.1.1", Transport: TrustPlainUDP}},
 		},
 		{
 			input: []string{"dns.google@8.8.8.8", "one.one.one.one@1.1.1.1"},
 			want: []TrustEntry{
-				{ServerName: "dns.google", DialAddr: "8.8.8.8"},
-				{ServerName: "one.one.one.one", DialAddr: "1.1.1.1"},
+				{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: TrustDoT},
+				{ServerName: "one.one.one.one", DialAddr: "1.1.1.1", Transport: TrustDoT},
 			},
 		},
 	}

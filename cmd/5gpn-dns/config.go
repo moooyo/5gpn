@@ -31,18 +31,33 @@ const (
 	maxConfiguredAPIBurst = 10_000
 )
 
-// TrustEntry describes a single trust upstream. Two spec forms:
-//
-//   - "serverName@dialIP" → DoT: TLS-verified against ServerName, dialed at
-//     DialAddr (port 853 default).
-//   - bare "IP" → plain UDP (Plain=true, port 53 default): a trusted internal
-//     resolver reachable over a clean path (e.g. the 22.22.22.22 default),
-//     where demanding a DoT certificate would just break resolution.
+// TrustTransport selects the wire protocol for one trust member.
+type TrustTransport uint8
+
+const (
+	// TrustPlainUDP is a bare "IP[:port]" entry: plain UDP :53 to a trusted
+	// internal resolver reachable over a clean path, where demanding a
+	// certificate would just break resolution.
+	TrustPlainUDP TrustTransport = iota
+	// TrustDoT is a "serverName@dialIP[:port]" entry: DoT :853, TLS-verified
+	// against ServerName and dialed at DialAddr.
+	TrustDoT
+	// TrustDoH is an "https://host/path@dialIP[:port]" entry: RFC 8484 over a
+	// pooled HTTP/2 connection, TLS-verified against the URL host and dialed at
+	// DialAddr. Preferred over DoT where the resolver offers it: net/http keeps
+	// the connection warm, so a query costs one round trip instead of the three
+	// a per-query TCP+TLS handshake costs.
+	TrustDoH
+)
+
+// TrustEntry describes a single trust upstream.
 type TrustEntry struct {
-	ServerName string // TLS SNI / cert verification name (DoT entries only)
-	DialAddr   string // host (or host:port) to dial
-	Plain      bool   // true → plain UDP :53; false → DoT :853
+	ServerName string         // TLS SNI / cert verification name (DoT and DoH)
+	DialAddr   string         // host (or host:port) to dial
+	Transport  TrustTransport // wire protocol for this member
+	Endpoint   string         // absolute https:// URL (DoH only)
 }
+
 
 // Config holds the resolved configuration for 5gpn-dns.
 type Config struct {
@@ -583,17 +598,37 @@ func parseTrustEntryList(parts []string) []TrustEntry {
 		if p == "" {
 			continue
 		}
-		if at := strings.LastIndex(p, "@"); at > 0 {
+		at := strings.LastIndex(p, "@")
+		switch {
+		case strings.HasPrefix(p, "https://") && at > 0:
+			// DoH: the URL carries the hostname (TLS name + Host header) and
+			// the path; the suffix pins the address to dial, because resolving
+			// that hostname would have to go through this daemon.
+			endpoint := p[:at]
+			u, err := url.Parse(endpoint)
+			if err != nil || u.Hostname() == "" {
+				// Unparseable specs are rejected by ValidateUpstreams before
+				// they can reach a group; skip rather than build a broken member.
+				continue
+			}
+			entries = append(entries, TrustEntry{
+				ServerName: u.Hostname(),
+				DialAddr:   p[at+1:],
+				Transport:  TrustDoH,
+				Endpoint:   endpoint,
+			})
+		case at > 0:
 			entries = append(entries, TrustEntry{
 				ServerName: p[:at],
 				DialAddr:   p[at+1:],
+				Transport:  TrustDoT,
 			})
-		} else {
+		default:
 			// Bare IP (or hostname) — plain UDP to that address.
 			entries = append(entries, TrustEntry{
 				ServerName: p,
 				DialAddr:   p,
-				Plain:      true,
+				Transport:  TrustPlainUDP,
 			})
 		}
 	}

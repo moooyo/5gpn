@@ -23,11 +23,16 @@ type Exchanger interface {
 // upstream is one member of a group: the dial address, wire transport, and
 // TLS config to use. Transport is per-member (not per-group) so the trust
 // group can mix plain-UDP members (bare-IP entries, e.g. an internal resolver
-// like 22.22.22.22) with DoT members ("serverName@IP" entries).
+// like 22.22.22.22) with DoT members ("serverName@IP" entries) and DoH members
+// ("https://host/path@IP" entries).
 type upstream struct {
 	addr   string      // normalised host:port
-	net    string      // "udp" or "tcp-tls"
+	net    string      // "udp" or "tcp-tls"; empty for DoH (see doh)
 	tlsCfg *tls.Config // nil for UDP; set for DoT
+	// doh, when non-nil, replaces the dns.Client exchange for this member with
+	// a pooled HTTP/2 request. Its connections are reused across queries, so
+	// unlike the udp/tcp-tls members it does not pay a handshake per query.
+	doh *dohClient
 }
 
 // group is the common implementation for the china and trust upstream groups.
@@ -88,6 +93,29 @@ func GetGroupECS(ex Exchanger) *net.IPNet {
 // doesn't use rolls over to the next. If all members fail the last error is
 // returned. When the group's circuit breaker is open (repeated recent
 // failures) it fails fast without dialing.
+// Close releases any pooled connections the group holds.
+//
+// Only DoH members hold anything: the udp/tcp-tls path builds a throwaway
+// dns.Client per attempt, so its sockets are closed by miekg on return. A DoH
+// member's idle connections live in an http.Transport that the group keeps
+// reachable, so a retired group would otherwise hold its sockets open for the
+// life of the process — one leaked fd per pooled connection on every
+// PUT /api/upstreams, which the console can issue repeatedly.
+//
+// Safe to call on a group still serving in-flight queries: CloseIdleConnections
+// closes only connections that are not currently in use, and an active request
+// finishes on its own connection. Callers should still retire on a grace timer
+// rather than immediately, because queries that loaded the old snapshot are
+// entitled to finish against it.
+func (g *group) Close() {
+	if g == nil {
+		return
+	}
+	for _, m := range g.members {
+		m.doh.closeIdle()
+	}
+}
+
 func (g *group) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	if !g.breaker.allow() {
 		return nil, fmt.Errorf("upstream group (%s) circuit open", g.label)
@@ -125,14 +153,22 @@ func (g *group) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 			slice := time.Until(dl) / time.Duration(len(g.members)-i)
 			attemptCtx, cancel = context.WithTimeout(ctx, slice)
 		}
-		c := &dns.Client{Net: m.net, TLSConfig: m.tlsCfg}
-		msg, _, err := c.ExchangeContext(attemptCtx, send, m.addr)
-		// miekg/dns deliberately does not retry a truncated UDP response over
-		// TCP. Do it here within the same member slice so a DoT client never gets
-		// a TC response it cannot recover from on its already-stream transport.
-		if err == nil && msg != nil && msg.Truncated && m.net == "udp" {
-			tcpClient := &dns.Client{Net: "tcp"}
-			msg, _, err = tcpClient.ExchangeContext(attemptCtx, send, m.addr)
+		var msg *dns.Msg
+		var err error
+		if m.doh != nil {
+			// Pooled HTTP/2: no per-query handshake, and a cancelled request
+			// resets only its own stream, leaving the connection reusable.
+			msg, err = m.doh.exchange(attemptCtx, send)
+		} else {
+			c := &dns.Client{Net: m.net, TLSConfig: m.tlsCfg}
+			msg, _, err = c.ExchangeContext(attemptCtx, send, m.addr)
+			// miekg/dns deliberately does not retry a truncated UDP response over
+			// TCP. Do it here within the same member slice so a DoT client never gets
+			// a TC response it cannot recover from on its already-stream transport.
+			if err == nil && msg != nil && msg.Truncated && m.net == "udp" {
+				tcpClient := &dns.Client{Net: "tcp"}
+				msg, _, err = tcpClient.ExchangeContext(attemptCtx, send, m.addr)
+			}
 		}
 		if cancel != nil {
 			cancel()
@@ -361,14 +397,27 @@ func NewTrustGroup(entries []TrustEntry) Exchanger {
 	sessCache := tls.NewLRUClientSessionCache(0) // 0 → default capacity
 	members := make([]upstream, len(entries))
 	for i, e := range entries {
-		if e.Plain {
+		switch e.Transport {
+		case TrustDoH:
+			client, err := newDoHClient(e.Endpoint, addDefaultPort(e.DialAddr, "443"), sessCache)
+			if err != nil {
+				// ValidateUpstreams rejects malformed DoH specs before they
+				// reach here, so this is a defensive path. Degrade the member
+				// rather than the group: a nil doh member fails its own
+				// attempt and the loop rolls to the next one.
+				log.Printf("warning: trust upstream %q: %v — member disabled", e.Endpoint, err)
+				members[i] = upstream{addr: addDefaultPort(e.DialAddr, "443")}
+				continue
+			}
+			members[i] = upstream{addr: addDefaultPort(e.DialAddr, "443"), doh: client}
+		case TrustDoT:
+			members[i] = upstream{
+				addr:   addDefaultPort(e.DialAddr, "853"),
+				net:    "tcp-tls",
+				tlsCfg: &tls.Config{ServerName: e.ServerName, ClientSessionCache: sessCache},
+			}
+		default:
 			members[i] = upstream{addr: addDefaultPort(e.DialAddr, "53"), net: "udp"}
-			continue
-		}
-		members[i] = upstream{
-			addr:   addDefaultPort(e.DialAddr, "853"),
-			net:    "tcp-tls",
-			tlsCfg: &tls.Config{ServerName: e.ServerName, ClientSessionCache: sessCache},
 		}
 	}
 	return &group{members: members, label: "trust", breaker: newBreaker()}

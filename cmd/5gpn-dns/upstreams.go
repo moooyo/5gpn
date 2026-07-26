@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -147,7 +148,30 @@ func ValidateUpstreams(china, trust []string) error {
 	}
 	for _, t := range trust {
 		t = strings.TrimSpace(t)
-		if at := strings.LastIndex(t, "@"); at > 0 {
+		at := strings.LastIndex(t, "@")
+		switch {
+		case strings.HasPrefix(t, "https://"):
+			// DoH: "https://host/path@dialIP[:port]". The dial part is
+			// mandatory — resolving the endpoint host would have to go through
+			// this daemon, which is the thing being configured.
+			if at <= 0 {
+				return fmt.Errorf("%w: trust entry %q (DoH needs a pinned address, e.g. https://dns.google/dns-query@8.8.8.8)", ErrInvalidUpstream, t)
+			}
+			endpoint, dial := t[:at], t[at+1:]
+			u, err := url.Parse(endpoint)
+			if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+				return fmt.Errorf("%w: trust entry %q (bad DoH endpoint %q)", ErrInvalidUpstream, t, endpoint)
+			}
+			if u.Path == "" || u.Path == "/" {
+				return fmt.Errorf("%w: trust entry %q (DoH endpoint needs a path, e.g. /dns-query)", ErrInvalidUpstream, t)
+			}
+			if !hostnameRE.MatchString(u.Hostname()) && net.ParseIP(u.Hostname()) == nil {
+				return fmt.Errorf("%w: trust entry %q (bad DoH host %q)", ErrInvalidUpstream, t, u.Hostname())
+			}
+			if !validIPPort(dial) {
+				return fmt.Errorf("%w: trust entry %q (dial part %q must be IP or IP:port)", ErrInvalidUpstream, t, dial)
+			}
+		case at > 0:
 			name, dial := t[:at], t[at+1:]
 			if !hostnameRE.MatchString(name) && net.ParseIP(name) == nil {
 				return fmt.Errorf("%w: trust entry %q (bad server name %q)", ErrInvalidUpstream, t, name)
@@ -155,8 +179,10 @@ func ValidateUpstreams(china, trust []string) error {
 			if !validIPPort(dial) {
 				return fmt.Errorf("%w: trust entry %q (dial part %q must be IP or IP:port)", ErrInvalidUpstream, t, dial)
 			}
-		} else if !validIPPort(t) {
-			return fmt.Errorf("%w: trust entry %q (want IP[:port] for plain UDP, or serverName@IP for DoT)", ErrInvalidUpstream, t)
+		default:
+			if !validIPPort(t) {
+				return fmt.Errorf("%w: trust entry %q (want IP[:port] for plain UDP, serverName@IP for DoT, or https://host/path@IP for DoH)", ErrInvalidUpstream, t)
+			}
 		}
 	}
 	return nil

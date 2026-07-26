@@ -246,7 +246,7 @@ func main() {
 		tg := NewTrustGroup(entries)
 		// Carry the live china-group ECS subnet onto the NEW group — an
 		// upstream swap must not silently drop an operator-set ECS override.
-		oldChina, _ := h.exchangers()
+		oldChina, oldTrust := h.exchangers()
 		SetGroupECS(cg, GetGroupECS(oldChina))
 		h.swapUpstreams(&upstreamSnapshot{
 			China:        cg,
@@ -255,6 +255,15 @@ func main() {
 			TrustRaw:     trustList,
 			TrustEntries: entries,
 		})
+		// Retire the replaced trust group's pooled connections, but not at
+		// once: a query that already loaded the old snapshot is entitled to
+		// finish against it (upstreams.go documents that contract), and it may
+		// hold the old exchanger for up to the per-query timeout. Closing on a
+		// grace timer keeps that promise while still releasing the sockets —
+		// without this every swap would leak one fd per pooled connection.
+		if retiring, ok := oldTrust.(*group); ok && retiring != tg {
+			time.AfterFunc(2*h.Timeout, retiring.Close)
+		}
 		StartChina0x20Probe(ctx, cg)
 		log.Printf("upstreams: hot-swapped (china=%v trust=%v)", chinaList, trustList)
 		if err := SaveUpstreams(cfg.UpstreamsFile, UpstreamsConfig{China: chinaList, Trust: trustList}); err != nil {
