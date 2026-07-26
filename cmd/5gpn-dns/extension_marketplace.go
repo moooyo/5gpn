@@ -22,7 +22,7 @@ const (
 	marketplaceAPIVersion      = "5gpn.io/marketplace/v1"
 	marketplaceKind            = "ExtensionMarketplace"
 
-	recommendedMarketplaceURL = "https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json"
+	recommendedMarketplaceURL = "https://moooyo.github.io/5gpn-extensions/marketplace/v1beta/index.json"
 
 	maxMarketplaceSources     = 16
 	maxMarketplaceEntries     = 512
@@ -82,6 +82,23 @@ type marketplaceEntry struct {
 	Manifest         marketplaceResource     `json:"manifest"`
 	Resources        []marketplaceResource   `json:"resources"`
 	Capabilities     marketplaceCapabilities `json:"capabilities"`
+	// Policy is the typed overlay projection the publisher compiled this
+	// extension to, and a digest of it. It is optional because the index is a
+	// wire contract with every deployed gateway and this decoder rejects
+	// unknown fields: a core that does not know the field refuses the whole
+	// index, so the field cannot appear in the published index until cores that
+	// accept it are the ones fetching it.
+	Policy marketplacePolicy `json:"policy"`
+}
+
+// marketplacePolicy lets the gateway check what it compiled against what the
+// publisher reviewed. An absent digest means the entry predates publication of
+// one, which is reported as unverified rather than treated as a mismatch.
+type marketplacePolicy struct {
+	ClientRules  int    `json:"clientRules"`
+	PolicyRules  int    `json:"policyRules"`
+	CaptureRules int    `json:"captureRules"`
+	Digest       string `json:"digest"`
 }
 
 type marketplaceLicense struct {

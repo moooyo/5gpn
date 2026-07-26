@@ -165,6 +165,23 @@ type Config struct {
 	// InterceptConfigFile is the modular sidecar document managed by the
 	// authenticated module API. It never contains a CA private key.
 	InterceptConfigFile string
+	// InterceptControlSocket is the plugin sidecar's control API. When present
+	// the coordinator drives the sidecar through it instead of writing the
+	// sidecar's private file. An absent socket is not an error: it is the state
+	// of a deployment that has not migrated, and of one deliberately rolled
+	// back by starting the sidecar with --control-socket "".
+	InterceptControlSocket string
+	// OverlayControlSocket is mihomo's runtime-overlay control API. When it is
+	// present and the mihomo config carries the overlay anchors, routing
+	// changes publish as typed generations instead of rewriting the operator's
+	// YAML. Its absence selects the legacy renderer, which is also the state of
+	// a core that does not implement the overlay.
+	OverlayControlSocket string
+	// OverlayJournalFile records the in-flight generation transition, so a
+	// coordinator that dies between the commit call and its response can read
+	// back and roll forward rather than blindly undo a generation that may
+	// already be serving traffic.
+	OverlayJournalFile string
 	// MarketplacesFile is the authenticated extension marketplace source
 	// document. It is separate from the immutable extension snapshots.
 	MarketplacesFile string
@@ -268,36 +285,39 @@ func LoadConfig() (Config, error) {
 		return Config{}, errors.New("config: pre-v5 DNS_EGRESS_RESOLVER is retired; disable the old MITM master, then perform the documented credential-preserving v4-to-v5 rebuild before removing that exact key")
 	}
 	cfg := Config{
-		ListenDoT:           envListen("DNS_LISTEN_DOT", ":853"),
-		ListenDebug:         envListen("DNS_LISTEN_DEBUG", "127.0.0.1:5353"),
-		CertFile:            os.Getenv("DNS_CERT"),
-		KeyFile:             os.Getenv("DNS_KEY"),
-		WebCertFile:         os.Getenv("DNS_WEB_CERT"),
-		WebKeyFile:          os.Getenv("DNS_WEB_KEY"),
-		RulesDir:            envOr("DNS_RULES_DIR", "/etc/5gpn/rules"),
-		ChnrouteFile:        os.Getenv("DNS_CHNROUTE"),
-		SubscriptionsFile:   envOr("DNS_SUBSCRIPTIONS", "/etc/5gpn/subscriptions.json"),
-		ListenAPI:           envListen("DNS_LISTEN_API", "127.0.0.1:443"),
-		APIToken:            os.Getenv("DNS_API_TOKEN"),
-		StatsFile:           envListen("DNS_STATS_FILE", "/etc/5gpn/stats.json"),
-		TGBotToken:          os.Getenv("TGBOT_TOKEN"),
-		TGBotAdmins:         parseAdminIDs(os.Getenv("TGBOT_ADMINS")),
-		TGBotProxyURL:       strings.TrimSpace(os.Getenv("TGBOT_PROXY_URL")),
-		TGBotAlerts:         envBool("TGBOT_ALERTS", false),
-		WWWDir:              envOr("WWW_DIR", "/opt/5gpn/www"),
-		WebDir:              envOr("DNS_WEB_DIR", "/opt/5gpn/web"),
-		BaseDomain:          envOr("DNS_BASE_DOMAIN", ""),
-		MihomoController:    envOr("DNS_MIHOMO_CONTROLLER", "127.0.0.1:9090"),
-		MihomoSecret:        envOr("DNS_MIHOMO_SECRET", ""),
-		WhitelistFile:       envOr("DNS_WHITELIST_FILE", "/etc/5gpn/mihomo/whitelist.txt"),
-		MihomoConfigFile:    envOr("DNS_MIHOMO_CONFIG", "/etc/5gpn/mihomo/config.yaml"),
-		InterceptConfigFile: envOr("DNS_INTERCEPT_CONFIG", "/etc/5gpn/intercept/config.json"),
-		MarketplacesFile:    envOr("DNS_MARKETPLACES_FILE", "/etc/5gpn/extension-marketplaces.json"),
-		PolicyRulesFile:     envListen("DNS_POLICY_RULES", "/etc/5gpn/policy.json"),
-		ZashDir:             envOr("DNS_ZASH_DIR", "/opt/5gpn/zash"),
-		ZashListen:          envListen("DNS_ZASH_LISTEN", "127.0.0.2:443"),
-		ZashCertFile:        os.Getenv("DNS_ZASH_CERT"),
-		ZashKeyFile:         os.Getenv("DNS_ZASH_KEY"),
+		ListenDoT:              envListen("DNS_LISTEN_DOT", ":853"),
+		ListenDebug:            envListen("DNS_LISTEN_DEBUG", "127.0.0.1:5353"),
+		CertFile:               os.Getenv("DNS_CERT"),
+		KeyFile:                os.Getenv("DNS_KEY"),
+		WebCertFile:            os.Getenv("DNS_WEB_CERT"),
+		WebKeyFile:             os.Getenv("DNS_WEB_KEY"),
+		RulesDir:               envOr("DNS_RULES_DIR", "/etc/5gpn/rules"),
+		ChnrouteFile:           os.Getenv("DNS_CHNROUTE"),
+		SubscriptionsFile:      envOr("DNS_SUBSCRIPTIONS", "/etc/5gpn/subscriptions.json"),
+		ListenAPI:              envListen("DNS_LISTEN_API", "127.0.0.1:443"),
+		APIToken:               os.Getenv("DNS_API_TOKEN"),
+		StatsFile:              envListen("DNS_STATS_FILE", "/etc/5gpn/stats.json"),
+		TGBotToken:             os.Getenv("TGBOT_TOKEN"),
+		TGBotAdmins:            parseAdminIDs(os.Getenv("TGBOT_ADMINS")),
+		TGBotProxyURL:          strings.TrimSpace(os.Getenv("TGBOT_PROXY_URL")),
+		TGBotAlerts:            envBool("TGBOT_ALERTS", false),
+		WWWDir:                 envOr("WWW_DIR", "/opt/5gpn/www"),
+		WebDir:                 envOr("DNS_WEB_DIR", "/opt/5gpn/web"),
+		BaseDomain:             envOr("DNS_BASE_DOMAIN", ""),
+		MihomoController:       envOr("DNS_MIHOMO_CONTROLLER", "127.0.0.1:9090"),
+		MihomoSecret:           envOr("DNS_MIHOMO_SECRET", ""),
+		WhitelistFile:          envOr("DNS_WHITELIST_FILE", "/etc/5gpn/mihomo/whitelist.txt"),
+		MihomoConfigFile:       envOr("DNS_MIHOMO_CONFIG", "/etc/5gpn/mihomo/config.yaml"),
+		InterceptConfigFile:    envOr("DNS_INTERCEPT_CONFIG", "/etc/5gpn/intercept/config.json"),
+		InterceptControlSocket: envOr("DNS_INTERCEPT_CONTROL_SOCKET", "/run/5gpn-intercept/control.sock"),
+		OverlayControlSocket:   envOr("DNS_OVERLAY_CONTROL_SOCKET", "/run/mihomo/overlay-control.sock"),
+		OverlayJournalFile:     envOr("DNS_OVERLAY_JOURNAL", "/var/lib/5gpn-dns/overlay-journal.json"),
+		MarketplacesFile:       envOr("DNS_MARKETPLACES_FILE", "/etc/5gpn/extension-marketplaces.json"),
+		PolicyRulesFile:        envListen("DNS_POLICY_RULES", "/etc/5gpn/policy.json"),
+		ZashDir:                envOr("DNS_ZASH_DIR", "/opt/5gpn/zash"),
+		ZashListen:             envListen("DNS_ZASH_LISTEN", "127.0.0.2:443"),
+		ZashCertFile:           os.Getenv("DNS_ZASH_CERT"),
+		ZashKeyFile:            os.Getenv("DNS_ZASH_KEY"),
 	}
 	if err := validateTGBotProxyURL(cfg.TGBotProxyURL); err != nil {
 		// The bot is optional. Keep the invalid value so a later runtime token

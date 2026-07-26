@@ -119,7 +119,7 @@ func TestMihomoIngressModules_EnableDisableRoundTrip(t *testing.T) {
 			t.Fatalf("enabled module is missing local-service guard %q", rule)
 		}
 	}
-	if strings.Index(onDisk, moduleRules[0]) > strings.Index(onDisk, "DOMAIN,"+fx.infra.ConsoleDomain+",DIRECT") {
+	if strings.Index(onDisk, moduleRules[0]) > strings.Index(onDisk, qualifiedDirectDomainRule(fx.infra.ConsoleDomain)) {
 		t.Fatal("module local-service guards must precede console/zash accepting rules")
 	}
 	backup, err = os.ReadFile(fx.store.BackupPath())

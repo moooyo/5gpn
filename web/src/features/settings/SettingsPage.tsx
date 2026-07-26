@@ -9,7 +9,7 @@ import { AboutStrip, AppearanceCard, ConsoleCard, DotServiceCard, EcsCard, Ingre
  *  plus a build-info strip. DoT-domain change and admin-password change have
  *  no API yet (greenfield) and render as disabled controls with a tooltip. */
 export default function SettingsPage() {
-  const { status } = useStatus()
+  const { status, mihomo } = useStatus()
 
   const [upstreams, setUpstreams] = useState<UpstreamsView | null>(null)
   const [ecs, setEcs] = useState<ECSView | null>(null)
@@ -137,7 +137,11 @@ export default function SettingsPage() {
       </div>
       <UpstreamsCard upstreams={upstreams} onSaved={setUpstreams} />
       <EcsCard ecs={ecs} onSaved={setEcs} />
-      <AboutStrip version={status?.version} />
+      <AboutStrip
+        version={status?.version}
+        zashVersion={status?.zash_version}
+        mihomoVersion={mihomo?.version}
+      />
     </div>
   )
 }

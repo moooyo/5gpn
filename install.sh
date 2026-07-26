@@ -80,6 +80,13 @@ LE_RENEWAL_ROOT="${LE_ROOT}/renewal"
 CERT_DNS_RESOLVER="1.1.1.1"              # fixed independent resolver for ACME A/AAAA gates
 CERT_DNS_WAIT_TIMEOUT=600                 # bounded install/configure propagation wait
 CERT_DNS_WAIT_INTERVAL=10
+# certbot writes the DNS-01 TXT record itself and then sleeps this long before
+# asking Let's Encrypt to validate. It cannot be replaced by a check — the
+# record does not exist until certbot creates it — and it is the only
+# unconditional wait on the certificate path; our own DNS verification checks
+# first and sleeps only after a failed check. Lower it if the zone's
+# authoritative servers converge quickly; too low fails validation outright.
+CERT_DNS_PROPAGATION_SECONDS="${CERT_DNS_PROPAGATION_SECONDS:-30}"
 INSTALL_LOCK_FILE="/run/5gpn/install.lock"
 CERT_RENEW_LOCK_FILE="/run/5gpn/cert-renew.lock"
 INSTALL_LOCK_WAIT_TIMEOUT=900
@@ -115,6 +122,22 @@ INTERCEPT_CA_DIR="/etc/5gpn/intercept-ca"
 INTERCEPT_CA_MARKER=".5gpn-intercept-ca-owned"
 INTERCEPT_CA_MARKER_VALUE="5gpn-intercept-ca-v1"
 INTERCEPT_STATE_DIR="/var/lib/5gpn-intercept"
+# The runtime overlay's machine-only sockets. mihomo creates both inside its
+# systemd RuntimeDirectory, so they cannot outlive the process that served them.
+OVERLAY_OWNER="5gpn"
+# Set by artifact staging once the installed mihomo has been shown to parse an
+# anchored config. Empty until then — not 0 — so that a render which staging
+# never reached can tell 'not probed' from 'probed and unsupported' and fall
+# back to what the live config already says.
+MIHOMO_SEED_OVERLAY=""
+OVERLAY_CONTROL_SOCKET="/run/mihomo/overlay-control.sock"
+OVERLAY_GENERATION_SOCKET="/run/mihomo/overlay-generation.sock"
+# One group per socket, owning nothing else. mihomo joins both so it can hand
+# each socket to the right one; the admitted peer joins exactly one. Reusing the
+# peers' own primary groups would have required mihomo to join those instead,
+# widening what the core can read for no benefit.
+OVERLAY_CONTROL_GROUP="5gpn-overlay-ctl"
+OVERLAY_GENERATION_GROUP="5gpn-overlay-gen"
 INTERCEPT_STATE_MARKER=".5gpn-intercept-state-owned"
 INTERCEPT_STATE_MARKER_VALUE="5gpn-intercept-state-v1"
 DNS_SERVICE_USER="gpn-dns"
@@ -129,10 +152,25 @@ IOS_OWNERSHIP_MARKER=".5gpn-ios-owned"
 IOS_OWNERSHIP_VALUE="5gpn-ios-v1"
 TEMP_OWNERSHIP_MARKER=".5gpn-temp-owned"
 TEMP_OWNERSHIP_VALUE="5gpn-temp-v1"
-MIHOMO_VERSION="v1.19.28"
-MIHOMO_SHA256="70d01cfb8cb7bf7a92fd1af16cb4b9553d90bb4eecde3b5c4849103e27c80ddb"
-ZASH_VERSION="v3.15.0"                   # Zephyruso/zashboard prebuilt dist.zip
-ZASH_SHA256="adba7b03f3bec792a354e65469fb8ac5513e48e0f646650f78aa313bcf5b18e9"
+# Upstream v1.19.28 plus the runtime overlay, built from moooyo/mihomo's
+# 5gpn-ext branch. Upstream does not implement the RUNTIME-OVERLAY anchors,
+# so against an upstream core the installer's probe fails and it seeds the
+# rendered config instead: the mechanism ships but never switches on.
+# The interception sidecar is maintained in its own repository and consumed
+# as a released artifact, like mihomo and gum. It used to be built from a copy
+# carried inside this tree, which meant the component and the gateway could
+# only ever ship together and a change to one implied a release of the other.
+# They share no Go types — only a versioned control-API wire format — so the
+# thing that keeps them working together is a schema number, not a build.
+SIDECAR_REPO="moooyo/mihomo-extension-sidecar"
+SIDECAR_VERSION="0.1.0-beta.1"
+SIDECAR_SHA256="4c701214f269ee87457f507ea9d9d02f612bf63dbe74226cb8f6d585ef1f1832"
+MIHOMO_REPO="moooyo/mihomo"
+MIHOMO_VERSION="v1.19.28-overlay.2"
+MIHOMO_SHA256="aac1c9936e05a05de9cd7eb365df2930ff630b673b91b31cc06a9370d455dc4d"
+ZASH_REPO="moooyo/zashboard"
+ZASH_VERSION="v3.16.0-overlay.1"         # our fork's dist.zip, built from 5gpn-ext
+ZASH_SHA256="b5d003f55f9424eaaa78f901a5b37912dbd9ac07cb37e17c527b209c52947bf4"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
@@ -1122,6 +1160,32 @@ normalize_legacy_intercept_ca_root() {
 # New fixed roots must be inspected without mutating the host before the
 # install transaction records whether each path was absent. Existing paths are
 # accepted only when their ownership marker is already valid.
+# Explains an unowned root when the cause is an orphaned owner.
+#
+# Removing a service account leaves every directory it owned with a uid that no
+# longer resolves, and the installer then refuses to claim those roots — which is
+# the right call, because a future account recreated at that uid would inherit
+# them. But "unowned" alone gives an operator nothing to act on, and the refusal
+# has no self-repair path: it is reached on every subsequent run, including the
+# one that would have recreated the account.
+#
+# Diagnose, do not repair. Silently chowning a directory whose owner the
+# installer does not recognise is precisely what this check exists to prevent.
+report_orphaned_root_owner() {
+    local dir="$1" uid gid
+    [[ -e "$dir" ]] || return 0
+    uid="$(file_uid "$dir")"
+    gid="$(file_gid "$dir")"
+    if [[ "$uid" =~ ^[0-9]+$ ]] && ! getent passwd "$uid" >/dev/null 2>&1; then
+        err "Its owner is uid ${uid}, which no longer exists — a removed service account."
+        err "Restore it with: chown root:root '${dir}' && chmod 755 '${dir}'"
+        err "and check the ownership marker inside it is root:root mode 644."
+    elif [[ "$gid" =~ ^[0-9]+$ ]] && ! getent group "$gid" >/dev/null 2>&1; then
+        err "Its group is gid ${gid}, which no longer exists — a removed service group."
+        err "Restore it with: chgrp root '${dir}'"
+    fi
+}
+
 preflight_intercept_roots() {
     local dir marker value
     while read -r dir marker value; do
@@ -1131,10 +1195,12 @@ preflight_intercept_roots() {
         if [[ "$dir" == "$INTERCEPT_CA_DIR" ]]; then
             fixed_owned_dir_is_safe "$dir" "$marker" "$value" \
                 || legacy_intercept_ca_root_is_safe \
-                || { err "Refusing pre-existing unowned interception root: $dir"; return 1; }
+                || { err "Refusing pre-existing unowned interception root: $dir"
+                     report_orphaned_root_owner "$dir"; return 1; }
         else
             fixed_owned_dir_is_safe "$dir" "$marker" "$value" \
-                || { err "Refusing pre-existing unowned interception root: $dir"; return 1; }
+                || { err "Refusing pre-existing unowned interception root: $dir"
+                     report_orphaned_root_owner "$dir"; return 1; }
         fi
     done <<EOF
 $INTERCEPT_CA_DIR $INTERCEPT_CA_MARKER $INTERCEPT_CA_MARKER_VALUE
@@ -1710,6 +1776,141 @@ resolve_mihomo_listen_ips() {
     printf '%s\n' "$out"
 }
 
+# Renders the runtime-overlay parts of the mihomo seed.
+#
+# The overlay replaces rewriting the operator's config on every routing change
+# with committing a typed generation over a machine-only socket. Two anchors
+# splice it into rule resolution, and a `runtime-overlay:` block names the
+# sockets and who may use them.
+#
+# All of it is emitted only when the mihomo binary being installed actually
+# implements the feature. That is established by validating the rendered
+# candidate with `mihomo -t`, not by comparing version strings: a core that
+# cannot parse RUNTIME-OVERLAY rejects the config outright, and seeding one it
+# rejects would leave the gateway unable to start. The caller falls back to the
+# unanchored form on failure, which is the legacy arrangement and fully
+# supported.
+#
+# The two sockets carry different peer policies on purpose. The coordinator may
+# mutate the overlay; the processor may only read the generation it serves. One
+# policy covering both would have to admit the processor to the mutation
+# endpoint, which is the reach the split exists to deny.
+# $1 selects "probe" to render with placeholder identities.
+#
+# Artifact staging validates an anchored candidate before the service accounts
+# and socket groups exist, because whether the core can parse the anchors is the
+# thing that decides whether they are emitted at all. That candidate is fed to
+# `mihomo -t` and discarded; no identity in it reaches the live config, which is
+# rendered later by render_mihomo_config once the accounts are real. Failing the
+# probe for want of a group that installation has not created yet would abort
+# every fresh install.
+render_overlay_runtime_block() {
+    local mode="${1:-live}"
+    local dns_uid dns_gid intercept_uid intercept_gid control_gid generation_gid
+    dns_uid="$(id -u "$DNS_SERVICE_USER" 2>/dev/null || true)"
+    dns_gid="$(id -g "$DNS_SERVICE_USER" 2>/dev/null || true)"
+    intercept_uid="$(id -u "$INTERCEPT_SERVICE_USER" 2>/dev/null || true)"
+    intercept_gid="$(id -g "$INTERCEPT_SERVICE_USER" 2>/dev/null || true)"
+    control_gid="$(getent group "$OVERLAY_CONTROL_GROUP" 2>/dev/null | cut -d: -f3)"
+    generation_gid="$(getent group "$OVERLAY_GENERATION_GROUP" 2>/dev/null | cut -d: -f3)"
+
+    if [[ "$mode" == probe ]]; then
+        # Any well-formed number parses identically. These are never installed.
+        local id
+        for id in dns_uid dns_gid intercept_uid intercept_gid control_gid generation_gid; do
+            [[ "${!id}" =~ ^[0-9]+$ ]] || printf -v "$id" '%s' 65534
+        done
+    else
+        [[ "$dns_uid" =~ ^[0-9]+$ && "$dns_gid" =~ ^[0-9]+$ ]]             || { err "Cannot resolve $DNS_SERVICE_USER for the overlay control socket."; return 1; }
+        [[ "$intercept_uid" =~ ^[0-9]+$ && "$intercept_gid" =~ ^[0-9]+$ ]]             || { err "Cannot resolve $INTERCEPT_SERVICE_USER for the overlay generation socket."; return 1; }
+        [[ "$control_gid" =~ ^[0-9]+$ && "$generation_gid" =~ ^[0-9]+$ ]]             || { err "The overlay socket groups do not exist yet."; return 1; }
+    fi
+    cat <<EOF_OVERLAY
+
+runtime-overlay:
+  owner: ${OVERLAY_OWNER}
+  control-socket: ${OVERLAY_CONTROL_SOCKET}
+  generation-socket: ${OVERLAY_GENERATION_SOCKET}
+  # Only the coordinator may commit a generation.
+  control-peer-uid: ${dns_uid}
+  control-peer-gid: ${dns_gid}
+  control-socket-gid: ${control_gid}
+  # Only the processor may read the generation it is serving.
+  generation-peer-uid: ${intercept_uid}
+  generation-peer-gid: ${intercept_gid}
+  generation-socket-gid: ${generation_gid}
+EOF_OVERLAY
+}
+
+# Creates the two socket groups and puts the right accounts in each.
+#
+# Membership is the whole mechanism: mihomo needs both so it can hand each
+# socket to its group, and each peer needs exactly the one for the socket it is
+# entitled to open. Neither group owns anything else, so this grants no reach
+# beyond the sockets themselves.
+ensure_overlay_socket_groups() {
+    local group member
+    for group in "$OVERLAY_CONTROL_GROUP" "$OVERLAY_GENERATION_GROUP"; do
+        getent group "$group" >/dev/null 2>&1             || groupadd --system "$group"             || { err "Could not create the overlay socket group $group"; return 1; }
+    done
+    for member in "$MIHOMO_SERVICE_USER" "$DNS_SERVICE_USER"; do
+        usermod -aG "$OVERLAY_CONTROL_GROUP" "$member"             || { err "Could not add $member to $OVERLAY_CONTROL_GROUP"; return 1; }
+    done
+    for member in "$MIHOMO_SERVICE_USER" "$INTERCEPT_SERVICE_USER"; do
+        usermod -aG "$OVERLAY_GENERATION_GROUP" "$member"             || { err "Could not add $member to $OVERLAY_GENERATION_GROUP"; return 1; }
+    done
+}
+
+# Expands one overlay placeholder line, or drops it when the overlay is off.
+render_overlay_placeholder() {
+    local placeholder="$1" enabled="$2" mode="${3:-live}"
+    if [[ "$enabled" != 1 ]]; then
+        return 0
+    fi
+    case "$placeholder" in
+        __OVERLAY_EGRESS_ANCHOR__) printf '  - RUNTIME-OVERLAY,%s,egress
+' "$OVERLAY_OWNER" ;;
+        __OVERLAY_CLIENT_ANCHOR__) printf '  - RUNTIME-OVERLAY,%s,client
+' "$OVERLAY_OWNER" ;;
+        __OVERLAY_RUNTIME_BLOCK__) render_overlay_runtime_block "$mode" || return 1 ;;
+    esac
+}
+
+# Expands the seed template. One implementation, two callers.
+#
+# Artifact staging and the live render used to carry the same expansion inline,
+# differing only in the values they substituted and in whether the overlay
+# probe was allowed placeholder identities. A placeholder added to the template
+# therefore had to be taught to both, and the day one of them was missed is the
+# day a release run failed on a config that was not YAML.
+#
+# Values arrive through the environment under the placeholder's own name, so a
+# caller that forgets one substitutes empty rather than leaving the literal —
+# and tests/test_seed_template_renderers.sh is what fails when a placeholder is
+# added here and nowhere else.
+render_mihomo_seed() {
+    local template="$1" overlay="$2" mode="${3:-live}" listeners="$4" line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in
+            __MIHOMO_LISTENERS__)
+                printf '%s\n' "$listeners"
+                continue ;;
+            __OVERLAY_EGRESS_ANCHOR__|__OVERLAY_CLIENT_ANCHOR__|__OVERLAY_RUNTIME_BLOCK__)
+                render_overlay_placeholder "$line" "$overlay" "$mode" || return 1
+                continue ;;
+        esac
+        line="${line//__GATEWAY_IP__/$SEED_GATEWAY_IP}"
+        line="${line//__CONSOLE_DOMAIN__/$SEED_CONSOLE_DOMAIN}"
+        line="${line//__ZASH_DOMAIN__/$SEED_ZASH_DOMAIN}"
+        line="${line//__CONTROLLER_SECRET__/$SEED_CONTROLLER_SECRET}"
+        line="${line//__INTERCEPT_INBOUND_USERNAME__/$SEED_INTERCEPT_INBOUND_USERNAME}"
+        line="${line//__INTERCEPT_INBOUND_PASSWORD__/$SEED_INTERCEPT_INBOUND_PASSWORD}"
+        line="${line//__INTERCEPT_UPSTREAM_USERNAME__/$SEED_INTERCEPT_UPSTREAM_USERNAME}"
+        line="${line//__INTERCEPT_UPSTREAM_PASSWORD__/$SEED_INTERCEPT_UPSTREAM_PASSWORD}"
+        printf '%s\n' "$line"
+    done < "$template"
+}
+
 render_mihomo_listeners() {
     local ips="$1" console_domain="$2" ip idx=0 suffix
     while IFS= read -r ip; do
@@ -1876,7 +2077,7 @@ unit_file_owned_by_5gpn() {
         mihomo.service)
             grep -Fqx 'ExecStart=/opt/5gpn/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' "$file" ;;
         5gpn-intercept.service)
-            grep -Fqx 'ExecStart=/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json' "$file" ;;
+            grep -Fqx 'ExecStart=/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json --control-peer-user gpn-dns' "$file" ;;
         5gpn-intercept-cert.service)
             grep -Fqx 'ExecStart=/opt/5gpn/scripts/intercept-cert-renew.sh' "$file" ;;
         5gpn-intercept-cert.path)
@@ -1946,6 +2147,21 @@ service_group_is_exclusive_for_user() {
     [[ -z "$primary_users" || "$primary_users" == "$user" ]]
 }
 
+# The gids a service account may carry: its own, plus the overlay socket
+# groups if they exist. Absent groups are simply not in the set, so this is
+# equally correct before they are created.
+service_account_groups_are_permitted() {
+    local user_groups="$1" primary_gid="$2" gid allowed
+    allowed=" ${primary_gid} "
+    for gid in "$(getent group "$OVERLAY_CONTROL_GROUP" 2>/dev/null | cut -d: -f3)" \
+               "$(getent group "$OVERLAY_GENERATION_GROUP" 2>/dev/null | cut -d: -f3)"; do
+        [[ "$gid" =~ ^[0-9]+$ ]] && allowed="${allowed}${gid} "
+    done
+    for gid in $user_groups; do
+        [[ "$allowed" == *" ${gid} "* ]] || return 1
+    done
+}
+
 service_account_is_safe() {
     local user="$1" group="$2" entry uid home shell primary primary_gid user_groups uid_min
     local group_entry group_gid members passwd_entries primary_users uid_users group_entries gid_groups gid_members
@@ -1972,8 +2188,14 @@ service_account_is_safe() {
     [[ "$group_gid" =~ ^[0-9]+$ && "$primary_gid" == "$group_gid" ]] || return 1
     [[ "$home" == /nonexistent && "$primary" == "$group" ]] || return 1
     [[ -z "$members" && "$primary_users" == "$user" && "$uid_users" == "$user" \
-       && "$gid_groups" == "$group" && -z "$gid_members" \
-       && "$user_groups" == "$group_gid" ]] || return 1
+       && "$gid_groups" == "$group" && -z "$gid_members" ]] || return 1
+    # A service account may belong to its own group and to the overlay socket
+    # groups, and to nothing else. The isolation this protects is real — an
+    # account that can join arbitrary groups can reach whatever those groups
+    # own — so the exception is enumerated rather than opened: those two groups
+    # exist solely to own one socket each and own nothing else, which is what
+    # makes membership of them grant no reach beyond the socket.
+    service_account_groups_are_permitted "$user_groups" "$group_gid" || return 1
     case "$shell" in */nologin|/bin/false) ;; *) return 1 ;; esac
 }
 
@@ -2037,6 +2259,13 @@ ensure_service_account() {
         if ! service_account_is_safe "$user" "$group"; then
             userdel "$user" 2>/dev/null || true
             [[ "$group_created" == 0 ]] || groupdel "$group" 2>/dev/null || true
+            # The pre-existing-account branch above says why it refuses; this one
+            # did not, so an account the installer created and then rejected
+            # aborted the run with no reason given at all. The usual cause is a
+            # host whose UID_MIN leaves useradd --system no system uid to
+            # allocate, which is worth naming rather than leaving to be guessed.
+            err "Created service account $user does not satisfy the isolation rules; removed it again."
+            err "Check that /etc/login.defs leaves a free system uid below UID_MIN for --system accounts."
             return 1
         fi
     fi
@@ -2082,6 +2311,8 @@ install_service_accounts() {
     install_service_account "$DNS_SERVICE_USER" "$DNS_SERVICE_USER" || return 1
     install_service_account "$MIHOMO_SERVICE_USER" "$MIHOMO_SERVICE_USER" || return 1
     install_service_account "$INTERCEPT_SERVICE_USER" "$INTERCEPT_SERVICE_USER" || return 1
+    command -v usermod >/dev/null 2>&1         || { err "usermod is required to grant overlay socket group membership."; return 1; }
+    ensure_overlay_socket_groups || return 1
     ok "Dedicated service accounts are ready: ${DNS_SERVICE_USER}, ${MIHOMO_SERVICE_USER}, ${INTERCEPT_SERVICE_USER}."
 }
 
@@ -2483,13 +2714,17 @@ stage_artifacts() {
     binary_reports_exact_version "$ARTIFACT_STAGE/5gpn-dns" --version "$ver" \
         || { err "Staged 5gpn-dns version does not match pinned release ${ver}."; return 1; }
 
-    curl -fsSL "$release/$intercept_asset" -o "$ARTIFACT_STAGE/5gpn-intercept" \
+    curl -fsSL "https://github.com/${SIDECAR_REPO}/releases/download/${SIDECAR_VERSION}/${intercept_asset}" \
+        -o "$ARTIFACT_STAGE/5gpn-intercept" \
         || { err "Could not download $intercept_asset."; return 1; }
-    verify_sha256 "$ARTIFACT_STAGE/5gpn-intercept" \
-        "$(release_checksum "$ARTIFACT_STAGE/checksums.txt" "$intercept_asset")" || return 1
+    # Verified against the digest pinned here, not against this project's
+    # checksums file: the artifact no longer comes from this project's release,
+    # and its version is its own. Asserting the gateway's version against it was
+    # only ever correct while the two were built together.
+    verify_sha256 "$ARTIFACT_STAGE/5gpn-intercept" "$SIDECAR_SHA256" || return 1
     chmod 0755 "$ARTIFACT_STAGE/5gpn-intercept"
-    binary_reports_exact_version "$ARTIFACT_STAGE/5gpn-intercept" --version "$ver" \
-        || { err "Staged 5gpn-intercept version does not match pinned release ${ver}."; return 1; }
+    binary_reports_exact_version "$ARTIFACT_STAGE/5gpn-intercept" --version "$SIDECAR_VERSION" \
+        || { err "Staged 5gpn-intercept version does not match pinned ${SIDECAR_VERSION}."; return 1; }
 
     curl -fsSL "$release/$web_asset" -o "$ARTIFACT_STAGE/web.tgz" \
         || { err "Could not download $web_asset."; return 1; }
@@ -2507,7 +2742,7 @@ stage_artifacts() {
     release_tag_file_matches "$ARTIFACT_STAGE/web/.web_version" "$ver" \
         || { err "Staged web archive version does not match pinned release ${ver}."; return 1; }
 
-    curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz" \
+    curl -fsSL "https://github.com/${MIHOMO_REPO}/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz" \
         -o "$ARTIFACT_STAGE/mihomo.gz" || { err "Could not download mihomo ${MIHOMO_VERSION}."; return 1; }
     verify_sha256 "$ARTIFACT_STAGE/mihomo.gz" "$MIHOMO_SHA256" || return 1
     gzip -dc "$ARTIFACT_STAGE/mihomo.gz" > "$ARTIFACT_STAGE/mihomo"
@@ -2515,7 +2750,7 @@ stage_artifacts() {
     mihomo_reports_exact_version "$ARTIFACT_STAGE/mihomo" "$MIHOMO_VERSION" \
         || { err "Staged mihomo version does not match pinned release ${MIHOMO_VERSION}."; return 1; }
 
-    curl -fsSL "https://github.com/Zephyruso/zashboard/releases/download/${ZASH_VERSION}/dist.zip" \
+    curl -fsSL "https://github.com/${ZASH_REPO}/releases/download/${ZASH_VERSION}/dist.zip" \
         -o "$ARTIFACT_STAGE/zash.zip" || { err "Could not download zashboard ${ZASH_VERSION}."; return 1; }
     verify_sha256 "$ARTIFACT_STAGE/zash.zip" "$ZASH_SHA256" || return 1
     archive_paths_safe zip "$ARTIFACT_STAGE/zash.zip" \
@@ -2532,27 +2767,38 @@ stage_artifacts() {
         || { err "Staged zashboard archive has no index.html."; return 1; }
 
     if [[ ! -f "$MIHOMO_DIR/config.yaml" ]]; then
-        local seed="$ARTIFACT_STAGE/mihomo-seed.yaml" line listeners
+        local seed="$ARTIFACT_STAGE/mihomo-seed.yaml" line listeners overlay
         listeners="$(render_mihomo_listeners "$MIHOMO_LISTEN_IPS" "$CONSOLE_DOMAIN")"
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            if [[ "$line" == '__MIHOMO_LISTENERS__' ]]; then
-                printf '%s\n' "$listeners"
-                continue
-            fi
-            line="${line//__GATEWAY_IP__/$GATEWAY_IP}"
-            line="${line//__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN}"
-            line="${line//__ZASH_DOMAIN__/$ZASH_DOMAIN}"
-            line="${line//__CONTROLLER_SECRET__/preflight-only-secret}"
-            line="${line//__INTERCEPT_INBOUND_USERNAME__/preflight-inbound-user}"
-            line="${line//__INTERCEPT_INBOUND_PASSWORD__/preflight-inbound-password-123456}"
-            line="${line//__INTERCEPT_UPSTREAM_USERNAME__/preflight-upstream-user}"
-            line="${line//__INTERCEPT_UPSTREAM_PASSWORD__/preflight-upstream-password-123456}"
-            printf '%s\n' "$line"
-        done < "${SCRIPT_DIR}/etc/mihomo/config.yaml.tmpl" > "$seed"
         install -d -m 0700 "$ARTIFACT_STAGE/mihomo-home"
         : > "$ARTIFACT_STAGE/mihomo-home/whitelist.txt"
-        "$ARTIFACT_STAGE/mihomo" -t -f "$seed" -d "$ARTIFACT_STAGE/mihomo-home" \
+        # Anchored first. A core that does not implement the overlay rejects
+        # the candidate and the unanchored render is retried, so the probe is
+        # the validation itself rather than a version comparison.
+        # Placeholder credentials: this candidate is fed to `mihomo -t` to
+        # find out whether the core parses the anchors, then discarded.
+        SEED_GATEWAY_IP="$GATEWAY_IP"
+        SEED_CONSOLE_DOMAIN="$CONSOLE_DOMAIN"
+        SEED_ZASH_DOMAIN="$ZASH_DOMAIN"
+        SEED_CONTROLLER_SECRET="preflight-only-secret"
+        SEED_INTERCEPT_INBOUND_USERNAME="preflight-inbound-user"
+        SEED_INTERCEPT_INBOUND_PASSWORD="preflight-inbound-password-123456"
+        SEED_INTERCEPT_UPSTREAM_USERNAME="preflight-upstream-user"
+        SEED_INTERCEPT_UPSTREAM_PASSWORD="preflight-upstream-password-123456"
+        for overlay in 1 0; do
+        render_mihomo_seed "${SCRIPT_DIR}/etc/mihomo/config.yaml.tmpl" \
+            "$overlay" probe "$listeners" > "$seed" || return 1
+        if "$ARTIFACT_STAGE/mihomo" -t -f "$seed" -d "$ARTIFACT_STAGE/mihomo-home"; then
+            if [[ "$overlay" == 1 ]]; then
+                ok "Staged mihomo implements the runtime overlay; seeding the anchored config."
+            else
+                warn "Staged mihomo does not implement the runtime overlay; seeding the rendered config."
+            fi
+            MIHOMO_SEED_OVERLAY="$overlay"
+            break
+        fi
+        [[ "$overlay" == 1 ]] \
             || { err "Staged mihomo seed candidate is invalid; live deployment was not touched."; return 1; }
+        done
     else
         "$ARTIFACT_STAGE/mihomo" -t -f "$MIHOMO_DIR/config.yaml" -d "$MIHOMO_DIR" \
             || { err "Existing operator-owned mihomo config is invalid; live deployment was not touched."; return 1; }
@@ -2632,7 +2878,12 @@ acquire_install_lock() {
         INSTALL_LOCK_HELD=1
         return 0
     fi
-    exec 7>&- 2>/dev/null || true
+    # No 2>/dev/null here. `exec` carrying only redirections applies them to the
+    # shell itself and does not restore them, so that spelling silenced every
+    # error message for the rest of the run — including the ones that explain
+    # why an install aborted. Closing an fd that was never opened is not an
+    # error in bash, so there is nothing to suppress.
+    exec 7>&- || true
     exec 7>"$INSTALL_LOCK_FILE"
     chmod 0600 "$INSTALL_LOCK_FILE" \
         || { exec 7>&-; err "Could not protect the installer transaction lock file."; return 1; }
@@ -2648,7 +2899,12 @@ release_install_lock() {
         lock_fd_targets_file 7 "$INSTALL_LOCK_FILE" || rc=1
         flock -u 7 2>/dev/null || rc=1
     fi
-    exec 7>&- 2>/dev/null || true
+    # No 2>/dev/null here. `exec` carrying only redirections applies them to the
+    # shell itself and does not restore them, so that spelling silenced every
+    # error message for the rest of the run — including the ones that explain
+    # why an install aborted. Closing an fd that was never opened is not an
+    # error in bash, so there is nothing to suppress.
+    exec 7>&- || true
     INSTALL_LOCK_HELD=0
     [[ "$rc" == 0 ]] || { err "The installer transaction lock descriptor was invalid during release."; return 1; }
 }
@@ -2691,7 +2947,7 @@ acquire_install_cert_lock() {
         INSTALL_CERT_LOCK_HELD=1
         return 0
     fi
-    exec 8>&- 2>/dev/null || true
+    exec 8>&- || true
     exec 8>"$CERT_RENEW_LOCK_FILE"
     chmod 0600 "$CERT_RENEW_LOCK_FILE" \
         || { exec 8>&-; err "Could not protect the certificate-renewal lock file."; return 1; }
@@ -2711,7 +2967,7 @@ release_install_cert_lock() {
         lock_fd_targets_file 8 "$CERT_RENEW_LOCK_FILE" || rc=1
         flock -u 8 2>/dev/null || rc=1
     fi
-    exec 8>&- 2>/dev/null || true
+    exec 8>&- || true
     INSTALL_CERT_LOCK_HELD=0
     [[ "$rc" == 0 ]] || { err "The certificate lock descriptor was invalid during release."; return 1; }
 }
@@ -3199,9 +3455,16 @@ rollback_created_service_accounts() {
             current_uid="$(id -u "$user" 2>/dev/null || true)"
             current_gid="$(id -g "$user" 2>/dev/null || true)"
             user_groups="$(id -G "$user" 2>/dev/null || true)"
+            # The same rule as service_account_is_safe, and for the same
+            # reason: install_service_accounts adds these accounts to the two
+            # overlay socket groups moments after creating them, so demanding
+            # that id -G equal the primary gid refuses every account this run
+            # created. Rollback then reports failure, which downgrades an
+            # otherwise clean restore into quarantining every unit and leaves
+            # the accounts behind — the worst place for a check to be wrong.
             if [[ "$current_uid" == "$recorded_uid" \
-               && "$current_gid" == "$recorded_gid" \
-               && "$user_groups" == "$recorded_gid" ]] \
+               && "$current_gid" == "$recorded_gid" ]] \
+               && service_account_groups_are_permitted "$user_groups" "$recorded_gid" \
                && service_account_is_safe "$user" "$group"; then
                 if ! userdel "$user" 2>/dev/null \
                    || getent passwd "$user" >/dev/null 2>&1; then
@@ -3963,14 +4226,16 @@ install_5gpndns() {
 }
 
 install_intercept() {
+    # The sidecar carries its own version now; asserting the gateway's was
+    # only ever correct while the two were built from one tree.
     [[ -n "$ARTIFACT_STAGE" && -x "$ARTIFACT_STAGE/5gpn-intercept" ]] \
         || { err "5gpn-intercept was not staged."; return 1; }
     publish_executable "$ARTIFACT_STAGE/5gpn-intercept" "$INTERCEPT_BIN" \
         || { err "5gpn-intercept publication failed."; return 1; }
     [[ -x "$INTERCEPT_BIN" ]] && cmp -s "$ARTIFACT_STAGE/5gpn-intercept" "$INTERCEPT_BIN" \
-        && binary_reports_exact_version "$INTERCEPT_BIN" --version "$DNS_VERSION_DEFAULT" \
+        && binary_reports_exact_version "$INTERCEPT_BIN" --version "$SIDECAR_VERSION" \
         || { err "Published 5gpn-intercept failed identity/version verification."; return 1; }
-    ok "Verified 5gpn-intercept ${DNS_VERSION_DEFAULT} published to $INTERCEPT_BIN."
+    ok "Verified 5gpn-intercept ${SIDECAR_VERSION} published to $INTERCEPT_BIN."
 }
 
 prepare_intercept_runtime_dirs() {
@@ -4142,8 +4407,9 @@ install_web() {
     ok "Verified control-console SPA published to ${DNS_WEB_DIR}/ (${DNS_VERSION_DEFAULT})."
 }
 
-# zashboard: prebuilt static dist from Zephyruso/zashboard. Pinned by
-# ZASH_VERSION; opt-in sha256 via ZASH_SHA256. Fresh-artifact: wipes+replaces
+# zashboard: prebuilt static dist from our fork moooyo/zashboard, which carries
+# the overlay panel upstream does not have. Pinned by ZASH_REPO/ZASH_VERSION;
+# opt-in sha256 via ZASH_SHA256. Fresh-artifact: wipes+replaces
 # DNS_ZASH_DIR on every run (never build on the box). Warn-not-fatal — a missing
 # zash panel must not abort the resolver install (the console + DoT still work).
 #
@@ -4300,6 +4566,24 @@ persist_mihomo_secret() {
 # old file, fsyncs, and atomically renames it into place.
 render_mihomo_config() {
     local mode="${1:-seed}" config="${MIHOMO_DIR}/config.yaml" secret="" template=""
+    # Staging establishes whether the mihomo being installed implements the
+    # runtime overlay, by validating an anchored candidate against that exact
+    # binary. Reuse that answer when there is one.
+    #
+    # But staging only probes when it is seeding a config that does not exist
+    # yet, so on a box that already has one — every `mihomo-reset`, every
+    # re-render — the flag is still its default. Taking that at face value
+    # renders the unanchored form, which on an anchored gateway means a reset
+    # silently removes the anchors and drops the overlay. Fall back to what
+    # the live config says instead: it is the arrangement this box runs.
+    local overlay="${MIHOMO_SEED_OVERLAY:-}"
+    if [[ -z "$overlay" ]]; then
+        if [[ -f "$config" ]] && grep -Eq "^[[:space:]]*-[[:space:]]*RUNTIME-OVERLAY," "$config"; then
+            overlay=1
+        else
+            overlay=0
+        fi
+    fi
     MIHOMO_SEED_PORTS_REQUIRED=0
     fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
         || { err "Unsafe configuration root: $CONF_DIR"; return 1; }
@@ -4362,21 +4646,15 @@ render_mihomo_config() {
     candidate="$(mktemp "${MIHOMO_DIR}/.config.yaml.XXXXXX")" \
         || { err "Could not create a mihomo config candidate in $MIHOMO_DIR"; return 1; }
 
-    if ! while IFS= read -r line || [[ -n "$line" ]]; do
-        if [[ "$line" == '__MIHOMO_LISTENERS__' ]]; then
-            printf '%s\n' "$listeners"
-            continue
-        fi
-        line="${line//__GATEWAY_IP__/$gw}"
-        line="${line//__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN}"
-        line="${line//__ZASH_DOMAIN__/$ZASH_DOMAIN}"
-        line="${line//__CONTROLLER_SECRET__/$secret_yaml_value}"
-        line="${line//__INTERCEPT_INBOUND_USERNAME__/$intercept_in_user}"
-        line="${line//__INTERCEPT_INBOUND_PASSWORD__/$intercept_in_pass}"
-        line="${line//__INTERCEPT_UPSTREAM_USERNAME__/$intercept_up_user}"
-        line="${line//__INTERCEPT_UPSTREAM_PASSWORD__/$intercept_up_pass}"
-        printf '%s\n' "$line"
-    done < "$template" > "$candidate"; then
+    SEED_GATEWAY_IP="$gw"
+    SEED_CONSOLE_DOMAIN="$CONSOLE_DOMAIN"
+    SEED_ZASH_DOMAIN="$ZASH_DOMAIN"
+    SEED_CONTROLLER_SECRET="$secret_yaml_value"
+    SEED_INTERCEPT_INBOUND_USERNAME="$intercept_in_user"
+    SEED_INTERCEPT_INBOUND_PASSWORD="$intercept_in_pass"
+    SEED_INTERCEPT_UPSTREAM_USERNAME="$intercept_up_user"
+    SEED_INTERCEPT_UPSTREAM_PASSWORD="$intercept_up_pass"
+    if ! render_mihomo_seed "$template" "$overlay" live "$listeners" > "$candidate"; then
         rm -f -- "$candidate"
         err "Could not render the mihomo config candidate from $template"
         return 1
@@ -5483,19 +5761,39 @@ install_cert() {
     # Reuse is mode-aware. The SAN shape distinguishes wildcard DNS-01 from
     # exact-name HTTP-01; renewal.conf and owned provenance prevent a mode
     # switch from silently retaining the previous authenticator.
-    if [[ "$lineage_was_owned" == 1 ]] \
-       && validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
-            "$base" "$((30*86400))" production "$mode" \
-       && certbot_renewal_mode_matches "$base" "$mode" \
-       && cert_provenance_matches "$mode" "$base"; then
+    #
+    # Each condition is evaluated separately so that declining to reuse can say
+    # which one declined. Collapsed into a single &&-chain it could not: the
+    # installer went quiet and then certbot ran, and because an existing lineage
+    # also sets --force-renewal below, "I already have a certificate" turned
+    # into a full re-issuance — including the propagation wait — with nothing
+    # said about why.
+    local reuse_declined=""
+    if [[ "$lineage_was_owned" != 1 ]]; then
+        reuse_declined="the lineage is not one this installer owns"
+    elif ! validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
+            "$base" "$((30*86400))" production "$mode"; then
+        reuse_declined="the certificate is missing, untrusted, wrong for ${mode}, or expires within 30 days"
+    elif ! certbot_renewal_mode_matches "$base" "$mode"; then
+        reuse_declined="its renewal configuration does not use the ${mode} authenticator"
+    elif ! cert_provenance_matches "$mode" "$base"; then
+        reuse_declined="its recorded provenance does not match ${mode}"
+    fi
+
+    if [[ -z "$reuse_declined" ]]; then
         lineage_origin=owned
         info "Valid owned ${mode} certificate and matching renewal authenticator for ${base} (>30d); reusing."
     else
+        info "Not reusing the existing certificate for ${base}: ${reuse_declined}."
         if [[ ! -e "$live" ]] && compgen -G "${LE_LIVE_ROOT}/${base}-[0-9][0-9][0-9][0-9]" >/dev/null; then
             err "A duplicate Certbot lineage exists for ${base}, but the canonical ${live} lineage is absent."
             err "Resolve that lineage explicitly before reinstalling; refusing silent reuse without scoped renewal."
             return 1
         fi
+        # An existing lineage is re-issued rather than renewed in place,
+        # because certbot otherwise refuses a changed SAN set under the same
+        # cert-name. This is why declining to reuse is expensive, and why the
+        # reason above is worth printing.
         [[ -e "$live" ]] && force=1
         local -a certbot_args=(certonly --cert-name "$base" --server "$LE_PRODUCTION_SERVER" --agree-tos -n \
             -m "${CERT_EMAIL:-admin@${base}}" --keep-until-expiring --no-directory-hooks)
@@ -5505,7 +5803,7 @@ install_cert() {
             info "Issuing Let's Encrypt WILDCARD cert for *.${base} (Cloudflare DNS-01)..."
             certbot_args+=(--dns-cloudflare \
                 --dns-cloudflare-credentials "${ACME_DIR}/cloudflare.ini" \
-                --dns-cloudflare-propagation-seconds 30 -d "*.${base}" -d "${base}")
+                --dns-cloudflare-propagation-seconds "$CERT_DNS_PROPAGATION_SECONDS" -d "*.${base}" -d "${base}")
         else
             check_http_challenge_dns_once \
                 || { err "HTTP-01 DNS changed after preflight: ${CERT_DNS_LAST_OBSERVATION:-no answer}."; return 1; }
@@ -6193,7 +6491,7 @@ DNS_INTERCEPT_CONFIG=${intercept_config}
 # native manifest snapshot pipeline.
 DNS_MARKETPLACES_FILE=${marketplaces_file}
 
-# ZashDir is the unzipped Zephyruso/zashboard
+# ZashDir is the unzipped moooyo/zashboard
 # dist served by a SECOND loopback HTTPS listener on ZashListen. ZashCert/Key
 # always point at the selected certificate's zash/ role-dir copy
 # (deploy_cert_roles).
@@ -6450,15 +6748,33 @@ verify_console_endpoint() {
 # ----------------------------------------------------------------------------
 # Service lifecycle
 # ----------------------------------------------------------------------------
+# Asks whether the NAMED process is listening, not merely whether something is.
+#
+# Without the process test this answers "is anything bound to ip:port", so a
+# pre-existing nginx or haproxy holding the same LAN address satisfies mihomo's
+# readiness probe and the installer declares a data plane ready that never
+# started. -p needs no privilege for sockets the caller owns and the installer
+# runs as root, so attribution is available; where it is not, the probe falls
+# back to the address test rather than failing a healthy gateway.
 ss_has_exact_listener() {
-    local kind="$1" ip="$2" port="$3" flags
+    local kind="$1" ip="$2" port="$3" process="${4:-}" flags out
     case "$kind" in
         tcp) flags=-ltn ;;
         udp) flags=-lun ;;
         *) return 1 ;;
     esac
-    ss -H "$flags" 2>/dev/null \
-        | awk -v target="${ip}:${port}" '$4 == target { found=1 } END { exit !found }'
+    out="$(ss -H -p "$flags" 2>/dev/null)" || out=""
+    if [[ -z "$out" ]]; then
+        ss -H "$flags" 2>/dev/null \
+            | awk -v target="${ip}:${port}" '$4 == target { found=1 } END { exit !found }'
+        return $?
+    fi
+    printf '%s\n' "$out" \
+        | awk -v target="${ip}:${port}" -v want="$process" '
+            $4 != target { next }
+            want == "" { found=1; next }
+            index($0, "\"" want "\"") { found=1 }
+            END { exit !found }'
 }
 
 probe_mihomo_ready() {
@@ -6479,10 +6795,10 @@ probe_mihomo_ready() {
     while IFS= read -r ip; do
         [[ -n "$ip" ]] || continue
         for port in "${tcp_ports[@]}"; do
-            ss_has_exact_listener tcp "$ip" "$port" || return 1
+            ss_has_exact_listener tcp "$ip" "$port" mihomo || return 1
         done
         for port in "${udp_ports[@]}"; do
-            ss_has_exact_listener udp "$ip" "$port" || return 1
+            ss_has_exact_listener udp "$ip" "$port" mihomo || return 1
         done
     done < <(printf '%s\n' "$MIHOMO_LISTEN_IPS" | tr ',' '\n')
 }
@@ -6502,7 +6818,7 @@ probe_dns_ready() {
 }
 
 wait_service_ready() {
-    local svc="$1" deadline remaining probe_timeout check_rc
+    local svc="$1" deadline remaining probe_timeout check_rc announced=0
     deadline=$((SECONDS + SERVICE_READY_TIMEOUT))
     while (( SECONDS < deadline )); do
         case "$svc" in
@@ -6530,6 +6846,14 @@ wait_service_ready() {
             mihomo)    probe_mihomo_ready && { ok "mihomo readiness passed (controller + local TCP/UDP listeners)."; return 0; } ;;
             5gpn-dns)  probe_dns_ready && { ok "5gpn-dns readiness passed (API + DoT TLS handshake)."; return 0; } ;;
         esac
+        # Speak up only once the first probe has failed, so a service that
+        # starts promptly stays quiet. Without this a slow start is up to
+        # SERVICE_READY_TIMEOUT seconds of silence per service, which reads as a
+        # hang rather than as waiting.
+        if (( announced == 0 )); then
+            announced=1
+            info "Waiting for ${svc} to become ready (up to ${SERVICE_READY_TIMEOUT}s)..."
+        fi
         (( SECONDS < deadline )) && sleep 1
     done
     err "$svc did not become ready within ${SERVICE_READY_TIMEOUT}s (journalctl -u $svc)."
@@ -6992,7 +7316,14 @@ mihomo_config_matches_install_config() {
     local config="$MIHOMO_DIR/config.yaml" ip
     [[ -f "$config" ]] || return 0
     grep -Fq -- "$CONSOLE_DOMAIN" "$config" || return 1
-    grep -Eq "^[[:space:]]*-[[:space:]]*DOMAIN,[[:space:]]*${CONSOLE_DOMAIN//./\\.},[[:space:]]*DIRECT[[:space:]]*$" "$config" || return 1
+    # The console must route DIRECT. Both spellings say that: the plain rule,
+    # and the form that additionally excludes processor-originated traffic —
+    # without that exclusion a compromised sidecar dialling the console
+    # reaches the gateway's own management plane, and the core refuses the
+    # unqualified form outright once the overlay anchors are present. The seed
+    # ships the qualified one, so accepting only the plain rule made this
+    # check reject the config the installer itself had just written.
+    grep -Eq "^[[:space:]]*-[[:space:]]*DOMAIN,[[:space:]]*${CONSOLE_DOMAIN//./\\.},[[:space:]]*DIRECT[[:space:]]*$|^[[:space:]]*-[[:space:]]*AND,\\(\\(NOT,\\(\\(IN-NAME,intercept-egress\\)\\)\\),\\(DOMAIN,${CONSOLE_DOMAIN//./\\.}\\)\\),[[:space:]]*DIRECT[[:space:]]*$" "$config" || return 1
     ! grep -Eq "DOMAIN,[[:space:]]*${CONSOLE_DOMAIN//./\\.},[[:space:]]*REJECT(-DROP)?" "$config" || return 1
     ! grep -Eq "AND,.*DOMAIN,[[:space:]]*${CONSOLE_DOMAIN//./\\.}.*RULE-SET,[[:space:]]*whitelist" "$config" || return 1
     ! grep -Fq -- "profile.${BASE_DOMAIN}" "$config" || return 1

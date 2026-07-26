@@ -393,8 +393,11 @@ grep -Fq 'force-domain: [__CONSOLE_DOMAIN__]'  "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: console fallback does not force hostname sniffing"
 grep -Fq '__ZASH_DOMAIN__:    127.0.0.2'        "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #5 (zash SNI hosts mapping)"
-grep -Fq 'DOMAIN,__CONSOLE_DOMAIN__,DIRECT'     "$MIHOMO_TMPL" \
-    || fail "etc/mihomo/config.yaml.tmpl: public console is not routed directly"
+# The console route carries the negative intercept-egress qualifier: it must sit
+# above the loopback deny, hence above the egress terminator, so without the
+# exclusion a compromised sidecar reaches the gateway's own management plane.
+grep -Fq 'AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: public console is not routed directly with an intercept-egress exclusion"
 grep -Fq '__PROFILE_DOMAIN__' "$MIHOMO_TMPL" \
     && fail "etc/mihomo/config.yaml.tmpl: retired profile SNI remains"
 grep -Fq 'IP-CIDR,__GATEWAY_IP__/32,REJECT' "$MIHOMO_TMPL" \

@@ -35,6 +35,11 @@ export interface Status {
   cert?: CertStatus
   dot_domain?: string
   zash_domain?: string
+  // `zash_version` is the release marker the installer wrote next to the
+  // unpacked zashboard dist, so it identifies what is on disk rather than what
+  // the daemon was built against. Omitted — never a placeholder — when no
+  // zashboard is installed or the marker is unreadable.
+  zash_version?: string
 }
 
 export interface ZashboardHandoff {

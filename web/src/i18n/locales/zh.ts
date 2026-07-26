@@ -251,6 +251,8 @@ const zh: typeof en = {
     aboutTitle: '5GPN 控制台',
     aboutSubtitle: 'Material 3 · 安全 DNS 网关',
     aboutVersion: '5gpn-dns {{version}}',
+    aboutMihomoVersion: 'mihomo {{version}}',
+    aboutZashVersion: 'zashboard {{version}}',
     ingressPorts: 'mihomo 功能模块',
     ingressPortsHint: '管理固定形状的公网入口与协议安全能力。保存后会验证完整配置并热加载。',
     ingressEnabled: '已启用',

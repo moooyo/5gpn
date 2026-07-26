@@ -690,7 +690,17 @@ export function EcsCard({ ecs, onSaved }: { ecs: ECSView | null; onSaved: (v: EC
 
 // ---- 8. About strip ---------------------------------------------------------
 
-export function AboutStrip({ version, className }: { version?: string; className?: string }) {
+export function AboutStrip({
+  version,
+  zashVersion,
+  mihomoVersion,
+  className,
+}: {
+  version?: string
+  zashVersion?: string
+  mihomoVersion?: string
+  className?: string
+}) {
   const { t } = useTranslation()
   return (
     <Card className={cn('flex flex-col gap-3 border-0 p-4 shadow-none sm:flex-row sm:items-center', className)}>
@@ -701,8 +711,26 @@ export function AboutStrip({ version, className }: { version?: string; className
         <div className="text-[13.5px] font-medium text-text-strong">{t('settings.aboutTitle')}</div>
         <div className="mt-0.5 text-[10.5px] text-text-faint">{t('settings.aboutSubtitle')}</div>
       </div>
-      <div className="shrink-0 rounded-[8px] bg-surface-container px-3 py-2 font-mono text-[10.5px] text-text-faint">
-        {t('settings.aboutVersion', { version: version ?? '—' })}
+      {/* Three separately-sourced versions, so an operator can tell which build
+          of each part is actually installed rather than inferring all three
+          from the release they think they ran.
+
+          mihomo is always rendered, zashboard only when present. That is not
+          cosmetic: mihomo is always part of an install, so "unknown" is a
+          signal worth showing, whereas the zashboard panel is optional and
+          omitting it says "not installed" rather than "installed, unidentified". */}
+      <div className="flex shrink-0 flex-wrap gap-1.5">
+        <span className="rounded-[8px] bg-surface-container px-3 py-2 font-mono text-[10.5px] text-text-faint">
+          {t('settings.aboutVersion', { version: version ?? '—' })}
+        </span>
+        <span className="rounded-[8px] bg-surface-container px-3 py-2 font-mono text-[10.5px] text-text-faint">
+          {t('settings.aboutMihomoVersion', { version: mihomoVersion ?? '—' })}
+        </span>
+        {zashVersion ? (
+          <span className="rounded-[8px] bg-surface-container px-3 py-2 font-mono text-[10.5px] text-text-faint">
+            {t('settings.aboutZashVersion', { version: zashVersion })}
+          </span>
+        ) : null}
       </div>
     </Card>
   )

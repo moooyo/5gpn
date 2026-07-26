@@ -99,7 +99,7 @@ Go toolchain on the box). Pins per [`install.sh`](install.sh).
 |---|---|---|---|
 | mihomo | v1.19.28 | GPL-3.0 | © MetaCubeX contributors — https://github.com/MetaCubeX/mihomo |
 | gum | 0.17.0 | MIT | © Charmbracelet, Inc. — https://github.com/charmbracelet/gum |
-| Zephyruso/zashboard | v3.15.0 | MIT | © 2024 Zephyruso — https://github.com/Zephyruso/zashboard |
+| Zephyruso/zashboard | v3.16.0-overlay.1 (fork: moooyo/zashboard) | MIT | © 2024 Zephyruso — https://github.com/Zephyruso/zashboard |
 
 > mihomo is distributed under the GNU General Public License v3.0; its source
 > is available at the link above.

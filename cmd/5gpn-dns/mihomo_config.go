@@ -218,7 +218,15 @@ func (s *MihomoConfigStore) Default() string {
 		"__INTERCEPT_UPSTREAM_USERNAME__", interceptUpUser,
 		"__INTERCEPT_UPSTREAM_PASSWORD__", interceptUpPass,
 	)
-	return r.Replace(mihomoConfigSeedTemplate)
+	// The restored seed must describe the arrangement this box runs. Carry the
+	// live config's overlay block across rather than re-deriving it; a box that
+	// has none gets the rendered form, which is also what first boot produces
+	// before the installer has written anything.
+	runtimeBlock := ""
+	if body, err := os.ReadFile(s.path); err == nil {
+		runtimeBlock = extractOverlayRuntimeBlock(string(body))
+	}
+	return r.Replace(renderSeedOverlay(mihomoConfigSeedTemplate, runtimeBlock))
 }
 
 func yamlSingleQuotedValue(value string) string {
@@ -301,11 +309,18 @@ proxies:
     username: __INTERCEPT_INBOUND_USERNAME__
     password: __INTERCEPT_INBOUND_PASSWORD__
     udp: true
+    # Names this outbound as the runtime overlay's processor. A generation's
+    # capture rules steer at a processor target, and the core refuses to stage
+    # one that names an outbound not declared here — so an overlay cannot be
+    # made to hand traffic to an arbitrary proxy by naming it. Harmless on a
+    # core without the overlay, which ignores the key.
+    runtime-overlay-processor: true
 proxy-providers: {}
 
 proxy-groups:
   - {name: Proxies, type: select, proxies: [DIRECT]}
 
+__OVERLAY_RUNTIME_BLOCK__
 rules:
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(NETWORK,UDP)),REJECT
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,80)),REJECT
@@ -317,8 +332,12 @@ rules:
   - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8443)),REJECT
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,5060)),REJECT
   - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,5060)),REJECT
-  - DOMAIN,__CONSOLE_DOMAIN__,DIRECT
-  - AND,((DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
+  # Both panel allow rules exclude intercept-egress. They must sit above the
+  # loopback deny (the console resolves to 127.0.0.1) and therefore above the
+  # egress terminator; without the exclusion a compromised sidecar dialling
+  # either hostname would reach the gateway's own management plane.
+  - AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT
+  - AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
   - DOMAIN,__ZASH_DOMAIN__,REJECT
   - IP-CIDR,__GATEWAY_IP__/32,REJECT,no-resolve
   - IP-CIDR,127.0.0.0/8,REJECT,no-resolve
@@ -329,9 +348,22 @@ rules:
   - IP-CIDR,169.254.0.0/16,REJECT,no-resolve
   # Every sidecar egress selector is published immediately above this
   # fail-closed terminator. Unknown or stale sidecar traffic must never fall
-  # through to the operator's terminal MATCH rule.
+  # through to the operator's terminal MATCH rule. Under the runtime overlay
+  # the selectors are not written here at all: the egress anchor resolves them
+  # from the committed generation, and must sit immediately above the
+  # terminator so a declined lookup still reaches the deny.
+__OVERLAY_EGRESS_ANCHOR__
   - IN-NAME,intercept-egress,REJECT
   - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
+  # The client anchor resolves the capture rules. It sits below every deny
+  # above and above the terminal MATCH, so captured traffic never falls through
+  # to the operator's own routing. The private-range denies above are
+  # no-resolve, so they stop IP-form targets only: a DOMAIN that resolves into a
+  # private range or loopback is NOT stopped here, because matching never
+  # resolves it. The panel names stay pinned by the exact rules and hosts
+  # entries above; other such names are not. Closing this needs pinned-IP
+  # dialing on egress (see PublicOnly in component/overlay/types.go).
+__OVERLAY_CLIENT_ANCHOR__
   - MATCH,Proxies
 `
 
@@ -618,12 +650,33 @@ func containsRule(rules []string, want string) bool {
 	return false
 }
 
+// interceptEgressExclusion is the negative inbound qualifier that keeps a
+// panel allow rule out of reach of processor-originated traffic.
+//
+// The console and dashboard allow rules must sit above the loopback deny — the
+// console resolves to 127.0.0.1 — and therefore above the intercept-egress
+// terminator. Without this qualifier a compromised sidecar dialling either
+// hostname reaches the gateway's own management plane without ever meeting the
+// egress boundary.
+const interceptEgressExclusion = "(NOT,((IN-NAME,intercept-egress)))"
+
 func directDomainRule(domain string) string {
 	return "DOMAIN," + domain + ",DIRECT"
 }
 
+// qualifiedDirectDomainRule is the console split with the exclusion applied.
+func qualifiedDirectDomainRule(domain string) string {
+	return "AND,(" + interceptEgressExclusion + ",(DOMAIN," + domain + ")),DIRECT"
+}
+
 func allowlistedDomainRule(domain string) string {
 	return "AND,((DOMAIN," + domain + "),(RULE-SET,whitelist,DIRECT,src)),DIRECT"
+}
+
+// qualifiedAllowlistedDomainRule is the dashboard split with the exclusion
+// applied.
+func qualifiedAllowlistedDomainRule(domain string) string {
+	return "AND,(" + interceptEgressExclusion + ",(DOMAIN," + domain + "),(RULE-SET,whitelist,DIRECT,src)),DIRECT"
 }
 
 func denyDomainRule(domain, action string) string {
@@ -645,7 +698,14 @@ func hasAllowlistedSNISplit(doc *mihomoInvariantDocument, domain, hostsIP string
 	if strings.TrimSpace(domain) == "" || doc.Hosts[domain] != hostsIP {
 		return false
 	}
-	return containsRule(doc.Rules, allowlistedDomainRule(domain)) &&
+	// Either form satisfies the invariant. The qualified one is what the
+	// current seed renders; the bare one is accepted so an operator config
+	// written before the qualifier existed is still valid — the invariant is
+	// "the dashboard split is present", and requalification is a separate,
+	// explicit hardening step rather than something that invalidates a
+	// working deployment on upgrade.
+	return (containsRule(doc.Rules, allowlistedDomainRule(domain)) ||
+		containsRule(doc.Rules, qualifiedAllowlistedDomainRule(domain))) &&
 		hasDenyDomainRule(doc, domain)
 }
 
@@ -656,9 +716,11 @@ func hasPublicSNISplit(doc *mihomoInvariantDocument, domain, hostsIP string) boo
 	if strings.TrimSpace(domain) == "" || doc.Hosts[domain] != hostsIP {
 		return false
 	}
-	return containsRule(doc.Rules, directDomainRule(domain)) &&
-		!containsRule(doc.Rules, allowlistedDomainRule(domain)) &&
-		!hasDenyDomainRule(doc, domain)
+	hasDirect := containsRule(doc.Rules, directDomainRule(domain)) ||
+		containsRule(doc.Rules, qualifiedDirectDomainRule(domain))
+	hasAllowlisted := containsRule(doc.Rules, allowlistedDomainRule(domain)) ||
+		containsRule(doc.Rules, qualifiedAllowlistedDomainRule(domain))
+	return hasDirect && !hasAllowlisted && !hasDenyDomainRule(doc, domain)
 }
 
 // hasAntiLoopInvariant asserts an exact gateway /32 deny guard. The action is

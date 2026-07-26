@@ -130,10 +130,13 @@ else
     pass "symlink web release marker is rejected"
 fi
 
+# The sidecar is a separately released component, so it is checked against its
+# own pinned version rather than the gateway's. The invariant under test is
+# that no staged executable reaches publication unversioned.
 stage_fn="$(sed -n '/^stage_artifacts()/,/^}/p' "$INSTALL")"
 install_web_fn="$(sed -n '/^install_web()/,/^}/p' "$INSTALL")"
 if grep -Fq 'binary_reports_exact_version "$ARTIFACT_STAGE/5gpn-dns" --version "$ver"' <<<"$stage_fn" \
-   && grep -Fq 'binary_reports_exact_version "$ARTIFACT_STAGE/5gpn-intercept" --version "$ver"' <<<"$stage_fn" \
+   && grep -Fq 'binary_reports_exact_version "$ARTIFACT_STAGE/5gpn-intercept" --version "$SIDECAR_VERSION"' <<<"$stage_fn" \
    && grep -Fq 'mihomo_reports_exact_version "$ARTIFACT_STAGE/mihomo" "$MIHOMO_VERSION"' <<<"$stage_fn"; then
     pass "all staged executables are wired to exact version checks"
 else

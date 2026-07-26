@@ -8,7 +8,14 @@ nocheck() { if grep -qE "$2" "$root/$1"; then echo "FAIL: $3 ($1 =~ $2)"; FAIL=1
 
 # Task 1: mihomo binary install
 check install.sh 'install_mihomo\(\)' 'install_mihomo function exists'
-check install.sh 'MetaCubeX/mihomo/releases' 'downloads mihomo from MetaCubeX'
+# The data plane no longer comes from upstream: upstream does not implement the
+# RUNTIME-OVERLAY anchors, so an upstream core makes the overlay a mechanism that
+# can never switch on. What has to stay true is that the source is pinned and
+# auditable — a named repository, an exact version, and a digest — rather than
+# assembled from anything an operator or an environment can influence.
+check install.sh '^MIHOMO_REPO="[A-Za-z0-9._-]+/[A-Za-z0-9._-]+"$' 'mihomo source repository is a pinned literal'
+check install.sh 'github.com/\$\{MIHOMO_REPO\}/releases/download' 'downloads mihomo from the pinned repository'
+check install.sh '^MIHOMO_SHA256="[0-9a-f]{64}"$' 'mihomo artifact is pinned by digest'
 check install.sh 'mihomo-linux-amd64-compatible' 'uses amd64-compatible asset'
 check install.sh 'MIHOMO_VERSION' 'mihomo version pin knob'
 nocheck install.sh 'install_xray\(\)' 'install_xray removed'
@@ -68,7 +75,11 @@ nocheck "$T" 'REJECT-DROP'                             'seed avoids connection-r
 check "$T" '127\.0\.0\.1:5354'                         'loopback origin DNS selector'
 check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(NETWORK,UDP\)\),REJECT' 'console UDP fallback fast-reject rule'
 check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(DST-PORT,80\)\),REJECT' 'console HTTP fast-reject rule'
-check "$T" 'DOMAIN,__CONSOLE_DOMAIN__,DIRECT'             'public console SNI direct route'
+# The panel allow rules exclude intercept-egress: they sit above the loopback
+# deny and therefore above the egress terminator, so without the exclusion a
+# compromised sidecar would reach the gateway's own management plane.
+check "$T" 'AND,\(\(NOT,\(\(IN-NAME,intercept-egress\)\)\),\(DOMAIN,__CONSOLE_DOMAIN__\)\),DIRECT' 'public console SNI direct route excludes intercept-egress'
+check "$T" 'AND,\(\(NOT,\(\(IN-NAME,intercept-egress\)\)\),\(DOMAIN,__ZASH_DOMAIN__\),\(RULE-SET,whitelist,DIRECT,src\)\),DIRECT' 'zashboard allowlisted route excludes intercept-egress'
 check "$T" 'AND,\(\(DOMAIN,__ZASH_DOMAIN__\),\(NETWORK,UDP\)\),REJECT' 'zashboard UDP fast-reject rule'
 check "$T" 'AND,\(\(NETWORK,UDP\),\(DST-PORT,443\)\),REJECT' 'HTTP3/QUIC UDP 443 block enabled by default'
 egress_guard_line="$(grep -nF '  - IN-NAME,intercept-egress,REJECT' "$root/$T" | cut -d: -f1 || true)"
@@ -81,8 +92,8 @@ else
     echo 'FAIL: QUIC block ordering is unsafe'
     FAIL=1
 fi
-console_direct_line="$(grep -nF '  - DOMAIN,__CONSOLE_DOMAIN__,DIRECT' "$root/$T" | cut -d: -f1 || true)"
-zash_direct_line="$(grep -nF '  - AND,((DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
+console_direct_line="$(grep -nF '  - AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
+zash_direct_line="$(grep -nF '  - AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
 panel_order_ok=1
 for rule in \
     'AND,((DOMAIN,__CONSOLE_DOMAIN__),(NETWORK,UDP)),REJECT' \
@@ -174,8 +185,10 @@ nocheck install.sh 'xray\.service|/usr/local/bin/xray' 'no old Xray teardown rem
 
 # Task A4: zashboard dist acquisition (pinned dist.zip download + wiring)
 check install.sh 'install_zashboard\(\)' 'install_zashboard function exists'
-check install.sh 'ZASH_VERSION="v3\.15\.0"' 'ZASH_VERSION fixed pin'
-check install.sh 'Zephyruso/zashboard/releases/download' 'downloads zashboard from Zephyruso/zashboard'
+check install.sh 'ZASH_VERSION="v3\.16\.0-overlay\.1"' 'ZASH_VERSION fixed pin'
+check install.sh 'ZASH_REPO="moooyo/zashboard"' 'zashboard comes from our fork'
+check install.sh '\$\{ZASH_REPO\}/releases/download' 'zashboard download URL is parameterised by ZASH_REPO'
+nocheck install.sh 'Zephyruso/zashboard/releases/download' 'no hardcoded upstream zashboard download remains'
 if grep -A1 -E '^\s*install_web(\s*\|\| return 1)?\s*$' "$root/install.sh" | grep -q 'install_zashboard'; then
     echo "ok: full_install calls install_zashboard right after install_web"
 else

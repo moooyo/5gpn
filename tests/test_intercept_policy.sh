@@ -13,24 +13,10 @@ MODULE_PAGE="$ROOT/web/src/features/extensions/ExtensionsPage.tsx"
 SETUP_GUIDE="$ROOT/web/src/features/setup-guide/SetupGuidePage.tsx"
 MODULE_PARSER="$ROOT/cmd/5gpn-dns/intercept_module_parser.go"
 MODULE_TYPES="$ROOT/cmd/5gpn-dns/intercept_module_types.go"
-SIDECAR_CONFIG="$ROOT/cmd/5gpn-intercept/config.go"
-SIDECAR_LOGS="$ROOT/cmd/5gpn-intercept/engine_logs.go"
-SIDECAR_RUNTIME="$ROOT/cmd/5gpn-intercept/module_runtime.go"
-SIDECAR_MAIN="$ROOT/cmd/5gpn-intercept/main.go"
-SIDECAR_PROXY="$ROOT/cmd/5gpn-intercept/proxy.go"
 CHECKS_WORKFLOW="$ROOT/.github/workflows/checks.yml"
 rc=0
 fail() { echo "FAIL: $1"; rc=1; }
 
-[[ -f "$ROOT/cmd/5gpn-intercept/go.mod" ]] || fail "interception Go module is missing"
-grep -Fq 'github.com/quic-go/quic-go v0.60.0' "$ROOT/cmd/5gpn-intercept/go.mod" \
-    || fail "quic-go direct dependency is not pinned"
-grep -Fq 'github.com/dop251/goja v0.0.0-20260701091749-b07b74453ea9' "$ROOT/cmd/5gpn-intercept/go.mod" \
-    || fail "goja direct dependency is not pinned"
-grep -Fq 'github.com/dlclark/regexp2/v2 v2.2.1' "$ROOT/cmd/5gpn-intercept/go.mod" \
-    || fail "regexp2 timeout dependency is not pinned"
-grep -Fq 'github.com/andybalholm/brotli v1.2.2' "$ROOT/cmd/5gpn-intercept/go.mod" \
-    || fail "Brotli decoding dependency is not pinned"
 find "$ROOT" -path "$ROOT/web/node_modules" -prune -o -type f -name '*.py' -print -quit | grep -q . \
     && fail "Python source was introduced"
 
@@ -76,10 +62,6 @@ grep -Fq 'maxInterceptModuleHosts' "$MODULE_TYPES" && grep -Fq '= 512' "$MODULE_
     || fail "core capture-host bound is not 512"
 grep -Fq '(( count <= 512 ))' "$ROOT/scripts/intercept-cert-renew.sh" \
     || fail "certificate publisher capture-host bound is not 512"
-grep -Fq 'maxModuleCaptureHosts = 512' "$SIDECAR_CONFIG" \
-    && grep -Fq 'maxActionMatchHosts = 512' "$SIDECAR_CONFIG" \
-    && grep -Fq 'maxCertificateHosts = 512' "$SIDECAR_CONFIG" \
-    || fail "sidecar capture/action/certificate host bounds are not 512"
 grep -Fq 'IN-NAME,intercept-egress),(DOMAIN-SUFFIX,compact.example.test' "$CHECKS_WORKFLOW" \
     && grep -Fq 'DOMAIN-SUFFIX,compact.example.test),(DST-PORT,443)),MODULE-INTERCEPT' "$CHECKS_WORKFLOW" \
     || fail "pinned mihomo CI fixture does not validate compact suffix egress and capture rules"
@@ -133,45 +115,6 @@ grep -Fq 'decoder.KnownFields(true)' "$MODULE_PARSER" \
     || fail "native extension manifest does not reject unknown fields"
 grep -Fq 'rejectUnsafeYAML' "$MODULE_PARSER" \
     || fail "native extension manifest does not reject aliases, anchors, and merges"
-grep -Fq 'servePlainHTTPConnection' "$ROOT/cmd/5gpn-intercept/proxy.go" \
-    || fail "plain HTTP module interception is missing"
-grep -Fq 'BodyMode' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
-    || fail "binary body script support is missing"
-grep -Fq 'brotli.NewReader' "$ROOT/cmd/5gpn-intercept/content_encoding.go" \
-    || fail "bounded Brotli decoding is missing"
-grep -Fq 'transform(context)' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
-    || fail "native transform entry point is missing"
-grep -Fq 'compiledRule.hosts.Match' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
-    || fail "native actions do not use the per-snapshot capture-host matcher"
-grep -Fq 'contextObject["network"]' "$ROOT/cmd/5gpn-intercept/module_runtime.go" \
-    || fail "declared origin permissions do not expose the bounded network capability"
-grep -Fq 'dialSOCKS5TCP' "$ROOT/cmd/5gpn-intercept/module_network.go" \
-    || fail "extension network requests do not return through authenticated mihomo SOCKS5"
-grep -Fq 'ExecutionOrder' "$ROOT/cmd/5gpn-intercept/config.go" \
-    || fail "sidecar config has no explicit extension execution order"
-grep -Fq 'engineLogsSocketPath' "$SIDECAR_LOGS" \
-    && grep -Fq '"/run/5gpn-intercept/logs.sock"' "$SIDECAR_LOGS" \
-    && grep -Fq 'os.Chmod(path, 0o660)' "$SIDECAR_LOGS" \
-    || fail "sidecar engine log UDS path or permissions are not fixed"
-grep -Fq 'engineLogRingCapacity' "$SIDECAR_LOGS" \
-    && grep -Fq '= 1000' "$SIDECAR_LOGS" \
-    && grep -Fq 'maxEngineLogWebSockets' "$SIDECAR_LOGS" \
-    && grep -Fq '= 8' "$SIDECAR_LOGS" \
-    || fail "sidecar engine log memory or connection bounds are missing"
-grep -Fq 'console.Set("warn", logger("warn"))' "$SIDECAR_RUNTIME" \
-    && grep -Fq 'console.Set("error", logger("error"))' "$SIDECAR_RUNTIME" \
-    || fail "native console levels are not mapped into structured engine logs"
-grep -Fq 'script=%q' "$SIDECAR_RUNTIME" \
-    && fail "native console text is still written to journald"
-grep -Fq 'engine log service unavailable; continuing without UI log streaming' "$SIDECAR_MAIN" \
-    && grep -Fq 'engine log service stopped unexpectedly; data plane remains active' "$SIDECAR_MAIN" \
-    || fail "engine log IPC failures can still stop the interception data plane"
-grep -Fq 'log.Print("intercept: request transformation failed")' "$SIDECAR_PROXY" \
-    && grep -Fq 'log.Print("intercept: response transformation failed")' "$SIDECAR_PROXY" \
-    || fail "script transformation details can still reach journald"
-grep -Fq 'log.Print("intercept: could not read replacement config; retaining the last valid snapshot")' "$SIDECAR_CONFIG" \
-    && grep -Fq 'log.Print("intercept: ignoring invalid replacement config; retaining the last valid snapshot")' "$SIDECAR_CONFIG" \
-    || fail "config rejection summaries are not journald-safe"
 grep -Fq 'NetworkOrigins' "$MODULE_PARSER" \
     || fail "native manifest parser does not snapshot exact network origins"
 grep -Fq 'EgressGroupRequired' "$MODULE_PARSER" \
@@ -184,10 +127,12 @@ fi
 grep -Fq 'fetch_profile' "$ROOT/web/src/lib/api/types.ts" \
     && fail "module import API still exposes a fetch-header choice"
 retired_client="$(printf '%s%s' 'lo' 'on')"
+# The sidecar is a separate repository now and asserts this about itself; this
+# scan covers what remains here.
 grep -Rni "$retired_client" \
     "$ROOT/README.md" "$ROOT/README.en.md" "$ROOT/docs/architecture.md" \
     "$ROOT/docs/pre-v5-upgrade.md" "$ROOT/cmd/5gpn-dns" \
-    "$ROOT/cmd/5gpn-intercept" "$ROOT/web/src" "$ROOT/web/e2e" 2>/dev/null | grep -q . \
+    "$ROOT/web/src" "$ROOT/web/e2e" 2>/dev/null | grep -q . \
     && fail "retired third-party plugin compatibility is still present"
 grep -RniE 'builtin-wloc|MODULE-MITM' \
     "$ROOT/README.md" "$ROOT/README.en.md" "$ROOT/docs/architecture.md" \

@@ -93,6 +93,20 @@ RestrictAddressFamilies=AF_INET AF_UNIX
 # The Cloudflare credential is entirely inaccessible below.
 # Mihomo origin DNS selector: binds 127.0.0.1:5354 (UDP+TCP).
 ReadWritePaths=/etc/5gpn
+# The overlay journal records an in-flight generation transition. It has to
+# survive a crash between the commit call and its response — that record is what
+# lets recovery read back and roll forward instead of blindly undoing a
+# generation that may already be serving traffic — so it is state, not
+# configuration, and systemd owns the directory rather than ProtectSystem
+# leaving /var/lib read-only.
+#
+# 5gpn-dns, not 5gpn: /var/lib/5gpn is a shared project directory the installer
+# claims as root:root 0755 and puts the swapfile in. Naming it here would make
+# systemd chown it to this service on every start, and the installer refuses to
+# claim a directory whose ownership it does not recognise — which aborted the
+# install outright, at the phase that claims project roots.
+StateDirectory=5gpn-dns
+StateDirectoryMode=0700
 ReadOnlyPaths=/etc/5gpn/dns.env -/etc/5gpn/cert -/opt/5gpn/web
 # ACME credentials are consumed only by the out-of-sandbox renewal helper.
 InaccessiblePaths=-/etc/5gpn/acme -/etc/5gpn/intercept-ca -/etc/5gpn/intercept/tls

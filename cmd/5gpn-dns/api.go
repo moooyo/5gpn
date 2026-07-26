@@ -10,10 +10,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -91,6 +95,12 @@ type ControlServer struct {
 	// via GET /api/status so the console's mihomo page can deep-link into the
 	// zashboard panel without scraping location.host. Empty when unconfigured.
 	zashDomain string
+
+	// zashDir is the unzipped zashboard dist. Only the version marker inside it
+	// is read, and only to report which build is installed: the panel is a
+	// pinned release artifact the installer places, so the console cannot
+	// otherwise tell an operator which zashboard they are looking at.
+	zashDir string
 
 	// Mihomo raw-config editor (api_mihomo_config.go). Wired post-construction
 	// via SetMihomoConfig; nil store means the
@@ -174,6 +184,7 @@ func NewControlServer(cfg Config, ctrl *Controller) (*ControlServer, error) {
 		limiter:        newRateLimiter(cfg.APIRate, cfg.APIBurst),
 		dotDomain:      cfg.DotDomain,
 		zashDomain:     cfg.ZashDomain,
+		zashDir:        cfg.ZashDir,
 		mihomoProxy:    unavailableMihomoProxy(),
 		interceptStore: NewInterceptConfigStore(cfg.InterceptConfigFile),
 		interceptLogs:  interceptLogs,
@@ -434,8 +445,50 @@ func (s *ControlServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if s.zashDomain != "" {
 		resp["zash_domain"] = s.zashDomain
 	}
+	if v := s.zashVersion(); v != "" {
+		resp["zash_version"] = v
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
+
+// zashVersionMaxBytes bounds the marker read. A release tag is tens of bytes;
+// anything larger means the file is not what the installer wrote, and reading
+// it in full would let whatever replaced it choose how much memory to spend.
+const zashVersionMaxBytes = 128
+
+// zashVersion reports the installed zashboard release, or "" when it cannot be
+// established. Empty is reported by omission rather than as a placeholder: the
+// console distinguishes "no zashboard installed" from "installed, version
+// unknown", and inventing a value for the second would make a panel of unknown
+// provenance look identified.
+//
+// The marker is written by the installer next to the dist it unpacked, so this
+// reports what is actually on disk rather than what the daemon was built
+// against — those differ exactly when an install half-completed, which is when
+// an operator most needs to know.
+func (s *ControlServer) zashVersion() string {
+	if s.zashDir == "" {
+		return ""
+	}
+	file, err := os.Open(filepath.Join(s.zashDir, ".zash_version"))
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	body, err := io.ReadAll(io.LimitReader(file, zashVersionMaxBytes+1))
+	if err != nil || len(body) > zashVersionMaxBytes {
+		return ""
+	}
+	v := strings.TrimSpace(string(body))
+	// A release tag, not free text. Refusing anything else keeps a tampered or
+	// truncated marker from reaching the console as display content.
+	if v == "" || !zashVersionPattern.MatchString(v) {
+		return ""
+	}
+	return v
+}
+
+var zashVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
 
 // handleResolveTest runs the diagnostic per-server lookup (see ResolveTest):
 // every configured upstream is queried individually and the arbitration

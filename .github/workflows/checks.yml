@@ -58,36 +58,6 @@ jobs:
       - name: go test -race
         run: go test -race ./...
 
-  intercept-go:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: cmd/5gpn-intercept
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version-file: cmd/5gpn-intercept/go.mod
-          cache-dependency-path: cmd/5gpn-intercept/go.sum
-      - name: gofmt
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "These files are not gofmt-clean:"; echo "$unformatted"
-            exit 1
-          fi
-      - name: go vet
-        run: go vet ./...
-      - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
-      - name: go test -race
-        run: go test -race ./...
-
-  # Web gate: unit tests, production build, explicit bundle budgets, and the
-  # real-browser desktop + 390x844 mobile suites under production CSP.
-  # (npm run build == tsc && vite build; tsconfig includes tests, so this
-  # type-checks the whole SPA). The release workflow runs the same build to
-  # produce the 5gpn-web tarball.
   web:
     runs-on: ubuntu-latest
     defaults:
@@ -118,14 +88,19 @@ jobs:
   mihomo-config:
     runs-on: ubuntu-latest
     env:
-      MIHOMO_VERSION: v1.19.28
-      MIHOMO_SHA256: 70d01cfb8cb7bf7a92fd1af16cb4b9553d90bb4eecde3b5c4849103e27c80ddb
+      # The core the installer actually ships. Validating against a different
+      # one checks a configuration nobody will run — and until this was pinned
+      # here too, CI exercised only the unanchored fallback while the installer
+      # seeded the anchored form.
+      MIHOMO_REPO: moooyo/mihomo
+      MIHOMO_VERSION: v1.19.28-overlay.2
+      MIHOMO_SHA256: aac1c9936e05a05de9cd7eb365df2930ff630b673b91b31cc06a9370d455dc4d
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Download pinned mihomo
         run: |
           set -euo pipefail
-          url="https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz"
+          url="https://github.com/${MIHOMO_REPO}/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz"
           curl -fsSL "$url" -o /tmp/mihomo.gz
           echo "${MIHOMO_SHA256}  /tmp/mihomo.gz" | sha256sum -c -
           gunzip /tmp/mihomo.gz
@@ -142,6 +117,14 @@ jobs:
               print "  - {name: gateway8080, type: tunnel, listen: 203.0.113.10, port: 8080, network: [tcp], target: console.example.test:8080}"
               print "  - {name: gateway8443, type: tunnel, listen: 203.0.113.10, port: 8443, network: [tcp], target: console.example.test:8443}"
               print "  - {name: gateway5060, type: tunnel, listen: 203.0.113.10, port: 5060, network: [tcp, udp], target: console.example.test:5060}"
+              next
+            }
+            # The pinned core predates the runtime overlay, so render the
+            # unanchored form: an anchor it cannot resolve makes the config
+            # unparseable, which is exactly why the installer probes before
+            # emitting them. Dropping the lines rather than blanking them keeps
+            # the "no unresolved placeholder" check below meaningful.
+            $0 == "__OVERLAY_EGRESS_ANCHOR__" || $0 == "__OVERLAY_CLIENT_ANCHOR__" || $0 == "__OVERLAY_RUNTIME_BLOCK__" {
               next
             }
             {
@@ -186,5 +169,11 @@ jobs:
           ! grep -Fq '5060' "$runtime/config-speedtest-5060-disabled.yaml"
           /tmp/mihomo -t -f "$runtime/config-speedtest-5060-disabled.yaml" -d "$runtime"
           bash tests/mihomo-compact-suffix-regression.sh /tmp/mihomo
+      - name: Validate the anchored seed the installer actually produces
+        run: |
+          set -euo pipefail
+          # Both renders, on a machine with neither the service accounts nor the
+          # socket groups — which is what a fresh install is.
+          bash test/overlay/verify-seed-render.sh /tmp/mihomo
       - name: Exercise sniff-cache isolation
         run: bash tests/mihomo-sniff-cache-regression.sh /tmp/mihomo

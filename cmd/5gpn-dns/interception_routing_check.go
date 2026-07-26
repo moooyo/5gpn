@@ -43,7 +43,14 @@ func runInterceptionRoutingCheck(args []string, stdout, stderr io.Writer) int {
 		return interceptionRoutingCheckError(stdout, stderr, "mihomo-config-invalid", fmt.Errorf("parse mihomo config: %w", err))
 	}
 
+	// An anchored config delegates interception routing to the overlay, so
+	// there are no rendered rules to reconcile against the document. Choosing
+	// the analyser by what the file actually says keeps the installer's check
+	// honest for both arrangements, including one an operator anchored by hand.
 	analysis := analyzeInterceptRoutingDocument(mihomoText, document)
+	if mihomoConfigIsOverlayAnchored(mihomoText) {
+		analysis = analyzeOverlayAnchoredDocument(mihomoText)
+	}
 	if !analysis.Manageable || !analysis.Ready {
 		reason := analysis.Reason
 		if reason == "" {

@@ -65,11 +65,18 @@ proxies:
     username: __INTERCEPT_INBOUND_USERNAME__
     password: __INTERCEPT_INBOUND_PASSWORD__
     udp: true
+    # Names this outbound as the runtime overlay's processor. A generation's
+    # capture rules steer at a processor target, and the core refuses to stage
+    # one that names an outbound not declared here — so an overlay cannot be
+    # made to hand traffic to an arbitrary proxy by naming it. Harmless on a
+    # core without the overlay, which ignores the key.
+    runtime-overlay-processor: true
 proxy-providers: {}
 
 proxy-groups:
   - {name: Proxies, type: select, proxies: [DIRECT]}
 
+__OVERLAY_RUNTIME_BLOCK__
 rules:
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(NETWORK,UDP)),REJECT
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,80)),REJECT
@@ -81,8 +88,12 @@ rules:
   - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8443)),REJECT
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,5060)),REJECT
   - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,5060)),REJECT
-  - DOMAIN,__CONSOLE_DOMAIN__,DIRECT
-  - AND,((DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
+  # Both panel allow rules exclude intercept-egress. They must sit above the
+  # loopback deny (the console resolves to 127.0.0.1) and therefore above the
+  # egress terminator; without the exclusion a compromised sidecar dialling
+  # either hostname would reach the gateway's own management plane.
+  - AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT
+  - AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
   - DOMAIN,__ZASH_DOMAIN__,REJECT
   - IP-CIDR,__GATEWAY_IP__/32,REJECT,no-resolve
   - IP-CIDR,127.0.0.0/8,REJECT,no-resolve
@@ -93,7 +104,20 @@ rules:
   - IP-CIDR,169.254.0.0/16,REJECT,no-resolve
   # Every sidecar egress selector is published immediately above this
   # fail-closed terminator. Unknown or stale sidecar traffic must never fall
-  # through to the operator's terminal MATCH rule.
+  # through to the operator's terminal MATCH rule. Under the runtime overlay
+  # the selectors are not written here at all: the egress anchor resolves them
+  # from the committed generation, and must sit immediately above the
+  # terminator so a declined lookup still reaches the deny.
+__OVERLAY_EGRESS_ANCHOR__
   - IN-NAME,intercept-egress,REJECT
   - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
+  # The client anchor resolves the capture rules. It sits below every deny
+  # above and above the terminal MATCH, so captured traffic never falls through
+  # to the operator's own routing. The private-range denies above are
+  # no-resolve, so they stop IP-form targets only: a DOMAIN that resolves into a
+  # private range or loopback is NOT stopped here, because matching never
+  # resolves it. The panel names stay pinned by the exact rules and hosts
+  # entries above; other such names are not. Closing this needs pinned-IP
+  # dialing on egress (see PublicOnly in component/overlay/types.go).
+__OVERLAY_CLIENT_ANCHOR__
   - MATCH,Proxies

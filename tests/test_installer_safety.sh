@@ -867,7 +867,10 @@ if install_mihomo_runtime_assets >/dev/null \
 pass "installed management runtime retains all mihomo reset assets"
 
 render_fn="$(sed -n '/^render_mihomo_config()/,/^}/p' "$INSTALL")"
-render_line="$(grep -nF 'done < "$template" > "$candidate"' <<<"$render_fn" | cut -d: -f1)"
+# The render is one call now rather than an inline loop; the property under test
+# is the ORDER — rendered, then checked non-empty, then handed to the service
+# accounts, then validated — not how the rendering is spelled.
+render_line="$(grep -nF 'render_mihomo_seed "$template"' <<<"$render_fn" | cut -d: -f1)"
 nonempty_line="$(grep -nF '[[ -s "$candidate" ]]' <<<"$render_fn" | cut -d: -f1)"
 secure_line="$(grep -nF 'chown "$DNS_SERVICE_USER:$MIHOMO_SERVICE_USER" "$candidate"' <<<"$render_fn" | cut -d: -f1)"
 validate_line="$(grep -nF '"$MIHOMO_BIN" -t -f "$candidate"' <<<"$render_fn" | cut -d: -f1)"
@@ -951,8 +954,12 @@ config_mode="$(stat -c %a "$config" 2>/dev/null || stat -f %Lp "$config")"
 [[ -s "$config" && ( "$POSIX_MODES" == 0 || "$config_mode" == 640 ) ]] \
     && pass "first install seeds a private mihomo config" \
     || fail "first-install mihomo config missing or not mode 0640"
+# The panel allow rule is requalified to exclude processor traffic: without that
+# exclusion a compromised sidecar dialling the console reaches the gateway's own
+# management plane without ever meeting the overlay's egress anchor, and the core
+# refuses the unqualified form outright.
 grep -Fq 'console.example.com: 127.0.0.1' "$config" \
-    && grep -Fq 'DOMAIN,console.example.com,DIRECT' "$config" \
+    && grep -Fq 'AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,console.example.com)),DIRECT' "$config" \
     && grep -Fq 'name: gateway5060' "$config" \
     && grep -Fq 'QUIC: { ports: [443, 5060] }' "$config" \
     && pass "seed contains public console mapping" \

@@ -523,9 +523,24 @@ func materializeInterceptRoutingRules(rules interceptRoutingRules, matchTarget s
 	return out
 }
 
+// ruleTouchesInterceptEgress reports whether a rule belongs to the reserved
+// egress block.
+//
+// The negative form is deliberately excluded. A panel guard qualified as
+// `AND,((NOT,((IN-NAME,intercept-egress))),…)` mentions the listener precisely
+// in order to keep processor traffic away from itself — it is the opposite of
+// an owned egress rule, and classifying it as one would make the manager filter
+// out the operator's own console and dashboard routes on every routing change.
 func ruleTouchesInterceptEgress(rule string) bool {
+	if strings.Contains(rule, interceptEgressNegativeQualifier) {
+		return false
+	}
 	return strings.HasPrefix(rule, "IN-NAME,intercept-egress,") || strings.Contains(rule, "(IN-NAME,intercept-egress)")
 }
+
+// interceptEgressNegativeQualifier is the exact compacted spelling of the
+// exclusion a panel guard carries.
+const interceptEgressNegativeQualifier = "(NOT,((IN-NAME,intercept-egress)))"
 
 func interceptRuleTarget(rule string) (string, bool) {
 	index := strings.LastIndex(rule, ")),")
@@ -701,9 +716,26 @@ func hasExactInterceptListener(listeners *yaml.Node) bool {
 }
 
 func hasExactModuleProxy(proxies *yaml.Node) bool {
+	return hasExactModuleProxyForm(proxies, false)
+}
+
+// hasExactModuleProxyOverlay additionally requires the processor declaration.
+//
+// Under the overlay that key is not decoration: a generation's capture rules
+// name a processor target, and the core refuses to stage one naming an outbound
+// that has not declared itself as such. Accepting a config without it here
+// would let the gateway believe it is managing an arrangement that can never
+// commit anything.
+func hasExactModuleProxyOverlay(proxies *yaml.Node) bool {
+	return hasExactModuleProxyForm(proxies, true)
+}
+
+func hasExactModuleProxyForm(proxies *yaml.Node, overlay bool) bool {
 	if proxies == nil || proxies.Kind != yaml.SequenceNode {
 		return false
 	}
+	base := []string{"name", "type", "server", "port", "username", "password", "udp"}
+	withProcessor := append(append([]string(nil), base...), overlayProcessorProxyKey)
 	found := 0
 	for _, item := range proxies.Content {
 		name, _ := mappingScalar(item, "name")
@@ -711,8 +743,22 @@ func hasExactModuleProxy(proxies *yaml.Node) bool {
 			continue
 		}
 		found++
-		if !exactMappingKeys(item, "name", "type", "server", "port", "username", "password", "udp") {
+		// The processor declaration is required under the overlay and merely
+		// tolerated without it: a core with no overlay configured ignores the
+		// key, so rejecting a config that carries it would break a gateway that
+		// is simply prepared to migrate.
+		if overlay {
+			if !exactMappingKeys(item, withProcessor...) {
+				return false
+			}
+		} else if !exactMappingKeys(item, base...) && !exactMappingKeys(item, withProcessor...) {
 			return false
+		}
+		if overlay {
+			flag := mappingNodeValue(item, overlayProcessorProxyKey)
+			if flag == nil || flag.Kind != yaml.ScalarNode || flag.Tag != "!!bool" || flag.Value != "true" {
+				return false
+			}
 		}
 		typeName, typeOK := mappingScalar(item, "type")
 		server, serverOK := mappingScalar(item, "server")

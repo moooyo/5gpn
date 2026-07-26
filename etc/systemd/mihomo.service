@@ -12,6 +12,20 @@ RestartSec=5
 User=mihomo
 Group=mihomo
 UMask=0027
+# The runtime-overlay control and generation sockets live here. systemd owns
+# the directory's lifetime, so a socket can never outlive the process that
+# served it; ProtectSystem=strict would otherwise leave /run read-only.
+# 0711 because the two peers are separate service users that must enter the
+# directory but never enumerate it — each socket's own mode and the
+# SO_PEERCRED check on every accept are what gate access.
+RuntimeDirectory=mihomo
+RuntimeDirectoryMode=0711
+# Membership of the two socket groups, and nothing else. An unprivileged process
+# cannot give a file away to a group it does not belong to, so mihomo must be a
+# member of whichever group owns each overlay socket. These groups exist only
+# for that and own nothing else, so joining them grants no additional reach —
+# using the peers' own primary groups instead would have.
+SupplementaryGroups=5gpn-overlay-ctl 5gpn-overlay-gen
 LimitNOFILE=65535
 # Sandbox: leaf proxy — binds 80/443/8080/8443 tcp + 443 udp by default;
 # optional catalog modules may add 5060 tcp/udp, plus loopback TLS external-controller

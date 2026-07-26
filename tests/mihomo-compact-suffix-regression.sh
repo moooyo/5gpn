@@ -13,6 +13,13 @@ awk '
     print "  - {name: gateway, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: console.example.test:443}"
     next
   }
+  # This regression pins the compact-suffix rendering against a core that
+  # predates the runtime overlay, so it renders the unanchored form. An anchor
+  # that core cannot resolve makes the config unparseable, which is why the
+  # installer probes before emitting them.
+  $0 == "__OVERLAY_EGRESS_ANCHOR__" || $0 == "__OVERLAY_CLIENT_ANCHOR__" || $0 == "__OVERLAY_RUNTIME_BLOCK__" {
+    next
+  }
   {
     gsub(/__GATEWAY_IP__/, "10.0.0.1")
     gsub(/__CONSOLE_DOMAIN__/, "console.example.test")
