@@ -58,7 +58,6 @@ type TrustEntry struct {
 	Endpoint   string         // absolute https:// URL (DoH only)
 }
 
-
 // Config holds the resolved configuration for 5gpn-dns.
 type Config struct {
 	// Listener addresses.  An empty string means the listener is disabled.

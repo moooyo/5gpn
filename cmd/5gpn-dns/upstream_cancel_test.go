@@ -96,7 +96,12 @@ func TestArbitrateChinaWinsDoNotTripTrustBreaker(t *testing.T) {
 	trustAddr := holdTCPListener(t)                         // trust: forever mid-handshake
 
 	china := NewUDPGroup([]string{chinaAddr}, false)
-	trust := NewTrustGroup([]TrustEntry{{ServerName: "trust.test", DialAddr: trustAddr}})
+	// Transport must be explicit: the zero value is plain UDP, and this test
+	// needs a DoT member so the abandoned exchange is cancelled mid-handshake
+	// against holdTCPListener. A UDP member pointed at a TCP listener fails
+	// fast instead, which records a real breaker failure rather than a
+	// cancellation and defeats the whole point of the test.
+	trust := NewTrustGroup([]TrustEntry{{ServerName: "trust.test", DialAddr: trustAddr, Transport: TrustDoT}})
 
 	q := new(dns.Msg)
 	q.SetQuestion("cn-domain.example.", dns.TypeA)

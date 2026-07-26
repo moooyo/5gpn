@@ -141,7 +141,6 @@ func (e *ctxAwareExchanger) Exchange(ctx context.Context, _ *dns.Msg) (*dns.Msg,
 	}
 }
 
-
 // #6: a failed subscription fetch is logged to the daemon's log sink (journald
 // in prod) — the silent-failure class this subsystem exists to survive.
 func TestSubscriptionFailureIsLogged(t *testing.T) {

@@ -343,7 +343,6 @@ func (c *Controller) ResetStats() error {
 	return nil
 }
 
-
 // isValidRuleDomain reports whether entry looks like a plausible FQDN: after
 // trimming whitespace, non-empty, no internal whitespace, contains at least
 // one '.', and every label is non-empty (rejects "..", leading/trailing dot
