@@ -93,8 +93,8 @@ jobs:
       # here too, CI exercised only the unanchored fallback while the installer
       # seeded the anchored form.
       MIHOMO_REPO: moooyo/mihomo
-      MIHOMO_VERSION: v1.19.28-overlay.1
-      MIHOMO_SHA256: 816eca7e6f932a2aee07a8113ce762fbc3b258b5c5c8091b7fdfb617895873b0
+      MIHOMO_VERSION: v1.19.28-overlay.2
+      MIHOMO_SHA256: aac1c9936e05a05de9cd7eb365df2930ff630b673b91b31cc06a9370d455dc4d
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Download pinned mihomo
