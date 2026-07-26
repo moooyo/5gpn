@@ -54,13 +54,16 @@ assert d['version']==1, d['version']
 assert d['china'] and d['trust'], d
 print('        china=%s trust=%s' % (d['china'], d['trust']))
 " || bad "upstreams.json is malformed"
-    # The boot log states which file won and with what contents.
-    if journalctl -u 5gpn-dns -b --no-pager 2>/dev/null | grep -q 'upstreams: loaded'; then
+    # Capture first: `grep -q` closes the pipe as soon as it matches, journalctl
+    # takes SIGPIPE, and `set -o pipefail` turns that into a failed pipeline — so
+    # a successful match reads as a miss.
+    boot_log="$(journalctl -u 5gpn-dns -b --no-pager 2>/dev/null)"
+    if grep -q 'upstreams: loaded' <<<"$boot_log"; then
         ok "daemon loaded upstreams.json at boot"
-        note "$(journalctl -u 5gpn-dns -b --no-pager | grep 'upstreams: loaded' | tail -1 | sed 's/.*upstreams:/upstreams:/')"
+        note "$(grep 'upstreams: loaded' <<<"$boot_log" | tail -1 | sed 's/.*upstreams:/upstreams:/')"
     else
         bad "no 'upstreams: loaded' line — the daemon fell back to built-in defaults"
-        journalctl -u 5gpn-dns -b --no-pager 2>/dev/null | grep -i 'upstream' | tail -3 | sed 's/^/        /'
+        grep -i 'upstream' <<<"$boot_log" | tail -3 | sed 's/^/        /'
     fi
 else
     bad "upstreams.json was not seeded by the installer"
@@ -70,28 +73,39 @@ echo
 echo "== stats schema migration =="
 if [[ -f /etc/5gpn/stats.json ]]; then
     v="$(python3 -c "import json;print(json.load(open('/etc/5gpn/stats.json')).get('version'))" 2>/dev/null)"
-    [[ "$v" == 2 ]] && ok "stats.json is at schema 2" || warn "stats.json version=${v:-?} (expected 2 once the daemon has saved once)"
+    # Version 2 only appears after the daemon's first save (60s tick, shutdown,
+    # or an explicit reset), so a v1 file here is not yet a failure.
+    if [[ "$v" == 2 ]]; then
+        ok "stats.json is at schema 2"
+    else
+        note "stats.json still at version ${v:-?} — the daemon has not saved since boot"
+    fi
     python3 -c "
 import json
 d=json.load(open('/etc/5gpn/stats.json'))
 stale=[k for k in d if 'lat_nanos' in k or 'lat_count' in k]
 print('        stale latency fields:', stale or 'none')
-raise SystemExit(1 if stale else 0)
-" || bad "stats.json still carries the retired cumulative latency fields"
+raise SystemExit(1 if (stale and d.get('version')==2) else 0)
+" || bad "a schema-2 stats.json still carries the retired cumulative latency fields"
 else
     note "no stats.json yet (the persister writes on a 60s tick)"
 fi
-journalctl -u 5gpn-dns -b --no-pager 2>/dev/null | grep -q 'stats:.*unsupported schema version' \
-    && ok "an old-schema stats.json was rejected cleanly at boot (counters start at zero)" \
-    || note "no schema-rejection line (the file may already have been rewritten)"
+# The rejection log is the durable evidence of the migration; the on-disk
+# version only reaches 2 after the daemon's first save.
+if grep -qE 'stats:.*(unsupported schema version|unknown field)' <<<"$boot_log"; then
+    ok "an old-schema stats.json was rejected cleanly at boot (counters start at zero)"
+    note "$(grep -E 'stats:' <<<"$boot_log" | tail -1 | sed 's/.*stats:/stats:/')"
+else
+    note "no schema-rejection line — this box had no pre-0.0.29 stats.json"
+fi
 
 echo
 echo "== trust upstream sanity probe =="
-if journalctl -u 5gpn-dns -b --no-pager 2>/dev/null | grep -q 'trust upstream probe'; then
-    line="$(journalctl -u 5gpn-dns -b --no-pager | grep 'trust upstream probe' | tail -1)"
+if grep -q 'trust upstream probe' <<<"$boot_log"; then
+    line="$(grep 'trust upstream probe' <<<"$boot_log" | tail -1)"
     note "${line#*5gpn-dns\[*\]: }"
-    if grep -q "resolver's own /24\|fabricated\|private or loopback" <<<"$line"; then
-        ok "probe correctly flagged the placeholder trust resolver"
+    if grep -qE "resolver's own /24|fabricated|private or loopback|never a real answer" <<<"$line"; then
+        ok "probe correctly flagged an implausible trust answer"
     else
         ok "probe ran and the trust answer looked genuine"
     fi

@@ -37,3 +37,32 @@ func TestImplausibleTrustAnswer(t *testing.T) {
 		})
 	}
 }
+
+// Ranges that are not private but can never be a genuine public answer. A
+// placeholder trust resolver on a real gateway answered example.com with
+// 198.18.1.12, which ip.IsPrivate() does not catch, and the probe called it
+// genuine.
+func TestImplausibleTrustAnswer_ReservedRanges(t *testing.T) {
+	google := []TrustEntry{{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: TrustDoT}}
+	for _, tc := range []struct {
+		ip      string
+		flagged bool
+	}{
+		{"198.18.1.12", true},    // RFC 2544 benchmarking — the observed case
+		{"100.64.0.7", true},     // CGNAT
+		{"192.0.2.5", true},      // documentation
+		{"198.51.100.5", true},   // documentation
+		{"203.0.113.5", true},    // documentation
+		{"240.0.0.1", true},      // reserved
+		{"93.184.216.34", false}, // a genuine public answer
+		{"1.1.1.1", false},
+	} {
+		why := implausibleTrustAnswer([]string{tc.ip}, google)
+		if tc.flagged && why == "" {
+			t.Errorf("%s = ok, want it flagged as never-a-real-answer", tc.ip)
+		}
+		if !tc.flagged && why != "" {
+			t.Errorf("%s = %q, want ok", tc.ip, why)
+		}
+	}
+}

@@ -69,6 +69,38 @@ func probeTrust(ctx context.Context, g *group, entries []TrustEntry) {
 	log.Printf("trust upstream probe: %s resolved to %v", trustProbeName, ips)
 }
 
+// reservedRanges are IPv4 blocks that can never be the genuine public answer
+// for a public name. None of them is private — ip.IsPrivate() returns false for
+// every one — so a placeholder resolver handing them out slips past the RFC 1918
+// check. Observed on a real gateway: a placeholder trust resolver answered
+// example.com with 198.18.1.12 and the probe called it genuine.
+var reservedRanges = []struct {
+	cidr string
+	name string
+}{
+	{"100.64.0.0/10", "the CGNAT range (RFC 6598)"},
+	{"192.0.2.0/24", "a documentation range (RFC 5737)"},
+	{"198.18.0.0/15", "the benchmarking range (RFC 2544)"},
+	{"198.51.100.0/24", "a documentation range (RFC 5737)"},
+	{"203.0.113.0/24", "a documentation range (RFC 5737)"},
+	{"240.0.0.0/4", "reserved space (RFC 1112)"},
+}
+
+// reservedRangeName returns a human description of the reserved block ip falls
+// in, or "" when it is an ordinary routable address.
+func reservedRangeName(ip net.IP) string {
+	for _, r := range reservedRanges {
+		_, block, err := net.ParseCIDR(r.cidr)
+		if err != nil {
+			continue
+		}
+		if block.Contains(ip) {
+			return r.name
+		}
+	}
+	return ""
+}
+
 // implausibleTrustAnswer reports why an answer looks fabricated, or "" when it
 // looks like a genuine recursive answer.
 //
@@ -88,6 +120,9 @@ func implausibleTrustAnswer(ips []string, entries []TrustEntry) string {
 		}
 		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
 			return "that is a private or loopback address for a public name, which means the answer is fabricated"
+		}
+		if reserved := reservedRangeName(ip); reserved != "" {
+			return "that is inside " + reserved + ", which is never a real answer for a public name"
 		}
 		for _, e := range entries {
 			host := e.DialAddr
