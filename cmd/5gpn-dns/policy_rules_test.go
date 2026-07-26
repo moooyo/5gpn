@@ -258,10 +258,6 @@ func TestPolicyManagerDefensiveCopy(t *testing.T) {
 // restore the removed rule at its ORIGINAL index, not silently drop it or
 // append it at the end.
 func TestPolicyManagerDeleteRollsBackOnSaveFailure(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: directory write permissions are not enforced")
-	}
-
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy.json")
 	m, err := NewPolicyRuleManager(path)
@@ -282,10 +278,23 @@ func TestPolicyManagerDeleteRollsBackOnSaveFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatalf("chmod dir: %v", err)
+	// Induce a save failure portably. The previous approach chmod'ed the
+	// directory to 0500, which Windows ignores — os.Chmod there only toggles
+	// the read-only attribute on files and does not affect directory
+	// writability, so the save succeeded and this test failed on every Windows
+	// run. Replacing the target path with a non-empty directory makes the
+	// atomic create-temp + rename fail on every platform, which is the
+	// condition the rollback is actually specified against.
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove policy file: %v", err)
 	}
-	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("mkdir over policy path: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "occupied"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("populate blocking directory: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(path) })
 
 	if err := m.DeleteRule(middle.ID); err == nil {
 		t.Fatal("DeleteRule must fail when the model directory is unwritable")

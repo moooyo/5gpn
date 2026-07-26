@@ -21,9 +21,9 @@ import (
 
 // ResolveProbe is one upstream server's individual answer.
 type ResolveProbe struct {
-	Server string   `json:"server"`          // display spec: "223.5.5.5:53" or "dns.google@8.8.8.8:853"
+	Server string   `json:"server"`          // display spec: "223.5.5.5:53", "dns.google@8.8.8.8:853", or "https://dns.google/dns-query@8.8.8.8:443"
 	Group  string   `json:"group"`           // "china" | "trust"
-	Proto  string   `json:"proto"`           // "udp" | "dot"
+	Proto  string   `json:"proto"`           // "udp" | "dot" | "doh"
 	IPs    []string `json:"ips,omitempty"`   // A records answered
 	Rcode  string   `json:"rcode,omitempty"` // DNS rcode when a reply arrived
 	// DurationMs is the gateway→upstream round trip, shown as a DIAGNOSTIC
