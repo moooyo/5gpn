@@ -5,16 +5,26 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
 
-// certState holds the last-loaded certificate and the file modification times
-// at which it was loaded, so we can detect when a renewal has replaced the files.
+// certState holds the last-loaded certificate and the identity of the files it
+// came from, so we can detect when a renewal has replaced them.
 type certState struct {
 	cert    *tls.Certificate
 	certMod time.Time
 	keyMod  time.Time
+	// certReal is certPath with symlinks resolved. Certificates are published
+	// into <role>/generations/<n> behind an atomically re-pointed `current`
+	// symlink, so a renewal changes which file the configured path resolves
+	// to. mtime alone cannot see that: two generations written inside the same
+	// filesystem timestamp tick compare equal, and the swap would go unnoticed
+	// — the old certificate served indefinitely, with nothing logged, until a
+	// restart. Comparing the resolved path closes that, because a swap always
+	// changes it.
+	certReal string
 }
 
 // certCache wraps a cached TLS certificate and reloads it when either the cert
@@ -55,8 +65,18 @@ func (c *certCache) get(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		return nil, fmt.Errorf("cert: stat %s: %w", c.keyPath, err)
 	}
 
-	// Use cached certificate if files have not been modified.
+	// EvalSymlinks failing is not itself a reason to reload or to fail: fall
+	// back to the configured path so the mtime comparison still applies. A
+	// renewal mid-swap can briefly leave the link unresolvable.
+	certReal, err := filepath.EvalSymlinks(c.certPath)
+	if err != nil {
+		certReal = c.certPath
+	}
+
+	// Use cached certificate if neither file has been modified AND the path
+	// still resolves to the same file.
 	if c.state.cert != nil &&
+		certReal == c.state.certReal &&
 		certInfo.ModTime().Equal(c.state.certMod) &&
 		keyInfo.ModTime().Equal(c.state.keyMod) {
 		return c.state.cert, nil
@@ -72,9 +92,10 @@ func (c *certCache) get(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		return nil, fmt.Errorf("cert: load %s / %s: %w", c.certPath, c.keyPath, err)
 	}
 	c.state = certState{
-		cert:    &cert,
-		certMod: certInfo.ModTime(),
-		keyMod:  keyInfo.ModTime(),
+		cert:     &cert,
+		certMod:  certInfo.ModTime(),
+		keyMod:   keyInfo.ModTime(),
+		certReal: certReal,
 	}
 	return c.state.cert, nil
 }
