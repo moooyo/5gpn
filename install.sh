@@ -168,8 +168,9 @@ SIDECAR_SHA256="4c701214f269ee87457f507ea9d9d02f612bf63dbe74226cb8f6d585ef1f1832
 MIHOMO_REPO="moooyo/mihomo"
 MIHOMO_VERSION="v1.19.28-overlay.1"
 MIHOMO_SHA256="816eca7e6f932a2aee07a8113ce762fbc3b258b5c5c8091b7fdfb617895873b0"
-ZASH_VERSION="v3.15.0"                   # Zephyruso/zashboard prebuilt dist.zip
-ZASH_SHA256="adba7b03f3bec792a354e65469fb8ac5513e48e0f646650f78aa313bcf5b18e9"
+ZASH_REPO="moooyo/zashboard"
+ZASH_VERSION="v3.16.0-overlay.1"         # our fork's dist.zip, built from 5gpn-ext
+ZASH_SHA256="b5d003f55f9424eaaa78f901a5b37912dbd9ac07cb37e17c527b209c52947bf4"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
@@ -2749,7 +2750,7 @@ stage_artifacts() {
     mihomo_reports_exact_version "$ARTIFACT_STAGE/mihomo" "$MIHOMO_VERSION" \
         || { err "Staged mihomo version does not match pinned release ${MIHOMO_VERSION}."; return 1; }
 
-    curl -fsSL "https://github.com/Zephyruso/zashboard/releases/download/${ZASH_VERSION}/dist.zip" \
+    curl -fsSL "https://github.com/${ZASH_REPO}/releases/download/${ZASH_VERSION}/dist.zip" \
         -o "$ARTIFACT_STAGE/zash.zip" || { err "Could not download zashboard ${ZASH_VERSION}."; return 1; }
     verify_sha256 "$ARTIFACT_STAGE/zash.zip" "$ZASH_SHA256" || return 1
     archive_paths_safe zip "$ARTIFACT_STAGE/zash.zip" \
@@ -4406,8 +4407,9 @@ install_web() {
     ok "Verified control-console SPA published to ${DNS_WEB_DIR}/ (${DNS_VERSION_DEFAULT})."
 }
 
-# zashboard: prebuilt static dist from Zephyruso/zashboard. Pinned by
-# ZASH_VERSION; opt-in sha256 via ZASH_SHA256. Fresh-artifact: wipes+replaces
+# zashboard: prebuilt static dist from our fork moooyo/zashboard, which carries
+# the overlay panel upstream does not have. Pinned by ZASH_REPO/ZASH_VERSION;
+# opt-in sha256 via ZASH_SHA256. Fresh-artifact: wipes+replaces
 # DNS_ZASH_DIR on every run (never build on the box). Warn-not-fatal — a missing
 # zash panel must not abort the resolver install (the console + DoT still work).
 #
@@ -6489,7 +6491,7 @@ DNS_INTERCEPT_CONFIG=${intercept_config}
 # native manifest snapshot pipeline.
 DNS_MARKETPLACES_FILE=${marketplaces_file}
 
-# ZashDir is the unzipped Zephyruso/zashboard
+# ZashDir is the unzipped moooyo/zashboard
 # dist served by a SECOND loopback HTTPS listener on ZashListen. ZashCert/Key
 # always point at the selected certificate's zash/ role-dir copy
 # (deploy_cert_roles).

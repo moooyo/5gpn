@@ -185,8 +185,10 @@ nocheck install.sh 'xray\.service|/usr/local/bin/xray' 'no old Xray teardown rem
 
 # Task A4: zashboard dist acquisition (pinned dist.zip download + wiring)
 check install.sh 'install_zashboard\(\)' 'install_zashboard function exists'
-check install.sh 'ZASH_VERSION="v3\.15\.0"' 'ZASH_VERSION fixed pin'
-check install.sh 'Zephyruso/zashboard/releases/download' 'downloads zashboard from Zephyruso/zashboard'
+check install.sh 'ZASH_VERSION="v3\.16\.0-overlay\.1"' 'ZASH_VERSION fixed pin'
+check install.sh 'ZASH_REPO="moooyo/zashboard"' 'zashboard comes from our fork'
+check install.sh '\$\{ZASH_REPO\}/releases/download' 'zashboard download URL is parameterised by ZASH_REPO'
+nocheck install.sh 'Zephyruso/zashboard/releases/download' 'no hardcoded upstream zashboard download remains'
 if grep -A1 -E '^\s*install_web(\s*\|\| return 1)?\s*$' "$root/install.sh" | grep -q 'install_zashboard'; then
     echo "ok: full_install calls install_zashboard right after install_web"
 else
