@@ -678,9 +678,9 @@ func TestBlockQUICModule_ReportsEnabledWhenTheRuleIsPresentButUnmanageable(t *te
 		t.Fatalf("seed baseline = %+v, want enabled+manageable", view)
 	}
 
-	// A perfectly ordinary operator rule that happens to mention both UDP and
-	// port 443 — the standard mihomo idiom for per-site QUIC handling.
-	collide := "  - AND,((DOMAIN-SUFFIX,example.test),(NETWORK,UDP),(DST-PORT,443)),DIRECT\n"
+	// A SECOND global UDP/443 rule — the case that genuinely contends with the
+	// module. A domain-scoped rule does not, and is covered separately.
+	collide := "  - AND,((NETWORK,UDP),(DST-PORT,443)),DIRECT\n"
 	canonical := "  - " + blockQUICRuleBase + ",REJECT\n"
 	if !strings.Contains(seed, canonical) {
 		t.Fatalf("seed does not contain the canonical rule %q", canonical)
@@ -689,7 +689,7 @@ func TestBlockQUICModule_ReportsEnabledWhenTheRuleIsPresentButUnmanageable(t *te
 
 	view := analyzeBlockQUICModule(withCollision, fx.infra).View
 	if view.Manageable {
-		t.Fatal("a second UDP/443 rule must make the module unmanageable")
+		t.Fatal("a second GLOBAL UDP/443 rule must make the module unmanageable")
 	}
 	if view.Reason != "partial-or-custom-quic-block" {
 		t.Errorf("reason = %q, want partial-or-custom-quic-block", view.Reason)
@@ -710,17 +710,75 @@ func TestBlockQUICModule_ReportsDisabledWhenUnmanageableAndRuleAbsent(t *testing
 		t.Fatal(err)
 	}
 	canonical := "  - " + blockQUICRuleBase + ",REJECT\n"
-	// Replace the canonical rule with a near-miss that still "touches" UDP/443
-	// but is not the rule 5gpn owns, and drop the terminator so the module also
-	// loses its anchor.
-	nearMiss := "  - AND,((DOMAIN-SUFFIX,example.test),(NETWORK,UDP),(DST-PORT,443)),DIRECT\n"
+	// Replace the canonical REJECT with a GLOBAL UDP/443 rule carrying a
+	// different target: it contends with the module, but it is not the rule
+	// 5gpn owns, so nothing is actually blocking QUIC.
+	nearMiss := "  - AND,((NETWORK,UDP),(DST-PORT,443)),DIRECT\n"
 	text := strings.Replace(seed, canonical, nearMiss, 1)
 
 	view := analyzeBlockQUICModule(text, fx.infra).View
 	if view.Manageable {
-		t.Fatal("a non-canonical UDP/443 rule must make the module unmanageable")
+		t.Fatal("a non-canonical global UDP/443 rule must make the module unmanageable")
 	}
 	if view.Enabled {
 		t.Error("the canonical REJECT is gone, so Enabled must be false")
+	}
+}
+
+// ruleTouchesBlockQUIC must match only GLOBAL UDP/443 rules. The cases marked
+// false are the standard mihomo idiom for pushing one site off QUIC so MITM can
+// capture it over TCP — they do not contend with a global rule, and counting
+// them used to lock the toggle for anyone running a couple of capture
+// extensions.
+func TestRuleTouchesBlockQUIC_OnlyGlobalRules(t *testing.T) {
+	for _, tc := range []struct {
+		rule string
+		want bool
+	}{
+		{"AND,((NETWORK,UDP),(DST-PORT,443)),REJECT", true},
+		{"AND,((DST-PORT,443),(NETWORK,UDP)),REJECT", true}, // order is not fixed by mihomo
+		{"AND,((NETWORK,UDP),(DST-PORT,443)),REJECT-DROP", true},
+		{"AND,((NETWORK,UDP),(DST-PORT,443)),DIRECT", true}, // a global rule with another target still contends
+		{"AND,((DOMAIN,api.zhihu.com),(NETWORK,UDP),(DST-PORT,443)),REJECT", false},
+		{"AND,((DOMAIN,weatherkit.apple.com),(NETWORK,UDP),(DST-PORT,443)),REJECT", false},
+		{"AND,((DOMAIN-SUFFIX,x.test),(DOMAIN-KEYWORD,tnc),(NETWORK,UDP),(DST-PORT,443)),DIRECT", false},
+		{"AND,((NETWORK,UDP)),REJECT", false},
+		{"AND,((DST-PORT,443)),REJECT", false},
+		{"MATCH,Proxies", false},
+		{"IN-NAME,intercept-egress,REJECT", false},
+	} {
+		if got := ruleTouchesBlockQUIC(tc.rule); got != tc.want {
+			t.Errorf("ruleTouchesBlockQUIC(%q) = %v, want %v", tc.rule, got, tc.want)
+		}
+	}
+}
+
+// End-to-end reproduction of a real gateway: the shipped seed plus the
+// per-domain QUIC rejects that MITM capture hosts attract. The module must stay
+// fully manageable — this is the exact configuration that used to grey the
+// toggle out permanently.
+func TestBlockQUICModule_DomainScopedCaptureRulesDoNotLockTheToggle(t *testing.T) {
+	fx := newMihomoConfigTestFixture(t)
+	seed, err := fx.store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	captures := ""
+	for _, host := range []string{
+		"api.zhihu.com", "m-cloud.zhihu.com", "page-info.zhihu.com",
+		"www.zhihu.com", "zhida.zhihu.com", "weatherkit.apple.com",
+	} {
+		captures += "  - AND,((DOMAIN," + host + "),(NETWORK,UDP),(DST-PORT,443)),REJECT\n"
+	}
+	// Capture rules splice in below the canonical rule, as the renderer does.
+	canonical := "  - " + blockQUICRuleBase + ",REJECT\n"
+	text := strings.Replace(seed, canonical, canonical+captures, 1)
+
+	view := analyzeBlockQUICModule(text, fx.infra).View
+	if !view.Enabled {
+		t.Error("canonical global REJECT is present — module must read as enabled")
+	}
+	if !view.Manageable {
+		t.Errorf("domain-scoped capture rules must not make the module unmanageable (reason=%q)", view.Reason)
 	}
 }

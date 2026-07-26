@@ -444,8 +444,67 @@ func analyzeBlockQUICModule(text string, infra InfraParams) blockQUICModuleAnaly
 	return analysis
 }
 
+// ruleTouchesBlockQUIC reports whether rule is a GLOBAL UDP/443 rule — one
+// whose entire condition set is (NETWORK,UDP) plus (DST-PORT,443) — regardless
+// of its target. Those are the rules that genuinely contend with this module,
+// so finding one that is not the canonical rule means 5gpn must not rewrite the
+// list.
+//
+// It deliberately does NOT match a rule that carries any further condition. A
+// domain-scoped rule such as
+//
+//	AND,((DOMAIN,api.example.com),(NETWORK,UDP),(DST-PORT,443)),REJECT
+//
+// is the standard mihomo idiom for pushing one site off QUIC so it can be
+// captured over TCP, and it does not conflict with a global rule: the global
+// one is broader and, sitting above it, matches first anyway. The previous
+// substring test counted those, so installing a couple of MITM extensions was
+// enough to make touchingRules exceed one and lock the toggle permanently —
+// while the canonical rule kept doing its job, which is the worst combination:
+// no control and no signal.
+//
+// Condition order is not fixed by mihomo, so both orderings are accepted.
 func ruleTouchesBlockQUIC(rule string) bool {
-	return strings.HasPrefix(rule, "AND,(") && strings.Contains(rule, "(NETWORK,UDP)") && strings.Contains(rule, "(DST-PORT,443)")
+	conditions, ok := andConditions(rule)
+	if !ok || len(conditions) != 2 {
+		return false
+	}
+	return (conditions[0] == "(NETWORK,UDP)" && conditions[1] == "(DST-PORT,443)") ||
+		(conditions[0] == "(DST-PORT,443)" && conditions[1] == "(NETWORK,UDP)")
+}
+
+// andConditions splits the top-level parenthesised conditions of a compacted
+// `AND,((a),(b),…),TARGET` rule. Returns ok=false for anything that is not an
+// AND rule or whose parentheses do not balance.
+func andConditions(rule string) ([]string, bool) {
+	const prefix = "AND,("
+	if !strings.HasPrefix(rule, prefix) {
+		return nil, false
+	}
+	body := rule[len(prefix):]
+	depth := 0
+	start := -1
+	var out []string
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case '(':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case ')':
+			depth--
+			if depth < 0 {
+				// Closes the AND group itself: everything after is the target.
+				return out, true
+			}
+			if depth == 0 && start >= 0 {
+				out = append(out, body[start:i+1])
+				start = -1
+			}
+		}
+	}
+	return nil, false
 }
 
 func parseMihomoNodeDocument(text string) (*yaml.Node, error) {
