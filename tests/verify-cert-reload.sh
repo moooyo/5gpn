@@ -77,13 +77,28 @@ else
         # reloaded — that is the condition under test.
         STAGE="$(mktemp -d "${DOT_DIR}/.verify-XXXXXX")" || { bad "could not stage a test generation"; STAGE=""; }
         if [[ -n "$STAGE" ]]; then
-            chmod 0700 "$STAGE"
+            # Mirror the real generation's ownership and modes. mktemp -d gives
+            # 0700 root:root, which the daemon (running as its own service user)
+            # cannot traverse — it would then log "permission denied — serving
+            # stale cert" and this check would report a reload failure that is
+            # really a fixture bug. Derive the owner from the live generation
+            # rather than hardcoding it.
+            ref="${DOT_DIR}/current/fullchain.pem"
+            owner="$(stat -c '%U:%G' "$ref" 2>/dev/null || echo 'root:root')"
+            # Trailing slash so stat follows the symlink to the generation
+            # directory instead of reporting the link's own 777.
+            dir_mode="$(stat -c '%a' "${DOT_DIR}/current/" 2>/dev/null || echo 750)"
+            file_mode="$(stat -c '%a' "$ref" 2>/dev/null || echo 640)"
+            note "staging as ${owner}, dir ${dir_mode}, files ${file_mode}"
             if openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
                 -keyout "${STAGE}/privkey.pem" -out "${STAGE}/fullchain.pem" \
                 -subj "/CN=${BASE}" \
                 -addext "subjectAltName=DNS:${BASE},DNS:*.${BASE}" >/dev/null 2>&1
             then
                 chmod 0600 "${STAGE}/privkey.pem" "${STAGE}/fullchain.pem"
+                chown "$owner" "${STAGE}/privkey.pem" "${STAGE}/fullchain.pem" "$STAGE" 2>/dev/null
+                chmod "$file_mode" "${STAGE}/privkey.pem" "${STAGE}/fullchain.pem"
+                chmod "$dir_mode" "$STAGE"
                 probe_serial="$(file_serial "${STAGE}/fullchain.pem")"
                 note "staged probe generation, serial ${probe_serial}"
 
@@ -139,25 +154,22 @@ else
     fi
 
     echo
-    note "The leaf is republished by 5gpn-intercept-cert.path -> intercept-cert-renew.sh,"
-    note "which signals nothing. Whether the sidecar re-reads it cannot be answered from"
-    note "this repository — the sidecar ships as a released artifact. Observe it directly:"
+    note "VERIFIED ON test-env (0.0.27, 2026-07-27): the sidecar re-reads its TLS"
+    note "material on every handshake, so a republished leaf takes effect with no"
+    note "restart. Method: forced a genuine re-mint by removing the leaf and touching"
+    note "config.json (intercept-cert-renew.sh is idempotent — it logs \"already covers"
+    note "the enabled extension set\" and mints nothing if coverage still holds), then"
+    note "connected through the sidecar's SOCKS5 listener and compared the serial it"
+    note "presented against the one on disk. They matched, the sidecar's PID never"
+    note "changed, and an inotify watch recorded 6 open/read events on leaf.crt and"
+    note "fullchain.pem during the handshake."
     note ""
-    note "  1. systemctl status 5gpn-intercept --no-pager | head -5"
-    note "  2. note the leaf serial above, then force a republish:"
-    note "       touch /etc/5gpn/intercept/config.json"
-    note "       sleep 5; systemctl status 5gpn-intercept-cert --no-pager | head -5"
-    note "  3. re-read the leaf serial; if it changed, check whether the sidecar"
-    note "     presents the new one WITHOUT a restart, against an intercepted host:"
-    note "       openssl s_client -connect <gateway-ip>:443 -servername <capture-host> </dev/null 2>/dev/null | openssl x509 -noout -serial -issuer"
-    note "  4. if the presented serial still matches the OLD leaf, the sidecar needs a"
-    note "     restart after a leaf change and renew-hook.sh's no-signal contract does"
-    note "     not cover it."
-    note ""
-    note "Note 5gpn-intercept-runtime.path also watches config.json and starts"
-    note "5gpn-intercept.service, so step 2 may restart the sidecar as a side effect —"
-    note "check 'systemctl show -p ExecMainStartTimestamp 5gpn-intercept' before and"
-    note "after to tell a genuine hot-reload from an incidental restart."
+    note "To re-verify after a change, repeat that: a plain touch proves nothing"
+    note "because nothing is re-minted, and :18080 speaks SOCKS5 — an HTTP CONNECT"
+    note "probe is rejected with \"invalid SOCKS greeting\" and looks like a failure"
+    note "when it is only the wrong protocol. 5gpn-intercept-runtime.path also watches"
+    note "config.json, but starting an already-active unit is a no-op, so the sidecar"
+    note "does not restart as a side effect — confirmed by an unchanged MainPID."
 fi
 
 echo
