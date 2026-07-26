@@ -167,7 +167,6 @@ func TestDoHExchange_ReusesTheConnection(t *testing.T) {
 	srv.EnableHTTP2 = true
 	srv.StartTLS()
 	defer srv.Close()
-	srv.Config.ConnState = nil
 
 	addr := strings.TrimPrefix(srv.URL, "https://")
 	c, err := newDoHClient("https://dns.test/dns-query", addr, nil)
