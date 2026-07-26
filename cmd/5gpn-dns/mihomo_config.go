@@ -356,9 +356,13 @@ __OVERLAY_EGRESS_ANCHOR__
   - IN-NAME,intercept-egress,REJECT
   - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
   # The client anchor resolves the capture rules. It sits below every deny
-  # above and above the terminal MATCH, so an extension can never capture the
-  # management plane or private ranges, and captured traffic never falls
-  # through to the operator's own routing.
+  # above and above the terminal MATCH, so captured traffic never falls through
+  # to the operator's own routing. The private-range denies above are
+  # no-resolve, so they stop IP-form targets only: a DOMAIN that resolves into a
+  # private range or loopback is NOT stopped here, because matching never
+  # resolves it. The panel names stay pinned by the exact rules and hosts
+  # entries above; other such names are not. Closing this needs pinned-IP
+  # dialing on egress (see PublicOnly in component/overlay/types.go).
 __OVERLAY_CLIENT_ANCHOR__
   - MATCH,Proxies
 `
