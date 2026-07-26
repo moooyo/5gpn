@@ -7,7 +7,7 @@
 
 ## 1. 一句话状态
 
-5gpn `0.0.24-beta.5` 已发布，从**已发布产物**全新安装并通过 22/22 实流量验证。
+5gpn `0.0.24-beta.6` 已发布，从**已发布产物**全新安装并通过 22/22 实流量验证。
 mihomo、sidecar 同样已发布并在线上运行。**zashboard 的改动这一轮补齐了**——
 fork 有了自己的构建与发布路径，安装器改为拉我们的 `v3.16.0-overlay.1`，
 test-env 上 `.zash_version` 已经是我们的版本（见 §4.1）。
@@ -18,8 +18,8 @@ test-env 上 `.zash_version` 已经是我们的版本（见 §4.1）。
 
 | 仓库 | 本地 worktree | 分支 | HEAD | 推送目标 |
 | --- | --- | --- | --- | --- |
-| 5gpn | `D:\Code\worktrees\5gpn-runtime-overlay` | `feat/runtime-overlay` → 镜像 `beta` | `8312259` | `origin` = moooyo/5gpn |
-| mihomo | `D:\Code\worktrees\mihomo-runtime-overlay` | `5gpn-ext` | `b888a9f7` | `origin` = moooyo/mihomo |
+| 5gpn | `D:\Code\worktrees\5gpn-runtime-overlay` | `feat/runtime-overlay` → 镜像 `beta` | `a197ef4` | `origin` = moooyo/5gpn |
+| mihomo | `D:\Code\worktrees\mihomo-runtime-overlay` | `5gpn-ext` | `b5a3f29e` | `origin` = moooyo/mihomo |
 | zashboard | `D:\Code\worktrees\zashboard-runtime-overlay` | `5gpn-ext` | `f7e23bf` | **`fork`** = moooyo/zashboard |
 | 5gpn-extensions | `D:\Code\worktrees\5gpn-extensions-typed` | `feat/typed-policy` | `e98359a` | `origin` = moooyo/5gpn-extensions |
 | sidecar | `D:\Code\worktrees\sidecar` | `main` | `5726517` | `origin` = moooyo/mihomo-extension-sidecar |
@@ -38,8 +38,9 @@ MetaCubeX 上游需要先 `git remote add upstream`。当初把分支从 `Alpha`
 
 ### 已发布
 
-- 5gpn `0.0.24-beta.5`（prerelease）
-- mihomo `v1.19.28-overlay.1`
+- 5gpn `0.0.24-beta.6`（prerelease）
+- mihomo `v1.19.28-overlay.2`（fork 上 Actions 从未启用，二进制本地交叉编译后手动上传——
+  这是 overlay.1 就定下的路径）
 - sidecar `0.1.0-beta.1`
 - zashboard `v3.16.0-overlay.1`（prerelease，**我们的 fork** moooyo/zashboard；
   上游 3.16.0 + 我们的四个提交）
@@ -55,6 +56,20 @@ overlay 数据面、失败即拒、就绪租约、双 socket 对端校验、CAS 
   `v1beta` 携带 typed policy 投影，由**同一次构建**产出两份（详见 §3.1）。
 - **zashboard 真正跑起来了**：fork 有了独立的 `5gpn-release.yml`，安装器
   参数化出 `ZASH_REPO`，overlay 面板新增策略投影摘要一行。
+- **就绪 sweeper 在恢复路径上也启动了**（mihomo `v1.19.28-overlay.2`）：
+  它原本只由 `Commit()` 启动，而网关重启走的是 recovery、之后往往再也不 commit
+  ——test-env 上 12 天的日志里只有 2 次 commit、每次启动都有 recovery。所以那个
+  "把失效租约变成失败即拒、且不依赖流量"的机制在实际运行的进程里根本没跑。
+
+  **它看起来一切正常，这才是要点**：`Readback()` 在读的时候就地把状态改写成
+  not-ready，所以轮询 API 的协调者看到的是对的，捕获也确实失败即拒。缺的是
+  状态转移本身——`[Overlay] processor state for generation %s changed to %s`
+  在 12 天日志里**一次都没打过**，尽管验证脚本反复杀掉 processor。运维看到的
+  是一串 connect-refused，没有任何一行说明原因。
+
+  既有测试抓不到它：唯一覆盖这条路径的测试**手动调用** `RefreshReadiness()`，
+  证明的是函数能工作，不是有人调用它。新测试断言的是持有的状态而非 readback，
+  因为读 readback 无论 sweeper 有没有跑都会通过。部署后已验证那条日志会打出来。
 
 以及上一轮的三项结构性工作：sidecar 真正独立、模板契约从模板推导、
 安装器内两个渲染器合一。
