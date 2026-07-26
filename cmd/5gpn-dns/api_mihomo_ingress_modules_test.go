@@ -656,3 +656,71 @@ func TestMihomoIngressModules_StrictBodyAndUnknownModule(t *testing.T) {
 		t.Fatalf("invalid requests reached validator/controller: %d/%d", fx.tester.calls, fx.ctl.putCalls)
 	}
 }
+
+// An unmanageable module used to report Enabled=false unconditionally: every
+// bail-out path returned the same zero view and only mutated Reason. So a
+// config whose canonical UDP/443 REJECT was present and actively rejecting
+// QUIC still rendered as 未启用 in the Console, telling the operator traffic was
+// flowing when it was being blocked.
+//
+// The common trigger is not a broken config at all — ruleTouchesBlockQUIC
+// counts ANY rule combining (NETWORK,UDP) with (DST-PORT,443) by substring,
+// with no check on the target, so an ordinary per-site QUIC rule collides with
+// the module and locks it.
+func TestBlockQUICModule_ReportsEnabledWhenTheRuleIsPresentButUnmanageable(t *testing.T) {
+	fx := newMihomoConfigTestFixture(t)
+	seed, err := fx.store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Baseline: the shipped seed is the canonical, manageable, enabled state.
+	if view := analyzeBlockQUICModule(seed, fx.infra).View; !view.Enabled || !view.Manageable {
+		t.Fatalf("seed baseline = %+v, want enabled+manageable", view)
+	}
+
+	// A perfectly ordinary operator rule that happens to mention both UDP and
+	// port 443 — the standard mihomo idiom for per-site QUIC handling.
+	collide := "  - AND,((DOMAIN-SUFFIX,example.test),(NETWORK,UDP),(DST-PORT,443)),DIRECT\n"
+	canonical := "  - " + blockQUICRuleBase + ",REJECT\n"
+	if !strings.Contains(seed, canonical) {
+		t.Fatalf("seed does not contain the canonical rule %q", canonical)
+	}
+	withCollision := strings.Replace(seed, canonical, canonical+collide, 1)
+
+	view := analyzeBlockQUICModule(withCollision, fx.infra).View
+	if view.Manageable {
+		t.Fatal("a second UDP/443 rule must make the module unmanageable")
+	}
+	if view.Reason != "partial-or-custom-quic-block" {
+		t.Errorf("reason = %q, want partial-or-custom-quic-block", view.Reason)
+	}
+	// The point of the fix: the canonical REJECT is still in the list, so the
+	// module must not claim QUIC is unblocked.
+	if !view.Enabled {
+		t.Error("canonical REJECT is present and mihomo applies it — Enabled must stay true even though 5gpn will not manage the rule")
+	}
+}
+
+// The mirror case: unmanageable AND the canonical rule genuinely absent must
+// still report Enabled=false, so the fix cannot be "always report true".
+func TestBlockQUICModule_ReportsDisabledWhenUnmanageableAndRuleAbsent(t *testing.T) {
+	fx := newMihomoConfigTestFixture(t)
+	seed, err := fx.store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := "  - " + blockQUICRuleBase + ",REJECT\n"
+	// Replace the canonical rule with a near-miss that still "touches" UDP/443
+	// but is not the rule 5gpn owns, and drop the terminator so the module also
+	// loses its anchor.
+	nearMiss := "  - AND,((DOMAIN-SUFFIX,example.test),(NETWORK,UDP),(DST-PORT,443)),DIRECT\n"
+	text := strings.Replace(seed, canonical, nearMiss, 1)
+
+	view := analyzeBlockQUICModule(text, fx.infra).View
+	if view.Manageable {
+		t.Fatal("a non-canonical UDP/443 rule must make the module unmanageable")
+	}
+	if view.Enabled {
+		t.Error("the canonical REJECT is gone, so Enabled must be false")
+	}
+}

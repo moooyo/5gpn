@@ -401,7 +401,11 @@ func analyzeBlockQUICModule(text string, infra InfraParams) blockQUICModuleAnaly
 		rule := compactMihomoRule(item.Value)
 		if rule == egressTerminator {
 			if egressTerminatorIndex != -1 {
-				analysis.View.Reason = "interception-egress-terminator-duplicate"
+				// Scan is incomplete here, so canonicalIndex only reflects the
+				// rules seen so far — this can under-report Enabled when the
+				// canonical rule sits below the duplicate. Under-reporting is
+				// the safe direction: it never claims a block that is absent.
+				analysis.View = blockQUICModuleView(canonicalIndex >= 0, false, "interception-egress-terminator-duplicate")
 				return analysis
 			}
 			egressTerminatorIndex = index
@@ -414,7 +418,8 @@ func analyzeBlockQUICModule(text string, infra InfraParams) blockQUICModuleAnaly
 		}
 	}
 	if egressTerminatorIndex < 0 {
-		analysis.View.Reason = "interception-egress-terminator-missing"
+		// The whole rules list was scanned, so canonicalIndex is conclusive.
+		analysis.View = blockQUICModuleView(canonicalIndex >= 0, false, "interception-egress-terminator-missing")
 		return analysis
 	}
 	analysis.Document = document
@@ -428,7 +433,14 @@ func analyzeBlockQUICModule(text string, infra InfraParams) blockQUICModuleAnaly
 		analysis.View = blockQUICModuleView(true, true, "")
 		return analysis
 	}
-	analysis.View.Reason = "partial-or-custom-quic-block"
+	// Present, but not as the single canonical rule directly after the
+	// terminator, so 5gpn will not rewrite it. Enabled still reports whether the
+	// canonical REJECT is in the list: mihomo applies it regardless of who owns
+	// the line, so reporting "off" here told the operator QUIC was flowing when
+	// it was in fact being rejected. (First-match ordering means an earlier
+	// conflicting rule can still take precedence for some traffic — this claims
+	// the rule is active, not that nothing shadows it.)
+	analysis.View = blockQUICModuleView(canonicalIndex >= 0, false, "partial-or-custom-quic-block")
 	return analysis
 }
 
