@@ -705,8 +705,17 @@ export function UpstreamsCard({
     if (upstreams) setDraft({ china: [...upstreams.china], trust: [...upstreams.trust] })
   }, [upstreams])
 
+  // The draft is prefilled from the live values, so pressing Save without
+  // editing anything used to persist whatever happened to be displayed —
+  // including the install-time defaults, which then outranked every later
+  // change made outside the console. Saving nothing must do nothing.
+  const changed = upstreams !== null && (
+    draft.china.join(' ') !== upstreams.china.join(' ') ||
+    draft.trust.join(' ') !== upstreams.trust.join(' ')
+  )
+
   async function onSubmit() {
-    if (draft.china.length === 0 || draft.trust.length === 0) return
+    if (!changed || draft.china.length === 0 || draft.trust.length === 0) return
     setSaving(true)
     try {
       const res = await api.putUpstreams(draft)
@@ -723,6 +732,7 @@ export function UpstreamsCard({
     <Card className="p-5 sm:p-6" data-testid="upstreams-card">
       <div className="mb-1 text-[15px] font-medium text-text-strong">{t('settings.upstreams')}</div>
       <p className="mb-3 text-[10.5px] leading-relaxed text-text-faint">{t('settings.upstreamsHint')}</p>
+      <p className="mb-3 text-[10px] leading-relaxed text-text-faint">{t('settings.upstreamsStorageHint')}</p>
       <div className="flex flex-col gap-3">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           <UpstreamGroupEditor
@@ -742,7 +752,7 @@ export function UpstreamsCard({
           <Button
             type="button"
             size="sm"
-            disabled={!upstreams || saving || draft.china.length === 0 || draft.trust.length === 0}
+            disabled={!upstreams || saving || !changed || draft.china.length === 0 || draft.trust.length === 0}
             onClick={() => void onSubmit()}
             data-testid="upstreams-save"
           >

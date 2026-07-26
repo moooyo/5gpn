@@ -183,6 +183,7 @@ const en = {
     upstreamsTrust: 'Foreign group (trust)',
     upstreamsHint:
       'Upstreams are tried in list order. The domestic group uses plain UDP; the foreign group supports DoT or plain UDP for a trusted internal resolver. Add and validate one entry at a time. Changes apply immediately — no restart.',
+    upstreamsStorageHint: 'Stored in /etc/5gpn/upstreams.json and applied without a restart. There is no dns.env copy — this is the only place the upstream groups are configured.',
     upstreamsCount: 'Upstreams: {{count}}',
     upstreamsAddChina: 'Add domestic DNS',
     upstreamsAddTrust: 'Add foreign DNS',

@@ -386,9 +386,30 @@ describe('SettingsPage', () => {
     renderSettings()
 
     await screen.findByText('223.5.5.5')
+    // Save is inert until the draft actually diverges from what was fetched,
+    // so make a real change before exercising the failure path.
+    await user.click(screen.getByRole('button', { name: '删除 119.29.29.29' }))
     await user.click(screen.getByTestId('upstreams-save'))
 
     expect(await screen.findByText('invalid upstream: bad-host')).toBeInTheDocument()
+  })
+
+  // The console prefills its draft from the live values and PUTs the whole
+  // draft, so a Save with no edits used to persist whatever was displayed —
+  // creating upstreams.json out of the install-time defaults and silently
+  // outranking every later change made outside the console.
+  it('does not persist an upstream save that changes nothing', async () => {
+    const user = userEvent.setup()
+    renderSettings()
+
+    await screen.findByText('223.5.5.5')
+    expect(screen.getByTestId('upstreams-save')).toBeDisabled()
+    await user.click(screen.getByTestId('upstreams-save'))
+    expect(api.putUpstreams).not.toHaveBeenCalled()
+
+    // A real edit re-enables it, and reverting that edit disables it again.
+    await user.click(screen.getByRole('button', { name: '删除 119.29.29.29' }))
+    await waitFor(() => expect(screen.getByTestId('upstreams-save')).toBeEnabled())
   })
 
   it('saving ecs calls putEcs with the trimmed subnet', async () => {

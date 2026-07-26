@@ -169,6 +169,7 @@ const zh: typeof en = {
     upstreamsTrust: '境外组（trust）',
     upstreamsHint:
       '上游会按列表顺序依次尝试。境内组使用明文 UDP；境外组支持 DoT，也可连接可信内网的明文 UDP 解析器。请逐项添加并校验，保存后立即生效，无需重启。',
+    upstreamsStorageHint: '保存在 /etc/5gpn/upstreams.json，无需重启即刻生效。dns.env 中没有副本——这里是配置上游组的唯一位置。',
     upstreamsCount: '上游数量：{{count}}',
     upstreamsAddChina: '添加境内 DNS',
     upstreamsAddTrust: '添加境外 DNS',
