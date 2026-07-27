@@ -258,6 +258,7 @@ type interceptModuleSnapshot struct {
 	Scripts             []interceptScriptRule    `json:"actions,omitempty"`
 	PersistentStorage   bool                     `json:"persistent_storage"`
 	NetworkOrigins      []string                 `json:"network_origins"`
+	NetworkAny          bool                     `json:"network_any,omitempty"`
 	EgressGroupRequired bool                     `json:"egress_group_required"`
 	EgressGroup         string                   `json:"egress_group,omitempty"`
 }
@@ -280,6 +281,7 @@ type interceptModuleView struct {
 	PersistentStorage   bool                        `json:"persistent_storage"`
 	ExecutionOrder      int                         `json:"execution_order"`
 	NetworkOrigins      []string                    `json:"network_origins"`
+	NetworkAny          bool                        `json:"network_any,omitempty"`
 	EgressGroupRequired bool                        `json:"egress_group_required"`
 	EgressGroup         string                      `json:"egress_group,omitempty"`
 	SourceURL           string                      `json:"source_url,omitempty"`
@@ -400,6 +402,11 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 	}
 	if err := validateInterceptNetworkOrigins(module.NetworkOrigins); err != nil {
 		return err
+	}
+	// The two grants are alternatives. Accepting both would show an operator an
+	// exact origin list that does not describe what the extension may reach.
+	if module.NetworkAny && len(module.NetworkOrigins) > 0 {
+		return errors.New("network permission declares both any and an origin list")
 	}
 	if err := validateInterceptEgressGroupBinding(module.EgressGroup); err != nil {
 		return err

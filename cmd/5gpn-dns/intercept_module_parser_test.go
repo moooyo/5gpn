@@ -762,3 +762,58 @@ func TestNativeExtensionParserRejectsAnUnknownEntry(t *testing.T) {
 		t.Fatalf("err = %v, want an entry rejection", err)
 	}
 }
+
+func networkCapabilityManifest(permission string) string {
+	return `apiVersion: 5gpn.io/v1
+kind: Extension
+metadata:
+  id: io.example.capability
+  name: Capability fixture
+  version: 1.0.0
+permissions:
+  persistentStorage: false
+  network:
+` + permission + `
+traffic:
+  captureHosts: [api.example.com]
+actions:
+  - id: pass
+    phase: response
+    match:
+      hosts: [api.example.com]
+      schemes: [https]
+      pathRegex: ^/
+    script:
+      inline: "function transform() { return null }"
+      bodyMode: none
+      timeoutMs: 1000
+      maxBodyBytes: 1024
+`
+}
+
+func TestNativeExtensionParserAcceptsTheNetworkCapability(t *testing.T) {
+	t.Parallel()
+	// Hosts an operator configures at runtime cannot be enumerated in a
+	// manifest, so the capability is declared without an origin list.
+	snapshot, err := (interceptModuleParser{now: time.Now}).Import(context.Background(), interceptModuleImportRequest{Content: networkCapabilityManifest("    any: true")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.NetworkAny {
+		t.Fatal("network capability was not snapshotted")
+	}
+	if len(snapshot.NetworkOrigins) != 0 {
+		t.Fatalf("origins = %v, want none", snapshot.NetworkOrigins)
+	}
+}
+
+func TestNativeExtensionParserRejectsCapabilityWithOrigins(t *testing.T) {
+	t.Parallel()
+	// Showing both would give an operator an exact origin list that does not
+	// describe what the extension may actually reach.
+	permission := "    any: true\n    origins: [https://api.example.net]"
+	_, err := (interceptModuleParser{now: time.Now}).Import(context.Background(), interceptModuleImportRequest{Content: networkCapabilityManifest(permission)})
+	if err == nil || !strings.Contains(err.Error(), "any and an origin list") {
+		t.Fatalf("err = %v, want the combined grant to be rejected", err)
+	}
+}

@@ -1455,6 +1455,7 @@ func interceptModuleViewFromSnapshot(module interceptModuleSnapshot, ready bool,
 		Settings: cloneInterceptSettings(module.Settings), HostMappings: append([]interceptHostMapping(nil), module.HostMappings...),
 		RoutingRules:      cloneInterceptRoutingRules(module.RoutingRules),
 		PersistentStorage: module.PersistentStorage, NetworkOrigins: append([]string{}, module.NetworkOrigins...),
+		NetworkAny:          module.NetworkAny,
 		EgressGroupRequired: module.EgressGroupRequired, EgressGroup: module.EgressGroup, SourceURL: module.Source.URL,
 		SourceDigest: module.Source.Digest, SnapshotDigest: interceptModuleSnapshotDigest(module), ImportedAt: module.ImportedAt,
 	}

@@ -65,6 +65,10 @@ type nativeExtensionPermission struct {
 
 type nativeExtensionNetworkPermission struct {
 	Origins []string `yaml:"origins"`
+	// Any grants the network capability without enumerating origins, for
+	// extensions whose reachable hosts are operator-configured. It is a
+	// strictly broader grant than origins and every review must say so.
+	Any bool `yaml:"any"`
 }
 
 type nativeExtensionRequirements struct {
@@ -324,6 +328,7 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 		CaptureHosts: captureHosts, CaptureDNS: interceptCaptureDNSTrust,
 		HostMappings: mappings, RoutingRules: routingRules, Settings: settings, Scripts: scripts,
 		PersistentStorage: manifest.Permissions.PersistentStorage, NetworkOrigins: networkOrigins,
+		NetworkAny:          manifest.Permissions.Network.Any,
 		EgressGroupRequired: manifest.Requirements.EgressGroup.Required,
 	}
 	if err := validateInterceptModule(moduleWithSyntheticSource(module)); err != nil {

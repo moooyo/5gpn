@@ -167,6 +167,16 @@ and private names are rejected. Default ports are canonicalized, so
 `https://api.example.net` and `https://api.example.net:443` request the same
 permission.
 
+`permissions.network.any: true` requests the same capability without an origin
+list, for an extension whose reachable hosts are chosen by the operator at
+runtime and therefore cannot be enumerated in a manifest. It is a strictly
+broader grant and every review must present it as such. The two forms are
+alternatives: declaring both is rejected, because an exact origin list shown
+next to `any` would not describe what the extension may reach. Every other
+guard is unchanged — the request URL is still canonicalized, IP literals and
+unsafe or private hosts are still refused, and the request still leaves through
+authenticated mihomo SOCKS5.
+
 The permission is part of the immutable snapshot digest. It provides no global
 `fetch`, XHR, socket, DNS, cookie jar, or ambient credentials. It authorizes
 both the synchronous `context.network.request` function and a request-phase URL
