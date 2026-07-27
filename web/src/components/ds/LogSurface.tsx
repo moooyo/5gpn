@@ -144,7 +144,7 @@ export function LogSurface({
   return (
     <Card className={cn('overflow-hidden p-0 shadow-none', className)} data-testid={testId}>
       {title !== undefined ? (
-        <div className="flex items-center gap-2.5 border-b border-divider px-3.5 py-3 md:px-[18px]">
+        <div className="flex items-center gap-2.5 border-b border-divider px-3.5 py-3 md:px-4.5">
           <span className="text-title font-semibold text-text-strong">{title}</span>
           {count !== undefined ? (
             <span className="rounded-pill bg-surface-container-low px-2 py-0.5 font-mono text-meta text-text-soft">{count}</span>
@@ -155,7 +155,7 @@ export function LogSurface({
       ) : null}
 
       {hasToolbar ? (
-        <div className="flex flex-col gap-2 border-b border-divider bg-bg px-3.5 py-2.5 sm:flex-row sm:items-center md:px-[18px]">
+        <div className="flex flex-col gap-2 border-b border-divider bg-bg px-3.5 py-2.5 sm:flex-row sm:items-center md:px-4.5">
           {filters}
           {search}
           {actionsOnToolbar ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
@@ -170,7 +170,7 @@ export function LogSurface({
       {isEmpty ? empty : children(logSurfaceHeight(chrome))}
 
       {footer !== undefined ? (
-        <div className="flex items-center justify-between gap-3 border-t border-divider px-3.5 py-2 text-meta text-text-faint md:px-[18px]">
+        <div className="flex items-center justify-between gap-3 border-t border-divider px-3.5 py-2 text-meta text-text-faint md:px-4.5">
           <span>{footer}</span>
           {footerMeta !== undefined ? <span className="font-mono">{footerMeta}</span> : null}
         </div>

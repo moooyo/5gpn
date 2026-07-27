@@ -134,6 +134,12 @@
     --md-sys-color-inverse-surface: #303030;
     --md-sys-color-inverse-on-surface: #f2f2f2;
     --md-sys-color-scrim: rgb(0 0 0 / 38%);
+    /* Translucent washes used ON a filled container (a chip on a hero card,
+       an inset row inside a tonal panel). Nine call sites invented their own
+       alpha — four different whites for the same job — which is the drift the
+       "reference, don't add" rule exists to stop. */
+    --md-sys-color-tint-on-fill: rgb(255 255 255 / 32%);
+    --md-sys-color-tint-inset: rgb(0 0 0 / 8%);
     /* Categorical chart series — validated on this theme's #ffffff card
        surface (adjacent + ring-wrap pairs, protan/deutan/tritan). */
     --chart-cat-1: #2a78d6;
@@ -184,6 +190,10 @@
     --md-sys-color-inverse-surface: #e3e3e3;
     --md-sys-color-inverse-on-surface: #303030;
     --md-sys-color-scrim: rgb(0 0 0 / 55%);
+    /* Inverted on a dark scheme: a white wash on an already-light container
+       and a black wash on a dark one both wash out. */
+    --md-sys-color-tint-on-fill: rgb(255 255 255 / 18%);
+    --md-sys-color-tint-inset: rgb(255 255 255 / 10%);
     /* Categorical chart series — the same five hues stepped for the dark
        card surface (#1e1f20), selected and validated for it, not flipped. */
     --chart-cat-1: #3987e5;
@@ -234,6 +244,12 @@
     --md-sys-color-inverse-surface: #2b3232;
     --md-sys-color-inverse-on-surface: #edf2f1;
     --md-sys-color-scrim: rgb(0 0 0 / 38%);
+    /* Translucent washes used ON a filled container (a chip on a hero card,
+       an inset row inside a tonal panel). Nine call sites invented their own
+       alpha — four different whites for the same job — which is the drift the
+       "reference, don't add" rule exists to stop. */
+    --md-sys-color-tint-on-fill: rgb(255 255 255 / 32%);
+    --md-sys-color-tint-inset: rgb(0 0 0 / 8%);
     /* Categorical chart series — validated on this theme's #ffffff card
        surface (adjacent + ring-wrap pairs, protan/deutan/tritan). */
     --chart-cat-1: #2a78d6;
@@ -284,6 +300,12 @@
     --md-sys-color-inverse-surface: #2e312d;
     --md-sys-color-inverse-on-surface: #f0f1ec;
     --md-sys-color-scrim: rgb(0 0 0 / 38%);
+    /* Translucent washes used ON a filled container (a chip on a hero card,
+       an inset row inside a tonal panel). Nine call sites invented their own
+       alpha — four different whites for the same job — which is the drift the
+       "reference, don't add" rule exists to stop. */
+    --md-sys-color-tint-on-fill: rgb(255 255 255 / 32%);
+    --md-sys-color-tint-inset: rgb(0 0 0 / 8%);
     /* Categorical chart series — validated on this theme's #ffffff card
        surface (adjacent + ring-wrap pairs, protan/deutan/tritan). */
     --chart-cat-1: #2a78d6;
@@ -334,6 +356,12 @@
     --md-sys-color-inverse-surface: #322f35;
     --md-sys-color-inverse-on-surface: #f5eff7;
     --md-sys-color-scrim: rgb(0 0 0 / 38%);
+    /* Translucent washes used ON a filled container (a chip on a hero card,
+       an inset row inside a tonal panel). Nine call sites invented their own
+       alpha — four different whites for the same job — which is the drift the
+       "reference, don't add" rule exists to stop. */
+    --md-sys-color-tint-on-fill: rgb(255 255 255 / 32%);
+    --md-sys-color-tint-inset: rgb(0 0 0 / 8%);
     /* Categorical chart series — validated on this theme's #ffffff card
        surface (adjacent + ring-wrap pairs, protan/deutan/tritan). */
     --chart-cat-1: #2a78d6;

@@ -88,6 +88,9 @@ const en = {
     },
   },
   sidebar: {
+    kernelGatewaySub: 'gateway · :443',
+    kernelPluginsSub_one: '{{count}} plugin running',
+    kernelPluginsSub_other: '{{count}} plugins running',
     // Named for the component, not the unit: the runtime-state card says
     // healthy or not and nothing else — one title and one state label per row,
     // no systemd unit name.

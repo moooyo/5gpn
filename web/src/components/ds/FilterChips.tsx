@@ -87,7 +87,7 @@ export function FilterChips({
         // its own content.
         const box = cn(
           'h-field shrink-0 md:h-chip',
-          size === 'md' ? 'rounded-pill px-[18px] text-body md:h-ctl' : 'rounded-chip px-3 text-label',
+          size === 'md' ? 'rounded-pill px-4.5 text-body md:h-ctl' : 'rounded-chip px-3 text-label',
           outlined && size !== 'md' && 'rounded-pill border border-outline-variant/60',
           size === 'md' && 'border border-outline-variant/60',
           'font-medium',

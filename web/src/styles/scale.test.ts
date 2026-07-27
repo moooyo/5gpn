@@ -128,4 +128,14 @@ describe('type and radius scale', () => {
   it('steps control heights down at md, the breakpoint the pages branch on', () => {
     expect(offenders(/\bsm:(?:min-)?h-(?:chip|row|ctl|field|action)\b/)).toEqual([])
   })
+
+  /**
+   * Spacing is Tailwind's default 4px grid. About two dozen call sites had left
+   * it for arbitrary pixel values — 18px was the most common, and `px-[18px]`
+   * sat directly beside a grid-correct `px-3.5` in the same class list, so the
+   * two were being chosen at random rather than for a reason.
+   */
+  it('keeps padding, margin and gap on the 4px grid', () => {
+    expect(offenders(/\b(?:p|px|py|pt|pb|pl|pr|m|mx|my|mt|mb|ml|mr|gap|gap-x|gap-y)-\[\d+px\]/)).toEqual([])
+  })
 })

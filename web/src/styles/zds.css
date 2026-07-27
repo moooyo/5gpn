@@ -177,4 +177,32 @@
     background: var(--md-sys-color-primary-container);
     color: var(--md-sys-color-on-primary-container);
   }
+
+  /* Vertical below the breakpoint every page branches its mobile layout on.
+     Five columns at 390px gives each step ~70px, which truncates the label
+     that says which step it is — the one thing the rail exists to show. The
+     connector turns into a spine down the left, so the dots still read as one
+     ordered path rather than as five unrelated rows. */
+  @media (max-width: 767px) {
+    .zds-trace-rail {
+      grid-template-columns: 1fr;
+      gap: 14px;
+    }
+
+    .zds-trace-rail::before {
+      top: 16px;
+      right: auto;
+      bottom: 16px;
+      left: 15px;
+      width: 2px;
+      height: auto;
+    }
+
+    .zds-trace-node {
+      flex-direction: row;
+      align-items: center;
+      gap: 10px;
+      text-align: left;
+    }
+  }
 }

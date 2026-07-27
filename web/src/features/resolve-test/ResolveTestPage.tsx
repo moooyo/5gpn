@@ -50,8 +50,8 @@ export default function ResolveTestPage() {
   const logQuery = result ? result.name.replace(/\.$/, '') : ''
 
   return (
-    <div className="flex flex-col gap-4" data-testid="page-resolve-test">
-      <Card variant="tonal" className="p-5 sm:p-6">
+    <div className="flex flex-col gap-3 md:gap-4" data-testid="page-resolve-test">
+      <Card variant="tonal" className="p-4 md:p-6">
         <div className="mb-3 flex items-center gap-3">
           <div className="grid h-11 w-11 place-items-center rounded-pill bg-primary-container text-on-primary-container">
             <NetworkCheckIcon className="h-6 w-6" aria-hidden="true" />
@@ -151,7 +151,7 @@ export default function ResolveTestPage() {
               ) : null}
             </div>
 
-            <div className="grid gap-3 p-5 sm:grid-cols-3 sm:p-6">
+            <div className="grid gap-3 p-5 md:grid-cols-3 md:p-6">
               {[
                 [
                   t('resolveTest.ruleLabel'),
@@ -171,9 +171,16 @@ export default function ResolveTestPage() {
                 ],
                 [t('resolveTest.answerLabel'), result.client_ips?.length ? result.client_ips.join(', ') : t('resolveTest.blocked'), true],
               ].map(([label, value, mono]) => (
-                <div key={String(label)} className="rounded-card bg-surface-container-low p-4">
-                  <div className="mb-2 text-meta font-medium text-text-faint">{label}</div>
-                  <div className={mono ? 'break-all font-mono text-label font-medium text-text-strong' : 'text-body font-medium text-text-strong'}>{value}</div>
+                // Label beside value below `md`, stacked in a tonal block
+                // above it. Three stacked cards at 390px cost three screenfuls
+                // to read three short facts, and the tonal fill on each one
+                // made the answer look like three separate results.
+                <div
+                  key={String(label)}
+                  className="flex items-baseline gap-3 border-b border-divider pb-2.5 last:border-b-0 last:pb-0 md:block md:rounded-card md:border-0 md:bg-surface-container-low md:p-4 md:pb-4"
+                >
+                  <div className="w-[76px] shrink-0 text-meta font-medium text-text-faint md:mb-2 md:w-auto">{label}</div>
+                  <div className={cn('min-w-0 flex-1', mono ? 'break-all font-mono text-label font-medium text-text-strong' : 'text-body font-medium text-text-strong')}>{value}</div>
                 </div>
               ))}
             </div>
@@ -233,7 +240,7 @@ export default function ResolveTestPage() {
           {attributionOf(result) === 'intercept' ? <AttributionSection result={result} /> : null}
 
           {result.probes?.length ? (
-            <Card className="p-5 sm:p-6">
+            <Card className="p-4 md:p-6">
               <div className="mb-4 flex items-center justify-between gap-3">
                 <h2 className="text-title font-medium text-text-strong">{t('resolveTest.probes')}</h2>
                 <Badge tone="blue">{t('resolveTest.concurrent')}</Badge>

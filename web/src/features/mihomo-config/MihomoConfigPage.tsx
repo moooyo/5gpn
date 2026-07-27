@@ -214,7 +214,7 @@ export default function MihomoConfigPage() {
   }
 
   return (
-    <div className="flex flex-col gap-4" data-testid="page-mihomo-config">
+    <div className="flex flex-col gap-3 md:gap-4" data-testid="page-mihomo-config">
       <p className="px-1 text-label text-text-faint">{t('mihomoConfig.intro')}</p>
 
       {/* The editor owns the full width. Seven lines of static prose used to
@@ -356,7 +356,14 @@ export default function MihomoConfigPage() {
           ) : null}
         </div>
 
-        <div className="mt-5 flex flex-wrap items-center justify-end gap-2 border-t border-divider pt-4">
+        {/* Pinned below `md`. The editor is 560px tall before the invariants
+            panel, so on a phone the row that validates and publishes an edit
+            sat past the end of a long scroll from the edit itself. `sticky`
+            keeps it inside the card's own column rather than over the page. */}
+        <div className={cn(
+          'mt-5 flex flex-wrap items-center justify-end gap-2 border-t border-divider pt-4',
+          'sticky bottom-0 z-10 bg-card pb-2 md:static md:bg-transparent md:pb-0',
+        )} data-testid="mihomo-config-actions">
           {/* Discard is the reversible one, so it stays in the open. Reset —
               which throws away the entire operator-owned config — moved into
               the overflow: it used to sit permanently in the bottom-left

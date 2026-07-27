@@ -74,6 +74,9 @@ const zh: typeof en = {
     },
   },
   sidebar: {
+    kernelGatewaySub: '网关 · :443',
+    kernelPluginsSub_one: '{{count}} 个插件运行中',
+    kernelPluginsSub_other: '{{count}} 个插件运行中',
     // 用组件名而不是单元名：运行状态卡片只表达健康与否，一行一个标题加一个
     // 状态标签，不再承载 systemd 单元名。
     intercept: 'sidecar',

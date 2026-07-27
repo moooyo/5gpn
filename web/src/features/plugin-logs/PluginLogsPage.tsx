@@ -80,14 +80,14 @@ function durationText(entry: PluginEngineLogEntry, t: TFunction): string {
 
 function LevelBadge({ level, t }: { level: PluginEngineLogLevel; t: TFunction }) {
   return (
-    <Badge className="min-w-[42px] justify-center rounded-chip px-[5px] py-0.5 font-mono text-meta" tone={LEVEL_TONE[level]}>
+    <Badge className="min-w-[42px] justify-center rounded-chip px-1 py-0.5 font-mono text-meta" tone={LEVEL_TONE[level]}>
       {t(`pluginLogs.level.${level}`)}
     </Badge>
   )
 }
 
 function EngineTag({ t }: { t: TFunction }) {
-  return <span className="shrink-0 rounded-chip bg-tertiary-container px-[5px] py-px text-meta font-semibold text-tertiary">{t('pluginLogs.engineTag')}</span>
+  return <span className="shrink-0 rounded-chip bg-tertiary-container px-1 py-px text-meta font-semibold text-tertiary">{t('pluginLogs.engineTag')}</span>
 }
 
 function Details({ entry, mobile, t }: { entry: PluginEngineLogEntry; mobile: boolean; t: TFunction }) {
@@ -115,8 +115,8 @@ function Details({ entry, mobile, t }: { entry: PluginEngineLogEntry; mobile: bo
     [t('pluginLogs.detail.url'), entry.url ?? missing],
   ]
   return (
-    <div className="flex h-[116px] w-full flex-col gap-2 overflow-auto bg-surface-container-low px-[18px] py-2.5">
-      <div className="rounded-chip border border-divider bg-card px-[11px] py-2 font-mono text-label leading-[1.55] text-text-mid break-all whitespace-pre-wrap">
+    <div className="flex h-[116px] w-full flex-col gap-2 overflow-auto bg-surface-container-low px-4.5 py-2.5">
+      <div className="rounded-chip border border-divider bg-card px-3 py-2 font-mono text-label leading-[1.55] text-text-mid break-all whitespace-pre-wrap">
         {entry.message}
       </div>
       <div className="flex flex-wrap gap-x-7 gap-y-2">
@@ -186,7 +186,7 @@ function StatusBanner({ banner, mobile, onReconnect, t }: { banner: StatusBanner
       className={cn(
         'flex items-center gap-2 text-meta font-medium',
         BANNER_TONE[banner.tone],
-        mobile ? 'rounded-ctl px-3 py-2' : 'px-[18px] py-2',
+        mobile ? 'rounded-ctl px-3 py-2' : 'px-4.5 py-2',
       )}
     >
       <StatusDot className="h-[7px] w-[7px] shrink-0" color={BANNER_DOT[banner.tone]} />
@@ -360,7 +360,7 @@ export default function PluginLogsPage() {
     {
       accessorKey: 'time',
       header: t('pluginLogs.colTime'),
-      meta: { width: 76, headerClassName: 'py-2 pl-[18px] pr-0', cellClassName: 'pl-[18px] pr-0 py-0' },
+      meta: { width: 76, headerClassName: 'py-2 pl-4.5 pr-0', cellClassName: 'pl-4.5 pr-0 py-0' },
       cell: ({ row }) => <span className="font-mono text-meta text-text-faint">{formatTime(row.original.time, t('pluginLogs.missingValue'))}</span>,
     },
     {

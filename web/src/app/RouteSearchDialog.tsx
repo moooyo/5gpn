@@ -49,7 +49,7 @@ export default function RouteSearchDialog({ open, onOpenChange }: { open: boolea
           expanded
         />
       </div>
-      <p id="route-search-dialog-hint" className="mt-[190px] flex flex-wrap items-center gap-x-3 px-1 text-meta text-text-faint">
+      <p id="route-search-dialog-hint" className="mt-48 flex flex-wrap items-center gap-x-3 px-1 text-meta text-text-faint">
         <span>{t('topbar.searchHintSelect')}</span>
         <span>{t('topbar.searchHintOpen')}</span>
         <span>{t('topbar.searchHintClose')}</span>

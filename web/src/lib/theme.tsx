@@ -12,6 +12,13 @@ export interface ThemeMeta {
   swatch: string
 }
 
+/**
+ * The swatch is a concrete value because it is painted as an inline
+ * `background`, and an inline style cannot resolve a variable that theme.css
+ * scopes to `[data-theme='…']` while a different theme is active. So it is a
+ * second copy of each theme's primary by necessity — and `theme.test.ts` fails
+ * when the two drift, which is the only thing that made the copy dangerous.
+ */
 export const THEME_CATALOG: readonly ThemeMeta[] = [
   { name: 'light', scheme: 'light', swatch: '#0B57D0' },
   { name: 'dark', scheme: 'dark', swatch: '#A8C7FA' },

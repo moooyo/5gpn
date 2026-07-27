@@ -61,6 +61,10 @@ function useSetupDevice(): [SetupDevice, (next: SetupDevice) => void] {
   return [device, setDevice]
 }
 
+/** The only fixed colours in this console, and deliberately so: a QR code is
+ *  read by a camera, not by a person, and scanners expect dark-on-light with
+ *  full contrast. Following the theme here would make the code unscannable on
+ *  a dark scheme, which is the one thing it must never be. */
 function QRCode({ value, label }: { value: string; label: string }) {
   const { data, size } = useMemo(() => encode(value, { ecc: 'M' }), [value])
   const border = 4
@@ -83,7 +87,7 @@ function QRCode({ value, label }: { value: string; label: string }) {
       shapeRendering="crispEdges"
     >
       <rect width="100%" height="100%" fill="#fff" />
-      <path d={path} fill="#101828" />
+      <path d={path} fill="#000000" />
     </svg>
   )
 }
@@ -110,7 +114,7 @@ function ProfileLink({ url, label }: { url: string; label: string }) {
         type="button"
         onClick={() => void copy()}
         aria-label={label}
-        className="zds-state-layer grid h-ctl w-ctl shrink-0 place-items-center rounded-pill text-text-soft"
+        className="zds-state-layer grid h-field w-field shrink-0 place-items-center rounded-pill text-text-soft md:h-ctl md:w-ctl"
       >
         <CopyIcon className="h-4 w-4" aria-hidden="true" />
       </button>
@@ -201,11 +205,11 @@ export default function SetupGuidePage() {
   ]
 
   return (
-    <div className="flex flex-col gap-4" data-testid="page-setup-guide">
+    <div className="flex flex-col gap-3 md:gap-4" data-testid="page-setup-guide">
       <Card variant="hero" className="overflow-hidden p-0">
         <div className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
           <div className="flex items-start gap-3.5">
-            <span className="grid h-12 w-12 shrink-0 place-items-center rounded-pill bg-[rgb(255_255_255_/_36%)]">
+            <span className="grid h-12 w-12 shrink-0 place-items-center rounded-pill bg-[var(--md-sys-color-tint-on-fill)]">
               <ShieldLockIcon className="h-6 w-6" aria-hidden="true" />
             </span>
             <div>
@@ -213,7 +217,7 @@ export default function SetupGuidePage() {
               <p className="mt-1 max-w-[700px] text-label leading-relaxed opacity-80">{t('setupGuide.intro')}</p>
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-2 rounded-pill bg-[rgb(255_255_255_/_30%)] px-4 py-2 text-label font-medium">
+          <div className="flex shrink-0 items-center gap-2 rounded-pill bg-[var(--md-sys-color-tint-on-fill)] px-4 py-2 text-label font-medium">
             <CheckCircleIcon className="h-4 w-4" aria-hidden="true" />
             {t('setupGuide.dotBadge')}
           </div>
@@ -240,7 +244,7 @@ export default function SetupGuidePage() {
           data-testid="intercept-ca-trust-warning"
           className="flex flex-col gap-3 rounded-card bg-[var(--md-sys-color-warning-container)] p-4 text-[var(--md-sys-color-on-warning-container)] sm:flex-row sm:items-center"
         >
-          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-pill bg-[rgb(255_255_255_/_34%)]">
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-pill bg-[var(--md-sys-color-tint-on-fill)]">
             <ShieldLockIcon className="h-5 w-5" aria-hidden="true" />
           </span>
           <div className="min-w-0 flex-1">
@@ -249,7 +253,7 @@ export default function SetupGuidePage() {
           </div>
           <a
             href={caDownloadURL}
-            className="zds-state-layer inline-flex h-ctl shrink-0 items-center justify-center gap-2 rounded-pill bg-primary px-4 text-label font-medium text-[var(--md-sys-color-on-primary)]"
+            className="zds-state-layer inline-flex h-field shrink-0 items-center justify-center gap-2 rounded-pill bg-primary px-4 text-label font-medium text-[var(--md-sys-color-on-primary)] md:h-ctl"
           >
             <DownloadIcon className="h-4 w-4" aria-hidden="true" />
             {t('setupGuide.interceptCA.trustWarningAction')}

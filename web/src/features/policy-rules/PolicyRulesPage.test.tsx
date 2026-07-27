@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -29,6 +29,21 @@ vi.mock('../../lib/api/client', () => ({
   },
 }))
 import { api } from '../../lib/api/client'
+
+
+/** Layout branches at 767px, matching every other page in this console. */
+function setMobile(mobile: boolean) {
+  vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({
+    matches: mobile && query.includes('max-width: 767px'),
+    media: query,
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  })))
+}
 
 function renderPage(initialPath = '/policy-rules') {
   return render(
@@ -124,6 +139,25 @@ describe('PolicyRulesPage', () => {
     await user.click(screen.getByTestId('policy-apply'))
     await waitFor(() => expect(screen.getByTestId('policy-apply')).toBeDisabled())
     expect(screen.getByTestId('policy-fallback')).toHaveAttribute('data-pending', 'false')
+  })
+
+  /**
+   * The rule list is unbounded, so on a phone the only control that publishes
+   * an edit scrolled away from the edits that needed publishing. The brief
+   * pins it; there is exactly one Apply on screen either way.
+   */
+  it('pins apply to the bottom of the viewport on a phone', async () => {
+    setMobile(true)
+    try {
+      renderPage()
+      await waitFor(() => expect(screen.getByText('netflix.com')).toBeInTheDocument())
+      const bar = screen.getByTestId('policy-apply-bar')
+      expect(bar.className).toContain('sticky')
+      expect(within(bar).getByTestId('policy-apply')).toBeInTheDocument()
+      expect(screen.getAllByTestId('policy-apply')).toHaveLength(1)
+    } finally {
+      setMobile(false)
+    }
   })
 
   it('surfaces an apply validation error as a toast, not a crash', async () => {

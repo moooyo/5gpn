@@ -136,7 +136,7 @@ export default function LogsPage() {
   }, [entries])
 
   return (
-    <div className="flex flex-col gap-4" data-testid="page-logs">
+    <div className="flex flex-col gap-3 md:gap-4" data-testid="page-logs">
       <div className="flex flex-wrap items-center gap-3 px-1">
         <p className="min-w-[220px] flex-1 text-label text-text-faint">{t('logs.intro')}</p>
         <LiveToggle
@@ -151,7 +151,7 @@ export default function LogsPage() {
         />
       </div>
 
-      <Card variant="tonal" className="flex flex-col gap-2 p-3 sm:p-4">
+      <Card variant="tonal" className="flex flex-col gap-2 p-3 md:p-4">
         <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
           {/* The pills ARE the legend: same slot, same order and same wording
               as the table's decision column, so the row below them no longer

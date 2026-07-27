@@ -74,7 +74,7 @@ export function RoutingRuleList({
       {rules.map((rule, index) => {
         const view = describeRoutingRule(rule)
         return (
-          <li key={`${index}:${view.kind}:${view.value}`} className="flex min-w-0 items-center gap-2 rounded-chip bg-[rgb(0_0_0_/_6%)] px-2 py-1.5">
+          <li key={`${index}:${view.kind}:${view.value}`} className="flex min-w-0 items-center gap-2 rounded-chip bg-[var(--md-sys-color-tint-inset)] px-2 py-1.5">
             <span className="shrink-0 font-mono text-meta opacity-70">{view.kind}</span>
             <span className="min-w-0 flex-1 break-all font-mono text-meta font-medium">{view.value}</span>
             {view.constraints.length > 0 ? (

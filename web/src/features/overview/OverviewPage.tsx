@@ -4,6 +4,7 @@ import { NetworkCheckIcon, RuleIcon, SpeedIcon } from '../../components/icons'
 import { DonutChart, HBarChart, Sparkline, type DonutSegment, type HBarRow } from '../../components/charts'
 import { Card, LiveToggle, StatusDot } from '../../components/ds'
 import { useStatus } from '../../lib/StatusContext'
+import { useMediaQuery } from '../../lib/useMediaQuery'
 import { cn } from '../../lib/cn'
 import { relativeTime } from '../../format'
 import {
@@ -122,6 +123,8 @@ export default function OverviewPage() {
   const { t, i18n } = useTranslation()
   const { status, statusUpdatedAt, statusStale, refreshNow } = useStatus()
   const [live, setLive] = useState(true)
+  const isMobile = useMediaQuery('(max-width: 767px)')
+  const donutSize = isMobile ? 104 : 132
   const previousPoint = useRef<QpsPoint | null>(null)
   const [qpsSeries, setQpsSeries] = useState<number[]>([])
   // Sample arrival times, pushed and capped in lockstep with `qpsSeries`, so
@@ -191,7 +194,7 @@ export default function OverviewPage() {
   const qpsSpanMs = qpsAt.length > 1 ? qpsAt[qpsAt.length - 1] - qpsAt[0] : 0
 
   return (
-    <div className="flex flex-col gap-4" data-testid="page-overview">
+    <div className="flex flex-col gap-3 md:gap-4" data-testid="page-overview">
       <div className="flex flex-wrap items-center gap-3 px-1">
         <p className="min-w-[220px] flex-1 text-label text-text-faint">{t('overview.intro')}</p>
         {/* Freshness beside the live pill. Pausing or a failing poll used to
@@ -231,8 +234,11 @@ export default function OverviewPage() {
 
       {/* QPS is drawn once. It used to appear both here and in a full-size card
           below — the same series, the same number, twice on one screen. */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <Card variant="hero" className="min-h-[150px] overflow-hidden p-5 sm:col-span-2">
+      {/* Two columns from the narrowest width up, with the hero spanning
+          both. The two metric tiles are short and stacking them on a phone
+          pushed the decision card below a second screenful for no gain. */}
+      <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
+        <Card variant="hero" className="col-span-2 min-h-[150px] overflow-hidden p-5">
           <div className="flex items-start justify-between gap-4">
             <div>
               <div className="text-body font-medium">{t('overview.qpsLive')}</div>
@@ -241,7 +247,7 @@ export default function OverviewPage() {
               </div>
             </div>
             {delta !== null ? (
-              <span className="rounded-pill bg-[rgb(255_255_255_/_35%)] px-3 py-1 font-mono text-meta font-medium">
+              <span className="rounded-pill bg-[var(--md-sys-color-tint-on-fill)] px-3 py-1 font-mono text-meta font-medium">
                 {`${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%`}
               </span>
             ) : null}
@@ -271,7 +277,7 @@ export default function OverviewPage() {
         />
       </div>
 
-      <Card variant="tonal" className="p-5 sm:p-6">
+      <Card variant="tonal" className="p-4 md:p-6">
         <div className="mb-5 flex items-baseline justify-between gap-3">
           <div>
             <h2 className="text-title font-medium text-text-strong">{t('overview.traceTitle')}</h2>
@@ -290,7 +296,10 @@ export default function OverviewPage() {
         <Card className="p-5">
           <h2 className="mb-4 text-title font-medium text-text-strong">{t('overview.decisionDistribution')}</h2>
           <div className="flex items-center gap-5">
-            <DonutChart segments={decisionSegments} height={132} width={132} centerLabel={formatter.format(decisionTotal)} className="shrink-0" />
+            {/* Smaller on a phone: at 132px the ring and its legend cannot
+                share a row at 390px, and the legend is what makes the ring
+                readable. */}
+            <DonutChart segments={decisionSegments} height={donutSize} width={donutSize} centerLabel={formatter.format(decisionTotal)} className="shrink-0" />
             <div className="flex min-w-0 flex-1 flex-col gap-2.5">
               {decisionSegments.map((segment) => (
                 <div key={segment.name} className="flex items-center gap-2">

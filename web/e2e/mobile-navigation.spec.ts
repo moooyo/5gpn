@@ -149,6 +149,8 @@ test('iPhone setup guide distinguishes Android DoT from unsupported Android MITM
   // would make it relevant — not five steps for a certificate with no effect.
   const collapsed = page.getByTestId('intercept-ca-collapsed')
   await expect(collapsed).toContainText('网关拦截总开关未启用')
-  await expect(collapsed.getByRole('link', { name: /去开启/ })).toHaveAttribute('href', '/settings')
+  // Anchored: settings is a five-section page, so landing at its top leaves
+  // the operator hunting for interception right after being told where to go.
+  await expect(collapsed.getByRole('link', { name: /去开启/ })).toHaveAttribute('href', '/settings#settings-intercept')
   await expectNoHorizontalOverflow(page)
 })

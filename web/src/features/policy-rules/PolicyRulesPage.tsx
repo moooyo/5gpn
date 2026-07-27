@@ -6,6 +6,7 @@ import { Button, Card, Modal, toast } from '../../components/ds'
 import { api } from '../../lib/api/client'
 import type { FallbackPolicyKind, PolicyRule } from '../../lib/api/types'
 import { cn } from '../../lib/cn'
+import { useMediaQuery } from '../../lib/useMediaQuery'
 import { PolicyRuleDialog } from './PolicyRuleDialog'
 import { PolicyRulesTable } from './PolicyRulesTable'
 import { FallbackControl } from './FallbackControl'
@@ -53,6 +54,7 @@ export default function PolicyRulesPage() {
   // so it belongs in the same diff. FallbackControl still owns loading and
   // persisting it; the page only needs the settled value to compare.
   const [fallback, setFallback] = useState<FallbackPolicyKind | null>(null)
+  const isMobile = useMediaQuery('(max-width: 767px)')
   // The resolve test links here with the rule its result matched. The
   // highlight fades on its own; the row itself is not otherwise special.
   const [searchParams, setSearchParams] = useSearchParams()
@@ -128,8 +130,39 @@ export default function PolicyRulesPage() {
 
   const upToDate = appliedSnapshot !== null && !dirty
 
+  // One definition, two positions. Below `md` this rides in a bar pinned to the
+  // bottom of the viewport instead of the header card: the rule list is
+  // unbounded, so on a phone the only control that publishes an edit scrolled
+  // away from the edits that needed publishing.
+  const applyButton = (
+    <Button
+      type="button"
+      // The brief fills this button with `warning` when dirty. The whole card
+      // already carries that container colour, so a warning button on it reads
+      // as one undifferentiated amber block; `primary` is what keeps the action
+      // legible against the state it sits on.
+      variant={upToDate ? 'secondary' : 'primary'}
+      onClick={() => void handleApply()}
+      disabled={applying || upToDate}
+      className={isMobile ? 'h-action w-full' : undefined}
+      data-testid="policy-apply"
+    >
+      <RocketIcon className="h-[18px] w-[18px]" aria-hidden="true" />
+      {applying
+        ? t('policyRules.applying')
+        : upToDate
+          ? t('policyRules.applyUpToDate')
+          : t('policyRules.apply')}
+      {dirty ? (
+        <span className="ml-1 inline-flex min-w-5 items-center justify-center rounded-pill bg-[var(--md-sys-color-on-primary)] px-1.5 font-mono text-meta font-semibold text-primary">
+          {pending.count}
+        </span>
+      ) : null}
+    </Button>
+  )
+
   return (
-    <div className="flex flex-col gap-4" data-testid="page-policy-rules">
+    <div className="flex flex-col gap-3 md:gap-4" data-testid="page-policy-rules">
       {/* Whole card carries the state, not just the button: "three of my edits
           are not live" is a fact about the page, and it has to survive the
           operator scrolling past a single control. */}
@@ -157,29 +190,7 @@ export default function PolicyRulesPage() {
             <AddIcon className="h-[18px] w-[18px]" aria-hidden="true" />
             {t('policyRules.newRule')}
           </Button>
-          <Button
-            type="button"
-            // The brief fills this button with `warning` when dirty. The whole
-            // card already carries that container colour, so a warning button
-            // on it reads as one undifferentiated amber block; `primary` is
-            // what keeps the action legible against the state it sits on.
-            variant={upToDate ? 'secondary' : 'primary'}
-            onClick={() => void handleApply()}
-            disabled={applying || upToDate}
-            data-testid="policy-apply"
-          >
-            <RocketIcon className="h-[18px] w-[18px]" aria-hidden="true" />
-            {applying
-              ? t('policyRules.applying')
-              : upToDate
-                ? t('policyRules.applyUpToDate')
-                : t('policyRules.apply')}
-            {dirty ? (
-              <span className="ml-1 inline-flex min-w-5 items-center justify-center rounded-pill bg-[var(--md-sys-color-on-primary)] px-1.5 font-mono text-meta font-semibold text-primary">
-                {pending.count}
-              </span>
-            ) : null}
-          </Button>
+          {isMobile ? null : applyButton}
         </div>
       </Card>
 
@@ -248,6 +259,18 @@ export default function PolicyRulesPage() {
         >
           <p className="text-body text-text-mid">{t('policyRules.deleteConfirm', { name: deleteTarget.matcher.value })}</p>
         </Modal>
+      ) : null}
+
+      {/* Pinned so the action that publishes an edit cannot scroll away from
+          the edits. `sticky` rather than `fixed`: it stays inside the page's
+          own column, so it never overlaps the drawer or the toast stack. */}
+      {isMobile ? (
+        <div
+          data-testid="policy-apply-bar"
+          className="sticky bottom-0 -mx-1 mt-1 border-t border-divider bg-bg px-1 pb-2 pt-2"
+        >
+          {applyButton}
+        </div>
       ) : null}
     </div>
   )

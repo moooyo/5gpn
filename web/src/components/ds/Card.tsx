@@ -33,5 +33,5 @@ export function CardHeader({ title, children, className, ...props }: CardHeaderP
 export type CardBodyProps = HTMLAttributes<HTMLDivElement>
 
 export function CardBody({ className, ...props }: CardBodyProps) {
-  return <div className={cn('p-5', className)} {...props} />
+  return <div className={cn('p-4 md:p-5', className)} {...props} />
 }

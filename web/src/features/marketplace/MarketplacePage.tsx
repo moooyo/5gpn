@@ -200,12 +200,16 @@ function MarketplaceCard({ item, installed, busy, onInstall, onManage, onUpdate 
   const permissions = permissionSummary(entry)
   return (
     <article
-      className="zds-card flex min-w-0 flex-col gap-4 rounded-card bg-surface-container-low px-5 py-[18px] sm:flex-row sm:gap-[18px]"
+      className="zds-card flex min-w-0 flex-col gap-4 rounded-card bg-surface-container-low px-5 py-4.5 sm:flex-row sm:gap-4.5"
       aria-labelledby={`marketplace-${source.id}-${entry.id}`}
       data-testid={`marketplace-entry-${entry.id}`}
     >
+      {/* Icon and title share a row on a phone. As a sibling of the whole text
+          column the avatar took a row of its own under `flex-col`, so the name
+          of the extension started on the second line of its own card. */}
+      <div className="flex min-w-0 items-start gap-3.5 sm:contents">
       <MarketplaceAvatar entry={entry} />
-      <div className="flex min-w-0 flex-1 flex-col gap-[7px]">
+      <div className="flex min-w-0 flex-1 flex-col gap-2">
         <div className="min-w-0 truncate">
           <h2 id={`marketplace-${source.id}-${entry.id}`} className="inline text-title font-medium text-text-strong">{entry.name}</h2>
           {outdated ? (
@@ -220,12 +224,12 @@ function MarketplaceCard({ item, installed, busy, onInstall, onManage, onUpdate 
         </div>
         <div className="truncate text-label text-text-faint">
           <span className="font-mono">{entry.id}</span>
-          <span className="mx-[7px] opacity-40">·</span>{sourceDomain}
-          <span className="mx-[7px] opacity-40">·</span>{source.metadata_name}
-          {entry.license ? <><span className="mx-[7px] opacity-40">·</span>{entry.license.spdx}</> : null}
+          <span className="mx-2 opacity-40">·</span>{sourceDomain}
+          <span className="mx-2 opacity-40">·</span>{source.metadata_name}
+          {entry.license ? <><span className="mx-2 opacity-40">·</span>{entry.license.spdx}</> : null}
         </div>
         {entry.description ? <p className="max-w-[760px] text-pretty text-body leading-[1.5] text-text-soft">{entry.description}</p> : null}
-        <div className="mt-1 flex flex-wrap items-center gap-[7px]">
+        <div className="mt-1 flex flex-wrap items-center gap-2">
           <MetaChip icon={DnsIcon} tone="blue">{t('marketplace.captureCount', { count: entry.capabilities.capture_host_count })}</MetaChip>
           <MetaChip icon={BoltIcon} tone="amber">{t('marketplace.actionCount', { count: entry.capabilities.action_count })}</MetaChip>
           <MetaChip icon={TagIcon} mono>{entry.manifest_digest.slice(0, 10)}…</MetaChip>
@@ -238,6 +242,7 @@ function MarketplaceCard({ item, installed, busy, onInstall, onManage, onUpdate 
             {entry.tags.map((tag) => <span key={tag}>#{tag}</span>)}
           </div>
         ) : null}
+      </div>
       </div>
       <div className="flex shrink-0 items-center justify-between gap-3 sm:min-w-[170px] sm:flex-col sm:items-end">
         <span className={cn(
@@ -253,7 +258,7 @@ function MarketplaceCard({ item, installed, busy, onInstall, onManage, onUpdate 
             target="_blank"
             rel="noreferrer"
             aria-label={t('marketplace.openDocumentation', { name: entry.name })}
-            className="zds-state-layer grid h-ctl w-ctl place-items-center rounded-pill border border-outline text-text-soft"
+            className="zds-state-layer grid h-field w-field place-items-center rounded-pill border border-outline text-text-soft md:h-ctl md:w-ctl"
           >
             <ExternalLinkIcon className="h-[18px] w-[18px]" aria-hidden="true" />
           </a>
@@ -261,17 +266,17 @@ function MarketplaceCard({ item, installed, busy, onInstall, onManage, onUpdate 
             // The update itself is a reviewed snapshot replacement, which is
             // the extensions page's confirmation flow — this is the entry
             // point to it, not a second copy of it.
-            <Button className="h-ctl px-4" onClick={onUpdate} data-testid={`marketplace-update-${entry.id}`}>
+            <Button className="px-4 md:h-ctl" onClick={onUpdate} data-testid={`marketplace-update-${entry.id}`}>
               <UploadIcon className="h-[18px] w-[18px]" aria-hidden="true" />
               {t('marketplace.updateTo', { version: entry.version })}
             </Button>
           ) : installed ? (
-            <Button variant="secondary" className="h-ctl px-4" onClick={onManage}>
+            <Button variant="secondary" className="px-4 md:h-ctl" onClick={onManage}>
               <SettingsIcon className="h-[18px] w-[18px]" aria-hidden="true" />
               {t('marketplace.manageSnapshot')}
             </Button>
           ) : (
-            <Button className="h-ctl px-[22px]" disabled={busy} onClick={onInstall}>
+            <Button className="px-5 md:h-ctl" disabled={busy} onClick={onInstall}>
               {busy ? <ProgressIcon className="h-[18px] w-[18px] animate-spin" aria-hidden="true" /> : <DownloadIcon className="h-[18px] w-[18px]" aria-hidden="true" />}
               {busy ? t('marketplace.installing') : t('marketplace.installSnapshot')}
             </Button>
@@ -455,7 +460,7 @@ export default function MarketplacePage() {
             <h1 id="marketplace-sources-title" className="text-body font-bold text-text-strong">{t('marketplace.sources')}</h1>
             <span className="text-label text-text-faint">{t('marketplace.connectedSources', { count: view.sources.length })}</span>
             <div className="flex-1" />
-            <Button variant="tonal" className="h-ctl px-[18px]" onClick={() => setAddOpen(true)}>
+            <Button variant="tonal" className="px-4.5 md:h-ctl" onClick={() => setAddOpen(true)}>
               <AddLinkIcon className="h-5 w-5" aria-hidden="true" />
               {t('marketplace.addMarketplace')}
             </Button>
@@ -506,7 +511,7 @@ export default function MarketplacePage() {
         </section>
 
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
-          <label className="flex h-field w-full max-w-[460px] items-center gap-3 rounded-pill bg-surface-container-high px-[18px] text-text-faint focus-within:ring-2 focus-within:ring-primary lg:flex-1">
+          <label className="flex h-field w-full max-w-[460px] items-center gap-3 rounded-pill bg-surface-container-high px-4.5 text-text-faint focus-within:ring-2 focus-within:ring-primary lg:flex-1">
             <SearchIcon className="h-[22px] w-[22px] shrink-0" aria-hidden="true" />
             <span className="sr-only">{t('marketplace.search')}</span>
             <input
@@ -532,7 +537,7 @@ export default function MarketplacePage() {
           </div>
           <button
             type="button"
-            className="zds-state-layer grid h-ctl w-ctl shrink-0 place-items-center rounded-pill border border-outline text-text-soft disabled:opacity-40"
+            className="zds-state-layer grid h-field w-field shrink-0 place-items-center rounded-pill border border-outline text-text-soft disabled:opacity-40 md:h-ctl md:w-ctl"
             aria-label={t('marketplace.refresh')}
             disabled={refreshing || view.sources.length === 0}
             onClick={() => void refreshMarketplaces()}
@@ -567,7 +572,7 @@ export default function MarketplacePage() {
             ))}
           </div>
         ) : (
-          <div className="flex flex-col items-center gap-2 py-[72px] text-center">
+          <div className="flex flex-col items-center gap-2 py-18 text-center">
             <SearchIcon className="h-12 w-12 text-text-faint opacity-50" aria-hidden="true" />
             <div className="text-title font-medium text-text-strong">{t('marketplace.noMatches')}</div>
             <p className="text-body text-text-faint">{t('marketplace.noMatchesHint')}</p>

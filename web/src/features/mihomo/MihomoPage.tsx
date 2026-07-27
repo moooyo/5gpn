@@ -188,7 +188,7 @@ export default function MihomoPage() {
   ].filter(Boolean).join(' · ')
 
   return (
-    <div className="flex flex-col gap-4" data-testid="page-mihomo">
+    <div className="flex flex-col gap-3 md:gap-4" data-testid="page-mihomo">
       <p className="px-1 text-label text-text-faint">{t('mihomo.intro')}</p>
 
       <Card className="p-5 shadow-none">
@@ -281,7 +281,7 @@ export default function MihomoPage() {
           // One row, highest state first: disconnected outranks paused, and the
           // lower-priority condition rides along as supplementary text rather
           // than as a second banner competing for the same space.
-          <div className="flex flex-wrap items-center gap-2 border-b border-divider px-3.5 py-2 text-meta font-medium text-text-soft md:px-[18px]" role="status" aria-live="polite">
+          <div className="flex flex-wrap items-center gap-2 border-b border-divider px-3.5 py-2 text-meta font-medium text-text-soft md:px-4.5" role="status" aria-live="polite">
             <StatusDot color={connected ? 'var(--color-green)' : 'var(--color-red)'} />
             <span>{connected ? t('mihomo.connected') : t('mihomo.disconnected')}</span>
             {paused ? (

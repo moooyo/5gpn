@@ -1317,21 +1317,31 @@ controls live in the top-bar profile menu and Settings appearance.
 
 Scale is tokenized, not hand-written. `styles/theme.css` declares seven type
 steps (11/12/13/15/20/28/40px, nothing smaller than 11px), five radius steps
-(chip/ctl/card/dialog/pill), and five control heights (chip 32, row 36, ctl 40,
+(chip/ctl/card/dialog/pill), five control heights (chip 32, row 36, ctl 40,
 field 44, action 48 — `action` is the mobile primary/secondary button, which is
-taller than an icon button and was previously written as a bare `h-12`).
-`styles/scale.test.ts` fails a bare `text-[Npx]` or `rounded-[Npx]` anywhere in
-`src/**`, and a bare control-range height inside `components/ds`: the
-primitives are what every page inherits, so a bypass there propagates, while a
-feature-level `h-12 w-12` is usually a decorative circle around an icon and no
-pattern can tell that from a control. A height that steps down does so at `md`.
-Pages branch their mobile layout on `(max-width: 767px)` while Tailwind's `sm`
-begins at 640px, so a step written at `sm` returned a control to its desktop
-size inside a layout that was still mobile — a 32px chip beside a 44px input in
-the same row. Because the steps are named, `lib/cn.ts` must keep teaching
+taller than an icon button and was previously written as a bare `h-12`), and
+two translucent tints, one for a wash on a filled container and one for an
+inset, defined per theme so a dark scheme inverts them rather than washing out.
+`styles/scale.test.ts` fails a bare `text-[Npx]` or `rounded-[Npx]` and any
+padding, margin or gap that leaves the 4px grid, anywhere in `src/**`; it also
+fails a bare control-range height inside `components/ds`, because the
+primitives are what every page inherits, while a feature-level `h-12 w-12` is
+usually a decorative circle around an icon and no pattern can tell that from a
+control. A height that steps down does so at `md`. Pages branch their mobile
+layout on `(max-width: 767px)` while Tailwind's `sm` begins at 640px, so a step
+written at `sm` returned a control to its desktop size inside a layout that was
+still mobile — a 32px chip beside a 44px input in the same row. Card padding
+and card gaps follow the same breakpoint and get smaller on a phone, not
+larger. Because the steps are named, `lib/cn.ts` must keep teaching
 tailwind-merge about them — an unknown `text-<word>` is otherwise classified as
 a text colour and silently strips the colour from any class list that sets
-both. Touch targets are 44px on mobile.
+both. Touch targets are 44px on mobile, and the two pages whose primary action
+is destructive or publishes an edit — policy rules and the mihomo config
+editor — pin that action to the bottom of the viewport there, because both sit
+above an unbounded scroll. `lib/theme.test.ts` pins each theme-picker swatch to
+that theme's own declared primary: the swatch has to be a concrete value
+because it is painted inline, so the copy is deliberate and the drift is what
+is guarded.
 
 Colour carries one of two meanings and never both. Distinguishing N peer
 entities — decisions, plugins, chart series — uses the categorical

@@ -68,7 +68,7 @@ function DecisionOrder({ stages }: { stages: Stage[] }) {
         {stages.map((row, index) => (
           <li
             key={row.stage}
-            className={`flex items-center gap-3.5 py-[11px] ${index < stages.length - 1 ? 'border-b border-surface-container-low' : ''}`}
+            className={`flex items-center gap-3.5 py-3 ${index < stages.length - 1 ? 'border-b border-surface-container-low' : ''}`}
           >
             <StageDot state={row.state} />
             <span

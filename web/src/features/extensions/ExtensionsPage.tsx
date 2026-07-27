@@ -584,7 +584,7 @@ function ExtensionUpdateModal({
           </DialogSection>
           {review.candidate.network_origins.length > 0 ? <DialogSection label={t('extensions.networkOriginsTitle')}>
             <div className="flex max-h-36 flex-wrap gap-1.5 overflow-y-auto rounded-ctl bg-[var(--md-sys-color-warning-container)] p-3 text-[var(--md-sys-color-on-warning-container)]">
-              {review.candidate.network_origins.map((origin) => <code key={origin} title={origin} className="inline-block min-w-0 max-w-full break-all rounded-chip bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-meta">{origin}</code>)}
+              {review.candidate.network_origins.map((origin) => <code key={origin} title={origin} className="inline-block min-w-0 max-w-full break-all rounded-chip bg-[var(--md-sys-color-tint-inset)] px-2 py-1 font-mono text-meta">{origin}</code>)}
             </div>
           </DialogSection> : null}
           {(review.candidate.routing_rules?.length ?? 0) > 0 ? <DialogSection label={t('extensions.routingRulesTitle')}>
@@ -635,7 +635,7 @@ function EnableExtensionModal({
           <div className="font-semibold">{t('extensions.networkOriginsTitle')}</div>
           <p className="mt-1">{t('extensions.networkOriginsWarning')}</p>
           <div className="mt-3 flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">
-            {module.network_origins.map((origin) => <code key={origin} title={origin} className="inline-block min-w-0 max-w-full break-all rounded-chip bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-meta">{origin}</code>)}
+            {module.network_origins.map((origin) => <code key={origin} title={origin} className="inline-block min-w-0 max-w-full break-all rounded-chip bg-[var(--md-sys-color-tint-inset)] px-2 py-1 font-mono text-meta">{origin}</code>)}
           </div>
         </section> : <DialogSection label={t('extensions.networkOriginsTitle')}><p className="text-label text-text-soft">{t('extensions.networkOriginsNone')}</p></DialogSection>}
         {module.egress_group_required || module.egress_group ? <DialogSection label={t('extensions.egressGroupTitle')}><code className="block font-mono text-label text-text-strong">{module.egress_group || t('extensions.egressGroupUnset')}</code></DialogSection> : null}
@@ -993,10 +993,10 @@ export default function ExtensionsPage() {
   }
 
   return (
-    <div className="flex flex-col gap-4" data-testid="page-extensions">
+    <div className="flex flex-col gap-3 md:gap-4" data-testid="page-extensions">
       <div className={cn('flex flex-col gap-3 rounded-card px-5 py-4 sm:flex-row sm:items-center sm:justify-between', trustState === 'ready' ? 'bg-[var(--md-sys-color-success-container)] text-[var(--md-sys-color-on-success-container)]' : trustState === 'master' ? 'bg-[var(--md-sys-color-warning-container)] text-[var(--md-sys-color-on-warning-container)]' : 'bg-primary-container text-on-primary-container')} data-testid="mitm-readiness-notice">
         <div className="flex items-start gap-2.5">{trustState === 'ready' ? <VerifiedIcon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" /> : <ShieldLockIcon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />}<div><div className="text-body font-semibold">{t(`extensions.readiness.${trustState}.title`)}</div><p className="mt-0.5 text-label leading-relaxed opacity-80">{t(`extensions.readiness.${trustState}.body`, { count: activeCount })}</p></div></div>
-        <Link className={cn('zds-state-layer inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-pill px-5 text-label font-medium', trustState === 'ready' ? 'bg-[rgb(0_0_0_/_8%)]' : 'bg-primary text-[var(--md-sys-color-on-primary)]')} to={trustState === 'master' ? '/settings' : '/setup-guide'}>{trustState !== 'ready' ? <LinkIcon className="h-4 w-4" aria-hidden="true" /> : null}{t(`extensions.readiness.${trustState}.action`)}</Link>
+        <Link className={cn('zds-state-layer inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-pill px-5 text-label font-medium', trustState === 'ready' ? 'bg-[var(--md-sys-color-tint-inset)]' : 'bg-primary text-[var(--md-sys-color-on-primary)]')} to={trustState === 'master' ? '/settings' : '/setup-guide'}>{trustState !== 'ready' ? <LinkIcon className="h-4 w-4" aria-hidden="true" /> : null}{t(`extensions.readiness.${trustState}.action`)}</Link>
       </div>
 
       {loading && !view ? <Card><CardBody className="text-center text-label text-text-faint">{t('common.loading')}</CardBody></Card> : null}

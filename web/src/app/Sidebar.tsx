@@ -86,7 +86,7 @@ export function Sidebar({ className, onNavigate, onClose, testId }: SidebarProps
       <nav className="flex flex-1 flex-col overflow-x-hidden overflow-y-auto" aria-label={t('nav.primary')}>
         {NAV_GROUPS.map((group) => (
           <div key={group.id} className="mb-2">
-            <div className="px-[18px] pb-1 pt-3 text-meta font-medium tracking-[.06em] text-text-faint">
+            <div className="px-4.5 pb-1 pt-3 text-meta font-medium tracking-[.06em] text-text-faint">
               {t(group.labelKey)}
             </div>
             <div className="flex flex-col gap-0.5">
@@ -96,7 +96,7 @@ export function Sidebar({ className, onNavigate, onClose, testId }: SidebarProps
                   to={item.path}
                   onClick={onNavigate}
                   className={({ isActive }) => cn(
-                    'sidebar-tab zds-state-layer flex h-field items-center gap-3 rounded-pill px-[18px] text-body font-medium',
+                    'sidebar-tab zds-state-layer flex h-field items-center gap-3 rounded-pill px-4.5 text-body font-medium',
                     isActive
                       ? 'sidebar-tab-active bg-secondary-container text-on-secondary-container'
                       : 'text-text-mid',
@@ -125,7 +125,7 @@ export function Sidebar({ className, onNavigate, onClose, testId }: SidebarProps
 
 function KernelStatusCard() {
   const { t } = useTranslation()
-  const { dnsState, mihomoState, interceptState } = useStatus()
+  const { status, intercept, dnsState, mihomoState, interceptState } = useStatus()
 
   return (
     <div className="mt-3 flex flex-col gap-2 rounded-card bg-surface-container-low p-3.5">
@@ -133,9 +133,13 @@ function KernelStatusCard() {
         <MemoryIcon className="h-4 w-4" aria-hidden="true" />
         {t('topbar.runtimeState')}
       </div>
-      <KernelRow title={t('topbar.kernelDns')} state={dnsState} />
-      <KernelRow title="mihomo" state={mihomoState} />
-      <KernelRow title={t('sidebar.intercept')} state={interceptState} />
+      <KernelRow title={t('topbar.kernelDns')} sub={status?.dot_domain ? `${status.dot_domain}:853` : undefined} state={dnsState} />
+      <KernelRow title="mihomo" sub={mihomoState === 'healthy' ? t('sidebar.kernelGatewaySub') : undefined} state={mihomoState} />
+      <KernelRow
+        title={t('sidebar.intercept')}
+        sub={intercept?.running ? t('sidebar.kernelPluginsSub', { count: intercept.active_plugins }) : undefined}
+        state={interceptState}
+      />
     </div>
   )
 }
@@ -147,7 +151,7 @@ const HEALTH_PRESENTATION: Record<HealthState, { color: string; className: strin
   down: { color: 'var(--color-red)', className: 'text-red', labelKey: 'common.healthDown' },
 }
 
-function KernelRow({ title, state }: { title: string; state: HealthState }) {
+function KernelRow({ title, sub, state }: { title: string; sub?: string; state: HealthState }) {
   const { t } = useTranslation()
   const presentation = HEALTH_PRESENTATION[state]
   return (
@@ -155,7 +159,13 @@ function KernelRow({ title, state }: { title: string; state: HealthState }) {
     // at for long stretches, and 10px was the smallest thing in the chrome.
     <div className="flex min-h-row items-center gap-2.5 rounded-chip px-1 py-1.5">
       <StatusDot color={presentation.color} pulse={state === 'checking'} />
-      <span className="min-w-0 flex-1 truncate text-label font-medium text-text-strong">{title}</span>
+      <span className="min-w-0 flex-1 truncate">
+        <span className="block truncate text-label font-medium text-text-strong">{title}</span>
+        {/* What each kernel is actually doing, at 11px. The draft carries it on
+            desktop and drops it on a phone, where the drawer is already the
+            width of the viewport and the state word is the answer. */}
+        {sub ? <span className="hidden truncate font-mono text-meta text-text-faint md:block">{sub}</span> : null}
+      </span>
       <span className={cn('text-label font-medium', presentation.className)}>{t(presentation.labelKey)}</span>
     </div>
   )
