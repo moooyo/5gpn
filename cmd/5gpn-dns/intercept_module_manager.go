@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,6 +50,10 @@ type InterceptModuleManager struct {
 	// responsible for the sidecar's on-disk layout, and neither side could name
 	// a version or say which state the other believed was live.
 	sidecar *SidecarClient
+	// sidecarStart bounds how long a master enable waits for the sidecar to
+	// come up after the configuration file is written. Zero means the default;
+	// tests shorten it so they do not sleep through a real start-up window.
+	sidecarStart time.Duration
 	// overlay, when set, publishes routing as typed generations instead of
 	// rewriting the operator's mihomo YAML. Selecting it is a startup decision
 	// recorded in the overlay journal, not a per-call one: the anchored config
@@ -111,23 +116,96 @@ func (m *InterceptModuleManager) SetSidecarClient(client *SidecarClient) {
 	m.mu.Unlock()
 }
 
+// sidecarStartWait bounds how long a master enable waits for the sidecar to
+// come up after the configuration file is written. Short enough that the
+// manager lock is not held for long, long enough for the path unit to start a
+// process that takes about a second.
+const sidecarStartWait = 6 * time.Second
+
 // publishSidecarDocument puts the candidate document into effect in the sidecar.
 //
-// Both paths preserve the ordering the transaction depends on: the sidecar
-// holds the new document before the certificate wait and before mihomo
-// publishes, so capture traffic never arrives at a processor that cannot serve
-// it.
+// The ordering the transaction depends on is that the sidecar holds the new
+// document before the certificate wait and before mihomo publishes, so capture
+// traffic never arrives at a processor that cannot serve it.
+//
+// Which channel carries it is decided per call rather than once at startup. The
+// sidecar's unit refuses to run while the MITM master is off, so its socket is
+// always gone by the time an operator turns the master back on — a client
+// installed at boot failed every such enable for want of the very process the
+// enable exists to start, which made the master switch a one-way door.
+//
+// Called with m.mu held (see mutate), so the client is read without taking it.
 func (m *InterceptModuleManager) publishSidecarDocument(ctx context.Context, body []byte) error {
-	if m.sidecar == nil {
+	client := m.sidecar
+	if client == nil {
 		return m.store.writeAtomicContext(ctx, body)
 	}
-	if _, err := m.sidecar.PublishBundle(ctx, interceptBundleID(body), body); err != nil {
+	if sidecarSocketPresent(client) {
+		if _, err := client.PublishBundle(ctx, interceptBundleID(body), body); err != nil {
+			return err
+		}
+		// The file is still written while both paths are supported, so a
+		// downgrade to a build without the API finds the state it expects. It is
+		// no longer what the sidecar reads.
+		return m.store.writeAtomicContext(ctx, body)
+	}
+
+	// No socket: write the file first, because that is what the runtime path
+	// unit watches and what the sidecar cold starts from, then push once it is
+	// listening. Writing alone is not enough — a sidecar serving the file has no
+	// bundle live, so readiness is never asserted and capture stays fail-closed
+	// indefinitely even though every step reported success.
+	if err := m.store.writeAtomicContext(ctx, body); err != nil {
 		return err
 	}
-	// The file is still written while both paths are supported, so a downgrade
-	// to a build without the API finds the state it expects. It is no longer
-	// what the sidecar reads.
-	return m.store.writeAtomicContext(ctx, body)
+	wait := m.sidecarStart
+	if wait <= 0 {
+		wait = sidecarStartWait
+	}
+	if !waitForSidecarSocket(ctx, client, wait) {
+		log.Printf("intercept: sidecar did not start within %s; it serves the configuration file until the next transaction", wait)
+		return nil
+	}
+	if _, err := client.PublishBundle(ctx, interceptBundleID(body), body); err != nil {
+		// The document is already durable and correct, so the transaction
+		// stands. The overlay generation published next asserts processor
+		// readiness and stays fail-closed on its own if the sidecar never
+		// adopts the bundle, which is the safe direction to fail.
+		log.Printf("intercept: sidecar started but did not adopt the bundle (%v); it serves the configuration file", err)
+	}
+	return nil
+}
+
+// sidecarSocketPresent reports whether the control API is there to talk to right
+// now. A socket that vanishes between this check and the call only costs the
+// transaction the error it would have had anyway.
+func sidecarSocketPresent(client *SidecarClient) bool {
+	path := client.SocketPath()
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// waitForSidecarSocket polls until the control socket appears, the deadline
+// passes, or the caller gives up. Polling rather than watching: the wait is
+// seconds long and only happens on a master enable.
+func waitForSidecarSocket(ctx context.Context, client *SidecarClient, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for {
+		if sidecarSocketPresent(client) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
 }
 
 // interceptBundleID derives a stable bundle identity from the document itself,

@@ -182,6 +182,72 @@ func TestOverlayGenerationIDIsDeterministic(t *testing.T) {
 	}
 }
 
+// The id must be a function of the whole TRANSACTION, not just the desired
+// state it lands on. mihomo's store keys generations by id and refuses to
+// re-stage one whose stored digest differs — and that digest covers the parent,
+// the transition, and the artifact digests, none of which the id used to.
+//
+// Turning the MITM master off and back on walks exactly this path: the enable
+// reaches the same routing state the disable revoked, but from a different
+// parent. With an id derived only from the desired state the two collided, the
+// store rejected the second with "already exists with a different document",
+// and the box was stuck — a revoked id can never be staged again, so there was
+// no way forward without hand-editing mihomo's state directory.
+func TestOverlayGenerationIDSeparatesTransactionsThatShareADesiredState(t *testing.T) {
+	compile := func(parent string, transition overlayTransitionMode) overlayDocument {
+		t.Helper()
+		out, err := compileOverlayGeneration(overlayCompileInput{
+			Document:         overlayTestDocument(),
+			MatchTarget:      "Proxies",
+			DocumentRevision: "rev-1",
+			ParentGeneration: parent,
+			Transition:       transition,
+		})
+		if err != nil {
+			t.Fatalf("compile: %v", err)
+		}
+		return out
+	}
+
+	first := compile("", overlayTransitionRevoke)
+	// The same desired state re-reached after a disable: identical rules and
+	// capabilities, but superseding the generation the disable committed.
+	afterDisable := compile("g-the-disable", overlayTransitionRevoke)
+	if first.GenerationID == afterDisable.GenerationID {
+		t.Fatalf("returning to a desired state from a different parent reused id %q; "+
+			"the store would reject the re-stage and the master switch becomes a one-way door",
+			first.GenerationID)
+	}
+
+	// Transition mode is likewise part of the transaction and part of the digest.
+	graceful := compile("", overlayTransitionGraceful)
+	if graceful.GenerationID == first.GenerationID {
+		t.Fatal("graceful and revoke of the same desired state share a generation id")
+	}
+
+	// Determinism is preserved where it matters: the SAME transaction, re-prepared
+	// after a crash, must produce the same id or recovery cannot use readback.
+	if again := compile("g-the-disable", overlayTransitionRevoke); again.GenerationID != afterDisable.GenerationID {
+		t.Fatalf("re-preparing one transaction produced %q then %q", afterDisable.GenerationID, again.GenerationID)
+	}
+}
+
+// A disabled master and an enabled one must not share an id either: the empty
+// generation the disable commits is a real, committable document.
+func TestOverlayGenerationIDDistinguishesTheDisabledMaster(t *testing.T) {
+	src := overlayTestDocument()
+	enabled := compileForTest(t, src, overlayTransitionRevoke)
+	src.MITM.Enabled = false
+	disabled := compileForTest(t, src, overlayTransitionRevoke)
+
+	if enabled.GenerationID == disabled.GenerationID {
+		t.Fatal("the disabled master shares a generation id with the enabled one")
+	}
+	if disabled.GenerationID == "" {
+		t.Fatal("the disabled master produced no generation id")
+	}
+}
+
 // A disabled master is a real, committable generation — an empty one. Inferring
 // "off" from an absent overlay instead would leave the transition unatomic.
 func TestOverlayCompileDisabledMasterIsAnEmptyGeneration(t *testing.T) {

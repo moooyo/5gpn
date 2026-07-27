@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -38,15 +39,35 @@ func overlayCapabilityFor(baseUser, group string) string {
 // exactly one listener with this name exists and carries exactly one user.
 const interceptEgressListenerName = "intercept-egress"
 
-// overlayGenerationID derives a deterministic generation id from the desired
-// state's own digest.
+// overlayGenerationID derives a deterministic generation id for one whole
+// transaction: the desired state AND the transition that reaches it.
 //
-// Deterministic rather than random so that re-preparing the same desired state
+// Deterministic rather than random so that re-preparing the same transaction
 // after a crash produces the same id — which is what makes prepare idempotent
 // and lets a lost response be recovered by readback instead of by guesswork.
-func overlayGenerationID(documentRevision string, projection string) string {
-	sum := sha256.Sum256([]byte(documentRevision + "\x00" + projection))
-	return "g-" + hex.EncodeToString(sum[:12])
+//
+// It hashes the complete document with the id field zeroed, rather than a
+// hand-picked subset of it. The subset this used to hash — the sidecar document
+// revision plus the routing projection — omitted ParentGenerationID,
+// TransitionMode, and the two artifact digests, every one of which the store's
+// record digest DOES cover. Two transactions that reach the same routing state
+// from different parents therefore landed on one id carrying two different
+// digests, and the store refused the second with "already exists with a
+// different document".
+//
+// Turning the MITM master off and back on is exactly that shape, and it was a
+// one-way door: the enable recomputed the id of the generation the disable had
+// just revoked, and a revoked id can never be staged again. Hashing the whole
+// document makes "same id" imply "same document" by construction, so the
+// derivation cannot drift from the digest again as fields are added.
+func overlayGenerationID(documentRevision string, doc overlayDocument) (string, error) {
+	doc.GenerationID = ""
+	body, err := json.Marshal(doc)
+	if err != nil {
+		return "", fmt.Errorf("overlay: derive generation id: %w", err)
+	}
+	sum := sha256.Sum256(append([]byte(documentRevision+"\x00"), body...))
+	return "g-" + hex.EncodeToString(sum[:12]), nil
 }
 
 // overlayCompileInput is everything the compiler needs that is not in the
@@ -93,7 +114,11 @@ func compileOverlayGeneration(in overlayCompileInput) (overlayDocument, error) {
 	// takes effect atomically, instead of being inferred from an absent
 	// overlay.
 	if !in.Document.MITM.Enabled {
-		doc.GenerationID = overlayGenerationID(in.DocumentRevision, "disabled")
+		id, err := overlayGenerationID(in.DocumentRevision, doc)
+		if err != nil {
+			return doc, err
+		}
+		doc.GenerationID = id
 		return doc, nil
 	}
 
@@ -230,7 +255,11 @@ func compileOverlayGeneration(in overlayCompileInput) (overlayDocument, error) {
 	rules = append(rules, captureRules...)
 	doc.Client.Rules = rules
 
-	doc.GenerationID = overlayGenerationID(in.DocumentRevision, overlayProjection(doc))
+	id, err := overlayGenerationID(in.DocumentRevision, doc)
+	if err != nil {
+		return doc, err
+	}
+	doc.GenerationID = id
 	return doc, nil
 }
 
