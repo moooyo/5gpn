@@ -1480,7 +1480,7 @@ func interceptModuleActionViews(actions []interceptScriptRule) []interceptModule
 		views = append(views, interceptModuleActionView{
 			ID: action.ID, Phase: action.Phase, Match: match,
 			ScriptURL: action.ScriptURL, ScriptDigest: action.ScriptDigest,
-			BodyMode: action.BodyMode, TimeoutMS: action.TimeoutMS, MaxBodyBytes: action.MaxBodyBytes,
+			BodyMode: action.BodyMode, Entry: action.Entry, TimeoutMS: action.TimeoutMS, MaxBodyBytes: action.MaxBodyBytes,
 		})
 	}
 	return views

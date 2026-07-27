@@ -42,6 +42,12 @@ const (
 	maxInterceptRouteKeywords  = 8
 )
 
+// interceptScriptEntryProxyCompat runs a published proxy-client bundle instead
+// of the native transform(context) entry point. The bundle signals completion
+// by calling $done, so the sidecar waits on that rather than on a returned
+// value; the mode is declared because it cannot be inferred from the source.
+const interceptScriptEntryProxyCompat = "proxy-compat"
+
 var nativeExtensionIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{1,126}[a-z0-9])$`)
 var nativeExtensionRouteKeywordPattern = regexp.MustCompile(`^[a-z0-9._-]+$`)
 
@@ -67,6 +73,7 @@ type interceptScriptRule struct {
 	ScriptDigest string               `json:"script_digest"`
 	ScriptBody   string               `json:"script_body"`
 	BodyMode     string               `json:"body_mode"`
+	Entry        string               `json:"entry,omitempty"`
 	TimeoutMS    int                  `json:"timeout_ms"`
 	MaxBodyBytes int64                `json:"max_body_bytes"`
 }
@@ -99,6 +106,7 @@ type interceptModuleActionView struct {
 	ScriptURL    string               `json:"script_url,omitempty"`
 	ScriptDigest string               `json:"script_digest"`
 	BodyMode     string               `json:"body_mode"`
+	Entry        string               `json:"entry,omitempty"`
 	TimeoutMS    int                  `json:"timeout_ms"`
 	MaxBodyBytes int64                `json:"max_body_bytes"`
 }
@@ -446,6 +454,9 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 		}
 		if rule.BodyMode != "none" && rule.BodyMode != "text" && rule.BodyMode != "binary" {
 			return fmt.Errorf("action %q body_mode must be none, text, or binary", rule.ID)
+		}
+		if rule.Entry != "" && rule.Entry != interceptScriptEntryProxyCompat {
+			return fmt.Errorf("action %q entry must be empty or %s", rule.ID, interceptScriptEntryProxyCompat)
 		}
 		if rule.TimeoutMS < 50 || rule.TimeoutMS > 30000 {
 			return fmt.Errorf("action %q timeout_ms must be between 50 and 30000", rule.ID)

@@ -698,3 +698,67 @@ func TestInterceptGlobalCertificateHostBoundIs512(t *testing.T) {
 		t.Fatalf("513 certificate hosts error = %v", err)
 	}
 }
+
+func proxyCompatEntryManifest(entry string) string {
+	return `apiVersion: 5gpn.io/v1
+kind: Extension
+metadata:
+  id: io.example.compat
+  name: Compat fixture
+  version: 1.0.0
+permissions:
+  persistentStorage: false
+traffic:
+  captureHosts: [api.example.com]
+actions:
+  - id: run-bundle
+    phase: response
+    match:
+      hosts: [api.example.com]
+      schemes: [https]
+      pathRegex: ^/
+    script:
+      inline: "$done($response)"
+      bodyMode: text
+      entry: ` + entry + `
+      timeoutMs: 1000
+      maxBodyBytes: 1024
+`
+}
+
+func TestNativeExtensionParserAcceptsProxyCompatEntry(t *testing.T) {
+	t.Parallel()
+	snapshot, err := (interceptModuleParser{now: time.Now}).Import(context.Background(), interceptModuleImportRequest{Content: proxyCompatEntryManifest("proxy-compat")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Scripts) != 1 {
+		t.Fatalf("scripts = %d, want 1", len(snapshot.Scripts))
+	}
+	if snapshot.Scripts[0].Entry != interceptScriptEntryProxyCompat {
+		t.Fatalf("entry = %q, want %q", snapshot.Scripts[0].Entry, interceptScriptEntryProxyCompat)
+	}
+}
+
+func TestNativeExtensionParserNormalizesTheDefaultEntry(t *testing.T) {
+	t.Parallel()
+	// An explicit "native" and an omitted entry are the same contract, so both
+	// store the empty value and no snapshot digest depends on which was written.
+	for _, entry := range []string{"native", `""`} {
+		snapshot, err := (interceptModuleParser{now: time.Now}).Import(context.Background(), interceptModuleImportRequest{Content: proxyCompatEntryManifest(entry)})
+		if err != nil {
+			t.Fatalf("entry %q: %v", entry, err)
+		}
+		if snapshot.Scripts[0].Entry != "" {
+			t.Fatalf("entry %q stored %q, want the native default", entry, snapshot.Scripts[0].Entry)
+		}
+	}
+}
+
+func TestNativeExtensionParserRejectsAnUnknownEntry(t *testing.T) {
+	t.Parallel()
+	_, err := (interceptModuleParser{now: time.Now}).Import(context.Background(), interceptModuleImportRequest{Content: proxyCompatEntryManifest("surge")})
+	if err == nil || !strings.Contains(err.Error(), "entry") {
+		t.Fatalf("err = %v, want an entry rejection", err)
+	}
+}
