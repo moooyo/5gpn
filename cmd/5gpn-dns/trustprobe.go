@@ -36,7 +36,7 @@ const trustProbeTimeout = 8 * time.Second
 // a probe that could stop it from serving would be a worse bug than the one it
 // detects, and a false positive on a legitimately fast local resolver must cost
 // nothing but a log line.
-func StartTrustProbe(ctx context.Context, ex Exchanger, entries []TrustEntry) {
+func StartTrustProbe(ctx context.Context, ex Exchanger, entries []UpstreamEntry) {
 	g, ok := ex.(*group)
 	if !ok || len(g.members) == 0 {
 		return
@@ -44,7 +44,7 @@ func StartTrustProbe(ctx context.Context, ex Exchanger, entries []TrustEntry) {
 	go probeTrust(ctx, g, entries)
 }
 
-func probeTrust(ctx context.Context, g *group, entries []TrustEntry) {
+func probeTrust(ctx context.Context, g *group, entries []UpstreamEntry) {
 	ctx, cancel := context.WithTimeout(ctx, trustProbeTimeout)
 	defer cancel()
 
@@ -112,7 +112,7 @@ func reservedRangeName(ip net.IP) string {
 //     placeholder or captive resolver returns when it answers everything with
 //     itself;
 //   - a private, loopback, or link-local address for a public name.
-func implausibleTrustAnswer(ips []string, entries []TrustEntry) string {
+func implausibleTrustAnswer(ips []string, entries []UpstreamEntry) string {
 	for _, raw := range ips {
 		ip := net.ParseIP(raw)
 		if ip == nil {

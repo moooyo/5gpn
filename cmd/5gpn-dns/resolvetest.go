@@ -224,13 +224,13 @@ func (h *Handler) probeUpstreams(ctx context.Context, name string, snap *upstrea
 			display = snap.TrustRaw[i]
 		}
 		switch e.Transport {
-		case TrustDoH:
+		case UpstreamDoH:
 			addr := addDefaultPort(e.DialAddr, "443")
 			if display == "" {
 				display = e.Endpoint + "@" + addr
 			}
 			specs = append(specs, spec{display: display, addr: addr, group: "trust", proto: "doh", sni: e.ServerName, endpoint: e.Endpoint})
-		case TrustDoT:
+		case UpstreamDoT:
 			addr := addDefaultPort(e.DialAddr, "853")
 			if display == "" {
 				display = e.ServerName + "@" + addr

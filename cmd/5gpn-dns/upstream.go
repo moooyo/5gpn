@@ -393,12 +393,12 @@ func StartChina0x20Probe(ctx context.Context, ex Exchanger) {
 //   - bare "IP" (Plain) → plain UDP (port 53 default) — for a trusted internal
 //     resolver reachable over a clean path (the 22.22.22.22 default), where
 //     requiring a DoT cert would just break resolution.
-func NewTrustGroup(entries []TrustEntry) Exchanger {
+func NewTrustGroup(entries []UpstreamEntry) Exchanger {
 	sessCache := tls.NewLRUClientSessionCache(0) // 0 → default capacity
 	members := make([]upstream, len(entries))
 	for i, e := range entries {
 		switch e.Transport {
-		case TrustDoH:
+		case UpstreamDoH:
 			client, err := newDoHClient(e.Endpoint, addDefaultPort(e.DialAddr, "443"), sessCache)
 			if err != nil {
 				// ValidateUpstreams rejects malformed DoH specs before they
@@ -410,7 +410,7 @@ func NewTrustGroup(entries []TrustEntry) Exchanger {
 				continue
 			}
 			members[i] = upstream{addr: addDefaultPort(e.DialAddr, "443"), doh: client}
-		case TrustDoT:
+		case UpstreamDoT:
 			members[i] = upstream{
 				addr:   addDefaultPort(e.DialAddr, "853"),
 				net:    "tcp-tls",

@@ -75,14 +75,14 @@ func main() {
 	// is the sole resolver, and refusing to start would leave no console to
 	// fix it from — the same reasoning as the empty-chnroute path below.
 	if uc, err := LoadUpstreams(cfg.UpstreamsFile); err != nil {
-		log.Printf("warning: %v — falling back to built-in defaults (china=%v trust=%v); fix it in the console under Settings → upstream DNS", err, cfg.ChinaAddrs, cfg.TrustRaw)
+		log.Printf("warning: %v — falling back to built-in defaults (china=%v trust=%v); fix it in the console under Settings → upstream DNS", err, cfg.ChinaRaw, cfg.TrustRaw)
 	} else if uc != nil {
-		cfg.ChinaAddrs = uc.China
+		cfg.ChinaRaw = uc.China
 		cfg.TrustRaw = uc.Trust
-		cfg.TrustEntries = parseTrustEntryList(uc.Trust)
+		cfg.TrustEntries = parseUpstreamEntryList(uc.Trust)
 		log.Printf("upstreams: loaded %s (china=%v trust=%v)", cfg.UpstreamsFile, uc.China, uc.Trust)
 	} else {
-		log.Printf("warning: %s absent — falling back to built-in defaults (china=%v trust=%v); set them in the console under Settings → upstream DNS", cfg.UpstreamsFile, cfg.ChinaAddrs, cfg.TrustRaw)
+		log.Printf("warning: %s absent — falling back to built-in defaults (china=%v trust=%v); set them in the console under Settings → upstream DNS", cfg.UpstreamsFile, cfg.ChinaRaw, cfg.TrustRaw)
 	}
 
 	applyTGBotOverride(&cfg)
@@ -100,7 +100,7 @@ func main() {
 	}
 	cache := NewCache(cacheSize)
 
-	china := NewUDPGroup(cfg.ChinaAddrs, cfg.China0x20)
+	china := NewUDPGroup(cfg.ChinaRaw, cfg.China0x20)
 	trust := NewTrustGroup(cfg.TrustEntries)
 
 	// China-group EDNS Client Subnet: the web-console override file (written
@@ -161,7 +161,7 @@ func main() {
 	h.swapUpstreams(&upstreamSnapshot{
 		China:        china,
 		Trust:        trust,
-		ChinaRaw:     cfg.ChinaAddrs,
+		ChinaRaw:     cfg.ChinaRaw,
 		TrustRaw:     cfg.TrustRaw,
 		TrustEntries: cfg.TrustEntries,
 	})
@@ -251,7 +251,7 @@ func main() {
 	// failure leaves the swap live and reports it — the operator asked for the
 	// change; better applied-but-not-durable than silently ignored.
 	ctrl.SetUpstreamsApply(func(chinaList, trustList []string) error {
-		entries := parseTrustEntryList(trustList)
+		entries := parseUpstreamEntryList(trustList)
 		cg := NewUDPGroup(chinaList, cfg.China0x20)
 		tg := NewTrustGroup(entries)
 		// Carry the live china-group ECS subnet onto the NEW group — an

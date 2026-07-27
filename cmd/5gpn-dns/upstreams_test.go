@@ -106,9 +106,9 @@ func TestUpstreamsFileRoundtrip(t *testing.T) {
 // ── mixed trust group construction ───────────────────────────────────────────
 
 func TestNewTrustGroupMixedTransports(t *testing.T) {
-	g, ok := NewTrustGroup([]TrustEntry{
-		{ServerName: "22.22.22.22", DialAddr: "22.22.22.22", Transport: TrustPlainUDP},
-		{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: TrustDoT},
+	g, ok := NewTrustGroup([]UpstreamEntry{
+		{ServerName: "22.22.22.22", DialAddr: "22.22.22.22", Transport: UpstreamPlainUDP},
+		{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: UpstreamDoT},
 	}).(*group)
 	if !ok {
 		t.Fatal("NewTrustGroup did not return a *group")
@@ -398,7 +398,7 @@ func TestResolveTest_PoolOrderAdoption(t *testing.T) {
 		China: h.China, Trust: h.Trust,
 		ChinaRaw:     []string{slowCN, fastCN},
 		TrustRaw:     []string{trustAddr},
-		TrustEntries: []TrustEntry{{ServerName: trustAddr, DialAddr: trustAddr, Transport: TrustPlainUDP}},
+		TrustEntries: []UpstreamEntry{{ServerName: trustAddr, DialAddr: trustAddr, Transport: UpstreamPlainUDP}},
 	})
 	c := NewController(func() error { return nil }, nil, nil, h)
 
@@ -463,7 +463,7 @@ func TestResolveTest_ProbesAndArbitration(t *testing.T) {
 		China: h.China, Trust: h.Trust,
 		ChinaRaw:     []string{cnAddr},
 		TrustRaw:     []string{foreignAddr},
-		TrustEntries: []TrustEntry{{ServerName: foreignAddr, DialAddr: foreignAddr, Transport: TrustPlainUDP}},
+		TrustEntries: []UpstreamEntry{{ServerName: foreignAddr, DialAddr: foreignAddr, Transport: UpstreamPlainUDP}},
 	})
 	c := NewController(func() error { return nil }, nil, nil, h)
 
@@ -499,7 +499,7 @@ func TestResolveTest_ProbesAndArbitration(t *testing.T) {
 		China: h.China, Trust: h.Trust,
 		ChinaRaw:     []string{foreignAddr},
 		TrustRaw:     []string{foreignAddr},
-		TrustEntries: []TrustEntry{{ServerName: foreignAddr, DialAddr: foreignAddr, Transport: TrustPlainUDP}},
+		TrustEntries: []UpstreamEntry{{ServerName: foreignAddr, DialAddr: foreignAddr, Transport: UpstreamPlainUDP}},
 	})
 	got = c.ResolveTest(context.Background(), "foreign.example")
 	if got.Chosen != "trust" {
@@ -557,10 +557,10 @@ func TestValidateUpstreams_DoHSpecForm(t *testing.T) {
 // A DoH entry must build a pooled member, and the other two forms must keep
 // working alongside it in one group.
 func TestNewTrustGroup_DoHMemberIsPooled(t *testing.T) {
-	g, ok := NewTrustGroup([]TrustEntry{
-		{ServerName: "22.22.22.22", DialAddr: "22.22.22.22", Transport: TrustPlainUDP},
-		{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: TrustDoT},
-		{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: TrustDoH, Endpoint: "https://dns.google/dns-query"},
+	g, ok := NewTrustGroup([]UpstreamEntry{
+		{ServerName: "22.22.22.22", DialAddr: "22.22.22.22", Transport: UpstreamPlainUDP},
+		{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: UpstreamDoT},
+		{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: UpstreamDoH, Endpoint: "https://dns.google/dns-query"},
 	}).(*group)
 	if !ok {
 		t.Fatal("NewTrustGroup did not return a *group")

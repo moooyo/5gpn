@@ -7,13 +7,13 @@ import "testing"
 // because rewriteA replaces a foreign address with GatewayIP before any client
 // receives it, so browsing keeps working while trust resolves nothing.
 func TestImplausibleTrustAnswer(t *testing.T) {
-	placeholder := []TrustEntry{{ServerName: "22.22.22.22", DialAddr: "22.22.22.22", Transport: TrustPlainUDP}}
-	google := []TrustEntry{{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: TrustDoT}}
+	placeholder := []UpstreamEntry{{ServerName: "22.22.22.22", DialAddr: "22.22.22.22", Transport: UpstreamPlainUDP}}
+	google := []UpstreamEntry{{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: UpstreamDoT}}
 
 	for _, tc := range []struct {
 		name    string
 		ips     []string
-		entries []TrustEntry
+		entries []UpstreamEntry
 		flagged bool
 	}{
 		{"resolver answers with its own /24", []string{"22.22.22.18"}, placeholder, true},
@@ -23,7 +23,7 @@ func TestImplausibleTrustAnswer(t *testing.T) {
 		{"genuine public answer", []string{"93.184.216.34"}, google, false},
 		{"genuine answer, placeholder group", []string{"93.184.216.34"}, placeholder, false},
 		// A member with an explicit port must still be compared correctly.
-		{"same /24 with an explicit port", []string{"22.22.22.9"}, []TrustEntry{{DialAddr: "22.22.22.22:53"}}, true},
+		{"same /24 with an explicit port", []string{"22.22.22.9"}, []UpstreamEntry{{DialAddr: "22.22.22.22:53"}}, true},
 		{"no addresses at all", nil, google, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -43,7 +43,7 @@ func TestImplausibleTrustAnswer(t *testing.T) {
 // 198.18.1.12, which ip.IsPrivate() does not catch, and the probe called it
 // genuine.
 func TestImplausibleTrustAnswer_ReservedRanges(t *testing.T) {
-	google := []TrustEntry{{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: TrustDoT}}
+	google := []UpstreamEntry{{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: UpstreamDoT}}
 	for _, tc := range []struct {
 		ip      string
 		flagged bool

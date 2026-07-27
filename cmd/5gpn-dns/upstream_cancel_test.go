@@ -101,7 +101,7 @@ func TestArbitrateChinaWinsDoNotTripTrustBreaker(t *testing.T) {
 	// against holdTCPListener. A UDP member pointed at a TCP listener fails
 	// fast instead, which records a real breaker failure rather than a
 	// cancellation and defeats the whole point of the test.
-	trust := NewTrustGroup([]TrustEntry{{ServerName: "trust.test", DialAddr: trustAddr, Transport: TrustDoT}})
+	trust := NewTrustGroup([]UpstreamEntry{{ServerName: "trust.test", DialAddr: trustAddr, Transport: UpstreamDoT}})
 
 	q := new(dns.Msg)
 	q.SetQuestion("cn-domain.example.", dns.TypeA)

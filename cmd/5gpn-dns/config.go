@@ -31,31 +31,33 @@ const (
 	maxConfiguredAPIBurst = 10_000
 )
 
-// TrustTransport selects the wire protocol for one trust member.
-type TrustTransport uint8
+// UpstreamTransport selects the wire protocol for one upstream member. It is a
+// per-MEMBER property, not per-group: either group may mix plain-UDP, DoT, and
+// DoH members, and the group's exchange dispatches on it.
+type UpstreamTransport uint8
 
 const (
-	// TrustPlainUDP is a bare "IP[:port]" entry: plain UDP :53 to a trusted
+	// UpstreamPlainUDP is a bare "IP[:port]" entry: plain UDP :53 to a trusted
 	// internal resolver reachable over a clean path, where demanding a
 	// certificate would just break resolution.
-	TrustPlainUDP TrustTransport = iota
-	// TrustDoT is a "serverName@dialIP[:port]" entry: DoT :853, TLS-verified
+	UpstreamPlainUDP UpstreamTransport = iota
+	// UpstreamDoT is a "serverName@dialIP[:port]" entry: DoT :853, TLS-verified
 	// against ServerName and dialed at DialAddr.
-	TrustDoT
-	// TrustDoH is an "https://host/path@dialIP[:port]" entry: RFC 8484 over a
+	UpstreamDoT
+	// UpstreamDoH is an "https://host/path@dialIP[:port]" entry: RFC 8484 over a
 	// pooled HTTP/2 connection, TLS-verified against the URL host and dialed at
 	// DialAddr. Preferred over DoT where the resolver offers it: net/http keeps
 	// the connection warm, so a query costs one round trip instead of the three
 	// a per-query TCP+TLS handshake costs.
-	TrustDoH
+	UpstreamDoH
 )
 
-// TrustEntry describes a single trust upstream.
-type TrustEntry struct {
-	ServerName string         // TLS SNI / cert verification name (DoT and DoH)
-	DialAddr   string         // host (or host:port) to dial
-	Transport  TrustTransport // wire protocol for this member
-	Endpoint   string         // absolute https:// URL (DoH only)
+// UpstreamEntry describes a single upstream member of either group.
+type UpstreamEntry struct {
+	ServerName string            // TLS SNI / cert verification name (DoT and DoH)
+	DialAddr   string            // host (or host:port) to dial
+	Transport  UpstreamTransport // wire protocol for this member
+	Endpoint   string            // absolute https:// URL (DoH only)
 }
 
 // Config holds the resolved configuration for 5gpn-dns.
@@ -75,10 +77,10 @@ type Config struct {
 	WebKeyFile  string
 
 	// Networking.
-	GatewayIP    net.IP       // foreign-address rewrite target
-	ChinaAddrs   []string     // UDP upstream addresses (no port → :53 appended later)
-	TrustEntries []TrustEntry // trust upstream entries (bare IP=UDP, host@IP=DoT, https://…@IP=DoH)
-	TrustRaw     []string     // the raw trust specs (for display/persistence)
+	GatewayIP    net.IP          // foreign-address rewrite target
+	ChinaRaw     []string        // the raw china specs (for display/persistence)
+	TrustEntries []UpstreamEntry // trust upstream entries (bare IP=UDP, host@IP=DoT, https://…@IP=DoH)
+	TrustRaw     []string        // the raw trust specs (for display/persistence)
 
 	// UpstreamsFile is THE upstream source of truth (env DNS_UPSTREAMS,
 	// default /etc/5gpn/upstreams.json): seeded by the installer, read at
@@ -394,9 +396,9 @@ func LoadConfig() (Config, error) {
 	// with nothing but a startup log line to say so; worse, the shadowed keys
 	// were still validated here and a typo in a value with zero runtime effect
 	// crash-looped the sole resolver.
-	cfg.ChinaAddrs = splitTrim(defaultChinaUpstreams)
+	cfg.ChinaRaw = splitTrim(defaultChinaUpstreams)
 	cfg.TrustRaw = splitTrim(defaultTrustUpstreams)
-	cfg.TrustEntries = parseTrustEntryList(cfg.TrustRaw)
+	cfg.TrustEntries = parseUpstreamEntryList(cfg.TrustRaw)
 
 	// Runtime upstream-override file (web-console managed).
 	cfg.UpstreamsFile = envListen("DNS_UPSTREAMS", "/etc/5gpn/upstreams.json")
@@ -592,10 +594,11 @@ func validateDoTAddr(addr string) error {
 	return nil
 }
 
-// parseTrustEntryList parses trust upstream specs, one per element:
-// "serverName@dialAddr" → DoT; bare "IP" → plain UDP (Plain=true).
-func parseTrustEntryList(parts []string) []TrustEntry {
-	entries := make([]TrustEntry, 0, len(parts))
+// parseUpstreamEntryList parses upstream specs, one per element:
+// "https://host/path@dialAddr" → DoH; "serverName@dialAddr" → DoT; bare
+// "IP[:port]" → plain UDP. The grammar is shared by both groups.
+func parseUpstreamEntryList(parts []string) []UpstreamEntry {
+	entries := make([]UpstreamEntry, 0, len(parts))
 	for _, p := range parts {
 		if p == "" {
 			continue
@@ -613,24 +616,24 @@ func parseTrustEntryList(parts []string) []TrustEntry {
 				// they can reach a group; skip rather than build a broken member.
 				continue
 			}
-			entries = append(entries, TrustEntry{
+			entries = append(entries, UpstreamEntry{
 				ServerName: u.Hostname(),
 				DialAddr:   p[at+1:],
-				Transport:  TrustDoH,
+				Transport:  UpstreamDoH,
 				Endpoint:   endpoint,
 			})
 		case at > 0:
-			entries = append(entries, TrustEntry{
+			entries = append(entries, UpstreamEntry{
 				ServerName: p[:at],
 				DialAddr:   p[at+1:],
-				Transport:  TrustDoT,
+				Transport:  UpstreamDoT,
 			})
 		default:
 			// Bare IP (or hostname) — plain UDP to that address.
-			entries = append(entries, TrustEntry{
+			entries = append(entries, UpstreamEntry{
 				ServerName: p,
 				DialAddr:   p,
-				Transport:  TrustPlainUDP,
+				Transport:  UpstreamPlainUDP,
 			})
 		}
 	}

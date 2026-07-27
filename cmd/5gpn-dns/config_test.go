@@ -78,19 +78,19 @@ func TestLoadConfig_Defaults(t *testing.T) {
 
 	// Default upstream lists.
 	wantChina := []string{"223.5.5.5"}
-	if len(cfg.ChinaAddrs) != len(wantChina) {
-		t.Errorf("ChinaAddrs len = %d, want %d", len(cfg.ChinaAddrs), len(wantChina))
+	if len(cfg.ChinaRaw) != len(wantChina) {
+		t.Errorf("ChinaRaw len = %d, want %d", len(cfg.ChinaRaw), len(wantChina))
 	} else {
-		for i, a := range cfg.ChinaAddrs {
+		for i, a := range cfg.ChinaRaw {
 			if a != wantChina[i] {
-				t.Errorf("ChinaAddrs[%d] = %q, want %q", i, a, wantChina[i])
+				t.Errorf("ChinaRaw[%d] = %q, want %q", i, a, wantChina[i])
 			}
 		}
 	}
 
 	// Default trust upstream: 22.22.22.22, bare IP ⇒ plain UDP.
-	wantTrust := []TrustEntry{
-		{ServerName: "22.22.22.22", DialAddr: "22.22.22.22", Transport: TrustPlainUDP},
+	wantTrust := []UpstreamEntry{
+		{ServerName: "22.22.22.22", DialAddr: "22.22.22.22", Transport: UpstreamPlainUDP},
 	}
 	if len(cfg.TrustEntries) != len(wantTrust) {
 		t.Fatalf("TrustEntries len = %d, want %d", len(cfg.TrustEntries), len(wantTrust))
@@ -217,8 +217,8 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	}
 	// Upstreams are no longer environment-configurable — they come from
 	// upstreams.json, so LoadConfig always reports the built-in defaults here.
-	if len(cfg.ChinaAddrs) != 1 || cfg.ChinaAddrs[0] != defaultChinaUpstreams {
-		t.Errorf("ChinaAddrs = %v, want the built-in default [%s]", cfg.ChinaAddrs, defaultChinaUpstreams)
+	if len(cfg.ChinaRaw) != 1 || cfg.ChinaRaw[0] != defaultChinaUpstreams {
+		t.Errorf("ChinaRaw = %v, want the built-in default [%s]", cfg.ChinaRaw, defaultChinaUpstreams)
 	}
 	if cfg.TTLMin != 60*time.Second {
 		t.Errorf("TTLMin = %v, want 60s", cfg.TTLMin)
@@ -490,39 +490,39 @@ func TestParseAdminIDs(t *testing.T) {
 	}
 }
 
-func TestParseTrustEntryList(t *testing.T) {
+func TestParseUpstreamEntryList(t *testing.T) {
 	tests := []struct {
 		input []string
-		want  []TrustEntry
+		want  []UpstreamEntry
 	}{
 		{
 			input: []string{"dns.google@8.8.8.8"},
-			want:  []TrustEntry{{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: TrustDoT}},
+			want:  []UpstreamEntry{{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: UpstreamDoT}},
 		},
 		{
 			// Bare IP ⇒ plain UDP (deliberate reversal 2026-07-10: it used to
 			// mean DoT-with-IP-SAN, which made an internal-resolver default
 			// like 22.22.22.22 unusable).
 			input: []string{"1.1.1.1"},
-			want:  []TrustEntry{{ServerName: "1.1.1.1", DialAddr: "1.1.1.1", Transport: TrustPlainUDP}},
+			want:  []UpstreamEntry{{ServerName: "1.1.1.1", DialAddr: "1.1.1.1", Transport: UpstreamPlainUDP}},
 		},
 		{
 			input: []string{"dns.google@8.8.8.8", "one.one.one.one@1.1.1.1"},
-			want: []TrustEntry{
-				{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: TrustDoT},
-				{ServerName: "one.one.one.one", DialAddr: "1.1.1.1", Transport: TrustDoT},
+			want: []UpstreamEntry{
+				{ServerName: "dns.google", DialAddr: "8.8.8.8", Transport: UpstreamDoT},
+				{ServerName: "one.one.one.one", DialAddr: "1.1.1.1", Transport: UpstreamDoT},
 			},
 		},
 	}
 	for _, tc := range tests {
-		got := parseTrustEntryList(tc.input)
+		got := parseUpstreamEntryList(tc.input)
 		if len(got) != len(tc.want) {
-			t.Errorf("parseTrustEntryList(%q): len=%d, want %d", tc.input, len(got), len(tc.want))
+			t.Errorf("parseUpstreamEntryList(%q): len=%d, want %d", tc.input, len(got), len(tc.want))
 			continue
 		}
 		for i, te := range got {
 			if te != tc.want[i] {
-				t.Errorf("parseTrustEntryList(%q)[%d] = %+v, want %+v", tc.input, i, te, tc.want[i])
+				t.Errorf("parseUpstreamEntryList(%q)[%d] = %+v, want %+v", tc.input, i, te, tc.want[i])
 			}
 		}
 	}
@@ -790,8 +790,8 @@ func TestLoadConfigIgnoresRetiredUpstreamEnvKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig must ignore the retired keys, got %v", err)
 	}
-	if len(cfg.ChinaAddrs) != 1 || cfg.ChinaAddrs[0] != defaultChinaUpstreams {
-		t.Errorf("ChinaAddrs = %v, want the built-in default %q", cfg.ChinaAddrs, defaultChinaUpstreams)
+	if len(cfg.ChinaRaw) != 1 || cfg.ChinaRaw[0] != defaultChinaUpstreams {
+		t.Errorf("ChinaRaw = %v, want the built-in default %q", cfg.ChinaRaw, defaultChinaUpstreams)
 	}
 	if len(cfg.TrustRaw) != 1 || cfg.TrustRaw[0] != defaultTrustUpstreams {
 		t.Errorf("TrustRaw = %v, want the built-in default %q", cfg.TrustRaw, defaultTrustUpstreams)

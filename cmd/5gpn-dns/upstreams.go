@@ -211,7 +211,7 @@ type upstreamSnapshot struct {
 	Trust        Exchanger
 	ChinaRaw     []string
 	TrustRaw     []string
-	TrustEntries []TrustEntry
+	TrustEntries []UpstreamEntry
 }
 
 // exchangerFunc adapts a function to the Exchanger interface — used to hand
