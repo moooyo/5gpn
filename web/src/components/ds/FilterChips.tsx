@@ -101,7 +101,11 @@ export function FilterChips({
             title={option.title}
             className={cn(
               'zds-state-layer flex shrink-0 items-center gap-2 outline-none',
-              option.trailing ? 'min-w-0' : box,
+              // With a trailing slot the wrapper carries the chip's box, but
+              // the button still has to fill it — otherwise the visible chip is
+              // 44px while the part that actually changes the filter is as
+              // short as its own text.
+              option.trailing ? 'h-full min-w-0' : box,
             )}
           >
             {option.dot ? <span className="h-2 w-2 shrink-0 rounded-pill" style={{ background: option.dot }} aria-hidden="true" /> : null}

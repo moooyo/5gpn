@@ -192,23 +192,58 @@ for (const [name, path, testId] of ROUTES) {
 }
 
 // Every tap target on a phone is 44px. The console was full of 32-36px ones.
-await phone.goto(`${ORIGIN}/plugin-logs`, { waitUntil: 'networkidle' })
-const small = await phone.evaluate(() => {
+// Swept over every route, not one: the last audit found fifteen violations
+// across nine files while the single-route check here reported clean, because
+// none of the fifteen happened to be on the route it looked at.
+const scanTapTargets = () => {
   const out = []
-  for (const el of document.querySelectorAll('button, a[href], [role="button"], input')) {
+  // Hit-test rather than measure the layout box. A control may pad its target
+  // with a ::before that reaches outside its own border box — the switch does
+  // exactly that to keep a 32px track with a 44px target — and
+  // getBoundingClientRect cannot see a pseudo-element, so measuring the box
+  // reported two hundred false violations on one page. What matters is whether
+  // a finger landing there actually hits the control, which is what
+  // elementFromPoint answers.
+  const reaches = (el, x, y) => {
+    const hit = document.elementFromPoint(x, y)
+    return hit !== null && (hit === el || el.contains(hit) || hit.contains(el))
+  }
+  for (const el of document.querySelectorAll('button, a[href], [role="button"], [role="switch"], input, select')) {
+    if (el.closest('[role="listbox"], [hidden]')) continue
     const r = el.getBoundingClientRect()
     if (r.width === 0 || r.height === 0) continue
-    if (el.closest('[role="listbox"], [hidden]')) continue
-    if (r.height < 40) out.push(`${el.tagName.toLowerCase()}"${(el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 24)}" ${Math.round(r.height)}px`)
+    // A visually-hidden input is not the tap target; the control wrapping it is.
+    const style = getComputedStyle(el)
+    if (style.opacity === '0' || style.visibility === 'hidden' || r.height <= 2 || r.width <= 2) continue
+    const x = Math.round(r.left + r.width / 2)
+    if (x < 0 || x > window.innerWidth) continue
+    // Walk outward from each edge while the point still hits this control.
+    let top = r.top
+    let bottom = r.bottom
+    for (let step = 1; step <= 12 && reaches(el, x, Math.round(top) - 1); step += 1) top -= 1
+    for (let step = 1; step <= 12 && reaches(el, x, Math.round(bottom) + 1); step += 1) bottom += 1
+    const effective = bottom - top
+    if (effective < 40) {
+      out.push(`${el.tagName.toLowerCase()}"${(el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 24)}" ${Math.round(effective)}px`)
+    }
   }
   return out
-})
-if (small.length > 0) {
-  note(`mobile plugin-logs: ${small.length} tap target(s) under 40px: ${small.slice(0, 6).join(', ')}`)
+}
+
+let smallTotal = 0
+for (const [name, path] of ROUTES) {
+  await phone.goto(`${ORIGIN}${path}`, { waitUntil: 'networkidle' })
+  const small = await phone.evaluate(scanTapTargets)
+  if (small.length > 0) {
+    smallTotal += small.length
+    note(`mobile ${name}: ${small.length} tap target(s) under 40px: ${small.slice(0, 6).join(', ')}`)
+    console.log(`FAIL - mobile tap targets on ${name} (${small.length} under 40px)`)
+  }
+}
+if (smallTotal > 0) {
   failures += 1
-  console.log(`FAIL - mobile tap targets (${small.length} under 40px)`)
 } else {
-  console.log('ok   - mobile tap targets are all >= 40px')
+  console.log(`ok   - mobile tap targets are all >= 40px across ${ROUTES.length} routes`)
 }
 
 writeFileSync(`${OUT}/report.json`, JSON.stringify({ problems, checks }, null, 2))

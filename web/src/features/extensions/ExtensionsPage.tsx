@@ -271,7 +271,7 @@ function ExtensionCard({
           type="button"
           aria-label={t('extensions.auditHosts')}
           onClick={() => onAudit(module)}
-          className="zds-state-layer inline-flex items-center gap-1 rounded-chip bg-surface-container px-2 py-0.5 text-meta font-medium text-text-soft"
+          className="zds-state-layer inline-flex items-center gap-1 h-field rounded-chip bg-surface-container px-2 text-meta font-medium text-text-soft md:h-auto md:py-0.5"
         >
           <ShieldLockIcon className="h-3.5 w-3.5" aria-hidden="true" /> {t('extensions.captureCount', { count: module.capture_hosts.length })}
         </button>
@@ -319,7 +319,7 @@ function ExtensionCard({
             {status.tone === 'error' ? <WarningIcon className="h-4 w-4 shrink-0" aria-hidden="true" /> : null}
             <span className="min-w-0 flex-1">{t(status.key, { group: module.egress_group })}</span>
             {status.to && status.actionKey ? (
-              <Link to={status.to} className="zds-state-layer shrink-0 rounded-pill px-2.5 py-1 font-semibold underline-offset-2 hover:underline">
+              <Link to={status.to} className="zds-state-layer inline-flex h-field shrink-0 items-center rounded-pill px-2.5 font-semibold underline-offset-2 hover:underline md:h-auto md:py-1">
                 {t(status.actionKey)}
               </Link>
             ) : null}
@@ -342,7 +342,7 @@ function ExtensionCard({
             <button
               type="button"
               onClick={() => onInspect(module)}
-              className="zds-state-layer inline-flex items-center gap-1 rounded-chip bg-surface-container px-2 py-0.5 text-meta font-medium text-text-soft"
+              className="zds-state-layer inline-flex items-center gap-1 h-field rounded-chip bg-surface-container px-2 text-meta font-medium text-text-soft md:h-auto md:py-0.5"
             >
               {t('extensions.capabilityMore', { count: capabilities.length - CHIP_CAP })}
             </button>
@@ -996,7 +996,7 @@ export default function ExtensionsPage() {
     <div className="flex flex-col gap-3 md:gap-4" data-testid="page-extensions">
       <div className={cn('flex flex-col gap-3 rounded-card px-5 py-4 sm:flex-row sm:items-center sm:justify-between', trustState === 'ready' ? 'bg-[var(--md-sys-color-success-container)] text-[var(--md-sys-color-on-success-container)]' : trustState === 'master' ? 'bg-[var(--md-sys-color-warning-container)] text-[var(--md-sys-color-on-warning-container)]' : 'bg-primary-container text-on-primary-container')} data-testid="mitm-readiness-notice">
         <div className="flex items-start gap-2.5">{trustState === 'ready' ? <VerifiedIcon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" /> : <ShieldLockIcon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />}<div><div className="text-body font-semibold">{t(`extensions.readiness.${trustState}.title`)}</div><p className="mt-0.5 text-label leading-relaxed opacity-80">{t(`extensions.readiness.${trustState}.body`, { count: activeCount })}</p></div></div>
-        <Link className={cn('zds-state-layer inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-pill px-5 text-label font-medium', trustState === 'ready' ? 'bg-[var(--md-sys-color-tint-inset)]' : 'bg-primary text-[var(--md-sys-color-on-primary)]')} to={trustState === 'master' ? '/settings' : '/setup-guide'}>{trustState !== 'ready' ? <LinkIcon className="h-4 w-4" aria-hidden="true" /> : null}{t(`extensions.readiness.${trustState}.action`)}</Link>
+        <Link className={cn('zds-state-layer inline-flex h-field shrink-0 items-center justify-center gap-1.5 rounded-pill px-5 text-label font-medium md:h-ctl', trustState === 'ready' ? 'bg-[var(--md-sys-color-tint-inset)]' : 'bg-primary text-[var(--md-sys-color-on-primary)]')} to={trustState === 'master' ? '/settings' : '/setup-guide'}>{trustState !== 'ready' ? <LinkIcon className="h-4 w-4" aria-hidden="true" /> : null}{t(`extensions.readiness.${trustState}.action`)}</Link>
       </div>
 
       {loading && !view ? <Card><CardBody className="text-center text-label text-text-faint">{t('common.loading')}</CardBody></Card> : null}

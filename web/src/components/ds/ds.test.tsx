@@ -145,8 +145,13 @@ describe('Toggle', () => {
     const onCheckedChange = vi.fn()
     render(<Toggle checked={false} onCheckedChange={onCheckedChange} aria-label="enable" />)
     const toggle = screen.getByRole('switch')
-    expect(toggle.className).toContain('h-chip')
-    expect(toggle.className).toContain('data-checked:bg-primary')
+    // The root IS the tap target — 44px on a phone, 32px above `md`. The track
+    // is a child, so the state colours live there. That padding used to come
+    // from a ::before reaching outside the root, which an ancestor with
+    // overflow-hidden clipped away without anything being able to measure it.
+    expect(toggle.className).toContain('h-field')
+    expect(toggle.className).toContain('md:h-chip')
+    expect(toggle.querySelector('.group-data-checked\\:bg-primary')).not.toBeNull()
     await user.click(toggle)
     expect(onCheckedChange).toHaveBeenCalledWith(true)
   })
