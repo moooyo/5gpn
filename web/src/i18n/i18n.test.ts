@@ -47,7 +47,7 @@ const SAMPLE_KEYS = [
   'topbar.sub.policyRules',
   'topbar.sub.extensions',
   'topbar.sub.pluginLogs',
-  'sidebar.interceptSub',
+  'sidebar.intercept',
   'overview.qps',
   'overview.decisionDistribution',
   'overview.decision.block',

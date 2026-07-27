@@ -70,11 +70,9 @@ const zh: typeof en = {
     },
   },
   sidebar: {
-    // 用组件名而不是单元名。单元名移到副标题而不是删掉：它仍然是运维敲
-    // systemctl 时要用的名字，丢掉等于把一个不一致换成另一个。
+    // 用组件名而不是单元名：运行状态卡片只表达健康与否，一行一个标题加一个
+    // 状态标签，不再承载 systemd 单元名。
     intercept: 'sidecar',
-    interceptSub: '5gpn-intercept · {{count}} 个活动插件',
-    interceptSubUnknown: '5gpn-intercept · — 个活动插件',
   },
   setupGuide: {
     title: '将设备接入 5gpn',
@@ -580,22 +578,64 @@ const zh: typeof en = {
     run: '测试',
     running: '测试中…',
     examples: '示例',
-    ruleLabel: '命中规则',
+    ruleLabel: '判定依据',
     sourceLabel: '解析来源',
-    answerLabel: '应答结果',
+    answerLabel: '客户端应答',
     decisionPath: '决策路径',
     probes: '上游探测',
     concurrent: 'china ‖ trust',
     selected: '已采用',
     blocked: '(已拦截)',
-    groupChina: '国内 UDP',
-    groupTrust: '可信 DoT',
+    groupChina: '国内',
+    groupTrust: '可信',
+    // 一条 force-proxy 可能来自扩展捕获，也可能来自操作者的策略规则——两者
+    // 判定与 reason 完全同形（下游可观测性把它们计为同一类），归因区是唯一
+    // 能把两者分开的地方。
+    intercept: {
+      title: '插件归因',
+      declaredBy: '声明插件',
+      matchedHost: '命中的捕获规则',
+      byPlugin: '插件触发',
+      sourcePolicy: 'SOURCE=POLICY',
+      meta: 'REASON={{reason}} · SOURCE=INTERCEPT',
+      wildcardMatch: '通配后缀匹配 · 查询名 {{name}}',
+      exactMatch: '精确匹配 · 查询名 {{name}}',
+      noUpstream: '未查询上游',
+      ruleBasis: '扩展捕获域名',
+      policyBasis: '策略规则',
+      rawTitle: '原始响应片段',
+      rawPolicyNote: '// intent 为 proxy 的策略规则命中，无 intercept 字段',
+      // 边界状态：插件显示「已启用」，但 MITM 未开启时捕获表不生效，很容易
+      // 被误判成「插件干的」。
+      notReadyTitle: '捕获未生效：MITM 未开启',
+      notReadyBody: '声明的 {{host}} 未进入捕获表，本次强制网关与该插件无关。',
+      // 判定顺序表
+      orderTitle: '判定顺序',
+      stageIntercept: '扩展捕获表',
+      stagePolicy: '策略规则',
+      stageFallback: '兜底策略 / chnroute',
+      stageAnswer: '应答',
+      interceptHit: '命中 {{host}}，判定在此终止',
+      interceptMissWithCount: '{{count}} 个已启用插件，均未声明该域名',
+      interceptMiss: '未声明该域名',
+      interceptDeclaredInert: '已声明 {{host}}，但捕获表未生效',
+      policyHit: '第 {{order}} 条 {{kind}} {{value}}',
+      policySkipped: '未参与匹配',
+      fallbackSkipped: '未参与匹配',
+      answerSynthesized: '合成 A 记录 = 网关 IP，未查询任何上游',
+      markActive: '生效',
+      markSkipped: '跳过',
+      markMiss: '未命中',
+      markInert: '未生效',
+    },
     // Pill text for each of the 5 reason-driven outcomes (matches the design
     // handoff's decide() wording family; same concepts as logs.decision.*).
     label: {
       block: '拦截',
       forceDirect: '强制直连',
-      forceProxy: '强制代理',
+      // 与 logs.decision.forceProxy 统一为「强制网关」：同一判定在两个界面
+      // 用两个名字，是把一个实现细节暴露成了两个概念。
+      forceProxy: '强制网关',
       chnrouteCn: '国内直连',
       chnrouteForeign: '境外代理',
     },
@@ -607,14 +647,20 @@ const zh: typeof en = {
       block: ['命中 block 域名集', '5gpn-dns 返回 NXDOMAIN', '客户端不发起任何连接'],
       forceDirect: ['命中 direct 直连规则', '用可信解析器取真实 IP', '结果：直连，不经网关'],
       forceProxy: ['命中 proxy 代理规则', '5gpn-dns 返回网关 IP', '连接被引导至代理出口'],
+      // 扩展捕获与策略规则共用 force-proxy，这一组是捕获命中时的替换文案。
+      interceptForceProxy: [
+        '插件「{{name}}」声明捕获该域名',
+        '早于策略规则匹配，直接终止',
+        '返回网关 IP，流量交由 mihomo 拦截',
+      ],
       chnrouteCn: [
         '未命中策略规则，进入 chnroute 仲裁',
-        '并发查询：国内 UDP ‖ 可信 DoT',
+        '并发查询：国内组 ‖ 可信组',
         '国内答案 IP ∈ chnroute → 采用，直连',
       ],
       chnrouteForeign: [
         '未命中策略规则，进入 chnroute 仲裁',
-        '并发查询：国内 UDP ‖ 可信 DoT',
+        '并发查询：国内组 ‖ 可信组',
         '答案 IP ∉ chnroute → 返回网关 IP，走代理',
       ],
       generic: '结果：{{verdict}}',
@@ -640,7 +686,8 @@ const zh: typeof en = {
     colDuration: '耗时',
     decision: {
       forceDirect: '强制直连',
-      forceProxy: '强制代理',
+      // 与 overview.decision 及 resolveTest.label 统一为「强制网关」。
+      forceProxy: '强制网关',
       chnrouteCn: '国内直连',
       chnrouteForeign: '境外代理',
       direct: '直连',

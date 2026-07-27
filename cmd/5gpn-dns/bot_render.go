@@ -531,6 +531,24 @@ func renderResolveTest(result ResolveTestResult) string {
 			html.EscapeString(result.Verdict), html.EscapeString(result.Reason),
 		))
 	}
+	// force-proxy alone cannot say whether an extension or an operator rule
+	// caused it, and this renderer has no second API call available to find
+	// out — so the attribution has to travel with the result.
+	if it := result.Intercept; it != nil && it.Ready {
+		label := it.ModuleName
+		if label == "" {
+			label = it.ModuleID
+		}
+		lines = append(lines, fmt.Sprintf(
+			"来源：拦截插件 <b>%s</b> · 捕获 <code>%s</code>",
+			html.EscapeString(label), html.EscapeString(it.MatchedHost),
+		))
+	} else if p := result.Policy; p != nil {
+		lines = append(lines, fmt.Sprintf(
+			"来源：策略规则第 %d 条 · <code>%s %s</code>",
+			p.Order, html.EscapeString(p.Kind), html.EscapeString(p.Value),
+		))
+	}
 	if result.Chosen != "" {
 		lines = append(lines, fmt.Sprintf(
 			"采用：<b>%s</b> · <code>%s</code>",

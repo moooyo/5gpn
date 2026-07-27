@@ -97,8 +97,15 @@ func CompilePolicy(model PolicyModel) (CompiledDNS, error) {
 // runtimePolicyRule is one fully materialized matcher in global evaluation
 // order. Keeping one DomainSet per rule (rather than merging intents into
 // category sets) is what makes cross-intent first-match semantics real.
+//
+// Order and Source carry no matching weight — they exist so a diagnostic can
+// name the rule that won ("rule 3, domain-suffix example.org") instead of
+// reporting only the intent it produced. Matching a name and being able to
+// explain the match are not the same requirement.
 type runtimePolicyRule struct {
 	ID      string
+	Order   int
+	Source  Matcher // the operator's declaration, before compilation
 	Intent  Intent
 	Matcher *DomainSet
 }
@@ -156,7 +163,13 @@ func CompileRuntimePolicy(model PolicyModel, rulesDir string) (*runtimePolicySna
 				ds.keyword = []string{value}
 			}
 		}
-		snap.Rules = append(snap.Rules, runtimePolicyRule{ID: r.ID, Intent: r.Intent, Matcher: ds})
+		snap.Rules = append(snap.Rules, runtimePolicyRule{
+			ID:      r.ID,
+			Order:   r.Order,
+			Source:  r.Matcher,
+			Intent:  r.Intent,
+			Matcher: ds,
+		})
 	}
 	return snap, nil
 }

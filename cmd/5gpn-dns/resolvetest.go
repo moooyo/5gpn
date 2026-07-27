@@ -35,6 +35,33 @@ type ResolveProbe struct {
 	Selected   bool    `json:"selected"` // this reply is its group's answer (first in pool order)
 }
 
+// ResolveTestIntercept names the extension behind a gateway verdict. An
+// extension capture host and an operator proxy rule produce the identical
+// Verdict/Reason pair, so without this the diagnostic cannot say which one
+// fired — the single most common question when a name is unexpectedly steered.
+//
+// Ready distinguishes "this capture is live" from "this extension declared the
+// name but MITM is off, so the capture is inert and something else decided".
+// The second case is worth reporting precisely because the extensions page
+// shows the extension as enabled, which reads as if it were in effect.
+type ResolveTestIntercept struct {
+	ModuleID    string `json:"module_id"`
+	ModuleName  string `json:"module_name"`
+	MatchedHost string `json:"matched_host"` // as declared: "host.example.com" or "*.example.com"
+	Ready       bool   `json:"ready"`
+	Reason      string `json:"reason,omitempty"` // why not ready, e.g. "mitm-disabled"
+}
+
+// ResolveTestPolicy names the operator rule that produced the verdict, so the
+// diagnostic can say "rule 3, domain-suffix example.org" rather than only the
+// intent that rule happened to carry.
+type ResolveTestPolicy struct {
+	RuleID string `json:"rule_id"`
+	Order  int    `json:"order"`
+	Kind   string `json:"kind"`
+	Value  string `json:"value"`
+}
+
 // ResolveTestResult is the full diagnostic outcome.
 type ResolveTestResult struct {
 	Name    string `json:"name"`
@@ -51,6 +78,40 @@ type ResolveTestResult struct {
 	// ClientIPs is what a real client would receive after the pipeline's
 	// rewrite step (foreign IPs collapsed to the gateway IP; CN kept as-is).
 	ClientIPs []string `json:"client_ips,omitempty"`
+	// Intercept and Policy attribute the verdict; at most one is the cause.
+	// Intercept may be present with Ready false alongside a Policy cause.
+	Intercept *ResolveTestIntercept `json:"intercept,omitempty"`
+	Policy    *ResolveTestPolicy    `json:"policy,omitempty"`
+	// InterceptModuleCount is how many extensions were enabled when the
+	// decision ran. It is what lets the UI state the negative case as a
+	// finding — "3 enabled, none declared this name" — rather than silence.
+	InterceptModuleCount int `json:"intercept_module_count"`
+}
+
+// attribute copies the decision's provenance onto the result. Called on every
+// exit that reports a verdict, because a name-only verdict and an arbitrated
+// one are equally worth attributing.
+func (r *ResolveTestResult) attribute(decision resolutionDecision) {
+	r.InterceptModuleCount = decision.interceptTotal
+	if b := decision.intercept; b != nil {
+		r.Intercept = &ResolveTestIntercept{
+			ModuleID:    b.moduleID,
+			ModuleName:  b.moduleName,
+			MatchedHost: b.pattern,
+			Ready:       decision.interceptReady,
+		}
+		if !decision.interceptReady {
+			r.Intercept.Reason = "mitm-disabled"
+		}
+	}
+	if rule := decision.policyRule; rule != nil {
+		r.Policy = &ResolveTestPolicy{
+			RuleID: rule.ID,
+			Order:  rule.Order,
+			Kind:   string(rule.Source.Kind),
+			Value:  rule.Source.Value,
+		}
+	}
 }
 
 // ResolveTest runs the diagnostic lookup for name. It never touches the
@@ -64,6 +125,7 @@ func (c *Controller) ResolveTest(ctx context.Context, name string) ResolveTestRe
 
 	decision := h.decideName(name)
 	verdict := decision.Verdict
+	res.attribute(decision)
 	cn := h.chnroute()
 
 	// Terminal name-only verdicts never consult an upstream (same as resolve).

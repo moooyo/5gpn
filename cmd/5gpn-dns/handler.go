@@ -452,50 +452,104 @@ type resolutionDecision struct {
 	Verdict Verdict
 	Action  resolutionAction
 	snap    *runtimePolicySnapshot
+
+	// Attribution for diagnostics. Both an extension capture host and an
+	// operator proxy rule produce Verdict{proxy, force-proxy} — deliberately,
+	// because downstream observability counts them as the same thing — so these
+	// are the only way to tell the two apart. intercept is also populated when
+	// an extension DECLARED the name but capture was inert (MITM off), in which
+	// case Action is whatever the policy path decided, not actionGateway.
+	intercept      *interceptHostBinding
+	interceptReady bool
+	interceptTotal int
+	policyRule     *runtimePolicyRule
 }
 
-// decideName is the shared policy decision used by live resolution, Lookup,
-// and ResolveTest. It folds the ordered name rule and the configured fallback
+// decideName is the shared policy decision used by live resolution and
+// ResolveTest. It folds the ordered name rule and the configured fallback
 // into one executable action so diagnostics cannot silently ignore fallback.
 func (h *Handler) decideName(name string) resolutionDecision {
-	if snapshot := h.interceptHosts.Load(); snapshot != nil && snapshot.Match(name) {
+	var intercept *interceptHostBinding
+	interceptReady := false
+	interceptTotal := 0
+	if snapshot := h.interceptHosts.Load(); snapshot != nil {
+		interceptTotal = snapshot.moduleCount
+		if binding, ok := snapshot.lookup(name); ok {
+			intercept = &binding
+			interceptReady = snapshot.mitmEnabled
+		}
+	}
+	// Only a READY capture steers to the gateway. A declaration with MITM off
+	// is carried for the diagnostic and otherwise falls through to policy —
+	// steering it would black-hole the name, since no sidecar can terminate it.
+	if interceptReady {
 		return resolutionDecision{
-			Verdict: Verdict{Verdict: "proxy", Reason: "force-proxy"},
-			Action:  actionGateway,
-			snap:    h.orderedPolicy.Load(),
+			Verdict:        Verdict{Verdict: "proxy", Reason: "force-proxy"},
+			Action:         actionGateway,
+			snap:           h.orderedPolicy.Load(),
+			intercept:      intercept,
+			interceptReady: true,
+			interceptTotal: interceptTotal,
 		}
 	}
 	snap := h.orderedPolicy.Load()
-	v := classifyPolicySnapshot(snap, name)
+	v, rule := classifyPolicySnapshotRule(snap, name)
+	decision := resolutionDecision{
+		Verdict:        v,
+		snap:           snap,
+		intercept:      intercept,
+		interceptReady: false,
+		interceptTotal: interceptTotal,
+		policyRule:     rule,
+	}
 	switch v.Reason {
 	case "block":
-		return resolutionDecision{Verdict: v, Action: actionBlock, snap: snap}
+		decision.Action = actionBlock
+		return decision
 	case "force-direct":
-		return resolutionDecision{Verdict: v, Action: actionDirect, snap: snap}
+		decision.Action = actionDirect
+		return decision
 	case "force-proxy":
-		return resolutionDecision{Verdict: v, Action: actionGateway, snap: snap}
+		decision.Action = actionGateway
+		return decision
 	}
+	decision.policyRule = nil
 	fallback := FallbackAuto
 	if snap != nil {
 		fallback = snap.Fallback
 	}
 	switch fallback {
 	case FallbackDirect:
-		return resolutionDecision{Verdict: Verdict{Verdict: "direct", Reason: "fallback-direct"}, Action: actionDirect, snap: snap}
+		decision.Verdict = Verdict{Verdict: "direct", Reason: "fallback-direct"}
+		decision.Action = actionDirect
 	case FallbackGateway:
-		return resolutionDecision{Verdict: Verdict{Verdict: "proxy", Reason: "fallback-gateway"}, Action: actionGateway, snap: snap}
+		decision.Verdict = Verdict{Verdict: "proxy", Reason: "fallback-gateway"}
+		decision.Action = actionGateway
 	default:
-		return resolutionDecision{Action: actionAuto, snap: snap}
+		decision.Verdict = Verdict{}
+		decision.Action = actionAuto
 	}
+	return decision
 }
 
+// interceptHostSnapshot holds every capture host declared by an enabled
+// extension, whether or not MITM is on. mitmEnabled gates matching rather than
+// construction: with MITM off the sidecar cannot terminate TLS, so nothing may
+// be captured — but the diagnostic still has to answer "which extension
+// declared this name, and why did it not take effect", which an empty table
+// cannot. Resolution reads the table only through CaptureDNS, which applies the
+// gate; lookup is the ungated view and is for diagnostics alone.
 type interceptHostSnapshot struct {
-	exact    map[string]interceptHostBinding
-	wildcard []interceptWildcardBinding
+	exact       map[string]interceptHostBinding
+	wildcard    []interceptWildcardBinding
+	mitmEnabled bool
+	moduleCount int // enabled extensions, for "N enabled, none declared this name"
 }
 
 type interceptHostBinding struct {
 	moduleID   string
+	moduleName string
+	pattern    string // as declared: "host.example.com" or "*.example.com"
 	captureDNS string
 	order      int
 }
@@ -506,17 +560,19 @@ type interceptWildcardBinding struct {
 }
 
 func newInterceptHostSnapshot(document interceptConfigDocument) *interceptHostSnapshot {
-	snapshot := &interceptHostSnapshot{exact: make(map[string]interceptHostBinding)}
-	if !document.MITM.Enabled {
-		return snapshot
+	snapshot := &interceptHostSnapshot{
+		exact:       make(map[string]interceptHostBinding),
+		mitmEnabled: document.MITM.Enabled,
 	}
 	seenWildcard := make(map[string]struct{})
 	for order, module := range orderedInterceptModules(document) {
 		if !module.Enabled {
 			continue
 		}
+		snapshot.moduleCount++
 		binding := interceptHostBinding{
 			moduleID:   module.ID,
+			moduleName: module.Name,
 			captureDNS: module.CaptureDNS,
 			order:      order,
 		}
@@ -526,13 +582,17 @@ func newInterceptHostSnapshot(document interceptConfigDocument) *interceptHostSn
 				suffix := strings.TrimPrefix(pattern, "*.")
 				if _, exists := seenWildcard[suffix]; !exists {
 					seenWildcard[suffix] = struct{}{}
-					snapshot.wildcard = append(snapshot.wildcard, interceptWildcardBinding{suffix: suffix, binding: binding})
+					declared := binding
+					declared.pattern = pattern
+					snapshot.wildcard = append(snapshot.wildcard, interceptWildcardBinding{suffix: suffix, binding: declared})
 				}
 				continue
 			}
 			if pattern != "" {
 				if _, exists := snapshot.exact[pattern]; !exists {
-					snapshot.exact[pattern] = binding
+					declared := binding
+					declared.pattern = pattern
+					snapshot.exact[pattern] = declared
 				}
 			}
 		}
@@ -547,10 +607,28 @@ func (s *interceptHostSnapshot) Match(name string) bool {
 
 // CaptureDNS returns the operator-selected resolver group and the owning
 // extension for name. Bindings are evaluated in execution_order, so the first
-// enabled extension that declared an overlapping capture host wins.
+// enabled extension that declared an overlapping capture host wins. Returns no
+// match while MITM is off: the sidecar cannot terminate TLS then, so steering a
+// name to the gateway would black-hole it.
 func (s *interceptHostSnapshot) CaptureDNS(name string) (resolver, moduleID string, matched bool) {
-	if s == nil {
+	if s == nil || !s.mitmEnabled {
 		return "", "", false
+	}
+	binding, ok := s.lookup(name)
+	if !ok {
+		return "", "", false
+	}
+	return binding.captureDNS, binding.moduleID, true
+}
+
+// lookup resolves name against the declared capture hosts with the same
+// first-match-in-execution-order semantics as CaptureDNS, but WITHOUT the MITM
+// gate. Diagnostics only: it is what lets the resolve test say "this extension
+// declared the name but capture is inert because MITM is off". Never call it
+// from a resolution path — CaptureDNS is the gated entry.
+func (s *interceptHostSnapshot) lookup(name string) (interceptHostBinding, bool) {
+	if s == nil {
+		return interceptHostBinding{}, false
 	}
 	name = strings.ToLower(stripDot(name))
 	exact, exactMatch := s.exact[name]
@@ -559,13 +637,13 @@ func (s *interceptHostSnapshot) CaptureDNS(name string) (resolver, moduleID stri
 			break
 		}
 		if len(name) > len(wildcard.suffix)+1 && strings.HasSuffix(name, "."+wildcard.suffix) {
-			return wildcard.binding.captureDNS, wildcard.binding.moduleID, true
+			return wildcard.binding, true
 		}
 	}
 	if exactMatch {
-		return exact.captureDNS, exact.moduleID, true
+		return exact, true
 	}
-	return "", "", false
+	return interceptHostBinding{}, false
 }
 
 func (h *Handler) setInterceptDocument(document *interceptConfigDocument) {
@@ -587,24 +665,35 @@ func (h *Handler) captureDNSForName(name string) (resolver, moduleID string) {
 }
 
 func classifyPolicySnapshot(snap *runtimePolicySnapshot, name string) Verdict {
+	v, _ := classifyPolicySnapshotRule(snap, name)
+	return v
+}
+
+// classifyPolicySnapshotRule is classifyPolicySnapshot plus the rule that won.
+// The extra return exists for diagnostics: a bare "force-proxy" cannot tell an
+// operator WHICH of their rules fired, and the compiled DomainSet has already
+// discarded the declaration by the time a verdict exists. matched is nil when
+// no rule applied.
+func classifyPolicySnapshotRule(snap *runtimePolicySnapshot, name string) (Verdict, *runtimePolicyRule) {
 	if snap == nil {
-		return Verdict{}
+		return Verdict{}, nil
 	}
 	bare := stripDot(name)
-	for _, rule := range snap.Rules {
+	for i := range snap.Rules {
+		rule := &snap.Rules[i]
 		if !rule.Matcher.Match(bare) {
 			continue
 		}
 		switch rule.Intent {
 		case IntentBlock:
-			return Verdict{Verdict: "block", Reason: "block"}
+			return Verdict{Verdict: "block", Reason: "block"}, rule
 		case IntentDirect:
-			return Verdict{Verdict: "direct", Reason: "force-direct"}
+			return Verdict{Verdict: "direct", Reason: "force-direct"}, rule
 		case IntentProxy:
-			return Verdict{Verdict: "proxy", Reason: "force-proxy"}
+			return Verdict{Verdict: "proxy", Reason: "force-proxy"}, rule
 		}
 	}
-	return Verdict{}
+	return Verdict{}, nil
 }
 
 // ServeDNS implements dns.Handler. The miekg UDP/TCP/DoT path carries no client

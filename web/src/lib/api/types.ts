@@ -81,6 +81,25 @@ export interface ResolveProbe {
   err?: string
   selected: boolean
 }
+/** Names the extension behind a gateway verdict. An extension capture host and
+ *  an operator proxy rule produce the identical `verdict`/`reason` pair, so
+ *  this is the only way to tell them apart. `ready` false means the extension
+ *  declared the name but capture is inert (MITM off) — worth surfacing because
+ *  the extensions page still shows it as enabled. */
+export interface ResolveTestIntercept {
+  module_id: string
+  module_name: string
+  matched_host: string // as declared: 'host.example.com' or '*.example.com'
+  ready: boolean
+  reason?: string // why not ready, e.g. 'mitm-disabled'
+}
+/** Names the operator rule that produced the verdict. */
+export interface ResolveTestPolicy {
+  rule_id: string
+  order: number
+  kind: string
+  value: string
+}
 export interface ResolveTestResult {
   name: string
   verdict: string
@@ -89,6 +108,11 @@ export interface ResolveTestResult {
   chosen?: string
   chosen_ips?: string[]
   client_ips?: string[]
+  intercept?: ResolveTestIntercept
+  policy?: ResolveTestPolicy
+  /** Enabled extensions at decision time — lets the UI state the negative case
+   *  as a finding ("3 enabled, none declared this name") rather than silence. */
+  intercept_module_count?: number
 }
 
 export interface UpstreamsView { china: string[]; trust: string[] }

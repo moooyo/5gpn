@@ -83,12 +83,10 @@ const en = {
     },
   },
   sidebar: {
-    // Named for the component, not the unit. The unit name moves to the
-    // subtitle rather than being dropped: it is still what an operator types
-    // into systemctl, so losing it would trade one mismatch for another.
+    // Named for the component, not the unit: the runtime-state card says
+    // healthy or not and nothing else — one title and one state label per row,
+    // no systemd unit name.
     intercept: 'sidecar',
-    interceptSub: '5gpn-intercept · {{count}} active plugins',
-    interceptSubUnknown: '5gpn-intercept · — active plugins',
   },
   setupGuide: {
     title: 'Connect a device to 5gpn',
@@ -596,22 +594,65 @@ const en = {
     run: 'Test',
     running: 'Testing…',
     examples: 'Examples',
-    ruleLabel: 'Matched rule',
+    ruleLabel: 'Decision basis',
     sourceLabel: 'Resolution source',
-    answerLabel: 'Answer',
+    answerLabel: 'Client answer',
     decisionPath: 'Decision path',
     probes: 'Upstream probes',
     concurrent: 'china ‖ trust',
     selected: 'selected',
     blocked: '(blocked)',
-    groupChina: 'Domestic UDP',
-    groupTrust: 'Trust DoT',
+    groupChina: 'Domestic',
+    groupTrust: 'Trust',
+    // A force-proxy can come from an extension capture or from an operator
+    // policy rule — the verdict and reason are identical (downstream
+    // observability counts them as one thing), so the attribution block is the
+    // only place the two can be told apart.
+    intercept: {
+      title: 'Extension attribution',
+      declaredBy: 'Declared by',
+      matchedHost: 'Matched capture rule',
+      byPlugin: 'Extension',
+      sourcePolicy: 'SOURCE=POLICY',
+      meta: 'REASON={{reason}} · SOURCE=INTERCEPT',
+      wildcardMatch: 'Wildcard suffix match · query {{name}}',
+      exactMatch: 'Exact match · query {{name}}',
+      noUpstream: 'No upstream queried',
+      ruleBasis: 'Extension capture host',
+      policyBasis: 'Policy rule',
+      rawTitle: 'Raw response',
+      rawPolicyNote: '// a proxy-intent policy rule matched; no intercept field',
+      // Edge case: the extension reads as "enabled" on the extensions page,
+      // but with MITM off the capture table is inert — easy to misattribute.
+      notReadyTitle: 'Capture inert: MITM is off',
+      notReadyBody: 'The declared {{host}} never entered the capture table; this gateway verdict is unrelated to that extension.',
+      // Decision-order table
+      orderTitle: 'Decision order',
+      stageIntercept: 'Extension capture table',
+      stagePolicy: 'Policy rules',
+      stageFallback: 'Fallback / chnroute',
+      stageAnswer: 'Answer',
+      interceptHit: 'Matched {{host}}; the decision ends here',
+      interceptMissWithCount: '{{count}} enabled extensions, none declared this name',
+      interceptMiss: 'Did not declare this name',
+      interceptDeclaredInert: 'Declared {{host}}, but the capture table is inert',
+      policyHit: 'Rule {{order}} · {{kind}} {{value}}',
+      policySkipped: 'Not evaluated',
+      fallbackSkipped: 'Not evaluated',
+      answerSynthesized: 'Synthesized A record = gateway IP; no upstream queried',
+      markActive: 'Applied',
+      markSkipped: 'Skipped',
+      markMiss: 'No match',
+      markInert: 'Inert',
+    },
     // Pill text for each of the 5 reason-driven outcomes (same concepts as
     // logs.decision.*).
     label: {
       block: 'Blocked',
       forceDirect: 'Force-direct',
-      forceProxy: 'Force-proxy',
+      // Unified with logs.decision.forceProxy and overview.decision: one
+      // verdict under two names across screens reads as two concepts.
+      forceProxy: 'Force-gateway',
       chnrouteCn: 'CN direct',
       chnrouteForeign: 'Foreign proxy',
     },
@@ -631,14 +672,21 @@ const en = {
         '5gpn-dns returns the gateway IP',
         'The connection is steered to the proxy egress',
       ],
+      // Extension capture and policy rule share force-proxy; these replace the
+      // steps above when the capture is what fired.
+      interceptForceProxy: [
+        'Extension "{{name}}" declares this name as a capture host',
+        'Evaluated before policy rules — the decision ends there',
+        'Returns the gateway IP; mihomo intercepts the traffic',
+      ],
       chnrouteCn: [
         'No policy rule matched — falls to chnroute arbitration',
-        'Concurrent query: domestic UDP ‖ trust DoT',
+        'Concurrent query: domestic group ‖ trust group',
         'Domestic answer IP is in chnroute — adopted, direct',
       ],
       chnrouteForeign: [
         'No policy rule matched — falls to chnroute arbitration',
-        'Concurrent query: domestic UDP ‖ trust DoT',
+        'Concurrent query: domestic group ‖ trust group',
         'Answer IP is not in chnroute — returns the gateway IP, proxied',
       ],
       generic: 'Result: {{verdict}}',
@@ -669,7 +717,8 @@ const en = {
     // keys are the generic fallback used when `reason` is missing/unknown.
     decision: {
       forceDirect: 'Force-direct',
-      forceProxy: 'Force-proxy',
+      // Unified with overview.decision and resolveTest.label.
+      forceProxy: 'Force-gateway',
       chnrouteCn: 'CN direct',
       chnrouteForeign: 'Foreign proxy',
       direct: 'Direct',

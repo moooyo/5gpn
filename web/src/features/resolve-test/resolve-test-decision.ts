@@ -40,8 +40,21 @@ export interface ResolveTestDecision {
  *  `/api/resolve-test` result. The color always comes from the logs view's
  *  `resolveDecision` (reason primary, verdict fallback) so the two live
  *  views never disagree on what color a given reason means. */
-export function decideResolveTest(result: Pick<ResolveTestResult, 'reason' | 'verdict'>, t: TFunction): ResolveTestDecision {
+export function decideResolveTest(result: Pick<ResolveTestResult, 'reason' | 'verdict' | 'intercept'>, t: TFunction): ResolveTestDecision {
   const color = resolveDecision(result).color
+  // A live extension capture and an operator proxy rule share `force-proxy`
+  // deliberately — observability counts them as one thing — so the steps have
+  // to branch on the attribution, not the reason.
+  if (result.reason === 'force-proxy' && result.intercept?.ready) {
+    return {
+      color,
+      label: t('resolveTest.label.forceProxy'),
+      steps: t('resolveTest.steps.interceptForceProxy', {
+        name: result.intercept.module_name || result.intercept.module_id,
+        returnObjects: true,
+      }) as unknown as string[],
+    }
+  }
   const slug = result.reason ? KNOWN_SLUG[result.reason] : undefined
   if (slug) {
     return {
@@ -55,6 +68,24 @@ export function decideResolveTest(result: Pick<ResolveTestResult, 'reason' | 've
     label: result.verdict || t('verdicts.noVerdict'),
     steps: [t('resolveTest.steps.generic', { verdict: result.verdict || t('verdicts.noVerdict') })],
   }
+}
+
+/** Which source the UI should attribute a gateway verdict to.
+ *
+ *  `intercept` — a live extension capture won, before policy was consulted.
+ *  `policy`    — an operator rule won (an extension may still have DECLARED
+ *                the name with capture inert; that is reported separately).
+ *  `none`      — nothing to attribute (chnroute, fallback, block, …).
+ *
+ *  Kept beside `decideResolveTest` rather than inline in the page because both
+ *  are "turn a raw result into what the operator should be told", and this one
+ *  is worth testing without mounting a component. */
+export type AttributionKind = 'intercept' | 'policy' | 'none'
+
+export function attributionOf(result: Pick<ResolveTestResult, 'reason' | 'intercept' | 'policy'>): AttributionKind {
+  if (result.intercept?.ready) return 'intercept'
+  if (result.policy) return 'policy'
+  return 'none'
 }
 
 /** 解析来源: `chosen` group name + a human group label (e.g. "china (国内

@@ -4,7 +4,8 @@ import { ArrowRightIcon, LanguageIcon, NetworkCheckIcon } from '../../components
 import { Badge, Button, Card, Input, SectionLabel, StatusDot, toast } from '../../components/ds'
 import { api } from '../../lib/api/client'
 import type { ResolveTestResult } from '../../lib/api/types'
-import { decideResolveTest, EXAMPLE_DOMAINS, resolveSourceText } from './resolve-test-decision'
+import { AttributionSection } from './AttributionSection'
+import { attributionOf, decideResolveTest, EXAMPLE_DOMAINS, resolveSourceText } from './resolve-test-decision'
 
 export default function ResolveTestPage() {
   const { t } = useTranslation()
@@ -87,12 +88,38 @@ export default function ResolveTestPage() {
                 <StatusDot color={decision.color} />
                 {decision.label}
               </span>
+              {/* Which source produced the verdict, stated at the top: an
+                  extension capture and an operator rule are indistinguishable
+                  from the verdict alone. */}
+              {attributionOf(result) === 'intercept' ? (
+                <Badge tone="indigo" className="ml-auto" data-testid="resolve-test-by-plugin">
+                  {t('resolveTest.intercept.byPlugin')}
+                </Badge>
+              ) : attributionOf(result) === 'policy' ? (
+                <span className="ml-auto font-mono text-[10.5px] tracking-[.06em] text-text-faint">
+                  {t('resolveTest.intercept.sourcePolicy')}
+                </span>
+              ) : null}
             </div>
 
             <div className="grid gap-3 p-5 sm:grid-cols-3 sm:p-6">
               {[
-                [t('resolveTest.ruleLabel'), result.reason || '—', false],
-                [t('resolveTest.sourceLabel'), resolveSourceText(result, t), false],
+                [
+                  t('resolveTest.ruleLabel'),
+                  attributionOf(result) === 'intercept'
+                    ? t('resolveTest.intercept.ruleBasis')
+                    : result.reason || '—',
+                  false,
+                ],
+                // A terminal name-only verdict consults no upstream. Saying so
+                // beats the old '—', which read as missing data rather than as
+                // the finding it is — the probes card is absent for the same
+                // reason and would otherwise look like something went wrong.
+                [
+                  t('resolveTest.sourceLabel'),
+                  result.probes?.length ? resolveSourceText(result, t) : t('resolveTest.intercept.noUpstream'),
+                  false,
+                ],
                 [t('resolveTest.answerLabel'), result.client_ips?.length ? result.client_ips.join(', ') : t('resolveTest.blocked'), true],
               ].map(([label, value, mono]) => (
                 <div key={String(label)} className="rounded-[14px] bg-surface-container-low p-4">
@@ -116,7 +143,14 @@ export default function ResolveTestPage() {
                 ))}
               </div>
             </div>
+
+            {/* Policy attribution has no extension to introduce, so its
+                evidence belongs inside the result card rather than in one of
+                its own. */}
+            {attributionOf(result) !== 'intercept' ? <AttributionSection result={result} /> : null}
           </Card>
+
+          {attributionOf(result) === 'intercept' ? <AttributionSection result={result} /> : null}
 
           {result.probes?.length ? (
             <Card className="p-5 sm:p-6">

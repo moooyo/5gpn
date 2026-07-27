@@ -125,7 +125,7 @@ export function Sidebar({ className, onNavigate, onClose, testId }: SidebarProps
 
 function KernelStatusCard() {
   const { t } = useTranslation()
-  const { dnsState, mihomoState, intercept, interceptState } = useStatus()
+  const { dnsState, mihomoState, interceptState } = useStatus()
 
   return (
     <div className="mt-3 flex flex-col gap-2 rounded-[16px] bg-surface-container-low p-3.5">
@@ -133,13 +133,9 @@ function KernelStatusCard() {
         <MemoryIcon className="h-4 w-4" aria-hidden="true" />
         {t('topbar.runtimeState')}
       </div>
-      <KernelRow title={t('topbar.kernelDns')} sub="5gpn-dns · :853 DoT" state={dnsState} />
-      <KernelRow title="mihomo" sub="gateway · :443" state={mihomoState} />
-      <KernelRow
-        title={t('sidebar.intercept')}
-        sub={intercept ? t('sidebar.interceptSub', { count: intercept.active_plugins }) : t('sidebar.interceptSubUnknown')}
-        state={interceptState}
-      />
+      <KernelRow title={t('topbar.kernelDns')} state={dnsState} />
+      <KernelRow title="mihomo" state={mihomoState} />
+      <KernelRow title={t('sidebar.intercept')} state={interceptState} />
     </div>
   )
 }
@@ -151,16 +147,13 @@ const HEALTH_PRESENTATION: Record<HealthState, { color: string; className: strin
   down: { color: 'var(--color-red)', className: 'text-red', labelKey: 'common.healthDown' },
 }
 
-function KernelRow({ title, sub, state }: { title: string; sub: string; state: HealthState }) {
+function KernelRow({ title, state }: { title: string; state: HealthState }) {
   const { t } = useTranslation()
   const presentation = HEALTH_PRESENTATION[state]
   return (
-    <div className="flex items-center gap-2.5 rounded-[10px] px-1 py-1">
+    <div className="flex items-center gap-2.5 rounded-[10px] px-1 py-1.5">
       <StatusDot color={presentation.color} pulse={state === 'checking'} />
-      <div className="flex min-w-0 flex-1 flex-col">
-        <span className="text-[12px] font-medium text-text-strong">{title}</span>
-        <span className="truncate font-mono text-[9.5px] text-text-faint">{sub}</span>
-      </div>
+      <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-text-strong">{title}</span>
       <span className={cn('text-[10px] font-medium', presentation.className)}>{t(presentation.labelKey)}</span>
     </div>
   )
