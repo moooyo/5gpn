@@ -361,7 +361,14 @@ after an explicit extension transaction has prepared the immutable snapshot and
 certificate, validated every required operator group, validated and hot-applied
 the ordered egress and capture rules, and committed the sidecar state. A
 matching name receives the same gateway action and `force-proxy`
-observability reason as an explicit proxy-intent rule. Disabling a module
+observability reason as an explicit proxy-intent rule — deliberately, so
+downstream counters treat the two as one thing. `GET /api/resolve-test`
+therefore reports the owning extension (id, display name, and the capture
+pattern that matched) alongside the unchanged reason, and reports the
+operator rule that won in the other case, because the verdict alone cannot
+distinguish them. When the MITM master is off the capture table is built but
+inert; the diagnostic still names the declaring extension with `ready: false`,
+since the extensions page continues to show it as enabled. Disabling a module
 removes its overlay and flushes the response cache. This overlay is not a
 second general policy language: it accepts only the normalized host patterns
 owned by enabled native extensions. DNS policy still cannot select egress; the
@@ -389,15 +396,25 @@ extension capture host and otherwise forces trust. It does, however, share the
 AAAA stance below: both resolver boundaries answer AAAA with the same synthetic
 NODATA, so neither a client nor mihomo can obtain an IPv6 address from 5gpn.
 
-A trust member declares its transport by spec form: a bare `IP[:port]` is
-plain UDP `:53`, `serverName@IP[:port]` is DoT `:853`, and
+A member of EITHER group declares its transport by spec form: a bare
+`IP[:port]` is plain UDP `:53`, `serverName@IP[:port]` is DoT `:853`, and
 `https://host/path@IP[:port]` is DoH over a pooled HTTP/2 connection `:443`.
-The address after `@` is always the dial target, because resolving the
-member's own hostname would have to go through this daemon. DoH reuses its
-connection across queries, so a query costs one round trip rather than the
-three a per-query TCP+TLS handshake costs; the pool is retired on a grace
-timer after an upstream hot-swap so in-flight queries finish against the
-snapshot they loaded. China members are always plain UDP.
+Transport is a per-member property, so one group may mix all three. The address
+after `@` is always the dial target, because resolving the member's own
+hostname would have to go through this daemon. DoH reuses its connection across
+queries, so a query costs one round trip rather than the three a per-query
+TCP+TLS handshake costs; both groups' pools are retired on a grace timer after
+an upstream hot-swap so in-flight queries finish against the snapshot they
+loaded.
+
+A plain-UDP member has no query-name anti-spoof mechanism. The DNS 0x20
+encoding that once protected the china group was removed with the group's
+transport restriction: it only ever covered plaintext UDP, its startup
+self-probe could not evaluate an encrypted member, and a case-normalising
+resolver would have made every query through that member fail the echo check
+undetectably. An operator who wants an authenticated path to a domestic
+resolver configures DoT or DoH instead — which is what the console's upstream
+card recommends.
 
 The upstream groups are configured in `upstreams.json` alone — there is no
 `dns.env` counterpart. The installer seeds that file with one plain-UDP member

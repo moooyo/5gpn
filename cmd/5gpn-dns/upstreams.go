@@ -124,15 +124,9 @@ func validIPPort(s string) bool {
 }
 
 // ValidateUpstreams checks china/trust upstream spec lists as accepted by
-// PUT /api/upstreams (and re-checked when loading upstreams.json):
-//
-//   - china: 1+ entries, each an IP with optional port (plain UDP).
-//   - trust: 1+ entries, each either a bare IP[:port] (plain UDP) or
-//     "serverName@IP[:port]" (DoT; serverName must look like a hostname or IP).
-//
-// A bare hostname (no '@') is rejected rather than parsed: it would be dialed
-// through the box's own resolve path — the exact self-reference footgun the
-// subscription fetcher had to work around.
+// PUT /api/upstreams (and re-checked when loading upstreams.json). Both groups
+// share one grammar — see validateUpstreamEntry — and each needs at least one
+// entry.
 func ValidateUpstreams(china, trust []string) error {
 	if len(china) == 0 {
 		return fmt.Errorf("%w: china list is empty", ErrInvalidUpstream)
@@ -141,48 +135,63 @@ func ValidateUpstreams(china, trust []string) error {
 		return fmt.Errorf("%w: trust list is empty", ErrInvalidUpstream)
 	}
 	for _, c := range china {
-		c = strings.TrimSpace(c)
-		if !validIPPort(c) {
-			return fmt.Errorf("%w: china entry %q (want IP or IP:port)", ErrInvalidUpstream, c)
+		if err := validateUpstreamEntry("china", strings.TrimSpace(c)); err != nil {
+			return err
 		}
 	}
 	for _, t := range trust {
-		t = strings.TrimSpace(t)
-		at := strings.LastIndex(t, "@")
-		switch {
-		case strings.HasPrefix(t, "https://"):
-			// DoH: "https://host/path@dialIP[:port]". The dial part is
-			// mandatory — resolving the endpoint host would have to go through
-			// this daemon, which is the thing being configured.
-			if at <= 0 {
-				return fmt.Errorf("%w: trust entry %q (DoH needs a pinned address, e.g. https://dns.google/dns-query@8.8.8.8)", ErrInvalidUpstream, t)
-			}
-			endpoint, dial := t[:at], t[at+1:]
-			u, err := url.Parse(endpoint)
-			if err != nil || u.Scheme != "https" || u.Hostname() == "" {
-				return fmt.Errorf("%w: trust entry %q (bad DoH endpoint %q)", ErrInvalidUpstream, t, endpoint)
-			}
-			if u.Path == "" || u.Path == "/" {
-				return fmt.Errorf("%w: trust entry %q (DoH endpoint needs a path, e.g. /dns-query)", ErrInvalidUpstream, t)
-			}
-			if !hostnameRE.MatchString(u.Hostname()) && net.ParseIP(u.Hostname()) == nil {
-				return fmt.Errorf("%w: trust entry %q (bad DoH host %q)", ErrInvalidUpstream, t, u.Hostname())
-			}
-			if !validIPPort(dial) {
-				return fmt.Errorf("%w: trust entry %q (dial part %q must be IP or IP:port)", ErrInvalidUpstream, t, dial)
-			}
-		case at > 0:
-			name, dial := t[:at], t[at+1:]
-			if !hostnameRE.MatchString(name) && net.ParseIP(name) == nil {
-				return fmt.Errorf("%w: trust entry %q (bad server name %q)", ErrInvalidUpstream, t, name)
-			}
-			if !validIPPort(dial) {
-				return fmt.Errorf("%w: trust entry %q (dial part %q must be IP or IP:port)", ErrInvalidUpstream, t, dial)
-			}
-		default:
-			if !validIPPort(t) {
-				return fmt.Errorf("%w: trust entry %q (want IP[:port] for plain UDP, serverName@IP for DoT, or https://host/path@IP for DoH)", ErrInvalidUpstream, t)
-			}
+		if err := validateUpstreamEntry("trust", strings.TrimSpace(t)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateUpstreamEntry checks one spec against the grammar both groups share:
+//
+//   - bare "IP[:port]"                  plain UDP :53
+//   - "serverName@IP[:port]"            DoT :853, TLS-verified against serverName
+//   - "https://host/path@IP[:port]"     DoH :443 over pooled HTTP/2
+//
+// A bare hostname (no '@') is rejected rather than parsed: it would be dialed
+// through the box's own resolve path — the exact self-reference footgun the
+// subscription fetcher had to work around. That is also why the dial part after
+// '@' is mandatory for DoT and DoH.
+//
+// group appears only in the error text, so a 400 still names which list the
+// operator got wrong.
+func validateUpstreamEntry(group, spec string) error {
+	at := strings.LastIndex(spec, "@")
+	switch {
+	case strings.HasPrefix(spec, "https://"):
+		if at <= 0 {
+			return fmt.Errorf("%w: %s entry %q (DoH needs a pinned address, e.g. https://dns.google/dns-query@8.8.8.8)", ErrInvalidUpstream, group, spec)
+		}
+		endpoint, dial := spec[:at], spec[at+1:]
+		u, err := url.Parse(endpoint)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+			return fmt.Errorf("%w: %s entry %q (bad DoH endpoint %q)", ErrInvalidUpstream, group, spec, endpoint)
+		}
+		if u.Path == "" || u.Path == "/" {
+			return fmt.Errorf("%w: %s entry %q (DoH endpoint needs a path, e.g. /dns-query)", ErrInvalidUpstream, group, spec)
+		}
+		if !hostnameRE.MatchString(u.Hostname()) && net.ParseIP(u.Hostname()) == nil {
+			return fmt.Errorf("%w: %s entry %q (bad DoH host %q)", ErrInvalidUpstream, group, spec, u.Hostname())
+		}
+		if !validIPPort(dial) {
+			return fmt.Errorf("%w: %s entry %q (dial part %q must be IP or IP:port)", ErrInvalidUpstream, group, spec, dial)
+		}
+	case at > 0:
+		name, dial := spec[:at], spec[at+1:]
+		if !hostnameRE.MatchString(name) && net.ParseIP(name) == nil {
+			return fmt.Errorf("%w: %s entry %q (bad server name %q)", ErrInvalidUpstream, group, spec, name)
+		}
+		if !validIPPort(dial) {
+			return fmt.Errorf("%w: %s entry %q (dial part %q must be IP or IP:port)", ErrInvalidUpstream, group, spec, dial)
+		}
+	default:
+		if !validIPPort(spec) {
+			return fmt.Errorf("%w: %s entry %q (want IP[:port] for plain UDP, serverName@IP for DoT, or https://host/path@IP for DoH)", ErrInvalidUpstream, group, spec)
 		}
 	}
 	return nil
@@ -210,6 +219,7 @@ type upstreamSnapshot struct {
 	China        Exchanger
 	Trust        Exchanger
 	ChinaRaw     []string
+	ChinaEntries []UpstreamEntry
 	TrustRaw     []string
 	TrustEntries []UpstreamEntry
 }

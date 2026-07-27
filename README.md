@@ -63,7 +63,7 @@ DNS 策略是一个全局有序、first-match 的规则列表：
 
 上表描述成功的 A 答案。采纳或改写上游 response 时，5gpn 会保留其 Rcode 与 authority；`NXDOMAIN` 和 `SERVFAIL` 不会被改成 `NOERROR`。
 
-`auto` 会并发查询 China 和 trust 两个上游组；组内成员按配置顺序串行尝试，并公平分配剩余 deadline。新安装由安装器把 `223.5.5.5:53` 与 `22.22.22.22:53` 两个 UDP 上游写入 `upstreams.json`（上游组的唯一配置来源，`dns.env` 中没有对应键），之后可在控制台修改并热生效。trust 成员按写法选择传输：裸 `IP[:port]` 为明文 UDP、`serverName@IP[:port]` 为 DoT、`https://host/path@IP[:port]` 为 DoH（复用 HTTP/2 连接，每次查询只需一个往返）。A 查询执行上述策略；AAAA、HTTPS 和 SVCB 返回带 authority 的 NODATA；其他类型交给 trust 组，并在缓存和返回之前把回复各段里的 AAAA、HTTPS、SVCB 记录剥掉 —— 只在"被直接查询"时拒绝这两类记录是不够的，`ANY` 会把它们整组带出来，MX/NS/SRV/PTR 的附加段也会夹带目标的 AAAA glue。
+`auto` 会并发查询 China 和 trust 两个上游组；组内成员按配置顺序串行尝试，并公平分配剩余 deadline。新安装由安装器把 `223.5.5.5:53` 与 `22.22.22.22:53` 两个 UDP 上游写入 `upstreams.json`（上游组的唯一配置来源，`dns.env` 中没有对应键），之后可在控制台修改并热生效。两个组的成员都按写法选择传输：裸 `IP[:port]` 为明文 UDP、`serverName@IP[:port]` 为 DoT、`https://host/path@IP[:port]` 为 DoH（复用 HTTP/2 连接，每次查询只需一个往返）；传输方式属于每个成员，同一组内可以混用。明文 UDP 没有查询名防欺骗机制，解析器支持时优先选 DoT 或 DoH。A 查询执行上述策略；AAAA、HTTPS 和 SVCB 返回带 authority 的 NODATA；其他类型交给 trust 组，并在缓存和返回之前把回复各段里的 AAAA、HTTPS、SVCB 记录剥掉 —— 只在"被直接查询"时拒绝这两类记录是不够的，`ANY` 会把它们整组带出来，MX/NS/SRV/PTR 的附加段也会夹带目标的 AAAA glue。
 
 AAAA 的 NODATA 不只针对客户端。mihomo 嗅探出主机名之后，会在 `127.0.0.1:5354` 这个回源解析器上重新解析 origin，那里同样在查询任何上游之前就返回合成 NODATA。这一条是网关保持 IPv4-only 出口的实际保证：mihomo 对每个 origin 都会无条件发出 AAAA 查询，它的 `dns.ipv6` 并不能抑制该查询，只有顶层 `ipv6` 可以，而 `/etc/5gpn/mihomo/config.yaml` 完全归运维者所有，无法假定其中存在某个 seed 值。若放行 AAAA，mihomo 会拿到 origin 的真实 IPv6 并与 IPv4 竞速；IPv6 一侧一旦完成 TCP 握手，双栈回退就不会再触发，而拒绝或错误定位机房 IPv6 段的目标站会在应用层失败，此时已无任何可回退的余地。返回 NODATA 后 mihomo 只剩 IPv4 候选。代价是明确接受的：只发布 AAAA 的 origin（或以主机名配置的运维者节点）无法经网关访问 —— 在 IPv4-only 数据面上，即使拿到 IPv6 答案也同样拨不通。新装或显式 reset 的 mihomo seed 另外写入 `ipv6: false` 作为纵深防御。
 

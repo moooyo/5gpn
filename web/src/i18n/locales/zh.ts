@@ -166,7 +166,7 @@ const zh: typeof en = {
     upstreamsChina: '境内组（china）',
     upstreamsTrust: '境外组（trust）',
     upstreamsHint:
-      '上游会按列表顺序依次尝试。境内组使用明文 UDP；境外组支持 DoT，也可连接可信内网的明文 UDP 解析器。请逐项添加并校验，保存后立即生效，无需重启。',
+      '上游会按列表顺序依次尝试。两个组都支持明文 UDP、DoT 与 DoH——传输方式属于每个成员，而不属于组。明文 UDP 没有任何防欺骗保护，解析器支持时请优先选择 DoT 或 DoH。请逐项添加并校验，保存后立即生效，无需重启。',
     upstreamsStorageHint: '保存在 /etc/5gpn/upstreams.json，无需重启即刻生效。dns.env 中没有副本——这里是配置上游组的唯一位置。',
     upstreamsCount: '上游数量：{{count}}',
     upstreamsAddChina: '添加境内 DNS',
@@ -182,7 +182,6 @@ const zh: typeof en = {
     upstreamsEndpointInvalid: '请输入带路径的绝对 https:// URL，例如 https://dns.google/dns-query。',
     upstreamsDohAddressHint: '守护进程直接连接此 IP 并保持 HTTP/2 连接，因此每次查询只需一个往返，而不必每次重新握手。DoH 默认使用 443 端口。',
     upstreamsProtocolDot: 'DoT',
-    upstreamsUdpDescription: '明文 DNS · 默认端口 53',
     upstreamsAddress: '服务器 IP（可选端口）',
     upstreamsDialAddress: '连接 IP（可选端口）',
     upstreamsUdpAddressHint: '填写 IPv4 地址，可写成 IP:端口。网关是 IPv4-only，IPv6 上游会被拒绝。',

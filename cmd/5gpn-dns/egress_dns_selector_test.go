@@ -87,7 +87,7 @@ func TestInterceptHostSnapshotDeduplicatesPatternsWithoutChangingWinner(t *testi
 func TestEgressDNSSelectorChinaBindingCarriesLiveECS(t *testing.T) {
 	got := make(chan *dns.EDNS0_SUBNET, 1)
 	addr := startLocalUDPDNS(t, captureECSHandler(got))
-	china := NewUDPGroup([]string{addr})
+	china := NewChinaGroup(udpEntries(addr))
 	subnet, err := parseECS("112.96.32.0/24")
 	if err != nil {
 		t.Fatal(err)

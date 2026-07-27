@@ -75,7 +75,7 @@ function UpstreamAddDialog({
   }
 
   function handleAdd() {
-    const result = createUpstreamSpec({ group, protocol, address, serverName, endpoint })
+    const result = createUpstreamSpec({ protocol, address, serverName, endpoint })
     if (!result.ok) {
       setErrors(result.errors)
       setFormError(null)
@@ -135,36 +135,31 @@ function UpstreamAddDialog({
         }}
       >
         <Field label={t('settings.upstreamsProtocol')}>
-          {group === 'trust' ? (
-            <div className="grid grid-cols-3 gap-1 rounded-[12px] bg-surface-container p-1" role="radiogroup" aria-label={t('settings.upstreamsProtocol')}>
-              {(['doh', 'dot', 'udp'] as const).map((value) => (
-                <button
-                  key={value}
-                  type="button"
-                  role="radio"
-                  aria-checked={protocol === value}
-                  data-testid={`upstreams-protocol-${value}`}
-                  onClick={() => handleProtocolChange(value)}
-                  className={
-                    protocol === value
-                      ? 'zds-state-layer rounded-[9px] bg-card px-3 py-2 text-[12px] font-medium text-primary shadow-[var(--md-sys-elevation-1)]'
-                      : 'zds-state-layer rounded-[9px] px-3 py-2 text-[12px] text-text-soft'
-                  }
-                >
-                  {value === 'doh'
-                    ? t('settings.upstreamsProtocolDoh')
-                    : value === 'dot'
-                      ? t('settings.upstreamsProtocolDot')
-                      : t('settings.upstreamsProtocolUdp')}
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="flex items-center gap-2 rounded-[12px] bg-surface-container-low px-3 py-2.5">
-              <Badge tone="cyan">{t('settings.upstreamsProtocolUdp')}</Badge>
-              <span className="text-[11px] text-text-faint">{t('settings.upstreamsUdpDescription')}</span>
-            </div>
-          )}
+          {/* Both groups offer the same three transports: transport is a
+              per-member property of an upstream, not a property of the group. */}
+          <div className="grid grid-cols-3 gap-1 rounded-[12px] bg-surface-container p-1" role="radiogroup" aria-label={t('settings.upstreamsProtocol')}>
+            {(['doh', 'dot', 'udp'] as const).map((value) => (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={protocol === value}
+                data-testid={`upstreams-protocol-${value}`}
+                onClick={() => handleProtocolChange(value)}
+                className={
+                  protocol === value
+                    ? 'zds-state-layer rounded-[9px] bg-card px-3 py-2 text-[12px] font-medium text-primary shadow-[var(--md-sys-elevation-1)]'
+                    : 'zds-state-layer rounded-[9px] px-3 py-2 text-[12px] text-text-soft'
+                }
+              >
+                {value === 'doh'
+                  ? t('settings.upstreamsProtocolDoh')
+                  : value === 'dot'
+                    ? t('settings.upstreamsProtocolDot')
+                    : t('settings.upstreamsProtocolUdp')}
+              </button>
+            ))}
+          </div>
         </Field>
 
         {protocol === 'doh' ? (
@@ -280,7 +275,7 @@ export function UpstreamGroupEditor({ group, entries, disabled, onChange }: Upst
         {entries.length > 0 ? (
           <ol>
             {entries.map((entry, index) => {
-              const parsed = parseUpstreamSpec(group, entry)
+              const parsed = parseUpstreamSpec(entry)
               return (
                 <li
                   key={`${entry}-${index}`}
@@ -290,10 +285,17 @@ export function UpstreamGroupEditor({ group, entries, disabled, onChange }: Upst
                     {String(index + 1).padStart(2, '0')}
                   </span>
                   <div className="flex min-w-0 items-center gap-2">
-                    <Badge tone={parsed.protocol === 'dot' ? 'blue' : 'cyan'} className="shrink-0 px-2 py-0.5">
-                      {parsed.protocol === 'dot'
-                        ? t('settings.upstreamsProtocolDot')
-                        : t('settings.upstreamsProtocolUdp')}
+                    {/* Three-way: a two-way dot/udp branch mislabeled every
+                        DoH entry as UDP. */}
+                    <Badge
+                      tone={parsed.protocol === 'doh' ? 'green' : parsed.protocol === 'dot' ? 'blue' : 'cyan'}
+                      className="shrink-0 px-2 py-0.5"
+                    >
+                      {parsed.protocol === 'doh'
+                        ? t('settings.upstreamsProtocolDoh')
+                        : parsed.protocol === 'dot'
+                          ? t('settings.upstreamsProtocolDot')
+                          : t('settings.upstreamsProtocolUdp')}
                     </Badge>
                     <code className="min-w-0 truncate font-mono text-[11.5px] text-text-strong" title={entry}>
                       {entry}

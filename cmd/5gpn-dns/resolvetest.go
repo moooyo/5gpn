@@ -200,28 +200,27 @@ func (c *Controller) ResolveTest(ctx context.Context, name string) ResolveTestRe
 	return res
 }
 
-// probeUpstreams queries every configured upstream server individually and
-// concurrently for name's A record, each bounded by the handler's per-query
-// timeout. Probe order in the result is stable: china members first (config
-// order), then trust members.
-func (h *Handler) probeUpstreams(ctx context.Context, name string, snap *upstreamSnapshot) []ResolveProbe {
-	type spec struct {
-		display  string
-		addr     string
-		group    string
-		proto    string
-		sni      string
-		endpoint string // DoH only: the absolute https:// URL to POST to
-	}
-	var specs []spec
-	for _, a := range snap.ChinaRaw {
-		addr := addDefaultPort(a, "53")
-		specs = append(specs, spec{display: addr, addr: addr, group: "china", proto: "udp"})
-	}
-	for i, e := range snap.TrustEntries {
+// probeSpec is one upstream server to query individually, with the transport
+// details the probe executor needs.
+type probeSpec struct {
+	display  string
+	addr     string
+	group    string
+	proto    string
+	sni      string
+	endpoint string // DoH only: the absolute https:// URL to POST to
+}
+
+// upstreamProbeSpecs builds one group's probe specs. Shared by china and trust
+// because transport is a per-member property: probing a DoH member with a plain
+// UDP datagram at :53 would report a failure the resolver never had. raw
+// supplies the operator's own spelling for display when present.
+func upstreamProbeSpecs(group string, entries []UpstreamEntry, raw []string) []probeSpec {
+	specs := make([]probeSpec, 0, len(entries))
+	for i, e := range entries {
 		display := ""
-		if i < len(snap.TrustRaw) {
-			display = snap.TrustRaw[i]
+		if i < len(raw) {
+			display = raw[i]
 		}
 		switch e.Transport {
 		case UpstreamDoH:
@@ -229,21 +228,34 @@ func (h *Handler) probeUpstreams(ctx context.Context, name string, snap *upstrea
 			if display == "" {
 				display = e.Endpoint + "@" + addr
 			}
-			specs = append(specs, spec{display: display, addr: addr, group: "trust", proto: "doh", sni: e.ServerName, endpoint: e.Endpoint})
+			specs = append(specs, probeSpec{display: display, addr: addr, group: group, proto: "doh", sni: e.ServerName, endpoint: e.Endpoint})
 		case UpstreamDoT:
 			addr := addDefaultPort(e.DialAddr, "853")
 			if display == "" {
 				display = e.ServerName + "@" + addr
 			}
-			specs = append(specs, spec{display: display, addr: addr, group: "trust", proto: "dot", sni: e.ServerName})
+			specs = append(specs, probeSpec{display: display, addr: addr, group: group, proto: "dot", sni: e.ServerName})
 		default:
 			addr := addDefaultPort(e.DialAddr, "53")
 			if display == "" {
 				display = addr
 			}
-			specs = append(specs, spec{display: display, addr: addr, group: "trust", proto: "udp"})
+			specs = append(specs, probeSpec{display: display, addr: addr, group: group, proto: "udp"})
 		}
 	}
+	return specs
+}
+
+// probeUpstreams queries every configured upstream server individually and
+// concurrently for name's A record, each bounded by the handler's per-query
+// timeout. Probe order in the result is stable: china members first (config
+// order), then trust members.
+func (h *Handler) probeUpstreams(ctx context.Context, name string, snap *upstreamSnapshot) []ResolveProbe {
+	// China first, then trust. The order is load-bearing: selectFirst scans
+	// forward and adopts the first usable reply per group, which is what makes
+	// pool order (not latency) decide the answer.
+	specs := append(upstreamProbeSpecs("china", snap.ChinaEntries, snap.ChinaRaw),
+		upstreamProbeSpecs("trust", snap.TrustEntries, snap.TrustRaw)...)
 
 	to := h.Timeout
 	if to <= 0 {
@@ -254,7 +266,7 @@ func (h *Handler) probeUpstreams(ctx context.Context, name string, snap *upstrea
 	var wg sync.WaitGroup
 	for i, sp := range specs {
 		wg.Add(1)
-		go func(i int, sp spec) {
+		go func(i int, sp probeSpec) {
 			defer wg.Done()
 			pctx, cancel := context.WithTimeout(ctx, to)
 			defer cancel()

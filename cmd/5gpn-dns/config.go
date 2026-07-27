@@ -79,6 +79,7 @@ type Config struct {
 	// Networking.
 	GatewayIP    net.IP          // foreign-address rewrite target
 	ChinaRaw     []string        // the raw china specs (for display/persistence)
+	ChinaEntries []UpstreamEntry // china specs parsed into per-member transports
 	TrustEntries []UpstreamEntry // trust upstream entries (bare IP=UDP, host@IP=DoT, https://…@IP=DoH)
 	TrustRaw     []string        // the raw trust specs (for display/persistence)
 
@@ -390,6 +391,7 @@ func LoadConfig() (Config, error) {
 	// were still validated here and a typo in a value with zero runtime effect
 	// crash-looped the sole resolver.
 	cfg.ChinaRaw = splitTrim(defaultChinaUpstreams)
+	cfg.ChinaEntries = parseUpstreamEntryList(cfg.ChinaRaw)
 	cfg.TrustRaw = splitTrim(defaultTrustUpstreams)
 	cfg.TrustEntries = parseUpstreamEntryList(cfg.TrustRaw)
 

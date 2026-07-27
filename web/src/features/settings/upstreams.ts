@@ -4,7 +4,6 @@ export type UpstreamProtocol = 'udp' | 'dot' | 'doh'
 export type UpstreamFieldError = 'required' | 'invalid'
 
 export interface UpstreamInputErrors {
-  protocol?: 'invalid'
   address?: UpstreamFieldError
   serverName?: UpstreamFieldError
   endpoint?: UpstreamFieldError
@@ -15,7 +14,6 @@ export type UpstreamSpecResult =
   | { ok: false; errors: UpstreamInputErrors }
 
 export interface UpstreamSpecInput {
-  group: UpstreamGroup
   protocol: UpstreamProtocol
   address: string
   serverName?: string
@@ -111,7 +109,6 @@ export function createUpstreamSpec(input: UpstreamSpecInput): UpstreamSpecResult
   const serverName = input.serverName?.trim() ?? ''
   const errors: UpstreamInputErrors = {}
 
-  if (input.group === 'china' && input.protocol !== 'udp') errors.protocol = 'invalid'
   if (!address) errors.address = 'required'
   else if (!isValidIPPort(address)) errors.address = 'invalid'
 
@@ -132,9 +129,11 @@ export function createUpstreamSpec(input: UpstreamSpecInput): UpstreamSpecResult
   return { ok: true, spec: address }
 }
 
-export function parseUpstreamSpec(group: UpstreamGroup, raw: string): ParsedUpstreamSpec {
+/** Both groups share one spec grammar, so the parse is group-agnostic. A
+ *  plain-UDP entry is a bare IP and can never contain '@'. */
+export function parseUpstreamSpec(raw: string): ParsedUpstreamSpec {
   const spec = raw.trim()
-  const separator = group === 'trust' ? spec.lastIndexOf('@') : -1
+  const separator = spec.lastIndexOf('@')
   if (separator > 0) {
     const head = spec.slice(0, separator)
     const address = spec.slice(separator + 1)

@@ -180,7 +180,7 @@ const en = {
     upstreamsChina: 'Domestic group (china)',
     upstreamsTrust: 'Foreign group (trust)',
     upstreamsHint:
-      'Upstreams are tried in list order. The domestic group uses plain UDP; the foreign group supports DoT or plain UDP for a trusted internal resolver. Add and validate one entry at a time. Changes apply immediately — no restart.',
+      'Upstreams are tried in list order. Both groups accept plain UDP, DoT, and DoH — transport is a property of each member, not of the group. Plain UDP has no anti-spoof protection, so prefer DoT or DoH wherever the resolver offers it. Add and validate one entry at a time. Changes apply immediately — no restart.',
     upstreamsStorageHint: 'Stored in /etc/5gpn/upstreams.json and applied without a restart. There is no dns.env copy — this is the only place the upstream groups are configured.',
     upstreamsCount: 'Upstreams: {{count}}',
     upstreamsAddChina: 'Add domestic DNS',
@@ -196,7 +196,6 @@ const en = {
     upstreamsEndpointInvalid: 'Enter an absolute https:// URL with a path, e.g. https://dns.google/dns-query.',
     upstreamsDohAddressHint: 'The daemon dials this IP directly and keeps the HTTP/2 connection open, so queries cost one round trip instead of a fresh handshake each time. DoH defaults to port 443.',
     upstreamsProtocolDot: 'DoT',
-    upstreamsUdpDescription: 'Plain DNS · default port 53',
     upstreamsAddress: 'Server IP (optional port)',
     upstreamsDialAddress: 'Connection IP (optional port)',
     upstreamsUdpAddressHint: 'Enter an IPv4 address, optionally as IP:port. The gateway is IPv4-only, so IPv6 upstreams are rejected.',

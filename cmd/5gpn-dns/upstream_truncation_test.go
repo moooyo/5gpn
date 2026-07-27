@@ -40,7 +40,7 @@ func TestUDPGroupRetriesTruncatedResponseOverTCP(t *testing.T) {
 		_ = tcpServer.Shutdown()
 	})
 
-	g := NewUDPGroup([]string{addr})
+	g := NewChinaGroup(udpEntries(addr))
 	req := new(dns.Msg)
 	req.SetQuestion("example.com.", dns.TypeA)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

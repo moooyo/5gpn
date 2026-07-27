@@ -95,7 +95,7 @@ func TestArbitrateChinaWinsDoNotTripTrustBreaker(t *testing.T) {
 	chinaAddr := startLocalUDPDNS(t, answerA("1.2.3.4", 0)) // fast CN answer
 	trustAddr := holdTCPListener(t)                         // trust: forever mid-handshake
 
-	china := NewUDPGroup([]string{chinaAddr})
+	china := NewChinaGroup(udpEntries(chinaAddr))
 	// Transport must be explicit: the zero value is plain UDP, and this test
 	// needs a DoT member so the abandoned exchange is cancelled mid-handshake
 	// against holdTCPListener. A UDP member pointed at a TCP listener fails
@@ -142,7 +142,7 @@ func TestArbitrateChinaWinsDoNotTripTrustBreaker(t *testing.T) {
 // cancels both groups when the HTTP client disconnects).
 func TestCancelledExchangeDoesNotRecordBreakerFailure(t *testing.T) {
 	addr := startLocalUDPDNS(t, answerA("1.2.3.4", 0))
-	g := NewUDPGroup([]string{addr}).(*group)
+	g := NewChinaGroup(udpEntries(addr)).(*group)
 
 	q := new(dns.Msg)
 	q.SetQuestion("example.com.", dns.TypeA)
@@ -165,7 +165,7 @@ func TestCancelledExchangeDoesNotRecordBreakerFailure(t *testing.T) {
 // must not swallow it.
 func TestDeadlineExpiryStillRecordsBreakerFailure(t *testing.T) {
 	addr := startLocalUDPDNS(t, answerA("1.2.3.4", 500*time.Millisecond)) // slower than the deadline
-	g := NewUDPGroup([]string{addr}).(*group)
+	g := NewChinaGroup(udpEntries(addr)).(*group)
 
 	q := new(dns.Msg)
 	q.SetQuestion("example.com.", dns.TypeA)
@@ -181,4 +181,15 @@ func TestDeadlineExpiryStillRecordsBreakerFailure(t *testing.T) {
 	if g.breaker.allow() {
 		t.Fatal("deadline-expired exchanges must still open the breaker")
 	}
+}
+
+// udpEntries builds plain-UDP entries for tests that only need a UDP group.
+// Most upstream tests predate per-member transports and care about pool order,
+// deadlines, or the breaker — not about which wire protocol a member speaks.
+func udpEntries(addrs ...string) []UpstreamEntry {
+	entries := make([]UpstreamEntry, len(addrs))
+	for i, a := range addrs {
+		entries[i] = UpstreamEntry{DialAddr: a, Transport: UpstreamPlainUDP}
+	}
+	return entries
 }

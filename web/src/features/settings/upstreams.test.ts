@@ -41,13 +41,12 @@ describe('upstream validation', () => {
   })
 
   it('builds the daemon wire format for UDP and DoT entries', () => {
-    expect(createUpstreamSpec({ group: 'china', protocol: 'udp', address: ' 223.5.5.5:53 ' })).toEqual({
+    expect(createUpstreamSpec({ protocol: 'udp', address: ' 223.5.5.5:53 ' })).toEqual({
       ok: true,
       spec: '223.5.5.5:53',
     })
     expect(
       createUpstreamSpec({
-        group: 'trust',
         protocol: 'dot',
         serverName: ' dns.google ',
         address: ' 8.8.8.8 ',
@@ -56,19 +55,15 @@ describe('upstream validation', () => {
   })
 
   it('reports protocol-specific field errors before an entry can be added', () => {
-    expect(createUpstreamSpec({ group: 'trust', protocol: 'dot', serverName: '', address: 'dns.google' })).toEqual({
+    expect(createUpstreamSpec({ protocol: 'dot', serverName: '', address: 'dns.google' })).toEqual({
       ok: false,
       errors: { address: 'invalid', serverName: 'required' },
-    })
-    expect(createUpstreamSpec({ group: 'china', protocol: 'dot', serverName: 'dns.google', address: '8.8.8.8' })).toEqual({
-      ok: false,
-      errors: { protocol: 'invalid' },
     })
   })
 
   it('parses existing entries into protocol metadata for the list', () => {
-    expect(parseUpstreamSpec('china', '223.5.5.5')).toEqual({ protocol: 'udp', address: '223.5.5.5' })
-    expect(parseUpstreamSpec('trust', 'dns.google@8.8.8.8:853')).toEqual({
+    expect(parseUpstreamSpec('223.5.5.5')).toEqual({ protocol: 'udp', address: '223.5.5.5' })
+    expect(parseUpstreamSpec('dns.google@8.8.8.8:853')).toEqual({
       protocol: 'dot',
       serverName: 'dns.google',
       address: '8.8.8.8:853',
@@ -81,7 +76,6 @@ describe('upstream validation', () => {
 describe('DoH upstream specs', () => {
   it('builds an endpoint@address spec', () => {
     const result = createUpstreamSpec({
-      group: 'trust',
       protocol: 'doh',
       endpoint: 'https://dns.google/dns-query',
       address: '8.8.8.8',
@@ -90,13 +84,13 @@ describe('DoH upstream specs', () => {
   })
 
   it('round-trips through parseUpstreamSpec without being mistaken for DoT', () => {
-    expect(parseUpstreamSpec('trust', 'https://dns.google/dns-query@8.8.8.8')).toEqual({
+    expect(parseUpstreamSpec('https://dns.google/dns-query@8.8.8.8')).toEqual({
       protocol: 'doh',
       endpoint: 'https://dns.google/dns-query',
       address: '8.8.8.8',
     })
     // A DoT entry must still parse as DoT.
-    expect(parseUpstreamSpec('trust', 'dns.google@8.8.8.8')).toEqual({
+    expect(parseUpstreamSpec('dns.google@8.8.8.8')).toEqual({
       protocol: 'dot',
       serverName: 'dns.google',
       address: '8.8.8.8',
@@ -110,14 +104,13 @@ describe('DoH upstream specs', () => {
     ['https://dns.google', 'invalid'],
     ['https://dns.google/', 'invalid'],
   ])('rejects endpoint %s', (endpoint, kind) => {
-    const result = createUpstreamSpec({ group: 'trust', protocol: 'doh', endpoint, address: '8.8.8.8' })
+    const result = createUpstreamSpec({ protocol: 'doh', endpoint, address: '8.8.8.8' })
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.errors.endpoint).toBe(kind)
   })
 
   it('still requires a pinned IPv4 dial address', () => {
     const result = createUpstreamSpec({
-      group: 'trust',
       protocol: 'doh',
       endpoint: 'https://dns.google/dns-query',
       address: 'dns.google',
@@ -126,14 +119,20 @@ describe('DoH upstream specs', () => {
     if (!result.ok) expect(result.errors.address).toBe('invalid')
   })
 
-  it('is not offered for the china group', () => {
+  // Transport is a per-member property, so the same builder serves both
+  // groups. A domestic resolver offering DoH is as valid a china member as a
+  // plain-UDP one — this is the assertion that used to say the opposite.
+  it('builds the same spec regardless of which group it is destined for', () => {
     const result = createUpstreamSpec({
-      group: 'china',
       protocol: 'doh',
-      endpoint: 'https://dns.google/dns-query',
-      address: '8.8.8.8',
+      endpoint: 'https://dns.alidns.com/dns-query',
+      address: '223.5.5.5',
     })
-    expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.errors.protocol).toBe('invalid')
+    expect(result).toEqual({ ok: true, spec: 'https://dns.alidns.com/dns-query@223.5.5.5' })
+    expect(parseUpstreamSpec('https://dns.alidns.com/dns-query@223.5.5.5')).toEqual({
+      protocol: 'doh',
+      endpoint: 'https://dns.alidns.com/dns-query',
+      address: '223.5.5.5',
+    })
   })
 })

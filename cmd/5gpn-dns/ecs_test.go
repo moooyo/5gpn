@@ -153,7 +153,7 @@ func TestGroupExchange_AttachesECS(t *testing.T) {
 	got := make(chan *dns.EDNS0_SUBNET, 1)
 	addr := startLocalUDPDNS(t, captureECSHandler(got))
 
-	g := NewUDPGroup([]string{addr})
+	g := NewChinaGroup(udpEntries(addr))
 	subnet, _ := parseECS("122.96.30.0/24")
 	SetGroupECS(g, subnet)
 
@@ -194,7 +194,7 @@ func TestGroupExchange_NoECSWhenDisabled(t *testing.T) {
 	got := make(chan *dns.EDNS0_SUBNET, 1)
 	addr := startLocalUDPDNS(t, captureECSHandler(got))
 
-	g := NewUDPGroup([]string{addr}) // no SetGroupECS call
+	g := NewChinaGroup(udpEntries(addr)) // no SetGroupECS call
 
 	q := new(dns.Msg)
 	q.SetQuestion("example.com.", dns.TypeA)
@@ -309,7 +309,7 @@ func TestECSFile_RoundTrip(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestControllerSetChinaECS(t *testing.T) {
-	china := NewUDPGroup([]string{"127.0.0.1:1"})
+	china := NewChinaGroup(udpEntries("127.0.0.1:1"))
 	h := &Handler{China: china, Cache: NewCache(16)}
 	ctrl := NewController(func() error { return nil }, nil, nil, h)
 	ecsPath := filepath.Join(t.TempDir(), "ecs.json")

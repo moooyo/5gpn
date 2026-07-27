@@ -192,32 +192,23 @@ func addDefaultPort(addr, defaultPort string) string {
 	return addr
 }
 
-// normaliseAddrs returns a copy of addrs with defaultPort appended to any
-// address that lacks an explicit port.
-func normaliseAddrs(addrs []string, defaultPort string) []string {
-	out := make([]string, len(addrs))
-	for i, a := range addrs {
-		out[i] = addDefaultPort(a, defaultPort)
+// retireGroup closes a replaced group's pooled connections after a grace
+// window. Not immediate: a query that already loaded the old snapshot may hold
+// the old exchanger for up to the per-query timeout and is entitled to finish
+// against it. A no-op when the group was reused, or when it is not a *group
+// (test fakes).
+func retireGroup(old, replacement Exchanger, grace time.Duration) {
+	retiring, ok := old.(*group)
+	if !ok || Exchanger(retiring) == replacement {
+		return
 	}
-	return out
+	time.AfterFunc(grace, retiring.Close)
 }
 
-// NewUDPGroup returns an Exchanger that tries addrs in pool order and returns
-// the first non-error reply. Addresses without an explicit port get port 53
-// appended.
-func NewUDPGroup(addrs []string) Exchanger {
-	members := make([]upstream, len(addrs))
-	for i, a := range normaliseAddrs(addrs, "53") {
-		members[i] = upstream{addr: a, net: "udp"}
-	}
-	return &group{members: members, label: "china", breaker: newBreaker()}
-}
-
-// NewTrustGroup builds the trust group from transport-tagged entries: DoH over
-// a pooled HTTP/2 connection, DoT with TLS verified against ServerName, or
-// plain UDP for a trusted internal resolver on a clean path where requiring a
-// certificate would just break resolution.
-func NewTrustGroup(entries []UpstreamEntry) Exchanger {
+// newTransportGroup builds a group from transport-tagged entries. Both groups
+// share it because transport is a per-MEMBER property (see the upstream type):
+// label differs only for error messages and the degraded-member warning.
+func newTransportGroup(label string, entries []UpstreamEntry) *group {
 	sessCache := tls.NewLRUClientSessionCache(0) // 0 → default capacity
 	members := make([]upstream, len(entries))
 	for i, e := range entries {
@@ -229,7 +220,7 @@ func NewTrustGroup(entries []UpstreamEntry) Exchanger {
 				// reach here, so this is a defensive path. Degrade the member
 				// rather than the group: a nil doh member fails its own
 				// attempt and the loop rolls to the next one.
-				log.Printf("warning: trust upstream %q: %v — member disabled", e.Endpoint, err)
+				log.Printf("warning: %s upstream %q: %v — member disabled", label, e.Endpoint, err)
 				members[i] = upstream{addr: addDefaultPort(e.DialAddr, "443")}
 				continue
 			}
@@ -244,5 +235,20 @@ func NewTrustGroup(entries []UpstreamEntry) Exchanger {
 			members[i] = upstream{addr: addDefaultPort(e.DialAddr, "53"), net: "udp"}
 		}
 	}
-	return &group{members: members, label: "trust", breaker: newBreaker()}
+	return &group{members: members, label: label, breaker: newBreaker()}
+}
+
+// NewChinaGroup builds the china group. Transports are per-member, exactly as
+// for trust: a domestic resolver reachable only over plaintext UDP and one
+// offering DoH can sit in the same pool.
+func NewChinaGroup(entries []UpstreamEntry) Exchanger {
+	return newTransportGroup("china", entries)
+}
+
+// NewTrustGroup builds the trust group from transport-tagged entries: DoH over
+// a pooled HTTP/2 connection, DoT with TLS verified against ServerName, or
+// plain UDP for a trusted internal resolver on a clean path where requiring a
+// certificate would just break resolution.
+func NewTrustGroup(entries []UpstreamEntry) Exchanger {
+	return newTransportGroup("trust", entries)
 }

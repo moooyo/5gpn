@@ -23,6 +23,12 @@ func TestValidateUpstreams(t *testing.T) {
 		{{"223.5.5.5:5353", "119.29.29.29"}, {"dns.google@8.8.8.8", "1.1.1.1"}},
 		{{"223.5.5.5"}, {"one.one.one.one@1.1.1.1:853"}},
 		{{"223.5.5.5:65535"}, {"1.1.1.1:1"}},
+		// Both groups accept the same grammar. Transport is a per-member
+		// property, so a domestic resolver offering DoT or DoH is as valid a
+		// china member as a plain-UDP one.
+		{{"dns.alidns.com@223.5.5.5"}, {"22.22.22.22"}},
+		{{"https://dns.alidns.com/dns-query@223.5.5.5"}, {"22.22.22.22"}},
+		{{"223.5.5.5", "https://doh.pub/dns-query@1.12.12.12:443"}, {"22.22.22.22"}},
 	}
 	for _, tc := range ok {
 		if err := ValidateUpstreams(tc[0], tc[1]); err != nil {
@@ -31,16 +37,20 @@ func TestValidateUpstreams(t *testing.T) {
 	}
 
 	bad := [][2][]string{
-		{{}, {"22.22.22.22"}},                  // empty china
-		{{"223.5.5.5"}, {}},                    // empty trust
-		{{"not-an-ip"}, {"22.22.22.22"}},       // china must be IP
-		{{"223.5.5.5"}, {"dns.google"}},        // bare hostname trust rejected (self-reference footgun)
-		{{"223.5.5.5"}, {"x@not-an-ip"}},       // DoT dial part must be IP
-		{{"223.5.5.5:abc"}, {"1.1.1.1"}},       // bad port
-		{{"223.5.5.5:0"}, {"1.1.1.1"}},         // port zero is invalid
-		{{"223.5.5.5:65536"}, {"1.1.1.1"}},     // port exceeds uint16
-		{{"223.5.5.5:99999"}, {"1.1.1.1"}},     // five digits is not sufficient validation
-		{{"223.5.5.5"}, {"bad name@[8.8.8.8"}}, // garbage server name / dial
+		{{}, {"22.22.22.22"}},            // empty china
+		{{"223.5.5.5"}, {}},              // empty trust
+		{{"not-an-ip"}, {"22.22.22.22"}}, // bare hostname china rejected (self-reference footgun)
+		{{"223.5.5.5"}, {"dns.google"}},  // bare hostname trust rejected, same reason
+		// A DoH endpoint must pin a dial address in either group: resolving the
+		// endpoint host would have to go through the daemon being configured.
+		{{"https://dns.alidns.com/dns-query"}, {"22.22.22.22"}},
+		{{"https://dns.alidns.com@223.5.5.5"}, {"22.22.22.22"}}, // DoH needs a path
+		{{"223.5.5.5"}, {"x@not-an-ip"}},                        // DoT dial part must be IP
+		{{"223.5.5.5:abc"}, {"1.1.1.1"}},                        // bad port
+		{{"223.5.5.5:0"}, {"1.1.1.1"}},                          // port zero is invalid
+		{{"223.5.5.5:65536"}, {"1.1.1.1"}},                      // port exceeds uint16
+		{{"223.5.5.5:99999"}, {"1.1.1.1"}},                      // five digits is not sufficient validation
+		{{"223.5.5.5"}, {"bad name@[8.8.8.8"}},                  // garbage server name / dial
 	}
 	for _, tc := range bad {
 		err := ValidateUpstreams(tc[0], tc[1])
@@ -123,6 +133,80 @@ func TestNewTrustGroupMixedTransports(t *testing.T) {
 		g.members[1].tlsCfg == nil || g.members[1].tlsCfg.ServerName != "dns.google" {
 		t.Errorf("DoT member = %+v, want tcp-tls 8.8.8.8:853 SNI dns.google", g.members[1])
 	}
+}
+
+// The china group is built by the same constructor as trust, with the same
+// per-member dispatch. This is the assertion that would have caught the old
+// hardcoded net: "udp".
+func TestNewChinaGroupMixedTransports(t *testing.T) {
+	g, ok := NewChinaGroup([]UpstreamEntry{
+		{DialAddr: "223.5.5.5", Transport: UpstreamPlainUDP},
+		{ServerName: "dns.alidns.com", DialAddr: "223.5.5.5", Transport: UpstreamDoT},
+		{Endpoint: "https://doh.pub/dns-query", DialAddr: "1.12.12.12", Transport: UpstreamDoH},
+	}).(*group)
+	if !ok {
+		t.Fatal("NewChinaGroup did not return a *group")
+	}
+	if g.label != "china" {
+		t.Errorf("label = %q, want china — it names the group in breaker errors", g.label)
+	}
+	if len(g.members) != 3 {
+		t.Fatalf("members = %d, want 3", len(g.members))
+	}
+	if g.members[0].net != "udp" || g.members[0].addr != "223.5.5.5:53" || g.members[0].tlsCfg != nil {
+		t.Errorf("plain member = %+v, want udp 223.5.5.5:53 no TLS", g.members[0])
+	}
+	if g.members[1].net != "tcp-tls" || g.members[1].addr != "223.5.5.5:853" ||
+		g.members[1].tlsCfg == nil || g.members[1].tlsCfg.ServerName != "dns.alidns.com" {
+		t.Errorf("DoT member = %+v, want tcp-tls 223.5.5.5:853 SNI dns.alidns.com", g.members[1])
+	}
+	if g.members[2].doh == nil || g.members[2].addr != "1.12.12.12:443" {
+		t.Errorf("DoH member = %+v, want a pooled client at 1.12.12.12:443", g.members[2])
+	}
+}
+
+// The resolve test queries each server individually, so it needs the same
+// per-member dispatch: probing a DoH member with a plain UDP datagram at :53
+// reports a failure the resolver never had.
+func TestUpstreamProbeSpecs_DispatchesPerTransport(t *testing.T) {
+	specs := upstreamProbeSpecs("china", []UpstreamEntry{
+		{DialAddr: "223.5.5.5", Transport: UpstreamPlainUDP},
+		{ServerName: "dns.alidns.com", DialAddr: "223.5.5.5", Transport: UpstreamDoT},
+		{Endpoint: "https://doh.pub/dns-query", DialAddr: "1.12.12.12", Transport: UpstreamDoH},
+	}, []string{"223.5.5.5", "dns.alidns.com@223.5.5.5", "https://doh.pub/dns-query@1.12.12.12"})
+
+	want := []struct{ group, proto, addr string }{
+		{"china", "udp", "223.5.5.5:53"},
+		{"china", "dot", "223.5.5.5:853"},
+		{"china", "doh", "1.12.12.12:443"},
+	}
+	if len(specs) != len(want) {
+		t.Fatalf("specs = %d, want %d", len(specs), len(want))
+	}
+	for i, w := range want {
+		if specs[i].group != w.group || specs[i].proto != w.proto || specs[i].addr != w.addr {
+			t.Errorf("spec[%d] = %+v, want %s/%s/%s", i, specs[i], w.group, w.proto, w.addr)
+		}
+	}
+	// The operator's own spelling is what they will recognize in the result.
+	if specs[2].display != "https://doh.pub/dns-query@1.12.12.12" {
+		t.Errorf("display = %q, want the raw spec", specs[2].display)
+	}
+	if specs[1].sni != "dns.alidns.com" {
+		t.Errorf("DoT sni = %q, want dns.alidns.com", specs[1].sni)
+	}
+}
+
+// retireGroup exists because china can hold a DoH pool now: without it every
+// PUT /api/upstreams leaks one http.Transport, and the console can save
+// repeatedly.
+func TestRetireGroup_SkipsReuseAndNonGroups(t *testing.T) {
+	g := NewChinaGroup(udpEntries("223.5.5.5")).(*group)
+	// Reused group: closing it would cut connections still in service.
+	retireGroup(g, g, time.Millisecond)
+	// A test fake is not a *group; must not panic.
+	retireGroup(&fakeExchanger{}, g, time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
 }
 
 // ── handler hot swap ─────────────────────────────────────────────────────────
@@ -345,7 +429,7 @@ func TestGroupExchangeSequentialPoolOrder(t *testing.T) {
 	slow := startLocalUDPDNS(t, answerA("9.9.9.1", 80*time.Millisecond))
 	fast := startLocalUDPDNS(t, answerA("9.9.9.2", 0))
 
-	g := NewUDPGroup([]string{slow, fast})
+	g := NewChinaGroup(udpEntries(slow, fast))
 	q := new(dns.Msg)
 	q.SetQuestion("seq-order.test.", dns.TypeA)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -368,7 +452,7 @@ func TestGroupExchangeFallsBackPastDeadMember(t *testing.T) {
 	dead := startLocalUDPDNS(t, func(dns.ResponseWriter, *dns.Msg) {}) // never replies
 	live := startLocalUDPDNS(t, answerA("9.9.9.2", 0))
 
-	g := NewUDPGroup([]string{dead, live})
+	g := NewChinaGroup(udpEntries(dead, live))
 	q := new(dns.Msg)
 	q.SetQuestion("seq-fallback.test.", dns.TypeA)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -397,6 +481,7 @@ func TestResolveTest_PoolOrderAdoption(t *testing.T) {
 	h.swapUpstreams(&upstreamSnapshot{
 		China: h.China, Trust: h.Trust,
 		ChinaRaw:     []string{slowCN, fastCN},
+		ChinaEntries: udpEntries(slowCN, fastCN),
 		TrustRaw:     []string{trustAddr},
 		TrustEntries: []UpstreamEntry{{ServerName: trustAddr, DialAddr: trustAddr, Transport: UpstreamPlainUDP}},
 	})
@@ -462,6 +547,7 @@ func TestResolveTest_ProbesAndArbitration(t *testing.T) {
 	h.swapUpstreams(&upstreamSnapshot{
 		China: h.China, Trust: h.Trust,
 		ChinaRaw:     []string{cnAddr},
+		ChinaEntries: udpEntries(cnAddr),
 		TrustRaw:     []string{foreignAddr},
 		TrustEntries: []UpstreamEntry{{ServerName: foreignAddr, DialAddr: foreignAddr, Transport: UpstreamPlainUDP}},
 	})
@@ -498,6 +584,7 @@ func TestResolveTest_ProbesAndArbitration(t *testing.T) {
 	h.swapUpstreams(&upstreamSnapshot{
 		China: h.China, Trust: h.Trust,
 		ChinaRaw:     []string{foreignAddr},
+		ChinaEntries: udpEntries(foreignAddr),
 		TrustRaw:     []string{foreignAddr},
 		TrustEntries: []UpstreamEntry{{ServerName: foreignAddr, DialAddr: foreignAddr, Transport: UpstreamPlainUDP}},
 	})

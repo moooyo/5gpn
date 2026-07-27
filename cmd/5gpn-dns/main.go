@@ -78,6 +78,7 @@ func main() {
 		log.Printf("warning: %v — falling back to built-in defaults (china=%v trust=%v); fix it in the console under Settings → upstream DNS", err, cfg.ChinaRaw, cfg.TrustRaw)
 	} else if uc != nil {
 		cfg.ChinaRaw = uc.China
+		cfg.ChinaEntries = parseUpstreamEntryList(uc.China)
 		cfg.TrustRaw = uc.Trust
 		cfg.TrustEntries = parseUpstreamEntryList(uc.Trust)
 		log.Printf("upstreams: loaded %s (china=%v trust=%v)", cfg.UpstreamsFile, uc.China, uc.Trust)
@@ -100,7 +101,7 @@ func main() {
 	}
 	cache := NewCache(cacheSize)
 
-	china := NewUDPGroup(cfg.ChinaRaw)
+	china := NewChinaGroup(cfg.ChinaEntries)
 	trust := NewTrustGroup(cfg.TrustEntries)
 
 	// China-group EDNS Client Subnet: the web-console override file (written
@@ -162,6 +163,7 @@ func main() {
 		China:        china,
 		Trust:        trust,
 		ChinaRaw:     cfg.ChinaRaw,
+		ChinaEntries: cfg.ChinaEntries,
 		TrustRaw:     cfg.TrustRaw,
 		TrustEntries: cfg.TrustEntries,
 	})
@@ -241,12 +243,12 @@ func main() {
 	// Upstream hot-swap hook (PUT /api/upstreams): rebuild both groups from the
 	// validated specs, swap them into the live engine (flushes the response
 	// cache), then persist to upstreams.json so the change survives a restart.
-	// A persist
-	// failure leaves the swap live and reports it — the operator asked for the
-	// change; better applied-but-not-durable than silently ignored.
+	// A persist failure leaves the swap live and reports it — the operator asked
+	// for the change; better applied-but-not-durable than silently ignored.
 	ctrl.SetUpstreamsApply(func(chinaList, trustList []string) error {
+		chinaEntries := parseUpstreamEntryList(chinaList)
 		entries := parseUpstreamEntryList(trustList)
-		cg := NewUDPGroup(chinaList)
+		cg := NewChinaGroup(chinaEntries)
 		tg := NewTrustGroup(entries)
 		// Carry the live china-group ECS subnet onto the NEW group — an
 		// upstream swap must not silently drop an operator-set ECS override.
@@ -256,18 +258,20 @@ func main() {
 			China:        cg,
 			Trust:        tg,
 			ChinaRaw:     chinaList,
+			ChinaEntries: chinaEntries,
 			TrustRaw:     trustList,
 			TrustEntries: entries,
 		})
-		// Retire the replaced trust group's pooled connections, but not at
-		// once: a query that already loaded the old snapshot is entitled to
-		// finish against it (upstreams.go documents that contract), and it may
-		// hold the old exchanger for up to the per-query timeout. Closing on a
-		// grace timer keeps that promise while still releasing the sockets —
-		// without this every swap would leak one fd per pooled connection.
-		if retiring, ok := oldTrust.(*group); ok && retiring != tg {
-			time.AfterFunc(2*h.Timeout, retiring.Close)
-		}
+		// Retire BOTH replaced groups' pooled connections, but not at once: a
+		// query that already loaded the old snapshot is entitled to finish
+		// against it (upstreams.go documents that contract), and it may hold the
+		// old exchanger for up to the per-query timeout. Closing on a grace
+		// timer keeps that promise while still releasing the sockets — without
+		// it every swap leaks one fd per pooled connection, and the console can
+		// save repeatedly. China is in scope for the same reason trust is: it
+		// can hold a DoH pool now.
+		retireGroup(oldChina, cg, 2*h.Timeout)
+		retireGroup(oldTrust, tg, 2*h.Timeout)
 		StartTrustProbe(ctx, tg, entries)
 		log.Printf("upstreams: hot-swapped (china=%v trust=%v)", chinaList, trustList)
 		if err := SaveUpstreams(cfg.UpstreamsFile, UpstreamsConfig{China: chinaList, Trust: trustList}); err != nil {
