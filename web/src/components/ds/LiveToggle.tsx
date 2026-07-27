@@ -37,7 +37,7 @@ export function LiveToggle({
       aria-label={live ? pauseAction : resumeAction}
       aria-pressed={!live}
       className={cn(
-        'zds-state-layer inline-flex h-field shrink-0 items-center gap-2 rounded-pill px-3 text-label font-medium sm:h-chip',
+        'zds-state-layer inline-flex h-field shrink-0 items-center gap-2 rounded-pill px-3 text-label font-medium md:h-chip',
         live
           ? 'bg-[var(--md-sys-color-success-container)] text-[var(--md-sys-color-on-success-container)]'
           : 'bg-surface-container text-text-soft',

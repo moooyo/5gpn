@@ -21,10 +21,13 @@ export function Toggle({ checked, onCheckedChange, disabled, className, title, .
       disabled={disabled}
       title={title}
       className={cn(
-        'relative h-8 w-[52px] shrink-0 cursor-pointer rounded-pill border-2 border-outline bg-surface-container-high p-0 outline-none',
+        'relative h-chip w-[52px] shrink-0 cursor-pointer rounded-pill border-2 border-outline bg-surface-container-high p-0 outline-none',
         // 32 + 6 + 6 = 44px of touch height without resizing the switch: the
-        // thumb's sizes and travel are all derived from the 32px track.
-        "before:absolute before:inset-x-0 before:-inset-y-1.5 before:content-[''] sm:before:hidden",
+        // thumb's sizes and travel are all derived from the 32px track. Dropped
+        // at `md`, not `sm`, for the same reason the height steps are: the
+        // pages branch their mobile layout at 767px, so retiring the padded
+        // area at 640px left a 32px target inside a still-mobile card.
+        "before:absolute before:inset-x-0 before:-inset-y-1.5 before:content-[''] md:before:hidden",
         'transition-[background-color,border-color] duration-150 data-checked:border-primary data-checked:bg-primary',
         'disabled:cursor-not-allowed disabled:opacity-[.38]',
         className,

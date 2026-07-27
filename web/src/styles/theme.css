@@ -79,11 +79,15 @@
   --radius-pill: 999px;           /* buttons, nav items, status pills */
 
   /* Control heights. Desktop uses ctl/chip/row, touch targets step up to
-     `field` (44px) at the mobile breakpoint. */
+     `field` (44px) at the mobile breakpoint, and a full-width primary action
+     takes `action` (48px) there — the brief sizes a mobile primary/secondary
+     button larger than an icon button, and without a step for it that 48px
+     was written as a bare `h-12`. */
   --spacing-chip: 2rem;           /* 32px — desktop filter chip (hit area padded to 40) */
   --spacing-row: 2.25rem;         /* 36px — desktop list-row minimum */
   --spacing-ctl: 2.5rem;          /* 40px — desktop icon and primary buttons */
   --spacing-field: 2.75rem;       /* 44px — inputs everywhere, every mobile tap target */
+  --spacing-action: 3rem;         /* 48px — mobile primary/secondary button */
 
   --shadow-card: var(--md-sys-elevation-1);
   --shadow-pop: var(--md-sys-elevation-3);

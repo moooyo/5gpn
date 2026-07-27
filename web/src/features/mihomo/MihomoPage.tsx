@@ -260,7 +260,7 @@ export default function MihomoPage() {
               type="button"
               onClick={clear}
               aria-label={t('mihomo.clearLabel')}
-              className="zds-state-layer inline-flex h-field items-center justify-center gap-1.5 rounded-pill border border-outline-variant px-3 text-label font-medium text-text-soft sm:h-chip"
+              className="zds-state-layer inline-flex h-field items-center justify-center gap-1.5 rounded-pill border border-outline-variant px-3 text-label font-medium text-text-soft md:h-chip"
             >
               <DeleteSweepIcon className="h-4 w-4" aria-hidden="true" />
               <span className="hidden sm:inline">{t('mihomo.clear')}</span>

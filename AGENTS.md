@@ -129,9 +129,15 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
 - Keep the current React/DaisyUI design language, five-theme catalog, `light`
   default, and MiSans stack.
 - Scale comes from tokens, never literals. `styles/theme.css` owns seven type
-  steps (nothing below 11px), five radius steps, and the control heights;
-  `styles/scale.test.ts` fails a bare `text-[Npx]`/`rounded-[Npx]`. The steps
-  are named, so `lib/cn.ts` must keep tailwind-merge taught about them —
+  steps (nothing below 11px), five radius steps, and five control heights
+  (32/36/40/44/48px). `styles/scale.test.ts` fails a bare
+  `text-[Npx]`/`rounded-[Npx]` anywhere in `src/**`, and a bare control-range
+  height inside `components/ds` — the primitives are where a bypass reaches
+  every page at once, and a feature-level `h-12 w-12` is usually a decorative
+  circle rather than a control. A height that steps down does so at `md`, not
+  `sm`: pages branch their mobile layout at 767px while Tailwind's `sm` starts
+  at 640px, so an `sm:` step shrank controls inside a still-mobile layout. The
+  steps are named, so `lib/cn.ts` must keep tailwind-merge taught about them —
   otherwise an unknown `text-<word>` is read as a colour and strips the real
   colour out of the class list.
 - Colour means one thing at a time. Telling N peer entities apart uses the

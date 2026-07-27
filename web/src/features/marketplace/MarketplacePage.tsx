@@ -222,7 +222,7 @@ function PermissionSummary({ entryId, permissions }: {
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
-        className="zds-state-layer inline-flex min-h-7 items-center gap-1.5 self-start rounded-chip bg-surface-container-high px-2.5 py-1 text-label font-medium text-text-soft"
+        className="zds-state-layer inline-flex min-h-field items-center gap-1.5 self-start rounded-chip bg-surface-container-high px-2.5 py-1 text-label font-medium text-text-soft md:min-h-chip"
       >
         {t('marketplace.permissionCount', { count: permissions.length })}
         <ChevronDownIcon className={cn('h-3.5 w-3.5 transition-transform', open && 'rotate-180')} aria-hidden="true" />

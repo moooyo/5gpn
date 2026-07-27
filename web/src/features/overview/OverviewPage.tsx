@@ -164,12 +164,11 @@ export default function OverviewPage() {
   const formatter = useMemo(() => new Intl.NumberFormat(i18n.language), [i18n.language])
   // One row per upstream group, both bars on a single shared ms scale so
   // "which leg is slower" is readable at a glance without a second axis.
-  const upstreamRows: Array<HBarRow & { hasSamples: boolean }> = [
+  const upstreamRows: HBarRow[] = [
     { name: t('overview.upstreamHealthChina'), group: health.china },
     { name: t('overview.upstreamHealthTrust'), group: health.trust },
   ].map(({ name, group }) => ({
     name,
-    hasSamples: group.latSamples > 0,
     // The bar encodes the median: it is what a typical query costs, and the
     // one an operator compares between groups. p95 rides alongside as text
     // rather than as a second bar, so the two are never read as series.
@@ -314,25 +313,11 @@ export default function OverviewPage() {
             </span>
           </div>
           <p className="mb-4 text-label leading-relaxed text-text-faint">{t('overview.upstreamLatencyHint')}</p>
-          {/* The P50 headline used to be a fourth metric tile up top AND the bar
-              here. One number, one place — and this is the place with the scale
-              that makes it mean something. */}
-          <div className="mb-4 flex flex-wrap gap-x-6 gap-y-2">
-            {upstreamRows.map((row) => (
-              <div key={row.name} className="flex items-baseline gap-2">
-                <span className="text-meta text-text-faint">{row.name}</span>
-                {/* The metric step is for a measurement. With no samples the
-                    display value is a sentence, and 28px turns "no recent
-                    samples" into the loudest thing on the card. */}
-                <b className={cn(
-                  'font-mono font-medium tabular-nums',
-                  row.hasSamples ? 'text-metric text-text-strong' : 'text-label text-text-faint',
-                )}>
-                  {row.display}
-                </b>
-              </div>
-            ))}
-          </div>
+          {/* The P50 used to be a fourth metric tile up top AND the bar here.
+              One number, one place — and this is the place, because the bar row
+              already carries the name and the value beside the scale that makes
+              them mean something. A headline row above it was the same
+              duplication moved down the page rather than removed. */}
           <HBarChart rows={upstreamRows} />
           <p className="mt-4 text-meta leading-relaxed text-text-faint">
             {t('overview.upstreamMeasured')} {t('overview.upstreamTrustNote')}

@@ -417,6 +417,9 @@ const en = {
     capabilityHost: 'Upstream · {{count}}',
     capabilityRouting: 'Routing · {{count}}',
     capabilityStorage: 'Persistent storage',
+    // The overflow opens the inspect panel, which lists every capability.
+    capabilityMore_one: '{{count}} more',
+    capabilityMore_other: '{{count}} more',
     capabilityNetwork: 'Network · {{count}}',
     capabilityEgress: 'Egress · {{group}}',
     captureDNS: {

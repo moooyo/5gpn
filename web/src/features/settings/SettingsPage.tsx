@@ -182,7 +182,54 @@ export default function SettingsPage() {
           <UpstreamsCard upstreams={upstreams} onSaved={setUpstreams} />
           <EcsCard ecs={ecs} onSaved={setEcs} />
         </SettingsSection>
+
+        {/* The index carries this at `lg`; below it the index is a pill row, so
+            the versions ride at the foot of the page instead of vanishing. */}
+        <VersionsBlock
+          version={status?.version}
+          zashVersion={status?.zash_version}
+          mihomoVersion={mihomo?.version}
+          sidecarVersion={intercept?.version}
+          className="flex lg:hidden"
+        />
       </div>
+    </div>
+  )
+}
+
+interface VersionsProps {
+  version?: string
+  zashVersion?: string
+  mihomoVersion?: string
+  sidecarVersion?: string
+}
+
+/**
+ * The four build versions.
+ *
+ * Rendered twice on purpose, at complementary widths. The sticky index becomes
+ * a horizontal pill row below `lg` and cannot carry a four-row list without
+ * eating the viewport it is pinned to — but hiding the block there was how the
+ * console ended up showing no version at all on a phone, which is worse than
+ * the bottom-of-page strip it replaced.
+ */
+function VersionsBlock({ version, zashVersion, mihomoVersion, sidecarVersion, className }: VersionsProps & { className?: string }) {
+  const { t } = useTranslation()
+  const versions: Array<[string, string]> = [
+    [t('settings.aboutVersionLabel'), version ?? '—'],
+    [t('settings.aboutMihomoLabel'), mihomoVersion ?? '—'],
+    ...(sidecarVersion ? [[t('settings.aboutSidecarLabel'), sidecarVersion] as [string, string]] : []),
+    ...(zashVersion ? [[t('settings.aboutZashLabel'), zashVersion] as [string, string]] : []),
+  ]
+  return (
+    <div className={cn('flex-col gap-1.5 rounded-card bg-surface-container-low p-3', className)} data-testid="settings-versions">
+      <div className="text-meta font-medium uppercase tracking-[.08em] text-text-faint">{t('settings.aboutVersionsTitle')}</div>
+      {versions.map(([label, value]) => (
+        <div key={label} className="flex items-baseline justify-between gap-2">
+          <span className="text-meta text-text-faint">{label}</span>
+          <span className="min-w-0 truncate font-mono text-meta text-text-mid" title={`${label} ${value}`}>{value}</span>
+        </div>
+      ))}
     </div>
   )
 }
@@ -252,12 +299,7 @@ function SettingsNav({
   // the zashboard panel is optional and the sidecar only reports one while it
   // is running, so a dash there would claim "installed but unidentified" about
   // something that may simply not be there.
-  const versions: Array<[string, string]> = [
-    [t('settings.aboutVersionLabel'), version ?? '—'],
-    [t('settings.aboutMihomoLabel'), mihomoVersion ?? '—'],
-    ...(sidecarVersion ? [[t('settings.aboutSidecarLabel'), sidecarVersion] as [string, string]] : []),
-    ...(zashVersion ? [[t('settings.aboutZashLabel'), zashVersion] as [string, string]] : []),
-  ]
+  const versionProps: VersionsProps = { version, zashVersion, mihomoVersion, sidecarVersion }
 
   return (
     <nav
@@ -281,15 +323,7 @@ function SettingsNav({
           </button>
         ))}
       </div>
-      <div className="mt-4 hidden flex-col gap-1.5 rounded-card bg-surface-container-low p-3 lg:flex">
-        <div className="text-meta font-medium uppercase tracking-[.08em] text-text-faint">{t('settings.aboutVersionsTitle')}</div>
-        {versions.map(([label, value]) => (
-          <div key={label} className="flex items-baseline justify-between gap-2">
-            <span className="text-meta text-text-faint">{label}</span>
-            <span className="min-w-0 truncate font-mono text-meta text-text-mid" title={`${label} ${value}`}>{value}</span>
-          </div>
-        ))}
-      </div>
+      <VersionsBlock {...versionProps} className="mt-4 hidden lg:flex" />
     </nav>
   )
 }

@@ -1317,9 +1317,18 @@ controls live in the top-bar profile menu and Settings appearance.
 
 Scale is tokenized, not hand-written. `styles/theme.css` declares seven type
 steps (11/12/13/15/20/28/40px, nothing smaller than 11px), five radius steps
-(chip/ctl/card/dialog/pill), and the control heights; components reference the
-token and `styles/scale.test.ts` fails a bare `text-[Npx]` or `rounded-[Npx]`
-in `src/**`. Because the steps are named, `lib/cn.ts` must keep teaching
+(chip/ctl/card/dialog/pill), and five control heights (chip 32, row 36, ctl 40,
+field 44, action 48 — `action` is the mobile primary/secondary button, which is
+taller than an icon button and was previously written as a bare `h-12`).
+`styles/scale.test.ts` fails a bare `text-[Npx]` or `rounded-[Npx]` anywhere in
+`src/**`, and a bare control-range height inside `components/ds`: the
+primitives are what every page inherits, so a bypass there propagates, while a
+feature-level `h-12 w-12` is usually a decorative circle around an icon and no
+pattern can tell that from a control. A height that steps down does so at `md`.
+Pages branch their mobile layout on `(max-width: 767px)` while Tailwind's `sm`
+begins at 640px, so a step written at `sm` returned a control to its desktop
+size inside a layout that was still mobile — a 32px chip beside a 44px input in
+the same row. Because the steps are named, `lib/cn.ts` must keep teaching
 tailwind-merge about them — an unknown `text-<word>` is otherwise classified as
 a text colour and silently strips the colour from any class list that sets
 both. Touch targets are 44px on mobile.

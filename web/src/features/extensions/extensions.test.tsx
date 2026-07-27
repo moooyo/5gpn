@@ -75,6 +75,20 @@ function renderPage(path = '/extensions') {
   )
 }
 
+/** Card layout branches at 767px, matching every other page in this console. */
+function setMobile(mobile: boolean) {
+  vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({
+    matches: mobile && query.includes('max-width: 767px'),
+    media: query,
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  })))
+}
+
 beforeEach(async () => {
   await i18n.changeLanguage('zh')
   localStorage.clear()
@@ -124,6 +138,41 @@ describe('ExtensionsPage native extension contract', () => {
     expect(screen.getByRole('link', { name: /打开插件目录/ })).toHaveAttribute('href', VIEW.catalog_url)
     expect(screen.queryByTestId('extension-traffic-contract')).not.toBeInTheDocument()
     expect(screen.queryByRole('tab', { name: '插件市场' })).not.toBeInTheDocument()
+  })
+
+  /**
+   * The capability row is an inventory, and the row's own comment said "one
+   * neutral shape" while its first entry was painted `primary-container` — so
+   * the card claimed the capture-host count mattered more than the six chips
+   * beside it, for no reason other than being first in the list. It stays a
+   * button because it opens the host audit; only the tone changes.
+   */
+  it('tones every capability chip alike, including the one that opens the audit', async () => {
+    renderPage()
+    const row = await screen.findByTestId(`capabilities-${CLEANER.id}`)
+    const audit = within(row).getByRole('button', { name: i18n.t('extensions.auditHosts') })
+    expect(audit.className).toContain('bg-surface-container')
+    expect(audit.className).not.toContain('primary-container')
+  })
+
+  /**
+   * Seven chips at 390px wrap into three rows and push the card's own actions
+   * off a phone screen, so below `md` the row is capped and the remainder
+   * becomes a count that opens the detail. The cap uses the same 767px branch
+   * every other page in this console uses — Tailwind's `sm` would fire at
+   * 640px, while the card is still rendering its wide form.
+   */
+  it('caps the capability row on a phone and routes the rest to the detail', async () => {
+    setMobile(true)
+    try {
+      renderPage()
+      const row = await screen.findByTestId(`capabilities-${CLEANER.id}`)
+      // 4 chips plus the overflow control.
+      expect(within(row).getAllByText(/./, { selector: 'span,button' }).length).toBeGreaterThan(0)
+      expect(within(row).getByText(/还有 \d+ 项/)).toBeInTheDocument()
+    } finally {
+      setMobile(false)
+    }
   })
 
   it('arms a valid native extension while the MITM master is off after confirmation', async () => {

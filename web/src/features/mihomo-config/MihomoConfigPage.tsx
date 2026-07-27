@@ -30,11 +30,18 @@ function errMessage(err: unknown, fallback: string): string {
 }
 
 /** Line box height in px. Shared by the textarea, the gutter and the scroll
- *  maths for "jump to line N", so the three cannot drift a pixel apart. */
+ *  maths for "jump to line N", so the three cannot drift a pixel apart.
+ *
+ *  This only holds while one logical line occupies exactly one line box, which
+ *  is why the textarea sets `wrap="off"`. Soft wrapping silently broke both:
+ *  the gutter prints one number per logical line, so the first wrapped line
+ *  pushed every number below it out of step with the text, and jumpToLine's
+ *  `(line - 1) * LINE_HEIGHT` drifted by the accumulated wrap. At a phone width
+ *  almost every YAML line wraps, so the gutter was wrong there by default. */
 const LINE_HEIGHT = 22
 
 const textareaClass =
-  'w-full min-h-[560px] resize-y rounded-r-ctl border border-transparent bg-surface-container-low py-4 pl-3 pr-4 font-mono text-body leading-[22px] text-text-strong outline-none transition-[border-color,background-color,box-shadow] focus:border-primary focus:bg-card focus:shadow-[inset_0_0_0_1px_var(--md-sys-color-primary)] disabled:opacity-60'
+  'w-full min-h-[560px] resize-y overflow-x-auto rounded-r-ctl border border-transparent bg-surface-container-low py-4 pl-3 pr-4 font-mono text-body leading-[22px] text-text-strong outline-none transition-[border-color,background-color,box-shadow] focus:border-primary focus:bg-card focus:shadow-[inset_0_0_0_1px_var(--md-sys-color-primary)] disabled:opacity-60'
 
 // Kept as data so the JSX below is a plain map rather than seven near-identical
 // list items.
@@ -272,7 +279,10 @@ export default function MihomoConfigPage() {
             ref={gutterRef}
             aria-hidden="true"
             data-testid="mihomo-config-gutter"
-            className="max-h-[560px] shrink-0 select-none overflow-hidden bg-surface-container py-4 pl-3 pr-2 text-right font-mono text-meta leading-[22px] text-text-faint"
+            // No max height: the textarea is resize-y, and a capped gutter ran
+            // out of numbers as soon as the operator dragged the editor taller.
+            // As a flex item it stretches to whatever height the textarea has.
+            className="shrink-0 select-none overflow-hidden bg-surface-container py-4 pl-3 pr-2 text-right font-mono text-meta leading-[22px] text-text-faint"
           >
             {Array.from({ length: lineCount }, (_, index) => (
               <div
@@ -289,6 +299,13 @@ export default function MihomoConfigPage() {
           <textarea
             ref={textareaRef}
             className={textareaClass}
+            // One logical line per line box — see LINE_HEIGHT. The brief also
+            // asks for the offending line to carry an error background; that
+            // needs an overlay tracking scrollTop in state, which re-renders a
+            // multi-thousand-line document on every scroll frame. The gutter
+            // number is tinted instead, and jumping selects the line, so the
+            // line is still identified in the body without that cost.
+            wrap="off"
             value={text}
             onChange={(e) => {
               setText(e.target.value)

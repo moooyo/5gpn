@@ -394,6 +394,9 @@ const zh: typeof en = {
     capabilityHost: '上游映射 · {{count}}',
     capabilityRouting: '路由规则 · {{count}}',
     capabilityStorage: '持久存储',
+    // The overflow opens the inspect panel, which lists every capability.
+    capabilityMore_one: '还有 {{count}} 项',
+    capabilityMore_other: '还有 {{count}} 项',
     capabilityNetwork: '联网 · {{count}}',
     capabilityEgress: '出口 · {{group}}',
     captureDNS: {

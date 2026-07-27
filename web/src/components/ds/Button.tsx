@@ -24,8 +24,8 @@ const variantClass: Record<ButtonVariant, string> = {
  * under a finger is the rule this console broke most often.
  */
 const sizeClass: Record<ButtonSize, string> = {
-  sm: 'h-field px-3.5 text-label sm:h-chip',
-  md: 'h-field px-5 text-body sm:h-ctl',
+  sm: 'h-field px-3.5 text-label md:h-chip',
+  md: 'h-field px-5 text-body md:h-ctl',
 }
 
 export function Button({ variant = 'primary', size = 'md', className, type = 'button', ...props }: ButtonProps) {

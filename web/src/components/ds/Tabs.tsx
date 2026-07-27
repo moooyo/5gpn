@@ -22,7 +22,7 @@ export function Tabs({ value, onValueChange, items, className }: TabsProps) {
             key={item.value}
             value={item.value}
             className={(state) => cn(
-              'zds-state-layer min-h-11 cursor-pointer rounded-pill px-4 text-body font-medium outline-none transition-colors sm:min-h-9',
+              'zds-state-layer min-h-field cursor-pointer rounded-pill px-4 text-body font-medium outline-none transition-colors md:min-h-row',
               state.active ? 'bg-secondary-container text-on-secondary-container' : 'text-text-soft',
             )}
           >

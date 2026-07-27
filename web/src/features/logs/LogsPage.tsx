@@ -2,8 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSearchParams } from 'react-router-dom'
 import type { TFunction } from 'i18next'
-import { SearchIcon } from '../../components/icons'
-import { Card, Chip, FilterChips, Input, LiveToggle, StatusDot, logSurfaceHeight } from '../../components/ds'
+import { Card, Chip, FilterChips, LiveToggle, LogSearchField, StatusDot, logSurfaceHeight } from '../../components/ds'
 import { VirtualTable } from '../../components/data-grid'
 import { api } from '../../lib/api/client'
 import type { QueryLogEntry } from '../../lib/api/types'
@@ -172,19 +171,20 @@ export default function LogsPage() {
             ]}
           />
           <div className="sm:flex-1" />
-          <div className="relative w-full sm:w-64">
-            <SearchIcon
-              className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-text-faint"
-              aria-hidden="true"
-            />
-            <Input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              aria-label={t('logs.searchLabel')}
-              placeholder={t('logs.searchPlaceholder')}
-              className="w-full rounded-pill pl-10"
-            />
-          </div>
+          {/* This page keeps its own toolbar rather than adopting LogSurface —
+              its body is a four-way loading/error/empty/list branch, and the
+              e2e suite asserts the virtual table is a direct child of the card.
+              The search control is still the shared one: it was the third
+              hand-rolled copy, differing from the other two in icon inset and
+              background, which is exactly the divergence LogSearchField was
+              extracted to end. */}
+          <LogSearchField
+            value={query}
+            onChange={setQuery}
+            label={t('logs.searchLabel')}
+            placeholder={t('logs.searchPlaceholder')}
+            className="w-full sm:w-64"
+          />
         </div>
         <p className="text-meta text-text-faint">{t('logs.windowHint', { limit: LIMIT })}</p>
       </Card>

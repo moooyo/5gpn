@@ -96,6 +96,36 @@ describe('PolicyRulesPage', () => {
     expect(screen.getByText('pending')).toBeInTheDocument()
   })
 
+  /**
+   * The fallback saves through the same write-now/apply-later path as a rule,
+   * but it was not in the diff. So after one apply, changing it left the count
+   * at 0 — and a count of 0 is exactly what disables Apply. The one control on
+   * the page that cannot self-apply was also the one whose change could not be
+   * applied, short of a reload clearing the snapshot.
+   */
+  it('re-enables apply when only the fallback changed', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await waitFor(() => expect(screen.getByText('netflix.com')).toBeInTheDocument())
+
+    await user.click(screen.getByTestId('policy-apply'))
+    await waitFor(() => expect(screen.getByTestId('policy-apply')).toBeDisabled())
+
+    // Touch nothing but the fallback.
+    await user.click(screen.getByRole('tab', { name: /gateway/i }))
+
+    await waitFor(() => expect(screen.getByTestId('policy-apply')).toBeEnabled())
+    expect(screen.getByTestId('policy-header')).toHaveAttribute('data-dirty', 'true')
+    expect(screen.getByTestId('policy-apply')).toHaveTextContent('1')
+    // The count has to be traceable to a control, so the card carries the marker.
+    expect(screen.getByTestId('policy-fallback')).toHaveAttribute('data-pending', 'true')
+
+    // And applying again settles it rather than leaving it permanently dirty.
+    await user.click(screen.getByTestId('policy-apply'))
+    await waitFor(() => expect(screen.getByTestId('policy-apply')).toBeDisabled())
+    expect(screen.getByTestId('policy-fallback')).toHaveAttribute('data-pending', 'false')
+  })
+
   it('surfaces an apply validation error as a toast, not a crash', async () => {
     vi.mocked(api.applyPolicy).mockRejectedValueOnce(new Error('mihomo -t: bad rule'))
     const user = userEvent.setup()

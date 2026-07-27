@@ -35,11 +35,13 @@ export interface LogSearchFieldProps {
  * The search input every log toolbar uses. Three hand-rolled copies differed in
  * height (31/36/44px), icon inset and background.
  *
- * Height is a flat `h-field` (44px) with no responsive step. That is the
- * handoff's rule for inputs at every width, and it also avoids a trap: the
- * pages branch on `md` (767px) while Tailwind's `sm` is 640px, so an
- * `sm:h-chip` would shrink this to 32px between 640 and 767px inside a mobile
- * row whose other controls are all pinned at 44px.
+ * Height is a flat `h-field` (44px) with no responsive step, which is the
+ * handoff's rule for inputs at every width. This component used to be the only
+ * place that dodged the breakpoint trap on purpose — the pages branch on `md`
+ * (767px) while Tailwind's `sm` is 640px, so a step-down written at `sm` shrank
+ * a control to its desktop size inside a still-mobile layout. Every step-down
+ * moved to `md`, and `styles/scale.test.ts` now fails one written at `sm`, so
+ * this input is flat because inputs are flat rather than to avoid a hazard.
  */
 export function LogSearchField({ value, onChange, label, placeholder, className }: LogSearchFieldProps) {
   return (

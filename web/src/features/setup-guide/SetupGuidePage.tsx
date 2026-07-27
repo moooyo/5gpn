@@ -280,7 +280,7 @@ export default function SetupGuidePage() {
                 <p className="text-label leading-relaxed text-text-soft">{t('setupGuide.ios.description')}</p>
                 <a
                   href={downloadURL}
-                  className="zds-state-layer mt-3 inline-flex h-12 w-full items-center justify-center gap-2 rounded-pill bg-primary px-5 text-body font-medium text-[var(--md-sys-color-on-primary)] sm:h-ctl sm:w-auto"
+                  className="zds-state-layer mt-3 inline-flex h-action w-full items-center justify-center gap-2 rounded-pill bg-primary px-5 text-body font-medium text-[var(--md-sys-color-on-primary)] md:h-ctl md:w-auto"
                 >
                   <DownloadIcon className="h-4 w-4" aria-hidden="true" />
                   {t('setupGuide.ios.download')}
@@ -411,7 +411,7 @@ export default function SetupGuidePage() {
                 <p className="text-label leading-relaxed text-text-soft">{t('setupGuide.interceptCA.description')}</p>
                 <a
                   href={caDownloadURL}
-                  className="zds-state-layer mt-3 inline-flex h-12 w-full items-center justify-center gap-2 rounded-pill bg-primary px-5 text-body font-medium text-[var(--md-sys-color-on-primary)] sm:h-ctl sm:w-auto"
+                  className="zds-state-layer mt-3 inline-flex h-action w-full items-center justify-center gap-2 rounded-pill bg-primary px-5 text-body font-medium text-[var(--md-sys-color-on-primary)] md:h-ctl md:w-auto"
                 >
                   <DownloadIcon className="h-4 w-4" aria-hidden="true" />
                   {t('setupGuide.interceptCA.download')}

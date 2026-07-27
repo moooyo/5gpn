@@ -94,6 +94,19 @@ describe('MihomoConfigPage', () => {
     expect(within(screen.getByTestId('mihomo-config-gutter')).getByText('2').className).toContain('error-container')
   })
 
+  /**
+   * The gutter prints one number per logical line and jumpToLine scrolls by
+   * `(line - 1) * 22px`. Both are only true while one logical line occupies one
+   * line box, so soft wrapping put every number below the first wrapped line
+   * out of step with the text it labels — guaranteed at a phone width, where
+   * nearly every YAML line wraps.
+   */
+  it('does not soft-wrap, because the gutter and the jump both count line boxes', async () => {
+    render(<MihomoConfigPage />)
+    const textarea = (await screen.findByTestId('mihomo-config-textarea')) as HTMLTextAreaElement
+    expect(textarea.getAttribute('wrap')).toBe('off')
+  })
+
   it('leaves the invariants folded for a line error, and opens them when none is named', async () => {
     const user = userEvent.setup()
     vi.mocked(api.putMihomoConfig)

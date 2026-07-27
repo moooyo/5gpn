@@ -14,7 +14,7 @@ import { extendTailwindMerge } from 'tailwind-merge'
  */
 const TEXT_STEPS = ['meta', 'label', 'body', 'title', 'headline', 'metric', 'hero'] as const
 const RADIUS_STEPS = ['chip', 'ctl', 'card', 'dialog', 'pill'] as const
-const SPACING_STEPS = ['chip', 'row', 'ctl', 'field'] as const
+const SPACING_STEPS = ['chip', 'row', 'ctl', 'field', 'action'] as const
 
 const twMerge = extendTailwindMerge({
   extend: {

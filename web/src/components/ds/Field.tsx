@@ -19,7 +19,7 @@ export function Input({ mono, className, ...props }: InputProps) {
   return (
     <input
       className={cn(
-        'input h-11 w-full rounded-ctl border border-input-border bg-input px-3.5 text-body text-text-strong shadow-none outline-none',
+        'input h-field w-full rounded-ctl border border-input-border bg-input px-3.5 text-body text-text-strong shadow-none outline-none',
         'placeholder:text-text-faint focus:border-primary focus:bg-card focus:ring-1 focus:ring-primary',
         'disabled:cursor-not-allowed disabled:opacity-50',
         mono && 'font-mono',

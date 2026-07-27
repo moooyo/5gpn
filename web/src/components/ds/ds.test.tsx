@@ -145,7 +145,7 @@ describe('Toggle', () => {
     const onCheckedChange = vi.fn()
     render(<Toggle checked={false} onCheckedChange={onCheckedChange} aria-label="enable" />)
     const toggle = screen.getByRole('switch')
-    expect(toggle.className).toContain('h-8')
+    expect(toggle.className).toContain('h-chip')
     expect(toggle.className).toContain('data-checked:bg-primary')
     await user.click(toggle)
     expect(onCheckedChange).toHaveBeenCalledWith(true)

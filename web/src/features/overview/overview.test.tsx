@@ -126,8 +126,8 @@ describe('OverviewPage', () => {
     // china (5ms) is drawn at half of it — one scale, no second axis.
     expect(fills[0].style.width).toBe('50%')
     expect(fills[1].style.width).toBe('100%')
-    expect(screen.getAllByText('5.0 ms')).toHaveLength(2)
-    expect(screen.getAllByText('10.0 ms')).toHaveLength(2)
+    expect(screen.getAllByText('5.0 ms')).toHaveLength(1)
+    expect(screen.getAllByText('10.0 ms')).toHaveLength(1)
   })
 
   it('states which latency it is measuring so the card cannot be misread', () => {
@@ -180,11 +180,17 @@ describe('OverviewPage', () => {
     expect(split).toHaveTextContent('37%')
   })
 
-  /** The upstream P50 was a metric tile up top and the bar in this card. */
+  /**
+   * The P50 was a metric tile up top and the bar in this card. Removing the
+   * tile moved the duplicate rather than deleting it — a headline row went in
+   * directly above the chart printing the same name and value, so the number
+   * still appeared twice, and this assertion said `toHaveLength(2)` while its
+   * own title said "exactly once".
+   */
   it('states each upstream median exactly once, beside the scale that explains it', () => {
     renderOverview()
-    expect(screen.getAllByText('5.0 ms')).toHaveLength(2)
-    expect(screen.getAllByText('10.0 ms')).toHaveLength(2)
+    expect(screen.getAllByText('5.0 ms')).toHaveLength(1)
+    expect(screen.getAllByText('10.0 ms')).toHaveLength(1)
   })
 
   it('keeps the live decision rail visible as the product signature', () => {

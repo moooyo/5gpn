@@ -72,10 +72,10 @@ export default function ResolveTestPage() {
                 if (event.key === 'Enter') void run(domain)
               }}
               placeholder="example.com"
-              className="h-14 rounded-pill bg-card pl-12 text-title"
+              className="h-field rounded-pill bg-card pl-12 text-title"
             />
           </div>
-          <Button onClick={() => void run(domain)} disabled={submitting || !domain.trim()} className="h-14 px-7">
+          <Button onClick={() => void run(domain)} disabled={submitting || !domain.trim()} className="h-field px-7">
             {submitting ? t('resolveTest.running') : t('resolveTest.run')}
           </Button>
         </div>
@@ -185,7 +185,7 @@ export default function ResolveTestPage() {
               {ruleId ? (
                 <Link
                   to={`/policy-rules?highlight=${encodeURIComponent(ruleId)}`}
-                  className="zds-state-layer mt-5 inline-flex h-field w-full items-center gap-2 rounded-pill bg-primary-container px-4 text-label font-medium text-on-primary-container sm:h-ctl sm:w-auto"
+                  className="zds-state-layer mt-5 inline-flex h-field w-full items-center gap-2 rounded-pill bg-primary-container px-4 text-label font-medium text-on-primary-container md:h-ctl md:w-auto"
                 >
                   <RuleIcon className="h-4 w-4" aria-hidden="true" />
                   {t('resolveTest.viewMatchedRule')}
@@ -193,7 +193,7 @@ export default function ResolveTestPage() {
               ) : null}
               <Link
                 to={`/logs?q=${encodeURIComponent(logQuery)}`}
-                className="zds-state-layer mt-5 inline-flex h-field w-full items-center gap-2 rounded-pill border border-border px-4 text-label font-medium text-text-mid sm:h-ctl sm:w-auto"
+                className="zds-state-layer mt-5 inline-flex h-field w-full items-center gap-2 rounded-pill border border-border px-4 text-label font-medium text-text-mid md:h-ctl md:w-auto"
               >
                 <ReceiptIcon className="h-4 w-4" aria-hidden="true" />
                 {t('resolveTest.filterInLogs')}

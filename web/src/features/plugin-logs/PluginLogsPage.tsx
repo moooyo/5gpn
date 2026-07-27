@@ -140,7 +140,7 @@ function EmptyState({ showAction, t }: { showAction: boolean; t: TFunction }) {
       <div className="text-body font-semibold text-text-strong">{t('pluginLogs.emptyTitle')}</div>
       <div className="text-label leading-5 text-text-faint">{t('pluginLogs.emptyHint')}</div>
       {showAction ? (
-        <Link className="zds-state-layer mt-1.5 inline-flex h-field items-center rounded-pill bg-primary-container px-4 text-label font-medium text-on-primary-container sm:h-ctl" to="/extensions">
+        <Link className="zds-state-layer mt-1.5 inline-flex h-field items-center rounded-pill bg-primary-container px-4 text-label font-medium text-on-primary-container md:h-ctl" to="/extensions">
           {t('pluginLogs.goToExtensions')}
         </Link>
       ) : null}
@@ -439,7 +439,7 @@ export default function PluginLogsPage() {
       pausedLabel={mobile ? '' : t('pluginLogs.pausedBuffered', { count: displayedBufferedCount })}
       pauseAction={t('pluginLogs.pause')}
       resumeAction={t('pluginLogs.resume')}
-      className={mobile ? 'w-field justify-center px-0 sm:h-field' : undefined}
+      className={mobile ? 'w-field justify-center px-0 md:h-field' : undefined}
     />
   )
   const clearButton = (mobile: boolean) => (

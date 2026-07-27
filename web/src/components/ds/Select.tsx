@@ -38,7 +38,7 @@ export function Select({ value, onValueChange, items, placeholder, className, di
         aria-label={ariaLabel}
         className={cn(
           'flex items-center justify-between rounded-ctl border border-input-border bg-input text-text-strong outline-none',
-          compact ? 'h-[34px] min-w-[176px] gap-2 px-[13px] pr-2 text-label font-medium' : 'min-h-11 gap-3 px-3.5 text-body',
+          compact ? 'h-row min-w-[176px] gap-2 px-[13px] pr-2 text-label font-medium' : 'min-h-field gap-3 px-3.5 text-body',
           'transition-[border-color,background-color] data-[popup-open]:border-primary data-[popup-open]:bg-card',
           'disabled:cursor-not-allowed disabled:opacity-50',
           className,

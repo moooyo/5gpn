@@ -4,12 +4,12 @@ import { useSearchParams } from 'react-router-dom'
 import { AddIcon, RocketIcon } from '../../components/icons'
 import { Button, Card, Modal, toast } from '../../components/ds'
 import { api } from '../../lib/api/client'
-import type { PolicyRule } from '../../lib/api/types'
+import type { FallbackPolicyKind, PolicyRule } from '../../lib/api/types'
 import { cn } from '../../lib/cn'
 import { PolicyRuleDialog } from './PolicyRuleDialog'
 import { PolicyRulesTable } from './PolicyRulesTable'
 import { FallbackControl } from './FallbackControl'
-import { diffPolicyRules } from './policy-dirty'
+import { diffPolicyRules, type PolicySnapshot } from './policy-dirty'
 
 function errMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback
@@ -47,8 +47,12 @@ export default function PolicyRulesPage() {
   const [addOpen, setAddOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<PolicyRule | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<PolicyRule | null>(null)
-  const [appliedSnapshot, setAppliedSnapshot] = useState<PolicyRule[] | null>(null)
+  const [appliedSnapshot, setAppliedSnapshot] = useState<PolicySnapshot | null>(null)
   const [appliedAt, setAppliedAt] = useState<number | null>(null)
+  // The fallback saves through the same write-now/apply-later path as a rule,
+  // so it belongs in the same diff. FallbackControl still owns loading and
+  // persisting it; the page only needs the settled value to compare.
+  const [fallback, setFallback] = useState<FallbackPolicyKind | null>(null)
   // The resolve test links here with the rule its result matched. The
   // highlight fades on its own; the row itself is not otherwise special.
   const [searchParams, setSearchParams] = useSearchParams()
@@ -76,14 +80,15 @@ export default function PolicyRulesPage() {
   }, [t])
   useEffect(() => void load(), [load])
 
-  const pending = useMemo(() => diffPolicyRules(appliedSnapshot, rules), [appliedSnapshot, rules])
+  const current = useMemo<PolicySnapshot>(() => ({ rules, fallback }), [rules, fallback])
+  const pending = useMemo(() => diffPolicyRules(appliedSnapshot, current), [appliedSnapshot, current])
   const dirty = pending.count > 0
 
   async function handleApply() {
     setApplying(true)
     try {
       await api.applyPolicy()
-      setAppliedSnapshot(rules)
+      setAppliedSnapshot(current)
       setAppliedAt(Date.now())
       toast.success(t('policyRules.applyOk'))
     } catch (err) {
@@ -154,6 +159,10 @@ export default function PolicyRulesPage() {
           </Button>
           <Button
             type="button"
+            // The brief fills this button with `warning` when dirty. The whole
+            // card already carries that container colour, so a warning button
+            // on it reads as one undifferentiated amber block; `primary` is
+            // what keeps the action legible against the state it sits on.
             variant={upToDate ? 'secondary' : 'primary'}
             onClick={() => void handleApply()}
             disabled={applying || upToDate}
@@ -174,7 +183,7 @@ export default function PolicyRulesPage() {
         </div>
       </Card>
 
-      <FallbackControl />
+      <FallbackControl onPolicyChange={setFallback} pending={pending.fallbackPending} />
 
       {loading ? (
         <Card variant="tonal" className="p-6 text-center text-sm text-text-faint">{t('common.loading')}</Card>

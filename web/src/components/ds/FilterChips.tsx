@@ -64,7 +64,7 @@ export function FilterChips({
             aria-pressed={selected}
             onClick={() => onChange(option.value)}
             className={cn(
-              'zds-state-layer flex h-field shrink-0 items-center gap-2 rounded-chip px-3 text-label font-medium sm:h-chip',
+              'zds-state-layer flex h-field shrink-0 items-center gap-2 rounded-chip px-3 text-label font-medium md:h-chip',
               outlined && 'border border-outline-variant/60 rounded-pill',
               selected ? 'bg-secondary-container text-on-secondary-container' : 'text-text-soft',
             )}

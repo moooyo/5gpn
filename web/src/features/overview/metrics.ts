@@ -11,8 +11,9 @@
  * every render:
  * `cacheHitRate` (缓存命中率 gauge), `upstreamHealth` + `upstreamSuccessRate`
  * (上游健康与延迟 card, china vs trust), `arbitrationSegments` (境内/境外分流比
- * donut — the chnroute-only half of `decisionCounts`, split out for its own
- * focused card).
+ * — the chnroute-only half of `decisionCounts`, drawn as a segmented bar inside
+ * the decision card rather than as a second donut, because two donuts on one
+ * screen read as two unrelated wholes when one is a subset of the other).
  */
 
 export interface QpsPoint {

@@ -559,6 +559,30 @@ describe('SettingsPage version block', () => {
     expect(nav.getByText('v3.16.0-overlay.1')).toBeInTheDocument()
   })
 
+  /**
+   * The index becomes a horizontal pill row below `lg` and cannot carry a
+   * four-row list, so the block in it is `lg`-only — and the bottom-of-page
+   * strip it replaced was deleted at the same time. That left a phone with no
+   * build, mihomo, sidecar or zashboard version anywhere in the console, which
+   * is worse than the strip that was removed for being too far down.
+   */
+  it('still states the versions below lg, where the index cannot carry them', async () => {
+    renderSettings(
+      statusValue({
+        mihomo: { version: 'v1.19.28-overlay.2', meta: true },
+        status: { version: 'dev+abc1234', uptime_seconds: 3600, stats: {} as Status['stats'] },
+      }),
+    )
+
+    const blocks = await screen.findAllByTestId('settings-versions')
+    expect(blocks).toHaveLength(2)
+    // One is hidden at this width and shown at lg; the other is the reverse, so
+    // exactly one is visible whatever the viewport.
+    expect(blocks.some((block) => block.className.includes('hidden lg:flex'))).toBe(true)
+    expect(blocks.some((block) => block.className.includes('flex lg:hidden'))).toBe(true)
+    for (const block of blocks) expect(within(block).getByText('dev+abc1234')).toBeInTheDocument()
+  })
+
   // The two unknowns are not the same unknown. mihomo is always part of an
   // install, so not knowing its version is a fact worth showing; the zashboard
   // panel is optional, and rendering a dash for it would say "installed but

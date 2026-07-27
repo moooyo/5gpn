@@ -34,10 +34,11 @@ function sourceFiles(dir: string): string[] {
 }
 
 const FILES = sourceFiles(SRC)
+const DS_FILES = FILES.filter((file) => relative(SRC, file).replace(/\\/g, '/').startsWith('components/ds/'))
 
-function offenders(pattern: RegExp): string[] {
+function offenders(pattern: RegExp, files: string[] = FILES): string[] {
   const hits: string[] = []
-  for (const file of FILES) {
+  for (const file of files) {
     const text = readFileSync(file, 'utf8')
     for (const [index, line] of text.split('\n').entries()) {
       // A comment explaining what a literal used to be is not a literal.
@@ -83,5 +84,48 @@ describe('type and radius scale', () => {
     // `rounded-[18px]`-style values were the way the declared tokens got
     // bypassed in the first place.
     expect(offenders(/\brounded-\[\d+px\]/)).toEqual([])
+  })
+
+  it('declares five control-height steps', () => {
+    const css = readFileSync(resolve(SRC, 'styles/theme.css'), 'utf8')
+    const themeBlock = css.slice(0, css.indexOf('@layer theme'))
+    const steps = [...themeBlock.matchAll(/^\s*--spacing-([a-z]+):\s*([\d.]+)rem;/gm)]
+      .map(([, name, rem]) => [name, Number(rem) * 16] as const)
+    expect(steps).toEqual([
+      ['chip', 32],
+      ['row', 36],
+      ['ctl', 40],
+      ['field', 44],
+      ['action', 48],
+    ])
+  })
+
+  /**
+   * The type and radius steps were declared AND adopted; the control heights
+   * were declared and then bypassed by the design system itself — `Field` was
+   * `h-11`, `Toggle` and `Pagination` were `h-8`. That is the same defect the
+   * tokens exist to prevent, one layer lower, and it made two documents wrong:
+   * both AGENTS.md and architecture.md said components reference the token.
+   *
+   * Scoped to `components/ds`, which is where the claim applies and where a
+   * bypass propagates to every page at once. A feature-level `h-12 w-12` is
+   * usually a decorative circle around an icon rather than a control, and no
+   * regex can tell those apart — the primitives are what must hold the line.
+   */
+  it('lets no design-system control carry a bare height in the control range', () => {
+    // 28px–56px is where a control lives. Icon sizes (h-4/h-5) sit below it and
+    // container boxes (h-40) above, and neither is on this scale.
+    expect(offenders(/\b(?:min-)?h-(?:7|8|9|10|11|12|13|14)\b/, DS_FILES)).toEqual([])
+  })
+
+  /**
+   * Every page branches its mobile layout on `(max-width: 767px)`, but Tailwind's
+   * `sm` starts at 640px. A height that steps down at `sm:` therefore shrinks to
+   * its desktop size in the 640–767px band while the page is still rendering its
+   * mobile layout — a 32px chip sitting beside a 44px input in the same row.
+   * Height steps use `md:` so the two agree.
+   */
+  it('steps control heights down at md, the breakpoint the pages branch on', () => {
+    expect(offenders(/\bsm:(?:min-)?h-(?:chip|row|ctl|field|action)\b/)).toEqual([])
   })
 })
