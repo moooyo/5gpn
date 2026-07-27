@@ -31,7 +31,7 @@ import {
   UploadIcon,
   VerifiedIcon,
 } from '../../components/icons'
-import { Button, Card, ConfirmDialog, DropdownItem, DropdownMenu, Field, Modal, Select, toast } from '../../components/ds'
+import { Button, Card, ConfirmDialog, DropdownItem, DropdownMenu, Field, FilterChips, Modal, Select, toast } from '../../components/ds'
 import { api } from '../../lib/api/client'
 import type { InterceptModule, InterceptModulesView, MarketplaceEntry, MarketplaceSource, MarketplacesView } from '../../lib/api/types'
 import { cn } from '../../lib/cn'
@@ -126,62 +126,6 @@ function MetaChip({ icon: IconComponent, children, tone = 'neutral', mono = fals
     <span className={cn('inline-flex min-h-7 items-center gap-1.5 rounded-chip px-2.5 py-1 text-label font-medium', toneClass, mono && 'font-mono')}>
       {IconComponent ? <IconComponent className="h-3.5 w-3.5" aria-hidden="true" /> : null}
       {children}
-    </span>
-  )
-}
-
-function SourceChip({ source, selected, warning, count, onClick, onRemove }: {
-  source?: MarketplaceSource
-  selected: boolean
-  warning?: boolean
-  count: number
-  onClick: () => void
-  onRemove?: () => void
-}) {
-  const { t } = useTranslation()
-  const label = source?.name ?? t('marketplace.allSources')
-  return (
-    <span
-      className={cn(
-        'inline-flex h-ctl shrink-0 items-center rounded-pill pl-[18px] text-body font-medium transition-[box-shadow,background-color,color]',
-        source && onRemove ? 'pr-1' : 'pr-[18px]',
-        selected ? 'border border-transparent bg-secondary-container text-on-secondary-container' : 'border border-outline bg-transparent text-text-strong hover:shadow-[var(--md-sys-elevation-1)]',
-      )}
-    >
-      <button
-        type="button"
-        onClick={onClick}
-        aria-pressed={selected}
-        title={source ? `${t('marketplace.publisherIdentity', { name: source.metadata_name })}\n${source.final_url}\n${t('marketplace.lastRefreshed', { value: new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(source.fetched_at)) })}` : undefined}
-        className="inline-flex min-w-0 items-center gap-2 outline-none"
-      >
-        {source ? <span className={cn('h-2 w-2 rounded-pill', warning ? 'bg-amber' : 'bg-green')} aria-hidden="true" /> : null}
-        <span className="max-w-[210px] truncate">{label}</span>
-        <span className={selected ? 'opacity-80' : 'text-text-faint'}>{count}</span>
-        {source ? <span className="sr-only">{warning ? t('marketplace.sourceWarning') : t('marketplace.sourceCached')}</span> : null}
-      </button>
-      {/* Removing a source belongs to the source, not to the title bar, where
-          it was an unlabelled red icon button beside "add marketplace". */}
-      {source && onRemove ? (
-        <DropdownMenu
-          align="end"
-          className="w-[248px]"
-          trigger={
-            <button
-              type="button"
-              aria-label={t('marketplace.sourceActions', { name: source.name })}
-              className="zds-state-layer ml-1.5 grid h-8 w-8 shrink-0 place-items-center rounded-pill"
-            >
-              <MenuIcon className="h-4 w-4" aria-hidden="true" />
-            </button>
-          }
-        >
-          <DropdownItem danger onSelect={onRemove}>
-            <DeleteIcon className="h-4 w-4" aria-hidden="true" />
-            {t('marketplace.deleteCurrentSource')}
-          </DropdownItem>
-        </DropdownMenu>
-      ) : null}
     </span>
   )
 }
@@ -516,20 +460,49 @@ export default function MarketplacePage() {
               {t('marketplace.addMarketplace')}
             </Button>
           </div>
-          <div className="flex flex-wrap gap-2.5">
-            <SourceChip selected={sourceID === 'all'} count={allItems.length} onClick={() => setSourceID('all')} />
-            {view.sources.map((source) => (
-              <SourceChip
-                key={source.id}
-                source={source}
-                selected={sourceID === source.id}
-                warning={sourceWarnings.has(source.id)}
-                count={source.entries.length}
-                onClick={() => setSourceID(source.id)}
-                onRemove={() => setRemoveSource(source)}
-              />
-            ))}
-          </div>
+          {/* Source selection is a mutually-exclusive filter, so it is the
+              shared chip control rather than a fourth hand-rolled costume. It
+              needs a per-chip menu — removing a source belongs to the source,
+              not to the title bar, where it was an unlabelled red icon button
+              beside "add marketplace" — which is what `trailing` carries. */}
+          <FilterChips
+            ariaLabel={t('marketplace.sources')}
+            value={sourceID}
+            onChange={setSourceID}
+            size="md"
+            scrollOnMobile={false}
+            options={[
+              { value: 'all', label: t('marketplace.allSources'), count: allItems.length },
+              ...view.sources.map((source) => ({
+                value: source.id,
+                label: source.name,
+                count: source.entries.length,
+                dot: sourceWarnings.has(source.id) ? 'var(--color-amber)' : 'var(--color-green)',
+                srLabel: sourceWarnings.has(source.id) ? t('marketplace.sourceWarning') : t('marketplace.sourceCached'),
+                title: `${t('marketplace.publisherIdentity', { name: source.metadata_name })}\n${source.final_url}\n${t('marketplace.lastRefreshed', { value: new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(source.fetched_at)) })}`,
+                trailing: (
+                  <DropdownMenu
+                    align="end"
+                    className="w-[248px]"
+                    trigger={
+                      <button
+                        type="button"
+                        aria-label={t('marketplace.sourceActions', { name: source.name })}
+                        className="zds-state-layer ml-1.5 grid h-field w-field shrink-0 place-items-center rounded-pill md:h-chip md:w-chip"
+                      >
+                        <MenuIcon className="h-4 w-4" aria-hidden="true" />
+                      </button>
+                    }
+                  >
+                    <DropdownItem danger onSelect={() => setRemoveSource(source)}>
+                      <DeleteIcon className="h-4 w-4" aria-hidden="true" />
+                      {t('marketplace.deleteCurrentSource')}
+                    </DropdownItem>
+                  </DropdownMenu>
+                ),
+              })),
+            ]}
+          />
         </section>
 
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
