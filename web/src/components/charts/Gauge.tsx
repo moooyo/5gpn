@@ -28,7 +28,7 @@ export function GaugeChart({ value, height = 140, width = '100%', color = 'var(-
           strokeLinecap="round"
         />
       </svg>
-      <span className="pointer-events-none absolute inset-0 flex items-center justify-center font-mono text-[21px] font-medium tracking-tight text-text-strong">
+      <span className="pointer-events-none absolute inset-0 flex items-center justify-center font-mono text-headline font-medium tracking-tight text-text-strong">
         {`${Math.round(clamped)}%`}
       </span>
     </div>

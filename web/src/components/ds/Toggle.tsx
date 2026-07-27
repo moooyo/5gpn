@@ -21,7 +21,10 @@ export function Toggle({ checked, onCheckedChange, disabled, className, title, .
       disabled={disabled}
       title={title}
       className={cn(
-        'relative h-8 w-[52px] shrink-0 cursor-pointer rounded-full border-2 border-outline bg-surface-container-high p-0 outline-none',
+        'relative h-8 w-[52px] shrink-0 cursor-pointer rounded-pill border-2 border-outline bg-surface-container-high p-0 outline-none',
+        // 32 + 6 + 6 = 44px of touch height without resizing the switch: the
+        // thumb's sizes and travel are all derived from the 32px track.
+        "before:absolute before:inset-x-0 before:-inset-y-1.5 before:content-[''] sm:before:hidden",
         'transition-[background-color,border-color] duration-150 data-checked:border-primary data-checked:bg-primary',
         'disabled:cursor-not-allowed disabled:opacity-[.38]',
         className,
@@ -30,7 +33,7 @@ export function Toggle({ checked, onCheckedChange, disabled, className, title, .
     >
       <Switch.Thumb
         className={cn(
-          'absolute left-1 top-1/2 grid h-4 w-4 -translate-y-1/2 place-items-center rounded-full bg-outline text-primary',
+          'absolute left-1 top-1/2 grid h-4 w-4 -translate-y-1/2 place-items-center rounded-pill bg-outline text-primary',
           'transition-[width,height,translate,background-color] duration-150 data-checked:h-6 data-checked:w-6 data-checked:translate-x-5 data-checked:bg-[var(--md-sys-color-on-primary)]',
         )}
       >

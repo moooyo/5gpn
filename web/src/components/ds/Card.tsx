@@ -24,7 +24,7 @@ export interface CardHeaderProps extends Omit<HTMLAttributes<HTMLDivElement>, 't
 export function CardHeader({ title, children, className, ...props }: CardHeaderProps) {
   return (
     <div className={cn('flex items-center justify-between gap-3 border-b border-border px-5 py-4', className)} {...props}>
-      {title !== undefined ? <div className="text-[15px] font-semibold text-text-strong">{title}</div> : null}
+      {title !== undefined ? <div className="text-title font-semibold text-text-strong">{title}</div> : null}
       {children}
     </div>
   )

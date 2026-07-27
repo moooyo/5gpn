@@ -37,8 +37,8 @@ export function Select({ value, onValueChange, items, placeholder, className, di
       <BaseSelect.Trigger
         aria-label={ariaLabel}
         className={cn(
-          'flex items-center justify-between rounded-[12px] border border-input-border bg-input text-text-strong outline-none',
-          compact ? 'h-[34px] min-w-[176px] gap-2 px-[13px] pr-2 text-[12px] font-medium' : 'min-h-11 gap-3 px-3.5 text-[13px]',
+          'flex items-center justify-between rounded-ctl border border-input-border bg-input text-text-strong outline-none',
+          compact ? 'h-[34px] min-w-[176px] gap-2 px-[13px] pr-2 text-label font-medium' : 'min-h-11 gap-3 px-3.5 text-body',
           'transition-[border-color,background-color] data-[popup-open]:border-primary data-[popup-open]:bg-card',
           'disabled:cursor-not-allowed disabled:opacity-50',
           className,
@@ -58,17 +58,17 @@ export function Select({ value, onValueChange, items, placeholder, className, di
                   key={item.value}
                   value={item.value}
                   className={cn(
-                    'grid cursor-pointer items-center rounded-[10px] text-text-mid outline-none data-[highlighted]:bg-surface-container-low data-[selected]:font-medium data-[selected]:text-primary',
+                    'grid cursor-pointer items-center rounded-ctl text-text-mid outline-none data-[highlighted]:bg-surface-container-low data-[selected]:font-medium data-[selected]:text-primary',
                     compact
-                      ? 'grid-cols-[minmax(0,1fr)_auto] gap-3 px-3 py-[9px] text-[12.5px] data-[selected]:bg-surface-container-low'
-                      : 'grid-cols-[20px_minmax(0,1fr)] gap-2 px-2.5 py-2 text-[13px]',
+                      ? 'grid-cols-[minmax(0,1fr)_auto] gap-3 px-3 py-[9px] text-body data-[selected]:bg-surface-container-low'
+                      : 'grid-cols-[20px_minmax(0,1fr)] gap-2 px-2.5 py-2 text-body',
                   )}
                 >
                   {!compact ? <BaseSelect.ItemIndicator>
                     <CheckIcon className="h-4 w-4" aria-hidden="true" />
                   </BaseSelect.ItemIndicator> : null}
                   <BaseSelect.ItemText className="truncate">{item.label}</BaseSelect.ItemText>
-                  {compact && item.count ? <span className="font-mono text-[10px] font-normal text-text-faint">{item.count}</span> : null}
+                  {compact && item.count ? <span className="font-mono text-meta font-normal text-text-faint">{item.count}</span> : null}
                 </BaseSelect.Item>
               ))}
             </BaseSelect.List>

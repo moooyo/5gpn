@@ -137,7 +137,7 @@ function UpstreamAddDialog({
         <Field label={t('settings.upstreamsProtocol')}>
           {/* Both groups offer the same three transports: transport is a
               per-member property of an upstream, not a property of the group. */}
-          <div className="grid grid-cols-3 gap-1 rounded-[12px] bg-surface-container p-1" role="radiogroup" aria-label={t('settings.upstreamsProtocol')}>
+          <div className="grid grid-cols-3 gap-1 rounded-ctl bg-surface-container p-1" role="radiogroup" aria-label={t('settings.upstreamsProtocol')}>
             {(['doh', 'dot', 'udp'] as const).map((value) => (
               <button
                 key={value}
@@ -148,8 +148,8 @@ function UpstreamAddDialog({
                 onClick={() => handleProtocolChange(value)}
                 className={
                   protocol === value
-                    ? 'zds-state-layer rounded-[9px] bg-card px-3 py-2 text-[12px] font-medium text-primary shadow-[var(--md-sys-elevation-1)]'
-                    : 'zds-state-layer rounded-[9px] px-3 py-2 text-[12px] text-text-soft'
+                    ? 'zds-state-layer rounded-chip bg-card px-3 py-2 text-label font-medium text-primary shadow-[var(--md-sys-elevation-1)]'
+                    : 'zds-state-layer rounded-chip px-3 py-2 text-label text-text-soft'
                 }
               >
                 {value === 'doh'
@@ -181,7 +181,7 @@ function UpstreamAddDialog({
               className={endpointError ? 'border-red/55 focus-visible:ring-2 focus-visible:ring-red/20' : undefined}
               data-testid="upstreams-endpoint"
             />
-            <span className="text-[10.5px] text-text-faint">{t('settings.upstreamsEndpointHint')}</span>
+            <span className="text-meta text-text-faint">{t('settings.upstreamsEndpointHint')}</span>
           </Field>
         ) : null}
 
@@ -204,7 +204,7 @@ function UpstreamAddDialog({
               className={serverNameError ? 'border-red/55 focus-visible:ring-2 focus-visible:ring-red/20' : undefined}
               data-testid="upstreams-server-name"
             />
-            <span className="text-[10.5px] text-text-faint">{t('settings.upstreamsServerNameHint')}</span>
+            <span className="text-meta text-text-faint">{t('settings.upstreamsServerNameHint')}</span>
           </Field>
         ) : null}
 
@@ -229,7 +229,7 @@ function UpstreamAddDialog({
             className={addressError ? 'border-red/55 focus-visible:ring-2 focus-visible:ring-red/20' : undefined}
             data-testid="upstreams-address"
           />
-          <span className="text-[10.5px] text-text-faint">
+          <span className="text-meta text-text-faint">
             {protocol === 'doh'
               ? t('settings.upstreamsDohAddressHint')
               : protocol === 'dot'
@@ -238,7 +238,7 @@ function UpstreamAddDialog({
           </span>
         </Field>
 
-        {formError ? <div role="alert" className="text-[11px] text-red">{formError}</div> : null}
+        {formError ? <div role="alert" className="text-label text-red">{formError}</div> : null}
       </form>
     </Modal>
   )
@@ -253,7 +253,7 @@ export function UpstreamGroupEditor({ group, entries, disabled, onChange }: Upst
     <section className="flex min-w-0 flex-col gap-2" aria-label={title}>
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          <h3 className="truncate text-[12px] font-semibold text-text-mid">{title}</h3>
+          <h3 className="truncate text-label font-semibold text-text-mid">{title}</h3>
           <Badge tone="neutral" aria-label={t('settings.upstreamsCount', { count: entries.length })}>
             {entries.length}
           </Badge>
@@ -271,7 +271,7 @@ export function UpstreamGroupEditor({ group, entries, disabled, onChange }: Upst
         </Button>
       </div>
 
-      <div className="overflow-hidden rounded-[14px] bg-surface-container-low">
+      <div className="overflow-hidden rounded-card bg-surface-container-low">
         {entries.length > 0 ? (
           <ol>
             {entries.map((entry, index) => {
@@ -281,7 +281,7 @@ export function UpstreamGroupEditor({ group, entries, disabled, onChange }: Upst
                   key={`${entry}-${index}`}
                   className="grid min-h-[58px] grid-cols-[32px_minmax(0,1fr)_32px] items-center gap-2 border-b border-divider px-3 py-2.5 last:border-b-0"
                 >
-                  <span className="font-mono text-[10px] font-semibold tabular-nums text-text-faint" aria-hidden="true">
+                  <span className="font-mono text-meta font-semibold tabular-nums text-text-faint" aria-hidden="true">
                     {String(index + 1).padStart(2, '0')}
                   </span>
                   <div className="flex min-w-0 items-center gap-2">
@@ -297,14 +297,14 @@ export function UpstreamGroupEditor({ group, entries, disabled, onChange }: Upst
                           ? t('settings.upstreamsProtocolDot')
                           : t('settings.upstreamsProtocolUdp')}
                     </Badge>
-                    <code className="min-w-0 truncate font-mono text-[11.5px] text-text-strong" title={entry}>
+                    <code className="min-w-0 truncate font-mono text-label text-text-strong" title={entry}>
                       {entry}
                     </code>
                   </div>
                   <button
                     type="button"
                     disabled={disabled}
-                    className="zds-state-layer inline-flex h-9 w-9 items-center justify-center rounded-full text-text-faint hover:text-red disabled:cursor-not-allowed disabled:opacity-50"
+                    className="zds-state-layer inline-flex h-9 w-9 items-center justify-center rounded-pill text-text-faint hover:text-red disabled:cursor-not-allowed disabled:opacity-50"
                     aria-label={t('settings.upstreamsDelete', { entry })}
                     title={t('common.delete')}
                     onClick={() => onChange(entries.filter((_, entryIndex) => entryIndex !== index))}
@@ -319,7 +319,7 @@ export function UpstreamGroupEditor({ group, entries, disabled, onChange }: Upst
         ) : (
           <div
             role={disabled ? 'status' : 'alert'}
-            className={`flex min-h-[58px] items-center px-3 text-[11px] ${disabled ? 'text-text-faint' : 'text-red'}`}
+            className={`flex min-h-[58px] items-center px-3 text-label ${disabled ? 'text-text-faint' : 'text-red'}`}
           >
             {disabled ? t('common.loading') : t('settings.upstreamsEmpty')}
           </div>

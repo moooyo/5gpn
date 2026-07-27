@@ -35,13 +35,13 @@ export function LoginPage() {
 
   return (
     <main className="grid min-h-dvh w-full place-items-center bg-bg p-4" data-testid="login-page">
-      <Card className="w-full max-w-[410px] rounded-[28px] border-0 p-7 shadow-[var(--md-sys-elevation-2)] sm:p-9">
+      <Card className="w-full max-w-[410px] rounded-dialog border-0 p-7 shadow-[var(--md-sys-elevation-2)] sm:p-9">
         <div className="mb-7 flex flex-col items-center text-center">
-          <div className="mb-4 grid h-16 w-16 place-items-center rounded-full bg-primary-container text-on-primary-container">
+          <div className="mb-4 grid h-16 w-16 place-items-center rounded-pill bg-primary-container text-on-primary-container">
             <ShieldLockIcon className="h-8 w-8" aria-hidden="true" />
           </div>
-          <h1 className="text-[23px] font-medium tracking-[-.01em] text-text-strong">{t('auth.title')}</h1>
-          <p className="mt-2 max-w-[300px] text-[12.5px] leading-5 text-text-faint">{t('auth.hint')}</p>
+          <h1 className="text-metric font-medium tracking-[-.01em] text-text-strong">{t('auth.title')}</h1>
+          <p className="mt-2 max-w-[300px] text-body leading-5 text-text-faint">{t('auth.hint')}</p>
         </div>
 
         <form className="flex flex-col gap-5" onSubmit={handleSubmit}>
@@ -61,8 +61,8 @@ export function LoginPage() {
           </Button>
         </form>
 
-        <div className="mt-7 flex items-center justify-center gap-2 text-[10.5px] text-text-faint">
-          <span className="h-2 w-2 rounded-full bg-green" />
+        <div className="mt-7 flex items-center justify-center gap-2 text-meta text-text-faint">
+          <span className="h-2 w-2 rounded-pill bg-green" />
           {t('auth.apiBoundary')}
         </div>
       </Card>

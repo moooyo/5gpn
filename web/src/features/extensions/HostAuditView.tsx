@@ -132,8 +132,8 @@ export function HostAuditView({
           [t('extensions.hostAudit.extensions'), view.modules.filter((module) => module.capture_hosts.length > 0).length],
         ].map(([label, value]) => (
           <Card key={String(label)} className="p-4 shadow-none">
-            <div className="text-[10.5px] font-medium text-text-faint">{label}</div>
-            <div className="mt-1 font-mono text-[25px] font-medium text-text-strong">{value}</div>
+            <div className="text-meta font-medium text-text-faint">{label}</div>
+            <div className="mt-1 font-mono text-metric font-medium text-text-strong">{value}</div>
           </Card>
         ))}
       </div>
@@ -166,14 +166,14 @@ export function HostAuditView({
       </Card>
 
       {moduleID ? (
-        <div className="flex items-center justify-between gap-3 rounded-[14px] bg-secondary-container px-4 py-3 text-[11.5px] text-on-secondary-container">
+        <div className="flex items-center justify-between gap-3 rounded-card bg-secondary-container px-4 py-3 text-label text-on-secondary-container">
           <span>{t('extensions.hostAudit.scoped')}</span>
           <Button type="button" variant="secondary" size="sm" onClick={onClearModule}>{t('extensions.hostAudit.showAll')}</Button>
         </div>
       ) : null}
 
       {!settings?.enabled ? (
-        <div className="flex items-start gap-2.5 rounded-[14px] bg-[var(--md-sys-color-warning-container)] px-4 py-3 text-[11px] leading-5 text-[var(--md-sys-color-on-warning-container)]">
+        <div className="flex items-start gap-2.5 rounded-card bg-[var(--md-sys-color-warning-container)] px-4 py-3 text-label leading-5 text-[var(--md-sys-color-on-warning-container)]">
           <WarningIcon className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
           {t('extensions.hostAudit.masterOff')}
         </div>
@@ -181,20 +181,20 @@ export function HostAuditView({
 
       {groups.length === 0 ? (
         <Card className="p-10 text-center shadow-none">
-          <div className="text-[13px] font-medium text-text-strong">{t('extensions.hostAudit.empty')}</div>
-          <div className="mt-1 text-[11.5px] text-text-faint">{t('extensions.hostAudit.emptyHint')}</div>
+          <div className="text-body font-medium text-text-strong">{t('extensions.hostAudit.empty')}</div>
+          <div className="mt-1 text-label text-text-faint">{t('extensions.hostAudit.emptyHint')}</div>
         </Card>
       ) : (
         <div className="space-y-3">
           {groups.map(({ module, entries }) => (
             <Card key={module.id} className="overflow-hidden p-0 shadow-none" data-testid={`host-group-${module.id}`}>
               <div className="flex flex-col gap-2 border-b border-divider px-4 py-3.5 sm:flex-row sm:items-center">
-                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-[10px] bg-primary-container text-on-primary-container">
+                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-ctl bg-primary-container text-on-primary-container">
                   <ShieldLockIcon className="h-4.5 w-4.5" aria-hidden="true" />
                 </span>
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-[13px] font-medium text-text-strong">{module.name}</div>
-                  <div className="mt-0.5 truncate font-mono text-[9.5px] text-text-faint">{module.snapshot_digest}</div>
+                  <div className="truncate text-body font-medium text-text-strong">{module.name}</div>
+                  <div className="mt-0.5 truncate font-mono text-meta text-text-faint">{module.snapshot_digest}</div>
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5">
                   <Badge tone={module.ready ? 'green' : module.enabled ? 'amber' : 'neutral'}>
@@ -208,7 +208,7 @@ export function HostAuditView({
               <div className="divide-y divide-divider">
                 {entries.map((entry) => (
                   <div key={entry.host} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center" data-host={entry.host}>
-                    <code className="min-w-0 flex-1 break-all font-mono text-[12px] text-text-strong">{entry.host}</code>
+                    <code className="min-w-0 flex-1 break-all font-mono text-label text-text-strong">{entry.host}</code>
                     <div className="flex flex-wrap items-center gap-1.5">
                       <Badge tone={entry.wildcard ? 'indigo' : 'neutral'}>
                         {entry.wildcard ? t('extensions.hostAudit.wildcard') : t('extensions.hostAudit.exact')}

@@ -20,14 +20,26 @@ describe('PolicyRulesTable', () => {
     await i18n.changeLanguage('en')
   })
 
-  it('filters by matcher value and hides reorder arrows while filtering', async () => {
+  it('filters by matcher value and disables — rather than removes — the reorder arrows', async () => {
     const user = userEvent.setup()
     render(<PolicyRulesTable rules={RULES} onEdit={() => {}} onDelete={() => {}} onToggle={() => {}} onReorder={() => {}} />)
     expect(screen.getByText('netflix.com')).toBeInTheDocument()
     await user.type(screen.getByTestId('policy-rules-search'), 'example')
     expect(screen.queryByText('netflix.com')).toBeNull()
     expect(screen.getByText('example.cn')).toBeInTheDocument()
-    expect(screen.queryByLabelText(/move up/i)).toBeNull() // arrows hidden while filtering
+    // The control stays visible and disabled: unmounting it left a bare row
+    // whose only explanation was one line of 11px grey text.
+    expect(screen.getByLabelText(/move up/i)).toBeDisabled()
+    expect(screen.getByRole('button', { name: /clear filters/i })).toBeInTheDocument()
+  })
+
+  it('restores reordering through the inline hint clear action', async () => {
+    const user = userEvent.setup()
+    render(<PolicyRulesTable rules={RULES} onEdit={() => {}} onDelete={() => {}} onToggle={() => {}} onReorder={() => {}} />)
+    await user.type(screen.getByTestId('policy-rules-search'), 'example')
+    await user.click(screen.getByRole('button', { name: /clear filters/i }))
+    expect(screen.getByText('netflix.com')).toBeInTheDocument()
+    expect(screen.getAllByLabelText(/move down/i)[0]).toBeEnabled()
   })
 
   it('move-down calls onReorder with the swapped full id list', async () => {
@@ -57,15 +69,61 @@ describe('PolicyRulesTable', () => {
     expect(screen.queryByText('https://x/blocklist.txt')).toBeNull()
   })
 
-  it('edit and delete buttons invoke the handlers with the row rule', async () => {
+  /** Edit and delete moved into a per-row overflow: two filled buttons per row
+   *  painted the most destructive action in the page N times over, in
+   *  error-container, right next to a routine one. */
+  it('invokes edit from the row overflow menu', async () => {
     const user = userEvent.setup()
     const onEdit = vi.fn()
-    const onDelete = vi.fn()
-    render(<PolicyRulesTable rules={RULES} onEdit={onEdit} onDelete={onDelete} onToggle={() => {}} onReorder={() => {}} />)
+    render(<PolicyRulesTable rules={RULES} onEdit={onEdit} onDelete={() => {}} onToggle={() => {}} onReorder={() => {}} />)
     const row = screen.getByText('example.cn').closest('tr')!
-    await user.click(within(row).getByText('Edit'))
+
+    await user.click(within(row).getByRole('button', { name: /more actions/i }))
+    await user.click(await screen.findByText('Edit'))
     expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 'b' }))
-    await user.click(within(row).getByText('Delete'))
+  })
+
+  it('invokes delete from the row overflow menu', async () => {
+    const user = userEvent.setup()
+    const onDelete = vi.fn()
+    render(<PolicyRulesTable rules={RULES} onEdit={() => {}} onDelete={onDelete} onToggle={() => {}} onReorder={() => {}} />)
+    const row = screen.getByText('example.cn').closest('tr')!
+
+    await user.click(within(row).getByRole('button', { name: /more actions/i }))
+    await user.click(await screen.findByText('Delete'))
     expect(onDelete).toHaveBeenCalledWith(expect.objectContaining({ id: 'b' }))
+  })
+
+  /** Moving rule 20 to the top used to be nineteen clicks and nineteen
+   *  requests, even though Reorder replaces the whole table server-side. */
+  it('moves a rule to the top of the full order in one request', async () => {
+    const user = userEvent.setup()
+    const onReorder = vi.fn()
+    render(<PolicyRulesTable rules={RULES} onEdit={() => {}} onDelete={() => {}} onToggle={() => {}} onReorder={onReorder} />)
+    const row = screen.getByText('netflix.com').closest('tr')!
+
+    await user.click(within(row).getByRole('button', { name: /more actions/i }))
+    await user.click(await screen.findByText('Move to top'))
+    expect(onReorder).toHaveBeenCalledTimes(1)
+    expect(onReorder).toHaveBeenCalledWith(['c', 'a', 'b'])
+  })
+
+  /** The 3px marker and the pending tag are how the header card's count maps
+   *  back to individual rows. */
+  it('marks the rules that differ from the last applied snapshot', () => {
+    render(
+      <PolicyRulesTable
+        rules={RULES}
+        pendingIds={new Set(['b'])}
+        onEdit={() => {}}
+        onDelete={() => {}}
+        onToggle={() => {}}
+        onReorder={() => {}}
+      />,
+    )
+    const pendingRow = screen.getByText('example.cn').closest('tr')!
+    expect(within(pendingRow).getByText('pending')).toBeInTheDocument()
+    const cleanRow = screen.getByText('netflix.com').closest('tr')!
+    expect(within(cleanRow).queryByText('pending')).toBeNull()
   })
 })

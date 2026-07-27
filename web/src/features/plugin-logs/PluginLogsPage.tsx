@@ -5,13 +5,13 @@ import { Link } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import {
   ChevronDownIcon,
+  CloseIcon,
   DeleteSweepIcon,
-  PauseIcon,
-  PlayIcon,
-  SearchIcon,
+  RefreshIcon,
   TerminalIcon,
+  TuneIcon,
 } from '../../components/icons'
-import { Badge, Card, Input, Select, StatusDot, type BadgeTone, type SelectItem } from '../../components/ds'
+import { Badge, FilterChips, LiveToggle, LogSearchField, LogSurface, Modal, Select, StatusDot, toast, type BadgeTone, type SelectItem } from '../../components/ds'
 import { VirtualTable } from '../../components/data-grid'
 import { api } from '../../lib/api/client'
 import type { InterceptModule, PluginEngineLogEntry, PluginEngineLogLevel } from '../../lib/api/types'
@@ -30,6 +30,9 @@ const MOBILE_EXPANDED_HEIGHT = 176
 type LevelFilter = 'all' | PluginEngineLogLevel
 
 const LEVELS: PluginEngineLogLevel[] = ['info', 'warn', 'error']
+// Severity IS a status, so these stay on the semantic roles — no theme aliases
+// warning onto error onto primary, and a reader expects red to mean error.
+// The plugin identity below is the opposite case and must not borrow them.
 const LEVEL_TONE: Record<PluginEngineLogLevel, BadgeTone> = {
   info: 'blue',
   warn: 'amber',
@@ -40,20 +43,20 @@ const LEVEL_DOT: Record<PluginEngineLogLevel, string> = {
   warn: 'var(--color-amber)',
   error: 'var(--color-red)',
 }
-const PLUGIN_DOTS = [
-  'var(--color-primary)',
-  'var(--color-cyan)',
-  'var(--color-indigo)',
-  'var(--color-green)',
-  'var(--color-amber)',
+/** Categorical slots for telling N peer plugins apart. This used to hash the
+ *  plugin id into a list of semantic roles: ocean aliases primary onto trace
+ *  and forest aliases primary onto success, so two plugins could land on the
+ *  same colour by theme, and a third could land on it by hash collision.
+ *  Assignment is now positional over `execution_order` — stable for a given
+ *  install set, and the same order the extensions page lists them in. */
+const PLUGIN_SLOTS = [
+  'var(--color-chart-1)',
+  'var(--color-chart-2)',
+  'var(--color-chart-3)',
+  'var(--color-chart-4)',
+  'var(--color-chart-5)',
 ]
-
-function pluginDot(extension?: string): string {
-  if (!extension) return 'var(--color-text-faint)'
-  let hash = 0
-  for (let index = 0; index < extension.length; index += 1) hash = ((hash << 5) - hash + extension.charCodeAt(index)) | 0
-  return PLUGIN_DOTS[Math.abs(hash) % PLUGIN_DOTS.length]
-}
+const NO_PLUGIN_DOT = 'var(--color-text-faint)'
 
 function formatTime(value: string, fallback: string): string {
   const date = new Date(value)
@@ -77,14 +80,14 @@ function durationText(entry: PluginEngineLogEntry, t: TFunction): string {
 
 function LevelBadge({ level, t }: { level: PluginEngineLogLevel; t: TFunction }) {
   return (
-    <Badge className="min-w-[42px] justify-center rounded-[5px] px-[5px] py-0.5 font-mono text-[10px]" tone={LEVEL_TONE[level]}>
+    <Badge className="min-w-[42px] justify-center rounded-chip px-[5px] py-0.5 font-mono text-meta" tone={LEVEL_TONE[level]}>
       {t(`pluginLogs.level.${level}`)}
     </Badge>
   )
 }
 
 function EngineTag({ t }: { t: TFunction }) {
-  return <span className="shrink-0 rounded-[5px] bg-tertiary-container px-[5px] py-px text-[9px] font-semibold text-tertiary">{t('pluginLogs.engineTag')}</span>
+  return <span className="shrink-0 rounded-chip bg-tertiary-container px-[5px] py-px text-meta font-semibold text-tertiary">{t('pluginLogs.engineTag')}</span>
 }
 
 function Details({ entry, mobile, t }: { entry: PluginEngineLogEntry; mobile: boolean; t: TFunction }) {
@@ -92,13 +95,13 @@ function Details({ entry, mobile, t }: { entry: PluginEngineLogEntry; mobile: bo
   if (mobile) {
     return (
       <div className="flex h-[118px] w-full flex-col gap-2 overflow-auto bg-surface-container-low px-3.5 pb-2.5 pt-1">
-        <div className="rounded-[9px] bg-card px-2.5 py-2 font-mono text-[11px] leading-[1.55] text-text-mid break-all whitespace-pre-wrap">
+        <div className="rounded-chip bg-card px-2.5 py-2 font-mono text-label leading-[1.55] text-text-mid break-all whitespace-pre-wrap">
           {entry.message}
         </div>
         <div className="flex flex-wrap gap-1.5">
-          <span className="rounded-[6px] bg-surface-container px-2 py-0.5 font-mono text-[9.5px] text-text-soft">{t('pluginLogs.detail.phase')} {entry.phase ?? missing}</span>
-          <span className="rounded-[6px] bg-surface-container px-2 py-0.5 font-mono text-[9.5px] text-text-soft">{t('pluginLogs.detail.duration')} {durationText(entry, t)}</span>
-          <span className="rounded-[6px] bg-surface-container px-2 py-0.5 font-mono text-[9.5px] text-text-soft">{shortDigest(entry.script_digest, missing)}</span>
+          <span className="rounded-chip bg-surface-container px-2 py-0.5 font-mono text-meta text-text-soft">{t('pluginLogs.detail.phase')} {entry.phase ?? missing}</span>
+          <span className="rounded-chip bg-surface-container px-2 py-0.5 font-mono text-meta text-text-soft">{t('pluginLogs.detail.duration')} {durationText(entry, t)}</span>
+          <span className="rounded-chip bg-surface-container px-2 py-0.5 font-mono text-meta text-text-soft">{shortDigest(entry.script_digest, missing)}</span>
         </div>
       </div>
     )
@@ -113,14 +116,14 @@ function Details({ entry, mobile, t }: { entry: PluginEngineLogEntry; mobile: bo
   ]
   return (
     <div className="flex h-[116px] w-full flex-col gap-2 overflow-auto bg-surface-container-low px-[18px] py-2.5">
-      <div className="rounded-[9px] border border-divider bg-card px-[11px] py-2 font-mono text-[11px] leading-[1.55] text-text-mid break-all whitespace-pre-wrap">
+      <div className="rounded-chip border border-divider bg-card px-[11px] py-2 font-mono text-label leading-[1.55] text-text-mid break-all whitespace-pre-wrap">
         {entry.message}
       </div>
       <div className="flex flex-wrap gap-x-7 gap-y-2">
         {metadata.map(([label, value]) => (
           <div key={label} className={cn('min-w-0', label === t('pluginLogs.detail.url') && 'max-w-full flex-1')}>
-            <div className="mb-0.5 text-[10px] text-text-faint">{label}</div>
-            <div className="font-mono text-[11px] text-text-mid break-all">{value}</div>
+            <div className="mb-0.5 text-meta text-text-faint">{label}</div>
+            <div className="font-mono text-label text-text-mid break-all">{value}</div>
           </div>
         ))}
       </div>
@@ -131,13 +134,13 @@ function Details({ entry, mobile, t }: { entry: PluginEngineLogEntry; mobile: bo
 function EmptyState({ showAction, t }: { showAction: boolean; t: TFunction }) {
   return (
     <div className="flex min-h-[260px] flex-col items-center justify-center gap-1.5 px-5 py-12 text-center">
-      <span className="mb-1 grid h-12 w-12 place-items-center rounded-full bg-surface-container-low text-text-faint">
+      <span className="mb-1 grid h-12 w-12 place-items-center rounded-pill bg-surface-container-low text-text-faint">
         <TerminalIcon className="h-6 w-6" aria-hidden="true" />
       </span>
-      <div className="text-[13px] font-semibold text-text-strong">{t('pluginLogs.emptyTitle')}</div>
-      <div className="text-[12px] leading-5 text-text-faint">{t('pluginLogs.emptyHint')}</div>
+      <div className="text-body font-semibold text-text-strong">{t('pluginLogs.emptyTitle')}</div>
+      <div className="text-label leading-5 text-text-faint">{t('pluginLogs.emptyHint')}</div>
       {showAction ? (
-        <Link className="zds-state-layer mt-1.5 inline-flex h-8 items-center rounded-full bg-primary-container px-4 text-[11.5px] font-medium text-on-primary-container" to="/extensions">
+        <Link className="zds-state-layer mt-1.5 inline-flex h-field items-center rounded-pill bg-primary-container px-4 text-label font-medium text-on-primary-container sm:h-ctl" to="/extensions">
           {t('pluginLogs.goToExtensions')}
         </Link>
       ) : null}
@@ -145,44 +148,81 @@ function EmptyState({ showAction, t }: { showAction: boolean; t: TFunction }) {
   )
 }
 
-function LevelFilters({ value, onChange, mobile, t }: { value: LevelFilter; onChange: (value: LevelFilter) => void; mobile: boolean; t: TFunction }) {
+/**
+ * Paused, inactive and disconnected used to be three independent conditional
+ * banners that could all be true at once — on mobile that was three stacked
+ * rows on top of two filter rows and the search row, pushing the table below
+ * six rows of chrome inside a viewport that gives it ~280px. They are now one
+ * banner: the highest-priority condition owns the row, and anything else still
+ * true is appended as supplementary text on the same line.
+ */
+type BannerTone = 'error' | 'neutral' | 'warning'
+
+interface StatusBannerModel {
+  tone: BannerTone
+  text: string
+  /** Lower-priority condition that is also true, shown inline after a `·`. */
+  secondary: string | null
+  reconnect: boolean
+}
+
+const BANNER_TONE: Record<BannerTone, string> = {
+  error: 'bg-[var(--md-sys-color-error-container)] text-[var(--md-sys-color-on-error-container)]',
+  warning: 'bg-[var(--md-sys-color-warning-container)] text-[var(--md-sys-color-on-warning-container)]',
+  neutral: 'bg-surface-container-low text-text-soft',
+}
+
+const BANNER_DOT: Record<BannerTone, string> = {
+  error: 'var(--color-red)',
+  warning: 'var(--color-amber)',
+  neutral: 'var(--color-text-faint)',
+}
+
+function StatusBanner({ banner, mobile, onReconnect, t }: { banner: StatusBannerModel; mobile: boolean; onReconnect: () => void; t: TFunction }) {
   return (
-    <div className={cn('flex items-center gap-1.5', mobile && 'min-w-max')} role="group" aria-label={t('pluginLogs.levelFilterLabel')}>
-      {(['all', ...LEVELS] as LevelFilter[]).map((level) => {
-        const selected = value === level
-        return (
-          <button
-            key={level}
-            type="button"
-            aria-pressed={selected}
-            onClick={() => onChange(level)}
-            className={cn(
-              'zds-state-layer inline-flex items-center gap-1.5 rounded-full border border-outline-variant/60 px-[11px] font-medium',
-              mobile ? 'h-[30px] text-[11.5px]' : 'h-7 text-[11px]',
-              selected ? 'bg-secondary-container text-on-secondary-container' : 'text-text-soft',
-            )}
-          >
-            {level !== 'all' ? <StatusDot className="h-[7px] w-[7px]" color={LEVEL_DOT[level]} /> : null}
-            {level === 'all' ? t('pluginLogs.allLevels') : t(`pluginLogs.level.${level}`)}
-          </button>
-        )
-      })}
+    <div
+      role="status"
+      data-testid="plugin-logs-status-banner"
+      className={cn(
+        'flex items-center gap-2 text-meta font-medium',
+        BANNER_TONE[banner.tone],
+        mobile ? 'rounded-ctl px-3 py-2' : 'px-[18px] py-2',
+      )}
+    >
+      <StatusDot className="h-[7px] w-[7px] shrink-0" color={BANNER_DOT[banner.tone]} />
+      <span className="min-w-0 flex-1">
+        {banner.text}
+        {banner.secondary ? <span className="opacity-80"> · {banner.secondary}</span> : null}
+      </span>
+      {banner.reconnect ? (
+        <button
+          type="button"
+          onClick={onReconnect}
+          className="zds-state-layer inline-flex h-chip shrink-0 items-center gap-1 rounded-pill px-2.5 text-meta font-semibold underline-offset-2 hover:underline"
+        >
+          <RefreshIcon className="h-3.5 w-3.5" aria-hidden="true" />
+          {t('pluginLogs.reconnectNow')}
+        </button>
+      ) : null}
     </div>
   )
 }
 
-function SearchField({ value, onChange, mobile, t }: { value: string; onChange: (value: string) => void; mobile: boolean; t: TFunction }) {
+function LevelFilters({ value, onChange, mobile, t }: { value: LevelFilter; onChange: (value: LevelFilter) => void; mobile: boolean; t: TFunction }) {
   return (
-    <div className="relative min-w-0 flex-1">
-      <SearchIcon className={cn('pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-text-faint', mobile ? 'h-[17px] w-[17px]' : 'h-4 w-4')} aria-hidden="true" />
-      <Input
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        aria-label={t('pluginLogs.searchLabel')}
-        placeholder={t('pluginLogs.searchPlaceholder')}
-        className={cn('rounded-full bg-card pl-[33px] text-[11.5px]', mobile ? 'h-9' : 'h-[31px]')}
-      />
-    </div>
+    <FilterChips
+      outlined
+      scrollOnMobile={false}
+      ariaLabel={t('pluginLogs.levelFilterLabel')}
+      value={value}
+      onChange={(next) => onChange(next as LevelFilter)}
+      className={cn(mobile && 'min-w-max')}
+      options={(['all', ...LEVELS] as LevelFilter[]).map((level) => ({
+        value: level,
+        label: level === 'all' ? t('pluginLogs.allLevels') : t(`pluginLogs.level.${level}`),
+        swatch: level === 'all' ? undefined : LEVEL_DOT[level],
+      }))}
+    />
   )
 }
 
@@ -199,13 +239,14 @@ export default function PluginLogsPage() {
   const [clearedWatermark, setClearedWatermark] = useState(0)
   const [expandedId, setExpandedId] = useState<number | null>(null)
   const [bufferedBaseline, setBufferedBaseline] = useState(0)
+  const [filtersOpen, setFiltersOpen] = useState(false)
   const checking = Boolean(status?.interceptLoading)
   const inactive = Boolean(status && !checking && status.interceptState === 'healthy' && status.intercept?.expected === false)
   // Subscribe immediately so a slow health probe cannot create an artificial
   // gap in this non-replaying stream. A confirmed idle state then closes the
   // socket and suppresses future reconnects.
   const streamEnabled = !inactive
-  const { entries, connected, bufferedCount, getCurrentWatermarks } = usePluginEngineLogs({ paused, enabled: streamEnabled })
+  const { entries, connected, bufferedCount, getCurrentWatermarks, reconnect } = usePluginEngineLogs({ paused, enabled: streamEnabled })
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedQuery(query), SEARCH_DEBOUNCE_MS)
@@ -223,6 +264,16 @@ export default function PluginLogsPage() {
   }, [])
 
   const moduleNames = useMemo(() => new Map(modules.map((module) => [module.id, module.name])), [modules])
+  // `modules` is kept sorted by execution_order, so the slot a plugin gets is
+  // its position in the pipeline rather than a hash of its id.
+  const pluginColors = useMemo(
+    () => new Map(modules.map((module, index) => [module.id, PLUGIN_SLOTS[index % PLUGIN_SLOTS.length]])),
+    [modules],
+  )
+  const pluginDot = useCallback(
+    (extension?: string) => (extension ? pluginColors.get(extension) ?? NO_PLUGIN_DOT : NO_PLUGIN_DOT),
+    [pluginColors],
+  )
   const pluginName = useCallback((entry: PluginEngineLogEntry) => {
     if (!entry.extension) return t('pluginLogs.engineTag')
     return moduleNames.get(entry.extension) ?? entry.extension
@@ -261,6 +312,19 @@ export default function PluginLogsPage() {
 
   const displayedBufferedCount = paused ? Math.max(0, bufferedCount - bufferedBaseline) : 0
   const showEmptyAction = entries.length === 0 && clearedWatermark === 0 && level === 'all' && plugin === ALL_PLUGINS && !searchNeedle
+  const activeFilterCount = (level === 'all' ? 0 : 1) + (plugin === ALL_PLUGINS ? 0 : 1)
+
+  // Priority: disconnected > inactive > paused. Only the winner gets a row.
+  const statusBanner = useMemo<StatusBannerModel | null>(() => {
+    if (checking) return null
+    const pausedText = paused ? t('pluginLogs.pausedHint', { count: displayedBufferedCount }) : null
+    if (streamEnabled && !connected) {
+      return { tone: 'error', text: t('pluginLogs.disconnectedBanner'), secondary: pausedText, reconnect: true }
+    }
+    if (inactive) return { tone: 'neutral', text: t('pluginLogs.inactive'), secondary: pausedText, reconnect: false }
+    if (pausedText) return { tone: 'warning', text: pausedText, secondary: null, reconnect: false }
+    return null
+  }, [checking, connected, displayedBufferedCount, inactive, paused, streamEnabled, t])
 
   const togglePaused = useCallback(() => {
     setExpandedId(null)
@@ -269,10 +333,25 @@ export default function PluginLogsPage() {
   }, [])
   const clear = useCallback(() => {
     const current = getCurrentWatermarks()
+    const previousWatermark = clearedWatermark
+    const previousBaseline = bufferedBaseline
+    const hidden = afterClear.length
     setClearedWatermark(current.latestId)
     setExpandedId(null)
     setBufferedBaseline(paused ? current.bufferedCount : 0)
-  }, [getCurrentWatermarks, paused])
+    // The watermark is a browser-side number over a ring the sidecar keeps
+    // filling — nothing was destroyed, so an undo costs one setState and is
+    // strictly better than the confirmation dialog this would otherwise need.
+    toast.info(t('pluginLogs.clearedToast', { count: hidden }), {
+      action: {
+        label: t('common.undo'),
+        onClick: () => {
+          setClearedWatermark(previousWatermark)
+          setBufferedBaseline(previousBaseline)
+        },
+      },
+    })
+  }, [afterClear.length, bufferedBaseline, clearedWatermark, getCurrentWatermarks, paused, t])
   const toggleExpanded = useCallback((entry: PluginEngineLogEntry) => {
     setExpandedId((current) => current === entry.id ? null : entry.id)
   }, [])
@@ -282,7 +361,7 @@ export default function PluginLogsPage() {
       accessorKey: 'time',
       header: t('pluginLogs.colTime'),
       meta: { width: 76, headerClassName: 'py-2 pl-[18px] pr-0', cellClassName: 'pl-[18px] pr-0 py-0' },
-      cell: ({ row }) => <span className="font-mono text-[10.5px] text-text-faint">{formatTime(row.original.time, t('pluginLogs.missingValue'))}</span>,
+      cell: ({ row }) => <span className="font-mono text-meta text-text-faint">{formatTime(row.original.time, t('pluginLogs.missingValue'))}</span>,
     },
     {
       accessorKey: 'level',
@@ -296,7 +375,7 @@ export default function PluginLogsPage() {
       meta: { width: 224, headerClassName: 'px-2 py-2', cellClassName: 'px-2 py-0' },
       cell: ({ row }) => {
         const entry = row.original
-        return <div className="flex min-w-0 items-center gap-1.5"><StatusDot className="h-1.5 w-1.5 shrink-0" color={pluginDot(entry.extension)} /><span className="shrink-0 truncate font-mono text-[11px] font-medium text-text-strong">{pluginName(entry)}</span><span className="truncate font-mono text-[10.5px] text-text-faint">· {actionName(entry)}</span></div>
+        return <div className="flex min-w-0 items-center gap-1.5"><StatusDot className="h-1.5 w-1.5 shrink-0" color={pluginDot(entry.extension)} /><span className="shrink-0 truncate font-mono text-label font-medium text-text-strong">{pluginName(entry)}</span><span className="truncate font-mono text-meta text-text-faint">· {actionName(entry)}</span></div>
       },
     },
     {
@@ -305,7 +384,7 @@ export default function PluginLogsPage() {
       meta: { headerClassName: 'px-2 py-2', cellClassName: 'px-2 py-0' },
       cell: ({ row }) => {
         const entry = row.original
-        return <div className="flex min-w-0 items-center gap-1.5">{entry.source === 'engine' ? <EngineTag t={t} /> : null}<span className={cn('truncate font-mono text-[11px]', entry.level === 'error' ? 'text-red' : entry.level === 'warn' ? 'text-amber' : 'text-text-mid')}>{entry.message}</span></div>
+        return <div className="flex min-w-0 items-center gap-1.5">{entry.source === 'engine' ? <EngineTag t={t} /> : null}<span className={cn('truncate font-mono text-label', entry.level === 'error' ? 'text-red' : entry.level === 'warn' ? 'text-amber' : 'text-text-mid')}>{entry.message}</span></div>
       },
     },
     {
@@ -314,7 +393,7 @@ export default function PluginLogsPage() {
       meta: { width: 34, headerClassName: 'p-0', cellClassName: 'p-0' },
       cell: ({ row }) => <ChevronDownIcon className={cn('mx-auto h-4 w-4 text-text-faint transition-transform', expandedId === row.original.id && 'rotate-180')} aria-hidden="true" />,
     },
-  ], [actionName, expandedId, pluginName, t])
+  ], [actionName, expandedId, pluginDot, pluginName, t])
 
   const mobileColumns = useMemo<ColumnDef<PluginEngineLogEntry, unknown>[]>(() => [{
     id: 'mobile-log',
@@ -327,17 +406,17 @@ export default function PluginLogsPage() {
           <div className="flex min-w-0 items-center gap-2">
             <LevelBadge level={entry.level} t={t} />
             <StatusDot className="h-1.5 w-1.5 shrink-0" color={pluginDot(entry.extension)} />
-            <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] font-medium text-text-strong">{pluginName(entry)} · {actionName(entry)}</span>
-            <span className="shrink-0 font-mono text-[10.5px] text-text-faint">{formatTime(entry.time, t('pluginLogs.missingValue'))}</span>
+            <span className="min-w-0 flex-1 truncate font-mono text-label font-medium text-text-strong">{pluginName(entry)} · {actionName(entry)}</span>
+            <span className="shrink-0 font-mono text-meta text-text-faint">{formatTime(entry.time, t('pluginLogs.missingValue'))}</span>
           </div>
           <div className="flex min-w-0 items-center gap-1.5">
             {entry.source === 'engine' ? <EngineTag t={t} /> : null}
-            <span className={cn('min-w-0 flex-1 truncate font-mono text-[11px]', entry.level === 'error' ? 'text-red' : entry.level === 'warn' ? 'text-amber' : 'text-text-mid')}>{entry.message}</span>
+            <span className={cn('min-w-0 flex-1 truncate font-mono text-label', entry.level === 'error' ? 'text-red' : entry.level === 'warn' ? 'text-amber' : 'text-text-mid')}>{entry.message}</span>
           </div>
         </div>
       )
     },
-  }], [actionName, pluginName, t])
+  }], [actionName, pluginDot, pluginName, t])
 
   const rowAriaLabel = useCallback((entry: PluginEngineLogEntry) => {
     const action = t(expandedId === entry.id ? 'pluginLogs.collapseRow' : 'pluginLogs.expandRow')
@@ -351,26 +430,24 @@ export default function PluginLogsPage() {
   const rowClass = useCallback((entry: PluginEngineLogEntry) => expandedId === entry.id ? 'bg-surface-container-low' : undefined, [expandedId])
 
   const pauseButton = (mobile: boolean) => (
-    <button
-      type="button"
-      onClick={togglePaused}
-      aria-label={paused ? t('pluginLogs.resume') : t('pluginLogs.pause')}
-      className={cn(
-        'zds-state-layer inline-flex shrink-0 items-center justify-center font-medium',
-        mobile ? 'h-9 w-9 rounded-full' : 'h-8 gap-1.5 rounded-full px-3 text-[11.5px]',
-        paused ? 'bg-surface-container text-text-soft' : 'bg-[var(--md-sys-color-success-container)] text-[var(--md-sys-color-on-success-container)]',
-      )}
-    >
-      {paused ? <PlayIcon className="h-[17px] w-[17px]" aria-hidden="true" /> : <PauseIcon className="h-[17px] w-[17px]" aria-hidden="true" />}
-      {!mobile ? paused ? t('pluginLogs.pausedBuffered', { count: displayedBufferedCount }) : t('pluginLogs.live') : null}
-    </button>
+    <LiveToggle
+      live={!paused}
+      onToggle={togglePaused}
+      // Ingestion never stops here; only the rendered snapshot freezes, and
+      // the label carries the count that accumulated behind it.
+      liveLabel={mobile ? '' : t('pluginLogs.live')}
+      pausedLabel={mobile ? '' : t('pluginLogs.pausedBuffered', { count: displayedBufferedCount })}
+      pauseAction={t('pluginLogs.pause')}
+      resumeAction={t('pluginLogs.resume')}
+      className={mobile ? 'w-field justify-center px-0 sm:h-field' : undefined}
+    />
   )
   const clearButton = (mobile: boolean) => (
     <button
       type="button"
       onClick={clear}
       aria-label={t('pluginLogs.clearLabel')}
-      className={cn('zds-state-layer inline-flex shrink-0 items-center justify-center border border-outline-variant text-text-soft', mobile ? 'h-9 w-9 rounded-full' : 'h-8 gap-1.5 rounded-full px-3 text-[11.5px]')}
+      className={cn('zds-state-layer inline-flex shrink-0 items-center justify-center border border-outline-variant text-text-soft', mobile ? 'h-field w-field rounded-pill' : 'h-chip gap-1.5 rounded-pill px-3 text-label')}
     >
       <DeleteSweepIcon className="h-[17px] w-[17px]" aria-hidden="true" />
       {!mobile ? t('pluginLogs.clear') : null}
@@ -380,8 +457,8 @@ export default function PluginLogsPage() {
   return (
     <div className="flex flex-col gap-3" data-testid="page-plugin-logs">
       <div className="hidden items-center gap-3 px-1 md:flex">
-        <p className="min-w-[260px] flex-1 text-[12.5px] leading-5 text-text-faint">{t('pluginLogs.intro')}</p>
-        <div className="flex items-center gap-2 text-[11.5px] font-medium text-text-soft" role="status" aria-live="polite">
+        <p className="min-w-[260px] flex-1 text-label text-text-faint">{t('pluginLogs.intro')}</p>
+        <div className="flex items-center gap-2 text-label font-medium text-text-soft" role="status" aria-live="polite">
           <StatusDot color={checking ? 'var(--color-amber)' : inactive ? 'var(--color-text-faint)' : connected ? 'var(--color-green)' : 'var(--color-red)'} pulse={checking} />
           {checking ? t('common.healthChecking') : inactive ? t('pluginLogs.inactive') : connected ? t('pluginLogs.connected') : t('pluginLogs.disconnected')}
         </div>
@@ -390,33 +467,72 @@ export default function PluginLogsPage() {
       {isMobile ? (
         <>
           <div className="flex items-center gap-2">
-            <SearchField value={query} onChange={setQuery} mobile t={t} />
+            <LogSearchField
+              className="flex-1"
+              value={query}
+              onChange={setQuery}
+              label={t('pluginLogs.searchLabel')}
+              placeholder={t('pluginLogs.searchPlaceholder')}
+            />
+            <button
+              type="button"
+              onClick={() => setFiltersOpen(true)}
+              aria-label={t('pluginLogs.filters')}
+              className={cn(
+                'zds-state-layer inline-flex h-field shrink-0 items-center justify-center gap-1 rounded-pill border border-outline-variant px-3 text-label font-medium',
+                activeFilterCount > 0 ? 'bg-secondary-container text-on-secondary-container' : 'text-text-soft',
+              )}
+            >
+              <TuneIcon className="h-[17px] w-[17px]" aria-hidden="true" />
+              {activeFilterCount > 0 ? <span className="font-mono tabular-nums">{activeFilterCount}</span> : null}
+            </button>
             {pauseButton(true)}
             {clearButton(true)}
           </div>
-          <div className="flex items-center gap-1.5 overflow-x-auto">
-            <span className="w-[26px] shrink-0 text-[10px] font-medium text-text-faint">{t('pluginLogs.levelLabel')}</span>
-            <LevelFilters value={level} onChange={setLevel} mobile t={t} />
-          </div>
-          <div className="flex items-center gap-1.5 overflow-x-auto">
-            <span className="w-[26px] shrink-0 text-[10px] font-medium text-text-faint">{t('pluginLogs.pluginLabel')}</span>
-            <div className="flex min-w-max items-center gap-1.5" role="group" aria-label={t('pluginLogs.pluginFilterLabel')}>
-              {pluginItems.map((item) => {
-                const selected = plugin === item.value
-                return <button key={item.value} type="button" aria-pressed={selected} onClick={() => setPlugin(item.value)} className={cn('zds-state-layer inline-flex h-[30px] items-center gap-1.5 rounded-full border border-outline-variant/60 px-3 text-[11.5px] font-medium', selected ? 'bg-secondary-container text-on-secondary-container' : 'text-text-soft')}>{item.value !== ALL_PLUGINS ? <StatusDot className="h-[7px] w-[7px]" color={pluginDot(item.value)} /> : null}{item.label}</button>
-              })}
+          {activeFilterCount > 0 ? (
+            <div className="-mx-1 flex items-center gap-1.5 overflow-x-auto px-1" role="group" aria-label={t('pluginLogs.activeFilters')}>
+              {level !== 'all' ? (
+                <button
+                  type="button"
+                  onClick={() => setLevel('all')}
+                  className="zds-state-layer inline-flex h-field shrink-0 items-center gap-1.5 rounded-pill bg-secondary-container px-3 text-label font-medium text-on-secondary-container"
+                >
+                  <StatusDot className="h-[7px] w-[7px]" color={LEVEL_DOT[level]} />
+                  {t(`pluginLogs.level.${level}`)}
+                  <CloseIcon className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span className="sr-only">{t('pluginLogs.clearFilter')}</span>
+                </button>
+              ) : null}
+              {plugin !== ALL_PLUGINS ? (
+                <button
+                  type="button"
+                  onClick={() => setPlugin(ALL_PLUGINS)}
+                  className="zds-state-layer inline-flex h-field shrink-0 items-center gap-1.5 rounded-pill bg-secondary-container px-3 text-label font-medium text-on-secondary-container"
+                >
+                  <StatusDot className="h-[7px] w-[7px]" color={pluginDot(plugin)} />
+                  {moduleNames.get(plugin) ?? plugin}
+                  <CloseIcon className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span className="sr-only">{t('pluginLogs.clearFilter')}</span>
+                </button>
+              ) : null}
             </div>
-          </div>
-          {paused ? <div className="flex items-center gap-2 rounded-[12px] bg-[var(--md-sys-color-warning-container)] px-3 py-2 text-[11px] font-medium text-[var(--md-sys-color-on-warning-container)]" role="status"><PauseIcon className="h-[15px] w-[15px]" aria-hidden="true" />{t('pluginLogs.pausedHint', { count: displayedBufferedCount })}</div> : null}
-          {inactive ? <div className="flex items-center gap-2 rounded-[12px] bg-surface-container-low px-3 py-2 text-[11px] font-medium text-text-soft" role="status"><StatusDot className="h-[7px] w-[7px]" color="var(--color-text-faint)" />{t('pluginLogs.inactive')}</div> : null}
-          {!checking && streamEnabled && !connected ? <div className="flex items-center gap-2 rounded-[12px] bg-[var(--md-sys-color-error-container)] px-3 py-2 text-[11px] font-medium text-[var(--md-sys-color-on-error-container)]" role="status"><StatusDot className="h-[7px] w-[7px]" color="var(--color-red)" />{t('pluginLogs.disconnectedBanner')}</div> : null}
-          <Card className="overflow-hidden p-0 shadow-none">
-            {visibleEntries.length === 0 ? <EmptyState showAction={showEmptyAction} t={t} /> : (
+          ) : null}
+          {statusBanner ? <StatusBanner banner={statusBanner} mobile onReconnect={reconnect} t={t} /> : null}
+          {/* Body and footer only: with no title, filters, search, actions or
+              status, LogSurface emits neither chrome row, so the list stays a
+              direct child of the card element. */}
+          <LogSurface
+            chrome={330}
+            isEmpty={visibleEntries.length === 0}
+            empty={<EmptyState showAction={showEmptyAction} t={t} />}
+            footer={t('pluginLogs.footerMobile', { count: visibleEntries.length })}
+          >
+            {(height) => (
               <VirtualTable
                 columns={mobileColumns}
                 data={visibleEntries}
                 rowHeight={MOBILE_ROW_HEIGHT}
-                height="clamp(280px, calc(100dvh - 330px), 560px)"
+                height={height}
                 showHeader={false}
                 getRowId={(entry) => String(entry.id)}
                 getRowHeight={mobileRowHeight}
@@ -427,33 +543,48 @@ export default function PluginLogsPage() {
                 renderRowDetails={renderMobileDetails}
               />
             )}
-            <div className="border-t border-divider px-3.5 py-2 text-[10.5px] text-text-faint">{t('pluginLogs.footerMobile', { count: visibleEntries.length })}</div>
-          </Card>
+          </LogSurface>
         </>
       ) : (
-        <Card className="overflow-hidden p-0 shadow-none">
-          <div className="flex items-center gap-2.5 border-b border-divider px-[18px] py-3">
-            <span className="text-[14px] font-semibold text-text-strong">{t('pluginLogs.title')}</span>
-            <span className="rounded-full bg-surface-container-low px-2 py-0.5 font-mono text-[10.5px] text-text-soft">{visibleEntries.length}</span>
-            {paused ? <span className="text-[10.5px] font-medium text-amber">{t('pluginLogs.pausedHint', { count: displayedBufferedCount })}</span> : null}
-            <div className="min-w-2 flex-1" />
-            {pauseButton(false)}
-            {clearButton(false)}
-          </div>
-          <div className="flex items-center gap-2 border-b border-divider bg-bg px-[18px] py-2.5">
-            <Select value={plugin} onValueChange={setPlugin} items={pluginItems} variant="compact-count" ariaLabel={t('pluginLogs.pluginFilterLabel')} />
-            <LevelFilters value={level} onChange={setLevel} mobile={false} t={t} />
-            <SearchField value={query} onChange={setQuery} mobile={false} t={t} />
-          </div>
-          {inactive ? <div className="flex items-center gap-2 bg-surface-container-low px-[18px] py-2 text-[11px] font-medium text-text-soft" role="status"><StatusDot color="var(--color-text-faint)" />{t('pluginLogs.inactive')}</div> : null}
-          {!checking && streamEnabled && !connected ? <div className="flex items-center gap-2 bg-[var(--md-sys-color-error-container)] px-[18px] py-2 text-[11px] font-medium text-[var(--md-sys-color-on-error-container)]" role="status"><StatusDot color="var(--color-red)" />{t('pluginLogs.disconnectedBanner')}</div> : null}
-          {visibleEntries.length === 0 ? <EmptyState showAction={showEmptyAction} t={t} /> : (
+        <LogSurface
+          // 323, not 310: the toolbar search grew from 31px to the shared
+          // 44px input step, and the band has to pay for it.
+          chrome={323}
+          title={t('pluginLogs.title')}
+          // Rendered at 0 too — that is the state right after a clear.
+          count={visibleEntries.length}
+          // A title exists, so these ride the title row, where they are today.
+          // The paused count used to be repeated there as well as on its own
+          // banner; the merged status row owns it now.
+          actions={<>{pauseButton(false)}{clearButton(false)}</>}
+          filters={
+            <>
+              <Select value={plugin} onValueChange={setPlugin} items={pluginItems} variant="compact-count" ariaLabel={t('pluginLogs.pluginFilterLabel')} />
+              <LevelFilters value={level} onChange={setLevel} mobile={false} t={t} />
+            </>
+          }
+          search={
+            <LogSearchField
+              className="flex-1"
+              value={query}
+              onChange={setQuery}
+              label={t('pluginLogs.searchLabel')}
+              placeholder={t('pluginLogs.searchPlaceholder')}
+            />
+          }
+          status={statusBanner ? <StatusBanner banner={statusBanner} mobile={false} onReconnect={reconnect} t={t} /> : undefined}
+          isEmpty={visibleEntries.length === 0}
+          empty={<EmptyState showAction={showEmptyAction} t={t} />}
+          footer={t('pluginLogs.footer')}
+          footerMeta={t('pluginLogs.transport')}
+        >
+          {(height) => (
             <VirtualTable
               columns={desktopColumns}
               data={visibleEntries}
               rowHeight={DESKTOP_ROW_HEIGHT}
-              height="clamp(280px, calc(100dvh - 310px), 520px)"
-              headerClassName="text-[10px]"
+              height={height}
+              headerClassName="text-meta"
               showRowDividers
               getRowId={(entry) => String(entry.id)}
               getRowHeight={desktopRowHeight}
@@ -464,12 +595,36 @@ export default function PluginLogsPage() {
               renderRowDetails={renderDesktopDetails}
             />
           )}
-          <div className="flex items-center justify-between gap-3 border-t border-divider px-[18px] py-2 text-[10.5px] text-text-faint">
-            <span>{t('pluginLogs.footer')}</span>
-            <span className="font-mono">{t('pluginLogs.transport')}</span>
-          </div>
-        </Card>
+        </LogSurface>
       )}
+
+      {/* Mobile filter sheet. The two filter rows used to sit permanently above
+          the table; with three banners also possible, the list could start six
+          rows down inside a viewport that only gives it ~280px. */}
+      <Modal open={filtersOpen} onOpenChange={setFiltersOpen} title={t('pluginLogs.filters')}>
+        <div className="flex flex-col gap-5">
+          <div className="flex flex-col gap-2">
+            <div className="text-label font-medium text-text-soft">{t('pluginLogs.levelLabel')}</div>
+            <LevelFilters value={level} onChange={setLevel} mobile t={t} />
+          </div>
+          <div className="flex flex-col gap-2">
+            <div className="text-label font-medium text-text-soft">{t('pluginLogs.pluginLabel')}</div>
+            <FilterChips
+              outlined
+              scrollOnMobile={false}
+              ariaLabel={t('pluginLogs.pluginFilterLabel')}
+              value={plugin}
+              onChange={setPlugin}
+              options={pluginItems.map((item) => ({
+                value: item.value,
+                label: item.label,
+                swatch: item.value === ALL_PLUGINS ? undefined : pluginDot(item.value),
+                count: item.count,
+              }))}
+            />
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }

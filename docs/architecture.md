@@ -1315,9 +1315,44 @@ default, and MiSans stack. DaisyUI remains below the zds cascade layer while
 direct utility classes can still win. Sidebar active state is CSS-only. Theme
 controls live in the top-bar profile menu and Settings appearance.
 
+Scale is tokenized, not hand-written. `styles/theme.css` declares seven type
+steps (11/12/13/15/20/28/40px, nothing smaller than 11px), five radius steps
+(chip/ctl/card/dialog/pill), and the control heights; components reference the
+token and `styles/scale.test.ts` fails a bare `text-[Npx]` or `rounded-[Npx]`
+in `src/**`. Because the steps are named, `lib/cn.ts` must keep teaching
+tailwind-merge about them — an unknown `text-<word>` is otherwise classified as
+a text colour and silently strips the colour from any class list that sets
+both. Touch targets are 44px on mobile.
+
+Colour carries one of two meanings and never both. Distinguishing N peer
+entities — decisions, plugins, chart series — uses the categorical
+`--color-chart-1..5` slots in a fixed, non-rotating assignment, because several
+themes give the semantic roles byte-identical values. Semantic roles are for
+state only. The five decisions have exactly one wording, the top-level
+`decision.*` namespace, shared by the overview, the query log and the resolve
+test.
+
 Logs remain virtualized, polling remains single-flight and cancellable, and
-mobile uses card rows with a drawer sidebar. Route metadata is centralized in
-`web/src/app/navigation.ts`. The built `web/dist` directory is a release
+mobile uses card rows with a drawer sidebar. `components/ds/LogSurface` owns
+the chrome the log pages share — title row, toolbar row, status slot, list,
+footer — and one height policy (`logSurfaceHeight`), a viewport-relative band
+rather than a row-count product. It has no `paused`, `onClear` or `connected`
+prop and never renders a pause control: what pausing does to the data differs
+per page, so the surface reserves the slot and nothing more. The list is a
+render prop receiving the computed height, because it must stay a direct child
+of the card element. Every live view shares one pause control
+(`components/ds/LiveToggle`), whose paused label is required to state what
+pausing does to the data. The query log deliberately does not adopt the shell —
+its toolbar is a separate card, its pause sits in the page header, it has no
+clear and its body is a four-way state — and takes only the search control and
+the height policy. A settings card reports loading and failure through
+`components/ds/CardState`, and shows a skeleton rather than live controls bound
+to `undefined`, which is indistinguishable from a value that is genuinely
+empty. A disabled control states why it is disabled in persistent text, not a
+tooltip a touch screen cannot reach.
+Route metadata is centralized in `web/src/app/navigation.ts`. Route search is
+available from `md` up and through a globally-registered ⌘K/Ctrl-K palette;
+both are the same combobox. The built `web/dist` directory is a release
 artifact, not committed source; PWA, initial asset, lazy-route, and font budgets
 remain enforced.
 
@@ -1325,11 +1360,30 @@ The Plugin navigation group owns installed modules, marketplace discovery, and
 the dedicated `/plugin-logs` route; Policy Rules belongs to Parse. The plugin
 log page is a compact single-card console with a virtualized 32-pixel desktop
 stream and virtualized two-line mobile cards. Search, level/plugin filters,
-pause, expansion, and clear are browser-local. Pause retains an independent
+pause, expansion, and clear are browser-local; on mobile the filters live in a
+sheet and what is applied comes back as removable chips. Paused, inactive and
+disconnected are one banner carrying the highest-priority condition, not three
+that can stack. Pause retains an independent
 view snapshot while the live 1000-entry ring continues ingesting; clear advances
-only a local watermark and never mutates the sidecar ring.
+only a local watermark and never mutates the sidecar ring, and because that is
+all it does it offers an undo rather than a confirmation.
 
-Settings may expose the fixed mihomo ingress-capability catalog. A capability toggle is
+The mihomo log page carries the same toolbar: level (a parameter of the
+WebSocket upgrade, so changing it reopens the socket), payload search, pause
+and clear. Pausing buffers and reports the count; it must not discard.
+
+State an operator cannot see is a defect. Policy rules compare the current list
+against a snapshot taken after the last successful apply and carry the pending
+count on the header card, not only inside the Apply button. The mihomo config
+editor parses the line number out of `mihomo -t` stderr into a jump, shows a
+line-level diff while dirty, and keeps reset behind an overflow. The overview
+states how fresh its numbers are and turns to an error when polling fails.
+
+Settings may expose the fixed mihomo ingress-capability catalog. The page is
+five sections behind a sticky index — appearance, service and certificates,
+interception and extensions, ingress and notifications, resolution upstreams —
+and the component versions ride in that index rather than in a strip at the
+end. Any two-column group uses one breakpoint. A capability toggle is
 only a local draft until the operator reviews a capability and exposure warning
 and explicitly confirms the apply. The UI must distinguish a bound UDP socket
 from supported raw UDP forwarding, show revision/custom-config conflicts, and
@@ -1353,7 +1407,25 @@ plugins. It shows immutable
 manifest/script digests, semantic version, normalized capture hosts, actions,
 permissions, exact network origins, typed settings, upstream mappings, exact
 typed routing rules, explicit execution position, operator egress binding, and
-operator capture-DNS binding, and enabled/runtime state. Enabling uses one
+operator capture-DNS binding, and enabled/runtime state. A card separates the
+two kinds of thing it carries: capabilities are neutral chips, while a state the
+operator has to act on — missing egress group, unfilled settings, master off,
+unconfirmed trust — becomes one banner showing only the highest-priority
+condition together with the route that resolves it. Typed routing rules render
+as matcher → REJECT/DIRECT in every place they appear, never as a stringified
+object.
+
+The extensions card and the marketplace card share that language — status
+banner, neutral capability chips, one routing-rule renderer — but not their
+code, and deliberately so. Their models overlap in fields that do not mean the
+same thing: `capture_dns` and a bound `egress_group` exist only after install,
+`manifest_digest` and `snapshot_digest` hash different bytes, and
+`upstream_mapping_count` exists on both while the marketplace withholds it on
+purpose. A normalized card model would make a catalog entry state a resolver
+group, an egress binding or a digest match that nothing has established. Do not
+merge the two components; keep the language shared and the models apart.
+
+Enabling uses one
 review for the complete snapshot. It
 lists every global routing rule and, when network permission exists, every
 origin while stating that the plugin can send any decrypted request, response,
@@ -1382,7 +1454,15 @@ search and truthful sorting, and supports adding, refreshing, and removing
 explicit sources. An operator may assign a bounded local display name; that
 alias never replaces or authenticates the marketplace metadata identity. Each
 entry shows bounded descriptive metadata, declared capability counts, license,
-source domain, manifest digest, and the required routing-rule count. Selecting Install first confirms the cached
+source domain, manifest digest, and the required routing-rule count. A card
+carries three install-decision facts plus one expandable permission count;
+tags do not compete for that space. When an entry is installed at a different
+version than the source now offers, the card states both versions and offers
+the update, which routes to the extensions page's existing reviewed snapshot
+replacement rather than performing one itself — comparing two versions already
+in hand is not invented metadata, but installing without review would be.
+Refreshing several sources settles every one and reports how many succeeded
+instead of aborting at the first failure. Selecting Install first confirms the cached
 scope, then the daemon refetches and verifies the exact manifest and scripts;
 success ends in review of the actual disabled immutable snapshot. Remote images,
 browser-side marketplace fetches, invented popularity/author claims, and
@@ -1391,7 +1471,13 @@ automatic installation or enablement are forbidden.
 The project extension repository remains external and is never automatically
 installed or mirrored. The Setup Guide owns the one shared
 interception-root QR code, download link, installation steps, and iOS manual
-full-trust instructions. It states that trust applies to every plugin while
+full-trust instructions. It asks which device it is guiding and expands only
+that branch, remembering the answer per browser. The CA card shares the MITM
+`enabled` condition with the warning banner above it: with the master off it
+collapses to one row plus the switch that would make it relevant. The
+locally-stored trust acknowledgement is marked as a record this browser wrote,
+visually distinct from the server-side master state beside it. It states that
+trust applies to every plugin while
 decryption remains limited to enabled capture hosts and requires explicit device
 authorization.
 

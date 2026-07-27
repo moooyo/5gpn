@@ -1,19 +1,40 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { ResetIcon, VerifiedIcon } from '../../components/icons'
-import { Badge, Button, Card, ConfirmDialog, StatusDot, toast } from '../../components/ds'
+import {
+  ChevronDownIcon,
+  MenuIcon,
+  MyLocationIcon,
+  ResetIcon,
+  VerifiedIcon,
+} from '../../components/icons'
+import {
+  Badge,
+  Button,
+  Card,
+  ConfirmDialog,
+  DropdownItem,
+  DropdownMenu,
+  StatusDot,
+  toast,
+} from '../../components/ds'
 import { api } from '../../lib/api/client'
 import { ApiError } from '../../lib/api/http'
 import type { MihomoConfig } from '../../lib/api/types'
 import { relativeTime } from '../../format'
+import { cn } from '../../lib/cn'
 import i18n from '../../i18n'
+import { lineDiff, lineRange, parseErrorLine } from './config-text'
 
 function errMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback
 }
 
+/** Line box height in px. Shared by the textarea, the gutter and the scroll
+ *  maths for "jump to line N", so the three cannot drift a pixel apart. */
+const LINE_HEIGHT = 22
+
 const textareaClass =
-  'w-full min-h-[430px] resize-y rounded-[12px] border border-transparent bg-surface-container-low px-4 py-4 font-mono text-[12.5px] leading-[1.7] text-text-strong outline-none transition-[border-color,background-color,box-shadow] focus:border-primary focus:bg-card focus:shadow-[inset_0_0_0_1px_var(--md-sys-color-primary)] disabled:opacity-60'
+  'w-full min-h-[560px] resize-y rounded-r-ctl border border-transparent bg-surface-container-low py-4 pl-3 pr-4 font-mono text-body leading-[22px] text-text-strong outline-none transition-[border-color,background-color,box-shadow] focus:border-primary focus:bg-card focus:shadow-[inset_0_0_0_1px_var(--md-sys-color-primary)] disabled:opacity-60'
 
 // Kept as data so the JSX below is a plain map rather than seven near-identical
 // list items.
@@ -47,7 +68,34 @@ export default function MihomoConfigPage() {
   const [reloadOpen, setReloadOpen] = useState(false)
   const [conflict, setConflict] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [invariantsOpen, setInvariantsOpen] = useState(false)
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const gutterRef = useRef<HTMLDivElement | null>(null)
   const dirty = !loading && text !== persistedText
+
+  const errorLine = useMemo(() => parseErrorLine(error), [error])
+  const diff = useMemo(() => (dirty ? lineDiff(persistedText, text) : null), [dirty, persistedText, text])
+  const lineCount = useMemo(() => text.split('\n').length, [text])
+
+  /** Select the offending line and bring it into view. The number was already
+   *  printed in the banner; this is what makes it reachable. */
+  const jumpToLine = useCallback((line: number) => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    const { start, end } = lineRange(text, line)
+    textarea.focus()
+    textarea.setSelectionRange(start, end)
+    const target = (line - 1) * LINE_HEIGHT - textarea.clientHeight / 2 + LINE_HEIGHT
+    textarea.scrollTop = Math.max(0, target)
+    if (gutterRef.current) gutterRef.current.scrollTop = textarea.scrollTop
+  }, [text])
+
+  // A rejection that names no line is almost always a missing infrastructure
+  // invariant rather than a YAML syntax error, and that is precisely when the
+  // seven-item list is worth reading — so it opens itself only then.
+  useEffect(() => {
+    if (error && errorLine === null) setInvariantsOpen(true)
+  }, [error, errorLine])
 
   const acceptSnapshot = useCallback((cfg: MihomoConfig, replaceEditor: boolean) => {
     if (replaceEditor) setText(cfg.text)
@@ -160,11 +208,13 @@ export default function MihomoConfigPage() {
 
   return (
     <div className="flex flex-col gap-4" data-testid="page-mihomo-config">
-      <p className="px-1 text-[12.5px] leading-5 text-text-faint">{t('mihomoConfig.intro')}</p>
+      <p className="px-1 text-label text-text-faint">{t('mihomoConfig.intro')}</p>
 
-      <div className="grid gap-4 xl:grid-cols-2 xl:items-start">
+      {/* The editor owns the full width. Seven lines of static prose used to
+          take half of a 1440px screen at `xl:grid-cols-2`, squeezing several
+          hundred lines of YAML into the other half. */}
       <Card className="p-5" data-testid="mihomo-config-editor" data-dirty={dirty ? 'true' : 'false'}>
-        <div className="mb-4 flex flex-wrap items-center gap-2 text-[11.5px] font-medium text-text-mid">
+        <div className="mb-4 flex flex-wrap items-center gap-2 text-label font-medium text-text-mid">
           <div className="flex items-center gap-1.5">
             <StatusDot
               color={!controllerReachable ? 'var(--color-red)' : controllerAuthenticated ? 'var(--color-green)' : 'var(--color-amber)'}
@@ -176,50 +226,133 @@ export default function MihomoConfigPage() {
                 : t('mihomoConfig.controllerUnauthenticated')}
           </div>
           <span className="text-text-faint">·</span>
+          {/* applied_at is the fact an operator acts on; `rev` is an optimistic
+              lock token. They used to be the other way round — the token in a
+              code block, the timestamp in smaller grey text beside it. */}
           <span className="font-normal text-text-faint">{t('mihomoConfig.appliedAt', { time: relativeTime(appliedAt) })}</span>
           <div className="flex-1" />
-          {dirty ? <Badge tone="amber">{t('mihomoConfig.unsaved')}</Badge> : null}
-          {revision ? <code className="rounded-[7px] bg-surface-container px-2.5 py-1 font-mono text-[10px] text-text-faint">rev {revision.slice(0, 4)}…{revision.slice(-4)}</code> : null}
+          {dirty ? (
+            <Badge tone="amber">
+              {diff
+                ? t('mihomoConfig.unsavedDiff', { added: diff.added, removed: diff.removed })
+                : t('mihomoConfig.unsaved')}
+            </Badge>
+          ) : null}
+          {revision ? <span className="font-mono text-meta font-normal text-text-faint">rev {revision.slice(0, 4)}…{revision.slice(-4)}</span> : null}
         </div>
-
-        <textarea
-          className={textareaClass}
-          value={text}
-          onChange={(e) => {
-            setText(e.target.value)
-            if (!conflict) setError(null)
-          }}
-          disabled={loading}
-          spellCheck={false}
-          aria-label={t('mihomoConfig.editorLabel')}
-          data-testid="mihomo-config-textarea"
-        />
 
         {error ? (
           <div
-            className="mt-3 flex flex-col gap-2 rounded-[14px] bg-[var(--md-sys-color-error-container)] p-3.5 text-[11.5px] text-[var(--md-sys-color-on-error-container)] sm:flex-row sm:items-center sm:justify-between"
+            className="mb-3 flex flex-col gap-2 rounded-card bg-[var(--md-sys-color-error-container)] p-3.5 text-label text-[var(--md-sys-color-on-error-container)] sm:flex-row sm:items-center sm:justify-between"
             data-testid="mihomo-config-error"
             role="alert"
           >
-            <span>{error}</span>
-            {conflict ? (
-              <Button type="button" variant="secondary" size="sm" onClick={() => setReloadOpen(true)}>
-                {t('mihomoConfig.reloadCurrent')}
-              </Button>
-            ) : null}
+            <span className="min-w-0 break-words">{error}</span>
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
+              {errorLine !== null ? (
+                <Button type="button" variant="secondary" size="sm" onClick={() => jumpToLine(errorLine)} data-testid="mihomo-config-jump">
+                  <MyLocationIcon className="h-4 w-4" aria-hidden="true" />
+                  {t('mihomoConfig.jumpToLine', { line: errorLine })}
+                </Button>
+              ) : null}
+              {conflict ? (
+                <Button type="button" variant="secondary" size="sm" onClick={() => setReloadOpen(true)}>
+                  {t('mihomoConfig.reloadCurrent')}
+                </Button>
+              ) : null}
+            </div>
           </div>
         ) : null}
 
-        <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-divider pt-4">
+        {/* Gutter + textarea share one line box so the numbers stay aligned;
+            indentation is the most common YAML mistake and the editor gave no
+            way to see which line the validator meant. */}
+        <div className="flex overflow-hidden rounded-ctl">
+          <div
+            ref={gutterRef}
+            aria-hidden="true"
+            data-testid="mihomo-config-gutter"
+            className="max-h-[560px] shrink-0 select-none overflow-hidden bg-surface-container py-4 pl-3 pr-2 text-right font-mono text-meta leading-[22px] text-text-faint"
+          >
+            {Array.from({ length: lineCount }, (_, index) => (
+              <div
+                key={index}
+                className={cn(
+                  'tabular-nums',
+                  errorLine === index + 1 && 'bg-[var(--md-sys-color-error-container)] font-semibold text-[var(--md-sys-color-on-error-container)]',
+                )}
+              >
+                {index + 1}
+              </div>
+            ))}
+          </div>
+          <textarea
+            ref={textareaRef}
+            className={textareaClass}
+            value={text}
+            onChange={(e) => {
+              setText(e.target.value)
+              if (!conflict) setError(null)
+            }}
+            onScroll={(event) => {
+              if (gutterRef.current) gutterRef.current.scrollTop = event.currentTarget.scrollTop
+            }}
+            disabled={loading}
+            spellCheck={false}
+            aria-label={t('mihomoConfig.editorLabel')}
+            data-testid="mihomo-config-textarea"
+          />
+        </div>
+
+        {/* Seven read-once facts, folded to one row. It expands on demand, and
+            by itself when a rejection names no line — which is what a missing
+            invariant looks like. */}
+        <div className="mt-4 overflow-hidden rounded-card border border-border" data-testid="mihomo-config-invariants">
+          <button
+            type="button"
+            onClick={() => setInvariantsOpen((open) => !open)}
+            aria-expanded={invariantsOpen}
+            className="zds-state-layer flex w-full items-center gap-2 px-4 py-3 text-left text-label font-medium text-text-strong"
+          >
+            <VerifiedIcon className="h-4 w-4 shrink-0 text-green" aria-hidden="true" />
+            <span className="min-w-0 flex-1">{t('mihomoConfig.invariantsTitle')}</span>
+            <span className="shrink-0 rounded-chip bg-[var(--md-sys-color-success-container)] px-2 py-0.5 font-mono text-meta text-[var(--md-sys-color-on-success-container)]">
+              {INVARIANT_KEYS.length} ✓
+            </span>
+            <ChevronDownIcon className={cn('h-4 w-4 shrink-0 text-text-faint transition-transform', invariantsOpen && 'rotate-180')} aria-hidden="true" />
+          </button>
+          {invariantsOpen ? (
+            <div className="border-t border-divider px-4 pb-2">
+              <p className="pt-3 text-meta text-text-faint">{t('mihomoConfig.invariantsHint')}</p>
+              <ul className="mt-2 divide-y divide-divider">
+                {INVARIANT_KEYS.map((key) => (
+                  <li key={key} className="flex items-start gap-3 px-1 py-3 text-label">
+                    <VerifiedIcon className="mt-0.5 h-4 w-4 shrink-0 text-green" aria-hidden="true" />
+                    <div>
+                      <div className="font-medium text-text-strong">{t(`mihomoConfig.invariants.${key}.name`)}</div>
+                      <div className="mt-1 leading-5 text-text-faint">{t(`mihomoConfig.invariants.${key}.desc`)}</div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="mt-5 flex flex-wrap items-center justify-end gap-2 border-t border-divider pt-4">
+          {/* Discard is the reversible one, so it stays in the open. Reset —
+              which throws away the entire operator-owned config — moved into
+              the overflow: it used to sit permanently in the bottom-left
+              corner at the same visual weight as a secondary action, at the
+              opposite end of the row from Apply. */}
           <Button
             type="button"
             variant="secondary"
-            onClick={() => setResetOpen(true)}
-            disabled={loading || !revision || conflict || applying || resetting}
-            data-testid="mihomo-config-reset"
+            onClick={() => setText(persistedText)}
+            disabled={!dirty || applying || resetting}
+            data-testid="mihomo-config-discard"
           >
-            <ResetIcon className="h-4 w-4" aria-hidden="true" />
-            {resetting ? t('common.saving') : t('mihomoConfig.reset')}
+            {t('mihomoConfig.discard')}
           </Button>
           <Button
             type="button"
@@ -230,25 +363,32 @@ export default function MihomoConfigPage() {
             <VerifiedIcon className="h-4 w-4" aria-hidden="true" />
             {applying ? t('mihomoConfig.applying') : t('mihomoConfig.apply')}
           </Button>
+          <DropdownMenu
+            align="end"
+            className="w-[280px]"
+            trigger={
+              <button
+                type="button"
+                aria-label={t('mihomoConfig.moreActions')}
+                className="zds-state-layer grid h-ctl w-ctl place-items-center rounded-pill text-text-soft"
+              >
+                <MenuIcon className="h-4 w-4" aria-hidden="true" />
+              </button>
+            }
+          >
+            <DropdownItem
+              danger
+              onSelect={() => {
+                if (loading || !revision || conflict || applying || resetting) return
+                setResetOpen(true)
+              }}
+            >
+              <ResetIcon className="h-4 w-4" aria-hidden="true" />
+              {resetting ? t('common.saving') : t('mihomoConfig.reset')}
+            </DropdownItem>
+          </DropdownMenu>
         </div>
       </Card>
-
-      <Card className="p-5">
-        <h2 className="text-[15px] font-medium text-text-strong">{t('mihomoConfig.invariantsTitle')}</h2>
-        <p className="mt-1 text-[11px] text-text-faint">{t('mihomoConfig.invariantsHint')}</p>
-        <ul className="mt-4 divide-y divide-divider">
-          {INVARIANT_KEYS.map((key) => (
-            <li key={key} className="flex items-start gap-3 px-1 py-3.5 text-[11.5px]">
-              <VerifiedIcon className="mt-0.5 h-4 w-4 shrink-0 text-green" aria-hidden="true" />
-              <div>
-                <div className="font-medium text-text-strong">{t(`mihomoConfig.invariants.${key}.name`)}</div>
-                <div className="mt-1 leading-5 text-text-faint">{t(`mihomoConfig.invariants.${key}.desc`)}</div>
-              </div>
-            </li>
-          ))}
-        </ul>
-      </Card>
-      </div>
 
       <ConfirmDialog
         open={resetOpen}

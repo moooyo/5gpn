@@ -101,7 +101,7 @@ export function VirtualTable<T>({
             <div
               key={header.id}
               style={columnFlexStyle(header.column)}
-              className={cn('min-w-0 px-4 py-3 text-left text-[10.5px] font-medium tracking-[.04em] text-text-faint', columnClassName(header.column, 'header'))}
+              className={cn('min-w-0 px-4 py-3 text-left text-meta font-medium tracking-[.04em] text-text-faint', columnClassName(header.column, 'header'))}
             >
               {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
             </div>
@@ -148,7 +148,7 @@ export function VirtualTable<T>({
             >
               <div className="flex w-full shrink-0 items-center" style={{ height: rowHeight }}>
                 {row.getVisibleCells().map((cell) => (
-                  <div key={cell.id} style={columnFlexStyle(cell.column)} className={cn('min-w-0 px-4 text-[12px]', rowHeight <= 36 ? 'py-1.5' : 'py-3', columnClassName(cell.column, 'cell'))}>
+                  <div key={cell.id} style={columnFlexStyle(cell.column)} className={cn('min-w-0 px-4 text-label', rowHeight <= 36 ? 'py-1.5' : 'py-3', columnClassName(cell.column, 'cell'))}>
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </div>
                 ))}

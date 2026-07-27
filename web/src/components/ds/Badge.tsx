@@ -19,7 +19,7 @@ export interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
 
 export function Badge({ tone = 'neutral', className, children, ...props }: BadgeProps) {
   return (
-    <span className={cn('badge h-auto rounded-full border-0 px-3 py-1 text-[11px] font-medium', toneClass[tone], className)} {...props}>
+    <span className={cn('badge h-auto rounded-pill border-0 px-3 py-1 text-meta font-medium', toneClass[tone], className)} {...props}>
       {children}
     </span>
   )
@@ -33,7 +33,7 @@ export interface ChipProps {
 
 export function Chip({ label, value, className }: ChipProps) {
   return (
-    <span className={cn('inline-flex items-center gap-1 rounded-[8px] bg-surface-container px-2.5 py-1 text-[10.5px] text-text-mid', className)}>
+    <span className={cn('inline-flex items-center gap-1 rounded-chip bg-surface-container px-2.5 py-1 text-meta text-text-mid', className)}>
       {label !== undefined ? <span className="font-mono text-text-faint">{label}</span> : null}
       <span>{value}</span>
     </span>
@@ -43,13 +43,22 @@ export function Chip({ label, value, className }: ChipProps) {
 export interface StatusDotProps {
   color: string
   pulse?: boolean
+  /** Square swatch instead of a dot. Used where the colour has to be read as
+   *  a legend key rather than as a live indicator — a 8px round dot at the
+   *  head of a mobile log row is too small to name a hue against. */
+  square?: boolean
   className?: string
 }
 
-export function StatusDot({ color, pulse, className }: StatusDotProps) {
+export function StatusDot({ color, pulse, square, className }: StatusDotProps) {
   return (
     <span
-      className={cn('inline-block h-2 w-2 rounded-full', pulse && 'ds-pulse', className)}
+      className={cn(
+        'inline-block',
+        square ? 'zds-swatch' : 'h-2 w-2 rounded-pill',
+        pulse && 'ds-pulse',
+        className,
+      )}
       style={{ background: color } satisfies CSSProperties}
     />
   )

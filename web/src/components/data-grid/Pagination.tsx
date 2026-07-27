@@ -17,7 +17,7 @@ export function Pagination({ page, pageCount, onPageChange, className }: Paginat
   const canPrev = page > 1
   const canNext = page < pageCount
   const btn =
-    'zds-state-layer inline-flex h-8 items-center gap-1 rounded-full px-3 text-[11.5px] text-text-soft outline-none disabled:opacity-40'
+    'zds-state-layer inline-flex h-8 items-center gap-1 rounded-pill px-3 text-label text-text-soft outline-none disabled:opacity-40'
   return (
     <div className={cn('flex items-center justify-end gap-2 border-t border-divider px-4 py-2', className)}>
       <button
@@ -30,7 +30,7 @@ export function Pagination({ page, pageCount, onPageChange, className }: Paginat
         <ChevronLeftIcon className="h-3.5 w-3.5" aria-hidden="true" />
         {t('common.pagePrev')}
       </button>
-      <span data-testid="pagination-status" className="font-mono text-[11px] tabular-nums text-text-faint">
+      <span data-testid="pagination-status" className="font-mono text-label tabular-nums text-text-faint">
         {t('common.pageOf', { page, count: pageCount })}
       </span>
       <button

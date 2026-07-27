@@ -38,7 +38,7 @@ test('add marketplace sends the optional local display name', async ({ page }) =
   const request = page.waitForRequest((candidate) => candidate.url().endsWith('/api/interception/marketplaces') && candidate.method() === 'POST')
   await dialog.getByRole('button', { name: '添加并拉取' }).click()
   expect((await request).postDataJSON()).toEqual(expect.objectContaining({ url: 'https://community.example.test/index.json', name: '社区镜像' }))
-  await expect(page.getByRole('button', { name: /社区镜像/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^社区镜像/ })).toBeVisible()
 })
 
 test('marketplace refresh and cards remain usable at a narrow viewport', async ({ page }) => {

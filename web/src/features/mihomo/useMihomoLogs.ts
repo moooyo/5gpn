@@ -1,20 +1,36 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MihomoLogLine } from '../../lib/api/types'
 import { api } from '../../lib/api/client'
 
 export interface UseMihomoLogsOpts {
-  /** Stops APPENDING new frames to `lines` — mirrors LogsPage's pause
-   *  semantics (pausing there just stops the poll, never tears down any
-   *  underlying connection). The socket stays open and keeps draining
-   *  frames while paused; only the ring stops growing. */
+  /** Freezes the rendered list. Frames that arrive while paused are BUFFERED,
+   *  not dropped: this used to `return` out of `onmessage`, so a socket that
+   *  kept receiving threw the frames away permanently — the same button on the
+   *  plugin-log page buffers and reports a count, and one control cannot mean
+   *  two different things about the operator's data. */
   paused: boolean
+  /** mihomo log level requested from the controller. Changing it reopens the
+   *  socket, since the level is a query parameter of the upgrade URL. */
+  level?: MihomoLogLevel
   /** Ring capacity — oldest lines are dropped once it's exceeded. */
   max?: number
 }
 
+export type MihomoLogLevel = 'debug' | 'info' | 'warning' | 'error' | 'silent'
+
+export const MIHOMO_LOG_LEVELS: MihomoLogLevel[] = ['debug', 'info', 'warning', 'error']
+
 export interface UseMihomoLogsResult {
   lines: MihomoLogLine[]
   connected: boolean
+  /** Frames received since the current pause began and not yet merged in. */
+  bufferedCount: number
+  /** Whether the pause buffer hit `max` and started dropping its oldest.
+   *  Surfaced so the button can stop promising that nothing is being lost. */
+  bufferFull: boolean
+  /** Drops every line currently displayed (and anything buffered behind the
+   *  pause). Local only — the controller keeps streaming. */
+  clear: () => void
 }
 
 const DEFAULT_MAX = 1000
@@ -40,16 +56,44 @@ const RECONNECT_MS = 3000
  * through the reverse proxy is a test-env cutover gate, not something the
  * jsdom unit suite can cover.
  */
-export function useMihomoLogs({ paused, max = DEFAULT_MAX }: UseMihomoLogsOpts): UseMihomoLogsResult {
+export function useMihomoLogs({ paused, level = 'info', max = DEFAULT_MAX }: UseMihomoLogsOpts): UseMihomoLogsResult {
   const [lines, setLines] = useState<MihomoLogLine[]>([])
   const [connected, setConnected] = useState(false)
+  const [bufferedCount, setBufferedCount] = useState(0)
+  const [bufferFull, setBufferFull] = useState(false)
 
   // The interval/socket callbacks always read the LATEST `paused` via this
   // ref rather than closing over it, so toggling pause never needs to
   // reopen the socket (mirrors LogsPage's queryRef pattern).
   const pausedRef = useRef(paused)
+  // Frames that arrived during the current pause, oldest first.
+  const pauseBufferRef = useRef<MihomoLogLine[]>([])
+  const maxRef = useRef(max)
+  maxRef.current = max
+
+  const clear = useCallback(() => {
+    pauseBufferRef.current = []
+    setBufferedCount(0)
+    setBufferFull(false)
+    setLines([])
+  }, [])
+
   useEffect(() => {
+    if (pausedRef.current === paused) return
     pausedRef.current = paused
+    if (paused) {
+      pauseBufferRef.current = []
+      setBufferedCount(0)
+      setBufferFull(false)
+      return
+    }
+    // Resuming merges the buffer in rather than discarding it.
+    const buffered = pauseBufferRef.current
+    pauseBufferRef.current = []
+    setBufferedCount(0)
+    setBufferFull(false)
+    if (buffered.length === 0) return
+    setLines((prev) => [...prev, ...buffered].slice(-maxRef.current))
   }, [paused])
 
   useEffect(() => {
@@ -81,7 +125,7 @@ export function useMihomoLogs({ paused, max = DEFAULT_MAX }: UseMihomoLogsOpts):
       }
       if (cancelled || currentGeneration !== generation) return
       const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-      const params = new URLSearchParams({ ticket, level: 'info' })
+      const params = new URLSearchParams({ ticket, level })
       const url = `${proto}://${location.host}/proxy/logs?${params.toString()}`
       const ws = new WebSocket(url)
       socket = ws
@@ -90,12 +134,22 @@ export function useMihomoLogs({ paused, max = DEFAULT_MAX }: UseMihomoLogsOpts):
         if (!cancelled) setConnected(true)
       }
       ws.onmessage = (ev: MessageEvent) => {
-        if (cancelled || pausedRef.current) return
+        if (cancelled) return
         let parsed: MihomoLogLine
         try {
           parsed = JSON.parse(ev.data as string) as MihomoLogLine
         } catch {
           return // not a JSON frame — drop rather than crash the list
+        }
+        if (pausedRef.current) {
+          const buffer = pauseBufferRef.current
+          buffer.push(parsed)
+          if (buffer.length > maxRef.current) {
+            buffer.splice(0, buffer.length - maxRef.current)
+            setBufferFull(true)
+          }
+          setBufferedCount(buffer.length)
+          return
         }
         setLines((prev) => {
           const next = prev.length >= max ? prev.slice(prev.length - max + 1) : prev.slice()
@@ -130,7 +184,7 @@ export function useMihomoLogs({ paused, max = DEFAULT_MAX }: UseMihomoLogsOpts):
         socket.close()
       }
     }
-  }, [max])
+  }, [level, max])
 
-  return { lines, connected }
+  return { lines, connected, bufferedCount, bufferFull, clear }
 }

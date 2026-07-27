@@ -3,7 +3,7 @@ import type en from './en'
 const zh: typeof en = {
   common: { cancel: '取消',
     saving: '保存中…',
-    save: '保存', add: '添加', edit: '编辑', delete: '删除',
+    save: '保存', add: '添加', edit: '编辑', delete: '删除', undo: '撤销',
     running: '运行中', loading: '加载中…',
     healthChecking: '检查中', healthHealthy: '正常', healthUnknown: '未知', healthDown: '异常',
     errorTitle: '出现错误', errorBody: '页面出现了预期之外的错误，重新加载通常可以解决。', reload: '重新加载',
@@ -55,6 +55,9 @@ const zh: typeof en = {
     search: '搜索页面',
     searchPlaceholder: '搜索页面与设置…',
     searchEmpty: '没有匹配的页面',
+    searchHintSelect: '↑↓ 选择',
+    searchHintOpen: '↵ 打开',
+    searchHintClose: 'ESC 关闭',
     sub: {
       overview: '实时监控 · QPS / 决策 / 上游健康',
       setupGuide: '接入加密 DNS，并为获授权设备安装共享 MITM 信任',
@@ -78,6 +81,14 @@ const zh: typeof en = {
     title: '将设备接入 5gpn',
     intro: '先按设备平台接入加密 DNS；只有启用需要 HTTPS 解密的拦截插件时，才需额外安装下方独立的共享根证书。5gpn 不会安装 VPN。',
     dotBadge: 'DNS over TLS · :853',
+    // 页面原先把 iOS 4 步 + Android 4 步 + CA 5 步共 13 个编号步骤一次摊开，
+    // 却从不问用什么设备。选择记到 localStorage。
+    devicePrompt: '你要接入哪种设备？',
+    deviceIos: 'iPhone / iPad',
+    deviceAndroid: 'Android',
+    copyUrl: '复制链接',
+    urlCopied: '链接已复制',
+    urlCopyFailed: '无法访问剪贴板，请手动复制。',
     requirementsTitle: '开始前请确认',
     requirementsBody: '设备必须能通过原有 DNS 解析 DoT 主机名，并能访问网关 TCP 853 端口。若客户端绕过网关，基于域名的加密 DNS 拦截无法阻止硬编码的解析器 IP。',
     ios: {
@@ -138,8 +149,12 @@ const zh: typeof en = {
       step5Body: '前往“插件模块”，审计不可变源码与接管域名，然后只启用需要的插件。',
       note: '仅在你拥有或已获明确授权测试的设备上安装。证书固定、双向 TLS 或独立配置的 ECH 仍会失败关闭。',
       clientTrust: '客户端信任', locallyConfirmed: '仅本浏览器已确认', notConfirmed: '本浏览器尚未确认',
-      gatewayMaster: '网关 MITM', masterEnabled: '总开关已开启', masterDisabled: '需要在设置中开启后插件才能解密流量',
-      complete: '已完成', required: '必需', openMITMSettings: '前往 MITM 设置',
+      // 这一格读的是 localStorage，右边那格读的是服务端开关。标签把这件事说破，
+      // 换一台电脑打开控制台时左边变回未确认才不会显得莫名其妙。
+      localOnlyTag: '仅本机记录',
+      gatewayMaster: '网关 MITM', masterEnabled: '总开关已开启',
+      collapsedBody: '网关拦截总开关未启用，当前不需要安装此证书。开启后再回到这里。',
+      enableMITM: '去开启',
       androidUnsupportedTitle: '现代 Android 应用不支持 MITM 配置',
       androidUnsupportedBody: '现代 Android 应用通常不信任用户安装的 CA。5gpn 不提供 Android MITM 配置；Android 私人 DNS 仍然完整支持。',
       acknowledgementHint: '该确认仅保存在当前浏览器，用于提醒配置进度，并不证明操作系统已经信任证书。',
@@ -225,6 +240,9 @@ const zh: typeof en = {
     greenfieldTip: '请通过安装/管理 TUI 配置',
     dotService: 'DoT 服务',
     dotDomain: 'DoT 域名',
+    // 控件禁用是因为这个值归安装器所有，不是因为在加载或出错。原先最多只有一个
+    // title tooltip（触屏够不到），这里连 tooltip 都没有——理由改成控件下方常驻。
+    dotDomainReadOnly: '由安装器写入 /etc/5gpn/dns.env。要修改需重新安装，并为新域名准备证书。',
     cert: "Let's Encrypt 证书",
     certValid: '有效',
     certExpired: '已过期',
@@ -265,12 +283,20 @@ const zh: typeof en = {
     changePassword: '修改密码',
     tgbotNeedToken: '请先填写机器人令牌，再启用机器人。',
     tgbotAdminsPlaceholder: '逗号分隔的数字 ID，如 123456789,987654321',
-    aboutTitle: '5GPN 控制台',
-    aboutSubtitle: 'Material 3 · 安全 DNS 网关',
-    aboutVersion: '5gpn-dns {{version}}',
-    aboutMihomoVersion: 'mihomo {{version}}',
-    aboutSidecarVersion: 'sidecar {{version}}',
-    aboutZashVersion: 'zashboard {{version}}',
+    // 10 张卡一条直流、3000+px 滚动、没有小节标题也没有锚点：改成五个小节
+    // 加一条吸顶导航。
+    sectionsLabel: '设置小节',
+    sectionAppearance: '外观',
+    sectionService: '服务与证书',
+    sectionIntercept: '拦截与插件',
+    sectionIngress: '入口与通知',
+    sectionResolution: '解析上游',
+    // 版本号提到侧栏常驻——查问题时它是最先要看的东西，不该压在页尾。
+    aboutVersionsTitle: '版本',
+    aboutVersionLabel: '5gpn-dns',
+    aboutMihomoLabel: 'mihomo',
+    aboutSidecarLabel: 'sidecar',
+    aboutZashLabel: 'zashboard',
     ingressPorts: 'mihomo 功能模块',
     ingressPortsHint: '管理固定形状的公网入口与协议安全能力。保存后会验证完整配置并热加载。',
     ingressEnabled: '已启用',
@@ -349,6 +375,21 @@ const zh: typeof en = {
     inspect: '审查快照',
     auditHosts: '审计接管域名',
     checkUpdate: '检查更新',
+    // 能力 chip：统一中性形状，标签与数值分开，让数值承担强调。原来每个能力
+    // 各占一个语义色，还和下面的状态挤在同一行同一形状里。
+    chipActions: '动作',
+    chipNetwork: '网络',
+    chipCaptureDNS: '抓取 DNS',
+    chipEgress: '出口',
+    chipHostMappings: '上游',
+    // 状态按严重度降序，只渲染最高的一条，并带上解决它的动作。
+    statusEgressMissing: '出口组 {{group}} 不存在，插件不会生效',
+    statusSettingsRequired: '必填设置尚未填写',
+    statusMasterOff: '拦截总开关未开启，捕获不生效',
+    statusTrustPending: '本浏览器尚未确认设备已信任 CA',
+    statusDisabled: '已禁用',
+    statusGoSettings: '去设置',
+    statusGoSetup: '去引导页',
     capabilityAction: '动作 · {{count}}',
     capabilityHost: '上游映射 · {{count}}',
     capabilityRouting: '路由规则 · {{count}}',
@@ -408,6 +449,7 @@ const zh: typeof en = {
     updateSafety: '应用后会原子替换已停用的不可变快照；不会原地编辑旧源码，也不会自动启用候选。',
     updateUnchanged: '该插件已是最新版本。',
     updateCheckFailed: '检查插件更新失败。',
+    updateTargetMissing: '该插件已不在本机安装列表中（{{id}}）。',
     updateApplied: '已替换为审查过的插件快照；新快照保持关闭。',
     updateApplyFailed: '应用已审查插件更新失败。',
     snapshotTitle: '{{name}} 快照',
@@ -487,6 +529,19 @@ const zh: typeof en = {
     resultCount: '{{count}} 个插件 · {{source}}', noMatches: '该市场暂无匹配插件', noMatchesHint: '试试切换市场源或清空搜索。',
     noSources: '尚未连接插件市场', noSourcesHint: '添加一个公开 HTTPS 市场清单。浏览不会自动安装或启用任何插件。', loadFailed: '无法加载插件市场数据。', retry: '重试',
     captureCount: '接管 · {{count}}', actionCount: '动作 · {{count}}', settingCount: '设置 · {{count}}', networkCount: '联网 · {{count}}', routingCount: '路由 · {{count}}', persistentStorage: '持久存储', egressRequired: '需要出口绑定',
+    updateTo: '更新到 v{{version}}',
+    // 权限折成一个可展开的计数：它们决定不了装不装（安装确认里本来就逐条列出），
+    // 而十一个同形 chip 会把真正做决定的三项信息淹掉。
+    permissionCount_one: '{{count}} 项权限',
+    permissionCount_other: '{{count}} 项权限',
+    permNetwork: '网络地址 · {{count}}',
+    permRouting: '路由规则 · {{count}}',
+    permStorage: '持久存储',
+    permEgress: '需要出口组',
+    permSettings: '设置项 · {{count}}',
+    sourceActions: '来源操作 · {{name}}',
+    // 一个源刷不动就整批中断，且没有任何地方说明刷到了哪里。
+    refreshPartial: '已刷新 {{ok}} 个源，{{failed}} 个失败',
     installed: '已安装', available: '可安装', installSnapshot: '安装快照', installing: '安装中', manageSnapshot: '管理快照', openDocumentation: '打开 {{name}} 文档',
     installConfirmTitle: '安装快照前确认', installBody: '插件使用不可变的清单与脚本快照运行。下方是已缓存市场声明的范围；服务端会在保存前重新抓取并核对每个文件。',
     captureHosts: '接管域名', gatewayActions: '网关动作', routingRules: '全局路由规则', source: '来源', license: '许可证', notDeclared: '未声明', egressReassurance: '插件不能命名任意代理组；启用确认后，它列出的全局规则可以对命中的网关流量执行 REJECT 或 DIRECT。',
@@ -525,6 +580,19 @@ const zh: typeof en = {
   verdicts: {
     noVerdict: '无判定',
   },
+  // 五种决策的共用文案。概览、查询日志与解析测试原先各有一份，同一个 reason
+  // 在三页出现三种叫法（境外代理 / 境外走网关）——一个判定被读成两个概念。
+  // 颜色走 --color-chart-1..5 的固定槽位，文案走这里，两者都只有一份。
+  decision: {
+    block: '拦截',
+    forceDirect: '强制直连',
+    forceProxy: '强制网关',
+    chnrouteCn: '国内直连',
+    chnrouteForeign: '境外走网关',
+    // reason 缺失时由更粗的 verdict 派生出的兜底文案。
+    direct: '直连',
+    proxy: '代理',
+  },
   overview: {
     intro: '下方 QPS 与决策分布均为实时数据，来自 /api/status。',
     live: '实时',
@@ -533,26 +601,21 @@ const zh: typeof en = {
     resume: '继续',
     qps: 'QPS',
     qpsLive: 'QPS 实时',
-    queriesPerSecond: '次查询 / 秒',
+    // Sparkline 原来既没有窗口也没有 y 轴范围——那是一个形状，不是一次测量。
+    qpsWindow: '近 {{count}} 次采样（上限 {{cap}}）',
+    // 暂停或轮询失败时，数字会静默变旧；相对时间与失败态是这一页可信度的下限。
+    updatedAt: '更新于{{time}}',
+    pollFailed: '轮询失败 · 数字已停止更新',
     totalQueries: '查询总量',
     sinceStartup: '自解析器启动以来',
-    cacheEntries: '缓存条目',
     traceTitle: '实时 DNS 决策轨道',
     traceDescription: '查询只经过一次 DNS 策略匹配，随后返回真实地址或网关地址。',
     traceQuery: '收到查询',
     traceDecision: '完成决策',
     traceGateway: '引流至网关',
     decisionDistribution: '决策分布',
-    decision: {
-      block: '拦截',
-      forceDirect: '强制直连',
-      forceProxy: '强制网关',
-      chnrouteCn: '国内直连',
-      chnrouteForeign: '境外走网关',
-    },
     cacheHitRate: '缓存命中率',
     upstreamHealth: '上游健康与延迟',
-    upstreamHealthLatency: '平均延迟',
     upstreamHealthChina: 'china',
     upstreamHealthTrust: 'trust',
     // 明确回答“这是到哪儿的延迟”：是到上游 DNS 解析器的查询往返，
@@ -567,7 +630,10 @@ const zh: typeof en = {
     upstreamExchanges: '{{n}} 次交换',
     upstreamFailures: '{{n}} 次失败',
     upstreamTrustNote: 'china 每次仲裁都会交换；trust 仅在 china 未返回国内地址时被采纳，两组的计数基数因此不同。',
-    arbitration: '境内/境外分流比',
+    // 原先是与「决策分布」并列的第二个环形图，而它画的正是那个环第 4、5 段的
+    // 放大——现在降级为决策卡内的一条分段条，槽位与色号完全一致。
+    arbitration: '其中 chnroute 仲裁',
+    arbitrationCount: '{{n}} 次',
     arbitrationCn: '境内',
     arbitrationForeign: '境外',
   },
@@ -577,6 +643,15 @@ const zh: typeof en = {
     run: '测试',
     running: '测试中…',
     examples: '示例',
+    // 六个示例恰好覆盖全部五种决策，是理解整套分流逻辑最快的入口，
+    // 原先却是输入框下面一排 10.5px 描边小按钮，也不说明各自会命中什么。
+    examplesTitle: '一键示例 · 覆盖全部五种决策',
+    recent: '最近',
+    // result.reason 已唯一定位到一条规则，日志页也早就支持按域名筛选——
+    // 缺的只是从结果走过去的那一步。
+    viewMatchedRule: '查看命中的规则',
+    filterInLogs: '在日志中筛选此域名',
+    highlightedRule: '来自解析测试的命中规则',
     ruleLabel: '判定依据',
     sourceLabel: '解析来源',
     answerLabel: '客户端应答',
@@ -627,17 +702,6 @@ const zh: typeof en = {
       markMiss: '未命中',
       markInert: '未生效',
     },
-    // Pill text for each of the 5 reason-driven outcomes (matches the design
-    // handoff's decide() wording family; same concepts as logs.decision.*).
-    label: {
-      block: '拦截',
-      forceDirect: '强制直连',
-      // 与 logs.decision.forceProxy 统一为「强制网关」：同一判定在两个界面
-      // 用两个名字，是把一个实现细节暴露成了两个概念。
-      forceProxy: '强制网关',
-      chnrouteCn: '国内直连',
-      chnrouteForeign: '境外代理',
-    },
     // Numbered 决策路径 step text per reason — wording modeled on the design
     // handoff's decide() (lines ~495-515); `generic` is the single-step
     // fallback used when `reason` is missing/unrecognized (derived from the
@@ -668,7 +732,13 @@ const zh: typeof en = {
   logs: {
     intro: '解析器最近查询的实时视图。仅在内存中保留最近 5 分钟，不写入磁盘。',
     searchPlaceholder: '按域名或客户端 IP 过滤…',
+    // 用它自己的名字，而不是表头的「域名」：这个框按域名或客户端 IP 过滤，
+    // 而它此前只有 placeholder，没有任何可访问名称。
+    searchLabel: '过滤查询日志',
     allDecisions: '全部决策',
+    // 胶囊本身就是图例：说清窗口大小与「颜色在三处同槽位」这件事，
+    // 原来单独占一行的图例行因此可以整行删掉。
+    windowHint: '最近 {{limit}} 条窗口 · 每 3 秒刷新 · 色号与决策分布环、表格圆点同槽位',
     loading: '读取日志中…',
     loadFailed: '无法读取查询日志。',
     emptyTitle: '暂无记录',
@@ -683,16 +753,6 @@ const zh: typeof en = {
     colDecision: '决策',
     colIps: '结果 IP',
     colDuration: '耗时',
-    decision: {
-      forceDirect: '强制直连',
-      // 与 overview.decision 及 resolveTest.label 统一为「强制网关」。
-      forceProxy: '强制网关',
-      chnrouteCn: '国内直连',
-      chnrouteForeign: '境外代理',
-      direct: '直连',
-      proxy: '代理',
-      block: '拦截',
-    },
   },
   pluginLogs: {
     intro: '脚本 console 输出与引擎事件的实时视图。仅在内存中保留最近 1000 条，不写入磁盘。',
@@ -709,6 +769,13 @@ const zh: typeof en = {
     resume: '恢复',
     clear: '清空',
     clearLabel: '清空当前日志视图',
+    // 「清空」只是把 clearedWatermark 前移，日志本身仍在 sidecar 的环形缓冲里，
+    // 撤销就是把水位线改回去——因此给撤销而不是给确认对话框。
+    clearedToast: '已清空 {{count}} 条',
+    filters: '筛选',
+    activeFilters: '已选筛选条件',
+    clearFilter: '清除此筛选',
+    reconnectNow: '立即重连',
     allLevels: '全部级别',
     allPlugins: '全部插件',
     levelLabel: '级别',
@@ -752,7 +819,13 @@ const zh: typeof en = {
   },
   // 基于 `/api/policy/rules` 与 `/api/policy/fallback` 的统一 DNS 意图规则。
   policyRules: {
+    title: '策略规则',
     applyHint: '编辑会立即保存——编译后的策略需点击"应用"才会重新加载。',
+    // 保存与生效是两件事：改动直接落进 policy.json，重新编译并热加载的是顶部
+    // 的「应用」。这条差异是页面级状态，因此整张头卡转 warning，而不是只在按钮上。
+    pendingHint: '{{count}} 处改动已保存到 policy.json，但运行中的策略仍是上次应用的版本。',
+    upToDateHint: '运行中的策略与已保存规则一致 · {{time}} 应用',
+    applyUpToDate: '已是最新',
     newRule: '新增规则',
     apply: '应用',
     applying: '应用中…',
@@ -818,29 +891,61 @@ const zh: typeof en = {
       filterAll: '全部',
       searchPlaceholder: '搜索匹配值…',
       reorderDisabledHint: '筛选状态下无法调整顺序——清除搜索/处理方式筛选后即可调整。',
+      clearFilters: '清除筛选',
+      rowActions: '更多操作',
+      moveTop: '移到顶部',
+      moveBottom: '移到底部',
+      pendingTag: '待应用',
       empty: '没有符合当前筛选条件的规则。',
     },
   },
   mihomo: {
     intro: '只读内核监控 —— 健康状态与实时日志。连接、流量、按节点视图请前往 zashboard。',
     healthTitle: 'mihomo 内核',
+    healthRunning: 'mihomo 运行中',
     healthLoading: '正在检查内核健康状态…',
     healthFailed: '无法连接到 mihomo 内核。',
     metaBadge: 'Meta',
+    // 与 mihomo 配置页同源的控制器三态：可达与已认证是两件事，一个 401
+    // 是「可达但不可用」，两页必须说同一句话。
+    controllerAuthenticated: '控制器可达且已认证',
+    controllerUnauthenticated: '控制器可达但未认证',
+    controllerUnreachable: '控制器不可达',
+    configApplied: '配置 {{time}}应用',
     openZashboard: '前往 zashboard',
+    zashPopupBlocked: '浏览器拦截了新标签页，zashboard 未能打开。',
+    zashOpenHere: '在本标签页打开',
+    zashHandoffFailed: '无法建立 zashboard 会话，请稍后重试。',
     connected: '实时日志已连接',
     disconnected: '重连中…',
     pause: '暂停',
     resume: '继续',
     paused: '已暂停',
+    // 暂停期间到达的日志会被缓冲而不是丢弃，按钮上直接写明条数。
+    pausedBuffered: '已暂停 · 缓冲 {{count}}',
+    pausedBufferFull: '缓冲已满，开始丢弃',
     live: '实时',
+    clear: '清空',
+    clearLabel: '清空当前日志视图',
+    levelFilterLabel: '按级别筛选',
+    searchLabel: '搜索日志内容',
+    searchPlaceholder: '搜索 payload…',
     colLevel: '级别',
     colMessage: '内容',
     emptyTitle: '暂无日志',
     emptyHint: '等待 mihomo 内核输出日志…',
+    emptySearchHint: '当前窗口内没有匹配的日志。',
+    footer: '{{count}} 条 · 环形缓冲上限 1000',
+    transport: 'wss ticket · /proxy/logs',
   },
   mihomoConfig: {
     unsaved: '有未保存修改',
+    // dirty 时给出行级差异：几百行 YAML 里「改了什么」不该只有一个是/否。
+    unsavedDiff: '未应用 +{{added}} −{{removed}} 行',
+    discard: '放弃改动',
+    moreActions: '更多操作',
+    // mihomo -t 的 stderr 里本来就写着 line N，只是它是纯文本，而编辑器没有行号。
+    jumpToLine: '跳到第 {{line}} 行',
     saved: '已保存快照',
     intro: '将 mihomo 的完整生效配置作为单一文档编辑。服务端强制要求下列七项基础设施，任何删除它们的编辑都会被拒绝。',
     loadFailed: '加载 mihomo 配置失败。',

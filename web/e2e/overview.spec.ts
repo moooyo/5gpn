@@ -11,12 +11,16 @@ test('overview page renders the live QPS + decision-distribution charts with zer
   // QPS and decision distribution both come from /api/status.
   await expect(page.getByText('决策分布', { exact: true })).toBeVisible()
   await expect(page.getByText('拦截', { exact: true })).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'QPS 实时' })).toBeVisible()
+  await expect(page.getByText('QPS 实时')).toBeVisible()
 
   // All dashboard charts are build-time SVG or flow HTML, with no canvas
-  // runtime or eval.
-  await expect(page.locator('[data-chart="sparkline"]')).toHaveCount(2)
-  await expect(page.locator('[data-chart="donut"]')).toHaveCount(2)
+  // runtime or eval. One sparkline and one donut: QPS used to be drawn in both
+  // the hero and a full-size card below it, and the CN/foreign ring was the
+  // decision ring's fourth and fifth segments magnified — that ring is a
+  // segmented bar inside the decision card now.
+  await expect(page.locator('[data-chart="sparkline"]')).toHaveCount(1)
+  await expect(page.locator('[data-chart="donut"]')).toHaveCount(1)
+  await expect(page.getByTestId('overview-arbitration')).toBeVisible()
   await expect(page.locator('[data-chart="gauge"]')).toHaveCount(0)
   await expect(page.locator('[data-chart="hbar"]')).toHaveCount(1)
   await expect(page.locator('canvas')).toHaveCount(0)

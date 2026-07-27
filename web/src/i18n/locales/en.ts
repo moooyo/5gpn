@@ -8,6 +8,7 @@ const en = {
     add: 'Add',
     edit: 'Edit',
     delete: 'Delete',
+    undo: 'Undo',
     running: 'Running',
     loading: 'Loading…',
     healthChecking: 'Checking',
@@ -68,6 +69,9 @@ const en = {
     search: 'Search pages',
     searchPlaceholder: 'Search pages and settings…',
     searchEmpty: 'No matching page',
+    searchHintSelect: '↑↓ to select',
+    searchHintOpen: '↵ to open',
+    searchHintClose: 'ESC to close',
     sub: {
       overview: 'Live monitoring · QPS / decisions / upstream health',
       setupGuide: 'Connect encrypted DNS and install shared MITM trust on authorized devices',
@@ -92,6 +96,15 @@ const en = {
     title: 'Connect a device to 5gpn',
     intro: 'Connect encrypted DNS for your platform first. Install the separate shared root below only when you use MITM extensions. 5gpn does not install a VPN.',
     dotBadge: 'DNS over TLS · :853',
+    // The page used to lay out all thirteen numbered steps (iOS 4 + Android 4
+    // + CA 5) at once without ever asking which device this is for. The choice
+    // is remembered in localStorage.
+    devicePrompt: 'Which device are you setting up?',
+    deviceIos: 'iPhone / iPad',
+    deviceAndroid: 'Android',
+    copyUrl: 'Copy link',
+    urlCopied: 'Link copied',
+    urlCopyFailed: 'Clipboard unavailable — copy the link manually.',
     requirementsTitle: 'Before you start',
     requirementsBody: 'The device must be able to resolve the DoT hostname with its existing DNS and reach TCP port 853 on the gateway. Name-based blocking cannot stop a hard-coded resolver IP when traffic bypasses the gateway.',
     ios: {
@@ -152,8 +165,13 @@ const en = {
       step5Body: 'Open Extensions, audit the immutable source and capture hosts, then enable only the extensions you need.',
       note: 'Install only on devices you own or are explicitly authorized to test. Certificate pinning, mutual TLS, and independently provisioned ECH still fail closed.',
       clientTrust: 'Client trust', locallyConfirmed: 'Confirmed in this browser only', notConfirmed: 'Not confirmed in this browser',
-      gatewayMaster: 'Gateway MITM', masterEnabled: 'Master switch is enabled', masterDisabled: 'Enable it in Settings before extensions can decrypt traffic',
-      complete: 'Complete', required: 'Required', openMITMSettings: 'Open MITM Settings',
+      // This tile reads localStorage; the one beside it reads the server-side
+      // switch. Saying so is what keeps "why did it go back to unconfirmed on
+      // my other laptop" from being a mystery.
+      localOnlyTag: 'this browser only',
+      gatewayMaster: 'Gateway MITM', masterEnabled: 'Master switch is enabled',
+      collapsedBody: 'The gateway interception master switch is off, so this certificate is not needed yet. Come back after enabling it.',
+      enableMITM: 'Enable it',
       androidUnsupportedTitle: 'MITM is not supported for modern Android apps',
       androidUnsupportedBody: 'Modern Android apps generally do not trust user-installed CAs. 5gpn does not provide Android MITM setup. Android Private DNS remains fully supported.',
       acknowledgementHint: 'This acknowledgement is stored only in this browser. It is a setup reminder, not proof that the operating system trusts the certificate.',
@@ -239,6 +257,11 @@ const en = {
     greenfieldTip: 'Managed through the installer TUI',
     dotService: 'DoT service',
     dotDomain: 'DoT domain',
+    // The control is disabled because the installer owns this value, not
+    // because it is loading or broken. That was a `title` tooltip at best —
+    // unreachable on a touch screen, and here not present at all — so the
+    // reason is persistent text under the field.
+    dotDomainReadOnly: 'Set by the installer in /etc/5gpn/dns.env. Changing it means reinstalling with a certificate for the new domain.',
     cert: "Let's Encrypt certificate",
     certValid: 'Valid',
     certExpired: 'Expired',
@@ -279,12 +302,22 @@ const en = {
     changePassword: 'Change password',
     tgbotNeedToken: 'Enter a bot token before enabling the bot.',
     tgbotAdminsPlaceholder: 'comma-separated numeric IDs, e.g. 123456789,987654321',
-    aboutTitle: '5GPN Console',
-    aboutSubtitle: 'Material 3 · secure DNS gateway',
-    aboutVersion: '5gpn-dns {{version}}',
-    aboutMihomoVersion: 'mihomo {{version}}',
-    aboutSidecarVersion: 'sidecar {{version}}',
-    aboutZashVersion: 'zashboard {{version}}',
+    // Ten cards in one straight column with no headings and 3000+px of
+    // scroll: five sections plus a sticky index instead.
+    sectionsLabel: 'Settings sections',
+    sectionAppearance: 'Appearance',
+    sectionService: 'Service & certificates',
+    sectionIntercept: 'Interception & extensions',
+    sectionIngress: 'Ingress & notifications',
+    sectionResolution: 'Resolution upstreams',
+    // The versions ride in the index rather than in a strip at the very
+    // bottom — they are the first thing anyone looks up when something is
+    // wrong.
+    aboutVersionsTitle: 'Versions',
+    aboutVersionLabel: '5gpn-dns',
+    aboutMihomoLabel: 'mihomo',
+    aboutSidecarLabel: 'sidecar',
+    aboutZashLabel: 'zashboard',
     ingressPorts: 'mihomo capability modules',
     ingressPortsHint: 'Manage fixed-shape public ingress and protocol-safety capabilities. Saving validates and hot-reloads the complete configuration.',
     ingressEnabled: 'Enabled',
@@ -363,6 +396,23 @@ const en = {
     inspect: 'Inspect snapshot',
     auditHosts: 'Audit hosts',
     checkUpdate: 'Check update',
+    // Capability chips: one neutral shape, the label separate from its number
+    // so the number can carry the emphasis. The old badges spent a colour each
+    // and sat in the same row as the states below.
+    chipActions: 'Actions',
+    chipNetwork: 'Network',
+    chipCaptureDNS: 'Capture DNS',
+    chipEgress: 'Egress',
+    chipHostMappings: 'Upstream',
+    // States, by descending severity — only the first true one is rendered,
+    // as a banner with the action that resolves it.
+    statusEgressMissing: 'Egress group {{group}} does not exist — this extension will not take effect',
+    statusSettingsRequired: 'Required settings are not filled in yet',
+    statusMasterOff: 'The MITM master switch is off, so capture is inert',
+    statusTrustPending: 'This browser has not confirmed CA trust on the device',
+    statusDisabled: 'Disabled',
+    statusGoSettings: 'Open Settings',
+    statusGoSetup: 'Open the setup guide',
     capabilityAction: 'Actions · {{count}}',
     capabilityHost: 'Upstream · {{count}}',
     capabilityRouting: 'Routing · {{count}}',
@@ -422,6 +472,7 @@ const en = {
     updateSafety: 'Applying replaces the disabled immutable snapshot atomically. It never edits the existing source in place and never enables the candidate automatically.',
     updateUnchanged: 'This extension is already up to date.',
     updateCheckFailed: 'Failed to check for an extension update.',
+    updateTargetMissing: 'That extension is no longer installed here ({{id}}).',
     updateApplied: 'The reviewed extension snapshot was replaced. It remains disabled.',
     updateApplyFailed: 'Failed to apply the reviewed extension update.',
     snapshotTitle: '{{name}} snapshot',
@@ -501,6 +552,23 @@ const en = {
     resultCount: '{{count}} extension(s) · {{source}}', noMatches: 'No matching extensions in this marketplace', noMatchesHint: 'Switch marketplace sources or clear the search.',
     noSources: 'No marketplace sources connected', noSourcesHint: 'Add a public HTTPS marketplace index. Browsing never installs or enables an extension.', loadFailed: 'Could not load marketplace data.', retry: 'Retry',
     captureCount: 'Capture · {{count}}', actionCount: 'Actions · {{count}}', settingCount: 'Settings · {{count}}', networkCount: 'Network · {{count}}', routingCount: 'Routing · {{count}}', persistentStorage: 'Persistent storage', egressRequired: 'Egress binding required',
+    // Both versions were already in hand and never compared: the card said
+    // "installed" whether or not the source had moved on.
+    updateTo: 'Update to v{{version}}',
+    // Permissions collapse to a count that expands. They decide nothing about
+    // whether to install — the install confirmation lists them in full — and
+    // as eleven same-shaped chips they drowned the three facts that do.
+    permissionCount_one: '{{count}} permission',
+    permissionCount_other: '{{count}} permissions',
+    permNetwork: 'Network origins · {{count}}',
+    permRouting: 'Routing rules · {{count}}',
+    permStorage: 'Persistent storage',
+    permEgress: 'Egress group required',
+    permSettings: 'Settings · {{count}}',
+    sourceActions: 'Actions for {{name}}',
+    // One unreachable source used to abort the sweep where it failed, with
+    // nothing saying how far it got.
+    refreshPartial: 'Refreshed {{ok}} source(s); {{failed}} failed',
     installed: 'Installed', available: 'Available', installSnapshot: 'Install snapshot', installing: 'Installing', manageSnapshot: 'Manage snapshot', openDocumentation: 'Open {{name}} documentation',
     installConfirmTitle: 'Confirm before installing snapshot', installBody: 'The extension runs from immutable manifest and script snapshots. Installation will declare the following cached marketplace scope; the server verifies the exact files before saving anything.',
     captureHosts: 'Capture hosts', gatewayActions: 'Gateway actions', routingRules: 'Global routing rules', source: 'Source', license: 'License', notDeclared: 'Not declared', egressReassurance: 'An extension cannot name an arbitrary proxy group. After enable confirmation, its listed global rules may REJECT or DIRECT matching gateway traffic.',
@@ -541,6 +609,22 @@ const en = {
     // well-behaved backend.
     noVerdict: 'no verdict',
   },
+  // Shared wording for the five decisions. Overview, the query log and the
+  // resolve test each used to carry their own copy, so one `reason` appeared
+  // under two names across screens (Foreign proxy / Foreign via gateway) —
+  // one verdict read as two concepts. Colour comes from the fixed
+  // --color-chart-1..5 slots, wording from here; both exist exactly once.
+  decision: {
+    block: 'Blocked',
+    forceDirect: 'Force-direct',
+    forceProxy: 'Force-gateway',
+    chnrouteCn: 'CN direct',
+    chnrouteForeign: 'Foreign via gateway',
+    // Fallback wording derived from the coarser `verdict` when `reason` is
+    // missing or unrecognized.
+    direct: 'Direct',
+    proxy: 'Proxy',
+  },
   overview: {
     intro: 'QPS and the decision split below are live, derived from /api/status.',
     live: 'Live',
@@ -549,26 +633,22 @@ const en = {
     resume: 'Resume',
     qps: 'QPS',
     qpsLive: 'QPS (live)',
-    queriesPerSecond: 'queries / second',
+    // The sparkline carried neither a window nor a y range — that is a
+    // shape, not a measurement. Both are one line of text.
+    qpsWindow: 'last {{count}} samples (cap {{cap}})',
+    // Paused or failing polls used to leave the numbers looking current.
+    updatedAt: 'updated {{time}}',
+    pollFailed: 'Polling failed — these numbers have stopped updating',
     totalQueries: 'Total queries',
     sinceStartup: 'Since the resolver started',
-    cacheEntries: 'Cache entries',
     traceTitle: 'Live DNS decision rail',
     traceDescription: 'A query is matched once by DNS policy, then either returns a real address or the gateway address.',
     traceQuery: 'Queries received',
     traceDecision: 'Decisions made',
     traceGateway: 'Steered to gateway',
     decisionDistribution: 'Decision split',
-    decision: {
-      block: 'Blocked',
-      forceDirect: 'Force-direct',
-      forceProxy: 'Force-gateway',
-      chnrouteCn: 'CN direct',
-      chnrouteForeign: 'Foreign via gateway',
-    },
     cacheHitRate: 'Cache hit rate',
     upstreamHealth: 'Upstream health & latency',
-    upstreamHealthLatency: 'Avg latency',
     upstreamHealthChina: 'china',
     upstreamHealthTrust: 'trust',
     // States plainly which latency this is: the round trip to the upstream DNS
@@ -583,7 +663,11 @@ const en = {
     upstreamExchanges: '{{n}} exchanges',
     upstreamFailures: '{{n}} failed',
     upstreamTrustNote: 'china is exchanged on every arbitration; trust is only adopted when china returns no CN address, so the two groups are counted against different bases.',
-    arbitration: 'CN vs foreign split',
+    // This was a second donut sitting beside the decision ring, plotting
+    // segments 4 and 5 of that very ring magnified. It is a segmented bar
+    // inside the decision card now, on the same two slots.
+    arbitration: 'of which chnroute arbitration',
+    arbitrationCount: '{{n}} decisions',
     arbitrationCn: 'CN direct',
     arbitrationForeign: 'Foreign via gateway',
   },
@@ -593,6 +677,16 @@ const en = {
     run: 'Test',
     running: 'Testing…',
     examples: 'Examples',
+    // The six examples cover all five decisions between them, which makes
+    // them the fastest route into the whole split. They were a row of 10.5px
+    // outlined footnotes that said nothing about what they would hit.
+    examplesTitle: 'One-click examples · all five decisions',
+    recent: 'Recent',
+    // `reason` already identifies exactly one rule and the log page already
+    // filters by name — the only missing piece was the step between.
+    viewMatchedRule: 'View the matched rule',
+    filterInLogs: 'Filter this domain in the log',
+    highlightedRule: 'Matched rule from the resolve test',
     ruleLabel: 'Decision basis',
     sourceLabel: 'Resolution source',
     answerLabel: 'Client answer',
@@ -644,17 +738,6 @@ const en = {
       markMiss: 'No match',
       markInert: 'Inert',
     },
-    // Pill text for each of the 5 reason-driven outcomes (same concepts as
-    // logs.decision.*).
-    label: {
-      block: 'Blocked',
-      forceDirect: 'Force-direct',
-      // Unified with logs.decision.forceProxy and overview.decision: one
-      // verdict under two names across screens reads as two concepts.
-      forceProxy: 'Force-gateway',
-      chnrouteCn: 'CN direct',
-      chnrouteForeign: 'Foreign proxy',
-    },
     // Numbered decision-path step text per reason — wording modeled on the
     // design handoff's decide() (lines ~495-515); `generic` is the
     // single-step fallback used when `reason` is missing/unrecognized
@@ -695,7 +778,15 @@ const en = {
     intro:
       'Live view of the resolver’s recent queries. Only the last 5 minutes are kept, in memory — nothing is written to disk.',
     searchPlaceholder: 'Filter by domain or client IP…',
+    // Its own name, not the table's Name column: this field filters by
+    // domain OR client IP, and it shipped with a placeholder and no
+    // accessible name at all.
+    searchLabel: 'Filter the query log',
     allDecisions: 'All decisions',
+    // The pills are the legend: this line names the window and states that the
+    // colour slots match the decision donut and the table dots, which is why
+    // the separate legend row could be deleted outright.
+    windowHint: 'Most recent {{limit}} entries · refreshed every 3s · same colour slots as the decision donut and the table dots',
     loading: 'Loading log…',
     loadFailed: 'Could not load the query log.',
     emptyTitle: 'No entries',
@@ -710,20 +801,6 @@ const en = {
     colDecision: 'Decision',
     colIps: 'Result IP',
     colDuration: 'Duration',
-    // Decision label + color for a row come from `reason` (amendment A-H1),
-    // NOT `verdict` — verdict only carries {block,direct,proxy} and
-    // collapses the design's 5 labels / 4 colors down to 3. The last three
-    // keys are the generic fallback used when `reason` is missing/unknown.
-    decision: {
-      forceDirect: 'Force-direct',
-      // Unified with overview.decision and resolveTest.label.
-      forceProxy: 'Force-gateway',
-      chnrouteCn: 'CN direct',
-      chnrouteForeign: 'Foreign proxy',
-      direct: 'Direct',
-      proxy: 'Proxy',
-      block: 'Blocked',
-    },
   },
   pluginLogs: {
     intro: 'Live view of script console output and engine events. Only the latest 1,000 entries are kept in memory; nothing is written to disk.',
@@ -740,6 +817,14 @@ const en = {
     resume: 'Resume',
     clear: 'Clear',
     clearLabel: 'Clear the current log view',
+    // Clearing only moves `clearedWatermark` forward; the entries themselves
+    // are still in the sidecar's ring, so undo is one setState away — better
+    // than putting a confirmation dialog in front of it.
+    clearedToast: 'Cleared {{count}} entries',
+    filters: 'Filters',
+    activeFilters: 'Active filters',
+    clearFilter: 'Clear this filter',
+    reconnectNow: 'Reconnect now',
     allLevels: 'All levels',
     allPlugins: 'All plugins',
     levelLabel: 'Level',
@@ -784,7 +869,14 @@ const en = {
   // Unified DNS intent rules over `/api/policy/rules` and
   // `/api/policy/fallback`.
   policyRules: {
+    title: 'Policy rules',
     applyHint: 'Edits save right away — the compiled policy only reloads after you Apply.',
+    // Saved and live are two different things: every edit lands in policy.json
+    // immediately, while Apply is what recompiles and hot-reloads. That gap is
+    // page-level state, so the whole header card carries it, not just a button.
+    pendingHint: '{{count}} change(s) saved to policy.json — the running policy is still the last applied version.',
+    upToDateHint: 'The running policy matches the saved rules · applied at {{time}}',
+    applyUpToDate: 'Up to date',
     newRule: 'Add rule',
     apply: 'Apply',
     applying: 'Applying…',
@@ -850,29 +942,66 @@ const en = {
       filterAll: 'All',
       searchPlaceholder: 'Search matcher value…',
       reorderDisabledHint: 'Reorder is disabled while a filter is active — clear the search/intent filter to reorder rules.',
+      clearFilters: 'Clear filters',
+      rowActions: 'More actions',
+      moveTop: 'Move to top',
+      moveBottom: 'Move to bottom',
+      pendingTag: 'pending',
       empty: 'No rules match the current filter.',
     },
   },
   mihomo: {
     intro: 'Read-only kernel monitoring — health + live logs. Connections, traffic, and per-node views live in zashboard.',
     healthTitle: 'mihomo kernel',
+    healthRunning: 'mihomo running',
     healthLoading: 'Checking kernel health…',
     healthFailed: 'Could not reach the mihomo kernel.',
     metaBadge: 'Meta',
+    // The same controller tri-state the mihomo config page reports: reachable
+    // and authenticated are two facts, and a 401 is "reachable but unusable".
+    // One page saying "healthy" while the other says "not authenticated" is
+    // the same system described two ways.
+    controllerAuthenticated: 'Controller reachable and authenticated',
+    controllerUnauthenticated: 'Controller reachable but not authenticated',
+    controllerUnreachable: 'Controller unreachable',
+    configApplied: 'config applied {{time}}',
     openZashboard: 'Open zashboard',
+    zashPopupBlocked: 'The browser blocked the new tab, so zashboard did not open.',
+    zashOpenHere: 'Open in this tab',
+    zashHandoffFailed: 'Could not start a zashboard session. Try again shortly.',
     connected: 'Live logs connected',
     disconnected: 'Reconnecting…',
     pause: 'Pause',
     resume: 'Resume',
     paused: 'paused',
+    // Frames that arrive while paused are buffered rather than discarded, and
+    // the button says how many are waiting.
+    pausedBuffered: 'Paused · {{count}} buffered',
+    pausedBufferFull: 'Buffer full — dropping',
     live: 'live',
+    clear: 'Clear',
+    clearLabel: 'Clear the current log view',
+    levelFilterLabel: 'Filter by level',
+    searchLabel: 'Search log payloads',
+    searchPlaceholder: 'Search payload…',
     colLevel: 'Level',
     colMessage: 'Message',
     emptyTitle: 'No log lines yet',
     emptyHint: 'Waiting for the mihomo kernel to emit log lines…',
+    emptySearchHint: 'No lines in the current window match.',
+    footer: '{{count}} lines · ring capacity 1000',
+    transport: 'wss ticket · /proxy/logs',
   },
   mihomoConfig: {
     unsaved: 'Unsaved changes',
+    // A line-level diff while dirty: "what changed" in several hundred lines
+    // of YAML deserves more than a yes/no.
+    unsavedDiff: 'Unapplied +{{added}} -{{removed}} lines',
+    discard: 'Discard changes',
+    moreActions: 'More actions',
+    // `mihomo -t` already prints `line N` in its stderr — it was just plain
+    // text next to an editor with no line numbers.
+    jumpToLine: 'Jump to line {{line}}',
     saved: 'Saved snapshot',
     intro:
       'Edit the complete operator-owned mihomo config. The server enforces the seven infrastructure invariants below and refuses any edit that deletes one of them.',

@@ -12,10 +12,14 @@ test('resolve-test page runs a domain and renders the verdict + decision path wi
   await page.getByRole('button', { name: '测试', exact: true }).click()
 
   // The shared mock fixture's /api/resolve-test response has reason
-  // 'chnroute-foreign' -> the 境外代理 pill + its decision-path steps.
-  await expect(page.getByText('境外代理')).toBeVisible()
+  // 'chnroute-foreign'. Overview, the query log and this page share one
+  // decision namespace now, so the label reads the same on all three.
+  const result = page.getByTestId('resolve-test-result')
+  await expect(result.getByText('境外走网关').first()).toBeVisible()
   await expect(page.getByText('未命中策略规则，进入 chnroute 仲裁')).toBeVisible()
   await expect(page.getByText('93.184.216.34')).toBeVisible()
+  // The chain no longer ends at the verdict.
+  await expect(result.getByRole('link', { name: '在日志中筛选此域名' })).toHaveAttribute('href', '/logs?q=example.com')
 
   expect(await csp.all()).toEqual([])
 })
@@ -25,10 +29,12 @@ test('resolve-test page: clicking an example chip runs the test', async ({ page 
   await page.goto('/resolve-test')
   await page.waitForLoadState('networkidle')
 
-  await page.getByRole('button', { name: 'baidu.com', exact: true }).click()
+  // Each example now states which decision it is expected to hit, so its
+  // accessible name is the domain plus that label.
+  await page.getByRole('button', { name: /^baidu\.com/ }).click()
 
   await expect(page.getByPlaceholder('example.com')).toHaveValue('baidu.com')
-  await expect(page.getByText('境外代理')).toBeVisible()
+  await expect(page.getByTestId('resolve-test-result').getByText('境外走网关').first()).toBeVisible()
 })
 
 // Attribution: an extension capture and an operator proxy rule produce the

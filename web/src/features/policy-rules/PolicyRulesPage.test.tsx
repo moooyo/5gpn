@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 // Side-effect import: initializes the real i18next singleton (mirrors
@@ -29,12 +30,12 @@ vi.mock('../../lib/api/client', () => ({
 }))
 import { api } from '../../lib/api/client'
 
-function renderPage() {
+function renderPage(initialPath = '/policy-rules') {
   return render(
-    <>
+    <MemoryRouter initialEntries={[initialPath]}>
       <PolicyRulesPage />
       <Toaster />
-    </>,
+    </MemoryRouter>,
   )
 }
 
@@ -68,6 +69,33 @@ describe('PolicyRulesPage', () => {
     expect(await screen.findByText('Applied — resolver policy reloaded.')).toBeInTheDocument()
   })
 
+  /**
+   * Saving and applying are two different acts here, and until now the page
+   * said nothing about the gap: after editing three rules Apply looked exactly
+   * as it did with nothing changed, and its only feedback was a toast.
+   */
+  it('turns the header card warning and counts pending changes after an edit lands', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await waitFor(() => expect(screen.getByText('netflix.com')).toBeInTheDocument())
+
+    // A snapshot only exists after an apply, so the page starts neutral.
+    await user.click(screen.getByTestId('policy-apply'))
+    await waitFor(() => expect(screen.getByTestId('policy-header')).toHaveAttribute('data-dirty', 'false'))
+    expect(screen.getByTestId('policy-apply')).toBeDisabled()
+    expect(screen.getByTestId('policy-apply')).toHaveTextContent('Up to date')
+
+    vi.mocked(api.getPolicyRules).mockResolvedValue([
+      { ...RULES[0], matcher: { kind: 'domain-suffix', value: 'netflix.com' }, enabled: false },
+    ])
+    await user.click(screen.getByRole('switch'))
+
+    await waitFor(() => expect(screen.getByTestId('policy-header')).toHaveAttribute('data-dirty', 'true'))
+    expect(screen.getByTestId('policy-apply')).toHaveTextContent('1')
+    expect(screen.getByTestId('policy-apply')).toBeEnabled()
+    expect(screen.getByText('pending')).toBeInTheDocument()
+  })
+
   it('surfaces an apply validation error as a toast, not a crash', async () => {
     vi.mocked(api.applyPolicy).mockRejectedValueOnce(new Error('mihomo -t: bad rule'))
     const user = userEvent.setup()
@@ -95,7 +123,8 @@ describe('PolicyRulesPage', () => {
     renderPage()
     await waitFor(() => expect(screen.getByText('netflix.com')).toBeInTheDocument())
 
-    await user.click(screen.getByText('Edit'))
+    await user.click(screen.getAllByRole('button', { name: /more actions/i })[0])
+    await user.click(await screen.findByText('Edit'))
 
     expect(screen.getByText('Edit policy rule')).toBeInTheDocument()
     expect(screen.getByDisplayValue('netflix.com')).toBeInTheDocument()
@@ -106,7 +135,8 @@ describe('PolicyRulesPage', () => {
     renderPage()
     await waitFor(() => expect(screen.getByText('netflix.com')).toBeInTheDocument())
 
-    await user.click(screen.getByText('Delete'))
+    await user.click(screen.getAllByRole('button', { name: /more actions/i })[0])
+    await user.click(await screen.findByText('Delete'))
     await user.click(screen.getByTestId('policy-rule-delete-confirm'))
 
     await waitFor(() => expect(api.deletePolicyRule).toHaveBeenCalledWith('a'))

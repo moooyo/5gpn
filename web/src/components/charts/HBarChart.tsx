@@ -50,20 +50,20 @@ export function HBarChart({ rows, color = 'var(--color-primary)', className }: H
         return (
           <div key={row.name}>
             <div className="flex items-baseline justify-between gap-3">
-              <span className="truncate text-[12.5px] font-medium text-text-mid">{row.name}</span>
-              <span className="shrink-0 font-mono text-[15px] font-medium tabular-nums text-text-strong">{row.display}</span>
+              <span className="truncate text-body font-medium text-text-mid">{row.name}</span>
+              <span className="shrink-0 font-mono text-title font-medium tabular-nums text-text-strong">{row.display}</span>
             </div>
             <div
-              className="mt-1.5 h-2 w-full overflow-hidden rounded-full bg-surface-container"
+              className="mt-1.5 h-2 w-full overflow-hidden rounded-pill bg-surface-container"
               role="img"
               aria-label={`${row.name}: ${row.display}`}
             >
               <div
-                className="h-full rounded-full transition-[width] duration-500"
+                className="h-full rounded-pill transition-[width] duration-500"
                 style={{ width: `${value > 0 ? Math.max(MIN_VISIBLE_PCT, pct) : 0}%`, background: color }}
               />
             </div>
-            {row.meta ? <div className="mt-1.5 text-[10.5px] text-text-faint">{row.meta}</div> : null}
+            {row.meta ? <div className="mt-1.5 text-meta text-text-faint">{row.meta}</div> : null}
           </div>
         )
       })}

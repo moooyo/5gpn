@@ -90,7 +90,7 @@ export function DataGrid<T>({ columns, data, className, emptyText = 'No data', p
                 return (
                   <th
                     key={header.id}
-                    className="px-4 py-3 text-left text-[10.5px] font-medium tracking-[.04em] text-text-faint"
+                    className="px-4 py-3 text-left text-meta font-medium tracking-[.04em] text-text-faint"
                     aria-sort={canSort ? (sorted === 'asc' ? 'ascending' : sorted === 'desc' ? 'descending' : 'none') : undefined}
                   >
                     {canSort ? (
@@ -115,7 +115,7 @@ export function DataGrid<T>({ columns, data, className, emptyText = 'No data', p
         <tbody>
           {data.length === 0 ? (
             <tr>
-              <td colSpan={columnCount} className="px-4 py-8 text-center text-[12px] text-text-faint">
+              <td colSpan={columnCount} className="px-4 py-8 text-center text-label text-text-faint">
                 {emptyText}
               </td>
             </tr>
@@ -124,7 +124,7 @@ export function DataGrid<T>({ columns, data, className, emptyText = 'No data', p
               {pageRows.map((row) => (
                 <tr key={row.id} className="border-b border-divider transition-colors hover:bg-surface-container-low">
                   {row.getVisibleCells().map((cell) => (
-                    <td key={cell.id} className="px-4 py-3 text-[12px]">
+                    <td key={cell.id} className="px-4 py-3 text-label">
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </td>
                   ))}
@@ -132,7 +132,7 @@ export function DataGrid<T>({ columns, data, className, emptyText = 'No data', p
               ))}
               {Array.from({ length: fillerCount }, (_, i) => (
                 <tr key={`filler-${i}`} data-testid="datagrid-filler" aria-hidden="true" className="border-b border-divider">
-                  <td colSpan={columnCount} className="px-4 py-3 text-[12px]">
+                  <td colSpan={columnCount} className="px-4 py-3 text-label">
                     &nbsp;
                   </td>
                 </tr>

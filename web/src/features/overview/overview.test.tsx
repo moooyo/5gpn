@@ -64,11 +64,30 @@ afterEach(async () => {
 })
 
 describe('OverviewPage', () => {
-  it('derives first-paint QPS from total/uptime and renders the M3 hero', async () => {
+  it('derives first-paint QPS from total/uptime and draws the series exactly once', async () => {
     const { container } = renderOverview()
-    expect(await screen.findAllByText('2')).toHaveLength(2)
-    expect(screen.getByText(i18n.t('overview.queriesPerSecond'))).toBeInTheDocument()
-    expect(container.querySelector('[data-chart="sparkline"]')).toBeInTheDocument()
+    // QPS used to appear both in the hero and in a full-size card below —
+    // the same series and the same number twice on one screen.
+    expect(await screen.findAllByText('2')).toHaveLength(1)
+    expect(container.querySelectorAll('[data-chart="sparkline"]')).toHaveLength(1)
+  })
+
+  it('labels the sparkline with its sampling window and value range', async () => {
+    renderOverview()
+    expect(await screen.findByText(i18n.t('overview.qpsWindow', { count: 1, cap: 48 }))).toBeInTheDocument()
+    expect(screen.getByText('2 – 2')).toBeInTheDocument()
+  })
+
+  /** A paused or failing poll used to leave the numbers sitting there looking
+   *  current — the pill said "paused", nothing said how old the data was. */
+  it('reports how fresh the numbers are, and turns to an error when polling fails', () => {
+    renderOverview(statusValue({ statusUpdatedAt: Date.now() }))
+    expect(screen.getByTestId('overview-freshness')).toHaveTextContent(i18n.t('format.justNow'))
+
+    renderOverview(statusValue({ statusStale: true, statusUpdatedAt: Date.now() - 60_000 }))
+    const stale = screen.getAllByTestId('overview-freshness').at(-1)!
+    expect(stale).toHaveTextContent(i18n.t('overview.pollFailed'))
+    expect(stale.className).toContain('text-red')
   })
 
   it('renders the five live decision segments in a CSP-safe SVG donut', () => {
@@ -125,6 +144,22 @@ describe('OverviewPage', () => {
     expect(screen.getAllByText(i18n.t('overview.upstreamFailures', { n: '0' }))).toHaveLength(2)
   })
 
+  /**
+   * Caught on the real deployment: with no samples the upstream "headline" is
+   * a sentence, and the metric step made "no recent samples" the loudest thing
+   * on the card.
+   */
+  it('does not render the no-samples sentence at the metric type step', () => {
+    renderOverview(statusValue({
+      status: { ...STATUS, stats: { ...STATS, china_lat_samples: 0, trust_lat_samples: 0 } },
+    }))
+    for (const node of screen.getAllByText(i18n.t('overview.upstreamNoSamples'))) {
+      if (node.tagName !== 'B') continue
+      expect(node.className).not.toContain('text-metric')
+      expect(node.className).toContain('text-label')
+    }
+  })
+
   it('renders "no samples yet" rather than a fabricated 100% before any exchange', () => {
     renderOverview(statusValue({
       status: { ...STATUS, stats: { ...STATS, china_ok: 0, china_err: 0, trust_ok: 0, trust_err: 0 } },
@@ -132,12 +167,24 @@ describe('OverviewPage', () => {
     expect(screen.getAllByText(i18n.t('overview.upstreamSuccessRateUnknown'))).toHaveLength(2)
   })
 
-  it('renders the chnroute-only arbitration split separately', () => {
+  /** The CN/foreign donut plotted segments 4 and 5 of the decision ring
+   *  magnified. It is a segmented bar inside that same card now — same slots,
+   *  no second ring competing for the same reading. */
+  it('folds the chnroute split into the decision card as a segmented bar', () => {
     const { container } = renderOverview()
-    const donut = [...container.querySelectorAll<HTMLElement>('[data-chart="donut"]')]
-      .find((element) => element.querySelector('svg')?.getAttribute('aria-label')?.includes('境内: 500'))
-    expect(donut).toBeDefined()
-    expect(donut?.querySelectorAll('circle[pathLength="100"]')).toHaveLength(2)
+    expect(container.querySelectorAll('[data-chart="donut"]')).toHaveLength(1)
+    const split = screen.getByTestId('overview-arbitration')
+    expect(split).toHaveTextContent(i18n.t('overview.arbitration'))
+    // 500 CN of 800 arbitrated -> 63% / 37%
+    expect(split).toHaveTextContent('63%')
+    expect(split).toHaveTextContent('37%')
+  })
+
+  /** The upstream P50 was a metric tile up top and the bar in this card. */
+  it('states each upstream median exactly once, beside the scale that explains it', () => {
+    renderOverview()
+    expect(screen.getAllByText('5.0 ms')).toHaveLength(2)
+    expect(screen.getAllByText('10.0 ms')).toHaveLength(2)
   })
 
   it('keeps the live decision rail visible as the product signature', () => {

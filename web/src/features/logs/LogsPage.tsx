@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useSearchParams } from 'react-router-dom'
 import type { TFunction } from 'i18next'
-import { PauseIcon, PlayIcon, SearchIcon } from '../../components/icons'
-import { Card, Chip, Input, StatusDot } from '../../components/ds'
+import { SearchIcon } from '../../components/icons'
+import { Card, Chip, FilterChips, Input, LiveToggle, StatusDot, logSurfaceHeight } from '../../components/ds'
 import { VirtualTable } from '../../components/data-grid'
 import { api } from '../../lib/api/client'
 import type { QueryLogEntry } from '../../lib/api/types'
-import { cn } from '../../lib/cn'
 import { useMediaQuery } from '../../lib/useMediaQuery'
-import { buildLogColumns, formatLogIps, formatLogTime, resolveDecision } from './log-columns'
+import { DECISION, DECISION_ORDER, buildLogColumns, formatLogIps, formatLogTime, resolveDecision } from './log-columns'
 
 const POLL_MS = 3000
 const SEARCH_DEBOUNCE_MS = 250
@@ -16,36 +16,26 @@ const LIMIT = 300
 
 type LoadState = 'loading' | 'ready' | 'error'
 
-// The legend mirrors the reason -> color map in log-columns.tsx one-for-one.
-// It previously carried four entries because force-proxy and chnroute-foreign
-// shared a hue; they now hold distinct categorical slots, so collapsing them
-// here would leave the legend unable to name a colour the table actually
-// paints. Colours come from the shared chart slots, not semantic UI roles,
-// which several themes alias onto each other.
-const LEGEND: Array<{ color: string; labelKey: string }> = [
-  { color: 'var(--color-chart-1)', labelKey: 'logs.decision.block' },
-  { color: 'var(--color-chart-2)', labelKey: 'logs.decision.forceDirect' },
-  { color: 'var(--color-chart-3)', labelKey: 'logs.decision.forceProxy' },
-  { color: 'var(--color-chart-4)', labelKey: 'logs.decision.chnrouteCn' },
-  { color: 'var(--color-chart-5)', labelKey: 'logs.decision.chnrouteForeign' },
-]
+/** Sentinel for the unfiltered pill; the filter state itself stays null. */
+const ALL_DECISIONS = '__all__'
 
 /** Two-line stacked card row used below the `md` breakpoint instead of the
- *  VirtualTable (line 1: time + domain + decision dot; line 2: reason chip +
- *  ip + ms). */
+ *  VirtualTable (line 1: time + domain + decision swatch; line 2: reason chip
+ *  + ip + ms). The swatch is square rather than a dot: at this size it has to
+ *  be read as the same legend key the filter pills carry. */
 function LogCard({ entry, t }: { entry: QueryLogEntry; t: TFunction }) {
   const decision = resolveDecision(entry)
   return (
-    <div className="flex flex-col gap-1.5 px-4 py-3">
-      <div className="flex items-center gap-2 text-[12px]">
+    <div className="flex min-h-field flex-col justify-center gap-1.5 px-4 py-3">
+      <div className="flex items-center gap-2 text-label">
         <span className="font-mono text-text-faint">{formatLogTime(entry.time)}</span>
         <span className="flex-1 truncate font-mono text-text-strong">{entry.name}</span>
-        <StatusDot color={decision.color} />
-        <span className="text-[11px] font-semibold text-text-mid">
+        <StatusDot color={decision.color} square />
+        <span className="text-meta font-semibold text-text-mid">
           {t(decision.key)}
         </span>
       </div>
-      <div className="flex items-center gap-2 text-[11px] text-text-soft">
+      <div className="flex items-center gap-2 text-meta text-text-soft">
         {entry.reason ? <Chip value={entry.reason} /> : null}
         <span className="font-mono">{formatLogIps(entry.ips)}</span>
         <span className="ml-auto font-mono text-text-faint">{Math.round(entry.duration_ms)}ms</span>
@@ -56,13 +46,17 @@ function LogCard({ entry, t }: { entry: QueryLogEntry; t: TFunction }) {
 
 export default function LogsPage() {
   const { t } = useTranslation()
-  const [query, setQuery] = useState('')
+  // `?q=` lets the resolve test hand a domain straight to this page — that
+  // hand-off used to be the operator memorizing the name and retyping it.
+  const [searchParams] = useSearchParams()
+  const initialQuery = searchParams.get('q') ?? ''
+  const [query, setQuery] = useState(initialQuery)
   const [entries, setEntries] = useState<QueryLogEntry[]>([])
   const [state, setState] = useState<LoadState>('loading')
   const [live, setLive] = useState(true)
   const [decisionFilter, setDecisionFilter] = useState<string | null>(null)
   const isMobile = useMediaQuery('(max-width: 767px)')
-  const [debouncedQuery, setDebouncedQuery] = useState('')
+  const [debouncedQuery, setDebouncedQuery] = useState(initialQuery)
   const requestIdRef = useRef(0)
   const activeControllerRef = useRef<AbortController | null>(null)
 
@@ -132,84 +126,78 @@ export default function LogsPage() {
     () => decisionFilter ? entries.filter((entry) => entry.reason === decisionFilter) : entries,
     [decisionFilter, entries],
   )
+  // One reduce over the window already in hand — no extra request. Without it
+  // a pill only reveals whether it has anything behind it after you click it.
+  const decisionCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const entry of entries) {
+      if (entry.reason) counts[entry.reason] = (counts[entry.reason] ?? 0) + 1
+    }
+    return counts
+  }, [entries])
 
   return (
     <div className="flex flex-col gap-4" data-testid="page-logs">
       <div className="flex flex-wrap items-center gap-3 px-1">
-        <p className="min-w-[220px] flex-1 text-[12.5px] text-text-faint">{t('logs.intro')}</p>
-        <button
-          type="button"
-          onClick={() => setLive((value) => !value)}
-          aria-label={live ? t('logs.pause') : t('logs.resume')}
-          className={cn(
-            'zds-state-layer inline-flex h-8 items-center gap-2 rounded-full px-3 text-[11.5px] font-medium',
-            live ? 'bg-[var(--md-sys-color-success-container)] text-[var(--md-sys-color-on-success-container)]' : 'bg-surface-container text-text-soft',
-          )}
-        >
-          {live ? <PauseIcon className="h-4 w-4" aria-hidden="true" /> : <PlayIcon className="h-4 w-4" aria-hidden="true" />}
-          {live ? t('logs.live') : t('logs.paused')}
-        </button>
+        <p className="min-w-[220px] flex-1 text-label text-text-faint">{t('logs.intro')}</p>
+        <LiveToggle
+          live={live}
+          onToggle={() => setLive((value) => !value)}
+          liveLabel={t('logs.live')}
+          // Pausing here stops the poll; the window simply stops advancing, so
+          // there is nothing to buffer and nothing lost.
+          pausedLabel={t('logs.paused')}
+          pauseAction={t('logs.pause')}
+          resumeAction={t('logs.resume')}
+        />
       </div>
 
-      <Card variant="tonal" className="flex flex-col gap-3 p-3 sm:p-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setDecisionFilter(null)}
-            className={cn('zds-state-layer h-8 rounded-[9px] px-3 text-[11.5px] font-medium', decisionFilter === null ? 'bg-secondary-container text-on-secondary-container' : 'text-text-soft')}
-          >
-            {t('logs.allDecisions')}
-          </button>
-          {[
-            ['force-direct', 'logs.decision.forceDirect', 'var(--color-green)'],
-            ['chnroute-cn', 'logs.decision.chnrouteCn', 'var(--color-cyan)'],
-            ['force-proxy', 'logs.decision.forceProxy', 'var(--color-primary)'],
-            ['chnroute-foreign', 'logs.decision.chnrouteForeign', 'var(--color-indigo)'],
-            ['block', 'logs.decision.block', 'var(--color-red)'],
-          ].map(([value, key, color]) => (
-            <button
-              key={value}
-              type="button"
-              onClick={() => setDecisionFilter(value)}
-              className={cn('zds-state-layer flex h-8 items-center gap-2 rounded-[9px] px-3 text-[11.5px] font-medium', decisionFilter === value ? 'bg-secondary-container text-on-secondary-container' : 'text-text-soft')}
-            >
-              <StatusDot color={color} />
-              {t(key)}
-            </button>
-          ))}
-          <div className="flex-1" />
+      <Card variant="tonal" className="flex flex-col gap-2 p-3 sm:p-4">
+        <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+          {/* The pills ARE the legend: same slot, same order and same wording
+              as the table's decision column, so the row below them no longer
+              has to repeat the mapping in a different palette. */}
+          <FilterChips
+            ariaLabel={t('logs.colDecision')}
+            value={decisionFilter ?? ALL_DECISIONS}
+            onChange={(value) => setDecisionFilter(value === ALL_DECISIONS ? null : value)}
+            options={[
+              { value: ALL_DECISIONS, label: t('logs.allDecisions'), count: entries.length },
+              ...DECISION_ORDER.map((value) => ({
+                value,
+                label: t(DECISION[value].key),
+                swatch: DECISION[value].color,
+                count: decisionCounts[value] ?? 0,
+              })),
+            ]}
+          />
+          <div className="sm:flex-1" />
           <div className="relative w-full sm:w-64">
-          <SearchIcon
-            className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-text-faint"
-            aria-hidden="true"
-          />
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={t('logs.searchPlaceholder')}
-            className="w-full rounded-full pl-10"
-          />
+            <SearchIcon
+              className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-text-faint"
+              aria-hidden="true"
+            />
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label={t('logs.searchLabel')}
+              placeholder={t('logs.searchPlaceholder')}
+              className="w-full rounded-pill pl-10"
+            />
+          </div>
         </div>
-        </div>
-        <div className="hidden flex-wrap gap-4 border-t border-border pt-3 sm:flex">
-          {LEGEND.map((item) => (
-            <div key={item.labelKey} className="flex items-center gap-1.5 text-[10.5px] text-text-faint">
-              <StatusDot color={item.color} />
-              {t(item.labelKey)}
-            </div>
-          ))}
-        </div>
+        <p className="text-meta text-text-faint">{t('logs.windowHint', { limit: LIMIT })}</p>
       </Card>
 
       <Card className="overflow-hidden p-0 shadow-none">
         {state === 'loading' ? (
-          <div className="p-8 text-center text-[12.5px] text-text-faint">{t('logs.loading')}</div>
+          <div className="p-8 text-center text-label text-text-faint">{t('logs.loading')}</div>
         ) : state === 'error' ? (
-          <div className="p-8 text-center text-[12.5px] text-red">{t('logs.loadFailed')}</div>
+          <div className="p-8 text-center text-label text-red">{t('logs.loadFailed')}</div>
         ) : visibleEntries.length === 0 ? (
           <div className="flex flex-col items-center gap-1 p-8 text-center">
-            <div className="text-[13px] font-semibold text-text-strong">{t('logs.emptyTitle')}</div>
-            <div className="text-[12px] text-text-faint">{t('logs.emptyHint')}</div>
+            <div className="text-body font-semibold text-text-strong">{t('logs.emptyTitle')}</div>
+            <div className="text-label text-text-faint">{t('logs.emptyHint')}</div>
           </div>
         ) : isMobile ? (
           <div className="flex flex-col divide-y divide-divider">
@@ -218,7 +206,7 @@ export default function LogsPage() {
             ))}
           </div>
         ) : (
-          <VirtualTable columns={columns} data={visibleEntries} />
+          <VirtualTable columns={columns} data={visibleEntries} height={logSurfaceHeight(300)} />
         )}
       </Card>
     </div>

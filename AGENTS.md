@@ -128,6 +128,21 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
 
 - Keep the current React/DaisyUI design language, five-theme catalog, `light`
   default, and MiSans stack.
+- Scale comes from tokens, never literals. `styles/theme.css` owns seven type
+  steps (nothing below 11px), five radius steps, and the control heights;
+  `styles/scale.test.ts` fails a bare `text-[Npx]`/`rounded-[Npx]`. The steps
+  are named, so `lib/cn.ts` must keep tailwind-merge taught about them —
+  otherwise an unknown `text-<word>` is read as a colour and strips the real
+  colour out of the class list.
+- Colour means one thing at a time. Telling N peer entities apart uses the
+  categorical `--color-chart-1..5` slots in a fixed assignment; semantic roles
+  are for state only, because several themes give them identical values. The
+  five decisions have one wording, the top-level `decision.*` namespace.
+- Any state the operator has to act on gets a persistent, page-level surface —
+  not a toast that leaves, and not one of a dozen same-shaped badges. Saved and
+  live are different things and the UI has to say which is which (policy
+  rules), and a control that changes what happens to data has to say what it
+  changes (pause).
 - `web/src/styles/index.css` cascade layering is load-bearing:
   DaisyUI is below the zds layer, while direct utility classes remain able to
   win. Do not move design-system CSS back into a losing `components` layer or
@@ -153,10 +168,19 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   not publisher identity. Do not fabricate popularity, author, health, or update
   metadata that the authenticated marketplace API does not provide.
 - Logs remain virtualized, polling is single-flight/cancellable, and mobile
-  uses card rows plus a drawer sidebar. Plugin engine logs live on the dedicated
-  `/plugin-logs` route in the Plugin navigation group; DNS policy rules remain
-  in Parse. Pausing that stream freezes only the view while its bounded memory
-  ring continues ingesting, and clearing changes only the browser watermark.
+  uses card rows plus a drawer sidebar. `ds/LogSurface` owns the shared log
+  chrome and the one height policy; `ds/LiveToggle` is the one pause control
+  and its paused label must say what pausing does to the data. On mobile,
+  filters live in a sheet and applied ones come back as chips. A settings card
+  reports load state through `ds/CardState` and shows a skeleton rather than
+  controls bound to `undefined`; a disabled control explains itself in
+  persistent text, never a tooltip. Plugin engine logs live on the
+  dedicated `/plugin-logs` route in the Plugin navigation group; DNS policy
+  rules remain in Parse. Pausing the plugin stream freezes only the view while
+  its bounded memory ring continues ingesting, and clearing changes only the
+  browser watermark — which is why it offers an undo rather than a
+  confirmation. Pausing the mihomo stream buffers and reports the count; it
+  must not discard.
 - Do not commit `web/dist`. Fonts are runtime-cached by the PWA; keep PWA,
   initial JS/CSS, lazy-route, and font budgets green.
 

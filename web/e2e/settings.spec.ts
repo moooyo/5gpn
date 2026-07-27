@@ -27,7 +27,10 @@ test('settings page renders all config cards with zero CSP violations', async ({
   await expect(main.getByText('Telegram 机器人')).toBeVisible()
   await expect(main.getByText('上游 DNS')).toBeVisible()
   await expect(main.getByText('国内解析 ECS')).toBeVisible()
-  await expect(main.getByText('5GPN 控制台')).toBeVisible()
+  // Versions moved out of a strip at the bottom of 3000px of scroll and into
+  // the sticky section index, where they are reachable from any section.
+  await expect(page.getByTestId('settings-nav')).toContainText('版本')
+  await expect(page.getByTestId('settings-nav').getByRole('button', { name: '解析上游' })).toBeVisible()
 
   // Cert status from the shared mock fixture (days_remaining: 82, not expired/broken) -> 有效.
   await expect(page.getByText('有效')).toBeVisible()

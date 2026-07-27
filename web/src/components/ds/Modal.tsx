@@ -27,13 +27,13 @@ export function Modal({ open, onOpenChange, title, descriptionId, children, foot
         <Dialog.Popup aria-describedby={descriptionId} className={cn('zds-dialog-popup p-6', className)}>
           <div className="mb-4 flex items-start justify-between gap-4">
             {title !== undefined ? (
-              <Dialog.Title className="text-[20px] font-medium leading-7 text-text-strong">{title}</Dialog.Title>
+              <Dialog.Title className="text-headline font-medium leading-7 text-text-strong">{title}</Dialog.Title>
             ) : (
               <Dialog.Title className="sr-only">Dialog</Dialog.Title>
             )}
             <Dialog.Close
               aria-label="Close"
-              className="zds-state-layer -mr-2 -mt-2 grid h-10 w-10 shrink-0 cursor-pointer place-items-center rounded-full text-text-soft"
+              className="zds-state-layer -mr-2 -mt-2 grid h-10 w-10 shrink-0 cursor-pointer place-items-center rounded-pill text-text-soft"
             >
               <CloseIcon className="h-5 w-5" aria-hidden="true" />
             </Dialog.Close>

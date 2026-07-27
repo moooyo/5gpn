@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   AddIcon,
   ArrowDownIcon,
   ArrowUpIcon,
+  ChevronDownIcon,
   CloudIcon,
   DeleteIcon,
   ExtensionFilledIcon,
@@ -50,6 +51,7 @@ import { cn } from '../../lib/cn'
 import { useMITMTrustAcknowledgement } from '../../lib/mitmTrust'
 import { HostAuditView } from './HostAuditView'
 import { ExtensionInstallReview } from './ExtensionInstallReview'
+import { RoutingRuleList } from './routing-rules'
 
 import { LocationPicker, type LocationPoint } from './LocationPicker'
 
@@ -104,6 +106,87 @@ function asLocation(value: unknown): LocationPoint {
   }
 }
 
+/**
+ * The one status the operator has to act on, if any.
+ *
+ * A card could carry up to thirteen badges, with "egress group missing" —
+ * which stops the extension working at all — the same shape, size and row as
+ * "persistent storage", a neutral fact about what it can do. Capability and
+ * problem are different kinds of thing: capabilities stay as neutral chips
+ * below, and the highest-priority problem becomes one banner with the action
+ * that resolves it.
+ */
+type ExtensionStatusTone = 'error' | 'warning' | 'neutral'
+
+interface ExtensionStatus {
+  tone: ExtensionStatusTone
+  key: string
+  /** Route that fixes it, when there is one. */
+  to?: string
+  actionKey?: string
+}
+
+function statusOf(module: InterceptModule, options: { trusted: boolean; groupMissing: boolean }): ExtensionStatus | null {
+  // Ordered by how badly the extension is broken, not by where the flag lives.
+  if (options.groupMissing) {
+    return { tone: 'error', key: 'extensions.statusEgressMissing', to: '/settings', actionKey: 'extensions.statusGoSettings' }
+  }
+  if (module.reason === 'settings-required') {
+    return { tone: 'warning', key: 'extensions.statusSettingsRequired' }
+  }
+  if (module.enabled && module.reason === 'mitm-disabled') {
+    return { tone: 'warning', key: 'extensions.statusMasterOff', to: '/settings', actionKey: 'extensions.statusGoSettings' }
+  }
+  if (module.enabled && !options.trusted) {
+    return { tone: 'warning', key: 'extensions.statusTrustPending', to: '/setup-guide', actionKey: 'extensions.statusGoSetup' }
+  }
+  if (!module.enabled) return { tone: 'neutral', key: 'extensions.statusDisabled' }
+  return null
+}
+
+const STATUS_TONE: Record<ExtensionStatusTone, string> = {
+  error: 'bg-[var(--md-sys-color-error-container)] text-[var(--md-sys-color-on-error-container)]',
+  warning: 'bg-[var(--md-sys-color-warning-container)] text-[var(--md-sys-color-on-warning-container)]',
+  neutral: 'bg-surface-container text-text-soft',
+}
+
+/**
+ * Neutral by construction: these say what the extension can do, and a colour
+ * here would compete with the banner above for "something needs you".
+ *
+ * Kept local rather than shared with the marketplace's MetaChip. The two pages
+ * describe the same object at two lifecycle stages, so one shared card is the
+ * obvious next move — it was designed and rejected on evidence:
+ *
+ *   - The overlapping fields do not mean the same thing. `capture_dns` and a
+ *     bound `egress_group` exist only after install and have no counterpart on
+ *     MarketplaceEntryCapabilities, so a normalized model invites a default
+ *     that makes a catalog entry assert a resolver group or an egress binding
+ *     nobody has chosen. `manifest_digest` and `snapshot_digest` hash
+ *     different bytes; equating them pre-empts the verification the install
+ *     flow performs server-side.
+ *   - `upstream_mapping_count` DOES exist on both, and the marketplace card
+ *     deliberately renders it nowhere. A shared chip row lights it up with no
+ *     fabrication and no type error, silently reversing the editorial rule
+ *     that a card carries only what decides an install.
+ *   - The difference between the two is disclosure DEPTH, not data: network
+ *     origins, persistent storage, routing rules and settings are chips here
+ *     and a collapsed count there. Normalizing flattens that on purpose.
+ *
+ * What the two pages genuinely share is the card LANGUAGE — status banner over
+ * neutral capability chips, and one routing-rule renderer (`RoutingRuleList`)
+ * — and that is already shared. See docs/architecture.md.
+ */
+function CapabilityChip({ label, value, icon }: { label: string; value?: string | number; icon?: ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1 rounded-chip bg-surface-container px-2 py-0.5 text-meta text-text-soft">
+      {icon}
+      {label}
+      {value !== undefined ? <b className="font-mono font-semibold text-text-mid">{value}</b> : null}
+    </span>
+  )
+}
+
 function ExtensionCard({
   module,
   busy,
@@ -142,7 +225,7 @@ function ExtensionCard({
   const canArmWhileMasterOff = module.reason === 'mitm-disabled'
   const groupMissing = (module.egress_group_required && !module.egress_group) || (!!module.egress_group && !egressGroups.includes(module.egress_group))
   const toggleDisabled = busy || (!module.enabled && (groupMissing || (!module.ready && !canArmWhileMasterOff)))
-  const trustWarning = module.enabled && !trusted
+  const status = statusOf(module, { trusted, groupMissing })
 
   return (
     <Card className="min-w-0 overflow-hidden border-0 shadow-[var(--md-sys-elevation-1)]" data-testid={`extension-${module.id}`}>
@@ -150,50 +233,70 @@ function ExtensionCard({
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <span className={cn(
-              'grid h-11 w-11 shrink-0 place-items-center rounded-[12px]',
+              'grid h-11 w-11 shrink-0 place-items-center rounded-ctl',
               module.enabled ? 'bg-primary-container text-on-primary-container' : 'bg-surface-container text-text-faint',
             )}>
               <ExtensionFilledIcon className="h-5 w-5" aria-hidden="true" />
             </span>
             <div className="min-w-0">
-              <h2 className="truncate text-[14.5px] font-medium leading-tight text-text-strong">{module.name}</h2>
-              <p className="mt-1 truncate text-[10.5px] text-text-faint">
+              <h2 className="truncate text-title font-medium leading-tight text-text-strong">{module.name}</h2>
+              <p className="mt-1 truncate text-meta text-text-faint">
                 {module.id} · v{module.extension_version}{imported ? ` · ${imported}` : ''}
               </p>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            <span className="rounded-full bg-surface-container-low px-2 py-1 font-mono text-[10px] text-text-faint" aria-label={t('extensions.executionOrder', { order: module.execution_order })}>{String(module.execution_order).padStart(2, '0')}</span>
+            <span className="rounded-pill bg-surface-container-low px-2 py-1 font-mono text-meta text-text-faint" aria-label={t('extensions.executionOrder', { order: module.execution_order })}>{String(module.execution_order).padStart(2, '0')}</span>
             <Toggle checked={module.enabled} onCheckedChange={() => onToggle(module)} disabled={toggleDisabled} aria-label={`${module.enabled ? t('extensions.toggleOff') : t('extensions.toggleOn')} · ${module.name}`} />
           </div>
         </div>
 
-        {module.description ? <p className="line-clamp-2 min-h-10 text-[11.5px] leading-5 text-text-soft">{module.description}</p> : <div className="min-h-10" />}
+        {/* One banner, highest priority only, with the action that resolves it. */}
+        {status ? (
+          <div
+            role={status.tone === 'error' ? 'alert' : 'status'}
+            data-testid={`extension-status-${module.id}`}
+            className={cn('flex flex-wrap items-center gap-2 rounded-ctl px-3 py-2 text-meta font-medium', STATUS_TONE[status.tone])}
+          >
+            {status.tone === 'error' ? <WarningIcon className="h-4 w-4 shrink-0" aria-hidden="true" /> : null}
+            <span className="min-w-0 flex-1">{t(status.key, { group: module.egress_group })}</span>
+            {status.to && status.actionKey ? (
+              <Link to={status.to} className="zds-state-layer shrink-0 rounded-pill px-2.5 py-1 font-semibold underline-offset-2 hover:underline">
+                {t(status.actionKey)}
+              </Link>
+            ) : null}
+          </div>
+        ) : null}
 
+        {module.description ? <p className="line-clamp-2 min-h-10 text-label leading-5 text-text-soft">{module.description}</p> : <div className="min-h-10" />}
+
+        {/* Capabilities: one neutral shape, numbers carried in monospace. */}
         <div className="flex flex-wrap items-center gap-1.5">
-          {!module.enabled ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="neutral">{t('extensions.disabled')}</Badge> : null}
-          {module.script_count > 0 ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber">{t('extensions.capabilityAction', { count: module.script_count })}</Badge> : null}
-          {module.network_origins.length > 0 ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="indigo"><NetworkIcon className="mr-1 inline h-3.5 w-3.5" aria-hidden="true" />{t('extensions.capabilityNetwork', { count: module.network_origins.length })}</Badge> : null}
-          {module.egress_group ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="cyan"><RouteIcon className="mr-1 inline h-3.5 w-3.5" aria-hidden="true" />{t('extensions.capabilityEgress', { group: module.egress_group })}</Badge> : null}
-          <button type="button" aria-label={t('extensions.auditHosts')} onClick={() => onAudit(module)} className="zds-state-layer inline-flex items-center gap-1 rounded-[6px] bg-primary-container px-2.5 py-0.5 text-[11px] font-medium text-on-primary-container">
+          <button type="button" aria-label={t('extensions.auditHosts')} onClick={() => onAudit(module)} className="zds-state-layer inline-flex items-center gap-1 rounded-chip bg-primary-container px-2 py-0.5 text-meta font-medium text-on-primary-container">
             <ShieldLockIcon className="h-3.5 w-3.5" aria-hidden="true" /> {t('extensions.captureCount', { count: module.capture_hosts.length })}
           </button>
-          <Badge className="rounded-[6px] px-2.5 py-0.5" tone={module.capture_dns === 'china' ? 'amber' : 'blue'}>
-            <RouteIcon className="mr-1 inline h-3.5 w-3.5" aria-hidden="true" />{t('extensions.captureDNS.badge', { group: t(`extensions.captureDNS.${module.capture_dns}`) })}
-          </Badge>
-          {mappingsCount > 0 ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="cyan">{t('extensions.capabilityHost', { count: mappingsCount })}</Badge> : null}
-          {routingRuleCount > 0 ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber">{t('extensions.capabilityRouting', { count: routingRuleCount })}</Badge> : null}
-          {module.persistent_storage ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="indigo">{t('extensions.capabilityStorage')}</Badge> : null}
-          {trustWarning ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber">{t('extensions.trustPending')}</Badge> : null}
-          {module.enabled && module.reason === 'mitm-disabled' ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber">{t('extensions.masterPending')}</Badge> : null}
-          {module.reason === 'settings-required' ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="blue">{t('extensions.settingsRequired')}</Badge> : null}
-          {groupMissing ? <Badge className="rounded-[6px] px-2.5 py-0.5" tone="amber"><WarningIcon className="mr-1 inline h-3.5 w-3.5" aria-hidden="true" />{t('extensions.egressGroupMissing')}</Badge> : null}
+          {module.script_count > 0 ? <CapabilityChip label={t('extensions.chipActions')} value={module.script_count} /> : null}
+          {module.network_origins.length > 0 ? <CapabilityChip icon={<NetworkIcon className="h-3.5 w-3.5" aria-hidden="true" />} label={t('extensions.chipNetwork')} value={module.network_origins.length} /> : null}
+          <CapabilityChip icon={<RouteIcon className="h-3.5 w-3.5" aria-hidden="true" />} label={t('extensions.chipCaptureDNS')} value={t(`extensions.captureDNS.${module.capture_dns}`)} />
+          {module.egress_group ? <CapabilityChip icon={<RouteIcon className="h-3.5 w-3.5" aria-hidden="true" />} label={t('extensions.chipEgress')} value={module.egress_group} /> : null}
+          {mappingsCount > 0 ? <CapabilityChip label={t('extensions.chipHostMappings')} value={mappingsCount} /> : null}
+          {module.persistent_storage ? <CapabilityChip label={t('extensions.capabilityStorage')} /> : null}
         </div>
 
-        {routingRuleCount > 0 ? <details className="group rounded-[10px] bg-[var(--md-sys-color-warning-container)] text-[var(--md-sys-color-on-warning-container)]" data-testid={`routing-rules-${module.id}`}>
-          <summary className="zds-state-layer cursor-pointer list-none rounded-[10px] px-3 py-2 text-[10.5px] font-semibold marker:hidden">{t('extensions.routingRulesInspect', { count: routingRuleCount })}</summary>
-          <div className="max-h-40 space-y-1.5 overflow-y-auto border-t border-[rgb(0_0_0_/_10%)] px-3 py-2.5">
-            {module.routing_rules!.map((rule, index) => <code key={`${index}:${JSON.stringify(rule)}`} className="block break-all rounded-[7px] bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-[9.5px]">{JSON.stringify(rule)}</code>)}
+        {/* Neutral, and only as wide as it needs to be. This was a full-width
+            bar in the SAME warning amber as the status banner above it, with
+            85% of its width empty — so a card could show two identical alarm
+            bars, one of which is a neutral disclosure. Amber has to keep
+            meaning "this needs you". The rules themselves carry their own
+            REJECT/DIRECT colour once opened. */}
+        {routingRuleCount > 0 ? <details className="group self-start rounded-ctl bg-surface-container text-text-mid" data-testid={`routing-rules-${module.id}`}>
+          <summary className="zds-state-layer flex cursor-pointer list-none items-center gap-1.5 rounded-ctl px-3 py-2 text-meta font-semibold marker:hidden">
+            <RouteIcon className="h-3.5 w-3.5" aria-hidden="true" />
+            {t('extensions.routingRulesInspect', { count: routingRuleCount })}
+            <ChevronDownIcon className="h-3.5 w-3.5 transition-transform group-open:rotate-180" aria-hidden="true" />
+          </summary>
+          <div className="max-h-40 overflow-y-auto border-t border-divider px-3 py-2.5">
+            <RoutingRuleList rules={module.routing_rules!} />
           </div>
         </details> : null}
 
@@ -202,10 +305,10 @@ function ExtensionCard({
             <Button type="button" variant="ghost" size="sm" className="h-10 w-10 px-0 sm:h-8 sm:w-8" aria-label={t('extensions.moveUp', { name: module.name })} title={t('extensions.moveUp', { name: module.name })} disabled={!reorderEnabled || module.execution_order <= 1 || busy} onClick={() => onMove(module, -1)}><ArrowUpIcon className="h-4 w-4" /></Button>
             <Button type="button" variant="ghost" size="sm" className="h-10 w-10 px-0 sm:h-8 sm:w-8" aria-label={t('extensions.moveDown', { name: module.name })} title={t('extensions.moveDown', { name: module.name })} disabled={!reorderEnabled || module.execution_order >= total || busy} onClick={() => onMove(module, 1)}><ArrowDownIcon className="h-4 w-4" /></Button>
           </div>
-          <span className="order-first flex min-w-0 basis-full items-center gap-1.5 pb-1 text-[10.5px] text-text-faint sm:order-none sm:basis-auto sm:pb-0 sm:flex-1">
+          <span className="order-first flex min-w-0 basis-full items-center gap-1.5 pb-1 text-meta text-text-faint sm:order-none sm:basis-auto sm:pb-0 sm:flex-1">
             {module.source_url ? <CloudIcon className="h-4 w-4 shrink-0" aria-hidden="true" /> : <FileIcon className="h-4 w-4 shrink-0" aria-hidden="true" />}
-            <span className="max-w-[180px] truncate sm:max-w-[104px]">{sourceLabel}</span>
-            <code className="shrink-0 font-mono text-[9px] text-text-faint" title={module.snapshot_digest}>· {module.snapshot_digest.slice(0, 8)}</code>
+            <span className="max-w-[180px] truncate sm:max-w-[260px]">{sourceLabel}</span>
+            <code className="shrink-0 font-mono text-meta text-text-faint" title={module.snapshot_digest}>· {module.snapshot_digest.slice(0, 8)}</code>
           </span>
           {module.source_url ? (
             <Button type="button" variant="ghost" size="sm" className="w-8 shrink-0 px-0" aria-label={t('extensions.checkUpdate')} title={t('extensions.checkUpdate')} disabled={busy} onClick={() => onCheckUpdate(module)}>
@@ -273,9 +376,9 @@ function ExtensionSettingsModal({
     >
       {module ? (
         <div className="space-y-5">
-          <section className="rounded-[14px] bg-surface-container-low p-4" data-testid="capture-dns-editor">
-            <div className="text-[12px] font-medium text-text-strong">{t('extensions.captureDNS.title')}</div>
-            <p className="mt-1 text-[10.5px] leading-4 text-text-faint">{t('extensions.captureDNS.hint')}</p>
+          <section className="rounded-card bg-surface-container-low p-4" data-testid="capture-dns-editor">
+            <div className="text-label font-medium text-text-strong">{t('extensions.captureDNS.title')}</div>
+            <p className="mt-1 text-meta leading-4 text-text-faint">{t('extensions.captureDNS.hint')}</p>
             <SegmentedControl
               value={captureDNS}
               onChange={(value) => setCaptureDNS(value as InterceptCaptureDNS)}
@@ -286,12 +389,12 @@ function ExtensionSettingsModal({
                 ['china', t('extensions.captureDNS.china')],
               ] as Array<[InterceptCaptureDNS, string]>).map(([value, label]) => ({ value, label }))}
             />
-            <p className="mt-3 text-[10.5px] leading-4 text-text-soft">{t(`extensions.captureDNS.${captureDNS}Hint`)}</p>
+            <p className="mt-3 text-meta leading-4 text-text-soft">{t(`extensions.captureDNS.${captureDNS}Hint`)}</p>
           </section>
-          <section className="rounded-[14px] bg-surface-container-low p-4">
-            <div className="text-[12px] font-medium text-text-strong">{t('extensions.egressGroupTitle')}</div>
-            <p className="mt-1 text-[10.5px] leading-4 text-text-faint">{t('extensions.egressGroupHint')}</p>
-            {((module.egress_group_required && !module.egress_group) || (!!module.egress_group && !egressGroups.includes(module.egress_group))) ? <p role="alert" className="mt-3 text-[11px] font-medium text-[var(--md-sys-color-error)]">{t('extensions.egressGroupMissingDetail', { group: module.egress_group || t('extensions.egressGroupUnset') })}</p> : null}
+          <section className="rounded-card bg-surface-container-low p-4">
+            <div className="text-label font-medium text-text-strong">{t('extensions.egressGroupTitle')}</div>
+            <p className="mt-1 text-meta leading-4 text-text-faint">{t('extensions.egressGroupHint')}</p>
+            {((module.egress_group_required && !module.egress_group) || (!!module.egress_group && !egressGroups.includes(module.egress_group))) ? <p role="alert" className="mt-3 text-label font-medium text-[var(--md-sys-color-error)]">{t('extensions.egressGroupMissingDetail', { group: module.egress_group || t('extensions.egressGroupUnset') })}</p> : null}
             <Select value={egressGroup} onValueChange={setEgressGroup} items={[{ value: DEFAULT_EGRESS_GROUP, label: t('extensions.egressGroupDefault') }, ...egressGroups.map((group) => ({ value: group, label: group }))]} placeholder={t('extensions.selectEgressGroup')} className="mt-3 w-full" />
           </section>
           {(module.settings ?? []).map((setting) => {
@@ -302,8 +405,8 @@ function ExtensionSettingsModal({
               return (
                 <section key={setting.key} className="space-y-3">
                   <div>
-                    <div className="text-[12.5px] font-medium text-text-strong">{label}{setting.required ? ' *' : ''}</div>
-                    {description ? <p className="mt-1 text-[10.5px] leading-4 text-text-faint">{description}</p> : null}
+                    <div className="text-body font-medium text-text-strong">{label}{setting.required ? ' *' : ''}</div>
+                    {description ? <p className="mt-1 text-meta leading-4 text-text-faint">{description}</p> : null}
                   </div>
                   <LocationPicker value={location} onChange={(next) => setValues((current) => ({ ...current, [setting.key]: next }))} />
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -322,10 +425,10 @@ function ExtensionSettingsModal({
             }
             if (setting.type === 'boolean') {
               return (
-                <div key={setting.key} className="flex items-start justify-between gap-4 rounded-[14px] bg-surface-container-low p-4">
+                <div key={setting.key} className="flex items-start justify-between gap-4 rounded-card bg-surface-container-low p-4">
                   <div>
-                    <div className="text-[12px] font-medium text-text-strong">{label}</div>
-                    {description ? <p className="mt-1 text-[10.5px] leading-4 text-text-faint">{description}</p> : null}
+                    <div className="text-label font-medium text-text-strong">{label}</div>
+                    {description ? <p className="mt-1 text-meta leading-4 text-text-faint">{description}</p> : null}
                   </div>
                   <Toggle checked={values[setting.key] === true} onCheckedChange={(checked) => setValues((current) => ({ ...current, [setting.key]: checked }))} aria-label={label} />
                 </div>
@@ -334,14 +437,14 @@ function ExtensionSettingsModal({
             return (
               <Field key={setting.key} label={`${label}${setting.required ? ' *' : ''}`}>
                 {setting.type === 'select' ? (
-                  <select aria-label={label} className="w-full rounded-[10px] border border-input-border bg-input px-3 py-2.5 text-[12px] text-text-strong outline-none" value={String(values[setting.key] ?? '')} onChange={(event) => setValues((current) => ({ ...current, [setting.key]: event.target.value }))}>
+                  <select aria-label={label} className="w-full rounded-ctl border border-input-border bg-input px-3 py-2.5 text-label text-text-strong outline-none" value={String(values[setting.key] ?? '')} onChange={(event) => setValues((current) => ({ ...current, [setting.key]: event.target.value }))}>
                     <option value="">{t('extensions.selectSetting')}</option>
                     {(setting.options ?? []).map((option) => <option key={option} value={option}>{option}</option>)}
                   </select>
                 ) : (
                   <Input aria-label={label} type={setting.type === 'number' ? 'number' : 'text'} min={setting.min} max={setting.max} value={String(values[setting.key] ?? '')} onChange={(event) => setValues((current) => ({ ...current, [setting.key]: setting.type === 'number' ? (event.target.value === '' ? undefined : Number(event.target.value)) : event.target.value }))} />
                 )}
-                {description ? <p className="mt-1 text-[10.5px] leading-4 text-text-faint">{description}</p> : null}
+                {description ? <p className="mt-1 text-meta leading-4 text-text-faint">{description}</p> : null}
               </Field>
             )
           })}
@@ -378,15 +481,15 @@ function ExtensionUpdateModal({
     >
       {review ? (
         <div className="space-y-4">
-          {review.current.enabled ? <div role="alert" className="rounded-[12px] bg-[var(--md-sys-color-warning-container)] px-3.5 py-3 text-[11px] text-[var(--md-sys-color-on-warning-container)]">{t('extensions.disableBeforeUpdate')}</div> : null}
+          {review.current.enabled ? <div role="alert" className="rounded-ctl bg-[var(--md-sys-color-warning-container)] px-3.5 py-3 text-label text-[var(--md-sys-color-on-warning-container)]">{t('extensions.disableBeforeUpdate')}</div> : null}
           <div className="grid gap-3 sm:grid-cols-2">
-            <div className="rounded-[14px] bg-surface-container-low p-4">
-              <div className="text-[10.5px] font-medium text-text-faint">{t('extensions.currentSnapshot')} · v{review.current.extension_version}</div>
-              <code className="mt-2 block break-all font-mono text-[10.5px] text-text-mid">{review.current.snapshot_digest}</code>
+            <div className="rounded-card bg-surface-container-low p-4">
+              <div className="text-meta font-medium text-text-faint">{t('extensions.currentSnapshot')} · v{review.current.extension_version}</div>
+              <code className="mt-2 block break-all font-mono text-meta text-text-mid">{review.current.snapshot_digest}</code>
             </div>
-            <div className="rounded-[14px] bg-primary-container p-4 text-on-primary-container">
-              <div className="text-[10.5px] font-medium opacity-70">{t('extensions.candidateSnapshot')} · v{review.candidate.extension_version}</div>
-              <code className="mt-2 block break-all font-mono text-[10.5px]">{review.candidate.snapshot_digest}</code>
+            <div className="rounded-card bg-primary-container p-4 text-on-primary-container">
+              <div className="text-meta font-medium opacity-70">{t('extensions.candidateSnapshot')} · v{review.candidate.extension_version}</div>
+              <code className="mt-2 block break-all font-mono text-meta">{review.candidate.snapshot_digest}</code>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -397,32 +500,32 @@ function ExtensionUpdateModal({
             {review.candidate.egress_group_required ? <Badge tone="cyan">{t('extensions.egressGroupTitle')}</Badge> : null}
             {(review.candidate.settings?.length ?? 0) > 0 ? <Badge tone="indigo">{t('extensions.settingsAction', { count: review.candidate.settings?.length ?? 0 })}</Badge> : null}
           </div>
-          <section className="rounded-[14px] bg-surface-container-low p-3.5" data-testid="update-capture-dns">
+          <section className="rounded-card bg-surface-container-low p-3.5" data-testid="update-capture-dns">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="text-[11px] font-medium text-text-faint">{t('extensions.captureDNS.title')}</div>
+              <div className="text-label font-medium text-text-faint">{t('extensions.captureDNS.title')}</div>
               <Badge tone={review.candidate.capture_dns === 'china' ? 'amber' : 'blue'}>{t(`extensions.captureDNS.${review.candidate.capture_dns}`)}</Badge>
             </div>
-            <p className="mt-1.5 text-[10.5px] leading-4 text-text-soft">{t(`extensions.captureDNS.${review.candidate.capture_dns}Hint`)}</p>
+            <p className="mt-1.5 text-meta leading-4 text-text-soft">{t(`extensions.captureDNS.${review.candidate.capture_dns}Hint`)}</p>
           </section>
           <div>
-            <div className="mb-2 text-[11px] font-medium text-text-faint">{t('extensions.captureHosts')}</div>
-            <div className="flex max-h-36 flex-wrap gap-1.5 overflow-y-auto rounded-[12px] bg-surface-container-low p-3">
-              {review.candidate.capture_hosts.map((host) => <code key={host} className="rounded-[7px] bg-card px-2 py-1 font-mono text-[10px] text-text-mid">{host}</code>)}
+            <div className="mb-2 text-label font-medium text-text-faint">{t('extensions.captureHosts')}</div>
+            <div className="flex max-h-36 flex-wrap gap-1.5 overflow-y-auto rounded-ctl bg-surface-container-low p-3">
+              {review.candidate.capture_hosts.map((host) => <code key={host} className="rounded-chip bg-card px-2 py-1 font-mono text-meta text-text-mid">{host}</code>)}
             </div>
           </div>
           {review.candidate.network_origins.length > 0 ? <div>
-            <div className="mb-2 text-[11px] font-medium text-text-faint">{t('extensions.networkOriginsTitle')}</div>
-            <div className="flex max-h-36 flex-wrap gap-1.5 overflow-y-auto rounded-[12px] bg-[var(--md-sys-color-warning-container)] p-3 text-[var(--md-sys-color-on-warning-container)]">
-              {review.candidate.network_origins.map((origin) => <code key={origin} title={origin} className="inline-block min-w-0 max-w-full break-all rounded-[7px] bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-[10px]">{origin}</code>)}
+            <div className="mb-2 text-label font-medium text-text-faint">{t('extensions.networkOriginsTitle')}</div>
+            <div className="flex max-h-36 flex-wrap gap-1.5 overflow-y-auto rounded-ctl bg-[var(--md-sys-color-warning-container)] p-3 text-[var(--md-sys-color-on-warning-container)]">
+              {review.candidate.network_origins.map((origin) => <code key={origin} title={origin} className="inline-block min-w-0 max-w-full break-all rounded-chip bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-meta">{origin}</code>)}
             </div>
           </div> : null}
           {(review.candidate.routing_rules?.length ?? 0) > 0 ? <div>
-            <div className="mb-2 text-[11px] font-medium text-text-faint">{t('extensions.routingRulesTitle')}</div>
-            <div className="max-h-40 space-y-1.5 overflow-y-auto rounded-[12px] bg-[var(--md-sys-color-warning-container)] p-3 text-[var(--md-sys-color-on-warning-container)]">
-              {review.candidate.routing_rules!.map((rule, index) => <code key={`${index}:${JSON.stringify(rule)}`} className="block break-all rounded-[7px] bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-[10px]">{JSON.stringify(rule)}</code>)}
+            <div className="mb-2 text-label font-medium text-text-faint">{t('extensions.routingRulesTitle')}</div>
+            <div className="max-h-40 overflow-y-auto rounded-ctl bg-[var(--md-sys-color-warning-container)] p-3 text-[var(--md-sys-color-on-warning-container)]">
+              <RoutingRuleList rules={review.candidate.routing_rules!} />
             </div>
           </div> : null}
-          <p className="text-[10.5px] leading-5 text-text-faint">{t('extensions.updateSafety')}</p>
+          <p className="text-meta leading-5 text-text-faint">{t('extensions.updateSafety')}</p>
         </div>
       ) : null}
     </Modal>
@@ -448,27 +551,27 @@ function EnableExtensionModal({
       footer={<><Button type="button" variant="secondary" size="sm" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button><Button type="button" size="sm" onClick={onConfirm}>{t('extensions.toggleOn')}</Button></>}
     >
       {module ? <div className="space-y-4">
-        <p className="text-[12.5px] leading-6 text-text-soft">{t('extensions.enableBody')}</p>
-        <section className="rounded-[14px] bg-primary-container p-4 text-on-primary-container" data-testid="enable-capture-dns">
+        <p className="text-body leading-6 text-text-soft">{t('extensions.enableBody')}</p>
+        <section className="rounded-card bg-primary-container p-4 text-on-primary-container" data-testid="enable-capture-dns">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="text-[11px] font-semibold">{t('extensions.captureDNS.title')}</div>
+            <div className="text-label font-semibold">{t('extensions.captureDNS.title')}</div>
             <Badge tone={module.capture_dns === 'china' ? 'amber' : 'blue'}>{t(`extensions.captureDNS.${module.capture_dns}`)}</Badge>
           </div>
-          <p className="mt-1.5 text-[10.5px] leading-4 opacity-80">{t(`extensions.captureDNS.${module.capture_dns}Hint`)}</p>
+          <p className="mt-1.5 text-meta leading-4 opacity-80">{t(`extensions.captureDNS.${module.capture_dns}Hint`)}</p>
         </section>
-        {module.network_origins.length > 0 ? <section className="rounded-[14px] bg-[var(--md-sys-color-warning-container)] p-4 text-[11.5px] leading-5 text-[var(--md-sys-color-on-warning-container)]">
+        {module.network_origins.length > 0 ? <section className="rounded-card bg-[var(--md-sys-color-warning-container)] p-4 text-label leading-5 text-[var(--md-sys-color-on-warning-container)]">
           <div className="font-semibold">{t('extensions.networkOriginsTitle')}</div>
           <p className="mt-1">{t('extensions.networkOriginsWarning')}</p>
           <div className="mt-3 flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">
-            {module.network_origins.map((origin) => <code key={origin} title={origin} className="inline-block min-w-0 max-w-full break-all rounded-[7px] bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-[10px]">{origin}</code>)}
+            {module.network_origins.map((origin) => <code key={origin} title={origin} className="inline-block min-w-0 max-w-full break-all rounded-chip bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-meta">{origin}</code>)}
           </div>
-        </section> : <section className="rounded-[14px] bg-surface-container-low p-4 text-[11.5px] text-text-soft"><div className="font-medium text-text-strong">{t('extensions.networkOriginsTitle')}</div><p className="mt-1">{t('extensions.networkOriginsNone')}</p></section>}
-        {module.egress_group_required || module.egress_group ? <section className="rounded-[14px] bg-surface-container-low p-4"><div className="text-[11px] font-medium text-text-faint">{t('extensions.egressGroupTitle')}</div><code className="mt-1.5 block font-mono text-[12px] text-text-strong">{module.egress_group || t('extensions.egressGroupUnset')}</code></section> : null}
-        {(module.routing_rules?.length ?? 0) > 0 ? <section className="rounded-[14px] bg-[var(--md-sys-color-warning-container)] p-4 text-[11.5px] leading-5 text-[var(--md-sys-color-on-warning-container)]">
+        </section> : <section className="rounded-card bg-surface-container-low p-4 text-label text-text-soft"><div className="font-medium text-text-strong">{t('extensions.networkOriginsTitle')}</div><p className="mt-1">{t('extensions.networkOriginsNone')}</p></section>}
+        {module.egress_group_required || module.egress_group ? <section className="rounded-card bg-surface-container-low p-4"><div className="text-label font-medium text-text-faint">{t('extensions.egressGroupTitle')}</div><code className="mt-1.5 block font-mono text-label text-text-strong">{module.egress_group || t('extensions.egressGroupUnset')}</code></section> : null}
+        {(module.routing_rules?.length ?? 0) > 0 ? <section className="rounded-card bg-[var(--md-sys-color-warning-container)] p-4 text-label leading-5 text-[var(--md-sys-color-on-warning-container)]">
           <div className="font-semibold">{t('extensions.routingRulesTitle')}</div>
           <p className="mt-1">{t('extensions.routingRulesWarning')}</p>
-          <div className="mt-3 max-h-40 space-y-1.5 overflow-y-auto">
-            {module.routing_rules!.map((rule, index) => <code key={`${index}:${JSON.stringify(rule)}`} className="block break-all rounded-[7px] bg-[rgb(0_0_0_/_8%)] px-2 py-1 font-mono text-[10px]">{JSON.stringify(rule)}</code>)}
+          <div className="mt-3 max-h-40 overflow-y-auto">
+            <RoutingRuleList rules={module.routing_rules!} />
           </div>
         </section> : null}
       </div> : null}
@@ -496,11 +599,11 @@ function ReorderExtensionModal({
         {order.map((id, index) => {
           const module = modulesByID.get(id)
           return (
-            <li key={id} className="flex min-w-0 flex-wrap items-center gap-2 rounded-[9px] bg-card px-2.5 py-2">
-              <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-surface-container text-[10px] font-semibold text-text-faint">{index + 1}</span>
-              <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-text-strong">{module?.name ?? id}</span>
+            <li key={id} className="flex min-w-0 flex-wrap items-center gap-2 rounded-chip bg-card px-2.5 py-2">
+              <span className="grid h-5 w-5 shrink-0 place-items-center rounded-pill bg-surface-container text-meta font-semibold text-text-faint">{index + 1}</span>
+              <span className="min-w-0 flex-1 truncate text-label font-medium text-text-strong">{module?.name ?? id}</span>
               {module ? <Badge tone={module.capture_dns === 'china' ? 'amber' : 'blue'}>{t(`extensions.captureDNS.${module.capture_dns}`)}</Badge> : null}
-              <code className="max-w-[42%] truncate font-mono text-[9.5px] text-text-faint" title={id}>{id}</code>
+              <code className="max-w-[42%] truncate font-mono text-meta text-text-faint" title={id}>{id}</code>
             </li>
           )
         })}
@@ -517,14 +620,14 @@ function ReorderExtensionModal({
       footer={<><Button type="button" variant="secondary" size="sm" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button><Button type="button" size="sm" onClick={onConfirm}>{t('extensions.reorderConfirmAction')}</Button></>}
     >
       {action ? <div className="space-y-4">
-        <p className="text-[12.5px] leading-6 text-text-soft">{t('extensions.reorderConfirmBody')}</p>
+        <p className="text-body leading-6 text-text-soft">{t('extensions.reorderConfirmBody')}</p>
         <div className="grid gap-3 sm:grid-cols-2">
-          <section className="min-w-0 rounded-[14px] bg-surface-container-low p-3">
-            <h3 className="mb-2 text-[11px] font-semibold text-text-faint">{t('extensions.reorderBefore')}</h3>
+          <section className="min-w-0 rounded-card bg-surface-container-low p-3">
+            <h3 className="mb-2 text-label font-semibold text-text-faint">{t('extensions.reorderBefore')}</h3>
             {renderOrder(action.beforeOrder, 'extension-reorder-before')}
           </section>
-          <section className="min-w-0 rounded-[14px] bg-primary-container p-3">
-            <h3 className="mb-2 text-[11px] font-semibold text-on-primary-container">{t('extensions.reorderAfter')}</h3>
+          <section className="min-w-0 rounded-card bg-primary-container p-3">
+            <h3 className="mb-2 text-label font-semibold text-on-primary-container">{t('extensions.reorderAfter')}</h3>
             {renderOrder(action.afterOrder, 'extension-reorder-after')}
           </section>
         </div>
@@ -537,18 +640,18 @@ function SnapshotModal({ open, loading, snapshot, onOpenChange }: { open: boolea
   const { t } = useTranslation()
   return (
     <Modal open={open} onOpenChange={onOpenChange} title={snapshot ? t('extensions.snapshotTitle', { name: snapshot.name }) : t('extensions.snapshotLoading')} className="w-[min(94vw,780px)]" footer={<Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>{t('extensions.snapshotClose')}</Button>}>
-      {loading ? <div className="py-8 text-center text-[12px] text-text-faint">{t('common.loading')}</div> : null}
+      {loading ? <div className="py-8 text-center text-label text-text-faint">{t('common.loading')}</div> : null}
       {!loading && snapshot ? (
         <div className="max-h-[68vh] space-y-4 overflow-y-auto pr-1">
           <section>
-            <div className="mb-1.5 flex items-center justify-between gap-3 text-[10.5px] text-text-faint"><span className="font-bold uppercase tracking-[.08em]">{t('extensions.snapshotSource')}</span><code className="max-w-[70%] truncate" title={snapshot.source_digest}>{snapshot.source_digest}</code></div>
-            <pre className="max-h-[280px] overflow-auto whitespace-pre-wrap break-words rounded-[14px] bg-surface-container-low p-4 font-mono text-[10.5px] leading-relaxed text-text-mid">{snapshot.source_body}</pre>
+            <div className="mb-1.5 flex items-center justify-between gap-3 text-meta text-text-faint"><span className="font-bold uppercase tracking-[.08em]">{t('extensions.snapshotSource')}</span><code className="max-w-[70%] truncate" title={snapshot.source_digest}>{snapshot.source_digest}</code></div>
+            <pre className="max-h-[280px] overflow-auto whitespace-pre-wrap break-words rounded-card bg-surface-container-low p-4 font-mono text-meta leading-relaxed text-text-mid">{snapshot.source_body}</pre>
           </section>
           {snapshot.scripts.map((script) => (
-            <details key={script.id} className="rounded-[14px] bg-surface-container-low px-4 py-3">
-              <summary className="cursor-pointer text-[11px] font-bold text-text-strong">{t('extensions.snapshotScript', { id: script.id })}<code className="ml-2 font-normal text-text-faint">{script.digest.slice(0, 12)}…</code></summary>
-              {script.url ? <div className="mt-2 break-all text-[10px] text-primary">{script.url}</div> : null}
-              <pre className="mt-2 max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-[10px] bg-card p-3 font-mono text-[10.5px] leading-relaxed text-text-mid">{script.body}</pre>
+            <details key={script.id} className="rounded-card bg-surface-container-low px-4 py-3">
+              <summary className="cursor-pointer text-label font-bold text-text-strong">{t('extensions.snapshotScript', { id: script.id })}<code className="ml-2 font-normal text-text-faint">{script.digest.slice(0, 12)}…</code></summary>
+              {script.url ? <div className="mt-2 break-all text-meta text-primary">{script.url}</div> : null}
+              <pre className="mt-2 max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-ctl bg-card p-3 font-mono text-meta leading-relaxed text-text-mid">{script.body}</pre>
             </details>
           ))}
         </div>
@@ -623,15 +726,15 @@ function InstallExtensionModal({
       {review ? <ExtensionInstallReview module={review} /> : mode === 'url' ? (
         <div className="space-y-4">
           <Field label={t('extensions.install.url')}><Input aria-label={t('extensions.install.url')} maxLength={4096} mono value={url} placeholder={t('extensions.install.urlPlaceholder')} onChange={(event) => setURL(event.target.value)} /></Field>
-          <div className="flex items-start gap-2.5 rounded-[14px] bg-surface-container-low px-4 py-3" data-testid="extension-install-url-info"><FileSearchIcon className="mt-0.5 h-5 w-5 shrink-0 text-primary" aria-hidden="true" /><p className="text-[11px] leading-relaxed text-text-soft">{t('extensions.install.urlInfo')}</p></div>
+          <div className="flex items-start gap-2.5 rounded-card bg-surface-container-low px-4 py-3" data-testid="extension-install-url-info"><FileSearchIcon className="mt-0.5 h-5 w-5 shrink-0 text-primary" aria-hidden="true" /><p className="text-label leading-relaxed text-text-soft">{t('extensions.install.urlInfo')}</p></div>
         </div>
       ) : (
         <div className="space-y-4">
           <Field label={t('extensions.install.content')}>
-            <textarea className="min-h-[240px] resize-y rounded-[14px] border border-input-border bg-input px-4 py-3 font-mono text-[12px] leading-5 text-text-strong outline-none focus:border-primary focus:bg-card" aria-label={t('extensions.install.content')} value={content} maxLength={2097152} placeholder={t('extensions.install.contentPlaceholder')} onChange={(event) => setContent(event.target.value)} />
-            <label className="zds-state-layer mt-2 inline-flex cursor-pointer items-center gap-2 rounded-full px-3 py-2 text-[11.5px] font-medium text-primary"><UploadIcon className="h-4 w-4" /> {t('extensions.install.upload')}<input className="sr-only" type="file" accept=".yaml,.yml,.json,text/yaml,application/yaml,text/plain" onChange={(event) => void chooseFile(event)} /></label>
+            <textarea className="min-h-[240px] resize-y rounded-card border border-input-border bg-input px-4 py-3 font-mono text-label leading-5 text-text-strong outline-none focus:border-primary focus:bg-card" aria-label={t('extensions.install.content')} value={content} maxLength={2097152} placeholder={t('extensions.install.contentPlaceholder')} onChange={(event) => setContent(event.target.value)} />
+            <label className="zds-state-layer mt-2 inline-flex cursor-pointer items-center gap-2 rounded-pill px-3 py-2 text-label font-medium text-primary"><UploadIcon className="h-4 w-4" /> {t('extensions.install.upload')}<input className="sr-only" type="file" accept=".yaml,.yml,.json,text/yaml,application/yaml,text/plain" onChange={(event) => void chooseFile(event)} /></label>
           </Field>
-          <div className="flex items-start gap-2.5 rounded-[14px] bg-surface-container-low px-4 py-3" data-testid="extension-install-local-info"><FileSearchIcon className="mt-0.5 h-5 w-5 shrink-0 text-primary" aria-hidden="true" /><p className="text-[11px] leading-relaxed text-text-soft">{t('extensions.install.localInfo')}</p></div>
+          <div className="flex items-start gap-2.5 rounded-card bg-surface-container-low px-4 py-3" data-testid="extension-install-local-info"><FileSearchIcon className="mt-0.5 h-5 w-5 shrink-0 text-primary" aria-hidden="true" /><p className="text-label leading-relaxed text-text-soft">{t('extensions.install.localInfo')}</p></div>
         </div>
       )}
     </Modal>
@@ -687,6 +790,11 @@ export default function ExtensionsPage() {
   const reorderModeAvailable = filter === 'all' && search.trim() === ''
   const showingHosts = location.pathname === '/extensions/hosts'
   const scopedModuleID = new URLSearchParams(location.search).get('plugin') ?? undefined
+  // The marketplace links here with `?update=<id>` when a source has moved
+  // past the installed version. Replacing a snapshot is a reviewed action, so
+  // the link opens this page's existing confirmation rather than carrying a
+  // second copy of it.
+  const requestedUpdateID = new URLSearchParams(location.search).get('update') ?? undefined
   const trustState = !acknowledged ? 'trust' : !settings?.enabled ? 'master' : 'ready'
 
   function beginModuleMutation(id: string): boolean {
@@ -770,6 +878,19 @@ export default function ExtensionsPage() {
     }
   }
 
+  const updateRequestHandled = useRef(false)
+  useEffect(() => {
+    if (!requestedUpdateID || !view || updateRequestHandled.current) return
+    updateRequestHandled.current = true
+    const target = view.modules.find((module) => module.id === requestedUpdateID)
+    navigate('/extensions', { replace: true })
+    if (target) void checkExtensionUpdate(target)
+    else toast.error(t('extensions.updateTargetMissing', { id: requestedUpdateID }))
+    // checkExtensionUpdate is a stable page-scoped function; re-running this
+    // on every render would re-open the dialog the operator just dismissed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestedUpdateID, view])
+
   async function checkExtensionUpdate(module: InterceptModule) {
     if (!view || !module.source_url || !beginModuleMutation(module.id)) return
     try {
@@ -801,20 +922,20 @@ export default function ExtensionsPage() {
 
   return (
     <div className="flex flex-col gap-4" data-testid="page-extensions">
-      <div className={cn('flex flex-col gap-3 rounded-[20px] px-5 py-4 sm:flex-row sm:items-center sm:justify-between', trustState === 'ready' ? 'bg-[var(--md-sys-color-success-container)] text-[var(--md-sys-color-on-success-container)]' : trustState === 'master' ? 'bg-[var(--md-sys-color-warning-container)] text-[var(--md-sys-color-on-warning-container)]' : 'bg-primary-container text-on-primary-container')} data-testid="mitm-readiness-notice">
-        <div className="flex items-start gap-2.5">{trustState === 'ready' ? <VerifiedIcon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" /> : <ShieldLockIcon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />}<div><div className="text-[12.5px] font-semibold">{t(`extensions.readiness.${trustState}.title`)}</div><p className="mt-0.5 text-[11px] leading-relaxed opacity-80">{t(`extensions.readiness.${trustState}.body`, { count: activeCount })}</p></div></div>
-        <Link className={cn('zds-state-layer inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-full px-5 text-[12px] font-medium', trustState === 'ready' ? 'bg-[rgb(0_0_0_/_8%)]' : 'bg-primary text-[var(--md-sys-color-on-primary)]')} to={trustState === 'master' ? '/settings' : '/setup-guide'}>{trustState !== 'ready' ? <LinkIcon className="h-4 w-4" aria-hidden="true" /> : null}{t(`extensions.readiness.${trustState}.action`)}</Link>
+      <div className={cn('flex flex-col gap-3 rounded-card px-5 py-4 sm:flex-row sm:items-center sm:justify-between', trustState === 'ready' ? 'bg-[var(--md-sys-color-success-container)] text-[var(--md-sys-color-on-success-container)]' : trustState === 'master' ? 'bg-[var(--md-sys-color-warning-container)] text-[var(--md-sys-color-on-warning-container)]' : 'bg-primary-container text-on-primary-container')} data-testid="mitm-readiness-notice">
+        <div className="flex items-start gap-2.5">{trustState === 'ready' ? <VerifiedIcon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" /> : <ShieldLockIcon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />}<div><div className="text-body font-semibold">{t(`extensions.readiness.${trustState}.title`)}</div><p className="mt-0.5 text-label leading-relaxed opacity-80">{t(`extensions.readiness.${trustState}.body`, { count: activeCount })}</p></div></div>
+        <Link className={cn('zds-state-layer inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-pill px-5 text-label font-medium', trustState === 'ready' ? 'bg-[rgb(0_0_0_/_8%)]' : 'bg-primary text-[var(--md-sys-color-on-primary)]')} to={trustState === 'master' ? '/settings' : '/setup-guide'}>{trustState !== 'ready' ? <LinkIcon className="h-4 w-4" aria-hidden="true" /> : null}{t(`extensions.readiness.${trustState}.action`)}</Link>
       </div>
 
-      {loading && !view ? <Card><CardBody className="text-center text-[12px] text-text-faint">{t('common.loading')}</CardBody></Card> : null}
-      {loadError && !view ? <Card><CardBody className="flex items-center justify-between gap-3"><span className="text-[12px] text-red">{t('extensions.loadFailed')}</span><Button variant="secondary" size="sm" onClick={() => void load()}><RefreshIcon className="h-4 w-4" />{t('extensions.retry')}</Button></CardBody></Card> : null}
+      {loading && !view ? <Card><CardBody className="text-center text-label text-text-faint">{t('common.loading')}</CardBody></Card> : null}
+      {loadError && !view ? <Card><CardBody className="flex items-center justify-between gap-3"><span className="text-label text-red">{t('extensions.loadFailed')}</span><Button variant="secondary" size="sm" onClick={() => void load()}><RefreshIcon className="h-4 w-4" />{t('extensions.retry')}</Button></CardBody></Card> : null}
 
       {!showingHosts && view ? <>
         <div className="flex flex-col gap-3 px-1 lg:flex-row lg:items-center">
-          <p className="min-w-[240px] flex-1 text-[12.5px] leading-5 text-text-faint">{t('extensions.catalogSummary', { total: view.modules.length, enabled: activeCount })}{' '}<button type="button" className="zds-state-layer rounded-full px-2 py-1 font-medium text-primary" onClick={() => void navigate('/extensions/hosts')}>{t('extensions.tabs.hosts', { count: hostCount })}</button></p>
+          <p className="min-w-[240px] flex-1 text-body leading-5 text-text-faint">{t('extensions.catalogSummary', { total: view.modules.length, enabled: activeCount })}{' '}<button type="button" className="zds-state-layer rounded-pill px-2 py-1 font-medium text-primary" onClick={() => void navigate('/extensions/hosts')}>{t('extensions.tabs.hosts', { count: hostCount })}</button></p>
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" variant="ghost" size="sm" className="w-9 px-0" aria-label={t('extensions.refresh')} title={t('extensions.refresh')} onClick={() => void load()} disabled={loading}><RefreshIcon className="h-4 w-4" /></Button>
-            <a href={view.catalog_url} target="_blank" rel="noreferrer" aria-label={t('extensions.catalog')} title={t('extensions.catalog')} className="zds-state-layer grid h-9 w-9 place-items-center rounded-full text-primary"><ExternalLinkIcon className="h-4 w-4" aria-hidden="true" /></a>
+            <a href={view.catalog_url} target="_blank" rel="noreferrer" aria-label={t('extensions.catalog')} title={t('extensions.catalog')} className="zds-state-layer grid h-field w-field place-items-center rounded-pill text-primary sm:h-9 sm:w-9"><ExternalLinkIcon className="h-4 w-4" aria-hidden="true" /></a>
             <Button type="button" variant="tonal" size="sm" disabled={busyID !== null} onClick={() => setInstallMode('url')}><LinkIcon className="h-4 w-4" />{t('extensions.addUrl')}</Button>
             <Button type="button" size="sm" disabled={busyID !== null} onClick={() => setInstallMode('local')}><AddIcon className="h-4 w-4" />{t('extensions.addLocal')}</Button>
           </div>
@@ -823,11 +944,11 @@ export default function ExtensionsPage() {
           <SegmentedControl value={filter} onChange={(value) => setFilter(value as ExtensionFilter)} ariaLabel={t('extensions.filterLabel')} className="grid-cols-2 sm:grid-cols-4" options={([['all', t('extensions.filters.all')], ['enabled', t('extensions.filters.enabled')], ['capture', t('extensions.filters.capture')], ['local', t('extensions.filters.local')]] as Array<[ExtensionFilter, string]>).map(([value, label]) => ({ value, label }))} />
           <div className="relative min-w-0 sm:ml-auto sm:w-[300px] sm:flex-none"><SearchIcon className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-text-faint" aria-hidden="true" /><Input value={search} onChange={(event) => setSearch(event.target.value)} aria-label={t('extensions.search')} placeholder={t('extensions.searchPlaceholder')} className="pl-10" /></div>
         </div>
-        {!reorderModeAvailable && view.modules.length > 1 ? <p role="status" data-testid="extension-order-hint" className="px-1 text-[10.5px] leading-4 text-text-faint">{t('extensions.orderUnavailableHint')}</p> : null}
-        {visibleModules.length > 0 ? <div className="space-y-3" aria-busy={busyID !== null}>{visibleModules.map((module) => <ExtensionCard key={module.id} module={module} busy={busyID !== null} trusted={acknowledged} egressGroups={view.available_egress_groups} reorderEnabled={reorderModeAvailable} total={view.modules.length} onMove={requestModuleMove} onToggle={(selected) => setPending({ kind: 'toggle', module: selected })} onDelete={(selected) => setPending({ kind: 'delete', module: selected })} onInspect={(selected) => void inspectModule(selected)} onConfigure={setConfigTarget} onAudit={(selected) => void navigate(`/extensions/hosts?plugin=${encodeURIComponent(selected.id)}`)} onCheckUpdate={(selected) => void checkExtensionUpdate(selected)} />)}</div> : <Card className="p-10 text-center shadow-none"><div className="text-[13px] font-medium text-text-strong">{t('extensions.noMatches')}</div><div className="mt-1 text-[11.5px] text-text-faint">{t('extensions.noMatchesHint')}</div></Card>}
+        {!reorderModeAvailable && view.modules.length > 1 ? <p role="status" data-testid="extension-order-hint" className="px-1 text-meta leading-4 text-text-faint">{t('extensions.orderUnavailableHint')}</p> : null}
+        {visibleModules.length > 0 ? <div className="space-y-3" aria-busy={busyID !== null}>{visibleModules.map((module) => <ExtensionCard key={module.id} module={module} busy={busyID !== null} trusted={acknowledged} egressGroups={view.available_egress_groups} reorderEnabled={reorderModeAvailable} total={view.modules.length} onMove={requestModuleMove} onToggle={(selected) => setPending({ kind: 'toggle', module: selected })} onDelete={(selected) => setPending({ kind: 'delete', module: selected })} onInspect={(selected) => void inspectModule(selected)} onConfigure={setConfigTarget} onAudit={(selected) => void navigate(`/extensions/hosts?plugin=${encodeURIComponent(selected.id)}`)} onCheckUpdate={(selected) => void checkExtensionUpdate(selected)} />)}</div> : <Card className="p-10 text-center shadow-none"><div className="text-body font-medium text-text-strong">{t('extensions.noMatches')}</div><div className="mt-1 text-label text-text-faint">{t('extensions.noMatchesHint')}</div></Card>}
         </> : null}
 
-      {showingHosts && view ? <><div className="flex items-center justify-between gap-3 px-1"><p className="text-[12.5px] text-text-faint">{t('extensions.hostAudit.intro')}</p><Button type="button" variant="secondary" size="sm" onClick={() => void navigate('/extensions')}>{t('extensions.backToCatalog')}</Button></div><HostAuditView view={view} settings={settings} moduleID={scopedModuleID} onClearModule={() => void navigate('/extensions/hosts')} /></> : null}
+      {showingHosts && view ? <><div className="flex items-center justify-between gap-3 px-1"><p className="text-body text-text-faint">{t('extensions.hostAudit.intro')}</p><Button type="button" variant="secondary" size="sm" onClick={() => void navigate('/extensions')}>{t('extensions.backToCatalog')}</Button></div><HostAuditView view={view} settings={settings} moduleID={scopedModuleID} onClearModule={() => void navigate('/extensions/hosts')} /></> : null}
 
       {view ? <InstallExtensionModal mode={installMode} revision={view.revision} existingIDs={view.modules.map((module) => module.id)} onOpenChange={(open) => { if (!open) setInstallMode(null) }} onInstalled={setView} /> : null}
       <SnapshotModal open={snapshotOpen} loading={snapshotLoading} snapshot={snapshot} onOpenChange={setSnapshotOpen} />

@@ -3,8 +3,8 @@ import type { TFunction } from 'i18next'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router-dom'
-import { Badge, Button, Card, ConfirmDialog, DataLine, Field, Input, Toggle, toast } from '../../components/ds'
-import { ResetIcon, ShieldFilledIcon } from '../../components/icons'
+import { Badge, Button, Card, CardSkeleton, CardState, ConfirmDialog, DataLine, Field, Input, Toggle, toast } from '../../components/ds'
+import { ResetIcon } from '../../components/icons'
 import { cn } from '../../lib/cn'
 import { THEME_CATALOG, useTheme, type ThemeName } from '../../lib/theme'
 import { api } from '../../lib/api/client'
@@ -35,8 +35,8 @@ export function AppearanceCard() {
     <Card variant="tonal" className="p-5 sm:p-6" data-testid="appearance-card">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
         <div className="min-w-[220px] flex-1">
-          <h2 className="text-[16px] font-medium text-text-strong">{t('settings.appearance')}</h2>
-          <p className="mt-1 text-[11.5px] leading-5 text-text-faint">{t('settings.appearanceHint')}</p>
+          <h2 className="text-title font-medium text-text-strong">{t('settings.appearance')}</h2>
+          <p className="mt-1 text-label leading-5 text-text-faint">{t('settings.appearanceHint')}</p>
         </div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-5" role="radiogroup" aria-label={t('settings.appearance')}>
           {THEME_CATALOG.map((item) => (
@@ -47,11 +47,11 @@ export function AppearanceCard() {
               aria-checked={theme === item.name}
               onClick={() => setTheme(item.name as ThemeName)}
               className={cn(
-                'zds-state-layer flex min-h-12 items-center gap-2 rounded-[12px] px-3 text-[11.5px] font-medium',
+                'zds-state-layer flex min-h-12 items-center gap-2 rounded-ctl px-3 text-label font-medium',
                 theme === item.name ? 'bg-card text-primary shadow-[var(--md-sys-elevation-1)]' : 'text-text-mid',
               )}
             >
-              <span className="h-4 w-4 shrink-0 rounded-full border-2 border-card" style={{ background: item.swatch }} />
+              <span className="h-4 w-4 shrink-0 rounded-pill border-2 border-card" style={{ background: item.swatch }} />
               {t(`topbar.themeNames.${item.name}`)}
             </button>
           ))}
@@ -88,9 +88,9 @@ export function DotServiceCard({ cert, dotDomain }: { cert?: CertStatus; dotDoma
 
   return (
     <Card className="p-5 sm:p-6">
-      <div className="mb-1 text-[15px] font-medium text-text-strong">{t('settings.dotService')}</div>
+      <div className="mb-1 text-title font-medium text-text-strong">{t('settings.dotService')}</div>
       <div className="flex flex-col gap-2 border-b border-divider pb-3">
-        <span className="text-[12.5px] font-semibold text-text-mid">{t('settings.dotDomain')}</span>
+        <span className="text-body font-semibold text-text-mid">{t('settings.dotDomain')}</span>
         <Input
           mono
           disabled
@@ -98,7 +98,14 @@ export function DotServiceCard({ cert, dotDomain }: { cert?: CertStatus; dotDoma
           value={dotDomain ?? ''}
           placeholder={t('common.loading')}
           aria-label={t('settings.dotDomain')}
+          aria-describedby="dot-domain-readonly"
         />
+        {/* Why it is disabled, in the open. A disabled control with no reason
+            beside it reads as broken; a `title` tooltip would not reach a
+            touch screen at all. */}
+        <span id="dot-domain-readonly" className="text-label leading-relaxed text-text-faint">
+          {t('settings.dotDomainReadOnly')}
+        </span>
       </div>
       <DataLine className="border-b-0" label={t('settings.cert')} sub={sub}>
         <Badge tone={tone}>{label}</Badge>
@@ -114,9 +121,9 @@ export function ConsoleCard() {
 
   return (
     <Card className="p-5 sm:p-6">
-      <div className="mb-1 text-[15px] font-medium text-text-strong">{t('settings.consoleTitle')}</div>
+      <div className="mb-1 text-title font-medium text-text-strong">{t('settings.consoleTitle')}</div>
       <DataLine label={t('settings.listenPort')} sub={t('settings.listenPortHint')}>
-        <span className="font-mono text-[12.5px] font-bold text-primary">127.0.0.1:443</span>
+        <span className="font-mono text-body font-bold text-primary">127.0.0.1:443</span>
       </DataLine>
       <DataLine className="border-b-0" label={t('settings.consoleAuth')} sub={t('settings.consoleAuthHint')}>
         <Badge tone="blue">Bearer</Badge>
@@ -165,13 +172,13 @@ export function StatsResetCard({ stats }: { stats?: Stats }) {
 
   return (
     <Card className="p-5 sm:p-6">
-      <div className="mb-1 text-[15px] font-medium text-text-strong">{t('settings.statsTitle')}</div>
-      <p className="mb-3 text-[11.5px] leading-relaxed text-text-faint">{t('settings.statsHint')}</p>
+      <div className="mb-1 text-title font-medium text-text-strong">{t('settings.statsTitle')}</div>
+      <p className="mb-3 text-label leading-relaxed text-text-faint">{t('settings.statsHint')}</p>
       <DataLine label={t('settings.statsQueries')} sub={t('settings.statsQueriesHint')}>
-        <span className="font-mono text-[12.5px] font-medium tabular-nums text-text-strong">{formatter.format(total)}</span>
+        <span className="font-mono text-body font-medium tabular-nums text-text-strong">{formatter.format(total)}</span>
       </DataLine>
       <DataLine className="border-b-0" label={t('settings.statsSamples')} sub={t('settings.statsSamplesHint')}>
-        <span className="font-mono text-[12.5px] font-medium tabular-nums text-text-strong">{formatter.format(samples)}</span>
+        <span className="font-mono text-body font-medium tabular-nums text-text-strong">{formatter.format(samples)}</span>
       </DataLine>
       <div className="mt-4 flex justify-end">
         <Button
@@ -259,33 +266,29 @@ export function MITMSettingsCard({
     <Card className="p-5 sm:p-6" data-testid="mitm-settings-card">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <div className="text-[15px] font-medium text-text-strong">{t('settings.mitmTitle')}</div>
-          <p className="mt-1 max-w-3xl text-[10.5px] leading-relaxed text-text-faint">{t('settings.mitmHint')}</p>
+          <div className="text-title font-medium text-text-strong">{t('settings.mitmTitle')}</div>
+          <p className="mt-1 max-w-3xl text-meta leading-relaxed text-text-faint">{t('settings.mitmHint')}</p>
         </div>
         <Badge tone={statusEnabled ? 'green' : 'neutral'}>
           {busyField === 'master' ? t('common.saving') : statusEnabled ? t('settings.mitmRunning') : t('settings.mitmStopped')}
         </Badge>
       </div>
 
-      {loadState === 'loading' && !settings ? (
-        <div role="status" className="mt-4 rounded-[16px] bg-surface-container-low px-4 py-4 text-[10.5px] text-text-faint">
-          {t('common.loading')}
-        </div>
-      ) : null}
-      {loadState === 'error' ? (
-        <div role="alert" className="mt-4 flex flex-col gap-2 rounded-[16px] bg-[var(--md-sys-color-error-container)] px-4 py-3 text-[10.5px] text-[var(--md-sys-color-on-error-container)] sm:flex-row sm:items-center sm:justify-between">
-          <span>{t('settings.mitmLoadFailed')}</span>
-          <Button type="button" variant="secondary" size="sm" onClick={() => void onReload()}>
-            {t('common.reload')}
-          </Button>
-        </div>
-      ) : null}
+      <CardState
+        className="mt-4"
+        state={loadState}
+        hasContent={!!settings}
+        loadingText={t('common.loading')}
+        errorText={t('settings.mitmLoadFailed')}
+        retryLabel={t('common.reload')}
+        onRetry={() => void onReload()}
+      />
 
-      <div className="mt-4 overflow-hidden rounded-[20px] bg-surface-container-low">
+      <div className="mt-4 overflow-hidden rounded-card bg-surface-container-low">
         <div className="flex items-start justify-between gap-4 px-4 py-4 sm:px-5">
           <div className="min-w-0">
-            <div className="text-[13px] font-semibold text-text-strong">{t('settings.mitmMaster')}</div>
-            <p className="mt-1 text-[10.5px] leading-relaxed text-text-faint">{t('settings.mitmMasterHint')}</p>
+            <div className="text-body font-semibold text-text-strong">{t('settings.mitmMaster')}</div>
+            <p className="mt-1 text-meta leading-relaxed text-text-faint">{t('settings.mitmMasterHint')}</p>
           </div>
           <Toggle
             checked={settings?.enabled ?? false}
@@ -296,10 +299,10 @@ export function MITMSettingsCard({
         </div>
 
         {settings?.enabled ? <div className="grid grid-cols-1 gap-2 border-t border-divider p-2 sm:p-3 lg:grid-cols-2" data-testid="mitm-capabilities">
-          <div className="flex min-h-[112px] items-start justify-between gap-4 rounded-[16px] bg-card px-4 py-4 shadow-[var(--md-sys-elevation-1)]">
+          <div className="flex min-h-[112px] items-start justify-between gap-4 rounded-card bg-card px-4 py-4 shadow-[var(--md-sys-elevation-1)]">
             <div className="min-w-0">
-              <div className="text-[12.5px] font-semibold text-text-mid">{t('settings.mitmHTTP2')}</div>
-              <p className="mt-1 text-[10.5px] leading-relaxed text-text-faint">{t('settings.mitmHTTP2Hint')}</p>
+              <div className="text-body font-semibold text-text-mid">{t('settings.mitmHTTP2')}</div>
+              <p className="mt-1 text-meta leading-relaxed text-text-faint">{t('settings.mitmHTTP2Hint')}</p>
             </div>
             <Toggle
               checked={settings.http2}
@@ -309,10 +312,10 @@ export function MITMSettingsCard({
             />
           </div>
 
-          <div className="flex min-h-[112px] items-start justify-between gap-4 rounded-[16px] bg-card px-4 py-4 shadow-[var(--md-sys-elevation-1)]">
+          <div className="flex min-h-[112px] items-start justify-between gap-4 rounded-card bg-card px-4 py-4 shadow-[var(--md-sys-elevation-1)]">
             <div className="min-w-0">
-              <div className="text-[12.5px] font-semibold text-text-mid">{t('settings.mitmQUICFallback')}</div>
-              <p className="mt-1 text-[10.5px] leading-relaxed text-text-faint">{t('settings.mitmQUICFallbackHint')}</p>
+              <div className="text-body font-semibold text-text-mid">{t('settings.mitmQUICFallback')}</div>
+              <p className="mt-1 text-meta leading-relaxed text-text-faint">{t('settings.mitmQUICFallbackHint')}</p>
             </div>
             <Toggle
               checked={settings.quic_fallback_protection}
@@ -322,24 +325,24 @@ export function MITMSettingsCard({
             />
           </div>
         </div> : (
-          <div className="border-t border-divider px-4 py-3 text-[10.5px] leading-5 text-text-faint sm:px-5">
+          <div className="border-t border-divider px-4 py-3 text-meta leading-5 text-text-faint sm:px-5">
             {t('settings.mitmCapabilitiesWhenEnabled')}
           </div>
         )}
       </div>
 
-      <p className="mt-3 rounded-[14px] bg-[var(--md-sys-color-warning-container)] px-4 py-3 text-[10.5px] leading-relaxed text-[var(--md-sys-color-on-warning-container)]">
+      <p className="mt-3 rounded-card bg-[var(--md-sys-color-warning-container)] px-4 py-3 text-meta leading-relaxed text-[var(--md-sys-color-on-warning-container)]">
         {t('settings.mitmSafety')}
       </p>
       {error ? (
-        <div role="alert" className="mt-3 rounded-[12px] bg-[var(--md-sys-color-error-container)] px-3 py-2.5 text-[10.5px] leading-relaxed text-[var(--md-sys-color-on-error-container)]" data-testid="mitm-settings-error">
+        <div role="alert" className="mt-3 rounded-ctl bg-[var(--md-sys-color-error-container)] px-3 py-2.5 text-meta leading-relaxed text-[var(--md-sys-color-on-error-container)]" data-testid="mitm-settings-error">
           {error}
         </div>
       ) : null}
       <div className="mt-3 flex justify-start border-t border-divider pt-3">
         <Link
           to="/extensions/hosts"
-          className="zds-state-layer inline-flex min-h-9 items-center gap-2 rounded-full px-3 text-[11.5px] font-medium text-primary"
+          className="zds-state-layer inline-flex min-h-9 items-center gap-2 rounded-pill px-3 text-label font-medium text-primary"
           data-testid="mitm-host-audit-link"
         >
           {t('settings.mitmAuditHosts', { count: hostCount })}
@@ -457,26 +460,19 @@ export function IngressPortsCard({
 
   return (
     <Card className="p-5 sm:p-6" data-testid="ingress-ports-card">
-      <div className="mb-1 text-[15px] font-medium text-text-strong">{t('settings.ingressPorts')}</div>
-      <p className="mb-3 text-[10.5px] leading-relaxed text-text-faint">{t('settings.ingressPortsHint')}</p>
+      <div className="mb-1 text-title font-medium text-text-strong">{t('settings.ingressPorts')}</div>
+      <p className="mb-3 text-meta leading-relaxed text-text-faint">{t('settings.ingressPortsHint')}</p>
 
-      {loadState === 'loading' && !modules ? (
-        <div role="status" className="rounded-[14px] bg-surface-container-low px-4 py-4 text-[10.5px] text-text-faint">
-          {t('common.loading')}
-        </div>
-      ) : null}
-      {loadState === 'error' ? (
-        <div
-          role="alert"
-          className="mb-3 flex flex-col gap-2 rounded-[14px] bg-[var(--md-sys-color-error-container)] px-4 py-3 text-[10.5px] text-[var(--md-sys-color-on-error-container)] sm:flex-row sm:items-center sm:justify-between"
-          data-testid="ingress-ports-load-error"
-        >
-          <span>{t('settings.ingressLoadFailed')}</span>
-          <Button type="button" variant="secondary" size="sm" onClick={() => void onReload()}>
-            {t('common.reload')}
-          </Button>
-        </div>
-      ) : null}
+      <CardState
+        className={loadState === 'error' ? 'mb-3' : undefined}
+        state={loadState}
+        hasContent={!!modules}
+        loadingText={t('common.loading')}
+        errorText={t('settings.ingressLoadFailed')}
+        retryLabel={t('common.reload')}
+        onRetry={() => void onReload()}
+        testId="ingress-ports-load-error"
+      />
 
       <div className="flex flex-col gap-3">
         {modules?.modules.map((module) => {
@@ -485,11 +481,11 @@ export function IngressPortsCard({
           const manageable = module.manageable && !saving && loadState === 'ready' && (!pendingModule || pendingModule.id === module.id)
           const blocksQUIC = module.id === 'block-quic-443'
           return (
-            <div key={module.id} className="rounded-[16px] bg-surface-container-low p-4" data-testid={`ingress-module-${module.id}`}>
+            <div key={module.id} className="rounded-card bg-surface-container-low p-4" data-testid={`ingress-module-${module.id}`}>
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[12.5px] font-semibold text-text-mid">{t(`settings.ingressModules.${module.id}.name`)}</span>
+                    <span className="text-body font-semibold text-text-mid">{t(`settings.ingressModules.${module.id}.name`)}</span>
                     <Badge tone={pending ? 'amber' : enabled ? 'green' : 'neutral'}>
                       {pending
                         ? enabled
@@ -500,7 +496,7 @@ export function IngressPortsCard({
                           : t('settings.ingressDisabled')}
                     </Badge>
                   </div>
-                  <p className="mt-1 text-[10.5px] leading-relaxed text-text-faint">
+                  <p className="mt-1 text-meta leading-relaxed text-text-faint">
                     {t(`settings.ingressModules.${module.id}.description`)}
                   </p>
                 </div>
@@ -515,8 +511,8 @@ export function IngressPortsCard({
                 />
               </div>
 
-              <div className="mt-3 flex flex-col gap-2 rounded-[12px] bg-card px-3.5 py-3 sm:flex-row sm:items-center">
-                <span className="border-b border-divider pb-2 font-mono text-[16px] font-bold text-primary sm:border-b-0 sm:border-r sm:pb-0 sm:pr-3">
+              <div className="mt-3 flex flex-col gap-2 rounded-ctl bg-card px-3.5 py-3 sm:flex-row sm:items-center">
+                <span className="border-b border-divider pb-2 font-mono text-title font-bold text-primary sm:border-b-0 sm:border-r sm:pb-0 sm:pr-3">
                   :{module.port}
                 </span>
                 <div className="flex flex-wrap gap-1.5" aria-label={t('settings.ingressProtocols')}>
@@ -527,7 +523,7 @@ export function IngressPortsCard({
               </div>
 
               {module.manageable ? null : (
-                <p className="mt-2 text-[10.5px] leading-relaxed text-text-faint">
+                <p className="mt-2 text-meta leading-relaxed text-text-faint">
                   {ingressReasonText(t, module.reason)}{' '}
                   <Link to="/mihomo-config" className="font-semibold text-primary underline-offset-2 hover:underline">
                     {t('settings.ingressOpenConfig')}
@@ -539,9 +535,9 @@ export function IngressPortsCard({
         })}
       </div>
 
-      <p className="mt-4 rounded-[14px] bg-[var(--md-sys-color-warning-container)] px-4 py-3 text-[10.5px] leading-relaxed text-[var(--md-sys-color-on-warning-container)]">{t('settings.ingressSafety')}</p>
+      <p className="mt-4 rounded-card bg-[var(--md-sys-color-warning-container)] px-4 py-3 text-meta leading-relaxed text-[var(--md-sys-color-on-warning-container)]">{t('settings.ingressSafety')}</p>
       {error ? (
-        <div role="alert" className="mt-3 rounded-[12px] bg-[var(--md-sys-color-error-container)] px-3 py-2.5 text-[10.5px] leading-relaxed text-[var(--md-sys-color-on-error-container)]" data-testid="ingress-ports-error">
+        <div role="alert" className="mt-3 rounded-ctl bg-[var(--md-sys-color-error-container)] px-3 py-2.5 text-meta leading-relaxed text-[var(--md-sys-color-on-error-container)]" data-testid="ingress-ports-error">
           {error}
         </div>
       ) : null}
@@ -643,7 +639,7 @@ export function TgbotCard({
     <Card className="p-5 sm:p-6">
       <div className="mb-2 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <div className="text-[15px] font-medium text-text-strong">{t('settings.tgbot')}</div>
+          <div className="text-title font-medium text-text-strong">{t('settings.tgbot')}</div>
           <Badge tone={stateTone}>{t(`settings.tgbotState_${state}`)}</Badge>
         </div>
         <Toggle
@@ -656,11 +652,12 @@ export function TgbotCard({
       {tgbot?.last_error ? (
         <div
           role="alert"
-          className="mb-3 break-all rounded-[12px] bg-[var(--md-sys-color-error-container)] px-3 py-2.5 text-[10.5px] text-[var(--md-sys-color-on-error-container)]"
+          className="mb-3 break-all rounded-ctl bg-[var(--md-sys-color-error-container)] px-3 py-2.5 text-meta text-[var(--md-sys-color-on-error-container)]"
         >
           {tgbot.last_error}
         </div>
       ) : null}
+      {!tgbot ? <CardSkeleton rows={2} /> : (
       <form onSubmit={(e) => void handleSubmit(onSubmit)(e)} className="flex flex-col">
         <Field
           label={t('settings.tgbotToken')}
@@ -672,18 +669,19 @@ export function TgbotCard({
             placeholder={tgbot?.token_set ? t('settings.tgbotTokenKeep') : t('settings.tgbotTokenPlaceholder')}
             {...register('token')}
           />
-          <span className="text-[10.5px] text-text-faint">{t('settings.tgbotTokenHint')}</span>
+          <span className="text-meta text-text-faint">{t('settings.tgbotTokenHint')}</span>
         </Field>
         <Field label={t('settings.tgbotAdmins')} className="py-3">
           <Input mono placeholder={t('settings.tgbotAdminsPlaceholder')} {...register('admins')} />
-          <span className="text-[10.5px] text-text-faint">{t('settings.tgbotAdminsHint')}</span>
+          <span className="text-meta text-text-faint">{t('settings.tgbotAdminsHint')}</span>
         </Field>
         <div className="flex justify-end pt-1">
-          <Button type="submit" size="sm" disabled={!tgbot} data-testid="tgbot-save">
+          <Button type="submit" size="sm" data-testid="tgbot-save">
             {t('settings.tgbotSave')}
           </Button>
         </div>
       </form>
+      )}
     </Card>
   )
 }
@@ -730,21 +728,22 @@ export function UpstreamsCard({
 
   return (
     <Card className="p-5 sm:p-6" data-testid="upstreams-card">
-      <div className="mb-1 text-[15px] font-medium text-text-strong">{t('settings.upstreams')}</div>
-      <p className="mb-3 text-[10.5px] leading-relaxed text-text-faint">{t('settings.upstreamsHint')}</p>
-      <p className="mb-3 text-[10px] leading-relaxed text-text-faint">{t('settings.upstreamsStorageHint')}</p>
+      <div className="mb-1 text-title font-medium text-text-strong">{t('settings.upstreams')}</div>
+      <p className="mb-3 text-meta leading-relaxed text-text-faint">{t('settings.upstreamsHint')}</p>
+      <p className="mb-3 text-meta leading-relaxed text-text-faint">{t('settings.upstreamsStorageHint')}</p>
+      {!upstreams ? <CardSkeleton rows={3} /> : (
       <div className="flex flex-col gap-3">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           <UpstreamGroupEditor
             group="china"
             entries={draft.china}
-            disabled={!upstreams || saving}
+            disabled={saving}
             onChange={(china) => setDraft((current) => ({ ...current, china }))}
           />
           <UpstreamGroupEditor
             group="trust"
             entries={draft.trust}
-            disabled={!upstreams || saving}
+            disabled={saving}
             onChange={(trust) => setDraft((current) => ({ ...current, trust }))}
           />
         </div>
@@ -752,7 +751,7 @@ export function UpstreamsCard({
           <Button
             type="button"
             size="sm"
-            disabled={!upstreams || saving || !changed || draft.china.length === 0 || draft.trust.length === 0}
+            disabled={saving || !changed || draft.china.length === 0 || draft.trust.length === 0}
             onClick={() => void onSubmit()}
             data-testid="upstreams-save"
           >
@@ -760,6 +759,7 @@ export function UpstreamsCard({
           </Button>
         </div>
       </div>
+      )}
     </Card>
   )
 }
@@ -792,8 +792,12 @@ export function EcsCard({ ecs, onSaved }: { ecs: ECSView | null; onSaved: (v: EC
 
   return (
     <Card className="p-5 sm:p-6">
-      <div className="mb-1 text-[15px] font-medium text-text-strong">{t('settings.ecs')}</div>
-      <p className="mb-3 text-[10.5px] leading-relaxed text-text-faint">{t('settings.ecsHint')}</p>
+      <div className="mb-1 text-title font-medium text-text-strong">{t('settings.ecs')}</div>
+      <p className="mb-3 text-meta leading-relaxed text-text-faint">{t('settings.ecsHint')}</p>
+      {/* A control bound to `undefined` is indistinguishable from one whose
+          value genuinely is empty, and several of these values legitimately can
+          be. Show that the data has not arrived instead of implying it has. */}
+      {!ecs ? <CardSkeleton rows={1} /> : (
       <form
         onSubmit={(e) => void handleSubmit(onSubmit)(e)}
         className="flex flex-col gap-3 sm:flex-row sm:items-end"
@@ -801,67 +805,11 @@ export function EcsCard({ ecs, onSaved }: { ecs: ECSView | null; onSaved: (v: EC
         <Field label={t('settings.ecsSubnet')} className="flex-1">
           <Input mono placeholder="122.96.30.0" {...register('subnet')} />
         </Field>
-        <Button type="submit" size="sm" disabled={!ecs} data-testid="ecs-save">
+        <Button type="submit" size="sm" data-testid="ecs-save">
           {t('settings.ecsSave')}
         </Button>
       </form>
-    </Card>
-  )
-}
-
-// ---- 9. About strip ---------------------------------------------------------
-
-export function AboutStrip({
-  version,
-  zashVersion,
-  mihomoVersion,
-  sidecarVersion,
-  className,
-}: {
-  version?: string
-  zashVersion?: string
-  mihomoVersion?: string
-  sidecarVersion?: string
-  className?: string
-}) {
-  const { t } = useTranslation()
-  return (
-    <Card className={cn('flex flex-col gap-3 border-0 p-4 shadow-none sm:flex-row sm:items-center', className)}>
-      <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-primary-container text-on-primary-container">
-        <ShieldFilledIcon className="h-5 w-5" aria-hidden="true" />
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="text-[13.5px] font-medium text-text-strong">{t('settings.aboutTitle')}</div>
-        <div className="mt-0.5 text-[10.5px] text-text-faint">{t('settings.aboutSubtitle')}</div>
-      </div>
-      {/* Four separately-sourced versions, so an operator can tell which build
-          of each part is actually installed rather than inferring all four
-          from the release they think they ran.
-
-          mihomo is always rendered; zashboard and the sidecar only when known.
-          That is not cosmetic: mihomo is always part of an install, so
-          "unknown" is a signal worth showing. The zashboard panel is optional,
-          and the sidecar only reports a version while it is running with
-          active plugins — for both, rendering a dash would say "installed but
-          unidentified" about something that may simply not be there. */}
-      <div className="flex shrink-0 flex-wrap gap-1.5">
-        <span className="rounded-[8px] bg-surface-container px-3 py-2 font-mono text-[10.5px] text-text-faint">
-          {t('settings.aboutVersion', { version: version ?? '—' })}
-        </span>
-        <span className="rounded-[8px] bg-surface-container px-3 py-2 font-mono text-[10.5px] text-text-faint">
-          {t('settings.aboutMihomoVersion', { version: mihomoVersion ?? '—' })}
-        </span>
-        {sidecarVersion ? (
-          <span className="rounded-[8px] bg-surface-container px-3 py-2 font-mono text-[10.5px] text-text-faint">
-            {t('settings.aboutSidecarVersion', { version: sidecarVersion })}
-          </span>
-        ) : null}
-        {zashVersion ? (
-          <span className="rounded-[8px] bg-surface-container px-3 py-2 font-mono text-[10.5px] text-text-faint">
-            {t('settings.aboutZashVersion', { version: zashVersion })}
-          </span>
-        ) : null}
-      </div>
+      )}
     </Card>
   )
 }

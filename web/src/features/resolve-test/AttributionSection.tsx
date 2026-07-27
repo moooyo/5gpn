@@ -25,7 +25,7 @@ function StageDot({ state }: { state: StageState }) {
   if (state === 'hit') {
     return (
       <span
-        className="grid h-[22px] w-[22px] shrink-0 place-items-center rounded-full text-white"
+        className="grid h-[22px] w-[22px] shrink-0 place-items-center rounded-pill text-white"
         style={{ background: 'var(--color-chart-3)' }}
         aria-hidden="true"
       >
@@ -36,16 +36,16 @@ function StageDot({ state }: { state: StageState }) {
   if (state === 'answer') {
     return (
       <span
-        className="grid h-[22px] w-[22px] shrink-0 place-items-center rounded-full bg-primary-container text-on-primary-container"
+        className="grid h-[22px] w-[22px] shrink-0 place-items-center rounded-pill bg-primary-container text-on-primary-container"
         aria-hidden="true"
       >
-        <span className="text-[13px] leading-none">→</span>
+        <span className="text-body leading-none">→</span>
       </span>
     )
   }
   return (
     <span
-      className="grid h-[22px] w-[22px] shrink-0 place-items-center rounded-full bg-surface-container text-[13px] leading-none text-text-faint"
+      className="grid h-[22px] w-[22px] shrink-0 place-items-center rounded-pill bg-surface-container text-body leading-none text-text-faint"
       aria-hidden="true"
     >
       −
@@ -66,16 +66,16 @@ function DecisionOrder({ stages }: { stages: Stage[] }) {
           >
             <StageDot state={row.state} />
             <span
-              className={`w-[150px] shrink-0 text-[12.5px] ${
+              className={`w-[150px] shrink-0 text-body ${
                 row.state === 'hit' || row.state === 'answer' ? 'font-medium text-text-strong' : 'text-text-faint'
               } max-sm:w-auto`}
             >
               {row.stage}
             </span>
-            <span className="min-w-0 flex-1 text-[11.5px] leading-5 text-text-mid">{row.detail}</span>
+            <span className="min-w-0 flex-1 text-label leading-5 text-text-mid">{row.detail}</span>
             {row.mark ? (
               <span
-                className={`shrink-0 text-[11px] font-medium ${row.markMono ? 'font-mono text-text-strong' : ''}`}
+                className={`shrink-0 text-label font-medium ${row.markMono ? 'font-mono text-text-strong' : ''}`}
                 style={row.markStrong ? { color: 'var(--md-sys-color-success)' } : undefined}
               >
                 {!row.markStrong && !row.markMono ? <span className="text-text-faint">{row.mark}</span> : row.mark}
@@ -96,10 +96,10 @@ function RawResponse({ result, note }: { result: ResolveTestResult; note?: strin
   return (
     <div>
       <SectionLabel className="mb-3">{t('resolveTest.intercept.rawTitle')}</SectionLabel>
-      <pre className="whitespace-pre-wrap break-all font-mono text-[11.5px] leading-5 text-text-strong">
+      <pre className="whitespace-pre-wrap break-all font-mono text-label leading-5 text-text-strong">
         {JSON.stringify(result, null, 2)}
       </pre>
-      {note ? <div className="mt-2 font-mono text-[11.5px] text-text-faint">{note}</div> : null}
+      {note ? <div className="mt-2 font-mono text-label text-text-faint">{note}</div> : null}
     </div>
   )
 }
@@ -216,8 +216,8 @@ export function AttributionSection({ result }: { result: ResolveTestResult }) {
   return (
     <Card className="overflow-hidden" data-testid="resolve-test-attribution">
       <div className="flex flex-wrap items-center gap-3 border-b border-divider bg-surface-container-low px-5 py-3.5 sm:px-6">
-        <span className="text-[13px] font-medium text-text-strong">{t('resolveTest.intercept.title')}</span>
-        <span className="ml-auto font-mono text-[10.5px] uppercase tracking-[.06em] text-text-faint">
+        <span className="text-body font-medium text-text-strong">{t('resolveTest.intercept.title')}</span>
+        <span className="ml-auto font-mono text-meta uppercase tracking-[.06em] text-text-faint">
           {t('resolveTest.intercept.meta', { reason: result.reason })}
         </span>
       </div>
@@ -226,23 +226,23 @@ export function AttributionSection({ result }: { result: ResolveTestResult }) {
         <div className="bg-card px-5 py-5 sm:px-6" data-testid="resolve-test-declared-by">
           <SectionLabel className="mb-3">{t('resolveTest.intercept.declaredBy')}</SectionLabel>
           <div className="flex items-center gap-3.5">
-            <span className="grid h-11 w-11 shrink-0 place-items-center rounded-[12px] bg-tertiary-container text-tertiary">
+            <span className="grid h-11 w-11 shrink-0 place-items-center rounded-ctl bg-tertiary-container text-tertiary">
               <ExtensionIcon className="h-[22px] w-[22px]" aria-hidden="true" />
             </span>
             <span className="flex min-w-0 flex-col">
-              <span className="truncate text-[15px] font-medium text-text-strong">
+              <span className="truncate text-title font-medium text-text-strong">
                 {intercept?.module_name || intercept?.module_id}
               </span>
-              <span className="truncate font-mono text-[11.5px] text-text-faint">{intercept?.module_id}</span>
+              <span className="truncate font-mono text-label text-text-faint">{intercept?.module_id}</span>
             </span>
           </div>
         </div>
         <div className="bg-card px-5 py-5 sm:px-6">
           <SectionLabel className="mb-3">{t('resolveTest.intercept.matchedHost')}</SectionLabel>
-          <span className="inline-block rounded-[8px] bg-secondary-container px-3 py-2 font-mono text-[13px] font-medium text-on-secondary-container">
+          <span className="inline-block rounded-chip bg-secondary-container px-3 py-2 font-mono text-body font-medium text-on-secondary-container">
             {intercept?.matched_host}
           </span>
-          <p className="mt-2.5 text-[11.5px] leading-5 text-text-mid">
+          <p className="mt-2.5 text-label leading-5 text-text-mid">
             {intercept?.matched_host?.startsWith('*.')
               ? t('resolveTest.intercept.wildcardMatch', { name: result.name })
               : t('resolveTest.intercept.exactMatch', { name: result.name })}
@@ -269,7 +269,7 @@ function InertNotice({ host, moduleName, moduleID }: { host: string; moduleName:
   const { t } = useTranslation()
   return (
     <div
-      className="flex items-start gap-2.5 rounded-[12px] px-3.5 py-3"
+      className="flex items-start gap-2.5 rounded-ctl px-3.5 py-3"
       style={{
         background: 'var(--md-sys-color-warning-container)',
         color: 'var(--md-sys-color-on-warning-container)',
@@ -283,9 +283,9 @@ function InertNotice({ host, moduleName, moduleID }: { host: string; moduleName:
         aria-hidden="true"
       />
       <span className="flex min-w-0 flex-col gap-1">
-        <span className="text-[12px] font-medium">{t('resolveTest.intercept.notReadyTitle')}</span>
-        <span className="text-[11.5px] leading-5">{t('resolveTest.intercept.notReadyBody', { host })}</span>
-        <span className="flex items-center gap-1.5 text-[11px] opacity-80">
+        <span className="text-label font-medium">{t('resolveTest.intercept.notReadyTitle')}</span>
+        <span className="text-label leading-5">{t('resolveTest.intercept.notReadyBody', { host })}</span>
+        <span className="flex items-center gap-1.5 text-label opacity-80">
           <RuleIcon className="h-3.5 w-3.5" aria-hidden="true" />
           <span className="truncate font-mono">{moduleName || moduleID}</span>
         </span>

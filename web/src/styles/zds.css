@@ -111,6 +111,18 @@
     overflow: hidden;
   }
 
+  /* Legend key: a square colour chip, not a dot. The distinction matters where
+     the colour has to be READ (a decision slot in a log row, a chart legend)
+     rather than watched (a live status indicator) — and at 10px the radius
+     that keeps it square is smaller than --radius-chip, so it lives here once
+     instead of as a literal at every call site. */
+  .zds-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+  }
+
   .zds-state-layer::before {
     position: absolute;
     z-index: -1;

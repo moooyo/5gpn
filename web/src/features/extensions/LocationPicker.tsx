@@ -183,27 +183,27 @@ export function LocationPicker({
       </form>
 
       {results.length > 0 ? (
-        <div className="max-h-40 overflow-y-auto rounded-[14px] bg-surface-container-low p-1.5" role="listbox" aria-label={t('extensions.location.results')}>
+        <div className="max-h-40 overflow-y-auto rounded-card bg-surface-container-low p-1.5" role="listbox" aria-label={t('extensions.location.results')}>
           {results.map((result) => (
-            <button key={result.place_id} type="button" role="option" aria-selected="false" onClick={() => choose(result)} className="zds-state-layer flex w-full items-start gap-2 rounded-[10px] px-3 py-2.5 text-left text-[11.5px] text-text-mid">
+            <button key={result.place_id} type="button" role="option" aria-selected="false" onClick={() => choose(result)} className="zds-state-layer flex w-full items-start gap-2 rounded-ctl px-3 py-2.5 text-left text-label text-text-mid">
               <LocationIcon className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
               <span>{result.display_name}</span>
             </button>
           ))}
         </div>
       ) : null}
-      {searchError ? <p role="alert" className="text-[11px] text-red">{t('extensions.location.searchFailed')}</p> : null}
+      {searchError ? <p role="alert" className="text-label text-red">{t('extensions.location.searchFailed')}</p> : null}
 
-      <div className="relative overflow-hidden rounded-[18px] border border-divider">
+      <div className="relative overflow-hidden rounded-card border border-divider">
         <div ref={containerRef} className="extension-location-map" role="region" aria-label={t('extensions.location.map')} />
         {!validPoint(value) && !mapFailed ? (
-          <div className="pointer-events-none absolute inset-x-4 bottom-4 rounded-full bg-card/90 px-4 py-2 text-center text-[11px] text-text-soft shadow-[var(--md-sys-elevation-1)]">
+          <div className="pointer-events-none absolute inset-x-4 bottom-4 rounded-pill bg-card/90 px-4 py-2 text-center text-label text-text-soft shadow-[var(--md-sys-elevation-1)]">
             {t('extensions.location.pickHint')}
           </div>
         ) : null}
-        {mapFailed ? <div className="absolute inset-0 grid place-items-center bg-surface-container-low p-6 text-center text-[11px] text-text-faint">{t('extensions.location.mapFailed')}</div> : null}
+        {mapFailed ? <div className="absolute inset-0 grid place-items-center bg-surface-container-low p-6 text-center text-label text-text-faint">{t('extensions.location.mapFailed')}</div> : null}
       </div>
-      <p className="text-[10px] leading-4 text-text-faint">{t('extensions.location.provider')}</p>
+      <p className="text-meta leading-4 text-text-faint">{t('extensions.location.provider')}</p>
     </div>
   )
 }

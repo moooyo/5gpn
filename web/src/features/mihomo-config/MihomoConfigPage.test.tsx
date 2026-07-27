@@ -23,6 +23,14 @@ vi.mock('../../lib/api/client', () => ({
 }))
 import { api } from '../../lib/api/client'
 
+/** Reset moved into the row overflow: it discards the whole operator-owned
+ *  config, and it used to sit permanently in the bottom-left corner at the
+ *  same visual weight as a secondary action. */
+async function openReset(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole('button', { name: /more actions/i }))
+  await user.click(await screen.findByText(/restore default/i))
+}
+
 describe('MihomoConfigPage', () => {
   beforeEach(async () => {
     vi.clearAllMocks()
@@ -45,10 +53,15 @@ describe('MihomoConfigPage', () => {
   })
 
   it('loads and shows the current config text', async () => {
+    const user0 = userEvent.setup()
     render(<MihomoConfigPage />)
     const textarea = (await screen.findByTestId('mihomo-config-textarea')) as HTMLTextAreaElement
     await waitFor(() => expect(textarea.value).toBe(CURRENT_TEXT))
     expect(api.getMihomoConfig).toHaveBeenCalledTimes(1)
+    // The seven invariants are read-once prose: folded to one summary row so
+    // the editor gets the full width instead of half a 1440px screen.
+    expect(screen.queryByText('Gateway ingress')).not.toBeInTheDocument()
+    await user0.click(screen.getByRole('button', { expanded: false, name: /required infrastructure/i }))
     expect(screen.getByText('Gateway ingress')).toBeInTheDocument()
     expect(screen.getByText('Controller secret')).toBeInTheDocument()
     expect(screen.getByText('Console SNI split')).toBeInTheDocument()
@@ -56,6 +69,57 @@ describe('MihomoConfigPage', () => {
     expect(screen.getByText('rev curr…sion')).toBeInTheDocument()
     expect(screen.queryByText('Saved snapshot')).not.toBeInTheDocument()
     expect(screen.queryByText('mihomo config (YAML)')).not.toBeInTheDocument()
+  })
+
+  /**
+   * The number was on screen the whole time — as plain text, beside an editor
+   * with no line numbers. This is the highest-value change on the page.
+   */
+  it('turns a line number in the validator stderr into a jump that selects that line', async () => {
+    const user = userEvent.setup()
+    vi.mocked(api.putMihomoConfig).mockRejectedValueOnce(
+      new ApiError(400, 'yaml: line 2: mapping values are not allowed in this context'),
+    )
+    render(<MihomoConfigPage />)
+    const textarea = (await screen.findByTestId('mihomo-config-textarea')) as HTMLTextAreaElement
+    await waitFor(() => expect(textarea.value).toBe(CURRENT_TEXT))
+
+    await user.click(screen.getByTestId('mihomo-config-apply'))
+    await screen.findByTestId('mihomo-config-error')
+
+    await user.click(screen.getByTestId('mihomo-config-jump'))
+    // CURRENT_TEXT line 2 is `external-controller: 127.0.0.1:9090`.
+    expect(textarea.selectionStart).toBe(CURRENT_TEXT.indexOf('external-controller'))
+    expect(textarea.selectionEnd).toBe(CURRENT_TEXT.indexOf(String.fromCharCode(10), textarea.selectionStart))
+    expect(within(screen.getByTestId('mihomo-config-gutter')).getByText('2').className).toContain('error-container')
+  })
+
+  it('leaves the invariants folded for a line error, and opens them when none is named', async () => {
+    const user = userEvent.setup()
+    vi.mocked(api.putMihomoConfig)
+      .mockRejectedValueOnce(new ApiError(400, 'yaml: line 2: bad'))
+      .mockRejectedValueOnce(new ApiError(400, 'missing required infrastructure: external-controller'))
+    render(<MihomoConfigPage />)
+    await waitFor(async () => expect(((await screen.findByTestId('mihomo-config-textarea')) as HTMLTextAreaElement).value).toBe(CURRENT_TEXT))
+
+    await user.click(screen.getByTestId('mihomo-config-apply'))
+    await screen.findByTestId('mihomo-config-error')
+    expect(screen.queryByText('Gateway ingress')).not.toBeInTheDocument()
+
+    await user.click(screen.getByTestId('mihomo-config-apply'))
+    expect(await screen.findByText('Gateway ingress')).toBeInTheDocument()
+  })
+
+  it('shows a line-level diff of the unapplied edit', async () => {
+    const user = userEvent.setup()
+    render(<MihomoConfigPage />)
+    const textarea = (await screen.findByTestId('mihomo-config-textarea')) as HTMLTextAreaElement
+    await waitFor(() => expect(textarea.value).toBe(CURRENT_TEXT))
+
+    await user.click(textarea)
+    await user.paste(`log-level: debug${String.fromCharCode(10)}`)
+
+    expect(await screen.findByText(i18n.t('mihomoConfig.unsavedDiff', { added: 1, removed: 0 }))).toBeInTheDocument()
   })
 
   it('keeps an unsaved edit when the UI language changes', async () => {
@@ -115,7 +179,7 @@ describe('MihomoConfigPage', () => {
     await user.click(screen.getByTestId('mihomo-config-apply'))
     await screen.findByTestId('mihomo-config-error')
 
-    await user.click(screen.getByTestId('mihomo-config-reset'))
+    await openReset(user)
     expect(api.resetMihomoConfig).not.toHaveBeenCalled()
 
     const dialog = await screen.findByRole('dialog')
@@ -249,7 +313,7 @@ describe('MihomoConfigPage', () => {
     const textarea = (await screen.findByTestId('mihomo-config-textarea')) as HTMLTextAreaElement
     await waitFor(() => expect(textarea.value).toBe(CURRENT_TEXT))
 
-    await user.click(screen.getByTestId('mihomo-config-reset'))
+    await openReset(user)
     let dialog = await screen.findByRole('dialog')
     await user.click(within(dialog).getByRole('button', { name: /restore default/i }))
 
@@ -257,7 +321,7 @@ describe('MihomoConfigPage', () => {
     await waitFor(() => expect(textarea.value).toBe(DEFAULT_TEXT))
     expect(screen.getByTestId('mihomo-config-editor')).toHaveAttribute('data-dirty', 'false')
 
-    await user.click(screen.getByTestId('mihomo-config-reset'))
+    await openReset(user)
     dialog = await screen.findByRole('dialog')
     await user.click(within(dialog).getByRole('button', { name: /restore default/i }))
     await waitFor(() => expect(api.resetMihomoConfig).toHaveBeenLastCalledWith(writtenDefault.revision))

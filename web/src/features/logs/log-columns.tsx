@@ -21,21 +21,37 @@ export interface Decision {
  * reads it the same on the other. They are not literal hex: the previous
  * fixed values were selected for a light surface and dropped below usable
  * contrast on the dark theme's card.
+ *
+ * This table is the single source for the decision colour AND the decision
+ * wording. The filter pills above the table read it too — they used to carry
+ * their own semantic-colour list, which painted 国内直连 green in the filter
+ * row and orange in the table 40px below it.
  */
 export const DECISION: Record<string, Decision> = {
-  'block': { key: 'logs.decision.block', color: 'var(--color-chart-1)' },
-  'force-direct': { key: 'logs.decision.forceDirect', color: 'var(--color-chart-2)' },
-  'force-proxy': { key: 'logs.decision.forceProxy', color: 'var(--color-chart-3)' },
-  'chnroute-cn': { key: 'logs.decision.chnrouteCn', color: 'var(--color-chart-4)' },
-  'chnroute-foreign': { key: 'logs.decision.chnrouteForeign', color: 'var(--color-chart-5)' },
+  'block': { key: 'decision.block', color: 'var(--color-chart-1)' },
+  'force-direct': { key: 'decision.forceDirect', color: 'var(--color-chart-2)' },
+  'force-proxy': { key: 'decision.forceProxy', color: 'var(--color-chart-3)' },
+  'chnroute-cn': { key: 'decision.chnrouteCn', color: 'var(--color-chart-4)' },
+  'chnroute-foreign': { key: 'decision.chnrouteForeign', color: 'var(--color-chart-5)' },
 }
+
+/** Canonical display order for the five decisions: chart slot order, so the
+ *  filter pills, the table dots and the overview donut all read left-to-right
+ *  as 1,2,3,4,5. The filter row used to start at force-direct. */
+export const DECISION_ORDER = [
+  'block',
+  'force-direct',
+  'force-proxy',
+  'chnroute-cn',
+  'chnroute-foreign',
+] as const
 
 /** Fallback when `reason` is missing/unknown — derived from the coarser
  *  `verdict` enum ({block,direct,proxy}), reusing the matching reason slots. */
 const VERDICT_FALLBACK: Record<string, Decision> = {
-  block: { key: 'logs.decision.block', color: 'var(--color-chart-1)' },
-  direct: { key: 'logs.decision.direct', color: 'var(--color-chart-2)' },
-  proxy: { key: 'logs.decision.proxy', color: 'var(--color-chart-3)' },
+  block: { key: 'decision.block', color: 'var(--color-chart-1)' },
+  direct: { key: 'decision.direct', color: 'var(--color-chart-2)' },
+  proxy: { key: 'decision.proxy', color: 'var(--color-chart-3)' },
 }
 
 /** Neutral last-resort fallback when neither `reason` nor `verdict` is a
@@ -107,7 +123,7 @@ export function buildLogColumns(t: TFunction): ColumnDef<QueryLogEntry, any>[] {
       cell: ({ row }) => {
         const decision = resolveDecision(row.original)
         return (
-          <span className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-text-mid">
+          <span className="inline-flex items-center gap-1.5 text-label font-semibold text-text-mid">
             <StatusDot color={decision.color} />
             {t(decision.key)}
           </span>
@@ -119,7 +135,14 @@ export function buildLogColumns(t: TFunction): ColumnDef<QueryLogEntry, any>[] {
       id: 'ips',
       header: t('logs.colIps'),
       accessorFn: (row) => (row.ips ?? []).join(', '),
-      cell: ({ row }) => <span className="font-mono text-text-soft">{formatLogIps(row.original.ips)}</span>,
+      // Truncate like every other cell in this table. An answer with several
+      // addresses used to wrap out of the fixed row box and draw over the row
+      // below it — visible the moment the log holds a real multi-A response.
+      cell: ({ row }) => (
+        <span className="block truncate font-mono text-text-soft" title={formatLogIps(row.original.ips)}>
+          {formatLogIps(row.original.ips)}
+        </span>
+      ),
       meta: { width: 140 },
     },
     {

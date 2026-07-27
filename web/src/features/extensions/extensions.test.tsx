@@ -106,10 +106,21 @@ describe('ExtensionsPage native extension contract', () => {
     renderPage()
     expect(await screen.findByText('Response Cleaner')).toBeInTheDocument()
     expect(screen.getByText('接管 · 1')).toBeInTheDocument()
-    expect(screen.getByText('上游映射 · 1')).toBeInTheDocument()
-    expect(screen.getByText('路由规则 · 1')).toBeInTheDocument()
+    const card0 = await screen.findByTestId(`extension-${CLEANER.id}`)
+    expect(within(card0).getByText(i18n.t('extensions.chipHostMappings'))).toBeInTheDocument()
+    // Routing rules read as "matcher → action" rather than as a stringified
+    // object in a 9.5px monospace block.
+    // Amber is reserved for the status banner. This disclosure is neutral, or
+    // a card would show two identical alarm bars, one of which is a fact.
+    const disclosure = within(card0).getByTestId(`routing-rules-${CLEANER.id}`)
+    expect(disclosure.className).toContain('bg-surface-container')
+    expect(disclosure.className).not.toContain('warning-container')
     await user.click(screen.getByText('查看精确路由规则 · 1'))
-    expect(screen.getByText('{"action":"reject","domain_suffix":"ads.example.com","network":"udp"}')).toBeVisible()
+    const rule = within(card0).getByRole('listitem')
+    expect(rule).toHaveTextContent('DOMAIN-SUFFIX')
+    expect(rule).toHaveTextContent('ads.example.com')
+    expect(rule).toHaveTextContent('UDP')
+    expect(rule).toHaveTextContent('REJECT')
     expect(screen.getByRole('link', { name: /打开插件目录/ })).toHaveAttribute('href', VIEW.catalog_url)
     expect(screen.queryByTestId('extension-traffic-contract')).not.toBeInTheDocument()
     expect(screen.queryByRole('tab', { name: '插件市场' })).not.toBeInTheDocument()
@@ -124,7 +135,13 @@ describe('ExtensionsPage native extension contract', () => {
     expect(dialog).toHaveTextContent('改写会转发完整的方法、解码后的请求体和端到端请求头，其中可能包含 Cookie 和 Authorization 凭据')
     expect(within(dialog).getByText('https://origin.example.net')).toHaveClass('min-w-0', 'max-w-full', 'break-all')
     expect(dialog).toHaveTextContent('本次启用确认同时授权这些已审查的 REJECT/DIRECT 规则')
-    expect(dialog).toHaveTextContent('{"action":"reject","domain_suffix":"ads.example.com","network":"udp"}')
+    // The confirmation still has to state every declared field; it just states
+    // them as matcher → action rather than as a stringified object.
+    const rule = within(dialog).getByRole('listitem')
+    expect(rule).toHaveTextContent('DOMAIN-SUFFIX')
+    expect(rule).toHaveTextContent('ads.example.com')
+    expect(rule).toHaveTextContent('UDP')
+    expect(rule).toHaveTextContent('REJECT')
     expect(within(dialog).getByTestId('enable-capture-dns')).toHaveTextContent('China 组')
     expect(dialog).toHaveTextContent('实时 China group（默认 223.5.5.5）及当前 ECS 设置')
     await user.click(within(dialog).getByRole('button', { name: '启用' }))
@@ -302,7 +319,11 @@ describe('ExtensionsPage native extension contract', () => {
     vi.mocked(api.getInterceptModules).mockResolvedValueOnce(missing)
     renderPage()
     const card = await screen.findByTestId(`extension-${CLEANER.id}`)
-    expect(within(card).getByText('出口组缺失')).toBeInTheDocument()
+    const banner = within(card).getByTestId(`extension-status-${CLEANER.id}`)
+    expect(banner).toHaveAttribute('role', 'alert')
+    expect(banner).toHaveTextContent(i18n.t('extensions.statusEgressMissing', { group: 'RemovedGroup' }))
+    expect(within(banner).getByRole('link', { name: i18n.t('extensions.statusGoSettings') }))
+      .toHaveAttribute('href', '/settings')
     expect(within(card).getByRole('switch')).toBeDisabled()
   })
 
@@ -358,7 +379,13 @@ describe('ExtensionsPage native extension contract', () => {
     expect(dialog).toHaveTextContent('v1.1.0')
     expect(within(dialog).getByTestId('update-capture-dns')).toHaveTextContent('China 组')
     expect(within(dialog).getByText('https://origin.example.net')).toHaveClass('min-w-0', 'max-w-full', 'break-all')
-    expect(dialog).toHaveTextContent('{"action":"reject","domain_suffix":"ads.example.com","network":"udp"}')
+    // The confirmation still has to state every declared field; it just states
+    // them as matcher → action rather than as a stringified object.
+    const rule = within(dialog).getByRole('listitem')
+    expect(rule).toHaveTextContent('DOMAIN-SUFFIX')
+    expect(rule).toHaveTextContent('ads.example.com')
+    expect(rule).toHaveTextContent('UDP')
+    expect(rule).toHaveTextContent('REJECT')
     await user.click(within(dialog).getByRole('button', { name: '替换快照' }))
     await waitFor(() => expect(api.applyInterceptModuleUpdate).toHaveBeenCalledWith(CLEANER.id, VIEW.revision, candidate.snapshot_digest))
   })

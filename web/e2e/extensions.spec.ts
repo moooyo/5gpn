@@ -27,7 +27,11 @@ test('extension console installs and atomically toggles a native snapshot', asyn
   await module.getByRole('switch').click()
   await page.getByRole('dialog').getByRole('button', { name: '启用' }).click()
   await expect(module.getByRole('switch')).toBeChecked()
-  await expect(module.getByText('MITM 总开关未开')).toBeVisible()
+  // States are one banner with the action that resolves them, no longer one of
+  // up to thirteen badges sharing a row with neutral capability facts.
+  const status = module.getByTestId('extension-status-io.example.response-cleaner')
+  await expect(status).toContainText('拦截总开关未开启')
+  await expect(status.getByRole('link', { name: '去设置' })).toHaveAttribute('href', '/settings')
 
   await page.getByRole('button', { name: '从 URL 安装' }).click()
   const dialog = page.getByRole('dialog')

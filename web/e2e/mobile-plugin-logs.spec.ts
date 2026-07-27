@@ -19,8 +19,10 @@ async function expectCircularButton(button: ReturnType<Page['getByRole']>): Prom
       radius: Number.parseFloat(getComputedStyle(element).borderTopLeftRadius),
     }
   })
-  expect(geometry.width).toBeCloseTo(36, 0)
-  expect(geometry.height).toBeCloseTo(36, 0)
+  // 44px, not 36: every tap target on a phone is 44px now, icon buttons
+  // included — the console was full of 32-36px ones.
+  expect(geometry.width).toBeCloseTo(44, 0)
+  expect(geometry.height).toBeCloseTo(44, 0)
   expect(geometry.radius).toBeGreaterThanOrEqual(geometry.width / 2)
 }
 
@@ -62,16 +64,24 @@ test('mobile plugin logs use split filter rails, compact cards, circular actions
 
   sockets[0].send(JSON.stringify(mobileFrame()))
 
+  // Two permanently-expanded filter rails plus up to three stacked banners
+  // pushed the table under six rows of chrome in a viewport that gives it
+  // ~280px. Filters are a sheet; what is applied comes back as chips.
   const levelFilters = page.getByRole('group', { name: '按级别筛选' })
   const pluginFilters = page.getByRole('group', { name: '按插件筛选' })
+  await expect(levelFilters).toBeHidden()
+  await expect(pluginFilters).toBeHidden()
+
+  await page.getByRole('button', { name: '筛选' }).click()
   await expect(levelFilters).toBeVisible()
   await expect(pluginFilters).toBeVisible()
   await expect(levelFilters.getByRole('button')).toHaveCount(4)
   await expect(pluginFilters.getByRole('button')).toHaveCount(3)
-  const [levelBox, pluginBox] = await Promise.all([levelFilters.boundingBox(), pluginFilters.boundingBox()])
-  expect(levelBox).not.toBeNull()
-  expect(pluginBox).not.toBeNull()
-  expect(pluginBox!.y).toBeGreaterThan(levelBox!.y + levelBox!.height)
+  await levelFilters.getByRole('button', { name: /^warn/ }).click()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('group', { name: '已选筛选条件' }).getByRole('button')).toHaveCount(1)
+  await page.getByRole('group', { name: '已选筛选条件' }).getByRole('button').first().click()
+  await expect(page.getByRole('group', { name: '已选筛选条件' })).toBeHidden()
 
   const pauseButton = page.getByRole('button', { name: '暂停' })
   const clearButton = page.getByRole('button', { name: '清空当前日志视图' })

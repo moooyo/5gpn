@@ -36,6 +36,16 @@ export interface StatusValue {
   loading: boolean
   /** Initial sidecar health request state, kept separate from `loading`. */
   interceptLoading: boolean
+  /** Epoch ms of the last successful `/api/status` response, or undefined
+   *  before the first one lands. Consumers that render live counters need it:
+   *  without a "last updated" the numbers go stale silently when polling stops
+   *  or starts failing, and a stale 342 QPS looks exactly like a live one. */
+  statusUpdatedAt?: number
+  /** True when the most recent `/api/status` attempt failed. The previous
+   *  payload is deliberately kept so the page can keep showing it, marked as
+   *  stale, instead of blanking out. Optional so a test or story can provide a
+   *  status value without restating the freshness pair. */
+  statusStale?: boolean
 }
 
 const INITIAL: StatusValue = {
@@ -47,6 +57,7 @@ const INITIAL: StatusValue = {
   interceptOk: false,
   loading: true,
   interceptLoading: true,
+  statusStale: false,
 }
 
 // Exported (not just useStatus) so tests can inject a manual value via
@@ -163,8 +174,8 @@ export function StatusProvider({ children, intervalMs = 5000, requestTimeoutMs =
         setValue((prev) => ({
           ...prev,
           ...(result.status === 'fulfilled'
-            ? { status: result.value, dnsState: 'healthy' as const, dnsOk: true }
-            : { dnsState: 'unknown' as const, dnsOk: false }),
+            ? { status: result.value, dnsState: 'healthy' as const, dnsOk: true, statusUpdatedAt: Date.now(), statusStale: false }
+            : { dnsState: 'unknown' as const, dnsOk: false, statusStale: true }),
           ...(healthResult?.status === 'rejected' ? updateMihomoFailure() : {}),
           loading: prev.loading && updateLoading(),
         }))

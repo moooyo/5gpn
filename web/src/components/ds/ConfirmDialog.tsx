@@ -56,7 +56,7 @@ export function ConfirmDialog({
       }
     >
       {description !== undefined ? (
-        <p id={descriptionId} className="text-[13px] leading-relaxed text-text-soft">{description}</p>
+        <p id={descriptionId} className="text-body leading-relaxed text-text-soft">{description}</p>
       ) : null}
     </Modal>
   )

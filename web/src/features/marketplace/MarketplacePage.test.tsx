@@ -110,8 +110,14 @@ describe('MarketplacePage', () => {
     renderPage()
     await screen.findByText('Response Cleaner')
     expect(screen.getByText('Apple WLOC Location Override')).toBeInTheDocument()
-    expect(screen.getByText('路由 · 2')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: /Community mirror/ }))
+    // Permissions live behind an expandable count now: they decide nothing
+        // about whether to install, and eleven identically-shaped chips drowned
+        // the three facts that do.
+    const cleaner = (await screen.findByText('Response Cleaner')).closest('article')!
+    await user.click(within(cleaner).getByRole('button', { expanded: false, name: /项权限/ }))
+    expect(within(cleaner).getByText('路由规则 · 2')).toBeInTheDocument()
+    expect(within(cleaner).getByText('网络地址 · 1')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /^Community mirror/ }))
     expect(screen.queryByText('Apple WLOC Location Override')).not.toBeInTheDocument()
     expect(screen.getByText('Response Cleaner')).toBeInTheDocument()
     await user.type(screen.getByLabelText('搜索市场插件'), 'not-present')
@@ -194,7 +200,9 @@ describe('MarketplacePage', () => {
     expect(await screen.findByText(/Actual verified cleaner/)).toBeInTheDocument()
     expect(dialog).toHaveTextContent('已关闭')
     expect(dialog).toHaveTextContent('f'.repeat(64))
-    expect(dialog).toHaveTextContent('{"action":"reject","domain":"ads.example.test"}')
+    expect(dialog).toHaveTextContent('DOMAIN')
+    expect(dialog).toHaveTextContent('ads.example.test')
+    expect(dialog).toHaveTextContent('REJECT')
   })
 
   it('shows installed entries as management actions rather than update claims', async () => {
@@ -205,12 +213,35 @@ describe('MarketplacePage', () => {
     expect(within(card).queryByText('有更新')).not.toBeInTheDocument()
   })
 
+  /**
+   * `entry.version` and the installed module's version were both already in
+   * hand and never compared, so the card said "installed" whether or not the
+   * source had moved on — the one thing a marketplace is there to tell you.
+   */
+  it('states the version difference and offers the update when the source has moved on', async () => {
+    const modules = structuredClone(MODULES)
+    const installed = modules.modules.find((module) => module.id === APPLE.id)!
+    installed.extension_version = '1.2.0'
+    vi.mocked(api.getInterceptModules).mockResolvedValue(modules)
+    renderPage()
+
+    const card = (await screen.findByText('Apple WLOC Location Override')).closest('article')!
+    const version = within(card).getByTestId(`marketplace-version-${APPLE.id}`)
+    expect(version).toHaveTextContent(`v1.2.0`)
+    expect(version).toHaveTextContent(`v${APPLE.version}`)
+    // Replacing a snapshot is a reviewed action, so this is the entry point to
+    // the extensions page's confirmation, not a second copy of it.
+    expect(within(card).getByTestId(`marketplace-update-${APPLE.id}`))
+      .toHaveTextContent(i18n.t('marketplace.updateTo', { version: APPLE.version }))
+    expect(within(card).queryByRole('button', { name: '管理快照' })).not.toBeInTheDocument()
+  })
+
   it('keeps the cached source visible and marks it after a refresh failure', async () => {
     const user = userEvent.setup()
     vi.mocked(api.refreshMarketplace).mockRejectedValueOnce(new Error('refresh unavailable'))
     renderPage()
     await screen.findByText('Response Cleaner')
-    await user.click(screen.getByRole('button', { name: /Community mirror/ }))
+    await user.click(screen.getByRole('button', { name: /^Community mirror/ }))
     await user.click(screen.getByRole('button', { name: '刷新市场源' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('refresh unavailable')
     expect(screen.getByText('Response Cleaner')).toBeInTheDocument()
@@ -222,8 +253,8 @@ describe('MarketplacePage', () => {
     vi.mocked(api.deleteMarketplace).mockResolvedValue({ ...MARKETPLACES, revision: '7'.repeat(64), sources: [OFFICIAL] })
     renderPage()
     await screen.findByText('Response Cleaner')
-    await user.click(screen.getByRole('button', { name: /Community mirror/ }))
-    await user.click(screen.getByRole('button', { name: '移除当前市场源' }))
+    await user.click(screen.getByRole('button', { name: '来源操作 · Community mirror' }))
+    await user.click(await screen.findByText('移除当前市场源'))
     const dialog = await screen.findByRole('dialog', { name: /移除 Community mirror/ })
     await user.click(within(dialog).getByRole('button', { name: '移除来源' }))
     await waitFor(() => expect(api.deleteMarketplace).toHaveBeenCalledWith(COMMUNITY.id, MARKETPLACES.revision))

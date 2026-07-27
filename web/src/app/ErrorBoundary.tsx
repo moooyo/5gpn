@@ -42,10 +42,10 @@ class ErrorBoundaryImpl extends Component<ErrorBoundaryProps, ErrorBoundaryState
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-bg p-6">
         <Card className="flex w-[380px] flex-col items-center gap-3 p-7 text-center">
-          <div className="text-[16px] font-extrabold text-text-strong">{t('common.errorTitle')}</div>
-          <p className="text-[12.5px] text-text-faint">{t('common.errorBody')}</p>
+          <div className="text-title font-extrabold text-text-strong">{t('common.errorTitle')}</div>
+          <p className="text-body text-text-faint">{t('common.errorBody')}</p>
           {import.meta.env.DEV ? (
-            <pre className="max-h-32 w-full overflow-auto rounded-[8px] border border-input-border bg-input p-2 text-left text-[11px] text-red">
+            <pre className="max-h-32 w-full overflow-auto rounded-chip border border-input-border bg-input p-2 text-left text-label text-red">
               {error.message}
             </pre>
           ) : null}

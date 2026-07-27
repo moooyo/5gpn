@@ -11,7 +11,7 @@ export interface ProfileMenuProps {
 function ConsoleAvatar({ size }: { size: number }) {
   return (
     <div
-      className="grid shrink-0 place-items-center rounded-full bg-primary text-[var(--md-sys-color-on-primary)]"
+      className="grid shrink-0 place-items-center rounded-pill bg-primary text-[var(--md-sys-color-on-primary)]"
       style={{ width: size, height: size }}
     >
       <ShieldFilledIcon style={{ width: size * .56, height: size * .56 }} aria-hidden="true" />
@@ -37,10 +37,10 @@ export function ProfileMenu({ onLogout }: ProfileMenuProps) {
         <button
           type="button"
           aria-label={t('topbar.openProfile')}
-          className="zds-state-layer flex h-11 items-center gap-2 rounded-full px-1.5 pr-3 text-text-mid"
+          className="zds-state-layer flex h-11 items-center gap-2 rounded-pill px-1.5 pr-3 text-text-mid"
         >
           <ConsoleAvatar size={34} />
-          <span className="hidden text-[12.5px] font-medium sm:inline">{t('topbar.consoleAccess')}</span>
+          <span className="hidden text-body font-medium sm:inline">{t('topbar.consoleAccess')}</span>
           <ChevronDownIcon className="h-4 w-4 text-text-faint" aria-hidden="true" />
         </button>
       }
@@ -48,8 +48,8 @@ export function ProfileMenu({ onLogout }: ProfileMenuProps) {
       <div className="flex items-center gap-3 px-2 py-2.5">
         <ConsoleAvatar size={42} />
         <div className="flex min-w-0 flex-col leading-tight">
-          <span className="text-[13.5px] font-medium text-text-strong">{t('topbar.consoleAccess')}</span>
-          <span className="mt-1 text-[11px] text-text-faint">{t('topbar.authenticated')}</span>
+          <span className="text-body font-medium text-text-strong">{t('topbar.consoleAccess')}</span>
+          <span className="mt-1 text-label text-text-faint">{t('topbar.authenticated')}</span>
         </div>
       </div>
 

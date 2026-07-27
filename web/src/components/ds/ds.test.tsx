@@ -31,7 +31,7 @@ describe('Button', () => {
     )
     const btn = screen.getByRole('button', { name: 'Save' })
     expect(btn.className).toContain('border-outline')
-    expect(btn.className).toContain('rounded-full')
+    expect(btn.className).toContain('rounded-pill')
     await user.click(btn)
     expect(onClick).toHaveBeenCalledTimes(1)
   })

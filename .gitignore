@@ -35,3 +35,5 @@ zz_*_test.go
 plugin-sidecar/5gpn-intercept
 cmd/5gpn-dns/5gpn-dns
 *.exe
+/web/dist.tar.gz
+/web/e2e/live/out/

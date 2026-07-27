@@ -163,7 +163,7 @@ export function PolicyRuleDialog({ open, onOpenChange, rule, onSaved }: PolicyRu
       <div className="flex flex-col gap-4">
         {/* matcher kind — a small radio-style row so each option carries a stable testid */}
         <Field label={t('policyRules.dialog.kindLabel')}>
-          <div className="grid grid-cols-2 gap-1 rounded-[12px] bg-surface-container p-1 sm:grid-cols-4" role="radiogroup">
+          <div className="grid grid-cols-2 gap-1 rounded-ctl bg-surface-container p-1 sm:grid-cols-4" role="radiogroup">
             {KINDS.map((k) => (
               <button
                 key={k}
@@ -174,8 +174,8 @@ export function PolicyRuleDialog({ open, onOpenChange, rule, onSaved }: PolicyRu
                 onClick={() => set('kind', k)}
                 className={
                   form.kind === k
-                    ? 'zds-state-layer rounded-[9px] bg-card px-2.5 py-2 text-[11.5px] font-medium text-primary shadow-[var(--md-sys-elevation-1)]'
-                    : 'zds-state-layer rounded-[9px] px-2.5 py-2 text-[11.5px] text-text-faint'
+                    ? 'zds-state-layer rounded-chip bg-card px-2.5 py-2 text-label font-medium text-primary shadow-[var(--md-sys-elevation-1)]'
+                    : 'zds-state-layer rounded-chip px-2.5 py-2 text-label text-text-faint'
                 }
               >
                 {t(`policyRules.kind.${k}`)}
@@ -216,7 +216,7 @@ export function PolicyRuleDialog({ open, onOpenChange, rule, onSaved }: PolicyRu
 
         {/* Intent is a bare DNS-steering decision. */}
         <Field label={t('policyRules.dialog.intentLabel')}>
-          <div className="grid grid-cols-3 gap-1 rounded-[12px] bg-surface-container p-1" role="radiogroup">
+          <div className="grid grid-cols-3 gap-1 rounded-ctl bg-surface-container p-1" role="radiogroup">
             {INTENTS.map((i) => (
               <button
                 key={i}
@@ -227,8 +227,8 @@ export function PolicyRuleDialog({ open, onOpenChange, rule, onSaved }: PolicyRu
                 onClick={() => set('intent', i)}
                 className={
                   form.intent === i
-                    ? 'zds-state-layer rounded-[9px] bg-card px-2.5 py-2 text-[11.5px] font-medium text-primary shadow-[var(--md-sys-elevation-1)]'
-                    : 'zds-state-layer rounded-[9px] px-2.5 py-2 text-[11.5px] text-text-faint'
+                    ? 'zds-state-layer rounded-chip bg-card px-2.5 py-2 text-label font-medium text-primary shadow-[var(--md-sys-elevation-1)]'
+                    : 'zds-state-layer rounded-chip px-2.5 py-2 text-label text-text-faint'
                 }
               >
                 {t(`policyRules.intent.${i}`)}
@@ -237,7 +237,7 @@ export function PolicyRuleDialog({ open, onOpenChange, rule, onSaved }: PolicyRu
           </div>
         </Field>
 
-        <div className="flex items-center justify-between rounded-[12px] bg-surface-container-low px-3.5 py-3">
+        <div className="flex items-center justify-between rounded-ctl bg-surface-container-low px-3.5 py-3">
           <Label>{t('policyRules.dialog.enabledLabel')}</Label>
           <Toggle
             checked={form.enabled}
@@ -246,7 +246,7 @@ export function PolicyRuleDialog({ open, onOpenChange, rule, onSaved }: PolicyRu
           />
         </div>
 
-        {error ? <div className="rounded-[10px] bg-[var(--md-sys-color-error-container)] px-3 py-2 text-[11.5px] text-[var(--md-sys-color-on-error-container)]">{error}</div> : null}
+        {error ? <div className="rounded-ctl bg-[var(--md-sys-color-error-container)] px-3 py-2 text-label text-[var(--md-sys-color-on-error-container)]">{error}</div> : null}
       </div>
     </Modal>
   )

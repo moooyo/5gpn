@@ -2,18 +2,23 @@ import type { TFunction } from 'i18next'
 import { resolveDecision } from '../logs/log-columns'
 import type { ResolveProbe, ResolveTestResult } from '../../lib/api/types'
 
-/** One-click example domains from the brief's exact set (design handoff's
- *  `examples` list). */
-export const EXAMPLE_DOMAINS = [
-  'www.youtube.com',
-  'apple.com',
-  'baidu.com',
-  'ads.doubleclick.net',
-  'github.com',
-  'taobao.com',
+/**
+ * One-click example domains from the brief's exact set. The six between them
+ * cover all five decisions, which makes them the fastest way to understand the
+ * whole split — so each one states which decision it is expected to hit rather
+ * than being an unlabeled shortcut. `slot` is the categorical chart slot that
+ * decision owns everywhere else in the console.
+ */
+export const EXAMPLE_DOMAINS: Array<{ domain: string; expectKey: string; slot: 1 | 2 | 3 | 4 | 5 }> = [
+  { domain: 'www.youtube.com', expectKey: 'decision.forceProxy', slot: 3 },
+  { domain: 'apple.com', expectKey: 'decision.chnrouteForeign', slot: 5 },
+  { domain: 'baidu.com', expectKey: 'decision.chnrouteCn', slot: 4 },
+  { domain: 'ads.doubleclick.net', expectKey: 'decision.block', slot: 1 },
+  { domain: 'github.com', expectKey: 'decision.chnrouteForeign', slot: 5 },
+  { domain: 'taobao.com', expectKey: 'decision.forceDirect', slot: 2 },
 ]
 
-// reason -> i18n key slug shared by resolveTest.label.<slug> and
+// reason -> i18n key slug shared by decision.<slug> and
 // resolveTest.steps.<slug>. These are the five reasons with specialized UI.
 const KNOWN_SLUG: Record<string, string> = {
   'block': 'block',
@@ -24,9 +29,11 @@ const KNOWN_SLUG: Record<string, string> = {
 }
 
 export interface ResolveTestDecision {
-  /** Shared with the logs view's reason→color mapping (block red /
-   *  force-direct green / force-proxy blue / chnroute-cn cyan /
-   *  chnroute-foreign blue; falls back by `verdict`). */
+  /** Shared with the logs view's reason→color mapping: the five reasons hold
+   *  fixed categorical chart slots (block 1 / force-direct 2 / force-proxy 3 /
+   *  chnroute-cn 4 / chnroute-foreign 5), falling back by `verdict`. Not
+   *  semantic UI roles — ocean aliases primary onto trace and forest aliases
+   *  primary onto success, which used to collapse five decisions into three. */
   color: string
   /** Already-localized pill text. */
   label: string
@@ -48,7 +55,7 @@ export function decideResolveTest(result: Pick<ResolveTestResult, 'reason' | 've
   if (result.reason === 'force-proxy' && result.intercept?.ready) {
     return {
       color,
-      label: t('resolveTest.label.forceProxy'),
+      label: t('decision.forceProxy'),
       steps: t('resolveTest.steps.interceptForceProxy', {
         name: result.intercept.module_name || result.intercept.module_id,
         returnObjects: true,
@@ -59,7 +66,7 @@ export function decideResolveTest(result: Pick<ResolveTestResult, 'reason' | 've
   if (slug) {
     return {
       color,
-      label: t(`resolveTest.label.${slug}`),
+      label: t(`decision.${slug}`),
       steps: t(`resolveTest.steps.${slug}`, { returnObjects: true }) as unknown as string[],
     }
   }

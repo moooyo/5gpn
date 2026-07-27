@@ -64,19 +64,19 @@ export function Sidebar({ className, onNavigate, onClose, testId }: SidebarProps
       data-testid={testId}
     >
       <div className="flex items-center gap-3 px-2 pb-5">
-        <div className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-primary-container text-on-primary-container">
+        <div className="grid h-11 w-11 shrink-0 place-items-center rounded-pill bg-primary-container text-on-primary-container">
           <ShieldFilledIcon className="h-6 w-6" aria-hidden="true" />
         </div>
         <div className="flex min-w-0 flex-col leading-tight">
-          <span className="text-[18px] font-semibold tracking-[.02em] text-text-strong">5GPN</span>
-          <span className="text-[10px] font-medium tracking-[.14em] text-text-faint">{t('topbar.consoleTag')}</span>
+          <span className="text-headline font-semibold tracking-[.02em] text-text-strong">5GPN</span>
+          <span className="text-meta font-medium tracking-[.14em] text-text-faint">{t('topbar.consoleTag')}</span>
         </div>
         {onClose ? (
           <button
             type="button"
             onClick={onClose}
             aria-label={t('nav.closeMenu')}
-            className="zds-state-layer ml-auto grid h-10 w-10 place-items-center rounded-full text-text-soft"
+            className="zds-state-layer ml-auto grid h-field w-field place-items-center rounded-pill text-text-soft"
           >
             <CloseIcon className="h-5 w-5" aria-hidden="true" />
           </button>
@@ -86,7 +86,7 @@ export function Sidebar({ className, onNavigate, onClose, testId }: SidebarProps
       <nav className="flex flex-1 flex-col overflow-x-hidden overflow-y-auto" aria-label={t('nav.primary')}>
         {NAV_GROUPS.map((group) => (
           <div key={group.id} className="mb-2">
-            <div className="px-[18px] pb-1 pt-3 text-[11px] font-medium tracking-[.06em] text-text-faint">
+            <div className="px-[18px] pb-1 pt-3 text-meta font-medium tracking-[.06em] text-text-faint">
               {t(group.labelKey)}
             </div>
             <div className="flex flex-col gap-0.5">
@@ -96,7 +96,7 @@ export function Sidebar({ className, onNavigate, onClose, testId }: SidebarProps
                   to={item.path}
                   onClick={onNavigate}
                   className={({ isActive }) => cn(
-                    'sidebar-tab zds-state-layer flex h-11 items-center gap-3 rounded-full px-[18px] text-[13.5px] font-medium',
+                    'sidebar-tab zds-state-layer flex h-field items-center gap-3 rounded-pill px-[18px] text-body font-medium',
                     isActive
                       ? 'sidebar-tab-active bg-secondary-container text-on-secondary-container'
                       : 'text-text-mid',
@@ -128,8 +128,8 @@ function KernelStatusCard() {
   const { dnsState, mihomoState, interceptState } = useStatus()
 
   return (
-    <div className="mt-3 flex flex-col gap-2 rounded-[16px] bg-surface-container-low p-3.5">
-      <div className="mb-1 flex items-center gap-2 text-[11px] font-medium text-text-faint">
+    <div className="mt-3 flex flex-col gap-2 rounded-card bg-surface-container-low p-3.5">
+      <div className="mb-1 flex items-center gap-2 text-meta font-medium text-text-faint">
         <MemoryIcon className="h-4 w-4" aria-hidden="true" />
         {t('topbar.runtimeState')}
       </div>
@@ -151,10 +151,12 @@ function KernelRow({ title, state }: { title: string; state: HealthState }) {
   const { t } = useTranslation()
   const presentation = HEALTH_PRESENTATION[state]
   return (
-    <div className="flex items-center gap-2.5 rounded-[10px] px-1 py-1.5">
+    // 12px title / 12px state, not 12/10: this is a panel an operator stares
+    // at for long stretches, and 10px was the smallest thing in the chrome.
+    <div className="flex min-h-row items-center gap-2.5 rounded-chip px-1 py-1.5">
       <StatusDot color={presentation.color} pulse={state === 'checking'} />
-      <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-text-strong">{title}</span>
-      <span className={cn('text-[10px] font-medium', presentation.className)}>{t(presentation.labelKey)}</span>
+      <span className="min-w-0 flex-1 truncate text-label font-medium text-text-strong">{title}</span>
+      <span className={cn('text-label font-medium', presentation.className)}>{t(presentation.labelKey)}</span>
     </div>
   )
 }

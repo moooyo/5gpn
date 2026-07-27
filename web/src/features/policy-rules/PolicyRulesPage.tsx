@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useSearchParams } from 'react-router-dom'
 import { AddIcon, RocketIcon } from '../../components/icons'
 import { Button, Card, Modal, toast } from '../../components/ds'
 import { api } from '../../lib/api/client'
 import type { PolicyRule } from '../../lib/api/types'
+import { cn } from '../../lib/cn'
 import { PolicyRuleDialog } from './PolicyRuleDialog'
 import { PolicyRulesTable } from './PolicyRulesTable'
 import { FallbackControl } from './FallbackControl'
+import { diffPolicyRules } from './policy-dirty'
 
 function errMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback
@@ -19,13 +22,20 @@ function contentOf(r: PolicyRule): Omit<PolicyRule, 'id' | 'order'> {
   return { matcher: r.matcher, intent: r.intent, enabled: r.enabled }
 }
 
+function clockOf(at: number): string {
+  const date = new Date(at)
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
+
 /** Unified policy-rule page backed by `/api/policy/rules` and
  *  `/api/policy/fallback`. It owns the dialogs and Apply action while the
  *  table receives only data and callbacks.
  *
  *  CRUD (toggle/reorder/delete/dialog-save) persists to the rule store
  *  immediately and reloads the list; Apply is the separate step that
- *  compiles and hot-reloads the live DNS policy.
+ *  compiles and hot-reloads the live DNS policy. The gap between those two is
+ *  page-level state, so it lives on the header card rather than inside the
+ *  Apply button — see policy-dirty.ts.
  *
  *  This page is DNS-only. Post-steering egress is the operator's complete
  *  mihomo config, edited on its own page. */
@@ -37,6 +47,23 @@ export default function PolicyRulesPage() {
   const [addOpen, setAddOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<PolicyRule | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<PolicyRule | null>(null)
+  const [appliedSnapshot, setAppliedSnapshot] = useState<PolicyRule[] | null>(null)
+  const [appliedAt, setAppliedAt] = useState<number | null>(null)
+  // The resolve test links here with the rule its result matched. The
+  // highlight fades on its own; the row itself is not otherwise special.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const highlightId = searchParams.get('highlight')
+  useEffect(() => {
+    if (!highlightId) return
+    const timer = setTimeout(() => {
+      setSearchParams((params) => {
+        const next = new URLSearchParams(params)
+        next.delete('highlight')
+        return next
+      }, { replace: true })
+    }, 2400)
+    return () => clearTimeout(timer)
+  }, [highlightId, setSearchParams])
 
   const load = useCallback(async () => {
     try {
@@ -49,10 +76,15 @@ export default function PolicyRulesPage() {
   }, [t])
   useEffect(() => void load(), [load])
 
+  const pending = useMemo(() => diffPolicyRules(appliedSnapshot, rules), [appliedSnapshot, rules])
+  const dirty = pending.count > 0
+
   async function handleApply() {
     setApplying(true)
     try {
       await api.applyPolicy()
+      setAppliedSnapshot(rules)
+      setAppliedAt(Date.now())
       toast.success(t('policyRules.applyOk'))
     } catch (err) {
       toast.error(errMessage(err, t('policyRules.applyFailed')))
@@ -89,21 +121,55 @@ export default function PolicyRulesPage() {
     }
   }
 
+  const upToDate = appliedSnapshot !== null && !dirty
+
   return (
     <div className="flex flex-col gap-4" data-testid="page-policy-rules">
-      <Card variant="tonal" className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:p-6">
+      {/* Whole card carries the state, not just the button: "three of my edits
+          are not live" is a fact about the page, and it has to survive the
+          operator scrolling past a single control. */}
+      <Card
+        variant="tonal"
+        data-testid="policy-header"
+        data-dirty={dirty ? 'true' : 'false'}
+        className={cn(
+          'flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:p-6',
+          dirty && 'bg-[var(--md-sys-color-warning-container)] text-[var(--md-sys-color-on-warning-container)]',
+        )}
+      >
         <div className="min-w-[220px] flex-1">
-          <h1 className="text-[17px] font-medium text-text-strong">{t('policyRules.title')}</h1>
-          <p className="mt-1.5 text-[12px] leading-5 text-text-faint">{t('policyRules.applyHint')}</p>
+          <h1 className={cn('text-headline font-medium', dirty ? 'text-inherit' : 'text-text-strong')}>{t('policyRules.title')}</h1>
+          <p className={cn('mt-1.5 text-label leading-5', dirty ? 'text-inherit opacity-90' : 'text-text-faint')}>
+            {dirty
+              ? t('policyRules.pendingHint', { count: pending.count })
+              : upToDate && appliedAt !== null
+                ? t('policyRules.upToDateHint', { time: clockOf(appliedAt) })
+                : t('policyRules.applyHint')}
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button type="button" variant="tonal" onClick={() => setAddOpen(true)}>
             <AddIcon className="h-[18px] w-[18px]" aria-hidden="true" />
             {t('policyRules.newRule')}
           </Button>
-          <Button type="button" onClick={() => void handleApply()} disabled={applying} data-testid="policy-apply">
+          <Button
+            type="button"
+            variant={upToDate ? 'secondary' : 'primary'}
+            onClick={() => void handleApply()}
+            disabled={applying || upToDate}
+            data-testid="policy-apply"
+          >
             <RocketIcon className="h-[18px] w-[18px]" aria-hidden="true" />
-            {applying ? t('policyRules.applying') : t('policyRules.apply')}
+            {applying
+              ? t('policyRules.applying')
+              : upToDate
+                ? t('policyRules.applyUpToDate')
+                : t('policyRules.apply')}
+            {dirty ? (
+              <span className="ml-1 inline-flex min-w-5 items-center justify-center rounded-pill bg-[var(--md-sys-color-on-primary)] px-1.5 font-mono text-meta font-semibold text-primary">
+                {pending.count}
+              </span>
+            ) : null}
           </Button>
         </div>
       </Card>
@@ -115,6 +181,8 @@ export default function PolicyRulesPage() {
       ) : (
         <PolicyRulesTable
           rules={rules}
+          pendingIds={pending.ids}
+          highlightId={highlightId}
           onEdit={setEditTarget}
           onDelete={setDeleteTarget}
           onToggle={(r) => void handleToggle(r)}
@@ -169,7 +237,7 @@ export default function PolicyRulesPage() {
             </>
           }
         >
-          <p className="text-[13px] text-text-mid">{t('policyRules.deleteConfirm', { name: deleteTarget.matcher.value })}</p>
+          <p className="text-body text-text-mid">{t('policyRules.deleteConfirm', { name: deleteTarget.matcher.value })}</p>
         </Modal>
       ) : null}
     </div>

@@ -122,7 +122,12 @@ describe('SettingsPage', () => {
     expect(screen.getByDisplayValue('123456789')).toBeInTheDocument()
     expect(screen.getByTestId('mitm-host-audit-link')).toHaveAttribute('href', '/extensions/hosts')
     expect(screen.queryByTestId('mitm-capabilities')).not.toBeInTheDocument()
-    expect(screen.getByText('Material 3 · 安全 DNS 网关')).toBeInTheDocument()
+    // Five sections with a sticky index replace the ten-card straight column
+    // and the about strip that closed it.
+    const nav = within(screen.getByTestId('settings-nav'))
+    expect(nav.getByRole('button', { name: i18n.t('settings.sectionAppearance') })).toBeInTheDocument()
+    expect(nav.getByRole('button', { name: i18n.t('settings.sectionResolution') })).toBeInTheDocument()
+    expect(document.getElementById('settings-resolution')).toBeInTheDocument()
   })
 
   it('saves HTTP/2 and QUIC capabilities without changing the MITM master state', async () => {
@@ -275,6 +280,37 @@ describe('SettingsPage', () => {
     expect(signal?.aborted).toBe(false)
     view.unmount()
     expect(signal?.aborted).toBe(true)
+  })
+
+  /**
+   * Cards that had no load state rendered live controls bound to `undefined`:
+   * an empty ECS subnet field looks exactly like an ECS subnet that is
+   * genuinely empty, and both were reachable and submittable. They show that
+   * the data has not arrived instead.
+   */
+  it('shows a skeleton rather than empty controls before the data lands', async () => {
+    let releaseEcs: (value: ECSView) => void = () => {}
+    vi.mocked(api.getEcs).mockReturnValueOnce(new Promise((resolve) => { releaseEcs = resolve }))
+    renderSettings()
+
+    expect((await screen.findAllByTestId('card-skeleton')).length).toBeGreaterThan(0)
+    expect(screen.queryByTestId('ecs-save')).not.toBeInTheDocument()
+
+    releaseEcs(ECS)
+    expect(await screen.findByTestId('ecs-save')).toBeInTheDocument()
+  })
+
+  /**
+   * A disabled control has to say why it is disabled, where a finger can reach
+   * it. This one is installer-owned and carried no explanation at all — worse
+   * than the `title` tooltip the review reported, which a touch screen cannot
+   * surface either.
+   */
+  it('explains in persistent text why the DoT domain cannot be edited here', async () => {
+    renderSettings()
+    const dotDomain = await screen.findByLabelText('DoT 域名')
+    expect(dotDomain).toBeDisabled()
+    expect(dotDomain).toHaveAccessibleDescription(i18n.t('settings.dotDomainReadOnly'))
   })
 
   it('cert status renders 有效 + days_remaining from status.cert', async () => {
@@ -498,7 +534,7 @@ describe('SettingsPage', () => {
   })
 })
 
-describe('SettingsPage about strip versions', () => {
+describe('SettingsPage version block', () => {
   it('reports the 5gpn-dns, mihomo and zashboard builds that are actually installed', async () => {
     renderSettings(
       statusValue({
@@ -513,10 +549,14 @@ describe('SettingsPage about strip versions', () => {
       }),
     )
 
-    expect(await screen.findByText('5gpn-dns dev+abc1234')).toBeInTheDocument()
-    expect(screen.getByText('mihomo v1.19.28-overlay.2')).toBeInTheDocument()
-    expect(screen.getByText('sidecar 0.1.0-beta.1')).toBeInTheDocument()
-    expect(screen.getByText('zashboard v3.16.0-overlay.1')).toBeInTheDocument()
+    // The versions ride in the sticky index now: they are the first thing
+    // anyone looks up when something is wrong, and they used to sit under
+    // 3000px of scroll.
+    const nav = within(await screen.findByTestId('settings-nav'))
+    expect(nav.getByText('dev+abc1234')).toBeInTheDocument()
+    expect(nav.getByText('v1.19.28-overlay.2')).toBeInTheDocument()
+    expect(nav.getByText('0.1.0-beta.1')).toBeInTheDocument()
+    expect(nav.getByText('v3.16.0-overlay.1')).toBeInTheDocument()
   })
 
   // The two unknowns are not the same unknown. mihomo is always part of an
@@ -537,8 +577,9 @@ describe('SettingsPage about strip versions', () => {
       }),
     )
 
-    expect(await screen.findByText('mihomo —')).toBeInTheDocument()
-    expect(screen.queryByText(/^zashboard /)).not.toBeInTheDocument()
+    const nav = within(await screen.findByTestId('settings-nav'))
+    expect(nav.getByTitle('mihomo —')).toBeInTheDocument()
+    expect(nav.queryByText('zashboard')).not.toBeInTheDocument()
     // The sidecar only reports a version while it is running with active
     // plugins, so like zashboard it is omitted rather than dashed.
     expect(screen.queryByText(/^sidecar /)).not.toBeInTheDocument()

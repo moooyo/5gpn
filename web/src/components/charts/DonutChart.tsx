@@ -65,7 +65,7 @@ export function DonutChart({ segments, height = 90, width = '100%', centerLabel,
         }) : null}
       </svg>
       {centerLabel !== undefined ? (
-        <span className="pointer-events-none absolute inset-0 flex items-center justify-center font-mono text-[12px] font-medium text-text-strong">
+        <span className="pointer-events-none absolute inset-0 flex items-center justify-center font-mono text-label font-medium text-text-strong">
           {centerLabel}
         </span>
       ) : null}

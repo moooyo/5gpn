@@ -1,10 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import i18n from '../../i18n'
 import { api } from '../../lib/api/client'
 import type { ResolveTestResult } from '../../lib/api/types'
 import ResolveTestPage from './ResolveTestPage'
+import { MemoryRouter } from 'react-router-dom'
+
+/** The result card links to /policy-rules and /logs now, so the page needs a
+ *  router in scope. */
+function renderResolveTest() {
+  return render(<MemoryRouter><ResolveTestPage /></MemoryRouter>)
+}
+
+/** The example buttons now state which decision they are expected to hit, so
+ *  a decision label appears both there and in the result — queries for the
+ *  verdict have to say which one they mean. */
+const result = () => within(screen.getByTestId('resolve-test-result'))
 
 vi.mock('../../lib/api/client', () => ({ api: { resolveTest: vi.fn() } }))
 
@@ -105,12 +117,13 @@ describe('ResolveTestPage', () => {
   it('renders the 国内直连 pill + chnroute-cn steps + client IPs for a chnroute-cn result', async () => {
     vi.mocked(api.resolveTest).mockResolvedValue(CN_RESULT)
     const user = userEvent.setup()
-    render(<ResolveTestPage />)
+    renderResolveTest()
 
     await user.type(screen.getByPlaceholderText('example.com'), 'baidu.com')
     await user.click(screen.getByRole('button', { name: i18n.t('resolveTest.run') }))
 
-    expect(await screen.findByText('国内直连')).toBeInTheDocument()
+    expect(await screen.findByTestId('resolve-test-result')).toBeInTheDocument()
+    expect(result().getByText('国内直连')).toBeInTheDocument()
     expect(screen.getByText('未命中策略规则，进入 chnroute 仲裁')).toBeInTheDocument()
     expect(screen.getByText('并发查询：国内组 ‖ 可信组')).toBeInTheDocument()
     expect(screen.getByText('国内答案 IP ∈ chnroute → 采用，直连')).toBeInTheDocument()
@@ -121,12 +134,13 @@ describe('ResolveTestPage', () => {
   it('renders 拦截 + the NXDOMAIN steps for a block result', async () => {
     vi.mocked(api.resolveTest).mockResolvedValue(BLOCK_RESULT)
     const user = userEvent.setup()
-    render(<ResolveTestPage />)
+    renderResolveTest()
 
     await user.type(screen.getByPlaceholderText('example.com'), 'ads.doubleclick.net')
     await user.click(screen.getByRole('button', { name: i18n.t('resolveTest.run') }))
 
-    expect(await screen.findByText('拦截')).toBeInTheDocument()
+    expect(await screen.findByTestId('resolve-test-result')).toBeInTheDocument()
+    expect(result().getByText('拦截')).toBeInTheDocument()
     expect(screen.getByText('5gpn-dns 返回 NXDOMAIN')).toBeInTheDocument()
     expect(screen.getByText('客户端不发起任何连接')).toBeInTheDocument()
     expect(screen.getByText('(已拦截)')).toBeInTheDocument() // no client_ips -> blocked fallback
@@ -135,13 +149,70 @@ describe('ResolveTestPage', () => {
   it('clicking an example chip fills the input and runs the test', async () => {
     vi.mocked(api.resolveTest).mockResolvedValue(CN_RESULT)
     const user = userEvent.setup()
-    render(<ResolveTestPage />)
+    renderResolveTest()
 
-    await user.click(screen.getByRole('button', { name: 'baidu.com' }))
+    await user.click(screen.getByRole('button', { name: /^baidu\.com/ }))
 
     await waitFor(() => expect(vi.mocked(api.resolveTest)).toHaveBeenCalledWith('baidu.com'))
     expect(screen.getByPlaceholderText('example.com')).toHaveValue('baidu.com')
-    expect(await screen.findByText('国内直连')).toBeInTheDocument()
+    expect(await screen.findByTestId('resolve-test-result')).toBeInTheDocument()
+    expect(result().getByText('国内直连')).toBeInTheDocument()
+  })
+
+  /**
+   * The chain used to end at the verdict: the result named a rule it could not
+   * take you to, and finding the same domain in the log meant memorizing it
+   * and retyping it on another page.
+   */
+  it('links the result back to the matched rule and to the log filtered by this domain', async () => {
+    vi.mocked(api.resolveTest).mockResolvedValue({
+      ...CN_RESULT,
+      policy: { rule_id: 'rule-7', order: 3, kind: 'domain-suffix', value: 'baidu.com' },
+    })
+    const user = userEvent.setup()
+    renderResolveTest()
+
+    await user.type(screen.getByPlaceholderText('example.com'), 'baidu.com')
+    await user.click(screen.getByRole('button', { name: i18n.t('resolveTest.run') }))
+    await screen.findByTestId('resolve-test-result')
+
+    const actions = within(screen.getByTestId('resolve-test-actions'))
+    expect(actions.getByRole('link', { name: i18n.t('resolveTest.viewMatchedRule') }))
+      .toHaveAttribute('href', '/policy-rules?highlight=rule-7')
+    expect(actions.getByRole('link', { name: i18n.t('resolveTest.filterInLogs') }))
+      .toHaveAttribute('href', '/logs?q=baidu.com')
+  })
+
+  it('offers only the log hand-off when no policy rule produced the verdict', async () => {
+    vi.mocked(api.resolveTest).mockResolvedValue(CN_RESULT)
+    const user = userEvent.setup()
+    renderResolveTest()
+
+    await user.type(screen.getByPlaceholderText('example.com'), 'baidu.com')
+    await user.click(screen.getByRole('button', { name: i18n.t('resolveTest.run') }))
+    await screen.findByTestId('resolve-test-result')
+
+    const actions = within(screen.getByTestId('resolve-test-actions'))
+    expect(actions.queryByRole('link', { name: i18n.t('resolveTest.viewMatchedRule') })).toBeNull()
+    expect(actions.getByRole('link', { name: i18n.t('resolveTest.filterInLogs') })).toBeInTheDocument()
+  })
+
+  /** Each run used to overwrite the last, so comparing two domains meant
+   *  writing one answer down first. */
+  it('keeps recent results available for comparison', async () => {
+    const user = userEvent.setup()
+    vi.mocked(api.resolveTest).mockResolvedValueOnce(CN_RESULT).mockResolvedValueOnce(BLOCK_RESULT)
+    renderResolveTest()
+
+    await user.click(screen.getByRole('button', { name: /^baidu\.com/ }))
+    await screen.findByTestId('resolve-test-result')
+    await user.click(screen.getByRole('button', { name: /^ads\.doubleclick\.net/ }))
+    await waitFor(() => expect(result().getByText('拦截')).toBeInTheDocument())
+
+    const chips = within(screen.getByTestId('resolve-test-history')).getAllByRole('button')
+    expect(chips.map((chip) => chip.textContent)).toEqual([BLOCK_RESULT.name, CN_RESULT.name])
+    await user.click(chips[1])
+    expect(result().getByText('国内直连')).toBeInTheDocument()
   })
 
   it('shows a loading state on the run button while the test is pending', async () => {
@@ -152,7 +223,7 @@ describe('ResolveTestPage', () => {
       }),
     )
     const user = userEvent.setup()
-    render(<ResolveTestPage />)
+    renderResolveTest()
 
     await user.type(screen.getByPlaceholderText('example.com'), 'baidu.com')
     await user.click(screen.getByRole('button', { name: i18n.t('resolveTest.run') }))
@@ -170,7 +241,7 @@ describe('ResolveTestPage', () => {
   it('names the extension, its matched pattern, and what was skipped when a capture fired', async () => {
     vi.mocked(api.resolveTest).mockResolvedValue(INTERCEPT_RESULT)
     const user = userEvent.setup()
-    render(<ResolveTestPage />)
+    renderResolveTest()
 
     await user.type(screen.getByPlaceholderText('example.com'), 'api.example.com')
     await user.click(screen.getByRole('button', { name: i18n.t('resolveTest.run') }))
@@ -189,7 +260,7 @@ describe('ResolveTestPage', () => {
   it('states the capture-table miss as a finding and names the policy rule that won', async () => {
     vi.mocked(api.resolveTest).mockResolvedValue(POLICY_RESULT)
     const user = userEvent.setup()
-    render(<ResolveTestPage />)
+    renderResolveTest()
 
     await user.type(screen.getByPlaceholderText('example.com'), 'news.example.org')
     await user.click(screen.getByRole('button', { name: i18n.t('resolveTest.run') }))
@@ -204,7 +275,7 @@ describe('ResolveTestPage', () => {
   it('warns that an enabled extension declared the name but MITM left the capture inert', async () => {
     vi.mocked(api.resolveTest).mockResolvedValue(INERT_RESULT)
     const user = userEvent.setup()
-    render(<ResolveTestPage />)
+    renderResolveTest()
 
     await user.type(screen.getByPlaceholderText('example.com'), 'api.example.com')
     await user.click(screen.getByRole('button', { name: i18n.t('resolveTest.run') }))

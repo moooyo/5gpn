@@ -22,6 +22,10 @@ export interface UsePluginEngineLogsResult {
   latestId: number
   /** Read counters synchronously for local clear actions between render batches. */
   getCurrentWatermarks: () => PluginEngineLogWatermarks
+  /** Tear down and redial now instead of waiting out the fixed 3s backoff.
+   *  Surfaced on the disconnected banner: the operator watching a stalled
+   *  stream should not have to reload the page to retry it. */
+  reconnect: () => void
 }
 
 interface PluginEngineLogWatermarks {
@@ -139,6 +143,7 @@ export function usePluginEngineLogs({ paused, enabled = true, max = PLUGIN_LOG_R
   const capacity = Number.isFinite(max) ? Math.max(1, Math.floor(max)) : PLUGIN_LOG_RING_SIZE
   const [snapshot, setSnapshot] = useState<PluginEngineLogSnapshot>({ entries: [], bufferedCount: 0, latestId: 0 })
   const [connected, setConnected] = useState(false)
+  const [redialNonce, setRedialNonce] = useState(0)
   const [ring] = useState(() => new BoundedNewestFirstRing<PluginEngineLogEntry>(capacity))
   const capacityRef = useRef(capacity)
   const nextIdRef = useRef(1)
@@ -178,6 +183,10 @@ export function usePluginEngineLogs({ paused, enabled = true, max = PLUGIN_LOG_R
     latestId: latestIdRef.current,
     bufferedCount: pausedRef.current ? pausedBufferedCountRef.current : 0,
   }), [])
+
+  // Re-running the connect effect is exactly "close what is open, mint a fresh
+  // ticket, redial" — the same path the backoff timer takes, without the wait.
+  const reconnect = useCallback(() => setRedialNonce((value) => value + 1), [])
 
   useEffect(() => {
     mountedRef.current = true
@@ -325,7 +334,7 @@ export function usePluginEngineLogs({ paused, enabled = true, max = PLUGIN_LOG_R
         socket = null
       }
     }
-  }, [enabled, ring, scheduleCommit])
+  }, [enabled, redialNonce, ring, scheduleCommit])
 
-  return { ...snapshot, connected, getCurrentWatermarks }
+  return { ...snapshot, connected, getCurrentWatermarks, reconnect }
 }

@@ -1,11 +1,12 @@
 import { StrictMode, useState } from 'react'
 import { MemoryRouter } from 'react-router-dom'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import i18n from '../../i18n'
 import type { InterceptModule, PluginEngineLogLine } from '../../lib/api/types'
 import PluginLogsPage from './PluginLogsPage'
+import { Toaster } from '../../components/ds'
 import {
   PLUGIN_LOG_HANDSHAKE_TIMEOUT_MS,
   PLUGIN_LOG_RECONNECT_MS,
@@ -482,6 +483,60 @@ describe('PluginLogsPage', () => {
     expect(await screen.findByText('after clear')).toBeInTheDocument()
   })
 
+  /**
+   * Clearing pushes a browser-side watermark to the newest id — 1,200 rows
+   * vanish with no confirmation and, before this, no way back. The entries are
+   * still in the sidecar ring, so undo just restores the previous number.
+   */
+  it('offers an undo that restores the pre-clear watermark', async () => {
+    const user = userEvent.setup()
+    render(<MemoryRouter><PluginLogsPage /><Toaster /></MemoryRouter>)
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const socket = FakeWebSocket.instances[0]
+    act(() => {
+      socket.open()
+      socket.emit(frame('cleared away'))
+      flushAnimationFrames()
+    })
+    expect(await screen.findByText('cleared away')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: i18n.t('pluginLogs.clearLabel') }))
+    act(() => flushAnimationFrames())
+    expect(screen.queryByText('cleared away')).not.toBeInTheDocument()
+
+    // The toast queue is module-level and survives across tests in this file,
+    // so scope to the row this clear produced rather than to the label alone.
+    const undoToast = screen.getByText(i18n.t('pluginLogs.clearedToast', { count: 1 })).closest('[role="status"]')
+    await user.click(within(undoToast as HTMLElement).getByRole('button', { name: i18n.t('common.undo') }))
+    act(() => flushAnimationFrames())
+    expect(await screen.findByText('cleared away')).toBeInTheDocument()
+  })
+
+  /**
+   * Paused, inactive and disconnected were three independent conditions that
+   * could all render at once. Only the highest-priority one gets a row now.
+   */
+  it('renders exactly one status row, with the lower-priority condition inline', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    await user.click(screen.getByRole('button', { name: i18n.t('pluginLogs.pause') }))
+
+    const banners = screen.getAllByTestId('plugin-logs-status-banner')
+    expect(banners).toHaveLength(1)
+    expect(banners[0]).toHaveTextContent(i18n.t('pluginLogs.disconnectedBanner'))
+    expect(banners[0]).toHaveTextContent(i18n.t('pluginLogs.pausedHint', { count: 0 }))
+  })
+
+  it('offers an immediate redial on the disconnected banner instead of only the 3s backoff', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await waitFor(() => expect(api.createPluginLogTicket).toHaveBeenCalledTimes(1))
+
+    await user.click(screen.getByRole('button', { name: i18n.t('pluginLogs.reconnectNow') }))
+    await waitFor(() => expect(api.createPluginLogTicket).toHaveBeenCalledTimes(2))
+  })
+
   it('clears a paused batch before its animation-frame counters commit', async () => {
     const user = userEvent.setup()
     renderPage()
@@ -495,7 +550,9 @@ describe('PluginLogsPage', () => {
     await user.click(screen.getByRole('button', { name: i18n.t('pluginLogs.clearLabel') }))
     act(() => flushAnimationFrames())
 
-    expect(screen.getAllByText(i18n.t('pluginLogs.pausedHint', { count: 0 })).length).toBeGreaterThan(0)
+    // Disconnected outranks paused, so the paused count rides along as the
+    // banner's supplementary text rather than owning a second row.
+    expect(screen.getByTestId('plugin-logs-status-banner')).toHaveTextContent(i18n.t('pluginLogs.pausedHint', { count: 0 }))
     await user.click(screen.getByRole('button', { name: i18n.t('pluginLogs.resume') }))
     expect(screen.queryByText('paused-clear-1004')).not.toBeInTheDocument()
 
@@ -569,7 +626,32 @@ describe('PluginLogsPage', () => {
     expect(screen.queryByText('https://example.test/path')).not.toBeInTheDocument()
   })
 
-  it('renders the mobile two-row virtual cards and split filter rails', async () => {
+  /**
+   * The dot used to be `PLUGIN_DOTS[hash(id) % 5]` over semantic roles —
+   * ocean aliases primary onto trace and forest aliases primary onto success,
+   * so two plugins could collide by theme, and any two could collide by hash.
+   * Slots are categorical and positional over execution_order now.
+   */
+  it('assigns plugin dots from the categorical slots by execution order', async () => {
+    renderPage()
+    await waitFor(() => expect(api.getInterceptModules).toHaveBeenCalledTimes(1))
+    const socket = FakeWebSocket.instances[0]
+    act(() => {
+      socket.open()
+      socket.emit(frame('first plugin', { extension: 'io.example.apple' }))
+      socket.emit(frame('second plugin', { extension: 'io.example.cleaner' }))
+      flushAnimationFrames()
+    })
+    await screen.findByText('second plugin')
+
+    const dotFor = (message: string) =>
+      (screen.getByText(message).closest('[role="button"]')?.querySelector('span[style]') as HTMLElement | null)?.style.background
+    expect(dotFor('first plugin')).toBe('var(--color-chart-1)')
+    expect(dotFor('second plugin')).toBe('var(--color-chart-2)')
+  })
+
+  it('renders the mobile two-row virtual cards and moves the filters into a sheet', async () => {
+    const user = userEvent.setup()
     setMobile(true)
     renderPage()
     await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
@@ -579,10 +661,32 @@ describe('PluginLogsPage', () => {
     })
 
     expect(await screen.findByText('mobile log line')).toBeInTheDocument()
-    expect(screen.getByText(i18n.t('pluginLogs.levelLabel'))).toBeInTheDocument()
-    expect(screen.getByText(i18n.t('pluginLogs.pluginLabel'))).toBeInTheDocument()
+    // The level and plugin rails no longer sit permanently above the table —
+    // with three possible banners they pushed the list under six rows of
+    // chrome inside a viewport that only gives it ~280px.
+    expect(screen.queryByText(i18n.t('pluginLogs.levelLabel'))).not.toBeInTheDocument()
+    expect(screen.queryByText(i18n.t('pluginLogs.pluginLabel'))).not.toBeInTheDocument()
     expect(screen.queryByText(i18n.t('pluginLogs.colTime'))).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: i18n.t('pluginLogs.pause') })).toHaveClass('rounded-full')
+    expect(screen.getByRole('button', { name: i18n.t('pluginLogs.pause') })).toHaveClass('rounded-pill')
     expect(screen.getByTestId('virtual-scroll')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: i18n.t('pluginLogs.filters') }))
+    expect(await screen.findByText(i18n.t('pluginLogs.levelLabel'))).toBeInTheDocument()
+    expect(screen.getByText(i18n.t('pluginLogs.pluginLabel'))).toBeInTheDocument()
+  })
+
+  it('echoes an applied mobile filter as a chip that clears it', async () => {
+    const user = userEvent.setup()
+    setMobile(true)
+    renderPage()
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+
+    await user.click(screen.getByRole('button', { name: i18n.t('pluginLogs.filters') }))
+    await user.click(await screen.findByRole('button', { name: new RegExp(i18n.t('pluginLogs.level.error')), pressed: false }))
+
+    const chips = within(screen.getByRole('group', { name: i18n.t('pluginLogs.activeFilters') })).getAllByRole('button')
+    expect(chips).toHaveLength(1)
+    await user.click(chips[0])
+    expect(screen.queryByRole('group', { name: i18n.t('pluginLogs.activeFilters') })).not.toBeInTheDocument()
   })
 })

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { Sidebar } from './Sidebar'
@@ -179,6 +179,63 @@ describe('Topbar', () => {
 
     expect(screen.getByText(i18n.t('nav.pluginLogs'))).toBeInTheDocument()
     expect(screen.getByText(i18n.t('topbar.sub.pluginLogs'))).toBeInTheDocument()
+  })
+
+  /**
+   * The desktop sidebar expands at `md` while route search only appeared at
+   * `lg`, so 768–1023px (a portrait iPad) had a topbar holding nothing but an
+   * avatar — and no width had a keyboard route in at all. The dialog and the
+   * inline field are the same combobox.
+   */
+  describe('route search', () => {
+    it('opens the palette from the trigger that exists below lg', async () => {
+      const user = userEvent.setup()
+      renderChrome(<Topbar />, { route: '/logs', status: statusValue() })
+
+      await user.click(screen.getByTestId('route-search-trigger'))
+
+      const dialog = await screen.findByRole('dialog')
+      expect(within(dialog).getByRole('combobox')).toBeInTheDocument()
+    })
+
+    it('opens on the global chord and closes on Escape', async () => {
+      const user = userEvent.setup()
+      renderChrome(<Topbar />, { route: '/logs', status: statusValue() })
+
+      await user.keyboard('{Control>}k{/Control}')
+      const dialog = await screen.findByRole('dialog')
+
+      await user.keyboard('{Escape}')
+      await waitFor(() => expect(dialog).not.toBeInTheDocument())
+    })
+
+    it('navigates to the highlighted route with the arrow keys and Enter', async () => {
+      const user = userEvent.setup()
+      renderChrome(<Topbar />, { route: '/logs', status: statusValue() })
+
+      await user.keyboard('{Control>}k{/Control}')
+      const dialog = await screen.findByRole('dialog')
+      const options = within(dialog).getAllByRole('option')
+      expect(options[0]).toHaveAttribute('aria-selected', 'true')
+
+      await user.keyboard('{ArrowDown}')
+      expect(within(dialog).getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true')
+    })
+
+    it('filters the options as the operator types', async () => {
+      const user = userEvent.setup()
+      renderChrome(<Topbar />, { route: '/logs', status: statusValue() })
+
+      await user.keyboard('{Control>}k{/Control}')
+      const dialog = await screen.findByRole('dialog')
+      await user.type(within(dialog).getByRole('combobox'), i18n.t('nav.settings'))
+
+      const options = within(dialog).getAllByRole('option')
+      expect(options.length).toBeLessThan(ALL_NAV_ITEMS.length)
+      // The matcher reads title and subtitle, so the extensions subtitle that
+      // mentions 设置 is a legitimate hit alongside the settings route itself.
+      expect(options.map((option) => option.textContent).join(' ')).toContain(i18n.t('nav.settings'))
+    })
   })
 })
 

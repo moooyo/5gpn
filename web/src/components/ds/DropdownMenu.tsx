@@ -38,7 +38,7 @@ export function DropdownItem({ onSelect, danger, children }: DropdownItemProps) 
       type="button"
       onClick={(event) => onSelect?.(event.nativeEvent)}
       className={cn(
-        'zds-state-layer flex w-full cursor-pointer items-center gap-3 rounded-[10px] px-3 py-2.5 text-left text-[13px] font-medium outline-none',
+        'zds-state-layer flex w-full cursor-pointer items-center gap-3 rounded-ctl px-3 py-2.5 text-left text-body font-medium outline-none',
         danger ? 'text-red' : 'text-text-mid',
       )}
     >

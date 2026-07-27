@@ -141,8 +141,14 @@ test('iPhone setup guide distinguishes Android DoT from unsupported Android MITM
   await setupMockApiWithToken(page)
   await page.goto('/setup-guide')
 
+  // The page opens on one branch instead of laying all thirteen numbered steps
+  // out at once, so reaching the Android guide means saying it is an Android.
+  await page.getByRole('tab', { name: 'Android' }).click()
   await expect(page.getByText('Android 9+')).toBeVisible()
-  await expect(page.getByText('现代 Android 应用不支持 MITM 配置')).toBeVisible()
-  await expect(page.getByRole('link', { name: '前往 MITM 设置' })).toHaveAttribute('href', '/settings')
+  // With the MITM master off, the CA card is one row plus the switch that
+  // would make it relevant — not five steps for a certificate with no effect.
+  const collapsed = page.getByTestId('intercept-ca-collapsed')
+  await expect(collapsed).toContainText('网关拦截总开关未启用')
+  await expect(collapsed.getByRole('link', { name: /去开启/ })).toHaveAttribute('href', '/settings')
   await expectNoHorizontalOverflow(page)
 })
