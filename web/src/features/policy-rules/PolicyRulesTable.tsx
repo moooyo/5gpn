@@ -96,7 +96,7 @@ function RowActions({ a, rule, index }: { a: ColArgs; rule: PolicyRule; index: n
         <button
           type="button"
           aria-label={a.t('policyRules.table.rowActions')}
-          className="zds-state-layer grid h-ctl w-ctl place-items-center rounded-pill text-text-soft"
+          className="zds-state-layer grid h-field w-field place-items-center rounded-pill text-text-soft md:h-ctl md:w-ctl"
         >
           <MenuIcon className="h-4 w-4" aria-hidden="true" />
         </button>
@@ -149,7 +149,7 @@ function buildColumns(a: ColArgs): ColumnDef<PolicyRule, any>[] {
                 aria-label={a.t('policyRules.table.moveUp')}
                 disabled={a.filtering || idx <= 0}
                 onClick={() => a.onReorder(moveIds(a.rules, idx, -1))}
-                className="zds-state-layer grid h-8 w-8 place-items-center rounded-pill text-text-faint disabled:cursor-not-allowed disabled:opacity-30"
+                className="zds-state-layer grid h-field w-field place-items-center rounded-pill text-text-faint disabled:cursor-not-allowed disabled:opacity-30 md:h-chip md:w-chip"
               >
                 <ArrowUpIcon className="h-4 w-4" aria-hidden="true" />
               </button>
@@ -158,7 +158,7 @@ function buildColumns(a: ColArgs): ColumnDef<PolicyRule, any>[] {
                 aria-label={a.t('policyRules.table.moveDown')}
                 disabled={a.filtering || idx < 0 || idx >= a.count - 1}
                 onClick={() => a.onReorder(moveIds(a.rules, idx, 1))}
-                className="zds-state-layer grid h-8 w-8 place-items-center rounded-pill text-text-faint disabled:cursor-not-allowed disabled:opacity-30"
+                className="zds-state-layer grid h-field w-field place-items-center rounded-pill text-text-faint disabled:cursor-not-allowed disabled:opacity-30 md:h-chip md:w-chip"
               >
                 <ArrowDownIcon className="h-4 w-4" aria-hidden="true" />
               </button>

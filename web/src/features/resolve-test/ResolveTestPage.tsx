@@ -115,7 +115,7 @@ export default function ResolveTestPage() {
                 onClick={() => show(item)}
                 aria-pressed={item.name === result?.name}
                 className={cn(
-                  'zds-state-layer inline-flex h-chip items-center gap-1.5 rounded-pill border border-border px-3 font-mono text-meta',
+                  'zds-state-layer inline-flex h-field items-center gap-1.5 rounded-pill border border-border px-3 font-mono text-meta md:h-chip',
                   item.name === result?.name ? 'bg-secondary-container text-on-secondary-container' : 'text-text-mid',
                 )}
               >

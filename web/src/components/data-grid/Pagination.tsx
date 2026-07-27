@@ -17,7 +17,7 @@ export function Pagination({ page, pageCount, onPageChange, className }: Paginat
   const canPrev = page > 1
   const canNext = page < pageCount
   const btn =
-    'zds-state-layer inline-flex h-8 items-center gap-1 rounded-pill px-3 text-label text-text-soft outline-none disabled:opacity-40'
+    'zds-state-layer inline-flex h-field items-center gap-1 rounded-pill px-3 text-label text-text-soft outline-none disabled:opacity-40 md:h-chip'
   return (
     <div className={cn('flex items-center justify-end gap-2 border-t border-divider px-4 py-2', className)}>
       <button

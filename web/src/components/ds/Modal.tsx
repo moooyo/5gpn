@@ -33,7 +33,7 @@ export function Modal({ open, onOpenChange, title, descriptionId, children, foot
             )}
             <Dialog.Close
               aria-label="Close"
-              className="zds-state-layer -mr-2 -mt-2 grid h-ctl w-ctl shrink-0 cursor-pointer place-items-center rounded-pill text-text-soft"
+              className="zds-state-layer -mr-2 -mt-2 grid h-field w-field shrink-0 cursor-pointer place-items-center rounded-pill text-text-soft md:h-ctl md:w-ctl"
             >
               <CloseIcon className="h-5 w-5" aria-hidden="true" />
             </Dialog.Close>

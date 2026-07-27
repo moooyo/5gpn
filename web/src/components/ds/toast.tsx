@@ -100,7 +100,7 @@ export function Toaster() {
                   item.action?.onClick()
                   dismiss(item.id)
                 }}
-                className="zds-state-layer -my-1 -mr-2 h-ctl shrink-0 rounded-pill px-3 text-body font-semibold text-[var(--md-sys-color-primary-fixed-dim)]"
+                className="zds-state-layer -my-1 -mr-2 h-field shrink-0 rounded-pill px-3 text-body font-semibold md:h-ctl text-[var(--md-sys-color-primary-fixed-dim)]"
               >
                 {item.action.label}
               </button>

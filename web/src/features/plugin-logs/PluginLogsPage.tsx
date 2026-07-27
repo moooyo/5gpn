@@ -198,7 +198,7 @@ function StatusBanner({ banner, mobile, onReconnect, t }: { banner: StatusBanner
         <button
           type="button"
           onClick={onReconnect}
-          className="zds-state-layer inline-flex h-chip shrink-0 items-center gap-1 rounded-pill px-2.5 text-meta font-semibold underline-offset-2 hover:underline"
+          className="zds-state-layer inline-flex h-field shrink-0 items-center gap-1 rounded-pill px-2.5 text-meta font-semibold underline-offset-2 hover:underline md:h-chip"
         >
           <RefreshIcon className="h-3.5 w-3.5" aria-hidden="true" />
           {t('pluginLogs.reconnectNow')}
@@ -246,7 +246,7 @@ export default function PluginLogsPage() {
   // gap in this non-replaying stream. A confirmed idle state then closes the
   // socket and suppresses future reconnects.
   const streamEnabled = !inactive
-  const { entries, connected, bufferedCount, getCurrentWatermarks, reconnect } = usePluginEngineLogs({ paused, enabled: streamEnabled })
+  const { entries, connected, bufferedCount, bufferFull, getCurrentWatermarks, reconnect } = usePluginEngineLogs({ paused, enabled: streamEnabled })
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedQuery(query), SEARCH_DEBOUNCE_MS)
@@ -436,7 +436,9 @@ export default function PluginLogsPage() {
       // Ingestion never stops here; only the rendered snapshot freezes, and
       // the label carries the count that accumulated behind it.
       liveLabel={mobile ? '' : t('pluginLogs.live')}
-      pausedLabel={mobile ? '' : t('pluginLogs.pausedBuffered', { count: displayedBufferedCount })}
+      // Once more than a ring's worth has arrived the oldest of it is gone,
+      // and a rising count would keep implying otherwise.
+      pausedLabel={mobile ? '' : bufferFull ? t('pluginLogs.pausedBufferFull') : t('pluginLogs.pausedBuffered', { count: displayedBufferedCount })}
       pauseAction={t('pluginLogs.pause')}
       resumeAction={t('pluginLogs.resume')}
       className={mobile ? 'w-field justify-center px-0 md:h-field' : undefined}

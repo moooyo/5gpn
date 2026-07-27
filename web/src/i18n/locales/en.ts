@@ -9,6 +9,7 @@ const en = {
     edit: 'Edit',
     delete: 'Delete',
     undo: 'Undo',
+    retry: 'Retry',
     running: 'Running',
     loading: 'Loading…',
     healthChecking: 'Checking',
@@ -290,6 +291,7 @@ const en = {
     mitmDisabled: 'MITM disabled. Extension hosts now follow the normal mihomo rules.',
     mitmCapabilitySaved: 'MITM capability updated.',
     mitmLoadFailed: 'Failed to load the MITM runtime configuration.',
+    resolutionLoadFailed: 'Could not load upstreams and ECS',
     mitmSaveFailed: 'Failed to save the MITM runtime configuration.',
     mitmConflict: 'The MITM configuration changed in another edit. Current state was refreshed; try again.',
     mitmEnableConfirmTitle: 'Enable MITM?',
@@ -639,6 +641,7 @@ const en = {
     // The sparkline carried neither a window nor a y range — that is a
     // shape, not a measurement. Both are one line of text.
     qpsWindow: 'last {{count}} samples (cap {{cap}})',
+    qpsSpan: 'about {{minutes}} min',
     // Paused or failing polls used to leave the numbers looking current.
     updatedAt: 'updated {{time}}',
     pollFailed: 'Polling failed — these numbers have stopped updating',
@@ -815,6 +818,7 @@ const en = {
     live: 'Live',
     paused: 'Paused',
     pausedBuffered: 'Paused · +{{count}}',
+    pausedBufferFull: 'Buffer full — dropping',
     pausedHint: 'Paused · {{count}} new entries buffered',
     pause: 'Pause',
     resume: 'Resume',
@@ -981,6 +985,9 @@ const en = {
     // the button says how many are waiting.
     pausedBuffered: 'Paused · {{count}} buffered',
     pausedBufferFull: 'Buffer full — dropping',
+    clearedToast_one: 'Cleared {{count}} line',
+    clearedToast_other: 'Cleared {{count}} lines',
+    reconnectNow: 'Reconnect now',
     live: 'live',
     clear: 'Clear',
     clearLabel: 'Clear the current log view',

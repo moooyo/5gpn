@@ -304,7 +304,7 @@ export function UpstreamGroupEditor({ group, entries, disabled, onChange }: Upst
                   <button
                     type="button"
                     disabled={disabled}
-                    className="zds-state-layer inline-flex h-9 w-9 items-center justify-center rounded-pill text-text-faint hover:text-red disabled:cursor-not-allowed disabled:opacity-50"
+                    className="zds-state-layer inline-flex h-field w-field items-center justify-center rounded-pill text-text-faint hover:text-red md:h-row md:w-row disabled:cursor-not-allowed disabled:opacity-50"
                     aria-label={t('settings.upstreamsDelete', { entry })}
                     title={t('common.delete')}
                     onClick={() => onChange(entries.filter((_, entryIndex) => entryIndex !== index))}

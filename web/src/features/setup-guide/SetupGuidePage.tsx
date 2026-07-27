@@ -340,8 +340,11 @@ export default function SetupGuidePage() {
             <div className="mt-0.5 text-label leading-relaxed text-text-faint">{t('setupGuide.interceptCA.collapsedBody')}</div>
           </div>
           <Link
-            to="/settings"
-            className="zds-state-layer inline-flex h-ctl shrink-0 items-center justify-center gap-1.5 rounded-pill bg-primary-container px-4 text-label font-medium text-on-primary-container"
+            // The anchor matters: settings is a five-section page, and landing
+            // at its top leaves the operator to find interception themselves
+            // after being told exactly where to go.
+            to="/settings#settings-intercept"
+            className="zds-state-layer inline-flex h-field shrink-0 items-center justify-center gap-1.5 rounded-pill bg-primary-container px-4 text-label font-medium text-on-primary-container md:h-ctl"
           >
             {t('setupGuide.interceptCA.enableMITM')}
             <ArrowRightIcon className="h-4 w-4" aria-hidden="true" />

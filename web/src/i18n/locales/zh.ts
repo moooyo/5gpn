@@ -4,6 +4,7 @@ const zh: typeof en = {
   common: { cancel: '取消',
     saving: '保存中…',
     save: '保存', add: '添加', edit: '编辑', delete: '删除', undo: '撤销',
+    retry: '重试',
     running: '运行中', loading: '加载中…',
     healthChecking: '检查中', healthHealthy: '正常', healthUnknown: '未知', healthDown: '异常',
     errorTitle: '出现错误', errorBody: '页面出现了预期之外的错误，重新加载通常可以解决。', reload: '重新加载',
@@ -271,6 +272,7 @@ const zh: typeof en = {
     mitmDisabled: 'MITM 已关闭；插件接管域名已恢复走普通 mihomo 规则。',
     mitmCapabilitySaved: 'MITM 子能力已更新。',
     mitmLoadFailed: '无法加载 MITM 运行配置。',
+    resolutionLoadFailed: '上游与 ECS 读取失败',
     mitmSaveFailed: 'MITM 运行配置保存失败。',
     mitmConflict: 'MITM 配置已被其他编辑修改；已刷新当前状态，请重试。',
     mitmEnableConfirmTitle: '启用 MITM？',
@@ -606,6 +608,7 @@ const zh: typeof en = {
     qpsLive: 'QPS 实时',
     // Sparkline 原来既没有窗口也没有 y 轴范围——那是一个形状，不是一次测量。
     qpsWindow: '近 {{count}} 次采样（上限 {{cap}}）',
+    qpsSpan: '约 {{minutes}} 分钟',
     // 暂停或轮询失败时，数字会静默变旧；相对时间与失败态是这一页可信度的下限。
     updatedAt: '更新于{{time}}',
     pollFailed: '轮询失败 · 数字已停止更新',
@@ -767,6 +770,7 @@ const zh: typeof en = {
     live: '实时',
     paused: '已暂停',
     pausedBuffered: '已暂停 · +{{count}}',
+    pausedBufferFull: '缓冲已满，开始丢弃',
     pausedHint: '已暂停 · {{count}} 条新日志已缓冲',
     pause: '暂停',
     resume: '恢复',
@@ -927,6 +931,9 @@ const zh: typeof en = {
     // 暂停期间到达的日志会被缓冲而不是丢弃，按钮上直接写明条数。
     pausedBuffered: '已暂停 · 缓冲 {{count}}',
     pausedBufferFull: '缓冲已满，开始丢弃',
+    clearedToast_one: '已清空 {{count}} 条',
+    clearedToast_other: '已清空 {{count}} 条',
+    reconnectNow: '立即重连',
     live: '实时',
     clear: '清空',
     clearLabel: '清空当前日志视图',

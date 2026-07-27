@@ -100,7 +100,7 @@ export function Topbar({ onOpenNavigation }: { onOpenNavigation?: () => void } =
           onClick={onOpenNavigation}
           aria-label={t('nav.openMenu')}
           aria-controls="mobile-navigation"
-          className="zds-state-layer grid h-ctl w-ctl shrink-0 place-items-center rounded-pill text-text-mid md:hidden"
+          className="zds-state-layer grid h-field w-field shrink-0 place-items-center rounded-pill text-text-mid md:hidden"
           data-testid="mobile-nav-open"
         >
           <MenuIcon className="h-6 w-6" aria-hidden="true" />
@@ -122,7 +122,7 @@ export function Topbar({ onOpenNavigation }: { onOpenNavigation?: () => void } =
         onClick={openPalette}
         aria-label={t('topbar.search')}
         data-testid="route-search-trigger"
-        className="zds-state-layer flex h-ctl shrink-0 items-center gap-2 rounded-pill px-2.5 text-text-mid md:bg-surface-container md:px-4 lg:hidden"
+        className="zds-state-layer flex h-field shrink-0 items-center gap-2 rounded-pill px-2.5 text-text-mid md:h-ctl md:bg-surface-container md:px-4 lg:hidden"
       >
         <SearchIcon className="h-5 w-5 shrink-0" aria-hidden="true" />
         <span className="hidden text-body md:inline">{t('topbar.searchPlaceholder')}</span>

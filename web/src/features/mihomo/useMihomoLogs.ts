@@ -29,8 +29,16 @@ export interface UseMihomoLogsResult {
    *  Surfaced so the button can stop promising that nothing is being lost. */
   bufferFull: boolean
   /** Drops every line currently displayed (and anything buffered behind the
-   *  pause). Local only — the controller keeps streaming. */
-  clear: () => void
+   *  pause), and returns what was dropped so the caller can offer an undo.
+   *  Local only — the controller keeps streaming. */
+  clear: () => MihomoLogLine[]
+  /** Puts a previous `clear()` result back. The stream keeps arriving during
+   *  the undo window, so restored lines go BEFORE anything received since. */
+  restore: (restored: MihomoLogLine[]) => void
+  /** Abandons the fixed backoff and redials now. Without it a stalled stream
+   *  could only be retried by waiting out the timer or reloading the page,
+   *  while the plugin-log page beside it already offered exactly this. */
+  reconnect: () => void
 }
 
 const DEFAULT_MAX = 1000
@@ -70,12 +78,26 @@ export function useMihomoLogs({ paused, level = 'info', max = DEFAULT_MAX }: Use
   const pauseBufferRef = useRef<MihomoLogLine[]>([])
   const maxRef = useRef(max)
   maxRef.current = max
+  // Read by `clear`, which has to hand back what it dropped. Capturing that
+  // inside the state updater would run twice under StrictMode.
+  const linesRef = useRef<MihomoLogLine[]>(lines)
+  linesRef.current = lines
+
+  const [redialNonce, setRedialNonce] = useState(0)
+  const reconnect = useCallback(() => setRedialNonce((value) => value + 1), [])
 
   const clear = useCallback(() => {
+    const dropped = [...linesRef.current, ...pauseBufferRef.current]
     pauseBufferRef.current = []
     setBufferedCount(0)
     setBufferFull(false)
     setLines([])
+    return dropped
+  }, [])
+
+  const restore = useCallback((restored: MihomoLogLine[]) => {
+    if (restored.length === 0) return
+    setLines((prev) => [...restored, ...prev].slice(-maxRef.current))
   }, [])
 
   useEffect(() => {
@@ -184,7 +206,7 @@ export function useMihomoLogs({ paused, level = 'info', max = DEFAULT_MAX }: Use
         socket.close()
       }
     }
-  }, [level, max])
+  }, [level, max, redialNonce])
 
-  return { lines, connected, bufferedCount, bufferFull, clear }
+  return { lines, connected, bufferedCount, bufferFull, clear, restore, reconnect }
 }

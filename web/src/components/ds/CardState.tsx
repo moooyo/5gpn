@@ -31,6 +31,11 @@ export interface CardStateProps {
   /** Suppress the loading row once stale-but-usable content exists, so a
    *  background refresh does not flash a banner over a populated card. */
   hasContent?: boolean
+  /** Render the loading state as N skeleton rows instead of a text row, for a
+   *  card whose content is a fixed set of fields. A card that showed a skeleton
+   *  and nothing else could not report a failure at all — which is how two of
+   *  them ended up sitting on a skeleton forever when their one load rejected. */
+  skeletonRows?: number
   className?: string
   testId?: string
 }
@@ -42,10 +47,12 @@ export function CardState({
   retryLabel,
   loadingText,
   hasContent = false,
+  skeletonRows,
   className,
   testId,
 }: CardStateProps) {
   if (state === 'loading' && !hasContent) {
+    if (skeletonRows !== undefined) return <CardSkeleton rows={skeletonRows} className={className} />
     return (
       <div role="status" className={cn('rounded-card bg-surface-container-low px-4 py-4 text-meta text-text-faint', className)}>
         {loadingText}

@@ -120,10 +120,15 @@ function UpstreamMeta({
 
 export default function OverviewPage() {
   const { t, i18n } = useTranslation()
-  const { status, statusUpdatedAt, statusStale } = useStatus()
+  const { status, statusUpdatedAt, statusStale, refreshNow } = useStatus()
   const [live, setLive] = useState(true)
   const previousPoint = useRef<QpsPoint | null>(null)
   const [qpsSeries, setQpsSeries] = useState<number[]>([])
+  // Sample arrival times, pushed and capped in lockstep with `qpsSeries`, so
+  // the annotation can say how much wall-clock the line covers. "48 samples"
+  // alone does not: the poll interval is not on screen anywhere, so the reader
+  // has no way to turn a sample count into a duration.
+  const [qpsAt, setQpsAt] = useState<number[]>([])
   const [qpsNow, setQpsNow] = useState(0)
   // Re-render on a timer so "updated 2s ago" keeps counting up even while the
   // payload itself is unchanged — a frozen relative time is the same lie as no
@@ -142,6 +147,7 @@ export default function OverviewPage() {
     previousPoint.current = next
     setQpsNow(Math.round(qps))
     setQpsSeries((series) => pushCapped(series, Math.round(qps), SERIES_CAP))
+    setQpsAt((series) => pushCapped(series, next.at, SERIES_CAP))
   }, [live, status?.stats?.total, status?.uptime_seconds])
 
   const counts = useMemo(() => decisionCounts(status?.stats), [status?.stats])
@@ -181,6 +187,8 @@ export default function OverviewPage() {
   const qpsRange = qpsSeries.length > 0
     ? { min: Math.min(...qpsSeries), max: Math.max(...qpsSeries) }
     : null
+  // Two samples is the minimum that spans any time at all.
+  const qpsSpanMs = qpsAt.length > 1 ? qpsAt[qpsAt.length - 1] - qpsAt[0] : 0
 
   return (
     <div className="flex flex-col gap-4" data-testid="page-overview">
@@ -190,13 +198,24 @@ export default function OverviewPage() {
             leave the numbers sitting there looking current. */}
         <span
           data-testid="overview-freshness"
-          className={cn('text-meta font-medium', statusStale ? 'text-red' : 'text-text-faint')}
+          className={cn('flex items-center gap-1.5 text-meta font-medium', statusStale ? 'text-red' : 'text-text-faint')}
         >
           {statusStale
             ? t('overview.pollFailed')
             : statusUpdatedAt
               ? t('overview.updatedAt', { time: relativeTime(new Date(statusUpdatedAt).toISOString()) })
               : t('common.loading')}
+          {/* Saying the numbers stopped updating without saying what to do
+              about it left reloading the page as the only recourse. */}
+          {statusStale && refreshNow ? (
+            <button
+              type="button"
+              onClick={refreshNow}
+              className="zds-state-layer inline-flex h-field items-center rounded-pill px-2 font-semibold underline-offset-2 hover:underline md:h-chip"
+            >
+              {t('common.retry')}
+            </button>
+          ) : null}
         </span>
         <LiveToggle
           live={live}
@@ -236,7 +255,10 @@ export default function OverviewPage() {
           {/* A sparkline with no window and no y range is a shape, not a
               measurement. Both are one line of text. */}
           <div className="mt-2 flex flex-wrap items-baseline justify-between gap-x-3 text-meta opacity-80">
-            <span>{t('overview.qpsWindow', { count: qpsSeries.length, cap: SERIES_CAP })}</span>
+            <span>
+              {t('overview.qpsWindow', { count: qpsSeries.length, cap: SERIES_CAP })}
+              {qpsSpanMs > 0 ? ` · ${t('overview.qpsSpan', { minutes: (qpsSpanMs / 60000).toFixed(1) })}` : ''}
+            </span>
             {qpsRange ? <span className="font-mono">{`${qpsRange.min} – ${qpsRange.max}`}</span> : null}
           </div>
         </Card>

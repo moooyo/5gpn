@@ -154,8 +154,15 @@ export function StatsResetCard({ stats }: { stats?: Stats }) {
   const formatter = useMemo(() => new Intl.NumberFormat(i18n.language), [i18n.language])
 
   const shown = cleared ?? stats
-  const total = shown?.total ?? 0
-  const samples = (shown?.china_ok ?? 0) + (shown?.china_err ?? 0) + (shown?.trust_ok ?? 0) + (shown?.trust_err ?? 0)
+  // `?? 0` here printed a credible zero whenever stats had not arrived — before
+  // the first poll, or for as long as /api/status keeps failing — on the one
+  // card whose entire purpose is to state the counters. A skeleton says "not
+  // known yet"; a zero says "nothing has happened", and only one of those is
+  // true.
+  const total = shown?.total
+  const samples = shown
+    ? shown.china_ok + shown.china_err + shown.trust_ok + shown.trust_err
+    : undefined
 
   async function reset() {
     setBusy(true)
@@ -174,12 +181,16 @@ export function StatsResetCard({ stats }: { stats?: Stats }) {
     <Card className="p-5 sm:p-6">
       <div className="mb-1 text-title font-medium text-text-strong">{t('settings.statsTitle')}</div>
       <p className="mb-3 text-label leading-relaxed text-text-faint">{t('settings.statsHint')}</p>
-      <DataLine label={t('settings.statsQueries')} sub={t('settings.statsQueriesHint')}>
-        <span className="font-mono text-body font-medium tabular-nums text-text-strong">{formatter.format(total)}</span>
-      </DataLine>
-      <DataLine className="border-b-0" label={t('settings.statsSamples')} sub={t('settings.statsSamplesHint')}>
-        <span className="font-mono text-body font-medium tabular-nums text-text-strong">{formatter.format(samples)}</span>
-      </DataLine>
+      {total === undefined || samples === undefined ? <CardSkeleton rows={2} /> : (
+        <>
+          <DataLine label={t('settings.statsQueries')} sub={t('settings.statsQueriesHint')}>
+            <span className="font-mono text-body font-medium tabular-nums text-text-strong">{formatter.format(total)}</span>
+          </DataLine>
+          <DataLine className="border-b-0" label={t('settings.statsSamples')} sub={t('settings.statsSamplesHint')}>
+            <span className="font-mono text-body font-medium tabular-nums text-text-strong">{formatter.format(samples)}</span>
+          </DataLine>
+        </>
+      )}
       <div className="mt-4 flex justify-end">
         <Button
           type="button"
@@ -342,7 +353,7 @@ export function MITMSettingsCard({
       <div className="mt-3 flex justify-start border-t border-divider pt-3">
         <Link
           to="/extensions/hosts"
-          className="zds-state-layer inline-flex min-h-9 items-center gap-2 rounded-pill px-3 text-label font-medium text-primary"
+          className="zds-state-layer inline-flex min-h-field items-center gap-2 rounded-pill px-3 text-label font-medium text-primary md:min-h-row"
           data-testid="mitm-host-audit-link"
         >
           {t('settings.mitmAuditHosts', { count: hostCount })}
@@ -690,9 +701,13 @@ export function TgbotCard({
 
 export function UpstreamsCard({
   upstreams,
+  loadState,
+  onReload,
   onSaved,
 }: {
   upstreams: UpstreamsView | null
+  loadState: 'loading' | 'ready' | 'error'
+  onReload: () => void | Promise<unknown>
   onSaved: (v: UpstreamsView) => void
 }) {
   const { t } = useTranslation()
@@ -731,7 +746,16 @@ export function UpstreamsCard({
       <div className="mb-1 text-title font-medium text-text-strong">{t('settings.upstreams')}</div>
       <p className="mb-3 text-meta leading-relaxed text-text-faint">{t('settings.upstreamsHint')}</p>
       <p className="mb-3 text-meta leading-relaxed text-text-faint">{t('settings.upstreamsStorageHint')}</p>
-      {!upstreams ? <CardSkeleton rows={3} /> : (
+      <CardState
+        state={loadState}
+        hasContent={!!upstreams}
+        skeletonRows={3}
+        loadingText={t('common.loading')}
+        errorText={t('settings.resolutionLoadFailed')}
+        retryLabel={t('common.reload')}
+        onRetry={() => void onReload()}
+      />
+      {!upstreams ? null : (
       <div className="flex flex-col gap-3">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           <UpstreamGroupEditor
@@ -770,7 +794,7 @@ interface EcsFormValues {
   subnet: string
 }
 
-export function EcsCard({ ecs, onSaved }: { ecs: ECSView | null; onSaved: (v: ECSView) => void }) {
+export function EcsCard({ ecs, loadState, onReload, onSaved }: { ecs: ECSView | null; loadState: 'loading' | 'ready' | 'error'; onReload: () => void | Promise<unknown>; onSaved: (v: ECSView) => void }) {
   const { t } = useTranslation()
   const { register, handleSubmit, reset } = useForm<EcsFormValues>({ defaultValues: { subnet: '' } })
 
@@ -797,7 +821,16 @@ export function EcsCard({ ecs, onSaved }: { ecs: ECSView | null; onSaved: (v: EC
       {/* A control bound to `undefined` is indistinguishable from one whose
           value genuinely is empty, and several of these values legitimately can
           be. Show that the data has not arrived instead of implying it has. */}
-      {!ecs ? <CardSkeleton rows={1} /> : (
+      <CardState
+        state={loadState}
+        hasContent={!!ecs}
+        skeletonRows={1}
+        loadingText={t('common.loading')}
+        errorText={t('settings.resolutionLoadFailed')}
+        retryLabel={t('common.reload')}
+        onRetry={() => void onReload()}
+      />
+      {!ecs ? null : (
       <form
         onSubmit={(e) => void handleSubmit(onSubmit)(e)}
         className="flex flex-col gap-3 sm:flex-row sm:items-end"

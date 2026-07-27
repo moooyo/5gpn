@@ -387,7 +387,7 @@ export default function MihomoConfigPage() {
               <button
                 type="button"
                 aria-label={t('mihomoConfig.moreActions')}
-                className="zds-state-layer grid h-ctl w-ctl place-items-center rounded-pill text-text-soft"
+                className="zds-state-layer grid h-field w-field place-items-center rounded-pill text-text-soft md:h-ctl md:w-ctl"
               >
                 <MenuIcon className="h-4 w-4" aria-hidden="true" />
               </button>

@@ -368,8 +368,8 @@ function ExtensionCard({
 
         <div className="mt-auto flex min-w-0 flex-wrap items-center gap-1 border-t border-divider pt-3">
           <div className="flex shrink-0 items-center gap-0.5">
-            <Button type="button" variant="ghost" size="sm" className="h-10 w-10 px-0 md:h-chip md:w-chip" aria-label={t('extensions.moveUp', { name: module.name })} title={t('extensions.moveUp', { name: module.name })} disabled={!reorderEnabled || module.execution_order <= 1 || busy} onClick={() => onMove(module, -1)}><ArrowUpIcon className="h-4 w-4" /></Button>
-            <Button type="button" variant="ghost" size="sm" className="h-10 w-10 px-0 md:h-chip md:w-chip" aria-label={t('extensions.moveDown', { name: module.name })} title={t('extensions.moveDown', { name: module.name })} disabled={!reorderEnabled || module.execution_order >= total || busy} onClick={() => onMove(module, 1)}><ArrowDownIcon className="h-4 w-4" /></Button>
+            <Button type="button" variant="ghost" size="sm" className="w-field px-0 md:w-chip" aria-label={t('extensions.moveUp', { name: module.name })} title={t('extensions.moveUp', { name: module.name })} disabled={!reorderEnabled || module.execution_order <= 1 || busy} onClick={() => onMove(module, -1)}><ArrowUpIcon className="h-4 w-4" /></Button>
+            <Button type="button" variant="ghost" size="sm" className="w-field px-0 md:w-chip" aria-label={t('extensions.moveDown', { name: module.name })} title={t('extensions.moveDown', { name: module.name })} disabled={!reorderEnabled || module.execution_order >= total || busy} onClick={() => onMove(module, 1)}><ArrowDownIcon className="h-4 w-4" /></Button>
           </div>
           <span className="order-first flex min-w-0 basis-full items-center gap-1.5 pb-1 text-meta text-text-faint sm:order-none sm:basis-auto sm:pb-0 sm:flex-1">
             {module.source_url ? <CloudIcon className="h-4 w-4 shrink-0" aria-hidden="true" /> : <FileIcon className="h-4 w-4 shrink-0" aria-hidden="true" />}

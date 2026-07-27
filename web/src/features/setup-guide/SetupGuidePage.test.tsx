@@ -98,8 +98,11 @@ describe('SetupGuidePage', () => {
     const collapsed = await screen.findByTestId('intercept-ca-collapsed')
     expect(collapsed).toHaveTextContent(i18n.t('setupGuide.interceptCA.collapsedBody'))
     expect(screen.queryByTestId('intercept-ca-guide')).not.toBeInTheDocument()
+    // Anchored, not bare: settings is a five-section page, so landing at its
+    // top leaves the operator hunting for interception right after being told
+    // exactly where to go.
     expect(screen.getByRole('link', { name: new RegExp(i18n.t('setupGuide.interceptCA.enableMITM')) }))
-      .toHaveAttribute('href', '/settings')
+      .toHaveAttribute('href', '/settings#settings-intercept')
   })
 
   it('expands the CA card once the master switch is on', async () => {

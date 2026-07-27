@@ -12,7 +12,7 @@
  * mihomoOk is computed from getMihomoHealth() succeeding (mihomo's bare
  * `/version` response carries no `error` field to check).
  */
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { api } from './api/client'
 import { ApiError } from './api/http'
 import type { Status, MihomoHealth, InterceptHealth } from './api/types'
@@ -46,6 +46,10 @@ export interface StatusValue {
    *  stale, instead of blanking out. Optional so a test or story can provide a
    *  status value without restating the freshness pair. */
   statusStale?: boolean
+  /** Abandon the interval and poll now. The stale readout says the numbers
+   *  stopped updating; without this it could not also say what to do about it,
+   *  and the operator's only recourse was reloading the page. */
+  refreshNow?: () => void
 }
 
 const INITIAL: StatusValue = {
@@ -133,6 +137,10 @@ function isInterceptHealth(value: unknown): value is InterceptHealth {
 
 export function StatusProvider({ children, intervalMs = 5000, requestTimeoutMs = 4000 }: StatusProviderProps) {
   const [value, setValue] = useState<StatusValue>(INITIAL)
+  // Re-running the poll effect is exactly "abort what is in flight and poll
+  // again", which is what a retry means here.
+  const [refreshNonce, setRefreshNonce] = useState(0)
+  const refreshNow = useCallback(() => setRefreshNonce((current) => current + 1), [])
 
   useEffect(() => {
     let cancelled = false
@@ -243,9 +251,11 @@ export function StatusProvider({ children, intervalMs = 5000, requestTimeoutMs =
       controllers.forEach((controller) => controller.abort())
       if (timer) clearTimeout(timer)
     }
-  }, [intervalMs, requestTimeoutMs])
+  }, [intervalMs, requestTimeoutMs, refreshNonce])
 
-  return <StatusContext.Provider value={value}>{children}</StatusContext.Provider>
+  const exposed = useMemo(() => ({ ...value, refreshNow }), [value, refreshNow])
+
+  return <StatusContext.Provider value={exposed}>{children}</StatusContext.Provider>
 }
 
 export function useStatus(): StatusValue {

@@ -7,7 +7,7 @@ import { attributionOf } from './resolve-test-decision'
 /** One row of the decision-order table.
  *
  *  `mark` is deliberately plain ink even on the winning row: the hue lives in
- *  the dot. `--color-chart-3` on 11px text over the card surface lands around
+ *  the dot. A saturated fill on 11px text over the card surface lands around
  *  2.9:1, below AA — the same reason `log-columns` colors only the StatusDot
  *  and leaves its label in text ink. */
 type StageState = 'hit' | 'miss' | 'skipped' | 'answer'
@@ -25,8 +25,14 @@ function StageDot({ state }: { state: StageState }) {
   if (state === 'hit') {
     return (
       <span
-        className="grid h-[22px] w-[22px] shrink-0 place-items-center rounded-pill text-white"
-        style={{ background: 'var(--color-chart-3)' }}
+        // "This stage matched" is a state, so it takes the semantic success
+        // role. It used to take `--color-chart-3`, which is the fixed
+        // categorical slot for force-proxy — so a blocked or chnroute-cn
+        // result still wore the force-proxy hue as its match marker, and the
+        // row's own mark eleven lines below already used success for the same
+        // idea. Colour means one thing at a time.
+        className="grid h-[22px] w-[22px] shrink-0 place-items-center rounded-pill"
+        style={{ background: 'var(--md-sys-color-success)', color: 'var(--md-sys-color-on-primary)' }}
         aria-hidden="true"
       >
         <CheckIcon className="h-3.5 w-3.5" />

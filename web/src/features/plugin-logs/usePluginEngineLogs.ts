@@ -18,6 +18,11 @@ export interface UsePluginEngineLogsResult {
   connected: boolean
   /** Valid frames received since the current pause began, even after ring eviction. */
   bufferedCount: number
+  /** More than a ring's worth has arrived during this pause, so the oldest of
+   *  those frames are gone. `bufferedCount` keeps counting arrivals, which is
+   *  honest about the stream but not about what resuming will show — this is
+   *  what lets the label stop implying everything is still there. */
+  bufferFull: boolean
   /** Monotonic browser-local watermark including frames hidden by pause. */
   latestId: number
   /** Read counters synchronously for local clear actions between render batches. */
@@ -31,6 +36,7 @@ export interface UsePluginEngineLogsResult {
 interface PluginEngineLogWatermarks {
   latestId: number
   bufferedCount: number
+  bufferFull: boolean
 }
 
 interface PluginEngineLogSnapshot extends PluginEngineLogWatermarks {
@@ -141,7 +147,7 @@ function parseFrame(data: unknown): PluginEngineLogLine | null {
  */
 export function usePluginEngineLogs({ paused, enabled = true, max = PLUGIN_LOG_RING_SIZE }: UsePluginEngineLogsOptions): UsePluginEngineLogsResult {
   const capacity = Number.isFinite(max) ? Math.max(1, Math.floor(max)) : PLUGIN_LOG_RING_SIZE
-  const [snapshot, setSnapshot] = useState<PluginEngineLogSnapshot>({ entries: [], bufferedCount: 0, latestId: 0 })
+  const [snapshot, setSnapshot] = useState<PluginEngineLogSnapshot>({ entries: [], bufferedCount: 0, bufferFull: false, latestId: 0 })
   const [connected, setConnected] = useState(false)
   const [redialNonce, setRedialNonce] = useState(0)
   const [ring] = useState(() => new BoundedNewestFirstRing<PluginEngineLogEntry>(capacity))
@@ -166,12 +172,13 @@ export function usePluginEngineLogs({ paused, enabled = true, max = PLUGIN_LOG_R
     const latestId = latestIdRef.current
     if (pausedRef.current) {
       const bufferedCount = pausedBufferedCountRef.current
-      setSnapshot((current) => current.latestId === latestId && current.bufferedCount === bufferedCount
+      const bufferFull = bufferedCount >= capacityRef.current
+      setSnapshot((current) => current.latestId === latestId && current.bufferedCount === bufferedCount && current.bufferFull === bufferFull
         ? current
-        : { ...current, latestId, bufferedCount })
+        : { ...current, latestId, bufferedCount, bufferFull })
       return
     }
-    setSnapshot({ entries: ring.toNewestFirst(), bufferedCount: 0, latestId })
+    setSnapshot({ entries: ring.toNewestFirst(), bufferedCount: 0, bufferFull: false, latestId })
   }, [ring])
 
   const scheduleCommit = useCallback(() => {
@@ -182,6 +189,7 @@ export function usePluginEngineLogs({ paused, enabled = true, max = PLUGIN_LOG_R
   const getCurrentWatermarks = useCallback((): PluginEngineLogWatermarks => ({
     latestId: latestIdRef.current,
     bufferedCount: pausedRef.current ? pausedBufferedCountRef.current : 0,
+    bufferFull: pausedRef.current && pausedBufferedCountRef.current >= capacityRef.current,
   }), [])
 
   // Re-running the connect effect is exactly "close what is open, mint a fresh
@@ -205,6 +213,7 @@ export function usePluginEngineLogs({ paused, enabled = true, max = PLUGIN_LOG_R
     setSnapshot({
       entries: ring.toNewestFirst(),
       bufferedCount: 0,
+      bufferFull: false,
       latestId: latestIdRef.current,
     })
   }, [cancelScheduledCommit, paused, ring])
@@ -218,6 +227,7 @@ export function usePluginEngineLogs({ paused, enabled = true, max = PLUGIN_LOG_R
     setSnapshot({
       entries: ring.toNewestFirst(),
       bufferedCount: 0,
+      bufferFull: false,
       latestId: latestIdRef.current,
     })
   }, [cancelScheduledCommit, capacity, ring])

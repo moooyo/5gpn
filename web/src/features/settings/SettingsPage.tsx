@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useLocation } from 'react-router-dom'
 import { useStatus } from '../../lib/StatusContext'
 import { api } from '../../lib/api/client'
 import { cn } from '../../lib/cn'
@@ -34,6 +35,7 @@ export default function SettingsPage() {
   const [tgbot, setTgbot] = useState<TGBotView | null>(null)
   const [ingressModules, setIngressModules] = useState<IngressModulesView | null>(null)
   const [ingressLoadState, setIngressLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [resolutionLoadState, setResolutionLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
   const ingressLoadSequence = useRef(0)
   const [mitmSettings, setMITMSettings] = useState<MITMSettingsView | null>(null)
   const [mitmHostCount, setMITMHostCount] = useState(0)
@@ -80,25 +82,27 @@ export default function SettingsPage() {
     }
   }, [])
 
+  // This runs exactly once per mount, unlike the tgbot poll below, so a
+  // rejection here is permanent: dropping it left both cards on a skeleton
+  // forever, which reads as "still loading" and never stops. They get the same
+  // load state the two cards beside them already have.
+  const loadResolution = useCallback(async () => {
+    setResolutionLoadState('loading')
+    const [u, e] = await Promise.allSettled([api.getUpstreams(), api.getEcs()])
+    if (u.status === 'fulfilled') setUpstreams(u.value)
+    if (e.status === 'fulfilled') setEcs(e.value)
+    setResolutionLoadState(u.status === 'rejected' || e.status === 'rejected' ? 'error' : 'ready')
+  }, [])
+
   useEffect(() => {
-    let cancelled = false
-
-    async function load() {
-      const [u, e] = await Promise.allSettled([api.getUpstreams(), api.getEcs()])
-      if (cancelled) return
-      if (u.status === 'fulfilled') setUpstreams(u.value)
-      if (e.status === 'fulfilled') setEcs(e.value)
-    }
-
-    void load()
+    void loadResolution()
     void loadIngressModules()
     void loadMITMSettings()
     return () => {
-      cancelled = true
       ingressLoadSequence.current++
       mitmLoadSequence.current++
     }
-  }, [loadIngressModules, loadMITMSettings])
+  }, [loadResolution, loadIngressModules, loadMITMSettings])
 
   // Bot lifecycle can move starting → healthy/degraded independently after a
   // save or gateway-network recovery. Poll single-flight and abort on unmount;
@@ -179,8 +183,8 @@ export default function SettingsPage() {
         </SettingsSection>
 
         <SettingsSection id="resolution">
-          <UpstreamsCard upstreams={upstreams} onSaved={setUpstreams} />
-          <EcsCard ecs={ecs} onSaved={setEcs} />
+          <UpstreamsCard upstreams={upstreams} loadState={resolutionLoadState} onReload={loadResolution} onSaved={setUpstreams} />
+          <EcsCard ecs={ecs} loadState={resolutionLoadState} onReload={loadResolution} onSaved={setEcs} />
         </SettingsSection>
 
         {/* The index carries this at `lg`; below it the index is a pill row, so
@@ -288,6 +292,21 @@ function SettingsNav({
     }
     return () => observer.disconnect()
   }, [])
+
+  // Another page can link straight at a section (the setup guide's "enable
+  // MITM" does). The browser will not scroll to it on its own: these anchors
+  // are rendered by this component, so the element does not exist yet when the
+  // navigation resolves the hash.
+  const { hash } = useLocation()
+  useEffect(() => {
+    if (!hash) return
+    const id = hash.slice(1)
+    if (!SECTIONS.some((section) => `settings-${section.id}` === id)) return
+    const node = document.getElementById(id)
+    if (!node) return
+    setActive(id.replace(/^settings-/, '') as SectionId)
+    node.scrollIntoView({ block: 'start' })
+  }, [hash])
 
   const go = (id: SectionId) => {
     setActive(id)

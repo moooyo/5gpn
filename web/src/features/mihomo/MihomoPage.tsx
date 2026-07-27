@@ -108,7 +108,7 @@ export default function MihomoPage() {
   const [query, setQuery] = useState('')
   const [debouncedQuery, setDebouncedQuery] = useState('')
   const [config, setConfig] = useState<MihomoConfig | null>(null)
-  const { lines, connected, bufferedCount, bufferFull, clear } = useMihomoLogs({ paused, level })
+  const { lines, connected, bufferedCount, bufferFull, clear, restore, reconnect } = useMihomoLogs({ paused, level })
   const columns = useMemo(() => (isMobile ? buildMobileColumns() : buildColumns(t)), [isMobile, t])
 
   useEffect(() => {
@@ -258,7 +258,16 @@ export default function MihomoPage() {
             />
             <button
               type="button"
-              onClick={clear}
+              onClick={() => {
+                // Clearing is local and destructive, and the stream keeps
+                // arriving behind it — so it offers an undo rather than a
+                // confirmation, exactly as the plugin log's clear does.
+                const dropped = clear()
+                if (dropped.length === 0) return
+                toast.success(t('mihomo.clearedToast', { count: dropped.length }), {
+                  action: { label: t('common.undo'), onClick: () => restore(dropped) },
+                })
+              }}
               aria-label={t('mihomo.clearLabel')}
               className="zds-state-layer inline-flex h-field items-center justify-center gap-1.5 rounded-pill border border-outline-variant px-3 text-label font-medium text-text-soft md:h-chip"
             >
@@ -269,9 +278,26 @@ export default function MihomoPage() {
         }
         status={
           // Same left edge as the surface's own rows, so the card has one.
-          <div className="flex items-center gap-2 border-b border-divider px-3.5 py-2 text-meta font-medium text-text-soft md:px-[18px]" role="status" aria-live="polite">
+          // One row, highest state first: disconnected outranks paused, and the
+          // lower-priority condition rides along as supplementary text rather
+          // than as a second banner competing for the same space.
+          <div className="flex flex-wrap items-center gap-2 border-b border-divider px-3.5 py-2 text-meta font-medium text-text-soft md:px-[18px]" role="status" aria-live="polite">
             <StatusDot color={connected ? 'var(--color-green)' : 'var(--color-red)'} />
-            {connected ? t('mihomo.connected') : t('mihomo.disconnected')}
+            <span>{connected ? t('mihomo.connected') : t('mihomo.disconnected')}</span>
+            {paused ? (
+              <span className="text-text-faint">
+                · {bufferFull ? t('mihomo.pausedBufferFull') : t('mihomo.pausedBuffered', { count: bufferedCount })}
+              </span>
+            ) : null}
+            {!connected ? (
+              <button
+                type="button"
+                onClick={reconnect}
+                className="zds-state-layer ml-auto inline-flex h-field shrink-0 items-center rounded-pill px-2.5 text-meta font-semibold text-primary underline-offset-2 hover:underline md:h-chip"
+              >
+                {t('mihomo.reconnectNow')}
+              </button>
+            ) : null}
           </div>
         }
         isEmpty={visibleLines.length === 0}
