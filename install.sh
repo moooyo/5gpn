@@ -183,11 +183,17 @@ DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
 # DNS_CHINA/DNS_TRUST moved to upstreams.json, which the daemon can write and
 # dns.env cannot be. seed_upstreams_json reads them one last time on upgrade so
 # a hand-edited value is carried across instead of being reset.
-readonly DNS_ENV_RETIRED_KEYS="DNS_CHINA DNS_TRUST"
+#
+# DNS_CHINA_0X20 governed DNS 0x20 anti-spoof encoding, which is gone: it only
+# ever protected the plaintext-UDP china path, and the china group now accepts
+# DoT and DoH, which address the same threat properly. The daemon no longer
+# reads the key, so leaving it in the schema would advertise a setting that
+# does nothing.
+readonly DNS_ENV_RETIRED_KEYS="DNS_CHINA DNS_CHINA_0X20 DNS_TRUST"
 
 readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_LISTEN_API DNS_CERT DNS_KEY DNS_WEB_CERT DNS_WEB_KEY DNS_ZASH_CERT DNS_ZASH_KEY \
 DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL DNS_UPSTREAMS \
-DNS_CHINA_ECS DNS_CHINA_0X20 DNS_ECS_FILE DNS_RULES_DIR DNS_CHNROUTE DNS_EGRESS_BROKER \
+DNS_CHINA_ECS DNS_ECS_FILE DNS_RULES_DIR DNS_CHNROUTE DNS_EGRESS_BROKER \
 DNS_SUBSCRIPTIONS DNS_POLICY_RULES DNS_API_TOKEN DNS_API_RATE DNS_API_BURST DNS_MIHOMO_CONTROLLER DNS_MIHOMO_SECRET \
 DNS_WHITELIST_FILE DNS_MIHOMO_CONFIG DNS_INTERCEPT_CONFIG DNS_MARKETPLACES_FILE DNS_ZASH_DIR DNS_ZASH_LISTEN DNS_WEB_DIR WWW_DIR TGBOT_TOKEN TGBOT_ADMINS \
 DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS DNS_CACHE_SIZE DNS_MAX_INFLIGHT DNS_TTL_MIN DNS_TTL_MAX DNS_QUERY_TIMEOUT \
@@ -6501,7 +6507,6 @@ write_dns_env() {
     local query_timeout="$(cfg_get DNS_QUERY_TIMEOUT)"; query_timeout="${query_timeout:-5s}"
     local api_rate="$(cfg_get DNS_API_RATE)"; api_rate="${api_rate:-20}"
     local api_burst="$(cfg_get DNS_API_BURST)"; api_burst="${api_burst:-40}"
-    local china_0x20="$(cfg_get DNS_CHINA_0X20)"; china_0x20="${china_0x20:-1}"
     local upstreams_file="$(cfg_get DNS_UPSTREAMS)"; upstreams_file="${upstreams_file:-${CONF_DIR}/upstreams.json}"
     local ecs_file="$(cfg_get DNS_ECS_FILE)"; ecs_file="${ecs_file:-${CONF_DIR}/ecs.json}"
     local policy_rules="$(cfg_get DNS_POLICY_RULES)"; policy_rules="${policy_rules:-${CONF_DIR}/policy.json}"
@@ -6570,7 +6575,6 @@ DNS_UPSTREAMS=${upstreams_file}
 # the operational 112.96.32.0/24 default; /etc/5gpn/ecs.json (written by the
 # web console and hot-applied without a restart) overrides it at runtime.
 DNS_CHINA_ECS=${china_ecs}
-DNS_CHINA_0X20=${china_0x20}
 DNS_ECS_FILE=${ecs_file}
 
 DNS_RULES_DIR=${DNS_RULES_DIR_DEFAULT}

@@ -153,7 +153,7 @@ func TestGroupExchange_AttachesECS(t *testing.T) {
 	got := make(chan *dns.EDNS0_SUBNET, 1)
 	addr := startLocalUDPDNS(t, captureECSHandler(got))
 
-	g := NewUDPGroup([]string{addr}, false)
+	g := NewUDPGroup([]string{addr})
 	subnet, _ := parseECS("122.96.30.0/24")
 	SetGroupECS(g, subnet)
 
@@ -190,42 +190,11 @@ func TestGroupExchange_AttachesECS(t *testing.T) {
 	}
 }
 
-// ECS + 0x20 combined: both wire transformations must coexist on the same
-// (single) query copy.
-func TestGroupExchange_ECSWith0x20(t *testing.T) {
-	got := make(chan *dns.EDNS0_SUBNET, 1)
-	addr := startLocalUDPDNS(t, captureECSHandler(got))
-
-	g := NewUDPGroup([]string{addr}, true)
-	subnet, _ := parseECS("122.96.30.0/24")
-	SetGroupECS(g, subnet)
-
-	q := new(dns.Msg)
-	q.SetQuestion("example.cn.", dns.TypeA)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	resp, err := g.Exchange(ctx, q)
-	if err != nil {
-		t.Fatalf("Exchange: %v", err)
-	}
-	select {
-	case e := <-got:
-		if e == nil {
-			t.Fatal("upstream saw no ECS option with 0x20 enabled")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("upstream never received the query")
-	}
-	if resp.Question[0].Name != "example.cn." {
-		t.Errorf("question casing not restored: %q", resp.Question[0].Name)
-	}
-}
-
 func TestGroupExchange_NoECSWhenDisabled(t *testing.T) {
 	got := make(chan *dns.EDNS0_SUBNET, 1)
 	addr := startLocalUDPDNS(t, captureECSHandler(got))
 
-	g := NewUDPGroup([]string{addr}, false) // no SetGroupECS call
+	g := NewUDPGroup([]string{addr}) // no SetGroupECS call
 
 	q := new(dns.Msg)
 	q.SetQuestion("example.com.", dns.TypeA)
@@ -340,7 +309,7 @@ func TestECSFile_RoundTrip(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestControllerSetChinaECS(t *testing.T) {
-	china := NewUDPGroup([]string{"127.0.0.1:1"}, false)
+	china := NewUDPGroup([]string{"127.0.0.1:1"})
 	h := &Handler{China: china, Cache: NewCache(16)}
 	ctrl := NewController(func() error { return nil }, nil, nil, h)
 	ecsPath := filepath.Join(t.TempDir(), "ecs.json")

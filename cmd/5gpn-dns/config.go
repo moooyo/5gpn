@@ -108,13 +108,6 @@ type Config struct {
 	// read-only to the sandboxed daemon). Empty disables override+persistence.
 	EcsFile string
 
-	// China0x20 enables DNS 0x20 anti-spoof encoding on the plaintext-UDP china
-	// group (env DNS_CHINA_0X20; default true). A startup self-probe
-	// (StartChina0x20Probe) auto-disables it if a configured china upstream is
-	// confirmed to normalise query-name case, so the default-on posture cannot
-	// degrade CN resolution even against a normalising resolver.
-	China0x20 bool
-
 	// Rule file locations.
 	RulesDir     string // directory containing subscription caches and chnroute
 	ChnrouteFile string // path to china IP CIDR list
@@ -428,10 +421,6 @@ func LoadConfig() (Config, error) {
 
 	// Runtime ECS-override file (web-console managed, like UpstreamsFile).
 	cfg.EcsFile = envListen("DNS_ECS_FILE", "/etc/5gpn/ecs.json")
-
-	// China 0x20 anti-spoof (default on; a startup self-probe disables it if an
-	// upstream normalises query-name case — see StartChina0x20Probe).
-	cfg.China0x20 = envBool("DNS_CHINA_0X20", true)
 
 	// Cache size.
 	cfg.CacheSize = envIntOr("DNS_CACHE_SIZE", 4096)

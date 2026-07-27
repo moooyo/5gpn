@@ -450,22 +450,24 @@ else
 fi
 
 # An existing installation's dns.env still contains DNS_CHINA/DNS_TRUST, which
-# moved to upstreams.json. validate_dns_env_schema must TOLERATE them: it is
-# run against the persisted file on every upgrade, and rejecting an unknown key
-# aborts the install. This is exactly how the retired DNS_EGRESS_RESOLVER path
-# behaves, except these are dropped silently instead of demanding operator
-# action, because seed_upstreams_json carries their values across first.
+# moved to upstreams.json, and DNS_CHINA_0X20, whose mechanism was removed
+# outright. validate_dns_env_schema must TOLERATE all three: it is run against
+# the persisted file on every upgrade, and rejecting an unknown key aborts the
+# install. This is exactly how the retired DNS_EGRESS_RESOLVER path behaves,
+# except these are dropped silently instead of demanding operator action,
+# because seed_upstreams_json carries the upstream values across first.
 retired_env="$(mktemp)"
 cat > "$retired_env" <<'RETIRED_ENV'
 DNS_BASE_DOMAIN=env.example
 DNS_CHINA=223.5.5.5
 DNS_TRUST=dns.google@8.8.8.8
+DNS_CHINA_0X20=1
 DNS_UPSTREAMS=/etc/5gpn/upstreams.json
 RETIRED_ENV
 if validate_dns_env_schema "$retired_env" 2>/dev/null; then
-    pass "a pre-upgrade dns.env carrying the retired upstream keys still validates"
+    pass "a pre-upgrade dns.env carrying every retired key still validates"
 else
-    fail "retired DNS_CHINA/DNS_TRUST abort the upgrade instead of being tolerated"
+    fail "a retired key aborts the upgrade instead of being tolerated"
 fi
 
 # Tolerated on read is not the same as writable: nothing may put them back.

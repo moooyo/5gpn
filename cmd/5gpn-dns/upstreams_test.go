@@ -345,7 +345,7 @@ func TestGroupExchangeSequentialPoolOrder(t *testing.T) {
 	slow := startLocalUDPDNS(t, answerA("9.9.9.1", 80*time.Millisecond))
 	fast := startLocalUDPDNS(t, answerA("9.9.9.2", 0))
 
-	g := NewUDPGroup([]string{slow, fast}, false)
+	g := NewUDPGroup([]string{slow, fast})
 	q := new(dns.Msg)
 	q.SetQuestion("seq-order.test.", dns.TypeA)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -368,7 +368,7 @@ func TestGroupExchangeFallsBackPastDeadMember(t *testing.T) {
 	dead := startLocalUDPDNS(t, func(dns.ResponseWriter, *dns.Msg) {}) // never replies
 	live := startLocalUDPDNS(t, answerA("9.9.9.2", 0))
 
-	g := NewUDPGroup([]string{dead, live}, false)
+	g := NewUDPGroup([]string{dead, live})
 	q := new(dns.Msg)
 	q.SetQuestion("seq-fallback.test.", dns.TypeA)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

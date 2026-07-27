@@ -123,8 +123,13 @@ afterward.
 - [ ] Parent-context cancellation does not open the upstream breaker; a member
   attempt deadline does allow fallback.
 - [ ] `PUT /api/upstreams` hot-swaps groups, preserves china ECS, flushes old
-  cached answers, reruns the 0x20 probe, and survives daemon restart through
-  `upstreams.json`.
+  cached answers, and survives daemon restart through `upstreams.json`.
+- [ ] A china group configured with a DoT or DoH member resolves CN names, and
+  the operator's `DNS_CHINA_ECS` subnet still rides the query on that member —
+  ECS is attached before the transport is chosen, but nothing else covers it.
+- [ ] Repeated `PUT /api/upstreams` with a china DoH member leaves the daemon's
+  fd count flat. A pooled `http.Transport` is retired on a grace timer, and a
+  regression here leaks one per save rather than failing visibly.
 - [ ] A subscription hostname resolves through the current trust snapshot.
 - [ ] Network failure, redirect to a special-use address, oversized line, or
   parser error retains the previous cache byte-for-byte and schedules backoff.

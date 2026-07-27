@@ -100,7 +100,7 @@ func main() {
 	}
 	cache := NewCache(cacheSize)
 
-	china := NewUDPGroup(cfg.ChinaRaw, cfg.China0x20)
+	china := NewUDPGroup(cfg.ChinaRaw)
 	trust := NewTrustGroup(cfg.TrustEntries)
 
 	// China-group EDNS Client Subnet: the web-console override file (written
@@ -213,12 +213,6 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// DNS 0x20 self-probe: if enabled (default), verify the china upstreams echo
-	// query-name case and auto-disable 0x20 if any normalises it, so the default-on
-	// posture can never quietly funnel CN domains through the gateway. Background;
-	// never blocks serving.
-	StartChina0x20Probe(ctx, china)
-
 	// Trust sanity probe: nothing else can tell a working trust resolver from
 	// a placeholder that answers everything with itself, because the gateway
 	// rewrite hides the fabricated address from clients. Warn-only, background,
@@ -246,13 +240,13 @@ func main() {
 
 	// Upstream hot-swap hook (PUT /api/upstreams): rebuild both groups from the
 	// validated specs, swap them into the live engine (flushes the response
-	// cache), re-run the 0x20 self-probe against the NEW china members, then
-	// persist to upstreams.json so the change survives a restart. A persist
+	// cache), then persist to upstreams.json so the change survives a restart.
+	// A persist
 	// failure leaves the swap live and reports it — the operator asked for the
 	// change; better applied-but-not-durable than silently ignored.
 	ctrl.SetUpstreamsApply(func(chinaList, trustList []string) error {
 		entries := parseUpstreamEntryList(trustList)
-		cg := NewUDPGroup(chinaList, cfg.China0x20)
+		cg := NewUDPGroup(chinaList)
 		tg := NewTrustGroup(entries)
 		// Carry the live china-group ECS subnet onto the NEW group — an
 		// upstream swap must not silently drop an operator-set ECS override.
@@ -274,7 +268,6 @@ func main() {
 		if retiring, ok := oldTrust.(*group); ok && retiring != tg {
 			time.AfterFunc(2*h.Timeout, retiring.Close)
 		}
-		StartChina0x20Probe(ctx, cg)
 		StartTrustProbe(ctx, tg, entries)
 		log.Printf("upstreams: hot-swapped (china=%v trust=%v)", chinaList, trustList)
 		if err := SaveUpstreams(cfg.UpstreamsFile, UpstreamsConfig{China: chinaList, Trust: trustList}); err != nil {

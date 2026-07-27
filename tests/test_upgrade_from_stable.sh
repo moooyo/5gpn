@@ -261,15 +261,16 @@ current_keys="$(for key in $DNS_ENV_KEYS; do printf '%s\n' "$key"; done | sort)"
 raw_missing_keys="$(comm -23 <(printf '%s\n' "$current_keys") <(printf '%s\n' "$fixture_keys"))"
 raw_extra_keys="$(comm -13 <(printf '%s\n' "$current_keys") <(printf '%s\n' "$fixture_keys"))"
 expected_missing="$(printf '%s\n' DNS_INTERCEPT_CONFIG DNS_MARKETPLACES_FILE | sort)"
-# A 0.0.13 dns.env carries three keys the current installer no longer manages:
+# A 0.0.13 dns.env carries four keys the current installer no longer manages:
 # DNS_EGRESS_RESOLVER, retired pre-v5 and still requiring the documented manual
-# rebuild, plus DNS_CHINA/DNS_TRUST, retired when upstreams.json became the sole
-# source of truth. The latter two are tolerated on read and dropped on rewrite,
-# so an upgrade must not stumble over them.
-expected_extra="$(printf '%s\n' DNS_CHINA DNS_EGRESS_RESOLVER DNS_TRUST | sort)"
+# rebuild, plus DNS_CHINA/DNS_TRUST (retired when upstreams.json became the sole
+# source of truth) and DNS_CHINA_0X20 (retired with the 0x20 mechanism itself).
+# The latter three are tolerated on read and dropped on rewrite, so an upgrade
+# must not stumble over them.
+expected_extra="$(printf '%s\n' DNS_CHINA DNS_CHINA_0X20 DNS_EGRESS_RESOLVER DNS_TRUST | sort)"
 if [[ "$raw_missing_keys" == "$expected_missing" && "$raw_extra_keys" == "$expected_extra" \
    && "$(printf '%s\n' "$fixture_keys" | grep -c .)" == 51 ]]; then
-    pass "raw stable key delta is the two additive files plus the three retired keys"
+    pass "raw stable key delta is the two additive files plus the four retired keys"
 else
     fail "raw stable dns.env key delta is unexpected (missing='$raw_missing_keys', extra='$raw_extra_keys')"
 fi
@@ -283,10 +284,10 @@ fi
 rebuilt_keys="$(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$CONF_DIR/dns.env" | sort)"
 rebuilt_missing_keys="$(comm -23 <(printf '%s\n' "$current_keys") <(printf '%s\n' "$rebuilt_keys"))"
 rebuilt_extra_keys="$(comm -13 <(printf '%s\n' "$current_keys") <(printf '%s\n' "$rebuilt_keys"))"
-# The operator's documented rebuild removes only DNS_EGRESS_RESOLVER;
-# DNS_CHINA/DNS_TRUST stay in their file, and the schema must still accept it —
-# that is the whole point of tolerating retired keys on read.
-rebuilt_expected_extra="$(printf '%s\n' DNS_CHINA DNS_TRUST | sort)"
+# The operator's documented rebuild removes only DNS_EGRESS_RESOLVER; the other
+# retired keys stay in their file, and the schema must still accept it — that is
+# the whole point of tolerating retired keys on read.
+rebuilt_expected_extra="$(printf '%s\n' DNS_CHINA DNS_CHINA_0X20 DNS_TRUST | sort)"
 if [[ "$rebuilt_missing_keys" == "$expected_missing" && "$rebuilt_extra_keys" == "$rebuilt_expected_extra" \
    && "$(printf '%s\n' "$rebuilt_keys" | grep -c .)" == 50 ]]; then
     pass "rebuilt 0.0.13 dns.env lacks only the two additive beta keys and keeps the retired upstream keys"

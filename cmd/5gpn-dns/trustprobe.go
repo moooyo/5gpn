@@ -23,9 +23,9 @@ const trustProbeTimeout = 8 * time.Second
 // answering plausibly — and only logs.
 //
 // Nothing else in the daemon can tell a working trust resolver from a hostile
-// or placeholder one. ValidateUpstreams checks that a spec is syntactically an
-// IPv4 address, which the shipped 22.22.22.22 default satisfies perfectly, and
-// the only other startup probe (StartChina0x20Probe) targets the china group.
+// or placeholder one, and this is the only upstream probe that runs at startup.
+// ValidateUpstreams checks that a spec is syntactically an IPv4 address, which
+// the shipped 22.22.22.22 default satisfies perfectly.
 // A trust leg answering "example.com. 10 IN A 22.22.22.18" in under a
 // millisecond is, to every other part of this system, indistinguishable from a
 // healthy one — and the gateway rewrite hides it downstream, because a foreign

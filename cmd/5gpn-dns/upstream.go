@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
-	crand "crypto/rand"
 	"crypto/tls"
 	"fmt"
 	"log"
 	"net"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -43,19 +41,6 @@ type group struct {
 	label   string // group name for error messages ("china", "trust")
 	breaker *breaker
 
-	// randomize enables DNS 0x20 encoding (RFC-draft) on outgoing queries: the
-	// question name's letters are randomly cased and the reply must echo that
-	// exact casing or it is rejected as a probable off-path spoof. It raises the
-	// bar for blind cache poisoning on the plaintext-UDP china path (whose CN
-	// verdict steers a client to a real IP, so a poisoned answer redirects
-	// traffic). Default-on (DNS_CHINA_0X20) but backed by a startup self-probe
-	// (probe0x20): if a china upstream is CONFIRMED to normalise query-name case —
-	// which would make every echo check fail and quietly funnel CN domains through
-	// the gateway — the probe flips this off, so "default on" cannot degrade
-	// resolution. atomic because the probe writes it from a goroutine while queries
-	// read it. Set only on the UDP group.
-	randomize atomic.Bool
-
 	// ecs, when non-nil, is the EDNS Client Subnet (RFC 7871) attached to every
 	// outgoing query — the clients' cellular egress /24, so CN CDNs schedule
 	// answers near the CLIENTS instead of near the gateway's own egress IP.
@@ -66,8 +51,8 @@ type group struct {
 
 // SetGroupECS sets (or clears, with nil) the ECS subnet a group attaches to
 // outgoing queries. A no-op for non-*group Exchangers (fakes in tests).
-// Exported-style helper (like StartChina0x20Probe) so main/Controller stay
-// free of the concrete group type.
+// Exported-style helper so main/Controller stay free of the concrete group
+// type.
 func SetGroupECS(ex Exchanger, subnet *net.IPNet) {
 	if g, ok := ex.(*group); ok {
 		g.ecs.Store(subnet)
@@ -132,17 +117,6 @@ func (g *group) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 		setECSOnMsg(send, ecsSubnet)
 	}
 
-	// 0x20: send a case-randomised copy of the query and require the reply to
-	// echo that exact casing. Randomised once per Exchange so every attempted
-	// member sends (and must echo) the same name. origName/sentName are empty
-	// when disabled.
-	var origName, sentName string
-	if g.randomize.Load() && len(q.Question) > 0 {
-		origName = q.Question[0].Name
-		sentName = randomizeDNSCase(origName)
-		send.Question[0].Name = sentName
-	}
-
 	var lastErr error
 	for i, m := range g.members {
 		// Per-attempt budget: an even share of what's left, so member k of n
@@ -193,18 +167,6 @@ func (g *group) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 			return nil, fmt.Errorf("exchange abandoned by caller: %w", err)
 		}
 
-		if err == nil && sentName != "" {
-			// The reply must echo our randomised question name byte-for-byte;
-			// otherwise treat it as a probable off-path spoof and drop it
-			// (this member fails; the next one is tried).
-			if msg == nil || len(msg.Question) == 0 || msg.Question[0].Name != sentName {
-				lastErr = fmt.Errorf("0x20 case-echo mismatch (possible off-path spoof or case-normalising upstream)")
-				continue
-			}
-			// Restore the caller's original casing so 0x20 stays contained to
-			// the wire and downstream sees a byte-identical message.
-			restoreDNSCase(msg, sentName, origName)
-		}
 		if err == nil {
 			// ECS is an upstream-only implementation detail. Strip an echo or an
 			// unsolicited option regardless of whether operator ECS is enabled.
@@ -222,60 +184,12 @@ func (g *group) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	return nil, fmt.Errorf("all upstreams failed: %w", lastErr)
 }
 
-// randomizeDNSCase returns name with each ASCII letter's case flipped at random
-// (DNS 0x20). Non-letters (dots, digits, hyphens) are untouched. Uses crypto/rand
-// for the per-letter bit; on the (practically impossible) read failure the bytes
-// stay zero, yielding an all-lowercased-where-flipped name that is still a valid
-// query — 0x20 degrades to no-op rather than erroring.
-func randomizeDNSCase(name string) string {
-	b := []byte(name)
-	r := make([]byte, len(b))
-	_, _ = crand.Read(r)
-	for i, c := range b {
-		if r[i]&1 == 0 {
-			continue
-		}
-		switch {
-		case c >= 'a' && c <= 'z':
-			b[i] = c - 32 // to upper
-		case c >= 'A' && c <= 'Z':
-			b[i] = c + 32 // to lower
-		}
-	}
-	return string(b)
-}
-
-// restoreDNSCase rewrites msg's question name and any answer/authority/additional
-// owner name that byte-matches sentName back to origName, so the case-randomised
-// wire form never leaks past Exchange. Records whose owner differs (e.g. CNAME
-// chain targets) are left as the upstream sent them. Case-insensitive resolution
-// makes this cosmetic downstream, but it keeps 0x20 fully contained.
-func restoreDNSCase(msg *dns.Msg, sentName, origName string) {
-	if len(msg.Question) > 0 && msg.Question[0].Name == sentName {
-		msg.Question[0].Name = origName
-	}
-	for _, section := range [][]dns.RR{msg.Answer, msg.Ns, msg.Extra} {
-		for _, rr := range section {
-			if h := rr.Header(); h != nil && h.Name == sentName {
-				h.Name = origName
-			}
-		}
-	}
-}
-
 // addDefaultPort appends defaultPort to addr if addr has no port component.
 func addDefaultPort(addr, defaultPort string) string {
-	// Check if it's already host:port.
-	if strings.Contains(addr, ":") {
-		// Could be IPv6 bare address or host:port — if it wraps in brackets it's IPv6.
-		// For simplicity: if it parses as host+port it's already set; if not, append.
-		if _, _, err := net.SplitHostPort(addr); err == nil {
-			return addr
-		}
-		// IPv6 address without brackets — wrap and add port.
+	if _, _, err := net.SplitHostPort(addr); err != nil {
 		return net.JoinHostPort(addr, defaultPort)
 	}
-	return net.JoinHostPort(addr, defaultPort)
+	return addr
 }
 
 // normaliseAddrs returns a copy of addrs with defaultPort appended to any
@@ -288,111 +202,21 @@ func normaliseAddrs(addrs []string, defaultPort string) []string {
 	return out
 }
 
-// NewUDPGroup returns an Exchanger that fans out UDP queries to addrs and
-// returns the first non-error reply. Addresses without an explicit port get
-// port 53 appended. randomize enables DNS 0x20 anti-spoof encoding (see
-// group.randomize); the caller should run StartChina0x20Probe afterwards so a
-// case-normalising upstream disables it automatically.
-func NewUDPGroup(addrs []string, randomize bool) Exchanger {
+// NewUDPGroup returns an Exchanger that tries addrs in pool order and returns
+// the first non-error reply. Addresses without an explicit port get port 53
+// appended.
+func NewUDPGroup(addrs []string) Exchanger {
 	members := make([]upstream, len(addrs))
 	for i, a := range normaliseAddrs(addrs, "53") {
 		members[i] = upstream{addr: a, net: "udp"}
 	}
-	g := &group{members: members, label: "china", breaker: newBreaker()}
-	g.randomize.Store(randomize)
-	return g
+	return &group{members: members, label: "china", breaker: newBreaker()}
 }
 
-// decide0x20 turns the probe's observations into "keep 0x20 enabled?":
-//   - anyPreserve: at least one member echoed the 0x20-cased name byte-for-byte
-//     → 0x20 works (the group returns that member's reply), keep it on.
-//   - else anyReachablePlain: a member answered a PLAIN query but none preserved
-//     the 0x20 casing → the reachable upstream(s) normalise case → disable, or
-//     every CN query would echo-mismatch and get funnelled through the gateway.
-//   - else (nothing reachable): inconclusive; keep on (harmless — the china group
-//     is down anyway, and a later restart re-probes when it recovers).
-func decide0x20(anyPreserve, anyReachablePlain bool) bool {
-	if anyPreserve {
-		return true
-	}
-	if anyReachablePlain {
-		return false
-	}
-	return true
-}
-
-// probe0x20 checks whether the china upstreams echo 0x20 query-name casing and
-// flips g.randomize off if they are confirmed to normalise it. Runs once at
-// startup (in a goroutine — never blocks serving); queries members directly (not
-// via Exchange) so it never mutates shared state mid-flight. A no-op if 0x20 is
-// already off.
-func (g *group) probe0x20(ctx context.Context) {
-	if !g.randomize.Load() {
-		return
-	}
-	const probeName = "www.qq.com."
-	timeout := 4 * time.Second
-	anyPreserve, anyReachablePlain := false, false
-	for _, m := range g.members {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		// Ensure the cased probe actually DIFFERS from the plain name.
-		// randomizeDNSCase flips each letter with p=1/2, so ~1/256 of the time it
-		// returns the unchanged all-lowercase probeName — and a case-NORMALISING
-		// upstream echoing that lowercase name would then match below and be
-		// mis-counted as case-preserving, defeating the probe. Retry (bounded — the
-		// cap guards the theoretical no-letter name where no casing can differ).
-		sent := randomizeDNSCase(probeName)
-		for i := 0; sent == probeName && i < 16; i++ {
-			sent = randomizeDNSCase(probeName)
-		}
-		q := new(dns.Msg)
-		q.SetQuestion(sent, dns.TypeA)
-		c := &dns.Client{Net: m.net, Timeout: timeout}
-		if r, _, err := c.ExchangeContext(ctx, q, m.addr); err == nil && r != nil && len(r.Question) > 0 {
-			if r.Question[0].Name == sent {
-				anyPreserve = true
-				break // one preserving member is enough for the group to work
-			}
-			// Reachable but did not echo our casing → normalises.
-			anyReachablePlain = true
-		} else {
-			// 0x20 query failed; see if a PLAIN query reaches this member (to tell
-			// "normalises" apart from "unreachable").
-			qp := new(dns.Msg)
-			qp.SetQuestion(probeName, dns.TypeA)
-			if rp, _, errp := c.ExchangeContext(ctx, qp, m.addr); errp == nil && rp != nil {
-				anyReachablePlain = true
-			}
-		}
-	}
-	if !decide0x20(anyPreserve, anyReachablePlain) {
-		g.randomize.Store(false)
-		log.Printf("warning: DNS_CHINA_0X20 auto-disabled — a china upstream normalises query-name case (0x20 echo check would funnel CN domains through the gateway). Point DNS_CHINA at case-preserving resolvers to re-enable.")
-	}
-}
-
-// StartChina0x20Probe launches the china group's 0x20 case-preservation probe in
-// the background (a no-op if ex is not a *group or 0x20 is off). Keeps main free
-// of the concrete group type.
-func StartChina0x20Probe(ctx context.Context, ex Exchanger) {
-	if g, ok := ex.(*group); ok {
-		go g.probe0x20(ctx)
-	}
-}
-
-// NewTrustGroup returns an Exchanger that fans out queries to the given trust
-// entries. Each entry picks its own transport:
-//
-//   - "serverName@dialIP" → DoT (port 853 default), TLS-verified against
-//     ServerName, sharing one TLS client-session cache so cache-miss queries
-//     resume handshakes instead of paying full asymmetric crypto each time.
-//   - bare "IP" (Plain) → plain UDP (port 53 default) — for a trusted internal
-//     resolver reachable over a clean path (the 22.22.22.22 default), where
-//     requiring a DoT cert would just break resolution.
+// NewTrustGroup builds the trust group from transport-tagged entries: DoH over
+// a pooled HTTP/2 connection, DoT with TLS verified against ServerName, or
+// plain UDP for a trusted internal resolver on a clean path where requiring a
+// certificate would just break resolution.
 func NewTrustGroup(entries []UpstreamEntry) Exchanger {
 	sessCache := tls.NewLRUClientSessionCache(0) // 0 → default capacity
 	members := make([]upstream, len(entries))
