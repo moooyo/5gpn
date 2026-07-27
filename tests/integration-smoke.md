@@ -478,6 +478,38 @@ token into recorded command output, screenshots, or issue logs.
 
 ## Modular HTTP/3 interception
 
+### Clearing a sidecar version pin
+
+`cmd/5gpn-dns/sidecar_client_test.go` holds the only end-to-end check of the
+control-API wire contract, and it runs the real sidecar binary. It skips unless
+it is on a gateway (it reads `/etc/5gpn/intercept/tls`) with `:18080` free, so
+ordinary CI never executes it — a sidecar release can change the contract and
+land unnoticed. Before moving `SIDECAR_VERSION`/`SIDECAR_SHA256` in
+`install.sh`, run it on a disposable gateway against both binaries:
+
+```bash
+# build the test binary and the candidate sidecar off-box; the gateway has no toolchain
+(cd cmd/5gpn-dns && GOOS=linux GOARCH=amd64 go test -c -o /tmp/sidecar-contract.test .)
+scp /tmp/sidecar-contract.test cmd/5gpn-dns/testdata/sidecar-bundle.json <gw>:/tmp/contract/
+
+# on the gateway: the service must be stopped, or :18080 is taken and it skips
+systemctl stop 5gpn-intercept
+cd /tmp/contract  # testdata/ is resolved relative to the working directory
+SIDECAR_BINARY=/opt/5gpn/bin/5gpn-intercept ./sidecar-contract.test -test.run Sidecar -test.v
+SIDECAR_BINARY=/tmp/5gpn-intercept-candidate ./sidecar-contract.test -test.run Sidecar -test.v
+systemctl start 5gpn-intercept
+```
+
+- [ ] Both runs report the same five `TestSidecar*` results. A skip is not a
+  pass — read the skip reason and fix the fixture rather than recording it green.
+- [ ] `TestSidecarPublishBundleEndToEnd` in particular pins the `generation`
+  semantics the coordinator depends on: the first publish is `1` and republishing
+  the same bundle does not advance it.
+- [ ] The control-API contract is not the whole surface. Install the candidate
+  over `/opt/5gpn/bin/5gpn-intercept`, restart, and re-run `test/overlay/verify-live.sh`
+  so the data plane is exercised too; then restore the pinned binary and confirm
+  the checks still pass and the mihomo config digest never moved.
+
 - [ ] On a fresh install the Console MITM master is off, there are no installed
   extensions, `5gpn-intercept.service` is inactive, and `--check-enabled` exits
   nonzero. `5gpn-intercept-runtime.path` remains active. Enabling the master
