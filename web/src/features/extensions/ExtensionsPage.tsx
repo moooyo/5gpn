@@ -564,6 +564,7 @@ function ExtensionUpdateModal({
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Badge tone="blue">{t('extensions.captureCount', { count: review.candidate.capture_hosts.length })}</Badge>
               <Badge tone="amber">{t('extensions.capabilityAction', { count: review.candidate.script_count })}</Badge>
+              {review.candidate.actions?.some((action) => action.entry === 'proxy-compat') ? <Badge tone="amber">{t('extensions.proxyCompatTitle')}</Badge> : null}
               {(review.candidate.routing_rules?.length ?? 0) > 0 ? <Badge tone="amber">{t('extensions.capabilityRouting', { count: review.candidate.routing_rules!.length })}</Badge> : null}
               {review.candidate.network_any ? <Badge tone="amber">{t('extensions.networkAnyTitle')}</Badge> : review.candidate.network_origins.length > 0 ? <Badge tone="indigo">{t('extensions.capabilityNetwork', { count: review.candidate.network_origins.length })}</Badge> : null}
               {review.candidate.egress_group_required ? <Badge tone="cyan">{t('extensions.egressGroupTitle')}</Badge> : null}
