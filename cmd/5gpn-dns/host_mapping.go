@@ -141,7 +141,6 @@ func (h *Handler) arbitrateOrMap(
 	return arbitrateSrc(ctx, q, china, trust, cn, h.stats)
 }
 
-//
 // AAAA gets NODATA rather than an answer even when the mapping holds a v6
 // address: 5gpn is IPv4-only end to end, and handing a client an AAAA it will
 // prefer is how a name stops working. The v6 address is still usable by the

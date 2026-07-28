@@ -31,25 +31,25 @@ const (
 	// needs a primary and a spare; more is a group, which is the operator's to
 	// configure and not an extension's to smuggle in one line.
 	maxInterceptHostMappingServers = 4
-	maxInterceptModuleRules    = 256
-	maxInterceptSettings       = 128
-	maxInterceptModuleName     = 128
-	maxInterceptModuleDesc     = 1024
-	maxInterceptModuleSource   = 2 << 20
-	maxInterceptScriptSource   = 1 << 20
-	maxInterceptJQProgram      = 32768
-	maxInterceptMockBody       = 1 << 20
-	maxInterceptMockHeaders    = 32
-	maxInterceptRewriteTarget  = 4096
-	maxInterceptReplacePattern = 1024
-	maxInterceptScriptTotal    = 8 << 20
-	maxInterceptModulePattern  = 4096
-	maxInterceptResourceURL    = 4096
-	maxInterceptSettingValue   = 64 << 10
-	maxInterceptEgressGroup    = 128
-	maxInterceptRoutingRules   = 256
-	maxInterceptActiveRoutes   = 2048
-	maxInterceptRouteKeywords  = 8
+	maxInterceptModuleRules        = 256
+	maxInterceptSettings           = 128
+	maxInterceptModuleName         = 128
+	maxInterceptModuleDesc         = 1024
+	maxInterceptModuleSource       = 2 << 20
+	maxInterceptScriptSource       = 1 << 20
+	maxInterceptJQProgram          = 32768
+	maxInterceptMockBody           = 1 << 20
+	maxInterceptMockHeaders        = 32
+	maxInterceptRewriteTarget      = 4096
+	maxInterceptReplacePattern     = 1024
+	maxInterceptScriptTotal        = 8 << 20
+	maxInterceptModulePattern      = 4096
+	maxInterceptResourceURL        = 4096
+	maxInterceptSettingValue       = 64 << 10
+	maxInterceptEgressGroup        = 128
+	maxInterceptRoutingRules       = 256
+	maxInterceptActiveRoutes       = 2048
+	maxInterceptRouteKeywords      = 8
 )
 
 // interceptScriptEntryProxyCompat runs a published proxy-client bundle instead
