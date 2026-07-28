@@ -471,6 +471,7 @@ const en = {
     networkOriginsWarning: 'This extension can send any decrypted request, response, setting, or stored data it can read to these addresses, or rewrite a captured request to them. A rewrite forwards the complete method, decoded body, and end-to-end headers, which may include Cookie and Authorization credentials.',
     networkOriginsNone: 'No additional network access requested.',
     networkAnyTitle: 'Unrestricted network access',
+    proxyCompatTitle: 'Runs a published third-party bundle',
     networkAnyChip: 'Any host',
     networkAnyWarning: 'This extension requested network access without naming the addresses it may reach, because they are chosen at runtime. It can send any decrypted request, response, setting, or stored data it can read to any host it resolves, and a rewritten request forwards the complete method, decoded body, and end-to-end headers, which may include Cookie and Authorization credentials. This is broader than an address list and cannot be narrowed after enabling.',
     trustPending: 'CA trust pending',

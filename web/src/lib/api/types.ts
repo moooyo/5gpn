@@ -264,6 +264,7 @@ export interface InterceptModuleAction {
   script_url?: string
   script_digest: string
   body_mode: 'none' | 'text' | 'binary'
+  entry?: 'proxy-compat'
   timeout_ms: number
   max_body_bytes: number
 }

@@ -992,7 +992,14 @@ func botExtensionActionsHTML(actions []interceptModuleActionView) string {
 		text.WriteString(html.EscapeString(action.Phase))
 		text.WriteString("</code> · body=<code>")
 		text.WriteString(html.EscapeString(action.BodyMode))
-		text.WriteString("</code>\n  hosts=<code>")
+		text.WriteString("</code>")
+		// A proxy-compat action runs a published bundle fetched by URL, not a
+		// reviewed local transform(context). That is a different trust decision,
+		// so it is named here rather than left to look like every other action.
+		if action.Entry == interceptScriptEntryProxyCompat {
+			text.WriteString(" · <b>entry=proxy-compat（运行已发布的第三方 bundle）</b>")
+		}
+		text.WriteString("\n  hosts=<code>")
 		text.WriteString(html.EscapeString(strings.Join(action.Match.Hosts, ", ")))
 		text.WriteString("</code>\n  schemes=<code>")
 		text.WriteString(html.EscapeString(strings.Join(action.Match.Schemes, ", ")))
