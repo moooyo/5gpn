@@ -281,7 +281,7 @@ func (m *InterceptModuleManager) PrepareRuntime() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.store.mu.Lock()
-	document, _, err := m.store.Read()
+	document, body, err := m.store.Read()
 	m.store.mu.Unlock()
 	if err != nil {
 		return err
@@ -311,6 +311,39 @@ func (m *InterceptModuleManager) PrepareRuntime() error {
 	if len(activeInterceptHosts(document)) > 0 && !m.certificateReady(document) {
 		m.publishHosts(nil)
 		return errors.New("interception certificate state is not ready")
+	}
+	// Republish the generation from the document, which is the authority.
+	//
+	// Startup used to trust whatever the core had recovered from its own store.
+	// That holds while the store is intact and fails silently when it is not: a
+	// core with no active generation does not reject captured traffic, it stops
+	// matching it, so every captured host falls through to the operator's own
+	// rules and leaves unintercepted. The gateway looks healthy while the thing
+	// it exists to do is not happening.
+	//
+	// An upgrade that changes the document shape is one way to arrive there --
+	// the installer discards generations it may be unable to reconstruct -- but
+	// it is not the only one, and none of them should depend on someone noticing.
+	// Publishing here makes the coordinator authoritative at every start: the
+	// driver short-circuits when the recomputed generation is already live, so a
+	// healthy boot pays a readback and nothing else.
+	if m.overlayDriverActive() {
+		// Both halves, in the order the apply path uses: the processor holds the
+		// document before mihomo publishes a generation naming it. Republishing
+		// only the generation is worse than republishing neither -- the sidecar
+		// goes on serving whatever its own store cold started from, the
+		// generation names the document's bundle, and readiness is refused for
+		// the mismatch, which fails every captured connection closed.
+		if err := m.publishSidecarDocument(context.Background(), body); err != nil {
+			m.publishHosts(nil)
+			return fmt.Errorf("the interception document could not be republished: %w", err)
+		}
+		if err := m.publishOverlayGeneration(context.Background(), document, analysis.MatchTarget,
+			interceptRevision(body), interceptCertificateDigest(certificateInterceptHosts(document)),
+			interceptBundleID(body)); err != nil {
+			m.publishHosts(nil)
+			return fmt.Errorf("interception routing could not be republished: %w", err)
+		}
 	}
 	m.publishHosts(&document)
 	return nil
