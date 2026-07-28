@@ -32,6 +32,7 @@ const (
 	maxInterceptModuleDesc     = 1024
 	maxInterceptModuleSource   = 2 << 20
 	maxInterceptScriptSource   = 1 << 20
+	maxInterceptJQProgram      = 32768
 	maxInterceptScriptTotal    = 8 << 20
 	maxInterceptModulePattern  = 4096
 	maxInterceptResourceURL    = 4096
@@ -47,6 +48,10 @@ const (
 // by calling $done, so the sidecar waits on that rather than on a returned
 // value; the mode is declared because it cannot be inferred from the source.
 const interceptScriptEntryProxyCompat = "proxy-compat"
+
+// A jq action carries an upstream module's own response-body-json-jq expression
+// instead of a script that reimplements it. It runs declaratively in the
+// sidecar, never entering the JavaScript runtime.
 
 var nativeExtensionIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{1,126}[a-z0-9])$`)
 var nativeExtensionRouteKeywordPattern = regexp.MustCompile(`^[a-z0-9._-]+$`)
@@ -74,6 +79,7 @@ type interceptScriptRule struct {
 	ScriptBody   string               `json:"script_body"`
 	BodyMode     string               `json:"body_mode"`
 	Entry        string               `json:"entry,omitempty"`
+	JQProgram    string               `json:"jq_program,omitempty"`
 	TimeoutMS    int                  `json:"timeout_ms"`
 	MaxBodyBytes int64                `json:"max_body_bytes"`
 }
@@ -107,6 +113,7 @@ type interceptModuleActionView struct {
 	ScriptDigest string               `json:"script_digest"`
 	BodyMode     string               `json:"body_mode"`
 	Entry        string               `json:"entry,omitempty"`
+	JQProgram    string               `json:"jq_program,omitempty"`
 	TimeoutMS    int                  `json:"timeout_ms"`
 	MaxBodyBytes int64                `json:"max_body_bytes"`
 }
@@ -453,6 +460,17 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 				return fmt.Errorf("action %q URL is invalid: %w", rule.ID, err)
 			}
 		}
+		// A jq action has an expression instead of a script snapshot, so the
+		// body and digest rules below do not apply to it.
+		if rule.JQProgram != "" {
+			if len(rule.JQProgram) > maxInterceptJQProgram {
+				return fmt.Errorf("action %q jq program exceeds %d bytes", rule.ID, maxInterceptJQProgram)
+			}
+			if rule.BodyMode != "text" {
+				return fmt.Errorf("action %q jq program requires body_mode text", rule.ID)
+			}
+			continue
+		}
 		if len(rule.ScriptBody) == 0 || len(rule.ScriptBody) > maxInterceptScriptSource {
 			return fmt.Errorf("action %q source must contain 1 to %d bytes", rule.ID, maxInterceptScriptSource)
 		}
@@ -464,6 +482,9 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 		}
 		if rule.Entry != "" && rule.Entry != interceptScriptEntryProxyCompat {
 			return fmt.Errorf("action %q entry must be empty or %s", rule.ID, interceptScriptEntryProxyCompat)
+		}
+		if rule.JQProgram != "" && (rule.Entry != "" || rule.ScriptBody != "" || rule.ScriptURL != "") {
+			return fmt.Errorf("action %q declares both a jq program and a script", rule.ID)
 		}
 		if rule.TimeoutMS < 50 || rule.TimeoutMS > 30000 {
 			return fmt.Errorf("action %q timeout_ms must be between 50 and 30000", rule.ID)

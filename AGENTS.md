@@ -52,10 +52,18 @@ plans, design handoffs, and git history are context only.
   allowlisted pass-through.
 - There is no Python in the repository. The `5gpn-dns` Go module has exactly three direct dependencies:
   `github.com/miekg/dns`, `github.com/go-telegram/bot`, and `gopkg.in/yaml.v3`.
-  The separate `5gpn-intercept` module has exactly four direct dependencies:
+  The separate `5gpn-intercept` module has exactly six direct dependencies:
   `github.com/quic-go/quic-go`, `github.com/dop251/goja`,
   `github.com/dlclark/regexp2/v2` (imported only to bound goja's backtracking
-  fallback), and `github.com/andybalholm/brotli` for bounded Brotli decoding.
+  fallback), `github.com/andybalholm/brotli` for bounded Brotli decoding, and
+  `golang.org/x/net` plus `github.com/andybalholm/cascadia` for the bounded
+  document model published proxy-compat bundles need. The last two were an
+  explicit design decision: a webpage bundle parses a response into a document,
+  selects nodes, injects into head, and serializes back, and without a real
+  document model it throws inside its own error handling and the action reports
+  success having changed nothing. `golang.org/x/net` was already in the module
+  graph through quic-go. A hand-written selector matcher was rejected because a
+  partial CSS implementation mismatches silently.
   The YAML dependency is the explicit security boundary for structural mihomo
   invariant validation; do not add another direct dependency without an explicit
   design decision.

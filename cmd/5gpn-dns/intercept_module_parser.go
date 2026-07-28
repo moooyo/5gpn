@@ -133,6 +133,7 @@ type nativeExtensionScript struct {
 	Inline       string `yaml:"inline"`
 	BodyMode     string `yaml:"bodyMode"`
 	Entry        string `yaml:"entry"`
+	JQ           string `yaml:"jq"`
 	TimeoutMS    int    `yaml:"timeoutMs"`
 	MaxBodyBytes int64  `yaml:"maxBodyBytes"`
 }
@@ -279,6 +280,13 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 		if entry != "" && entry != interceptScriptEntryProxyCompat {
 			return interceptModuleSnapshot{}, fmt.Errorf("action %q script entry must be native or %s", raw.ID, interceptScriptEntryProxyCompat)
 		}
+		// jq carries the upstream module's own response-body-json-jq expression.
+		// It is declarative and runs without the JavaScript runtime, so it is
+		// mutually exclusive with a script.
+		jqProgram := strings.TrimSpace(raw.Script.JQ)
+		if jqProgram != "" && entry != "" {
+			return interceptModuleSnapshot{}, fmt.Errorf("action %q declares both script.jq and script.entry", raw.ID)
+		}
 		timeoutMS := raw.Script.TimeoutMS
 		if timeoutMS == 0 {
 			timeoutMS = 1000
@@ -289,6 +297,29 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 		}
 		inline := raw.Script.Inline
 		source := strings.TrimSpace(raw.Script.Source)
+		// A jq action carries an expression instead of code, so it declares
+		// neither a source nor an inline script.
+		if jqProgram != "" {
+			if source != "" || inline != "" {
+				return interceptModuleSnapshot{}, fmt.Errorf("action %q declares both script.jq and a script body", raw.ID)
+			}
+			if bodyMode != "text" {
+				return interceptModuleSnapshot{}, fmt.Errorf("action %q script.jq requires bodyMode text", raw.ID)
+			}
+			if len(jqProgram) > maxInterceptJQProgram {
+				return interceptModuleSnapshot{}, fmt.Errorf("action %q script.jq exceeds %d bytes", raw.ID, maxInterceptJQProgram)
+			}
+			scripts = append(scripts, interceptScriptRule{
+				ID: strings.TrimSpace(raw.ID), Phase: strings.ToLower(strings.TrimSpace(raw.Phase)),
+				Match: interceptActionMatch{
+					Hosts: hosts, Schemes: schemes, Methods: methods, PathRegex: pathRegex,
+					StatusCodes: uniqueSortedInts(raw.Match.StatusCodes),
+				},
+				BodyMode: bodyMode, JQProgram: jqProgram,
+				TimeoutMS: timeoutMS, MaxBodyBytes: maxBodyBytes,
+			})
+			continue
+		}
 		if (source == "") == (inline == "") {
 			return interceptModuleSnapshot{}, fmt.Errorf("action %q must declare exactly one of script.source or script.inline", raw.ID)
 		}
@@ -318,7 +349,8 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 				StatusCodes: uniqueSortedInts(raw.Match.StatusCodes),
 			},
 			ScriptURL: scriptURL, ScriptDigest: sha256Hex(scriptBody), ScriptBody: string(scriptBody),
-			BodyMode: bodyMode, Entry: entry, TimeoutMS: timeoutMS, MaxBodyBytes: maxBodyBytes,
+			BodyMode: bodyMode, Entry: entry, JQProgram: jqProgram,
+			TimeoutMS: timeoutMS, MaxBodyBytes: maxBodyBytes,
 		})
 	}
 

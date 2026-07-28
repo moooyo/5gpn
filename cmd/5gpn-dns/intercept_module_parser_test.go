@@ -845,3 +845,75 @@ func externalAwareTestClient(t *testing.T, server *httptest.Server) *http.Client
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}},
 	}
 }
+
+func jqActionManifest(program, bodyMode, extra string) string {
+	return `apiVersion: 5gpn.io/v1
+kind: Extension
+metadata:
+  id: io.example.jq
+  name: JQ fixture
+  version: 1.0.0
+permissions:
+  persistentStorage: false
+traffic:
+  captureHosts: [api.example.com]
+actions:
+  - id: clean-json
+    phase: response
+    match:
+      hosts: [api.example.com]
+      schemes: [https]
+      pathRegex: ^/
+    script:
+      jq: '` + program + `'
+      bodyMode: ` + bodyMode + `
+      timeoutMs: 1000
+      maxBodyBytes: 1024
+` + extra
+}
+
+func TestNativeExtensionParserCarriesAJQProgram(t *testing.T) {
+	t.Parallel()
+	// The upstream expression is the implementation. Carrying it verbatim is the
+	// point: translating each published rule into JavaScript produced code this
+	// repository then owned and re-derived on every upstream revision.
+	program := "del(.data.payment)"
+	snapshot, err := (interceptModuleParser{now: time.Now}).Import(
+		context.Background(),
+		interceptModuleImportRequest{Content: jqActionManifest(program, "text", "")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Scripts[0].JQProgram != program {
+		t.Fatalf("jq program = %q, want %q", snapshot.Scripts[0].JQProgram, program)
+	}
+	if snapshot.Scripts[0].ScriptBody != "" || snapshot.Scripts[0].ScriptDigest != "" {
+		t.Fatal("a jq action must carry no script snapshot")
+	}
+}
+
+func TestNativeExtensionParserRejectsAJQProgramWithAScript(t *testing.T) {
+	t.Parallel()
+	// Carrying both would leave which one runs undefined.
+	extra := "      inline: \"function transform(context) { return null }\"\n"
+	_, err := (interceptModuleParser{now: time.Now}).Import(
+		context.Background(),
+		interceptModuleImportRequest{Content: jqActionManifest("del(.a)", "text", extra)},
+	)
+	if err == nil || !strings.Contains(err.Error(), "jq") {
+		t.Fatalf("err = %v, want the pairing refused", err)
+	}
+}
+
+func TestNativeExtensionParserRejectsAJQProgramOnABinaryBody(t *testing.T) {
+	t.Parallel()
+	// jq transforms a JSON document; a binary body has none to transform.
+	_, err := (interceptModuleParser{now: time.Now}).Import(
+		context.Background(),
+		interceptModuleImportRequest{Content: jqActionManifest("del(.a)", "binary", "")},
+	)
+	if err == nil || !strings.Contains(err.Error(), "bodyMode") {
+		t.Fatalf("err = %v, want a text body required", err)
+	}
+}
