@@ -542,6 +542,8 @@ func (h *Handler) decideName(name string) resolutionDecision {
 type interceptHostSnapshot struct {
 	exact       map[string]interceptHostBinding
 	wildcard    []interceptWildcardBinding
+	mapExact    map[string]interceptHostMappingBinding
+	mapWildcard []interceptHostMappingWildcard
 	mitmEnabled bool
 	moduleCount int // enabled extensions, for "N enabled, none declared this name"
 }
@@ -559,12 +561,35 @@ type interceptWildcardBinding struct {
 	binding interceptHostBinding
 }
 
+// interceptHostMappingBinding is one resolved [Host] entry, with the resolver
+// form's upstream group already built.
+//
+// The group is built once per document rather than per query: a mapping is
+// consulted on every resolution of the name it covers, and building a transport
+// group per query would open a fresh connection each time and discard the
+// circuit breaker that makes a dead nameserver cheap.
+type interceptHostMappingBinding struct {
+	moduleID string
+	pattern  string
+	target   string
+	order    int
+	// servers is non-nil only for the resolver form.
+	servers Exchanger
+}
+
+type interceptHostMappingWildcard struct {
+	suffix  string
+	binding interceptHostMappingBinding
+}
+
 func newInterceptHostSnapshot(document interceptConfigDocument) *interceptHostSnapshot {
 	snapshot := &interceptHostSnapshot{
 		exact:       make(map[string]interceptHostBinding),
+		mapExact:    make(map[string]interceptHostMappingBinding),
 		mitmEnabled: document.MITM.Enabled,
 	}
 	seenWildcard := make(map[string]struct{})
+	seenMapWildcard := make(map[string]struct{})
 	for order, module := range orderedInterceptModules(document) {
 		if !module.Enabled {
 			continue
@@ -596,8 +621,88 @@ func newInterceptHostSnapshot(document interceptConfigDocument) *interceptHostSn
 				}
 			}
 		}
+		// Host mappings are indexed with the same first-in-execution-order
+		// semantics as capture hosts, and deliberately without the MITM gate:
+		// a mapping says where a name lives, which is true whether or not
+		// anything is intercepting it.
+		for _, mapping := range module.HostMappings {
+			pattern := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(mapping.Pattern), "."))
+			if pattern == "" {
+				continue
+			}
+			declared := interceptHostMappingBinding{
+				moduleID: module.ID,
+				pattern:  pattern,
+				target:   strings.ToLower(strings.TrimSpace(strings.TrimSuffix(mapping.Target, "."))),
+				order:    order,
+			}
+			if specs := mapping.hostMappingServers(); len(specs) > 0 {
+				entries := parseUpstreamEntryList(specs)
+				if len(entries) == 0 {
+					// Validation refuses this at import, so reaching here means
+					// a document written by something other than the importer.
+					// Dropping the mapping resolves the name normally, which is
+					// the same outcome as not declaring it.
+					continue
+				}
+				declared.servers = newTransportGroup("host-mapping:"+module.ID, entries)
+			}
+			if strings.HasPrefix(pattern, "*.") {
+				suffix := strings.TrimPrefix(pattern, "*.")
+				if _, exists := seenMapWildcard[suffix]; !exists {
+					seenMapWildcard[suffix] = struct{}{}
+					snapshot.mapWildcard = append(snapshot.mapWildcard,
+						interceptHostMappingWildcard{suffix: suffix, binding: declared})
+				}
+				continue
+			}
+			if _, exists := snapshot.mapExact[pattern]; !exists {
+				snapshot.mapExact[pattern] = declared
+			}
+		}
 	}
 	return snapshot
+}
+
+// HostMapping resolves name against the declared [Host] entries, first match in
+// execution order, exactly as capture hosts are matched. Unlike CaptureDNS it
+// carries no MITM gate.
+func (s *interceptHostSnapshot) HostMapping(name string) (interceptHostMappingBinding, bool) {
+	if s == nil {
+		return interceptHostMappingBinding{}, false
+	}
+	name = strings.ToLower(stripDot(name))
+	exact, exactMatch := s.mapExact[name]
+	for _, wildcard := range s.mapWildcard {
+		if exactMatch && wildcard.binding.order >= exact.order {
+			break
+		}
+		if len(name) > len(wildcard.suffix)+1 && strings.HasSuffix(name, "."+wildcard.suffix) {
+			return wildcard.binding, true
+		}
+	}
+	if exactMatch {
+		return exact, true
+	}
+	return interceptHostMappingBinding{}, false
+}
+
+// retireMappingResolvers closes the upstream groups a superseded snapshot built.
+//
+// On a grace timer rather than immediately: a query that loaded the old
+// snapshot is entitled to finish against it, and Close only reclaims idle
+// connections anyway. The grace matches what main.go gives a replaced china or
+// trust group, for the same reason.
+func (s *interceptHostSnapshot) retireMappingResolvers(grace time.Duration) {
+	if s == nil {
+		return
+	}
+	for _, binding := range s.mapExact {
+		retireGroup(binding.servers, nil, grace)
+	}
+	for _, wildcard := range s.mapWildcard {
+		retireGroup(wildcard.binding.servers, nil, grace)
+	}
 }
 
 func (s *interceptHostSnapshot) Match(name string) bool {
@@ -647,12 +752,26 @@ func (s *interceptHostSnapshot) lookup(name string) (interceptHostBinding, bool)
 }
 
 func (h *Handler) setInterceptDocument(document *interceptConfigDocument) {
+	var replacement *interceptHostSnapshot
 	if document == nil {
-		h.interceptHosts.Store(&interceptHostSnapshot{})
+		replacement = &interceptHostSnapshot{}
 	} else {
-		h.interceptHosts.Store(newInterceptHostSnapshot(*document))
+		replacement = newInterceptHostSnapshot(*document)
 	}
+	superseded := h.interceptHosts.Swap(replacement)
+	// A resolver-form mapping owns an upstream group. Swapping the snapshot
+	// without retiring the old one leaks its pooled connections on every
+	// document write, and the console can issue those repeatedly.
+	superseded.retireMappingResolvers(2 * h.Timeout)
 	h.Cache.Flush()
+}
+
+// hostMappingFor returns the [Host] entry covering name, if any.
+func (h *Handler) hostMappingFor(name string) (interceptHostMappingBinding, bool) {
+	if snapshot := h.interceptHosts.Load(); snapshot != nil {
+		return snapshot.HostMapping(name)
+	}
+	return interceptHostMappingBinding{}, false
 }
 
 func (h *Handler) captureDNSForName(name string) (resolver, moduleID string) {
@@ -1077,7 +1196,7 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 				initial = *ri
 			}
 			resp, info, ok := h.coalesceResolution(ctx, q, r, flightScope, initial, func(runCtx context.Context, flightReq *dns.Msg, flightInfo *resolveInfo) *dns.Msg {
-				resolved, src, err := arbitrateSrc(runCtx, flightReq, china, trust, cn, h.stats)
+				resolved, src, err := h.arbitrateOrMap(runCtx, flightReq, china, trust, cn)
 				if err != nil || resolved == nil {
 					return h.staleOrServerFail(flightReq, name, q.Qtype, flightInfo)
 				}
@@ -1142,7 +1261,7 @@ func (h *Handler) resolveTraced(ctx context.Context, q dns.Question, r *dns.Msg,
 			initial = *ri
 		}
 		resp, info, ok := h.coalesceResolution(ctx, q, r, flightScope, initial, func(runCtx context.Context, flightReq *dns.Msg, flightInfo *resolveInfo) *dns.Msg {
-			resolved, src, err := arbitrateSrc(runCtx, flightReq, china, trust, cn, h.stats)
+			resolved, src, err := h.arbitrateOrMap(runCtx, flightReq, china, trust, cn)
 			if err != nil || resolved == nil {
 				return h.staleOrServerFail(flightReq, name, q.Qtype, flightInfo)
 			}

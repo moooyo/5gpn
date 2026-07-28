@@ -27,6 +27,10 @@ const (
 	maxInterceptModules        = 64
 	maxInterceptModuleHosts    = 512
 	maxInterceptNetworkOrigins = 256
+	// maxInterceptHostMappingServers bounds one resolver-form mapping. A name
+	// needs a primary and a spare; more is a group, which is the operator's to
+	// configure and not an extension's to smuggle in one line.
+	maxInterceptHostMappingServers = 4
 	maxInterceptModuleRules    = 256
 	maxInterceptSettings       = 128
 	maxInterceptModuleName     = 128
@@ -161,9 +165,43 @@ type interceptModuleActionView struct {
 	MaxBodyBytes int64                  `json:"max_body_bytes"`
 }
 
+// interceptHostMapping is one entry of Loon's [Host]: a name, and what its
+// address should be resolved from.
+//
+// Target carries the form in Loon's own encoding rather than in three typed
+// fields, so a mapping lifted from an upstream plugin transcribes unchanged:
+//
+//	1.2.3.4            an address; the name resolves to it, full stop
+//	other.example.com  an alias; the name resolves to whatever that name does
+//	server:1.1.1.1     a resolver; the name is looked up through those servers
+//
+// Two of the three were already accepted and are already authorized as egress
+// destinations. None of the three did anything: the mapping was parsed,
+// conflict-checked, shown in the console and never consulted when a name was
+// actually resolved.
 type interceptHostMapping struct {
 	Pattern string `json:"host"`
 	Target  string `json:"target"`
+}
+
+// interceptHostMappingServerPrefix marks the resolver form. It is Loon's
+// spelling, not ours.
+const interceptHostMappingServerPrefix = "server:"
+
+// hostMappingServers returns the resolver specs of a server: mapping, or nil
+// for the address and alias forms.
+func (m interceptHostMapping) hostMappingServers() []string {
+	rest, ok := strings.CutPrefix(m.Target, interceptHostMappingServerPrefix)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, 2)
+	for _, part := range strings.Split(rest, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 // interceptRoutingRule is the normalized, reviewable subset of mihomo routing
@@ -920,10 +958,56 @@ func validateInterceptHostMappings(captureHosts []string, mappings []interceptHo
 
 func validInterceptHostTarget(value string) bool {
 	value = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(value, ".")))
+	if rest, ok := strings.CutPrefix(value, interceptHostMappingServerPrefix); ok {
+		return validInterceptHostMappingServers(rest)
+	}
 	if ip := net.ParseIP(value); ip != nil {
-		return ip.To4() != nil && ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()
+		return ip.To4() != nil && interceptHostTargetAddressAllowed(ip)
 	}
 	return isValidDomain(value) && value != "localhost" && !strings.HasSuffix(value, ".local")
+}
+
+// interceptHostTargetAddressAllowed is the scope check a static mapping makes
+// possible.
+//
+// A mapping is the one way an extension could aim origin traffic at the
+// gateway's own management plane: the private-range denies in the rendered rule
+// list are all no-resolve, so they stop an IP-form target and nothing else, and
+// the egress anchor resolves ahead of the rule list entirely. Refusing the
+// address here, at compile time, is both the earliest and the only reliable
+// place — and it is only possible because a static mapping's address is known
+// before any traffic flows, which is exactly why the same intent (PublicOnly)
+// cannot be enforced for a name.
+//
+// Carrier-grade NAT is refused alongside the private ranges. IsGlobalUnicast
+// reports true for 100.64/10, but it is neither globally routable nor the
+// operator's own network, and forbiddenEgressScope in the core already treats
+// it as out of scope; disagreeing here would let a mapping reach an address the
+// core would refuse to dial for any other reason.
+func interceptHostTargetAddressAllowed(ip net.IP) bool {
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return false
+	}
+	if four := ip.To4(); four != nil && four[0] == 100 && four[1]&0xc0 == 64 {
+		return false
+	}
+	return true
+}
+
+// validInterceptHostMappingServers checks the resolver form's specs. They are
+// the same strings the operator's own upstream groups accept, so a mapping
+// cannot name a transport the box does not already speak.
+func validInterceptHostMappingServers(rest string) bool {
+	parts := make([]string, 0, 2)
+	for _, part := range strings.Split(rest, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			parts = append(parts, part)
+		}
+	}
+	if len(parts) == 0 || len(parts) > maxInterceptHostMappingServers {
+		return false
+	}
+	return len(parseUpstreamEntryList(parts)) == len(parts)
 }
 
 type interceptNetworkOriginTarget struct {

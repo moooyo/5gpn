@@ -339,18 +339,13 @@ func main() {
 		moduleMihomoClient,
 	)
 	interceptManager.SetSidecarTester(realInterceptConfigTester{})
-	// Drive the sidecar through its control API when the socket is present.
-	// Its absence is not an error: a deployment that has not migrated, or one
-	// deliberately rolled back with --control-socket "", keeps the file path.
-	var sidecarClient *SidecarClient
-	if socket := cfg.InterceptControlSocket; socket != "" {
-		if _, err := os.Stat(socket); err == nil {
-			sidecarClient = NewSidecarClient(socket)
-			interceptManager.SetSidecarClient(sidecarClient)
-			log.Printf("intercept: driving the sidecar through %s", socket)
-		} else {
-			log.Printf("intercept: sidecar control socket %s is absent; using the configuration file", socket)
-		}
+	// Drive the sidecar through its control API whenever one is configured.
+	// A configured path with nothing listening is not an error: a deployment
+	// that has not migrated, or one deliberately rolled back with
+	// --control-socket "", keeps the file path.
+	sidecarClient := newSidecarControlClient(cfg)
+	if sidecarClient != nil {
+		interceptManager.SetSidecarClient(sidecarClient)
 	}
 	ctrl.SetInterceptModuleManager(interceptManager)
 	selectInterceptRoutingDriver(cfg, interceptManager, moduleMihomoStore, sidecarClient)

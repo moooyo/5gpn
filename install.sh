@@ -163,11 +163,11 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp-v1"
 # They share no Go types — only a versioned control-API wire format — so the
 # thing that keeps them working together is a schema number, not a build.
 SIDECAR_REPO="moooyo/mihomo-extension-sidecar"
-SIDECAR_VERSION="0.1.0-beta.4"
-SIDECAR_SHA256="fe72748facd7251ada65e456279c3c8585ac0b847307f322dce7abd13b0e91c1"
+SIDECAR_VERSION="0.1.0-beta.5"
+SIDECAR_SHA256="b495db4fdd20e84eb8deced5d5451a6619f618ffbd3dd32a05d9d1a18263b677"
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-overlay.2"
-MIHOMO_SHA256="aac1c9936e05a05de9cd7eb365df2930ff630b673b91b31cc06a9370d455dc4d"
+MIHOMO_VERSION="v1.19.28-overlay.3"
+MIHOMO_SHA256="a7bd9941666d2efd838834c6da69054970b95331bbfe25687e1be7af04c7f1f1"
 ZASH_REPO="moooyo/zashboard"
 ZASH_VERSION="v3.16.0-overlay.1"         # our fork's dist.zip, built from 5gpn-ext
 ZASH_SHA256="b5d003f55f9424eaaa78f901a5b37912dbd9ac07cb37e17c527b209c52947bf4"
@@ -2141,7 +2141,8 @@ unit_file_owned_by_5gpn() {
                 && grep -Fqx 'Unit=5gpn-intercept-cert.service' "$file" ;;
         5gpn-intercept-runtime.path)
             grep -Fqx 'PathChanged=/etc/5gpn/intercept/config.json' "$file" \
-                && grep -Fqx 'Unit=5gpn-intercept.service' "$file" ;;
+                && grep -Fqx 'Unit=5gpn-intercept.service' "$file" \
+                && grep -Fqx 'StartLimitIntervalSec=0' "$file" ;;
         5gpn-journal@.service)
             grep -Fqx 'ExecStart=/opt/5gpn/scripts/export-journal.sh %i' "$file" \
                 && journal_export_instances_clear ;;
@@ -4490,12 +4491,48 @@ install_zashboard() {
 install_mihomo() {
     [[ -n "$ARTIFACT_STAGE" && -x "$ARTIFACT_STAGE/mihomo" ]] \
         || { err "mihomo was not staged."; return 1; }
+    # Whether this is an upgrade has to be decided before the binary is
+    # replaced, because afterwards there is nothing left to ask.
+    local upgrading=0
+    if [[ -x "$MIHOMO_BIN" ]] && ! mihomo_reports_exact_version "$MIHOMO_BIN" "$MIHOMO_VERSION"; then
+        upgrading=1
+    fi
     publish_executable "$ARTIFACT_STAGE/mihomo" "$MIHOMO_BIN" \
         || { err "mihomo publication failed."; return 1; }
     [[ -x "$MIHOMO_BIN" ]] && cmp -s "$ARTIFACT_STAGE/mihomo" "$MIHOMO_BIN" \
         && mihomo_reports_exact_version "$MIHOMO_BIN" "$MIHOMO_VERSION" \
         || { err "Published mihomo failed identity/version verification."; return 1; }
     ok "Verified mihomo ${MIHOMO_VERSION} published to $MIHOMO_BIN."
+    (( upgrading )) && discard_overlay_generations
+    return 0
+}
+
+# Drops the persisted runtime-overlay generations across a mihomo upgrade.
+#
+# A generation is stored with an integrity digest over its own document shape.
+# When a release changes that shape the recovered generation fails its check,
+# and mihomo treats a store it cannot reconstruct as fatal — it refuses to
+# start, systemd restarts it, and the gateway is down with no DNS, no console
+# and no data plane. Refusing to run is the right instinct (an overlay that is
+# simply absent lets captured traffic fall through to the operator's own rules,
+# which is the bypass the anchors exist to prevent) but crash-looping the box is
+# not the way to express it.
+#
+# So an upgrade discards the generations rather than carrying them into a binary
+# that may not be able to read them. Nothing is lost: 5gpn-dns republishes the
+# live document as a fresh generation within seconds of starting, and it starts
+# after mihomo. The window between them is the same one any mihomo restart has
+# always had.
+discard_overlay_generations() {
+    local store="${MIHOMO_DIR}/runtime-overlay"
+    [[ -d "$store" ]] || return 0
+    info "mihomo was upgraded; discarding persisted overlay generations so a shape change cannot wedge the data plane."
+    rm -f -- "${store}/pointer.json" "${store}/generations/"*.json 2>/dev/null || true
+    # The coordinator's journal names a generation that no longer exists. Left
+    # behind, recovery reads back a core that has never heard of it. The path
+    # matches DNS_OVERLAY_JOURNAL's default in cmd/5gpn-dns/config.go.
+    rm -f -- "/var/lib/5gpn-dns/overlay-journal.json" 2>/dev/null || true
+    return 0
 }
 
 # ----------------------------------------------------------------------------

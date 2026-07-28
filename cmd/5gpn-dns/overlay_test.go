@@ -102,8 +102,13 @@ func TestOverlayCapabilityIsThePresentedCredential(t *testing.T) {
 	if cap.Listener != interceptEgressListenerName {
 		t.Fatalf("capability listener = %q, want %q", cap.Listener, interceptEgressListenerName)
 	}
-	if len(cap.Destinations) == 0 {
-		t.Fatal("the capability carries no destination allowlist; it would authorize any endpoint")
+	if len(cap.Bindings) == 0 {
+		t.Fatal("the capability carries no bindings; it would authorize nothing")
+	}
+	for _, bind := range cap.Bindings {
+		if len(bind.Destinations) == 0 {
+			t.Fatalf("binding for %q carries no destination allowlist; it would authorize any endpoint", bind.Group)
+		}
 	}
 }
 
@@ -113,10 +118,10 @@ func TestOverlayCapabilityIsThePresentedCredential(t *testing.T) {
 // whose extensions did not all agree on a single group.
 //
 // The credential does not select the group — the destination does, exactly as it
-// did under the legacy renderer's per-destination egress rules. So every
-// capability carries the one credential the processor can present, and the
-// destination sets are what tell them apart.
-func TestOverlayMintsOneCapabilityPerEgressGroup(t *testing.T) {
+// did under the legacy renderer's per-destination egress rules. So there is one
+// capability carrying the one credential the processor can present, and one
+// binding per group inside it.
+func TestOverlayMintsOneBindingPerEgressGroup(t *testing.T) {
 	src := overlayTestDocument()
 	src.Modules[1].EgressGroup = "SecondGroup"
 
@@ -128,25 +133,32 @@ func TestOverlayMintsOneCapabilityPerEgressGroup(t *testing.T) {
 		t.Fatalf("two egress groups were refused: %v", err)
 	}
 
-	byGroup := map[string]overlayEgressCapability{}
-	for _, c := range doc.Egress.Capabilities {
-		if _, dup := byGroup[c.Group]; dup {
-			t.Fatalf("group %q got two capabilities", c.Group)
+	// One credential means one capability, whatever the group count. Emitting
+	// several that share an id is what the core refuses outright.
+	if len(doc.Egress.Capabilities) != 1 {
+		t.Fatalf("got %d capabilities for one credential, want exactly 1", len(doc.Egress.Capabilities))
+	}
+	capability := doc.Egress.Capabilities[0]
+	if capability.ID != src.UpstreamProxy.Username {
+		t.Errorf("capability has id %q, which the processor cannot present", capability.ID)
+	}
+	if capability.Listener != interceptEgressListenerName {
+		t.Errorf("capability is valid on %q, not the egress listener", capability.Listener)
+	}
+
+	byGroup := map[string]overlayEgressBinding{}
+	for _, bind := range capability.Bindings {
+		if _, dup := byGroup[bind.Group]; dup {
+			t.Fatalf("group %q got two bindings", bind.Group)
 		}
-		byGroup[c.Group] = c
-		if c.ID != src.UpstreamProxy.Username {
-			t.Errorf("capability for %q has id %q, which the processor cannot present", c.Group, c.ID)
-		}
-		if c.Listener != interceptEgressListenerName {
-			t.Errorf("capability for %q is valid on %q, not the egress listener", c.Group, c.Listener)
-		}
-		if len(c.Destinations) == 0 {
-			t.Errorf("capability for %q carries no destination allowlist", c.Group)
+		byGroup[bind.Group] = bind
+		if len(bind.Destinations) == 0 {
+			t.Errorf("binding for %q carries no destination allowlist", bind.Group)
 		}
 	}
 	for _, group := range []string{"Proxies", "SecondGroup"} {
 		if _, ok := byGroup[group]; !ok {
-			t.Fatalf("no capability was minted for group %q; its extension has no egress at all", group)
+			t.Fatalf("no binding was minted for group %q; its extension has no egress at all", group)
 		}
 	}
 
@@ -155,13 +167,13 @@ func TestOverlayMintsOneCapabilityPerEgressGroup(t *testing.T) {
 	// connection leaves through cannot depend on the order the core evaluates
 	// capabilities in.
 	owner := map[string]string{}
-	for _, c := range doc.Egress.Capabilities {
-		for _, d := range c.Destinations {
+	for _, bind := range capability.Bindings {
+		for _, d := range bind.Destinations {
 			key := string(d.Kind) + "|" + d.Value + "|" + strconv.Itoa(int(d.Ports[0].From))
 			if previous, dup := owner[key]; dup {
-				t.Errorf("destination %s is claimed by both %q and %q", key, previous, c.Group)
+				t.Errorf("destination %s is claimed by both %q and %q", key, previous, bind.Group)
 			}
-			owner[key] = c.Group
+			owner[key] = bind.Group
 		}
 	}
 }
@@ -181,17 +193,17 @@ func TestOverlayDirectBindingAllowsDirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	for _, c := range doc.Egress.Capabilities {
-		switch c.Group {
+	for _, bind := range overlayBindingsOf(doc) {
+		switch bind.Group {
 		case "DIRECT":
-			if !c.AllowDirect {
-				t.Error("the capability for an explicit DIRECT binding forbids DIRECT")
+			if !bind.AllowDirect {
+				t.Error("the binding for an explicit DIRECT binding forbids DIRECT")
 			}
 		case "Proxies":
 			// The terminal MATCH target; the operator's own global default may
 			// legitimately resolve to DIRECT.
-			if !c.AllowDirect {
-				t.Error("the capability for the terminal MATCH target forbids DIRECT")
+			if !bind.AllowDirect {
+				t.Error("the binding for the terminal MATCH target forbids DIRECT")
 			}
 		}
 	}
@@ -206,11 +218,22 @@ func TestOverlayDirectBindingAllowsDirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	for _, c := range doc.Egress.Capabilities {
-		if c.Group == "Japan" && c.AllowDirect {
-			t.Error("a capability for an explicitly bound selector group allows DIRECT")
+	for _, bind := range overlayBindingsOf(doc) {
+		if bind.Group == "Japan" && bind.AllowDirect {
+			t.Error("a binding for an explicitly bound selector group allows DIRECT")
 		}
 	}
+}
+
+// overlayBindingsOf flattens every binding across every capability. There is
+// only ever one capability, but reading them all keeps the helper honest if
+// that ever stops being true.
+func overlayBindingsOf(doc overlayDocument) []overlayEgressBinding {
+	var out []overlayEgressBinding
+	for _, c := range doc.Egress.Capabilities {
+		out = append(out, c.Bindings...)
+	}
+	return out
 }
 
 // The allowlist must cover exactly what the legacy renderer emitted egress
@@ -231,8 +254,8 @@ func TestOverlayDestinationAllowlistMirrorsTheLegacyEgressRules(t *testing.T) {
 		}
 	}
 	got := map[string]struct{}{}
-	for _, c := range doc.Egress.Capabilities {
-		for _, d := range c.Destinations {
+	for _, bind := range overlayBindingsOf(doc) {
+		for _, d := range bind.Destinations {
 			got[string(d.Kind)+"|"+d.Value+"|"+strconv.Itoa(int(d.Ports[0].From))] = struct{}{}
 		}
 	}
