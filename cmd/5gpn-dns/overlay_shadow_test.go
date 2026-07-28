@@ -197,13 +197,32 @@ func TestShadowPolicyRuleCoverage(t *testing.T) {
 	}
 }
 
-// Every enabled module must end up with an egress capability whose group is the
-// one the legacy renderer would have targeted. The enforcement point differs —
-// legacy matches per selector, the overlay resolves a capability — but the
-// group each module's traffic leaves through must not.
+// The group each endpoint leaves through must be identical under both
+// compilers. The enforcement point differs — legacy matches an ordered
+// per-destination rule, the overlay resolves a capability whose allowlist
+// contains the destination — but a destination that changes group is an
+// extension's traffic silently taking an egress its operator did not choose.
+//
+// Comparing per destination rather than per module is what makes this real: two
+// extensions may declare the same host, and then only one of them owns it. The
+// legacy renderer decides that with bound-before-unbound and execution order,
+// and the overlay has to decide it the same way.
 func TestShadowEgressGroupsAgree(t *testing.T) {
 	doc := loadShadowDocument(t)
 	const matchTarget = "Proxies"
+
+	legacy := map[selectorKey]string{}
+	for _, rule := range materializeInterceptRoutingRules(interceptMihomoRouting(doc), matchTarget).Egress {
+		selector, target, ok := parseCanonicalInterceptEgressRule(rule)
+		if !ok {
+			t.Fatalf("could not parse a legacy egress rule: %q", rule)
+		}
+		key := selectorKey{Kind: selector.Kind, Value: selector.Value, Port: selector.Port}
+		if previous, dup := legacy[key]; dup {
+			t.Fatalf("the legacy renderer emitted %s twice (%q then %q)", key, previous, target)
+		}
+		legacy[key] = target
+	}
 
 	compiled, err := compileOverlayGeneration(overlayCompileInput{
 		Document: doc, MatchTarget: matchTarget, DocumentRevision: "shadow",
@@ -213,38 +232,65 @@ func TestShadowEgressGroupsAgree(t *testing.T) {
 		t.Fatalf("overlay compile: %v", err)
 	}
 
-	byGroup := map[string]overlayEgressCapability{}
-	for _, c := range compiled.Egress.Capabilities {
-		byGroup[c.Group] = c
+	overlaid := map[selectorKey]string{}
+	for _, capability := range compiled.Egress.Capabilities {
+		if capability.ID != doc.UpstreamProxy.Username {
+			t.Errorf("capability for group %q has id %q, which the processor cannot present",
+				capability.Group, capability.ID)
+		}
+		if capability.Group != matchTarget && capability.Group != "DIRECT" && capability.AllowDirect {
+			t.Errorf("capability for explicitly bound group %q allows DIRECT", capability.Group)
+		}
+		for _, destination := range capability.Destinations {
+			if len(destination.Ports) != 1 || destination.Ports[0].From != destination.Ports[0].To {
+				t.Fatalf("destination has a non-singular port range: %+v", destination)
+			}
+			key := selectorKey{
+				Kind:  overlayKindToLegacy(destination.Kind),
+				Value: destination.Value,
+				Port:  int(destination.Ports[0].From),
+			}
+			if previous, dup := overlaid[key]; dup {
+				t.Errorf("destination %s appears in both the %q and %q capabilities; "+
+					"which group it leaves through then depends on the core's evaluation order",
+					key, previous, capability.Group)
+			}
+			overlaid[key] = capability.Group
+		}
 	}
 
-	wanted := map[string][]string{}
-	for _, module := range orderedEnabledInterceptModules(doc) {
-		group := module.EgressGroup
-		if group == "" {
-			group = matchTarget
-		}
-		wanted[group] = append(wanted[group], module.ID)
-	}
+	t.Logf("legacy egress destinations: %d, overlay egress destinations: %d across %d capabilities",
+		len(legacy), len(overlaid), len(compiled.Egress.Capabilities))
 
-	t.Logf("egress groups in use: %d, capabilities minted: %d", len(wanted), len(byGroup))
-	for group, modules := range wanted {
-		cap, ok := byGroup[group]
-		if !ok {
-			t.Errorf("no capability was minted for group %q (needed by %v)", group, modules)
-			continue
-		}
-		t.Logf("  %-24s -> %s (allowDirect=%v) for %v", group, cap.ID, cap.AllowDirect, modules)
-		// A group the operator explicitly bound must not be allowed to resolve
-		// to DIRECT behind their back.
-		if group != matchTarget && cap.AllowDirect {
-			t.Errorf("capability for explicitly bound group %q allows DIRECT", group)
+	var missing, extra, disagreed []string
+	for key, group := range legacy {
+		switch got, ok := overlaid[key]; {
+		case !ok:
+			missing = append(missing, key.String())
+		case got != group:
+			disagreed = append(disagreed, fmt.Sprintf("%s: legacy %q, overlay %q", key, group, got))
 		}
 	}
-	for group := range byGroup {
-		if _, ok := wanted[group]; !ok {
-			t.Errorf("a capability was minted for group %q, which no enabled module uses", group)
+	for key := range overlaid {
+		if _, ok := legacy[key]; !ok {
+			extra = append(extra, key.String())
 		}
+	}
+	sort.Strings(missing)
+	sort.Strings(extra)
+	sort.Strings(disagreed)
+
+	if len(missing) > 0 {
+		t.Errorf("%d destination(s) the legacy path permitted have no capability; first 10: %v",
+			len(missing), firstN(missing, 10))
+	}
+	if len(extra) > 0 {
+		t.Errorf("%d destination(s) the legacy path denied are now authorized; first 10: %v",
+			len(extra), firstN(extra, 10))
+	}
+	if len(disagreed) > 0 {
+		t.Errorf("%d destination(s) leave through a different group; first 10: %v",
+			len(disagreed), firstN(disagreed, 10))
 	}
 }
 
