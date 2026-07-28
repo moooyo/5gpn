@@ -9,7 +9,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// Loon's [Host], enforced.
+// The upstream plugin format's [Host] section, enforced.
 //
 // A mapping says what a name's address should be resolved from. 5gpn has
 // exactly two places where a name becomes an address, and this file is what
@@ -35,7 +35,8 @@ import (
 //
 // The one place a mapping cannot reach is an outbound that resolves remotely: a
 // proxy node is handed the name, not the address, so the remote's resolver
-// decides. That is Loon's behaviour too, and 5gpn's for every other name.
+// decides. That is the upstream format's behaviour too, and 5gpn's for every
+// other name.
 
 // hostMappingTTL bounds how long a client may cache a mapped answer.
 //

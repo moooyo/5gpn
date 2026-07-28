@@ -8,7 +8,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// Loon's [Host], now that it does something.
+// The upstream plugin format's [Host], now that it does something.
 //
 // The mapping existed as a manifest field, was conflict-checked across enabled
 // extensions, was authorized as an egress destination and was rendered in the
@@ -231,7 +231,7 @@ func TestHostMappingTargetRefusesNonGlobalAddresses(t *testing.T) {
 	}
 }
 
-// The resolver form is Loon's own spelling and must parse as such.
+// The resolver form is the upstream format's own spelling and must parse as such.
 func TestHostMappingServerFormParses(t *testing.T) {
 	mapping := interceptHostMapping{Pattern: "origin.test", Target: "server:9.9.9.9, 1.1.1.1"}
 	got := mapping.hostMappingServers()

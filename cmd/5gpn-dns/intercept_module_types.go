@@ -165,10 +165,12 @@ type interceptModuleActionView struct {
 	MaxBodyBytes int64                  `json:"max_body_bytes"`
 }
 
-// interceptHostMapping is one entry of Loon's [Host]: a name, and what its
+// interceptHostMapping is one entry of the upstream plugin format's [Host]: a
+// name, and what its
 // address should be resolved from.
 //
-// Target carries the form in Loon's own encoding rather than in three typed
+// Target carries the form in the upstream format's own encoding rather than in
+// three typed
 // fields, so a mapping lifted from an upstream plugin transcribes unchanged:
 //
 //	1.2.3.4            an address; the name resolves to it, full stop
@@ -184,8 +186,8 @@ type interceptHostMapping struct {
 	Target  string `json:"target"`
 }
 
-// interceptHostMappingServerPrefix marks the resolver form. It is Loon's
-// spelling, not ours.
+// interceptHostMappingServerPrefix marks the resolver form. It is the upstream
+// format's spelling, not ours.
 const interceptHostMappingServerPrefix = "server:"
 
 // hostMappingServers returns the resolver specs of a server: mapping, or nil
