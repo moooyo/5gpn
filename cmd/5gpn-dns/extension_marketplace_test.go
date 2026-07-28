@@ -666,9 +666,23 @@ func TestExternalMaintainedMarketplaceMatchesCoreContract(t *testing.T) {
 	if err := normalizeAndValidateMarketplaceIndex(&index, recommendedMarketplaceURL); err != nil {
 		t.Fatalf("validate maintained marketplace index: %v", err)
 	}
-	if index.Metadata.ID != "io.5gpn.official" || len(index.Entries) == 0 {
-		t.Fatalf("unexpected maintained marketplace identity or entries: id=%q entries=%d", index.Metadata.ID, len(index.Entries))
+	if index.Metadata.ID != "io.5gpn.official" {
+		t.Fatalf("unexpected maintained marketplace identity: id=%q", index.Metadata.ID)
 	}
+	// The entry count is deliberately not asserted.
+	//
+	// This used to require a non-empty catalogue, to catch a change that would
+	// cost every deployed gateway its extensions. That guard stopped being able
+	// to tell the difference between the accident it was written for and an
+	// intended state: a profile publishes only the extensions whose contract the
+	// reading core supports, so once every extension needs a newer contract than
+	// a frozen profile offers, that profile is correctly empty and the generator
+	// says so explicitly rather than silently.
+	//
+	// What still holds is everything above -- the index decodes under
+	// DisallowUnknownFields, normalizes, and identifies itself -- which is the
+	// wire contract this test exists to pin. An empty catalogue is a product
+	// decision announced by the generator; a malformed one is the regression.
 }
 
 // The marketplace index is a wire contract with every deployed gateway, and
