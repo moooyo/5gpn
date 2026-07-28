@@ -1129,8 +1129,27 @@ func (m *InterceptModuleManager) mutate(
 	if err := m.validateSidecarCandidate(ctx, newBody); err != nil {
 		return interceptModulesView{}, err
 	}
-	if !effects.routingChanged {
-		if err := m.store.writeAtomicContext(ctx, newBody); err != nil {
+	// A change that leaves routing alone -- a settings edit, say -- still has to
+	// reach the processor, and under the overlay it also has to reach the
+	// generation.
+	//
+	// Writing the document and returning was right when the file was the whole
+	// contract: the runtime path unit restarts the sidecar on the write, and
+	// there was no second copy of anything to keep in step. The overlay adds
+	// one. Each generation names the bundle it was compiled against, and mihomo
+	// refuses to treat the processor as ready while it serves a different one --
+	// correctly, because the traffic it is about to steer would then meet a
+	// policy other than the one in the generation. So a settings-only change
+	// that stopped here left the sidecar on a new bundle, the live generation
+	// naming the old one, and every captured connection rejecting until some
+	// unrelated routing change happened to resynchronise them.
+	//
+	// Under the overlay the change therefore takes the full path below, which
+	// publishes the bundle and commits a generation naming it. The mihomo file
+	// is still not rewritten for it: that is gated on routingChanged separately,
+	// further down, and stays gated.
+	if !effects.routingChanged && !m.overlayDriverActive() {
+		if err := m.publishSidecarDocument(ctx, newBody); err != nil {
 			return interceptModulesView{}, err
 		}
 		m.store.mu.Unlock()
