@@ -901,7 +901,7 @@ func TestNativeExtensionParserRejectsAJQProgramWithAScript(t *testing.T) {
 		context.Background(),
 		interceptModuleImportRequest{Content: jqActionManifest("del(.a)", "text", extra)},
 	)
-	if err == nil || !strings.Contains(err.Error(), "jq") {
+	if err == nil || !strings.Contains(err.Error(), "more than one action kind") {
 		t.Fatalf("err = %v, want the pairing refused", err)
 	}
 }
@@ -997,5 +997,63 @@ func TestNativeExtensionParserRefusesAMockThatCouldInjectHeaders(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "newline") {
 		t.Fatalf("err = %v, want the header refused", err)
+	}
+}
+
+func TestNativeExtensionParserCarriesTheDeclarativeRewriteKinds(t *testing.T) {
+	t.Parallel()
+	// Header edits, rewrites, and regex body replacement all reach the sidecar
+	// without a script snapshot. The camelCase manifest key has to survive into
+	// the snake_case wire field, which is the join a typo would break silently.
+	cases := []struct {
+		name  string
+		block string
+		check func(*testing.T, interceptScriptRule)
+	}{
+		{"headers", "      headers:\n        set:\n          Grpc-Status: '0'\n        remove: [Content-Encoding]\n      bodyMode: none\n",
+			func(t *testing.T, rule interceptScriptRule) {
+				if rule.Headers.Set["Grpc-Status"] != "0" || len(rule.Headers.Remove) != 1 {
+					t.Fatalf("headers = %+v", rule.Headers)
+				}
+			}},
+		{"rewrite", "      rewrite:\n        pattern: '^https://a[.]example[.]com/(.*)$'\n        to: 'https://b.example.net/$1'\n        status: 307\n      bodyMode: none\n",
+			func(t *testing.T, rule interceptScriptRule) {
+				if rule.Rewrite.Status != 307 || rule.Rewrite.To != "https://b.example.net/$1" {
+					t.Fatalf("rewrite = %+v", rule.Rewrite)
+				}
+			}},
+		{"replaceBody", "      replaceBody:\n        pattern: 'x'\n        to: 'y{{settings.k}}'\n        valueMap:\n          k:\n            a: 'b'\n      bodyMode: text\n",
+			func(t *testing.T, rule interceptScriptRule) {
+				if rule.ReplaceBody.ValueMap["k"]["a"] != "b" {
+					t.Fatalf("valueMap = %+v", rule.ReplaceBody.ValueMap)
+				}
+			}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			snapshot, err := (interceptModuleParser{now: time.Now}).Import(
+				context.Background(),
+				interceptModuleImportRequest{Content: declarativeActionManifest(testCase.block)},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Scripts[0].ScriptBody != "" {
+				t.Fatal("a declarative action must carry no script snapshot")
+			}
+			testCase.check(t, snapshot.Scripts[0])
+		})
+	}
+}
+
+func TestNativeExtensionParserRefusesAnInvalidRewriteStatus(t *testing.T) {
+	t.Parallel()
+	_, err := (interceptModuleParser{now: time.Now}).Import(
+		context.Background(),
+		interceptModuleImportRequest{Content: declarativeActionManifest(
+			"      rewrite:\n        to: 'https://b.example.net/'\n        status: 301\n      bodyMode: none\n")},
+	)
+	if err == nil || !strings.Contains(err.Error(), "302") {
+		t.Fatalf("err = %v, want 301 refused", err)
 	}
 }

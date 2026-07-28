@@ -36,6 +36,8 @@ const (
 	maxInterceptJQProgram      = 32768
 	maxInterceptMockBody       = 1 << 20
 	maxInterceptMockHeaders    = 32
+	maxInterceptRewriteTarget  = 4096
+	maxInterceptReplacePattern = 1024
 	maxInterceptScriptTotal    = 8 << 20
 	maxInterceptModulePattern  = 4096
 	maxInterceptResourceURL    = 4096
@@ -58,6 +60,25 @@ const interceptScriptEntryProxyCompat = "proxy-compat"
 //
 // Base64Body exists because the published modules mock binary gRPC frames,
 // which cannot survive a UTF-8 round trip through a manifest.
+type interceptHeaderEdits struct {
+	Set    map[string]string `json:"set,omitempty" yaml:"set"`
+	Remove []string          `json:"remove,omitempty" yaml:"remove"`
+}
+
+type interceptURLRewrite struct {
+	Pattern string `json:"pattern,omitempty" yaml:"pattern"`
+	To      string `json:"to" yaml:"to"`
+	Status  int    `json:"status,omitempty" yaml:"status"`
+}
+
+// ValueMap resolves a setting's value to the substitution. A published module
+// hard-codes its replacement; an operator here chooses among several.
+type interceptBodyReplace struct {
+	Pattern  string                       `json:"pattern" yaml:"pattern"`
+	To       string                       `json:"to" yaml:"to"`
+	ValueMap map[string]map[string]string `json:"value_map,omitempty" yaml:"valueMap"`
+}
+
 type interceptMockResponse struct {
 	Status     int               `json:"status,omitempty" yaml:"status"`
 	Headers    map[string]string `json:"headers,omitempty" yaml:"headers"`
@@ -94,6 +115,9 @@ type interceptScriptRule struct {
 	JQProgram    string                 `json:"jq_program,omitempty"`
 	Reject       bool                   `json:"reject,omitempty"`
 	Mock         *interceptMockResponse `json:"mock,omitempty"`
+	Headers      *interceptHeaderEdits  `json:"headers,omitempty"`
+	Rewrite      *interceptURLRewrite   `json:"rewrite,omitempty"`
+	ReplaceBody  *interceptBodyReplace  `json:"replace_body,omitempty"`
 	TimeoutMS    int                    `json:"timeout_ms"`
 	MaxBodyBytes int64                  `json:"max_body_bytes"`
 }
@@ -130,6 +154,9 @@ type interceptModuleActionView struct {
 	JQProgram    string                 `json:"jq_program,omitempty"`
 	Reject       bool                   `json:"reject,omitempty"`
 	Mock         *interceptMockResponse `json:"mock,omitempty"`
+	Headers      *interceptHeaderEdits  `json:"headers,omitempty"`
+	Rewrite      *interceptURLRewrite   `json:"rewrite,omitempty"`
+	ReplaceBody  *interceptBodyReplace  `json:"replace_body,omitempty"`
 	TimeoutMS    int                    `json:"timeout_ms"`
 	MaxBodyBytes int64                  `json:"max_body_bytes"`
 }
@@ -494,9 +521,14 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 		if rule.Reject {
 			continue
 		}
-		if rule.Mock != nil {
-			if err := rule.Mock.validate(); err != nil {
-				return fmt.Errorf("action %q %w", rule.ID, err)
+		if rule.Mock != nil || rule.Headers != nil || rule.Rewrite != nil || rule.ReplaceBody != nil {
+			for _, validate := range []func() error{
+				rule.Mock.validate, rule.Headers.validate,
+				rule.Rewrite.validate, rule.ReplaceBody.validate,
+			} {
+				if err := validate(); err != nil {
+					return fmt.Errorf("action %q %w", rule.ID, err)
+				}
 			}
 			continue
 		}
@@ -524,15 +556,20 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 		// Exactly one kind applies to an action. Carrying two would leave which
 		// one runs undefined.
 		kinds := 0
-		for _, declared := range []bool{rule.JQProgram != "", rule.Reject, rule.Mock != nil, rule.ScriptBody != "" || rule.ScriptURL != ""} {
+		for _, declared := range []bool{
+			rule.JQProgram != "", rule.Reject, rule.Mock != nil, rule.Headers != nil,
+			rule.Rewrite != nil, rule.ReplaceBody != nil,
+			rule.ScriptBody != "" || rule.ScriptURL != "",
+		} {
 			if declared {
 				kinds++
 			}
 		}
 		if kinds > 1 {
-			return fmt.Errorf("action %q declares more than one of jq, reject, mock, and a script", rule.ID)
+			return fmt.Errorf("action %q declares more than one action kind", rule.ID)
 		}
-		if rule.Entry != "" && (rule.JQProgram != "" || rule.Reject || rule.Mock != nil) {
+		if rule.Entry != "" && (rule.JQProgram != "" || rule.Reject || rule.Mock != nil ||
+			rule.Headers != nil || rule.Rewrite != nil || rule.ReplaceBody != nil) {
 			return fmt.Errorf("action %q declares an entry without a script", rule.ID)
 		}
 		if rule.TimeoutMS < 50 || rule.TimeoutMS > 30000 {
@@ -1209,6 +1246,66 @@ func (m *interceptMockResponse) validate() error {
 	}
 	if len(m.Body) > maxInterceptMockBody {
 		return fmt.Errorf("mock body exceeds %d bytes", maxInterceptMockBody)
+	}
+	return nil
+}
+
+// The three validators below mirror the sidecar's bounds so a manifest is
+// refused at import rather than at the first request that matches.
+func (h *interceptHeaderEdits) validate() error {
+	if h == nil {
+		return nil
+	}
+	if len(h.Set)+len(h.Remove) == 0 {
+		return errors.New("header edits declare neither set nor remove")
+	}
+	if len(h.Set)+len(h.Remove) > maxInterceptMockHeaders {
+		return fmt.Errorf("header edits exceed %d fields", maxInterceptMockHeaders)
+	}
+	for name, value := range h.Set {
+		if strings.TrimSpace(name) == "" || strings.ContainsAny(name, " :\r\n\t") {
+			return fmt.Errorf("header name %q is invalid", name)
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("header %q value contains a newline", name)
+		}
+	}
+	for _, name := range h.Remove {
+		if strings.TrimSpace(name) == "" || strings.ContainsAny(name, " :\r\n\t") {
+			return fmt.Errorf("header name %q is invalid", name)
+		}
+	}
+	return nil
+}
+
+func (r *interceptURLRewrite) validate() error {
+	if r == nil {
+		return nil
+	}
+	if r.Status != 0 && r.Status != 302 && r.Status != 307 {
+		return fmt.Errorf("rewrite status %d must be omitted, 302, or 307", r.Status)
+	}
+	if strings.TrimSpace(r.To) == "" || len(r.To) > maxInterceptRewriteTarget {
+		return fmt.Errorf("rewrite target must contain 1 to %d bytes", maxInterceptRewriteTarget)
+	}
+	if len(r.Pattern) > maxInterceptReplacePattern {
+		return fmt.Errorf("rewrite pattern exceeds %d bytes", maxInterceptReplacePattern)
+	}
+	if _, err := regexp.Compile(r.Pattern); err != nil {
+		return fmt.Errorf("rewrite pattern is invalid: %w", err)
+	}
+	return nil
+}
+
+func (b *interceptBodyReplace) validate() error {
+	if b == nil {
+		return nil
+	}
+	if b.Pattern == "" || len(b.Pattern) > maxInterceptReplacePattern {
+		return fmt.Errorf("body replace pattern must contain 1 to %d bytes", maxInterceptReplacePattern)
+	}
+	if _, err := regexp.Compile(b.Pattern); err != nil {
+		return fmt.Errorf("body replace pattern is invalid: %w", err)
 	}
 	return nil
 }

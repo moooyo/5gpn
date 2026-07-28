@@ -137,6 +137,9 @@ type nativeExtensionScript struct {
 	JQ           string                 `yaml:"jq"`
 	Reject       bool                   `yaml:"reject"`
 	Mock         *interceptMockResponse `yaml:"mock"`
+	Headers      *interceptHeaderEdits  `yaml:"headers"`
+	Rewrite      *interceptURLRewrite   `yaml:"rewrite"`
+	ReplaceBody  *interceptBodyReplace  `yaml:"replaceBody"`
 	TimeoutMS    int                    `yaml:"timeoutMs"`
 	MaxBodyBytes int64                  `yaml:"maxBodyBytes"`
 }
@@ -291,15 +294,21 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 		// published modules declare -- reject-dict and mock-response-body --
 		// and neither runs any code.
 		declared := 0
-		for _, present := range []bool{jqProgram != "", raw.Script.Reject, raw.Script.Mock != nil, raw.Script.Source != "" || raw.Script.Inline != ""} {
+		for _, present := range []bool{
+			jqProgram != "", raw.Script.Reject, raw.Script.Mock != nil,
+			raw.Script.Headers != nil, raw.Script.Rewrite != nil, raw.Script.ReplaceBody != nil,
+			raw.Script.Source != "" || raw.Script.Inline != "",
+		} {
 			if present {
 				declared++
 			}
 		}
 		if declared > 1 {
-			return interceptModuleSnapshot{}, fmt.Errorf("action %q declares more than one of script.jq, script.reject, script.mock, and a script body", raw.ID)
+			return interceptModuleSnapshot{}, fmt.Errorf("action %q declares more than one action kind", raw.ID)
 		}
-		if entry != "" && (jqProgram != "" || raw.Script.Reject || raw.Script.Mock != nil) {
+		declarativeKind := jqProgram != "" || raw.Script.Reject || raw.Script.Mock != nil ||
+			raw.Script.Headers != nil || raw.Script.Rewrite != nil || raw.Script.ReplaceBody != nil
+		if entry != "" && declarativeKind {
 			return interceptModuleSnapshot{}, fmt.Errorf("action %q declares script.entry without a script", raw.ID)
 		}
 		timeoutMS := raw.Script.TimeoutMS
@@ -312,9 +321,15 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 		}
 		inline := raw.Script.Inline
 		source := strings.TrimSpace(raw.Script.Source)
-		if raw.Script.Reject || raw.Script.Mock != nil {
-			if err := raw.Script.Mock.validate(); err != nil {
-				return interceptModuleSnapshot{}, fmt.Errorf("action %q %w", raw.ID, err)
+		if raw.Script.Reject || raw.Script.Mock != nil || raw.Script.Headers != nil ||
+			raw.Script.Rewrite != nil || raw.Script.ReplaceBody != nil {
+			for _, validate := range []func() error{
+				raw.Script.Mock.validate, raw.Script.Headers.validate,
+				raw.Script.Rewrite.validate, raw.Script.ReplaceBody.validate,
+			} {
+				if err := validate(); err != nil {
+					return interceptModuleSnapshot{}, fmt.Errorf("action %q %w", raw.ID, err)
+				}
 			}
 			scripts = append(scripts, interceptScriptRule{
 				ID: strings.TrimSpace(raw.ID), Phase: strings.ToLower(strings.TrimSpace(raw.Phase)),
@@ -323,6 +338,7 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 					StatusCodes: uniqueSortedInts(raw.Match.StatusCodes),
 				},
 				BodyMode: bodyMode, Reject: raw.Script.Reject, Mock: raw.Script.Mock,
+				Headers: raw.Script.Headers, Rewrite: raw.Script.Rewrite, ReplaceBody: raw.Script.ReplaceBody,
 				TimeoutMS: timeoutMS, MaxBodyBytes: maxBodyBytes,
 			})
 			continue
