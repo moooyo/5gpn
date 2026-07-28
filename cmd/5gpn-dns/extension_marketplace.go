@@ -22,7 +22,7 @@ const (
 	marketplaceAPIVersion      = "5gpn.io/marketplace/v1"
 	marketplaceKind            = "ExtensionMarketplace"
 
-	recommendedMarketplaceURL = "https://moooyo.github.io/5gpn-extensions/marketplace/v1beta/index.json"
+	recommendedMarketplaceURL = "https://moooyo.github.io/5gpn-extensions/marketplace/v2/index.json"
 
 	maxMarketplaceSources     = 16
 	maxMarketplaceEntries     = 512
@@ -118,8 +118,9 @@ type marketplaceCapabilities struct {
 	ActionCount      int      `json:"actionCount"`
 	SettingCount     int      `json:"settingCount"`
 	NetworkOrigins   []string `json:"networkOrigins"`
-	// NetworkAny is the unrestricted network grant. It rides the v1beta profile
-	// only, so it is absent from a v1 document and decodes as false there.
+	// NetworkAny is the unrestricted network grant. An index that omits it
+	// decodes as false, which is the safe direction: the check below then
+	// refuses to install a manifest that takes the grant.
 	NetworkAny           bool `json:"networkAny"`
 	PersistentStorage    bool `json:"persistentStorage"`
 	UpstreamMappingCount int  `json:"upstreamMappingCount"`
@@ -1192,10 +1193,9 @@ func validateMarketplaceInstall(_ marketplaceSourceSnapshot, entry marketplaceEn
 		capabilities.RoutingRuleCount == nil || *capabilities.RoutingRuleCount != len(module.RoutingRules) ||
 		capabilities.EgressGroupRequired != module.EgressGroupRequired ||
 		// An index that does not describe the unrestricted network grant must
-		// not be able to install a manifest that takes it. The v1 profile cannot
-		// carry this field, so an extension that needs it is served from v1beta
-		// or not at all — which is the honest outcome, because the operator
-		// reviewed the catalogue entry before asking for the install.
+		// not be able to install a manifest that takes it. The operator reviewed
+		// the catalogue entry before asking for the install, so the entry has to
+		// be what the manifest turns out to be.
 		capabilities.NetworkAny != module.NetworkAny ||
 		!stringSlicesEqual(capabilities.NetworkOrigins, module.NetworkOrigins) {
 		return errors.New("manifest capabilities mismatch")
