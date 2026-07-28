@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -66,6 +67,38 @@ func NewSidecarClient(socketPath string) *SidecarClient {
 
 // SocketPath reports the configured socket.
 func (c *SidecarClient) SocketPath() string { return c.socketPath }
+
+// newSidecarControlClient builds the process-wide sidecar client, or nil when
+// no control socket is configured at all.
+//
+// Presence is deliberately NOT checked here. The sidecar's unit carries an
+// ExecCondition that refuses to run while the MITM master is off, so on any
+// gateway where MITM has not been enabled yet — which includes every fresh
+// install — the socket does not exist at the moment this core starts. Deciding
+// here that the sidecar is therefore absent produced a nil client that nothing
+// ever replaced, and two failures followed from that one nil:
+//
+//   - the readiness reporter had no way to read what the processor had live, so
+//     it never asserted a lease. mihomo holds the generation in quarantine until
+//     a lease arrives and fails capture closed while it is there, so every
+//     captured connection was REJECTed. The data plane was dead from boot and
+//     said so only in one line of the core's log.
+//   - bundle publication fell back to writing the configuration file, so a
+//     sidecar already running kept serving whatever it had cold started from
+//     while the overlay generation named the newer bundle.
+//
+// Callers already treat presence as a per-call question (see
+// sidecarSocketPresent), which is the only way to get this right: the socket
+// comes and goes with the master switch over the lifetime of one core process.
+func newSidecarControlClient(cfg Config) *SidecarClient {
+	socket := cfg.InterceptControlSocket
+	if socket == "" {
+		log.Printf("intercept: no sidecar control socket configured; using the configuration file")
+		return nil
+	}
+	log.Printf("intercept: driving the sidecar through %s when it is listening", socket)
+	return NewSidecarClient(socket)
+}
 
 type sidecarCapabilities struct {
 	Schema   int            `json:"schema"`
