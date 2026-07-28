@@ -817,7 +817,7 @@ ensure_dns_cert_root() {
     if root_ownership_marker_is_safe "$DNS_CERT_DIR" "$CERT_ROOT_MARKER" "$CERT_ROOT_MARKER_VALUE"; then
         if [[ "$(file_mode "$DNS_CERT_DIR")" == 750 ]] \
            && cert_root_contents_are_safe; then
-            chmod 0751 "$DNS_CERT_DIR" || return 1
+            chmod 00751 "$DNS_CERT_DIR" || return 1
         fi
         cert_root_is_safe \
             || { err "Existing certificate root failed structural validation: $DNS_CERT_DIR"; return 1; }
@@ -825,7 +825,14 @@ ensure_dns_cert_root() {
     fi
     [[ ! -e "$DNS_CERT_DIR/$CERT_ROOT_MARKER" && ! -L "$DNS_CERT_DIR/$CERT_ROOT_MARKER" ]] \
         || { err "Certificate root marker is unsafe: $DNS_CERT_DIR/$CERT_ROOT_MARKER"; return 1; }
+    # CONF_DIR is deliberately setgid (2771/3771) so the service group keeps
+    # access, and a directory created inside it inherits that bit. A first
+    # install therefore presents 2751 here rather than 751, and comparing the
+    # full mode made this installer refuse a root it had just created itself.
+    # Only the permission digits decide claimability; the chmod below
+    # normalises the inherited bits immediately afterwards.
     mode="$(file_mode "$DNS_CERT_DIR")"
+    mode="${mode: -3}"
     [[ "$mode" == 750 || "$mode" == 751 || "$mode" == 755 ]] \
         && legacy_cert_root_contents_are_migratable \
         || { err "Refusing to claim an unknown certificate root: $DNS_CERT_DIR"; return 1; }
@@ -834,7 +841,12 @@ ensure_dns_cert_root() {
         [[ ! -e "$DNS_CERT_DIR/$role" && ! -L "$DNS_CERT_DIR/$role" ]] \
             || normalize_legacy_cert_role_metadata "$DNS_CERT_DIR/$role" || return 1
     done
-    chmod 0751 "$DNS_CERT_DIR" || return 1
+    # Five octal digits on purpose. GNU chmod preserves a directory's
+    # set-group-ID bit for a four-digit mode, and this root inherits that bit
+    # from the setgid CONF_DIR, so "chmod 0751" left it at 2751 and the
+    # boundary check below -- which requires exactly 751 -- could never pass
+    # on a first install.
+    chmod 00751 "$DNS_CERT_DIR" || return 1
     write_ownership_marker "$DNS_CERT_DIR" "$CERT_ROOT_MARKER" "$CERT_ROOT_MARKER_VALUE" \
         || return 1
     cert_root_is_safe \
@@ -894,11 +906,14 @@ ensure_debug_cert_root() {
     fi
     [[ ! -e "$DEBUG_CERT_DIR/$DEBUG_CERT_MARKER" && ! -L "$DEBUG_CERT_DIR/$DEBUG_CERT_MARKER" ]] \
         || { err "Debug-certificate root marker is unsafe."; return 1; }
+    # Same inherited set-group-ID bit as the certificate root above: only the
+    # permission digits decide claimability, and the chmod below clears the rest.
     mode="$(file_mode "$DEBUG_CERT_DIR")"
+    mode="${mode: -3}"
     [[ "$mode" == 700 || "$mode" == 755 ]] \
         && debug_cert_root_contents_are_safe \
         || { err "Refusing to claim an unknown debug-certificate root."; return 1; }
-    chmod 0700 "$DEBUG_CERT_DIR" || return 1
+    chmod 00700 "$DEBUG_CERT_DIR" || return 1
     write_ownership_marker "$DEBUG_CERT_DIR" "$DEBUG_CERT_MARKER" "$DEBUG_CERT_MARKER_VALUE" \
         || return 1
     debug_cert_root_is_safe \
