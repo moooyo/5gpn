@@ -267,9 +267,9 @@ func botExtensionModuleDetailHTML(module interceptModuleView) string {
 		text.WriteString("\nGlobal routing rules：")
 		text.WriteString(botExtensionRoutingRulesHTML(module.RoutingRules))
 	}
-	if len(module.NetworkOrigins) > 0 {
+	if module.NetworkAny || len(module.NetworkOrigins) > 0 {
 		text.WriteString("\n\n")
-		text.WriteString(botExtensionNetworkRiskHTML(module.NetworkOrigins))
+		text.WriteString(botExtensionNetworkRiskHTML(module.NetworkOrigins, module.NetworkAny))
 	}
 	return text.String()
 }
@@ -337,7 +337,7 @@ func (bt *Bot) previewBotExtensionToggle(
 	}
 	prompt := "⚠️ <b>确认" + action + "插件？</b>\n" + botExtensionModuleDetailHTML(module) + "\n\n" + impact
 	if next && len(module.NetworkOrigins) > 0 {
-		prompt += "\n\n" + botExtensionNetworkRiskHTML(module.NetworkOrigins)
+		prompt += "\n\n" + botExtensionNetworkRiskHTML(module.NetworkOrigins, module.NetworkAny)
 	}
 	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
 }
@@ -446,9 +446,9 @@ func botExtensionExecutionOrderHTML(view interceptModulesView, order []string) s
 		text.WriteString("</code> · routing_rules=<code>")
 		text.WriteString(strconv.Itoa(len(module.RoutingRules)))
 		text.WriteString("</code>")
-		if len(module.NetworkOrigins) > 0 {
+		if module.NetworkAny || len(module.NetworkOrigins) > 0 {
 			text.WriteString("\n   ")
-			text.WriteString(botExtensionNetworkRiskHTML(module.NetworkOrigins))
+			text.WriteString(botExtensionNetworkRiskHTML(module.NetworkOrigins, module.NetworkAny))
 		}
 	}
 	return text.String()
@@ -876,8 +876,8 @@ func botExtensionSettingReviewHTML(module interceptModuleView, setting intercept
 	prompt := "插件：<b>" + html.EscapeString(module.Name) + "</b>\nID：<code>" +
 		html.EscapeString(module.ID) + "</code>\n快照：<code>" + html.EscapeString(module.SnapshotDigest) +
 		"</code>\n\n" + botExtensionSettingConfirmationHTML(setting, value)
-	if len(module.NetworkOrigins) > 0 {
-		prompt += "\n\n" + botExtensionNetworkRiskHTML(module.NetworkOrigins)
+	if module.NetworkAny || len(module.NetworkOrigins) > 0 {
+		prompt += "\n\n" + botExtensionNetworkRiskHTML(module.NetworkOrigins, module.NetworkAny)
 	}
 	return prompt
 }
@@ -999,8 +999,8 @@ func (bt *Bot) previewBotExtensionEgressSelection(
 		"</code>\n执行位置：<code>" + strconv.Itoa(module.ExecutionOrder) + "</code>\nCapture hosts：<code>" +
 		html.EscapeString(strings.Join(module.CaptureHosts, ", ")) + "</code>\n当前：<code>" + html.EscapeString(module.EgressGroup) + "</code>\n新值：<code>" + html.EscapeString(label) +
 		"</code>\n\n执行顺序决定重叠 capture host 的第一个出口赢家。"
-	if len(module.NetworkOrigins) > 0 {
-		prompt += "\n\n" + botExtensionNetworkRiskHTML(module.NetworkOrigins)
+	if module.NetworkAny || len(module.NetworkOrigins) > 0 {
+		prompt += "\n\n" + botExtensionNetworkRiskHTML(module.NetworkOrigins, module.NetworkAny)
 	}
 	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
 }

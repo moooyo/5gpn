@@ -633,6 +633,10 @@ func marketplaceSourceReviewHTML(source marketplaceSourceView) string {
 			entry.Capabilities.PersistentStorage, entry.Capabilities.EgressGroupRequired,
 		)
 		text.WriteString("\n声明的 network origins（仅市场元数据；安装与启用仍需独立审查）：")
+		if entry.Capabilities.NetworkAny {
+			text.WriteString("<b>不受限（未列出地址）</b>")
+			continue
+		}
 		if len(entry.Capabilities.NetworkOrigins) == 0 {
 			text.WriteString("<i>无</i>")
 			continue
@@ -862,9 +866,9 @@ func (bt *Bot) handleBotExtensionEntryCallback(
 		html.EscapeString(source.Name), html.EscapeString(entry.ID), html.EscapeString(entry.License.SPDX), html.EscapeString(entry.ManifestDigest)))
 	text.WriteString(fmt.Sprintf("\n\n能力：<code>%d</code> hosts · <code>%d</code> actions · <code>%d</code> settings · <code>%d</code> mappings · <code>%d</code> global routing rules",
 		entry.Capabilities.CaptureHostCount, entry.Capabilities.ActionCount, entry.Capabilities.SettingCount, entry.Capabilities.UpstreamMappingCount, entry.Capabilities.RoutingRuleCount))
-	if len(entry.Capabilities.NetworkOrigins) > 0 {
+	if entry.Capabilities.NetworkAny || len(entry.Capabilities.NetworkOrigins) > 0 {
 		text.WriteString("\n\n")
-		text.WriteString(botExtensionNetworkRiskHTML(entry.Capabilities.NetworkOrigins))
+		text.WriteString(botExtensionNetworkRiskHTML(entry.Capabilities.NetworkOrigins, entry.Capabilities.NetworkAny))
 	}
 	rows := [][]models.InlineKeyboardButton{
 		{botExtensionButton("📥 审查并安装", "entry:install:"+rest)},
@@ -955,7 +959,12 @@ func (bt *Bot) previewBotExtensionMarketplaceInstall(
 	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
 }
 
-func botExtensionNetworkRiskHTML(origins []string) string {
+func botExtensionNetworkRiskHTML(origins []string, any bool) string {
+	// An unrestricted grant has no list to print, and printing "none" beside it
+	// would tell an operator the opposite of what was granted.
+	if any {
+		return "🌐 <b>联网权限风险（不受限）</b>\n该插件申请了联网权限但未指明可访问的地址，因为这些地址在运行时才确定。它可以把可见的全部解密请求、响应、参数和存储数据发送到它能解析的任意主机；改写请求会转发完整请求方法、解码后的请求体和端到端请求头，其中可能包含 Cookie 和 Authorization 凭据。这比地址列表更宽泛，启用后无法收窄。"
+	}
 	if len(origins) == 0 {
 		return ""
 	}
@@ -1151,9 +1160,9 @@ func botExtensionCandidateReviewHTML(module interceptModuleView) string {
 	if module.EgressGroupRequired && module.EgressGroup == "" {
 		text.WriteString("\n需要管理员选择 mihomo 出口组后才能启用。")
 	}
-	if len(module.NetworkOrigins) > 0 {
+	if module.NetworkAny || len(module.NetworkOrigins) > 0 {
 		text.WriteString("\n\n")
-		text.WriteString(botExtensionNetworkRiskHTML(module.NetworkOrigins))
+		text.WriteString(botExtensionNetworkRiskHTML(module.NetworkOrigins, module.NetworkAny))
 	}
 	return text.String()
 }

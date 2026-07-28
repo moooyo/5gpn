@@ -141,6 +141,22 @@ describe('ExtensionsPage native extension contract', () => {
   })
 
   /**
+   * Every network disclosure used to be gated on a non-empty origin list, so an
+   * extension granted the unrestricted capability — which by definition has no
+   * list — rendered as "no additional network access requested" and suppressed
+   * the warning entirely. That told an operator the opposite of what enabling
+   * would grant, in the one place the decision is made.
+   */
+  it('warns about an unrestricted network grant that has no origin list', async () => {
+    const unrestricted: InterceptModule = { ...CLEANER, network_origins: [], network_any: true }
+    vi.mocked(api.getInterceptModules).mockResolvedValue({ ...cloneView(), modules: [unrestricted] })
+    renderPage()
+    const row = await screen.findByTestId(`capabilities-${unrestricted.id}`)
+    expect(within(row).getByText(i18n.t('extensions.networkAnyChip'))).toBeInTheDocument()
+    expect(screen.queryByText(i18n.t('extensions.networkOriginsNone'))).not.toBeInTheDocument()
+  })
+
+  /**
    * The capability row is an inventory, and the row's own comment said "one
    * neutral shape" while its first entry was painted `primary-container` — so
    * the card claimed the capture-host count mattered more than the six chips

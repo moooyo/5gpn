@@ -303,6 +303,7 @@ export interface InterceptModule {
   imported_at?: string
   execution_order: number
   network_origins: string[]
+  network_any?: boolean
   egress_group_required: boolean
   egress_group?: string
 }
@@ -351,6 +352,7 @@ export interface MarketplaceEntryCapabilities {
   action_count: number
   setting_count: number
   network_origins: string[]
+  network_any?: boolean
   persistent_storage: boolean
   upstream_mapping_count: number
   egress_group_required: boolean
