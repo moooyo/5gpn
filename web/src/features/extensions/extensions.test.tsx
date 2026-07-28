@@ -230,6 +230,33 @@ describe('ExtensionsPage native extension contract', () => {
     }))
   })
 
+  /**
+   * An upstream plugin format gates a whole script entry on a switch instead of
+   * passing it to the script, so a boolean setting can decide whether an action
+   * is loaded at all. That is a bigger consequence than a preference -- the one
+   * that made this feature necessary switches off a request to a third party --
+   * so the operator has to be able to read it before flipping the toggle.
+   */
+  it('says which actions a boolean setting switches off', async () => {
+    const gated: InterceptModule = {
+      ...CLEANER,
+      settings: [{ key: 'airborne', type: 'boolean', label: 'Airborne helper', required: true, value: true }],
+      actions: [
+        { id: 'transform-airborne', phase: 'request', match: { hosts: ['api.example.com'], schemes: ['https'], path_regex: '^/' }, enabled_when: 'airborne', script_digest: 'c'.repeat(64), body_mode: 'binary', timeout_ms: 1000, max_body_bytes: 1024 },
+        { id: 'clean-json', phase: 'response', match: { hosts: ['api.example.com'], schemes: ['https'], path_regex: '^/' }, script_digest: 'd'.repeat(64), body_mode: 'text', timeout_ms: 1000, max_body_bytes: 1024 },
+      ],
+    }
+    vi.mocked(api.getInterceptModules).mockResolvedValue({ ...cloneView(), modules: [gated] })
+    const user = userEvent.setup()
+    renderPage()
+    const card = await screen.findByTestId(`extension-${gated.id}`)
+    await user.click(within(card).getByRole('button', { name: '设置 · 1' }))
+    const dialog = await screen.findByRole('dialog', { name: /Response Cleaner/ })
+    const note = within(dialog).getByText(/transform-airborne/)
+    expect(note).toHaveTextContent('停用 1 个 action')
+    expect(note).not.toHaveTextContent('clean-json')
+  })
+
   it('edits the operator-selected capture DNS group', async () => {
     const user = userEvent.setup()
     renderPage()

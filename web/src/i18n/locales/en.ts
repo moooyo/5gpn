@@ -472,6 +472,8 @@ const en = {
     networkOriginsNone: 'No additional network access requested.',
     networkAnyTitle: 'Unrestricted network access',
     proxyCompatTitle: 'Runs a published third-party bundle',
+    settingGatesActions_one: 'Switches off {{count}} action while unchecked: {{actions}}. It is not loaded at all, so nothing it does — including any request it makes — happens.',
+    settingGatesActions_other: 'Switches off {{count}} actions while unchecked: {{actions}}. They are not loaded at all, so nothing they do — including any requests they make — happens.',
     networkAnyChip: 'Any host',
     networkAnyWarning: 'This extension requested network access without naming the addresses it may reach, because they are chosen at runtime. It can send any decrypted request, response, setting, or stored data it can read to any host it resolves, and a rewritten request forwards the complete method, decoded body, and end-to-end headers, which may include Cookie and Authorization credentials. This is broader than an address list and cannot be narrowed after enabling.',
     trustPending: 'CA trust pending',

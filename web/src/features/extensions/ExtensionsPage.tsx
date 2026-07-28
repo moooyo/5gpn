@@ -488,11 +488,18 @@ function ExtensionSettingsModal({
               )
             }
             if (setting.type === 'boolean') {
+              // An upstream plugin format gates a whole script entry on a switch
+              // rather than passing it to the script, so a setting can decide
+              // whether an action is loaded at all. That is a bigger consequence
+              // than a preference, and the operator has to be able to see it
+              // before flipping it -- in persistent text, not on hover.
+              const gated = (module.actions ?? []).filter((action) => action.enabled_when === setting.key)
               return (
                 <DialogSection key={setting.key} className="flex items-start justify-between gap-4">
                   <div>
                     <div className="text-label font-medium text-text-strong">{label}</div>
                     {description ? <p className="mt-1 text-meta leading-4 text-text-faint">{description}</p> : null}
+                    {gated.length > 0 ? <p className="mt-1 text-meta leading-4 text-text-soft">{t('extensions.settingGatesActions', { count: gated.length, actions: gated.map((action) => action.id).join(', ') })}</p> : null}
                   </div>
                   <Toggle checked={values[setting.key] === true} onCheckedChange={(checked) => setValues((current) => ({ ...current, [setting.key]: checked }))} aria-label={label} />
                 </DialogSection>

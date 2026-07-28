@@ -115,10 +115,16 @@ type nativeExtensionSetting struct {
 }
 
 type nativeExtensionAction struct {
-	ID     string                     `yaml:"id"`
-	Phase  string                     `yaml:"phase"`
-	Match  nativeExtensionActionMatch `yaml:"match"`
-	Script nativeExtensionScript      `yaml:"script"`
+	ID    string                     `yaml:"id"`
+	Phase string                     `yaml:"phase"`
+	Match nativeExtensionActionMatch `yaml:"match"`
+	// EnabledWhen names a required boolean setting of the same extension. When
+	// it is false the action is not compiled at all. Upstream plugin formats
+	// gate a script entry from outside the script, writing the switch on the
+	// entry rather than passing the key to it, so a bundle carrying such a
+	// switch never reads it and without this the setting silently does nothing.
+	EnabledWhen string                `yaml:"enabledWhen"`
+	Script      nativeExtensionScript `yaml:"script"`
 }
 
 type nativeExtensionActionMatch struct {
@@ -274,6 +280,10 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 		if bodyMode == "" {
 			bodyMode = "none"
 		}
+		enabledWhen := strings.TrimSpace(raw.EnabledWhen)
+		if err := validateActionGateSetting(enabledWhen, settings); err != nil {
+			return interceptModuleSnapshot{}, fmt.Errorf("action %q enabledWhen: %w", raw.ID, err)
+		}
 		// entry selects the script contract. The default native entry point is a
 		// transform(context) function that returns a patch; proxy-compat runs a
 		// published proxy-client bundle, which completes by calling $done. It
@@ -339,7 +349,8 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 				},
 				BodyMode: bodyMode, Reject: raw.Script.Reject, Mock: raw.Script.Mock,
 				Headers: raw.Script.Headers, Rewrite: raw.Script.Rewrite, ReplaceBody: raw.Script.ReplaceBody,
-				TimeoutMS: timeoutMS, MaxBodyBytes: maxBodyBytes,
+				EnabledWhen: enabledWhen,
+				TimeoutMS:   timeoutMS, MaxBodyBytes: maxBodyBytes,
 			})
 			continue
 		}
@@ -362,7 +373,8 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 					StatusCodes: uniqueSortedInts(raw.Match.StatusCodes),
 				},
 				BodyMode: bodyMode, JQProgram: jqProgram,
-				TimeoutMS: timeoutMS, MaxBodyBytes: maxBodyBytes,
+				EnabledWhen: enabledWhen,
+				TimeoutMS:   timeoutMS, MaxBodyBytes: maxBodyBytes,
 			})
 			continue
 		}
@@ -396,7 +408,8 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 			},
 			ScriptURL: scriptURL, ScriptDigest: sha256Hex(scriptBody), ScriptBody: string(scriptBody),
 			BodyMode: bodyMode, Entry: entry, JQProgram: jqProgram,
-			TimeoutMS: timeoutMS, MaxBodyBytes: maxBodyBytes,
+			EnabledWhen: enabledWhen,
+			TimeoutMS:   timeoutMS, MaxBodyBytes: maxBodyBytes,
 		})
 	}
 
@@ -422,6 +435,37 @@ func moduleWithSyntheticSource(module interceptModuleSnapshot) interceptModuleSn
 	module.Source.Digest = sha256Hex([]byte(module.Source.Body))
 	module.ImportedAt = time.Unix(0, 0).UTC().Format(time.RFC3339)
 	return module
+}
+
+// validateActionGateSetting checks an action's enabledWhen against the settings
+// the same manifest declares.
+//
+// Boolean, because a gate has two states and nothing else reads as one. Required
+// is the load-bearing half: an enabled module's required settings always carry a
+// value, so a gate always has a decidable state. An optional setting would add a
+// third case -- declared, gating an action, and unset -- whose only answers are
+// running something the operator may have switched off, or silently dropping an
+// action. Refusing it here means neither has to be chosen at compile time.
+func validateActionGateSetting(key string, settings []interceptModuleSetting) error {
+	if key == "" {
+		return nil
+	}
+	if !validModuleSettingKey(key) {
+		return fmt.Errorf("%q is not a valid setting key", key)
+	}
+	for _, setting := range settings {
+		if setting.Key != key {
+			continue
+		}
+		if setting.Type != "boolean" {
+			return fmt.Errorf("%q is a %s setting; only boolean is supported", key, setting.Type)
+		}
+		if !setting.Required {
+			return fmt.Errorf("%q is optional; a gate must name a required setting", key)
+		}
+		return nil
+	}
+	return fmt.Errorf("%q is not a setting this extension declares", key)
 }
 
 func normalizeNativeExtensionRoutingRule(raw nativeExtensionRoutingRule) (interceptRoutingRule, error) {

@@ -449,6 +449,8 @@ const zh: typeof en = {
     networkOriginsNone: '未申请额外网络访问权限。',
     networkAnyTitle: '不受限的网络访问',
     proxyCompatTitle: '运行已发布的第三方 bundle',
+    settingGatesActions_one: '关闭时停用 {{count}} 个 action：{{actions}}。它完全不会被加载，因此它做的一切——包括它发出的任何请求——都不会发生。',
+    settingGatesActions_other: '关闭时停用 {{count}} 个 action：{{actions}}。它们完全不会被加载，因此它们做的一切——包括它们发出的任何请求——都不会发生。',
     networkAnyChip: '任意主机',
     networkAnyWarning: '该插件申请了网络访问权限但未指明可访问的地址，因为这些地址在运行时才确定。它可以把读取到的任何解密请求、响应、设置或存储数据发送到它能解析的任意主机；改写请求会转发完整的方法、解码后的请求体和端到端请求头，其中可能包含 Cookie 和 Authorization 凭据。这比地址列表更宽泛，且启用后无法收窄。',
     trustPending: '待信任证书',

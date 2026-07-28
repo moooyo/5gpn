@@ -108,9 +108,14 @@ type interceptActionMatch struct {
 }
 
 type interceptScriptRule struct {
-	ID           string                 `json:"id"`
-	Phase        string                 `json:"phase"`
-	Match        interceptActionMatch   `json:"match"`
+	ID    string               `json:"id"`
+	Phase string               `json:"phase"`
+	Match interceptActionMatch `json:"match"`
+	// EnabledWhen names a required boolean setting of the same extension. The
+	// sidecar does not compile the action when that setting is false, so it
+	// never matches. Upstream plugin formats gate a script entry from outside
+	// the script, which is why a bundle never reads the key that switches it.
+	EnabledWhen  string                 `json:"enabled_when,omitempty"`
 	ScriptURL    string                 `json:"script_url,omitempty"`
 	ScriptDigest string                 `json:"script_digest"`
 	ScriptBody   string                 `json:"script_body"`
@@ -148,9 +153,13 @@ type interceptModuleSetting struct {
 // interceptModuleActionView exposes immutable action metadata for operator
 // review without returning the potentially large stored script body.
 type interceptModuleActionView struct {
-	ID           string                 `json:"id"`
-	Phase        string                 `json:"phase"`
-	Match        interceptActionMatch   `json:"match"`
+	ID    string               `json:"id"`
+	Phase string               `json:"phase"`
+	Match interceptActionMatch `json:"match"`
+	// EnabledWhen lets the console say which setting switched an action off,
+	// rather than leaving an operator to wonder why a declared action does
+	// nothing.
+	EnabledWhen  string                 `json:"enabled_when,omitempty"`
 	ScriptURL    string                 `json:"script_url,omitempty"`
 	ScriptDigest string                 `json:"script_digest"`
 	BodyMode     string                 `json:"body_mode"`

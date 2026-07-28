@@ -261,6 +261,9 @@ export interface InterceptModuleAction {
   id: string
   phase: 'request' | 'response'
   match: InterceptActionMatch
+  // Names a required boolean setting. The action is not compiled at all while
+  // that setting is false, so it never runs.
+  enabled_when?: string
   script_url?: string
   script_digest: string
   body_mode: 'none' | 'text' | 'binary'

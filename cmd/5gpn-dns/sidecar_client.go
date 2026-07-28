@@ -27,7 +27,11 @@ const (
 	// sidecarAPISchema is the control-API version this build speaks. A sidecar
 	// advertising anything else is refused rather than guessed at — the two are
 	// separately released, so a mismatch is expected and must be explicit.
-	sidecarAPISchema = 1
+	//
+	// 2 added enabled_when to an action. The sidecar's document decoder rejects
+	// unknown fields, so emitting it to a schema-1 build would cost that gateway
+	// its whole interception configuration rather than one action.
+	sidecarAPISchema = 2
 )
 
 var (

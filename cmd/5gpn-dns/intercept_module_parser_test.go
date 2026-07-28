@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1055,5 +1056,97 @@ func TestNativeExtensionParserRefusesAnInvalidRewriteStatus(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "302") {
 		t.Fatalf("err = %v, want 301 refused", err)
+	}
+}
+
+// An upstream plugin format switches a script entry on and off from outside the
+// script, so a bundle never reads the key that gates it. Carrying that key as an
+// ordinary setting gave an extension a switch that did nothing at all. These
+// cases hold the contract that makes it mean something on import.
+func TestNativeExtensionParserBindsActionGateToARequiredBooleanSetting(t *testing.T) {
+	t.Parallel()
+	manifest := func(gate string, settings string) string {
+		return `apiVersion: 5gpn.io/v1
+kind: Extension
+metadata:
+  id: io.example.gate
+  name: Gate fixture
+  version: 1.0.0
+permissions:
+  persistentStorage: false
+traffic:
+  captureHosts: [api.example.com]
+settings:
+` + settings + `actions:
+  - id: gated
+    phase: response
+` + gate + `    match:
+      hosts: [api.example.com]
+      schemes: [https]
+      pathRegex: ^/
+    script:
+      jq: .
+      bodyMode: text
+      timeoutMs: 1000
+      maxBodyBytes: 1024
+`
+	}
+	booleanSetting := func(required bool) string {
+		return "  - key: airborne\n    type: boolean\n    required: " +
+			map[bool]string{true: "true", false: "false"}[required] + "\n    default: true\n"
+	}
+	importManifest := func(t *testing.T, body string) (interceptModuleSnapshot, error) {
+		t.Helper()
+		return (interceptModuleParser{now: time.Now}).Import(context.Background(), interceptModuleImportRequest{Content: body})
+	}
+
+	for _, testCase := range []struct {
+		name     string
+		gate     string
+		settings string
+		want     string
+	}{
+		{"undeclared", "    enabledWhen: airborne\n", "", "not a setting this extension declares"},
+		{"malformed key", "    enabledWhen: not a key\n", booleanSetting(true), "not a valid setting key"},
+		{
+			"non-boolean", "    enabledWhen: airborne\n",
+			"  - key: airborne\n    type: text\n    required: true\n    default: \"on\"\n",
+			"only boolean is supported",
+		},
+		{"optional", "    enabledWhen: airborne\n", booleanSetting(false), "must name a required setting"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := importManifest(t, manifest(testCase.gate, testCase.settings)); err == nil || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("error = %v, want %q", err, testCase.want)
+			}
+		})
+	}
+
+	snapshot, err := importManifest(t, manifest("    enabledWhen: airborne\n", booleanSetting(true)))
+	if err != nil {
+		t.Fatalf("valid gate rejected: %v", err)
+	}
+	if got := snapshot.Scripts[0].EnabledWhen; got != "airborne" {
+		t.Fatalf("stored gate = %q; it must reach the sidecar document", got)
+	}
+	body, err := json.Marshal(snapshot.Scripts[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"enabled_when":"airborne"`) {
+		t.Fatalf("published action = %s", body)
+	}
+
+	ungated, err := importManifest(t, manifest("", booleanSetting(true)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err = json.Marshal(ungated.Scripts[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "enabled_when") {
+		t.Fatalf("ungated action carried the field to a sidecar that may not know it: %s", body)
 	}
 }

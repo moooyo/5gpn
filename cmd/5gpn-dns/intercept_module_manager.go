@@ -1532,7 +1532,8 @@ func interceptModuleActionViews(actions []interceptScriptRule) []interceptModule
 		match.StatusCodes = append([]int{}, action.Match.StatusCodes...)
 		views = append(views, interceptModuleActionView{
 			ID: action.ID, Phase: action.Phase, Match: match,
-			ScriptURL: action.ScriptURL, ScriptDigest: action.ScriptDigest,
+			EnabledWhen: action.EnabledWhen,
+			ScriptURL:   action.ScriptURL, ScriptDigest: action.ScriptDigest,
 			BodyMode: action.BodyMode, Entry: action.Entry, JQProgram: action.JQProgram,
 			TimeoutMS: action.TimeoutMS, MaxBodyBytes: action.MaxBodyBytes,
 		})
