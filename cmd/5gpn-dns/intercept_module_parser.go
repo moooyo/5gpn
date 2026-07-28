@@ -129,13 +129,15 @@ type nativeExtensionActionMatch struct {
 }
 
 type nativeExtensionScript struct {
-	Source       string `yaml:"source"`
-	Inline       string `yaml:"inline"`
-	BodyMode     string `yaml:"bodyMode"`
-	Entry        string `yaml:"entry"`
-	JQ           string `yaml:"jq"`
-	TimeoutMS    int    `yaml:"timeoutMs"`
-	MaxBodyBytes int64  `yaml:"maxBodyBytes"`
+	Source       string                 `yaml:"source"`
+	Inline       string                 `yaml:"inline"`
+	BodyMode     string                 `yaml:"bodyMode"`
+	Entry        string                 `yaml:"entry"`
+	JQ           string                 `yaml:"jq"`
+	Reject       bool                   `yaml:"reject"`
+	Mock         *interceptMockResponse `yaml:"mock"`
+	TimeoutMS    int                    `yaml:"timeoutMs"`
+	MaxBodyBytes int64                  `yaml:"maxBodyBytes"`
 }
 
 func (p interceptModuleParser) Import(ctx context.Context, request interceptModuleImportRequest) (interceptModuleSnapshot, error) {
@@ -284,8 +286,20 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 		// It is declarative and runs without the JavaScript runtime, so it is
 		// mutually exclusive with a script.
 		jqProgram := strings.TrimSpace(raw.Script.JQ)
-		if jqProgram != "" && entry != "" {
-			return interceptModuleSnapshot{}, fmt.Errorf("action %q declares both script.jq and script.entry", raw.ID)
+		// Exactly one action kind applies. reject and mock carry what the
+		// published modules declare -- reject-dict and mock-response-body --
+		// and neither runs any code.
+		declared := 0
+		for _, present := range []bool{jqProgram != "", raw.Script.Reject, raw.Script.Mock != nil, raw.Script.Source != "" || raw.Script.Inline != ""} {
+			if present {
+				declared++
+			}
+		}
+		if declared > 1 {
+			return interceptModuleSnapshot{}, fmt.Errorf("action %q declares more than one of script.jq, script.reject, script.mock, and a script body", raw.ID)
+		}
+		if entry != "" && (jqProgram != "" || raw.Script.Reject || raw.Script.Mock != nil) {
+			return interceptModuleSnapshot{}, fmt.Errorf("action %q declares script.entry without a script", raw.ID)
 		}
 		timeoutMS := raw.Script.TimeoutMS
 		if timeoutMS == 0 {
@@ -297,6 +311,21 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 		}
 		inline := raw.Script.Inline
 		source := strings.TrimSpace(raw.Script.Source)
+		if raw.Script.Reject || raw.Script.Mock != nil {
+			if err := raw.Script.Mock.validate(); err != nil {
+				return interceptModuleSnapshot{}, fmt.Errorf("action %q %w", raw.ID, err)
+			}
+			scripts = append(scripts, interceptScriptRule{
+				ID: strings.TrimSpace(raw.ID), Phase: strings.ToLower(strings.TrimSpace(raw.Phase)),
+				Match: interceptActionMatch{
+					Hosts: hosts, Schemes: schemes, Methods: methods, PathRegex: pathRegex,
+					StatusCodes: uniqueSortedInts(raw.Match.StatusCodes),
+				},
+				BodyMode: bodyMode, Reject: raw.Script.Reject, Mock: raw.Script.Mock,
+				TimeoutMS: timeoutMS, MaxBodyBytes: maxBodyBytes,
+			})
+			continue
+		}
 		// A jq action carries an expression instead of code, so it declares
 		// neither a source nor an inline script.
 		if jqProgram != "" {

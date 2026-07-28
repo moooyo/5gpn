@@ -917,3 +917,85 @@ func TestNativeExtensionParserRejectsAJQProgramOnABinaryBody(t *testing.T) {
 		t.Fatalf("err = %v, want a text body required", err)
 	}
 }
+
+func declarativeActionManifest(scriptBlock string) string {
+	return `apiVersion: 5gpn.io/v1
+kind: Extension
+metadata:
+  id: io.example.declarative
+  name: Declarative fixture
+  version: 1.0.0
+permissions:
+  persistentStorage: false
+traffic:
+  captureHosts: [api.example.com]
+actions:
+  - id: act
+    phase: request
+    match:
+      hosts: [api.example.com]
+      schemes: [https]
+      pathRegex: ^/
+    script:
+` + scriptBlock
+}
+
+func TestNativeExtensionParserCarriesRejectAndMock(t *testing.T) {
+	t.Parallel()
+	// Both carry what the published modules declare -- reject-dict and
+	// mock-response-body -- and neither ships a script snapshot for review.
+	reject, err := (interceptModuleParser{now: time.Now}).Import(
+		context.Background(),
+		interceptModuleImportRequest{Content: declarativeActionManifest("      reject: true\n      bodyMode: none\n")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reject.Scripts[0].Reject || reject.Scripts[0].ScriptBody != "" {
+		t.Fatalf("reject action = %+v, want a reject carrying no script", reject.Scripts[0])
+	}
+
+	mock, err := (interceptModuleParser{now: time.Now}).Import(
+		context.Background(),
+		interceptModuleImportRequest{Content: declarativeActionManifest(
+			"      mock:\n        status: 200\n        headers:\n          Content-Type: application/json\n        body: '{}'\n      bodyMode: none\n")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mock.Scripts[0].Mock == nil || mock.Scripts[0].Mock.Body != "{}" || mock.Scripts[0].Mock.Status != 200 {
+		t.Fatalf("mock action = %+v", mock.Scripts[0].Mock)
+	}
+	if mock.Scripts[0].Mock.Headers["Content-Type"] != "application/json" {
+		t.Fatalf("mock headers = %v", mock.Scripts[0].Mock.Headers)
+	}
+}
+
+func TestNativeExtensionParserRejectsMoreThanOneActionKind(t *testing.T) {
+	t.Parallel()
+	// Carrying two would leave which one runs undefined.
+	_, err := (interceptModuleParser{now: time.Now}).Import(
+		context.Background(),
+		interceptModuleImportRequest{Content: declarativeActionManifest("      reject: true\n      jq: 'del(.a)'\n      bodyMode: text\n")},
+	)
+	if err == nil || !strings.Contains(err.Error(), "more than one") {
+		t.Fatalf("err = %v, want the pairing refused", err)
+	}
+}
+
+func TestNativeExtensionParserRefusesAMockThatCouldInjectHeaders(t *testing.T) {
+	t.Parallel()
+	// A newline in a header value would let a mock put further headers, or a
+	// second response, onto the wire. A raw newline is folded away by YAML
+	// itself; the vector that survives is a double-quoted escape, so that is
+	// what is tested. The fragment is a raw literal so the backslashes reach
+	// the YAML parser rather than the Go one.
+	fragment := "      mock:\n        headers:\n          X-Bad: " + `"a\r\nY: b"` + "\n        body: '{}'\n      bodyMode: none\n"
+	_, err := (interceptModuleParser{now: time.Now}).Import(
+		context.Background(),
+		interceptModuleImportRequest{Content: declarativeActionManifest(fragment)},
+	)
+	if err == nil || !strings.Contains(err.Error(), "newline") {
+		t.Fatalf("err = %v, want the header refused", err)
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -33,6 +34,8 @@ const (
 	maxInterceptModuleSource   = 2 << 20
 	maxInterceptScriptSource   = 1 << 20
 	maxInterceptJQProgram      = 32768
+	maxInterceptMockBody       = 1 << 20
+	maxInterceptMockHeaders    = 32
 	maxInterceptScriptTotal    = 8 << 20
 	maxInterceptModulePattern  = 4096
 	maxInterceptResourceURL    = 4096
@@ -49,9 +52,18 @@ const (
 // value; the mode is declared because it cannot be inferred from the source.
 const interceptScriptEntryProxyCompat = "proxy-compat"
 
-// A jq action carries an upstream module's own response-body-json-jq expression
-// instead of a script that reimplements it. It runs declaratively in the
-// sidecar, never entering the JavaScript runtime.
+// Three declarative action kinds carry what the published modules declare --
+// response-body-json-jq, reject, and mock-response-body -- instead of a script
+// that reimplements them. None enters the JavaScript runtime.
+//
+// Base64Body exists because the published modules mock binary gRPC frames,
+// which cannot survive a UTF-8 round trip through a manifest.
+type interceptMockResponse struct {
+	Status     int               `json:"status,omitempty" yaml:"status"`
+	Headers    map[string]string `json:"headers,omitempty" yaml:"headers"`
+	Body       string            `json:"body,omitempty" yaml:"body"`
+	Base64Body string            `json:"base64_body,omitempty" yaml:"base64Body"`
+}
 
 var nativeExtensionIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{1,126}[a-z0-9])$`)
 var nativeExtensionRouteKeywordPattern = regexp.MustCompile(`^[a-z0-9._-]+$`)
@@ -71,17 +83,19 @@ type interceptActionMatch struct {
 }
 
 type interceptScriptRule struct {
-	ID           string               `json:"id"`
-	Phase        string               `json:"phase"`
-	Match        interceptActionMatch `json:"match"`
-	ScriptURL    string               `json:"script_url,omitempty"`
-	ScriptDigest string               `json:"script_digest"`
-	ScriptBody   string               `json:"script_body"`
-	BodyMode     string               `json:"body_mode"`
-	Entry        string               `json:"entry,omitempty"`
-	JQProgram    string               `json:"jq_program,omitempty"`
-	TimeoutMS    int                  `json:"timeout_ms"`
-	MaxBodyBytes int64                `json:"max_body_bytes"`
+	ID           string                 `json:"id"`
+	Phase        string                 `json:"phase"`
+	Match        interceptActionMatch   `json:"match"`
+	ScriptURL    string                 `json:"script_url,omitempty"`
+	ScriptDigest string                 `json:"script_digest"`
+	ScriptBody   string                 `json:"script_body"`
+	BodyMode     string                 `json:"body_mode"`
+	Entry        string                 `json:"entry,omitempty"`
+	JQProgram    string                 `json:"jq_program,omitempty"`
+	Reject       bool                   `json:"reject,omitempty"`
+	Mock         *interceptMockResponse `json:"mock,omitempty"`
+	TimeoutMS    int                    `json:"timeout_ms"`
+	MaxBodyBytes int64                  `json:"max_body_bytes"`
 }
 
 type interceptLocationValue struct {
@@ -106,16 +120,18 @@ type interceptModuleSetting struct {
 // interceptModuleActionView exposes immutable action metadata for operator
 // review without returning the potentially large stored script body.
 type interceptModuleActionView struct {
-	ID           string               `json:"id"`
-	Phase        string               `json:"phase"`
-	Match        interceptActionMatch `json:"match"`
-	ScriptURL    string               `json:"script_url,omitempty"`
-	ScriptDigest string               `json:"script_digest"`
-	BodyMode     string               `json:"body_mode"`
-	Entry        string               `json:"entry,omitempty"`
-	JQProgram    string               `json:"jq_program,omitempty"`
-	TimeoutMS    int                  `json:"timeout_ms"`
-	MaxBodyBytes int64                `json:"max_body_bytes"`
+	ID           string                 `json:"id"`
+	Phase        string                 `json:"phase"`
+	Match        interceptActionMatch   `json:"match"`
+	ScriptURL    string                 `json:"script_url,omitempty"`
+	ScriptDigest string                 `json:"script_digest"`
+	BodyMode     string                 `json:"body_mode"`
+	Entry        string                 `json:"entry,omitempty"`
+	JQProgram    string                 `json:"jq_program,omitempty"`
+	Reject       bool                   `json:"reject,omitempty"`
+	Mock         *interceptMockResponse `json:"mock,omitempty"`
+	TimeoutMS    int                    `json:"timeout_ms"`
+	MaxBodyBytes int64                  `json:"max_body_bytes"`
 }
 
 type interceptHostMapping struct {
@@ -460,8 +476,17 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 				return fmt.Errorf("action %q URL is invalid: %w", rule.ID, err)
 			}
 		}
-		// A jq action has an expression instead of a script snapshot, so the
-		// body and digest rules below do not apply to it.
+		// A declarative action has no script snapshot, so the body and digest
+		// rules below do not apply to it.
+		if rule.Reject {
+			continue
+		}
+		if rule.Mock != nil {
+			if err := rule.Mock.validate(); err != nil {
+				return fmt.Errorf("action %q %w", rule.ID, err)
+			}
+			continue
+		}
 		if rule.JQProgram != "" {
 			if len(rule.JQProgram) > maxInterceptJQProgram {
 				return fmt.Errorf("action %q jq program exceeds %d bytes", rule.ID, maxInterceptJQProgram)
@@ -483,8 +508,19 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 		if rule.Entry != "" && rule.Entry != interceptScriptEntryProxyCompat {
 			return fmt.Errorf("action %q entry must be empty or %s", rule.ID, interceptScriptEntryProxyCompat)
 		}
-		if rule.JQProgram != "" && (rule.Entry != "" || rule.ScriptBody != "" || rule.ScriptURL != "") {
-			return fmt.Errorf("action %q declares both a jq program and a script", rule.ID)
+		// Exactly one kind applies to an action. Carrying two would leave which
+		// one runs undefined.
+		kinds := 0
+		for _, declared := range []bool{rule.JQProgram != "", rule.Reject, rule.Mock != nil, rule.ScriptBody != "" || rule.ScriptURL != ""} {
+			if declared {
+				kinds++
+			}
+		}
+		if kinds > 1 {
+			return fmt.Errorf("action %q declares more than one of jq, reject, mock, and a script", rule.ID)
+		}
+		if rule.Entry != "" && (rule.JQProgram != "" || rule.Reject || rule.Mock != nil) {
+			return fmt.Errorf("action %q declares an entry without a script", rule.ID)
 		}
 		if rule.TimeoutMS < 50 || rule.TimeoutMS > 30000 {
 			return fmt.Errorf("action %q timeout_ms must be between 50 and 30000", rule.ID)
@@ -1114,4 +1150,44 @@ func validSHA256(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
+}
+
+// validate mirrors the sidecar's bound on a mock reply. A header value with a
+// newline in it would let a mock inject further headers or a second response
+// onto the wire.
+func (m *interceptMockResponse) validate() error {
+	if m == nil {
+		return nil
+	}
+	if m.Status != 0 && (m.Status < 100 || m.Status > 599) {
+		return fmt.Errorf("mock status %d is not an HTTP status", m.Status)
+	}
+	if m.Body != "" && m.Base64Body != "" {
+		return errors.New("mock declares both body and base64Body")
+	}
+	if len(m.Headers) > maxInterceptMockHeaders {
+		return fmt.Errorf("mock declares more than %d headers", maxInterceptMockHeaders)
+	}
+	for name, value := range m.Headers {
+		if strings.TrimSpace(name) == "" || strings.ContainsAny(name, " :\r\n\t") {
+			return fmt.Errorf("mock header name %q is invalid", name)
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("mock header %q value contains a newline", name)
+		}
+	}
+	if m.Base64Body != "" {
+		decoded, err := base64.StdEncoding.DecodeString(m.Base64Body)
+		if err != nil {
+			return fmt.Errorf("mock base64Body is not base64: %w", err)
+		}
+		if len(decoded) > maxInterceptMockBody {
+			return fmt.Errorf("mock body exceeds %d bytes", maxInterceptMockBody)
+		}
+		return nil
+	}
+	if len(m.Body) > maxInterceptMockBody {
+		return fmt.Errorf("mock body exceeds %d bytes", maxInterceptMockBody)
+	}
+	return nil
 }
