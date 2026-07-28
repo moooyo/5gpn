@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -193,7 +195,14 @@ func TestExternalMaintainedExtensionsAreInstallableFromURL(t *testing.T) {
 				_, _ = w.Write(body)
 			}))
 			defer server.Close()
-			module, importErr := (interceptModuleParser{client: server.Client(), now: time.Now}).Import(
+			// An extension may point an action at a published bundle on a real
+			// host instead of shipping the script beside its manifest. The test
+			// server's own client trusts only its self-signed certificate, so it
+			// cannot verify that host and the import fails on the fetch rather
+			// than on anything this test is checking. Trust both: the fixture
+			// certificate for the manifest, and the system roots for whatever
+			// external source the manifest names.
+			module, importErr := (interceptModuleParser{client: externalAwareTestClient(t, server), now: time.Now}).Import(
 				context.Background(),
 				interceptModuleImportRequest{URL: server.URL + "/extension.yaml"},
 			)
@@ -815,5 +824,24 @@ func TestNativeExtensionParserRejectsCapabilityWithOrigins(t *testing.T) {
 	_, err := (interceptModuleParser{now: time.Now}).Import(context.Background(), interceptModuleImportRequest{Content: networkCapabilityManifest(permission)})
 	if err == nil || !strings.Contains(err.Error(), "any and an origin list") {
 		t.Fatalf("err = %v, want the combined grant to be rejected", err)
+	}
+}
+
+// externalAwareTestClient trusts the fixture server's certificate alongside the
+// system roots, so a manifest that names an external script source is fetched
+// for real instead of failing certificate verification against a pool that only
+// contains the test server.
+func externalAwareTestClient(t *testing.T, server *httptest.Server) *http.Client {
+	t.Helper()
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if certificate := server.Certificate(); certificate != nil {
+		pool.AddCert(certificate)
+	}
+	return &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}},
 	}
 }
