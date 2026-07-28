@@ -32,7 +32,7 @@ const (
 	maxInterceptModuleDesc     = 1024
 	maxInterceptModuleSource   = 2 << 20
 	maxInterceptScriptSource   = 1 << 20
-	maxInterceptJQProgram      = 8192
+	maxInterceptJQProgram      = 32768
 	maxInterceptScriptTotal    = 8 << 20
 	maxInterceptModulePattern  = 4096
 	maxInterceptResourceURL    = 4096
