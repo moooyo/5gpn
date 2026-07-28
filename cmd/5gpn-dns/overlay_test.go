@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 )
 
@@ -90,8 +89,11 @@ func TestOverlayCapabilityIsThePresentedCredential(t *testing.T) {
 	src := overlayTestDocument()
 	doc := compileForTest(t, src, overlayTransitionRevoke)
 
+	// Both modules resolve to "Proxies" here — one by an explicit binding, the
+	// other through the terminal MATCH target — so there is one group to mint
+	// for.
 	if len(doc.Egress.Capabilities) != 1 {
-		t.Fatalf("got %d capabilities, want exactly 1: the egress listener carries one credential", len(doc.Egress.Capabilities))
+		t.Fatalf("got %d capabilities, want exactly 1: both modules resolve to one group", len(doc.Egress.Capabilities))
 	}
 	cap := doc.Egress.Capabilities[0]
 	if cap.ID != src.UpstreamProxy.Username {
@@ -105,22 +107,109 @@ func TestOverlayCapabilityIsThePresentedCredential(t *testing.T) {
 	}
 }
 
-// One credential can select one group. Enabled extensions bound to different
-// groups are not representable, and picking one silently would route an
-// extension through a group its operator did not choose.
-func TestOverlayRefusesMultipleEgressGroups(t *testing.T) {
+// One bound extension alongside one unbound one is the ordinary arrangement, and
+// it resolves to two groups: the bound one and the operator's terminal MATCH
+// target. Refusing it made enabling the MITM master impossible on any gateway
+// whose extensions did not all agree on a single group.
+//
+// The credential does not select the group — the destination does, exactly as it
+// did under the legacy renderer's per-destination egress rules. So every
+// capability carries the one credential the processor can present, and the
+// destination sets are what tell them apart.
+func TestOverlayMintsOneCapabilityPerEgressGroup(t *testing.T) {
 	src := overlayTestDocument()
 	src.Modules[1].EgressGroup = "SecondGroup"
 
-	_, err := compileOverlayGeneration(overlayCompileInput{
+	doc, err := compileOverlayGeneration(overlayCompileInput{
 		Document: src, MatchTarget: "Proxies", DocumentRevision: "rev-1",
 		Transition: overlayTransitionRevoke,
 	})
-	if err == nil {
-		t.Fatal("two distinct egress groups compiled; one credential cannot select between them")
+	if err != nil {
+		t.Fatalf("two egress groups were refused: %v", err)
 	}
-	if !strings.Contains(err.Error(), "distinct egress groups") {
-		t.Fatalf("unexpected error: %v", err)
+
+	byGroup := map[string]overlayEgressCapability{}
+	for _, c := range doc.Egress.Capabilities {
+		if _, dup := byGroup[c.Group]; dup {
+			t.Fatalf("group %q got two capabilities", c.Group)
+		}
+		byGroup[c.Group] = c
+		if c.ID != src.UpstreamProxy.Username {
+			t.Errorf("capability for %q has id %q, which the processor cannot present", c.Group, c.ID)
+		}
+		if c.Listener != interceptEgressListenerName {
+			t.Errorf("capability for %q is valid on %q, not the egress listener", c.Group, c.Listener)
+		}
+		if len(c.Destinations) == 0 {
+			t.Errorf("capability for %q carries no destination allowlist", c.Group)
+		}
+	}
+	for _, group := range []string{"Proxies", "SecondGroup"} {
+		if _, ok := byGroup[group]; !ok {
+			t.Fatalf("no capability was minted for group %q; its extension has no egress at all", group)
+		}
+	}
+
+	// Disjoint destination sets are the property that makes the capability set
+	// unambiguous: no endpoint appears in two of them, so which group a
+	// connection leaves through cannot depend on the order the core evaluates
+	// capabilities in.
+	owner := map[string]string{}
+	for _, c := range doc.Egress.Capabilities {
+		for _, d := range c.Destinations {
+			key := string(d.Kind) + "|" + d.Value + "|" + strconv.Itoa(int(d.Ports[0].From))
+			if previous, dup := owner[key]; dup {
+				t.Errorf("destination %s is claimed by both %q and %q", key, previous, c.Group)
+			}
+			owner[key] = c.Group
+		}
+	}
+}
+
+// An operator who binds an extension to the built-in DIRECT group has asked for
+// unproxied egress in the one way the UI offers. A capability for that group
+// that forbids DIRECT is self-contradictory, and the extension's upstream traffic
+// simply stops.
+func TestOverlayDirectBindingAllowsDirect(t *testing.T) {
+	src := overlayTestDocument()
+	src.Modules[0].EgressGroup = "DIRECT"
+
+	doc, err := compileOverlayGeneration(overlayCompileInput{
+		Document: src, MatchTarget: "Proxies", DocumentRevision: "rev-1",
+		Transition: overlayTransitionRevoke,
+	})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	for _, c := range doc.Egress.Capabilities {
+		switch c.Group {
+		case "DIRECT":
+			if !c.AllowDirect {
+				t.Error("the capability for an explicit DIRECT binding forbids DIRECT")
+			}
+		case "Proxies":
+			// The terminal MATCH target; the operator's own global default may
+			// legitimately resolve to DIRECT.
+			if !c.AllowDirect {
+				t.Error("the capability for the terminal MATCH target forbids DIRECT")
+			}
+		}
+	}
+
+	// A named selector group is a different matter: it can be pointing anywhere
+	// at any moment, so binding to it is not consent to unproxied egress.
+	src.Modules[0].EgressGroup = "Japan"
+	doc, err = compileOverlayGeneration(overlayCompileInput{
+		Document: src, MatchTarget: "Proxies", DocumentRevision: "rev-1",
+		Transition: overlayTransitionRevoke,
+	})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	for _, c := range doc.Egress.Capabilities {
+		if c.Group == "Japan" && c.AllowDirect {
+			t.Error("a capability for an explicitly bound selector group allows DIRECT")
+		}
 	}
 }
 
@@ -142,8 +231,10 @@ func TestOverlayDestinationAllowlistMirrorsTheLegacyEgressRules(t *testing.T) {
 		}
 	}
 	got := map[string]struct{}{}
-	for _, d := range doc.Egress.Capabilities[0].Destinations {
-		got[string(d.Kind)+"|"+d.Value+"|"+strconv.Itoa(int(d.Ports[0].From))] = struct{}{}
+	for _, c := range doc.Egress.Capabilities {
+		for _, d := range c.Destinations {
+			got[string(d.Kind)+"|"+d.Value+"|"+strconv.Itoa(int(d.Ports[0].From))] = struct{}{}
+		}
 	}
 
 	for k := range want {
@@ -155,6 +246,26 @@ func TestOverlayDestinationAllowlistMirrorsTheLegacyEgressRules(t *testing.T) {
 		if _, ok := want[k]; !ok {
 			t.Errorf("the allowlist adds %s, which the legacy path denied", k)
 		}
+	}
+}
+
+// An enabled master with nothing to capture must mint no capability at all.
+//
+// The alternative is a capability whose destination allowlist is present but
+// empty, and "empty" and "absent" are the same JSON to a core that treats a
+// missing allowlist as unrestricted — which would hand the processor the
+// operator's egress group for any endpoint it cared to dial, at exactly the
+// moment no extension has authorized a single one.
+func TestOverlayEnabledMasterWithNoModulesMintsNoCapability(t *testing.T) {
+	src := overlayTestDocument()
+	for i := range src.Modules {
+		src.Modules[i].Enabled = false
+	}
+	doc := compileForTest(t, src, overlayTransitionRevoke)
+
+	if len(doc.Egress.Capabilities) != 0 {
+		t.Fatalf("got %d capabilities with no enabled extension: %+v",
+			len(doc.Egress.Capabilities), doc.Egress.Capabilities)
 	}
 }
 
