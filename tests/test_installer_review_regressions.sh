@@ -245,13 +245,11 @@ else
     pass "installer has no old-release service teardown"
 fi
 
-renew_install="$(sed -n '/^install_renewal_automation()/,/^}/p' "$INSTALL")"
 renew_remove="$(sed -n '/^remove_owned_renewal_automation()/,/^}/p' "$INSTALL")"
-grep -Fq 'preflight_renewal_unit_ownership' <<<"$renew_install" \
-    && grep -Fq 'remove_owned_unit 5gpn-certbot-renew.timer' <<<"$renew_remove" \
-    && grep -Fq 'remove_owned_unit 5gpn-certbot-renew.service' <<<"$renew_remove" \
-    && pass "renewal units are ownership-gated before replacement and removal" \
-    || fail "renewal unit ownership gates are incomplete"
+grep -Fq 'remove_unit 5gpn-certbot-renew.timer' <<<"$renew_remove" \
+    && grep -Fq 'remove_unit 5gpn-certbot-renew.service' <<<"$renew_remove" \
+    && pass "renewal timer and service are both torn down" \
+    || fail "renewal teardown misses a unit"
 
 grep -Fq 'MIHOMO_BIN="${BIN_DIR}/mihomo"' "$INSTALL" \
     && grep -Fq 'GUM_BIN="${BIN_DIR}/gum"' "$INSTALL" \

@@ -19,9 +19,9 @@ CA_MARKER_VALUE=5gpn-intercept-ca-v1
 LOCK_FILE=/run/5gpn/cert-renew.lock
 RENEW_BEFORE=2592000
 TEMP_MARKER=.5gpn-temp-owned
-TEMP_MARKER_VALUE=5gpn-intercept-renew-v2
+TEMP_MARKER_VALUE=5gpn-intercept-renew
 CONFIG_ROOT_MARKER=.5gpn-owned
-CONFIG_ROOT_MARKER_VALUE=5gpn-config-v1
+CONFIG_ROOT_MARKER_VALUE=5gpn-config
 
 path_uid() { stat -c %u -- "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null || true; }
 path_gid() { stat -c %g -- "$1" 2>/dev/null || stat -f %g "$1" 2>/dev/null || true; }

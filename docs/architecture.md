@@ -1131,30 +1131,69 @@ the same failed transaction is removed only while it still has the expected
 isolated shape; pre-existing accounts are retained. Ownership validation must
 fail before either path is claimed or deleted.
 
-Replacement or removal of the current `5gpn-dns`, `5gpn-intercept`, mihomo, and certificate-
-renewal service/timer units is gated by an explicit 5gpn ownership fingerprint.
+Replacement of the current `5gpn-dns`, `5gpn-intercept`, mihomo, and
+certificate-renewal service/timer units is not gated on provenance. These fixed
+unit names are the project's own deployment artifacts: installing claims them
+outright and uninstalling deletes them. Unit *contents* are pinned by the
+repository policy suites against `etc/systemd/`, never by inspecting the
+installed file — inspecting it cannot pin what a release ships, it can only
+reject a host that has not upgraded yet, which is every host mid-upgrade. An
+operator drop-in is not a reason to refuse either: replacing the unit file
+leaves drop-ins in place and systemd keeps applying them, which is the supported
+way to override anything here. Stop-and-disable failure still blocks deletion of
+that unit file.
+
+The same rule governs the other fixed 5gpn paths — `/opt/5gpn`, `/etc/5gpn`, the
+state root, the management launcher, the polkit rule, the Certbot deploy hook,
+and the published static trees. Each still publishes an ownership marker, and
+recursive removal still re-verifies it, but *claiming* one is self-healing: an
+absent marker, one written by an older release, or one whose value has since
+changed all resolve to republishing the current marker and continuing. A marker
+names its owner, not its revision. Project roots are claimed as the first action
+of both install and uninstall, and the static trees and interception state root
+are claimed immediately before removal, so no check is ever reached with a stale
+marker. These ownership values therefore carry no revision suffix.
+
+Certificate material is the exception and keeps strict ownership: the
+certificate root and role trees, the debug-certificate root, the Certbot lineage
+ownership record, and the interception CA root are accepted only on their own
+valid marker, or — for a legacy CA root — on the exact closed legacy shape.
+Because there is no self-healing claim on that path, their marker values are
+frozen: changing one strands every existing host. The config-root value is
+additionally duplicated in `scripts/cert-renew.sh`,
+`scripts/intercept-cert-renew.sh`, and `scripts/renew-hook.sh`, which validate
+`/etc/5gpn` independently; the policy suite pins all four together.
 
 Root-owned recursive deletion requires all of the following:
 
-- an absolute canonical path;
-- rejection of empty paths, `/`, and system roots;
-- a non-symlink 5gpn ownership marker with exact expected contents;
-- deletion constrained to the validated owned directory.
+- an absolute canonical path, rejecting symlinks and aliases;
+- rejection of empty paths, `/`, and system roots; operator-configurable
+  publication paths are additionally rejected if they resolve to a system
+  directory or to a project root;
+- a target that is a real directory, root-owned and not writable by others;
+- for certificate material, a non-symlink 5gpn ownership marker with exact
+  expected contents;
+- deletion constrained to the validated directory.
 
 The quick-installer source marker follows the same rules. It cannot be supplied
 through a symlink, forged by merely placing any file with the marker name, or
 used to authorize clearing a pre-existing non-empty directory.
 
-Uninstall removes only resources proven to be owned by this installation. It
-must not stop, disable, overwrite, or delete similarly named third-party
-services, binaries, configuration, or data. In particular:
+Uninstall removes the resources this installation manages. Certificates,
+Certbot lineages, and operator configuration are removed only when proven owned;
+the fixed unit, launcher, polkit, hook, and directory paths above are removed
+because they are ours by path. It does not modify unrelated third-party
+services, binaries, data, `/etc/fstab` entries outside its own marked line,
+sysctls, modules, or directories. In particular:
 
-- a pre-existing `/swapfile` and its fstab entry are untouched unless an
-  installation ownership record proves 5gpn created that exact file;
-- global `mihomo`, Gum, and Certbot assets are untouched unless a 5gpn marker
-  or exact unit fingerprint proves ownership;
-- unrelated systemd units, Certbot lineages/hooks, `/etc/fstab` entries,
-  sysctls, modules, and directories are not modified;
+- a pre-existing `/swapfile` is untouched: the managed swapfile lives inside the
+  project state root, and only the exact `/etc/fstab` line carrying the 5gpn
+  swap marker is removed;
+- global Gum and Certbot assets are untouched unless a 5gpn marker proves
+  ownership; a preserved Gum binary survives runtime removal;
+- `mihomo.service` is a generic unit name and is *not* protected: if the host
+  had its own unit at that path, this installation replaced it and uninstall
+  deletes it;
 - no nftables ruleset or host firewall configuration is modified.
 
 `--purge` can remove additional 5gpn-owned state, but it does not weaken path,

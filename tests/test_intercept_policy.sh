@@ -28,6 +28,8 @@ grep -Fxq 'StateDirectory=5gpn-intercept' "$UNIT" || fail "module persistent sto
 grep -Fxq 'RuntimeDirectory=5gpn-intercept' "$UNIT" || fail "sidecar engine log socket has no private runtime directory"
 grep -Fxq 'RuntimeDirectoryMode=0750' "$UNIT" || fail "sidecar engine log runtime directory is not group-readable"
 grep -Fxq 'Requires=5gpn-intercept-cert.service' "$UNIT" || fail "sidecar startup does not gate on certificate publication"
+grep -Fxq 'ExecStart=/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json --control-peer-user gpn-dns' "$UNIT" \
+    || fail "sidecar is not launched against the fixed config and control peer"
 grep -Fxq 'ExecCondition=/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json --check-enabled' "$UNIT" \
     || fail "sidecar startup is not gated by the MITM master setting"
 grep -Fq 'InaccessiblePaths=-/etc/5gpn/intercept-ca' "$UNIT" || fail "interception unit can read the CA signing key"
@@ -45,11 +47,18 @@ grep -Fxq 'ReadOnlyPaths=/etc/5gpn/intercept-ca /opt/5gpn/bin/5gpn-intercept /op
     || fail "certificate publisher does not scope root-key access"
 grep -Fxq 'PathChanged=/etc/5gpn/intercept/config.json' "$CERT_PATH" || fail "module certificate watcher is missing"
 grep -Fxq '# 5gpn-unit-id: 5gpn-intercept-cert.timer:v1' "$CERT_TIMER" || fail "interception certificate timer ownership marker is missing"
+grep -Fxq 'OnCalendar=*-*-* 02:00:00' "$CERT_TIMER" || fail "interception certificate timer does not run on the fixed daily schedule"
 grep -Fxq 'Persistent=true' "$CERT_TIMER" || fail "interception certificate timer is not persistent"
 grep -Fxq 'Unit=5gpn-intercept-cert.service' "$CERT_TIMER" || fail "interception certificate timer does not target the leaf publisher"
 grep -Fxq '# 5gpn-unit-id: 5gpn-intercept-runtime.path:v1' "$RUNTIME_PATH" || fail "MITM runtime watcher ownership marker is missing"
 grep -Fxq 'PathChanged=/etc/5gpn/intercept/config.json' "$RUNTIME_PATH" || fail "MITM runtime watcher is missing"
 grep -Fxq 'Unit=5gpn-intercept.service' "$RUNTIME_PATH" || fail "MITM runtime watcher does not start the sidecar"
+# A path unit counts every trigger against systemd's start limit, and the watched
+# file is rewritten once per settings change. Without this, a burst of console
+# edits puts the watcher into failed permanently and the sidecar stops being
+# started on any later change. The installer no longer inspects the installed
+# unit's body, so this is the only thing pinning the directive.
+grep -Fxq 'StartLimitIntervalSec=0' "$RUNTIME_PATH" || fail "MITM runtime watcher is start-rate-limited and a burst of settings edits can disable it permanently"
 
 grep -Fq 'intercept_asset="5gpn-intercept-linux-amd64"' "$INSTALL" || fail "interception release asset is not staged"
 grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/5gpn-intercept"' "$INSTALL" || fail "interception release asset is not checksum-verified"
@@ -81,7 +90,7 @@ renew_service="$(sed -n '/^install_renewal_automation()/,/^}/p' "$INSTALL")"
 grep -Fq 'ExecStart=/opt/5gpn/scripts/intercept-cert-renew.sh' <<<"$renew_service" \
     && fail "public certificate renewal still couples interception leaf renewal"
 grep -Fq 'INTERCEPT_CA_MARKER_VALUE="5gpn-intercept-ca-v1"' "$INSTALL" || fail "interception CA ownership marker is missing"
-grep -Fq 'INTERCEPT_STATE_MARKER_VALUE="5gpn-intercept-state-v1"' "$INSTALL" || fail "interception state ownership marker is missing"
+grep -Fq 'INTERCEPT_STATE_MARKER_VALUE="5gpn-intercept-state"' "$INSTALL" || fail "interception state ownership marker is missing"
 grep -Fq 'remove_fixed_owned_dir "$INTERCEPT_STATE_DIR"' "$INSTALL" || fail "purge does not remove marked module persistent state"
 
 grep -Fq 'name: intercept-egress' "$TEMPLATE" || fail "mihomo interception egress listener is missing"

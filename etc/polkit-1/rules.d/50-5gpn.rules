@@ -1,4 +1,4 @@
-// 5gpn-polkit-id: runtime-operations-v1
+// 5gpn-polkit-id: runtime-operations
 // Permit the unprivileged control plane to request only its fixed privileged
 // operations. Command lines and unit definitions remain root-owned.
 polkit.addRule(function(action, subject) {

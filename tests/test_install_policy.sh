@@ -29,6 +29,8 @@ grep -Fq 'certbot_lineage_owned_by_5gpn "$base"' <<<"$renew_auto_fn" \
 grep -Fq 'acquire_install_gate || return 1' "$CERT_RENEW" \
     || fail "public renewal can enter the installer certificate-lock handoff window"
 grep -Fq '5gpn-certbot-renew.timer' <<<"$renew_auto_fn" || fail "no certificate renewal timer installed"
+grep -Fq 'OnCalendar=*-*-* 03:00:00' <<<"$renew_auto_fn" \
+    || fail "renewal timer does not run on the fixed daily schedule"
 grep -Fq 'Persistent=true' <<<"$renew_auto_fn" || fail "renewal timer not Persistent (missed runs will not catch up)"
 grep -Fq 'ExecStart=/opt/5gpn/scripts/cert-renew.sh --quiet' <<<"$renew_auto_fn" \
     || fail "renewal timer does not invoke the unified certificate helper"
@@ -62,17 +64,60 @@ grep -Fq 'systemd-run' "$BOT_OPS" \
 grep -Fq 'cf_credential_safe' "$CERT_RENEW" \
     || fail "Cloudflare renewal can follow an unsafe credential symlink or permissions drift"
 
-unit_owned_fn="$(sed -n '/^unit_file_owned_by_5gpn()/,/^}/p' "$INSTALL")"
-grep -Fq '# 5gpn-unit-id:' <<<"$unit_owned_fn" \
-    || fail "systemd ownership does not require an exact unit marker"
-grep -Fq 'Description=5gpn' <<<"$unit_owned_fn" \
-    && fail "systemd ownership still trusts a display description"
+# Unit replacement must not be gated on the installed file's contents. Such a
+# check cannot pin what we ship -- it can only reject a host that has not
+# upgraded yet, which is every host mid-upgrade -- so a bumped revision or a
+# newly required directive silently wedges every existing install. Unit contents
+# are pinned against etc/systemd/ below and in test_intercept_policy.sh instead.
+grep -Fq 'unit_file_owned_by_5gpn' "$INSTALL" \
+    && fail "systemd unit replacement is gated on the installed unit's contents again"
+remove_unit_fn="$(sed -n '/^remove_unit()/,/^}/p' "$INSTALL")"
+grep -Fq '5gpn-unit-id' <<<"$remove_unit_fn" \
+    && fail "unit removal consults a provenance marker instead of the fixed unit path"
 grep -Fxq '# 5gpn-unit-id: 5gpn-dns.service:v1' "$ROOT/etc/systemd/5gpn-dns.service" \
-    || fail "5gpn-dns unit lacks its exact ownership marker"
+    || fail "5gpn-dns unit lacks its provenance marker"
 grep -Fxq '# 5gpn-unit-id: mihomo.service:v1' "$ROOT/etc/systemd/mihomo.service" \
-    || fail "mihomo unit lacks its exact ownership marker"
+    || fail "mihomo unit lacks its provenance marker"
 grep -Fxq '# 5gpn-unit-id: 5gpn-journal@.service:v1' "$ROOT/etc/systemd/5gpn-journal@.service" \
-    || fail "journal exporter unit lacks its exact ownership marker"
+    || fail "journal exporter unit lacks its provenance marker"
+
+# The same trap lives in every other ownership check: a marker revision or a
+# body fingerprint that changes between releases wedges every host that has not
+# upgraded yet. Project roots self-heal at claim time; the path predicates match
+# the owner rather than the revision or the contents.
+claim_roots_fn="$(sed -n '/^claim_project_roots()/,/^}/p' "$INSTALL")"
+[[ "$(grep -c 'claim_fixed_owned_dir .* 1 || return 1' <<<"$claim_roots_fn")" == 3 ]] \
+    || fail "project roots are not all claimed self-healingly"
+grep -Fq 'claim_fixed_owned_dir "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" 1' "$INSTALL" \
+    && fail "interception CA root is claimed self-healingly; certificate material must stay strict"
+launcher_owned_fn="$(sed -n '/^launcher_owned()/,/^}/p' "$INSTALL")"
+grep -Fq 'BK=/opt/5gpn/install.sh' <<<"$launcher_owned_fn" \
+    && fail "launcher ownership fingerprints the generated launcher body"
+grep -Fq "Let's Encrypt renewal deploy hook" <<<"$renew_owned_fn" \
+    && fail "deploy-hook ownership fingerprints the hook body"
+polkit_owned_fn="$(sed -n '/^polkit_rule_owned_by_5gpn()/,/^}/p' "$INSTALL")"
+grep -Fq 'grep -Fqx "$POLKIT_RULE_MARKER"' <<<"$polkit_owned_fn" \
+    && fail "polkit ownership pins the exact marker revision instead of its owner"
+grep -Eq '^// 5gpn-polkit-id: [a-z-]+$' "$ROOT/etc/polkit-1/rules.d/50-5gpn.rules" \
+    || fail "polkit rule marker carries a revision suffix again"
+grep -REq '_VALUE="5gpn-(runtime|config|state|web|ios|temp|zashboard|intercept-state)-v[0-9]' "$INSTALL" \
+    && fail "a self-healing ownership value carries a revision suffix again"
+# The converse: certificate roots have no self-heal, so their values are frozen.
+# Changing one strands every existing host.
+for cert_value in 'DEBUG_CERT_MARKER_VALUE="5gpn-debug-cert-v1"' \
+                  'CERT_ROOT_MARKER_VALUE="5gpn-cert-root-v1"' \
+                  'CERT_ROLE_VALUE_PREFIX="5gpn-cert-role-v1"' \
+                  'INTERCEPT_CA_MARKER_VALUE="5gpn-intercept-ca-v1"'; do
+    grep -Fq "$cert_value" "$INSTALL" \
+        || fail "frozen certificate ownership value changed: $cert_value"
+done
+# The config-root marker value is duplicated in three runtime helpers that
+# validate /etc/5gpn on their own. De-syncing them silently breaks renewal after
+# the installer republishes the marker, so they are pinned together here.
+for helper in scripts/cert-renew.sh scripts/intercept-cert-renew.sh scripts/renew-hook.sh; do
+    grep -Fqx 'CONFIG_ROOT_MARKER_VALUE=5gpn-config' "$ROOT/$helper" \
+        || fail "$helper disagrees with the installer's config-root ownership value"
+done
 
 # Install/configure ordering: resolve the TUI/persisted selection, wait for the
 # fixed-resolver DNS gate, and only then publish or issue certificate material.

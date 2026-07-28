@@ -46,20 +46,27 @@ BIN_DIR="${BASE_DIR}/bin"                # project-managed binaries; Gum survive
 SCRIPTS_DIR="${BASE_DIR}/scripts"        # installed copies of repo scripts
 WWW_DIR="${BASE_DIR}/www"                # signed iOS profile root (served in-process by 5gpn-dns)
 BASE_OWNERSHIP_MARKER=".5gpn-owned"
-BASE_OWNERSHIP_VALUE="5gpn-runtime-v1"
+BASE_OWNERSHIP_VALUE="5gpn-runtime"
 
 CONF_DIR="/etc/5gpn"                 # config: dns.env is the single source of truth
 CONF_OWNERSHIP_MARKER=".5gpn-owned"
-CONF_OWNERSHIP_VALUE="5gpn-config-v1"
+CONF_OWNERSHIP_VALUE="5gpn-config"
 STATE_DIR="/var/lib/5gpn"
 STATE_OWNERSHIP_MARKER=".5gpn-owned"
-STATE_OWNERSHIP_VALUE="5gpn-state-v1"
+STATE_OWNERSHIP_VALUE="5gpn-state"
 SWAP_FILE="${STATE_DIR}/swapfile"
 SWAP_FSTAB_MARKER="# 5gpn-owned-swap-v1"
 SWAP_CREATED_THIS_RUN=0
 DNS_BIN="${BIN_DIR}/5gpn-dns"            # 5gpn-dns binary (DoT resolver + web console)
 INTERCEPT_BIN="${BIN_DIR}/5gpn-intercept" # allowlisted TLS/HTTP3 interception sidecar
 DNS_CERT_DIR="/etc/5gpn/cert"            # selected cert copied into dot/, web/, zash/ roles
+# Certificate ownership values keep their revision suffix, and it is not dead
+# weight. Every other 5gpn root self-heals -- claiming republishes whatever
+# marker is there -- so its value can change freely. Certificate roots
+# deliberately have no such path: their marker is the only thing that stops the
+# installer adopting a directory of someone else's key material. Changing one of
+# these strings therefore strands every existing host with no way back, so they
+# are frozen rather than versioned, and test_install_policy.sh pins them.
 DEBUG_CERT_DIR="/etc/5gpn/debug-cert"     # self-signed debug certs; NEVER under /etc/letsencrypt
 DEBUG_CERT_MARKER=".5gpn-debug-cert-owned"
 DEBUG_CERT_MARKER_VALUE="5gpn-debug-cert-v1"
@@ -139,19 +146,20 @@ OVERLAY_GENERATION_SOCKET="/run/mihomo/overlay-generation.sock"
 OVERLAY_CONTROL_GROUP="5gpn-overlay-ctl"
 OVERLAY_GENERATION_GROUP="5gpn-overlay-gen"
 INTERCEPT_STATE_MARKER=".5gpn-intercept-state-owned"
-INTERCEPT_STATE_MARKER_VALUE="5gpn-intercept-state-v1"
+INTERCEPT_STATE_MARKER_VALUE="5gpn-intercept-state"
 DNS_SERVICE_USER="gpn-dns"
 MIHOMO_SERVICE_USER="mihomo"
 INTERCEPT_SERVICE_USER="gpn-intercept"
 POLKIT_RULE_PATH="/etc/polkit-1/rules.d/50-5gpn.rules"
-POLKIT_RULE_MARKER="// 5gpn-polkit-id: runtime-operations-v1"
+POLKIT_RULE_MARKER="// 5gpn-polkit-id: runtime-operations"
 ZASH_OWNERSHIP_MARKER=".5gpn-zashboard-owned"
+ZASH_OWNERSHIP_VALUE="5gpn-zashboard"
 WEB_OWNERSHIP_MARKER=".5gpn-web-owned"
-WEB_OWNERSHIP_VALUE="5gpn-web-v1"
+WEB_OWNERSHIP_VALUE="5gpn-web"
 IOS_OWNERSHIP_MARKER=".5gpn-ios-owned"
-IOS_OWNERSHIP_VALUE="5gpn-ios-v1"
+IOS_OWNERSHIP_VALUE="5gpn-ios"
 TEMP_OWNERSHIP_MARKER=".5gpn-temp-owned"
-TEMP_OWNERSHIP_VALUE="5gpn-temp-v1"
+TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # Upstream v1.19.28 plus the runtime overlay, built from moooyo/mihomo's
 # 5gpn-ext branch. Upstream does not implement the RUNTIME-OVERLAY anchors,
 # so against an upstream core the installer's probe fails and it seeds the
@@ -1107,8 +1115,22 @@ remove_temp_dir() {
     rm -rf -- "$canonical"
 }
 
+# Claim a fixed project root and publish the ownership marker that the recursive
+# removal guards re-verify later.
+#
+# adopt=1 makes the claim self-healing: an absent marker, one written by an
+# older release, or one whose value has since changed all resolve to "republish
+# the current marker and continue". This is what 5gpn's own artifact roots pass.
+# A refusal there could only ever mean "this host has not upgraded yet" -- true
+# of every host mid-upgrade -- and there is no way forward from it short of
+# deleting the directory by hand. That is exactly how a bumped marker once
+# wedged live installs, and the marker names the owner, not the revision.
+#
+# adopt=0 (the default) keeps the strict behaviour for certificate material: an
+# existing root is accepted only when its marker already verifies, and an
+# unmarked non-empty directory is refused rather than absorbed.
 claim_fixed_owned_dir() {
-    local dir="$1" marker="$2" value="$3" canonical nonempty=0 created_dir=0
+    local dir="$1" marker="$2" value="$3" adopt="${4:-0}" canonical nonempty=0 created_dir=0
     canonical="$(canonical_dir_path "$dir")" \
         || { err "Could not canonicalize project directory: $dir"; return 1; }
     [[ "$canonical" == "$dir" ]] \
@@ -1121,27 +1143,47 @@ claim_fixed_owned_dir() {
             || { err "Unsafe ownership or mode on fixed project directory: $dir"; return 1; }
         return 0
     fi
-    if [[ -e "$dir/$marker" ]]; then
-        err "Invalid or symlinked ownership marker: $dir/$marker"
-        return 1
-    fi
-    if [[ "$nonempty" == 1 ]]; then
-        err "Refusing non-empty unowned project directory: $dir"
-        return 1
-    fi
-    if [[ -e "$dir" || -L "$dir" ]]; then
-        unmarked_fixed_dir_is_safe_to_claim "$dir" \
-            || { err "Refusing unsafe empty fixed directory before marker publication: $dir"; return 1; }
+    if [[ "$adopt" == 1 ]]; then
+        if [[ -e "$dir" || -L "$dir" ]]; then
+            [[ -d "$dir" && ! -L "$dir" ]] \
+                || { err "Fixed project directory is not a real directory: $dir"; return 1; }
+            # Metadata is still checked. An orphaned uid or a mode an operator
+            # widened is a real finding; only the marker's presence and revision
+            # stop being grounds for refusal.
+            fixed_owned_dir_metadata_is_safe "$dir" \
+                || { err "Unsafe ownership or mode on fixed project directory: $dir"
+                     report_orphaned_root_owner "$dir"; return 1; }
+        else
+            created_dir=1
+            install -d -o root -g root -m 0755 -- "$dir" \
+                && chmod g-s -- "$dir" \
+                && chmod 0755 -- "$dir" \
+                || { err "Could not create fixed project directory: $dir"; return 1; }
+        fi
+        rm -f -- "$dir/$marker" 2>/dev/null || true
     else
-        created_dir=1
-        # CONF_DIR is intentionally setgid. A child created there without an
-        # explicit group inherits gpn-dns and immediately fails the root-owned
-        # fixed-root boundary. Establish fresh roots with exact metadata before
-        # publishing the ownership marker.
-        install -d -o root -g root -m 0755 -- "$dir" \
-            && chmod g-s -- "$dir" \
-            && chmod 0755 -- "$dir" \
-            || { err "Could not create fixed project directory: $dir"; return 1; }
+        if [[ -e "$dir/$marker" ]]; then
+            err "Invalid or symlinked ownership marker: $dir/$marker"
+            return 1
+        fi
+        if [[ "$nonempty" == 1 ]]; then
+            err "Refusing non-empty unowned project directory: $dir"
+            return 1
+        fi
+        if [[ -e "$dir" || -L "$dir" ]]; then
+            unmarked_fixed_dir_is_safe_to_claim "$dir" \
+                || { err "Refusing unsafe empty fixed directory before marker publication: $dir"; return 1; }
+        else
+            created_dir=1
+            # CONF_DIR is intentionally setgid. A child created there without an
+            # explicit group inherits gpn-dns and immediately fails the root-owned
+            # fixed-root boundary. Establish fresh roots with exact metadata before
+            # publishing the ownership marker.
+            install -d -o root -g root -m 0755 -- "$dir" \
+                && chmod g-s -- "$dir" \
+                && chmod 0755 -- "$dir" \
+                || { err "Could not create fixed project directory: $dir"; return 1; }
+        fi
     fi
     write_ownership_marker "$dir" "$marker" "$value" \
         || { err "Could not write ownership marker under $dir"; return 1; }
@@ -1154,9 +1196,9 @@ claim_fixed_owned_dir() {
 }
 
 claim_project_roots() {
-    claim_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" || return 1
-    claim_fixed_owned_dir "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" || return 1
-    claim_fixed_owned_dir "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE" || return 1
+    claim_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" 1 || return 1
+    claim_fixed_owned_dir "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" 1 || return 1
+    claim_fixed_owned_dir "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE" 1 || return 1
 }
 
 # Older beta installs used a setgid CA directory and inherited the gpn-dns
@@ -1235,26 +1277,16 @@ report_orphaned_root_owner() {
     fi
 }
 
+# The CA root holds signing key material, so a pre-existing one is accepted only
+# on its own marker or the exact closed legacy shape. The state root is an
+# ordinary 5gpn artifact root and is claimed rather than inspected: refusing it
+# here could only mean the host had not upgraded yet.
 preflight_intercept_roots() {
-    local dir marker value
-    while read -r dir marker value; do
-        if [[ ! -e "$dir" && ! -L "$dir" ]]; then
-            continue
-        fi
-        if [[ "$dir" == "$INTERCEPT_CA_DIR" ]]; then
-            fixed_owned_dir_is_safe "$dir" "$marker" "$value" \
-                || legacy_intercept_ca_root_is_safe \
-                || { err "Refusing pre-existing unowned interception root: $dir"
-                     report_orphaned_root_owner "$dir"; return 1; }
-        else
-            fixed_owned_dir_is_safe "$dir" "$marker" "$value" \
-                || { err "Refusing pre-existing unowned interception root: $dir"
-                     report_orphaned_root_owner "$dir"; return 1; }
-        fi
-    done <<EOF
-$INTERCEPT_CA_DIR $INTERCEPT_CA_MARKER $INTERCEPT_CA_MARKER_VALUE
-$INTERCEPT_STATE_DIR $INTERCEPT_STATE_MARKER $INTERCEPT_STATE_MARKER_VALUE
-EOF
+    [[ -e "$INTERCEPT_CA_DIR" || -L "$INTERCEPT_CA_DIR" ]] || return 0
+    fixed_owned_dir_is_safe "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" \
+        || legacy_intercept_ca_root_is_safe \
+        || { err "Refusing pre-existing unowned interception CA root: $INTERCEPT_CA_DIR"
+             report_orphaned_root_owner "$INTERCEPT_CA_DIR"; return 1; }
 }
 
 claim_intercept_roots() {
@@ -1264,7 +1296,7 @@ claim_intercept_roots() {
         fi
     fi
     claim_fixed_owned_dir "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" || return 1
-    claim_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" || return 1
+    claim_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" 1 || return 1
 }
 
 remove_fixed_owned_dir() {
@@ -1369,12 +1401,21 @@ static_owned_tree_is_safe() {
         && root_ownership_marker_is_safe "$dir" "$marker" "$value"
 }
 
-claim_empty_public_owned_tree() {
+# Claim a public static tree and publish the marker that later removals
+# re-verify. An existing tree is adopted rather than refused: an absent marker,
+# one written by an older release, or one whose value has since changed would
+# otherwise reject every host that had not upgraded yet, with no way forward
+# short of deleting the tree by hand.
+#
+# The path is still gated, just not on provenance: safe_web_path /
+# safe_zashboard_path reject system roots and the project's own roots, and both
+# the tree and its parent must be real directories that are root-owned and not
+# writable by anyone else.
+claim_public_owned_tree() {
     local dir="$1" marker="$2" value="$3" created_dir=0
     if [[ -e "$dir" || -L "$dir" ]]; then
         root_owned_nonwritable_directory_is_safe "$dir" || return 1
-        [[ -z "$(find "$dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]] \
-            || return 1
+        rm -f -- "$dir/$marker" 2>/dev/null || true
     else
         created_dir=1
     fi
@@ -1400,7 +1441,7 @@ normalize_static_tree_ownership() {
 }
 
 preflight_public_owned_tree() {
-    local path="$1" marker="$2" value="$3" parent nonempty=0
+    local path="$1" marker="$2" value="$3" parent
     parent="$(dirname -- "$path")" || return 1
     secure_directory_chain_is_safe "$parent" \
         && root_owned_nonwritable_directory_is_safe "$parent" || return 1
@@ -1410,10 +1451,8 @@ preflight_public_owned_tree() {
         static_owned_tree_is_safe "$path" "$marker" "$value"
         return
     fi
-    [[ ! -e "$path/$marker" && ! -L "$path/$marker" ]] || return 1
-    [[ -n "$(find "$path" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]] \
-        && nonempty=1
-    [[ "$nonempty" == 0 ]] || return 1
+    # An absent, stale, or older-release marker is adopted at claim time, not
+    # refused here. Only the tree's own shape still gates.
     root_owned_nonwritable_directory_is_safe "$path"
 }
 
@@ -1434,7 +1473,7 @@ preflight_zashboard_dir() {
     local p
     p="$(safe_zashboard_path)" || return 1
     DNS_ZASH_DIR="$p"
-    preflight_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1' \
+    preflight_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
         || { err "Refusing unsafe or unowned DNS_ZASH_DIR before staging: $p"; return 1; }
     export DNS_ZASH_DIR
 }
@@ -1442,35 +1481,28 @@ preflight_zashboard_dir() {
 # Claim the zashboard directory before ever clearing it. A non-empty directory
 # must already carry the exact current ownership marker.
 claim_zashboard_dir() {
-    local p marker nonempty=0
+    local p
     preflight_zashboard_dir || return 1
     p="$(safe_zashboard_path)" || return 1
     DNS_ZASH_DIR="$p"
-    marker="$p/$ZASH_OWNERSHIP_MARKER"
     ensure_static_publish_parent "$p" \
         || { err "DNS_ZASH_DIR parent is not root-owned and non-writable: $(dirname -- "$p")"; return 1; }
     if [[ ( -e "$p" || -L "$p" ) && ( ! -d "$p" || -L "$p" ) ]]; then
         err "DNS_ZASH_DIR exists but is not a directory: $p"; return 1
     fi
-    [[ -d "$p" && -n "$(find "$p" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]] && nonempty=1
-    if verify_ownership_marker "$p" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1'; then
-        static_owned_tree_is_safe "$p" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1' \
+    if verify_ownership_marker "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE"; then
+        static_owned_tree_is_safe "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
             || { err "Unsafe zashboard directory or ownership marker: $p"; return 1; }
-    elif [[ "$nonempty" == 0 ]]; then
-        [[ ! -e "$marker" && ! -L "$marker" ]] \
-            || { err "Invalid zashboard ownership marker: $marker"; return 1; }
-        claim_empty_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1' \
-            || { err "Could not establish safe zashboard ownership: $p"; return 1; }
     else
-        err "Refusing non-empty external DNS_ZASH_DIR without a 5gpn ownership marker: $p"
-        return 1
+        claim_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
+            || { err "Could not establish safe zashboard ownership: $p"; return 1; }
     fi
     export DNS_ZASH_DIR
 }
 
 clear_zashboard_dir() {
     claim_zashboard_dir || return 1
-    clear_owned_scope "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1' \
+    clear_owned_scope "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
         "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER"
 }
 
@@ -1478,10 +1510,13 @@ remove_zashboard_dir() {
     local p
     p="$(safe_zashboard_path)" || return 1
     [[ -e "$p" ]] || return 0
+    # Claim before removing: a tree published by an older release carries that
+    # release's marker value, and requiring the current one here would strand it
+    # on the disk of every host that had not reinstalled first.
     static_publish_parent_is_safe "$p" \
-        && static_owned_tree_is_safe "$p" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1' \
-        || { err "Refusing to remove unowned zashboard directory: $p"; return 1; }
-    remove_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1'
+        && claim_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
+        || { err "Refusing to remove unsafe zashboard directory: $p"; return 1; }
+    remove_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE"
 }
 
 safe_web_path() {
@@ -1504,25 +1539,21 @@ preflight_web_dir() {
 }
 
 claim_web_dir() {
-    local p marker nonempty=0
+    local p
     preflight_web_dir || return 1
     p="$(safe_web_path)" || return 1
     DNS_WEB_DIR="$p"
-    marker="$p/$WEB_OWNERSHIP_MARKER"
     ensure_static_publish_parent "$p" \
         || { err "DNS_WEB_DIR parent is not root-owned and non-writable: $(dirname -- "$p")"; return 1; }
     [[ ( ! -e "$p" && ! -L "$p" ) || ( -d "$p" && ! -L "$p" ) ]] \
         || { err "DNS_WEB_DIR is not a directory: $p"; return 1; }
-    [[ -d "$p" && -n "$(find "$p" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]] && nonempty=1
     if verify_ownership_marker "$p" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"; then
         static_owned_tree_is_safe "$p" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE" \
             || { err "Unsafe web directory or ownership marker: $p"; return 1; }
         return 0
     fi
-    [[ ! -e "$marker" ]] || { err "Invalid web ownership marker: $marker"; return 1; }
-    [[ "$nonempty" == 0 ]] \
-        || { err "Refusing non-empty DNS_WEB_DIR without the current ownership marker: $p"; return 1; }
-    claim_empty_public_owned_tree "$p" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"
+    claim_public_owned_tree "$p" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE" \
+        || { err "Could not establish safe web directory ownership: $p"; return 1; }
 }
 
 # Atomically publish a tree of public static assets. Source trees may come from
@@ -1570,22 +1601,21 @@ publish_owned_tree() {
     fi
 }
 
+# WWW_DIR is claimed the same way as the other static trees: an absent, stale, or
+# older-release marker is adopted rather than refused.
 claim_ios_dir() {
-    local nonempty=0
     [[ ! -e "$WWW_DIR" || -d "$WWW_DIR" ]] || return 1
-    [[ -d "$WWW_DIR" && -n "$(find "$WWW_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]] && nonempty=1
     if verify_ownership_marker "$WWW_DIR" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE"; then
         return 0
     fi
-    [[ ! -e "$WWW_DIR/$IOS_OWNERSHIP_MARKER" ]] || return 1
-    [[ "$nonempty" == 0 ]] || return 1
+    rm -f -- "$WWW_DIR/$IOS_OWNERSHIP_MARKER" 2>/dev/null || true
     write_ownership_marker "$WWW_DIR" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE"
 }
 
 # Bootstrap gum (prebuilt binary + sha256 verify). Never fatal: on any failure
 # _HAVE_GUM stays 0 and all helpers fall back to plain echo.
 install_gum() {
-    claim_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
+    claim_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" 1 \
         || { _HAVE_GUM=0; warn "gum bootstrap could not claim the runtime directory; using plain output."; return 0; }
     # Reuse only the project-owned binary after repeating its local ownership
     # and version checks. This avoids a silent network download on every run.
@@ -2117,73 +2147,26 @@ journal_export_instances_clear() {
     done
 }
 
-unit_file_owned_by_5gpn() {
-    local unit="$1" file="/etc/systemd/system/$1"
-    SYSTEMD_UNIT_CONFLICT_REASON=""
-    [[ -f "$file" && ! -L "$file" ]] || return 1
-    ! systemd_unit_has_dropins "$unit" || return 1
-    grep -Fqx "# 5gpn-unit-id: ${unit}:v1" "$file" || return 1
-    case "$unit" in
-        5gpn-dns.service)
-            grep -Fqx 'EnvironmentFile=/etc/5gpn/dns.env' "$file" \
-                && grep -Fqx 'ExecStart=/opt/5gpn/bin/5gpn-dns' "$file" ;;
-        mihomo.service)
-            grep -Fqx 'ExecStart=/opt/5gpn/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' "$file" ;;
-        5gpn-intercept.service)
-            grep -Fqx 'ExecStart=/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json --control-peer-user gpn-dns' "$file" ;;
-        5gpn-intercept-cert.service)
-            grep -Fqx 'ExecStart=/opt/5gpn/scripts/intercept-cert-renew.sh' "$file" ;;
-        5gpn-intercept-cert.path)
-            grep -Fqx 'PathChanged=/etc/5gpn/intercept/config.json' "$file" ;;
-        5gpn-intercept-cert.timer)
-            grep -Fqx 'OnCalendar=*-*-* 02:00:00' "$file" \
-                && grep -Fqx 'Persistent=true' "$file" \
-                && grep -Fqx 'Unit=5gpn-intercept-cert.service' "$file" ;;
-        5gpn-intercept-runtime.path)
-            grep -Fqx 'PathChanged=/etc/5gpn/intercept/config.json' "$file" \
-                && grep -Fqx 'Unit=5gpn-intercept.service' "$file" \
-                && grep -Fqx 'StartLimitIntervalSec=0' "$file" ;;
-        5gpn-journal@.service)
-            grep -Fqx 'ExecStart=/opt/5gpn/scripts/export-journal.sh %i' "$file" \
-                && journal_export_instances_clear ;;
-        5gpn-certbot-renew.service)
-            grep -Fqx 'ExecStart=/opt/5gpn/scripts/cert-renew.sh --quiet' "$file" ;;
-        5gpn-certbot-renew.timer)
-            grep -Fqx 'OnCalendar=*-*-* 03:00:00' "$file" \
-                && grep -Fqx 'Persistent=true' "$file" ;;
-        *) return 1 ;;
-    esac
-}
-
-preflight_owned_units() {
-    local unit
-    for unit in "$@"; do
-        if systemctl cat "$unit" >/dev/null 2>&1 || [[ -e "/etc/systemd/system/$unit" ]]; then
-            unit_file_owned_by_5gpn "$unit" \
-                || { err "Refusing to replace an existing non-5gpn or overridden unit: $unit${SYSTEMD_UNIT_CONFLICT_REASON:+ ($SYSTEMD_UNIT_CONFLICT_REASON)}"; return 1; }
-        fi
-    done
-}
-
-remove_owned_unit() {
-    local unit="$1"
-    if unit_file_owned_by_5gpn "$unit"; then
-        systemctl disable --now "$unit" 2>/dev/null \
-            || { err "Could not stop and disable owned unit $unit; refusing to delete its unit file."; return 1; }
-        rm -f -- "/etc/systemd/system/$unit" \
-            || { err "Could not delete owned unit file: $unit"; return 1; }
-        [[ ! -e "/etc/systemd/system/$unit" && ! -L "/etc/systemd/system/$unit" ]] \
-            || { err "Owned unit file still exists after removal: $unit"; return 1; }
-        ok "Removed 5gpn-owned unit: $unit"
-        return 0
-    fi
-    if systemctl cat "$unit" >/dev/null 2>&1 || [[ -e "/etc/systemd/system/$unit" ]]; then
-        warn "Preserving unowned unit: $unit"
-    fi
-}
-
-preflight_renewal_unit_ownership() {
-    preflight_owned_units 5gpn-certbot-renew.service 5gpn-certbot-renew.timer
+# The fixed unit names this installer writes are its own deployment artifacts.
+# Installing claims them outright and uninstalling deletes them; there is no
+# ownership fingerprint to consult. Two things this deliberately does not do:
+#
+#   - It does not inspect the installed unit's body. Doing so cannot pin what we
+#     ship -- it can only reject a host that has not upgraded yet, which is every
+#     host mid-upgrade. The unit contents are pinned by the repository policy
+#     suites against etc/systemd/, where a silent edit actually gets caught.
+#   - It does not refuse when an operator added a drop-in. Replacing the unit
+#     file leaves drop-ins in place and systemd keeps applying them, which is the
+#     supported way to override anything here.
+remove_unit() {
+    local unit="$1" file="/etc/systemd/system/$unit"
+    [[ -e "$file" || -L "$file" ]] || return 0
+    systemctl disable --now "$unit" 2>/dev/null \
+        || { err "Could not stop and disable $unit; refusing to delete its unit file."; return 1; }
+    rm -f -- "$file" || { err "Could not delete unit file: $unit"; return 1; }
+    [[ ! -e "$file" && ! -L "$file" ]] \
+        || { err "Unit file still exists after removal: $unit"; return 1; }
+    ok "Removed unit: $unit"
 }
 
 service_group_is_exclusive_for_user() {
@@ -2370,9 +2353,15 @@ install_service_accounts() {
     ok "Dedicated service accounts are ready: ${DNS_SERVICE_USER}, ${MIHOMO_SERVICE_USER}, ${INTERCEPT_SERVICE_USER}."
 }
 
+# The marker names the file's owner, not its revision: any revision this project
+# has published is ours to replace. Pinning the exact current string would mean
+# that bumping it wedges every host which has not upgraded yet -- with no way
+# forward but deleting the rule by hand.
 polkit_rule_owned_by_5gpn() {
-    [[ -f "$POLKIT_RULE_PATH" && ! -L "$POLKIT_RULE_PATH" ]] \
-        && grep -Fqx "$POLKIT_RULE_MARKER" "$POLKIT_RULE_PATH"
+    local line
+    [[ -f "$POLKIT_RULE_PATH" && ! -L "$POLKIT_RULE_PATH" ]] || return 1
+    line="$(grep -m1 -e '^// 5gpn-polkit-id: ' -- "$POLKIT_RULE_PATH")" || return 1
+    [[ "$line" == "$POLKIT_RULE_MARKER"* ]]
 }
 
 preflight_polkit_rule_ownership() {
@@ -2399,8 +2388,8 @@ install_polkit_rule() {
 }
 
 remove_owned_renewal_automation() {
-    remove_owned_unit 5gpn-certbot-renew.timer || return 1
-    remove_owned_unit 5gpn-certbot-renew.service || return 1
+    remove_unit 5gpn-certbot-renew.timer || return 1
+    remove_unit 5gpn-certbot-renew.service || return 1
     systemctl daemon-reload 2>/dev/null \
         || { err "Could not reload systemd after removing certificate renewal units."; return 1; }
 }
@@ -3260,7 +3249,7 @@ validate_install_rollback_snapshot() {
         snapshot_has_exactly_one_public_tree_state "$ROLLBACK_DIR/external-zash" \
             "$ROLLBACK_DIR/external-zash.empty-unowned" "$ROLLBACK_DIR/external-zash.absent" || return 1
         [[ ! -d "$ROLLBACK_DIR/external-zash" ]] \
-            || verify_ownership_marker "$ROLLBACK_DIR/external-zash" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1' || return 1
+            || verify_ownership_marker "$ROLLBACK_DIR/external-zash" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" || return 1
         if [[ -d "$ROLLBACK_DIR/external-zash.empty-unowned" ]]; then
             empty_unowned_public_tree_is_safe "$ROLLBACK_DIR/external-zash.empty-unowned" \
                 "$ZASH_OWNERSHIP_MARKER" || return 1
@@ -3407,8 +3396,8 @@ capture_install_rollback() {
     fi
     if [[ "$DNS_ZASH_DIR" != "$BASE_DIR"/* ]]; then
         if [[ -e "$DNS_ZASH_DIR" || -L "$DNS_ZASH_DIR" ]]; then
-            if verify_ownership_marker "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1'; then
-                static_owned_tree_is_safe "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1' \
+            if verify_ownership_marker "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE"; then
+                static_owned_tree_is_safe "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
                     || { err "Cannot capture unsafe external zashboard root: $DNS_ZASH_DIR"; return 1; }
                 cp -a -- "$DNS_ZASH_DIR" "$ROLLBACK_DIR/external-zash" || return 1
             else
@@ -3578,21 +3567,12 @@ restore_managed_unit_files() {
     for unit in "${TRANSACTION_UNIT_FILES[@]}"; do
         live="/etc/systemd/system/$unit"
         if [[ -f "$ROLLBACK_DIR/units/$unit" && ! -L "$ROLLBACK_DIR/units/$unit" ]]; then
-            if [[ -e "$live" || -L "$live" ]]; then
-                unit_file_owned_by_5gpn "$unit" \
-                    || { warn "Refusing to overwrite a changed unit during rollback: $unit"; failed_ref=1; continue; }
-            fi
             atomic_restore_regular_file "$ROLLBACK_DIR/units/$unit" "$live" \
                 || { warn "Could not restore unit file: $unit"; failed_ref=1; }
         elif [[ -f "$ROLLBACK_DIR/units/$unit.absent" ]]; then
             if [[ -e "$live" || -L "$live" ]]; then
-                if unit_file_owned_by_5gpn "$unit"; then
-                    rm -f -- "$live" \
-                        || { warn "Could not remove newly installed unit: $unit"; failed_ref=1; }
-                else
-                    warn "Refusing to remove a changed unit during rollback: $unit"
-                    failed_ref=1
-                fi
+                rm -f -- "$live" \
+                    || { warn "Could not remove newly installed unit: $unit"; failed_ref=1; }
             fi
         else
             warn "Rollback snapshot is missing the unit state for $unit."
@@ -4086,7 +4066,7 @@ rollback_install() {
     fi
     if [[ "$DNS_ZASH_DIR" != "$BASE_DIR"/* ]]; then
         restore_external_owned_tree "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" \
-            '5gpn-zashboard-v1' external-zash rollback_asset_failed
+            "$ZASH_OWNERSHIP_VALUE" external-zash rollback_asset_failed
     fi
     rollback_created_service_accounts rollback_account_failed
     systemctl daemon-reload >/dev/null 2>&1 || rollback_unit_failed=1
@@ -4309,7 +4289,7 @@ prepare_intercept_runtime_dirs() {
 }
 
 prepare_intercept_state_dir() {
-    claim_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" || return 1
+    claim_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" 1 || return 1
     install -d -o "$INTERCEPT_SERVICE_USER" -g "$INTERCEPT_SERVICE_USER" -m 0700 "$INTERCEPT_STATE_DIR" || return 1
     write_ownership_marker "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" || return 1
 }
@@ -4477,7 +4457,7 @@ install_zashboard() {
         || { err "zashboard was not staged."; return 1; }
     claim_zashboard_dir || return 1
     printf '%s\n' "$ZASH_VERSION" > "$ARTIFACT_STAGE/zash/.zash_version"
-    publish_owned_tree "$ARTIFACT_STAGE/zash" "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" '5gpn-zashboard-v1' \
+    publish_owned_tree "$ARTIFACT_STAGE/zash" "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
         || { err "Could not atomically publish zashboard."; return 1; }
     ok "Verified zashboard published to ${DNS_ZASH_DIR}/ (${ZASH_VERSION})."
 }
@@ -5043,9 +5023,12 @@ install_files() {
 # install_manage_cli installs the `5gpn` management command: a small launcher on
 # PATH that opens the management menu (or runs a subcommand), backed by a copy of
 # this installer at /opt/5gpn/install.sh. So an operator just types `5gpn`.
+# Ownership of the fixed launcher path is its header marker alone. The body is
+# generated by the heredoc in install_manage_cli below, so fingerprinting it
+# here would mean any future edit to that heredoc rejects every host still
+# running the previous release.
 launcher_owned() {
     [[ -f /usr/local/bin/5gpn && ! -L /usr/local/bin/5gpn ]] \
-        && grep -qF 'BK=/opt/5gpn/install.sh' /usr/local/bin/5gpn \
         && grep -Eq '^# (Managed by 5gpn installer|5gpn management launcher)' /usr/local/bin/5gpn
 }
 
@@ -5700,13 +5683,13 @@ decommission_certbot_lineage() {
     ok "Deleted the provenance-confirmed 5gpn Certbot lineage '${base}'."
 }
 
+# Ownership of the fixed deploy-hook path is its id marker alone. The rest of
+# the file is scripts/renew-hook.sh, whose text changes between releases, so
+# matching it here would reject every host still running the previous one.
 renew_hook_owned() {
     local hook="/etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh"
     [[ -f "$hook" && ! -L "$hook" ]] || return 1
-    grep -Fqx '# 5gpn-renew-hook-id: deploy-v1' "$hook" \
-        && grep -qF "Let's Encrypt renewal deploy hook" "$hook" \
-        && grep -qF 'DNS_BASE_DOMAIN' "$hook" \
-        && grep -qF '/etc/5gpn/cert' "$hook"
+    grep -Fqx '# 5gpn-renew-hook-id: deploy-v1' "$hook"
 }
 
 remove_owned_renew_hook() {
@@ -6105,7 +6088,6 @@ install_renewal_automation() {
     local service_tmp timer_tmp
     certbot_lineage_owned_by_5gpn "$base" \
         || { err "Refusing to install project renewal automation for a non-owned Certbot lineage."; return 1; }
-    preflight_renewal_unit_ownership || return 1
     [[ -x "${SCRIPTS_DIR}/cert-renew.sh" ]] \
         || { err "Scoped renewal helper is missing: ${SCRIPTS_DIR}/cert-renew.sh"; return 1; }
     service_tmp="$(mktemp /etc/systemd/system/.5gpn-certbot-renew.service.XXXXXX)" || return 1
@@ -6261,10 +6243,8 @@ reload_rules() {
 }
 
 preflight_unit_ownership() {
-    preflight_owned_units 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-cert.timer 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service \
-        5gpn-certbot-renew.service 5gpn-certbot-renew.timer
     journal_export_instances_clear \
-        || { err "Refusing conflicting fixed 5gpn journal exporter instance or drop-in."; return 1; }
+        || { err "Refusing conflicting fixed 5gpn journal exporter instance or drop-in.${SYSTEMD_UNIT_CONFLICT_REASON:+ ($SYSTEMD_UNIT_CONFLICT_REASON)}"; return 1; }
     preflight_polkit_rule_ownership
 }
 
@@ -7620,7 +7600,7 @@ full_install() {
         return 1
     }
     [[ "$reset_mihomo" == 0 ]] || confirm_upgrade_mihomo_reset || return 1
-    INSTALL_PHASE="checking existing unit and static-asset ownership"
+    INSTALL_PHASE="checking existing static-asset ownership"
     preflight_unit_ownership
     preflight_web_dir
     preflight_zashboard_dir
@@ -7800,7 +7780,7 @@ uninstall() {
     local unit
     for unit in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-cert.timer 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service 5gpn-certbot-renew.timer \
                 5gpn-certbot-renew.service; do
-        remove_owned_unit "$unit"
+        remove_unit "$unit"
     done
     rm -f -- /run/5gpn-journal/5gpn-dns.log /run/5gpn-journal/mihomo.log 2>/dev/null || true
     rmdir -- /run/5gpn-journal 2>/dev/null || true
@@ -7831,11 +7811,13 @@ uninstall() {
         warn "Preserving unowned /usr/local/bin/5gpn."
     fi
     if [[ "$DNS_WEB_DIR" != "$BASE_DIR"/* && -e "$DNS_WEB_DIR" ]]; then
+        # Claim before removing, for the same reason as the zashboard tree: a
+        # tree published by an older release carries that release's marker.
         if [[ "$(safe_web_path 2>/dev/null || true)" == "$DNS_WEB_DIR" ]] \
-           && verify_ownership_marker "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"; then
+           && claim_public_owned_tree "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"; then
             remove_public_owned_tree "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"
         else
-            warn "Kept unowned/unsafe DNS_WEB_DIR '$DNS_WEB_DIR'."
+            warn "Kept unsafe DNS_WEB_DIR '$DNS_WEB_DIR'."
         fi
     fi
     if [[ "$DNS_ZASH_DIR" != "$BASE_DIR"/* ]]; then
@@ -7878,6 +7860,12 @@ uninstall() {
         clear_owned_scope "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
             "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" cert acme debug-cert intercept-ca \
             || { err "Config ownership validation failed; refusing purge."; return 1; }
+        # Claim before removing: state published by an older release carries
+        # that release's marker value.
+        if [[ -e "$INTERCEPT_STATE_DIR" ]]; then
+            claim_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" 1 \
+                || { err "Refusing unsafe interception state removal."; return 1; }
+        fi
         remove_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" \
             || { err "Refusing unsafe interception state removal."; return 1; }
         if [[ "$decommission" == 1 && "$DECOMMISSION_PRESERVE_ACME" == 0 ]]; then

@@ -12,13 +12,13 @@ source "$INSTALL"
 pass() { echo "ok: $*"; }
 fail() { echo "FAIL: $*"; FAIL=1; }
 
-remove_unit="$(sed -n '/^remove_owned_unit()/,/^}/p' "$INSTALL")"
+remove_unit="$(sed -n '/^remove_unit()/,/^}/p' "$INSTALL")"
 if grep -Fq 'systemctl disable --now "$unit"' <<<"$remove_unit" \
    && ! grep -Fq 'systemctl disable --now "$unit" 2>/dev/null || true' <<<"$remove_unit" \
    && grep -Fq 'refusing to delete its unit file' <<<"$remove_unit"; then
-    pass "owned unit files are retained when stop/disable fails"
+    pass "unit files are retained when stop/disable fails"
 else
-    fail "owned unit removal can delete a unit after stop/disable failure"
+    fail "unit removal can delete a unit after stop/disable failure"
 fi
 
 readiness="$(sed -n '/^wait_service_ready()/,/^}/p' "$INSTALL")"
