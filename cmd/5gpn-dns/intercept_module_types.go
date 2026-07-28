@@ -150,6 +150,7 @@ type interceptRoutingRule struct {
 	DomainKeywords    []string `json:"domain_keywords,omitempty"`
 	AllDomainKeywords []string `json:"all_domain_keywords,omitempty"`
 	IPCIDR            string   `json:"ip_cidr,omitempty"`
+	IPASN             int      `json:"ip_asn,omitempty"`
 	Network           string   `json:"network,omitempty"`
 	DestinationPort   int      `json:"destination_port,omitempty"`
 }
@@ -175,6 +176,7 @@ type rawInterceptRoutingRule struct {
 	DomainKeywords    json.RawMessage `json:"domain_keywords"`
 	AllDomainKeywords json.RawMessage `json:"all_domain_keywords"`
 	IPCIDR            json.RawMessage `json:"ip_cidr"`
+	IPASN             json.RawMessage `json:"ip_asn"`
 	Network           json.RawMessage `json:"network"`
 	DestinationPort   json.RawMessage `json:"destination_port"`
 }
@@ -210,6 +212,17 @@ func (rule *interceptRoutingRule) UnmarshalJSON(body []byte) error {
 	}
 	if err := decodeStoredRoutingString(raw.Network, "network", &decoded.Network, false); err != nil {
 		return err
+	}
+	if len(raw.IPASN) > 0 {
+		if isJSONNull(raw.IPASN) {
+			return errors.New("ip_asn must not be null")
+		}
+		if err := json.Unmarshal(raw.IPASN, &decoded.IPASN); err != nil {
+			return fmt.Errorf("ip_asn must be an integer: %w", err)
+		}
+		if decoded.IPASN == 0 {
+			return errors.New("ip_asn must not be zero when declared")
+		}
 	}
 	if len(raw.DestinationPort) > 0 {
 		if isJSONNull(raw.DestinationPort) {
@@ -582,11 +595,19 @@ func validateInterceptRoutingRule(rule interceptRoutingRule) error {
 			return errors.New("ip_cidr must be canonical")
 		}
 	}
-	if primary > 1 || (primary == 0 && len(rule.DomainKeywords) == 0 && len(rule.AllDomainKeywords) == 0) {
-		return errors.New("declare exactly one of domain, domain_suffix, or ip_cidr, or at least one domain keyword")
+	if rule.IPASN != 0 {
+		primary++
+		// Zero is a reserved ASN and is also this field's unset value, so a
+		// declared zero cannot be distinguished from an omission.
+		if rule.IPASN < 0 || rule.IPASN > 4294967294 {
+			return errors.New("ip_asn must be a public autonomous system number")
+		}
 	}
-	if rule.IPCIDR != "" && (len(rule.DomainKeywords) > 0 || len(rule.AllDomainKeywords) > 0) {
-		return errors.New("ip_cidr cannot be combined with domain keywords")
+	if primary > 1 || (primary == 0 && len(rule.DomainKeywords) == 0 && len(rule.AllDomainKeywords) == 0) {
+		return errors.New("declare exactly one of domain, domain_suffix, ip_cidr, or ip_asn, or at least one domain keyword")
+	}
+	if (rule.IPCIDR != "" || rule.IPASN != 0) && (len(rule.DomainKeywords) > 0 || len(rule.AllDomainKeywords) > 0) {
+		return errors.New("an address selector cannot be combined with domain keywords")
 	}
 	if len(rule.DomainKeywords) > maxInterceptRouteKeywords || !sort.StringsAreSorted(rule.DomainKeywords) {
 		return fmt.Errorf("domain_keywords must be canonical, sorted, and contain at most %d entries", maxInterceptRouteKeywords)

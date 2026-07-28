@@ -142,6 +142,11 @@ func renderInterceptPolicyRule(rule interceptRoutingRule) string {
 		}
 		matchers = append(matchers, "("+kind+","+rule.IPCIDR+",no-resolve)")
 	}
+	if rule.IPASN != 0 {
+		// mihomo resolves an ASN from the destination address, so no-resolve
+		// keeps it from forcing a DNS lookup the same way IP-CIDR does.
+		matchers = append(matchers, "(IP-ASN,"+strconv.Itoa(rule.IPASN)+",no-resolve)")
+	}
 	if len(rule.DomainKeywords) == 1 {
 		matchers = append(matchers, "(DOMAIN-KEYWORD,"+rule.DomainKeywords[0]+")")
 	} else if len(rule.DomainKeywords) > 1 {
@@ -168,7 +173,7 @@ func renderInterceptPolicyRule(rule interceptRoutingRule) string {
 			if parts[0] == "OR" {
 				return matcher + "," + target
 			}
-			if strings.HasPrefix(parts[0], "IP-CIDR") {
+			if strings.HasPrefix(parts[0], "IP-CIDR") || parts[0] == "IP-ASN" {
 				return parts[0] + "," + parts[1] + "," + target + ",no-resolve"
 			}
 			return matcher + "," + target

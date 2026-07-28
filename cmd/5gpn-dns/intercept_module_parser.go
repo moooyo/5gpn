@@ -92,6 +92,7 @@ type nativeExtensionRoutingRule struct {
 	DomainKeywords    *[]string `yaml:"domainKeywords"`
 	AllDomainKeywords *[]string `yaml:"allDomainKeywords"`
 	IPCIDR            *string   `yaml:"ipCIDR"`
+	IPASN             *int      `yaml:"ipASN"`
 	Network           *string   `yaml:"network"`
 	DestinationPort   *int      `yaml:"destinationPort"`
 }
@@ -440,6 +441,14 @@ func normalizeNativeExtensionRoutingRule(raw nativeExtensionRoutingRule) (interc
 			return interceptRoutingRule{}, errors.New("ipCIDR must be one IPv4 or IPv6 CIDR")
 		}
 		rule.IPCIDR = network.String()
+	}
+	if raw.IPASN != nil {
+		// Public 32-bit ASNs. Zero is reserved and is also the field's unset
+		// value, so declaring it is refused rather than silently ignored.
+		if *raw.IPASN <= 0 || *raw.IPASN > 4294967294 {
+			return interceptRoutingRule{}, errors.New("ipASN must be a public autonomous system number")
+		}
+		rule.IPASN = *raw.IPASN
 	}
 	if raw.Network != nil {
 		rule.Network = strings.ToLower(strings.TrimSpace(*raw.Network))

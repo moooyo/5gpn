@@ -647,3 +647,31 @@ func sortStringsEqual(left, right []string) bool {
 	}
 	return true
 }
+
+func TestInterceptPolicyRuleRendersAnASNSelector(t *testing.T) {
+	t.Parallel()
+	// weatherkit's README records its UDP/443 rule as a narrower approximation
+	// of an upstream ASN-plus-QUIC rule, because the ASN half could not be
+	// expressed. mihomo resolves an ASN from the destination address, so
+	// no-resolve keeps it from forcing a lookup the same way IP-CIDR does.
+	single := renderInterceptPolicyRule(interceptRoutingRule{Action: "reject", IPASN: 714})
+	if single != "IP-ASN,714,REJECT,no-resolve" {
+		t.Fatalf("rule = %q", single)
+	}
+	combined := renderInterceptPolicyRule(interceptRoutingRule{
+		Action: "reject", IPASN: 6185, Network: "udp", DestinationPort: 443,
+	})
+	if combined != "AND,((IP-ASN,6185,no-resolve),(NETWORK,UDP),(DST-PORT,443)),REJECT" {
+		t.Fatalf("rule = %q", combined)
+	}
+}
+
+func TestInterceptPolicyRuleOmitsAnUndeclaredASN(t *testing.T) {
+	t.Parallel()
+	// Zero is a reserved ASN and is also this field's unset value, so an
+	// omitted selector must not leak an IP-ASN matcher into the rule.
+	rule := renderInterceptPolicyRule(interceptRoutingRule{Action: "reject", Domain: "example.com"})
+	if strings.Contains(rule, "IP-ASN") {
+		t.Fatalf("rule = %q, want no ASN matcher", rule)
+	}
+}
