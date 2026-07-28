@@ -192,6 +192,13 @@ func interceptModuleEgressSelectors(module interceptModuleSnapshot) []interceptE
 		}
 	}
 	for _, mapping := range module.HostMappings {
+		// The resolver form names nameservers, not a destination. 5gpn-dns
+		// dials those itself; the extension's egress never reaches them, and
+		// turning "server:1.1.1.1" into a domain selector would authorize a
+		// destination that does not exist.
+		if len(mapping.hostMappingServers()) > 0 {
+			continue
+		}
 		kind, target := "DOMAIN", strings.ToLower(strings.TrimSuffix(mapping.Target, "."))
 		if ip := net.ParseIP(target); ip != nil && ip.To4() != nil {
 			kind, target = "IP-CIDR", ip.To4().String()+"/32"

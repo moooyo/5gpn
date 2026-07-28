@@ -24,6 +24,16 @@ func (s *egressDNSSelector) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg,
 	if q == nil || len(q.Question) != 1 {
 		return nil, errors.New("egress DNS selector requires exactly one question")
 	}
+	// A [Host] mapping answers before any group is consulted. This is the point
+	// at which a mapping takes effect for every captured origin: mihomo resolves
+	// each sniffed hostname here, so substituting the answer here substitutes
+	// the address mihomo dials, without the sidecar or mihomo knowing a mapping
+	// exists. A mapping the handler cannot serve falls through to the groups
+	// rather than failing the query — an unresolvable override must not be
+	// worse than no override.
+	if reply, ok, err := s.handler.answerHostMapping(ctx, q); ok {
+		return reply, err
+	}
 	china, trust := s.handler.exchangers()
 	resolver, _ := s.handler.captureDNSForName(q.Question[0].Name)
 	selected := trust
