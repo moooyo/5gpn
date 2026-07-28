@@ -708,6 +708,14 @@ func TestInterceptGlobalCertificateHostBoundIs512(t *testing.T) {
 	}
 }
 
+func proxyCompatArgumentManifest(entry, argumentFormat string) string {
+	manifest := proxyCompatEntryManifest(entry)
+	if argumentFormat == "" {
+		return manifest
+	}
+	return manifest + "      argumentFormat: " + argumentFormat + "\n"
+}
+
 func proxyCompatEntryManifest(entry string) string {
 	return `apiVersion: 5gpn.io/v1
 kind: Extension
@@ -843,5 +851,64 @@ func externalAwareTestClient(t *testing.T, server *httptest.Server) *http.Client
 	return &http.Client{
 		Timeout:   30 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}},
+	}
+}
+
+func TestNativeExtensionParserCarriesTheArgumentFormat(t *testing.T) {
+	t.Parallel()
+	// The encoding cannot be inferred from the bundle, and picking the wrong one
+	// is silent: at least one published bundle catches the JSON parse failure and
+	// runs on its defaults, so every setting appears to do nothing.
+	for _, format := range []string{interceptScriptArgumentFormatQuery, interceptScriptArgumentFormatJSON} {
+		snapshot, err := (interceptModuleParser{now: time.Now}).Import(
+			context.Background(),
+			interceptModuleImportRequest{Content: proxyCompatArgumentManifest("proxy-compat", format)},
+		)
+		if err != nil {
+			t.Fatalf("format %q: %v", format, err)
+		}
+		if snapshot.Scripts[0].ArgumentFormat != format {
+			t.Fatalf("argument format = %q, want %q", snapshot.Scripts[0].ArgumentFormat, format)
+		}
+	}
+}
+
+func TestNativeExtensionParserDefaultsTheArgumentFormat(t *testing.T) {
+	t.Parallel()
+	// weatherkit is published without one and parses the query form, so an
+	// omitted format must stay empty rather than being written into the snapshot.
+	snapshot, err := (interceptModuleParser{now: time.Now}).Import(
+		context.Background(),
+		interceptModuleImportRequest{Content: proxyCompatArgumentManifest("proxy-compat", "")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Scripts[0].ArgumentFormat != "" {
+		t.Fatalf("argument format = %q, want it unset", snapshot.Scripts[0].ArgumentFormat)
+	}
+}
+
+func TestNativeExtensionParserRejectsAnUnknownArgumentFormat(t *testing.T) {
+	t.Parallel()
+	_, err := (interceptModuleParser{now: time.Now}).Import(
+		context.Background(),
+		interceptModuleImportRequest{Content: proxyCompatArgumentManifest("proxy-compat", "yaml")},
+	)
+	if err == nil || !strings.Contains(err.Error(), "argumentFormat") {
+		t.Fatalf("err = %v, want an argumentFormat rejection", err)
+	}
+}
+
+func TestNativeExtensionParserRejectsAnArgumentFormatOnANativeAction(t *testing.T) {
+	t.Parallel()
+	// A native script is handed decoded settings and never reads $argument, so
+	// declaring an encoding there would describe something that does not happen.
+	_, err := (interceptModuleParser{now: time.Now}).Import(
+		context.Background(),
+		interceptModuleImportRequest{Content: proxyCompatArgumentManifest("native", "json")},
+	)
+	if err == nil || !strings.Contains(err.Error(), "argumentFormat") {
+		t.Fatalf("err = %v, want the format refused without proxy-compat", err)
 	}
 }

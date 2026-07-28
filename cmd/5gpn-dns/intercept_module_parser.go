@@ -129,12 +129,13 @@ type nativeExtensionActionMatch struct {
 }
 
 type nativeExtensionScript struct {
-	Source       string `yaml:"source"`
-	Inline       string `yaml:"inline"`
-	BodyMode     string `yaml:"bodyMode"`
-	Entry        string `yaml:"entry"`
-	TimeoutMS    int    `yaml:"timeoutMs"`
-	MaxBodyBytes int64  `yaml:"maxBodyBytes"`
+	Source         string `yaml:"source"`
+	Inline         string `yaml:"inline"`
+	BodyMode       string `yaml:"bodyMode"`
+	Entry          string `yaml:"entry"`
+	ArgumentFormat string `yaml:"argumentFormat"`
+	TimeoutMS      int    `yaml:"timeoutMs"`
+	MaxBodyBytes   int64  `yaml:"maxBodyBytes"`
 }
 
 func (p interceptModuleParser) Import(ctx context.Context, request interceptModuleImportRequest) (interceptModuleSnapshot, error) {
@@ -279,6 +280,19 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 		if entry != "" && entry != interceptScriptEntryProxyCompat {
 			return interceptModuleSnapshot{}, fmt.Errorf("action %q script entry must be native or %s", raw.ID, interceptScriptEntryProxyCompat)
 		}
+		// argumentFormat declares how the bundle parses $argument. Published
+		// bundles disagree, and the disagreement is silent: at least one catches
+		// a JSON parse failure and runs on its defaults, so a wrong encoding
+		// looks like an extension whose settings simply do nothing.
+		argumentFormat := strings.ToLower(strings.TrimSpace(raw.Script.ArgumentFormat))
+		switch argumentFormat {
+		case "", interceptScriptArgumentFormatQuery, interceptScriptArgumentFormatJSON:
+		default:
+			return interceptModuleSnapshot{}, fmt.Errorf("action %q script argumentFormat must be %s or %s", raw.ID, interceptScriptArgumentFormatQuery, interceptScriptArgumentFormatJSON)
+		}
+		if argumentFormat != "" && entry != interceptScriptEntryProxyCompat {
+			return interceptModuleSnapshot{}, fmt.Errorf("action %q sets script argumentFormat without entry %s", raw.ID, interceptScriptEntryProxyCompat)
+		}
 		timeoutMS := raw.Script.TimeoutMS
 		if timeoutMS == 0 {
 			timeoutMS = 1000
@@ -318,7 +332,8 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 				StatusCodes: uniqueSortedInts(raw.Match.StatusCodes),
 			},
 			ScriptURL: scriptURL, ScriptDigest: sha256Hex(scriptBody), ScriptBody: string(scriptBody),
-			BodyMode: bodyMode, Entry: entry, TimeoutMS: timeoutMS, MaxBodyBytes: maxBodyBytes,
+			BodyMode: bodyMode, Entry: entry, ArgumentFormat: argumentFormat,
+			TimeoutMS: timeoutMS, MaxBodyBytes: maxBodyBytes,
 		})
 	}
 

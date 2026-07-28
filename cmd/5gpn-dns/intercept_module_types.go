@@ -48,6 +48,15 @@ const (
 // value; the mode is declared because it cannot be inferred from the source.
 const interceptScriptEntryProxyCompat = "proxy-compat"
 
+// Published bundles disagree on how they read $argument: some parse the Surge
+// key="value"&... form, others call JSON.parse on it. The wrong encoding is not
+// reported -- at least one bundle catches the parse failure and runs on its
+// defaults -- so the action declares which one its bundle parses.
+const (
+	interceptScriptArgumentFormatQuery = "query"
+	interceptScriptArgumentFormatJSON  = "json"
+)
+
 var nativeExtensionIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{1,126}[a-z0-9])$`)
 var nativeExtensionRouteKeywordPattern = regexp.MustCompile(`^[a-z0-9._-]+$`)
 
@@ -66,16 +75,17 @@ type interceptActionMatch struct {
 }
 
 type interceptScriptRule struct {
-	ID           string               `json:"id"`
-	Phase        string               `json:"phase"`
-	Match        interceptActionMatch `json:"match"`
-	ScriptURL    string               `json:"script_url,omitempty"`
-	ScriptDigest string               `json:"script_digest"`
-	ScriptBody   string               `json:"script_body"`
-	BodyMode     string               `json:"body_mode"`
-	Entry        string               `json:"entry,omitempty"`
-	TimeoutMS    int                  `json:"timeout_ms"`
-	MaxBodyBytes int64                `json:"max_body_bytes"`
+	ID             string               `json:"id"`
+	Phase          string               `json:"phase"`
+	Match          interceptActionMatch `json:"match"`
+	ScriptURL      string               `json:"script_url,omitempty"`
+	ScriptDigest   string               `json:"script_digest"`
+	ScriptBody     string               `json:"script_body"`
+	BodyMode       string               `json:"body_mode"`
+	Entry          string               `json:"entry,omitempty"`
+	ArgumentFormat string               `json:"argument_format,omitempty"`
+	TimeoutMS      int                  `json:"timeout_ms"`
+	MaxBodyBytes   int64                `json:"max_body_bytes"`
 }
 
 type interceptLocationValue struct {
@@ -100,15 +110,16 @@ type interceptModuleSetting struct {
 // interceptModuleActionView exposes immutable action metadata for operator
 // review without returning the potentially large stored script body.
 type interceptModuleActionView struct {
-	ID           string               `json:"id"`
-	Phase        string               `json:"phase"`
-	Match        interceptActionMatch `json:"match"`
-	ScriptURL    string               `json:"script_url,omitempty"`
-	ScriptDigest string               `json:"script_digest"`
-	BodyMode     string               `json:"body_mode"`
-	Entry        string               `json:"entry,omitempty"`
-	TimeoutMS    int                  `json:"timeout_ms"`
-	MaxBodyBytes int64                `json:"max_body_bytes"`
+	ID             string               `json:"id"`
+	Phase          string               `json:"phase"`
+	Match          interceptActionMatch `json:"match"`
+	ScriptURL      string               `json:"script_url,omitempty"`
+	ScriptDigest   string               `json:"script_digest"`
+	BodyMode       string               `json:"body_mode"`
+	Entry          string               `json:"entry,omitempty"`
+	ArgumentFormat string               `json:"argument_format,omitempty"`
+	TimeoutMS      int                  `json:"timeout_ms"`
+	MaxBodyBytes   int64                `json:"max_body_bytes"`
 }
 
 type interceptHostMapping struct {
@@ -464,6 +475,14 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 		}
 		if rule.Entry != "" && rule.Entry != interceptScriptEntryProxyCompat {
 			return fmt.Errorf("action %q entry must be empty or %s", rule.ID, interceptScriptEntryProxyCompat)
+		}
+		switch rule.ArgumentFormat {
+		case "", interceptScriptArgumentFormatQuery, interceptScriptArgumentFormatJSON:
+		default:
+			return fmt.Errorf("action %q argument_format must be %s or %s", rule.ID, interceptScriptArgumentFormatQuery, interceptScriptArgumentFormatJSON)
+		}
+		if rule.ArgumentFormat != "" && rule.Entry != interceptScriptEntryProxyCompat {
+			return fmt.Errorf("action %q sets argument_format without entry %s", rule.ID, interceptScriptEntryProxyCompat)
 		}
 		if rule.TimeoutMS < 50 || rule.TimeoutMS > 30000 {
 			return fmt.Errorf("action %q timeout_ms must be between 50 and 30000", rule.ID)
