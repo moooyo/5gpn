@@ -1191,6 +1191,12 @@ func validateMarketplaceInstall(_ marketplaceSourceSnapshot, entry marketplaceEn
 		capabilities.UpstreamMappingCount != len(module.HostMappings) ||
 		capabilities.RoutingRuleCount == nil || *capabilities.RoutingRuleCount != len(module.RoutingRules) ||
 		capabilities.EgressGroupRequired != module.EgressGroupRequired ||
+		// An index that does not describe the unrestricted network grant must
+		// not be able to install a manifest that takes it. The v1 profile cannot
+		// carry this field, so an extension that needs it is served from v1beta
+		// or not at all — which is the honest outcome, because the operator
+		// reviewed the catalogue entry before asking for the install.
+		capabilities.NetworkAny != module.NetworkAny ||
 		!stringSlicesEqual(capabilities.NetworkOrigins, module.NetworkOrigins) {
 		return errors.New("manifest capabilities mismatch")
 	}

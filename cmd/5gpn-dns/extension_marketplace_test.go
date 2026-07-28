@@ -530,6 +530,10 @@ func TestMarketplaceInstallRejectsManifestAndResourceMismatch(t *testing.T) {
 	for name, mutate := range map[string]func(*marketplaceIndex){
 		"manifest digest": func(index *marketplaceIndex) { index.Entries[0].Manifest.SHA256 = strings.Repeat("b", 64) },
 		"resource digest": func(index *marketplaceIndex) { index.Entries[0].Resources[0].SHA256 = strings.Repeat("c", 64) },
+		// An index that claims the unrestricted network grant the manifest does
+		// not take is as much a mismatch as one that hides a grant it does: the
+		// operator reviewed the catalogue entry before asking for the install.
+		"network capability": func(index *marketplaceIndex) { index.Entries[0].Capabilities.NetworkAny = true },
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := newMarketplaceFixture(t, mutate)
