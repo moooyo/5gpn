@@ -32,6 +32,7 @@ const (
 	maxInterceptModuleDesc     = 1024
 	maxInterceptModuleSource   = 2 << 20
 	maxInterceptScriptSource   = 1 << 20
+	maxInterceptJQProgram      = 8192
 	maxInterceptScriptTotal    = 8 << 20
 	maxInterceptModulePattern  = 4096
 	maxInterceptResourceURL    = 4096
@@ -48,14 +49,9 @@ const (
 // value; the mode is declared because it cannot be inferred from the source.
 const interceptScriptEntryProxyCompat = "proxy-compat"
 
-// Published bundles disagree on how they read $argument: some parse the Surge
-// key="value"&... form, others call JSON.parse on it. The wrong encoding is not
-// reported -- at least one bundle catches the parse failure and runs on its
-// defaults -- so the action declares which one its bundle parses.
-const (
-	interceptScriptArgumentFormatQuery = "query"
-	interceptScriptArgumentFormatJSON  = "json"
-)
+// A jq action carries an upstream module's own response-body-json-jq expression
+// instead of a script that reimplements it. It runs declaratively in the
+// sidecar, never entering the JavaScript runtime.
 
 var nativeExtensionIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{1,126}[a-z0-9])$`)
 var nativeExtensionRouteKeywordPattern = regexp.MustCompile(`^[a-z0-9._-]+$`)
@@ -75,17 +71,17 @@ type interceptActionMatch struct {
 }
 
 type interceptScriptRule struct {
-	ID             string               `json:"id"`
-	Phase          string               `json:"phase"`
-	Match          interceptActionMatch `json:"match"`
-	ScriptURL      string               `json:"script_url,omitempty"`
-	ScriptDigest   string               `json:"script_digest"`
-	ScriptBody     string               `json:"script_body"`
-	BodyMode       string               `json:"body_mode"`
-	Entry          string               `json:"entry,omitempty"`
-	ArgumentFormat string               `json:"argument_format,omitempty"`
-	TimeoutMS      int                  `json:"timeout_ms"`
-	MaxBodyBytes   int64                `json:"max_body_bytes"`
+	ID           string               `json:"id"`
+	Phase        string               `json:"phase"`
+	Match        interceptActionMatch `json:"match"`
+	ScriptURL    string               `json:"script_url,omitempty"`
+	ScriptDigest string               `json:"script_digest"`
+	ScriptBody   string               `json:"script_body"`
+	BodyMode     string               `json:"body_mode"`
+	Entry        string               `json:"entry,omitempty"`
+	JQProgram    string               `json:"jq_program,omitempty"`
+	TimeoutMS    int                  `json:"timeout_ms"`
+	MaxBodyBytes int64                `json:"max_body_bytes"`
 }
 
 type interceptLocationValue struct {
@@ -110,16 +106,16 @@ type interceptModuleSetting struct {
 // interceptModuleActionView exposes immutable action metadata for operator
 // review without returning the potentially large stored script body.
 type interceptModuleActionView struct {
-	ID             string               `json:"id"`
-	Phase          string               `json:"phase"`
-	Match          interceptActionMatch `json:"match"`
-	ScriptURL      string               `json:"script_url,omitempty"`
-	ScriptDigest   string               `json:"script_digest"`
-	BodyMode       string               `json:"body_mode"`
-	Entry          string               `json:"entry,omitempty"`
-	ArgumentFormat string               `json:"argument_format,omitempty"`
-	TimeoutMS      int                  `json:"timeout_ms"`
-	MaxBodyBytes   int64                `json:"max_body_bytes"`
+	ID           string               `json:"id"`
+	Phase        string               `json:"phase"`
+	Match        interceptActionMatch `json:"match"`
+	ScriptURL    string               `json:"script_url,omitempty"`
+	ScriptDigest string               `json:"script_digest"`
+	BodyMode     string               `json:"body_mode"`
+	Entry        string               `json:"entry,omitempty"`
+	JQProgram    string               `json:"jq_program,omitempty"`
+	TimeoutMS    int                  `json:"timeout_ms"`
+	MaxBodyBytes int64                `json:"max_body_bytes"`
 }
 
 type interceptHostMapping struct {
@@ -464,6 +460,17 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 				return fmt.Errorf("action %q URL is invalid: %w", rule.ID, err)
 			}
 		}
+		// A jq action has an expression instead of a script snapshot, so the
+		// body and digest rules below do not apply to it.
+		if rule.JQProgram != "" {
+			if len(rule.JQProgram) > maxInterceptJQProgram {
+				return fmt.Errorf("action %q jq program exceeds %d bytes", rule.ID, maxInterceptJQProgram)
+			}
+			if rule.BodyMode != "text" {
+				return fmt.Errorf("action %q jq program requires body_mode text", rule.ID)
+			}
+			continue
+		}
 		if len(rule.ScriptBody) == 0 || len(rule.ScriptBody) > maxInterceptScriptSource {
 			return fmt.Errorf("action %q source must contain 1 to %d bytes", rule.ID, maxInterceptScriptSource)
 		}
@@ -476,13 +483,8 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 		if rule.Entry != "" && rule.Entry != interceptScriptEntryProxyCompat {
 			return fmt.Errorf("action %q entry must be empty or %s", rule.ID, interceptScriptEntryProxyCompat)
 		}
-		switch rule.ArgumentFormat {
-		case "", interceptScriptArgumentFormatQuery, interceptScriptArgumentFormatJSON:
-		default:
-			return fmt.Errorf("action %q argument_format must be %s or %s", rule.ID, interceptScriptArgumentFormatQuery, interceptScriptArgumentFormatJSON)
-		}
-		if rule.ArgumentFormat != "" && rule.Entry != interceptScriptEntryProxyCompat {
-			return fmt.Errorf("action %q sets argument_format without entry %s", rule.ID, interceptScriptEntryProxyCompat)
+		if rule.JQProgram != "" && (rule.Entry != "" || rule.ScriptBody != "" || rule.ScriptURL != "") {
+			return fmt.Errorf("action %q declares both a jq program and a script", rule.ID)
 		}
 		if rule.TimeoutMS < 50 || rule.TimeoutMS > 30000 {
 			return fmt.Errorf("action %q timeout_ms must be between 50 and 30000", rule.ID)

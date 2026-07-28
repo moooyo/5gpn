@@ -708,14 +708,6 @@ func TestInterceptGlobalCertificateHostBoundIs512(t *testing.T) {
 	}
 }
 
-func proxyCompatArgumentManifest(entry, argumentFormat string) string {
-	manifest := proxyCompatEntryManifest(entry)
-	if argumentFormat == "" {
-		return manifest
-	}
-	return manifest + "      argumentFormat: " + argumentFormat + "\n"
-}
-
 func proxyCompatEntryManifest(entry string) string {
 	return `apiVersion: 5gpn.io/v1
 kind: Extension
@@ -854,61 +846,74 @@ func externalAwareTestClient(t *testing.T, server *httptest.Server) *http.Client
 	}
 }
 
-func TestNativeExtensionParserCarriesTheArgumentFormat(t *testing.T) {
-	t.Parallel()
-	// The encoding cannot be inferred from the bundle, and picking the wrong one
-	// is silent: at least one published bundle catches the JSON parse failure and
-	// runs on its defaults, so every setting appears to do nothing.
-	for _, format := range []string{interceptScriptArgumentFormatQuery, interceptScriptArgumentFormatJSON} {
-		snapshot, err := (interceptModuleParser{now: time.Now}).Import(
-			context.Background(),
-			interceptModuleImportRequest{Content: proxyCompatArgumentManifest("proxy-compat", format)},
-		)
-		if err != nil {
-			t.Fatalf("format %q: %v", format, err)
-		}
-		if snapshot.Scripts[0].ArgumentFormat != format {
-			t.Fatalf("argument format = %q, want %q", snapshot.Scripts[0].ArgumentFormat, format)
-		}
-	}
+func jqActionManifest(program, bodyMode, extra string) string {
+	return `apiVersion: 5gpn.io/v1
+kind: Extension
+metadata:
+  id: io.example.jq
+  name: JQ fixture
+  version: 1.0.0
+permissions:
+  persistentStorage: false
+traffic:
+  captureHosts: [api.example.com]
+actions:
+  - id: clean-json
+    phase: response
+    match:
+      hosts: [api.example.com]
+      schemes: [https]
+      pathRegex: ^/
+    script:
+      jq: '` + program + `'
+      bodyMode: ` + bodyMode + `
+      timeoutMs: 1000
+      maxBodyBytes: 1024
+` + extra
 }
 
-func TestNativeExtensionParserDefaultsTheArgumentFormat(t *testing.T) {
+func TestNativeExtensionParserCarriesAJQProgram(t *testing.T) {
 	t.Parallel()
-	// weatherkit is published without one and parses the query form, so an
-	// omitted format must stay empty rather than being written into the snapshot.
+	// The upstream expression is the implementation. Carrying it verbatim is the
+	// point: translating each published rule into JavaScript produced code this
+	// repository then owned and re-derived on every upstream revision.
+	program := "del(.data.payment)"
 	snapshot, err := (interceptModuleParser{now: time.Now}).Import(
 		context.Background(),
-		interceptModuleImportRequest{Content: proxyCompatArgumentManifest("proxy-compat", "")},
+		interceptModuleImportRequest{Content: jqActionManifest(program, "text", "")},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Scripts[0].ArgumentFormat != "" {
-		t.Fatalf("argument format = %q, want it unset", snapshot.Scripts[0].ArgumentFormat)
+	if snapshot.Scripts[0].JQProgram != program {
+		t.Fatalf("jq program = %q, want %q", snapshot.Scripts[0].JQProgram, program)
+	}
+	if snapshot.Scripts[0].ScriptBody != "" || snapshot.Scripts[0].ScriptDigest != "" {
+		t.Fatal("a jq action must carry no script snapshot")
 	}
 }
 
-func TestNativeExtensionParserRejectsAnUnknownArgumentFormat(t *testing.T) {
+func TestNativeExtensionParserRejectsAJQProgramWithAScript(t *testing.T) {
 	t.Parallel()
+	// Carrying both would leave which one runs undefined.
+	extra := "      inline: \"function transform(context) { return null }\"\n"
 	_, err := (interceptModuleParser{now: time.Now}).Import(
 		context.Background(),
-		interceptModuleImportRequest{Content: proxyCompatArgumentManifest("proxy-compat", "yaml")},
+		interceptModuleImportRequest{Content: jqActionManifest("del(.a)", "text", extra)},
 	)
-	if err == nil || !strings.Contains(err.Error(), "argumentFormat") {
-		t.Fatalf("err = %v, want an argumentFormat rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "jq") {
+		t.Fatalf("err = %v, want the pairing refused", err)
 	}
 }
 
-func TestNativeExtensionParserRejectsAnArgumentFormatOnANativeAction(t *testing.T) {
+func TestNativeExtensionParserRejectsAJQProgramOnABinaryBody(t *testing.T) {
 	t.Parallel()
-	// A native script is handed decoded settings and never reads $argument, so
-	// declaring an encoding there would describe something that does not happen.
+	// jq transforms a JSON document; a binary body has none to transform.
 	_, err := (interceptModuleParser{now: time.Now}).Import(
 		context.Background(),
-		interceptModuleImportRequest{Content: proxyCompatArgumentManifest("native", "json")},
+		interceptModuleImportRequest{Content: jqActionManifest("del(.a)", "binary", "")},
 	)
-	if err == nil || !strings.Contains(err.Error(), "argumentFormat") {
-		t.Fatalf("err = %v, want the format refused without proxy-compat", err)
+	if err == nil || !strings.Contains(err.Error(), "bodyMode") {
+		t.Fatalf("err = %v, want a text body required", err)
 	}
 }

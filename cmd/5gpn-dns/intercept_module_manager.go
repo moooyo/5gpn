@@ -1481,7 +1481,7 @@ func interceptModuleActionViews(actions []interceptScriptRule) []interceptModule
 		views = append(views, interceptModuleActionView{
 			ID: action.ID, Phase: action.Phase, Match: match,
 			ScriptURL: action.ScriptURL, ScriptDigest: action.ScriptDigest,
-			BodyMode: action.BodyMode, Entry: action.Entry, ArgumentFormat: action.ArgumentFormat,
+			BodyMode: action.BodyMode, Entry: action.Entry, JQProgram: action.JQProgram,
 			TimeoutMS: action.TimeoutMS, MaxBodyBytes: action.MaxBodyBytes,
 		})
 	}
