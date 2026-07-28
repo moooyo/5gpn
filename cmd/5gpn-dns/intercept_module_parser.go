@@ -65,6 +65,10 @@ type nativeExtensionPermission struct {
 
 type nativeExtensionNetworkPermission struct {
 	Origins []string `yaml:"origins"`
+	// Any grants the network capability without enumerating origins, for
+	// extensions whose reachable hosts are operator-configured. It is a
+	// strictly broader grant than origins and every review must say so.
+	Any bool `yaml:"any"`
 }
 
 type nativeExtensionRequirements struct {
@@ -128,6 +132,7 @@ type nativeExtensionScript struct {
 	Source       string `yaml:"source"`
 	Inline       string `yaml:"inline"`
 	BodyMode     string `yaml:"bodyMode"`
+	Entry        string `yaml:"entry"`
 	TimeoutMS    int    `yaml:"timeoutMs"`
 	MaxBodyBytes int64  `yaml:"maxBodyBytes"`
 }
@@ -262,6 +267,18 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 		if bodyMode == "" {
 			bodyMode = "none"
 		}
+		// entry selects the script contract. The default native entry point is a
+		// transform(context) function that returns a patch; proxy-compat runs a
+		// published proxy-client bundle, which completes by calling $done. It
+		// cannot be inferred from the source, because it changes how the action
+		// completes and what its result means.
+		entry := strings.ToLower(strings.TrimSpace(raw.Script.Entry))
+		if entry == "native" {
+			entry = ""
+		}
+		if entry != "" && entry != interceptScriptEntryProxyCompat {
+			return interceptModuleSnapshot{}, fmt.Errorf("action %q script entry must be native or %s", raw.ID, interceptScriptEntryProxyCompat)
+		}
 		timeoutMS := raw.Script.TimeoutMS
 		if timeoutMS == 0 {
 			timeoutMS = 1000
@@ -301,7 +318,7 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 				StatusCodes: uniqueSortedInts(raw.Match.StatusCodes),
 			},
 			ScriptURL: scriptURL, ScriptDigest: sha256Hex(scriptBody), ScriptBody: string(scriptBody),
-			BodyMode: bodyMode, TimeoutMS: timeoutMS, MaxBodyBytes: maxBodyBytes,
+			BodyMode: bodyMode, Entry: entry, TimeoutMS: timeoutMS, MaxBodyBytes: maxBodyBytes,
 		})
 	}
 
@@ -311,6 +328,7 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 		CaptureHosts: captureHosts, CaptureDNS: interceptCaptureDNSTrust,
 		HostMappings: mappings, RoutingRules: routingRules, Settings: settings, Scripts: scripts,
 		PersistentStorage: manifest.Permissions.PersistentStorage, NetworkOrigins: networkOrigins,
+		NetworkAny:          manifest.Permissions.Network.Any,
 		EgressGroupRequired: manifest.Requirements.EgressGroup.Required,
 	}
 	if err := validateInterceptModule(moduleWithSyntheticSource(module)); err != nil {

@@ -1455,6 +1455,7 @@ func interceptModuleViewFromSnapshot(module interceptModuleSnapshot, ready bool,
 		Settings: cloneInterceptSettings(module.Settings), HostMappings: append([]interceptHostMapping(nil), module.HostMappings...),
 		RoutingRules:      cloneInterceptRoutingRules(module.RoutingRules),
 		PersistentStorage: module.PersistentStorage, NetworkOrigins: append([]string{}, module.NetworkOrigins...),
+		NetworkAny:          module.NetworkAny,
 		EgressGroupRequired: module.EgressGroupRequired, EgressGroup: module.EgressGroup, SourceURL: module.Source.URL,
 		SourceDigest: module.Source.Digest, SnapshotDigest: interceptModuleSnapshotDigest(module), ImportedAt: module.ImportedAt,
 	}
@@ -1480,7 +1481,7 @@ func interceptModuleActionViews(actions []interceptScriptRule) []interceptModule
 		views = append(views, interceptModuleActionView{
 			ID: action.ID, Phase: action.Phase, Match: match,
 			ScriptURL: action.ScriptURL, ScriptDigest: action.ScriptDigest,
-			BodyMode: action.BodyMode, TimeoutMS: action.TimeoutMS, MaxBodyBytes: action.MaxBodyBytes,
+			BodyMode: action.BodyMode, Entry: action.Entry, TimeoutMS: action.TimeoutMS, MaxBodyBytes: action.MaxBodyBytes,
 		})
 	}
 	return views

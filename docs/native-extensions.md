@@ -71,6 +71,7 @@ actions:
     script:
       source: ./clean.js
       bodyMode: text
+      entry: native
       timeoutMs: 1000
       maxBodyBytes: 1048576
 ```
@@ -166,6 +167,16 @@ and private names are rejected. Default ports are canonicalized, so
 `https://api.example.net` and `https://api.example.net:443` request the same
 permission.
 
+`permissions.network.any: true` requests the same capability without an origin
+list, for an extension whose reachable hosts are chosen by the operator at
+runtime and therefore cannot be enumerated in a manifest. It is a strictly
+broader grant and every review must present it as such. The two forms are
+alternatives: declaring both is rejected, because an exact origin list shown
+next to `any` would not describe what the extension may reach. Every other
+guard is unchanged — the request URL is still canonicalized, IP literals and
+unsafe or private hosts are still refused, and the request still leaves through
+authenticated mihomo SOCKS5.
+
 The permission is part of the immutable snapshot digest. It provides no global
 `fetch`, XHR, socket, DNS, cookie jar, or ambient credentials. It authorizes
 both the synchronous `context.network.request` function and a request-phase URL
@@ -240,7 +251,18 @@ header-only result can then stream the original body and late trailers, while a
 URL rewrite still requires the complete decoded body and a replacement drains
 the original body to preserve its late trailers without materializing it.
 
-Every script defines one global entry point:
+`entry` selects the script contract. It is `native` by default, which is the
+`transform(context)` entry point described below. `proxy-compat` instead runs a
+published proxy-client bundle: the script returns immediately, does its work
+asynchronously, and signals completion by calling `$done`. The mode is declared
+rather than inferred, because it changes how an action completes and what its
+result means.
+
+## Script contracts
+
+### Native
+
+Every native script defines one global entry point:
 
 ```javascript
 function transform(context) {
@@ -309,6 +331,47 @@ The returned object contains `url`, `status`, `headers`, `trailers`, binary
 `body`, and a `text` field when the body is valid UTF-8. Non-2xx responses are returned
 normally; permission, transport, or bound failures throw an exception that the
 script may catch.
+
+### Proxy-compat
+
+`entry: proxy-compat` runs a published proxy-client bundle unmodified. The
+runtime presents itself as Surge, because `@nsnanocat/util` and the bundles
+built on it select their runtime by probing globals in a fixed order —
+`$task`, `$loon`, `$rocket`, `Egern`, then `$environment["surge-version"]` —
+and Surge's network and storage shapes are the ones this runtime can back.
+The earlier globals are deliberately left undefined; defining any of them
+selects a branch with different semantics.
+
+A bundle receives:
+
+```text
+$environment      { "surge-version": … }
+$script           { startTime }
+$request          { url, method, headers, body? }
+$response         { status, statusCode, headers, body | bodyBytes }
+$argument         typed settings, serialized as key="value"&key="value"
+$done(result)     completion; result is the response projection
+$persistentStore  read(key) / write(value, key), with the storage permission
+$httpClient       get|post|put|delete|head|patch(options, cb), with network
+```
+
+`$done` receives the response projection directly rather than the native
+`{response: {…}}` envelope, and `bodyBytes` and `statusCode` are accepted as
+aliases for `body` and `status`. Transport hints a bundle carries on the same
+object, such as `policy` or `auto-redirect`, are runtime-owned and ignored.
+The first `$done` call wins.
+
+An action completes when `$done` is called. A bundle that never calls it runs
+until the action deadline and then fails, exactly like a native script whose
+returned promise never settles.
+
+Async is supported for both contracts: `setTimeout`, `setInterval`, and their
+clear functions exist, and a native `transform` may be an `async function` or
+return a promise. A timer longer than the action deadline is not shortened —
+firing it early would run a bundle's own timeout branch and report a request
+timeout that never happened — so the action deadline ends the action instead.
+Timers are capped per action. There is still no module loader; bundles reach
+their `require` calls only on a Node.js branch this runtime never selects.
 
 ## Installation and updates
 

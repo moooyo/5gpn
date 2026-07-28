@@ -42,6 +42,12 @@ const (
 	maxInterceptRouteKeywords  = 8
 )
 
+// interceptScriptEntryProxyCompat runs a published proxy-client bundle instead
+// of the native transform(context) entry point. The bundle signals completion
+// by calling $done, so the sidecar waits on that rather than on a returned
+// value; the mode is declared because it cannot be inferred from the source.
+const interceptScriptEntryProxyCompat = "proxy-compat"
+
 var nativeExtensionIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{1,126}[a-z0-9])$`)
 var nativeExtensionRouteKeywordPattern = regexp.MustCompile(`^[a-z0-9._-]+$`)
 
@@ -67,6 +73,7 @@ type interceptScriptRule struct {
 	ScriptDigest string               `json:"script_digest"`
 	ScriptBody   string               `json:"script_body"`
 	BodyMode     string               `json:"body_mode"`
+	Entry        string               `json:"entry,omitempty"`
 	TimeoutMS    int                  `json:"timeout_ms"`
 	MaxBodyBytes int64                `json:"max_body_bytes"`
 }
@@ -99,6 +106,7 @@ type interceptModuleActionView struct {
 	ScriptURL    string               `json:"script_url,omitempty"`
 	ScriptDigest string               `json:"script_digest"`
 	BodyMode     string               `json:"body_mode"`
+	Entry        string               `json:"entry,omitempty"`
 	TimeoutMS    int                  `json:"timeout_ms"`
 	MaxBodyBytes int64                `json:"max_body_bytes"`
 }
@@ -250,6 +258,7 @@ type interceptModuleSnapshot struct {
 	Scripts             []interceptScriptRule    `json:"actions,omitempty"`
 	PersistentStorage   bool                     `json:"persistent_storage"`
 	NetworkOrigins      []string                 `json:"network_origins"`
+	NetworkAny          bool                     `json:"network_any,omitempty"`
 	EgressGroupRequired bool                     `json:"egress_group_required"`
 	EgressGroup         string                   `json:"egress_group,omitempty"`
 }
@@ -272,6 +281,7 @@ type interceptModuleView struct {
 	PersistentStorage   bool                        `json:"persistent_storage"`
 	ExecutionOrder      int                         `json:"execution_order"`
 	NetworkOrigins      []string                    `json:"network_origins"`
+	NetworkAny          bool                        `json:"network_any,omitempty"`
 	EgressGroupRequired bool                        `json:"egress_group_required"`
 	EgressGroup         string                      `json:"egress_group,omitempty"`
 	SourceURL           string                      `json:"source_url,omitempty"`
@@ -393,6 +403,11 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 	if err := validateInterceptNetworkOrigins(module.NetworkOrigins); err != nil {
 		return err
 	}
+	// The two grants are alternatives. Accepting both would show an operator an
+	// exact origin list that does not describe what the extension may reach.
+	if module.NetworkAny && len(module.NetworkOrigins) > 0 {
+		return errors.New("network permission declares both any and an origin list")
+	}
 	if err := validateInterceptEgressGroupBinding(module.EgressGroup); err != nil {
 		return err
 	}
@@ -446,6 +461,9 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 		}
 		if rule.BodyMode != "none" && rule.BodyMode != "text" && rule.BodyMode != "binary" {
 			return fmt.Errorf("action %q body_mode must be none, text, or binary", rule.ID)
+		}
+		if rule.Entry != "" && rule.Entry != interceptScriptEntryProxyCompat {
+			return fmt.Errorf("action %q entry must be empty or %s", rule.ID, interceptScriptEntryProxyCompat)
 		}
 		if rule.TimeoutMS < 50 || rule.TimeoutMS > 30000 {
 			return fmt.Errorf("action %q timeout_ms must be between 50 and 30000", rule.ID)

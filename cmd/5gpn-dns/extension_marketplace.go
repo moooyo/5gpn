@@ -114,14 +114,17 @@ type marketplaceResource struct {
 }
 
 type marketplaceCapabilities struct {
-	CaptureHostCount     int      `json:"captureHostCount"`
-	ActionCount          int      `json:"actionCount"`
-	SettingCount         int      `json:"settingCount"`
-	NetworkOrigins       []string `json:"networkOrigins"`
-	PersistentStorage    bool     `json:"persistentStorage"`
-	UpstreamMappingCount int      `json:"upstreamMappingCount"`
-	EgressGroupRequired  bool     `json:"egressGroupRequired"`
-	RoutingRuleCount     *int     `json:"routingRuleCount"`
+	CaptureHostCount int      `json:"captureHostCount"`
+	ActionCount      int      `json:"actionCount"`
+	SettingCount     int      `json:"settingCount"`
+	NetworkOrigins   []string `json:"networkOrigins"`
+	// NetworkAny is the unrestricted network grant. It rides the v1beta profile
+	// only, so it is absent from a v1 document and decodes as false there.
+	NetworkAny           bool `json:"networkAny"`
+	PersistentStorage    bool `json:"persistentStorage"`
+	UpstreamMappingCount int  `json:"upstreamMappingCount"`
+	EgressGroupRequired  bool `json:"egressGroupRequired"`
+	RoutingRuleCount     *int `json:"routingRuleCount"`
 }
 
 type marketplaceSourceSnapshot struct {
@@ -174,6 +177,7 @@ type marketplaceCapabilitiesView struct {
 	ActionCount          int      `json:"action_count"`
 	SettingCount         int      `json:"setting_count"`
 	NetworkOrigins       []string `json:"network_origins"`
+	NetworkAny           bool     `json:"network_any"`
 	PersistentStorage    bool     `json:"persistent_storage"`
 	UpstreamMappingCount int      `json:"upstream_mapping_count"`
 	EgressGroupRequired  bool     `json:"egress_group_required"`
@@ -816,7 +820,7 @@ func marketplaceSourceViewFromSnapshot(source marketplaceSourceSnapshot) marketp
 	for _, entry := range source.Entries {
 		capabilities := marketplaceCapabilitiesView{
 			CaptureHostCount: entry.Capabilities.CaptureHostCount, ActionCount: entry.Capabilities.ActionCount,
-			SettingCount: entry.Capabilities.SettingCount, NetworkOrigins: append([]string{}, entry.Capabilities.NetworkOrigins...),
+			SettingCount: entry.Capabilities.SettingCount, NetworkOrigins: append([]string{}, entry.Capabilities.NetworkOrigins...), NetworkAny: entry.Capabilities.NetworkAny,
 			PersistentStorage: entry.Capabilities.PersistentStorage, UpstreamMappingCount: entry.Capabilities.UpstreamMappingCount,
 			EgressGroupRequired: entry.Capabilities.EgressGroupRequired,
 			RoutingRuleCount:    *entry.Capabilities.RoutingRuleCount,
