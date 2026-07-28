@@ -2141,7 +2141,8 @@ unit_file_owned_by_5gpn() {
                 && grep -Fqx 'Unit=5gpn-intercept-cert.service' "$file" ;;
         5gpn-intercept-runtime.path)
             grep -Fqx 'PathChanged=/etc/5gpn/intercept/config.json' "$file" \
-                && grep -Fqx 'Unit=5gpn-intercept.service' "$file" ;;
+                && grep -Fqx 'Unit=5gpn-intercept.service' "$file" \
+                && grep -Fqx 'StartLimitIntervalSec=0' "$file" ;;
         5gpn-journal@.service)
             grep -Fqx 'ExecStart=/opt/5gpn/scripts/export-journal.sh %i' "$file" \
                 && journal_export_instances_clear ;;

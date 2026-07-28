@@ -1,6 +1,16 @@
-# 5gpn-unit-id: 5gpn-intercept-runtime.path:v1
+# 5gpn-unit-id: 5gpn-intercept-runtime.path:v2
 [Unit]
 Description=Start the 5gpn MITM sidecar when its runtime setting changes
+
+# systemd rate-limits unit starts, and a path unit counts every trigger against
+# that limit. The watched file is rewritten once per settings change, so an
+# operator editing a handful of module settings in a row -- an ordinary thing to
+# do from the console -- exceeds the default 5-starts-in-10s and systemd puts
+# THIS unit into failed permanently. The sidecar then stops being started on any
+# later change for the lifetime of the host, with nothing but a failed .path to
+# show for it. Since the trigger is edge-based and the triggered service is
+# idempotent, bursts are safe and rate-limiting them buys nothing.
+StartLimitIntervalSec=0
 
 [Path]
 PathChanged=/etc/5gpn/intercept/config.json
