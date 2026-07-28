@@ -292,6 +292,7 @@ context.response.body         # response actions only when requested
 context.settings
 context.storage               # only with persistentStorage permission
 context.network.request       # only with declared and confirmed origins
+context.network.requestAsync  # the same, returning a promise
 ```
 
 A request action may return a `request` patch or a synthetic `response` patch.
@@ -331,6 +332,26 @@ The returned object contains `url`, `status`, `headers`, `trailers`, binary
 `body`, and a `text` field when the body is valid UTF-8. Non-2xx responses are returned
 normally; permission, transport, or bound failures throw an exception that the
 script may catch.
+
+`context.network.requestAsync` takes the same options and returns a promise, so
+a script can issue several requests at once:
+
+```javascript
+const [first, second] = await Promise.all([
+  context.network.requestAsync({ url: 'https://api.example.net/v1/a' }),
+  context.network.requestAsync({ url: 'https://api.example.net/v1/b' }),
+])
+```
+
+It resolves to the same object and rejects rather than throwing, so `await`
+inside `try`/`catch` reads the way the synchronous form does. Both entry points
+draw on one per-action call budget, so mixing them cannot double a script's
+allowance, and the same origin, body, header, and egress rules apply to each.
+
+The synchronous form holds the VM for the whole round trip, so it fails
+immediately when the process-wide concurrency bound is saturated; an awaited
+request waits for a slot instead, because it can settle later. The action
+deadline bounds both.
 
 ### Proxy-compat
 
