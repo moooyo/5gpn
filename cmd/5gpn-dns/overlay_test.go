@@ -683,3 +683,32 @@ func TestOverlayErrorClassification(t *testing.T) {
 		})
 	}
 }
+
+// A stage that fails must not keep its journal entry in flight. Begin refuses
+// while one is unfinished, so a single rejected document wedged every later
+// apply until the daemon restarted and recovery ran -- which is what a
+// duplicate-capability document did on a real gateway.
+func TestJournalEntryIsAbandonedWhenStagingFails(t *testing.T) {
+	t.Parallel()
+	journal, err := NewOverlayJournal(filepath.Join(t.TempDir(), "journal.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Begin(overlayJournalEntry{
+		OperationID: "op-failed", BaseGeneration: "g0", TargetGeneration: "g1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// What the driver does when client.Stage returns an error.
+	_ = journal.Advance(overlayPhaseStaged, "overlay: invalid document")
+	_ = journal.Finish()
+
+	if entry := journal.Current(); entry != nil {
+		t.Fatalf("entry still in flight at %s; the next apply would be refused", entry.Phase)
+	}
+	if err := journal.Begin(overlayJournalEntry{
+		OperationID: "op-next", BaseGeneration: "g0", TargetGeneration: "g2",
+	}); err != nil {
+		t.Fatalf("a later apply was refused after a failed stage: %v", err)
+	}
+}

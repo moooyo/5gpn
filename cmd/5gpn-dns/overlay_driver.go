@@ -120,7 +120,14 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 
 	staged, err := d.client.Stage(ctx, doc)
 	if err != nil {
+		// A stage that failed left nothing behind -- no generation, and so no
+		// capability -- exactly like the certificate wait below, which already
+		// abandons its entry. Recording the error and keeping the entry in
+		// flight instead blocked every later apply, because Begin refuses while
+		// one is unfinished: one rejected document wedged the driver until the
+		// daemon restarted and recovery ran.
 		_ = d.journal.Advance(overlayPhaseStaged, err.Error())
+		_ = d.journal.Finish()
 		return zero, fmt.Errorf("overlay: stage %s: %w", doc.GenerationID, err)
 	}
 	if err := d.journal.Advance(overlayPhasePrepared, ""); err != nil {
