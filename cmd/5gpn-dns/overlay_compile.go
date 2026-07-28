@@ -194,28 +194,36 @@ func compileOverlayGeneration(in overlayCompileInput) (overlayDocument, error) {
 	return doc, nil
 }
 
-// overlayEgressCapabilities partitions the processor's endpoint allowlist across
-// the egress groups the enabled extensions resolve to, and mints one capability
-// per group.
+// overlayEgressCapabilities partitions the processor's endpoint allowlist
+// across the egress groups the enabled extensions resolve to, and mints one
+// capability whose policy is that partition.
 //
-// Every capability carries the same id — the one credential the processor
-// authenticates with — because a capability the processor cannot present
-// authorizes nothing, and the failure is silent: every egress dial simply
-// rejects. What tells the capabilities apart is the destination set, which is
-// how the legacy renderer's ordered per-destination egress rules selected a
-// group too.
+// There is exactly one capability because there is exactly one credential: the
+// processor authenticates with a single username on the egress listener, and a
+// capability it cannot present authorizes nothing. What decides which group a
+// connection leaves through is the destination, exactly as it was under the
+// legacy renderer's ordered `AND,((IN-NAME,intercept-egress),<selector>,
+// (DST-PORT,n)),<group>` rules.
 //
-// The partition follows that renderer exactly: an explicitly bound extension
-// claims a selector before an unbound one, execution order breaks ties within
-// each pass, and a selector is claimed only once. That last property is what
-// makes the destination sets disjoint, so which group a connection leaves
-// through does not depend on the order the core evaluates capabilities in.
+// Minting a credential per group was the obvious alternative and is wrong twice
+// over. It would let the processor choose its own egress by choosing which
+// credential to present, when the whole point of the capability model is that
+// the processor never names a group. And it would tie the credential set to the
+// operator's group list, so adding a proxy group would require rewriting the
+// listener's users — the configuration rewrite the overlay exists to avoid.
+//
+// The partition follows the legacy renderer exactly: an explicitly bound
+// extension claims a selector before an unbound one, execution order breaks ties
+// within each pass, and a selector is claimed only once. That last property is
+// what makes the destination sets disjoint, so which group a connection leaves
+// through does not depend on the order bindings are evaluated in.
 //
 // A group whose extensions had every selector claimed by an earlier one gets no
-// capability rather than an empty one. That is what the legacy path did — such a
+// binding rather than an empty one. That is what the legacy path did — such a
 // module emitted no egress rule and so conferred no authority — and it keeps an
 // allowlist that is empty from ever being handed to the core in place of one
-// that is absent.
+// that is absent. A processor with no bindings at all gets no capability, for
+// the same reason.
 func overlayEgressCapabilities(ordered []interceptModuleSnapshot, credential, matchTarget string) []overlayEgressCapability {
 	groups := make([]string, 0, 4)
 	destinations := make(map[string][]overlayDestinationRule, 4)
@@ -254,7 +262,8 @@ func overlayEgressCapabilities(ordered []interceptModuleSnapshot, credential, ma
 	claim(true)
 	claim(false)
 
-	capabilities := make([]overlayEgressCapability, 0, len(groups))
+	capabilities := make([]overlayEgressCapability, 0, 1)
+	bindings := make([]overlayEgressBinding, 0, len(groups))
 	for _, group := range groups {
 		rules := destinations[group]
 		sort.SliceStable(rules, func(i, j int) bool {
@@ -267,15 +276,23 @@ func overlayEgressCapabilities(ordered []interceptModuleSnapshot, credential, ma
 			}
 			return a.Ports[0].From < b.Ports[0].From
 		})
-		capabilities = append(capabilities, overlayEgressCapability{
-			ID:           credential,
-			Listener:     interceptEgressListenerName,
+		bindings = append(bindings, overlayEgressBinding{
 			Group:        group,
 			Destinations: rules,
 			AllowDirect:  overlayCapabilityAllowsDirect(group, matchTarget),
 		})
 	}
-	return capabilities
+	if len(bindings) == 0 {
+		// No enabled extension conferred any egress authority. An empty
+		// capability would authorize nothing while looking like it authorizes
+		// something; the core refuses one, and rightly.
+		return capabilities
+	}
+	return append(capabilities, overlayEgressCapability{
+		ID:       credential,
+		Listener: interceptEgressListenerName,
+		Bindings: bindings,
+	})
 }
 
 // overlayCapabilityAllowsDirect reports whether a capability for this group may
@@ -433,8 +450,10 @@ func overlayProjection(doc overlayDocument) string {
 	b.WriteByte('|')
 	for _, c := range doc.Egress.Capabilities {
 		b.WriteString(c.ID)
-		b.WriteByte(0)
-		b.WriteString(c.Group)
+		for _, bind := range c.Bindings {
+			b.WriteByte(0)
+			b.WriteString(bind.Group)
+		}
 		b.WriteByte('\n')
 	}
 	sum := sha256.Sum256([]byte(b.String()))

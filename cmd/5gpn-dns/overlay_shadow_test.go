@@ -233,34 +233,37 @@ func TestShadowEgressGroupsAgree(t *testing.T) {
 	}
 
 	overlaid := map[selectorKey]string{}
+	bindings := 0
 	for _, capability := range compiled.Egress.Capabilities {
 		if capability.ID != doc.UpstreamProxy.Username {
-			t.Errorf("capability for group %q has id %q, which the processor cannot present",
-				capability.Group, capability.ID)
+			t.Errorf("capability has id %q, which the processor cannot present", capability.ID)
 		}
-		if capability.Group != matchTarget && capability.Group != "DIRECT" && capability.AllowDirect {
-			t.Errorf("capability for explicitly bound group %q allows DIRECT", capability.Group)
-		}
-		for _, destination := range capability.Destinations {
-			if len(destination.Ports) != 1 || destination.Ports[0].From != destination.Ports[0].To {
-				t.Fatalf("destination has a non-singular port range: %+v", destination)
+		for _, binding := range capability.Bindings {
+			bindings++
+			if binding.Group != matchTarget && binding.Group != "DIRECT" && binding.AllowDirect {
+				t.Errorf("binding for explicitly bound group %q allows DIRECT", binding.Group)
 			}
-			key := selectorKey{
-				Kind:  overlayKindToLegacy(destination.Kind),
-				Value: destination.Value,
-				Port:  int(destination.Ports[0].From),
+			for _, destination := range binding.Destinations {
+				if len(destination.Ports) != 1 || destination.Ports[0].From != destination.Ports[0].To {
+					t.Fatalf("destination has a non-singular port range: %+v", destination)
+				}
+				key := selectorKey{
+					Kind:  overlayKindToLegacy(destination.Kind),
+					Value: destination.Value,
+					Port:  int(destination.Ports[0].From),
+				}
+				if previous, dup := overlaid[key]; dup {
+					t.Errorf("destination %s appears in both the %q and %q bindings; "+
+						"which group it leaves through then depends on evaluation order",
+						key, previous, binding.Group)
+				}
+				overlaid[key] = binding.Group
 			}
-			if previous, dup := overlaid[key]; dup {
-				t.Errorf("destination %s appears in both the %q and %q capabilities; "+
-					"which group it leaves through then depends on the core's evaluation order",
-					key, previous, capability.Group)
-			}
-			overlaid[key] = capability.Group
 		}
 	}
 
-	t.Logf("legacy egress destinations: %d, overlay egress destinations: %d across %d capabilities",
-		len(legacy), len(overlaid), len(compiled.Egress.Capabilities))
+	t.Logf("legacy egress destinations: %d, overlay egress destinations: %d across %d bindings",
+		len(legacy), len(overlaid), bindings)
 
 	var missing, extra, disagreed []string
 	for key, group := range legacy {

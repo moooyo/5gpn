@@ -79,6 +79,24 @@ type overlayDestinationRule struct {
 	Ports []overlayPortRange  `json:"ports,omitempty"`
 }
 
+// overlayEgressBinding is one destination-scoped egress decision.
+//
+// The group hangs off the destination rather than off the credential because
+// the processor authenticates with exactly one credential and its extensions
+// may be bound to several groups. Minting a credential per group instead would
+// hand the processor the choice of which group to leave through — the one thing
+// the capability model exists to keep on the server side — and would tie the
+// credential set to the operator's group list, so adding a proxy group would
+// mean rewriting the configuration the overlay exists to leave alone.
+type overlayEgressBinding struct {
+	Group string `json:"group"`
+	// Destinations is the endpoint allowlist for this group. It mirrors the
+	// per-destination, per-port egress rules the legacy renderer emitted;
+	// without it the binding would authorize the group for anything.
+	Destinations []overlayDestinationRule `json:"destinations"`
+	AllowDirect  bool                     `json:"allowDirect"`
+}
+
 type overlayEgressCapability struct {
 	// ID must be exactly the credential the processor authenticates with on the
 	// egress listener. A capability the processor cannot present authorizes
@@ -86,15 +104,13 @@ type overlayEgressCapability struct {
 	ID string `json:"id"`
 	// Listener is the inbound this capability is valid on.
 	Listener string `json:"listener"`
-	// Destinations is the endpoint allowlist. It mirrors the per-destination,
-	// per-port egress rules the legacy renderer emitted; without it the
-	// capability would authorize the operator's egress group for anything.
-	Destinations    []overlayDestinationRule `json:"destinations"`
-	Group           string                   `json:"group"`
-	AllowDirect     bool                     `json:"allowDirect"`
-	PublicOnly      bool                     `json:"publicOnly"`
-	ResolverProfile string                   `json:"resolverProfile,omitempty"`
-	Owner           string                   `json:"owner,omitempty"`
+	// Bindings is the destination-indexed egress policy, in order; the first
+	// binding covering a destination decides it. The sets are disjoint by
+	// construction, so order is a tie-break that should never be needed.
+	Bindings        []overlayEgressBinding `json:"bindings"`
+	PublicOnly      bool                   `json:"publicOnly"`
+	ResolverProfile string                 `json:"resolverProfile,omitempty"`
+	Owner           string                 `json:"owner,omitempty"`
 }
 
 type overlayProcessorTarget struct {
