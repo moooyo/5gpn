@@ -1150,8 +1150,11 @@ recursive removal still re-verifies it, but *claiming* one is self-healing: an
 absent marker, one written by an older release, or one whose value has since
 changed all resolve to republishing the current marker and continuing. A marker
 names its owner, not its revision. Project roots are claimed as the first action
-of both install and uninstall, and the static trees and interception state root
-are claimed immediately before removal, so no check is ever reached with a stale
+of both install and uninstall, the interception state root is claimed before the
+rollback snapshot reads it — systemd creates that root from
+`StateDirectory=5gpn-intercept` without a marker, so the snapshot must claim it
+rather than refuse it — and the static trees and interception state root are
+claimed immediately before removal, so no check is ever reached with a stale
 marker. These ownership values therefore carry no revision suffix.
 
 Certificate material is the exception and keeps strict ownership: the

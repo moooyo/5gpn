@@ -637,6 +637,40 @@ else
     fail "rollback left a newly created interception root behind"
 fi
 
+# systemd creates the interception state root from StateDirectory the first time
+# the sidecar starts, so the snapshot legitimately meets an unmarked one. It is
+# claimed and captured, while the CA root beside it stays strict.
+ROLLBACK_DIR="$TMP/rollback-unmarked-state"
+INTERCEPT_CA_DIR="$TMP/unmarked-intercept-ca"
+INTERCEPT_STATE_DIR="$TMP/unmarked-intercept-state"
+mkdir -p "$ROLLBACK_DIR" "$INTERCEPT_CA_DIR" "$INTERCEPT_STATE_DIR"
+printf 'sidecar state\n' > "$INTERCEPT_STATE_DIR/snapshot.json"
+printf 'key material\n' > "$INTERCEPT_CA_DIR/root.key"
+saved_fixed_owned_dir_is_safe="$(declare -f fixed_owned_dir_is_safe)"
+saved_metadata_is_safe="$(declare -f fixed_owned_dir_metadata_is_safe)"
+fixed_owned_dir_is_safe() { return 0; }
+fixed_owned_dir_metadata_is_safe() { return 0; }
+unmarked_state_ok=1
+capture_intercept_state_root || unmarked_state_ok=0
+verify_ownership_marker "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" \
+    "$INTERCEPT_STATE_MARKER_VALUE" || unmarked_state_ok=0
+[[ "$(cat "$ROLLBACK_DIR/intercept-state/snapshot.json" 2>/dev/null)" == 'sidecar state' ]] \
+    || unmarked_state_ok=0
+[[ ! -e "$ROLLBACK_DIR/intercept-state.absent" ]] || unmarked_state_ok=0
+if capture_optional_owned_root "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" \
+       "$INTERCEPT_CA_MARKER_VALUE" intercept-ca >/dev/null 2>&1; then
+    unmarked_state_ok=0
+fi
+[[ "$(cat "$INTERCEPT_CA_DIR/root.key")" == 'key material' ]] || unmarked_state_ok=0
+[[ ! -e "$INTERCEPT_CA_DIR/$INTERCEPT_CA_MARKER" ]] || unmarked_state_ok=0
+eval "$saved_fixed_owned_dir_is_safe"
+eval "$saved_metadata_is_safe"
+if [[ "$unmarked_state_ok" == 1 ]]; then
+    pass "an unmarked interception state root is claimed and captured, not refused"
+else
+    fail "the rollback snapshot gated on the interception state root's marker"
+fi
+
 # Service accounts created by a failed transaction are removed only through
 # the run-local creation registry; pre-existing accounts never enter it.
 if (

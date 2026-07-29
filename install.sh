@@ -3067,6 +3067,26 @@ capture_optional_owned_root() {
     cp -a -- "$dir" "$ROLLBACK_DIR/$name"
 }
 
+# The interception state root is an ordinary 5gpn artifact root at a fixed path,
+# and systemd creates it from StateDirectory=5gpn-intercept the first time the
+# sidecar starts. A host therefore reaches this snapshot with an unmarked state
+# root through nothing but normal operation, and refusing it here left no way
+# forward: the adopting claim that would have healed it runs a phase later.
+# Claim it first, so the capture stays a snapshot rather than a gate.
+#
+# Only an existing root is claimed. An absent one still records .absent, so a
+# failed transaction removes the root publication created rather than leaving an
+# empty directory behind. The CA root captured beside it holds key material and
+# keeps its strict capture.
+capture_intercept_state_root() {
+    if [[ -e "$INTERCEPT_STATE_DIR" || -L "$INTERCEPT_STATE_DIR" ]]; then
+        claim_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" \
+            "$INTERCEPT_STATE_MARKER_VALUE" 1 || return 1
+    fi
+    capture_optional_owned_root "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" \
+        "$INTERCEPT_STATE_MARKER_VALUE" intercept-state
+}
+
 capture_managed_unit_states() {
     local unit enabled_state active_state fragment_path load_state enabled_rc active_rc
     install -d -m 0700 "$ROLLBACK_DIR/unit-state" || return 1
@@ -3324,8 +3344,7 @@ capture_install_rollback() {
     fi
     capture_optional_owned_root "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" \
         "$INTERCEPT_CA_MARKER_VALUE" intercept-ca || return 1
-    capture_optional_owned_root "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" \
-        "$INTERCEPT_STATE_MARKER_VALUE" intercept-state || return 1
+    capture_intercept_state_root || return 1
     install -d -m 0700 "$ROLLBACK_DIR/polkit" || return 1
     if [[ -e "$POLKIT_RULE_PATH" || -L "$POLKIT_RULE_PATH" ]]; then
         polkit_rule_owned_by_5gpn \
