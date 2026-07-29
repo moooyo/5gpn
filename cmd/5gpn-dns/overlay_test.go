@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -733,5 +734,89 @@ func TestJournalEntryIsAbandonedWhenStagingFails(t *testing.T) {
 		OperationID: "op-next", BaseGeneration: "g0", TargetGeneration: "g2",
 	}); err != nil {
 		t.Fatalf("a later apply was refused after a failed stage: %v", err)
+	}
+}
+
+// A commit the core refuses outright publishes nothing, so its entry describes
+// no capability and repeating it cannot help. Keeping it in flight is what
+// wedged a real gateway: Begin refuses while one is unfinished, so the operator
+// saw every later enable fail with "is still at COMMIT_INTENT" and had no way
+// to clear it short of restarting the daemon.
+func TestJournalEntryIsClearedWhenCommitIsRefused(t *testing.T) {
+	t.Parallel()
+	journal, client := journalAtCommitIntent(t, "g0")
+	driver := NewOverlayDriver(client, journal)
+
+	refusal := fmt.Errorf("%w: invalid_document", errOverlayTerminal)
+	if _, err := driver.recoverAfterCommit(context.Background(), "g1", "g0", refusal); !errors.Is(err, errOverlayTerminal) {
+		t.Fatalf("error = %v, want the terminal refusal to surface", err)
+	}
+	assertJournalAcceptsNextApply(t, journal)
+}
+
+// The base generation is still live, so the commit provably did not land.
+// Recovery would classify exactly this as a retry and clear it; doing it here
+// means the driver does not stay wedged until a restart.
+func TestJournalEntryIsClearedWhenCommitDidNotLand(t *testing.T) {
+	t.Parallel()
+	journal, client := journalAtCommitIntent(t, "g0")
+	driver := NewOverlayDriver(client, journal)
+
+	lost := errors.New("overlay: connection reset")
+	if _, err := driver.recoverAfterCommit(context.Background(), "g1", "g0", lost); err == nil {
+		t.Fatal("a commit that did not take effect must still report an error")
+	}
+	assertJournalAcceptsNextApply(t, journal)
+}
+
+// The opposite guard. Neither the base nor the target is live, so something
+// outside this coordinator moved the generation. That is the one case recovery
+// refuses to resolve on its own, and the entry has to survive for an operator.
+func TestJournalEntrySurvivesGenerationMove(t *testing.T) {
+	t.Parallel()
+	journal, client := journalAtCommitIntent(t, "g9")
+	driver := NewOverlayDriver(client, journal)
+
+	lost := errors.New("overlay: connection reset")
+	if _, err := driver.recoverAfterCommit(context.Background(), "g1", "g0", lost); err == nil {
+		t.Fatal("a conflicting active generation must report an error")
+	}
+	entry := journal.Current()
+	if entry == nil {
+		t.Fatal("the entry was cleared; an operator has nothing left to resolve")
+	}
+	if entry.Phase != overlayPhaseCommitIntent {
+		t.Fatalf("phase = %s, want COMMIT_INTENT", entry.Phase)
+	}
+}
+
+// journalAtCommitIntent returns a journal holding one operation at
+// COMMIT_INTENT (base g0, target g1) and a core reporting active as given.
+func journalAtCommitIntent(t *testing.T, active string) (*OverlayJournal, *OverlayClient) {
+	t.Helper()
+	journal, err := NewOverlayJournal(filepath.Join(t.TempDir(), "journal.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Begin(overlayJournalEntry{
+		OperationID: "op-1", BaseGeneration: "g0", TargetGeneration: "g1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Advance(overlayPhaseCommitIntent, ""); err != nil {
+		t.Fatal(err)
+	}
+	return journal, stubOverlayCore(t, overlayReadback{ActiveGeneration: active})
+}
+
+func assertJournalAcceptsNextApply(t *testing.T, journal *OverlayJournal) {
+	t.Helper()
+	if entry := journal.Current(); entry != nil {
+		t.Fatalf("entry still in flight at %s; the next apply would be refused", entry.Phase)
+	}
+	if err := journal.Begin(overlayJournalEntry{
+		OperationID: "op-next", BaseGeneration: "g0", TargetGeneration: "g2",
+	}); err != nil {
+		t.Fatalf("a later apply was refused: %v", err)
 	}
 }
