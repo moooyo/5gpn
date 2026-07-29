@@ -155,7 +155,7 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 
 	result, err := d.client.Commit(ctx, doc.GenerationID, entry.BaseGeneration, entry.ExpectedCoreRevision)
 	if err != nil {
-		return d.recoverAfterCommit(ctx, doc.GenerationID, err)
+		return d.recoverAfterCommit(ctx, doc.GenerationID, entry.BaseGeneration, err)
 	}
 	_ = staged
 
@@ -177,12 +177,21 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 // A transport error says nothing about whether the commit landed. Reading back
 // is the only way to find out, and rolling back on the strength of a lost
 // response would revoke a generation that is serving traffic.
-func (d *OverlayDriver) recoverAfterCommit(ctx context.Context, generationID string, commitErr error) (overlayCommitResult, error) {
+//
+// The entry is kept in flight only while that ambiguity is real. An outcome
+// this function can prove -- the core refused the document, or the base is
+// still live -- leaves nothing for recovery to resolve, and keeping it would
+// refuse every later apply at Begin until the daemon restarted, which is the
+// wedge a failed stage already avoids.
+func (d *OverlayDriver) recoverAfterCommit(ctx context.Context, generationID, baseGeneration string, commitErr error) (overlayCommitResult, error) {
 	var zero overlayCommitResult
 
 	if errors.Is(commitErr, errOverlayTerminal) || errors.Is(commitErr, errOverlayUnsupported) {
-		// The core refused outright, so nothing was published.
+		// The core refused outright, so nothing was published and the entry
+		// describes no capability. Repeating it cannot help either, so there is
+		// nothing for a later recovery to do with it.
 		_ = d.journal.Advance(overlayPhaseCommitIntent, commitErr.Error())
+		_ = d.journal.Finish()
 		return zero, commitErr
 	}
 
@@ -212,6 +221,16 @@ func (d *OverlayDriver) recoverAfterCommit(ctx context.Context, generationID str
 	}
 
 	_ = d.journal.Advance(overlayPhaseCommitIntent, commitErr.Error())
+	if readback.ActiveGeneration == baseGeneration {
+		// The base is still live, so the commit provably did not land and the
+		// entry describes nothing. Recovery would classify this as a plain
+		// retry and clear it; doing that here keeps the driver usable without
+		// waiting for a restart.
+		_ = d.journal.Finish()
+	}
+	// Anything else means a third party moved the active generation. That is
+	// the conflict recovery deliberately refuses to resolve on its own, so the
+	// entry stays in flight for an operator.
 	return zero, fmt.Errorf("overlay: commit of %s did not take effect (active is %q): %w",
 		generationID, readback.ActiveGeneration, commitErr)
 }
