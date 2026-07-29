@@ -241,7 +241,7 @@ fresh/reset seed 的 `Proxies` 组初始只有 `DIRECT`；5gpn 不附带代理�
 - 每个 action 在全新的、有界 goja VM 中运行；只有 manifest 明确申请时才提供有配额的 `context.storage`，且没有 filesystem、process、timer、module loader、socket、ambient `fetch` 或直接出口。所有 upstream TCP/UDP 和允许的脚本网络请求都经 authenticated mihomo SOCKS5 转发。
 - 扩展可以要求运维者从已有 mihomo group 中选择 egress，但 manifest 和脚本不能命名或修改 group。启用确认中审阅的全局 routing rule 只允许 `REJECT` 或 `DIRECT`，且只在扩展与 MITM master 同时启用时存在。
 - 执行顺序会影响 action composition、重叠 host 的 egress/capture-DNS winner 和 routing first-match，因此重排也必须确认。
-- marketplace 只是 discovery metadata，不是信任根；不会自动安装、启用、更新、抓取或镜像内容。第一方扩展源码位于独立的 [moooyo/5gpn-extensions](https://github.com/moooyo/5gpn-extensions) 仓库，并发布[官方 marketplace index](https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json)。
+- marketplace 只是 discovery metadata，不是信任根；不会自动安装、启用、更新、抓取或镜像内容。第一方扩展源码位于独立的 [moooyo/5gpn-extensions](https://github.com/moooyo/5gpn-extensions) 仓库，并发布[官方 marketplace index](https://moooyo.github.io/5gpn-extensions/marketplace/v2/index.json)。
 - Plugin engine logs 只存在于 sidecar 的 1000-entry 内存 ring。暂停或清除 Console 视图不会停止采集或删除 sidecar ring，进程退出后日志消失。
 
 > [!CAUTION]

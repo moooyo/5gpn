@@ -276,7 +276,7 @@ rather than manifest knobs.
 First-party extension source is maintained independently in the public
 `moooyo/5gpn-extensions` repository. That repository publishes the strict,
 bounded `5gpn.io/marketplace/v1` JSON index at
-`https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json`. The core
+`https://moooyo.github.io/5gpn-extensions/marketplace/v2/index.json`. The core
 repository does not vendor, mirror, seed, or release extension manifests or
 scripts. Apple WLOC and every other maintained extension follow this external
 source boundary and are never compiled into either Go binary.
