@@ -356,24 +356,38 @@ deadline bounds both.
 ### Proxy-compat
 
 `entry: proxy-compat` runs a published proxy-client bundle unmodified. The
-runtime presents itself as Surge, because `@nsnanocat/util` and the bundles
-built on it select their runtime by probing globals in a fixed order —
-`$task`, `$loon`, `$rocket`, `Egern`, then `$environment["surge-version"]` —
-and Surge's network and storage shapes are the ones this runtime can back.
-The earlier globals are deliberately left undefined; defining any of them
-selects a branch with different semantics.
+runtime presents itself as Loon: the sidecar defines `$loon`, and the bundles
+built on `@nsnanocat/util` select their runtime by probing globals in a fixed
+order — `$task`, `$loon`, `$rocket`, `Egern`, then
+`$environment["surge-version"]` — so they take their Loon branch. No Surge,
+Quantumult X, or Egern global is defined, and `$environment` reports
+`loon-version` rather than `surge-version`.
+
+Loon is the right persona because its `[Argument]` block is typed and Loon
+hands a bundle a **decoded object**. Serializing settings into a string instead
+is what every encoding bug in this layer came from: each publisher parses that
+string differently — a quoted `key="value"` form, JSON, a bare query — and a
+bundle that mis-parses `$argument` does not fail, it silently runs on its own
+defaults.
 
 A bundle receives:
 
 ```text
-$environment      { "surge-version": … }
+$loon             the persona version string
+$environment      { "loon-version": … }
 $script           { startTime }
 $request          { url, method, headers, body? }
-$response         { status, statusCode, headers, body | bodyBytes }
-$argument         typed settings, serialized as key="value"&key="value"
+$response         { status, headers, body }, undefined in the request phase
+$argument         typed settings, as a decoded object
 $done(result)     completion; result is the response projection
 $persistentStore  read(key) / write(value, key), with the storage permission
 $httpClient       get|post|put|delete|head|patch(options, cb), with network
+$utils            ungzip only; any other helper stays absent so a bundle
+                  reaching for one fails loudly rather than producing a wrong
+                  result silently
+$notification     post(...), recorded through the action's own console budget
+                  rather than delivered, because the gateway has no channel for
+                  it. It has to exist: bundles call it from their error paths.
 ```
 
 `$done` receives the response projection directly rather than the native
@@ -381,6 +395,12 @@ $httpClient       get|post|put|delete|head|patch(options, cb), with network
 aliases for `body` and `status`. Transport hints a bundle carries on the same
 object, such as `policy` or `auto-redirect`, are runtime-owned and ignored.
 The first `$done` call wins.
+
+`$response` is defined even for a request action, where it stays `undefined`
+rather than absent, because the bundle assigns back to it. `$script.startTime`
+exists for the same reason: the completion branch reads it before calling
+`$done`, and a `TypeError` there would be swallowed by the bundle's own
+`.finally()` and hang the action to its deadline instead of failing it.
 
 An action completes when `$done` is called. A bundle that never calls it runs
 until the action deadline and then fails, exactly like a native script whose
@@ -485,7 +505,7 @@ Project-maintained examples, including Apple WLOC, live in the separate
 extension source. The official marketplace index is:
 
 ```text
-https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json
+https://moooyo.github.io/5gpn-extensions/marketplace/v2/index.json
 ```
 
 The public repository also exposes Apple WLOC directly at:
