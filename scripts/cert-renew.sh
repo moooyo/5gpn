@@ -110,7 +110,8 @@ cf_credential_safe() {
 }
 
 renewal_conf_safe() {
-    local base="$1" mode="$2" conf="${LE_RENEWAL_ROOT}/${base}.conf"
+    local base="$1" mode="$2"
+    local conf="${LE_RENEWAL_ROOT}/${base}.conf"
     local key value expected auth server
     [[ -f "$conf" && ! -L "$conf" ]] || return 1
     for key in archive_dir cert privkey chain fullchain; do

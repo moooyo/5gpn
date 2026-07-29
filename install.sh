@@ -2170,7 +2170,12 @@ journal_export_instances_clear() {
 #     file leaves drop-ins in place and systemd keeps applying them, which is the
 #     supported way to override anything here.
 remove_unit() {
-    local unit="$1" file="/etc/systemd/system/$unit"
+    # Two statements: bash expands every word of a `local` before it assigns any
+    # of them, so a second word reading "$unit" would get the caller's variable
+    # of that name -- an unbound-variable abort under set -u, or worse, silently
+    # the wrong path when the caller happens to have one.
+    local unit="$1"
+    local file="/etc/systemd/system/$unit"
     [[ -e "$file" || -L "$file" ]] || return 0
     systemctl disable --now "$unit" 2>/dev/null \
         || { err "Could not stop and disable $unit; refusing to delete its unit file."; return 1; }
@@ -5622,7 +5627,8 @@ certbot_renewal_conf_scoped() {
 }
 
 certbot_renewal_mode_matches() {
-    local base="$1" mode="$2" conf="${LE_RENEWAL_ROOT}/${base}.conf" auth value
+    local base="$1" mode="$2" auth value
+    local conf="${LE_RENEWAL_ROOT}/${base}.conf"
     certbot_renewal_conf_scoped "$conf" "$base" || return 1
     auth="$(grep -E '^[[:space:]]*authenticator[[:space:]]*=' "$conf" 2>/dev/null \
         | tail -1 | cut -d= -f2- | tr -d '[:space:]')"
@@ -6008,7 +6014,8 @@ issue_selfsigned_wildcard() {
 # dirs. Defaults to reading from the Certbot lineage; a preserved role copy or
 # debug mode may pass an alternate source directory explicitly.
 deploy_cert_roles() {
-    local base="$1" src="${2:-${LE_LIVE_ROOT}/${base}}" mode="${3:-${CERT_MODE:-cloudflare}}"
+    local base="$1" mode="${3:-${CERT_MODE:-cloudflare}}"
+    local src="${2:-${LE_LIVE_ROOT}/${base}}"
     local r dest group generation final link_tmp old trust=production i j rollback_link
     local -a roles=(dot web zash) dests=() generations=() links=() old_targets=()
     [[ "$src" == "$DEBUG_CERT_DIR"/* ]] && { trust=debug; mode=debug; }

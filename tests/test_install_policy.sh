@@ -492,5 +492,40 @@ printf '%s' "$spd_fn" | grep -Fq 'egress.json' \
 printf '%s' "$spd_fn" | grep -Fq -- '--egress-out' \
     && fail "seed_policy_defaults must not pass --egress-out (flag removed from --seed-defaults)"
 
+# A `local a=1 b=$a` declaration does not do what it reads like: bash expands
+# every word of the builtin before it assigns any of them, so $a there is the
+# CALLER's variable of that name. Under set -u that aborts the installer mid
+# phase; when the caller happens to have one it silently uses the wrong value.
+# Each such name must be assigned in an earlier statement.
+self_referential_locals() {
+    local file="$1" line body rest tail_text i hits=""
+    local -a names
+    while IFS= read -r line; do
+        body="${line#*:}"
+        body="${body#*local }"
+        # Only the `local` statement itself. A following `; name=...` is an
+        # ordinary assignment that runs after the builtin, where reading the
+        # name just declared is correct.
+        body="${body%%;*}"
+        mapfile -t names < <(printf '%s' "$body" \
+            | grep -oE '(^|[[:space:]])[a-zA-Z_][a-zA-Z0-9_]*=' | tr -d ' =')
+        for (( i = 0; i + 1 < ${#names[@]}; i++ )); do
+            rest="${body#*"${names[i]}"=}"
+            tail_text="${rest#*"${names[i + 1]}"=}"
+            case "$tail_text" in
+                *"\$${names[i]}"*|*"\${${names[i]}}"*|*"\${${names[i]}:"*)
+                    hits="${hits}${line}
+" ;;
+            esac
+        done
+    done < <(grep -nE '^[[:space:]]*local[[:space:]]' "$file")
+    printf '%s' "$hits"
+}
+for shell_file in "$INSTALL" "$ROOT/quick-install.sh" "$ROOT"/scripts/*.sh; do
+    hits="$(self_referential_locals "$shell_file")"
+    [ -z "$hits" ] \
+        || fail "$(basename "$shell_file") declares a local that reads another local from the same statement: $hits"
+done
+
 [ $rc -eq 0 ] && echo "install policy: PASS"
 exit $rc

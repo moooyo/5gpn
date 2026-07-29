@@ -363,6 +363,19 @@ else
     fail "ownership marker took its group from the directory it was written into"
 fi
 
+# remove_unit is called with a literal from scopes that have no `unit` variable
+# of their own (remove_owned_renewal_automation), so its own declaration must not
+# read one. It returns early for an absent unit file, which keeps this off
+# systemd.
+if (
+    set -u
+    remove_unit 5gpn-test-does-not-exist.service
+); then
+    pass "remove_unit resolves its unit file from its own argument"
+else
+    fail "remove_unit read a caller-scope variable or touched systemd"
+fi
+
 if [[ "$POSIX_MODES" == 1 ]] && process_is_root; then
     if (
         conf="$TMP/setgid-marker-live"
