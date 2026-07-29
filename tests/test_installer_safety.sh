@@ -341,6 +341,45 @@ else
     fail "sticky configuration-root design was rejected"
 fi
 
+# That sticky root is also where markers get published, and a file created in a
+# setgid directory inherits its group. The marker must therefore be chowned to
+# root:root before it is renamed into place, or the claim deletes the marker it
+# just wrote and every rerun repeats the same refusal.
+if (
+    conf="$TMP/setgid-marker-root"
+    chown_log="$TMP/setgid-marker-root.chown"
+    mkdir -p "$conf"
+    chmod g+s "$conf" 2>/dev/null || true
+    : > "$chown_log"
+    process_is_root() { return 0; }
+    chown() { printf '%s\n' "$*" >> "$chown_log"; }
+    write_ownership_marker "$conf" .owner marker-v1 || exit 1
+    [[ "$(cat "$conf/.owner")" == marker-v1 ]] || exit 1
+    read -r recorded < "$chown_log" || exit 1
+    [[ "$recorded" == "0:0 -- $conf/"* ]]
+); then
+    pass "ownership markers are published root:root, not inherited from a setgid root"
+else
+    fail "ownership marker took its group from the directory it was written into"
+fi
+
+if [[ "$POSIX_MODES" == 1 ]] && process_is_root; then
+    if (
+        conf="$TMP/setgid-marker-live"
+        mkdir -p "$conf"
+        chgrp 1 "$conf" && chmod 3771 "$conf" || exit 1
+        write_ownership_marker "$conf" .owner marker-v1 || exit 1
+        [[ "$(file_gid "$conf")" != 0 ]] || exit 1
+        root_ownership_marker_is_safe "$conf" .owner marker-v1
+    ); then
+        pass "a marker published into a live setgid root satisfies the root:root boundary"
+    else
+        fail "marker published into a live setgid root failed the root:root boundary"
+    fi
+else
+    pass "live setgid marker ownership skipped because the suite is not root on a POSIX-mode filesystem"
+fi
+
 if (
     INTERCEPT_CA_DIR="$TMP/legacy-intercept-ca"
     DNS_SERVICE_USER=gpn-dns

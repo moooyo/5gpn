@@ -477,6 +477,14 @@ canonical_dir_path() {
     fi
 }
 
+process_is_root() { [[ ${EUID:-$(id -u)} -eq 0 ]]; }
+
+# The marker is published, not inherited. CONF_DIR is setgid gpn-dns from the
+# moment runtime permissions land, so a file created here picks up that group
+# and then fails the root:root boundary root_ownership_marker_is_safe enforces.
+# The claim would delete the marker it had just written and every rerun would
+# repeat that, which is the same wedge as a marker that answered "which
+# revision": unrecoverable without editing the host by hand.
 write_ownership_marker() {
     local dir="$1" name="$2" value="$3" tmp
     if [[ ! -e "$dir" ]]; then
@@ -486,6 +494,9 @@ write_ownership_marker() {
     tmp="$(mktemp "${dir}/.${name}.XXXXXX")" || return 1
     printf '%s\n' "$value" > "$tmp" || { rm -f -- "$tmp"; return 1; }
     chmod 0644 "$tmp" || { rm -f -- "$tmp"; return 1; }
+    if process_is_root; then
+        chown 0:0 -- "$tmp" || { rm -f -- "$tmp"; return 1; }
+    fi
     mv -f -- "$tmp" "$dir/$name" || { rm -f -- "$tmp"; return 1; }
 }
 
@@ -1703,7 +1714,7 @@ activate_verified_installed_gum() {
 }
 
 check_root() {
-    if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+    if ! process_is_root; then
         err "This script must be run as root (use sudo)."
         exit 1
     fi
