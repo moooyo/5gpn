@@ -142,7 +142,7 @@ actions:
 			Manifest:  marketplaceResource{URL: "./extension.yaml", SHA256: sha256Hex([]byte(fixture.manifest)), Size: int64(len(fixture.manifest))},
 			Resources: []marketplaceResource{{Path: "clean.js", URL: "./clean.js", SHA256: sha256Hex([]byte(fixture.script)), Size: int64(len(fixture.script))}},
 			Capabilities: marketplaceCapabilities{
-				CaptureHostCount: 1, ActionCount: 1, SettingCount: 0, NetworkOrigins: []string{},
+				CaptureHostCount: 1, ActionCount: 1, SettingCount: 0, Network: false,
 				PersistentStorage: false, UpstreamMappingCount: 0, RoutingRuleCount: &routingRuleCount, EgressGroupRequired: false,
 			},
 		}},
@@ -533,7 +533,7 @@ func TestMarketplaceInstallRejectsManifestAndResourceMismatch(t *testing.T) {
 		// An index that claims the unrestricted network grant the manifest does
 		// not take is as much a mismatch as one that hides a grant it does: the
 		// operator reviewed the catalogue entry before asking for the install.
-		"network capability": func(index *marketplaceIndex) { index.Entries[0].Capabilities.NetworkAny = true },
+		"network capability": func(index *marketplaceIndex) { index.Entries[0].Capabilities.Network = true },
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := newMarketplaceFixture(t, mutate)
@@ -573,7 +573,7 @@ func TestMarketplaceAPIViewOmitsInstallationInternals(t *testing.T) {
 			t.Fatalf("API view leaked internal field %s: %s", forbidden, encoded)
 		}
 	}
-	for _, required := range []string{`"recommended_url"`, `"metadata_name"`, `"snapshot_digest"`, `"manifest_url"`, `"manifest_digest"`, `"documentation_url"`, `"capture_host_count"`, `"network_origins"`, `"routing_rule_count"`} {
+	for _, required := range []string{`"recommended_url"`, `"metadata_name"`, `"snapshot_digest"`, `"manifest_url"`, `"manifest_digest"`, `"documentation_url"`, `"capture_host_count"`, `"network"`, `"routing_rule_count"`} {
 		if !strings.Contains(encoded, required) {
 			t.Fatalf("API view omitted %s: %s", required, encoded)
 		}
@@ -706,7 +706,7 @@ func TestMarketplaceEntryAcceptsThePublishedPolicyProjection(t *testing.T) {
 	    "documentationUrl":"https://example.test/d",
 	    "manifest":{"url":"https://example.test/m","sha256":"` + strings.Repeat("b", 64) + `","size":1},
 	    "resources":[],
-	    "capabilities":{"captureHostCount":1,"actionCount":0,"settingCount":0,"networkOrigins":[],
+	    "capabilities":{"captureHostCount":1,"actionCount":0,"settingCount":0,"network":false,
 	      "persistentStorage":false,"upstreamMappingCount":0,"routingRuleCount":0,"egressGroupRequired":false},
 	    "policy":{"clientRules":4,"policyRules":0,"captureRules":4,"digest":"` + strings.Repeat("c", 64) + `"}
 	  }]
@@ -739,7 +739,7 @@ func TestMarketplaceEntryWithoutAPolicyProjectionStillDecodes(t *testing.T) {
 	    "documentationUrl":"https://example.test/d",
 	    "manifest":{"url":"https://example.test/m","sha256":"` + strings.Repeat("b", 64) + `","size":1},
 	    "resources":[],
-	    "capabilities":{"captureHostCount":1,"actionCount":0,"settingCount":0,"networkOrigins":[],
+	    "capabilities":{"captureHostCount":1,"actionCount":0,"settingCount":0,"network":false,
 	      "persistentStorage":false,"upstreamMappingCount":0,"routingRuleCount":0,"egressGroupRequired":false}
 	  }]
 	}`)

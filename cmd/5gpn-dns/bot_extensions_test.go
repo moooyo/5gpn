@@ -297,9 +297,9 @@ func TestBotExtensionFailedReviewDocumentNeverIssuesConfirmation(t *testing.T) {
 	}
 }
 
-func TestBotExtensionNetworkEnableReviewListsEveryOrigin(t *testing.T) {
+func TestBotExtensionNetworkEnableReviewStatesTheUnboundedGrant(t *testing.T) {
 	module := testModuleSnapshot()
-	module.NetworkOrigins = []string{"https://audit.example.com", "https://upload.example.net:8443"}
+	module.Network = true
 	module.RoutingRules = []interceptRoutingRule{{Action: "reject", Domain: "ads.example.com", Network: "udp"}}
 	manager, _, _, _, _ := newInterceptManagerFixture(t, module)
 	ctrl := NewController(func() error { return nil }, nil, nil, nil)
@@ -325,8 +325,8 @@ func TestBotExtensionNetworkEnableReviewListsEveryOrigin(t *testing.T) {
 	}
 	text := delivered.String()
 	for _, want := range []string{
-		"https://audit.example.com",
-		"https://upload.example.net:8443",
+		"联网权限风险（不受限）",
+		"可访问的地址不在清单中声明",
 		"解密请求、响应、参数和存储数据",
 		"完整请求方法、解码后的请求体和端到端请求头",
 		"Cookie 和 Authorization 凭据",
@@ -520,7 +520,7 @@ func TestMarketplaceSourceReviewRendersEveryEntryAndNetworkOrigin(t *testing.T) 
 				ID: "io.example.one", Name: "Extension one", Version: "1.2.3", Description: "First extension",
 				License: marketplaceLicense{SPDX: "MIT"}, ManifestURL: "https://catalog.example/one.yaml", ManifestDigest: strings.Repeat("c", 64),
 				Capabilities: marketplaceCapabilitiesView{CaptureHostCount: 2, ActionCount: 3, SettingCount: 4, UpstreamMappingCount: 5, RoutingRuleCount: 6,
-					NetworkOrigins: []string{"https://audit.example.com", "https://upload.example.net:8443"}, PersistentStorage: true, EgressGroupRequired: true},
+					Network: true, PersistentStorage: true, EgressGroupRequired: true},
 			},
 			{
 				ID: "io.example.two", Name: "Extension two", Version: "2.0.0", Description: "Second extension",
@@ -530,7 +530,7 @@ func TestMarketplaceSourceReviewRendersEveryEntryAndNetworkOrigin(t *testing.T) 
 	}
 	review := marketplaceSourceReviewHTML(source)
 	for _, required := range []string{
-		"io.example.one", "1.2.3", strings.Repeat("c", 64), "https://audit.example.com", "https://upload.example.net:8443",
+		"io.example.one", "1.2.3", strings.Repeat("c", 64), "已申请，可达地址不受限",
 		"io.example.two", "2.0.0", strings.Repeat("d", 64), "<code>6</code> global routing rules", "storage=<code>true</code>", "egress-required=<code>true</code>",
 	} {
 		if !strings.Contains(review, required) {
@@ -539,10 +539,10 @@ func TestMarketplaceSourceReviewRendersEveryEntryAndNetworkOrigin(t *testing.T) 
 	}
 }
 
-func TestBotExtensionProtocolReviewsListEveryArmedNetworkOrigin(t *testing.T) {
+func TestBotExtensionProtocolReviewsStateEveryArmedNetworkGrant(t *testing.T) {
 	module := testModuleSnapshot()
 	module.Enabled = true
-	module.NetworkOrigins = []string{"https://audit.example.com", "https://upload.example.net:8443"}
+	module.Network = true
 	manager, _, _, _, _ := newInterceptManagerFixture(t, module)
 	ctrl := NewController(func() error { return nil }, nil, nil, nil)
 	ctrl.SetInterceptModuleManager(manager)
@@ -557,10 +557,8 @@ func TestBotExtensionProtocolReviewsListEveryArmedNetworkOrigin(t *testing.T) {
 		if reviewErr != nil {
 			t.Fatalf("%s review: %v", field, reviewErr)
 		}
-		for _, origin := range module.NetworkOrigins {
-			if !strings.Contains(review, origin) {
-				t.Fatalf("%s review omitted network origin %q: %s", field, origin, review)
-			}
+		if !strings.Contains(review, "联网权限风险（不受限）") {
+			t.Fatalf("%s review omitted the network grant: %s", field, review)
 		}
 		if !strings.Contains(review, "解密请求、响应、参数和存储数据") ||
 			!strings.Contains(review, "Cookie 和 Authorization 凭据") {

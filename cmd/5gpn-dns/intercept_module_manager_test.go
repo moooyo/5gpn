@@ -42,15 +42,25 @@ func testInterceptDocument(t testing.TB, modules ...interceptModuleSnapshot) (in
 	return document, body
 }
 
-func TestInterceptModuleViewAlwaysMarshalsNetworkOriginsAsArray(t *testing.T) {
-	view := interceptModuleViewFromSnapshot(testModuleSnapshot(), true, "")
-	view.NetworkOrigins = append([]string{}, view.NetworkOrigins...)
-	body, err := json.Marshal(view)
+// An ungranted extension must be distinguishable from one whose grant simply
+// did not serialize. The field is omitempty, so its absence is the answer, and
+// this pins that a granted one is present and true.
+func TestInterceptModuleViewMarshalsTheNetworkGrant(t *testing.T) {
+	body, err := json.Marshal(interceptModuleViewFromSnapshot(testModuleSnapshot(), true, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), `"network_origins":[]`) {
-		t.Fatalf("empty network origins were omitted or null: %s", body)
+	if strings.Contains(string(body), `"network"`) {
+		t.Fatalf("an ungranted extension claimed the network permission: %s", body)
+	}
+	granted := testModuleSnapshot()
+	granted.Network = true
+	body, err = json.Marshal(interceptModuleViewFromSnapshot(granted, true, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"network":true`) {
+		t.Fatalf("the network grant did not survive into the view: %s", body)
 	}
 }
 

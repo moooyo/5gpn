@@ -19,9 +19,7 @@ metadata:
 
 permissions:
   persistentStorage: false
-  network:
-    origins:
-      - https://api.example.net
+  network: true
 
 requirements:
   egressGroup:
@@ -158,48 +156,45 @@ Import appends an extension to the order; delete removes it; the Console and
 trusted private-chat Telegram bot can move an extension up or down with a
 revision-protected, explicitly confirmed complete reorder.
 
-## Origin-scoped network permission
+## Network permission
 
-`permissions.network.origins` is an optional list of exact HTTP(S) origins. An
-origin contains only scheme, canonical hostname, and effective port. Userinfo,
-paths other than `/`, query, fragment, wildcard hosts, IP literals, localhost,
-and private names are rejected. Default ports are canonicalized, so
-`https://api.example.net` and `https://api.example.net:443` request the same
-permission.
+`permissions.network: true` is the whole grant. It authorizes the synchronous
+`context.network.request` function and a request-phase URL rewrite to any
+origin. There is no origin list: the field used to accept either an exact list
+or an unbounded `any`, and the two were alternatives, so an extension whose
+script reaches operator-chosen hosts while one of its actions rewrites to a
+fixed one could satisfy neither half. Every review now states that the extension
+may reach the network, and cannot state where.
 
-`permissions.network.any: true` requests the same capability without an origin
-list, for an extension whose reachable hosts are chosen by the operator at
-runtime and therefore cannot be enumerated in a manifest. It is a strictly
-broader grant and every review must present it as such. The two forms are
-alternatives: declaring both is rejected, because an exact origin list shown
-next to `any` would not describe what the extension may reach. Every other
-guard is unchanged — the request URL is still canonicalized, IP literals and
-unsafe or private hosts are still refused, and the request still leaves through
-authenticated mihomo SOCKS5.
+Every other guard is unchanged. The request URL is still canonicalized, IP
+literals and unsafe or private hosts are still refused, and the request still
+leaves through authenticated mihomo SOCKS5. Redirects from
+`context.network.request` are returned to the script rather than followed. Fixed
+process-wide time, body, header, call-count, and concurrency bounds apply; they
+are runtime safety limits, not manifest-controlled permissions.
 
 The permission is part of the immutable snapshot digest. It provides no global
-`fetch`, XHR, socket, DNS, cookie jar, or ambient credentials. It authorizes
-both the synchronous `context.network.request` function and a request-phase URL
-rewrite to an exact declared origin. Every such call or rewritten request
-travels through authenticated mihomo SOCKS5. A cross-origin rewritten URL must
-be canonical absolute HTTP(S), match the declared origin exactly, contain no
-userinfo or fragment, and never downgrade an HTTPS request to HTTP. A
-same-origin rewrite from the captured origin remains inside the extension's
-capture-host boundary. After an earlier action moves the request to an approved
-external origin, a later action may execute against or rewrite within that
-current origin only when its own extension also declares that exact origin.
-Redirects from `context.network.request` are returned to the script rather than followed.
-Fixed process-wide time, body, header, call-count, and concurrency bounds apply;
-they are runtime safety limits, not manifest-controlled permissions.
+`fetch`, XHR, socket, DNS, cookie jar, or ambient credentials. A cross-origin
+rewritten URL must be canonical absolute HTTP(S), contain no userinfo or
+fragment, and never downgrade an HTTPS request to HTTP. A same-origin rewrite
+from the captured origin stays inside the extension's capture-host boundary and
+needs no grant. After an earlier action moves the request to an external origin,
+a later action may execute against or rewrite within that current origin only
+when its own extension also holds the grant.
 
-Once granted, a script can deliberately send any request, response, setting,
-or storage data visible to it to an approved origin. A rewritten captured
+Once granted, a script can deliberately send any request, response, setting, or
+storage data visible to it to any host it can resolve. A rewritten captured
 request sends its complete method, decoded body, and end-to-end headers,
-potentially including `Cookie` or `Authorization`; framing and hop-by-hop fields
-remain runtime-owned. Every management surface's enable review must list the
-origins and state these consequences explicitly.
-Adding or changing an origin changes the snapshot and therefore requires a
-disabled update followed by a new enable confirmation.
+potentially including `Cookie` or `Authorization`, to a host the manifest never
+names; framing and hop-by-hop fields remain runtime-owned. Every management
+surface's enable review must state these consequences explicitly. Taking or
+dropping the grant changes the snapshot and therefore requires a disabled update
+followed by a new enable confirmation.
+
+An extension holding the grant contributes no mihomo egress selector for it.
+Capture hosts and upstream mappings are still steered to the extension's egress
+binding; a script's own requests follow the operator's routing, because there is
+no declared origin to steer.
 
 ## Typed settings
 
@@ -291,7 +286,7 @@ context.response.trailers     # response actions only
 context.response.body         # response actions only when requested
 context.settings
 context.storage               # only with persistentStorage permission
-context.network.request       # only with declared and confirmed origins
+context.network.request       # only with the confirmed network grant
 context.network.requestAsync  # the same, returning a promise
 ```
 
@@ -299,8 +294,8 @@ A request action may return a `request` patch or a synthetic `response` patch.
 A response action may return only a `response` patch. Either phase may return
 `{abort: true}`, `null`, or `undefined`. Unknown result fields fail closed.
 Changed request URLs must remain inside that action's extension capture-host
-boundary unless an exact declared network origin authorizes the cross-origin
-rewrite under the constraints above.
+boundary unless the extension holds the network grant, which authorizes the
+cross-origin rewrite under the constraints above.
 
 Response trailers are exposed after the upstream body is read and may be
 replaced through `response.trailers`. Request patches cannot create trailers.
@@ -317,7 +312,7 @@ live only in the sidecar's 1000-entry memory ring and the authenticated
 `/plugin-logs` stream; they are not written to journald or another file. Event
 URLs retain only scheme, host, and path. The optional storage object exposes
 bounded `get`, `set`, `delete`, and `clear` methods scoped to the extension ID.
-When network origins were declared, a script can make a bounded request:
+With the network grant, a script can make a bounded request:
 
 ```javascript
 const result = context.network.request({
@@ -451,8 +446,8 @@ keep the same `metadata.id`. The management surface displays the candidate
 version, snapshot digest, capture hosts, actions, and settings before
 replacement. Replacement requires the current extension to be disabled, refetches the exact
 reviewed digest, preserves still-valid setting values by key and type, and
-leaves the new snapshot disabled. Enabling reviews capture hosts, network
-origins, every exact normalized routing rule, execution position, and the current operator egress binding before
+leaves the new snapshot disabled. Enabling reviews capture hosts, the network
+grant, every exact normalized routing rule, execution position, and the current operator egress binding before
 the transaction publishes certificates, mihomo rules, sidecar state, and the
 DNS overlay.
 
@@ -470,8 +465,8 @@ update application always leave the extension disabled.
 Browsing and update checks may be read-only, but every state-changing Telegram
 action uses a two-step review. The bot first renders the complete normalized
 impact relevant to the operation: source, identity, old and new versions,
-immutable snapshot digest, settings, capture hosts, permissions, exact network
-origins, exact routing rules, execution position, operator egress binding, and action match/execution
+immutable snapshot digest, settings, capture hosts, permissions, the network
+grant, exact routing rules, execution position, operator egress binding, and action match/execution
 metadata with script digests, plus the resulting enabled/runtime state. Script
 bodies remain available through
 the separate authenticated snapshot review rather than being placed in every

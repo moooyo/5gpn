@@ -33,10 +33,7 @@ metadata:
   description: Native fixture
 permissions:
   persistentStorage: true
-  network:
-    origins:
-      - HTTPS://Assets.Example.COM:443/
-      - http://assets.example.com:8080
+  network: true
 requirements:
   egressGroup:
     required: true
@@ -92,8 +89,8 @@ actions:
 	if module.ID != "io.example.cleaner" || module.Version != "1.2.0" || !module.PersistentStorage || len(module.Scripts) != 1 {
 		t.Fatalf("parsed extension = %+v", module)
 	}
-	if !module.EgressGroupRequired || strings.Join(module.NetworkOrigins, ",") != "http://assets.example.com:8080,https://assets.example.com" {
-		t.Fatalf("network capabilities = origins=%v required=%v", module.NetworkOrigins, module.EgressGroupRequired)
+	if !module.EgressGroupRequired || !module.Network {
+		t.Fatalf("network capabilities = network=%v required=%v", module.Network, module.EgressGroupRequired)
 	}
 	if got := strings.Join(module.CaptureHosts, ","); got != "*.cdn.example.com,api.example.com" || module.CaptureDNS != interceptCaptureDNSTrust {
 		t.Fatalf("capture hosts/default DNS = %q/%q", got, module.CaptureDNS)
@@ -433,40 +430,7 @@ func TestNativeExtensionImportURLRequiresHTTPS(t *testing.T) {
 	}
 }
 
-func TestNormalizeInterceptNetworkOrigin(t *testing.T) {
-	t.Parallel()
-	for raw, want := range map[string]string{
-		"HTTPS://API.Example.COM:443/": "https://api.example.com",
-		"http://api.example.com:80":    "http://api.example.com",
-		"https://api.example.com:8443": "https://api.example.com:8443",
-		"http://api.example.com./":     "http://api.example.com",
-	} {
-		got, err := normalizeInterceptNetworkOrigin(raw)
-		if err != nil || got != want {
-			t.Errorf("normalize origin %q = %q, %v; want %q", raw, got, err, want)
-		}
-	}
-
-	for _, raw := range []string{
-		"ftp://api.example.com",
-		"https://user@api.example.com",
-		"https://api.example.com/path",
-		"https://api.example.com?query",
-		"https://api.example.com#fragment",
-		"https://*.example.com",
-		"https://127.0.0.1",
-		"https://[2001:db8::1]",
-		"https://localhost",
-		"https://api.example.com:0",
-		"https://api.example.com:65536",
-	} {
-		if got, err := normalizeInterceptNetworkOrigin(raw); err == nil {
-			t.Errorf("unsafe origin %q normalized to %q", raw, got)
-		}
-	}
-}
-
-func TestNativeExtensionParserRejectsInvalidNetworkOriginShape(t *testing.T) {
+func TestNativeExtensionParserRejectsInvalidNetworkPermissionShape(t *testing.T) {
 	t.Parallel()
 	base := `apiVersion: 5gpn.io/v1
 kind: Extension
@@ -476,8 +440,7 @@ metadata:
   version: 1.0.0
 permissions:
   persistentStorage: false
-  network:
-    origins: [https://api.example.com]
+  network: true
 traffic:
   captureHosts: [api.example.com]
 actions:
@@ -494,10 +457,15 @@ actions:
       maxBodyBytes: 1024
 `
 	parser := interceptModuleParser{now: time.Now}
+	// The permission is a boolean. Anything shaped like the old list is an
+	// unknown field or a type error, and both are refused rather than ignored:
+	// silently dropping one would import an extension whose author believed the
+	// grant was narrower than it is.
 	for name, content := range map[string]string{
-		"unknown network field": strings.Replace(base, "origins: [https://api.example.com]", "origins: [https://api.example.com]\n    wildcard: true", 1),
-		"wrong origins type":    strings.Replace(base, "origins: [https://api.example.com]", "origins: https://api.example.com", 1),
-		"path is not origin":    strings.Replace(base, "https://api.example.com]", "https://api.example.com/path]", 1),
+		"origin list":     strings.Replace(base, "network: true", "network:\n    origins: [https://api.example.com]", 1),
+		"any form":        strings.Replace(base, "network: true", "network:\n    any: true", 1),
+		"wrong type":      strings.Replace(base, "network: true", "network: yes-please", 1),
+		"nested unknowns": strings.Replace(base, "network: true", "network:\n    wildcard: true", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parser.Import(context.Background(), interceptModuleImportRequest{Content: content}); err == nil {
@@ -601,17 +569,6 @@ func TestNormalizeNativeExtensionRoutingRuleRejectsUnsafeShapes(t *testing.T) {
 	}
 }
 
-func TestInterceptNetworkOriginHostPortRequiresCanonicalOrigin(t *testing.T) {
-	t.Parallel()
-	host, port, err := interceptNetworkOriginHostPort("https://api.example.com:8443")
-	if err != nil || host != "api.example.com" || port != 8443 {
-		t.Fatalf("origin target = %q:%d, %v", host, port, err)
-	}
-	if _, _, err := interceptNetworkOriginHostPort("HTTPS://API.EXAMPLE.COM:443/"); err == nil {
-		t.Fatal("non-canonical stored origin was accepted")
-	}
-}
-
 func TestInterceptModuleSnapshotDigestExcludesOperatorBindings(t *testing.T) {
 	t.Parallel()
 	module := testModuleSnapshot()
@@ -625,11 +582,11 @@ func TestInterceptModuleSnapshotDigestExcludesOperatorBindings(t *testing.T) {
 		t.Fatalf("operator capture DNS binding changed snapshot digest: %s != %s", got, baseline)
 	}
 	module.CaptureDNS = interceptCaptureDNSTrust
-	module.NetworkOrigins = []string{"https://api.example.com"}
+	module.Network = true
 	if got := interceptModuleSnapshotDigest(module); got == baseline {
 		t.Fatal("immutable network capability did not change snapshot digest")
 	}
-	module.NetworkOrigins = nil
+	module.Network = false
 	module.EgressGroupRequired = true
 	if got := interceptModuleSnapshotDigest(module); got == baseline {
 		t.Fatal("immutable egress requirement did not change snapshot digest")
@@ -782,8 +739,7 @@ metadata:
   version: 1.0.0
 permissions:
   persistentStorage: false
-  network:
-` + permission + `
+  network: ` + permission + `
 traffic:
   captureHosts: [api.example.com]
 actions:
@@ -803,28 +759,26 @@ actions:
 
 func TestNativeExtensionParserAcceptsTheNetworkCapability(t *testing.T) {
 	t.Parallel()
-	// Hosts an operator configures at runtime cannot be enumerated in a
-	// manifest, so the capability is declared without an origin list.
-	snapshot, err := (interceptModuleParser{now: time.Now}).Import(context.Background(), interceptModuleImportRequest{Content: networkCapabilityManifest("    any: true")})
+	// One boolean. Reachable hosts are not enumerable -- an operator configures
+	// some of them at runtime -- so the manifest no longer pretends to list them.
+	snapshot, err := (interceptModuleParser{now: time.Now}).Import(context.Background(), interceptModuleImportRequest{Content: networkCapabilityManifest("true")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !snapshot.NetworkAny {
+	if !snapshot.Network {
 		t.Fatal("network capability was not snapshotted")
-	}
-	if len(snapshot.NetworkOrigins) != 0 {
-		t.Fatalf("origins = %v, want none", snapshot.NetworkOrigins)
 	}
 }
 
-func TestNativeExtensionParserRejectsCapabilityWithOrigins(t *testing.T) {
+func TestNativeExtensionParserRejectsANetworkOriginList(t *testing.T) {
 	t.Parallel()
-	// Showing both would give an operator an exact origin list that does not
-	// describe what the extension may actually reach.
-	permission := "    any: true\n    origins: [https://api.example.net]"
-	_, err := (interceptModuleParser{now: time.Now}).Import(context.Background(), interceptModuleImportRequest{Content: networkCapabilityManifest(permission)})
-	if err == nil || !strings.Contains(err.Error(), "any and an origin list") {
-		t.Fatalf("err = %v, want the combined grant to be rejected", err)
+	// The list is gone from the schema, and an unknown field is refused rather
+	// than ignored: a manifest still carrying one would otherwise import with a
+	// grant broader than the origins it thought it was asking for.
+	_, err := (interceptModuleParser{now: time.Now}).Import(context.Background(), interceptModuleImportRequest{Content: strings.Replace(
+		networkCapabilityManifest("true"), "  network: true", "  network:\n    origins: [https://api.example.net]", 1)})
+	if err == nil {
+		t.Fatal("err = nil, want an origin list to be refused")
 	}
 }
 
@@ -1106,14 +1060,16 @@ settings:
 		settings string
 		want     string
 	}{
-		{"undeclared", "    enabledWhen: airborne\n", "", "not a setting this extension declares"},
-		{"malformed key", "    enabledWhen: not a key\n", booleanSetting(true), "not a valid setting key"},
+		{"undeclared", "    enabledWhen:\n      key: airborne\n      equals: \"true\"\n", "", "not a setting this extension declares"},
+		{"malformed key", "    enabledWhen:\n      key: not a key\n      equals: \"true\"\n", booleanSetting(true), "not a valid setting key"},
+		{"valueless", "    enabledWhen:\n      key: airborne\n", booleanSetting(true), "no value to compare against"},
+		{"unreachable boolean", "    enabledWhen:\n      key: airborne\n      equals: maybe\n", booleanSetting(true), "cannot equal"},
 		{
-			"non-boolean", "    enabledWhen: airborne\n",
-			"  - key: airborne\n    type: text\n    required: true\n    default: \"on\"\n",
-			"only boolean is supported",
+			"unreachable option", "    enabledWhen:\n      key: mode\n      equals: Cloud\n",
+			"  - key: mode\n    type: select\n    required: true\n    options: [Script, Worker]\n    default: Script\n",
+			"has no option",
 		},
-		{"optional", "    enabledWhen: airborne\n", booleanSetting(false), "must name a required setting"},
+		{"optional", "    enabledWhen:\n      key: airborne\n      equals: \"true\"\n", booleanSetting(false), "must name a required setting"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
@@ -1123,18 +1079,18 @@ settings:
 		})
 	}
 
-	snapshot, err := importManifest(t, manifest("    enabledWhen: airborne\n", booleanSetting(true)))
+	snapshot, err := importManifest(t, manifest("    enabledWhen:\n      key: airborne\n      equals: \"true\"\n", booleanSetting(true)))
 	if err != nil {
 		t.Fatalf("valid gate rejected: %v", err)
 	}
-	if got := snapshot.Scripts[0].EnabledWhen; got != "airborne" {
-		t.Fatalf("stored gate = %q; it must reach the sidecar document", got)
+	if got := snapshot.Scripts[0].EnabledWhen; got == nil || got.Key != "airborne" || got.Equals != "true" {
+		t.Fatalf("stored gate = %+v; it must reach the sidecar document", got)
 	}
 	body, err := json.Marshal(snapshot.Scripts[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), `"enabled_when":"airborne"`) {
+	if !strings.Contains(string(body), `"enabled_when":{"key":"airborne","equals":"true"}`) {
 		t.Fatalf("published action = %s", body)
 	}
 
