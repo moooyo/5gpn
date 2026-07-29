@@ -1135,7 +1135,6 @@ func (m *InterceptModuleManager) mutate(
 	nextDocument.ExecutionOrder = append([]string{}, oldDocument.ExecutionOrder...)
 	nextDocument.Modules = append([]interceptModuleSnapshot(nil), oldDocument.Modules...)
 	for index := range nextDocument.Modules {
-		nextDocument.Modules[index].NetworkOrigins = append([]string(nil), oldDocument.Modules[index].NetworkOrigins...)
 		nextDocument.Modules[index].RoutingRules = cloneInterceptRoutingRules(oldDocument.Modules[index].RoutingRules)
 		nextDocument.Modules[index].Settings = cloneInterceptSettings(oldDocument.Modules[index].Settings)
 		nextDocument.Modules[index].HostMappings = append([]interceptHostMapping(nil), oldDocument.Modules[index].HostMappings...)
@@ -1506,8 +1505,7 @@ func interceptModuleViewFromSnapshot(module interceptModuleSnapshot, ready bool,
 		Actions:  interceptModuleActionViews(module.Scripts),
 		Settings: cloneInterceptSettings(module.Settings), HostMappings: append([]interceptHostMapping(nil), module.HostMappings...),
 		RoutingRules:      cloneInterceptRoutingRules(module.RoutingRules),
-		PersistentStorage: module.PersistentStorage, NetworkOrigins: append([]string{}, module.NetworkOrigins...),
-		NetworkAny:          module.NetworkAny,
+		PersistentStorage: module.PersistentStorage, Network: module.Network,
 		EgressGroupRequired: module.EgressGroupRequired, EgressGroup: module.EgressGroup, SourceURL: module.Source.URL,
 		SourceDigest: module.Source.Digest, SnapshotDigest: interceptModuleSnapshotDigest(module), ImportedAt: module.ImportedAt,
 	}

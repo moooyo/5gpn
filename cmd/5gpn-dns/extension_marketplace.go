@@ -116,12 +116,11 @@ type marketplaceResource struct {
 type marketplaceCapabilities struct {
 	CaptureHostCount int      `json:"captureHostCount"`
 	ActionCount      int      `json:"actionCount"`
-	SettingCount     int      `json:"settingCount"`
-	NetworkOrigins   []string `json:"networkOrigins"`
-	// NetworkAny is the unrestricted network grant. An index that omits it
-	// decodes as false, which is the safe direction: the check below then
-	// refuses to install a manifest that takes the grant.
-	NetworkAny           bool `json:"networkAny"`
+	SettingCount     int `json:"settingCount"`
+	// Network is the network grant. An index that omits it decodes as false,
+	// which is the safe direction: the check below then refuses to install a
+	// manifest that takes the grant.
+	Network              bool `json:"network"`
 	PersistentStorage    bool `json:"persistentStorage"`
 	UpstreamMappingCount int  `json:"upstreamMappingCount"`
 	EgressGroupRequired  bool `json:"egressGroupRequired"`
@@ -176,13 +175,12 @@ type marketplaceEntryView struct {
 type marketplaceCapabilitiesView struct {
 	CaptureHostCount     int      `json:"capture_host_count"`
 	ActionCount          int      `json:"action_count"`
-	SettingCount         int      `json:"setting_count"`
-	NetworkOrigins       []string `json:"network_origins"`
-	NetworkAny           bool     `json:"network_any"`
-	PersistentStorage    bool     `json:"persistent_storage"`
-	UpstreamMappingCount int      `json:"upstream_mapping_count"`
-	EgressGroupRequired  bool     `json:"egress_group_required"`
-	RoutingRuleCount     int      `json:"routing_rule_count"`
+	SettingCount         int  `json:"setting_count"`
+	Network              bool `json:"network"`
+	PersistentStorage    bool `json:"persistent_storage"`
+	UpstreamMappingCount int  `json:"upstream_mapping_count"`
+	EgressGroupRequired  bool `json:"egress_group_required"`
+	RoutingRuleCount     int  `json:"routing_rule_count"`
 }
 
 type ExtensionMarketplaceStore struct {
@@ -821,7 +819,7 @@ func marketplaceSourceViewFromSnapshot(source marketplaceSourceSnapshot) marketp
 	for _, entry := range source.Entries {
 		capabilities := marketplaceCapabilitiesView{
 			CaptureHostCount: entry.Capabilities.CaptureHostCount, ActionCount: entry.Capabilities.ActionCount,
-			SettingCount: entry.Capabilities.SettingCount, NetworkOrigins: append([]string{}, entry.Capabilities.NetworkOrigins...), NetworkAny: entry.Capabilities.NetworkAny,
+			SettingCount: entry.Capabilities.SettingCount, Network: entry.Capabilities.Network,
 			PersistentStorage: entry.Capabilities.PersistentStorage, UpstreamMappingCount: entry.Capabilities.UpstreamMappingCount,
 			EgressGroupRequired: entry.Capabilities.EgressGroupRequired,
 			RoutingRuleCount:    *entry.Capabilities.RoutingRuleCount,
@@ -947,10 +945,6 @@ func normalizeAndValidateMarketplaceIndex(index *marketplaceIndex, baseURL strin
 		entry.Description = strings.TrimSpace(entry.Description)
 		entry.License.SPDX = strings.TrimSpace(entry.License.SPDX)
 		entry.Tags = normalizeMarketplaceTags(entry.Tags)
-		entry.Capabilities.NetworkOrigins, err = normalizeInterceptNetworkOrigins(entry.Capabilities.NetworkOrigins)
-		if err != nil {
-			return fmt.Errorf("entries[%d].capabilities.networkOrigins: %w", entryIndex, err)
-		}
 		if entry.License.URL, err = resolveMarketplaceURL(baseURL, entry.License.URL, true); err != nil {
 			return fmt.Errorf("entries[%d].license.url: %w", entryIndex, err)
 		}
@@ -1100,9 +1094,6 @@ func validateNormalizedMarketplaceIndex(index marketplaceIndex) error {
 			capabilities.ActionCount+capabilities.UpstreamMappingCount > maxInterceptModuleRules {
 			return fmt.Errorf("entry %q has invalid capability counts", entry.ID)
 		}
-		if err := validateInterceptNetworkOrigins(capabilities.NetworkOrigins); err != nil {
-			return fmt.Errorf("entry %q capabilities: %w", entry.ID, err)
-		}
 	}
 	return nil
 }
@@ -1196,8 +1187,7 @@ func validateMarketplaceInstall(_ marketplaceSourceSnapshot, entry marketplaceEn
 		// not be able to install a manifest that takes it. The operator reviewed
 		// the catalogue entry before asking for the install, so the entry has to
 		// be what the manifest turns out to be.
-		capabilities.NetworkAny != module.NetworkAny ||
-		!stringSlicesEqual(capabilities.NetworkOrigins, module.NetworkOrigins) {
+		capabilities.Network != module.Network {
 		return errors.New("manifest capabilities mismatch")
 	}
 	actualResources, err := marketplaceResourcesFromModule(module)

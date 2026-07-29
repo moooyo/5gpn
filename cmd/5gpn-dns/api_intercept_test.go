@@ -107,12 +107,7 @@ func TestInterceptConfigValidatesNetworkAndEgressFields(t *testing.T) {
 	module := testModuleSnapshot()
 	document, _ := testInterceptDocument(t, module)
 
-	document.Modules[0].NetworkOrigins = []string{"HTTPS://API.EXAMPLE.COM:443/"}
-	if err := validateInterceptDocument(document); err == nil || !strings.Contains(err.Error(), "not canonical") {
-		t.Fatalf("non-canonical network origin error = %v", err)
-	}
-
-	document.Modules[0].NetworkOrigins = nil
+	document.Modules[0].Network = true
 	document.Modules[0].EgressGroup = "bad,group"
 	if err := validateInterceptDocument(document); err == nil || !strings.Contains(err.Error(), "commas") {
 		t.Fatalf("unsafe egress group error = %v", err)

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -59,16 +60,14 @@ type nativeExtensionMetadata struct {
 }
 
 type nativeExtensionPermission struct {
-	PersistentStorage bool                             `yaml:"persistentStorage"`
-	Network           nativeExtensionNetworkPermission `yaml:"network"`
-}
-
-type nativeExtensionNetworkPermission struct {
-	Origins []string `yaml:"origins"`
-	// Any grants the network capability without enumerating origins, for
-	// extensions whose reachable hosts are operator-configured. It is a
-	// strictly broader grant than origins and every review must say so.
-	Any bool `yaml:"any"`
+	PersistentStorage bool `yaml:"persistentStorage"`
+	// Network is one boolean: the extension may reach the network, or it may
+	// not. It replaces the earlier origins/any pair, which described the same
+	// capability at two breadths and forced an extension needing both -- a
+	// script reaching operator-chosen hosts, an action rewriting to a fixed one
+	// -- to pick a breadth that broke the other half. Every review now says
+	// "any host" rather than naming one.
+	Network bool `yaml:"network"`
 }
 
 type nativeExtensionRequirements struct {
@@ -118,13 +117,23 @@ type nativeExtensionAction struct {
 	ID    string                     `yaml:"id"`
 	Phase string                     `yaml:"phase"`
 	Match nativeExtensionActionMatch `yaml:"match"`
-	// EnabledWhen names a required boolean setting of the same extension. When
-	// it is false the action is not compiled at all. Upstream plugin formats
-	// gate a script entry from outside the script, writing the switch on the
-	// entry rather than passing the key to it, so a bundle carrying such a
+	// EnabledWhen compares one of the extension's own settings against a value.
+	// When it does not hold the action is not compiled at all. Upstream plugin
+	// formats gate a script entry from outside the script, writing the switch on
+	// the entry rather than passing the key to it, so a bundle carrying such a
 	// switch never reads it and without this the setting silently does nothing.
-	EnabledWhen string                `yaml:"enabledWhen"`
-	Script      nativeExtensionScript `yaml:"script"`
+	//
+	// A comparison rather than a bare key is what lets one select drive two
+	// mutually exclusive action sets, which is the shape an upstream publishing
+	// two modules for the same paths actually has. Two booleans can say "A on"
+	// and "B on" but not "exactly one of them".
+	EnabledWhen *nativeExtensionActionGate `yaml:"enabledWhen"`
+	Script      nativeExtensionScript      `yaml:"script"`
+}
+
+type nativeExtensionActionGate struct {
+	Key    string `yaml:"key"`
+	Equals string `yaml:"equals"`
 }
 
 type nativeExtensionActionMatch struct {
@@ -225,10 +234,6 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 	if err != nil {
 		return interceptModuleSnapshot{}, fmt.Errorf("traffic.captureHosts: %w", err)
 	}
-	networkOrigins, err := normalizeInterceptNetworkOrigins(manifest.Permissions.Network.Origins)
-	if err != nil {
-		return interceptModuleSnapshot{}, fmt.Errorf("permissions.network.origins: %w", err)
-	}
 	mappings := make([]interceptHostMapping, 0, len(manifest.Traffic.UpstreamMappings))
 	for index, raw := range manifest.Traffic.UpstreamMappings {
 		host, err := normalizeInterceptHostPattern(raw.Host)
@@ -280,8 +285,8 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 		if bodyMode == "" {
 			bodyMode = "none"
 		}
-		enabledWhen := strings.TrimSpace(raw.EnabledWhen)
-		if err := validateActionGateSetting(enabledWhen, settings); err != nil {
+		enabledWhen, err := parseActionGate(raw.EnabledWhen, settings)
+		if err != nil {
 			return interceptModuleSnapshot{}, fmt.Errorf("action %q enabledWhen: %w", raw.ID, err)
 		}
 		// entry selects the script contract. The default native entry point is a
@@ -418,8 +423,8 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 		Name: strings.TrimSpace(manifest.Metadata.Name), Description: strings.TrimSpace(manifest.Metadata.Description),
 		CaptureHosts: captureHosts, CaptureDNS: interceptCaptureDNSTrust,
 		HostMappings: mappings, RoutingRules: routingRules, Settings: settings, Scripts: scripts,
-		PersistentStorage: manifest.Permissions.PersistentStorage, NetworkOrigins: networkOrigins,
-		NetworkAny:          manifest.Permissions.Network.Any,
+		PersistentStorage:   manifest.Permissions.PersistentStorage,
+		Network:             manifest.Permissions.Network,
 		EgressGroupRequired: manifest.Requirements.EgressGroup.Required,
 	}
 	if err := validateInterceptModule(moduleWithSyntheticSource(module)); err != nil {
@@ -446,26 +451,44 @@ func moduleWithSyntheticSource(module interceptModuleSnapshot) interceptModuleSn
 // third case -- declared, gating an action, and unset -- whose only answers are
 // running something the operator may have switched off, or silently dropping an
 // action. Refusing it here means neither has to be chosen at compile time.
-func validateActionGateSetting(key string, settings []interceptModuleSetting) error {
-	if key == "" {
-		return nil
+func parseActionGate(raw *nativeExtensionActionGate, settings []interceptModuleSetting) (*interceptActionGate, error) {
+	if raw == nil {
+		return nil, nil
 	}
+	key := strings.TrimSpace(raw.Key)
+	equals := strings.TrimSpace(raw.Equals)
 	if !validModuleSettingKey(key) {
-		return fmt.Errorf("%q is not a valid setting key", key)
+		return nil, fmt.Errorf("%q is not a valid setting key", key)
+	}
+	if equals == "" {
+		return nil, fmt.Errorf("%q declares no value to compare against", key)
 	}
 	for _, setting := range settings {
 		if setting.Key != key {
 			continue
 		}
-		if setting.Type != "boolean" {
-			return fmt.Errorf("%q is a %s setting; only boolean is supported", key, setting.Type)
-		}
+		// Required is the load-bearing half: an enabled extension's required
+		// settings always carry a value, so a gate always has a decidable state.
+		// An optional one would add a third case whose only answers are running
+		// something the operator switched off, or dropping an action silently.
 		if !setting.Required {
-			return fmt.Errorf("%q is optional; a gate must name a required setting", key)
+			return nil, fmt.Errorf("%q is optional; a gate must name a required setting", key)
 		}
-		return nil
+		switch setting.Type {
+		case "boolean":
+			if equals != "true" && equals != "false" {
+				return nil, fmt.Errorf("%q is a boolean setting and cannot equal %q", key, equals)
+			}
+		case "select":
+			// Comparing against a value the operator can never choose compiles
+			// to an action that never runs, which is the failure nobody sees.
+			if !slices.Contains(setting.Options, equals) {
+				return nil, fmt.Errorf("%q has no option %q", key, equals)
+			}
+		}
+		return &interceptActionGate{Key: key, Equals: equals}, nil
 	}
-	return fmt.Errorf("%q is not a setting this extension declares", key)
+	return nil, fmt.Errorf("%q is not a setting this extension declares", key)
 }
 
 func normalizeNativeExtensionRoutingRule(raw nativeExtensionRoutingRule) (interceptRoutingRule, error) {

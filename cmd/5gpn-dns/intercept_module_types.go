@@ -10,10 +10,8 @@ import (
 	"fmt"
 	"math"
 	"net"
-	"net/url"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -64,6 +62,14 @@ const interceptScriptEntryProxyCompat = "proxy-compat"
 //
 // Base64Body exists because the published modules mock binary gRPC frames,
 // which cannot survive a UTF-8 round trip through a manifest.
+// interceptActionGate compiles an action only while one of the extension's own
+// settings equals a declared value. Comparison is on rendered text, so a select
+// gate names the option string an operator picks.
+type interceptActionGate struct {
+	Key    string `json:"key"`
+	Equals string `json:"equals"`
+}
+
 type interceptHeaderEdits struct {
 	Set    map[string]string `json:"set,omitempty" yaml:"set"`
 	Remove []string          `json:"remove,omitempty" yaml:"remove"`
@@ -111,11 +117,11 @@ type interceptScriptRule struct {
 	ID    string               `json:"id"`
 	Phase string               `json:"phase"`
 	Match interceptActionMatch `json:"match"`
-	// EnabledWhen names a required boolean setting of the same extension. The
-	// sidecar does not compile the action when that setting is false, so it
+	// EnabledWhen compares one of the extension's own settings against a value.
+	// The sidecar does not compile the action when the comparison fails, so it
 	// never matches. Upstream plugin formats gate a script entry from outside
 	// the script, which is why a bundle never reads the key that switches it.
-	EnabledWhen  string                 `json:"enabled_when,omitempty"`
+	EnabledWhen  *interceptActionGate   `json:"enabled_when,omitempty"`
 	ScriptURL    string                 `json:"script_url,omitempty"`
 	ScriptDigest string                 `json:"script_digest"`
 	ScriptBody   string                 `json:"script_body"`
@@ -156,10 +162,10 @@ type interceptModuleActionView struct {
 	ID    string               `json:"id"`
 	Phase string               `json:"phase"`
 	Match interceptActionMatch `json:"match"`
-	// EnabledWhen lets the console say which setting switched an action off,
-	// rather than leaving an operator to wonder why a declared action does
+	// EnabledWhen lets the console say which setting value switched an action
+	// off, rather than leaving an operator to wonder why a declared action does
 	// nothing.
-	EnabledWhen  string                 `json:"enabled_when,omitempty"`
+	EnabledWhen  *interceptActionGate   `json:"enabled_when,omitempty"`
 	ScriptURL    string                 `json:"script_url,omitempty"`
 	ScriptDigest string                 `json:"script_digest"`
 	BodyMode     string                 `json:"body_mode"`
@@ -368,10 +374,13 @@ type interceptModuleSnapshot struct {
 	RoutingRules        interceptRoutingRuleList `json:"routing_rules,omitempty"`
 	Settings            []interceptModuleSetting `json:"settings,omitempty"`
 	Scripts             []interceptScriptRule    `json:"actions,omitempty"`
-	PersistentStorage   bool                     `json:"persistent_storage"`
-	NetworkOrigins      []string                 `json:"network_origins"`
-	NetworkAny          bool                     `json:"network_any,omitempty"`
-	EgressGroupRequired bool                     `json:"egress_group_required"`
+	PersistentStorage bool `json:"persistent_storage"`
+	// Network is the whole network permission: the script request API, and a
+	// request-phase URL rewrite to any origin. There is no origin list beside
+	// it, so a review can say that an extension may reach the network but not
+	// where.
+	Network             bool `json:"network,omitempty"`
+	EgressGroupRequired bool `json:"egress_group_required"`
 	EgressGroup         string                   `json:"egress_group,omitempty"`
 }
 
@@ -390,11 +399,10 @@ type interceptModuleView struct {
 	Settings            []interceptModuleSetting    `json:"settings,omitempty"`
 	HostMappings        []interceptHostMapping      `json:"upstream_mappings,omitempty"`
 	RoutingRules        []interceptRoutingRule      `json:"routing_rules,omitempty"`
-	PersistentStorage   bool                        `json:"persistent_storage"`
-	ExecutionOrder      int                         `json:"execution_order"`
-	NetworkOrigins      []string                    `json:"network_origins"`
-	NetworkAny          bool                        `json:"network_any,omitempty"`
-	EgressGroupRequired bool                        `json:"egress_group_required"`
+	PersistentStorage   bool `json:"persistent_storage"`
+	ExecutionOrder      int  `json:"execution_order"`
+	Network             bool `json:"network,omitempty"`
+	EgressGroupRequired bool `json:"egress_group_required"`
 	EgressGroup         string                      `json:"egress_group,omitempty"`
 	SourceURL           string                      `json:"source_url,omitempty"`
 	SourceDigest        string                      `json:"source_digest"`
@@ -511,14 +519,6 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 	}
 	if err := validateInterceptCaptureDNS(module.CaptureDNS); err != nil {
 		return err
-	}
-	if err := validateInterceptNetworkOrigins(module.NetworkOrigins); err != nil {
-		return err
-	}
-	// The two grants are alternatives. Accepting both would show an operator an
-	// exact origin list that does not describe what the extension may reach.
-	if module.NetworkAny && len(module.NetworkOrigins) > 0 {
-		return errors.New("network permission declares both any and an origin list")
 	}
 	if err := validateInterceptEgressGroupBinding(module.EgressGroup); err != nil {
 		return err
@@ -1019,108 +1019,6 @@ func validInterceptHostMappingServers(rest string) bool {
 		return false
 	}
 	return len(parseUpstreamEntryList(parts)) == len(parts)
-}
-
-type interceptNetworkOriginTarget struct {
-	Host string
-	Port int
-}
-
-func normalizeInterceptNetworkOrigins(raw []string) ([]string, error) {
-	if len(raw) > maxInterceptNetworkOrigins {
-		return nil, fmt.Errorf("at most %d network origins are allowed", maxInterceptNetworkOrigins)
-	}
-	origins := make([]string, 0, len(raw))
-	for index, value := range raw {
-		origin, err := normalizeInterceptNetworkOrigin(value)
-		if err != nil {
-			return nil, fmt.Errorf("origin %d: %w", index, err)
-		}
-		origins = append(origins, origin)
-	}
-	return uniqueSortedStrings(origins), nil
-}
-
-func validateInterceptNetworkOrigins(origins []string) error {
-	if len(origins) > maxInterceptNetworkOrigins {
-		return fmt.Errorf("network_origins exceeds %d entries", maxInterceptNetworkOrigins)
-	}
-	if !sort.StringsAreSorted(origins) {
-		return errors.New("network_origins must be canonical and sorted")
-	}
-	for index, origin := range origins {
-		canonical, err := normalizeInterceptNetworkOrigin(origin)
-		if err != nil {
-			return fmt.Errorf("network origin %d: %w", index, err)
-		}
-		if canonical != origin {
-			return fmt.Errorf("network origin %d is not canonical", index)
-		}
-		if index > 0 && origins[index-1] == origin {
-			return fmt.Errorf("duplicate network origin %q", origin)
-		}
-	}
-	return nil
-}
-
-func normalizeInterceptNetworkOrigin(raw string) (string, error) {
-	canonical, _, err := parseInterceptNetworkOrigin(raw)
-	return canonical, err
-}
-
-func interceptNetworkOriginHostPort(origin string) (string, int, error) {
-	canonical, target, err := parseInterceptNetworkOrigin(origin)
-	if err != nil {
-		return "", 0, err
-	}
-	if canonical != origin {
-		return "", 0, errors.New("network origin is not canonical")
-	}
-	return target.Host, target.Port, nil
-}
-
-func parseInterceptNetworkOrigin(raw string) (string, interceptNetworkOriginTarget, error) {
-	value := strings.TrimSpace(raw)
-	if value == "" || len(value) > maxInterceptResourceURL {
-		return "", interceptNetworkOriginTarget{}, fmt.Errorf("origin must contain 1 to %d bytes", maxInterceptResourceURL)
-	}
-	parsed, err := url.Parse(value)
-	if err != nil {
-		return "", interceptNetworkOriginTarget{}, fmt.Errorf("invalid origin: %w", err)
-	}
-	scheme := strings.ToLower(parsed.Scheme)
-	if scheme != "http" && scheme != "https" {
-		return "", interceptNetworkOriginTarget{}, errors.New("origin scheme must be http or https")
-	}
-	if parsed.Opaque != "" || parsed.User != nil || parsed.Hostname() == "" {
-		return "", interceptNetworkOriginTarget{}, errors.New("origin must have a host and no userinfo")
-	}
-	if (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || strings.Contains(value, "#") {
-		return "", interceptNetworkOriginTarget{}, errors.New("origin must not contain a path, query, or fragment")
-	}
-	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
-	if strings.Contains(host, "*") || net.ParseIP(host) != nil || !isValidDomain(host) || host == "localhost" || strings.HasSuffix(host, ".local") {
-		return "", interceptNetworkOriginTarget{}, errors.New("origin host must be an exact public DNS hostname")
-	}
-	if strings.HasSuffix(parsed.Host, ":") {
-		return "", interceptNetworkOriginTarget{}, errors.New("origin port is empty")
-	}
-	defaultPort := 80
-	if scheme == "https" {
-		defaultPort = 443
-	}
-	port := defaultPort
-	if parsed.Port() != "" {
-		port, err = strconv.Atoi(parsed.Port())
-		if err != nil || port < 1 || port > 65535 {
-			return "", interceptNetworkOriginTarget{}, errors.New("origin port must be between 1 and 65535")
-		}
-	}
-	canonical := scheme + "://" + host
-	if port != defaultPort {
-		canonical += ":" + strconv.Itoa(port)
-	}
-	return canonical, interceptNetworkOriginTarget{Host: host, Port: port}, nil
 }
 
 func validateInterceptEgressGroupBinding(group string) error {

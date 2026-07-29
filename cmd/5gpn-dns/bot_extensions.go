@@ -632,20 +632,12 @@ func marketplaceSourceReviewHTML(source marketplaceSourceView) string {
 			entry.Capabilities.RoutingRuleCount,
 			entry.Capabilities.PersistentStorage, entry.Capabilities.EgressGroupRequired,
 		)
-		text.WriteString("\n声明的 network origins（仅市场元数据；安装与启用仍需独立审查）：")
-		if entry.Capabilities.NetworkAny {
-			text.WriteString("<b>不受限（未列出地址）</b>")
+		text.WriteString("\n联网权限（仅市场元数据；安装与启用仍需独立审查）：")
+		if entry.Capabilities.Network {
+			text.WriteString("<b>已申请，可达地址不受限</b>")
 			continue
 		}
-		if len(entry.Capabilities.NetworkOrigins) == 0 {
-			text.WriteString("<i>无</i>")
-			continue
-		}
-		for _, origin := range entry.Capabilities.NetworkOrigins {
-			text.WriteString("\n• <code>")
-			text.WriteString(html.EscapeString(origin))
-			text.WriteString("</code>")
-		}
+		text.WriteString("<i>未申请</i>")
 	}
 	return text.String()
 }
@@ -866,9 +858,9 @@ func (bt *Bot) handleBotExtensionEntryCallback(
 		html.EscapeString(source.Name), html.EscapeString(entry.ID), html.EscapeString(entry.License.SPDX), html.EscapeString(entry.ManifestDigest)))
 	text.WriteString(fmt.Sprintf("\n\n能力：<code>%d</code> hosts · <code>%d</code> actions · <code>%d</code> settings · <code>%d</code> mappings · <code>%d</code> global routing rules",
 		entry.Capabilities.CaptureHostCount, entry.Capabilities.ActionCount, entry.Capabilities.SettingCount, entry.Capabilities.UpstreamMappingCount, entry.Capabilities.RoutingRuleCount))
-	if entry.Capabilities.NetworkAny || len(entry.Capabilities.NetworkOrigins) > 0 {
+	if entry.Capabilities.Network {
 		text.WriteString("\n\n")
-		text.WriteString(botExtensionNetworkRiskHTML(entry.Capabilities.NetworkOrigins, entry.Capabilities.NetworkAny))
+		text.WriteString(botExtensionNetworkRiskHTML(entry.Capabilities.Network))
 	}
 	rows := [][]models.InlineKeyboardButton{
 		{botExtensionButton("📥 审查并安装", "entry:install:"+rest)},
@@ -959,23 +951,14 @@ func (bt *Bot) previewBotExtensionMarketplaceInstall(
 	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
 }
 
-func botExtensionNetworkRiskHTML(origins []string, any bool) string {
-	// An unrestricted grant has no list to print, and printing "none" beside it
-	// would tell an operator the opposite of what was granted.
-	if any {
-		return "🌐 <b>联网权限风险（不受限）</b>\n该插件申请了联网权限但未指明可访问的地址，因为这些地址在运行时才确定。它可以把可见的全部解密请求、响应、参数和存储数据发送到它能解析的任意主机；改写请求会转发完整请求方法、解码后的请求体和端到端请求头，其中可能包含 Cookie 和 Authorization 凭据。这比地址列表更宽泛，启用后无法收窄。"
-	}
-	if len(origins) == 0 {
+// botExtensionNetworkRiskHTML states the whole grant, because the grant no
+// longer names anything. There is no list to print and no narrower form to
+// contrast it with: an extension either may reach the network or may not.
+func botExtensionNetworkRiskHTML(network bool) string {
+	if !network {
 		return ""
 	}
-	var text strings.Builder
-	text.WriteString("🌐 <b>联网权限风险</b>\n该脚本可以把它可见的全部解密请求、响应、参数和存储数据发送到以下每一个 origin，也可以把捕获的请求改写到这些 origin。改写会转发完整请求方法、解码后的请求体和端到端请求头，其中可能包含 Cookie 和 Authorization 凭据：")
-	for _, origin := range origins {
-		text.WriteString("\n• <code>")
-		text.WriteString(html.EscapeString(origin))
-		text.WriteString("</code>")
-	}
-	return text.String()
+	return "🌐 <b>联网权限风险（不受限）</b>\n该插件申请了联网权限。可访问的地址不在清单中声明，也无法在启用前列出：它可以把可见的全部解密请求、响应、参数和存储数据发送到它能解析的任意主机。改写请求会把捕获的请求转发到任意主机，其中包含完整请求方法、解码后的请求体和端到端请求头，可能带有 Cookie 和 Authorization 凭据。启用后无法收窄。"
 }
 
 func botExtensionActionsHTML(actions []interceptModuleActionView) string {
@@ -1167,9 +1150,9 @@ func botExtensionCandidateReviewHTML(module interceptModuleView) string {
 	if module.EgressGroupRequired && module.EgressGroup == "" {
 		text.WriteString("\n需要管理员选择 mihomo 出口组后才能启用。")
 	}
-	if module.NetworkAny || len(module.NetworkOrigins) > 0 {
+	if module.Network {
 		text.WriteString("\n\n")
-		text.WriteString(botExtensionNetworkRiskHTML(module.NetworkOrigins, module.NetworkAny))
+		text.WriteString(botExtensionNetworkRiskHTML(module.Network))
 	}
 	return text.String()
 }

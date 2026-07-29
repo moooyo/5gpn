@@ -183,14 +183,12 @@ func renderInterceptPolicyRule(rule interceptRoutingRule) string {
 }
 
 func interceptModuleEgressSelectors(module interceptModuleSnapshot) []interceptEgressSelector {
-	selectors := make([]interceptEgressSelector, 0, len(module.CaptureHosts)*2+len(module.NetworkOrigins)+len(module.HostMappings)*2)
+	// Capture hosts and mappings are the whole selector set. The network grant
+	// used to contribute one DOMAIN selector per declared origin, steering those
+	// hosts to the extension's egress; it names no origins now, so there is
+	// nothing to steer and a script's own requests follow the operator's routing.
+	selectors := make([]interceptEgressSelector, 0, len(module.CaptureHosts)*2+len(module.HostMappings)*2)
 	selectors = append(selectors, interceptModuleCaptureSelectors(module)...)
-	for _, origin := range module.NetworkOrigins {
-		host, port, err := interceptNetworkOriginHostPort(origin)
-		if err == nil {
-			selectors = append(selectors, interceptEgressSelector{Kind: "DOMAIN", Value: host, Port: port})
-		}
-	}
 	for _, mapping := range module.HostMappings {
 		// The resolver form names nameservers, not a destination. 5gpn-dns
 		// dials those itself; the extension's egress never reaches them, and
