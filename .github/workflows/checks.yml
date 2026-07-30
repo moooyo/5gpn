@@ -120,9 +120,11 @@ jobs:
             }
             # The anchors are literal in the template. Only the runtime block is
             # substituted, and it must be: an anchor with no block behind it is
-            # a config mihomo cannot parse, which is the pairing the installer's
-            # staging probe exists to prove against the shipped core. Probe
-            # identities, exactly as render_overlay_runtime_block emits them.
+            # a config mihomo cannot parse, which is the pairing the staging
+            # probe in install.sh exists to prove against the shipped core.
+            # Probe identities, exactly as render_overlay_runtime_block emits.
+            # No apostrophes in this comment: it sits inside the single-quoted
+            # awk program above, and one would close it.
             $0 == "__OVERLAY_RUNTIME_BLOCK__" {
               print ""
               print "runtime-overlay:"
