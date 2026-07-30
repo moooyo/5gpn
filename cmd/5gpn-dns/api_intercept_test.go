@@ -50,7 +50,7 @@ func TestInterceptSettingsAPIUpdatesCapabilitiesAndMasterState(t *testing.T) {
 
 func TestInterceptConfigRejectsDuplicateJSONKeys(t *testing.T) {
 	_, body := testInterceptDocument(t)
-	duplicate := strings.Replace(string(body), `"version": 5`, `"version": 5, "Version": 5`, 1)
+	duplicate := strings.Replace(string(body), `"version": 6`, `"version": 6, "Version": 6`, 1)
 	if _, err := decodeInterceptConfig([]byte(duplicate)); err == nil || !strings.Contains(err.Error(), "duplicate JSON key") {
 		t.Fatalf("duplicate config error = %v", err)
 	}
@@ -60,9 +60,24 @@ func TestInterceptConfigRequiresCurrentVersionAndCompleteExecutionOrder(t *testi
 	module := testModuleSnapshot()
 	_, body := testInterceptDocument(t, module)
 
-	stale := strings.Replace(string(body), `"version": 5`, `"version": 4`, 1)
-	if _, err := decodeInterceptConfig([]byte(stale)); err == nil || !strings.Contains(err.Error(), "version must be 5") {
+	stale := strings.Replace(string(body), `"version": 6`, `"version": 4`, 1)
+	if _, err := decodeInterceptConfig([]byte(stale)); err == nil || !strings.Contains(err.Error(), "version must be 6") {
 		t.Fatalf("stale config error = %v", err)
+	}
+
+	// The immediately previous version is upgraded in place instead: a deployed
+	// gateway keeps its extensions, settings, and bindings across this change.
+	previous := strings.Replace(string(body), `"version": 6`, `"version": 5`, 1)
+	previous = strings.Replace(previous, `"persistent_storage": false`, `"persistent_storage": false,
+      "network_origins": [
+        "https://api.example.net"
+      ]`, 1)
+	upgraded, err := decodeInterceptConfig([]byte(previous))
+	if err != nil {
+		t.Fatalf("previous version was refused rather than upgraded: %v", err)
+	}
+	if upgraded.Version != interceptConfigVersion || !upgraded.Modules[0].Network {
+		t.Fatalf("upgraded document = %+v", upgraded)
 	}
 
 	missing := strings.Replace(string(body), `"execution_order": [

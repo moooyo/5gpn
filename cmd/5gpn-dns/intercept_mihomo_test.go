@@ -65,12 +65,12 @@ func TestInterceptMihomoRoutingUsesExecutionOrderAndDeduplicatesSelectors(t *tes
 			t.Fatalf("later module reclaimed a duplicate selector: %s", rule)
 		}
 	}
-	// The network grant contributes no selector: it names no origin to steer, so
-	// a script's own requests follow the operator's routing rather than the
-	// extension's egress binding.
+	// The grant names no origin, so it contributes no selector. That leaves an
+	// extension's own outbound with no egress rule above the listener's terminal
+	// REJECT -- see the deployment note in docs/native-extensions.md.
 	for _, rule := range routing.Egress {
 		if strings.Contains(rule, "assets.example.com") {
-			t.Fatalf("network grant produced an egress selector: %s", rule)
+			t.Fatalf("network grant produced a per-origin selector: %s", rule)
 		}
 	}
 	wants := []string{

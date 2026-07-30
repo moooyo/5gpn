@@ -184,9 +184,10 @@ func renderInterceptPolicyRule(rule interceptRoutingRule) string {
 
 func interceptModuleEgressSelectors(module interceptModuleSnapshot) []interceptEgressSelector {
 	// Capture hosts and mappings are the whole selector set. The network grant
-	// used to contribute one DOMAIN selector per declared origin, steering those
-	// hosts to the extension's egress; it names no origins now, so there is
-	// nothing to steer and a script's own requests follow the operator's routing.
+	// used to contribute one DOMAIN selector per declared origin; it names no
+	// origins now, so it contributes nothing here -- and the transport layer
+	// still needs an enumerated allowlist, which is the open problem recorded in
+	// docs/native-extensions.md.
 	selectors := make([]interceptEgressSelector, 0, len(module.CaptureHosts)*2+len(module.HostMappings)*2)
 	selectors = append(selectors, interceptModuleCaptureSelectors(module)...)
 	for _, mapping := range module.HostMappings {

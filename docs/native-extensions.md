@@ -191,10 +191,27 @@ surface's enable review must state these consequences explicitly. Taking or
 dropping the grant changes the snapshot and therefore requires a disabled update
 followed by a new enable confirmation.
 
-An extension holding the grant contributes no mihomo egress selector for it.
-Capture hosts and upstream mappings are still steered to the extension's egress
-binding; a script's own requests follow the operator's routing, because there is
-no declared origin to steer.
+> [!WARNING]
+> An extension holding the grant currently cannot reach anything outside its own
+> capture hosts. This is a known, deployment-verified gap, not a design choice.
+>
+> The origin list was two things at once: the sentence an enable review could
+> read out, and the destination allowlist the runtime overlay enforces. Removing
+> it removed both. The interception listener's rules end with
+> `IN-NAME,intercept-egress,REJECT`, every rule above it comes from an
+> enumerated selector, and the overlay refuses a binding with an empty
+> destination list outright -- it reports that such a binding "authorizes
+> nothing" and rejects the whole generation. So a script's `context.network`
+> request and a cross-origin rewrite both dial, match nothing, and reject.
+>
+> On a test gateway this was confirmed end to end: with `Mode=Cloud` the sidecar
+> correctly rewrote a captured WeatherKit request and asked mihomo for
+> `weatherkit.pages.dev:443`, and mihomo answered
+> `match InName(intercept-egress) using REJECT`.
+>
+> Closing it needs one of: an "any destination" kind in the overlay contract that
+> mihomo enforces, or a destination allowlist back in the manifest -- serving the
+> transport layer rather than the review text.
 
 ## Typed settings
 
