@@ -100,8 +100,17 @@ grep -Fq 'grep -Fqx "$POLKIT_RULE_MARKER"' <<<"$polkit_owned_fn" \
     && fail "polkit ownership pins the exact marker revision instead of its owner"
 grep -Eq '^// 5gpn-polkit-id: [a-z-]+$' "$ROOT/etc/polkit-1/rules.d/50-5gpn.rules" \
     || fail "polkit rule marker carries a revision suffix again"
-grep -REq '_VALUE="5gpn-(runtime|config|state|web|ios|temp|zashboard|intercept-state)-v[0-9]' "$INSTALL" \
-    && fail "a self-healing ownership value carries a revision suffix again"
+# The value a root is claimed with must never be versioned: comparing it exactly
+# is what wedged upgrades. A LEGACY value is the opposite of that mistake -- it
+# is never written, only accepted so the claim can heal a marker an older release
+# left behind, which is the role legacy_intercept_ca_root_is_safe plays for the
+# CA root. So the rule covers the values we write and exempts that one shape.
+if grep -RE '_VALUE="5gpn-(runtime|config|state|web|ios|temp|zashboard|intercept-state)-v[0-9]' "$INSTALL" \
+    | grep -qv 'LEGACY'; then
+    fail "a self-healing ownership value carries a revision suffix again"
+fi
+grep -Fq 'CONF_LEGACY_OWNERSHIP_VALUE=' "$INSTALL" \
+    || fail "the legacy config ownership value is gone; a pre-0.0.44 host cannot upgrade"
 # The converse: certificate roots have no self-heal, so their values are frozen.
 # Changing one strands every existing host.
 for cert_value in 'DEBUG_CERT_MARKER_VALUE="5gpn-debug-cert-v1"' \
