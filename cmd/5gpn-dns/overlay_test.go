@@ -820,3 +820,61 @@ func assertJournalAcceptsNextApply(t *testing.T, journal *OverlayJournal) {
 		t.Fatalf("a later apply was refused: %v", err)
 	}
 }
+
+// An extension holding the network permission must reach the network. The
+// permission names no host, so the transport half of it cannot be an allowlist:
+// the overlay's binding for it is unbounded, and the interception listener's
+// deny terminator is what everything else still falls to.
+func TestOverlayGrantHolderGetsExactlyOneUnboundedBindingLast(t *testing.T) {
+	module := testModuleSnapshot()
+	module.Enabled = true
+	module.Network = true
+	module.EgressGroup = "Japan"
+	second := testModuleSnapshot()
+	second.ID = "io.example.second"
+	second.Enabled = true
+	second.Network = true
+	second.EgressGroup = "Proxies"
+	second.CaptureHosts = []string{"second.example.com"}
+
+	document := interceptConfigDocument{
+		Version: interceptConfigVersion, MITM: interceptMITMSettings{Enabled: true},
+		ExecutionOrder: []string{module.ID, second.ID},
+		Modules:        []interceptModuleSnapshot{module, second},
+	}
+	capabilities := overlayEgressCapabilities(orderedEnabledInterceptModules(document), "cred", "Proxies")
+	if len(capabilities) != 1 {
+		t.Fatalf("got %d capabilities, want 1", len(capabilities))
+	}
+	bindings := capabilities[0].Bindings
+	unbounded := 0
+	for index, bind := range bindings {
+		if !bind.Unbounded {
+			continue
+		}
+		unbounded++
+		if index != len(bindings)-1 {
+			t.Errorf("the unbounded binding is at %d of %d and would shadow the rest", index, len(bindings))
+		}
+		if len(bind.Destinations) != 0 {
+			t.Errorf("the unbounded binding also carries %d destinations", len(bind.Destinations))
+		}
+		// Execution order decides it, the same way it decides every other
+		// overlapping claim in this projection.
+		if bind.Group != "Japan" {
+			t.Errorf("unmatched egress went to %q, not the first bound grant holder", bind.Group)
+		}
+	}
+	if unbounded != 1 {
+		t.Fatalf("got %d unbounded bindings, want exactly 1", unbounded)
+	}
+
+	// Without the grant there is nothing to widen, and the allowlist stands.
+	module.Network, second.Network = false, false
+	document.Modules = []interceptModuleSnapshot{module, second}
+	for _, bind := range overlayEgressCapabilities(orderedEnabledInterceptModules(document), "cred", "Proxies")[0].Bindings {
+		if bind.Unbounded {
+			t.Fatal("an extension without the network permission got unbounded egress")
+		}
+	}
+}

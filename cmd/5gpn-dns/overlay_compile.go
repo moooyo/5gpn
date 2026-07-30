@@ -228,6 +228,11 @@ func overlayEgressCapabilities(ordered []interceptModuleSnapshot, credential, ma
 	groups := make([]string, 0, 4)
 	destinations := make(map[string][]overlayDestinationRule, 4)
 	claimed := make(map[string]struct{})
+	// The first grant-holding module in execution order owns unmatched egress.
+	// The permission names no host, so its binding cannot either, and two of
+	// them would leave which group unmatched traffic leaves through undecided --
+	// the same first-match ownership every other selector here already has.
+	unboundedGroup := ""
 
 	claim := func(bound bool) {
 		for _, module := range ordered {
@@ -237,6 +242,9 @@ func overlayEgressCapabilities(ordered []interceptModuleSnapshot, credential, ma
 			group := module.EgressGroup
 			if group == "" {
 				group = matchTarget
+			}
+			if module.Network && unboundedGroup == "" {
+				unboundedGroup = group
 			}
 			for _, selector := range interceptModuleEgressSelectors(module) {
 				kind, ok := overlayKindFor(selector.Kind)
@@ -280,6 +288,15 @@ func overlayEgressCapabilities(ordered []interceptModuleSnapshot, credential, ma
 			Group:        group,
 			Destinations: rules,
 			AllowDirect:  overlayCapabilityAllowsDirect(group, matchTarget),
+		})
+	}
+	// Appended last, which the overlay requires: it matches everything, so any
+	// earlier position would shadow the destination-scoped bindings above it.
+	if unboundedGroup != "" {
+		bindings = append(bindings, overlayEgressBinding{
+			Group:       unboundedGroup,
+			Unbounded:   true,
+			AllowDirect: overlayCapabilityAllowsDirect(unboundedGroup, matchTarget),
 		})
 	}
 	if len(bindings) == 0 {
