@@ -306,8 +306,14 @@ export interface InterceptModule {
   snapshot_digest: string
   imported_at?: string
   execution_order: number
-  network_origins: string[]
-  network_any?: boolean
+  /**
+   * The whole network permission: the script request API and a request-phase
+   * URL rewrite to any origin. There is no origin list beside it, so a review
+   * can say an extension may reach the network but not where.
+   *
+   * Optional because the daemon omits it when false.
+   */
+  network?: boolean
   egress_group_required: boolean
   egress_group?: string
 }
@@ -355,8 +361,7 @@ export interface MarketplaceEntryCapabilities {
   capture_host_count: number
   action_count: number
   setting_count: number
-  network_origins: string[]
-  network_any?: boolean
+  network: boolean
   persistent_storage: boolean
   upstream_mapping_count: number
   egress_group_required: boolean
@@ -387,6 +392,12 @@ export interface MarketplaceSource {
   digest: string
   snapshot_digest: string
   fetched_at: string
+  /**
+   * Why this source's cached snapshot could not be read. When set, `entries` is
+   * empty and nothing can be installed from it — the source is listed anyway so
+   * it can be refreshed or removed.
+   */
+  error?: string
   entries: MarketplaceEntry[]
 }
 export interface MarketplacesView {

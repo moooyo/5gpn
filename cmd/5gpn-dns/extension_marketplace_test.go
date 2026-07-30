@@ -751,3 +751,143 @@ func TestMarketplaceEntryWithoutAPolicyProjectionStillDecodes(t *testing.T) {
 		t.Fatal("an absent projection decoded as present")
 	}
 }
+
+// A cached snapshot ages out of the schema every time the published index
+// renames a field, and this decoder rejects unknown fields. Failing the whole
+// document for that used to take down the marketplace page — which is the only
+// place the offending source could have been removed from, so the operator was
+// left editing JSON on the gateway by hand.
+//
+// The regression this pins is the one that shipped: `networkOrigins` was
+// replaced by a single `network` grant, and every gateway holding a snapshot
+// fetched before that answered 400 on GET /api/interception/marketplaces.
+func TestMarketplaceReadKeepsUsableSourcesWhenOneSnapshotIsStale(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "extension-marketplaces.json")
+	store := NewExtensionMarketplaceStore(path)
+
+	healthy := marketplaceTestSnapshot("io.5gpn.official", "https://example.test/index.json")
+	document := marketplaceDocument{Version: marketplaceDocumentVersion, Sources: []marketplaceSourceSnapshot{healthy}}
+	body, err := marshalMarketplaceDocument(document)
+	if err != nil {
+		t.Fatalf("marshal seed document: %v", err)
+	}
+	// Splice in a second source carrying the retired field, exactly as a
+	// snapshot fetched before the rename would.
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	stale := map[string]any{
+		"id": "io.example.stale", "display_name": "Stale source",
+		"url": "https://stale.test/index.json", "final_url": "https://stale.test/index.json",
+		"index_digest": sha256Hex([]byte("stale")), "fetched_at": "2026-07-30T00:00:00Z",
+		"metadata": map[string]any{"id": "io.example.stale", "name": "Stale source"},
+		"entries": []any{map[string]any{
+			"id": "io.example.one", "name": "One", "version": "1.0.0",
+			"capabilities": map[string]any{"networkOrigins": []string{"https://example.test"}},
+		}},
+	}
+	raw["sources"] = append(raw["sources"].([]any), stale)
+	spliced, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(spliced, '\n'), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	read, readBody, err := store.Read()
+	if err != nil {
+		t.Fatalf("a stale snapshot must not fail the whole document: %v", err)
+	}
+	if len(read.Sources) != 2 {
+		t.Fatalf("sources = %d, want both kept", len(read.Sources))
+	}
+	if read.Sources[0].Unusable() != "" {
+		t.Fatalf("the healthy source was marked unusable: %s", read.Sources[0].Unusable())
+	}
+	bad := read.Sources[1]
+	if bad.Unusable() == "" {
+		t.Fatal("the stale source was not marked unusable")
+	}
+	if !strings.Contains(bad.Unusable(), "networkOrigins") {
+		t.Fatalf("the reason does not name the offending field: %s", bad.Unusable())
+	}
+	// The operator's own fields are what make it removable from the console.
+	if bad.ID != "io.example.stale" || bad.URL != "https://stale.test/index.json" || bad.DisplayName != "Stale source" {
+		t.Fatalf("operator fields were not salvaged: %+v", bad)
+	}
+
+	view := marketplaceViewFromDocument(read, readBody)
+	if len(view.Sources) != 2 {
+		t.Fatalf("view sources = %d, want 2", len(view.Sources))
+	}
+	if view.Sources[0].Error != "" {
+		t.Fatalf("healthy source carries an error: %s", view.Sources[0].Error)
+	}
+	if view.Sources[1].Error == "" {
+		t.Fatal("the unusable source carries no error for the console to show")
+	}
+	if len(view.Sources[1].Entries) != 0 {
+		t.Fatal("an undecodable snapshot must not present entries")
+	}
+
+	// Removing the healthy one must not rewrite the stale one, because this
+	// build cannot reproduce bytes it could not read.
+	remaining := marketplaceDocument{Version: marketplaceDocumentVersion, Sources: []marketplaceSourceSnapshot{bad}}
+	written, err := marshalMarketplaceDocument(remaining)
+	if err != nil {
+		t.Fatalf("a document containing an unusable source must still write: %v", err)
+	}
+	if !bytes.Contains(written, []byte("networkOrigins")) {
+		t.Fatal("the unusable snapshot was rewritten without the field it was kept for")
+	}
+	if err := os.WriteFile(path, written, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	again, _, err := store.Read()
+	if err != nil {
+		t.Fatalf("re-read after write: %v", err)
+	}
+	if len(again.Sources) != 1 || again.Sources[0].Unusable() == "" {
+		t.Fatalf("round trip lost the unusable source: %+v", again.Sources)
+	}
+}
+
+// Nothing may be installed out of a snapshot this build could not decode: the
+// fields an install trusts are the ones that failed to read.
+func TestMarketplaceInstallRefusesAnUnusableSource(t *testing.T) {
+	stale := salvagedMarketplaceSource(
+		json.RawMessage(`{"id":"io.example.stale","url":"https://stale.test/i.json"}`),
+		errors.New(`json: unknown field "networkOrigins"`),
+	)
+	err := marketplaceSourceUnusable(stale)
+	if err == nil {
+		t.Fatal("an unusable source was accepted")
+	}
+	if !errors.Is(err, errMarketplaceConflict) {
+		t.Fatalf("error = %v, want a marketplace conflict", err)
+	}
+	if marketplaceSourceUnusable(marketplaceTestSnapshot("io.5gpn.official", "https://example.test/i.json")) != nil {
+		t.Fatal("a usable source was refused")
+	}
+}
+
+// marketplaceTestSnapshot is a minimal snapshot that passes validation, for
+// tests about the document around it rather than about its contents.
+func marketplaceTestSnapshot(id, url string) marketplaceSourceSnapshot {
+	return marketplaceSourceSnapshot{
+		ID: id, URL: url, FinalURL: url,
+		IndexDigest: sha256Hex([]byte(id)),
+		FetchedAt:   "2026-07-30T00:00:00Z",
+		Metadata: marketplaceMetadata{
+			ID: id, Name: "Test source",
+			Source: marketplaceMetadataSource{
+				Repository: "https://example.test/repo",
+				Revision:   "0123456789abcdef0123456789abcdef01234567",
+			},
+		},
+		Entries: []marketplaceEntry{},
+	}
+}

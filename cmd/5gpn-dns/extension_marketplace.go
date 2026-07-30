@@ -42,8 +42,11 @@ var (
 	errMarketplaceNotFound    = errors.New("extension marketplace or entry not found")
 	errMarketplaceFetch       = errors.New("extension marketplace fetch failed")
 	errMarketplaceIntegrity   = errors.New("extension marketplace entry does not match the fetched extension")
-	marketplaceTagPattern     = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
-	marketplaceSPDXPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+-]*$`)
+	// errMarketplaceState marks a failure of the stored document itself rather
+	// than of the request that happened to read it.
+	errMarketplaceState    = errors.New("extension marketplace configuration is unusable")
+	marketplaceTagPattern  = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	marketplaceSPDXPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+-]*$`)
 )
 
 type marketplaceDocument struct {
@@ -136,6 +139,39 @@ type marketplaceSourceSnapshot struct {
 	FetchedAt   string              `json:"fetched_at"`
 	Metadata    marketplaceMetadata `json:"metadata"`
 	Entries     []marketplaceEntry  `json:"entries"`
+
+	// unusable records why this snapshot could not be read under the current
+	// schema, and is empty for every snapshot that could.
+	//
+	// The cached half of a snapshot is fetched data: the published index moves
+	// on, fields are renamed, and this decoder rejects unknown ones. A stale
+	// cache used to fail the whole document, which took down the page that
+	// lists the sources -- so the one screen an operator could have removed the
+	// offending source from was the screen the offending source broke. What
+	// must survive is the operator's own half: the URL they configured and the
+	// name they gave it. Everything else is refetchable, so it is reported
+	// missing rather than allowed to be fatal.
+	unusable string
+	// raw is the snapshot exactly as it sits on disk, kept only for an unusable
+	// one. Writing the document back re-emits it byte for byte, so removing or
+	// refreshing some other source cannot quietly rewrite a snapshot this build
+	// was unable to understand in the first place.
+	raw json.RawMessage
+}
+
+// Unusable reports why this snapshot cannot be used, or "" when it can.
+func (s marketplaceSourceSnapshot) Unusable() string { return s.unusable }
+
+// MarshalJSON re-emits an unusable snapshot verbatim. Marshalling the decoded
+// struct instead would silently drop whatever fields this build does not know,
+// turning a source the operator can still see and remove into one that has been
+// rewritten behind their back.
+func (s marketplaceSourceSnapshot) MarshalJSON() ([]byte, error) {
+	if len(s.raw) > 0 {
+		return append([]byte(nil), s.raw...), nil
+	}
+	type plain marketplaceSourceSnapshot
+	return json.Marshal(plain(s))
 }
 
 type marketplaceView struct {
@@ -145,18 +181,22 @@ type marketplaceView struct {
 }
 
 type marketplaceSourceView struct {
-	ID             string                 `json:"id"`
-	Name           string                 `json:"name"`
-	DisplayName    string                 `json:"display_name,omitempty"`
-	MetadataName   string                 `json:"metadata_name"`
-	Description    string                 `json:"description"`
-	Homepage       string                 `json:"homepage"`
-	URL            string                 `json:"url"`
-	FinalURL       string                 `json:"final_url"`
-	Digest         string                 `json:"digest"`
-	SnapshotDigest string                 `json:"snapshot_digest"`
-	FetchedAt      string                 `json:"fetched_at"`
-	Entries        []marketplaceEntryView `json:"entries"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	DisplayName    string `json:"display_name,omitempty"`
+	MetadataName   string `json:"metadata_name"`
+	Description    string `json:"description"`
+	Homepage       string `json:"homepage"`
+	URL            string `json:"url"`
+	FinalURL       string `json:"final_url"`
+	Digest         string `json:"digest"`
+	SnapshotDigest string `json:"snapshot_digest"`
+	FetchedAt      string `json:"fetched_at"`
+	// Error is the reason this source's cached snapshot could not be read. When
+	// it is set the entries are empty and nothing can be installed from it, but
+	// the source is still listed so it can be refreshed or removed.
+	Error   string                 `json:"error,omitempty"`
+	Entries []marketplaceEntryView `json:"entries"`
 }
 
 type marketplaceEntryView struct {
@@ -207,22 +247,108 @@ func (s *ExtensionMarketplaceStore) Read() (marketplaceDocument, []byte, error) 
 		return empty, body, marshalErr
 	}
 	if err != nil {
-		return marketplaceDocument{}, nil, fmt.Errorf("read extension marketplaces: %w", err)
+		return marketplaceDocument{}, nil, fmt.Errorf("%w: read extension marketplaces: %v", errMarketplaceState, err)
 	}
 	if len(body) > maxMarketplaceConfigBytes {
-		return marketplaceDocument{}, nil, fmt.Errorf("extension marketplace config exceeds %d bytes", maxMarketplaceConfigBytes)
+		return marketplaceDocument{}, nil, fmt.Errorf("%w: extension marketplace config exceeds %d bytes", errMarketplaceState, maxMarketplaceConfigBytes)
 	}
 	if !utf8.Valid(body) {
-		return marketplaceDocument{}, nil, errors.New("extension marketplace config must be valid UTF-8")
+		return marketplaceDocument{}, nil, fmt.Errorf("%w: extension marketplace config must be valid UTF-8", errMarketplaceState)
 	}
 	var document marketplaceDocument
 	if err := unmarshalStrictJSON(body, &document); err != nil {
-		return marketplaceDocument{}, nil, fmt.Errorf("decode extension marketplaces: %w", err)
+		return salvageMarketplaceDocument(body, fmt.Errorf("%w: decode extension marketplaces: %v", errMarketplaceState, err))
 	}
 	if err := validateMarketplaceDocument(document); err != nil {
-		return marketplaceDocument{}, nil, err
+		return salvageMarketplaceDocument(body, fmt.Errorf("%w: %v", errMarketplaceState, err))
 	}
 	return document, body, nil
+}
+
+// salvageMarketplaceDocument recovers what it can from a document the strict
+// decoder or the validator rejected.
+//
+// A whole-document failure is almost always one source's cached index having
+// aged past the schema this build knows. Failing everything for that reason
+// left no way to fix it from the console, because listing the sources needs the
+// same read that just failed. So each source is decoded on its own, and one
+// that cannot be is reduced to the operator-owned fields plus the reason,
+// keeping its bytes intact for the next write.
+//
+// The document envelope still has to be sound: if `version` or `sources` cannot
+// be read there is nothing to salvage per source, and the original error stands.
+func salvageMarketplaceDocument(body []byte, cause error) (marketplaceDocument, []byte, error) {
+	var envelope struct {
+		Version int               `json:"version"`
+		Sources []json.RawMessage `json:"sources"`
+	}
+	if err := unmarshalStrictJSON(body, &envelope); err != nil {
+		return marketplaceDocument{}, nil, cause
+	}
+	if envelope.Version != marketplaceDocumentVersion {
+		return marketplaceDocument{}, nil, cause
+	}
+	if envelope.Sources == nil {
+		return marketplaceDocument{}, nil, cause
+	}
+	if len(envelope.Sources) > maxMarketplaceSources {
+		return marketplaceDocument{}, nil, cause
+	}
+
+	document := marketplaceDocument{
+		Version: envelope.Version,
+		Sources: make([]marketplaceSourceSnapshot, 0, len(envelope.Sources)),
+	}
+	salvaged := false
+	for _, raw := range envelope.Sources {
+		source, err := decodeMarketplaceSourceSnapshot(raw)
+		if err != nil {
+			document.Sources = append(document.Sources, salvagedMarketplaceSource(raw, err))
+			salvaged = true
+			continue
+		}
+		document.Sources = append(document.Sources, source)
+	}
+	if !salvaged {
+		// Every source read cleanly, so the rejection was a document-level rule
+		// -- a duplicate id or URL across sources, say. Salvaging would hide a
+		// problem this cannot repair.
+		return marketplaceDocument{}, nil, cause
+	}
+	return document, body, nil
+}
+
+// salvagedMarketplaceSource keeps the operator's half of a snapshot that could
+// not be read, so the console can show it and offer removal or a refresh.
+// The fields are taken leniently and are not trusted: a salvaged source is
+// never a candidate for install, and its id is only ever compared, never used
+// to fetch anything.
+func salvagedMarketplaceSource(raw json.RawMessage, cause error) marketplaceSourceSnapshot {
+	var operator struct {
+		ID          string `json:"id"`
+		DisplayName string `json:"display_name"`
+		URL         string `json:"url"`
+	}
+	_ = json.Unmarshal(raw, &operator)
+	return marketplaceSourceSnapshot{
+		ID:          operator.ID,
+		DisplayName: operator.DisplayName,
+		URL:         operator.URL,
+		unusable:    cause.Error(),
+		raw:         append(json.RawMessage(nil), raw...),
+	}
+}
+
+// decodeMarketplaceSourceSnapshot reads one snapshot under the current schema.
+func decodeMarketplaceSourceSnapshot(raw json.RawMessage) (marketplaceSourceSnapshot, error) {
+	var source marketplaceSourceSnapshot
+	if err := unmarshalStrictJSON(raw, &source); err != nil {
+		return marketplaceSourceSnapshot{}, err
+	}
+	if err := validateMarketplaceSourceSnapshot(source); err != nil {
+		return marketplaceSourceSnapshot{}, err
+	}
+	return source, nil
 }
 
 func marshalMarketplaceDocument(document marketplaceDocument) ([]byte, error) {
@@ -252,6 +378,17 @@ func marketplaceSourceSnapshotDigest(source marketplaceSourceSnapshot) string {
 		panic("marketplace snapshot digest contains an unsupported value: " + err.Error())
 	}
 	return sha256Hex(body)
+}
+
+// marketplaceSourceUnusable reports the reason a snapshot cannot be used, for
+// callers that must refuse rather than degrade. Installing from a snapshot this
+// build could not decode would mean trusting fields it never read.
+func marketplaceSourceUnusable(source marketplaceSourceSnapshot) error {
+	if reason := source.Unusable(); reason != "" {
+		return fmt.Errorf("%w: this marketplace snapshot could not be read (%s); refresh it or remove it",
+			errMarketplaceConflict, reason)
+	}
+	return nil
 }
 
 type ExtensionMarketplaceManager struct {
@@ -741,6 +878,13 @@ func (m *ExtensionMarketplaceManager) sourceAtRevision(ctx context.Context, id, 
 	if index < 0 {
 		return marketplaceSourceSnapshot{}, errMarketplaceNotFound
 	}
+	// Every caller of this reads the snapshot's cached index. An unusable one
+	// has no decoded index to read, so say that rather than let it surface as
+	// "entry not found" -- the operator would go looking for a missing
+	// extension instead of refreshing the source.
+	if err := marketplaceSourceUnusable(document.Sources[index]); err != nil {
+		return marketplaceSourceSnapshot{}, err
+	}
 	return document.Sources[index], nil
 }
 
@@ -810,6 +954,20 @@ func marketplaceSourceViewFromSnapshot(source marketplaceSourceSnapshot) marketp
 	if source.DisplayName != "" {
 		name = source.DisplayName
 	}
+	if reason := source.Unusable(); reason != "" {
+		// Only what the operator themselves put there. Everything else came
+		// from an index this build could not read, so reporting any of it would
+		// be reporting a value that was never decoded.
+		if name == "" {
+			name = source.ID
+		}
+		return marketplaceSourceView{
+			ID: source.ID, Name: name, DisplayName: source.DisplayName, URL: source.URL,
+			SnapshotDigest: marketplaceSourceSnapshotDigest(source),
+			Error:          reason,
+			Entries:        []marketplaceEntryView{},
+		}
+	}
 	view := marketplaceSourceView{
 		ID: source.ID, Name: name, DisplayName: source.DisplayName, MetadataName: source.Metadata.Name, Description: source.Metadata.Description,
 		Homepage: source.Metadata.Homepage, URL: source.URL, FinalURL: source.FinalURL,
@@ -865,8 +1023,14 @@ func validateMarketplaceDocument(document marketplaceDocument) error {
 	ids := make(map[string]struct{}, len(document.Sources))
 	urls := make(map[string]struct{}, len(document.Sources)*2)
 	for _, source := range document.Sources {
-		if err := validateMarketplaceSourceSnapshot(source); err != nil {
-			return fmt.Errorf("marketplace %q: %w", source.ID, err)
+		// An unusable snapshot has already been judged: it failed this very
+		// check on the way in and was kept only so the operator can see and
+		// remove it. Re-running it here would make every later write fail for
+		// the source the write is most likely trying to get rid of.
+		if source.Unusable() == "" {
+			if err := validateMarketplaceSourceSnapshot(source); err != nil {
+				return fmt.Errorf("marketplace %q: %w", source.ID, err)
+			}
 		}
 		if _, duplicate := ids[source.ID]; duplicate {
 			return fmt.Errorf("duplicate extension marketplace id %q", source.ID)

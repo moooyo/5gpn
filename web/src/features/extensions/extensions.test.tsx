@@ -36,7 +36,7 @@ const WLOC: InterceptModule = {
     { key: 'location', type: 'location', label: 'Target location', required: true, value: { accuracy: 25 } },
     { key: 'failClosed', type: 'boolean', label: 'Block on transformation failure', required: true, value: true },
   ],
-  persistent_storage: false, execution_order: 1, network_origins: [], egress_group_required: false,
+  persistent_storage: false, execution_order: 1, network: false, egress_group_required: false,
   source_url: 'https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml',
   source_digest: 'a'.repeat(64), snapshot_digest: 'a'.repeat(64), imported_at: '2026-07-18T00:00:00Z',
 }
@@ -48,7 +48,7 @@ const CLEANER: InterceptModule = {
   upstream_mappings: [{ host: 'api.example.com', target: 'origin.example.net' }],
   routing_rules: [{ action: 'reject', domain_suffix: 'ads.example.com', network: 'udp' }],
   source_url: 'https://extensions.example.test/clean.yaml', source_digest: 'b'.repeat(64), snapshot_digest: 'b'.repeat(64), imported_at: '2026-07-18T00:00:00Z',
-  execution_order: 2, network_origins: ['https://origin.example.net'], egress_group_required: true, egress_group: 'Proxies',
+  execution_order: 2, network: true, egress_group_required: true, egress_group: 'Proxies',
 }
 
 const VIEW: InterceptModulesView = {
@@ -148,12 +148,12 @@ describe('ExtensionsPage native extension contract', () => {
    * would grant, in the one place the decision is made.
    */
   it('warns about an unrestricted network grant that has no origin list', async () => {
-    const unrestricted: InterceptModule = { ...CLEANER, network_origins: [], network_any: true }
+    const unrestricted: InterceptModule = { ...CLEANER, network: true }
     vi.mocked(api.getInterceptModules).mockResolvedValue({ ...cloneView(), modules: [unrestricted] })
     renderPage()
     const row = await screen.findByTestId(`capabilities-${unrestricted.id}`)
-    expect(within(row).getByText(i18n.t('extensions.networkAnyChip'))).toBeInTheDocument()
-    expect(screen.queryByText(i18n.t('extensions.networkOriginsNone'))).not.toBeInTheDocument()
+    expect(within(row).getByText(i18n.t('extensions.networkChip'))).toBeInTheDocument()
+    expect(screen.queryByText(i18n.t('extensions.networkNone'))).not.toBeInTheDocument()
   })
 
   /**
@@ -197,8 +197,9 @@ describe('ExtensionsPage native extension contract', () => {
     const card = await screen.findByTestId(`extension-${CLEANER.id}`)
     await user.click(within(card).getByRole('switch'))
     const dialog = await screen.findByRole('dialog')
-    expect(dialog).toHaveTextContent('改写会转发完整的方法、解码后的请求体和端到端请求头，其中可能包含 Cookie 和 Authorization 凭据')
-    expect(within(dialog).getByText('https://origin.example.net')).toHaveClass('min-w-0', 'max-w-full', 'break-all')
+    // The grant names no addresses, so the confirmation has to say that it
+    // cannot say where -- that is the whole risk being accepted.
+    expect(dialog).toHaveTextContent('权限本身无法说明它会访问何处')
     expect(dialog).toHaveTextContent('本次启用确认同时授权这些已审查的 REJECT/DIRECT 规则')
     // The confirmation still has to state every declared field; it just states
     // them as matcher → action rather than as a stringified object.
@@ -470,7 +471,7 @@ describe('ExtensionsPage native extension contract', () => {
     const dialog = await screen.findByRole('dialog', { name: /审查更新/ })
     expect(dialog).toHaveTextContent('v1.1.0')
     expect(within(dialog).getByTestId('update-capture-dns')).toHaveTextContent('China 组')
-    expect(within(dialog).getByText('https://origin.example.net')).toHaveClass('min-w-0', 'max-w-full', 'break-all')
+    expect(dialog).toHaveTextContent('权限本身无法说明它会访问何处')
     // The confirmation still has to state every declared field; it just states
     // them as matcher → action rather than as a stringified object.
     const rule = within(dialog).getByRole('listitem')

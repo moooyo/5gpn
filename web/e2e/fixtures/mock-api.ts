@@ -280,13 +280,13 @@ export async function setupMockApi(page: Page): Promise<void> {
       ],
       persistent_storage: false, source_url: 'https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml',
       source_digest: 'a'.repeat(64), snapshot_digest: 'a'.repeat(64),
-      execution_order: 1, network_origins: [], egress_group_required: false,
+      execution_order: 1, network: false, egress_group_required: false,
     },
     {
       id: 'io.example.response-cleaner', extension_version: '1.0.0', name: 'Response Cleaner', description: 'Synthetic native extension fixture',
       enabled: false, ready: true, capture_hosts: ['api.example.com'], capture_dns: 'china', script_count: 1, settings: [], persistent_storage: false,
       source_url: 'https://example.com/extension.yaml', source_digest: 'b'.repeat(64), snapshot_digest: 'b'.repeat(64), imported_at: '2026-07-18T00:00:00Z',
-      execution_order: 2, network_origins: ['https://origin.example.net'], egress_group_required: true, egress_group: 'Proxies',
+      execution_order: 2, network: true, egress_group_required: true, egress_group: 'Proxies',
     },
   ]
 
@@ -306,7 +306,7 @@ export async function setupMockApi(page: Page): Promise<void> {
   let marketplaceSources: T.MarketplaceSource[] = [{
     id: 'io.5gpn.official', name: '5GPN Extensions', metadata_name: '5GPN Extensions', description: 'Maintained native extensions.', homepage: 'https://github.com/moooyo/5gpn-extensions',
     url: 'https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json', final_url: 'https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json', digest: '9'.repeat(64), fetched_at: '2026-07-20T00:00:00Z',
-    entries: [{ id: 'io.example.marketplace-cleaner', name: 'Marketplace Response Cleaner', version: '1.0.0', description: 'A marketplace native extension.', tags: ['response'], license: { spdx: 'MIT' }, manifest_url: 'https://extensions.example.test/marketplace-cleaner.yaml', manifest_digest: '7'.repeat(64), capabilities: { capture_host_count: 1, action_count: 1, setting_count: 0, network_origins: [], persistent_storage: false, upstream_mapping_count: 0, egress_group_required: false } }],
+    entries: [{ id: 'io.example.marketplace-cleaner', name: 'Marketplace Response Cleaner', version: '1.0.0', description: 'A marketplace native extension.', tags: ['response'], license: { spdx: 'MIT' }, manifest_url: 'https://extensions.example.test/marketplace-cleaner.yaml', manifest_digest: '7'.repeat(64), capabilities: { capture_host_count: 1, action_count: 1, setting_count: 0, network: false, persistent_storage: false, upstream_mapping_count: 0, egress_group_required: false } }],
   }]
   const currentMarketplaces = (): T.MarketplacesView => ({ revision: marketplaceRevision, recommended_url: 'https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json', sources: structuredClone(marketplaceSources) })
 
@@ -487,7 +487,7 @@ export async function setupMockApi(page: Page): Promise<void> {
       const body = route.request().postDataJSON() as { marketplace_revision?: string; module_revision?: string }
       const entry = marketplaceSources.find((source) => source.id === decodeURIComponent(marketplaceEntry[1]))?.entries.find((candidate) => candidate.id === decodeURIComponent(marketplaceEntry[2]))
       if (!entry || body.marketplace_revision !== marketplaceRevision || body.module_revision !== interceptRevision) return json(route, { error: 'marketplace revision changed' }, 409)
-      interceptModules = [...interceptModules, { id: entry.id, extension_version: entry.version, name: entry.name, description: entry.description, enabled: false, ready: true, capture_hosts: ['capture.example.test'], capture_dns: 'trust', script_count: entry.capabilities.action_count, settings: [], persistent_storage: false, source_url: entry.manifest_url, source_digest: entry.manifest_digest, snapshot_digest: entry.manifest_digest, execution_order: interceptModules.length + 1, network_origins: [], egress_group_required: false }]
+      interceptModules = [...interceptModules, { id: entry.id, extension_version: entry.version, name: entry.name, description: entry.description, enabled: false, ready: true, capture_hosts: ['capture.example.test'], capture_dns: 'trust', script_count: entry.capabilities.action_count, settings: [], persistent_storage: false, source_url: entry.manifest_url, source_digest: entry.manifest_digest, snapshot_digest: entry.manifest_digest, execution_order: interceptModules.length + 1, network: false, egress_group_required: false }]
       advanceInterceptRevision()
       return json(route, currentInterceptModules(), 201)
     }
@@ -501,7 +501,7 @@ export async function setupMockApi(page: Page): Promise<void> {
         id: 'io.example.imported', extension_version: '1.0.0', name: 'Imported native extension',
         enabled: false, ready: true, capture_hosts: ['service.example.test'], capture_dns: 'trust', script_count: 1, settings: [], persistent_storage: false, source_url: body.url,
         source_digest: 'c'.repeat(64), snapshot_digest: 'c'.repeat(64), imported_at: '2026-07-18T01:00:00Z',
-        execution_order: interceptModules.length + 1, network_origins: [], egress_group_required: false,
+        execution_order: interceptModules.length + 1, network: false, egress_group_required: false,
       }]
       advanceInterceptRevision()
       return json(route, currentInterceptModules(), 201)

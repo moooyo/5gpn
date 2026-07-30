@@ -108,7 +108,7 @@ export const interceptModules: T.InterceptModulesView = {
       source_digest: 'a'.repeat(64),
       snapshot_digest: 'a'.repeat(64),
       execution_order: 1,
-      network_origins: [],
+      network: false,
       egress_group_required: false,
     },
     {
@@ -129,7 +129,7 @@ export const interceptModules: T.InterceptModulesView = {
       snapshot_digest: 'b'.repeat(64),
       imported_at: '2026-07-18T00:00:00Z',
       execution_order: 2,
-      network_origins: ['https://origin.example.net'],
+      network: true,
       egress_group_required: true,
       egress_group: 'Proxies',
     },

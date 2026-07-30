@@ -278,7 +278,7 @@ function ExtensionCard({
       ),
     },
     ...(module.script_count > 0 ? [{ key: 'actions', node: <CapabilityChip key="actions" label={t('extensions.chipActions')} value={module.script_count} /> }] : []),
-    ...(module.network_any ? [{ key: 'network', node: <CapabilityChip key="network" icon={<NetworkIcon className="h-3.5 w-3.5" aria-hidden="true" />} label={t('extensions.chipNetwork')} value={t('extensions.networkAnyChip')} /> }] : module.network_origins.length > 0 ? [{ key: 'network', node: <CapabilityChip key="network" icon={<NetworkIcon className="h-3.5 w-3.5" aria-hidden="true" />} label={t('extensions.chipNetwork')} value={module.network_origins.length} /> }] : []),
+    ...(module.network ? [{ key: 'network', node: <CapabilityChip key="network" icon={<NetworkIcon className="h-3.5 w-3.5" aria-hidden="true" />} label={t('extensions.chipNetwork')} value={t('extensions.networkChip')} /> }] : []),
     { key: 'captureDns', node: <CapabilityChip key="captureDns" icon={<RouteIcon className="h-3.5 w-3.5" aria-hidden="true" />} label={t('extensions.chipCaptureDNS')} value={t(`extensions.captureDNS.${module.capture_dns}`)} /> },
     ...(module.egress_group ? [{ key: 'egress', node: <CapabilityChip key="egress" icon={<RouteIcon className="h-3.5 w-3.5" aria-hidden="true" />} label={t('extensions.chipEgress')} value={module.egress_group} /> }] : []),
     ...(mappingsCount > 0 ? [{ key: 'mappings', node: <CapabilityChip key="mappings" label={t('extensions.chipHostMappings')} value={mappingsCount} /> }] : []),
@@ -573,7 +573,7 @@ function ExtensionUpdateModal({
               <Badge tone="amber">{t('extensions.capabilityAction', { count: review.candidate.script_count })}</Badge>
               {review.candidate.actions?.some((action) => action.entry === 'proxy-compat') ? <Badge tone="amber">{t('extensions.proxyCompatTitle')}</Badge> : null}
               {(review.candidate.routing_rules?.length ?? 0) > 0 ? <Badge tone="amber">{t('extensions.capabilityRouting', { count: review.candidate.routing_rules!.length })}</Badge> : null}
-              {review.candidate.network_any ? <Badge tone="amber">{t('extensions.networkAnyTitle')}</Badge> : review.candidate.network_origins.length > 0 ? <Badge tone="indigo">{t('extensions.capabilityNetwork', { count: review.candidate.network_origins.length })}</Badge> : null}
+              {review.candidate.network ? <Badge tone="amber">{t('extensions.networkTitle')}</Badge> : null}
               {review.candidate.egress_group_required ? <Badge tone="cyan">{t('extensions.egressGroupTitle')}</Badge> : null}
               {(review.candidate.settings?.length ?? 0) > 0 ? <Badge tone="indigo">{t('extensions.settingsAction', { count: review.candidate.settings?.length ?? 0 })}</Badge> : null}
             </div>
@@ -590,12 +590,8 @@ function ExtensionUpdateModal({
               {review.candidate.capture_hosts.map((host) => <code key={host} className="rounded-chip bg-card px-2 py-1 font-mono text-meta text-text-mid">{host}</code>)}
             </div>
           </DialogSection>
-          {review.candidate.network_any ? <DialogSection label={t('extensions.networkAnyTitle')}>
-            <p className="rounded-ctl bg-[var(--md-sys-color-warning-container)] p-3 text-label leading-5 text-[var(--md-sys-color-on-warning-container)]">{t('extensions.networkAnyWarning')}</p>
-          </DialogSection> : review.candidate.network_origins.length > 0 ? <DialogSection label={t('extensions.networkOriginsTitle')}>
-            <div className="flex max-h-36 flex-wrap gap-1.5 overflow-y-auto rounded-ctl bg-[var(--md-sys-color-warning-container)] p-3 text-[var(--md-sys-color-on-warning-container)]">
-              {review.candidate.network_origins.map((origin) => <code key={origin} title={origin} className="inline-block min-w-0 max-w-full break-all rounded-chip bg-[var(--md-sys-color-tint-inset)] px-2 py-1 font-mono text-meta">{origin}</code>)}
-            </div>
+          {review.candidate.network ? <DialogSection label={t('extensions.networkTitle')}>
+            <p className="rounded-ctl bg-[var(--md-sys-color-warning-container)] p-3 text-label leading-5 text-[var(--md-sys-color-on-warning-container)]">{t('extensions.networkWarning')}</p>
           </DialogSection> : null}
           {(review.candidate.routing_rules?.length ?? 0) > 0 ? <DialogSection label={t('extensions.routingRulesTitle')}>
             <div className="max-h-40 overflow-y-auto rounded-ctl bg-[var(--md-sys-color-warning-container)] p-3 text-[var(--md-sys-color-on-warning-container)]">
@@ -641,16 +637,10 @@ function EnableExtensionModal({
           </div>
           <p className="mt-1.5 text-meta leading-4 text-text-soft">{t(`extensions.captureDNS.${module.capture_dns}Hint`)}</p>
         </DialogSection>
-        {module.network_any ? <section className="rounded-card bg-[var(--md-sys-color-warning-container)] p-4 text-label leading-5 text-[var(--md-sys-color-on-warning-container)]">
-          <div className="font-semibold">{t('extensions.networkAnyTitle')}</div>
-          <p className="mt-1">{t('extensions.networkAnyWarning')}</p>
-        </section> : module.network_origins.length > 0 ? <section className="rounded-card bg-[var(--md-sys-color-warning-container)] p-4 text-label leading-5 text-[var(--md-sys-color-on-warning-container)]">
-          <div className="font-semibold">{t('extensions.networkOriginsTitle')}</div>
-          <p className="mt-1">{t('extensions.networkOriginsWarning')}</p>
-          <div className="mt-3 flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">
-            {module.network_origins.map((origin) => <code key={origin} title={origin} className="inline-block min-w-0 max-w-full break-all rounded-chip bg-[var(--md-sys-color-tint-inset)] px-2 py-1 font-mono text-meta">{origin}</code>)}
-          </div>
-        </section> : <DialogSection label={t('extensions.networkOriginsTitle')}><p className="text-label text-text-soft">{t('extensions.networkOriginsNone')}</p></DialogSection>}
+        {module.network ? <section className="rounded-card bg-[var(--md-sys-color-warning-container)] p-4 text-label leading-5 text-[var(--md-sys-color-on-warning-container)]">
+          <div className="font-semibold">{t('extensions.networkTitle')}</div>
+          <p className="mt-1">{t('extensions.networkWarning')}</p>
+        </section> : <DialogSection label={t('extensions.networkTitle')}><p className="text-label text-text-soft">{t('extensions.networkNone')}</p></DialogSection>}
         {module.egress_group_required || module.egress_group ? <DialogSection label={t('extensions.egressGroupTitle')}><code className="block font-mono text-label text-text-strong">{module.egress_group || t('extensions.egressGroupUnset')}</code></DialogSection> : null}
         {(module.routing_rules?.length ?? 0) > 0 ? <section className="rounded-card bg-[var(--md-sys-color-warning-container)] p-4 text-label leading-5 text-[var(--md-sys-color-on-warning-container)]">
           <div className="font-semibold">{t('extensions.routingRulesTitle')}</div>

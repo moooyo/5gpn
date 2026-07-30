@@ -48,8 +48,8 @@ export function ExtensionInstallReview({ module }: { module: InterceptModule }) 
       <Row aria-label={t('extensions.install.snapshotDetails')}>
         <div className="grid gap-2 sm:grid-cols-2"><div><div className="text-meta text-text-faint">{t('extensions.install.sourceDigest')}</div><code className="mt-1 block break-all font-mono text-meta text-text-mid">{module.source_digest}</code></div><div><div className="text-meta text-text-faint">{t('extensions.install.snapshotDigest')}</div><code className="mt-1 block break-all font-mono text-meta text-text-mid">{module.snapshot_digest}</code></div></div>
       </Row>
-      <Row label={module.network_any ? t('extensions.networkAnyTitle') : t('extensions.networkOriginsTitle')}>
-        {module.network_any ? <p className="text-meta leading-4 text-[var(--md-sys-color-on-warning-container)]">{t('extensions.networkAnyWarning')}</p> : module.network_origins.length ? <div className="flex flex-wrap gap-1.5">{module.network_origins.map((origin) => <code key={origin} className="max-w-full break-all rounded-chip bg-surface-container-low px-2 py-1 font-mono text-meta text-text-mid">{origin}</code>)}</div> : <p className="text-meta text-text-faint">{t('extensions.networkOriginsNone')}</p>}
+      <Row label={t('extensions.networkTitle')}>
+        {module.network ? <p className="text-meta leading-4 text-[var(--md-sys-color-on-warning-container)]">{t('extensions.networkWarning')}</p> : <p className="text-meta text-text-faint">{t('extensions.networkNone')}</p>}
       </Row>
       {(module.routing_rules?.length ?? 0) > 0 ? <Row label={t('extensions.routingRulesTitle')}><RoutingRuleList rules={module.routing_rules!} /></Row> : null}
       <p className="text-label leading-5 text-text-faint">{t('extensions.install.reviewBody')}</p>

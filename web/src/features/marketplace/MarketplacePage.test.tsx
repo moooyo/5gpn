@@ -28,7 +28,7 @@ const APPLE: MarketplaceEntry = {
   documentation_url: 'https://example.test/apple',
   manifest_url: 'https://cdn.example.test/apple/extension.yaml',
   manifest_digest: 'a'.repeat(64),
-  capabilities: { capture_host_count: 2, action_count: 1, setting_count: 2, network_origins: [], persistent_storage: false, upstream_mapping_count: 0, routing_rule_count: 0, egress_group_required: false },
+  capabilities: { capture_host_count: 2, action_count: 1, setting_count: 2, network: false, persistent_storage: false, upstream_mapping_count: 0, routing_rule_count: 0, egress_group_required: false },
 }
 const CLEANER: MarketplaceEntry = {
   id: 'io.example.response-cleaner',
@@ -39,7 +39,7 @@ const CLEANER: MarketplaceEntry = {
   license: { spdx: 'Apache-2.0' },
   manifest_url: 'https://mirror.example.test/cleaner/extension.yaml',
   manifest_digest: 'b'.repeat(64),
-  capabilities: { capture_host_count: 4, action_count: 3, setting_count: 0, network_origins: ['https://api.example.test'], persistent_storage: true, upstream_mapping_count: 0, routing_rule_count: 2, egress_group_required: true },
+  capabilities: { capture_host_count: 4, action_count: 3, setting_count: 0, network: true, persistent_storage: true, upstream_mapping_count: 0, routing_rule_count: 2, egress_group_required: true },
 }
 const OFFICIAL: MarketplaceSource = {
   id: 'io.5gpn.official',
@@ -81,7 +81,7 @@ const INSTALLED_APPLE: InterceptModule = {
   source_digest: APPLE.manifest_digest,
   snapshot_digest: 'e'.repeat(64),
   execution_order: 1,
-  network_origins: [],
+  network: false,
   egress_group_required: false,
 }
 const MODULES: InterceptModulesView = {
@@ -116,7 +116,7 @@ describe('MarketplacePage', () => {
     const cleaner = (await screen.findByText('Response Cleaner')).closest('article')!
     await user.click(within(cleaner).getByRole('button', { expanded: false, name: /项权限/ }))
     expect(within(cleaner).getByText('路由规则 · 2')).toBeInTheDocument()
-    expect(within(cleaner).getByText('网络地址 · 1')).toBeInTheDocument()
+    expect(within(cleaner).getByText('网络访问')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /^Community mirror/ }))
     expect(screen.queryByText('Apple WLOC Location Override')).not.toBeInTheDocument()
     expect(screen.getByText('Response Cleaner')).toBeInTheDocument()
@@ -181,7 +181,7 @@ describe('MarketplacePage', () => {
       source_digest: CLEANER.manifest_digest,
       snapshot_digest: 'f'.repeat(64),
       execution_order: 2,
-      network_origins: ['https://api.example.test'],
+      network: true,
       egress_group_required: true,
     }
     const installed: InterceptModulesView = { ...MODULES, revision: '6'.repeat(64), execution_order: [...MODULES.execution_order, actual.id], modules: [...MODULES.modules, actual] }

@@ -113,7 +113,7 @@ function interceptModulesView(): T.InterceptModulesView {
     modules: fixtures.interceptModules.modules.map((module) => ({
       ...module,
       capture_hosts: [...module.capture_hosts],
-      network_origins: [...module.network_origins],
+      network: module.network,
       settings: module.settings?.map((setting) => ({ ...setting })),
       upstream_mappings: module.upstream_mappings?.map((mapping) => ({ ...mapping })),
     })),
@@ -197,7 +197,7 @@ export async function importInterceptModule(request: T.InterceptModuleImport): P
     snapshot_digest: 'c'.repeat(64),
     imported_at: new Date().toISOString(),
     execution_order: fixtures.interceptModules.modules.length + 1,
-    network_origins: [],
+    network: false,
     egress_group_required: false,
   })
   fixtures.interceptModules.execution_order = fixtures.interceptModules.modules.map((module) => module.id)
@@ -321,13 +321,13 @@ let marketplaces: T.MarketplaceSource[] = [{
     documentation_url: 'https://github.com/moooyo/5gpn-extensions',
     manifest_url: 'https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml',
     manifest_digest: 'a'.repeat(64),
-    capabilities: { capture_host_count: 2, action_count: 1, setting_count: 2, network_origins: [], persistent_storage: false, upstream_mapping_count: 0, routing_rule_count: 0, egress_group_required: false },
+    capabilities: { capture_host_count: 2, action_count: 1, setting_count: 2, network: false, persistent_storage: false, upstream_mapping_count: 0, routing_rule_count: 0, egress_group_required: false },
   }, {
     id: 'io.example.marketplace-cleaner', name: 'Marketplace Response Cleaner', version: '1.0.0',
     description: 'A native response transformation example from the marketplace.',
     tags: ['response', 'example'], license: { spdx: 'Apache-2.0' },
     manifest_url: 'https://extensions.example.test/marketplace-cleaner.yaml', manifest_digest: '7'.repeat(64),
-    capabilities: { capture_host_count: 1, action_count: 1, setting_count: 0, network_origins: ['https://origin.example.net'], persistent_storage: false, upstream_mapping_count: 1, routing_rule_count: 0, egress_group_required: true },
+    capabilities: { capture_host_count: 1, action_count: 1, setting_count: 0, network: true, persistent_storage: false, upstream_mapping_count: 1, routing_rule_count: 0, egress_group_required: true },
   }],
 }]
 
@@ -383,7 +383,7 @@ export async function installMarketplaceEntry(marketplace: string, extension: st
     script_count: entry.capabilities.action_count, settings: [], persistent_storage: entry.capabilities.persistent_storage,
     source_url: entry.manifest_url, source_digest: entry.manifest_digest, snapshot_digest: entry.manifest_digest,
     imported_at: new Date().toISOString(), execution_order: fixtures.interceptModules.modules.length + 1,
-    network_origins: [...entry.capabilities.network_origins], egress_group_required: entry.capabilities.egress_group_required,
+    network: entry.capabilities.network, egress_group_required: entry.capabilities.egress_group_required,
   })
   fixtures.interceptModules.execution_order = fixtures.interceptModules.modules.map((module) => module.id)
   advanceInterceptRevision()

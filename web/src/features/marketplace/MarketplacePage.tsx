@@ -140,8 +140,10 @@ function MetaChip({ icon: IconComponent, children, tone = 'neutral', mono = fals
  */
 function permissionSummary(entry: MarketplaceItem['entry']): Array<{ key: string; value: string | number }> {
   const permissions: Array<{ key: string; value: string | number }> = []
-  if (entry.capabilities.network_origins.length > 0) {
-    permissions.push({ key: 'marketplace.permNetwork', value: entry.capabilities.network_origins.length })
+  // The grant names no origins, so there is no count to show — it is held or
+  // it is not, like storage and the egress binding beside it.
+  if (entry.capabilities.network) {
+    permissions.push({ key: 'marketplace.permNetwork', value: '✓' })
   }
   if ((entry.capabilities.routing_rule_count ?? 0) > 0) {
     permissions.push({ key: 'marketplace.permRouting', value: entry.capabilities.routing_rule_count ?? 0 })
@@ -347,7 +349,9 @@ export default function MarketplacePage() {
       })
   }, [allItems, query, sort, sourceID])
   const selectedSource = view?.sources.find((source) => source.id === sourceID)
-
+  // A source whose cached snapshot could not be decoded. The daemon still
+  // lists it so it can be refreshed or removed; the page has to say why.
+  const brokenSources = useMemo(() => view?.sources.filter((source) => source.error) ?? [], [view?.sources])
   async function addMarketplace() {
     if (!view || addBusy || !validMarketplaceURL(addURL.trim())) return
     setAddBusy(true)
@@ -455,6 +459,27 @@ export default function MarketplacePage() {
       ) : null}
 
       {view && modulesView ? <>
+        {/* A source whose cached snapshot cannot be read is state the operator
+            has to act on, so it gets a persistent surface here rather than a
+            toast. It names the source and says the two things that resolve it,
+            because the chip menu that does both is easy to miss when the only
+            other signal is a coloured dot. */}
+        {brokenSources.length > 0 ? (
+          <Card className="border border-red/40 p-5">
+            <h2 className="text-body font-bold text-text-strong">{t('marketplace.brokenTitle', { count: brokenSources.length })}</h2>
+            <p className="mt-1.5 text-label text-text-mid">{t('marketplace.brokenBody')}</p>
+            <ul className="mt-3 flex flex-col gap-3">
+              {brokenSources.map((source) => (
+                <li key={source.id} className="rounded-md bg-surface-container p-3.5">
+                  <div className="text-label font-bold text-text-strong">{source.name}</div>
+                  <code className="mt-1 block break-all font-mono text-meta text-text-mid">{source.url}</code>
+                  <p className="mt-1.5 break-words text-meta text-red">{source.error}</p>
+                </li>
+              ))}
+            </ul>
+          </Card>
+        ) : null}
+
         <section aria-labelledby="marketplace-sources-title">
           <div className="mb-3.5 flex flex-wrap items-center gap-3">
             <h1 id="marketplace-sources-title" className="text-body font-bold text-text-strong">{t('marketplace.sources')}</h1>
@@ -482,9 +507,13 @@ export default function MarketplacePage() {
                 value: source.id,
                 label: source.name,
                 count: source.entries.length,
-                dot: sourceWarnings.has(source.id) ? 'var(--color-amber)' : 'var(--color-green)',
-                srLabel: sourceWarnings.has(source.id) ? t('marketplace.sourceWarning') : t('marketplace.sourceCached'),
-                title: `${t('marketplace.publisherIdentity', { name: source.metadata_name })}\n${source.final_url}\n${t('marketplace.lastRefreshed', { value: new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(source.fetched_at)) })}`,
+                dot: source.error ? 'var(--color-red)' : sourceWarnings.has(source.id) ? 'var(--color-amber)' : 'var(--color-green)',
+                srLabel: source.error
+                  ? t('marketplace.sourceUnreadable')
+                  : sourceWarnings.has(source.id) ? t('marketplace.sourceWarning') : t('marketplace.sourceCached'),
+                title: source.error
+                  ? `${source.url}\n${source.error}`
+                  : `${t('marketplace.publisherIdentity', { name: source.metadata_name })}\n${source.final_url}\n${t('marketplace.lastRefreshed', { value: new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(source.fetched_at)) })}`,
                 trailing: (
                   <DropdownMenu
                     align="end"
