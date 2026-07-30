@@ -376,6 +376,27 @@ else
     fail "remove_unit read a caller-scope variable or touched systemd"
 fi
 
+# `5gpn-journal@.service` is a template. systemd cannot stop or disable a name
+# with no instance, so the stop-and-disable gate refused to delete a unit file
+# that was always safe to delete, and the same empty status answers made a clean
+# rollback report itself incomplete. An instance name must NOT take that path.
+if unit_is_template 5gpn-journal@.service \
+   && unit_is_template example@.timer \
+   && ! unit_is_template 5gpn-journal@mihomo.service \
+   && ! unit_is_template mihomo.service; then
+    pass "a template name is told apart from its instances and from plain units"
+else
+    fail "template detection would misclassify an instance or a plain unit"
+fi
+remove_unit_body="$(sed -n '/^remove_unit()/,/^}/p' "$INSTALL")"
+tmpl_line="$(grep -n 'unit_is_template' <<<"$remove_unit_body" | head -1 | cut -d: -f1)"
+disable_line="$(grep -n 'systemctl disable --now' <<<"$remove_unit_body" | head -1 | cut -d: -f1)"
+if [[ -n "$tmpl_line" && -n "$disable_line" && "$tmpl_line" -lt "$disable_line" ]]; then
+    pass "uninstall deletes a template unit file without a stop-and-disable it cannot pass"
+else
+    fail "uninstall still gates a template unit file on an impossible stop-and-disable"
+fi
+
 if [[ "$POSIX_MODES" == 1 ]] && process_is_root; then
     if (
         conf="$TMP/setgid-marker-live"

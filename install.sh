@@ -2167,6 +2167,16 @@ journal_export_instances_clear() {
     done
 }
 
+# A systemd template (`name@.service`) is a definition, not a unit: without an
+# instance there is nothing to start, stop, enable, or report on. `systemctl`
+# answers status queries for one with an empty string and fails `disable --now`,
+# so every caller that treats it like an ordinary unit reads "broken" off a name
+# that is working exactly as designed. Its unit *file* is still snapshotted,
+# restored, and removed with the rest.
+unit_is_template() {
+    [[ "${1%.*}" == *@ ]]
+}
+
 # The fixed unit names this installer writes are its own deployment artifacts.
 # Installing claims them outright and uninstalling deletes them; there is no
 # ownership fingerprint to consult. Two things this deliberately does not do:
@@ -2186,6 +2196,15 @@ remove_unit() {
     local unit="$1"
     local file="/etc/systemd/system/$unit"
     [[ -e "$file" || -L "$file" ]] || return 0
+    # A template name carries no runtime state, so the stop-and-disable gate
+    # below would refuse to delete a file that is perfectly safe to delete.
+    if unit_is_template "$unit"; then
+        rm -f -- "$file" || { err "Could not delete unit file: $unit"; return 1; }
+        [[ ! -e "$file" && ! -L "$file" ]] \
+            || { err "Unit file still exists after removal: $unit"; return 1; }
+        ok "Removed unit: $unit"
+        return 0
+    fi
     systemctl disable --now "$unit" 2>/dev/null \
         || { err "Could not stop and disable $unit; refusing to delete its unit file."; return 1; }
     rm -f -- "$file" || { err "Could not delete unit file: $unit"; return 1; }
@@ -3800,6 +3819,11 @@ restore_unit_activity() {
 disable_and_verify_quarantined_unit() {
     local unit="$1" failed_name="$2" load_state active_state enabled_state
     local -n failed_ref="$failed_name"
+    # Quarantine means "stopped and not coming back at reboot". A template is
+    # already both: it cannot run, and no instance of it is enabled. Querying it
+    # returns nothing, which the emptiness gate below would report as an
+    # unverifiable unit and escalate into an incomplete rollback.
+    ! unit_is_template "$unit" || return 0
     systemctl disable --now "$unit" >/dev/null 2>&1 || true
     systemctl stop "$unit" >/dev/null 2>&1 || true
     load_state="$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)"

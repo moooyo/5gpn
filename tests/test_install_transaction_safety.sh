@@ -363,8 +363,11 @@ printf '%s\n' enabled > "$ROLLBACK_DIR/unit-state/certbot.timer.enabled-state"
 declare -A q_active=([core.service]=1 [certbot.timer]=0)
 declare -A q_enabled=([core.service]=1 [certbot.timer]=0)
 TRANSACTION_UNIT_FILES=(core.service)
+template_touched=0
 systemctl() {
     local action="$1" unit="${*: -1}"
+    # systemd cannot act on or report a template name; it answers with nothing.
+    [[ "$unit" != *@.service ]] || { template_touched=1; return 1; }
     case "$action" in
         enable) q_enabled["$unit"]=1 ;;
         disable) q_active["$unit"]=0; q_enabled["$unit"]=0 ;;
@@ -405,6 +408,22 @@ quarantine_managed_units_after_failed_rollback quarantine_failed 1
    && "${q_enabled[certbot.timer]}" == 0 ]] \
     || fail "exclusive failed lineage left its global renewal timer enabled"
 pass "rollback preserves shared Certbot renewal and quarantines an exclusive failed lineage"
+
+# A template unit is a definition, not a unit: systemd answers its status
+# queries with nothing. Reading that emptiness as an unverifiable unit made an
+# otherwise clean rollback report itself incomplete, which is what escalated a
+# single failure into disabling every healthy service on the host.
+TRANSACTION_UNIT_FILES=(core.service 5gpn-journal@.service)
+q_active[core.service]=1
+q_enabled[core.service]=1
+template_touched=0
+certbot_lineage_set_is_exclusive() { return 1; }
+quarantine_failed=0
+quarantine_managed_units_after_failed_rollback quarantine_failed 1
+[[ "$quarantine_failed" == 0 && "$template_touched" == 0 \
+   && "${q_active[core.service]}" == 0 && "${q_enabled[core.service]}" == 0 ]] \
+    || fail "a template unit's empty status made the whole rollback look incomplete"
+pass "quarantine skips template units and still quarantines the real ones"
 unset -f systemctl
 unset -f certbot_lineage_set_is_exclusive
 
