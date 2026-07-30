@@ -64,7 +64,7 @@ grep -Fq 'intercept_asset="5gpn-intercept-linux-amd64"' "$INSTALL" || fail "inte
 grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/5gpn-intercept"' "$INSTALL" || fail "interception release asset is not checksum-verified"
 grep -Fq 'install_service_account "$INTERCEPT_SERVICE_USER" "$INTERCEPT_SERVICE_USER"' "$INSTALL" || fail "interception service account is not installed"
 grep -Fq 'ensure_intercept_certificates' "$INSTALL" || fail "interception certificate lifecycle is missing"
-grep -Fq '"version": 5' "$INSTALL" || fail "current interception config schema is not installed"
+grep -Fq '"version": 6' "$INSTALL" || fail "current interception config schema is not installed"
 grep -Fq 'CaptureDNS' "$MODULE_TYPES" && grep -Fq 'json:"capture_dns' "$MODULE_TYPES" \
     || fail "operator capture DNS binding is missing from the module schema"
 grep -Fq 'maxInterceptModuleHosts' "$MODULE_TYPES" && grep -Fq '= 512' "$MODULE_TYPES" \

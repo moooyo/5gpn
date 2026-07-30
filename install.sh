@@ -51,6 +51,14 @@ BASE_OWNERSHIP_VALUE="5gpn-runtime"
 CONF_DIR="/etc/5gpn"                 # config: dns.env is the single source of truth
 CONF_OWNERSHIP_MARKER=".5gpn-owned"
 CONF_OWNERSHIP_VALUE="5gpn-config"
+# The value carried a -v1 until 0.0.44 dropped it, and claiming a root rewrites a
+# stale marker. But this is checked earlier than that: cfg_get reads dns.env at
+# script top level, long before claim_project_roots runs, so a host installed
+# before 0.0.44 refused every upgrade with "Refusing unsafe persisted
+# configuration" and no way forward. Accepting the exact closed legacy value lets
+# the claim heal it, the same way a legacy interception CA root is accepted on
+# its own old shape.
+CONF_LEGACY_OWNERSHIP_VALUE="5gpn-config-v1"
 STATE_DIR="/var/lib/5gpn"
 STATE_OWNERSHIP_MARKER=".5gpn-owned"
 STATE_OWNERSHIP_VALUE="5gpn-state"
@@ -361,7 +369,8 @@ persisted_dns_env_is_safe() {
        && "$(file_gid "$marker")" == 0 \
        && "$(file_mode "$marker")" == 644 \
        && "$(file_nlink "$marker")" == 1 \
-       && "$(cat "$marker" 2>/dev/null || true)" == "$CONF_OWNERSHIP_VALUE" ]] \
+       && ( "$(cat "$marker" 2>/dev/null || true)" == "$CONF_OWNERSHIP_VALUE" \
+          || "$(cat "$marker" 2>/dev/null || true)" == "$CONF_LEGACY_OWNERSHIP_VALUE" ) ]] \
         || return 1
     [[ -f "$env" && ! -L "$env" \
        && "$(file_uid "$env")" == 0 \
@@ -4356,7 +4365,7 @@ ensure_intercept_config() {
     candidate="$(mktemp "$INTERCEPT_DIR/.config.json.XXXXXX")" || return 1
     cat > "$candidate" <<EOF
 {
-  "version": 5,
+  "version": 6,
   "listen": "127.0.0.1:18080",
   "username": "${inbound_user}",
   "password": "${inbound_pass}",
