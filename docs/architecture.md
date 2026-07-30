@@ -604,9 +604,11 @@ credential agreement with the sidecar document. A preserved configuration
 carrying no anchors is refused in preflight, while the host is still untouched,
 with the instruction to run `5gpn mihomo-reset`: routing has no renderer behind
 it, so such a gateway could never enable an extension, and the file is the
-operator's to replace rather than the installer's. Any other structurally
-incompatible boundary aborts for the same reason instead of degrading active
-traffic silently.
+operator's to replace rather than the installer's. Reset restores the seed and
+discards whatever the operator added to it; `test/overlay/migrate-to-anchored.sh`
+is the rule-preserving alternative for a host worth migrating rather than
+reseeding. Any other structurally incompatible boundary aborts for the same
+reason instead of degrading active traffic silently.
 
 `dns.env` itself has only the current key schema. The retired
 `DNS_EGRESS_RESOLVER` key is neither accepted nor ignored. Every pre-v5

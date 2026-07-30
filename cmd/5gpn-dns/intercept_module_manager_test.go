@@ -204,9 +204,8 @@ func (c *recordingOverlayCore) commitCount() int {
 	return c.commits
 }
 
-// captureSelectors renders a committed generation's capture rules as
-// "<kind>:<value>:<port>", which is what the legacy driver used to express as
-// mihomo capture rule text.
+// overlayCaptureSelectors renders a committed generation's capture rules as
+// "<kind>:<value>:<port>", the form a test can compare against.
 func overlayCaptureSelectors(doc overlayDocument) []string {
 	out := []string{}
 	for _, rule := range doc.Client.Rules {
@@ -221,9 +220,8 @@ func overlayCaptureSelectors(doc overlayDocument) []string {
 }
 
 // overlayEgressGroupFor reports the group a committed generation authorises for
-// one destination and port, or "" for none. The legacy driver expressed this as
-// the first matching `AND,((IN-NAME,intercept-egress),…),<group>` rule; here the
-// destination sets are disjoint, so the answer is a lookup rather than a scan.
+// one destination and port, or "" for none. The destination sets are disjoint by
+// construction, so this is a lookup rather than a first-match scan.
 func overlayEgressGroupFor(doc overlayDocument, kind overlaySelectorKind, value string, port uint16) string {
 	for _, capability := range doc.Egress.Capabilities {
 		for _, binding := range capability.Bindings {

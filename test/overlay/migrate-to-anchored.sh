@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Migrate a rendered mihomo config to the runtime-overlay arrangement.
+# Migrate a config written by a pre-overlay release to the anchored arrangement.
 #
-# The legacy driver writes three managed regions into the operator's config: the
-# extension policy rules, the processor egress selectors, and the capture rules.
-# Under the overlay none of them live in the file — they are compiled into a
-# typed generation and committed over a socket — so migrating means removing all
-# three and leaving the two anchors that resolve them.
+# Releases before the overlay wrote three managed regions into the operator's
+# config: the extension policy rules, the processor egress selectors, and the
+# capture rules. Nothing writes them now — they are compiled into a typed
+# generation and committed over a socket — so migrating means removing all three
+# and leaving the two anchors that resolve them.
+#
+# This is the alternative to `5gpn mihomo-reset` for a host the installer turned
+# away as unanchored. Reset restores the seed and discards whatever proxies,
+# providers and rules the operator added; this keeps them.
 #
 # What must NOT be touched is everything else in the rule list. Those are the
 # operator's own rules, including the panel guards and the private-range denies,

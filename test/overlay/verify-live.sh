@@ -26,9 +26,9 @@ hit()  { curl -sk --max-time 12 --resolve "$1:443:$GW" "https://$1/" -o /dev/nul
 
 echo "== 1. the overlay is the driver =="
 # Scoped to the running process, not the whole journal. Without --since the
-# match can come from an incarnation that has since been restarted onto the
-# legacy driver, so the check would claim the overlay is driving a gateway that
-# has stopped driving with it — the one thing it exists to detect.
+# match can come from an incarnation that has since been restarted and failed
+# to bring the driver up, so the check would claim the overlay is driving a
+# gateway that has stopped driving with it — the one thing it exists to detect.
 #
 # grep -q closes the pipe on its first match, so with pipefail the producer's
 # SIGPIPE becomes the pipeline's status and a found match reads as a failure.

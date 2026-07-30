@@ -118,9 +118,8 @@ func TestOverlayCapabilityIsThePresentedCredential(t *testing.T) {
 // target. Refusing it made enabling the MITM master impossible on any gateway
 // whose extensions did not all agree on a single group.
 //
-// The credential does not select the group — the destination does, exactly as it
-// did under the legacy renderer's per-destination egress rules. So there is one
-// capability carrying the one credential the processor can present, and one
+// The credential does not select the group — the destination does. So there is
+// one capability carrying the one credential the processor can present, and one
 // binding per group inside it.
 func TestOverlayMintsOneBindingPerEgressGroup(t *testing.T) {
 	src := overlayTestDocument()
@@ -237,10 +236,10 @@ func overlayBindingsOf(doc overlayDocument) []overlayEgressBinding {
 	return out
 }
 
-// The allowlist must cover exactly what the legacy renderer emitted egress
-// rules for. A destination it omits was reachable before and would now be
-// denied; one it adds was denied before and would now be reachable.
-func TestOverlayDestinationAllowlistMirrorsTheLegacyEgressRules(t *testing.T) {
+// The allowlist must cover exactly the destinations the enabled extensions
+// declare. One it omits is denied when it should be reachable; one it adds is
+// reachable when it should be denied.
+func TestOverlayDestinationAllowlistCoversDeclaredDestinations(t *testing.T) {
 	src := overlayTestDocument()
 	doc := compileForTest(t, src, overlayTransitionRevoke)
 

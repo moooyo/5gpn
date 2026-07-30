@@ -159,9 +159,10 @@ IOS_OWNERSHIP_VALUE="5gpn-ios"
 TEMP_OWNERSHIP_MARKER=".5gpn-temp-owned"
 TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # Upstream v1.19.28 plus the runtime overlay, built from moooyo/mihomo's
-# 5gpn-ext branch. Upstream does not implement the RUNTIME-OVERLAY anchors,
-# so against an upstream core the installer's probe fails and it seeds the
-# rendered config instead: the mechanism ships but never switches on.
+# 5gpn-ext branch. Upstream does not implement the RUNTIME-OVERLAY anchors, and
+# this release has no second arrangement to fall back to, so the staging probe
+# refuses an upstream core outright rather than installing one that cannot
+# carry interception.
 # The interception sidecar is maintained in its own repository and consumed
 # as a released artifact, like mihomo and gum. It used to be built from a copy
 # carried inside this tree, which meant the component and the gateway could
