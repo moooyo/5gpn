@@ -768,11 +768,49 @@ cert_root_is_safe() {
         && cert_root_contents_are_safe
 }
 
-ensure_dns_cert_root() {
+# Every reason an existing certificate root can be refused, decided without
+# touching it. ensure_dns_cert_root runs this too, so preflight and publication
+# reach the same verdict from one implementation rather than two that can drift.
+#
+# This exists because ensure_dns_cert_root does not run until
+# prepare_certificate_publication_boundaries -- by which point the three
+# binaries have already been replaced, and with no rollback there is nothing to
+# return to. A host this release cannot accept has to be turned away while its
+# deployment is still untouched.
+cert_root_claim_is_possible() {
     local mode
+    [[ -e "$DNS_CERT_DIR" || -L "$DNS_CERT_DIR" ]] || return 0
+    [[ -d "$DNS_CERT_DIR" && ! -L "$DNS_CERT_DIR" \
+       && "$(file_uid "$DNS_CERT_DIR")" == 0 \
+       && "$(file_gid "$DNS_CERT_DIR")" == 0 ]] \
+        || { err "Certificate root ownership is unsafe: $DNS_CERT_DIR"; return 1; }
+    root_ownership_marker_is_safe "$DNS_CERT_DIR" "$CERT_ROOT_MARKER" "$CERT_ROOT_MARKER_VALUE" \
+        && return 0
+    [[ ! -e "$DNS_CERT_DIR/$CERT_ROOT_MARKER" && ! -L "$DNS_CERT_DIR/$CERT_ROOT_MARKER" ]] \
+        || { err "Certificate root marker is unsafe: $DNS_CERT_DIR/$CERT_ROOT_MARKER"; return 1; }
+    # CONF_DIR is deliberately setgid (2771/3771) so the service group keeps
+    # access, and a directory created inside it inherits that bit. A first
+    # install therefore presents 2751 here rather than 751, and comparing the
+    # full mode made this installer refuse a root it had just created itself.
+    # Only the permission digits decide claimability; ensure_dns_cert_root
+    # normalises the inherited bits immediately after claiming.
+    mode="$(file_mode "$DNS_CERT_DIR")"
+    mode="${mode: -3}"
+    [[ "$mode" == 750 || "$mode" == 751 || "$mode" == 755 ]] \
+        || { err "Refusing to claim an unknown certificate root: $DNS_CERT_DIR"; return 1; }
+    # An unmarked root is only ever one this run just created. A populated one
+    # predates the ownership marker, and those are no longer migrated: claiming
+    # it would adopt a tree whose shape this release never validated.
+    [[ -z "$(find "$DNS_CERT_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]] \
+        || { err "Refusing to claim a populated certificate root with no ownership marker: $DNS_CERT_DIR"
+             err "Back it up and remove it, or restore the marker, before rerunning."; return 1; }
+}
+
+ensure_dns_cert_root() {
     fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
         && runtime_directory_slot_is_safe "$DNS_CERT_DIR" "$CONF_DIR" \
         || { err "Refusing unsafe certificate root slot: $DNS_CERT_DIR"; return 1; }
+    cert_root_claim_is_possible || return 1
     if [[ ! -e "$DNS_CERT_DIR" && ! -L "$DNS_CERT_DIR" ]]; then
         install -d -o root -g root -m 0751 "$DNS_CERT_DIR" || return 1
     fi
@@ -789,24 +827,6 @@ ensure_dns_cert_root() {
             || { err "Existing certificate root failed structural validation: $DNS_CERT_DIR"; return 1; }
         return 0
     fi
-    [[ ! -e "$DNS_CERT_DIR/$CERT_ROOT_MARKER" && ! -L "$DNS_CERT_DIR/$CERT_ROOT_MARKER" ]] \
-        || { err "Certificate root marker is unsafe: $DNS_CERT_DIR/$CERT_ROOT_MARKER"; return 1; }
-    # CONF_DIR is deliberately setgid (2771/3771) so the service group keeps
-    # access, and a directory created inside it inherits that bit. A first
-    # install therefore presents 2751 here rather than 751, and comparing the
-    # full mode made this installer refuse a root it had just created itself.
-    # Only the permission digits decide claimability; the chmod below
-    # normalises the inherited bits immediately afterwards.
-    mode="$(file_mode "$DNS_CERT_DIR")"
-    mode="${mode: -3}"
-    [[ "$mode" == 750 || "$mode" == 751 || "$mode" == 755 ]] \
-        || { err "Refusing to claim an unknown certificate root: $DNS_CERT_DIR"; return 1; }
-    # An unmarked root is only ever one this run just created. A populated one
-    # predates the ownership marker, and those are no longer migrated: claiming
-    # it would adopt a tree whose shape this release never validated.
-    [[ -z "$(find "$DNS_CERT_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]] \
-        || { err "Refusing to claim a populated certificate root with no ownership marker: $DNS_CERT_DIR"
-             err "Back it up and remove it, or restore the marker, before rerunning."; return 1; }
     # Five octal digits on purpose. GNU chmod preserves a directory's
     # set-group-ID bit for a four-digit mode, and this root inherits that bit
     # from the setgid CONF_DIR, so "chmod 0751" left it at 2751 and the
@@ -6267,6 +6287,10 @@ full_install() {
     INSTALL_PHASE="claiming project roots"
     claim_project_roots
     preflight_intercept_roots
+    # Certificate material has no migration path and no rollback behind it, so
+    # decide here -- while the deployment is untouched -- rather than at
+    # publication time when the binaries have already been replaced.
+    cert_root_claim_is_possible
     # Bootstrap the TUI here, not at publication time. Every prompt this
     # installer asks -- domain, gateway IP, resolver, certificate mode -- runs in
     # the stage below, so a later bootstrap meant the interactive helpers always

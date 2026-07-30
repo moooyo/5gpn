@@ -1517,6 +1517,51 @@ grep -Eq '^wait_service_ready\(\)' "$INSTALL" \
     || fail "service readiness gate is absent"
 
 echo "----"
+# Certificate material has no migration path and nothing to roll back to, so a
+# host this release cannot accept must be turned away while its deployment is
+# still intact. ensure_dns_cert_root only runs at publication time, by which
+# point the three binaries are already replaced -- hence the same read-only
+# verdict runs in preflight, from one shared implementation.
+cert_pf="$TMP/cert-preflight"
+if (
+    DNS_CERT_DIR="$cert_pf/populated"
+    mkdir -p "$DNS_CERT_DIR/dot"
+    file_uid() { printf '0\n'; }
+    file_gid() { printf '0\n'; }
+    file_mode() { printf '751\n'; }
+    err() { :; }
+    ! cert_root_claim_is_possible
+); then
+    pass "a populated certificate root with no marker is refused before publication"
+else
+    fail "a pre-marker certificate tree reaches publication before it is refused"
+fi
+if (
+    DNS_CERT_DIR="$cert_pf/empty"
+    mkdir -p "$DNS_CERT_DIR"
+    file_uid() { printf '0\n'; }
+    file_gid() { printf '0\n'; }
+    file_mode() { printf '751\n'; }
+    err() { :; }
+    cert_root_claim_is_possible
+); then
+    pass "the empty root a fresh install just created is still claimable"
+else
+    fail "preflight refuses the empty certificate root of a first install"
+fi
+cert_full_body="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
+cert_pf_line="$(grep -n 'cert_root_claim_is_possible' <<<"$cert_full_body" | head -1 | cut -d: -f1 || true)"
+cert_pub_line="$(grep -n 'install_5gpndns' <<<"$cert_full_body" | head -1 | cut -d: -f1 || true)"
+cert_shared=0
+grep -Fq 'cert_root_claim_is_possible || return 1' \
+    <<<"$(sed -n '/^ensure_dns_cert_root()/,/^}/p' "$INSTALL")" && cert_shared=1
+if [[ -n "$cert_pf_line" && -n "$cert_pub_line" \
+   && "$cert_pf_line" -lt "$cert_pub_line" && "$cert_shared" == 1 ]]; then
+    pass "preflight and publication share one certificate-root verdict"
+else
+    fail "the certificate-root check runs after publication begins, or was duplicated"
+fi
+
 if [[ "$FAIL" == 0 ]]; then
     echo "test_installer_safety: PASS"
 else
