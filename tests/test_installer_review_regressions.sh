@@ -40,73 +40,44 @@ else
 fi
 
 stage_line="$(grep -n '^[[:space:]]*stage_artifacts' "$INSTALL" | tail -1 | cut -d: -f1)"
-capture_line="$(grep -n '^[[:space:]]*capture_install_rollback' "$INSTALL" | tail -1 | cut -d: -f1)"
 publish_line="$(grep -n '^[[:space:]]*install_5gpndns' "$INSTALL" | tail -1 | cut -d: -f1)"
-if [[ -n "$stage_line" && -n "$capture_line" && -n "$publish_line" \
-   && "$stage_line" -lt "$capture_line" && "$capture_line" -lt "$publish_line" ]]; then
-    pass "artifact verification and rollback capture precede publication"
+if [[ -n "$stage_line" && -n "$publish_line" && "$stage_line" -lt "$publish_line" ]]; then
+    pass "artifact verification precedes publication"
 else
-    fail "install publication order is not transactional"
+    fail "artifacts are published before they are staged and verified"
 fi
 
+# The installer reports a failure and unwinds its locks; it does not undo a
+# partial publication. Anything that restores or quarantines is a regression.
 grep -Fq 'trap install_transaction_error ERR' "$INSTALL" \
-    && grep -Fq 'rollback_install' "$INSTALL" \
-    && pass "publication failures have a rollback trap" \
-    || fail "publication rollback is not wired"
+    && grep -Fq 'report_install_failure' "$INSTALL" \
+    && pass "publication failures are trapped and reported" \
+    || fail "publication failure reporting is not wired"
+grep -Eq '^(rollback_install|capture_install_rollback|restore_managed_unit_states)\(\)' "$INSTALL" \
+    && fail "the install rollback subsystem came back" \
+    || pass "a failed install does not restore or quarantine the host"
 
-capture_fn="$(sed -n '/^capture_install_rollback()/,/^}/p' "$INSTALL")"
-rollback_fn="$(sed -n '/^rollback_install()/,/^}/p' "$INSTALL")"
-if grep -Fq '/etc/letsencrypt/renewal/${b}.conf' <<<"$capture_fn" \
-   && grep -Fq '/etc/letsencrypt/live/${b}' <<<"$capture_fn" \
-   && grep -Fq '/etc/letsencrypt/archive/${b}' <<<"$capture_fn" \
-   && grep -Fq 'certbot delete --non-interactive --cert-name "$renewal_base"' <<<"$rollback_fn" \
-   && grep -Fq 'ROLLBACK_DIR/le-live/${renewal_base}' <<<"$rollback_fn"; then
-    pass "certificate mode switches snapshot and restore the exact scoped lineage"
+# The interception credentials in a preserved operator config are rendered from
+# intercept/config.json, so a reseeded document leaves the YAML stale and the
+# routing check aborts publication with `credential-mismatch`. The preserve
+# branch must realign them, and must treat "nothing alignable" (exit 3, a legacy
+# config with no interception blocks) as fine rather than fatal.
+render_fn="$(sed -n '/^render_mihomo_config()/,/^}/p' "$INSTALL")"
+align_fn="$(sed -n '/^align_preserved_intercept_credentials()/,/^}/p' "$INSTALL")"
+preserve_line="$(grep -nF 'align_preserved_intercept_credentials "$config"' <<<"$render_fn" | head -1 | cut -d: -f1)"
+preserved_ok_line="$(grep -nF 'validated and preserved' <<<"$render_fn" | head -1 | cut -d: -f1)"
+if [[ -n "$preserve_line" && -n "$preserved_ok_line" \
+   && "$preserve_line" -lt "$preserved_ok_line" ]] \
+   && grep -Fq -- '--align-interception-credentials' <<<"$align_fn" \
+   && grep -Fq '3) rm -f -- "$candidate"; return 0 ;;' <<<"$align_fn" \
+   && grep -Fq '"$MIHOMO_BIN" -t -f "$candidate"' <<<"$align_fn"; then
+    pass "a preserved mihomo config is realigned to the interception truth source"
 else
-    fail "transaction rollback can leave cert mode/authenticator/lineage split-brain"
+    fail "a reseeded interception config can strand a preserved mihomo config in credential-mismatch"
 fi
-unit_capture_fn="$(sed -n '/^capture_managed_unit_states()/,/^}/p' "$INSTALL")"
-unit_restore_fn="$(sed -n '/^restore_managed_unit_states()/,/^}/p' "$INSTALL")"
-if grep -Fq 'TRANSACTION_STATE_UNITS' <<<"$unit_capture_fn" \
-   && grep -Fq '.enabled-state' <<<"$unit_capture_fn" \
-   && grep -Fq '.active-state' <<<"$unit_capture_fn" \
-   && grep -Fq 'restore_unit_enablement' <<<"$unit_restore_fn" \
-   && grep -Fq 'restore_unit_activity' <<<"$unit_restore_fn" \
-   && grep -Fq '5gpn-certbot-renew.timer' "$INSTALL"; then
-    pass "rollback preserves certificate timer enabled/active state"
-else
-    fail "certificate timer state is lost across a failed mode switch"
-fi
-# A oneshot left `failed` by an aborted earlier install is a settled state the
-# snapshot can record exactly as well as `inactive`. Refusing it wedged every
-# later retry on a state the installer itself produced and never cleared.
-if grep -Fq '"$active_state" == failed' <<<"$unit_capture_fn" \
-   && grep -Fq "'^(active|inactive|failed)\$'" "$INSTALL" \
-   && grep -Fq 'clear_managed_unit_failure_records' <<<"$unit_capture_fn"; then
-    pass "an aborted install's failed unit state is snapshotted, not refused"
-else
-    fail "a failed managed unit permanently blocks reinstall at the snapshot gate"
-fi
-reset_units=()
-systemctl() { [[ "$1" != reset-failed ]] || reset_units+=("$2"); return 0; }
-clear_managed_unit_failure_records
-unset -f systemctl
-if [[ "${#reset_units[@]}" -gt 0 \
-   && " ${reset_units[*]} " == *" 5gpn-intercept-cert.service "* \
-   && " ${reset_units[*]} " == *" mihomo.service "* \
-   && " ${reset_units[*]} " != *" certbot.timer "* ]]; then
-    pass "install clears its own units' failure records and leaves certbot.timer alone"
-else
-    fail "pre-snapshot cleanup is missing or resets the distro certbot timer's failure"
-fi
-if grep -Fq 'ROLLBACK_DIR/polkit/50-5gpn.rules' <<<"$capture_fn" \
-   && grep -Fq 'ROLLBACK_DIR/polkit/50-5gpn.rules' <<<"$rollback_fn" \
-   && grep -Fq '50-5gpn.rules.absent' <<<"$rollback_fn" \
-   && grep -Fq 'polkit_rule_owned_by_5gpn' <<<"$rollback_fn"; then
-    pass "rollback restores the exact prior 5gpn polkit rule or its absence"
-else
-    fail "failed publication can leave a new or changed polkit authorization behind"
-fi
+grep -Fq 'cmp -s -- "$candidate" "$config"' <<<"$align_fn" \
+    && pass "an already-aligned config is left untouched" \
+    || fail "alignment rewrites an operator config that needed no change"
 
 ic="$(sed -n '/^install_cert()/,/^}/p' "$INSTALL")"
 grep -Fq 'validate_cert_pair' <<<"$ic" \
@@ -207,49 +178,51 @@ else
     fail "active external Certbot can race the lineage snapshot"
 fi
 
-printf '%s\n' 'version=1' 'exists=1' 'enabled=enabled' 'active=active' \
-    > "$cert_ownership_tmp/certbot.timer.state"
+# `pause_global_certbot_timer` stops the distro timer on every run. The success
+# path must put back exactly what it paused, or a *successful* install silently
+# leaves an unrelated machine's renewals stopped forever. A failed install
+# deliberately restores nothing -- that is the contract, not an oversight.
 if (
-    GLOBAL_CERTBOT_TIMER_STATE="$cert_ownership_tmp/certbot.timer.state"
-    ACME_DIR="$cert_ownership_tmp"
-    timer_enabled=disabled
-    timer_active=inactive
-    global_certbot_timer_state_is_safe() { return 0; }
+    KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=0
+    GLOBAL_CERTBOT_TIMER_PAUSED_ACTIVE=""
+    timer_active=active
+    global_certbot_timer_exists() { return 0; }
     systemctl() {
         case "${1:-}" in
             stop) timer_active=inactive ;;
             start) timer_active=active ;;
-            enable) timer_enabled=enabled ;;
-            disable) timer_enabled=disabled ;;
-            is-enabled) printf '%s\n' "$timer_enabled"; [[ "$timer_enabled" == enabled ]] ;;
-            is-active) printf '%s\n' "$timer_active"; [[ "$timer_active" == active ]] ;;
-            *) return 1 ;;
+            is-active)
+                [[ "$*" == *--quiet* ]] || printf '%s\n' "$timer_active"
+                [[ "$timer_active" == active ]] ;;
+            *) return 0 ;;
         esac
     }
-    restore_persisted_global_certbot_timer \
-        && [[ "$timer_enabled" == enabled && "$timer_active" == active \
-           && ! -e "$GLOBAL_CERTBOT_TIMER_STATE" ]]
+    pause_global_certbot_timer >/dev/null 2>&1 \
+        && [[ "$timer_active" == inactive \
+           && "$GLOBAL_CERTBOT_TIMER_PAUSED_ACTIVE" == active ]] \
+        && restore_global_certbot_timer_after_success >/dev/null 2>&1 \
+        && [[ "$timer_active" == active ]]
 ); then
-    pass "released ownership restores and clears the original distro timer state"
+    pass "a successful install restarts the distro timer it paused"
 else
-    fail "debug/external/uninstall can strand the distro timer disabled"
+    fail "a successful install can leave the distro certbot.timer stopped"
 fi
-disable_global_fn="$(sed -n '/^disable_global_certbot_timer_for_owned_lineage()/,/^}/p' "$INSTALL")"
-persist_line="$(grep -nF 'persist_global_certbot_timer_state' <<<"$disable_global_fn" | head -1 | cut -d: -f1)"
-disable_line="$(grep -nF 'systemctl disable --now certbot.timer' <<<"$disable_global_fn" | head -1 | cut -d: -f1)"
-[[ -n "$persist_line" && -n "$disable_line" && "$persist_line" -lt "$disable_line" ]] \
-    && pass "first global-timer takeover persists restorable state before disable" \
-    || fail "global-timer takeover can lose its pre-disable state"
-printf '%s\n' original-state > "$cert_ownership_tmp/existing-timer-state"
 if (
-    GLOBAL_CERTBOT_TIMER_STATE="$cert_ownership_tmp/existing-timer-state"
-    global_certbot_timer_state_is_safe() { return 0; }
-    persist_global_certbot_timer_state \
-        && grep -qx original-state "$GLOBAL_CERTBOT_TIMER_STATE"
+    KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=1
+    GLOBAL_CERTBOT_TIMER_PAUSED_ACTIVE=active
+    systemctl() {
+        case "${1:-}" in
+            show) printf 'loaded\n' ;;
+            is-active) printf 'inactive\n'; return 3 ;;
+            is-enabled) printf 'disabled\n'; return 1 ;;
+            *) return 0 ;;
+        esac
+    }
+    restore_global_certbot_timer_after_success >/dev/null 2>&1
 ); then
-    pass "owned reinstall never overwrites the first global-timer takeover state"
+    pass "an owned-lineage takeover keeps the distro timer disabled"
 else
-    fail "owned reinstall replaced the only record of the original distro timer state"
+    fail "owned-lineage takeover restarted the timer it deliberately disabled"
 fi
 rm -rf -- "$cert_ownership_tmp"
 

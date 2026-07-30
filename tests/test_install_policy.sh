@@ -135,11 +135,9 @@ cfg_line="$(grep -n 'resolve_install_configuration' <<<"$full_fn" | head -1 | cu
 dns_line="$(grep -n '^[[:space:]]*verify_console_dns' <<<"$full_fn" | head -1 | cut -d: -f1)"
 cert_line="$(grep -n '^[[:space:]]*install_cert "\$BASE_DOMAIN"' <<<"$full_fn" | head -1 | cut -d: -f1)"
 lock_line="$(grep -n '^[[:space:]]*acquire_install_cert_lock' <<<"$full_fn" | head -1 | cut -d: -f1)"
-capture_line="$(grep -n '^[[:space:]]*capture_install_rollback' <<<"$full_fn" | head -1 | cut -d: -f1)"
-if [[ -z "$cfg_line" || -z "$dns_line" || -z "$cert_line" \
-   || -z "$lock_line" || -z "$capture_line" \
+if [[ -z "$cfg_line" || -z "$dns_line" || -z "$cert_line" || -z "$lock_line" \
    || "$cfg_line" -ge "$dns_line" || "$dns_line" -ge "$lock_line" \
-   || "$lock_line" -ge "$capture_line" || "$capture_line" -ge "$cert_line" ]]; then
+   || "$lock_line" -ge "$cert_line" ]]; then
     fail "configuration/DNS-gate/certificate issuance order is not fail-closed"
 fi
 grep -Fq '    start_services_with_cert_lock_handoff' <<<"$full_fn" \
@@ -284,12 +282,13 @@ printf '%s' "$at_fn" | grep -Fq '[[ -t 0 ]] && return 0' \
 grep -Eq '^[[:space:]]*attach_tty$' "$INSTALL" \
     || fail "main() does not call attach_tty (piped install stays non-interactive)"
 
-# Publication is staged and rollback-capable without any old-release teardown.
+# Publication is staged, and the installer does not undo a partial one: a failed
+# run leaves the host as it stands rather than restoring or quarantining it.
 grep -Eq '^stage_artifacts\(\)' "$INSTALL" || fail "release artifacts are not staged"
-grep -Eq '^capture_install_rollback\(\)' "$INSTALL" || fail "install rollback snapshot is missing"
-grep -Eq '^rollback_install\(\)' "$INSTALL" || fail "install rollback path is missing"
 grep -Eq '^[[:space:]]*stage_artifacts( \|\| return 1)?$' "$INSTALL" || fail "full_install does not stage artifacts"
-grep -Eq '^[[:space:]]*capture_install_rollback( \|\| return 1)?$' "$INSTALL" || fail "full_install does not capture rollback state"
+grep -Eq '^(capture_install_rollback|rollback_install|quarantine_managed_units_after_failed_rollback)\(\)' "$INSTALL" \
+    && fail "the install rollback subsystem came back"
+grep -q 'ROLLBACK_DIR' "$INSTALL" && fail "a rollback snapshot directory came back"
 grep -Eq '^remove_legacy_|^clean_previous_install\(\)' "$INSTALL" \
     && fail "installer still contains an old-release teardown helper"
 

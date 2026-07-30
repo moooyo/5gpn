@@ -1581,21 +1581,20 @@ if (
     [[ "$handoff_rc" == 7 && "$INSTALL_CERT_LOCK_HELD" == 1 \
        && "$(tr '\n' ' ' < "$handoff_log")" == "release start-failed acquire " ]]
 ); then
-    pass "failed service start reacquires the certificate lock before rollback"
+    pass "failed service start reacquires the certificate lock before unwinding"
 else
-    fail "failed service start can enter rollback without the certificate lock"
+    fail "failed service start can unwind without holding the certificate lock"
 fi
-rollback_lock_fn="$(sed -n '/^ensure_install_cert_lock_for_rollback()/,/^}/p' "$INSTALL")"
 exit_trap_fn="$(sed -n '/^install_transaction_exit()/,/^}/p' "$INSTALL")"
 error_trap_fn="$(sed -n '/^install_transaction_error()/,/^}/p' "$INSTALL")"
 finish_trap_fn="$(sed -n '/^finish_install_transaction()/,/^}/p' "$INSTALL")"
-if grep -Fq 'acquire_install_cert_lock' <<<"$rollback_lock_fn" \
-   && grep -Fq 'finish_install_transaction' <<<"$exit_trap_fn" \
+if grep -Fq 'finish_install_transaction' <<<"$exit_trap_fn" \
    && grep -Fq 'finish_install_transaction' <<<"$error_trap_fn" \
-   && grep -Fq 'ensure_install_cert_lock_for_rollback' <<<"$finish_trap_fn"; then
-    pass "transaction traps reacquire the certificate lock before rollback"
+   && grep -Fq 'release_install_cert_lock' <<<"$finish_trap_fn" \
+   && grep -Fq 'release_install_lock' <<<"$finish_trap_fn"; then
+    pass "transaction traps always release both locks on the way out"
 else
-    fail "a signal or error during service lock handoff can race rollback"
+    fail "a signal or error can leave an installer lock held"
 fi
 debug_fn="$(sed -n '/^issue_selfsigned_wildcard()/,/^}/p' "$INSTALL")"
 if grep -Fq '/etc/letsencrypt/live' <<<"$debug_fn"; then

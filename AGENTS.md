@@ -40,6 +40,16 @@ plans, design handoffs, and git history are context only.
 - `/etc/5gpn/mihomo/config.yaml` is fully operator-owned. Normal install,
   reinstall, and `configure` operations preserve a valid existing file. Only
   explicit reset may replace it, after `mihomo -t`, backup, and atomic rename.
+  The single exception is the `intercept-egress` listener and `MODULE-INTERCEPT`
+  proxy credentials, which are rendered from `intercept/config.json` and are
+  realigned to it in place; that rewrite touches those scalars' exact source
+  positions and no other byte, and refuses rather than guesses when it cannot
+  prove the edit is safe.
+- The installer does not roll back. A failure before publication leaves the host
+  untouched; a failure during publication leaves it partially installed and says
+  so. Do not reintroduce snapshot/restore/quarantine machinery — its failure
+  amplification (one unrecoverable unit disabling every healthy one) is why it
+  was removed. Keep fail-before-publish checks, the locks, and staging.
 - `console.<base>` is the public bootstrap/console SNI: the SPA and `/ios/` are
   public, while every `/api/*` request still requires the console bearer token.
   Do not introduce a separate bootstrap hostname. zashboard remains source-allowlisted.

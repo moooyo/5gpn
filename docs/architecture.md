@@ -498,6 +498,26 @@ egress terminator, and a `Proxies` group
 whose initial choice is `DIRECT`. After publication there is no generated or
 daemon-managed region.
 
+There is exactly one exception to that ownership, and it is narrow. The
+credentials on the `intercept-egress` listener and the `MODULE-INTERCEPT` proxy
+are not the operator's to hold: `/etc/5gpn/intercept/config.json` is the truth
+source that renders them, and the reserved blocks carrying them already belong
+to the interception manager. When a run reseeds that document, a preserved YAML
+keeps the previous pair and the routing check fails closed with
+`credential-mismatch`, aborting publication on a host that is otherwise
+healthy. An install therefore realigns those four scalars against the truth
+source before preserving the file.
+
+The alignment rewrites the exact source positions of those scalars and nothing
+else — no re-serialization, so comments, quoting, key order, and every unrelated
+byte survive. It refuses rather than guesses whenever it cannot prove the edit
+is safe: a non-plain scalar, a parser mark that does not hold the value it
+claims, or a credential outside the rendered alphabet all abort the install. An
+already-aligned file is detected and left untouched, and a legacy config with no
+interception blocks is simply skipped — whether such a config is acceptable is
+the routing check's decision, not the alignment's. The result is validated with
+`mihomo -t` and published by atomic rename like any other candidate.
+
 The seed also sets the top-level `ipv6: false`, because mihomo's own default for
 that key is `true` and an IPv4-only steering gateway must not resolve or dial
 IPv6. This is defence in depth for the paths that do not pass through the
@@ -1032,24 +1052,21 @@ lock. Install/configure/uninstall also hold an outer installer transaction lock.
 The public timer and Bot helper acquire that installer gate non-blockingly before
 the certificate lock, so they cannot enter the sidecar certificate-lock handoff;
 the required sidecar certificate oneshot takes only the certificate lock.
-Before inspecting Certbot state, the installer transaction stops the distro
+Before inspecting Certbot state, the installer stops the distro
 `certbot.timer` and fails if `certbot.service` is already active. An owned 5gpn
 lineage may keep that unscoped timer disabled only when no unrelated lineage
 depends on it; otherwise installation fails closed. A read-only reused lineage
-keeps external renewal ownership, so the transaction restores the distro timer
-after publication. The first owned takeover persists the distro unit's exact
-existence, enablement, and activity in a root-only state file and later owned
-reinstalls never overwrite it. Switching to debug/external ownership, normal
-uninstall, and decommission restore and clear that saved state. Rollback always
-restores the current transaction's exact prior enabled/active state. After an
+keeps external renewal ownership, so a successful run restarts the distro timer
+it paused. That pause/restart pairing is in-memory and success-path only: a run
+that fails partway leaves the distro timer stopped, and uninstall does not
+restore it either. Reviving it is then an operator step
+(`systemctl enable --now certbot.timer`), which matters because that timer may
+renew lineages having nothing to do with 5gpn. After an
 installer has published and validated
-all certificate state, it briefly releases that lock while systemd starts the
-sidecar's required certificate oneshot, then reacquires it before final endpoint
-verification or rollback. This bounded handoff prevents the oneshot from
-deadlocking against its parent installer without allowing a rollback to race a
-renewal. Installer rollback restores the exact prior
-live/archive/renewal state and the timer's enabled/active state after a failed
-mode change; it never consumes an unscoped or partial Certbot lineage.
+all certificate state, it briefly releases the certificate lock while systemd
+starts the sidecar's required certificate oneshot, then reacquires it before
+final endpoint verification. This bounded handoff prevents the oneshot from
+deadlocking against its parent installer.
 
 The deploy hook verifies that the renewed lineage matches `DNS_BASE_DOMAIN`,
 updates only the three role directories, and re-signs the iOS profile. It never
@@ -1105,8 +1122,8 @@ This source behavior is not deployable through the public beta selector until
 a new beta prerelease containing it is published. Release documentation and
 integration results must distinguish the repository revision under test from
 the latest published prerelease. A completed stable-to-beta upgrade establishes
-no direct beta-to-stable downgrade contract; restoration uses the failed-install
-rollback or an operator-created pre-upgrade snapshot.
+no direct beta-to-stable downgrade contract; restoration uses an
+operator-created pre-upgrade snapshot.
 
 An install or reinstall is staged before it mutates the working deployment:
 
@@ -1117,19 +1134,33 @@ An install or reinstall is staged before it mutates the working deployment:
 4. take any required backups;
 5. atomically publish files and units, then restart and probe services.
 
-A failed preflight, download, checksum, certificate, render, or validation must
-leave the previously runnable binaries, units, renewal hook, and operator
-configuration in place. Third-party tools are prebuilt and version-pinned; no
-compiler toolchain is installed on the gateway. Gum bootstrap failure is
-non-fatal and falls back to plain output.
+A failed preflight, download, checksum, certificate, render, or validation
+happens before step 5 and therefore leaves the previously runnable binaries,
+units, renewal hook, and operator configuration in place. Third-party tools are
+prebuilt and version-pinned; no compiler toolchain is installed on the gateway.
+Gum bootstrap failure is non-fatal and falls back to plain output.
 
-Rollback records whether each beta-only interception CA and state root was
-absent before mutation. On failure it removes a root created by the transaction
-only after validating its canonical fixed path and ownership marker, or restores
-the exact owned prior tree. A `gpn-intercept` service user or group created by
-the same failed transaction is removed only while it still has the expected
-isolated shape; pre-existing accounts are retained. Ownership validation must
-fail before either path is claimed or deleted.
+**The installer does not roll back.** Once publication has begun there is no
+compensating action: no snapshot is captured, nothing is restored, and no
+service is quarantined. A failure during step 5 leaves the host partially
+installed, and the run says so explicitly alongside the phase it died in. The
+operator reruns the installer or repairs the host by hand.
+
+This is a deliberate trade. The previous transaction subsystem restored and
+verified services on failure, but any single unit it could not put back
+escalated into disabling *every* project unit — including ones it had already
+restored and probed successfully — which turned a partial failure into a
+gateway that was fully down and would not come back at reboot. Removing the
+subsystem removes that failure amplification along with roughly 1300 lines of
+capture/restore/quarantine machinery. What remains is fail-before-publish: every
+preflight, digest, ownership, and `mihomo -t` check still runs, and still
+refuses ahead of step 5.
+
+The unwind path is correspondingly small. On any exit the installer reports the
+failing phase exactly once, drops its artifact staging directory, and releases
+the certificate and install locks; signals are ignored while it does so, so a
+disconnect cannot strand a lock. Locks and staging are concurrency and
+validation, not recovery, and they stay.
 
 Replacement of the current `5gpn-dns`, `5gpn-intercept`, mihomo, and
 certificate-renewal service/timer units is not gated on provenance. These fixed
@@ -1143,15 +1174,12 @@ leaves drop-ins in place and systemd keeps applying them, which is the supported
 way to override anything here. Stop-and-disable failure still blocks deletion of
 that unit file.
 
-The pre-publication snapshot records each managed unit's exact enablement and
-activity. A unit left `failed` by an aborted earlier install is a settled state,
-not a transition: it is snapshotted like an inactive one, and rollback stops it
-either way. The installer also clears its own units' failure records immediately
-before that snapshot, so a oneshot that failed mid-transaction cannot wedge
-every later retry on a state the installer itself produced. `certbot.timer` is
-distro-owned and its failure may belong to an unrelated lineage, so that record
-is left exactly as found. Only genuinely in-flight activity — activating,
-deactivating, reloading — aborts the snapshot.
+A systemd template such as `5gpn-journal@.service` is a definition, not a unit:
+with no instance there is nothing to start, stop, enable, or report on, and
+`systemctl` answers its status queries with an empty string. Any code path that
+treats one like an ordinary unit reads "broken" off a name that is working as
+designed, so uninstall deletes a template's unit file without gating on a
+stop-and-disable it can never pass.
 
 The same rule governs the other fixed 5gpn paths — `/opt/5gpn`, `/etc/5gpn`, the
 state root, the management launcher, the polkit rule, the Certbot deploy hook,
@@ -1160,11 +1188,8 @@ recursive removal still re-verifies it, but *claiming* one is self-healing: an
 absent marker, one written by an older release, or one whose value has since
 changed all resolve to republishing the current marker and continuing. A marker
 names its owner, not its revision. Project roots are claimed as the first action
-of both install and uninstall, the interception state root is claimed before the
-rollback snapshot reads it — systemd creates that root from
-`StateDirectory=5gpn-intercept` without a marker, so the snapshot must claim it
-rather than refuse it — and the static trees and interception state root are
-claimed immediately before removal, so no check is ever reached with a stale
+of both install and uninstall, and the static trees and interception state root
+are claimed immediately before removal, so no check is ever reached with a stale
 marker. These ownership values therefore carry no revision suffix.
 
 Certificate material is the exception and keeps strict ownership: the

@@ -87,7 +87,9 @@ CERTBOT_OWNERSHIP_FILE="${DNS_CERT_DIR}/.certbot-ownership"
 CERT_ROLE_MARKER=".5gpn-cert-role-owned"
 CERT_ROLE_VALUE_PREFIX="5gpn-cert-role-v1"
 ACME_DIR="/etc/5gpn/acme"                # root-only Cloudflare API-token credentials dir
-GLOBAL_CERTBOT_TIMER_STATE="${ACME_DIR}/certbot.timer.state"
+# Activity of the distro certbot.timer at the moment this run paused it, so the
+# success path can put it back. Empty means this run never paused it.
+GLOBAL_CERTBOT_TIMER_PAUSED_ACTIVE=""
 LE_ROOT="/etc/letsencrypt"
 LE_LIVE_ROOT="${LE_ROOT}/live"
 LE_ARCHIVE_ROOT="${LE_ROOT}/archive"
@@ -114,16 +116,9 @@ INSTALL_CERT_LOCK_HELD=0
 # rollback and after non-owning certificate flows. Owned 5gpn lineages set this
 # flag so the unscoped distro timer stays disabled after commit.
 KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=0
-RELEASE_PERSISTED_GLOBAL_CERTBOT_TIMER=0
 DECOMMISSION_PRESERVE_ACME=0
 INTERCEPT_ROUTING_READY=0
 INTERCEPT_ROUTING_REASON="not-checked"
-CREATED_SERVICE_ACCOUNT_USERS=()
-CREATED_SERVICE_ACCOUNT_GROUPS=()
-CREATED_SERVICE_ACCOUNT_UIDS=()
-CREATED_SERVICE_ACCOUNT_GIDS=()
-CREATED_SERVICE_ACCOUNT_USER_FLAGS=()
-CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=()
 DNS_WEB_DIR_DEFAULT="/opt/5gpn/web"         # resolved from dns.env after cfg_get is defined
 # DNS_ZASH_DIR (zashboard SPA dist, config.go's ZashDir) is resolved just below
 # cfg_get()'s definition -- NOT here: the daemon reads DNS_ZASH_DIR out of dns.env,
@@ -2371,14 +2366,6 @@ install_service_account() {
     local created_user_flag=0 created_group_flag=0 created_uid_value="" created_gid_value="" result=0
     ensure_service_account "$user" "$group" created_user_flag created_group_flag \
         created_uid_value created_gid_value || result=$?
-    if [[ "$created_user_flag" == 1 || "$created_group_flag" == 1 ]]; then
-        CREATED_SERVICE_ACCOUNT_USERS+=("$user")
-        CREATED_SERVICE_ACCOUNT_GROUPS+=("$group")
-        CREATED_SERVICE_ACCOUNT_UIDS+=("$created_uid_value")
-        CREATED_SERVICE_ACCOUNT_GIDS+=("$created_gid_value")
-        CREATED_SERVICE_ACCOUNT_USER_FLAGS+=("$created_user_flag")
-        CREATED_SERVICE_ACCOUNT_GROUP_FLAGS+=("$created_group_flag")
-    fi
     return "$result"
 }
 
@@ -2496,58 +2483,8 @@ install_deps() {
 # the live runtime. Nothing below publishes to the working installation until
 # every digest and archive has passed validation.
 ARTIFACT_STAGE=""
-ROLLBACK_DIR=""
-INSTALL_TRANSACTION_ACTIVE=0
-ROLLBACK_SNAPSHOT_READY=0
-ROLLBACK_IN_PROGRESS=0
-PRESERVE_ROLLBACK_STAGE=0
-PRETRANSACTION_ROOTS_ACTIVE=0
-BASE_ROOT_WAS_ABSENT=0
-CONF_ROOT_WAS_ABSENT=0
-STATE_ROOT_WAS_ABSENT=0
-POSTCOMMIT_TIMER_RESTORE_PENDING=0
 INSTALL_PHASE="initialization"
 INSTALL_FAILURE_REPORTED=0
-
-# Unit files are snapshotted only for project-owned units. Runtime state also
-# includes the distro Certbot timer because an owned-lineage install may
-# deliberately coordinate it, but the installer never replaces its unit file.
-TRANSACTION_UNIT_FILES=(
-    5gpn-dns.service
-    5gpn-intercept.service
-    5gpn-intercept-cert.service
-    5gpn-intercept-cert.path
-    5gpn-intercept-cert.timer
-    5gpn-intercept-runtime.path
-    mihomo.service
-    5gpn-journal@.service
-    5gpn-certbot-renew.service
-    5gpn-certbot-renew.timer
-)
-TRANSACTION_STATE_UNITS=(
-    mihomo.service
-    5gpn-intercept.service
-    5gpn-dns.service
-    5gpn-intercept-cert.path
-    5gpn-intercept-cert.timer
-    5gpn-intercept-runtime.path
-    5gpn-intercept-cert.service
-    5gpn-certbot-renew.service
-    5gpn-certbot-renew.timer
-    certbot.timer
-)
-TRANSACTION_STOP_UNITS=(
-    certbot.timer
-    5gpn-certbot-renew.timer
-    5gpn-intercept-cert.timer
-    5gpn-intercept-cert.path
-    5gpn-intercept-runtime.path
-    5gpn-certbot-renew.service
-    5gpn-intercept-cert.service
-    5gpn-dns.service
-    5gpn-intercept.service
-    mihomo.service
-)
 
 sha256_of() { sha256sum "$1" | awk '{print tolower($1)}'; }
 
@@ -3059,856 +2996,12 @@ release_install_cert_lock() {
     [[ "$rc" == 0 ]] || { err "The certificate lock descriptor was invalid during release."; return 1; }
 }
 
-record_project_root_prestate() {
-    BASE_ROOT_WAS_ABSENT=0
-    CONF_ROOT_WAS_ABSENT=0
-    STATE_ROOT_WAS_ABSENT=0
-    POSTCOMMIT_TIMER_RESTORE_PENDING=0
-    [[ -e "$BASE_DIR" || -L "$BASE_DIR" ]] || BASE_ROOT_WAS_ABSENT=1
-    [[ -e "$CONF_DIR" || -L "$CONF_DIR" ]] || CONF_ROOT_WAS_ABSENT=1
-    [[ -e "$STATE_DIR" || -L "$STATE_DIR" ]] || STATE_ROOT_WAS_ABSENT=1
-    PRETRANSACTION_ROOTS_ACTIVE=1
-}
-
-cleanup_pretransaction_project_roots() {
-    local failed_name="$1"
-    local -n failed_ref="$failed_name"
-    [[ "$PRETRANSACTION_ROOTS_ACTIVE" == 1 ]] || return 0
-    if [[ "$STATE_ROOT_WAS_ABSENT" == 1 && ( -e "$STATE_DIR" || -L "$STATE_DIR" ) ]]; then
-        remove_fixed_owned_dir "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE" \
-            || failed_ref=1
-    fi
-    if [[ "$CONF_ROOT_WAS_ABSENT" == 1 && ( -e "$CONF_DIR" || -L "$CONF_DIR" ) ]]; then
-        remove_fixed_owned_dir "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
-            || failed_ref=1
-    fi
-    if [[ "$BASE_ROOT_WAS_ABSENT" == 1 && ( -e "$BASE_DIR" || -L "$BASE_DIR" ) ]]; then
-        remove_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
-            || failed_ref=1
-    fi
-    [[ "$failed_ref" != 0 ]] || PRETRANSACTION_ROOTS_ACTIVE=0
-}
-
-capture_optional_owned_root() {
-    local dir="$1" marker="$2" value="$3" name="$4"
-    if [[ ! -e "$dir" && ! -L "$dir" ]]; then
-        : > "$ROLLBACK_DIR/${name}.absent"
-        return 0
-    fi
-    owned_root_canonical "$dir" "$marker" "$value" >/dev/null \
-        || { err "Cannot capture unowned rollback root: $dir"; return 1; }
-    cp -a -- "$dir" "$ROLLBACK_DIR/$name"
-}
-
-# The interception state root is an ordinary 5gpn artifact root at a fixed path,
-# and systemd creates it from StateDirectory=5gpn-intercept the first time the
-# sidecar starts. A host therefore reaches this snapshot with an unmarked state
-# root through nothing but normal operation, and refusing it here left no way
-# forward: the adopting claim that would have healed it runs a phase later.
-# Claim it first, so the capture stays a snapshot rather than a gate.
-#
-# Only an existing root is claimed. An absent one still records .absent, so a
-# failed transaction removes the root publication created rather than leaving an
-# empty directory behind. The CA root captured beside it holds key material and
-# keeps its strict capture.
-capture_intercept_state_root() {
-    if [[ -e "$INTERCEPT_STATE_DIR" || -L "$INTERCEPT_STATE_DIR" ]]; then
-        claim_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" \
-            "$INTERCEPT_STATE_MARKER_VALUE" 1 || return 1
-    fi
-    capture_optional_owned_root "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" \
-        "$INTERCEPT_STATE_MARKER_VALUE" intercept-state
-}
-
-# A oneshot that failed during an earlier aborted install stays `failed` for as
-# long as the host runs: nothing else clears that record, so every later retry
-# would abort at the state gate below on a state the installer itself produced.
-# The record is bookkeeping, not activity — clearing it neither starts nor stops
-# anything. certbot.timer is distro-owned and its failure may belong to an
-# unrelated lineage, so that record is left exactly as found.
-clear_managed_unit_failure_records() {
-    local unit
-    for unit in "${TRANSACTION_STATE_UNITS[@]}"; do
-        [[ "$unit" != certbot.timer ]] || continue
-        systemctl reset-failed "$unit" >/dev/null 2>&1 || true
-    done
-}
-
-capture_managed_unit_states() {
-    local unit enabled_state active_state fragment_path load_state enabled_rc active_rc
-    install -d -m 0700 "$ROLLBACK_DIR/unit-state" || return 1
-    clear_managed_unit_failure_records
-    for unit in "${TRANSACTION_STATE_UNITS[@]}"; do
-        load_state="$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)"
-        [[ -n "$load_state" ]] \
-            || { err "Could not determine systemd load state for $unit."; return 1; }
-        if [[ -n "$load_state" && "$load_state" != not-found ]]; then
-            : > "$ROLLBACK_DIR/unit-state/${unit}.exists" || return 1
-        else
-            : > "$ROLLBACK_DIR/unit-state/${unit}.absent" || return 1
-        fi
-        if enabled_state="$(systemctl is-enabled "$unit" 2>/dev/null)"; then
-            enabled_rc=0
-        else
-            enabled_rc=$?
-        fi
-        if active_state="$(systemctl is-active "$unit" 2>/dev/null)"; then
-            active_rc=0
-        else
-            active_rc=$?
-        fi
-        fragment_path="$(systemctl show -p FragmentPath --value "$unit" 2>/dev/null || true)"
-        [[ "$enabled_state" != *$'\n'* && "$active_state" != *$'\n'* \
-           && "$fragment_path" != *$'\n'* ]] || return 1
-        case "${enabled_state:-not-found}" in
-            enabled|enabled-runtime|masked|masked-runtime|static|indirect|disabled|not-found) ;;
-            *) err "Unsupported systemd enablement state for $unit: ${enabled_state:-empty}"; return 1 ;;
-        esac
-        if [[ "$load_state" == not-found ]]; then
-            [[ "${enabled_state:-not-found}" == not-found \
-               && ( "${active_state:-unknown}" == inactive || "${active_state:-unknown}" == unknown ) ]] \
-                || { err "Inconsistent absent-unit state for $unit."; return 1; }
-        else
-            # `failed` is a settled terminal state, not a transition: it records
-            # exactly as much as `inactive` does (active_rc is non-zero either
-            # way, so restore stops the unit) and is the state an aborted
-            # earlier install leaves behind. Only genuinely in-flight states —
-            # activating, deactivating, reloading — cannot be snapshotted.
-            [[ "$enabled_state" != not-found \
-               && ( "$active_state" == active || "$active_state" == inactive \
-                  || "$active_state" == failed ) ]] \
-                || { err "Unsettled systemd state for $unit (${enabled_state:-empty}/${active_state:-empty}); retry once it finishes activating or deactivating."; return 1; }
-        fi
-        printf '%s\n' "${enabled_state:-not-found}" \
-            > "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" || return 1
-        printf '%s\n' "${active_state:-unknown}" \
-            > "$ROLLBACK_DIR/unit-state/${unit}.active-state" || return 1
-        printf '%s\n' "$fragment_path" \
-            > "$ROLLBACK_DIR/unit-state/${unit}.fragment-path" || return 1
-        if [[ "$enabled_rc" == 0 ]]; then
-            : > "$ROLLBACK_DIR/unit-state/${unit}.enabled" || return 1
-            # Keep the legacy path while older rollback tests and snapshots are
-            # still consumed by pre-release installers.
-            : > "$ROLLBACK_DIR/units/${unit}.enabled" || return 1
-        else
-            : > "$ROLLBACK_DIR/unit-state/${unit}.disabled" || return 1
-            : > "$ROLLBACK_DIR/units/${unit}.disabled" || return 1
-        fi
-        if [[ "$active_rc" == 0 ]]; then
-            : > "$ROLLBACK_DIR/unit-state/${unit}.active" || return 1
-            : > "$ROLLBACK_DIR/units/${unit}.active" || return 1
-        else
-            : > "$ROLLBACK_DIR/unit-state/${unit}.inactive" || return 1
-            : > "$ROLLBACK_DIR/units/${unit}.inactive" || return 1
-        fi
-    done
-}
-
-stop_units_for_install_snapshot() {
-    local unit
-    for unit in "${TRANSACTION_STOP_UNITS[@]}"; do
-        [[ -f "$ROLLBACK_DIR/unit-state/${unit}.exists" ]] || continue
-        systemctl stop "$unit" >/dev/null 2>&1 \
-            || { err "Could not stop $unit before the install snapshot."; return 1; }
-        ! systemctl is-active --quiet "$unit" 2>/dev/null \
-            || { err "$unit remained active before the install snapshot."; return 1; }
-    done
-    if systemctl is-active --quiet certbot.service 2>/dev/null; then
-        err "certbot.service is active after its timer was stopped; retry after that external renewal completes."
-        return 1
-    fi
-}
-
-snapshot_has_exactly_one_file() {
-    local first="$1" second="$2" count=0
-    [[ -f "$first" && ! -L "$first" ]] && count=$((count + 1))
-    [[ -f "$second" && ! -L "$second" ]] && count=$((count + 1))
-    [[ "$count" == 1 ]]
-}
-
-snapshot_has_dir_or_absent() {
-    local dir="$1" absent="$2" count=0
-    [[ -d "$dir" && ! -L "$dir" ]] && count=$((count + 1))
-    [[ -f "$absent" && ! -L "$absent" ]] && count=$((count + 1))
-    [[ "$count" == 1 ]]
-}
-
-snapshot_has_exactly_one_public_tree_state() {
-    local owned="$1" empty="$2" absent="$3" count=0
-    [[ -d "$owned" && ! -L "$owned" ]] && count=$((count + 1))
-    [[ -d "$empty" && ! -L "$empty" ]] && count=$((count + 1))
-    [[ -f "$absent" && ! -L "$absent" ]] && count=$((count + 1))
-    [[ "$count" == 1 ]]
-}
-
-empty_unowned_public_tree_is_safe() {
-    local dir="$1" marker="$2" entry
-    root_owned_nonwritable_directory_is_safe "$dir" || return 1
-    [[ ! -e "$dir/$marker" && ! -L "$dir/$marker" ]] || return 1
-    entry="$(find "$dir" -mindepth 1 -print -quit 2>/dev/null)" || return 1
-    [[ -z "$entry" ]]
-}
-
-validate_install_rollback_snapshot() {
-    local unit b seen=" "
-    [[ -d "$ROLLBACK_DIR" && ! -L "$ROLLBACK_DIR" \
-       && -f "$ROLLBACK_DIR/.complete" && ! -L "$ROLLBACK_DIR/.complete" \
-       && "$(cat "$ROLLBACK_DIR/.complete" 2>/dev/null || true)" == 5gpn-install-rollback-v2 \
-       && -d "$ROLLBACK_DIR/units" && ! -L "$ROLLBACK_DIR/units" \
-       && -d "$ROLLBACK_DIR/unit-state" && ! -L "$ROLLBACK_DIR/unit-state" \
-       && -d "$ROLLBACK_DIR/polkit" && ! -L "$ROLLBACK_DIR/polkit" \
-       && -d "$ROLLBACK_DIR/renewal-conf" && ! -L "$ROLLBACK_DIR/renewal-conf" \
-       && -f "$ROLLBACK_DIR/renewal-names" && ! -L "$ROLLBACK_DIR/renewal-names" ]] \
-        || return 1
-    snapshot_has_dir_or_absent "$ROLLBACK_DIR/base" "$ROLLBACK_DIR/base.absent" || return 1
-    snapshot_has_dir_or_absent "$ROLLBACK_DIR/conf" "$ROLLBACK_DIR/conf.absent" || return 1
-    snapshot_has_exactly_one_file "$ROLLBACK_DIR/state.present" "$ROLLBACK_DIR/state.absent" || return 1
-    [[ ! -d "$ROLLBACK_DIR/base" ]] \
-        || verify_ownership_marker "$ROLLBACK_DIR/base" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" || return 1
-    [[ ! -d "$ROLLBACK_DIR/conf" ]] \
-        || verify_ownership_marker "$ROLLBACK_DIR/conf" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" || return 1
-    snapshot_has_exactly_one_file "$ROLLBACK_DIR/launcher" "$ROLLBACK_DIR/launcher.absent" || return 1
-    snapshot_has_exactly_one_file "$ROLLBACK_DIR/polkit/50-5gpn.rules" \
-        "$ROLLBACK_DIR/polkit/50-5gpn.rules.absent" || return 1
-    snapshot_has_exactly_one_file "$ROLLBACK_DIR/renew-hook" "$ROLLBACK_DIR/renew-hook.absent" || return 1
-    snapshot_has_dir_or_absent "$ROLLBACK_DIR/intercept-ca" "$ROLLBACK_DIR/intercept-ca.absent" || return 1
-    snapshot_has_dir_or_absent "$ROLLBACK_DIR/intercept-state" "$ROLLBACK_DIR/intercept-state.absent" || return 1
-    [[ ! -d "$ROLLBACK_DIR/intercept-ca" ]] \
-        || verify_ownership_marker "$ROLLBACK_DIR/intercept-ca" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" || return 1
-    [[ ! -d "$ROLLBACK_DIR/intercept-state" ]] \
-        || verify_ownership_marker "$ROLLBACK_DIR/intercept-state" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" || return 1
-    for unit in "${TRANSACTION_UNIT_FILES[@]}"; do
-        snapshot_has_exactly_one_file "$ROLLBACK_DIR/units/$unit" "$ROLLBACK_DIR/units/$unit.absent" || return 1
-    done
-    for unit in "${TRANSACTION_STATE_UNITS[@]}"; do
-        snapshot_has_exactly_one_file "$ROLLBACK_DIR/unit-state/${unit}.exists" \
-            "$ROLLBACK_DIR/unit-state/${unit}.absent" || return 1
-        [[ -f "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" \
-           && ! -L "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" \
-           && -f "$ROLLBACK_DIR/unit-state/${unit}.active-state" \
-           && ! -L "$ROLLBACK_DIR/unit-state/${unit}.active-state" \
-           && -f "$ROLLBACK_DIR/unit-state/${unit}.fragment-path" \
-           && ! -L "$ROLLBACK_DIR/unit-state/${unit}.fragment-path" ]] || return 1
-        if [[ -f "$ROLLBACK_DIR/unit-state/${unit}.exists" ]]; then
-            grep -Eq '^(enabled|enabled-runtime|masked|masked-runtime|static|indirect|disabled)$' \
-                "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" || return 1
-            grep -Eq '^(active|inactive|failed)$' "$ROLLBACK_DIR/unit-state/${unit}.active-state" || return 1
-        else
-            grep -Eq '^not-found$' "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" || return 1
-            grep -Eq '^(inactive|unknown)$' "$ROLLBACK_DIR/unit-state/${unit}.active-state" || return 1
-        fi
-        snapshot_has_exactly_one_file "$ROLLBACK_DIR/unit-state/${unit}.enabled" \
-            "$ROLLBACK_DIR/unit-state/${unit}.disabled" || return 1
-        snapshot_has_exactly_one_file "$ROLLBACK_DIR/unit-state/${unit}.active" \
-            "$ROLLBACK_DIR/unit-state/${unit}.inactive" || return 1
-    done
-    while IFS= read -r b; do
-        is_valid_domain "$b" || return 1
-        case "$seen" in *" $b "*) return 1 ;; *) seen+="$b " ;; esac
-        snapshot_has_exactly_one_file "$ROLLBACK_DIR/renewal-conf/${b}.conf" \
-            "$ROLLBACK_DIR/renewal-conf/${b}.absent" || return 1
-        snapshot_has_exactly_one_file "$ROLLBACK_DIR/renewal-conf/${b}.lineage-present" \
-            "$ROLLBACK_DIR/renewal-conf/${b}.lineage-absent" || return 1
-        if [[ -f "$ROLLBACK_DIR/renewal-conf/${b}.lineage-present" ]]; then
-            [[ -d "$ROLLBACK_DIR/le-live/${b}" && ! -L "$ROLLBACK_DIR/le-live/${b}" \
-               && -d "$ROLLBACK_DIR/le-archive/${b}" && ! -L "$ROLLBACK_DIR/le-archive/${b}" \
-               && -s "$ROLLBACK_DIR/lineage-leaf/${b}/fullchain.pem" \
-               && -f "$ROLLBACK_DIR/lineage-leaf/${b}/fullchain.pem" \
-               && ! -L "$ROLLBACK_DIR/lineage-leaf/${b}/fullchain.pem" \
-               && -s "$ROLLBACK_DIR/lineage-leaf/${b}/privkey.pem" \
-               && -f "$ROLLBACK_DIR/lineage-leaf/${b}/privkey.pem" \
-               && ! -L "$ROLLBACK_DIR/lineage-leaf/${b}/privkey.pem" ]] || return 1
-        fi
-    done < "$ROLLBACK_DIR/renewal-names"
-    if [[ "$DNS_WEB_DIR" != "$BASE_DIR"/* ]]; then
-        snapshot_has_exactly_one_public_tree_state "$ROLLBACK_DIR/external-web" \
-            "$ROLLBACK_DIR/external-web.empty-unowned" "$ROLLBACK_DIR/external-web.absent" || return 1
-        [[ ! -d "$ROLLBACK_DIR/external-web" ]] \
-            || verify_ownership_marker "$ROLLBACK_DIR/external-web" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE" || return 1
-        if [[ -d "$ROLLBACK_DIR/external-web.empty-unowned" ]]; then
-            empty_unowned_public_tree_is_safe "$ROLLBACK_DIR/external-web.empty-unowned" \
-                "$WEB_OWNERSHIP_MARKER" || return 1
-        fi
-    fi
-    if [[ "$DNS_ZASH_DIR" != "$BASE_DIR"/* ]]; then
-        snapshot_has_exactly_one_public_tree_state "$ROLLBACK_DIR/external-zash" \
-            "$ROLLBACK_DIR/external-zash.empty-unowned" "$ROLLBACK_DIR/external-zash.absent" || return 1
-        [[ ! -d "$ROLLBACK_DIR/external-zash" ]] \
-            || verify_ownership_marker "$ROLLBACK_DIR/external-zash" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" || return 1
-        if [[ -d "$ROLLBACK_DIR/external-zash.empty-unowned" ]]; then
-            empty_unowned_public_tree_is_safe "$ROLLBACK_DIR/external-zash.empty-unowned" \
-                "$ZASH_OWNERSHIP_MARKER" || return 1
-        fi
-    fi
-}
-
-capture_install_rollback() {
-    ROLLBACK_DIR="$ARTIFACT_STAGE/rollback"
-    local unit
-    info "Capturing the pre-install rollback snapshot before live publication..."
-    install -d -m 0700 "$ROLLBACK_DIR" "$ROLLBACK_DIR/units" \
-        || { err "Could not create the rollback snapshot directories."; return 1; }
-    for unit in "${TRANSACTION_UNIT_FILES[@]}"; do
-        if [[ -e "/etc/systemd/system/$unit" || -L "/etc/systemd/system/$unit" ]]; then
-            [[ -f "/etc/systemd/system/$unit" && ! -L "/etc/systemd/system/$unit" ]] \
-                || { err "Unsafe managed unit path before rollback capture: /etc/systemd/system/$unit"; return 1; }
-            cp -p -- "/etc/systemd/system/$unit" "$ROLLBACK_DIR/units/$unit" \
-                || { err "Could not snapshot the managed unit file: $unit"; return 1; }
-        else
-            : > "$ROLLBACK_DIR/units/$unit.absent" \
-                || { err "Could not record the absent managed unit: $unit"; return 1; }
-        fi
-    done
-    capture_managed_unit_states \
-        || { err "Could not capture the complete systemd state for the rollback snapshot."; return 1; }
-    INSTALL_TRANSACTION_ACTIVE=1
-    ROLLBACK_SNAPSHOT_READY=0
-    stop_units_for_install_snapshot || return 1
-    if [[ -s "$CONF_DIR/dns.env" ]]; then
-        validate_dns_env_schema \
-            || { err "dns.env changed before the transaction fence; refusing a stale snapshot."; return 1; }
-    fi
-    mihomo_config_matches_install_config \
-        || { err "The operator-owned mihomo config changed before the transaction fence; refusing a stale snapshot."; return 1; }
-
-    # Daemons that can rewrite operator state are now stopped. Snapshot live
-    # files only after this fence so a rollback never overwrites a later daemon
-    # write that raced the copy.
-    if [[ "$BASE_ROOT_WAS_ABSENT" == 1 ]]; then
-        : > "$ROLLBACK_DIR/base.absent" || return 1
-    else
-        cp -a -- "$BASE_DIR" "$ROLLBACK_DIR/base" || return 1
-    fi
-    if [[ "$CONF_ROOT_WAS_ABSENT" == 1 ]]; then
-        : > "$ROLLBACK_DIR/conf.absent" || return 1
-    else
-        cp -a -- "$CONF_DIR" "$ROLLBACK_DIR/conf" || return 1
-    fi
-    if [[ "$STATE_ROOT_WAS_ABSENT" == 1 ]]; then
-        : > "$ROLLBACK_DIR/state.absent" || return 1
-    else
-        : > "$ROLLBACK_DIR/state.present" || return 1
-    fi
-    if [[ -e /usr/local/bin/5gpn || -L /usr/local/bin/5gpn ]]; then
-        launcher_owned \
-            || { err "Refusing to snapshot an unowned /usr/local/bin/5gpn launcher."; return 1; }
-        cp -p -- /usr/local/bin/5gpn "$ROLLBACK_DIR/launcher" || return 1
-    else
-        : > "$ROLLBACK_DIR/launcher.absent" || return 1
-    fi
-    capture_optional_owned_root "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" \
-        "$INTERCEPT_CA_MARKER_VALUE" intercept-ca || return 1
-    capture_intercept_state_root || return 1
-    install -d -m 0700 "$ROLLBACK_DIR/polkit" || return 1
-    if [[ -e "$POLKIT_RULE_PATH" || -L "$POLKIT_RULE_PATH" ]]; then
-        polkit_rule_owned_by_5gpn \
-            || { err "Unsafe polkit rule appeared before rollback capture: $POLKIT_RULE_PATH"; return 1; }
-        cp -p -- "$POLKIT_RULE_PATH" "$ROLLBACK_DIR/polkit/50-5gpn.rules" || return 1
-    else
-        : > "$ROLLBACK_DIR/polkit/50-5gpn.rules.absent" || return 1
-    fi
-    if [[ -e /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh \
-       || -L /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh ]]; then
-        renew_hook_owned \
-            || { err "Unsafe Certbot deploy hook before rollback capture."; return 1; }
-        cp -p -- /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh "$ROLLBACK_DIR/renew-hook" || return 1
-    else
-        : > "$ROLLBACK_DIR/renew-hook.absent" || return 1
-    fi
-    # A certificate-method switch rewrites this scoped Certbot renewal file.
-    # Snapshot both the currently persisted base and the newly selected base so
-    # a later publication failure cannot leave dns.env and the authenticator in
-    # different modes. No other host lineage is read or touched.
-    install -d -m 0700 "$ROLLBACK_DIR/renewal-conf" || return 1
-    local old_base selected_base b seen="" conf_present live_present archive_present present_count
-    old_base="$(cfg_get DNS_BASE_DOMAIN)" || return 1
-    selected_base="${BASE_DOMAIN:-}"
-    : > "$ROLLBACK_DIR/renewal-names" || return 1
-    for b in "$old_base" "$selected_base"; do
-        b="$(printf '%s' "${b%.}" | tr '[:upper:]' '[:lower:]')" || return 1
-        is_valid_domain "$b" || continue
-        case " $seen " in *" $b "*) continue ;; esac
-        seen+=" $b"
-        printf '%s\n' "$b" >> "$ROLLBACK_DIR/renewal-names" || return 1
-        conf_present=0; live_present=0; archive_present=0
-        [[ -e "/etc/letsencrypt/renewal/${b}.conf" || -L "/etc/letsencrypt/renewal/${b}.conf" ]] && conf_present=1
-        [[ -e "/etc/letsencrypt/live/${b}" || -L "/etc/letsencrypt/live/${b}" ]] && live_present=1
-        [[ -e "/etc/letsencrypt/archive/${b}" || -L "/etc/letsencrypt/archive/${b}" ]] && archive_present=1
-        present_count=$((conf_present + live_present + archive_present))
-        [[ "$present_count" == 0 || "$present_count" == 3 ]] \
-            || { err "Certbot lineage ${b} is partial (renewal/live/archive must be all present or all absent); refusing replacement."; return 1; }
-        if [[ -f "/etc/letsencrypt/renewal/${b}.conf" && ! -L "/etc/letsencrypt/renewal/${b}.conf" ]]; then
-            certbot_renewal_conf_scoped "/etc/letsencrypt/renewal/${b}.conf" "$b" \
-                || { err "Certbot renewal config for ${b} escapes its exact live/archive paths; refusing replacement."; return 1; }
-            cp -p -- "/etc/letsencrypt/renewal/${b}.conf" "$ROLLBACK_DIR/renewal-conf/${b}.conf" || return 1
-        elif [[ -e "/etc/letsencrypt/renewal/${b}.conf" || -L "/etc/letsencrypt/renewal/${b}.conf" ]]; then
-            err "Refusing unsafe Certbot renewal config path: /etc/letsencrypt/renewal/${b}.conf"
-            return 1
-        else
-            : > "$ROLLBACK_DIR/renewal-conf/${b}.absent" || return 1
-        fi
-        if [[ "$live_present" == 1 ]]; then
-            : > "$ROLLBACK_DIR/renewal-conf/${b}.lineage-present" || return 1
-            [[ -d "/etc/letsencrypt/live/${b}" && ! -L "/etc/letsencrypt/live/${b}" \
-               && -d "/etc/letsencrypt/archive/${b}" && ! -L "/etc/letsencrypt/archive/${b}" \
-               && -s "/etc/letsencrypt/live/${b}/fullchain.pem" \
-               && -s "/etc/letsencrypt/live/${b}/privkey.pem" ]] \
-                || { err "Existing Certbot lineage ${b} has an unsafe or incomplete layout; refusing transactional replacement."; return 1; }
-            install -d -m 0700 "$ROLLBACK_DIR/le-live" "$ROLLBACK_DIR/le-archive" "$ROLLBACK_DIR/lineage-leaf/${b}" || return 1
-            cp -a -- "/etc/letsencrypt/live/${b}" "$ROLLBACK_DIR/le-live/${b}" || return 1
-            cp -a -- "/etc/letsencrypt/archive/${b}" "$ROLLBACK_DIR/le-archive/${b}" || return 1
-            cp -L -- "/etc/letsencrypt/live/${b}/fullchain.pem" "$ROLLBACK_DIR/lineage-leaf/${b}/fullchain.pem" || return 1
-            cp -L -- "/etc/letsencrypt/live/${b}/privkey.pem" "$ROLLBACK_DIR/lineage-leaf/${b}/privkey.pem" || return 1
-        else
-            : > "$ROLLBACK_DIR/renewal-conf/${b}.lineage-absent" || return 1
-        fi
-    done
-    if [[ "$DNS_WEB_DIR" != "$BASE_DIR"/* ]]; then
-        if [[ -e "$DNS_WEB_DIR" || -L "$DNS_WEB_DIR" ]]; then
-            if verify_ownership_marker "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"; then
-                static_owned_tree_is_safe "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE" \
-                    || { err "Cannot capture unsafe external web root: $DNS_WEB_DIR"; return 1; }
-                cp -a -- "$DNS_WEB_DIR" "$ROLLBACK_DIR/external-web" || return 1
-            else
-                empty_unowned_public_tree_is_safe "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" \
-                    || { err "Cannot capture non-empty or unsafe unowned web root: $DNS_WEB_DIR"; return 1; }
-                cp -a -- "$DNS_WEB_DIR" "$ROLLBACK_DIR/external-web.empty-unowned" || return 1
-            fi
-        else
-            : > "$ROLLBACK_DIR/external-web.absent" || return 1
-        fi
-    fi
-    if [[ "$DNS_ZASH_DIR" != "$BASE_DIR"/* ]]; then
-        if [[ -e "$DNS_ZASH_DIR" || -L "$DNS_ZASH_DIR" ]]; then
-            if verify_ownership_marker "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE"; then
-                static_owned_tree_is_safe "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
-                    || { err "Cannot capture unsafe external zashboard root: $DNS_ZASH_DIR"; return 1; }
-                cp -a -- "$DNS_ZASH_DIR" "$ROLLBACK_DIR/external-zash" || return 1
-            else
-                empty_unowned_public_tree_is_safe "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" \
-                    || { err "Cannot capture non-empty or unsafe unowned zashboard root: $DNS_ZASH_DIR"; return 1; }
-                cp -a -- "$DNS_ZASH_DIR" "$ROLLBACK_DIR/external-zash.empty-unowned" || return 1
-            fi
-        else
-            : > "$ROLLBACK_DIR/external-zash.absent" || return 1
-        fi
-    fi
-    printf '%s\n' 5gpn-install-rollback-v2 > "$ROLLBACK_DIR/.complete" || return 1
-    validate_install_rollback_snapshot \
-        || { rm -f -- "$ROLLBACK_DIR/.complete" 2>/dev/null || true; err "Rollback snapshot completeness validation failed."; return 1; }
-    ROLLBACK_SNAPSHOT_READY=1
-    ok "Pre-install rollback snapshot captured and validated."
-}
-
-restore_optional_owned_root() {
-    local dir="$1" marker="$2" value="$3" name="$4" failed_name="$5"
-    local -n failed_ref="$failed_name"
-    [[ "$failed_ref" == 0 ]] || return 0
-    if [[ -e "$dir" || -L "$dir" ]]; then
-        if verify_ownership_marker "$dir" "$marker" "$value"; then
-            remove_fixed_owned_dir "$dir" "$marker" "$value" || failed_ref=1
-        else
-            warn "Could not restore $dir because its live path is no longer 5gpn-owned."
-            failed_ref=1
-        fi
-    fi
-    [[ "$failed_ref" == 0 ]] || return 0
-    if [[ -f "$ROLLBACK_DIR/${name}.absent" ]]; then
-        return 0
-    fi
-    [[ -d "$ROLLBACK_DIR/$name" ]] \
-        || { warn "Rollback snapshot for $dir is missing."; failed_ref=1; return 0; }
-    cp -a -- "$ROLLBACK_DIR/$name" "$dir" || failed_ref=1
-}
-
-restore_config_root_without_intercept_ca() {
-    local failed_name="$1" source
-    local -n failed_ref="$failed_name"
-    if ! verify_ownership_marker "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"; then
-        warn "Could not restore the config root because its live ownership marker changed."
-        failed_ref=1
-        return 0
-    fi
-    clear_owned_scope "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
-        "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" intercept-ca || { failed_ref=1; return 0; }
-    (
-        shopt -s dotglob nullglob
-        for source in "$ROLLBACK_DIR/conf"/*; do
-            [[ "$(basename -- "$source")" == intercept-ca ]] && continue
-            cp -a -- "$source" "$CONF_DIR/" || exit 1
-        done
-    ) || failed_ref=1
-    [[ "$failed_ref" != 0 ]] \
-        || chown --reference="$ROLLBACK_DIR/conf" "$CONF_DIR" || failed_ref=1
-    [[ "$failed_ref" != 0 ]] \
-        || chmod --reference="$ROLLBACK_DIR/conf" "$CONF_DIR" || failed_ref=1
-}
-
-rollback_created_service_accounts() {
-    local failed_name="$1" count index user group recorded_uid recorded_gid user_flag group_flag
-    local current_uid current_gid user_groups group_entry members passwd_entries primary_users
-    local -n failed_ref="$failed_name"
-    count="${#CREATED_SERVICE_ACCOUNT_USERS[@]}"
-    if [[ "${#CREATED_SERVICE_ACCOUNT_GROUPS[@]}" != "$count" \
-       || "${#CREATED_SERVICE_ACCOUNT_UIDS[@]}" != "$count" \
-       || "${#CREATED_SERVICE_ACCOUNT_GIDS[@]}" != "$count" \
-       || "${#CREATED_SERVICE_ACCOUNT_USER_FLAGS[@]}" != "$count" \
-       || "${#CREATED_SERVICE_ACCOUNT_GROUP_FLAGS[@]}" != "$count" ]]; then
-        warn "Refusing service-account rollback because its creation registry is inconsistent."
-        failed_ref=1
-        return 0
-    fi
-    for (( index=count - 1; index >= 0; index-- )); do
-        user="${CREATED_SERVICE_ACCOUNT_USERS[index]}"
-        group="${CREATED_SERVICE_ACCOUNT_GROUPS[index]}"
-        recorded_uid="${CREATED_SERVICE_ACCOUNT_UIDS[index]}"
-        recorded_gid="${CREATED_SERVICE_ACCOUNT_GIDS[index]}"
-        user_flag="${CREATED_SERVICE_ACCOUNT_USER_FLAGS[index]}"
-        group_flag="${CREATED_SERVICE_ACCOUNT_GROUP_FLAGS[index]}"
-        if ! service_account_name_is_valid "$user" || ! service_account_name_is_valid "$group" \
-           || [[ ! "$user_flag" =~ ^[01]$ || ! "$group_flag" =~ ^[01]$ ]] \
-           || [[ "$user_flag" == 0 && "$group_flag" == 0 ]]; then
-            warn "Refusing an invalid service-account rollback registry entry."
-            failed_ref=1
-            continue
-        fi
-        if [[ ! "$recorded_gid" =~ ^[0-9]+$ \
-           || ( "$user_flag" == 1 && ! "$recorded_uid" =~ ^[0-9]+$ ) ]]; then
-            warn "Refusing a service-account rollback entry without its recorded identity."
-            failed_ref=1
-            continue
-        fi
-        if [[ "$user_flag" == 1 ]] && getent passwd "$user" >/dev/null 2>&1; then
-            current_uid="$(id -u "$user" 2>/dev/null || true)"
-            current_gid="$(id -g "$user" 2>/dev/null || true)"
-            user_groups="$(id -G "$user" 2>/dev/null || true)"
-            # The same rule as service_account_is_safe, and for the same
-            # reason: install_service_accounts adds these accounts to the two
-            # overlay socket groups moments after creating them, so demanding
-            # that id -G equal the primary gid refuses every account this run
-            # created. Rollback then reports failure, which downgrades an
-            # otherwise clean restore into quarantining every unit and leaves
-            # the accounts behind — the worst place for a check to be wrong.
-            if [[ "$current_uid" == "$recorded_uid" \
-               && "$current_gid" == "$recorded_gid" ]] \
-               && service_account_groups_are_permitted "$user_groups" "$recorded_gid" \
-               && service_account_is_safe "$user" "$group"; then
-                if ! userdel "$user" 2>/dev/null \
-                   || getent passwd "$user" >/dev/null 2>&1; then
-                    warn "Could not remove the service user created by this run: $user"
-                    failed_ref=1
-                fi
-            else
-                warn "Refusing to remove a changed service user: $user"
-                failed_ref=1
-            fi
-        fi
-        if [[ "$group_flag" == 1 ]] && getent group "$group" >/dev/null 2>&1; then
-            group_entry="$(getent group "$group" 2>/dev/null || true)"
-            current_gid="$(printf '%s\n' "$group_entry" | cut -d: -f3)"
-            members="$(printf '%s\n' "$group_entry" | cut -d: -f4)"
-            passwd_entries="$(getent passwd 2>/dev/null)" || passwd_entries="__enumeration_failed__"
-            primary_users="$(printf '%s\n' "$passwd_entries" | awk -F: -v gid="$current_gid" '$4 == gid { print $1 }')"
-            if [[ "$passwd_entries" != __enumeration_failed__ \
-               && "$current_gid" == "$recorded_gid" \
-               && -z "$members" && -z "$primary_users" ]]; then
-                if ! groupdel "$group" 2>/dev/null \
-                   || getent group "$group" >/dev/null 2>&1; then
-                    warn "Could not remove the service group created by this run: $group"
-                    failed_ref=1
-                fi
-            else
-                warn "Refusing to remove a changed or non-empty service group: $group"
-                failed_ref=1
-            fi
-        fi
-    done
-    CREATED_SERVICE_ACCOUNT_USERS=()
-    CREATED_SERVICE_ACCOUNT_GROUPS=()
-    CREATED_SERVICE_ACCOUNT_UIDS=()
-    CREATED_SERVICE_ACCOUNT_GIDS=()
-    CREATED_SERVICE_ACCOUNT_USER_FLAGS=()
-    CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=()
-}
-
-atomic_restore_regular_file() {
-    local source="$1" dest="$2" candidate
-    [[ -f "$source" && ! -L "$source" ]] || return 1
-    [[ -d "$(dirname -- "$dest")" && ! -L "$(dirname -- "$dest")" ]] || return 1
-    candidate="$(mktemp "$(dirname -- "$dest")/.$(basename -- "$dest").rollback.XXXXXX")" \
-        || return 1
-    if ! cp -p -- "$source" "$candidate" || ! mv -f -- "$candidate" "$dest"; then
-        rm -f -- "$candidate" 2>/dev/null || true
-        return 1
-    fi
-}
-
-restore_managed_unit_files() {
-    local failed_name="$1" unit live candidate
-    local -n failed_ref="$failed_name"
-    [[ -d /etc/systemd/system && ! -L /etc/systemd/system ]] \
-        || { warn "Unsafe systemd unit root during rollback."; failed_ref=1; return 0; }
-    for unit in "${TRANSACTION_UNIT_FILES[@]}"; do
-        live="/etc/systemd/system/$unit"
-        if [[ -f "$ROLLBACK_DIR/units/$unit" && ! -L "$ROLLBACK_DIR/units/$unit" ]]; then
-            atomic_restore_regular_file "$ROLLBACK_DIR/units/$unit" "$live" \
-                || { warn "Could not restore unit file: $unit"; failed_ref=1; }
-        elif [[ -f "$ROLLBACK_DIR/units/$unit.absent" ]]; then
-            if [[ -e "$live" || -L "$live" ]]; then
-                rm -f -- "$live" \
-                    || { warn "Could not remove newly installed unit: $unit"; failed_ref=1; }
-            fi
-        else
-            warn "Rollback snapshot is missing the unit state for $unit."
-            failed_ref=1
-        fi
-    done
-}
-
-restore_management_launcher() {
-    local failed_name="$1" launcher=/usr/local/bin/5gpn
-    local -n failed_ref="$failed_name"
-    if [[ -f "$ROLLBACK_DIR/launcher" && ! -L "$ROLLBACK_DIR/launcher" ]]; then
-        if [[ -e "$launcher" || -L "$launcher" ]]; then
-            launcher_owned \
-                || { warn "Refusing to overwrite a changed management launcher during rollback."; failed_ref=1; return 0; }
-        fi
-        atomic_restore_regular_file "$ROLLBACK_DIR/launcher" "$launcher" \
-            || { failed_ref=1; return 0; }
-        launcher_owned || failed_ref=1
-    elif [[ -f "$ROLLBACK_DIR/launcher.absent" ]]; then
-        if [[ -e "$launcher" || -L "$launcher" ]]; then
-            if launcher_owned; then
-                rm -f -- "$launcher" || failed_ref=1
-            else
-                warn "Refusing to remove a changed management launcher during rollback."
-                failed_ref=1
-            fi
-        fi
-    else
-        warn "Rollback snapshot is missing the management-launcher state."
-        failed_ref=1
-    fi
-}
-
-restore_renew_hook() {
-    local failed_name="$1" hook="/etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh"
-    local -n failed_ref="$failed_name"
-    if [[ -f "$ROLLBACK_DIR/renew-hook" && ! -L "$ROLLBACK_DIR/renew-hook" ]]; then
-        if [[ -e "$hook" || -L "$hook" ]]; then
-            renew_hook_owned \
-                || { warn "Refusing to overwrite a changed Certbot deploy hook during rollback."; failed_ref=1; return 0; }
-        fi
-        install -d -o root -g root -m 0755 "$(dirname -- "$hook")" \
-            || { failed_ref=1; return 0; }
-        atomic_restore_regular_file "$ROLLBACK_DIR/renew-hook" "$hook" \
-            || failed_ref=1
-    elif [[ -f "$ROLLBACK_DIR/renew-hook.absent" ]]; then
-        if [[ -e "$hook" || -L "$hook" ]]; then
-            if renew_hook_owned; then
-                rm -f -- "$hook" || failed_ref=1
-            else
-                warn "Refusing to remove a changed Certbot deploy hook during rollback."
-                failed_ref=1
-            fi
-        fi
-    else
-        warn "Rollback snapshot is missing the Certbot deploy-hook state."
-        failed_ref=1
-    fi
-}
-
-restore_external_owned_tree() {
-    local dir="$1" marker="$2" value="$3" name="$4" failed_name="$5"
-    local component_failed=0
-    local -n failed_ref="$failed_name"
-    if [[ -e "$dir" || -L "$dir" ]]; then
-        if verify_ownership_marker "$dir" "$marker" "$value"; then
-            remove_public_owned_tree "$dir" "$marker" "$value" || component_failed=1
-        elif empty_unowned_public_tree_is_safe "$dir" "$marker"; then
-            rmdir -- "$dir" || component_failed=1
-        else
-            warn "Refusing to replace a changed external asset root during rollback: $dir"
-            component_failed=1
-        fi
-    fi
-    if [[ "$component_failed" != 0 ]]; then
-        failed_ref=1
-        return 0
-    fi
-    if [[ -d "$ROLLBACK_DIR/$name" && ! -L "$ROLLBACK_DIR/$name" ]]; then
-        static_publish_parent_is_safe "$dir" \
-            && cp -a -- "$ROLLBACK_DIR/$name" "$dir" \
-            && static_owned_tree_is_safe "$dir" "$marker" "$value" \
-            || component_failed=1
-    elif [[ -d "$ROLLBACK_DIR/${name}.empty-unowned" \
-         && ! -L "$ROLLBACK_DIR/${name}.empty-unowned" ]]; then
-        static_publish_parent_is_safe "$dir" \
-            && cp -a -- "$ROLLBACK_DIR/${name}.empty-unowned" "$dir" \
-            && empty_unowned_public_tree_is_safe "$dir" "$marker" \
-            || component_failed=1
-    elif [[ ! -f "$ROLLBACK_DIR/${name}.absent" ]]; then
-        warn "Rollback snapshot is missing the external asset state for $dir."
-        component_failed=1
-    fi
-    [[ "$component_failed" == 0 ]] || failed_ref=1
-}
-
-unit_enablement_links_absent() {
-    local unit="$1" root found
-    for root in /etc/systemd/system /run/systemd/system; do
-        [[ -d "$root" && ! -L "$root" ]] || continue
-        found="$(find "$root" -type l -name "$unit" -print -quit 2>/dev/null || true)"
-        [[ -z "$found" ]] || return 1
-    done
-    return 0
-}
-
-restore_unit_enablement() {
-    local unit="$1" failed_name="$2" state current
-    local -n failed_ref="$failed_name"
-    if [[ -f "$ROLLBACK_DIR/unit-state/${unit}.absent" ]]; then
-        systemctl disable "$unit" >/dev/null 2>&1 || true
-        unit_enablement_links_absent "$unit" \
-            || { warn "Dangling enablement links remain for absent unit $unit."; failed_ref=1; }
-        return 0
-    fi
-    [[ -f "$ROLLBACK_DIR/unit-state/${unit}.exists" \
-       && -f "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" ]] \
-        || { warn "Rollback snapshot is missing enablement state for $unit."; failed_ref=1; return 0; }
-    IFS= read -r state < "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" || state=""
-    systemctl unmask "$unit" >/dev/null 2>&1 || failed_ref=1
-    systemctl unmask --runtime "$unit" >/dev/null 2>&1 || failed_ref=1
-    systemctl disable "$unit" >/dev/null 2>&1 || true
-    case "$state" in
-        enabled) systemctl enable "$unit" >/dev/null 2>&1 || failed_ref=1 ;;
-        enabled-runtime) systemctl enable --runtime "$unit" >/dev/null 2>&1 || failed_ref=1 ;;
-        disabled) ;;
-        masked) systemctl mask "$unit" >/dev/null 2>&1 || failed_ref=1 ;;
-        masked-runtime) systemctl mask --runtime "$unit" >/dev/null 2>&1 || failed_ref=1 ;;
-        static|indirect) ;;
-        *) warn "Unsupported saved enablement state '$state' for $unit."; failed_ref=1; return 0 ;;
-    esac
-    current="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
-    [[ "$current" == "$state" ]] \
-        || { warn "Could not restore exact enablement state '$state' for $unit (got '${current:-unknown}')."; failed_ref=1; }
-}
-
-restore_unit_activity() {
-    local unit="$1" failed_name="$2"
-    local -n failed_ref="$failed_name"
-    [[ -f "$ROLLBACK_DIR/unit-state/${unit}.exists" ]] || return 0
-    if [[ -f "$ROLLBACK_DIR/unit-state/${unit}.active" ]]; then
-        systemctl start "$unit" >/dev/null 2>&1 || failed_ref=1
-        systemctl is-active --quiet "$unit" 2>/dev/null || failed_ref=1
-        case "$unit" in
-            5gpn-intercept.service|mihomo.service|5gpn-dns.service)
-                [[ "$failed_ref" != 0 ]] \
-                    || wait_service_ready "${unit%.service}" || failed_ref=1
-                ;;
-        esac
-    elif [[ -f "$ROLLBACK_DIR/unit-state/${unit}.inactive" ]]; then
-        systemctl stop "$unit" >/dev/null 2>&1 || failed_ref=1
-        ! systemctl is-active --quiet "$unit" 2>/dev/null || failed_ref=1
-    else
-        warn "Rollback snapshot is missing activity state for $unit."
-        failed_ref=1
-    fi
-}
-
-disable_and_verify_quarantined_unit() {
-    local unit="$1" failed_name="$2" load_state active_state enabled_state
-    local -n failed_ref="$failed_name"
-    # Quarantine means "stopped and not coming back at reboot". A template is
-    # already both: it cannot run, and no instance of it is enabled. Querying it
-    # returns nothing, which the emptiness gate below would report as an
-    # unverifiable unit and escalate into an incomplete rollback.
-    ! unit_is_template "$unit" || return 0
-    systemctl disable --now "$unit" >/dev/null 2>&1 || true
-    systemctl stop "$unit" >/dev/null 2>&1 || true
-    load_state="$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)"
-    active_state="$(systemctl is-active "$unit" 2>/dev/null || true)"
-    enabled_state="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
-    if [[ -z "$load_state" || -z "$active_state" || -z "$enabled_state" ]]; then
-        warn "Could not verify quarantine state for $unit."
-        failed_ref=1
-        return 0
-    fi
-    case "$active_state" in inactive|failed) ;; unknown) [[ "$load_state" == not-found ]] || failed_ref=1 ;; *) failed_ref=1 ;; esac
-    case "$enabled_state" in disabled|static|indirect|masked|masked-runtime|linked|linked-runtime|alias|generated|transient|not-found) ;; *) failed_ref=1 ;; esac
-}
-
-quarantine_managed_units_after_failed_rollback() {
-    local failed_name="$1" cert_failed="${2:-0}" unit base global_failed=0
-    local -n failed_ref="$failed_name"
-    for unit in "${TRANSACTION_UNIT_FILES[@]}"; do
-        disable_and_verify_quarantined_unit "$unit" "$failed_name"
-    done
-
-    # certbot.timer is distro-owned and may renew unrelated lineages. Preserve
-    # its exact pre-transaction state unless the failed 5gpn lineage is proven
-    # to be the only Certbot lineage on the host.
-    base="$(awk -F= '$1 == "DNS_BASE_DOMAIN" { print substr($0, index($0, "=") + 1); exit }' \
-        "$ROLLBACK_DIR/conf/dns.env" 2>/dev/null || true)"
-    if [[ "$cert_failed" == 1 && -n "$base" ]] \
-       && is_valid_domain "$base" \
-       && certbot_lineage_set_is_exclusive "$base"; then
-        disable_and_verify_quarantined_unit certbot.timer global_failed
-    else
-        restore_unit_enablement certbot.timer global_failed
-        restore_unit_activity certbot.timer global_failed
-        if [[ "$cert_failed" == 1 ]]; then
-            warn "The distro certbot.timer was restored to protect unrelated lineages; isolate and repair only the 5gpn lineage manually."
-        fi
-    fi
-    [[ "$global_failed" == 0 ]] || failed_ref=1
-}
-
-restore_managed_unit_states() {
-    local failed_name="$1" cert_failed="$2" allow_start="$3" unit
-    local -n failed_ref="$failed_name"
-    if [[ "$allow_start" != 1 ]]; then
-        quarantine_managed_units_after_failed_rollback "$failed_name" "$cert_failed"
-        return 0
-    fi
-    for unit in "${TRANSACTION_STATE_UNITS[@]}"; do
-        restore_unit_enablement "$unit" "$failed_name"
-    done
-    if [[ "$allow_start" == 1 ]]; then
-        for unit in "${TRANSACTION_STATE_UNITS[@]}"; do
-            restore_unit_activity "$unit" "$failed_name"
-        done
-        # Starting an active unit may pull in a unit that was originally
-        # inactive through Wants=/Requires=. Normalize inactive units once more,
-        # then verify the final active set and runtime readiness.
-        for unit in "${TRANSACTION_STATE_UNITS[@]}"; do
-            [[ -f "$ROLLBACK_DIR/unit-state/${unit}.exists" \
-               && -f "$ROLLBACK_DIR/unit-state/${unit}.inactive" ]] || continue
-            systemctl stop "$unit" >/dev/null 2>&1 || failed_ref=1
-            ! systemctl is-active --quiet "$unit" 2>/dev/null || failed_ref=1
-        done
-        for unit in "${TRANSACTION_STATE_UNITS[@]}"; do
-            [[ -f "$ROLLBACK_DIR/unit-state/${unit}.exists" \
-               && -f "$ROLLBACK_DIR/unit-state/${unit}.active" ]] || continue
-            if ! systemctl is-active --quiet "$unit" 2>/dev/null; then
-                failed_ref=1
-                continue
-            fi
-            case "$unit" in
-                5gpn-intercept.service|mihomo.service|5gpn-dns.service)
-                    wait_service_ready "${unit%.service}" || failed_ref=1 ;;
-            esac
-        done
-    fi
-}
-
+# Put back what this run paused. `pause_global_certbot_timer` only stops the
+# timer, so a plain pause is undone with a start; the owning-lineage flow
+# disabled it deliberately and it stays that way. This runs on the success path
+# only -- a failed install leaves the timer stopped for the operator to handle.
 restore_global_certbot_timer_after_success() {
-    local failed=0 load_state active_state enabled_state
-    if [[ "$RELEASE_PERSISTED_GLOBAL_CERTBOT_TIMER" == 1 \
-       && ( -e "$GLOBAL_CERTBOT_TIMER_STATE" || -L "$GLOBAL_CERTBOT_TIMER_STATE" ) ]]; then
-        restore_persisted_global_certbot_timer
-        return
-    fi
+    local load_state active_state enabled_state
     if [[ "$KEEP_GLOBAL_CERTBOT_TIMER_DISABLED" == 1 ]]; then
         systemctl disable --now certbot.timer >/dev/null 2>&1 || true
         systemctl stop certbot.timer >/dev/null 2>&1 || true
@@ -3924,281 +3017,12 @@ restore_global_certbot_timer_after_success() {
         fi
         return 0
     fi
-    if [[ -e "$GLOBAL_CERTBOT_TIMER_STATE" || -L "$GLOBAL_CERTBOT_TIMER_STATE" ]]; then
-        err "A saved distro Certbot timer takeover state exists, but this flow did not authorize releasing it."
-        return 1
-    fi
-    restore_unit_enablement certbot.timer failed
-    restore_unit_activity certbot.timer failed
-    [[ "$failed" == 0 ]] \
-        || { err "Could not restore the distro certbot.timer after the non-owning certificate flow."; return 1; }
+    [[ "$GLOBAL_CERTBOT_TIMER_PAUSED_ACTIVE" == active ]] || return 0
+    systemctl start certbot.timer >/dev/null 2>&1 \
+        && systemctl is-active --quiet certbot.timer 2>/dev/null \
+        || { err "Could not restart the distro certbot.timer that this run had paused."; return 1; }
 }
 
-rollback_install() {
-    [[ "$INSTALL_TRANSACTION_ACTIVE" == 1 && -d "$ROLLBACK_DIR" ]] || return 0
-    local rollback_cert_failed=0 rollback_host_failed=0 rollback_state_failed=0
-    local rollback_base_failed=0 rollback_config_failed=0 rollback_unit_failed=0
-    local rollback_asset_failed=0 rollback_account_failed=0 rollback_polkit_failed=0
-    local rollback_launcher_failed=0
-    local rollback_service_failed=0
-    local rollback_lock_failed=0 polkit_candidate="" unit load_state content_failed=0 restore_ok=0
-    warn "Install publication failed; restoring the previous 5gpn deployment."
-
-    # A capture failure before the immutable file snapshot has not published
-    # anything. Only the services stopped by the capture fence need restoring.
-    if [[ "$ROLLBACK_SNAPSHOT_READY" != 1 ]]; then
-        release_install_cert_lock || rollback_lock_failed=1
-        if [[ "$rollback_lock_failed" == 0 ]]; then
-            restore_managed_unit_states rollback_service_failed 0 1
-            [[ "$rollback_service_failed" == 0 ]] \
-                || quarantine_managed_units_after_failed_rollback rollback_service_failed 0
-        else
-            restore_managed_unit_states rollback_service_failed 0 0
-        fi
-        if [[ "$rollback_lock_failed" == 0 && "$rollback_service_failed" == 0 ]]; then
-            INSTALL_TRANSACTION_ACTIVE=0
-            warn "Install snapshot failed before publication; prior service states were restored."
-            return 0
-        fi
-        return 1
-    fi
-
-    if ! validate_install_rollback_snapshot; then
-        rollback_state_failed=1
-        release_install_cert_lock || rollback_lock_failed=1
-        restore_managed_unit_states rollback_service_failed 0 0
-        err "Rollback snapshot completeness validation failed; live files were not removed or overwritten."
-        return 1
-    fi
-
-    # Publication may already have restarted the runtime. Stop every current
-    # writer before replacing live state; failure leaves the snapshot intact.
-    for unit in "${TRANSACTION_STOP_UNITS[@]}"; do
-        load_state="$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)"
-        if [[ ( -z "$load_state" || "$load_state" == not-found ) ]] \
-           && ! systemctl is-active --quiet "$unit" 2>/dev/null; then
-            continue
-        fi
-        systemctl stop "$unit" >/dev/null 2>&1 || rollback_service_failed=1
-        ! systemctl is-active --quiet "$unit" 2>/dev/null || rollback_service_failed=1
-    done
-    if [[ "$rollback_service_failed" != 0 ]]; then
-        release_install_cert_lock || rollback_lock_failed=1
-        restore_managed_unit_states rollback_service_failed 0 0
-        err "Rollback could not stop all live writers; no filesystem snapshot was applied."
-        return 1
-    fi
-
-    if [[ "$SWAP_CREATED_THIS_RUN" == 1 ]]; then
-        if swapon --show=NAME --noheadings 2>/dev/null | grep -Fxq "$SWAP_FILE"; then
-            swapoff "$SWAP_FILE" 2>/dev/null || rollback_host_failed=1
-        fi
-        rm -f -- "$SWAP_FILE" || rollback_host_failed=1
-        [[ ! -e "$SWAP_FILE" && ! -L "$SWAP_FILE" ]] || rollback_host_failed=1
-        sed -i "\|^${SWAP_FILE} none swap sw 0 0 ${SWAP_FSTAB_MARKER}$|d" /etc/fstab 2>/dev/null \
-            || rollback_host_failed=1
-        grep -Fq "$SWAP_FSTAB_MARKER" /etc/fstab 2>/dev/null && rollback_host_failed=1
-        [[ "$rollback_host_failed" != 0 ]] || SWAP_CREATED_THIS_RUN=0
-    fi
-
-    if [[ ! -d "$ROLLBACK_DIR/base" && ! -f "$ROLLBACK_DIR/base.absent" ]]; then
-        rollback_base_failed=1
-    fi
-    if [[ -e "$BASE_DIR" || -L "$BASE_DIR" ]]; then
-        if verify_ownership_marker "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"; then
-            remove_fixed_owned_dir "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
-                || rollback_base_failed=1
-        else
-            warn "Refusing to replace a changed runtime root during rollback: $BASE_DIR"
-            rollback_base_failed=1
-        fi
-    fi
-    # Never copy over BASE_DIR after a failed removal. A partial copy is also a
-    # hard rollback failure and the pristine snapshot remains retained.
-    if [[ "$rollback_base_failed" == 0 && -d "$ROLLBACK_DIR/base" ]]; then
-        [[ ! -e "$BASE_DIR" && ! -L "$BASE_DIR" ]] || rollback_base_failed=1
-        [[ "$rollback_base_failed" != 0 ]] \
-            || cp -a -- "$ROLLBACK_DIR/base" "$BASE_DIR" || rollback_base_failed=1
-    fi
-
-    if [[ -f "$ROLLBACK_DIR/conf.absent" ]]; then
-        if [[ -e "$CONF_DIR" || -L "$CONF_DIR" ]]; then
-            remove_fixed_owned_dir "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
-                || rollback_config_failed=1
-        fi
-    else
-        restore_config_root_without_intercept_ca rollback_config_failed
-    fi
-    restore_optional_owned_root "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" \
-        "$INTERCEPT_CA_MARKER_VALUE" intercept-ca rollback_config_failed
-    restore_optional_owned_root "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" \
-        "$INTERCEPT_STATE_MARKER_VALUE" intercept-state rollback_state_failed
-    restore_managed_unit_files rollback_unit_failed
-    restore_management_launcher rollback_launcher_failed
-    if [[ -f "$ROLLBACK_DIR/state.absent" && ( -e "$STATE_DIR" || -L "$STATE_DIR" ) ]]; then
-        remove_fixed_owned_dir "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE" \
-            || rollback_state_failed=1
-    fi
-
-    if [[ -f "$ROLLBACK_DIR/polkit/50-5gpn.rules" ]]; then
-        if [[ ( -e "$POLKIT_RULE_PATH" || -L "$POLKIT_RULE_PATH" ) ]] \
-           && ! polkit_rule_owned_by_5gpn; then
-            warn "Could not restore the previous polkit rule because the live path is no longer 5gpn-owned."
-            rollback_polkit_failed=1
-        else
-            install -d -o root -g root -m 0755 "$(dirname -- "$POLKIT_RULE_PATH")" \
-                || rollback_polkit_failed=1
-            if [[ "$rollback_polkit_failed" == 0 ]]; then
-                polkit_candidate="$(mktemp "$(dirname -- "$POLKIT_RULE_PATH")/.50-5gpn.rollback.XXXXXX")" \
-                    || rollback_polkit_failed=1
-            fi
-            if [[ "$rollback_polkit_failed" == 0 ]]; then
-                install -o root -g root -m 0644 "$ROLLBACK_DIR/polkit/50-5gpn.rules" "$polkit_candidate" \
-                    && mv -f -- "$polkit_candidate" "$POLKIT_RULE_PATH" \
-                    || rollback_polkit_failed=1
-            fi
-            [[ "$rollback_polkit_failed" == 0 || -z "$polkit_candidate" ]] \
-                || rm -f -- "$polkit_candidate" || rollback_polkit_failed=1
-        fi
-    elif [[ -f "$ROLLBACK_DIR/polkit/50-5gpn.rules.absent" ]]; then
-        if polkit_rule_owned_by_5gpn; then
-            rm -f -- "$POLKIT_RULE_PATH" || rollback_polkit_failed=1
-        elif [[ -e "$POLKIT_RULE_PATH" || -L "$POLKIT_RULE_PATH" ]]; then
-            warn "Could not restore an absent polkit rule because the live path is no longer 5gpn-owned."
-            rollback_polkit_failed=1
-        fi
-    else
-        warn "Rollback snapshot is missing the polkit rule state."
-        rollback_polkit_failed=1
-    fi
-
-    restore_renew_hook rollback_cert_failed
-    if [[ -f "$ROLLBACK_DIR/renewal-names" ]]; then
-        local renewal_base lineage_changed restore_ok
-        while IFS= read -r renewal_base; do
-            if ! is_valid_domain "$renewal_base"; then
-                rollback_cert_failed=1
-                continue
-            fi
-            if [[ -f "$ROLLBACK_DIR/renewal-conf/${renewal_base}.lineage-present" ]]; then
-                lineage_changed=0
-                cmp -s "$ROLLBACK_DIR/lineage-leaf/${renewal_base}/fullchain.pem" \
-                    "/etc/letsencrypt/live/${renewal_base}/fullchain.pem" 2>/dev/null \
-                    || lineage_changed=1
-                cmp -s "$ROLLBACK_DIR/lineage-leaf/${renewal_base}/privkey.pem" \
-                    "/etc/letsencrypt/live/${renewal_base}/privkey.pem" 2>/dev/null \
-                    || lineage_changed=1
-                if [[ -f "$ROLLBACK_DIR/renewal-conf/${renewal_base}.conf" ]]; then
-                    cmp -s "$ROLLBACK_DIR/renewal-conf/${renewal_base}.conf" \
-                        "/etc/letsencrypt/renewal/${renewal_base}.conf" 2>/dev/null \
-                        || lineage_changed=1
-                elif [[ -e "/etc/letsencrypt/renewal/${renewal_base}.conf" ]]; then
-                    lineage_changed=1
-                fi
-                if [[ "$lineage_changed" == 1 ]]; then
-                    if certbot delete --non-interactive --cert-name "$renewal_base" >/dev/null 2>&1; then
-                        restore_ok=1
-                        [[ ! -e "/etc/letsencrypt/live/${renewal_base}" \
-                           && ! -e "/etc/letsencrypt/archive/${renewal_base}" \
-                           && ! -e "/etc/letsencrypt/renewal/${renewal_base}.conf" ]] \
-                            || restore_ok=0
-                        install -d -m 0755 /etc/letsencrypt/live /etc/letsencrypt/archive /etc/letsencrypt/renewal \
-                            || restore_ok=0
-                        [[ "$restore_ok" == 1 ]] \
-                            && cp -a -- "$ROLLBACK_DIR/le-live/${renewal_base}" "/etc/letsencrypt/live/${renewal_base}" \
-                            || restore_ok=0
-                        [[ "$restore_ok" == 1 ]] \
-                            && cp -a -- "$ROLLBACK_DIR/le-archive/${renewal_base}" "/etc/letsencrypt/archive/${renewal_base}" \
-                            || restore_ok=0
-                        if [[ "$restore_ok" == 1 && -f "$ROLLBACK_DIR/renewal-conf/${renewal_base}.conf" ]]; then
-                            cp -p -- "$ROLLBACK_DIR/renewal-conf/${renewal_base}.conf" \
-                                "/etc/letsencrypt/renewal/${renewal_base}.conf" \
-                                || restore_ok=0
-                        fi
-                        if [[ "$restore_ok" == 1 ]]; then
-                            cmp -s "$ROLLBACK_DIR/lineage-leaf/${renewal_base}/fullchain.pem" \
-                                "/etc/letsencrypt/live/${renewal_base}/fullchain.pem" 2>/dev/null \
-                                || restore_ok=0
-                            cmp -s "$ROLLBACK_DIR/lineage-leaf/${renewal_base}/privkey.pem" \
-                                "/etc/letsencrypt/live/${renewal_base}/privkey.pem" 2>/dev/null \
-                                || restore_ok=0
-                        fi
-                        if [[ "$restore_ok" != 1 ]]; then
-                            rollback_cert_failed=1
-                            warn "Certbot lineage ${renewal_base} could not be fully restored; automatic renewal was disabled."
-                        fi
-                    else
-                        rollback_cert_failed=1
-                        warn "Could not restore Certbot lineage ${renewal_base}; automatic renewal was disabled to avoid a mode mismatch."
-                    fi
-                fi
-            elif [[ -f "$ROLLBACK_DIR/renewal-conf/${renewal_base}.lineage-absent" ]] \
-               && [[ -e "/etc/letsencrypt/live/${renewal_base}" \
-                  || -e "/etc/letsencrypt/archive/${renewal_base}" \
-                  || -e "/etc/letsencrypt/renewal/${renewal_base}.conf" ]]; then
-                if ! certbot delete --non-interactive --cert-name "$renewal_base" >/dev/null 2>&1 \
-                   || [[ -e "/etc/letsencrypt/live/${renewal_base}" \
-                      || -e "/etc/letsencrypt/archive/${renewal_base}" \
-                      || -e "/etc/letsencrypt/renewal/${renewal_base}.conf" ]]; then
-                    rollback_cert_failed=1
-                    warn "Could not remove the Certbot lineage created by the failed transaction: ${renewal_base}."
-                fi
-            fi
-        done < "$ROLLBACK_DIR/renewal-names"
-    else
-        rollback_cert_failed=1
-    fi
-
-    if [[ "$DNS_WEB_DIR" != "$BASE_DIR"/* ]]; then
-        restore_external_owned_tree "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" \
-            "$WEB_OWNERSHIP_VALUE" external-web rollback_asset_failed
-    fi
-    if [[ "$DNS_ZASH_DIR" != "$BASE_DIR"/* ]]; then
-        restore_external_owned_tree "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" \
-            "$ZASH_OWNERSHIP_VALUE" external-zash rollback_asset_failed
-    fi
-    rollback_created_service_accounts rollback_account_failed
-    systemctl daemon-reload >/dev/null 2>&1 || rollback_unit_failed=1
-
-    # Starting 5gpn-intercept may synchronously start its required certificate
-    # oneshot. Release the certificate lock before restoring any active state.
-    release_install_cert_lock || rollback_lock_failed=1
-    content_failed=$((rollback_cert_failed + rollback_host_failed + rollback_state_failed \
-        + rollback_base_failed + rollback_config_failed + rollback_unit_failed \
-        + rollback_asset_failed + rollback_account_failed + rollback_polkit_failed \
-        + rollback_launcher_failed + rollback_lock_failed))
-    if [[ "$content_failed" == 0 ]]; then
-        restore_managed_unit_states rollback_service_failed 0 1
-        [[ "$rollback_service_failed" == 0 ]] \
-            || quarantine_managed_units_after_failed_rollback rollback_service_failed
-    else
-        restore_managed_unit_states rollback_service_failed "$rollback_cert_failed" 0
-    fi
-
-    if [[ "$content_failed" == 0 && "$rollback_service_failed" == 0 ]]; then
-        INSTALL_TRANSACTION_ACTIVE=0
-        ROLLBACK_SNAPSHOT_READY=0
-        PRETRANSACTION_ROOTS_ACTIVE=0
-        warn "Previous deployment restored; inspect the reported error before retrying."
-        return 0
-    else
-        [[ "$rollback_cert_failed" == 0 ]] \
-            || err "Certificate-lineage rollback was incomplete; automatic renewal is disabled pending repair."
-        [[ "$rollback_host_failed" == 0 && "$rollback_base_failed" == 0 \
-           && "$rollback_config_failed" == 0 && "$rollback_unit_failed" == 0 \
-           && "$rollback_asset_failed" == 0 && "$rollback_account_failed" == 0 \
-           && "$rollback_polkit_failed" == 0 && "$rollback_launcher_failed" == 0 ]] \
-            || err "Host authorization rollback was incomplete; inspect $POLKIT_RULE_PATH before retrying."
-        [[ "$rollback_state_failed" == 0 ]] \
-            || err "Interception state rollback was incomplete; inspect $INTERCEPT_STATE_DIR before retrying."
-        [[ "$rollback_service_failed" == 0 ]] \
-            || err "Service enablement, activity, or readiness could not be restored."
-        err "Project-managed services, paths, and timers were quarantined (disabled/stopped); verify them before reboot."
-        [[ "$rollback_lock_failed" == 0 ]] \
-            || err "A transaction lock descriptor became invalid during rollback."
-        return 1
-    fi
-}
 
 report_install_failure() {
     local rc="$1"
@@ -4224,87 +3048,26 @@ install_transaction_signal() {
     finish_install_transaction "$1"
 }
 
-ensure_install_lock_for_rollback() {
-    if lock_fd_targets_file 7 "$INSTALL_LOCK_FILE"; then
-        flock -w "$INSTALL_LOCK_WAIT_TIMEOUT" 7 \
-            || { err "Timed out revalidating the installer lock for rollback."; return 1; }
-        INSTALL_LOCK_HELD=1
-        return 0
-    fi
-    INSTALL_LOCK_HELD=0
-    acquire_install_lock
-}
-
-ensure_install_cert_lock_for_rollback() {
-    ensure_install_lock_for_rollback || return 1
-    if lock_fd_targets_file 8 "$CERT_RENEW_LOCK_FILE"; then
-        flock -w "$CERT_LOCK_WAIT_TIMEOUT" 8 \
-            || { err "Timed out revalidating the certificate lock for rollback."; return 1; }
-        INSTALL_CERT_LOCK_HELD=1
-        return 0
-    fi
-    INSTALL_CERT_LOCK_HELD=0
-    acquire_install_cert_lock
-}
 
 finish_install_transaction() {
-    local original_rc="$1" rollback_rc=0 cleanup_rc=0 root_cleanup_rc=0 lock_rc=0
-    local active_was_set=0 postcommit_was_pending=0 final_rc
+    local original_rc="$1" cleanup_rc=0 lock_rc=0 final_rc
     final_rc="$original_rc"
     trap '' HUP INT TERM
     trap - ERR EXIT
-    if [[ "$ROLLBACK_IN_PROGRESS" == 1 ]]; then
-        PRESERVE_ROLLBACK_STAGE=1
-        rollback_rc=1
-        err "A second failure reached the installer while rollback was already running."
-    elif [[ "$INSTALL_TRANSACTION_ACTIVE" == 1 ]]; then
-        active_was_set=1
-        ROLLBACK_IN_PROGRESS=1
-        set +e
-        ensure_install_cert_lock_for_rollback
-        lock_rc=$?
-        if [[ "$lock_rc" == 0 ]]; then
-            rollback_install
-            rollback_rc=$?
-        else
-            rollback_rc=1
-            err "Could not reacquire both transaction locks; refusing an unsafe concurrent rollback."
-        fi
-        set -e
-        [[ "$rollback_rc" == 0 ]] || PRESERVE_ROLLBACK_STAGE=1
+
+    # The installer does not undo a partial publication. Say so plainly: this is
+    # the operator's only signal that the host needs looking at.
+    if [[ "$final_rc" != 0 ]]; then
+        err "The installer does not roll back. This host is left partially installed."
+        err "Inspect the reported phase, then rerun the installer or repair it by hand."
     fi
 
-    if [[ "$POSTCOMMIT_TIMER_RESTORE_PENDING" == 1 ]]; then
-        postcommit_was_pending=1
-        set +e
-        restore_global_certbot_timer_after_success
-        cleanup_rc=$?
-        set -e
-        POSTCOMMIT_TIMER_RESTORE_PENDING=0
-        [[ "$cleanup_rc" == 0 ]] || PRESERVE_ROLLBACK_STAGE=1
-    fi
-
-    if [[ "$PRESERVE_ROLLBACK_STAGE" == 0 && "$PRETRANSACTION_ROOTS_ACTIVE" == 1 ]]; then
-        set +e
-        cleanup_pretransaction_project_roots root_cleanup_rc
-        set -e
-        [[ "$root_cleanup_rc" == 0 ]] || PRESERVE_ROLLBACK_STAGE=1
-    fi
-    if [[ "$PRESERVE_ROLLBACK_STAGE" == 0 ]]; then
-        set +e
-        cleanup_artifact_stage
-        cleanup_rc=$?
-        set -e
-        [[ "$cleanup_rc" == 0 ]] || PRESERVE_ROLLBACK_STAGE=1
-    fi
-    if [[ "$PRESERVE_ROLLBACK_STAGE" == 1 ]]; then
-        [[ "$root_cleanup_rc" == 0 ]] \
-            || err "Could not restore one or more project roots that were absent before this run."
-        [[ -z "$ROLLBACK_DIR" ]] \
-            || err "Rollback was incomplete; the recovery snapshot was preserved at: $ROLLBACK_DIR"
-        [[ -z "$ARTIFACT_STAGE" ]] \
-            || err "Do not remove the retained transaction directory: $ARTIFACT_STAGE"
-    fi
+    set +e
+    cleanup_artifact_stage
+    cleanup_rc=$?
+    set -e
+    [[ "$cleanup_rc" == 0 || -z "$ARTIFACT_STAGE" ]] \
+        || err "Staging was retained at: $ARTIFACT_STAGE"
 
     set +e
     release_install_cert_lock
@@ -4312,8 +3075,7 @@ finish_install_transaction() {
     release_install_lock
     [[ "$?" == 0 ]] || lock_rc=1
     set -e
-    if [[ "$active_was_set" == 1 || "$postcommit_was_pending" == 1 || "$rollback_rc" != 0 \
-       || "$cleanup_rc" != 0 || "$root_cleanup_rc" != 0 || "$lock_rc" != 0 ]]; then
+    if [[ "$cleanup_rc" != 0 || "$lock_rc" != 0 ]]; then
         [[ "$final_rc" != 0 ]] || final_rc=1
     fi
     exit "$final_rc"
@@ -4723,6 +3485,49 @@ persist_mihomo_secret() {
 # byte-for-byte. `render_mihomo_config --reset` is the sole overwrite path: it
 # renders to a same-directory candidate, validates that candidate, backs up the
 # old file, fsyncs, and atomically renames it into place.
+# The interception credentials inside an operator-owned mihomo config are not
+# the operator's to own: intercept/config.json is what renders them. A run that
+# reseeds that document leaves the preserved YAML holding the previous pair, and
+# the routing check then fails closed with `credential-mismatch` on a host that
+# is otherwise healthy. Realign those two reserved blocks and nothing else.
+#
+# Exit 3 means there is nothing alignable here -- a legacy config with no
+# interception blocks at all. That is not an error: the routing check that runs
+# later is what decides whether such a config is acceptable.
+align_preserved_intercept_credentials() {
+    local config="$1" candidate rc=0
+    [[ -f "$INTERCEPT_DIR/config.json" ]] || return 0
+    candidate="$(mktemp "${MIHOMO_DIR}/.config.yaml.XXXXXX")" \
+        || { err "Could not create a mihomo credential-alignment candidate."; return 1; }
+    "$DNS_BIN" --align-interception-credentials \
+        --mihomo-config "$config" \
+        --intercept-config "$INTERCEPT_DIR/config.json" > "$candidate" || rc=$?
+    case "$rc" in
+        0) ;;
+        3) rm -f -- "$candidate"; return 0 ;;
+        *)
+            rm -f -- "$candidate"
+            err "Could not align the preserved mihomo config with the interception credentials."
+            return 1 ;;
+    esac
+    if cmp -s -- "$candidate" "$config"; then
+        rm -f -- "$candidate"
+        return 0
+    fi
+    if ! "$MIHOMO_BIN" -t -f "$candidate" -d "$MIHOMO_DIR"; then
+        rm -f -- "$candidate"
+        err "The credential-aligned mihomo config failed validation; the live file was NOT changed."
+        return 1
+    fi
+    chown "$DNS_SERVICE_USER:$MIHOMO_SERVICE_USER" "$candidate" \
+        && chmod 0640 "$candidate" \
+        || { rm -f -- "$candidate"; err "Could not secure the credential-aligned mihomo config."; return 1; }
+    sync -f "$candidate" 2>/dev/null || true
+    mv -f -- "$candidate" "$config" \
+        || { rm -f -- "$candidate"; err "Could not publish the credential-aligned mihomo config."; return 1; }
+    ok "Realigned the preserved mihomo config with the current interception credentials."
+}
+
 render_mihomo_config() {
     local mode="${1:-seed}" config="${MIHOMO_DIR}/config.yaml" secret="" template=""
     # Staging establishes whether the mihomo being installed implements the
@@ -4766,6 +3571,7 @@ render_mihomo_config() {
         secret="$(mihomo_config_secret "$config")" \
             || { err "Existing mihomo controller secret could not be parsed safely."; return 1; }
         persist_mihomo_secret "$secret" || return 1
+        align_preserved_intercept_credentials "$config" || return 1
         ok "Existing operator-owned mihomo config validated and preserved: $config"
         return 0
     fi
@@ -5509,10 +4315,11 @@ global_certbot_timer_exists() {
 }
 
 # Stop the distro-wide unscoped timer before inspecting or mutating certificate
-# state. The install transaction records its enabled/active state and restores
-# it on rollback. A non-owning certificate flow also restores it before commit.
+# state. Its pre-pause activity is remembered in memory so the success path can
+# put it back; a failed install restores nothing, by design.
 pause_global_certbot_timer() {
     if global_certbot_timer_exists; then
+        GLOBAL_CERTBOT_TIMER_PAUSED_ACTIVE="$(systemctl is-active certbot.timer 2>/dev/null || true)"
         systemctl stop certbot.timer \
             || { err "Could not stop the distro certbot.timer before the certificate transaction."; return 1; }
         systemctl is-active --quiet certbot.timer 2>/dev/null \
@@ -5553,100 +4360,10 @@ certbot_lineage_set_is_exclusive() {
     done
 }
 
-global_certbot_timer_state_is_safe() {
-    local file="$GLOBAL_CERTBOT_TIMER_STATE" root_gid enabled active
-    root_gid="$(account_gid root)"
-    [[ -n "$root_gid" \
-       && -f "$file" && ! -L "$file" \
-       && "$(file_uid "$file")" == 0 \
-       && "$(file_gid "$file")" == "$root_gid" \
-       && "$(file_mode "$file")" == 600 \
-       && "$(file_nlink "$file")" == 1 ]] || return 1
-    grep -Eq '^version=1$' "$file" \
-        && grep -Eq '^exists=1$' "$file" \
-        && grep -Eq '^enabled=(enabled|enabled-runtime|disabled|masked|masked-runtime|static|indirect)$' "$file" \
-        && grep -Eq '^active=(active|inactive)$' "$file" \
-        && [[ "$(wc -l < "$file" | tr -d '[:space:]')" == 4 ]] \
-        || return 1
-    enabled="$(grep -E '^enabled=' "$file" | cut -d= -f2-)"
-    active="$(grep -E '^active=' "$file" | cut -d= -f2-)"
-    [[ "$active" != active || ( "$enabled" != masked && "$enabled" != masked-runtime ) ]]
-}
-
-persist_global_certbot_timer_state() {
-    local enabled active tmp
-    if [[ -e "$GLOBAL_CERTBOT_TIMER_STATE" || -L "$GLOBAL_CERTBOT_TIMER_STATE" ]]; then
-        global_certbot_timer_state_is_safe \
-            || { err "The persisted distro Certbot timer state is unsafe."; return 1; }
-        return 0
-    fi
-    [[ -n "$ROLLBACK_DIR" \
-       && -f "$ROLLBACK_DIR/unit-state/certbot.timer.exists" \
-       && -f "$ROLLBACK_DIR/unit-state/certbot.timer.enabled-state" \
-       && -f "$ROLLBACK_DIR/unit-state/certbot.timer.active-state" ]] \
-        || { err "The pre-takeover distro Certbot timer state was not captured."; return 1; }
-    enabled="$(<"$ROLLBACK_DIR/unit-state/certbot.timer.enabled-state")"
-    active="$(<"$ROLLBACK_DIR/unit-state/certbot.timer.active-state")"
-    [[ "$enabled" =~ ^(enabled|enabled-runtime|disabled|masked|masked-runtime|static|indirect)$ \
-       && "$active" =~ ^(active|inactive)$ ]] \
-        || { err "The distro Certbot timer is in a state that cannot be restored exactly: ${enabled}/${active}"; return 1; }
-    [[ "$active" != active || ( "$enabled" != masked && "$enabled" != masked-runtime ) ]] \
-        || { err "An active masked distro Certbot timer cannot be restored exactly; refusing takeover."; return 1; }
-    ensure_acme_dir || return 1
-    tmp="$(mktemp "${ACME_DIR}/.certbot.timer.state.XXXXXX")" || return 1
-    printf 'version=1\nexists=1\nenabled=%s\nactive=%s\n' "$enabled" "$active" > "$tmp" \
-        && chown root:root "$tmp" \
-        && chmod 0600 "$tmp" \
-        || { rm -f -- "$tmp"; return 1; }
-    sync -f "$tmp" 2>/dev/null || true
-    mv -f -- "$tmp" "$GLOBAL_CERTBOT_TIMER_STATE" \
-        || { rm -f -- "$tmp"; return 1; }
-    sync -f "$ACME_DIR" 2>/dev/null \
-        || { err "Could not durably persist the distro Certbot timer takeover state."; return 1; }
-    global_certbot_timer_state_is_safe \
-        || { err "Could not persist the distro Certbot timer takeover state."; return 1; }
-}
-
-restore_persisted_global_certbot_timer() {
-    local enabled active actual
-    [[ -e "$GLOBAL_CERTBOT_TIMER_STATE" || -L "$GLOBAL_CERTBOT_TIMER_STATE" ]] || return 0
-    global_certbot_timer_state_is_safe \
-        || { err "The persisted distro Certbot timer state is unsafe; refusing restoration."; return 1; }
-    enabled="$(grep -E '^enabled=' "$GLOBAL_CERTBOT_TIMER_STATE" | cut -d= -f2-)"
-    active="$(grep -E '^active=' "$GLOBAL_CERTBOT_TIMER_STATE" | cut -d= -f2-)"
-    systemctl stop certbot.timer >/dev/null 2>&1 \
-        || { err "Could not stop certbot.timer before restoring its saved state."; return 1; }
-    case "$enabled" in
-        enabled) systemctl enable certbot.timer >/dev/null 2>&1 || return 1 ;;
-        enabled-runtime) systemctl enable --runtime certbot.timer >/dev/null 2>&1 || return 1 ;;
-        disabled) systemctl disable certbot.timer >/dev/null 2>&1 || return 1 ;;
-        masked) systemctl mask certbot.timer >/dev/null 2>&1 || return 1 ;;
-        masked-runtime) systemctl mask --runtime certbot.timer >/dev/null 2>&1 || return 1 ;;
-        static|indirect) ;;
-        *) return 1 ;;
-    esac
-    if [[ "$active" == active ]]; then
-        systemctl start certbot.timer >/dev/null 2>&1 || return 1
-    fi
-    actual="$(systemctl is-enabled certbot.timer 2>/dev/null || true)"
-    [[ "$actual" == "$enabled" ]] \
-        || { err "certbot.timer enablement restore mismatch: expected ${enabled}, got ${actual:-unknown}."; return 1; }
-    actual="$(systemctl is-active certbot.timer 2>/dev/null || true)"
-    [[ "$actual" == "$active" ]] \
-        || { err "certbot.timer activity restore mismatch: expected ${active}, got ${actual:-unknown}."; return 1; }
-    rm -f -- "$GLOBAL_CERTBOT_TIMER_STATE" || return 1
-    sync -f "$ACME_DIR" 2>/dev/null || true
-    if [[ "$enabled" != enabled && "$enabled" != enabled-runtime ]] \
-       || [[ "$active" != active ]]; then
-        warn "Restored the original distro certbot.timer state (${enabled}/${active}); it does not provide active automatic renewal."
-    fi
-}
-
 disable_global_certbot_timer_for_owned_lineage() {
     local base="$1"
     if global_certbot_timer_exists; then
         certbot_lineage_set_is_exclusive "$base" || return 1
-        persist_global_certbot_timer_state || return 1
         systemctl disable --now certbot.timer \
             || { err "Could not disable the unscoped distro certbot.timer."; return 1; }
         systemctl is-active --quiet certbot.timer 2>/dev/null \
@@ -5858,14 +4575,9 @@ install_cert() {
     certbot_lineage_owned_by_5gpn "$base" && lineage_was_owned=1
     certbot_lineage_artifacts_exist "$base" && lineage_artifacts=1
     KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=0
-    RELEASE_PERSISTED_GLOBAL_CERTBOT_TIMER=0
 
     [[ "$mode" == cloudflare || "$mode" == http-01 || "$mode" == debug ]] \
         || { err "CERT_MODE must be cloudflare, http-01, or debug."; return 1; }
-    if [[ -e "$GLOBAL_CERTBOT_TIMER_STATE" || -L "$GLOBAL_CERTBOT_TIMER_STATE" ]]; then
-        global_certbot_timer_state_is_safe \
-            || { err "The persisted distro Certbot timer takeover state is unsafe."; return 1; }
-    fi
     pause_global_certbot_timer || return 1
 
     if [ "$mode" = "debug" ]; then
@@ -5886,7 +4598,6 @@ install_cert() {
         write_cert_provenance debug "$base" none || return 1
         remove_owned_renew_hook
         remove_owned_renewal_automation || return 1
-        RELEASE_PERSISTED_GLOBAL_CERTBOT_TIMER=1
         return 0
     fi
 
@@ -5905,7 +4616,6 @@ install_cert() {
             write_cert_provenance "$mode" "$base" reused || return 1
             install_cert_deploy_hook || return 1
             remove_owned_renewal_automation || return 1
-            RELEASE_PERSISTED_GLOBAL_CERTBOT_TIMER=1
             warn "The external lineage remains operator-owned; 5gpn did not install a public renewal timer or gain deletion authority."
             return 0
         fi
@@ -5927,7 +4637,6 @@ install_cert() {
         write_cert_provenance "$mode" "$base" missing || return 1
         remove_owned_renew_hook
         remove_owned_renewal_automation || return 1
-        RELEASE_PERSISTED_GLOBAL_CERTBOT_TIMER=1
         warn "The preserved certificate is active, but automatic renewal is disabled until the Certbot lineage is repaired or reissued."
         return 0
     fi
@@ -7662,21 +6371,12 @@ full_install() {
     acquire_install_lock || return 1
     INSTALL_PHASE="initializing the install transaction"
     INSTALL_FAILURE_REPORTED=0
-    INSTALL_TRANSACTION_ACTIVE=0
-    ROLLBACK_SNAPSHOT_READY=0
-    ROLLBACK_IN_PROGRESS=0
-    PRESERVE_ROLLBACK_STAGE=0
-    PRETRANSACTION_ROOTS_ACTIVE=0
-    BASE_ROOT_WAS_ABSENT=0
-    CONF_ROOT_WAS_ABSENT=0
-    STATE_ROOT_WAS_ABSENT=0
     trap install_transaction_error ERR
     trap install_transaction_exit EXIT
     trap 'install_transaction_signal 129' HUP
     trap 'install_transaction_signal 130' INT
     trap 'install_transaction_signal 143' TERM
     INSTALL_PHASE="claiming project roots"
-    record_project_root_prestate
     claim_project_roots
     preflight_intercept_roots
     INSTALL_PHASE="checking the host and persisted configuration"
@@ -7708,8 +6408,6 @@ full_install() {
     preflight_existing_interception_state
     INSTALL_PHASE="acquiring the certificate transaction lock"
     acquire_install_cert_lock
-    INSTALL_PHASE="capturing the pre-install rollback snapshot"
-    capture_install_rollback
     INSTALL_PHASE="claiming publication directories"
     claim_web_dir
     claim_zashboard_dir
@@ -7753,29 +6451,19 @@ full_install() {
     start_services_with_cert_lock_handoff
     verify_console_endpoint
     reload_rules
-    # Shield the short commit/timer-restore critical section. A disconnect must
-    # not leave an external/unrelated distro renewal timer stopped forever.
+    # Shield the short timer-restore critical section. A disconnect must not
+    # leave an external/unrelated distro renewal timer stopped forever.
     trap '' HUP INT TERM
     release_install_cert_lock
-    # The deployment is fully verified at this point. Commit before starting a
-    # distro-wide timer or deleting the rollback snapshot; post-commit cleanup
-    # failures must never roll a healthy deployment back.
-    INSTALL_TRANSACTION_ACTIVE=0 ROLLBACK_SNAPSHOT_READY=0 PRETRANSACTION_ROOTS_ACTIVE=0
-    POSTCOMMIT_TIMER_RESTORE_PENDING=1
     restore_global_certbot_timer_after_success \
-        || { err "The deployment committed, but the distro Certbot timer state needs repair."; postcommit_failed=1; }
-    POSTCOMMIT_TIMER_RESTORE_PENDING=0
+        || { err "The deployment is up, but the distro Certbot timer state needs repair."; postcommit_failed=1; }
     trap 'install_transaction_signal 129' HUP
     trap 'install_transaction_signal 130' INT
     trap 'install_transaction_signal 143' TERM
-    if [[ "$postcommit_failed" == 0 ]]; then
-        cleanup_artifact_stage \
-            || { err "The deployment committed, but transaction staging was retained at: $ARTIFACT_STAGE"; postcommit_failed=1; }
-    else
-        err "The committed transaction snapshot was retained for timer-state recovery at: $ROLLBACK_DIR"
-    fi
+    cleanup_artifact_stage \
+        || { err "The deployment is up, but staging was retained at: $ARTIFACT_STAGE"; postcommit_failed=1; }
     release_install_lock \
-        || { err "The deployment committed, but the installer lock descriptor ended unexpectedly."; postcommit_failed=1; }
+        || { err "The deployment is up, but the installer lock descriptor ended unexpectedly."; postcommit_failed=1; }
     trap - ERR EXIT HUP INT TERM
     [[ "$postcommit_failed" == 0 ]] || return 1
 
@@ -7842,10 +6530,6 @@ uninstall() {
         && prompt="确认卸载并删除可证明由 5gpn 拥有的证书材料?（共享 lineage/凭据会保留）"
     ask_yesno "$prompt" || return 0
     acquire_install_lock || return 1
-    INSTALL_TRANSACTION_ACTIVE=0
-    ROLLBACK_SNAPSHOT_READY=0
-    ROLLBACK_IN_PROGRESS=0
-    PRESERVE_ROLLBACK_STAGE=0
     trap install_transaction_error ERR
     trap install_transaction_exit EXIT
     trap 'install_transaction_signal 129' HUP
@@ -7853,10 +6537,6 @@ uninstall() {
     trap 'install_transaction_signal 143' TERM
     claim_project_roots || return 1
     acquire_install_cert_lock || return 1
-    if [[ -e "$GLOBAL_CERTBOT_TIMER_STATE" || -L "$GLOBAL_CERTBOT_TIMER_STATE" ]]; then
-        global_certbot_timer_state_is_safe \
-            || { err "The saved distro Certbot timer state is unsafe; refusing partial uninstall."; return 1; }
-    fi
     if [[ "$decommission" == 1 ]]; then
         base="$(cfg_get DNS_BASE_DOMAIN)"
         if ! decommission_certbot_lineage "$base"; then
@@ -7884,8 +6564,6 @@ uninstall() {
 
     # Remove the exact deploy hook installed by the current release.
     remove_owned_renew_hook
-    restore_persisted_global_certbot_timer \
-        || { err "Could not restore the distro Certbot timer state during uninstall."; return 1; }
 
     # Remove only the project-private swapfile under a marked state directory.
     if verify_ownership_marker "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE" \

@@ -356,6 +356,22 @@ if [[ "${1:-}" == --print-mihomo-secret && "${2:-}" == --config && -f "${3:-}" ]
     sed -n 's/^secret:[[:space:]]*//p' "$3"
     exit 0
 fi
+if [[ "${1:-}" == --align-interception-credentials ]]; then
+    shift
+    mihomo=""
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --mihomo-config) mihomo="$2"; shift 2 ;;
+            --intercept-config) shift 2 ;;
+            *) exit 1 ;;
+        esac
+    done
+    [[ -f "$mihomo" ]] || exit 1
+    # Nothing alignable in a legacy config: no interception blocks exist yet.
+    grep -Fq 'name: intercept-egress' "$mihomo" || exit 3
+    cat "$mihomo"
+    exit 0
+fi
 [[ "${1:-}" == --check-interception-routing ]] || exit 1
 shift
 mihomo=""
@@ -457,11 +473,9 @@ INTERCEPT_BIN="$saved_intercept_bin"
 
 full_install_fn="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
 preflight_line="$(grep -n 'preflight_existing_interception_state' <<<"$full_install_fn" | head -1 | cut -d: -f1)"
-snapshot_line="$(grep -n 'capture_install_rollback' <<<"$full_install_fn" | head -1 | cut -d: -f1)"
 publish_line="$(grep -n 'install_5gpndns' <<<"$full_install_fn" | head -1 | cut -d: -f1)"
-if [[ -n "$preflight_line" && -n "$snapshot_line" && -n "$publish_line" \
-   && "$preflight_line" -lt "$snapshot_line" && "$preflight_line" -lt "$publish_line" ]]; then
-    pass "interception routing preflight runs before rollback snapshot and live publication"
+if [[ -n "$preflight_line" && -n "$publish_line" && "$preflight_line" -lt "$publish_line" ]]; then
+    pass "interception routing preflight runs before live publication"
 else
     fail "interception routing preflight is too late in full_install"
 fi
@@ -579,9 +593,8 @@ else
     fail "claim_intercept_roots hid or continued past a root claim failure"
 fi
 
-# A stable installation has neither interception root. Capture that absence,
-# create both roots during publication, then exercise the rollback helpers.
-ROLLBACK_DIR="$TMP/rollback"
+# A stable installation has neither interception root. An unowned one must be
+# refused outright and left byte-for-byte alone.
 INTERCEPT_CA_DIR="$TMP/unowned-intercept-ca"
 INTERCEPT_STATE_DIR="$TMP/unowned-intercept-state"
 mkdir -p "$INTERCEPT_CA_DIR"
@@ -593,84 +606,6 @@ elif [[ "$(cat "$INTERCEPT_CA_DIR/keep")" == 'operator data' ]]; then
 else
     fail "preflight changed an unowned interception root"
 fi
-INTERCEPT_CA_DIR="$TMP/optional-intercept-ca"
-INTERCEPT_STATE_DIR="$TMP/optional-intercept-state"
-mkdir -p "$ROLLBACK_DIR"
-saved_fixed_owned_dir_is_safe="$(declare -f fixed_owned_dir_is_safe)"
-saved_unmarked_fixed_dir_is_safe_to_claim="$(declare -f unmarked_fixed_dir_is_safe_to_claim)"
-fixed_owned_dir_is_safe() { return 0; }
-unmarked_fixed_dir_is_safe_to_claim() { return 0; }
-# The production installer runs as root. This non-root fixture keeps its focus
-# on rollback semantics while accepting the exact root-owned creation request.
-install() {
-    if [[ "$#" == 9 && "$1" == -d && "$2" == -o && "$3" == root \
-       && "$4" == -g && "$5" == root && "$6" == -m && "$7" == 0755 \
-       && "$8" == -- ]]; then
-        command install -d -m 0755 -- "$9"
-        return
-    fi
-    command install "$@"
-}
-optional_snapshot_ok=1
-capture_optional_owned_root "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" \
-    "$INTERCEPT_CA_MARKER_VALUE" intercept-ca || optional_snapshot_ok=0
-capture_optional_owned_root "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" \
-    "$INTERCEPT_STATE_MARKER_VALUE" intercept-state || optional_snapshot_ok=0
-[[ -f "$ROLLBACK_DIR/intercept-ca.absent" \
-   && -f "$ROLLBACK_DIR/intercept-state.absent" ]] || optional_snapshot_ok=0
-claim_intercept_roots >/dev/null 2>&1 || optional_snapshot_ok=0
-unset -f install
-rollback_host_failed=0
-rollback_state_failed=0
-restore_optional_owned_root "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" \
-    "$INTERCEPT_CA_MARKER_VALUE" intercept-ca rollback_host_failed
-restore_optional_owned_root "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" \
-    "$INTERCEPT_STATE_MARKER_VALUE" intercept-state rollback_state_failed
-eval "$saved_fixed_owned_dir_is_safe"
-eval "$saved_unmarked_fixed_dir_is_safe_to_claim"
-if [[ "$optional_snapshot_ok" == 1 && "$rollback_host_failed" == 0 \
-   && "$rollback_state_failed" == 0 \
-   && ! -e "$INTERCEPT_CA_DIR" && ! -L "$INTERCEPT_CA_DIR" \
-   && ! -e "$INTERCEPT_STATE_DIR" && ! -L "$INTERCEPT_STATE_DIR" ]]; then
-    pass "rollback restores absent interception roots to absence"
-else
-    fail "rollback left a newly created interception root behind"
-fi
-
-# systemd creates the interception state root from StateDirectory the first time
-# the sidecar starts, so the snapshot legitimately meets an unmarked one. It is
-# claimed and captured, while the CA root beside it stays strict.
-ROLLBACK_DIR="$TMP/rollback-unmarked-state"
-INTERCEPT_CA_DIR="$TMP/unmarked-intercept-ca"
-INTERCEPT_STATE_DIR="$TMP/unmarked-intercept-state"
-mkdir -p "$ROLLBACK_DIR" "$INTERCEPT_CA_DIR" "$INTERCEPT_STATE_DIR"
-printf 'sidecar state\n' > "$INTERCEPT_STATE_DIR/snapshot.json"
-printf 'key material\n' > "$INTERCEPT_CA_DIR/root.key"
-saved_fixed_owned_dir_is_safe="$(declare -f fixed_owned_dir_is_safe)"
-saved_metadata_is_safe="$(declare -f fixed_owned_dir_metadata_is_safe)"
-fixed_owned_dir_is_safe() { return 0; }
-fixed_owned_dir_metadata_is_safe() { return 0; }
-unmarked_state_ok=1
-capture_intercept_state_root || unmarked_state_ok=0
-verify_ownership_marker "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" \
-    "$INTERCEPT_STATE_MARKER_VALUE" || unmarked_state_ok=0
-[[ "$(cat "$ROLLBACK_DIR/intercept-state/snapshot.json" 2>/dev/null)" == 'sidecar state' ]] \
-    || unmarked_state_ok=0
-[[ ! -e "$ROLLBACK_DIR/intercept-state.absent" ]] || unmarked_state_ok=0
-if capture_optional_owned_root "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" \
-       "$INTERCEPT_CA_MARKER_VALUE" intercept-ca >/dev/null 2>&1; then
-    unmarked_state_ok=0
-fi
-[[ "$(cat "$INTERCEPT_CA_DIR/root.key")" == 'key material' ]] || unmarked_state_ok=0
-[[ ! -e "$INTERCEPT_CA_DIR/$INTERCEPT_CA_MARKER" ]] || unmarked_state_ok=0
-eval "$saved_fixed_owned_dir_is_safe"
-eval "$saved_metadata_is_safe"
-if [[ "$unmarked_state_ok" == 1 ]]; then
-    pass "an unmarked interception state root is claimed and captured, not refused"
-else
-    fail "the rollback snapshot gated on the interception state root's marker"
-fi
-
 # Service accounts created by a failed transaction are removed only through
 # the run-local creation registry; pre-existing accounts never enter it.
 if (
@@ -881,276 +816,6 @@ if (
 else
     fail "service account creation did not report its own mutation results"
 fi
-if (
-    CREATED_SERVICE_ACCOUNT_USERS=()
-    CREATED_SERVICE_ACCOUNT_GROUPS=()
-    CREATED_SERVICE_ACCOUNT_UIDS=()
-    CREATED_SERVICE_ACCOUNT_GIDS=()
-    CREATED_SERVICE_ACCOUNT_USER_FLAGS=()
-    CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=()
-    group_exists=0
-    getent() {
-        case "$1" in
-            group) [[ "$group_exists" == 1 ]] && printf 'gpn-test:x:999:\n' ;;
-            passwd) [[ "$#" == 1 ]] && printf 'root:x:0:0::/root:/bin/bash\n' ;;
-            *) return 1 ;;
-        esac
-    }
-    groupadd() { group_exists=1; }
-    groupdel() { return 1; }
-    service_group_is_exclusive_for_user() { return 1; }
-    ! install_service_account gpn-test gpn-test \
-        && [[ "$group_exists" == 1 \
-           && "${#CREATED_SERVICE_ACCOUNT_USERS[@]}" == 1 \
-           && "${CREATED_SERVICE_ACCOUNT_USERS[0]}" == gpn-test \
-           && "${CREATED_SERVICE_ACCOUNT_UIDS[0]}" == '' \
-           && "${CREATED_SERVICE_ACCOUNT_GIDS[0]}" == 999 \
-           && "${CREATED_SERVICE_ACCOUNT_USER_FLAGS[0]}" == 0 \
-           && "${CREATED_SERVICE_ACCOUNT_GROUP_FLAGS[0]}" == 1 ]]
-); then
-    pass "a newly created group remains registered when immediate cleanup fails"
-else
-    fail "failed group cleanup left an unregistered service group"
-fi
-if (
-    CREATED_SERVICE_ACCOUNT_USERS=()
-    CREATED_SERVICE_ACCOUNT_GROUPS=()
-    CREATED_SERVICE_ACCOUNT_UIDS=()
-    CREATED_SERVICE_ACCOUNT_GIDS=()
-    CREATED_SERVICE_ACCOUNT_USER_FLAGS=()
-    CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=()
-    group_exists=0
-    user_exists=0
-    getent() {
-        case "$1" in
-            group) [[ "$group_exists" == 1 ]] && printf 'gpn-test:x:999:\n' ;;
-            passwd)
-                if [[ "$#" == 2 ]]; then
-                    [[ "$user_exists" == 1 ]] \
-                        && printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n'
-                else
-                    printf 'root:x:0:0::/root:/bin/bash\n'
-                    [[ "$user_exists" == 0 ]] \
-                        || printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n'
-                fi
-                ;;
-            *) return 1 ;;
-        esac
-    }
-    groupadd() { group_exists=1; }
-    useradd() { user_exists=1; }
-    groupdel() { return 1; }
-    userdel() { return 1; }
-    service_group_is_exclusive_for_user() { return 0; }
-    service_account_is_safe() { return 1; }
-    id() {
-        case "$1" in
-            -u) printf '998\n' ;;
-            -g) printf '999\n' ;;
-            *) return 1 ;;
-        esac
-    }
-    ! install_service_account gpn-test gpn-test \
-        && [[ "$group_exists" == 1 && "$user_exists" == 1 \
-           && "${#CREATED_SERVICE_ACCOUNT_USERS[@]}" == 1 \
-           && "${CREATED_SERVICE_ACCOUNT_USERS[0]}" == gpn-test \
-           && "${CREATED_SERVICE_ACCOUNT_UIDS[0]}" == 998 \
-           && "${CREATED_SERVICE_ACCOUNT_GIDS[0]}" == 999 \
-           && "${CREATED_SERVICE_ACCOUNT_USER_FLAGS[0]}" == 1 \
-           && "${CREATED_SERVICE_ACCOUNT_GROUP_FLAGS[0]}" == 1 ]]
-); then
-    pass "a newly created user and group remain registered when post-check cleanup fails"
-else
-    fail "failed user cleanup left an unregistered service account"
-fi
-if (
-    DNS_SERVICE_USER=gpn-dns
-    MIHOMO_SERVICE_USER=mihomo
-    INTERCEPT_SERVICE_USER=gpn-intercept
-    CREATED_SERVICE_ACCOUNT_USERS=()
-    CREATED_SERVICE_ACCOUNT_GROUPS=()
-    CREATED_SERVICE_ACCOUNT_UIDS=()
-    CREATED_SERVICE_ACCOUNT_GIDS=()
-    CREATED_SERVICE_ACCOUNT_USER_FLAGS=()
-    CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=()
-    ensure_service_account() {
-        if [[ "$1" == gpn-intercept ]]; then
-            printf -v "$3" '%s' 1
-            printf -v "$4" '%s' 0
-            printf -v "$5" '%s' 998
-            printf -v "$6" '%s' 777
-        fi
-    }
-    install_service_accounts >/dev/null
-    [[ "${#CREATED_SERVICE_ACCOUNT_USERS[@]}" == 1 \
-       && "${CREATED_SERVICE_ACCOUNT_USERS[0]}" == gpn-intercept \
-       && "${CREATED_SERVICE_ACCOUNT_GROUPS[0]}" == gpn-intercept \
-       && "${CREATED_SERVICE_ACCOUNT_UIDS[0]}" == 998 \
-       && "${CREATED_SERVICE_ACCOUNT_GIDS[0]}" == 777 \
-       && "${CREATED_SERVICE_ACCOUNT_USER_FLAGS[0]}" == 1 \
-       && "${CREATED_SERVICE_ACCOUNT_GROUP_FLAGS[0]}" == 0 ]]
-); then
-    pass "new service users are recorded generically with their actual primary GID"
-else
-    fail "generic service-account creation tracking is incomplete"
-fi
-if (
-    DNS_SERVICE_USER=gpn-dns
-    MIHOMO_SERVICE_USER=mihomo
-    INTERCEPT_SERVICE_USER=gpn-intercept
-    CREATED_SERVICE_ACCOUNT_USERS=()
-    CREATED_SERVICE_ACCOUNT_GROUPS=()
-    CREATED_SERVICE_ACCOUNT_UIDS=()
-    CREATED_SERVICE_ACCOUNT_GIDS=()
-    CREATED_SERVICE_ACCOUNT_USER_FLAGS=()
-    CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=()
-    ensure_service_account() {
-        local uid
-        case "$1" in
-            gpn-dns) uid=995 ;;
-            mihomo) uid=996 ;;
-            gpn-intercept) uid=997 ;;
-            *) return 1 ;;
-        esac
-        printf -v "$3" '%s' 1
-        printf -v "$4" '%s' 1
-        printf -v "$5" '%s' "$uid"
-        printf -v "$6" '%s' "$uid"
-    }
-    install_service_accounts >/dev/null
-    [[ "${#CREATED_SERVICE_ACCOUNT_USERS[@]}" == 3 \
-       && "${CREATED_SERVICE_ACCOUNT_USERS[*]}" == 'gpn-dns mihomo gpn-intercept' \
-       && "${CREATED_SERVICE_ACCOUNT_GROUPS[*]}" == 'gpn-dns mihomo gpn-intercept' \
-       && "${CREATED_SERVICE_ACCOUNT_UIDS[*]}" == '995 996 997' \
-       && "${CREATED_SERVICE_ACCOUNT_GIDS[*]}" == '995 996 997' \
-       && "${CREATED_SERVICE_ACCOUNT_USER_FLAGS[*]}" == '1 1 1' \
-       && "${CREATED_SERVICE_ACCOUNT_GROUP_FLAGS[*]}" == '1 1 1' ]]
-); then
-    pass "all newly created service accounts are registered for failed-install rollback"
-else
-    fail "service-account tracking omitted a newly created runtime account"
-fi
-if (
-    calls="$TMP/account-rollback.log"
-    user_exists=1
-    group_exists=1
-    CREATED_SERVICE_ACCOUNT_USERS=(gpn-intercept)
-    CREATED_SERVICE_ACCOUNT_GROUPS=(gpn-intercept)
-    CREATED_SERVICE_ACCOUNT_UIDS=(998)
-    CREATED_SERVICE_ACCOUNT_GIDS=(999)
-    CREATED_SERVICE_ACCOUNT_USER_FLAGS=(1)
-    CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=(1)
-    service_account_is_safe() { return 0; }
-    # id -G reports the primary gid AND the overlay socket group, because
-    # install_service_accounts adds every account it creates to those groups
-    # moments after creating them. Stubbing a lone primary gid described a state
-    # the installer never produces, and that is why this test passed while
-    # rollback refused to remove any account on a real host.
-    id() {
-        case "$1" in
-            -u) printf '998\n' ;;
-            -g) printf '999\n' ;;
-            -G) printf '999 983\n' ;;
-            *) return 1 ;;
-        esac
-    }
-    userdel() { printf 'userdel:%s\n' "$1" >> "$calls"; user_exists=0; }
-    getent() {
-        case "${1:-}" in
-            group)
-                case "${2:-}" in
-                    5gpn-overlay-ctl) printf '5gpn-overlay-ctl:x:984:\n'; return 0 ;;
-                    5gpn-overlay-gen) printf '5gpn-overlay-gen:x:983:\n'; return 0 ;;
-                esac
-                [[ "$group_exists" == 1 ]] && printf 'gpn-intercept:x:999:\n' ;;
-            passwd)
-                if [[ "$#" == 2 ]]; then
-                    [[ "$user_exists" == 1 ]] \
-                        && printf 'gpn-intercept:x:998:999::/nonexistent:/usr/sbin/nologin\n'
-                else
-                    printf 'root:x:0:0::/root:/bin/bash\n'
-                    [[ "$user_exists" == 0 ]] \
-                        || printf 'gpn-intercept:x:998:999::/nonexistent:/usr/sbin/nologin\n'
-                fi
-                ;;
-            *) return 1 ;;
-        esac
-    }
-    groupdel() { printf 'groupdel:%s\n' "$1" >> "$calls"; group_exists=0; }
-    failed=0
-    rollback_created_service_accounts failed
-    [[ "$failed" == 0 && "${#CREATED_SERVICE_ACCOUNT_USERS[@]}" == 0 \
-       && "$(tr '\n' ' ' < "$calls")" == 'userdel:gpn-intercept groupdel:gpn-intercept ' ]]
-); then
-    pass "failed-install rollback removes only the service account created by that run"
-else
-    fail "failed-install service-account rollback is incomplete"
-fi
-if (
-    calls="$TMP/account-group-only-rollback.log"
-    group_exists=1
-    CREATED_SERVICE_ACCOUNT_USERS=(gpn-test)
-    CREATED_SERVICE_ACCOUNT_GROUPS=(gpn-test)
-    CREATED_SERVICE_ACCOUNT_UIDS=('')
-    CREATED_SERVICE_ACCOUNT_GIDS=(999)
-    CREATED_SERVICE_ACCOUNT_USER_FLAGS=(0)
-    CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=(1)
-    getent() {
-        case "${1:-}" in
-            group) [[ "$group_exists" == 1 ]] && printf 'gpn-test:x:999:\n' ;;
-            passwd) printf 'root:x:0:0::/root:/bin/bash\n' ;;
-            *) return 1 ;;
-        esac
-    }
-    groupdel() { printf 'groupdel:%s\n' "$1" >> "$calls"; group_exists=0; }
-    failed=0
-    rollback_created_service_accounts failed
-    [[ "$failed" == 0 && "$group_exists" == 0 \
-       && "$(cat "$calls")" == 'groupdel:gpn-test' ]]
-); then
-    pass "failed-install rollback removes a group created before user creation failed"
-else
-    fail "failed-install rollback left a group-only creation behind"
-fi
-if (
-    calls="$TMP/account-gid-mismatch.log"
-    CREATED_SERVICE_ACCOUNT_USERS=(gpn-intercept)
-    CREATED_SERVICE_ACCOUNT_GROUPS=(gpn-intercept)
-    CREATED_SERVICE_ACCOUNT_UIDS=(998)
-    CREATED_SERVICE_ACCOUNT_GIDS=(999)
-    CREATED_SERVICE_ACCOUNT_USER_FLAGS=(1)
-    CREATED_SERVICE_ACCOUNT_GROUP_FLAGS=(0)
-    service_account_is_safe() { return 0; }
-    id() {
-        case "$1" in
-            -u) printf '998\n' ;;
-            -g) printf '997\n' ;;
-            -G) printf '997 983\n' ;;
-            *) return 1 ;;
-        esac
-    }
-    getent() {
-        case "${1:-}" in
-            group)
-                case "${2:-}" in
-                    5gpn-overlay-ctl) printf '5gpn-overlay-ctl:x:984:\n'; return 0 ;;
-                    5gpn-overlay-gen) printf '5gpn-overlay-gen:x:983:\n'; return 0 ;;
-                esac
-                return 1 ;;
-            passwd) printf 'gpn-intercept:x:998:997::/nonexistent:/usr/sbin/nologin\n' ;;
-            *) return 1 ;;
-        esac
-    }
-    userdel() { printf 'unexpected\n' >> "$calls"; }
-    failed=0
-    rollback_created_service_accounts failed
-    [[ "$failed" == 1 && ! -e "$calls" ]]
-); then
-    pass "service-account rollback refuses a changed primary GID"
-else
-    fail "service-account rollback ignored a changed primary GID"
-fi
-
 # The destructive upgrade mode refuses non-interactive execution before the
 # install transaction or mihomo reset begins.
 if confirm_upgrade_mihomo_reset >/dev/null 2>&1; then
@@ -1158,35 +823,6 @@ if confirm_upgrade_mihomo_reset >/dev/null 2>&1; then
 else
     pass "upgrade-reset-mihomo requires an interactive TTY"
 fi
-
-# A hostile or concurrent replacement of the nested CA root must never be
-# deleted merely because the parent config root still has its own marker.
-saved_conf_dir="$CONF_DIR"
-saved_rollback_dir="$ROLLBACK_DIR"
-CONF_DIR="$TMP/conf-race"
-ROLLBACK_DIR="$TMP/rollback-race"
-mkdir -p "$CONF_DIR/intercept-ca" "$ROLLBACK_DIR/conf"
-write_ownership_marker "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"
-write_ownership_marker "$ROLLBACK_DIR/conf" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"
-chmod 2771 "$CONF_DIR"
-chmod 0700 "$ROLLBACK_DIR/conf"
-printf 'live unowned sentinel\n' > "$CONF_DIR/intercept-ca/keep"
-printf 'old config\n' > "$ROLLBACK_DIR/conf/restored"
-: > "$ROLLBACK_DIR/intercept-ca.absent"
-nested_failed=0
-restore_config_root_without_intercept_ca nested_failed
-restore_optional_owned_root "$CONF_DIR/intercept-ca" "$INTERCEPT_CA_MARKER" \
-    "$INTERCEPT_CA_MARKER_VALUE" intercept-ca nested_failed
-if [[ "$nested_failed" == 1 \
-   && "$(cat "$CONF_DIR/intercept-ca/keep")" == 'live unowned sentinel' \
-   && "$(cat "$CONF_DIR/restored")" == 'old config' \
-   && "$(file_mode "$CONF_DIR")" == 700 ]]; then
-    pass "parent config rollback preserves a changed unowned nested CA root"
-else
-    fail "parent config rollback deleted or overwrote an unowned nested CA root"
-fi
-CONF_DIR="$saved_conf_dir"
-ROLLBACK_DIR="$saved_rollback_dir"
 
 # Purge retains the CA for already enrolled devices. Keep this assertion tied
 # to the actual clear_owned_scope preserve arguments in uninstall().
