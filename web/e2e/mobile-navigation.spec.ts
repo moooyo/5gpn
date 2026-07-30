@@ -92,7 +92,9 @@ test('iPhone extension permission and egress dialogs stay inside the viewport', 
   const extension = page.getByTestId('extension-io.example.response-cleaner')
   await extension.getByRole('switch').click()
   const permissionDialog = page.getByRole('dialog', { name: /启用|Enable/ })
-  await expect(permissionDialog.getByText('https://origin.example.net')).toHaveClass(/break-all/)
+  // The grant names no addresses, so there is no origin list left to wrap;
+  // what has to stay inside the viewport now is the warning that replaced it.
+  await expect(permissionDialog.getByText(/权限本身无法说明它会访问何处|permission cannot state where/)).toBeVisible()
   let box = await permissionDialog.boundingBox()
   const viewportWidth = await page.evaluate(() => window.innerWidth)
   expect(box).not.toBeNull()

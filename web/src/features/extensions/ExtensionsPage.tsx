@@ -626,7 +626,7 @@ function EnableExtensionModal({
       {module ? <div className="space-y-4">
         <p className="text-body leading-6 text-text-soft">{t('extensions.enableBody')}</p>
         {/* The two warning blocks keep their fill: "this can send everything it
-            sees to these origins" and "this rewrites global routing" are the
+            sees anywhere it resolves" and "this rewrites global routing" are the
             two facts this confirmation exists for. The neutral facts around
             them are divided instead of tinted, so the amber still means
             something when it appears. */}
