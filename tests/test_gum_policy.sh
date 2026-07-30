@@ -58,5 +58,32 @@ grep -Fq 'env -u CI' <<<"$gum_spin_fn" \
 grep -Fq 'Telegram configuration requires the TUI' "$INSTALL" \
     || fail "tgbot configuration is not TTY-gated"
 
+# --- Gum must exist before the prompts, not after them -------------------------
+# Every question this installer asks runs in resolve_install_configuration. When
+# install_gum came later, ask_text/ask_choice/ask_yesno always took their
+# read -p fallback and Gum only ever coloured the closing log lines -- the TUI
+# was effectively never used.
+full_install_body="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
+gum_line="$(grep -n '^[[:space:]]*install_gum$' <<<"$full_install_body" | head -1 | cut -d: -f1)"
+prompt_line="$(grep -n 'resolve_install_configuration' <<<"$full_install_body" | head -1 | cut -d: -f1)"
+if [ -n "$gum_line" ] && [ -n "$prompt_line" ] && [ "$gum_line" -lt "$prompt_line" ]; then
+    :
+else
+    fail "install_gum runs after the prompts; every interactive helper falls back to read -p"
+fi
+
+# --- one accent colour, and every framed surface uses it -----------------------
+grep -Eq '^UI_ACCENT=[0-9]+$' "$INSTALL" \
+    || fail "the installer has no single accent colour"
+grep -Fq 'border-foreground "$UI_ACCENT"' "$INSTALL" \
+    || fail "card() hardcodes a colour instead of the shared accent"
+phase_fn="$(sed -n '/^phase()/,/^}/p' "$INSTALL")"
+grep -Fq 'gum style' <<<"$phase_fn" \
+    || fail "phase() has no gum branch"
+grep -Fq 'printf' <<<"$phase_fn" \
+    || fail "phase() lost its plain-text fallback"
+grep -Fq 'INSTALL_PHASE=' <<<"$phase_fn" \
+    || fail "phase() does not set the phase that failure reporting quotes"
+
 [ $rc -eq 0 ] && echo "gum policy: PASS"
 exit $rc

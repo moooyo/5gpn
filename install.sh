@@ -245,6 +245,10 @@ if [[ -t 1 ]]; then
 else
     RED=''; GREEN=''; YELLOW=''; BLUE=''; NC=''
 fi
+# One accent colour for every framed or emphasised surface: stage headings, card
+# borders, and the selection cursor. Keeping it in a single place is what makes
+# the installer read as one program rather than a pile of scripts.
+UI_ACCENT=212
 info() {
     if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then
         CI=1 gum log --level info -- "$*" || echo "${BLUE}[INFO]${NC} $*"
@@ -277,10 +281,10 @@ err() {
 # Interactive helpers (gum vs read). Callers gate on [[ -t 0 ]]; main() runs
 # attach_tty first, so a piped `curl | sudo bash` install still has a terminal on
 # stdin and these prompts fire as intended.
-ask_text()   { if [[ "$_HAVE_GUM" == 1 ]]; then CI=1 gum input --prompt "$1 " --placeholder "${2:-}"; else local v; read -r -p "$1 " v; printf '%s' "$v"; fi; }
+ask_text()   { if [[ "$_HAVE_GUM" == 1 ]]; then CI=1 gum input --prompt "$1 " --prompt.foreground "$UI_ACCENT" --placeholder "${2:-}"; else local v; read -r -p "$1 " v; printf '%s' "$v"; fi; }
 ask_secret() {
     if [[ "$_HAVE_GUM" == 1 ]]; then
-        CI=1 gum input --password --prompt "$1 "
+        CI=1 gum input --password --prompt "$1 " --prompt.foreground "$UI_ACCENT"
     else
         local v
         read -r -s -p "$1 " v
@@ -288,11 +292,12 @@ ask_secret() {
         printf '%s' "$v"
     fi
 }
-ask_yesno()  { if [[ "$_HAVE_GUM" == 1 ]]; then CI=1 gum confirm "$1"; else local a; read -r -p "$1 [y/N] " a; [[ "$a" == [yY]* ]]; fi; }
+ask_yesno()  { if [[ "$_HAVE_GUM" == 1 ]]; then CI=1 gum confirm "$1" --selected.background "$UI_ACCENT"; else local a; read -r -p "$1 [y/N] " a; [[ "$a" == [yY]* ]]; fi; }
 ask_choice() {
     local prompt="$1"; shift
     if [[ "$_HAVE_GUM" == 1 ]]; then
-        printf '%s\n' "$@" | CI=1 gum choose --header "$prompt"
+        printf '%s\n' "$@" | CI=1 gum choose --header "$prompt" \
+            --header.foreground "$UI_ACCENT" --cursor.foreground "$UI_ACCENT"
     else
         local i=1 answer="" item
         echo "$prompt" >&2
@@ -318,7 +323,29 @@ gum_spin() {
     fi
 }
 # Frame multi-line stdin in a rounded box when interactive; else pass it through.
-card()       { if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then CI=1 gum style --border rounded --padding "0 1" --border-foreground 212; else cat; fi; }
+card()       { if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then CI=1 gum style --border rounded --padding "0 1" --border-foreground "$UI_ACCENT"; else cat; fi; }
+
+# One heading per install stage. This also carries the phase name that failure
+# reporting quotes, so the operator reads the same words on screen and in the
+# error -- keeping them in one call is what stops the two from drifting.
+phase() {
+    INSTALL_PHASE="$1"
+    local label="${2:-$1}"
+    printf '\n'
+    if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then
+        CI=1 gum style --foreground "$UI_ACCENT" --bold -- "▸ ${label}" \
+            || printf '%s▸ %s%s\n' "$BLUE" "$label" "$NC"
+    else
+        printf '%s▸ %s%s\n' "$BLUE" "$label" "$NC"
+    fi
+}
+
+# The environment summary an operator wants before anything is touched: which
+# release, on what host, with which memory profile.
+banner() {
+    local version="$1" host="$2"
+    { printf '5gpn 安装器  %s\n' "$version"; printf '%s\n' "$host"; } | card
+}
 
 # attach_tty makes a PIPED install interactive. Run via `curl | sudo bash`, fd 0 is
 # the pipe/script, not the terminal, so [[ -t 0 ]] is false and EVERY prompt below
@@ -2289,7 +2316,7 @@ install_deps() {
     case "$PKG_MGR" in
         apt-get)
             export DEBIAN_FRONTEND=noninteractive
-            apt-get update -qq || true
+            gum_spin "更新软件包索引…" apt-get update -qq || true
             apt-get install -y -qq \
                 wget curl ca-certificates unzip iproute2 openssl \
                 qrencode jq libcap2-bin util-linux polkitd \
@@ -3892,7 +3919,8 @@ manage_menu() {
     while true; do
         local choice=""
         if [[ "$_HAVE_GUM" == 1 ]]; then
-            choice="$(printf '%s\n' "${labels[@]}" | CI=1 gum choose --header '5gpn 管理 (↑/↓ 选择, Enter 确认)' || true)"
+            choice="$(printf '%s\n' "${labels[@]}" | CI=1 gum choose --header '5gpn 管理 (↑/↓ 选择, Enter 确认)' \
+                --header.foreground "$UI_ACCENT" --cursor.foreground "$UI_ACCENT" || true)"
         else
             echo ""; echo "5gpn 管理菜单:"
             local i=1; for l in "${labels[@]}"; do echo "  $i) $l"; i=$((i+1)); done
@@ -6239,10 +6267,16 @@ full_install() {
     INSTALL_PHASE="claiming project roots"
     claim_project_roots
     preflight_intercept_roots
-    INSTALL_PHASE="checking the host and persisted configuration"
+    # Bootstrap the TUI here, not at publication time. Every prompt this
+    # installer asks -- domain, gateway IP, resolver, certificate mode -- runs in
+    # the stage below, so a later bootstrap meant the interactive helpers always
+    # fell back to `read -p` and Gum only ever coloured the closing log lines.
+    install_gum
+    phase "checking the host and persisted configuration" "检查主机与配置"
     detect_os
     check_arch
     detect_memory_profile
+    banner "$DNS_VERSION_DEFAULT" "${OS:-unknown} ${VER:-?} · $(uname -m 2>/dev/null || echo unknown)${MEM_TOTAL_MB:+ · ${MEM_TOTAL_MB}MB}"
     resolve_install_configuration "$force_tui"
     derive_domains "$BASE_DOMAIN"
     mihomo_config_matches_install_config || {
@@ -6251,40 +6285,39 @@ full_install() {
         return 1
     }
     [[ "$reset_mihomo" == 0 ]] || confirm_upgrade_mihomo_reset || return 1
-    INSTALL_PHASE="checking existing static-asset ownership"
+    phase "checking existing static-asset ownership" "检查静态资源归属"
     preflight_unit_ownership
     preflight_web_dir
     preflight_zashboard_dir
 
     # Package installation may add shared OS packages, but no live 5gpn file has
     # been removed or replaced yet. Debug mode deliberately skips Certbot.
-    INSTALL_PHASE="installing host dependencies"
+    phase "installing host dependencies" "安装主机依赖"
     install_deps
-    INSTALL_PHASE="verifying public console DNS"
+    phase "verifying public console DNS" "校验公网 console DNS"
     verify_console_dns
-    INSTALL_PHASE="staging and verifying release artifacts"
+    phase "staging and verifying release artifacts" "下载并校验发布产物"
     stage_artifacts
-    INSTALL_PHASE="checking existing interception routing before publication"
+    phase "checking existing interception routing before publication" "检查既有拦截路由"
     preflight_existing_interception_state
     INSTALL_PHASE="acquiring the certificate transaction lock"
     acquire_install_cert_lock
-    INSTALL_PHASE="claiming publication directories"
+    phase "claiming publication directories" "认领发布目录"
     claim_web_dir
     claim_zashboard_dir
-    install_gum
     claim_intercept_roots
-    INSTALL_PHASE="preparing low-memory runtime support"
+    phase "preparing low-memory runtime support" "准备低内存运行支持"
     ensure_swap
 
     # Only after every input, host conflict, download, digest, archive, console
     # DNS gate, and existing mihomo config has passed do we enter publication.
-    INSTALL_PHASE="installing service accounts"
+    phase "installing service accounts" "创建服务账户"
     install_service_accounts
-    INSTALL_PHASE="publishing verified executables"
+    phase "publishing verified executables" "发布可执行文件"
     install_5gpndns
     install_intercept
     install_mihomo
-    INSTALL_PHASE="publishing runtime configuration and assets"
+    phase "publishing runtime configuration and assets" "发布运行配置与资源"
     ensure_intercept_config
     prepare_certificate_publication_boundaries
     install_files

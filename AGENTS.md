@@ -83,9 +83,20 @@ plans, design handoffs, and git history are context only.
 All operator-facing shell scripts use the established gum-or-echo pattern.
 
 - `install.sh` owns `install_gum()` and the canonical helpers
-  (`info`, `ok`, `warn`, `err`, `ask_*`, `gum_spin`, `card`). Gum is downloaded
-  as a prebuilt binary and verified. Bootstrap failure must be non-fatal under
-  `set -euo pipefail`: leave `_HAVE_GUM=0`, return success, and use plain output.
+  (`info`, `ok`, `warn`, `err`, `ask_*`, `gum_spin`, `card`, `phase`, `banner`).
+  Gum is downloaded as a prebuilt binary and verified. Bootstrap failure must be
+  non-fatal under `set -euo pipefail`: leave `_HAVE_GUM=0`, return success, and
+  use plain output.
+- `install_gum` must run **before** `resolve_install_configuration`. Every
+  prompt lives in that stage, so bootstrapping later makes every interactive
+  helper silently take its `read -p` fallback — the TUI is then never used at
+  all. The gum policy suite pins the ordering.
+- `UI_ACCENT` is the single accent colour for every framed or emphasised
+  surface: `card` borders, `phase` headings, and the `gum choose` cursor. Do not
+  hardcode a colour at a call site.
+- `phase` both prints the stage heading and sets the `INSTALL_PHASE` that
+  failure reporting quotes, so the operator reads the same words on screen and
+  in the error. Keep them in one call.
 - Sub-scripts have a small self-contained gum-or-echo preamble. They only
   detect Gum; they never install it. `quick-install.sh` runs before bootstrap,
   so it is Gum-aware-if-present with an ANSI fallback.
