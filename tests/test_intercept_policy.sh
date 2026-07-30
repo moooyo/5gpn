@@ -124,8 +124,13 @@ grep -Fq 'decoder.KnownFields(true)' "$MODULE_PARSER" \
     || fail "native extension manifest does not reject unknown fields"
 grep -Fq 'rejectUnsafeYAML' "$MODULE_PARSER" \
     || fail "native extension manifest does not reject aliases, anchors, and merges"
+# The permission is one boolean now. What has to stay true is that the parser
+# snapshots it at all, and that the origin list it replaced cannot come back
+# without this test being changed on purpose.
+grep -Fq 'manifest.Permissions.Network' "$MODULE_PARSER" \
+    || fail "native manifest parser does not snapshot the network permission"
 grep -Fq 'NetworkOrigins' "$MODULE_PARSER" \
-    || fail "native manifest parser does not snapshot exact network origins"
+    && fail "native manifest parser still carries the retired origin list"
 grep -Fq 'EgressGroupRequired' "$MODULE_PARSER" \
     || fail "native manifest parser does not support operator egress requirements"
 grep -Fq 'https://github.com/moooyo/5gpn-extensions' "$MODULE_PARSER" \
