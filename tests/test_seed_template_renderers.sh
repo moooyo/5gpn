@@ -29,7 +29,6 @@ FAIL=0
 RENDERERS=(
     "install.sh|install.sh"
     "CI mihomo-config job|.github/workflows/checks.yml"
-    "compact-suffix regression|tests/mihomo-compact-suffix-regression.sh"
     "sniff-cache regression|tests/mihomo-sniff-cache-regression.sh"
     "daemon (mihomo-reset)|cmd/5gpn-dns/mihomo_config.go cmd/5gpn-dns/intercept_mihomo_overlay.go"
 )

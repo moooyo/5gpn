@@ -13,7 +13,7 @@ MODULE_PAGE="$ROOT/web/src/features/extensions/ExtensionsPage.tsx"
 SETUP_GUIDE="$ROOT/web/src/features/setup-guide/SetupGuidePage.tsx"
 MODULE_PARSER="$ROOT/cmd/5gpn-dns/intercept_module_parser.go"
 MODULE_TYPES="$ROOT/cmd/5gpn-dns/intercept_module_types.go"
-CHECKS_WORKFLOW="$ROOT/.github/workflows/checks.yml"
+MANAGER_TEST="$ROOT/cmd/5gpn-dns/intercept_module_manager_test.go"
 rc=0
 fail() { echo "FAIL: $1"; rc=1; }
 
@@ -71,9 +71,12 @@ grep -Fq 'maxInterceptModuleHosts' "$MODULE_TYPES" && grep -Fq '= 512' "$MODULE_
     || fail "core capture-host bound is not 512"
 grep -Fq '(( count <= 512 ))' "$ROOT/scripts/intercept-cert-renew.sh" \
     || fail "certificate publisher capture-host bound is not 512"
-grep -Fq 'IN-NAME,intercept-egress),(DOMAIN-SUFFIX,compact.example.test' "$CHECKS_WORKFLOW" \
-    && grep -Fq 'DOMAIN-SUFFIX,compact.example.test),(DST-PORT,443)),MODULE-INTERCEPT' "$CHECKS_WORKFLOW" \
-    || fail "pinned mihomo CI fixture does not validate compact suffix egress and capture rules"
+# Apex-plus-wildcard compaction is a property of the compiled generation now,
+# not of any text rendered into the operator's config, so it is pinned where it
+# is produced rather than in a YAML fixture nothing emits.
+grep -Fq 'domain-suffix:example.com:443' "$MANAGER_TEST" \
+    && grep -Fq 'domain-suffix:example.com:80' "$MANAGER_TEST" \
+    || fail "the compacted suffix selector is not pinned in the committed generation"
 grep -Fq '"execution_order": []' "$INSTALL" || fail "current interception config has no explicit execution order"
 grep -Fq '"quic_fallback_protection": true' "$INSTALL" || fail "QUIC fallback protection is not configured by default"
 grep -Fq 'systemctl enable --now 5gpn-intercept-runtime.path' "$INSTALL" || fail "MITM runtime watcher is not enabled"

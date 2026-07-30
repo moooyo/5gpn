@@ -89,7 +89,12 @@ awk -v cert="$RUNTIME/cert.pem" -v key="$RUNTIME/key.pem" -v listener="$GATEWAY_
   }
   $0 == "rules:" {
     print
-    print "  - DOMAIN,origin.example.test,DIRECT"
+    # Above the egress anchor, so it has to exclude the processor inbound. The
+    # core refuses a bare allow rule here: a processor-originated connection
+    # would match it and reach its target without ever meeting the anchor,
+    # which is the egress control the overlay exists to apply. The seed panel
+    # rules carry the same exclusion for the same reason.
+    print "  - AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,origin.example.test)),DIRECT"
     next
   }
   {
