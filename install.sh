@@ -715,92 +715,8 @@ cert_role_tree_is_safe_for_recursive_metadata() {
     fi
 }
 
-# The immediately preceding beta normalized role markers and `current` symlinks
-# to the role group. Accept that exact structure only while no certificate-root
-# marker exists, then atomically republish those metadata entries in final form.
-legacy_cert_role_tree_is_migratable() {
-    local role="$1" role_name group expected_gid current target canonical entry name generations marker
-    role_name="$(basename -- "$role")"
-    case "$role_name" in
-        dot|web) group="$DNS_SERVICE_USER" ;;
-        zash) group="$MIHOMO_SERVICE_USER" ;;
-        *) return 1 ;;
-    esac
-    expected_gid="$(account_gid "$group")"
-    [[ -n "$expected_gid" ]] || return 1
-    runtime_directory_slot_is_safe "$role" "$DNS_CERT_DIR" || return 1
-    root_owned_nonwritable_directory_is_safe "$role" \
-        && [[ "$(file_gid "$role")" == "$expected_gid" \
-           && "$(file_mode "$role")" == 750 ]] || return 1
-    marker="$role/$CERT_ROLE_MARKER"
-    if ! root_ownership_marker_is_safe "$role" "$CERT_ROLE_MARKER" \
-            "${CERT_ROLE_VALUE_PREFIX}:${role_name}"; then
-        root_plain_file_metadata_is_safe "$marker" "$expected_gid" 640 \
-            && [[ "$(cat "$marker" 2>/dev/null || true)" == "${CERT_ROLE_VALUE_PREFIX}:${role_name}" ]] \
-            || return 1
-    fi
-    generations="$role/generations"
-    root_owned_nonwritable_directory_is_safe "$generations" \
-        && [[ "$(file_gid "$generations")" == "$expected_gid" \
-           && "$(file_mode "$generations")" == 750 ]] || return 1
-    current="$role/current"
-    while IFS= read -r -d '' entry; do
-        name="$(basename -- "$entry")"
-        case "$name" in
-            "$CERT_ROLE_MARKER"|generations) ;;
-            current)
-                [[ -L "$entry" && "$(file_uid "$entry")" == 0 \
-                   && ( "$(file_gid "$entry")" == 0 || "$(file_gid "$entry")" == "$expected_gid" ) \
-                   && "$(file_nlink "$entry")" == 1 ]] || return 1 ;;
-            *) return 1 ;;
-        esac
-    done < <(find "$role" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-    while IFS= read -r -d '' entry; do
-        name="$(basename -- "$entry")"
-        [[ "$name" =~ ^generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] \
-            || return 1
-        cert_generation_is_safe "$entry" "$expected_gid" || return 1
-    done < <(find "$generations" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-    if [[ -e "$current" || -L "$current" ]]; then
-        [[ -L "$current" ]] || return 1
-        target="$(readlink -- "$current")" || return 1
-        [[ "$target" =~ ^generations/generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] \
-            || return 1
-        [[ -d "$role/$target" && ! -L "$role/$target" ]] || return 1
-        canonical="$(canonical_dir_path "$role/$target")" || return 1
-        [[ "$canonical" == "$role/$target" ]] || return 1
-    fi
-}
 
-normalize_legacy_cert_role_metadata() {
-    local role="$1" role_name current target candidate
-    role_name="$(basename -- "$role")"
-    legacy_cert_role_tree_is_migratable "$role" || return 1
-    write_ownership_marker "$role" "$CERT_ROLE_MARKER" "${CERT_ROLE_VALUE_PREFIX}:${role_name}" \
-        || return 1
-    current="$role/current"
-    if [[ -e "$current" || -L "$current" ]]; then
-        target="$(readlink -- "$current")" || return 1
-        candidate="$role/.current.normalize.${BASHPID}.${RANDOM}"
-        [[ ! -e "$candidate" && ! -L "$candidate" ]] || return 1
-        ln -s "$target" "$candidate" \
-            && mv -Tf -- "$candidate" "$current" \
-            || { rm -f -- "$candidate"; return 1; }
-    fi
-    cert_role_tree_is_safe_for_recursive_metadata "$role"
-}
 
-legacy_cert_root_contents_are_migratable() {
-    local entry name
-    while IFS= read -r -d '' entry; do
-        name="$(basename -- "$entry")"
-        case "$name" in
-            .provenance) root_plain_file_metadata_is_safe "$entry" 0 640 || return 1 ;;
-            dot|web|zash) legacy_cert_role_tree_is_migratable "$entry" || return 1 ;;
-            *) return 1 ;;
-        esac
-    done < <(find "$DNS_CERT_DIR" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-}
 
 cert_root_contents_are_safe() {
     local entry name
@@ -857,13 +773,13 @@ ensure_dns_cert_root() {
     mode="$(file_mode "$DNS_CERT_DIR")"
     mode="${mode: -3}"
     [[ "$mode" == 750 || "$mode" == 751 || "$mode" == 755 ]] \
-        && legacy_cert_root_contents_are_migratable \
         || { err "Refusing to claim an unknown certificate root: $DNS_CERT_DIR"; return 1; }
-    local role
-    for role in dot web zash; do
-        [[ ! -e "$DNS_CERT_DIR/$role" && ! -L "$DNS_CERT_DIR/$role" ]] \
-            || normalize_legacy_cert_role_metadata "$DNS_CERT_DIR/$role" || return 1
-    done
+    # An unmarked root is only ever one this run just created. A populated one
+    # predates the ownership marker, and those are no longer migrated: claiming
+    # it would adopt a tree whose shape this release never validated.
+    [[ -z "$(find "$DNS_CERT_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]] \
+        || { err "Refusing to claim a populated certificate root with no ownership marker: $DNS_CERT_DIR"
+             err "Back it up and remove it, or restore the marker, before rerunning."; return 1; }
     # Five octal digits on purpose. GNU chmod preserves a directory's
     # set-group-ID bit for a four-digit mode, and this root inherits that bit
     # from the setgid CONF_DIR, so "chmod 0751" left it at 2751 and the
@@ -1216,52 +1132,7 @@ claim_project_roots() {
     claim_fixed_owned_dir "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE" 1 || return 1
 }
 
-# Older beta installs used a setgid CA directory and inherited the gpn-dns
-# group on its root-published marker. Accept only that exact, closed legacy
-# shape during read-only preflight; normalization happens after the rollback
-# snapshot and while runtime writers are stopped.
-legacy_intercept_ca_root_is_safe() {
-    local marker="$INTERCEPT_CA_DIR/$INTERCEPT_CA_MARKER" dns_gid entry name count=0
-    dns_gid="$(account_gid "$DNS_SERVICE_USER")"
-    [[ -n "$dns_gid" \
-       && -d "$INTERCEPT_CA_DIR" && ! -L "$INTERCEPT_CA_DIR" \
-       && "$(canonical_dir_path "$INTERCEPT_CA_DIR")" == "$INTERCEPT_CA_DIR" \
-       && "$(file_uid "$INTERCEPT_CA_DIR")" == 0 \
-       && "$(file_gid "$INTERCEPT_CA_DIR")" == 0 \
-       && ( "$(file_mode "$INTERCEPT_CA_DIR")" == 2700 \
-          || "$(file_mode "$INTERCEPT_CA_DIR")" == 700 ) \
-       && -f "$marker" && ! -L "$marker" \
-       && "$(file_uid "$marker")" == 0 \
-       && ( "$(file_gid "$marker")" == 0 || "$(file_gid "$marker")" == "$dns_gid" ) \
-       && "$(file_mode "$marker")" == 644 \
-       && "$(file_nlink "$marker")" == 1 \
-       && "$(cat "$marker" 2>/dev/null || true)" == "$INTERCEPT_CA_MARKER_VALUE" ]] \
-        || return 1
-    while IFS= read -r -d '' entry; do
-        name="$(basename -- "$entry")"
-        case "$name" in
-            "$INTERCEPT_CA_MARKER") ;;
-            root.crt) root_plain_file_metadata_is_safe "$entry" 0 644 || return 1 ;;
-            root.key) root_plain_file_metadata_is_safe "$entry" 0 600 || return 1 ;;
-            *) return 1 ;;
-        esac
-        count=$((count + 1))
-    done < <(find "$INTERCEPT_CA_DIR" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-    [[ "$count" == 3 ]]
-}
 
-normalize_legacy_intercept_ca_root() {
-    local marker="$INTERCEPT_CA_DIR/$INTERCEPT_CA_MARKER"
-    legacy_intercept_ca_root_is_safe \
-        || { err "Legacy interception CA root failed strict migration validation."; return 1; }
-    chown root:root "$marker" \
-        && chmod 0644 "$marker" \
-        && chmod 0700 "$INTERCEPT_CA_DIR" \
-        && chmod g-s "$INTERCEPT_CA_DIR" \
-        || { err "Could not normalize the legacy interception CA root metadata."; return 1; }
-    fixed_owned_dir_is_safe "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" \
-        || { err "Normalized interception CA root failed validation."; return 1; }
-}
 
 # New fixed roots must be inspected without mutating the host before the
 # install transaction records whether each path was absent. Existing paths are
@@ -1293,23 +1164,17 @@ report_orphaned_root_owner() {
 }
 
 # The CA root holds signing key material, so a pre-existing one is accepted only
-# on its own marker or the exact closed legacy shape. The state root is an
-# ordinary 5gpn artifact root and is claimed rather than inspected: refusing it
-# here could only mean the host had not upgraded yet.
+# on its own marker. The state root is an ordinary 5gpn artifact root and is
+# claimed rather than inspected: refusing it here could only mean the host had
+# not upgraded yet.
 preflight_intercept_roots() {
     [[ -e "$INTERCEPT_CA_DIR" || -L "$INTERCEPT_CA_DIR" ]] || return 0
     fixed_owned_dir_is_safe "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" \
-        || legacy_intercept_ca_root_is_safe \
         || { err "Refusing pre-existing unowned interception CA root: $INTERCEPT_CA_DIR"
              report_orphaned_root_owner "$INTERCEPT_CA_DIR"; return 1; }
 }
 
 claim_intercept_roots() {
-    if [[ -e "$INTERCEPT_CA_DIR" || -L "$INTERCEPT_CA_DIR" ]]; then
-        if ! fixed_owned_dir_is_safe "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE"; then
-            normalize_legacy_intercept_ca_root || return 1
-        fi
-    fi
     claim_fixed_owned_dir "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" || return 1
     claim_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" 1 || return 1
 }
@@ -1515,11 +1380,6 @@ claim_zashboard_dir() {
     export DNS_ZASH_DIR
 }
 
-clear_zashboard_dir() {
-    claim_zashboard_dir || return 1
-    clear_owned_scope "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
-        "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER"
-}
 
 remove_zashboard_dir() {
     local p

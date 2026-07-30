@@ -1195,7 +1195,13 @@ marker. These ownership values therefore carry no revision suffix.
 Certificate material is the exception and keeps strict ownership: the
 certificate root and role trees, the debug-certificate root, the Certbot lineage
 ownership record, and the interception CA root are accepted only on their own
-valid marker, or — for a legacy CA root — on the exact closed legacy shape.
+valid marker. There is no migration path for an unmarked one: a populated
+certificate root or an unowned interception CA root is refused outright, during
+preflight and therefore before anything is published. Adopting a tree whose
+shape this release never validated is the one thing that must not happen to
+signing key material, and the pre-marker shapes those paths used to accept are
+no longer recognised. An operator meeting this refusal backs the tree up and
+removes it, or restores the marker, before rerunning.
 Because there is no self-healing claim on that path, their marker values are
 frozen: changing one strands every existing host. The config-root value is
 additionally duplicated in `scripts/cert-renew.sh`,

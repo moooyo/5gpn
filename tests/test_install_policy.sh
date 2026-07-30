@@ -103,8 +103,8 @@ grep -Eq '^// 5gpn-polkit-id: [a-z-]+$' "$ROOT/etc/polkit-1/rules.d/50-5gpn.rule
 # The value a root is claimed with must never be versioned: comparing it exactly
 # is what wedged upgrades. A LEGACY value is the opposite of that mistake -- it
 # is never written, only accepted so the claim can heal a marker an older release
-# left behind, which is the role legacy_intercept_ca_root_is_safe plays for the
-# CA root. So the rule covers the values we write and exempts that one shape.
+# left behind, which is what CONF_LEGACY_OWNERSHIP_VALUE does for the config
+# root. So the rule covers the values we write and exempts that one shape.
 if grep -RE '_VALUE="5gpn-(runtime|config|state|web|ios|temp|zashboard|intercept-state)-v[0-9]' "$INSTALL" \
     | grep -qv 'LEGACY'; then
     fail "a self-healing ownership value carries a revision suffix again"

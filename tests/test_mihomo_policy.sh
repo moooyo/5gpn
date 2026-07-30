@@ -196,7 +196,6 @@ else
 fi
 # Custom DNS_ZASH_DIR cleanup is marker-gated; raw rm of the env path is banned.
 check install.sh 'claim_zashboard_dir\(\)' 'zashboard ownership marker claim exists'
-check install.sh 'clear_zashboard_dir\(\)' 'zashboard marker-gated clear exists'
 check install.sh 'remove_zashboard_dir\(\)' 'zashboard marker-gated uninstall exists'
 nocheck install.sh 'rm -rf "\$DNS_ZASH_DIR"' 'no raw recursive deletion of DNS_ZASH_DIR'
 # The zashboard backend-seeding deep-link is C3 frontend scope, NOT the

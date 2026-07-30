@@ -415,45 +415,6 @@ else
 fi
 
 if (
-    INTERCEPT_CA_DIR="$TMP/legacy-intercept-ca"
-    DNS_SERVICE_USER=gpn-dns
-    normalized=0
-    mkdir -p "$INTERCEPT_CA_DIR"
-    printf '%s\n' "$INTERCEPT_CA_MARKER_VALUE" > "$INTERCEPT_CA_DIR/$INTERCEPT_CA_MARKER"
-    printf '%s\n' cert > "$INTERCEPT_CA_DIR/root.crt"
-    printf '%s\n' key > "$INTERCEPT_CA_DIR/root.key"
-    getent() { [[ "$1" == group && "$2" == gpn-dns ]] && printf 'gpn-dns:x:4242:\n'; }
-    file_uid() { printf '0\n'; }
-    file_gid() {
-        if [[ "$1" == "$INTERCEPT_CA_DIR/$INTERCEPT_CA_MARKER" && "$normalized" == 0 ]]; then
-            printf '4242\n'
-        else
-            printf '0\n'
-        fi
-    }
-    file_mode() {
-        case "$1" in
-            "$INTERCEPT_CA_DIR") [[ "$normalized" == 1 ]] && printf '700\n' || printf '2700\n' ;;
-            "$INTERCEPT_CA_DIR/root.key") printf '600\n' ;;
-            *) printf '644\n' ;;
-        esac
-    }
-    file_nlink() { printf '1\n'; }
-    chown() { return 0; }
-    chmod() {
-        [[ "$1" != 0700 || "$2" != "$INTERCEPT_CA_DIR" ]] || normalized=1
-        return 0
-    }
-    legacy_intercept_ca_root_is_safe \
-        && normalize_legacy_intercept_ca_root \
-        && [[ "$normalized" == 1 ]]
-); then
-    pass "legacy setgid interception CA metadata normalizes after strict validation"
-else
-    fail "valid legacy interception CA metadata cannot upgrade safely"
-fi
-
-if (
     CONF_DIR="$TMP/cfg-get-safe"
     DNS_SERVICE_USER=gpn-dns
     mkdir -p "$CONF_DIR"
@@ -602,70 +563,6 @@ if (
     pass "certificate role permits only its bounded generation pointer"
 else
     fail "certificate role tree validation missed a valid or escaping current pointer"
-fi
-
-if (
-    CONF_DIR="$TMP/cert-migration-conf"
-    DNS_CERT_DIR="$CONF_DIR/cert"
-    DNS_SERVICE_USER=gpn-dns
-    role="$DNS_CERT_DIR/dot"
-    generation="$role/generations/generation-20260721T020304Z-30-40"
-    mkdir -p "$generation"
-    printf '%s\n' "$CONF_OWNERSHIP_VALUE" > "$CONF_DIR/$CONF_OWNERSHIP_MARKER"
-    printf '%s\n' "${CERT_ROLE_VALUE_PREFIX}:dot" > "$role/$CERT_ROLE_MARKER"
-    printf 'cert\n' > "$generation/fullchain.pem"
-    printf 'key\n' > "$generation/privkey.pem"
-    command ln -s "generations/$(basename -- "$generation")" "$role/current"
-    role_marker_normalized=0
-    current_normalized=0
-    root_marker_written=0
-    account_gid() { printf '4242\n'; }
-    file_uid() { printf '0\n'; }
-    file_gid() {
-        case "$1" in
-            "$CONF_DIR"|"$CONF_DIR/$CONF_OWNERSHIP_MARKER"|"$DNS_CERT_DIR"|"$DNS_CERT_DIR/$CERT_ROOT_MARKER")
-                printf '0\n' ;;
-            "$role/$CERT_ROLE_MARKER")
-                [[ "$role_marker_normalized" == 1 ]] && printf '0\n' || printf '4242\n' ;;
-            "$role/current")
-                [[ "$current_normalized" == 1 ]] && printf '0\n' || printf '4242\n' ;;
-            *) printf '4242\n' ;;
-        esac
-    }
-    file_mode() {
-        case "$1" in
-            "$CONF_DIR") printf '755\n' ;;
-            "$CONF_DIR/$CONF_OWNERSHIP_MARKER"|"$DNS_CERT_DIR/$CERT_ROOT_MARKER") printf '644\n' ;;
-            "$DNS_CERT_DIR") printf '751\n' ;;
-            "$role"|"$role/generations"|"$generation") printf '750\n' ;;
-            "$role/$CERT_ROLE_MARKER")
-                [[ "$role_marker_normalized" == 1 ]] && printf '644\n' || printf '640\n' ;;
-            *) printf '640\n' ;;
-        esac
-    }
-    file_nlink() { printf '1\n'; }
-    write_ownership_marker() {
-        local dir="$1" name="$2" value="$3"
-        printf '%s\n' "$value" > "$dir/$name" || return 1
-        case "$name" in
-            "$CERT_ROLE_MARKER") role_marker_normalized=1 ;;
-            "$CERT_ROOT_MARKER") root_marker_written=1 ;;
-        esac
-    }
-    ln() {
-        command ln "$@" || return 1
-        [[ "$*" != *'.current.normalize.'* ]] || current_normalized=1
-    }
-    legacy_cert_role_tree_is_migratable "$role" \
-        && ensure_dns_cert_root \
-        && cert_root_is_safe \
-        && [[ "$role_marker_normalized" == 1 \
-           && "$current_normalized" == 1 \
-           && "$root_marker_written" == 1 ]]
-); then
-    pass "legacy 0751 certificate trees normalize safely before root-marker claim"
-else
-    fail "legacy certificate tree could not be normalized to the current boundary"
 fi
 
 debug_root="$TMP/debug-cert-root"
@@ -1253,12 +1150,10 @@ if (
     rm -f "$DNS_ZASH_DIR/file"
     claim_zashboard_dir >/dev/null
     echo owned > "$DNS_ZASH_DIR/file"
-    clear_zashboard_dir >/dev/null
-    [[ -f "$DNS_ZASH_DIR/$ZASH_OWNERSHIP_MARKER" && ! -e "$DNS_ZASH_DIR/file" ]]
     remove_zashboard_dir >/dev/null
     [[ ! -e "$DNS_ZASH_DIR" ]]
 ); then
-    pass "zashboard ownership marker gates cleanup and removal"
+    pass "zashboard ownership marker gates removal"
 else
     fail "zashboard ownership lifecycle check failed"
 fi
