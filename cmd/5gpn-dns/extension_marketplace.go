@@ -114,8 +114,8 @@ type marketplaceResource struct {
 }
 
 type marketplaceCapabilities struct {
-	CaptureHostCount int      `json:"captureHostCount"`
-	ActionCount      int      `json:"actionCount"`
+	CaptureHostCount int `json:"captureHostCount"`
+	ActionCount      int `json:"actionCount"`
 	SettingCount     int `json:"settingCount"`
 	// Network is the network grant. An index that omits it decodes as false,
 	// which is the safe direction: the check below then refuses to install a
@@ -173,8 +173,8 @@ type marketplaceEntryView struct {
 }
 
 type marketplaceCapabilitiesView struct {
-	CaptureHostCount     int      `json:"capture_host_count"`
-	ActionCount          int      `json:"action_count"`
+	CaptureHostCount     int  `json:"capture_host_count"`
+	ActionCount          int  `json:"action_count"`
 	SettingCount         int  `json:"setting_count"`
 	Network              bool `json:"network"`
 	PersistentStorage    bool `json:"persistent_storage"`

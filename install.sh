@@ -171,11 +171,11 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # They share no Go types — only a versioned control-API wire format — so the
 # thing that keeps them working together is a schema number, not a build.
 SIDECAR_REPO="moooyo/mihomo-extension-sidecar"
-SIDECAR_VERSION="0.2.0"
-SIDECAR_SHA256="fde2ca07af957158b037d2ced2bcb60a9f4e2bcdd82646ea67700d4a63d5fb51"
+SIDECAR_VERSION="0.3.0"
+SIDECAR_SHA256="eb25e3820ef2bed8688d8a1dc2cf7657237e3c4f893f6d5494d16587f7892441"
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-overlay.4"
-MIHOMO_SHA256="6af4adc03907ad776783c1e3029795e450a124c5ff880217e2a9672310a10c0d"
+MIHOMO_VERSION="v1.19.28-overlay.5"
+MIHOMO_SHA256="8e85c4f744151eb35c6ebfb9573abc310c433fd45d72cd51c4aacd9bde5275a2"
 ZASH_REPO="moooyo/zashboard"
 ZASH_VERSION="v3.16.0-overlay.1"         # our fork's dist.zip, built from 5gpn-ext
 ZASH_SHA256="b5d003f55f9424eaaa78f901a5b37912dbd9ac07cb37e17c527b209c52947bf4"

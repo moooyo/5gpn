@@ -361,27 +361,27 @@ func isJSONNull(raw json.RawMessage) bool {
 }
 
 type interceptModuleSnapshot struct {
-	ID                  string                   `json:"id"`
-	Version             string                   `json:"extension_version"`
-	Name                string                   `json:"name"`
-	Description         string                   `json:"description,omitempty"`
-	Enabled             bool                     `json:"enabled"`
-	ImportedAt          string                   `json:"imported_at"`
-	Source              interceptModuleSource    `json:"source"`
-	CaptureHosts        []string                 `json:"capture_hosts"`
-	CaptureDNS          string                   `json:"capture_dns,omitempty"`
-	HostMappings        []interceptHostMapping   `json:"upstream_mappings,omitempty"`
-	RoutingRules        interceptRoutingRuleList `json:"routing_rules,omitempty"`
-	Settings            []interceptModuleSetting `json:"settings,omitempty"`
-	Scripts             []interceptScriptRule    `json:"actions,omitempty"`
-	PersistentStorage bool `json:"persistent_storage"`
+	ID                string                   `json:"id"`
+	Version           string                   `json:"extension_version"`
+	Name              string                   `json:"name"`
+	Description       string                   `json:"description,omitempty"`
+	Enabled           bool                     `json:"enabled"`
+	ImportedAt        string                   `json:"imported_at"`
+	Source            interceptModuleSource    `json:"source"`
+	CaptureHosts      []string                 `json:"capture_hosts"`
+	CaptureDNS        string                   `json:"capture_dns,omitempty"`
+	HostMappings      []interceptHostMapping   `json:"upstream_mappings,omitempty"`
+	RoutingRules      interceptRoutingRuleList `json:"routing_rules,omitempty"`
+	Settings          []interceptModuleSetting `json:"settings,omitempty"`
+	Scripts           []interceptScriptRule    `json:"actions,omitempty"`
+	PersistentStorage bool                     `json:"persistent_storage"`
 	// Network is the whole network permission: the script request API, and a
 	// request-phase URL rewrite to any origin. There is no origin list beside
 	// it, so a review can say that an extension may reach the network but not
 	// where.
-	Network             bool `json:"network,omitempty"`
-	EgressGroupRequired bool `json:"egress_group_required"`
-	EgressGroup         string                   `json:"egress_group,omitempty"`
+	Network             bool   `json:"network,omitempty"`
+	EgressGroupRequired bool   `json:"egress_group_required"`
+	EgressGroup         string `json:"egress_group,omitempty"`
 }
 
 type interceptModuleView struct {
@@ -399,10 +399,10 @@ type interceptModuleView struct {
 	Settings            []interceptModuleSetting    `json:"settings,omitempty"`
 	HostMappings        []interceptHostMapping      `json:"upstream_mappings,omitempty"`
 	RoutingRules        []interceptRoutingRule      `json:"routing_rules,omitempty"`
-	PersistentStorage   bool `json:"persistent_storage"`
-	ExecutionOrder      int  `json:"execution_order"`
-	Network             bool `json:"network,omitempty"`
-	EgressGroupRequired bool `json:"egress_group_required"`
+	PersistentStorage   bool                        `json:"persistent_storage"`
+	ExecutionOrder      int                         `json:"execution_order"`
+	Network             bool                        `json:"network,omitempty"`
+	EgressGroupRequired bool                        `json:"egress_group_required"`
 	EgressGroup         string                      `json:"egress_group,omitempty"`
 	SourceURL           string                      `json:"source_url,omitempty"`
 	SourceDigest        string                      `json:"source_digest"`

@@ -44,9 +44,9 @@ func TestInterceptMihomoRoutingUsesExecutionOrderAndDeduplicatesSelectors(t *tes
 		Modules: []interceptModuleSnapshot{
 			{
 				ID: "io.example.first", Enabled: true, EgressGroup: "Japan",
-				CaptureHosts:   []string{"api.example.com"},
-				Network: true,
-				HostMappings:   []interceptHostMapping{{Pattern: "api.example.com", Target: "203.0.113.7"}},
+				CaptureHosts: []string{"api.example.com"},
+				Network:      true,
+				HostMappings: []interceptHostMapping{{Pattern: "api.example.com", Target: "203.0.113.7"}},
 			},
 			{
 				ID: "io.example.second", Enabled: true, EgressGroup: "Proxies",
