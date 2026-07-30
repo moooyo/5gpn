@@ -13,11 +13,22 @@ awk '
     print "  - {name: gateway, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: console.example.test:443}"
     next
   }
-  # This regression pins the compact-suffix rendering against a core that
-  # predates the runtime overlay, so it renders the unanchored form. An anchor
-  # that core cannot resolve makes the config unparseable, which is why the
-  # installer probes before emitting them.
-  $0 == "__OVERLAY_EGRESS_ANCHOR__" || $0 == "__OVERLAY_CLIENT_ANCHOR__" || $0 == "__OVERLAY_RUNTIME_BLOCK__" {
+  # The anchors are literal in the template; only the runtime block is
+  # substituted, and it must be, because an anchor with no block behind it is a
+  # config mihomo refuses to parse. Probe identities, exactly as
+  # render_overlay_runtime_block emits them.
+  $0 == "__OVERLAY_RUNTIME_BLOCK__" {
+    print ""
+    print "runtime-overlay:"
+    print "  owner: 5gpn"
+    print "  control-socket: /run/mihomo/overlay-control.sock"
+    print "  generation-socket: /run/mihomo/overlay-generation.sock"
+    print "  control-peer-uid: 65534"
+    print "  control-peer-gid: 65534"
+    print "  control-socket-gid: 65534"
+    print "  generation-peer-uid: 65534"
+    print "  generation-peer-gid: 65534"
+    print "  generation-socket-gid: 65534"
     next
   }
   {

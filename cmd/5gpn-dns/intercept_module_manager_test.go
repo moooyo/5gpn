@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -135,7 +137,205 @@ func newInterceptManagerFixture(t *testing.T, modules ...interceptModuleSnapshot
 	handler := &Handler{}
 	controller := &fakeMihomoController{reachable: true, authenticated: true}
 	manager := NewInterceptModuleManager(NewInterceptConfigStore(interceptPath), handler, nil, NewMihomoConfigStore(mihomoPath), goldenInfraParams(), &fakeMihomoTester{}, controller)
+	// The overlay driver is the only publication path, so a manager without one
+	// refuses every routing change. Fixtures get a core that accepts a stage and
+	// a commit; tests that need a failing driver install their own.
+	manager.SetOverlayDriver(NewOverlayDriver(stubCommittingOverlayCore(t).client, newTestOverlayJournal(t)))
 	return manager, controller, handler, interceptPath, mihomoPath
+}
+
+// newInterceptManagerFixtureWithCore is newInterceptManagerFixture for tests
+// that have to look at what was published. Routing no longer reaches the mihomo
+// file, so the committed generation is the only place it can be seen.
+func newInterceptManagerFixtureWithCore(t *testing.T, modules ...interceptModuleSnapshot) (*InterceptModuleManager, *recordingOverlayCore, *fakeMihomoController, *Handler, string, string) {
+	t.Helper()
+	manager, controller, handler, interceptPath, mihomoPath := newInterceptManagerFixture(t, modules...)
+	core := stubCommittingOverlayCore(t)
+	manager.SetOverlayDriver(NewOverlayDriver(core.client, newTestOverlayJournal(t)))
+	return manager, core, controller, handler, interceptPath, mihomoPath
+}
+
+func newTestOverlayJournal(t *testing.T) *OverlayJournal {
+	t.Helper()
+	journal, err := NewOverlayJournal(filepath.Join(t.TempDir(), "overlay-journal.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return journal
+}
+
+// recordingOverlayCore is a control socket that carries a generation all the way
+// through: it stages what it is given and makes it active on commit, so a
+// readback afterwards reports the generation the driver just published. That
+// round trip is what the manager's publish path depends on.
+//
+// It keeps every staged document as well. The mihomo file is no longer
+// rewritten for a routing change, so the committed generation is where a test
+// looks to see what was published.
+type recordingOverlayCore struct {
+	client *OverlayClient
+
+	mu      sync.Mutex
+	staged  map[string]overlayDocument
+	active  string
+	commits int
+}
+
+// committed returns the generation the core last made active.
+func (c *recordingOverlayCore) committed(t *testing.T) overlayDocument {
+	t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.active == "" {
+		t.Fatal("no generation was committed")
+	}
+	doc, ok := c.staged[c.active]
+	if !ok {
+		t.Fatalf("the active generation %q was never staged", c.active)
+	}
+	return doc
+}
+
+// commitCount reports how many generations were made active. Publishing the
+// generation that is already live is a no-op, so this counts real transitions.
+func (c *recordingOverlayCore) commitCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.commits
+}
+
+// captureSelectors renders a committed generation's capture rules as
+// "<kind>:<value>:<port>", which is what the legacy driver used to express as
+// mihomo capture rule text.
+func overlayCaptureSelectors(doc overlayDocument) []string {
+	out := []string{}
+	for _, rule := range doc.Client.Rules {
+		if rule.Action != overlayActionCapture {
+			continue
+		}
+		for _, port := range rule.Ports {
+			out = append(out, fmt.Sprintf("%s:%s:%d", rule.Kind, rule.Value, port.From))
+		}
+	}
+	return out
+}
+
+// overlayEgressGroupFor reports the group a committed generation authorises for
+// one destination and port, or "" for none. The legacy driver expressed this as
+// the first matching `AND,((IN-NAME,intercept-egress),…),<group>` rule; here the
+// destination sets are disjoint, so the answer is a lookup rather than a scan.
+func overlayEgressGroupFor(doc overlayDocument, kind overlaySelectorKind, value string, port uint16) string {
+	for _, capability := range doc.Egress.Capabilities {
+		for _, binding := range capability.Bindings {
+			for _, destination := range binding.Destinations {
+				if destination.Kind != kind || destination.Value != value {
+					continue
+				}
+				for _, allowed := range destination.Ports {
+					if port >= allowed.From && port <= allowed.To {
+						return binding.Group
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func stubCommittingOverlayCore(t *testing.T) *recordingOverlayCore {
+	t.Helper()
+	return newRecordingOverlayCore(t, false)
+}
+
+// stubRefusingOverlayCore stages a generation and then refuses to commit it,
+// with a code the client classifies as terminal so the outcome is unambiguous.
+// A publication fails this way now: the commit does not land. The mihomo
+// controller is no longer in the publish path and cannot fail it.
+func stubRefusingOverlayCore(t *testing.T) *recordingOverlayCore {
+	t.Helper()
+	return newRecordingOverlayCore(t, true)
+}
+
+func newRecordingOverlayCore(t *testing.T, refuseCommit bool) *recordingOverlayCore {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "control.sock")
+
+	core := &recordingOverlayCore{staged: map[string]overlayDocument{}}
+	revision := uint64(1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/capabilities", func(w http.ResponseWriter, r *http.Request) {
+		out := overlayCapabilities{ControllerAPI: "1"}
+		out.Features = map[string]struct {
+			Version int    `json:"version"`
+			Owner   string `json:"owner"`
+		}{"runtime-overlay": {Version: 1, Owner: overlayOwner}}
+		_ = json.NewEncoder(w).Encode(out)
+	})
+	base := "/runtime-overlays/" + overlayOwner
+	mux.HandleFunc(base+"/readiness", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc(base+"/generations/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, base+"/generations/")
+		core.mu.Lock()
+		defer core.mu.Unlock()
+		switch {
+		case strings.HasSuffix(id, "/commit"):
+			if refuseCommit {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(overlayErrorBody{
+					Code: "invalid_document", Message: "stub core refuses this generation",
+				})
+				return
+			}
+			core.active = strings.TrimSuffix(id, "/commit")
+			core.commits++
+			revision++
+			_ = json.NewEncoder(w).Encode(overlayCommitResult{
+				ActiveGeneration: core.active,
+				ActiveDigest:     "digest-" + core.active,
+				CoreRevision:     revision,
+				ResolverEpoch:    revision,
+			})
+		case strings.HasSuffix(id, "/abort"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			var doc overlayDocument
+			if err := json.NewDecoder(r.Body).Decode(&doc); err == nil {
+				core.staged[id] = doc
+			}
+			out := overlayStageResult{GenerationID: id, CoreRevision: revision}
+			out.Digests.Overall = "digest-" + id
+			out.Digests.Projection = "projection-" + id
+			_ = json.NewEncoder(w).Encode(out)
+		}
+	})
+	mux.HandleFunc(base, func(w http.ResponseWriter, r *http.Request) {
+		core.mu.Lock()
+		defer core.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(overlayReadback{
+			Enabled:          true,
+			ActiveGeneration: core.active,
+			ActiveDigest:     "digest-" + core.active,
+			CoreRevision:     revision,
+			ResolverEpoch:    revision,
+			ProcessorState:   "ready",
+			SchemaVersion:    overlaySchemaVersion,
+		})
+	})
+
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Skipf("unix sockets unavailable here: %v", err)
+	}
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(l)
+	t.Cleanup(func() { _ = srv.Close() })
+	core.client = NewOverlayClient(sock)
+	return core
 }
 
 type countingInterceptConfigTester struct {
@@ -377,12 +577,13 @@ func TestInterceptModuleManagerInactiveOnlyReorderSkipsMihomoApply(t *testing.T)
 
 func TestInterceptModuleManagerEnableDisablePublishesOneTransaction(t *testing.T) {
 	module := testModuleSnapshot()
-	manager, controller, handler, interceptPath, mihomoPath := newInterceptManagerFixture(t, module)
+	manager, core, controller, handler, interceptPath, mihomoPath := newInterceptManagerFixtureWithCore(t, module)
 	var certificateDigests []string
 	manager.certWait = func(_ context.Context, digest string) error {
 		certificateDigests = append(certificateDigests, digest)
 		return nil
 	}
+	beforeMihomo := mustRead(t, mihomoPath)
 	before, err := manager.View()
 	if err != nil {
 		t.Fatal(err)
@@ -392,17 +593,23 @@ func TestInterceptModuleManagerEnableDisablePublishesOneTransaction(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(certificateDigests) != 1 || controller.putCalls != 1 {
-		t.Fatalf("certificate/apply calls = %d/%d", len(certificateDigests), controller.putCalls)
+	// One transaction is now one committed generation. The operator's mihomo
+	// file is not rewritten and mihomo is not reloaded for it, so a controller
+	// call here would mean routing had leaked back into the YAML.
+	if len(certificateDigests) != 1 || core.commitCount() != 1 || controller.putCalls != 0 {
+		t.Fatalf("certificate/commit/apply calls = %d/%d/%d", len(certificateDigests), core.commitCount(), controller.putCalls)
 	}
 	if got := handler.decideName("api.example.com"); got.Action != actionGateway || got.Verdict.Reason != "force-proxy" {
 		t.Fatalf("DNS overlay = %+v", got)
 	}
-	mihomoBody, _ := os.ReadFile(mihomoPath)
-	wantRule := "AND,((DOMAIN,api.example.com),(DST-PORT,443)),MODULE-INTERCEPT"
-	wantHTTPRule := "AND,((DOMAIN,api.example.com),(DST-PORT,80)),MODULE-INTERCEPT"
-	if !strings.Contains(string(mihomoBody), wantRule) || !strings.Contains(string(mihomoBody), wantHTTPRule) {
-		t.Fatalf("mihomo capture routes missing:\n%s", mihomoBody)
+	if got := mustRead(t, mihomoPath); got != beforeMihomo {
+		t.Fatalf("enabling an extension rewrote the operator's mihomo config:\n%s", got)
+	}
+	selectors := overlayCaptureSelectors(core.committed(t))
+	for _, want := range []string{"domain:api.example.com:443", "domain:api.example.com:80"} {
+		if !containsString(selectors, want) {
+			t.Fatalf("committed generation is missing capture selector %q: %v", want, selectors)
+		}
 	}
 	configBody, _ := os.ReadFile(interceptPath)
 	document, err := decodeInterceptConfig(configBody)
@@ -415,80 +622,59 @@ func TestInterceptModuleManagerEnableDisablePublishesOneTransaction(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if final.Modules[0].Enabled || controller.putCalls != 2 || len(final.ActiveCaptureHosts) != 0 {
-		t.Fatalf("disabled view/calls = %+v %d", final, controller.putCalls)
+	if final.Modules[0].Enabled || core.commitCount() != 2 || len(final.ActiveCaptureHosts) != 0 {
+		t.Fatalf("disabled view/commits = %+v %d", final, core.commitCount())
+	}
+	if len(overlayCaptureSelectors(core.committed(t))) != 0 {
+		t.Fatal("disabling the extension left capture selectors in the committed generation")
 	}
 }
 
-func TestInterceptModuleManagerUsesDaemonBackupOutsideStickyMihomoDir(t *testing.T) {
+// A failed publication must leave both files exactly as it found them. The
+// mihomo config is no longer one of the things a routing change writes, so what
+// this pins is that a refused generation still rolls the sidecar document back
+// and still does not touch the operator's config or either backup.
+func TestInterceptModuleManagerRestoresExactFilesWhenPublicationFails(t *testing.T) {
 	module := testModuleSnapshot()
-	for _, tc := range []struct {
-		name         string
-		rollback     bool
-		wantPutCalls int
-	}{
-		{name: "publish", wantPutCalls: 1},
-		{name: "controller rollback", rollback: true, wantPutCalls: 2},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			manager, controller, _, interceptPath, mihomoPath := newInterceptManagerFixture(t, module)
-			legacyBackupPath, legacyBackupBody := seedLegacyMihomoBackup(t, manager.mihomo)
-			originalIntercept := mustRead(t, interceptPath)
-			originalMihomo := mustRead(t, mihomoPath)
-			manager.certWait = func(context.Context, string) error { return nil }
-			var rollbackController *rollbackTestController
-			if tc.rollback {
-				rollbackController = &rollbackTestController{}
-				manager.controller = rollbackController
-			}
+	manager, controller, _, interceptPath, mihomoPath := newInterceptManagerFixture(t, module)
+	manager.SetOverlayDriver(NewOverlayDriver(stubRefusingOverlayCore(t).client, newTestOverlayJournal(t)))
+	legacyBackupPath, legacyBackupBody := seedLegacyMihomoBackup(t, manager.mihomo)
+	originalIntercept := mustRead(t, interceptPath)
+	originalMihomo := mustRead(t, mihomoPath)
+	manager.certWait = func(context.Context, string) error { return nil }
 
-			view, err := manager.View()
-			if err != nil {
-				t.Fatal(err)
-			}
-			enabled := true
-			_, err = manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled})
-			if tc.rollback {
-				if !errors.Is(err, errInterceptApplyFailed) {
-					t.Fatalf("rollback update error = %v", err)
-				}
-				if rollbackController.putCalls != tc.wantPutCalls {
-					t.Fatalf("rollback controller calls = %d, want %d", rollbackController.putCalls, tc.wantPutCalls)
-				}
-				if mustRead(t, mihomoPath) != originalMihomo || mustRead(t, interceptPath) != originalIntercept {
-					t.Fatal("failed extension transaction did not restore the exact old files")
-				}
-			} else {
-				if err != nil {
-					t.Fatal(err)
-				}
-				if controller.putCalls != tc.wantPutCalls {
-					t.Fatalf("controller calls = %d, want %d", controller.putCalls, tc.wantPutCalls)
-				}
-				if !strings.Contains(mustRead(t, mihomoPath), "DOMAIN,api.example.com") {
-					t.Fatal("successful extension transaction did not publish its mihomo rule")
-				}
-			}
-
-			backup, err := os.ReadFile(manager.mihomo.BackupPath())
-			if err != nil || string(backup) != originalMihomo {
-				t.Fatalf("daemon backup = %q, %v", backup, err)
-			}
-			if info, err := os.Stat(manager.mihomo.BackupPath()); err != nil || filesystemSupportsPOSIXModes(t, filepath.Dir(manager.mihomo.BackupPath())) && info.Mode().Perm() != 0o640 {
-				t.Fatalf("daemon backup mode: info=%v err=%v", info, err)
-			}
-			legacyBackup, err := os.ReadFile(legacyBackupPath)
-			if err != nil || string(legacyBackup) != legacyBackupBody {
-				t.Fatalf("extension transaction changed legacy backup: body=%q err=%v", legacyBackup, err)
-			}
-		})
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	if _, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled}); !errors.Is(err, errInterceptApplyFailed) {
+		t.Fatalf("refused publication error = %v, want an apply failure", err)
+	}
+	if mustRead(t, mihomoPath) != originalMihomo || mustRead(t, interceptPath) != originalIntercept {
+		t.Fatal("failed extension transaction did not restore the exact old files")
+	}
+	if controller.putCalls != 0 {
+		t.Fatalf("failed publication reloaded mihomo: %d controller calls", controller.putCalls)
+	}
+	// The daemon backup belongs to the mihomo config editor, which is the only
+	// writer of that file. A routing change must not create one.
+	if _, err := os.Stat(manager.mihomo.BackupPath()); !os.IsNotExist(err) {
+		t.Fatalf("a routing change wrote a mihomo backup: %v", err)
+	}
+	if legacyBackup, err := os.ReadFile(legacyBackupPath); err != nil || string(legacyBackup) != legacyBackupBody {
+		t.Fatalf("extension transaction changed legacy backup: body=%q err=%v", legacyBackup, err)
 	}
 }
 
-func TestInterceptModuleManagerRollsBackCompactSuffixBlockOnControllerFailure(t *testing.T) {
+// A capture-host set that compacts to a suffix is the case most likely to be
+// mangled by a partial rollback. The generation carries it as two selectors;
+// after a refused publication both the sidecar document and the live generation
+// must be exactly what they were.
+func TestInterceptModuleManagerRollsBackCompactSuffixBlockOnPublicationFailure(t *testing.T) {
 	module := testModuleSnapshot()
 	module.CaptureHosts = []string{"*.example.com", "example.com"}
-	manager, _, handler, interceptPath, mihomoPath := newInterceptManagerFixture(t, module)
+	manager, core, _, handler, interceptPath, mihomoPath := newInterceptManagerFixtureWithCore(t, module)
 	manager.certWait = func(context.Context, string) error { return nil }
 	view, err := manager.View()
 	if err != nil {
@@ -500,53 +686,58 @@ func TestInterceptModuleManagerRollsBackCompactSuffixBlockOnControllerFailure(t 
 		t.Fatal(err)
 	}
 	activeIntercept, activeMihomo := mustRead(t, interceptPath), mustRead(t, mihomoPath)
-	if strings.Count(activeMihomo, "DOMAIN-SUFFIX,example.com") != 4 {
-		t.Fatalf("active compact block does not contain two egress and two capture rules:\n%s", activeMihomo)
+	activeGeneration := core.committed(t)
+	for _, want := range []string{"domain-suffix:example.com:443", "domain-suffix:example.com:80"} {
+		if !containsString(overlayCaptureSelectors(activeGeneration), want) {
+			t.Fatalf("active generation is missing compacted selector %q: %v", want, overlayCaptureSelectors(activeGeneration))
+		}
 	}
 
-	controller := &rollbackTestController{}
-	manager.controller = controller
+	manager.SetOverlayDriver(NewOverlayDriver(stubRefusingOverlayCore(t).client, newTestOverlayJournal(t)))
 	disabled := false
 	if _, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &disabled}); !errors.Is(err, errInterceptApplyFailed) {
-		t.Fatalf("disable error = %v, want controller apply failure", err)
-	}
-	if controller.putCalls != 2 {
-		t.Fatalf("controller calls = %d, want candidate + rollback", controller.putCalls)
+		t.Fatalf("disable error = %v, want a publication failure", err)
 	}
 	if got := mustRead(t, interceptPath); got != activeIntercept {
 		t.Fatal("sidecar document was not restored exactly")
 	}
 	if got := mustRead(t, mihomoPath); got != activeMihomo {
-		t.Fatal("compact suffix mihomo block was not restored exactly")
+		t.Fatal("a failed publication rewrote the operator's mihomo config")
 	}
 	if decision := handler.decideName("api.example.com"); decision.Action != actionGateway {
 		t.Fatalf("DNS overlay changed after rollback: %+v", decision)
 	}
 }
 
-func TestInterceptModuleManagerExplicitToggleRepairsMissingOwnedRouting(t *testing.T) {
+// Disabling an extension has to withdraw the reviewed reject/direct rules it
+// owns, not just its capture hosts. Those rules only ever existed because both
+// the extension and the MITM master were enabled.
+func TestInterceptModuleDisableWithdrawsReviewedRoutingRules(t *testing.T) {
 	module := testModuleSnapshot()
 	module.Enabled = true
 	module.RoutingRules = []interceptRoutingRule{{Action: "reject", Domain: "ads.example.com"}}
-	manager, controller, _, _, mihomoPath := newInterceptManagerFixture(t, module)
+	manager, core, controller, _, _, mihomoPath := newInterceptManagerFixtureWithCore(t, module)
+	beforeMihomo := mustRead(t, mihomoPath)
 	view, err := manager.View()
 	if err != nil {
 		t.Fatal(err)
-	}
-	if view.Modules[0].Ready || view.Modules[0].Reason == "" {
-		t.Fatalf("missing routing was not reported as degraded: %+v", view.Modules[0])
 	}
 	disabled := false
 	updated, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &disabled})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Modules[0].Enabled || controller.putCalls != 1 {
-		t.Fatalf("explicit repair result = %+v, apply calls=%d", updated.Modules[0], controller.putCalls)
+	if updated.Modules[0].Enabled || core.commitCount() != 1 || controller.putCalls != 0 {
+		t.Fatalf("disable result = %+v, commits=%d apply=%d", updated.Modules[0], core.commitCount(), controller.putCalls)
 	}
-	mihomo := mustRead(t, mihomoPath)
-	if strings.Contains(mihomo, "ads.example.com") || strings.Contains(mihomo, "api.example.com),(DST-PORT") {
-		t.Fatalf("disabled repair retained extension-owned routing:\n%s", mihomo)
+	// The withdrawal is a generation carrying nothing this extension owned, not
+	// an edit to the operator's file — which must come back byte-identical.
+	committed := core.committed(t)
+	if len(committed.Client.Rules) != 0 || len(committed.Egress.Capabilities) != 0 {
+		t.Fatalf("disabled extension retained owned routing: %+v", committed)
+	}
+	if got := mustRead(t, mihomoPath); got != beforeMihomo {
+		t.Fatalf("the disable rewrote the operator's mihomo config:\n%s", got)
 	}
 }
 
@@ -554,8 +745,16 @@ func TestInterceptModuleManagerRefusesToClaimUnexpectedPolicyRule(t *testing.T) 
 	module := testModuleSnapshot()
 	module.Enabled = true
 	module.RoutingRules = []interceptRoutingRule{{Action: "reject", Domain: "ads.example.com"}}
-	manager, controller, _, interceptPath, mihomoPath := newInterceptManagerFixture(t, module)
-	tampered := strings.Replace(mustRead(t, mihomoPath), "  - MATCH,Proxies\n", "  - DOMAIN,operator.example,DIRECT\n  - MATCH,Proxies\n", 1)
+	manager, core, controller, _, interceptPath, mihomoPath := newInterceptManagerFixtureWithCore(t, module)
+	// An operator rule interposed between the egress anchor and the fail-closed
+	// terminator is the placement the analyser refuses: declined processor
+	// traffic would reach it before the deny.
+	tampered := strings.Replace(mustRead(t, mihomoPath),
+		"  - "+interceptEgressRejectRule+"\n",
+		"  - DOMAIN,operator.example,DIRECT\n  - "+interceptEgressRejectRule+"\n", 1)
+	if tampered == mustRead(t, mihomoPath) {
+		t.Fatal("the egress terminator was not found, so this test proves nothing")
+	}
 	if err := os.WriteFile(mihomoPath, []byte(tampered), 0o660); err != nil {
 		t.Fatal(err)
 	}
@@ -568,7 +767,7 @@ func TestInterceptModuleManagerRefusesToClaimUnexpectedPolicyRule(t *testing.T) 
 	if _, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &disabled}); !errors.Is(err, errInterceptModuleConflict) {
 		t.Fatalf("unexpected operator rule conflict = %v", err)
 	}
-	if controller.putCalls != 0 || mustRead(t, interceptPath) != beforeConfig || mustRead(t, mihomoPath) != tampered {
+	if core.commitCount() != 0 || controller.putCalls != 0 || mustRead(t, interceptPath) != beforeConfig || mustRead(t, mihomoPath) != tampered {
 		t.Fatal("failed reconciliation mutated operator or extension state")
 	}
 }
@@ -611,8 +810,9 @@ func TestInterceptModuleManagerWaitsForCertificateWhenEnabledHostSetShrinks(t *t
 
 func TestInterceptMasterSwitchStopsAndRestoresArmedExtensions(t *testing.T) {
 	module := testModuleSnapshot()
-	manager, controller, handler, _, mihomoPath := newInterceptManagerFixture(t, module)
+	manager, core, _, handler, _, mihomoPath := newInterceptManagerFixtureWithCore(t, module)
 	manager.certWait = func(context.Context, string) error { return nil }
+	beforeMihomo := mustRead(t, mihomoPath)
 	view, _ := manager.View()
 	enabled := true
 	view, _ = manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled})
@@ -624,16 +824,27 @@ func TestInterceptMasterSwitchStopsAndRestoresArmedExtensions(t *testing.T) {
 	if !view.Modules[0].Enabled || view.Modules[0].Ready || view.Modules[0].Reason != "mitm-disabled" || len(view.ActiveCaptureHosts) != 0 {
 		t.Fatalf("disabled master view = %+v", view)
 	}
-	if handler.decideName("api.example.com").Action == actionGateway || strings.Contains(mustRead(t, mihomoPath), "api.example.com),(DST-PORT") {
+	// A disabled master is a committed generation with an empty client stage,
+	// not an absent overlay -- that is what makes the switch atomic.
+	if handler.decideName("api.example.com").Action == actionGateway {
 		t.Fatal("disabled master retained an interception route")
+	}
+	if len(overlayCaptureSelectors(core.committed(t))) != 0 {
+		t.Fatal("disabled master left capture selectors in the committed generation")
+	}
+	if got := mustRead(t, mihomoPath); got != beforeMihomo {
+		t.Fatalf("the master switch rewrote the operator's mihomo config:\n%s", got)
 	}
 	disabledSettings.Enabled = true
 	view, err = manager.UpdateSettings(context.Background(), view.Revision, disabledSettings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !view.Modules[0].Ready || len(view.ActiveCaptureHosts) != 1 || controller.putCalls != 3 {
-		t.Fatalf("re-enabled master view = %+v calls=%d", view, controller.putCalls)
+	if !view.Modules[0].Ready || len(view.ActiveCaptureHosts) != 1 || core.commitCount() != 3 {
+		t.Fatalf("re-enabled master view = %+v commits=%d", view, core.commitCount())
+	}
+	if !containsString(overlayCaptureSelectors(core.committed(t)), "domain:api.example.com:443") {
+		t.Fatal("re-enabling the master did not restore the capture selectors")
 	}
 }
 
@@ -774,7 +985,7 @@ func TestInterceptModuleManagerRollsBackWhenCertificatePublicationFails(t *testi
 
 func TestInterceptModuleManagerRetriggersMissedCertificatePathEvent(t *testing.T) {
 	module := testModuleSnapshot()
-	manager, controller, _, interceptPath, _ := newInterceptManagerFixture(t, module)
+	manager, core, controller, _, interceptPath, _ := newInterceptManagerFixtureWithCore(t, module)
 	manager.certStatePath = filepath.Join(t.TempDir(), "cert-state")
 	wantDigest := interceptCertificateDigest(module.CaptureHosts)
 	var republishCalls atomic.Int32
@@ -805,8 +1016,8 @@ func TestInterceptModuleManagerRetriggersMissedCertificatePathEvent(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if republishCalls.Load() != 1 || controller.putCalls != 1 {
-		t.Fatalf("republish/controller calls = %d/%d", republishCalls.Load(), controller.putCalls)
+	if republishCalls.Load() != 1 || core.commitCount() != 1 || controller.putCalls != 0 {
+		t.Fatalf("republish/commit/apply calls = %d/%d/%d", republishCalls.Load(), core.commitCount(), controller.putCalls)
 	}
 	if publishedCandidate == "" || mustRead(t, interceptPath) != publishedCandidate {
 		t.Fatal("successful certificate retry did not preserve the exact candidate bytes")
@@ -959,6 +1170,7 @@ func TestInterceptModulesAPIListsAndTogglesThroughSharedManager(t *testing.T) {
 	}
 	handler := &Handler{}
 	manager := NewInterceptModuleManager(NewInterceptConfigStore(interceptPath), handler, nil, fx.store, fx.infra, fx.tester, fx.ctl)
+	manager.SetOverlayDriver(NewOverlayDriver(stubCommittingOverlayCore(t).client, newTestOverlayJournal(t)))
 	manager.certWait = func(context.Context, string) error { return nil }
 	fx.cs.SetInterceptModuleManager(manager)
 
@@ -998,7 +1210,7 @@ func TestInterceptModulesAPIListsAndTogglesThroughSharedManager(t *testing.T) {
 func TestInterceptModuleRequiresExistingEgressGroupBeforeEnable(t *testing.T) {
 	module := testModuleSnapshot()
 	module.EgressGroupRequired = true
-	manager, _, _, _, mihomoPath := newInterceptManagerFixture(t, module)
+	manager, core, _, _, _, _ := newInterceptManagerFixtureWithCore(t, module)
 	manager.certWait = func(context.Context, string) error { return nil }
 	view, err := manager.View()
 	if err != nil {
@@ -1025,8 +1237,8 @@ func TestInterceptModuleRequiresExistingEgressGroupBeforeEnable(t *testing.T) {
 	if !updated.Modules[0].Ready || updated.Modules[0].EgressGroup != group || updated.Modules[0].ExecutionOrder != 1 {
 		t.Fatalf("updated module = %+v", updated.Modules[0])
 	}
-	if !strings.Contains(mustRead(t, mihomoPath), "(IN-NAME,intercept-egress),(DOMAIN,api.example.com),(DST-PORT,443)),Proxies") {
-		t.Fatal("selected egress group rule was not published")
+	if got := overlayEgressGroupFor(core.committed(t), overlaySelectorDomain, "api.example.com", 443); got != group {
+		t.Fatalf("committed generation binds api.example.com:443 to %q, want %q", got, group)
 	}
 }
 
@@ -1037,7 +1249,7 @@ func TestInterceptModuleReorderChangesFirstMatchingEgress(t *testing.T) {
 	second.ID = "io.example.second"
 	second.Name = "Second extension"
 	second.EgressGroup = "DIRECT"
-	manager, _, _, _, mihomoPath := newInterceptManagerFixture(t, first, second)
+	manager, core, _, _, _, _ := newInterceptManagerFixtureWithCore(t, first, second)
 	manager.certWait = func(context.Context, string) error { return nil }
 	view, _ := manager.View()
 	enabled := true
@@ -1049,18 +1261,18 @@ func TestInterceptModuleReorderChangesFirstMatchingEgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := mustRead(t, mihomoPath)
-	selector := "(IN-NAME,intercept-egress),(DOMAIN,api.example.com),(DST-PORT,443))"
-	if strings.Count(before, selector) != 1 || !strings.Contains(before, selector+",Proxies") {
-		t.Fatalf("initial first-match rule is wrong:\n%s", before)
+	// Both extensions claim the same destination; execution order decides which
+	// group gets it, and the selector is claimed exactly once so the two groups'
+	// destination sets stay disjoint.
+	if got := overlayEgressGroupFor(core.committed(t), overlaySelectorDomain, "api.example.com", 443); got != "Proxies" {
+		t.Fatalf("initial egress winner = %q, want Proxies", got)
 	}
 	view, err = manager.Reorder(context.Background(), view.Revision, []string{second.ID, first.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	after := mustRead(t, mihomoPath)
-	if strings.Count(after, selector) != 1 || !strings.Contains(after, selector+",DIRECT") {
-		t.Fatalf("reordered first-match rule is wrong:\n%s", after)
+	if got := overlayEgressGroupFor(core.committed(t), overlaySelectorDomain, "api.example.com", 443); got != "DIRECT" {
+		t.Fatalf("reordered egress winner = %q, want DIRECT", got)
 	}
 	if !stringSlicesEqual(view.ExecutionOrder, []string{second.ID, first.ID}) || view.Modules[0].ExecutionOrder != 1 || view.Modules[1].ExecutionOrder != 2 {
 		t.Fatalf("reordered view = %+v", view)

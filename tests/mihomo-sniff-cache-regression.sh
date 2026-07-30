@@ -63,9 +63,21 @@ CONSOLE_PID=$!
 ORIGIN_PID=$!
 
 awk -v cert="$RUNTIME/cert.pem" -v key="$RUNTIME/key.pem" -v listener="$GATEWAY_LISTENER" '
-  # Rendered against a core that predates the runtime overlay, so the anchors
-  # are dropped: one it cannot resolve makes the config unparseable.
-  $0 == "__OVERLAY_EGRESS_ANCHOR__" || $0 == "__OVERLAY_CLIENT_ANCHOR__" || $0 == "__OVERLAY_RUNTIME_BLOCK__" {
+  # The anchors are literal in the template; only the runtime block is
+  # substituted, and it must be, because an anchor with no block behind it is a
+  # config mihomo refuses to parse.
+  $0 == "__OVERLAY_RUNTIME_BLOCK__" {
+    print ""
+    print "runtime-overlay:"
+    print "  owner: 5gpn"
+    print "  control-socket: /run/mihomo/overlay-control.sock"
+    print "  generation-socket: /run/mihomo/overlay-generation.sock"
+    print "  control-peer-uid: 65534"
+    print "  control-peer-gid: 65534"
+    print "  control-socket-gid: 65534"
+    print "  generation-peer-uid: 65534"
+    print "  generation-peer-gid: 65534"
+    print "  generation-socket-gid: 65534"
     next
   }
   $0 == "__MIHOMO_LISTENERS__" {

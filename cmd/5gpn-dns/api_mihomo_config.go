@@ -187,6 +187,17 @@ func (s *ControlServer) handleMihomoConfigReset(w http.ResponseWriter, r *http.R
 		return
 	}
 	candidate := s.mihomoStore.Default()
+	// The seed's anchors are rebuilt around the live config's runtime block,
+	// which is the only place this box's sockets and peer IDs are recorded. A
+	// config damaged past the point where they can be read has no seed to
+	// restore -- and routing has no renderer behind it, so interception would be
+	// permanently dead with reset as the suggested repair. Refuse instead of
+	// handing back a config that cannot carry traffic.
+	if candidate == "" {
+		writeErr(w, http.StatusConflict,
+			"the live mihomo config no longer carries the overlay runtime block, so a reset cannot rebuild a usable one; reinstall this release to reseed it")
+		return
+	}
 	unlock, err := s.lockInterceptMihomoCandidate(candidate)
 	if err != nil {
 		status := http.StatusBadRequest

@@ -38,26 +38,22 @@ func runInterceptionRoutingCheck(args []string, stdout, stderr io.Writer) int {
 		return interceptionRoutingCheckError(stdout, stderr, "mihomo-config-unreadable", fmt.Errorf("read mihomo config: %w", err))
 	}
 	mihomoText := string(mihomoBody)
-	mihomoDocument, err := parseMihomoNodeDocument(mihomoText)
-	if err != nil {
+	if _, err := parseMihomoNodeDocument(mihomoText); err != nil {
 		return interceptionRoutingCheckError(stdout, stderr, "mihomo-config-invalid", fmt.Errorf("parse mihomo config: %w", err))
 	}
 
-	// An anchored config delegates interception routing to the overlay, so
-	// there are no rendered rules to reconcile against the document. Choosing
-	// the analyser by what the file actually says keeps the installer's check
-	// honest for both arrangements, including one an operator anchored by hand.
-	analysis := analyzeInterceptRoutingDocument(mihomoText, document)
-	if mihomoConfigIsOverlayAnchored(mihomoText) {
-		analysis = analyzeOverlayAnchoredDocument(mihomoText)
+	// Routing lives in the overlay, so the only shape this build can manage is
+	// an anchored config. A config without anchors is not diagnosed further:
+	// whatever is wrong with it, the answer is the same reseed.
+	if !mihomoConfigIsOverlayAnchored(mihomoText) {
+		fmt.Fprintln(stdout, "not-anchored")
+		return 3
 	}
+	analysis := analyzeOverlayAnchoredDocument(mihomoText)
 	if !analysis.Manageable || !analysis.Ready {
 		reason := analysis.Reason
 		if reason == "" {
 			reason = "interception-routing-not-ready"
-		}
-		if reason == "interception-listener-missing" && len(mihomoDocument.Content) == 1 && cleanLegacyMihomoInterceptionBoundary(mihomoDocument.Content[0]) {
-			reason = "legacy-mihomo-boundary-missing-clean"
 		}
 		fmt.Fprintln(stdout, reason)
 		return 3
@@ -69,27 +65,6 @@ func runInterceptionRoutingCheck(args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintln(stdout, "ready")
 	return 0
-}
-
-func cleanLegacyMihomoInterceptionBoundary(root *yaml.Node) bool {
-	if sequenceContainsNamedMapping(mappingNodeValue(root, "listeners"), "intercept-egress") ||
-		sequenceContainsNamedMapping(mappingNodeValue(root, "proxies"), interceptMihomoProxyName) {
-		return false
-	}
-	rules := mappingNodeValue(root, "rules")
-	if rules == nil || rules.Kind != yaml.SequenceNode {
-		return false
-	}
-	for _, item := range rules.Content {
-		if item.Kind != yaml.ScalarNode {
-			return false
-		}
-		rule := strings.TrimSpace(item.Value)
-		if rule == interceptEgressRejectRule || ruleTouchesInterceptEgress(rule) || strings.HasSuffix(compactMihomoRule(rule), ","+interceptMihomoProxyName) {
-			return false
-		}
-	}
-	return true
 }
 
 func sequenceContainsNamedMapping(sequence *yaml.Node, name string) bool {

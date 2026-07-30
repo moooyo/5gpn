@@ -191,7 +191,7 @@ exit 0
 EOF
 cat > "$recipe_test/check-routing" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' interception-egress-rules-out-of-sync
+printf '%s\n' not-anchored
 exit 3
 EOF
 chmod +x "$recipe_test/check-sidecar" "$recipe_test/check-routing"
@@ -305,6 +305,12 @@ INTERCEPT_BIN="$TMP/fake-intercept"
 DNS_BIN="$TMP/fake-dns"
 MIHOMO_SERVICE_USER="$(id -gn)"
 DNS_SERVICE_USER="$(id -un)"
+# The live render resolves real identities for the overlay runtime block and
+# refuses rather than inventing them, so the seed cannot be rendered at all
+# without these. Point them at this test runner's own account and group.
+INTERCEPT_SERVICE_USER="$(id -un)"
+OVERLAY_CONTROL_GROUP="$(id -gn)"
+OVERLAY_GENERATION_GROUP="$(id -gn)"
 SCRIPT_DIR="$ROOT"
 BASE_DOMAIN=example.com
 PUBLIC_IP=192.0.2.10
@@ -385,7 +391,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 [[ -f "$mihomo" && -f "$intercept" ]] || exit 1
 if ! grep -Fq 'name: intercept-egress' "$mihomo"; then
-    printf '%s\n' legacy-mihomo-boundary-missing-clean
+    printf '%s\n' not-anchored
     exit 3
 fi
 printf '%s\n' ready
@@ -413,18 +419,29 @@ else
     fail "normal beta rendering changed or rejected the legacy mihomo config"
 fi
 
-if check_interception_routing_compatibility >/dev/null 2>&1 \
-   && [[ "$INTERCEPT_ROUTING_READY" == 0 \
-      && "$INTERCEPT_ROUTING_REASON" == legacy-mihomo-boundary-missing-clean ]]; then
-    pass "the installer compatibility seam classifies the preserved seed as legacy"
+# Routing publishes through the overlay and nothing else, so a preserved config
+# with no anchors is not a degraded-but-usable arrangement any more: it is a
+# gateway whose extensions can never be enabled. The seam must refuse it.
+if check_interception_routing_compatibility >/dev/null 2>&1; then
+    fail "the installer compatibility seam accepted an unanchored preserved config"
+elif [[ "$INTERCEPT_ROUTING_READY" == 0 && "$INTERCEPT_ROUTING_REASON" == not-anchored ]]; then
+    pass "the installer compatibility seam refuses an unanchored preserved config"
 else
-    fail "the installer compatibility seam did not classify the preserved seed as legacy"
+    fail "the installer compatibility seam did not report the unanchored config as not-anchored"
+fi
+
+# The same config, caught in preflight while the host is still untouched. This
+# is the check that turns the upgrade away with an actionable instruction.
+if preserved_mihomo_config_is_anchored >/dev/null 2>&1; then
+    fail "preflight accepted a preserved mihomo config with no overlay anchors"
+else
+    pass "preflight refuses a preserved mihomo config with no overlay anchors"
 fi
 
 cat > "$TMP/fake-dns-residual" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == --check-interception-routing ]]; then
-    printf '%s\n' interception-egress-rules-out-of-sync
+    printf '%s\n' overlay-egress-anchor-misplaced
     exit 3
 fi
 exit 1
@@ -446,7 +463,7 @@ before_residual_mihomo="$(hash_file "$MIHOMO_DIR/config.yaml")"
 before_residual_intercept="$(hash_file "$INTERCEPT_DIR/config.json")"
 if check_interception_routing_compatibility >/dev/null 2>&1; then
     fail "disabled v5 with residual managed rules was allowed to degrade"
-elif [[ "$INTERCEPT_ROUTING_REASON" == interception-egress-rules-out-of-sync \
+elif [[ "$INTERCEPT_ROUTING_REASON" == overlay-egress-anchor-misplaced \
      && "$before_residual_mihomo" == "$(hash_file "$MIHOMO_DIR/config.yaml")" \
      && "$before_residual_intercept" == "$(hash_file "$INTERCEPT_DIR/config.json")" ]]; then
     pass "residual managed rules hard-fail without changing mihomo/intercept bytes"
@@ -479,38 +496,6 @@ if [[ -n "$preflight_line" && -n "$publish_line" && "$preflight_line" -lt "$publ
 else
     fail "interception routing preflight is too late in full_install"
 fi
-
-cat > "$TMP/fake-intercept-active" <<'EOF'
-#!/usr/bin/env bash
-case " $* " in
-    *' --check-enabled '*) exit 0 ;;
-esac
-exit 1
-EOF
-chmod +x "$TMP/fake-intercept-active"
-saved_intercept_bin="$INTERCEPT_BIN"
-INTERCEPT_BIN="$TMP/fake-intercept-active"
-if check_interception_routing_compatibility >/dev/null 2>&1; then
-    fail "an active interception config was allowed with legacy mihomo routing"
-else
-    pass "active interception fails closed on a legacy mihomo boundary"
-fi
-INTERCEPT_BIN="$saved_intercept_bin"
-cat > "$TMP/fake-intercept-broken" <<'EOF'
-#!/usr/bin/env bash
-case " $* " in
-    *' --check-enabled '*) exit 1 ;;
-esac
-exit 1
-EOF
-chmod +x "$TMP/fake-intercept-broken"
-INTERCEPT_BIN="$TMP/fake-intercept-broken"
-if check_interception_routing_compatibility >/dev/null 2>&1; then
-    fail "an invalid interception enabled-state check was treated as disabled"
-else
-    pass "invalid interception enabled-state checks fail closed"
-fi
-INTERCEPT_BIN="$saved_intercept_bin"
 
 # The explicit reset path is the only allowed replacement. It must retain an
 # exact backup and add all three routing boundaries needed by interception.

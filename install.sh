@@ -135,11 +135,6 @@ INTERCEPT_STATE_DIR="/var/lib/5gpn-intercept"
 # The runtime overlay's machine-only sockets. mihomo creates both inside its
 # systemd RuntimeDirectory, so they cannot outlive the process that served them.
 OVERLAY_OWNER="5gpn"
-# Set by artifact staging once the installed mihomo has been shown to parse an
-# anchored config. Empty until then — not 0 — so that a render which staging
-# never reached can tell 'not probed' from 'probed and unsupported' and fall
-# back to what the live config already says.
-MIHOMO_SEED_OVERLAY=""
 OVERLAY_CONTROL_SOCKET="/run/mihomo/overlay-control.sock"
 OVERLAY_GENERATION_SOCKET="/run/mihomo/overlay-generation.sock"
 # One group per socket, owning nothing else. mihomo joins both so it can hand
@@ -177,8 +172,8 @@ SIDECAR_REPO="moooyo/mihomo-extension-sidecar"
 SIDECAR_VERSION="0.3.0"
 SIDECAR_SHA256="eb25e3820ef2bed8688d8a1dc2cf7657237e3c4f893f6d5494d16587f7892441"
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-overlay.5"
-MIHOMO_SHA256="8e85c4f744151eb35c6ebfb9573abc310c433fd45d72cd51c4aacd9bde5275a2"
+MIHOMO_VERSION="v1.19.28-overlay.6"
+MIHOMO_SHA256="13fbc6789895bb201c7c8607ec423b03b192082f9b6bb0a20bf9a15593973479"
 ZASH_REPO="moooyo/zashboard"
 ZASH_VERSION="v3.16.0-overlay.1"         # our fork's dist.zip, built from 5gpn-ext
 ZASH_SHA256="b5d003f55f9424eaaa78f901a5b37912dbd9ac07cb37e17c527b209c52947bf4"
@@ -1781,20 +1776,23 @@ resolve_mihomo_listen_ips() {
     printf '%s\n' "$out"
 }
 
-# Renders the runtime-overlay parts of the mihomo seed.
+# Renders the `runtime-overlay:` block of the mihomo seed.
 #
-# The overlay replaces rewriting the operator's config on every routing change
-# with committing a typed generation over a machine-only socket. Two anchors
-# splice it into rule resolution, and a `runtime-overlay:` block names the
-# sockets and who may use them.
+# The overlay is how routing is published: a typed generation committed over a
+# machine-only socket, rather than a rewrite of the operator's config on every
+# change. Two anchors splice it into rule resolution -- those are literal in the
+# template -- and this block names the sockets and who may use them.
 #
-# All of it is emitted only when the mihomo binary being installed actually
-# implements the feature. That is established by validating the rendered
-# candidate with `mihomo -t`, not by comparing version strings: a core that
-# cannot parse RUNTIME-OVERLAY rejects the config outright, and seeding one it
-# rejects would leave the gateway unable to start. The caller falls back to the
-# unanchored form on failure, which is the legacy arrangement and fully
-# supported.
+# It is the one part that cannot be literal, because it carries this box's
+# socket paths and peer identities. It is also required: an anchor with no block
+# behind it is a config mihomo refuses to parse, so there is no arrangement in
+# which the anchors are emitted and this is not.
+#
+# Whether the installed core implements the feature at all is established by
+# validating the rendered candidate with `mihomo -t`, not by comparing version
+# strings. A core that cannot parse RUNTIME-OVERLAY rejects the config outright,
+# and this release has no second form to fall back to -- staging fails and the
+# live deployment is left untouched.
 #
 # The two sockets carry different peer policies on purpose. The coordinator may
 # mutate the overlay; the processor may only read the generation it serves. One
@@ -1802,13 +1800,12 @@ resolve_mihomo_listen_ips() {
 # endpoint, which is the reach the split exists to deny.
 # $1 selects "probe" to render with placeholder identities.
 #
-# Artifact staging validates an anchored candidate before the service accounts
-# and socket groups exist, because whether the core can parse the anchors is the
-# thing that decides whether they are emitted at all. That candidate is fed to
-# `mihomo -t` and discarded; no identity in it reaches the live config, which is
-# rendered later by render_mihomo_config once the accounts are real. Failing the
-# probe for want of a group that installation has not created yet would abort
-# every fresh install.
+# Artifact staging validates its candidate before the service accounts and
+# socket groups exist, so the probe accepts placeholder identities. That
+# candidate is fed to `mihomo -t` and discarded; no identity in it reaches the
+# live config, which render_mihomo_config writes later once the accounts are
+# real. Failing the probe for want of a group that installation has not created
+# yet would abort every fresh install.
 render_overlay_runtime_block() {
     local mode="${1:-live}"
     local dns_uid dns_gid intercept_uid intercept_gid control_gid generation_gid
@@ -1866,21 +1863,6 @@ ensure_overlay_socket_groups() {
     done
 }
 
-# Expands one overlay placeholder line, or drops it when the overlay is off.
-render_overlay_placeholder() {
-    local placeholder="$1" enabled="$2" mode="${3:-live}"
-    if [[ "$enabled" != 1 ]]; then
-        return 0
-    fi
-    case "$placeholder" in
-        __OVERLAY_EGRESS_ANCHOR__) printf '  - RUNTIME-OVERLAY,%s,egress
-' "$OVERLAY_OWNER" ;;
-        __OVERLAY_CLIENT_ANCHOR__) printf '  - RUNTIME-OVERLAY,%s,client
-' "$OVERLAY_OWNER" ;;
-        __OVERLAY_RUNTIME_BLOCK__) render_overlay_runtime_block "$mode" || return 1 ;;
-    esac
-}
-
 # Expands the seed template. One implementation, two callers.
 #
 # Artifact staging and the live render used to carry the same expansion inline,
@@ -1894,14 +1876,14 @@ render_overlay_placeholder() {
 # and tests/test_seed_template_renderers.sh is what fails when a placeholder is
 # added here and nowhere else.
 render_mihomo_seed() {
-    local template="$1" overlay="$2" mode="${3:-live}" listeners="$4" line
+    local template="$1" mode="${2:-live}" listeners="$3" line
     while IFS= read -r line || [[ -n "$line" ]]; do
         case "$line" in
             __MIHOMO_LISTENERS__)
                 printf '%s\n' "$listeners"
                 continue ;;
-            __OVERLAY_EGRESS_ANCHOR__|__OVERLAY_CLIENT_ANCHOR__|__OVERLAY_RUNTIME_BLOCK__)
-                render_overlay_placeholder "$line" "$overlay" "$mode" || return 1
+            __OVERLAY_RUNTIME_BLOCK__)
+                render_overlay_runtime_block "$mode" || return 1
                 continue ;;
         esac
         line="${line//__GATEWAY_IP__/$SEED_GATEWAY_IP}"
@@ -2698,15 +2680,20 @@ stage_artifacts() {
         || { err "Staged zashboard archive has no index.html."; return 1; }
 
     if [[ ! -f "$MIHOMO_DIR/config.yaml" ]]; then
-        local seed="$ARTIFACT_STAGE/mihomo-seed.yaml" line listeners overlay
+        local seed="$ARTIFACT_STAGE/mihomo-seed.yaml" line listeners
         listeners="$(render_mihomo_listeners "$MIHOMO_LISTEN_IPS" "$CONSOLE_DOMAIN")"
         install -d -m 0700 "$ARTIFACT_STAGE/mihomo-home"
         : > "$ARTIFACT_STAGE/mihomo-home/whitelist.txt"
-        # Anchored first. A core that does not implement the overlay rejects
-        # the candidate and the unanchored render is retried, so the probe is
-        # the validation itself rather than a version comparison.
-        # Placeholder credentials: this candidate is fed to `mihomo -t` to
-        # find out whether the core parses the anchors, then discarded.
+        # The anchors are the only arrangement this release seeds, so the probe
+        # decides whether the release can run at all rather than which form to
+        # write. Validating with `mihomo -t` against this exact binary is the
+        # test, not a version comparison: a core that cannot parse
+        # RUNTIME-OVERLAY rejects the config outright, and seeding one it
+        # rejects would leave the gateway unable to start.
+        #
+        # Placeholder credentials and identities: this candidate is fed to
+        # `mihomo -t` and discarded. Nothing in it reaches the live config,
+        # which render_mihomo_config writes later once the accounts are real.
         SEED_GATEWAY_IP="$GATEWAY_IP"
         SEED_CONSOLE_DOMAIN="$CONSOLE_DOMAIN"
         SEED_ZASH_DOMAIN="$ZASH_DOMAIN"
@@ -2715,21 +2702,14 @@ stage_artifacts() {
         SEED_INTERCEPT_INBOUND_PASSWORD="preflight-inbound-password-123456"
         SEED_INTERCEPT_UPSTREAM_USERNAME="preflight-upstream-user"
         SEED_INTERCEPT_UPSTREAM_PASSWORD="preflight-upstream-password-123456"
-        for overlay in 1 0; do
         render_mihomo_seed "${SCRIPT_DIR}/etc/mihomo/config.yaml.tmpl" \
-            "$overlay" probe "$listeners" > "$seed" || return 1
-        if "$ARTIFACT_STAGE/mihomo" -t -f "$seed" -d "$ARTIFACT_STAGE/mihomo-home"; then
-            if [[ "$overlay" == 1 ]]; then
-                ok "Staged mihomo implements the runtime overlay; seeding the anchored config."
-            else
-                warn "Staged mihomo does not implement the runtime overlay; seeding the rendered config."
-            fi
-            MIHOMO_SEED_OVERLAY="$overlay"
-            break
+            probe "$listeners" > "$seed" || return 1
+        if ! "$ARTIFACT_STAGE/mihomo" -t -f "$seed" -d "$ARTIFACT_STAGE/mihomo-home"; then
+            err "Staged mihomo does not accept the runtime-overlay seed."
+            err "This release publishes interception routing only through the overlay, so it requires a core that implements it. Live deployment was not touched."
+            return 1
         fi
-        [[ "$overlay" == 1 ]] \
-            || { err "Staged mihomo seed candidate is invalid; live deployment was not touched."; return 1; }
-        done
+        ok "Staged mihomo implements the runtime overlay; seeding the anchored config."
     else
         "$ARTIFACT_STAGE/mihomo" -t -f "$MIHOMO_DIR/config.yaml" -d "$MIHOMO_DIR" \
             || { err "Existing operator-owned mihomo config is invalid; live deployment was not touched."; return 1; }
@@ -3437,24 +3417,6 @@ align_preserved_intercept_credentials() {
 
 render_mihomo_config() {
     local mode="${1:-seed}" config="${MIHOMO_DIR}/config.yaml" secret="" template=""
-    # Staging establishes whether the mihomo being installed implements the
-    # runtime overlay, by validating an anchored candidate against that exact
-    # binary. Reuse that answer when there is one.
-    #
-    # But staging only probes when it is seeding a config that does not exist
-    # yet, so on a box that already has one — every `mihomo-reset`, every
-    # re-render — the flag is still its default. Taking that at face value
-    # renders the unanchored form, which on an anchored gateway means a reset
-    # silently removes the anchors and drops the overlay. Fall back to what
-    # the live config says instead: it is the arrangement this box runs.
-    local overlay="${MIHOMO_SEED_OVERLAY:-}"
-    if [[ -z "$overlay" ]]; then
-        if [[ -f "$config" ]] && grep -Eq "^[[:space:]]*-[[:space:]]*RUNTIME-OVERLAY," "$config"; then
-            overlay=1
-        else
-            overlay=0
-        fi
-    fi
     MIHOMO_SEED_PORTS_REQUIRED=0
     fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
         || { err "Unsafe configuration root: $CONF_DIR"; return 1; }
@@ -3526,7 +3488,7 @@ render_mihomo_config() {
     SEED_INTERCEPT_INBOUND_PASSWORD="$intercept_in_pass"
     SEED_INTERCEPT_UPSTREAM_USERNAME="$intercept_up_user"
     SEED_INTERCEPT_UPSTREAM_PASSWORD="$intercept_up_pass"
-    if ! render_mihomo_seed "$template" "$overlay" live "$listeners" > "$candidate"; then
+    if ! render_mihomo_seed "$template" live "$listeners" > "$candidate"; then
         rm -f -- "$candidate"
         err "Could not render the mihomo config candidate from $template"
         return 1
@@ -3574,8 +3536,8 @@ reset_mihomo_config() {
 }
 
 check_interception_routing_compatibility() {
-    local dns_binary="${1:-$DNS_BIN}" intercept_binary="${2:-$INTERCEPT_BIN}"
-    local output rc=0 enabled_rc=0
+    local dns_binary="${1:-$DNS_BIN}"
+    local output rc=0
     INTERCEPT_ROUTING_READY=0
     INTERCEPT_ROUTING_REASON="not-checked"
     output="$("$dns_binary" --check-interception-routing \
@@ -3587,29 +3549,40 @@ check_interception_routing_compatibility() {
             INTERCEPT_ROUTING_REASON="ready"
             return 0 ;;
         3)
+            # Routing publishes through the overlay and nothing else, so every
+            # rc=3 is a config this release cannot manage. There is no longer a
+            # tolerated shape that runs core services with interception simply
+            # unavailable: an unanchored config is refused in preflight, while
+            # the deployment is still untouched.
             INTERCEPT_ROUTING_REASON="${output##*$'\n'}"
-            [[ -n "$INTERCEPT_ROUTING_REASON" ]] || INTERCEPT_ROUTING_REASON="legacy-mihomo-config"
-            if [[ "$INTERCEPT_ROUTING_REASON" != legacy-mihomo-boundary-missing-clean ]]; then
-                err "Interception routing is structurally incompatible or contains residual managed rules (${INTERCEPT_ROUTING_REASON}); refusing to publish or preserve a dead sidecar route."
-                return 1
-            fi
-            "$intercept_binary" --config "$INTERCEPT_DIR/config.json" --check-enabled >/dev/null 2>&1 \
-                || enabled_rc=$?
-            case "$enabled_rc" in
-                0)
-                    err "Active interception cannot be preserved on an incompatible mihomo config (${INTERCEPT_ROUTING_REASON})."
-                    return 1 ;;
-                3) ;;
-                *)
-                    err "Could not determine whether interception is active (exit ${enabled_rc})."
-                    return 1 ;;
-            esac
-            warn "Core services can use the clean legacy mihomo config, but extension interception is unavailable: ${INTERCEPT_ROUTING_REASON}."
-            return 0 ;;
+            [[ -n "$INTERCEPT_ROUTING_REASON" ]] || INTERCEPT_ROUTING_REASON="interception-routing-not-ready"
+            err "Interception routing is not manageable (${INTERCEPT_ROUTING_REASON}); refusing to publish or preserve a dead sidecar route."
+            return 1 ;;
         *)
             err "Could not validate mihomo interception compatibility: ${output:-unknown error}"
             return 1 ;;
     esac
+}
+
+# A preserved operator config with no overlay anchors cannot carry interception
+# at all: routing publishes as typed generations that the anchors resolve, and
+# nothing renders those rules into the file any more. Installing over such a
+# config would produce a gateway whose extensions can never be enabled.
+#
+# The file is the operator's and this installer does not rewrite it, so the
+# repair is theirs to make: `5gpn mihomo-reset` backs the current file up and
+# restores the anchored seed. Refuse here, before publication, so a host that
+# cannot run this release is turned away untouched.
+preserved_mihomo_config_is_anchored() {
+    local config="${MIHOMO_DIR}/config.yaml"
+    [[ -e "$config" || -L "$config" ]] || return 0
+    [[ -f "$config" && ! -L "$config" ]] \
+        || { err "Existing mihomo config path is unsafe before publication: $config"; return 1; }
+    grep -Eq "^[[:space:]]*-[[:space:]]*RUNTIME-OVERLAY,${OVERLAY_OWNER}," "$config" && return 0
+    err "The preserved mihomo config carries no runtime-overlay anchors: $config"
+    err "This release publishes interception routing only through the overlay, so that config can never carry it."
+    err "Run '5gpn mihomo-reset' to back it up and restore the anchored seed, then rerun this installer. No live 5gpn bytes were changed."
+    return 1
 }
 
 preflight_existing_interception_state() {
@@ -3627,7 +3600,7 @@ preflight_existing_interception_state() {
         return 1
     fi
     [[ -f "$MIHOMO_DIR/config.yaml" && ! -L "$MIHOMO_DIR/config.yaml" ]] || return 0
-    check_interception_routing_compatibility "$ARTIFACT_STAGE/5gpn-dns" "$ARTIFACT_STAGE/5gpn-intercept"
+    check_interception_routing_compatibility "$ARTIFACT_STAGE/5gpn-dns"
 }
 
 # ----------------------------------------------------------------------------
@@ -6291,6 +6264,11 @@ full_install() {
     # decide here -- while the deployment is untouched -- rather than at
     # publication time when the binaries have already been replaced.
     cert_root_claim_is_possible
+    # Same reasoning for the operator's mihomo config: a preserved file with no
+    # overlay anchors cannot carry interception under this release, and finding
+    # that out after publication would leave a half-installed gateway whose
+    # extensions can never be enabled.
+    preserved_mihomo_config_is_anchored
     # Bootstrap the TUI here, not at publication time. Every prompt this
     # installer asks -- domain, gateway IP, resolver, certificate mode -- runs in
     # the stage below, so a later bootstrap meant the interactive helpers always

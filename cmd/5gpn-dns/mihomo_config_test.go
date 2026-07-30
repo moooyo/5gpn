@@ -25,15 +25,18 @@ func goldenInfraParams() InfraParams {
 // goldenMihomoConfig renders the seed template's tokens directly (bypassing
 // MihomoConfigStore.Default's env-var indirection) so this test file's
 // golden text and goldenInfraParams stay obviously in sync.
+//
+// Routing lives in the overlay, so anchored is the only arrangement the
+// installer seeds and the only one the manager can drive. The runtime block is
+// round-tripped through the daemon's own extractor to make this text a fixed
+// point of it: Default() rebuilds the seed from whatever
+// extractOverlayRuntimeBlock reads out of the live config, and without the
+// round-trip the fixture and a reset of that fixture would differ only in the
+// block's indentation — a property of yaml.Marshal rather than of anything
+// under test.
 func goldenMihomoConfig() string {
-	// Unanchored: these invariants describe the rendered arrangement, which is
-	// what a core without the overlay gets. The anchored form is covered by the
-	// interception routing check, which is where anchor placement matters.
-	return goldenMihomoConfigForm(false)
-}
-
-func goldenMihomoConfigForm(overlay bool) string {
-	return goldenMihomoValues(renderSeedOverlayPlaceholders(mihomoConfigSeedTemplate, overlay))
+	seeded := goldenMihomoValues(renderSeedOverlayBlock(mihomoConfigSeedTemplate, testOverlayRuntimeBlock()))
+	return goldenMihomoConfigWithBlock(extractOverlayRuntimeBlock(seeded))
 }
 
 // goldenMihomoConfigWithBlock renders through the production expander, so a
@@ -55,6 +58,19 @@ func goldenMihomoValues(template string) string {
 		"__INTERCEPT_UPSTREAM_PASSWORD__", "interception-upstream-unavailable-password",
 	)
 	return r.Replace(template)
+}
+
+// seededMihomoStore returns a store whose live config already carries the
+// runtime-overlay block. Default() reads this box's overlay sockets and peer
+// identities out of the live file, so a store pointed at a path with no config
+// has nothing to restore and deliberately renders no seed at all.
+func seededMihomoStore(t *testing.T) *MihomoConfigStore {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(goldenMihomoConfig()), 0o600); err != nil {
+		t.Fatalf("seed live config: %v", err)
+	}
+	return NewMihomoConfigStore(path)
 }
 
 func TestMihomoInvariants_GoldenPasses(t *testing.T) {
@@ -607,6 +623,16 @@ func TestMihomoConfigStore_ReadAndDefault(t *testing.T) {
 	t.Setenv("DNS_MIHOMO_SECRET", "s3cr3t")
 	t.Setenv("DNS_PUBLIC_IP", "203.0.113.10")
 
+	// A live config with no runtime-overlay block leaves nothing to rebuild the
+	// seed's anchors around, and the reset handler reports that rather than
+	// writing a config mihomo would refuse.
+	if def := store.Default(); def != "" {
+		t.Fatalf("Default() over a config with no overlay block = %q, want no seed", def)
+	}
+
+	if err := os.WriteFile(path, []byte(goldenMihomoConfig()), 0o644); err != nil {
+		t.Fatalf("seed live config: %v", err)
+	}
 	def := store.Default()
 	if def != goldenMihomoConfig() {
 		t.Fatalf("Default() did not match the expected rendering:\n--- got ---\n%s\n--- want ---\n%s", def, goldenMihomoConfig())
@@ -629,7 +655,7 @@ func TestMihomoConfigDefaultPreservesSpecialControllerSecrets(t *testing.T) {
 			t.Setenv("DNS_MIHOMO_LISTEN_IPS", "203.0.113.10")
 			t.Setenv("DNS_GATEWAY_IP", "10.0.1.20")
 			t.Setenv("DNS_MIHOMO_SECRET", secret)
-			got := NewMihomoConfigStore(filepath.Join(t.TempDir(), "config.yaml")).Default()
+			got := seededMihomoStore(t).Default()
 			parsed, err := parseMihomoRootSecret([]byte(got))
 			if err != nil {
 				t.Fatalf("parse rendered secret: %v", err)
@@ -679,7 +705,7 @@ func TestMihomoConfigDefaultRendersPluralListeners(t *testing.T) {
 	t.Setenv("DNS_MIHOMO_LISTEN_IPS", "10.0.1.20, 203.0.113.10,10.0.1.20")
 	t.Setenv("DNS_MIHOMO_SECRET", "s3cr3t")
 
-	got := NewMihomoConfigStore(filepath.Join(t.TempDir(), "config.yaml")).Default()
+	got := seededMihomoStore(t).Default()
 	for _, want := range []string{
 		"name: gateway, type: tunnel, listen: 10.0.1.20, port: 443, network: [tcp, udp], target: console.5gpn.test:443",
 		"name: gateway80, type: tunnel, listen: 10.0.1.20, port: 80, network: [tcp], target: console.5gpn.test:80",
@@ -728,7 +754,7 @@ func TestMihomoConfigDefaultRequiresExplicitSafeListeners(t *testing.T) {
 	t.Setenv("DNS_MIHOMO_LISTEN_IPS", "")
 	t.Setenv("DNS_GATEWAY_IP", "10.0.1.20")
 	t.Setenv("DNS_PUBLIC_IP", "203.0.113.10")
-	def := NewMihomoConfigStore(filepath.Join(t.TempDir(), "config.yaml")).Default()
+	def := seededMihomoStore(t).Default()
 	err := ValidateInvariants(def, p)
 	var missing *ErrMissingInfra
 	if !errors.As(err, &missing) || missing.Name != "gateway-inbound" {
@@ -739,7 +765,7 @@ func TestMihomoConfigDefaultRequiresExplicitSafeListeners(t *testing.T) {
 	}
 
 	t.Setenv("DNS_MIHOMO_LISTEN_IPS", "0.0.0.0")
-	def = NewMihomoConfigStore(filepath.Join(t.TempDir(), "config.yaml")).Default()
+	def = seededMihomoStore(t).Default()
 	err = ValidateInvariants(def, p)
 	if !errors.As(err, &missing) || missing.Name != "gateway-inbound" {
 		t.Fatalf("unsafe explicit listener error = %v, want gateway-inbound", err)
@@ -771,7 +797,7 @@ func TestMihomoConfigSeedTemplate_MatchesRepoFile(t *testing.T) {
 // feature that is no longer configured — which mihomo refuses to parse, turning
 // a reset into an outage.
 func TestSeedResetPreservesTheOverlayBlock(t *testing.T) {
-	live := goldenMihomoConfigForm(true)
+	live := goldenMihomoConfig()
 	block := extractOverlayRuntimeBlock(live)
 	if strings.TrimSpace(block) == "" {
 		t.Fatal("no overlay block was recovered from an anchored config")
@@ -791,19 +817,19 @@ func TestSeedResetPreservesTheOverlayBlock(t *testing.T) {
 	}
 }
 
-// A box without the overlay must get the rendered form. Leaving an anchor in a
-// config with no runtime-overlay block would make it unparseable.
-func TestSeedResetWithoutAnOverlayBlockDropsTheAnchors(t *testing.T) {
-	restored := goldenMihomoConfigWithBlock("")
-	if mihomoConfigIsOverlayAnchored(restored) {
-		t.Fatal("anchors survived into a config with no overlay configured")
+// The seed has exactly one arrangement now: both anchors, and the runtime block
+// they resolve against. Either one alone is a config mihomo refuses to parse,
+// so the template must never render a partial form or leave a token behind.
+func TestSeedRendersTheAnchorsAndBlockTogether(t *testing.T) {
+	seed := goldenMihomoConfig()
+	if !mihomoConfigIsOverlayAnchored(seed) {
+		t.Error("the rendered seed carries no overlay anchors")
 	}
-	for _, placeholder := range []string{
-		"__OVERLAY_EGRESS_ANCHOR__", "__OVERLAY_CLIENT_ANCHOR__", "__OVERLAY_RUNTIME_BLOCK__",
-	} {
-		if strings.Contains(restored, placeholder) {
-			t.Errorf("%s was left unexpanded, so the config is not YAML", placeholder)
-		}
+	if extractOverlayRuntimeBlock(seed) == "" {
+		t.Error("the rendered seed carries no overlay runtime block")
+	}
+	if strings.Contains(seed, "__OVERLAY_") {
+		t.Error("the rendered seed left an overlay placeholder unexpanded, so it is not YAML")
 	}
 }
 

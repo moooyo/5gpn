@@ -502,9 +502,6 @@ func TestOverlayJournalPersistsAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if j.Driver() != overlayDriverLegacy {
-		t.Fatalf("default driver = %q, want the legacy one", j.Driver())
-	}
 	if err := j.Begin(overlayJournalEntry{
 		OperationID: "op-1", BaseGeneration: "g0", TargetGeneration: "g1",
 	}); err != nil {
@@ -527,26 +524,6 @@ func TestOverlayJournalPersistsAcrossReopen(t *testing.T) {
 	}
 	if entry.TargetGeneration != "g1" {
 		t.Fatalf("target = %q", entry.TargetGeneration)
-	}
-}
-
-// The driver is persisted and never inferred. A coordinator that guesses would
-// oscillate the first time a readback is ambiguous, rewriting routing each time.
-func TestOverlayJournalDriverIsPersistedAndValidated(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "journal.json")
-	j, _ := NewOverlayJournal(path)
-	if err := j.SetDriver(overlayDriverOverlay); err != nil {
-		t.Fatalf("set driver: %v", err)
-	}
-	reopened, err := NewOverlayJournal(path)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	if reopened.Driver() != overlayDriverOverlay {
-		t.Fatalf("driver = %q, want the overlay one", reopened.Driver())
-	}
-	if err := j.SetDriver("something-else"); err == nil {
-		t.Fatal("an unknown driver was accepted")
 	}
 }
 

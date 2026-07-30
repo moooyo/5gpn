@@ -9,13 +9,10 @@ import (
 // Structural analysis of a mihomo config that delegates interception routing to
 // the runtime overlay.
 //
-// The legacy analyser reconciles the rendered capture and egress rules it finds
-// in the file against the rules the interception document implies. Under the
-// overlay there are no such rules to find: the file carries two anchors, and
-// the rules themselves live in a typed, generation-versioned document committed
-// over a machine-only socket. Running the legacy analyser against an anchored
-// config reports "out of sync" for the entirely correct state of an empty file
-// and a populated overlay.
+// There are no interception rules in the file to reconcile: it carries two
+// anchors, and the rules themselves live in a typed, generation-versioned
+// document committed over a machine-only socket. An empty file alongside a
+// populated overlay is the correct steady state, not a fault.
 //
 // What still has to be checked is that the anchors are where they must be. The
 // overlay only closes the bypass if every path that could reach the operator's
@@ -31,13 +28,14 @@ const (
 	// that has not declared this, so an overlay cannot be made to hand traffic
 	// to an arbitrary proxy by naming it.
 	overlayProcessorProxyKey = "runtime-overlay-processor"
+	// overlayRuntimeBlockPlaceholder is the one line of the seed template that
+	// the daemon still substitutes. The anchors are literal there; this is not,
+	// because it names box-specific sockets and peer identities.
+	overlayRuntimeBlockPlaceholder = "__OVERLAY_RUNTIME_BLOCK__"
 )
 
 // analyzeOverlayAnchoredDocument checks an anchored config and extracts what
 // compiling a generation needs from it.
-//
-// It deliberately reports the same shape as the legacy analyser so the apply
-// path can hold one variable rather than branching on two types.
 func analyzeOverlayAnchoredDocument(text string) interceptRoutingAnalysis {
 	analysis := interceptRoutingAnalysis{Reason: "invalid-config"}
 	document, err := parseMihomoNodeDocument(text)
@@ -215,33 +213,28 @@ func extractOverlayRuntimeBlock(text string) string {
 	return strings.TrimRight(string(encoded), "\n")
 }
 
-// renderSeedOverlay expands the seed template's overlay placeholders.
+// renderSeedOverlay substitutes the seed template's runtime-overlay block.
 //
-// An empty block means the core does not implement the overlay, or this
-// deployment has not adopted it; the anchors are then dropped rather than left
-// inert, because an anchor mihomo cannot resolve makes the config unparseable.
+// The two anchors are inline in the template: the overlay is the only routing
+// driver, so a seed without them describes a gateway that cannot carry
+// interception at all. The block stays a placeholder because it names this
+// box's sockets and the peer uids permitted to open them — infrastructure only
+// the installer knows, like the listeners and the controller secret.
+//
+// An empty block leaves anchors mihomo cannot resolve, which makes the config
+// unparseable rather than merely inert. Callers establish that they have one
+// before rendering; MihomoConfigStore.Default refuses instead of guessing.
 func renderSeedOverlay(template, runtimeBlock string) string {
-	anchors := map[string]string{
-		"__OVERLAY_EGRESS_ANCHOR__": "",
-		"__OVERLAY_CLIENT_ANCHOR__": "",
-		"__OVERLAY_RUNTIME_BLOCK__": "",
-	}
-	if strings.TrimSpace(runtimeBlock) != "" {
-		anchors["__OVERLAY_EGRESS_ANCHOR__"] = "  - " + overlayEgressAnchorRule
-		anchors["__OVERLAY_CLIENT_ANCHOR__"] = "  - " + overlayClientAnchorRule
-		anchors["__OVERLAY_RUNTIME_BLOCK__"] = runtimeBlock
-	}
 	lines := strings.Split(template, "\n")
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
-		expansion, isPlaceholder := anchors[line]
-		if !isPlaceholder {
-			out = append(out, line)
+		if line == overlayRuntimeBlockPlaceholder {
+			if strings.TrimSpace(runtimeBlock) != "" {
+				out = append(out, runtimeBlock)
+			}
 			continue
 		}
-		if expansion != "" {
-			out = append(out, expansion)
-		}
+		out = append(out, line)
 	}
 	return strings.Join(out, "\n")
 }

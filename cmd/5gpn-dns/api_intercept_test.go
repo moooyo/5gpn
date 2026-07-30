@@ -65,19 +65,12 @@ func TestInterceptConfigRequiresCurrentVersionAndCompleteExecutionOrder(t *testi
 		t.Fatalf("stale config error = %v", err)
 	}
 
-	// The immediately previous version is upgraded in place instead: a deployed
-	// gateway keeps its extensions, settings, and bindings across this change.
+	// Version 5 is refused exactly like any other stale version. The in-place
+	// upgrade was removed, so a gateway still holding a v5 document reinstalls
+	// rather than being migrated.
 	previous := strings.Replace(string(body), `"version": 6`, `"version": 5`, 1)
-	previous = strings.Replace(previous, `"persistent_storage": false`, `"persistent_storage": false,
-      "network_origins": [
-        "https://api.example.net"
-      ]`, 1)
-	upgraded, err := decodeInterceptConfig([]byte(previous))
-	if err != nil {
-		t.Fatalf("previous version was refused rather than upgraded: %v", err)
-	}
-	if upgraded.Version != interceptConfigVersion || !upgraded.Modules[0].Network {
-		t.Fatalf("upgraded document = %+v", upgraded)
+	if _, err := decodeInterceptConfig([]byte(previous)); err == nil || !strings.Contains(err.Error(), "version must be 6") {
+		t.Fatalf("version-5 config error = %v", err)
 	}
 
 	missing := strings.Replace(string(body), `"execution_order": [

@@ -68,8 +68,7 @@ proxies:
     # Names this outbound as the runtime overlay's processor. A generation's
     # capture rules steer at a processor target, and the core refuses to stage
     # one that names an outbound not declared here — so an overlay cannot be
-    # made to hand traffic to an arbitrary proxy by naming it. Harmless on a
-    # core without the overlay, which ignores the key.
+    # made to hand traffic to an arbitrary proxy by naming it.
     runtime-overlay-processor: true
 proxy-providers: {}
 
@@ -102,13 +101,12 @@ rules:
   - IP-CIDR,192.168.0.0/16,REJECT,no-resolve
   - IP-CIDR,100.64.0.0/10,REJECT,no-resolve
   - IP-CIDR,169.254.0.0/16,REJECT,no-resolve
-  # Every sidecar egress selector is published immediately above this
-  # fail-closed terminator. Unknown or stale sidecar traffic must never fall
-  # through to the operator's terminal MATCH rule. Under the runtime overlay
-  # the selectors are not written here at all: the egress anchor resolves them
-  # from the committed generation, and must sit immediately above the
-  # terminator so a declined lookup still reaches the deny.
-__OVERLAY_EGRESS_ANCHOR__
+  # The egress anchor resolves every sidecar egress selector from the committed
+  # generation; not one of them is written into this file. It must sit
+  # immediately above the fail-closed terminator below, so traffic the overlay
+  # declined still reaches the deny. Unknown or stale sidecar traffic must never
+  # fall through to the operator's terminal MATCH rule.
+  - RUNTIME-OVERLAY,5gpn,egress
   - IN-NAME,intercept-egress,REJECT
   - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
   # The client anchor resolves the capture rules. It sits below every deny
@@ -119,5 +117,5 @@ __OVERLAY_EGRESS_ANCHOR__
   # resolves it. The panel names stay pinned by the exact rules and hosts
   # entries above; other such names are not. Closing this needs pinned-IP
   # dialing on egress (see PublicOnly in component/overlay/types.go).
-__OVERLAY_CLIENT_ANCHOR__
+  - RUNTIME-OVERLAY,5gpn,client
   - MATCH,Proxies

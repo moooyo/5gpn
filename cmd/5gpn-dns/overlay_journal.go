@@ -33,24 +33,6 @@ const (
 	overlayPhaseDone         overlayPhase = "DONE"
 )
 
-// overlayDriverMode is the persisted routing driver.
-//
-// It is persisted and never auto-detected. A coordinator that guesses its own
-// driver from observed state will oscillate between them the first time a
-// readback is ambiguous, and each oscillation rewrites the operator's routing.
-type overlayDriverMode string
-
-const (
-	// overlayDriverLegacy renders the complete mihomo YAML, as today.
-	overlayDriverLegacy overlayDriverMode = "legacy-yaml-socks"
-	// overlayDriverOverlay commits typed generations through the control socket.
-	overlayDriverOverlay overlayDriverMode = "overlay-socks"
-)
-
-func (m overlayDriverMode) valid() bool {
-	return m == overlayDriverLegacy || m == overlayDriverOverlay
-}
-
 // overlayJournalEntry is the durable record of one in-flight transaction.
 type overlayJournalEntry struct {
 	OperationID              string       `json:"operation_id"`
@@ -66,8 +48,7 @@ type overlayJournalEntry struct {
 
 // overlayJournalState is the complete on-disk journal.
 type overlayJournalState struct {
-	Version int               `json:"version"`
-	Driver  overlayDriverMode `json:"driver"`
+	Version int `json:"version"`
 	// Current is the in-flight operation, or nil when idle.
 	Current *overlayJournalEntry `json:"current,omitempty"`
 	// LastEffective records the last generation this coordinator observed as
@@ -94,7 +75,7 @@ func NewOverlayJournal(path string) (*OverlayJournal, error) {
 	raw, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		j.state = overlayJournalState{Version: overlayJournalVersion, Driver: overlayDriverLegacy}
+		j.state = overlayJournalState{Version: overlayJournalVersion}
 		return j, nil
 	case err != nil:
 		return nil, fmt.Errorf("overlay journal: read %s: %w", path, err)
@@ -106,29 +87,7 @@ func NewOverlayJournal(path string) (*OverlayJournal, error) {
 		return nil, fmt.Errorf("overlay journal: %s was written by version %d, this build understands %d",
 			path, j.state.Version, overlayJournalVersion)
 	}
-	if !j.state.Driver.valid() {
-		return nil, fmt.Errorf("overlay journal: %s names unknown driver %q", path, j.state.Driver)
-	}
 	return j, nil
-}
-
-// Driver reports the persisted routing driver.
-func (j *OverlayJournal) Driver() overlayDriverMode {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	return j.state.Driver
-}
-
-// SetDriver persists a driver switch. This is a deliberate operator-visible
-// migration step, not something a failure path performs on its own.
-func (j *OverlayJournal) SetDriver(mode overlayDriverMode) error {
-	if !mode.valid() {
-		return fmt.Errorf("overlay journal: unknown driver %q", mode)
-	}
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	j.state.Driver = mode
-	return j.writeLocked()
 }
 
 // LastEffective reports the last generation observed live.

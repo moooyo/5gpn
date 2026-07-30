@@ -2,28 +2,29 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"os"
 	"time"
 )
 
-// Chooses which driver publishes interception routing.
+// Brings up the runtime-overlay driver, which is the only way this build
+// publishes interception routing.
 //
-// Three things have to agree before the overlay is used, and each is checked
-// against reality rather than against configuration:
+// Three things have to agree, and each is checked against reality rather than
+// against configuration:
 //
 //   - the mihomo config carries the anchors, which is what splices the overlay
 //     into rule resolution at all;
 //   - the core answers on the control socket with a schema this build speaks;
 //   - any transition left in flight by a previous process has been resolved.
 //
-// Any one of them failing selects the legacy renderer. That is not a
-// degradation to hide: the legacy path is fully supported, and running it is
-// strictly better than committing generations to a core that will not resolve
-// the anchors, or rewriting a config whose anchors say the rules live
-// elsewhere. Which one was chosen, and why, is logged at startup because it
-// determines how every later routing change is applied.
-
+// Any one of them failing is fatal to interception. There is no renderer to
+// fall back to, and continuing without a driver would leave a gateway that
+// accepts routing changes and silently applies none of them -- the operator
+// would see every extension toggle succeed while traffic kept following the
+// last generation the core happened to hold.
 const overlayDriverProbeTimeout = 10 * time.Second
 
 func selectInterceptRoutingDriver(
@@ -31,70 +32,52 @@ func selectInterceptRoutingDriver(
 	manager *InterceptModuleManager,
 	mihomo *MihomoConfigStore,
 	sidecar *SidecarClient,
-) {
+) error {
 	socket := cfg.OverlayControlSocket
 	if socket == "" {
-		log.Printf("intercept: no overlay control socket configured; rendering the mihomo config")
-		return
+		return errors.New("no overlay control socket configured")
 	}
 	if manager == nil || mihomo == nil {
-		return
+		return errors.New("interception management is unavailable")
 	}
 
 	mihomo.Lock()
 	text, err := mihomo.Read()
 	mihomo.Unlock()
 	if err != nil {
-		log.Printf("intercept: mihomo config unreadable (%v); rendering the mihomo config", err)
-		return
+		return fmt.Errorf("mihomo config unreadable: %w", err)
 	}
 	if !mihomoConfigIsOverlayAnchored(text) {
-		// Not an error, and not something to fix here. A config without anchors
-		// is the pre-migration arrangement, and splicing them in behind the
-		// operator's back would change how their traffic is routed without them
-		// having asked for it.
-		log.Printf("intercept: mihomo config carries no overlay anchors; rendering the mihomo config")
-		return
+		// The installer refuses to publish an unanchored config, so reaching
+		// here means the file was changed out of band. Splicing anchors in
+		// behind the operator's back would change how their traffic is routed
+		// without them having asked for it; refusing says so instead.
+		return errors.New("mihomo config carries no overlay anchors; run '5gpn mihomo-reset' to reseed it")
 	}
 	if analysis := analyzeOverlayAnchoredDocument(text); !analysis.Manageable {
-		// Anchored but not correctly: the operator asked for the overlay and
-		// the arrangement does not hold. Saying so is the whole value of the
-		// structural check — falling back silently would leave a config that
-		// looks migrated and a gateway that is not.
-		log.Printf("intercept: mihomo config is anchored but not manageable (%s); rendering the mihomo config",
-			analysis.Reason)
-		return
+		return fmt.Errorf("mihomo config is anchored but not manageable: %s", analysis.Reason)
 	}
 	if _, err := os.Stat(socket); err != nil {
-		log.Printf("intercept: overlay control socket %s is absent (%v); rendering the mihomo config", socket, err)
-		return
+		return fmt.Errorf("overlay control socket %s is absent: %w", socket, err)
 	}
 
 	journal, err := NewOverlayJournal(cfg.OverlayJournalFile)
 	if err != nil {
-		log.Printf("intercept: overlay journal %s unusable (%v); rendering the mihomo config",
-			cfg.OverlayJournalFile, err)
-		return
+		return fmt.Errorf("overlay journal %s unusable: %w", cfg.OverlayJournalFile, err)
 	}
 	driver := NewOverlayDriver(NewOverlayClient(socket), journal)
 
 	ctx, cancel := context.WithTimeout(context.Background(), overlayDriverProbeTimeout)
 	defer cancel()
 	if err := driver.Available(ctx); err != nil {
-		log.Printf("intercept: overlay control API at %s unusable (%v); rendering the mihomo config", socket, err)
-		return
+		return fmt.Errorf("overlay control API at %s unusable: %w", socket, err)
 	}
 	// A transition left in flight by a previous process is resolved by reading
 	// back what the core actually has, never by undoing it: the commit may have
 	// landed and lost only its response, and revoking that would stop processing
 	// traffic mihomo is already steering at the sidecar.
 	if err := driver.Recover(ctx); err != nil {
-		log.Printf("intercept: overlay recovery failed (%v); rendering the mihomo config", err)
-		return
-	}
-	if err := journal.SetDriver(overlayDriverOverlay); err != nil {
-		log.Printf("intercept: could not record the overlay driver (%v); rendering the mihomo config", err)
-		return
+		return fmt.Errorf("overlay recovery failed: %w", err)
 	}
 
 	manager.SetOverlayDriver(driver)
@@ -106,4 +89,5 @@ func selectInterceptRoutingDriver(
 	// overlay serve traffic at all rather than an optional refinement.
 	client := NewOverlayClient(socket)
 	go NewOverlayReadinessReporter(client, sidecar).Run(context.Background())
+	return nil
 }

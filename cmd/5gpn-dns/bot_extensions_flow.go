@@ -928,7 +928,3 @@ func (bt *Bot) applyBotExtensionInstall(
 		return errors.New("unsupported confirmed install mode")
 	}
 }
-
-func botExtensionConfirmationDebugHTML(payload botExtensionStatePayload) string {
-	return "<code>" + html.EscapeString(string(payload.Kind)) + "</code>"
-}

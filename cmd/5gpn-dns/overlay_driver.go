@@ -10,14 +10,13 @@ import (
 	"time"
 )
 
-// OverlayDriver publishes routing changes as typed generations instead of by
-// rewriting the operator's mihomo YAML.
+// OverlayDriver publishes routing changes as typed generations. It is the only
+// publication path: the operator's mihomo YAML is never rewritten for one.
 //
 // The ordering below is the whole point and is not negotiable: the sidecar
 // bundle and the certificate must be in place *before* mihomo publishes the
 // generation as active, because activation is what makes capture traffic
-// start arriving. The legacy driver already establishes that order; this one
-// keeps it and replaces only the final publish step.
+// start arriving.
 type OverlayDriver struct {
 	client  *OverlayClient
 	journal *OverlayJournal

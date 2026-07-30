@@ -2,47 +2,40 @@ package main
 
 import "strings"
 
-// The installer's seed template carries the runtime-overlay anchors as
-// placeholder lines, expanded only when the mihomo being installed has been
-// shown to parse them. Tests that render the template have to do the same
-// expansion, or they check a document that is not YAML at all.
+// The installer's seed template carries the runtime-overlay anchors literally
+// and its runtime block as a placeholder, because the block names sockets and
+// peer uids only the installing box knows. Tests that render the template have
+// to substitute it, or they check a document whose anchors resolve to nothing.
 //
-// Both forms are real deployments and both are exercised: anchored is what a
-// current core gets, unanchored is what a core without the overlay gets and the
-// rollback position for one that has it.
-func renderSeedOverlayPlaceholders(text string, overlay bool) string {
-	expansions := map[string]string{
-		"__OVERLAY_EGRESS_ANCHOR__": "",
-		"__OVERLAY_CLIENT_ANCHOR__": "",
-		"__OVERLAY_RUNTIME_BLOCK__": "",
-	}
-	if overlay {
-		expansions["__OVERLAY_EGRESS_ANCHOR__"] = "  - " + overlayEgressAnchorRule
-		expansions["__OVERLAY_CLIENT_ANCHOR__"] = "  - " + overlayClientAnchorRule
-		expansions["__OVERLAY_RUNTIME_BLOCK__"] = strings.Join([]string{
-			"",
-			"runtime-overlay:",
-			"  owner: " + overlayOwner,
-			"  control-socket: /run/mihomo/overlay-control.sock",
-			"  generation-socket: /run/mihomo/overlay-generation.sock",
-			"  control-peer-uid: 991",
-			"  control-peer-gid: 991",
-			"  generation-peer-uid: 992",
-			"  generation-peer-gid: 992",
-		}, "\n")
-	}
+// These are the values a real install writes, with the identities fixed so the
+// rendered text is stable.
+func testOverlayRuntimeBlock() string {
+	return strings.Join([]string{
+		"",
+		"runtime-overlay:",
+		"  owner: " + overlayOwner,
+		"  control-socket: /run/mihomo/overlay-control.sock",
+		"  generation-socket: /run/mihomo/overlay-generation.sock",
+		"  control-peer-uid: 991",
+		"  control-peer-gid: 991",
+		"  generation-peer-uid: 992",
+		"  generation-peer-gid: 992",
+	}, "\n")
+}
 
+// renderSeedOverlayBlock expands the template's one remaining placeholder,
+// tolerating the CRLF a checked-out template can carry on Windows.
+func renderSeedOverlayBlock(text, runtimeBlock string) string {
 	lines := strings.Split(text, "\n")
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
-		expansion, isPlaceholder := expansions[strings.TrimRight(line, "\r")]
-		if !isPlaceholder {
-			out = append(out, line)
+		if strings.TrimRight(line, "\r") == overlayRuntimeBlockPlaceholder {
+			if strings.TrimSpace(runtimeBlock) != "" {
+				out = append(out, runtimeBlock)
+			}
 			continue
 		}
-		if expansion != "" {
-			out = append(out, expansion)
-		}
+		out = append(out, line)
 	}
 	return strings.Join(out, "\n")
 }

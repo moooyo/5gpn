@@ -48,7 +48,7 @@ substitute_values() {
 # Exercised through install.sh's real functions rather than a transcription of
 # them; a transcription would drift from the thing under test.
 render_installer() {
-    local overlay="$1" mode="$2" line
+    local mode="$1" line
     (
         OVERLAY_OWNER="5gpn"
         OVERLAY_CONTROL_SOCKET="/run/mihomo/overlay-control.sock"
@@ -59,12 +59,11 @@ render_installer() {
         INTERCEPT_SERVICE_USER="gpn-intercept"
         err() { :; }
         eval "$(awk '/^render_overlay_runtime_block\(\) \{/,/^\}/' "$ROOT/install.sh")"
-        eval "$(awk '/^render_overlay_placeholder\(\) \{/,/^\}/' "$ROOT/install.sh")"
         while IFS= read -r line || [[ -n "$line" ]]; do
             case "$line" in
                 __MIHOMO_LISTENERS__) printf '%s\n' "$V_LISTENERS"; continue ;;
-                __OVERLAY_EGRESS_ANCHOR__|__OVERLAY_CLIENT_ANCHOR__|__OVERLAY_RUNTIME_BLOCK__)
-                    render_overlay_placeholder "$line" "$overlay" "$mode"; continue ;;
+                __OVERLAY_RUNTIME_BLOCK__)
+                    render_overlay_runtime_block "$mode"; continue ;;
             esac
             substitute_values "$line"
         done < "$TEMPLATE"
@@ -74,8 +73,7 @@ render_installer() {
 capture() {
     local out="$1"
     mkdir -p "$out"
-    render_installer 1 probe > "$out/installer-anchored-probe.yaml"
-    render_installer 0 probe > "$out/installer-plain-probe.yaml"
+    render_installer probe > "$out/installer-anchored-probe.yaml"
     echo "captured $(ls -1 "$out"/*.yaml | wc -l) renderings into $out"
 }
 

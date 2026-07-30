@@ -20,35 +20,40 @@ func TestInterceptionRoutingCheckAcceptsCurrentSeed(t *testing.T) {
 	}
 }
 
-func TestInterceptionRoutingCheckClassifiesLegacyMainSeed(t *testing.T) {
-	// This is the routing-significant shape of the main seed before the
-	// interception listener, proxy, and fail-closed terminator were added.
-	legacy := `listeners: []
+// Routing lives in the overlay, so a config carrying no anchors cannot be
+// managed whatever else is wrong with it, and the check says exactly that
+// rather than diagnosing a shape no longer worth telling apart.
+func TestInterceptionRoutingCheckRejectsUnanchoredConfig(t *testing.T) {
+	unanchored := `listeners: []
 proxies: []
 proxy-groups:
   - {name: Proxies, type: select, proxies: [DIRECT]}
 rules:
   - MATCH,Proxies
 `
-	code, stdout, stderr := runInstallerRoutingCheck(t, legacy, mustMarshalInstallerInterceptConfig(t, installerRoutingCheckDocument()))
-	if code != 3 || stdout != "legacy-mihomo-boundary-missing-clean\n" || stderr != "" {
+	code, stdout, stderr := runInstallerRoutingCheck(t, unanchored, mustMarshalInstallerInterceptConfig(t, installerRoutingCheckDocument()))
+	if code != 3 || stdout != "not-anchored\n" || stderr != "" {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
 
-func TestInterceptionRoutingCheckRejectsResidualManagedRulesWithDisabledMaster(t *testing.T) {
+// The fail-closed boundary is a position, not a rule set: the overlay carries
+// every managed rule, so what the check still has to catch is an operator rule
+// interposed where declined processor traffic would reach it.
+func TestInterceptionRoutingCheckRejectsRulesInterposedAtTheBoundary(t *testing.T) {
 	document := installerRoutingCheckDocument()
 	mihomo := currentInstallerRoutingSeed(t, document)
 	residualEgress := "AND,((IN-NAME,intercept-egress),(DOMAIN,example.com),(DST-PORT,443)),Proxies"
-	residualCapture := "AND,((DOMAIN,example.com),(DST-PORT,443)),MODULE-INTERCEPT"
-	mihomo = strings.Replace(mihomo, "  - "+interceptEgressRejectRule, "  - "+residualEgress+"\n  - "+interceptEgressRejectRule, 1)
-	mihomo = strings.Replace(mihomo, "  - MATCH,Proxies", "  - "+residualCapture+"\n  - MATCH,Proxies", 1)
-	code, stdout, stderr := runInstallerRoutingCheck(t, mihomo, mustMarshalInstallerInterceptConfig(t, document))
-	if code != 3 || stdout != "interception-egress-rules-out-of-sync\n" || stderr != "" {
+	interposed := strings.Replace(mihomo, "  - "+interceptEgressRejectRule, "  - "+residualEgress+"\n  - "+interceptEgressRejectRule, 1)
+	if interposed == mihomo {
+		t.Fatal("the egress terminator was not found, so this test proves nothing")
+	}
+	code, stdout, stderr := runInstallerRoutingCheck(t, interposed, mustMarshalInstallerInterceptConfig(t, document))
+	if code != 3 || stdout != "overlay-egress-anchor-misplaced\n" || stderr != "" {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 
-	legacyWithResidual := `listeners: []
+	unanchoredWithResidual := `listeners: []
 proxies: []
 proxy-groups:
   - {name: Proxies, type: select, proxies: [DIRECT]}
@@ -56,9 +61,9 @@ rules:
   - AND,((DOMAIN,example.com),(DST-PORT,443)),MODULE-INTERCEPT
   - MATCH,Proxies
 `
-	code, stdout, stderr = runInstallerRoutingCheck(t, legacyWithResidual, mustMarshalInstallerInterceptConfig(t, document))
-	if code != 3 || stdout != "interception-listener-missing\n" || stderr != "" {
-		t.Fatalf("legacy residual code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	code, stdout, stderr = runInstallerRoutingCheck(t, unanchoredWithResidual, mustMarshalInstallerInterceptConfig(t, document))
+	if code != 3 || stdout != "not-anchored\n" || stderr != "" {
+		t.Fatalf("unanchored residual code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
 
@@ -116,7 +121,7 @@ func TestInterceptionRoutingCheckCLIExitContract(t *testing.T) {
 
 	document := installerRoutingCheckDocument()
 	ready := currentInstallerRoutingSeed(t, document)
-	legacy := "listeners: []\nproxies: []\nproxy-groups:\n  - {name: Proxies, type: select, proxies: [DIRECT]}\nrules:\n  - MATCH,Proxies\n"
+	unanchored := "listeners: []\nproxies: []\nproxy-groups:\n  - {name: Proxies, type: select, proxies: [DIRECT]}\nrules:\n  - MATCH,Proxies\n"
 	tests := []struct {
 		name          string
 		mihomo        string
@@ -126,7 +131,7 @@ func TestInterceptionRoutingCheckCLIExitContract(t *testing.T) {
 		wantStderrSet bool
 	}{
 		{name: "ready", mihomo: ready, intercept: mustMarshalInstallerInterceptConfig(t, document), wantCode: 0, wantStdout: "ready\n"},
-		{name: "legacy", mihomo: legacy, intercept: mustMarshalInstallerInterceptConfig(t, document), wantCode: 3, wantStdout: "legacy-mihomo-boundary-missing-clean\n"},
+		{name: "not-anchored", mihomo: unanchored, intercept: mustMarshalInstallerInterceptConfig(t, document), wantCode: 3, wantStdout: "not-anchored\n"},
 		{name: "invalid", mihomo: ready, intercept: []byte(`{"version":`), wantCode: 1, wantStdout: "intercept-config-invalid\n", wantStderrSet: true},
 	}
 	for _, test := range tests {
@@ -177,14 +182,10 @@ func installerRoutingCheckDocument() interceptConfigDocument {
 	}
 }
 
+// currentInstallerRoutingSeed renders the one arrangement the installer
+// produces: the template's literal anchors plus the runtime block that resolves
+// them.
 func currentInstallerRoutingSeed(t *testing.T, document interceptConfigDocument) string {
-	return currentInstallerRoutingSeedForm(t, document, false)
-}
-
-// currentInstallerRoutingSeedForm renders either arrangement the installer can
-// produce: anchored when the core implements the overlay, rendered when it does
-// not.
-func currentInstallerRoutingSeedForm(t *testing.T, document interceptConfigDocument, overlay bool) string {
 	t.Helper()
 	body, err := os.ReadFile(filepath.Join("..", "..", "etc", "mihomo", "config.yaml.tmpl"))
 	if err != nil {
@@ -201,7 +202,7 @@ func currentInstallerRoutingSeedForm(t *testing.T, document interceptConfigDocum
 		"__INTERCEPT_UPSTREAM_USERNAME__": document.UpstreamProxy.Username,
 		"__INTERCEPT_UPSTREAM_PASSWORD__": document.UpstreamProxy.Password,
 	}
-	text := renderSeedOverlayPlaceholders(string(body), overlay)
+	text := renderSeedOverlayBlock(string(body), testOverlayRuntimeBlock())
 	for from, to := range replacements {
 		text = strings.ReplaceAll(text, from, to)
 	}
@@ -237,12 +238,12 @@ func runInstallerRoutingCheck(t *testing.T, mihomo string, intercept []byte) (in
 	return code, stdout.String(), stderr.String()
 }
 
-// The installer's check has to accept the arrangement the installer produces.
-// Anchored is what a current core gets, and a check that only understood the
-// rendered form would report a healthy migrated gateway as broken.
+// The CLI reports readiness; this pins what the analyser hands the manager
+// behind it. Without a terminal MATCH target extracted from the operator's own
+// rules there is no egress winner to mint a capability against.
 func TestInterceptionRoutingCheckAcceptsAnchoredSeed(t *testing.T) {
 	document := installerRoutingCheckDocument()
-	seed := currentInstallerRoutingSeedForm(t, document, true)
+	seed := currentInstallerRoutingSeed(t, document)
 	if !mihomoConfigIsOverlayAnchored(seed) {
 		t.Fatal("the anchored seed does not read as anchored")
 	}
@@ -261,7 +262,7 @@ func TestInterceptionRoutingCheckAcceptsAnchoredSeed(t *testing.T) {
 // fall-through the terminator exists to prevent.
 func TestOverlayEgressAnchorMustAbutTheTerminator(t *testing.T) {
 	document := installerRoutingCheckDocument()
-	seed := currentInstallerRoutingSeedForm(t, document, true)
+	seed := currentInstallerRoutingSeed(t, document)
 
 	moved := strings.Replace(seed,
 		"  - "+overlayEgressAnchorRule+"\n  - "+interceptEgressRejectRule,
@@ -282,7 +283,7 @@ func TestOverlayEgressAnchorMustAbutTheTerminator(t *testing.T) {
 // of the processor.
 func TestOverlayClientAnchorIsRequired(t *testing.T) {
 	document := installerRoutingCheckDocument()
-	seed := currentInstallerRoutingSeedForm(t, document, true)
+	seed := currentInstallerRoutingSeed(t, document)
 	stripped := strings.Replace(seed, "  - "+overlayClientAnchorRule+"\n", "", 1)
 	if stripped == seed {
 		t.Fatal("the client anchor was not found, so this test proves nothing")

@@ -1,15 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -106,23 +103,9 @@ func (s *InterceptConfigStore) Read() (interceptConfigDocument, []byte, error) {
 	if len(body) > maxInterceptConfigBytes {
 		return interceptConfigDocument{}, nil, fmt.Errorf("interception config exceeds %d bytes", maxInterceptConfigBytes)
 	}
-	upgraded, err := upgradeInterceptConfigDocument(body)
+	document, err := decodeInterceptConfig(body)
 	if err != nil {
 		return interceptConfigDocument{}, nil, err
-	}
-	document, err := decodeInterceptConfig(upgraded)
-	if err != nil {
-		return interceptConfigDocument{}, nil, err
-	}
-	// An upgrade has to reach the disk, not just this process. The sidecar cold
-	// starts from this file and the certificate publisher reads it with its own
-	// decoder, so leaving the old version there would keep both refusing it
-	// until the next unrelated transaction happened to rewrite it.
-	if !bytes.Equal(upgraded, body) {
-		if err := s.writeAtomic(upgraded); err != nil {
-			return interceptConfigDocument{}, nil, fmt.Errorf("persist upgraded interception config: %w", err)
-		}
-		return document, upgraded, nil
 	}
 	return document, body, nil
 }
@@ -257,10 +240,6 @@ func (s *InterceptConfigStore) writeAtomic(body []byte) error {
 }
 
 func decodeInterceptConfig(body []byte) (interceptConfigDocument, error) {
-	body, err := upgradeInterceptConfigDocument(body)
-	if err != nil {
-		return interceptConfigDocument{}, err
-	}
 	var document interceptConfigDocument
 	if err := unmarshalStrictJSON(body, &document); err != nil {
 		return interceptConfigDocument{}, fmt.Errorf("decode interception config: %w", err)
@@ -269,66 +248,6 @@ func decodeInterceptConfig(body []byte) (interceptConfigDocument, error) {
 		return interceptConfigDocument{}, err
 	}
 	return document, nil
-}
-
-// upgradeInterceptConfigDocument rewrites a version-5 document in memory.
-//
-// Both fields it touches map exactly: an extension that declared any network
-// origins, or the unbounded grant, held the network permission and now says so
-// with one boolean, and a bare enabled_when key meant "run this while that
-// boolean is true". The origin list itself has nowhere to go, which is the
-// point of the change rather than a loss in the migration.
-//
-// Without this the strict decoder refuses every deployed document on upgrade,
-// and a gateway loses its complete interception configuration -- extensions,
-// settings, execution order, and operator bindings -- rather than one field.
-func upgradeInterceptConfigDocument(body []byte) ([]byte, error) {
-	var probe struct {
-		Version int `json:"version"`
-	}
-	if err := json.Unmarshal(body, &probe); err != nil {
-		return nil, fmt.Errorf("decode interception config: %w", err)
-	}
-	if probe.Version != interceptConfigVersion-1 {
-		return body, nil
-	}
-	var document map[string]any
-	if err := json.Unmarshal(body, &document); err != nil {
-		return nil, fmt.Errorf("decode interception config: %w", err)
-	}
-	modules, _ := document["modules"].([]any)
-	for _, raw := range modules {
-		module, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		origins, _ := module["network_origins"].([]any)
-		unbounded, _ := module["network_any"].(bool)
-		delete(module, "network_origins")
-		delete(module, "network_any")
-		if len(origins) > 0 || unbounded {
-			module["network"] = true
-		}
-		actions, _ := module["actions"].([]any)
-		for _, rawAction := range actions {
-			action, ok := rawAction.(map[string]any)
-			if !ok {
-				continue
-			}
-			key, gated := action["enabled_when"].(string)
-			if !gated || strings.TrimSpace(key) == "" {
-				continue
-			}
-			action["enabled_when"] = map[string]any{"key": key, "equals": "true"}
-		}
-	}
-	document["version"] = interceptConfigVersion
-	upgraded, err := json.Marshal(document)
-	if err != nil {
-		return nil, fmt.Errorf("upgrade interception config: %w", err)
-	}
-	log.Printf("intercept: upgraded the interception document from version %d to %d", interceptConfigVersion-1, interceptConfigVersion)
-	return upgraded, nil
 }
 
 func validateInterceptDocument(document interceptConfigDocument) error {
@@ -476,10 +395,6 @@ func (s *ControlServer) handleInterceptSettingsPut(w http.ResponseWriter, r *htt
 		return
 	}
 	writeJSON(w, http.StatusOK, interceptSettings(document, body))
-}
-
-func writeInterceptConfigAtomic(path string, body []byte) error {
-	return writeInterceptConfigAtomicContext(context.Background(), path, body)
 }
 
 func writeInterceptConfigAtomicContext(ctx context.Context, path string, body []byte) error {

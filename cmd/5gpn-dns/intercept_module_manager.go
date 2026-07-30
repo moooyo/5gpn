@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +20,8 @@ var (
 	errInterceptModuleConflict     = errors.New("interception module conflicts with the current runtime")
 	errInterceptModuleNotFound     = errors.New("interception module not found")
 	errInterceptApplyFailed        = errors.New("interception module apply failed")
+
+	errInterceptRoutingDriverUnavailable = errors.New("interception routing driver unavailable; run '5gpn mihomo-reset' if the mihomo config lost its overlay anchors")
 )
 
 const (
@@ -215,40 +216,27 @@ func interceptBundleID(body []byte) string {
 	return "b-" + interceptRevision(body)[:24]
 }
 
-// SetOverlayDriver installs the runtime-overlay driver. Without one the manager
-// keeps rewriting the mihomo config, which is the rollback position and the
-// state of a deployment whose core does not implement the overlay.
+// SetOverlayDriver installs the runtime-overlay driver. It is required: the
+// manager has no other way to publish routing, and selectInterceptRoutingDriver
+// refuses to start without one.
 func (m *InterceptModuleManager) SetOverlayDriver(driver *OverlayDriver) {
 	m.mu.Lock()
 	m.overlay = driver
 	m.mu.Unlock()
 }
 
-// overlayDriverActive reports whether routing changes publish as generations.
-// Callers already hold m.mu.
-func (m *InterceptModuleManager) overlayDriverActive() bool {
-	return m.overlay != nil
-}
-
-// analyzeInterceptRouting picks the analyser that matches the driver in use.
-//
-// The two are not interchangeable: the legacy analyser reconciles rendered
-// rules against the document and reports "out of sync" when the file carries
-// none, which under the overlay is the correct steady state rather than a
-// fault. Callers already hold m.mu.
-func (m *InterceptModuleManager) analyzeInterceptRouting(text string, document interceptConfigDocument) interceptRoutingAnalysis {
-	if m.overlayDriverActive() {
-		return analyzeOverlayAnchoredDocument(text)
-	}
-	return analyzeInterceptRoutingDocument(text, document)
+// analyzeInterceptRouting reads the anchored document. Under the overlay a
+// mihomo config carrying no rendered interception rules is the correct steady
+// state, not a fault. Callers already hold m.mu.
+func (m *InterceptModuleManager) analyzeInterceptRouting(text string) interceptRoutingAnalysis {
+	return analyzeOverlayAnchoredDocument(text)
 }
 
 // publishOverlayGeneration commits the desired routing as a typed generation.
 //
 // The certificate wait stays in the caller rather than moving into the driver's
-// hook. Both drivers then share one implementation of "the certificate is in
-// place before capture traffic can arrive", which is the invariant that matters;
-// having each driver carry its own copy is how the two would come to disagree.
+// hook, so "the certificate is in place before capture traffic can arrive"
+// remains one implementation on the path every mutation takes.
 func (m *InterceptModuleManager) publishOverlayGeneration(
 	ctx context.Context,
 	document interceptConfigDocument,
@@ -257,6 +245,13 @@ func (m *InterceptModuleManager) publishOverlayGeneration(
 	certificateHostSetDigest string,
 	sidecarBundleDigest string,
 ) error {
+	// The driver is installed at startup and is the only publication path. If
+	// its probe failed, every routing change has to say so rather than dereference
+	// a nil driver -- a gateway that accepts toggles and applies none of them is
+	// worse than one that refuses them.
+	if m.overlay == nil {
+		return errInterceptRoutingDriverUnavailable
+	}
 	_, err := m.overlay.Publish(ctx, overlayCompileInput{
 		Document:                 document,
 		MatchTarget:              matchTarget,
@@ -303,10 +298,18 @@ func (m *InterceptModuleManager) PrepareRuntime() error {
 	if err != nil {
 		return err
 	}
-	analysis := m.analyzeInterceptRouting(text, document)
+	analysis := m.analyzeInterceptRouting(text)
 	if !analysis.Manageable || !interceptCredentialsMatch(text, document) {
 		m.publishHosts(nil)
 		return fmt.Errorf("interception routing is not ready: %s", firstNonEmpty(analysis.Reason, "credential-mismatch"))
+	}
+	// The anchored analysis judges anchor positions, not bindings. An extension
+	// names its egress group by string and the groups are the operator's own, so
+	// a renamed or deleted group leaves the document authorising one that no
+	// longer resolves. Withdraw the hosts rather than steer traffic into it.
+	if err := validateInterceptEgressBindings(document, analysis.AvailableEgressGroups); err != nil {
+		m.publishHosts(nil)
+		return fmt.Errorf("interception routing is not ready: egress-group-missing: %w", err)
 	}
 	if len(activeInterceptHosts(document)) > 0 && !m.certificateReady(document) {
 		m.publishHosts(nil)
@@ -327,23 +330,21 @@ func (m *InterceptModuleManager) PrepareRuntime() error {
 	// Publishing here makes the coordinator authoritative at every start: the
 	// driver short-circuits when the recomputed generation is already live, so a
 	// healthy boot pays a readback and nothing else.
-	if m.overlayDriverActive() {
-		// Both halves, in the order the apply path uses: the processor holds the
-		// document before mihomo publishes a generation naming it. Republishing
-		// only the generation is worse than republishing neither -- the sidecar
-		// goes on serving whatever its own store cold started from, the
-		// generation names the document's bundle, and readiness is refused for
-		// the mismatch, which fails every captured connection closed.
-		if err := m.publishSidecarDocument(context.Background(), body); err != nil {
-			m.publishHosts(nil)
-			return fmt.Errorf("the interception document could not be republished: %w", err)
-		}
-		if err := m.publishOverlayGeneration(context.Background(), document, analysis.MatchTarget,
-			interceptRevision(body), interceptCertificateDigest(certificateInterceptHosts(document)),
-			interceptBundleID(body)); err != nil {
-			m.publishHosts(nil)
-			return fmt.Errorf("interception routing could not be republished: %w", err)
-		}
+	// Both halves, in the order the apply path uses: the processor holds the
+	// document before mihomo publishes a generation naming it. Republishing
+	// only the generation is worse than republishing neither -- the sidecar
+	// goes on serving whatever its own store cold started from, the
+	// generation names the document's bundle, and readiness is refused for
+	// the mismatch, which fails every captured connection closed.
+	if err := m.publishSidecarDocument(context.Background(), body); err != nil {
+		m.publishHosts(nil)
+		return fmt.Errorf("the interception document could not be republished: %w", err)
+	}
+	if err := m.publishOverlayGeneration(context.Background(), document, analysis.MatchTarget,
+		interceptRevision(body), interceptCertificateDigest(certificateInterceptHosts(document)),
+		interceptBundleID(body)); err != nil {
+		m.publishHosts(nil)
+		return fmt.Errorf("interception routing could not be republished: %w", err)
 	}
 	m.publishHosts(&document)
 	return nil
@@ -366,10 +367,18 @@ func (m *InterceptModuleManager) ReconcileMihomoText(text string) error {
 		m.publishHosts(nil)
 		return nil
 	}
-	analysis := m.analyzeInterceptRouting(text, document)
+	analysis := m.analyzeInterceptRouting(text)
 	if !analysis.Manageable || !interceptCredentialsMatch(text, document) {
 		m.publishHosts(nil)
 		return fmt.Errorf("interception routing is not ready: %s", firstNonEmpty(analysis.Reason, "credential-mismatch"))
+	}
+	// The anchored analysis judges anchor positions, not bindings. An extension
+	// names its egress group by string and the groups are the operator's own, so
+	// a renamed or deleted group leaves the document authorising one that no
+	// longer resolves. Withdraw the hosts rather than steer traffic into it.
+	if err := validateInterceptEgressBindings(document, analysis.AvailableEgressGroups); err != nil {
+		m.publishHosts(nil)
+		return fmt.Errorf("interception routing is not ready: egress-group-missing: %w", err)
 	}
 	if len(activeInterceptHosts(document)) > 0 && !m.certificateReady(document) {
 		m.publishHosts(nil)
@@ -533,9 +542,17 @@ func (m *InterceptModuleManager) routingReadyLocked(document interceptConfigDocu
 	if !document.MITM.Enabled {
 		return false, "mitm-disabled", availableGroups
 	}
-	analysis := m.analyzeInterceptRouting(text, document)
+	analysis := m.analyzeInterceptRouting(text)
 	if !analysis.Manageable {
 		return false, analysis.Reason, availableGroups
+	}
+	// The anchored analysis judges positions, not bindings: the egress groups
+	// live in the operator's own proxy-groups and an extension names one by
+	// string. An operator who renamed or deleted a bound group leaves a
+	// generation authorising a group that no longer exists, so this has to fail
+	// closed here rather than wait for the next publication to notice.
+	if err := validateInterceptEgressBindings(document, analysis.AvailableEgressGroups); err != nil {
+		return false, "egress-group-missing", availableGroups
 	}
 	if !interceptCredentialsMatch(text, document) {
 		return false, "credential-mismatch", availableGroups
@@ -1162,33 +1179,22 @@ func (m *InterceptModuleManager) mutate(
 		return interceptModulesView{}, err
 	}
 	// A change that leaves routing alone -- a settings edit, say -- still has to
-	// reach the processor, and under the overlay it also has to reach the
-	// generation.
+	// reach the processor, and it also has to reach the generation.
 	//
 	// Writing the document and returning was right when the file was the whole
-	// contract: the runtime path unit restarts the sidecar on the write, and
-	// there was no second copy of anything to keep in step. The overlay adds
-	// one. Each generation names the bundle it was compiled against, and mihomo
-	// refuses to treat the processor as ready while it serves a different one --
-	// correctly, because the traffic it is about to steer would then meet a
-	// policy other than the one in the generation. So a settings-only change
-	// that stopped here left the sidecar on a new bundle, the live generation
-	// naming the old one, and every captured connection rejecting until some
-	// unrelated routing change happened to resynchronise them.
+	// contract. The overlay adds a second copy: each generation names the bundle
+	// it was compiled against, and mihomo refuses to treat the processor as
+	// ready while it serves a different one -- correctly, because the traffic it
+	// is about to steer would then meet a policy other than the one in the
+	// generation. So a settings-only change that stopped here would leave the
+	// sidecar on a new bundle, the live generation naming the old one, and every
+	// captured connection rejecting until some unrelated routing change happened
+	// to resynchronise them.
 	//
-	// Under the overlay the change therefore takes the full path below, which
-	// publishes the bundle and commits a generation naming it. The mihomo file
-	// is still not rewritten for it: that is gated on routingChanged separately,
-	// further down, and stays gated.
-	if !effects.routingChanged && !m.overlayDriverActive() {
-		if err := m.publishSidecarDocument(ctx, newBody); err != nil {
-			return interceptModulesView{}, err
-		}
-		m.store.mu.Unlock()
-		view, viewErr := m.viewLocked()
-		m.store.mu.Lock()
-		return view, viewErr
-	}
+	// Every change therefore takes the full path below, which publishes the
+	// bundle and commits a generation naming it. The mihomo file is still not
+	// rewritten for it: that is gated on routingChanged separately, further
+	// down, and stays gated.
 	if m.mihomo == nil || m.controller == nil {
 		return interceptModulesView{}, errInterceptModulesUnavailable
 	}
@@ -1206,27 +1212,12 @@ func (m *InterceptModuleManager) mutate(
 	// machine-only socket. Reconciling the file against the document would
 	// report "out of sync" for the entirely correct state of an empty file and
 	// a populated overlay, so the anchored config gets its own analysis.
-	overlayMode := m.overlayDriverActive()
-	var nextMihomo string
-	analysis := m.analyzeInterceptRouting(oldMihomo, oldDocument)
+	analysis := m.analyzeInterceptRouting(oldMihomo)
 	if !analysis.Reconcileable {
 		return interceptModulesView{}, fmt.Errorf("%w: %s", errInterceptModuleConflict, analysis.Reason)
 	}
 	if err := validateInterceptEgressBindings(nextDocument, analysis.AvailableEgressGroups); err != nil {
 		return interceptModulesView{}, fmt.Errorf("%w: %v", errInterceptModuleConflict, err)
-	}
-	if !overlayMode {
-		nextMihomo, err = renderInterceptRoutingDocument(analysis, nextDocument)
-		if err != nil {
-			return interceptModulesView{}, err
-		}
-		verification := analyzeInterceptRoutingDocument(nextMihomo, nextDocument)
-		if !verification.Manageable {
-			return interceptModulesView{}, errors.New("rendered interception routing failed structural verification")
-		}
-		if err := m.validateMihomoCandidateLocked(ctx, nextMihomo); err != nil {
-			return interceptModulesView{}, err
-		}
 	}
 	if err := m.publishSidecarDocument(ctx, newBody); err != nil {
 		return interceptModulesView{}, err
@@ -1241,18 +1232,12 @@ func (m *InterceptModuleManager) mutate(
 			return interceptModulesView{}, fmt.Errorf("%w: certificate publication: %v; sidecar rollback: %v", errInterceptApplyFailed, err, rollbackErr)
 		}
 	}
-	if overlayMode {
-		// The mihomo file is not rewritten and mihomo is not reloaded. What
-		// changes is a typed generation, committed transactionally; the
-		// operator's own rules are never re-serialised, so a change to routing
-		// can no longer perturb them.
-		if err := m.publishOverlayGeneration(ctx, nextDocument, analysis.MatchTarget,
-			interceptRevision(newBody), interceptCertificateDigest(nextCertificateHosts),
-			interceptBundleID(newBody)); err != nil {
-			rollbackErr := m.store.writeAtomic(oldBody)
-			return interceptModulesView{}, fmt.Errorf("%w: %v; sidecar rollback: %v", errInterceptApplyFailed, err, rollbackErr)
-		}
-	} else if err := m.publishMihomoLocked(ctx, oldMihomo, nextMihomo); err != nil {
+	// The mihomo file is not rewritten and mihomo is not reloaded. What changes
+	// is a typed generation, committed transactionally; the operator's own rules
+	// are never re-serialised, so a change to routing can no longer perturb them.
+	if err := m.publishOverlayGeneration(ctx, nextDocument, analysis.MatchTarget,
+		interceptRevision(newBody), interceptCertificateDigest(nextCertificateHosts),
+		interceptBundleID(newBody)); err != nil {
 		rollbackErr := m.store.writeAtomic(oldBody)
 		return interceptModulesView{}, fmt.Errorf("%w: %v; sidecar rollback: %v", errInterceptApplyFailed, err, rollbackErr)
 	}
@@ -1317,58 +1302,6 @@ func (m *InterceptModuleManager) validateSidecarCandidate(ctx context.Context, b
 	testCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return m.sidecarTest.Test(testCtx, path)
-}
-
-func (m *InterceptModuleManager) validateMihomoCandidateLocked(ctx context.Context, text string) error {
-	if err := ValidateInvariants(text, m.infra); err != nil {
-		return err
-	}
-	if err := m.mihomo.EnsurePrivateDir(); err != nil {
-		return err
-	}
-	temp, err := os.CreateTemp(m.mihomo.Dir(), ".intercept-test-*.yaml")
-	if err != nil {
-		return err
-	}
-	path := temp.Name()
-	defer os.Remove(path)
-	if _, err := temp.WriteString(text); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if m.tester != nil {
-		testCtx, cancel := context.WithTimeout(ctx, mihomoTestTimeout)
-		defer cancel()
-		if err := m.tester.Test(testCtx, path, m.mihomo.Dir()); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (m *InterceptModuleManager) publishMihomoLocked(ctx context.Context, oldText, nextText string) error {
-	if err := atomicWriteFile(m.mihomo.BackupPath(), []byte(oldText), 0o640); err != nil {
-		return fmt.Errorf("write mihomo backup: %w", err)
-	}
-	if err := atomicWriteFile(m.mihomo.Path(), []byte(nextText), 0o640); err != nil {
-		return fmt.Errorf("write mihomo config: %w", err)
-	}
-	if err := m.controller.PutConfigs(ctx, m.mihomo.Path()); err == nil {
-		return nil
-	} else {
-		applyErr := err
-		rollbackDiskErr := atomicWriteFile(m.mihomo.Path(), []byte(oldText), 0o640)
-		var rollbackApplyErr error
-		if rollbackDiskErr == nil {
-			rollbackCtx, cancel := context.WithTimeout(context.Background(), mihomoRollbackLimit)
-			rollbackApplyErr = m.controller.PutConfigs(rollbackCtx, m.mihomo.Path())
-			cancel()
-		}
-		return fmt.Errorf("mihomo hot-apply failed: %v; rollback disk=%v apply=%v", applyErr, rollbackDiskErr, rollbackApplyErr)
-	}
 }
 
 func (m *InterceptModuleManager) waitForCertificate(ctx context.Context, digest string, candidate []byte) error {
@@ -1567,32 +1500,6 @@ func mergeInterceptSettingValues(current, candidate []interceptModuleSetting) []
 	return merged
 }
 
-func containsNewStrings(oldValues, nextValues []string) bool {
-	old := make(map[string]struct{}, len(oldValues))
-	for _, value := range oldValues {
-		old[value] = struct{}{}
-	}
-	for _, value := range nextValues {
-		if _, ok := old[value]; !ok {
-			return true
-		}
-	}
-	return false
-}
-
 func bytesEqual(left, right []byte) bool {
 	return string(left) == string(right)
-}
-
-func sortedModuleIDs(modules []interceptModuleSnapshot) []string {
-	ids := make([]string, 0, len(modules))
-	for _, module := range modules {
-		ids = append(ids, module.ID)
-	}
-	sort.Strings(ids)
-	return ids
-}
-
-func interceptCertStatePath(configPath string) string {
-	return filepath.Join(filepath.Dir(configPath), "cert-state")
 }

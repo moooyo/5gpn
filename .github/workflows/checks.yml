@@ -89,12 +89,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # The core the installer actually ships. Validating against a different
-      # one checks a configuration nobody will run — and until this was pinned
-      # here too, CI exercised only the unanchored fallback while the installer
-      # seeded the anchored form.
+      # one checks a configuration nobody will run. Keep this pin and its digest
+      # in lockstep with MIHOMO_VERSION/MIHOMO_SHA256 in install.sh.
       MIHOMO_REPO: moooyo/mihomo
-      MIHOMO_VERSION: v1.19.28-overlay.4
-      MIHOMO_SHA256: 6af4adc03907ad776783c1e3029795e450a124c5ff880217e2a9672310a10c0d
+      MIHOMO_VERSION: v1.19.28-overlay.6
+      MIHOMO_SHA256: 13fbc6789895bb201c7c8607ec423b03b192082f9b6bb0a20bf9a15593973479
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Download pinned mihomo
@@ -119,12 +118,23 @@ jobs:
               print "  - {name: gateway5060, type: tunnel, listen: 203.0.113.10, port: 5060, network: [tcp, udp], target: console.example.test:5060}"
               next
             }
-            # The pinned core predates the runtime overlay, so render the
-            # unanchored form: an anchor it cannot resolve makes the config
-            # unparseable, which is exactly why the installer probes before
-            # emitting them. Dropping the lines rather than blanking them keeps
-            # the "no unresolved placeholder" check below meaningful.
-            $0 == "__OVERLAY_EGRESS_ANCHOR__" || $0 == "__OVERLAY_CLIENT_ANCHOR__" || $0 == "__OVERLAY_RUNTIME_BLOCK__" {
+            # The anchors are literal in the template. Only the runtime block is
+            # substituted, and it must be: an anchor with no block behind it is
+            # a config mihomo cannot parse, which is the pairing the installer's
+            # staging probe exists to prove against the shipped core. Probe
+            # identities, exactly as render_overlay_runtime_block emits them.
+            $0 == "__OVERLAY_RUNTIME_BLOCK__" {
+              print ""
+              print "runtime-overlay:"
+              print "  owner: 5gpn"
+              print "  control-socket: /run/mihomo/overlay-control.sock"
+              print "  generation-socket: /run/mihomo/overlay-generation.sock"
+              print "  control-peer-uid: 65534"
+              print "  control-peer-gid: 65534"
+              print "  control-socket-gid: 65534"
+              print "  generation-peer-uid: 65534"
+              print "  generation-peer-gid: 65534"
+              print "  generation-socket-gid: 65534"
               next
             }
             {
@@ -172,8 +182,8 @@ jobs:
       - name: Validate the anchored seed the installer actually produces
         run: |
           set -euo pipefail
-          # Both renders, on a machine with neither the service accounts nor the
-          # socket groups — which is what a fresh install is.
+          # On a machine with neither the service accounts nor the socket
+          # groups — which is what a fresh install is.
           bash test/overlay/verify-seed-render.sh /tmp/mihomo
       - name: Exercise sniff-cache isolation
         run: bash tests/mihomo-sniff-cache-regression.sh /tmp/mihomo

@@ -45,6 +45,20 @@ plans, design handoffs, and git history are context only.
   realigned to it in place; that rewrite touches those scalars' exact source
   positions and no other byte, and refuses rather than guesses when it cannot
   prove the edit is safe.
+- Interception routing publishes as a typed generation committed over the mihomo
+  runtime-overlay control socket, and the config carries only the two
+  `RUNTIME-OVERLAY,5gpn,*` anchors. Do not add a YAML rendering driver back.
+  Rendering managed capture, egress, and policy rules into the operator's file
+  was removed because it made every routing change a rewrite of a file the
+  operator owns — re-serialising their rules to publish ours, with reconciliation
+  that could claim or drop a rule sitting near the reserved block. A config
+  without the anchors has no publication path and must fail closed, not fall back
+  to rendering: the installer refuses it in preflight and `mihomo-reset` refuses
+  when the `runtime-overlay:` block is unreadable. The anchors and that block are
+  published together or not at all, since an anchor without it is a config mihomo
+  cannot parse. Anchor placement is a security property: the egress anchor sits
+  immediately above the fail-closed terminator, the client anchor above the
+  terminal `MATCH`.
 - The installer does not roll back. A failure before publication leaves the host
   untouched; a failure during publication leaves it partially installed and says
   so. Do not reintroduce snapshot/restore/quarantine machinery — its failure

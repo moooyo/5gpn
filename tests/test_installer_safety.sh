@@ -864,6 +864,12 @@ CONF_DIR="$TMP/conf"
 MIHOMO_DIR="$CONF_DIR/mihomo"
 MIHOMO_SERVICE_USER="$(id -gn)"
 DNS_SERVICE_USER="$(id -un)"
+# The live render resolves real identities for the overlay runtime block and
+# refuses rather than inventing them, so the seed cannot be rendered at all
+# without these. Point them at this test runner's own account and group.
+INTERCEPT_SERVICE_USER="$(id -un)"
+OVERLAY_CONTROL_GROUP="$(id -gn)"
+OVERLAY_GENERATION_GROUP="$(id -gn)"
 MIHOMO_BIN="$TMP/fake-mihomo"
 DNS_BIN="$TMP/fake-dns"
 INTERCEPT_BIN="$TMP/fake-intercept"

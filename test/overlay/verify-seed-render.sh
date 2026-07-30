@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Exercises both of the installer's seed renders on a machine that has neither
-# the service accounts nor the socket groups.
+# Exercises the installer's seed render on a machine that has neither the
+# service accounts nor the socket groups.
 #
-# Artifact staging validates an anchored candidate before installation has
-# created either, because whether the core parses the anchors is what decides
-# whether they are emitted at all. A renderer that insisted on resolving real
-# identities there would abort every fresh install — which is a failure only a
-# clean machine can show, and the reason this exists.
+# Artifact staging validates its candidate before installation has created
+# either, so the probe render accepts placeholder identities. A renderer that
+# insisted on resolving real ones there would abort every fresh install — which
+# is a failure only a clean machine can show, and the reason this exists.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -24,17 +23,16 @@ OVERLAY_GENERATION_SOCKET="/run/mihomo/overlay-generation.sock"
 err() { echo "  err: $*" >&2; }
 
 eval "$(awk '/^render_overlay_runtime_block\(\) \{/,/^\}/' "$ROOT/install.sh")"
-eval "$(awk '/^render_overlay_placeholder\(\) \{/,/^\}/' "$ROOT/install.sh")"
 
 render() {
-    local overlay="$1" mode="$2" out="$3" line
+    local mode="$1" out="$2" line
     while IFS= read -r line || [[ -n "$line" ]]; do
         case "$line" in
             __MIHOMO_LISTENERS__)
                 printf '  - {name: gateway, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: console.example.test:443}\n'
                 continue ;;
-            __OVERLAY_EGRESS_ANCHOR__|__OVERLAY_CLIENT_ANCHOR__|__OVERLAY_RUNTIME_BLOCK__)
-                render_overlay_placeholder "$line" "$overlay" "$mode" || return 1
+            __OVERLAY_RUNTIME_BLOCK__)
+                render_overlay_runtime_block "$mode" || return 1
                 continue ;;
         esac
         line="${line//__GATEWAY_IP__/10.0.0.1}"
@@ -54,7 +52,7 @@ trap 'rm -rf "$runtime"' EXIT
 printf '127.0.0.1/32\n' > "$runtime/whitelist.txt"
 
 # 1. The probe: anchored, before any account or group exists.
-if render 1 probe "$runtime/anchored.yaml"; then
+if render probe "$runtime/anchored.yaml"; then
     echo "  ok: staging renders the anchored candidate before accounts exist"
 else
     echo "  FAIL: staging could not render before accounts exist — every fresh install aborts" >&2
@@ -64,25 +62,17 @@ grep -Eq '__[A-Z0-9_]+__' "$runtime/anchored.yaml" \
     && { echo "  FAIL: unresolved placeholder in the probe render" >&2; exit 1; }
 echo "  ok: no unresolved placeholders"
 
-# 2. The fallback: unanchored, which is what a core without the overlay gets.
-render 0 probe "$runtime/plain.yaml"
-if "$CORE" -t -f "$runtime/plain.yaml" -d "$runtime" >/dev/null 2>&1; then
-    echo "  ok: the unanchored fallback validates against this core"
+# 2. The anchored form is the only form. A core that rejects it cannot run this
+#    release, which is exactly what artifact staging refuses to install over.
+if "$CORE" -t -f "$runtime/anchored.yaml" -d "$runtime" >/dev/null 2>&1; then
+    echo "  ok: this core implements the overlay; the installer would seed anchored"
 else
-    echo "  FAIL: the unanchored fallback does not validate" >&2
+    echo "  FAIL: this core does not implement the overlay, so staging would refuse it" >&2
     exit 1
 fi
 
-# 3. Whether the anchored form validates depends on the core, and that is the
-#    whole point of the probe — report it rather than assert it.
-if "$CORE" -t -f "$runtime/anchored.yaml" -d "$runtime" >/dev/null 2>&1; then
-    echo "  note: this core implements the overlay; the installer would seed anchored"
-else
-    echo "  note: this core does not implement the overlay; the installer would fall back"
-fi
-
-# 4. The live render must still refuse to invent identities.
-if render 1 live "$runtime/live.yaml" 2>/dev/null; then
+# 3. The live render must still refuse to invent identities.
+if render live "$runtime/live.yaml" 2>/dev/null; then
     echo "  FAIL: the live render invented identities for accounts that do not exist" >&2
     exit 1
 fi

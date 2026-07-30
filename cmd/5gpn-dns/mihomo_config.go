@@ -191,6 +191,12 @@ func mihomoSeedListenerIPs() []string {
 // against the process's OWN environment — the same DNS_* keys systemd's
 // EnvironmentFile populates from /etc/5gpn/dns.env. It takes no arguments so
 // the reset handler always renders from the daemon's current deployment identity.
+//
+// It returns "" when the live config no longer carries a runtime-overlay block.
+// That block is the only record of this box's overlay sockets and peer uids, and
+// the seed's anchors are unresolvable without it, so there is no seed to render
+// rather than a lesser one; the caller reports that instead of writing a config
+// mihomo would refuse.
 func (s *MihomoConfigStore) Default() string {
 	base := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(os.Getenv("DNS_BASE_DOMAIN"))), ".")
 	consoleDomain, zashDomain := "", ""
@@ -219,12 +225,14 @@ func (s *MihomoConfigStore) Default() string {
 		"__INTERCEPT_UPSTREAM_PASSWORD__", interceptUpPass,
 	)
 	// The restored seed must describe the arrangement this box runs. Carry the
-	// live config's overlay block across rather than re-deriving it; a box that
-	// has none gets the rendered form, which is also what first boot produces
-	// before the installer has written anything.
+	// live config's overlay block across rather than re-deriving it, which would
+	// mean guessing socket paths and uids the installer chose.
 	runtimeBlock := ""
 	if body, err := os.ReadFile(s.path); err == nil {
 		runtimeBlock = extractOverlayRuntimeBlock(string(body))
+	}
+	if strings.TrimSpace(runtimeBlock) == "" {
+		return ""
 	}
 	return r.Replace(renderSeedOverlay(mihomoConfigSeedTemplate, runtimeBlock))
 }
@@ -312,8 +320,7 @@ proxies:
     # Names this outbound as the runtime overlay's processor. A generation's
     # capture rules steer at a processor target, and the core refuses to stage
     # one that names an outbound not declared here — so an overlay cannot be
-    # made to hand traffic to an arbitrary proxy by naming it. Harmless on a
-    # core without the overlay, which ignores the key.
+    # made to hand traffic to an arbitrary proxy by naming it.
     runtime-overlay-processor: true
 proxy-providers: {}
 
@@ -346,13 +353,12 @@ rules:
   - IP-CIDR,192.168.0.0/16,REJECT,no-resolve
   - IP-CIDR,100.64.0.0/10,REJECT,no-resolve
   - IP-CIDR,169.254.0.0/16,REJECT,no-resolve
-  # Every sidecar egress selector is published immediately above this
-  # fail-closed terminator. Unknown or stale sidecar traffic must never fall
-  # through to the operator's terminal MATCH rule. Under the runtime overlay
-  # the selectors are not written here at all: the egress anchor resolves them
-  # from the committed generation, and must sit immediately above the
-  # terminator so a declined lookup still reaches the deny.
-__OVERLAY_EGRESS_ANCHOR__
+  # The egress anchor resolves every sidecar egress selector from the committed
+  # generation; not one of them is written into this file. It must sit
+  # immediately above the fail-closed terminator below, so traffic the overlay
+  # declined still reaches the deny. Unknown or stale sidecar traffic must never
+  # fall through to the operator's terminal MATCH rule.
+  - RUNTIME-OVERLAY,5gpn,egress
   - IN-NAME,intercept-egress,REJECT
   - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
   # The client anchor resolves the capture rules. It sits below every deny
@@ -363,7 +369,7 @@ __OVERLAY_EGRESS_ANCHOR__
   # resolves it. The panel names stay pinned by the exact rules and hosts
   # entries above; other such names are not. Closing this needs pinned-IP
   # dialing on egress (see PublicOnly in component/overlay/types.go).
-__OVERLAY_CLIENT_ANCHOR__
+  - RUNTIME-OVERLAY,5gpn,client
   - MATCH,Proxies
 `
 

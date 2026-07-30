@@ -184,11 +184,10 @@ type Config struct {
 	// of a deployment that has not migrated, and of one deliberately rolled
 	// back by starting the sidecar with --control-socket "".
 	InterceptControlSocket string
-	// OverlayControlSocket is mihomo's runtime-overlay control API. When it is
-	// present and the mihomo config carries the overlay anchors, routing
-	// changes publish as typed generations instead of rewriting the operator's
-	// YAML. Its absence selects the legacy renderer, which is also the state of
-	// a core that does not implement the overlay.
+	// OverlayControlSocket is mihomo's runtime-overlay control API, and the only
+	// way this build publishes routing: changes become typed generations rather
+	// than edits to the operator's YAML. Without it interception has no
+	// publication path at all and fails closed.
 	OverlayControlSocket string
 	// OverlayJournalFile records the in-flight generation transition, so a
 	// coordinator that dies between the commit call and its response can read

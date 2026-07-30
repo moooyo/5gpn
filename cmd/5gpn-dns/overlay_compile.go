@@ -125,8 +125,7 @@ func compileOverlayGeneration(in overlayCompileInput) (overlayDocument, error) {
 	// Every capability carries the credential the processor actually presents.
 	// The egress listener is validated to carry exactly one user, so there is
 	// exactly one credential — but the credential is not what selects the group.
-	// The destination is, exactly as it was under the legacy renderer's ordered
-	// `AND,((IN-NAME,intercept-egress),<selector>,(DST-PORT,n)),<group>` rules.
+	// The destination does.
 	//
 	// This used to refuse any document whose enabled extensions resolved to more
 	// than one group, on the reasoning that one credential can present one
@@ -201,9 +200,7 @@ func compileOverlayGeneration(in overlayCompileInput) (overlayDocument, error) {
 // There is exactly one capability because there is exactly one credential: the
 // processor authenticates with a single username on the egress listener, and a
 // capability it cannot present authorizes nothing. What decides which group a
-// connection leaves through is the destination, exactly as it was under the
-// legacy renderer's ordered `AND,((IN-NAME,intercept-egress),<selector>,
-// (DST-PORT,n)),<group>` rules.
+// connection leaves through is the destination.
 //
 // Minting a credential per group was the obvious alternative and is wrong twice
 // over. It would let the processor choose its own egress by choosing which
@@ -212,18 +209,17 @@ func compileOverlayGeneration(in overlayCompileInput) (overlayDocument, error) {
 // operator's group list, so adding a proxy group would require rewriting the
 // listener's users — the configuration rewrite the overlay exists to avoid.
 //
-// The partition follows the legacy renderer exactly: an explicitly bound
-// extension claims a selector before an unbound one, execution order breaks ties
-// within each pass, and a selector is claimed only once. That last property is
-// what makes the destination sets disjoint, so which group a connection leaves
-// through does not depend on the order bindings are evaluated in.
+// The partition rule: an explicitly bound extension claims a selector before an
+// unbound one, execution order breaks ties within each pass, and a selector is
+// claimed only once. That last property is what makes the destination sets
+// disjoint, so which group a connection leaves through does not depend on the
+// order bindings are evaluated in.
 //
 // A group whose extensions had every selector claimed by an earlier one gets no
-// binding rather than an empty one. That is what the legacy path did — such a
-// module emitted no egress rule and so conferred no authority — and it keeps an
-// allowlist that is empty from ever being handed to the core in place of one
-// that is absent. A processor with no bindings at all gets no capability, for
-// the same reason.
+// binding rather than an empty one — such a module confers no authority, and
+// this keeps an allowlist that is empty from ever being handed to the core in
+// place of one that is absent. A processor with no bindings at all gets no
+// capability, for the same reason.
 func overlayEgressCapabilities(ordered []interceptModuleSnapshot, credential, matchTarget string) []overlayEgressCapability {
 	groups := make([]string, 0, 4)
 	destinations := make(map[string][]overlayDestinationRule, 4)

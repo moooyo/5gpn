@@ -20,7 +20,21 @@ awk '
     print "  - {name: gateway5060, type: tunnel, listen: 203.0.113.10, port: 5060, network: [tcp, udp], target: console.example.test:5060}"
     next
   }
-  $0 == "__OVERLAY_EGRESS_ANCHOR__" || $0 == "__OVERLAY_CLIENT_ANCHOR__" || $0 == "__OVERLAY_RUNTIME_BLOCK__" {
+  # Mirrors the workflow: the anchors are literal, and the runtime block is
+  # substituted rather than dropped -- an anchor with no block behind it is a
+  # config mihomo refuses to parse.
+  $0 == "__OVERLAY_RUNTIME_BLOCK__" {
+    print ""
+    print "runtime-overlay:"
+    print "  owner: 5gpn"
+    print "  control-socket: /run/mihomo/overlay-control.sock"
+    print "  generation-socket: /run/mihomo/overlay-generation.sock"
+    print "  control-peer-uid: 65534"
+    print "  control-peer-gid: 65534"
+    print "  control-socket-gid: 65534"
+    print "  generation-peer-uid: 65534"
+    print "  generation-peer-gid: 65534"
+    print "  generation-socket-gid: 65534"
     next
   }
   {

@@ -90,10 +90,9 @@ type overlayDestinationRule struct {
 // mean rewriting the configuration the overlay exists to leave alone.
 type overlayEgressBinding struct {
 	Group string `json:"group"`
-	// Destinations is the endpoint allowlist for this group. It mirrors the
-	// per-destination, per-port egress rules the legacy renderer emitted. An
-	// empty list authorizes nothing and the overlay refuses it, which is what
-	// keeps a coordinator that dropped its rules from failing open.
+	// Destinations is the per-destination, per-port endpoint allowlist for this
+	// group. An empty list authorizes nothing and the overlay refuses it, which
+	// is what keeps a coordinator that dropped its rules from failing open.
 	Destinations []overlayDestinationRule `json:"destinations,omitempty"`
 	// Unbounded carries an extension's network permission to the transport
 	// layer. That permission names no host, so no allowlist can express it; the

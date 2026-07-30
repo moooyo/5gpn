@@ -97,29 +97,45 @@ server after DNS steering and therefore fail closed.
 
 Fresh and explicitly reset seeds also enable the fixed `block-quic-443`
 capability. It keeps the UDP `:443` listener bound but places one canonical
-`AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` rule after the authenticated
-`intercept-egress` binding rules and fail-closed terminator, and before
-interception-host rules. UDP/443 traffic
+`AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` rule after the egress anchor and
+fail-closed terminator, and before the client anchor. UDP/443 traffic
 that reaches the public gateway therefore fails immediately so clients that
 support fallback can retry over TCP/HTTPS, while declared sidecar upstream
-traffic matches its authenticated binding rule first. This is a mihomo ingress rule, not a host firewall;
+traffic is resolved by the egress anchor first. This is a mihomo ingress rule, not a host firewall;
 traffic that bypasses the gateway is unaffected. Normal install and configure
 operations continue to preserve an existing valid operator config byte-for-byte,
 so only fresh/reset configs receive the default implicitly.
 
+Interception routing is published as a typed, generation-versioned document
+committed over a machine-only mihomo control socket — never by rewriting the
+operator's YAML. The configuration carries exactly two `RUNTIME-OVERLAY,5gpn,*`
+anchors that splice the committed generation into rule resolution, and no
+interception rule of any kind. This is the only publication path; there is no
+YAML renderer behind it, so a configuration without the anchors cannot carry
+interception at all.
+
+The data plane is therefore a pinned `moooyo/mihomo` build that implements the
+overlay. Artifact staging proves this by validating an anchored candidate with
+`mihomo -t` against that exact binary rather than by comparing version strings,
+and refuses to install a core that rejects it — while the host is still
+untouched. A mihomo upgrade discards the persisted generations, which the daemon
+republishes from the sidecar document at its next start.
+
 The rule boundary is exact: eight base panel protocol/port rejects, the two
 `:5060` panel rejects, the console and allowlisted zashboard routes, the
-zashboard deny-by-default rule, seven anti-loop destination guards, the ordered
-interception-egress domain/port binding block, the fail-closed
+zashboard deny-by-default rule, seven anti-loop destination guards, the
+`RUNTIME-OVERLAY,5gpn,egress` anchor, the fail-closed
 `IN-NAME,intercept-egress,REJECT` terminator, zero or one canonical global
-UDP/443 reject, zero or more reviewed extension routing rules, zero or more
-canonical extension-capture rules, and the terminal `MATCH`. Egress and
-extension routing rules follow explicit extension execution order and use
-mihomo first-match semantics. Identical rendered routing rules are published
-once at their first declaration. Extension routing rules remain a contiguous
-reserved block after the optional global UDP/443 reject and before capture
-rules. Capture rules use the reserved `MODULE-INTERCEPT` action and remain a
-contiguous, sorted block immediately after that policy block.
+UDP/443 reject, the `RUNTIME-OVERLAY,5gpn,client` anchor, and the terminal
+`MATCH`. Anchor placement is a security property rather than formatting: the
+egress anchor must sit immediately above the terminator, so traffic the overlay
+declined reaches the deny rather than falling through to an operator rule, and
+the client anchor must resolve before the terminal `MATCH`, so captured traffic
+never reaches the operator's own routing. Within the committed generation,
+egress bindings and reviewed extension routing rules follow explicit extension
+execution order and keep first-match semantics; identical rules are published
+once at their first declaration, and capture rules are sorted because they all
+steer at the same processor.
 The anti-loop guards must follow the panel routes because
 mihomo resolves the synthetic console target through `hosts` before matching
 rules; moving those guards earlier would reject the legitimate console
@@ -142,28 +158,35 @@ operator-owned YAML and never reconcile or enable a missing module implicitly.
 The interception subsystem is a separate catalog from the fixed mihomo ingress
 catalog. Its global master is disabled in a fresh installation. The seed always
 contains an authenticated loopback `MODULE-INTERCEPT`
-SOCKS5 node, the matching `intercept-egress` mixed listener, and an `IN-NAME`
-fail-closed terminator. No extension-capture or bound egress rule is
-present in a fresh seed. Extensions may be configured and armed while the
-master is off, but they publish no DNS overlay or mihomo capture rule until the
-master is explicitly enabled. An active native extension derives exact
-`DOMAIN` and wildcard `DOMAIN-WILDCARD` matchers only from its normalized
+SOCKS5 node declared as the overlay's processor, the matching `intercept-egress`
+mixed listener, the two anchors, and an `IN-NAME`
+fail-closed terminator. The committed generation of a fresh seed carries no
+capture rule and no egress capability. Extensions may be configured and armed while the
+master is off, but they publish no DNS overlay and no capture rule until the
+master is explicitly enabled; a disabled master is itself a committed generation
+with an empty client stage, which is what makes the switch atomic rather than
+inferred from an absent overlay. An active native extension derives exact
+`domain` and `domain-wildcard` selectors only from its normalized
 `traffic.captureHosts` list and combines
-each with canonical `DST-PORT,80` and `DST-PORT,443` rules. Plain HTTP, TCP TLS,
+each with canonical port 80 and port 443 constraints. Plain HTTP, TCP TLS,
 and UDP QUIC on those ports are sent to the sidecar; alternate-port traffic
 continues to the operator's normal rule path. A hostname target must match
 the active extension set; a pure-IP SOCKS target is accepted only until the TLS or
 QUIC handshake supplies an allowlisted SNI. Unknown SNI fails closed.
 
-The mihomo transaction may compact one extension's exact apex plus matching
+Because a generation names the outbound it steers at, and the core refuses to
+stage one naming an outbound that has not declared
+`runtime-overlay-processor: true`, an overlay cannot be made to hand traffic to
+an arbitrary proxy by naming it.
+
+The compiler may compact one extension's exact apex plus matching
 wildcard pair (`example.com` and `*.example.com`) into one
-`DOMAIN-SUFFIX,example.com` selector when the action, destination port, egress
-target, and ordered owner are identical. This is only a data-plane rendering
+`domain-suffix` selector when the action, destination port, egress
+target, and ordered owner are identical. This is only a data-plane compilation
 optimization: the immutable manifest, DNS matcher, capture-host audit, and
 certificate SAN set retain both declarations. Exact-only, wildcard-only,
 cross-extension pairs, different egress winners, and reviewed routing rules are
-never compacted. The reserved-block parser accepts only this canonical suffix
-shape and rollback restores the exact previously published bytes.
+never compacted.
 
 Every installed extension also has mutable operator state named `capture_dns`.
 It is exactly `trust` or `china`, defaults to `trust`, is excluded from the
@@ -212,10 +235,12 @@ retry over TCP/HTTPS. This does not claim legacy GQUIC support, and a client is
 permitted to fail instead of falling back. HTTPS upstreams are separately
 certificate-verified and every upstream connection, including an explicitly
 permitted script network request, returns through mihomo's authenticated
-`intercept-egress` SOCKS5 listener. Ordered domain/port rules select an
-operator-bound group when present and otherwise the terminal operator target
-declared by the complete mihomo configuration. Unknown sidecar egress hits the
-dedicated REJECT terminator. The HTTP/3
+`intercept-egress` SOCKS5 listener. The committed generation carries one egress
+capability, keyed to the single credential the processor presents, whose
+destination-indexed bindings select an operator-bound group when present and
+otherwise the terminal operator target declared by the complete mihomo
+configuration. The processor never names a group. Unknown sidecar egress hits
+the dedicated REJECT terminator. The HTTP/3
 client starts with QUIC v1 and retries v2 only after an authenticated version-
 negotiation failure, before request data is sent. There is no direct sidecar
 egress.
@@ -320,8 +345,8 @@ manifest may require an operator egress-group binding but cannot name, inspect,
 or change the selected group. The management surfaces expose only existing
 proxy-group names plus `DIRECT`; the binding is operator state stored outside
 the immutable snapshot. Every transformed TCP or UDP flow returns through authenticated
-`intercept-egress`, where ordered domain/port rules apply the first matching
-bound extension's group. Missing and removed required bindings fail closed
+`intercept-egress`, where the generation's egress bindings apply the first
+matching bound extension's group. Missing and removed required bindings fail closed
 without fallback.
 
 Routing declarations are immutable snapshot capability, while activation is an
@@ -570,15 +595,17 @@ installer command `upgrade-reset-mihomo`, may replace it, and reset must:
 This ownership rule also applies across release channels. A normal
 stable-to-beta upgrade accepts the common persisted JSON schemas and creates
 the beta-only interception state separately; a missing marketplace document
-continues to mean no configured sources. It does not migrate or patch legacy
+continues to mean no configured sources. It does not migrate or patch existing
 mihomo YAML. After preserving the file, the
-installer uses the daemon's structural parser to check the authenticated
-`intercept-egress` listener, `MODULE-INTERCEPT` node, fail-closed rule, and
-credential agreement with the sidecar document. When those boundaries are not
-ready and no interception runtime is active, the installer may complete only
-the DNS, Console, Telegram, and existing mihomo data plane and must explicitly
-report Extensions unavailable. An active interception configuration with an
-incompatible mihomo boundary aborts and rolls back instead of degrading active
+installer uses the daemon's structural parser to check the two overlay anchors
+and their placement, the authenticated
+`intercept-egress` listener, `MODULE-INTERCEPT` processor node, fail-closed rule, and
+credential agreement with the sidecar document. A preserved configuration
+carrying no anchors is refused in preflight, while the host is still untouched,
+with the instruction to run `5gpn mihomo-reset`: routing has no renderer behind
+it, so such a gateway could never enable an extension, and the file is the
+operator's to replace rather than the installer's. Any other structurally
+incompatible boundary aborts for the same reason instead of degrading active
 traffic silently.
 
 `dns.env` itself has only the current key schema. The retired
@@ -624,14 +651,16 @@ restores and reapplies the previous bytes. There is no separate ingress-capabili
 generated region, startup reconciliation, or daemon-owned YAML fragment; the
 result remains fully operator-owned and visible in the raw editor.
 
-The interception-egress, extension-routing, and `MODULE-INTERCEPT` contiguous
-rule blocks are reserved for the interception manager. A raw reset or safe
-partial deletion makes active extensions degraded and immediately removes their
-DNS overlay. A later explicit extension toggle may reconcile only an ordered
-subset of exact old-snapshot egress/capture rules and a prefix of exact old-
-snapshot routing rules. It refuses any extra, reordered, duplicate,
-non-canonical, or otherwise unowned rule, so reconciliation cannot claim or
-delete an operator rule merely because it sits near the reserved block.
+The two `RUNTIME-OVERLAY,5gpn,*` anchors and the `runtime-overlay:` block that
+resolves them are reserved for the interception manager. Deleting either makes
+active extensions degraded and immediately removes their DNS overlay; the
+manager withdraws rather than repairs, because it does not write this file. An
+anchor left without its runtime block is a configuration mihomo refuses to
+parse, so the two are published and restored together or not at all. `5gpn
+mihomo-reset` refuses when the live file no longer carries the block, since that
+block is the only record of this box's overlay sockets and peer identities and a
+reset without it would produce a permanently dead gateway with reset as the
+suggested repair.
 
 Interception extensions are managed through the authenticated
 `/api/interception/modules` surface. The global master, HTTP/2, and QUIC
@@ -701,15 +730,34 @@ conservative 100000-metre maximum rather than inventing precision.
 An active-extension, reorder, binding, or master enable/disable transaction
 holds the sidecar and mihomo store locks in a fixed order. It validates the
 candidate sidecar with the installed
-`5gpn-intercept --check-config`, structurally renders the reserved mihomo rule
-blocks, including reviewed extension routing rules, verifies every selected group exists, validates the complete YAML
-invariants, runs `mihomo -t`, and preserves
-the old bytes for rollback. When new SANs are needed, it atomically publishes
-the candidate sidecar document, waits for the root-owned certificate publisher
-to acknowledge the exact host-set digest, then atomically publishes and hot-
-applies mihomo before publishing the DNS overlay. Certificate or mihomo failure
-restores the old sidecar bytes; mihomo failure also restores and reapplies the
-old operator configuration. While that bounded certificate wait is active, a
+`5gpn-intercept --check-config`, reads the operator's configuration to confirm
+the anchors are placed correctly and to extract the terminal `MATCH` target,
+verifies every selected group exists, compiles the desired routing into a typed
+generation, and preserves the old sidecar bytes for rollback. The operator's
+mihomo file is neither rewritten nor reloaded, so a routing change can no longer
+perturb the rules in it.
+
+The generation transaction is ordered so that a failure cannot leave capability
+without the state it depends on: read back the live generation, compile and
+stage — which is idempotent and confers no capability — atomically publish the
+candidate sidecar document, wait for the root-owned certificate publisher to
+acknowledge the exact host-set digest, record a durable commit intent, then
+commit with compare-and-swap against both the live generation and the core
+configuration revision. The DNS overlay is published last, only once the
+generation is effective, because publishing it earlier would steer clients at a
+gateway that cannot yet process their traffic. A stage or certificate failure
+abandons the staged generation and restores the old sidecar bytes. A commit
+whose response is lost is resolved by reading back and rolling forward, never by
+rolling back: a lost response says nothing about whether the commit landed, and
+undoing on that basis would revoke a generation already serving traffic. An
+active generation matching neither the base nor the target means a third party
+moved it, which is deliberately left for an operator rather than resolved
+automatically. The daemon republishes from the sidecar document at every start,
+so a core whose generation store was lost is corrected rather than trusted; the
+driver short-circuits when the recomputed generation is already live, so a
+healthy boot costs one readback.
+
+While that bounded certificate wait is active, a
 missing target digest causes the manager to atomically republish the exact same
 candidate bytes at a fixed interval. This preserves the revision and content
 while retriggering `PathChanged` after an earlier event was coalesced into an
@@ -1110,8 +1158,9 @@ script receives an explicit `--beta`, it delegates the entire invocation to
 that resolver instead of combining stable templates with beta artifacts.
 
 Stable-to-beta upgrade has two explicit modes. Normal `--beta` installation
-preserves a valid legacy mihomo file byte-for-byte and performs the structural
-interception-readiness check described above. `--beta upgrade-reset-mihomo` is
+preserves a valid existing mihomo file byte-for-byte and performs the structural
+interception-readiness check described above, which refuses a file carrying no
+overlay anchors. `--beta upgrade-reset-mihomo` is
 available only from a pinned beta bundle, requires an existing installation and
 an interactive TTY confirmation, and replaces the complete mihomo file with the
 validated current seed inside the same install transaction. It does not merge
@@ -1596,8 +1645,9 @@ installation because modern Android applications generally reject user CAs.
 
 Changes are tested in proportion to their surface. The complete local gates
 are the repository shell tests, formatting/vet/race tests for both Go modules, Web typecheck and
-Vitest/build/bundle checks, and Playwright tests. CI also renders the mihomo
-seed and validates it with the digest-pinned mihomo version. The separate
+Vitest/build/bundle checks, and Playwright tests. CI also renders the anchored
+mihomo seed and validates it with the digest-pinned mihomo version, which is the
+gate proving that the shipped core parses the overlay anchors. The separate
 extensions repository deterministically generates its marketplace index and
 passes both that index and every maintained manifest to the current core
 `beta` parser tests, so either side rejects a contract drift. Real gateway

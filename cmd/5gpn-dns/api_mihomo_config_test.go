@@ -455,6 +455,11 @@ func TestMihomoConfigAPI_Put_ApplyFails_DiskStillUpdated(t *testing.T) {
 	}
 }
 
+// An ambiguous hot-apply leaves the new file durable and mihomo's state
+// unknown. If that file can no longer carry interception -- here because the
+// operator's edit dropped the overlay anchors -- the DNS overlay has to be
+// withdrawn: steering clients at a gateway that will not capture their traffic
+// is worse than not steering them at all.
 func TestMihomoConfigAPI_AmbiguousHotApplyFailureWithdrawsInterceptionOverlay(t *testing.T) {
 	fx := newMihomoConfigTestFixture(t)
 	module := testModuleSnapshot()
@@ -467,6 +472,7 @@ func TestMihomoConfigAPI_AmbiguousHotApplyFailureWithdrawsInterceptionOverlay(t 
 	manager := NewInterceptModuleManager(
 		NewInterceptConfigStore(interceptPath), handler, nil, fx.store, fx.infra, fx.tester, fx.ctl,
 	)
+	manager.SetOverlayDriver(NewOverlayDriver(stubCommittingOverlayCore(t).client, newTestOverlayJournal(t)))
 	fx.cs.SetInterceptModuleManager(manager)
 	view, err := manager.View()
 	if err != nil {
@@ -483,14 +489,18 @@ func TestMihomoConfigAPI_AmbiguousHotApplyFailureWithdrawsInterceptionOverlay(t 
 	if err != nil {
 		t.Fatal(err)
 	}
+	unanchored := strings.Replace(fx.golden, "  - "+overlayClientAnchorRule+"\n", "", 1)
+	if unanchored == fx.golden {
+		t.Fatal("the client anchor was not found, so this test proves nothing")
+	}
 	fx.ctl.putErr = errors.New("controller response lost after request transmission")
 	recorder := doAPI(fx.cs, http.MethodPut, "/api/mihomo/config",
-		mihomoConfigPutBody(t, fx.golden, mihomoConfigRevision(current)), fx.token, true)
+		mihomoConfigPutBody(t, unanchored, mihomoConfigRevision(current)), fx.token, true)
 	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), `"written":true`) {
 		t.Fatalf("ambiguous apply status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	if handler.decideName("api.example.com").Action == actionGateway {
-		t.Fatal("interception overlay remained active after an ambiguous apply removed its routing block")
+		t.Fatal("interception overlay remained active after an ambiguous apply removed its anchors")
 	}
 }
 
@@ -667,12 +677,18 @@ func TestMihomoConfigAPI_Reset(t *testing.T) {
 	t.Setenv("DNS_PUBLIC_IP", "203.0.113.10")
 	legacyBackupPath, legacyBackupBody := seedLegacyMihomoBackup(t, fx.store)
 
-	// Break the on-disk config first (simulating a prior bad edit).
-	if err := os.WriteFile(fx.store.Path(), []byte("garbage: not a real config"), 0o644); err != nil {
+	// Break the on-disk config the way a bad edit does: the rules are wrong but
+	// the overlay runtime block is still there, which is what a reset rebuilds
+	// the anchored seed from.
+	broken := strings.Replace(goldenMihomoConfig(), "  - MATCH,Proxies", "  - NOT-A-RULE,Proxies", 1)
+	if broken == goldenMihomoConfig() {
+		t.Fatal("fixture did not break the config")
+	}
+	if err := os.WriteFile(fx.store.Path(), []byte(broken), 0o644); err != nil {
 		t.Fatalf("seed broken config: %v", err)
 	}
 
-	rec := doAPI(fx.cs, http.MethodPost, "/api/mihomo/config/reset", mihomoConfigResetBody(t, mihomoConfigRevision("garbage: not a real config")), fx.token, true)
+	rec := doAPI(fx.cs, http.MethodPost, "/api/mihomo/config/reset", mihomoConfigResetBody(t, mihomoConfigRevision(broken)), fx.token, true)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -698,7 +714,7 @@ func TestMihomoConfigAPI_Reset(t *testing.T) {
 		t.Fatalf("reset should restore the seed default:\n--- got ---\n%s\n--- want ---\n%s", onDisk, goldenMihomoConfig())
 	}
 	backup, err := os.ReadFile(fx.store.BackupPath())
-	if err != nil || string(backup) != "garbage: not a real config" {
+	if err != nil || string(backup) != broken {
 		t.Fatalf("reset backup = %q, %v", backup, err)
 	}
 	if info, err := os.Stat(fx.store.BackupPath()); err != nil || filesystemSupportsPOSIXModes(t, filepath.Dir(fx.store.BackupPath())) && info.Mode().Perm() != 0o640 {
@@ -709,5 +725,31 @@ func TestMihomoConfigAPI_Reset(t *testing.T) {
 	}
 	if fx.ctl.putCalls != 1 {
 		t.Fatalf("reset should hot-apply the restored default, got %d PutConfigs calls", fx.ctl.putCalls)
+	}
+}
+
+// A config damaged past the overlay runtime block cannot be reset into a usable
+// one: the block records the sockets and peer IDs the daemon does not otherwise
+// know, and routing has no renderer behind it. Refusing says so instead of
+// handing back an unanchored file that would leave interception permanently
+// dead with reset as the suggested repair.
+func TestMihomoConfigAPI_ResetRefusesWhenTheOverlayBlockIsGone(t *testing.T) {
+	fx := newMihomoConfigTestFixture(t)
+	t.Setenv("DNS_BASE_DOMAIN", "5gpn.test")
+	t.Setenv("DNS_MIHOMO_LISTEN_IPS", "203.0.113.10")
+	t.Setenv("DNS_GATEWAY_IP", fx.infra.GatewayIP)
+	t.Setenv("DNS_MIHOMO_SECRET", "s3cr3t")
+	t.Setenv("DNS_PUBLIC_IP", "203.0.113.10")
+
+	if err := os.WriteFile(fx.store.Path(), []byte("garbage: not a real config"), 0o644); err != nil {
+		t.Fatalf("seed broken config: %v", err)
+	}
+	rec := doAPI(fx.cs, http.MethodPost, "/api/mihomo/config/reset",
+		mihomoConfigResetBody(t, mihomoConfigRevision("garbage: not a real config")), fx.token, true)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s, want a refusal", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "reinstall") {
+		t.Fatalf("refusal does not tell the operator what to do: %s", rec.Body.String())
 	}
 }
