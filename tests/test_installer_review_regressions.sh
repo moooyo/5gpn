@@ -77,6 +77,28 @@ if grep -Fq 'TRANSACTION_STATE_UNITS' <<<"$unit_capture_fn" \
 else
     fail "certificate timer state is lost across a failed mode switch"
 fi
+# A oneshot left `failed` by an aborted earlier install is a settled state the
+# snapshot can record exactly as well as `inactive`. Refusing it wedged every
+# later retry on a state the installer itself produced and never cleared.
+if grep -Fq '"$active_state" == failed' <<<"$unit_capture_fn" \
+   && grep -Fq "'^(active|inactive|failed)\$'" "$INSTALL" \
+   && grep -Fq 'clear_managed_unit_failure_records' <<<"$unit_capture_fn"; then
+    pass "an aborted install's failed unit state is snapshotted, not refused"
+else
+    fail "a failed managed unit permanently blocks reinstall at the snapshot gate"
+fi
+reset_units=()
+systemctl() { [[ "$1" != reset-failed ]] || reset_units+=("$2"); return 0; }
+clear_managed_unit_failure_records
+unset -f systemctl
+if [[ "${#reset_units[@]}" -gt 0 \
+   && " ${reset_units[*]} " == *" 5gpn-intercept-cert.service "* \
+   && " ${reset_units[*]} " == *" mihomo.service "* \
+   && " ${reset_units[*]} " != *" certbot.timer "* ]]; then
+    pass "install clears its own units' failure records and leaves certbot.timer alone"
+else
+    fail "pre-snapshot cleanup is missing or resets the distro certbot timer's failure"
+fi
 if grep -Fq 'ROLLBACK_DIR/polkit/50-5gpn.rules' <<<"$capture_fn" \
    && grep -Fq 'ROLLBACK_DIR/polkit/50-5gpn.rules' <<<"$rollback_fn" \
    && grep -Fq '50-5gpn.rules.absent' <<<"$rollback_fn" \

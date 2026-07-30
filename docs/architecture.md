@@ -1143,6 +1143,16 @@ leaves drop-ins in place and systemd keeps applying them, which is the supported
 way to override anything here. Stop-and-disable failure still blocks deletion of
 that unit file.
 
+The pre-publication snapshot records each managed unit's exact enablement and
+activity. A unit left `failed` by an aborted earlier install is a settled state,
+not a transition: it is snapshotted like an inactive one, and rollback stops it
+either way. The installer also clears its own units' failure records immediately
+before that snapshot, so a oneshot that failed mid-transaction cannot wedge
+every later retry on a state the installer itself produced. `certbot.timer` is
+distro-owned and its failure may belong to an unrelated lineage, so that record
+is left exactly as found. Only genuinely in-flight activity — activating,
+deactivating, reloading — aborts the snapshot.
+
 The same rule governs the other fixed 5gpn paths — `/opt/5gpn`, `/etc/5gpn`, the
 state root, the management launcher, the polkit rule, the Certbot deploy hook,
 and the published static trees. Each still publishes an ownership marker, and

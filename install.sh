@@ -3101,9 +3101,24 @@ capture_intercept_state_root() {
         "$INTERCEPT_STATE_MARKER_VALUE" intercept-state
 }
 
+# A oneshot that failed during an earlier aborted install stays `failed` for as
+# long as the host runs: nothing else clears that record, so every later retry
+# would abort at the state gate below on a state the installer itself produced.
+# The record is bookkeeping, not activity — clearing it neither starts nor stops
+# anything. certbot.timer is distro-owned and its failure may belong to an
+# unrelated lineage, so that record is left exactly as found.
+clear_managed_unit_failure_records() {
+    local unit
+    for unit in "${TRANSACTION_STATE_UNITS[@]}"; do
+        [[ "$unit" != certbot.timer ]] || continue
+        systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+    done
+}
+
 capture_managed_unit_states() {
     local unit enabled_state active_state fragment_path load_state enabled_rc active_rc
     install -d -m 0700 "$ROLLBACK_DIR/unit-state" || return 1
+    clear_managed_unit_failure_records
     for unit in "${TRANSACTION_STATE_UNITS[@]}"; do
         load_state="$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)"
         [[ -n "$load_state" ]] \
@@ -3135,9 +3150,15 @@ capture_managed_unit_states() {
                && ( "${active_state:-unknown}" == inactive || "${active_state:-unknown}" == unknown ) ]] \
                 || { err "Inconsistent absent-unit state for $unit."; return 1; }
         else
+            # `failed` is a settled terminal state, not a transition: it records
+            # exactly as much as `inactive` does (active_rc is non-zero either
+            # way, so restore stops the unit) and is the state an aborted
+            # earlier install leaves behind. Only genuinely in-flight states —
+            # activating, deactivating, reloading — cannot be snapshotted.
             [[ "$enabled_state" != not-found \
-               && ( "$active_state" == active || "$active_state" == inactive ) ]] \
-                || { err "Unstable systemd state for $unit (${enabled_state:-empty}/${active_state:-empty}); retry when it is active or inactive."; return 1; }
+               && ( "$active_state" == active || "$active_state" == inactive \
+                  || "$active_state" == failed ) ]] \
+                || { err "Unsettled systemd state for $unit (${enabled_state:-empty}/${active_state:-empty}); retry once it finishes activating or deactivating."; return 1; }
         fi
         printf '%s\n' "${enabled_state:-not-found}" \
             > "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" || return 1
@@ -3252,7 +3273,7 @@ validate_install_rollback_snapshot() {
         if [[ -f "$ROLLBACK_DIR/unit-state/${unit}.exists" ]]; then
             grep -Eq '^(enabled|enabled-runtime|masked|masked-runtime|static|indirect|disabled)$' \
                 "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" || return 1
-            grep -Eq '^(active|inactive)$' "$ROLLBACK_DIR/unit-state/${unit}.active-state" || return 1
+            grep -Eq '^(active|inactive|failed)$' "$ROLLBACK_DIR/unit-state/${unit}.active-state" || return 1
         else
             grep -Eq '^not-found$' "$ROLLBACK_DIR/unit-state/${unit}.enabled-state" || return 1
             grep -Eq '^(inactive|unknown)$' "$ROLLBACK_DIR/unit-state/${unit}.active-state" || return 1
