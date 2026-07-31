@@ -43,7 +43,8 @@ const WLOC: InterceptModule = {
 
 /**
  * A published proxy-compat bundle reads a coordinate as three flat arguments,
- * because Loon's `[Argument]` block has no location type. The console still
+ * because the published plugin format has no location type in its argument
+ * block. The console still
  * offers the map for that trio; only the values it writes stay flat.
  */
 const FLAT_WLOC: InterceptModule = {

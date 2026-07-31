@@ -114,9 +114,10 @@ function asLocation(value: unknown): LocationPoint {
  * nested under its own key and a published bundle reading `$argument.longitude`
  * finds nothing and silently runs on its own defaults.
  *
- * Loon's `[Argument]` block is flat, so those bundles spell a coordinate as
- * three scalar arguments under exactly these names. Recognising that trio gives
- * the operator the same map the `location` type gets while the values the
+ * The published plugin format those bundles are written against declares a
+ * flat, typed argument block with no location type, so they spell a coordinate
+ * as three scalar arguments under exactly these names. Recognising that trio
+ * gives the operator the same map the `location` type gets while the values the
  * script receives stay flat and unchanged. The picker writes only these three
  * keys -- the same ones the operator could type by hand -- so a misread here
  * costs an unwanted map, never a wrong value.
