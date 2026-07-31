@@ -232,6 +232,24 @@ It warns before collection that coordinates pass through Telegram and the
 Telegram Bot API. An omitted Telegram accuracy becomes the conservative
 100000-metre maximum. Telegram does not embed or proxy the Console's full map.
 
+A `location` value reaches a script nested under its own setting key, so it
+cannot drive a published proxy-compat bundle: those are written against Loon's
+`[Argument]` block, which is flat, and spell a coordinate as three scalar
+arguments. A bundle reading `$argument.longitude` against a `location` setting
+finds nothing and silently runs on its own defaults.
+
+So the Console offers the same map for the flat form. When an extension
+declares `text` or `number` settings keyed exactly `longitude` and `latitude`
+-- with an optional `accuracy` -- it renders one picker above them that writes
+those keys instead of a location object. The three fields remain editable on
+their own, and what the script receives is unchanged: three flat values. A
+`text` coordinate is written back as a string, because those bundles guard with
+`argument.longitude && …` and would drop a numeric `0` as falsy.
+
+This is a Console affordance, not a manifest declaration. It writes only the
+keys the operator could type by hand, so it costs an unwanted map at worst and
+never a wrong value, and no part of the sidecar contract changes.
+
 ## Script actions
 
 An action phase is `request` or `response`. Its structured matcher contains:
