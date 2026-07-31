@@ -30,6 +30,23 @@ function rounded(value: number): number {
   return Number(value.toFixed(6))
 }
 
+/**
+ * Leaflet reports a click or a drag on a repeated world copy in that copy's
+ * own coordinates, so panning east past the antimeridian yields a longitude
+ * above 180. Every emitted point is normalised here rather than at each call
+ * site: a `location` setting would fail its ±180 validation and refuse to save
+ * with no visible cause, and a flat coordinate trio has no range check at all
+ * and would hand the script a longitude no protocol accepts.
+ */
+function wrappedLongitude(value: number): number {
+  const wrapped = ((value + 180) % 360 + 360) % 360 - 180
+  return rounded(wrapped)
+}
+
+function clampedLatitude(value: number): number {
+  return rounded(Math.min(90, Math.max(-90, value)))
+}
+
 export function LocationPicker({
   value,
   disabled,
@@ -66,7 +83,7 @@ export function LocationPicker({
       const marker = L.marker(latLng, { draggable: true, icon, keyboard: true, title: t('extensions.location.selected') }).addTo(map)
       marker.on('dragend', () => {
         const next = marker.getLatLng()
-        onChangeRef.current({ ...valueRef.current, longitude: rounded(next.lng), latitude: rounded(next.lat) })
+        onChangeRef.current({ ...valueRef.current, longitude: wrappedLongitude(next.lng), latitude: clampedLatitude(next.lat) })
       })
       markerRef.current = marker
     } else {
@@ -104,7 +121,7 @@ export function LocationPicker({
       }).addTo(map)
       map.on('click', (event: Leaflet.LeafletMouseEvent) => {
         if (disabled) return
-        const next = { ...valueRef.current, longitude: rounded(event.latlng.lng), latitude: rounded(event.latlng.lat) }
+        const next = { ...valueRef.current, longitude: wrappedLongitude(event.latlng.lng), latitude: clampedLatitude(event.latlng.lat) }
         onChangeRef.current(next)
         syncPoint(next)
       })
@@ -148,7 +165,7 @@ export function LocationPicker({
   }
 
   function choose(result: CityResult) {
-    const next = { ...value, longitude: rounded(Number(result.lon)), latitude: rounded(Number(result.lat)) }
+    const next = { ...value, longitude: wrappedLongitude(Number(result.lon)), latitude: clampedLatitude(Number(result.lat)) }
     onChange(next)
     syncPoint(next, true)
     setResults([])
@@ -160,8 +177,8 @@ export function LocationPicker({
     navigator.geolocation.getCurrentPosition((position) => {
       const next = {
         ...valueRef.current,
-        longitude: rounded(position.coords.longitude),
-        latitude: rounded(position.coords.latitude),
+        longitude: wrappedLongitude(position.coords.longitude),
+        latitude: clampedLatitude(position.coords.latitude),
         accuracy: Math.max(1, Math.round(position.coords.accuracy || valueRef.current.accuracy)),
       }
       onChangeRef.current(next)

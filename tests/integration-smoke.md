@@ -645,8 +645,13 @@ systemctl start 5gpn-intercept
   legacy GQUIC coverage.
 - [ ] Install
   `https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml`,
-  search for a city in its generic map-backed `location` setting, fine-tune the
-  marker/coordinates and accuracy, save settings, and enable the extension.
+  search for a city in the map picker the Console renders over its flat
+  `longitude`/`latitude`/`accuracy` settings, fine-tune the marker/coordinates
+  and accuracy, save settings, and enable the extension. The extension declares
+  no `location` setting -- the bundle it runs reads three flat arguments -- so
+  confirm the three settings hold the picked values afterwards, and that a point
+  left at upstream's `113.94114`/`22.544577` is treated as unconfigured by the
+  bundle and patches nothing.
 - [ ] Exercise WLOC over TCP/H2, QUIC v1/H3, and QUIC v2/H3. In every case the
   response is patched, the upstream certificate is verified, and packet capture
   shows the sidecar's upstream TCP/UDP entering mihomo's authenticated

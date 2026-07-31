@@ -41,6 +41,26 @@ const WLOC: InterceptModule = {
   source_digest: 'a'.repeat(64), snapshot_digest: 'a'.repeat(64), imported_at: '2026-07-18T00:00:00Z',
 }
 
+/**
+ * A published proxy-compat bundle reads a coordinate as three flat arguments,
+ * because Loon's `[Argument]` block has no location type. The console still
+ * offers the map for that trio; only the values it writes stay flat.
+ */
+const FLAT_WLOC: InterceptModule = {
+  id: 'io.5gpn.apple-wloc-flat', extension_version: '2.1.0', name: 'Apple WLOC Upstream Bundle',
+  description: 'Runs the published upstream bundle.', enabled: false, ready: false,
+  reason: 'settings-required', capture_hosts: ['gs-loc.apple.com'], capture_dns: 'trust', script_count: 2,
+  settings: [
+    { key: 'longitude', type: 'number', label: 'Longitude', required: true, min: -180, max: 180 },
+    { key: 'latitude', type: 'number', label: 'Latitude', required: true, min: -90, max: 90 },
+    { key: 'accuracy', type: 'number', label: 'Accuracy', required: true, min: 1, max: 100000, value: 25 },
+    { key: 'LogLevel', type: 'select', label: 'Script log level', required: true, options: ['off', 'info'], value: 'info' },
+  ],
+  persistent_storage: true, execution_order: 3, network: false, egress_group_required: false,
+  source_url: 'https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml',
+  source_digest: 'c'.repeat(64), snapshot_digest: 'c'.repeat(64), imported_at: '2026-07-31T00:00:00Z',
+}
+
 const CLEANER: InterceptModule = {
   id: 'io.example.response-cleaner', extension_version: '1.0.0', name: 'Response Cleaner',
   description: 'Native response action fixture.', enabled: false, ready: true, reason: undefined,
@@ -229,6 +249,67 @@ describe('ExtensionsPage native extension contract', () => {
         failClosed: true,
       },
     }))
+  })
+
+  /**
+   * The map is not reserved for the `location` type. A bundle that reads three
+   * flat arguments gets the same picker, and what reaches the script stays
+   * flat, in each setting's own declared type.
+   */
+  it('offers the map picker for a flat longitude/latitude/accuracy trio', async () => {
+    const user = userEvent.setup()
+    const view = cloneView()
+    view.modules = [FLAT_WLOC]
+    view.execution_order = [FLAT_WLOC.id]
+    vi.mocked(api.getInterceptModules).mockResolvedValue(view)
+    vi.mocked(api.putInterceptModule).mockResolvedValue(view)
+    renderPage()
+    const card = await screen.findByTestId(`extension-${FLAT_WLOC.id}`)
+    await user.click(within(card).getByRole('button', { name: '设置 · 4' }))
+    const dialog = await screen.findByRole('dialog', { name: /Apple WLOC Upstream Bundle/ })
+    expect(within(dialog).getByTestId('coordinate-group-picker')).toBeInTheDocument()
+    await user.click(within(dialog).getByTestId('mock-location-picker'))
+    await user.click(within(dialog).getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(api.putInterceptModule).toHaveBeenCalledWith(FLAT_WLOC.id, {
+      revision: view.revision,
+      settings: { longitude: 113.94114, latitude: 22.544577, accuracy: 25, LogLevel: 'info' },
+    }))
+  })
+
+  /**
+   * A `text` coordinate is written back as a string on purpose: the bundles
+   * guard with `argument.longitude && …`, so a numeric 0 would be dropped as
+   * falsy where `"0"` is honoured.
+   */
+  it('writes a text-typed coordinate trio back as strings', async () => {
+    const user = userEvent.setup()
+    const view = cloneView()
+    const textual = structuredClone(FLAT_WLOC)
+    textual.settings = textual.settings?.map((setting) =>
+      setting.type === 'number' ? { ...setting, type: 'text' as const, min: undefined, max: undefined, value: setting.value === undefined ? undefined : String(setting.value) } : setting)
+    view.modules = [textual]
+    view.execution_order = [textual.id]
+    vi.mocked(api.getInterceptModules).mockResolvedValue(view)
+    vi.mocked(api.putInterceptModule).mockResolvedValue(view)
+    renderPage()
+    const card = await screen.findByTestId(`extension-${textual.id}`)
+    await user.click(within(card).getByRole('button', { name: '设置 · 4' }))
+    const dialog = await screen.findByRole('dialog', { name: /Apple WLOC Upstream Bundle/ })
+    await user.click(within(dialog).getByTestId('mock-location-picker'))
+    await user.click(within(dialog).getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(api.putInterceptModule).toHaveBeenCalledWith(textual.id, {
+      revision: view.revision,
+      settings: { longitude: '113.94114', latitude: '22.544577', accuracy: '25', LogLevel: 'info' },
+    }))
+  })
+
+  it('offers no map picker when the coordinate trio is absent', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    const card = await screen.findByTestId(`extension-${WLOC.id}`)
+    await user.click(within(card).getByRole('button', { name: '设置 · 2' }))
+    const dialog = await screen.findByRole('dialog', { name: /Apple WLOC Location Override/ })
+    expect(within(dialog).queryByTestId('coordinate-group-picker')).not.toBeInTheDocument()
   })
 
   /**

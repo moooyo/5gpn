@@ -109,6 +109,67 @@ function asLocation(value: unknown): LocationPoint {
 }
 
 /**
+ * A `location` setting cannot drive a proxy-compat bundle: settings reach a
+ * script as one flat map keyed by setting key, so a location value arrives
+ * nested under its own key and a published bundle reading `$argument.longitude`
+ * finds nothing and silently runs on its own defaults.
+ *
+ * Loon's `[Argument]` block is flat, so those bundles spell a coordinate as
+ * three scalar arguments under exactly these names. Recognising that trio gives
+ * the operator the same map the `location` type gets while the values the
+ * script receives stay flat and unchanged. The picker writes only these three
+ * keys -- the same ones the operator could type by hand -- so a misread here
+ * costs an unwanted map, never a wrong value.
+ */
+const COORDINATE_KEYS = { longitude: 'longitude', latitude: 'latitude', accuracy: 'accuracy' } as const
+
+interface CoordinateGroup {
+  longitude: InterceptModuleSetting
+  latitude: InterceptModuleSetting
+  accuracy?: InterceptModuleSetting
+}
+
+function scalarSetting(settings: InterceptModuleSetting[], key: string): InterceptModuleSetting | undefined {
+  const setting = settings.find((candidate) => candidate.key === key)
+  return setting && (setting.type === 'text' || setting.type === 'number') ? setting : undefined
+}
+
+function coordinateGroupOf(settings: InterceptModuleSetting[]): CoordinateGroup | null {
+  const longitude = scalarSetting(settings, COORDINATE_KEYS.longitude)
+  const latitude = scalarSetting(settings, COORDINATE_KEYS.latitude)
+  if (!longitude || !latitude) return null
+  return { longitude, latitude, accuracy: scalarSetting(settings, COORDINATE_KEYS.accuracy) }
+}
+
+function coordinateNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  if (typeof value !== 'string' || value.trim() === '') return undefined
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+/**
+ * Written back in the setting's own type. A `text` coordinate has to stay a
+ * string: the bundles guard with `argument.longitude && …`, so a numeric 0
+ * would be dropped as falsy while `"0"` is honoured.
+ */
+function coordinateValue(setting: InterceptModuleSetting | undefined, value: number): string | number {
+  return setting?.type === 'number' ? value : String(value)
+}
+
+function groupPoint(group: CoordinateGroup, values: Record<string, unknown>): LocationPoint {
+  return {
+    longitude: coordinateNumber(values[group.longitude.key]),
+    latitude: coordinateNumber(values[group.latitude.key]),
+    // `??`, not `||`. coordinateNumber already returns undefined for anything
+    // unusable, so `||` would only swallow a legitimate 0 -- showing 25 on the
+    // circle and then writing 25 back over the operator's value on the next
+    // marker move.
+    accuracy: (group.accuracy && coordinateNumber(values[group.accuracy.key])) ?? 25,
+  }
+}
+
+/**
  * The one status the operator has to act on, if any.
  *
  * A card could carry up to thirteen badges, with "egress group missing" —
@@ -426,13 +487,14 @@ function ExtensionSettingsModal({
   const captureDNSChanged = !!module && captureDNS !== module.capture_dns
   const egressReady = !module?.egress_group_required || (selectedEgressGroup !== '' && egressGroups.includes(selectedEgressGroup))
   const hasLocation = module?.settings?.some((setting) => setting.type === 'location') ?? false
+  const coordinates = coordinateGroupOf(module?.settings ?? [])
 
   return (
     <Modal
       open={!!module}
       onOpenChange={onOpenChange}
       title={module ? t('extensions.configureTitle', { name: module.name }) : ''}
-      className={hasLocation ? 'w-[min(96vw,920px)]' : undefined}
+      className={hasLocation || coordinates ? 'w-[min(96vw,920px)]' : undefined}
       footer={
         <>
           <Button type="button" variant="secondary" size="sm" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
@@ -461,6 +523,31 @@ function ExtensionSettingsModal({
             {((module.egress_group_required && !module.egress_group) || (!!module.egress_group && !egressGroups.includes(module.egress_group))) ? <p role="alert" className="mt-3 text-label font-medium text-[var(--md-sys-color-error)]">{t('extensions.egressGroupMissingDetail', { group: module.egress_group || t('extensions.egressGroupUnset') })}</p> : null}
             <Select value={egressGroup} onValueChange={setEgressGroup} items={[{ value: DEFAULT_EGRESS_GROUP, label: t('extensions.egressGroupDefault') }, ...egressGroups.map((group) => ({ value: group, label: group }))]} placeholder={t('extensions.selectEgressGroup')} className="mt-3 w-full" />
           </DialogSection>
+          {coordinates ? (
+            <DialogSection label={t('extensions.location.title')} data-testid="coordinate-group-picker">
+              <p className="text-meta leading-4 text-text-faint">{t('extensions.location.groupHint')}</p>
+              <div className="mt-3">
+                <LocationPicker
+                  value={groupPoint(coordinates, values)}
+                  onChange={(next) => setValues((current) => {
+                    const updated = { ...current }
+                    if (next.longitude !== undefined) updated[coordinates.longitude.key] = coordinateValue(coordinates.longitude, next.longitude)
+                    if (next.latitude !== undefined) updated[coordinates.latitude.key] = coordinateValue(coordinates.latitude, next.latitude)
+                    // Only when the picker actually moved accuracy, which is
+                    // the "use current location" control alone. Every other
+                    // path spreads the accuracy it was handed straight back
+                    // out, so writing unconditionally would let a plain map
+                    // click overwrite a value the operator typed with whatever
+                    // groupPoint could make of it.
+                    if (coordinates.accuracy && next.accuracy !== groupPoint(coordinates, current).accuracy) {
+                      updated[coordinates.accuracy.key] = coordinateValue(coordinates.accuracy, next.accuracy)
+                    }
+                    return updated
+                  })}
+                />
+              </div>
+            </DialogSection>
+          ) : null}
           {(module.settings ?? []).map((setting) => {
             const label = setting.label || setting.key
             const description = setting.description

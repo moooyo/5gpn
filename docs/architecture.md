@@ -1618,6 +1618,11 @@ disable, delete, reorder, binding, settings, and update changes use revision
 checks and explicit confirmation. Required missing or removed group bindings
 render the plugin not-ready and cannot silently fall back. A `location` setting uses the shared map point picker with
 explicit city search, draggable point, accuracy, and direct coordinate fields.
+The same picker is offered over `text` or `number` settings keyed exactly
+`longitude` and `latitude`, with an optional `accuracy`, because a published
+proxy-compat bundle reads a coordinate as three flat arguments and a `location`
+value would reach it nested under one key. That form writes the three keys
+rather than a location object, so what the script receives is unchanged.
 City search calls bearer-protected `GET /api/geocode/cities`; the daemon sends
 only the bounded query and language to the fixed Nominatim origin through the
 same post-resolution SSRF dial guard used by subscription fetches. It never

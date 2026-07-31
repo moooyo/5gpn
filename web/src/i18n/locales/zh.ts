@@ -527,6 +527,8 @@ const zh: typeof en = {
       useCurrent: '使用当前位置', map: '地图取点', pickHint: '点击地图或搜索城市设置目标位置；标记可拖动。', mapFailed: '地图加载失败，仍可在下方直接输入经纬度。',
       provider: '地图瓦片来自 OpenStreetMap；点击搜索后由受保护的同源 API 查询 Nominatim，控制台令牌不会转发给地图服务。', selected: '目标位置',
       longitude: '经度', latitude: '纬度', accuracy: '精度（米）',
+      title: '目标位置',
+      groupHint: '在此取点会填入下方的坐标设置；也可以直接编辑那几个输入框。',
     },
   },
   marketplace: {

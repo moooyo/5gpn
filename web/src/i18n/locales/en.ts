@@ -550,6 +550,8 @@ const en = {
       useCurrent: 'Use current location', map: 'Map point picker', pickHint: 'Click the map or search a city. The marker is draggable.', mapFailed: 'The map failed to load. You can still enter coordinates below.',
       provider: 'Map tiles are provided by OpenStreetMap. After Search is pressed, a protected same-origin API queries Nominatim without forwarding the Console token.', selected: 'Target location',
       longitude: 'Longitude', latitude: 'Latitude', accuracy: 'Accuracy (metres)',
+      title: 'Target location',
+      groupHint: 'Picking a point here fills the coordinate settings below. You can also edit those fields directly.',
     },
   },
   marketplace: {
