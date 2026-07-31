@@ -76,7 +76,7 @@ test('mobile plugin logs use split filter rails, compact cards, circular actions
   await expect(levelFilters).toBeVisible()
   await expect(pluginFilters).toBeVisible()
   await expect(levelFilters.getByRole('button')).toHaveCount(4)
-  await expect(pluginFilters.getByRole('button')).toHaveCount(3)
+  await expect(pluginFilters.getByRole('button')).toHaveCount(4)
   await levelFilters.getByRole('button', { name: /^warn/ }).click()
   await page.keyboard.press('Escape')
   await expect(page.getByRole('group', { name: '已选筛选条件' }).getByRole('button')).toHaveCount(1)

@@ -204,3 +204,43 @@ test('online WLOC extension uses the native location setting and generic enable 
   await expect(confirm).toBeVisible()
   await confirm.getByRole('button', { name: '启用' }).click()
 })
+
+/**
+ * The same map, over the flat argument trio a published bundle actually reads.
+ * A `location` setting would reach that bundle nested under one key, so this is
+ * the only shape that gets both the picker and a working script -- which makes
+ * the city search and the three fields worth driving for real here.
+ */
+test('a flat coordinate trio gets the map picker and city search', async ({ page }) => {
+  await setupMockApiWithToken(page)
+  await page.route('https://tile.openstreetmap.org/**', (route) => route.abort())
+  await page.goto('/extensions')
+  await page.waitForLoadState('networkidle')
+
+  const extension = page.getByTestId('extension-io.example.flat-wloc')
+  await extension.getByRole('button', { name: '设置 · 4' }).click()
+  const dialog = page.getByRole('dialog', { name: /Flat Coordinate Bundle/ })
+  await expect(dialog.getByTestId('coordinate-group-picker')).toBeVisible()
+  await expect(dialog.getByTestId('extension-location-picker')).toBeVisible()
+
+  await dialog.getByLabel('搜索城市').fill('深圳')
+  await dialog.getByRole('button', { name: '搜索', exact: true }).click()
+  await dialog.getByRole('option', { name: /深圳市/ }).click()
+
+  // The three coordinate settings render their own number inputs, and the
+  // search result has to have filled the two the picker owns.
+  const fields = dialog.getByRole('spinbutton')
+  await expect(fields).toHaveCount(3)
+  await expect(fields.nth(0)).toHaveValue('113.94114')
+  await expect(fields.nth(1)).toHaveValue('22.544577')
+
+  const settingsRequest = page.waitForRequest((request) =>
+    request.url().includes('/api/interception/modules/io.example.flat-wloc') && request.method() === 'PUT',
+  )
+  await dialog.getByRole('button', { name: '保存' }).click()
+  // Flat, and numbers rather than a nested location object.
+  expect((await settingsRequest).postDataJSON()).toMatchObject({
+    settings: { longitude: 113.94114, latitude: 22.544577, accuracy: 25, LogLevel: 'info' },
+  })
+  await expect(page.getByText('插件设置已保存。')).toBeVisible()
+})

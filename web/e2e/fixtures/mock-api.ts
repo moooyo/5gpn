@@ -288,6 +288,21 @@ export async function setupMockApi(page: Page): Promise<void> {
       source_url: 'https://example.com/extension.yaml', source_digest: 'b'.repeat(64), snapshot_digest: 'b'.repeat(64), imported_at: '2026-07-18T00:00:00Z',
       execution_order: 2, network: true, egress_group_required: true, egress_group: 'Proxies',
     },
+    {
+      id: 'io.example.flat-wloc', extension_version: '2.1.0', name: 'Flat Coordinate Bundle',
+      description: 'Runs a published bundle that reads three flat coordinate arguments',
+      enabled: false, ready: false, reason: 'settings-required',
+      capture_hosts: ['gs-loc.apple.com'], capture_dns: 'trust', script_count: 2,
+      settings: [
+        { key: 'longitude', type: 'number', label: 'Longitude', required: true, min: -180, max: 180 },
+        { key: 'latitude', type: 'number', label: 'Latitude', required: true, min: -90, max: 90 },
+        { key: 'accuracy', type: 'number', label: 'Accuracy', required: true, min: 1, max: 100000, value: 25 },
+        { key: 'LogLevel', type: 'select', label: 'Script log level', required: true, options: ['off', 'info'], value: 'info' },
+      ],
+      persistent_storage: true, source_url: 'https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml',
+      source_digest: 'c'.repeat(64), snapshot_digest: 'c'.repeat(64),
+      execution_order: 3, network: false, egress_group_required: false,
+    },
   ]
 
   const currentInterceptModules = (): T.InterceptModulesView => ({

@@ -22,7 +22,7 @@ test('extension console installs and atomically toggles a native snapshot', asyn
     request.url().endsWith('/api/interception/modules/reorder') && request.method() === 'PUT',
   )
   await reorderDialog.getByRole('button', { name: '确认调整顺序' }).click()
-  expect((await reorderRequest).postDataJSON()).toMatchObject({ execution_order: ['io.example.response-cleaner', 'io.5gpn.apple-wloc'] })
+  expect((await reorderRequest).postDataJSON()).toMatchObject({ execution_order: ['io.example.response-cleaner', 'io.5gpn.apple-wloc', 'io.example.flat-wloc'] })
 
   await module.getByRole('switch').click()
   await page.getByRole('dialog').getByRole('button', { name: '启用' }).click()
