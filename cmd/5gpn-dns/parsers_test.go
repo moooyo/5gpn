@@ -57,6 +57,83 @@ func TestParseDomainsHosts(t *testing.T) {
 	}
 }
 
+func TestParseDomainsClash(t *testing.T) {
+	raw := []byte(`# NAME: Example
+payload:
+  - '+.suffix.com'
+  - '.surge.com'
+  - 'bare.com'
+  - DOMAIN-SUFFIX,token.com
+  - DOMAIN,exact.com
+  - DOMAIN-KEYWORD,ads
+  - IP-CIDR,1.2.3.0/24,no-resolve
+  - IP-CIDR6,2001:db8::/32
+  - GEOIP,CN
+  - PROCESS-NAME,curl
+`)
+	got, err := ParseDomains("clash", raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"bare.com", "exact.com", "suffix.com", "surge.com", "token.com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// A Clash provider entry keeps its suffix marker in the payload. validPolicyDomain
+// accepts '+' as a legal hostname byte, so an unstripped "+.foo.com" would pass
+// validation and be cached as a literal entry that DomainSet.Match — which walks
+// label boundaries — can never match. The fetch would report success with a
+// healthy entry count while blocking or steering nothing at all. Pin the strip.
+func TestParseDomainsClashStripsSuffixMarker(t *testing.T) {
+	got, err := ParseDomains("clash", []byte("payload:\n  - '+.foo.com'\n"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"foo.com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for _, d := range got {
+		if strings.ContainsAny(d, "+*,") {
+			t.Fatalf("marker survived normalization: %q", d)
+		}
+	}
+}
+
+// A wildcard matches exactly one label; the suffix cache would over-match it,
+// so it is dropped rather than silently widened.
+func TestParseDomainsClashDropsWildcard(t *testing.T) {
+	got, err := ParseDomains("clash", []byte("payload:\n  - '*.wild.com'\n  - 'keep.com'\n"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"keep.com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestParseDomainsClashRejectsMalformedYAML(t *testing.T) {
+	if _, err := ParseDomains("clash", []byte("payload:\n  - [unclosed\n")); err == nil {
+		t.Fatal("malformed YAML must error rather than yield an empty list")
+	}
+}
+
+// Non-domain rule kinds are dropped before normalization, so a provider that is
+// mostly IP rules does not trip the 40% invalid-entry rejection.
+func TestParseDomainsClashIPOnlyProviderIsEmptyNotRejected(t *testing.T) {
+	raw := []byte("payload:\n  - IP-CIDR,1.2.3.0/24\n  - IP-CIDR,4.5.6.0/24\n  - 'only.com'\n")
+	got, err := ParseDomains("clash", raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"only.com"}) {
+		t.Fatalf("got %v", got)
+	}
+}
+
 func TestParseDomainsUnknownFormat(t *testing.T) {
 	_, err := ParseDomains("bogus", []byte("a.com\n"))
 	if !errors.Is(err, ErrUnknownFormat) {

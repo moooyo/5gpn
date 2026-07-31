@@ -6,7 +6,7 @@ import type { Intent, MatcherKind, PolicyMatcher, PolicyRule, SubscriptionFormat
 
 const INTENTS: Intent[] = ['block', 'direct', 'proxy']
 const KINDS: MatcherKind[] = ['domain', 'domain-suffix', 'domain-keyword', 'subscription']
-const FORMATS: SubscriptionFormat[] = ['plain', 'gfwlist', 'dnsmasq', 'hosts']
+const FORMATS: SubscriptionFormat[] = ['plain', 'gfwlist', 'dnsmasq', 'hosts', 'clash']
 
 function errMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback

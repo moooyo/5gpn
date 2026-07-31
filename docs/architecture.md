@@ -510,9 +510,32 @@ Subscription refresh is fail-safe. Network, redirect, parse, scan, or
 too-small/partial-result failure keeps the last complete cache. URL resolution,
 every redirect, and the final dial target are subject to SSRF protections.
 
+A subscription rule declares the parser for its source: `plain`, `gfwlist`,
+`dnsmasq`, `hosts`, or `clash`. `clash` reads a Clash rule-provider document —
+a YAML mapping with a `payload` sequence — and reduces each entry to a name,
+stripping the `+.` and leading-dot suffix markers and the `DOMAIN,`/
+`DOMAIN-SUFFIX,` tokens. Every cached entry is loaded as a domain suffix
+regardless of format, so a provider's exact-name rule is deliberately widened to
+a suffix, and its keyword, IP-CIDR, GEOIP, and process rules carry no name and
+are dropped before normalization rather than counted as malformed. Stripping the
+markers is load-bearing rather than cosmetic: a hostname may legally contain
+`+`, so an unstripped `+.example.com` would pass name validation and be cached
+as a literal entry that label-boundary matching can never match — a subscription
+that reports a healthy entry count while matching nothing.
+
 Name-based blocking of encrypted-DNS services cannot stop a client that uses a
 hard-coded resolver IP and can route around the gateway. The product and UI
 must state that limitation rather than implying network-level enforcement.
+
+The seeded encrypted-DNS bypass blocklist is therefore shipped **disabled**. It
+is one subscription rule over a list maintained in this repository at
+`etc/block-dns-bypass.txt`, plus the two inline keyword rules that a
+suffix-only subscription cannot express. Blocking a vendor's HTTPDNS endpoint
+does not fail fast: the application spends its own timeout on the rejected call
+before falling back to this resolver, and that delay lands ahead of whatever the
+user is waiting on. The set is worth enabling when the operator is actually
+steering or blocking something an application would otherwise resolve around,
+so it is an operator decision rather than an install-time default.
 
 ## Mihomo data plane and configuration ownership
 

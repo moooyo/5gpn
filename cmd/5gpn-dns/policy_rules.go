@@ -78,7 +78,7 @@ const (
 type Matcher struct {
 	Kind     MatcherKind
 	Value    string
-	Format   string        // subscription parser: plain|gfwlist|dnsmasq|hosts
+	Format   string        // subscription parser: plain|gfwlist|dnsmasq|hosts|clash
 	Interval time.Duration // subscription refresh interval
 }
 
@@ -336,7 +336,7 @@ func (m *PolicyRuleManager) saveLocked() error {
 // accepted by policy matchers and block/direct/proxy Subscription definitions.
 // It deliberately excludes "cidr", which is reserved for chnroute.
 var validSubscriptionFormats = map[string]bool{
-	"plain": true, "gfwlist": true, "dnsmasq": true, "hosts": true,
+	"plain": true, "gfwlist": true, "dnsmasq": true, "hosts": true, "clash": true,
 }
 
 // validMatcherKinds enumerates the supported matcher surface.
@@ -396,7 +396,7 @@ func validateMatcher(mm Matcher) error {
 			return fmt.Errorf("%w: %v", ErrInvalidPolicy, err)
 		}
 		if !validSubscriptionFormats[mm.Format] {
-			return fmt.Errorf("%w: subscription format %q must be plain|gfwlist|dnsmasq|hosts", ErrInvalidPolicy, mm.Format)
+			return fmt.Errorf("%w: subscription format %q must be plain|gfwlist|dnsmasq|hosts|clash", ErrInvalidPolicy, mm.Format)
 		}
 		if mm.Interval <= 0 {
 			return fmt.Errorf("%w: subscription interval must be positive", ErrInvalidPolicy)

@@ -39,15 +39,15 @@ func main() {
 		fs := flag.NewFlagSet("seed-defaults", flag.ExitOnError)
 		policyOut := fs.String("policy-out", "/etc/5gpn/policy.json", "policy.json output path")
 		subscriptions := fs.String("subscriptions", "/etc/5gpn/subscriptions.json", "subscriptions.json validation path")
-		bypass := fs.String("bypass", "", "bundled DoH/DoT/HTTPDNS bypass domain list (domain-suffix block)")
+		bypass := fs.String("bypass-url", defaultBypassURL, "DoH/DoT/HTTPDNS bypass list subscription URL (block, seeded disabled)")
 		keyword := fs.String("keyword", "", "bundled bypass keyword list (domain-keyword block)")
 		proxyDomains := fs.String("proxy-domains", "", "bundled forced-proxy domain list (domain-suffix proxy)")
-		chinaList := fs.String("china-list-url", defaultChinaListURL, "dnsmasq-china-list subscription URL")
+		chinaList := fs.String("china-list-url", defaultChinaListURL, "china-direct list subscription URL")
 		gfw := fs.String("gfw-url", defaultGFWURL, "gfw subscription URL")
 		_ = fs.Parse(os.Args[2:])
 		in := seedInputs{
-			BypassPath: *bypass, KeywordPath: *keyword, ProxyPath: *proxyDomains,
-			ChinaListURL: *chinaList, GFWURL: *gfw,
+			KeywordPath: *keyword, ProxyPath: *proxyDomains,
+			BypassURL: *bypass, ChinaListURL: *chinaList, GFWURL: *gfw,
 		}
 		if err := seedDefaults(*policyOut, in); err != nil {
 			log.Fatalf("seed-defaults: %v", err)

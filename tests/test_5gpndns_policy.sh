@@ -274,14 +274,22 @@ grep -Fq 'remove_legacy_policy_state' "$INSTALL" \
 grep -Eq 'egress(-nodes)?\.(json|enc)' "$INSTALL" \
     && fail "install.sh: removed structured-egress state path remains"
 
-# the two default §7 list URLs are env-overridable
-grep -Fq 'felixonmars/dnsmasq-china-list' "$INSTALL" || fail "install.sh: fixed china-list seed URL missing"
+# the default list URLs are fixed, not caller-overridable
+grep -Fq 'blackmatrix7/ios_rule_script' "$INSTALL" || fail "install.sh: fixed china-list seed URL missing"
 grep -Fq 'Loyalsoldier/v2ray-rules-dat' "$INSTALL" || fail "install.sh: fixed gfw seed URL missing"
 seed_fn="$(sed -n '/^seed_policy_defaults()/,/^}/p' "$INSTALL")"
-printf '%s' "$seed_fn" | grep -Eq 'CHINA_LIST_URL|GFW_URL' \
+printf '%s' "$seed_fn" | grep -Eq 'CHINA_LIST_URL|GFW_URL|BYPASS_URL' \
     && fail "install.sh: policy seed URLs still accept caller environment overrides"
-grep -Fq 'accelerated-domains.china.conf'  "$INSTALL" || fail "install.sh: missing dnsmasq-china-list default URL"
+grep -Fq 'ChinaMax/ChinaMax_Domain.yaml'   "$INSTALL" || fail "install.sh: missing ChinaMax default URL"
 grep -Fq 'v2ray-rules-dat'                 "$INSTALL" || fail "install.sh: missing gfw default URL"
+
+# The encrypted-DNS bypass list is delivered as a subscription, not inlined into
+# the seed one rule per domain, so an edit reaches a gateway by refresh rather
+# than by reinstall (the seed never rewrites an existing policy.json).
+grep -Fq -- '--bypass-url' "$INSTALL" || fail "install.sh: bypass list must be seeded as a subscription URL"
+grep -Fq -- '--bypass ' "$INSTALL" && fail "install.sh: inline --bypass path flag remains (list moved to a subscription)"
+grep -Fq '${SCRIPT_DIR}/etc/block-dns-bypass.txt' "$INSTALL" \
+    && fail "install.sh: bypass list must not be passed as a bundled path any more"
 
 # the seed's Go surface exists
 SEED_GO="$ROOT/cmd/5gpn-dns/seed_defaults.go"
@@ -290,8 +298,11 @@ grep -Fq 'buildDefaultPolicyModel' "$SEED_GO" || fail "seed_defaults.go: no buil
 grep -Fq 'seedSelectorName = "Proxies"' "$SEED_GO" && fail "seed_defaults.go: must not seed a Proxies default selector (binary policy carries no selector -- see mihomoConfigSeedTemplate's Proxies group instead)"
 grep -Fq -- '--seed-defaults' "$ROOT/cmd/5gpn-dns/main.go" || fail "main.go: no --seed-defaults subcommand"
 
-# the bundled bypass lists still ship (now CONSUMED by the seed, not installed as block.txt)
-[ -f "$ROOT/etc/block-dns-bypass.txt" ]         || fail "etc/block-dns-bypass.txt must still ship (seed input)"
+# the bundled bypass lists still ship: block-dns-bypass.txt is now the published
+# subscription SOURCE (maintained in-tree, fetched by URL), and the keyword list
+# is still a seed input because keyword matching cannot be a subscription --
+# every cached subscription entry is loaded as a domain suffix.
+[ -f "$ROOT/etc/block-dns-bypass.txt" ]         || fail "etc/block-dns-bypass.txt must still ship (subscription source)"
 [ -f "$ROOT/etc/block-dns-bypass.keyword.txt" ] || fail "etc/block-dns-bypass.keyword.txt must still ship (seed input)"
 
 # chnroute STAYS in subscriptions.json (system arbitration input, NOT a policy rule)

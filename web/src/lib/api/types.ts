@@ -419,7 +419,7 @@ export interface CitySearchResult {
 export type MatcherKind = 'domain' | 'domain-suffix' | 'domain-keyword' | 'subscription'
 export type Intent = 'block' | 'direct' | 'proxy'
 export type FallbackPolicyKind = 'auto' | 'direct' | 'gateway'
-export type SubscriptionFormat = 'plain' | 'gfwlist' | 'dnsmasq' | 'hosts'
+export type SubscriptionFormat = 'plain' | 'gfwlist' | 'dnsmasq' | 'hosts' | 'clash'
 
 export type PolicyMatcher =
   | {

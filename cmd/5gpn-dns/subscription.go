@@ -52,7 +52,7 @@ type Subscription struct {
 	Category string // block|direct|proxy|chnroute
 	Name     string
 	URL      string
-	Format   string // chnroute: cidr; block/direct/proxy: plain|gfwlist|dnsmasq|hosts
+	Format   string // chnroute: cidr; block/direct/proxy: plain|gfwlist|dnsmasq|hosts|clash
 	Enabled  bool
 	Interval time.Duration // must be positive when Enabled
 }
@@ -1011,7 +1011,7 @@ func validateSubscription(s Subscription) error {
 		}
 	default: // block, direct, proxy
 		if !validSubscriptionFormats[s.Format] {
-			return fmt.Errorf("subscription: %s format %q must be plain|gfwlist|dnsmasq|hosts", s.Category, s.Format)
+			return fmt.Errorf("subscription: %s format %q must be plain|gfwlist|dnsmasq|hosts|clash", s.Category, s.Format)
 		}
 	}
 	if s.Enabled && s.Interval <= 0 {

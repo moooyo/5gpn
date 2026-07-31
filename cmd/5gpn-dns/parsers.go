@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/miekg/dns"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -37,7 +38,7 @@ var ErrUnknownFormat = errors.New("unknown format")
 
 // ParseDomains parses raw rule-list bytes in the given format into a
 // normalized, deduplicated, sorted slice of domains. Supported formats:
-// plain, gfwlist, dnsmasq, hosts.
+// plain, gfwlist, dnsmasq, hosts, clash.
 func ParseDomains(format string, raw []byte) ([]string, error) {
 	var lines []string
 	var err error
@@ -50,6 +51,8 @@ func ParseDomains(format string, raw []byte) ([]string, error) {
 		lines, err = parseDnsmasq(raw)
 	case "hosts":
 		lines, err = parseHosts(raw)
+	case "clash":
+		lines, err = parseClashProvider(raw)
 	default:
 		return nil, ErrUnknownFormat
 	}
@@ -230,6 +233,71 @@ func parseHosts(raw []byte) ([]string, error) {
 		out = append(out, host)
 	}
 	return out, scanner.Err()
+}
+
+// parseClashProvider parses a Clash rule-provider document: a YAML mapping
+// carrying a `payload` sequence of that provider's own rule grammar.
+//
+//	+.example.com              suffix marker (Clash)
+//	.example.com               suffix marker (Surge-style)
+//	example.com                bare name
+//	DOMAIN-SUFFIX,example.com  tokenized suffix
+//	DOMAIN,example.com         tokenized exact name
+//
+// Every cached subscription entry is loaded as a domain suffix (LoadDomainSet),
+// so DOMAIN and DOMAIN-SUFFIX collapse to the same match here; an exact-only
+// rule cannot be represented and is deliberately widened rather than dropped.
+// Rule kinds that carry no domain at all — DOMAIN-KEYWORD, every IP-CIDR/GEOIP/
+// IP-ASN form, process and port matchers — are dropped before normalization,
+// the way parseDnsmasq and parseHosts drop their non-matching lines, so they
+// never count toward the invalid-entry threshold.
+func parseClashProvider(raw []byte) ([]string, error) {
+	var doc struct {
+		Payload []string `yaml:"payload"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("clash provider: %w", err)
+	}
+	out := make([]string, 0, len(doc.Payload))
+	for _, entry := range doc.Payload {
+		if d, ok := clashPayloadDomain(entry); ok {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+// clashPayloadDomain reduces one payload entry to a domain, reporting false
+// when the entry names a rule kind this parser cannot represent as a name.
+func clashPayloadDomain(entry string) (string, bool) {
+	e := strings.TrimSpace(entry)
+	if e == "" || strings.HasPrefix(e, "#") {
+		return "", false
+	}
+	if kind, value, tokenized := strings.Cut(e, ","); tokenized {
+		switch strings.ToUpper(strings.TrimSpace(kind)) {
+		case "DOMAIN", "DOMAIN-SUFFIX":
+			e = strings.TrimSpace(value)
+		default:
+			return "", false
+		}
+	}
+	// Both suffix markers mean "this name and every subdomain", which is what
+	// the cache already stores, so they are stripped rather than translated.
+	e = strings.TrimPrefix(e, "+")
+	e = strings.TrimPrefix(e, ".")
+	if e == "" {
+		return "", false
+	}
+	// A residual marker is a shape this parser does not model — a `*.` wildcard
+	// matches exactly one label, which a suffix cache would over-match. Dropping
+	// it here matters more than it looks: validPolicyDomain accepts '+' and ','
+	// as legal hostname bytes, so an unstripped marker would pass validation and
+	// be cached as a literal entry that silently never matches anything.
+	if strings.ContainsAny(e, "+*,/ \t") {
+		return "", false
+	}
+	return e, true
 }
 
 // ParseCIDRs parses one CIDR per line, skipping '#' comments and invalid

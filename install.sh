@@ -3303,8 +3303,12 @@ seed_policy_defaults() {
     local policy="${CONF_DIR}/policy.json"
 
     # Fixed, reviewable default list URLs.
-    local china_list_url="https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/accelerated-domains.china.conf"
+    local china_list_url="https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/ChinaMax/ChinaMax_Domain.yaml"
     local gfw_url="https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/gfw.txt"
+    # etc/block-dns-bypass.txt is maintained in-tree and delivered as a
+    # subscription, so a gateway picks up edits by refreshing rather than by
+    # reinstalling. The seeded rule is DISABLED by default.
+    local bypass_url="https://raw.githubusercontent.com/moooyo/5gpn/main/etc/block-dns-bypass.txt"
 
     if [[ -f "$policy" ]]; then
         info "Keeping existing ${policy} (operator policy model preserved)."
@@ -3313,7 +3317,7 @@ seed_policy_defaults() {
     if "$DNS_BIN" --seed-defaults \
         --policy-out "$policy" \
         --subscriptions "${CONF_DIR}/subscriptions.json" \
-        --bypass "${SCRIPT_DIR}/etc/block-dns-bypass.txt" \
+        --bypass-url "$bypass_url" \
         --keyword "${SCRIPT_DIR}/etc/block-dns-bypass.keyword.txt" \
         --proxy-domains "${SCRIPT_DIR}/etc/proxy-domains.txt" \
         --china-list-url "$china_list_url" \
