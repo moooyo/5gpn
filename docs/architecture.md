@@ -804,7 +804,7 @@ seconds, enough for that bounded 500 ms retry window while retaining a finite
 rate limit. Disable operations may leave a temporary
 certificate SAN superset, but the runtime allowlist rejects disabled hosts.
 
-`/etc/5gpn/intercept/config.json` version 5 preserves installer-owned SOCKS credentials,
+`/etc/5gpn/intercept/config.json` version 6 preserves installer-owned SOCKS credentials,
 loopback addresses, and certificate paths across every API write. It also
 stores the MITM master and protocol settings plus immutable native extension,
 manifest, script, origin-permission, typed-setting, and capture-host snapshots,
