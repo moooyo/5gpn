@@ -226,74 +226,112 @@ func TestBotExtensionCallbackDataStaysWithinTelegramLimit(t *testing.T) {
 	}
 }
 
+// botExtensionConfirmationEntries is both ways an operator reaches the
+// review-then-confirm sequence: a callback query, and a conversational input
+// (a pasted manifest, a marketplace URL, a typed setting, a shared location).
+//
+// The two used to be separate copies of the same six-step ordering, and only
+// the callback one was ever tested -- so a regression in the ordering on the
+// input path, which carries local manifest import and every setting value,
+// would have left this suite green. They are one function now, and every
+// ordering test below runs through both entry points.
+func botExtensionConfirmationEntries(bt *Bot) map[string]func(context.Context, botExtensionStatePayload, string) {
+	return map[string]func(context.Context, botExtensionStatePayload, string){
+		"callback": func(ctx context.Context, payload botExtensionStatePayload, review string) {
+			bt.issueBotExtensionConfirmation(ctx, bt.tg, botExtensionTestCallback(), 111, 111, payload, review, "modules")
+		},
+		"conversational input": func(ctx context.Context, payload botExtensionStatePayload, review string) {
+			bt.sendBotExtensionConfirmation(ctx, bt.tg, 111, 111, payload, review, "modules")
+		},
+	}
+}
+
+var botExtensionConfirmationEntryNames = []string{"callback", "conversational input"}
+
 func TestBotExtensionIncompleteReviewNeverIssuesConfirmation(t *testing.T) {
-	ctrl := NewController(func() error { return nil }, nil, nil, nil)
-	bt, recorder := newBotExtensionTelegramFixture(t, ctrl)
-	recorder.mu.Lock()
-	recorder.failSendMessageAt = 2
-	recorder.mu.Unlock()
 	payload := botExtensionStatePayload{
 		Kind: botExtensionPayloadEnable, Revision: strings.Repeat("a", 64),
 		ModuleID: "io.example.fixture", Digest: strings.Repeat("b", 64), BoolValue: true,
 	}
 	review := "<b>完整审查</b>\n" + strings.Repeat("safe-content ", 700)
-	bt.issueBotExtensionConfirmation(botExtensionTestOperation(t, bt), bt.tg, botExtensionTestCallback(), 111, 111, payload, review)
-	store := bt.extensionStateStore()
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	for _, entry := range store.tokens {
-		if entry.purpose == botExtensionTokenConfirmation {
-			t.Fatal("confirmation was issued after a review chunk failed")
-		}
+	for _, name := range botExtensionConfirmationEntryNames {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			ctrl := NewController(func() error { return nil }, nil, nil, nil)
+			bt, recorder := newBotExtensionTelegramFixture(t, ctrl)
+			recorder.mu.Lock()
+			recorder.failSendMessageAt = 2
+			recorder.mu.Unlock()
+			botExtensionConfirmationEntries(bt)[name](botExtensionTestOperation(t, bt), payload, review)
+			store := bt.extensionStateStore()
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			for _, entry := range store.tokens {
+				if entry.purpose == botExtensionTokenConfirmation {
+					t.Fatal("confirmation was issued after a review chunk failed")
+				}
+			}
+		})
 	}
 }
 
 func TestBotExtensionLongReviewUsesProtectedDocumentBeforeConfirmation(t *testing.T) {
-	ctrl := NewController(func() error { return nil }, nil, nil, nil)
-	bt, recorder := newBotExtensionTelegramFixture(t, ctrl)
 	payload := botExtensionStatePayload{
 		Kind: botExtensionPayloadEnable, Revision: strings.Repeat("a", 64),
 		ModuleID: "io.example.fixture", Digest: strings.Repeat("b", 64), BoolValue: true,
 	}
 	review := "<b>完整审查</b>\n" + strings.Repeat("逐项安全内容 ", 5000)
-	bt.issueBotExtensionConfirmation(botExtensionTestOperation(t, bt), bt.tg, botExtensionTestCallback(), 111, 111, payload, review)
-	documentIndex := -1
-	confirmIndex := -1
-	for index, call := range recorder.snapshot() {
-		if call.method == "sendDocument" {
-			documentIndex = index
-			if call.form.Get("protect_content") != "true" {
-				t.Fatalf("long review document was not protected: %v", call.form)
+	for _, name := range botExtensionConfirmationEntryNames {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			ctrl := NewController(func() error { return nil }, nil, nil, nil)
+			bt, recorder := newBotExtensionTelegramFixture(t, ctrl)
+			botExtensionConfirmationEntries(bt)[name](botExtensionTestOperation(t, bt), payload, review)
+			documentIndex := -1
+			confirmIndex := -1
+			for index, call := range recorder.snapshot() {
+				if call.method == "sendDocument" {
+					documentIndex = index
+					if call.form.Get("protect_content") != "true" {
+						t.Fatalf("long review document was not protected: %v", call.form)
+					}
+				}
+				if call.method == "sendMessage" && strings.Contains(call.form.Get("reply_markup"), "confirm:enable") {
+					confirmIndex = index
+				}
 			}
-		}
-		if call.method == "sendMessage" && strings.Contains(call.form.Get("reply_markup"), "confirm:enable") {
-			confirmIndex = index
-		}
+			if documentIndex < 0 || confirmIndex <= documentIndex {
+				t.Fatalf("document/confirmation order = %d/%d", documentIndex, confirmIndex)
+			}
+			botExtensionOnlyConfirmation(t, bt.extensionStateStore())
+		})
 	}
-	if documentIndex < 0 || confirmIndex <= documentIndex {
-		t.Fatalf("document/confirmation order = %d/%d", documentIndex, confirmIndex)
-	}
-	botExtensionOnlyConfirmation(t, bt.extensionStateStore())
 }
 
 func TestBotExtensionFailedReviewDocumentNeverIssuesConfirmation(t *testing.T) {
-	ctrl := NewController(func() error { return nil }, nil, nil, nil)
-	bt, recorder := newBotExtensionTelegramFixture(t, ctrl)
-	recorder.mu.Lock()
-	recorder.failSendDocument = true
-	recorder.mu.Unlock()
 	payload := botExtensionStatePayload{
 		Kind: botExtensionPayloadEnable, Revision: strings.Repeat("a", 64),
 		ModuleID: "io.example.fixture", Digest: strings.Repeat("b", 64), BoolValue: true,
 	}
 	review := "<b>完整审查</b>\n" + strings.Repeat("逐项安全内容 ", 5000)
-	bt.issueBotExtensionConfirmation(botExtensionTestOperation(t, bt), bt.tg, botExtensionTestCallback(), 111, 111, payload, review)
-	bt.extensionStateStore().mu.Lock()
-	defer bt.extensionStateStore().mu.Unlock()
-	for _, entry := range bt.extensionStateStore().tokens {
-		if entry.purpose == botExtensionTokenConfirmation {
-			t.Fatal("confirmation was issued after the protected review document failed")
-		}
+	for _, name := range botExtensionConfirmationEntryNames {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			ctrl := NewController(func() error { return nil }, nil, nil, nil)
+			bt, recorder := newBotExtensionTelegramFixture(t, ctrl)
+			recorder.mu.Lock()
+			recorder.failSendDocument = true
+			recorder.mu.Unlock()
+			botExtensionConfirmationEntries(bt)[name](botExtensionTestOperation(t, bt), payload, review)
+			store := bt.extensionStateStore()
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			for _, entry := range store.tokens {
+				if entry.purpose == botExtensionTokenConfirmation {
+					t.Fatal("confirmation was issued after the protected review document failed")
+				}
+			}
+		})
 	}
 }
 

@@ -88,6 +88,18 @@ func decodeBotExtensionMutation(raw json.RawMessage) (botExtensionMutation, erro
 	return mutation, nil
 }
 
+// issueBotExtensionConfirmation runs the review-then-confirm sequence.
+//
+// It is the most safety-critical ordering in this subsystem -- the confirmation
+// control is sent only after the complete review has been delivered -- and it
+// existed twice, once for the callback-query path and once for the
+// conversational-input path. The two differed in a progress edit and a hardcoded
+// back target, and only the first was tested, so the copy carrying local
+// manifest import, marketplace add, and every typed setting and location value
+// could have regressed with the suite still green.
+//
+// cq is nil on the input path, which is what selects the progress edit; back
+// names the screen a failure returns to.
 func (bt *Bot) issueBotExtensionConfirmation(
 	ctx context.Context,
 	b *bot.Bot,
@@ -95,50 +107,19 @@ func (bt *Bot) issueBotExtensionConfirmation(
 	adminID, chatID int64,
 	payload botExtensionStatePayload,
 	prompt string,
-) {
-	bt.extensionReviewMu.Lock()
-	defer bt.extensionReviewMu.Unlock()
-	if !bt.botExtensionOperationCurrent(ctx) {
-		return
-	}
-	bt.edit(ctx, b, cq, "⏳ 正在发送完整操作审查…", nil)
-	if err := bt.sendBotExtensionReview(ctx, b, chatID, prompt); err != nil {
-		if !bt.botExtensionOperationCurrent(ctx) {
-			return
-		}
-		bt.send(ctx, b, chatID, "❌ 审查内容未能完整送达，未创建确认请求："+pre(err.Error()), botExtensionBack("modules"))
-		return
-	}
-	token, expires, err := bt.extensionStateStore().IssueConfirmationForOperation(ctx, payload)
-	if err != nil {
-		if !bt.botExtensionOperationCurrent(ctx) {
-			return
-		}
-		bt.send(ctx, b, chatID, "❌ 无法创建确认请求："+pre(err.Error()), botExtensionBack("modules"))
-		return
-	}
-	if !bt.botExtensionOperationCurrent(ctx) {
-		bt.extensionStateStore().CancelConfirmation(token, adminID, chatID)
-		return
-	}
-	if err := sendBotExtensionConfirmControl(ctx, b, chatID, payload, token, expires); err != nil {
-		bt.extensionStateStore().CancelConfirmation(token, adminID, chatID)
-		bt.send(ctx, b, chatID, "❌ 确认控件发送失败，确认请求已撤销："+pre(err.Error()), botExtensionBack("modules"))
-	}
-}
-
-func (bt *Bot) sendBotExtensionConfirmation(
-	ctx context.Context,
-	b *bot.Bot,
-	adminID, chatID int64,
-	payload botExtensionStatePayload,
-	prompt string,
 	back string,
 ) {
+	// extensionReviewMu is retained deliberately even though every caller
+	// already holds the process-wide capacity-1 render slot: this function is
+	// where the ordering lives, and a lock here says so locally rather than
+	// depending on a property of the callers.
 	bt.extensionReviewMu.Lock()
 	defer bt.extensionReviewMu.Unlock()
 	if !bt.botExtensionOperationCurrent(ctx) {
 		return
+	}
+	if cq != nil {
+		bt.edit(ctx, b, cq, "⏳ 正在发送完整操作审查…", nil)
 	}
 	if err := bt.sendBotExtensionReview(ctx, b, chatID, prompt); err != nil {
 		if !bt.botExtensionOperationCurrent(ctx) {
@@ -163,6 +144,19 @@ func (bt *Bot) sendBotExtensionConfirmation(
 		bt.extensionStateStore().CancelConfirmation(token, adminID, chatID)
 		bt.send(ctx, b, chatID, "❌ 确认控件发送失败，确认请求已撤销："+pre(err.Error()), botExtensionBack(back))
 	}
+}
+
+// sendBotExtensionConfirmation is the conversational-input entry point: no
+// callback query to edit, and a caller-chosen back target.
+func (bt *Bot) sendBotExtensionConfirmation(
+	ctx context.Context,
+	b *bot.Bot,
+	adminID, chatID int64,
+	payload botExtensionStatePayload,
+	prompt string,
+	back string,
+) {
+	bt.issueBotExtensionConfirmation(ctx, b, nil, adminID, chatID, payload, prompt, back)
 }
 
 func (bt *Bot) sendBotExtensionReview(ctx context.Context, b *bot.Bot, chatID int64, review string) error {
@@ -597,7 +591,7 @@ func (bt *Bot) previewBotExtensionMarketplaceAddValues(
 	}
 	prompt := "⚠️ <b>确认添加插件市场来源？</b>\n" + marketplaceSourceReviewHTML(candidate) +
 		"\n\n远端名称和描述来自索引；本地显示名称只是别名，两者都不代表发布者身份。添加只保存经过验证的完整索引快照，不会自动安装或启用插件。"
-	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
+	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt, "modules")
 }
 
 func marketplaceSourceReviewHTML(source marketplaceSourceView) string {
@@ -804,7 +798,7 @@ func (bt *Bot) previewBotExtensionMarketplaceRefresh(
 	prompt := "⚠️ <b>确认替换市场索引快照？</b>\n\n<b>当前规范化来源</b>\n" + marketplaceSourceReviewHTML(source) +
 		"\n\n<b>候选规范化来源</b>\n" + marketplaceSourceReviewHTML(candidate) +
 		"\n\n确认时会重新获取并要求候选快照完全一致；冲突不会静默重试。"
-	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
+	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt, "modules")
 }
 
 func (bt *Bot) previewBotExtensionMarketplaceDelete(
@@ -827,7 +821,7 @@ func (bt *Bot) previewBotExtensionMarketplaceDelete(
 	}
 	prompt := "⚠️ <b>确认删除市场来源？</b>\n" + marketplaceSourceReviewHTML(source) +
 		"\n\n这只删除本地市场索引快照；已经安装的插件快照不会被卸载或更改。"
-	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
+	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt, "modules")
 }
 
 func (bt *Bot) handleBotExtensionEntryCallback(
@@ -948,7 +942,7 @@ func (bt *Bot) previewBotExtensionMarketplaceInstall(
 	prompt := "⚠️ <b>确认安装市场插件？</b>\n来源索引快照：<code>" + html.EscapeString(source.SnapshotDigest) + "</code>\n" +
 		botExtensionCandidateReviewHTML(candidate) +
 		"\n\n确认时会重新获取并同时验证来源索引与插件候选摘要。安装后插件保持关闭，不会发布流量接管。"
-	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
+	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt, "modules")
 }
 
 // botExtensionNetworkRiskHTML states the whole grant, because the grant no
@@ -1085,7 +1079,16 @@ func botExtensionCandidateReviewHTML(module interceptModuleView) string {
 	text.WriteString(html.EscapeString(module.Name))
 	text.WriteString("</b> · <code>")
 	text.WriteString(html.EscapeString(module.Version))
-	text.WriteString("</code>\nID：<code>")
+	text.WriteString("</code>")
+	// The installed renderer has always printed this and the candidate one never
+	// did, which had the disclosure backwards: this is the renderer marketplace
+	// install and HTTPS/local import use, so it is the one an operator reads
+	// about an extension they have never seen.
+	if module.Description != "" {
+		text.WriteString("\n")
+		text.WriteString(html.EscapeString(module.Description))
+	}
+	text.WriteString("\nID：<code>")
 	text.WriteString(html.EscapeString(module.ID))
 	text.WriteString("</code>\n候选快照：<code>")
 	text.WriteString(html.EscapeString(module.SnapshotDigest))

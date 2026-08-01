@@ -315,6 +315,22 @@ func (bt *Bot) handleExtensionInput(
 	defer finish()
 	releaseRender, err := bt.acquireBotExtensionRender(ctx)
 	if err != nil {
+		// ClaimInput is destructive: the pending-input entry is already gone. The
+		// render slot is one process-wide semaphore held by whichever admin is
+		// currently inside a callback -- across a marketplace manifest fetch, or a
+		// multi-megabyte review document upload -- so this is reachable simply by
+		// two administrators acting at once. Returning here sent the operator
+		// nothing at all: their pasted manifest or location was consumed, the flow
+		// was gone, and re-sending fell through to the default handler.
+		//
+		// Re-arm the input and say so, the way retryBotExtensionInput already does
+		// for a value that failed validation. startBotExtensionOperation can also
+		// hand back an already-cancelled context when a newer operation exists for
+		// this owner, and in that case the operator has moved on deliberately --
+		// botExtensionOperationCurrent inside the re-arm declines it, which is
+		// what leaves that case silent rather than confusing.
+		bt.retryBotExtensionInput(ctx, b, chatID, state.Kind, state.Payload,
+			"⏳ 另一项插件操作正在进行，本次输入未被处理。")
 		return true
 	}
 	defer releaseRender()
