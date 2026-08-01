@@ -39,6 +39,7 @@ import {
   toast,
 } from '../../components/ds'
 import { api } from '../../lib/api/client'
+import { ApiError } from '../../lib/api/http'
 import type {
   InterceptCaptureDNS,
   InterceptLocationValue,
@@ -190,6 +191,34 @@ interface ExtensionStatus {
   actionKey?: string
 }
 
+/**
+ * Reasons the daemon can attach to a not-ready module, beyond the two this page
+ * used to know about.
+ *
+ * routingReadyLocked and analyzeInterceptRouting between them emit every one of
+ * these, and each sets ready:false and empties active_capture_hosts. An enabled
+ * module carrying any of them fell through every branch below and rendered with
+ * no banner at all, toggles still showing "on", under a header saying
+ * prerequisites are configured — while interception was entirely dead. The one
+ * place the truth appeared was a badge on the /extensions/hosts sub-route.
+ */
+const EXTENSION_BLOCKING_REASONS = new Set([
+  'mihomo-management-unavailable',
+  'mihomo-config-unreadable',
+  'proxy-groups-structure-conflict',
+  'credential-mismatch',
+  'certificate-not-ready',
+  'overlay-client-anchor-missing',
+  'overlay-client-anchor-duplicate',
+  'overlay-client-anchor-after-match',
+  'overlay-client-anchor-before-terminator',
+  'overlay-egress-anchor-missing',
+  'overlay-egress-anchor-duplicate',
+  'overlay-egress-anchor-misplaced',
+  'interception-egress-terminator-missing',
+  'interception-egress-terminator-duplicate',
+])
+
 function statusOf(module: InterceptModule, options: { trusted: boolean; groupMissing: boolean }): ExtensionStatus | null {
   // Ordered by how badly the extension is broken, not by where the flag lives.
   if (options.groupMissing) {
@@ -200,6 +229,20 @@ function statusOf(module: InterceptModule, options: { trusted: boolean; groupMis
   }
   if (module.enabled && module.reason === 'mitm-disabled') {
     return { tone: 'warning', key: 'extensions.statusMasterOff', to: '/settings', actionKey: 'extensions.statusGoSettings' }
+  }
+  // Everything else the daemon can refuse for. One string per reason, because
+  // "not effective" without saying which boundary broke sends the operator to
+  // read the mihomo file by hand; the generic fallback exists only so a reason
+  // this build has not been taught still surfaces as a banner rather than as
+  // silence.
+  if (!module.ready && module.reason) {
+    const known = EXTENSION_BLOCKING_REASONS.has(module.reason)
+    return {
+      tone: 'error',
+      key: known ? `extensions.statusReason.${module.reason}` : 'extensions.statusNotEffective',
+      to: '/settings',
+      actionKey: 'extensions.statusGoSettings',
+    }
   }
   if (module.enabled && !options.trusted) {
     return { tone: 'warning', key: 'extensions.statusTrustPending', to: '/setup-guide', actionKey: 'extensions.statusGoSetup' }
@@ -278,6 +321,25 @@ function CapabilityChip({ label, value, icon }: { label: string; value?: string 
   )
 }
 
+/**
+ * One formatter per language, not one per card per render.
+ *
+ * Intl.DateTimeFormat is among the most expensive constructors in the platform,
+ * and nothing in this app is memoized, so every card is re-rendered on every
+ * keystroke in the page search box — building N formatters to print a date that
+ * depends only on the extension and the language.
+ */
+const importedDateFormatters = new Map<string, Intl.DateTimeFormat>()
+
+function importedDateFormatter(language: string): Intl.DateTimeFormat {
+  let formatter = importedDateFormatters.get(language)
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(language, { dateStyle: 'medium' })
+    importedDateFormatters.set(language, formatter)
+  }
+  return formatter
+}
+
 function ExtensionCard({
   module,
   busy,
@@ -308,7 +370,7 @@ function ExtensionCard({
   onMove: (module: InterceptModule, direction: -1 | 1) => void
 }) {
   const { t, i18n } = useTranslation()
-  const imported = module.imported_at ? new Intl.DateTimeFormat(i18n.language, { dateStyle: 'medium' }).format(new Date(module.imported_at)) : ''
+  const imported = module.imported_at ? importedDateFormatter(i18n.language).format(new Date(module.imported_at)) : ''
   const settingsCount = module.settings?.length ?? 0
   const mappingsCount = module.upstream_mappings?.length ?? 0
   const routingRuleCount = module.routing_rules?.length ?? 0
@@ -461,11 +523,15 @@ function ExtensionCard({
 function ExtensionSettingsModal({
   module,
   egressGroups,
+  busy,
+  conflict,
   onOpenChange,
   onSave,
 }: {
   module: InterceptModule | null
   egressGroups: string[]
+  busy: boolean
+  conflict: boolean
   onOpenChange: (open: boolean) => void
   onSave: (module: InterceptModule, settings: Record<string, unknown>, egressGroup?: string, captureDNS?: InterceptCaptureDNS) => void
 }) {
@@ -474,7 +540,19 @@ function ExtensionSettingsModal({
   const [egressGroup, setEgressGroup] = useState(DEFAULT_EGRESS_GROUP)
   const [captureDNS, setCaptureDNS] = useState<InterceptCaptureDNS>('trust')
 
+  const resetFor = useRef<string | null>(null)
   useEffect(() => {
+    // Reset only when the dialog target changes.
+    //
+    // The deps are the values this reads, but the condition is the id: a
+    // refresh of `view` hands down a new egressGroups array and a new module
+    // object with identical content, and resetting on that identity change
+    // wiped the operator's in-progress entries the moment a failed save
+    // refreshed the revision -- which is precisely the loss this dialog now
+    // stays mounted to prevent.
+    const id = module?.id ?? null
+    if (resetFor.current === id) return
+    resetFor.current = id
     setValues(Object.fromEntries((module?.settings ?? []).map((setting) => [setting.key, settingInitialValue(setting)])))
     setEgressGroup(module?.egress_group && egressGroups.includes(module.egress_group) ? module.egress_group : DEFAULT_EGRESS_GROUP)
     setCaptureDNS(module?.capture_dns ?? 'trust')
@@ -493,16 +571,30 @@ function ExtensionSettingsModal({
   return (
     <Modal
       open={!!module}
-      onOpenChange={onOpenChange}
+      onOpenChange={(open) => { if (!busy) onOpenChange(open) }}
       title={module ? t('extensions.configureTitle', { name: module.name }) : ''}
       className={hasLocation || coordinates ? 'w-[min(96vw,920px)]' : undefined}
       footer={
         <>
-          <Button type="button" variant="secondary" size="sm" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-          <Button type="button" size="sm" disabled={!module || (!changed && !egressChanged && !captureDNSChanged) || !ready || !egressReady} onClick={() => module && onSave(module, Object.fromEntries((module.settings ?? []).map((setting) => [setting.key, values[setting.key] ?? null])), egressChanged ? selectedEgressGroup : undefined, captureDNSChanged ? captureDNS : undefined)}>{t('common.save')}</Button>
+          <Button type="button" variant="secondary" size="sm" disabled={busy} onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
+          <Button type="button" size="sm" disabled={busy || !module || (!changed && !egressChanged && !captureDNSChanged) || !ready || !egressReady} onClick={() => module && onSave(module, Object.fromEntries((module.settings ?? []).map((setting) => [setting.key, values[setting.key] ?? null])), egressChanged ? selectedEgressGroup : undefined, captureDNSChanged ? captureDNS : undefined)}>{busy ? t('common.saving') : t('common.save')}</Button>
         </>
       }
     >
+      {/*
+        The dialog stays mounted until the write succeeds. Closing it first
+        looked harmless and was not: the reset effect above fires on `module`
+        becoming null and wipes `values`, so a stale-revision 409 -- which the
+        page cannot even prevent, because it loads the revision once and never
+        polls -- discarded a minute of typing into a toast that says "update
+        failed" and then vanishes. AGENTS.md: state the operator has to act on
+        gets a persistent, page-level surface, not a toast that leaves.
+      */}
+      {conflict ? (
+        <div role="alert" data-testid="extension-settings-conflict" className="mb-4 rounded-ctl bg-[var(--md-sys-color-error-container)] px-4 py-3 text-label text-[var(--md-sys-color-on-error-container)]">
+          {t('extensions.settingsConflict')}
+        </div>
+      ) : null}
       {module ? (
         <div className="space-y-4">
           <DialogSection label={t('extensions.captureDNS.title')} data-testid="capture-dns-editor">
@@ -917,6 +1009,8 @@ export default function ExtensionsPage() {
   const [filter, setFilter] = useState<ExtensionFilter>('all')
   const [search, setSearch] = useState('')
   const [configTarget, setConfigTarget] = useState<InterceptModule | null>(null)
+  const [settingsBusy, setSettingsBusy] = useState(false)
+  const [settingsConflict, setSettingsConflict] = useState(false)
   const [updateReview, setUpdateReview] = useState<{ current: InterceptModule; candidate: InterceptModule } | null>(null)
   const [updateBusy, setUpdateBusy] = useState(false)
   const [busyID, setBusyID] = useState<string | null>(null)
@@ -981,6 +1075,44 @@ export default function ExtensionsPage() {
       toast.error(errorMessage(error, t('extensions.updateFailed')))
       void load()
     } finally {
+      finishModuleMutation()
+    }
+  }
+
+  /**
+   * The settings write, kept apart from updateModule because it is the one that
+   * carries operator input worth preserving.
+   *
+   * The dialog closes only on success. On failure the values stay on screen, and
+   * a 409 -- which is not a network blip but "someone else published a change
+   * while this dialog was open" -- gets its own persistent surface inside the
+   * dialog rather than being folded into the generic failure toast. The page
+   * loads its revision once and never polls, so the stale window is the whole
+   * session, not just the time the dialog is open.
+   */
+  async function saveModuleSettings(module: InterceptModule, settings: Record<string, unknown>, egressGroup?: string, captureDNS?: InterceptCaptureDNS) {
+    if (!view || !beginModuleMutation(module.id)) return
+    setSettingsBusy(true)
+    setSettingsConflict(false)
+    try {
+      setView(await api.putInterceptModule(module.id, {
+        revision: view.revision,
+        settings,
+        ...(egressGroup !== undefined ? { egress_group: egressGroup } : {}),
+        ...(captureDNS !== undefined ? { capture_dns: captureDNS } : {}),
+      }))
+      setConfigTarget(null)
+      toast.success(t('extensions.settingsSaved'))
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        setSettingsConflict(true)
+      } else {
+        toast.error(errorMessage(error, t('extensions.updateFailed')))
+      }
+      // Refresh the revision so a retry can succeed without losing the entries.
+      void load()
+    } finally {
+      setSettingsBusy(false)
       finishModuleMutation()
     }
   }
@@ -1115,7 +1247,7 @@ export default function ExtensionsPage() {
 
       {view ? <InstallExtensionModal mode={installMode} revision={view.revision} existingIDs={view.modules.map((module) => module.id)} onOpenChange={(open) => { if (!open) setInstallMode(null) }} onInstalled={setView} /> : null}
       <SnapshotModal open={snapshotOpen} loading={snapshotLoading} snapshot={snapshot} onOpenChange={setSnapshotOpen} />
-      <ExtensionSettingsModal module={configTarget} egressGroups={view?.available_egress_groups ?? []} onOpenChange={(open) => { if (!open) setConfigTarget(null) }} onSave={(module, nextSettings, egressGroup, captureDNS) => { setConfigTarget(null); void updateModule(module, { settings: nextSettings, ...(egressGroup !== undefined ? { egress_group: egressGroup } : {}), ...(captureDNS !== undefined ? { capture_dns: captureDNS } : {}) }, t('extensions.settingsSaved')) }} />
+      <ExtensionSettingsModal module={configTarget} egressGroups={view?.available_egress_groups ?? []} busy={settingsBusy} conflict={settingsConflict} onOpenChange={(open) => { if (!open) { setConfigTarget(null); setSettingsConflict(false) } }} onSave={(module, nextSettings, egressGroup, captureDNS) => { void saveModuleSettings(module, nextSettings, egressGroup, captureDNS) }} />
       <ExtensionUpdateModal review={updateReview} busy={updateBusy} onOpenChange={(open) => { if (!open) setUpdateReview(null) }} onApply={() => void applyExtensionUpdate()} />
       <EnableExtensionModal module={pending?.kind === 'toggle' && !pending.module.enabled ? pending.module : null} onOpenChange={(open) => { if (!open) setPending(null) }} onConfirm={() => { if (pending) void updateModule(pending.module, { enabled: true }, t('extensions.updated')); setPending(null) }} />
       <ReorderExtensionModal action={pending?.kind === 'reorder' ? pending : null} modules={view?.modules ?? []} onOpenChange={(open) => { if (!open) setPending(null) }} onConfirm={() => { if (pending?.kind === 'reorder') void confirmModuleMove(pending); setPending(null) }} />
