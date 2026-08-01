@@ -278,6 +278,38 @@ func TestOverlayEgressAnchorMustAbutTheTerminator(t *testing.T) {
 	}
 }
 
+// The third placement constraint, and the one nothing proved. The canonical
+// boundary is egress anchor, fail-closed terminator, the optional global UDP/443
+// reject, client anchor, terminal MATCH. Only "egress anchor abuts terminator"
+// and "client anchor before MATCH" were checked, so a config with the client
+// anchor ABOVE the terminator read as manageable — and analyzeBlockQUICModule
+// derives the UDP/443 reject's insertion point from the terminator alone, so
+// enabling that capability then wrote the fixed global reject below the capture
+// stage. Extension capture and reviewed REJECT/DIRECT rules would resolve first,
+// inverting the documented precedence.
+func TestOverlayClientAnchorMustFollowTheTerminator(t *testing.T) {
+	document := installerRoutingCheckDocument()
+	seed := currentInstallerRoutingSeed(t, document)
+
+	// Hoist the client anchor above the egress anchor/terminator pair.
+	stripped := strings.Replace(seed, "  - "+overlayClientAnchorRule+"\n", "", 1)
+	if stripped == seed {
+		t.Fatal("the client anchor was not found, so this test proves nothing")
+	}
+	hoisted := strings.Replace(stripped,
+		"  - "+overlayEgressAnchorRule,
+		"  - "+overlayClientAnchorRule+"\n  - "+overlayEgressAnchorRule,
+		1)
+	if hoisted == stripped {
+		t.Fatal("the egress anchor was not found, so this test proves nothing")
+	}
+	if analysis := analyzeOverlayAnchoredDocument(hoisted); analysis.Manageable {
+		t.Fatal("a client anchor above the fail-closed terminator was accepted as manageable")
+	} else if analysis.Reason != "overlay-client-anchor-before-terminator" {
+		t.Fatalf("reason = %q, want overlay-client-anchor-before-terminator", analysis.Reason)
+	}
+}
+
 // A missing client anchor must not read as "no capture configured": under the
 // overlay it means captured traffic reaches the operator's own routing instead
 // of the processor.

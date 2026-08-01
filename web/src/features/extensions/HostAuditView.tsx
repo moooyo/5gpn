@@ -1,8 +1,10 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { SearchIcon, ShieldLockIcon, WarningIcon } from '../../components/icons'
 import { Badge, Button, Card, Input, SegmentedControl } from '../../components/ds'
 import type { InterceptModule, InterceptModulesView, MITMSettingsView } from '../../lib/api/types'
+
+const SEARCH_DEBOUNCE_MS = 250
 
 type HostFilter = 'all' | 'active' | 'configured' | 'disabled' | 'wildcard'
 
@@ -66,7 +68,15 @@ export function HostAuditView({
 }) {
   const { t } = useTranslation()
   const [query, setQuery] = useState('')
+  const [debouncedQuery, setDebouncedQuery] = useState('')
   const [filter, setFilter] = useState<HostFilter>('all')
+
+  // The same 250 ms the log pages use. This one is not cosmetic: the memo below
+  // it is the most expensive computation on the page.
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(query), SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [query])
 
   const activeHosts = useMemo(() => new Set(view.active_capture_hosts ?? []), [view.active_capture_hosts])
   const declarations = useMemo(() => {
@@ -77,35 +87,50 @@ export function HostAuditView({
     return owners
   }, [view.modules])
 
-  const groups = useMemo<HostGroup[]>(() => {
-    const needle = query.trim().toLocaleLowerCase()
+  // The per-host facts — overlap, the egress winner, the DNS winner and its
+  // partial-shadow case — depend only on the module set, not on the query or the
+  // filter, and they are the expensive part: an O(T^2) pattern scan over every
+  // declared host, plus two scans of the enabled modules per host. All of it
+  // used to sit inside the query-keyed memo, so a proxy-compat bundle declaring
+  // hundreds of hosts recomputed the lot on every keystroke, with the needle
+  // filter running afterwards so it narrowed nothing.
+  const hostFacts = useMemo(() => {
     const orderedEnabled = [...view.modules].filter((candidate) => candidate.enabled).sort((left, right) => left.execution_order - right.execution_order)
-    return view.modules.flatMap((module) => {
+    return view.modules.map((module) => ({
+      module,
+      entries: module.capture_hosts.map((host) => {
+        const egressWinner = declarations.get(host)?.find((owner) => owner.enabled && !!owner.egress_group)
+        // .some, not .filter().length: only the boolean is used, and .some stops
+        // at the first hit.
+        const overlap = view.modules.some((owner) => owner.id !== module.id && owner.capture_hosts.some((pattern) => patternsOverlap(pattern, host)))
+        const dnsWinner = orderedEnabled.find((owner) => owner.capture_hosts.some((pattern) => patternCovers(pattern, host)))
+        const dnsPartialWinner = dnsWinner?.id === module.id
+          ? orderedEnabled.find((owner) => owner.execution_order < module.execution_order && owner.capture_hosts.some((pattern) => patternsOverlap(pattern, host) && !patternCovers(pattern, host)))
+          : dnsWinner
+            ? undefined
+            : orderedEnabled.find((owner) => owner.capture_hosts.some((pattern) => patternsOverlap(pattern, host) && !patternCovers(pattern, host)))
+        return {
+          host,
+          active: activeHosts.has(host),
+          wildcard: host.startsWith('*.'),
+          duplicate: (declarations.get(host) ?? []).length > 1,
+          overlap,
+          egressWinner,
+          egressShadowed: !!egressWinner && egressWinner.id !== module.id,
+          dnsWinner,
+          dnsShadowed: !!dnsWinner && dnsWinner.id !== module.id,
+          dnsPartialWinner,
+        }
+      }),
+    }))
+  }, [activeHosts, declarations, view.modules])
+
+  const groups = useMemo<HostGroup[]>(() => {
+    const needle = debouncedQuery.trim().toLocaleLowerCase()
+    return hostFacts.flatMap(({ module, entries: allEntries }) => {
       if (moduleID && module.id !== moduleID) return []
       const moduleMatch = `${module.name} ${module.source_url ?? ''} ${module.source_digest}`.toLocaleLowerCase().includes(needle)
-      const entries = module.capture_hosts
-        .map((host) => {
-          const egressWinner = declarations.get(host)?.find((owner) => owner.enabled && !!owner.egress_group)
-          const overlappingModules = view.modules.filter((owner) => owner.id !== module.id && owner.capture_hosts.some((pattern) => patternsOverlap(pattern, host)))
-          const dnsWinner = orderedEnabled.find((owner) => owner.capture_hosts.some((pattern) => patternCovers(pattern, host)))
-          const dnsPartialWinner = dnsWinner?.id === module.id
-            ? orderedEnabled.find((owner) => owner.execution_order < module.execution_order && owner.capture_hosts.some((pattern) => patternsOverlap(pattern, host) && !patternCovers(pattern, host)))
-            : dnsWinner
-              ? undefined
-              : orderedEnabled.find((owner) => owner.capture_hosts.some((pattern) => patternsOverlap(pattern, host) && !patternCovers(pattern, host)))
-          return {
-            host,
-            active: activeHosts.has(host),
-            wildcard: host.startsWith('*.'),
-            duplicate: (declarations.get(host) ?? []).length > 1,
-            overlap: overlappingModules.length > 0,
-            egressWinner,
-            egressShadowed: !!egressWinner && egressWinner.id !== module.id,
-            dnsWinner,
-            dnsShadowed: !!dnsWinner && dnsWinner.id !== module.id,
-            dnsPartialWinner,
-          }
-        })
+      const entries = allEntries
         .filter((entry) => {
           if (needle && !moduleMatch && !entry.host.toLocaleLowerCase().includes(needle)) return false
           if (filter === 'active') return entry.active
@@ -117,7 +142,7 @@ export function HostAuditView({
         .sort((left, right) => Number(right.active) - Number(left.active) || Number(left.wildcard) - Number(right.wildcard) || left.host.localeCompare(right.host))
       return entries.length > 0 ? [{ module, entries }] : []
     }).sort((left, right) => left.module.execution_order - right.module.execution_order)
-  }, [activeHosts, declarations, filter, moduleID, query, view.modules])
+  }, [debouncedQuery, filter, hostFacts, moduleID])
 
   const declaredCount = view.modules.reduce((count, module) => count + module.capture_hosts.length, 0)
   const wildcardCount = view.modules.reduce((count, module) => count + module.capture_hosts.filter((host) => host.startsWith('*.')).length, 0)

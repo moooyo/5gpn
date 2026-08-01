@@ -360,17 +360,30 @@ type interceptInternalHealth struct {
 // handleInterceptHealth distinguishes an intentionally idle sidecar from a
 // failed one. Installed/active counts come from the control-plane document;
 // only an expected runtime must answer the bounded Unix-socket health probe.
+//
+// A 503 here means "this control plane cannot tell you", not "the engine is
+// down". The engine being down is a 200 carrying expected=true, running=false
+// and the counts, which is the state the field pair was added to express: the
+// console renders `running === expected`, and while a dead engine answered 503
+// that comparison could never be false, the counts were dropped, and the
+// operator saw "Unavailable" beside whatever numbers were cached before the
+// failure.
 func (s *ControlServer) handleInterceptHealth(w http.ResponseWriter, r *http.Request) {
 	if s.interceptStore == nil {
 		writeErr(w, http.StatusServiceUnavailable, "plugin engine health unavailable")
 		return
 	}
-	if err := lockMutexContext(r.Context(), &s.interceptStore.mu); err != nil {
-		writeErr(w, http.StatusServiceUnavailable, "plugin engine health unavailable")
-		return
-	}
+	// No s.mu. HealthProjection takes its own healthMu and re-establishes the
+	// file's identity around its read, which is exactly why it was written that
+	// way -- "the projection lookup never acquires mu itself, so manager
+	// transactions cannot deadlock with direct cache inspection". Taking mu here
+	// queued this endpoint behind the whole apply transaction: validateSidecar-
+	// Candidate's 10 s subprocess, publishSidecarDocument's HTTP calls, the 15 s
+	// certificate wait and the generation commit. The console polls this every
+	// 5 s with a 4 s deadline, so during every extension enable -- exactly when
+	// an operator is watching -- the plugin engine indicator went unknown for
+	// tens of seconds while nothing was wrong with the sidecar.
 	projection, err := s.interceptStore.HealthProjection()
-	s.interceptStore.mu.Unlock()
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "plugin engine health unavailable")
 		return
@@ -385,7 +398,9 @@ func (s *ControlServer) handleInterceptHealth(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if s.interceptLogs == nil || s.interceptLogs.healthClient == nil {
-		writeErr(w, http.StatusServiceUnavailable, "plugin engine unavailable")
+		// No probe channel at all is a control-plane defect, so it stays unknown
+		// rather than being reported as a dead engine.
+		writeErr(w, http.StatusServiceUnavailable, "plugin engine health unavailable")
 		return
 	}
 
@@ -393,7 +408,11 @@ func (s *ControlServer) handleInterceptHealth(w http.ResponseWriter, r *http.Req
 	defer cancel()
 	health, err := probeInterceptLogHealth(ctx, s.interceptLogs.healthClient)
 	if err != nil || !health.Running || health.ActiveExtensions != view.ActivePlugins {
-		writeErr(w, http.StatusServiceUnavailable, "plugin engine unavailable")
+		// Expected but not answering, or answering with a count that disagrees
+		// with the document. Both mean the runtime is not serving what the
+		// control plane published, and both are the operator's problem to see
+		// with the numbers attached.
+		writeJSON(w, http.StatusOK, view)
 		return
 	}
 	view.Running = true

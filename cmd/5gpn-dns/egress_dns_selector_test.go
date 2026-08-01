@@ -73,8 +73,9 @@ func TestInterceptHostSnapshotDeduplicatesPatternsWithoutChangingWinner(t *testi
 	second.CaptureHosts = append([]string(nil), first.CaptureHosts...)
 	document, _ := testInterceptDocument(t, first, second)
 	snapshot := newInterceptHostSnapshot(document)
-	if len(snapshot.exact) != 1 || len(snapshot.wildcard) != 1 {
-		t.Fatalf("compiled matcher size exact=%d wildcard=%d, want 1/1", len(snapshot.exact), len(snapshot.wildcard))
+	if len(snapshot.capture.exact) != 1 || len(snapshot.capture.wildcard) != 1 {
+		t.Fatalf("compiled matcher size exact=%d wildcard=%d, want 1/1",
+			len(snapshot.capture.exact), len(snapshot.capture.wildcard))
 	}
 	for _, name := range []string{"api.example.com", "cdn.example.com"} {
 		resolver, owner, matched := snapshot.CaptureDNS(name)

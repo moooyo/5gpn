@@ -156,10 +156,53 @@ actions:
 	}
 }
 
+// loadPublishedPolicyDigests reads the extension repository's generated
+// marketplace index and returns the policy digest each entry published.
+//
+// Produce one with:
+//
+//	(cd /path/to/5gpn-extensions && node scripts/generate-marketplace.mjs \
+//	   --revision "$(git rev-parse HEAD)" --output /tmp/index.json)
+func loadPublishedPolicyDigests(t *testing.T, path string) map[string]string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var index struct {
+		Entries []struct {
+			ID     string `json:"id"`
+			Policy struct {
+				Digest string `json:"digest"`
+			} `json:"policy"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(raw, &index); err != nil {
+		t.Fatal(err)
+	}
+	digests := make(map[string]string, len(index.Entries))
+	for _, entry := range index.Entries {
+		digests[entry.ID] = entry.Policy.Digest
+	}
+	if len(digests) == 0 {
+		t.Fatal("the marketplace index carries no entries, so this proves nothing")
+	}
+	return digests
+}
+
 func TestExternalMaintainedExtensionsAreInstallableFromURL(t *testing.T) {
 	root := strings.TrimSpace(os.Getenv("FIVEGPN_EXTENSIONS_ROOT"))
 	if root == "" {
 		t.Skip("FIVEGPN_EXTENSIONS_ROOT is not set")
+	}
+	// When a generated index is supplied, this also becomes the cross-
+	// implementation agreement test the policy digest exists for: the publisher
+	// compiles every manifest with typed-policy.mjs and the gateway compiles it
+	// again here. validateMarketplaceInstall compares the two on every install,
+	// so a divergence has to fail in CI rather than at an operator's gateway.
+	var publishedPolicy map[string]string
+	if indexPath := strings.TrimSpace(os.Getenv("FIVEGPN_MARKETPLACE_INDEX")); indexPath != "" {
+		publishedPolicy = loadPublishedPolicyDigests(t, indexPath)
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -213,6 +256,19 @@ func TestExternalMaintainedExtensionsAreInstallableFromURL(t *testing.T) {
 			seenIDs[module.ID] = entry.Name()
 			if module.Enabled || len(module.CaptureHosts) == 0 || len(module.Scripts)+len(module.HostMappings) == 0 {
 				t.Fatalf("invalid maintained extension snapshot: %+v", module)
+			}
+			if publishedPolicy != nil {
+				published, listed := publishedPolicy[module.ID]
+				if !listed {
+					t.Fatalf("extension %q is not in the generated marketplace index", module.ID)
+				}
+				projection, projectErr := overlayProjectModule(module)
+				if projectErr != nil {
+					t.Fatalf("this extension cannot be carried by a generation: %v", projectErr)
+				}
+				if got := overlayPolicyDigest(projection); got != published {
+					t.Fatalf("policy digest %s does not match the published %s: the publisher's compiler and the gateway's disagree about what this manifest enforces", got, published)
+				}
 			}
 			validated++
 		})
@@ -364,6 +420,61 @@ actions:
       timeoutMs: 1000
       maxBodyBytes: 1024
 `
+}
+
+// ipASN was a primary selector no consumer could carry: the sidecar's strict
+// decoder has no such field, overlayPolicyRule never reads it, and the extension
+// repository's validator rejects the key. A manifest could declare it, the
+// review would render it as an enforced deny, and the generation would not carry
+// it. The project has one contract, so the field is gone rather than
+// half-implemented, and an old manifest fails as an unknown field.
+func TestNativeExtensionParserRejectsRetiredASNSelector(t *testing.T) {
+	t.Parallel()
+	parser := interceptModuleParser{now: time.Now}
+	_, err := parser.Import(context.Background(), interceptModuleImportRequest{Content: nativeRoutingManifest(`    - action: reject
+      ipASN: 4808`)})
+	if err == nil {
+		t.Fatal("a routing rule selecting on ipASN was accepted; nothing downstream can enforce it")
+	}
+	if !strings.Contains(err.Error(), "ipASN") {
+		t.Fatalf("rejection must name the field the manifest used, got %v", err)
+	}
+}
+
+// yaml.v3 decodes .nan and .inf straight into a number setting's *float64
+// bounds, and the ordering check catches neither: NaN > NaN is false, and so is
+// 1 > +Inf. A non-finite bound reaching the snapshot makes
+// interceptModuleSnapshotDigest panic -- by design, since encoding/json cannot
+// represent it -- on a path that digests bytes fetched from the publisher's own
+// URL.
+func TestNativeExtensionParserRejectsNonFiniteNumberBounds(t *testing.T) {
+	t.Parallel()
+	parser := interceptModuleParser{now: time.Now}
+	base := nativeRoutingManifest(`    - action: reject
+      domain: ads.example.com`)
+	for name, bound := range map[string]string{
+		"nan minimum":       "    min: .nan",
+		"nan maximum":       "    max: .nan",
+		"positive infinity": "    max: .inf",
+		"negative infinity": "    min: -.inf",
+	} {
+		name, bound := name, bound
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			manifest := base + `settings:
+  - key: threshold
+    type: number
+    label: Threshold
+` + bound + "\n"
+			module, err := parser.Import(context.Background(), interceptModuleImportRequest{Content: manifest})
+			if err == nil {
+				t.Fatalf("a non-finite bound was accepted: %+v", module.Settings)
+			}
+			if !strings.Contains(err.Error(), "finite") {
+				t.Fatalf("rejection must say the bound is not finite, got %v", err)
+			}
+		})
+	}
 }
 
 func TestNativeExtensionParserEnforcesCaptureBoundary(t *testing.T) {

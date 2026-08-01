@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -405,6 +406,34 @@ func TestOverlayCompileDisabledMasterIsAnEmptyGeneration(t *testing.T) {
 // The accept half is the regression guard for a real bug: these keyword shapes
 // used to be refused, and refusing them meant the coordinator silently dropped
 // 21 of 323 reviewed rules from a live deployment.
+// A rule this compiler cannot represent must fail the generation, not vanish
+// from it. Skipping is how a reviewed deny stops being enforced with nothing
+// reporting it -- the regression the header on overlayPolicyRule records, where
+// a shadow comparison found 21 of 323 reviewed rules dropped that way. The
+// digest path (overlayProjectModule) has always refused; this pins the path that
+// decides what actually runs.
+func TestOverlayCompileRefusesAnUnrepresentableRule(t *testing.T) {
+	doc := overlayTestDocument()
+	doc.Modules[0].RoutingRules = interceptRoutingRuleList{
+		// Two primary selectors: overlayPolicyRule returns ok=false for this, and
+		// narrowing it to one would enforce something other than what was
+		// approved.
+		{Action: "reject", Domain: "a.example.test", DomainSuffix: "b.example.test"},
+	}
+	_, err := compileOverlayGeneration(overlayCompileInput{
+		Document:         doc,
+		MatchTarget:      "Proxies",
+		DocumentRevision: "rev-1",
+		Transition:       overlayTransitionRevoke,
+	})
+	if err == nil {
+		t.Fatal("a routing rule the generation cannot carry was silently dropped instead of failing the compile")
+	}
+	if !strings.Contains(err.Error(), "alpha") || !strings.Contains(err.Error(), "cannot be represented") {
+		t.Fatalf("compile error must name the extension and the reason, got %v", err)
+	}
+}
+
 func TestOverlayPolicyRuleExpressiveness(t *testing.T) {
 	t.Run("two primary selectors are refused", func(t *testing.T) {
 		// The source model permits exactly one; more than one means the rule
@@ -636,6 +665,192 @@ func TestRecoverBeforeCommitIntentAbandons(t *testing.T) {
 	}
 	if action != overlayRecoveryAbandon {
 		t.Fatalf("action = %q, want abandon", action)
+	}
+}
+
+// A failed readback after COMMIT_INTENT means "could not find out", not "did not
+// land", and the difference decides whether the one durable record that a commit
+// may have landed survives. Deleting it made the conflict case -- the one that
+// is supposed to demand an operator -- undetectable on every later start.
+// Republishing the state that is already live must be a no-op.
+//
+// The check that claimed to do this compared readback.ActiveGeneration against
+// the id just compiled with that same generation as its parent -- equality would
+// have needed a SHA-256 fixed point, so it never fired. Every daemon start and
+// every unrelated document write therefore committed a fresh generation with a
+// revoke transition, hard-cutting in-flight capture for a change that altered no
+// routing, and PrepareRuntime's "a healthy boot pays a readback and nothing
+// else" was simply false.
+func TestOverlayPublishSkipsAStateThatIsAlreadyLive(t *testing.T) {
+	core := stubCommittingOverlayCore(t)
+	journal := newTestOverlayJournal(t)
+	driver := NewOverlayDriver(core.client, journal)
+
+	in := overlayCompileInput{
+		Document:         overlayTestDocument(),
+		MatchTarget:      "Proxies",
+		DocumentRevision: "rev-1",
+		Transition:       overlayTransitionRevoke,
+	}
+	first, err := driver.Publish(context.Background(), in)
+	if err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+	if first.Repeated || core.commitCount() != 1 {
+		t.Fatalf("first publish = repeated=%t commits=%d", first.Repeated, core.commitCount())
+	}
+
+	second, err := driver.Publish(context.Background(), in)
+	if err != nil {
+		t.Fatalf("republish: %v", err)
+	}
+	if !second.Repeated {
+		t.Fatal("republishing the live state was not recognised as a no-op")
+	}
+	if core.commitCount() != 1 {
+		t.Fatalf("commits = %d, want 1: an unchanged desired state burned a generation", core.commitCount())
+	}
+
+	// A real change still publishes. This is the half the comparison must not
+	// lose: the fingerprint covers the whole document, so any change to what the
+	// generation would carry is a different state.
+	changed := in
+	changed.Document = overlayTestDocument()
+	changed.Document.Modules[1].CaptureHosts = []string{"api.example.test", "extra.example.test"}
+	third, err := driver.Publish(context.Background(), changed)
+	if err != nil {
+		t.Fatalf("publish after a real change: %v", err)
+	}
+	if third.Repeated || core.commitCount() != 2 {
+		t.Fatalf("changed publish = repeated=%t commits=%d", third.Repeated, core.commitCount())
+	}
+}
+
+// A journal write failing once must not wedge the driver for the rest of the
+// process lifetime. Begin refuses while an entry is unfinished, so any path that
+// leaves one behind -- in memory or on disk -- turns a transient ENOSPC into an
+// extensions subsystem that cannot be configured until the daemon restarts.
+func TestOverlayPublishStaysUsableWhenAJournalWriteFails(t *testing.T) {
+	core := stubCommittingOverlayCore(t)
+	journal := newTestOverlayJournal(t)
+	driver := NewOverlayDriver(core.client, journal)
+
+	in := overlayCompileInput{
+		Document:         overlayTestDocument(),
+		MatchTarget:      "Proxies",
+		DocumentRevision: "rev-1",
+		Transition:       overlayTransitionRevoke,
+	}
+	if _, err := driver.Publish(context.Background(), in); err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+
+	// Make the journal unwritable the way a full partition does: the directory
+	// its atomic write stages into is not a directory any more.
+	dir := filepath.Dir(journal.path)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed := in
+	changed.Document = overlayTestDocument()
+	changed.Document.Modules[1].CaptureHosts = []string{"api.example.test", "extra.example.test"}
+	if _, err := driver.Publish(context.Background(), changed); err == nil {
+		t.Fatal("a journal write failure was not reported")
+	}
+
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := driver.Publish(context.Background(), changed); err != nil {
+		t.Fatalf("the driver stayed wedged after the journal recovered: %v", err)
+	}
+}
+
+// The in-memory journal must never claim more than the file does. A phase that
+// advanced only in memory would let recovery believe a COMMIT_INTENT reached
+// disk when it never did.
+func TestOverlayJournalRestoresItselfWhenAWriteFails(t *testing.T) {
+	journal := newTestOverlayJournal(t)
+	if err := journal.Begin(overlayJournalEntry{
+		OperationID: "op-1", BaseGeneration: "g0", TargetGeneration: "g1", TargetFingerprint: "fp-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := filepath.Dir(journal.path)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Advance(overlayPhaseCommitIntent, ""); err == nil {
+		t.Fatal("a failed journal write was reported as success")
+	}
+	if entry := journal.Current(); entry == nil || entry.Phase != overlayPhaseStaged {
+		t.Fatalf("phase advanced in memory without reaching disk: %+v", entry)
+	}
+	if generation, fingerprint := journal.LastEffectiveState(); generation != "" || fingerprint != "" {
+		t.Fatalf("last-effective advanced without reaching disk: %q %q", generation, fingerprint)
+	}
+}
+
+func TestRecoverKeepsTheIntentRecordWhenTheReadbackFails(t *testing.T) {
+	journal, err := NewOverlayJournal(filepath.Join(t.TempDir(), "journal.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Begin(overlayJournalEntry{
+		OperationID: "op-1", BaseGeneration: "g0", TargetGeneration: "g1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Advance(overlayPhaseCommitIntent, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// A socket path that answers nothing: Readback fails rather than reporting a
+	// live generation.
+	client := NewOverlayClient(filepath.Join(t.TempDir(), "absent.sock"))
+	action, _, err := RecoverOverlayOperation(context.Background(), journal, client)
+	if err == nil {
+		t.Fatal("a failed readback was reported as a successful recovery")
+	}
+	if action != overlayRecoveryUnknown {
+		t.Fatalf("action = %q, want unknown: a failed readback cannot support the claim that the commit did not land", action)
+	}
+
+	driver := NewOverlayDriver(client, journal)
+	if err := driver.Recover(context.Background()); err == nil {
+		t.Fatal("the driver reported recovery as successful")
+	}
+	if entry := journal.Current(); entry == nil || entry.Phase != overlayPhaseCommitIntent {
+		t.Fatalf("the COMMIT_INTENT record was discarded: %+v", entry)
+	}
+}
+
+// Before COMMIT_INTENT the journal alone proves nothing was committed, so a core
+// that cannot answer must not turn a free cleanup into a wedged driver.
+func TestRecoverAbandonsBeforeCommitIntentEvenWithoutAReadback(t *testing.T) {
+	journal, err := NewOverlayJournal(filepath.Join(t.TempDir(), "journal.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Begin(overlayJournalEntry{
+		OperationID: "op-1", BaseGeneration: "g0", TargetGeneration: "g1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client := NewOverlayClient(filepath.Join(t.TempDir(), "absent.sock"))
+	action, _, err := RecoverOverlayOperation(context.Background(), journal, client)
+	if err != nil || action != overlayRecoveryAbandon {
+		t.Fatalf("action = %q err = %v, want abandon with no error", action, err)
 	}
 }
 

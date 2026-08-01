@@ -27,6 +27,7 @@ vi.mock('./LocationPicker', () => ({
 }))
 
 import { api } from '../../lib/api/client'
+import { ApiError } from '../../lib/api/http'
 
 const WLOC: InterceptModule = {
   id: 'io.5gpn.apple-wloc', extension_version: '1.0.0', name: 'Apple WLOC Location Override',
@@ -392,8 +393,10 @@ describe('ExtensionsPage native extension contract', () => {
     expect(await screen.findByTestId('host-audit-view')).toBeInTheDocument()
     expect(screen.getByTestId(`host-group-${WLOC.id}`)).toHaveTextContent('gs-loc.apple.com')
     await user.type(screen.getByTestId('host-audit-search'), 'api.example.com')
-    expect(screen.getByTestId(`host-group-${CLEANER.id}`)).toBeInTheDocument()
-    expect(screen.queryByTestId(`host-group-${WLOC.id}`)).not.toBeInTheDocument()
+    // The audit debounces its query by 250 ms, because the memo behind it is the
+    // most expensive computation on the page. waitFor rather than a fixed sleep.
+    expect(await screen.findByTestId(`host-group-${CLEANER.id}`)).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByTestId(`host-group-${WLOC.id}`)).not.toBeInTheDocument())
   })
 
   it('shows the first enabled DNS winner for exact and wildcard overlap', async () => {
@@ -520,6 +523,50 @@ describe('ExtensionsPage native extension contract', () => {
       settings: {},
       egress_group: 'Proxies',
     }))
+  })
+
+  // A revision conflict is not a network blip: it means someone else published a
+  // change while this dialog was open. Closing the dialog before the write and
+  // reporting it as a generic failure destroyed everything the operator had
+  // typed -- the reset effect wipes `values` when `module` goes null -- and the
+  // page never polls, so the stale window is the whole session.
+  it('keeps the settings dialog and its entries when a concurrent change wins the revision', async () => {
+    const user = userEvent.setup()
+    const unbound = cloneView()
+    const module = unbound.modules.find((candidate) => candidate.id === CLEANER.id)!
+    module.egress_group = undefined
+    vi.mocked(api.getInterceptModules).mockResolvedValueOnce(unbound)
+    vi.mocked(api.putInterceptModule).mockRejectedValueOnce(new ApiError(409, 'interception module revision changed'))
+    renderPage()
+    const card = await screen.findByTestId(`extension-${CLEANER.id}`)
+    await user.click(within(card).getByRole('button', { name: '配置' }))
+    const dialog = await screen.findByRole('dialog', { name: /Response Cleaner/ })
+    await user.click(within(dialog).getByRole('combobox'))
+    await user.click(await screen.findByRole('option', { name: 'Proxies' }))
+    await user.click(within(dialog).getByRole('button', { name: '保存' }))
+
+    const conflict = await within(dialog).findByTestId('extension-settings-conflict')
+    expect(conflict).toHaveTextContent('再次点击保存')
+    // Still open, and the selection is still there to retry with.
+    expect(screen.getByRole('dialog', { name: /Response Cleaner/ })).toBeInTheDocument()
+    expect(within(dialog).getByRole('combobox')).toHaveTextContent('Proxies')
+  })
+
+  // routingReadyLocked and analyzeInterceptRouting emit a much larger reason set
+  // than settings-required and mitm-disabled. An enabled module carrying one of
+  // them used to render with no banner at all, toggles showing "on", while
+  // interception was entirely dead.
+  it('shows a banner for a not-ready reason beyond settings and the master switch', async () => {
+    const broken = cloneView()
+    const module = broken.modules.find((candidate) => candidate.id === CLEANER.id)!
+    module.enabled = true
+    module.ready = false
+    module.reason = 'overlay-egress-anchor-misplaced'
+    broken.active_capture_hosts = []
+    vi.mocked(api.getInterceptModules).mockResolvedValueOnce(broken)
+    renderPage()
+    const card = await screen.findByTestId(`extension-${CLEANER.id}`)
+    expect(within(card).getByText(/egress 锚点与 fail-closed 终止规则之间存在其他规则/)).toBeInTheDocument()
   })
 
   it('clears an optional egress binding back to the terminal target', async () => {

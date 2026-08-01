@@ -41,9 +41,13 @@ type overlayJournalEntry struct {
 	BaseGeneration           string       `json:"base_generation_id"`
 	TargetGeneration         string       `json:"target_generation_id"`
 	TargetDocumentDigest     string       `json:"target_document_digest"`
-	ExpectedCoreRevision     uint64       `json:"expected_core_config_revision"`
-	LastError                string       `json:"last_error,omitempty"`
-	UpdatedAt                int64        `json:"updated_at"`
+	// TargetFingerprint identifies the desired state without its parent, so the
+	// next transaction can recognise "this is already live" — which the
+	// generation id cannot answer, because it covers the parent by design.
+	TargetFingerprint    string `json:"target_fingerprint,omitempty"`
+	ExpectedCoreRevision uint64 `json:"expected_core_config_revision"`
+	LastError            string `json:"last_error,omitempty"`
+	UpdatedAt            int64  `json:"updated_at"`
 }
 
 // overlayJournalState is the complete on-disk journal.
@@ -54,6 +58,14 @@ type overlayJournalState struct {
 	// LastEffective records the last generation this coordinator observed as
 	// live, which is the CAS base for the next transaction.
 	LastEffective string `json:"last_effective_generation,omitempty"`
+	// LastEffectiveFingerprint is the parent-independent fingerprint of the
+	// desired state that produced LastEffective. The pair is what lets the next
+	// Publish recognise a republication of the same state: the live generation
+	// must be one this coordinator put there, and the desired content must be
+	// identical to what it published. Absent (an older journal, or a generation
+	// some third party moved) simply means no short-circuit, which is the safe
+	// direction.
+	LastEffectiveFingerprint string `json:"last_effective_fingerprint,omitempty"`
 }
 
 const overlayJournalVersion = 1
@@ -97,6 +109,14 @@ func (j *OverlayJournal) LastEffective() string {
 	return j.state.LastEffective
 }
 
+// LastEffectiveState reports the last generation observed live together with the
+// parent-independent fingerprint of the desired state that produced it.
+func (j *OverlayJournal) LastEffectiveState() (generation, fingerprint string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.state.LastEffective, j.state.LastEffectiveFingerprint
+}
+
 // Current returns a copy of the in-flight entry, or nil.
 func (j *OverlayJournal) Current() *overlayJournalEntry {
 	j.mu.Lock()
@@ -118,8 +138,17 @@ func (j *OverlayJournal) Begin(entry overlayJournalEntry) error {
 	}
 	entry.Phase = overlayPhaseStaged
 	entry.UpdatedAt = time.Now().Unix()
+	previous := j.state.Current
 	j.state.Current = &entry
-	return j.writeLocked()
+	if err := j.writeLocked(); err != nil {
+		// Leave the journal exactly as it was. An entry kept in memory after its
+		// durable write failed describes a transaction that was never recorded,
+		// and it wedges every later Begin -- which is the same failure the driver
+		// works to avoid one layer up, arriving through the back door.
+		j.state.Current = previous
+		return err
+	}
+	return nil
 }
 
 // Advance moves the in-flight operation to a new phase.
@@ -129,13 +158,26 @@ func (j *OverlayJournal) Advance(phase overlayPhase, lastErr string) error {
 	if j.state.Current == nil {
 		return errors.New("overlay journal: no operation in flight")
 	}
+	previousEntry := *j.state.Current
+	previousEffective := j.state.LastEffective
+	previousFingerprint := j.state.LastEffectiveFingerprint
 	j.state.Current.Phase = phase
 	j.state.Current.LastError = lastErr
 	j.state.Current.UpdatedAt = time.Now().Unix()
 	if phase == overlayPhaseEffective {
 		j.state.LastEffective = j.state.Current.TargetGeneration
+		j.state.LastEffectiveFingerprint = j.state.Current.TargetFingerprint
 	}
-	return j.writeLocked()
+	if err := j.writeLocked(); err != nil {
+		// Same rule: in-memory state must never claim more than the disk does.
+		// A phase that advanced only in memory would let recovery believe a
+		// COMMIT_INTENT was durable when it never reached the file.
+		*j.state.Current = previousEntry
+		j.state.LastEffective = previousEffective
+		j.state.LastEffectiveFingerprint = previousFingerprint
+		return err
+	}
+	return nil
 }
 
 // Finish clears the in-flight operation.
@@ -225,6 +267,12 @@ const (
 	// overlayRecoveryRetry means the commit did not land; the identical
 	// idempotent operation may be retried.
 	overlayRecoveryRetry overlayRecoveryAction = "retry"
+	// overlayRecoveryUnknown means recovery could not find out whether the commit
+	// landed, because the readback itself failed. It is deliberately distinct
+	// from retry: "provably did not land" and "could not tell" are different
+	// answers, and only the first one makes it safe to discard the COMMIT_INTENT
+	// record.
+	overlayRecoveryUnknown overlayRecoveryAction = "unknown"
 	// overlayRecoveryAbandon means prepared artifacts can simply be dropped.
 	overlayRecoveryAbandon overlayRecoveryAction = "abandon"
 	// overlayRecoveryConflict means some third party moved the active
@@ -246,7 +294,20 @@ func RecoverOverlayOperation(ctx context.Context, journal *OverlayJournal, clien
 
 	readback, err := client.Readback(ctx)
 	if err != nil {
-		return overlayRecoveryRetry, overlayReadback{}, err
+		switch entry.Phase {
+		case overlayPhaseStaged, overlayPhasePrepared:
+			// The journal alone proves nothing was committed at these phases, so
+			// the cleanup does not need the core to answer.
+			return overlayRecoveryAbandon, overlayReadback{}, nil
+		default:
+			// Nothing was learned. Reporting "retry" here claimed the commit did
+			// not land -- a claim a failed readback cannot support -- and the
+			// caller acted on it by deleting the COMMIT_INTENT record, which is
+			// the only durable evidence that a commit may have landed. The
+			// conflict case that is supposed to demand an operator could then
+			// never be detected on any later start.
+			return overlayRecoveryUnknown, overlayReadback{}, err
+		}
 	}
 
 	switch entry.Phase {

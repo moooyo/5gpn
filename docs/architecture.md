@@ -127,11 +127,17 @@ zashboard deny-by-default rule, seven anti-loop destination guards, the
 `RUNTIME-OVERLAY,5gpn,egress` anchor, the fail-closed
 `IN-NAME,intercept-egress,REJECT` terminator, zero or one canonical global
 UDP/443 reject, the `RUNTIME-OVERLAY,5gpn,client` anchor, and the terminal
-`MATCH`. Anchor placement is a security property rather than formatting: the
-egress anchor must sit immediately above the terminator, so traffic the overlay
-declined reaches the deny rather than falling through to an operator rule, and
-the client anchor must resolve before the terminal `MATCH`, so captured traffic
-never reaches the operator's own routing. Within the committed generation,
+`MATCH`. Anchor placement is a security property rather than formatting, and it
+is three constraints, not two: the egress anchor must sit immediately above the
+terminator, so traffic the overlay declined reaches the deny rather than falling
+through to an operator rule; the client anchor must resolve before the terminal
+`MATCH`, so captured traffic never reaches the operator's own routing; and the
+client anchor must sit below the terminator. The third was implied by the
+ordered list above and proved by nothing, which mattered because
+`block-quic-443` derives its insertion point from the terminator alone — a
+config with the client anchor above it accepted the capability and then wrote
+the fixed global UDP/443 reject below the capture stage, inverting the
+precedence this document states. Within the committed generation,
 egress bindings and reviewed extension routing rules follow explicit extension
 execution order and keep first-match semantics; identical rules are published
 once at their first declaration, and capture rules are sorted because they all
@@ -264,7 +270,7 @@ partial-execution acknowledgement. Unknown fields, duplicate keys, multiple
 documents, YAML aliases, anchors, and merge keys are rejected. A manifest
 declares stable metadata identity and semantic version, explicit capture hosts,
 optional public-domain or public-IPv4 upstream mappings, typed settings,
-permissions, optional exact HTTP(S) network origins, an optional
+permissions, an optional unrestricted HTTP(S) network grant, an optional
 operator-egress-group requirement, optional bounded typed `REJECT`/`DIRECT`
 routing rules, and structured request/response script actions. URL install accepts
 one HTTPS manifest; local add accepts one pasted or uploaded manifest. A URL
@@ -281,16 +287,21 @@ path RE2 expression, optional response statuses, body representation, timeout,
 and body limit. Its single `transform(context)` entry point receives only the
 bounded request/response projection, typed settings, console logging, and—when
 explicitly permitted—a quota-bound per-extension storage object and synchronous
-network requests constrained to exact approved origins. The same permission
-also authorizes a request-phase URL rewrite to a canonical absolute HTTP(S)
-URL whose origin exactly matches the approved list; userinfo and fragments are
-forbidden, HTTPS cannot be downgraded to HTTP, and same-origin rewrites remain
-inside the extension's capture-host boundary while the request is still at its
-captured origin. After an authorized cross-origin rewrite, a later action may
-execute against or rewrite within the current external origin only when its own
-extension also declares that exact origin. It has no ambient
+network requests. That permission is a single un-parameterised grant. It names
+no addresses: a script holding it may reach any host it can resolve, and the
+manifest cannot narrow that. The earlier arrangement, an immutable list of exact
+approved origins, no longer exists in any component. The guards that remain are
+URL canonicalization, rejection of IP literals, unsafe hosts, userinfo and
+fragments, and egress through authenticated mihomo SOCKS5 with certificate
+verification. The same permission also authorizes a request-phase URL rewrite to
+a canonical absolute HTTP(S) URL; HTTPS cannot be downgraded to HTTP, and a
+same-origin rewrite remains inside the extension's capture-host boundary while
+the request is still at its captured origin. It has no ambient
 network client, filesystem, process, timer, socket, or module-loader access. A
-permitted script can deliberately send any data visible to it to those origins.
+permitted script can deliberately send any data visible to it anywhere it can
+reach. This is the one permission whose entire purpose is to state where
+decrypted data may go, so every management surface must describe it as
+unrestricted rather than as a reviewed set of destinations.
 A rewritten captured request sends its complete method, decoded body, and
 end-to-end headers, potentially including `Cookie` or `Authorization`; framing
 and hop-by-hop fields remain runtime-owned. Every management surface states
@@ -715,7 +726,7 @@ Every Telegram write is a two-step review and confirmation. The review renders
 the complete normalized impact relevant to the operation, including the source,
 identity, versions, immutable snapshot digest, changed settings, capture hosts,
 action match/execution metadata and script digests (but not script bodies),
-permissions, exact network origins, execution position, egress and capture-DNS
+permissions, the network grant, execution position, egress and capture-DNS
 bindings, and enabled/runtime transition. Enable reviews also list every exact normalized
 global routing rule. Reorder reviews show the complete before/after order and
 state that overlapping routing, egress, and capture-DNS first-match can change.
@@ -735,12 +746,13 @@ redirect-final URLs, normalized metadata, entries, and resolved resources; it
 excludes only the observation timestamp. Remote index, manifest, and script
 digests remain independent publisher data.
 
-When a candidate or installed extension declares network origins, every review
-lists each exact origin. An enable review additionally states that the script
-may send any decrypted request, response, setting, or storage data visible to it
-to every listed origin, and may rewrite a captured request there with its
-method, decoded body, and end-to-end headers, including possible cookies or
-authorization. Telegram never compresses this into a generic permission
+When a candidate or installed extension declares the network grant, every review
+says so. An enable review additionally states that the script may send any
+decrypted request, response, setting, or storage data visible to it to any host
+it can reach, and may rewrite a captured request there with its method, decoded
+body, and end-to-end headers, including possible cookies or authorization. The
+grant carries no destination list, so a review that named one would be
+describing a boundary that does not exist. Telegram never compresses this into a generic permission
 label or treats an earlier acknowledgement as approval for a changed snapshot.
 
 Telegram supports `location` settings through the client's native location
@@ -792,7 +804,7 @@ seconds, enough for that bounded 500 ms retry window while retaining a finite
 rate limit. Disable operations may leave a temporary
 certificate SAN superset, but the runtime allowlist rejects disabled hosts.
 
-`/etc/5gpn/intercept/config.json` version 5 preserves installer-owned SOCKS credentials,
+`/etc/5gpn/intercept/config.json` version 6 preserves installer-owned SOCKS credentials,
 loopback addresses, and certificate paths across every API write. It also
 stores the MITM master and protocol settings plus immutable native extension,
 manifest, script, origin-permission, typed-setting, and capture-host snapshots,
@@ -983,7 +995,7 @@ Specialized live state remains in purpose-specific, atomically written files:
 - `intercept/config.json` is the sidecar runtime document. Its SOCKS credentials
   and fixed paths are installer-owned; native extension installs store bounded
   immutable manifests and scripts, normalized capture hosts, structured action
-  matchers, typed settings, exact network origins, permissions, upstream
+  matchers, typed settings, the network grant, permissions, upstream
   mappings, normalized typed routing rules, enabled state, explicit execution order, and operator group
   bindings.
   The global MITM master, HTTP/2 negotiation, and QUIC fallback protection live
@@ -1381,9 +1393,9 @@ Each native HTTP action runs in a fresh goja VM and must define exactly
 request/response projection, typed settings, console logging, and an optional
 quota-bound storage object when the immutable manifest requested that
 permission. A declared and operator-confirmed network permission adds
-`context.network.request` and the bounded cross-origin request-rewrite
-capability described above, both restricted to the immutable exact-origin list
-and routed through authenticated mihomo SOCKS5. There are no compatibility globals,
+`context.network.request` and the cross-origin request-rewrite capability
+described above. Neither is restricted to a declared destination set — the grant
+names none — and both are routed through authenticated mihomo SOCKS5. There are no compatibility globals,
 ambient `fetch`, filesystem, process, timer, module loader, socket, or ambient
 Go object.
 Validated JavaScript Programs, typed settings, host/path matchers, and ordered
@@ -1452,12 +1464,19 @@ restored from stale bootstrap defaults.
 
 The repository contains no Python. The `5gpn-dns` Go module has exactly three
 direct dependencies: `github.com/miekg/dns`, `github.com/go-telegram/bot`, and
-`gopkg.in/yaml.v3`. The separate `5gpn-intercept` module has exactly four
+`gopkg.in/yaml.v3`. The separate `5gpn-intercept` module has exactly seven
 direct dependencies: `github.com/quic-go/quic-go` for QUIC v1/v2 and HTTP/3,
 `github.com/dop251/goja` for the isolated native extension JavaScript runtime,
 `github.com/dlclark/regexp2/v2` solely to impose the explicit
-backtracking timeout on goja's fallback expression engine, and
-`github.com/andybalholm/brotli` for bounded Brotli request/response decoding. These architecture
+backtracking timeout on goja's fallback expression engine,
+`github.com/andybalholm/brotli` for bounded Brotli request/response decoding,
+`github.com/itchyny/gojq` for declarative jq actions, and `golang.org/x/net`
+plus `github.com/andybalholm/cascadia` for the bounded document model published
+proxy-compat bundles need. This count is stated in three places — here,
+`AGENTS.md`, and the sidecar's own policy suite — and they disagreed: gojq was
+listed as indirect in `go.mod` while `config.go` and `module_jq.go` imported it
+directly, so one document said four and another said six for a module that
+actually had seven. These architecture
 decisions add no gateway toolchain. The YAML
 dependency is an explicit security decision: raw
 mihomo edits are parsed structurally before invariant validation so decoy keys,
@@ -1581,7 +1600,7 @@ QUIC v1/v2 traffic and other variants are not guaranteed.
 Within the Web Console, the dedicated `/extensions` route owns installed native
 plugins. It shows immutable
 manifest/script digests, semantic version, normalized capture hosts, actions,
-permissions, exact network origins, typed settings, upstream mappings, exact
+permissions, the network grant, typed settings, upstream mappings, exact
 typed routing rules, explicit execution position, operator egress binding, and
 operator capture-DNS binding, and enabled/runtime state. A card separates the
 two kinds of thing it carries: capabilities are neutral chips, while a state the

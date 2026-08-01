@@ -32,11 +32,14 @@ operator capture-DNS bindings, on 2026-07-22.**
 - Native scripts define `transform(context)`. They receive structured
   request/response data, typed settings, console logging, optional bounded
   storage, and—only when explicitly declared and operator-confirmed—a
-  synchronous network capability restricted to exact HTTP(S) origins. They
+  synchronous network capability. That capability is a single un-parameterised
+  grant naming no destinations: an earlier arrangement restricted it to a
+  declared list of exact HTTP(S) origins, and no component implements that any
+  more. They
   still have no filesystem, process, timer, module-loader, socket, or ambient
   network API. A permitted script can deliberately send any data visible to it
-  to those origins, and every management surface must say so plainly before
-  enable.
+  to any host it can reach, and every management surface must say so plainly
+  before enable — as unrestricted, not as a reviewed destination set.
 - Plugin engine observability is memory-only. The active sidecar retains a
   bounded 1000-entry ring of structured script-console and action lifecycle
   events and exposes it only through the group-restricted fixed Unix socket.
@@ -64,17 +67,16 @@ operator capture-DNS bindings, on 2026-07-22.**
   and synthetic result bodies are
   bounded by both action and process-wide limits. Response actions remain
   buffered because final trailers are part of their projection.
-- The same exact-origin network permission authorizes a bounded request-phase
-  URL rewrite to a canonical absolute HTTP(S) URL at a declared origin.
+- The same network permission authorizes a request-phase URL rewrite to a
+  canonical absolute HTTP(S) URL. It is not narrowed to a declared origin set,
+  because the grant declares none.
   Userinfo and fragments are forbidden, HTTPS cannot downgrade to HTTP, and
   same-origin rewrites from the captured origin remain inside the extension's
-  capture-host boundary. After an authorized cross-origin rewrite, a later
-  action may execute against or rewrite within that current external origin
-  only when its own extension declares the same exact origin.
+  capture-host boundary.
   The rewritten request sends its complete method, decoded body, and end-to-end
   headers, potentially including `Cookie` or `Authorization`; framing and
-  hop-by-hop fields remain runtime-owned. The single enable review names every
-  origin, states this disclosure explicitly, and all resulting traffic returns
+  hop-by-hop fields remain runtime-owned. The single enable review states this
+  disclosure explicitly, and all resulting traffic returns
   through authenticated mihomo SOCKS5.
 - Extensions cannot name, inspect, or change arbitrary application egress
   groups. A manifest may require an operator egress binding; the operator

@@ -132,6 +132,19 @@ func analyzeOverlayAnchoredDocument(text string) interceptRoutingAnalysis {
 		analysis.Reason = "overlay-client-anchor-after-match"
 		return analysis
 	}
+	// And below the fail-closed terminator, which is the third constraint the
+	// canonical boundary states and the only one nothing proved. It is not
+	// cosmetic ordering: analyzeBlockQUICModule derives the global UDP/443
+	// reject's insertion point purely from the terminator (egressTerminatorIndex
+	// + 1), so a config with the client anchor above it put that reject *below*
+	// the capture stage. Extension capture and reviewed REJECT/DIRECT rules then
+	// resolve first, inverting the documented precedence, and the processor's own
+	// upstream traffic meets the capture stage before the terminator meant to
+	// catch it.
+	if clientIndex <= rejectIndex {
+		analysis.Reason = "overlay-client-anchor-before-terminator"
+		return analysis
+	}
 	if rejectIndex >= matchIndex {
 		analysis.Reason = "interception-egress-terminator-missing"
 		return analysis

@@ -93,9 +93,25 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 	}
 
 	// Publishing the generation that is already live is a no-op, not a new
-	// transaction. Without this, every unrelated document write would burn a
-	// generation and force a drain.
-	if readback.ActiveGeneration == doc.GenerationID {
+	// transaction. Without this, every unrelated document write burns a
+	// generation and forces a drain.
+	//
+	// The test cannot be readback.ActiveGeneration == doc.GenerationID: the id
+	// covers ParentGenerationID, and doc was just compiled with the live
+	// generation as its parent, so equality would need a SHA-256 fixed point and
+	// never held once. Compare the desired state instead, and only trust it when
+	// the live generation is one this coordinator put there — a generation some
+	// third party moved is deliberately not short-circuited, and neither is a
+	// journal that has no record (an older file, or a lost store).
+	fingerprint, err := overlayDesiredFingerprint(in.DocumentRevision, doc)
+	if err != nil {
+		return zero, err
+	}
+	lastGeneration, lastFingerprint := d.journal.LastEffectiveState()
+	alreadyLive := readback.ActiveGeneration != "" &&
+		readback.ActiveGeneration == lastGeneration &&
+		lastFingerprint != "" && lastFingerprint == fingerprint
+	if alreadyLive {
 		return overlayCommitResult{
 			ActiveGeneration: readback.ActiveGeneration,
 			ActiveDigest:     readback.ActiveDigest,
@@ -111,6 +127,7 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 		BaseGeneration:           readback.ActiveGeneration,
 		TargetGeneration:         doc.GenerationID,
 		TargetDocumentDigest:     overlayProjection(doc),
+		TargetFingerprint:        fingerprint,
 		ExpectedCoreRevision:     readback.CoreRevision,
 	}
 	if err := d.journal.Begin(entry); err != nil {
@@ -130,6 +147,14 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 		return zero, fmt.Errorf("overlay: stage %s: %w", doc.GenerationID, err)
 	}
 	if err := d.journal.Advance(overlayPhasePrepared, ""); err != nil {
+		// Same wedge the stage-failure path above documents, and the same cure.
+		// Begin refuses while an entry is unfinished, so returning here left every
+		// later apply failing with "is still at PREPARED" for the rest of the
+		// process lifetime -- from nothing worse than a journal write failing
+		// once, a full partition being the realistic trigger. Nothing was
+		// committed, so the entry describes no capability and the staged
+		// generation can simply be dropped.
+		d.abandonStagedGeneration(ctx, doc.GenerationID)
 		return zero, err
 	}
 
@@ -149,6 +174,10 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 	// recoverable: after this point the coordinator knows a commit may have
 	// landed and must read back rather than assume.
 	if err := d.journal.Advance(overlayPhaseCommitIntent, ""); err != nil {
+		// Commit has not run, so this is still the pre-commit world: nothing was
+		// committed, the staged generation carries no capability, and leaving the
+		// entry in flight would wedge every later apply at Begin.
+		d.abandonStagedGeneration(ctx, doc.GenerationID)
 		return zero, err
 	}
 
@@ -169,6 +198,23 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 	_ = d.journal.Advance(overlayPhaseDNSApplied, "")
 	_ = d.journal.Finish()
 	return result, nil
+}
+
+// abandonStagedGeneration drops a generation that was staged but never
+// committed, and clears the journal entry describing it.
+//
+// Both are best effort and both are safe: a staged generation confers no
+// capability, and Finish only removes a record of something that did not happen.
+// What is not safe is skipping either — an un-aborted generation leaks in the
+// core's staging area, and an unfinished entry makes Begin refuse every
+// subsequent transaction until the daemon restarts.
+func (d *OverlayDriver) abandonStagedGeneration(ctx context.Context, generation string) {
+	if err := d.client.Abort(ctx, generation); err != nil {
+		log.Printf("overlay: abort %s after a journal write failed: %v", generation, err)
+	}
+	if err := d.journal.Finish(); err != nil {
+		log.Printf("overlay: clear the journal entry for %s: %v", generation, err)
+	}
 }
 
 // recoverAfterCommit resolves an ambiguous commit.
@@ -276,6 +322,11 @@ func (d *OverlayDriver) Recover(ctx context.Context) error {
 		// next publish supersedes it.
 		log.Printf("overlay: interrupted operation did not take effect; active generation is %q", readback.ActiveGeneration)
 		return d.journal.Finish()
+
+	case overlayRecoveryUnknown:
+		// The entry stays. It is the only record that a commit may have landed,
+		// and the conflict case below can only ever be detected while it exists.
+		return fmt.Errorf("overlay: the live generation could not be read back, so the interrupted operation remains in flight: %w", err)
 
 	case overlayRecoveryConflict:
 		// Deliberately not resolved automatically. Something outside this

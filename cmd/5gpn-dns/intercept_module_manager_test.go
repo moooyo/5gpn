@@ -117,6 +117,69 @@ func testModuleSnapshot() interceptModuleSnapshot {
 	}
 }
 
+// With the master off the table is built but inert, and inert is not empty.
+// PrepareRuntime and ReconcileMihomoText published nil, which discards the
+// [Host] mappings -- ungated by design, because a mapping says where a name
+// lives whether or not anything is intercepting it -- and the attribution the
+// resolve test needs to report "this extension declared the name, and it is
+// inert because the master is off". The apply path publishes the document
+// unconditionally, so the same document produced two different overlays
+// depending on which path last published it: right after the toggle, silently
+// empty after the next daemon start or mihomo config PUT.
+func TestInterceptMasterOffPublishesTheDeclaredTableRatherThanNothing(t *testing.T) {
+	t.Parallel()
+	module := testModuleSnapshot()
+	module.Enabled = true
+	module.HostMappings = []interceptHostMapping{{Pattern: "api.example.com", Target: "origin.example.net"}}
+	manager, _, handler, interceptPath, mihomoPath := newInterceptManagerFixture(t, module)
+
+	document, _ := testInterceptDocument(t, module)
+	document.MITM.Enabled = false
+	body, err := marshalInterceptDocument(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(interceptPath, body, 0o660); err != nil {
+		t.Fatal(err)
+	}
+
+	mihomoText, err := os.ReadFile(mihomoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, publish := range map[string]func() error{
+		"PrepareRuntime":      manager.PrepareRuntime,
+		"ReconcileMihomoText": func() error { return manager.ReconcileMihomoText(string(mihomoText)) },
+	} {
+		name, publish := name, publish
+		t.Run(name, func(t *testing.T) {
+			if err := publish(); err != nil {
+				t.Fatal(err)
+			}
+			snapshot := handler.interceptHosts.Load()
+			if snapshot == nil {
+				t.Fatal("no snapshot was published at all")
+			}
+			if snapshot.moduleCount != 1 {
+				t.Fatalf("enabled extensions in the table = %d, want 1: the extensions page still shows it enabled", snapshot.moduleCount)
+			}
+			binding, ok := snapshot.lookup("api.example.com")
+			if !ok || binding.moduleID != module.ID {
+				t.Fatalf("attribution lost: lookup = %+v ok=%t", binding, ok)
+			}
+			mapping, ok := snapshot.HostMapping("api.example.com")
+			if !ok || mapping.target != "origin.example.net" {
+				t.Fatalf("[Host] mapping lost: %+v ok=%t", mapping, ok)
+			}
+			// The gate still holds: capture must stay fail-closed, because the
+			// sidecar cannot terminate TLS with the master off.
+			if _, _, matched := snapshot.CaptureDNS("api.example.com"); matched {
+				t.Fatal("capture matched while the master is off; that would black-hole the name")
+			}
+		})
+	}
+}
+
 func newInterceptManagerFixture(t *testing.T, modules ...interceptModuleSnapshot) (*InterceptModuleManager, *fakeMihomoController, *Handler, string, string) {
 	t.Helper()
 	dir := t.TempDir()

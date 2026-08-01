@@ -339,7 +339,7 @@ func (bt *Bot) previewBotExtensionToggle(
 	if next && module.Network {
 		prompt += "\n\n" + botExtensionNetworkRiskHTML(module.Network)
 	}
-	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
+	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt, "modules")
 }
 
 func (bt *Bot) previewBotExtensionDelete(
@@ -366,7 +366,7 @@ func (bt *Bot) previewBotExtensionDelete(
 	}
 	prompt := "⚠️ <b>确认卸载插件？</b>\n" + botExtensionModuleDetailHTML(module) +
 		"\n\n这会删除本地不可变快照、参数和出口绑定。插件当前已关闭；不会删除市场来源。脚本的 bounded persistent storage 独立保留，不会被卸载动作隐式擦除。"
-	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
+	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt, "modules")
 }
 
 func (bt *Bot) previewBotExtensionReorder(
@@ -411,7 +411,7 @@ func (bt *Bot) previewBotExtensionReorder(
 		"</code>\n完整旧顺序：" + botExtensionExecutionOrderHTML(view, view.ExecutionOrder) +
 		"\n完整新顺序：" + botExtensionExecutionOrderHTML(view, order) +
 		"\n\n执行顺序同时决定 action composition、capture host 重叠时第一个生效的出口绑定、重叠 capture host 的第一个 enabled mihomo origin re-resolution DNS 绑定赢家，以及重叠全局 REJECT/DIRECT 规则的 first-match 优先级。China 绑定使用运行时实时 China group 与当前 ECS 配置。"
-	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
+	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt, "modules")
 }
 
 func botExtensionExecutionOrderHTML(view interceptModulesView, order []string) string {
@@ -497,7 +497,7 @@ func (bt *Bot) previewBotExtensionUpdate(
 		"\n\n<b>候选快照</b>\n" + botExtensionCandidateReviewHTML(candidate) +
 		"\n\n" + botExtensionChangedSettingsHTML(module.Settings, candidate.Settings) +
 		"\n\n确认时会重新获取并要求候选快照摘要完全一致。更新应用后插件保持关闭。"
-	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
+	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt, "modules")
 }
 
 func botExtensionChangedSettingsHTML(current, candidate []interceptModuleSetting) string {
@@ -869,7 +869,7 @@ func (bt *Bot) issueBotExtensionSettingConfirmation(
 	}
 	prompt := botExtensionSettingReviewHTML(module, setting, value) +
 		"\n\n提交内容包含该插件的完整 settings map；其他参数保持当前值。"
-	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
+	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt, "modules")
 }
 
 func botExtensionSettingReviewHTML(module interceptModuleView, setting interceptModuleSetting, value json.RawMessage) string {
@@ -1002,7 +1002,7 @@ func (bt *Bot) previewBotExtensionEgressSelection(
 	if module.Network {
 		prompt += "\n\n" + botExtensionNetworkRiskHTML(module.Network)
 	}
-	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
+	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt, "modules")
 }
 
 func (bt *Bot) handleBotExtensionCaptureDNSCallback(
@@ -1082,7 +1082,7 @@ func (bt *Bot) previewBotExtensionCaptureDNSSelection(
 		"Trust 使用运行时当前 Trust group；China 使用运行时实时 China group 与当前 ECS 配置。\n" +
 		"该选择只控制 active capture host 的 mihomo loopback origin re-resolution，不改变客户端 DNS policy、网关引流或 mihomo 应用出口。\n" +
 		"若多个 enabled 插件声明重叠 capture host，执行顺序中的第一个插件是 DNS 绑定赢家。"
-	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
+	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt, "modules")
 }
 
 func botExtensionMITMDigest(settings interceptSettingsView) string {
@@ -1176,7 +1176,7 @@ func (bt *Bot) handleBotExtensionMITMCallback(
 		SettingKey: field,
 		RawJSON:    raw,
 	}
-	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt)
+	bt.issueBotExtensionConfirmation(ctx, b, cq, uid, chatID, payload, prompt, "modules")
 }
 
 func (bt *Bot) botExtensionMITMReview(revision, field string, next interceptMITMSettings) (string, error) {

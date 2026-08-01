@@ -90,7 +90,7 @@ func NewInterceptModuleManager(
 	manager := &InterceptModuleManager{
 		store:      store,
 		handler:    handler,
-		parser:     interceptModuleParser{resolver: resolver},
+		parser:     newInterceptModuleParser(resolver),
 		mihomo:     mihomo,
 		infra:      infra,
 		tester:     tester,
@@ -122,6 +122,41 @@ func (m *InterceptModuleManager) SetSidecarClient(client *SidecarClient) {
 // manager lock is not held for long, long enough for the path unit to start a
 // process that takes about a second.
 const sidecarStartWait = 6 * time.Second
+
+// interceptRollbackTimeout bounds an undo. It is generous because the undo runs
+// detached from the caller's context on purpose, and stingy because the
+// transaction still holds three locks while it happens.
+const interceptRollbackTimeout = 20 * time.Second
+
+// rollbackSidecarDocument undoes publishSidecarDocument.
+//
+// Rewriting the file is not an undo once a bundle has been pushed. PublishBundle
+// stages *and* commits, and configStore.Current latches onto the bundle source
+// permanently the first time one goes live -- so the sidecar keeps serving the
+// candidate while the still-live generation names the old bundle. Readiness then
+// stops being asserted, the lease lapses, and every captured connection REJECTs.
+// The sidecar's pointer is durable across its own restart, so nothing repairs
+// that until an unrelated transaction succeeds or the core process restarts and
+// PrepareRuntime republishes. The error string said "sidecar rollback" for an
+// operation that never happened.
+//
+// Detached from the caller's context, because a cancelled request is one of the
+// ways the certificate wait ends, and an undo skipped for that reason leaves
+// exactly the state this exists to prevent.
+func (m *InterceptModuleManager) rollbackSidecarDocument(ctx context.Context, body []byte) error {
+	rollback, cancel := context.WithTimeout(context.WithoutCancel(ctx), interceptRollbackTimeout)
+	defer cancel()
+	client := m.sidecar
+	if client != nil && sidecarSocketPresent(client) {
+		if _, err := client.PublishBundle(rollback, interceptBundleID(body), body); err != nil {
+			// Surfaced rather than swallowed: the processor is now serving a
+			// bundle no generation names, which an operator has to know about.
+			documentErr := m.store.writeAtomicContext(rollback, body)
+			return fmt.Errorf("restore bundle: %w (document: %v)", err, documentErr)
+		}
+	}
+	return m.store.writeAtomicContext(rollback, body)
+}
 
 // publishSidecarDocument puts the candidate document into effect in the sidecar.
 //
@@ -282,7 +317,17 @@ func (m *InterceptModuleManager) PrepareRuntime() error {
 		return err
 	}
 	if !document.MITM.Enabled {
-		m.publishHosts(nil)
+		// The real document, not nil. "Inert" is not "empty": the snapshot records
+		// mitmEnabled and CaptureDNS refuses to match while it is false, so capture
+		// stays fail-closed either way -- but publishing nil also discards the
+		// [Host] mappings, which carry no MITM gate by design, and the attribution
+		// the resolve test needs to say "this extension declared the name, and it
+		// is inert because the master is off". The apply path publishes the
+		// document unconditionally, so nil here meant the same document produced
+		// two different overlays depending on which path last published it: correct
+		// right after the toggle, silently empty after the next daemon start or
+		// mihomo config PUT.
+		m.publishHosts(&document)
 		return nil
 	}
 	if m.mihomo == nil || m.controller == nil {
@@ -298,23 +343,12 @@ func (m *InterceptModuleManager) PrepareRuntime() error {
 	if err != nil {
 		return err
 	}
-	analysis := m.analyzeInterceptRouting(text)
-	if !analysis.Manageable || !interceptCredentialsMatch(text, document) {
+	gate := m.routingGateFor(document, text)
+	if !gate.ready {
 		m.publishHosts(nil)
-		return fmt.Errorf("interception routing is not ready: %s", firstNonEmpty(analysis.Reason, "credential-mismatch"))
+		return fmt.Errorf("interception routing is not ready: %s", gate.reason)
 	}
-	// The anchored analysis judges anchor positions, not bindings. An extension
-	// names its egress group by string and the groups are the operator's own, so
-	// a renamed or deleted group leaves the document authorising one that no
-	// longer resolves. Withdraw the hosts rather than steer traffic into it.
-	if err := validateInterceptEgressBindings(document, analysis.AvailableEgressGroups); err != nil {
-		m.publishHosts(nil)
-		return fmt.Errorf("interception routing is not ready: egress-group-missing: %w", err)
-	}
-	if len(activeInterceptHosts(document)) > 0 && !m.certificateReady(document) {
-		m.publishHosts(nil)
-		return errors.New("interception certificate state is not ready")
-	}
+	analysis := gate.analysis
 	// Republish the generation from the document, which is the authority.
 	//
 	// Startup used to trust whatever the core had recovered from its own store.
@@ -364,25 +398,14 @@ func (m *InterceptModuleManager) ReconcileMihomoText(text string) error {
 		return err
 	}
 	if !document.MITM.Enabled {
-		m.publishHosts(nil)
+		// See PrepareRuntime: inert is not empty, and the apply path publishes the
+		// document unconditionally. These three publications have to agree.
+		m.publishHosts(&document)
 		return nil
 	}
-	analysis := m.analyzeInterceptRouting(text)
-	if !analysis.Manageable || !interceptCredentialsMatch(text, document) {
+	if gate := m.routingGateFor(document, text); !gate.ready {
 		m.publishHosts(nil)
-		return fmt.Errorf("interception routing is not ready: %s", firstNonEmpty(analysis.Reason, "credential-mismatch"))
-	}
-	// The anchored analysis judges anchor positions, not bindings. An extension
-	// names its egress group by string and the groups are the operator's own, so
-	// a renamed or deleted group leaves the document authorising one that no
-	// longer resolves. Withdraw the hosts rather than steer traffic into it.
-	if err := validateInterceptEgressBindings(document, analysis.AvailableEgressGroups); err != nil {
-		m.publishHosts(nil)
-		return fmt.Errorf("interception routing is not ready: egress-group-missing: %w", err)
-	}
-	if len(activeInterceptHosts(document)) > 0 && !m.certificateReady(document) {
-		m.publishHosts(nil)
-		return errors.New("interception certificate state is not ready")
+		return fmt.Errorf("interception routing is not ready: %s", gate.reason)
 	}
 	m.publishHosts(&document)
 	return nil
@@ -479,43 +502,17 @@ func (m *InterceptModuleManager) viewLocked() (interceptModulesView, error) {
 		return interceptModulesView{}, err
 	}
 	ready, reason, availableGroups := m.routingReadyLocked(document)
-	view := interceptModulesView{
-		Revision:              interceptRevision(body),
-		CatalogURL:            nativeExtensionCatalogURL,
-		ExecutionOrder:        append([]string{}, document.ExecutionOrder...),
-		AvailableEgressGroups: append([]string(nil), availableGroups...),
-		Modules:               make([]interceptModuleView, 0, len(document.Modules)),
-		ActiveCaptureHosts:    []string{},
-	}
-	if ready {
-		view.ActiveCaptureHosts = append([]string{}, activeInterceptHosts(document)...)
-	}
-	orderByID := interceptExecutionOrderIndex(document.ExecutionOrder)
-	availableSet := make(map[string]struct{}, len(availableGroups))
-	for _, group := range availableGroups {
-		availableSet[group] = struct{}{}
-	}
-	for _, module := range orderedInterceptModules(document) {
-		settingsReady := interceptModuleSettingsReady(module.Settings)
-		moduleReady := ready && settingsReady
-		moduleReason := reason
-		if !settingsReady {
-			moduleReason = "settings-required"
-		}
-		if module.EgressGroupRequired && module.EgressGroup == "" {
-			moduleReady = false
-			moduleReason = "egress-group-required"
-		} else if module.EgressGroup != "" {
-			if _, exists := availableSet[module.EgressGroup]; !exists {
-				moduleReady = false
-				moduleReason = "egress-group-missing"
-			}
-		}
-		moduleView := interceptModuleViewFromSnapshot(module, moduleReady, moduleReason)
-		moduleView.ExecutionOrder = orderByID[module.ID]
-		view.Modules = append(view.Modules, moduleView)
-	}
-	return view, nil
+	// modulesViewFromDocument is the same assembly, and it used to be written out
+	// here a second time -- including the egress-group-required /
+	// egress-group-missing precedence and the settings-required override. Two
+	// copies of a per-module verdict means a change to that precedence lands in
+	// the list endpoint and not in the response returned straight from a
+	// mutation, so the console shows one answer on refresh and another right
+	// after a toggle, with no test comparing them.
+	//
+	// The one difference was modulesViewFromDocument's !MITM.Enabled guard, which
+	// routingReadyLocked already produces as (false, "mitm-disabled", groups).
+	return modulesViewFromDocument(document, body, ready, reason, availableGroups), nil
 }
 
 func moduleRuntimeReason(ready bool, reason string) string {
@@ -523,6 +520,62 @@ func moduleRuntimeReason(ready bool, reason string) string {
 		return reason
 	}
 	return ""
+}
+
+// interceptRoutingGate is the one answer to "can routing be published for this
+// document against this mihomo config, and if not, why".
+//
+// It exists because that question was answered in three places with two
+// different orderings, and they had already drifted: routingReadyLocked checked
+// the egress bindings before the credentials, while PrepareRuntime and
+// ReconcileMihomoText folded credentials into the manageability branch ahead of
+// them. A document with both a renamed egress group and mismatched credentials
+// therefore reported "egress-group-missing" to the console and
+// "credential-mismatch" to the log, for the same state. The console's ordering
+// wins: a missing group is the more actionable of the two.
+type interceptRoutingGate struct {
+	ready    bool
+	reason   string
+	groups   []string
+	analysis interceptRoutingAnalysis
+}
+
+func (m *InterceptModuleManager) routingGateFor(document interceptConfigDocument, text string) interceptRoutingGate {
+	gate := interceptRoutingGate{}
+	availableGroups, groupErr := interceptAvailableEgressGroups(text)
+	if groupErr != nil {
+		gate.reason = "proxy-groups-structure-conflict"
+		return gate
+	}
+	gate.groups = availableGroups
+	if !document.MITM.Enabled {
+		gate.reason = "mitm-disabled"
+		return gate
+	}
+	gate.analysis = m.analyzeInterceptRouting(text)
+	if !gate.analysis.Manageable {
+		gate.reason = gate.analysis.Reason
+		return gate
+	}
+	// The anchored analysis judges positions, not bindings: the egress groups
+	// live in the operator's own proxy-groups and an extension names one by
+	// string. An operator who renamed or deleted a bound group leaves a
+	// generation authorising a group that no longer exists, so this has to fail
+	// closed here rather than wait for the next publication to notice.
+	if err := validateInterceptEgressBindings(document, gate.analysis.AvailableEgressGroups); err != nil {
+		gate.reason = "egress-group-missing"
+		return gate
+	}
+	if !interceptCredentialsMatch(text, document) {
+		gate.reason = "credential-mismatch"
+		return gate
+	}
+	if len(activeInterceptHosts(document)) > 0 && !m.certificateReady(document) {
+		gate.reason = "certificate-not-ready"
+		return gate
+	}
+	gate.ready = true
+	return gate
 }
 
 func (m *InterceptModuleManager) routingReadyLocked(document interceptConfigDocument) (bool, string, []string) {
@@ -535,32 +588,8 @@ func (m *InterceptModuleManager) routingReadyLocked(document interceptConfigDocu
 	if err != nil {
 		return false, "mihomo-config-unreadable", nil
 	}
-	availableGroups, groupErr := interceptAvailableEgressGroups(text)
-	if groupErr != nil {
-		return false, "proxy-groups-structure-conflict", nil
-	}
-	if !document.MITM.Enabled {
-		return false, "mitm-disabled", availableGroups
-	}
-	analysis := m.analyzeInterceptRouting(text)
-	if !analysis.Manageable {
-		return false, analysis.Reason, availableGroups
-	}
-	// The anchored analysis judges positions, not bindings: the egress groups
-	// live in the operator's own proxy-groups and an extension names one by
-	// string. An operator who renamed or deleted a bound group leaves a
-	// generation authorising a group that no longer exists, so this has to fail
-	// closed here rather than wait for the next publication to notice.
-	if err := validateInterceptEgressBindings(document, analysis.AvailableEgressGroups); err != nil {
-		return false, "egress-group-missing", availableGroups
-	}
-	if !interceptCredentialsMatch(text, document) {
-		return false, "credential-mismatch", availableGroups
-	}
-	if len(activeInterceptHosts(document)) > 0 && !m.certificateReady(document) {
-		return false, "certificate-not-ready", availableGroups
-	}
-	return true, "", availableGroups
+	gate := m.routingGateFor(document, text)
+	return gate.ready, gate.reason, gate.groups
 }
 
 func interceptExecutionOrderIndex(order []string) map[string]int {
@@ -786,6 +815,15 @@ func (m *InterceptModuleManager) CheckUpdate(ctx context.Context, id, revision s
 	if candidate.ID != current.ID {
 		return interceptModuleUpdateCheckView{}, errors.New("updated manifest changed metadata.id")
 	}
+	// Digest both snapshots before taking the lock. interceptModuleSnapshotDigest
+	// panics by design on a value encoding/json cannot represent, and this
+	// function releases m.store.mu by hand on every branch rather than with a
+	// defer -- so a panic under it stranded the mutex and left every later View,
+	// enable, import and delete blocked until the daemon restarted. The candidate
+	// is bytes a publisher controls, refetched from their own URL, which is
+	// exactly the input that should not be digested inside a critical section.
+	candidateDigest := interceptModuleSnapshotDigest(candidate)
+	currentDigest := interceptModuleSnapshotDigest(current)
 
 	m.store.mu.Lock()
 	latest, latestBody, err := m.store.Read()
@@ -797,7 +835,7 @@ func (m *InterceptModuleManager) CheckUpdate(ctx context.Context, id, revision s
 		m.store.mu.Unlock()
 		return interceptModuleUpdateCheckView{}, errInterceptRevisionConflict
 	}
-	if interceptModuleSnapshotDigest(candidate) == interceptModuleSnapshotDigest(current) {
+	if candidateDigest == currentDigest {
 		m.store.mu.Unlock()
 		return interceptModuleUpdateCheckView{Revision: revision, State: "unchanged"}, nil
 	}
@@ -1228,7 +1266,7 @@ func (m *InterceptModuleManager) mutate(
 	certificateHostsChanged := !stringSlicesEqual(oldCertificateHosts, nextCertificateHosts)
 	if len(nextCertificateHosts) > 0 && (certificateHostsChanged || (firstActivation && !m.certificateReady(nextDocument))) {
 		if err := m.waitForCertificate(ctx, interceptCertificateDigest(nextCertificateHosts), newBody); err != nil {
-			rollbackErr := m.store.writeAtomic(oldBody)
+			rollbackErr := m.rollbackSidecarDocument(ctx, oldBody)
 			return interceptModulesView{}, fmt.Errorf("%w: certificate publication: %v; sidecar rollback: %v", errInterceptApplyFailed, err, rollbackErr)
 		}
 	}
@@ -1238,7 +1276,7 @@ func (m *InterceptModuleManager) mutate(
 	if err := m.publishOverlayGeneration(ctx, nextDocument, analysis.MatchTarget,
 		interceptRevision(newBody), interceptCertificateDigest(nextCertificateHosts),
 		interceptBundleID(newBody)); err != nil {
-		rollbackErr := m.store.writeAtomic(oldBody)
+		rollbackErr := m.rollbackSidecarDocument(ctx, oldBody)
 		return interceptModulesView{}, fmt.Errorf("%w: %v; sidecar rollback: %v", errInterceptApplyFailed, err, rollbackErr)
 	}
 	m.publishHosts(&nextDocument)

@@ -536,7 +536,12 @@ func TestInterceptHealthExpectedProbesBoundedInternalEndpoint(t *testing.T) {
 	}
 }
 
-func TestInterceptHealthRejectsStaleOrNonRunningSidecarSnapshot(t *testing.T) {
+// A stale or non-running snapshot must never read as healthy. It is reported as
+// expected-but-not-running with the counts attached, rather than as a 503:
+// the console compares running against expected, so a 503 made that comparison
+// unfalsifiable and dropped the numbers the operator needs to see beside it.
+// 503 is reserved for "this control plane cannot tell you".
+func TestInterceptHealthReportsAStaleOrNonRunningSidecarAsNotRunning(t *testing.T) {
 	module := testModuleSnapshot()
 	module.Enabled = true
 	for _, body := range []string{
@@ -557,10 +562,34 @@ func TestInterceptHealthRejectsStaleOrNonRunningSidecarSnapshot(t *testing.T) {
 			}
 			recorder := httptest.NewRecorder()
 			server.handleInterceptHealth(recorder, httptest.NewRequest(http.MethodGet, "/api/intercept/health", nil))
-			if recorder.Code != http.StatusServiceUnavailable {
+			if recorder.Code != http.StatusOK {
 				t.Fatalf("stale health status=%d body=%s", recorder.Code, recorder.Body.String())
 			}
+			var view interceptHealthView
+			if err := json.Unmarshal(recorder.Body.Bytes(), &view); err != nil {
+				t.Fatal(err)
+			}
+			if view.Running {
+				t.Fatalf("a stale snapshot was reported as running: %+v", view)
+			}
+			if !view.Expected {
+				t.Fatalf("an enabled extension must make the runtime expected: %+v", view)
+			}
+			if view.InstalledPlugins != 1 || view.ActivePlugins != 1 {
+				t.Fatalf("counts were dropped, so the operator sees a failure with no numbers: %+v", view)
+			}
 		})
+	}
+}
+
+// A control plane that cannot answer is a different thing from an engine that is
+// down, and only the first is a 503.
+func TestInterceptHealthReportsAnUnreadableProjectionAsUnknown(t *testing.T) {
+	server := &ControlServer{interceptStore: NewInterceptConfigStore(filepath.Join(t.TempDir(), "absent.json"))}
+	recorder := httptest.NewRecorder()
+	server.handleInterceptHealth(recorder, httptest.NewRequest(http.MethodGet, "/api/intercept/health", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unreadable projection status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -592,7 +621,10 @@ func TestProbeInterceptLogHealthBoundsBodyAndHonorsContext(t *testing.T) {
 	})
 }
 
-func TestInterceptHealthExpectedMissingSocketIsUnavailable(t *testing.T) {
+// An absent socket is the definitive signal that an expected runtime is not
+// there. That is "down", not "cannot tell", so it reports expected-but-not-
+// running with the counts rather than a 503 that discards them.
+func TestInterceptHealthExpectedMissingSocketReportsNotRunning(t *testing.T) {
 	module := testModuleSnapshot()
 	module.Enabled = true
 	server := &ControlServer{
@@ -601,8 +633,15 @@ func TestInterceptHealthExpectedMissingSocketIsUnavailable(t *testing.T) {
 	}
 	recorder := httptest.NewRecorder()
 	server.handleInterceptHealth(recorder, httptest.NewRequest(http.MethodGet, "/api/intercept/health", nil))
-	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "plugin engine unavailable") {
+	if recorder.Code != http.StatusOK {
 		t.Fatalf("missing socket health status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var view interceptHealthView
+	if err := json.Unmarshal(recorder.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.Running || !view.Expected || view.ActivePlugins != 1 {
+		t.Fatalf("missing socket health = %+v", view)
 	}
 }
 

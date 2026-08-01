@@ -56,9 +56,10 @@ plans, design handoffs, and git history are context only.
   to rendering: the installer refuses it in preflight and `mihomo-reset` refuses
   when the `runtime-overlay:` block is unreadable. The anchors and that block are
   published together or not at all, since an anchor without it is a config mihomo
-  cannot parse. Anchor placement is a security property: the egress anchor sits
-  immediately above the fail-closed terminator, the client anchor above the
-  terminal `MATCH`.
+  cannot parse. Anchor placement is a security property, and all three
+  constraints are checked: the egress anchor sits immediately above the
+  fail-closed terminator, the client anchor sits below that terminator, and the
+  client anchor sits above the terminal `MATCH`.
 - The installer does not roll back. A failure before publication leaves the host
   untouched; a failure during publication leaves it partially installed and says
   so. Do not reintroduce snapshot/restore/quarantine machinery — its failure
@@ -76,10 +77,11 @@ plans, design handoffs, and git history are context only.
   allowlisted pass-through.
 - There is no Python in the repository. The `5gpn-dns` Go module has exactly three direct dependencies:
   `github.com/miekg/dns`, `github.com/go-telegram/bot`, and `gopkg.in/yaml.v3`.
-  The separate `5gpn-intercept` module has exactly six direct dependencies:
+  The separate `5gpn-intercept` module has exactly seven direct dependencies:
   `github.com/quic-go/quic-go`, `github.com/dop251/goja`,
   `github.com/dlclark/regexp2/v2` (imported only to bound goja's backtracking
-  fallback), `github.com/andybalholm/brotli` for bounded Brotli decoding, and
+  fallback), `github.com/andybalholm/brotli` for bounded Brotli decoding,
+  `github.com/itchyny/gojq` for declarative jq actions, and
   `golang.org/x/net` plus `github.com/andybalholm/cascadia` for the bounded
   document model published proxy-compat bundles need. The last two were an
   explicit design decision: a webpage bundle parses a response into a document,
@@ -202,12 +204,14 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   sliding indicator.
 - Theme controls live in the top bar profile menu and Settings appearance only.
 - Plugin modules live on the dedicated `/extensions` route. Keep immutable
-  digests, typed settings, origin-scoped network permissions, operator egress
+  digests, typed settings, the network grant, operator egress
   bindings, explicit execution order, capture-host allowlists, exact typed
   routing rules, and the snapshot/trust/traffic transaction visible. Enabling
   an extension uses one confirmation that includes every declared routing rule
-  and, when network origins exist, names every origin and states that all data
-  visible to the script can be sent there. It must also state that a reviewed
+  and, when the network grant is present, states that all data visible to the
+  script can be sent to any host it can reach. The grant is a single boolean
+  that names no destinations, so a review must not present it as a reviewed
+  origin list. It must also state that a
   cross-origin URL rewrite forwards the complete request method, decoded body,
   and end-to-end headers, potentially including `Cookie` or `Authorization`.
   Reordering also requires review

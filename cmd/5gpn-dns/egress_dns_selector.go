@@ -28,9 +28,14 @@ func (s *egressDNSSelector) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg,
 	// at which a mapping takes effect for every captured origin: mihomo resolves
 	// each sniffed hostname here, so substituting the answer here substitutes
 	// the address mihomo dials, without the sidecar or mihomo knowing a mapping
-	// exists. A mapping the handler cannot serve falls through to the groups
-	// rather than failing the query — an unresolvable override must not be
-	// worse than no override.
+	// exists.
+	//
+	// A mapping that exists but could not be served FAILS the query rather than
+	// falling through to the groups. That is deliberate and test-pinned: a
+	// resolver-form mapping names the nameserver the operator chose for that
+	// name, and quietly resolving through the trust group instead would answer
+	// with an address the mapping exists to override. The comment here used to
+	// claim the opposite; the code was right and the comment was not.
 	if reply, ok, err := s.handler.answerHostMapping(ctx, q); ok {
 		return reply, err
 	}
