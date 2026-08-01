@@ -188,4 +188,47 @@ else
     fail "installer bundle omits a README language or linked operator runbook"
 fi
 
+# --- pinned third-party artifacts -------------------------------------------
+#
+# Each pin is a version and the digest of the asset that version publishes.
+# Whether the digest is the RIGHT one needs the network and lives in
+# tests/verify-artifact-pins.sh; what can be checked offline is that every pin
+# is complete, well-formed, and actually verified before the artifact is used.
+CHECKS="$ROOT/.github/workflows/checks.yml"
+for pin in SIDECAR MIHOMO ZASH; do
+    version="${pin}_VERSION"
+    digest="${pin}_SHA256"
+    if [[ -z "${!version-}" || -z "${!digest-}" ]]; then
+        fail "$pin is missing a version or a digest"
+        continue
+    fi
+    if [[ ! "${!digest}" =~ ^[0-9a-f]{64}$ ]]; then
+        fail "$digest is not a lowercase 64-character SHA-256"
+        continue
+    fi
+    if grep -Fq "verify_sha256 \"\$ARTIFACT_STAGE/" "$INSTALL" && grep -Fq "\$$digest" "$INSTALL"; then
+        pass "$pin is pinned as a complete version/digest pair and verified before use"
+    else
+        fail "$digest is declared but never passed to verify_sha256"
+    fi
+done
+
+# The mihomo-config job restates the mihomo pin in its own env block, so it is a
+# third copy that can drift from install.sh. The network check reads install.sh;
+# this keeps the workflow's copy honest.
+if grep -Fq "MIHOMO_VERSION: ${MIHOMO_VERSION}" "$CHECKS" \
+   && grep -Fq "MIHOMO_SHA256: ${MIHOMO_SHA256}" "$CHECKS"; then
+    pass "checks.yml validates the mihomo build install.sh actually ships"
+else
+    fail "checks.yml pins a different mihomo version or digest than install.sh"
+fi
+
+# The network check is a CI job of its own. It must not be quietly dropped: an
+# unverified pin is how 0.0.57 shipped an installer that could not install.
+if grep -Fq 'bash tests/verify-artifact-pins.sh' "$CHECKS"; then
+    pass "CI verifies every pinned artifact against its published release"
+else
+    fail "checks.yml no longer runs tests/verify-artifact-pins.sh"
+fi
+
 exit "$FAIL"

@@ -85,6 +85,24 @@ jobs:
   # Validate the committed seed and the optional ingress-module candidate with
   # the exact pinned data-plane binary. The digest prevents a mutable upstream
   # artifact from changing this gate.
+  artifact-pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      # install.sh pins each third-party artifact as a PAIR: a version and the
+      # SHA-256 of the asset that version publishes. Nothing bound the two
+      # together, so a version bump that left its digest behind shipped an
+      # installer that downloaded the right artifact, hashed it correctly, and
+      # refused it -- discovered only by installing 0.0.57 on a gateway, because
+      # that is the only place the digest was ever checked.
+      #
+      # This is a separate job rather than a step in `shell`, because the local
+      # suite is deliberately offline and deterministic. It reads the pins out of
+      # install.sh instead of restating them, and it fails rather than skips when
+      # an artifact cannot be fetched.
+      - name: Verify pinned artifacts against their published releases
+        run: bash tests/verify-artifact-pins.sh
+
   mihomo-config:
     runs-on: ubuntu-latest
     env:
