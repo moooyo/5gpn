@@ -90,7 +90,7 @@ func NewInterceptModuleManager(
 	manager := &InterceptModuleManager{
 		store:      store,
 		handler:    handler,
-		parser:     interceptModuleParser{resolver: resolver},
+		parser:     newInterceptModuleParser(resolver),
 		mihomo:     mihomo,
 		infra:      infra,
 		tester:     tester,
@@ -122,6 +122,41 @@ func (m *InterceptModuleManager) SetSidecarClient(client *SidecarClient) {
 // manager lock is not held for long, long enough for the path unit to start a
 // process that takes about a second.
 const sidecarStartWait = 6 * time.Second
+
+// interceptRollbackTimeout bounds an undo. It is generous because the undo runs
+// detached from the caller's context on purpose, and stingy because the
+// transaction still holds three locks while it happens.
+const interceptRollbackTimeout = 20 * time.Second
+
+// rollbackSidecarDocument undoes publishSidecarDocument.
+//
+// Rewriting the file is not an undo once a bundle has been pushed. PublishBundle
+// stages *and* commits, and configStore.Current latches onto the bundle source
+// permanently the first time one goes live -- so the sidecar keeps serving the
+// candidate while the still-live generation names the old bundle. Readiness then
+// stops being asserted, the lease lapses, and every captured connection REJECTs.
+// The sidecar's pointer is durable across its own restart, so nothing repairs
+// that until an unrelated transaction succeeds or the core process restarts and
+// PrepareRuntime republishes. The error string said "sidecar rollback" for an
+// operation that never happened.
+//
+// Detached from the caller's context, because a cancelled request is one of the
+// ways the certificate wait ends, and an undo skipped for that reason leaves
+// exactly the state this exists to prevent.
+func (m *InterceptModuleManager) rollbackSidecarDocument(ctx context.Context, body []byte) error {
+	rollback, cancel := context.WithTimeout(context.WithoutCancel(ctx), interceptRollbackTimeout)
+	defer cancel()
+	client := m.sidecar
+	if client != nil && sidecarSocketPresent(client) {
+		if _, err := client.PublishBundle(rollback, interceptBundleID(body), body); err != nil {
+			// Surfaced rather than swallowed: the processor is now serving a
+			// bundle no generation names, which an operator has to know about.
+			documentErr := m.store.writeAtomicContext(rollback, body)
+			return fmt.Errorf("restore bundle: %w (document: %v)", err, documentErr)
+		}
+	}
+	return m.store.writeAtomicContext(rollback, body)
+}
 
 // publishSidecarDocument puts the candidate document into effect in the sidecar.
 //
@@ -282,7 +317,17 @@ func (m *InterceptModuleManager) PrepareRuntime() error {
 		return err
 	}
 	if !document.MITM.Enabled {
-		m.publishHosts(nil)
+		// The real document, not nil. "Inert" is not "empty": the snapshot records
+		// mitmEnabled and CaptureDNS refuses to match while it is false, so capture
+		// stays fail-closed either way -- but publishing nil also discards the
+		// [Host] mappings, which carry no MITM gate by design, and the attribution
+		// the resolve test needs to say "this extension declared the name, and it
+		// is inert because the master is off". The apply path publishes the
+		// document unconditionally, so nil here meant the same document produced
+		// two different overlays depending on which path last published it: correct
+		// right after the toggle, silently empty after the next daemon start or
+		// mihomo config PUT.
+		m.publishHosts(&document)
 		return nil
 	}
 	if m.mihomo == nil || m.controller == nil {
@@ -364,7 +409,9 @@ func (m *InterceptModuleManager) ReconcileMihomoText(text string) error {
 		return err
 	}
 	if !document.MITM.Enabled {
-		m.publishHosts(nil)
+		// See PrepareRuntime: inert is not empty, and the apply path publishes the
+		// document unconditionally. These three publications have to agree.
+		m.publishHosts(&document)
 		return nil
 	}
 	analysis := m.analyzeInterceptRouting(text)
@@ -786,6 +833,15 @@ func (m *InterceptModuleManager) CheckUpdate(ctx context.Context, id, revision s
 	if candidate.ID != current.ID {
 		return interceptModuleUpdateCheckView{}, errors.New("updated manifest changed metadata.id")
 	}
+	// Digest both snapshots before taking the lock. interceptModuleSnapshotDigest
+	// panics by design on a value encoding/json cannot represent, and this
+	// function releases m.store.mu by hand on every branch rather than with a
+	// defer -- so a panic under it stranded the mutex and left every later View,
+	// enable, import and delete blocked until the daemon restarted. The candidate
+	// is bytes a publisher controls, refetched from their own URL, which is
+	// exactly the input that should not be digested inside a critical section.
+	candidateDigest := interceptModuleSnapshotDigest(candidate)
+	currentDigest := interceptModuleSnapshotDigest(current)
 
 	m.store.mu.Lock()
 	latest, latestBody, err := m.store.Read()
@@ -797,7 +853,7 @@ func (m *InterceptModuleManager) CheckUpdate(ctx context.Context, id, revision s
 		m.store.mu.Unlock()
 		return interceptModuleUpdateCheckView{}, errInterceptRevisionConflict
 	}
-	if interceptModuleSnapshotDigest(candidate) == interceptModuleSnapshotDigest(current) {
+	if candidateDigest == currentDigest {
 		m.store.mu.Unlock()
 		return interceptModuleUpdateCheckView{Revision: revision, State: "unchanged"}, nil
 	}
@@ -1228,7 +1284,7 @@ func (m *InterceptModuleManager) mutate(
 	certificateHostsChanged := !stringSlicesEqual(oldCertificateHosts, nextCertificateHosts)
 	if len(nextCertificateHosts) > 0 && (certificateHostsChanged || (firstActivation && !m.certificateReady(nextDocument))) {
 		if err := m.waitForCertificate(ctx, interceptCertificateDigest(nextCertificateHosts), newBody); err != nil {
-			rollbackErr := m.store.writeAtomic(oldBody)
+			rollbackErr := m.rollbackSidecarDocument(ctx, oldBody)
 			return interceptModulesView{}, fmt.Errorf("%w: certificate publication: %v; sidecar rollback: %v", errInterceptApplyFailed, err, rollbackErr)
 		}
 	}
@@ -1238,7 +1294,7 @@ func (m *InterceptModuleManager) mutate(
 	if err := m.publishOverlayGeneration(ctx, nextDocument, analysis.MatchTarget,
 		interceptRevision(newBody), interceptCertificateDigest(nextCertificateHosts),
 		interceptBundleID(newBody)); err != nil {
-		rollbackErr := m.store.writeAtomic(oldBody)
+		rollbackErr := m.rollbackSidecarDocument(ctx, oldBody)
 		return interceptModulesView{}, fmt.Errorf("%w: %v; sidecar rollback: %v", errInterceptApplyFailed, err, rollbackErr)
 	}
 	m.publishHosts(&nextDocument)

@@ -232,7 +232,6 @@ type interceptRoutingRule struct {
 	DomainKeywords    []string `json:"domain_keywords,omitempty"`
 	AllDomainKeywords []string `json:"all_domain_keywords,omitempty"`
 	IPCIDR            string   `json:"ip_cidr,omitempty"`
-	IPASN             int      `json:"ip_asn,omitempty"`
 	Network           string   `json:"network,omitempty"`
 	DestinationPort   int      `json:"destination_port,omitempty"`
 }
@@ -258,7 +257,6 @@ type rawInterceptRoutingRule struct {
 	DomainKeywords    json.RawMessage `json:"domain_keywords"`
 	AllDomainKeywords json.RawMessage `json:"all_domain_keywords"`
 	IPCIDR            json.RawMessage `json:"ip_cidr"`
-	IPASN             json.RawMessage `json:"ip_asn"`
 	Network           json.RawMessage `json:"network"`
 	DestinationPort   json.RawMessage `json:"destination_port"`
 }
@@ -294,17 +292,6 @@ func (rule *interceptRoutingRule) UnmarshalJSON(body []byte) error {
 	}
 	if err := decodeStoredRoutingString(raw.Network, "network", &decoded.Network, false); err != nil {
 		return err
-	}
-	if len(raw.IPASN) > 0 {
-		if isJSONNull(raw.IPASN) {
-			return errors.New("ip_asn must not be null")
-		}
-		if err := json.Unmarshal(raw.IPASN, &decoded.IPASN); err != nil {
-			return fmt.Errorf("ip_asn must be an integer: %w", err)
-		}
-		if decoded.IPASN == 0 {
-			return errors.New("ip_asn must not be zero when declared")
-		}
 	}
 	if len(raw.DestinationPort) > 0 {
 		if isJSONNull(raw.DestinationPort) {
@@ -565,6 +552,32 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 				return fmt.Errorf("action %q URL is invalid: %w", rule.ID, err)
 			}
 		}
+		// Exactly one kind applies to an action. Carrying two would leave which one
+		// runs undefined.
+		//
+		// Counted before the per-kind branches below, which is the order the
+		// sidecar uses. Doing it after them let a reject action carrying a second
+		// kind pass here and be refused there, several layers later, by
+		// `5gpn-intercept --check-config` — an opaque cross-process failure that
+		// names no field, and one that gates every subsequent unrelated document
+		// mutation because validateSidecarCandidate runs on all of them.
+		kinds := 0
+		for _, declared := range []bool{
+			rule.JQProgram != "", rule.Reject, rule.Mock != nil, rule.Headers != nil,
+			rule.Rewrite != nil, rule.ReplaceBody != nil,
+			rule.ScriptBody != "" || rule.ScriptURL != "",
+		} {
+			if declared {
+				kinds++
+			}
+		}
+		if kinds > 1 {
+			return fmt.Errorf("action %q declares more than one action kind", rule.ID)
+		}
+		if rule.Entry != "" && (rule.JQProgram != "" || rule.Reject || rule.Mock != nil ||
+			rule.Headers != nil || rule.Rewrite != nil || rule.ReplaceBody != nil) {
+			return fmt.Errorf("action %q declares an entry without a script", rule.ID)
+		}
 		// A declarative action has no script snapshot, so the body and digest
 		// rules below do not apply to it.
 		if rule.Reject {
@@ -580,6 +593,17 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 				}
 			}
 			continue
+		}
+		// jq and script both run with a timeout and a body limit, and the sidecar
+		// bounds them for both. These sat below the jq branch, so a manifest
+		// declaring `timeoutMs: 20` on a jq action was accepted here and rejected
+		// there. Two components disagreeing about the same document is the whole
+		// failure; the bounds are the same numbers either way.
+		if rule.TimeoutMS < 50 || rule.TimeoutMS > 30000 {
+			return fmt.Errorf("action %q timeout_ms must be between 50 and 30000", rule.ID)
+		}
+		if rule.MaxBodyBytes < 1024 || rule.MaxBodyBytes > 64<<20 {
+			return fmt.Errorf("action %q max_body_bytes must be between 1024 and 67108864", rule.ID)
 		}
 		if rule.JQProgram != "" {
 			if len(rule.JQProgram) > maxInterceptJQProgram {
@@ -601,31 +625,6 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 		}
 		if rule.Entry != "" && rule.Entry != interceptScriptEntryProxyCompat {
 			return fmt.Errorf("action %q entry must be empty or %s", rule.ID, interceptScriptEntryProxyCompat)
-		}
-		// Exactly one kind applies to an action. Carrying two would leave which
-		// one runs undefined.
-		kinds := 0
-		for _, declared := range []bool{
-			rule.JQProgram != "", rule.Reject, rule.Mock != nil, rule.Headers != nil,
-			rule.Rewrite != nil, rule.ReplaceBody != nil,
-			rule.ScriptBody != "" || rule.ScriptURL != "",
-		} {
-			if declared {
-				kinds++
-			}
-		}
-		if kinds > 1 {
-			return fmt.Errorf("action %q declares more than one action kind", rule.ID)
-		}
-		if rule.Entry != "" && (rule.JQProgram != "" || rule.Reject || rule.Mock != nil ||
-			rule.Headers != nil || rule.Rewrite != nil || rule.ReplaceBody != nil) {
-			return fmt.Errorf("action %q declares an entry without a script", rule.ID)
-		}
-		if rule.TimeoutMS < 50 || rule.TimeoutMS > 30000 {
-			return fmt.Errorf("action %q timeout_ms must be between 50 and 30000", rule.ID)
-		}
-		if rule.MaxBodyBytes < 1024 || rule.MaxBodyBytes > 64<<20 {
-			return fmt.Errorf("action %q max_body_bytes must be between 1024 and 67108864", rule.ID)
 		}
 		totalScriptBytes += len(rule.ScriptBody)
 	}
@@ -681,18 +680,10 @@ func validateInterceptRoutingRule(rule interceptRoutingRule) error {
 			return errors.New("ip_cidr must be canonical")
 		}
 	}
-	if rule.IPASN != 0 {
-		primary++
-		// Zero is a reserved ASN and is also this field's unset value, so a
-		// declared zero cannot be distinguished from an omission.
-		if rule.IPASN < 0 || rule.IPASN > 4294967294 {
-			return errors.New("ip_asn must be a public autonomous system number")
-		}
-	}
 	if primary > 1 || (primary == 0 && len(rule.DomainKeywords) == 0 && len(rule.AllDomainKeywords) == 0) {
-		return errors.New("declare exactly one of domain, domain_suffix, ip_cidr, or ip_asn, or at least one domain keyword")
+		return errors.New("declare exactly one of domain, domain_suffix, or ip_cidr, or at least one domain keyword")
 	}
-	if (rule.IPCIDR != "" || rule.IPASN != 0) && (len(rule.DomainKeywords) > 0 || len(rule.AllDomainKeywords) > 0) {
+	if rule.IPCIDR != "" && (len(rule.DomainKeywords) > 0 || len(rule.AllDomainKeywords) > 0) {
 		return errors.New("an address selector cannot be combined with domain keywords")
 	}
 	if len(rule.DomainKeywords) > maxInterceptRouteKeywords || !sort.StringsAreSorted(rule.DomainKeywords) {
@@ -835,6 +826,23 @@ func validateInterceptSettingDefinition(setting interceptModuleSetting) error {
 	case "number":
 		if len(setting.Options) > 0 {
 			return errors.New("number settings cannot declare options")
+		}
+		// Finiteness before ordering, and each bound independently. yaml.v3
+		// decodes `.nan` and `.inf` straight into these *float64 fields, and the
+		// ordering check below catches neither: NaN > NaN is false, and so is
+		// 1 > +Inf. A non-finite bound then survives into the immutable snapshot,
+		// where interceptModuleSnapshotDigest marshals it with encoding/json --
+		// which cannot represent it and panics by design. That panic is reachable
+		// from CheckUpdate, which computes the digest of a candidate refetched
+		// from the publisher's own URL while holding the store mutex, so a
+		// manifest carrying `min: .nan` turned one "check for updates" click into
+		// a permanently held lock and an extensions subsystem that answers
+		// nothing until the daemon restarts.
+		if setting.Min != nil && (math.IsNaN(*setting.Min) || math.IsInf(*setting.Min, 0)) {
+			return errors.New("minimum must be a finite number")
+		}
+		if setting.Max != nil && (math.IsNaN(*setting.Max) || math.IsInf(*setting.Max, 0)) {
+			return errors.New("maximum must be a finite number")
 		}
 		if setting.Min != nil && setting.Max != nil && *setting.Min > *setting.Max {
 			return errors.New("minimum exceeds maximum")
@@ -1227,6 +1235,9 @@ func (m *interceptMockResponse) validate() error {
 			return fmt.Errorf("mock header %q value contains a newline", name)
 		}
 	}
+	if err := rejectCaseCollidingKeys(mapKeys(m.Headers), "mock header"); err != nil {
+		return err
+	}
 	if m.Base64Body != "" {
 		decoded, err := base64.StdEncoding.DecodeString(m.Base64Body)
 		if err != nil {
@@ -1268,6 +1279,53 @@ func (h *interceptHeaderEdits) validate() error {
 			return fmt.Errorf("header name %q is invalid", name)
 		}
 	}
+	if err := rejectCaseCollidingKeys(mapKeys(h.Set), "header"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// mapKeys is the key set of a string-keyed map, in no particular order.
+func mapKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+// rejectCaseCollidingKeys refuses a manifest-controlled key set whose members
+// differ only in case.
+//
+// These maps are the only places a publisher's own strings become JSON object
+// keys in the stored document, and rejectDuplicateJSONKeys — the strict decoder
+// every read of that document goes through — collapses case, which is right for
+// the daemon's struct-shaped documents because encoding/json matches fields
+// case-insensitively. YAML does not: `X-Trace` and `x-trace` are distinct keys,
+// every validator accepted both, and marshalInterceptDocument wrote them out.
+// The result was a document the write path produced and the read path refused,
+// which would have made /etc/5gpn/intercept/config.json permanently unreadable
+// with no in-band recovery. Today the sidecar's identical scan happens to reject
+// the candidate first, so the only visible symptom is an opaque
+// `--check-config` failure instead of a precise parser error — but that is a
+// coincidence of a separately versioned binary, not a guarantee.
+//
+// For header names it is independently correct: HTTP field names are
+// case-insensitive, so two spellings are genuinely ambiguous.
+func rejectCaseCollidingKeys(keys []string, what string) error {
+	if len(keys) < 2 {
+		return nil
+	}
+	seen := make(map[string]string, len(keys))
+	sorted := append([]string(nil), keys...)
+	sort.Strings(sorted)
+	for _, key := range sorted {
+		folded := strings.ToLower(key)
+		if previous, collides := seen[folded]; collides {
+			return fmt.Errorf("%s names %q and %q differ only in case", what, previous, key)
+		}
+		seen[folded] = key
+	}
 	return nil
 }
 
@@ -1299,6 +1357,17 @@ func (b *interceptBodyReplace) validate() error {
 	}
 	if _, err := regexp.Compile(b.Pattern); err != nil {
 		return fmt.Errorf("body replace pattern is invalid: %w", err)
+	}
+	// The outer keys name settings and the inner ones name that setting's values.
+	// Both are publisher-controlled and both become JSON object keys in the
+	// stored document.
+	if err := rejectCaseCollidingKeys(mapKeys(b.ValueMap), "body replace value_map setting"); err != nil {
+		return err
+	}
+	for setting, mapping := range b.ValueMap {
+		if err := rejectCaseCollidingKeys(mapKeys(mapping), fmt.Sprintf("body replace value_map %q value", setting)); err != nil {
+			return err
+		}
 	}
 	return nil
 }

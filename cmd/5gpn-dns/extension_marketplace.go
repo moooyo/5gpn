@@ -401,7 +401,7 @@ type ExtensionMarketplaceManager struct {
 
 func NewExtensionMarketplaceManager(store *ExtensionMarketplaceStore, resolver HostResolver, modules *InterceptModuleManager) *ExtensionMarketplaceManager {
 	return &ExtensionMarketplaceManager{
-		store: store, parser: interceptModuleParser{resolver: resolver}, modules: modules, now: time.Now,
+		store: store, parser: newInterceptModuleParser(resolver), modules: modules, now: time.Now,
 	}
 }
 
@@ -1258,6 +1258,19 @@ func validateNormalizedMarketplaceIndex(index marketplaceIndex) error {
 			capabilities.ActionCount+capabilities.UpstreamMappingCount > maxInterceptModuleRules {
 			return fmt.Errorf("entry %q has invalid capability counts", entry.ID)
 		}
+		// The policy projection is inside the strict envelope like everything
+		// else. An empty digest is the "published before the field existed" case;
+		// anything present has to be a SHA-256 and carry non-negative counts,
+		// because validateMarketplaceInstall compares against it.
+		if entry.Policy.Digest != "" && !validSHA256(entry.Policy.Digest) {
+			return fmt.Errorf("entry %q policy digest is not a SHA-256", entry.ID)
+		}
+		if entry.Policy.ClientRules < 0 || entry.Policy.PolicyRules < 0 || entry.Policy.CaptureRules < 0 ||
+			entry.Policy.ClientRules > maxInterceptRoutingRules+maxInterceptModuleHosts*2 ||
+			entry.Policy.PolicyRules > maxInterceptRoutingRules ||
+			entry.Policy.CaptureRules > maxInterceptModuleHosts*2 {
+			return fmt.Errorf("entry %q has invalid policy counts", entry.ID)
+		}
 	}
 	return nil
 }
@@ -1368,6 +1381,23 @@ func validateMarketplaceInstall(_ marketplaceSourceSnapshot, entry marketplaceEn
 		if expected[index] != actualResources[index] {
 			return fmt.Errorf("remote script resource mismatch for %q", expected[index].URL)
 		}
+	}
+	// The cross-implementation check the whole policy apparatus exists for.
+	//
+	// The publisher pays for a second compiler in JavaScript (typed-policy.mjs), a
+	// length-prefixed canonical encoding designed to be reproducible across
+	// languages, and a `policy` field threaded through schema.json and every
+	// index entry -- all so "the gateway compares what it is about to enforce
+	// against what was reviewed". verifyOverlayPublishedPolicy existed to do the
+	// comparing and had no production caller, so the two compilers could diverge
+	// with nothing reporting it. The counts above cannot substitute: a rule that
+	// parses is counted whether or not the generation can carry it.
+	//
+	// An entry published without a projection is reported as unverified rather
+	// than as a mismatch, so this cannot turn into an outage for extensions
+	// listed before the field existed.
+	if err := verifyOverlayPublishedPolicy(module, entry.Policy.Digest); err != nil {
+		return err
 	}
 	return nil
 }

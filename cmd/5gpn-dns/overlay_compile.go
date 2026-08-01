@@ -63,6 +63,37 @@ func overlayGenerationID(documentRevision string, doc overlayDocument) (string, 
 	return "g-" + hex.EncodeToString(sum[:12]), nil
 }
 
+// overlayDesiredFingerprint identifies a desired state independently of which
+// generation it supersedes.
+//
+// The generation id deliberately covers ParentGenerationID — two transactions
+// that reach the same routing state from different parents must be distinct
+// records, or the store refuses the second with "already exists with a different
+// document". That is exactly what made the id useless for answering "is this
+// already live": equality would have required a SHA-256 fixed point, so the
+// check never fired once, and every daemon start and every unrelated document
+// write committed a fresh generation with a revoke transition — hard-cutting
+// in-flight capture for a change that altered no routing, and walking the core's
+// generation quota.
+//
+// So zero the parent too and compare content. It hashes the whole document
+// rather than reusing overlayProjection, which is deliberately lossy: that
+// summary omits Destinations, AllowDirect and Unbounded, so a publication
+// removing egress authority would compare equal to one granting it, and
+// "missing and removed required bindings fail closed without fallback" would
+// stop being true. The domain separator keeps this out of the generation id
+// space so the two can never be confused for one another.
+func overlayDesiredFingerprint(documentRevision string, doc overlayDocument) (string, error) {
+	doc.GenerationID = ""
+	doc.ParentGenerationID = ""
+	body, err := json.Marshal(doc)
+	if err != nil {
+		return "", fmt.Errorf("overlay: derive desired fingerprint: %w", err)
+	}
+	sum := sha256.Sum256(append([]byte("overlay-desired\x00"+documentRevision+"\x00"), body...))
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // overlayCompileInput is everything the compiler needs that is not in the
 // interception document itself.
 type overlayCompileInput struct {
@@ -145,12 +176,22 @@ func compileOverlayGeneration(in overlayCompileInput) (overlayDocument, error) {
 	// operator explicitly reviewed.
 	rules := make([]overlayClientRule, 0, 64)
 
+	// A rule this compiler cannot represent must block the commit, not be skipped.
+	//
+	// Skipping is the failure the header above records: a reviewed deny or direct
+	// simply stops being enforced, with nothing anywhere reporting it. The
+	// operator confirmed it, the console and the Telegram review render it, and
+	// interceptModuleView still lists it -- while doc.Client.Rules contains no
+	// corresponding entry. Refusing turns that class of drift into a failed apply
+	// with a name attached, which is the only outcome that cannot enforce
+	// something other than what was approved. overlayProjectModule, the digest
+	// path, has always refused; this is the path that decides what runs.
 	seenPolicy := make(map[string]struct{})
 	for _, module := range ordered {
-		for _, route := range module.RoutingRules {
+		for index, route := range module.RoutingRules {
 			compiled, ok := overlayPolicyRule(route, module.ID)
 			if !ok {
-				continue
+				return doc, fmt.Errorf("overlay: extension %s routing rule %d cannot be represented in a generation", module.ID, index)
 			}
 			identity := overlayRuleIdentity(compiled)
 			if _, dup := seenPolicy[identity]; dup {
@@ -167,7 +208,10 @@ func compileOverlayGeneration(in overlayCompileInput) (overlayDocument, error) {
 		for _, selector := range interceptModuleCaptureSelectors(module) {
 			compiled, ok := overlayCaptureRule(selector, module.ID)
 			if !ok {
-				continue
+				// Same reasoning, and worse consequences: a dropped capture rule
+				// leaves a declared host running unintercepted through the
+				// operator's own rules while every surface says it is captured.
+				return doc, fmt.Errorf("overlay: extension %s capture selector %q cannot be represented in a generation", module.ID, selector.Value)
 			}
 			identity := overlayRuleIdentity(compiled)
 			if _, dup := seenCapture[identity]; dup {

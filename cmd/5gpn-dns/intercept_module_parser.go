@@ -38,7 +38,57 @@ type interceptModuleImportRequest struct {
 type interceptModuleParser struct {
 	resolver HostResolver
 	now      func() time.Time
-	client   *http.Client
+	// client overrides the fetch client. Tests supply one carrying a fixture's
+	// TLS trust; it is the caller's, so it is copied rather than configured.
+	client *http.Client
+	// fetcher is this parser's own reusable client, built once by
+	// newInterceptModuleParser.
+	fetcher *http.Client
+}
+
+// newInterceptModuleParser builds a parser with one reusable fetch client.
+//
+// fetchResource used to construct a client per call and then Clone() the
+// transport it had just built: a brand-new *http.Transport with an empty pool
+// for every HTTPS request, never closed. The client goes out of scope on return,
+// so the transport becomes unreachable while its persistConn read and write
+// loops keep it alive holding an open TCP+TLS connection -- and newSubHTTPClient
+// builds a zero-value transport, whose IdleConnTimeout of 0 means idle
+// connections never expire on their own. Installing one extension with five
+// script resources stranded six of them, and every marketplace refresh strands
+// another. SubManager already builds its client once and reuses it, for exactly
+// this reason.
+func newInterceptModuleParser(resolver HostResolver) interceptModuleParser {
+	return interceptModuleParser{resolver: resolver, fetcher: newModuleFetchClient(resolver)}
+}
+
+// newModuleFetchClient builds the SSRF-guarded client every extension and
+// marketplace fetch goes through. Timeout and CheckRedirect are set here rather
+// than per call so the client can be shared without a data race.
+func newModuleFetchClient(resolver HostResolver) *http.Client {
+	client := newSubHTTPClient(resolver)
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		transport.MaxResponseHeaderBytes = 64 << 10
+		transport.ResponseHeaderTimeout = 15 * time.Second
+		// Reuse is the point, but not forever: a source an operator adds once
+		// should not cost a permanently open socket on the process that also
+		// serves DoT.
+		transport.IdleConnTimeout = 90 * time.Second
+	}
+	client.Timeout = 30 * time.Second
+	client.CheckRedirect = moduleFetchRedirectPolicy
+	return client
+}
+
+func moduleFetchRedirectPolicy(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("too many redirects")
+	}
+	if err := validateRemoteModuleURL(req.URL.String()); err != nil {
+		return fmt.Errorf("unsafe redirect: %w", err)
+	}
+	setModuleFetchHeaders(req)
+	return nil
 }
 
 type nativeExtensionManifest struct {
@@ -91,7 +141,6 @@ type nativeExtensionRoutingRule struct {
 	DomainKeywords    *[]string `yaml:"domainKeywords"`
 	AllDomainKeywords *[]string `yaml:"allDomainKeywords"`
 	IPCIDR            *string   `yaml:"ipCIDR"`
-	IPASN             *int      `yaml:"ipASN"`
 	Network           *string   `yaml:"network"`
 	DestinationPort   *int      `yaml:"destinationPort"`
 }
@@ -229,6 +278,34 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 	if !nativeExtensionVersionPattern.MatchString(manifest.Metadata.Version) {
 		return interceptModuleSnapshot{}, errors.New("metadata.version must be a semantic version")
 	}
+	// Declaration counts before any I/O.
+	//
+	// The action loop below fetches one HTTPS resource per action carrying a
+	// `script.source`, and validateInterceptModule only applies the 256
+	// action/mapping bound after every one of them has been fetched. The single
+	// in-loop bound is the 8 MiB cumulative script cap, which a server answering
+	// with one-byte bodies never reaches -- so a 2 MiB manifest declaring ~16,000
+	// remote actions drove ~16,000 sequential outbound requests to hosts it chose
+	// itself, each with a fresh TLS handshake and a 30 s timeout, before being
+	// rejected for a bound that was knowable from the first line. A hostile
+	// server that stalls near that timeout stretches one import across days.
+	//
+	// These are the same numbers validateInterceptModule enforces afterwards, so
+	// no manifest that is accepted today becomes rejected; capture hosts are
+	// deduplicated during normalization, so their pre-check is an upper bound
+	// rather than an equality and stays sound.
+	if declared := len(manifest.Actions) + len(manifest.Traffic.UpstreamMappings); declared > maxInterceptModuleRules {
+		return interceptModuleSnapshot{}, fmt.Errorf("extension declares %d actions and upstream mappings, exceeding %d", declared, maxInterceptModuleRules)
+	}
+	if declared := len(manifest.Traffic.CaptureHosts); declared > maxInterceptModuleHosts {
+		return interceptModuleSnapshot{}, fmt.Errorf("traffic.captureHosts declares %d entries, exceeding %d", declared, maxInterceptModuleHosts)
+	}
+	if declared := len(manifest.Traffic.RoutingRules); declared > maxInterceptRoutingRules {
+		return interceptModuleSnapshot{}, fmt.Errorf("traffic.routingRules declares %d entries, exceeding %d", declared, maxInterceptRoutingRules)
+	}
+	if declared := len(manifest.Settings); declared > maxInterceptSettings {
+		return interceptModuleSnapshot{}, fmt.Errorf("settings declares %d entries, exceeding %d", declared, maxInterceptSettings)
+	}
 
 	captureHosts, err := normalizeHostList(manifest.Traffic.CaptureHosts)
 	if err != nil {
@@ -240,7 +317,14 @@ func (p interceptModuleParser) parse(ctx context.Context, sourceURL string, sour
 		if err != nil {
 			return interceptModuleSnapshot{}, fmt.Errorf("traffic.upstreamMappings[%d].host: %w", index, err)
 		}
-		target := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(raw.Target, ".")))
+		// Normalize in the same order as normalizeInterceptHostPattern:
+		// lower, trim, then strip the trailing dot. Stripping first left the dot
+		// in place for a target with trailing whitespace, and the stored value is
+		// what the sidecar dials -- "8.8.8.8." is not an IP literal, so the
+		// mapping resolved nowhere -- while validInterceptHostTarget re-normalized
+		// internally and passed. It also broke the cross-extension conflict check,
+		// which compares targets as raw strings.
+		target := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw.Target)), ".")
 		mappings = append(mappings, interceptHostMapping{Pattern: host, Target: target})
 	}
 	routingRules := make([]interceptRoutingRule, 0, len(manifest.Traffic.RoutingRules))
@@ -525,14 +609,6 @@ func normalizeNativeExtensionRoutingRule(raw nativeExtensionRoutingRule) (interc
 		}
 		rule.IPCIDR = network.String()
 	}
-	if raw.IPASN != nil {
-		// Public 32-bit ASNs. Zero is reserved and is also the field's unset
-		// value, so declaring it is refused rather than silently ignored.
-		if *raw.IPASN <= 0 || *raw.IPASN > 4294967294 {
-			return interceptRoutingRule{}, errors.New("ipASN must be a public autonomous system number")
-		}
-		rule.IPASN = *raw.IPASN
-	}
 	if raw.Network != nil {
 		rule.Network = strings.ToLower(strings.TrimSpace(*raw.Network))
 		if rule.Network == "" {
@@ -756,29 +832,23 @@ func (p interceptModuleParser) fetchResource(ctx context.Context, rawURL string,
 	if err := validateRemoteModuleURL(rawURL); err != nil {
 		return nil, "", err
 	}
-	client := p.client
-	if client == nil {
-		client = newSubHTTPClient(p.resolver)
-	} else {
-		clone := *client
+	client := p.fetcher
+	switch {
+	case p.client != nil:
+		// A caller-supplied client is not ours to configure, so the per-call copy
+		// stays on this path. It is a test seam; production goes through fetcher.
+		clone := *p.client
+		if transport, ok := clone.Transport.(*http.Transport); ok {
+			transport = transport.Clone()
+			transport.MaxResponseHeaderBytes = 64 << 10
+			transport.ResponseHeaderTimeout = 15 * time.Second
+			clone.Transport = transport
+		}
+		clone.Timeout = 30 * time.Second
+		clone.CheckRedirect = moduleFetchRedirectPolicy
 		client = &clone
-	}
-	if transport, ok := client.Transport.(*http.Transport); ok {
-		transport = transport.Clone()
-		transport.MaxResponseHeaderBytes = 64 << 10
-		transport.ResponseHeaderTimeout = 15 * time.Second
-		client.Transport = transport
-	}
-	client.Timeout = 30 * time.Second
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 5 {
-			return errors.New("too many redirects")
-		}
-		if err := validateRemoteModuleURL(req.URL.String()); err != nil {
-			return fmt.Errorf("unsafe redirect: %w", err)
-		}
-		setModuleFetchHeaders(req)
-		return nil
+	case client == nil:
+		client = newModuleFetchClient(p.resolver)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {

@@ -350,12 +350,17 @@ func interceptSettings(document interceptConfigDocument, body []byte) interceptS
 	}
 }
 
-func (s *ControlServer) handleInterceptSettingsGet(w http.ResponseWriter, _ *http.Request) {
+func (s *ControlServer) handleInterceptSettingsGet(w http.ResponseWriter, r *http.Request) {
 	if s.interceptStore == nil {
 		writeErr(w, http.StatusServiceUnavailable, "interception config management unavailable")
 		return
 	}
-	s.interceptStore.mu.Lock()
+	// Interruptible: this lock is held for the whole of an apply transaction, and
+	// a plain Lock() here could not even be abandoned when the client gave up.
+	if err := lockMutexContext(r.Context(), &s.interceptStore.mu); err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "interception config management unavailable")
+		return
+	}
 	defer s.interceptStore.mu.Unlock()
 	document, body, err := s.interceptStore.Read()
 	if err != nil {
@@ -383,18 +388,29 @@ func (s *ControlServer) handleInterceptSettingsPut(w http.ResponseWriter, r *htt
 		HTTP2:                  *update.HTTP2,
 		QUICFallbackProtection: *update.QUICFallbackProtection,
 	}
-	if _, err := s.interceptModules.UpdateSettings(r.Context(), update.Revision, next); err != nil {
+	view, err := s.interceptModules.UpdateSettings(r.Context(), update.Revision, next)
+	if err != nil {
 		writeInterceptModuleError(w, err)
 		return
 	}
-	s.interceptStore.mu.Lock()
-	document, body, err := s.interceptStore.Read()
-	s.interceptStore.mu.Unlock()
-	if err != nil {
-		writeErr(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, interceptSettings(document, body))
+	// Answer from what was written, not from a fresh read.
+	//
+	// mutate returns interceptRevision of the exact bytes it published and the
+	// mutator set document.MITM = next, so both halves are already in hand. The
+	// re-read this replaces took only store.mu and not the manager's mu, so a
+	// concurrent transaction -- a Telegram toggle, another console tab -- landing
+	// between the two returned ITS revision and flags as the answer to this PUT.
+	// The console caches that as the acknowledgement of its own write and would
+	// then submit its next PUT against a document state it never saw, defeating
+	// the complete-document revision guard for the following request. It also
+	// invented a second error mapping for store errors that no sibling handler
+	// has.
+	writeJSON(w, http.StatusOK, interceptSettingsView{
+		Revision:               view.Revision,
+		Enabled:                next.Enabled,
+		HTTP2:                  next.HTTP2,
+		QUICFallbackProtection: next.QUICFallbackProtection,
+	})
 }
 
 func writeInterceptConfigAtomicContext(ctx context.Context, path string, body []byte) error {

@@ -31,7 +31,12 @@ const (
 	// 2 added enabled_when to an action. The sidecar's document decoder rejects
 	// unknown fields, so emitting it to a schema-1 build would cost that gateway
 	// its whole interception configuration rather than one action.
-	sidecarAPISchema = 2
+	//
+	// 3 replaced the network_origins/network_any pair with a single network
+	// boolean, and turned enabled_when from a boolean setting key into a
+	// key/equals comparison. Both are incompatible in both directions, and this
+	// build already emits that shape — only the constant was left behind.
+	sidecarAPISchema = 3
 )
 
 var (
@@ -285,6 +290,17 @@ func (c *SidecarClient) PublishBundle(ctx context.Context, bundleID string, docu
 		}, nil
 	}
 
+	// Refuse a schema this build does not speak, before anything is staged. The
+	// comment on sidecarAPISchema has always described this as the contract, but
+	// Capabilities had no production caller, so a mismatched pair instead
+	// surfaced as a plain decode failure out of Stage -- one that writeError does
+	// not even map to a terminal code, since errBundleSchema names the sidecar's
+	// on-disk store layout rather than the control-API wire format. "sidecar
+	// speaks schema N, this build speaks M" is the answer an operator can act on.
+	if _, err := c.Capabilities(ctx); err != nil {
+		return zero, err
+	}
+
 	if _, err := c.Stage(ctx, bundleID, document); err != nil {
 		return zero, fmt.Errorf("sidecar: stage %s: %w", bundleID, err)
 	}
@@ -294,11 +310,16 @@ func (c *SidecarClient) PublishBundle(ctx context.Context, bundleID string, docu
 		return result, nil
 	}
 	if errors.Is(err, errSidecarTerminal) || errors.Is(err, errSidecarUnsupported) {
+		c.abortStaged(ctx, bundleID)
 		return zero, err
 	}
 
 	after, readErr := c.State(ctx)
 	if readErr != nil {
+		// Deliberately not aborted. The commit outcome is unknown, and withdrawing
+		// a bundle that may be live would stop processing traffic mihomo is
+		// already steering at the sidecar -- the same reason this function never
+		// assumes a lost response means failure.
 		return zero, fmt.Errorf("sidecar: commit outcome unknown for %s (%v); readback also failed: %w",
 			bundleID, err, readErr)
 	}
@@ -308,6 +329,25 @@ func (c *SidecarClient) PublishBundle(ctx context.Context, bundleID string, docu
 			BundleID: after.ActiveBundle, Digest: after.ActiveDigest, Generation: after.Generation,
 		}, nil
 	}
+	c.abortStaged(ctx, bundleID)
 	return zero, fmt.Errorf("sidecar: commit of %s did not take effect (active is %q): %w",
 		bundleID, after.ActiveBundle, err)
+}
+
+// abortStaged withdraws a bundle this coordinator staged and then failed to
+// commit.
+//
+// The sidecar never sweeps staged records -- "a stage is a durable promise the
+// coordinator is meant to be able to come back to... abort is how it withdraws
+// one" -- and pruneSuperseded only collects superseded ones. Without this, every
+// distinct document that failed to commit left an fsynced record behind
+// forever, and a full disk is precisely what makes the next commit fail: the
+// operation an operator needs when something is already wrong.
+//
+// Best effort and logged: the bundle carries no capability either way, and a
+// failed abort must not replace the error that actually explains the failure.
+func (c *SidecarClient) abortStaged(ctx context.Context, bundleID string) {
+	if err := c.Abort(ctx, bundleID); err != nil {
+		log.Printf("intercept: abandon staged bundle %s: %v", bundleID, err)
+	}
 }
