@@ -171,7 +171,7 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # thing that keeps them working together is a schema number, not a build.
 SIDECAR_REPO="moooyo/mihomo-extension-sidecar"
 SIDECAR_VERSION="0.4.2"
-SIDECAR_SHA256="97555804ce54e4b91e2f2b589d6938a728cbf02c50fe033d09db1245b9313dbf"
+SIDECAR_SHA256="ba84df627c7a7881f05a2e77a2abc3360f2836ef7efbb42ec1f47a5d5857d9c0"
 MIHOMO_REPO="moooyo/mihomo"
 MIHOMO_VERSION="v1.19.28-overlay.6"
 MIHOMO_SHA256="13fbc6789895bb201c7c8607ec423b03b192082f9b6bb0a20bf9a15593973479"
