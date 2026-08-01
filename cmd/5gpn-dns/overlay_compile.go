@@ -268,10 +268,20 @@ func overlayEgressCapabilities(ordered []interceptModuleSnapshot, credential, ma
 	groups := make([]string, 0, 4)
 	destinations := make(map[string][]overlayDestinationRule, 4)
 	claimed := make(map[string]struct{})
-	// The first grant-holding module in execution order owns unmatched egress.
+	// Unmatched egress is owned by the first grant-holding module in the BOUND
+	// pass, falling back to the first in the unbound pass.
+	//
+	// The bound-before-unbound order is the same one the destination selectors
+	// use, and it is what docs/architecture.md describes: the bindings "select an
+	// operator-bound group when present and otherwise the terminal operator
+	// target". So an explicitly bound extension takes this even when an unbound
+	// one precedes it in execution_order -- reordering the two does not move it.
+	// This comment previously said "the first grant-holding module in execution
+	// order", which is what a reader would reasonably expect from every other
+	// selector here, and it is not what the two passes below do.
+	//
 	// The permission names no host, so its binding cannot either, and two of
-	// them would leave which group unmatched traffic leaves through undecided --
-	// the same first-match ownership every other selector here already has.
+	// them would leave which group unmatched traffic leaves through undecided.
 	unboundedGroup := ""
 
 	claim := func(bound bool) {
