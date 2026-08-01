@@ -343,23 +343,12 @@ func (m *InterceptModuleManager) PrepareRuntime() error {
 	if err != nil {
 		return err
 	}
-	analysis := m.analyzeInterceptRouting(text)
-	if !analysis.Manageable || !interceptCredentialsMatch(text, document) {
+	gate := m.routingGateFor(document, text)
+	if !gate.ready {
 		m.publishHosts(nil)
-		return fmt.Errorf("interception routing is not ready: %s", firstNonEmpty(analysis.Reason, "credential-mismatch"))
+		return fmt.Errorf("interception routing is not ready: %s", gate.reason)
 	}
-	// The anchored analysis judges anchor positions, not bindings. An extension
-	// names its egress group by string and the groups are the operator's own, so
-	// a renamed or deleted group leaves the document authorising one that no
-	// longer resolves. Withdraw the hosts rather than steer traffic into it.
-	if err := validateInterceptEgressBindings(document, analysis.AvailableEgressGroups); err != nil {
-		m.publishHosts(nil)
-		return fmt.Errorf("interception routing is not ready: egress-group-missing: %w", err)
-	}
-	if len(activeInterceptHosts(document)) > 0 && !m.certificateReady(document) {
-		m.publishHosts(nil)
-		return errors.New("interception certificate state is not ready")
-	}
+	analysis := gate.analysis
 	// Republish the generation from the document, which is the authority.
 	//
 	// Startup used to trust whatever the core had recovered from its own store.
@@ -414,22 +403,9 @@ func (m *InterceptModuleManager) ReconcileMihomoText(text string) error {
 		m.publishHosts(&document)
 		return nil
 	}
-	analysis := m.analyzeInterceptRouting(text)
-	if !analysis.Manageable || !interceptCredentialsMatch(text, document) {
+	if gate := m.routingGateFor(document, text); !gate.ready {
 		m.publishHosts(nil)
-		return fmt.Errorf("interception routing is not ready: %s", firstNonEmpty(analysis.Reason, "credential-mismatch"))
-	}
-	// The anchored analysis judges anchor positions, not bindings. An extension
-	// names its egress group by string and the groups are the operator's own, so
-	// a renamed or deleted group leaves the document authorising one that no
-	// longer resolves. Withdraw the hosts rather than steer traffic into it.
-	if err := validateInterceptEgressBindings(document, analysis.AvailableEgressGroups); err != nil {
-		m.publishHosts(nil)
-		return fmt.Errorf("interception routing is not ready: egress-group-missing: %w", err)
-	}
-	if len(activeInterceptHosts(document)) > 0 && !m.certificateReady(document) {
-		m.publishHosts(nil)
-		return errors.New("interception certificate state is not ready")
+		return fmt.Errorf("interception routing is not ready: %s", gate.reason)
 	}
 	m.publishHosts(&document)
 	return nil
@@ -526,43 +502,17 @@ func (m *InterceptModuleManager) viewLocked() (interceptModulesView, error) {
 		return interceptModulesView{}, err
 	}
 	ready, reason, availableGroups := m.routingReadyLocked(document)
-	view := interceptModulesView{
-		Revision:              interceptRevision(body),
-		CatalogURL:            nativeExtensionCatalogURL,
-		ExecutionOrder:        append([]string{}, document.ExecutionOrder...),
-		AvailableEgressGroups: append([]string(nil), availableGroups...),
-		Modules:               make([]interceptModuleView, 0, len(document.Modules)),
-		ActiveCaptureHosts:    []string{},
-	}
-	if ready {
-		view.ActiveCaptureHosts = append([]string{}, activeInterceptHosts(document)...)
-	}
-	orderByID := interceptExecutionOrderIndex(document.ExecutionOrder)
-	availableSet := make(map[string]struct{}, len(availableGroups))
-	for _, group := range availableGroups {
-		availableSet[group] = struct{}{}
-	}
-	for _, module := range orderedInterceptModules(document) {
-		settingsReady := interceptModuleSettingsReady(module.Settings)
-		moduleReady := ready && settingsReady
-		moduleReason := reason
-		if !settingsReady {
-			moduleReason = "settings-required"
-		}
-		if module.EgressGroupRequired && module.EgressGroup == "" {
-			moduleReady = false
-			moduleReason = "egress-group-required"
-		} else if module.EgressGroup != "" {
-			if _, exists := availableSet[module.EgressGroup]; !exists {
-				moduleReady = false
-				moduleReason = "egress-group-missing"
-			}
-		}
-		moduleView := interceptModuleViewFromSnapshot(module, moduleReady, moduleReason)
-		moduleView.ExecutionOrder = orderByID[module.ID]
-		view.Modules = append(view.Modules, moduleView)
-	}
-	return view, nil
+	// modulesViewFromDocument is the same assembly, and it used to be written out
+	// here a second time -- including the egress-group-required /
+	// egress-group-missing precedence and the settings-required override. Two
+	// copies of a per-module verdict means a change to that precedence lands in
+	// the list endpoint and not in the response returned straight from a
+	// mutation, so the console shows one answer on refresh and another right
+	// after a toggle, with no test comparing them.
+	//
+	// The one difference was modulesViewFromDocument's !MITM.Enabled guard, which
+	// routingReadyLocked already produces as (false, "mitm-disabled", groups).
+	return modulesViewFromDocument(document, body, ready, reason, availableGroups), nil
 }
 
 func moduleRuntimeReason(ready bool, reason string) string {
@@ -570,6 +520,62 @@ func moduleRuntimeReason(ready bool, reason string) string {
 		return reason
 	}
 	return ""
+}
+
+// interceptRoutingGate is the one answer to "can routing be published for this
+// document against this mihomo config, and if not, why".
+//
+// It exists because that question was answered in three places with two
+// different orderings, and they had already drifted: routingReadyLocked checked
+// the egress bindings before the credentials, while PrepareRuntime and
+// ReconcileMihomoText folded credentials into the manageability branch ahead of
+// them. A document with both a renamed egress group and mismatched credentials
+// therefore reported "egress-group-missing" to the console and
+// "credential-mismatch" to the log, for the same state. The console's ordering
+// wins: a missing group is the more actionable of the two.
+type interceptRoutingGate struct {
+	ready    bool
+	reason   string
+	groups   []string
+	analysis interceptRoutingAnalysis
+}
+
+func (m *InterceptModuleManager) routingGateFor(document interceptConfigDocument, text string) interceptRoutingGate {
+	gate := interceptRoutingGate{}
+	availableGroups, groupErr := interceptAvailableEgressGroups(text)
+	if groupErr != nil {
+		gate.reason = "proxy-groups-structure-conflict"
+		return gate
+	}
+	gate.groups = availableGroups
+	if !document.MITM.Enabled {
+		gate.reason = "mitm-disabled"
+		return gate
+	}
+	gate.analysis = m.analyzeInterceptRouting(text)
+	if !gate.analysis.Manageable {
+		gate.reason = gate.analysis.Reason
+		return gate
+	}
+	// The anchored analysis judges positions, not bindings: the egress groups
+	// live in the operator's own proxy-groups and an extension names one by
+	// string. An operator who renamed or deleted a bound group leaves a
+	// generation authorising a group that no longer exists, so this has to fail
+	// closed here rather than wait for the next publication to notice.
+	if err := validateInterceptEgressBindings(document, gate.analysis.AvailableEgressGroups); err != nil {
+		gate.reason = "egress-group-missing"
+		return gate
+	}
+	if !interceptCredentialsMatch(text, document) {
+		gate.reason = "credential-mismatch"
+		return gate
+	}
+	if len(activeInterceptHosts(document)) > 0 && !m.certificateReady(document) {
+		gate.reason = "certificate-not-ready"
+		return gate
+	}
+	gate.ready = true
+	return gate
 }
 
 func (m *InterceptModuleManager) routingReadyLocked(document interceptConfigDocument) (bool, string, []string) {
@@ -582,32 +588,8 @@ func (m *InterceptModuleManager) routingReadyLocked(document interceptConfigDocu
 	if err != nil {
 		return false, "mihomo-config-unreadable", nil
 	}
-	availableGroups, groupErr := interceptAvailableEgressGroups(text)
-	if groupErr != nil {
-		return false, "proxy-groups-structure-conflict", nil
-	}
-	if !document.MITM.Enabled {
-		return false, "mitm-disabled", availableGroups
-	}
-	analysis := m.analyzeInterceptRouting(text)
-	if !analysis.Manageable {
-		return false, analysis.Reason, availableGroups
-	}
-	// The anchored analysis judges positions, not bindings: the egress groups
-	// live in the operator's own proxy-groups and an extension names one by
-	// string. An operator who renamed or deleted a bound group leaves a
-	// generation authorising a group that no longer exists, so this has to fail
-	// closed here rather than wait for the next publication to notice.
-	if err := validateInterceptEgressBindings(document, analysis.AvailableEgressGroups); err != nil {
-		return false, "egress-group-missing", availableGroups
-	}
-	if !interceptCredentialsMatch(text, document) {
-		return false, "credential-mismatch", availableGroups
-	}
-	if len(activeInterceptHosts(document)) > 0 && !m.certificateReady(document) {
-		return false, "certificate-not-ready", availableGroups
-	}
-	return true, "", availableGroups
+	gate := m.routingGateFor(document, text)
+	return gate.ready, gate.reason, gate.groups
 }
 
 func interceptExecutionOrderIndex(order []string) map[string]int {

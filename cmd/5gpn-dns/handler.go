@@ -540,12 +540,136 @@ func (h *Handler) decideName(name string) resolutionDecision {
 // cannot. Resolution reads the table only through CaptureDNS, which applies the
 // gate; lookup is the ungated view and is for diagnostics alone.
 type interceptHostSnapshot struct {
-	exact       map[string]interceptHostBinding
-	wildcard    []interceptWildcardBinding
-	mapExact    map[string]interceptHostMappingBinding
-	mapWildcard []interceptHostMappingWildcard
+	capture     *orderedHostIndex[interceptHostBinding]
+	mapping     *orderedHostIndex[interceptHostMappingBinding]
 	mitmEnabled bool
 	moduleCount int // enabled extensions, for "N enabled, none declared this name"
+}
+
+// orderedHostIndex resolves a hostname against declared exact and wildcard
+// patterns with the ownership rule the architecture states once: the first
+// enabled extension in execution order that declared an overlapping pattern
+// wins.
+//
+// It replaces two copies of the same eighteen lines over parallel types, each a
+// linear scan of every declared wildcard building a "."+suffix string per
+// iteration. Both ran per query — decideName consults the capture table before
+// anything else, and the mihomo origin path consults the mapping table again —
+// and a name that matches nothing walked the whole table, which is every name in
+// a random-subdomain flood. A document may declare 512 patterns; a hostname has
+// at most a handful of labels, and a suffix walk allocates nothing because every
+// candidate is a slice of the name.
+//
+// The rule is reproduced exactly rather than improved on, because it decides
+// which extension owns a captured host and therefore which operator-selected
+// egress group its origin re-resolution uses. In particular it is NOT
+// "most-specific suffix wins": the winner is the lowest execution order among
+// all matching patterns, an exact match beats a wildcard of equal order, and
+// wildcards of equal order are settled by declaration sequence — which is what
+// the slice scan did, since the slice was appended in exactly that sequence.
+// interceptHostSnapshot.lookupLinear and mappingLinear keep the original scans
+// as reference implementations, and a differential test holds the two together.
+type orderedHostIndex[T any] struct {
+	exact    map[string]orderedHostEntry[T]
+	wildcard map[string]orderedHostEntry[T]
+	next     int
+}
+
+type orderedHostEntry[T any] struct {
+	value T
+	// order is the declaring extension's position in execution_order.
+	order int
+	// rank is the declaration sequence, which settles patterns of equal order.
+	rank int
+}
+
+func newOrderedHostIndex[T any]() *orderedHostIndex[T] {
+	return &orderedHostIndex[T]{
+		exact:    make(map[string]orderedHostEntry[T]),
+		wildcard: make(map[string]orderedHostEntry[T]),
+	}
+}
+
+// insert records one declared pattern, keeping the first declaration of it.
+//
+// Callers must insert in non-decreasing order, which newInterceptHostSnapshot
+// does by construction: it walks modules in execution order. That invariant is
+// what makes this index equivalent to the slice scan it replaced — the scan
+// returned the first matching wildcard in slice position, and under
+// non-decreasing insertion "first position" and "lowest order, then earliest
+// declaration" are the same answer. TestOrderedHostIndexMatchesTheScanItReplaced
+// holds the two together over that input space.
+func (i *orderedHostIndex[T]) insert(pattern string, order int, value T) {
+	entry := orderedHostEntry[T]{value: value, order: order, rank: i.next}
+	i.next++
+	if suffix, wildcard := strings.CutPrefix(pattern, "*."); wildcard {
+		if suffix == "" {
+			return
+		}
+		if _, exists := i.wildcard[suffix]; !exists {
+			i.wildcard[suffix] = entry
+		}
+		return
+	}
+	if pattern == "" {
+		return
+	}
+	if _, exists := i.exact[pattern]; !exists {
+		i.exact[pattern] = entry
+	}
+}
+
+func (i *orderedHostIndex[T]) match(name string) (T, bool) {
+	var zero T
+	if i == nil {
+		return zero, false
+	}
+	name = strings.ToLower(stripDot(name))
+	exact, hasExact := i.exact[name]
+
+	// Parent suffixes only. "*.example.com" covers a.example.com and not
+	// example.com itself, which is what the scan's length check expressed.
+	var best orderedHostEntry[T]
+	hasWildcard := false
+	for offset := 0; offset < len(name); {
+		dot := strings.IndexByte(name[offset:], '.')
+		if dot < 0 {
+			break
+		}
+		offset += dot + 1
+		if offset >= len(name) {
+			break
+		}
+		candidate, ok := i.wildcard[name[offset:]]
+		if !ok {
+			continue
+		}
+		if !hasWildcard || candidate.order < best.order ||
+			(candidate.order == best.order && candidate.rank < best.rank) {
+			best, hasWildcard = candidate, true
+		}
+	}
+
+	switch {
+	case hasExact && (!hasWildcard || exact.order <= best.order):
+		return exact.value, true
+	case hasWildcard:
+		return best.value, true
+	}
+	return zero, false
+}
+
+// values yields every declared entry, for teardown.
+func (i *orderedHostIndex[T]) values(visit func(T)) {
+	if i == nil {
+		return
+	}
+	for _, entry := range i.exact {
+		visit(entry.value)
+	}
+	for _, entry := range i.wildcard {
+		visit(entry.value)
+	}
 }
 
 type interceptHostBinding struct {
@@ -554,11 +678,6 @@ type interceptHostBinding struct {
 	pattern    string // as declared: "host.example.com" or "*.example.com"
 	captureDNS string
 	order      int
-}
-
-type interceptWildcardBinding struct {
-	suffix  string
-	binding interceptHostBinding
 }
 
 // interceptHostMappingBinding is one resolved [Host] entry, with the resolver
@@ -577,19 +696,12 @@ type interceptHostMappingBinding struct {
 	servers Exchanger
 }
 
-type interceptHostMappingWildcard struct {
-	suffix  string
-	binding interceptHostMappingBinding
-}
-
 func newInterceptHostSnapshot(document interceptConfigDocument) *interceptHostSnapshot {
 	snapshot := &interceptHostSnapshot{
-		exact:       make(map[string]interceptHostBinding),
-		mapExact:    make(map[string]interceptHostMappingBinding),
+		capture:     newOrderedHostIndex[interceptHostBinding](),
+		mapping:     newOrderedHostIndex[interceptHostMappingBinding](),
 		mitmEnabled: document.MITM.Enabled,
 	}
-	seenWildcard := make(map[string]struct{})
-	seenMapWildcard := make(map[string]struct{})
 	for order, module := range orderedInterceptModules(document) {
 		if !module.Enabled {
 			continue
@@ -603,23 +715,9 @@ func newInterceptHostSnapshot(document interceptConfigDocument) *interceptHostSn
 		}
 		for _, pattern := range module.CaptureHosts {
 			pattern = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(pattern), "."))
-			if strings.HasPrefix(pattern, "*.") {
-				suffix := strings.TrimPrefix(pattern, "*.")
-				if _, exists := seenWildcard[suffix]; !exists {
-					seenWildcard[suffix] = struct{}{}
-					declared := binding
-					declared.pattern = pattern
-					snapshot.wildcard = append(snapshot.wildcard, interceptWildcardBinding{suffix: suffix, binding: declared})
-				}
-				continue
-			}
-			if pattern != "" {
-				if _, exists := snapshot.exact[pattern]; !exists {
-					declared := binding
-					declared.pattern = pattern
-					snapshot.exact[pattern] = declared
-				}
-			}
+			declared := binding
+			declared.pattern = pattern
+			snapshot.capture.insert(pattern, order, declared)
 		}
 		// Host mappings are indexed with the same first-in-execution-order
 		// semantics as capture hosts, and deliberately without the MITM gate:
@@ -647,18 +745,7 @@ func newInterceptHostSnapshot(document interceptConfigDocument) *interceptHostSn
 				}
 				declared.servers = newTransportGroup("host-mapping:"+module.ID, entries)
 			}
-			if strings.HasPrefix(pattern, "*.") {
-				suffix := strings.TrimPrefix(pattern, "*.")
-				if _, exists := seenMapWildcard[suffix]; !exists {
-					seenMapWildcard[suffix] = struct{}{}
-					snapshot.mapWildcard = append(snapshot.mapWildcard,
-						interceptHostMappingWildcard{suffix: suffix, binding: declared})
-				}
-				continue
-			}
-			if _, exists := snapshot.mapExact[pattern]; !exists {
-				snapshot.mapExact[pattern] = declared
-			}
+			snapshot.mapping.insert(pattern, order, declared)
 		}
 	}
 	return snapshot
@@ -671,20 +758,7 @@ func (s *interceptHostSnapshot) HostMapping(name string) (interceptHostMappingBi
 	if s == nil {
 		return interceptHostMappingBinding{}, false
 	}
-	name = strings.ToLower(stripDot(name))
-	exact, exactMatch := s.mapExact[name]
-	for _, wildcard := range s.mapWildcard {
-		if exactMatch && wildcard.binding.order >= exact.order {
-			break
-		}
-		if len(name) > len(wildcard.suffix)+1 && strings.HasSuffix(name, "."+wildcard.suffix) {
-			return wildcard.binding, true
-		}
-	}
-	if exactMatch {
-		return exact, true
-	}
-	return interceptHostMappingBinding{}, false
+	return s.mapping.match(name)
 }
 
 // retireMappingResolvers closes the upstream groups a superseded snapshot built.
@@ -697,12 +771,9 @@ func (s *interceptHostSnapshot) retireMappingResolvers(grace time.Duration) {
 	if s == nil {
 		return
 	}
-	for _, binding := range s.mapExact {
+	s.mapping.values(func(binding interceptHostMappingBinding) {
 		retireGroup(binding.servers, nil, grace)
-	}
-	for _, wildcard := range s.mapWildcard {
-		retireGroup(wildcard.binding.servers, nil, grace)
-	}
+	})
 }
 
 func (s *interceptHostSnapshot) Match(name string) bool {
@@ -735,20 +806,7 @@ func (s *interceptHostSnapshot) lookup(name string) (interceptHostBinding, bool)
 	if s == nil {
 		return interceptHostBinding{}, false
 	}
-	name = strings.ToLower(stripDot(name))
-	exact, exactMatch := s.exact[name]
-	for _, wildcard := range s.wildcard {
-		if exactMatch && wildcard.binding.order >= exact.order {
-			break
-		}
-		if len(name) > len(wildcard.suffix)+1 && strings.HasSuffix(name, "."+wildcard.suffix) {
-			return wildcard.binding, true
-		}
-	}
-	if exactMatch {
-		return exact, true
-	}
-	return interceptHostBinding{}, false
+	return s.capture.match(name)
 }
 
 func (h *Handler) setInterceptDocument(document *interceptConfigDocument) {
