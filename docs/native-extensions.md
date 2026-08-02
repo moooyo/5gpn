@@ -110,10 +110,24 @@ group with its current ECS, while `trust` and non-extension hostnames use the
 live trust group. The first enabled matching extension in execution order wins
 overlaps. DNS sees a hostname only, so a URL path cannot choose a resolver.
 
-`upstreamMappings` changes only the sidecar's upstream target. It preserves the
-original HTTP Host and TLS SNI and rejects private, loopback, link-local, or
-otherwise unsafe IPv4 targets. Every upstream TCP or UDP flow returns through
-authenticated mihomo `intercept-egress`.
+An `upstreamMappings` entry takes one of three target forms.
+
+An **address** (`203.0.113.7`) or an **alias** (`origin.example.net`) changes
+the sidecar's upstream target. It preserves the original HTTP Host and TLS SNI.
+An address target rejects private, loopback, link-local, CGNAT, and otherwise
+unsafe IPv4 addresses; an alias is a name, so the same intent cannot be enforced
+for it and a name that resolves into a private range is an accepted consequence.
+Every upstream TCP or UDP flow returns through authenticated mihomo
+`intercept-egress`.
+
+A **resolver** form (`server:1.1.1.1`, up to four comma-separated specs) names
+nameservers rather than a destination. It changes where `5gpn-dns` resolves the
+mapped name, and the sidecar never dials it: capture still leaves through the
+extension's ordinary egress binding. Each spec uses the same grammar as an
+operator upstream — `IP[:port]` for plain UDP, `name@IP[:port]` for DoT,
+`https://host/path@IP[:port]` for DoH — and the address each one dials is held
+to the same scope refusal an address target gets. A DoH endpoint hostname is
+never resolved, so only the pinned address is checked.
 
 `traffic.routingRules` is a separate global gateway capability. It does not
 acquire or decrypt traffic and it does not extend `captureHosts`. Each rule has

@@ -349,9 +349,14 @@ interception transaction implicitly.
 
 Native `traffic.upstreamMappings` are extension-scoped upstream overrides, not
 a second global DNS policy. Their host must be covered by the same extension's
-`captureHosts`. They apply only after that host has been steered through the
-sidecar, preserve the original HTTP Host and TLS SNI, reject private, loopback,
-link-local, and otherwise unsafe IPv4 targets, and return through mihomo. A
+`captureHosts`. The address and alias forms apply only after that host has been
+steered through the sidecar, preserve the original HTTP Host and TLS SNI, and
+return through mihomo. The resolver form (`server:…`) names nameservers for the
+loopback origin resolver instead of a destination, and the sidecar excludes it
+everywhere a mapping becomes a dial target. Every form's dialled IPv4 address —
+an address target, or each resolver spec's pinned address — is refused if it is
+private, loopback, link-local, CGNAT, or otherwise unsafe; an alias is a name,
+so that intent cannot be enforced for it. A
 manifest may require an operator egress-group binding but cannot name, inspect,
 or change the selected group. The management surfaces expose only existing
 proxy-group names plus `DIRECT`; the binding is operator state stored outside

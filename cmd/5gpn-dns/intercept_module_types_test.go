@@ -184,3 +184,49 @@ func TestDeclarativeActionsAreBoundsCheckedLikeScripts(t *testing.T) {
 		}
 	})
 }
+
+// The resolver form of an upstream mapping used to skip every address check.
+//
+// validInterceptHostTarget returns on the "server:" prefix, so it never reached
+// interceptHostTargetAddressAllowed -- the check whose own comment calls it
+// "both the earliest and the only reliable place" to stop a mapping aimed at
+// the gateway's management plane. What stood in for it checked only that
+// parseUpstreamEntryList produced as many entries as it was given parts, and
+// that parser is lenient by design: its default branch appends an entry for any
+// non-empty string, so the equality held for essentially anything.
+//
+// Each accepted spec became a live resolver group inside the DNS daemon, dialled
+// verbatim on every resolution of the mapped name. The plain UDP form is the
+// strongest of the three: an arbitrary address and port, an attacker-chosen
+// QNAME in the payload, and the reply parsed and returned.
+func TestResolverFormHostTargetsAreScopeChecked(t *testing.T) {
+	t.Parallel()
+	for _, target := range []string{
+		"server:127.0.0.1",
+		"server:169.254.169.254", // link-local, and the cloud metadata address
+		"server:10.0.0.5",
+		"server:192.168.1.1",
+		"server:100.64.0.1", // CGNAT, refused alongside the private ranges
+		"server:ns@10.0.0.5:853",
+		"server:https://a.invalid/p@127.0.0.1:8443",
+		"server:not-an-ip-at-all", // a bare hostname is the self-reference footgun
+		"server:",
+		"server:1.1.1.1,10.0.0.1", // one bad part poisons the list
+	} {
+		if validInterceptHostTarget(target) {
+			t.Errorf("accepted %q", target)
+		}
+	}
+	// The form still has to work, or this is a removal rather than a fix.
+	for _, target := range []string{
+		"server:1.1.1.1",
+		"server:8.8.8.8:53",
+		"server:dns.google@8.8.8.8:853",
+		"server:https://dns.google/dns-query@8.8.8.8:443",
+		"server:1.1.1.1,1.0.0.1",
+	} {
+		if !validInterceptHostTarget(target) {
+			t.Errorf("refused %q, which is an ordinary public resolver", target)
+		}
+	}
+}

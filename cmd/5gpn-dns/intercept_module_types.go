@@ -1045,11 +1045,31 @@ func interceptHostTargetAddressAllowed(ip net.IP) bool {
 	return true
 }
 
-// validInterceptHostMappingServers checks the resolver form's specs. They are
-// the same strings the operator's own upstream groups accept, so a mapping
-// cannot name a transport the box does not already speak.
+// validInterceptHostMappingServers checks the resolver form's specs.
+//
+// Every part runs through the operator's own upstream validator and then
+// through the same address-range check the address form gets.
+//
+// It used to run neither. The comment here claimed these were "the same strings
+// the operator's own upstream groups accept" -- they were not:
+// parseUpstreamEntryList is a lenient parser, not a validator, and its default
+// branch appends an entry for any non-empty string, so len(parsed) == len(parts)
+// held for essentially any input. validateUpstreamEntry, which the operator's
+// own path actually runs and which refuses a bare hostname by name as "the
+// exact self-reference footgun", was never called here. And because
+// validInterceptHostTarget returns on the server: prefix, the whole thing
+// returned before interceptHostTargetAddressAllowed -- the check whose own
+// comment calls it "both the earliest and the only reliable place" to stop a
+// mapping aimed at the gateway's own management plane.
+//
+// So `server:127.0.0.1`, `server:169.254.169.254` and `server:ns@10.0.0.5:853`
+// were all accepted, while the plain `127.0.0.1` address form was correctly
+// refused. Each became a live resolver group inside the DNS daemon, dialled
+// verbatim on every resolution of the mapped name. The plain UDP form is the
+// strongest: an arbitrary address and port, an attacker-chosen QNAME in the
+// payload, and the reply parsed and returned.
 func validInterceptHostMappingServers(rest string) bool {
-	parts := make([]string, 0, 2)
+	parts := make([]string, 0, maxInterceptHostMappingServers)
 	for _, part := range strings.Split(rest, ",") {
 		if part = strings.TrimSpace(part); part != "" {
 			parts = append(parts, part)
@@ -1058,7 +1078,29 @@ func validInterceptHostMappingServers(rest string) bool {
 	if len(parts) == 0 || len(parts) > maxInterceptHostMappingServers {
 		return false
 	}
-	return len(parseUpstreamEntryList(parts)) == len(parts)
+	for _, part := range parts {
+		if err := validateUpstreamEntry("host-mapping", part); err != nil {
+			return false
+		}
+	}
+	entries := parseUpstreamEntryList(parts)
+	if len(entries) != len(parts) {
+		return false
+	}
+	for _, entry := range entries {
+		// Only DialAddr is ever contacted. A DoH endpoint's hostname is never
+		// resolved -- the pinned address is what gets dialled -- so the range
+		// check belongs on the dial address and nowhere else.
+		host := entry.DialAddr
+		if bare, _, err := net.SplitHostPort(host); err == nil {
+			host = bare
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || ip.To4() == nil || !interceptHostTargetAddressAllowed(ip) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateInterceptEgressGroupBinding(group string) error {
