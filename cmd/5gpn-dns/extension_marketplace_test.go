@@ -145,6 +145,17 @@ actions:
 				CaptureHostCount: 1, ActionCount: 1, SettingCount: 0, Network: false,
 				PersistentStorage: false, UpstreamMappingCount: 0, RoutingRuleCount: &routingRuleCount, EgressGroupRequired: false,
 			},
+			// Required, and compared. An entry without it is an install with no
+			// policy verification at all, because the comparison is skipped when
+			// the digest is empty.
+			//
+			// The value is the projection of the constant manifest above. If
+			// that manifest changes, the install fails and names the digest it
+			// compiled -- paste that here.
+			Policy: marketplacePolicy{
+				ClientRules: 2, PolicyRules: 0, CaptureRules: 2,
+				Digest: "facef23e0e7807b941c667c8d091d0147e9876b83ffb3a64bbbd87aff751680b",
+			},
 		}},
 	}
 	if mutate != nil {
@@ -724,9 +735,16 @@ func TestMarketplaceEntryAcceptsThePublishedPolicyProjection(t *testing.T) {
 	}
 }
 
-// An index without the field must still decode: every entry published before
-// the projection existed has none.
-func TestMarketplaceEntryWithoutAPolicyProjectionStillDecodes(t *testing.T) {
+// An index without the field decodes -- the wire format tolerates it -- but must
+// not validate.
+//
+// It used to validate, on the reasoning that entries published before the
+// projection existed carry none. That allowance was itself the hole: the install
+// check skips the comparison when the digest is empty and the overlay digest
+// check reads an empty value as "not verified" rather than "does not match", so
+// an index that simply omitted the field bought an install with no policy
+// verification at all.
+func TestMarketplaceEntryWithoutAPolicyProjectionIsRefused(t *testing.T) {
 	body := []byte(`{
 	  "apiVersion": "5gpn.io/marketplace/v1",
 	  "kind": "ExtensionMarketplace",
@@ -745,10 +763,13 @@ func TestMarketplaceEntryWithoutAPolicyProjectionStillDecodes(t *testing.T) {
 	}`)
 	var index marketplaceIndex
 	if err := decodeStrictJSON(bytes.NewReader(body), &index); err != nil {
-		t.Fatalf("an index without the policy projection was rejected: %v", err)
+		t.Fatalf("an index without the policy projection was rejected by the decoder: %v", err)
 	}
 	if index.Entries[0].Policy.Digest != "" {
 		t.Fatal("an absent projection decoded as present")
+	}
+	if err := validateNormalizedMarketplaceIndex(index); err == nil {
+		t.Fatal("an entry with no policy digest validated; that is an install with no policy verification")
 	}
 }
 

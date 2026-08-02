@@ -1259,10 +1259,17 @@ func validateNormalizedMarketplaceIndex(index marketplaceIndex) error {
 			return fmt.Errorf("entry %q has invalid capability counts", entry.ID)
 		}
 		// The policy projection is inside the strict envelope like everything
-		// else. An empty digest is the "published before the field existed" case;
-		// anything present has to be a SHA-256 and carry non-negative counts,
-		// because validateMarketplaceInstall compares against it.
-		if entry.Policy.Digest != "" && !validSHA256(entry.Policy.Digest) {
+		// else, and its digest is required.
+		//
+		// It used to be optional, for the "published before the field existed"
+		// case. That allowance is what made a silently unverified install
+		// possible: validateMarketplaceInstall skips the comparison when the
+		// digest is empty, and the overlay digest check reads an empty value as
+		// "not verified" rather than "does not match", so an index omitting the
+		// field bought itself an install with no policy verification at all. The
+		// generator has always emitted it and the published fixtures assert it,
+		// so the only documents this refuses are ones that should be refused.
+		if !validSHA256(entry.Policy.Digest) {
 			return fmt.Errorf("entry %q policy digest is not a SHA-256", entry.ID)
 		}
 		if entry.Policy.ClientRules < 0 || entry.Policy.PolicyRules < 0 || entry.Policy.CaptureRules < 0 ||
