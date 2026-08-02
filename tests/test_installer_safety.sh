@@ -930,12 +930,13 @@ config_mode="$(stat -c %a "$config" 2>/dev/null || stat -f %Lp "$config")"
 [[ -s "$config" && ( "$POSIX_MODES" == 0 || "$config_mode" == 640 ) ]] \
     && pass "first install seeds a private mihomo config" \
     || fail "first-install mihomo config missing or not mode 0640"
-# The panel allow rule is requalified to exclude processor traffic: without that
-# exclusion a compromised sidecar dialling the console reaches the gateway's own
-# management plane without ever meeting the overlay's egress anchor, and the core
-# refuses the unqualified form outright.
+# The panel allow rule is qualified to exclude the engine's own egress: without
+# it a captured extension naming the console reaches the gateway's management
+# plane. The engine dials its upstreams back through these same rules, so that
+# traffic arrives as INNER -- the predicate names the type because there is no
+# longer a listener to name.
 grep -Fq 'console.example.com: 127.0.0.1' "$config" \
-    && grep -Fq 'AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,console.example.com)),DIRECT' "$config" \
+    && grep -Fq 'AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,console.example.com)),DIRECT' "$config" \
     && grep -Fq 'name: gateway5060' "$config" \
     && grep -Fq 'QUIC: { ports: [443, 5060] }' "$config" \
     && pass "seed contains public console mapping" \
@@ -1557,7 +1558,7 @@ else
 fi
 cert_full_body="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
 cert_pf_line="$(grep -n 'cert_root_claim_is_possible' <<<"$cert_full_body" | head -1 | cut -d: -f1 || true)"
-cert_pub_line="$(grep -n 'install_5gpndns' <<<"$cert_full_body" | head -1 | cut -d: -f1 || true)"
+cert_pub_line="$(grep -n 'install_mihomo' <<<"$cert_full_body" | head -1 | cut -d: -f1 || true)"
 cert_shared=0
 grep -Fq 'cert_root_claim_is_possible || return 1' \
     <<<"$(sed -n '/^ensure_dns_cert_root()/,/^}/p' "$INSTALL")" && cert_shared=1

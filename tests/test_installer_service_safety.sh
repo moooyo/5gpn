@@ -23,11 +23,10 @@ fi
 
 readiness="$(sed -n '/^wait_service_ready()/,/^}/p' "$INSTALL")"
 if grep -Fq 'deadline=$((SECONDS + SERVICE_READY_TIMEOUT))' <<<"$readiness" \
-   && grep -Fq '"${probe_timeout}s"' <<<"$readiness" \
-   && grep -Fq '"$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --healthcheck' <<<"$readiness"; then
-    pass "installer applies one wall-clock deadline to sidecar readiness"
+   && grep -Fq 'probe_mihomo_ready' <<<"$readiness"; then
+    pass "installer applies one wall-clock deadline to readiness"
 else
-    fail "sidecar readiness can exceed the advertised total deadline"
+    fail "readiness can exceed the advertised total deadline"
 fi
 
 deps="$(sed -n '/^install_deps()/,/^}/p' "$INSTALL")"

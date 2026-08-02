@@ -26,41 +26,6 @@ printf '%s\n' \
     'exit "${FAKE_RC-0}"' > "$FAKE_BIN"
 chmod +x "$FAKE_BIN"
 
-expect_binary_accept() {
-    local name="$1" output="$2"
-    export FAKE_STDOUT="$output" FAKE_RC=0
-    if binary_reports_exact_version "$FAKE_BIN" --version 9.8.7; then
-        pass "$name"
-    else
-        fail "$name"
-    fi
-}
-
-expect_binary_reject() {
-    local name="$1" output="$2" rc="${3:-0}"
-    export FAKE_STDOUT="$output" FAKE_RC="$rc"
-    if binary_reports_exact_version "$FAKE_BIN" --version 9.8.7; then
-        fail "$name"
-    else
-        pass "$name"
-    fi
-}
-
-expect_binary_accept "exact first-party version is accepted" $'9.8.7\n'
-expect_binary_reject "wrong first-party version is rejected" $'9.8.6\n'
-expect_binary_reject "version prefix match is rejected" $'9.8.7-beta.1\n'
-expect_binary_reject "extra first-party version output is rejected" $'9.8.7\nextra\n'
-expect_binary_reject "failed first-party version command is rejected" $'9.8.7\n' 1
-
-NUL_BIN="$TMP/fake-version-nul"
-printf '%s\n' '#!/usr/bin/env bash' "printf '9.8.7\\000\\n'" > "$NUL_BIN"
-chmod +x "$NUL_BIN"
-if binary_reports_exact_version "$NUL_BIN" --version 9.8.7; then
-    fail "NUL-bearing first-party version is rejected"
-else
-    pass "NUL-bearing first-party version is rejected"
-fi
-
 expect_mihomo_accept() {
     local name="$1" output="$2"
     export FAKE_STDOUT="$output" FAKE_RC=0
@@ -130,27 +95,20 @@ else
     pass "symlink web release marker is rejected"
 fi
 
-# The sidecar is a separately released component, so it is checked against its
-# own pinned version rather than the gateway's. The invariant under test is
-# that no staged executable reaches publication unversioned.
+# The invariant under test is that no staged executable reaches publication
+# unversioned. There is one staged executable now.
 stage_fn="$(sed -n '/^stage_artifacts()/,/^}/p' "$INSTALL")"
 install_web_fn="$(sed -n '/^install_web()/,/^}/p' "$INSTALL")"
-if grep -Fq 'binary_reports_exact_version "$ARTIFACT_STAGE/5gpn-dns" --version "$ver"' <<<"$stage_fn" \
-   && grep -Fq 'binary_reports_exact_version "$ARTIFACT_STAGE/5gpn-intercept" --version "$SIDECAR_VERSION"' <<<"$stage_fn" \
-   && grep -Fq 'mihomo_reports_exact_version "$ARTIFACT_STAGE/mihomo" "$MIHOMO_VERSION"' <<<"$stage_fn"; then
+if grep -Fq 'mihomo_reports_exact_version "$ARTIFACT_STAGE/mihomo" "$MIHOMO_VERSION"' <<<"$stage_fn"; then
     pass "all staged executables are wired to exact version checks"
 else
     fail "a staged executable bypasses exact version checks"
 fi
 
-for publisher in install_5gpndns install_intercept install_mihomo; do
+for publisher in install_mihomo; do
     if (
-        cp "$FAKE_BIN" "$ARTIFACT_STAGE/5gpn-dns"
-        cp "$FAKE_BIN" "$ARTIFACT_STAGE/5gpn-intercept"
         cp "$FAKE_BIN" "$ARTIFACT_STAGE/mihomo"
-        chmod +x "$ARTIFACT_STAGE/5gpn-dns" "$ARTIFACT_STAGE/5gpn-intercept" "$ARTIFACT_STAGE/mihomo"
-        DNS_BIN=/bin/true
-        INTERCEPT_BIN=/bin/true
+        chmod +x "$ARTIFACT_STAGE/mihomo"
         MIHOMO_BIN=/bin/true
         publish_executable() { return 77; }
         "$publisher" >/dev/null 2>&1
@@ -195,7 +153,7 @@ fi
 # tests/verify-artifact-pins.sh; what can be checked offline is that every pin
 # is complete, well-formed, and actually verified before the artifact is used.
 CHECKS="$ROOT/.github/workflows/checks.yml"
-for pin in SIDECAR MIHOMO ZASH; do
+for pin in MIHOMO ZASH; do
     version="${pin}_VERSION"
     digest="${pin}_SHA256"
     if [[ -z "${!version-}" || -z "${!digest-}" ]]; then

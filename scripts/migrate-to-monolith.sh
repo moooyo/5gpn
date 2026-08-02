@@ -15,13 +15,16 @@
 #
 # The first three are hard errors: the monolith deleted the RUNTIME-OVERLAY rule
 # type, so a config carrying an anchor fails `mihomo -t` with "proxy [egress]
-# not found" and the core refuses to start. The rest are merely pointless -- a
-# qualifier excluding an inbound that no longer exists can only ever be true.
+# not found" and the core refuses to start. The listener and the proxy are
+# merely pointless. The two qualifiers are neither: they keep extension-borne
+# traffic off the management plane, and the engine still produces such traffic
+# -- as INNER rather than on a named listener -- so they are rewritten to name
+# the new shape rather than dropped.
 #
-# Verified against a live v5 host: with the three rules removed and the two
-# qualifiers stripped, the monolith accepts the operator's config unchanged
-# otherwise. That is the point -- config.yaml is the operator's file, and this
-# removes what 5gpn put there, not what they did.
+# Verified against a live v5 host: with the three rules removed, the two
+# qualifiers rewritten and the listener and proxy stripped, the monolith accepts
+# the operator's config unchanged otherwise. That is the point -- config.yaml is
+# the operator's file, and this removes what 5gpn put there, not what they did.
 #
 # Usage: migrate-to-monolith.sh <config.yaml> [--in-place]
 # Without --in-place the rewritten config goes to stdout and nothing is touched.
@@ -53,17 +56,25 @@ DROP = {
 }
 
 # A panel rule excluded the sidecar's egress inbound because that egress
-# re-entered mihomo and would otherwise have matched the panel route. With the
-# hop gone the inbound cannot exist, so the qualifier is always true -- and
-# leaving it in place would keep a config referencing a listener the operator is
-# about to delete.
+# re-entered mihomo and would otherwise have matched the panel route -- a
+# compromised extension naming the console or panel hostname would have reached
+# the gateway's own management plane.
+#
+# That exposure did not go away with the hop. The engine still reaches its
+# upstreams by dialling back through these same rules, which is deliberate: it
+# is what keeps intercepted traffic inside the operator's routing. What changed
+# is only how that traffic is recognised. It used to arrive on a named SOCKS
+# listener; it now arrives as INNER, with no inbound name at all -- so a
+# qualifier naming the dead listener is indeed always true, but deleting it
+# does not preserve the rule's meaning, it discards it. Rewrite the predicate
+# instead, which is what etc/mihomo/config.yaml.tmpl seeds for fresh installs.
 QUALIFIED = re.compile(
     r'^(\s*)- AND,\(\(NOT,\(\(IN-NAME,intercept-egress\)\)\),(.*)\),(\w+)\s*$'
 )
 
 out = []
 dropped = 0
-simplified = 0
+rewritten = 0
 for line in lines:
     if line.strip() in DROP:
         dropped += 1
@@ -71,12 +82,14 @@ for line in lines:
     m = QUALIFIED.match(line)
     if m:
         indent, rest, action = m.groups()
-        out.append(f'{indent}- AND,({rest.strip()}),{action}')
-        simplified += 1
+        out.append(
+            f'{indent}- AND,((NOT,((IN-TYPE,INNER))),{rest.strip()}),{action}'
+        )
+        rewritten += 1
         continue
     out.append(line)
 
-sys.stderr.write(f'dropped {dropped} rule(s), simplified {simplified} panel rule(s)\n')
+sys.stderr.write(f'dropped {dropped} rule(s), rewrote {rewritten} panel rule(s)\n')
 sys.stdout.write('\n'.join(out))
 PY
 }

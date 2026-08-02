@@ -24,7 +24,7 @@ line_of() {
 
 install_lock_line="$(line_of "$full_fn" 'acquire_install_lock')"
 cert_lock_line="$(line_of "$full_fn" 'acquire_install_cert_lock')"
-publish_line="$(line_of "$full_fn" 'install_5gpndns')"
+publish_line="$(line_of "$full_fn" 'install_mihomo')"
 if [[ -n "$install_lock_line" && -n "$cert_lock_line" && -n "$publish_line" \
    && "$install_lock_line" -lt "$cert_lock_line" \
    && "$cert_lock_line" -lt "$publish_line" ]]; then

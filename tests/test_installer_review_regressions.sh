@@ -40,7 +40,7 @@ else
 fi
 
 stage_line="$(grep -n '^[[:space:]]*stage_artifacts' "$INSTALL" | tail -1 | cut -d: -f1)"
-publish_line="$(grep -n '^[[:space:]]*install_5gpndns' "$INSTALL" | tail -1 | cut -d: -f1)"
+publish_line="$(grep -n '^[[:space:]]*install_mihomo' "$INSTALL" | tail -1 | cut -d: -f1)"
 if [[ -n "$stage_line" && -n "$publish_line" && "$stage_line" -lt "$publish_line" ]]; then
     pass "artifact verification precedes publication"
 else
@@ -57,27 +57,19 @@ grep -Eq '^(rollback_install|capture_install_rollback|restore_managed_unit_state
     && fail "the install rollback subsystem came back" \
     || pass "a failed install does not restore or quarantine the host"
 
-# The interception credentials in a preserved operator config are rendered from
-# intercept/config.json, so a reseeded document leaves the YAML stale and the
-# routing check aborts publication with `credential-mismatch`. The preserve
-# branch must realign them, and must treat "nothing alignable" (exit 3, a legacy
-# config with no interception blocks) as fine rather than fatal.
+# The interception credentials used to exist in two places: intercept/config.json
+# rendered them and the operator's YAML carried a copy, so a reseeded document
+# stranded the preserved YAML in credential-mismatch and the installer had to
+# realign the two. In one process there is no second copy to drift from -- the
+# engine holds the document and nothing interception-shaped is written into
+# config.yaml at all. Neither the realignment nor the seed inputs may come back.
+grep -Eq '^align_preserved_intercept_credentials\(\)' "$INSTALL" \
+    && fail "the credential realignment subsystem came back" \
+    || pass "no interception credential is copied into the operator mihomo config"
 render_fn="$(sed -n '/^render_mihomo_config()/,/^}/p' "$INSTALL")"
-align_fn="$(sed -n '/^align_preserved_intercept_credentials()/,/^}/p' "$INSTALL")"
-preserve_line="$(grep -nF 'align_preserved_intercept_credentials "$config"' <<<"$render_fn" | head -1 | cut -d: -f1)"
-preserved_ok_line="$(grep -nF 'validated and preserved' <<<"$render_fn" | head -1 | cut -d: -f1)"
-if [[ -n "$preserve_line" && -n "$preserved_ok_line" \
-   && "$preserve_line" -lt "$preserved_ok_line" ]] \
-   && grep -Fq -- '--align-interception-credentials' <<<"$align_fn" \
-   && grep -Fq '3) rm -f -- "$candidate"; return 0 ;;' <<<"$align_fn" \
-   && grep -Fq '"$MIHOMO_BIN" -t -f "$candidate"' <<<"$align_fn"; then
-    pass "a preserved mihomo config is realigned to the interception truth source"
-else
-    fail "a reseeded interception config can strand a preserved mihomo config in credential-mismatch"
-fi
-grep -Fq 'cmp -s -- "$candidate" "$config"' <<<"$align_fn" \
-    && pass "an already-aligned config is left untouched" \
-    || fail "alignment rewrites an operator config that needed no change"
+grep -Fqi 'intercept' <<<"$render_fn" \
+    && fail "the mihomo seed renderer still reaches for interception credentials" \
+    || pass "the mihomo seed renderer has no interception inputs"
 
 ic="$(sed -n '/^install_cert()/,/^}/p' "$INSTALL")"
 grep -Fq 'validate_cert_pair' <<<"$ic" \
@@ -256,7 +248,7 @@ grep -Fq 'remove_runtime_preserving_gum' <<<"$uninstall_fn" \
     && pass "uninstall preserves Gum through the dedicated runtime cleanup" \
     || fail "uninstall still removes Gum with the whole runtime"
 
-grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/5gpn-dns"' "$INSTALL" \
+grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/web.tgz"' "$INSTALL" \
     && grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/mihomo.gz"' "$INSTALL" \
     && grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/zash.zip"' "$INSTALL" \
     && pass "all staged runtime artifacts are digest verified" \

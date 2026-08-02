@@ -45,12 +45,6 @@ if [[ "$raw_validation" == *"Pre-v5 dns.env contains retired DNS_EGRESS_RESOLVER
 else
     fail "raw stable dns.env failure is not actionable: $raw_validation"
 fi
-grep -Fq 'Pre-v5 interception config detected' "$INSTALL" \
-    && grep -Fq 'Do not delete it' "$INSTALL" \
-    && grep -Fq "jq rebuild preserving SOCKS/TLS infrastructure" "$INSTALL" \
-    && grep -Fq -- '--check-interception-routing to report ready' "$INSTALL" \
-    && pass "interception v4 failure provides the lockstep v5 rebuild instruction" \
-    || fail "interception v4 failure lacks the lockstep v5 rebuild instruction"
 for recipe_token in \
     'set -euo pipefail' \
     'NEW_INSTALL_SH' \
@@ -419,84 +413,6 @@ else
     fail "normal beta rendering changed or rejected the legacy mihomo config"
 fi
 
-# Routing publishes through the overlay and nothing else, so a preserved config
-# with no anchors is not a degraded-but-usable arrangement any more: it is a
-# gateway whose extensions can never be enabled. The seam must refuse it.
-if check_interception_routing_compatibility >/dev/null 2>&1; then
-    fail "the installer compatibility seam accepted an unanchored preserved config"
-elif [[ "$INTERCEPT_ROUTING_READY" == 0 && "$INTERCEPT_ROUTING_REASON" == not-anchored ]]; then
-    pass "the installer compatibility seam refuses an unanchored preserved config"
-else
-    fail "the installer compatibility seam did not report the unanchored config as not-anchored"
-fi
-
-# The same config, caught in preflight while the host is still untouched. This
-# is the check that turns the upgrade away with an actionable instruction.
-if preserved_mihomo_config_is_anchored >/dev/null 2>&1; then
-    fail "preflight accepted a preserved mihomo config with no overlay anchors"
-else
-    pass "preflight refuses a preserved mihomo config with no overlay anchors"
-fi
-
-cat > "$TMP/fake-dns-residual" <<'EOF'
-#!/usr/bin/env bash
-if [[ "${1:-}" == --check-interception-routing ]]; then
-    printf '%s\n' overlay-egress-anchor-misplaced
-    exit 3
-fi
-exit 1
-EOF
-cat > "$TMP/fake-intercept-disabled" <<'EOF'
-#!/usr/bin/env bash
-case " $* " in
-    *' --check-config '*) exit 0 ;;
-    *' --check-enabled '*) exit 3 ;;
-esac
-exit 1
-EOF
-chmod +x "$TMP/fake-dns-residual" "$TMP/fake-intercept-disabled"
-saved_dns_bin="$DNS_BIN"
-saved_intercept_bin="$INTERCEPT_BIN"
-DNS_BIN="$TMP/fake-dns-residual"
-INTERCEPT_BIN="$TMP/fake-intercept-disabled"
-before_residual_mihomo="$(hash_file "$MIHOMO_DIR/config.yaml")"
-before_residual_intercept="$(hash_file "$INTERCEPT_DIR/config.json")"
-if check_interception_routing_compatibility >/dev/null 2>&1; then
-    fail "disabled v5 with residual managed rules was allowed to degrade"
-elif [[ "$INTERCEPT_ROUTING_REASON" == overlay-egress-anchor-misplaced \
-     && "$before_residual_mihomo" == "$(hash_file "$MIHOMO_DIR/config.yaml")" \
-     && "$before_residual_intercept" == "$(hash_file "$INTERCEPT_DIR/config.json")" ]]; then
-    pass "residual managed rules hard-fail without changing mihomo/intercept bytes"
-else
-    fail "residual managed-rule preflight did not preserve bytes"
-fi
-
-saved_artifact_stage="${ARTIFACT_STAGE:-}"
-ARTIFACT_STAGE="$TMP/residual-stage"
-mkdir -p "$ARTIFACT_STAGE"
-cp -- "$TMP/fake-dns-residual" "$ARTIFACT_STAGE/5gpn-dns"
-cp -- "$TMP/fake-intercept-disabled" "$ARTIFACT_STAGE/5gpn-intercept"
-if preflight_existing_interception_state >/dev/null 2>&1; then
-    fail "target-release preflight accepted residual managed rules"
-elif [[ "$before_residual_mihomo" == "$(hash_file "$MIHOMO_DIR/config.yaml")" \
-     && "$before_residual_intercept" == "$(hash_file "$INTERCEPT_DIR/config.json")" ]]; then
-    pass "target-release preflight aborts residual rules before publication"
-else
-    fail "target-release residual preflight changed live bytes"
-fi
-ARTIFACT_STAGE="$saved_artifact_stage"
-DNS_BIN="$saved_dns_bin"
-INTERCEPT_BIN="$saved_intercept_bin"
-
-full_install_fn="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
-preflight_line="$(grep -n 'preflight_existing_interception_state' <<<"$full_install_fn" | head -1 | cut -d: -f1)"
-publish_line="$(grep -n 'install_5gpndns' <<<"$full_install_fn" | head -1 | cut -d: -f1)"
-if [[ -n "$preflight_line" && -n "$publish_line" && "$preflight_line" -lt "$publish_line" ]]; then
-    pass "interception routing preflight runs before live publication"
-else
-    fail "interception routing preflight is too late in full_install"
-fi
-
 # The explicit reset path is the only allowed replacement. It must retain an
 # exact backup and add all three routing boundaries needed by interception.
 if (
@@ -514,14 +430,14 @@ if (
     backups=("$MIHOMO_DIR"/config.yaml.bak.*)
     if [[ "${#backups[@]}" == 1 && -f "${backups[0]}" ]] \
        && cmp -s "$FIXTURE/mihomo-config.yaml" "${backups[0]}" \
-       && grep -Fq 'name: intercept-egress' "$MIHOMO_DIR/config.yaml" \
-       && grep -Fq 'name: MODULE-INTERCEPT' "$MIHOMO_DIR/config.yaml" \
-       && grep -Fq -- '- IN-NAME,intercept-egress,REJECT' "$MIHOMO_DIR/config.yaml" \
-       && check_interception_routing_compatibility >/dev/null 2>&1 \
-       && [[ "$INTERCEPT_ROUTING_READY" == 1 ]]; then
-        pass "explicit reset backs up the legacy bytes and installs the interception scaffold"
+       && ! grep -Fq 'name: intercept-egress' "$MIHOMO_DIR/config.yaml" \
+       && ! grep -Fq 'name: MODULE-INTERCEPT' "$MIHOMO_DIR/config.yaml" \
+       && ! grep -Fq 'RUNTIME-OVERLAY' "$MIHOMO_DIR/config.yaml" \
+       && grep -Fq -- '- AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,' "$MIHOMO_DIR/config.yaml" \
+       && grep -Fq -- '- AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' "$MIHOMO_DIR/config.yaml"; then
+        pass "explicit reset backs up the legacy bytes and seeds the monolith boundary"
     else
-        fail "explicit reset backup or interception scaffold is incomplete"
+        fail "explicit reset backup or monolith boundary is incomplete"
     fi
 else
     fail "explicit reset rejected the 0.0.13 legacy fixture"
