@@ -112,15 +112,13 @@ func (bt *Bot) resolveBotExtensionModule(
 	if err != nil {
 		return interceptModulesView{}, interceptModuleView{}, payload, err
 	}
-	if view.Revision != payload.Revision {
-		return view, interceptModuleView{}, payload, errInterceptRevisionConflict
+	module, err := findBotExtensionModule(view, payload)
+	if errors.Is(err, errBotExtensionSnapshotChanged) {
+		// This surface answers the operator in their own language; the lookup
+		// itself has no opinion about wording.
+		return view, interceptModuleView{}, payload, errors.New("插件快照已变化或已删除")
 	}
-	for _, module := range view.Modules {
-		if module.ID == payload.ModuleID && module.SnapshotDigest == payload.Digest {
-			return view, module, payload, nil
-		}
-	}
-	return view, interceptModuleView{}, payload, errors.New("插件快照已变化或已删除")
+	return view, module, payload, err
 }
 
 func (bt *Bot) renderBotExtensionModule(
@@ -617,17 +615,18 @@ func (bt *Bot) resolveBotExtensionSetting(
 	if err != nil {
 		return interceptModulesView{}, interceptModuleView{}, interceptModuleSetting{}, payload, err
 	}
-	if view.Revision != payload.Revision {
-		return view, interceptModuleView{}, interceptModuleSetting{}, payload, errInterceptRevisionConflict
-	}
-	for _, module := range view.Modules {
-		if module.ID != payload.ModuleID || module.SnapshotDigest != payload.Digest {
-			continue
+	// The same (revision, id, digest) proof as everywhere else, not a third
+	// hand-rolled copy of it; only the setting lookup is this resolver's own.
+	module, err := findBotExtensionModule(view, payload)
+	if err != nil {
+		if errors.Is(err, errBotExtensionSnapshotChanged) {
+			return view, interceptModuleView{}, interceptModuleSetting{}, payload, errors.New("插件参数或快照已变化")
 		}
-		for _, setting := range module.Settings {
-			if setting.Key == payload.SettingKey {
-				return view, module, setting, payload, nil
-			}
+		return view, interceptModuleView{}, interceptModuleSetting{}, payload, err
+	}
+	for _, setting := range module.Settings {
+		if setting.Key == payload.SettingKey {
+			return view, module, setting, payload, nil
 		}
 	}
 	return view, interceptModuleView{}, interceptModuleSetting{}, payload, errors.New("插件参数或快照已变化")
