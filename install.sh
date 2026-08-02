@@ -918,8 +918,7 @@ preflight_runtime_publication_paths() {
 
     for path in \
         "$SCRIPTS_DIR" "$WWW_DIR" "${BASE_DIR}/etc" "${BASE_DIR}/etc/systemd" \
-        "${BASE_DIR}/etc/mihomo" \
-        "${BASE_DIR}/etc/polkit-1" "${BASE_DIR}/etc/polkit-1/rules.d"; do
+        "${BASE_DIR}/etc/mihomo"; do
         runtime_directory_slot_is_safe "$path" "$BASE_DIR" \
             || { err "Refusing unsafe runtime directory slot: $path"; return 1; }
     done
@@ -2287,25 +2286,7 @@ polkit_rule_owned_by_5gpn() {
 
 preflight_polkit_rule_ownership() {
     [[ ! -e "$POLKIT_RULE_PATH" ]] || polkit_rule_owned_by_5gpn \
-        || { err "Refusing to replace an unowned polkit rule: $POLKIT_RULE_PATH"; return 1; }
-}
-
-install_polkit_rule() {
-    local src candidate
-    preflight_polkit_rule_ownership || return 1
-    if [[ -f "${SCRIPT_DIR}/etc/polkit-1/rules.d/50-5gpn.rules" ]]; then
-        src="${SCRIPT_DIR}/etc/polkit-1/rules.d/50-5gpn.rules"
-    elif [[ -f "${BASE_DIR}/etc/polkit-1/rules.d/50-5gpn.rules" ]]; then
-        src="${BASE_DIR}/etc/polkit-1/rules.d/50-5gpn.rules"
-    else
-        err "The fixed 5gpn polkit rule is missing."
-        return 1
-    fi
-    install -d -o root -g root -m 0755 "$(dirname -- "$POLKIT_RULE_PATH")" || return 1
-    candidate="$(mktemp "$(dirname -- "$POLKIT_RULE_PATH")/.50-5gpn.rules.XXXXXX")" || return 1
-    install -o root -g root -m 0644 "$src" "$candidate" \
-        || { rm -f -- "$candidate"; return 1; }
-    mv -f -- "$candidate" "$POLKIT_RULE_PATH"
+        || { err "Refusing to touch an unowned polkit rule: $POLKIT_RULE_PATH"; return 1; }
 }
 
 remove_owned_renewal_automation() {
@@ -3791,9 +3772,6 @@ install_files() {
         [[ -e "$u" ]] || continue
         install -m 0644 "$u" "${BASE_DIR}/etc/systemd/$(basename "$u")"
     done
-    install -d -m 0755 "${BASE_DIR}/etc/polkit-1/rules.d"
-    install -m 0644 "${SCRIPT_DIR}/etc/polkit-1/rules.d/50-5gpn.rules" \
-        "${BASE_DIR}/etc/polkit-1/rules.d/50-5gpn.rules"
     # The installed management script resolves reset assets relative to
     # /opt/5gpn, so persist every mihomo seed input beside that script.
     install_mihomo_runtime_assets || return 1
@@ -4935,11 +4913,11 @@ preflight_unit_ownership() {
 }
 
 install_units() {
-    info "Installing systemd units (5gpn-dns + 5gpn-intercept + mihomo)..."
+    info "Installing systemd units (one service, two root oneshots)..."
     # Prefer the repo checkout; fall back to the staged copies under /opt/5gpn
     # (a piped curl|bash install has no checkout after install_files staged them).
     local src u
-    for u in 5gpn-dns.service 5gpn-intercept.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-cert.timer 5gpn-intercept-runtime.path mihomo.service 5gpn-journal@.service; do
+    for u in mihomo.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-cert.timer; do
         if [[ -f "${SCRIPT_DIR}/etc/systemd/${u}" ]]; then
             src="${SCRIPT_DIR}/etc/systemd/${u}"
         elif [[ -f "${BASE_DIR}/etc/systemd/${u}" ]]; then
@@ -4954,9 +4932,49 @@ install_units() {
         sync -f "$candidate" 2>/dev/null || true
         mv -f -- "$candidate" "/etc/systemd/system/${u}"
     done
-    install_polkit_rule || return 1
+    # Units this release no longer publishes are removed rather than left
+    # behind. A host upgrading from the three-process layout still has them
+    # enabled, and an orphaned 5gpn-dns.service would keep restarting against a
+    # binary that is gone -- or, worse, keep :853 bound against the one that is
+    # not.
+    remove_retired_units || return 1
     systemctl daemon-reload
-    ok "5gpn-dns, modular interception, certificate watcher/timer, mihomo, and fixed journal units installed."
+    ok "mihomo, the certificate watcher and its timer installed."
+}
+
+# retired_units are what the three-process layout published. Removal has to
+# outlive publication: this list is the only record that they were ever ours,
+# and dropping an entry from it strands whatever it names on every host that
+# has not upgraded yet.
+retired_units() {
+    printf '%s\n' \
+        5gpn-dns.service \
+        5gpn-intercept.service \
+        5gpn-intercept-runtime.path \
+        5gpn-journal@.service
+}
+
+remove_retired_units() {
+    local unit
+    while read -r unit; do
+        [[ -n "$unit" ]] || continue
+        remove_unit "$unit" || return 1
+    done < <(retired_units)
+    remove_retired_polkit_rule
+    rm -f -- /run/5gpn-journal/5gpn-dns.log /run/5gpn-journal/mihomo.log 2>/dev/null || true
+    rmdir -- /run/5gpn-journal 2>/dev/null || true
+}
+
+# The polkit rule authorized one service user to restart another service's unit.
+# With one unit there is no such relationship, and leaving it in place would give
+# a network-facing account the ability to restart system services for no reason
+# at all. It is removed on upgrade, and only when it is provably ours.
+remove_retired_polkit_rule() {
+    if polkit_rule_owned_by_5gpn; then
+        rm -f -- "$POLKIT_RULE_PATH"
+    elif [[ -e "$POLKIT_RULE_PATH" ]]; then
+        warn "Preserving unowned polkit rule: $POLKIT_RULE_PATH"
+    fi
 }
 
 prepare_runtime_permissions() {
@@ -6455,11 +6473,7 @@ uninstall() {
     done
     rm -f -- /run/5gpn-journal/5gpn-dns.log /run/5gpn-journal/mihomo.log 2>/dev/null || true
     rmdir -- /run/5gpn-journal 2>/dev/null || true
-    if polkit_rule_owned_by_5gpn; then
-        rm -f -- "$POLKIT_RULE_PATH"
-    elif [[ -e "$POLKIT_RULE_PATH" ]]; then
-        warn "Preserving unowned polkit rule: $POLKIT_RULE_PATH"
-    fi
+    remove_retired_polkit_rule
     systemctl daemon-reload 2>/dev/null || true
 
     # Remove the exact deploy hook installed by the current release.

@@ -1,8 +1,8 @@
-# 5gpn-unit-id: mihomo.service:v1
+# 5gpn-unit-id: mihomo.service:v2
 [Unit]
-Description=5gpn mihomo (TLS external-controller + SNI/QUIC forward + egress)
-After=network-online.target 5gpn-intercept.service
-Wants=network-online.target 5gpn-intercept.service
+Description=5gpn (DNS engine, interception engine, forwarding data plane, control API)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -12,29 +12,27 @@ RestartSec=5
 User=mihomo
 Group=mihomo
 UMask=0027
-# The runtime-overlay control and generation sockets live here. systemd owns
-# the directory's lifetime, so a socket can never outlive the process that
-# served it; ProtectSystem=strict would otherwise leave /run read-only.
-# 0711 because the two peers are separate service users that must enter the
-# directory but never enumerate it — each socket's own mode and the
-# SO_PEERCRED check on every accept are what gate access.
-RuntimeDirectory=mihomo
-RuntimeDirectoryMode=0711
-# Membership of the two socket groups, and nothing else. An unprivileged process
-# cannot give a file away to a group it does not belong to, so mihomo must be a
-# member of whichever group owns each overlay socket. These groups exist only
-# for that and own nothing else, so joining them grants no additional reach —
-# using the peers' own primary groups instead would have.
-SupplementaryGroups=5gpn-overlay-ctl 5gpn-overlay-gen
+
+# One process now, so this unit carries the union of what three used to. What
+# it does not carry is the coordination between them: the overlay control and
+# generation sockets are gone, and with them the runtime directory that held
+# them and the two groups whose only purpose was handing a socket from one
+# service user to another. There is no second process left to agree with.
+
+# The interception leaf is published by the root oneshot that owns the CA, and
+# this group is how it is read. Membership grants nothing else — the group owns
+# the leaf and nothing besides.
+SupplementaryGroups=gpn-intercept
+
 LimitNOFILE=65535
-# Sandbox: leaf proxy — binds 80/443/8080/8443 tcp + 443 udp by default;
-# optional catalog modules may add 5060 tcp/udp, plus loopback TLS external-controller
-# on the shared zash role certificate. mihomo dials both IPv4 and IPv6;
-# AF_NETLINK is REQUIRED — its UDP/QUIC DIRECT
-# dial path does a route-table lookup (route ip+net: netlinkrib) that fatals the
-# forward with "address family not supported by protocol" without it (confirmed
-# on test-env 2026-07-14: QUIC/HTTP3 forwarding fails without AF_NETLINK; TCP is
-# unaffected).
+
+# Sandbox. This process binds :853 for DoT and the operator's gateway ports,
+# which is the whole reason it needs a capability at all. AF_NETLINK is
+# REQUIRED and not decorative: the UDP/QUIC DIRECT dial path does a route-table
+# lookup (route ip+net: netlinkrib) that fatals the forward with "address
+# family not supported by protocol" without it, confirmed on test-env
+# 2026-07-14. TCP is unaffected, so the failure presents as "QUIC is broken"
+# rather than as a sandbox problem.
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -47,18 +45,34 @@ ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
 ProtectProc=invisible
 ProcSubset=pid
 RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
-# mihomo v1.19.28 safe-path checks only trust files under -d plus SAFE_PATHS.
-# The shared zash controller cert lives outside /etc/5gpn/mihomo, so allow only
-# that read-only cert dir while keeping ProtectSystem=strict and writes scoped to
-# /etc/5gpn/mihomo.
-Environment=SAFE_PATHS=/etc/5gpn/cert/zash
-# mihomo writes provider caches + reads whitelist.txt/config.yaml under its dir.
-ReadWritePaths=/etc/5gpn/mihomo
-# ACME credentials are unrelated to the data plane and must remain unreadable.
-InaccessiblePaths=-/etc/5gpn/acme -/etc/5gpn/dns.env
+
+# mihomo's safe-path check only trusts files under -d plus SAFE_PATHS. The DoT
+# leaf, the shared controller certificate and the interception leaf all live
+# outside /etc/5gpn/mihomo, so they are named here rather than by relaxing the
+# check.
+Environment=SAFE_PATHS=/etc/5gpn/cert/zash:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls
+
+# Writable: mihomo's own directory, which now also holds the gpn/ state
+# documents, and the per-extension persistent storage.
+ReadWritePaths=/etc/5gpn/mihomo /var/lib/5gpn-intercept
+
+# Readable: the certificates it serves and verifies against, read-only. Nothing
+# in this process is entitled to replace a certificate — issuing belongs to the
+# root oneshots, and a network-facing process able to rewrite its own leaf could
+# rewrite the SAN set that bounds what it may intercept.
+ReadOnlyPaths=/etc/5gpn/cert /etc/5gpn/intercept/tls
+
+# The CA signing key is the one secret this process must never hold. It can mint
+# a leaf for any name, so an engine compromise that reached it would be a
+# compromise of every TLS identity this gateway can present — permanently, and
+# far beyond the SAN set the published leaf bounds it to. ACME credentials are
+# unrelated to the data plane and are excluded for the same reason.
+InaccessiblePaths=-/etc/5gpn/intercept-ca -/etc/5gpn/acme -/etc/5gpn/dns.env
 
 [Install]
 WantedBy=multi-user.target
