@@ -52,20 +52,22 @@ ProcSubset=pid
 RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
 
 # mihomo's safe-path check only trusts files under -d plus SAFE_PATHS. The DoT
-# leaf, the shared controller certificate and the interception leaf all live
-# outside /etc/5gpn/mihomo, so they are named here rather than by relaxing the
-# check.
-Environment=SAFE_PATHS=/etc/5gpn/cert/zash:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls
+# leaf, the shared controller certificate, the interception leaf and the
+# zashboard bundle all live outside /etc/5gpn/mihomo, so they are named here
+# rather than by relaxing the check.
+Environment=SAFE_PATHS=/etc/5gpn/cert/zash:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui
 
 # Writable: mihomo's own directory, which now also holds the gpn/ state
 # documents, and the per-extension persistent storage.
 ReadWritePaths=/etc/5gpn/mihomo /var/lib/5gpn-intercept
 
-# Readable: the certificates it serves and verifies against, read-only. Nothing
-# in this process is entitled to replace a certificate — issuing belongs to the
-# root oneshots, and a network-facing process able to rewrite its own leaf could
-# rewrite the SAN set that bounds what it may intercept.
-ReadOnlyPaths=/etc/5gpn/cert /etc/5gpn/intercept/tls
+# Readable: the certificates it serves and verifies against, and the UI bundle
+# it serves at /ui/ — all read-only. Nothing in this process is entitled to
+# replace a certificate: issuing belongs to the root oneshots, and a
+# network-facing process able to rewrite its own leaf could rewrite the SAN set
+# that bounds what it may intercept. The bundle is read-only for the plainer
+# reason that a process serving static assets has no business rewriting them.
+ReadOnlyPaths=/etc/5gpn/cert /etc/5gpn/intercept/tls /opt/5gpn/ui
 
 # The CA signing key is the one secret this process must never hold. It can mint
 # a leaf for any name, so an engine compromise that reached it would be a
