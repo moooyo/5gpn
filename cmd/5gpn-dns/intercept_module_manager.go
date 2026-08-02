@@ -164,18 +164,24 @@ func (m *InterceptModuleManager) rollbackSidecarDocument(ctx context.Context, bo
 	return m.store.writeAtomicContext(rollback, body)
 }
 
-// publishSidecarDocument puts the candidate document into effect in the sidecar.
+// stageSidecarDocument makes the candidate durable, and live if the sidecar is
+// already listening.
 //
 // It reports whether anything durable happened, because that -- not the error --
 // is what tells the caller a compensation is owed. The bundle commit and the
 // file write are two steps, and the second failing after the first succeeded
-// leaves the sidecar serving a document that no generation names. Returning
-// only an error made that case indistinguishable from having done nothing, and
-// the caller compensated neither.
+// leaves the sidecar serving a document that no generation names.
 //
-// The ordering the transaction depends on is that the sidecar holds the new
-// document before the certificate wait and before mihomo publishes, so capture
-// traffic never arrives at a processor that cannot serve it.
+// It also reports whether the bundle still has to be handed over. That is split
+// out because of an ordering the unit files impose: 5gpn-intercept.service has
+// `Requires=5gpn-intercept-cert.service`, and the cert oneshot is triggered by
+// the very write below. On a first enable the sidecar therefore cannot start
+// until the certificate exists, so waiting for its socket here waited for
+// something that structurally could not happen yet -- and then treated the
+// timeout as success. The transaction went on to commit a generation naming a
+// bundle the sidecar had never seen, readiness was never asserted, and every
+// captured connection was REJECTed while the API, the console and the bot all
+// reported the enable had worked.
 //
 // Which channel carries it is decided per call rather than once at startup. The
 // sidecar's unit refuses to run while the MITM master is off, so its socket is
@@ -184,17 +190,17 @@ func (m *InterceptModuleManager) rollbackSidecarDocument(ctx context.Context, bo
 // enable exists to start, which made the master switch a one-way door.
 //
 // Called with m.mu held (see mutate), so the client is read without taking it.
-func (m *InterceptModuleManager) publishSidecarDocument(ctx context.Context, body []byte) (bool, error) {
+func (m *InterceptModuleManager) stageSidecarDocument(ctx context.Context, body []byte) (published, pending bool, err error) {
 	client := m.sidecar
 	if client == nil {
 		if err := m.store.writeAtomicContext(ctx, body); err != nil {
-			return false, err
+			return false, false, err
 		}
-		return true, nil
+		return true, false, nil
 	}
 	if sidecarSocketPresent(client) {
 		if _, err := client.PublishBundle(ctx, interceptBundleID(body), body); err != nil {
-			return false, err
+			return false, false, err
 		}
 		// The bundle is live from here on, so every later failure owes a
 		// compensation even though the document write below may not have run.
@@ -203,35 +209,44 @@ func (m *InterceptModuleManager) publishSidecarDocument(ctx context.Context, bod
 		// downgrade to a build without the API finds the state it expects. It is
 		// no longer what the sidecar reads.
 		if err := m.store.writeAtomicContext(ctx, body); err != nil {
-			return true, err
+			return true, false, err
 		}
-		return true, nil
+		return true, false, nil
 	}
 
-	// No socket: write the file first, because that is what the runtime path
-	// unit watches and what the sidecar cold starts from, then push once it is
-	// listening. Writing alone is not enough — a sidecar serving the file has no
-	// bundle live, so readiness is never asserted and capture stays fail-closed
-	// indefinitely even though every step reported success.
+	// No socket: write the file, because that is what the runtime path unit
+	// watches, what the cert path unit watches, and what the sidecar cold starts
+	// from. The handover waits until the certificate gate has run.
 	if err := m.store.writeAtomicContext(ctx, body); err != nil {
-		return false, err
+		return false, false, err
+	}
+	return true, true, nil
+}
+
+// pushSidecarBundle waits for the sidecar to come up and hands it the bundle.
+//
+// A failure here fails the transaction. Writing the document alone is not
+// enough: a sidecar serving the file has no bundle live, so the generation's
+// SidecarBundleDigest matches nothing, readiness is never asserted, and capture
+// stays fail-closed indefinitely. Reporting that as success is what this used to
+// do, and it is strictly worse than refusing the change -- the operator gets a
+// green console and a hostname that answers nothing.
+func (m *InterceptModuleManager) pushSidecarBundle(ctx context.Context, body []byte) error {
+	client := m.sidecar
+	if client == nil {
+		return nil
 	}
 	wait := m.sidecarStart
 	if wait <= 0 {
 		wait = sidecarStartWait
 	}
 	if !waitForSidecarSocket(ctx, client, wait) {
-		log.Printf("intercept: sidecar did not start within %s; it serves the configuration file until the next transaction", wait)
-		return true, nil
+		return fmt.Errorf("the sidecar did not start within %s", wait)
 	}
 	if _, err := client.PublishBundle(ctx, interceptBundleID(body), body); err != nil {
-		// The document is already durable and correct, so the transaction
-		// stands. The overlay generation published next asserts processor
-		// readiness and stays fail-closed on its own if the sidecar never
-		// adopts the bundle, which is the safe direction to fail.
-		log.Printf("intercept: sidecar started but did not adopt the bundle (%v); it serves the configuration file", err)
+		return fmt.Errorf("the sidecar started but did not adopt the bundle: %w", err)
 	}
-	return true, nil
+	return nil
 }
 
 // sidecarSocketPresent reports whether the control API is there to talk to right
@@ -392,9 +407,19 @@ func (m *InterceptModuleManager) PrepareRuntime() error {
 	// goes on serving whatever its own store cold started from, the
 	// generation names the document's bundle, and readiness is refused for
 	// the mismatch, which fails every captured connection closed.
-	if _, err := m.publishSidecarDocument(context.Background(), body); err != nil {
+	_, pendingBundle, err := m.stageSidecarDocument(context.Background(), body)
+	if err != nil {
 		m.publishHosts(nil)
 		return fmt.Errorf("the interception document could not be republished: %w", err)
+	}
+	// At startup the certificate already exists if it ever did, so there is
+	// nothing to gate the handover on here -- but the handover still has to
+	// happen, for the reason above.
+	if pendingBundle {
+		if err := m.pushSidecarBundle(context.Background(), body); err != nil {
+			m.publishHosts(nil)
+			return fmt.Errorf("the interception bundle could not be republished: %w", err)
+		}
 	}
 	if _, err := m.publishOverlayGeneration(context.Background(), document, analysis.MatchTarget,
 		interceptRevision(body), interceptCertificateDigest(certificateInterceptHosts(document)),
@@ -1345,7 +1370,7 @@ func (m *InterceptModuleManager) mutate(
 		}
 	}()
 
-	published, err = m.publishSidecarDocument(ctx, newBody)
+	published, pendingBundle, err := m.stageSidecarDocument(ctx, newBody)
 	if err != nil {
 		return interceptModulesView{}, fmt.Errorf("%w: sidecar publication: %v", errInterceptApplyFailed, err)
 	}
@@ -1356,6 +1381,14 @@ func (m *InterceptModuleManager) mutate(
 	if len(nextCertificateHosts) > 0 && (certificateHostsChanged || (firstActivation && !m.certificateReady(nextDocument))) {
 		if err := m.waitForCertificate(ctx, interceptCertificateDigest(nextCertificateHosts), newBody); err != nil {
 			return interceptModulesView{}, fmt.Errorf("%w: certificate publication: %v", errInterceptApplyFailed, err)
+		}
+	}
+	// Only now can the sidecar start: its unit Requires the certificate oneshot,
+	// which the document write above is what triggers. Waiting for its socket
+	// before this point waited for something that could not happen yet.
+	if pendingBundle {
+		if err := m.pushSidecarBundle(ctx, newBody); err != nil {
+			return interceptModulesView{}, fmt.Errorf("%w: sidecar handover: %v", errInterceptApplyFailed, err)
 		}
 	}
 	// The mihomo file is not rewritten and mihomo is not reloaded. What changes
