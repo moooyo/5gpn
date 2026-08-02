@@ -342,12 +342,37 @@ func (s *botExtensionStateStore) issueToken(purpose botExtensionTokenPurpose, ad
 		ttl = s.confirmationTTL
 	}
 	expiresAt := now.Add(ttl)
+	// Every confirmation is bound to a generation, without exception.
+	//
+	// This entry point left it zero and the consume path skipped the check
+	// whenever it was zero, so the binding was optional in practice: the
+	// production issuer set it, and anything else produced a token that
+	// outlived the owner's own cancellations. Binding here removes the escape
+	// rather than relying on one caller to remember.
+	//
+	// The current generation, not a new one: advancing would invalidate a
+	// confirmation the operator is still looking at, which is what
+	// CancelOwner is for.
+	generation := uint64(0)
+	if purpose == botExtensionTokenConfirmation {
+		existing, ok := s.generations[owner]
+		if !ok {
+			value, genErr := s.advanceGenerationLocked(owner, now)
+			if genErr != nil {
+				return "", time.Time{}, genErr
+			}
+			generation = value
+		} else {
+			generation = existing.value
+		}
+	}
 	s.tokens[token] = botExtensionTokenEntry{
-		purpose:   purpose,
-		owner:     owner,
-		payload:   cloneBotExtensionPayload(payload),
-		expiresAt: expiresAt,
-		bytes:     payloadBytes,
+		purpose:    purpose,
+		owner:      owner,
+		payload:    cloneBotExtensionPayload(payload),
+		expiresAt:  expiresAt,
+		bytes:      payloadBytes,
+		generation: generation,
 	}
 	s.usedBytes += payloadBytes
 	return token, expiresAt, nil
@@ -400,7 +425,9 @@ func (s *botExtensionStateStore) tokenPayload(token string, purpose botExtension
 	if !ok || entry.purpose != purpose || entry.owner != owner || entry.payload.Kind != expectedKind {
 		return botExtensionStatePayload{}, false
 	}
-	if purpose == botExtensionTokenConfirmation && entry.generation != 0 {
+	if purpose == botExtensionTokenConfirmation {
+		// No `entry.generation != 0` escape. Every confirmation carries one now,
+		// so a zero here is a token this build did not issue and must not honour.
 		generation, current := s.generations[owner]
 		if !current || generation.value != entry.generation {
 			return botExtensionStatePayload{}, false
@@ -511,11 +538,15 @@ func (s *botExtensionStateStore) ConsumeInput(adminID, chatID int64, expectedKin
 	s.initLocked()
 	now := s.now()
 	s.pruneLocked(now)
-	_, _ = s.advanceGenerationLocked(owner, now)
+	// Check before advancing. This burned the owner's generation and only then
+	// looked at the entry, so a kind mismatch invalidated every live
+	// confirmation for that owner -- while the doc comment promised "a kind
+	// mismatch leaves it intact".
 	entry, ok := s.inputs[owner]
 	if !ok || entry.state.Kind != expectedKind {
 		return botExtensionStatePayload{}, false
 	}
+	_, _ = s.advanceGenerationLocked(owner, now)
 	payload := cloneBotExtensionPayload(entry.state.Payload)
 	s.deleteInputLocked(owner, entry)
 	return payload, true

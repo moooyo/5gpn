@@ -1527,3 +1527,48 @@ func TestApplyCompensatesWhenTheCertificateNeverArrives(t *testing.T) {
 		t.Fatal("a failed transaction touched the operator's mihomo file")
 	}
 }
+
+// A required egress binding cannot be cleared, and the mutator is what refuses
+// it.
+//
+// Both Telegram paths carried this check and the manager did not, so it was
+// enforced by whichever surface happened to be asking. The enable path's copy
+// sits inside `if update.Enabled != nil`, and an egress apply sends Enabled as
+// nil; validateInterceptEgressGroupBinding returns nil for "",
+// effects.validateEgressBindings is set only for a non-empty group, and mutate
+// never calls validateInterceptModule. Clearing it reached the document
+// unopposed and left the extension not-ready with nothing having said no.
+func TestRequiredEgressBindingCannotBeCleared(t *testing.T) {
+	module := testModuleSnapshot()
+	module.EgressGroupRequired = true
+	module.EgressGroup = "Proxies"
+	manager, _, _, _, _ := newInterceptManagerFixture(t, module)
+	manager.certWait = func(context.Context, string) error { return nil }
+
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleared := ""
+	if _, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{
+		Revision: view.Revision, EgressGroup: &cleared,
+	}); err == nil {
+		t.Fatal("a required egress binding was cleared")
+	}
+
+	// An extension that does not require one may still clear it.
+	optional := testModuleSnapshot()
+	optional.ID = "io.example.optional"
+	optional.EgressGroup = "Proxies"
+	optionalManager, _, _, _, _ := newInterceptManagerFixture(t, optional)
+	optionalManager.certWait = func(context.Context, string) error { return nil }
+	optionalView, err := optionalManager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := optionalManager.Update(context.Background(), optional.ID, interceptModuleUpdate{
+		Revision: optionalView.Revision, EgressGroup: &cleared,
+	}); err != nil {
+		t.Fatalf("an optional binding could not be cleared: %v", err)
+	}
+}

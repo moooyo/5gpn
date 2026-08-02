@@ -67,6 +67,22 @@ type InterceptConfigStore struct {
 	healthCache  interceptHealthCacheEntry
 	healthReads  uint64
 	healthParses uint64
+
+	// documentCache memoises the decoded document by content digest.
+	//
+	// Read re-validated the whole document on every call, and validation is not
+	// cheap: a SHA-256 of every module's manifest body and of every action's
+	// script body, a regexp.Compile of every path pattern and of every rewrite
+	// and replace pattern, and a json.Marshal of every routing rule just to
+	// build a dedup key. With fourteen call sites, an operator action paid that
+	// several times over for bytes that had not changed.
+	//
+	// Keyed on the digest, not on the file identity: mtime granularity is
+	// coarser than the writes here, and the bytes are already in hand.
+	documentMu    sync.Mutex
+	documentKey   [sha256.Size]byte
+	documentValue interceptConfigDocument
+	documentValid bool
 }
 
 type interceptHealthProjection struct {
@@ -103,7 +119,7 @@ func (s *InterceptConfigStore) Read() (interceptConfigDocument, []byte, error) {
 	if len(body) > maxInterceptConfigBytes {
 		return interceptConfigDocument{}, nil, fmt.Errorf("interception config exceeds %d bytes", maxInterceptConfigBytes)
 	}
-	document, err := decodeInterceptConfig(body)
+	document, err := s.decodeCached(body)
 	if err != nil {
 		return interceptConfigDocument{}, nil, err
 	}
@@ -222,6 +238,35 @@ func (s *InterceptConfigStore) invalidateHealthCache() {
 	s.healthMu.Lock()
 	s.healthCache = interceptHealthCacheEntry{}
 	s.healthMu.Unlock()
+}
+
+// decodeCached returns the decoded document for body, validating it only when
+// these exact bytes have not been validated before.
+//
+// A cache hit returns the same value the validator produced, so it is
+// indistinguishable from a miss except in cost. Only successes are cached: a
+// failure is cheap and caching it would mean a repaired file kept reporting the
+// error the previous bytes had.
+func (s *InterceptConfigStore) decodeCached(body []byte) (interceptConfigDocument, error) {
+	key := sha256.Sum256(body)
+	s.documentMu.Lock()
+	if s.documentValid && s.documentKey == key {
+		document := s.documentValue
+		s.documentMu.Unlock()
+		return document, nil
+	}
+	s.documentMu.Unlock()
+
+	document, err := decodeInterceptConfig(body)
+	if err != nil {
+		return interceptConfigDocument{}, err
+	}
+	s.documentMu.Lock()
+	s.documentKey = key
+	s.documentValue = document
+	s.documentValid = true
+	s.documentMu.Unlock()
+	return document, nil
 }
 
 func (s *InterceptConfigStore) writeAtomicContext(ctx context.Context, body []byte) error {

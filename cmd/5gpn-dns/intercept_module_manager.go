@@ -1212,6 +1212,23 @@ func (m *InterceptModuleManager) Update(ctx context.Context, id string, update i
 				if err := validateInterceptEgressGroupBinding(group); err != nil {
 					return interceptMutationEffects{}, err
 				}
+				// Clearing a required binding is refused here, not only in the
+				// surfaces that offer the control.
+				//
+				// Both bot paths carried this check and the mutator did not, so
+				// it was enforced by whoever happened to be asking. The enable
+				// path's copy is inside `if update.Enabled != nil`, and an
+				// egress apply sends Enabled as nil; validateInterceptEgressGroupBinding
+				// returns nil for "", effects.validateEgressBindings is set only
+				// for a non-empty group, and mutate never calls
+				// validateInterceptModule. So clearing it reached the document
+				// unopposed and the extension became not-ready with nothing
+				// having said no.
+				if group == "" && module.EgressGroupRequired {
+					return interceptMutationEffects{}, fmt.Errorf(
+						"%w: extension %q requires an egress group and cannot have it cleared",
+						errInterceptModuleConflict, module.ID)
+				}
 				// A non-empty binding must still exist even when this update is a
 				// byte-for-byte no-op or the extension is not currently active.
 				effects.validateEgressBindings = group != ""

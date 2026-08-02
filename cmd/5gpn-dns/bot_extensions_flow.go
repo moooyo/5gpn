@@ -582,20 +582,38 @@ func sendBotExtensionLocationPreview(ctx context.Context, b *bot.Bot, chatID int
 	return err
 }
 
+// findBotExtensionModule is the one proof that a reviewed (revision, id, digest)
+// still describes something the manager holds.
+//
+// It was written out three times: here, in the selection resolver, and inlined
+// again in the setting resolver. Not a manager method, deliberately -- this is a
+// presentation-layer concern about a view the manager already returned, and
+// pushing it down would add methods and controller pass-throughs to the manager
+// for the bot's benefit.
+func findBotExtensionModule(view interceptModulesView, payload botExtensionStatePayload) (interceptModuleView, error) {
+	if view.Revision != payload.Revision {
+		return interceptModuleView{}, errInterceptRevisionConflict
+	}
+	for _, module := range view.Modules {
+		if module.ID == payload.ModuleID && module.SnapshotDigest == payload.Digest {
+			return module, nil
+		}
+	}
+	return interceptModuleView{}, errBotExtensionSnapshotChanged
+}
+
+// errBotExtensionSnapshotChanged is the one outcome the two call sites used to
+// word differently, in two languages. The operator-facing wording belongs to
+// whichever surface renders it, not to the lookup.
+var errBotExtensionSnapshotChanged = errors.New("extension snapshot changed since review")
+
 func requireBotExtensionModule(bt *Bot, payload botExtensionStatePayload) (interceptModulesView, interceptModuleView, error) {
 	view, err := bt.ctrl.InterceptModules()
 	if err != nil {
 		return interceptModulesView{}, interceptModuleView{}, err
 	}
-	if view.Revision != payload.Revision {
-		return view, interceptModuleView{}, errInterceptRevisionConflict
-	}
-	for _, module := range view.Modules {
-		if module.ID == payload.ModuleID && module.SnapshotDigest == payload.Digest {
-			return view, module, nil
-		}
-	}
-	return view, interceptModuleView{}, errors.New("extension snapshot changed since review")
+	module, err := findBotExtensionModule(view, payload)
+	return view, module, err
 }
 
 func requireBotExtensionSetting(bt *Bot, payload botExtensionStatePayload) (interceptModulesView, interceptModuleView, interceptModuleSetting, error) {

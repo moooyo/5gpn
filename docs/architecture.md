@@ -1451,12 +1451,20 @@ control characters fail closed. Unmodified and transformed trailers are
 declared and published correctly across HTTP/1.1, HTTP/2, and HTTP/3, including
 an H2/H3-to-H1 conversion where upstream trailers were not announced in
 advance.
-At most two body-buffering transformation flows run concurrently. Every
-matching request action reserves that admission before it can produce side
-effects or a dynamic body, including for a bodyless request, and releases an
-unused reservation as soon as preparation proves that no materialized body is
-retained. Excess work fails closed with service unavailable instead of
+Body-buffering transformation flows are admitted against a process-wide byte
+budget, not a stream count. Every matching request action reserves what it may
+hold resident before it can produce side effects or a dynamic body, including
+for a bodyless request, and releases an unused reservation as soon as
+preparation proves that no materialized body is retained. A response rule set
+whose members read neither the body nor the trailers takes no reservation at
+all and streams. Excess work fails closed with service unavailable instead of
 exceeding the sidecar cgroup.
+
+Counting streams instead conflated memory with concurrency: a `bodyMode: none`
+action and a maximal buffered response cost the same unit of a capacity of two,
+and because the reservation is taken before the action loop and held across the
+upstream round trip whenever the buffer is retained, two of them excluded every
+other extension in the process.
 VM execution has a rule timeout, and regexp2's non-RE2 JavaScript fallback has
 an independent 250 ms match limit so catastrophic backtracking cannot evade the
 VM interrupt. Validated action path RE2 expressions, active/per-extension/action

@@ -499,8 +499,27 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 		return errors.New("capture_hosts must be canonical and sorted")
 	}
 	for _, host := range module.CaptureHosts {
-		if err := validateInterceptHostPattern(host); err != nil {
+		// Canonical, not merely valid. validateInterceptHostPattern lowercases
+		// into a local and validates *that*, discarding the result, so
+		// "API.example.com" passed a check whose own error message on the line
+		// above promises canonicality.
+		//
+		// It is the odd one out among its neighbours: a host mapping requires
+		// pattern == normalized, and ip_cidr requires network.String() ==
+		// rule.IPCIDR. What it cost is two divergences downstream. The gateway's
+		// uniqueSortedStrings does not lowercase while the sidecar's uniqueSorted
+		// does, so the certificate host-set digests disagree and every
+		// enable that changes that set burns the full certificate wait and then
+		// rolls back, blaming the certificate. And the data plane stores the
+		// pattern verbatim while matching on a canonicalised request host, so
+		// exact["API.example.com"] never matches anything and the extension
+		// silently intercepts nothing.
+		normalized, err := normalizeInterceptHostPattern(host)
+		if err != nil {
 			return err
+		}
+		if normalized != host {
+			return fmt.Errorf("capture host %q is not canonical; store it as %q", host, normalized)
 		}
 	}
 	if err := validateInterceptCaptureDNS(module.CaptureDNS); err != nil {
