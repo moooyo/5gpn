@@ -158,8 +158,8 @@ type interceptModuleSetting struct {
 // interceptModuleActionView exposes immutable action metadata for operator
 // review without returning the potentially large stored script body.
 type interceptModuleActionView struct {
-	ID    string               `json:"id"`
-	Phase string               `json:"phase"`
+	ID    string `json:"id"`
+	Phase string `json:"phase"`
 	// Kind names which of the seven forms this action takes. It is derived
 	// rather than stored, so a reviewer sees the same discriminant the executor
 	// dispatches on instead of inferring it from which fields happen to be set.
