@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
-# Domain-validation consistency: the Go bot's domainRE (cmd/5gpn-dns/bot.go) and
-# install.sh's is_valid_domain must enforce the same FQDN rule. Pure bash+grep —
-# runs on the dev box and in CI.
+# install.sh's is_valid_domain must enforce the canonical FQDN rule. Pure
+# bash+grep -- runs on the dev box and in CI.
+#
+# This used to also assert that the Telegram bot's domainRE (cmd/5gpn-dns/bot.go)
+# carried the identical pattern, because two implementations of one rule drift
+# silently. That package is gone and the bot is not ported yet. When it lands in
+# the fork, the consistency check has to come back with it -- as a Go test
+# beside the regexp, not as a grep across repositories.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
 rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
-BOT="$ROOT/cmd/5gpn-dns/bot.go"; INSTALL="$ROOT/install.sh"
+INSTALL="$ROOT/install.sh"
 
-# (1) bot.go carries the canonical FQDN pattern (RE2 form, no lookahead — the
-# ≤253 length bound is enforced separately in isValidDomain, mirroring install.sh).
-PAT='^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'
-grep -Fq "$PAT" "$BOT"  || fail "bot.go domainRE is not the canonical FQDN pattern"
 
-# (2) install.sh is_valid_domain must enforce the same rule. Extract + run in isolation.
+# Extract is_valid_domain and run it in isolation.
 fn="$(sed -n '/^is_valid_domain()/,/^}/p' "$INSTALL")"
 [ -n "$fn" ] || fail "could not extract is_valid_domain from install.sh"
 check(){ bash -c "${fn}

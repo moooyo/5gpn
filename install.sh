@@ -3528,7 +3528,6 @@ manage_menu() {
             "状态 Status")                          show_status ;;
             "重启服务 Restart services")            run_management_with_install_lock restart_services ;;
             "编辑安装配置 Configure installation")  full_install configure ;;
-            "重载规则 Reload rules")                       run_management_with_install_lock reload_rules ;;
             "添加 zashboard 白名单IP Add zashboard allowlist IP")    run_management_with_install_lock add_allow_ip ;;
             "移除 zashboard 白名单IP Remove zashboard allowlist IP") run_management_with_install_lock del_allow_ip ;;
             "重新生成 iOS 描述文件 Regenerate iOS profile") run_management_with_install_and_cert_lock regen_ios ;;
@@ -3536,7 +3535,6 @@ manage_menu() {
             "设置 Cloudflare Token Set Cloudflare token") run_management_with_install_and_cert_lock set_cf_token ;;
             "重置 mihomo 配置 Reset mihomo config")
                 if ask_yesno "确认备份并重置 operator-owned mihomo config?"; then run_management_with_install_lock reset_mihomo_config; fi ;;
-            "配置 Telegram Bot")                    run_management_with_install_lock setup_tgbot ;;
             "卸载 Uninstall")                       uninstall; break ;;
             "退出 Quit"|"") break ;;
         esac
@@ -4516,17 +4514,8 @@ set_cf_token() {
 }
 
 # ----------------------------------------------------------------------------
-# Lists + rules, systemd units, iOS profile
+# systemd units, iOS profile
 # ----------------------------------------------------------------------------
-reload_rules() {
-    check_root
-    local script="${SCRIPTS_DIR}/reload-rules.sh"
-    [[ -x "$script" ]] || script="${SCRIPT_DIR}/scripts/reload-rules.sh"
-    info "Reloading 5gpn-dns policy and chnroute state from disk..."
-    bash "$script" || { err "5gpn-dns rule reload failed."; return 1; }
-    ok "Rules reloaded."
-}
-
 preflight_unit_ownership() {
     journal_export_instances_clear \
         || { err "Refusing conflicting fixed 5gpn journal exporter instance or drop-in.${SYSTEMD_UNIT_CONFLICT_REASON:+ ($SYSTEMD_UNIT_CONFLICT_REASON)}"; return 1; }
@@ -4993,7 +4982,7 @@ DNS_WEB_DIR=${DNS_WEB_DIR}
 WWW_DIR=${WWW_DIR}
 
 # In-process Telegram control bot (goroutine of 5gpn-dns). Populated by
-# 'install.sh setup-tgbot' (or set here manually). Empty token ⇒ bot disabled.
+# Set here manually until the bot is ported. Empty token ⇒ bot disabled.
 # TGBOT_ADMINS is a comma-separated list of authorized numeric Telegram IDs.
 # These are the INSTALL-TIME DEFAULTS: the web console (Settings → Telegram bot,
 # PUT /api/tgbot) writes /etc/5gpn/tgbot.json, which OVERRIDES these at startup
@@ -5266,7 +5255,7 @@ ss_has_exact_listener() {
 # DoT boundary, so readiness has to cover all four. It used to be two probes
 # against two units; keeping only the mihomo half would have declared the
 # install ready while the resolver was not yet answering, which is precisely
-# the window install_cert and reload_rules run in.
+# the window install_cert runs in.
 probe_mihomo_ready() {
     systemctl is-active --quiet mihomo || return 1
     local secret ip port token domain
@@ -5941,7 +5930,6 @@ full_install() {
     prepare_runtime_permissions
     start_services_with_cert_lock_handoff
     verify_console_endpoint
-    reload_rules
     # Shield the short timer-restore critical section. A disconnect must not
     # leave an external/unrelated distro renewal timer stopped forever.
     trap '' HUP INT TERM
@@ -5979,7 +5967,6 @@ full_install() {
     print_qr
     echo ""
     ok "管理入口：直接输入  5gpn  打开管理菜单（状态 / 重启 / 改域名 / 改公网IP / 卸载 …）。"
-    info "Optional: '5gpn setup-tgbot' (or '$0 setup-tgbot') to set up the Telegram control bot."
 }
 
 # ----------------------------------------------------------------------------
@@ -6150,12 +6137,10 @@ Usage: sudo bash install.sh [--beta] [command] — or, after install:  5gpn [com
                       operator-owned mihomo config with the backed-up current seed
   menu                Open the interactive management menu (this is what bare '5gpn' runs)
   status              Show service states, domains, IP, list counts/age
-  restart             Restart the 5gpn services (5gpn-dns + 5gpn-intercept + mihomo)
-  reload-rules        Reload local policy and chnroute state from disk
+  restart             Restart the 5gpn service
   add-allow <cidr>    Add a source IP/CIDR to the zashboard allowlist + live refresh
   del-allow <cidr>    Remove a source IP/CIDR from the zashboard allowlist + live refresh
   ios                 Regenerate the iOS profile + QR
-  setup-tgbot         Validate + hot-apply Telegram config through the local API
   rotate-token        Generate a new control-console DNS_API_TOKEN + restart
   set-cf-token        Enter/update the Cloudflare token through the TUI only
   mihomo-reset        Explicitly back up + replace the operator mihomo config
@@ -6228,18 +6213,6 @@ in mihomo's whitelist.txt allowlist.
 EOF
 }
 
-# Keep the Telegram workflow in one source-only helper.
-setup_tgbot() {
-    [[ -t 0 ]] || { err "Telegram configuration requires the TUI."; return 1; }
-    unset TGBOT_TOKEN TGBOT_ADMINS DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS
-    local helper="${SCRIPT_DIR}/scripts/setup-tgbot.sh"
-    [[ -r "$helper" ]] || helper="${SCRIPTS_DIR}/setup-tgbot.sh"
-    [[ -r "$helper" ]] || { err "Telegram setup helper not found: scripts/setup-tgbot.sh"; return 1; }
-    # shellcheck source=scripts/setup-tgbot.sh
-    source "$helper"
-    setup_tgbot_live "$@"
-}
-
 require_command_arity() {
     local name="$1" actual="$2" minimum="$3" maximum="$4"
     if (( actual < minimum || actual > maximum )); then
@@ -6274,12 +6247,10 @@ main() {
                          require_command_arity "$cmd" "$#" 1 1 || return $?; full_install upgrade-reset-mihomo ;;
         menu)           require_command_arity "$cmd" "$#" 1 1 || return $?; manage_menu ;;
         restart)        require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_lock restart_services ;;
-        reload-rules)   require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_lock reload_rules ;;
         status)         require_command_arity "$cmd" "$#" 1 1 || return $?; show_status ;;
         add-allow)      require_command_arity "$cmd" "$#" 2 2 || return $?; run_management_with_install_lock add_allow_ip "$2" ;;
         del-allow)      require_command_arity "$cmd" "$#" 2 2 || return $?; run_management_with_install_lock del_allow_ip "$2" ;;
         ios)            require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_and_cert_lock regen_ios ;;
-        setup-tgbot)    require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_lock setup_tgbot ;;
         rotate-token)   require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_lock rotate_token ;;
         set-cf-token)   require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_and_cert_lock set_cf_token ;;
         mihomo-reset)   require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_lock reset_mihomo_config ;;

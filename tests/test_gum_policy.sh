@@ -54,9 +54,13 @@ grep -Fq 'env -u CI' <<<"$gum_spin_fn" \
     && grep -Fq 'env "CI=$CI"' <<<"$gum_spin_fn" \
     || fail "gum_spin leaks Gum's synthetic CI=1 into wrapped commands"
 
-# --- non-TTY safety: Telegram configuration fails before prompts without a TTY ---
-grep -Fq 'Telegram configuration requires the TUI' "$INSTALL" \
-    || fail "tgbot configuration is not TTY-gated"
+# --- non-TTY safety: every interactive management op fails before prompting ---
+#
+# The Telegram case used to be named here specifically. That command is gone
+# with the helper it sourced, so the assertion is the general one it was an
+# instance of: an op that prompts must refuse a pipe rather than block on it.
+grep -Fq 'requires an interactive TTY' "$INSTALL" \
+    || fail "no management op is TTY-gated"
 
 # --- Gum must exist before the prompts, not after them -------------------------
 # Every question this installer asks runs in resolve_install_configuration. When

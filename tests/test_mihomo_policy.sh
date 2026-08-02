@@ -75,25 +75,32 @@ nocheck "$T" 'REJECT-DROP'                             'seed avoids connection-r
 check "$T" '127\.0\.0\.1:5354'                         'loopback origin DNS selector'
 check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(NETWORK,UDP\)\),REJECT' 'console UDP fallback fast-reject rule'
 check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(DST-PORT,80\)\),REJECT' 'console HTTP fast-reject rule'
-# The panel allow rules exclude intercept-egress: they sit above the loopback
-# deny and therefore above the egress terminator, so without the exclusion a
-# compromised sidecar would reach the gateway's own management plane.
-check "$T" 'AND,\(\(NOT,\(\(IN-NAME,intercept-egress\)\)\),\(DOMAIN,__CONSOLE_DOMAIN__\)\),DIRECT' 'public console SNI direct route excludes intercept-egress'
-check "$T" 'AND,\(\(NOT,\(\(IN-NAME,intercept-egress\)\)\),\(DOMAIN,__ZASH_DOMAIN__\),\(RULE-SET,whitelist,DIRECT,src\)\),DIRECT' 'zashboard allowlisted route excludes intercept-egress'
+# The panel allow rules exclude the engine's own egress: they sit above the
+# loopback deny, so without the exclusion a captured extension naming either
+# hostname would reach the gateway's management plane. The engine dials its
+# upstreams back through these rules, so that traffic is INNER -- there is no
+# inbound name left to exclude by.
+check "$T" 'AND,\(\(NOT,\(\(IN-TYPE,INNER\)\)\),\(DOMAIN,__CONSOLE_DOMAIN__\)\),DIRECT' 'public console SNI direct route excludes engine egress'
+check "$T" 'AND,\(\(NOT,\(\(IN-TYPE,INNER\)\)\),\(DOMAIN,__ZASH_DOMAIN__\),\(RULE-SET,whitelist,DIRECT,src\)\),DIRECT' 'zashboard allowlisted route excludes engine egress'
 check "$T" 'AND,\(\(DOMAIN,__ZASH_DOMAIN__\),\(NETWORK,UDP\)\),REJECT' 'zashboard UDP fast-reject rule'
 check "$T" 'AND,\(\(NETWORK,UDP\),\(DST-PORT,443\)\),REJECT' 'HTTP3/QUIC UDP 443 block enabled by default'
-egress_guard_line="$(grep -nF '  - IN-NAME,intercept-egress,REJECT' "$root/$T" | cut -d: -f1 || true)"
+# The UDP/443 reject is the guard standing in for the unwired datagram capture
+# path: the engine's MatchUDP always declines, so a captured host reached over
+# QUIC would bypass interception silently. It must sit below the private-range
+# denies and above the operator's terminal MATCH, so a capable client falls
+# back to TCP, which is captured.
+private_deny_line="$(grep -nF '  - IP-CIDR,169.254.0.0/16,REJECT,no-resolve' "$root/$T" | cut -d: -f1 || true)"
 quic_block_line="$(grep -nF '  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' "$root/$T" | cut -d: -f1 || true)"
 match_line="$(grep -nF '  - MATCH,Proxies' "$root/$T" | cut -d: -f1 || true)"
-if [ -n "$egress_guard_line" ] && [ -n "$quic_block_line" ] && [ -n "$match_line" ] \
-   && [ "$egress_guard_line" -lt "$quic_block_line" ] && [ "$quic_block_line" -lt "$match_line" ]; then
-    echo 'ok: QUIC block follows sidecar fail-closed egress guard and precedes terminal policy'
+if [ -n "$private_deny_line" ] && [ -n "$quic_block_line" ] && [ -n "$match_line" ] \
+   && [ "$private_deny_line" -lt "$quic_block_line" ] && [ "$quic_block_line" -lt "$match_line" ]; then
+    echo 'ok: QUIC guard follows the private-range denies and precedes terminal policy'
 else
     echo 'FAIL: QUIC block ordering is unsafe'
     FAIL=1
 fi
-console_direct_line="$(grep -nF '  - AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
-zash_direct_line="$(grep -nF '  - AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
+console_direct_line="$(grep -nF '  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
+zash_direct_line="$(grep -nF '  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
 panel_order_ok=1
 for rule in \
     'AND,((DOMAIN,__CONSOLE_DOMAIN__),(NETWORK,UDP)),REJECT' \
@@ -144,8 +151,17 @@ else
     echo "FAIL: template's last line is not the terminal MATCH,Proxies rule (got: $last_line)"
     FAIL=1
 fi
-check cmd/5gpn-dns/mihomo_config.go 'mihomoConfigSeedTemplate = ' 'mihomo_config.go carries the Go-side copy of the seed template'
-nocheck cmd/5gpn-dns/mihomo_config.go '>>>5gpn'        'Go copy of the seed template also carries no marker regions'
+# The seed template had a second copy in Go so the daemon could re-render it.
+# There is no second copy now: etc/mihomo/config.yaml.tmpl is the only one, and
+# install.sh is its only renderer. If a Go-side copy reappears anywhere, the
+# two will drift and a mihomo-reset will produce a config the installer never
+# validated.
+if [ -e "$root/cmd" ]; then
+    echo 'FAIL: a cmd/ tree came back; the seed template may have a second copy again'
+    FAIL=1
+else
+    echo 'ok: the seed template has exactly one copy, rendered only by install.sh'
+fi
 nocheck cmd/5gpn-dns/policy_compile.go 'RULE-SET'                   'policy_compile.go no longer renders mihomo RULE-SET lines (DNS-only compiler)'
 nocheck cmd/5gpn-dns/policy_compile.go 'type: file, behavior: domain' 'policy_compile.go no longer renders mihomo rule-provider stanzas'
 
@@ -171,14 +187,10 @@ nocheck scripts/cert-renew.sh 'xray' 'renewal helper never touches xray'
 nocheck scripts/renew-hook.sh 'xray' 'renew-hook does not touch xray'
 check install.sh 'set_cf_token' 'TUI op to set CF token'
 
-# Task 9: bot manages mihomo, not xray (daemon no longer actively drives xray
-# at runtime either -- see test_5gpndns_policy.sh's botServices assertion).
-check cmd/5gpn-dns/bot.go '"mihomo"' 'bot manages mihomo'
-nocheck cmd/5gpn-dns/bot.go '"xray"' 'bot no longer manages xray'
 
 # Task 10: lifecycle/management surface uses mihomo + transactional configure.
 check install.sh 'configure\)' 'single transactional configure op'
-check install.sh 'for svc in mihomo 5gpn-dns|systemctl enable "\$svc"' 'lifecycle drives mihomo (enable/restart)'
+check install.sh 'systemctl enable mihomo' 'lifecycle drives the one unit (enable/restart)'
 nocheck install.sh 'for svc in .*xray' 'start/status service loop no longer includes xray'
 nocheck install.sh 'systemctl restart xray' 'restart_services no longer restarts xray'
 nocheck install.sh 'xray\.service|/usr/local/bin/xray' 'no old Xray teardown remains'

@@ -17,7 +17,7 @@ grep -Fq '==========================================' "$INSTALL" \
     && fail "install.sh still uses the old ==== status banner instead of a gum card"
 
 # --- sub-scripts + hooks: gum-detect + gum log + plain-echo fallback all present -
-for f in scripts/reload-rules.sh scripts/gen-ios-profile.sh scripts/renew-hook.sh scripts/cert-renew.sh; do
+for f in scripts/gen-ios-profile.sh scripts/renew-hook.sh scripts/cert-renew.sh scripts/intercept-cert-renew.sh; do
     s="$ROOT/$f"
     grep -Fq 'command -v gum'  "$s" || fail "$f does not detect gum on PATH"
     grep -Fq 'gum log'         "$s" || fail "$f has no gum log output path"
@@ -98,10 +98,10 @@ printf '%s' "$tui_fn" | grep -Fq 'The API token is used only for ACME TXT record
     && printf '%s' "$tui_fn" | grep -Fq 'does NOT create or modify this A record' \
     || fail "Cloudflare TUI does not explain that the console A record is operator-managed"
 
-# --- reload-rules.sh performs only the visible local reload. ---
-UL="$ROOT/scripts/reload-rules.sh"
-grep -Eq 'gum_spin[^|]*(render_smartdns_conf|systemctl)' "$UL" \
-    && fail "reload-rules.sh must not hide reload output behind a spinner"
+# --- the certificate oneshot performs only the visible local publication. ---
+UL="$ROOT/scripts/intercept-cert-renew.sh"
+grep -Eq 'gum_spin[^|]*systemctl' "$UL" \
+    && fail "intercept-cert-renew.sh must not hide publication output behind a spinner"
 
 # --- quick-install.sh: pre-gum entrypoint — gum-aware-if-present, ANSI fallback -
 QI="$ROOT/quick-install.sh"
