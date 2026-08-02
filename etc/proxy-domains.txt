@@ -1,4 +1,0 @@
-# Forced-proxy domains (one per line, suffix match).
-# Add a domain here to ALWAYS route it through the proxy regardless of resolved IP.
-# Enabled interception-module hosts are published through a separate atomic
-# runtime overlay and must not be duplicated here.
