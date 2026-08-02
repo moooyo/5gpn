@@ -389,6 +389,43 @@ func (m *InterceptModuleManager) PrepareRuntime() error {
 		// right after the toggle, silently empty after the next daemon start or
 		// mihomo config PUT.
 		m.publishHosts(&document)
+		// And withdraw the capture rules, which are a different publication.
+		//
+		// Returning here left the live generation exactly as the last enabled
+		// document compiled it. The divergence window is inside mutate: the
+		// master-off transaction writes the MITM-off document first and revokes
+		// the capture rules second, and because certificateInterceptHosts looks
+		// only at module.Enabled, that transaction changes no certificate hosts
+		// and so takes no certificate wait -- the two publications are adjacent.
+		// A SIGKILL, OOM, panic or exhausted stop budget landing between them
+		// leaves config.json saying MITM is off, so the sidecar unit stops,
+		// while mihomo still holds capture rules for every host that was
+		// enabled. Those names then black-hole for every client, the console
+		// shows interception disabled, and this early return meant no restart
+		// ever repaired it -- only an unrelated extension change would.
+		//
+		// Deliberately not the sidecar half: with the master off the sidecar is
+		// not running by design, so staging would block for the whole start-up
+		// wait on a socket that will never appear, holding m.mu and the store
+		// lock, and log a spurious warning on every boot.
+		if m.mihomo == nil || m.controller == nil {
+			return nil
+		}
+		m.mihomo.Lock()
+		text, err := m.mihomo.Read()
+		m.mihomo.Unlock()
+		if err != nil {
+			return err
+		}
+		analysis := m.analyzeInterceptRouting(text)
+		if !analysis.Manageable {
+			return fmt.Errorf("interception routing is not ready: %s", analysis.Reason)
+		}
+		if _, err := m.publishOverlayGeneration(context.Background(), document, analysis.MatchTarget,
+			interceptRevision(body), interceptCertificateDigest(certificateInterceptHosts(document)),
+			interceptBundleID(body)); err != nil {
+			return fmt.Errorf("interception capture rules could not be withdrawn: %w", err)
+		}
 		return nil
 	}
 	if m.mihomo == nil || m.controller == nil {
