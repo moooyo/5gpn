@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -366,4 +367,23 @@ func (s *ControlServer) applyMihomoConfigLockedCAS(ctx context.Context, text str
 	// response — the reset path needs the restored seed text echoed back, and a
 	// successful apply needs the real controller_reachable, not a missing field.
 	return http.StatusOK, s.mihomoConfigResponse(ctx, text), true
+}
+
+// reconcileInterceptionAfterMihomoWrite republishes interception state after the
+// operator's mihomo config changed, and reports a failure in the same response
+// rather than swallowing it.
+//
+// The write has already landed, so this cannot fail the request. What it must
+// not do is stay silent: the generation carries the terminal MATCH target, an
+// unbound extension's egress capability is compiled from it, and a repointed
+// MATCH therefore changes what every unbound extension is authorised to do.
+func reconcileInterceptionAfterMihomoWrite(manager *InterceptModuleManager, text string, resp map[string]any) {
+	err := manager.ReconcileMihomoText(text)
+	if err == nil {
+		return
+	}
+	log.Printf("intercept: reconciling after a mihomo config write failed: %v", err)
+	if resp != nil {
+		resp["interceptionReconcile"] = err.Error()
+	}
 }

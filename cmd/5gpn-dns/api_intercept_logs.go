@@ -349,6 +349,14 @@ type interceptHealthView struct {
 	InstalledPlugins int    `json:"installed_plugins"`
 	ActivePlugins    int    `json:"active_plugins"`
 	Version          string `json:"version,omitempty"`
+	// RoutingDriver is false when interception has no publication path at all,
+	// so every change is refused and the DNS capture table has been withdrawn.
+	RoutingDriver bool `json:"routing_driver"`
+	// ReadinessBlocked is why the processor lease is being withheld. Non-empty
+	// means captured traffic is REJECTed once the lease lapses, however healthy
+	// the counts above look -- which is exactly the combination that used to
+	// present as a fully green gateway.
+	ReadinessBlocked string `json:"readiness_blocked,omitempty"`
 }
 
 type interceptInternalHealth struct {
@@ -392,6 +400,7 @@ func (s *ControlServer) handleInterceptHealth(w http.ResponseWriter, r *http.Req
 		InstalledPlugins: projection.InstalledPlugins,
 		ActivePlugins:    projection.ActivePlugins,
 	}
+	view.RoutingDriver, view.ReadinessBlocked = s.interceptModules.RoutingStatus()
 	view.Expected = view.ActivePlugins > 0
 	if !view.Expected {
 		writeJSON(w, http.StatusOK, view)

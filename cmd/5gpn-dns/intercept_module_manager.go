@@ -20,6 +20,12 @@ var (
 	errInterceptModuleConflict     = errors.New("interception module conflicts with the current runtime")
 	errInterceptModuleNotFound     = errors.New("interception module not found")
 	errInterceptApplyFailed        = errors.New("interception module apply failed")
+	// errInterceptApplyUnresolved is the apply whose outcome nothing could
+	// determine. It is deliberately not errInterceptApplyFailed: "failed" tells
+	// an operator the change did not happen, and here that is exactly what is
+	// not known. Both sides are left on the candidate so the next daemon start
+	// adjudicates against the core rather than against local belief.
+	errInterceptApplyUnresolved = errors.New("interception module apply outcome is unresolved; it will be settled by recovery on the next restart")
 
 	errInterceptRoutingDriverUnavailable = errors.New("interception routing driver unavailable; run '5gpn mihomo-reset' if the mihomo config lost its overlay anchors")
 )
@@ -61,7 +67,8 @@ type InterceptModuleManager struct {
 	// and the typed generation are two halves of one arrangement, and a gateway
 	// that changed its mind mid-run would leave the file describing one policy
 	// and the core enforcing another.
-	overlay *OverlayDriver
+	overlay   *OverlayDriver
+	readiness *OverlayReadinessReporter
 }
 
 type interceptConfigTester interface {
@@ -158,11 +165,24 @@ func (m *InterceptModuleManager) rollbackSidecarDocument(ctx context.Context, bo
 	return m.store.writeAtomicContext(rollback, body)
 }
 
-// publishSidecarDocument puts the candidate document into effect in the sidecar.
+// stageSidecarDocument makes the candidate durable, and live if the sidecar is
+// already listening.
 //
-// The ordering the transaction depends on is that the sidecar holds the new
-// document before the certificate wait and before mihomo publishes, so capture
-// traffic never arrives at a processor that cannot serve it.
+// It reports whether anything durable happened, because that -- not the error --
+// is what tells the caller a compensation is owed. The bundle commit and the
+// file write are two steps, and the second failing after the first succeeded
+// leaves the sidecar serving a document that no generation names.
+//
+// It also reports whether the bundle still has to be handed over. That is split
+// out because of an ordering the unit files impose: 5gpn-intercept.service has
+// `Requires=5gpn-intercept-cert.service`, and the cert oneshot is triggered by
+// the very write below. On a first enable the sidecar therefore cannot start
+// until the certificate exists, so waiting for its socket here waited for
+// something that structurally could not happen yet -- and then treated the
+// timeout as success. The transaction went on to commit a generation naming a
+// bundle the sidecar had never seen, readiness was never asserted, and every
+// captured connection was REJECTed while the API, the console and the bot all
+// reported the enable had worked.
 //
 // Which channel carries it is decided per call rather than once at startup. The
 // sidecar's unit refuses to run while the MITM master is off, so its socket is
@@ -171,43 +191,61 @@ func (m *InterceptModuleManager) rollbackSidecarDocument(ctx context.Context, bo
 // enable exists to start, which made the master switch a one-way door.
 //
 // Called with m.mu held (see mutate), so the client is read without taking it.
-func (m *InterceptModuleManager) publishSidecarDocument(ctx context.Context, body []byte) error {
+func (m *InterceptModuleManager) stageSidecarDocument(ctx context.Context, body []byte) (published, pending bool, err error) {
 	client := m.sidecar
 	if client == nil {
-		return m.store.writeAtomicContext(ctx, body)
+		if err := m.store.writeAtomicContext(ctx, body); err != nil {
+			return false, false, err
+		}
+		return true, false, nil
 	}
 	if sidecarSocketPresent(client) {
 		if _, err := client.PublishBundle(ctx, interceptBundleID(body), body); err != nil {
-			return err
+			return false, false, err
 		}
+		// The bundle is live from here on, so every later failure owes a
+		// compensation even though the document write below may not have run.
+		//
 		// The file is still written while both paths are supported, so a
 		// downgrade to a build without the API finds the state it expects. It is
 		// no longer what the sidecar reads.
-		return m.store.writeAtomicContext(ctx, body)
+		if err := m.store.writeAtomicContext(ctx, body); err != nil {
+			return true, false, err
+		}
+		return true, false, nil
 	}
 
-	// No socket: write the file first, because that is what the runtime path
-	// unit watches and what the sidecar cold starts from, then push once it is
-	// listening. Writing alone is not enough — a sidecar serving the file has no
-	// bundle live, so readiness is never asserted and capture stays fail-closed
-	// indefinitely even though every step reported success.
+	// No socket: write the file, because that is what the runtime path unit
+	// watches, what the cert path unit watches, and what the sidecar cold starts
+	// from. The handover waits until the certificate gate has run.
 	if err := m.store.writeAtomicContext(ctx, body); err != nil {
-		return err
+		return false, false, err
+	}
+	return true, true, nil
+}
+
+// pushSidecarBundle waits for the sidecar to come up and hands it the bundle.
+//
+// A failure here fails the transaction. Writing the document alone is not
+// enough: a sidecar serving the file has no bundle live, so the generation's
+// SidecarBundleDigest matches nothing, readiness is never asserted, and capture
+// stays fail-closed indefinitely. Reporting that as success is what this used to
+// do, and it is strictly worse than refusing the change -- the operator gets a
+// green console and a hostname that answers nothing.
+func (m *InterceptModuleManager) pushSidecarBundle(ctx context.Context, body []byte) error {
+	client := m.sidecar
+	if client == nil {
+		return nil
 	}
 	wait := m.sidecarStart
 	if wait <= 0 {
 		wait = sidecarStartWait
 	}
 	if !waitForSidecarSocket(ctx, client, wait) {
-		log.Printf("intercept: sidecar did not start within %s; it serves the configuration file until the next transaction", wait)
-		return nil
+		return fmt.Errorf("the sidecar did not start within %s", wait)
 	}
 	if _, err := client.PublishBundle(ctx, interceptBundleID(body), body); err != nil {
-		// The document is already durable and correct, so the transaction
-		// stands. The overlay generation published next asserts processor
-		// readiness and stays fail-closed on its own if the sidecar never
-		// adopts the bundle, which is the safe direction to fail.
-		log.Printf("intercept: sidecar started but did not adopt the bundle (%v); it serves the configuration file", err)
+		return fmt.Errorf("the sidecar started but did not adopt the bundle: %w", err)
 	}
 	return nil
 }
@@ -260,6 +298,29 @@ func (m *InterceptModuleManager) SetOverlayDriver(driver *OverlayDriver) {
 	m.mu.Unlock()
 }
 
+// SetReadinessReporter gives the control plane something to report.
+//
+// The reporter's only output was the journal, so a gateway REJECTing every
+// captured connection for a bundle/generation mismatch looked identical on
+// every API and every page to one that was working.
+func (m *InterceptModuleManager) SetReadinessReporter(reporter *OverlayReadinessReporter) {
+	m.mu.Lock()
+	m.readiness = reporter
+	m.mu.Unlock()
+}
+
+// RoutingStatus reports whether interception can publish at all, and why it is
+// not currently serving traffic if it is not.
+func (m *InterceptModuleManager) RoutingStatus() (driverReady bool, readinessBlocked string) {
+	if m == nil {
+		return false, ""
+	}
+	m.mu.Lock()
+	driver, reporter := m.overlay, m.readiness
+	m.mu.Unlock()
+	return driver != nil, reporter.Reason()
+}
+
 // analyzeInterceptRouting reads the anchored document. Under the overlay a
 // mihomo config carrying no rendered interception rules is the correct steady
 // state, not a fault. Callers already hold m.mu.
@@ -279,15 +340,15 @@ func (m *InterceptModuleManager) publishOverlayGeneration(
 	documentRevision string,
 	certificateHostSetDigest string,
 	sidecarBundleDigest string,
-) error {
+) (overlayOutcome, error) {
 	// The driver is installed at startup and is the only publication path. If
 	// its probe failed, every routing change has to say so rather than dereference
 	// a nil driver -- a gateway that accepts toggles and applies none of them is
 	// worse than one that refuses them.
 	if m.overlay == nil {
-		return errInterceptRoutingDriverUnavailable
+		return overlayNotTaken, errInterceptRoutingDriverUnavailable
 	}
-	_, err := m.overlay.Publish(ctx, overlayCompileInput{
+	_, outcome, err := m.overlay.Publish(ctx, overlayCompileInput{
 		Document:                 document,
 		MatchTarget:              matchTarget,
 		DocumentRevision:         documentRevision,
@@ -295,7 +356,7 @@ func (m *InterceptModuleManager) publishOverlayGeneration(
 		CertificateHostSetDigest: certificateHostSetDigest,
 		SidecarBundleDigest:      sidecarBundleDigest,
 	})
-	return err
+	return outcome, err
 }
 
 func (m *InterceptModuleManager) SetSidecarTester(tester interceptConfigTester) {
@@ -328,6 +389,43 @@ func (m *InterceptModuleManager) PrepareRuntime() error {
 		// right after the toggle, silently empty after the next daemon start or
 		// mihomo config PUT.
 		m.publishHosts(&document)
+		// And withdraw the capture rules, which are a different publication.
+		//
+		// Returning here left the live generation exactly as the last enabled
+		// document compiled it. The divergence window is inside mutate: the
+		// master-off transaction writes the MITM-off document first and revokes
+		// the capture rules second, and because certificateInterceptHosts looks
+		// only at module.Enabled, that transaction changes no certificate hosts
+		// and so takes no certificate wait -- the two publications are adjacent.
+		// A SIGKILL, OOM, panic or exhausted stop budget landing between them
+		// leaves config.json saying MITM is off, so the sidecar unit stops,
+		// while mihomo still holds capture rules for every host that was
+		// enabled. Those names then black-hole for every client, the console
+		// shows interception disabled, and this early return meant no restart
+		// ever repaired it -- only an unrelated extension change would.
+		//
+		// Deliberately not the sidecar half: with the master off the sidecar is
+		// not running by design, so staging would block for the whole start-up
+		// wait on a socket that will never appear, holding m.mu and the store
+		// lock, and log a spurious warning on every boot.
+		if m.mihomo == nil || m.controller == nil {
+			return nil
+		}
+		m.mihomo.Lock()
+		text, err := m.mihomo.Read()
+		m.mihomo.Unlock()
+		if err != nil {
+			return err
+		}
+		analysis := m.analyzeInterceptRouting(text)
+		if !analysis.Manageable {
+			return fmt.Errorf("interception routing is not ready: %s", analysis.Reason)
+		}
+		if _, err := m.publishOverlayGeneration(context.Background(), document, analysis.MatchTarget,
+			interceptRevision(body), interceptCertificateDigest(certificateInterceptHosts(document)),
+			interceptBundleID(body)); err != nil {
+			return fmt.Errorf("interception capture rules could not be withdrawn: %w", err)
+		}
 		return nil
 	}
 	if m.mihomo == nil || m.controller == nil {
@@ -370,11 +468,21 @@ func (m *InterceptModuleManager) PrepareRuntime() error {
 	// goes on serving whatever its own store cold started from, the
 	// generation names the document's bundle, and readiness is refused for
 	// the mismatch, which fails every captured connection closed.
-	if err := m.publishSidecarDocument(context.Background(), body); err != nil {
+	_, pendingBundle, err := m.stageSidecarDocument(context.Background(), body)
+	if err != nil {
 		m.publishHosts(nil)
 		return fmt.Errorf("the interception document could not be republished: %w", err)
 	}
-	if err := m.publishOverlayGeneration(context.Background(), document, analysis.MatchTarget,
+	// At startup the certificate already exists if it ever did, so there is
+	// nothing to gate the handover on here -- but the handover still has to
+	// happen, for the reason above.
+	if pendingBundle {
+		if err := m.pushSidecarBundle(context.Background(), body); err != nil {
+			m.publishHosts(nil)
+			return fmt.Errorf("the interception bundle could not be republished: %w", err)
+		}
+	}
+	if _, err := m.publishOverlayGeneration(context.Background(), document, analysis.MatchTarget,
 		interceptRevision(body), interceptCertificateDigest(certificateInterceptHosts(document)),
 		interceptBundleID(body)); err != nil {
 		m.publishHosts(nil)
@@ -391,7 +499,7 @@ func (m *InterceptModuleManager) ReconcileMihomoText(text string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.store.mu.Lock()
-	document, _, err := m.store.Read()
+	document, body, err := m.store.Read()
 	m.store.mu.Unlock()
 	if err != nil {
 		m.publishHosts(nil)
@@ -403,9 +511,29 @@ func (m *InterceptModuleManager) ReconcileMihomoText(text string) error {
 		m.publishHosts(&document)
 		return nil
 	}
-	if gate := m.routingGateFor(document, text); !gate.ready {
+	gate := m.routingGateFor(document, text)
+	if !gate.ready {
 		m.publishHosts(nil)
 		return fmt.Errorf("interception routing is not ready: %s", gate.reason)
+	}
+	// Republish the generation, not just the DNS table.
+	//
+	// analysis.MatchTarget is compiled *into* every egress capability: an
+	// extension with no explicit binding gets the terminal MATCH target as its
+	// group, and overlayCapabilityAllowsDirect decides its allowDirect from the
+	// same value. Reconciling only the host table left that baked-in target
+	// stale for as long as no extension happened to change -- so an operator who
+	// repointed MATCH at a different existing group left the live generation
+	// still authorising the old one, with the allowDirect they had just revoked.
+	//
+	// The driver already deduplicates: Publish short-circuits when the recompiled
+	// desired state matches the live generation, so a mihomo edit that changes
+	// nothing here costs a readback and a compile rather than a generation.
+	if _, err := m.publishOverlayGeneration(context.Background(), document, gate.analysis.MatchTarget,
+		interceptRevision(body), interceptCertificateDigest(certificateInterceptHosts(document)),
+		interceptBundleID(body)); err != nil {
+		m.publishHosts(nil)
+		return fmt.Errorf("interception routing could not be republished: %w", err)
 	}
 	m.publishHosts(&document)
 	return nil
@@ -432,7 +560,7 @@ func (m *InterceptModuleManager) LockMihomoCandidate(text string) (func(), error
 		unlock()
 		return nil, err
 	}
-	if err := validateInterceptEgressBindings(document, available); err != nil {
+	if err := validateInterceptEgressBindings(document, available, m.analyzeInterceptRouting(text).MatchTarget); err != nil {
 		unlock()
 		return nil, fmt.Errorf("%w: %v", errInterceptModuleConflict, err)
 	}
@@ -562,7 +690,7 @@ func (m *InterceptModuleManager) routingGateFor(document interceptConfigDocument
 	// string. An operator who renamed or deleted a bound group leaves a
 	// generation authorising a group that no longer exists, so this has to fail
 	// closed here rather than wait for the next publication to notice.
-	if err := validateInterceptEgressBindings(document, gate.analysis.AvailableEgressGroups); err != nil {
+	if err := validateInterceptEgressBindings(document, gate.analysis.AvailableEgressGroups, gate.analysis.MatchTarget); err != nil {
 		gate.reason = "egress-group-missing"
 		return gate
 	}
@@ -600,16 +728,34 @@ func interceptExecutionOrderIndex(order []string) map[string]int {
 	return indices
 }
 
-func validateInterceptEgressBindings(document interceptConfigDocument, available []string) error {
+// validateInterceptEgressBindings fails closed on a group no longer in the
+// operator's config.
+//
+// matchTarget is the group an extension without an explicit binding actually
+// gets: overlayEgressCapabilities compiles the terminal MATCH target into that
+// extension's capability, and its allowDirect with it. An empty EgressGroup was
+// therefore not "no binding to check", it was "the binding is the match target"
+// -- and skipping it made every unbound extension invisible to precisely the
+// check that exists so an operator who renames or repoints a group fails closed.
+func validateInterceptEgressBindings(document interceptConfigDocument, available []string, matchTarget string) error {
 	groups := make(map[string]struct{}, len(available))
 	for _, group := range available {
 		groups[group] = struct{}{}
 	}
 	for _, module := range document.Modules {
-		if module.EgressGroup == "" {
+		group := module.EgressGroup
+		if group == "" {
+			group = matchTarget
+		}
+		// A terminal MATCH can name a built-in rather than a proxy group, and
+		// those are never in the operator's proxy-groups list.
+		if group == "" || group == interceptDirectEgressGroup {
 			continue
 		}
-		if _, exists := groups[module.EgressGroup]; !exists {
+		if _, exists := groups[group]; !exists {
+			if module.EgressGroup == "" {
+				return fmt.Errorf("terminal egress target %q used by unbound extension %q does not exist", group, module.ID)
+			}
 			return fmt.Errorf("egress group %q selected by extension %q does not exist", module.EgressGroup, module.ID)
 		}
 	}
@@ -1254,11 +1400,40 @@ func (m *InterceptModuleManager) mutate(
 	if !analysis.Reconcileable {
 		return interceptModulesView{}, fmt.Errorf("%w: %s", errInterceptModuleConflict, analysis.Reason)
 	}
-	if err := validateInterceptEgressBindings(nextDocument, analysis.AvailableEgressGroups); err != nil {
+	if err := validateInterceptEgressBindings(nextDocument, analysis.AvailableEgressGroups, analysis.MatchTarget); err != nil {
 		return interceptModulesView{}, fmt.Errorf("%w: %v", errInterceptModuleConflict, err)
 	}
-	if err := m.publishSidecarDocument(ctx, newBody); err != nil {
-		return interceptModulesView{}, err
+	// One compensation for the whole publish, installed before the first step
+	// that can need it.
+	//
+	// This used to be per-step, and the steps disagreed. The first had none at
+	// all, so a bundle committed to the sidecar and then a document write that
+	// failed -- a cancelled request, ENOSPC, EROFS on /etc/5gpn/intercept --
+	// left the processor serving a bundle the live generation does not name.
+	// The third compensated unconditionally, including when the generation had
+	// provably gone live, which produced the same mismatch from the opposite
+	// direction. Either way the readiness lease is withheld and every captured
+	// connection is REJECTed, both pointers survive their own restarts, and the
+	// only repair is an unrelated successful transaction or a daemon restart.
+	//
+	// So: compensate exactly when something was published and the transaction
+	// did not complete, and never when the overlay says the generation took or
+	// that nothing here can tell.
+	published := false
+	compensate := true
+	overlayResult := overlayNotTaken
+	defer func() {
+		if !published || !compensate {
+			return
+		}
+		if rollbackErr := m.rollbackSidecarDocument(ctx, oldBody); rollbackErr != nil {
+			log.Printf("intercept: restoring the previous sidecar document failed: %v", rollbackErr)
+		}
+	}()
+
+	published, pendingBundle, err := m.stageSidecarDocument(ctx, newBody)
+	if err != nil {
+		return interceptModulesView{}, fmt.Errorf("%w: sidecar publication: %v", errInterceptApplyFailed, err)
 	}
 	oldCertificateHosts := certificateInterceptHosts(oldDocument)
 	nextCertificateHosts := certificateInterceptHosts(nextDocument)
@@ -1266,19 +1441,37 @@ func (m *InterceptModuleManager) mutate(
 	certificateHostsChanged := !stringSlicesEqual(oldCertificateHosts, nextCertificateHosts)
 	if len(nextCertificateHosts) > 0 && (certificateHostsChanged || (firstActivation && !m.certificateReady(nextDocument))) {
 		if err := m.waitForCertificate(ctx, interceptCertificateDigest(nextCertificateHosts), newBody); err != nil {
-			rollbackErr := m.rollbackSidecarDocument(ctx, oldBody)
-			return interceptModulesView{}, fmt.Errorf("%w: certificate publication: %v; sidecar rollback: %v", errInterceptApplyFailed, err, rollbackErr)
+			return interceptModulesView{}, fmt.Errorf("%w: certificate publication: %v", errInterceptApplyFailed, err)
+		}
+	}
+	// Only now can the sidecar start: its unit Requires the certificate oneshot,
+	// which the document write above is what triggers. Waiting for its socket
+	// before this point waited for something that could not happen yet.
+	if pendingBundle {
+		if err := m.pushSidecarBundle(ctx, newBody); err != nil {
+			return interceptModulesView{}, fmt.Errorf("%w: sidecar handover: %v", errInterceptApplyFailed, err)
 		}
 	}
 	// The mihomo file is not rewritten and mihomo is not reloaded. What changes
 	// is a typed generation, committed transactionally; the operator's own rules
 	// are never re-serialised, so a change to routing can no longer perturb them.
-	if err := m.publishOverlayGeneration(ctx, nextDocument, analysis.MatchTarget,
+	overlayResult, err = m.publishOverlayGeneration(ctx, nextDocument, analysis.MatchTarget,
 		interceptRevision(newBody), interceptCertificateDigest(nextCertificateHosts),
-		interceptBundleID(newBody)); err != nil {
-		rollbackErr := m.rollbackSidecarDocument(ctx, oldBody)
-		return interceptModulesView{}, fmt.Errorf("%w: %v; sidecar rollback: %v", errInterceptApplyFailed, err, rollbackErr)
+		interceptBundleID(newBody))
+	if err != nil {
+		switch overlayResult {
+		case overlayNotTaken:
+			return interceptModulesView{}, fmt.Errorf("%w: %v", errInterceptApplyFailed, err)
+		default:
+			// Taken, or unknown. Both leave the candidate in place: revoking a
+			// generation that is live, or that may be, is the failure this whole
+			// arrangement exists to avoid.
+			compensate = false
+			return interceptModulesView{}, fmt.Errorf("%w (overlay outcome %s): %v",
+				errInterceptApplyUnresolved, overlayResult, err)
+		}
 	}
+	compensate = false
 	m.publishHosts(&nextDocument)
 	if m.onApplied != nil {
 		m.onApplied()
@@ -1305,7 +1498,7 @@ func (m *InterceptModuleManager) validateEgressBindingsOnly(document interceptCo
 	if err != nil {
 		return fmt.Errorf("%w: %v", errInterceptModuleConflict, err)
 	}
-	if err := validateInterceptEgressBindings(document, available); err != nil {
+	if err := validateInterceptEgressBindings(document, available, m.analyzeInterceptRouting(text).MatchTarget); err != nil {
 		return fmt.Errorf("%w: %v", errInterceptModuleConflict, err)
 	}
 	return nil

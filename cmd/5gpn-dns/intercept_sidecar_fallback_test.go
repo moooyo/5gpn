@@ -29,8 +29,15 @@ func TestPublishSidecarDocument_FallsBackWhenTheSocketIsGone(t *testing.T) {
 	manager.sidecarStart = 10 * time.Millisecond
 
 	_, body := testInterceptDocument(t)
-	if err := manager.publishSidecarDocument(context.Background(), body); err != nil {
-		t.Fatalf("publish with an absent socket = %v; the enable must not be refused for want of the sidecar", err)
+	published, pending, err := manager.stageSidecarDocument(context.Background(), body)
+	if err != nil {
+		t.Fatalf("staging with an absent socket = %v; the enable must not be refused for want of the sidecar", err)
+	}
+	if !published {
+		t.Fatal("the document was written but not reported as published; the caller would skip its compensation")
+	}
+	if !pending {
+		t.Fatal("the handover was not reported as pending; the bundle would never be pushed and readiness never asserted")
 	}
 	written, err := os.ReadFile(interceptPath)
 	if err != nil || len(written) == 0 {
@@ -51,8 +58,12 @@ func TestPublishSidecarDocument_UsesTheControlAPIWhenTheSocketExists(t *testing.
 	manager.SetSidecarClient(NewSidecarClient(present))
 
 	_, body := testInterceptDocument(t)
-	if err := manager.publishSidecarDocument(context.Background(), body); err == nil {
+	published, _, err := manager.stageSidecarDocument(context.Background(), body)
+	if err == nil {
 		t.Fatal("a present socket was skipped; the control API is no longer being used at all")
+	}
+	if published {
+		t.Fatal("a bundle that was never committed must not be reported as published; the caller would compensate a transaction that did not happen")
 	}
 }
 

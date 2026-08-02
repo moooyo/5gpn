@@ -160,6 +160,12 @@ func writeInterceptModuleError(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, errInterceptApplyFailed):
 		writeErr(w, http.StatusBadGateway, err.Error())
+	case errors.Is(err, errInterceptApplyUnresolved):
+		// Not 502. That code, and the message beside it, tell an operator the
+		// change did not happen -- and here that is the one thing nobody knows.
+		// The candidate is still in place on both sides and the next daemon
+		// start adjudicates it against the core.
+		writeErr(w, http.StatusInternalServerError, err.Error())
 	default:
 		writeErr(w, http.StatusBadRequest, err.Error())
 	}

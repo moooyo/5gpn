@@ -539,7 +539,7 @@ describe('SettingsPage version block', () => {
     renderSettings(
       statusValue({
         mihomo: { version: 'v1.19.28-overlay.2', meta: true },
-        intercept: { running: true, expected: true, installed_plugins: 6, active_plugins: 6, version: '0.1.0-beta.1' },
+        intercept: { running: true, expected: true, installed_plugins: 6, active_plugins: 6, routing_driver: true, version: '0.1.0-beta.1' },
         status: {
           version: 'dev+abc1234',
           uptime_seconds: 3600,

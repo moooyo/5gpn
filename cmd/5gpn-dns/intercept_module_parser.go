@@ -569,6 +569,17 @@ func parseActionGate(raw *nativeExtensionActionGate, settings []interceptModuleS
 			if !slices.Contains(setting.Options, equals) {
 				return nil, fmt.Errorf("%q has no option %q", key, equals)
 			}
+		default:
+			// A whitelist, not a fallthrough. The runtime compares the setting's
+			// *rendered* text, so a gate on any other type asks an author to
+			// reproduce Go's own formatting: a number gate written `equals:
+			// "1.0"` never matches the value 1, whose canonical form is "1", and
+			// a location renders as `map[accuracy:25 latitude:… longitude:…]`,
+			// which no author can write in advance because it depends on
+			// coordinates the operator picks. Both compile to an action that is
+			// silently skipped -- no error, no engine log -- and the runtime's
+			// own comment asserts this case cannot arise.
+			return nil, fmt.Errorf("%q is a %s setting; only boolean and select settings can gate an action", key, setting.Type)
 		}
 		return &interceptActionGate{Key: key, Equals: equals}, nil
 	}

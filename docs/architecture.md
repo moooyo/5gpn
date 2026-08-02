@@ -349,9 +349,14 @@ interception transaction implicitly.
 
 Native `traffic.upstreamMappings` are extension-scoped upstream overrides, not
 a second global DNS policy. Their host must be covered by the same extension's
-`captureHosts`. They apply only after that host has been steered through the
-sidecar, preserve the original HTTP Host and TLS SNI, reject private, loopback,
-link-local, and otherwise unsafe IPv4 targets, and return through mihomo. A
+`captureHosts`. The address and alias forms apply only after that host has been
+steered through the sidecar, preserve the original HTTP Host and TLS SNI, and
+return through mihomo. The resolver form (`server:…`) names nameservers for the
+loopback origin resolver instead of a destination, and the sidecar excludes it
+everywhere a mapping becomes a dial target. Every form's dialled IPv4 address —
+an address target, or each resolver spec's pinned address — is refused if it is
+private, loopback, link-local, CGNAT, or otherwise unsafe; an alias is a name,
+so that intent cannot be enforced for it. A
 manifest may require an operator egress-group binding but cannot name, inspect,
 or change the selected group. The management surfaces expose only existing
 proxy-group names plus `DIRECT`; the binding is operator state stored outside
@@ -775,18 +780,23 @@ mihomo file is neither rewritten nor reloaded, so a routing change can no longer
 perturb the rules in it.
 
 The generation transaction is ordered so that a failure cannot leave capability
-without the state it depends on: read back the live generation, compile and
-stage — which is idempotent and confers no capability — atomically publish the
-candidate sidecar document, wait for the root-owned certificate publisher to
-acknowledge the exact host-set digest, record a durable commit intent, then
-commit with compare-and-swap against both the live generation and the core
-configuration revision. The DNS overlay is published last, only once the
-generation is effective, because publishing it earlier would steer clients at a
-gateway that cannot yet process their traffic. A stage or certificate failure
-abandons the staged generation and restores the old sidecar bytes. A commit
-whose response is lost is resolved by reading back and rolling forward, never by
-rolling back: a lost response says nothing about whether the commit landed, and
-undoing on that basis would revoke a generation already serving traffic. An
+without the state it depends on: publish the candidate sidecar document, wait
+for the root-owned certificate publisher to acknowledge the exact host-set
+digest, hand the sidecar its bundle once its unit is able to start — which it
+cannot be until that certificate exists — then read back the live generation,
+compile and stage (idempotent, conferring no capability), record a durable
+commit intent, and commit with compare-and-swap against both the live generation
+and the core configuration revision. The DNS overlay is published last, only
+once the generation is effective, because publishing it earlier would steer
+clients at a gateway that cannot yet process their traffic.
+
+The compensation is one step, installed before the first publication that can
+need it, and it runs only when the overlay reports that the generation provably
+did not take. A commit whose response is lost, and a commit that landed before
+its bookkeeping failed, both leave the candidate in place: a lost response says
+nothing about whether the commit landed, and undoing on that basis would revoke
+a generation already serving traffic. Those apply as unresolved rather than
+failed, and restart recovery adjudicates them against the core. An
 active generation matching neither the base nor the target means a third party
 moved it, which is deliberately left for an operator rather than resolved
 automatically. The daemon republishes from the sidecar document at every start,
@@ -1622,9 +1632,10 @@ merge the two components; keep the language shared and the models apart.
 
 Enabling uses one
 review for the complete snapshot. It
-lists every global routing rule and, when network permission exists, every
-origin while stating that the plugin can send any decrypted request, response,
-setting, or storage data visible to it there. Reordering opens a separate
+lists every global routing rule and, when network permission exists, states that
+the grant names no destination and that the plugin can send any decrypted
+request, response, setting, or storage data visible to it to any host it can
+reach. Reordering opens a separate
 before/after review because it changes action, egress, and global routing
 precedence. An authenticated,
 on-demand detail read exposes the exact stored manifest and script bodies for

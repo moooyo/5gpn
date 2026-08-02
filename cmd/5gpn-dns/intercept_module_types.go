@@ -22,9 +22,8 @@ const (
 	interceptPhaseRequest  = "request"
 	interceptPhaseResponse = "response"
 
-	maxInterceptModules        = 64
-	maxInterceptModuleHosts    = 512
-	maxInterceptNetworkOrigins = 256
+	maxInterceptModules     = 64
+	maxInterceptModuleHosts = 512
 	// maxInterceptHostMappingServers bounds one resolver-form mapping. A name
 	// needs a primary and a spare; more is a group, which is the operator's to
 	// configure and not an extension's to smuggle in one line.
@@ -578,6 +577,52 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 			rule.Headers != nil || rule.Rewrite != nil || rule.ReplaceBody != nil) {
 			return fmt.Errorf("action %q declares an entry without a script", rule.ID)
 		}
+		// Every kind carries a body mode and the two limits, so all three are
+		// checked once, here, above the branches. They used to sit below two
+		// `continue`s -- one for reject and one for the four other declarative
+		// kinds -- so five of the seven kinds were never bounds-checked at all,
+		// by either component. The comment below about hoisting these above the
+		// jq branch is the same lesson, learned once and not carried far enough.
+		//
+		// What that cost: `maxBodyBytes: 1024` on a mock whose body is 2 KiB is
+		// an ordinary thing to copy from a neighbouring action, and it made
+		// every matching request 502 -- because validateModuleResultBody sizes
+		// the result against this field. `maxBodyBytes: -1` did it
+		// unconditionally, for any body including an empty one. `bodyMode:
+		// banana` survived to the sidecar and defeated the streaming fast path,
+		// which requires every matched rule to be exactly "none".
+		if rule.BodyMode != "none" && rule.BodyMode != "text" && rule.BodyMode != "binary" {
+			return fmt.Errorf("action %q body_mode must be none, text, or binary", rule.ID)
+		}
+		// jq and script both run with a timeout and a body limit, and the sidecar
+		// bounds them for both. These sat below the jq branch, so a manifest
+		// declaring `timeoutMs: 20` on a jq action was accepted here and rejected
+		// there. Two components disagreeing about the same document is the whole
+		// failure; the bounds are the same numbers either way.
+		if rule.TimeoutMS < 50 || rule.TimeoutMS > 30000 {
+			return fmt.Errorf("action %q timeout_ms must be between 50 and 30000", rule.ID)
+		}
+		if rule.MaxBodyBytes < 1024 || rule.MaxBodyBytes > 64<<20 {
+			return fmt.Errorf("action %q max_body_bytes must be between 1024 and 67108864", rule.ID)
+		}
+		// A rewrite reads the request URL and returns a changed one. It is the
+		// one declarative kind that never looks at rule.Phase, so on the
+		// response phase it still produced a URL change -- which the response
+		// path refuses, correctly and fail-closed, by failing the exchange. The
+		// upstream had already answered; the client got a 502 instead of a
+		// response that was fine. Four validators accepted the shape and the
+		// per-action log even recorded "action completed".
+		if rule.Rewrite != nil && rule.Phase != interceptPhaseRequest {
+			return fmt.Errorf("action %q rewrite requires phase request", rule.ID)
+		}
+		// replace_body edits a body, so it needs one delivered. It reads the
+		// message body directly without consulting body_mode, and today that
+		// works only because the response path buffers unconditionally. Pinning
+		// the declaration means a streaming fast path cannot silently turn a
+		// replacement into a no-op later.
+		if rule.ReplaceBody != nil && rule.BodyMode == "none" {
+			return fmt.Errorf("action %q replace_body requires body_mode text or binary", rule.ID)
+		}
 		// A declarative action has no script snapshot, so the body and digest
 		// rules below do not apply to it.
 		if rule.Reject {
@@ -594,17 +639,6 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 			}
 			continue
 		}
-		// jq and script both run with a timeout and a body limit, and the sidecar
-		// bounds them for both. These sat below the jq branch, so a manifest
-		// declaring `timeoutMs: 20` on a jq action was accepted here and rejected
-		// there. Two components disagreeing about the same document is the whole
-		// failure; the bounds are the same numbers either way.
-		if rule.TimeoutMS < 50 || rule.TimeoutMS > 30000 {
-			return fmt.Errorf("action %q timeout_ms must be between 50 and 30000", rule.ID)
-		}
-		if rule.MaxBodyBytes < 1024 || rule.MaxBodyBytes > 64<<20 {
-			return fmt.Errorf("action %q max_body_bytes must be between 1024 and 67108864", rule.ID)
-		}
 		if rule.JQProgram != "" {
 			if len(rule.JQProgram) > maxInterceptJQProgram {
 				return fmt.Errorf("action %q jq program exceeds %d bytes", rule.ID, maxInterceptJQProgram)
@@ -619,9 +653,6 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 		}
 		if !validSHA256(rule.ScriptDigest) || rule.ScriptDigest != sha256Hex([]byte(rule.ScriptBody)) {
 			return fmt.Errorf("action %q digest does not match its immutable script snapshot", rule.ID)
-		}
-		if rule.BodyMode != "none" && rule.BodyMode != "text" && rule.BodyMode != "binary" {
-			return fmt.Errorf("action %q body_mode must be none, text, or binary", rule.ID)
 		}
 		if rule.Entry != "" && rule.Entry != interceptScriptEntryProxyCompat {
 			return fmt.Errorf("action %q entry must be empty or %s", rule.ID, interceptScriptEntryProxyCompat)
@@ -1013,11 +1044,31 @@ func interceptHostTargetAddressAllowed(ip net.IP) bool {
 	return true
 }
 
-// validInterceptHostMappingServers checks the resolver form's specs. They are
-// the same strings the operator's own upstream groups accept, so a mapping
-// cannot name a transport the box does not already speak.
+// validInterceptHostMappingServers checks the resolver form's specs.
+//
+// Every part runs through the operator's own upstream validator and then
+// through the same address-range check the address form gets.
+//
+// It used to run neither. The comment here claimed these were "the same strings
+// the operator's own upstream groups accept" -- they were not:
+// parseUpstreamEntryList is a lenient parser, not a validator, and its default
+// branch appends an entry for any non-empty string, so len(parsed) == len(parts)
+// held for essentially any input. validateUpstreamEntry, which the operator's
+// own path actually runs and which refuses a bare hostname by name as "the
+// exact self-reference footgun", was never called here. And because
+// validInterceptHostTarget returns on the server: prefix, the whole thing
+// returned before interceptHostTargetAddressAllowed -- the check whose own
+// comment calls it "both the earliest and the only reliable place" to stop a
+// mapping aimed at the gateway's own management plane.
+//
+// So `server:127.0.0.1`, `server:169.254.169.254` and `server:ns@10.0.0.5:853`
+// were all accepted, while the plain `127.0.0.1` address form was correctly
+// refused. Each became a live resolver group inside the DNS daemon, dialled
+// verbatim on every resolution of the mapped name. The plain UDP form is the
+// strongest: an arbitrary address and port, an attacker-chosen QNAME in the
+// payload, and the reply parsed and returned.
 func validInterceptHostMappingServers(rest string) bool {
-	parts := make([]string, 0, 2)
+	parts := make([]string, 0, maxInterceptHostMappingServers)
 	for _, part := range strings.Split(rest, ",") {
 		if part = strings.TrimSpace(part); part != "" {
 			parts = append(parts, part)
@@ -1026,7 +1077,29 @@ func validInterceptHostMappingServers(rest string) bool {
 	if len(parts) == 0 || len(parts) > maxInterceptHostMappingServers {
 		return false
 	}
-	return len(parseUpstreamEntryList(parts)) == len(parts)
+	for _, part := range parts {
+		if err := validateUpstreamEntry("host-mapping", part); err != nil {
+			return false
+		}
+	}
+	entries := parseUpstreamEntryList(parts)
+	if len(entries) != len(parts) {
+		return false
+	}
+	for _, entry := range entries {
+		// Only DialAddr is ever contacted. A DoH endpoint's hostname is never
+		// resolved -- the pinned address is what gets dialled -- so the range
+		// check belongs on the dial address and nowhere else.
+		host := entry.DialAddr
+		if bare, _, err := net.SplitHostPort(host); err == nil {
+			host = bare
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || ip.To4() == nil || !interceptHostTargetAddressAllowed(ip) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateInterceptEgressGroupBinding(group string) error {

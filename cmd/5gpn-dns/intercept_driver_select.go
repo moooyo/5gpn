@@ -88,6 +88,90 @@ func selectInterceptRoutingDriver(
 	// arrives. Nothing else renews it, so this heartbeat is what makes the
 	// overlay serve traffic at all rather than an optional refinement.
 	client := NewOverlayClient(socket)
-	go NewOverlayReadinessReporter(client, sidecar).Run(context.Background())
+	reporter := NewOverlayReadinessReporter(client, sidecar)
+	// The control plane reports what this reporter decides. Without it, every
+	// state that withholds the lease -- and so REJECTs all captured traffic --
+	// was visible only in the journal.
+	manager.SetReadinessReporter(reporter)
+	go reporter.Run(context.Background())
 	return nil
+}
+
+// Retry bounds for the driver probe. The floor is short because the common
+// failure is a cold-start race measured in hundreds of milliseconds; the
+// ceiling keeps a genuinely misconfigured gateway to one attempt a minute.
+const (
+	overlayDriverRetryMin = 2 * time.Second
+	overlayDriverRetryMax = time.Minute
+)
+
+// superviseInterceptRoutingDriver brings the driver up, and keeps trying if it
+// cannot yet.
+//
+// The probe used to run exactly once, and a failure was logged and forgotten.
+// That is not a rare path: the socket lives in mihomo's RuntimeDirectory, and
+// 5gpn-dns is only softly ordered after mihomo -- Wants= and After=, explicitly
+// best-effort -- while mihomo is Type=simple, so systemd releases this daemon
+// the instant mihomo is forked, before it has loaded its config and providers
+// and bound the socket. Losing that race cost the whole process lifetime:
+// publishOverlayGeneration returned errInterceptRoutingDriverUnavailable for
+// every subsequent change, PrepareRuntime published a nil host table so
+// interception silently vanished, and the readiness reporter -- which is
+// started only here -- never ran at all, leaving even a generation mihomo
+// recovered from its own store quarantined forever. The process is healthy
+// throughout, so Restart=on-failure and WatchdogSec never fire.
+//
+// Retrying also covers the operator repairing a config the probe rejected,
+// which previously required a restart to take effect.
+func superviseInterceptRoutingDriver(
+	ctx context.Context,
+	cfg Config,
+	manager *InterceptModuleManager,
+	mihomo *MihomoConfigStore,
+	sidecar *SidecarClient,
+) {
+	err := selectInterceptRoutingDriver(cfg, manager, mihomo, sidecar)
+	if err == nil {
+		return
+	}
+	// DNS is this daemon's primary duty and keeps running. Interception has no
+	// second publication path, so it stays fail-closed and every routing change
+	// reports this rather than appearing to succeed.
+	log.Printf("warning: interception routing driver: %v -- retrying in the background", err)
+
+	go func() {
+		delay := overlayDriverRetryMin
+		last := err.Error()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
+			retryErr := selectInterceptRoutingDriver(cfg, manager, mihomo, sidecar)
+			if retryErr == nil {
+				log.Print("intercept: routing driver became available; republishing the current document")
+				// PrepareRuntime is what makes the coordinator authoritative,
+				// and the driver short-circuits when the recompiled state is
+				// already live, so republishing a healthy gateway is a readback.
+				if prepareErr := manager.PrepareRuntime(); prepareErr != nil {
+					log.Printf("intercept: republishing after the driver became available failed: %v", prepareErr)
+				}
+				return
+			}
+			// Only when the reason changes. A permanently broken gateway is one
+			// line, not one a minute, and a reason that changes is the thing an
+			// operator actually needs to see.
+			if message := retryErr.Error(); message != last {
+				log.Printf("warning: interception routing driver: %v", retryErr)
+				last = message
+			}
+			if delay < overlayDriverRetryMax {
+				delay *= 2
+				if delay > overlayDriverRetryMax {
+					delay = overlayDriverRetryMax
+				}
+			}
+		}
+	}()
 }

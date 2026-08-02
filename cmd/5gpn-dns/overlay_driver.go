@@ -13,35 +13,20 @@ import (
 // OverlayDriver publishes routing changes as typed generations. It is the only
 // publication path: the operator's mihomo YAML is never rewritten for one.
 //
-// The ordering below is the whole point and is not negotiable: the sidecar
-// bundle and the certificate must be in place *before* mihomo publishes the
-// generation as active, because activation is what makes capture traffic
-// start arriving.
+// The driver owns the generation. The certificate gate and the client DNS
+// overlay belong to the caller: InterceptModuleManager.mutate waits for the
+// certificate before calling Publish and installs the DNS overlay after it
+// returns (see intercept_module_manager.go:1260-1282). The driver used to carry
+// hooks for both, which nothing ever installed -- so a doc comment called a
+// seven-step ordering "not negotiable" while two of the steps could not run.
 type OverlayDriver struct {
 	client  *OverlayClient
 	journal *OverlayJournal
-	// certWait blocks until the certificate publisher acknowledges the exact
-	// host-set digest for this generation.
-	certWait func(ctx context.Context, digest string) error
-	// dnsPublish installs the client DNS overlay. It runs last, after the
-	// generation is confirmed effective — publishing it earlier would steer
-	// clients at a gateway that cannot yet process their traffic.
-	dnsPublish func(ctx context.Context) error
 }
 
 // NewOverlayDriver builds the driver.
 func NewOverlayDriver(client *OverlayClient, journal *OverlayJournal) *OverlayDriver {
 	return &OverlayDriver{client: client, journal: journal}
-}
-
-// SetCertificateWaiter installs the certificate readiness gate.
-func (d *OverlayDriver) SetCertificateWaiter(fn func(ctx context.Context, digest string) error) {
-	d.certWait = fn
-}
-
-// SetDNSPublisher installs the client DNS overlay publisher.
-func (d *OverlayDriver) SetDNSPublisher(fn func(ctx context.Context) error) {
-	d.dnsPublish = fn
 }
 
 // Available reports whether the core actually implements a schema this build
@@ -59,24 +44,82 @@ func newOverlayOperationID() string {
 	return "op-" + hex.EncodeToString(b[:])
 }
 
+// overlayOutcome says what a Publish result proved about the commit.
+//
+// The caller compensates a partially applied transaction by restoring the
+// previous sidecar bundle, and that is only ever safe when the generation
+// provably did not take. Publish returns errors for three different situations
+// -- it did not take, it did take, nothing here can tell -- and a caller that
+// reads only `err != nil` compensates all three. Two of those compensations
+// manufacture the exact mismatch the compensation exists to prevent: the
+// sidecar serving one bundle while the live generation names another, which
+// holds the readiness lease down and REJECTs every captured connection until an
+// unrelated transaction or a daemon restart repairs it.
+//
+// A sentinel error will not do. The call site cannot see one it was not told to
+// look for, and that is precisely the shape this already got wrong.
+type overlayOutcome int
+
+const (
+	// overlayNotTaken: the live generation is unchanged. Compensating is safe,
+	// and is the only way the caller gets back to a consistent state.
+	overlayNotTaken overlayOutcome = iota
+	// overlayTaken: the target generation is live. Compensating would revoke
+	// policy that is already serving traffic.
+	overlayTaken
+	// overlayUnknown: nothing here can prove either way. Leave both sides on the
+	// candidate so restart recovery adjudicates against the core rather than
+	// against local belief.
+	overlayUnknown
+)
+
+func (o overlayOutcome) String() string {
+	switch o {
+	case overlayTaken:
+		return "taken"
+	case overlayUnknown:
+		return "unknown"
+	default:
+		return "not-taken"
+	}
+}
+
 // Publish takes one desired state to effective.
 //
 // Steps, in the order the failure matrix requires:
 //
 //  1. read back the authoritative live state — never trust local belief;
-//  2. compile and stage, which is idempotent and carries no capability;
-//  3. wait for the certificate for this exact host set;
+//  2. adjudicate any operation an earlier call left in flight, against that
+//     same readback;
+//  3. compile and stage, which is idempotent and carries no capability;
 //  4. write COMMIT_INTENT durably, before the commit call goes out;
 //  5. commit with compare-and-swap against the live generation and the core
 //     configuration revision;
-//  6. on any ambiguous failure, read back and roll forward — never rollback;
-//  7. publish the client DNS overlay only after the generation is effective.
-func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (overlayCommitResult, error) {
+//  6. on any ambiguous failure, read back and roll forward — never rollback.
+//
+// The certificate for this exact host set is already published when Publish is
+// called, and the client DNS overlay is installed after it returns. Both are
+// the caller's, and both have to bracket this call: capture traffic starts
+// arriving the moment the generation goes live.
+//
+// The returned overlayOutcome, not the error, is what tells the caller whether
+// compensating is safe.
+func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (overlayCommitResult, overlayOutcome, error) {
 	var zero overlayCommitResult
 
 	readback, err := d.client.Readback(ctx)
 	if err != nil {
-		return zero, fmt.Errorf("overlay: readback before publish: %w", err)
+		return zero, overlayNotTaken, fmt.Errorf("overlay: readback before publish: %w", err)
+	}
+
+	// The readback above is authoritative and current, so an entry an earlier
+	// ambiguous commit left behind can be adjudicated here instead of refused at
+	// Begin. Without this one lost commit response wedged every later enable,
+	// disable, settings edit and reorder for the rest of the process lifetime --
+	// and each attempt still published a sidecar bundle before failing, so the
+	// wedge cost two generations a try.
+	if err := d.resolveInFlight(ctx, readback); err != nil {
+		return zero, overlayNotTaken, err
 	}
 
 	doc, err := compileOverlayGeneration(overlayCompileInput{
@@ -89,7 +132,7 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 		SidecarBundleDigest:      in.SidecarBundleDigest,
 	})
 	if err != nil {
-		return zero, err
+		return zero, overlayNotTaken, err
 	}
 
 	// Publishing the generation that is already live is a no-op, not a new
@@ -105,7 +148,7 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 	// journal that has no record (an older file, or a lost store).
 	fingerprint, err := overlayDesiredFingerprint(in.DocumentRevision, doc)
 	if err != nil {
-		return zero, err
+		return zero, overlayNotTaken, err
 	}
 	lastGeneration, lastFingerprint := d.journal.LastEffectiveState()
 	alreadyLive := readback.ActiveGeneration != "" &&
@@ -118,7 +161,7 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 			CoreRevision:     readback.CoreRevision,
 			ResolverEpoch:    readback.ResolverEpoch,
 			Repeated:         true,
-		}, nil
+		}, overlayTaken, nil
 	}
 
 	entry := overlayJournalEntry{
@@ -131,20 +174,19 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 		ExpectedCoreRevision:     readback.CoreRevision,
 	}
 	if err := d.journal.Begin(entry); err != nil {
-		return zero, err
+		return zero, overlayNotTaken, err
 	}
 
 	staged, err := d.client.Stage(ctx, doc)
 	if err != nil {
 		// A stage that failed left nothing behind -- no generation, and so no
-		// capability -- exactly like the certificate wait below, which already
-		// abandons its entry. Recording the error and keeping the entry in
-		// flight instead blocked every later apply, because Begin refuses while
-		// one is unfinished: one rejected document wedged the driver until the
-		// daemon restarted and recovery ran.
+		// capability. Recording the error and keeping the entry in flight instead
+		// blocked every later apply, because Begin refuses while one is
+		// unfinished: one rejected document wedged the driver until the daemon
+		// restarted and recovery ran.
 		_ = d.journal.Advance(overlayPhaseStaged, err.Error())
 		_ = d.journal.Finish()
-		return zero, fmt.Errorf("overlay: stage %s: %w", doc.GenerationID, err)
+		return zero, overlayNotTaken, fmt.Errorf("overlay: stage %s: %w", doc.GenerationID, err)
 	}
 	if err := d.journal.Advance(overlayPhasePrepared, ""); err != nil {
 		// Same wedge the stage-failure path above documents, and the same cure.
@@ -155,19 +197,7 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 		// committed, so the entry describes no capability and the staged
 		// generation can simply be dropped.
 		d.abandonStagedGeneration(ctx, doc.GenerationID)
-		return zero, err
-	}
-
-	if d.certWait != nil && doc.CertificateHostSetDigest != "" {
-		if err := d.certWait(ctx, doc.CertificateHostSetDigest); err != nil {
-			// The staged generation carries no capability, so abandoning it
-			// leaves the live generation untouched.
-			if abortErr := d.client.Abort(ctx, doc.GenerationID); abortErr != nil {
-				log.Printf("overlay: abort %s after certificate failure: %v", doc.GenerationID, abortErr)
-			}
-			_ = d.journal.Finish()
-			return zero, fmt.Errorf("overlay: certificate not ready for %s: %w", doc.GenerationID, err)
-		}
+		return zero, overlayNotTaken, err
 	}
 
 	// Durable intent BEFORE the commit call. This is what makes a lost response
@@ -178,7 +208,7 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 		// committed, the staged generation carries no capability, and leaving the
 		// entry in flight would wedge every later apply at Begin.
 		d.abandonStagedGeneration(ctx, doc.GenerationID)
-		return zero, err
+		return zero, overlayNotTaken, err
 	}
 
 	result, err := d.client.Commit(ctx, doc.GenerationID, entry.BaseGeneration, entry.ExpectedCoreRevision)
@@ -188,16 +218,57 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 	_ = staged
 
 	if err := d.journal.Advance(overlayPhaseEffective, ""); err != nil {
-		return result, err
-	}
-	if err := d.publishDNS(ctx); err != nil {
-		// The generation is live; only the client DNS overlay is missing. That
-		// is a degraded state to report, not a reason to revoke working policy.
-		return result, fmt.Errorf("overlay: generation %s is effective but the DNS overlay failed: %w", doc.GenerationID, err)
+		// The commit succeeded; only the bookkeeping that records it did not. The
+		// generation is live, so this is overlayTaken and the caller must not
+		// compensate -- reporting it as a plain error is what had callers restore
+		// the previous bundle underneath a generation already serving traffic.
+		return result, overlayTaken, err
 	}
 	_ = d.journal.Advance(overlayPhaseDNSApplied, "")
 	_ = d.journal.Finish()
-	return result, nil
+	return result, overlayTaken, nil
+}
+
+// resolveInFlight adjudicates an entry an earlier transaction left behind,
+// against a readback that has just proven what is live.
+//
+// Two of the three cases are decidable, and they are the two that occur. If the
+// live generation is the entry's target the commit did land, so roll forward
+// and finish. If it is the entry's base the commit provably did not, so the
+// entry describes nothing and the staged generation can be dropped. Anything
+// else is the conflict Recover also refuses to resolve, and it stays for an
+// operator.
+//
+// This is the same classification RecoverOverlayOperation performs at startup.
+// Doing it here too is what stops a single lost commit response from wedging
+// every subsequent routing change until a restart.
+func (d *OverlayDriver) resolveInFlight(ctx context.Context, readback overlayReadback) error {
+	entry := d.journal.Current()
+	if entry == nil || entry.Phase == overlayPhaseDone {
+		return nil
+	}
+	switch readback.ActiveGeneration {
+	case entry.TargetGeneration:
+		log.Printf("overlay: rolling forward generation %s left in flight at %s by operation %s",
+			entry.TargetGeneration, entry.Phase, entry.OperationID)
+		if err := d.journal.Advance(overlayPhaseEffective, ""); err != nil {
+			return err
+		}
+		_ = d.journal.Advance(overlayPhaseDNSApplied, "")
+		return d.journal.Finish()
+	case entry.BaseGeneration:
+		log.Printf("overlay: discarding operation %s left in flight at %s; its commit did not take effect",
+			entry.OperationID, entry.Phase)
+		if entry.TargetGeneration != "" {
+			if abortErr := d.client.Abort(ctx, entry.TargetGeneration); abortErr != nil {
+				log.Printf("overlay: abort %s left in flight: %v", entry.TargetGeneration, abortErr)
+			}
+		}
+		return d.journal.Finish()
+	default:
+		return fmt.Errorf("overlay: active generation %q matches neither the base nor the target of in-flight operation %s; operator intervention required",
+			readback.ActiveGeneration, entry.OperationID)
+	}
 }
 
 // abandonStagedGeneration drops a generation that was staged but never
@@ -228,7 +299,12 @@ func (d *OverlayDriver) abandonStagedGeneration(ctx context.Context, generation 
 // still live -- leaves nothing for recovery to resolve, and keeping it would
 // refuse every later apply at Begin until the daemon restarted, which is the
 // wedge a failed stage already avoids.
-func (d *OverlayDriver) recoverAfterCommit(ctx context.Context, generationID, baseGeneration string, commitErr error) (overlayCommitResult, error) {
+//
+// The overlayOutcome it returns is what the caller compensates on. Only the two
+// provable refusals are overlayNotTaken; a lost response and a third-party move
+// are both overlayUnknown, because compensating either one can revoke live
+// policy.
+func (d *OverlayDriver) recoverAfterCommit(ctx context.Context, generationID, baseGeneration string, commitErr error) (overlayCommitResult, overlayOutcome, error) {
 	var zero overlayCommitResult
 
 	if errors.Is(commitErr, errOverlayTerminal) || errors.Is(commitErr, errOverlayUnsupported) {
@@ -237,7 +313,7 @@ func (d *OverlayDriver) recoverAfterCommit(ctx context.Context, generationID, ba
 		// nothing for a later recovery to do with it.
 		_ = d.journal.Advance(overlayPhaseCommitIntent, commitErr.Error())
 		_ = d.journal.Finish()
-		return zero, commitErr
+		return zero, overlayNotTaken, commitErr
 	}
 
 	readback, err := d.client.Readback(ctx)
@@ -245,16 +321,13 @@ func (d *OverlayDriver) recoverAfterCommit(ctx context.Context, generationID, ba
 		// Still ambiguous. The journal keeps COMMIT_INTENT so the next start
 		// resolves it instead of starting a fresh transaction on top.
 		_ = d.journal.Advance(overlayPhaseCommitIntent, commitErr.Error())
-		return zero, fmt.Errorf("overlay: commit outcome unknown for %s (%v); readback also failed: %w",
+		return zero, overlayUnknown, fmt.Errorf("overlay: commit outcome unknown for %s (%v); readback also failed: %w",
 			generationID, commitErr, err)
 	}
 
 	if readback.ActiveGeneration == generationID {
 		// It landed after all. Roll forward.
 		_ = d.journal.Advance(overlayPhaseEffective, commitErr.Error())
-		if dnsErr := d.publishDNS(ctx); dnsErr != nil {
-			return overlayCommitResult{ActiveGeneration: readback.ActiveGeneration}, dnsErr
-		}
 		_ = d.journal.Advance(overlayPhaseDNSApplied, "")
 		_ = d.journal.Finish()
 		return overlayCommitResult{
@@ -262,7 +335,7 @@ func (d *OverlayDriver) recoverAfterCommit(ctx context.Context, generationID, ba
 			ActiveDigest:     readback.ActiveDigest,
 			CoreRevision:     readback.CoreRevision,
 			ResolverEpoch:    readback.ResolverEpoch,
-		}, nil
+		}, overlayTaken, nil
 	}
 
 	_ = d.journal.Advance(overlayPhaseCommitIntent, commitErr.Error())
@@ -272,19 +345,15 @@ func (d *OverlayDriver) recoverAfterCommit(ctx context.Context, generationID, ba
 		// retry and clear it; doing that here keeps the driver usable without
 		// waiting for a restart.
 		_ = d.journal.Finish()
+		return zero, overlayNotTaken, fmt.Errorf("overlay: commit of %s did not take effect (active is %q): %w",
+			generationID, readback.ActiveGeneration, commitErr)
 	}
 	// Anything else means a third party moved the active generation. That is
 	// the conflict recovery deliberately refuses to resolve on its own, so the
-	// entry stays in flight for an operator.
-	return zero, fmt.Errorf("overlay: commit of %s did not take effect (active is %q): %w",
+	// entry stays in flight for an operator -- and the caller must not
+	// compensate, because whatever is live is not ours to revoke.
+	return zero, overlayUnknown, fmt.Errorf("overlay: commit of %s did not take effect (active is %q): %w",
 		generationID, readback.ActiveGeneration, commitErr)
-}
-
-func (d *OverlayDriver) publishDNS(ctx context.Context) error {
-	if d.dnsPublish == nil {
-		return nil
-	}
-	return d.dnsPublish(ctx)
 }
 
 // Recover resolves an operation interrupted by a crash or a lost response. It
@@ -310,9 +379,6 @@ func (d *OverlayDriver) Recover(ctx context.Context) error {
 		log.Printf("overlay: rolling forward to generation %s recovered from the journal", readback.ActiveGeneration)
 		if err := d.journal.Advance(overlayPhaseEffective, ""); err != nil {
 			return err
-		}
-		if dnsErr := d.publishDNS(ctx); dnsErr != nil {
-			return dnsErr
 		}
 		_ = d.journal.Advance(overlayPhaseDNSApplied, "")
 		return d.journal.Finish()

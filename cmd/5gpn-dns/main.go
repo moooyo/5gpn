@@ -351,12 +351,7 @@ func main() {
 		interceptManager.SetSidecarClient(sidecarClient)
 	}
 	ctrl.SetInterceptModuleManager(interceptManager)
-	if err := selectInterceptRoutingDriver(cfg, interceptManager, moduleMihomoStore, sidecarClient); err != nil {
-		// DNS is this daemon's primary duty and keeps running. Interception has
-		// no second publication path, so it stays fail-closed and every routing
-		// change reports this rather than appearing to succeed.
-		log.Printf("warning: interception routing driver: %v -- extensions cannot be applied", err)
-	}
+	superviseInterceptRoutingDriver(ctx, cfg, interceptManager, moduleMihomoStore, sidecarClient)
 	marketplaceManager := NewExtensionMarketplaceManager(
 		NewExtensionMarketplaceStore(cfg.MarketplacesFile),
 		trustResolver,

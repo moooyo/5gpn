@@ -242,6 +242,12 @@ type recordingOverlayCore struct {
 	staged  map[string]overlayDocument
 	active  string
 	commits int
+
+	// afterCommit runs on the server, after the generation is active and before
+	// the success response is written. It is how a test arranges the one state
+	// the failure matrix could not otherwise reach: the commit landed, and the
+	// bookkeeping that records it then failed.
+	afterCommit func()
 }
 
 // committed returns the generation the core last made active.
@@ -353,6 +359,9 @@ func newRecordingOverlayCore(t *testing.T, refuseCommit bool) *recordingOverlayC
 			core.active = strings.TrimSuffix(id, "/commit")
 			core.commits++
 			revision++
+			if core.afterCommit != nil {
+				core.afterCommit()
+			}
 			_ = json.NewEncoder(w).Encode(overlayCommitResult{
 				ActiveGeneration: core.active,
 				ActiveDigest:     "digest-" + core.active,
@@ -1427,4 +1436,94 @@ func mustRead(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(body)
+}
+
+// A generation that went live must never be compensated.
+//
+// The apply used to restore the previous sidecar bundle on any error from
+// publishOverlayGeneration, and the driver returns an error for three different
+// situations: the commit did not land, it did land but the journal write
+// recording it failed, and nothing could be determined. Compensating the last
+// two produced exactly the mismatch the compensation exists to prevent -- the
+// sidecar serving one bundle while the live generation names another -- which
+// withholds the readiness lease and REJECTs every captured connection. Both
+// pointers are durable, so it survived a restart of either process and only an
+// unrelated successful transaction or a daemon restart repaired it.
+//
+// The reachable trigger is a journal write failing once, which the driver's own
+// comments already call a realistic partition symptom.
+func TestApplyDoesNotCompensateAGenerationThatWentLive(t *testing.T) {
+	module := testModuleSnapshot()
+	module.EgressGroup = "Proxies"
+	manager, controller, _, interceptPath, _ := newInterceptManagerFixture(t, module)
+	core := stubCommittingOverlayCore(t)
+	journalDir := t.TempDir()
+	journal, err := NewOverlayJournal(filepath.Join(journalDir, "overlay-journal.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.SetOverlayDriver(NewOverlayDriver(core.client, journal))
+	manager.certWait = func(context.Context, string) error { return nil }
+
+	// The commit lands, and then the journal cannot record that it did.
+	core.afterCommit = func() {
+		_ = os.RemoveAll(journalDir)
+		_ = os.WriteFile(journalDir, []byte("not a directory"), 0o600)
+	}
+
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := mustRead(t, interceptPath)
+	enabled := true
+	_, err = manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled})
+	if err == nil {
+		t.Fatal("a journal write failure after a successful commit was not reported at all")
+	}
+	if !errors.Is(err, errInterceptApplyUnresolved) {
+		t.Fatalf("error = %v, want errInterceptApplyUnresolved: reporting this as a plain apply failure tells the operator the change did not happen, and it did", err)
+	}
+	if errors.Is(err, errInterceptApplyFailed) {
+		t.Fatalf("error = %v, must not also be an apply failure: the two mean opposite things to the console", err)
+	}
+	if core.commitCount() != 1 {
+		t.Fatalf("commits = %d, want 1", core.commitCount())
+	}
+	after := mustRead(t, interceptPath)
+	if after == before {
+		t.Fatal("the sidecar document was rolled back underneath a generation that is live; that is the mismatch this exists to prevent")
+	}
+	if controller.putCalls != 0 {
+		t.Fatalf("a routing change reloaded mihomo: %d controller calls", controller.putCalls)
+	}
+}
+
+// The compensation still runs for everything between the first publication and
+// the end of the transaction. The certificate wait is the step in the middle,
+// and it used to be the only one with a compensation at all.
+func TestApplyCompensatesWhenTheCertificateNeverArrives(t *testing.T) {
+	module := testModuleSnapshot()
+	module.EgressGroup = "Proxies"
+	manager, _, _, interceptPath, mihomoPath := newInterceptManagerFixture(t, module)
+	manager.certWait = func(context.Context, string) error {
+		return errors.New("the certificate publisher never acknowledged this host set")
+	}
+	originalIntercept := mustRead(t, interceptPath)
+	originalMihomo := mustRead(t, mihomoPath)
+
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	if _, err := manager.Update(context.Background(), module.ID, interceptModuleUpdate{Revision: view.Revision, Enabled: &enabled}); !errors.Is(err, errInterceptApplyFailed) {
+		t.Fatalf("certificate failure error = %v, want an apply failure", err)
+	}
+	if mustRead(t, interceptPath) != originalIntercept {
+		t.Fatal("the sidecar document was not restored after the certificate wait failed")
+	}
+	if mustRead(t, mihomoPath) != originalMihomo {
+		t.Fatal("a failed transaction touched the operator's mihomo file")
+	}
 }
