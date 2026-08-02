@@ -143,13 +143,13 @@ fi
 rm -rf -- "$unit_conflicts/5gpn-intercept-.service.d"
 
 # Stable and beta release tags are strict, disjoint SemVer forms.
-if valid_dns_stable_release_tag 9.8.7 \
-   && ! valid_dns_stable_release_tag 9.8.7-beta.1 \
-   && ! valid_dns_stable_release_tag 09.8.7 \
-   && valid_dns_beta_release_tag 9.8.8-beta.1 \
-   && valid_dns_beta_release_tag 9.8.8-beta.12 \
-   && ! valid_dns_beta_release_tag 9.8.8-beta.0 \
-   && ! valid_dns_beta_release_tag 9.8.8-beta.01; then
+if valid_stable_release_tag 9.8.7 \
+   && ! valid_stable_release_tag 9.8.7-beta.1 \
+   && ! valid_stable_release_tag 09.8.7 \
+   && valid_beta_release_tag 9.8.8-beta.1 \
+   && valid_beta_release_tag 9.8.8-beta.12 \
+   && ! valid_beta_release_tag 9.8.8-beta.0 \
+   && ! valid_beta_release_tag 9.8.8-beta.01; then
     pass "main installer enforces disjoint official and beta tag grammars"
 else
     fail "main installer release tag grammar is not strict"
@@ -159,10 +159,10 @@ fi
 # remain pinned to the exact tag stamped by the release workflow.
 latest_json="$TMP/latest-release.json"
 printf '{"tag_name":"9.8.7"}\n' > "$latest_json"
-DNS_VERSION_DEFAULT="latest"
-DNS_RELEASE_CHANNEL="stable"
-DNS_RELEASE_CHANNEL_EXPLICIT=0
-resolved="$(resolve_dns_release_version "file://$latest_json" 2>/dev/null)"
+RELEASE_TAG="latest"
+RELEASE_CHANNEL="stable"
+RELEASE_CHANNEL_EXPLICIT=0
+resolved="$(resolve_install_release_tag "file://$latest_json" 2>/dev/null)"
 if [[ "$resolved" == 9.8.7 ]]; then
     pass "source installer resolves the latest official release tag"
 else
@@ -170,7 +170,7 @@ else
 fi
 
 printf '{"tag_name":"9.8.8-beta.1"}\n' > "$latest_json"
-if resolve_dns_release_version "file://$latest_json" >/dev/null 2>&1; then
+if resolve_install_release_tag "file://$latest_json" >/dev/null 2>&1; then
     fail "official source resolution accepted a beta tag"
 else
     pass "official source resolution refuses beta tags"
@@ -182,9 +182,9 @@ printf '%s\n' \
     '[{"tag_name":"9.8.7","draft":false,"prerelease":false},{"tag_name":"9.9.0-beta.2","draft":false,"prerelease":true}]' \
     > "$beta_list"
 printf '{"tag_name":"9.9.0-beta.2","draft":false,"prerelease":true}\n' > "$beta_metadata"
-DNS_RELEASE_CHANNEL="beta"
-DNS_RELEASE_CHANNEL_EXPLICIT=1
-resolved="$(resolve_dns_release_version "file://$TMP/absent" "file://$beta_list" "file://$beta_metadata" 2>/dev/null)"
+RELEASE_CHANNEL="beta"
+RELEASE_CHANNEL_EXPLICIT=1
+resolved="$(resolve_install_release_tag "file://$TMP/absent" "file://$beta_list" "file://$beta_metadata" 2>/dev/null)"
 if [[ "$resolved" == 9.9.0-beta.2 ]]; then
     pass "source installer resolves and verifies the latest beta prerelease"
 else
@@ -192,49 +192,49 @@ else
 fi
 
 printf '{"tag_name":"9.9.0-beta.2","draft":false,"prerelease":false}\n' > "$beta_metadata"
-if resolve_dns_release_version "file://$TMP/absent" "file://$beta_list" "file://$beta_metadata" >/dev/null 2>&1; then
+if resolve_install_release_tag "file://$TMP/absent" "file://$beta_list" "file://$beta_metadata" >/dev/null 2>&1; then
     fail "source installer accepted beta metadata without prerelease status"
 else
     pass "source installer rejects beta metadata without prerelease status"
 fi
 
 printf '[{"tag_name":"9.8.7","draft":false,"prerelease":false}]\n' > "$beta_list"
-if resolve_dns_release_version "file://$TMP/absent" "file://$beta_list" "file://$beta_metadata" >/dev/null 2>&1; then
+if resolve_install_release_tag "file://$TMP/absent" "file://$beta_list" "file://$beta_metadata" >/dev/null 2>&1; then
     fail "source installer fell back to official when beta was missing"
 else
     pass "source installer fails closed when no beta exists"
 fi
 
-DNS_VERSION_DEFAULT="9.8.6"
-DNS_RELEASE_CHANNEL="stable"
-DNS_RELEASE_CHANNEL_EXPLICIT=0
-resolved="$(resolve_dns_release_version "file://$TMP/absent" 2>/dev/null)"
+RELEASE_TAG="9.8.6"
+RELEASE_CHANNEL="stable"
+RELEASE_CHANNEL_EXPLICIT=0
+resolved="$(resolve_install_release_tag "file://$TMP/absent" 2>/dev/null)"
 if [[ "$resolved" == 9.8.6 ]]; then
     pass "release installer keeps its stamped tag without another lookup"
 else
     fail "release installer did not keep its stamped tag"
 fi
 
-DNS_VERSION_DEFAULT="9.9.0-beta.2"
-resolved="$(resolve_dns_release_version "file://$TMP/absent" 2>/dev/null)"
+RELEASE_TAG="9.9.0-beta.2"
+resolved="$(resolve_install_release_tag "file://$TMP/absent" 2>/dev/null)"
 if [[ "$resolved" == 9.9.0-beta.2 ]]; then
     pass "installed beta management remains pinned without another lookup"
 else
     fail "installed beta management did not retain its pinned tag"
 fi
 
-DNS_VERSION_DEFAULT="9.8.6"
-DNS_RELEASE_CHANNEL="beta"
-DNS_RELEASE_CHANNEL_EXPLICIT=1
-if resolve_dns_release_version "file://$TMP/absent" >/dev/null 2>&1; then
+RELEASE_TAG="9.8.6"
+RELEASE_CHANNEL="beta"
+RELEASE_CHANNEL_EXPLICIT=1
+if resolve_install_release_tag "file://$TMP/absent" >/dev/null 2>&1; then
     fail "explicit beta selection accepted an official stamped bundle"
 else
     pass "explicit beta selection rejects an official stamped bundle"
 fi
 
-DNS_VERSION_DEFAULT="latest"
-DNS_RELEASE_CHANNEL="stable"
-DNS_RELEASE_CHANNEL_EXPLICIT=0
+RELEASE_TAG="latest"
+RELEASE_CHANNEL="stable"
+RELEASE_CHANNEL_EXPLICIT=0
 
 grep -Fq 'delegate_unpinned_installer' "$INSTALL" \
     && grep -Fq 'quick-install.sh' "$INSTALL" \

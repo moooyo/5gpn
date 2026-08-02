@@ -160,7 +160,7 @@ stable-to-beta upgrade contract on 2026-07-21.**
   are prereleases with `make_latest=false`.
 - `quick-install.sh` and source `install.sh` default to the latest official
   release; `--beta` explicitly selects the latest verified beta prerelease.
-- A release bundle stamps `DNS_VERSION_DEFAULT` to its exact tag. Unpinned source
+- A release bundle stamps `RELEASE_TAG` to its exact tag. Unpinned source
   installs delegate to that verified bundle, and packaged or installed scripts
   retain the stamped tag so scripts, daemon binaries, web assets, and checksums
   cannot drift across releases or channels.

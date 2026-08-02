@@ -175,7 +175,7 @@ build_fixture_bundle() { # build_fixture_bundle <install.sh contents>
     printf '%s  %s\n' "$(sha256_file "$bundle")" "$BUNDLE_NAME" > "$checksums"
 }
 
-build_fixture_bundle $'#!/usr/bin/env bash\nDNS_VERSION_DEFAULT="9.8.7"'
+build_fixture_bundle $'#!/usr/bin/env bash\nRELEASE_TAG="9.8.7"'
 
 DL_MODE=valid
 dl() {
@@ -202,7 +202,7 @@ fi
 
 beta_bundle_target="$TMP/beta-bundle-target"
 prepare_source_dir "$beta_bundle_target" >/dev/null 2>&1
-build_fixture_bundle $'#!/usr/bin/env bash\nDNS_VERSION_DEFAULT="9.9.0-beta.2"'
+build_fixture_bundle $'#!/usr/bin/env bash\nRELEASE_TAG="9.9.0-beta.2"'
 fetch_bundle https://fixture.invalid beta 9.9.0-beta.2 >/dev/null 2>&1
 if [[ "$?" == 0 && -f "$_QI_SOURCE_DIR/install.sh" ]] \
    && marker_matches "$_QI_SOURCE_DIR/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE"; then
@@ -229,11 +229,11 @@ expect_stamp_rejected() { # expect_stamp_rejected <name> <channel> <tag> <instal
 expect_stamp_rejected missing stable 9.8.7 \
     $'#!/usr/bin/env bash\necho missing-stamp'
 expect_stamp_rejected duplicate stable 9.8.7 \
-    $'#!/usr/bin/env bash\nDNS_VERSION_DEFAULT="9.8.7"\nDNS_VERSION_DEFAULT="9.8.7"'
+    $'#!/usr/bin/env bash\nRELEASE_TAG="9.8.7"\nRELEASE_TAG="9.8.7"'
 expect_stamp_rejected wrong-tag stable 9.8.7 \
-    $'#!/usr/bin/env bash\nDNS_VERSION_DEFAULT="9.8.6"'
+    $'#!/usr/bin/env bash\nRELEASE_TAG="9.8.6"'
 expect_stamp_rejected cross-channel stable 9.8.7 \
-    $'#!/usr/bin/env bash\nDNS_VERSION_DEFAULT="9.8.7-beta.1"'
+    $'#!/usr/bin/env bash\nRELEASE_TAG="9.8.7-beta.1"'
 
 mismatch_target="$TMP/mismatch-target"
 prepare_source_dir "$mismatch_target" >/dev/null 2>&1

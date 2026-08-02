@@ -306,7 +306,7 @@ grep -Fq 'make_latest: ${{ needs.classify.outputs.make_latest }}' "$RELEASE" \
     || fail "release workflow does not protect the official latest pointer"
 grep -Fq 'uses: ./.github/workflows/checks.yml' "$RELEASE" \
     || fail "release channels do not share the repository checks gate"
-grep -Fq 'DNS_VERSION_DEFAULT=\"${GITHUB_REF_NAME}\"' "$RELEASE" \
+grep -Fq 'RELEASE_TAG=\"${GITHUB_REF_NAME}\"' "$RELEASE" \
     || fail "release installer bundle is not stamped to the exact tag"
 
 # --- Certs are DELIBERATELY preserved (re-issuing an LE cert is rate-limited) ---

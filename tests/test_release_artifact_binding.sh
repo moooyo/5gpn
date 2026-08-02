@@ -163,7 +163,7 @@ done
 grep -Fq 'release_tag_file_matches "$ARTIFACT_STAGE/web/.web_version" "$ver"' <<<"$stage_fn" \
     && pass "web marker is checked during staging" \
     || fail "web marker is not checked during staging"
-if grep -Fq 'release_tag_file_matches "$ARTIFACT_STAGE/web/.web_version" "$DNS_VERSION_DEFAULT"' <<<"$install_web_fn" \
+if grep -Fq 'release_tag_file_matches "$ARTIFACT_STAGE/web/.web_version" "$RELEASE_TAG"' <<<"$install_web_fn" \
    && ! grep -Fq '> "$ARTIFACT_STAGE/web/.web_version"' <<<"$install_web_fn"; then
     pass "web publication rechecks rather than overwrites the release marker"
 else

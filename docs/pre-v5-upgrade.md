@@ -128,8 +128,8 @@ source "$NEW_INSTALL_SH"
 declare -F validate_dns_env_schema >/dev/null
 declare -F acquire_install_lock >/dev/null
 declare -F release_install_lock >/dev/null
-declare -F valid_dns_release_tag >/dev/null
-valid_dns_release_tag "$DNS_VERSION_DEFAULT" || {
+declare -F valid_release_tag >/dev/null
+valid_release_tag "$RELEASE_TAG" || {
   echo 'NEW_INSTALL_SH is not stamped to an exact official or beta release tag' >&2
   exit 1
 }
@@ -138,7 +138,7 @@ binary_reports_target_version() {
   output="$(mktemp /root/.5gpn-target-version.XXXXXX)" || return 1
   chmod 0600 "$output" || { rm -f -- "$output"; return 1; }
   if "$binary" --version > "$output" 2>/dev/null \
-     && printf '%s\n' "$DNS_VERSION_DEFAULT" | cmp -s - "$output"; then
+     && printf '%s\n' "$RELEASE_TAG" | cmp -s - "$output"; then
     result=0
   fi
   rm -f -- "$output" || return 1

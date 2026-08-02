@@ -215,17 +215,31 @@ GUM_BIN="${BIN_DIR}/gum"
 _HAVE_GUM=0                              # set by install_gum(); helpers fall back to echo when 0
 export PATH="${BIN_DIR}:${PATH}"
 
-# 5gpn-dns binary + web SPA release selector on moooyo/5gpn. The source-tree
-# sentinel delegates to quick-install so the selected channel is resolved once
-# and every installer input comes from the same exact release bundle.
+# The release this installer IS, on moooyo/5gpn. Not a component version: it
+# selects the release every first-party input is drawn from, and four separate
+# decisions read it.
+#
+#   1. Artifact binding -- stage_artifacts builds the whole download base URL
+#      from it, so checksums, core and console always come from one release.
+#   2. The console SPA gate -- install_web refuses a tarball whose .web_version
+#      disagrees with it.
+#   3. The unpinned-source sentinel -- while it is literally `latest` this
+#      script refuses to install and execs quick-install.sh instead, so the
+#      channel is resolved once and the install comes from a verified bundle.
+#   4. Channel delegation -- a stamped stable bundle asked for --beta hands off
+#      rather than reusing its own pinned artifacts, and upgrade-reset-mihomo
+#      is admitted only from a stamped beta bundle.
+#
 # The release pipeline STAMPS this exact line to the tag being cut (see
-# .github/workflows/release.yml), so a packaged installer always pulls its OWN
-# release's artifacts and never mixes release binaries with another tag's files.
-DNS_VERSION_DEFAULT="latest"
-DNS_RELEASE_CHANNEL="stable"
-DNS_RELEASE_CHANNEL_EXPLICIT=0
-DNS_STABLE_RELEASE_API="https://api.github.com/repos/moooyo/5gpn/releases/latest"
-DNS_RELEASES_API="https://api.github.com/repos/moooyo/5gpn/releases"
+# .github/workflows/release.yml) and quick-install.sh validates the stamp from
+# the outside -- one column-zero, double-quoted, uninterpolated assignment,
+# read by awk and sed without ever sourcing the downloaded script. Reformatting
+# this line breaks bundle validation even if the shell semantics are identical.
+RELEASE_TAG="latest"
+RELEASE_CHANNEL="stable"
+RELEASE_CHANNEL_EXPLICIT=0
+STABLE_RELEASE_API="https://api.github.com/repos/moooyo/5gpn/releases/latest"
+RELEASES_API="https://api.github.com/repos/moooyo/5gpn/releases"
 SERVICE_READY_TIMEOUT=20
 INTERCEPT_HEALTHCHECK_MAX_TIMEOUT=10
 
@@ -2418,33 +2432,33 @@ release_checksum() {
     awk -v f="$asset" '$2 == f || $2 == "*" f { print tolower($1); exit }' "$sums"
 }
 
-valid_dns_stable_release_tag() {
+valid_stable_release_tag() {
     local tag="$1"
     local number='(0|[1-9][0-9]*)'
     [[ "$tag" =~ ^${number}\.${number}\.${number}$ ]]
 }
 
-valid_dns_beta_release_tag() {
+valid_beta_release_tag() {
     local tag="$1"
     local number='(0|[1-9][0-9]*)'
     [[ "$tag" =~ ^${number}\.${number}\.${number}-beta\.([1-9][0-9]*)$ ]]
 }
 
-valid_dns_release_tag() {
-    valid_dns_stable_release_tag "$1" || valid_dns_beta_release_tag "$1"
+valid_release_tag() {
+    valid_stable_release_tag "$1" || valid_beta_release_tag "$1"
 }
 
-dns_release_json_tag() {
+release_json_tag() {
     sed -n 's/^.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*$/\1/p' "$1"
 }
 
-dns_beta_tags_from_release_list() {
+beta_tags_from_release_list() {
     grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+"' "$1" 2>/dev/null \
         | sed -E 's/^.*"([^"]+)"$/\1/' || true
 }
 
-resolve_dns_latest_beta_version() { # optional list and exact-metadata URLs are internal test seams
-    local list_url="${1:-${DNS_RELEASES_API}?per_page=100}"
+resolve_latest_beta_tag() { # optional list and exact-metadata URLs are internal test seams
+    local list_url="${1:-${RELEASES_API}?per_page=100}"
     local metadata_url="${2:-}"
     local list_json metadata_json candidate="" tag metadata_tag
 
@@ -2455,23 +2469,23 @@ resolve_dns_latest_beta_version() { # optional list and exact-metadata URLs are 
         return 1
     fi
     while IFS= read -r tag; do
-        if valid_dns_beta_release_tag "$tag"; then
+        if valid_beta_release_tag "$tag"; then
             candidate="$tag"
             break
         fi
-    done < <(dns_beta_tags_from_release_list "$list_json")
+    done < <(beta_tags_from_release_list "$list_json")
     rm -f -- "$list_json"
     [[ -n "$candidate" ]] \
         || { err "No published 5gpn beta release is available."; return 1; }
 
-    metadata_url="${metadata_url:-${DNS_RELEASES_API}/tags/${candidate}}"
+    metadata_url="${metadata_url:-${RELEASES_API}/tags/${candidate}}"
     metadata_json="$(mktemp /tmp/5gpn-dns-beta-release.XXXXXX)" || return 1
     if ! curl -fsSL "$metadata_url" -o "$metadata_json"; then
         rm -f -- "$metadata_json"
         err "Could not verify beta release ${candidate}."
         return 1
     fi
-    metadata_tag="$(dns_release_json_tag "$metadata_json")"
+    metadata_tag="$(release_json_tag "$metadata_json")"
     if [[ "$metadata_tag" != "$candidate" ]] \
        || ! grep -Eq '"draft"[[:space:]]*:[[:space:]]*false' "$metadata_json" \
        || ! grep -Eq '"prerelease"[[:space:]]*:[[:space:]]*true' "$metadata_json"; then
@@ -2483,24 +2497,24 @@ resolve_dns_latest_beta_version() { # optional list and exact-metadata URLs are 
     printf '%s\n' "$candidate"
 }
 
-resolve_dns_release_version() { # optional stable/list/metadata URLs are internal test seams
-    local requested="$DNS_VERSION_DEFAULT"
-    local api_url="${1:-$DNS_STABLE_RELEASE_API}"
+resolve_install_release_tag() { # optional stable/list/metadata URLs are internal test seams
+    local requested="$RELEASE_TAG"
+    local api_url="${1:-$STABLE_RELEASE_API}"
     local beta_list_url="${2:-}"
     local beta_metadata_url="${3:-}"
     local json tags
 
     if [[ "$requested" != latest ]]; then
-        if valid_dns_stable_release_tag "$requested"; then
-            if [[ "$DNS_RELEASE_CHANNEL_EXPLICIT" == 1 && "$DNS_RELEASE_CHANNEL" == beta ]]; then
+        if valid_stable_release_tag "$requested"; then
+            if [[ "$RELEASE_CHANNEL_EXPLICIT" == 1 && "$RELEASE_CHANNEL" == beta ]]; then
                 err "A beta install cannot use an official-release installer bundle."
                 return 1
             fi
             printf '%s\n' "$requested"
             return 0
         fi
-        if valid_dns_beta_release_tag "$requested"; then
-            if [[ "$DNS_RELEASE_CHANNEL_EXPLICIT" == 1 && "$DNS_RELEASE_CHANNEL" != beta ]]; then
+        if valid_beta_release_tag "$requested"; then
+            if [[ "$RELEASE_CHANNEL_EXPLICIT" == 1 && "$RELEASE_CHANNEL" != beta ]]; then
                 err "A beta installer bundle requires the beta release channel."
                 return 1
             fi
@@ -2511,18 +2525,18 @@ resolve_dns_release_version() { # optional stable/list/metadata URLs are interna
         return 1
     fi
 
-    if [[ "$DNS_RELEASE_CHANNEL" == beta ]]; then
-        resolve_dns_latest_beta_version "$beta_list_url" "$beta_metadata_url"
+    if [[ "$RELEASE_CHANNEL" == beta ]]; then
+        resolve_latest_beta_tag "$beta_list_url" "$beta_metadata_url"
         return
     fi
-    [[ "$DNS_RELEASE_CHANNEL" == stable ]] \
-        || { err "Unknown 5gpn release channel: $DNS_RELEASE_CHANNEL"; return 1; }
+    [[ "$RELEASE_CHANNEL" == stable ]] \
+        || { err "Unknown 5gpn release channel: $RELEASE_CHANNEL"; return 1; }
     json="$(curl -fsSL "$api_url")" \
         || { err "Could not resolve the latest official 5gpn release."; return 1; }
     tags="$(printf '%s\n' "$json" | sed -n 's/^.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*$/\1/p')"
     [[ -n "$tags" && "$tags" != *$'\n'* ]] \
         || { err "Latest official release response has no unique tag."; return 1; }
-    valid_dns_stable_release_tag "$tags" \
+    valid_stable_release_tag "$tags" \
         || { err "Latest official release returned an unsafe or non-official tag."; return 1; }
     printf '%s\n' "$tags"
 }
@@ -2587,8 +2601,8 @@ extracted_tree_safe() {
 stage_artifacts() {
     local ver release
     local dns_asset intercept_asset web_asset
-    ver="$(resolve_dns_release_version)" || return 1
-    DNS_VERSION_DEFAULT="$ver"
+    ver="$(resolve_install_release_tag)" || return 1
+    RELEASE_TAG="$ver"
     release="https://github.com/moooyo/5gpn/releases/download/${ver}"
     dns_asset="5gpn-dns-linux-amd64"
     intercept_asset="5gpn-intercept-linux-amd64"
@@ -2974,9 +2988,9 @@ install_5gpndns() {
     publish_executable "$ARTIFACT_STAGE/5gpn-dns" "$DNS_BIN" \
         || { err "5gpn-dns publication failed."; return 1; }
     [[ -x "$DNS_BIN" ]] && cmp -s "$ARTIFACT_STAGE/5gpn-dns" "$DNS_BIN" \
-        && binary_reports_exact_version "$DNS_BIN" --version "$DNS_VERSION_DEFAULT" \
+        && binary_reports_exact_version "$DNS_BIN" --version "$RELEASE_TAG" \
         || { err "Published 5gpn-dns failed identity/version verification."; return 1; }
-    ok "Verified 5gpn-dns ${DNS_VERSION_DEFAULT} published to $DNS_BIN."
+    ok "Verified 5gpn-dns ${RELEASE_TAG} published to $DNS_BIN."
 }
 
 install_intercept() {
@@ -3153,12 +3167,12 @@ ensure_intercept_certificates() {
 install_web() {
     [[ -n "$ARTIFACT_STAGE" && -f "$ARTIFACT_STAGE/web/index.html" ]] \
         || { err "Control-console SPA was not staged."; return 1; }
-    release_tag_file_matches "$ARTIFACT_STAGE/web/.web_version" "$DNS_VERSION_DEFAULT" \
-        || { err "Control-console SPA version does not match ${DNS_VERSION_DEFAULT}."; return 1; }
+    release_tag_file_matches "$ARTIFACT_STAGE/web/.web_version" "$RELEASE_TAG" \
+        || { err "Control-console SPA version does not match ${RELEASE_TAG}."; return 1; }
     claim_web_dir || return 1
     publish_owned_tree "$ARTIFACT_STAGE/web" "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE" \
         || { err "Could not atomically publish control-console SPA."; return 1; }
-    ok "Verified control-console SPA published to ${DNS_WEB_DIR}/ (${DNS_VERSION_DEFAULT})."
+    ok "Verified control-console SPA published to ${DNS_WEB_DIR}/ (${RELEASE_TAG})."
 }
 
 # zashboard: prebuilt static dist from our fork moooyo/zashboard, which carries
@@ -6203,19 +6217,19 @@ confirm_upgrade_mihomo_reset() {
 delegate_unpinned_installer() {
     local mode="${1:-}" quick
     local -a args=()
-    [[ "$DNS_VERSION_DEFAULT" == latest ]] || return 0
+    [[ "$RELEASE_TAG" == latest ]] || return 0
     quick="${SCRIPT_DIR}/quick-install.sh"
     [[ -f "$quick" && ! -L "$quick" ]] \
         || { err "An unpinned source install requires the sibling quick-install.sh entrypoint."; return 1; }
-    [[ "$DNS_RELEASE_CHANNEL" == stable || "$DNS_RELEASE_CHANNEL" == beta ]] \
-        || { err "Unknown 5gpn release channel: $DNS_RELEASE_CHANNEL"; return 1; }
-    [[ "$DNS_RELEASE_CHANNEL" == stable ]] || args+=(--beta)
+    [[ "$RELEASE_CHANNEL" == stable || "$RELEASE_CHANNEL" == beta ]] \
+        || { err "Unknown 5gpn release channel: $RELEASE_CHANNEL"; return 1; }
+    [[ "$RELEASE_CHANNEL" == stable ]] || args+=(--beta)
     case "$mode" in
         "") ;;
         configure|upgrade-reset-mihomo) args+=("$mode") ;;
         *) err "Unsupported delegated installer mode: $mode"; return 1 ;;
     esac
-    info "Resolving a version-matched ${DNS_RELEASE_CHANNEL} installer bundle before installation."
+    info "Resolving a version-matched ${RELEASE_CHANNEL} installer bundle before installation."
     exec bash "$quick" "${args[@]}"
 }
 
@@ -6225,9 +6239,9 @@ delegate_unpinned_installer() {
 delegate_pinned_channel_switch() {
     local mode="${1:-}" quick quick_mode base_mode
     local -a args=(--beta)
-    [[ "$DNS_RELEASE_CHANNEL_EXPLICIT" == 1 && "$DNS_RELEASE_CHANNEL" == beta ]] || return 0
-    [[ "$DNS_VERSION_DEFAULT" != latest ]] || return 0
-    valid_dns_stable_release_tag "$DNS_VERSION_DEFAULT" || return 0
+    [[ "$RELEASE_CHANNEL_EXPLICIT" == 1 && "$RELEASE_CHANNEL" == beta ]] || return 0
+    [[ "$RELEASE_TAG" != latest ]] || return 0
+    valid_stable_release_tag "$RELEASE_TAG" || return 0
     quick="${SCRIPT_DIR}/quick-install.sh"
     quick_mode="$(file_mode "$quick")"
     [[ -f "$quick" && ! -L "$quick" && "$(file_uid "$quick")" == 0 \
@@ -6252,7 +6266,7 @@ full_install() {
     [[ "$mode" == upgrade-reset-mihomo ]] && reset_mihomo=1
     delegate_pinned_channel_switch "$mode" || return 1
     delegate_unpinned_installer "$mode" || return 1
-    if [[ "$reset_mihomo" == 1 ]] && ! valid_dns_beta_release_tag "$DNS_VERSION_DEFAULT"; then
+    if [[ "$reset_mihomo" == 1 ]] && ! valid_beta_release_tag "$RELEASE_TAG"; then
         err "upgrade-reset-mihomo is available only from a pinned beta installer bundle."
         return 1
     fi
@@ -6286,7 +6300,7 @@ full_install() {
     detect_os
     check_arch
     detect_memory_profile
-    banner "$DNS_VERSION_DEFAULT" "${OS:-unknown} ${VER:-?} · $(uname -m 2>/dev/null || echo unknown)${MEM_TOTAL_MB:+ · ${MEM_TOTAL_MB}MB}"
+    banner "$RELEASE_TAG" "${OS:-unknown} ${VER:-?} · $(uname -m 2>/dev/null || echo unknown)${MEM_TOTAL_MB:+ · ${MEM_TOTAL_MB}MB}"
     resolve_install_configuration "$force_tui"
     derive_domains "$BASE_DOMAIN"
     mihomo_config_matches_install_config || {
@@ -6671,11 +6685,11 @@ require_command_arity() {
 }
 
 main() {
-    DNS_RELEASE_CHANNEL=stable
-    DNS_RELEASE_CHANNEL_EXPLICIT=0
+    RELEASE_CHANNEL=stable
+    RELEASE_CHANNEL_EXPLICIT=0
     if [[ "${1:-}" == --beta ]]; then
-        DNS_RELEASE_CHANNEL=beta
-        DNS_RELEASE_CHANNEL_EXPLICIT=1
+        RELEASE_CHANNEL=beta
+        RELEASE_CHANNEL_EXPLICIT=1
         shift
     fi
     case "${1:-}" in

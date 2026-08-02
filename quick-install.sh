@@ -351,15 +351,15 @@ validate_bundle_release_stamp() { # validate_bundle_release_stamp <stage> <chann
     # The release workflow writes one exact, column-zero literal assignment.
     # Refuse absent, malformed, or repeated declarations without evaluating
     # any downloaded shell content.
-    assignment_count="$(awk '/^DNS_VERSION_DEFAULT=/{ count++ } END { print count + 0 }' "$install")" \
+    assignment_count="$(awk '/^RELEASE_TAG=/{ count++ } END { print count + 0 }' "$install")" \
         || return 1
     if [[ "$assignment_count" != 1 ]]; then
-        red "Installer bundle has no unique DNS_VERSION_DEFAULT release stamp."
+        red "Installer bundle has no unique RELEASE_TAG release stamp."
         return 1
     fi
-    stamps="$(sed -n 's/^DNS_VERSION_DEFAULT="\([^"]*\)"$/\1/p' "$install")" || return 1
+    stamps="$(sed -n 's/^RELEASE_TAG="\([^"]*\)"$/\1/p' "$install")" || return 1
     if [[ -z "$stamps" || "$stamps" == *$'\n'* ]]; then
-        red "Installer bundle has a malformed DNS_VERSION_DEFAULT release stamp."
+        red "Installer bundle has a malformed RELEASE_TAG release stamp."
         return 1
     fi
     stamp="$stamps"

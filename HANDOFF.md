@@ -103,7 +103,7 @@ than being replaced, because the machinery it served no longer exists:
 Line numbers are from `009cd98` and will drift as soon as the first deletion
 lands; `grep -n 'DNS_BIN\|INTERCEPT_BIN' install.sh` is the reliable index.
 
-**Do not remove `DNS_VERSION_DEFAULT`.** It is the release selector, not a
+**Do not remove `RELEASE_TAG`.** It is the release selector, not a
 binary variable: it also versions the console SPA, drives the stable/beta
 channel delegation, and gates `upgrade-reset-mihomo`.
 

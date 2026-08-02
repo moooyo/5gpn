@@ -60,7 +60,7 @@ for recipe_token in \
     'NEW_5GPN_INTERCEPT must be a root-owned, single-link' \
     'source "$NEW_INSTALL_SH"' \
     'declare -F validate_dns_env_schema' \
-    'valid_dns_release_tag "$DNS_VERSION_DEFAULT"' \
+    'valid_release_tag "$RELEASE_TAG"' \
     'binary_reports_target_version()' \
     'binary_reports_target_version "$NEW_5GPN_INTERCEPT"' \
     'acquire_install_lock' \
@@ -161,7 +161,7 @@ EOF
 chmod 0755 "$wrong_version_binary"
 if (
     eval "$version_guard_fn"
-    DNS_VERSION_DEFAULT=1.2.3
+    RELEASE_TAG=1.2.3
     mktemp() {
         local output="$TMP/documented-version-output"
         : > "$output"
@@ -857,9 +857,9 @@ if (
     SCRIPT_DIR="$TMP/unsafe-handoff"
     mkdir -p "$SCRIPT_DIR"
     : > "$SCRIPT_DIR/quick-install.sh"
-    DNS_VERSION_DEFAULT=0.0.13
-    DNS_RELEASE_CHANNEL_EXPLICIT=1
-    DNS_RELEASE_CHANNEL=beta
+    RELEASE_TAG=0.0.13
+    RELEASE_CHANNEL_EXPLICIT=1
+    RELEASE_CHANNEL=beta
     file_uid() { printf '0\n'; }
     file_mode() { printf '777\n'; }
     ! delegate_pinned_channel_switch >/dev/null 2>&1
@@ -874,9 +874,9 @@ if (
     mkdir -p "$BASE_DIR"
     write_ownership_marker "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"
     : > "$BASE_DIR/quick-install.sh"
-    DNS_VERSION_DEFAULT=0.0.13
-    DNS_RELEASE_CHANNEL_EXPLICIT=1
-    DNS_RELEASE_CHANNEL=beta
+    RELEASE_TAG=0.0.13
+    RELEASE_CHANNEL_EXPLICIT=1
+    RELEASE_CHANNEL=beta
     file_uid() { printf '0\n'; }
     file_mode() {
         if [[ "$1" == "$BASE_DIR" ]]; then printf '777\n'; else printf '644\n'; fi
