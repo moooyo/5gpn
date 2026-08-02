@@ -65,8 +65,6 @@ STATE_OWNERSHIP_VALUE="5gpn-state"
 SWAP_FILE="${STATE_DIR}/swapfile"
 SWAP_FSTAB_MARKER="# 5gpn-owned-swap-v1"
 SWAP_CREATED_THIS_RUN=0
-DNS_BIN="${BIN_DIR}/5gpn-dns"            # 5gpn-dns binary (DoT resolver + web console)
-INTERCEPT_BIN="${BIN_DIR}/5gpn-intercept" # allowlisted TLS/HTTP3 interception sidecar
 DNS_CERT_DIR="/etc/5gpn/cert"            # selected cert copied into dot/, web/, zash/ roles
 # Certificate ownership values keep their revision suffix, and it is not dead
 # weight. Every other 5gpn root self-heals -- claiming republishes whatever
@@ -117,8 +115,6 @@ INSTALL_CERT_LOCK_HELD=0
 # flag so the unscoped distro timer stays disabled after commit.
 KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=0
 DECOMMISSION_PRESERVE_ACME=0
-INTERCEPT_ROUTING_READY=0
-INTERCEPT_ROUTING_REASON="not-checked"
 DNS_WEB_DIR_DEFAULT="/opt/5gpn/web"         # resolved from dns.env after cfg_get is defined
 # DNS_ZASH_DIR (zashboard SPA dist, config.go's ZashDir) is resolved just below
 # cfg_get()'s definition -- NOT here: the daemon reads DNS_ZASH_DIR out of dns.env,
@@ -127,6 +123,15 @@ DNS_WEB_DIR_DEFAULT="/opt/5gpn/web"         # resolved from dns.env after cfg_ge
 DNS_RULES_DIR_DEFAULT="/etc/5gpn/rules"  # subscription caches and chnroute snapshot
 MIHOMO_BIN="${BIN_DIR}/mihomo"
 MIHOMO_DIR="/etc/5gpn/mihomo"           # config.yaml + whitelist.txt + provider caches
+GPN_STATE_DIR="/etc/5gpn/mihomo/gpn"    # the engine's own documents, beside mihomo's
+# What the interception leaf must cover, published by the engine after every
+# successful write and once at startup: a digest on the first line, then one
+# host pattern per line. It is a file rather than a subcommand because its
+# consumer is a root oneshot holding the CA signing key, and having that
+# process execute the network-facing program to find out what to sign is a
+# different shape from having it read what that program wrote.
+# scripts/intercept-cert-renew.sh parses the same file.
+CERT_REQUEST_FILE="${GPN_STATE_DIR}/certificate-request"
 INTERCEPT_DIR="/etc/5gpn/intercept"
 INTERCEPT_CA_DIR="/etc/5gpn/intercept-ca"
 INTERCEPT_CA_MARKER=".5gpn-intercept-ca-owned"
@@ -163,15 +168,6 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # this release has no second arrangement to fall back to, so the staging probe
 # refuses an upstream core outright rather than installing one that cannot
 # carry interception.
-# The interception sidecar is maintained in its own repository and consumed
-# as a released artifact, like mihomo and gum. It used to be built from a copy
-# carried inside this tree, which meant the component and the gateway could
-# only ever ship together and a change to one implied a release of the other.
-# They share no Go types — only a versioned control-API wire format — so the
-# thing that keeps them working together is a schema number, not a build.
-SIDECAR_REPO="moooyo/mihomo-extension-sidecar"
-SIDECAR_VERSION="0.7.0"
-SIDECAR_SHA256="61de591949029717f472f0a3209e056c6a70020b14ae7ea1c5898b8da205d4d9"
 MIHOMO_REPO="moooyo/mihomo"
 MIHOMO_VERSION="v1.19.28-overlay.6"
 MIHOMO_SHA256="13fbc6789895bb201c7c8607ec423b03b192082f9b6bb0a20bf9a15593973479"
@@ -1790,93 +1786,6 @@ resolve_mihomo_listen_ips() {
     printf '%s\n' "$out"
 }
 
-# Renders the `runtime-overlay:` block of the mihomo seed.
-#
-# The overlay is how routing is published: a typed generation committed over a
-# machine-only socket, rather than a rewrite of the operator's config on every
-# change. Two anchors splice it into rule resolution -- those are literal in the
-# template -- and this block names the sockets and who may use them.
-#
-# It is the one part that cannot be literal, because it carries this box's
-# socket paths and peer identities. It is also required: an anchor with no block
-# behind it is a config mihomo refuses to parse, so there is no arrangement in
-# which the anchors are emitted and this is not.
-#
-# Whether the installed core implements the feature at all is established by
-# validating the rendered candidate with `mihomo -t`, not by comparing version
-# strings. A core that cannot parse RUNTIME-OVERLAY rejects the config outright,
-# and this release has no second form to fall back to -- staging fails and the
-# live deployment is left untouched.
-#
-# The two sockets carry different peer policies on purpose. The coordinator may
-# mutate the overlay; the processor may only read the generation it serves. One
-# policy covering both would have to admit the processor to the mutation
-# endpoint, which is the reach the split exists to deny.
-# $1 selects "probe" to render with placeholder identities.
-#
-# Artifact staging validates its candidate before the service accounts and
-# socket groups exist, so the probe accepts placeholder identities. That
-# candidate is fed to `mihomo -t` and discarded; no identity in it reaches the
-# live config, which render_mihomo_config writes later once the accounts are
-# real. Failing the probe for want of a group that installation has not created
-# yet would abort every fresh install.
-render_overlay_runtime_block() {
-    local mode="${1:-live}"
-    local dns_uid dns_gid intercept_uid intercept_gid control_gid generation_gid
-    dns_uid="$(id -u "$DNS_SERVICE_USER" 2>/dev/null || true)"
-    dns_gid="$(id -g "$DNS_SERVICE_USER" 2>/dev/null || true)"
-    intercept_uid="$(id -u "$INTERCEPT_SERVICE_USER" 2>/dev/null || true)"
-    intercept_gid="$(id -g "$INTERCEPT_SERVICE_USER" 2>/dev/null || true)"
-    control_gid="$(getent group "$OVERLAY_CONTROL_GROUP" 2>/dev/null | cut -d: -f3)"
-    generation_gid="$(getent group "$OVERLAY_GENERATION_GROUP" 2>/dev/null | cut -d: -f3)"
-
-    if [[ "$mode" == probe ]]; then
-        # Any well-formed number parses identically. These are never installed.
-        local id
-        for id in dns_uid dns_gid intercept_uid intercept_gid control_gid generation_gid; do
-            [[ "${!id}" =~ ^[0-9]+$ ]] || printf -v "$id" '%s' 65534
-        done
-    else
-        [[ "$dns_uid" =~ ^[0-9]+$ && "$dns_gid" =~ ^[0-9]+$ ]]             || { err "Cannot resolve $DNS_SERVICE_USER for the overlay control socket."; return 1; }
-        [[ "$intercept_uid" =~ ^[0-9]+$ && "$intercept_gid" =~ ^[0-9]+$ ]]             || { err "Cannot resolve $INTERCEPT_SERVICE_USER for the overlay generation socket."; return 1; }
-        [[ "$control_gid" =~ ^[0-9]+$ && "$generation_gid" =~ ^[0-9]+$ ]]             || { err "The overlay socket groups do not exist yet."; return 1; }
-    fi
-    cat <<EOF_OVERLAY
-
-runtime-overlay:
-  owner: ${OVERLAY_OWNER}
-  control-socket: ${OVERLAY_CONTROL_SOCKET}
-  generation-socket: ${OVERLAY_GENERATION_SOCKET}
-  # Only the coordinator may commit a generation.
-  control-peer-uid: ${dns_uid}
-  control-peer-gid: ${dns_gid}
-  control-socket-gid: ${control_gid}
-  # Only the processor may read the generation it is serving.
-  generation-peer-uid: ${intercept_uid}
-  generation-peer-gid: ${intercept_gid}
-  generation-socket-gid: ${generation_gid}
-EOF_OVERLAY
-}
-
-# Creates the two socket groups and puts the right accounts in each.
-#
-# Membership is the whole mechanism: mihomo needs both so it can hand each
-# socket to its group, and each peer needs exactly the one for the socket it is
-# entitled to open. Neither group owns anything else, so this grants no reach
-# beyond the sockets themselves.
-ensure_overlay_socket_groups() {
-    local group member
-    for group in "$OVERLAY_CONTROL_GROUP" "$OVERLAY_GENERATION_GROUP"; do
-        getent group "$group" >/dev/null 2>&1             || groupadd --system "$group"             || { err "Could not create the overlay socket group $group"; return 1; }
-    done
-    for member in "$MIHOMO_SERVICE_USER" "$DNS_SERVICE_USER"; do
-        usermod -aG "$OVERLAY_CONTROL_GROUP" "$member"             || { err "Could not add $member to $OVERLAY_CONTROL_GROUP"; return 1; }
-    done
-    for member in "$MIHOMO_SERVICE_USER" "$INTERCEPT_SERVICE_USER"; do
-        usermod -aG "$OVERLAY_GENERATION_GROUP" "$member"             || { err "Could not add $member to $OVERLAY_GENERATION_GROUP"; return 1; }
-    done
-}
-
 # Expands the seed template. One implementation, two callers.
 #
 # Artifact staging and the live render used to carry the same expansion inline,
@@ -1896,18 +1805,11 @@ render_mihomo_seed() {
             __MIHOMO_LISTENERS__)
                 printf '%s\n' "$listeners"
                 continue ;;
-            __OVERLAY_RUNTIME_BLOCK__)
-                render_overlay_runtime_block "$mode" || return 1
-                continue ;;
         esac
         line="${line//__GATEWAY_IP__/$SEED_GATEWAY_IP}"
         line="${line//__CONSOLE_DOMAIN__/$SEED_CONSOLE_DOMAIN}"
         line="${line//__ZASH_DOMAIN__/$SEED_ZASH_DOMAIN}"
         line="${line//__CONTROLLER_SECRET__/$SEED_CONTROLLER_SECRET}"
-        line="${line//__INTERCEPT_INBOUND_USERNAME__/$SEED_INTERCEPT_INBOUND_USERNAME}"
-        line="${line//__INTERCEPT_INBOUND_PASSWORD__/$SEED_INTERCEPT_INBOUND_PASSWORD}"
-        line="${line//__INTERCEPT_UPSTREAM_USERNAME__/$SEED_INTERCEPT_UPSTREAM_USERNAME}"
-        line="${line//__INTERCEPT_UPSTREAM_PASSWORD__/$SEED_INTERCEPT_UPSTREAM_PASSWORD}"
         printf '%s\n' "$line"
     done < "$template"
 }
@@ -2126,16 +2028,15 @@ service_group_is_exclusive_for_user() {
     [[ -z "$primary_users" || "$primary_users" == "$user" ]]
 }
 
-# The gids a service account may carry: its own, plus the overlay socket
-# groups if they exist. Absent groups are simply not in the set, so this is
-# equally correct before they are created.
+# A service account may carry exactly one gid: its own.
+#
+# It used to be allowed two more -- the overlay socket groups that let three
+# processes hand sockets to each other. There is one process now, so a service
+# account holding any supplementary group is something this installer did not
+# put there.
 service_account_groups_are_permitted() {
     local user_groups="$1" primary_gid="$2" gid allowed
     allowed=" ${primary_gid} "
-    for gid in "$(getent group "$OVERLAY_CONTROL_GROUP" 2>/dev/null | cut -d: -f3)" \
-               "$(getent group "$OVERLAY_GENERATION_GROUP" 2>/dev/null | cut -d: -f3)"; do
-        [[ "$gid" =~ ^[0-9]+$ ]] && allowed="${allowed}${gid} "
-    done
     for gid in $user_groups; do
         [[ "$allowed" == *" ${gid} "* ]] || return 1
     done
@@ -2282,8 +2183,6 @@ install_service_accounts() {
     install_service_account "$DNS_SERVICE_USER" "$DNS_SERVICE_USER" || return 1
     install_service_account "$MIHOMO_SERVICE_USER" "$MIHOMO_SERVICE_USER" || return 1
     install_service_account "$INTERCEPT_SERVICE_USER" "$INTERCEPT_SERVICE_USER" || return 1
-    command -v usermod >/dev/null 2>&1         || { err "usermod is required to grant overlay socket group membership."; return 1; }
-    ensure_overlay_socket_groups || return 1
     ok "Dedicated service accounts are ready: ${DNS_SERVICE_USER}, ${MIHOMO_SERVICE_USER}, ${INTERCEPT_SERVICE_USER}."
 }
 
@@ -2389,19 +2288,6 @@ release_tag_file_matches() {
     [[ -f "$file" && ! -L "$file" ]] || return 1
     [[ "$(file_nlink "$file")" == 1 ]] || return 1
     printf '%s\n' "$expected" | cmp -s - "$file"
-}
-
-binary_reports_exact_version() {
-    local binary="$1" flag="$2" expected="$3" output result=1
-    [[ -d "$ARTIFACT_STAGE" && ! -L "$ARTIFACT_STAGE" ]] || return 1
-    output="$(mktemp "${ARTIFACT_STAGE}/.version-output.XXXXXX")" || return 1
-    chmod 0600 "$output" || { rm -f -- "$output"; return 1; }
-    if "$binary" "$flag" > "$output" 2>/dev/null \
-       && release_tag_file_matches "$output" "$expected"; then
-        result=0
-    fi
-    rm -f -- "$output" || return 1
-    return "$result"
 }
 
 # Upstream mihomo prints build metadata and feature tags as well as its release
@@ -2600,12 +2486,10 @@ extracted_tree_safe() {
 
 stage_artifacts() {
     local ver release
-    local dns_asset intercept_asset web_asset
+    local web_asset
     ver="$(resolve_install_release_tag)" || return 1
     RELEASE_TAG="$ver"
     release="https://github.com/moooyo/5gpn/releases/download/${ver}"
-    dns_asset="5gpn-dns-linux-amd64"
-    intercept_asset="5gpn-intercept-linux-amd64"
     web_asset="5gpn-web-${ver}.tar.gz"
     ARTIFACT_STAGE="$(mktemp -d /var/tmp/5gpn-artifacts.XXXXXX)" \
         || { err "Could not create artifact staging directory."; return 1; }
@@ -2613,28 +2497,9 @@ stage_artifacts() {
     claim_temp_dir "$ARTIFACT_STAGE" \
         || { rmdir -- "$ARTIFACT_STAGE"; err "Could not claim artifact staging directory."; return 1; }
     info "Staging pinned release artifacts (${ver})..."
+    # checksums.txt stays: the console SPA tarball is verified from it.
     curl -fsSL "$release/checksums.txt" -o "$ARTIFACT_STAGE/checksums.txt" \
         || { err "Could not download release checksums.txt."; return 1; }
-    curl -fsSL "$release/$dns_asset" -o "$ARTIFACT_STAGE/5gpn-dns" \
-        || { err "Could not download $dns_asset."; return 1; }
-    verify_sha256 "$ARTIFACT_STAGE/5gpn-dns" \
-        "$(release_checksum "$ARTIFACT_STAGE/checksums.txt" "$dns_asset")" || return 1
-    chmod 0755 "$ARTIFACT_STAGE/5gpn-dns"
-    binary_reports_exact_version "$ARTIFACT_STAGE/5gpn-dns" --version "$ver" \
-        || { err "Staged 5gpn-dns version does not match pinned release ${ver}."; return 1; }
-
-    curl -fsSL "https://github.com/${SIDECAR_REPO}/releases/download/${SIDECAR_VERSION}/${intercept_asset}" \
-        -o "$ARTIFACT_STAGE/5gpn-intercept" \
-        || { err "Could not download $intercept_asset."; return 1; }
-    # Verified against the digest pinned here, not against this project's
-    # checksums file: the artifact no longer comes from this project's release,
-    # and its version is its own. Asserting the gateway's version against it was
-    # only ever correct while the two were built together.
-    verify_sha256 "$ARTIFACT_STAGE/5gpn-intercept" "$SIDECAR_SHA256" || return 1
-    chmod 0755 "$ARTIFACT_STAGE/5gpn-intercept"
-    binary_reports_exact_version "$ARTIFACT_STAGE/5gpn-intercept" --version "$SIDECAR_VERSION" \
-        || { err "Staged 5gpn-intercept version does not match pinned ${SIDECAR_VERSION}."; return 1; }
-
     curl -fsSL "$release/$web_asset" -o "$ARTIFACT_STAGE/web.tgz" \
         || { err "Could not download $web_asset."; return 1; }
     verify_sha256 "$ARTIFACT_STAGE/web.tgz" \
@@ -2973,39 +2838,6 @@ publish_executable() {
     mv -f -- "$candidate" "$dest"
 }
 
-# 5gpn-dns: prebuilt binary from moooyo/5gpn releases.
-# Mirrors the install_mihomo download/sha256/install pattern.
-#
-# Every run publishes the already verified pinned DNS_VERSION over $DNS_BIN.
-# Replacing the running daemon's binary is safe because the
-# process keeps its inode until start_services restarts it). Download failure
-# aborts the install and leaves the previously installed binary untouched.
-# Dev builds must be scp'd in AFTER the install run (then restarted) — a
-# pre-placed binary is deliberately clobbered.
-install_5gpndns() {
-    [[ -n "$ARTIFACT_STAGE" && -x "$ARTIFACT_STAGE/5gpn-dns" ]] \
-        || { err "5gpn-dns was not staged."; return 1; }
-    publish_executable "$ARTIFACT_STAGE/5gpn-dns" "$DNS_BIN" \
-        || { err "5gpn-dns publication failed."; return 1; }
-    [[ -x "$DNS_BIN" ]] && cmp -s "$ARTIFACT_STAGE/5gpn-dns" "$DNS_BIN" \
-        && binary_reports_exact_version "$DNS_BIN" --version "$RELEASE_TAG" \
-        || { err "Published 5gpn-dns failed identity/version verification."; return 1; }
-    ok "Verified 5gpn-dns ${RELEASE_TAG} published to $DNS_BIN."
-}
-
-install_intercept() {
-    # The sidecar carries its own version now; asserting the gateway's was
-    # only ever correct while the two were built from one tree.
-    [[ -n "$ARTIFACT_STAGE" && -x "$ARTIFACT_STAGE/5gpn-intercept" ]] \
-        || { err "5gpn-intercept was not staged."; return 1; }
-    publish_executable "$ARTIFACT_STAGE/5gpn-intercept" "$INTERCEPT_BIN" \
-        || { err "5gpn-intercept publication failed."; return 1; }
-    [[ -x "$INTERCEPT_BIN" ]] && cmp -s "$ARTIFACT_STAGE/5gpn-intercept" "$INTERCEPT_BIN" \
-        && binary_reports_exact_version "$INTERCEPT_BIN" --version "$SIDECAR_VERSION" \
-        || { err "Published 5gpn-intercept failed identity/version verification."; return 1; }
-    ok "Verified 5gpn-intercept ${SIDECAR_VERSION} published to $INTERCEPT_BIN."
-}
-
 prepare_intercept_runtime_dirs() {
     local path canonical
     fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
@@ -3026,62 +2858,6 @@ prepare_intercept_state_dir() {
     claim_fixed_owned_dir "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" 1 || return 1
     install -d -o "$INTERCEPT_SERVICE_USER" -g "$INTERCEPT_SERVICE_USER" -m 0700 "$INTERCEPT_STATE_DIR" || return 1
     write_ownership_marker "$INTERCEPT_STATE_DIR" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" || return 1
-}
-
-ensure_intercept_config() {
-    local config="$INTERCEPT_DIR/config.json" candidate inbound_user inbound_pass upstream_user upstream_pass
-    prepare_intercept_runtime_dirs || return 1
-    if [[ -f "$config" && ! -L "$config" ]]; then
-        if ! "$INTERCEPT_BIN" --config "$config" --check-config; then
-            if grep -Eq '"version"[[:space:]]*:[[:space:]]*4([,[:space:]}]|$)' "$config"; then
-                err "Pre-v5 interception config detected: $config"
-                err "Do not delete it: back up active env/intercept/mihomo state, use the old v4 control plane to disable MITM and withdraw managed rules, then save the clean post-disable boundary."
-                err "Follow the pre-v5 upgrade guide linked from README: use its jq rebuild preserving SOCKS/TLS infrastructure, and require current sidecar --check-config plus 5gpn-dns --check-interception-routing to report ready before synced atomic publication."
-                err "Modules/order are cleared and extensions must be re-imported and reviewed."
-            else
-                err "Existing interception config is invalid: $config"
-            fi
-            return 1
-        fi
-        ok "Existing interception config validated and preserved: $config"
-        return 0
-    fi
-    [[ ! -e "$config" && ! -L "$config" ]] \
-        || { err "Refusing unsafe interception config path: $config"; return 1; }
-    inbound_user="module-in-$(openssl rand -hex 12)"
-    inbound_pass="$(openssl rand -hex 24)"
-    upstream_user="module-up-$(openssl rand -hex 12)"
-    upstream_pass="$(openssl rand -hex 24)"
-    candidate="$(mktemp "$INTERCEPT_DIR/.config.json.XXXXXX")" || return 1
-    cat > "$candidate" <<EOF
-{
-  "version": 6,
-  "listen": "127.0.0.1:18080",
-  "username": "${inbound_user}",
-  "password": "${inbound_pass}",
-  "tls_cert": "/etc/5gpn/intercept/tls/fullchain.pem",
-  "tls_key": "/etc/5gpn/intercept/tls/privkey.pem",
-  "upstream_proxy": {
-    "address": "127.0.0.1:17890",
-    "username": "${upstream_user}",
-    "password": "${upstream_pass}"
-  },
-  "mitm": {
-    "enabled": false,
-    "http2": true,
-    "quic_fallback_protection": true
-  },
-  "execution_order": [],
-  "modules": []
-}
-EOF
-    chown "$DNS_SERVICE_USER:$INTERCEPT_SERVICE_USER" "$candidate" && chmod 0640 "$candidate" \
-        || { rm -f -- "$candidate"; return 1; }
-    "$INTERCEPT_BIN" --config "$candidate" --check-config \
-        || { rm -f -- "$candidate"; err "Generated interception config failed validation."; return 1; }
-    sync -f "$candidate" 2>/dev/null || true
-    mv -f -- "$candidate" "$config"
-    ok "Created disabled-by-default interception config: $config"
 }
 
 intercept_keypair_matches() {
@@ -3107,7 +2883,8 @@ validate_intercept_leaf() {
     openssl verify -CAfile "$INTERCEPT_CA_DIR/root.crt" "$leaf" >/dev/null 2>&1 || return 1
     intercept_keypair_matches "$leaf" "$key" || return 1
     local host probe digest state request hosts
-    request="$("$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --print-certificate-request 2>/dev/null)" || return 1
+    [[ -f "$CERT_REQUEST_FILE" && ! -L "$CERT_REQUEST_FILE" ]] || return 1
+    request="$(cat -- "$CERT_REQUEST_FILE")" || return 1
     digest="$(head -n 1 <<<"$request" | tr -d '[:space:]')"
     hosts="$(tail -n +2 <<<"$request")"
     state="$(tr -d '[:space:]' < "$INTERCEPT_DIR/cert-state" 2>/dev/null || true)"
@@ -3150,7 +2927,7 @@ ensure_intercept_certificates() {
     remove_temp_dir "$stage"
 	"${SCRIPTS_DIR}/intercept-cert-renew.sh" --installer-lock-held \
 		|| { err "Dynamic interception leaf publication failed."; return 1; }
-	if [[ -n "$("$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --print-certificate-hosts 2>/dev/null)" ]]; then
+	if [[ -s "$CERT_REQUEST_FILE" ]] && [[ -n "$(tail -n +2 -- "$CERT_REQUEST_FILE")" ]]; then
 		validate_intercept_leaf \
 			|| { err "Dynamic interception leaf validation failed."; return 1; }
 		ok "Dedicated interception CA and extension-scoped leaf are ready."
@@ -3217,35 +2994,6 @@ install_mihomo() {
         && mihomo_reports_exact_version "$MIHOMO_BIN" "$MIHOMO_VERSION" \
         || { err "Published mihomo failed identity/version verification."; return 1; }
     ok "Verified mihomo ${MIHOMO_VERSION} published to $MIHOMO_BIN."
-    (( upgrading )) && discard_overlay_generations
-    return 0
-}
-
-# Drops the persisted runtime-overlay generations across a mihomo upgrade.
-#
-# A generation is stored with an integrity digest over its own document shape.
-# When a release changes that shape the recovered generation fails its check,
-# and mihomo treats a store it cannot reconstruct as fatal — it refuses to
-# start, systemd restarts it, and the gateway is down with no DNS, no console
-# and no data plane. Refusing to run is the right instinct (an overlay that is
-# simply absent lets captured traffic fall through to the operator's own rules,
-# which is the bypass the anchors exist to prevent) but crash-looping the box is
-# not the way to express it.
-#
-# So an upgrade discards the generations rather than carrying them into a binary
-# that may not be able to read them. Nothing is lost: 5gpn-dns republishes the
-# live document as a fresh generation within seconds of starting, and it starts
-# after mihomo. The window between them is the same one any mihomo restart has
-# always had.
-discard_overlay_generations() {
-    local store="${MIHOMO_DIR}/runtime-overlay"
-    [[ -d "$store" ]] || return 0
-    info "mihomo was upgraded; discarding persisted overlay generations so a shape change cannot wedge the data plane."
-    rm -f -- "${store}/pointer.json" "${store}/generations/"*.json 2>/dev/null || true
-    # The coordinator's journal names a generation that no longer exists. Left
-    # behind, recovery reads back a core that has never heard of it. The path
-    # matches DNS_OVERLAY_JOURNAL's default in cmd/5gpn-dns/config.go.
-    rm -f -- "/var/lib/5gpn-dns/overlay-journal.json" 2>/dev/null || true
     return 0
 }
 
@@ -3285,47 +3033,6 @@ EOF
 }
 
 # ----------------------------------------------------------------------------
-# Seed the unified policy-rule model (policy.json). Runs the installed
-# 5gpn-dns binary's --seed-defaults subcommand (which owns the JSON shape,
-# reusing the daemon's own types). This MUST run before start_services: the
-# daemon compiles the ordered DNS intent rules directly from policy.json.
-# Idempotent — the subcommand skips a present policy.json (operator source of
-# truth). Each default list URL is env-overridable.
-#
-# Proxy intent selects the gateway only; application egress routing lives
-# entirely in the operator-owned mihomo configuration.
-seed_policy_defaults() {
-    local policy="${CONF_DIR}/policy.json"
-
-    # Fixed, reviewable default list URLs.
-    local china_list_url="https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/ChinaMax/ChinaMax_Domain.yaml"
-    local gfw_url="https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/gfw.txt"
-    # etc/block-dns-bypass.txt is maintained in-tree and delivered as a
-    # subscription, so a gateway picks up edits by refreshing rather than by
-    # reinstalling. The seeded rule is DISABLED by default.
-    local bypass_url="https://raw.githubusercontent.com/moooyo/5gpn/main/etc/block-dns-bypass.txt"
-
-    if [[ -f "$policy" ]]; then
-        info "Keeping existing ${policy} (operator policy model preserved)."
-    fi
-
-    if "$DNS_BIN" --seed-defaults \
-        --policy-out "$policy" \
-        --subscriptions "${CONF_DIR}/subscriptions.json" \
-        --bypass-url "$bypass_url" \
-        --keyword "${SCRIPT_DIR}/etc/block-dns-bypass.keyword.txt" \
-        --proxy-domains "${SCRIPT_DIR}/etc/proxy-domains.txt" \
-        --china-list-url "$china_list_url" \
-        --gfw-url "$gfw_url"; then
-        chmod 644 "$policy" 2>/dev/null || true
-        ok "Seeded ${policy} (default policy ruleset)."
-    else
-        err "Policy seed/current-schema validation failed; refusing installation."
-        return 1
-    fi
-}
-
-# ----------------------------------------------------------------------------
 # Install config + scripts + control-plane sources
 # ----------------------------------------------------------------------------
 # render_mihomo_config renders /etc/5gpn/mihomo/config.yaml from the committed
@@ -3346,11 +3053,22 @@ seed_mihomo_whitelist() {
     fi
 }
 
+# Read the controller secret out of the operator's own YAML.
+#
+# This used to shell out to the resolver binary for a structural YAML parse.
+# That binary is gone, and reaching for a structural parser again would mean
+# either shipping one or making the installer depend on the very core it is in
+# the middle of replacing. What is actually being read is a single scalar that
+# this installer wrote, on a line it controls the shape of: `secret: '...'`,
+# optionally single-quoted. The acceptance suite reads it exactly this way.
+#
+# A multi-line or block-scalar secret is therefore not readable here -- and not
+# writable either, because yaml_single_quoted_value refuses to emit one.
 mihomo_config_secret() {
     local f="$1"
-    [[ -x "$DNS_BIN" ]] \
-        || { err "5gpn-dns is unavailable for structural mihomo secret parsing."; return 1; }
-    "$DNS_BIN" --print-mihomo-secret --config "$f"
+    [[ -f "$f" && -r "$f" ]] \
+        || { err "The mihomo config is unreadable for controller secret parsing: $f"; return 1; }
+    grep -m1 -E "^secret:" "$f" | sed -E "s/^secret: *'?([^']*)'?.*/\1/"
 }
 
 yaml_single_quoted_value() {
@@ -3372,49 +3090,6 @@ persist_mihomo_secret() {
 # byte-for-byte. `render_mihomo_config --reset` is the sole overwrite path: it
 # renders to a same-directory candidate, validates that candidate, backs up the
 # old file, fsyncs, and atomically renames it into place.
-# The interception credentials inside an operator-owned mihomo config are not
-# the operator's to own: intercept/config.json is what renders them. A run that
-# reseeds that document leaves the preserved YAML holding the previous pair, and
-# the routing check then fails closed with `credential-mismatch` on a host that
-# is otherwise healthy. Realign those two reserved blocks and nothing else.
-#
-# Exit 3 means there is nothing alignable here -- a legacy config with no
-# interception blocks at all. That is not an error: the routing check that runs
-# later is what decides whether such a config is acceptable.
-align_preserved_intercept_credentials() {
-    local config="$1" candidate rc=0
-    [[ -f "$INTERCEPT_DIR/config.json" ]] || return 0
-    candidate="$(mktemp "${MIHOMO_DIR}/.config.yaml.XXXXXX")" \
-        || { err "Could not create a mihomo credential-alignment candidate."; return 1; }
-    "$DNS_BIN" --align-interception-credentials \
-        --mihomo-config "$config" \
-        --intercept-config "$INTERCEPT_DIR/config.json" > "$candidate" || rc=$?
-    case "$rc" in
-        0) ;;
-        3) rm -f -- "$candidate"; return 0 ;;
-        *)
-            rm -f -- "$candidate"
-            err "Could not align the preserved mihomo config with the interception credentials."
-            return 1 ;;
-    esac
-    if cmp -s -- "$candidate" "$config"; then
-        rm -f -- "$candidate"
-        return 0
-    fi
-    if ! "$MIHOMO_BIN" -t -f "$candidate" -d "$MIHOMO_DIR"; then
-        rm -f -- "$candidate"
-        err "The credential-aligned mihomo config failed validation; the live file was NOT changed."
-        return 1
-    fi
-    chown "$DNS_SERVICE_USER:$MIHOMO_SERVICE_USER" "$candidate" \
-        && chmod 0640 "$candidate" \
-        || { rm -f -- "$candidate"; err "Could not secure the credential-aligned mihomo config."; return 1; }
-    sync -f "$candidate" 2>/dev/null || true
-    mv -f -- "$candidate" "$config" \
-        || { rm -f -- "$candidate"; err "Could not publish the credential-aligned mihomo config."; return 1; }
-    ok "Realigned the preserved mihomo config with the current interception credentials."
-}
-
 render_mihomo_config() {
     local mode="${1:-seed}" config="${MIHOMO_DIR}/config.yaml" secret="" template=""
     MIHOMO_SEED_PORTS_REQUIRED=0
@@ -3440,7 +3115,6 @@ render_mihomo_config() {
         secret="$(mihomo_config_secret "$config")" \
             || { err "Existing mihomo controller secret could not be parsed safely."; return 1; }
         persist_mihomo_secret "$secret" || return 1
-        align_preserved_intercept_credentials "$config" || return 1
         ok "Existing operator-owned mihomo config validated and preserved: $config"
         return 0
     fi
@@ -3465,17 +3139,9 @@ render_mihomo_config() {
     MIHOMO_LISTEN_IPS="${MIHOMO_LISTEN_IPS:-$(cfg_get DNS_MIHOMO_LISTEN_IPS)}"
     MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" || return 1
     export MIHOMO_LISTEN_IPS
-    local listeners candidate line backup intercept_fields intercept_in_user intercept_in_pass intercept_up_user intercept_up_pass secret_yaml_value
+    local listeners candidate line backup secret_yaml_value
     secret_yaml_value="$(yaml_single_quoted_value "$secret")" \
         || { err "The mihomo controller secret cannot be represented safely in YAML."; return 1; }
-    intercept_fields="$("$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --print-mihomo-fields)" \
-        || { err "Could not read validated interception credentials."; return 1; }
-    IFS=$'\t' read -r intercept_in_user intercept_in_pass intercept_up_user intercept_up_pass <<< "$intercept_fields"
-    [[ "$intercept_in_user" =~ ^[A-Za-z0-9._-]{16,255}$ \
-       && "$intercept_in_pass" =~ ^[A-Za-z0-9._-]{24,255}$ \
-       && "$intercept_up_user" =~ ^[A-Za-z0-9._-]{16,255}$ \
-       && "$intercept_up_pass" =~ ^[A-Za-z0-9._-]{24,255}$ ]] \
-        || { err "Interception credentials are unsafe for mihomo YAML."; return 1; }
     listeners="$(render_mihomo_listeners "$MIHOMO_LISTEN_IPS" "$CONSOLE_DOMAIN")"
     candidate="$(mktemp "${MIHOMO_DIR}/.config.yaml.XXXXXX")" \
         || { err "Could not create a mihomo config candidate in $MIHOMO_DIR"; return 1; }
@@ -3484,10 +3150,6 @@ render_mihomo_config() {
     SEED_CONSOLE_DOMAIN="$CONSOLE_DOMAIN"
     SEED_ZASH_DOMAIN="$ZASH_DOMAIN"
     SEED_CONTROLLER_SECRET="$secret_yaml_value"
-    SEED_INTERCEPT_INBOUND_USERNAME="$intercept_in_user"
-    SEED_INTERCEPT_INBOUND_PASSWORD="$intercept_in_pass"
-    SEED_INTERCEPT_UPSTREAM_USERNAME="$intercept_up_user"
-    SEED_INTERCEPT_UPSTREAM_PASSWORD="$intercept_up_pass"
     if ! render_mihomo_seed "$template" live "$listeners" > "$candidate"; then
         rm -f -- "$candidate"
         err "Could not render the mihomo config candidate from $template"
@@ -3535,74 +3197,6 @@ reset_mihomo_config() {
     ok "mihomo seed restored; backup retained beside ${MIHOMO_DIR}/config.yaml."
 }
 
-check_interception_routing_compatibility() {
-    local dns_binary="${1:-$DNS_BIN}"
-    local output rc=0
-    INTERCEPT_ROUTING_READY=0
-    INTERCEPT_ROUTING_REASON="not-checked"
-    output="$("$dns_binary" --check-interception-routing \
-        --mihomo-config "$MIHOMO_DIR/config.yaml" \
-        --intercept-config "$INTERCEPT_DIR/config.json" 2>&1)" || rc=$?
-    case "$rc" in
-        0)
-            INTERCEPT_ROUTING_READY=1
-            INTERCEPT_ROUTING_REASON="ready"
-            return 0 ;;
-        3)
-            # Routing publishes through the overlay and nothing else, so every
-            # rc=3 is a config this release cannot manage. There is no longer a
-            # tolerated shape that runs core services with interception simply
-            # unavailable: an unanchored config is refused in preflight, while
-            # the deployment is still untouched.
-            INTERCEPT_ROUTING_REASON="${output##*$'\n'}"
-            [[ -n "$INTERCEPT_ROUTING_REASON" ]] || INTERCEPT_ROUTING_REASON="interception-routing-not-ready"
-            err "Interception routing is not manageable (${INTERCEPT_ROUTING_REASON}); refusing to publish or preserve a dead sidecar route."
-            return 1 ;;
-        *)
-            err "Could not validate mihomo interception compatibility: ${output:-unknown error}"
-            return 1 ;;
-    esac
-}
-
-# A preserved operator config with no overlay anchors cannot carry interception
-# at all: routing publishes as typed generations that the anchors resolve, and
-# nothing renders those rules into the file any more. Installing over such a
-# config would produce a gateway whose extensions can never be enabled.
-#
-# The file is the operator's and this installer does not rewrite it, so the
-# repair is theirs to make: `5gpn mihomo-reset` backs the current file up and
-# restores the anchored seed. Refuse here, before publication, so a host that
-# cannot run this release is turned away untouched.
-preserved_mihomo_config_is_anchored() {
-    local config="${MIHOMO_DIR}/config.yaml"
-    [[ -e "$config" || -L "$config" ]] || return 0
-    [[ -f "$config" && ! -L "$config" ]] \
-        || { err "Existing mihomo config path is unsafe before publication: $config"; return 1; }
-    grep -Eq "^[[:space:]]*-[[:space:]]*RUNTIME-OVERLAY,${OVERLAY_OWNER}," "$config" && return 0
-    err "The preserved mihomo config carries no runtime-overlay anchors: $config"
-    err "This release publishes interception routing only through the overlay, so that config can never carry it."
-    err "Run '5gpn mihomo-reset' to back it up and restore the anchored seed, then rerun this installer. No live 5gpn bytes were changed."
-    return 1
-}
-
-preflight_existing_interception_state() {
-    local config="$INTERCEPT_DIR/config.json"
-    [[ -e "$config" || -L "$config" ]] || return 0
-    [[ -f "$config" && ! -L "$config" ]] \
-        || { err "Existing interception config path is unsafe before publication: $config"; return 1; }
-    if ! "$ARTIFACT_STAGE/5gpn-intercept" --config "$config" --check-config; then
-        if grep -Eq '"version"[[:space:]]*:[[:space:]]*4([,[:space:]}]|$)' "$config"; then
-            err "Pre-v5 interception config detected before publication: $config"
-            err "Back up active state, disable the old v4 MITM transaction, then follow the credential-preserving checked jq rebuild in the pre-v5 upgrade guide linked from README. No live 5gpn bytes were changed."
-        else
-            err "Existing interception config is invalid under the target release: $config"
-        fi
-        return 1
-    fi
-    [[ -f "$MIHOMO_DIR/config.yaml" && ! -L "$MIHOMO_DIR/config.yaml" ]] || return 0
-    check_interception_routing_compatibility "$ARTIFACT_STAGE/5gpn-dns"
-}
-
 # ----------------------------------------------------------------------------
 # Zashboard source-IP allowlist (whitelist.txt) — TUI-managed OUT-OF-BAND, never
 # web-editable. add/del edit the file directly, then apply_whitelist pushes it
@@ -3632,6 +3226,20 @@ mihomo_controller_curl() {
     curl --cacert "$cert_file" \
         --connect-to "${server_name}:${port}:${host}:${port}" \
         "$@" "https://${server_name}:${port}${path}"
+}
+
+# The interception snapshot, as JSON on stdout.
+#
+# Whether interception is on is a property of the engine's document, not of a
+# unit's state -- there is no second process whose liveness could stand in for
+# it. This asks the control API the same question the console asks, so the
+# installer and the operator's browser cannot disagree about what is enabled.
+gpn_interception_snapshot() {
+    local secret
+    secret="$(cfg_get DNS_MIHOMO_SECRET)"
+    local -a curl_args=(--fail --silent --show-error --max-time 3)
+    [[ -n "$secret" ]] && curl_args+=(-H "Authorization: Bearer $secret")
+    mihomo_controller_curl "/gpn/interception" "${curl_args[@]}" 2>/dev/null
 }
 
 # apply_whitelist pushes the on-disk whitelist.txt live via the mihomo
@@ -3771,7 +3379,6 @@ install_files() {
     fi
 
     write_subscriptions_json
-    seed_policy_defaults
 
     # repo scripts -> /opt/5gpn/scripts.
     for f in "${SCRIPT_DIR}"/scripts/*.sh; do
@@ -5655,9 +5262,14 @@ ss_has_exact_listener() {
             END { exit !found }'
 }
 
+# One unit owns the controller, the gateway listeners, the console API and the
+# DoT boundary, so readiness has to cover all four. It used to be two probes
+# against two units; keeping only the mihomo half would have declared the
+# install ready while the resolver was not yet answering, which is precisely
+# the window install_cert and reload_rules run in.
 probe_mihomo_ready() {
     systemctl is-active --quiet mihomo || return 1
-    local secret ip port
+    local secret ip port token domain
     local -a tcp_ports=(80 443)
     local -a udp_ports=(443)
     if [[ "${MIHOMO_SEED_PORTS_REQUIRED:-0}" == 1 ]]; then
@@ -5679,11 +5291,7 @@ probe_mihomo_ready() {
             ss_has_exact_listener udp "$ip" "$port" mihomo || return 1
         done
     done < <(printf '%s\n' "$MIHOMO_LISTEN_IPS" | tr ',' '\n')
-}
 
-probe_dns_ready() {
-    systemctl is-active --quiet 5gpn-dns || return 1
-    local token domain
     token="$(cfg_get DNS_API_TOKEN)"
     [[ -n "${DOT_DOMAIN:-}" ]] || load_persisted_domains || return 1
     domain="$DOT_DOMAIN"
@@ -5696,33 +5304,12 @@ probe_dns_ready() {
 }
 
 wait_service_ready() {
-    local svc="$1" deadline remaining probe_timeout check_rc announced=0
+    local svc="$1" deadline announced=0
     deadline=$((SECONDS + SERVICE_READY_TIMEOUT))
     while (( SECONDS < deadline )); do
         case "$svc" in
-            5gpn-intercept)
-                if "$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --check-enabled >/dev/null 2>&1; then
-                    remaining=$((deadline - SECONDS))
-                    (( remaining > 0 )) || break
-                    probe_timeout="$remaining"
-                    (( probe_timeout <= INTERCEPT_HEALTHCHECK_MAX_TIMEOUT )) \
-                        || probe_timeout="$INTERCEPT_HEALTHCHECK_MAX_TIMEOUT"
-                    timeout --signal=TERM --kill-after=2s "${probe_timeout}s" \
-                        "$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --healthcheck \
-                        && { ok "5gpn-intercept readiness passed (authenticated loopback SOCKS5 TCP/UDP)."; return 0; }
-                else
-                    check_rc=$?
-                    if [[ "$check_rc" == 3 ]]; then
-                    systemctl stop 5gpn-intercept.service 2>/dev/null || true
-					ok "5gpn-intercept remains stopped because no interception extension is active."
-                    return 0
-                    fi
-                    err "5gpn-intercept configuration could not be read while checking the MITM master setting."
-                    return 1
-                fi
-                ;;
-            mihomo)    probe_mihomo_ready && { ok "mihomo readiness passed (controller + local TCP/UDP listeners)."; return 0; } ;;
-            5gpn-dns)  probe_dns_ready && { ok "5gpn-dns readiness passed (API + DoT TLS handshake)."; return 0; } ;;
+            mihomo) probe_mihomo_ready \
+                && { ok "mihomo readiness passed (controller, gateway listeners, console API, DoT handshake)."; return 0; } ;;
         esac
         # Speak up only once the first probe has failed, so a service that
         # starts promptly stays quiet. Without this a slow start is up to
@@ -5925,24 +5512,26 @@ regen_ios() {
 show_status() {
     load_persisted_domains || return 1
     {
-        local domain="$DOT_DOMAIN" webdomain="$CONSOLE_DOMAIN" pubip svc s
+        local domain="$DOT_DOMAIN" webdomain="$CONSOLE_DOMAIN" pubip svc s intercept_snapshot
         pubip="$(cfg_get DNS_PUBLIC_IP)"; pubip="${pubip:-N/A}"
         echo "📊 5gpn 状态"
         echo ""
-        # Telegram bot + iOS profile path are in-process parts of 5gpn-dns now;
-        # mihomo is the forwarding data plane; interception is a separate sidecar.
-        for svc in "5gpn-dns" 5gpn-intercept mihomo; do
-            if [[ "$svc" == 5gpn-intercept ]]; then
-                if "$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --check-enabled >/dev/null 2>&1; then
-                    :
-                elif [[ "$?" == 3 ]]; then
-                    echo "  ⏸️  ${svc}  (disabled by MITM setting)"
-                    continue
-                fi
+        # One process owns resolving, forwarding, the console, the bot and
+        # interception, so there is one unit to report. Interception is a stage
+        # inside it rather than a service that can be up or down on its own --
+        # whether it is switched on is a property of the document, which the
+        # control API reports.
+        s="$(systemctl is-active mihomo 2>/dev/null || echo unknown)"
+        echo "  $([[ "$s" == active ]] && echo '✅' || echo '❌') mihomo  (${s})"
+        if intercept_snapshot="$(gpn_interception_snapshot)"; then
+            if grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true' <<<"$intercept_snapshot"; then
+                echo "  ✅ interception  (enabled)"
+            else
+                echo "  ⏸️  interception  (disabled by MITM setting)"
             fi
-            s="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
-            echo "  $([[ "$s" == active ]] && echo '✅' || echo '❌') ${svc}  (${s})"
-        done
+        else
+            echo "  ❔ interception  (control API unreachable)"
+        fi
         echo ""
         echo "  WebUI 域名  $webdomain  (https://${webdomain}/)"
         echo "  DoT 域名    $domain"
@@ -6286,11 +5875,6 @@ full_install() {
     # decide here -- while the deployment is untouched -- rather than at
     # publication time when the binaries have already been replaced.
     cert_root_claim_is_possible
-    # Same reasoning for the operator's mihomo config: a preserved file with no
-    # overlay anchors cannot carry interception under this release, and finding
-    # that out after publication would leave a half-installed gateway whose
-    # extensions can never be enabled.
-    preserved_mihomo_config_is_anchored
     # Bootstrap the TUI here, not at publication time. Every prompt this
     # installer asks -- domain, gateway IP, resolver, certificate mode -- runs in
     # the stage below, so a later bootstrap meant the interactive helpers always
@@ -6322,8 +5906,6 @@ full_install() {
     verify_console_dns
     phase "staging and verifying release artifacts" "下载并校验发布产物"
     stage_artifacts
-    phase "checking existing interception routing before publication" "检查既有拦截路由"
-    preflight_existing_interception_state
     INSTALL_PHASE="acquiring the certificate transaction lock"
     acquire_install_cert_lock
     phase "claiming publication directories" "认领发布目录"
@@ -6338,11 +5920,8 @@ full_install() {
     phase "installing service accounts" "创建服务账户"
     install_service_accounts
     phase "publishing verified executables" "发布可执行文件"
-    install_5gpndns
-    install_intercept
     install_mihomo
     phase "publishing runtime configuration and assets" "发布运行配置与资源"
-    ensure_intercept_config
     prepare_certificate_publication_boundaries
     install_files
     install_manage_cli
@@ -6357,11 +5936,6 @@ full_install() {
         render_mihomo_config --reset
     else
         render_mihomo_config
-    fi
-    check_interception_routing_compatibility
-    if [[ "$reset_mihomo" == 1 && "$INTERCEPT_ROUTING_READY" != 1 ]]; then
-        err "Explicit mihomo reset did not produce a manageable interception boundary."
-        return 1
     fi
     setup_ios_profile
     prepare_runtime_permissions
@@ -6385,19 +5959,9 @@ full_install() {
     [[ "$postcommit_failed" == 0 ]] || return 1
 
     echo ""
-    if [[ "$INTERCEPT_ROUTING_READY" == 1 ]]; then
-        ok "5gpn install complete."
-    else
-        ok "5gpn core install complete."
-        warn "Extensions remain disabled because the preserved mihomo config is not interception-ready (${INTERCEPT_ROUTING_REASON})."
-        info "Run '5gpn mihomo-reset' only if replacing the complete operator-owned mihomo config is acceptable."
-    fi
+    ok "5gpn install complete."
     {
-        if [[ "$INTERCEPT_ROUTING_READY" == 1 ]]; then
-            echo "✅ 5gpn 安装完成"
-        else
-            echo "✅ 5gpn 核心安装完成（Extensions 暂不可启用）"
-        fi
+        echo "✅ 5gpn 安装完成"
         echo ""
         echo "  DoT 地址         tls://${DOT_DOMAIN}:853"
         echo "  Android 私人DNS  ${DOT_DOMAIN}"
