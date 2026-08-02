@@ -202,6 +202,14 @@ func classifySidecarError(status int, raw []byte) error {
 		return fmt.Errorf("%w: %s", errSidecarRetryable, detail)
 	case "not_found":
 		return fmt.Errorf("%w: %s", errSidecarTerminal, detail)
+	case "invalid_document":
+		// Terminal. The sidecar will never accept this document, so repeating it
+		// is a loop rather than a recovery. It used to arrive as "internal",
+		// which this classifier reads as retryable -- the two components'
+		// hand-maintained validators disagreeing about one document is exactly
+		// the case that produces it, and the message naming the field was
+		// already in the body.
+		return fmt.Errorf("%w: %s", errSidecarTerminal, detail)
 	}
 	if status >= 500 {
 		return fmt.Errorf("%w: HTTP %d: %s", errSidecarRetryable, status, detail)

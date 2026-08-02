@@ -230,3 +230,32 @@ func TestResolverFormHostTargetsAreScopeChecked(t *testing.T) {
 		}
 	}
 }
+
+// capture_hosts must be canonical, which the error message on the sorted check
+// has always claimed and only this enforces.
+//
+// validateInterceptHostPattern lowercases into a local and validates that,
+// discarding the result, so a mixed-case host passed. It is the odd one out
+// among its neighbours -- a host mapping requires pattern == normalized, an
+// ip_cidr requires network.String() == rule.IPCIDR -- and it cost two
+// divergences downstream: the two components' certificate host-set digests
+// disagree, so every enable that changes that set burns the certificate wait
+// and rolls back blaming the certificate; and the data-plane matcher stores the
+// pattern verbatim while looking it up with a canonicalised request host, so
+// the extension silently intercepts nothing.
+func TestCaptureHostsMustBeCanonical(t *testing.T) {
+	t.Parallel()
+	for _, host := range []string{"API.example.com", "api.example.com.", " api.example.com", "*.EXAMPLE.com"} {
+		module := testModuleSnapshot()
+		module.CaptureHosts = []string{host}
+		module.Scripts[0].Match.Hosts = []string{host}
+		if err := validateInterceptModule(module); err == nil {
+			t.Errorf("accepted non-canonical capture host %q", host)
+		}
+	}
+	module := testModuleSnapshot()
+	module.CaptureHosts = []string{"api.example.com"}
+	if err := validateInterceptModule(module); err != nil {
+		t.Fatalf("a canonical host was refused: %v", err)
+	}
+}
