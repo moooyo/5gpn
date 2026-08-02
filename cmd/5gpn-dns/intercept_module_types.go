@@ -22,9 +22,8 @@ const (
 	interceptPhaseRequest  = "request"
 	interceptPhaseResponse = "response"
 
-	maxInterceptModules        = 64
-	maxInterceptModuleHosts    = 512
-	maxInterceptNetworkOrigins = 256
+	maxInterceptModules     = 64
+	maxInterceptModuleHosts = 512
 	// maxInterceptHostMappingServers bounds one resolver-form mapping. A name
 	// needs a primary and a spare; more is a group, which is the operator's to
 	// configure and not an extension's to smuggle in one line.

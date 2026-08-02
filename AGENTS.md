@@ -16,9 +16,11 @@ plans, design handoffs, and git history are context only.
   TLS/H1/H2, and QUIC/H3; its upstream TCP and UDP return through authenticated mihomo SOCKS5
   listeners. Native `5gpn.io/v1` scripts execute from immutable local snapshots
   in a no-filesystem goja sandbox. A script receives a synchronous network
-  capability only when its manifest declares exact HTTP(S) origins and the
-  operator confirms that permission; every such request returns through
-  authenticated mihomo SOCKS5 and cannot escape the approved origin set. Do not
+  capability only when its manifest declares `permissions.network: true` and the
+  operator confirms it. That grant names no destinations: a script holding it may
+  reach any host it can resolve, and the manifest cannot narrow that. Every such
+  request still returns through authenticated mihomo SOCKS5, and the URL
+  canonicalization, IP-literal and unsafe-host refusals still apply. Do not
   crawl or mirror module stores. First-party extension source lives exclusively
   in `moooyo/5gpn-extensions`; do not add an `extensions/` source tree back to
   this core repository.

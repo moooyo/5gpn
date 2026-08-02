@@ -221,8 +221,14 @@ resolver profile all still apply. Capture hosts and upstream mappings keep their
 own exact bindings above it, so an extension's captured traffic still leaves
 through the binding its own hosts were given.
 
-Where several extensions hold the grant, the first one in execution order owns
-unmatched egress, the same first-match ownership the rest of the projection has.
+Where several extensions hold the grant, the explicitly bound ones own unmatched
+egress before the unbound ones do; execution order decides only within each of
+those two passes. Unlike the rest of the projection, `execution_order` alone
+does not move this. The owner's group also decides the binding's `allowDirect`:
+the terminal `MATCH` target and the built-in `DIRECT` group permit leaving
+without a proxy, and any other named group fails closed — so a bound owner can
+hold `allowDirect` too, which is a relaxation relative to the unbound case
+rather than a restriction.
 
 ## Typed settings
 
@@ -274,14 +280,48 @@ An action phase is `request` or `response`. Its structured matcher contains:
 - a required RE2 `pathRegex`, matched against path plus query; and
 - optional response `statusCodes` from 100 through 599.
 
-The script declares exactly one of:
+An action declares exactly one of seven kinds. Six are declarative and never
+reach the JavaScript runtime — they are dispatched before a VM is created:
 
-- `source`: an HTTPS URL, or a relative URL when the manifest itself was
-  installed by URL; or
-- `inline`: source embedded in the manifest.
+- `reject`: `true`, which aborts the exchange;
+- `mock`: a synthetic response (`status`, `headers`, and one of `body` or
+  `base64Body`), bounded at 1 MiB by its own limit rather than by
+  `maxBodyBytes`, because the body is declared here rather than read off the
+  wire;
+- `headers`: `set` and `remove` maps, applied to whichever message the phase
+  owns;
+- `rewrite`: `pattern`, `to`, and optional `status` (302 or 307). Request phase
+  only — its executor rewrites the request URL, which the response phase has no
+  way to honour;
+- `replaceBody`: `pattern`, `to`, and optional `valueMap`. Requires `bodyMode`
+  `text` or `binary`, since it edits a body it has to be given;
+- `jq`: one expression, at most 32768 bytes, requiring `bodyMode: text`. A
+  document whose shape the expression cannot act on — a top-level array where an
+  object was expected, `"data": []` standing in for an object — skips the action
+  rather than failing the exchange, the same as a body that is not JSON at all;
+- a script, declaring exactly one of:
+  - `source`: an HTTPS URL, or a relative URL when the manifest itself was
+    installed by URL; or
+  - `inline`: source embedded in the manifest.
 
-`bodyMode` is `none`, `text`, or `binary`. Binary bodies are `Uint8Array`
-values. `timeoutMs` is 50–30000 and `maxBodyBytes` is 1024–67108864. Source,
+`{{settings.key}}` in a `rewrite.to` or `replaceBody.to` is substituted with
+that setting's rendered value, once. A substituted value is data, not more
+template, so a value that contains a placeholder keeps it literally. An
+unresolvable key, or a value with no `valueMap` entry, declines the action
+rather than substituting an empty string.
+
+`enabledWhen` gates an action on a setting: `{key, equals}`, where `key` names a
+required `boolean` or `select` setting of the same extension and `equals` is one
+of its declared values. Only those two types may be gated — a `number`,
+`text`, or `location` comparison would be against a rendered string an author
+cannot reliably predict, and a gate that never opens is silent.
+
+`bodyMode` is `none`, `text`, or `binary`, and `timeoutMs` is 50–30000 and
+`maxBodyBytes` is 1024–67108864, for every kind. `timeoutMs` bounds only the jq
+and script kinds in practice, since the other five return before a deadline
+could apply; `maxBodyBytes` bounds the message an action reads, so a `mock`,
+which reads none, is not sized by it. Binary bodies are `Uint8Array`
+values. Source,
 aggregate script, response, and VM resource limits are enforced independently.
 `bodyMode` controls only whether the input projection contains a body; it does
 not restrict which valid patch the action may return. Replacement and synthetic
@@ -531,15 +571,16 @@ extension snapshot digest. Expiry, replay, cross-user or cross-chat use, a
 changed revision, or any snapshot/index digest mismatch fails closed and
 requires a new review.
 
-Every review of a candidate or installed extension lists each declared network
-origin. Before enable, it also states that the script can send any decrypted
-request, response, setting, or storage data visible to it to every listed
-origin, and may rewrite a captured request there with its method, decoded body,
+Every review of a candidate or installed extension states whether the network
+grant is present. Before enable, it also states that the grant names no
+destination, that the script can send any decrypted request, response, setting,
+or storage data visible to it to any host it can reach, and that it may rewrite
+a captured request there with its method, decoded body,
 and end-to-end headers, including possible cookies or authorization. Enable
 review uses the same single confirmation for the complete
 snapshot, including all listed routing rules. Reorder review shows the complete
 before/after order and warns that routing first-match may change. Approval of
-one immutable snapshot never grants a changed origin or routing-rule set.
+one immutable snapshot never grants a changed permission or routing-rule set.
 
 Project-maintained examples, including Apple WLOC, live in the separate
 `moooyo/5gpn-extensions` catalog. The core repository intentionally contains no
