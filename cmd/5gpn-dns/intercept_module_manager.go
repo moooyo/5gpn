@@ -20,6 +20,12 @@ var (
 	errInterceptModuleConflict     = errors.New("interception module conflicts with the current runtime")
 	errInterceptModuleNotFound     = errors.New("interception module not found")
 	errInterceptApplyFailed        = errors.New("interception module apply failed")
+	// errInterceptApplyUnresolved is the apply whose outcome nothing could
+	// determine. It is deliberately not errInterceptApplyFailed: "failed" tells
+	// an operator the change did not happen, and here that is exactly what is
+	// not known. Both sides are left on the candidate so the next daemon start
+	// adjudicates against the core rather than against local belief.
+	errInterceptApplyUnresolved = errors.New("interception module apply outcome is unresolved; it will be settled by recovery on the next restart")
 
 	errInterceptRoutingDriverUnavailable = errors.New("interception routing driver unavailable; run '5gpn mihomo-reset' if the mihomo config lost its overlay anchors")
 )
@@ -160,6 +166,13 @@ func (m *InterceptModuleManager) rollbackSidecarDocument(ctx context.Context, bo
 
 // publishSidecarDocument puts the candidate document into effect in the sidecar.
 //
+// It reports whether anything durable happened, because that -- not the error --
+// is what tells the caller a compensation is owed. The bundle commit and the
+// file write are two steps, and the second failing after the first succeeded
+// leaves the sidecar serving a document that no generation names. Returning
+// only an error made that case indistinguishable from having done nothing, and
+// the caller compensated neither.
+//
 // The ordering the transaction depends on is that the sidecar holds the new
 // document before the certificate wait and before mihomo publishes, so capture
 // traffic never arrives at a processor that cannot serve it.
@@ -171,19 +184,28 @@ func (m *InterceptModuleManager) rollbackSidecarDocument(ctx context.Context, bo
 // enable exists to start, which made the master switch a one-way door.
 //
 // Called with m.mu held (see mutate), so the client is read without taking it.
-func (m *InterceptModuleManager) publishSidecarDocument(ctx context.Context, body []byte) error {
+func (m *InterceptModuleManager) publishSidecarDocument(ctx context.Context, body []byte) (bool, error) {
 	client := m.sidecar
 	if client == nil {
-		return m.store.writeAtomicContext(ctx, body)
+		if err := m.store.writeAtomicContext(ctx, body); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	if sidecarSocketPresent(client) {
 		if _, err := client.PublishBundle(ctx, interceptBundleID(body), body); err != nil {
-			return err
+			return false, err
 		}
+		// The bundle is live from here on, so every later failure owes a
+		// compensation even though the document write below may not have run.
+		//
 		// The file is still written while both paths are supported, so a
 		// downgrade to a build without the API finds the state it expects. It is
 		// no longer what the sidecar reads.
-		return m.store.writeAtomicContext(ctx, body)
+		if err := m.store.writeAtomicContext(ctx, body); err != nil {
+			return true, err
+		}
+		return true, nil
 	}
 
 	// No socket: write the file first, because that is what the runtime path
@@ -192,7 +214,7 @@ func (m *InterceptModuleManager) publishSidecarDocument(ctx context.Context, bod
 	// bundle live, so readiness is never asserted and capture stays fail-closed
 	// indefinitely even though every step reported success.
 	if err := m.store.writeAtomicContext(ctx, body); err != nil {
-		return err
+		return false, err
 	}
 	wait := m.sidecarStart
 	if wait <= 0 {
@@ -200,7 +222,7 @@ func (m *InterceptModuleManager) publishSidecarDocument(ctx context.Context, bod
 	}
 	if !waitForSidecarSocket(ctx, client, wait) {
 		log.Printf("intercept: sidecar did not start within %s; it serves the configuration file until the next transaction", wait)
-		return nil
+		return true, nil
 	}
 	if _, err := client.PublishBundle(ctx, interceptBundleID(body), body); err != nil {
 		// The document is already durable and correct, so the transaction
@@ -209,7 +231,7 @@ func (m *InterceptModuleManager) publishSidecarDocument(ctx context.Context, bod
 		// adopts the bundle, which is the safe direction to fail.
 		log.Printf("intercept: sidecar started but did not adopt the bundle (%v); it serves the configuration file", err)
 	}
-	return nil
+	return true, nil
 }
 
 // sidecarSocketPresent reports whether the control API is there to talk to right
@@ -279,15 +301,15 @@ func (m *InterceptModuleManager) publishOverlayGeneration(
 	documentRevision string,
 	certificateHostSetDigest string,
 	sidecarBundleDigest string,
-) error {
+) (overlayOutcome, error) {
 	// The driver is installed at startup and is the only publication path. If
 	// its probe failed, every routing change has to say so rather than dereference
 	// a nil driver -- a gateway that accepts toggles and applies none of them is
 	// worse than one that refuses them.
 	if m.overlay == nil {
-		return errInterceptRoutingDriverUnavailable
+		return overlayNotTaken, errInterceptRoutingDriverUnavailable
 	}
-	_, err := m.overlay.Publish(ctx, overlayCompileInput{
+	_, outcome, err := m.overlay.Publish(ctx, overlayCompileInput{
 		Document:                 document,
 		MatchTarget:              matchTarget,
 		DocumentRevision:         documentRevision,
@@ -295,7 +317,7 @@ func (m *InterceptModuleManager) publishOverlayGeneration(
 		CertificateHostSetDigest: certificateHostSetDigest,
 		SidecarBundleDigest:      sidecarBundleDigest,
 	})
-	return err
+	return outcome, err
 }
 
 func (m *InterceptModuleManager) SetSidecarTester(tester interceptConfigTester) {
@@ -370,11 +392,11 @@ func (m *InterceptModuleManager) PrepareRuntime() error {
 	// goes on serving whatever its own store cold started from, the
 	// generation names the document's bundle, and readiness is refused for
 	// the mismatch, which fails every captured connection closed.
-	if err := m.publishSidecarDocument(context.Background(), body); err != nil {
+	if _, err := m.publishSidecarDocument(context.Background(), body); err != nil {
 		m.publishHosts(nil)
 		return fmt.Errorf("the interception document could not be republished: %w", err)
 	}
-	if err := m.publishOverlayGeneration(context.Background(), document, analysis.MatchTarget,
+	if _, err := m.publishOverlayGeneration(context.Background(), document, analysis.MatchTarget,
 		interceptRevision(body), interceptCertificateDigest(certificateInterceptHosts(document)),
 		interceptBundleID(body)); err != nil {
 		m.publishHosts(nil)
@@ -1257,8 +1279,37 @@ func (m *InterceptModuleManager) mutate(
 	if err := validateInterceptEgressBindings(nextDocument, analysis.AvailableEgressGroups); err != nil {
 		return interceptModulesView{}, fmt.Errorf("%w: %v", errInterceptModuleConflict, err)
 	}
-	if err := m.publishSidecarDocument(ctx, newBody); err != nil {
-		return interceptModulesView{}, err
+	// One compensation for the whole publish, installed before the first step
+	// that can need it.
+	//
+	// This used to be per-step, and the steps disagreed. The first had none at
+	// all, so a bundle committed to the sidecar and then a document write that
+	// failed -- a cancelled request, ENOSPC, EROFS on /etc/5gpn/intercept --
+	// left the processor serving a bundle the live generation does not name.
+	// The third compensated unconditionally, including when the generation had
+	// provably gone live, which produced the same mismatch from the opposite
+	// direction. Either way the readiness lease is withheld and every captured
+	// connection is REJECTed, both pointers survive their own restarts, and the
+	// only repair is an unrelated successful transaction or a daemon restart.
+	//
+	// So: compensate exactly when something was published and the transaction
+	// did not complete, and never when the overlay says the generation took or
+	// that nothing here can tell.
+	published := false
+	compensate := true
+	overlayResult := overlayNotTaken
+	defer func() {
+		if !published || !compensate {
+			return
+		}
+		if rollbackErr := m.rollbackSidecarDocument(ctx, oldBody); rollbackErr != nil {
+			log.Printf("intercept: restoring the previous sidecar document failed: %v", rollbackErr)
+		}
+	}()
+
+	published, err = m.publishSidecarDocument(ctx, newBody)
+	if err != nil {
+		return interceptModulesView{}, fmt.Errorf("%w: sidecar publication: %v", errInterceptApplyFailed, err)
 	}
 	oldCertificateHosts := certificateInterceptHosts(oldDocument)
 	nextCertificateHosts := certificateInterceptHosts(nextDocument)
@@ -1266,19 +1317,29 @@ func (m *InterceptModuleManager) mutate(
 	certificateHostsChanged := !stringSlicesEqual(oldCertificateHosts, nextCertificateHosts)
 	if len(nextCertificateHosts) > 0 && (certificateHostsChanged || (firstActivation && !m.certificateReady(nextDocument))) {
 		if err := m.waitForCertificate(ctx, interceptCertificateDigest(nextCertificateHosts), newBody); err != nil {
-			rollbackErr := m.rollbackSidecarDocument(ctx, oldBody)
-			return interceptModulesView{}, fmt.Errorf("%w: certificate publication: %v; sidecar rollback: %v", errInterceptApplyFailed, err, rollbackErr)
+			return interceptModulesView{}, fmt.Errorf("%w: certificate publication: %v", errInterceptApplyFailed, err)
 		}
 	}
 	// The mihomo file is not rewritten and mihomo is not reloaded. What changes
 	// is a typed generation, committed transactionally; the operator's own rules
 	// are never re-serialised, so a change to routing can no longer perturb them.
-	if err := m.publishOverlayGeneration(ctx, nextDocument, analysis.MatchTarget,
+	overlayResult, err = m.publishOverlayGeneration(ctx, nextDocument, analysis.MatchTarget,
 		interceptRevision(newBody), interceptCertificateDigest(nextCertificateHosts),
-		interceptBundleID(newBody)); err != nil {
-		rollbackErr := m.rollbackSidecarDocument(ctx, oldBody)
-		return interceptModulesView{}, fmt.Errorf("%w: %v; sidecar rollback: %v", errInterceptApplyFailed, err, rollbackErr)
+		interceptBundleID(newBody))
+	if err != nil {
+		switch overlayResult {
+		case overlayNotTaken:
+			return interceptModulesView{}, fmt.Errorf("%w: %v", errInterceptApplyFailed, err)
+		default:
+			// Taken, or unknown. Both leave the candidate in place: revoking a
+			// generation that is live, or that may be, is the failure this whole
+			// arrangement exists to avoid.
+			compensate = false
+			return interceptModulesView{}, fmt.Errorf("%w (overlay outcome %s): %v",
+				errInterceptApplyUnresolved, overlayResult, err)
+		}
 	}
+	compensate = false
 	m.publishHosts(&nextDocument)
 	if m.onApplied != nil {
 		m.onApplied()

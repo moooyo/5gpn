@@ -692,15 +692,18 @@ func TestOverlayPublishSkipsAStateThatIsAlreadyLive(t *testing.T) {
 		DocumentRevision: "rev-1",
 		Transition:       overlayTransitionRevoke,
 	}
-	first, err := driver.Publish(context.Background(), in)
+	first, firstOutcome, err := driver.Publish(context.Background(), in)
 	if err != nil {
 		t.Fatalf("first publish: %v", err)
+	}
+	if firstOutcome != overlayTaken {
+		t.Fatalf("first publish outcome = %s, want taken", firstOutcome)
 	}
 	if first.Repeated || core.commitCount() != 1 {
 		t.Fatalf("first publish = repeated=%t commits=%d", first.Repeated, core.commitCount())
 	}
 
-	second, err := driver.Publish(context.Background(), in)
+	second, _, err := driver.Publish(context.Background(), in)
 	if err != nil {
 		t.Fatalf("republish: %v", err)
 	}
@@ -717,7 +720,7 @@ func TestOverlayPublishSkipsAStateThatIsAlreadyLive(t *testing.T) {
 	changed := in
 	changed.Document = overlayTestDocument()
 	changed.Document.Modules[1].CaptureHosts = []string{"api.example.test", "extra.example.test"}
-	third, err := driver.Publish(context.Background(), changed)
+	third, _, err := driver.Publish(context.Background(), changed)
 	if err != nil {
 		t.Fatalf("publish after a real change: %v", err)
 	}
@@ -741,7 +744,7 @@ func TestOverlayPublishStaysUsableWhenAJournalWriteFails(t *testing.T) {
 		DocumentRevision: "rev-1",
 		Transition:       overlayTransitionRevoke,
 	}
-	if _, err := driver.Publish(context.Background(), in); err != nil {
+	if _, _, err := driver.Publish(context.Background(), in); err != nil {
 		t.Fatalf("first publish: %v", err)
 	}
 
@@ -757,7 +760,7 @@ func TestOverlayPublishStaysUsableWhenAJournalWriteFails(t *testing.T) {
 	changed := in
 	changed.Document = overlayTestDocument()
 	changed.Document.Modules[1].CaptureHosts = []string{"api.example.test", "extra.example.test"}
-	if _, err := driver.Publish(context.Background(), changed); err == nil {
+	if _, _, err := driver.Publish(context.Background(), changed); err == nil {
 		t.Fatal("a journal write failure was not reported")
 	}
 
@@ -767,7 +770,7 @@ func TestOverlayPublishStaysUsableWhenAJournalWriteFails(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o770); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := driver.Publish(context.Background(), changed); err != nil {
+	if _, _, err := driver.Publish(context.Background(), changed); err != nil {
 		t.Fatalf("the driver stayed wedged after the journal recovered: %v", err)
 	}
 }
@@ -939,8 +942,13 @@ func TestJournalEntryIsClearedWhenCommitIsRefused(t *testing.T) {
 	driver := NewOverlayDriver(client, journal)
 
 	refusal := fmt.Errorf("%w: invalid_document", errOverlayTerminal)
-	if _, err := driver.recoverAfterCommit(context.Background(), "g1", "g0", refusal); !errors.Is(err, errOverlayTerminal) {
+	_, outcome, err := driver.recoverAfterCommit(context.Background(), "g1", "g0", refusal)
+	if !errors.Is(err, errOverlayTerminal) {
 		t.Fatalf("error = %v, want the terminal refusal to surface", err)
+	}
+	// The core refused, so nothing was published and the caller must compensate.
+	if outcome != overlayNotTaken {
+		t.Fatalf("outcome = %s, want not-taken", outcome)
 	}
 	assertJournalAcceptsNextApply(t, journal)
 }
@@ -954,8 +962,14 @@ func TestJournalEntryIsClearedWhenCommitDidNotLand(t *testing.T) {
 	driver := NewOverlayDriver(client, journal)
 
 	lost := errors.New("overlay: connection reset")
-	if _, err := driver.recoverAfterCommit(context.Background(), "g1", "g0", lost); err == nil {
+	_, outcome, err := driver.recoverAfterCommit(context.Background(), "g1", "g0", lost)
+	if err == nil {
 		t.Fatal("a commit that did not take effect must still report an error")
+	}
+	// The base is still live, which proves it. This is the one lost-response
+	// shape the caller may compensate.
+	if outcome != overlayNotTaken {
+		t.Fatalf("outcome = %s, want not-taken", outcome)
 	}
 	assertJournalAcceptsNextApply(t, journal)
 }
@@ -969,8 +983,14 @@ func TestJournalEntrySurvivesGenerationMove(t *testing.T) {
 	driver := NewOverlayDriver(client, journal)
 
 	lost := errors.New("overlay: connection reset")
-	if _, err := driver.recoverAfterCommit(context.Background(), "g1", "g0", lost); err == nil {
+	_, outcome, err := driver.recoverAfterCommit(context.Background(), "g1", "g0", lost)
+	if err == nil {
 		t.Fatal("a conflicting active generation must report an error")
+	}
+	// Nothing here can prove what is live is ours to revoke, so the caller must
+	// not compensate.
+	if outcome != overlayUnknown {
+		t.Fatalf("outcome = %s, want unknown", outcome)
 	}
 	entry := journal.Current()
 	if entry == nil {

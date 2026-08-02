@@ -115,6 +115,10 @@ func writeMarketplaceError(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, errMarketplaceFetch), errors.Is(err, errInterceptApplyFailed):
 		writeErr(w, http.StatusBadGateway, err.Error())
+	case errors.Is(err, errInterceptApplyUnresolved):
+		// See api_intercept_modules.go: "unresolved" is not "failed", and
+		// reporting it as 502 would tell the operator the opposite of the truth.
+		writeErr(w, http.StatusInternalServerError, err.Error())
 	case errors.Is(err, errMarketplaceState):
 		// The request was fine; the file behind it is not. Reporting that as
 		// 400 told the console the operator had sent something wrong, so it
