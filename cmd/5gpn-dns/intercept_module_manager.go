@@ -413,7 +413,7 @@ func (m *InterceptModuleManager) ReconcileMihomoText(text string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.store.mu.Lock()
-	document, _, err := m.store.Read()
+	document, body, err := m.store.Read()
 	m.store.mu.Unlock()
 	if err != nil {
 		m.publishHosts(nil)
@@ -425,9 +425,29 @@ func (m *InterceptModuleManager) ReconcileMihomoText(text string) error {
 		m.publishHosts(&document)
 		return nil
 	}
-	if gate := m.routingGateFor(document, text); !gate.ready {
+	gate := m.routingGateFor(document, text)
+	if !gate.ready {
 		m.publishHosts(nil)
 		return fmt.Errorf("interception routing is not ready: %s", gate.reason)
+	}
+	// Republish the generation, not just the DNS table.
+	//
+	// analysis.MatchTarget is compiled *into* every egress capability: an
+	// extension with no explicit binding gets the terminal MATCH target as its
+	// group, and overlayCapabilityAllowsDirect decides its allowDirect from the
+	// same value. Reconciling only the host table left that baked-in target
+	// stale for as long as no extension happened to change -- so an operator who
+	// repointed MATCH at a different existing group left the live generation
+	// still authorising the old one, with the allowDirect they had just revoked.
+	//
+	// The driver already deduplicates: Publish short-circuits when the recompiled
+	// desired state matches the live generation, so a mihomo edit that changes
+	// nothing here costs a readback and a compile rather than a generation.
+	if _, err := m.publishOverlayGeneration(context.Background(), document, gate.analysis.MatchTarget,
+		interceptRevision(body), interceptCertificateDigest(certificateInterceptHosts(document)),
+		interceptBundleID(body)); err != nil {
+		m.publishHosts(nil)
+		return fmt.Errorf("interception routing could not be republished: %w", err)
 	}
 	m.publishHosts(&document)
 	return nil
@@ -454,7 +474,7 @@ func (m *InterceptModuleManager) LockMihomoCandidate(text string) (func(), error
 		unlock()
 		return nil, err
 	}
-	if err := validateInterceptEgressBindings(document, available); err != nil {
+	if err := validateInterceptEgressBindings(document, available, m.analyzeInterceptRouting(text).MatchTarget); err != nil {
 		unlock()
 		return nil, fmt.Errorf("%w: %v", errInterceptModuleConflict, err)
 	}
@@ -584,7 +604,7 @@ func (m *InterceptModuleManager) routingGateFor(document interceptConfigDocument
 	// string. An operator who renamed or deleted a bound group leaves a
 	// generation authorising a group that no longer exists, so this has to fail
 	// closed here rather than wait for the next publication to notice.
-	if err := validateInterceptEgressBindings(document, gate.analysis.AvailableEgressGroups); err != nil {
+	if err := validateInterceptEgressBindings(document, gate.analysis.AvailableEgressGroups, gate.analysis.MatchTarget); err != nil {
 		gate.reason = "egress-group-missing"
 		return gate
 	}
@@ -622,16 +642,34 @@ func interceptExecutionOrderIndex(order []string) map[string]int {
 	return indices
 }
 
-func validateInterceptEgressBindings(document interceptConfigDocument, available []string) error {
+// validateInterceptEgressBindings fails closed on a group no longer in the
+// operator's config.
+//
+// matchTarget is the group an extension without an explicit binding actually
+// gets: overlayEgressCapabilities compiles the terminal MATCH target into that
+// extension's capability, and its allowDirect with it. An empty EgressGroup was
+// therefore not "no binding to check", it was "the binding is the match target"
+// -- and skipping it made every unbound extension invisible to precisely the
+// check that exists so an operator who renames or repoints a group fails closed.
+func validateInterceptEgressBindings(document interceptConfigDocument, available []string, matchTarget string) error {
 	groups := make(map[string]struct{}, len(available))
 	for _, group := range available {
 		groups[group] = struct{}{}
 	}
 	for _, module := range document.Modules {
-		if module.EgressGroup == "" {
+		group := module.EgressGroup
+		if group == "" {
+			group = matchTarget
+		}
+		// A terminal MATCH can name a built-in rather than a proxy group, and
+		// those are never in the operator's proxy-groups list.
+		if group == "" || group == interceptDirectEgressGroup {
 			continue
 		}
-		if _, exists := groups[module.EgressGroup]; !exists {
+		if _, exists := groups[group]; !exists {
+			if module.EgressGroup == "" {
+				return fmt.Errorf("terminal egress target %q used by unbound extension %q does not exist", group, module.ID)
+			}
 			return fmt.Errorf("egress group %q selected by extension %q does not exist", module.EgressGroup, module.ID)
 		}
 	}
@@ -1276,7 +1314,7 @@ func (m *InterceptModuleManager) mutate(
 	if !analysis.Reconcileable {
 		return interceptModulesView{}, fmt.Errorf("%w: %s", errInterceptModuleConflict, analysis.Reason)
 	}
-	if err := validateInterceptEgressBindings(nextDocument, analysis.AvailableEgressGroups); err != nil {
+	if err := validateInterceptEgressBindings(nextDocument, analysis.AvailableEgressGroups, analysis.MatchTarget); err != nil {
 		return interceptModulesView{}, fmt.Errorf("%w: %v", errInterceptModuleConflict, err)
 	}
 	// One compensation for the whole publish, installed before the first step
@@ -1366,7 +1404,7 @@ func (m *InterceptModuleManager) validateEgressBindingsOnly(document interceptCo
 	if err != nil {
 		return fmt.Errorf("%w: %v", errInterceptModuleConflict, err)
 	}
-	if err := validateInterceptEgressBindings(document, available); err != nil {
+	if err := validateInterceptEgressBindings(document, available, m.analyzeInterceptRouting(text).MatchTarget); err != nil {
 		return fmt.Errorf("%w: %v", errInterceptModuleConflict, err)
 	}
 	return nil

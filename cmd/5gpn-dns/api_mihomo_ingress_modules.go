@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"regexp"
@@ -39,6 +40,10 @@ type mihomoIngressModuleView struct {
 type mihomoIngressModulesResponse struct {
 	Revision string                    `json:"revision"`
 	Modules  []mihomoIngressModuleView `json:"modules"`
+	// InterceptionReconcile carries a reconciliation failure that happened after
+	// the config was already written. The toggle succeeded; interception did not
+	// follow it, and that is not something an operator should have to infer.
+	InterceptionReconcile string `json:"interceptionReconcile,omitempty"`
 }
 
 type mihomoIngressModuleUpdate struct {
@@ -208,7 +213,20 @@ func (s *ControlServer) handleMihomoIngressModulePut(w http.ResponseWriter, r *h
 
 	status, resp, written := s.applyMihomoConfigLockedCAS(r.Context(), candidate, true, body.Revision)
 	if status == http.StatusOK {
-		writeJSON(w, status, ingressModulesResponse(candidate, s.mihomoInfra))
+		// This edits the operator's mihomo config, so interception has to be
+		// reconciled against it exactly as the raw PUT and reset paths do. It
+		// was not, so a toggle here bypassed the routing gate entirely and left
+		// the overlay generation compiled against the previous text -- including
+		// the terminal MATCH target every unbound extension's egress capability
+		// is built from.
+		out := ingressModulesResponse(candidate, s.mihomoInfra)
+		if s.interceptModules != nil {
+			if err := s.interceptModules.ReconcileMihomoText(candidate); err != nil {
+				log.Printf("intercept: reconciling after a mihomo ingress module toggle failed: %v", err)
+				out.InterceptionReconcile = err.Error()
+			}
+		}
+		writeJSON(w, status, out)
 		return
 	}
 	if !written {
