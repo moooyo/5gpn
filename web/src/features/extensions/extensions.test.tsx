@@ -326,8 +326,8 @@ describe('ExtensionsPage native extension contract', () => {
       ...CLEANER,
       settings: [{ key: 'airborne', type: 'boolean', label: 'Airborne helper', required: true, value: true }],
       actions: [
-        { id: 'transform-airborne', phase: 'request', match: { hosts: ['api.example.com'], schemes: ['https'], path_regex: '^/' }, enabled_when: 'airborne', script_digest: 'c'.repeat(64), body_mode: 'binary', timeout_ms: 1000, max_body_bytes: 1024 },
-        { id: 'clean-json', phase: 'response', match: { hosts: ['api.example.com'], schemes: ['https'], path_regex: '^/' }, script_digest: 'd'.repeat(64), body_mode: 'text', timeout_ms: 1000, max_body_bytes: 1024 },
+        { id: 'transform-airborne', phase: 'request', match: { hosts: ['api.example.com'], schemes: ['https'], path_regex: '^/' }, enabled_when: { key: 'airborne', equals: 'true' }, kind: 'script', script_digest: 'c'.repeat(64), body_mode: 'binary', timeout_ms: 1000, max_body_bytes: 1024 },
+        { id: 'clean-json', phase: 'response', match: { hosts: ['api.example.com'], schemes: ['https'], path_regex: '^/' }, kind: 'script', script_digest: 'd'.repeat(64), body_mode: 'text', timeout_ms: 1000, max_body_bytes: 1024 },
       ],
     }
     vi.mocked(api.getInterceptModules).mockResolvedValue({ ...cloneView(), modules: [gated] })

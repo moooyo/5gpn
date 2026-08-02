@@ -455,6 +455,8 @@ const en = {
     },
     captureCount: 'Capture · {{count}}',
     captureHosts: 'Capture hosts',
+    upstreamMappings: 'Upstream mappings',
+    executionPositionTitle: 'Execution position',
     actions: 'Actions',
     settings: 'Settings',
     settingsAction: 'Settings · {{count}}',

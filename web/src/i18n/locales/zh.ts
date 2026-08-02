@@ -432,6 +432,8 @@ const zh: typeof en = {
     },
     captureCount: '接管 · {{count}}',
     captureHosts: '接管域名',
+    upstreamMappings: '上游映射',
+    executionPositionTitle: '执行顺序',
     actions: '动作',
     settings: '设置',
     settingsAction: '设置 · {{count}}',
