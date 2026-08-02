@@ -1,4 +1,4 @@
-# Handoff — 5gpn monolith, 2026-08-02
+# Handoff — 5gpn monolith, 2026-08-03
 
 Working state, not documentation. `docs/architecture.md` is the normative
 description of the system; this file is what a next session needs in order to
@@ -11,13 +11,18 @@ Three worktrees, all clean, all committed, nothing pushed.
 
 | Worktree | Branch | Head |
 | --- | --- | --- |
-| `D:/Code/worktrees/mihomo-5gpn-monolith` | `feat/5gpn-monolith` | `215a9697` (25 commits) |
+| `D:/Code/worktrees/mihomo-5gpn-monolith` | `feat/5gpn-monolith` | `c813885a` (27 commits) |
 | `D:/Code/worktrees/zashboard-5gpn-console` | `feat/5gpn-console` | `02793c0` (4 commits) |
-| `D:/Code/worktrees/5gpn-installer-tui` | `feat/installer-tui` | `009cd98` (7 commits) |
+| `D:/Code/worktrees/5gpn-installer-tui` | `feat/installer-tui` | `c6e1a60` (13 commits) |
 
 **`v0.1.0-beta.1` is packaged and running on `test-env`** as a single
 `mihomo.service`. The three retired units are stopped and disabled. Rollback
 material is under `/root/5gpn-pre-monolith-*/`.
+
+**That beta predates everything below.** It was an upgrade of a provisioned
+host, so it preserved the operator's `config.yaml` and never rendered a seed —
+which is why a fresh install being broken did not show up in its 50 green
+acceptance checks. Repackage before trusting `test-env` to represent the tree.
 
 ## What is done
 
@@ -32,9 +37,10 @@ material is under `/root/5gpn-pre-monolith-*/`.
   bot.**
 - **M7** — `GpnDnsPage.vue` and `GpnExtensionsPage.vue`, capability-gated, four
   languages. **Missing: the bot config page** (there is no bot to configure).
-- **M8** — partially. The unit set is collapsed; state and config migration
-  scripts exist and are verified on a live host. **The `install.sh` body is
-  not done.** No TUI.
+- **M8** — the unit set is collapsed, the migration scripts are verified on a
+  live host, and **the `install.sh` body is done**: both retired binaries are
+  gone from it and the seed template renders against the monolith core. **No
+  TUI.**
 - **M9** — `scripts/package-beta.sh` produces the bundle;
   `scripts/upgrade-to-beta.sh` inside it moves a provisioned host across.
 
@@ -49,21 +55,23 @@ wsl -e bash -lc "cd /mnt/d/Code/worktrees/mihomo-5gpn-monolith \
   && CGO_ENABLED=1 go test -race ./gpn/... -count=1"
 ```
 
+Green. It was not green at `215a9697`: `Doc.Update` handed mutators memory that
+live readers held, and the resolver's subscription goroutine raced it.
 `gofmt -l` on the *working tree* reports false positives — the tree is CRLF and
 the index is LF. Check the committed content if it disagrees.
 
-**Installer suites** — 18 of 27. They need an LF copy under Linux:
+**Installer suites** — 26 of 26. `scripts/run-suites.sh` makes the LF copy and
+runs them under Linux:
 
 ```
-wsl -e bash -lc "rm -rf /tmp/5gpn-lf && mkdir -p /tmp/5gpn-lf \
-  && cd /mnt/d/Code/worktrees/5gpn-installer-tui \
-  && tar --exclude=./.git --exclude=dist -cf - . | (cd /tmp/5gpn-lf && tar xf -) \
-  && cd /tmp/5gpn-lf && grep -rIl $'\r' . | xargs -r sed -i 's/\r$//' \
-  && for t in tests/test_*.sh; do bash \$t >/dev/null 2>&1 \
-       && echo \"PASS \$t\" || echo \"FAIL \$t\"; done"
+wsl -e bash -lc "cd /mnt/d/Code/worktrees/5gpn-installer-tui && bash scripts/run-suites.sh"
 ```
 
-**On the gateway** — 50 checks, all green:
+Pass suite names for a subset (`run-suites.sh install_policy tui_policy`), and
+`SUITE_TAIL=N` for more failure context.
+
+**On the gateway** — 50 checks, green as of the beta, *not* re-run against the
+current tree:
 
 ```
 ssh test-env "bash /tmp/beta/5gpn-v0.1.0-beta.1/scripts/acceptance-monolith.sh"
@@ -77,61 +85,17 @@ mangles `for`/`if` blocks passed through `ssh`.
 
 ## Next, in order
 
-### 1. The `install.sh` body
+### 1. Repackage and re-run acceptance
 
-~15 call sites still invoke the two retired binaries as libraries. Each needs a
-decision, and for most of them the answer is that the calling logic goes rather
-than being replaced, because the machinery it served no longer exists:
+Nothing below should start before the current tree is on a host. The install
+path changed substantially and the last acceptance run does not cover it. A
+**fresh** install is the case to exercise, not another upgrade — that is the
+path that was broken, and it is now the one with no live evidence behind it.
 
-| Call | Line | Enclosing | Disposition |
-| --- | --- | --- | --- |
-| `--align-interception-credentials` | 3375 | `align_interception_credentials` | Delete. There is no second SOCKS hop to align credentials across. |
-| `--print-mihomo-fields` | 3457 | seed rendering | Delete. It rendered the `intercept-egress` credentials into the seed. |
-| `--check-enabled` | 5690 | `wait_service_ready` | Delete. It gated readiness on a conditioned second unit. |
-| `--healthcheck` | 5697 | `wait_service_ready` | Replace with `GET /gpn/interception` on the controller, or drop — the unit's own readiness is now the whole answer. |
-| `--check-enabled` | 5922 | `show_status` | Replace with `GET /gpn/interception` (`.snapshot.enabled`). |
-| `--seed-defaults` | 3298 | seeding | Delete. The datasets are embedded in the binary now. |
-| `--check-config` | 3021, 3066 | interception publication | Delete. The engine validates on load and refuses to publish an invalid document. |
-| `--check-config` | 3579 | `preflight_existing_interception_state` | Delete, or re-point at the staged mihomo binary if a preflight on an untouched host is still wanted. |
-| `--print-certificate-request` / `--print-certificate-hosts` | 3096, 3139 | certificate wait | Delete. Replaced by `<stateDir>/certificate-request`. |
-| `--print-mihomo-secret` | 3339 | `read_mihomo_secret` | Replace. It reads `secret:` out of the operator's YAML; the acceptance scripts already do this with `grep`/`sed`. |
-| `install_5gpndns`, `install_intercept` | 2971-2993 | — | Delete, with their call sites in `full_install` (6342-6343). |
-| `stage_artifacts` binary halves | 2593-2622 | `stage_artifacts` | Delete. Keep `checksums.txt` — the web tarball is verified from it. |
-| `SIDECAR_REPO/VERSION/SHA256` | 172-174 | — | Delete; only `stage_artifacts` uses them. |
-| `binary_reports_exact_version` | 2380-2391 | — | Dead once the above go. mihomo has its own. |
+### 2. The TUI
 
-Line numbers are from `009cd98` and will drift as soon as the first deletion
-lands; `grep -n 'DNS_BIN\|INTERCEPT_BIN' install.sh` is the reliable index.
-
-**Do not remove `RELEASE_TAG`.** It is the release selector, not a
-binary variable: it also versions the console SPA, drives the stable/beta
-channel delegation, and gates `upgrade-reset-mihomo`.
-
-The seed template `etc/mihomo/config.yaml.tmpl` still carries the
-`RUNTIME-OVERLAY` anchors, the `intercept-egress` listener, the
-`MODULE-INTERCEPT` node and the `runtime-overlay:` block. It needs those
-removed and a `dns:` section pointing `nameserver` at `127.0.0.1:5354` — the
-deployed v5 config already has that section, which is why the origin boundary
-wired up on `test-env` with the operator's file untouched.
-
-Then the TUI. Nothing of it exists.
-
-### 2. The nine red suites
-
-None can simply be deleted — every one but `test_pii_policy` is entangled with
-`install.sh`, so deleting it would drop real installer coverage:
-
-| Suite | install.sh refs | Disposition |
-| --- | --- | --- |
-| `test_pii_policy` | 0 | Delete. Pure `cmd/5gpn-dns` subject; covered by Go tests in the fork now. |
-| `test_seed_template_renderers` | 2 | Rewrite against the monolith template. |
-| `test_domain_validation` | 6 | Prune the `bot.go` assertions; keep the installer ones. |
-| `test_tgbot_installer_policy` | 6 | Prune; the bot's installer surface is gone until the bot is ported. |
-| `test_intercept_policy` | 16 | Prune the manifest-parser assertions — that subject moved to `gpn/engine/manifest_test.go`. |
-| `test_tui_policy` | 17 | Rewrite for the new TUI once it exists. |
-| `test_mihomo_policy` | 50 | Two assertions reference `cmd/5gpn-dns`; the rest are seed/installer and stay. |
-| `test_5gpndns_policy` | 92 | Prune heavily; most of it asserts the retired daemon. |
-| `test_install_policy` | 98 | Prune the journal-exporter, polkit and `5gpn-dns` assertions. |
+Nothing of it exists. `test_tui_policy` passes because it asserts the
+installer's own Gum usage, which is real; it says nothing about a TUI.
 
 ### 3. Marketplace and Telegram bot
 
@@ -140,20 +104,57 @@ them, which is what the acceptance suite exercises. The bot's own extension
 management surface is deliberately not being ported — the decision on record is
 that its UI moves into zashboard.
 
+Two pieces of coverage are parked on the bot landing, both recorded in the
+files themselves so they are not lost:
+
+- `test_domain_validation` dropped its `bot.go` regexp comparison. It existed
+  because two implementations of one FQDN rule drift silently, so it has to
+  return as a Go test beside the regexp — not as a grep across repositories.
+- `test_tgbot_installer_policy` keeps the `dns.env` half and asserts that the
+  `setup-tgbot` command stays gone until there is a helper behind it. The live
+  apply path needs its own coverage in the fork.
+
+### 4. `gpn/engine` has no tests for the request path
+
+`manage_test.go` and `manifest_test.go` cover the document and the parser. The
+proxy, the goja runtime and the TLS termination are untested and were
+inherited. This is the largest untested surface in the tree.
+
+### 5. UDP/QUIC capture is not wired
+
+`MatchUDP` returns false. The seed template's fixed
+`AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` is the guard that makes a capable
+client fall back to TCP, which is captured. Do not remove it ahead of the
+capture path; `test_mihomo_policy` asserts its position for that reason.
+
 ## Things that will bite
 
-- **`gpn/engine` has no tests for the request path.** `manage_test.go` and
-  `manifest_test.go` cover the document and the parser. The proxy, the goja
-  runtime and the TLS termination are untested here and were inherited.
-- **UDP/QUIC capture is not wired.** `MatchUDP` returns false; the fixed
-  `AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` capability is the guard.
 - **The certificate oneshot runs as root with an empty capability set.** It is
   therefore subject to ordinary permission checks. That is why the state
   directory is `0711` and the certificate request is `0644`. Do not "tighten"
   either without re-running the extension acceptance suite.
+- **`RELEASE_TAG` is a textual contract, not just a variable.** `release.yml`
+  rewrites the line with an anchored `sed`, and `quick-install.sh` reads it back
+  with `awk` and `sed` without ever sourcing the downloaded bundle: one
+  column-zero, double-quoted, uninterpolated assignment. Reformatting it breaks
+  bundle validation even when the shell semantics are identical.
+- **The panel allow rules exclude `IN-TYPE,INNER`, and that is load-bearing.**
+  The engine reaches every upstream by dialling back through mihomo's own
+  rules, which is what keeps intercepted traffic inside the operator's routing
+  — but it also means engine egress is what those two rules have to be told
+  apart from. It used to arrive on a named SOCKS listener. Deleting the
+  qualifier as vacuous lets a captured extension naming the console reach the
+  management plane; `migrate-to-monolith.sh` rewrites rather than strips it for
+  the same reason.
 - **`package-beta.sh` reports the fork budget as `unknown` under WSL**, because
-  the worktree's `.git` file points at a Windows path. The real number is two
-  files and eight lines against upstream `Alpha`; verify it from git bash.
+  the worktree's `.git` file points at a Windows path. The real number is 8
+  files, +106/-14 against upstream `Alpha`, or 6 files +60/-4 excluding
+  `go.mod`/`go.sum`. The previous handoff said "two files and eight lines";
+  that was wrong. Verify from git bash.
 - **The zashboard UI cannot be built from WSL** — its `node_modules` are
   Windows-native. Build with `npm run build` on Windows and pass
   `ZASHBOARD_DIST` to the packager.
+- **A red suite hides new breakage.** Three separate paths in `install.sh`
+  could only ever fail — `reload_rules`, `setup_tgbot`, and a `china_ip_list`
+  seed reference — and every one was invisible inside a suite that had been
+  failing for unrelated reasons. Keep them green.
