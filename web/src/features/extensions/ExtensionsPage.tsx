@@ -51,6 +51,7 @@ import type {
 } from '../../lib/api/types'
 import { cn } from '../../lib/cn'
 import { useMediaQuery } from '../../lib/useMediaQuery'
+import { useOptionalStatus } from '../../lib/StatusContext'
 import { useMITMTrustAcknowledgement } from '../../lib/mitmTrust'
 import { HostAuditView } from './HostAuditView'
 import { ExtensionInstallReview } from './ExtensionInstallReview'
@@ -1001,6 +1002,7 @@ export default function ExtensionsPage() {
   const location = useLocation()
   const navigate = useNavigate()
   const { acknowledged } = useMITMTrustAcknowledgement()
+  const intercept = useOptionalStatus()?.intercept
   const [view, setView] = useState<InterceptModulesView | null>(null)
   const [settings, setSettings] = useState<MITMSettingsView | null>(null)
   const [loading, setLoading] = useState(true)
@@ -1239,6 +1241,8 @@ export default function ExtensionsPage() {
           <SegmentedControl value={filter} onChange={(value) => setFilter(value as ExtensionFilter)} ariaLabel={t('extensions.filterLabel')} className="grid-cols-2 sm:grid-cols-4" options={([['all', t('extensions.filters.all')], ['enabled', t('extensions.filters.enabled')], ['capture', t('extensions.filters.capture')], ['local', t('extensions.filters.local')]] as Array<[ExtensionFilter, string]>).map(([value, label]) => ({ value, label }))} />
           <div className="relative min-w-0 sm:ml-auto sm:w-[300px] sm:flex-none"><SearchIcon className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-text-faint" aria-hidden="true" /><Input value={search} onChange={(event) => setSearch(event.target.value)} aria-label={t('extensions.search')} placeholder={t('extensions.searchPlaceholder')} className="pl-10" /></div>
         </div>
+        {intercept && intercept.routing_driver === false ? <p role="alert" data-testid="routing-driver-down" className="rounded-card bg-error-container px-3.5 py-3 text-body leading-5 text-on-error-container">{t('extensions.routingDriverDown')}</p> : null}
+        {intercept?.readiness_blocked ? <p role="alert" data-testid="readiness-blocked" className="rounded-card bg-error-container px-3.5 py-3 text-body leading-5 text-on-error-container">{t('extensions.readinessBlocked', { reason: intercept.readiness_blocked })}</p> : null}
         {!reorderModeAvailable && view.modules.length > 1 ? <p role="status" data-testid="extension-order-hint" className="px-1 text-meta leading-4 text-text-faint">{t('extensions.orderUnavailableHint')}</p> : null}
         {visibleModules.length > 0 ? <div className="space-y-3" aria-busy={busyID !== null}>{visibleModules.map((module) => <ExtensionCard key={module.id} module={module} busy={busyID !== null} trusted={acknowledged} egressGroups={view.available_egress_groups} reorderEnabled={reorderModeAvailable} total={view.modules.length} onMove={requestModuleMove} onToggle={(selected) => setPending({ kind: 'toggle', module: selected })} onDelete={(selected) => setPending({ kind: 'delete', module: selected })} onInspect={(selected) => void inspectModule(selected)} onConfigure={setConfigTarget} onAudit={(selected) => void navigate(`/extensions/hosts?plugin=${encodeURIComponent(selected.id)}`)} onCheckUpdate={(selected) => void checkExtensionUpdate(selected)} />)}</div> : <Card className="p-10 text-center shadow-none"><div className="text-body font-medium text-text-strong">{t('extensions.noMatches')}</div><div className="mt-1 text-label text-text-faint">{t('extensions.noMatchesHint')}</div></Card>}
         </> : null}

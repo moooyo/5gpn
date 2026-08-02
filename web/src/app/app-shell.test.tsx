@@ -16,7 +16,7 @@ vi.mock('../lib/api/client', () => ({
 
 const OK_STATUS: Status = { version: 'dev', uptime_seconds: 42, stats: {} as Status['stats'] }
 const OK_MIHOMO: MihomoHealth = { version: 'v1.19.0' }
-const OK_INTERCEPT: InterceptHealth = { running: false, expected: false, installed_plugins: 2, active_plugins: 0 }
+const OK_INTERCEPT: InterceptHealth = { running: false, expected: false, installed_plugins: 2, active_plugins: 0, routing_driver: true }
 
 beforeEach(async () => {
   await i18n.changeLanguage('zh')

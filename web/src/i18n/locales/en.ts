@@ -469,6 +469,8 @@ const en = {
     orderFailed: 'Failed to save extension execution order.',
     orderChanged: 'The extension order changed before confirmation. Refresh and review the new order.',
     orderUnavailableHint: 'To change execution order, switch to All and clear the search.',
+    routingDriverDown: 'Interception has no publication path. Every change below is refused, and captured hosts are not being steered. The gateway retries in the background; check the journal for the reason.',
+    readinessBlocked: 'Captured traffic is being rejected: {{reason}}. Extensions below may show as enabled while none of their hosts are served.',
     reorderConfirmTitle: 'Confirm execution order change · {{name}}',
     reorderConfirmBody: 'Execution order uses first-match precedence. This change affects action composition, the DNS resolver winner for overlapping capture hosts, overlapping egress selection, and global REJECT/DIRECT routing priority. Review the complete before and after order even when an extension declares no routing rules.',
     reorderConfirmAction: 'Confirm order change',

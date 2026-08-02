@@ -446,6 +446,8 @@ const zh: typeof en = {
     orderFailed: '无法保存插件执行顺序。',
     orderChanged: '确认前插件顺序已变化，请刷新并重新审查新顺序。',
     orderUnavailableHint: '若要调整执行顺序，请切换到“全部”并清空搜索。',
+    routingDriverDown: '拦截当前没有发布通道。下面的任何变更都会被拒绝，捕获主机也不会被导流。网关正在后台重试，具体原因见日志。',
+    readinessBlocked: '捕获流量正在被拒绝：{{reason}}。下面的扩展可能显示为已启用，但其主机全部未被服务。',
     reorderConfirmTitle: '确认调整执行顺序 · {{name}}',
     reorderConfirmBody: '执行顺序使用 first-match 优先级。本次调整会同时改变插件 actions 的组合顺序、重叠接管域名的 DNS 解析器赢家、重叠 egress 的选择优先级，以及全局 REJECT/DIRECT 路由规则的优先级；即使某个插件没有声明路由规则，也请审查完整的调整前后顺序。',
     reorderConfirmAction: '确认调整顺序',

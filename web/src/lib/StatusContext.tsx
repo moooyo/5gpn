@@ -225,7 +225,13 @@ export function StatusProvider({ children, intervalMs = 5000, requestTimeoutMs =
               interceptLoading: false,
             }
           }
+          // running === expected is not enough. A gateway can have its engine
+          // up and its extensions enabled while the overlay withholds the
+          // processor lease or has no driver at all, and in both of those the
+          // capture traffic this page exists to describe is being rejected.
           const healthy = result.value.running === result.value.expected
+            && result.value.routing_driver !== false
+            && !result.value.readiness_blocked
           return {
             ...prev,
             intercept: result.value,
@@ -256,6 +262,14 @@ export function StatusProvider({ children, intervalMs = 5000, requestTimeoutMs =
   const exposed = useMemo(() => ({ ...value, refreshNow }), [value, refreshNow])
 
   return <StatusContext.Provider value={exposed}>{children}</StatusContext.Provider>
+}
+
+// useOptionalStatus is useStatus for a component that must still render without
+// a provider. ExtensionsPage is one: it is mounted standalone in tests, and a
+// page that throws when the ambient poller is absent has been coupled to it for
+// the sake of one advisory banner.
+export function useOptionalStatus(): StatusValue | null {
+  return useContext(StatusContext) ?? null
 }
 
 export function useStatus(): StatusValue {

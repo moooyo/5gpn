@@ -24,7 +24,7 @@ const styleCount = () => document.querySelectorAll('style').length
 
 const OK_STATUS: Status = { version: 'dev', uptime_seconds: 42, stats: {} as Status['stats'] }
 const OK_MIHOMO: MihomoHealth = { version: 'v1.19.0' }
-const OK_INTERCEPT: InterceptHealth = { running: true, expected: true, installed_plugins: 3, active_plugins: 2, version: 'dev' }
+const OK_INTERCEPT: InterceptHealth = { running: true, expected: true, installed_plugins: 3, active_plugins: 2, routing_driver: true, version: 'dev' }
 
 function statusValue(overrides: Partial<StatusValue> = {}): StatusValue {
   return {
@@ -419,7 +419,7 @@ describe('StatusProvider / useStatus', () => {
       running: false,
       expected: false,
       installed_plugins: 3,
-      active_plugins: 0,
+      active_plugins: 0, routing_driver: true,
     })
 
     const first = render(
@@ -434,7 +434,7 @@ describe('StatusProvider / useStatus', () => {
       running: false,
       expected: true,
       installed_plugins: 3,
-      active_plugins: 2,
+      active_plugins: 2, routing_driver: true,
     })
     render(
       <StatusProvider intervalMs={100_000}>

@@ -154,3 +154,21 @@ func quoteOrNone(v string) string {
 	}
 	return `"` + v + `"`
 }
+
+// Reason reports why readiness is currently not being asserted, or "" when it
+// is.
+//
+// note() writes this to the journal and nowhere else, so every state it
+// describes -- a sidecar serving a bundle the live generation was not compiled
+// against, a sidecar with no bundle live at all, a registration the core keeps
+// refusing -- was invisible on every operator surface. Each of them REJECTs
+// 100% of captured traffic once the lease lapses, while the console shows an
+// enabled extension and a running engine.
+func (r *OverlayReadinessReporter) Reason() string {
+	if r == nil {
+		return ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastReason
+}

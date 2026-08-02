@@ -149,6 +149,13 @@ export interface InterceptHealth {
   installed_plugins: number
   active_plugins: number
   version?: string
+  // False when interception has no publication path at all: every change is
+  // refused and the DNS capture table has been withdrawn.
+  routing_driver: boolean
+  // Why the processor lease is being withheld. Non-empty means captured traffic
+  // is rejected once the lease lapses, however healthy the counts above look --
+  // the combination that used to present as a fully green gateway.
+  readiness_blocked?: string
 }
 
 // Short-lived, single-use credential for one same-origin plugin-engine log

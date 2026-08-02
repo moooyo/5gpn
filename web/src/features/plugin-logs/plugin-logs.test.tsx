@@ -119,7 +119,7 @@ function renderPage() {
 }
 
 const IDLE_STATUS: StatusValue = {
-  intercept: { running: false, expected: false, installed_plugins: 2, active_plugins: 0 },
+  intercept: { running: false, expected: false, installed_plugins: 2, active_plugins: 0, routing_driver: true },
   dnsState: 'healthy', mihomoState: 'healthy', interceptState: 'healthy',
   dnsOk: true, mihomoOk: true, interceptOk: true, loading: false, interceptLoading: false,
 }

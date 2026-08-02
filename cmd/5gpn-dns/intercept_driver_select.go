@@ -88,7 +88,12 @@ func selectInterceptRoutingDriver(
 	// arrives. Nothing else renews it, so this heartbeat is what makes the
 	// overlay serve traffic at all rather than an optional refinement.
 	client := NewOverlayClient(socket)
-	go NewOverlayReadinessReporter(client, sidecar).Run(context.Background())
+	reporter := NewOverlayReadinessReporter(client, sidecar)
+	// The control plane reports what this reporter decides. Without it, every
+	// state that withholds the lease -- and so REJECTs all captured traffic --
+	// was visible only in the journal.
+	manager.SetReadinessReporter(reporter)
+	go reporter.Run(context.Background())
 	return nil
 }
 

@@ -67,7 +67,8 @@ type InterceptModuleManager struct {
 	// and the typed generation are two halves of one arrangement, and a gateway
 	// that changed its mind mid-run would leave the file describing one policy
 	// and the core enforcing another.
-	overlay *OverlayDriver
+	overlay   *OverlayDriver
+	readiness *OverlayReadinessReporter
 }
 
 type interceptConfigTester interface {
@@ -295,6 +296,29 @@ func (m *InterceptModuleManager) SetOverlayDriver(driver *OverlayDriver) {
 	m.mu.Lock()
 	m.overlay = driver
 	m.mu.Unlock()
+}
+
+// SetReadinessReporter gives the control plane something to report.
+//
+// The reporter's only output was the journal, so a gateway REJECTing every
+// captured connection for a bundle/generation mismatch looked identical on
+// every API and every page to one that was working.
+func (m *InterceptModuleManager) SetReadinessReporter(reporter *OverlayReadinessReporter) {
+	m.mu.Lock()
+	m.readiness = reporter
+	m.mu.Unlock()
+}
+
+// RoutingStatus reports whether interception can publish at all, and why it is
+// not currently serving traffic if it is not.
+func (m *InterceptModuleManager) RoutingStatus() (driverReady bool, readinessBlocked string) {
+	if m == nil {
+		return false, ""
+	}
+	m.mu.Lock()
+	driver, reporter := m.overlay, m.readiness
+	m.mu.Unlock()
+	return driver != nil, reporter.Reason()
 }
 
 // analyzeInterceptRouting reads the anchored document. Under the overlay a
