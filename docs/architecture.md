@@ -284,9 +284,6 @@ This document describes the target the work is converging on. These parts are
 designed and not yet implemented; do not read their presence above as a claim
 that they ship today.
 
-- `install.sh` still stages and publishes the two retired binaries, and still
-  seeds the four retired DNS state files. The unit set is already collapsed to
-  one service plus two root oneshots. The TUI is not started.
 - The marketplace surface does not exist. Extensions install from a manifest URL
   or a pasted manifest, which is the whole of the install path today.
 - The Telegram bot is not ported. Its management UI is designed to live in
