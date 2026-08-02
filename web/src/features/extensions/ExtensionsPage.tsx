@@ -674,7 +674,7 @@ function ExtensionSettingsModal({
               // whether an action is loaded at all. That is a bigger consequence
               // than a preference, and the operator has to be able to see it
               // before flipping it -- in persistent text, not on hover.
-              const gated = (module.actions ?? []).filter((action) => action.enabled_when === setting.key)
+              const gated = (module.actions ?? []).filter((action) => action.enabled_when?.key === setting.key)
               return (
                 <DialogSection key={setting.key} className="flex items-start justify-between gap-4">
                   <div>
@@ -806,6 +806,26 @@ function EnableExtensionModal({
     >
       {module ? <div className="space-y-4">
         <p className="text-body leading-6 text-text-soft">{t('extensions.enableBody')}</p>
+        {/* The body copy says "these capture hosts" and there was no list under
+            it. The hosts are the whole traffic-acquisition permission, and the
+            upstream mappings say where a captured name is actually dialled, so a
+            confirmation that names neither is not the complete-snapshot review
+            the contract promises. */}
+        <DialogSection label={t('extensions.captureHosts')} data-testid="enable-capture-hosts">
+          <div className="flex flex-wrap gap-1.5">
+            {module.capture_hosts.map((host) => <code key={host} className="rounded-chip bg-surface-container-low px-2 py-1 font-mono text-meta text-text-mid">{host}</code>)}
+          </div>
+        </DialogSection>
+        {(module.upstream_mappings?.length ?? 0) > 0 ? <DialogSection label={t('extensions.upstreamMappings')} data-testid="enable-upstream-mappings">
+          <div className="space-y-1">
+            {module.upstream_mappings!.map((mapping) => (
+              <code key={`${mapping.host}->${mapping.target}`} className="block font-mono text-meta text-text-mid">{mapping.host} → {mapping.target}</code>
+            ))}
+          </div>
+        </DialogSection> : null}
+        <DialogSection label={t('extensions.executionPositionTitle')} data-testid="enable-execution-order">
+          <p className="text-label text-text-soft">{t('extensions.executionOrder', { order: module.execution_order })}</p>
+        </DialogSection>
         {/* The two warning blocks keep their fill: "this can send everything it
             sees anywhere it resolves" and "this rewrites global routing" are the
             two facts this confirmation exists for. The neutral facts around

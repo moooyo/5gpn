@@ -264,13 +264,29 @@ export interface InterceptActionMatch {
   path_regex: string
   status_codes?: number[]
 }
+export interface InterceptActionGate {
+  key: string
+  equals: string
+}
 export interface InterceptModuleAction {
   id: string
   phase: 'request' | 'response'
+  // Which of the seven forms the action takes, derived server-side from the
+  // same discriminant the executor dispatches on.
+  kind: 'reject' | 'mock' | 'headers' | 'rewrite' | 'replaceBody' | 'jq' | 'script'
   match: InterceptActionMatch
-  // Names a required boolean setting. The action is not compiled at all while
-  // that setting is false, so it never runs.
-  enabled_when?: string
+  // Names a required boolean or select setting and the value that opens the
+  // gate. The action is not compiled at all while the comparison fails, so it
+  // never runs. This mirrors Go's *interceptActionGate: it was declared here as
+  // a bare string, which typechecked against an object comparison and silently
+  // made every gate lookup fail.
+  enabled_when?: InterceptActionGate
+  reject?: boolean
+  mock?: { status?: number; headers?: Record<string, string>; body?: string; base64_body?: string }
+  headers?: { set?: Record<string, string>; remove?: string[] }
+  rewrite?: { pattern?: string; to: string; status?: number }
+  replace_body?: { pattern: string; to: string; value_map?: Record<string, Record<string, string>> }
+  jq_program?: string
   script_url?: string
   script_digest: string
   body_mode: 'none' | 'text' | 'binary'

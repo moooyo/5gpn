@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -967,6 +968,8 @@ func botExtensionActionsHTML(actions []interceptModuleActionView) string {
 		text.WriteString(html.EscapeString(action.ID))
 		text.WriteString("</b> · phase=<code>")
 		text.WriteString(html.EscapeString(action.Phase))
+		text.WriteString("</code> · kind=<code>")
+		text.WriteString(html.EscapeString(action.Kind))
 		text.WriteString("</code> · body=<code>")
 		text.WriteString(html.EscapeString(action.BodyMode))
 		text.WriteString("</code>")
@@ -1010,8 +1013,111 @@ func botExtensionActionsHTML(actions []interceptModuleActionView) string {
 		text.WriteString("ms</code> · max body=<code>")
 		text.WriteString(strconv.FormatInt(action.MaxBodyBytes, 10))
 		text.WriteString("</code>")
+		text.WriteString(botExtensionActionKindHTML(action))
 	}
 	return text.String()
+}
+
+// botExtensionActionKindHTML states what a declarative action actually does.
+//
+// Naming the kind is not enough for the two that move data: a rewrite names the
+// destination a captured request is sent to, and a mock names the bytes the
+// client is answered with instead of the origin's. Both are decisions the single
+// enable confirmation is supposed to authorize, and neither was shown at all.
+func botExtensionActionKindHTML(action interceptModuleActionView) string {
+	var text strings.Builder
+	switch {
+	case action.Reject:
+		text.WriteString("\n  <b>reject</b>：中止该交换")
+	case action.Mock != nil:
+		text.WriteString("\n  <b>mock</b>：以本地合成响应作答，不回源")
+		if action.Mock.Status != 0 {
+			text.WriteString(" · status=<code>")
+			text.WriteString(strconv.Itoa(action.Mock.Status))
+			text.WriteString("</code>")
+		}
+		if names := sortedMapKeys(action.Mock.Headers); len(names) > 0 {
+			text.WriteString(" · headers=<code>")
+			text.WriteString(html.EscapeString(strings.Join(names, ", ")))
+			text.WriteString("</code>")
+		}
+		if size := len(action.Mock.Body) + len(action.Mock.Base64Body); size > 0 {
+			text.WriteString(" · body=<code>")
+			text.WriteString(strconv.Itoa(size))
+			text.WriteString(" 字节</code>")
+		}
+	case action.Headers != nil:
+		if names := sortedMapKeys(action.Headers.Set); len(names) > 0 {
+			text.WriteString("\n  <b>headers.set</b>=<code>")
+			text.WriteString(html.EscapeString(strings.Join(names, ", ")))
+			text.WriteString("</code>")
+		}
+		if len(action.Headers.Remove) > 0 {
+			removed := append([]string(nil), action.Headers.Remove...)
+			sort.Strings(removed)
+			text.WriteString("\n  <b>headers.remove</b>=<code>")
+			text.WriteString(html.EscapeString(strings.Join(removed, ", ")))
+			text.WriteString("</code>")
+		}
+	case action.Rewrite != nil:
+		text.WriteString("\n  <b>rewrite</b>：改写请求 URL")
+		if action.Rewrite.Pattern != "" {
+			text.WriteString("\n  pattern=<code>")
+			text.WriteString(html.EscapeString(action.Rewrite.Pattern))
+			text.WriteString("</code>")
+		}
+		text.WriteString("\n  <b>to</b>=<code>")
+		text.WriteString(html.EscapeString(action.Rewrite.To))
+		text.WriteString("</code>")
+		if action.Rewrite.Status != 0 {
+			text.WriteString(" · status=<code>")
+			text.WriteString(strconv.Itoa(action.Rewrite.Status))
+			text.WriteString("</code>")
+		}
+	case action.ReplaceBody != nil:
+		text.WriteString("\n  <b>replaceBody</b> pattern=<code>")
+		text.WriteString(html.EscapeString(action.ReplaceBody.Pattern))
+		text.WriteString("</code>\n  to=<code>")
+		text.WriteString(html.EscapeString(action.ReplaceBody.To))
+		text.WriteString("</code>")
+		if keys := sortedMapKeys2(action.ReplaceBody.ValueMap); len(keys) > 0 {
+			text.WriteString(" · value_map=<code>")
+			text.WriteString(html.EscapeString(strings.Join(keys, ", ")))
+			text.WriteString("</code>")
+		}
+	}
+	if action.EnabledWhen != nil {
+		text.WriteString("\n  仅当设置 <code>")
+		text.WriteString(html.EscapeString(action.EnabledWhen.Key))
+		text.WriteString("</code>=<code>")
+		text.WriteString(html.EscapeString(action.EnabledWhen.Equals))
+		text.WriteString("</code> 时生效")
+	}
+	return text.String()
+}
+
+func sortedMapKeys(values map[string]string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedMapKeys2(values map[string]map[string]string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func botExtensionSettingsSchemaHTML(settings []interceptModuleSetting) string {

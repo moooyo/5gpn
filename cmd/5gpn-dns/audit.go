@@ -55,9 +55,11 @@ func (r *statusRecorder) resultStatus() int {
 //
 // It is wired OUTSIDE authMiddleware (see NewControlServer) so a rejected
 // (401) mutation attempt is still recorded — an unauthenticated attempt to
-// mutate state is itself a security-relevant signal — while staying INSIDE
-// rateLimitMiddleware so a request dropped for being rate-limited (which
-// never reaches here) doesn't also get an audit line.
+// mutate state is itself a security-relevant signal. It is also outside
+// rateLimitMiddleware, which is the same wrapping order, so a rate-limited
+// request is audited too. That is deliberate but it means every field on this
+// line comes from an unauthenticated, unthrottled caller: see auditPath for why
+// the path is re-encoded and allowlisted rather than logged as parsed.
 //
 // A logging failure must never break the request: log.Printf on a plain
 // stderr writer doesn't return an error the caller can act on, and this
@@ -73,7 +75,7 @@ func (s *ControlServer) auditMiddleware(next http.Handler) http.Handler {
 		rec := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(rec, r)
 
-		log.Printf("audit method=%s path=%s src=%s status=%d", r.Method, r.URL.Path, auditSource(r), rec.resultStatus())
+		log.Printf("audit method=%s path=%s src=%s status=%d", auditBotToken(r.Method), auditPath(r.URL.EscapedPath()), auditSource(r), rec.resultStatus())
 	})
 }
 
@@ -121,6 +123,35 @@ func auditBot(op string, adminID int64, result string) {
 // work that actually succeeded.
 func auditBotOutcome(op string, adminID int64, ok bool) {
 	auditBot(op, adminID, auditResult(ok))
+}
+
+// auditPath renders a request path for the audit line.
+//
+// r.URL.Path is percent-DECODED, so a request for `/api/x%0Aaudit method=GET
+// path=/api/anything` wrote a second, entirely attacker-authored line into
+// journald. The middleware sits outside both authMiddleware and
+// rateLimitMiddleware -- deliberately, so refused requests are still audited --
+// which means any unauthenticated caller could forge and flood the log the
+// operator reads to reconstruct what happened.
+//
+// EscapedPath keeps the encoded form, so a newline stays the three characters
+// %0A. The allowlist then covers the rest of the control-character space, and
+// the bound stops one long URL from crowding out the surrounding lines.
+func auditPath(value string) string {
+	value = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case strings.ContainsRune("._:-/%~", r):
+			return r
+		default:
+			return '_'
+		}
+	}, value)
+	if value == "" {
+		return "unknown"
+	}
+	return truncateRunes(value, 96)
 }
 
 func auditBotToken(value string) string {

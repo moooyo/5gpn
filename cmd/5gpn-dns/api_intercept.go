@@ -247,11 +247,16 @@ func (s *InterceptConfigStore) invalidateHealthCache() {
 // indistinguishable from a miss except in cost. Only successes are cached: a
 // failure is cheap and caching it would mean a repaired file kept reporting the
 // error the previous bytes had.
+//
+// Both paths return a clone. The cached value is reachable only from here, so
+// "indistinguishable from a miss" holds for mutation as well as for cost: a
+// caller cannot reach the memo through the document it was handed, and does not
+// have to know a memo exists. See cloneInterceptDocument.
 func (s *InterceptConfigStore) decodeCached(body []byte) (interceptConfigDocument, error) {
 	key := sha256.Sum256(body)
 	s.documentMu.Lock()
 	if s.documentValid && s.documentKey == key {
-		document := s.documentValue
+		document := cloneInterceptDocument(s.documentValue)
 		s.documentMu.Unlock()
 		return document, nil
 	}
@@ -263,7 +268,7 @@ func (s *InterceptConfigStore) decodeCached(body []byte) (interceptConfigDocumen
 	}
 	s.documentMu.Lock()
 	s.documentKey = key
-	s.documentValue = document
+	s.documentValue = cloneInterceptDocument(document)
 	s.documentValid = true
 	s.documentMu.Unlock()
 	return document, nil

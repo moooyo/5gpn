@@ -196,3 +196,54 @@ func TestSettingsOnlyChangeWithoutTheOverlayOnlyWritesTheDocument(t *testing.T) 
 		t.Fatalf("a settings-only change reloaded mihomo %d time(s)", controller.putCalls)
 	}
 }
+
+// The unit's ExecCondition exits 3 unless the MITM master is on and some enabled
+// extension declares a capture host, so for a candidate that leaves nothing
+// active there is no process to hand a bundle to. mutate waited for one anyway:
+// it blocked for the whole start-up budget, failed the transaction, and then
+// rolled its own document write back through the compensation defer.
+//
+// That made the states an operator reaches first unreachable. On a fresh install
+// the master is off, so enabling the first extension took this path; so did
+// turning the master off, and reordering with nothing enabled. Each cost the
+// full wait with m.mu, m.store.mu and m.mihomo held, which stalls every reader
+// too.
+//
+// The fixture's socket never appears, so a wait of any length is a failure and
+// the assertion does not depend on timing.
+func TestMasterOffMutationDoesNotWaitForASidecarSystemdWillNotStart(t *testing.T) {
+	module := testModuleSnapshot()
+	manager, _, _, interceptPath, _ := newInterceptManagerFixture(t, module)
+	manager.certWait = func(context.Context, string) error { return nil }
+
+	missing := filepath.Join(t.TempDir(), "gone", "control.sock")
+	manager.SetSidecarClient(NewSidecarClient(missing))
+	// Long enough that waiting is unmistakable in the elapsed time, short enough
+	// that a regression does not hang the suite.
+	manager.sidecarStart = 2 * time.Second
+
+	view, err := manager.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if _, err := manager.mutate(context.Background(), view.Revision,
+		func(document *interceptConfigDocument) (interceptMutationEffects, error) {
+			// Turn the master off: nothing stays active, so nothing can serve a bundle.
+			document.MITM.Enabled = false
+			return interceptMutationEffects{routingChanged: true}, nil
+		}); err != nil {
+		t.Fatalf("turning the master off = %v; the sidecar cannot run in the state this produces, so its absence is not a failure", err)
+	}
+	if waited := time.Since(started); waited >= manager.sidecarStart {
+		t.Fatalf("the transaction waited %s for a sidecar that cannot start", waited)
+	}
+
+	written, err := os.ReadFile(interceptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(written), `"enabled": false`) && !strings.Contains(string(written), `"enabled":false`) {
+		t.Fatalf("the master-off document was rolled back by the compensation defer: %s", written)
+	}
+}

@@ -1572,3 +1572,141 @@ func TestRequiredEgressBindingCannotBeCleared(t *testing.T) {
 		t.Fatalf("an optional binding could not be cleared: %v", err)
 	}
 }
+
+// Read memoises the decoded document by content digest, so a caller that edits
+// what it was handed edits the memo -- and the file bytes are unchanged, so
+// every later Read returns the edit. Delete spliced Modules and ApplyUpdate
+// assigned into it, both before the write that could fail, which turned an
+// aborted transaction into a permanently wrong in-memory document: a duplicate
+// id that made every later mutation fail validation, or a version the console
+// reported as installed while the disk said otherwise.
+func TestInterceptStoreReadCannotBeAliasedIntoTheMemo(t *testing.T) {
+	first := testModuleSnapshot()
+	first.ID = "io.example.one"
+	second := testModuleSnapshot()
+	second.ID = "io.example.two"
+	_, body := testInterceptDocument(t, first, second)
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewInterceptConfigStore(path)
+
+	// Prime the memo, then perform exactly the splice Delete performs.
+	document, _, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Modules = append(document.Modules[:0], document.Modules[1:]...)
+	document.ExecutionOrder = removeInterceptModuleID(document.ExecutionOrder, "io.example.one")
+
+	after, _, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Modules) != 2 {
+		t.Fatalf("a discarded splice changed the stored document: got %d modules, want 2", len(after.Modules))
+	}
+	if after.Modules[0].ID != "io.example.one" || after.Modules[1].ID != "io.example.two" {
+		t.Fatalf("a discarded splice reordered the stored document: %s, %s", after.Modules[0].ID, after.Modules[1].ID)
+	}
+	if len(after.ExecutionOrder) != 2 {
+		t.Fatalf("a discarded splice changed the execution order: %v", after.ExecutionOrder)
+	}
+
+	// And the assignment ApplyUpdate performs, including the nested state a
+	// shallow module copy would still share.
+	document, _, err = store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Modules[0].Version = "9.9.9"
+	document.Modules[0].CaptureHosts[0] = "attacker.example.com"
+	document.Modules[0].Scripts[0].Match.Hosts[0] = "attacker.example.com"
+	document.Modules[0].Scripts[0].ScriptBody = "function transform() { return null }"
+
+	after, _, err = store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Modules[0].Version != "1.0.0" {
+		t.Fatalf("a discarded edit changed the stored version: %s", after.Modules[0].Version)
+	}
+	if after.Modules[0].CaptureHosts[0] != "api.example.com" {
+		t.Fatalf("a discarded edit changed a stored capture host: %s", after.Modules[0].CaptureHosts[0])
+	}
+	if after.Modules[0].Scripts[0].Match.Hosts[0] != "api.example.com" {
+		t.Fatalf("a discarded edit changed a stored action matcher: %s", after.Modules[0].Scripts[0].Match.Hosts[0])
+	}
+	if strings.Contains(after.Modules[0].Scripts[0].ScriptBody, "return null") {
+		t.Fatalf("a discarded edit changed a stored script body")
+	}
+}
+
+// The single enable confirmation is supposed to state the complete impact of a
+// snapshot. It could not: interceptModuleActionView declared reject, mock,
+// headers, rewrite and replace_body, all omitempty, and this -- the only
+// constructor in the repository -- never set any of them. So an extension whose
+// rewrite action forwards a captured request, with whatever Cookie and
+// Authorization it carries, to an origin the manifest never names was reviewable
+// only as "an action with a path regex".
+func TestActionViewCarriesTheDeclarativeKindsAReviewMustState(t *testing.T) {
+	actions := []interceptScriptRule{
+		{ID: "a-reject", Phase: interceptPhaseRequest, Reject: true},
+		{ID: "a-mock", Phase: interceptPhaseRequest, Mock: &interceptMockResponse{
+			Status: 204, Headers: map[string]string{"X-Mock": "1"}, Body: "hello",
+		}},
+		{ID: "a-headers", Phase: interceptPhaseResponse, Headers: &interceptHeaderEdits{
+			Set: map[string]string{"X-Set": "1"}, Remove: []string{"X-Gone"},
+		}},
+		{ID: "a-rewrite", Phase: interceptPhaseRequest, Rewrite: &interceptURLRewrite{
+			Pattern: "^https://api.example.com/(.*)$", To: "https://exfil.example.net/$1", Status: 302,
+		}},
+		{ID: "a-replace", Phase: interceptPhaseResponse, ReplaceBody: &interceptBodyReplace{
+			Pattern: `"a":"[^"]*"`, To: `"a":"{{settings.k}}"`,
+			ValueMap: map[string]map[string]string{"k": {"x": "y"}},
+		}},
+		{ID: "a-jq", Phase: interceptPhaseResponse, JQProgram: ".items |= map(select(.ad | not))"},
+		{ID: "a-script", Phase: interceptPhaseResponse, ScriptDigest: "abc"},
+	}
+	views := interceptModuleActionViews(actions)
+	if len(views) != len(actions) {
+		t.Fatalf("views = %d, want %d", len(views), len(actions))
+	}
+
+	wantKinds := []string{"reject", "mock", "headers", "rewrite", "replaceBody", "jq", "script"}
+	for index, want := range wantKinds {
+		if views[index].Kind != want {
+			t.Errorf("action %s kind = %q, want %q", views[index].ID, views[index].Kind, want)
+		}
+	}
+
+	// The destination of a cross-origin rewrite must survive to the wire, since
+	// that is the fact the review exists to disclose.
+	body, err := json.Marshal(views)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, needle := range []string{
+		`"kind":"rewrite"`, "exfil.example.net", `"kind":"mock"`, "X-Mock",
+		`"kind":"headers"`, "X-Gone", `"kind":"replaceBody"`, `"kind":"reject"`,
+	} {
+		if !strings.Contains(string(body), needle) {
+			t.Errorf("the review projection dropped %q: %s", needle, body)
+		}
+	}
+
+	// And the rendered Telegram review has to show it, not merely carry it.
+	rendered := botExtensionActionsHTML(views)
+	for _, needle := range []string{"exfil.example.net", "kind=<code>rewrite", "kind=<code>mock", "X-Gone"} {
+		if !strings.Contains(rendered, needle) {
+			t.Errorf("the Telegram review never rendered %q", needle)
+		}
+	}
+
+	// A view must not alias the snapshot it was built from.
+	views[1].Mock.Headers["X-Mock"] = "tampered"
+	if actions[1].Mock.Headers["X-Mock"] != "1" {
+		t.Error("the view aliased the stored mock headers")
+	}
+}

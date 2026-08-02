@@ -158,8 +158,12 @@ type interceptModuleSetting struct {
 // interceptModuleActionView exposes immutable action metadata for operator
 // review without returning the potentially large stored script body.
 type interceptModuleActionView struct {
-	ID    string               `json:"id"`
-	Phase string               `json:"phase"`
+	ID    string `json:"id"`
+	Phase string `json:"phase"`
+	// Kind names which of the seven forms this action takes. It is derived
+	// rather than stored, so a reviewer sees the same discriminant the executor
+	// dispatches on instead of inferring it from which fields happen to be set.
+	Kind  string               `json:"kind"`
 	Match interceptActionMatch `json:"match"`
 	// EnabledWhen lets the console say which setting value switched an action
 	// off, rather than leaving an operator to wonder why a declared action does
@@ -1447,8 +1451,22 @@ func (b *interceptBodyReplace) validate() error {
 	if b.Pattern == "" || len(b.Pattern) > maxInterceptReplacePattern {
 		return fmt.Errorf("body replace pattern must contain 1 to %d bytes", maxInterceptReplacePattern)
 	}
-	if _, err := regexp.Compile(b.Pattern); err != nil {
+	// Bounded like a rewrite target, which it was not: the sibling field has
+	// carried this limit all along and the omission here was an oversight, not a
+	// distinction.
+	if len(b.To) > maxInterceptRewriteTarget {
+		return fmt.Errorf("body replace target exceeds %d bytes", maxInterceptRewriteTarget)
+	}
+	compiled, err := regexp.Compile(b.Pattern)
+	if err != nil {
 		return fmt.Errorf("body replace pattern is invalid: %w", err)
+	}
+	// A pattern matching the empty string substitutes at every byte offset, so
+	// the sidecar would multiply a whole body by the length of `to` with no
+	// deadline to stop it -- a declarative action is dispatched before any VM
+	// exists. Refusing it at import keeps that snapshot from ever being stored.
+	if compiled.MatchString("") {
+		return errors.New("body replace pattern must not match the empty string")
 	}
 	// The outer keys name settings and the inner ones name that setting's values.
 	// Both are publisher-controlled and both become JSON object keys in the

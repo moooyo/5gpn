@@ -876,6 +876,14 @@ func (m *InterceptModuleManager) previewSnapshot(
 // the native extension parser. Marketplace installation uses this path so the
 // manifest and scripts are fetched exactly once before catalog integrity checks
 // and the normal module revision CAS.
+//
+// It goes through mutate for the same reason every other document change does:
+// the bundle the sidecar serves is the whole document, so adding even a disabled
+// extension changes the bundle id. Writing the file and stopping left the
+// sidecar on the previous bundle, and the next caller to compile a generation
+// from the document on disk -- ReconcileMihomoText, on any raw mihomo config
+// write -- named a bundle the sidecar had never adopted, which withholds the
+// readiness lease and REJECTs every captured connection.
 func (m *InterceptModuleManager) importSnapshot(ctx context.Context, revision string, module interceptModuleSnapshot) (interceptModulesView, error) {
 	if m == nil || m.store == nil {
 		return interceptModulesView{}, errInterceptModulesUnavailable
@@ -886,39 +894,18 @@ func (m *InterceptModuleManager) importSnapshot(ctx context.Context, revision st
 	if err := validateInterceptModule(module); err != nil {
 		return interceptModulesView{}, err
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.store.mu.Lock()
-	defer m.store.mu.Unlock()
-	document, oldBody, err := m.store.Read()
-	if err != nil {
-		return interceptModulesView{}, err
-	}
-	if interceptRevision(oldBody) != revision {
-		return interceptModulesView{}, errInterceptRevisionConflict
-	}
-	for _, existing := range document.Modules {
-		if existing.ID == module.ID {
-			return interceptModulesView{}, fmt.Errorf("%w: extension id %q is already installed", errInterceptModuleConflict, module.ID)
+	return m.mutate(ctx, revision, func(document *interceptConfigDocument) (interceptMutationEffects, error) {
+		for _, existing := range document.Modules {
+			if existing.ID == module.ID {
+				return interceptMutationEffects{}, fmt.Errorf("%w: extension id %q is already installed", errInterceptModuleConflict, module.ID)
+			}
 		}
-	}
-	document.Modules = append(document.Modules, module)
-	document.ExecutionOrder = append(document.ExecutionOrder, module.ID)
-	newBody, err := marshalInterceptDocument(document)
-	if err != nil {
-		return interceptModulesView{}, err
-	}
-	if err := m.validateSidecarCandidate(ctx, newBody); err != nil {
-		return interceptModulesView{}, err
-	}
-	if err := m.store.writeAtomicContext(ctx, newBody); err != nil {
-		return interceptModulesView{}, err
-	}
-	// viewLocked takes the store mutex, so release it before composing the view.
-	m.store.mu.Unlock()
-	view, viewErr := m.viewLocked()
-	m.store.mu.Lock()
-	return view, viewErr
+		document.Modules = append(document.Modules, module)
+		document.ExecutionOrder = append(document.ExecutionOrder, module.ID)
+		// An import always lands disabled, so it publishes no capture host and no
+		// routing rule of its own.
+		return interceptMutationEffects{}, nil
+	})
 }
 
 func (m *InterceptModuleManager) CheckUpdate(ctx context.Context, id, revision string) (interceptModuleUpdateCheckView, error) {
@@ -988,12 +975,14 @@ func (m *InterceptModuleManager) CheckUpdate(ctx context.Context, id, revision s
 	candidate.Settings = mergeInterceptSettingValues(current.Settings, candidate.Settings)
 	candidate.EgressGroup = current.EgressGroup
 	candidate.CaptureDNS = current.CaptureDNS
-	candidateDocument := latest
-	candidateDocument.Modules = append([]interceptModuleSnapshot(nil), latest.Modules...)
+	// Read hands back a document this call owns outright, so the candidate is
+	// built by editing it. The execution position is read first because the edit
+	// is what the marshalled body is taken from.
+	executionOrder := interceptExecutionOrderIndex(latest.ExecutionOrder)[id]
 	found = false
-	for index := range candidateDocument.Modules {
-		if candidateDocument.Modules[index].ID == id {
-			candidateDocument.Modules[index] = candidate
+	for index := range latest.Modules {
+		if latest.Modules[index].ID == id {
+			latest.Modules[index] = candidate
 			found = true
 			break
 		}
@@ -1002,7 +991,7 @@ func (m *InterceptModuleManager) CheckUpdate(ctx context.Context, id, revision s
 		m.store.mu.Unlock()
 		return interceptModuleUpdateCheckView{}, errInterceptModuleNotFound
 	}
-	candidateBody, err := marshalInterceptDocument(candidateDocument)
+	candidateBody, err := marshalInterceptDocument(latest)
 	m.store.mu.Unlock()
 	if err != nil {
 		return interceptModuleUpdateCheckView{}, err
@@ -1011,7 +1000,7 @@ func (m *InterceptModuleManager) CheckUpdate(ctx context.Context, id, revision s
 		return interceptModuleUpdateCheckView{}, err
 	}
 	view := interceptCandidateView(candidate)
-	view.ExecutionOrder = interceptExecutionOrderIndex(latest.ExecutionOrder)[id]
+	view.ExecutionOrder = executionOrder
 	return interceptModuleUpdateCheckView{Revision: revision, State: "available", Candidate: &view}, nil
 }
 
@@ -1062,44 +1051,34 @@ func (m *InterceptModuleManager) ApplyUpdate(ctx context.Context, id, revision, 
 		return interceptModulesView{}, errInterceptRevisionConflict
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.store.mu.Lock()
-	latest, latestBody, err := m.store.Read()
-	if err != nil {
-		m.store.mu.Unlock()
-		return interceptModulesView{}, err
-	}
-	if interceptRevision(latestBody) != revision || !interceptModuleSourceUnchanged(latest, id, current.Source.URL, current.Source.Digest) {
-		m.store.mu.Unlock()
-		return interceptModulesView{}, errInterceptRevisionConflict
-	}
-	index := -1
-	for i, module := range latest.Modules {
-		if module.ID == id {
-			index = i
+	// The candidate is bound to the reviewed digest above; mutate re-checks the
+	// document revision under its own lock and publishes the replacement the same
+	// way every other document change is published.
+	return m.mutate(ctx, revision, func(document *interceptConfigDocument) (interceptMutationEffects, error) {
+		if !interceptModuleSourceUnchanged(*document, id, current.Source.URL, current.Source.Digest) {
+			return interceptMutationEffects{}, errInterceptRevisionConflict
 		}
-	}
-	if index < 0 {
-		m.store.mu.Unlock()
-		return interceptModulesView{}, errInterceptModuleNotFound
-	}
-	candidate.Settings = mergeInterceptSettingValues(latest.Modules[index].Settings, candidate.Settings)
-	candidate.EgressGroup = latest.Modules[index].EgressGroup
-	candidate.CaptureDNS = latest.Modules[index].CaptureDNS
-	latest.Modules[index] = candidate
-	newBody, err := marshalInterceptDocument(latest)
-	if err == nil {
-		err = m.validateSidecarCandidate(ctx, newBody)
-	}
-	if err == nil {
-		err = m.store.writeAtomicContext(ctx, newBody)
-	}
-	m.store.mu.Unlock()
-	if err != nil {
-		return interceptModulesView{}, err
-	}
-	return m.viewLocked()
+		index := -1
+		for i, module := range document.Modules {
+			if module.ID == id {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			return interceptMutationEffects{}, errInterceptModuleNotFound
+		}
+		if document.Modules[index].Enabled {
+			return interceptMutationEffects{}, errors.New("disable the extension before replacing its immutable snapshot")
+		}
+		replacement := candidate
+		replacement.Settings = mergeInterceptSettingValues(document.Modules[index].Settings, candidate.Settings)
+		replacement.EgressGroup = document.Modules[index].EgressGroup
+		replacement.CaptureDNS = document.Modules[index].CaptureDNS
+		document.Modules[index] = replacement
+		// The replacement lands disabled, like the snapshot it replaces.
+		return interceptMutationEffects{}, nil
+	})
 }
 
 func interceptModuleSourceUnchanged(document interceptConfigDocument, id, sourceURL, digest string) bool {
@@ -1121,58 +1100,26 @@ func (m *InterceptModuleManager) Delete(ctx context.Context, id, revision string
 	if err := ctx.Err(); err != nil {
 		return interceptModulesView{}, err
 	}
-	if err := lockMutexContext(ctx, &m.mu); err != nil {
-		return interceptModulesView{}, err
-	}
-	defer m.mu.Unlock()
-	if err := lockMutexContext(ctx, &m.store.mu); err != nil {
-		return interceptModulesView{}, err
-	}
-	if err := ctx.Err(); err != nil {
-		m.store.mu.Unlock()
-		return interceptModulesView{}, err
-	}
-	document, oldBody, err := m.store.Read()
-	if err != nil {
-		m.store.mu.Unlock()
-		return interceptModulesView{}, err
-	}
-	if interceptRevision(oldBody) != revision {
-		m.store.mu.Unlock()
-		return interceptModulesView{}, errInterceptRevisionConflict
-	}
-	index := -1
-	for i, module := range document.Modules {
-		if module.ID == id {
-			index = i
-			if module.Enabled {
-				m.store.mu.Unlock()
-				return interceptModulesView{}, errors.New("disable the module before deleting it")
+	return m.mutate(ctx, revision, func(document *interceptConfigDocument) (interceptMutationEffects, error) {
+		index := -1
+		for i, module := range document.Modules {
+			if module.ID == id {
+				index = i
+				if module.Enabled {
+					return interceptMutationEffects{}, errors.New("disable the module before deleting it")
+				}
+				break
 			}
-			break
 		}
-	}
-	if index < 0 {
-		m.store.mu.Unlock()
-		return interceptModulesView{}, errInterceptModuleNotFound
-	}
-	document.Modules = append(document.Modules[:index], document.Modules[index+1:]...)
-	document.ExecutionOrder = removeInterceptModuleID(document.ExecutionOrder, id)
-	newBody, err := marshalInterceptDocument(document)
-	if err == nil {
-		err = m.validateSidecarCandidate(ctx, newBody)
-	}
-	if err == nil {
-		err = ctx.Err()
-	}
-	if err == nil {
-		err = m.store.writeAtomicContext(ctx, newBody)
-	}
-	m.store.mu.Unlock()
-	if err != nil {
-		return interceptModulesView{}, err
-	}
-	return m.viewLocked()
+		if index < 0 {
+			return interceptMutationEffects{}, errInterceptModuleNotFound
+		}
+		document.Modules = append(document.Modules[:index], document.Modules[index+1:]...)
+		document.ExecutionOrder = removeInterceptModuleID(document.ExecutionOrder, id)
+		// The module was disabled, so it owned no capture host, routing rule or
+		// egress binding to withdraw.
+		return interceptMutationEffects{}, nil
+	})
 }
 
 type interceptModuleUpdate struct {
@@ -1338,9 +1285,20 @@ func (m *InterceptModuleManager) mutate(
 	revision string,
 	mutator func(*interceptConfigDocument) (interceptMutationEffects, error),
 ) (interceptModulesView, error) {
-	m.mu.Lock()
+	if ctx == nil {
+		return interceptModulesView{}, errors.New("an interception operation context is required")
+	}
+	// Context-aware because this lock is held for the whole publish -- a
+	// subprocess validation, a certificate wait, a sidecar handover and an
+	// overlay round trip. A caller that has gone away should stop waiting for it
+	// rather than pin a request goroutine to the end of someone else's apply.
+	if err := lockMutexContext(ctx, &m.mu); err != nil {
+		return interceptModulesView{}, err
+	}
 	defer m.mu.Unlock()
-	m.store.mu.Lock()
+	if err := lockMutexContext(ctx, &m.store.mu); err != nil {
+		return interceptModulesView{}, err
+	}
 	defer m.store.mu.Unlock()
 	oldDocument, oldBody, err := m.store.Read()
 	if err != nil {
@@ -1349,14 +1307,10 @@ func (m *InterceptModuleManager) mutate(
 	if interceptRevision(oldBody) != revision {
 		return interceptModulesView{}, errInterceptRevisionConflict
 	}
-	nextDocument := oldDocument
-	nextDocument.ExecutionOrder = append([]string{}, oldDocument.ExecutionOrder...)
-	nextDocument.Modules = append([]interceptModuleSnapshot(nil), oldDocument.Modules...)
-	for index := range nextDocument.Modules {
-		nextDocument.Modules[index].RoutingRules = cloneInterceptRoutingRules(oldDocument.Modules[index].RoutingRules)
-		nextDocument.Modules[index].Settings = cloneInterceptSettings(oldDocument.Modules[index].Settings)
-		nextDocument.Modules[index].HostMappings = append([]interceptHostMapping(nil), oldDocument.Modules[index].HostMappings...)
-	}
+	// oldDocument stays intact for the comparisons below and for the rollback
+	// body, so the mutator gets its own document rather than a shallow copy
+	// sharing the same slices.
+	nextDocument := cloneInterceptDocument(oldDocument)
 	effects, err := mutator(&nextDocument)
 	if err != nil {
 		return interceptModulesView{}, err
@@ -1464,7 +1418,17 @@ func (m *InterceptModuleManager) mutate(
 	// Only now can the sidecar start: its unit Requires the certificate oneshot,
 	// which the document write above is what triggers. Waiting for its socket
 	// before this point waited for something that could not happen yet.
-	if pendingBundle {
+	//
+	// And only when the candidate gives it something to serve. The unit's
+	// ExecCondition runs `5gpn-intercept --check-enabled`, which exits 3 unless
+	// the MITM master is on AND some enabled extension declares a capture host --
+	// exactly what activeInterceptHosts reports here. Waiting unconditionally
+	// meant every mutation that left nothing active blocked for the whole
+	// start-up budget on a process systemd was refusing to start, failed, and
+	// then rolled its own document write back: enabling the first extension on a
+	// fresh install, turning the master off, or reordering with nothing enabled.
+	// PrepareRuntime already skips its sidecar half for this reason.
+	if pendingBundle && len(activeInterceptHosts(nextDocument)) > 0 {
 		if err := m.pushSidecarBundle(ctx, newBody); err != nil {
 			return interceptModulesView{}, fmt.Errorf("%w: sidecar handover: %v", errInterceptApplyFailed, err)
 		}
@@ -1701,6 +1665,147 @@ func cloneInterceptRoutingRules(rules []interceptRoutingRule) []interceptRouting
 	return cloned
 }
 
+// cloneSlice copies values while preserving the difference between an absent
+// list and an empty one.
+//
+// `append([]T(nil), empty...)` returns nil, which is not the same document:
+// capture_hosts, hosts, schemes and execution_order all encode without
+// omitempty, so one marshals as null and the other as [], the revision is a
+// digest of exactly those bytes, and validateInterceptExecutionOrder rejects a
+// nil execution_order outright.
+func cloneSlice[T any](values []T) []T {
+	if values == nil {
+		return nil
+	}
+	return append(make([]T, 0, len(values)), values...)
+}
+
+// cloneInterceptDocument returns a document sharing no mutable state with its
+// argument.
+//
+// The store memoises the decoded document by content digest, so a caller that
+// edits what Read handed back edits the cache itself: the file bytes have not
+// changed, so the next Read hits the same entry and returns the edit -- even
+// when the transaction that made it went on to fail, leaving the on-disk
+// document and the in-memory one permanently disagreeing. Delete spliced its
+// Modules slice and ApplyUpdate assigned into it, both before their write could
+// fail, which is exactly that.
+//
+// The alternative was to ask each mutating path to remember a partial copy, and
+// two of the five already did. Read handing out a value nothing else points at
+// removes the obligation instead of restating it.
+func cloneInterceptDocument(document interceptConfigDocument) interceptConfigDocument {
+	document.ExecutionOrder = cloneSlice(document.ExecutionOrder)
+	document.Modules = cloneInterceptModuleSnapshots(document.Modules)
+	return document
+}
+
+func cloneInterceptModuleSnapshots(modules []interceptModuleSnapshot) []interceptModuleSnapshot {
+	if modules == nil {
+		return nil
+	}
+	cloned := make([]interceptModuleSnapshot, len(modules))
+	for index, module := range modules {
+		module.CaptureHosts = cloneSlice(module.CaptureHosts)
+		module.HostMappings = cloneSlice(module.HostMappings)
+		module.RoutingRules = cloneInterceptRoutingRules(module.RoutingRules)
+		module.Settings = cloneInterceptSettings(module.Settings)
+		module.Scripts = cloneInterceptScriptRules(module.Scripts)
+		cloned[index] = module
+	}
+	return cloned
+}
+
+func cloneInterceptScriptRules(rules []interceptScriptRule) []interceptScriptRule {
+	if rules == nil {
+		return nil
+	}
+	cloned := make([]interceptScriptRule, len(rules))
+	for index, rule := range rules {
+		rule.Match.Hosts = cloneSlice(rule.Match.Hosts)
+		rule.Match.Schemes = cloneSlice(rule.Match.Schemes)
+		rule.Match.Methods = cloneSlice(rule.Match.Methods)
+		rule.Match.StatusCodes = cloneSlice(rule.Match.StatusCodes)
+		if rule.EnabledWhen != nil {
+			gate := *rule.EnabledWhen
+			rule.EnabledWhen = &gate
+		}
+		if rule.Mock != nil {
+			mock := *rule.Mock
+			mock.Headers = cloneStringMap(rule.Mock.Headers)
+			rule.Mock = &mock
+		}
+		if rule.Headers != nil {
+			headers := *rule.Headers
+			headers.Set = cloneStringMap(rule.Headers.Set)
+			headers.Remove = cloneSlice(rule.Headers.Remove)
+			rule.Headers = &headers
+		}
+		if rule.Rewrite != nil {
+			rewrite := *rule.Rewrite
+			rule.Rewrite = &rewrite
+		}
+		if rule.ReplaceBody != nil {
+			replace := *rule.ReplaceBody
+			replace.ValueMap = cloneInterceptValueMap(rule.ReplaceBody.ValueMap)
+			rule.ReplaceBody = &replace
+		}
+		cloned[index] = rule
+	}
+	return cloned
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func cloneInterceptValueMap(values map[string]map[string]string) map[string]map[string]string {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]map[string]string, len(values))
+	for key, inner := range values {
+		cloned[key] = cloneStringMap(inner)
+	}
+	return cloned
+}
+
+// interceptActionKind names which of the seven forms an action takes, in the
+// order the executor dispatches them.
+func interceptActionKind(action interceptScriptRule) string {
+	switch {
+	case action.Reject:
+		return "reject"
+	case action.Mock != nil:
+		return "mock"
+	case action.Headers != nil:
+		return "headers"
+	case action.Rewrite != nil:
+		return "rewrite"
+	case action.ReplaceBody != nil:
+		return "replaceBody"
+	case strings.TrimSpace(action.JQProgram) != "":
+		return "jq"
+	default:
+		return "script"
+	}
+}
+
+// interceptModuleActionViews projects actions for operator review.
+//
+// The five declarative kinds are carried, not just declared. The view type has
+// always had the fields and this constructor -- the only one -- never filled
+// them, so every one was omitempty-absent on the wire and both renderers had
+// nothing to show. An extension whose rewrite action sends a captured request,
+// with its cookies, to another origin was reviewable only as "an action", which
+// is precisely the fact the enable confirmation exists to state.
 func interceptModuleActionViews(actions []interceptScriptRule) []interceptModuleActionView {
 	views := make([]interceptModuleActionView, 0, len(actions))
 	for _, action := range actions {
@@ -1709,13 +1814,37 @@ func interceptModuleActionViews(actions []interceptScriptRule) []interceptModule
 		match.Schemes = append([]string{}, action.Match.Schemes...)
 		match.Methods = append([]string{}, action.Match.Methods...)
 		match.StatusCodes = append([]int{}, action.Match.StatusCodes...)
-		views = append(views, interceptModuleActionView{
-			ID: action.ID, Phase: action.Phase, Match: match,
+		view := interceptModuleActionView{
+			ID: action.ID, Phase: action.Phase, Kind: interceptActionKind(action), Match: match,
 			EnabledWhen: action.EnabledWhen,
 			ScriptURL:   action.ScriptURL, ScriptDigest: action.ScriptDigest,
 			BodyMode: action.BodyMode, Entry: action.Entry, JQProgram: action.JQProgram,
 			TimeoutMS: action.TimeoutMS, MaxBodyBytes: action.MaxBodyBytes,
-		})
+			Reject: action.Reject,
+		}
+		// Cloned for the same reason the matcher is: a view is handed to
+		// renderers and marshalled, and must not alias the stored snapshot.
+		if action.Mock != nil {
+			mock := *action.Mock
+			mock.Headers = cloneStringMap(action.Mock.Headers)
+			view.Mock = &mock
+		}
+		if action.Headers != nil {
+			headers := *action.Headers
+			headers.Set = cloneStringMap(action.Headers.Set)
+			headers.Remove = cloneSlice(action.Headers.Remove)
+			view.Headers = &headers
+		}
+		if action.Rewrite != nil {
+			rewrite := *action.Rewrite
+			view.Rewrite = &rewrite
+		}
+		if action.ReplaceBody != nil {
+			replace := *action.ReplaceBody
+			replace.ValueMap = cloneInterceptValueMap(action.ReplaceBody.ValueMap)
+			view.ReplaceBody = &replace
+		}
+		views = append(views, view)
 	}
 	return views
 }
