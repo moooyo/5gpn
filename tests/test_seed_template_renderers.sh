@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # The seed template's placeholders, and everything that must expand them.
 #
-# etc/mihomo/config.yaml.tmpl is expanded by several independent renderers: two
-# inside install.sh, the CI job's own awk, two mihomo regression scripts, and the
-# daemon's Go copy. They exist because they run in different contexts — install
-# time, CI, and `mihomo-reset` inside the daemon — and each hand-lists the
-# placeholders it knows.
+# etc/mihomo/config.yaml.tmpl is expanded by several independent renderers:
+# install.sh, the CI job's own awk, and a mihomo regression script. They exist
+# because they run in different contexts, and each hand-lists the placeholders
+# it knows.
+#
+# There used to be a fourth: the daemon's Go copy, which re-rendered the seed
+# for `mihomo-reset`. It is gone with the daemon, and it is not coming back --
+# a second copy of the template is exactly what the byte-identical lock below
+# had to exist to police. install.sh is the only renderer that writes a live
+# config now.
 #
 # That is the defect this guards. A placeholder added to the template and taught
 # to only some of them leaves the others emitting `__SOMETHING__` verbatim: the
@@ -24,13 +29,11 @@ FAIL=0
 
 [[ -f "$template" ]] || { echo "FAIL: no template at $template"; exit 1; }
 
-# name = one or more files; a renderer may span files (the Go one expands values
-# in mihomo_config.go and the overlay anchors in intercept_mihomo_overlay.go).
+# name = one or more files; a renderer may span files.
 RENDERERS=(
     "install.sh|install.sh"
     "CI mihomo-config job|.github/workflows/checks.yml"
     "sniff-cache regression|tests/mihomo-sniff-cache-regression.sh"
-    "daemon (mihomo-reset)|cmd/5gpn-dns/mihomo_config.go cmd/5gpn-dns/intercept_mihomo_overlay.go"
 )
 
 mapfile -t placeholders < <(grep -oE '__[A-Z0-9_]+__' "$template" | sort -u)
@@ -57,14 +60,15 @@ for entry in "${RENDERERS[@]}"; do
     fi
 done
 
-# The Go copy of the template is byte-identical to the repo file, locked by
-# TestMihomoConfigSeedTemplate_MatchesRepoFile. Assert the lock exists, because
-# without it the two could drift in content rather than in placeholder coverage.
-if grep -Fq 'TestMihomoConfigSeedTemplate_MatchesRepoFile' "$root/cmd/5gpn-dns/mihomo_config_test.go"; then
-    echo "ok: the Go copy is locked byte-identical to the template"
-else
-    echo "FAIL: nothing locks the Go copy of the template to the repo file"
+# The lock that kept a second, in-binary copy byte-identical to this file is
+# retired with that copy. What replaces it is the stronger condition: there is
+# no second copy to lock. A cmd/ tree reappearing is the shape of the
+# regression, since that is where the Go copy lived.
+if [[ -e "$root/cmd" ]]; then
+    echo "FAIL: a cmd/ tree came back; the seed template may have a second copy again"
     FAIL=1
+else
+    echo "ok: the template has exactly one copy"
 fi
 
 echo "----"

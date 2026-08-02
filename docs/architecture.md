@@ -245,11 +245,20 @@ parse: two `RUNTIME-OVERLAY,5gpn,*` anchors and an
 `IN-NAME,intercept-egress,REJECT` terminator. The core fails `mihomo -t` rather
 than starting with capture silently absent.
 
-`scripts/migrate-to-monolith.sh` removes those three rules and strips the
-`NOT,((IN-NAME,intercept-egress))` qualifiers from the panel allow rules, which
-excluded an inbound that no longer exists. The `intercept-egress` listener and
-the `MODULE-INTERCEPT` node are dead but harmless, so they are cleanup rather
-than migration.
+`scripts/migrate-to-monolith.sh` removes those three rules. It does not strip
+the `NOT,((IN-NAME,intercept-egress))` qualifiers on the two panel allow rules;
+it rewrites them to `NOT,((IN-TYPE,INNER))`. The qualifier looks vacuous once
+the listener is gone — nothing can arrive on an inbound that does not exist —
+but the rule was never about the listener. It kept extension-borne traffic off
+the gateway's own management plane, and the engine still produces such traffic:
+every upstream it opens goes back through these same rules by inner dialling,
+which is what keeps intercepted traffic inside the operator's routing. That
+traffic arrives as `INNER`, with no inbound name. Stripping the qualifier would
+therefore let a captured extension naming the console reach it — so migrated
+hosts get the same predicate a fresh install seeds.
+
+The `intercept-egress` listener and the `MODULE-INTERCEPT` node are dead but
+harmless, so they are cleanup rather than migration.
 
 The units are handled the same way, and the asymmetry is deliberate: the
 installer publishes only the units this release owns, but keeps removing the

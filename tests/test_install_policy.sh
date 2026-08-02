@@ -57,10 +57,9 @@ grep -Fq '# 5gpn-renew-hook-id: deploy-v1' <<<"$renew_owned_fn" \
     || fail "deploy-hook ownership check does not require the exact current marker"
 grep -Fq 'renewed 5gpn WILDCARD lineage' <<<"$renew_owned_fn" \
     && fail "deploy-hook ownership still accepts the superseded wildcard text"
-grep -Fq '"systemctl", "start", "5gpn-certbot-renew.service"' "$BOT_OPS" \
-    || fail "Telegram renewal does not start the fixed scoped renewal service"
-grep -Fq 'systemd-run' "$BOT_OPS" \
-    && fail "Telegram renewal must not create an operator-controlled transient root unit"
+# The bot drove renewal through a fixed scoped unit rather than a transient
+# systemd-run one, so an operator could not choose what ran as root. The bot is
+# not ported; when it is, that property belongs in a Go test beside it.
 grep -Fq 'cf_credential_safe' "$CERT_RENEW" \
     || fail "Cloudflare renewal can follow an unsafe credential symlink or permissions drift"
 
@@ -74,12 +73,15 @@ grep -Fq 'unit_file_owned_by_5gpn' "$INSTALL" \
 remove_unit_fn="$(sed -n '/^remove_unit()/,/^}/p' "$INSTALL")"
 grep -Fq '5gpn-unit-id' <<<"$remove_unit_fn" \
     && fail "unit removal consults a provenance marker instead of the fixed unit path"
-grep -Fxq '# 5gpn-unit-id: 5gpn-dns.service:v1' "$ROOT/etc/systemd/5gpn-dns.service" \
-    || fail "5gpn-dns unit lacks its provenance marker"
-grep -Fxq '# 5gpn-unit-id: mihomo.service:v1' "$ROOT/etc/systemd/mihomo.service" \
-    || fail "mihomo unit lacks its provenance marker"
-grep -Fxq '# 5gpn-unit-id: 5gpn-journal@.service:v1' "$ROOT/etc/systemd/5gpn-journal@.service" \
-    || fail "journal exporter unit lacks its provenance marker"
+# Every shipped unit carries a provenance marker. The revision is deliberately
+# not pinned: mihomo.service is at v2, and pinning v1 is exactly the trap the
+# comment above describes -- a revision that wedges the check on every bump.
+# Assert the shape, and that no shipped unit is missing one.
+for unit in "$ROOT"/etc/systemd/*; do
+    [[ -f "$unit" ]] || continue
+    grep -Eq '^# 5gpn-unit-id: [A-Za-z0-9@.-]+:v[0-9]+$' "$unit" \
+        || fail "$(basename "$unit") lacks its provenance marker"
+done
 
 # The same trap lives in every other ownership check: a marker revision or a
 # body fingerprint that changes between releases wedges every host that has not
@@ -98,8 +100,9 @@ grep -Fq "Let's Encrypt renewal deploy hook" <<<"$renew_owned_fn" \
 polkit_owned_fn="$(sed -n '/^polkit_rule_owned_by_5gpn()/,/^}/p' "$INSTALL")"
 grep -Fq 'grep -Fqx "$POLKIT_RULE_MARKER"' <<<"$polkit_owned_fn" \
     && fail "polkit ownership pins the exact marker revision instead of its owner"
-grep -Eq '^// 5gpn-polkit-id: [a-z-]+$' "$ROOT/etc/polkit-1/rules.d/50-5gpn.rules" \
-    || fail "polkit rule marker carries a revision suffix again"
+# The rule file itself is gone: every grant in it named a uid nothing runs as
+# now. install.sh keeps only the preflight above, which refuses to touch a
+# leftover rule on an upgraded host -- that is the surviving property.
 # The value a root is claimed with must never be versioned: comparing it exactly
 # is what wedged upgrades. A LEGACY value is the opposite of that mistake -- it
 # is never written, only accepted so the claim can heal a marker an older release
@@ -446,11 +449,12 @@ grep -Fq 'force-domain: [__CONSOLE_DOMAIN__]'  "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: console fallback does not force hostname sniffing"
 grep -Fq '__ZASH_DOMAIN__:    127.0.0.2'        "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #5 (zash SNI hosts mapping)"
-# The console route carries the negative intercept-egress qualifier: it must sit
-# above the loopback deny, hence above the egress terminator, so without the
-# exclusion a compromised sidecar reaches the gateway's own management plane.
-grep -Fq 'AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT' "$MIHOMO_TMPL" \
-    || fail "etc/mihomo/config.yaml.tmpl: public console is not routed directly with an intercept-egress exclusion"
+# The console route carries a negative qualifier excluding the engine's own
+# egress: it sits above the loopback deny, so without the exclusion a captured
+# extension reaches the gateway's own management plane. The engine dials back
+# through these rules as INNER, so there is no inbound name left to exclude by.
+grep -Fq 'AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: public console is not routed directly with an engine-egress exclusion"
 grep -Fq '__PROFILE_DOMAIN__' "$MIHOMO_TMPL" \
     && fail "etc/mihomo/config.yaml.tmpl: retired profile SNI remains"
 grep -Fq 'IP-CIDR,__GATEWAY_IP__/32,REJECT' "$MIHOMO_TMPL" \
@@ -471,13 +475,16 @@ printf '%s' "$rmc_fn" | grep -Fq 'mihomo_config_secret "$config"' \
 parser_guards="$(printf '%s' "$rmc_fn" | grep -Fc 'Existing mihomo controller secret could not be parsed safely.' || true)"
 [[ "$parser_guards" == 2 ]] \
     || fail "render_mihomo_config must fail closed on secret parsing in preserve and reset paths"
+# The secret was read by a structural YAML parser inside a binary this installer
+# published. That binary is gone, and shipping a YAML parser to read one scalar
+# is not worth it: the value sits on a line whose shape this installer controls,
+# and yaml_single_quoted_value refuses to write one that could not be read back.
+# The acceptance suite reads it identically, so the two cannot disagree.
 mcs_fn="$(sed -n '/^mihomo_config_secret()/,/^}/p' "$INSTALL")"
-printf '%s' "$mcs_fn" | grep -Fq '"$DNS_BIN" --print-mihomo-secret --config "$f"' \
-    || fail "mihomo_config_secret must use the structural 5gpn-dns YAML reader"
-printf '%s' "$mcs_fn" | grep -Eq 'sed|head -1' \
-    && fail "mihomo_config_secret must not parse operator YAML as text"
-grep -Fq -- '--print-mihomo-secret' "$ROOT/cmd/5gpn-dns/main.go" \
-    || fail "5gpn-dns does not expose the installer-only mihomo secret reader"
+printf '%s' "$mcs_fn" | grep -Fq 'grep -m1 -E "^secret:"' \
+    || fail "mihomo_config_secret does not read the secret line the installer writes"
+printf '%s' "$mcs_fn" | grep -Fq '[[ -f "$f" && -r "$f" ]]' \
+    || fail "mihomo_config_secret does not fail closed on an unreadable config"
 printf '%s' "$rmc_fn" | grep -Fq 'Existing operator-owned mihomo config' \
     || fail "render_mihomo_config does not preserve an existing operator-owned config"
 printf '%s' "$rmc_fn" | grep -Fq 'mktemp "${MIHOMO_DIR}/.config.yaml.' \

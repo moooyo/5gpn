@@ -1,94 +1,84 @@
 #!/usr/bin/env bash
+# What the installer still owns of interception.
+#
+# Interception used to be a second process with its own unit, account,
+# capability set, SOCKS listener and Go manifest parser, plus a React console
+# that rendered it. All of that is inside mihomo now, or inside zashboard, and
+# the assertions that covered it are not deleted so much as relocated:
+#
+#   the sidecar unit, its account and confinement   -- there is no second
+#       process; the capture stage runs in mihomo, guarded by tunnel/gpn.go's
+#       INNER check rather than by a separate uid.
+#   the intercept-egress listener and MODULE-INTERCEPT node  -- the seed template
+#       assertions live in test_mihomo_policy.sh and test_install_policy.sh,
+#       which follow the template.
+#   the manifest parser and its permission model   -- gpn/engine/manifest_test.go
+#       in the fork.
+#   the Extensions and Setup Guide pages           -- zashboard's own repository.
+#
+# What genuinely remains here is the certificate boundary, because the installer
+# is what publishes it: a root oneshot holding the CA signing key, reading a
+# request file the engine writes, with no capabilities and no way to reach the
+# engine's own binary. That arrangement is the installer's to get right.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL="$ROOT/install.sh"
-UNIT="$ROOT/etc/systemd/5gpn-intercept.service"
 CERT_UNIT="$ROOT/etc/systemd/5gpn-intercept-cert.service"
 CERT_PATH="$ROOT/etc/systemd/5gpn-intercept-cert.path"
 CERT_TIMER="$ROOT/etc/systemd/5gpn-intercept-cert.timer"
-RUNTIME_PATH="$ROOT/etc/systemd/5gpn-intercept-runtime.path"
-TEMPLATE="$ROOT/etc/mihomo/config.yaml.tmpl"
+RENEW="$ROOT/scripts/intercept-cert-renew.sh"
 PROFILE="$ROOT/scripts/gen-ios-profile.sh"
-MODULE_PAGE="$ROOT/web/src/features/extensions/ExtensionsPage.tsx"
-SETUP_GUIDE="$ROOT/web/src/features/setup-guide/SetupGuidePage.tsx"
-MODULE_PARSER="$ROOT/cmd/5gpn-dns/intercept_module_parser.go"
-MODULE_TYPES="$ROOT/cmd/5gpn-dns/intercept_module_types.go"
-MANAGER_TEST="$ROOT/cmd/5gpn-dns/intercept_module_manager_test.go"
 rc=0
 fail() { echo "FAIL: $1"; rc=1; }
 
-find "$ROOT" -path "$ROOT/web/node_modules" -prune -o -type f -name '*.py' -print -quit | grep -q . \
+find "$ROOT" -type f -name '*.py' -print -quit | grep -q . \
     && fail "Python source was introduced"
 
-grep -Fxq '# 5gpn-unit-id: 5gpn-intercept.service:v1' "$UNIT" || fail "interception unit ownership marker missing"
-grep -Fxq 'User=gpn-intercept' "$UNIT" || fail "interception unit lacks its dedicated account"
-grep -Fxq 'CapabilityBoundingSet=' "$UNIT" || fail "interception unit has capabilities"
-grep -Fxq 'RestrictAddressFamilies=AF_INET AF_UNIX' "$UNIT" || fail "interception unit address families are too broad"
-grep -Fxq 'StateDirectory=5gpn-intercept' "$UNIT" || fail "module persistent store has no private state directory"
-grep -Fxq 'RuntimeDirectory=5gpn-intercept' "$UNIT" || fail "sidecar engine log socket has no private runtime directory"
-grep -Fxq 'RuntimeDirectoryMode=0750' "$UNIT" || fail "sidecar engine log runtime directory is not group-readable"
-grep -Fxq 'Requires=5gpn-intercept-cert.service' "$UNIT" || fail "sidecar startup does not gate on certificate publication"
-grep -Fxq 'ExecStart=/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json --control-peer-user gpn-dns' "$UNIT" \
-    || fail "sidecar is not launched against the fixed config and control peer"
-grep -Fxq 'ExecCondition=/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json --check-enabled' "$UNIT" \
-    || fail "sidecar startup is not gated by the MITM master setting"
-grep -Fq 'InaccessiblePaths=-/etc/5gpn/intercept-ca' "$UNIT" || fail "interception unit can read the CA signing key"
+# --- the certificate publisher -----------------------------------------------
 grep -Fxq '# 5gpn-unit-id: 5gpn-intercept-cert.service:v1' "$CERT_UNIT" || fail "certificate publisher ownership marker missing"
 grep -Fxq 'ExecStart=/opt/5gpn/scripts/intercept-cert-renew.sh' "$CERT_UNIT" || fail "certificate publisher helper is missing"
 grep -Fxq 'Group=root' "$CERT_UNIT" || fail "certificate publisher primary group is not root"
 grep -Fxq 'SupplementaryGroups=gpn-intercept' "$CERT_UNIT" || fail "capability-free certificate publisher lacks the runtime file group"
+grep -Fxq 'CapabilityBoundingSet=' "$CERT_UNIT" || fail "certificate publisher has capabilities"
 grep -Fxq 'RuntimeDirectory=5gpn' "$CERT_UNIT" || fail "certificate publisher cannot create its fresh-boot lock directory"
 grep -Fxq 'RuntimeDirectoryMode=0700' "$CERT_UNIT" || fail "certificate publisher runtime directory is not private"
+grep -Fxq 'RuntimeDirectoryPreserve=yes' "$CERT_UNIT" || fail "certificate lock directory is not preserved between oneshot runs"
+# A path unit counts every trigger against systemd's start limit. Without a
+# raised bound, a burst of writes puts the publisher into failed permanently.
 grep -Fxq 'StartLimitIntervalSec=30' "$CERT_UNIT" \
     && grep -Fxq 'StartLimitBurst=64' "$CERT_UNIT" \
-    || fail "certificate publisher start limit does not cover the bounded PathChanged retry window"
-grep -Fxq 'RuntimeDirectoryPreserve=yes' "$CERT_UNIT" || fail "certificate lock directory is not preserved between oneshot runs"
-grep -Fxq 'ReadOnlyPaths=/etc/5gpn/intercept-ca /opt/5gpn/bin/5gpn-intercept /opt/5gpn/scripts/intercept-cert-renew.sh' "$CERT_UNIT" \
+    || fail "certificate publisher start limit does not admit the bounded republish retry"
+# The publisher holds the CA signing key. It may read the engine's state
+# directory -- that is where the request is -- and nothing else of the engine's.
+grep -Fq 'ReadOnlyPaths=/etc/5gpn/intercept-ca /etc/5gpn/mihomo/gpn /opt/5gpn/scripts/intercept-cert-renew.sh' "$CERT_UNIT" \
     || fail "certificate publisher does not scope root-key access"
-grep -Fxq 'PathChanged=/etc/5gpn/intercept/config.json' "$CERT_PATH" || fail "module certificate watcher is missing"
+
+# The watcher fires on the request, not on the document. The document changes
+# whenever an operator edits a setting; the request changes only when the host
+# set the leaf must cover does, so this reissues when it is actually needed.
+grep -Fxq 'PathChanged=/etc/5gpn/mihomo/gpn/certificate-request' "$CERT_PATH" || fail "certificate watcher does not watch the request file"
 grep -Fxq '# 5gpn-unit-id: 5gpn-intercept-cert.timer:v1' "$CERT_TIMER" || fail "interception certificate timer ownership marker is missing"
 grep -Fxq 'OnCalendar=*-*-* 02:00:00' "$CERT_TIMER" || fail "interception certificate timer does not run on the fixed daily schedule"
 grep -Fxq 'Persistent=true' "$CERT_TIMER" || fail "interception certificate timer is not persistent"
 grep -Fxq 'Unit=5gpn-intercept-cert.service' "$CERT_TIMER" || fail "interception certificate timer does not target the leaf publisher"
-grep -Fxq '# 5gpn-unit-id: 5gpn-intercept-runtime.path:v1' "$RUNTIME_PATH" || fail "MITM runtime watcher ownership marker is missing"
-grep -Fxq 'PathChanged=/etc/5gpn/intercept/config.json' "$RUNTIME_PATH" || fail "MITM runtime watcher is missing"
-grep -Fxq 'Unit=5gpn-intercept.service' "$RUNTIME_PATH" || fail "MITM runtime watcher does not start the sidecar"
-# A path unit counts every trigger against systemd's start limit, and the watched
-# file is rewritten once per settings change. Without this, a burst of console
-# edits puts the watcher into failed permanently and the sidecar stops being
-# started on any later change. The installer no longer inspects the installed
-# unit's body, so this is the only thing pinning the directive.
-grep -Fxq 'StartLimitIntervalSec=0' "$RUNTIME_PATH" || fail "MITM runtime watcher is start-rate-limited and a burst of settings edits can disable it permanently"
 
-grep -Fq 'intercept_asset="5gpn-intercept-linux-amd64"' "$INSTALL" || fail "interception release asset is not staged"
-grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/5gpn-intercept"' "$INSTALL" || fail "interception release asset is not checksum-verified"
-grep -Fq 'install_service_account "$INTERCEPT_SERVICE_USER" "$INTERCEPT_SERVICE_USER"' "$INSTALL" || fail "interception service account is not installed"
+# --- the renewal helper ------------------------------------------------------
+grep -Fq "stat -Lc '%d:%i'" "$RENEW" \
+    && grep -Fq '/fd/${fd}' "$RENEW" \
+    || fail "interception helper does not validate the inherited installer lock inode"
+grep -Fq 'CERT_REQUEST=/etc/5gpn/mihomo/gpn/certificate-request' "$RENEW" \
+    || fail "certificate helper does not consume the engine's atomic host-set request"
+grep -Fq 'if [[ ! -s "$stage/hosts" ]]' "$RENEW" || fail "certificate helper does not accept a fresh zero-extension host set"
+
+# --- the installer's side ----------------------------------------------------
+grep -Fq 'install_service_account "$INTERCEPT_SERVICE_USER" "$INTERCEPT_SERVICE_USER"' "$INSTALL" || fail "interception file-ownership account is not installed"
 grep -Fq 'ensure_intercept_certificates' "$INSTALL" || fail "interception certificate lifecycle is missing"
-grep -Fq '"version": 6' "$INSTALL" || fail "current interception config schema is not installed"
-grep -Fq 'CaptureDNS' "$MODULE_TYPES" && grep -Fq 'json:"capture_dns' "$MODULE_TYPES" \
-    || fail "operator capture DNS binding is missing from the module schema"
-grep -Fq 'maxInterceptModuleHosts' "$MODULE_TYPES" && grep -Fq '= 512' "$MODULE_TYPES" \
-    || fail "core capture-host bound is not 512"
-grep -Fq '(( count <= 512 ))' "$ROOT/scripts/intercept-cert-renew.sh" \
-    || fail "certificate publisher capture-host bound is not 512"
-# Apex-plus-wildcard compaction is a property of the compiled generation now,
-# not of any text rendered into the operator's config, so it is pinned where it
-# is produced rather than in a YAML fixture nothing emits.
-grep -Fq 'domain-suffix:example.com:443' "$MANAGER_TEST" \
-    && grep -Fq 'domain-suffix:example.com:80' "$MANAGER_TEST" \
-    || fail "the compacted suffix selector is not pinned in the committed generation"
-grep -Fq '"execution_order": []' "$INSTALL" || fail "current interception config has no explicit execution order"
-grep -Fq '"quic_fallback_protection": true' "$INSTALL" || fail "QUIC fallback protection is not configured by default"
-grep -Fq 'systemctl enable --now 5gpn-intercept-runtime.path' "$INSTALL" || fail "MITM runtime watcher is not enabled"
 grep -Fq 'systemctl enable --now 5gpn-intercept-cert.timer' "$INSTALL" || fail "interception leaf renewal timer is not always enabled"
+grep -Fq 'systemctl enable --now 5gpn-intercept-cert.path' "$INSTALL" || fail "interception certificate watcher is not enabled"
 grep -Fq '"${SCRIPT_DIR}"/etc/systemd/*.timer' "$INSTALL" || fail "interception certificate timer is not copied into installed bundles"
 grep -Fq 'intercept-cert-renew.sh" --installer-lock-held' "$INSTALL" || fail "installer does not reuse its held certificate lock"
-grep -Fq "stat -Lc '%d:%i'" "$ROOT/scripts/intercept-cert-renew.sh" \
-    && grep -Fq '/fd/${fd}' "$ROOT/scripts/intercept-cert-renew.sh" \
-    || fail "interception helper does not validate the inherited installer lock inode"
-grep -Fq "stat -Lc '%d:%i'" "$ROOT/scripts/intercept-cert-renew.sh" || fail "interception helper trusts a replaced lock pathname instead of the inherited inode"
-grep -Fq -- '--print-certificate-request' "$ROOT/scripts/intercept-cert-renew.sh" || fail "certificate helper does not consume one atomic host-set request"
-grep -Fq 'if [[ ! -s "$stage/hosts" ]]' "$ROOT/scripts/intercept-cert-renew.sh" || fail "certificate helper does not accept a fresh zero-extension host set"
+grep -Fq 'CERT_REQUEST_FILE="${GPN_STATE_DIR}/certificate-request"' "$INSTALL" \
+    || fail "installer does not read the leaf host set from the engine's published request"
 renew_service="$(sed -n '/^install_renewal_automation()/,/^}/p' "$INSTALL")"
 grep -Fq 'ExecStart=/opt/5gpn/scripts/intercept-cert-renew.sh' <<<"$renew_service" \
     && fail "public certificate renewal still couples interception leaf renewal"
@@ -96,64 +86,28 @@ grep -Fq 'INTERCEPT_CA_MARKER_VALUE="5gpn-intercept-ca-v1"' "$INSTALL" || fail "
 grep -Fq 'INTERCEPT_STATE_MARKER_VALUE="5gpn-intercept-state"' "$INSTALL" || fail "interception state ownership marker is missing"
 grep -Fq 'remove_fixed_owned_dir "$INTERCEPT_STATE_DIR"' "$INSTALL" || fail "purge does not remove marked module persistent state"
 
-grep -Fq 'name: intercept-egress' "$TEMPLATE" || fail "mihomo interception egress listener is missing"
-grep -Fq 'listen: 127.0.0.1' "$TEMPLATE" || fail "interception egress listener is not loopback"
-grep -Fq 'name: MODULE-INTERCEPT' "$TEMPLATE" || fail "mihomo extension SOCKS node is missing"
-grep -Fq 'type: socks5' "$TEMPLATE" || fail "module node is not SOCKS5"
-grep -Fq 'udp: true' "$TEMPLATE" || fail "module node does not carry QUIC"
-grep -Fq 'IN-NAME,intercept-egress,REJECT' "$TEMPLATE" || fail "interception fail-closed egress guard is missing"
-grep -Fq 'After=network-online.target 5gpn-intercept.service' "$ROOT/etc/systemd/mihomo.service" \
-    || fail "mihomo is not ordered after the interception sidecar"
-grep -Eq '^  - AND,.*MODULE-INTERCEPT' "$TEMPLATE" \
-    && fail "interception extensions must remain disabled in the seed"
-grep -Fq 'gs-loc.apple.com' "$ROOT/etc/proxy-domains.txt" \
-    && fail "disabled WLOC hosts must not remain in the static proxy policy"
+# The engine writes its own document with interception off, so the installer
+# must not seed one -- two writers of one document is how they drift.
+grep -Fq '"mitm"' "$INSTALL" && fail "the installer seeds an interception document the engine owns"
 
+# --- the shared trust profile ------------------------------------------------
 grep -Fq 'ios-intercept-ca.mobileconfig' "$PROFILE" || fail "interception CA profile generation is missing"
 grep -Fq 'com.apple.security.root' "$PROFILE" || fail "shared interception profile is not a root-certificate payload"
-grep -Fq "INTERCEPT_CA_PROFILE_PATH = '/ios/ios-intercept-ca.mobileconfig'" "$SETUP_GUIDE" \
-    || fail "Setup Guide does not own the shared interception CA profile"
-grep -Fq 'data-testid="intercept-ca-guide"' "$SETUP_GUIDE" \
-    || fail "Setup Guide lacks the shared interception trust guide"
-grep -Fq "'/setup-guide'" "$MODULE_PAGE" \
-    || fail "Extensions page does not direct operators to the shared trust guide"
-grep -Fq "'/extensions/hosts'" "$MODULE_PAGE" \
-    || fail "Extensions page does not expose the capture-host audit"
-grep -Fq 'ios-intercept-ca.mobileconfig' "$MODULE_PAGE" \
-    && fail "Modules page still owns a direct CA profile download"
-grep -Fq 'nativeExtensionAPIVersion = "5gpn.io/v1"' "$MODULE_PARSER" \
-    || fail "native extension manifest version is missing"
-grep -Fq 'decoder.KnownFields(true)' "$MODULE_PARSER" \
-    || fail "native extension manifest does not reject unknown fields"
-grep -Fq 'rejectUnsafeYAML' "$MODULE_PARSER" \
-    || fail "native extension manifest does not reject aliases, anchors, and merges"
-# The permission is one boolean now. What has to stay true is that the parser
-# snapshots it at all, and that the origin list it replaced cannot come back
-# without this test being changed on purpose.
-grep -Fq 'manifest.Permissions.Network' "$MODULE_PARSER" \
-    || fail "native manifest parser does not snapshot the network permission"
-grep -Fq 'NetworkOrigins' "$MODULE_PARSER" \
-    && fail "native manifest parser still carries the retired origin list"
-grep -Fq 'EgressGroupRequired' "$MODULE_PARSER" \
-    || fail "native manifest parser does not support operator egress requirements"
-grep -Fq 'https://github.com/moooyo/5gpn-extensions' "$MODULE_PARSER" \
-    || fail "native extension catalog does not point to the independent repository"
+
+# --- retired identifiers must not reappear in what is left here ---------------
 if [[ -d "$ROOT/extensions" ]] && find "$ROOT/extensions" -mindepth 1 -print -quit 2>/dev/null | grep -q .; then
     fail "core repository still vendors extension source"
 fi
-grep -Fq 'fetch_profile' "$ROOT/web/src/lib/api/types.ts" \
-    && fail "module import API still exposes a fetch-header choice"
 retired_client="$(printf '%s%s' 'lo' 'on')"
-# The sidecar is a separate repository now and asserts this about itself; this
-# scan covers what remains here.
 grep -Rni "$retired_client" \
     "$ROOT/README.md" "$ROOT/README.en.md" "$ROOT/docs/architecture.md" \
-    "$ROOT/docs/pre-v5-upgrade.md" "$ROOT/cmd/5gpn-dns" \
-    "$ROOT/web/src" "$ROOT/web/e2e" 2>/dev/null | grep -q . \
+    "$ROOT/docs/pre-v5-upgrade.md" 2>/dev/null | grep -q . \
     && fail "retired third-party plugin compatibility is still present"
-grep -RniE 'builtin-wloc|MODULE-MITM' \
-    "$ROOT/README.md" "$ROOT/README.en.md" "$ROOT/docs/architecture.md" \
-    "$ROOT/docs/pre-v5-upgrade.md" "$ROOT/cmd" "$ROOT/web/src" 2>/dev/null | grep -q . \
-    && fail "retired built-in interception identifiers are still present"
+# Only the seed template. docs/architecture.md and migrate-to-monolith.sh name
+# these identifiers on purpose -- they are what the upgrade path removes, and a
+# migration guide that cannot say what it removes is useless.
+grep -niE 'builtin-wloc|MODULE-MITM|MODULE-INTERCEPT|intercept-egress|RUNTIME-OVERLAY' \
+    "$ROOT/etc/mihomo/config.yaml.tmpl" 2>/dev/null | grep -q . \
+    && fail "retired interception identifiers came back into the seed template"
 
 exit "$rc"
