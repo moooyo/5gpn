@@ -11,8 +11,7 @@ err() { if [[ "$_HAVE_GUM" == 1 ]]; then CI=1 gum log --level error -- "$*" >&2;
 CA_DIR=/etc/5gpn/intercept-ca
 INTERCEPT_DIR=/etc/5gpn/intercept
 TLS_DIR=/etc/5gpn/intercept/tls
-CONFIG=/etc/5gpn/intercept/config.json
-INTERCEPT_BIN=/opt/5gpn/bin/5gpn-intercept
+CERT_REQUEST=/etc/5gpn/mihomo/gpn/certificate-request
 CERT_STATE=/etc/5gpn/intercept/cert-state
 CA_MARKER=.5gpn-intercept-ca-owned
 CA_MARKER_VALUE=5gpn-intercept-ca-v1
@@ -200,9 +199,17 @@ validate_root() {
     keypair_matches "$CA_DIR/root.crt" "$CA_DIR/root.key"
 }
 
+# The engine publishes what the leaf must cover; this reads it.
+#
+# It used to execute the sidecar binary to ask. That put a root process holding
+# the one key able to mint any identity in the position of running a
+# network-facing program to decide what to mint. Reading a file it wrote is a
+# strictly smaller trust: the worst a bad request can do now is name hosts, and
+# every one of them is validated below before it reaches openssl.
 load_desired_hosts() {
-    [[ -x "$INTERCEPT_BIN" && -f "$CONFIG" && ! -L "$CONFIG" ]] || return 1
-    "$INTERCEPT_BIN" --config "$CONFIG" --print-certificate-request > "$stage/request"
+    [[ -f "$CERT_REQUEST" && ! -L "$CERT_REQUEST" ]] || return 1
+    [[ "$(path_uid "$CERT_REQUEST")" == "$(path_uid "$(dirname -- "$CERT_REQUEST")")" ]] || return 1
+    cp -- "$CERT_REQUEST" "$stage/request" || return 1
     head -n 1 "$stage/request" > "$stage/digest"
     tail -n +2 "$stage/request" > "$stage/hosts"
     [[ -f "$stage/hosts" && -s "$stage/digest" ]] || return 1

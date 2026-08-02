@@ -33,4 +33,4 @@ ProtectProc=invisible
 ProcSubset=pid
 RestrictAddressFamilies=AF_UNIX
 ReadWritePaths=/etc/5gpn/intercept /run/5gpn
-ReadOnlyPaths=/etc/5gpn/intercept-ca /opt/5gpn/bin/5gpn-intercept /opt/5gpn/scripts/intercept-cert-renew.sh
+ReadOnlyPaths=/etc/5gpn/intercept-ca /etc/5gpn/mihomo/gpn /opt/5gpn/scripts/intercept-cert-renew.sh

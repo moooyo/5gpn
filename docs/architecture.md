@@ -184,8 +184,18 @@ beneath it. `gpn/importrule_test.go` enforces this by walking `go list`.
 
 The rule exists because the fork's cost is not the size of `gpn/` — it is how
 many upstream-owned files carry a 5gpn-shaped change, since those are what a
-rebase must reconcile. That number is currently **one file, seven lines**
-(`tunnel/tunnel.go`). Everything else is new files, which do not conflict.
+rebase must reconcile. That number is **two files, eight lines**: the capture
+hook in `tunnel/tunnel.go` (seven) and the one call that starts the subsystems
+in `hub/hub.go` (one). Everything else 5gpn adds is a new file, which does not
+conflict.
+
+Two other categories of change exist against upstream and are deliberately not
+counted, because counting them would make the number mean something else.
+`go.mod` and `go.sum` conflict on every rebase, but resolving them is mechanical
+and needs no knowledge of 5gpn. And the fork inherits changes to
+`component/sniffer/` and `listener/socks/` from the branch it grew out of;
+those are general improvements to mihomo rather than 5gpn-shaped, and the right
+destination for them is upstream.
 
 There is one ordering constraint on the façade: `hub/route` imports
 `hub/executor`, so `gpn` cannot be called from `hub/executor` without an import

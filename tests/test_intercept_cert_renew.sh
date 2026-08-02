@@ -42,12 +42,15 @@ ca_boundary_safe || fail "canonical root-owned interception CA tree was rejected
 tls_tree_safe || fail "empty canonical interception TLS tree was rejected"
 pass "canonical CA and TLS publication boundaries validate"
 
-# The root publisher must enforce the same 512-host contract as both Go
-# validators. Exercise the actual request parser so a stale shell-only bound
-# cannot reject a document already accepted by the control plane and sidecar.
-INTERCEPT_BIN="$TMP/fake-intercept"
-printf '%s\n' '{}' > "$CONFIG"
-chmod 0640 "$CONFIG"
+# The root publisher must enforce the same 512-host contract the engine does.
+# Exercise the actual request parser so a stale shell-only bound cannot reject
+# a document the control plane already accepted.
+#
+# The request is a file the engine publishes, not the output of a binary this
+# script runs. That is exactly what changed: the process holding the CA signing
+# key reads data instead of executing the network-facing program to decide what
+# to sign, so the harness publishes a file rather than a fake executable.
+CERT_REQUEST="$TMP/certificate-request"
 write_fake_certificate_request() {
     local count="$1" index
     {
@@ -55,12 +58,8 @@ write_fake_certificate_request() {
         for ((index = 0; index < count; index++)); do
             printf 'h%03d.example.com\n' "$index"
         done
-    } > "$TMP/request"
-    cat > "$INTERCEPT_BIN" <<EOF
-#!/usr/bin/env bash
-cat '$TMP/request'
-EOF
-    chmod 0755 "$INTERCEPT_BIN"
+    } > "$CERT_REQUEST"
+    chmod 0644 "$CERT_REQUEST"
 }
 stage="$TMP/host-limit-stage"
 mkdir -p "$stage"

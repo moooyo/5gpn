@@ -5736,45 +5736,30 @@ start_services() {
         || { err "could not enable the interception certificate watcher."; return 1; }
     systemctl enable --now 5gpn-intercept-cert.timer >/dev/null 2>&1 \
         || { err "could not enable the interception certificate renewal timer."; return 1; }
-    systemctl enable --now 5gpn-intercept-runtime.path >/dev/null 2>&1 \
-        || { err "could not enable the MITM runtime watcher."; return 1; }
-    # mihomo is the data plane + panel SNI split; it was installed by
-    # install_units but is enabled/started HERE (nothing started it before).
-    # Start mihomo first so DNS cannot advertise gateway answers before the
-    # data-plane listener is live. Any enable/start/readiness failure is fatal;
+    # One service. It carries the DNS engine, the interception engine, the data
+    # plane and the control API, so there is no ordering left to get right --
+    # the race this used to arbitrate, where DNS could advertise gateway
+    # answers before the data-plane listener was live, cannot occur inside one
+    # process that binds both before it accepts either.
+    #
+    # The MITM master is no longer consulted here. It used to decide whether to
+    # start a second unit, and a conditioned sidecar that must not run with the
+    # master off is a thing that no longer exists: the engine is loaded either
+    # way and captures nothing until the document says to.
+    #
+    # Any enable, start or readiness failure is fatal.
     # full_install must never print success for a broken deployment.
-    local svc failed=0 check_rc=0
-    for svc in mihomo 5gpn-intercept 5gpn-dns; do
-        if ! systemctl enable "$svc" >/dev/null 2>&1; then
-            err "could not enable $svc (check: systemctl status $svc)."
-            failed=1
-        fi
-        if [[ "$svc" == 5gpn-intercept ]]; then
-            if "$INTERCEPT_BIN" --config "$INTERCEPT_DIR/config.json" --check-enabled >/dev/null 2>&1; then
-                :
-            else
-                check_rc=$?
-                if [[ "$check_rc" == 3 ]]; then
-                    if systemctl stop 5gpn-intercept.service 2>/dev/null; then
-                        ok "5gpn-intercept remains stopped because MITM is disabled."
-                    else
-                        err "could not stop disabled 5gpn-intercept (check: journalctl -u 5gpn-intercept)."
-                        failed=1
-                    fi
-                    continue
-                fi
-                err "could not validate the MITM master setting before starting 5gpn-intercept."
-                failed=1
-                continue
-            fi
-        fi
-        if ! systemctl restart "$svc" 2>/dev/null && ! systemctl start "$svc" 2>/dev/null; then
-            err "could not start $svc (check: journalctl -u $svc)."
-            failed=1
-            continue
-        fi
-        wait_service_ready "$svc" || failed=1
-    done
+    local failed=0
+    if ! systemctl enable mihomo >/dev/null 2>&1; then
+        err "could not enable mihomo (check: systemctl status mihomo)."
+        failed=1
+    fi
+    if ! systemctl restart mihomo 2>/dev/null && ! systemctl start mihomo 2>/dev/null; then
+        err "could not start mihomo (check: journalctl -u mihomo)."
+        failed=1
+    else
+        wait_service_ready mihomo || failed=1
+    fi
     [[ "$failed" == 0 ]] || return 1
 }
 

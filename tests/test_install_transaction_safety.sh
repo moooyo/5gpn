@@ -177,15 +177,17 @@ run_management_with_install_and_cert_lock cert_management_probe \
     || fail "certificate management probe did not run"
 pass "certificate-writing management commands hold install then certificate locks"
 
-# With interception enabled, its readiness probe depends on mihomo's
-# authenticated SOCKS listeners. Prove that the lifecycle loop establishes the
-# data plane before probing the sidecar, then starts DNS last.
-intercept_stub="$TMP/intercept-check"
-printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$intercept_stub"
-chmod 0755 "$intercept_stub"
+# There is one long-running unit now, so the ordering this used to police is
+# gone -- not relaxed. The race it existed for was the interception sidecar's
+# readiness probe depending on mihomo's SOCKS listeners, and DNS advertising
+# gateway answers before the data plane was live. Inside one process that binds
+# everything before it accepts anything, neither can happen.
+#
+# What must survive is the part that was never about ordering: success is gated
+# on readiness, and any failure to enable, start or become ready is fatal. An
+# installer that prints success over a dead gateway is the failure this file
+# exists to prevent.
 service_order="$TMP/service-order"
-mihomo_ready="$TMP/mihomo-ready"
-INTERCEPT_BIN="$intercept_stub"
 PUBLIC_IP=192.0.2.10
 GATEWAY_IP=192.0.2.10
 MIHOMO_LISTEN_IPS=192.0.2.10
@@ -193,27 +195,23 @@ resolve_mihomo_listen_ips() { printf '%s\n' "$1"; }
 systemctl() {
     local action="$1" unit="${*: -1}"
     case "$action" in
-        daemon-reload|enable) return 0 ;;
-        restart|start)
-            case "$unit" in
-                mihomo) : > "$mihomo_ready"; printf 'mihomo\n' >> "$service_order" ;;
-                5gpn-intercept)
-                    [[ -e "$mihomo_ready" ]] || return 91
-                    printf 'intercept\n' >> "$service_order" ;;
-                5gpn-dns) printf 'dns\n' >> "$service_order" ;;
-            esac ;;
-        stop) return 0 ;;
-        *) return 0 ;;
+        restart|start) printf '%s\n' "$unit" >> "$service_order" ;;
     esac
-}
-wait_service_ready() {
-    [[ "$1" != 5gpn-intercept || -e "$mihomo_ready" ]] || return 92
     return 0
 }
-start_services || fail "enabled interception was probed before mihomo became ready"
-[[ "$(tr '\n' ' ' < "$service_order")" == 'mihomo intercept dns ' ]] \
-    || fail "service start order is not mihomo -> intercept -> DNS"
-pass "active interception starts and probes only after the mihomo data plane"
+wait_service_ready() { return 0; }
+start_services || fail "start_services failed on a healthy host"
+[[ "$(tr '\n' ' ' < "$service_order")" == 'mihomo ' ]] \
+    || fail "start_services started something other than the one unit: $(tr '\n' ' ' < "$service_order")"
+pass "one unit is started, and nothing that was retired with the old layout"
+
+# A unit that never becomes ready must fail the install rather than complete it.
+: > "$service_order"
+wait_service_ready() { return 92; }
+if start_services; then
+    fail "start_services reported success for a unit that never became ready"
+fi
+pass "install success is gated on readiness"
 unset -f systemctl wait_service_ready resolve_mihomo_listen_ips
 
 # The unwind path still owns three things: it surfaces its own failures, it
