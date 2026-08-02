@@ -13,35 +13,20 @@ import (
 // OverlayDriver publishes routing changes as typed generations. It is the only
 // publication path: the operator's mihomo YAML is never rewritten for one.
 //
-// The ordering below is the whole point and is not negotiable: the sidecar
-// bundle and the certificate must be in place *before* mihomo publishes the
-// generation as active, because activation is what makes capture traffic
-// start arriving.
+// The driver owns the generation. The certificate gate and the client DNS
+// overlay belong to the caller: InterceptModuleManager.mutate waits for the
+// certificate before calling Publish and installs the DNS overlay after it
+// returns (see intercept_module_manager.go:1260-1282). The driver used to carry
+// hooks for both, which nothing ever installed -- so a doc comment called a
+// seven-step ordering "not negotiable" while two of the steps could not run.
 type OverlayDriver struct {
 	client  *OverlayClient
 	journal *OverlayJournal
-	// certWait blocks until the certificate publisher acknowledges the exact
-	// host-set digest for this generation.
-	certWait func(ctx context.Context, digest string) error
-	// dnsPublish installs the client DNS overlay. It runs last, after the
-	// generation is confirmed effective — publishing it earlier would steer
-	// clients at a gateway that cannot yet process their traffic.
-	dnsPublish func(ctx context.Context) error
 }
 
 // NewOverlayDriver builds the driver.
 func NewOverlayDriver(client *OverlayClient, journal *OverlayJournal) *OverlayDriver {
 	return &OverlayDriver{client: client, journal: journal}
-}
-
-// SetCertificateWaiter installs the certificate readiness gate.
-func (d *OverlayDriver) SetCertificateWaiter(fn func(ctx context.Context, digest string) error) {
-	d.certWait = fn
-}
-
-// SetDNSPublisher installs the client DNS overlay publisher.
-func (d *OverlayDriver) SetDNSPublisher(fn func(ctx context.Context) error) {
-	d.dnsPublish = fn
 }
 
 // Available reports whether the core actually implements a schema this build
@@ -65,12 +50,15 @@ func newOverlayOperationID() string {
 //
 //  1. read back the authoritative live state — never trust local belief;
 //  2. compile and stage, which is idempotent and carries no capability;
-//  3. wait for the certificate for this exact host set;
-//  4. write COMMIT_INTENT durably, before the commit call goes out;
-//  5. commit with compare-and-swap against the live generation and the core
+//  3. write COMMIT_INTENT durably, before the commit call goes out;
+//  4. commit with compare-and-swap against the live generation and the core
 //     configuration revision;
-//  6. on any ambiguous failure, read back and roll forward — never rollback;
-//  7. publish the client DNS overlay only after the generation is effective.
+//  5. on any ambiguous failure, read back and roll forward — never rollback.
+//
+// The certificate for this exact host set is already published when Publish is
+// called, and the client DNS overlay is installed after it returns. Both are
+// the caller's, and both have to bracket this call: capture traffic starts
+// arriving the moment the generation goes live.
 func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (overlayCommitResult, error) {
 	var zero overlayCommitResult
 
@@ -158,18 +146,6 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 		return zero, err
 	}
 
-	if d.certWait != nil && doc.CertificateHostSetDigest != "" {
-		if err := d.certWait(ctx, doc.CertificateHostSetDigest); err != nil {
-			// The staged generation carries no capability, so abandoning it
-			// leaves the live generation untouched.
-			if abortErr := d.client.Abort(ctx, doc.GenerationID); abortErr != nil {
-				log.Printf("overlay: abort %s after certificate failure: %v", doc.GenerationID, abortErr)
-			}
-			_ = d.journal.Finish()
-			return zero, fmt.Errorf("overlay: certificate not ready for %s: %w", doc.GenerationID, err)
-		}
-	}
-
 	// Durable intent BEFORE the commit call. This is what makes a lost response
 	// recoverable: after this point the coordinator knows a commit may have
 	// landed and must read back rather than assume.
@@ -189,11 +165,6 @@ func (d *OverlayDriver) Publish(ctx context.Context, in overlayCompileInput) (ov
 
 	if err := d.journal.Advance(overlayPhaseEffective, ""); err != nil {
 		return result, err
-	}
-	if err := d.publishDNS(ctx); err != nil {
-		// The generation is live; only the client DNS overlay is missing. That
-		// is a degraded state to report, not a reason to revoke working policy.
-		return result, fmt.Errorf("overlay: generation %s is effective but the DNS overlay failed: %w", doc.GenerationID, err)
 	}
 	_ = d.journal.Advance(overlayPhaseDNSApplied, "")
 	_ = d.journal.Finish()
@@ -252,9 +223,6 @@ func (d *OverlayDriver) recoverAfterCommit(ctx context.Context, generationID, ba
 	if readback.ActiveGeneration == generationID {
 		// It landed after all. Roll forward.
 		_ = d.journal.Advance(overlayPhaseEffective, commitErr.Error())
-		if dnsErr := d.publishDNS(ctx); dnsErr != nil {
-			return overlayCommitResult{ActiveGeneration: readback.ActiveGeneration}, dnsErr
-		}
 		_ = d.journal.Advance(overlayPhaseDNSApplied, "")
 		_ = d.journal.Finish()
 		return overlayCommitResult{
@@ -280,13 +248,6 @@ func (d *OverlayDriver) recoverAfterCommit(ctx context.Context, generationID, ba
 		generationID, readback.ActiveGeneration, commitErr)
 }
 
-func (d *OverlayDriver) publishDNS(ctx context.Context) error {
-	if d.dnsPublish == nil {
-		return nil
-	}
-	return d.dnsPublish(ctx)
-}
-
 // Recover resolves an operation interrupted by a crash or a lost response. It
 // runs at startup, before anything else touches routing.
 func (d *OverlayDriver) Recover(ctx context.Context) error {
@@ -310,9 +271,6 @@ func (d *OverlayDriver) Recover(ctx context.Context) error {
 		log.Printf("overlay: rolling forward to generation %s recovered from the journal", readback.ActiveGeneration)
 		if err := d.journal.Advance(overlayPhaseEffective, ""); err != nil {
 			return err
-		}
-		if dnsErr := d.publishDNS(ctx); dnsErr != nil {
-			return dnsErr
 		}
 		_ = d.journal.Advance(overlayPhaseDNSApplied, "")
 		return d.journal.Finish()
