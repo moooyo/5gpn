@@ -578,6 +578,52 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 			rule.Headers != nil || rule.Rewrite != nil || rule.ReplaceBody != nil) {
 			return fmt.Errorf("action %q declares an entry without a script", rule.ID)
 		}
+		// Every kind carries a body mode and the two limits, so all three are
+		// checked once, here, above the branches. They used to sit below two
+		// `continue`s -- one for reject and one for the four other declarative
+		// kinds -- so five of the seven kinds were never bounds-checked at all,
+		// by either component. The comment below about hoisting these above the
+		// jq branch is the same lesson, learned once and not carried far enough.
+		//
+		// What that cost: `maxBodyBytes: 1024` on a mock whose body is 2 KiB is
+		// an ordinary thing to copy from a neighbouring action, and it made
+		// every matching request 502 -- because validateModuleResultBody sizes
+		// the result against this field. `maxBodyBytes: -1` did it
+		// unconditionally, for any body including an empty one. `bodyMode:
+		// banana` survived to the sidecar and defeated the streaming fast path,
+		// which requires every matched rule to be exactly "none".
+		if rule.BodyMode != "none" && rule.BodyMode != "text" && rule.BodyMode != "binary" {
+			return fmt.Errorf("action %q body_mode must be none, text, or binary", rule.ID)
+		}
+		// jq and script both run with a timeout and a body limit, and the sidecar
+		// bounds them for both. These sat below the jq branch, so a manifest
+		// declaring `timeoutMs: 20` on a jq action was accepted here and rejected
+		// there. Two components disagreeing about the same document is the whole
+		// failure; the bounds are the same numbers either way.
+		if rule.TimeoutMS < 50 || rule.TimeoutMS > 30000 {
+			return fmt.Errorf("action %q timeout_ms must be between 50 and 30000", rule.ID)
+		}
+		if rule.MaxBodyBytes < 1024 || rule.MaxBodyBytes > 64<<20 {
+			return fmt.Errorf("action %q max_body_bytes must be between 1024 and 67108864", rule.ID)
+		}
+		// A rewrite reads the request URL and returns a changed one. It is the
+		// one declarative kind that never looks at rule.Phase, so on the
+		// response phase it still produced a URL change -- which the response
+		// path refuses, correctly and fail-closed, by failing the exchange. The
+		// upstream had already answered; the client got a 502 instead of a
+		// response that was fine. Four validators accepted the shape and the
+		// per-action log even recorded "action completed".
+		if rule.Rewrite != nil && rule.Phase != interceptPhaseRequest {
+			return fmt.Errorf("action %q rewrite requires phase request", rule.ID)
+		}
+		// replace_body edits a body, so it needs one delivered. It reads the
+		// message body directly without consulting body_mode, and today that
+		// works only because the response path buffers unconditionally. Pinning
+		// the declaration means a streaming fast path cannot silently turn a
+		// replacement into a no-op later.
+		if rule.ReplaceBody != nil && rule.BodyMode == "none" {
+			return fmt.Errorf("action %q replace_body requires body_mode text or binary", rule.ID)
+		}
 		// A declarative action has no script snapshot, so the body and digest
 		// rules below do not apply to it.
 		if rule.Reject {
@@ -594,17 +640,6 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 			}
 			continue
 		}
-		// jq and script both run with a timeout and a body limit, and the sidecar
-		// bounds them for both. These sat below the jq branch, so a manifest
-		// declaring `timeoutMs: 20` on a jq action was accepted here and rejected
-		// there. Two components disagreeing about the same document is the whole
-		// failure; the bounds are the same numbers either way.
-		if rule.TimeoutMS < 50 || rule.TimeoutMS > 30000 {
-			return fmt.Errorf("action %q timeout_ms must be between 50 and 30000", rule.ID)
-		}
-		if rule.MaxBodyBytes < 1024 || rule.MaxBodyBytes > 64<<20 {
-			return fmt.Errorf("action %q max_body_bytes must be between 1024 and 67108864", rule.ID)
-		}
 		if rule.JQProgram != "" {
 			if len(rule.JQProgram) > maxInterceptJQProgram {
 				return fmt.Errorf("action %q jq program exceeds %d bytes", rule.ID, maxInterceptJQProgram)
@@ -619,9 +654,6 @@ func validateInterceptModule(module interceptModuleSnapshot) error {
 		}
 		if !validSHA256(rule.ScriptDigest) || rule.ScriptDigest != sha256Hex([]byte(rule.ScriptBody)) {
 			return fmt.Errorf("action %q digest does not match its immutable script snapshot", rule.ID)
-		}
-		if rule.BodyMode != "none" && rule.BodyMode != "text" && rule.BodyMode != "binary" {
-			return fmt.Errorf("action %q body_mode must be none, text, or binary", rule.ID)
 		}
 		if rule.Entry != "" && rule.Entry != interceptScriptEntryProxyCompat {
 			return fmt.Errorf("action %q entry must be empty or %s", rule.ID, interceptScriptEntryProxyCompat)

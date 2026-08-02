@@ -129,3 +129,58 @@ func TestStoredInterceptRoutingDomainsUseCanonicalCorpus(t *testing.T) {
 		})
 	}
 }
+
+// The gateway half of the same gap the sidecar validator had: body_mode and the
+// two limits were checked below two `continue`s, so five of the seven action
+// kinds passed both components unchecked. Both validators have to agree, and
+// they have to agree on all seven kinds -- a manifest the gateway stores and
+// the sidecar then refuses wedges every later document mutation, because
+// validateSidecarCandidate runs on all of them.
+func TestDeclarativeActionsAreBoundsCheckedLikeScripts(t *testing.T) {
+	t.Parallel()
+	base := func(mutate func(*interceptScriptRule)) interceptModuleSnapshot {
+		module := testModuleSnapshot()
+		rule := interceptScriptRule{
+			ID: "declarative", Phase: interceptPhaseResponse, BodyMode: "none",
+			MaxBodyBytes: 1 << 20, TimeoutMS: 1000,
+			Match: interceptActionMatch{Hosts: []string{"api.example.com"}, Schemes: []string{"https"}, PathRegex: "^/"},
+			Mock:  &interceptMockResponse{Status: 200, Body: "{}"},
+		}
+		mutate(&rule)
+		module.Scripts = []interceptScriptRule{rule}
+		return module
+	}
+	for name, mutate := range map[string]func(*interceptScriptRule){
+		"max_body_bytes below the floor":   func(r *interceptScriptRule) { r.MaxBodyBytes = -1 },
+		"max_body_bytes above the ceiling": func(r *interceptScriptRule) { r.MaxBodyBytes = 1 << 30 },
+		"timeout below the floor":          func(r *interceptScriptRule) { r.TimeoutMS = 5 },
+		"body mode outside the enum":       func(r *interceptScriptRule) { r.BodyMode = "banana" },
+		"rewrite on the response phase": func(r *interceptScriptRule) {
+			r.Mock = nil
+			r.Rewrite = &interceptURLRewrite{Pattern: `^https://api\.example\.com/(.*)$`, To: "https://api.example.com/v2/$1"}
+		},
+		"replace_body without a body": func(r *interceptScriptRule) {
+			r.Mock = nil
+			r.BodyMode = "none"
+			r.ReplaceBody = &interceptBodyReplace{Pattern: "a", To: "b"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateInterceptModule(base(mutate)); err == nil {
+				t.Fatal("accepted; the sidecar refuses this shape, and a stored document it refuses blocks every later mutation")
+			}
+		})
+	}
+
+	// The shape the catalog ships stays valid: the limit bounds the message an
+	// action reads, and a mock reads none.
+	t.Run("mock body larger than the action limit", func(t *testing.T) {
+		module := base(func(r *interceptScriptRule) {
+			r.MaxBodyBytes = 1024
+			r.Mock = &interceptMockResponse{Status: 200, Body: strings.Repeat("x", 2048)}
+		})
+		if err := validateInterceptModule(module); err != nil {
+			t.Fatalf("refused a manifest the catalog ships: %v", err)
+		}
+	})
+}
