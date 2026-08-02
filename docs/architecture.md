@@ -76,6 +76,7 @@ between processes that no longer exist.
 | Listener | Purpose |
 | --- | --- |
 | `:853/tcp` | The only client DNS ingress, DNS over TLS. |
+| `127.0.0.1:5354/udp` and `/tcp` | The origin boundary. mihomo's own resolver queries it after the sniffer recovers a hostname, and it answers a different question from the client listener — see below. Loopback is enforced at bind. |
 | `127.0.0.1:5353/udp` | Local debugging only. The bind is refused if it is not loopback: it answers the same policy without TLS or client identity, which on a public address is an open resolver. |
 | `127.0.0.1:9090/tcp` | TLS-only external controller. Serves the Clash-compatible API, the `/gpn/*` routes, `/capabilities`, and the zashboard bundle at `/ui/`. |
 | configured gateway addresses | HTTP/TLS ingress for traffic steered to the gateway, sniffed for Host or SNI. |
@@ -83,6 +84,26 @@ between processes that no longer exist.
 There is no public DoH listener and no client-facing plain DNS listener on `:53`.
 There is no separate console origin, no zashboard origin, and no interception
 SOCKS5 listener. All three were deleted with the processes that needed them.
+
+### Why the origin boundary is a socket
+
+A client asks "where should I connect", and the answer may be this gateway.
+mihomo asks "where does this name actually live", and answering *that* with the
+gateway address would point the box at itself. So the origin listener carries no
+ordered policy, no CN arbitration and no gateway rewrite — not as a setting, but
+by construction. What it does own is the operator's china/trust binding for a
+captured host, and the synthetic NODATA that keeps egress on IPv4: mihomo issues
+the AAAA query unconditionally, and an answered one is raced against the v4
+addresses, where a winning v6 leg retires the dual-stack fallback and leaves
+nothing behind it.
+
+It is a socket rather than a function call because mihomo reaches its resolver
+through package-level globals that `hub/executor.updateDNS` reassigns on every
+`ApplyConfig`. A loopback nameserver named in the operator's own configuration
+survives a reload; anything else would need an edit to an upstream-owned file,
+which is the one cost this fork is organised to avoid.
+
+Both boundaries share one cache, keyed so they can never share an answer.
 
 ## Authentication
 
@@ -98,6 +119,40 @@ client that can reach `/configs` can reach these and one that cannot, cannot.
 `/ui/*` is mounted outside that group. That is deliberate and is the only
 unauthenticated surface: an unenrolled phone downloading a `.mobileconfig`
 trusts nothing yet and holds no secret.
+
+## Control surface
+
+`/capabilities` reports which subsystems are actually installed, with a schema
+version each. A client that does not understand exactly that version treats the
+feature as absent rather than rendering it — field meanings may have moved, and
+showing an operator a status that might be wrong is worse than showing nothing.
+A subsystem whose document failed to load does not advertise itself, so an
+absent panel and an empty one mean different things.
+
+`/gpn/dns` is read and written whole. The edits are not independent: moving a
+gateway to a new address and changing the upstreams that serve it is one
+decision, and there is no useful state between the two halves of it.
+
+`/gpn/interception` is the opposite, and for the same reason. Enabling an
+extension authorizes a capture set, a script set, a storage grant and possibly
+an unrestricted network grant; reordering decides which of two extensions owns
+an overlapping host, and therefore which script acts on it, which egress binding
+wins and which resolver group looks up its origin. A single endpoint taking the
+whole document would make those indistinguishable from renaming something, and
+the confirmation an operator gave would not correspond to any particular
+decision. So each is its own write.
+
+Every write quotes the revision it was read at and is refused with `409` if it
+has moved, carrying the current revision back so a client can re-read rather
+than being told only that it lost.
+
+Install and update are two calls, joined by a digest. The digest covers the
+manifest bytes, every script that will run, and the immutable capability shape —
+and deliberately not the operator's bindings or entered settings, which would
+make it change whenever they edited a field and stop meaning "this is what you
+reviewed". The install re-fetches and compares rather than committing the
+candidate it already holds, which is what makes the digest a check on the
+publisher rather than on our own bookkeeping.
 
 ## Capture
 
@@ -157,6 +212,20 @@ Updates carry the revision they were read at and are refused with
 the system and it exists for one reason: two operators with the same page open
 in two tabs.
 
+There are two documents. `dns.json` is the resolver: listeners, gateway address,
+the two upstream groups and their client subnet, the ordered policy, and the
+handful of knobs with no correct universal value. `intercept.json` is the
+interception engine: the master switch, the protocol settings, and the installed
+extensions with their immutable snapshots and the operator's own bindings.
+
+`dns.json` replaced four files — `policy.json`, `upstreams.json`, `ecs.json` and
+the DNS-shaped half of an environment file that systemd read and the daemon
+could not write. Splitting them made every cross-cutting edit two writes with no
+way to name the pair: moving a gateway to a new address and changing the
+upstreams that serve it left a window in which the resolver was configured as
+neither. It also put the one file the console most needed to repair out of its
+reach.
+
 `config.yaml` remains fully operator-owned.
 
 ## Upgrading an existing gateway
@@ -172,10 +241,19 @@ excluded an inbound that no longer exists. The `intercept-egress` listener and
 the `MODULE-INTERCEPT` node are dead but harmless, so they are cleanup rather
 than migration.
 
+The units are handled the same way, and the asymmetry is deliberate: the
+installer publishes only the units this release owns, but keeps removing the
+ones it used to. An orphaned `5gpn-dns.service` on an upgraded host would keep
+restarting against a binary that is gone — or keep `:853` bound against the one
+that is not. The list of retired units is therefore the only record that they
+were ever ours, and dropping an entry from it strands whatever it names on every
+host that has not upgraded yet.
+
 ## Verification boundary
 
 Changes are tested in proportion to their surface. `go build ./...` and
-`go test -race ./gpn/...` must be green. `tests/` holds the installer suites.
+`go test -race ./gpn/...` must be green. `tests/` holds the installer suites,
+which are shell and must be run under Linux against an LF checkout.
 
 A real gateway is reachable as `test-env` over OpenSSH. Because it is a working
 gateway, configuration changes are validated against copies rather than in
@@ -187,13 +265,14 @@ This document describes the target the work is converging on. These parts are
 designed and not yet implemented; do not read their presence above as a claim
 that they ship today.
 
-- The DNS decision engine (ordered policy, CN arbitration, ECS, cache, query
-  log) still lives in the retired `5gpn-dns` sources. `gpn/dns` currently holds
-  the embedded datasets and the DoT listener, and the listener has no handler.
-- `/gpn/*` currently serves `/capabilities` and a read-only
-  `GET /gpn/interception`. The remaining routes are not written.
-- zashboard has capability discovery and one interception settings section. The
-  extensions, marketplace, policy, query-log and Telegram-bot surfaces are not
-  written.
-- `install.sh` still installs three artifacts and three units. Its rewrite, and
-  the TUI, are not started.
+- `install.sh` still stages and publishes the two retired binaries, and still
+  seeds the four retired DNS state files. The unit set is already collapsed to
+  one service plus two root oneshots. The TUI is not started.
+- The marketplace surface does not exist. Extensions install from a manifest URL
+  or a pasted manifest, which is the whole of the install path today.
+- The Telegram bot is not ported. Its management UI is designed to live in
+  zashboard alongside every other surface rather than as a second marketplace
+  inside a chat client, and neither half is written.
+- UDP and HTTP/3 capture are not wired. `MatchUDP` reports false, and gateway
+  QUIC is handled by the fixed `AND,((NETWORK,UDP),(DST-PORT,443)),REJECT`
+  capability, which makes a capable client retry over TCP.
