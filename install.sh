@@ -170,8 +170,8 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # They share no Go types — only a versioned control-API wire format — so the
 # thing that keeps them working together is a schema number, not a build.
 SIDECAR_REPO="moooyo/mihomo-extension-sidecar"
-SIDECAR_VERSION="0.5.0"
-SIDECAR_SHA256="e00401acb3defb1a97133c0d5068f22be44934b640e2fc827d7c6535f3c0c392"
+SIDECAR_VERSION="0.6.0"
+SIDECAR_SHA256="c6be991d810613c1dcf735af47007cadeb998b0e7647c72bad849fe95d821d4d"
 MIHOMO_REPO="moooyo/mihomo"
 MIHOMO_VERSION="v1.19.28-overlay.6"
 MIHOMO_SHA256="13fbc6789895bb201c7c8607ec423b03b192082f9b6bb0a20bf9a15593973479"
