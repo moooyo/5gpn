@@ -309,6 +309,19 @@ main() {
         || { err "The interception TLS directory is unsafe."; return 1; }
 
     local serial group group_gid_value first_host san host
+    # A host that has never enabled an extension has no request file at all --
+    # the engine writes it when the first capture host is enabled. That is the
+    # absence of a set, not a malformed one, and install.sh says so itself a few
+    # lines after calling this script ("no extension leaf is needed yet"). Before
+    # this check a fresh install died here, on a state it is supposed to reach.
+    #
+    # The test is `! -e && ! -L` rather than `! -e` alone: a dangling symlink
+    # satisfies `! -e`, and treating one as "nothing here" would convert a
+    # planted path into a silent skip. Absence has to mean absence.
+    if [[ ! -e "$CERT_REQUEST" && ! -L "$CERT_REQUEST" ]]; then
+        info "No extension has requested interception hosts yet; nothing to publish."
+        return 0
+    fi
     load_desired_hosts || { err "The enabled extension capture-host set is invalid."; return 1; }
     if [[ ! -s "$stage/hosts" ]]; then
         info "No enabled extension requests interception hosts; keeping any previous leaf unused."

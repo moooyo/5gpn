@@ -71,6 +71,34 @@ if load_desired_hosts; then
 fi
 pass "certificate publisher enforces the shared 512-host bound"
 
+# A host that has never enabled an extension has no request file at all. That is
+# the state every fresh install passes through, and load_desired_hosts rejects it
+# the same way it rejects a corrupt one -- which is correct for that function and
+# wrong as a publication verdict. The caller has to tell absence from corruption,
+# because install.sh treats absence as normal ("no extension leaf is needed yet")
+# immediately after invoking the publisher.
+rm -f "$CERT_REQUEST"
+if load_desired_hosts; then
+    fail "load_desired_hosts accepted a missing certificate request"
+fi
+pass "a missing certificate request is not a loadable host set"
+
+# Absence must mean absence: a dangling symlink satisfies `! -e`, so a guard
+# written with `! -e` alone would turn a planted path into a silent skip.
+ln -s "$TMP/does-not-exist" "$CERT_REQUEST"
+if [[ ! -e "$CERT_REQUEST" && ! -L "$CERT_REQUEST" ]]; then
+    fail "dangling symlink was classified as an absent certificate request"
+fi
+pass "a dangling symlink is not classified as absence"
+rm -f "$CERT_REQUEST"
+if [[ ! -e "$CERT_REQUEST" && ! -L "$CERT_REQUEST" ]]; then
+    pass "a truly absent certificate request is classified as absence"
+else
+    fail "an absent certificate request was not classified as absence"
+fi
+grep -Fq 'No extension has requested interception hosts yet' "$ROOT/scripts/intercept-cert-renew.sh" \
+    || fail "the publisher has no no-op path for a host with no enabled extensions"
+
 # A stale inherited descriptor must not be accepted merely because readlink
 # prints the same pathname after the lock file was replaced.
 : > "$LOCK_FILE"
