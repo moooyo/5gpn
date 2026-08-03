@@ -248,8 +248,7 @@ grep -Fq 'remove_runtime_preserving_gum' <<<"$uninstall_fn" \
     && pass "uninstall preserves Gum through the dedicated runtime cleanup" \
     || fail "uninstall still removes Gum with the whole runtime"
 
-grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/web.tgz"' "$INSTALL" \
-    && grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/mihomo.gz"' "$INSTALL" \
+grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/mihomo.gz"' "$INSTALL" \
     && grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/zash.zip"' "$INSTALL" \
     && pass "all staged runtime artifacts are digest verified" \
     || fail "mandatory artifact digest verification missing"

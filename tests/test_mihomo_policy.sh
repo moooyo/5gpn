@@ -196,20 +196,25 @@ nocheck install.sh 'systemctl restart xray' 'restart_services no longer restarts
 nocheck install.sh 'xray\.service|/usr/local/bin/xray' 'no old Xray teardown remains'
 
 # Task A4: zashboard dist acquisition (pinned dist.zip download + wiring)
-check install.sh 'install_zashboard\(\)' 'install_zashboard function exists'
+check install.sh '^install_ui\(\)' 'install_ui function exists'
 check install.sh 'ZASH_VERSION="v3\.16\.0-overlay\.1"' 'ZASH_VERSION fixed pin'
 check install.sh 'ZASH_REPO="moooyo/zashboard"' 'zashboard comes from our fork'
 check install.sh '\$\{ZASH_REPO\}/releases/download' 'zashboard download URL is parameterised by ZASH_REPO'
 nocheck install.sh 'Zephyruso/zashboard/releases/download' 'no hardcoded upstream zashboard download remains'
-if grep -A1 -E '^\s*install_web(\s*\|\| return 1)?\s*$' "$root/install.sh" | grep -q 'install_zashboard'; then
-    echo "ok: full_install calls install_zashboard right after install_web"
+# The bundle must be on disk before install_units starts the service: the unit
+# names UI_DIR in ReadOnlyPaths with no `-` prefix, so an unpublished directory
+# is not a missing panel, it is a unit that cannot enter its namespace.
+if grep -A1 -E '^\s*install_ui(\s*\|\| return 1)?\s*$' "$root/install.sh" | grep -q 'install_units'; then
+    echo "ok: full_install publishes the UI immediately before install_units"
 else
-    echo "FAIL: full_install calls install_zashboard right after install_web"; FAIL=1
+    echo "FAIL: full_install publishes the UI immediately before install_units"; FAIL=1
 fi
-# Custom DNS_ZASH_DIR cleanup is marker-gated; raw rm of the env path is banned.
-check install.sh 'claim_zashboard_dir\(\)' 'zashboard ownership marker claim exists'
-check install.sh 'remove_zashboard_dir\(\)' 'zashboard marker-gated uninstall exists'
-nocheck install.sh 'rm -rf "\$DNS_ZASH_DIR"' 'no raw recursive deletion of DNS_ZASH_DIR'
+# UI cleanup is marker-gated; raw rm of the published path is banned.
+check install.sh 'claim_ui_dir\(\)' 'UI ownership marker claim exists'
+check install.sh 'remove_ui_dir\(\)' 'UI marker-gated removal exists'
+nocheck install.sh 'rm -rf "\$UI_DIR"' 'no raw recursive deletion of UI_DIR'
+# The retired console origin must not come back with its own directory or listener.
+nocheck install.sh 'install_web\(\)|DNS_WEB_DIR=|DNS_ZASH_LISTEN=' 'no second origin is published'
 # The zashboard backend-seeding deep-link is C3 frontend scope, NOT the
 # installer -- install.sh must only acquire+unzip the dist, never patch it in.
 nocheck install.sh 'secondaryPath=/proxy' 'zashboard #/setup deep-link NOT hardcoded in install.sh (belongs to C3 frontend)'

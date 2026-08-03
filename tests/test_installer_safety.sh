@@ -623,12 +623,12 @@ if (
     printf 'asset\n' > "$src/assets/app.js"
     chmod 0700 "$src" "$src/assets"
     chmod 0600 "$src/index.html" "$src/assets/app.js"
-    publish_owned_tree "$src" "$dest" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"
+    publish_owned_tree "$src" "$dest" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE"
     [[ "$(file_mode "$dest")" == 755 ]]
     [[ "$(file_mode "$dest/assets")" == 755 ]]
     [[ "$(file_mode "$dest/index.html")" == 644 ]]
     [[ "$(file_mode "$dest/assets/app.js")" == 644 ]]
-    [[ "$(file_mode "$dest/$WEB_OWNERSHIP_MARKER")" == 644 ]]
+    [[ "$(file_mode "$dest/$ZASH_OWNERSHIP_MARKER")" == 644 ]]
     grep -qxF index "$dest/index.html"
     grep -qxF asset "$dest/assets/app.js"
 ); then
@@ -653,16 +653,16 @@ fi
 
 if (
     custom_parent="$TMP/custom-static-marker"
-    DNS_WEB_DIR="$custom_parent/web"
-    mkdir -p "$DNS_WEB_DIR"
-    printf '%s\n' "$WEB_OWNERSHIP_VALUE" > "$DNS_WEB_DIR/$WEB_OWNERSHIP_MARKER"
+    UI_DIR="$custom_parent/web"
+    mkdir -p "$UI_DIR"
+    printf '%s\n' "$ZASH_OWNERSHIP_VALUE" > "$UI_DIR/$ZASH_OWNERSHIP_MARKER"
     file_uid() {
-        [[ "$1" == "$DNS_WEB_DIR/$WEB_OWNERSHIP_MARKER" ]] \
+        [[ "$1" == "$UI_DIR/$ZASH_OWNERSHIP_MARKER" ]] \
             && printf '1001\n' || printf '0\n'
     }
     file_gid() { printf '0\n'; }
     file_mode() {
-        [[ "$1" == "$DNS_WEB_DIR/$WEB_OWNERSHIP_MARKER" ]] \
+        [[ "$1" == "$UI_DIR/$ZASH_OWNERSHIP_MARKER" ]] \
             && printf '644\n' || printf '755\n'
     }
     ! claim_web_dir >/dev/null 2>&1
@@ -674,15 +674,15 @@ fi
 
 if (
     custom_parent="$TMP/custom-static-empty-owner"
-    DNS_WEB_DIR="$custom_parent/web"
-    mkdir -p "$DNS_WEB_DIR"
+    UI_DIR="$custom_parent/web"
+    mkdir -p "$UI_DIR"
     file_uid() {
-        [[ "$1" == "$DNS_WEB_DIR" ]] && printf '1001\n' || printf '0\n'
+        [[ "$1" == "$UI_DIR" ]] && printf '1001\n' || printf '0\n'
     }
     file_gid() { printf '0\n'; }
     file_mode() { printf '755\n'; }
     ! claim_web_dir >/dev/null 2>&1 \
-        && [[ ! -e "$DNS_WEB_DIR/$WEB_OWNERSHIP_MARKER" ]]
+        && [[ ! -e "$UI_DIR/$ZASH_OWNERSHIP_MARKER" ]]
 ); then
     pass "empty custom asset roots are trusted before marker publication"
 else
@@ -702,7 +702,7 @@ if (
     file_gid() { printf '0\n'; }
     file_mode() { [[ -d "$1" ]] && printf '755\n' || printf '644\n'; }
     normalize_static_tree_ownership() { :; }
-    ! publish_owned_tree "$src" "$dest" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE" >/dev/null 2>&1 \
+    ! publish_owned_tree "$src" "$dest" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" >/dev/null 2>&1 \
         && grep -qxF old "$dest/index.html"
 ); then
     pass "static publication revalidates its trusted parent before the swap"
@@ -1138,41 +1138,41 @@ else
     pass "mihomo reset does not restart after candidate publication failure"
 fi
 
-# External zashboard directories need a marker before recursive cleanup. The
-# GitHub checkout lives below /home, which safe_zashboard_path intentionally
-# rejects, so isolate ownership lifecycle behavior from path-policy behavior.
+# The published UI directory needs a marker before recursive cleanup. The
+# GitHub checkout lives below /home, which safe_ui_path intentionally rejects,
+# so isolate ownership lifecycle behavior from path-policy behavior.
 BASE_DIR="$TMP/base"
 if (
-    safe_zashboard_path() { printf '%s\n' "$DNS_ZASH_DIR"; }
-    DNS_ZASH_DIR="$TMP/external/zash"
+    safe_ui_path() { printf '%s\n' "$UI_DIR"; }
+    UI_DIR="$TMP/external/ui"
     file_uid() { printf '0\n'; }
     file_gid() { printf '0\n'; }
     file_mode() {
-        [[ "$1" == "$DNS_ZASH_DIR/$ZASH_OWNERSHIP_MARKER" ]] \
+        [[ "$1" == "$UI_DIR/$ZASH_OWNERSHIP_MARKER" ]] \
             && printf '644\n' || printf '755\n'
     }
-    mkdir -p "$DNS_ZASH_DIR"
-    echo foreign > "$DNS_ZASH_DIR/file"
-    ! claim_zashboard_dir >/dev/null 2>&1
-    rm -f "$DNS_ZASH_DIR/file"
-    claim_zashboard_dir >/dev/null
-    echo owned > "$DNS_ZASH_DIR/file"
-    remove_zashboard_dir >/dev/null
-    [[ ! -e "$DNS_ZASH_DIR" ]]
+    mkdir -p "$UI_DIR"
+    echo foreign > "$UI_DIR/file"
+    ! claim_ui_dir >/dev/null 2>&1
+    rm -f "$UI_DIR/file"
+    claim_ui_dir >/dev/null
+    echo owned > "$UI_DIR/file"
+    remove_ui_dir >/dev/null
+    [[ ! -e "$UI_DIR" ]]
 ); then
-    pass "zashboard ownership marker gates removal"
+    pass "UI ownership marker gates removal"
 else
-    fail "zashboard ownership lifecycle check failed"
+    fail "UI ownership lifecycle check failed"
 fi
-DNS_ZASH_DIR=/
-if safe_zashboard_path >/dev/null 2>&1; then
-    fail "filesystem root accepted as DNS_ZASH_DIR"
+UI_DIR=/
+if safe_ui_path >/dev/null 2>&1; then
+    fail "filesystem root accepted as UI_DIR"
 else
-    pass "system root is rejected as DNS_ZASH_DIR"
+    pass "system root is rejected as UI_DIR"
 fi
-DNS_ZASH_DIR=/etc/5gpn-unowned-panel
-if safe_zashboard_path >/dev/null 2>&1; then
-    fail "system-directory descendant accepted as DNS_ZASH_DIR"
+UI_DIR=/etc/5gpn-unowned-panel
+if safe_ui_path >/dev/null 2>&1; then
+    fail "system-directory descendant accepted as UI_DIR"
 else
     pass "system-directory descendants are rejected as panel cleanup paths"
 fi

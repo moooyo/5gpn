@@ -115,11 +115,11 @@ INSTALL_CERT_LOCK_HELD=0
 # flag so the unscoped distro timer stays disabled after commit.
 KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=0
 DECOMMISSION_PRESERVE_ACME=0
-DNS_WEB_DIR_DEFAULT="/opt/5gpn/web"         # resolved from dns.env after cfg_get is defined
-# DNS_ZASH_DIR (zashboard SPA dist, config.go's ZashDir) is resolved just below
-# cfg_get()'s definition -- NOT here: the daemon reads DNS_ZASH_DIR out of dns.env,
-# so it must honor a dns.env value (cfg_get > default) and survive a bare
-# re-install, and cfg_get isn't defined yet at this point in the file.
+# The zashboard bundle, and the only user interface. Fixed, not operator-
+# configurable: mihomo.service names this exact path in SAFE_PATHS and in
+# ReadOnlyPaths, and the seed template names it in external-ui. A dns.env key
+# that could move it would only ever move it out from under the unit.
+UI_DIR="/opt/5gpn/ui"
 DNS_RULES_DIR_DEFAULT="/etc/5gpn/rules"  # subscription caches and chnroute snapshot
 MIHOMO_BIN="${BIN_DIR}/mihomo"
 MIHOMO_DIR="/etc/5gpn/mihomo"           # config.yaml + whitelist.txt + provider caches
@@ -157,8 +157,6 @@ POLKIT_RULE_PATH="/etc/polkit-1/rules.d/50-5gpn.rules"
 POLKIT_RULE_MARKER="// 5gpn-polkit-id: runtime-operations"
 ZASH_OWNERSHIP_MARKER=".5gpn-zashboard-owned"
 ZASH_OWNERSHIP_VALUE="5gpn-zashboard"
-WEB_OWNERSHIP_MARKER=".5gpn-web-owned"
-WEB_OWNERSHIP_VALUE="5gpn-web"
 IOS_OWNERSHIP_MARKER=".5gpn-ios-owned"
 IOS_OWNERSHIP_VALUE="5gpn-ios"
 TEMP_OWNERSHIP_MARKER=".5gpn-temp-owned"
@@ -192,13 +190,13 @@ DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
 # DoT and DoH, which address the same threat properly. The daemon no longer
 # reads the key, so leaving it in the schema would advertise a setting that
 # does nothing.
-readonly DNS_ENV_RETIRED_KEYS="DNS_CHINA DNS_CHINA_0X20 DNS_TRUST"
+readonly DNS_ENV_RETIRED_KEYS="DNS_CHINA DNS_CHINA_0X20 DNS_TRUST DNS_WEB_DIR DNS_ZASH_DIR DNS_ZASH_LISTEN"
 
 readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_LISTEN_API DNS_CERT DNS_KEY DNS_WEB_CERT DNS_WEB_KEY DNS_ZASH_CERT DNS_ZASH_KEY \
 DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL DNS_UPSTREAMS \
 DNS_CHINA_ECS DNS_ECS_FILE DNS_RULES_DIR DNS_CHNROUTE DNS_EGRESS_BROKER \
 DNS_SUBSCRIPTIONS DNS_POLICY_RULES DNS_API_TOKEN DNS_API_RATE DNS_API_BURST DNS_MIHOMO_CONTROLLER DNS_MIHOMO_SECRET \
-DNS_WHITELIST_FILE DNS_MIHOMO_CONFIG DNS_INTERCEPT_CONFIG DNS_MARKETPLACES_FILE DNS_ZASH_DIR DNS_ZASH_LISTEN DNS_WEB_DIR WWW_DIR TGBOT_TOKEN TGBOT_ADMINS \
+DNS_WHITELIST_FILE DNS_MIHOMO_CONFIG DNS_INTERCEPT_CONFIG DNS_MARKETPLACES_FILE WWW_DIR TGBOT_TOKEN TGBOT_ADMINS \
 DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS DNS_CACHE_SIZE DNS_MAX_INFLIGHT DNS_TTL_MIN DNS_TTL_MAX DNS_QUERY_TIMEOUT \
 DNS_STATS_FILE DNS_HEARTBEAT_URL DNS_HEARTBEAT_INTERVAL"
 # EDNS Client Subnet uses the operational default above. Operators can disable
@@ -211,18 +209,15 @@ GUM_BIN="${BIN_DIR}/gum"
 _HAVE_GUM=0                              # set by install_gum(); helpers fall back to echo when 0
 export PATH="${BIN_DIR}:${PATH}"
 
-# The release this installer IS, on moooyo/5gpn. Not a component version: it
-# selects the release every first-party input is drawn from, and four separate
-# decisions read it.
+# The release this installer IS, on moooyo/5gpn. Not a component version, and no
+# longer an artifact selector: the core and the UI bundle are released from their
+# own repositories under their own digest pins, so nothing is drawn from this
+# release but the installer bundle itself. Two decisions still read it.
 #
-#   1. Artifact binding -- stage_artifacts builds the whole download base URL
-#      from it, so checksums, core and console always come from one release.
-#   2. The console SPA gate -- install_web refuses a tarball whose .web_version
-#      disagrees with it.
-#   3. The unpinned-source sentinel -- while it is literally `latest` this
+#   1. The unpinned-source sentinel -- while it is literally `latest` this
 #      script refuses to install and execs quick-install.sh instead, so the
 #      channel is resolved once and the install comes from a verified bundle.
-#   4. Channel delegation -- a stamped stable bundle asked for --beta hands off
+#   2. Channel delegation -- a stamped stable bundle asked for --beta hands off
 #      rather than reusing its own pinned artifacts, and upgrade-reset-mihomo
 #      is admitted only from a stamped beta bundle.
 #
@@ -465,30 +460,19 @@ clear_external_config_env() {
     unset BASE_DOMAIN CONSOLE_DOMAIN ZASH_DOMAIN DOT_DOMAIN PUBLIC_IP GATEWAY_IP \
         MIHOMO_LISTEN_IPS CHINA_ECS CACHE_SIZE LOWMEM
     for key in $DNS_ENV_KEYS; do
-        # The web/zashboard paths were already resolved from dns.env immediately
-        # after cfg_get was defined. WWW_DIR is an installer-owned constant that
-        # was assigned above, not caller configuration. Preserve all three while
-        # clearing every externally supplied daemon key.
-        [[ "$key" == DNS_WEB_DIR || "$key" == DNS_ZASH_DIR || "$key" == WWW_DIR ]] && continue
+        # WWW_DIR is an installer-owned constant that was assigned above, not
+        # caller configuration. Preserve it while clearing every externally
+        # supplied daemon key. The UI directory is not in this set at all: it is
+        # a fixed constant now, not a dns.env key.
+        [[ "$key" == WWW_DIR ]] && continue
         unset "$key"
     done
 }
 
-# DNS_ZASH_DIR resolves dns.env (cfg_get) > default HERE, right after
-# cfg_get is defined -- so install_zashboard and uninstall
-# (which all read the global $DNS_ZASH_DIR) honor an operator's dns.env value and
-# it survives a bare re-install, matching DNS_ZASH_LISTEN. Do NOT move this back
-# up into the constants block: cfg_get() isn't defined there, so it would silently
-# fall through to the default and clobber a customized dns.env value on re-install.
-DNS_WEB_DIR="$(cfg_get DNS_WEB_DIR)"
-DNS_WEB_DIR="${DNS_WEB_DIR:-$DNS_WEB_DIR_DEFAULT}"
-DNS_ZASH_DIR="$(cfg_get DNS_ZASH_DIR)"
-DNS_ZASH_DIR="${DNS_ZASH_DIR:-/opt/5gpn/zash}"
-
 # Canonicalize a directory without requiring its final component to exist.
 # Deletion helpers below only operate on the returned path after checking a
 # project ownership marker. This protects root-run cleanup from a typo or a
-# malicious symlink in DNS_ZASH_DIR.
+# malicious symlink in UI_DIR.
 canonical_dir_path() {
     local p="$1" cur suffix="" leaf
     [[ "$p" == /* ]] || p="$PWD/$p"
@@ -1339,10 +1323,9 @@ static_owned_tree_is_safe() {
 # otherwise reject every host that had not upgraded yet, with no way forward
 # short of deleting the tree by hand.
 #
-# The path is still gated, just not on provenance: safe_web_path /
-# safe_zashboard_path reject system roots and the project's own roots, and both
-# the tree and its parent must be real directories that are root-owned and not
-# writable by anyone else.
+# The path is still gated, just not on provenance: safe_ui_path rejects system
+# roots and the project's own roots, and both the tree and its parent must be
+# real directories that are root-owned and not writable by anyone else.
 claim_public_owned_tree() {
     local dir="$1" marker="$2" value="$3" created_dir=0
     if [[ -e "$dir" || -L "$dir" ]]; then
@@ -1388,99 +1371,58 @@ preflight_public_owned_tree() {
     root_owned_nonwritable_directory_is_safe "$path"
 }
 
-safe_zashboard_path() {
+safe_ui_path() {
     local p
-    [[ -n "${DNS_ZASH_DIR:-}" && "$DNS_ZASH_DIR" != *$'\n'* && "$DNS_ZASH_DIR" != *$'\r'* ]] \
-        || { err "DNS_ZASH_DIR is empty or contains a newline; refusing it."; return 1; }
-    p="$(canonical_dir_path "$DNS_ZASH_DIR")" \
-        || { err "Could not canonicalize DNS_ZASH_DIR='$DNS_ZASH_DIR'."; return 1; }
+    [[ -n "${UI_DIR:-}" && "$UI_DIR" != *$'\n'* && "$UI_DIR" != *$'\r'* ]] \
+        || { err "UI_DIR is empty or contains a newline; refusing it."; return 1; }
+    p="$(canonical_dir_path "$UI_DIR")" \
+        || { err "Could not canonicalize UI_DIR='$UI_DIR'."; return 1; }
     case "$p" in
         /|/bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/home|/home/*|/lib|/lib/*|/lib64|/lib64/*|/opt|/private/etc|/private/etc/*|/private/tmp|/private/tmp/*|/private/var|/private/var/*|/proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/srv|/sys|/sys/*|/tmp|/tmp/*|/usr|/usr/*|/var|/var/*|"$BASE_DIR"|"$CONF_DIR")
-            err "Refusing unsafe DNS_ZASH_DIR: $p"; return 1 ;;
+            err "Refusing unsafe UI_DIR: $p"; return 1 ;;
     esac
     printf '%s\n' "$p"
 }
 
-preflight_zashboard_dir() {
+preflight_ui_dir() {
     local p
-    p="$(safe_zashboard_path)" || return 1
-    DNS_ZASH_DIR="$p"
+    p="$(safe_ui_path)" || return 1
     preflight_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
-        || { err "Refusing unsafe or unowned DNS_ZASH_DIR before staging: $p"; return 1; }
-    export DNS_ZASH_DIR
+        || { err "Refusing unsafe or unowned UI_DIR before staging: $p"; return 1; }
 }
 
-# Claim the zashboard directory before ever clearing it. A non-empty directory
-# must already carry the exact current ownership marker.
-claim_zashboard_dir() {
+# Claim the UI directory before ever clearing it. A non-empty directory must
+# already carry the exact current ownership marker.
+claim_ui_dir() {
     local p
-    preflight_zashboard_dir || return 1
-    p="$(safe_zashboard_path)" || return 1
-    DNS_ZASH_DIR="$p"
+    preflight_ui_dir || return 1
+    p="$(safe_ui_path)" || return 1
     ensure_static_publish_parent "$p" \
-        || { err "DNS_ZASH_DIR parent is not root-owned and non-writable: $(dirname -- "$p")"; return 1; }
+        || { err "UI_DIR parent is not root-owned and non-writable: $(dirname -- "$p")"; return 1; }
     if [[ ( -e "$p" || -L "$p" ) && ( ! -d "$p" || -L "$p" ) ]]; then
-        err "DNS_ZASH_DIR exists but is not a directory: $p"; return 1
+        err "UI_DIR exists but is not a directory: $p"; return 1
     fi
     if verify_ownership_marker "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE"; then
         static_owned_tree_is_safe "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
-            || { err "Unsafe zashboard directory or ownership marker: $p"; return 1; }
+            || { err "Unsafe UI directory or ownership marker: $p"; return 1; }
     else
         claim_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
-            || { err "Could not establish safe zashboard ownership: $p"; return 1; }
+            || { err "Could not establish safe UI directory ownership: $p"; return 1; }
     fi
-    export DNS_ZASH_DIR
 }
 
 
-remove_zashboard_dir() {
+remove_ui_dir() {
     local p
-    p="$(safe_zashboard_path)" || return 1
+    p="$(safe_ui_path)" || return 1
     [[ -e "$p" ]] || return 0
     # Claim before removing: a tree published by an older release carries that
     # release's marker value, and requiring the current one here would strand it
     # on the disk of every host that had not reinstalled first.
     static_publish_parent_is_safe "$p" \
         && claim_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
-        || { err "Refusing to remove unsafe zashboard directory: $p"; return 1; }
+        || { err "Refusing to remove unsafe UI directory: $p"; return 1; }
     remove_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE"
-}
-
-safe_web_path() {
-    local p
-    [[ -n "$DNS_WEB_DIR" && "$DNS_WEB_DIR" != *$'\n'* && "$DNS_WEB_DIR" != *$'\r'* ]] || return 1
-    p="$(canonical_dir_path "$DNS_WEB_DIR")" || return 1
-    case "$p" in
-        /|/bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/home|/home/*|/lib|/lib/*|/lib64|/lib64/*|/opt|/private/etc|/private/etc/*|/private/tmp|/private/tmp/*|/private/var|/private/var/*|/proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/srv|/sys|/sys/*|/tmp|/tmp/*|/usr|/usr/*|/var|/var/*|"$BASE_DIR"|"$CONF_DIR")
-            err "Refusing unsafe DNS_WEB_DIR: $p"; return 1 ;;
-    esac
-    printf '%s\n' "$p"
-}
-
-preflight_web_dir() {
-    local p
-    p="$(safe_web_path)" || return 1
-    DNS_WEB_DIR="$p"
-    preflight_public_owned_tree "$p" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE" \
-        || { err "Refusing unsafe or unowned DNS_WEB_DIR before staging: $p"; return 1; }
-}
-
-claim_web_dir() {
-    local p
-    preflight_web_dir || return 1
-    p="$(safe_web_path)" || return 1
-    DNS_WEB_DIR="$p"
-    ensure_static_publish_parent "$p" \
-        || { err "DNS_WEB_DIR parent is not root-owned and non-writable: $(dirname -- "$p")"; return 1; }
-    [[ ( ! -e "$p" && ! -L "$p" ) || ( -d "$p" && ! -L "$p" ) ]] \
-        || { err "DNS_WEB_DIR is not a directory: $p"; return 1; }
-    if verify_ownership_marker "$p" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"; then
-        static_owned_tree_is_safe "$p" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE" \
-            || { err "Unsafe web directory or ownership marker: $p"; return 1; }
-        return 0
-    fi
-    claim_public_owned_tree "$p" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE" \
-        || { err "Could not establish safe web directory ownership: $p"; return 1; }
 }
 
 # Atomically publish a tree of public static assets. Source trees may come from
@@ -2281,15 +2223,6 @@ verify_sha256() {
         || { err "SHA-256 mismatch for $(basename "$file") (want $expected got $got)."; return 1; }
 }
 
-# A release version declaration is one exact LF-terminated byte sequence.
-# Bytewise comparison rejects NULs that shell line readers would silently drop.
-release_tag_file_matches() {
-    local file="$1" expected="$2"
-    [[ -f "$file" && ! -L "$file" ]] || return 1
-    [[ "$(file_nlink "$file")" == 1 ]] || return 1
-    printf '%s\n' "$expected" | cmp -s - "$file"
-}
-
 # Upstream mihomo prints build metadata and feature tags as well as its release
 # version. Require its documented amd64 first-line shape, then compare the
 # complete version token rather than accepting a substring match.
@@ -2311,11 +2244,6 @@ mihomo_reports_exact_version() {
         && result=0
     rm -f -- "$output" || return 1
     return "$result"
-}
-
-release_checksum() {
-    local sums="$1" asset="$2"
-    awk -v f="$asset" '$2 == f || $2 == "*" f { print tolower($1); exit }' "$sums"
 }
 
 valid_stable_release_tag() {
@@ -2485,36 +2413,22 @@ extracted_tree_safe() {
 }
 
 stage_artifacts() {
-    local ver release
-    local web_asset
+    local ver
     ver="$(resolve_install_release_tag)" || return 1
     RELEASE_TAG="$ver"
-    release="https://github.com/moooyo/5gpn/releases/download/${ver}"
-    web_asset="5gpn-web-${ver}.tar.gz"
     ARTIFACT_STAGE="$(mktemp -d /var/tmp/5gpn-artifacts.XXXXXX)" \
         || { err "Could not create artifact staging directory."; return 1; }
     chmod 0700 "$ARTIFACT_STAGE"
     claim_temp_dir "$ARTIFACT_STAGE" \
         || { rmdir -- "$ARTIFACT_STAGE"; err "Could not claim artifact staging directory."; return 1; }
     info "Staging pinned release artifacts (${ver})..."
-    # checksums.txt stays: the console SPA tarball is verified from it.
-    curl -fsSL "$release/checksums.txt" -o "$ARTIFACT_STAGE/checksums.txt" \
-        || { err "Could not download release checksums.txt."; return 1; }
-    curl -fsSL "$release/$web_asset" -o "$ARTIFACT_STAGE/web.tgz" \
-        || { err "Could not download $web_asset."; return 1; }
-    verify_sha256 "$ARTIFACT_STAGE/web.tgz" \
-        "$(release_checksum "$ARTIFACT_STAGE/checksums.txt" "$web_asset")" || return 1
-    archive_paths_safe tar "$ARTIFACT_STAGE/web.tgz" \
-        || { err "Unsafe path in web archive."; return 1; }
-    mkdir "$ARTIFACT_STAGE/web"
-    tar --no-same-owner --no-same-permissions --delay-directory-restore \
-        -xzf "$ARTIFACT_STAGE/web.tgz" -C "$ARTIFACT_STAGE/web"
-    extracted_tree_safe "$ARTIFACT_STAGE/web" \
-        || { err "Unsafe object found after web archive extraction."; return 1; }
-    [[ -f "$ARTIFACT_STAGE/web/index.html" ]] \
-        || { err "Staged web archive has no index.html."; return 1; }
-    release_tag_file_matches "$ARTIFACT_STAGE/web/.web_version" "$ver" \
-        || { err "Staged web archive version does not match pinned release ${ver}."; return 1; }
+    # Nothing is drawn from the moooyo/5gpn release itself any more. The console
+    # SPA it used to publish is gone with the process that served it, and the
+    # two artifacts that remain -- the core and the UI bundle -- come from their
+    # own repositories under their own digest pins, so there is no release-wide
+    # digest manifest to fetch and no base URL to build. RELEASE_TAG still
+    # selects the channel and still gates an unpinned source; it no longer
+    # selects an artifact.
 
     curl -fsSL "https://github.com/${MIHOMO_REPO}/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz" \
         -o "$ARTIFACT_STAGE/mihomo.gz" || { err "Could not download mihomo ${MIHOMO_VERSION}."; return 1; }
@@ -2936,41 +2850,29 @@ ensure_intercept_certificates() {
 	fi
 }
 
-# 5gpn-web: control-console SPA tarball from the same moooyo/5gpn release.
-# Served from disk by the loopback :443 console server (DNS_WEB_DIR); no go:embed.
-#
-# The pinned DNS_VERSION's SPA and daemon move together on every run. Staging
-# and atomic tree publication leave the active console untouched on failure.
-install_web() {
-    [[ -n "$ARTIFACT_STAGE" && -f "$ARTIFACT_STAGE/web/index.html" ]] \
-        || { err "Control-console SPA was not staged."; return 1; }
-    release_tag_file_matches "$ARTIFACT_STAGE/web/.web_version" "$RELEASE_TAG" \
-        || { err "Control-console SPA version does not match ${RELEASE_TAG}."; return 1; }
-    claim_web_dir || return 1
-    publish_owned_tree "$ARTIFACT_STAGE/web" "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE" \
-        || { err "Could not atomically publish control-console SPA."; return 1; }
-    ok "Verified control-console SPA published to ${DNS_WEB_DIR}/ (${RELEASE_TAG})."
-}
-
 # zashboard: prebuilt static dist from our fork moooyo/zashboard, which carries
-# the overlay panel upstream does not have. Pinned by ZASH_REPO/ZASH_VERSION;
-# opt-in sha256 via ZASH_SHA256. Fresh-artifact: wipes+replaces
-# DNS_ZASH_DIR on every run (never build on the box). Warn-not-fatal — a missing
-# zash panel must not abort the resolver install (the console + DoT still work).
+# the 5gpn panels upstream does not have. Pinned by ZASH_REPO/ZASH_VERSION and
+# verified against ZASH_SHA256. Fresh-artifact: wipes+replaces UI_DIR on every
+# run (never build on the box).
+#
+# This is the only user interface, and publishing it is NOT optional. mihomo
+# serves it at /ui/ on the controller, reading it from the path the seed
+# template names in external-ui. mihomo.service lists that same path in
+# ReadOnlyPaths without a `-` prefix, so if nothing published here systemd
+# cannot build the unit's namespace and the service does not start at all.
+# It used to be warn-not-fatal, when a missing panel only cost a panel.
 #
 # This ONLY acquires+unzips the dist -- it does not seed a backend. zashboard
-# receives its controller target from the daemon's one-use handoff redirect.
-# The redirect stores only a fixed non-secret placeholder in zashboard; an
-# HttpOnly host session gates /proxy/ and the daemon injects the real controller
-# credential. No index.html/config patch happens here.
-install_zashboard() {
+# reaches the controller as a same-origin relative URL, because the bundle and
+# the API are now served by one process on one origin.
+install_ui() {
     [[ -n "$ARTIFACT_STAGE" && -f "$ARTIFACT_STAGE/zash/index.html" ]] \
         || { err "zashboard was not staged."; return 1; }
-    claim_zashboard_dir || return 1
+    claim_ui_dir || return 1
     printf '%s\n' "$ZASH_VERSION" > "$ARTIFACT_STAGE/zash/.zash_version"
-    publish_owned_tree "$ARTIFACT_STAGE/zash" "$DNS_ZASH_DIR" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
-        || { err "Could not atomically publish zashboard."; return 1; }
-    ok "Verified zashboard published to ${DNS_ZASH_DIR}/ (${ZASH_VERSION})."
+    publish_owned_tree "$ARTIFACT_STAGE/zash" "$UI_DIR" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
+        || { err "Could not atomically publish the zashboard bundle."; return 1; }
+    ok "Verified zashboard published to ${UI_DIR}/ (${ZASH_VERSION})."
 }
 
 # mihomo: prebuilt binary from MetaCubeX/mihomo releases (amd64-compatible).
@@ -4835,15 +4737,6 @@ write_dns_env() {
     dns_mihomo_secret_env="$(dns_env_encode_value "$dns_mihomo_secret")" \
         || { err "DNS_MIHOMO_SECRET cannot be represented safely in dns.env."; return 1; }
     local dns_whitelist_file="$(cfg_get DNS_WHITELIST_FILE)"; dns_whitelist_file="${dns_whitelist_file:-${MIHOMO_DIR}/whitelist.txt}"
-    # SP-3 zashboard panel: dir + listen address for the second loopback HTTPS
-    # panel (Task A1). DNS_ZASH_DIR is already resolved (dns.env > default)
-    # up at cfg_get's definition — the global is authoritative here, so the value
-    # written back matches what install_zashboard/clean/uninstall actually used.
-    # DNS_ZASH_LISTEN resolves here (its only consumer). The cert paths below are
-    # NOT preserved — they always point at the deploy_cert_roles zash/ copy, like
-    # DNS_CERT/DNS_WEB_CERT.
-    local dns_zash_dir="$DNS_ZASH_DIR"
-    local dns_zash_listen="$(cfg_get DNS_ZASH_LISTEN)"; dns_zash_listen="${dns_zash_listen:-127.0.0.2:443}"
 
     # Tuning knobs: current dns.env value > default (single-source, so a
     # hand-edited value survives an idempotent re-run).
@@ -4965,18 +4858,12 @@ DNS_INTERCEPT_CONFIG=${intercept_config}
 # native manifest snapshot pipeline.
 DNS_MARKETPLACES_FILE=${marketplaces_file}
 
-# ZashDir is the unzipped moooyo/zashboard
-# dist served by a SECOND loopback HTTPS listener on ZashListen. ZashCert/Key
-# always point at the selected certificate's zash/ role-dir copy
-# (deploy_cert_roles).
-DNS_ZASH_DIR=${dns_zash_dir}
-DNS_ZASH_LISTEN=${dns_zash_listen}
+# ZashCert/Key always point at the selected certificate's zash/ role-dir copy
+# (deploy_cert_roles). mihomo serves the controller with them; the bundle they
+# used to pair with is no longer a separate origin with a directory and a listen
+# address of its own, so neither is written here any more.
 DNS_ZASH_CERT=${ZASH_CERT_DIR}/current/fullchain.pem
 DNS_ZASH_KEY=${ZASH_CERT_DIR}/current/privkey.pem
-
-# Control-console SPA (served from disk by the loopback :443 server). Populated
-# by install_web from the 5gpn-web release tarball; empty dir -> built-in placeholder.
-DNS_WEB_DIR=${DNS_WEB_DIR}
 
 # iOS .mobileconfig files served by the daemon at the public /ios/ path.
 WWW_DIR=${WWW_DIR}
@@ -5884,8 +5771,7 @@ full_install() {
     [[ "$reset_mihomo" == 0 ]] || confirm_upgrade_mihomo_reset || return 1
     phase "checking existing static-asset ownership" "检查静态资源归属"
     preflight_unit_ownership
-    preflight_web_dir
-    preflight_zashboard_dir
+    preflight_ui_dir
 
     # Package installation may add shared OS packages, but no live 5gpn file has
     # been removed or replaced yet. Debug mode deliberately skips Certbot.
@@ -5898,8 +5784,7 @@ full_install() {
     INSTALL_PHASE="acquiring the certificate transaction lock"
     acquire_install_cert_lock
     phase "claiming publication directories" "认领发布目录"
-    claim_web_dir
-    claim_zashboard_dir
+    claim_ui_dir
     claim_intercept_roots
     phase "preparing low-memory runtime support" "准备低内存运行支持"
     ensure_swap
@@ -5914,8 +5799,7 @@ full_install() {
     prepare_certificate_publication_boundaries
     install_files
     install_manage_cli
-    install_web
-    install_zashboard
+    install_ui
     install_units
     seed_upstreams_json
     write_dns_env
@@ -6043,19 +5927,10 @@ uninstall() {
     elif [[ -e /usr/local/bin/5gpn ]]; then
         warn "Preserving unowned /usr/local/bin/5gpn."
     fi
-    if [[ "$DNS_WEB_DIR" != "$BASE_DIR"/* && -e "$DNS_WEB_DIR" ]]; then
-        # Claim before removing, for the same reason as the zashboard tree: a
-        # tree published by an older release carries that release's marker.
-        if [[ "$(safe_web_path 2>/dev/null || true)" == "$DNS_WEB_DIR" ]] \
-           && claim_public_owned_tree "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"; then
-            remove_public_owned_tree "$DNS_WEB_DIR" "$WEB_OWNERSHIP_MARKER" "$WEB_OWNERSHIP_VALUE"
-        else
-            warn "Kept unsafe DNS_WEB_DIR '$DNS_WEB_DIR'."
-        fi
-    fi
-    if [[ "$DNS_ZASH_DIR" != "$BASE_DIR"/* ]]; then
-        remove_zashboard_dir || warn "Kept unowned/unsafe DNS_ZASH_DIR '$DNS_ZASH_DIR'."
-    fi
+    # The UI tree lives at $BASE_DIR/ui and is removed with $BASE_DIR itself.
+    # It no longer needs a separate claim-then-remove pass: that existed because
+    # the console and zashboard directories were operator-relocatable through
+    # dns.env and could therefore sit outside the tree this uninstall owns.
     remove_runtime_preserving_gum
     remove_fixed_owned_dir "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE"
 

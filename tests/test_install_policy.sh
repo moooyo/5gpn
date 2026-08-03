@@ -172,10 +172,21 @@ printf '%s' "$full_install_fn" | grep -Fq 'echo "Console token: ${DNS_API_TOKEN}
     && ! printf '%s' "$full_install_fn" | grep -Fq 'token_was_present' \
     || fail "successful interactive installs do not always show the current console token"
 
-# --- Frontend shipped separately + served from disk (not go:embed) ---
-grep -Eq 'install_web'          "$INSTALL" || fail "no install_web() to fetch the 5gpn-web tarball"
-grep -Eq '5gpn-web-.*\.tar\.gz' "$INSTALL" || fail "install_web does not fetch the 5gpn-web tarball asset"
-grep -Eq 'DNS_WEB_DIR'          "$INSTALL" || fail "DNS_WEB_DIR not wired in install.sh"
+# --- The UI is the zashboard bundle, published where the unit can read it ---
+# There is one interface and one origin now. The console SPA and its release
+# tarball are gone with the loopback :443 server that served them, so what this
+# has to hold is no longer "the SPA is fetched" but "the bundle lands on the one
+# path the unit and the seed template both name". Those three strings agreeing is
+# the whole contract: if publication drifts off /opt/5gpn/ui, systemd refuses to
+# build the namespace (ReadOnlyPaths carries no `-` prefix) and mihomo never starts.
+grep -Eq '^install_ui\(\)'      "$INSTALL" || fail "no install_ui() to publish the zashboard bundle"
+grep -Eq 'UI_DIR="/opt/5gpn/ui"' "$INSTALL" || fail "UI_DIR is not pinned to /opt/5gpn/ui"
+grep -Fq 'external-ui: /opt/5gpn/ui' "$ROOT/etc/mihomo/config.yaml.tmpl" \
+    || fail "seed template does not point external-ui at /opt/5gpn/ui"
+grep -Fq '/opt/5gpn/ui' "$ROOT/etc/systemd/mihomo.service" \
+    || fail "mihomo.service does not grant read access to /opt/5gpn/ui"
+grep -Eq 'install_web|5gpn-web-.*\.tar\.gz|DNS_WEB_DIR=' "$INSTALL" \
+    && fail "the retired console SPA is still fetched or published"
 
 # --- `5gpn` management command: installed on PATH, backed by a copy of install.sh ---
 grep -Eq '^install_manage_cli\(\)' "$INSTALL" || fail "no install_manage_cli() (the 5gpn management command)"

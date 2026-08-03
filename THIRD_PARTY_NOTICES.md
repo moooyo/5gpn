@@ -105,9 +105,10 @@ Go toolchain on the box). Pins per [`install.sh`](install.sh).
 > is available at the link above.
 
 > zashboard is a prebuilt frontend `dist.zip` (a mihomo/Clash web dashboard),
-> not a compiled binary — `install_zashboard()` downloads and unpacks the
-> pinned release archive to `DNS_ZASH_DIR`, served at `DNS_ZASH_LISTEN` and
-> reverse-proxied to mihomo's controller by `5gpn-dns` (see `mihomo_proxy.go`).
+> not a compiled binary — `install_ui()` downloads and unpacks the pinned
+> release archive to `/opt/5gpn/ui`, which mihomo serves at `/ui/` on its own
+> controller. There is no reverse proxy in front of it and no second origin:
+> the bundle and the API it calls are the same process on the same port.
 
 ---
 

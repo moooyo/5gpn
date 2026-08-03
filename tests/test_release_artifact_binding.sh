@@ -64,41 +64,9 @@ else
     pass "NUL-bearing mihomo version is rejected"
 fi
 
-WEB_VERSION="$TMP/.web_version"
-printf '%s\n' 9.8.7 > "$WEB_VERSION"
-release_tag_file_matches "$WEB_VERSION" 9.8.7 \
-    && pass "exact web release marker is accepted" \
-    || fail "exact web release marker is accepted"
-printf '%s\n' 9.8.6 > "$WEB_VERSION"
-if release_tag_file_matches "$WEB_VERSION" 9.8.7; then
-    fail "wrong web release marker is rejected"
-else
-    pass "wrong web release marker is rejected"
-fi
-printf '9.8.7\n\n' > "$WEB_VERSION"
-if release_tag_file_matches "$WEB_VERSION" 9.8.7; then
-    fail "multi-line web release marker is rejected"
-else
-    pass "multi-line web release marker is rejected"
-fi
-printf '9.8.7\0\n' > "$WEB_VERSION"
-if release_tag_file_matches "$WEB_VERSION" 9.8.7; then
-    fail "NUL-bearing web release marker is rejected"
-else
-    pass "NUL-bearing web release marker is rejected"
-fi
-rm -f "$WEB_VERSION"
-ln -s marker-target "$WEB_VERSION"
-if release_tag_file_matches "$WEB_VERSION" 9.8.7; then
-    fail "symlink web release marker is rejected"
-else
-    pass "symlink web release marker is rejected"
-fi
-
 # The invariant under test is that no staged executable reaches publication
 # unversioned. There is one staged executable now.
 stage_fn="$(sed -n '/^stage_artifacts()/,/^}/p' "$INSTALL")"
-install_web_fn="$(sed -n '/^install_web()/,/^}/p' "$INSTALL")"
 if grep -Fq 'mihomo_reports_exact_version "$ARTIFACT_STAGE/mihomo" "$MIHOMO_VERSION"' <<<"$stage_fn"; then
     pass "all staged executables are wired to exact version checks"
 else
@@ -118,22 +86,19 @@ for publisher in install_mihomo; do
         pass "$publisher propagates executable publication failure"
     fi
 done
-grep -Fq 'release_tag_file_matches "$ARTIFACT_STAGE/web/.web_version" "$ver"' <<<"$stage_fn" \
-    && pass "web marker is checked during staging" \
-    || fail "web marker is not checked during staging"
-if grep -Fq 'release_tag_file_matches "$ARTIFACT_STAGE/web/.web_version" "$RELEASE_TAG"' <<<"$install_web_fn" \
-   && ! grep -Fq '> "$ARTIFACT_STAGE/web/.web_version"' <<<"$install_web_fn"; then
-    pass "web publication rechecks rather than overwrites the release marker"
+# Nothing is drawn from the 5gpn release itself any more, so there is no
+# checksums.txt fetch and no per-release asset to bind. What must stay true is
+# that the release still carries no unbound artifact: assert the retired console
+# SPA has not returned to either side of the boundary.
+if grep -Eq 'checksums\.txt|5gpn-web-' <<<"$stage_fn"; then
+    fail "staging fetches a 5gpn release asset again"
 else
-    fail "web publication can overwrite or bypass the release marker"
+    pass "staging draws nothing from the 5gpn release"
 fi
-
-marker_line="$(grep -nF 'printf '\''%s\n'\'' "$VER" > web/dist/.web_version' "$RELEASE" | cut -d: -f1)"
-tar_line="$(grep -nF 'tar czf "5gpn-web-${VER}.tar.gz" -C web/dist .' "$RELEASE" | cut -d: -f1)"
-if [[ -n "$marker_line" && -n "$tar_line" && "$marker_line" -lt "$tar_line" ]]; then
-    pass "release workflow embeds the exact tag before packaging the web archive"
+if grep -Fq '5gpn-web-${VER}.tar.gz' "$RELEASE"; then
+    fail "release workflow still packages the retired console SPA"
 else
-    fail "release workflow does not embed the exact tag before packaging"
+    pass "release workflow no longer packages the retired console SPA"
 fi
 
 if grep -Fq 'README.en.md' "$RELEASE" \
