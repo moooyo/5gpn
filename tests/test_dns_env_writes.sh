@@ -92,7 +92,7 @@ pass "the dns.env heredoc carries no live command substitution"
 # On the upgrade that moved the panel onto the console name, the controller went
 # from :9090 to :443 in config.yaml while dns.env kept :9090 -- because the
 # writer preserved the previous value. Every caller reads dns.env, so the
-# readiness probe, apply_whitelist and the daemon all dialled a dead port, and
+# readiness probe and the daemon both dialled a dead port, and
 # the install failed at "mihomo did not become ready" with mihomo running
 # perfectly well on the port nobody was asking for.
 mkdir -p "$MIHOMO_DIR"

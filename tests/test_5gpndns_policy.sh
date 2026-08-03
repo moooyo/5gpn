@@ -61,7 +61,7 @@ grep -Eq '(^|[[:space:]])nft([[:space:]]|$)' "$INSTALL" && fail "install.sh: mus
 grep -Fq '${BASE_DIR}/etc/systemd' "$INSTALL" || fail "install.sh: install_files does not stage etc/systemd into /opt/5gpn"
 grep -Fq 'mihomo.service' "$INSTALL" || fail "install.sh: install_units does not install mihomo.service"
 grep -Fq '${BASE_DIR}/etc/mihomo' "$INSTALL" || fail "install.sh: installed management runtime has no mihomo asset directory"
-grep -Fq 'config.yaml.tmpl whitelist.seed.txt' "$INSTALL" \
+grep -Fq 'for asset in config.yaml.tmpl; do' "$INSTALL" \
     || fail "install.sh: installed management runtime does not retain every mihomo reset asset"
 
 # --- install.sh: control-plane token + loopback :443 pin ---

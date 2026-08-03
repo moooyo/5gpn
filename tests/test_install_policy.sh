@@ -221,7 +221,7 @@ grep -Fq 'exec bash "$BK" menu' "$INSTALL" || fail "5gpn launcher does not open 
 for tok in 'menu)' 'restart)' 'configure)'; do
     grep -Fq -e "$tok" "$INSTALL" || fail "install.sh dispatch missing case: $tok"
 done
-grep -Eq -- '--(configure|menu|status|restart|reload-rules|add-allow|del-allow|ios|setup-tgbot|rotate-token|set-cf-token|mihomo-reset|uninstall|help)\)' "$INSTALL" \
+grep -Eq -- '--(configure|menu|status|restart|reload-rules|ios|setup-tgbot|rotate-token|set-cf-token|mihomo-reset|uninstall|help)\)' "$INSTALL" \
     && fail "install.sh still accepts a flag-style command alias"
 grep -Eq '^manage_menu\(\)'      "$INSTALL" || fail "no manage_menu() TUI"
 grep -Eq '^restart_services\(\)' "$INSTALL" || fail "no restart_services() (menu 'restart')"
@@ -236,41 +236,20 @@ grep -Eq '^load_persisted_domains\(\)' "$INSTALL" || fail "no persisted base-dom
 grep -Eq 'DNS_(DOMAIN|WEB_DOMAIN|CONSOLE_DOMAIN|ZASH_DOMAIN)=' "$INSTALL" \
     && fail "installer still persists a redundant derived-domain key"
 
-# --- Task 4: panel whitelist.txt TUI management + live controller refresh
-# (out-of-band; never web-editable, no full config reload). ---
+# --- Task 4: the source allowlist is gone by owner decision. The panel and
+# the control API answer any client that reaches this gateway; /api/* still
+# requires the bearer token. Nothing may reintroduce the management surface,
+# because the rule and the rule-provider that gave it meaning are gone from
+# the seed -- an add-allow that edits a file no rule reads is worse than no
+# add-allow at all, since it reports success while changing nothing. ---
 for tok in 'add-allow)' 'del-allow)'; do
-    grep -Fq -e "$tok" "$INSTALL" || fail "install.sh dispatch missing case: $tok"
+    grep -Fq -e "$tok" "$INSTALL" && fail "install.sh still dispatches $tok"
 done
-grep -Eq '^add_allow_ip\(\)'     "$INSTALL" || fail "no add_allow_ip() (menu/CLI whitelist add)"
-grep -Eq '^del_allow_ip\(\)'     "$INSTALL" || fail "no del_allow_ip() (menu/CLI whitelist del)"
-grep -Eq '^apply_whitelist\(\)'  "$INSTALL" || fail "no apply_whitelist() (live controller refresh)"
-aa_fn="$(sed -n '/^add_allow_ip()/,/^}/p' "$INSTALL")"
-printf '%s' "$aa_fn" | grep -Fq 'ask_text' \
-    || fail "add_allow_ip does not prompt via ask_text"
-printf '%s' "$aa_fn" | grep -Eq 'ask_text .*\|\| true\)"' \
-    || fail "add_allow_ip's ask_text capture is not guarded with || true (cancel would abort under set -e)"
-printf '%s' "$aa_fn" | grep -Fq 'file="${MIHOMO_DIR}/whitelist.txt"' \
-    || fail "add_allow_ip does not write MIHOMO_DIR/whitelist.txt"
-printf '%s' "$aa_fn" | grep -Fq 'is_valid_ipv4_or_cidr' \
-    || fail "add_allow_ip does not validate the current IPv4/CIDR format"
-printf '%s' "$aa_fn" | grep -Fq 'apply_whitelist' \
-    || fail "add_allow_ip does not call apply_whitelist (live refresh)"
-da_fn="$(sed -n '/^del_allow_ip()/,/^}/p' "$INSTALL")"
-printf '%s' "$da_fn" | grep -Eq 'ask_text .*\|\| true\)"' \
-    || fail "del_allow_ip's ask_text capture is not guarded with || true (cancel would abort under set -e)"
-printf '%s' "$da_fn" | grep -Fq 'file="${MIHOMO_DIR}/whitelist.txt"' \
-    || fail "del_allow_ip does not edit MIHOMO_DIR/whitelist.txt"
-printf '%s' "$da_fn" | grep -Fq 'is_valid_ipv4_or_cidr' \
-    || fail "del_allow_ip does not validate the current IPv4/CIDR format"
-printf '%s' "$da_fn" | grep -Eq 'sed -i.*\$ip' \
-    && fail "del_allow_ip still interpolates an entry into a sed regular expression"
-printf '%s' "$da_fn" | grep -Fq 'apply_whitelist' \
-    || fail "del_allow_ip does not call apply_whitelist (live refresh)"
-aw_fn="$(sed -n '/^apply_whitelist()/,/^}/p' "$INSTALL")"
-printf '%s' "$aw_fn" | grep -Fq 'mihomo_controller_curl "/providers/rules/whitelist"' \
-    || fail "apply_whitelist does not use the shared HTTPS controller helper"
-printf '%s' "$aw_fn" | grep -Fq 'Authorization: Bearer' \
-    || fail "apply_whitelist does not send the controller bearer secret"
+for fn in add_allow_ip del_allow_ip apply_whitelist seed_mihomo_whitelist; do
+    grep -Eq "^${fn}\(\)" "$INSTALL" && fail "install.sh still defines $fn()"
+done
+grep -Fq '/providers/rules/whitelist' "$INSTALL" \
+    && fail "installer still refreshes the retired allowlist rule-provider"
 grep -Fq 'http://127.0.0.1:9090' "$INSTALL" \
     && fail "installer still calls the plaintext mihomo controller"
 mc_fn="$(sed -n '/^mihomo_controller_curl()/,/^}/p' "$INSTALL")"
@@ -295,23 +274,14 @@ printf '%s' "$pmr_fn" | grep -Fq 'local -a udp_ports=(443)' \
     || fail "probe_mihomo_ready must always require UDP :443"
 printf '%s' "$pmr_fn" | grep -Fq 'udp_ports+=(5060)' \
     || fail "probe_mihomo_ready must conditionally require default-module UDP :5060"
-# The TUI must expose add/remove allowlist entries.
-#
-# Offered by a screen and dispatched by manage_action -- two functions since the
-# menu became multi-screen. Both halves are asserted here because either alone
-# is a no-op: a label with no branch does nothing, and a branch nothing offers
-# is unreachable. test_tui_policy holds the general coupling; this holds that
-# these two specific ops did not get dropped in the rewrite.
+# The TUI must NOT offer allowlist entries: the ops behind them are gone, and
+# test_tui_policy would fail a label whose branch no longer exists anyway.
 mm_fn="$(sed -n '/^manage_menu()/,/^}/p' "$INSTALL")"
 ma_fn="$(sed -n '/^manage_action()/,/^}/p' "$INSTALL")"
-printf '%s' "$mm_fn" | grep -Fq '添加 zashboard 白名单IP' \
-    || fail "the TUI does not offer an add-allowlist-IP entry"
-printf '%s' "$ma_fn" | grep -Fq 'add_allow_ip' \
-    || fail "manage_action does not dispatch an add-allowlist-IP entry"
-printf '%s' "$mm_fn" | grep -Fq '移除 zashboard 白名单IP' \
-    || fail "the TUI does not offer a remove-allowlist-IP entry"
-printf '%s' "$ma_fn" | grep -Fq 'del_allow_ip' \
-    || fail "manage_action does not dispatch a remove-allowlist-IP entry"
+printf '%s' "$mm_fn" | grep -Fq '白名单' \
+    && fail "the TUI still offers an allowlist entry"
+printf '%s' "$ma_fn" | grep -Eq 'add_allow_ip|del_allow_ip' \
+    && fail "manage_action still dispatches an allowlist op"
 
 # uninstall must remove the 5gpn launcher.
 grep -Fq '/usr/local/bin/5gpn ' "$INSTALL" || grep -Eq 'rm -f .*/usr/local/bin/5gpn( |$)' "$INSTALL" \
@@ -492,12 +462,15 @@ grep -Fq '__CONSOLE_DOMAIN__: 127.0.0.1'       "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #4 (console SNI hosts mapping)"
 grep -Fq 'force-domain: [__CONSOLE_DOMAIN__]'  "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: console fallback does not force hostname sniffing"
-# The panel route carries two qualifiers and both are load-bearing. It sits
-# above the loopback deny, so without the INNER exclusion a captured extension
-# reaches the gateway's own management plane; without the source rule-set the
-# panel answers every client whose DNS points at this gateway.
-grep -Fq 'AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__CONSOLE_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$MIHOMO_TMPL" \
-    || fail "etc/mihomo/config.yaml.tmpl: the panel route is not allowlisted and engine-egress excluded"
+# The panel route carries one qualifier and it is load-bearing. It sits above
+# the loopback deny, so without the INNER exclusion a captured extension
+# running operator-supplied JavaScript reaches the gateway's own management
+# plane. The source rule-set that used to sit beside it was removed with the
+# allowlist; no rule may reference that provider, because it is not shipped.
+grep -Fq 'AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: the panel route does not exclude engine egress"
+grep -Fq 'RULE-SET,whitelist' "$MIHOMO_TMPL" \
+    && fail "etc/mihomo/config.yaml.tmpl: a rule still reads the retired allowlist provider"
 grep -Fq 'DOMAIN,__CONSOLE_DOMAIN__,REJECT' "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: the panel has no fail-closed deny below its allow rule"
 grep -Fq '__PROFILE_DOMAIN__' "$MIHOMO_TMPL" \

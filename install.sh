@@ -24,8 +24,7 @@
 # QUIC/HTTP3 is proxied by mihomo (UDP 443 sniff-forward). There is no
 # daemon-managed exit layer or Go data plane. 5gpn never manages the host firewall; use your provider's
 # security group if you want one. The
-# console is public with bearer-protected APIs; zashboard remains reachable
-# only from source IPs on the mihomo whitelist.txt allowlist.
+# console serves the panel and the bearer-protected APIs on one origin.
 #
 # There is NO network-layer exit: no WireGuard, no fwmark / ip-rule / table-100.
 # Do not add any of those (application-layer exits live in mihomo's rule engine).
@@ -122,7 +121,7 @@ DECOMMISSION_PRESERVE_ACME=0
 UI_DIR="/opt/5gpn/ui"
 DNS_RULES_DIR_DEFAULT="/etc/5gpn/rules"  # subscription caches and chnroute snapshot
 MIHOMO_BIN="${BIN_DIR}/mihomo"
-MIHOMO_DIR="/etc/5gpn/mihomo"           # config.yaml + whitelist.txt + provider caches
+MIHOMO_DIR="/etc/5gpn/mihomo"           # config.yaml + provider caches
 GPN_STATE_DIR="/etc/5gpn/mihomo/gpn"    # the engine's own documents, beside mihomo's
 # What the interception leaf must cover, published by the engine after every
 # successful write and once at startup: a digest on the first line, then one
@@ -206,7 +205,7 @@ DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
 # upgraded host carries five dns.env lines nothing reads. Naming them here is
 # what strips them; dropping them from this list instead would make an
 # upgraded dns.env fail validation on a key this installer wrote itself.
-readonly DNS_ENV_RETIRED_KEYS="DNS_CHINA DNS_CHINA_0X20 DNS_TRUST DNS_WEB_DIR DNS_ZASH_DIR DNS_ZASH_LISTEN \
+readonly DNS_ENV_RETIRED_KEYS="DNS_CHINA DNS_CHINA_0X20 DNS_TRUST DNS_WEB_DIR DNS_ZASH_DIR DNS_ZASH_LISTEN DNS_WHITELIST_FILE \
 TGBOT_TOKEN TGBOT_ADMINS DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS DNS_MARKETPLACES_FILE \
 DNS_ZASH_CERT DNS_ZASH_KEY"
 
@@ -214,7 +213,7 @@ readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_LISTEN_API DNS_CERT D
 DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL DNS_UPSTREAMS \
 DNS_CHINA_ECS DNS_ECS_FILE DNS_RULES_DIR DNS_CHNROUTE DNS_EGRESS_BROKER \
 DNS_SUBSCRIPTIONS DNS_POLICY_RULES DNS_API_TOKEN DNS_API_RATE DNS_API_BURST DNS_MIHOMO_CONTROLLER DNS_MIHOMO_SECRET \
-DNS_WHITELIST_FILE DNS_MIHOMO_CONFIG DNS_INTERCEPT_CONFIG WWW_DIR \
+DNS_MIHOMO_CONFIG DNS_INTERCEPT_CONFIG WWW_DIR \
 DNS_CACHE_SIZE DNS_MAX_INFLIGHT DNS_TTL_MIN DNS_TTL_MAX DNS_QUERY_TIMEOUT \
 DNS_STATS_FILE DNS_HEARTBEAT_URL DNS_HEARTBEAT_INTERVAL"
 # EDNS Client Subnet uses the operational default above. Operators can disable
@@ -997,7 +996,7 @@ preflight_runtime_publication_paths() {
         "${CONF_DIR}/ecs.json" "${CONF_DIR}/stats.json" \
         "${CONF_DIR}/tgbot.json" "${CONF_DIR}/extension-marketplaces.json" \
         "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" \
-        "${MIHOMO_DIR}/config.yaml" "${MIHOMO_DIR}/whitelist.txt" \
+        "${MIHOMO_DIR}/config.yaml" \
         "${INTERCEPT_DIR}/config.json" "${INTERCEPT_DIR}/cert-state"; do
         runtime_file_slot_is_safe "$path" "$CONF_DIR" \
             || { err "Refusing unsafe configuration file slot: $path"; return 1; }
@@ -1032,8 +1031,6 @@ runtime_permission_boundary_is_safe() {
         && shared_runtime_directory_metadata_is_safe "$MIHOMO_DIR" "$MIHOMO_SERVICE_USER" 3770 \
         && shared_runtime_directory_metadata_is_safe "$INTERCEPT_DIR" "$INTERCEPT_SERVICE_USER" 3770 \
         && runtime_control_file_metadata_is_safe "$MIHOMO_DIR/config.yaml" \
-            "$DNS_SERVICE_USER" "$MIHOMO_SERVICE_USER" 640 \
-        && runtime_control_file_metadata_is_safe "$MIHOMO_DIR/whitelist.txt" \
             "$DNS_SERVICE_USER" "$MIHOMO_SERVICE_USER" 640 \
         && runtime_control_file_metadata_is_safe "$INTERCEPT_DIR/config.json" \
             "$DNS_SERVICE_USER" "$INTERCEPT_SERVICE_USER" 640 \
@@ -2523,7 +2520,6 @@ stage_artifacts() {
         local seed="$ARTIFACT_STAGE/mihomo-seed.yaml" line listeners
         listeners="$(render_mihomo_listeners "$MIHOMO_LISTEN_IPS" "$CONSOLE_DOMAIN")"
         install -d -m 0700 "$ARTIFACT_STAGE/mihomo-home"
-        : > "$ARTIFACT_STAGE/mihomo-home/whitelist.txt"
         # Validating with `mihomo -t` against this exact binary is the test, not
         # a version comparison: the seed names paths outside its own home -- the
         # certificates it serves and the UI bundle at external-ui -- and a core
@@ -3010,21 +3006,9 @@ EOF
 # ----------------------------------------------------------------------------
 # render_mihomo_config renders /etc/5gpn/mihomo/config.yaml from the committed
 # template (etc/mihomo/config.yaml.tmpl), substituting the box-specific
-# sentinels, seeds the zashboard whitelist.txt on first run, then validates the
+# sentinels, then validates the
 # rendered file with `mihomo -t` (fatal on failure — a bad config must never
 # be left live). This is the SINGLE writer for the mihomo data-plane config.
-seed_mihomo_whitelist() {
-    # whitelist.txt is TUI-managed after install and never clobbered.
-    if [[ ! -f "$MIHOMO_DIR/whitelist.txt" ]]; then
-        local seed="${SCRIPT_DIR}/etc/mihomo/whitelist.seed.txt"
-        [[ -f "$seed" && -r "$seed" && -s "$seed" ]] \
-            || { err "Bundled mihomo whitelist seed is missing, unreadable, or empty: $seed"; return 1; }
-        install -o "$DNS_SERVICE_USER" -g "$MIHOMO_SERVICE_USER" -m 0640 \
-            "$seed" "$MIHOMO_DIR/whitelist.txt" \
-            || { err "Could not seed the mihomo source allowlist."; return 1; }
-        warn "Zashboard is unreachable until you explicitly add a source CIDR with '5gpn add-allow'."
-    fi
-}
 
 # Read the controller secret out of the operator's own YAML.
 #
@@ -3071,12 +3055,10 @@ render_mihomo_config() {
     runtime_directory_slot_is_safe "$MIHOMO_DIR" "$CONF_DIR" \
         || { err "Refusing unsafe mihomo directory slot: $MIHOMO_DIR"; return 1; }
     runtime_file_slot_is_safe "$config" "$CONF_DIR" \
-        && runtime_file_slot_is_safe "$MIHOMO_DIR/whitelist.txt" "$CONF_DIR" \
         || { err "Refusing unsafe mihomo configuration file slot."; return 1; }
     install -d -g "$MIHOMO_SERVICE_USER" -m 3770 "$MIHOMO_DIR"
     runtime_tree_has_only_plain_entries "$MIHOMO_DIR" \
         || { err "Refusing unsafe link, hardlink, or special entry below $MIHOMO_DIR"; return 1; }
-    seed_mihomo_whitelist || return 1
 
     if [[ -f "$config" && "$mode" != "--reset" ]]; then
         if ! SAFE_PATHS="$MIHOMO_SAFE_PATHS" "$MIHOMO_BIN" -t -f "$config" -d "$MIHOMO_DIR"; then
@@ -3170,10 +3152,7 @@ reset_mihomo_config() {
 }
 
 # ----------------------------------------------------------------------------
-# Zashboard source-IP allowlist (whitelist.txt) — TUI-managed OUT-OF-BAND, never
-# web-editable. add/del edit the file directly, then apply_whitelist pushes it
-# live via the mihomo controller's rule-provider reload — NOT a full config
-# reload/restart, so an in-flight zashboard session is undisturbed.
+# The mihomo controller client.
 # ----------------------------------------------------------------------------
 
 # mihomo_controller_curl dials the loopback mihomo controller over verified TLS
@@ -3214,106 +3193,18 @@ gpn_interception_snapshot() {
     mihomo_controller_curl "/gpn/interception" "${curl_args[@]}" 2>/dev/null
 }
 
-# apply_whitelist pushes the on-disk whitelist.txt live via the mihomo
-# controller's rule-provider reload endpoint (no full config reload/restart).
-apply_whitelist() {
-    local secret
-    secret="$(cfg_get DNS_MIHOMO_SECRET)"
-    [[ -n "$secret" ]] || secret="$(mihomo_config_secret "$MIHOMO_DIR/config.yaml")"
-    mihomo_controller_curl "/providers/rules/whitelist" \
-        -fsS -X PUT -H "Authorization: Bearer $secret" -o /dev/null \
-        && ok "whitelist applied" || warn "whitelist refresh failed (is mihomo running?)"
-}
-
-# add_allow_ip appends a source IP/CIDR to the zashboard allowlist and refreshes
-# it live. Accepts an optional positional arg (CLI/menu dispatch); prompts
-# interactively via ask_text when omitted and stdin is a TTY.
-add_allow_ip() {
-    check_root
-    install_gum
-    local ip="${1:-}" file="${MIHOMO_DIR}/whitelist.txt" tmp
-    if [[ -z "$ip" && -t 0 ]]; then
-        ip="$(ask_text 'Allow source IP/CIDR (e.g. 203.0.113.10/32)' || true)"
-    fi
-    [ -z "$ip" ] && return 0
-    is_valid_ipv4_or_cidr "$ip" \
-        || { err "Allowlist entry must be a canonical IPv4 address or IPv4 CIDR."; return 1; }
-    [[ "$ip" == */* ]] || ip="${ip}/32"
-    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
-        && runtime_directory_slot_is_safe "$MIHOMO_DIR" "$CONF_DIR" \
-        && runtime_file_slot_is_safe "$file" "$CONF_DIR" \
-        || { err "Refusing unsafe mihomo allowlist path: $file"; return 1; }
-    install -d -g "$MIHOMO_SERVICE_USER" -m 3770 "$MIHOMO_DIR"
-    [[ ! -e "$file" || ( -f "$file" && ! -L "$file" ) ]] \
-        || { err "Refusing unsafe allowlist path: $file"; return 1; }
-    tmp="$(mktemp "${MIHOMO_DIR}/.whitelist.XXXXXX")" || return 1
-    if [[ -f "$file" ]] && ! cat "$file" > "$tmp"; then
-        rm -f -- "$tmp"
-        err "Could not read the existing allowlist: $file"
-        return 1
-    fi
-    if [[ ! -f "$file" ]] || ! grep -qxF "$ip" "$file"; then
-        printf '%s\n' "$ip" >> "$tmp" \
-            || { rm -f -- "$tmp"; err "Could not update the allowlist candidate."; return 1; }
-    fi
-    chown "$DNS_SERVICE_USER:$MIHOMO_SERVICE_USER" "$tmp" \
-        && chmod 0640 "$tmp" \
-        || { rm -f -- "$tmp"; err "Could not secure the allowlist candidate."; return 1; }
-    sync -f "$tmp" 2>/dev/null || true
-    mv -f -- "$tmp" "$file" \
-        || { rm -f -- "$tmp"; err "Could not publish the allowlist candidate."; return 1; }
-    sync -f "$MIHOMO_DIR" 2>/dev/null || true
-    apply_whitelist
-}
-
-# del_allow_ip removes a source IP/CIDR from the zashboard allowlist and
-# refreshes it live. Same optional-arg/prompt convention as add_allow_ip.
-del_allow_ip() {
-    check_root
-    install_gum
-    local ip="${1:-}" file="${MIHOMO_DIR}/whitelist.txt" tmp
-    if [[ -z "$ip" && -t 0 ]]; then
-        ip="$(ask_text 'Remove source IP/CIDR' || true)"
-    fi
-    [ -z "$ip" ] && return 0
-    is_valid_ipv4_or_cidr "$ip" \
-        || { err "Allowlist entry must be a canonical IPv4 address or IPv4 CIDR."; return 1; }
-    [[ "$ip" == */* ]] || ip="${ip}/32"
-    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
-        && runtime_directory_slot_is_safe "$MIHOMO_DIR" "$CONF_DIR" \
-        && runtime_file_slot_is_safe "$file" "$CONF_DIR" \
-        || { err "Refusing unsafe mihomo allowlist path: $file"; return 1; }
-    [[ -f "$file" && ! -L "$file" ]] || {
-        [[ -e "$file" ]] \
-            && { err "Refusing unsafe allowlist path: $file"; return 1; }
-        warn "No whitelist.txt yet."
-        return 0
-    }
-    tmp="$(mktemp "${MIHOMO_DIR}/.whitelist.XXXXXX")" || return 1
-    awk -v entry="$ip" '$0 != entry' "$file" > "$tmp" \
-        || { rm -f -- "$tmp"; err "Could not update the allowlist candidate."; return 1; }
-    chown "$DNS_SERVICE_USER:$MIHOMO_SERVICE_USER" "$tmp" \
-        && chmod 0640 "$tmp" \
-        || { rm -f -- "$tmp"; err "Could not secure the allowlist candidate."; return 1; }
-    sync -f "$tmp" 2>/dev/null || true
-    mv -f -- "$tmp" "$file" \
-        || { rm -f -- "$tmp"; err "Could not publish the allowlist candidate."; return 1; }
-    sync -f "$MIHOMO_DIR" 2>/dev/null || true
-    apply_whitelist
-}
-
 install_mihomo_runtime_assets() {
     local runtime_dir="${BASE_DIR}/etc/mihomo" asset source candidate
     install -d -m 0755 "$runtime_dir" \
         || { err "Could not create the installed mihomo asset directory: $runtime_dir"; return 1; }
 
-    for asset in config.yaml.tmpl whitelist.seed.txt; do
+    for asset in config.yaml.tmpl; do
         source="${SCRIPT_DIR}/etc/mihomo/${asset}"
         [[ -f "$source" && -r "$source" && -s "$source" ]] \
             || { err "Required mihomo runtime asset is missing, unreadable, or empty: $source"; return 1; }
     done
 
-    for asset in config.yaml.tmpl whitelist.seed.txt; do
+    for asset in config.yaml.tmpl; do
         source="${SCRIPT_DIR}/etc/mihomo/${asset}"
         candidate="$(mktemp "${runtime_dir}/.${asset}.XXXXXX")" \
             || { err "Could not stage mihomo runtime asset: $asset"; return 1; }
@@ -3652,12 +3543,6 @@ manage_screen_network() {
     printf '  网关 IPv4     %s\n' "$(cfg_get DNS_GATEWAY_IP || echo N/A)"
     printf '  mihomo 监听   %s\n' "$(cfg_get DNS_MIHOMO_LISTEN_IPS || echo N/A)"
     echo ""
-    wl="${MIHOMO_DIR}/whitelist.txt"
-    if [[ -f "$wl" ]]; then
-        printf '  zashboard 白名单  %s 条\n' "$(manage_count_lines "$wl")"
-    else
-        printf '  zashboard 白名单  缺失\n'
-    fi
     if [[ -f "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" ]]; then
         lines="$(manage_count_lines "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt")"
         now=$(date +%s); mtime=$(stat -c %Y "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" 2>/dev/null || echo "$now")
@@ -3702,10 +3587,6 @@ manage_action() {
             run_management_with_install_and_cert_lock regen_ios ;;
         "设置 Cloudflare Token Set Cloudflare token")
             run_management_with_install_and_cert_lock set_cf_token ;;
-        "添加 zashboard 白名单IP Add allowlist IP")
-            run_management_with_install_lock add_allow_ip ;;
-        "移除 zashboard 白名单IP Remove allowlist IP")
-            run_management_with_install_lock del_allow_ip ;;
         "轮换控制台令牌 Rotate console token")
             run_management_with_install_lock rotate_token ;;
         "重置 mihomo 配置 Reset mihomo config")
@@ -3747,8 +3628,6 @@ manage_menu() {
                     "设置 Cloudflare Token Set Cloudflare token" ;;
             "网络 Network")
                 manage_screen "网络" manage_screen_network \
-                    "添加 zashboard 白名单IP Add allowlist IP" \
-                    "移除 zashboard 白名单IP Remove allowlist IP" \
                     "编辑安装配置 Configure installation" ;;
             "危险操作 Danger zone")
                 # Grouped because each one is irreversible or drops live
@@ -4854,14 +4733,14 @@ prepare_runtime_permissions() {
         -exec chown "$MIHOMO_SERVICE_USER:$MIHOMO_SERVICE_USER" {} + \
         -exec chmod 2770 {} + || return 1
     find "$MIHOMO_DIR" -mindepth 1 -path "$MIHOMO_DIR/gpn" -prune -o -type f \
-        ! -path "$MIHOMO_DIR/config.yaml" ! -path "$MIHOMO_DIR/whitelist.txt" \
+        ! -path "$MIHOMO_DIR/config.yaml" \
         ! -name 'config.yaml.bak.*' \
         -exec chown "$MIHOMO_SERVICE_USER:$MIHOMO_SERVICE_USER" {} + \
         -exec chmod 0660 {} + || return 1
     find "$MIHOMO_DIR" -mindepth 1 -maxdepth 1 -type f -name 'config.yaml.bak.*' \
         -exec chown "root:$MIHOMO_SERVICE_USER" {} + \
         -exec chmod 0640 {} + || return 1
-    for path in config.yaml whitelist.txt; do
+    for path in config.yaml; do
         [[ -f "$MIHOMO_DIR/$path" ]] || continue
         chown "$DNS_SERVICE_USER:$MIHOMO_SERVICE_USER" "$MIHOMO_DIR/$path" || return 1
         chmod 0640 "$MIHOMO_DIR/$path" || return 1
@@ -5083,18 +4962,16 @@ write_dns_env() {
     # config.yaml agree instead of drifting.
     local base_domain="$BASE_DOMAIN"
     derive_domains "$base_domain" || return 1
-    # Mihomo's loopback external-controller API + the console source-IP
-    # allowlist file it reloads from (add_allow_ip/del_allow_ip/apply_whitelist
-    # already hardcode these same two values; persisting them here lets the
-    # daemon read back what it's actually being served against).
+    # Mihomo's loopback external-controller API, persisted so the daemon reads
+    # back what it is actually being served against.
     #
     # The address is READ BACK FROM THE OPERATOR'S CONFIG, not preserved from
     # the previous dns.env. It is not an independent knob -- it is a copy of
     # where mihomo was told to listen, and a copy that can disagree with its
     # original is exactly what broke the upgrade to the console panel: the
     # controller moved to :443, dns.env still said :9090 because the old value
-    # was preserved, and every caller (the readiness probe, apply_whitelist,
-    # the daemon) dialled a port nothing listened on. Reading the config makes
+    # was preserved, and every caller (the readiness probe and the daemon)
+    # dialled a port nothing listened on. Reading the config makes
     # the disagreement impossible rather than merely fixed once.
     local dns_mihomo_controller
     dns_mihomo_controller="$(mihomo_configured_controller)"
@@ -5103,7 +4980,6 @@ write_dns_env() {
     local dns_mihomo_secret="$(cfg_get DNS_MIHOMO_SECRET)" dns_mihomo_secret_env
     dns_mihomo_secret_env="$(dns_env_encode_value "$dns_mihomo_secret")" \
         || { err "DNS_MIHOMO_SECRET cannot be represented safely in dns.env."; return 1; }
-    local dns_whitelist_file="$(cfg_get DNS_WHITELIST_FILE)"; dns_whitelist_file="${dns_whitelist_file:-${MIHOMO_DIR}/whitelist.txt}"
 
     # Tuning knobs: current dns.env value > default (single-source, so a
     # hand-edited value survives an idempotent re-run).
@@ -5211,11 +5087,9 @@ DNS_API_BURST=${api_burst}
 
 # Mihomo's loopback external-controller API (DNS_MIHOMO_CONTROLLER) + its
 # bearer secret (DNS_MIHOMO_SECRET) + the zashboard source-IP allowlist file
-# (DNS_WHITELIST_FILE) mihomo's rule-provider reloads from. add_allow_ip /
-# del_allow_ip / apply_whitelist use these same values directly.
+# bearer secret (DNS_MIHOMO_SECRET).
 DNS_MIHOMO_CONTROLLER=${dns_mihomo_controller}
 DNS_MIHOMO_SECRET=${dns_mihomo_secret_env}
-DNS_WHITELIST_FILE=${dns_whitelist_file}
 DNS_MIHOMO_CONFIG=${mihomo_config}
 DNS_INTERCEPT_CONFIG=${intercept_config}
 # Extension catalogs are part of the interception document, not a file of their
@@ -6068,36 +5942,40 @@ mihomo_config_matches_install_config() {
     [[ -f "$config" ]] || return 0
     grep -Fq -- "$CONSOLE_DOMAIN" "$config" || return 1
     # The console must be routed to the panel, and the routing must still be the
-    # shape this installer writes.
+    # shape this installer writes: engine-excluded, and nothing else.
     #
-    # Three spellings are accepted: the plain rule, the engine-excluded one, and
-    # the engine-excluded allowlisted one the seed now ships. The exclusion keeps
-    # a captured extension dialling the console off the management plane; the
-    # allowlist keeps every other client off it. Accepting only the plain rule
-    # made this check reject the config the installer itself had just written.
+    # One spelling is accepted now, where there were three. The source allowlist
+    # was removed, so the qualifier that carried it is gone from the seed -- and
+    # a config still naming RULE-SET,whitelist is not merely old, it is broken:
+    # the rule-provider that rule reads is no longer shipped, so mihomo refuses
+    # to load it. Rejecting here names the migration; accepting would hand the
+    # operator a core that will not start.
     #
-    # The qualifier is IN-TYPE,INNER, which is what the seed writes and what
+    # The plain unqualified rule is not accepted either. With the allowlist gone
+    # the IN-TYPE,INNER exclusion is the only thing left keeping a captured
+    # extension from dialling the management plane, so it is now required rather
+    # than merely written. The old check tolerated the plain form because a
+    # separate assertion made it unreachable anyway; that assertion is gone.
+    #
     # migrate-to-monolith.sh rewrites the retired IN-NAME,intercept-egress form
-    # to. The old spelling is deliberately NOT accepted: a host still carrying
-    # it has not been migrated, and this core fails `mihomo -t` on the overlay
-    # anchors beside it. Passing the drift check there would turn a clear "run
-    # the migration" into an obscure core failure two phases later.
+    # to IN-TYPE,INNER. The old spelling is deliberately NOT accepted: a host
+    # still carrying it has not been migrated, and this core fails `mihomo -t`
+    # on the overlay anchors beside it. Passing the drift check there would turn
+    # a clear "run the migration" into an obscure core failure two phases later.
     local console_re="${CONSOLE_DOMAIN//./\\.}"
     local allow_line deny_line
-    allow_line="$(grep -nE "^[[:space:]]*-[[:space:]]*DOMAIN,[[:space:]]*${console_re},[[:space:]]*DIRECT[[:space:]]*$|^[[:space:]]*-[[:space:]]*AND,\\(\\(NOT,\\(\\(IN-TYPE,INNER\\)\\)\\),\\(DOMAIN,${console_re}\\)(,\\(RULE-SET,whitelist,DIRECT,src\\))?\\),[[:space:]]*DIRECT[[:space:]]*$" "$config" | head -1 | cut -d: -f1)"
+    allow_line="$(grep -nE "^[[:space:]]*-[[:space:]]*AND,\\(\\(NOT,\\(\\(IN-TYPE,INNER\\)\\)\\),\\(DOMAIN,${console_re}\\)\\),[[:space:]]*DIRECT[[:space:]]*$" "$config" | head -1 | cut -d: -f1)"
     [[ -n "$allow_line" ]] || return 1
-    # A console REJECT is no longer disqualifying on its own: the seed ships one
-    # deliberately, below the allow rule, so an unallowlisted client fails closed
-    # rather than falling through to the loopback deny for the wrong reason. What
-    # would break the panel is a REJECT that comes *first*.
+    # A console REJECT is not disqualifying on its own: the seed ships one
+    # deliberately, below the allow rule, so a captured extension excluded by the
+    # rule above fails closed there rather than falling through to the loopback
+    # deny for the wrong reason. What would break the panel is a REJECT first.
     deny_line="$(grep -nE "DOMAIN,[[:space:]]*${console_re},[[:space:]]*REJECT(-DROP)?" "$config" | head -1 | cut -d: -f1)"
     [[ -z "$deny_line" || "$allow_line" -lt "$deny_line" ]] || return 1
-    # The panel must be behind the source allowlist. This check used to assert
-    # the opposite -- the console was the unrestricted origin and the panel lived
-    # on a second name that carried the allowlist. The panel is the console now,
-    # so an unrestricted console rule is no longer merely unusual: it is the
-    # management plane answering every client whose DNS points at this gateway.
-    grep -Eq "AND,.*DOMAIN,[[:space:]]*${console_re}.*RULE-SET,[[:space:]]*whitelist" "$config" || return 1
+    # No rule may still reference the retired allowlist rule-provider. The
+    # installer stopped shipping whitelist.txt and the provider that reads it, so
+    # a surviving RULE-SET,whitelist is a config mihomo will refuse to load.
+    ! grep -Eq "RULE-SET,[[:space:]]*whitelist" "$config" || return 1
     ! grep -Fq -- "profile.${BASE_DOMAIN}" "$config" || return 1
     grep -Fq -- "${GATEWAY_IP}/32" "$config" || return 1
     while IFS= read -r ip; do
@@ -6299,9 +6177,9 @@ full_install() {
         echo "  Public console   ${CONSOLE_DOMAIN} A -> ${PUBLIC_IP}（NPN 可用客户端可路由 ${GATEWAY_IP}）"
     } | card
     {
-        echo "控制台 Console: https://${CONSOLE_DOMAIN}/ui/  (仅白名单来源 IP)"
+        echo "控制台 Console: https://${CONSOLE_DOMAIN}/ui/"
         [[ -t 1 ]] && echo "Console token: ${DNS_API_TOKEN}"
-        echo "(控制台与 /api 同一来源，均需在白名单内；/api 另需 bearer token)"
+        echo "(面板公开；/api 需要 bearer token)"
     } | card
     print_qr
     echo ""
@@ -6468,8 +6346,6 @@ Usage: sudo bash install.sh [--beta] [command] — or, after install:  5gpn [com
   menu                Open the interactive management menu (this is what bare '5gpn' runs)
   status              Show service states, domains, IP, list counts/age
   restart             Restart the 5gpn service
-  add-allow <cidr>    Add a source IP/CIDR to the zashboard allowlist + live refresh
-  del-allow <cidr>    Remove a source IP/CIDR from the zashboard allowlist + live refresh
   ios                 Regenerate the iOS profile + QR
   rotate-token        Generate a new control-console DNS_API_TOKEN + restart
   set-cf-token        Enter/update the Cloudflare token through the TUI only
@@ -6525,9 +6401,9 @@ Domains + certificates: ONE base domain and ONE scoped Let's Encrypt lineage.
 
 There is NO host firewall management: use your provider's security
 group if you need one. New/reset mihomo seeds require client reachability to
-TCP 80, 443, 5060, 8080, and 8443 plus UDP 443 and 5060. The console SPA and /ios/ are public
-while /api/* requires the bearer token. Zashboard remains limited to source IPs
-in mihomo's whitelist.txt allowlist.
+TCP 80, 443, 5060, 8080, and 8443 plus UDP 443 and 5060. The console panel at
+/ui/ and the iOS profiles beside it are public; /api/* requires the bearer
+token.
 
   TUI configuration:
     certificate mode/email, base domain, public/gateway/listener IPv4,
@@ -6578,8 +6454,6 @@ main() {
         menu)           require_command_arity "$cmd" "$#" 1 1 || return $?; manage_menu ;;
         restart)        require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_lock restart_services ;;
         status)         require_command_arity "$cmd" "$#" 1 1 || return $?; show_status ;;
-        add-allow)      require_command_arity "$cmd" "$#" 2 2 || return $?; run_management_with_install_lock add_allow_ip "$2" ;;
-        del-allow)      require_command_arity "$cmd" "$#" 2 2 || return $?; run_management_with_install_lock del_allow_ip "$2" ;;
         ios)            require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_and_cert_lock regen_ios ;;
         rotate-token)   require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_lock rotate_token ;;
         set-cf-token)   require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_and_cert_lock set_cf_token ;;

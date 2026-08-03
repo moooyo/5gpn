@@ -831,9 +831,7 @@ runtime_root="$TMP/runtime-assets"
 BASE_DIR="$runtime_root"
 if install_mihomo_runtime_assets >/dev/null \
    && cmp -s "$source_script_dir/etc/mihomo/config.yaml.tmpl" \
-        "$runtime_root/etc/mihomo/config.yaml.tmpl" \
-   && cmp -s "$source_script_dir/etc/mihomo/whitelist.seed.txt" \
-        "$runtime_root/etc/mihomo/whitelist.seed.txt"; then
+        "$runtime_root/etc/mihomo/config.yaml.tmpl"; then
 pass "installed management runtime retains all mihomo reset assets"
 
 render_fn="$(sed -n '/^render_mihomo_config()/,/^}/p' "$INSTALL")"
@@ -936,7 +934,7 @@ config_mode="$(stat -c %a "$config" 2>/dev/null || stat -f %Lp "$config")"
 # traffic arrives as INNER -- the predicate names the type because there is no
 # longer a listener to name.
 grep -Fq 'console.example.com: 127.0.0.1' "$config" \
-    && grep -Fq 'AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,console.example.com),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$config" \
+    && grep -Fq 'AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,console.example.com)),DIRECT' "$config" \
     && grep -Fq 'name: gateway5060' "$config" \
     && grep -Fq 'QUIC: { ports: [443, 5060] }' "$config" \
     && pass "seed contains public console mapping" \
@@ -1055,56 +1053,18 @@ else
     pass "command arity is enforced before dispatch"
 fi
 
-# Allowlist mutations accept only canonical IPv4/IP-CIDR entries, are exact,
-# and refuse symlink targets.
-allow_conf="$TMP/allow-conf"
-allow_dir="$allow_conf/mihomo"
-mkdir -p "$allow_conf"
-printf '%s\n' "$CONF_OWNERSHIP_VALUE" > "$allow_conf/$CONF_OWNERSHIP_MARKER"
-if (
-    CONF_DIR="$allow_conf"
-    MIHOMO_DIR="$allow_dir"
-    check_root() { :; }
-    install_gum() { :; }
-    apply_whitelist() { :; }
-    ! add_allow_ip '203.0.113.1/33' >/dev/null 2>&1 || exit 1
-    [[ ! -e "$MIHOMO_DIR/whitelist.txt" ]] || exit 1
-    add_allow_ip '203.0.113.1/32' >/dev/null || exit 1
-    add_allow_ip '203.0.113.10/32' >/dev/null || exit 1
-    add_allow_ip '203.0.113.1/32' >/dev/null || exit 1
-    add_allow_ip '203.0.113.20' >/dev/null || exit 1
-    [[ "$(grep -c '^203\.0\.113\.1/32$' "$MIHOMO_DIR/whitelist.txt")" == 1 ]] || exit 1
-    grep -qxF '203.0.113.20/32' "$MIHOMO_DIR/whitelist.txt" || exit 1
-    del_allow_ip '203.0.113.1/32' >/dev/null || exit 1
-    del_allow_ip '203.0.113.20' >/dev/null || exit 1
-    ! grep -qxF '203.0.113.1/32' "$MIHOMO_DIR/whitelist.txt" || exit 1
-    ! grep -qxF '203.0.113.20/32' "$MIHOMO_DIR/whitelist.txt" || exit 1
-    grep -qxF '203.0.113.10/32' "$MIHOMO_DIR/whitelist.txt" || exit 1
-); then
-    pass "allowlist updates validate, deduplicate, and delete exact CIDRs"
+# The allowlist ops are gone by owner decision, so the boundaries they used to
+# enforce -- canonical CIDR validation, exact-match deletion, symlink refusal
+# -- have nothing left to protect. What replaces them is the assertion that
+# nothing writes an allowlist file at all: a writer that survives its rule
+# would edit a file no rule reads, and report success doing it.
+if grep -Eq '^(add_allow_ip|del_allow_ip|apply_whitelist)\(\)' "$INSTALL"; then
+    fail "an allowlist mutation op survived the allowlist"
+elif grep -Fq '/whitelist.txt' "$INSTALL"; then
+    fail "the installer still builds a path to an allowlist file"
 else
-    fail "allowlist update boundaries are not enforced"
+    pass "no allowlist file is written or refreshed by the installer"
 fi
-symlink_target="$TMP/allowlist-target"
-printf '%s\n' sentinel > "$symlink_target"
-rm -rf -- "$allow_dir"
-mkdir -p "$allow_dir"
-ln -s "$symlink_target" "$allow_dir/whitelist.txt"
-if (
-    CONF_DIR="$allow_conf"
-    MIHOMO_DIR="$allow_dir"
-    check_root() { :; }
-    install_gum() { :; }
-    apply_whitelist() { :; }
-    add_allow_ip '203.0.113.1/32'
-) >/dev/null 2>&1; then
-    fail "allowlist writer followed a symlink"
-elif [[ "$(cat "$symlink_target")" == sentinel ]]; then
-    pass "allowlist writer refuses symlink targets"
-else
-    fail "allowlist writer modified a symlink target"
-fi
-
 # Reset must stop at the first failed boundary even when main dispatch invokes
 # it through an && list (which suppresses Bash errexit inside called functions).
 reset_ran="$TMP/reset-ran"

@@ -41,7 +41,6 @@ trap cleanup EXIT INT TERM
 mkdir -p "$RUNTIME/console" "$RUNTIME/origin"
 printf 'CONSOLE-BACKEND\n' > "$RUNTIME/console/marker.txt"
 printf 'ORIGIN-BACKEND\n' > "$RUNTIME/origin/marker.txt"
-printf '127.0.0.1/32\n' > "$RUNTIME/whitelist.txt"
 
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
     -subj '/CN=console.example.test' \

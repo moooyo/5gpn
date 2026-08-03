@@ -61,12 +61,9 @@ check "$T" 'QUIC: \{ ports: \[443, 5060\] \}'               'QUIC sniffer covers
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,8080.*REJECT' 'console cannot expose loopback :8080'
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,8443.*REJECT' 'console cannot expose loopback :8443'
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,5060.*REJECT' 'console cannot expose loopback :5060'
-check "$T" 'rule-providers:'                           'rule-providers block'
-check "$T" 'whitelist:'                                'whitelist rule-provider'
-check "$T" 'behavior: ipcidr'                          'whitelist ipcidr behavior'
-check "$T" 'format: text'                              'whitelist provider uses text format'
-check "$T" 'RULE-SET,whitelist,DIRECT,src'             'source-IP allowlist rule'
-check "$T" 'DOMAIN,__CONSOLE_DOMAIN__,REJECT'           'fast deny for non-allowlisted panel traffic'
+nocheck "$T" 'rule-providers:'                         'no rule-provider survives the allowlist removal'
+nocheck "$T" 'RULE-SET,[[:space:]]*whitelist'          'no rule reads the retired allowlist provider'
+check "$T" 'DOMAIN,__CONSOLE_DOMAIN__,REJECT'           'fail-closed deny for engine egress naming the console'
 nocheck "$T" 'REJECT-DROP'                             'seed avoids connection-retaining reject rules'
 check "$T" '127\.0\.0\.1:5354'                         'loopback origin DNS selector'
 check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(NETWORK,UDP\)\),REJECT' 'console UDP fallback fast-reject rule'
@@ -74,11 +71,14 @@ check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(DST-PORT,80\)\),REJECT' 'conso
 # The panel allow rule carries both predicates. It sits above the loopback deny,
 # because the console resolves to 127.0.0.1, and the engine dials its upstreams
 # back through these same rules as INNER -- there is no inbound name to exclude
-# by, so the type is the name. Losing the source rule-set
-# opens the management plane to every client whose DNS points at this
-# gateway; losing the INNER exclusion lets a captured extension reach it.
-check "$T" 'AND,\(\(NOT,\(\(IN-TYPE,INNER\)\)\),\(DOMAIN,__CONSOLE_DOMAIN__\),\(RULE-SET,whitelist,DIRECT,src\)\),DIRECT' 'the panel route is allowlisted and excludes engine egress'
-nocheck "$T" 'DOMAIN,__CONSOLE_DOMAIN__\)\),DIRECT$' 'the panel route is never unrestricted'
+# by, so the type is the name.
+#
+# The source rule-set that used to sit beside it is gone by owner decision:
+# the panel answers any client that can reach this gateway. That makes the
+# INNER exclusion the ONLY qualifier left on this rule, so it is asserted on
+# its own -- lose it and a captured extension running operator-supplied
+# JavaScript reaches the management plane.
+check "$T" 'AND,\(\(NOT,\(\(IN-TYPE,INNER\)\)\),\(DOMAIN,__CONSOLE_DOMAIN__\)\),DIRECT' 'the panel route excludes engine egress'
 check "$T" 'external-controller-tls: 127\.0\.0\.1:443' 'the controller listens where the console DIRECT dial lands'
 check "$T" 'AND,\(\(NETWORK,UDP\),\(DST-PORT,443\)\),REJECT' 'HTTP3/QUIC UDP 443 block enabled by default'
 # The UDP/443 reject is the guard standing in for the unwired datagram capture
@@ -96,7 +96,7 @@ else
     echo 'FAIL: QUIC block ordering is unsafe'
     FAIL=1
 fi
-console_direct_line="$(grep -nF '  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__CONSOLE_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
+console_direct_line="$(grep -nF '  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
 panel_order_ok=1
 for rule in \
     'AND,((DOMAIN,__CONSOLE_DOMAIN__),(NETWORK,UDP)),REJECT' \
@@ -158,11 +158,14 @@ nocheck cmd/5gpn-dns/policy_compile.go 'type: file, behavior: domain' 'policy_co
 check install.sh 'render_mihomo_config'                'installer renders config'
 nocheck install.sh 'apply_.*_to_xray'                  'xray patchers removed'
 
-# Task 4: whitelist TUI management + live refresh (no full config reload)
-check install.sh 'add_allow_ip\(\)' 'whitelist add op'
-check install.sh 'del_allow_ip\(\)' 'whitelist del op'
-check install.sh 'providers/rules/whitelist' 'live whitelist refresh via controller'
-check install.sh 'whitelist' 'manage_menu exposes whitelist' # ensure a menu label
+# Task 4: the source allowlist was removed by owner decision. Nothing may
+# reintroduce a management surface for it -- the ops, the live refresh, or
+# the file they edited -- because the rule and the provider that gave it
+# meaning are gone from the seed.
+nocheck install.sh 'add_allow_ip' 'no allowlist add op'
+nocheck install.sh 'del_allow_ip' 'no allowlist del op'
+nocheck install.sh 'providers/rules/whitelist' 'no live allowlist refresh'
+nocheck install.sh '/whitelist.txt' 'installer builds no path to an allowlist file'
 
 # Task 5: selectable Cloudflare DNS-01 wildcard or HTTP-01 exact-SAN cert.
 check install.sh 'dns-cloudflare' 'Cloudflare mode uses DNS-01'

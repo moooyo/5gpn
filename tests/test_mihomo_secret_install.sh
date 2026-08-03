@@ -38,7 +38,6 @@ chmod 0755 "$MIHOMO_BIN"
 fixed_owned_dir_is_safe() { return 0; }
 runtime_directory_slot_is_safe() { return 0; }
 runtime_file_slot_is_safe() { return 0; }
-seed_mihomo_whitelist() { return 0; }
 install() { return 0; }
 mihomo_config_secret() { return 23; }
 PERSIST_CALLS=0

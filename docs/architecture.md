@@ -84,11 +84,20 @@ between processes that no longer exist.
 There is no public DoH listener and no client-facing plain DNS listener on `:53`.
 There is no separate console origin, no separate panel origin, and no interception
 SOCKS5 listener. All three were deleted with the processes that needed them.
-The panel is the console: one name, one listener, one certificate role. That name
-is behind the source allowlist, and the allowlist is what keeps the management
-plane from being reachable by every client whose DNS points at this gateway — so
-an unrestricted rule on the console name is not merely unusual, it is the whole
-control surface answering anyone who arrives.
+The panel is the console: one name, one listener, one certificate role.
+
+That origin is not source-restricted. It answers any client that can reach this
+gateway on `:443` and resolve the console name, and the bearer secret is the
+only credential in front of the control API — `/ui/` is deliberately outside it,
+because an unenrolled phone fetching its profile holds no token. The source
+allowlist that used to sit on this rule was removed by owner decision; mihomo's
+controller has no source-IP facility of its own (only the secret and CORS), so
+the rule engine was the only place such a restriction could live, and nothing
+replaced it. What remains on the rule is the `IN-TYPE,INNER` exclusion, which is
+load-bearing for a different reason: the engine dials every captured upstream
+back through these same rules, so without it an extension running
+operator-supplied JavaScript could name the console and reach the management
+plane.
 
 ### Why the origin boundary is a socket
 

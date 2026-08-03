@@ -180,10 +180,10 @@ sudo sed -n 's/^DNS_API_TOKEN=//p' /etc/5gpn/dns.env
 ```
 
 - **Android**：在 Console 的 Setup Guide 中查看 `dot.<base>`，然后填入系统 Private DNS。现代 Android 应用通常默认不信任用户安装的 CA，因此项目不提供 Android MITM CA 安装流程。
-- **iOS**：在 Setup Guide 下载并安装 `/ios/ios-dot.mobileconfig`。若使用扩展，再单独安装 `/ios/ios-intercept-ca.mobileconfig`，并在系统设置中手动启用 Full SSL Trust。
-- **面板 (zashboard)**：`https://console.<base>/ui/`。先用 `5gpn` 菜单把来源 CIDR 加入白名单——面板的允许规则带 `RULE-SET,whitelist,...,src`，未在白名单里的客户端一律 REJECT。凭据只有 mihomo controller secret 一个。
+- **iOS**：下载并安装 `https://console.<base>/ui/ios-dot.mobileconfig`。若使用扩展，再单独安装 `/ui/ios-intercept-ca.mobileconfig`，并在系统设置中手动启用 Full SSL Trust。
+- **面板 (zashboard)**：`https://console.<base>/ui/`，对所有能解析到本网关的客户端开放。凭据只有 mihomo controller secret 一个，且只挡 `/api` 一侧——`/ui/` 与其下的描述文件是免鉴权的，因为未入网的手机身上没有 token。
 
-Console 包含 `/overview`、`/setup-guide`、`/logs`、`/resolve-test`、`/policy-rules`、`/extensions`、`/extensions/hosts`、`/marketplace`、`/plugin-logs`、`/mihomo`、`/mihomo-config` 和 `/settings`。Console 只暴露窄化的 mihomo API；完整 controller pass-through 只属于单独保护的 zashboard。mihomo logs 与 plugin logs 使用不同的短时一次性 WebSocket ticket。
+Console 包含 `/overview`、`/setup-guide`、`/logs`、`/resolve-test`、`/policy-rules`、`/extensions`、`/extensions/hosts`、`/marketplace`、`/plugin-logs`、`/mihomo`、`/mihomo-config` 和 `/settings`。Console 只暴露窄化的 mihomo API；完整 controller pass-through 属于同一来源上的 zashboard，两者共用 controller secret。mihomo logs 与 plugin logs 使用不同的短时一次性 WebSocket ticket。
 
 Telegram bot 运行在 `5gpn-dns` 进程内，可从 Console Settings 或下列 TUI 配置：
 
@@ -201,7 +201,6 @@ Bot 仍需要 Telegram bot token 和管理员白名单；除用于发现数字 u
 | `/etc/5gpn/policy.json` | 有序 DNS policy 与 fallback |
 | `/etc/5gpn/upstreams.json`, `ecs.json`, `subscriptions.json`, `rules/` | 控制面 override、订阅和完整缓存 |
 | `/etc/5gpn/mihomo/config.yaml` | 运维者完整拥有的 mihomo 配置 |
-| `/etc/5gpn/mihomo/whitelist.txt` | zashboard 来源白名单 |
 | `/etc/5gpn/intercept/config.json` | interception master、协议设置和扩展快照状态 |
 | `/etc/5gpn/extension-marketplaces.json` | 明确添加的 marketplace 源和最后一份完整缓存 |
 
@@ -220,8 +219,6 @@ fresh/reset seed 的 `Proxies` 组初始只有 `DIRECT`；5gpn 不附带代理�
 | `sudo 5gpn restart` | 重启 `5gpn-dns`、`5gpn-intercept` 和 mihomo |
 | `sudo 5gpn configure` | 打开完整配置 TUI，校验后事务化应用 |
 | `sudo 5gpn reload-rules` | 从磁盘热重载本地 policy 与 `chnroute` |
-| `sudo 5gpn add-allow <cidr>` | 添加 zashboard 来源 CIDR 并实时刷新 |
-| `sudo 5gpn del-allow <cidr>` | 删除 zashboard 来源 CIDR 并实时刷新 |
 | `sudo 5gpn ios` | 重新生成 iOS profile 与二维码 |
 | `sudo 5gpn setup-tgbot` | 校验并热应用 Telegram 配置 |
 | `sudo 5gpn rotate-token` | 轮换 Console token 并重启 daemon |
@@ -262,7 +259,7 @@ fresh/reset seed 的 `Proxies` 组初始只有 `DIRECT`；5gpn 不附带代理�
 - 名称级 encrypted-DNS blocking 无法阻止使用硬编码 resolver IP 且能绕过网关的客户端。5gpn 不声称提供网络层强制执行。
 - Steering 依赖 DNS 和可见 hostname。任意端口、通用 raw UDP、没有可用 Host/SNI 的流量、由应用内预置 ECH 隐藏的 inner name，以及绕过 5gpn DNS 的连接不受支持。
 - `block-quic-443` 只拒绝到达网关的 UDP/443；它不管理防火墙，也不影响绕过网关的流量。MITM 的 QUIC fallback protection 是另一项仅作用于已匹配 capture hosts 的控制。
-- Console SPA 和 profile 下载公开，但所有 `/api/*` 都要求 bearer token；服务端未配置 token 时 API 整体禁用，请求未携带有效 token 时会被拒绝。zashboard 另受来源白名单和一次性 handoff session 保护。
+- Console SPA 和 profile 下载公开，但所有 `/api/*` 都要求 bearer token；服务端未配置 token 时 API 整体禁用，请求未携带有效 token 时会被拒绝。zashboard 与 Console 同源同凭据，没有额外的来源限制。
 - 扩展 root CA 的信任范围覆盖整个扩展子系统，但实际解密仍受启用的 capture hosts 限制。普通 uninstall 和 purge 为已注册设备保留该 CA；只有 explicit decommission 才尝试删除所有权可证明的 CA 与公共 lineage。
 - 5gpn 不修改 nftables 或任何宿主防火墙。公共入口、特别是 `:5060`，必须由运维者限制到预期客户端。
 

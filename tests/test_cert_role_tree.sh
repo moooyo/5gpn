@@ -89,7 +89,7 @@ pass "service-owned role marker fails closed"
 # Found by upgrading test-env. A fresh install writes the right modes and the
 # sweep only reaches these documents on a host where they already exist, so no
 # amount of fresh-install acceptance could have caught it.
-sweep="$(sed -n '/^    install -d -o root -g "\$MIHOMO_SERVICE_USER" -m 3770 "\$MIHOMO_DIR" || return 1$/,/^    for path in config.yaml whitelist.txt; do$/p' "$ROOT/install.sh")"
+sweep="$(sed -n '/^    install -d -o root -g "\$MIHOMO_SERVICE_USER" -m 3770 "\$MIHOMO_DIR" || return 1$/,/^    for path in config.yaml; do$/p' "$ROOT/install.sh")"
 [[ -n "$sweep" ]] || fail "could not extract the mihomo home mode sweep"
 [[ "$(printf '%s' "$sweep" | grep -c -- '-path "\$MIHOMO_DIR/gpn" -prune')" == 2 ]] \
     || fail "the mode sweep does not prune \$MIHOMO_DIR/gpn; the certificate request loses 0644"
