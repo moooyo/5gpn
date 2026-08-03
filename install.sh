@@ -5206,7 +5206,7 @@ ss_has_exact_listener() {
 # the window install_cert runs in.
 probe_mihomo_ready() {
     systemctl is-active --quiet mihomo || return 1
-    local secret ip port token domain
+    local secret ip port domain
     local -a tcp_ports=(80 443)
     local -a udp_ports=(443)
     if [[ "${MIHOMO_SEED_PORTS_REQUIRED:-0}" == 1 ]]; then
@@ -5229,11 +5229,17 @@ probe_mihomo_ready() {
         done
     done < <(printf '%s\n' "$MIHOMO_LISTEN_IPS" | tr ',' '\n')
 
-    token="$(cfg_get DNS_API_TOKEN)"
     [[ -n "${DOT_DOMAIN:-}" ]] || load_persisted_domains || return 1
     domain="$DOT_DOMAIN"
-    curl --fail --silent --show-error --insecure --max-time 2 -o /dev/null \
-        -H "Authorization: Bearer $token" https://127.0.0.1/api/status \
+    # The loopback console origin this used to probe is gone -- one process
+    # serves the API and the bundle on the controller now, and nothing listens on
+    # 127.0.0.1:443 at all, so this leg could never pass on a monolith host.
+    #
+    # /ui/ is the check worth having in its place. It is unauthenticated static
+    # content, so a 200 means the bundle really was published where the unit can
+    # read it. That failure otherwise surfaces as a blank page long after the
+    # installer has reported success.
+    mihomo_controller_curl "/ui/" --fail --silent --show-error --max-time 2 -o /dev/null \
         >/dev/null 2>&1 || return 1
     command -v timeout >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 || return 1
     timeout 4 openssl s_client -brief -connect 127.0.0.1:853 -servername "$domain" \
@@ -5246,7 +5252,7 @@ wait_service_ready() {
     while (( SECONDS < deadline )); do
         case "$svc" in
             mihomo) probe_mihomo_ready \
-                && { ok "mihomo readiness passed (controller, gateway listeners, console API, DoT handshake)."; return 0; } ;;
+                && { ok "mihomo readiness passed (controller, gateway listeners, UI bundle, DoT handshake)."; return 0; } ;;
         esac
         # Speak up only once the first probe has failed, so a service that
         # starts promptly stays quiet. Without this a slow start is up to
