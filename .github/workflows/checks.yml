@@ -95,7 +95,6 @@ jobs:
             {
               gsub(/__GATEWAY_IP__/, "10.0.0.1")
               gsub(/__CONSOLE_DOMAIN__/, "console.example.test")
-              gsub(/__ZASH_DOMAIN__/, "zash.example.test")
               gsub(/__CONTROLLER_SECRET__/, "ci-controller-secret")
               print
             }
@@ -109,19 +108,27 @@ jobs:
           # accepts this config as the service will run it. The seed names the
           # certificates it serves and the UI bundle at external-ui, all outside
           # its own home, so a bare -t rejects a config that runs fine.
-          export SAFE_PATHS=/etc/5gpn/cert/zash:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui
+          export SAFE_PATHS=/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui
           /tmp/mihomo -t -f "$runtime/config.yaml" -d "$runtime"
           /tmp/mihomo -t -f tests/fixtures/stable-0.0.13/mihomo-config.yaml -d "$runtime"
           grep -Fq 'name: gateway5060' "$runtime/config.yaml"
           grep -Fq 'target: console.example.test:5060' "$runtime/config.yaml"
           grep -Fq 'QUIC: { ports: [443, 5060] }' "$runtime/config.yaml"
           grep -Fq 'AND,((DOMAIN,console.example.test),(DST-PORT,5060)),REJECT' "$runtime/config.yaml"
-          grep -Fq 'AND,((DOMAIN,zash.example.test),(DST-PORT,5060)),REJECT' "$runtime/config.yaml"
           # The UI is served by this process from the path the unit grants, and
           # the seed has to say so: without external-ui the controller serves no
           # bundle, and with a path the unit does not list the service cannot
           # start at all.
           grep -Fq 'external-ui: /opt/5gpn/ui' "$runtime/config.yaml"
+          # The panel is served on the console name, and only to allowlisted
+          # sources. The controller has to listen on :443 for the console's
+          # DIRECT dial to land on it, and the allow rule has to carry the
+          # source rule-set or the management plane is open to every client
+          # whose DNS points here.
+          grep -Fq 'external-controller-tls: 127.0.0.1:443' "$runtime/config.yaml"
+          grep -Fq 'AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,console.example.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$runtime/config.yaml"
+          grep -Fq 'DOMAIN,console.example.test,REJECT' "$runtime/config.yaml"
+          ! grep -Fq 'zash.example.test' "$runtime/config.yaml"
           # The backstop behind datagram capture. Capture is consulted before
           # rule resolution, so with mitm.http3 on this reject only ever sees
           # the datagrams capture did not want, and with it off it is the whole

@@ -35,7 +35,7 @@ cat > "$DEPLOY_HOOK" <<'EOF'
 # Let's Encrypt renewal deploy hook; reads DNS_BASE_DOMAIN; publishes /etc/5gpn/cert.
 set -eu
 [[ "${RENEW_HOOK_VALIDATE_ONLY:-0}" == 1 ]] && exit 0
-for role in dot web zash; do
+for role in dot web console; do
     mkdir -p "$TEST_CERT_ROOT/$role/generations/fixture"
     cp "$RENEWED_LINEAGE/fullchain.pem" "$TEST_CERT_ROOT/$role/generations/fixture/fullchain.pem"
     cp "$RENEWED_LINEAGE/privkey.pem" "$TEST_CERT_ROOT/$role/generations/fixture/privkey.pem"
@@ -63,7 +63,7 @@ file_gid() {
     case "$path" in
         "$CERT_ROOT"/dot/*) role=dot; expected=61001 ;;
         "$CERT_ROOT"/web/*) role=web; expected=61001 ;;
-        "$CERT_ROOT"/zash/*) role=zash; expected=61002 ;;
+        "$CERT_ROOT"/console/*) role=console; expected=61002 ;;
         *) return 1 ;;
     esac
     basename="${path##*/}"
@@ -78,7 +78,7 @@ file_gid() {
 
 sync_role_copies() {
     local role
-    for role in dot web zash; do
+    for role in dot web console; do
         mkdir -p "$CERT_ROOT/$role/generations/fixture"
         cp "$LE_LIVE_ROOT/example.com/fullchain.pem" "$CERT_ROOT/$role/generations/fixture/fullchain.pem"
         cp "$LE_LIVE_ROOT/example.com/privkey.pem" "$CERT_ROOT/$role/generations/fixture/privkey.pem"
@@ -276,16 +276,16 @@ cmp -s "$LE_LIVE_ROOT/example.com/fullchain.pem" "$CERT_ROOT/web/current/fullcha
     || fail "stale role certificate survived the not-due fast path"
 
 # Content, owner, and mode are insufficient: the DNS copies must be readable
-# only through gpn-dns and the zashboard copy only through mihomo. A wrong role
+# only through gpn-dns and the controller copy only through mihomo. A wrong role
 # group is treated as stale and repaired by the owned deploy hook.
 reset_case
 MOCK_CERT_FRESH=1
-MOCK_BAD_GROUP_ROLE=zash
+MOCK_BAD_GROUP_ROLE=console
 MOCK_BAD_GROUP_FILE=privkey.pem
 expect_success "not-due lineage repairs a role copy with the wrong group" cert_renew_main --cert-name example.com
 [[ -e "$CERT_ROOT/.deploy-ran" ]] \
-    && pass "wrong zash group forced deploy-hook recovery" \
-    || fail "wrong zash group was accepted without deploy-hook recovery"
+    && pass "wrong console group forced deploy-hook recovery" \
+    || fail "wrong console group was accepted without deploy-hook recovery"
 
 reset_case
 MOCK_CERT_FRESH=1

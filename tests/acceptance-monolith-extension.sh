@@ -18,7 +18,7 @@ head_() { echo; echo "== $1"; }
 
 CONF=/etc/5gpn/mihomo/config.yaml
 SECRET="$(grep -m1 -E "^secret:" "$CONF" | sed -E "s/^secret: *'?([^']*)'?.*/\1/")"
-API="https://127.0.0.1:9090"
+API="https://127.0.0.1:443"
 REQUEST=/etc/5gpn/mihomo/gpn/certificate-request
 HOST=smoke.5gpn-beta.example
 EXT=beta.smoke

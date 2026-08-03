@@ -288,15 +288,15 @@ if command -v openssl >/dev/null 2>&1; then
     if openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
         -keyout "$cert_tmp/http-key.pem" -out "$cert_tmp/http-cert.pem" \
         -subj /CN=console.example.com \
-        -addext 'subjectAltName=DNS:console.example.com,DNS:zash.example.com,DNS:dot.example.com' >/dev/null 2>&1; then
+        -addext 'subjectAltName=DNS:console.example.com,DNS:dot.example.com' >/dev/null 2>&1; then
         cert_chain_trusted() { return 0; }
         validate_cert_pair "$cert_tmp/http-cert.pem" "$cert_tmp/http-key.pem" example.com 0 production http-01 \
-            && pass "HTTP-01 exact console/zash/dot SAN shape validates" \
+            && pass "HTTP-01 exact console/dot SAN shape validates" \
             || fail "HTTP-01 exact service SAN certificate was rejected"
         openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
             -keyout "$cert_tmp/http-extra-key.pem" -out "$cert_tmp/http-extra-cert.pem" \
             -subj /CN=console.example.com \
-            -addext 'subjectAltName=DNS:console.example.com,DNS:zash.example.com,DNS:dot.example.com,DNS:extra.example.com' >/dev/null 2>&1
+            -addext 'subjectAltName=DNS:console.example.com,DNS:dot.example.com,DNS:extra.example.com' >/dev/null 2>&1
         if validate_cert_pair "$cert_tmp/http-extra-cert.pem" "$cert_tmp/http-extra-key.pem" example.com 0 production http-01; then
             fail "HTTP-01 certificate with an extra DNS SAN was accepted"
         else
@@ -357,7 +357,7 @@ cert_state_tmp="$(mktemp -d)"
 DNS_CERT_DIR="$cert_state_tmp/cert"
 DOT_CERT_DIR="$DNS_CERT_DIR/dot"
 WEB_CERT_DIR="$DNS_CERT_DIR/web"
-ZASH_CERT_DIR="$DNS_CERT_DIR/zash"
+CONSOLE_CERT_DIR="$DNS_CERT_DIR/console"
 DEBUG_CERT_DIR="$cert_state_tmp/debug-cert"
 ACME_DIR="$cert_state_tmp/acme"
 LE_LIVE_ROOT="$cert_state_tmp/letsencrypt/live"

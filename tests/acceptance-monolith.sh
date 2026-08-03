@@ -25,7 +25,7 @@ head_() { echo; echo "== $1"; }
 
 CONF=/etc/5gpn/mihomo/config.yaml
 SECRET="$(grep -m1 -E "^secret:" "$CONF" | sed -E "s/^secret: *'?([^']*)'?.*/\1/")"
-API="https://127.0.0.1:9090"
+API="https://127.0.0.1:443"
 CURL=(curl -sk --max-time 15 -H "Authorization: Bearer ${SECRET}")
 
 GATEWAY="$(jq -r '.gateway' /etc/5gpn/mihomo/gpn/dns.json)"

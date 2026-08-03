@@ -12,7 +12,7 @@
 #
 # One base domain and one scoped production cert lineage:
 #   BASE_DOMAIN  -> the operator's ONE apex domain (the single knob).
-#   CONSOLE_DOMAIN/ZASH_DOMAIN/DOT_DOMAIN
+#   CONSOLE_DOMAIN/DOT_DOMAIN
 #     (= console./zash./dot.<BASE_DOMAIN>)
 #     are auto-derived subdomains (derive_domains). Cloudflare DNS-01 issues
 #     `*.<base>` + `<base>`; HTTP-01 issues the three exact service SANs because
@@ -78,7 +78,7 @@ DEBUG_CERT_MARKER=".5gpn-debug-cert-owned"
 DEBUG_CERT_MARKER_VALUE="5gpn-debug-cert-v1"
 DOT_CERT_DIR="${DNS_CERT_DIR}/dot"       # DoT :853 cert copy (hot-reloaded on mtime change)
 WEB_CERT_DIR="${DNS_CERT_DIR}/web"       # loopback HTTPS console :443 cert copy
-ZASH_CERT_DIR="${DNS_CERT_DIR}/zash"     # zashboard panel cert copy
+CONSOLE_CERT_DIR="${DNS_CERT_DIR}/console"  # the controller TLS pair; mihomo serves the panel with it
 CERT_ROOT_MARKER=".5gpn-cert-root-owned"
 CERT_ROOT_MARKER_VALUE="5gpn-cert-root-v1"
 CERTBOT_OWNERSHIP_FILE="${DNS_CERT_DIR}/.certbot-ownership"
@@ -179,7 +179,7 @@ MIHOMO_SHA256="ce86d718efcc8a699652d6ea4af7df1be49ffa6ec8511522948493e66918d2d9"
 # This value duplicates Environment=SAFE_PATHS in etc/systemd/mihomo.service.
 # The duplication is checked: test_mihomo_policy asserts the two agree, because
 # a drift here fails at install time on a config the running service accepts.
-MIHOMO_SAFE_PATHS="/etc/5gpn/cert/zash:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui"
+MIHOMO_SAFE_PATHS="/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui"
 ZASH_REPO="moooyo/zashboard"
 ZASH_VERSION="v3.16.0-monolith.3"        # our fork's dist.zip, built from feat/5gpn-console
 ZASH_SHA256="c3af6589f983e2b16cda8c6b554c6245d187b202f3ef20027a5ec1efbec2667c"
@@ -207,9 +207,10 @@ DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
 # what strips them; dropping them from this list instead would make an
 # upgraded dns.env fail validation on a key this installer wrote itself.
 readonly DNS_ENV_RETIRED_KEYS="DNS_CHINA DNS_CHINA_0X20 DNS_TRUST DNS_WEB_DIR DNS_ZASH_DIR DNS_ZASH_LISTEN \
-TGBOT_TOKEN TGBOT_ADMINS DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS DNS_MARKETPLACES_FILE"
+TGBOT_TOKEN TGBOT_ADMINS DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS DNS_MARKETPLACES_FILE \
+DNS_ZASH_CERT DNS_ZASH_KEY"
 
-readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_LISTEN_API DNS_CERT DNS_KEY DNS_WEB_CERT DNS_WEB_KEY DNS_ZASH_CERT DNS_ZASH_KEY \
+readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_LISTEN_API DNS_CERT DNS_KEY DNS_WEB_CERT DNS_WEB_KEY DNS_CONSOLE_CERT DNS_CONSOLE_KEY \
 DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL DNS_UPSTREAMS \
 DNS_CHINA_ECS DNS_ECS_FILE DNS_RULES_DIR DNS_CHNROUTE DNS_EGRESS_BROKER \
 DNS_SUBSCRIPTIONS DNS_POLICY_RULES DNS_API_TOKEN DNS_API_RATE DNS_API_BURST DNS_MIHOMO_CONTROLLER DNS_MIHOMO_SECRET \
@@ -474,7 +475,7 @@ cfg_get() {
 # reads the persisted dns.env when it launches the daemon.
 clear_external_config_env() {
     local key
-    unset BASE_DOMAIN CONSOLE_DOMAIN ZASH_DOMAIN DOT_DOMAIN PUBLIC_IP GATEWAY_IP \
+    unset BASE_DOMAIN CONSOLE_DOMAIN DOT_DOMAIN PUBLIC_IP GATEWAY_IP \
         MIHOMO_LISTEN_IPS CHINA_ECS CACHE_SIZE LOWMEM
     # Retired keys are cleared too. A key stops being written before it stops
     # being something a caller might have exported, and one that survived here
@@ -714,7 +715,7 @@ cert_generation_is_safe() {
 # role with no reader should not be widened to the account that would gain one.
 cert_role_group() {
     case "$1" in
-        dot|zash) printf '%s\n' "$MIHOMO_SERVICE_USER" ;;
+        dot|console) printf '%s\n' "$MIHOMO_SERVICE_USER" ;;
         web)      printf '%s\n' "$DNS_SERVICE_USER" ;;
         *)        return 1 ;;
     esac
@@ -831,7 +832,37 @@ cert_root_claim_is_possible() {
              err "Back it up and remove it, or restore the marker, before rerunning."; return 1; }
 }
 
+# migrate_cert_role_zash_to_console renames the retired role in place.
+#
+# The role directory carries a root-owned marker naming it, and every structural
+# check reads that marker -- so an upgraded host with cert/zash would fail role
+# validation against a build that only knows cert/console, and fail it during
+# publication, after the binaries were replaced. Renaming both together, before
+# anything validates, is what makes the upgrade a rename rather than a
+# reinstall of the certificate tree.
+#
+# Idempotent: a host that has already migrated, or a fresh one that never had
+# the old role, does nothing.
+migrate_cert_role_zash_to_console() {
+    local old="${DNS_CERT_DIR}/zash" new="${DNS_CERT_DIR}/console"
+    [[ -d "$old" && ! -L "$old" ]] || return 0
+    [[ ! -e "$new" ]] || {
+        err "Both ${old} and ${new} exist; refusing to guess which certificate role is live."
+        return 1
+    }
+    runtime_directory_slot_is_safe "$old" "$DNS_CERT_DIR" \
+        || { err "Refusing to migrate an unsafe certificate-role slot: $old"; return 1; }
+    info "Renaming the retired zash certificate role to console..."
+    mv -T -- "$old" "$new" || { err "Could not rename ${old} to ${new}."; return 1; }
+    printf '%s\n' "${CERT_ROLE_VALUE_PREFIX}:console" > "${new}/${CERT_ROLE_MARKER}" \
+        || { err "Could not rewrite the certificate-role marker in ${new}."; return 1; }
+    chown root:root "${new}/${CERT_ROLE_MARKER}" || return 1
+    chmod 0644 "${new}/${CERT_ROLE_MARKER}" || return 1
+    ok "Certificate role zash renamed to console."
+}
+
 ensure_dns_cert_root() {
+    migrate_cert_role_zash_to_console || return 1
     fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
         && runtime_directory_slot_is_safe "$DNS_CERT_DIR" "$CONF_DIR" \
         || { err "Refusing unsafe certificate root slot: $DNS_CERT_DIR"; return 1; }
@@ -1785,7 +1816,6 @@ render_mihomo_seed() {
         esac
         line="${line//__GATEWAY_IP__/$SEED_GATEWAY_IP}"
         line="${line//__CONSOLE_DOMAIN__/$SEED_CONSOLE_DOMAIN}"
-        line="${line//__ZASH_DOMAIN__/$SEED_ZASH_DOMAIN}"
         line="${line//__CONTROLLER_SECRET__/$SEED_CONTROLLER_SECRET}"
         printf '%s\n' "$line"
     done < "$template"
@@ -2507,7 +2537,6 @@ stage_artifacts() {
         # render_mihomo_config writes later once the accounts are real.
         SEED_GATEWAY_IP="$GATEWAY_IP"
         SEED_CONSOLE_DOMAIN="$CONSOLE_DOMAIN"
-        SEED_ZASH_DOMAIN="$ZASH_DOMAIN"
         SEED_CONTROLLER_SECRET="preflight-only-secret"
         render_mihomo_seed "${SCRIPT_DIR}/etc/mihomo/config.yaml.tmpl" \
             probe "$listeners" > "$seed" || return 1
@@ -3092,7 +3121,6 @@ render_mihomo_config() {
 
     SEED_GATEWAY_IP="$gw"
     SEED_CONSOLE_DOMAIN="$CONSOLE_DOMAIN"
-    SEED_ZASH_DOMAIN="$ZASH_DOMAIN"
     SEED_CONTROLLER_SECRET="$secret_yaml_value"
     if ! render_mihomo_seed "$template" live "$listeners" > "$candidate"; then
         rm -f -- "$candidate"
@@ -3163,8 +3191,8 @@ mihomo_controller_curl() {
     is_valid_domain "$base" \
         || { warn "DNS_BASE_DOMAIN is required for mihomo controller TLS"; return 1; }
     derive_domains "$base" || return 1
-    server_name="$ZASH_DOMAIN"
-    cert_file="$(cfg_get DNS_ZASH_CERT)"
+    server_name="$CONSOLE_DOMAIN"
+    cert_file="$(cfg_get DNS_CONSOLE_CERT)"
     [[ -r "$cert_file" ]] \
         || { warn "mihomo controller trust certificate is unreadable: $cert_file"; return 1; }
     curl --cacert "$cert_file" \
@@ -3413,14 +3441,18 @@ load_mihomo_reset_context() {
 # calling this function (or reading the globals it sets/exports), never by
 # re-deriving "console.${base}"/"zash.${base}" inline, to avoid drift.
 # The base must already be validated. Sets BASE_DOMAIN plus the derived globals
-# and exports them. The selected certificate mode covers all three names.
+# and exports them. The selected certificate mode covers both names.
+#
+# There were three. zash.<base> served the panel on a second origin with its own
+# certificate role and its own allow rule; the panel is the console now, on the
+# one controller, so the name is deleted rather than kept as an alias. An alias
+# would be a second way into the management plane with no second purpose.
 derive_domains() {
     is_valid_domain "${1:-}" || { err "Base domain is missing or invalid."; return 1; }
     BASE_DOMAIN="$1"
     CONSOLE_DOMAIN="console.${BASE_DOMAIN}"
-    ZASH_DOMAIN="zash.${BASE_DOMAIN}"
     DOT_DOMAIN="dot.${BASE_DOMAIN}"
-    export BASE_DOMAIN CONSOLE_DOMAIN ZASH_DOMAIN DOT_DOMAIN
+    export BASE_DOMAIN CONSOLE_DOMAIN DOT_DOMAIN
 }
 
 load_persisted_domains() {
@@ -3539,7 +3571,7 @@ manage_screen_overview() {
     fi
 
     echo ""
-    printf '  控制台  https://%s/\n' "${ZASH_DOMAIN:-$(cfg_get DNS_BASE_DOMAIN)}"
+    printf '  面板    https://%s/ui/\n' "${CONSOLE_DOMAIN:-$(cfg_get DNS_BASE_DOMAIN)}"
     printf '  DoT     tls://%s:853\n' "${DOT_DOMAIN:-?}"
     printf '  公网 IP %s\n' "$(cfg_get DNS_PUBLIC_IP || echo N/A)"
     echo ""
@@ -3572,7 +3604,7 @@ manage_screen_certificates() {
     printf '  签发模式  %s\n' "$mode"
     printf '  基础域名  %s\n' "$(cfg_get DNS_BASE_DOMAIN || echo '?')"
     echo ""
-    for role in dot zash web; do
+    for role in dot console web; do
         dir="${CONF_DIR}/cert/${role}/current"
         if [[ -f "$dir/fullchain.pem" ]]; then
             printf '  ✅ %-5s %s 到期\n' "$role" \
@@ -3771,7 +3803,7 @@ is_valid_ipv4_or_cidr() {
 # deploy it to all three role directories:
 #   dot  -> ${DOT_CERT_DIR}  (serves DoT :853; also signs the iOS profile)
 #   web  -> ${WEB_CERT_DIR}  (serves the web console behind the mihomo SNI split)
-#   zash -> ${ZASH_CERT_DIR} (serves the zashboard panel)
+#   console -> ${CONSOLE_CERT_DIR} (the controller TLS pair; the panel is served with it)
 # Three modes (resolved from persisted dns.env or the TUI):
 #   cloudflare (default) — Let's Encrypt DNS-01 through the Cloudflare API
 #                       for apex + *.<base>; an owned lineage auto-renews
@@ -3836,9 +3868,10 @@ cert_identity_matches_mode() {
             cert_has_exact_san "$cert" "$base" || return 1
             cert_has_exact_san "$cert" "*.${base}" || return 1 ;;
         http-01)
-            [[ "$dns_san_count" == 3 ]] || return 1
+            # Two exact names. It was three while the panel had an origin of its
+            # own; a stale count here rejects a correctly issued certificate.
+            [[ "$dns_san_count" == 2 ]] || return 1
             cert_has_exact_san "$cert" "console.${base}" || return 1
-            cert_has_exact_san "$cert" "zash.${base}" || return 1
             cert_has_exact_san "$cert" "dot.${base}" || return 1 ;;
         *) return 1 ;;
     esac
@@ -4354,9 +4387,9 @@ install_cert() {
         else
             check_http_challenge_dns_once \
                 || { err "HTTP-01 DNS changed after preflight: ${CERT_DNS_LAST_OBSERVATION:-no answer}."; return 1; }
-            info "Issuing Let's Encrypt cert for ${CONSOLE_DOMAIN}, ${ZASH_DOMAIN}, ${DOT_DOMAIN} (HTTP-01 / :80)..."
+            info "Issuing Let's Encrypt cert for ${CONSOLE_DOMAIN}, ${DOT_DOMAIN} (HTTP-01 / :80)..."
             certbot_args+=(--standalone --preferred-challenges http-01 \
-                -d "$CONSOLE_DOMAIN" -d "$ZASH_DOMAIN" -d "$DOT_DOMAIN")
+                -d "$CONSOLE_DOMAIN" -d "$DOT_DOMAIN")
         fi
         # Non-interactive Certbot otherwise refuses a changed SAN set when the
         # same cert-name switches between wildcard DNS-01 and exact HTTP-01.
@@ -4832,7 +4865,7 @@ prepare_runtime_permissions() {
     fi
 
     ensure_dns_cert_root || return 1
-    for role in dot web zash; do
+    for role in dot web console; do
         [[ -d "${DNS_CERT_DIR}/${role}" ]] || continue
         cert_role_tree_is_safe_for_recursive_metadata "${DNS_CERT_DIR}/${role}" \
             || { err "Refusing unsafe certificate-role tree: ${DNS_CERT_DIR}/${role}"; return 1; }
@@ -5036,7 +5069,7 @@ write_dns_env() {
     # allowlist file it reloads from (add_allow_ip/del_allow_ip/apply_whitelist
     # already hardcode these same two values; persisting them here lets the
     # daemon read back what it's actually being served against).
-    local dns_mihomo_controller="$(cfg_get DNS_MIHOMO_CONTROLLER)"; dns_mihomo_controller="${dns_mihomo_controller:-127.0.0.1:9090}"
+    local dns_mihomo_controller="$(cfg_get DNS_MIHOMO_CONTROLLER)"; dns_mihomo_controller="${dns_mihomo_controller:-127.0.0.1:443}"
     local dns_mihomo_secret="$(cfg_get DNS_MIHOMO_SECRET)" dns_mihomo_secret_env
     dns_mihomo_secret_env="$(dns_env_encode_value "$dns_mihomo_secret")" \
         || { err "DNS_MIHOMO_SECRET cannot be represented safely in dns.env."; return 1; }
@@ -5163,8 +5196,8 @@ DNS_INTERCEPT_CONFIG=${intercept_config}
 # (deploy_cert_roles). mihomo serves the controller with them; the bundle they
 # used to pair with is no longer a separate origin with a directory and a listen
 # address of its own, so neither is written here any more.
-DNS_ZASH_CERT=${ZASH_CERT_DIR}/current/fullchain.pem
-DNS_ZASH_KEY=${ZASH_CERT_DIR}/current/privkey.pem
+DNS_CONSOLE_CERT=${CONSOLE_CERT_DIR}/current/fullchain.pem
+DNS_CONSOLE_KEY=${CONSOLE_CERT_DIR}/current/privkey.pem
 
 # iOS .mobileconfig files served by the daemon at the public /ios/ path.
 WWW_DIR=${WWW_DIR}
@@ -5361,10 +5394,10 @@ check_console_dns_once() {
 
 check_http_challenge_dns_once() {
     local domain
-    for domain in "$CONSOLE_DOMAIN" "$ZASH_DOMAIN" "$DOT_DOMAIN"; do
+    for domain in "$CONSOLE_DOMAIN" "$DOT_DOMAIN"; do
         cert_dns_name_matches "$domain" 1 "$PUBLIC_IP" || return 1
     done
-    for domain in "$CONSOLE_DOMAIN" "$ZASH_DOMAIN" "$DOT_DOMAIN"; do
+    for domain in "$CONSOLE_DOMAIN" "$DOT_DOMAIN"; do
         ok "HTTP-01 DNS verified via ${CERT_DNS_RESOLVER}: ${domain} A ${PUBLIC_IP} (no AAAA)."
     done
 }
@@ -5948,7 +5981,6 @@ configure_install_tui() {
         {
             echo "HTTP-01 DNS / network prerequisites"
             echo "  ${CONSOLE_DOMAIN}  A -> ${PUBLIC_IP}"
-            echo "  ${ZASH_DOMAIN}     A -> ${PUBLIC_IP}"
             echo "  ${DOT_DOMAIN}      A -> ${PUBLIC_IP}"
             echo "  AAAA: none for all three names (IPv4-only gateway)"
             echo "  TCP/80: publicly reachable through NAT/security-group rules"
@@ -5991,12 +6023,14 @@ mihomo_config_matches_install_config() {
     local config="$MIHOMO_DIR/config.yaml" ip
     [[ -f "$config" ]] || return 0
     grep -Fq -- "$CONSOLE_DOMAIN" "$config" || return 1
-    # The console must route DIRECT. Both spellings say that: the plain rule,
-    # and the form that additionally excludes engine-originated traffic —
-    # without that exclusion a captured extension dialling the console reaches
-    # the gateway's own management plane. The seed ships the qualified one, so
-    # accepting only the plain rule made this check reject the config the
-    # installer itself had just written.
+    # The console must be routed to the panel, and the routing must still be the
+    # shape this installer writes.
+    #
+    # Three spellings are accepted: the plain rule, the engine-excluded one, and
+    # the engine-excluded allowlisted one the seed now ships. The exclusion keeps
+    # a captured extension dialling the console off the management plane; the
+    # allowlist keeps every other client off it. Accepting only the plain rule
+    # made this check reject the config the installer itself had just written.
     #
     # The qualifier is IN-TYPE,INNER, which is what the seed writes and what
     # migrate-to-monolith.sh rewrites the retired IN-NAME,intercept-egress form
@@ -6004,11 +6038,23 @@ mihomo_config_matches_install_config() {
     # it has not been migrated, and this core fails `mihomo -t` on the overlay
     # anchors beside it. Passing the drift check there would turn a clear "run
     # the migration" into an obscure core failure two phases later.
-    grep -Eq "^[[:space:]]*-[[:space:]]*DOMAIN,[[:space:]]*${CONSOLE_DOMAIN//./\\.},[[:space:]]*DIRECT[[:space:]]*$|^[[:space:]]*-[[:space:]]*AND,\\(\\(NOT,\\(\\(IN-TYPE,INNER\\)\\)\\),\\(DOMAIN,${CONSOLE_DOMAIN//./\\.}\\)\\),[[:space:]]*DIRECT[[:space:]]*$" "$config" || return 1
-    ! grep -Eq "DOMAIN,[[:space:]]*${CONSOLE_DOMAIN//./\\.},[[:space:]]*REJECT(-DROP)?" "$config" || return 1
-    ! grep -Eq "AND,.*DOMAIN,[[:space:]]*${CONSOLE_DOMAIN//./\\.}.*RULE-SET,[[:space:]]*whitelist" "$config" || return 1
+    local console_re="${CONSOLE_DOMAIN//./\\.}"
+    local allow_line deny_line
+    allow_line="$(grep -nE "^[[:space:]]*-[[:space:]]*DOMAIN,[[:space:]]*${console_re},[[:space:]]*DIRECT[[:space:]]*$|^[[:space:]]*-[[:space:]]*AND,\\(\\(NOT,\\(\\(IN-TYPE,INNER\\)\\)\\),\\(DOMAIN,${console_re}\\)(,\\(RULE-SET,whitelist,DIRECT,src\\))?\\),[[:space:]]*DIRECT[[:space:]]*$" "$config" | head -1 | cut -d: -f1)"
+    [[ -n "$allow_line" ]] || return 1
+    # A console REJECT is no longer disqualifying on its own: the seed ships one
+    # deliberately, below the allow rule, so an unallowlisted client fails closed
+    # rather than falling through to the loopback deny for the wrong reason. What
+    # would break the panel is a REJECT that comes *first*.
+    deny_line="$(grep -nE "DOMAIN,[[:space:]]*${console_re},[[:space:]]*REJECT(-DROP)?" "$config" | head -1 | cut -d: -f1)"
+    [[ -z "$deny_line" || "$allow_line" -lt "$deny_line" ]] || return 1
+    # The panel must be behind the source allowlist. This check used to assert
+    # the opposite -- the console was the unrestricted origin and the panel lived
+    # on a second name that carried the allowlist. The panel is the console now,
+    # so an unrestricted console rule is no longer merely unusual: it is the
+    # management plane answering every client whose DNS points at this gateway.
+    grep -Eq "AND,.*DOMAIN,[[:space:]]*${console_re}.*RULE-SET,[[:space:]]*whitelist" "$config" || return 1
     ! grep -Fq -- "profile.${BASE_DOMAIN}" "$config" || return 1
-    grep -Fq -- "$ZASH_DOMAIN" "$config" || return 1
     grep -Fq -- "${GATEWAY_IP}/32" "$config" || return 1
     while IFS= read -r ip; do
         grep -Eq "listen:[[:space:]]*${ip//./\\.}([,}[:space:]]|$)" "$config" || return 1
@@ -6193,7 +6239,7 @@ full_install() {
     } | card
     {
         echo "Web 控制台: https://${CONSOLE_DOMAIN}/"
-        echo "zashboard:  https://${ZASH_DOMAIN}/"
+        echo "面板 Panel: https://${CONSOLE_DOMAIN}/ui/  (allowlisted source IPs only)"
         echo "配置向导:   https://${CONSOLE_DOMAIN}/setup-guide"
         [[ -t 1 ]] && echo "Console token: ${DNS_API_TOKEN}"
         echo "(console 公网开放，/api 需要 bearer token；zashboard 仅对白名单来源 IP 开放)"

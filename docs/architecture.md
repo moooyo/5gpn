@@ -78,12 +78,17 @@ between processes that no longer exist.
 | `:853/tcp` | The only client DNS ingress, DNS over TLS. |
 | `127.0.0.1:5354/udp` and `/tcp` | The origin boundary. mihomo's own resolver queries it after the sniffer recovers a hostname, and it answers a different question from the client listener — see below. Loopback is enforced at bind. |
 | `127.0.0.1:5353/udp` | Local debugging only. The bind is refused if it is not loopback: it answers the same policy without TLS or client identity, which on a public address is an open resolver. |
-| `127.0.0.1:9090/tcp` | TLS-only external controller. Serves the Clash-compatible API, the `/gpn/*` routes, `/capabilities`, and the zashboard bundle at `/ui/`. |
+| `127.0.0.1:443/tcp` | TLS-only external controller. Serves the Clash-compatible API, the `/gpn/*` routes, `/capabilities`, and the zashboard bundle at `/ui/` — so the panel is `https://console.<base>/ui/`. Loopback, on :443, because that is the port a browser reaching the console name arrives on: the name resolves to `127.0.0.1` through the seed's `hosts` block, so the allow rule's DIRECT dial lands here, on this same process through a different listener. |
 | configured gateway addresses | HTTP/TLS ingress for traffic steered to the gateway, sniffed for Host or SNI. |
 
 There is no public DoH listener and no client-facing plain DNS listener on `:53`.
 There is no separate console origin, no zashboard origin, and no interception
 SOCKS5 listener. All three were deleted with the processes that needed them.
+The panel that used to live on `zash.<base>` is the console now — one name, one
+listener, one certificate role. That name carried the source allowlist while the
+console rule was unrestricted, which was harmless only because nothing listened
+for either; the allowlist moved with the panel, so the management plane is not
+reachable by every client whose DNS points at this gateway.
 
 ### Why the origin boundary is a socket
 

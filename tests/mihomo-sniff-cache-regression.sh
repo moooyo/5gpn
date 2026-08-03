@@ -45,7 +45,7 @@ printf '127.0.0.1/32\n' > "$RUNTIME/whitelist.txt"
 
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
     -subj '/CN=console.example.test' \
-    -addext 'subjectAltName=DNS:console.example.test,DNS:origin.example.test,DNS:zash.example.test' \
+    -addext 'subjectAltName=DNS:console.example.test,DNS:origin.example.test' \
     -keyout "$RUNTIME/key.pem" -out "$RUNTIME/cert.pem" >/dev/null 2>&1
 
 (
@@ -100,14 +100,13 @@ awk -v cert="$RUNTIME/cert.pem" -v key="$RUNTIME/key.pem" -v listener="$GATEWAY_
   {
     gsub(/__GATEWAY_IP__/, "10.0.0.1")
     gsub(/__CONSOLE_DOMAIN__/, "console.example.test")
-    gsub(/__ZASH_DOMAIN__/, "zash.example.test")
     gsub(/__CONTROLLER_SECRET__/, "ci-controller-secret")
     gsub(/__INTERCEPT_INBOUND_USERNAME__/, "ci-module-inbound-user")
     gsub(/__INTERCEPT_INBOUND_PASSWORD__/, "ci-module-inbound-password-123456")
     gsub(/__INTERCEPT_UPSTREAM_USERNAME__/, "ci-module-upstream-user")
     gsub(/__INTERCEPT_UPSTREAM_PASSWORD__/, "ci-module-upstream-password-123456")
     gsub(/127.0.0.1:9090/, "127.0.0.1:19090")
-    gsub(/\/etc\/5gpn\/cert\/zash\/current\/fullchain.pem/, cert)
+    gsub(/\/etc\/5gpn\/cert\/console\/current\/fullchain.pem/, cert)
     gsub(/\/etc\/5gpn\/cert\/zash\/current\/privkey.pem/, key)
 	if ($0 ~ /TLS:.*ports: \[443, 8080, 8443, 5060\]/) {
 	  gsub(/ports: \[443, 8080, 8443, 5060\]/, "ports: [18443, 8080, 8443, 5060]")

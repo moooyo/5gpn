@@ -254,7 +254,7 @@ fixture_keys="$(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$FIXTURE/dns.env.exampl
 current_keys="$(for key in $DNS_ENV_KEYS; do printf '%s\n' "$key"; done | sort)"
 raw_missing_keys="$(comm -23 <(printf '%s\n' "$current_keys") <(printf '%s\n' "$fixture_keys"))"
 raw_extra_keys="$(comm -13 <(printf '%s\n' "$current_keys") <(printf '%s\n' "$fixture_keys"))"
-expected_missing="$(printf '%s\n' DNS_INTERCEPT_CONFIG | sort)"
+expected_missing="$(printf '%s\n' DNS_INTERCEPT_CONFIG DNS_CONSOLE_CERT DNS_CONSOLE_KEY | sort)"
 # A 0.0.13 dns.env carries twelve keys the current installer no longer manages:
 # DNS_EGRESS_RESOLVER, retired pre-v5 and still requiring the documented manual
 # rebuild; DNS_CHINA/DNS_TRUST (retired when upstreams.json became the sole
@@ -263,15 +263,17 @@ expected_missing="$(printf '%s\n' DNS_INTERCEPT_CONFIG | sort)"
 # third origins -- one process serves one UI from a path the unit fixes, so a
 # key that could relocate it would only move it out from under the unit; and the
 # five TGBOT_* keys, retired when the bot moved into the fork and took its own
-# document with it.
+# document with it; and DNS_ZASH_CERT/DNS_ZASH_KEY, retired when the panel moved
+# onto the console name and the certificate role was renamed with it.
 # All are tolerated on read and dropped on rewrite, so an upgrade must not
 # stumble over them.
 expected_extra="$(printf '%s\n' DNS_CHINA DNS_CHINA_0X20 DNS_EGRESS_RESOLVER DNS_TRUST \
     DNS_WEB_DIR DNS_ZASH_DIR DNS_ZASH_LISTEN \
-    TGBOT_TOKEN TGBOT_ADMINS DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS | sort)"
+    TGBOT_TOKEN TGBOT_ADMINS DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS \
+    DNS_ZASH_CERT DNS_ZASH_KEY | sort)"
 if [[ "$raw_missing_keys" == "$expected_missing" && "$raw_extra_keys" == "$expected_extra" \
    && "$(printf '%s\n' "$fixture_keys" | grep -c .)" == 51 ]]; then
-    pass "raw stable key delta is the one additive file plus the twelve retired keys"
+    pass "raw stable key delta is the additive console keys plus the fourteen retired ones"
 else
     fail "raw stable dns.env key delta is unexpected (missing='$raw_missing_keys', extra='$raw_extra_keys')"
 fi
@@ -290,10 +292,11 @@ rebuilt_extra_keys="$(comm -13 <(printf '%s\n' "$current_keys") <(printf '%s\n' 
 # the whole point of tolerating retired keys on read.
 rebuilt_expected_extra="$(printf '%s\n' DNS_CHINA DNS_CHINA_0X20 DNS_TRUST \
     DNS_WEB_DIR DNS_ZASH_DIR DNS_ZASH_LISTEN \
-    TGBOT_TOKEN TGBOT_ADMINS DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS | sort)"
+    TGBOT_TOKEN TGBOT_ADMINS DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS \
+    DNS_ZASH_CERT DNS_ZASH_KEY | sort)"
 if [[ "$rebuilt_missing_keys" == "$expected_missing" && "$rebuilt_extra_keys" == "$rebuilt_expected_extra" \
    && "$(printf '%s\n' "$rebuilt_keys" | grep -c .)" == 50 ]]; then
-    pass "rebuilt 0.0.13 dns.env lacks only the one additive beta key and keeps the retired upstream keys"
+    pass "rebuilt 0.0.13 dns.env lacks only the additive console keys and keeps the retired ones"
 else
     fail "rebuilt stable dns.env key delta is unexpected (missing='$rebuilt_missing_keys', extra='$rebuilt_extra_keys')"
 fi

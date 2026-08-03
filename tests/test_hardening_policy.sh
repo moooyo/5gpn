@@ -65,7 +65,7 @@ grep -Fq -- '-/etc/5gpn/dns.env' "$SVC" \
 # leaf could replace the SAN set that bounds what it may intercept.
 grep -Fq 'ReadOnlyPaths=/etc/5gpn/cert /etc/5gpn/intercept/tls /opt/5gpn/ui' "$SVC" \
     || fail "mihomo.service can write the certificates or the UI bundle it serves"
-grep -Fq 'Environment=SAFE_PATHS=/etc/5gpn/cert/zash:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui' "$SVC" \
+grep -Fq 'Environment=SAFE_PATHS=/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui' "$SVC" \
     || fail "mihomo.service SAFE_PATHS must name exactly the paths it serves from outside its own directory"
 
 # The leaf is published by the root oneshot and read through this group. It must

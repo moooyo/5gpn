@@ -936,7 +936,7 @@ config_mode="$(stat -c %a "$config" 2>/dev/null || stat -f %Lp "$config")"
 # traffic arrives as INNER -- the predicate names the type because there is no
 # longer a listener to name.
 grep -Fq 'console.example.com: 127.0.0.1' "$config" \
-    && grep -Fq 'AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,console.example.com)),DIRECT' "$config" \
+    && grep -Fq 'AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,console.example.com),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$config" \
     && grep -Fq 'name: gateway5060' "$config" \
     && grep -Fq 'QUIC: { ports: [443, 5060] }' "$config" \
     && pass "seed contains public console mapping" \
@@ -1145,7 +1145,7 @@ fi
 # and had no DNS ingress at all because it could not open its own key.
 [[ "$(cert_role_group dot)" == "$MIHOMO_SERVICE_USER" ]] \
     || fail "the DoT certificate role is not owned by the account that serves DoT"
-[[ "$(cert_role_group zash)" == "$MIHOMO_SERVICE_USER" ]] \
+[[ "$(cert_role_group console)" == "$MIHOMO_SERVICE_USER" ]] \
     || fail "the controller certificate role is not owned by the serving account"
 [[ "$(cert_role_group web)" == "$DNS_SERVICE_USER" ]] \
     || fail "the reader-less web role was widened beyond the retired account"
@@ -1281,9 +1281,9 @@ DIG_A=198.51.100.9
 derive_domains example.com
 CERT_MODE=http-01
 verify_console_dns >/dev/null \
-    && pass "HTTP-01 verifies console/zash/dot A and empty AAAA through 1.1.1.1" \
+    && pass "HTTP-01 verifies console/dot A and empty AAAA through 1.1.1.1" \
     || fail "valid HTTP-01 service DNS was rejected"
-for name in console.example.com zash.example.com dot.example.com; do
+for name in console.example.com dot.example.com; do
     grep -q " A ${name} @1.1.1.1" "$DIG_LOG" \
         || fail "HTTP-01 DNS gate did not query A for ${name} through 1.1.1.1"
     grep -q " AAAA ${name} @1.1.1.1" "$DIG_LOG" \
@@ -1421,7 +1421,7 @@ HTTP_INSTALL_LOG="$TMP/http-install-order.log"
     write_cert_provenance() { printf 'write_cert_provenance\n' >> "$HTTP_INSTALL_LOG"; }
     install_cert_deploy_hook() { printf 'install_cert_deploy_hook\n' >> "$HTTP_INSTALL_LOG"; }
     install_renewal_automation() { printf 'install_renewal_automation\n' >> "$HTTP_INSTALL_LOG"; }
-    deploy_cert_roles() { printf 'deploy_cert_roles zash/current\n' >> "$HTTP_INSTALL_LOG"; }
+    deploy_cert_roles() { printf 'deploy_cert_roles console/current\n' >> "$HTTP_INSTALL_LOG"; }
     systemctl() {
         printf 'systemctl %s\n' "$*" >> "$HTTP_INSTALL_LOG"
         case "$*" in
@@ -1442,14 +1442,14 @@ HTTP_INSTALL_LOG="$TMP/http-install-order.log"
     start_services
 ) || fail "mocked successful HTTP-01 install flow failed"
 http_certbot_line="$(grep -n '^certbot ' "$HTTP_INSTALL_LOG" | head -1 | cut -d: -f1)"
-http_deploy_line="$(grep -n '^deploy_cert_roles zash/current$' "$HTTP_INSTALL_LOG" | head -1 | cut -d: -f1)"
+http_deploy_line="$(grep -n '^deploy_cert_roles console/current$' "$HTTP_INSTALL_LOG" | head -1 | cut -d: -f1)"
 http_start_line="$(grep -n '^systemctl start mihomo.service$' "$HTTP_INSTALL_LOG" | head -1 | cut -d: -f1)"
 if [[ -n "$http_certbot_line" && -n "$http_deploy_line" && -n "$http_start_line" \
    && "$http_certbot_line" -lt "$http_deploy_line" \
    && "$http_deploy_line" -lt "$http_start_line" ]]; then
-    pass "HTTP-01 publishes zash/current before start_services restores mihomo"
+    pass "HTTP-01 publishes console/current before start_services restores mihomo"
 else
-    fail "HTTP-01 service restoration raced ahead of zash/current publication"
+    fail "HTTP-01 service restoration raced ahead of console/current publication"
 fi
 
 # Static gates for operations that are intentionally not executed in a unit

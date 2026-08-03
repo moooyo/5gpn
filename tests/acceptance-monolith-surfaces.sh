@@ -19,7 +19,7 @@ head_() { echo; echo "== $1"; }
 
 CONF=/etc/5gpn/mihomo/config.yaml
 SECRET="$(grep -m1 -E "^secret:" "$CONF" | sed -E "s/^secret: *'?([^']*)'?.*/\1/")"
-API="https://127.0.0.1:9090"
+API="https://127.0.0.1:443"
 req() { curl -sk --max-time 120 -H "Authorization: Bearer ${SECRET}" -H 'Content-Type: application/json' "$@"; }
 status() { curl -sk --max-time 120 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${SECRET}" -H 'Content-Type: application/json' "$@"; }
 

@@ -88,7 +88,7 @@ printf '%s' "$tui_fn" | grep -Fq 'SNI 回源解析器' \
     && fail "advanced configure TUI still prompts for the retired single egress resolver"
 printf '%s' "$tui_fn" | grep -Fq "|| true)" \
     || fail "certificate-mode TUI prompt capture is not cancellation-safe under set -e"
-for domain in CONSOLE_DOMAIN ZASH_DOMAIN DOT_DOMAIN; do
+for domain in CONSOLE_DOMAIN DOT_DOMAIN; do
     printf '%s' "$tui_fn" | grep -Fq "\${$domain}" \
         || fail "HTTP-01 confirmation card omits \$$domain"
 done

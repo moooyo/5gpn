@@ -28,7 +28,7 @@ chmod 0640 "$CERT_ROOT/.provenance"
 
 named_group_gid() { id -g; }
 
-for role in dot web zash; do
+for role in dot web console; do
     generation="$CERT_ROOT/$role/generations/generation-20000101T000000Z-1-1"
     mkdir -p "$generation"
     chmod 0750 "$CERT_ROOT/$role" "$CERT_ROOT/$role/generations" "$generation"
@@ -63,7 +63,7 @@ mv -- "$CERT_ROOT/web.saved" "$CERT_ROOT/web"
 pass "symlinked certificate role fails closed"
 
 original_file_uid="$(declare -f file_uid)"
-UNSAFE_OWNER_PATH="$CERT_ROOT/zash/$CERT_ROLE_MARKER"
+UNSAFE_OWNER_PATH="$CERT_ROOT/console/$CERT_ROLE_MARKER"
 file_uid() {
     if [[ "$1" == "$UNSAFE_OWNER_PATH" ]]; then
         printf '%s\n' "$((EUID + 1))"

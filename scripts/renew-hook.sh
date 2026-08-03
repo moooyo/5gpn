@@ -1,15 +1,15 @@
 #!/bin/bash
 # 5gpn-renew-hook-id: deploy-v1
 # Let's Encrypt renewal deploy hook — publish the renewed 5gpn lineage to
-# /etc/5gpn/cert/{dot,web,zash}. Cloudflare DNS-01 lineages must cover the apex
-# and wildcard; HTTP-01 lineages must cover all three derived service names.
-# The zash role is shared by the zashboard panel and mihomo's TLS controller.
-# The pinned mihomo v1.19.28 build guarantees that mihomo reloads the controller certificate files automatically, so the renewed zash copy becomes active without a mihomo restart or reload.
+# /etc/5gpn/cert/{dot,web,console}. Cloudflare DNS-01 lineages must cover the apex
+# and wildcard; HTTP-01 lineages must cover both derived service names.
+# The console role is mihomo TLS controller pair; the panel is served with it.
+# The pinned mihomo v1.19.28 build guarantees that mihomo reloads the controller certificate files automatically, so the renewed console copy becomes active without a mihomo restart or reload.
 #
 # This hook is installed system-wide and certbot may invoke it for unrelated
 # lineages. It therefore accepts only the exact lineage named by the validated
 # DNS_BASE_DOMAIN, verifies the leaf SANs and private-key match before staging,
-# and re-signs only after all three role copies were published.
+# and re-signs only after all role copies were published.
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
@@ -42,7 +42,6 @@ MIHOMO_CERT_GROUP=mihomo
 BASE_DOMAIN=""
 CERT_MODE=""
 CONSOLE_DOMAIN=""
-ZASH_DOMAIN=""
 DOT_DOMAIN=""
 _CERT_RENEWED=0
 
@@ -115,7 +114,7 @@ cert_chain_trusted() {
                     -untrusted "$cert" "$cert" >/dev/null 2>&1; }
 }
 
-# validate_cert_pair <cert> <key> <mode> <base> <console> <zash> <dot>
+# validate_cert_pair <cert> <key> <mode> <base> <console> <dot>
 # Require a currently valid leaf certificate with exactly the DNS SAN set for
 # its issuance mode and prove that the private key has the same public key.
 # Non-DNS SANs do not affect this identity check. Comparing public-key PEM works
@@ -124,7 +123,7 @@ cert_chain_trusted() {
 # debug lineages.
 validate_cert_pair() {
     local cert="$1" key="$2" mode="$3" base="$4"
-    local console="$5" zash="$6" dot="$7"
+    local console="$5" dot="$6"
     local sans normalized_sans dns_sans cert_pub key_pub required name
     [[ -s "$cert" ]] || { err "certificate is missing or empty: $cert"; return 1; }
     [[ -s "$key" ]]  || { err "private key is missing or empty: $key"; return 1; }
@@ -141,7 +140,7 @@ validate_cert_pair() {
             required="${base}"$'\n'"*.${base}"
             ;;
         http-01)
-            required="${console}"$'\n'"${zash}"$'\n'"${dot}"
+            required="${console}"$'\n'"${dot}"
             ;;
         *)
             err "unsupported certificate mode: $mode"
@@ -180,7 +179,7 @@ cleanup_staged() {
 
 role_group() {
     local role="$1" group="$DNS_CERT_GROUP"
-    [[ "$role" == zash ]] && group="$MIHOMO_CERT_GROUP"
+    [[ "$role" == console ]] && group="$MIHOMO_CERT_GROUP"
     if getent group "$group" >/dev/null 2>&1; then
         printf '%s\n' "$group"
     elif [[ "$CERT_ROOT" != /etc/5gpn/cert ]]; then
@@ -259,7 +258,7 @@ cert_root_is_safe() {
             "$CERT_ROOT_MARKER") ;;
             .provenance) safe_plain_file "$entry" "$root_group" 640 || return 1 ;;
             .certbot-ownership) safe_plain_file "$entry" "$root_group" 640 || return 1 ;;
-            dot|web|zash) [[ -d "$entry" && ! -L "$entry" ]] || return 1 ;;
+            dot|web|console) [[ -d "$entry" && ! -L "$entry" ]] || return 1 ;;
             *) return 1 ;;
         esac
     done < <(find "$CERT_ROOT" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
@@ -467,13 +466,13 @@ scrub_interrupted_role_candidates() {
     done < <(find "$dest/generations" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
 }
 
-# publish_roles <cert> <key> <mode> <base> <console> <zash> <dot>
+# publish_roles <cert> <key> <mode> <base> <console> <dot>
 # Stage complete generations for all roles, then atomically swap each role's
 # single current symlink. A TLS reader can never observe a mixed keypair.
 publish_roles() {
     local cert="$1" key="$2" mode="$3" base="$4"
-    local console="$5" zash="$6" dot="$7" r dest group expected_gid root_group generation final link_tmp old i j rollback_link
-    local -a roles=(dot web zash) dests=() generations=() links=() old_targets=()
+    local console="$5" dot="$6" r dest group expected_gid root_group generation final link_tmp old i j rollback_link
+    local -a roles=(dot web console) dests=() generations=() links=() old_targets=()
 
     cert_root_is_safe \
         || { err "certificate publication root is unsafe: $CERT_ROOT"; return 1; }
@@ -514,7 +513,7 @@ publish_roles() {
         generation_is_safe "$generation" "$expected_gid" \
             || { cleanup_role_candidates roles dests generations links; return 1; }
         if ! validate_cert_pair "${generation}/fullchain.pem" "${generation}/privkey.pem" "$mode" "$base" \
-            "$console" "$zash" "$dot"; then
+            "$console" "$dot"; then
             cleanup_role_candidates roles dests generations links
             return 1
         fi
@@ -574,13 +573,13 @@ deploy_lineage() {
     [[ -d "$live" ]] || { err "5gpn lineage directory is missing: $live"; return 1; }
 
     validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
-        "$CERT_MODE" "$BASE_DOMAIN" "$CONSOLE_DOMAIN" "$ZASH_DOMAIN" "$DOT_DOMAIN" \
+        "$CERT_MODE" "$BASE_DOMAIN" "$CONSOLE_DOMAIN" "$DOT_DOMAIN" \
         || return 1
     publish_roles "${live}/fullchain.pem" "${live}/privkey.pem" \
-        "$CERT_MODE" "$BASE_DOMAIN" "$CONSOLE_DOMAIN" "$ZASH_DOMAIN" "$DOT_DOMAIN" \
+        "$CERT_MODE" "$BASE_DOMAIN" "$CONSOLE_DOMAIN" "$DOT_DOMAIN" \
         || return 1
     _CERT_RENEWED=1
-    ok "${CERT_MODE} cert for ${BASE_DOMAIN} redeployed to dot/web/zash"
+    ok "${CERT_MODE} cert for ${BASE_DOMAIN} redeployed to dot/web/console"
 }
 
 renew_hook_main() {
@@ -595,7 +594,6 @@ renew_hook_main() {
         return 1
     fi
     CONSOLE_DOMAIN="console.${BASE_DOMAIN}"
-    ZASH_DOMAIN="zash.${BASE_DOMAIN}"
     DOT_DOMAIN="dot.${BASE_DOMAIN}"
     expected="${LE_LIVE_ROOT}/${BASE_DOMAIN}"
 
@@ -621,7 +619,6 @@ renew_hook_main() {
     fi
 
     valid_base_domain "$CONSOLE_DOMAIN" \
-        && valid_base_domain "$ZASH_DOMAIN" \
         && valid_base_domain "$DOT_DOMAIN" \
         || { err "derived service domains are invalid; no certificate was deployed."; return 1; }
 
@@ -629,16 +626,16 @@ renew_hook_main() {
 
     cert_root_is_safe || return 1
     local role
-    for role in dot web zash; do
+    for role in dot web console; do
         scrub_interrupted_role_candidates "$role" "$CERT_ROOT/$role" || return 1
     done
 
     if [[ "${RENEW_HOOK_VALIDATE_ONLY:-0}" == 1 ]]; then
-        for role in dot web zash; do
+        for role in dot web console; do
             role_tree_is_safe "$role" "$CERT_ROOT/$role" || return 1
         done
         validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
-            "$CERT_MODE" "$BASE_DOMAIN" "$CONSOLE_DOMAIN" "$ZASH_DOMAIN" "$DOT_DOMAIN"
+            "$CERT_MODE" "$BASE_DOMAIN" "$CONSOLE_DOMAIN" "$DOT_DOMAIN"
         return
     fi
 

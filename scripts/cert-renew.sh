@@ -153,7 +153,7 @@ renewal_conf_safe() {
 http_cert_domains() {
     local base="$1"
     valid_domain "$base" || return 1
-    printf 'console.%s\nzash.%s\ndot.%s\n' "$base" "$base" "$base"
+    printf 'console.%s\ndot.%s\n' "$base" "$base"
 }
 
 deploy_hook_owned() {
@@ -217,13 +217,13 @@ certificate_role_tree_safe() {
             "$CERT_ROOT_MARKER") ;;
             .provenance) plain_file_metadata_safe "$entry" "$root_gid" 640 || return 1 ;;
             .certbot-ownership) plain_file_metadata_safe "$entry" "$root_gid" 640 || return 1 ;;
-            dot|web|zash) [[ -d "$entry" && ! -L "$entry" ]] || return 1 ;;
+            dot|web|console) [[ -d "$entry" && ! -L "$entry" ]] || return 1 ;;
             *) return 1 ;;
         esac
     done < <(find "$CERT_ROOT" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-    for role in dot web zash; do
+    for role in dot web console; do
         group="$DNS_CERT_GROUP"
-        [[ "$role" == zash ]] && group="$MIHOMO_CERT_GROUP"
+        [[ "$role" == console ]] && group="$MIHOMO_CERT_GROUP"
         expected_gid="$(named_group_gid "$group")" || return 1
         dest="$CERT_ROOT/$role"
         canonical_directory_metadata_safe "$dest" "$expected_gid" 750 || return 1
@@ -262,9 +262,9 @@ certificate_role_tree_safe() {
 role_copies_match_live() {
     local live="$1" role cert key current group expected_gid
     certificate_role_tree_safe || return 1
-    for role in dot web zash; do
+    for role in dot web console; do
         group="$DNS_CERT_GROUP"
-        [[ "$role" == zash ]] && group="$MIHOMO_CERT_GROUP"
+        [[ "$role" == console ]] && group="$MIHOMO_CERT_GROUP"
         expected_gid="$(named_group_gid "$group")" || return 1
         current="${CERT_ROOT}/${role}/current"
         [[ -L "$current" && "$(readlink -- "$current")" =~ ^generations/[A-Za-z0-9._-]+$ ]] \
@@ -519,7 +519,11 @@ cert_renew_main() {
             || { err "DNS_PUBLIC_IP is missing or invalid; cannot verify HTTP-01 DNS."; return 1; }
         local -a domains=()
         mapfile -t domains < <(http_cert_domains "$base")
-        [[ ${#domains[@]} == 3 ]] || return 1
+        # Two names: console.<base> and dot.<base>. It was three while the panel
+        # had an origin of its own. A count that outlives the list it counts
+        # aborts renewal before the DNS gate ever runs, which reads as a DNS
+        # failure and is not one.
+        [[ ${#domains[@]} == 2 ]] || return 1
         wait_for_http_dns "$public" "${domains[@]}" || return 1
         run_http_renewal "${certbot_args[@]}" \
             || { err "Scoped HTTP-01 certificate renewal failed."; return 1; }

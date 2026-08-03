@@ -56,7 +56,7 @@ candidate="$(mktemp)"
 bash "${HERE}/scripts/migrate-to-monolith.sh" "${MIHOMO_HOME}/config.yaml" > "$candidate"
 grep -q '^external-ui:' "$candidate" || sed -i '/^external-controller-tls:/a external-ui: /opt/5gpn/ui' "$candidate"
 
-if ! SAFE_PATHS=/etc/5gpn/cert/zash:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui \
+if ! SAFE_PATHS=/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui \
      "${BASE_DIR}/bin/mihomo" -t -f "$candidate" -d "$MIHOMO_HOME" >/dev/null 2>&1; then
     err "the migrated config does not validate against the new core; nothing was published"
     err "candidate left at $candidate for inspection"

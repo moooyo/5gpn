@@ -6,8 +6,16 @@
 # engine only ever decides "gateway or not" (DNS layer); everything below
 # about what happens to gateway-bound traffic is yours to shape.
 external-controller: ""
-external-controller-tls: 127.0.0.1:9090
-# The zashboard bundle, served at /ui/ on the controller above. This path is not
+# Loopback, on :443, because that is the port a browser reaching
+# https://__CONSOLE_DOMAIN__/ arrives on. The console name resolves to 127.0.0.1
+# through the hosts block below, so the allow rule's DIRECT dial lands here --
+# on this same process, through a different listener, with no second origin and
+# no proxy in front. Moving this port breaks that path silently: the rule still
+# matches, the dial still succeeds against nothing, and the panel just does not
+# answer.
+external-controller-tls: 127.0.0.1:443
+# The zashboard bundle, served at /ui/ on the controller above -- so the panel
+# is https://__CONSOLE_DOMAIN__/ui/. This path is not
 # free: mihomo.service names it in both SAFE_PATHS and ReadOnlyPaths, and the
 # unit's ReadOnlyPaths entry carries no `-` prefix, so systemd refuses to build
 # the namespace -- the service does not start -- if nothing has published here.
@@ -15,8 +23,8 @@ external-controller-tls: 127.0.0.1:9090
 external-ui: /opt/5gpn/ui
 secret: '__CONTROLLER_SECRET__'
 tls:
-  certificate: /etc/5gpn/cert/zash/current/fullchain.pem
-  private-key: /etc/5gpn/cert/zash/current/privkey.pem
+  certificate: /etc/5gpn/cert/console/current/fullchain.pem
+  private-key: /etc/5gpn/cert/console/current/privkey.pem
 profile: { store-selected: true }
 mode: rule
 log-level: info
@@ -47,7 +55,6 @@ dns:
 
 hosts:
   __CONSOLE_DOMAIN__: 127.0.0.1
-  __ZASH_DOMAIN__:    127.0.0.2
 
 rule-providers:
   whitelist: {type: file, behavior: ipcidr, format: text, path: ./whitelist.txt}
@@ -72,28 +79,30 @@ rules:
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,80)),REJECT
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8080)),REJECT
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8443)),REJECT
-  - AND,((DOMAIN,__ZASH_DOMAIN__),(NETWORK,UDP)),REJECT
-  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,80)),REJECT
-  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8080)),REJECT
-  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8443)),REJECT
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,5060)),REJECT
-  - AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,5060)),REJECT
-  # Both panel allow rules exclude the engine's own egress, and they must sit
-  # above the loopback deny (the console resolves to 127.0.0.1) and therefore
-  # above everything below; without the exclusion an extension script could
-  # name either hostname and reach the gateway's own management plane.
+  # The one panel allow rule. It carries two predicates and both are load-bearing.
   #
-  # The predicate is IN-TYPE,INNER rather than a listener name. The engine has
-  # no socket of its own: every upstream it opens -- a captured connection's
-  # own upstream, or a network.request from a plugin script -- goes back
-  # through this same rule set via inner dialing and arrives as INNER. That is
-  # deliberate, because it is what keeps intercepted traffic inside the
-  # operator's routing, but it also means engine egress is what these two rules
-  # have to be told apart from. It used to arrive on a named SOCKS listener;
-  # now the type is the name.
-  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT
-  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
-  - DOMAIN,__ZASH_DOMAIN__,REJECT
+  # NOT,((IN-TYPE,INNER)) excludes the engine's own egress. The engine has no
+  # socket of its own: every upstream it opens -- a captured connection's own
+  # upstream, or a network.request from a plugin script -- goes back through
+  # this same rule set by inner dialing and arrives as INNER. That is what keeps
+  # intercepted traffic inside the operator's routing, and it is also what these
+  # rules have to tell engine egress apart from. Without the exclusion a
+  # captured extension naming the console reaches the management plane.
+  #
+  # RULE-SET,whitelist,...,src restricts it to allowlisted source addresses.
+  # This used to live on a second panel hostname while the console rule was
+  # unrestricted -- harmless only because nothing listened for either. The panel
+  # answers here now, so the allowlist is what stands between the management
+  # plane and every client whose DNS points at this gateway.
+  #
+  # It must sit above the loopback deny, because the console resolves to
+  # 127.0.0.1, and therefore above everything below it.
+  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__CONSOLE_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT
+  # Fail closed. Without this an unallowlisted client falls through to the
+  # loopback deny, which is the right answer for the wrong reason and would stop
+  # being the right answer the moment the console stopped resolving to 127.0.0.1.
+  - DOMAIN,__CONSOLE_DOMAIN__,REJECT
   - IP-CIDR,__GATEWAY_IP__/32,REJECT,no-resolve
   - IP-CIDR,127.0.0.0/8,REJECT,no-resolve
   - IP-CIDR,10.0.0.0/8,REJECT,no-resolve
@@ -101,10 +110,11 @@ rules:
   - IP-CIDR,192.168.0.0/16,REJECT,no-resolve
   - IP-CIDR,100.64.0.0/10,REJECT,no-resolve
   - IP-CIDR,169.254.0.0/16,REJECT,no-resolve
-  # Gateway QUIC is rejected outright while the datagram capture path is
-  # unwired: the engine's MatchUDP always declines, so a captured host reached
-  # over QUIC would bypass interception silently rather than loudly. Rejecting
-  # UDP/443 makes a capable client fall back to TCP, which is captured. Remove
-  # this only together with the UDP capture path, never ahead of it.
+  # The backstop behind datagram capture. Capture is consulted before rule
+  # resolution, so with mitm.http3 on this reject only ever sees the datagrams
+  # capture did not want, and with it off it is the whole mechanism -- a capable
+  # client falls back to TCP, which is captured. Removing it does not enable
+  # QUIC capture; it makes gateway QUIC bypass interception whenever http3 is
+  # off or the master switch is.
   - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
   - MATCH,Proxies

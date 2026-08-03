@@ -46,7 +46,7 @@ printf '%s\n' 'mode=cloudflare' 'base=example.test' 'certbot_lineage=owned' \
     > "$CERT_ROOT/.provenance"
 chmod 0644 "$CERT_ROOT/$CERT_ROOT_MARKER"
 chmod 0640 "$CERT_ROOT/.provenance"
-for role in dot web zash; do
+for role in dot web console; do
     mkdir -p "$CERT_ROOT/$role/generations"
     chmod 0750 "$CERT_ROOT/$role" "$CERT_ROOT/$role/generations"
     chmod g-s "$CERT_ROOT/$role" "$CERT_ROOT/$role/generations"
@@ -88,12 +88,12 @@ role_checksums() {
     cksum \
         "$CERT_ROOT/dot/current/fullchain.pem" "$CERT_ROOT/dot/current/privkey.pem" \
         "$CERT_ROOT/web/current/fullchain.pem" "$CERT_ROOT/web/current/privkey.pem" \
-        "$CERT_ROOT/zash/current/fullchain.pem" "$CERT_ROOT/zash/current/privkey.pem"
+        "$CERT_ROOT/console/current/fullchain.pem" "$CERT_ROOT/console/current/privkey.pem"
 }
 
 roles_unpublished() {
     local role
-    for role in dot web zash; do
+    for role in dot web console; do
         [[ ! -e "$CERT_ROOT/$role/current" && ! -L "$CERT_ROOT/$role/current" ]] || return 1
         ! find "$CERT_ROOT/$role/generations" -mindepth 1 -print -quit | grep -q . || return 1
     done
@@ -153,7 +153,7 @@ write_env cloudflare
 : > "$SYSTEMCTL_LOG"
 RENEWED_LINEAGE="$LE_LIVE_ROOT/example.test/"
 renew_hook_main >/dev/null
-for role in dot web zash; do
+for role in dot web console; do
     [[ -L "$CERT_ROOT/$role/current" ]] || fail "$role current generation is not an atomic symlink"
     cert="$CERT_ROOT/$role/current/fullchain.pem"
     key="$CERT_ROOT/$role/current/privkey.pem"
@@ -161,7 +161,7 @@ for role in dot web zash; do
     [[ "$(mode_of "$cert")" == 640 && "$(mode_of "$key")" == 640 ]] \
         || fail "$role certificate pair does not have mode 0640"
     validate_cert_pair "$cert" "$key" cloudflare example.test \
-        console.example.test zash.example.test dot.example.test >/dev/null \
+        console.example.test dot.example.test >/dev/null \
         || fail "$role certificate pair failed post-publication validation"
 done
 [[ ! -s "$SYSTEMCTL_LOG" ]] \
@@ -311,12 +311,12 @@ pass "Cloudflare certificate with an extra DNS SAN fails before publication"
 # derived service DNS names. Non-DNS SANs do not change that identity set.
 write_env http-01
 generate_cert "$LE_LIVE_ROOT/example.test" \
-    'DNS:console.example.test,DNS:zash.example.test,DNS:dot.example.test,IP:192.0.2.10'
+    'DNS:console.example.test,DNS:dot.example.test,IP:192.0.2.10'
 : > "$SYSTEMCTL_LOG"
 renew_hook_main >/dev/null
-for role in dot web zash; do
+for role in dot web console; do
     validate_cert_pair "$CERT_ROOT/$role/current/fullchain.pem" "$CERT_ROOT/$role/current/privkey.pem" \
-        http-01 example.test console.example.test zash.example.test dot.example.test >/dev/null \
+        http-01 example.test console.example.test dot.example.test >/dev/null \
         || fail "$role HTTP-01 certificate failed post-publication validation"
 done
 [[ ! -s "$SYSTEMCTL_LOG" ]] \
@@ -327,7 +327,7 @@ pass "HTTP-01 publishes a certificate covering all three service SANs"
 write_env http-01
 before="$(role_checksums)"
 generate_cert "$LE_LIVE_ROOT/example.test" \
-    'DNS:console.example.test,DNS:zash.example.test,DNS:dot.example.test,DNS:extra.example.test'
+    'DNS:console.example.test,DNS:dot.example.test,DNS:extra.example.test'
 : > "$SYSTEMCTL_LOG"
 if renew_hook_main >/dev/null 2>&1; then
     fail "HTTP-01 certificate with an extra DNS SAN was accepted"
@@ -338,12 +338,11 @@ after="$(role_checksums)"
 pass "HTTP-01 certificate with an extra DNS SAN fails before publication"
 
 # Every required HTTP-01 SAN is independently mandatory. Validation happens
-# against the lineage before any of the three live roles is touched.
-for missing in console zash dot; do
+# against the lineage before any live role is touched.
+for missing in console dot; do
     case "$missing" in
-        console) sans='DNS:zash.example.test,DNS:dot.example.test' ;;
-        zash) sans='DNS:console.example.test,DNS:dot.example.test' ;;
-        dot) sans='DNS:console.example.test,DNS:zash.example.test' ;;
+        console) sans='DNS:dot.example.test' ;;
+        dot) sans='DNS:console.example.test' ;;
     esac
     generate_cert "$LE_LIVE_ROOT/example.test" "$sans"
     : > "$SYSTEMCTL_LOG"
@@ -361,7 +360,7 @@ pass "HTTP-01 certificate missing any required service SAN fails before publicat
 # A valid-SAN leaf paired with a different private key must likewise fail closed.
 write_env http-01
 generate_cert "$LE_LIVE_ROOT/example.test" \
-    'DNS:console.example.test,DNS:zash.example.test,DNS:dot.example.test'
+    'DNS:console.example.test,DNS:dot.example.test'
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
     -out "$LE_LIVE_ROOT/example.test/privkey.pem" >/dev/null 2>&1
 : > "$SYSTEMCTL_LOG"

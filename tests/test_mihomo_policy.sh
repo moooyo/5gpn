@@ -24,7 +24,7 @@ nocheck install.sh 'install_xray\(\)' 'install_xray removed'
 check etc/systemd/mihomo.service 'ExecStart=/opt/5gpn/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' 'project-private mihomo ExecStart'
 check etc/systemd/mihomo.service 'RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX' 'mihomo AF set incl AF_NETLINK (required for QUIC/UDP DIRECT dial)'
 check etc/systemd/mihomo.service 'ReadWritePaths=/etc/5gpn/mihomo' 'mihomo writes provider caches'
-check etc/systemd/mihomo.service 'Environment=SAFE_PATHS=/etc/5gpn/cert/zash' 'mihomo SAFE_PATHS scoped to the shared zash controller cert'
+check etc/systemd/mihomo.service 'Environment=SAFE_PATHS=/etc/5gpn/cert/console' 'mihomo SAFE_PATHS scoped to the controller cert role'
 check install.sh 'mihomo\.service' 'install_units installs mihomo.service'
 
 # Task 3: mihomo config template shape
@@ -36,9 +36,8 @@ check "$SNI_REGRESSION" '__INTERCEPT_INBOUND_PASSWORD__'  'sniff-cache fixture r
 check "$SNI_REGRESSION" '__INTERCEPT_UPSTREAM_USERNAME__' 'sniff-cache fixture renders interception upstream username'
 check "$SNI_REGRESSION" '__INTERCEPT_UPSTREAM_PASSWORD__' 'sniff-cache fixture renders interception upstream password'
 check "$T" 'external-controller: ""'                   'plaintext controller disabled in seed'
-check "$T" 'external-controller-tls: 127\.0\.0\.1:9090' 'TLS controller loopback listener'
-check "$T" 'certificate: /etc/5gpn/cert/zash/current/fullchain\.pem' 'controller TLS certificate key pinned'
-check "$T" 'private-key: /etc/5gpn/cert/zash/current/privkey\.pem'   'controller TLS private-key key pinned'
+check "$T" 'certificate: /etc/5gpn/cert/console/current/fullchain\.pem' 'controller TLS certificate key pinned'
+check "$T" 'private-key: /etc/5gpn/cert/console/current/privkey\.pem'   'controller TLS private-key key pinned'
 nocheck install.sh 'http://127\.0\.0\.1:9090'           'installer no longer calls the plaintext mihomo controller'
 check install.sh 'render_mihomo_listeners\(\)'          'dynamic listener renderer'
 check install.sh 'name: gateway%s'                       'current gateway listener name'
@@ -61,28 +60,26 @@ check "$T" 'HTTP: \{ ports: \[80, 8080, 8443, 5060\] \}'    'HTTP sniffer covers
 check "$T" 'QUIC: \{ ports: \[443, 5060\] \}'               'QUIC sniffer covers default UDP ingress ports'
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,8080.*REJECT' 'console cannot expose loopback :8080'
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,8443.*REJECT' 'console cannot expose loopback :8443'
-check "$T" 'DOMAIN,__ZASH_DOMAIN__.*DST-PORT,8080.*REJECT' 'zash cannot expose loopback :8080'
-check "$T" 'DOMAIN,__ZASH_DOMAIN__.*DST-PORT,8443.*REJECT' 'zash cannot expose loopback :8443'
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,5060.*REJECT' 'console cannot expose loopback :5060'
-check "$T" 'DOMAIN,__ZASH_DOMAIN__.*DST-PORT,5060.*REJECT' 'zash cannot expose loopback :5060'
 check "$T" 'rule-providers:'                           'rule-providers block'
 check "$T" 'whitelist:'                                'whitelist rule-provider'
 check "$T" 'behavior: ipcidr'                          'whitelist ipcidr behavior'
 check "$T" 'format: text'                              'whitelist provider uses text format'
 check "$T" 'RULE-SET,whitelist,DIRECT,src'             'source-IP allowlist rule'
-check "$T" 'DOMAIN,__ZASH_DOMAIN__,REJECT'              'fast deny for non-allowlisted zashboard traffic'
+check "$T" 'DOMAIN,__CONSOLE_DOMAIN__,REJECT'           'fast deny for non-allowlisted panel traffic'
 nocheck "$T" 'REJECT-DROP'                             'seed avoids connection-retaining reject rules'
 check "$T" '127\.0\.0\.1:5354'                         'loopback origin DNS selector'
 check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(NETWORK,UDP\)\),REJECT' 'console UDP fallback fast-reject rule'
 check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(DST-PORT,80\)\),REJECT' 'console HTTP fast-reject rule'
-# The panel allow rules exclude the engine's own egress: they sit above the
-# loopback deny, so without the exclusion a captured extension naming either
-# hostname would reach the gateway's management plane. The engine dials its
-# upstreams back through these rules, so that traffic is INNER -- there is no
-# inbound name left to exclude by.
-check "$T" 'AND,\(\(NOT,\(\(IN-TYPE,INNER\)\)\),\(DOMAIN,__CONSOLE_DOMAIN__\)\),DIRECT' 'public console SNI direct route excludes engine egress'
-check "$T" 'AND,\(\(NOT,\(\(IN-TYPE,INNER\)\)\),\(DOMAIN,__ZASH_DOMAIN__\),\(RULE-SET,whitelist,DIRECT,src\)\),DIRECT' 'zashboard allowlisted route excludes engine egress'
-check "$T" 'AND,\(\(DOMAIN,__ZASH_DOMAIN__\),\(NETWORK,UDP\)\),REJECT' 'zashboard UDP fast-reject rule'
+# The panel allow rule carries both predicates. It sits above the loopback deny,
+# because the console resolves to 127.0.0.1, and the engine dials its upstreams
+# back through these same rules as INNER -- there is no inbound name to exclude
+# by, so the type is the name. Losing the source rule-set
+# opens the management plane to every client whose DNS points at this
+# gateway; losing the INNER exclusion lets a captured extension reach it.
+check "$T" 'AND,\(\(NOT,\(\(IN-TYPE,INNER\)\)\),\(DOMAIN,__CONSOLE_DOMAIN__\),\(RULE-SET,whitelist,DIRECT,src\)\),DIRECT' 'the panel route is allowlisted and excludes engine egress'
+nocheck "$T" 'DOMAIN,__CONSOLE_DOMAIN__\)\),DIRECT$' 'the panel route is never unrestricted'
+check "$T" 'external-controller-tls: 127\.0\.0\.1:443' 'the controller listens where the console DIRECT dial lands'
 check "$T" 'AND,\(\(NETWORK,UDP\),\(DST-PORT,443\)\),REJECT' 'HTTP3/QUIC UDP 443 block enabled by default'
 # The UDP/443 reject is the guard standing in for the unwired datagram capture
 # path: the engine's MatchUDP always declines, so a captured host reached over
@@ -99,31 +96,24 @@ else
     echo 'FAIL: QUIC block ordering is unsafe'
     FAIL=1
 fi
-console_direct_line="$(grep -nF '  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
-zash_direct_line="$(grep -nF '  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__ZASH_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
+console_direct_line="$(grep -nF '  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__CONSOLE_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$root/$T" | cut -d: -f1 || true)"
 panel_order_ok=1
 for rule in \
     'AND,((DOMAIN,__CONSOLE_DOMAIN__),(NETWORK,UDP)),REJECT' \
     'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,80)),REJECT' \
     'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8080)),REJECT' \
     'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8443)),REJECT' \
-    'AND,((DOMAIN,__ZASH_DOMAIN__),(NETWORK,UDP)),REJECT' \
-    'AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,80)),REJECT' \
-    'AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8080)),REJECT' \
-    'AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,8443)),REJECT' \
-    'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,5060)),REJECT' \
-    'AND,((DOMAIN,__ZASH_DOMAIN__),(DST-PORT,5060)),REJECT'; do
+    'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,5060)),REJECT'; do
     reject_line="$(grep -nF "  - $rule" "$root/$T" | cut -d: -f1 || true)"
-    route_line="$zash_direct_line"
-    [[ "$rule" == *'__CONSOLE_DOMAIN__'* ]] && route_line="$console_direct_line"
+    route_line="$console_direct_line"
     if [ -z "$reject_line" ] || [ -z "$route_line" ] || [ "$reject_line" -ge "$route_line" ]; then
         panel_order_ok=0
     fi
 done
-zash_deny_line="$(grep -nF '  - DOMAIN,__ZASH_DOMAIN__,REJECT' "$root/$T" | cut -d: -f1 || true)"
+panel_deny_line="$(grep -nF '  - DOMAIN,__CONSOLE_DOMAIN__,REJECT' "$root/$T" | cut -d: -f1 || true)"
 anti_loop_line="$(grep -nF '  - IP-CIDR,__GATEWAY_IP__/32,REJECT,no-resolve' "$root/$T" | cut -d: -f1 || true)"
-if [ "$panel_order_ok" = 1 ] && [ -n "$zash_deny_line" ] && [ -n "$anti_loop_line" ] \
-    && [ "$zash_deny_line" -lt "$anti_loop_line" ]; then
+if [ "$panel_order_ok" = 1 ] && [ -n "$panel_deny_line" ] && [ -n "$anti_loop_line" ] \
+    && [ "$panel_deny_line" -lt "$anti_loop_line" ]; then
     echo "ok: panel rejects precede panel routes and anti-loop guards follow them"
 else
     echo "FAIL: unsafe panel/anti-loop rule ordering"; FAIL=1

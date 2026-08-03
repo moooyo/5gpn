@@ -225,11 +225,10 @@ grep -Eq '^manage_menu\(\)'      "$INSTALL" || fail "no manage_menu() TUI"
 grep -Eq '^restart_services\(\)' "$INSTALL" || fail "no restart_services() (menu 'restart')"
 grep -Eq '^require_command_arity\(\)' "$INSTALL" || fail "commands do not reject unsupported argv shapes"
 # Base-domain install flow: ONE base domain, the three service subdomains
-# (console./zash./dot.<base>) auto-derived by derive_domains.
+# (console./dot.<base>) auto-derived by derive_domains.
 grep -Eq '^derive_domains\(\)' "$INSTALL" || fail "no derive_domains() (single subdomain derivation)"
 dd_fn="$(sed -n '/^derive_domains()/,/^}/p' "$INSTALL")"
 printf '%s' "$dd_fn" | grep -Fq 'console.' || fail "derive_domains does not derive console.<base>"
-printf '%s' "$dd_fn" | grep -Fq 'zash.'    || fail "derive_domains does not derive zash.<base>"
 printf '%s' "$dd_fn" | grep -Fq 'dot.'     || fail "derive_domains does not derive dot.<base>"
 grep -Eq '^load_persisted_domains\(\)' "$INSTALL" || fail "no persisted base-domain derivation helper"
 grep -Eq 'DNS_(DOMAIN|WEB_DOMAIN|CONSOLE_DOMAIN|ZASH_DOMAIN)=' "$INSTALL" \
@@ -274,7 +273,7 @@ grep -Fq 'http://127.0.0.1:9090' "$INSTALL" \
     && fail "installer still calls the plaintext mihomo controller"
 mc_fn="$(sed -n '/^mihomo_controller_curl()/,/^}/p' "$INSTALL")"
 printf '%s' "$mc_fn" | grep -Fq -- '--cacert' \
-    || fail "mihomo_controller_curl does not verify the zash certificate"
+    || fail "mihomo_controller_curl does not verify the controller certificate"
 printf '%s' "$mc_fn" | grep -Fq -- '--connect-to' \
     || fail "mihomo_controller_curl does not dial the configured loopback target"
 printf '%s' "$mc_fn" | grep -Fq 'https://' \
@@ -442,18 +441,18 @@ printf '%s' "$ect_fn" | grep -Fq 'ensure_acme_dir || return 1' \
 printf '%s' "$ic_fn" | grep -Fq 'ensure_cf_token || return 1' \
     || fail "install_cert: issuance branch must contain 'ensure_cf_token || return 1' (anchored call, not just a comment)"
 
-# --- UP-4 Task 8 (2026-07-15 policy/mihomo decoupling): strong zash secret +
+# --- UP-4 Task 8 (2026-07-15 policy/mihomo decoupling): strong controller secret +
 # full-config mihomo seed, no daemon-owned marker regions. ---
 MIHOMO_TMPL="$ROOT/etc/mihomo/config.yaml.tmpl"
 [ -f "$MIHOMO_TMPL" ] || fail "etc/mihomo/config.yaml.tmpl does not exist"
 grep -Fq 'external-controller: ""' "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: plaintext controller must stay disabled"
-grep -Fq 'external-controller-tls: 127.0.0.1:9090' "$MIHOMO_TMPL" \
-    || fail "etc/mihomo/config.yaml.tmpl: missing TLS controller listener"
-grep -Fq '/etc/5gpn/cert/zash/current/fullchain.pem' "$MIHOMO_TMPL" \
-    || fail "etc/mihomo/config.yaml.tmpl: missing zash certificate path"
-grep -Fq '/etc/5gpn/cert/zash/current/privkey.pem' "$MIHOMO_TMPL" \
-    || fail "etc/mihomo/config.yaml.tmpl: missing zash private key path"
+grep -Fq 'external-controller-tls: 127.0.0.1:443' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: the controller must listen where the console DIRECT dial lands"
+grep -Fq '/etc/5gpn/cert/console/current/fullchain.pem' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: missing console certificate path"
+grep -Fq '/etc/5gpn/cert/console/current/privkey.pem' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: missing console private key path"
 grep -Fq '>>>5gpn' "$MIHOMO_TMPL" \
     && fail "etc/mihomo/config.yaml.tmpl: no daemon-owned >>>5gpn marker regions may remain (config is fully operator-owned)"
 grep -Fq '<<<5gpn' "$MIHOMO_TMPL" \
@@ -467,12 +466,12 @@ grep -Fq '{name: Proxies, type: select, proxies: [DIRECT]}' "$MIHOMO_TMPL" \
 # Infrastructure invariants must all still be present in the seed/render path.
 grep -Fq 'external-controller: ""' "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: plaintext controller must stay disabled"
-grep -Fq 'external-controller-tls: 127.0.0.1:9090' "$MIHOMO_TMPL" \
+grep -Fq 'external-controller-tls: 127.0.0.1:443' "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #1 (TLS controller)"
-grep -Fq 'certificate: /etc/5gpn/cert/zash/current/fullchain.pem' "$MIHOMO_TMPL" \
-    || fail "etc/mihomo/config.yaml.tmpl: missing invariant #1 (zash controller certificate path)"
-grep -Fq 'private-key: /etc/5gpn/cert/zash/current/privkey.pem' "$MIHOMO_TMPL" \
-    || fail "etc/mihomo/config.yaml.tmpl: missing invariant #1 (zash controller private-key path)"
+grep -Fq 'certificate: /etc/5gpn/cert/console/current/fullchain.pem' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: missing invariant #1 (console controller certificate path)"
+grep -Fq 'private-key: /etc/5gpn/cert/console/current/privkey.pem' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: missing invariant #1 (console controller private-key path)"
 grep -Fq '__MIHOMO_LISTENERS__'                 "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing dynamic listener placeholder"
 grep -Fq 'target: %s:443'                       "$INSTALL" \
@@ -491,14 +490,14 @@ grep -Fq '__CONSOLE_DOMAIN__: 127.0.0.1'       "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: missing invariant #4 (console SNI hosts mapping)"
 grep -Fq 'force-domain: [__CONSOLE_DOMAIN__]'  "$MIHOMO_TMPL" \
     || fail "etc/mihomo/config.yaml.tmpl: console fallback does not force hostname sniffing"
-grep -Fq '__ZASH_DOMAIN__:    127.0.0.2'        "$MIHOMO_TMPL" \
-    || fail "etc/mihomo/config.yaml.tmpl: missing invariant #5 (zash SNI hosts mapping)"
-# The console route carries a negative qualifier excluding the engine's own
-# egress: it sits above the loopback deny, so without the exclusion a captured
-# extension reaches the gateway's own management plane. The engine dials back
-# through these rules as INNER, so there is no inbound name left to exclude by.
-grep -Fq 'AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT' "$MIHOMO_TMPL" \
-    || fail "etc/mihomo/config.yaml.tmpl: public console is not routed directly with an engine-egress exclusion"
+# The panel route carries two qualifiers and both are load-bearing. It sits
+# above the loopback deny, so without the INNER exclusion a captured extension
+# reaches the gateway's own management plane; without the source rule-set the
+# panel answers every client whose DNS points at this gateway.
+grep -Fq 'AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__CONSOLE_DOMAIN__),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: the panel route is not allowlisted and engine-egress excluded"
+grep -Fq 'DOMAIN,__CONSOLE_DOMAIN__,REJECT' "$MIHOMO_TMPL" \
+    || fail "etc/mihomo/config.yaml.tmpl: the panel has no fail-closed deny below its allow rule"
 grep -Fq '__PROFILE_DOMAIN__' "$MIHOMO_TMPL" \
     && fail "etc/mihomo/config.yaml.tmpl: retired profile SNI remains"
 grep -Fq 'IP-CIDR,__GATEWAY_IP__/32,REJECT' "$MIHOMO_TMPL" \

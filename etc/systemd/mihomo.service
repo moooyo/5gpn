@@ -55,7 +55,7 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
 # leaf, the shared controller certificate, the interception leaf and the
 # zashboard bundle all live outside /etc/5gpn/mihomo, so they are named here
 # rather than by relaxing the check.
-Environment=SAFE_PATHS=/etc/5gpn/cert/zash:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui
+Environment=SAFE_PATHS=/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui
 
 # Writable: mihomo's own directory, which now also holds the gpn/ state
 # documents, and the per-extension persistent storage.

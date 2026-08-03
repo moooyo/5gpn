@@ -85,7 +85,7 @@ AAAA 的 NODATA 不只针对客户端。mihomo 嗅探出主机名之后，会在
 - 一台带 systemd 的 Linux amd64 网关和 root 权限。安装器直接支持使用 apt 或 dnf/yum 的发行版；其他发行版只有在检测到上述包管理器时才会尽力适配。
 - 首次安装可用的交互 TTY。`curl | sudo bash` 会尝试重新连接 `/dev/tty`；没有 TTY 时首次安装会 fail closed。
 - 至少一个已分配给本机接口、客户端可路由到达的非回环 IPv4。5gpn 的 steering 路径是 IPv4-only；IPv6-only 客户端无法到达网关，除非网络提供 CLAT 等 IPv4 可达性。
-- 一个自有 base domain。系统会派生 `dot.<base>`、`console.<base>` 和 `zash.<base>`。
+- 一个自有 base domain。系统会派生 `dot.<base>` 和 `console.<base>`。
 - 生产模式需要 `console.<base>` 指向公网或客户端可路由网关 IPv4 的 A 记录；`debug` 会跳过公共 DNS gate。Android 首次启用 Private DNS 前，`dot.<base>` 还必须能通过客户端原有 resolver 解析。
 - 由云安全组或独立防火墙控制入口来源。5gpn 不创建、修改或删除宿主防火墙规则。
 
@@ -112,12 +112,12 @@ TCP `853` 是 `5gpn-dns` 的固定客户端入口。其余数据面 listener 来
 
 ## 证书模式
 
-首次安装 TUI 会要求选择以下一种模式。两个生产模式都只使用一个名为 `<base>` 的 scoped Certbot lineage，并把证书部署到 dot、web 和 zash 三个角色目录。
+首次安装 TUI 会要求选择以下一种模式。两个生产模式都只使用一个名为 `<base>` 的 scoped Certbot lineage，并把证书部署到 dot、web 和 console 三个角色目录。
 
 | 模式 | 证书与 DNS 要求 | 续期行为 |
 | --- | --- | --- |
 | `cloudflare` | DNS-01；证书 SAN 为 `<base>` 与 `*.<base>`；需要仅具 `Zone:DNS:Edit` 的 token。通过固定解析器 `1.1.1.1` 查询时，`console.<base>` 的结果必须只包含一条 A、不得经过 CNAME，并指向 `DNS_PUBLIC_IP` 或内网部署的 `DNS_GATEWAY_IP` | 不停止 mihomo |
-| `http-01` | 通过固定解析器 `1.1.1.1` 查询时，`console.<base>`、`zash.<base>`、`dot.<base>` 的结果必须各自只包含一条指向 `DNS_PUBLIC_IP` 的公共 A、不得经过 CNAME 且不能有 AAAA，TCP `80` 必须公网可达 | 首次签发仅在 mihomo 原本 active 时停止；失败或信号会立即恢复，成功则在 lineage 与角色证书完整发布后由安装流程恢复。到期续期会短停 `:80`，并在成功或失败后恢复 |
+| `http-01` | 通过固定解析器 `1.1.1.1` 查询时，`console.<base>`、`dot.<base>` 的结果必须各自只包含一条指向 `DNS_PUBLIC_IP` 的公共 A、不得经过 CNAME 且不能有 AAAA，TCP `80` 必须公网可达 | 首次签发仅在 mihomo 原本 active 时停止；失败或信号会立即恢复，成功则在 lineage 与角色证书完整发布后由安装流程恢复。到期续期会短停 `:80`，并在成功或失败后恢复 |
 | `debug` | 隔离的自签证书，不使用 Certbot，不受客户端默认信任 | 仅用于测试 |
 
 Cloudflare token 只写入 root-only 的 `/etc/5gpn/acme/cloudflare.ini`，不会进入 `dns.env`、调用者环境或日志。可选 interception 使用完全独立的私有根 CA，不会替换 DoT 或 Console 公网证书。
@@ -181,7 +181,7 @@ sudo sed -n 's/^DNS_API_TOKEN=//p' /etc/5gpn/dns.env
 
 - **Android**：在 Console 的 Setup Guide 中查看 `dot.<base>`，然后填入系统 Private DNS。现代 Android 应用通常默认不信任用户安装的 CA，因此项目不提供 Android MITM CA 安装流程。
 - **iOS**：在 Setup Guide 下载并安装 `/ios/ios-dot.mobileconfig`。若使用扩展，再单独安装 `/ios/ios-intercept-ca.mobileconfig`，并在系统设置中手动启用 Full SSL Trust。
-- **zashboard**：先把来源 CIDR 加入白名单，再从 Console 发起一次性 handoff。`https://zash.<base>/` 的来源白名单和短时 session 是独立于 Console token 的边界。
+- **面板 (zashboard)**：`https://console.<base>/ui/`。先用 `5gpn` 菜单把来源 CIDR 加入白名单——面板的允许规则带 `RULE-SET,whitelist,...,src`，未在白名单里的客户端一律 REJECT。凭据只有 mihomo controller secret 一个。
 
 Console 包含 `/overview`、`/setup-guide`、`/logs`、`/resolve-test`、`/policy-rules`、`/extensions`、`/extensions/hosts`、`/marketplace`、`/plugin-logs`、`/mihomo`、`/mihomo-config` 和 `/settings`。Console 只暴露窄化的 mihomo API；完整 controller pass-through 只属于单独保护的 zashboard。mihomo logs 与 plugin logs 使用不同的短时一次性 WebSocket ticket。
 

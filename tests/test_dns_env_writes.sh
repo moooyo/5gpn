@@ -46,7 +46,7 @@ INTERCEPT_DIR="$CONF_DIR/intercept"
 DNS_RULES_DIR_DEFAULT="$CONF_DIR/rules"
 DOT_CERT_DIR="$CONF_DIR/cert/dot"
 WEB_CERT_DIR="$CONF_DIR/cert/web"
-ZASH_CERT_DIR="$CONF_DIR/cert/zash"
+CONSOLE_CERT_DIR="$CONF_DIR/cert/console"
 WWW_DIR="$TMP/www"
 cfg_get() {
     case "$1" in

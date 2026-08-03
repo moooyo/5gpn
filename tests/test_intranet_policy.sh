@@ -3,7 +3,7 @@
 # (2026-07: /etc/5gpn/dns.env is the ONE source of truth; caller environment is
 # not configuration input and there are NO per-key .state files). Cert modes are
 # cloudflare | http-01 | debug; generic DNS plugins and import remain removed.
-# ONE base-domain lineage is deployed to dot/web/zash role dirs. The host
+# ONE base-domain lineage is deployed to dot/web/console role dirs. The host
 # nftables firewall management was REMOVED — this file also locks that.
 # Pure grep/sed — runs on the dev box under Git Bash; also the CI test job.
 set -u
@@ -47,8 +47,8 @@ grep -Fq 'DOT_CERT_DIR="${DNS_CERT_DIR}/dot"' "$INSTALL" \
     || fail "install.sh: no DOT_CERT_DIR role dir (/etc/5gpn/cert/dot)"
 grep -Fq 'WEB_CERT_DIR="${DNS_CERT_DIR}/web"' "$INSTALL" \
     || fail "install.sh: no WEB_CERT_DIR role dir (/etc/5gpn/cert/web)"
-grep -Fq 'ZASH_CERT_DIR="${DNS_CERT_DIR}/zash"' "$INSTALL" \
-    || fail "install.sh: no ZASH_CERT_DIR role dir (/etc/5gpn/cert/zash)"
+grep -Fq 'CONSOLE_CERT_DIR="${DNS_CERT_DIR}/console"' "$INSTALL" \
+    || fail "install.sh: no CONSOLE_CERT_DIR role dir (/etc/5gpn/cert/console)"
 grep -Fq 'DNS_WEB_CERT=${WEB_CERT_DIR}/current/fullchain.pem' "$INSTALL" \
     || fail "install.sh: dns.env does not point DNS_WEB_CERT at the web role dir"
 grep -Fq 'DNS_CERT=${DOT_CERT_DIR}/current/fullchain.pem' "$INSTALL" \
@@ -57,7 +57,7 @@ grep -Fq 'DNS_CERT=${DOT_CERT_DIR}/current/fullchain.pem' "$INSTALL" \
 grep -Eq '^[[:space:]]*install_cert "\$BASE_DOMAIN"' "$INSTALL" \
     || fail "install.sh: full_install does not provision the single scoped cert via install_cert \$BASE_DOMAIN"
 grep -Eq '^deploy_cert_roles\(\)' "$INSTALL" \
-    || fail "install.sh: no deploy_cert_roles() (copies the selected certificate to dot/web/zash)"
+    || fail "install.sh: no deploy_cert_roles() (copies the selected certificate to dot/web/console)"
 
 # ===== CERT_MODE=debug — self-signed WILDCARD + dismantles ACME machinery =====
 dbg="$(sed -n '/^issue_selfsigned_wildcard()/,/^}/p' "$INSTALL")"
@@ -84,7 +84,7 @@ printf '%s' "$ic" | grep -Fq -- '--standalone --preferred-challenges http-01' \
     || fail "install.sh: HTTP-01 mode does not use Certbot standalone HTTP challenge"
 printf '%s' "$ic" | grep -Fq -- '--force-renewal --renew-with-new-domains' \
     || fail "install.sh: non-interactive mode switch cannot replace the lineage SAN set"
-for domain in CONSOLE_DOMAIN ZASH_DOMAIN DOT_DOMAIN; do
+for domain in CONSOLE_DOMAIN DOT_DOMAIN; do
     printf '%s' "$ic" | grep -Fq -- "-d \"\$$domain\"" \
         || fail "install.sh: HTTP-01 certificate omits \$$domain"
 done
@@ -120,7 +120,7 @@ printf '%s' "$dns_match" | grep -Fq '+short A "$domain" @"$CERT_DNS_RESOLVER"' \
     || fail "install.sh: certificate DNS gate does not query A through the fixed resolver"
 printf '%s' "$dns_match" | grep -Fq '+short AAAA "$domain" @"$CERT_DNS_RESOLVER"' \
     || fail "install.sh: certificate DNS gate does not reject AAAA through the fixed resolver"
-for domain in CONSOLE_DOMAIN ZASH_DOMAIN DOT_DOMAIN; do
+for domain in CONSOLE_DOMAIN DOT_DOMAIN; do
     printf '%s' "$http_dns" | grep -Fq "\$$domain" \
         || fail "install.sh: HTTP-01 DNS gate omits \$$domain"
 done
@@ -181,8 +181,8 @@ grep -Eq 'open_port80|close_port80' "$INSTALL" \
 RENEW="$ROOT/scripts/renew-hook.sh"
 grep -Fq 'RENEWED_LINEAGE' "$RENEW" || fail "renew-hook.sh: does not use RENEWED_LINEAGE"
 grep -Fq 'DNS_BASE_DOMAIN' "$RENEW" || fail "renew-hook.sh: does not match the lineage to DNS_BASE_DOMAIN"
-grep -Fq 'roles=(dot web zash)' "$RENEW" \
-    || fail "renew-hook.sh: does not deploy to all dot/web/zash role dirs"
+grep -Fq 'roles=(dot web console)' "$RENEW" \
+    || fail "renew-hook.sh: does not deploy to all dot/web/console role dirs"
 grep -Fq 'validate_cert_pair' "$RENEW" \
     || fail "renew-hook.sh: does not validate SANs and the certificate/private-key pair"
 grep -Fq 'mktemp -d "${dest}/generations/.new.XXXXXX"' "$RENEW" \
