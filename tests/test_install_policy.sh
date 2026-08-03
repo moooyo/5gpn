@@ -147,11 +147,13 @@ grep -Fq '    start_services_with_cert_lock_handoff' <<<"$full_fn" \
 grep -Fqx '    start_services' <<<"$full_fn" \
     && fail "full install still starts the sidecar while holding the certificate lock"
 
-# ===== iOS profile is served at the web console's public /ios/ path; the
-# standalone :8111 responder and the host firewall are both gone =====
+# ===== iOS profile is served by the controller under /ui/; the standalone :8111
+# responder, the host firewall and the separate console origin that owned /ios/
+# are all gone. The path assertion lives in test_ios_profile_atomic.sh, which
+# also ties it to what verify_console_endpoint probes. =====
 grep -Eq 'IOS_PORT=' "$INSTALL" && fail "install.sh must not reference IOS_PORT (:8111 responder removed)"
-grep -Fq '/ios/ios-dot.mobileconfig' "$INSTALL" \
-    || fail "install.sh must print the /ios/ profile URL (web console path)"
+grep -Eq '^ios_profile_url\(\)' "$INSTALL" \
+    || fail "install.sh has no single derivation of the iOS profile URL"
 # First install is TUI-only; reinstall reads the persisted dns.env and caller
 # environment is explicitly cleared.
 grep -Eq '^configure_install_tui\(\)' "$INSTALL" || fail "no first-install TUI configuration wizard"

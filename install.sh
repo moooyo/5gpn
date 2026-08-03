@@ -5337,9 +5337,23 @@ ensure_profile_mime_type() {
     info "Registered the .mobileconfig MIME type so iOS is offered the profile."
 }
 
+# ios_profile_url — the ONE derivation of where a phone fetches the DoT profile.
+#
+# It is /ui/, not /ios/. The profiles are published into the bundle directory
+# because the controller is what serves them, and the /ios/ path belonged to the
+# separate console origin that the monolith retired. The QR code, the success
+# banner and the regenerate message all print this URL to an operator who will
+# type it into a phone, so all three come through here -- one of them pointing
+# at the retired path is a 404 discovered by hand, on a phone, later.
+ios_profile_url() {
+    local name="${1:-ios-dot.mobileconfig}"
+    [[ -n "${CONSOLE_DOMAIN:-}" ]] || load_persisted_domains || return 1
+    printf 'https://%s/ui/%s' "$CONSOLE_DOMAIN" "$name"
+}
+
 print_qr() {
     [[ -n "${CONSOLE_DOMAIN:-}" ]] || load_persisted_domains || return 1
-    local url="https://${CONSOLE_DOMAIN}/ios/ios-dot.mobileconfig"
+    local url; url="$(ios_profile_url)" || return 1
     if command -v qrencode >/dev/null 2>&1; then
         echo ""; info "Scan to install the iOS profile:"
         qrencode -t ANSIUTF8 "$url" || true
@@ -5789,7 +5803,7 @@ regen_ios() {
     MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" || return 1
     verify_console_endpoint
     print_qr
-    ok "iOS profile regenerated: https://${CONSOLE_DOMAIN:-<console-domain>}/ios/ios-dot.mobileconfig"
+    ok "iOS profile regenerated: $(ios_profile_url)"
 }
 
 show_status() {
@@ -6280,16 +6294,14 @@ full_install() {
         echo ""
         echo "  DoT 地址         tls://${DOT_DOMAIN}:853"
         echo "  Android 私人DNS  ${DOT_DOMAIN}"
-        echo "  iOS 描述文件      https://${CONSOLE_DOMAIN}/ios/ios-dot.mobileconfig"
-        echo "  MITM CA 描述文件  https://${CONSOLE_DOMAIN}/ios/ios-intercept-ca.mobileconfig（需手动完全信任）"
+        echo "  iOS 描述文件      $(ios_profile_url ios-dot.mobileconfig)"
+        echo "  MITM CA 描述文件  $(ios_profile_url ios-intercept-ca.mobileconfig)（需手动完全信任）"
         echo "  Public console   ${CONSOLE_DOMAIN} A -> ${PUBLIC_IP}（NPN 可用客户端可路由 ${GATEWAY_IP}）"
     } | card
     {
-        echo "Web 控制台: https://${CONSOLE_DOMAIN}/"
-        echo "面板 Panel: https://${CONSOLE_DOMAIN}/ui/  (allowlisted source IPs only)"
-        echo "配置向导:   https://${CONSOLE_DOMAIN}/setup-guide"
+        echo "控制台 Console: https://${CONSOLE_DOMAIN}/ui/  (仅白名单来源 IP)"
         [[ -t 1 ]] && echo "Console token: ${DNS_API_TOKEN}"
-        echo "(console 公网开放，/api 需要 bearer token；zashboard 仅对白名单来源 IP 开放)"
+        echo "(控制台与 /api 同一来源，均需在白名单内；/api 另需 bearer token)"
     } | card
     print_qr
     echo ""

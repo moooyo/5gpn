@@ -190,4 +190,36 @@ if find "$CANDIDATE_DIR" -mindepth 1 \
 fi
 pass "fresh installation candidate receives both signed profiles"
 
+# The URL an operator is told to open must be the URL the installer verified.
+#
+# Three surfaces print it -- the QR code, the success banner and the regenerate
+# message -- and all three said /ios/ after the monolith moved the profiles into
+# the bundle at /ui/. verify_console_endpoint probed /ui/ and passed, so the
+# install reported success while the printed URL and the QR a phone would scan
+# both returned 404. Nothing on the host could notice: the two paths are read by
+# different readers, and only one of them is a machine.
+INSTALL="$ROOT/install.sh"
+grep -nE '(https://\$\{CONSOLE_DOMAIN[^}]*\}|https://%s)/ios/' "$INSTALL" \
+    && fail "a printed URL still points at the retired /ios/ path"
+url_fn="$(sed -n '/^ios_profile_url()/,/^}/p' "$INSTALL")"
+[[ -n "$url_fn" ]] || fail "ios_profile_url is missing"
+printf '%s' "$url_fn" | grep -Fq '/ui/' \
+    || fail "ios_profile_url does not build the /ui/ path the controller serves"
+
+# Every printer goes through that one derivation rather than spelling it out.
+# A name that no longer exists fails here rather than skipping: a silent skip is
+# how this check would quietly stop covering the site it was written for.
+for site in print_qr regen_ios; do
+    body="$(sed -n "/^${site}()/,/^}/p" "$INSTALL")"
+    [[ -n "$body" ]] || fail "$site is missing; update this check to its new name"
+    printf '%s' "$body" | grep -Fq 'ios_profile_url' \
+        || fail "$site builds the profile URL itself instead of calling ios_profile_url"
+done
+
+# And the path it builds is the one the console probe actually asserts on.
+probe="$(sed -n '/^verify_console_endpoint()/,/^}/p' "$INSTALL")"
+printf '%s' "$probe" | grep -Fq '"/ui/${name}"' \
+    || fail "verify_console_endpoint no longer probes the profiles under /ui/"
+pass "the printed profile URL is the path the console probe verifies"
+
 echo "iOS profile atomic publication tests: PASS"
