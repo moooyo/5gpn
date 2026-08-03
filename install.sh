@@ -7,15 +7,15 @@
 #   (sniffer override-destination), then the loopback DNS broker resolves the
 #   real IP through an extension's operator-selected China/trust group (trust by
 #   default) before mihomo applies its operator-owned policy.
-#   mihomo also SNI-splits the panels
-#   (console./zash.<base>) to the daemon's loopback :443 listener.
+#   mihomo also SNI-splits the console panel
+#   (console.<base>) to the daemon's loopback :443 listener.
 #
 # One base domain and one scoped production cert lineage:
 #   BASE_DOMAIN  -> the operator's ONE apex domain (the single knob).
 #   CONSOLE_DOMAIN/DOT_DOMAIN
-#     (= console./zash./dot.<BASE_DOMAIN>)
+#     (= console./dot.<BASE_DOMAIN>)
 #     are auto-derived subdomains (derive_domains). Cloudflare DNS-01 issues
-#     `*.<base>` + `<base>`; HTTP-01 issues the three exact service SANs because
+#     `*.<base>` + `<base>`; HTTP-01 issues the two exact service SANs because
 #     HTTP-01 cannot issue wildcards. HTTP-01 waits for all three A records via
 #     1.1.1.1, then briefly releases mihomo's :80 listener for issuance/renewal.
 #     Auto-renewal is unattended via the daily scoped certbot timer.
@@ -65,7 +65,7 @@ STATE_OWNERSHIP_VALUE="5gpn-state"
 SWAP_FILE="${STATE_DIR}/swapfile"
 SWAP_FSTAB_MARKER="# 5gpn-owned-swap-v1"
 SWAP_CREATED_THIS_RUN=0
-DNS_CERT_DIR="/etc/5gpn/cert"            # selected cert copied into dot/, web/, zash/ roles
+DNS_CERT_DIR="/etc/5gpn/cert"            # selected cert copied into dot/, web/, console/ roles
 # Certificate ownership values keep their revision suffix, and it is not dead
 # weight. Every other 5gpn root self-heals -- claiming republishes whatever
 # marker is there -- so its value can change freely. Certificate roots
@@ -710,8 +710,8 @@ cert_generation_is_safe() {
 # meant changing one of them -- which produced a directory the validator then
 # rejected as unsafe. A single definition cannot disagree with itself.
 #
-# dot and zash: the monolith serves both, so it must read both. web: nothing
-# reads it since its console origin went with the process that served it, and a
+# dot and console: the monolith serves both, so it must read both. web: nothing
+# reads it since its origin went with the process that served it, and a
 # role with no reader should not be widened to the account that would gain one.
 cert_role_group() {
     case "$1" in
@@ -987,7 +987,7 @@ preflight_runtime_publication_paths() {
         "${DNS_RULES_DIR_DEFAULT}/direct" "${DNS_RULES_DIR_DEFAULT}/proxy" \
         "${DNS_RULES_DIR_DEFAULT}/chnroute" "$MIHOMO_DIR" "$INTERCEPT_DIR" \
         "${INTERCEPT_DIR}/tls" "$DNS_CERT_DIR" "${DNS_CERT_DIR}/dot" \
-        "${DNS_CERT_DIR}/web" "${DNS_CERT_DIR}/zash"; do
+        "${DNS_CERT_DIR}/web" "${DNS_CERT_DIR}/console"; do
         runtime_directory_slot_is_safe "$path" "$CONF_DIR" \
             || { err "Refusing unsafe configuration directory slot: $path"; return 1; }
     done
@@ -3177,7 +3177,7 @@ reset_mihomo_config() {
 # ----------------------------------------------------------------------------
 
 # mihomo_controller_curl dials the loopback mihomo controller over verified TLS
-# using the zash certificate and SNI, while still letting callers supply their
+# using the console certificate and SNI, while still letting callers supply their
 # own curl flags and path.
 mihomo_controller_curl() {
     local path="$1"; shift
@@ -3434,19 +3434,19 @@ load_mihomo_reset_context() {
     export PUBLIC_IP GATEWAY_IP BASE_DOMAIN CERT_MODE CERT_EMAIL MIHOMO_LISTEN_IPS
 }
 
-# derive_domains <base> — the SINGLE derivation of the three service subdomains
+# derive_domains <base> — the SINGLE derivation of the two service subdomains
 # from the operator's ONE base (apex) domain. This is the ONLY place that knows
-# the console./zash./dot. prefix scheme -- every other call site (mihomo config
+# the console./dot. prefix scheme -- every other call site (mihomo config
 # render and dns.env writer) MUST obtain the derived domains by
 # calling this function (or reading the globals it sets/exports), never by
-# re-deriving "console.${base}"/"zash.${base}" inline, to avoid drift.
+# re-deriving "console.${base}" inline, to avoid drift.
 # The base must already be validated. Sets BASE_DOMAIN plus the derived globals
 # and exports them. The selected certificate mode covers both names.
 #
-# There were three. zash.<base> served the panel on a second origin with its own
-# certificate role and its own allow rule; the panel is the console now, on the
-# one controller, so the name is deleted rather than kept as an alias. An alias
-# would be a second way into the management plane with no second purpose.
+# The panel and the controller share the console name and the one certificate
+# role behind it. There is deliberately no second name aliased to the same
+# listener: an alias would be a second way into the management plane with no
+# second purpose, and every allow rule would have to be written twice.
 derive_domains() {
     is_valid_domain "${1:-}" || { err "Base domain is missing or invalid."; return 1; }
     BASE_DOMAIN="$1"
@@ -3817,7 +3817,7 @@ is_valid_ipv4_or_cidr() {
 #                       Use '5gpn set-cf-token' (or the manage menu) to update
 #                       the token at any time.
 #   http-01            — Let's Encrypt standalone HTTP challenge for the exact
-#                       console/zash/dot service SANs. The TUI confirms the DNS
+#                       console/dot service SANs. The TUI confirms the DNS
 #                       plan, then waits for 1.1.1.1 to see every A record at
 #                       PUBLIC_IP with no AAAA. Initial issuance keeps an
 #                       originally active mihomo stopped through role-certificate
@@ -4214,7 +4214,7 @@ install_cert_deploy_hook() {
         return 1
     fi
     install -m 0755 "$src" /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh || return 1
-    ok "Renewal deploy hook installed (validated dot/web/zash publication + iOS re-sign)."
+    ok "Renewal deploy hook installed (validated dot/web/console publication + iOS re-sign)."
 }
 
 # Certbot standalone must own public TCP :80. Run in a subshell so its signal
@@ -4473,7 +4473,7 @@ deploy_cert_roles() {
     local base="$1" mode="${3:-${CERT_MODE:-cloudflare}}"
     local src="${2:-${LE_LIVE_ROOT}/${base}}"
     local r dest group generation final link_tmp old trust=production i j rollback_link
-    local -a roles=(dot web zash) dests=() generations=() links=() old_targets=()
+    local -a roles=(dot web console) dests=() generations=() links=() old_targets=()
     [[ "$src" == "$DEBUG_CERT_DIR"/* ]] && { trust=debug; mode=debug; }
     validate_cert_pair "${src}/fullchain.pem" "${src}/privkey.pem" "$base" 0 "$trust" "$mode" \
         || { err "Certificate source failed validation: $src"; return 1; }
@@ -4568,7 +4568,7 @@ deploy_cert_roles() {
     done
     cert_root_is_safe \
         || { err "Published certificate role tree failed ownership validation."; return 1; }
-    ok "${mode} certificate for ${base} deployed to dot/web/zash role dirs."
+    ok "${mode} certificate for ${base} deployed to dot/web/console role dirs."
 }
 
 # install_renewal_automation installs a daily systemd timer running only the
@@ -5058,9 +5058,9 @@ write_dns_env() {
     # pre-existing dns.env value forward on the first upgrade past this change,
     # so an operator who hand-edited the old keys does not silently lose them.
 
-    # Obtain console/zash/base domains from the single derivation of the
+    # Obtain the console/dot/base domains from the single derivation of the
     # operator's base (apex) domain
-    # (console.<base> / zash.<base>), also used by render_mihomo_config and the
+    # (console.<base> / dot.<base>), also used by render_mihomo_config and the
     # *.<base> wildcard install_cert issues, so dns.env and the rendered
     # config.yaml agree instead of drifting.
     local base_domain="$BASE_DOMAIN"
@@ -5109,10 +5109,10 @@ DNS_LISTEN_DOT=:853
 DNS_LISTEN_DEBUG=127.0.0.1:5353
 
 # TLS certs — ONE scoped lineage. Cloudflare uses apex+wildcard; HTTP-01 uses
-# exact console/zash/dot SANs. Either shape is deployed to THREE role dirs:
-#   dot/  serves DoT :853 (also signs the iOS profile)
-#   web/  serves the web console (loopback :443, behind the mihomo SNI split)
-#   zash/ serves the zashboard panel
+# exact console/dot SANs. Either shape is deployed to THREE role dirs:
+#   dot/     serves DoT :853 (also signs the iOS profile)
+#   web/     serves nothing today; see cert_role_group
+#   console/ serves the mihomo TLS controller, and so the panel behind it
 # All hot-reload on file-mtime change; pinned mihomo v1.19.28 guarantees that
 # mihomo reloads the controller certificate files automatically, and
 # renew-hook.sh redeploys on renewal.
@@ -5123,9 +5123,9 @@ DNS_WEB_KEY=${WEB_CERT_DIR}/current/privkey.pem
 
 # ── Deployment identity + cert (read by install.sh/renew-hook.sh; also read by
 # the in-process Telegram bot). DNS_BASE_DOMAIN = the operator's ONE apex domain
-# (the cert-name); the three service domains are auto-derived subdomains and
+# (the cert-name); the two service domains are auto-derived subdomains and
 # covered by the selected wildcard or exact-SAN certificate. Runtime components
-# derive dot./console./zash. directly from DNS_BASE_DOMAIN.
+# derive dot./console. directly from DNS_BASE_DOMAIN.
 # ──
 DNS_BASE_DOMAIN=${BASE_DOMAIN}
 DNS_PUBLIC_IP=${PUBLIC_IP}
@@ -5192,10 +5192,10 @@ DNS_INTERCEPT_CONFIG=${intercept_config}
 # own: a fetched index is refetchable by definition, so only the operator's list
 # of sources is state. See the catalogs field in intercept.json.
 
-# ZashCert/Key always point at the selected certificate's zash/ role-dir copy
-# (deploy_cert_roles). mihomo serves the controller with them; the bundle they
-# used to pair with is no longer a separate origin with a directory and a listen
-# address of its own, so neither is written here any more.
+# DNS_CONSOLE_CERT/KEY always point at the selected certificate's console/
+# role-dir copy (deploy_cert_roles). mihomo serves the controller with them, and
+# the panel is served behind that controller, so there is no second origin with
+# a directory and a listen address of its own to write here any more.
 DNS_CONSOLE_CERT=${CONSOLE_CERT_DIR}/current/fullchain.pem
 DNS_CONSOLE_KEY=${CONSOLE_CERT_DIR}/current/privkey.pem
 
@@ -5413,7 +5413,7 @@ verify_console_dns() {
             return 0 ;;
         http-01)
             wait_for_cert_dns "HTTP-01 service records" check_http_challenge_dns_once \
-                || { err "Set console/zash/dot A records to DNS_PUBLIC_IP=${PUBLIC_IP}, remove AAAA records, and keep public TCP/80 reachable."; return 1; } ;;
+                || { err "Set console/dot A records to DNS_PUBLIC_IP=${PUBLIC_IP}, remove AAAA records, and keep public TCP/80 reachable."; return 1; } ;;
         cloudflare)
             [[ -n "${CONSOLE_DOMAIN:-}" ]] || load_persisted_domains || return 1
             local console="$CONSOLE_DOMAIN"
@@ -6464,8 +6464,8 @@ Domains + certificates: ONE base domain and ONE scoped Let's Encrypt lineage.
                      is stored in /etc/5gpn/acme/cloudflare.ini
                      (dir 0700, file 0600) and is NEVER written to dns.env or logs.
                      Use '5gpn set-cf-token' (or the menu) to update it at any time.
-  http-01 mode       exact console/zash/dot SAN certificate via public TCP :80.
-                     After explicit TUI confirmation, all three A records must
+  http-01 mode       exact console/dot SAN certificate via public TCP :80.
+                     After explicit TUI confirmation, both A records must
                      resolve through 1.1.1.1 to DNS_PUBLIC_IP with no AAAA.
                      Initial issuance keeps mihomo stopped until role certificates
                      are published and full_install starts services. Due renewal

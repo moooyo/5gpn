@@ -99,13 +99,22 @@ pass "the mode sweep prunes the core's gpn/ state directory"
 
 # Every place that enumerates the certificate roles must name the same three.
 #
-# They were four lists in three files, and the rename left one behind:
-# cert_root_contents_are_safe still allowed dot|web|zash, so a migrated host
-# passed the role rename and then failed the certificate root's own structural
-# validation -- during publication, after the binaries were replaced.
+# They were five lists in three files, and the rename kept leaving one behind:
+# first cert_root_contents_are_safe still allowed dot|web|zash, so a migrated
+# host passed the role rename and then failed the certificate root's own
+# structural validation; then deploy_cert_roles still *wrote* dot web zash, so
+# the next upgrade died with "Unknown certificate role: zash" -- both during
+# publication, after the binaries were replaced.
+#
+# So this check has two halves. The first names the sites known to enumerate
+# roles. The second is the one that matters: it sweeps for the retired name
+# anywhere it could still be load-bearing, so a site nobody thought to add to
+# the list above cannot hide.
 for site in \
     'cert_role_group' \
-    'cert_root_contents_are_safe'; do
+    'cert_root_contents_are_safe' \
+    'deploy_cert_roles' \
+    'preflight_runtime_publication_paths'; do
     body="$(sed -n "/^${site}()/,/^}/p" "$ROOT/install.sh")"
     [[ -n "$body" ]] || fail "$site is missing"
     printf '%s' "$body" | grep -Fq 'console' \
@@ -113,5 +122,43 @@ for site in \
     printf '%s' "$body" | grep -Fq 'zash' \
         && fail "$site still names the retired zash certificate role"
 done
+body="$(sed -n '/^publish_roles()/,/^}/p' "$ROOT/scripts/renew-hook.sh")"
+[[ -n "$body" ]] || fail "publish_roles is missing from renew-hook.sh"
+printf '%s' "$body" | grep -Fq 'console' \
+    || fail "publish_roles does not know the console certificate role"
+printf '%s' "$body" | grep -Fq 'zash' \
+    && fail "publish_roles still names the retired zash certificate role"
 pass "every certificate-role enumeration names console and not zash"
+
+# The sweep. A role name reaches the filesystem as a cert path or as a member of
+# a roles=() array; those two shapes are what must never say zash again.
+#
+# The migration is the one exception, and it is exempted by range rather than
+# by pattern: migrate_cert_role_zash_to_console exists precisely to find and
+# rename /etc/5gpn/cert/zash on a host that predates the console, so its whole
+# body is cut out before the sweep runs -- matching its name line by line would
+# exempt only the line that names it, not the lines that do the renaming.
+migration_free_install="$(mktemp)"
+awk '
+    /^migrate_cert_role_zash_to_console\(\)/ { skip = 1 }
+    skip { if ($0 == "}") skip = 0; print "" ; next }
+    { print }
+' "$ROOT/install.sh" >"$migration_free_install"
+grep -Fq 'migrate_cert_role_zash_to_console()' "$ROOT/install.sh" \
+    || fail "the zash->console migration is gone; drop this exemption too"
+
+zash_sites="$(
+    grep -rn "cert/zash\|CERT_DIR}/zash\|roles=([^)]*zash" \
+        --include='*.sh' --include='*.tmpl' --include='*.example' \
+        "$ROOT/scripts" "$ROOT/etc" 2>/dev/null \
+        | grep -v 'migrate-panel-to-console.sh' || true
+    grep -n "cert/zash\|CERT_DIR}/zash\|roles=([^)]*zash" \
+        "$migration_free_install" 2>/dev/null \
+        | sed "s|^|${ROOT}/install.sh:|" || true
+)"
+zash_sites="$(printf '%s' "$zash_sites" | grep -v ':[0-9]*:[[:space:]]*#' || true)"
+rm -f "$migration_free_install"
+[[ -z "$zash_sites" ]] || fail "retired zash certificate role still reachable:
+$zash_sites"
+pass "no zash certificate path or role array outside the migration"
 echo "certificate role tree safety: PASS"
