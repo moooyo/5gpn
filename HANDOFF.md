@@ -9,45 +9,41 @@ Everything is pushed. `beta` is fast-forwarded to `feat/installer-tui`.
 
 | Repository | Branch | Published |
 | --- | --- | --- |
-| `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.6` |
-| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.2` |
-| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.15` |
+| `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.7` |
+| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.3` |
+| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.16` |
 
 Green: `go test -race ./gpn/...`, all 26 installer suites, and CI on every
 branch push. See [Reproducing the checks](#reproducing-the-checks).
 
 ---
 
-## 0. Acceptance — one decision, unchanged
+## 0. Acceptance — green
 
-`0.0.62-beta.15` is deployed on `test-env`. Acceptance there:
+`0.0.62-beta.16` is deployed on `test-env`. Acceptance there:
 
 | Suite | Result |
 | --- | --- |
+| `acceptance-monolith.sh` | **18 / 18** |
 | `acceptance-monolith-writes.sh` | **12 / 12** |
 | `acceptance-monolith-extension.sh` | **18 / 18** |
 | `acceptance-monolith-surfaces.sh` | **31 / 31** |
-| `acceptance-monolith.sh` | 17 / 20 |
 
 `acceptance-monolith-surfaces.sh` is new and covers the three subsystems that
 landed together — datagram capture, the catalog, the bot. It fetches the real
 first-party index and reviews a real entry against its published digest and
 advertised capabilities, so the network path is exercised rather than mocked.
 
-**The one open decision is the same one.** The three remaining failures are one
-cause, and the suite says so itself: `no enabled block rule found in the
-migrated policy`. `acceptance-monolith.sh` asserts *migrated* content — an
-operator policy that a gateway carries through `migrate-state-to-monolith.sh`.
-A fresh gateway has no policy rules and an unfetched subscription record by
-design. So:
+The three migrated-content checks are gone by owner decision. They asserted an
+enabled block rule, a non-empty policy and a subscription with fetched entries —
+none of which an *installed* gateway has by design, so they failed forever and
+17/20 was a number nobody could read a regression out of. They are conditional
+now and report `--`.
 
-- Mark those checks as requiring a configured gateway, and keep a smaller
-  fresh-install acceptance? Or
-- Seed a policy rule and trigger a subscription fetch as part of acceptance, so
-  it covers a configured gateway and the fresh case is asserted separately?
-
-Do not simply relax the assertions. A suite that passes by asking less is the
-failure mode this whole branch has been correcting.
+**What that costs, stated so it is not rediscovered as a surprise:** on a
+gateway with no policy and no subscriptions, nothing proves that a block rule
+produces NXDOMAIN or that a subscription fetch completes. Asserting either needs
+a configured gateway, and no suite requires one. The suite header says this too.
 
 ---
 
@@ -94,39 +90,35 @@ they are couplings nothing was watching: `test_seed_template_renderers` renders
 the seed and runs the drift check against it, and `test_dns_env_writes` extracts
 the heredoc body and refuses backticks and `$( )` outright.
 
-**What this suggests for the next round.** There is no second-install
-acceptance. Every suite here runs against a gateway in one state, and five
-faults lived in the transition between two. A suite that installs, upgrades, and
-then asserts would have caught all five.
+**What this suggests for the next round, and it is the top item.** There is
+still no second-install acceptance. Every suite runs against a gateway in one
+state, and five of six faults lived in the transition between two. A suite that
+installs, upgrades, then asserts would have caught all five — and it is the only
+thing on this list that would have caught them *before* a human noticed.
 
 ---
 
-## 1. The installer TUI — scope is genuinely undecided
+## 1. The installer TUI — rewritten; two things left
 
-**The branch is named `feat/installer-tui` and it is not clear what that was
-meant to mean.** This needs a decision before code.
+`manage_menu` is five screens now: 概览 / 服务 / 证书 / 网络 / 危险操作. Each
+renders the facts its own actions act on, immediately above them. The two dead
+entries are gone — 「重载规则」 with the helper it called, 「配置 Telegram Bot」
+because the console owns it, and the overview says where the runtime surfaces
+live so an operator is not left hunting.
 
-What exists today, and works:
+`test_tui_policy` now compares the label list against the dispatch, which is the
+coupling that let two entries do nothing for the whole of the monolith work.
 
-- `configure_install_tui()` — the install-time prompt flow (certificate mode,
-  domain; public/gateway/listen IPv4 are prompted only in advanced mode and
-  otherwise derived from `get_public_ip`, which prefers the box's own egress
-  source address).
-- `manage_menu()` — the post-install menu behind bare `5gpn`: restart, configure,
-  add/remove zashboard allowlist IP, reset mihomo config, uninstall.
-- 32 Gum call sites, with a plain-echo fallback everywhere.
-  `test_tui_policy` and `test_gum_policy` hold that shape.
+**Left:**
 
-**Open questions:**
-
-- Is the intended work a *rewrite* of the existing TUI, or new surfaces inside
-  it? If new: which, given zashboard now owns every runtime surface (DNS
-  document, extensions, catalogs, bot, settings) and the installer owns only
-  install-time and lifecycle operations?
-- The menu lost two entries during the monolith work — `Reload rules` and
-  `Configure Telegram Bot` — because both invoked helpers deleted in `939638c`.
-  The bot is now configured in zashboard, so that entry is answered. Does
-  anything replace `Reload rules`, or is the smaller menu the answer?
+- **Navigation is two levels, not tabs.** Gum's `choose` is a single-select list
+  with no key handler, so left/right tabs would need a hand-rolled raw-mode
+  reader with its own terminal restore on every signal — and it would have no
+  plain-echo fallback, which is the property every surface here keeps. If tabs
+  are wanted, that is the cost.
+- **`configure_install_tui` is untouched.** The install-time flow is still a
+  linear prompt sequence. It works and its shape is held by `test_tui_policy`,
+  but it did not get the same treatment and nobody has decided whether it should.
 
 ---
 
@@ -174,26 +166,27 @@ The parts most likely to be wrong there and invisible in a test:
 
 ---
 
-## 4. Marketplace — the catalog exists, the rest is open
+## 4. Marketplace — decided, bar one gap
 
 Discovery works: `GET /gpn/interception/catalog`, a reviewed and digest-checked
 install from an entry, and the zashboard listing. `test-env` fetches the
 first-party index and reviews an entry from it.
 
-**Open questions the implementation deliberately did not answer:**
+**Decided 2026-08-03:**
 
-- **Who signs?** Today the entry's SHA-256 is checked against the fetched
-  manifest, and the entry's advertised capabilities against what was parsed —
-  but the catalog itself is trusted because it was fetched over TLS from a host
-  the operator configured. A signature over the index would move that trust to a
-  key. Nothing currently pins one.
-- **Is a second source ever added?** The document supports up to 16 and
-  zashboard renders them, but there is no UI for adding one — the only way is a
-  `PUT /gpn/interception/catalog/sources`.
-- **Update flow from a catalog.** `CheckUpdate` re-reads the URL an extension
-  was installed from, never the catalog. That is deliberate, and it means a
-  catalog that publishes a new version does not surface as an update unless the
-  entry's manifest URL is the same one the operator installed from.
+- **Nothing signs the index.** The catalog grants no authority — every install
+  still runs review → digest → confirm, and an entry that misdescribes its
+  manifest is refused at the review. A compromised catalog host can mislead a
+  listing; it cannot cause an install. Key management for that is cost without a
+  matching threat.
+- **An update may come from an entry, when asked.** `ApplyCatalogUpdate` moves an
+  installed extension's source to the entry's manifest URL. `CheckUpdate` still
+  re-reads only the URL an extension was installed from: the distinction is not
+  "may the source ever change" but "may it change without being asked".
+
+**Still open:** there is no UI for adding a second source. The document supports
+16 and zashboard renders them all, but the only way in is a
+`PUT /gpn/interception/catalog/sources`.
 
 ---
 
