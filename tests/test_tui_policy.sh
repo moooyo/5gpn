@@ -54,16 +54,28 @@ grep -Fq 'DNS_CHINA_DEFAULT="223.5.5.5"' "$INSTALL" \
 # the operational defaults, refuses to clobber an operator-configured file, and
 # carries a pre-existing dns.env value forward once so the first upgrade past
 # this change does not reset a hand-edited value.
-seed_fn="$(sed -n '/^seed_upstreams_json() {/,/^    ok /p' "$INSTALL")"
-printf '%s' "$seed_fn" | grep -Fq 'local china="${prev_china:-$DNS_CHINA_DEFAULT}"' \
-    && printf '%s' "$seed_fn" | grep -Fq 'local trust="${prev_trust:-$DNS_TRUST_DEFAULT}"' \
-    || fail "upstreams.json seeder does not consume the operational upstream defaults"
-printf '%s' "$seed_fn" | grep -Fq 'if [[ -f "$target" ]]; then' \
-    || fail "upstreams.json seeder would overwrite an operator-configured file"
+seed_fn="$(sed -n '/^seed_dns_document() {/,/^    ok "Seeded the DNS document/p' "$INSTALL")"
+printf '%s' "$seed_fn" | grep -Fq 'china="${prev_china:-$DNS_CHINA_DEFAULT}"' \
+    && printf '%s' "$seed_fn" | grep -Fq 'trust="${prev_trust:-$DNS_TRUST_DEFAULT}"' \
+    || fail "DNS document seeder does not consume the operational upstream defaults"
+# An existing document is refreshed, not replaced: the installer owns the
+# certificate pair and the gateway, and the console owns policy, upstreams and
+# tuning through the same file. A seeder that rewrote the whole document would
+# discard every console edit on the next reinstall.
+printf '%s' "$seed_fn" | grep -Fq '.listen.certificate = $cert' \
+    && printf '%s' "$seed_fn" | grep -Fq '.listen.privateKey = $key' \
+    && printf '%s' "$seed_fn" | grep -Fq '.gateway = $gw' \
+    || fail "DNS document seeder does not refresh the installer-owned fields in place"
+# The pair is the whole point: DefaultDocument asks for :853 and cannot name a
+# key, so a document without it means a gateway that starts healthy with no DNS.
+printf '%s' "$seed_fn" | grep -Fq 'certificate: $cert, privateKey: $key' \
+    || fail "a freshly seeded DNS document carries no certificate pair"
 grep -Eq '^DNS_CHINA=|^DNS_TRUST=' "$INSTALL" \
     && fail "DNS_CHINA/DNS_TRUST must no longer be written into dns.env"
+grep -Eq '^[[:space:]]+seed_dns_document$' "$INSTALL" \
+    || fail "full_install does not seed the DNS document"
 grep -Eq '^[[:space:]]+seed_upstreams_json$' "$INSTALL" \
-    || fail "full_install does not seed upstreams.json"
+    && fail "full_install still seeds the retired upstreams.json"
 printf '%s' "$tui_fn" | grep -Fq 'GATEWAY_IP="$PUBLIC_IP"' \
     && printf '%s' "$tui_fn" | grep -Fq 'MIHOMO_LISTEN_IPS="$default_listen"' \
     && printf '%s' "$tui_fn" | grep -Fq 'PUBLIC_IP="$detected"' \

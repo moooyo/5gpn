@@ -193,7 +193,7 @@ DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
 # file, so they disappear on the first upgrade rather than lingering forever.
 #
 # DNS_CHINA/DNS_TRUST moved to upstreams.json, which the daemon can write and
-# dns.env cannot be. seed_upstreams_json reads them one last time on upgrade so
+# dns.env cannot be. seed_dns_document reads them one last time on upgrade so
 # a hand-edited value is carried across instead of being reset.
 #
 # DNS_CHINA_0X20 governed DNS 0x20 anti-spoof encoding, which is gone: it only
@@ -4631,83 +4631,114 @@ prepare_certificate_publication_boundaries() {
     fi
 }
 
-# Seed /etc/5gpn/upstreams.json when it is absent. This file is the single
-# source of truth for the china/trust upstream groups: the daemon reads it at
-# startup and the web console rewrites it (Settings → upstream DNS, hot-applied
-# without a restart). dns.env carries no copy, because the daemon cannot write
-# dns.env under its systemd sandbox and a second copy could only go stale.
-#
-# Never overwrites an existing file — that would discard whatever the operator
-# configured in the console. On the first upgrade past the dns.env removal it
-# carries the old DNS_CHINA/DNS_TRUST values forward, so a hand-edited value is
-# preserved rather than silently reset to the defaults.
-#
-# The installer does not prompt: these are operational defaults, changeable in
-# the console at any time.
-seed_upstreams_json() {
-    local target="${CONF_DIR}/upstreams.json"
-    if [[ -f "$target" ]]; then
-        info "Upstream groups already configured (${target}) — preserved."
+# The installer does not prompt for any of this: these are operational defaults,
+# changeable in the console at any time.
+seed_dns_document() {
+    # <mihomo-home>/gpn/dns.json is the one document the DNS engine reads. Its
+    # own type comment says it replaced four files -- policy.json,
+    # upstreams.json, ecs.json, and the DNS half of an environment file systemd
+    # read and the daemon could not write. The installer went on seeding one of
+    # the four. Nothing had read it since the monolith landed.
+    #
+    # The field that mattered was in none of them. DefaultDocument() asks for a
+    # DoT listener on :853 and cannot say which key to present, so relisten
+    # refuses to bind and a fresh gateway comes up looking healthy -- every
+    # tunnel bound, the controller serving TLS -- with no DNS ingress at all.
+    # migrate-state-to-monolith.sh has always written the pair; this is the same
+    # write on the path that does not migrate.
+    #
+    # Three fields belong to the installer and are refreshed on every run: the
+    # certificate, the private key, and the gateway address. Everything else in
+    # an existing document belongs to the operator -- the console edits policy,
+    # upstreams and tuning through it -- and a reinstall must not discard that.
+    local state_dir="${MIHOMO_DIR}/gpn"
+    local target="${state_dir}/dns.json"
+    local cert="${DNS_CERT_DIR}/dot/current/fullchain.pem"
+    local key="${DNS_CERT_DIR}/dot/current/privkey.pem"
+    local tmp
+
+    # The engine creates this directory itself on first start, but the document
+    # has to exist before that start, so the installer creates it to the same
+    # shape rather than waiting for a process that cannot come up without it.
+    #
+    # Only the leaf: `install -d` would apply this ownership to every component
+    # it had to create, and the mihomo home above it is not the engine's to own.
+    [[ -d "$MIHOMO_DIR" ]] \
+        || { err "The mihomo home does not exist yet: ${MIHOMO_DIR}"; return 1; }
+    install -d -o "$MIHOMO_SERVICE_USER" -g "$MIHOMO_SERVICE_USER" -m 0711 "$state_dir" \
+        || { err "Could not create the engine state directory: ${state_dir}"; return 1; }
+
+    if [[ -f "$target" && ! -L "$target" ]]; then
+        tmp="$(mktemp "${state_dir}/.dns.json.XXXXXX")" \
+            || { err "Could not create the DNS document candidate."; return 1; }
+        if ! jq --arg cert "$cert" --arg key "$key" --arg gw "$GATEWAY_IP" \
+                '.listen.certificate = $cert
+                 | .listen.privateKey = $key
+                 | .gateway = $gw' "$target" > "$tmp"; then
+            rm -f -- "$tmp"
+            err "Could not refresh the DNS document: ${target}"
+            return 1
+        fi
+        chown "${MIHOMO_SERVICE_USER}:${MIHOMO_SERVICE_USER}" "$tmp" 2>/dev/null || true
+        chmod 0600 "$tmp"
+        mv -f -- "$tmp" "$target" \
+            || { rm -f -- "$tmp"; err "Could not install ${target}."; return 1; }
+        ok "Refreshed the DNS document's certificate pair and gateway."
         return 0
     fi
 
     # Read the retired keys straight from the current dns.env. This must run
     # BEFORE write_dns_env rewrites that file without them, which is why the
     # call site is ordered that way.
-    local prev_china prev_trust
+    local prev_china prev_trust china trust ecs dot debug
     prev_china="$(cfg_get DNS_CHINA)"
     prev_trust="$(cfg_get DNS_TRUST)"
-    local china="${prev_china:-$DNS_CHINA_DEFAULT}"
-    local trust="${prev_trust:-$DNS_TRUST_DEFAULT}"
+    china="${prev_china:-$DNS_CHINA_DEFAULT}"
+    trust="${prev_trust:-$DNS_TRUST_DEFAULT}"
     if [[ -n "$prev_china" || -n "$prev_trust" ]]; then
         info "Carrying the previous dns.env upstream values into ${target}."
     fi
+    ecs="$(cfg_get DNS_CHINA_ECS)";      ecs="${ecs:-$DNS_CHINA_ECS_DEFAULT}"
+    dot="$(cfg_get DNS_LISTEN_DOT)";     dot="${dot:-:853}"
+    debug="$(cfg_get DNS_LISTEN_DEBUG)"; debug="${debug:-127.0.0.1:5353}"
 
-    # Build the JSON arrays from the comma-separated spec lists.
-    local china_json trust_json entry
-    china_json=""; trust_json=""
-    local IFS=','
-    for entry in $china; do
-        entry="$(printf '%s' "$entry" | tr -d '[:space:]')"
-        [[ -n "$entry" ]] || continue
-        china_json="${china_json}${china_json:+,}"$'
-    "'"${entry}"'"'
-    done
-    for entry in $trust; do
-        entry="$(printf '%s' "$entry" | tr -d '[:space:]')"
-        [[ -n "$entry" ]] || continue
-        trust_json="${trust_json}${trust_json:+,}"$'
-    "'"${entry}"'"'
-    done
-    unset IFS
-
-    if [[ -z "$china_json" || -z "$trust_json" ]]; then
+    tmp="$(mktemp "${state_dir}/.dns.json.XXXXXX")" \
+        || { err "Could not create the DNS document candidate."; return 1; }
+    # An upstream without a port is a dns.env spelling; the document wants a
+    # resolver address. Appending :53 here keeps a carried-forward value usable
+    # instead of failing validation on a difference the operator never made.
+    if ! jq -n \
+            --arg dot "$dot" --arg debug "$debug" --arg origin "127.0.0.1:5354" \
+            --arg cert "$cert" --arg key "$key" --arg gw "$GATEWAY_IP" \
+            --arg ecs "$ecs" --arg china "$china" --arg trust "$trust" \
+            'def addrs: split(",") | map(gsub("\\s";""))
+                        | map(select(length > 0))
+                        | map(if test(":[0-9]+$") then . else . + ":53" end);
+             {
+               listen:    {dot: $dot, debug: $debug, origin: $origin,
+                           certificate: $cert, privateKey: $key},
+               gateway:   $gw,
+               upstreams: {china: ($china | addrs), trust: ($trust | addrs), ecs: $ecs},
+               policy:    {rules: null, fallback: "auto"},
+               tuning:    {}
+             }' > "$tmp"; then
+        rm -f -- "$tmp"
+        err "Could not write the DNS document candidate."
+        return 1
+    fi
+    if [[ "$(jq -r '.upstreams.china | length' "$tmp")" == 0 \
+       || "$(jq -r '.upstreams.trust | length' "$tmp")" == 0 ]]; then
+        rm -f -- "$tmp"
         err "Refusing to seed an empty upstream group into ${target}."
         return 1
     fi
-
-    local tmp
-    tmp="$(mktemp "${CONF_DIR}/.upstreams.XXXXXX")"         || { err "Could not create the upstreams.json candidate."; return 1; }
-    if ! cat > "$tmp" <<EOF
-{
-  "version": 1,
-  "china": [${china_json}
-  ],
-  "trust": [${trust_json}
-  ]
-}
-EOF
-    then
-        rm -f "$tmp"
-        err "Could not write the upstreams.json candidate."
-        return 1
-    fi
-    # Owned by the service account: unlike dns.env, the daemon must be able to
+    # Owned by the service account: unlike dns.env, the engine must be able to
     # replace this file when the console saves a change.
-    chown "${DNS_SERVICE_USER}:${DNS_SERVICE_USER}" "$tmp" 2>/dev/null || true
-    chmod 0640 "$tmp"
-    mv -f "$tmp" "$target" || { rm -f "$tmp"; err "Could not install ${target}."; return 1; }
-    ok "Seeded upstream groups (china=${china} trust=${trust})."
+    chown "${MIHOMO_SERVICE_USER}:${MIHOMO_SERVICE_USER}" "$tmp" 2>/dev/null || true
+    chmod 0600 "$tmp"
+    mv -f -- "$tmp" "$target" \
+        || { rm -f -- "$tmp"; err "Could not install ${target}."; return 1; }
+    ok "Seeded the DNS document (china=${china} trust=${trust})."
 }
 
 write_dns_env() {
@@ -5827,7 +5858,7 @@ full_install() {
     install_manage_cli
     install_ui
     install_units
-    seed_upstreams_json
+    seed_dns_document
     write_dns_env
     ensure_intercept_certificates
     install_cert "$BASE_DOMAIN"
