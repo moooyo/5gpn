@@ -2,11 +2,15 @@
 # install.sh's is_valid_domain must enforce the canonical FQDN rule. Pure
 # bash+grep -- runs on the dev box and in CI.
 #
-# This used to also assert that the Telegram bot's domainRE (cmd/5gpn-dns/bot.go)
-# carried the identical pattern, because two implementations of one rule drift
-# silently. That package is gone and the bot is not ported yet. When it lands in
-# the fork, the consistency check has to come back with it -- as a Go test
-# beside the regexp, not as a grep across repositories.
+# The same table lives in the fork, beside the regexp, as
+# gpn/bot/domain_test.go's TestValidDomainMatchesTheInstallerRule. Two
+# implementations of one rule drift silently, so both run it and the day they
+# disagree one of them fails. Keep the two tables identical.
+#
+# It used to be a grep from here into the bot's source asserting the two files
+# contained the same characters. That stopped being possible when the daemon
+# moved into the fork, and it was the wrong assertion anyway: what matters is
+# that the two reach the same verdict, not that they are spelled alike.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
 rc=0; fail(){ echo "FAIL: $1"; rc=1; }

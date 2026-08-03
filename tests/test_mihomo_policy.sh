@@ -197,7 +197,13 @@ nocheck install.sh 'xray\.service|/usr/local/bin/xray' 'no old Xray teardown rem
 
 # Task A4: zashboard dist acquisition (pinned dist.zip download + wiring)
 check install.sh '^install_ui\(\)' 'install_ui function exists'
-check install.sh 'ZASH_VERSION="v3\.16\.0-monolith\.1"' 'ZASH_VERSION fixed pin'
+# The shape, not the number. What matters is that the pin is one column-zero,
+# double-quoted, uninterpolated literal naming a monolith tag -- not `latest`,
+# not a variable, not something a caller can set. Asserting the exact version
+# instead made every console release edit this file, which is churn that teaches
+# the next person to bump the string without reading what it is for.
+check install.sh '^ZASH_VERSION="v[0-9]+\.[0-9]+\.[0-9]+-monolith\.[0-9]+"' 'ZASH_VERSION is a fixed literal monolith pin'
+nocheck install.sh '^ZASH_VERSION=.*(\$|`|latest)' 'ZASH_VERSION is neither interpolated nor a moving tag'
 check install.sh 'ZASH_REPO="moooyo/zashboard"' 'zashboard comes from our fork'
 check install.sh '\$\{ZASH_REPO\}/releases/download' 'zashboard download URL is parameterised by ZASH_REPO'
 nocheck install.sh 'Zephyruso/zashboard/releases/download' 'no hardcoded upstream zashboard download remains'

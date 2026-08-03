@@ -11,8 +11,8 @@ described in earlier revisions of this file.
 5gpn is an IPv4 DNS-steering gateway. It has **one long-running process**.
 
 - **mihomo** (the `moooyo/mihomo` fork) is the entire runtime: the DNS decision
-  engine, the interception/plugin engine, the forwarding data plane, and the
-  control API.
+  engine, the interception/plugin engine, the forwarding data plane, the
+  Telegram control plane, and the control API.
 - **zashboard** is the only user interface. It is a static bundle mihomo serves
   and an API client that talks to mihomo's controller.
 - **This repository** is an installer and a TUI. It contains no service.
@@ -154,6 +154,31 @@ reviewed". The install re-fetches and compares rather than committing the
 candidate it already holds, which is what makes the digest a check on the
 publisher rather than on our own bookkeeping.
 
+`/gpn/interception/catalog` is discovery and nothing else. A catalog is a list
+of manifests: it is fetched through the same guarded client an import uses, it
+is never persisted, and installing from an entry runs exactly the
+review-then-confirm path a pasted URL runs. It is deliberately not an update
+source — `CheckUpdate` re-reads the URL an extension was installed from, never an
+entry that happens to share its id, or adding a catalog would silently change
+where an operator's code comes from.
+
+What a catalog is allowed to do is contradict itself, and that is checked. An
+entry states the manifest's SHA-256 and the shape of what it declares; if the
+fetched manifest disagrees, the review is refused rather than returned with a
+footnote, because the review is the screen where the operator decides and a
+wrong description reaching it is the whole failure. The index is decoded
+leniently: it is a contract with every deployed gateway, so rejecting unknown
+fields would make older cores refuse whole catalogs whenever a publisher added
+something for newer ones.
+
+`/gpn/bot` is one read and one write, whole-document rather than a write per
+field. The interception routes are split because each authorizes something
+different; here there is a single question — who may ask this gateway things
+over Telegram — and splitting it would allow a gateway with a token and no
+admins, or admins and no token. The token is write-only in both directions: no
+read returns it, and an empty write keeps the stored one, so a console edits the
+admin list having never held it.
+
 ## Capture
 
 Interception is a hook in `tunnel/tunnel.go`, three lines, placed after the
@@ -172,9 +197,61 @@ applied". An intercepted upstream therefore cannot diverge from an ordinary
 client connection: same rules, same outbound selection, same row in the
 connection table.
 
-UDP/QUIC capture is not wired. `MatchUDP` reports false and gateway QUIC is
-handled by the fixed `AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` capability,
-which makes a capable client retry over TCP.
+### Datagrams
+
+UDP has no connection to hand over. The core builds an association and asks the
+outbound for a `C.PacketConn`, which it then drives as though it were the
+remote — writes are the client's datagrams, reads are the remote's replies. So
+`captureUDPFor` returns one of those instead, and what sits behind it is a QUIC
+listener rather than a socket. The handler is the same
+`interceptProxy.ServeHTTP` the TLS path uses, so an HTTP/3 request runs the same
+actions, the same upstream generation and the same body budget as the identical
+request arriving over TCP.
+
+One listener for the whole process, not one per association, because a QUIC
+connection is not a 4-tuple. A client that rebinds — Wi-Fi to cellular, or a NAT
+that re-maps the port — keeps its connection IDs and expects the server to
+follow it there. The core sees a brand new association; a per-association
+listener would see a packet carrying connection IDs it never issued and answer
+with a stateless reset. Feeding every association into one listener is what
+makes migration work, because quic-go routes on the connection ID and does not
+care which association carried the datagram in.
+
+The bridge addresses datagrams by the client's own address, which is both the
+association's identity and the peer quic-go demultiplexes on. Two live
+associations from one client address to two different gateway addresses cannot
+both be routed back — a write carries only the address it is addressed to — so
+the second is refused rather than misrouted, and falls through to ordinary
+routing.
+
+Capture is off by default (`mitm.http3`) and the fixed
+`AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` capability stays in the seed either
+way. Capture is consulted before rule resolution, so with HTTP/3 on the reject
+only ever sees the datagrams capture did not want, and with it off nothing
+changes: a capable client falls back to TCP, which is captured.
+
+## The Telegram control plane
+
+`gpn/bot` is one goroutine, off unless configured. It reads and it alerts. It
+cannot enable an extension, install one, edit policy, restart a service or touch
+the interception CA — zashboard owns extension management, and a second surface
+for authorizing what may decrypt traffic would be a second place for the
+operator's confirmation to mean something slightly different.
+
+The narrowness is enforced by construction rather than by review: `gpn/bot`
+cannot import the resolver or the engine, and reaches both through a `Facts`
+struct of read functions the façade assembles. Widening what a command can do
+requires widening that struct.
+
+Alerts are transitions, never states, and the bot does not claim to detect the
+gateway's own death: a monitor inside the process cannot report that the process
+stopped, and an operator who read silence as health would be worse off than one
+who knows it means nothing. `DNS_HEARTBEAT_URL` remains the external
+dead-man's switch.
+
+Egress goes through the core's own inner dialer, so reaching `api.telegram.org`
+from a network that blocks it is the operator's existing rules rather than a
+private proxy knob.
 
 ## Code layout and the fork budget
 
@@ -184,10 +261,12 @@ beneath it. `gpn/importrule_test.go` enforces this by walking `go list`.
 
 The rule exists because the fork's cost is not the size of `gpn/` — it is how
 many upstream-owned files carry a 5gpn-shaped change, since those are what a
-rebase must reconcile. That number is **two files, eight lines**: the capture
-hook in `tunnel/tunnel.go` (seven) and the one call that starts the subsystems
-in `hub/hub.go` (one). Everything else 5gpn adds is a new file, which does not
-conflict.
+rebase must reconcile. That number is **two files, twelve lines**: the capture
+hooks in `tunnel/tunnel.go` (eleven — seven for TCP, three for the datagram
+path, one blank) and the one call that starts the subsystems in `hub/hub.go`.
+Everything else 5gpn adds is a new file, which does not conflict. The datagram
+hook is three lines rather than the twenty the bookkeeping needs because the
+bookkeeping lives in `tunnel/gpn.go`, which is fork-owned.
 
 Two other categories of change exist against upstream and are deliberately not
 counted, because counting them would make the number mean something else.
@@ -222,11 +301,23 @@ Updates carry the revision they were read at and are refused with
 the system and it exists for one reason: two operators with the same page open
 in two tabs.
 
-There are two documents. `dns.json` is the resolver: listeners, gateway address,
-the two upstream groups and their client subnet, the ordered policy, and the
-handful of knobs with no correct universal value. `intercept.json` is the
-interception engine: the master switch, the protocol settings, and the installed
-extensions with their immutable snapshots and the operator's own bindings.
+There are three documents. `dns.json` is the resolver: listeners, gateway
+address, the two upstream groups and their client subnet, the ordered policy,
+and the handful of knobs with no correct universal value. `intercept.json` is
+the interception engine: the master switch, the protocol settings, the
+configured extension catalogs, and the installed extensions with their immutable
+snapshots and the operator's own bindings. `bot.json` is the Telegram control
+plane: the switch, the token, the admin set and whether alerts are on.
+
+The bot is its own document rather than a field on either of the others,
+because it is neither: the resolver document is what the gateway answers with
+and the interception document is what may decrypt. Putting a chat credential in
+either would widen what a write to those means.
+
+A fetched catalog index is not in any of them. It is refetchable by definition,
+and persisting one would let a stale listing outlive the process that fetched
+it — which is what the previous design's salvage, unusable and raw-passthrough
+machinery existed to survive.
 
 `dns.json` replaced four files — `policy.json`, `upstreams.json`, `ecs.json` and
 the DNS-shaped half of an environment file that systemd read and the daemon
@@ -277,18 +368,3 @@ which are shell and must be run under Linux against an LF checkout.
 A real gateway is reachable as `test-env` over OpenSSH. Because it is a working
 gateway, configuration changes are validated against copies rather than in
 place.
-
-## Not yet true
-
-This document describes the target the work is converging on. These parts are
-designed and not yet implemented; do not read their presence above as a claim
-that they ship today.
-
-- The marketplace surface does not exist. Extensions install from a manifest URL
-  or a pasted manifest, which is the whole of the install path today.
-- The Telegram bot is not ported. Its management UI is designed to live in
-  zashboard alongside every other surface rather than as a second marketplace
-  inside a chat client, and neither half is written.
-- UDP and HTTP/3 capture are not wired. `MatchUDP` reports false, and gateway
-  QUIC is handled by the fixed `AND,((NETWORK,UDP),(DST-PORT,443)),REJECT`
-  capability, which makes a capable client retry over TCP.

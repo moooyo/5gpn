@@ -168,8 +168,8 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # leaves the gateway with no resolver, no capture and no control API at all. The
 # staging probe checks the version token exactly rather than accepting a prefix.
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-monolith.2"
-MIHOMO_SHA256="62cfd92cc7a6f6028c17dd44d7b77c436500ec82b1d2c9eb51a520f93b535452"
+MIHOMO_VERSION="v1.19.28-monolith.4"
+MIHOMO_SHA256="3707592c4ddf93911f627ec2b32ec1b6965f89af5180990a3663291b609d7141"
 # Every `mihomo -t` in this script must run with the same SAFE_PATHS the unit
 # grants, because the seed names paths outside its own home directory -- the
 # certificates it serves and the UI bundle it publishes. Without this the core
@@ -181,8 +181,8 @@ MIHOMO_SHA256="62cfd92cc7a6f6028c17dd44d7b77c436500ec82b1d2c9eb51a520f93b535452"
 # a drift here fails at install time on a config the running service accepts.
 MIHOMO_SAFE_PATHS="/etc/5gpn/cert/zash:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui"
 ZASH_REPO="moooyo/zashboard"
-ZASH_VERSION="v3.16.0-monolith.1"        # our fork's dist.zip, built from feat/5gpn-console
-ZASH_SHA256="3b4515bae9f967b094e7642823f25d653d415bf0d068c062dafbfe58e491db70"
+ZASH_VERSION="v3.16.0-monolith.2"        # our fork's dist.zip, built from feat/5gpn-console
+ZASH_SHA256="5c5689212106674234ec840bc6c2966a3acc509cd3f17cf2986916ec5fff37a9"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
@@ -201,14 +201,20 @@ DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
 # DoT and DoH, which address the same threat properly. The daemon no longer
 # reads the key, so leaving it in the schema would advertise a setting that
 # does nothing.
-readonly DNS_ENV_RETIRED_KEYS="DNS_CHINA DNS_CHINA_0X20 DNS_TRUST DNS_WEB_DIR DNS_ZASH_DIR DNS_ZASH_LISTEN"
+# The Telegram keys are retired rather than deleted: the bot has its own
+# document now (<mihomo-home>/gpn/bot.json, 0600, written by the core), so an
+# upgraded host carries five dns.env lines nothing reads. Naming them here is
+# what strips them; dropping them from this list instead would make an
+# upgraded dns.env fail validation on a key this installer wrote itself.
+readonly DNS_ENV_RETIRED_KEYS="DNS_CHINA DNS_CHINA_0X20 DNS_TRUST DNS_WEB_DIR DNS_ZASH_DIR DNS_ZASH_LISTEN \
+TGBOT_TOKEN TGBOT_ADMINS DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS DNS_MARKETPLACES_FILE"
 
 readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_LISTEN_API DNS_CERT DNS_KEY DNS_WEB_CERT DNS_WEB_KEY DNS_ZASH_CERT DNS_ZASH_KEY \
 DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL DNS_UPSTREAMS \
 DNS_CHINA_ECS DNS_ECS_FILE DNS_RULES_DIR DNS_CHNROUTE DNS_EGRESS_BROKER \
 DNS_SUBSCRIPTIONS DNS_POLICY_RULES DNS_API_TOKEN DNS_API_RATE DNS_API_BURST DNS_MIHOMO_CONTROLLER DNS_MIHOMO_SECRET \
-DNS_WHITELIST_FILE DNS_MIHOMO_CONFIG DNS_INTERCEPT_CONFIG DNS_MARKETPLACES_FILE WWW_DIR TGBOT_TOKEN TGBOT_ADMINS \
-DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS DNS_CACHE_SIZE DNS_MAX_INFLIGHT DNS_TTL_MIN DNS_TTL_MAX DNS_QUERY_TIMEOUT \
+DNS_WHITELIST_FILE DNS_MIHOMO_CONFIG DNS_INTERCEPT_CONFIG WWW_DIR \
+DNS_CACHE_SIZE DNS_MAX_INFLIGHT DNS_TTL_MIN DNS_TTL_MAX DNS_QUERY_TIMEOUT \
 DNS_STATS_FILE DNS_HEARTBEAT_URL DNS_HEARTBEAT_INTERVAL"
 # EDNS Client Subnet uses the operational default above. Operators can disable
 # or change it through the web console, which persists the runtime value.
@@ -470,7 +476,10 @@ clear_external_config_env() {
     local key
     unset BASE_DOMAIN CONSOLE_DOMAIN ZASH_DOMAIN DOT_DOMAIN PUBLIC_IP GATEWAY_IP \
         MIHOMO_LISTEN_IPS CHINA_ECS CACHE_SIZE LOWMEM
-    for key in $DNS_ENV_KEYS; do
+    # Retired keys are cleared too. A key stops being written before it stops
+    # being something a caller might have exported, and one that survived here
+    # would still be in the environment of everything this script runs.
+    for key in $DNS_ENV_KEYS $DNS_ENV_RETIRED_KEYS; do
         # WWW_DIR is an installer-owned constant that was assigned above, not
         # caller configuration. Preserve it while clearing every externally
         # supplied daemon key. The UI directory is not in this set at all: it is
@@ -4541,16 +4550,11 @@ prepare_runtime_permissions() {
     find "$DNS_RULES_DIR_DEFAULT" -type f -exec chown "$DNS_SERVICE_USER:$DNS_SERVICE_USER" {} + \
         -exec chmod 0640 {} + || return 1
 
-    for path in subscriptions.json policy.json upstreams.json ecs.json stats.json extension-marketplaces.json; do
+    for path in subscriptions.json policy.json upstreams.json ecs.json stats.json; do
         [[ -f "${CONF_DIR}/${path}" ]] || continue
         chown "$DNS_SERVICE_USER:$DNS_SERVICE_USER" "${CONF_DIR}/${path}" || return 1
         chmod 0640 "${CONF_DIR}/${path}" || return 1
     done
-    if [[ -f "${CONF_DIR}/tgbot.json" ]]; then
-        chown "$DNS_SERVICE_USER:$DNS_SERVICE_USER" "${CONF_DIR}/tgbot.json" || return 1
-        chmod 0600 "${CONF_DIR}/tgbot.json" || return 1
-    fi
-
     runtime_tree_has_only_plain_entries "$MIHOMO_DIR" \
         || { err "Refusing unsafe link, hardlink, or special entry below $MIHOMO_DIR"; return 1; }
     install -d -o root -g "$MIHOMO_SERVICE_USER" -m 3770 "$MIHOMO_DIR" || return 1
@@ -4766,13 +4770,8 @@ write_dns_env() {
     # working token); otherwise generate one.
     # Read current values from the single config file (dns.env). Secrets + tuning
     # knobs are preserved across a re-install; caller environment is ignored.
-    local existing_token existing_tgtoken existing_tgadmins existing_tgfile existing_tgproxy existing_tgalerts existing_china existing_trust
+    local existing_token existing_china existing_trust
     existing_token="$(cfg_get DNS_API_TOKEN)"
-    existing_tgtoken="$(cfg_get TGBOT_TOKEN)"
-    existing_tgadmins="$(cfg_get TGBOT_ADMINS)"
-    existing_tgfile="$(cfg_get DNS_TGBOT_FILE)"
-    existing_tgproxy="$(cfg_get TGBOT_PROXY_URL)"
-    existing_tgalerts="$(cfg_get TGBOT_ALERTS)"
     existing_china="$(cfg_get DNS_CHINA)"
     existing_trust="$(cfg_get DNS_TRUST)"
 	DNS_API_TOKEN="$existing_token"
@@ -4780,11 +4779,6 @@ write_dns_env() {
 		DNS_API_TOKEN="$(openssl rand -hex 32)" \
 			|| { err "Could not generate DNS_API_TOKEN."; return 1; }
 	fi
-	local tg_token="$existing_tgtoken"
-	local tg_admins="$existing_tgadmins"
-	local tg_file="${existing_tgfile:-${CONF_DIR}/tgbot.json}"
-	local tg_proxy="$existing_tgproxy"
-    local tg_alerts="${existing_tgalerts:-false}"
     # Upstream groups are seeded into upstreams.json (see seed_upstreams_json),
     # not written here. existing_china/existing_trust are read only to carry a
     # pre-existing dns.env value forward on the first upgrade past this change,
@@ -4821,7 +4815,6 @@ write_dns_env() {
     local stats_file="$(cfg_get DNS_STATS_FILE)"; stats_file="${stats_file:-${CONF_DIR}/stats.json}"
     local mihomo_config="$(cfg_get DNS_MIHOMO_CONFIG)"; mihomo_config="${mihomo_config:-${MIHOMO_DIR}/config.yaml}"
     local intercept_config="${INTERCEPT_DIR}/config.json"
-    local marketplaces_file="${CONF_DIR}/extension-marketplaces.json"
     local heartbeat_url="$(cfg_get DNS_HEARTBEAT_URL)"
     local heartbeat_interval="$(cfg_get DNS_HEARTBEAT_INTERVAL)"; heartbeat_interval="${heartbeat_interval:-60s}"
     # full_install has already validated and normalized the China ECS value.
@@ -4921,11 +4914,9 @@ DNS_MIHOMO_SECRET=${dns_mihomo_secret_env}
 DNS_WHITELIST_FILE=${dns_whitelist_file}
 DNS_MIHOMO_CONFIG=${mihomo_config}
 DNS_INTERCEPT_CONFIG=${intercept_config}
-# Console-managed extension marketplace source snapshots. The daemon writes
-# this file atomically; marketplace indexes never contain executable runtime
-# state and every selected extension is still imported through the strict
-# native manifest snapshot pipeline.
-DNS_MARKETPLACES_FILE=${marketplaces_file}
+# Extension catalogs are part of the interception document, not a file of their
+# own: a fetched index is refetchable by definition, so only the operator's list
+# of sources is state. See intercept.json's `catalogs`.
 
 # ZashCert/Key always point at the selected certificate's zash/ role-dir copy
 # (deploy_cert_roles). mihomo serves the controller with them; the bundle they
@@ -4937,27 +4928,12 @@ DNS_ZASH_KEY=${ZASH_CERT_DIR}/current/privkey.pem
 # iOS .mobileconfig files served by the daemon at the public /ios/ path.
 WWW_DIR=${WWW_DIR}
 
-# In-process Telegram control bot (goroutine of 5gpn-dns). Populated by
-# Set here manually until the bot is ported. Empty token ⇒ bot disabled.
-# TGBOT_ADMINS is a comma-separated list of authorized numeric Telegram IDs.
-# These are the INSTALL-TIME DEFAULTS: the web console (Settings → Telegram bot,
-# PUT /api/tgbot) writes /etc/5gpn/tgbot.json, which OVERRIDES these at startup
-# and hot-restarts the bot without touching this read-only file (same pattern as
-# upstreams.json). Delete tgbot.json to fall back to the values below.
-TGBOT_TOKEN=${tg_token}
-TGBOT_ADMINS=${tg_admins}
-# Runtime token/admin override written atomically by PUT /api/tgbot. This path
-# must remain in a daemon-writable directory (the systemd unit permits
-# /etc/5gpn); changing it takes effect after a 5gpn-dns restart.
-DNS_TGBOT_FILE=${tg_file}
-# Optional Telegram-only HTTP/HTTPS CONNECT proxy. This is a daemon startup
-# knob, not part of tgbot.json: change it in dns.env and restart 5gpn-dns.
-# 5gpn never edits operator-owned mihomo config to create a proxy listener.
-TGBOT_PROXY_URL=${tg_proxy}
-# Opt-in transition alerts for certificate, mihomo and upstream health. This is
-# also a daemon startup knob; the bot cannot report its own process/host death,
-# so DNS_HEARTBEAT_URL remains the external dead-man's switch.
-TGBOT_ALERTS=${tg_alerts}
+# The Telegram bot is configured in the console, not here. It has its own
+# document beside the resolver's and the engine's (<mihomo-home>/gpn/bot.json),
+# written 0600 by the core because it carries a token. dns.env used to hold the
+# install-time defaults for a daemon that read this file at startup; nothing
+# reads it for the bot any more, so keeping the keys would describe a
+# configuration surface that does not exist.
 
 DNS_CACHE_SIZE=${CACHE_SIZE}
 DNS_MAX_INFLIGHT=${max_inflight}
@@ -5385,9 +5361,7 @@ start_services_with_cert_lock_handoff() {
 }
 
 # ----------------------------------------------------------------------------
-# Optional control plane: Telegram bot (an in-process goroutine of 5gpn-dns).
-# dns.env supplies startup defaults; the validated runtime override at
-# DNS_TGBOT_FILE is authoritative once created by the control API.
+# dns.env maintenance.
 # ----------------------------------------------------------------------------
 # Set (or replace) a KEY=VALUE line in a dotenv file, preserving all other keys.
 # Appends the key if absent without clobbering unrelated settings.

@@ -8,7 +8,6 @@ rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
 INSTALL="$ROOT/install.sh"
 CERT_RENEW="$ROOT/scripts/cert-renew.sh"
-BOT_OPS="$ROOT/cmd/5gpn-dns/bot_ops.go"
 RELEASE="$ROOT/.github/workflows/release.yml"
 
 # --- Production renewal is unattended through one mode-aware, cert-name-scoped

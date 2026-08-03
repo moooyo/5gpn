@@ -66,8 +66,8 @@ jobs:
       # one checks a configuration nobody will run. Keep this pin and its digest
       # in lockstep with MIHOMO_VERSION/MIHOMO_SHA256 in install.sh.
       MIHOMO_REPO: moooyo/mihomo
-      MIHOMO_VERSION: v1.19.28-monolith.2
-      MIHOMO_SHA256: 62cfd92cc7a6f6028c17dd44d7b77c436500ec82b1d2c9eb51a520f93b535452
+      MIHOMO_VERSION: v1.19.28-monolith.4
+      MIHOMO_SHA256: 3707592c4ddf93911f627ec2b32ec1b6965f89af5180990a3663291b609d7141
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Download pinned mihomo
@@ -122,8 +122,12 @@ jobs:
           # bundle, and with a path the unit does not list the service cannot
           # start at all.
           grep -Fq 'external-ui: /opt/5gpn/ui' "$runtime/config.yaml"
-          # The guard standing in for unwired UDP capture. Removing it does not
-          # enable QUIC capture, it makes gateway QUIC bypass interception.
+          # The backstop behind datagram capture. Capture is consulted before
+          # rule resolution, so with mitm.http3 on this reject only ever sees
+          # the datagrams capture did not want, and with it off it is the whole
+          # mechanism -- a capable client falls back to TCP, which is captured.
+          # Removing it does not enable QUIC capture; it makes gateway QUIC
+          # bypass interception whenever http3 is off or the master switch is.
           grep -Fq 'AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' "$runtime/config.yaml"
           sed \
             -e '/name: gateway5060/d' \
