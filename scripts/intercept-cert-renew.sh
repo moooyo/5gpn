@@ -250,13 +250,13 @@ readonly_leaf_ready() {
 }
 
 main() {
-    local inherited_lock=0 root_gid readonly_rc=0
-    if [[ $# == 1 && "$1" == --installer-lock-held ]]; then
-        inherited_lock=1
-    elif [[ $# != 0 ]]; then
-        err "This helper accepts only the internal --installer-lock-held flag."
-        return 2
-    fi
+    local root_gid readonly_rc=0
+    # No flags. This used to accept --installer-lock-held, because install.sh
+    # invoked it while already holding the certificate lock and had to say so to
+    # avoid blocking on itself. The installer no longer mints leaves at all --
+    # it establishes the CA and stops -- so the only callers left are the path
+    # unit and the renewal timer, and both start from no lock.
+    [[ $# == 0 ]] || { err "This helper takes no arguments."; return 2; }
     [[ "$EUID" == 0 ]] || { err "Interception certificate renewal must run as root."; return 1; }
     command -v openssl >/dev/null 2>&1 && command -v flock >/dev/null 2>&1 \
         || { err "openssl and flock are required."; return 1; }
@@ -284,23 +284,18 @@ main() {
         lock_file_safe "$LOCK_FILE" \
             || { err "The certificate lock file is unsafe."; return 1; }
     fi
-    if [[ "$inherited_lock" == 1 ]]; then
-        lock_fd_targets_file 8 "$LOCK_FILE" \
-            || { err "The installer certificate lock was not inherited on fd 8."; return 1; }
-    else
-        exec 9>"$LOCK_FILE"
-        chmod 0600 "$LOCK_FILE" \
-            || { exec 9>&-; err "Could not protect the certificate lock file."; return 1; }
-        lock_fd_targets_file 9 "$LOCK_FILE" \
-            || { exec 9>&-; err "The certificate lock descriptor is unsafe."; return 1; }
-        if ! flock -w 10 9; then
-            if [[ "$readonly_rc" == 4 ]]; then
-                warn "The interception leaf is due for renewal but remains runtime-valid; another certificate operation will retry renewal later."
-                return 0
-            fi
-            err "Another 5gpn certificate operation is running."
-            return 1
+    exec 9>"$LOCK_FILE"
+    chmod 0600 "$LOCK_FILE" \
+        || { exec 9>&-; err "Could not protect the certificate lock file."; return 1; }
+    lock_fd_targets_file 9 "$LOCK_FILE" \
+        || { exec 9>&-; err "The certificate lock descriptor is unsafe."; return 1; }
+    if ! flock -w 10 9; then
+        if [[ "$readonly_rc" == 4 ]]; then
+            warn "The interception leaf is due for renewal but remains runtime-valid; another certificate operation will retry renewal later."
+            return 0
         fi
+        err "Another 5gpn certificate operation is running."
+        return 1
     fi
     cleanup_tls_candidates \
         || { err "Interrupted interception certificate candidates are unsafe."; return 1; }

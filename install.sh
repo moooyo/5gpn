@@ -168,8 +168,8 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # leaves the gateway with no resolver, no capture and no control API at all. The
 # staging probe checks the version token exactly rather than accepting a prefix.
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-monolith.1"
-MIHOMO_SHA256="5b3c5a1a78ea62746404ed0ad860c45c1593caaaa3b22b049ece5ae1210396f6"
+MIHOMO_VERSION="v1.19.28-monolith.2"
+MIHOMO_SHA256="62cfd92cc7a6f6028c17dd44d7b77c436500ec82b1d2c9eb51a520f93b535452"
 # Every `mihomo -t` in this script must run with the same SAFE_PATHS the unit
 # grants, because the seed names paths outside its own home directory -- the
 # certificates it serves and the UI bundle it publishes. Without this the core
@@ -2864,15 +2864,23 @@ ensure_intercept_certificates() {
 
     prepare_intercept_runtime_dirs || { remove_temp_dir "$stage"; return 1; }
     remove_temp_dir "$stage"
-	"${SCRIPTS_DIR}/intercept-cert-renew.sh" --installer-lock-held \
-		|| { err "Dynamic interception leaf publication failed."; return 1; }
-	if [[ -s "$CERT_REQUEST_FILE" ]] && [[ -n "$(tail -n +2 -- "$CERT_REQUEST_FILE")" ]]; then
-		validate_intercept_leaf \
-			|| { err "Dynamic interception leaf validation failed."; return 1; }
-		ok "Dedicated interception CA and extension-scoped leaf are ready."
-	else
-		ok "Dedicated interception CA is ready; no extension leaf is needed yet."
-	fi
+    # The installer establishes the root of trust and stops there.
+    #
+    # It used to mint a leaf too, which put it inside a loop that is otherwise
+    # entirely event-driven: the engine writes its certificate request, the path
+    # unit sees that file change, and the root oneshot signs a leaf covering
+    # exactly the hosts it names. Calling the same script here added a second
+    # entry point and, with it, a first-install special case -- there is nothing
+    # to sign on a gateway whose extension set is empty.
+    #
+    # Removing it leaves one path to a leaf and no special cases. The first real
+    # issuance happens when the first extension is enabled, which is also the
+    # first moment a leaf means anything.
+    if [[ -s "$CERT_REQUEST_FILE" ]] && [[ -n "$(tail -n +2 -- "$CERT_REQUEST_FILE")" ]]; then
+        validate_intercept_leaf \
+            || warn "The interception leaf does not currently cover the enabled capture hosts; the certificate watcher will reissue it."
+    fi
+    ok "Dedicated interception CA is ready; leaves are issued on demand."
 }
 
 # zashboard: prebuilt static dist from our fork moooyo/zashboard, which carries

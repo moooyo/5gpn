@@ -76,7 +76,16 @@ grep -Fq 'ensure_intercept_certificates' "$INSTALL" || fail "interception certif
 grep -Fq 'systemctl enable --now 5gpn-intercept-cert.timer' "$INSTALL" || fail "interception leaf renewal timer is not always enabled"
 grep -Fq 'systemctl enable --now 5gpn-intercept-cert.path' "$INSTALL" || fail "interception certificate watcher is not enabled"
 grep -Fq '"${SCRIPT_DIR}"/etc/systemd/*.timer' "$INSTALL" || fail "interception certificate timer is not copied into installed bundles"
-grep -Fq 'intercept-cert-renew.sh" --installer-lock-held' "$INSTALL" || fail "installer does not reuse its held certificate lock"
+grep -Fq 'intercept-cert-renew.sh" --installer-lock-held' "$INSTALL" \
+    && fail "the installer mints leaves again instead of leaving them to the watcher"
+# One path to a leaf: the engine writes its request, the path unit sees it
+# change, the root oneshot signs. The installer establishes the CA and stops --
+# a second entry point is what forced a first-install special case, because a
+# gateway with no extensions has nothing to sign.
+grep -Fq 'PathChanged=/etc/5gpn/mihomo/gpn/certificate-request' "$ROOT/etc/systemd/5gpn-intercept-cert.path" \
+    || fail "the certificate watcher does not follow the engine's request"
+grep -Fq 'inherited_lock' "$ROOT/scripts/intercept-cert-renew.sh" \
+    && fail "the renew helper still has a branch that skips taking the certificate lock"
 grep -Fq 'CERT_REQUEST_FILE="${GPN_STATE_DIR}/certificate-request"' "$INSTALL" \
     || fail "installer does not read the leaf host set from the engine's published request"
 renew_service="$(sed -n '/^install_renewal_automation()/,/^}/p' "$INSTALL")"
