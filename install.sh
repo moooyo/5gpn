@@ -4987,8 +4987,7 @@ EOF
 
 setup_ios_profile() {
     info "Generating iOS DoT profile..."
-    claim_ios_dir || { err "Refusing unowned iOS profile directory: $WWW_DIR"; return 1; }
-    local gw="${GATEWAY_IP:-$PUBLIC_IP}" candidate
+    local gw="${GATEWAY_IP:-$PUBLIC_IP}" candidate f
     candidate="$(mktemp -d "${BASE_DIR}/.www.new.XXXXXX")" || return 1
     write_ownership_marker "$candidate" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE" \
         || { rmdir -- "$candidate"; return 1; }
@@ -5004,11 +5003,50 @@ setup_ios_profile() {
         remove_owned_root "$candidate" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE" || true
         return 1
     fi
-    publish_owned_tree "$candidate" "$WWW_DIR" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE" \
-        || { remove_owned_root "$candidate" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE" || true; return 1; }
+
+    # The profiles go into the UI bundle, not a directory of their own.
+    #
+    # architecture.md is explicit that /ui/* is mounted outside the controller's
+    # authentication group and is the only unauthenticated surface, for exactly
+    # this reason: an unenrolled phone downloading a .mobileconfig trusts nothing
+    # yet and holds no secret. The loopback console origin that used to serve
+    # them went with the process that served it, so publishing to a directory of
+    # its own would put them where nothing can read them -- which is where the
+    # fresh install left them until now.
+    #
+    # Copied in rather than published as a tree: install_ui replaces UI_DIR
+    # atomically from the zashboard dist, so a tree publication here would
+    # delete the console. install_ui runs earlier in the same phase, and a
+    # re-install repeats both in that order.
+    ensure_profile_mime_type || return 1
+    for f in "$candidate"/*.mobileconfig; do
+        [[ -f "$f" ]] || continue
+        install -o root -g root -m 0644 "$f" "${UI_DIR}/$(basename -- "$f")" \
+            || { remove_owned_root "$candidate" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE" || true
+                 err "Could not publish the iOS profiles into ${UI_DIR}."; return 1; }
+    done
     remove_owned_root "$candidate" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE"
 
-    ok "iOS profile generated (downloaded from https://${CONSOLE_DOMAIN:-<console-domain>}/ios/ios-dot.mobileconfig)."
+    ok "iOS profile generated (served at /ui/ios-dot.mobileconfig on the controller)."
+}
+
+# Teach the system MIME table what a .mobileconfig is.
+#
+# The controller serves the bundle with Go's static file handler, which resolves
+# content types through mime.TypeByExtension -- and that consults the system
+# database on Unix. Without an entry the profile is served as
+# application/octet-stream, and iOS then downloads it instead of offering to
+# install it, which is a silently worse experience rather than a visible error.
+#
+# Idempotent, and additive to a file the distro owns: a package update that
+# rewrites /etc/mime.types costs the entry, and the next install restores it.
+ensure_profile_mime_type() {
+    local table=/etc/mime.types
+    [[ -f "$table" && ! -L "$table" ]] || return 0
+    grep -qE '(^|[[:space:]])mobileconfig([[:space:]]|$)' "$table" && return 0
+    printf 'application/x-apple-aspen-config\tmobileconfig\n' >> "$table" \
+        || { err "Could not register the .mobileconfig MIME type in ${table}."; return 1; }
+    info "Registered the .mobileconfig MIME type so iOS is offered the profile."
 }
 
 print_qr() {
@@ -5130,41 +5168,57 @@ verify_console_dns() {
 }
 
 verify_console_endpoint() {
-    [[ -s "${WWW_DIR}/ios-dot.mobileconfig" ]] \
-        || { warn "iOS profile file is absent; endpoint content probe skipped (profile generation already reported fail-closed)."; return 0; }
-    [[ -s "${WWW_DIR}/ios-intercept-ca.mobileconfig" ]] \
-        || { err "Interception CA profile file is absent after profile generation."; return 1; }
-    [[ -n "${CONSOLE_DOMAIN:-}" ]] || load_persisted_domains || return 1
-    local console="$CONSOLE_DOMAIN"
-    local bind_ip="${MIHOMO_LISTEN_IPS%%,*}" tmp headers code intercept_code api_code root_code
-    [[ -n "$console" && -n "$bind_ip" ]] \
-        || { err "Cannot probe console SNI: console domain or mihomo bind address is empty."; return 1; }
+    # What a fresh install can actually verify about the served surface.
+    #
+    # This probed a public console origin: an SPA at https://<console>/, an
+    # /api/status that had to answer 401, and the profiles under /ios/. None of
+    # the three exists. One process serves the API and the bundle on the
+    # controller now, so that is where the checks belong -- and the old ones
+    # could not fail informatively, because nothing was listening to refuse them.
+    #
+    # Two things are worth asserting, and both were live failure modes on this
+    # branch. The profiles must be readable without a secret, because an
+    # unenrolled phone holds none and /ui/* is deliberately outside the
+    # controller's authentication group. And they must carry the Apple content
+    # type, or iOS downloads the file instead of offering to install it -- a
+    # silently worse experience rather than a visible error.
+    local tmp code name
     tmp="$(mktemp -d /tmp/5gpn-console-probe.XXXXXX)" || return 1
     claim_temp_dir "$tmp" || { rmdir -- "$tmp"; return 1; }
-    code="$(curl --silent --show-error --insecure --max-time 5 \
-        --resolve "${console}:443:${bind_ip}" -D "$tmp/headers" -o "$tmp/body" \
-        -w '%{http_code}' "https://${console}/ios/ios-dot.mobileconfig" 2>/dev/null || true)"
-    if [[ "$code" != 200 ]] \
-       || ! grep -qi '^Content-Type:[[:space:]]*application/x-apple-aspen-config' "$tmp/headers"; then
-        remove_temp_dir "$tmp"
-        err "Public console profile probe failed (HTTP ${code:-none}); operator mihomo config may lack the public ${console} host/rule. Update it or run '5gpn mihomo-reset'."
-        return 1
-    fi
-    intercept_code="$(curl --silent --show-error --insecure --max-time 5 \
-        --resolve "${console}:443:${bind_ip}" -o /dev/null \
-        -w '%{http_code}' "https://${console}/ios/ios-intercept-ca.mobileconfig" 2>/dev/null || true)"
-    [[ "$intercept_code" == 200 ]] \
-        || { remove_temp_dir "$tmp"; err "Public interception CA profile probe failed (HTTP ${intercept_code:-none})."; return 1; }
-    api_code="$(curl --silent --insecure --max-time 5 --resolve "${console}:443:${bind_ip}" \
-        -o /dev/null -w '%{http_code}' "https://${console}/api/status" 2>/dev/null || true)"
-    root_code="$(curl --silent --insecure --max-time 5 --resolve "${console}:443:${bind_ip}" \
-        -o /dev/null -w '%{http_code}' "https://${console}/" 2>/dev/null || true)"
+
+    for name in ios-dot.mobileconfig ios-intercept-ca.mobileconfig; do
+        [[ -s "${UI_DIR}/${name}" ]] \
+            || { remove_temp_dir "$tmp"
+                 err "Profile ${name} is absent from ${UI_DIR} after generation."; return 1; }
+        code="$(mihomo_controller_curl "/ui/${name}" \
+            --silent --show-error --max-time 5 \
+            -D "$tmp/headers" -o /dev/null -w '%{http_code}' 2>/dev/null || true)"
+        if [[ "$code" != 200 ]]; then
+            remove_temp_dir "$tmp"
+            err "Profile probe failed: /ui/${name} returned HTTP ${code:-none}, want 200."
+            return 1
+        fi
+        if ! grep -qi '^Content-Type:[[:space:]]*application/x-apple-aspen-config' "$tmp/headers"; then
+            remove_temp_dir "$tmp"
+            err "Profile /ui/${name} is not served as application/x-apple-aspen-config; iOS would download it instead of installing it."
+            return 1
+        fi
+    done
+
+    # The bundle itself, unauthenticated, on the same origin.
+    code="$(mihomo_controller_curl "/ui/" --silent --max-time 5 \
+        -o /dev/null -w '%{http_code}' 2>/dev/null || true)"
+    [[ "$code" == 200 ]] \
+        || { remove_temp_dir "$tmp"; err "Console bundle probe failed: /ui/ returned HTTP ${code:-none}, want 200."; return 1; }
+
+    # And the authenticated half stays authenticated. Asking without a bearer
+    # must be refused: /ui/* being open is a deliberate exception, not the rule.
+    code="$(mihomo_controller_curl "/configs" --silent --max-time 5 \
+        -o /dev/null -w '%{http_code}' 2>/dev/null || true)"
     remove_temp_dir "$tmp"
-    [[ "$root_code" == 200 ]] \
-        || { err "Public console SPA probe failed: / returned HTTP ${root_code:-none}, want 200."; return 1; }
-    [[ "$api_code" == 401 ]] \
-        || { err "Console API auth probe failed: unauthenticated /api/status returned HTTP ${api_code:-none}, want 401."; return 1; }
-    ok "Public console verified: SPA and mobileconfig are reachable; /api remains bearer-protected."
+    [[ "$code" == 401 ]] \
+        || { err "Controller auth probe failed: unauthenticated /configs returned HTTP ${code:-none}, want 401."; return 1; }
+    ok "Console verified: bundle and both profiles are served unauthenticated; the control API is not."
 }
 
 # ----------------------------------------------------------------------------

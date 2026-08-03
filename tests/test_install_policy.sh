@@ -188,6 +188,29 @@ grep -Fq '/opt/5gpn/ui' "$ROOT/etc/systemd/mihomo.service" \
 grep -Eq 'install_web|5gpn-web-.*\.tar\.gz|DNS_WEB_DIR=' "$INSTALL" \
     && fail "the retired console SPA is still fetched or published"
 
+# --- The iOS profiles are served, and served as profiles ---
+# /ui/* is the controller's only unauthenticated surface, and architecture.md
+# says why: an unenrolled phone downloading a .mobileconfig holds no secret. The
+# loopback console origin that used to serve them is gone, so a profile
+# published anywhere else is a profile nothing can read.
+grep -Fq '"${UI_DIR}/$(basename -- "$f")"' "$INSTALL" \
+    || fail "the iOS profiles are not published into the served UI directory"
+grep -Eq 'publish_owned_tree "\$candidate" "\$WWW_DIR"' "$INSTALL" \
+    && fail "the iOS profiles are still published to the unserved WWW_DIR"
+# Without a MIME entry Go serves them as application/octet-stream and iOS
+# downloads the file instead of offering to install it.
+grep -Fq 'application/x-apple-aspen-config' "$INSTALL" \
+    || fail "the .mobileconfig MIME type is never registered"
+grep -Eq '^ensure_profile_mime_type\(\)' "$INSTALL" \
+    || fail "no helper registers the .mobileconfig MIME type"
+verify_fn="$(sed -n '/^verify_console_endpoint() {/,/^}/p' "$INSTALL")"
+printf '%s' "$verify_fn" | grep -Fq '/ui/${name}' \
+    || fail "console verification does not probe the profiles where they are served"
+printf '%s' "$verify_fn" | grep -Fq 'x-apple-aspen-config' \
+    || fail "console verification does not assert the profile content type"
+printf '%s' "$verify_fn" | grep -Eq 'https://\$\{console\}' \
+    && fail "console verification still probes the retired public console origin"
+
 # --- `5gpn` management command: installed on PATH, backed by a copy of install.sh ---
 grep -Eq '^install_manage_cli\(\)' "$INSTALL" || fail "no install_manage_cli() (the 5gpn management command)"
 grep -Eq '^[[:space:]]*install_manage_cli( \|\| return 1)?$' "$INSTALL" || fail "install_manage_cli defined but never called in full_install"
