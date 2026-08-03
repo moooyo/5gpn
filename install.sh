@@ -692,14 +692,29 @@ cert_generation_is_safe() {
     [[ "$count" == 2 ]]
 }
 
+# The account that must be able to read a certificate role's material.
+#
+# One mapping, two callers: deploy_cert_roles creates the tree with it and
+# cert_role_tree_is_safe_for_recursive_metadata validates the tree against it.
+# They were separate case statements, and moving DoT into the mihomo process
+# meant changing one of them -- which produced a directory the validator then
+# rejected as unsafe. A single definition cannot disagree with itself.
+#
+# dot and zash: the monolith serves both, so it must read both. web: nothing
+# reads it since its console origin went with the process that served it, and a
+# role with no reader should not be widened to the account that would gain one.
+cert_role_group() {
+    case "$1" in
+        dot|zash) printf '%s\n' "$MIHOMO_SERVICE_USER" ;;
+        web)      printf '%s\n' "$DNS_SERVICE_USER" ;;
+        *)        return 1 ;;
+    esac
+}
+
 cert_role_tree_is_safe_for_recursive_metadata() {
     local role="$1" role_name group expected_gid current target canonical entry name generations
     role_name="$(basename -- "$role")"
-    case "$role_name" in
-        dot|web) group="$DNS_SERVICE_USER" ;;
-        zash) group="$MIHOMO_SERVICE_USER" ;;
-        *) return 1 ;;
-    esac
+    group="$(cert_role_group "$role_name")" || return 1
     expected_gid="$(account_gid "$group")"
     [[ -n "$expected_gid" ]] || return 1
     runtime_directory_slot_is_safe "$role" "$DNS_CERT_DIR" || return 1
@@ -4186,18 +4201,9 @@ deploy_cert_roles() {
     # never a key and certificate from different generations.
     for r in "${roles[@]}"; do
         dest="${DNS_CERT_DIR}/$r"
-        # One process reads certificates now, so every role it actually serves
-        # is group mihomo. This selected gpn-dns for `dot` because the DoT
-        # listener lived in a separate daemon running as that user; the listener
-        # moved into mihomo and the ownership did not follow. The result was
-        # silent: the service starts, binds every tunnel and the controller, and
-        # has no DNS ingress at all, because it cannot read its own key.
-        #
-        # `web` stays on gpn-dns. Nothing reads it -- its console origin went
-        # with the process that served it -- and a role no reader needs should
-        # not be widened to the account that would then be able to read it.
-        group="$MIHOMO_SERVICE_USER"
-        [[ "$r" == web ]] && group="$DNS_SERVICE_USER"
+        # One mapping for both the writer and the validator; see cert_role_group.
+        group="$(cert_role_group "$r")" \
+            || { cleanup_cert_role_candidates roles dests generations links; err "Unknown certificate role: $r"; return 1; }
         if [[ -e "$dest" || -L "$dest" ]]; then
             cert_role_tree_is_safe_for_recursive_metadata "$dest" \
                 || { cleanup_cert_role_candidates roles dests generations links; err "Certificate role boundary is unsafe: $dest"; return 1; }

@@ -213,17 +213,11 @@ fi
 check install.sh 'claim_ui_dir\(\)' 'UI ownership marker claim exists'
 check install.sh 'remove_ui_dir\(\)' 'UI marker-gated removal exists'
 nocheck install.sh 'rm -rf "\$UI_DIR"' 'no raw recursive deletion of UI_DIR'
-# The DoT listener lives in the mihomo process now. If its certificate role is
-# still group gpn-dns the service starts, binds every tunnel and the controller,
-# and silently has no DNS ingress -- it cannot read its own key. Only `web`, the
-# role with no reader left, stays on the retired account.
-if grep -Fq 'group="$MIHOMO_SERVICE_USER"' "$root/install.sh" \
-   && grep -Fq '[[ "$r" == web ]] && group="$DNS_SERVICE_USER"' "$root/install.sh" \
-   && ! grep -Fq '[[ "$r" == zash ]] && group="$MIHOMO_SERVICE_USER"' "$root/install.sh"; then
-    echo "ok: certificate roles the running process serves belong to the mihomo account"
-else
-    echo "FAIL: a certificate role the mihomo process serves is not readable by it"; FAIL=1
-fi
+# The role->account mapping must exist exactly once. It used to be two case
+# statements -- one in the writer, one in the validator -- so moving DoT into the
+# mihomo process changed one of them and produced a tree the other rejected.
+check install.sh '^cert_role_group\(\)' 'certificate role ownership has one definition'
+nocheck install.sh 'dot\|web\) group=' 'no second role->account mapping remains'
 # Every `mihomo -t` the installer runs must see the SAFE_PATHS the unit grants.
 # The seed names paths outside its own home -- the certificates and the UI
 # bundle -- so a -t without them rejects a config the running service accepts,

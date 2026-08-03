@@ -1138,6 +1138,22 @@ else
     pass "mihomo reset does not restart after candidate publication failure"
 fi
 
+# The DoT listener lives in the mihomo process now, so the account that serves a
+# certificate has to be the account that can read it. When the writer and the
+# validator disagreed the failure was silent in the worst way: the service
+# started, bound every tunnel and the TLS controller, reported itself healthy,
+# and had no DNS ingress at all because it could not open its own key.
+[[ "$(cert_role_group dot)" == "$MIHOMO_SERVICE_USER" ]] \
+    || fail "the DoT certificate role is not owned by the account that serves DoT"
+[[ "$(cert_role_group zash)" == "$MIHOMO_SERVICE_USER" ]] \
+    || fail "the controller certificate role is not owned by the serving account"
+[[ "$(cert_role_group web)" == "$DNS_SERVICE_USER" ]] \
+    || fail "the reader-less web role was widened beyond the retired account"
+if cert_role_group nonsense >/dev/null 2>&1; then
+    fail "an unknown certificate role was given an owning account"
+fi
+pass "certificate roles are owned by the account that serves them"
+
 # The published UI directory needs a marker before recursive cleanup. The
 # GitHub checkout lives below /home, which safe_ui_path intentionally rejects,
 # so isolate ownership lifecycle behavior from path-policy behavior.
