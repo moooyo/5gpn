@@ -7,51 +7,39 @@ git history. Delete this file when the list empties.
 
 Everything is pushed. `beta` is fast-forwarded to `feat/installer-tui`.
 
-| Repository | Branch | Head | Published |
-| --- | --- | --- | --- |
-| `moooyo/mihomo` | `feat/5gpn-monolith` | `112f1be3` | `v1.19.28-monolith.2` |
-| `moooyo/zashboard` | `feat/5gpn-console` | `3079675` | `v3.16.0-monolith.1` |
-| `moooyo/5gpn` | `feat/installer-tui` | `d245ddd` | `0.0.62-beta.9` |
+| Repository | Branch | Published |
+| --- | --- | --- |
+| `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.6` |
+| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.2` |
+| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.15` |
 
 Green: `go test -race ./gpn/...`, all 26 installer suites, and CI on every
 branch push. See [Reproducing the checks](#reproducing-the-checks).
 
 ---
 
-## 0. Fresh-install acceptance — done, bar one decision
+## 0. Acceptance — one decision, unchanged
 
-**A clean host installs and comes up.** This was the gate, and it is walked.
-`0.0.62-beta.9` installs onto a wiped `test-env` end to end: readiness passes,
-the console verifies, exit 0. Acceptance on that host:
+`0.0.62-beta.15` is deployed on `test-env`. Acceptance there:
 
 | Suite | Result |
 | --- | --- |
 | `acceptance-monolith-writes.sh` | **12 / 12** |
 | `acceptance-monolith-extension.sh` | **18 / 18** |
+| `acceptance-monolith-surfaces.sh` | **31 / 31** |
 | `acceptance-monolith.sh` | 17 / 20 |
 
-The extension suite is the one that matters: it drives the whole lifecycle from
-zero — enable, the engine writes its certificate request, the path unit fires,
-the root oneshot mints a leaf covering exactly the requested host, the resolver
-attributes the name, capture steers it, uninstall restores the request.
+`acceptance-monolith-surfaces.sh` is new and covers the three subsystems that
+landed together — datagram capture, the catalog, the bot. It fetches the real
+first-party index and reviews a real entry against its published digest and
+advertised capabilities, so the network path is exercised rather than mocked.
 
-Getting there took seven fixes, every one of them the same shape: **the upgrade
-path did something the fresh path never learned to do.** The deployed beta was
-green on 50 checks because it upgraded a provisioned host. Pins at overlay.6; no
-`external-ui` in the seed; nothing creating `/opt/5gpn/ui`; the DoT certificate
-owned by the retired `gpn-dns`; the role→account mapping duplicated so changing
-one made the two disagree; `dns.json` never given the certificate pair while the
-installer seeded a retired `upstreams.json`; readiness and console verification
-both waiting on the deleted loopback console origin; the iOS profiles published
-to an unserved `WWW_DIR`; and an interception engine that refused to exist
-before its first leaf, which deadlocked a fresh gateway out of ever enabling an
-extension.
-
-**The one open decision.** The three remaining failures are one cause, and the
-suite says so itself: `no enabled block rule found in the migrated policy`.
-`acceptance-monolith.sh` asserts *migrated* content — an operator policy that a
-gateway carries through `migrate-state-to-monolith.sh`. A fresh gateway has no
-policy rules and an unfetched subscription record by design. So:
+**The one open decision is the same one.** The three remaining failures are one
+cause, and the suite says so itself: `no enabled block rule found in the
+migrated policy`. `acceptance-monolith.sh` asserts *migrated* content — an
+operator policy that a gateway carries through `migrate-state-to-monolith.sh`.
+A fresh gateway has no policy rules and an unfetched subscription record by
+design. So:
 
 - Mark those checks as requiring a configured gateway, and keep a smaller
   fresh-install acceptance? Or
@@ -61,10 +49,55 @@ policy rules and an unfetched subscription record by design. So:
 Do not simply relax the assertions. A suite that passes by asking less is the
 failure mode this whole branch has been correcting.
 
-**Small, separate.** The seeded document emits `policy.rules: null`, because Go
-marshals a nil slice that way, and consumers' `jq` iteration errors on it. `[]`
-says the same thing without the foot-gun. It will not turn the three checks
-green — they want an actual rule — so it is its own change.
+---
+
+## What shipped on 2026-08-03, and what it cost
+
+The three items this file used to list as unbuilt are built. They are described
+by `docs/architecture.md`; what belongs here is the shape of what went wrong,
+because it repeated.
+
+**Every bug found in this round was on the second install, not the first.**
+The previous round's lesson was "the upgrade path did something the fresh path
+never learned to do". This round was the mirror: fresh installs were green
+throughout, and five separate faults were only reachable by upgrading a host
+that already had state.
+
+- `mihomo_config_matches_install_config` accepted only the *retired*
+  `NOT,((IN-NAME,intercept-egress))` qualifier, so **every monolith-installed
+  host failed its own drift check** and was told to run `upgrade-reset-mihomo`,
+  which replaces the operator's entire config. The check reads a config that
+  must already exist, so the first install never runs it.
+- **A comment ran as a command.** The dns.env heredoc is unquoted by design, so
+  a comment containing `` `catalogs` `` executed `catalogs` and failed the
+  publication phase with exit 127.
+- The installer's mode sweep hardened everything under the mihomo home to
+  0660, **including the core's own `gpn/` state directory**, leaving the
+  certificate request unreadable by the root-with-no-capabilities oneshot that
+  is the only thing that mints leaves.
+- Renaming `mitm.quic_fallback_protection` to `mitm.http3` made
+  `DisallowUnknownFields` **refuse the intercept.json on every deployed
+  gateway**. Worse than refusing: `StartInterception`'s failure is a warning, so
+  the core came up resolving and forwarding with interception silently absent.
+- `DefaultDocument` seeds the catalog, and `DefaultDocument` applies only to an
+  absent document — so extension discovery **shipped dark on every host that
+  already existed**.
+
+And one that was not about state at all: `quick-install.sh --beta` took the
+first tag GitHub listed, but `/releases` is ordered **lexicographically**, so
+`beta.9` outranks `beta.11`. It worked for nine betas and then pinned every
+`--beta` install to beta.9, silently, because downloading an older bundle than
+the operator asked for is a successful install of the wrong thing.
+
+Each now has a test that fails without its fix. Two are worth naming because
+they are couplings nothing was watching: `test_seed_template_renderers` renders
+the seed and runs the drift check against it, and `test_dns_env_writes` extracts
+the heredoc body and refuses backticks and `$( )` outright.
+
+**What this suggests for the next round.** There is no second-install
+acceptance. Every suite here runs against a gateway in one state, and five
+faults lived in the transition between two. A suite that installs, upgrades, and
+then asserts would have caught all five.
 
 ---
 
@@ -88,109 +121,115 @@ What exists today, and works:
 
 - Is the intended work a *rewrite* of the existing TUI, or new surfaces inside
   it? If new: which, given zashboard now owns every runtime surface (DNS
-  document, extensions, settings) and the installer owns only install-time and
-  lifecycle operations?
+  document, extensions, catalogs, bot, settings) and the installer owns only
+  install-time and lifecycle operations?
 - The menu lost two entries during the monolith work — `Reload rules` and
   `Configure Telegram Bot` — because both invoked helpers deleted in `939638c`.
-  Does anything replace them, or is the smaller menu the answer?
+  The bot is now configured in zashboard, so that entry is answered. Does
+  anything replace `Reload rules`, or is the smaller menu the answer?
 
 ---
 
-## 2. Marketplace — greenfield
-
-Does not exist. Extensions install by manifest URL or pasted manifest, and
-`gpn/engine`'s review → digest-checked install → update-check → apply path is
-complete and tested — and now demonstrated end to end on a real gateway by the
-extension acceptance suite.
-
-So the missing piece is *discovery*, not installation.
-
-**Already decided:** the catalog lives in an independent repository
-(`https://github.com/moooyo/5gpn-extensions`; whether that repo exists is
-unverified). The core repository must not vendor extension source;
-`test_intercept_policy` asserts that.
-
-**Open questions:**
-
-- What is a marketplace here — a static index the gateway fetches, or a service?
-  A static index keeps the gateway's trust surface as it is now (fetch guarded
-  by `publicUnicast`, digest checked before install).
-- Who signs? Today the digest is quoted by the operator from a review response.
-  A catalog implies something signs the catalog itself.
-- Where does it render — a zashboard page, or inside the existing Extensions
-  page as a second install source?
-
----
-
-## 3. Telegram bot — greenfield, and its zashboard page is blocked on it
-
-Not ported. `dns.env` still carries `DNS_TGBOT_FILE`, `TGBOT_PROXY_URL`,
-`TGBOT_ALERTS` and the installer still writes them, so the configuration
-surface is reserved; nothing reads it.
-
-**Already decided:** the bot's own extension-management UI is *not* being
-ported. Its management surface moves into zashboard rather than being a second
-marketplace inside a chat client.
-
-**Blocked on this item:** M7's bot configuration page.
-
-**Two pieces of test coverage are parked on it:**
-
-- `test_domain_validation` dropped its `bot.go` regexp comparison. It has to
-  return as a Go test *beside the regexp* in the fork, not as a grep across
-  repositories.
-- `test_tgbot_installer_policy` keeps the `dns.env` half and asserts that the
-  `setup-tgbot` command stays gone until a helper exists behind it.
-
-Residue to clean up when this lands: `tests/test_install_policy.sh` defines
-`BOT_OPS` pointing at `cmd/5gpn-dns/bot_ops.go`, a path deleted with the
-three-process layout. Nothing reads the variable.
-
-**Open questions:**
-
-- Does the bot live in `gpn/` inside the fork (one process, consistent with
-  everything else) or as a separate process again?
-- What can it still do, given zashboard owns extension management? Alerts and
-  status reads are the obvious residue.
-
----
-
-## 4. `gpn/engine` has no tests for the request path
+## 2. `gpn/engine` has no tests for the request path
 
 The largest untested surface in the tree, and inherited rather than introduced.
 
 Covered: the document (`manage_test.go`), the manifest parser
 (`manifest_test.go`), the certificate store's presence/absence contract
-(`cert_test.go`), capture ownership.
+(`cert_test.go`), the catalog (`catalog_test.go`), the datagram capture bridge
+and a live QUIC/H3 round trip through it (`quiccapture_test.go`), capture
+ownership.
 
-**Not covered:** the proxy, the goja script runtime, TLS termination. Those are
-the parts that see live traffic and run operator-supplied JavaScript.
+**Not covered:** the proxy's request path, the goja script runtime, TLS
+termination. Those are the parts that see live traffic and run
+operator-supplied JavaScript.
 
 Two facts that should shape the design:
 
 - `gpn/dns` has real socket tests (`service_test.go` binds listeners and asks
   questions over the wire). That is the bar, and it caught things unit tests
-  could not.
+  could not. `quiccapture_test.go` follows it: a real quic-go client handshakes
+  against the engine's own leaf and gets an HTTP/3 response back.
 - A pre-existing data race in `Doc.Update` survived every existing test and was
   only caught by `-race`. Assume more of that shape is in the untested half.
 
 ---
 
-## 5. UDP / HTTP-3 capture — deliberately deferred, still deferred
+## 3. Datagram capture is unproven against a real client
 
-`captureUDPFor` exists in `tunnel/gpn.go` and is unused; `MatchUDP` returns
-false. The UDP path builds an association, so a capture also owns
-`nat.NewWriteBackProxy` and the `handleUDPToLocal` pump, which deserves its own
-change with its own tests.
+`MatchUDP`/`HandleUDP` are wired and `quiccapture_test.go` drives a genuine QUIC
+handshake and HTTP/3 request through the same bridge the core uses. What has
+**not** happened is a browser on a real network reaching a captured host over
+H3 through `test-env`.
 
-The guard in the meantime is the seed template's fixed
-`AND,((NETWORK,UDP),(DST-PORT,443)),REJECT`, which makes a capable client fall
-back to TCP, which *is* captured. `test_mihomo_policy` asserts its position, and
-the CI seed gate asserts its presence.
+The parts most likely to be wrong there and invisible in a test:
 
-**This rule must not be removed before the capture path works.** Removing it
-first does not enable QUIC capture; it makes gateway QUIC bypass interception
-silently.
+- **Connection migration.** One listener per process exists precisely so a
+  rebinding client keeps its connection IDs. Nothing has rebound yet.
+- **MTU and datagram truncation.** The bridge copies into whatever buffer
+  quic-go offers; a path with a smaller MTU than the test's has not been seen.
+- **Alt-Svc.** A client only tries H3 if the origin advertised it, and responses
+  pass through the engine's rewrite path. Whether the advertisement survives is
+  untested.
+
+---
+
+## 4. Marketplace — the catalog exists, the rest is open
+
+Discovery works: `GET /gpn/interception/catalog`, a reviewed and digest-checked
+install from an entry, and the zashboard listing. `test-env` fetches the
+first-party index and reviews an entry from it.
+
+**Open questions the implementation deliberately did not answer:**
+
+- **Who signs?** Today the entry's SHA-256 is checked against the fetched
+  manifest, and the entry's advertised capabilities against what was parsed —
+  but the catalog itself is trusted because it was fetched over TLS from a host
+  the operator configured. A signature over the index would move that trust to a
+  key. Nothing currently pins one.
+- **Is a second source ever added?** The document supports up to 16 and
+  zashboard renders them, but there is no UI for adding one — the only way is a
+  `PUT /gpn/interception/catalog/sources`.
+- **Update flow from a catalog.** `CheckUpdate` re-reads the URL an extension
+  was installed from, never the catalog. That is deliberate, and it means a
+  catalog that publishes a new version does not surface as an update unless the
+  entry's manifest URL is the same one the operator installed from.
+
+---
+
+## 5. Telegram bot — reads and alerts; the rest was deleted on purpose
+
+Ported into `gpn/bot`. `/status`, `/resolve`, `/id`, transition alerts, and
+nothing that mutates. Configured in zashboard, its own `bot.json`.
+
+**Unverified:** no real Telegram token has ever been configured on `test-env`.
+The poll loop, the admin gate and the alert transitions have Go tests against a
+stand-in Telegram; the live path — `getMe` against the real API through the
+core's inner dialer, on a network that blocks it — has not run.
+
+**Open questions:**
+
+- Alerts are transition-only and cannot report the gateway's own death.
+  `DNS_HEARTBEAT_URL` remains the external dead-man's switch. Is anything
+  actually consuming it?
+- `/resolve` is the only command taking an argument, and it is bounded by the
+  FQDN rule. If more read commands arrive, the `Facts` struct is where the
+  boundary is enforced — widen it deliberately, not incidentally.
+
+---
+
+## 6. UDP / HTTP-3 — the reject rule stays
+
+`captureUDPFor` is wired and `MatchUDP` answers for captured hosts on :443 with
+`mitm.http3` on. The seed's fixed `AND,((NETWORK,UDP),(DST-PORT,443)),REJECT`
+**stays in place either way**: capture is consulted before rule resolution, so
+with HTTP/3 on the reject only ever sees datagrams capture did not want, and
+with it off it is the whole mechanism.
+
+**This rule must not be removed.** Removing it does not enable QUIC capture; it
+makes gateway QUIC bypass interception whenever `http3` is off or the master
+switch is. `test_mihomo_policy` asserts its position and the CI seed gate
+asserts its presence.
 
 ---
 
@@ -202,37 +241,34 @@ These are load-bearing and each one looks removable.
   anchored `sed`; `quick-install.sh` reads it back with `awk` and `sed` without
   ever sourcing the downloaded bundle. One column-zero, double-quoted,
   uninterpolated assignment. Reformatting breaks bundle validation even when the
-  shell semantics are identical. It no longer selects an artifact — the core and
-  the UI come from their own repositories under their own digest pins — but it
-  still gates an unpinned source and still drives channel delegation.
+  shell semantics are identical.
 - **`NOT,((IN-TYPE,INNER))` on the two panel allow rules.** The engine reaches
   every upstream by dialling back through mihomo's own rules, so engine egress
   arrives as `INNER` with no inbound name. The qualifier looks vacuous; deleting
   it lets a captured extension naming the console reach the management plane.
-- **`MIHOMO_SAFE_PATHS` must equal the unit's `Environment=SAFE_PATHS`.** The
-  seed names paths outside its own home — the certificates and the UI bundle at
-  `external-ui` — so a bare `mihomo -t` rejects a config the running service
-  accepts, and a fresh install fails its own preflight on a correct config.
-  `test_mihomo_policy` asserts the two are equal and that no `-t` escapes the
-  guard.
-- **`cert_role_group` is the only role→account mapping.** It was two case
-  statements, one in the writer and one in the validator, and moving DoT into
-  the mihomo process changed one of them — which produced a directory the other
-  rejected as unsafe. `dot` and `zash` resolve to `mihomo`, which serves them;
-  `web` has no reader left and stays on the retired account rather than being
-  widened.
+  The installer's drift check must accept **this** spelling and not the retired
+  `IN-NAME,intercept-egress` one — `test_seed_template_renderers` now renders the
+  seed and runs the check against it.
+- **`MIHOMO_SAFE_PATHS` must equal the unit's `Environment=SAFE_PATHS`.** A bare
+  `mihomo -t` otherwise rejects a config the running service accepts.
+- **`cert_role_group` is the only role→account mapping.**
 - **One path to a leaf.** The engine writes `certificate-request`,
-  `5gpn-intercept-cert.path` sees it change, the root oneshot signs. The
-  installer establishes the CA and stops. A second entry point is what forced a
-  first-install special case, because a gateway with no extensions has nothing
-  to sign.
-- **The CA signing key never enters the engine's address space.** It can mint a
-  leaf for any name; the leaf's SAN set is the enforcement of the capture
-  policy, and it only bounds anything because the process holding the leaf
-  cannot sign a new one. `InaccessiblePaths=-/etc/5gpn/intercept-ca`.
+  `5gpn-intercept-cert.path` sees it change, the root oneshot signs.
+- **The CA signing key never enters the engine's address space.**
 - **The certificate oneshot is root with an empty capability set**, so it is
   subject to ordinary permission checks. Hence state directory `0711` and
-  certificate request `0644`.
+  certificate request `0644` — and hence the installer's mode sweep must prune
+  `$MIHOMO_DIR/gpn`, which is the core's own state and not the installer's to
+  re-mode.
+- **The dns.env heredoc is unquoted.** Backticks and `$( )` in it, *including in
+  comments*, are live command substitution. `test_dns_env_writes` refuses both.
+- **Retired document fields are dropped, not preserved.** `DisallowUnknownFields`
+  stays — it is what catches a typo in a hand-edited document — but a key this
+  program itself retired is not a typo, and refusing it disables interception on
+  every deployed gateway at once. See `retiredDocumentFields`.
+- **`Config.Catalogs` is not `omitempty`.** An absent key seeds the default; an
+  explicitly empty list is an operator decision that must survive a restart.
+  With `omitempty` those are the same bytes.
 - **A red suite hides new breakage.** Keep all 26 green.
 
 ---
@@ -257,8 +293,8 @@ wsl -e bash -lc "cd /mnt/d/Code/worktrees/5gpn-installer-tui && bash scripts/run
 
 Names for a subset (`run-suites.sh install_policy tui_policy`), `SUITE_TAIL=N`
 for more failure context. `tests/verify-artifact-pins.sh` needs the network and
-must run from a tree with `install.sh` beside it — copy both to an LF directory
-preserving `tests/`, or it fails on its own path derivation.
+must run from a tree with `install.sh` beside it — run it from `/tmp/5gpn-lf`
+after `run-suites.sh` has built that copy.
 
 ### Cutting a release
 
@@ -272,7 +308,8 @@ fetches a digest-checked bundle. There is no local-bundle install path.
   setting `constant.Version` **and** `constant.BuildTime`), gzip to
   `mihomo-linux-amd64-compatible-<tag>.gz`, `gh release create --prerelease`.
   The version token must match `MIHOMO_VERSION` exactly —
-  `mihomo_reports_exact_version` parses the `-v` first line.
+  `mihomo_reports_exact_version` parses the `-v` first line, and its regex
+  requires a non-empty build time after the Go version.
 - **zashboard** has `5gpn-release.yml`, triggered by a `v*-monolith.*` tag.
 - **5gpn**: tag `X.Y.Z-beta.N` **reachable from `origin/beta`**, and N greater
   than every existing `X.Y.Z-beta.*`. `classify` enforces both.
@@ -285,10 +322,22 @@ The installer refuses a headless first install by design: `configure_install_tui
 requires a TTY and `attach_tty` reattaches stdin to `/dev/tty`, so answers
 cannot be piped. Drive it with `expect`, and **set `stty_init`** — without a pty
 size gum's textinput panics inside `placeholderView`, which presents as an
-endless "Invalid domain" loop and a 45 MB log.
+endless "Invalid domain" loop and a 45 MB log. A working driver is on the host
+at `/tmp/fresh-install.exp`.
 
 Run it detached (`setsid nohup … > /tmp/fi.log`) so a dropped ssh session does
 not take the install with it.
+
+### Upgrading in place
+
+An upgrade **is** headless: `bash quick-install.sh --beta` on a provisioned host
+needs no TTY.
+
+**Fetch `quick-install.sh` by commit SHA, not by branch.**
+`raw.githubusercontent.com` serves a cached copy of a branch for minutes, so a
+fetch of `.../beta/quick-install.sh` right after a push silently runs the
+previous revision — which is exactly how an afternoon went before this was
+understood.
 
 ### test-env
 
@@ -296,10 +345,14 @@ Windows OpenSSH only (`C:\Windows\System32\OpenSSH\ssh.exe`); git bash's ssh
 cannot resolve the name. Keep remote commands straight-line — PowerShell mangles
 `for`/`if` blocks and `$(...)` passed through `ssh`.
 
-It currently holds a **fresh install of `0.0.62-beta.9`**, not the old
-three-process deployment. Pre-wipe backup: `/root/5gpn-pre-freshinstall-20260803T011558Z`
-(`etc-5gpn.tgz` plus every unit file). `get_public_ip` returns `10.0.1.20` there,
-so a default install reproduces the deployment that was wiped.
+It currently holds `0.0.62-beta.15`, upgraded in place from the beta.9 fresh
+install. Backups: `/root/5gpn-pre-freshinstall-20260803T011558Z` and
+`/root/5gpn-pre-beta10-*`. `get_public_ip` returns `10.0.1.20` there.
+
+**Read the journal, not just the installer's exit code.** The interception
+engine failing to load is a `[GPN]`-tagged warning in `journalctl -u mihomo`,
+and the install reports success regardless — that is how a build that refused
+every deployed intercept.json looked like a clean upgrade.
 
 To wipe it back to clean, in one straight line: disable the units, remove the
 unit files, `daemon-reload`, `reset-failed`, `rm -rf /etc/5gpn /opt/5gpn
@@ -309,5 +362,5 @@ unit files, `daemon-reload`, `reset-failed`, `rm -rf /etc/5gpn /opt/5gpn
 attempt missed the user `gpn-intercept` and the groups `5gpn-overlay-ctl` and
 `5gpn-overlay-gen`.
 
-The acceptance suites are not in the installer bundle; `scp` them from
-`tests/` and strip CRLF.
+The acceptance suites are not in the installer bundle; `scp` them from `tests/`
+and strip CRLF. All four are on the host at `/root/acceptance-monolith*.sh`.
