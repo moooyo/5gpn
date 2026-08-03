@@ -161,17 +161,28 @@ IOS_OWNERSHIP_MARKER=".5gpn-ios-owned"
 IOS_OWNERSHIP_VALUE="5gpn-ios"
 TEMP_OWNERSHIP_MARKER=".5gpn-temp-owned"
 TEMP_OWNERSHIP_VALUE="5gpn-temp"
-# Upstream v1.19.28 plus the runtime overlay, built from moooyo/mihomo's
-# 5gpn-ext branch. Upstream does not implement the RUNTIME-OVERLAY anchors, and
-# this release has no second arrangement to fall back to, so the staging probe
-# refuses an upstream core outright rather than installing one that cannot
-# carry interception.
+# Upstream v1.19.28 plus the 5gpn monolith, built from moooyo/mihomo's
+# feat/5gpn-monolith branch. This core does not merely add interception, it *is*
+# the DNS engine, the interception engine, the data plane and the control API in
+# one process, so an upstream binary here does not degrade the install -- it
+# leaves the gateway with no resolver, no capture and no control API at all. The
+# staging probe checks the version token exactly rather than accepting a prefix.
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-overlay.6"
-MIHOMO_SHA256="13fbc6789895bb201c7c8607ec423b03b192082f9b6bb0a20bf9a15593973479"
+MIHOMO_VERSION="v1.19.28-monolith.1"
+MIHOMO_SHA256="5b3c5a1a78ea62746404ed0ad860c45c1593caaaa3b22b049ece5ae1210396f6"
+# Every `mihomo -t` in this script must run with the same SAFE_PATHS the unit
+# grants, because the seed names paths outside its own home directory -- the
+# certificates it serves and the UI bundle it publishes. Without this the core
+# refuses the config it will happily run once systemd starts it, so a fresh
+# install fails its own preflight probe on a config that is correct.
+#
+# This value duplicates Environment=SAFE_PATHS in etc/systemd/mihomo.service.
+# The duplication is checked: test_mihomo_policy asserts the two agree, because
+# a drift here fails at install time on a config the running service accepts.
+MIHOMO_SAFE_PATHS="/etc/5gpn/cert/zash:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui"
 ZASH_REPO="moooyo/zashboard"
-ZASH_VERSION="v3.16.0-overlay.1"         # our fork's dist.zip, built from 5gpn-ext
-ZASH_SHA256="b5d003f55f9424eaaa78f901a5b37912dbd9ac07cb37e17c527b209c52947bf4"
+ZASH_VERSION="v3.16.0-monolith.1"        # our fork's dist.zip, built from feat/5gpn-console
+ZASH_SHA256="3b4515bae9f967b094e7642823f25d653d415bf0d068c062dafbfe58e491db70"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
@@ -2459,34 +2470,33 @@ stage_artifacts() {
         listeners="$(render_mihomo_listeners "$MIHOMO_LISTEN_IPS" "$CONSOLE_DOMAIN")"
         install -d -m 0700 "$ARTIFACT_STAGE/mihomo-home"
         : > "$ARTIFACT_STAGE/mihomo-home/whitelist.txt"
-        # The anchors are the only arrangement this release seeds, so the probe
-        # decides whether the release can run at all rather than which form to
-        # write. Validating with `mihomo -t` against this exact binary is the
-        # test, not a version comparison: a core that cannot parse
-        # RUNTIME-OVERLAY rejects the config outright, and seeding one it
-        # rejects would leave the gateway unable to start.
+        # Validating with `mihomo -t` against this exact binary is the test, not
+        # a version comparison: the seed names paths outside its own home -- the
+        # certificates it serves and the UI bundle at external-ui -- and a core
+        # that will not accept them rejects the config outright, which would
+        # leave the gateway unable to start. SAFE_PATHS is the unit's, because
+        # the question is whether the core accepts this config as the service
+        # will run it, not as a bare -t would see it.
         #
-        # Placeholder credentials and identities: this candidate is fed to
-        # `mihomo -t` and discarded. Nothing in it reaches the live config,
-        # which render_mihomo_config writes later once the accounts are real.
+        # Placeholder secret: this candidate is fed to `mihomo -t` and
+        # discarded. Nothing in it reaches the live config, which
+        # render_mihomo_config writes later once the accounts are real.
         SEED_GATEWAY_IP="$GATEWAY_IP"
         SEED_CONSOLE_DOMAIN="$CONSOLE_DOMAIN"
         SEED_ZASH_DOMAIN="$ZASH_DOMAIN"
         SEED_CONTROLLER_SECRET="preflight-only-secret"
-        SEED_INTERCEPT_INBOUND_USERNAME="preflight-inbound-user"
-        SEED_INTERCEPT_INBOUND_PASSWORD="preflight-inbound-password-123456"
-        SEED_INTERCEPT_UPSTREAM_USERNAME="preflight-upstream-user"
-        SEED_INTERCEPT_UPSTREAM_PASSWORD="preflight-upstream-password-123456"
         render_mihomo_seed "${SCRIPT_DIR}/etc/mihomo/config.yaml.tmpl" \
             probe "$listeners" > "$seed" || return 1
-        if ! "$ARTIFACT_STAGE/mihomo" -t -f "$seed" -d "$ARTIFACT_STAGE/mihomo-home"; then
-            err "Staged mihomo does not accept the runtime-overlay seed."
-            err "This release publishes interception routing only through the overlay, so it requires a core that implements it. Live deployment was not touched."
+        if ! SAFE_PATHS="$MIHOMO_SAFE_PATHS" \
+             "$ARTIFACT_STAGE/mihomo" -t -f "$seed" -d "$ARTIFACT_STAGE/mihomo-home"; then
+            err "Staged mihomo does not accept the seed this release publishes."
+            err "The core and the seed ship together, so this is a packaging fault rather than a host one. Live deployment was not touched."
             return 1
         fi
-        ok "Staged mihomo implements the runtime overlay; seeding the anchored config."
+        ok "Staged mihomo accepts the seed; writing it."
     else
-        "$ARTIFACT_STAGE/mihomo" -t -f "$MIHOMO_DIR/config.yaml" -d "$MIHOMO_DIR" \
+        SAFE_PATHS="$MIHOMO_SAFE_PATHS" \
+            "$ARTIFACT_STAGE/mihomo" -t -f "$MIHOMO_DIR/config.yaml" -d "$MIHOMO_DIR" \
             || { err "Existing operator-owned mihomo config is invalid; live deployment was not touched."; return 1; }
     fi
     ok "All release artifacts staged and verified."
@@ -3008,7 +3018,7 @@ render_mihomo_config() {
     seed_mihomo_whitelist || return 1
 
     if [[ -f "$config" && "$mode" != "--reset" ]]; then
-        if ! "$MIHOMO_BIN" -t -f "$config" -d "$MIHOMO_DIR"; then
+        if ! SAFE_PATHS="$MIHOMO_SAFE_PATHS" "$MIHOMO_BIN" -t -f "$config" -d "$MIHOMO_DIR"; then
             err "Existing operator-owned mihomo config is invalid; it was NOT overwritten: $config"
             return 1
         fi
@@ -3063,7 +3073,7 @@ render_mihomo_config() {
         && chmod 0640 "$candidate" \
         || { rm -f -- "$candidate"; err "Could not secure the rendered mihomo config candidate."; return 1; }
 
-    if ! "$MIHOMO_BIN" -t -f "$candidate" -d "$MIHOMO_DIR"; then
+    if ! SAFE_PATHS="$MIHOMO_SAFE_PATHS" "$MIHOMO_BIN" -t -f "$candidate" -d "$MIHOMO_DIR"; then
         rm -f -- "$candidate"
         err "mihomo candidate validation failed; live config was not changed."
         return 1

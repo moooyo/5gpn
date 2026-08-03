@@ -63,8 +63,10 @@ check() {
 
 echo "Verifying pinned artifacts against their published releases."
 
-check "5gpn-intercept ${SIDECAR_VERSION}" "$SIDECAR_SHA256" \
-    "https://github.com/${SIDECAR_REPO}/releases/download/${SIDECAR_VERSION}/5gpn-intercept-linux-amd64"
+# Two artifacts, because there are two processes' worth of code left to fetch and
+# they both run inside one. The 5gpn-intercept sidecar that used to be checked
+# here is not unpinned, it is gone: the monolith absorbed it, so there is no
+# third binary to bind.
 
 check "mihomo ${MIHOMO_VERSION}" "$MIHOMO_SHA256" \
     "https://github.com/${MIHOMO_REPO}/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz"

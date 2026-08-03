@@ -121,6 +121,10 @@ if grep -Eq '__[A-Z0-9_]+__' "$RUNTIME/config.yaml"; then
     exit 1
 fi
 
+# The unit's SAFE_PATHS, taken from install.sh rather than restated, because the
+# seed names the certificates and the UI bundle outside its own home directory.
+# Without them the core refuses a config it will run.
+export SAFE_PATHS="$MIHOMO_SAFE_PATHS"
 "$PINNED_MIHOMO_BIN" -t -f "$RUNTIME/config.yaml" -d "$RUNTIME"
 "$PINNED_MIHOMO_BIN" -f "$RUNTIME/config.yaml" -d "$RUNTIME" \
     >"$RUNTIME/mihomo.log" 2>&1 &

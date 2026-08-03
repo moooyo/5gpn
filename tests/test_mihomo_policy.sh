@@ -197,7 +197,7 @@ nocheck install.sh 'xray\.service|/usr/local/bin/xray' 'no old Xray teardown rem
 
 # Task A4: zashboard dist acquisition (pinned dist.zip download + wiring)
 check install.sh '^install_ui\(\)' 'install_ui function exists'
-check install.sh 'ZASH_VERSION="v3\.16\.0-overlay\.1"' 'ZASH_VERSION fixed pin'
+check install.sh 'ZASH_VERSION="v3\.16\.0-monolith\.1"' 'ZASH_VERSION fixed pin'
 check install.sh 'ZASH_REPO="moooyo/zashboard"' 'zashboard comes from our fork'
 check install.sh '\$\{ZASH_REPO\}/releases/download' 'zashboard download URL is parameterised by ZASH_REPO'
 nocheck install.sh 'Zephyruso/zashboard/releases/download' 'no hardcoded upstream zashboard download remains'
@@ -213,6 +213,24 @@ fi
 check install.sh 'claim_ui_dir\(\)' 'UI ownership marker claim exists'
 check install.sh 'remove_ui_dir\(\)' 'UI marker-gated removal exists'
 nocheck install.sh 'rm -rf "\$UI_DIR"' 'no raw recursive deletion of UI_DIR'
+# Every `mihomo -t` the installer runs must see the SAFE_PATHS the unit grants.
+# The seed names paths outside its own home -- the certificates and the UI
+# bundle -- so a -t without them rejects a config the running service accepts,
+# and a fresh install fails its own preflight on a correct config.
+installer_safe="$(sed -n 's/^MIHOMO_SAFE_PATHS="\(.*\)"$/\1/p' "$root/install.sh")"
+unit_safe="$(sed -n 's/^Environment=SAFE_PATHS=\(.*\)$/\1/p' "$root/etc/systemd/mihomo.service" | tr -d '\r')"
+if [[ -n "$installer_safe" && "$installer_safe" == "$unit_safe" ]]; then
+    echo "ok: installer and unit agree on SAFE_PATHS"
+else
+    echo "FAIL: SAFE_PATHS drifted (installer='$installer_safe' unit='$unit_safe')"; FAIL=1
+fi
+untested_t="$(grep -c '^[^#]*[^_]-t -f' "$root/install.sh" || true)"
+guarded_t="$(grep -c 'SAFE_PATHS="\$MIHOMO_SAFE_PATHS"' "$root/install.sh" || true)"
+if [[ "$untested_t" -gt 0 && "$guarded_t" -ge "$untested_t" ]]; then
+    echo "ok: every mihomo -t carries the unit SAFE_PATHS"
+else
+    echo "FAIL: a mihomo -t runs without SAFE_PATHS ($guarded_t guarded of $untested_t)"; FAIL=1
+fi
 # The retired console origin must not come back with its own directory or listener.
 nocheck install.sh 'install_web\(\)|DNS_WEB_DIR=|DNS_ZASH_LISTEN=' 'no second origin is published'
 # The zashboard backend-seeding deep-link is C3 frontend scope, NOT the

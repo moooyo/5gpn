@@ -66,8 +66,8 @@ jobs:
       # one checks a configuration nobody will run. Keep this pin and its digest
       # in lockstep with MIHOMO_VERSION/MIHOMO_SHA256 in install.sh.
       MIHOMO_REPO: moooyo/mihomo
-      MIHOMO_VERSION: v1.19.28-overlay.6
-      MIHOMO_SHA256: 13fbc6789895bb201c7c8607ec423b03b192082f9b6bb0a20bf9a15593973479
+      MIHOMO_VERSION: v1.19.28-monolith.1
+      MIHOMO_SHA256: 5b3c5a1a78ea62746404ed0ad860c45c1593caaaa3b22b049ece5ae1210396f6
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Download pinned mihomo
@@ -78,7 +78,7 @@ jobs:
           echo "${MIHOMO_SHA256}  /tmp/mihomo.gz" | sha256sum -c -
           gunzip /tmp/mihomo.gz
           chmod 0755 /tmp/mihomo
-      - name: Render and validate ingress and interception module configs
+      - name: Render and validate the seed the installer publishes
         run: |
           set -euo pipefail
           runtime="$(mktemp -d)"
@@ -92,36 +92,11 @@ jobs:
               print "  - {name: gateway5060, type: tunnel, listen: 203.0.113.10, port: 5060, network: [tcp, udp], target: console.example.test:5060}"
               next
             }
-            # The anchors are literal in the template. Only the runtime block is
-            # substituted, and it must be: an anchor with no block behind it is
-            # a config mihomo cannot parse, which is the pairing the staging
-            # probe in install.sh exists to prove against the shipped core.
-            # Probe identities, exactly as render_overlay_runtime_block emits.
-            # No apostrophes in this comment: it sits inside the single-quoted
-            # awk program above, and one would close it.
-            $0 == "__OVERLAY_RUNTIME_BLOCK__" {
-              print ""
-              print "runtime-overlay:"
-              print "  owner: 5gpn"
-              print "  control-socket: /run/mihomo/overlay-control.sock"
-              print "  generation-socket: /run/mihomo/overlay-generation.sock"
-              print "  control-peer-uid: 65534"
-              print "  control-peer-gid: 65534"
-              print "  control-socket-gid: 65534"
-              print "  generation-peer-uid: 65534"
-              print "  generation-peer-gid: 65534"
-              print "  generation-socket-gid: 65534"
-              next
-            }
             {
               gsub(/__GATEWAY_IP__/, "10.0.0.1")
               gsub(/__CONSOLE_DOMAIN__/, "console.example.test")
               gsub(/__ZASH_DOMAIN__/, "zash.example.test")
               gsub(/__CONTROLLER_SECRET__/, "ci-controller-secret")
-              gsub(/__INTERCEPT_INBOUND_USERNAME__/, "ci-module-inbound-user")
-              gsub(/__INTERCEPT_INBOUND_PASSWORD__/, "ci-module-inbound-password-123456")
-              gsub(/__INTERCEPT_UPSTREAM_USERNAME__/, "ci-module-upstream-user")
-              gsub(/__INTERCEPT_UPSTREAM_PASSWORD__/, "ci-module-upstream-password-123456")
               print
             }
           ' etc/mihomo/config.yaml.tmpl > "$runtime/config.yaml"
@@ -130,6 +105,11 @@ jobs:
             echo "unresolved mihomo template placeholder" >&2
             exit 1
           fi
+          # The unit's SAFE_PATHS, because the question is whether the core
+          # accepts this config as the service will run it. The seed names the
+          # certificates it serves and the UI bundle at external-ui, all outside
+          # its own home, so a bare -t rejects a config that runs fine.
+          export SAFE_PATHS=/etc/5gpn/cert/zash:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui
           /tmp/mihomo -t -f "$runtime/config.yaml" -d "$runtime"
           /tmp/mihomo -t -f tests/fixtures/stable-0.0.13/mihomo-config.yaml -d "$runtime"
           grep -Fq 'name: gateway5060' "$runtime/config.yaml"
@@ -137,9 +117,14 @@ jobs:
           grep -Fq 'QUIC: { ports: [443, 5060] }' "$runtime/config.yaml"
           grep -Fq 'AND,((DOMAIN,console.example.test),(DST-PORT,5060)),REJECT' "$runtime/config.yaml"
           grep -Fq 'AND,((DOMAIN,zash.example.test),(DST-PORT,5060)),REJECT' "$runtime/config.yaml"
-          grep -Fq 'name: intercept-egress' "$runtime/config.yaml"
-          grep -Fq 'name: MODULE-INTERCEPT' "$runtime/config.yaml"
-          grep -Fq 'IN-NAME,intercept-egress,REJECT' "$runtime/config.yaml"
+          # The UI is served by this process from the path the unit grants, and
+          # the seed has to say so: without external-ui the controller serves no
+          # bundle, and with a path the unit does not list the service cannot
+          # start at all.
+          grep -Fq 'external-ui: /opt/5gpn/ui' "$runtime/config.yaml"
+          # The guard standing in for unwired UDP capture. Removing it does not
+          # enable QUIC capture, it makes gateway QUIC bypass interception.
+          grep -Fq 'AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' "$runtime/config.yaml"
           sed \
             -e '/name: gateway5060/d' \
             -e 's/, 5060//g' \
@@ -147,11 +132,5 @@ jobs:
             "$runtime/config.yaml" > "$runtime/config-speedtest-5060-disabled.yaml"
           ! grep -Fq '5060' "$runtime/config-speedtest-5060-disabled.yaml"
           /tmp/mihomo -t -f "$runtime/config-speedtest-5060-disabled.yaml" -d "$runtime"
-      - name: Validate the anchored seed the installer actually produces
-        run: |
-          set -euo pipefail
-          # On a machine with neither the service accounts nor the socket
-          # groups — which is what a fresh install is.
-          bash test/overlay/verify-seed-render.sh /tmp/mihomo
       - name: Exercise sniff-cache isolation
         run: bash tests/mihomo-sniff-cache-regression.sh /tmp/mihomo
