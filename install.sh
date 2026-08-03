@@ -168,8 +168,8 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # leaves the gateway with no resolver, no capture and no control API at all. The
 # staging probe checks the version token exactly rather than accepting a prefix.
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-monolith.5"
-MIHOMO_SHA256="d039de11addbb6861965a551e0a8885cc15de6b9f9c9b6e3c5af56d0fa29596c"
+MIHOMO_VERSION="v1.19.28-monolith.6"
+MIHOMO_SHA256="6b6c99ce34e811e2593dfb5c52b894ad972804cef655113b528862b69b3fb74e"
 # Every `mihomo -t` in this script must run with the same SAFE_PATHS the unit
 # grants, because the seed names paths outside its own home directory -- the
 # certificates it serves and the UI bundle it publishes. Without this the core
