@@ -120,5 +120,62 @@ QI="$ROOT/quick-install.sh"
 grep -Fq 'command -v gum' "$QI" || fail "quick-install.sh is not gum-aware (use gum if already on PATH)"
 grep -Fq '\033[0;31m'     "$QI" || fail "quick-install.sh lost its ANSI fallback"
 
+# --- the management TUI: every offered label does something --------------------
+#
+# The flat menu carried 「重载规则」 and 「配置 Telegram Bot」 in its label list
+# with no branch in its case, for the whole of the monolith work. Selecting
+# either silently redrew the menu. Nothing caught it because a label and its
+# dispatch were two lists nobody compared.
+#
+# They are one mapping now, and this compares them.
+menu_fn="$(sed -n '/^manage_menu()/,/^}/p' "$INSTALL")"
+action_fn="$(sed -n '/^manage_action()/,/^}/p' "$INSTALL")"
+[[ -n "$menu_fn" && -n "$action_fn" ]] || fail "manage_menu/manage_action not found"
+
+while IFS= read -r label; do
+    [[ -n "$label" ]] || continue
+    printf '%s' "$action_fn" | grep -Fq "\"$label\")" \
+        || fail "the TUI offers \"$label\" with no branch in manage_action"
+done <<< "$(printf '%s' "$menu_fn" | awk '
+    # Only the arguments of a manage_screen call are labels. Every other quoted
+    # string in this function is prose -- a header, an error, a hint -- and
+    # matching those would make this assertion fail on its own documentation.
+    /manage_screen "/ { incall = 1 }
+    incall {
+        line = $0
+        while (match(line, /"[^"]+"/)) {
+            label = substr(line, RSTART + 1, RLENGTH - 2)
+            line = substr(line, RSTART + RLENGTH)
+            # A screen title is CJK only; a label is "中文 English". The
+            # renderer is a bare word and is never quoted.
+            if (label ~ /[A-Za-z]/ && label !~ /^(概览|服务|证书|网络|危险操作)$/) print label
+        }
+        if (line !~ /\\$/) incall = 0
+    }
+' | sed -E 's/ (Back)$//' | sort -u | grep -v '^返回$')"
+
+# Each screen renders its own facts before offering its actions: a decision is
+# made with the state it acts on already on screen.
+for screen in manage_screen_overview manage_screen_services \
+              manage_screen_certificates manage_screen_network; do
+    grep -Eq "^${screen}\(\)" "$INSTALL" || fail "$screen is missing"
+done
+screen_fn="$(sed -n '/^manage_screen()/,/^}/p' "$INSTALL")"
+printf '%s' "$screen_fn" | grep -Fq '| card' \
+    || fail "manage_screen does not frame its status through card()"
+printf '%s' "$screen_fn" | grep -Fq 'ask_choice' \
+    || fail "manage_screen does not use the gum-or-read chooser"
+
+# Status must never assert a value it could not read. Without jq every field
+# falls back to its zero value, which reads as a confident "off" for a switch
+# that may be on.
+overview_fn="$(sed -n '/^manage_screen_overview()/,/^}/p' "$INSTALL")"
+printf '%s' "$overview_fn" | grep -Fq 'command -v jq' \
+    || fail "the overview screen reports interception state without checking jq is present"
+
+# The menu is still interactive-only, and still names the subcommands.
+printf '%s' "$menu_fn" | grep -Fq '[[ ! -t 0 ]]' \
+    || fail "manage_menu no longer refuses a non-TTY"
+
 [ $rc -eq 0 ] && echo "tui policy: PASS"
 exit $rc

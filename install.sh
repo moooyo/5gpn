@@ -3431,8 +3431,243 @@ load_persisted_domains() {
     derive_domains "$base"
 }
 
-# manage_menu is the interactive management TUI shown by `5gpn`. gum when
-# available on a TTY; a numbered read-menu otherwise. Loops until Quit.
+# ----------------------------------------------------------------------------
+# The management TUI shown by bare `5gpn`.
+#
+# Five screens rather than one list, because the flat menu had grown into
+# thirteen unrelated verbs with no state on screen: an operator restarting a
+# service could not see whether it was running, and one about to reset the
+# mihomo config could not see what mode its certificate was in. Each screen now
+# renders the facts its own actions act on, immediately above them.
+#
+# Navigation is two levels — pick a screen, act, go back — rather than tabs with
+# left/right keys. Gum's `choose` is a single-select list and exposes no key
+# handler, so a tab strip would have to be a hand-rolled raw-mode reader with
+# its own terminal restore path on every signal. That is a lot of machinery for
+# a menu, and it would have no plain-echo fallback at all, which is the one
+# property every surface here has to keep.
+#
+# Everything below degrades: ask_choice falls back to a numbered read, card()
+# to plain text. The screens are the same either way.
+# ----------------------------------------------------------------------------
+
+# gpn_json reads one field out of a control-API response.
+#
+# jq is installed by install_deps, so it is present on any host that has an
+# installation to manage -- but a missing one degrades to the fallback rather
+# than failing the screen, because a status display that cannot render is worse
+# than one that says "?".
+gpn_json() {
+    local json="$1" filter="$2" fallback="${3:-?}" out=""
+    command -v jq >/dev/null 2>&1 || { printf '%s' "$fallback"; return 0; }
+    out="$(printf '%s' "$json" | jq -r "$filter" 2>/dev/null || true)"
+    [[ -n "$out" && "$out" != "null" ]] && printf '%s' "$out" || printf '%s' "$fallback"
+}
+
+# One word, always.
+#
+# `systemctl is-active` prints its verdict *and* exits non-zero for anything not
+# running, so the obvious `|| echo unknown` appends a second line rather than
+# replacing the first -- and the caller's printf then splits across rows. Taking
+# the first line is what makes this a value rather than a stream.
+manage_unit_state() {
+    local state
+    state="$(systemctl is-active "$1" 2>/dev/null | head -1)"
+    printf '%s' "${state:-unknown}"
+}
+
+# Same shape: `grep -c` prints 0 and exits 1 when it counts nothing, so a
+# `|| echo 0` fallback prints a second zero.
+manage_count_lines() {
+    local n
+    [[ -f "$1" ]] || { printf '%s' "-"; return 0; }
+    n="$(grep -cvE '^[[:space:]]*(#|$)' "$1" 2>/dev/null | head -1)"
+    printf '%s' "${n:-0}"
+}
+
+manage_mark() { [[ "$1" == active ]] && printf '✅' || printf '❌'; }
+
+# --- screen: overview ---------------------------------------------------------
+manage_screen_overview() {
+    local snap ver unit master http3 total on cert_loaded cert_cov cert_missing cert_exp
+    ver="$("$MIHOMO_BIN" -v 2>/dev/null | head -1 | awk '{print $3}' || true)"
+    unit="$(manage_unit_state mihomo)"
+    snap="$(gpn_interception_snapshot 2>/dev/null || true)"
+
+    echo "5gpn 概览"
+    echo ""
+    printf '  %s 核心    %s (%s)\n' "$(manage_mark "$unit")" "${ver:-未知}" "$unit"
+    printf '  %s DoT     %s\n' "$(manage_mark "$unit")" "$(cfg_get DNS_LISTEN_DOT || echo :853)"
+
+    if [[ -z "$snap" ]]; then
+        printf '  ❔ 拦截    控制 API 不可达\n'
+    elif ! command -v jq >/dev/null 2>&1; then
+        # Never guess. Without jq every field below would fall back to its zero
+        # value, which reads as a confident "off" for a switch that may be on --
+        # and an operator acting on that is worse off than one told nothing.
+        printf '  ❔ 拦截    控制 API 可达,但本机缺少 jq,无法解析状态\n'
+    else
+        master="$(gpn_json "$snap" '.snapshot.enabled' false)"
+        http3="$(gpn_json "$snap" '.snapshot.http3' false)"
+        total="$(gpn_json "$snap" '.snapshot.modules | length' 0)"
+        on="$(gpn_json "$snap" '[.snapshot.modules[]? | select(.enabled)] | length' 0)"
+        # "已安装" and "正在捕获" are two numbers, not one. A disabled extension
+        # still declares hosts; reporting the declared set as the live one tells
+        # the operator traffic is being intercepted when nothing is intercepting.
+        printf '  %s 拦截    %s · %s/%s 启用%s\n' \
+            "$([[ "$master" == true ]] && printf '✅' || printf '⏸️ ')" \
+            "$([[ "$master" == true ]] && echo on || echo off)" "$on" "$total" \
+            "$([[ "$http3" == true ]] && echo ' · QUIC 捕获' || echo '')"
+
+        cert_loaded="$(gpn_json "$snap" '.snapshot.certificate.loaded' false)"
+        cert_cov="$(gpn_json "$snap" '.snapshot.certificate.covers_all_capture_hosts' false)"
+        if [[ "$cert_loaded" != true ]]; then
+            printf '  ⏸️  拦截证书 尚未签发（没有扩展请求过捕获主机）\n'
+        elif [[ "$cert_cov" != true ]]; then
+            # The one failure that shows up as a client-side trust error with
+            # nothing in the gateway's own logs. It has to be the loudest line.
+            cert_missing="$(gpn_json "$snap" '[.snapshot.certificate.missing_hosts[]?] | join(", ")' '')"
+            printf '  ❌ 拦截证书 未覆盖 %s\n' "$cert_missing"
+        else
+            cert_exp="$(gpn_json "$snap" '.snapshot.certificate.not_after' '')"
+            if [[ -n "$cert_exp" && "$cert_exp" != "?" ]]; then
+                printf '  ✅ 拦截证书 覆盖全部 · %s 到期\n' "$(date -d "@$cert_exp" '+%Y-%m-%d' 2>/dev/null || echo "$cert_exp")"
+            else
+                printf '  ✅ 拦截证书 覆盖全部\n'
+            fi
+        fi
+    fi
+
+    echo ""
+    printf '  控制台  https://%s/\n' "${ZASH_DOMAIN:-$(cfg_get DNS_BASE_DOMAIN)}"
+    printf '  DoT     tls://%s:853\n' "${DOT_DOMAIN:-?}"
+    printf '  公网 IP %s\n' "$(cfg_get DNS_PUBLIC_IP || echo N/A)"
+    echo ""
+    # Where the runtime surfaces went. Both of the menu entries this screen
+    # replaced pointed at helpers deleted with the three-process layout, and an
+    # operator looking for them needs somewhere to be sent.
+    printf '  扩展、DNS 策略、Telegram 机器人都在控制台里配置。\n'
+}
+
+# --- screen: services ---------------------------------------------------------
+manage_screen_services() {
+    local unit
+    echo "服务"
+    echo ""
+    for unit in mihomo 5gpn-intercept-cert.path 5gpn-intercept-cert.timer 5gpn-certbot-renew.timer; do
+        printf '  %s %-32s %s\n' \
+            "$(manage_mark "$(manage_unit_state "$unit")")" "$unit" "$(manage_unit_state "$unit")"
+    done
+    echo ""
+    printf '  一个进程拥有解析、转发、控制台、机器人和拦截,所以只有一个服务单元。\n'
+    printf '  两个 root oneshot 只因为它们持有网络进程不该碰的密钥材料而存在。\n'
+}
+
+# --- screen: certificates -----------------------------------------------------
+manage_screen_certificates() {
+    local mode role dir
+    mode="$(cfg_get CERT_MODE || echo unknown)"
+    echo "证书"
+    echo ""
+    printf '  签发模式  %s\n' "$mode"
+    printf '  基础域名  %s\n' "$(cfg_get DNS_BASE_DOMAIN || echo '?')"
+    echo ""
+    for role in dot zash web; do
+        dir="${CONF_DIR}/cert/${role}/current"
+        if [[ -f "$dir/fullchain.pem" ]]; then
+            printf '  ✅ %-5s %s 到期\n' "$role" \
+                "$(openssl x509 -enddate -noout -in "$dir/fullchain.pem" 2>/dev/null | sed 's/notAfter=//' || echo '?')"
+        else
+            printf '  ⏸️  %-5s 未部署\n' "$role"
+        fi
+    done
+    echo ""
+    if [[ -f "${CONF_DIR}/intercept-ca/root.crt" ]]; then
+        printf '  ✅ 拦截 CA 已建立\n'
+    else
+        printf '  ❌ 拦截 CA 缺失\n'
+    fi
+    # The signing key never enters the engine's address space; the leaf's SAN set
+    # is the enforcement of the capture policy, and it only bounds anything
+    # because the process holding the leaf cannot sign a new one.
+    printf '  叶证书由 root oneshot 按需签发,签名密钥从不进入引擎地址空间。\n'
+}
+
+# --- screen: network ----------------------------------------------------------
+manage_screen_network() {
+    local wl lines age now mtime
+    echo "网络"
+    echo ""
+    printf '  公网 IPv4     %s\n' "$(cfg_get DNS_PUBLIC_IP || echo N/A)"
+    printf '  网关 IPv4     %s\n' "$(cfg_get DNS_GATEWAY_IP || echo N/A)"
+    printf '  mihomo 监听   %s\n' "$(cfg_get DNS_MIHOMO_LISTEN_IPS || echo N/A)"
+    echo ""
+    wl="${MIHOMO_DIR}/whitelist.txt"
+    if [[ -f "$wl" ]]; then
+        printf '  zashboard 白名单  %s 条\n' "$(manage_count_lines "$wl")"
+    else
+        printf '  zashboard 白名单  缺失\n'
+    fi
+    if [[ -f "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" ]]; then
+        lines="$(manage_count_lines "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt")"
+        now=$(date +%s); mtime=$(stat -c %Y "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" 2>/dev/null || echo "$now")
+        age="$(( (now - mtime) / 3600 ))h"
+        printf '  china_ip_list     %s 行（age %s）\n' "$lines" "$age"
+    else
+        printf '  china_ip_list     缺失（订阅拉取前未播种）\n'
+    fi
+}
+
+# manage_screen runs one screen: render its facts, offer its actions, repeat
+# until the operator goes back. The status is re-rendered after every action, so
+# the effect of what they just did is on screen before the next choice.
+manage_screen() {
+    local title="$1" render="$2"; shift 2
+    local -a labels=("$@")
+    local choice
+    while true; do
+        printf '\n'
+        "$render" | card
+        choice="$(ask_choice "$title" "${labels[@]}" "返回 Back" || true)"
+        case "$choice" in
+            "返回 Back"|"") return 0 ;;
+            *) manage_action "$choice" || true ;;
+        esac
+    done
+}
+
+# Every action the TUI can take, in one place. A screen names labels; this maps
+# them. Keeping the mapping single means a label with no branch is a visible
+# gap here rather than a menu entry that silently does nothing -- which is what
+# 「重载规则」 and 「配置 Telegram Bot」 were for the whole of the monolith work.
+manage_action() {
+    case "$1" in
+        "重启服务 Restart services")
+            run_management_with_install_lock restart_services ;;
+        "查看核心日志 Core logs")
+            journalctl -u mihomo -n 80 --no-pager 2>/dev/null | card || warn "journalctl unavailable" ;;
+        "编辑安装配置 Configure installation")
+            full_install configure ;;
+        "重新生成 iOS 描述文件 Regenerate iOS profile")
+            run_management_with_install_and_cert_lock regen_ios ;;
+        "设置 Cloudflare Token Set Cloudflare token")
+            run_management_with_install_and_cert_lock set_cf_token ;;
+        "添加 zashboard 白名单IP Add allowlist IP")
+            run_management_with_install_lock add_allow_ip ;;
+        "移除 zashboard 白名单IP Remove allowlist IP")
+            run_management_with_install_lock del_allow_ip ;;
+        "轮换控制台令牌 Rotate console token")
+            run_management_with_install_lock rotate_token ;;
+        "重置 mihomo 配置 Reset mihomo config")
+            if ask_yesno "确认备份并重置 operator-owned mihomo config?"; then
+                run_management_with_install_lock reset_mihomo_config
+            fi ;;
+        "卸载 Uninstall")
+            uninstall; return 1 ;;
+        *) warn "未实现的操作: $1" ;;
+    esac
+}
+
 manage_menu() {
     check_root
     run_management_with_install_lock install_gum
@@ -3442,44 +3677,37 @@ manage_menu() {
         echo "  5gpn status | 5gpn restart | 5gpn uninstall" >&2
         exit 1
     fi
-    local labels=(
-        "状态 Status"
-        "重启服务 Restart services"
-        "编辑安装配置 Configure installation"
-        "重载规则 Reload rules"
-        "添加 zashboard 白名单IP Add zashboard allowlist IP"
-        "移除 zashboard 白名单IP Remove zashboard allowlist IP"
-        "重新生成 iOS 描述文件 Regenerate iOS profile"
-        "轮换控制台令牌 Rotate console token"
-        "设置 Cloudflare Token Set Cloudflare token"
-        "重置 mihomo 配置 Reset mihomo config"
-        "配置 Telegram Bot"
-        "卸载 Uninstall"
-        "退出 Quit"
-    )
+    load_persisted_domains 2>/dev/null || true
+
+    local screen
     while true; do
-        local choice=""
-        if [[ "$_HAVE_GUM" == 1 ]]; then
-            choice="$(printf '%s\n' "${labels[@]}" | CI=1 gum choose --header '5gpn 管理 (↑/↓ 选择, Enter 确认)' \
-                --header.foreground "$UI_ACCENT" --cursor.foreground "$UI_ACCENT" || true)"
-        else
-            echo ""; echo "5gpn 管理菜单:"
-            local i=1; for l in "${labels[@]}"; do echo "  $i) $l"; i=$((i+1)); done
-            local n=""; read -r -p "选择编号: " n || true
-            [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 && "$n" -le ${#labels[@]} ]] && choice="${labels[$((n-1))]}"
-        fi
-        case "$choice" in
-            "状态 Status")                          show_status ;;
-            "重启服务 Restart services")            run_management_with_install_lock restart_services ;;
-            "编辑安装配置 Configure installation")  full_install configure ;;
-            "添加 zashboard 白名单IP Add zashboard allowlist IP")    run_management_with_install_lock add_allow_ip ;;
-            "移除 zashboard 白名单IP Remove zashboard allowlist IP") run_management_with_install_lock del_allow_ip ;;
-            "重新生成 iOS 描述文件 Regenerate iOS profile") run_management_with_install_and_cert_lock regen_ios ;;
-            "轮换控制台令牌 Rotate console token")   run_management_with_install_lock rotate_token ;;
-            "设置 Cloudflare Token Set Cloudflare token") run_management_with_install_and_cert_lock set_cf_token ;;
-            "重置 mihomo 配置 Reset mihomo config")
-                if ask_yesno "确认备份并重置 operator-owned mihomo config?"; then run_management_with_install_lock reset_mihomo_config; fi ;;
-            "卸载 Uninstall")                       uninstall; break ;;
+        screen="$(ask_choice "5gpn 管理" \
+            "概览 Overview" "服务 Services" "证书 Certificates" "网络 Network" \
+            "危险操作 Danger zone" "退出 Quit" || true)"
+        case "$screen" in
+            "概览 Overview")
+                manage_screen "概览" manage_screen_overview \
+                    "重启服务 Restart services" "编辑安装配置 Configure installation" ;;
+            "服务 Services")
+                manage_screen "服务" manage_screen_services \
+                    "重启服务 Restart services" "查看核心日志 Core logs" ;;
+            "证书 Certificates")
+                manage_screen "证书" manage_screen_certificates \
+                    "重新生成 iOS 描述文件 Regenerate iOS profile" \
+                    "设置 Cloudflare Token Set Cloudflare token" ;;
+            "网络 Network")
+                manage_screen "网络" manage_screen_network \
+                    "添加 zashboard 白名单IP Add allowlist IP" \
+                    "移除 zashboard 白名单IP Remove allowlist IP" \
+                    "编辑安装配置 Configure installation" ;;
+            "危险操作 Danger zone")
+                # Grouped because each one is irreversible or drops live
+                # sessions, and a list that mixed them with "show status" made
+                # the cursor pass over them on the way to something harmless.
+                manage_screen "危险操作" manage_screen_overview \
+                    "轮换控制台令牌 Rotate console token" \
+                    "重置 mihomo 配置 Reset mihomo config" \
+                    "卸载 Uninstall" || break ;;
             "退出 Quit"|"") break ;;
         esac
     done

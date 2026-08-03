@@ -294,12 +294,23 @@ printf '%s' "$pmr_fn" | grep -Fq 'local -a udp_ports=(443)' \
     || fail "probe_mihomo_ready must always require UDP :443"
 printf '%s' "$pmr_fn" | grep -Fq 'udp_ports+=(5060)' \
     || fail "probe_mihomo_ready must conditionally require default-module UDP :5060"
-# manage_menu must expose add/remove allowlist entries as menu ops.
+# The TUI must expose add/remove allowlist entries.
+#
+# Offered by a screen and dispatched by manage_action -- two functions since the
+# menu became multi-screen. Both halves are asserted here because either alone
+# is a no-op: a label with no branch does nothing, and a branch nothing offers
+# is unreachable. test_tui_policy holds the general coupling; this holds that
+# these two specific ops did not get dropped in the rewrite.
 mm_fn="$(sed -n '/^manage_menu()/,/^}/p' "$INSTALL")"
-printf '%s' "$mm_fn" | grep -Fq 'add_allow_ip' \
-    || fail "manage_menu does not wire an add-allowlist-IP entry"
-printf '%s' "$mm_fn" | grep -Fq 'del_allow_ip' \
-    || fail "manage_menu does not wire a remove-allowlist-IP entry"
+ma_fn="$(sed -n '/^manage_action()/,/^}/p' "$INSTALL")"
+printf '%s' "$mm_fn" | grep -Fq '添加 zashboard 白名单IP' \
+    || fail "the TUI does not offer an add-allowlist-IP entry"
+printf '%s' "$ma_fn" | grep -Fq 'add_allow_ip' \
+    || fail "manage_action does not dispatch an add-allowlist-IP entry"
+printf '%s' "$mm_fn" | grep -Fq '移除 zashboard 白名单IP' \
+    || fail "the TUI does not offer a remove-allowlist-IP entry"
+printf '%s' "$ma_fn" | grep -Fq 'del_allow_ip' \
+    || fail "manage_action does not dispatch a remove-allowlist-IP entry"
 
 # uninstall must remove the 5gpn launcher.
 grep -Fq '/usr/local/bin/5gpn ' "$INSTALL" || grep -Eq 'rm -f .*/usr/local/bin/5gpn( |$)' "$INSTALL" \
