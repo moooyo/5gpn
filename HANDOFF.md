@@ -11,7 +11,7 @@ Everything is pushed. `beta` is fast-forwarded to `feat/installer-tui`.
 | --- | --- | --- |
 | `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.7` |
 | `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.3` |
-| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.16` |
+| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.21` |
 
 Green: `go test -race ./gpn/...`, all 26 installer suites, and CI on every
 branch push. See [Reproducing the checks](#reproducing-the-checks).
@@ -20,7 +20,7 @@ branch push. See [Reproducing the checks](#reproducing-the-checks).
 
 ## 0. Acceptance — green
 
-`0.0.62-beta.16` is deployed on `test-env`. Acceptance there:
+`0.0.62-beta.21` is deployed on `test-env`. Acceptance there:
 
 | Suite | Result |
 | --- | --- |
@@ -92,9 +92,68 @@ the heredoc body and refuses backticks and `$( )` outright.
 
 **What this suggests for the next round, and it is the top item.** There is
 still no second-install acceptance. Every suite runs against a gateway in one
-state, and five of six faults lived in the transition between two. A suite that
-installs, upgrades, then asserts would have caught all five — and it is the only
-thing on this list that would have caught them *before* a human noticed.
+state, and five of six faults lived in the transition between two — nine of ten
+once the panel move below is counted, with one of them a repeat of the fault
+directly above it. A suite that installs, upgrades, then asserts would have
+caught all nine, and it is the only thing on this list that would have caught
+them *before* a human noticed. Nothing else on this page has that record.
+
+---
+
+## The panel got a domain, and the rule held four more times
+
+The panel had no reachable address at all. The controller sat on loopback
+`:9090` behind an SSH tunnel; `zash.<base>` was in the hosts block, in five
+reject rules, in the one allow rule carrying the source allowlist, and in the
+controller's certificate path — and nothing ever listened for it. The panel is
+`https://console.<base>/ui/` now, on the one controller, behind the source
+allowlist. `zash.<base>` is deleted rather than aliased: an alias would be a
+second way into the management plane with no second purpose.
+
+The security half is the part worth restating. `zash.<base>` carried the
+allowlist while the console rule was unrestricted, which was harmless only
+because nothing listened for either. Moving the panel onto the console name
+meant the allowlist had to move with it, and
+`mihomo_config_matches_install_config`'s assertion had to **invert** — an
+unrestricted console rule is now the management plane answering every client
+whose DNS points at the gateway. `scripts/migrate-panel-to-console.sh` does the
+four things this requires to an operator-owned config and nothing else.
+
+**Four more second-install faults, in a single feature.** The rule from the
+round above held again, unbroken, and each of these reached a real upgrade:
+
+- `cert_root_contents_are_safe` still allowed `dot|web|zash`, so the migrated
+  host passed the role rename and then failed the certificate root's own
+  structural validation.
+- `deploy_cert_roles` still *wrote* `roles=(dot web zash)`, so the next upgrade
+  died with `Unknown certificate role: zash` — same fault, second list, one
+  release later, because the fix had enumerated the sites it knew about.
+- `write_dns_env` **preserved** `DNS_MIHOMO_CONTROLLER`, so an upgraded host
+  kept `:9090` while the controller moved to `:443`. Fresh installs had nothing
+  to preserve and took the correct default, which is exactly why it was
+  invisible. Every caller reads dns.env, so the readiness probe, `apply_whitelist`
+  and the daemon all dialled a dead port and the install failed at "mihomo did
+  not become ready" with mihomo running fine.
+- The success banner, the regenerate message and **the QR code** all printed
+  `/ios/ios-dot.mobileconfig`, a 404. `verify_console_endpoint` probed `/ui/`
+  and passed, so the install reported success while the URL a phone would scan
+  pointed at nothing.
+
+The last two are a category the earlier list does not name: **a value copied out
+of its source can go stale, and a path is only verified for the reader that is a
+machine.** `DNS_MIHOMO_CONTROLLER` now reads back from the operator's
+config.yaml, and `ios_profile_url` is the single derivation the three printers
+call, tied by test to the path `verify_console_endpoint` actually probes.
+
+`test_cert_role_tree` grew the check that matters after two role-list misses:
+naming the enumerating sites did not work twice, so it now **sweeps** for the
+shapes a role name takes on its way to the filesystem — a cert path or a
+`roles=()` member — across `install.sh`, `scripts/` and `etc/`, with the
+migration cut out by range rather than matched by name.
+
+Verified on `test-env` end to end: `/ui/` 200 and both profiles 200 from an
+allowlisted source, `/configs` 401, and the connection refused outright once the
+source is removed from the allowlist. Two consecutive installs are idempotent.
 
 ---
 
@@ -338,9 +397,11 @@ Windows OpenSSH only (`C:\Windows\System32\OpenSSH\ssh.exe`); git bash's ssh
 cannot resolve the name. Keep remote commands straight-line — PowerShell mangles
 `for`/`if` blocks and `$(...)` passed through `ssh`.
 
-It currently holds `0.0.62-beta.15`, upgraded in place from the beta.9 fresh
+It currently holds `0.0.62-beta.21`, upgraded in place from the beta.9 fresh
 install. Backups: `/root/5gpn-pre-freshinstall-20260803T011558Z` and
-`/root/5gpn-pre-beta10-*`. `get_public_ip` returns `10.0.1.20` there.
+`/root/5gpn-pre-beta10-*`; the pre-console config.yaml is at
+`/etc/5gpn/mihomo/config.yaml.pre-console.bak`. `get_public_ip` returns
+`10.0.1.20` there, and `10.0.1.20/32` is the one entry in the panel allowlist.
 
 **Read the journal, not just the installer's exit code.** The interception
 engine failing to load is a `[GPN]`-tagged warning in `journalctl -u mihomo`,

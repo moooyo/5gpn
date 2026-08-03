@@ -82,13 +82,13 @@ between processes that no longer exist.
 | configured gateway addresses | HTTP/TLS ingress for traffic steered to the gateway, sniffed for Host or SNI. |
 
 There is no public DoH listener and no client-facing plain DNS listener on `:53`.
-There is no separate console origin, no zashboard origin, and no interception
+There is no separate console origin, no separate panel origin, and no interception
 SOCKS5 listener. All three were deleted with the processes that needed them.
-The panel that used to live on `zash.<base>` is the console now — one name, one
-listener, one certificate role. That name carried the source allowlist while the
-console rule was unrestricted, which was harmless only because nothing listened
-for either; the allowlist moved with the panel, so the management plane is not
-reachable by every client whose DNS points at this gateway.
+The panel is the console: one name, one listener, one certificate role. That name
+is behind the source allowlist, and the allowlist is what keeps the management
+plane from being reachable by every client whose DNS points at this gateway — so
+an unrestricted rule on the console name is not merely unusual, it is the whole
+control surface answering anyone who arrives.
 
 ### Why the origin boundary is a socket
 
