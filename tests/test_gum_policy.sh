@@ -6,7 +6,6 @@ HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
 rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
 INSTALL="$ROOT/install.sh"
-TGBOT_HELPER="$ROOT/scripts/setup-tgbot.sh"
 
 # --- removed Python web control plane stays absent ---
 [ ! -e "$ROOT/api-server.py" ] || fail "api-server.py must be removed"
@@ -41,10 +40,14 @@ grep -Fq 'read -r -s' <<<"$ask_secret_fn"              || fail "plain secret fal
 
 # Gum must not probe OSC/CSI terminal capabilities. On TTYs that do not answer
 # those queries, one unscoped Gum process can otherwise block for many seconds.
-for f in "$INSTALL" "$ROOT/quick-install.sh" \
-    "$ROOT/scripts/cert-renew.sh" "$ROOT/scripts/gen-ios-profile.sh" \
-    "$ROOT/scripts/intercept-cert-renew.sh" "$ROOT/scripts/reload-rules.sh" \
-    "$ROOT/scripts/renew-hook.sh" "$ROOT/scripts/setup-tgbot.sh"; do
+#
+# The file list is derived from the tree, not hand-written. It used to name
+# scripts/reload-rules.sh and scripts/setup-tgbot.sh, both deleted with the
+# three-process layout — and `grep` on a missing file exits non-zero with no
+# output, so the assertion passed for two files that were not there. A
+# hand-written list of paths degrades into a list of things nobody checks.
+for f in "$INSTALL" "$ROOT/quick-install.sh" "$ROOT"/scripts/*.sh; do
+    [[ -f "$f" ]] || { fail "$f is in the Gum policy list but does not exist"; continue; }
     unsafe_gum="$(grep -E 'gum (log|input|confirm|choose|spin|style)([[:space:]]|$)' "$f" \
         | grep -Fv 'CI=1 gum ' || true)"
     [[ -z "$unsafe_gum" ]] || fail "$f has a Gum interaction that can block on terminal probing"

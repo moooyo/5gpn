@@ -3489,9 +3489,14 @@ manage_menu() {
 # Domain + ACME certificate
 # ----------------------------------------------------------------------------
 is_valid_domain() {
-    # Same FQDN rule as the Go bot's domainRE (cmd/5gpn-dns/bot.go); bash ERE has no
+    # Same FQDN rule as gpn/bot/domain.go's domainRE in the fork; bash ERE has no
     # lookahead, so total length is checked separately): lowercase [a-z0-9-]
     # labels (<=63), alphabetic 2-63 TLD, total 1..253. Case-insensitive.
+    #
+    # tests/test_domain_validation.sh and the fork's
+    # TestValidDomainMatchesTheInstallerRule hold the same table. Two
+    # implementations of one rule drift silently; both run it, so the day they
+    # disagree one of them fails.
     local d; d="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
     [[ ${#d} -ge 1 && ${#d} -le 253 ]] || return 1
     [[ "$d" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]
