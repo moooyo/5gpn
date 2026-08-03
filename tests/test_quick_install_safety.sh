@@ -281,6 +281,44 @@ else
     fail "unsafe archive validation or extraction ownership gate is missing"
 fi
 
+# --beta must resolve the highest beta, and "highest" is numeric.
+#
+# GitHub does not return releases newest first: /releases is ordered
+# lexicographically on the tag, so 0.0.62-beta.9 comes before 0.0.62-beta.11
+# the way "9" sorts above "11" as text. Taking the first match worked for nine
+# betas and then pinned every --beta install to beta.9 -- silently, because
+# downloading an older bundle than the operator asked for is not an error.
+#
+# The fixture is that real ordering, not a sorted one.
+beta_list="$TMP/releases.json"
+cat > "$beta_list" <<'JSON'
+[
+ {"tag_name": "0.0.62-beta.9"},
+ {"tag_name": "0.0.62-beta.8"},
+ {"tag_name": "0.0.62-beta.2"},
+ {"tag_name": "0.0.62-beta.11"},
+ {"tag_name": "0.0.62-beta.10"},
+ {"tag_name": "0.0.62-beta.1"},
+ {"tag_name": "0.0.61-beta.3"}
+]
+JSON
+resolved="$(latest_beta_tag_from_list "$beta_list")"
+[[ "$resolved" == "0.0.62-beta.11" ]] \
+    && pass "the highest beta is resolved numerically, not lexicographically" \
+    || fail "latest beta resolved to '$resolved', expected 0.0.62-beta.11"
+
+# A higher patch wins over a higher beta number on a lower patch.
+cat > "$beta_list" <<'JSON'
+[
+ {"tag_name": "0.0.62-beta.11"},
+ {"tag_name": "0.0.63-beta.2"}
+]
+JSON
+resolved="$(latest_beta_tag_from_list "$beta_list")"
+[[ "$resolved" == "0.0.63-beta.2" ]] \
+    && pass "a higher patch outranks a higher beta number below it" \
+    || fail "cross-version beta ordering resolved to '$resolved', expected 0.0.63-beta.2"
+
 echo "----"
 if [[ "$FAIL" == 0 ]]; then
     echo "test_quick_install_safety: PASS"

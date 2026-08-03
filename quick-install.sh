@@ -225,6 +225,22 @@ beta_tags_from_release_list() {
         | sed -E 's/^.*"([^"]+)"$/\1/' || true
 }
 
+# The highest beta tag, ordered numerically on all four components.
+#
+# Not "the first one the API listed". GitHub does not return releases newest
+# first -- the order is lexicographic on the tag, so 0.0.62-beta.9 sorts above
+# 0.0.62-beta.11 exactly the way "9" sorts above "11" as text. Taking the first
+# match therefore worked for nine betas and then silently pinned every --beta
+# install to beta.9 forever, downloading a bundle older than the one the
+# operator asked for and reporting no error at all.
+latest_beta_tag_from_list() {
+    beta_tags_from_release_list "$1" \
+        | sed -E 's/^([0-9]+)\.([0-9]+)\.([0-9]+)-beta\.([0-9]+)$/\1 \2 \3 \4 &/' \
+        | sort -k1,1n -k2,2n -k3,3n -k4,4n \
+        | tail -n 1 \
+        | awk '{print $5}'
+}
+
 resolve_latest_beta_tag() { # optional list and exact-metadata URLs are internal test seams
     local list_url="${1:-${RELEASES_API}?per_page=100}"
     local metadata_url="${2:-}"
@@ -241,7 +257,7 @@ resolve_latest_beta_tag() { # optional list and exact-metadata URLs are internal
             candidate="$tag"
             break
         fi
-    done < <(beta_tags_from_release_list "$list_json")
+    done < <(latest_beta_tag_from_list "$list_json")
     rm -f -- "$list_json"
     [[ -n "$candidate" ]] \
         || { red "No published 5gpn beta release is available."; return 1; }
