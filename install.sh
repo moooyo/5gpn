@@ -168,8 +168,8 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # leaves the gateway with no resolver, no capture and no control API at all. The
 # staging probe checks the version token exactly rather than accepting a prefix.
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-monolith.6"
-MIHOMO_SHA256="6b6c99ce34e811e2593dfb5c52b894ad972804cef655113b528862b69b3fb74e"
+MIHOMO_VERSION="v1.19.28-monolith.7"
+MIHOMO_SHA256="ce86d718efcc8a699652d6ea4af7df1be49ffa6ec8511522948493e66918d2d9"
 # Every `mihomo -t` in this script must run with the same SAFE_PATHS the unit
 # grants, because the seed names paths outside its own home directory -- the
 # certificates it serves and the UI bundle it publishes. Without this the core
@@ -181,8 +181,8 @@ MIHOMO_SHA256="6b6c99ce34e811e2593dfb5c52b894ad972804cef655113b528862b69b3fb74e"
 # a drift here fails at install time on a config the running service accepts.
 MIHOMO_SAFE_PATHS="/etc/5gpn/cert/zash:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui"
 ZASH_REPO="moooyo/zashboard"
-ZASH_VERSION="v3.16.0-monolith.2"        # our fork's dist.zip, built from feat/5gpn-console
-ZASH_SHA256="5c5689212106674234ec840bc6c2966a3acc509cd3f17cf2986916ec5fff37a9"
+ZASH_VERSION="v3.16.0-monolith.3"        # our fork's dist.zip, built from feat/5gpn-console
+ZASH_SHA256="c3af6589f983e2b16cda8c6b554c6245d187b202f3ef20027a5ec1efbec2667c"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
