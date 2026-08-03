@@ -30,57 +30,13 @@ jobs:
             echo "--- $t ---"; bash "$t"
           done
 
-  # Go gate: gofmt-clean + vet + the full suite under the race detector (ubuntu
-  # runners ship gcc, so -race works). Catches the concurrent control-server /
-  # subscription-manager / resolver-pool races the non-race suite misses.
-  go:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: cmd/5gpn-dns
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: cmd/5gpn-dns/go.mod
-          cache-dependency-path: cmd/5gpn-dns/go.sum
-      - name: gofmt
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "These files are not gofmt-clean:"; echo "$unformatted"
-            echo "Run: gofmt -w cmd/5gpn-dns"; exit 1
-          fi
-      - name: go vet
-        run: go vet ./...
-      - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
-      - name: go test -race
-        run: go test -race ./...
-
-  web:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: web/package-lock.json
-      - run: npm ci
-      - name: Unit tests (vitest)
-        run: npx vitest run
-      - name: Type-check + build
-        run: npm run build
-      - name: Bundle budgets
-        run: npm run bundle:check
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
-      - name: Browser E2E (desktop + mobile)
-        run: npx playwright test
+  # There is no Go or web gate here any more. The daemon and the control-console
+  # SPA this repository used to build were deleted with the three-process layout;
+  # the Go that replaced them lives in the mihomo fork and the UI in the
+  # zashboard fork, each gated by its own CI before it is ever released. What is
+  # left in this repository is shell, so the shell gate above and the two gates
+  # below -- which validate the pinned artifacts and the seed they have to
+  # accept -- are the whole check surface.
 
   # Validate the committed seed and the optional ingress-module candidate with
   # the exact pinned data-plane binary. The digest prevents a mutable upstream
