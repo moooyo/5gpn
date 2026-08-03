@@ -95,4 +95,23 @@ sweep="$(sed -n '/^    install -d -o root -g "\$MIHOMO_SERVICE_USER" -m 3770 "\$
     || fail "the mode sweep does not prune \$MIHOMO_DIR/gpn; the certificate request loses 0644"
 pass "the mode sweep prunes the core's gpn/ state directory"
 
+
+
+# Every place that enumerates the certificate roles must name the same three.
+#
+# They were four lists in three files, and the rename left one behind:
+# cert_root_contents_are_safe still allowed dot|web|zash, so a migrated host
+# passed the role rename and then failed the certificate root's own structural
+# validation -- during publication, after the binaries were replaced.
+for site in \
+    'cert_role_group' \
+    'cert_root_contents_are_safe'; do
+    body="$(sed -n "/^${site}()/,/^}/p" "$ROOT/install.sh")"
+    [[ -n "$body" ]] || fail "$site is missing"
+    printf '%s' "$body" | grep -Fq 'console' \
+        || fail "$site does not know the console certificate role"
+    printf '%s' "$body" | grep -Fq 'zash' \
+        && fail "$site still names the retired zash certificate role"
+done
+pass "every certificate-role enumeration names console and not zash"
 echo "certificate role tree safety: PASS"

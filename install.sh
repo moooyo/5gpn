@@ -779,7 +779,7 @@ cert_root_contents_are_safe() {
             "$CERT_ROOT_MARKER") ;;
             .provenance) root_plain_file_metadata_is_safe "$entry" 0 640 || return 1 ;;
             .certbot-ownership) root_plain_file_metadata_is_safe "$entry" 0 640 || return 1 ;;
-            dot|web|zash) cert_role_tree_is_safe_for_recursive_metadata "$entry" || return 1 ;;
+            dot|web|console) cert_role_tree_is_safe_for_recursive_metadata "$entry" || return 1 ;;
             *) return 1 ;;
         esac
     done < <(find "$DNS_CERT_DIR" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
@@ -6161,7 +6161,24 @@ full_install() {
     derive_domains "$BASE_DOMAIN"
     mihomo_config_matches_install_config || {
         err "The operator-owned mihomo config does not match the selected domains, gateway, and listener addresses."
-        err "Edit and validate the operator-owned file explicitly before rerunning configuration."
+        # Name the migration rather than saying "edit it by hand". A config
+        # written by a release before the panel moved onto the console name
+        # fails here for one specific, mechanical reason, and there is a script
+        # that fixes exactly that reason and nothing else. The alternative the
+        # operator would otherwise reach for -- upgrade-reset-mihomo -- replaces
+        # their whole file.
+        if grep -Eq '^[[:space:]]*external-controller-tls:[[:space:]]*127\.0\.0\.1:9090[[:space:]]*$' \
+               "$MIHOMO_DIR/config.yaml" 2>/dev/null \
+           || grep -q 'zash\.' "$MIHOMO_DIR/config.yaml" 2>/dev/null; then
+            err "This config predates the console panel. Migrate it:"
+            # The bundle's copy, not the installed one: this check runs before
+            # publication, so /opt/5gpn/scripts still holds the previous
+            # release and may not have the script at all.
+            err "  ${SCRIPT_DIR}/scripts/migrate-panel-to-console.sh ${MIHOMO_DIR}/config.yaml --in-place"
+            err "Then rerun the installer. The script keeps a .pre-console.bak beside the file."
+        else
+            err "Edit and validate the operator-owned file explicitly before rerunning configuration."
+        fi
         return 1
     }
     [[ "$reset_mihomo" == 0 ]] || confirm_upgrade_mihomo_reset || return 1
