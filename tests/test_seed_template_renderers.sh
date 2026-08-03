@@ -71,6 +71,52 @@ else
     echo "ok: the template has exactly one copy"
 fi
 
+# The drift check has to accept the seed the installer itself writes.
+#
+# This is the one coupling the placeholder scan above cannot see: the template
+# writes the console allow rule, and mihomo_config_matches_install_config
+# decides whether an existing config still matches the install. They are two
+# spellings of the same rule in two files, so they drift — and the failure only
+# appears on the SECOND install, because the first has no config to check.
+#
+# It has happened. The seed moved from NOT,((IN-NAME,intercept-egress)) to
+# NOT,((IN-TYPE,INNER)) with the monolith and the check kept naming the retired
+# form, so every monolith-installed gateway failed its own drift check and was
+# told to run upgrade-reset-mihomo -- which replaces the operator's entire
+# config. Fresh-install acceptance could not catch it by construction.
+render_seed() {
+    sed -e "s/__CONSOLE_DOMAIN__/console.seedcheck.test/g" \
+        -e "s/__ZASH_DOMAIN__/zash.seedcheck.test/g" \
+        -e "s/__GATEWAY_IP__/10.0.0.1/g" \
+        -e "s/__CONTROLLER_SECRET__/seed-check-secret/g" \
+        -e "s/^__MIHOMO_LISTENERS__$/  - {name: gateway, type: tunnel, listen: 10.0.0.1, port: 443, network: [tcp, udp], target: console.seedcheck.test:443}/" \
+        "$template"
+}
+
+seed_dir="$(mktemp -d)"
+trap 'rm -rf "$seed_dir"' EXIT
+mkdir -p "$seed_dir/mihomo"
+render_seed > "$seed_dir/mihomo/config.yaml"
+
+(
+    export INSTALL_SH_LIB_ONLY=1
+    # shellcheck source=../install.sh
+    source "$root/install.sh"
+    MIHOMO_DIR="$seed_dir/mihomo"
+    CONSOLE_DOMAIN=console.seedcheck.test
+    ZASH_DOMAIN=zash.seedcheck.test
+    BASE_DOMAIN=seedcheck.test
+    GATEWAY_IP=10.0.0.1
+    MIHOMO_LISTEN_IPS=10.0.0.1
+    mihomo_config_matches_install_config
+) >/dev/null 2>&1
+if [[ $? == 0 ]]; then
+    echo "ok: the drift check accepts the config the seed template renders"
+else
+    echo "FAIL: mihomo_config_matches_install_config rejects the installer's own seed"
+    FAIL=1
+fi
+
 echo "----"
 if (( FAIL == 0 )); then
     echo "test_seed_template_renderers: PASS"
