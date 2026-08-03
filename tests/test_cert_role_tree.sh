@@ -77,4 +77,22 @@ fi
 eval "$original_file_uid"
 pass "service-owned role marker fails closed"
 
+# The core's own state directory survives the installer's mode sweep.
+#
+# install.sh hardens everything under the mihomo home to 0660/2770. gpn/ must be
+# excluded: state.Dir keeps it 0711 so the certificate oneshot -- root with an
+# empty capability bounding set, and therefore subject to ordinary permission
+# checks -- can traverse without listing, and the certificate request is 0644 so
+# that same oneshot can read it. Sweeping it to 0660 left the request unreadable
+# by the only process that mints leaves, until the engine happened to rewrite it.
+#
+# Found by upgrading test-env. A fresh install writes the right modes and the
+# sweep only reaches these documents on a host where they already exist, so no
+# amount of fresh-install acceptance could have caught it.
+sweep="$(sed -n '/^    install -d -o root -g "\$MIHOMO_SERVICE_USER" -m 3770 "\$MIHOMO_DIR" || return 1$/,/^    for path in config.yaml whitelist.txt; do$/p' "$ROOT/install.sh")"
+[[ -n "$sweep" ]] || fail "could not extract the mihomo home mode sweep"
+[[ "$(printf '%s' "$sweep" | grep -c -- '-path "\$MIHOMO_DIR/gpn" -prune')" == 2 ]] \
+    || fail "the mode sweep does not prune \$MIHOMO_DIR/gpn; the certificate request loses 0644"
+pass "the mode sweep prunes the core's gpn/ state directory"
+
 echo "certificate role tree safety: PASS"

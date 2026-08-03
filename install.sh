@@ -4558,10 +4558,18 @@ prepare_runtime_permissions() {
     runtime_tree_has_only_plain_entries "$MIHOMO_DIR" \
         || { err "Refusing unsafe link, hardlink, or special entry below $MIHOMO_DIR"; return 1; }
     install -d -o root -g "$MIHOMO_SERVICE_USER" -m 3770 "$MIHOMO_DIR" || return 1
-    find "$MIHOMO_DIR" -mindepth 1 -type d \
+    # gpn/ is the core's own state directory and its modes are not ours to
+    # rewrite. state.Dir keeps it 0711 so the certificate oneshot -- root with
+    # an empty capability bounding set, and therefore subject to ordinary
+    # permission checks -- can traverse it without being able to list it, and
+    # state.WritePublicFile keeps the certificate request 0644 so that same
+    # oneshot can read it. Sweeping the tree to 0660 left the request
+    # unreadable by the only process that mints leaves, until the engine
+    # happened to rewrite it for an unrelated reason.
+    find "$MIHOMO_DIR" -mindepth 1 -path "$MIHOMO_DIR/gpn" -prune -o -type d \
         -exec chown "$MIHOMO_SERVICE_USER:$MIHOMO_SERVICE_USER" {} + \
         -exec chmod 2770 {} + || return 1
-    find "$MIHOMO_DIR" -mindepth 1 -type f \
+    find "$MIHOMO_DIR" -mindepth 1 -path "$MIHOMO_DIR/gpn" -prune -o -type f \
         ! -path "$MIHOMO_DIR/config.yaml" ! -path "$MIHOMO_DIR/whitelist.txt" \
         ! -name 'config.yaml.bak.*' \
         -exec chown "$MIHOMO_SERVICE_USER:$MIHOMO_SERVICE_USER" {} + \
@@ -4916,7 +4924,7 @@ DNS_MIHOMO_CONFIG=${mihomo_config}
 DNS_INTERCEPT_CONFIG=${intercept_config}
 # Extension catalogs are part of the interception document, not a file of their
 # own: a fetched index is refetchable by definition, so only the operator's list
-# of sources is state. See intercept.json's `catalogs`.
+# of sources is state. See the catalogs field in intercept.json.
 
 # ZashCert/Key always point at the selected certificate's zash/ role-dir copy
 # (deploy_cert_roles). mihomo serves the controller with them; the bundle they

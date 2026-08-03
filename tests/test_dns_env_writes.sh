@@ -64,4 +64,27 @@ cmp -s "$CONF_DIR/dns.env" "$TMP/original.env" \
     || fail "write_dns_env changed live bytes after candidate creation failure"
 pass "write_dns_env propagates candidate creation failure"
 
+# The dns.env heredoc is unquoted by design: it interpolates ${var} for every
+# value it writes. That also makes backticks and $( ) live command substitution,
+# so a *comment* carrying either runs at install time.
+#
+# It has happened: a comment ending "see the `catalogs` field" made the
+# installer try to execute `catalogs`, which failed the publication phase with
+# exit 127 on a real upgrade. Prose is the one thing nobody proofreads for shell
+# metacharacters, and it is the one thing in this heredoc that is pure prose.
+#
+# Every value is computed into a local beforehand, so ${var} is the only
+# substitution the body needs and the other two forms are always a mistake.
+heredoc_body="$(sed -n '/^    if ! cat > "\$dns_env_tmp" <<EOF$/,/^EOF$/p' "$ROOT/install.sh")"
+[[ -n "$heredoc_body" ]] || fail "could not extract the dns.env heredoc"
+if printf '%s' "$heredoc_body" | grep -q '`'; then
+    printf '%s' "$heredoc_body" | grep -n '`' >&2
+    fail "the dns.env heredoc contains a backtick, which the shell runs as a command"
+fi
+if printf '%s' "$heredoc_body" | grep -qF '$('; then
+    printf '%s' "$heredoc_body" | grep -nF '$(' >&2
+    fail "the dns.env heredoc contains \$( ), which the shell runs as a command"
+fi
+pass "the dns.env heredoc carries no live command substitution"
+
 echo "dns.env write safety: PASS"
