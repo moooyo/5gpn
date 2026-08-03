@@ -388,8 +388,12 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   `root:gpn-dns` mode `3771`, `/etc/5gpn/cert` is `root:root` mode `0751`, and
   its root marker is `root:root` mode `0644`. Verify the runtime traversal
   contract directly:
-  `sudo -u gpn-dns test -r /etc/5gpn/cert/dot/current/fullchain.pem` and
+  `sudo -u mihomo test -r /etc/5gpn/cert/dot/current/fullchain.pem` and
   `sudo -u mihomo test -r /etc/5gpn/cert/zash/current/privkey.pem` both succeed.
+  Both name `mihomo`, not one account each: the DoT listener moved into the same
+  process that serves the controller, so one account reads every certificate the
+  gateway presents. A `dot` role still readable only by `gpn-dns` is the shape
+  that let a fresh install come up with no DNS ingress and no error.
   Neither runtime account can rename the root-owned `cert`, `mihomo`,
   `intercept`, or interception `tls` directory through its sticky parent.
 - [ ] New TLS handshakes observe renewed files by mtime without daemon restart.

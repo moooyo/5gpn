@@ -4186,8 +4186,18 @@ deploy_cert_roles() {
     # never a key and certificate from different generations.
     for r in "${roles[@]}"; do
         dest="${DNS_CERT_DIR}/$r"
-        group="$DNS_SERVICE_USER"
-        [[ "$r" == zash ]] && group="$MIHOMO_SERVICE_USER"
+        # One process reads certificates now, so every role it actually serves
+        # is group mihomo. This selected gpn-dns for `dot` because the DoT
+        # listener lived in a separate daemon running as that user; the listener
+        # moved into mihomo and the ownership did not follow. The result was
+        # silent: the service starts, binds every tunnel and the controller, and
+        # has no DNS ingress at all, because it cannot read its own key.
+        #
+        # `web` stays on gpn-dns. Nothing reads it -- its console origin went
+        # with the process that served it -- and a role no reader needs should
+        # not be widened to the account that would then be able to read it.
+        group="$MIHOMO_SERVICE_USER"
+        [[ "$r" == web ]] && group="$DNS_SERVICE_USER"
         if [[ -e "$dest" || -L "$dest" ]]; then
             cert_role_tree_is_safe_for_recursive_metadata "$dest" \
                 || { cleanup_cert_role_candidates roles dests generations links; err "Certificate role boundary is unsafe: $dest"; return 1; }
