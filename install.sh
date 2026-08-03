@@ -4657,14 +4657,18 @@ seed_dns_document() {
     local key="${DNS_CERT_DIR}/dot/current/privkey.pem"
     local tmp
 
-    # The engine creates this directory itself on first start, but the document
-    # has to exist before that start, so the installer creates it to the same
-    # shape rather than waiting for a process that cannot come up without it.
+    # The engine creates the state directory itself on first start, but the
+    # document has to exist before that start, so the installer creates it to
+    # the same shape rather than waiting for a process that cannot come up
+    # without it.
     #
-    # Only the leaf: `install -d` would apply this ownership to every component
-    # it had to create, and the mihomo home above it is not the engine's to own.
-    [[ -d "$MIHOMO_DIR" ]] \
-        || { err "The mihomo home does not exist yet: ${MIHOMO_DIR}"; return 1; }
+    # The mihomo home above it may not exist yet either: this runs before
+    # render_mihomo_config, because it has to read the retired dns.env upstream
+    # keys before write_dns_env drops them. Creating it here with the same
+    # incantation the other three sites use is idempotent, and
+    # prepare_runtime_permissions normalises the tree afterwards regardless.
+    install -d -o root -g "$MIHOMO_SERVICE_USER" -m 3770 "$MIHOMO_DIR" \
+        || { err "Could not create the mihomo home: ${MIHOMO_DIR}"; return 1; }
     install -d -o "$MIHOMO_SERVICE_USER" -g "$MIHOMO_SERVICE_USER" -m 0711 "$state_dir" \
         || { err "Could not create the engine state directory: ${state_dir}"; return 1; }
 
