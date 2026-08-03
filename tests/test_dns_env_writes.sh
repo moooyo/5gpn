@@ -87,4 +87,51 @@ if printf '%s' "$heredoc_body" | grep -qF '$('; then
 fi
 pass "the dns.env heredoc carries no live command substitution"
 
+# DNS_MIHOMO_CONTROLLER follows the operator's config, and does not survive it.
+#
+# On the upgrade that moved the panel onto the console name, the controller went
+# from :9090 to :443 in config.yaml while dns.env kept :9090 -- because the
+# writer preserved the previous value. Every caller reads dns.env, so the
+# readiness probe, apply_whitelist and the daemon all dialled a dead port, and
+# the install failed at "mihomo did not become ready" with mihomo running
+# perfectly well on the port nobody was asking for.
+mkdir -p "$MIHOMO_DIR"
+cat >"$MIHOMO_DIR/config.yaml" <<'YAML'
+external-controller: ""
+external-controller-tls: 127.0.0.1:443
+YAML
+cfg_get() {
+    case "$1" in
+        # The stale value the old writer would have carried forward.
+        DNS_MIHOMO_CONTROLLER) printf '%s' '127.0.0.1:9090' ;;
+        *) return 0 ;;
+    esac
+}
+got="$(mihomo_configured_controller)"
+[[ "$got" == "127.0.0.1:443" ]] \
+    || fail "mihomo_configured_controller read '$got', not the config's 127.0.0.1:443"
+pass "the controller address is read back from the operator's config"
+
+# Quoted and trailing-comment spellings are the same address.
+printf 'external-controller-tls: "127.0.0.1:8443"   # moved\n' >"$MIHOMO_DIR/config.yaml"
+got="$(mihomo_configured_controller)"
+[[ "$got" == "127.0.0.1:8443" ]] \
+    || fail "mihomo_configured_controller mishandled a quoted address: '$got'"
+pass "a quoted or commented controller address parses to the bare host:port"
+
+# No config yet is a fresh install, where the seed's own address is the answer
+# and there is nothing to read. It must not fail, and must not invent a value.
+rm -f "$MIHOMO_DIR/config.yaml"
+got="$(mihomo_configured_controller)"
+[[ -z "$got" ]] \
+    || fail "mihomo_configured_controller invented '$got' with no config present"
+pass "a fresh install with no config yields no address rather than a wrong one"
+
+# The writer must consult it. A future edit that goes back to reading only
+# dns.env would restore the exact bug above, and nothing else here would notice.
+writer="$(sed -n '/^write_dns_env()/,/^}/p' "$ROOT/install.sh")"
+printf '%s' "$writer" | grep -Fq 'mihomo_configured_controller' \
+    || fail "write_dns_env no longer derives the controller address from the config"
+pass "write_dns_env derives DNS_MIHOMO_CONTROLLER from the config"
+
 echo "dns.env write safety: PASS"

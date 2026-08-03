@@ -3455,6 +3455,24 @@ derive_domains() {
     export BASE_DOMAIN CONSOLE_DOMAIN DOT_DOMAIN
 }
 
+# mihomo_configured_controller — the address the operator's config actually
+# tells mihomo to serve the controller on, or empty if there is no config yet
+# (fresh install, where the seed's own 127.0.0.1:443 is the answer).
+#
+# One line, one reader. Callers that need a dial target must come through here
+# or through the DNS_MIHOMO_CONTROLLER this writes, never through a literal.
+mihomo_configured_controller() {
+    local config="$MIHOMO_DIR/config.yaml" value
+    [[ -f "$config" ]] || return 0
+    value="$(sed -n 's/^[[:space:]]*external-controller-tls:[[:space:]]*//p' "$config" | head -1)"
+    # Cut any trailing comment first, then unquote: doing it the other way round
+    # leaves the closing quote attached to the address.
+    value="${value%%[[:space:]]*}"
+    value="${value%\"}"; value="${value#\"}"
+    value="${value%\'}"; value="${value#\'}"
+    printf '%s' "$value"
+}
+
 load_persisted_domains() {
     local base
     base="$(cfg_get DNS_BASE_DOMAIN)"
@@ -5065,11 +5083,23 @@ write_dns_env() {
     # config.yaml agree instead of drifting.
     local base_domain="$BASE_DOMAIN"
     derive_domains "$base_domain" || return 1
-    # Mihomo's loopback external-controller API + the zashboard source-IP
+    # Mihomo's loopback external-controller API + the console source-IP
     # allowlist file it reloads from (add_allow_ip/del_allow_ip/apply_whitelist
     # already hardcode these same two values; persisting them here lets the
     # daemon read back what it's actually being served against).
-    local dns_mihomo_controller="$(cfg_get DNS_MIHOMO_CONTROLLER)"; dns_mihomo_controller="${dns_mihomo_controller:-127.0.0.1:443}"
+    #
+    # The address is READ BACK FROM THE OPERATOR'S CONFIG, not preserved from
+    # the previous dns.env. It is not an independent knob -- it is a copy of
+    # where mihomo was told to listen, and a copy that can disagree with its
+    # original is exactly what broke the upgrade to the console panel: the
+    # controller moved to :443, dns.env still said :9090 because the old value
+    # was preserved, and every caller (the readiness probe, apply_whitelist,
+    # the daemon) dialled a port nothing listened on. Reading the config makes
+    # the disagreement impossible rather than merely fixed once.
+    local dns_mihomo_controller
+    dns_mihomo_controller="$(mihomo_configured_controller)"
+    dns_mihomo_controller="${dns_mihomo_controller:-$(cfg_get DNS_MIHOMO_CONTROLLER)}"
+    dns_mihomo_controller="${dns_mihomo_controller:-127.0.0.1:443}"
     local dns_mihomo_secret="$(cfg_get DNS_MIHOMO_SECRET)" dns_mihomo_secret_env
     dns_mihomo_secret_env="$(dns_env_encode_value "$dns_mihomo_secret")" \
         || { err "DNS_MIHOMO_SECRET cannot be represented safely in dns.env."; return 1; }
@@ -5543,9 +5573,9 @@ probe_mihomo_ready() {
 
     [[ -n "${DOT_DOMAIN:-}" ]] || load_persisted_domains || return 1
     domain="$DOT_DOMAIN"
-    # The loopback console origin this used to probe is gone -- one process
-    # serves the API and the bundle on the controller now, and nothing listens on
-    # 127.0.0.1:443 at all, so this leg could never pass on a monolith host.
+    # The loopback console origin this used to probe as a *separate* listener is
+    # gone -- one process serves the API and the bundle on the controller now,
+    # which is itself what answers on 127.0.0.1:443.
     #
     # /ui/ is the check worth having in its place. It is unauthenticated static
     # content, so a 200 means the bundle really was published where the unit can

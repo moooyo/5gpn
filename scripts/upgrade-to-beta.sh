@@ -94,4 +94,4 @@ ok "5gpn is running as one process"
 echo
 echo "  rollback:  cp ${BACKUP}/config.yaml ${MIHOMO_HOME}/config.yaml && cp ${BACKUP}/mihomo ${BASE_DIR}/bin/mihomo"
 echo "  verify:    bash ${HERE}/scripts/acceptance-monolith.sh"
-echo "  UI:        https://127.0.0.1:9090/ui/  (tunnel it; the controller is loopback-only)"
+echo "  UI:        https://console.<base>/ui/  (from an allowlisted source address)"
