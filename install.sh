@@ -180,8 +180,8 @@ MIHOMO_SHA256="b9aee7b3e3dcfa6623cb760a20541c27ee6d0f91f9a658aad5497de513bf49b4"
 # a drift here fails at install time on a config the running service accepts.
 MIHOMO_SAFE_PATHS="/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui"
 ZASH_REPO="moooyo/zashboard"
-ZASH_VERSION="v3.16.0-monolith.12"        # our fork's dist.zip, built from feat/5gpn-console
-ZASH_SHA256="b6bc196ceac4512b789a3e021faa0edc5f9f69e1fc48b7cef047a237a5ca9975"
+ZASH_VERSION="v3.16.0-monolith.13"        # our fork's dist.zip, built from feat/5gpn-console
+ZASH_SHA256="b2bfe6d51a8826156d3c0cf29a2c8870faf6d55c56397862f45f6e5b179dccb0"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
