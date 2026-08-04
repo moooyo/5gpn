@@ -66,8 +66,8 @@ jobs:
       # one checks a configuration nobody will run. Keep this pin and its digest
       # in lockstep with MIHOMO_VERSION/MIHOMO_SHA256 in install.sh.
       MIHOMO_REPO: moooyo/mihomo
-      MIHOMO_VERSION: v1.19.28-monolith.7
-      MIHOMO_SHA256: ce86d718efcc8a699652d6ea4af7df1be49ffa6ec8511522948493e66918d2d9
+      MIHOMO_VERSION: v1.19.28-monolith.8
+      MIHOMO_SHA256: b9aee7b3e3dcfa6623cb760a20541c27ee6d0f91f9a658aad5497de513bf49b4
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Download pinned mihomo
@@ -119,11 +119,11 @@ jobs:
           # bundle, and with a path the unit does not list the service cannot
           # start at all.
           grep -Fq 'external-ui: /opt/5gpn/ui' "$runtime/config.yaml"
-          # The panel is served on the console name, and only to allowlisted
-          # sources. The controller has to listen on :443 for the console's
-          # DIRECT dial to land on it, and the allow rule has to carry the
-          # source rule-set or the management plane is open to every client
-          # whose DNS points here.
+          # The panel is served on the console name. The controller has to
+          # listen on :443 for the console's DIRECT dial to land on it, and the
+          # allow rule has to keep the IN-TYPE,INNER exclusion -- with the
+          # source allowlist gone that is the only qualifier left, and without
+          # it a captured extension reaches the management plane.
           grep -Fq 'external-controller-tls: 127.0.0.1:443' "$runtime/config.yaml"
           grep -Fq 'AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,console.example.test)),DIRECT' "$runtime/config.yaml"
           # The allowlist is gone: no rule may read a rule-provider the installer
