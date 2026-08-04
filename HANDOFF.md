@@ -52,7 +52,8 @@ pass.
 
 ## 0. Acceptance — green
 
-`0.0.62-beta.38` is deployed on `test-env`. Acceptance there:
+`0.0.62-beta.39` is deployed on `test-env` (core `v1.19.28-monolith.11`, console
+`v3.16.0-monolith.16`), upgraded in place. Acceptance there:
 
 | Suite | Result |
 | --- | --- |
