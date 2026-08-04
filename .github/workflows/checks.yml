@@ -99,7 +99,6 @@ jobs:
               print
             }
           ' etc/mihomo/config.yaml.tmpl > "$runtime/config.yaml"
-          printf '127.0.0.1/32\n' > "$runtime/whitelist.txt"
           if grep -Eq '__[A-Z0-9_]+__' "$runtime/config.yaml"; then
             echo "unresolved mihomo template placeholder" >&2
             exit 1
@@ -126,7 +125,11 @@ jobs:
           # source rule-set or the management plane is open to every client
           # whose DNS points here.
           grep -Fq 'external-controller-tls: 127.0.0.1:443' "$runtime/config.yaml"
-          grep -Fq 'AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,console.example.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT' "$runtime/config.yaml"
+          grep -Fq 'AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,console.example.test)),DIRECT' "$runtime/config.yaml"
+          # The allowlist is gone: no rule may read a rule-provider the installer
+          # no longer ships, because that config does not load at all.
+          ! grep -Fq 'RULE-SET,whitelist' "$runtime/config.yaml"
+          ! grep -Fq 'rule-providers:' "$runtime/config.yaml"
           grep -Fq 'DOMAIN,console.example.test,REJECT' "$runtime/config.yaml"
           ! grep -Fq 'zash.example.test' "$runtime/config.yaml"
           # The backstop behind datagram capture. Capture is consulted before

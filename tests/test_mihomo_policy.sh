@@ -241,4 +241,34 @@ nocheck install.sh 'install_web\(\)|DNS_WEB_DIR=|DNS_ZASH_LISTEN=' 'no second or
 # installer -- install.sh must only acquire+unzip the dist, never patch it in.
 nocheck install.sh 'secondaryPath=/proxy' 'zashboard #/setup deep-link NOT hardcoded in install.sh (belongs to C3 frontend)'
 
+# The allowlist sweep, over the whole tree rather than a list of files.
+#
+# Removing the allowlist touched install.sh, the template, six test files and
+# the docs -- and still missed .github/workflows/checks.yml, which seeded a
+# whitelist.txt and asserted the retired rule shape. CI caught it, which is one
+# release later than the local suite should have.
+#
+# Two shapes are swept, chosen so the assertions that assert ABSENCE do not
+# match themselves: a redirection that creates an allowlist file, and an actual
+# rule line reading the retired provider. Prose about the removal, and the
+# migration that performs it, name the string without being either shape.
+creators="$(grep -rn '> *"[^"]*whitelist\.txt"' \
+    --include='*.sh' --include='*.yml' --include='*.tmpl' \
+    "$root/install.sh" "$root/scripts" "$root/etc" "$root/tests" "$root/.github" 2>/dev/null || true)"
+if [[ -n "$creators" ]]; then
+    printf '%s\n' "$creators" >&2
+    echo "FAIL: something still creates an allowlist file"; FAIL=1
+else
+    echo "ok: nothing creates an allowlist file"
+fi
+rules="$(grep -rn '^[[:space:]]*-[[:space:]]*AND,.*RULE-SET,[[:space:]]*whitelist' \
+    --include='*.sh' --include='*.yml' --include='*.tmpl' --include='*.yaml' \
+    "$root/install.sh" "$root/scripts" "$root/etc" "$root/.github" 2>/dev/null || true)"
+if [[ -n "$rules" ]]; then
+    printf '%s\n' "$rules" >&2
+    echo "FAIL: a rule still reads the retired allowlist provider"; FAIL=1
+else
+    echo "ok: no rule reads the retired allowlist provider"
+fi
+
 echo "----"; [ "$FAIL" = 0 ] && echo "test_mihomo_policy: PASS" || { echo "test_mihomo_policy: FAIL"; exit 1; }
