@@ -66,8 +66,8 @@ jobs:
       # one checks a configuration nobody will run. Keep this pin and its digest
       # in lockstep with MIHOMO_VERSION/MIHOMO_SHA256 in install.sh.
       MIHOMO_REPO: moooyo/mihomo
-      MIHOMO_VERSION: v1.19.28-monolith.8
-      MIHOMO_SHA256: b9aee7b3e3dcfa6623cb760a20541c27ee6d0f91f9a658aad5497de513bf49b4
+      MIHOMO_VERSION: v1.19.28-monolith.9
+      MIHOMO_SHA256: 072c15c7f15d5d23422ea7e03a28d2fee54f2a4d116ec4001163e2c32336dddd
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Download pinned mihomo
