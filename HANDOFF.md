@@ -10,8 +10,8 @@ Everything is pushed. `beta` is fast-forwarded to `feat/installer-tui`.
 | Repository | Branch | Published |
 | --- | --- | --- |
 | `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.11` |
-| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.17` |
-| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.40` |
+| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.18` |
+| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.41` |
 
 Green: `go test -race ./gpn/...` (**run it in WSL** — Windows has no gcc, so
 `-race` cannot build there), all 28 installer suites, four console build-time
@@ -53,8 +53,8 @@ pass.
 
 ## 0. Acceptance — green
 
-`0.0.62-beta.40` is deployed on `test-env` (core `v1.19.28-monolith.11`, console
-`v3.16.0-monolith.17`), upgraded in place. Acceptance there:
+`0.0.62-beta.41` is deployed on `test-env` (core `v1.19.28-monolith.11`, console
+`v3.16.0-monolith.18`), upgraded in place. Acceptance there:
 
 | Suite | Result |
 | --- | --- |
@@ -433,6 +433,19 @@ setup guide as a page, deriving everything from the origin serving it; the
 default China-direct and GFW-proxy subscriptions, seeded by the core AND
 offered explicitly in the console because a default only ever reaches an absent
 document.
+
+**One place per number.** The DNS settings page carried a statistics block that
+was the text copy of what the overview card draws — total, cache hits/lookups/
+entries, and both upstream groups — read twice, and in that copy with no trend.
+It is gone. "Steered to the gateway" went with it: it was the sum of two slices
+the decision mix already separates by cause. "CN ranges loaded" is the one entry
+on that list that is not a statistic — it is the ground arbitration stands on,
+and at zero every address is judged foreign and the whole Chinese internet is
+steered into the tunnel — so it moved onto the card as a permanent footnote
+instead of being dropped. Upstream health is now two sparklines of p50 with
+ok/total and p95, sampled by the same one-second poller as QPS; a quiet gateway
+returns to no samples after 15 minutes, and those points carry `init` so the
+chart does not claim a 0 ms resolver.
 
 **The overview has two surfaces, and the default configuration shows only one.**
 The DNS card was reported missing twice. It was not missing: `splitOverviewPage`
