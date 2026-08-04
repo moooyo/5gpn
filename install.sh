@@ -180,8 +180,8 @@ MIHOMO_SHA256="ce86d718efcc8a699652d6ea4af7df1be49ffa6ec8511522948493e66918d2d9"
 # a drift here fails at install time on a config the running service accepts.
 MIHOMO_SAFE_PATHS="/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui"
 ZASH_REPO="moooyo/zashboard"
-ZASH_VERSION="v3.16.0-monolith.4"        # our fork's dist.zip, built from feat/5gpn-console
-ZASH_SHA256="7ec4955b9f6d8dc87b803f5888e7bacf5ada31475378d166d84b4470366db6d2"
+ZASH_VERSION="v3.16.0-monolith.5"        # our fork's dist.zip, built from feat/5gpn-console
+ZASH_SHA256="a075c579365133f1610aa86a2597b8ff3fc40cebd10c024e0deb743965fa268a"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
@@ -3625,6 +3625,150 @@ manage_action() {
     esac
 }
 
+# The screen table: title | renderer | label | label ...
+#
+# One definition, read by both the tab UI and the plain list, so the two cannot
+# drift into offering different things -- which is the shape of the bug that let
+# two menu entries do nothing for the whole of the monolith work.
+MANAGE_SCREENS=(
+    "概览|manage_screen_overview|重启服务 Restart services|编辑安装配置 Configure installation"
+    "服务|manage_screen_services|重启服务 Restart services|查看核心日志 Core logs"
+    "证书|manage_screen_certificates|重新生成 iOS 描述文件 Regenerate iOS profile|设置 Cloudflare Token Set Cloudflare token"
+    "网络|manage_screen_network|编辑安装配置 Configure installation"
+    # Grouped because each one is irreversible or drops live sessions, and a list
+    # that mixed them with "show status" made the cursor pass over them on the
+    # way to something harmless.
+    "危险操作|manage_screen_overview|轮换控制台 secret Rotate console secret|重置 mihomo 配置 Reset mihomo config|卸载 Uninstall"
+)
+
+# manage_read_key — one keypress, decoded to a direction.
+#
+# `read -rsn1` is the whole mechanism. It reads a single character without
+# echoing and bash restores the terminal settings itself, so there is no stty
+# raw mode here and therefore nothing to restore on a signal. An earlier note in
+# HANDOFF costed this as a hand-rolled raw-mode reader needing its own terminal
+# restore on every signal; that was true of an stty implementation and is not
+# true of this one.
+#
+# Arrows arrive as ESC [ A..D. The read for the rest of the sequence must TIME
+# OUT: a bare ESC is an operator asking to leave, and a blocking read would hang
+# the menu until they pressed something else.
+manage_read_key() {
+    local k rest
+    IFS= read -rsn1 k || return 1
+    case "$k" in
+        $'\e')
+            IFS= read -rsn2 -t 0.05 rest || rest=""
+            case "$rest" in
+                '[A') printf 'up' ;;
+                '[B') printf 'down' ;;
+                '[C') printf 'right' ;;
+                '[D') printf 'left' ;;
+                '')   printf 'quit' ;;
+                *)    printf 'other' ;;
+            esac ;;
+        # read -n1 yields an empty string for Enter.
+        '')  printf 'enter' ;;
+        q|Q) printf 'quit' ;;
+        h|H) printf 'left' ;;
+        l|L) printf 'right' ;;
+        k|K) printf 'up' ;;
+        j|J) printf 'down' ;;
+        *)   printf 'other' ;;
+    esac
+}
+
+# manage_tab_strip — the tabs, with the active one inverted.
+manage_tab_strip() {
+    local active="$1" i title out=''
+    for i in "${!MANAGE_SCREENS[@]}"; do
+        title="${MANAGE_SCREENS[$i]%%|*}"
+        if [[ "$i" == "$active" ]]; then
+            out+=$'\033[7m'" ${title} "$'\033[0m'
+        else
+            out+=" ${title} "
+        fi
+    done
+    printf '%s\n' "$out"
+}
+
+# manage_menu_tabs — one level: tabs across, actions down.
+#
+# Only reached on a real terminal. Everything it draws is printf, so there is no
+# dependency on gum for input or layout; gum still styles the fact cards through
+# card() when it is present.
+manage_menu_tabs() {
+    local tab=0 cursor=0 key entry title render
+    local -a labels
+    while true; do
+        entry="${MANAGE_SCREENS[$tab]}"
+        title="${entry%%|*}"
+        render="${entry#*|}"; render="${render%%|*}"
+        IFS='|' read -r -a labels <<< "${entry#*|*|}"
+
+        printf '\033[2J\033[H'
+        manage_tab_strip "$tab"
+        printf '\n'
+        "$render" | card
+        printf '\n'
+        local i
+        for i in "${!labels[@]}"; do
+            if [[ "$i" == "$cursor" ]]; then
+                printf '  \033[7m> %s\033[0m\n' "${labels[$i]}"
+            else
+                printf '    %s\n' "${labels[$i]}"
+            fi
+        done
+        printf '\n  ←/→ 切换标签  ↑/↓ 选择  Enter 执行  q 退出\n'
+
+        key="$(manage_read_key)" || break
+        case "$key" in
+            left)
+                tab=$(( (tab - 1 + ${#MANAGE_SCREENS[@]}) % ${#MANAGE_SCREENS[@]} ))
+                cursor=0 ;;
+            right)
+                tab=$(( (tab + 1) % ${#MANAGE_SCREENS[@]} ))
+                cursor=0 ;;
+            up)   (( cursor > 0 )) && cursor=$(( cursor - 1 )) ;;
+            down) (( cursor < ${#labels[@]} - 1 )) && cursor=$(( cursor + 1 )) ;;
+            enter)
+                printf '\033[2J\033[H'
+                # Actions prompt and print; they need the screen to themselves
+                # and a cooked terminal, which is what we are already in.
+                manage_action "${labels[$cursor]}" || true
+                printf '\n按任意键返回 Press any key to return\n'
+                manage_read_key >/dev/null || true ;;
+            quit)
+                printf '\033[2J\033[H'
+                return 0 ;;
+        esac
+    done
+}
+
+# manage_menu_list — the two-level fallback, for anything that is not a terminal
+# capable of single-key reads. It reads the same table, so it offers the same
+# things in the same order.
+manage_menu_list() {
+    local screen entry title render i
+    local -a labels titles=()
+    for i in "${!MANAGE_SCREENS[@]}"; do
+        titles+=("${MANAGE_SCREENS[$i]%%|*}")
+    done
+    while true; do
+        screen="$(ask_choice "5gpn 管理" "${titles[@]}" "退出 Quit" || true)"
+        [[ -n "$screen" && "$screen" != "退出 Quit" ]] || return 0
+        for i in "${!MANAGE_SCREENS[@]}"; do
+            entry="${MANAGE_SCREENS[$i]}"
+            title="${entry%%|*}"
+            [[ "$title" == "$screen" ]] || continue
+            render="${entry#*|}"; render="${render%%|*}"
+            IFS='|' read -r -a labels <<< "${entry#*|*|}"
+            manage_screen "$title" "$render" "${labels[@]}"
+            break
+        done
+    done
+}
+
 manage_menu() {
     check_root
     run_management_with_install_lock install_gum
@@ -3636,36 +3780,14 @@ manage_menu() {
     fi
     load_persisted_domains 2>/dev/null || true
 
-    local screen
-    while true; do
-        screen="$(ask_choice "5gpn 管理" \
-            "概览 Overview" "服务 Services" "证书 Certificates" "网络 Network" \
-            "危险操作 Danger zone" "退出 Quit" || true)"
-        case "$screen" in
-            "概览 Overview")
-                manage_screen "概览" manage_screen_overview \
-                    "重启服务 Restart services" "编辑安装配置 Configure installation" ;;
-            "服务 Services")
-                manage_screen "服务" manage_screen_services \
-                    "重启服务 Restart services" "查看核心日志 Core logs" ;;
-            "证书 Certificates")
-                manage_screen "证书" manage_screen_certificates \
-                    "重新生成 iOS 描述文件 Regenerate iOS profile" \
-                    "设置 Cloudflare Token Set Cloudflare token" ;;
-            "网络 Network")
-                manage_screen "网络" manage_screen_network \
-                    "编辑安装配置 Configure installation" ;;
-            "危险操作 Danger zone")
-                # Grouped because each one is irreversible or drops live
-                # sessions, and a list that mixed them with "show status" made
-                # the cursor pass over them on the way to something harmless.
-                manage_screen "危险操作" manage_screen_overview \
-                    "轮换控制台 secret Rotate console secret" \
-                    "重置 mihomo 配置 Reset mihomo config" \
-                    "卸载 Uninstall" || break ;;
-            "退出 Quit"|"") break ;;
-        esac
-    done
+    # Tabs need to draw at a cursor position and read one key at a time, so both
+    # ends must be the terminal. Anything else -- output piped to a file, a
+    # dumb TERM -- gets the list, which needs neither.
+    if [[ -t 1 && -n "${TERM:-}" && "${TERM}" != dumb ]]; then
+        manage_menu_tabs
+    else
+        manage_menu_list
+    fi
 }
 
 # ----------------------------------------------------------------------------
@@ -5826,9 +5948,32 @@ validate_install_config() {
         CACHE_SIZE CHINA_ECS
 }
 
-configure_install_tui() {
-    [[ -t 0 ]] || { err "First install/configuration requires an attached TTY; shell environment injection is not supported."; return 1; }
-    local advanced="${1:-0}" choice detected value default_listen
+# ---------------------------------------------------------------------------
+# First-install configuration.
+#
+# The collection pass is deliberately linear, and it is not a screen list like
+# manage_menu. These fields are dependency-ordered: the certificate mode decides
+# whether an ACME email and a Cloudflare token are asked for at all, and the base
+# domain is what the DNS-prerequisite card is rendered from. A screen an operator
+# could enter out of order would present fields whose validity depends on answers
+# not yet given.
+#
+# What it lacked was not a way sideways but a way BACK. A typo in the base domain
+# first became visible on the summary card, and the only thing the summary
+# offered was yes or no -- so correcting one character meant cancelling the whole
+# install and starting over. The summary is a review screen now: confirm, or pick
+# a field and re-answer it, as many times as needed.
+#
+# That also retires what `advanced` used to cost. It still decides which fields
+# the FIRST pass stops on, but every field is reachable from the review, so an
+# auto-detected address an operator disagrees with no longer requires a rerun.
+#
+# One prompt per field, defined once and called from both the first pass and the
+# review. Two copies of a prompt are two places for a validator to drift apart.
+# ---------------------------------------------------------------------------
+
+install_tui_cert_mode() {
+    local choice
     case "${CERT_MODE:-cloudflare}" in
         http-01)
             choice="$(ask_choice '证书模式 Certificate mode' \
@@ -5852,14 +5997,62 @@ configure_install_tui() {
         http-01*) CERT_MODE=http-01 ;;
         cloudflare*) CERT_MODE=cloudflare ;;
     esac
+}
 
+install_tui_base_domain() {
+    local value
     while true; do
         value="$(prompt_default '主域名 Base domain' "${BASE_DOMAIN:-5gpn.local}")"
         value="${value#http://}"; value="${value#https://}"; value="${value%/}"; value="${value// /}"
         value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
-        is_valid_domain "$value" && { derive_domains "$value"; break; }
+        is_valid_domain "$value" && { derive_domains "$value"; return 0; }
         warn "Invalid domain; enter a full FQDN like example.com."
     done
+}
+
+install_tui_public_ip() {
+    local default="${1:-$PUBLIC_IP}"
+    while true; do
+        PUBLIC_IP="$(prompt_default '公网 IPv4 Public IPv4' "$default")"
+        is_valid_ipv4 "$PUBLIC_IP" && return 0
+        warn "Invalid public IPv4."
+    done
+}
+
+install_tui_gateway_ip() {
+    while true; do
+        GATEWAY_IP="$(prompt_default '客户端可达网关 IPv4 Gateway IPv4' "${GATEWAY_IP:-$PUBLIC_IP}")"
+        is_valid_ipv4 "$GATEWAY_IP" && return 0
+        warn "Invalid gateway IPv4."
+    done
+}
+
+install_tui_listen_ips() {
+    local default="${1:-$MIHOMO_LISTEN_IPS}"
+    while true; do
+        MIHOMO_LISTEN_IPS="$(prompt_default 'mihomo 本机监听 IPv4（逗号分隔）' "$default")"
+        MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" && return 0
+    done
+}
+
+# The ACME email belongs to the mode, so changing the mode re-runs this. debug
+# issues nothing and must not carry a stale address forward.
+install_tui_cert_email() {
+    if [[ "$CERT_MODE" == debug ]]; then
+        CERT_EMAIL=""
+        return 0
+    fi
+    CERT_EMAIL="$(prompt_default 'Let’s Encrypt email' "${CERT_EMAIL:-admin@${BASE_DOMAIN}}")"
+    [[ "$CERT_EMAIL" == *@* && "$CERT_EMAIL" != *[[:space:]]* ]] \
+        || { err "Invalid certificate email."; return 1; }
+}
+
+configure_install_tui() {
+    [[ -t 0 ]] || { err "First install/configuration requires an attached TTY; shell environment injection is not supported."; return 1; }
+    local advanced="${1:-0}" detected default_listen choice
+
+    install_tui_cert_mode || return 1
+    install_tui_base_domain || return 1
 
     detected="${PUBLIC_IP:-}"
     if ! is_valid_ipv4 "$detected"; then
@@ -5868,21 +6061,10 @@ configure_install_tui() {
         detected="$PUBLIC_IP"
     fi
     if [[ "$advanced" == 1 ]]; then
-        while true; do
-            PUBLIC_IP="$(prompt_default '公网 IPv4 Public IPv4' "$detected")"
-            is_valid_ipv4 "$PUBLIC_IP" && break
-            warn "Invalid public IPv4."
-        done
+        install_tui_public_ip "$detected" || return 1
+        install_tui_gateway_ip || return 1
     else
         PUBLIC_IP="$detected"
-    fi
-    if [[ "$advanced" == 1 ]]; then
-        while true; do
-            GATEWAY_IP="$(prompt_default '客户端可达网关 IPv4 Gateway IPv4' "${GATEWAY_IP:-$PUBLIC_IP}")"
-            is_valid_ipv4 "$GATEWAY_IP" && break
-            warn "Invalid gateway IPv4."
-        done
-    else
         GATEWAY_IP="$PUBLIC_IP"
     fi
 
@@ -5894,46 +6076,77 @@ configure_install_tui() {
     [[ -n "$default_listen" ]] \
         || { err "No locally assigned IPv4 is available for mihomo listeners."; return 1; }
     if [[ "$advanced" == 1 ]]; then
-        while true; do
-            MIHOMO_LISTEN_IPS="$(prompt_default 'mihomo 本机监听 IPv4（逗号分隔）' "$default_listen")"
-            MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" && break
-        done
+        install_tui_listen_ips "$default_listen" || return 1
     else
         MIHOMO_LISTEN_IPS="$default_listen"
     fi
+
+    # ECS and the cache size are derived, never asked: one is an operational
+    # default and the other follows host memory. test_tui_policy holds that.
     if [[ -z "${CHINA_ECS+x}" ]]; then
         CHINA_ECS="$DNS_CHINA_ECS_DEFAULT"
     fi
     CACHE_SIZE="${CACHE_SIZE:-${_CACHE_SIZE_DEFAULT:-4096}}"
     [[ "$CACHE_SIZE" =~ ^[1-9][0-9]*$ ]] \
         || { err "DNS cache size must be a positive integer."; return 1; }
-    if [[ "$CERT_MODE" != debug ]]; then
-        CERT_EMAIL="$(prompt_default 'Let’s Encrypt email' "${CERT_EMAIL:-admin@${BASE_DOMAIN}}")"
-        [[ "$CERT_EMAIL" == *@* && "$CERT_EMAIL" != *[[:space:]]* ]] \
-            || { err "Invalid certificate email."; return 1; }
-    else
-        CERT_EMAIL=""
-    fi
+
+    install_tui_cert_email || return 1
     if [[ "$CERT_MODE" == cloudflare ]]; then
         ensure_cf_token || return 1
     fi
 
-    {
-        echo "安装配置 Install configuration"
-        echo "  mode:       $CERT_MODE"
-        echo "  base:       $BASE_DOMAIN"
-        echo "  public:     $PUBLIC_IP"
-        echo "  gateway:    $GATEWAY_IP"
-        echo "  listeners:  $MIHOMO_LISTEN_IPS"
-        echo "  ECS:        ${CHINA_ECS:-disabled (configure in WebUI)}"
-        echo "  cache:      $CACHE_SIZE"
-    } | card
+    # Review. Every label here has an arm below; a label without one is a menu
+    # entry that does nothing, which is exactly what went unnoticed in
+    # manage_menu for the whole of the monolith work.
+    while true; do
+        {
+            echo "安装配置 Install configuration"
+            echo "  mode:       $CERT_MODE"
+            echo "  base:       $BASE_DOMAIN"
+            echo "  public:     $PUBLIC_IP"
+            echo "  gateway:    $GATEWAY_IP"
+            echo "  listeners:  $MIHOMO_LISTEN_IPS"
+            echo "  email:      ${CERT_EMAIL:-(debug: none)}"
+            echo "  ECS:        ${CHINA_ECS:-disabled (configure in WebUI)}"
+            echo "  cache:      $CACHE_SIZE"
+        } | card
+        choice="$(ask_choice '确认或修改 Confirm or edit' \
+            '确认并继续 Confirm and continue' \
+            '修改 证书模式 Certificate mode' \
+            '修改 主域名 Base domain' \
+            '修改 公网 IPv4 Public IPv4' \
+            '修改 网关 IPv4 Gateway IPv4' \
+            '修改 监听 IPv4 Listener IPv4' \
+            '修改 ACME email' \
+            '取消 Cancel' || true)"
+        case "$choice" in
+            '确认并继续'*) break ;;
+            '修改 证书模式'*)
+                install_tui_cert_mode || return 1
+                # The mode decides whether these are asked for at all, so a
+                # change re-asks rather than leaving an address or a token that
+                # belonged to the previous mode.
+                install_tui_cert_email || return 1
+                if [[ "$CERT_MODE" == cloudflare ]]; then
+                    ensure_cf_token || return 1
+                fi ;;
+            '修改 主域名'*)    install_tui_base_domain || return 1 ;;
+            '修改 公网 IPv4'*) install_tui_public_ip "$PUBLIC_IP" || return 1 ;;
+            '修改 网关 IPv4'*) install_tui_gateway_ip || return 1 ;;
+            '修改 监听 IPv4'*) install_tui_listen_ips "$MIHOMO_LISTEN_IPS" || return 1 ;;
+            '修改 ACME email'*) install_tui_cert_email || return 1 ;;
+            '取消'*|'')
+                warn "Configuration cancelled."
+                return 1 ;;
+        esac
+    done
+
     if [[ "$CERT_MODE" == http-01 ]]; then
         {
             echo "HTTP-01 DNS / network prerequisites"
             echo "  ${CONSOLE_DOMAIN}  A -> ${PUBLIC_IP}"
             echo "  ${DOT_DOMAIN}      A -> ${PUBLIC_IP}"
-            echo "  AAAA: none for all three names (IPv4-only gateway)"
+            echo "  AAAA: none for either name (IPv4-only gateway)"
             echo "  TCP/80: publicly reachable through NAT/security-group rules"
             echo "The installer will wait for 1.1.1.1 to observe these records."
         } | card
