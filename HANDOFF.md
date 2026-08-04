@@ -398,6 +398,26 @@ backend is to write on `@change` — `BackendPortsGrid` patches `/configs` that
 way and the tun/allow-lan toggles beside it do the same. The DNS panel's
 save/revert bar was this fork inventing a second interaction model.
 
+**The two DNS rule rows stopped overlapping, and the core now pins the
+precedence.** A subscription is a rule with `kind=subscription`, so it was
+listed and editable in *both* dialogs, and the kind dropdown could turn a
+hand-written rule into a subscription in place — at which point it vanished
+from the list you were looking at and reappeared in the other one, unannounced.
+Two entry points for one row. They are disjoint now: 解析规则 holds only
+hand-written matchers and offers only the three kinds that are one; 规则订阅
+owns the URL rules and took over the reorder buttons.
+
+Splitting the lists takes away the shared index, and `classify` returns the
+first match — so "does my exception beat the imported list?" would have had no
+visible answer. **Owner decision: every hand-written rule is evaluated before
+every subscription.** `Policy.ordered` groups the slice in `Service.Update`, so
+the panel, the bot and a direct PUT all get the same precedence, and again on
+open, so a gateway configured under the old interleaved model converges at once
+instead of resolving in the old order until someone next edits the policy.
+Grouping the stored document rather than the match loop keeps the existing
+invariant: a rule's position in the slice is still the whole statement of when
+it runs. `gpn/dns/policy_order_test.go` pins all of it.
+
 **Extension logs.** Capture already existed and was well bounded; `Publish` threw
 every event away unless a websocket was already attached. Right for a live tail,
 wrong for a debug log — an operator opens it after something broke, so a stream
