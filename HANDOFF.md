@@ -52,8 +52,8 @@ pass.
 
 ## 0. Acceptance — green
 
-`0.0.62-beta.39` is deployed on `test-env` (core `v1.19.28-monolith.11`, console
-`v3.16.0-monolith.16`), upgraded in place. Acceptance there:
+`0.0.62-beta.40` is deployed on `test-env` (core `v1.19.28-monolith.11`, console
+`v3.16.0-monolith.17`), upgraded in place. Acceptance there:
 
 | Suite | Result |
 | --- | --- |
@@ -432,6 +432,19 @@ setup guide as a page, deriving everything from the origin serving it; the
 default China-direct and GFW-proxy subscriptions, seeded by the core AND
 offered explicitly in the console because a default only ever reaches an absent
 document.
+
+**The overview has two surfaces, and the default configuration shows only one.**
+The DNS card was reported missing twice. It was not missing: `splitOverviewPage`
+is **off by default**, and with it off `renderRoutes` drops the `overview` route
+entirely — the overview is embedded in the settings page, and what renders there
+is `components/settings/overview/OverviewCard.vue`, a **fixed list of two cards
+that does not read `overviewCardOrder`**. So a card added to
+`defaultOverviewCardOrder` renders correctly on `OverviewPage` and is reachable
+only by someone who has turned the split on. Both times I checked the page it
+does render on. **Adding an overview card means touching both surfaces.** The
+fixed list was left fixed on purpose: switching it to `overviewCardOrder` would
+also pull TopologyCharts, ConnectionHistory, ProviderTrafficOverview and
+RuleHitCountCard into the settings page, which is upstream's curation to make.
 
 **One recurring trap, now three deep.** A string printed for a human to act on
 is verified by nothing: the `/ios/` profile URL that 404'd while the probe
