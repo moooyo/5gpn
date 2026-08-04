@@ -11,7 +11,7 @@ Everything is pushed. `beta` is fast-forwarded to `feat/installer-tui`.
 | --- | --- | --- |
 | `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.7` |
 | `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.3` |
-| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.21` |
+| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.25` |
 
 Green: `go test -race ./gpn/...`, all 26 installer suites, and CI on every
 branch push. See [Reproducing the checks](#reproducing-the-checks).
@@ -20,7 +20,7 @@ branch push. See [Reproducing the checks](#reproducing-the-checks).
 
 ## 0. Acceptance — green
 
-`0.0.62-beta.21` is deployed on `test-env`. Acceptance there:
+`0.0.62-beta.25` is deployed on `test-env`. Acceptance there:
 
 | Suite | Result |
 | --- | --- |
@@ -106,18 +106,14 @@ The panel had no reachable address at all. The controller sat on loopback
 `:9090` behind an SSH tunnel; `zash.<base>` was in the hosts block, in five
 reject rules, in the one allow rule carrying the source allowlist, and in the
 controller's certificate path — and nothing ever listened for it. The panel is
-`https://console.<base>/ui/` now, on the one controller, behind the source
-allowlist. `zash.<base>` is deleted rather than aliased: an alias would be a
-second way into the management plane with no second purpose.
+`https://console.<base>/ui/` now, on the one controller. `zash.<base>` is
+deleted rather than aliased: an alias would be a second way into the management
+plane with no second purpose.
 
-The security half is the part worth restating. `zash.<base>` carried the
-allowlist while the console rule was unrestricted, which was harmless only
-because nothing listened for either. Moving the panel onto the console name
-meant the allowlist had to move with it, and
-`mihomo_config_matches_install_config`'s assertion had to **invert** — an
-unrestricted console rule is now the management plane answering every client
-whose DNS points at the gateway. `scripts/migrate-panel-to-console.sh` does the
-four things this requires to an operator-owned config and nothing else.
+The source allowlist moved onto the console name with the panel, and was then
+**removed entirely by owner decision** — see the section below.
+`scripts/migrate-panel-to-console.sh` performs both transitions on an
+operator-owned config and nothing else.
 
 **Four more second-install faults, in a single feature.** The rule from the
 round above held again, unbroken, and each of these reached a real upgrade:
@@ -131,9 +127,9 @@ round above held again, unbroken, and each of these reached a real upgrade:
 - `write_dns_env` **preserved** `DNS_MIHOMO_CONTROLLER`, so an upgraded host
   kept `:9090` while the controller moved to `:443`. Fresh installs had nothing
   to preserve and took the correct default, which is exactly why it was
-  invisible. Every caller reads dns.env, so the readiness probe, `apply_whitelist`
-  and the daemon all dialled a dead port and the install failed at "mihomo did
-  not become ready" with mihomo running fine.
+  invisible. Every caller reads dns.env, so the readiness probe and the daemon
+  dialled a dead port and the install failed at "mihomo did not become ready"
+  with mihomo running fine.
 - The success banner, the regenerate message and **the QR code** all printed
   `/ios/ios-dot.mobileconfig`, a 404. `verify_console_endpoint` probed `/ui/`
   and passed, so the install reported success while the URL a phone would scan
@@ -154,6 +150,79 @@ migration cut out by range rather than matched by name.
 Verified on `test-env` end to end: `/ui/` 200 and both profiles 200 from an
 allowlisted source, `/configs` 401, and the connection refused outright once the
 source is removed from the allowlist. Two consecutive installs are idempotent.
+
+---
+
+## The allowlist is gone, and the trade was stated first
+
+The panel is not source-restricted. Any client that can reach this gateway on
+`:443` and resolves the console name gets `/ui/` and both iOS profiles
+unauthenticated, and the control API behind one bearer secret. On a VPS whose
+interface holds the public address, that means the internet.
+
+This was the owner's call, made against a stated alternative. The facts it was
+made on, so it is not relitigated from memory:
+
+- mihomo's controller has **no source-IP facility at all**. `config.go` offers
+  the secret and CORS; the auth middleware never reads `RemoteAddr`. The rule
+  engine was the only place such a restriction could live.
+- `/ui/*` is mounted **outside** the authenticated group in
+  `hub/route/server.go`, deliberately — an unenrolled phone fetching its profile
+  holds no token.
+- `dns.env.example` used to say access control lived in whitelist.txt "**not in
+  an in-process login-failure lockout**". Removing it leaves neither: no
+  allowlist, no rate limit, no lockout. The secret is 192 bits, so brute force is
+  not the worry; secret *leakage* now has no second factor behind it.
+
+The counter-proposal, recorded because it remains available: seed the allowlist
+with the installing operator's `SSH_CLIENT` address (~3 lines), which removes the
+"locked out immediately after install" friction without giving up the layer.
+
+**What deliberately stayed.** The `IN-TYPE,INNER` exclusion on the console allow
+rule. It is load-bearing for a different reason than the allowlist was: the
+engine dials every captured upstream back through these same rules, so without
+it an extension running operator-supplied JavaScript could name the console and
+reach the management plane. With the allowlist gone it is the *only* qualifier
+left, so the drift check now requires it rather than merely writing it.
+
+**Cost:** 365 deletions against 230 insertions; 220 lines out of install.sh.
+
+**Four more faults, and the pattern shifted.** These were not second-install
+faults — they were *removal* faults, which is a category this page had not seen:
+
+- The removal swept install.sh, the template, six test files and the docs, and
+  missed `.github/workflows/checks.yml`, which both seeded a `whitelist.txt` and
+  asserted the retired rule shape. CI caught it. Same shape as the two zash role
+  lists: enumerate what you remember, and the one you forget is the one that
+  breaks.
+- `mihomo-sniff-cache-regression.sh` injected a hosts mapping by anchoring on
+  `rule-providers:` — the line after `hosts:` only because the allowlist provider
+  lived there. Deleting the allowlist deleted the anchor, and the failure
+  surfaced two assertions later as a curl timeout that named nothing.
+- The drift check learned to reject a surviving `RULE-SET,whitelist`; the message
+  that follows it did not, so a host failing for exactly the reason the migration
+  exists to fix was told to "edit and validate the operator-owned file
+  explicitly". Both read one predicate now.
+- The hint then printed a bare script path. **Nothing in `scripts/` carries the
+  executable bit** — all ten are 100644 in git, because the repo is developed on
+  Windows, and the release tarball is a plain `cp -r scripts`. The installer
+  stopped an upgrade, named the fix, and the fix answered `command not found`.
+
+The last one is the `/ios/` URL again: *a string printed for a human to act on,
+which no machine on the path ever tried.* That is now two instances, and the
+generalisable check is cheap — assert the printed command is runnable, not that
+it says a particular word.
+
+Writing the round-trip test for the third fault immediately found two more: the
+predicate was wrong under `set -e` (`grep ... && return 0` per shape aborts the
+list at the first non-match), and the drift check accepted a `:9090` config
+outright — which is not benign now that dns.env follows the config, because such
+a host is internally consistent and the only thing that breaks is the console
+DIRECT dial landing on `127.0.0.1:443`. That is how beta.19 failed.
+
+**Verified on `test-env`:** migrated, upgraded, `whitelist.txt` removed by
+`retire_mihomo_whitelist`, `/ui/` 200 from an off-box client with no allowlist
+anywhere, `/configs` 401, and all four acceptance suites at 18 / 12 / 18 / 31.
 
 ---
 
@@ -397,11 +466,12 @@ Windows OpenSSH only (`C:\Windows\System32\OpenSSH\ssh.exe`); git bash's ssh
 cannot resolve the name. Keep remote commands straight-line — PowerShell mangles
 `for`/`if` blocks and `$(...)` passed through `ssh`.
 
-It currently holds `0.0.62-beta.21`, upgraded in place from the beta.9 fresh
+It currently holds `0.0.62-beta.25`, upgraded in place from the beta.9 fresh
 install. Backups: `/root/5gpn-pre-freshinstall-20260803T011558Z` and
 `/root/5gpn-pre-beta10-*`; the pre-console config.yaml is at
 `/etc/5gpn/mihomo/config.yaml.pre-console.bak`. `get_public_ip` returns
-`10.0.1.20` there, and `10.0.1.20/32` is the one entry in the panel allowlist.
+`10.0.1.20` there. The panel has no allowlist; it answers any client that can
+reach the box and resolve `console.5gpn.test`.
 
 **Read the journal, not just the installer's exit code.** The interception
 engine failing to load is a `[GPN]`-tagged warning in `journalctl -u mihomo`,
