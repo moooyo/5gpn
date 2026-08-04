@@ -10,8 +10,8 @@ Everything is pushed. `beta` is fast-forwarded to `feat/installer-tui`.
 | Repository | Branch | Published |
 | --- | --- | --- |
 | `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.7` |
-| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.5` |
-| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.28` |
+| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.6` |
+| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.29` |
 
 Green: `go test -race ./gpn/...`, all 26 installer suites, and CI on every
 branch push. See [Reproducing the checks](#reproducing-the-checks).
@@ -20,7 +20,7 @@ branch push. See [Reproducing the checks](#reproducing-the-checks).
 
 ## 0. Acceptance — green
 
-`0.0.62-beta.28` is deployed on `test-env`. Acceptance there:
+`0.0.62-beta.29` is deployed on `test-env`. Acceptance there:
 
 | Suite | Result |
 | --- | --- |
@@ -234,7 +234,24 @@ was correct — the fork was deployed, the core advertised `gpn-dns`,
 `gpn-interception` and `gpn-bot` at version 1, and `UNDERSTOOD_SCHEMA_VERSIONS`
 listed all three.
 
-**The panel never had a backend to ask.** SetupPage's empty-list bootstrap
+**Two bugs produced that, and the second is the one that mattered.**
+
+`initCapabilityDiscovery` was **never called**. Its only mention outside its own
+definition was its own retry timer, and nothing schedules a first attempt. So
+`states` stayed `{}`, `featureState` returned `'unknown'` for every key,
+`featureSupported` was permanently false, and both gates — `renderRoutes` and
+SettingsPage's `menuItems` — filtered the entire 5gpn surface out. **On every
+backend, always.** The lazy route chunks shipped in the bundle and were
+unreachable. It compiled, it linted, and the pages existed; nothing on the path
+could notice, because the thing that was missing was a caller.
+
+It is triggered at module scope now, on `activeUuid`, `immediate`, the same
+shape `version.ts` uses. `scripts/check-capability-probe.mjs` runs before every
+build and asserts that specific property — a general unused-export sweep does
+not catch it, because the function was referenced twice inside its own file and
+reads as used by any reference count.
+
+The second, found first: SetupPage's empty-list bootstrap
 submits its default form, and that default is `http` / `127.0.0.1` / `9090` —
 the shape for "dashboard hosted elsewhere, backend on this machine". 5gpn is the
 inverse: the bundle is served by the controller itself through `external-ui`, so
@@ -535,7 +552,7 @@ Windows OpenSSH only (`C:\Windows\System32\OpenSSH\ssh.exe`); git bash's ssh
 cannot resolve the name. Keep remote commands straight-line — PowerShell mangles
 `for`/`if` blocks and `$(...)` passed through `ssh`.
 
-It currently holds `0.0.62-beta.28`, upgraded in place from the beta.9 fresh
+It currently holds `0.0.62-beta.29`, upgraded in place from the beta.9 fresh
 install. Backups: `/root/5gpn-pre-freshinstall-20260803T011558Z` and
 `/root/5gpn-pre-beta10-*`; the pre-console config.yaml is at
 `/etc/5gpn/mihomo/config.yaml.pre-console.bak`. `get_public_ip` returns
