@@ -10,8 +10,8 @@ Everything is pushed. `beta` is fast-forwarded to `feat/installer-tui`.
 | Repository | Branch | Published |
 | --- | --- | --- |
 | `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.11` |
-| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.18` |
-| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.41` |
+| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.19` |
+| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.42` |
 
 Green: `go test -race ./gpn/...` (**run it in WSL** — Windows has no gcc, so
 `-race` cannot build there), all 28 installer suites, four console build-time
@@ -53,8 +53,8 @@ pass.
 
 ## 0. Acceptance — green
 
-`0.0.62-beta.41` is deployed on `test-env` (core `v1.19.28-monolith.11`, console
-`v3.16.0-monolith.18`), upgraded in place. Acceptance there:
+`0.0.62-beta.42` is deployed on `test-env` (core `v1.19.28-monolith.11`, console
+`v3.16.0-monolith.19`), upgraded in place. Acceptance there:
 
 | Suite | Result |
 | --- | --- |
