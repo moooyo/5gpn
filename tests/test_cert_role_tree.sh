@@ -133,11 +133,23 @@ pass "every certificate-role enumeration names console and not zash"
 # The sweep. A role name reaches the filesystem as a cert path or as a member of
 # a roles=() array; those two shapes are what must never say zash again.
 #
-# The migration is the one exception, and it is exempted by range rather than
-# by pattern: migrate_cert_role_zash_to_console exists precisely to find and
-# rename /etc/5gpn/cert/zash on a host that predates the console, so its whole
-# body is cut out before the sweep runs -- matching its name line by line would
-# exempt only the line that names it, not the lines that do the renaming.
+# It covers tests/ and .github/ too, and it tolerates an escaped slash. Both
+# gaps were real: a *.sh under tests/ went on substituting
+# /etc/5gpn/cert\/zash\/current\/privkey.pem into a rendered fixture long after
+# the template said console -- so that fixture ran with a certificate and a
+# private key from different paths. The directory was out of scope AND the awk
+# escaping would have slipped the pattern even if it had not been, which is why
+# `cert[\\]?/zash` and not `cert/zash`.
+#
+# tests/fixtures/ is exempt: those are frozen copies of what older releases
+# actually shipped, and rewriting them would destroy what they exist to prove.
+# This file is exempt because it names the retired role in order to forbid it.
+#
+# The migration is exempted by range rather than by pattern:
+# migrate_cert_role_zash_to_console exists precisely to find and rename
+# /etc/5gpn/cert/zash on a host that predates the console, so its whole body is
+# cut out before the sweep runs -- matching its name line by line would exempt
+# only the line that names it, not the lines that do the renaming.
 migration_free_install="$(mktemp)"
 awk '
     /^migrate_cert_role_zash_to_console\(\)/ { skip = 1 }
@@ -147,12 +159,15 @@ awk '
 grep -Fq 'migrate_cert_role_zash_to_console()' "$ROOT/install.sh" \
     || fail "the zash->console migration is gone; drop this exemption too"
 
+ZASH_SHAPES='cert[\\]?/zash|CERT_DIR\}/zash|roles=\([^)]*zash'
 zash_sites="$(
-    grep -rn "cert/zash\|CERT_DIR}/zash\|roles=([^)]*zash" \
-        --include='*.sh' --include='*.tmpl' --include='*.example' \
-        "$ROOT/scripts" "$ROOT/etc" 2>/dev/null \
-        | grep -v 'migrate-panel-to-console.sh' || true
-    grep -n "cert/zash\|CERT_DIR}/zash\|roles=([^)]*zash" \
+    grep -rnE "$ZASH_SHAPES" \
+        --include='*.sh' --include='*.tmpl' --include='*.example' --include='*.yml' \
+        "$ROOT/scripts" "$ROOT/etc" "$ROOT/tests" "$ROOT/.github" 2>/dev/null \
+        | grep -v 'migrate-panel-to-console.sh' \
+        | grep -v '/tests/fixtures/' \
+        | grep -v '/tests/test_cert_role_tree.sh' || true
+    grep -nE "$ZASH_SHAPES" \
         "$migration_free_install" 2>/dev/null \
         | sed "s|^|${ROOT}/install.sh:|" || true
 )"

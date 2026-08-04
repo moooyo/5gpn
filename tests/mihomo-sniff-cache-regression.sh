@@ -83,8 +83,16 @@ awk -v cert="$RUNTIME/cert.pem" -v key="$RUNTIME/key.pem" -v listener="$GATEWAY_
     print listener
     next
   }
-  $0 == "rule-providers:" {
+  $0 == "hosts:" {
+    # The origin backend needs a mapping of its own, and this anchors on the
+    # hosts key rather than on whatever happens to follow it. It used to anchor
+    # on "rule-providers:", which was the next line only because the allowlist
+    # provider lived there -- removing the allowlist deleted the anchor, the
+    # injection silently stopped happening, and origin.example.test resolved
+    # nowhere. The symptom was a curl timeout three assertions later.
+    print
     print "  origin.example.test: 127.0.0.4"
+    next
   }
   $0 == "rules:" {
     print
@@ -106,7 +114,7 @@ awk -v cert="$RUNTIME/cert.pem" -v key="$RUNTIME/key.pem" -v listener="$GATEWAY_
     gsub(/__INTERCEPT_UPSTREAM_PASSWORD__/, "ci-module-upstream-password-123456")
     gsub(/127.0.0.1:9090/, "127.0.0.1:19090")
     gsub(/\/etc\/5gpn\/cert\/console\/current\/fullchain.pem/, cert)
-    gsub(/\/etc\/5gpn\/cert\/zash\/current\/privkey.pem/, key)
+    gsub(/\/etc\/5gpn\/cert\/console\/current\/privkey.pem/, key)
 	if ($0 ~ /TLS:.*ports: \[443, 8080, 8443, 5060\]/) {
 	  gsub(/ports: \[443, 8080, 8443, 5060\]/, "ports: [18443, 8080, 8443, 5060]")
 	}
