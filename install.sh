@@ -6135,8 +6135,16 @@ full_install() {
             err "This config predates the current console panel. Migrate it:"
             # The bundle's copy, not the installed one: this check runs before
             # publication, so /opt/5gpn/scripts still holds the previous
-            # release and may not have the script at all.
-            err "  ${SCRIPT_DIR}/scripts/migrate-panel-to-console.sh ${MIHOMO_DIR}/config.yaml --in-place"
+            # release and may not have the script at all -- or, worse, may hold
+            # a version that migrates in the opposite direction.
+            #
+            # Invoked through bash, because nothing in scripts/ carries the
+            # executable bit: the repo is developed on Windows and every one of
+            # them is 100644 in git, so the release tarball -- a plain `cp -r
+            # scripts` -- ships them non-executable. Printing the bare path
+            # gives the operator "command not found" from a command this
+            # installer told them to run.
+            err "  bash ${SCRIPT_DIR}/scripts/migrate-panel-to-console.sh ${MIHOMO_DIR}/config.yaml --in-place"
             err "Then rerun the installer. The script keeps a .pre-console.bak beside the file."
         else
             err "Edit and validate the operator-owned file explicitly before rerunning configuration."

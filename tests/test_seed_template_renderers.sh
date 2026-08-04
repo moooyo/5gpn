@@ -185,6 +185,34 @@ for shape in allowlist controller9090; do
     fi
 done
 
+# A command the installer tells an operator to run must be runnable as printed.
+#
+# It was not: the hint printed the bare script path, and nothing in scripts/
+# carries the executable bit -- every one is 100644 in git, because the repo is
+# developed on Windows, and the release tarball is a plain `cp -r scripts`. So
+# the installer stopped the upgrade, named the fix, and the fix answered
+# "command not found".
+#
+# The rule is the general one rather than "must say bash": either the target is
+# executable in the tree, or the printed command invokes an interpreter.
+hint="$(grep -o 'err "  [^"]*migrate-panel-to-console\.sh[^"]*"' "$root/install.sh" \
+        | head -1 | sed 's/^err "  //; s/"$//')"
+if [[ -z "$hint" ]]; then
+    echo "FAIL: install.sh no longer prints a migration command"
+    FAIL=1
+else
+    hint_script="$(printf '%s\n' "$hint" | tr ' ' '\n' | grep 'migrate-panel-to-console\.sh$' | head -1)"
+    hint_mode="$(git -C "$root" ls-files -s -- scripts/migrate-panel-to-console.sh 2>/dev/null | awk '{print $1}')"
+    if [[ "$hint_mode" == 100755 ]]; then
+        echo "ok: the printed migration command targets an executable script"
+    elif [[ "$hint" == bash\ * || "$hint" == sh\ * ]]; then
+        echo "ok: the printed migration command runs a non-executable script through bash"
+    else
+        echo "FAIL: install.sh prints '${hint_script}' but it is mode ${hint_mode:-unknown} and no interpreter is named"
+        FAIL=1
+    fi
+fi
+
 echo "----"
 if (( FAIL == 0 )); then
     echo "test_seed_template_renderers: PASS"
