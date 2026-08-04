@@ -3353,7 +3353,7 @@ derive_domains() {
 # One line, one reader. Callers that need a dial target must come through here
 # or through the DNS_MIHOMO_CONTROLLER this writes, never through a literal.
 mihomo_configured_controller() {
-    local config="$MIHOMO_DIR/config.yaml" value
+    local config="${1:-$MIHOMO_DIR/config.yaml}" value
     [[ -f "$config" ]] || return 0
     value="$(sed -n 's/^[[:space:]]*external-controller-tls:[[:space:]]*//p' "$config" | head -1)"
     # Cut any trailing comment first, then unquote: doing it the other way round
@@ -5976,6 +5976,19 @@ mihomo_config_matches_install_config() {
     # installer stopped shipping whitelist.txt and the provider that reads it, so
     # a surviving RULE-SET,whitelist is a config mihomo will refuse to load.
     ! grep -Eq "RULE-SET,[[:space:]]*whitelist" "$config" || return 1
+    # The controller must be on 127.0.0.1:443, because that is where the console
+    # DIRECT dial lands: the hosts mapping sends the name to loopback and the
+    # gateway listener's target names port 443. Anywhere else and the rule still
+    # matches, the dial still succeeds against nothing, and the panel simply does
+    # not answer.
+    #
+    # This is asserted here rather than left to fail later because it already
+    # failed later once. dns.env follows the config now, so a :9090 config is
+    # internally consistent -- every caller dials :9090 and mihomo is listening
+    # there -- and the only thing that breaks is the one surface an installer
+    # cannot test from the inside. It surfaced as "mihomo did not become ready"
+    # with mihomo running perfectly well.
+    [[ "$(mihomo_configured_controller "$config")" == "127.0.0.1:443" ]] || return 1
     ! grep -Fq -- "profile.${BASE_DOMAIN}" "$config" || return 1
     grep -Fq -- "${GATEWAY_IP}/32" "$config" || return 1
     while IFS= read -r ip; do
@@ -5983,9 +5996,38 @@ mihomo_config_matches_install_config() {
     done < <(printf '%s\n' "$MIHOMO_LISTEN_IPS" | tr ',' '\n')
 }
 
-# ----------------------------------------------------------------------------
-# Full install
-# ----------------------------------------------------------------------------
+# mihomo_config_predates_console — true when the operator's config carries a
+# shape migrate-panel-to-console.sh knows how to rewrite.
+#
+# This exists so the drift check's rejection and the message that follows it
+# cannot disagree. They did once: the allowlist removal taught
+# mihomo_config_matches_install_config to reject a surviving RULE-SET,whitelist
+# and did not teach the message about it, so a host that failed for exactly the
+# reason the migration exists to fix was told to "edit and validate the
+# operator-owned file explicitly" instead. A caller that knows what is wrong and
+# will not say so is worse than one that does not know.
+#
+# Every shape here must be one the script actually fixes. Adding a shape the
+# script cannot rewrite would send an operator in a circle.
+mihomo_config_predates_console() {
+    local config="${1:-$MIHOMO_DIR/config.yaml}"
+    [[ -f "$config" ]] || return 1
+    # if/then rather than `grep ... && return 0`: under set -e a failing AND-OR
+    # list aborts the caller, so the first shape that did NOT match would end
+    # the function before the shape that did.
+    if grep -Eq '^[[:space:]]*external-controller-tls:[[:space:]]*127\.0\.0\.1:9090[[:space:]]*$' \
+           "$config" 2>/dev/null; then
+        return 0
+    fi
+    if grep -q 'zash\.' "$config" 2>/dev/null; then
+        return 0
+    fi
+    if grep -Eq 'RULE-SET,[[:space:]]*whitelist' "$config" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
 confirm_upgrade_mihomo_reset() {
     [[ -f "${CONF_DIR}/dns.env" && -f "${MIHOMO_DIR}/config.yaml" ]] \
         || { err "upgrade-reset-mihomo requires an existing 5gpn installation."; return 1; }
@@ -6084,15 +6126,13 @@ full_install() {
     mihomo_config_matches_install_config || {
         err "The operator-owned mihomo config does not match the selected domains, gateway, and listener addresses."
         # Name the migration rather than saying "edit it by hand". A config
-        # written by a release before the panel moved onto the console name
-        # fails here for one specific, mechanical reason, and there is a script
-        # that fixes exactly that reason and nothing else. The alternative the
-        # operator would otherwise reach for -- upgrade-reset-mihomo -- replaces
-        # their whole file.
-        if grep -Eq '^[[:space:]]*external-controller-tls:[[:space:]]*127\.0\.0\.1:9090[[:space:]]*$' \
-               "$MIHOMO_DIR/config.yaml" 2>/dev/null \
-           || grep -q 'zash\.' "$MIHOMO_DIR/config.yaml" 2>/dev/null; then
-            err "This config predates the console panel. Migrate it:"
+        # written by a release before the panel moved onto the console name, or
+        # before the source allowlist was removed, fails here for one specific,
+        # mechanical reason, and there is a script that fixes exactly that
+        # reason and nothing else. The alternative the operator would otherwise
+        # reach for -- upgrade-reset-mihomo -- replaces their whole file.
+        if mihomo_config_predates_console; then
+            err "This config predates the current console panel. Migrate it:"
             # The bundle's copy, not the installed one: this check runs before
             # publication, so /opt/5gpn/scripts still holds the previous
             # release and may not have the script at all.

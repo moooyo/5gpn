@@ -117,6 +117,74 @@ else
     FAIL=1
 fi
 
+# Every retired shape must be rejected, recognised, AND fixed -- all three.
+#
+# Rejecting without recognising is what happened on the allowlist removal: a
+# host carrying RULE-SET,whitelist failed the drift check correctly and was then
+# told to "edit and validate the operator-owned file explicitly", naming neither
+# the problem nor the script that fixes it. Recognising without fixing would be
+# worse: the installer would send the operator to a migration that leaves the
+# config exactly as rejected, and they would run it in a circle.
+#
+# So each shape is round-tripped: reject -> recognise -> migrate -> accept.
+migrate="$root/scripts/migrate-panel-to-console.sh"
+check_config() {  # <config> -> "<drift-rc> <predates-rc>"
+    (
+        export INSTALL_SH_LIB_ONLY=1
+        # shellcheck source=../install.sh
+        source "$root/install.sh"
+        MIHOMO_DIR="$(dirname "$1")"
+        CONSOLE_DOMAIN=console.seedcheck.test
+        BASE_DOMAIN=seedcheck.test
+        GATEWAY_IP=10.0.0.1
+        MIHOMO_LISTEN_IPS=10.0.0.1
+        # `cmd; rc=$?` would abort here: install.sh sets -e when sourced, and
+        # both of these are expected to fail for a retired-shape config.
+        local drift=0 predates=0
+        mihomo_config_matches_install_config >/dev/null 2>&1 || drift=$?
+        mihomo_config_predates_console "$1" >/dev/null 2>&1 || predates=$?
+        printf '%s %s' "$drift" "$predates"
+    )
+}
+
+for shape in allowlist controller9090; do
+    shape_dir="$seed_dir/$shape/mihomo"
+    mkdir -p "$shape_dir"
+    case "$shape" in
+        allowlist)
+            # A config from before the allowlist was removed.
+            render_seed \
+                | sed -e 's|^hosts:$|rule-providers:\n  whitelist: {type: file, behavior: ipcidr, format: text, path: ./whitelist.txt}\nhosts:|' \
+                      -e 's|^  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,console.seedcheck.test)),DIRECT$|  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,console.seedcheck.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT|' \
+                > "$shape_dir/config.yaml"
+            grep -Fq 'RULE-SET,whitelist' "$shape_dir/config.yaml" \
+                || { echo "FAIL: could not build the $shape fixture"; FAIL=1; continue; } ;;
+        controller9090)
+            # A config from before the controller moved to :443.
+            render_seed \
+                | sed -e 's|^external-controller-tls: 127.0.0.1:443$|external-controller-tls: 127.0.0.1:9090|' \
+                > "$shape_dir/config.yaml"
+            grep -Fq '127.0.0.1:9090' "$shape_dir/config.yaml" \
+                || { echo "FAIL: could not build the $shape fixture"; FAIL=1; continue; } ;;
+    esac
+
+    read -r drift predates <<<"$(check_config "$shape_dir/config.yaml")"
+    if [[ "$drift" == 0 ]]; then
+        echo "FAIL: the drift check accepts a $shape config it cannot run"; FAIL=1
+    elif [[ "$predates" != 0 ]]; then
+        echo "FAIL: a rejected $shape config is not recognised as migratable"; FAIL=1
+    elif ! bash "$migrate" "$shape_dir/config.yaml" --in-place >/dev/null 2>&1; then
+        echo "FAIL: the migration refused the $shape config it is meant to fix"; FAIL=1
+    else
+        read -r drift predates <<<"$(check_config "$shape_dir/config.yaml")"
+        if [[ "$drift" != 0 ]]; then
+            echo "FAIL: the migration left a $shape config the drift check still rejects"; FAIL=1
+        else
+            echo "ok: a $shape config is rejected, recognised, migrated, then accepted"
+        fi
+    fi
+done
+
 echo "----"
 if (( FAIL == 0 )); then
     echo "test_seed_template_renderers: PASS"
