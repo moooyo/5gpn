@@ -9,12 +9,13 @@ Everything is pushed. `beta` is fast-forwarded to `feat/installer-tui`.
 
 | Repository | Branch | Published |
 | --- | --- | --- |
-| `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.10` |
-| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.15` |
-| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.38` |
+| `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.11` |
+| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.17` |
+| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.40` |
 
-Green: `go test -race ./gpn/...`, all 26 installer suites, four console
-build-time checks, and CI on every branch push. See [Reproducing the checks](#reproducing-the-checks).
+Green: `go test -race ./gpn/...` (**run it in WSL** — Windows has no gcc, so
+`-race` cannot build there), all 28 installer suites, four console build-time
+checks, and CI on every branch push. See [Reproducing the checks](#reproducing-the-checks).
 
 ---
 
