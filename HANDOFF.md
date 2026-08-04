@@ -9,22 +9,50 @@ Everything is pushed. `beta` is fast-forwarded to `feat/installer-tui`.
 
 | Repository | Branch | Published |
 | --- | --- | --- |
-| `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.7` |
-| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.8` |
-| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.31` |
+| `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.10` |
+| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.15` |
+| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.38` |
 
-Green: `go test -race ./gpn/...`, all 26 installer suites, and CI on every
-branch push. See [Reproducing the checks](#reproducing-the-checks).
+Green: `go test -race ./gpn/...`, all 26 installer suites, four console
+build-time checks, and CI on every branch push. See [Reproducing the checks](#reproducing-the-checks).
 
 ---
 
+## Pick up here
+
+Nothing is half-finished; everything below is a next thing, not a loose end.
+`main` is untouched and 60+ commits behind — the owner has not asked for that
+merge.
+
+In the order they are worth doing:
+
+1. **A render smoke test for the console** (vitest + happy-dom, mount each page,
+   assert no throw). Ten console faults this round, all found by the owner
+   because nothing in CI opens a page. Costs three devDependencies.
+2. **Second-install acceptance** — still the top item on the installer side, and
+   still nothing installs, upgrades, then asserts. Nine of ten faults in the
+   earlier round lived in that transition.
+3. **`gpn/engine` request-path tests** — the proxy path, the goja runtime and
+   TLS termination are the largest untested surface, and they are the parts that
+   see live traffic and run operator-supplied JavaScript.
+4. **Unverified despite shipping:** datagram capture against a real browser
+   (migration, MTU, Alt-Svc) and the bot against a real Telegram token.
+5. **Three lifecycle functions with no callers** — `stopBot`, `stopDns`,
+   `stopInterception`. Switching backends does not clear those assemblies. Each
+   `refresh*` guards on `activeUuid`, so the blast radius is small, but it is the
+   same class as the capability probe that was never called.
+
+**Read before touching the console:** the four `npm run build` checks exist
+because each caught something that shipped. Do not weaken one to make a change
+pass.
+
 ## 0. Acceptance — green
 
-`0.0.62-beta.31` is deployed on `test-env`. Acceptance there:
+`0.0.62-beta.38` is deployed on `test-env`. Acceptance there:
 
 | Suite | Result |
 | --- | --- |
-| `acceptance-monolith.sh` | **18 / 18** |
+| `acceptance-monolith.sh` | **19 / 19** |
 | `acceptance-monolith-writes.sh` | **12 / 12** |
 | `acceptance-monolith-extension.sh` | **18 / 18** |
 | `acceptance-monolith-surfaces.sh` | **31 / 31** |
@@ -40,10 +68,12 @@ none of which an *installed* gateway has by design, so they failed forever and
 17/20 was a number nobody could read a regression out of. They are conditional
 now and report `--`.
 
-**What that costs, stated so it is not rediscovered as a surprise:** on a
-gateway with no policy and no subscriptions, nothing proves that a block rule
-produces NXDOMAIN or that a subscription fetch completes. Asserting either needs
-a configured gateway, and no suite requires one. The suite header says this too.
+**Partly retired 2026-08-04.** A fresh gateway now seeds the China-direct and
+GFW-proxy subscriptions, so `2 subscription(s) fetched and live` runs instead of
+reporting `--`, and the suite went 18 -> 19. The block-rule check is still
+conditional: the seeded defaults carry no block intent, so nothing on a default
+gateway proves a block rule returns NXDOMAIN. That one still needs a configured
+gateway and no suite requires one.
 
 ---
 
@@ -320,6 +350,79 @@ way only a person could notice.
 
 ---
 
+## The console round, 2026-08-04 — and where its faults lived
+
+Ten console-side faults in one day. **Every one compiled, typechecked, linted
+and shipped, and every one failed only in a browser.** That is the shape to
+carry forward: the checks this repository is good at cannot see any of them.
+
+**Four made the panel look like it had no 5gpn in it at all:**
+
+- `initCapabilityDiscovery` was **never called** — its only mention outside its
+  own definition was its own retry timer. So `featureSupported` was permanently
+  false and both gates, `renderRoutes` and SettingsPage's `menuItems`, filtered
+  the entire 5gpn surface out on every backend, forever. The pages shipped as
+  lazy chunks nobody could route to.
+- SetupPage's empty-list bootstrap guessed `http://127.0.0.1:9090`. 5gpn serves
+  the bundle from the controller, so all three fields are wrong, it failed
+  silently, and there was no backend to probe.
+- `gpnUpstreamGrammar` documented the upstream spelling `serverName@IP`, and
+  **`@` is vue-i18n's linked-message syntax** — the compile throws during render
+  and blanked the DNS page, reported only as `SyntaxError: 10`.
+- Three snapshot lists could marshal as JSON `null` (Go nil slices) and the
+  console read `.length` off them, so a gateway with no extensions rendered the
+  extensions page into a TypeError.
+
+**Guards, all in `npm run build`:** `check-capability-probe.mjs` (the probe has a
+module-level trigger), `check-i18n-compiles.mjs` (every message through the real
+compiler — 2804 of them), `check-i18n-keys-exist.mjs` (every literal `t('key')`
+resolves in en), `check-built-output.mjs` (the shipped service-worker
+registration handles its own failure). Plus a Go test asserting the snapshot's
+list fields never marshal as null.
+
+**What moved, and the principle behind it.** The owner's rule is that settings
+live in the settings page. So: DNS policy, upstreams and diagnostics became a
+settings category; the three interception toggles moved off the extensions page
+into the panel that had been rendering them as read-only badges; rule
+subscriptions got their own row. The extensions page became tabs
+(已安装 / 扩展市场 / 从 URL 安装 / 日志) with SegmentedControl, and the catalog
+was renamed to the marketplace it is — the entry for adding one had existed all
+along, but nothing on screen used the word, so it was invisible while visible.
+
+**No save buttons.** zashboard's answer for a settings row that writes to the
+backend is to write on `@change` — `BackendPortsGrid` patches `/configs` that
+way and the tun/allow-lan toggles beside it do the same. The DNS panel's
+save/revert bar was this fork inventing a second interaction model.
+
+**Extension logs.** Capture already existed and was well bounded; `Publish` threw
+every event away unless a websocket was already attached. Right for a live tail,
+wrong for a debug log — an operator opens it after something broke, so a stream
+starting at "now" has nothing. The hub retains its ring unconditionally now and
+`GET /gpn/interception/logs` reads it with extension, level and substring
+filters.
+
+**Also shipped:** the DNS overview card (QPS by sampling `total`, cache hit rate,
+decision mix, upstream health) built from zashboard's own overview pieces; the
+setup guide as a page, deriving everything from the origin serving it; the
+default China-direct and GFW-proxy subscriptions, seeded by the core AND
+offered explicitly in the console because a default only ever reaches an absent
+document.
+
+**One recurring trap, now three deep.** A string printed for a human to act on
+is verified by nothing: the `/ios/` profile URL that 404'd while the probe
+checked `/ui/`, the migration command that answered `command not found` because
+nothing in `scripts/` has the executable bit, and the banner that printed
+`DNS_API_TOKEN` when the panel takes `DNS_MIHOMO_SECRET`.
+
+**And one that is not fixed.** I cannot render these pages. Every console fault
+this round was found by the owner, not by me. The cheap generalisation — a
+vitest + happy-dom smoke test that mounts each page and asserts it does not
+throw — would have caught the i18n compile, the null `.length`, and arguably the
+probe. It was declined this round to avoid three devDependencies and rebase
+friction on the fork. **It is the highest-value thing left on the console side.**
+
+---
+
 ## 1. The installer TUI — done
 
 `manage_menu` is a tab strip now: 概览 / 服务 / 证书 / 网络 / 危险操作 across the
@@ -514,6 +617,57 @@ wsl -e bash -lc "cd /mnt/d/Code/worktrees/mihomo-5gpn-monolith \
   && CGO_ENABLED=1 go test -race ./gpn/... -count=1"
 ```
 
+**Console** — the fork is at `D:/Code/worktrees/zashboard-5gpn-console`. Its
+remote for our fork is **`fork`**, not `origin`; `origin` is upstream
+Zephyruso/zashboard and pushing there fails.
+
+```
+npm run type-check      # vue-tsc; plain tsc cannot resolve .vue
+npm run build           # runs the four checks first, then vite
+```
+
+The four checks are `scripts/check-{capability-probe,i18n-compiles,i18n-keys-exist,built-output}.mjs`.
+`check-built-output.mjs` runs AFTER vite because it inspects `dist/`.
+
+**Release loop, all three repositories.** Each artifact is pinned by version AND
+digest, and the two must move together or the installer downloads the right file
+and refuses it.
+
+```
+# console
+cd zashboard-5gpn-console && git push fork feat/5gpn-console
+git tag v3.16.0-monolith.N && git push fork v3.16.0-monolith.N   # triggers 5gpn-release.yml
+curl -fsSL -o z.zip https://github.com/moooyo/zashboard/releases/download/<tag>/dist.zip
+sha256sum z.zip                                                   # -> ZASH_SHA256
+
+# core: built locally, there is no CI release for it
+cd mihomo-5gpn-monolith
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 go build -tags with_gvisor -trimpath   -ldflags '-X "github.com/metacubex/mihomo/constant.Version=<tag>"             -X "github.com/metacubex/mihomo/constant.BuildTime=<date -u>" -w -s -buildid='   -o mihomo-linux-amd64-compatible .
+gzip -k …  &&  gh release create <tag> --repo moooyo/mihomo --prerelease <asset>.gz
+
+# installer: bump BOTH install.sh and .github/workflows/checks.yml for the core
+bash tests/verify-artifact-pins.sh
+git push origin feat/installer-tui:beta && git tag 0.0.62-beta.N && git push origin 0.0.62-beta.N
+```
+
+`MIHOMO_VERSION`/`MIHOMO_SHA256` appear in **two** files — `install.sh` and
+`.github/workflows/checks.yml`. Bumping only one fails CI's seed gate.
+
+**Deploying to test-env.** Re-fetch `quick-install.sh` **by commit SHA**, not by
+branch: `raw.githubusercontent.com` caches a branch for minutes and you will
+silently run the previous revision.
+
+```
+ssh test-env 'curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/<sha>/quick-install.sh -o /tmp/qi.sh && sudo bash /tmp/qi.sh --beta'
+```
+
+Windows OpenSSH only. Keep remote commands straight-line — heredocs through
+`ssh` from PowerShell get mangled; write the script locally and `scp` it.
+
+**After deploying, hard-reload the browser.** zashboard is a PWA
+(`registerType: 'autoUpdate'`) and will otherwise serve the previously cached
+bundle, which reads exactly like "the fix did not land".
+
 **Installer suites** — `scripts/run-suites.sh` makes the LF copy and runs them
 under Linux:
 
@@ -575,7 +729,7 @@ Windows OpenSSH only (`C:\Windows\System32\OpenSSH\ssh.exe`); git bash's ssh
 cannot resolve the name. Keep remote commands straight-line — PowerShell mangles
 `for`/`if` blocks and `$(...)` passed through `ssh`.
 
-It currently holds `0.0.62-beta.31`, upgraded in place from the beta.9 fresh
+It currently holds `0.0.62-beta.38`, upgraded in place from the beta.9 fresh
 install. Backups: `/root/5gpn-pre-freshinstall-20260803T011558Z` and
 `/root/5gpn-pre-beta10-*`; the pre-console config.yaml is at
 `/etc/5gpn/mihomo/config.yaml.pre-console.bak`. `get_public_ip` returns
