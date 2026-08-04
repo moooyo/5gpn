@@ -10,8 +10,8 @@ Everything is pushed. `beta` is fast-forwarded to `feat/installer-tui`.
 | Repository | Branch | Published |
 | --- | --- | --- |
 | `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.7` |
-| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.6` |
-| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.29` |
+| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.8` |
+| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.31` |
 
 Green: `go test -race ./gpn/...`, all 26 installer suites, and CI on every
 branch push. See [Reproducing the checks](#reproducing-the-checks).
@@ -20,7 +20,7 @@ branch push. See [Reproducing the checks](#reproducing-the-checks).
 
 ## 0. Acceptance — green
 
-`0.0.62-beta.29` is deployed on `test-env`. Acceptance there:
+`0.0.62-beta.31` is deployed on `test-env`. Acceptance there:
 
 | Suite | Result |
 | --- | --- |
@@ -290,6 +290,29 @@ run, which is better than a trap: the migration failure names a script path
 *inside* that directory, and cleaning up at exit would delete the file the
 operator was just told to run.
 
+**Then the page it unlocked was blank**, with `SyntaxError: 10` and nothing else
+— @intlify strips its error text from production builds, so the code is the
+whole message. 10 is `INVALID_LINKED_FORMAT`, and the cause was
+`gpnUpstreamGrammar`, the help text that documents the upstream spelling:
+`serverName@IP` is DoT, `https://host/path@IP` is DoH. **`@` is vue-i18n's
+linked-message syntax**, so compiling that message throws, and the throw happens
+during render. All four locales carried it. The literal escape is `{'@'}`.
+
+Nothing could catch it as written: valid TypeScript, typechecks, lints, ships,
+and the only place it fails is the one page that renders it. It also survived a
+grep for quoted values containing `@`, because prettier had wrapped the key and
+the value onto separate lines. So the check runs **every message through the
+compiler vue-i18n uses at runtime** — 2548 across four locales — rather than
+linting for a character.
+
+And a third console error on every load: the service worker cannot register
+behind the self-signed `CERT_MODE=debug` certificate — a browser lets an
+operator click through the warning to view a page but not to register a worker —
+and vite-plugin-pwa's injected `registerSW.js` calls `register()` with no catch,
+so it surfaced as an uncaught `SecurityError` with a stack. Noise that
+guaranteed is what the next real error gets scrolled past. The panel owns the
+registration now and prints one line.
+
 **The lesson, now three deep:** a string printed for a human to act on is not
 verified by anything on the path. A URL, a command, a credential. Each was
 produced by working code, next to a probe that passed, and each was wrong in a
@@ -552,7 +575,7 @@ Windows OpenSSH only (`C:\Windows\System32\OpenSSH\ssh.exe`); git bash's ssh
 cannot resolve the name. Keep remote commands straight-line — PowerShell mangles
 `for`/`if` blocks and `$(...)` passed through `ssh`.
 
-It currently holds `0.0.62-beta.29`, upgraded in place from the beta.9 fresh
+It currently holds `0.0.62-beta.31`, upgraded in place from the beta.9 fresh
 install. Backups: `/root/5gpn-pre-freshinstall-20260803T011558Z` and
 `/root/5gpn-pre-beta10-*`; the pre-console config.yaml is at
 `/etc/5gpn/mihomo/config.yaml.pre-console.bak`. `get_public_ip` returns
