@@ -26,9 +26,13 @@ merge.
 
 In the order they are worth doing:
 
-1. **A render smoke test for the console** (vitest + happy-dom, mount each page,
-   assert no throw). Ten console faults this round, all found by the owner
-   because nothing in CI opens a page. Costs three devDependencies.
+1. **A render smoke test for the console** — mount each page, assert no throw,
+   and assert no sidebar route row falls outside the sidebar's box at a short
+   viewport. Eleven console faults so far, all found by the owner because
+   nothing in CI opens a page. happy-dom is enough for the first half and **not**
+   for the second: the eleventh fault was pure layout, so the height assertion
+   needs a real engine (the CDP harness that found it is described below, under
+   "The sidebar dropped its last tab").
 2. **Second-install acceptance** — still the top item on the installer side, and
    still nothing installs, upgrades, then asserts. Nine of ten faults in the
    earlier round lived in that transition.
@@ -420,6 +424,52 @@ vitest + happy-dom smoke test that mounts each page and asserts it does not
 throw — would have caught the i18n compile, the null `.length`, and arguably the
 probe. It was declined this round to avoid three devDependencies and rebase
 friction on the fork. **It is the highest-value thing left on the console side.**
+
+---
+
+## The sidebar dropped its last tab, and the scrollbar that would have said so
+
+Reported 2026-08-04: after a refresh the sidebar is one tab short, and clicking
+another tab makes it correct. It was `Settings`, the last row.
+
+**Nothing in the DOM was wrong.** Twenty consecutive reloads against `test-env`
+gave eight rows every time, each with its icon, at every viewport from 1440×900
+to 1280×500, collapsed and expanded, on every route, with the tab indicator
+aligned. The capability probe does add the three 5gpn tabs a frame after first
+paint — 13–21 ms, measured over twenty reloads — but that is not clickable, and
+it is all three at once, never one.
+
+**`.sidebar` is a scroll container whose scrollbar is hidden.** `overflow-x-hidden`
+makes `overflow-y` compute to `auto`; `.scrollbar-hidden` then removes the
+scrollbar. So "does not fit" does not render as "scroll me". It renders as "not
+there". And nothing in the column could shrink — nav, statistics and carousel all
+carried the default `min-height: auto` — so below roughly 677 px of window height
+the column exceeded its box and the excess was cut, bottom first: statistics,
+then, under ~304 px, the last route row. The tell was in the owner's own
+screenshots: **neither one showed the statistics block**, which a 493 px render
+shows plainly.
+
+**Navigation is the one block that must never be the one to go** — losing a row
+means losing the only way to reach a page. The secondary blocks now declare
+`min-h-0` and scroll themselves. Measured against the live gateway: sidebar
+overflow was 176 px at a 493 px window, and is 0 down to 360 px, with all eight
+rows inside the box down to 310 px. Below that the window is shorter than the
+navigation itself and something has to scroll.
+
+Two more came out of the same file. The list carried `h-full`, pinning it to the
+nav's height: daisyUI's `.menu` is `flex-flow: column wrap`, so a squeezed nav
+would fold rows into a second column that `overflow-x-hidden` then clipped — and
+because the `ul`'s size never changed, `useResizeObserver` could never fire. And
+the indicator watch did not include `renderRoutes`, so nothing re-measured the
+highlight when the 5gpn tabs arrived a frame late.
+
+**How it was found, and the tool that is now available.** Headless Chrome over
+CDP, driving the deployed console with a seeded backend, then serving a locally
+built `dist/` over the real origin through `Fetch.fulfillRequest` so the fix
+could be verified against the live gateway without deploying anything. That is
+the second exhibit for the open item above: **this was a layout fault, so
+happy-dom would not have caught it.** A render check for the console needs real
+layout.
 
 ---
 
