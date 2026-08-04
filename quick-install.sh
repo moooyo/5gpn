@@ -108,6 +108,37 @@ source_dir_is_owned() {
     marker_matches "$_QI_SOURCE_DIR/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE"
 }
 
+# sweep_stale_source_dirs — remove the private directories older runs left in
+# /tmp, except the one just created.
+#
+# This entrypoint `exec`s install.sh, which replaces the shell that would have
+# held an EXIT trap, so nothing here can clean up after itself. Sweeping at the
+# START of the next run is not a workaround for that: it is better, because the
+# failure message install.sh prints when a config needs migrating names a script
+# path *inside* this directory. Removing it at exit would delete the file the
+# operator was just told to run. Keeping it until the next install is exactly
+# the window in which it is still useful, and bounds the accumulation at one.
+#
+# Only directories carrying this entrypoint's own ownership marker are touched:
+# /tmp is world-writable, and a name match alone would let anyone hand root an
+# rm -rf target.
+sweep_stale_source_dirs() {
+    local keep="$1" dir
+    for dir in /tmp/5gpn-installer.*; do
+        [[ -d "$dir" && ! -L "$dir" ]] || continue
+        [[ "$dir" != "$keep" ]] || continue
+        [[ "$(cat "$dir/$SOURCE_MARKER" 2>/dev/null)" == "$SOURCE_MARKER_VALUE" ]] || continue
+        rm -rf -- "$dir" 2>/dev/null || true
+    done
+    # Bundle downloads clean up on every branch of fetch_bundle; a survivor means
+    # an abnormal exit, and it is a plain file with no marker to check.
+    local f
+    for f in /tmp/5gpn-installer.tgz.* /tmp/5gpn-checksums.txt.*; do
+        [[ -f "$f" && ! -L "$f" ]] || continue
+        rm -f -- "$f" 2>/dev/null || true
+    done
+}
+
 # The optional argument is an internal seam used by safety tests. Production
 # always passes an empty value and therefore uses a private mktemp directory;
 # SRC is deliberately not a public environment override.
@@ -116,6 +147,7 @@ prepare_source_dir() {
     if [[ -z "$requested" ]]; then
         canonical="$(mktemp -d /tmp/5gpn-installer.XXXXXX)" \
             || { red "Could not allocate a temporary installer directory."; return 1; }
+        sweep_stale_source_dirs "$canonical"
     else
         canonical="$(canonical_path "$requested")" \
             || { red "Invalid installer source path."; return 1; }

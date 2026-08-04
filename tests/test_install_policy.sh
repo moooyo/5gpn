@@ -168,10 +168,16 @@ grep -Fq 'Pre-v5 dns.env contains retired DNS_EGRESS_RESOLVER' "$INSTALL" \
     || fail "installer does not reject the retired single egress resolver explicitly"
 grep -Eq '^[[:space:]]*DNS_EGRESS_RESOLVER=' "$INSTALL" \
     && fail "installer still persists the retired single egress resolver"
+# The banner must print the credential zashboard's backend dialog actually
+# takes. It printed DNS_API_TOKEN, and the two are different values -- so an
+# operator pasting what the installer showed them got 401 from a panel that was
+# working perfectly. Same class as the /ios/ URL and the bare migration path: a
+# string printed for a human that no machine on the path ever tried.
 full_install_fn="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
-printf '%s' "$full_install_fn" | grep -Fq 'echo "Console token: ${DNS_API_TOKEN}"' \
-    && ! printf '%s' "$full_install_fn" | grep -Fq 'token_was_present' \
-    || fail "successful interactive installs do not always show the current console token"
+printf '%s' "$full_install_fn" | grep -Fq 'DNS_MIHOMO_SECRET' \
+    || fail "the success banner does not show the controller secret the panel needs"
+printf '%s' "$full_install_fn" | grep -Fq 'DNS_API_TOKEN' \
+    && fail "the success banner still shows the retired DNS_API_TOKEN"
 
 # --- The UI is the zashboard bundle, published where the unit can read it ---
 # There is one interface and one origin now. The console SPA and its release

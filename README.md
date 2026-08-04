@@ -173,10 +173,10 @@ dig @127.0.0.1 -p 5353 example.com A
 
 把示例域名和地址替换为实际值；不支持 `+tls` 的旧版 `dig` 应跳过第一条 DNS 命令。公网 plain DNS `:53` 失败、远端无法访问 `:5353`、fresh install 中 `5gpn-intercept.service` 为 inactive 都是预期行为。完整实机清单见 [tests/integration-smoke.md](tests/integration-smoke.md)；它只应在一次性或明确指定的 Linux 网关上执行。
 
-然后访问 `https://console.<base>/`。SPA 资源和两个 iOS profile 下载端点是公开的，但每个 `/api/*` 请求都需要 Console bearer token；前端登录页本身不是安全边界。需要在主机上找回 token 时：
+然后访问 `https://console.<base>/ui/`。面板和两个 iOS profile 下载端点是公开的，但每个 `/api/*` 请求都需要 mihomo controller secret；前端登录页本身不是安全边界。首次打开时后端表单已按当前源填好协议/主机/端口，只需粘贴 secret。需要在主机上找回它时：
 
 ```bash
-sudo sed -n 's/^DNS_API_TOKEN=//p' /etc/5gpn/dns.env
+sudo sed -n 's/^DNS_MIHOMO_SECRET=//p' /etc/5gpn/dns.env
 ```
 
 - **Android**：在 Console 的 Setup Guide 中查看 `dot.<base>`，然后填入系统 Private DNS。现代 Android 应用通常默认不信任用户安装的 CA，因此项目不提供 Android MITM CA 安装流程。

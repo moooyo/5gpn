@@ -210,12 +210,28 @@ grep -Fq 'mv -Tf -- "$staged_profile" "$profile_path"' "$IOSGEN" \
 grep -Eq '(index\.html|ios\.css|ios\.js)' "$IOSGEN" \
     && fail "gen-ios-profile.sh: standalone iOS landing assets must stay removed"
 
-# ===== rotate_token — restart, never reload/SIGHUP =====
+# ===== rotate_token — the console credential, and the unit that serves it =====
+#
+# It rotated DNS_API_TOKEN and restarted 5gpn-dns: a credential nothing reads,
+# and a unit the monolith deleted, with the failure swallowed by 2>/dev/null. The
+# entry reported success while the panel's actual credential was untouched.
 rt="$(sed -n '/^rotate_token()/,/^}/p' "$INSTALL")"
-printf '%s' "$rt" | grep -Fq 'systemctl restart 5gpn-dns' \
-    || fail "install.sh: rotate_token must 'systemctl restart 5gpn-dns' (token read at startup)"
-printf '%s' "$rt" | grep -Eq 'systemctl reload 5gpn-dns|kill -HUP' \
-    && fail "install.sh: rotate_token must not use reload/SIGHUP (insufficient for a token change)"
+printf '%s' "$rt" | grep -Fq 'DNS_API_TOKEN' \
+    && fail "install.sh: rotate_token still rotates the retired DNS_API_TOKEN"
+printf '%s' "$rt" | grep -Fq '5gpn-dns' \
+    && fail "install.sh: rotate_token still restarts the deleted 5gpn-dns unit"
+printf '%s' "$rt" | grep -Fq 'persist_mihomo_secret' \
+    || fail "install.sh: rotate_token does not mirror the new secret into dns.env"
+printf '%s' "$rt" | grep -Fq 'systemctl restart mihomo' \
+    || fail "install.sh: rotate_token must restart mihomo (the secret is read when the router is built)"
+printf '%s' "$rt" | grep -Eq 'systemctl reload mihomo|kill -HUP' \
+    && fail "install.sh: rotate_token must not use reload/SIGHUP (insufficient for a secret change)"
+# The live config is rewritten atomically, or not at all: a half-written
+# config.yaml is a gateway that will not start.
+printf '%s' "$rt" | grep -Fq 'mktemp "${config}.XXXXXX"' \
+    || fail "install.sh: rotate_token does not stage the rotated config beside it"
+printf '%s' "$rt" | grep -Fq 'mv -f -- "$tmp" "$config"' \
+    || fail "install.sh: rotate_token does not publish the rotated config by rename"
 
 # ===== Single config file: dns.env is the ONE source of truth =====
 # There must be NO per-key .state file read/write (a bare `.cache_size` mention in

@@ -180,8 +180,8 @@ MIHOMO_SHA256="ce86d718efcc8a699652d6ea4af7df1be49ffa6ec8511522948493e66918d2d9"
 # a drift here fails at install time on a config the running service accepts.
 MIHOMO_SAFE_PATHS="/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui"
 ZASH_REPO="moooyo/zashboard"
-ZASH_VERSION="v3.16.0-monolith.3"        # our fork's dist.zip, built from feat/5gpn-console
-ZASH_SHA256="c3af6589f983e2b16cda8c6b554c6245d187b202f3ef20027a5ec1efbec2667c"
+ZASH_VERSION="v3.16.0-monolith.4"        # our fork's dist.zip, built from feat/5gpn-console
+ZASH_SHA256="7ec4955b9f6d8dc87b803f5888e7bacf5ada31475378d166d84b4470366db6d2"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
@@ -205,14 +205,14 @@ DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
 # upgraded host carries five dns.env lines nothing reads. Naming them here is
 # what strips them; dropping them from this list instead would make an
 # upgraded dns.env fail validation on a key this installer wrote itself.
-readonly DNS_ENV_RETIRED_KEYS="DNS_CHINA DNS_CHINA_0X20 DNS_TRUST DNS_WEB_DIR DNS_ZASH_DIR DNS_ZASH_LISTEN DNS_WHITELIST_FILE \
+readonly DNS_ENV_RETIRED_KEYS="DNS_CHINA DNS_CHINA_0X20 DNS_TRUST DNS_WEB_DIR DNS_ZASH_DIR DNS_ZASH_LISTEN DNS_WHITELIST_FILE DNS_API_TOKEN \
 TGBOT_TOKEN TGBOT_ADMINS DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS DNS_MARKETPLACES_FILE \
 DNS_ZASH_CERT DNS_ZASH_KEY"
 
 readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_LISTEN_API DNS_CERT DNS_KEY DNS_WEB_CERT DNS_WEB_KEY DNS_CONSOLE_CERT DNS_CONSOLE_KEY \
 DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL DNS_UPSTREAMS \
 DNS_CHINA_ECS DNS_ECS_FILE DNS_RULES_DIR DNS_CHNROUTE DNS_EGRESS_BROKER \
-DNS_SUBSCRIPTIONS DNS_POLICY_RULES DNS_API_TOKEN DNS_API_RATE DNS_API_BURST DNS_MIHOMO_CONTROLLER DNS_MIHOMO_SECRET \
+DNS_SUBSCRIPTIONS DNS_POLICY_RULES DNS_API_RATE DNS_API_BURST DNS_MIHOMO_CONTROLLER DNS_MIHOMO_SECRET \
 DNS_MIHOMO_CONFIG DNS_INTERCEPT_CONFIG WWW_DIR \
 DNS_CACHE_SIZE DNS_MAX_INFLIGHT DNS_TTL_MIN DNS_TTL_MAX DNS_QUERY_TIMEOUT \
 DNS_STATS_FILE DNS_HEARTBEAT_URL DNS_HEARTBEAT_INTERVAL"
@@ -3613,7 +3613,7 @@ manage_action() {
             run_management_with_install_and_cert_lock regen_ios ;;
         "设置 Cloudflare Token Set Cloudflare token")
             run_management_with_install_and_cert_lock set_cf_token ;;
-        "轮换控制台令牌 Rotate console token")
+        "轮换控制台 secret Rotate console secret")
             run_management_with_install_lock rotate_token ;;
         "重置 mihomo 配置 Reset mihomo config")
             if ask_yesno "确认备份并重置 operator-owned mihomo config?"; then
@@ -3660,7 +3660,7 @@ manage_menu() {
                 # sessions, and a list that mixed them with "show status" made
                 # the cursor pass over them on the way to something harmless.
                 manage_screen "危险操作" manage_screen_overview \
-                    "轮换控制台令牌 Rotate console token" \
+                    "轮换控制台 secret Rotate console secret" \
                     "重置 mihomo 配置 Reset mihomo config" \
                     "卸载 Uninstall" || break ;;
             "退出 Quit"|"") break ;;
@@ -4963,19 +4963,15 @@ write_dns_env() {
     [[ -d "$CONF_DIR" && ! -L "$CONF_DIR" ]] \
         || { err "Configuration root disappeared before dns.env publication."; return 1; }
 
-    # DNS_API_TOKEN: reuse an existing token across re-installs (never rotate a
-    # working token); otherwise generate one.
+    # There is one console credential and it is the mihomo controller secret.
+    # DNS_API_TOKEN was the retired gpn-dns control server's, and nothing has
+    # read it since that process was deleted -- not the core, not zashboard, not
+    # a script. It is generated nowhere now and retired in the schema.
     # Read current values from the single config file (dns.env). Secrets + tuning
     # knobs are preserved across a re-install; caller environment is ignored.
-    local existing_token existing_china existing_trust
-    existing_token="$(cfg_get DNS_API_TOKEN)"
+    local existing_china existing_trust
     existing_china="$(cfg_get DNS_CHINA)"
     existing_trust="$(cfg_get DNS_TRUST)"
-	DNS_API_TOKEN="$existing_token"
-	if [[ -z "$DNS_API_TOKEN" ]]; then
-		DNS_API_TOKEN="$(openssl rand -hex 32)" \
-			|| { err "Could not generate DNS_API_TOKEN."; return 1; }
-	fi
     # Upstream groups are seeded into upstreams.json (see seed_upstreams_json),
     # not written here. existing_china/existing_trust are read only to carry a
     # pre-existing dns.env value forward on the first upgrade past this change,
@@ -5107,7 +5103,6 @@ DNS_POLICY_RULES=${policy_rules}
 # Binds LOOPBACK :443 directly: mihomo owns the public :443 socket and routes
 # console.<base> to this listener. Do not bind the daemon itself publicly.
 DNS_LISTEN_API=127.0.0.1:443
-DNS_API_TOKEN=${DNS_API_TOKEN}
 DNS_API_RATE=${api_rate}
 DNS_API_BURST=${api_burst}
 
@@ -5629,56 +5624,68 @@ set_dns_env_kv() {
     persisted_dns_env_is_safe && validate_dns_env_schema
 }
 
-# Call the live, bearer-authenticated control API on its loopback listener.
-# The response body is written to the caller-provided file; stdout contains only
-# the HTTP status so callers can distinguish validation (400), availability
-# (503), and persistence (500) failures without parsing human text. --insecure
-# is limited to this loopback hop because the listener certificate names
-# console.<base>, not 127.0.0.1.
-tgbot_api_call() {
-    local method="$1" data_file="$2" response_file="$3" token auth_file rc=0
-    token="$(cfg_get DNS_API_TOKEN)"
-    [[ -n "$token" ]] || { err "DNS_API_TOKEN is missing from ${CONF_DIR}/dns.env; cannot authenticate the local control API."; return 1; }
-    [[ "$token" != *$'\n'* && "$token" != *$'\r'* ]] \
-        || { err "DNS_API_TOKEN contains a newline; refusing to construct an HTTP header."; return 1; }
-    auth_file="$(mktemp)" || return 1
-    chmod 600 "$auth_file" || { rm -f -- "$auth_file"; return 1; }
-    printf 'Authorization: Bearer %s\n' "$token" > "$auth_file" \
-        || { rm -f -- "$auth_file"; return 1; }
-
-    # NewBot performs getMe plus webhook preflight synchronously; allow that
-    # bounded validation to finish so curl cannot time out while the server is
-    # still committing a change the CLI would mistakenly treat as rejected.
-    local -a args=(--silent --show-error --insecure --noproxy '*' --connect-timeout 10 --max-time 90
-        --request "$method" -H "@${auth_file}"
-        -o "$response_file" -w '%{http_code}')
-    if [[ -n "$data_file" ]]; then
-        args+=(-H 'Content-Type: application/json' --data-binary "@${data_file}")
-    fi
-    curl "${args[@]}" https://127.0.0.1/api/tgbot || rc=$?
-    rm -f -- "$auth_file"
-    return "$rc"
-}
-
-# rotate_token generates a fresh DNS_API_TOKEN, writes it into dns.env, and
-# restarts 5gpn-dns so the new token takes effect (the control server reads the
-# token at startup, so a SIGHUP reload is NOT enough — a restart is required).
-# The old token stops working immediately; browsers must re-login with the new
-# one. Mitigates the "token never rotates" exposure of the localStorage-held
-# bearer credential.
+# rotate_token replaces the console credential — the mihomo controller secret.
+#
+# It rotated DNS_API_TOKEN and restarted 5gpn-dns. Both belonged to the control
+# server the monolith deleted: nothing has read that token since, and the unit
+# has not existed for as long, with the failure swallowed by `2>/dev/null`. So
+# the menu entry reported "old token invalid immediately, log in with the new
+# one" while the credential the panel actually takes was never touched.
+#
+# The secret lives in the operator-owned config.yaml and is mirrored into
+# dns.env. config.yaml is theirs and ordinary runs preserve it byte-for-byte,
+# but this is an explicit operator command whose entire purpose is to change
+# that one line, so rewriting it here is the point rather than a violation.
+#
+# mihomo reads the controller secret when it builds the router, so the restart
+# is required and is not free: it is the data plane too, and client traffic
+# drops for its duration. Said out loud rather than discovered.
 rotate_token() {
     check_root
-    [[ -t 0 && -t 1 ]] || { err "Token rotation requires an interactive TTY; refusing to write a secret to logs."; return 1; }
-    local envf="${CONF_DIR}/dns.env"
-    [[ -f "$envf" ]] || { err "${envf} not found (run a full install first)."; exit 1; }
-    local new; new="$(openssl rand -hex 32)"
-    set_dns_env_kv "$envf" DNS_API_TOKEN "$new"
-    systemctl restart 5gpn-dns 2>/dev/null || warn "could not restart 5gpn-dns (check: journalctl -u 5gpn-dns)."
+    [[ -t 0 && -t 1 ]] || { err "Secret rotation requires an interactive TTY; refusing to write a secret to logs."; return 1; }
+    local envf="${CONF_DIR}/dns.env" config="${MIHOMO_DIR}/config.yaml"
+    [[ -f "$envf" ]] || { err "${envf} not found (run a full install first)."; return 1; }
+    [[ -f "$config" ]] || { err "${config} not found (run a full install first)."; return 1; }
+    grep -qE "^secret:" "$config" \
+        || { err "No 'secret:' line in ${config}; refusing to guess where the controller credential lives."; return 1; }
+
+    local new
+    new="$(openssl rand -base64 24)" \
+        || { err "Could not generate a controller secret."; return 1; }
+    # base64 can end in '=' and contains '/' and '+'; single-quoted YAML carries
+    # all three, and the generator cannot emit a single quote, so the value needs
+    # no escaping. Assert rather than assume.
+    [[ "$new" != *"'"* ]] \
+        || { err "Generated secret contains a quote; refusing to write it unescaped."; return 1; }
+
+    local tmp
+    tmp="$(mktemp "${config}.XXXXXX")" || return 1
+    # Same-directory rename, so the config is the old one or the new one and
+    # never a half-written file the core will not start on.
+    if ! awk -v secret="$new" '
+        !done && /^secret:/ { print "secret: " "'"'"'" secret "'"'"'"; done = 1; next }
+        { print }
+    ' "$config" > "$tmp"; then
+        rm -f -- "$tmp"
+        err "Could not render the rotated mihomo config."
+        return 1
+    fi
+    grep -qF "secret: '${new}'" "$tmp" \
+        || { rm -f -- "$tmp"; err "The rotated config does not carry the new secret; live config unchanged."; return 1; }
+    chown --reference="$config" "$tmp" 2>/dev/null || true
+    chmod --reference="$config" "$tmp" 2>/dev/null || chmod 0640 "$tmp"
+    mv -f -- "$tmp" "$config" \
+        || { rm -f -- "$tmp"; err "Could not publish the rotated mihomo config."; return 1; }
+    sync -f "$MIHOMO_DIR" 2>/dev/null || true
+
+    persist_mihomo_secret "$new" || return 1
+    systemctl restart mihomo 2>/dev/null \
+        || warn "could not restart mihomo (check: journalctl -u mihomo); the new secret is on disk but not live."
     {
-        echo "控制台 token 已轮换（旧 token 立即失效）"
+        echo "控制台 secret 已轮换（旧 secret 立即失效）"
         echo ""
-        echo "New token: ${new}"
-        echo "(浏览器需用新 token 重新登录；仅显示一次)"
+        echo "New secret: ${new}"
+        echo "(在 zashboard 的后端设置里替换；仅显示一次)"
     } | card
 }
 
@@ -6252,7 +6259,11 @@ full_install() {
     } | card
     {
         echo "控制台 Console: https://${CONSOLE_DOMAIN}/ui/"
-        [[ -t 1 ]] && echo "Console token: ${DNS_API_TOKEN}"
+        # The controller secret, because that is what zashboard's backend
+        # dialog asks for. This printed the retired control server's token
+        # instead, and the two are different values, so the credential on
+        # screen opened nothing.
+        [[ -t 1 ]] && echo "Console secret: $(cfg_get DNS_MIHOMO_SECRET)"
         echo "(面板公开；/api 需要 bearer token)"
     } | card
     print_qr
@@ -6421,7 +6432,8 @@ Usage: sudo bash install.sh [--beta] [command] — or, after install:  5gpn [com
   status              Show service states, domains, IP, list counts/age
   restart             Restart the 5gpn service
   ios                 Regenerate the iOS profile + QR
-  rotate-token        Generate a new control-console DNS_API_TOKEN + restart
+  rotate-token        Generate a new mihomo controller secret (the console
+                      credential), write it to config.yaml + dns.env, restart
   set-cf-token        Enter/update the Cloudflare token through the TUI only
   mihomo-reset        Explicitly back up + replace the operator mihomo config
                       with a freshly rendered, validated seed, then restart

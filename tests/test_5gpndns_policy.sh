@@ -73,7 +73,15 @@ grep -Fq 'DNS_LISTEN_API=:9443' "$INSTALL" \
     && fail "install.sh: the old :9443 control-plane port must not come back"
 grep -Fq 'DNS_LISTEN_API=:18443' "$INSTALL" \
     && fail "install.sh: the old xray-era :18443 control-plane port must not come back"
-grep -Fq 'existing_token'    "$INSTALL" || fail "install.sh: does not preserve an existing token across re-install"
+# The console credential is the mihomo controller secret, and it is preserved
+# because it lives in the operator's config.yaml -- render_mihomo_config reads it
+# back and persist_mihomo_secret mirrors it into dns.env. DNS_API_TOKEN, whose
+# preservation this used to assert, belonged to the deleted control server and is
+# generated nowhere now.
+grep -Fq 'DNS_API_TOKEN="$(openssl rand' "$INSTALL" \
+    && fail "install.sh: generates the retired DNS_API_TOKEN again"
+grep -Fq 'persist_mihomo_secret "$secret"' "$INSTALL" \
+    || fail "install.sh: does not preserve the controller secret across re-install"
 
 grep -Fq 'DNS_EGRESS_BROKER=127.0.0.1:5354' "$ROOT/etc/5gpn-dns/dns.env.example" \
     || fail "dns.env.example: DNS_EGRESS_BROKER not documented with default 127.0.0.1:5354"
