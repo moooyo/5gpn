@@ -3071,6 +3071,7 @@ render_mihomo_config() {
             || { err "Existing mihomo controller secret could not be parsed safely."; return 1; }
         persist_mihomo_secret "$secret" || return 1
         ok "Existing operator-owned mihomo config validated and preserved: $config"
+        retire_mihomo_whitelist "$config"
         return 0
     fi
 
@@ -3139,6 +3140,31 @@ render_mihomo_config() {
     MIHOMO_SEED_PORTS_REQUIRED=1
 
     ok "mihomo config ${mode/--/} candidate validated and atomically installed at $config."
+    retire_mihomo_whitelist "$config"
+}
+
+# retire_mihomo_whitelist — delete the orphaned source allowlist.
+#
+# The allowlist was removed, but whitelist.txt survives on every host that had
+# one, holding the operator's CIDRs and read by nothing. That is worse than not
+# being there: an operator who finds it reasonably concludes the panel is still
+# source-restricted, and it is not.
+#
+# Guarded on the live config rather than on the release, because deleting a file
+# a rule still reads would take the gateway down at the next reload. The drift
+# check already refuses a config naming the provider, so by here this can only
+# be a leftover -- but it costs one grep to not depend on that.
+retire_mihomo_whitelist() {
+    local config="${1:-$MIHOMO_DIR/config.yaml}" stale="$MIHOMO_DIR/whitelist.txt"
+    [[ -f "$stale" ]] || return 0
+    if grep -Eq 'RULE-SET,[[:space:]]*whitelist' "$config" 2>/dev/null; then
+        warn "Keeping ${stale}: a rule in ${config} still reads it."
+        return 0
+    fi
+    rm -f -- "$stale" \
+        || { warn "Could not remove the retired source allowlist ${stale}."; return 0; }
+    sync -f "$MIHOMO_DIR" 2>/dev/null || true
+    ok "Removed the retired source allowlist (${stale}); the panel is not source-restricted."
 }
 
 reset_mihomo_config() {

@@ -165,7 +165,17 @@ nocheck install.sh 'apply_.*_to_xray'                  'xray patchers removed'
 nocheck install.sh 'add_allow_ip' 'no allowlist add op'
 nocheck install.sh 'del_allow_ip' 'no allowlist del op'
 nocheck install.sh 'providers/rules/whitelist' 'no live allowlist refresh'
-nocheck install.sh '/whitelist.txt' 'installer builds no path to an allowlist file'
+# Same exemption as in test_installer_safety: retire_mihomo_whitelist names the
+# path in order to delete it. Everything else naming it is a survivor.
+if [[ -n "$(awk '
+    /^retire_mihomo_whitelist\(\)/ { skip = 1 }
+    skip { if ($0 == "}") skip = 0; next }
+    /[/]whitelist[.]txt/ { print }
+' "$root/install.sh")" ]]; then
+    echo "FAIL: installer builds a path to an allowlist file outside the retirement"; FAIL=1
+else
+    echo "ok: installer builds no allowlist path outside the retirement"
+fi
 
 # Task 5: selectable Cloudflare DNS-01 wildcard or HTTP-01 exact-SAN cert.
 check install.sh 'dns-cloudflare' 'Cloudflare mode uses DNS-01'
@@ -252,9 +262,15 @@ nocheck install.sh 'secondaryPath=/proxy' 'zashboard #/setup deep-link NOT hardc
 # match themselves: a redirection that creates an allowlist file, and an actual
 # rule line reading the retired provider. Prose about the removal, and the
 # migration that performs it, name the string without being either shape.
+#
+# test_installer_safety.sh is exempt: it creates one on purpose, to prove
+# retire_mihomo_whitelist deletes it. That is the same kind of exemption the
+# zash sweep gives the migration -- the one caller allowed to name a thing is
+# the one whose job is to get rid of it.
 creators="$(grep -rn '> *"[^"]*whitelist\.txt"' \
     --include='*.sh' --include='*.yml' --include='*.tmpl' \
-    "$root/install.sh" "$root/scripts" "$root/etc" "$root/tests" "$root/.github" 2>/dev/null || true)"
+    "$root/install.sh" "$root/scripts" "$root/etc" "$root/tests" "$root/.github" 2>/dev/null \
+    | grep -v '/tests/test_installer_safety.sh' || true)"
 if [[ -n "$creators" ]]; then
     printf '%s\n' "$creators" >&2
     echo "FAIL: something still creates an allowlist file"; FAIL=1

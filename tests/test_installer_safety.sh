@@ -1053,6 +1053,54 @@ else
     pass "command arity is enforced before dispatch"
 fi
 
+# The orphaned allowlist file is removed, and only when no rule reads it.
+#
+# whitelist.txt survived on every host that had one: holding the operator's
+# CIDRs, swept to 0660 by the mode pass, and read by nothing. An operator who
+# finds it reasonably concludes the panel is still source-restricted.
+#
+# Both call sites matter and one was nearly missed: render_mihomo_config returns
+# early on the preserve path, which is THE path an upgrade takes, and that is
+# exactly where the orphan lives.
+retire_fn="$(sed -n '/^retire_mihomo_whitelist()/,/^}/p' "$INSTALL")"
+if [[ -z "$retire_fn" ]]; then
+    fail "retire_mihomo_whitelist is missing"
+else
+    printf '%s' "$retire_fn" | grep -Fq 'RULE-SET' \
+        || fail "retire_mihomo_whitelist deletes the file without checking the live config"
+    render_fn="$(sed -n '/^render_mihomo_config()/,/^}/p' "$INSTALL")"
+    [[ "$(printf '%s' "$render_fn" | grep -c 'retire_mihomo_whitelist')" == 2 ]] \
+        || fail "render_mihomo_config does not retire the allowlist on both the preserve and the seed path"
+fi
+
+retire_dir="$TMP/retire/mihomo"
+mkdir -p "$retire_dir"
+printf '203.0.113.1/32\n' > "$retire_dir/whitelist.txt"
+printf 'rules:\n  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,c.test)),DIRECT\n' > "$retire_dir/config.yaml"
+(
+    MIHOMO_DIR="$retire_dir"
+    retire_mihomo_whitelist "$retire_dir/config.yaml"
+) >/dev/null 2>&1
+if [[ -e "$retire_dir/whitelist.txt" ]]; then
+    fail "the orphaned allowlist file survived a config that does not read it"
+else
+    pass "the orphaned allowlist file is removed once no rule reads it"
+fi
+
+# And it is kept when a rule still does, because deleting a file a live rule
+# reads takes the gateway down at the next reload.
+printf '203.0.113.1/32\n' > "$retire_dir/whitelist.txt"
+printf 'rules:\n  - AND,((DOMAIN,c.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT\n' > "$retire_dir/config.yaml"
+(
+    MIHOMO_DIR="$retire_dir"
+    retire_mihomo_whitelist "$retire_dir/config.yaml"
+) >/dev/null 2>&1
+if [[ -e "$retire_dir/whitelist.txt" ]]; then
+    pass "an allowlist file a live rule still reads is kept"
+else
+    fail "the allowlist file was deleted while a rule still reads it"
+fi
+
 # The allowlist ops are gone by owner decision, so the boundaries they used to
 # enforce -- canonical CIDR validation, exact-match deletion, symlink refusal
 # -- have nothing left to protect. What replaces them is the assertion that
@@ -1060,8 +1108,14 @@ fi
 # would edit a file no rule reads, and report success doing it.
 if grep -Eq '^(add_allow_ip|del_allow_ip|apply_whitelist)\(\)' "$INSTALL"; then
     fail "an allowlist mutation op survived the allowlist"
-elif grep -Fq '/whitelist.txt' "$INSTALL"; then
-    fail "the installer still builds a path to an allowlist file"
+elif [[ -n "$(awk '
+    /^retire_mihomo_whitelist\(\)/ { skip = 1 }
+    skip { if ($0 == "}") skip = 0; next }
+    /[/]whitelist[.]txt/ { print }
+' "$INSTALL")" ]]; then
+    # retire_mihomo_whitelist is exempt by range: it names the path in order to
+    # delete it, which is the one legitimate reason left to name it at all.
+    fail "the installer still builds a path to an allowlist file outside the retirement"
 else
     pass "no allowlist file is written or refreshed by the installer"
 fi
