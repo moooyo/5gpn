@@ -10,8 +10,8 @@ Everything is pushed. `beta` is fast-forwarded to `feat/installer-tui`.
 | Repository | Branch | Published |
 | --- | --- | --- |
 | `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.7` |
-| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.3` |
-| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.25` |
+| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.5` |
+| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.28` |
 
 Green: `go test -race ./gpn/...`, all 26 installer suites, and CI on every
 branch push. See [Reproducing the checks](#reproducing-the-checks).
@@ -20,7 +20,7 @@ branch push. See [Reproducing the checks](#reproducing-the-checks).
 
 ## 0. Acceptance — green
 
-`0.0.62-beta.25` is deployed on `test-env`. Acceptance there:
+`0.0.62-beta.28` is deployed on `test-env`. Acceptance there:
 
 | Suite | Result |
 | --- | --- |
@@ -226,27 +226,94 @@ anywhere, `/configs` 401, and all four acceptance suites at 18 / 12 / 18 / 31.
 
 ---
 
-## 1. The installer TUI — rewritten; two things left
+## The panel looked like upstream, and the credential it asked for was wrong
 
-`manage_menu` is five screens now: 概览 / 服务 / 证书 / 网络 / 危险操作. Each
-renders the facts its own actions act on, immediately above them. The two dead
-entries are gone — 「重载规则」 with the helper it called, 「配置 Telegram Bot」
-because the console owns it, and the overview says where the runtime surfaces
-live so an operator is not left hunting.
+Opening `https://console.<base>/ui/` on a fresh browser produced a stock
+zashboard: no DNS page, no extensions page, nothing 5gpn. Everything behind it
+was correct — the fork was deployed, the core advertised `gpn-dns`,
+`gpn-interception` and `gpn-bot` at version 1, and `UNDERSTOOD_SCHEMA_VERSIONS`
+listed all three.
 
-`test_tui_policy` now compares the label list against the dispatch, which is the
-coupling that let two entries do nothing for the whole of the monolith work.
+**The panel never had a backend to ask.** SetupPage's empty-list bootstrap
+submits its default form, and that default is `http` / `127.0.0.1` / `9090` —
+the shape for "dashboard hosted elsewhere, backend on this machine". 5gpn is the
+inverse: the bundle is served by the controller itself through `external-ui`, so
+panel and API are always same-origin, and all three fields are wrong here. The
+protocol (TLS-only, `external-controller` is `""`), the host (from the browser,
+`127.0.0.1` is the operator's own machine) and the port (443).
 
-**Left:**
+So the quiet auto-submit could only fail, and quietly: the list stayed empty, the
+capability probe never started, `featureSupported` stayed false for everything,
+and `renderRoutes` filtered out every gpn page. **A panel whose 5gpn half is
+gated on a probe that never runs is indistinguishable from upstream.** It adopts
+the serving origin now, which is the one answer that does not have to be guessed.
 
-- **Navigation is two levels, not tabs.** Gum's `choose` is a single-select list
-  with no key handler, so left/right tabs would need a hand-rolled raw-mode
-  reader with its own terminal restore on every signal — and it would have no
-  plain-echo fallback, which is the property every surface here keeps. If tabs
-  are wanted, that is the cost.
-- **`configure_install_tui` is untouched.** The install-time flow is still a
-  linear prompt sequence. It works and its shape is held by `test_tui_policy`,
-  but it did not get the same treatment and nobody has decided whether it should.
+Then the credential the operator would paste was the wrong one. The banner
+printed `DNS_API_TOKEN`; the panel takes `DNS_MIHOMO_SECRET`; they are different
+values, so following the installer's own output produced a 401 from a panel that
+was working. **That is the third instance of the same class** — after the
+`/ios/` profile URL and the bare migration path — and this one had a *test
+asserting the wrong credential was shown*.
+
+`DNS_API_TOKEN` belonged to the control server the monolith deleted, and nothing
+had read it since: not the core, not zashboard, not a script. It is retired
+rather than corrected. Two live surfaces went with it: `tgbot_api_call`, which
+had zero callers and POSTed to a `/api/tgbot` the core does not serve; and
+`rotate_token`, reachable from the menu, which reported *"old token invalid
+immediately, log in with the new one"* while rotating that dead key and
+restarting `5gpn-dns` — a unit deleted with the same process, its failure
+swallowed by `2>/dev/null`. It rotates the controller secret now, through a
+staged same-directory rename of the operator's config.yaml, and restarts mihomo,
+which drops client traffic and says so.
+
+`quick-install.sh` also never removed its private `/tmp` directory — it cannot,
+because it `exec`s install.sh and loses the shell that would hold the trap.
+Thirty-odd had accumulated. It sweeps its own leftovers at the start of the next
+run, which is better than a trap: the migration failure names a script path
+*inside* that directory, and cleaning up at exit would delete the file the
+operator was just told to run.
+
+**The lesson, now three deep:** a string printed for a human to act on is not
+verified by anything on the path. A URL, a command, a credential. Each was
+produced by working code, next to a probe that passed, and each was wrong in a
+way only a person could notice.
+
+---
+
+## 1. The installer TUI — done
+
+`manage_menu` is a tab strip now: 概览 / 服务 / 证书 / 网络 / 危险操作 across the
+top, that screen's actions down the side, its facts rendered between them.
+←/→ switches, ↑/↓ selects, Enter runs, q leaves.
+
+**The cost this file recorded for tabs was wrong.** It said a hand-rolled
+raw-mode reader owing a terminal restore on every signal, with no plain-echo
+fallback. That is true of an `stty` implementation. `read -rsn1` is not one: it
+takes a single key without echoing and bash restores what it altered, so there
+is no raw mode and nothing to strand an operator with echo off.
+`test_tui_policy` asserts the absence of `stty` for exactly that reason, and
+that the escape-sequence read times out — a bare ESC is someone leaving, and a
+blocking read for the rest of the sequence would hang the menu.
+
+The screens live in one `MANAGE_SCREENS` table read by both the tab UI and the
+plain list, so the two cannot offer different things. The list stays, because
+tabs draw at a cursor and read one key and therefore need both ends to be a
+terminal; piped output and `TERM=dumb` still get a working menu.
+`test_manage_menu_fallback` drives that path rather than grepping it.
+
+`configure_install_tui` keeps its linear collection **deliberately**. Those
+fields are dependency-ordered — the certificate mode decides whether an ACME
+email and a Cloudflare token are asked for at all, the base domain is what the
+DNS-prerequisite card is rendered from — so a screen enterable out of order
+would present fields whose validity depends on answers not yet given. What it
+lacked was not a way sideways but a way **back**: a typo in the base domain
+first became visible on the summary, and the summary offered only yes or no, so
+correcting one character meant cancelling the whole install. The summary is a
+review screen now — confirm, or pick a field and re-answer it.
+
+That also retired what `advanced` cost. It still decides which fields the first
+pass stops on, but every field is reachable from the review, so an auto-detected
+address an operator disagrees with no longer needs a rerun.
 
 ---
 
@@ -294,7 +361,7 @@ The parts most likely to be wrong there and invisible in a test:
 
 ---
 
-## 4. Marketplace — decided, bar one gap
+## 4. Marketplace — decided, and the gap is closed
 
 Discovery works: `GET /gpn/interception/catalog`, a reviewed and digest-checked
 install from an entry, and the zashboard listing. `test-env` fetches the
@@ -312,9 +379,11 @@ first-party index and reviews an entry from it.
   re-reads only the URL an extension was installed from: the distinction is not
   "may the source ever change" but "may it change without being asked".
 
-**Still open:** there is no UI for adding a second source. The document supports
-16 and zashboard renders them all, but the only way in is a
-`PUT /gpn/interception/catalog/sources`.
+**Closed 2026-08-04:** sources can be added, removed and enabled/disabled from
+the extensions page. Writes replace the whole list because that is the core's
+contract, carried on the interception revision. The client mirrors the core's
+validation so a rejection is explained where the operator is typing, and the
+core remains the authority.
 
 ---
 
@@ -466,7 +535,7 @@ Windows OpenSSH only (`C:\Windows\System32\OpenSSH\ssh.exe`); git bash's ssh
 cannot resolve the name. Keep remote commands straight-line — PowerShell mangles
 `for`/`if` blocks and `$(...)` passed through `ssh`.
 
-It currently holds `0.0.62-beta.25`, upgraded in place from the beta.9 fresh
+It currently holds `0.0.62-beta.28`, upgraded in place from the beta.9 fresh
 install. Backups: `/root/5gpn-pre-freshinstall-20260803T011558Z` and
 `/root/5gpn-pre-beta10-*`; the pre-console config.yaml is at
 `/etc/5gpn/mihomo/config.yaml.pre-console.bak`. `get_public_ip` returns
