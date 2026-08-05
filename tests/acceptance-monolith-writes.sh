@@ -70,7 +70,7 @@ snap="$(req "$API/gpn/interception")"
 irev="$(echo "$snap" | jq -r .revision)"
 was="$(echo "$snap" | jq -r '.snapshot.enabled')"
 
-on="$(jq -nc --arg r "$irev" '{revision:$r, enabled:true, http2:true, quicFallbackProtection:false}')"
+on="$(jq -nc --arg r "$irev" '{revision:$r, enabled:true, http2:true, http3:false}')"
 res="$(req -X PUT --data "$on" "$API/gpn/interception/settings")"
 if [ "$(echo "$res" | jq -r '.snapshot.enabled')" = "true" ]; then
   ok "the MITM master can be turned on"
@@ -88,7 +88,7 @@ else
 fi
 
 back="$(jq -nc --arg r "$(echo "$res" | jq -r .revision)" --argjson w "$was" \
-        '{revision:$r, enabled:$w, http2:true, quicFallbackProtection:false}')"
+        '{revision:$r, enabled:$w, http2:true, http3:false}')"
 res="$(req -X PUT --data "$back" "$API/gpn/interception/settings")"
 if [ "$(echo "$res" | jq -r '.snapshot.enabled')" = "$was" ]; then
   ok "the master was restored to $was"

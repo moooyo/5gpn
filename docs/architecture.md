@@ -211,38 +211,31 @@ applied". An intercepted upstream therefore cannot diverge from an ordinary
 client connection: same rules, same outbound selection, same row in the
 connection table.
 
-### Datagrams
+### Datagrams and HTTP/3
 
-UDP has no connection to hand over. The core builds an association and asks the
-outbound for a `C.PacketConn`, which it then drives as though it were the
-remote — writes are the client's datagrams, reads are the remote's replies. So
-`captureUDPFor` returns one of those instead, and what sits behind it is a QUIC
-listener rather than a socket. The handler is the same
-`interceptProxy.ServeHTTP` the TLS path uses, so an HTTP/3 request runs the same
-actions, the same upstream generation and the same body budget as the identical
-request arriving over TCP.
+The interception engine does not consume datagrams. HTTP/3 interception is an
+explicitly unsupported capability: the persisted setting remains present as
+`mitm.http3`, but configuration validation requires it to be `false` and every
+management write attempting `true` is rejected without changing the revision.
 
-One listener for the whole process, not one per association, because a QUIC
-connection is not a 4-tuple. A client that rebinds — Wi-Fi to cellular, or a NAT
-that re-maps the port — keeps its connection IDs and expects the server to
-follow it there. The core sees a brand new association; a per-association
-listener would see a packet carrying connection IDs it never issued and answer
-with a stateless reset. Feeding every association into one listener is what
-makes migration work, because quic-go routes on the connection ID and does not
-care which association carried the datagram in.
+Fresh and explicitly reset seeds contain exactly one fixed global rule:
 
-The bridge addresses datagrams by the client's own address, which is both the
-association's identity and the peer quic-go demultiplexes on. Two live
-associations from one client address to two different gateway addresses cannot
-both be routed back — a write carries only the address it is addressed to — so
-the second is refused rather than misrouted, and falls through to ordinary
-routing.
+```text
+AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
+```
 
-Capture is off by default (`mitm.http3`) and the fixed
-`AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` capability stays in the seed either
-way. Capture is consulted before rule resolution, so with HTTP/3 on the reject
-only ever sees the datagrams capture did not want, and with it off nothing
-changes: a capable client falls back to TCP, which is captured.
+The tunnel evaluates this guard before extension routing rules and before TCP
+capture. The controller rule-management API refuses attempts to disable it. The complete
+mihomo YAML remains operator-owned, so an operator can still edit it manually;
+removing or disabling the guard withdraws the fixed client boundary and makes
+extension interception fail closed rather than enabling HTTP/3 capture.
+
+A client that supports protocol fallback can retry over TCP, where plain HTTP
+or TLS/H1/H2 follows the ordinary capture path. An H3-only client fails. The
+guard affects only UDP destination port 443 that reaches the gateway: it is not
+a firewall, does not affect traffic that bypasses the gateway, and does not
+disable ordinary UDP forwarding or QUIC sniffing on other configured ports such
+as the optional `:5060` ingress.
 
 ## The Telegram control plane
 
@@ -333,8 +326,12 @@ and persisting one would let a stale listing outlive the process that fetched
 it — which is what the previous design's salvage, unusable and raw-passthrough
 machinery existed to survive.
 
+`intercept.json` retains an `http3` field so the API shape is explicit, but the
+only valid value is `false`; it is not a feature toggle. HTTP/2 remains the only
+optional intercepted HTTP protocol above H1.
+
 `dns.json` replaced four files — `policy.json`, `upstreams.json`, `ecs.json` and
-the DNS-shaped half of an environment file that systemd read and the daemon
+the DNS-shaped half of an environment file that systemd read and the runtime
 could not write. Splitting them made every cross-cutting edit two writes with no
 way to name the pair: moving a gateway to a new address and changing the
 upstreams that serve it left a window in which the resolver was configured as
@@ -345,8 +342,8 @@ reach.
 
 ## Upgrading an existing gateway
 
-A deployed three-process gateway carries configuration the monolith cannot
-parse: two `RUNTIME-OVERLAY,5gpn,*` anchors and an
+A legacy three-process gateway may carry configuration the monolith cannot
+parse: two retired `RUNTIME-OVERLAY,5gpn,*` anchors and an
 `IN-NAME,intercept-egress,REJECT` terminator. The core fails `mihomo -t` rather
 than starting with capture silently absent.
 
@@ -362,8 +359,8 @@ traffic arrives as `INNER`, with no inbound name. Stripping the qualifier would
 therefore let a captured extension naming the console reach it — so migrated
 hosts get the same predicate a fresh install seeds.
 
-The `intercept-egress` listener and the `MODULE-INTERCEPT` node are dead but
-harmless, so they are cleanup rather than migration.
+The legacy `intercept-egress` listener and `MODULE-INTERCEPT` node are unused by
+the monolith but harmless, so they are cleanup rather than migration.
 
 The units are handled the same way, and the asymmetry is deliberate: the
 installer publishes only the units this release owns, but keeps removing the

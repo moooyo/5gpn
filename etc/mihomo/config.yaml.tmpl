@@ -1,7 +1,7 @@
 # 5gpn mihomo data plane — install-time seed (rendered by install.sh). This
 # file is fully operator-owned from here on: no region of it is daemon-
-# managed by the daemon -- edit it via the
-# console's mihomo config editor (GET/PUT /api/mihomo/config), '5gpn
+# managed by the runtime -- edit it via the
+# console's mihomo config editor (GET/PUT /configs), '5gpn
 # mihomo-reset' to restore this seed, or by hand. The console's policy
 # engine only ever decides "gateway or not" (DNS layer); everything below
 # about what happens to gateway-bound traffic is yours to shape.
@@ -108,11 +108,8 @@ rules:
   - IP-CIDR,192.168.0.0/16,REJECT,no-resolve
   - IP-CIDR,100.64.0.0/10,REJECT,no-resolve
   - IP-CIDR,169.254.0.0/16,REJECT,no-resolve
-  # The backstop behind datagram capture. Capture is consulted before rule
-  # resolution, so with mitm.http3 on this reject only ever sees the datagrams
-  # capture did not want, and with it off it is the whole mechanism -- a capable
-  # client falls back to TCP, which is captured. Removing it does not enable
-  # QUIC capture; it makes gateway QUIC bypass interception whenever http3 is
-  # off or the master switch is.
+  # HTTP/3 interception is unsupported. This fixed guard rejects every gateway
+  # UDP/443 flow so capable clients fall back to captured TCP. It is independent
+  # of the MITM master switch and has no product management off switch.
   - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
   - MATCH,Proxies

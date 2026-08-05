@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # 5gpn installer / orchestrator (DNS-steering architecture).
 #
-#   client DoT:853 (the ONLY DNS transport) -> 5gpn-dns (NXDOMAIN for block,
-#   real IP for direct, gateway IP for proxy/foreign) -> mihomo
+#   client DoT:853 (the ONLY DNS transport) -> mihomo gpn/dns (NXDOMAIN for
+#   block, real IP for direct, gateway IP for proxy/foreign) -> mihomo tunnel
 #   (:80/:443/:5060/:8080/:8443) sniffs HTTP Host or TLS SNI
 #   (sniffer override-destination), then the loopback DNS broker resolves the
 #   real IP through an extension's operator-selected China/trust group (trust by
 #   default) before mihomo applies its operator-owned policy.
-#   mihomo also SNI-splits the console panel
-#   (console.<base>) to the daemon's loopback :443 listener.
+#   mihomo also serves the console panel and authenticated controller at
+#   console.<base> through its loopback :443 listener.
 #
 # One base domain and one scoped production cert lineage:
 #   BASE_DOMAIN  -> the operator's ONE apex domain (the single knob).
@@ -16,22 +16,27 @@
 #     (= console./dot.<BASE_DOMAIN>)
 #     are auto-derived subdomains (derive_domains). Cloudflare DNS-01 issues
 #     `*.<base>` + `<base>`; HTTP-01 issues the two exact service SANs because
-#     HTTP-01 cannot issue wildcards. HTTP-01 waits for all three A records via
+#     HTTP-01 cannot issue wildcards. HTTP-01 waits for both A records via
 #     1.1.1.1, then briefly releases mihomo's :80 listener for issuance/renewal.
 #     Auto-renewal is unattended via the daily scoped certbot timer.
 #     CERT_MODE=debug issues a self-signed wildcard instead (test/dev boxes).
 #
-# QUIC/HTTP3 is proxied by mihomo (UDP 443 sniff-forward). There is no
-# daemon-managed exit layer or Go data plane. 5gpn never manages the host firewall; use your provider's
-# security group if you want one. The
-# console serves the panel and the bearer-protected APIs on one origin.
+# HTTP/3 interception is unsupported. Fresh and explicitly reset mihomo seeds
+# keep a fixed global UDP/443 REJECT rule with no product-management off switch.
+# Clients that support fallback use TCP with HTTP/1.1 or HTTP/2; H3-only clients
+# fail closed. This does not disable unrelated UDP traffic or QUIC sniffing on
+# other ports. There is no separate daemon-managed exit layer. 5gpn never
+# manages the host firewall; use your provider's security group if you want
+# one. The console serves the public panel and controller-secret-protected
+# routes on one origin.
 #
 # There is NO network-layer exit: no WireGuard, no fwmark / ip-rule / table-100.
 # Do not add any of those (application-layer exits live in mihomo's rule engine).
 #
-# Every run stages and validates pinned artifacts before atomically publishing
-# them. Persisted operator state and a valid operator-owned mihomo config are
-# preserved; failed publication rolls back to the runnable snapshot.
+# Every run stages and validates pinned artifacts before publication. Persisted
+# operator state and a valid operator-owned mihomo config are preserved. A
+# failure before publication leaves the host untouched; a failure during
+# publication is reported as partial rather than claiming whole-system rollback.
 set -Eeuo pipefail
 
 # ----------------------------------------------------------------------------
@@ -167,8 +172,8 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # leaves the gateway with no resolver, no capture and no control API at all. The
 # staging probe checks the version token exactly rather than accepting a prefix.
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-monolith.11"
-MIHOMO_SHA256="40a4d9a3647b5ff829abf88cef13478205e5b6f2bccc4810761aa0cbf5e66a98"
+MIHOMO_VERSION="v1.19.28-monolith.12"
+MIHOMO_SHA256="ed47e9642de0d38fdc8d13190398a3cb9ad160d062a3a04fde6813568575bb10"
 # Every `mihomo -t` in this script must run with the same SAFE_PATHS the unit
 # grants, because the seed names paths outside its own home directory -- the
 # certificates it serves and the UI bundle it publishes. Without this the core
@@ -180,8 +185,8 @@ MIHOMO_SHA256="40a4d9a3647b5ff829abf88cef13478205e5b6f2bccc4810761aa0cbf5e66a98"
 # a drift here fails at install time on a config the running service accepts.
 MIHOMO_SAFE_PATHS="/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui"
 ZASH_REPO="moooyo/zashboard"
-ZASH_VERSION="v3.16.0-monolith.19"        # our fork's dist.zip, built from feat/5gpn-console
-ZASH_SHA256="74f667f0a7c635e004cc3e656a586c8e5fcd74a2978680aff39658f196884297"
+ZASH_VERSION="v3.16.0-monolith.20"        # our fork's dist.zip, built from feat/5gpn-console
+ZASH_SHA256="83a934703807a8518c1246d9f3486c493e9e8a373c606d11b7ee637f597d8111"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
@@ -3456,7 +3461,7 @@ manage_mark() { [[ "$1" == active ]] && printf '✅' || printf '❌'; }
 
 # --- screen: overview ---------------------------------------------------------
 manage_screen_overview() {
-    local snap ver unit master http3 total on cert_loaded cert_cov cert_missing cert_exp
+    local snap ver unit master total on cert_loaded cert_cov cert_missing cert_exp
     ver="$("$MIHOMO_BIN" -v 2>/dev/null | head -1 | awk '{print $3}' || true)"
     unit="$(manage_unit_state mihomo)"
     snap="$(gpn_interception_snapshot 2>/dev/null || true)"
@@ -3475,16 +3480,15 @@ manage_screen_overview() {
         printf '  ❔ 拦截    控制 API 可达,但本机缺少 jq,无法解析状态\n'
     else
         master="$(gpn_json "$snap" '.snapshot.enabled' false)"
-        http3="$(gpn_json "$snap" '.snapshot.http3' false)"
         total="$(gpn_json "$snap" '.snapshot.modules | length' 0)"
         on="$(gpn_json "$snap" '[.snapshot.modules[]? | select(.enabled)] | length' 0)"
         # "已安装" and "正在捕获" are two numbers, not one. A disabled extension
         # still declares hosts; reporting the declared set as the live one tells
         # the operator traffic is being intercepted when nothing is intercepting.
-        printf '  %s 拦截    %s · %s/%s 启用%s\n' \
+        printf '  %s 拦截    %s · %s/%s 启用\n' \
             "$([[ "$master" == true ]] && printf '✅' || printf '⏸️ ')" \
-            "$([[ "$master" == true ]] && echo on || echo off)" "$on" "$total" \
-            "$([[ "$http3" == true ]] && echo ' · QUIC 捕获' || echo '')"
+            "$([[ "$master" == true ]] && echo on || echo off)" "$on" "$total"
+        printf '  🚫 HTTP/3 unsupported · UDP/443 fixed REJECT · fallback uses TCP/H1/H2; H3-only fails\n'
 
         cert_loaded="$(gpn_json "$snap" '.snapshot.certificate.loaded' false)"
         cert_cov="$(gpn_json "$snap" '.snapshot.certificate.covers_all_capture_hosts' false)"
@@ -4266,7 +4270,7 @@ install_cert_deploy_hook() {
 # traps cannot replace the full install transaction's ERR/EXIT rollback traps.
 # Only a mihomo service that was active is stopped. Failure and signal paths
 # restore it from this subshell. After successful initial issuance, leave it
-# stopped so install_cert can validate and publish zash/current before
+# stopped so install_cert can validate and publish console/current before
 # full_install's normal start_services step restores the data plane. An
 # unrelated process occupying :80 is never killed and makes Certbot fail closed.
 run_http_certbot() (
@@ -5148,11 +5152,10 @@ write_dns_env() {
     dns_env_tmp="$(mktemp "${CONF_DIR}/.dns.env.XXXXXX")" \
         || { err "Could not create the dns.env candidate."; return 1; }
     if ! cat > "$dns_env_tmp" <<EOF
-# 5gpn-dns config — the SINGLE source of truth (written by install.sh).
-# 'systemctl reload 5gpn-dns' (SIGHUP) reloads ONLY the rule files under
-# /etc/5gpn/rules/ + chnroute, NOT this file — a daemon knob here needs
-# 'systemctl restart 5gpn-dns' (read once at startup). Re-run install.sh for
-# cert knobs. There are no separate .state files.
+# 5gpn installer environment — the SINGLE deployment source of truth.
+# Mihomo's live DNS/interception/bot documents live under its gpn state
+# directory. Re-run install.sh for deployment or certificate changes; use the
+# authenticated Console for live document changes.
 
 # DoT is the ONLY client-facing DNS transport; no DoH or client :53 is served.
 DNS_LISTEN_DOT=:853
@@ -5215,22 +5218,15 @@ DNS_EGRESS_BROKER=127.0.0.1:5354
 DNS_SUBSCRIPTIONS=${CONF_DIR}/subscriptions.json
 DNS_POLICY_RULES=${policy_rules}
 
-# Control-plane HTTPS API + public web console. Browsers reach it at
-# https://console.<DNS_BASE_DOMAIN> via the mihomo :443 SNI split, which forwards
-# straight to this loopback listener. The SPA and /ios/ are public; every
-# /api/* request requires the bearer token. The token is generated once and
-# preserved across re-installs so a working token is never rotated out from
-# under an operator config.
-#
-# Binds LOOPBACK :443 directly: mihomo owns the public :443 socket and routes
-# console.<base> to this listener. Do not bind the daemon itself publicly.
+# Mihomo's controller and public zashboard bundle share this loopback TLS
+# listener. Browsers reach it at https://console.<DNS_BASE_DOMAIN>/ui/. The
+# /ui/* bundle and profiles are public; /gpn/* and ordinary controller routes
+# require DNS_MIHOMO_SECRET.
 DNS_LISTEN_API=127.0.0.1:443
 DNS_API_RATE=${api_rate}
 DNS_API_BURST=${api_burst}
 
-# Mihomo's loopback external-controller API (DNS_MIHOMO_CONTROLLER) + its
-# bearer secret (DNS_MIHOMO_SECRET) + the zashboard source-IP allowlist file
-# bearer secret (DNS_MIHOMO_SECRET).
+# Mihomo's loopback external-controller API and its sole controller secret.
 DNS_MIHOMO_CONTROLLER=${dns_mihomo_controller}
 DNS_MIHOMO_SECRET=${dns_mihomo_secret_env}
 DNS_MIHOMO_CONFIG=${mihomo_config}
@@ -5246,7 +5242,7 @@ DNS_INTERCEPT_CONFIG=${intercept_config}
 DNS_CONSOLE_CERT=${CONSOLE_CERT_DIR}/current/fullchain.pem
 DNS_CONSOLE_KEY=${CONSOLE_CERT_DIR}/current/privkey.pem
 
-# iOS .mobileconfig files served by the daemon at the public /ios/ path.
+# iOS .mobileconfig files served by mihomo under the public /ui/ path.
 WWW_DIR=${WWW_DIR}
 
 # The Telegram bot is configured in the console, not here. It has its own
@@ -6664,11 +6660,10 @@ Config: /etc/5gpn/dns.env is the persistent source of truth. First install write
 it from the TUI; reinstall reads it. Ambient shell variables are discarded.
 
 Domains + certificates: ONE base domain and ONE scoped Let's Encrypt lineage.
-  BASE_DOMAIN (e.g. example.com)     the operator's single domain knob. Three
+  BASE_DOMAIN (e.g. example.com)     the operator's single domain knob. Two
                                      service domains are auto-derived:
                                        console.<base>  web console (mihomo :443 SNI
-                                                       split -> daemon loopback :443)
-                                       zash.<base>     zashboard panel
+                                                       and zashboard panel)
                                        dot.<base>      DoT :853 (Private DNS / iOS)
                                      Values are collected by the TUI.
   cloudflare mode (default)          apex + WILDCARD *.<base> cert via Let's
@@ -6701,12 +6696,12 @@ Domains + certificates: ONE base domain and ONE scoped Let's Encrypt lineage.
 There is NO host firewall management: use your provider's security
 group if you need one. New/reset mihomo seeds require client reachability to
 TCP 80, 443, 5060, 8080, and 8443 plus UDP 443 and 5060. The console panel at
-/ui/ and the iOS profiles beside it are public; /api/* requires the bearer
-token.
+/ui/ and the iOS profiles beside it are public; /gpn/* and ordinary controller
+routes require the mihomo controller secret.
 
   TUI configuration:
-    certificate mode/email, base domain, public/gateway/listener IPv4,
-    Cloudflare token, and Telegram identity/admins/proxy/alerts.
+    certificate mode/email, base domain, public/gateway/listener IPv4, and
+    Cloudflare token.
 
   Automatic runtime defaults:
     China/trust upstream groups, China ECS, and cache size. The authenticated

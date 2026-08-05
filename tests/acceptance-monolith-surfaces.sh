@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Acceptance for the three surfaces that landed together: datagram capture, the
-# extension catalog, and the Telegram control plane.
+# Acceptance for the three surfaces that landed together: the HTTP/3 boundary,
+# the extension catalog, and the Telegram control plane.
 #
-# Read-mostly. The two writes it makes (the HTTP/3 switch, the bot document) are
-# restored, and the last check verifies the gateway is back where it started.
+# Read-mostly. Its HTTP/3 write is deliberately rejected without changing the
+# revision. The bot document write is restored, and the last check verifies the
+# gateway is back where it started.
 #
 # The catalog checks reach the public index over the network. That is the point
 # of running them here rather than in the offline suite: what is under test is
@@ -43,13 +44,13 @@ else
   bad "policy.rules is null; jq iteration over it errors"
 fi
 
-head_ "HTTP/3 capture is a document field the engine reads"
+head_ "HTTP/3 is explicitly unsupported"
 snap="$(req "$API/gpn/interception")"
 rev="$(echo "$snap" | jq -r .revision)"
-if echo "$snap" | jq -e 'has("snapshot") and (.snapshot | has("http3"))' >/dev/null; then
-  ok "the snapshot carries http3"
+if echo "$snap" | jq -e 'has("snapshot") and (.snapshot.http3 == false)' >/dev/null; then
+  ok "the snapshot reports http3=false"
 else
-  bad "the snapshot has no http3 field: $(echo "$snap" | jq -c .snapshot | head -c 200)"
+  bad "the snapshot does not report http3=false: $(echo "$snap" | jq -c .snapshot | head -c 200)"
 fi
 if echo "$snap" | jq -e '.snapshot | has("quic_fallback_protection")' >/dev/null; then
   bad "the retired quic_fallback_protection field is still served"
@@ -57,35 +58,61 @@ else
   ok "the retired quic_fallback_protection field is gone"
 fi
 
-orig_http3="$(echo "$snap" | jq -r '.snapshot.http3')"
 orig_http2="$(echo "$snap" | jq -r '.snapshot.http2')"
 orig_master="$(echo "$snap" | jq -r '.snapshot.enabled')"
 body="$(jq -nc --arg r "$rev" --argjson e "$orig_master" --argjson h2 "$orig_http2" \
          '{revision:$r, enabled:$e, http2:$h2, http3:true}')"
-after="$(req -X PUT --data "$body" "$API/gpn/interception/settings")"
-if [ "$(echo "$after" | jq -r '.snapshot.http3')" = "true" ]; then
-  ok "http3 can be turned on"
+code="$(status -X PUT --data "$body" "$API/gpn/interception/settings")"
+if [ "$code" = "422" ]; then
+  ok "PUT http3=true is refused with 422"
 else
-  bad "turning http3 on failed: $(echo "$after" | head -c 200)"
+  bad "PUT http3=true returned $code, expected 422"
+fi
+after="$(req "$API/gpn/interception")"
+if [ "$(echo "$after" | jq -r '.revision')" = "$rev" ] \
+   && [ "$(echo "$after" | jq -r '.snapshot.http3')" = "false" ]; then
+  ok "the rejected write left the revision and http3 state unchanged"
+else
+  bad "the rejected write changed interception state: $(echo "$after" | head -c 200)"
 fi
 
-# The reject rule stays regardless. Capture is consulted before rule
-# resolution, so with http3 on it only ever sees what capture did not want --
-# and with it off it is the whole mechanism.
-if grep -Fq 'AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' "$CONF"; then
-  ok "the UDP/443 backstop is still in the operator config"
+# The fixed guard appears exactly once, after all private-address denies and
+# before the terminal policy. The QUIC sniffer still covers non-443 protocols
+# such as :5060; this rule deliberately blocks only UDP/443.
+guard='  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT'
+guard_count="$(grep -cF "$guard" "$CONF" || true)"
+private_line="$(grep -nF '  - IP-CIDR,169.254.0.0/16,REJECT,no-resolve' "$CONF" | cut -d: -f1 || true)"
+guard_line="$(grep -nF "$guard" "$CONF" | cut -d: -f1 || true)"
+match_line="$(grep -nF '  - MATCH,Proxies' "$CONF" | cut -d: -f1 || true)"
+if [ "$guard_count" = "1" ] && [ -n "$private_line" ] && [ -n "$guard_line" ] \
+   && [ -n "$match_line" ] && [ "$private_line" -lt "$guard_line" ] \
+   && [ "$guard_line" -lt "$match_line" ]; then
+  ok "the fixed UDP/443 guard appears once in the safe position"
 else
-  bad "the UDP/443 backstop is missing; gateway QUIC would bypass interception"
+  bad "the fixed UDP/443 guard is missing, duplicated, or out of position"
 fi
 
-restore="$(jq -nc --arg r "$(req "$API/gpn/interception" | jq -r .revision)" \
-            --argjson e "$orig_master" --argjson h2 "$orig_http2" --argjson h3 "$orig_http3" \
-            '{revision:$r, enabled:$e, http2:$h2, http3:$h3}')"
-req -X PUT --data "$restore" "$API/gpn/interception/settings" >/dev/null
-if [ "$(req "$API/gpn/interception" | jq -r '.snapshot.http3')" = "$orig_http3" ]; then
-  ok "http3 was restored to $orig_http3"
+rules="$(req "$API/rules")"
+guard_api_count="$(echo "$rules" | jq -r '[.rules[] | select(.type == "AND" and .payload == "((Network,udp) && (DstPort,443))" and .proxy == "REJECT")] | length')"
+if [ "$guard_api_count" = "1" ]; then
+  ok "the running rule set carries exactly one fixed UDP/443 guard"
+  guard_index="$(echo "$rules" | jq -r '.rules[] | select(.type == "AND" and .payload == "((Network,udp) && (DstPort,443))" and .proxy == "REJECT") | .index')"
+  disable_body="$(jq -nc --arg i "$guard_index" '{($i):true}')"
+  code="$(status -X PATCH --data "$disable_body" "$API/rules/disable")"
+  if [ "$code" = "400" ]; then
+    ok "PATCH /rules/disable cannot disable the fixed guard"
+  else
+    bad "PATCH /rules/disable returned $code for the fixed guard, expected 400"
+  fi
+  rules="$(req "$API/rules")"
+  if echo "$rules" | jq -e --argjson i "$guard_index" \
+       '.rules[] | select(.index == $i and .type == "AND" and .payload == "((Network,udp) && (DstPort,443))" and .proxy == "REJECT" and .extra.disabled == false)' >/dev/null; then
+    ok "the rejected patch left the fixed guard enabled"
+  else
+    bad "the fixed guard was disabled or disappeared after the rejected patch"
+  fi
 else
-  bad "http3 was not restored"
+  bad "the running rule set has $guard_api_count fixed UDP/443 guards"
 fi
 
 head_ "the extension catalog"

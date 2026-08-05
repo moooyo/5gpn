@@ -8,9 +8,9 @@ Update the status and the normative documentation when an implementation lands.
 
 ## Native interception extensions
 
-**Status: Implemented. Recorded 2026-07-19 and superseded in place by the
-current pre-release contract, including trusted Telegram management and
-operator capture-DNS bindings, on 2026-07-22.**
+**Status: Implemented. Recorded 2026-07-19, extended with operator capture-DNS
+bindings on 2026-07-22, and superseded in place by the single-process mihomo
+contract and explicit HTTP/3 refusal on 2026-08-05.**
 
 - The extension system accepts only strict `5gpn.io/v1` native YAML manifests.
   It does not parse or emulate third-party proxy-client plugin formats.
@@ -24,37 +24,36 @@ operator capture-DNS bindings, on 2026-07-22.**
   cannot name a proxy group. Each extension may declare at most 256 rules and
   enabled extensions may declare at most 2048 in total. Rules exist only while
   both the extension and MITM master are enabled, follow explicit extension
-  order, and are published in the same rollback-safe mihomo transaction as the
-  capture block. One enable confirmation lists the exact normalized rules and
-  authorizes them together with the extension; there is no second routing-only
-  confirmation. Reordering requires its own review because it can change global
-  first-match behavior.
+  order, and are compiled into the same immutable in-process policy snapshot as
+  capture and egress authorization. One enable confirmation lists the exact
+  normalized rules and authorizes them together with the extension; there is no
+  second routing-only confirmation. Reordering requires its own review because
+  it can change global first-match behavior.
 - Native scripts define `transform(context)`. They receive structured
   request/response data, typed settings, console logging, optional bounded
-  storage, and—only when explicitly declared and operator-confirmed—a
-  synchronous network capability. That capability is a single un-parameterised
-  grant naming no destinations: an earlier arrangement restricted it to a
+  storage, bounded action-scoped timers, and—only when explicitly declared and
+  operator-confirmed—synchronous and promise-based network calls. That
+  capability is a single un-parameterised grant naming no destinations: an
+  earlier arrangement restricted it to a
   declared list of exact HTTP(S) origins, and no component implements that any
   more. They
-  still have no filesystem, process, timer, module-loader, socket, or ambient
-  network API. A permitted script can deliberately send any data visible to it
+  still have no filesystem, process, module-loader, socket, or ambient network
+  API. A permitted script can deliberately send any data visible to it
   to any host it can reach, and every management surface must say so plainly
   before enable — as unrestricted, not as a reviewed destination set.
-- Plugin engine observability is memory-only. The active sidecar retains a
+- Plugin engine observability is memory-only. The mihomo process retains a
   bounded 1000-entry ring of structured script-console and action lifecycle
-  events and exposes it only through the group-restricted fixed Unix socket.
-  `5gpn-dns` mints a separate 30-second, one-use WebSocket ticket through
-  bearer-protected `POST /api/intercept/logs/ticket` and consumes it only at
-  `/intercept/logs`; script console text and detailed action errors are not
-  persisted to journald or another file. The Console owns the
-  virtualized `/plugin-logs` view, local filters, pause snapshot, and clear
+  events and exposes snapshots only through the authenticated
+  `/gpn/interception/logs` controller route. Script console text and detailed
+  action errors are not persisted to journald or another file. The Console owns
+  the virtualized `/plugin-logs` view, local filters, pause snapshot, and clear
   watermark.
 - Compiled JavaScript Programs and decoded settings belong to immutable config
   snapshots, but every action still executes in a fresh goja VM. Main upstream
   transports are reused only within one config generation, and explicit script
   network transports only within one action and exact origin. Pooled transports
-  and inbound UDP associations retain only narrow immutable transport and host-
-  authorization projections, never the complete config, Programs, or settings.
+  retain only narrow immutable transport and host-authorization projections,
+  never the complete config, Programs, or settings.
   This reuse must never retain JS globals or stale permissions across requests.
 - `bodyMode` limits only an action's input projection, not its possible result.
   Every matching request action therefore reserves bounded body admission
@@ -76,17 +75,24 @@ operator capture-DNS bindings, on 2026-07-22.**
   The rewritten request sends its complete method, decoded body, and end-to-end
   headers, potentially including `Cookie` or `Authorization`; framing and
   hop-by-hop fields remain runtime-owned. The single enable review states this
-  disclosure explicitly, and all resulting traffic returns
-  through authenticated mihomo SOCKS5.
+  disclosure explicitly, and all resulting traffic returns through mihomo's
+  in-process inner dialer and current rule evaluation.
 - Extensions cannot name, inspect, or change arbitrary application egress
   groups. A manifest may require an operator egress binding; the operator
-  selects an existing mihomo group, and ordered domain/port rules on the shared
-  authenticated `intercept-egress` listener enforce it. A separately reviewed
+  selects an existing mihomo group, and the in-process traffic policy passes
+  that group as the inner dialer's explicit target. A separately reviewed
   typed routing rule may bypass the normal operator target with `DIRECT`, but
   cannot choose any other target. Missing or removed bindings fail closed
   without a default fallback. The explicit extension execution order determines
   action composition, the first binding that wins for an overlapping
   destination, and global routing first-match precedence.
+- Native interception supports plain HTTP and TLS/H1/H2 only. `mitm.http3=true`
+  is invalid and every management write attempting it fails without changing
+  state. Fresh and explicitly reset mihomo seeds contain one fixed global
+  UDP/443 `REJECT` that product management cannot disable. A fallback-capable
+  client may retry over TCP and enter capture; an H3-only client fails. The
+  guard does not disable ordinary UDP or QUIC sniffing on other configured
+  ports.
 - Every installed extension has an operator-owned `capture_dns` binding with
   the exact values `trust` and `china`; imported extensions default to `trust`.
   The binding is mutable state outside the immutable snapshot digest and is
@@ -102,9 +108,7 @@ operator capture-DNS bindings, on 2026-07-22.**
   at 256.
 - URL install and local add are separate actions. URL install accepts one HTTPS
   manifest and may snapshot relative HTTPS scripts. Local add accepts one
-  pasted or uploaded manifest and uses inline or absolute HTTPS scripts. The
-  Telegram local-add flow accepts pasted text rather than claiming an embedded
-  file or Web form.
+  pasted or uploaded manifest and uses inline or absolute HTTPS scripts.
 - First-party extension source, including Apple WLOC, is maintained in the
   separate `moooyo/5gpn-extensions` repository. The core repository does not
   vendor, seed, or release extension manifests or scripts. Its target
@@ -112,9 +116,9 @@ operator capture-DNS bindings, on 2026-07-22.**
   to any native extension.
 - The extensions repository publishes a deterministic
   `5gpn.io/marketplace/v1` index through GitHub Pages. Operators explicitly add
-  marketplace URLs through the authenticated Console or the trusted Telegram
-  administrator private-chat surface; successful refreshes retain a complete
-  bounded index snapshot and failures preserve the prior snapshot.
+  marketplace URLs through the authenticated Console; successful refreshes
+  retain a complete bounded index snapshot and failures preserve the prior
+  snapshot.
   Marketplace data is discovery metadata, never an execution or trust root.
   Selecting an entry refetches one manifest through the native parser, verifies
   the listed manifest/script digests and derived capability summary, and stores
@@ -126,24 +130,12 @@ operator capture-DNS bindings, on 2026-07-22.**
   installed-extensions page has no decorative traffic rail or embedded
   marketplace tab. Optional marketplace display names are local labels and
   never publisher identity.
-- The Telegram bot is a trusted plugin-management endpoint only for configured
-  administrators in private chats. It supports marketplace source management
-  and browsing, marketplace/URL/pasted-text installation, uninstall,
-  enable/disable, all typed settings, `location`, egress binding, execution
-  order, and update checks/applies through the same managers and state as the
-  Console. Install and update apply always leave the extension disabled.
-- Every Telegram mutation has a complete review followed by a short-lived,
-  one-use confirmation bound to the administrator, exact private chat,
-  operation payload, current revision, and exact extension snapshot or
-  marketplace index digest. Stale, replayed, cross-user, cross-chat, or
-  digest-mismatched confirmations fail closed. Enable reviews list every exact
-  normalized routing rule. Reviews also list every declared network origin and
-  explicitly warn that the script can send any visible decrypted request,
-  response, setting, or storage data there.
-- Telegram `location` editing accepts the client's native location message or
-  explicit longitude, latitude, and accuracy. The bot warns that coordinates
-  pass through Telegram. City search, the draggable OpenStreetMap point, and
-  accuracy visualization remain in the Console.
+- The monolith Telegram bot is read-only and alert-only. It may report status,
+  resolve a name, and send transition alerts to allowlisted administrators. It
+  cannot mutate extension,
+  catalog, policy, or mihomo configuration. Extension installation, review,
+  enablement, settings, location, egress binding, capture-DNS binding, update,
+  and ordering remain exclusively on the authenticated Console surface.
 
 ## Stable and beta release channels
 
@@ -220,14 +212,13 @@ stable-to-beta upgrade contract on 2026-07-21.**
   of that installed stable script delegates the complete operation to the quick
   installer; it never uses stable templates with beta binaries. Stable releases
   that predate this mechanism still require the remote verified quick installer.
-- A normal stable-to-beta install accepts the common persisted JSON schemas,
-  creates beta-only interception state separately, and treats a missing
-  marketplace document as an empty source list. It validates
-  and preserves a valid legacy mihomo config byte-for-byte, then structurally
-  checks the required interception listener, node, fail-closed rule, and
-  credentials. If interception is inactive and that boundary is not ready, the
-  core install may complete only with an explicit Extensions-unavailable result.
-  It must not claim a complete interception upgrade or patch the YAML.
+- A normal channel transition uses the selected release's complete verified
+  installer bundle. It preserves a valid current mihomo config byte-for-byte.
+  Moving from the retired multi-process design to the monolith is a separate,
+  explicit checked migration: legacy anchors and the old interception inbound
+  are removed from a candidate, panel rules are rewritten to exclude `INNER`,
+  the fixed UDP/443 guard is present, and the candidate passes pinned
+  `mihomo -t` before atomic publication.
 - The installer still accepts only the one current `dns.env` key schema. The
   retired `DNS_EGRESS_RESOLVER` key is not ignored or migrated. Every pre-v5
   deployment, including `0.0.19`, `test-env`, and `kfchost`, must first use its
@@ -235,8 +226,8 @@ stable-to-beta upgrade contract on 2026-07-21.**
   managed rules, and retain a separate clean post-disable baseline. A fixed
   explicit rebuild then preserves the listener, SOCKS credentials, TLS paths,
   upstream proxy, and protocol booleans in a checked, atomically published,
-  disabled empty v5 document. The current sidecar check and current DNS routing
-  check must both pass against the clean mihomo file before config and env
+  disabled empty v5 document. Historical sidecar and DNS routing checks must
+  both pass against the clean mihomo file before the legacy config and env
   candidates publish with rollback copies. Never delete v4 and accept randomized credentials against a preserved
   mihomo file. Extensions are re-imported and reviewed; this is not a lossless
   automatic migration.

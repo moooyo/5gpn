@@ -152,7 +152,7 @@ else
   bad "the capture claims ready with the master off"
 fi
 
-req -X PUT --data "$(jq -nc --arg r "$(irev)" '{revision:$r, enabled:true, http2:true, quicFallbackProtection:false}')" \
+req -X PUT --data "$(jq -nc --arg r "$(irev)" '{revision:$r, enabled:true, http2:true, http3:false}')" \
     "$API/gpn/interception/settings" >/dev/null
 exp="$(req "$API/gpn/dns/resolve?name=${HOST}")"
 gw="$(jq -r .gateway /etc/5gpn/mihomo/gpn/dns.json)"
@@ -165,7 +165,7 @@ else
 fi
 
 head_ "clean up"
-req -X PUT --data "$(jq -nc --arg r "$(irev)" '{revision:$r, enabled:false, http2:true, quicFallbackProtection:false}')" \
+req -X PUT --data "$(jq -nc --arg r "$(irev)" '{revision:$r, enabled:false, http2:true, http3:false}')" \
     "$API/gpn/interception/settings" >/dev/null
 res="$(req -X DELETE --data "$(jq -nc --arg r "$(irev)" '{revision:$r}')" "$API/gpn/interception/extensions/${EXT}")"
 if echo "$res" | jq -e --arg id "$EXT" '[.snapshot.modules[]|select(.id==$id)]|length == 0' >/dev/null 2>&1; then

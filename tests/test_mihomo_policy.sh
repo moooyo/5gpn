@@ -81,19 +81,20 @@ check "$T" 'AND,\(\(DOMAIN,__CONSOLE_DOMAIN__\),\(DST-PORT,80\)\),REJECT' 'conso
 check "$T" 'AND,\(\(NOT,\(\(IN-TYPE,INNER\)\)\),\(DOMAIN,__CONSOLE_DOMAIN__\)\),DIRECT' 'the panel route excludes engine egress'
 check "$T" 'external-controller-tls: 127\.0\.0\.1:443' 'the controller listens where the console DIRECT dial lands'
 check "$T" 'AND,\(\(NETWORK,UDP\),\(DST-PORT,443\)\),REJECT' 'HTTP3/QUIC UDP 443 block enabled by default'
-# The UDP/443 reject is the guard standing in for the unwired datagram capture
-# path: the engine's MatchUDP always declines, so a captured host reached over
-# QUIC would bypass interception silently. It must sit below the private-range
-# denies and above the operator's terminal MATCH, so a capable client falls
-# back to TCP, which is captured.
+# HTTP/3 interception is unsupported. The fixed guard must appear exactly once,
+# below the private-range denies and above the terminal MATCH, so a capable
+# client falls back to TCP. This remains scoped to UDP/443; the seed still
+# permits ordinary UDP and keeps QUIC sniffing on :5060.
 private_deny_line="$(grep -nF '  - IP-CIDR,169.254.0.0/16,REJECT,no-resolve' "$root/$T" | cut -d: -f1 || true)"
 quic_block_line="$(grep -nF '  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' "$root/$T" | cut -d: -f1 || true)"
+quic_block_count="$(grep -cFx '  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' "$root/$T" || true)"
 match_line="$(grep -nF '  - MATCH,Proxies' "$root/$T" | cut -d: -f1 || true)"
-if [ -n "$private_deny_line" ] && [ -n "$quic_block_line" ] && [ -n "$match_line" ] \
+if [ "$quic_block_count" = "1" ] && [ -n "$private_deny_line" ] \
+   && [ -n "$quic_block_line" ] && [ -n "$match_line" ] \
    && [ "$private_deny_line" -lt "$quic_block_line" ] && [ "$quic_block_line" -lt "$match_line" ]; then
-    echo 'ok: QUIC guard follows the private-range denies and precedes terminal policy'
+    echo 'ok: the single fixed UDP/443 guard follows private denies and precedes terminal policy'
 else
-    echo 'FAIL: QUIC block ordering is unsafe'
+    echo 'FAIL: the fixed UDP/443 guard is missing, duplicated, or out of position'
     FAIL=1
 fi
 console_direct_line="$(grep -nF '  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT' "$root/$T" | cut -d: -f1 || true)"

@@ -8,18 +8,24 @@ plans, design handoffs, and git history are context only.
 
 ## Non-negotiable architecture
 
-- `5gpn-dns` is the DNS brain. Client ingress is DoT `:853` only; public DoH
-  and plain `:53` must not be reintroduced. `127.0.0.1:5353/udp` is debug-only.
-- mihomo is the data-plane forwarder. It owns application-layer egress after a
-  DNS answer steers traffic to the gateway. `5gpn-intercept` is the sole narrow
-  exception for explicitly enabled native-extension capture hosts over plain HTTP,
-  TLS/H1/H2, and QUIC/H3; its upstream TCP and UDP return through authenticated mihomo SOCKS5
-  listeners. Native `5gpn.io/v1` scripts execute from immutable local snapshots
-  in a no-filesystem goja sandbox. A script receives a synchronous network
-  capability only when its manifest declares `permissions.network: true` and the
-  operator confirms it. That grant names no destinations: a script holding it may
+- The `moooyo/mihomo` fork is the sole long-running process. It owns DoT DNS
+  decisions, application-layer forwarding, native-extension interception, the
+  Telegram control plane, and the authenticated controller API. Client DNS
+  ingress is DoT `:853` only; public DoH and plain `:53` must not be
+  reintroduced. `127.0.0.1:5353/udp` is debug-only.
+- Native-extension interception is limited to plain HTTP and TLS/H1/H2 on
+  explicitly enabled capture hosts. HTTP/3 interception is unsupported:
+  `mitm.http3=true` is rejected, fresh and explicitly reset seeds contain one
+  fixed global UDP/443 `REJECT`, and product management cannot disable that
+  guard. A client that supports protocol fallback may retry over TCP and enter
+  the normal HTTP/H1/H2 capture path; an H3-only client fails. Native
+  `5gpn.io/v1` scripts execute from immutable local snapshots
+  in a no-filesystem goja sandbox. A script receives bounded synchronous and
+  promise-based network calls only when its manifest declares
+  `permissions.network: true` and the operator confirms it. That grant names no
+  destinations: a script holding it may
   reach any host it can resolve, and the manifest cannot narrow that. Every such
-  request still returns through authenticated mihomo SOCKS5, and the URL
+  request returns through mihomo's in-process inner dialer, and the URL
   canonicalization, IP-literal and unsafe-host refusals still apply. Do not
   crawl or mirror module stores. First-party extension source lives exclusively
   in `moooyo/5gpn-extensions`; do not add an `extensions/` source tree back to
@@ -42,59 +48,34 @@ plans, design handoffs, and git history are context only.
 - `/etc/5gpn/mihomo/config.yaml` is fully operator-owned. Normal install,
   reinstall, and `configure` operations preserve a valid existing file. Only
   explicit reset may replace it, after `mihomo -t`, backup, and atomic rename.
-  The single exception is the `intercept-egress` listener and `MODULE-INTERCEPT`
-  proxy credentials, which are rendered from `intercept/config.json` and are
-  realigned to it in place; that rewrite touches those scalars' exact source
-  positions and no other byte, and refuses rather than guesses when it cannot
-  prove the edit is safe.
-- Interception routing publishes as a typed generation committed over the mihomo
-  runtime-overlay control socket, and the config carries only the two
-  `RUNTIME-OVERLAY,5gpn,*` anchors. Do not add a YAML rendering driver back.
-  Rendering managed capture, egress, and policy rules into the operator's file
-  was removed because it made every routing change a rewrite of a file the
-  operator owns — re-serialising their rules to publish ours, with reconciliation
-  that could claim or drop a rule sitting near the reserved block. A config
-  without the anchors has no publication path and must fail closed, not fall back
-  to rendering: the installer refuses it in preflight and `mihomo-reset` refuses
-  when the `runtime-overlay:` block is unreadable. The anchors and that block are
-  published together or not at all, since an anchor without it is a config mihomo
-  cannot parse. Anchor placement is a security property, and all three
-  constraints are checked: the egress anchor sits immediately above the
-  fail-closed terminator, the client anchor sits below that terminator, and the
-  client anchor sits above the terminal `MATCH`.
+  The fixed UDP/443 guard is part of fresh/reset seeds and the live readiness
+  boundary, but it is not an installer-owned generated region. An operator may
+  edit the complete YAML manually; if the guard is missing or disabled,
+  interception readiness fails closed.
+- Interception capture hosts, typed `REJECT`/`DIRECT` rules, and egress bindings
+  are immutable in-memory projections of the current extension document. The
+  tunnel and inner dialer consume those projections directly. Do not restore a
+  sidecar, runtime-overlay socket, YAML anchors, generated mihomo rule block, or
+  loopback SOCKS hop.
 - The installer does not roll back. A failure before publication leaves the host
   untouched; a failure during publication leaves it partially installed and says
   so. Do not reintroduce snapshot/restore/quarantine machinery — its failure
   amplification (one unrecoverable unit disabling every healthy one) is why it
   was removed. Keep fail-before-publish checks, the locks, and staging.
-- `console.<base>` is the public bootstrap/console SNI: the SPA and `/ios/` are
-  public, while every `/api/*` request still requires the console bearer token.
-  Do not introduce a separate bootstrap hostname. zashboard remains source-allowlisted.
-- `/api/*` requires the console bearer token. Console mihomo logs and plugin
-  engine logs use separate short-lived one-use WebSocket tickets. Plugin logs
-  remain in the sidecar's bounded memory ring and cross only the fixed,
-  group-restricted `/run/5gpn-intercept/logs.sock`; do not persist script
-  console output or expose another controller path. Do not expose the full
-  mihomo controller under the console `/proxy/`; zashboard has a separate
-  allowlisted pass-through.
-- There is no Python in the repository. The `5gpn-dns` Go module has exactly three direct dependencies:
-  `github.com/miekg/dns`, `github.com/go-telegram/bot`, and `gopkg.in/yaml.v3`.
-  The separate `5gpn-intercept` module has exactly seven direct dependencies:
-  `github.com/quic-go/quic-go`, `github.com/dop251/goja`,
-  `github.com/dlclark/regexp2/v2` (imported only to bound goja's backtracking
-  fallback), `github.com/andybalholm/brotli` for bounded Brotli decoding,
-  `github.com/itchyny/gojq` for declarative jq actions, and
-  `golang.org/x/net` plus `github.com/andybalholm/cascadia` for the bounded
-  document model published proxy-compat bundles need. The last two were an
-  explicit design decision: a webpage bundle parses a response into a document,
-  selects nodes, injects into head, and serializes back, and without a real
-  document model it throws inside its own error handling and the action reports
-  success having changed nothing. `golang.org/x/net` was already in the module
-  graph through quic-go. A hand-written selector matcher was rejected because a
-  partial CSS implementation mismatches silently.
-  The YAML dependency is the explicit security boundary for structural mihomo
-  invariant validation; do not add another direct dependency without an explicit
-  design decision.
+- `console.<base>` is the single public bootstrap and panel SNI. `/ui/*` and its
+  iOS profiles are public, while `/gpn/*` and the ordinary controller routes
+  require the mihomo controller secret. Do not restore a separate bootstrap,
+  Console API, panel hostname, source allowlist, or handoff session.
+- The mihomo controller secret protects `/gpn/*` and the ordinary authenticated
+  controller routes. `/ui/*` remains public for bootstrap and profile delivery.
+  Plugin logs remain in mihomo's bounded in-memory ring and are read through the
+  authenticated interception API; do not persist script console output or add a
+  second credential, listener, or controller origin.
+- There is no Python, Go module, or Web source tree in this repository. Runtime
+  source belongs in `moooyo/mihomo`, Console source belongs in
+  `moooyo/zashboard`, and first-party extension source belongs in
+  `moooyo/5gpn-extensions`. This repository installs digest-pinned release
+  artifacts from those repositories.
 
 ## Shell TUI policy: Gum
 
@@ -142,7 +123,7 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   aliases, schema migrations, or retired-component teardown paths.
 - `CERT_MODE` is exactly `cloudflare`, `http-01`, or `debug`. Both production
   modes use one scoped `<base>` Certbot lineage. HTTP-01 requires exact
-  console/zash/dot A records, no AAAA, and may stop mihomo only for the bounded
+  console/dot A records, no AAAA, and may stop mihomo only for the bounded
   standalone challenge; Cloudflare credentials are used only by DNS-01.
 - Any root recursive deletion must use a canonical, validated path plus a 5gpn
   ownership marker. Refuse `/`, system directories, empty paths, and unowned
@@ -247,9 +228,7 @@ Run checks proportional to the touched surface:
 
 ```bash
 for t in tests/test_*.sh; do bash "$t"; done
-(cd cmd/5gpn-dns && test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...)
-(cd web && npm run typecheck && npx vitest run && npm run build && npm run bundle:check)
-(cd web && npx playwright test)
+tests/verify-artifact-pins.sh
 ```
 
 CI also renders the seed and validates it with digest-pinned mihomo. For real

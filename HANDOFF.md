@@ -1,17 +1,21 @@
-# What is not done — 5gpn monolith
+# 5gpn monolith handoff
 
-Input for a design session, not a status report. Everything below is either
-unbuilt or unverified; what *is* built is described by
+The current release contract is described by
 [`docs/architecture.md`](docs/architecture.md), which is normative, and by the
-git history. Delete this file when the list empties.
+git history. Most narrative below records earlier beta work and is explicitly
+superseded where it conflicts with the current monolith or HTTP/3 boundary.
 
-Everything is pushed. `beta` is fast-forwarded to `feat/installer-tui`.
-
-| Repository | Branch | Published |
+| Repository | Maintenance branch | Release coordinate |
 | --- | --- | --- |
-| `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.11` |
-| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.19` |
-| `moooyo/5gpn` | `feat/installer-tui` | `0.0.62-beta.42` |
+| `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.12` |
+| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.20` |
+| `moooyo/5gpn` | `main` | `0.0.62` |
+
+The stable release has one long-running process: mihomo. HTTP/3 interception is
+unsupported, `http3=true` is rejected, and the fixed global UDP/443 `REJECT`
+cannot be disabled through product management. Fallback-capable clients may
+retry over TCP and enter HTTP/H1/H2 capture; H3-only clients fail. There is no
+sidecar, runtime-overlay publication, or loopback SOCKS return path.
 
 Green: `go test -race ./gpn/...` (**run it in WSL** — Windows has no gcc, so
 `-race` cannot build there), all 28 installer suites, four console build-time
@@ -22,8 +26,8 @@ checks, and CI on every branch push. See [Reproducing the checks](#reproducing-t
 ## Pick up here
 
 Nothing is half-finished; everything below is a next thing, not a loose end.
-`main` is untouched and 60+ commits behind — the owner has not asked for that
-merge.
+The former beta line is promoted to `main` as stable `0.0.62`; `main`, `beta`,
+and `feat/installer-tui` identify the same release commit.
 
 In the order they are worth doing:
 
@@ -40,8 +44,8 @@ In the order they are worth doing:
 3. **`gpn/engine` request-path tests** — the proxy path, the goja runtime and
    TLS termination are the largest untested surface, and they are the parts that
    see live traffic and run operator-supplied JavaScript.
-4. **Unverified despite shipping:** datagram capture against a real browser
-   (migration, MTU, Alt-Svc) and the bot against a real Telegram token.
+4. **Unverified despite shipping:** the read-only bot against a real Telegram
+   token.
 5. **Three lifecycle functions with no callers** — `stopBot`, `stopDns`,
    `stopInterception`. Switching backends does not clear those assemblies. Each
    `refresh*` guards on `activeUuid`, so the blast radius is small, but it is the
@@ -53,8 +57,9 @@ pass.
 
 ## 0. Acceptance — green
 
-`0.0.62-beta.42` is deployed on `test-env` (core `v1.19.28-monolith.11`, console
-`v3.16.0-monolith.19`), upgraded in place. Acceptance there:
+This is a superseded beta acceptance record. `0.0.62-beta.42` was deployed on
+`test-env` with core `v1.19.28-monolith.11` and console
+`v3.16.0-monolith.19`, upgraded in place. Acceptance there was:
 
 | Suite | Result |
 | --- | --- |
@@ -558,15 +563,14 @@ address an operator disagrees with no longer needs a rerun.
 
 ---
 
-## 2. `gpn/engine` has no tests for the request path
+## 2. Historical request-path test gap (superseded record)
 
 The largest untested surface in the tree, and inherited rather than introduced.
 
-Covered: the document (`manage_test.go`), the manifest parser
+At the time, coverage included the document (`manage_test.go`), the manifest parser
 (`manifest_test.go`), the certificate store's presence/absence contract
-(`cert_test.go`), the catalog (`catalog_test.go`), the datagram capture bridge
-and a live QUIC/H3 round trip through it (`quiccapture_test.go`), capture
-ownership.
+(`cert_test.go`), the catalog (`catalog_test.go`), and capture ownership. The
+former datagram/HTTP3 tests do not define the current product contract.
 
 **Not covered:** the proxy's request path, the goja script runtime, TLS
 termination. Those are the parts that see live traffic and run
@@ -583,12 +587,11 @@ Two facts that should shape the design:
 
 ---
 
-## 3. Datagram capture is unproven against a real client
+## 3. Historical datagram-capture design (superseded)
 
-`MatchUDP`/`HandleUDP` are wired and `quiccapture_test.go` drives a genuine QUIC
-handshake and HTTP/3 request through the same bridge the core uses. What has
-**not** happened is a browser on a real network reaching a captured host over
-H3 through `test-env`.
+The earlier beta attempted a QUIC bridge. That path is not a supported product
+capability. Current `MatchUDP` leaves UDP/443 to the fixed reject guard and
+`http3=true` is invalid.
 
 The parts most likely to be wrong there and invisible in a test:
 
@@ -649,18 +652,19 @@ core's inner dialer, on a network that blocks it — has not run.
 
 ---
 
-## 6. UDP / HTTP-3 — the reject rule stays
+## 6. UDP / HTTP/3 — current contract
 
-`captureUDPFor` is wired and `MatchUDP` answers for captured hosts on :443 with
-`mitm.http3` on. The seed's fixed `AND,((NETWORK,UDP),(DST-PORT,443)),REJECT`
-**stays in place either way**: capture is consulted before rule resolution, so
-with HTTP/3 on the reject only ever sees datagrams capture did not want, and
-with it off it is the whole mechanism.
+HTTP/3 interception is unsupported. `mitm.http3` must be `false`; startup and
+management writes reject `true`. The seed's fixed
+`AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` is evaluated before extension rules
+or capture and cannot be disabled through the controller rule-management API.
+Removing it manually from the operator-owned YAML withdraws interception
+readiness; it does not enable QUIC capture.
 
-**This rule must not be removed.** Removing it does not enable QUIC capture; it
-makes gateway QUIC bypass interception whenever `http3` is off or the master
-switch is. `test_mihomo_policy` asserts its position and the CI seed gate
-asserts its presence.
+A client that supports fallback may retry over TCP and reach plain HTTP or
+TLS/H1/H2 capture. H3-only clients fail. The rule is scoped to gateway UDP/443
+and does not disable ordinary UDP or QUIC sniffing on another configured port,
+including the optional `:5060` ingress.
 
 ---
 
@@ -745,7 +749,8 @@ gzip -k …  &&  gh release create <tag> --repo moooyo/mihomo --prerelease <asse
 
 # installer: bump BOTH install.sh and .github/workflows/checks.yml for the core
 bash tests/verify-artifact-pins.sh
-git push origin feat/installer-tui:beta && git tag 0.0.62-beta.N && git push origin 0.0.62-beta.N
+git push --atomic origin HEAD:feat/installer-tui HEAD:beta HEAD:main
+git tag X.Y.Z && git push origin X.Y.Z
 ```
 
 `MIHOMO_VERSION`/`MIHOMO_SHA256` appear in **two** files — `install.sh` and
@@ -756,7 +761,7 @@ branch: `raw.githubusercontent.com` caches a branch for minutes and you will
 silently run the previous revision.
 
 ```
-ssh test-env 'curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/<sha>/quick-install.sh -o /tmp/qi.sh && sudo bash /tmp/qi.sh --beta'
+ssh test-env 'curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/<sha>/quick-install.sh -o /tmp/qi.sh && sudo bash /tmp/qi.sh'
 ```
 
 Windows OpenSSH only. Keep remote commands straight-line — heredocs through
@@ -812,7 +817,7 @@ not take the install with it.
 
 ### Upgrading in place
 
-An upgrade **is** headless: `bash quick-install.sh --beta` on a provisioned host
+An upgrade **is** headless: `bash quick-install.sh` on a provisioned host
 needs no TTY.
 
 **Fetch `quick-install.sh` by commit SHA, not by branch.**
@@ -827,8 +832,9 @@ Windows OpenSSH only (`C:\Windows\System32\OpenSSH\ssh.exe`); git bash's ssh
 cannot resolve the name. Keep remote commands straight-line — PowerShell mangles
 `for`/`if` blocks and `$(...)` passed through `ssh`.
 
-It currently holds `0.0.62-beta.38`, upgraded in place from the beta.9 fresh
-install. Backups: `/root/5gpn-pre-freshinstall-20260803T011558Z` and
+Before stable promotion it held `0.0.62-beta.38`, upgraded in place from the
+beta.9 fresh install. Verify the live version rather than treating this
+historical snapshot as current. Backups: `/root/5gpn-pre-freshinstall-20260803T011558Z` and
 `/root/5gpn-pre-beta10-*`; the pre-console config.yaml is at
 `/etc/5gpn/mihomo/config.yaml.pre-console.bak`. `get_public_ip` returns
 `10.0.1.20` there. The panel has no allowlist; it answers any client that can
@@ -839,13 +845,9 @@ engine failing to load is a `[GPN]`-tagged warning in `journalctl -u mihomo`,
 and the install reports success regardless — that is how a build that refused
 every deployed intercept.json looked like a clean upgrade.
 
-To wipe it back to clean, in one straight line: disable the units, remove the
-unit files, `daemon-reload`, `reset-failed`, `rm -rf /etc/5gpn /opt/5gpn
-/var/lib/5gpn* /run/5gpn /usr/local/bin/5gpn`, drop the `mobileconfig` line from
-`/etc/mime.types`, then `userdel`/`groupdel` `mihomo`, `gpn-dns` and
-`gpn-intercept`. Scan for leftovers by pattern rather than by name — the first
-attempt missed the user `gpn-intercept` and the groups `5gpn-overlay-ctl` and
-`5gpn-overlay-gen`.
+Use `5gpn uninstall --decommission` for a clean host. Its ownership-marker and
+canonical-path checks are the supported deletion boundary; do not replace it
+with a broad recursive removal command.
 
 The acceptance suites are not in the installer bundle; `scp` them from `tests/`
 and strip CRLF. All four are on the host at `/root/acceptance-monolith*.sh`.

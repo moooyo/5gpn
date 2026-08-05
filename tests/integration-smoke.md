@@ -19,22 +19,10 @@ current architecture is `docs/architecture.md`.
   looks fabricated — treat that warning as a signal the fixture is wrong, not
   as noise.
 - At least two controllable upstreams when testing sequential fallback.
-- For cross-channel upgrade acceptance, use an immutable pre-v5 deployment
-  (`0.0.13`, `0.0.19`, or an equivalent `test-env`/`kfchost` snapshot) plus a
-  locally built release bundle stamped with the exact beta candidate tag. Do
-  not substitute the latest published beta unless it actually contains the
-  candidate revision under test.
-- Preserve active `dns.env`, interception v4, and mihomo files before any
-  mutation, then retain a separate clean post-disable v4/mihomo baseline. The
-  raw environment containing retired `DNS_EGRESS_RESOLVER` and the v4
-  document must each fail with the actionable pre-v5 repair message. Remove only
-  that exact environment key only after the old v4 control plane has disabled
-  MITM and removed its managed rules. Use the documented fixed `jq` projection
-  to preserve listener/SOCKS/TLS/upstream/protocol infrastructure in disabled
-  empty v5, validate it with the verified current sidecar and require the current
-  DNS routing checker to report `ready` against clean mihomo, atomically publish it,
-  and re-import extensions. Never accept randomized credentials against the
-  preserved mihomo file or represent the rebuild as an automatic migration.
+- For an upgrade acceptance run, preserve active `dns.env`, mihomo YAML, and
+  the complete mihomo `gpn/` state directory before mutation. A legacy
+  multi-process deployment must follow `docs/pre-v5-upgrade.md` and then the
+  checked monolith migration; do not improvise a partial schema edit.
 
 Capture before-state for host-owned facilities. In particular:
 
@@ -45,27 +33,16 @@ sudo cp -a /etc/5gpn/mihomo/config.yaml /tmp/mihomo-config.before
 
 ## 1. Static and service health
 
-- [ ] `systemctl is-active 5gpn-dns mihomo` reports both active.
-- [ ] `systemctl show -p User -p Group -p SupplementaryGroups 5gpn-dns`
-  reports `gpn-dns`, `gpn-dns`, and exactly `mihomo`; mihomo
-  reports its dedicated `mihomo` user/group.
-- [ ] `journalctl -u 5gpn-dns -b` contains no bind/config fatal error.
+- [ ] `systemctl is-active mihomo` reports active. No `5gpn-dns` or
+  `5gpn-intercept` long-running service exists.
+- [ ] `systemctl show -p User -p Group mihomo` reports the dedicated mihomo
+  account selected by the installer.
 - [ ] `journalctl -u mihomo -b` contains no `External controller tls listen error`
   or safe-path rejection after startup.
-- [ ] `runuser -u gpn-dns -- journalctl -n 1 --no-pager` is denied; the daemon
-  has no general host-journal permission. Starting each fixed exporter through
-  the Bot produces a root-owned, `gpn-dns`-readable `0640` file below
-  `/run/5gpn-journal`, bounded to 256 KiB and containing the requested unit's
-  newest 50 lines.
-- [ ] Evaluate the installed polkit rule with a `gpn-dns` subject. It authorizes
-  only `org.freedesktop.systemd1.manage-units` details
-  `mihomo.service`/`restart`, `5gpn-certbot-renew.service`/`start`, and the two
-  exact `5gpn-journal@{5gpn-dns,mihomo}.service`/`start` instances; changing
-  any unit or verb is denied. Verify with `pkcheck` before exercising the Bot.
 - [ ] `ss -lntup` shows:
-  - `:853/tcp` owned by `5gpn-dns`;
+  - `:853/tcp` owned by mihomo;
   - `127.0.0.1:5353/udp` and `127.0.0.1:5354/tcp+udp`;
-  - console `127.0.0.1:443/tcp`, zashboard `127.0.0.2:443/tcp`;
+  - console/controller `127.0.0.1:443/tcp`;
   - mihomo TCP `:80`, `:443`, `:5060`, `:8080`, and `:8443`, plus UDP `:443`
     and `:5060`, on every
     configured local listen IP when testing a fresh or explicitly reset seed.
@@ -110,8 +87,8 @@ afterward.
   - `direct`: real address, no gateway rewrite;
   - `gateway`: gateway steering.
 - [ ] A cached reply preserves its original verdict/reason/upstream metadata in
-  `/api/querylog`; a fallback-direct cache hit is not mislabeled chnroute-cn.
-- [ ] `/api/resolve-test` agrees with the live query for direct, proxy, every
+  `/gpn/dns/querylog`; a fallback-direct cache hit is not mislabeled chnroute-cn.
+- [ ] `/gpn/dns/resolve` agrees with the live query for direct, proxy, every
   fallback, NXDOMAIN, and NODATA.
 
 ## 4. Upstream ordering, reload, and subscriptions
@@ -122,13 +99,14 @@ afterward.
   total request deadline. Recovered first member regains precedence.
 - [ ] Parent-context cancellation does not open the upstream breaker; a member
   attempt deadline does allow fallback.
-- [ ] `PUT /api/upstreams` hot-swaps groups, preserves china ECS, flushes old
-  cached answers, and survives daemon restart through `upstreams.json`.
+- [ ] A revision-correct whole-document `PUT /gpn/dns` hot-swaps upstream
+  groups, preserves China ECS, flushes old cached answers, and survives mihomo
+  restart through `/etc/5gpn/mihomo/gpn/dns.json`.
 - [ ] A china group configured with a DoT or DoH member resolves CN names, and
   the operator's `DNS_CHINA_ECS` subnet still rides the query on that member —
   ECS is attached before the transport is chosen, but nothing else covers it.
-- [ ] Repeated `PUT /api/upstreams` with a china DoH member leaves the daemon's
-  fd count flat. A pooled `http.Transport` is retired on a grace timer, and a
+- [ ] Repeated whole-document writes with a China DoH member leave mihomo's fd
+  count flat. A pooled `http.Transport` is retired on a grace timer, and a
   regression here leaks one per save rather than failing visibly.
 - [ ] A subscription hostname resolves through the current trust snapshot.
 - [ ] Network failure, redirect to a special-use address, oversized line, or
@@ -137,65 +115,60 @@ afterward.
 
 ## 5. Public console, iOS bootstrap, and authentication
 
-Set `CONSOLE=console.<base>` and `TOKEN` to the
-current API bearer. Direct loopback tests isolate daemon routing:
+Set `CONSOLE=console.<base>` and `SECRET` to mihomo's current controller
+secret. Direct loopback tests isolate controller routing:
 
 ```bash
 curl --resolve "$CONSOLE:443:127.0.0.1" -fsS \
-  -H "Authorization: Bearer $TOKEN" "https://$CONSOLE/api/status"
+  -H "Authorization: Bearer $SECRET" "https://$CONSOLE/gpn/dns"
 curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
-  "https://$CONSOLE/ios/ios-dot.mobileconfig"
+  "https://$CONSOLE/ui/ios-dot.mobileconfig"
 ```
 
-- [ ] Correct console bearer returns 200; missing/wrong bearer returns 401 and
-  never exposes status or mihomo credentials.
+- [ ] The correct controller secret returns 200 from `/gpn/dns` and ordinary
+  authenticated controller routes. A missing or wrong secret returns 401.
 - [ ] The console profile response is `200` with
   `Content-Type: application/x-apple-aspen-config`, contains no secret, and is
   installable by iOS before DoT is configured.
 - [ ] A normal install fails before declaring success when the console A record
   is missing/wrong; exported skip variables cannot bypass the gate.
-- [ ] `https://$CONSOLE/` serves the SPA; unauthenticated
-  `$CONSOLE/api/status` returns 401.
-- [ ] The authenticated console `/setup-guide` route shows separate iOS and
-  Android instructions, the derived `dot.<DNS_BASE_DOMAIN>` identity, a profile
-  QR code, and a direct `/ios/ios-dot.mobileconfig` link. Public `/ios/`
-  redirects to the guide; a
-  nonexistent profile path never returns the SPA shell as a false-positive
-  `200 text/html`.
+- [ ] `https://$CONSOLE/ui` redirects to `/ui/`; `/ui/` serves zashboard
+  without authentication. A nonexistent profile path never returns a valid
+  profile as a false-positive.
+- [ ] The Console Setup Guide shows the derived `dot.<DNS_BASE_DOMAIN>`
+  identity, Android instructions, and direct links to both public `/ui/`
+  profiles.
 - [ ] Production CSP reports no inline script/style or worker/font violation.
 
 ## 6. Mihomo controller boundaries
 
-- [ ] `DNS_MIHOMO_CONTROLLER` completes a TLS handshake for
-  `zash.<DNS_BASE_DOMAIN>`
-  with the zash role certificate and no earlier safe-path rejection in
-  `journalctl -u mihomo -b`; plaintext HTTP or a mismatched SNI fails closed.
-- [ ] zashboard REST and WebSocket operations succeed through `/proxy/` while
-  the 5gpn-to-mihomo hop is HTTPS.
-- [ ] `GET /api/mihomo/health` succeeds only with the console bearer.
-- [ ] `POST /api/mihomo/log-ticket` returns a short-lived opaque ticket.
-- [ ] That ticket upgrades `/proxy/logs` exactly once; reuse, expiry, missing
-  ticket, and arbitrary `/proxy/*` controller paths are rejected.
-- [ ] The ticket and controller secret do not appear in logs, error bodies, or
-  persisted browser URLs beyond the short-lived WebSocket request.
-- [ ] zashboard works through its own allowlisted SNI and `/proxy/` using the
-  mihomo secret it presents. The console SNI cannot obtain this broad proxy.
-- [ ] A wrong controller secret reports unauthenticated health without clearing
-  a valid console token.
+- [ ] The single `console.<base>` origin completes a TLS handshake with the
+  console certificate and no safe-path rejection in `journalctl -u mihomo -b`;
+  plaintext HTTP or a mismatched SNI fails closed.
+- [ ] zashboard REST and WebSocket operations use mihomo's controller directly
+  on the same origin. There is no `/proxy/`, second panel SNI, source allowlist,
+  handoff session, or separate Console bearer.
+- [ ] `/ui/*` remains the only unauthenticated controller surface. `/gpn/*`
+  and ordinary controller routes reject a missing or wrong controller secret,
+  and neither secrets nor extension log contents appear in error bodies or
+  persistent journal output.
+- [ ] An engine inner dial naming `console.<base>` is rejected by the
+  `IN-TYPE,INNER` exclusion before it can reach the management listener.
 
 ## 7. Data-plane forwarding
 
 - [ ] A proxy/foreign DNS answer is exactly `DNS_GATEWAY_IP`, and that address
   is one of the active mihomo listener addresses.
-- [ ] HTTPS, HTTP, and QUIC connections steered to the gateway are sniffed and
-  forwarded according to the operator mihomo config.
+- [ ] HTTPS and HTTP connections steered to the gateway are sniffed and
+  forwarded according to the operator mihomo config. Every gateway UDP/443
+  flow is rejected by the fixed guard.
 - [ ] Fresh/reset seeds forward sniffable TCP `:8080` and `:8443` traffic to
   the visible HTTP Host or TLS SNI on the same destination port. No-SNI,
   unrecognized raw TCP, and UDP on those ports fail closed.
 - [ ] A fresh or explicitly reset seed reports `speedtest-5060` enabled and has
   TCP and UDP `:5060` listeners on every configured gateway address, with
-  `5060` present in the HTTP, TLS, and QUIC sniffer port sets and exact
-  console/zash `:5060` rejects immediately after the canonical panel-reject
+  `5060` present in the HTTP, TLS, and QUIC sniffer port sets and the exact
+  console `:5060` reject immediately after the canonical panel-reject
   prefix. Disabling it requires confirmation and removes only those canonical
   objects; re-enabling restores them. Restrict the test source in the provider
   security group.
@@ -213,9 +186,10 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   the gateway `:80` listener is rejected promptly before the console `DIRECT`
   rule. Mihomo logs show no attempted dial to `127.0.0.1:80`; HTTPS through
   the gateway `:443` listener still reaches the console successfully.
-- [ ] UDP traffic that remains identified as `console.<base>` or `zash.<base>`
-  is rejected promptly before either panel `DIRECT` rule; successfully sniffed
-  QUIC for other hostnames still follows the operator data-plane rules.
+- [ ] UDP traffic that remains identified as `console.<base>` is rejected
+  promptly before its panel `DIRECT` rule. QUIC on another configured port,
+  including the optional `:5060` ingress, still follows operator data-plane
+  rules after successful sniffing.
 - [ ] The reset seed contains no `REJECT-DROP`. Non-allowlisted zashboard and
   anti-loop traffic match `REJECT`, create no outbound dial retries, and leave
   no connection tracker after the client closes.
@@ -272,42 +246,21 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   `X.Y.Z-beta.N` prerelease. Missing beta metadata, a normal release carrying a
   beta-looking tag, and a beta-tagged bundle selected for the official channel
   all fail before deployment mutation and never fall back across channels.
-- [ ] Starting from a clean pre-v5 release/fixture, populate every common JSON
-  state file and install a valid customized legacy mihomo config. First prove
-  the untouched `dns.env` and interception v4 document fail with the explicit
-  rebuild instructions. Through the old v4 API, disable MITM and verify the
-  sidecar stops and old reserved rules disappear. Create recoverable copies,
-  build the fixed credential-preserving empty v5 candidate, validate it with the
-  current sidecar, atomically replace v4, remove only the retired key, and verify
-  the preserved mihomo infrastructure still authenticates. Record that the old
-  master-disable transaction changed the mihomo hash by removing its managed
-  blocks, then treat that clean post-disable hash as the preservation baseline.
-  Upgrade with
-  the exact stamped beta bundle through ordinary `--beta`. The common policy,
-  upstream, ECS, Telegram, subscription, and statistics state remains readable,
-  the new interception state uses the current schema, a missing marketplace
-  file is exposed as an empty source list, and the clean post-disable mihomo
-  hash is byte-for-byte unchanged by the installer. DNS, Console, Telegram,
-  and the existing data plane remain healthy, while completion explicitly says
-  core install complete and Extensions unavailable. Enabling interception must
-  fail closed until its mihomo boundary is made ready.
-- [ ] Restore the same pre-v5 baseline, repeat the explicit schema rebuild, and
-  run the exact stamped beta bundle as
-  `--beta upgrade-reset-mihomo` from a real TTY. Review and accept the destructive
-  warning. The retained backup must hash-identically to the old customized file;
-  the replacement must pass pinned `mihomo -t`, match the sidecar credentials,
-  contain exactly one canonical listener/node/fail-closed boundary, and permit a
-  synthetic extension to enable and pass end-to-end traffic verification. Run
-  the command without a TTY and cancel its confirmation in separate attempts;
-  both must stop before the mihomo or deployment transaction is mutated.
-- [ ] Repeat both pre-v5 upgrade paths with injected failures before and after
-  CA creation, state-root creation, service-account creation, mihomo candidate
-  validation, publication, and service readiness. Paths absent before the
-  attempt are absent afterward; pre-existing owned CA/state trees are restored
-  byte-for-byte; unowned lookalike paths are refused; a newly created
-  `gpn-intercept` user/group is removed only when still in its expected isolated
-  shape; and pre-existing accounts remain untouched. The original mihomo file,
-  services, nftables state, and installed release stay runnable after rollback.
+- [ ] Starting from a clean legacy multi-process fixture, follow the historical
+  pre-v5 runbook without shortcuts, then run the checked monolith migration.
+  The candidate removes only retired runtime-overlay anchors and the old
+  interception inbound boundary, rewrites panel exclusions to `IN-TYPE,INNER`,
+  contains exactly one fixed UDP/443 guard, and passes the pinned `mihomo -t`
+  before atomic publication. Preserve recoverable copies throughout.
+- [ ] After migration, exactly one long-running mihomo process owns DNS,
+  forwarding, interception, Telegram, and the controller. The migrated DNS,
+  extension, catalog, and bot documents remain readable; the operator-owned
+  egress configuration remains intact; retired services cannot restart or bind
+  their old ports.
+- [ ] Inject failures before candidate validation, state publication, and
+  service readiness. A failure before publication leaves the host untouched; a
+  failure during publication is reported as partial and never claims a rollback
+  that did not occur. Unowned lookalike paths remain untouched.
 - [ ] With a future stamped stable fixture that includes cross-channel
   delegation, invoke its installed `5gpn --beta` and verify that it executes the
   root-owned quick installer retained from the verified bundle, selects one
@@ -355,29 +308,28 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   removed.
 - [ ] In `cloudflare` mode, the certificate has the exact apex `<base>` and
   `*.<base>` SAN shape. Initial issuance and a due timer renewal use Cloudflare
-  DNS-01 without stopping mihomo or binding an ACME `:80` listener; a synthetic
-  `zash.<base>` remains valid for this mode.
+  DNS-01 without stopping mihomo or binding an ACME `:80` listener.
 - [ ] In `http-01` mode, install and mode-switch TUI screens display the required
-  A records for `console.<base>`, `zash.<base>`, and `dot.<base>` and require an
+  A records for `console.<base>` and `dot.<base>` and require an
   explicit confirmation before any issuance attempt.
 - [ ] For HTTP-01, make one A answer absent, wrong, or non-unique, or publish an
   AAAA answer. The gate observes the failure through `1.1.1.1`, keeps waiting
-  and then fails closed without issuing a certificate. After all three names
+  and then fails closed without issuing a certificate. After both names
   each return exactly the sole A `DNS_PUBLIC_IP` and no AAAA through `1.1.1.1`,
   the same install/configure path proceeds.
-- [ ] The HTTP-01 lineage contains exactly the three service SANs and contains
+- [ ] The HTTP-01 lineage contains exactly the two service SANs and contains
   neither `<base>` nor `*.<base>`.
 - [ ] HTTP-01 initial issuance stops mihomo, serves the standalone ACME
   challenge on TCP `:80`, keeps mihomo stopped while the new lineage and
-  `zash/current` role certificate are validated/published, and restores it in
+  `console/current` role certificate are validated/published, and restores it in
   the later service-start phase. A forced challenge failure or signal also
   restores a previously active mihomo service.
 - [ ] A scheduled check while the certificate is not due leaves mihomo running.
   A due HTTP-01 renewal repeats the `1.1.1.1` DNS gate and the same bounded
   stop-and-restore window; a due Cloudflare renewal remains interruption-free.
-- [ ] The systemd timer and the Telegram bot's confirmed renewal action invoke
-  the same mode-aware scoped helper. Their result and journal output agree for
-  not-due, success, DNS-gate failure, Certbot failure, and mihomo-restore failure.
+- [ ] The systemd timer and an explicit host-side renewal invoke the same
+  mode-aware scoped helper. Their result and journal output agree for not-due,
+  success, DNS-gate failure, Certbot failure, and mihomo-restore failure.
 - [ ] Hold `/run/5gpn/install.lock`, then start the public renewal service: it
   exits without reaching the certificate lock or Certbot. The interception
   certificate oneshot still succeeds during the installer's explicit
@@ -389,7 +341,7 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   its root marker is `root:root` mode `0644`. Verify the runtime traversal
   contract directly:
   `sudo -u mihomo test -r /etc/5gpn/cert/dot/current/fullchain.pem` and
-  `sudo -u mihomo test -r /etc/5gpn/cert/zash/current/privkey.pem` both succeed.
+  `sudo -u mihomo test -r /etc/5gpn/cert/console/current/privkey.pem` both succeed.
   Both name `mihomo`, not one account each: the DoT listener moved into the same
   process that serves the controller, so one account reads every certificate the
   gateway presents. A `dot` role still readable only by `gpn-dns` is the shape
@@ -406,147 +358,66 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
 
 ## 11. Telegram bot (optional real-network smoke)
 
-Use a disposable Telegram bot token, at least two test administrator accounts,
-and a temporary group. Back up `/etc/5gpn/tgbot.json` first and do not paste the
-token into recorded command output, screenshots, or issue logs.
+Use a disposable Telegram bot token and at least two test administrator
+accounts. Back up `/etc/5gpn/mihomo/gpn/bot.json` first and never paste the token
+into recorded command output, screenshots, or issue logs.
 
-- [ ] `5gpn setup-tgbot` requires a TTY, reports an existing `DNS_TGBOT_FILE` as the active
-  source, validates a replacement token through the live control API, and
-  atomically leaves a root-only (`0600`) JSON override. It does not claim that a
-  caller environment token became active.
-- [ ] A malformed or unauthorized token makes both CLI and Web apply fail. The
-  previous live bot and the byte-for-byte override remain usable, and neither
-  path prints a success message.
-- [ ] `GET /api/tgbot` never returns the token. Its lifecycle/health fields agree
-  with reality after enable, network failure, recovery, disable, and an
-  unexpected polling-loop exit.
-- [ ] A token that previously had a webhook is safely returned to long polling
-  without dropping pending updates. Commands and inline callback buttons both
-  work, proving the explicit `message` + `callback_query` update selection.
-- [ ] `/id` reports the numeric user ID. Every status, log, diagnostic, and
-  maintenance action is rejected outside an authorized administrator's private
-  chat; adding the bot to a group cannot reveal domains, addresses, or journal
-  output.
-- [ ] Removing an administrator takes effect immediately. A concurrent stale
-  token/admin apply cannot later restore the revoked account or replace a newer
-  configuration.
-- [ ] Menu navigation and refresh work for status, DNS diagnosis, logs,
-  upstreams, maintenance, iOS install, marketplace, installed extensions, and
-  the Web-console link. DNS diagnosis agrees with `/api/resolve-test`;
-  policy/subscription/YAML editing is absent.
-- [ ] From an authorized private chat, add and refresh the official marketplace,
-  browse its normalized entries, install one entry, remove/re-add its source,
-  and verify the installed immutable snapshot is unaffected. Repeat installation
-  through an HTTPS manifest URL and pasted local manifest text. Exercise
-  uninstall, enable/disable, update check/apply, egress binding, and complete
-  reorder. Every install and applied update finishes disabled, and all results
-  agree with the Console and the underlying marketplace/sidecar revisions.
-- [ ] For every Telegram marketplace or extension mutation, verify that the bot
-  renders the complete normalized impact before exposing Confirm. Capture a
-  confirmation and try it after expiry, twice, from the second administrator,
-  from a different private chat, and from the group. Then change the marketplace
-  revision/index digest, sidecar revision/installed snapshot digest, and
-  install/update candidate digest between review and confirmation. Every stale,
-  replayed, cross-user, cross-chat, or digest-mismatched attempt must fail without
-  state changes and require a fresh review.
-- [ ] Install a synthetic extension with multiple exact network origins. Each
-  affected Telegram review lists every origin, and enable states that the script
-  can send any decrypted request, response, setting, or storage data visible to
-  it to each origin. Paginate or attach an oversized review and verify Confirm
-  appears only after the final review part. Change one origin through a disabled
-  update and verify the old confirmation cannot authorize the new snapshot.
-- [ ] Edit `text`, `select`, `boolean`, `number`, and `location` values from
-  Telegram, with revision conflict injection for each save. Set `location` once
-  with a Telegram native location message and once with manual longitude,
-  latitude, and accuracy. Both paths warn before collection that coordinates
-  pass through Telegram and the Bot API; the bot does not claim to embed the
-  Console's city-search/draggable-map/accuracy-visualization editor.
-- [ ] Mihomo restart and certificate renewal require an unexpired one-use
-  confirmation. Replaying or double-clicking it cannot start a second job, and
-  the final message/audit record contains the real success or failure result.
-- [ ] Short logs retain the newest failure lines and paginate without breaking
-  Unicode or HTML. Oversized logs arrive as a protected text document. The iOS
-  action sends a PNG QR plus a direct
-  `console.<base>/ios/ios-dot.mobileconfig` URL button.
-- [ ] When direct Telegram access is unavailable, setting a valid proxy through
-  the Telegram TUI and letting it restart the daemon restores operation through the
-  chosen HTTP/HTTPS CONNECT proxy. Invalid schemes/credentials fail visibly.
-  This test must not change `/etc/5gpn/mihomo/config.yaml`; any local mihomo
-  HTTP/mixed listener is created and secured explicitly by the operator.
-- [ ] With alerts disabled in the TUI, health polling sends no unsolicited messages.
-  With it enabled by the TUI, certificate, mihomo, and upstream
-  failure/recovery transitions produce protected private alerts to every
-  configured admin without repeated unchanged-state spam. Stopping the daemon
-  cannot produce a Telegram alert; the configured external heartbeat monitor
-  must detect that dead-man's-switch failure.
+- [ ] Console configuration writes the bot document atomically. Reads
+  report only `token_set`; neither `/gpn/bot` nor status output returns the
+  token. A malformed or unauthorized token leaves the previous document and
+  running bot usable.
+- [ ] A token that previously had a webhook is safely returned to long polling.
+  Lifecycle and health fields agree with enable, network failure, recovery,
+  disable, and an unexpected polling-loop exit.
+- [ ] `/id` returns only the caller and chat numeric IDs. `/status` and
+  `/resolve <domain>` answer configured administrators and agree with the
+  Console's resolver and interception state. Removing an administrator takes
+  effect on the next update.
+- [ ] The command surface is read-only. Attempts to install, enable, disable,
+  update, reorder, or configure an extension; edit policy; restart mihomo; read
+  logs; or touch the interception CA return `unknown command` and leave every
+  document revision unchanged.
+- [ ] With alerts disabled, the bot sends no unsolicited messages. With alerts
+  enabled, resolver, interception, certificate, subscription, and upstream
+  failure/recovery transitions notify configured administrators without
+  repeated unchanged-state spam.
+- [ ] Stopping mihomo cannot produce a Telegram alert from inside that process.
+  The configured external heartbeat monitor detects this dead-man's-switch
+  failure.
 
-## Modular HTTP/3 interception
+## Native HTTP/H1/H2 interception and the HTTP/3 boundary
 
-### Clearing a sidecar version pin
+- [ ] `GET /gpn/interception` reports `http3: false`. A revision-correct
+  settings write attempting `http3: true` returns 422, does not advance the
+  revision, and does not change any other setting.
+- [ ] The running rule set contains exactly one fixed global
+  `AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` before extension rules and capture.
+  The controller rule-management API refuses to disable it.
+- [ ] A client offered H3 receives no forwarded UDP/443 response. A client that
+  supports fallback retries over TCP and reaches the same origin through
+  HTTP/H1/H2 capture; an H3-only client fails.
+- [ ] Ordinary UDP remains unaffected. The optional `:5060` ingress still
+  recognizes supported QUIC Host/SNI and follows operator rules; raw UDP remains
+  outside the HTTP interception contract.
 
-`cmd/5gpn-dns/sidecar_client_test.go` holds the only end-to-end check of the
-control-API wire contract, and it runs the real sidecar binary. It skips unless
-it is on a gateway (it reads `/etc/5gpn/intercept/tls`) with `:18080` free, so
-ordinary CI never executes it — a sidecar release can change the contract and
-land unnoticed. Before moving `SIDECAR_VERSION`/`SIDECAR_SHA256` in
-`install.sh`, run it on a disposable gateway against both binaries:
-
-```bash
-# build the test binary and the candidate sidecar off-box; the gateway has no toolchain
-(cd cmd/5gpn-dns && GOOS=linux GOARCH=amd64 go test -c -o /tmp/sidecar-contract.test .)
-scp /tmp/sidecar-contract.test cmd/5gpn-dns/testdata/sidecar-bundle.json <gw>:/tmp/contract/
-
-# on the gateway: the service must be stopped, or :18080 is taken and it skips
-systemctl stop 5gpn-intercept
-cd /tmp/contract  # testdata/ is resolved relative to the working directory
-SIDECAR_BINARY=/opt/5gpn/bin/5gpn-intercept ./sidecar-contract.test -test.run Sidecar -test.v
-SIDECAR_BINARY=/tmp/5gpn-intercept-candidate ./sidecar-contract.test -test.run Sidecar -test.v
-systemctl start 5gpn-intercept
-```
-
-- [ ] Both runs report the same five `TestSidecar*` results. A skip is not a
-  pass — read the skip reason and fix the fixture rather than recording it green.
-- [ ] `TestSidecarPublishBundleEndToEnd` in particular pins the `generation`
-  semantics the coordinator depends on: the first publish is `1` and republishing
-  the same bundle does not advance it.
-- [ ] The control-API contract is not the whole surface. Install the candidate
-  over `/opt/5gpn/bin/5gpn-intercept`, restart, and re-run `test/overlay/verify-live.sh`
-  so the data plane is exercised too; then restore the pinned binary and confirm
-  the checks still pass and the mihomo config digest never moved.
-
-- [ ] On a fresh install the Console MITM master is off, there are no installed
-  extensions, `5gpn-intercept.service` is inactive, and `--check-enabled` exits
-  nonzero. `5gpn-intercept-runtime.path` remains active. Enabling the master
-  without an enabled extension still leaves the sidecar stopped. Install and
-  enable a valid native extension, then verify the service starts as
-  `gpn-intercept`, has no capabilities, listens only on
-  `127.0.0.1:18080/tcp`, and passes
-  `/opt/5gpn/bin/5gpn-intercept --config /etc/5gpn/intercept/config.json --healthcheck`.
-  Its private `/var/lib/5gpn-intercept/store.json` survives a sidecar restart,
-  while purge removes the independently marked state directory.
+- [ ] On a fresh install the Console MITM master is off and there are no
+  installed extensions. The engine is loaded inside mihomo and exposes no
+  sidecar process, loopback interception listener, or SOCKS return hop. Enabling
+  the master without an enabled extension still captures nothing.
 - [ ] With the MITM master and at least one extension enabled, reinstall the
   same release. The installer must hand the private certificate lock to the
-  required `5gpn-intercept-cert.service`, start and health-check the sidecar,
-  reacquire the lock before final verification, and preserve the interception
-  document, marketplace cache, and operator-owned mihomo bytes. Inject a
-  sidecar start failure and verify rollback runs only after the lock is held
-  again.
-- [ ] On a fresh or explicitly reset mihomo config, Settings reports
-  `block-quic-443` enabled and the canonical UDP/443 reject appears exactly once
-  after `IN-NAME,intercept-egress,REJECT` and before every `MODULE-INTERCEPT` rule.
-  Disable and re-enable it through the authenticated module API; each change
-  must revision-check, pass full `mihomo -t`, hot-apply, and preserve unrelated
-  operator YAML. Confirm that the UDP listener remains bound and that traffic
-  bypassing the gateway is unaffected.
+  required `5gpn-intercept-cert.service`, reacquire the lock before final
+  verification, and preserve the interception document and operator-owned
+  mihomo bytes.
 - [ ] `/etc/5gpn/intercept-ca/root.key` is root-only and is inaccessible from
-  `5gpn-dns`, mihomo, and `5gpn-intercept`; the runtime leaf is not a CA and
+  mihomo; the runtime leaf is not a CA and
   covers only the capture hosts of enabled native extensions. With none enabled,
   the private root remains valid but no leaf is required.
-- [ ] `5gpn-intercept-cert.path` and `5gpn-intercept-runtime.path` react to an atomic module config replacement,
-  the root-owned publisher writes the expected `cert-state` digest, and neither
-  long-running daemon can read the signing key. Turning the Console master off
-  removes DNS/mihomo interception state and cleanly stops the sidecar; turning
-  it back on starts the sidecar and restores only the armed hosts.
+- [ ] `5gpn-intercept-cert.path` reacts to an atomic certificate request
+  replacement, the root-owned publisher writes the expected state digest, and
+  mihomo cannot read the signing key. Turning the Console master off withdraws
+  the DNS overlay and in-process traffic policy; turning it back on restores
+  only ready armed hosts.
 - [ ] `5gpn-intercept-cert.timer` remains enabled and active in Cloudflare,
   HTTP-01, debug, and missing-public-lineage installations. Trigger it directly
   and verify it invokes only `5gpn-intercept-cert.service`; a public renewal
@@ -557,7 +428,7 @@ systemctl start 5gpn-intercept
   fails before publication and preserves every prior live keypair. Replacing a
   lock pathname while the inherited descriptor still references the old inode
   is also rejected.
-- [ ] `/ios/ios-intercept-ca.mobileconfig` downloads as a CMS-signed Apple profile.
+- [ ] `/ui/ios-intercept-ca.mobileconfig` downloads as a CMS-signed Apple profile.
   On an owned test iPhone, install it and explicitly enable full trust under
   Certificate Trust Settings. Removing this profile does not remove the DoT
   profile.
@@ -568,13 +439,13 @@ systemctl start 5gpn-intercept
   documents, non-HTTPS resources, unsafe redirects, and out-of-scope action
   hosts must fail installation. Every valid install starts disabled; required
   typed settings and required operator egress-group bindings remain hard enable
-  gates. Exact network origins are normalized into the immutable snapshot and
-  changing them changes the reviewed digest.
+  gates. The unrestricted network grant is a single reviewed boolean with no
+  destination list; changing it changes the immutable snapshot digest.
 - [ ] Confirm `/extensions` contains only installed-plugin management and host
   audit entry points: there is no embedded Marketplace tab and no decorative
   capture/transform/egress traffic rail. Open the top-level `/marketplace`
   route with no configured sources. Add
-  `https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json`, verify
+  `https://moooyo.github.io/5gpn-extensions/marketplace/v2/index.json`, verify
   an optional local display name does not replace the index identity, then use
   the source chips, search, truthful sort, and refresh controls across the
   published entries. Refreshing a valid source atomically updates the
@@ -584,13 +455,9 @@ systemctl start 5gpn-intercept
 - [ ] Open `/plugin-logs` with an enabled synthetic extension. Verify
   `console.log`/`info`/`warn`/`error` levels, action completion and timeout
   metadata, plugin/action filters, debounced search, one-row expansion, local
-  clear, and pause-with-buffer behavior on desktop and mobile. Disconnect the
-  sidecar Unix socket: the current WebSocket closes, the page mints a different
-  one-use ticket every three seconds, and recovery appends only new events.
-  Confirm `/run/5gpn-intercept/logs.sock` is `0660` inside a `0750` runtime
-  directory, a ninth stream is refused, invalid Origin/query/non-Upgrade
-  requests do not consume a ticket, and script console text does not appear in
-  the persistent journal.
+  clear, and pause behavior on desktop and mobile. Confirm authenticated
+  `/gpn/interception/logs` reads the retained in-memory ring and script console
+  text does not appear in the persistent journal.
 - [ ] Select one official marketplace entry, review the cached scope in the
   install-confirm dialog, and verify the daemon then refetches the
   listed manifest, checks its byte size and SHA-256 plus every referenced script
@@ -602,9 +469,8 @@ systemctl start 5gpn-intercept
 - [ ] Reorder installed extensions through the Console. Request and response
   actions execute top-to-bottom in the displayed order. For a host or network
   origin shared by extensions with different bindings, the first matching
-  bound extension wins; moving it changes the ordered mihomo egress rule block
-  only after revision check, `mihomo -t`, and hot apply. A stale reorder is
-  rejected without changing either config.
+  bound extension wins; moving it changes the immutable in-process policy only
+  after revision check. A stale reorder is rejected without changing state.
 - [ ] Verify every installed extension defaults its capture-host DNS binding to
   trust. Switch one to China and confirm its captured hostname resolves through
   the live China group with `DNS_CHINA_ECS`; non-captured names remain on trust.
@@ -613,40 +479,30 @@ systemctl start 5gpn-intercept
   changes only after the reviewed revision-protected transaction. URL paths
   under one hostname must not change the selected resolver.
 - [ ] With the master off, enable the synthetic module in the Console and verify
-  it remains armed but has no DNS overlay or mihomo host rule. Turn the master
-  on, then disable/re-enable the extension from
-  Telegram. Each surface shows the same revision and state. The complete
-  mihomo config passes `mihomo -t`; ordered `intercept-egress` domain/port rules
-  sit before the fail-closed `IN-NAME,intercept-egress,REJECT` terminator, while
-  sorted port-80/443 `MODULE-INTERCEPT` rules sit after it and the optional QUIC
-  guard. The DNS answer changes to the gateway only while enabled, and
-  certificate/mihomo failure injection restores the previous state.
-- [ ] With `MitM over HTTP/2` on and QUIC fallback protection off, verify plain
-  HTTP, TLS/H1/H2, QUIC v1/v2, and H3 apply the same native request/response
-  actions. Text and binary-body scripts
+  it remains armed but has no DNS overlay or in-process capture policy. Turn the
+  master on and confirm the DNS answer changes to the gateway only while the
+  extension is ready.
+- [ ] With `MitM over HTTP/2` on, verify plain HTTP and TLS/H1/H2 apply the same
+  native request/response actions. Text and binary-body scripts
   decode identity, gzip, zlib/raw deflate, and Brotli bodies within their
   expanded-size bounds. Verify `transform(context)` receives only the structured
   request/response projection and typed settings. `context.storage` exists only
   when the manifest requests it; ambient `fetch`, filesystem, process, timer,
   compatibility globals, and module-loader access fail closed. A plugin with
-  declared network origins receives only `context.network.request`; exact
-  scheme/host/effective-port matches succeed through authenticated mihomo
-  SOCKS5, while cross-origin calls, redirects, implicit cookies/authorization,
+  network permission receives only `context.network.request`; authorized
+  requests succeed through mihomo's inner dialer, while redirects,
   oversized responses, excessive calls, caller cancellation, VM timeout, and
   backtracking-regexp timeout remain bounded. The enable dialog must state that
   the plugin can send any decrypted request, response, setting, or storage data
-  visible to it to every listed origin.
+  visible to it to any host it can reach; the grant has no destination list.
 - [ ] Bind a required extension to an existing mihomo group and verify only
   group names plus `DIRECT` are offered. Removing or renaming a referenced group
   through the raw config API is rejected before publication. An out-of-band
   invalidation marks the extension not-ready, withdraws the DNS overlay, and
   never falls back to DIRECT or the terminal group; rebinding restores service
   through the normal transaction.
-- [ ] Turn `MitM over HTTP/2` off and verify new TLS connections negotiate
-  HTTP/1.1 only. Turn QUIC fallback protection on and verify matched IETF QUIC
-  v1/v2 receives no forwarded response while a capable client retries over
-  TCP/HTTPS. Record clients that fail instead of falling back; do not claim
-  legacy GQUIC coverage.
+- [ ] Turn `MitM over HTTP/2` off and verify new captured TLS connections
+  negotiate HTTP/1.1 only. The fixed UDP/443 reject remains unchanged.
 - [ ] Install
   `https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml`,
   search for a city in the map picker the Console renders over its flat
@@ -656,10 +512,10 @@ systemctl start 5gpn-intercept
   confirm the three settings hold the picked values afterwards, and that a point
   left at upstream's `113.94114`/`22.544577` is treated as unconfigured by the
   bundle and patches nothing.
-- [ ] Exercise WLOC over TCP/H2, QUIC v1/H3, and QUIC v2/H3. In every case the
-  response is patched, the upstream certificate is verified, and packet capture
-  shows the sidecar's upstream TCP/UDP entering mihomo's authenticated
-  `intercept-egress` listener rather than dialing Apple directly.
+- [ ] Exercise WLOC over TCP/H2. The response is patched, the upstream
+  certificate is verified, and connection tracing shows the engine's upstream
+  entering mihomo's inner dialer with the selected egress group rather than
+  dialing Apple directly. H3 remains rejected by the boundary above.
 - [ ] With malformed protobuf, a client that does not trust the private CA, a
   wrong SNI, or any inactive extension target, interception fails closed. Disabling
   the extension restores ordinary end-to-end forwarding without changing the

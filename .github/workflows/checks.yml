@@ -66,8 +66,8 @@ jobs:
       # one checks a configuration nobody will run. Keep this pin and its digest
       # in lockstep with MIHOMO_VERSION/MIHOMO_SHA256 in install.sh.
       MIHOMO_REPO: moooyo/mihomo
-      MIHOMO_VERSION: v1.19.28-monolith.11
-      MIHOMO_SHA256: 40a4d9a3647b5ff829abf88cef13478205e5b6f2bccc4810761aa0cbf5e66a98
+      MIHOMO_VERSION: v1.19.28-monolith.12
+      MIHOMO_SHA256: ed47e9642de0d38fdc8d13190398a3cb9ad160d062a3a04fde6813568575bb10
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Download pinned mihomo
@@ -132,12 +132,10 @@ jobs:
           ! grep -Fq 'rule-providers:' "$runtime/config.yaml"
           grep -Fq 'DOMAIN,console.example.test,REJECT' "$runtime/config.yaml"
           ! grep -Fq 'zash.example.test' "$runtime/config.yaml"
-          # The backstop behind datagram capture. Capture is consulted before
-          # rule resolution, so with mitm.http3 on this reject only ever sees
-          # the datagrams capture did not want, and with it off it is the whole
-          # mechanism -- a capable client falls back to TCP, which is captured.
-          # Removing it does not enable QUIC capture; it makes gateway QUIC
-          # bypass interception whenever http3 is off or the master switch is.
+          # HTTP/3 interception is unsupported. This fixed guard rejects every
+          # gateway UDP/443 flow so capable clients fall back to captured TCP.
+          # It is independent of the MITM master switch and has no product
+          # management off switch.
           grep -Fq 'AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' "$runtime/config.yaml"
           sed \
             -e '/name: gateway5060/d' \

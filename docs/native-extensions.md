@@ -76,9 +76,8 @@ actions:
 
 Unknown fields, duplicate keys, multiple YAML documents, aliases, anchors, and
 merge keys are rejected. Extension IDs are stable lowercase dotted identifiers
-from 3 to 40 bytes. The short limit keeps every authenticated Telegram
-confirmation callback within its protocol boundary. Versions use semantic
-version syntax.
+from 3 to 40 bytes. The short limit keeps route parameters, state keys, and
+review projections bounded. Versions use semantic version syntax.
 
 ## Traffic acquisition, routing, and egress
 
@@ -87,15 +86,15 @@ Entries are exact DNS names or constrained `*.example.com` wildcards. 5GPN
 never infers hosts from a regular expression.
 
 When an enabled extension and the global MITM master are active, the same
-capture-host set is published atomically to:
+capture-host set is consumed atomically by:
 
 1. the DNS overlay that returns the gateway address;
 2. the constrained interception certificate SAN set; and
-3. the reserved mihomo `MODULE-INTERCEPT` rules for ports 80 and 443.
+3. the in-process TCP capture policy for ports 80 and 443.
 
 Every action `match.hosts` and every upstream mapping host must be covered by
 the same extension's `captureHosts`. The control plane validates this relation,
-and the sidecar repeats it at runtime. A plugin cannot act on a host captured
+and the engine repeats it at runtime. A plugin cannot act on a host captured
 only by another plugin.
 
 An extension may declare at most 512 capture hosts, an action may match at most
@@ -113,16 +112,17 @@ overlaps. DNS sees a hostname only, so a URL path cannot choose a resolver.
 An `upstreamMappings` entry takes one of three target forms.
 
 An **address** (`203.0.113.7`) or an **alias** (`origin.example.net`) changes
-the sidecar's upstream target. It preserves the original HTTP Host and TLS SNI.
+the engine's upstream target. It preserves the original HTTP Host and TLS SNI.
 An address target rejects private, loopback, link-local, CGNAT, and otherwise
 unsafe IPv4 addresses; an alias is a name, so the same intent cannot be enforced
 for it and a name that resolves into a private range is an accepted consequence.
-Every upstream TCP or UDP flow returns through authenticated mihomo
-`intercept-egress`.
+Every upstream connection returns through mihomo's in-process inner dialer and
+current rule evaluation.
 
 A **resolver** form (`server:1.1.1.1`, up to four comma-separated specs) names
-nameservers rather than a destination. It changes where `5gpn-dns` resolves the
-mapped name, and the sidecar never dials it: capture still leaves through the
+nameservers rather than a destination. It changes where the monolith resolver
+resolves the mapped name, and the engine never dials it as an upstream target:
+capture still leaves through the
 extension's ordinary egress binding. Each spec uses the same grammar as an
 operator upstream — `IP[:port]` for plain UDP, `name@IP[:port]` for DoT,
 `https://host/path@IP[:port]` for DoH — and the address each one dials is held
@@ -143,10 +143,10 @@ duplicate normalized rules are rejected.
 
 An extension may declare at most 256 rules, and enabled extensions may declare
 at most 2048 in total. Rules follow explicit extension execution order and
-mihomo first-match semantics. They are published after the fixed gateway
-UDP/443 guard and before `MODULE-INTERCEPT` capture rules, so a reviewed
+mihomo first-match semantics. They are evaluated after the fixed gateway
+UDP/443 guard and before TCP capture, so a reviewed
 `direct` match deliberately bypasses both the normal operator target and
-sidecar capture. They exist only while both the extension and MITM master are
+extension capture. They exist only while both the extension and MITM master are
 enabled. The one enable confirmation lists every normalized rule and authorizes
 the complete snapshot; there is no second routing-only confirmation. Reordering
 requires a before/after confirmation because it can change action, egress, and
@@ -155,20 +155,20 @@ reaches mihomo on the DNS-steering gateway; they cannot block a hard-coded IP
 path that bypasses it.
 
 An extension may declare `requirements.egressGroup.required: true`, but the
-manifest and script never name or choose an arbitrary group. The operator selects one
-existing mihomo proxy group or `DIRECT` before enable. Extensions without that requirement
-use the operator's terminal mihomo target unless an optional binding was
-selected. Ordered, host-and-port-scoped `intercept-egress` rules enforce the
-binding, and the first matching bound extension in the operator's explicit
-execution order wins. A missing or removed group makes the extension not ready
+manifest and script never name or choose an arbitrary group. The operator
+selects one existing mihomo proxy group or `DIRECT` before enable. Extensions
+without that requirement use the operator's terminal mihomo target unless an optional binding was
+selected. The in-process traffic policy applies the selected group to the
+engine's inner dial, and the first matching bound extension in the operator's
+explicit execution order wins. A missing or removed group makes the extension not ready
 and never silently falls back to DIRECT or another group. A separately reviewed
 `routingRules` action may still explicitly select `direct` for its own matcher.
 
 The same execution order is used for request and response actions, top to
 bottom. Every action sees the output produced by earlier actions in its phase.
-Import appends an extension to the order; delete removes it; the Console and
-trusted private-chat Telegram bot can move an extension up or down with a
-revision-protected, explicitly confirmed complete reorder.
+Import appends an extension to the order; delete removes it; the Console can
+move an extension up or down with a revision-protected, explicitly confirmed
+complete reorder.
 
 ## Network permission
 
@@ -182,7 +182,7 @@ may reach the network, and cannot state where.
 
 Every other guard is unchanged. The request URL is still canonicalized, IP
 literals and unsafe or private hosts are still refused, and the request still
-leaves through authenticated mihomo SOCKS5. Redirects from
+leaves through mihomo's in-process inner dialer. Redirects from
 `context.network.request` are returned to the script rather than followed. Fixed
 process-wide time, body, header, call-count, and concurrency bounds apply; they
 are runtime safety limits, not manifest-controlled permissions.
@@ -206,29 +206,24 @@ dropping the grant changes the snapshot and therefore requires a disabled update
 followed by a new enable confirmation.
 
 An extension holding the grant reaches the network through one unbounded egress
-binding rather than a destination allowlist. The origin list used to be two
-things at once -- the sentence an enable review read out, and the allowlist the
-runtime overlay enforces -- so removing it removed both, and every request an
-extension made fell past its capability to the interception listener's
-`IN-NAME,intercept-egress,REJECT` terminator.
+authorization rather than a destination allowlist. The immutable in-process
+policy revalidates each request against the current document and live mihomo
+group set before dialing. Explicit destination bindings win first; otherwise
+the authorizing extension's selected group is used. Missing or removed groups
+fail closed, including for pooled transports after their authorization changes.
 
-The overlay contract carries the permission instead: a capability may end with
-one `unbounded` binding, which authorizes its group for every destination on
-that listener. It is the last binding by construction, because one that matches
-everything would shadow the destination-scoped bindings above it, and it removes
-the endpoint constraint only -- the listener check, `allowDirect`, and the
-resolver profile all still apply. Capture hosts and upstream mappings keep their
-own exact bindings above it, so an extension's captured traffic still leaves
-through the binding its own hosts were given.
+## HTTP/3 boundary
 
-Where several extensions hold the grant, the explicitly bound ones own unmatched
-egress before the unbound ones do; execution order decides only within each of
-those two passes. Unlike the rest of the projection, `execution_order` alone
-does not move this. The owner's group also decides the binding's `allowDirect`:
-the terminal `MATCH` target and the built-in `DIRECT` group permit leaving
-without a proxy, and any other named group fails closed — so a bound owner can
-hold `allowDirect` too, which is a relaxation relative to the unbound case
-rather than a restriction.
+Native interception supports plain HTTP and TLS/H1/H2 only. `mitm.http3` is an
+explicit capability marker whose only valid value is `false`; a management write
+attempting `true` is rejected without changing the document revision. Fresh and
+explicitly reset mihomo seeds contain one fixed global UDP/443 `REJECT`, and the
+controller rule-management API refuses to disable it. A fallback-capable client may
+retry over TCP and enter the normal capture path. An H3-only client fails.
+
+This guard covers only UDP destination port 443 that reaches the gateway. It
+does not disable ordinary UDP forwarding or QUIC sniffing on other configured
+ports such as `:5060`, and it is not a host firewall.
 
 ## Typed settings
 
@@ -246,11 +241,8 @@ rendered by the Console with city search, a draggable OpenStreetMap point,
 accuracy visualization, and direct coordinate fields. The browser calls one
 authenticated same-origin city-search endpoint; that bounded server projection
 contacts the fixed Nominatim origin only after an explicit Search action and
-never forwards the Console bearer token. The Telegram bot accepts either the
-client's native location message or explicit longitude, latitude, and accuracy.
-It warns before collection that coordinates pass through Telegram and the
-Telegram Bot API. An omitted Telegram accuracy becomes the conservative
-100000-metre maximum. Telegram does not embed or proxy the Console's full map.
+never forwards the controller secret. The read-only Telegram bot does not edit
+extension settings or collect locations.
 
 A `location` value reaches a script nested under its own setting key, so it
 cannot drive a published proxy-compat bundle: those are written against Loon's
@@ -268,7 +260,7 @@ their own, and what the script receives is unchanged: three flat values. A
 
 This is a Console affordance, not a manifest declaration. It writes only the
 keys the operator could type by hand, so it costs an unwanted map at worst and
-never a wrong value, and no part of the sidecar contract changes.
+never a wrong value, and no part of the engine contract changes.
 
 ## Script actions
 
@@ -387,15 +379,17 @@ Response trailers are exposed after the upstream body is read and may be
 replaced through `response.trailers`. Request patches cannot create trailers.
 Trailer names and values use the same bounded, control-character-safe shape as
 headers, while framing and otherwise forbidden trailer fields are rejected.
-The sidecar declares and publishes them correctly over HTTP/1.1, HTTP/2, and
-HTTP/3, including when an H2/H3 upstream did not announce them before an H1
-downstream response starts.
+The engine declares and publishes them correctly over HTTP/1.1 and HTTP/2,
+including when an H2 upstream did not announce them before an H1 downstream
+response starts. HTTP/3 downstream interception is unsupported.
 
-Scripts receive bounded `console.log`/`info`/`warn`/`error` logging but no
-ambient network, filesystem, process, timer, socket, module loader, or Go
-object. Console output and structured action completion/error/timeout events
-live only in the sidecar's 1000-entry memory ring and the authenticated
-`/plugin-logs` stream; they are not written to journald or another file. Event
+Scripts receive bounded `console.log`/`info`/`warn`/`error` logging and
+action-scoped timers, but no ambient network, filesystem, process, socket,
+module loader, or Go object. Console output and structured action
+completion/error/timeout events
+live only in mihomo's 1000-entry memory ring and the authenticated
+`/gpn/interception/logs` projection used by `/plugin-logs`; they are not written
+to journald or another file. Event
 URLs retain only scheme, host, and path. The optional storage object exposes
 bounded `get`, `set`, `delete`, and `clear` methods scoped to the extension ID.
 With the network grant, a script can make a bounded request:
@@ -437,7 +431,7 @@ deadline bounds both.
 ### Proxy-compat
 
 `entry: proxy-compat` runs a published proxy-client bundle unmodified. The
-runtime presents itself as Loon: the sidecar defines `$loon`, and the bundles
+runtime presents itself as Loon: the engine defines `$loon`, and the bundles
 built on `@nsnanocat/util` select their runtime by probing globals in a fixed
 order — `$task`, `$loon`, `$rocket`, `Egern`, then
 `$environment["surge-version"]` — so they take their Loon branch. No Surge,
@@ -502,19 +496,18 @@ scripts. **Add locally** accepts one pasted or uploaded manifest; local
 manifests use inline scripts or absolute HTTPS script URLs. Both actions install
 the extension disabled.
 
-The top-level Console Marketplace page and the trusted private-chat Telegram
-bot also accept explicit HTTPS marketplace indexes using the strict
-`5gpn.io/marketplace/v1` JSON contract. A marketplace is only a bounded
-discovery list. The daemon fetches and caches it through the same redirect and
-post-resolution SSRF guard, while both surfaces render only the authenticated
-normalized projection. Adding or refreshing a marketplace never installs,
-updates, enables, or executes an extension.
+The top-level Console Marketplace page accepts explicit HTTPS marketplace
+indexes using the strict `5gpn.io/marketplace/v1` JSON contract. A marketplace
+is only a bounded discovery list. The engine fetches and caches it through the
+same redirect and post-resolution SSRF guard, while the Console renders only
+the authenticated normalized projection. Adding or refreshing a marketplace
+never installs, updates, enables, or executes an extension.
 
 An optional source display name is local operator text only. It does not replace
 the index metadata identity or prove publisher ownership. It never changes the
 remote index, manifest, or script digests. The separate local normalized-source
-snapshot digest does include the display name so a Telegram confirmation for
-one reviewed label cannot authorize writing another.
+snapshot digest includes the display name so a revision-protected write for one
+reviewed label cannot authorize another.
 
 Selecting a marketplace entry refetches its manifest through this same native
 parser and verifies the index's manifest and script SHA-256 digests, byte sizes,
@@ -533,54 +526,18 @@ version, snapshot digest, capture hosts, actions, and settings before
 replacement. Replacement requires the current extension to be disabled, refetches the exact
 reviewed digest, preserves still-valid setting values by key and type, and
 leaves the new snapshot disabled. Enabling reviews capture hosts, the network
-grant, every exact normalized routing rule, execution position, and the current operator egress binding before
-the transaction publishes certificates, mihomo rules, sidecar state, and the
-DNS overlay.
+grant, every exact normalized routing rule, execution position, and the current
+operator egress binding before the transaction publishes the certificate
+request, in-process traffic policy, engine state, and DNS overlay.
 
-## Telegram management confirmations
+## Telegram boundary
 
-The Telegram bot is a trusted extension-management endpoint only for
-allowlisted administrators in private chats. It supports marketplace source
-add, refresh, browse, and removal; marketplace and HTTPS-URL installation;
-pasted-text local import; uninstall; enable and disable; every typed setting;
-`location`; operator egress binding; complete execution-order changes; and
-update checks and applies. It calls the same marketplace and extension managers
-as the Console and has no private state or relaxed parser. Installation and
-update application always leave the extension disabled.
-
-Browsing and update checks may be read-only, but every state-changing Telegram
-action uses a two-step review. The bot first renders the complete normalized
-impact relevant to the operation: source, identity, old and new versions,
-immutable snapshot digest, settings, capture hosts, permissions, the network
-grant, exact routing rules, execution position, operator egress binding, and action match/execution
-metadata with script digests, plus the resulting enabled/runtime state. Script
-bodies remain available through
-the separate authenticated snapshot review rather than being placed in every
-Telegram mutation prompt. If Telegram message limits require pagination or a
-protected document, the confirmation control appears only after the complete
-review.
-
-The confirmation callback carries only an opaque reference to a server-side,
-short-lived, one-use record. That record is bound to the allowlisted
-administrator user ID, exact private chat ID, exact operation payload, and all
-applicable concurrency proofs. Extension changes bind the complete sidecar
-revision and affected immutable snapshot digest. Marketplace source changes
-bind the marketplace document revision and exact normalized index snapshot
-digest. Marketplace installation and extension update also bind the candidate
-extension snapshot digest. Expiry, replay, cross-user or cross-chat use, a
-changed revision, or any snapshot/index digest mismatch fails closed and
-requires a new review.
-
-Every review of a candidate or installed extension states whether the network
-grant is present. Before enable, it also states that the grant names no
-destination, that the script can send any decrypted request, response, setting,
-or storage data visible to it to any host it can reach, and that it may rewrite
-a captured request there with its method, decoded body,
-and end-to-end headers, including possible cookies or authorization. Enable
-review uses the same single confirmation for the complete
-snapshot, including all listed routing rules. Reorder review shows the complete
-before/after order and warns that routing first-match may change. Approval of
-one immutable snapshot never grants a changed permission or routing-rule set.
+The monolith Telegram bot is read-only and alert-only. It may report status,
+resolve a name, and send transition alerts to allowlisted administrators. It
+cannot install, update, enable,
+disable, reorder, configure, or remove an extension; it cannot edit catalogs,
+settings, egress bindings, capture-DNS bindings, or routing rules. All extension
+review and mutation stays on the authenticated Console surface.
 
 Project-maintained examples, including Apple WLOC, live in the separate
 `moooyo/5gpn-extensions` catalog. The core repository intentionally contains no

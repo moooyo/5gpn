@@ -1,186 +1,175 @@
 #!/usr/bin/env bash
-# Post-upgrade acceptance for a released version on a real box.
+# Read-only post-release acceptance for the installed monolith.
 #
-# usage: acceptance.sh <expected-version>
+# Usage: acceptance.sh <expected-5gpn-release>
 #
-# 0.0.29 changed three things that only a real upgrade can exercise, because
-# each one depends on state a fresh install never has:
-#
-#   * DNS_CHINA / DNS_TRUST were retired from dns.env. Every existing box still
-#     has them, and validate_dns_env_schema rejects unknown keys, so the
-#     upgrade aborts unless retired keys are tolerated.
-#   * upstreams.json becomes the sole source of truth. The installer must seed
-#     it, and must carry the previous dns.env values across rather than
-#     resetting to the shipped defaults.
-#   * stats.json went from schema 1 to 2 (latency left the file). An old file
-#     must be rejected cleanly and the daemon must start with zeroed counters,
-#     not refuse to boot.
-#
-# Those checks stay: they are the ones that regress silently, and every future
-# upgrade crosses the same code. 0.0.30 adds the trust probe's reserved-range
-# detection.
-#
-# Read-only apart from one stats reset. Run after the upgrade completes.
+# The only writes attempted below are deliberately rejected authorization
+# probes. A passing run does not change the interception revision or rule state.
 
 set -uo pipefail
 
-WANT_VERSION="${1:-}"
-if [[ -z "$WANT_VERSION" ]]; then
-    echo "usage: $0 <expected-version>" >&2
+EXPECTED_RELEASE="${1:-}"
+if [[ -z "$EXPECTED_RELEASE" ]]; then
+    echo "usage: $0 <expected-5gpn-release>" >&2
     exit 2
 fi
 
-PASS=0; FAIL=0; WARN=0
-ok()   { echo "  PASS  $*"; PASS=$((PASS+1)); }
-bad()  { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
-warn() { echo "  WARN  $*"; WARN=$((WARN+1)); }
-note() { echo "        $*"; }
+INSTALLER=/opt/5gpn/install.sh
+MIHOMO=/opt/5gpn/bin/mihomo
+MIHOMO_CONF=/etc/5gpn/mihomo/config.yaml
+CONTROLLER=https://127.0.0.1
 
-echo "== version and service health =="
-ver="$(/opt/5gpn/bin/5gpn-dns --version 2>/dev/null)"
-note "daemon version: ${ver:-<unknown>}"
-[[ "$ver" == "$WANT_VERSION" ]] && ok "running $WANT_VERSION" || bad "expected $WANT_VERSION, got ${ver:-<unknown>}"
-for u in 5gpn-dns mihomo 5gpn-intercept; do
-    st="$(systemctl is-active "$u" 2>/dev/null)"
-    [[ "$st" == active ]] && ok "$u active" || bad "$u is $st"
+PASS=0
+FAIL=0
+ok() { printf '  PASS  %s\n' "$*"; PASS=$((PASS + 1)); }
+bad() { printf '  FAIL  %s\n' "$*"; FAIL=$((FAIL + 1)); }
+note() { printf '        %s\n' "$*"; }
+
+installed_value() {
+    local key="$1"
+    sed -n "s/^${key}=\"\([^\"]*\)\".*/\1/p" "$INSTALLER" | head -n 1
+}
+
+echo '== release and service health =='
+if [[ -f "$INSTALLER" ]]; then
+    release="$(installed_value RELEASE_TAG)"
+    core_pin="$(installed_value MIHOMO_VERSION)"
+    [[ "$release" == "$EXPECTED_RELEASE" ]] \
+        && ok "installed release is $EXPECTED_RELEASE" \
+        || bad "expected release $EXPECTED_RELEASE, found ${release:-<unknown>}"
+else
+    release=''
+    core_pin=''
+    bad "installed release metadata is missing at $INSTALLER"
+fi
+
+if [[ -x "$MIHOMO" ]]; then
+    core_version="$($MIHOMO -v 2>/dev/null | head -n 1)"
+    note "${core_version:-<no version>}"
+    [[ -n "$core_pin" && "$core_version" == *"$core_pin"* ]] \
+        && ok "mihomo matches the installed $core_pin pin" \
+        || bad "mihomo does not match the installed ${core_pin:-<unknown>} pin"
+else
+    bad "mihomo binary is missing"
+fi
+
+[[ "$(systemctl is-active mihomo 2>/dev/null)" == active ]] \
+    && ok 'mihomo is active' || bad 'mihomo is not active'
+for retired in 5gpn-dns.service 5gpn-intercept.service; do
+    [[ "$(systemctl is-active "$retired" 2>/dev/null)" != active ]] \
+        && ok "$retired is retired" || bad "$retired is still active"
 done
 
 echo
-echo "== the retired dns.env keys =="
-if grep -qE '^DNS_CHINA=|^DNS_TRUST=' /etc/5gpn/dns.env 2>/dev/null; then
-    bad "dns.env still carries DNS_CHINA/DNS_TRUST — the installer did not rewrite it"
+echo '== controller authentication and documents =='
+if [[ ! -f "$MIHOMO_CONF" ]]; then
+    bad "mihomo config is missing"
+    SECRET=''
 else
-    ok "dns.env no longer carries the retired upstream keys"
+    SECRET="$(sed -n -E "s/^secret:[[:space:]]*'?([^']*)'?.*/\1/p" "$MIHOMO_CONF" | head -n 1)"
+    [[ -n "$SECRET" ]] && ok 'controller secret is configured' \
+        || bad 'controller secret is missing'
 fi
-grep -q '^DNS_UPSTREAMS=' /etc/5gpn/dns.env && ok "DNS_UPSTREAMS still points at the file" \
-    || bad "DNS_UPSTREAMS missing from dns.env"
+
+request() {
+    curl -sk --max-time 30 \
+        -H "Authorization: Bearer ${SECRET}" \
+        -H 'Content-Type: application/json' "$@"
+}
+
+http_status() {
+    curl -sk --max-time 30 -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer ${SECRET}" \
+        -H 'Content-Type: application/json' "$@"
+}
+
+unauth="$(curl -sk --max-time 30 -o /dev/null -w '%{http_code}' \
+    "$CONTROLLER/gpn/dns")"
+[[ "$unauth" == 401 ]] && ok '/gpn/dns rejects missing authentication' \
+    || bad "/gpn/dns returned $unauth without authentication"
+
+ui="$(curl -sk --max-time 30 -o /dev/null -w '%{http_code}' \
+    "$CONTROLLER/ui/")"
+[[ "$ui" == 200 ]] && ok '/ui/ is available for bootstrap' \
+    || bad "/ui/ returned $ui"
+
+dns="$(request "$CONTROLLER/gpn/dns")"
+interception="$(request "$CONTROLLER/gpn/interception")"
+bot="$(request "$CONTROLLER/gpn/bot")"
+for name in dns interception bot; do
+    value="${!name}"
+    if jq -e '.revision | type == "string" and length > 0' \
+        >/dev/null 2>&1 <<<"$value"; then
+        ok "$name document is readable"
+    else
+        bad "$name document is unavailable or malformed"
+    fi
+done
 
 echo
-echo "== upstreams.json is the source of truth =="
-if [[ -f /etc/5gpn/upstreams.json ]]; then
-    ok "upstreams.json exists"
-    note "$(tr -d '\n ' < /etc/5gpn/upstreams.json)"
-    python3 -c "
-import json,sys
-d=json.load(open('/etc/5gpn/upstreams.json'))
-assert d['version']==1, d['version']
-assert d['china'] and d['trust'], d
-print('        china=%s trust=%s' % (d['china'], d['trust']))
-" || bad "upstreams.json is malformed"
-    # Capture first: `grep -q` closes the pipe as soon as it matches, journalctl
-    # takes SIGPIPE, and `set -o pipefail` turns that into a failed pipeline — so
-    # a successful match reads as a miss.
-    boot_log="$(journalctl -u 5gpn-dns -b --no-pager 2>/dev/null)"
-    if grep -q 'upstreams: loaded' <<<"$boot_log"; then
-        ok "daemon loaded upstreams.json at boot"
-        note "$(grep 'upstreams: loaded' <<<"$boot_log" | tail -1 | sed 's/.*upstreams:/upstreams:/')"
+echo '== fixed HTTP/3 boundary =='
+revision="$(jq -r '.revision // empty' <<<"$interception")"
+enabled="$(jq -r '.snapshot.enabled // false' <<<"$interception")"
+http2="$(jq -r '.snapshot.http2 // false' <<<"$interception")"
+if jq -e '.snapshot.http3 == false and (.snapshot.available_egress_groups | type == "array")' \
+    >/dev/null 2>&1 <<<"$interception"; then
+    ok 'snapshot reports http3=false and the narrow egress catalog'
+else
+    bad 'interception snapshot violates the fixed HTTP/3 contract'
+fi
+
+enable_h3="$(jq -nc --arg r "$revision" --argjson e "$enabled" \
+    --argjson h2 "$http2" \
+    '{revision:$r, enabled:$e, http2:$h2, http3:true}')"
+code="$(http_status -X PUT --data "$enable_h3" \
+    "$CONTROLLER/gpn/interception/settings")"
+[[ "$code" == 422 ]] && ok 'http3=true is rejected with 422' \
+    || bad "http3=true returned $code"
+
+after="$(request "$CONTROLLER/gpn/interception")"
+if [[ "$(jq -r '.revision' <<<"$after")" == "$revision" ]] \
+   && [[ "$(jq -r '.snapshot.http3' <<<"$after")" == false ]]; then
+    ok 'the rejected HTTP/3 write changed no state'
+else
+    bad 'the rejected HTTP/3 write changed revision or state'
+fi
+
+guard='  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT'
+guard_count="$(grep -cFx "$guard" "$MIHOMO_CONF" 2>/dev/null || true)"
+private_line="$(grep -nF '  - IP-CIDR,169.254.0.0/16,REJECT,no-resolve' \
+    "$MIHOMO_CONF" | cut -d: -f1 || true)"
+guard_line="$(grep -nF "$guard" "$MIHOMO_CONF" | cut -d: -f1 || true)"
+match_line="$(grep -nF '  - MATCH,Proxies' "$MIHOMO_CONF" | cut -d: -f1 || true)"
+if [[ "$guard_count" == 1 && -n "$private_line" && -n "$guard_line" \
+      && -n "$match_line" && "$private_line" -lt "$guard_line" \
+      && "$guard_line" -lt "$match_line" ]]; then
+    ok 'operator config contains one fixed UDP/443 guard in the safe position'
+else
+    bad 'operator config guard is missing, duplicated, or out of position'
+fi
+
+rules="$(request "$CONTROLLER/rules")"
+api_guard_count="$(jq -r '[.rules[] | select(.type == "AND" and .payload == "((Network,udp) && (DstPort,443))" and .proxy == "REJECT")] | length' <<<"$rules")"
+if [[ "$api_guard_count" == 1 ]]; then
+    ok 'running rules contain exactly one fixed UDP/443 guard'
+    guard_index="$(jq -r '.rules[] | select(.type == "AND" and .payload == "((Network,udp) && (DstPort,443))" and .proxy == "REJECT") | .index' <<<"$rules")"
+    disable_body="$(jq -nc --arg i "$guard_index" '{($i):true}')"
+    code="$(http_status -X PATCH --data "$disable_body" \
+        "$CONTROLLER/rules/disable")"
+    [[ "$code" == 400 ]] && ok 'controller refuses to disable the guard' \
+        || bad "guard disable returned $code"
+    rules_after="$(request "$CONTROLLER/rules")"
+    if jq -e --argjson i "$guard_index" \
+        '.rules[] | select(.index == $i and .type == "AND" and .payload == "((Network,udp) && (DstPort,443))" and .proxy == "REJECT" and .extra.disabled == false)' \
+        >/dev/null <<<"$rules_after"; then
+        ok 'the rejected disable left the guard enabled'
     else
-        bad "no 'upstreams: loaded' line — the daemon fell back to built-in defaults"
-        grep -i 'upstream' <<<"$boot_log" | tail -3 | sed 's/^/        /'
+        bad 'the guard changed after the rejected disable'
     fi
 else
-    bad "upstreams.json was not seeded by the installer"
+    bad "running rules contain $api_guard_count fixed UDP/443 guards"
 fi
 
 echo
-echo "== stats schema migration =="
-if [[ -f /etc/5gpn/stats.json ]]; then
-    v="$(python3 -c "import json;print(json.load(open('/etc/5gpn/stats.json')).get('version'))" 2>/dev/null)"
-    # Version 2 only appears after the daemon's first save (60s tick, shutdown,
-    # or an explicit reset), so a v1 file here is not yet a failure.
-    if [[ "$v" == 2 ]]; then
-        ok "stats.json is at schema 2"
-    else
-        note "stats.json still at version ${v:-?} — the daemon has not saved since boot"
-    fi
-    python3 -c "
-import json
-d=json.load(open('/etc/5gpn/stats.json'))
-stale=[k for k in d if 'lat_nanos' in k or 'lat_count' in k]
-print('        stale latency fields:', stale or 'none')
-raise SystemExit(1 if (stale and d.get('version')==2) else 0)
-" || bad "a schema-2 stats.json still carries the retired cumulative latency fields"
-else
-    note "no stats.json yet (the persister writes on a 60s tick)"
-fi
-# The rejection log is the durable evidence of the migration; the on-disk
-# version only reaches 2 after the daemon's first save.
-if grep -qE 'stats:.*(unsupported schema version|unknown field)' <<<"$boot_log"; then
-    ok "an old-schema stats.json was rejected cleanly at boot (counters start at zero)"
-    note "$(grep -E 'stats:' <<<"$boot_log" | tail -1 | sed 's/.*stats:/stats:/')"
-else
-    note "no schema-rejection line — this box had no pre-0.0.29 stats.json"
-fi
-
-echo
-echo "== trust upstream sanity probe =="
-if grep -q 'trust upstream probe' <<<"$boot_log"; then
-    line="$(grep 'trust upstream probe' <<<"$boot_log" | tail -1)"
-    note "${line#*5gpn-dns\[*\]: }"
-    # Don't accept either verdict blindly — decide independently whether the
-    # address the probe got back is one a real recursive resolver could return,
-    # then assert the probe agreed. 0.0.29 endorsed 198.18.1.12 (RFC 2544
-    # benchmarking space) as genuine; ip.IsPrivate() is false for it, so the
-    # private/loopback check alone never caught it.
-    probe_ip="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' <<<"$line" | tail -1)"
-    flagged=no
-    grep -qE "resolver's own /24|fabricated|never a real answer" <<<"$line" && flagged=yes
-    should_flag="$(python3 -c "
-import ipaddress,sys
-ip=ipaddress.ip_address('$probe_ip')
-print('yes' if not ip.is_global else 'no')
-" 2>/dev/null)"
-    note "resolved ${probe_ip:-?} | reserved=${should_flag:-?} | probe flagged=${flagged}"
-    if [[ -z "$should_flag" ]]; then
-        warn "could not classify ${probe_ip:-<none>} — probe verdict not checked"
-    elif [[ "$should_flag" == "$flagged" ]]; then
-        if [[ "$flagged" == yes ]]; then
-            ok "probe flagged a reserved-range answer (the 0.0.30 widening)"
-        else
-            ok "probe ran and correctly accepted a globally-routable answer"
-        fi
-    elif [[ "$should_flag" == yes ]]; then
-        bad "probe endorsed $probe_ip, which is not globally routable — the heuristic is too narrow"
-    else
-        bad "probe flagged $probe_ip, which is a legitimate public address — false positive"
-    fi
-else
-    bad "the trust probe did not run (or did not log)"
-fi
-
-echo
-echo "== API surface =="
-TOKEN="$(grep -E '^DNS_API_TOKEN=' /etc/5gpn/dns.env | cut -d= -f2-)"
-api() { curl -sk -H "Authorization: Bearer $TOKEN" "https://127.0.0.1$1" ${2:+-X "$2"}; }
-st="$(api /api/status)"
-if python3 -c "
-import json,sys
-d=json.loads(sys.stdin.read())['stats']
-need=['china_p50_ms','china_p95_ms','china_lat_samples','trust_p50_ms','trust_p95_ms','trust_lat_samples']
-missing=[k for k in need if k not in d]
-gone=[k for k in ('china_avg_ms','trust_avg_ms') if k in d]
-print('        p50/p95 fields present:', not missing, '| retired avg fields gone:', not gone)
-raise SystemExit(1 if (missing or gone) else 0)
-" <<<"$st"; then ok "/api/status reports latency percentiles"; else bad "/api/status latency fields are wrong"; fi
-
-code="$(curl -sk -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" https://127.0.0.1/api/stats/reset)"
-[[ "$code" == 200 ]] && ok "POST /api/stats/reset returns 200" || bad "POST /api/stats/reset returned $code"
-
-mods="$(api /api/mihomo/ingress-modules)"
-python3 -c "
-import json,sys
-d=json.loads(sys.stdin.read())
-for m in d['modules']:
-    print('        %-18s enabled=%-5s manageable=%-5s %s' % (m['id'], m['enabled'], m['manageable'], m.get('reason','')))
-" <<<"$mods"
-if python3 -c "
-import json,sys
-d=json.loads(sys.stdin.read())
-q=[m for m in d['modules'] if m['id']=='block-quic-443'][0]
-raise SystemExit(0 if q['manageable'] else 1)
-" <<<"$mods"; then ok "block-quic-443 is manageable (capture rules no longer lock it)"
-else bad "block-quic-443 is still locked"; fi
-
-echo
-echo "== summary: ${PASS} passed, ${FAIL} failed, ${WARN} warnings =="
-[[ "$FAIL" -eq 0 ]]
+echo "== summary: $PASS passed, $FAIL failed =="
+(( FAIL == 0 ))
