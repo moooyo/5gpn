@@ -257,6 +257,8 @@ RELEASE_CHANNEL_EXPLICIT=0
 STABLE_RELEASE_API="https://api.github.com/repos/moooyo/5gpn/releases/latest"
 RELEASES_API="https://api.github.com/repos/moooyo/5gpn/releases"
 SERVICE_READY_TIMEOUT=20
+ACCOUNT_QUIESCE_TIMEOUT=10
+ACCOUNT_QUIESCE_INTERVAL=1
 
 # ----------------------------------------------------------------------------
 # Pretty output helpers
@@ -2459,14 +2461,46 @@ service_account_name_is_valid() {
     [[ "${1:-}" =~ ^[a-z_][a-z0-9_-]{0,30}$ ]]
 }
 
-managed_account_has_processes() {
-    local user="$1" uid pids
-    getent passwd "$user" >/dev/null 2>&1 || return 1
+managed_account_process_snapshot() {
+    local user="$1" uid
+    getent passwd "$user" >/dev/null 2>&1 || return 0
     uid="$(id -u "$user" 2>/dev/null || true)"
-    [[ "$uid" =~ ^[0-9]+$ ]] || return 0
-    pids="$(ps -o pid= -u "$uid" 2>/dev/null)" || return 0
-    pids="$(printf '%s' "$pids" | tr -d '[:space:]')"
-    [[ -n "$pids" ]]
+    [[ "$uid" =~ ^[0-9]+$ ]] || return 1
+    ps -ww -eo uid=,pid=,ppid=,stat=,comm=,args= 2>/dev/null \
+        | awk -v id="$uid" '
+            $1 == id {
+                $1 = ""
+                sub(/^[[:space:]]+/, "")
+                print
+            }
+        '
+}
+
+wait_managed_account_quiescent() {
+    local user="$1" snapshot="" elapsed=0 slice announced=0
+    getent passwd "$user" >/dev/null 2>&1 || return 0
+    [[ "$ACCOUNT_QUIESCE_TIMEOUT" =~ ^[1-9][0-9]*$ \
+       && "$ACCOUNT_QUIESCE_INTERVAL" =~ ^[1-9][0-9]*$ ]] \
+        || { err "Managed-account quiescence bounds are invalid."; return 1; }
+    while true; do
+        snapshot="$(managed_account_process_snapshot "$user")" \
+            || { err "Could not inspect processes owned by managed account: $user"; return 1; }
+        [[ -n "$snapshot" ]] || return 0
+        if (( elapsed >= ACCOUNT_QUIESCE_TIMEOUT )); then
+            err "Managed account ${user} still owns running processes after ${ACCOUNT_QUIESCE_TIMEOUT}s."
+            printf '%s\n' 'PID PPID STAT COMMAND ARGS' "$snapshot" >&2
+            return 1
+        fi
+        if (( announced == 0 )); then
+            announced=1
+            info "Waiting up to ${ACCOUNT_QUIESCE_TIMEOUT}s for ${user} processes to exit after service shutdown..."
+        fi
+        slice="$ACCOUNT_QUIESCE_INTERVAL"
+        (( slice <= ACCOUNT_QUIESCE_TIMEOUT - elapsed )) \
+            || slice=$((ACCOUNT_QUIESCE_TIMEOUT - elapsed))
+        sleep "$slice"
+        elapsed=$((elapsed + slice))
+    done
 }
 
 managed_identity_ids_are_exclusive() {
@@ -2517,10 +2551,7 @@ managed_group_gid_is_exclusive() {
 remove_managed_account_identity() {
     local user="$1" group="$2"
     if getent passwd "$user" >/dev/null 2>&1; then
-        if managed_account_has_processes "$user"; then
-            err "Managed account ${user} still owns running processes after service shutdown."
-            return 1
-        fi
+        wait_managed_account_quiescent "$user" || return 1
         userdel "$user" \
             || { err "Could not remove the managed account: $user"; return 1; }
     fi
@@ -2561,17 +2592,11 @@ stop_managed_runtime_units() {
 
 assert_managed_accounts_quiescent() {
     local user
-    if getent passwd "$FIVEGPN_SERVICE_USER" >/dev/null 2>&1 \
-       && managed_account_has_processes "$FIVEGPN_SERVICE_USER"; then
-        err "The managed ${FIVEGPN_SERVICE_USER} account still owns running processes after service shutdown."
-        return 1
-    fi
+    wait_managed_account_quiescent "$FIVEGPN_SERVICE_USER" || return 1
     [[ "$LEGACY_INSTALL_IDENTITY_CONFIRMED" == 1 ]] || return 0
     for user in $LEGACY_SERVICE_USERS; do
         [[ "$user" != mihomo || "$LEGACY_MIHOMO_IDENTITY_CONFIRMED" == 1 ]] || continue
-        getent passwd "$user" >/dev/null 2>&1 || continue
-        managed_account_has_processes "$user" \
-            && { err "Legacy managed account ${user} still owns running processes after service shutdown."; return 1; }
+        wait_managed_account_quiescent "$user" || return 1
     done
 }
 
@@ -2831,8 +2856,7 @@ remove_legacy_service_accounts() {
                     || cleanup_incomplete=1
                 continue
             fi
-            managed_account_has_processes "$user" \
-                && { err "Legacy managed account ${user} still owns running processes."; return 1; }
+            wait_managed_account_quiescent "$user" || return 1
             uid="$(id -u "$user")"
             gid="$(id -g "$user")"
             residual=""
@@ -2901,8 +2925,7 @@ remove_decommissioned_fivegpn_identity() {
     if getent passwd "$FIVEGPN_SERVICE_USER" >/dev/null 2>&1; then
         managed_user_uid_is_exclusive "$FIVEGPN_SERVICE_USER" \
             || { err "Refusing to remove an aliased fivegpn UID during decommission."; return 1; }
-        managed_account_has_processes "$FIVEGPN_SERVICE_USER" \
-            && { err "The fivegpn account still owns running processes during decommission."; return 1; }
+        wait_managed_account_quiescent "$FIVEGPN_SERVICE_USER" || return 1
         uid="$(id -u "$FIVEGPN_SERVICE_USER")"
         primary_gid="$(id -g "$FIVEGPN_SERVICE_USER")"
     fi

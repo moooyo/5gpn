@@ -160,7 +160,7 @@ pass "an incompatible exclusive fivegpn identity is recreated with stable IDs"
     service_account_is_safe() { [[ "$recreated" == 1 ]]; }
     service_group_is_exclusive_for_user() { return 0; }
     managed_user_uid_is_exclusive() { return 0; }
-    managed_account_has_processes() { return 1; }
+    wait_managed_account_quiescent() { return 0; }
     persist_replaced_fivegpn_identity() {
         REPLACED_FIVEGPN_UID="$1"
         REPLACED_FIVEGPN_GID="$2"
@@ -301,6 +301,42 @@ pass "an ordinary generic mihomo account is not cleanup provenance"
     grep -Fxq 'stop 5gpn-intercept-cert.service' "$calls"
 ) || fail "managed triggers/legacy units were not disabled before state migration"
 pass "legacy triggers and runtimes are disabled before state migration"
+
+(
+    counter="$TMP/transient-process.count"
+    printf '0\n' > "$counter"
+    ACCOUNT_QUIESCE_TIMEOUT=5
+    ACCOUNT_QUIESCE_INTERVAL=1
+    getent() { [[ "$1:$2" == passwd:gpn-dns ]]; }
+    managed_account_process_snapshot() {
+        n="$(cat "$counter")"
+        n=$((n + 1))
+        printf '%s\n' "$n" > "$counter"
+        (( n < 3 )) && printf '101 1 S old-worker old-worker --shutdown\n'
+        return 0
+    }
+    sleep() { return 0; }
+    info() { return 0; }
+    kill() { fail "quiescence wait sent a signal"; }
+    wait_managed_account_quiescent gpn-dns
+    [[ "$(cat "$counter")" == 3 ]]
+) || fail "a transient managed-account process did not drain within the bounded wait"
+pass "transient managed-account processes drain without signals"
+
+(
+    ACCOUNT_QUIESCE_TIMEOUT=3
+    ACCOUNT_QUIESCE_INTERVAL=1
+    getent() { [[ "$1:$2" == passwd:gpn-dns ]]; }
+    managed_account_process_snapshot() { printf '202 1 D stuck-worker stuck-worker --stuck\n'; }
+    sleep() { return 0; }
+    info() { return 0; }
+    err() { printf '%s\n' "$*" >&2; }
+    kill() { fail "persistent-process timeout sent a signal"; }
+    ! wait_managed_account_quiescent gpn-dns 2> "$TMP/persistent-process.err"
+    grep -Fq 'still owns running processes after 3s' "$TMP/persistent-process.err"
+    grep -Fq '202 1 D stuck-worker stuck-worker --stuck' "$TMP/persistent-process.err"
+) || fail "a persistent managed-account process did not fail with PID/command diagnostics"
+pass "persistent managed-account processes fail after the bounded wait with diagnostics"
 
 # If account recreation receives different numeric IDs, all installer-managed
 # roots must be reconciled before the service may start.
@@ -499,7 +535,7 @@ mkdir -p "$journal_state"
         esac
     }
     legacy_service_account_is_owned_shape() { return 0; }
-    managed_account_has_processes() { return 1; }
+    wait_managed_account_quiescent() { return 0; }
     userdel() { mock_user=0; }
     groupdel() {
         if [[ "$1" == mihomo ]]; then mock_mihomo_group=0; fi
