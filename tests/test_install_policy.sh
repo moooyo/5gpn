@@ -170,15 +170,22 @@ grep -Fq 'Pre-v5 dns.env contains retired DNS_EGRESS_RESOLVER' "$INSTALL" \
 grep -Eq '^[[:space:]]*DNS_EGRESS_RESOLVER=' "$INSTALL" \
     && fail "installer still persists the retired single egress resolver"
 # The banner must print the credential zashboard's backend dialog actually
-# takes. It printed DNS_API_TOKEN, and the two are different values -- so an
-# operator pasting what the installer showed them got 401 from a panel that was
-# working perfectly. Same class as the /ios/ URL and the bare migration path: a
-# string printed for a human that no machine on the path ever tried.
+# takes, but only when the installer's real stdout is a terminal. Testing `-t`
+# inside a block piped to card can never succeed because that block's stdout is
+# already a pipe.
 full_install_fn="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
-printf '%s' "$full_install_fn" | grep -Fq 'DNS_MIHOMO_SECRET' \
-    || fail "the success banner does not show the controller secret the panel needs"
+printf '%s' "$full_install_fn" | grep -Fq 'reveal_console_connection=0' \
+    && printf '%s' "$full_install_fn" | grep -Fq 'if [[ -t 1 ]]' \
+    && printf '%s' "$full_install_fn" | grep -Fq 'print_console_connection_info "$reveal_console_connection" | card' \
+    || fail "the success banner does not capture real stdout TTY state before card's pipe"
+connection_fn="$(sed -n '/^print_console_connection_info()/,/^}/p' "$INSTALL")"
+printf '%s' "$connection_fn" | grep -Fq 'DNS_MIHOMO_SECRET' \
+    || fail "the Console connection helper does not read the controller secret"
 printf '%s' "$full_install_fn" | grep -Fq 'DNS_API_TOKEN' \
     && fail "the success banner still shows the retired DNS_API_TOKEN"
+status_fn="$(sed -n '/^show_status()/,/^}/p' "$INSTALL")"
+printf '%s' "$status_fn" | grep -Fq 'https://${webdomain}/ui/' \
+    || fail "status still points at the controller origin instead of the /ui/ Console"
 
 # --- The UI is the zashboard bundle, published where the unit can read it ---
 # There is one interface and one origin now. The console SPA and its release

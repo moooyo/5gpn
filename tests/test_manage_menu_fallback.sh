@@ -28,7 +28,8 @@ source "$ROOT/install.sh"
 # returns the same answer -- an infinite loop, which is how this harness first
 # behaved. File state is the only kind that survives a subshell.
 QUEUE="$(mktemp)"
-trap 'rm -f -- "$QUEUE"' EXIT
+TAB_TMP="$(mktemp -d)"
+trap 'rm -f -- "$QUEUE"; rm -rf -- "$TAB_TMP"' EXIT
 declare -a DISPATCHED=()
 
 ask_choice() {
@@ -78,6 +79,21 @@ for i in "${!MANAGE_SCREENS[@]}"; do
 done
 pass "the non-terminal list offers every screen and hands over the table's own renderer and labels"
 
+# An empty subscription is a valid zero-row snapshot. GNU grep prints `0` but
+# returns 1 for that case; under the installer's errexit/pipefail policy the
+# network screen must retain the value and render it instead of exiting.
+RULES_DIR="$TAB_TMP/rules"
+mkdir -p "$RULES_DIR"
+printf '# no entries yet\n\n' > "$RULES_DIR/china_ip_list.txt"
+SAVED_DNS_RULES_DIR_DEFAULT="$DNS_RULES_DIR_DEFAULT"
+DNS_RULES_DIR_DEFAULT="$RULES_DIR"
+network_output="$(manage_screen_network)" \
+    || fail "a comment-only china_ip_list aborted the network screen under set -e"
+DNS_RULES_DIR_DEFAULT="$SAVED_DNS_RULES_DIR_DEFAULT"
+grep -Fq 'china_ip_list     0 行' <<< "$network_output" \
+    || fail "a comment-only china_ip_list was not rendered as zero rows"
+pass "the network screen treats an empty china_ip_list as zero rows"
+
 # Quitting must return rather than loop. An empty answer is what ask_choice
 # yields when the operator escapes, and it has to mean the same thing.
 DISPATCHED=()
@@ -85,5 +101,88 @@ DISPATCHED=()
 manage_menu_list
 [[ "${#DISPATCHED[@]}" == 0 ]] || fail "an escaped selection dispatched a screen"
 pass "an escaped selection leaves the list rather than dispatching"
+
+# Drive the terminal renderer with cursor movement and a tab change. Renderer
+# calls are recorded outside command-substitution state so this proves that
+# up/down only rebuild the frame from cached facts and that a tab change runs
+# only the destination renderer.
+MANAGE_SCREENS=(
+    "A|render_a|A one|A two"
+    "B|render_b|B one|B two"
+)
+RENDER_CALLS="$TAB_TMP/render-calls"
+KEY_QUEUE="$TAB_TMP/key-queue"
+render_a() { echo A >> "$RENDER_CALLS"; echo "facts A"; }
+render_b() { echo B >> "$RENDER_CALLS"; echo "facts B"; }
+card() { cat; }
+manage_read_key() {
+    local answer
+    answer="$(head -n 1 "$KEY_QUEUE" 2>/dev/null || true)"
+    sed -i '1d' "$KEY_QUEUE" 2>/dev/null || true
+    printf '%s' "$answer"
+}
+printf '%s\n' down right up quit > "$KEY_QUEUE"
+tab_output="$(manage_menu_tabs)"
+[[ "$(tr '\n' ' ' < "$RENDER_CALLS")" == 'A B ' ]] \
+    || fail "cursor movement reran a renderer or the tab switch rendered the wrong side: $(tr '\n' ' ' < "$RENDER_CALLS")"
+[[ "$tab_output" != *$'\033[2J'* ]] \
+    || fail "terminal navigation still performs a full 2J clear"
+first_paint="${tab_output%%$'\033[J'*}"
+[[ "$first_paint" == $'\033[H'* && "$first_paint" == *'facts A'* ]] \
+    || fail "the terminal erased its old frame before writing the complete new frame"
+[[ "$tab_output" == *'facts A'* && "$tab_output" == *'facts B'* ]] \
+    || fail "the terminal frames omitted a cached renderer snapshot"
+pass "tab frames are complete before paint and cursor movement reuses cached facts"
+
+# Every unit displayed in one services snapshot must have at most one
+# systemctl query. The public renewal timer is interpreted through certificate
+# provenance rather than treating every intentional inactive state as failure.
+UNIT_CALLS="$TAB_TMP/unit-calls"
+INACTIVE_UNIT=5gpn-certbot-renew.timer
+systemctl() {
+    [[ "$1" == is-active ]] || return 1
+    echo "$2" >> "$UNIT_CALLS"
+    if [[ "$2" == "$INACTIVE_UNIT" ]]; then
+        printf 'inactive\n'
+        return 3
+    fi
+    printf 'active\n'
+}
+CERT_MODE_TEST=cloudflare
+CERT_LINEAGE_TEST=owned
+cert_provenance_get() {
+    case "$1" in
+        mode) printf '%s' "$CERT_MODE_TEST" ;;
+        certbot_lineage) printf '%s' "$CERT_LINEAGE_TEST" ;;
+    esac
+}
+owned_output="$(manage_screen_services)"
+grep -Fq '❌ 5gpn-certbot-renew.timer' <<< "$owned_output" \
+    && grep -Fq 'inactive (5gpn-owned renewal)' <<< "$owned_output" \
+    || fail "an inactive owned renewal timer is not reported as an actionable failure"
+for unit in 5gpn-mihomo.service 5gpn-intercept-cert.path \
+            5gpn-intercept-cert.timer 5gpn-certbot-renew.timer; do
+    [[ "$(grep -Fxc "$unit" "$UNIT_CALLS")" == 1 ]] \
+        || fail "$unit was queried more or less than once in one services snapshot"
+done
+
+for case_value in 'debug|none|不适用' \
+                  'cloudflare|reused|外部续期' \
+                  'http-01|missing|需修复'; do
+    IFS='|' read -r CERT_MODE_TEST CERT_LINEAGE_TEST expected <<< "$case_value"
+    : > "$UNIT_CALLS"
+    service_output="$(manage_screen_services)"
+    grep -Fq "$expected" <<< "$service_output" \
+        || fail "$CERT_MODE_TEST/$CERT_LINEAGE_TEST renewal state omitted '$expected'"
+    ! grep -Fqx '5gpn-certbot-renew.timer' "$UNIT_CALLS" \
+        || fail "$CERT_MODE_TEST/$CERT_LINEAGE_TEST needlessly queried the inapplicable renewal timer"
+done
+cert_provenance_get() { return 1; }
+: > "$UNIT_CALLS"
+service_output="$(manage_screen_services)" \
+    || fail "missing certificate provenance aborted the services screen under set -e"
+grep -Fq 'provenance unknown' <<< "$service_output" \
+    || fail "missing certificate provenance was not shown as unknown"
+pass "service status queries each applicable unit once and explains renewal provenance"
 
 echo "management menu fallback: PASS"

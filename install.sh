@@ -175,8 +175,8 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # leaves the gateway with no resolver, no capture and no control API at all. The
 # staging probe checks the version token exactly rather than accepting a prefix.
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-monolith.17"
-MIHOMO_SHA256="eef6c88c9fd864f9d5a78448e5518a42005c1ad03f3075360339d50025286e5e"
+MIHOMO_VERSION="v1.19.28-monolith.18"
+MIHOMO_SHA256="17fb5cc7092e2a4b6e3a7d71b71a0511538d96c4d589553b276e303ea09e3823"
 # Every `mihomo -t` in this script must run with the same SAFE_PATHS the unit
 # grants, because the seed names paths outside its own home directory -- the
 # certificates it serves and the UI bundle it publishes. Without this the core
@@ -188,8 +188,8 @@ MIHOMO_SHA256="eef6c88c9fd864f9d5a78448e5518a42005c1ad03f3075360339d50025286e5e"
 # a drift here fails at install time on a config the running service accepts.
 MIHOMO_SAFE_PATHS="/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui"
 ZASH_REPO="moooyo/zashboard"
-ZASH_VERSION="v3.16.0-monolith.22"        # our fork's dist.zip, built from feat/5gpn-console
-ZASH_SHA256="c4b41234c7f12aa13d93ad56ba3e23abf2944532a8c10d984665d061b5888373"
+ZASH_VERSION="v3.16.0-monolith.23"        # our fork's dist.zip, built from feat/5gpn-console
+ZASH_SHA256="66907c3a730ec512019d73ceade958d866a669b57bb455d31319aa1e17206c25"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
@@ -350,7 +350,16 @@ gum_spin() {
     fi
 }
 # Frame multi-line stdin in a rounded box when interactive; else pass it through.
-card()       { if [[ "$_HAVE_GUM" == 1 && -t 1 ]]; then CI=1 gum style --border rounded --padding "0 1" --border-foreground "$UI_ACCENT"; else cat; fi; }
+# `capture` is used only by the terminal tab renderer, which records the styled
+# bytes before its atomic paint and therefore cannot expose a TTY on stdout.
+card() {
+    local mode="${1:-}"
+    if [[ "$_HAVE_GUM" == 1 ]] && { [[ -t 1 ]] || [[ "$mode" == capture ]]; }; then
+        CI=1 gum style --border rounded --padding "0 1" --border-foreground "$UI_ACCENT"
+    else
+        cat
+    fi
+}
 
 # One heading per install stage. This also carries the phase name that failure
 # reporting quotes, so the operator reads the same words on screen and in the
@@ -4520,24 +4529,112 @@ load_persisted_domains() {
     derive_domains "$base"
 }
 
+# Encode one URL component according to RFC 3986. The controller secret is
+# generated from a deliberately small alphabet today, but treating it as an
+# arbitrary byte string keeps a future `&`, `#`, `%`, or space from changing the
+# setup fragment's fields.
+url_percent_encode() {
+    local value="${1-}" out="" char encoded i
+    local LC_ALL=C
+    for ((i = 0; i < ${#value}; i++)); do
+        char="${value:i:1}"
+        case "$char" in
+            [a-zA-Z0-9.~_-]) out+="$char" ;;
+            *)
+                printf -v encoded '%%%02X' "'$char"
+                out+="$encoded"
+                ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
+console_public_url() {
+    local domain="${1:-${CONSOLE_DOMAIN:-}}"
+    if [[ -z "$domain" ]]; then
+        load_persisted_domains || return 1
+        domain="$CONSOLE_DOMAIN"
+    fi
+    is_valid_domain "$domain" || return 1
+    printf 'https://%s/ui/' "$domain"
+}
+
+# This is a client-side zashboard setup URL, not a server-side handoff. All
+# connection fields, including the secret, live after `#` and therefore are not
+# sent in the HTTP request. The Console removes them before probing, but the
+# unconsumed URL and terminal scrollback are still password-equivalent.
+console_setup_url() {
+    local domain="${1:?console_setup_url needs a domain}"
+    local secret="${2-}" encoded_domain encoded_secret secret_bytes
+    is_valid_domain "$domain" || return 1
+    [[ -n "$secret" && "$secret" != *$'\r'* && "$secret" != *$'\n'* ]] || return 1
+    secret_bytes="$(LC_ALL=C; printf '%s' "${#secret}")"
+    (( secret_bytes <= 4096 )) || return 1
+    encoded_domain="$(url_percent_encode "$domain")" || return 1
+    encoded_secret="$(url_percent_encode "$secret")" || return 1
+    printf 'https://%s/ui/#/setup?type=clash&hostname=%s&port=443&https=1&secret=%s&label=5gpn&disableUpgradeCore=1&disableTunMode=1' \
+        "$domain" "$encoded_domain" "$encoded_secret"
+}
+
+# print_console_connection_info <reveal-sensitive>
+#
+# A non-terminal install may be captured by CI, a remote log collector, or a
+# provisioning service. It gets the public URL and a recovery instruction, but
+# never the controller credential. The interactive install and the explicit
+# root-only management action may opt in to the password and fragment link.
+print_console_connection_info() {
+    local reveal="${1:-0}" domain="${CONSOLE_DOMAIN:-}" public_url secret setup_url
+    if [[ -z "$domain" ]]; then
+        load_persisted_domains || return 1
+        domain="$CONSOLE_DOMAIN"
+    fi
+    public_url="$(console_public_url "$domain")" || return 1
+
+    echo "控制台 Console"
+    echo ""
+    printf '  打开 Open           %s\n' "$public_url"
+    if [[ "$reveal" != 1 ]]; then
+        echo "  连接凭据未写入非交互输出。"
+        echo "  在主机上运行 sudo 5gpn，然后选择「显示 Console 连接信息 Console connection」。"
+        return 0
+    fi
+
+    secret="$(cfg_get DNS_MIHOMO_SECRET)" || return 1
+    [[ -n "$secret" ]] \
+        || { err "Persisted controller secret is missing."; return 1; }
+    if setup_url="$(console_setup_url "$domain" "$secret")"; then
+        printf '  一键连接（含密码）   %s\n' "$setup_url"
+        echo "  ⚠ 上述链接等同于密码；不要转发、截图或保存到共享书签。"
+    else
+        echo "  一键连接不可用：当前密码超过 4096 UTF-8 字节，或不适合安全地放入 URL；请按下方字段手动填写。"
+    fi
+    echo ""
+    echo "  手动填写 zashboard"
+    echo "  后端类型 Type       Clash API"
+    echo "  协议 Protocol       HTTPS"
+    printf '  主机 Host           %s\n' "$domain"
+    echo "  端口 Port           443"
+    echo "  Secondary Path      留空"
+    printf '  密码 Password       %s\n' "$secret"
+    echo ""
+    echo "  不要填写 127.0.0.1：zashboard 运行在浏览器中，127.0.0.1 指向浏览器所在的客户端，而不是网关。"
+}
+
+show_console_connection_info() {
+    load_persisted_domains || return 1
+    print_console_connection_info 1 | card
+}
+
 # ----------------------------------------------------------------------------
 # The management TUI shown by bare `5gpn`.
 #
-# Five screens rather than one list, because the flat menu had grown into
-# thirteen unrelated verbs with no state on screen: an operator restarting a
-# service could not see whether it was running, and one about to reset the
-# mihomo config could not see what mode its certificate was in. Each screen now
-# renders the facts its own actions act on, immediately above them.
-#
-# Navigation is two levels — pick a screen, act, go back — rather than tabs with
-# left/right keys. Gum's `choose` is a single-select list and exposes no key
-# handler, so a tab strip would have to be a hand-rolled raw-mode reader with
-# its own terminal restore path on every signal. That is a lot of machinery for
-# a menu, and it would have no plain-echo fallback at all, which is the one
-# property every surface here has to keep.
-#
-# Everything below degrades: ask_choice falls back to a numbered read, card()
-# to plain text. The screens are the same either way.
+# Five screens rather than one flat action list, because an operator restarting
+# a service needs its state on screen and one resetting mihomo needs the current
+# certificate context. A real terminal gets a single-key tab strip. Redirected
+# output, TERM=dumb, and other terminals that cannot support it get the same
+# screen table through the two-level gum-or-numbered-list fallback. The key
+# reader uses Bash's bounded single-character read, never stty, so it leaves no
+# terminal mode to recover after a signal.
 # ----------------------------------------------------------------------------
 
 # fivegpn_json reads one field out of a control-API response.
@@ -4561,7 +4658,7 @@ fivegpn_json() {
 # the first line is what makes this a value rather than a stream.
 manage_unit_state() {
     local state
-    state="$(systemctl is-active "$1" 2>/dev/null | head -1)"
+    state="$(systemctl is-active "$1" 2>/dev/null | head -1 || true)"
     printf '%s' "${state:-unknown}"
 }
 
@@ -4570,7 +4667,7 @@ manage_unit_state() {
 manage_count_lines() {
     local n
     [[ -f "$1" ]] || { printf '%s' "-"; return 0; }
-    n="$(grep -cvE '^[[:space:]]*(#|$)' "$1" 2>/dev/null | head -1)"
+    n="$(grep -cvE '^[[:space:]]*(#|$)' "$1" 2>/dev/null | head -1 || true)"
     printf '%s' "${n:-0}"
 }
 
@@ -4578,7 +4675,7 @@ manage_mark() { [[ "$1" == active ]] && printf '✅' || printf '❌'; }
 
 # --- screen: overview ---------------------------------------------------------
 manage_screen_overview() {
-    local snap ver unit master total on cert_loaded cert_cov cert_missing cert_exp
+    local snap ver unit master total on cert_loaded cert_cov cert_missing cert_exp panel_url
     ver="$("$MIHOMO_BIN" -v 2>/dev/null | head -1 | awk '{print $3}' || true)"
     unit="$(manage_unit_state 5gpn-mihomo.service)"
     snap="$(fivegpn_interception_snapshot 2>/dev/null || true)"
@@ -4627,7 +4724,9 @@ manage_screen_overview() {
     fi
 
     echo ""
-    printf '  面板    https://%s/ui/\n' "${CONSOLE_DOMAIN:-$(cfg_get DNS_BASE_DOMAIN)}"
+    panel_url="$(console_public_url)" || panel_url="不可用"
+    printf '  Console %s\n' "$panel_url"
+    printf '  连接    选择「显示 Console 连接信息 Console connection」查看一键链接或手填参数\n'
     printf '  DoT     tls://%s:853\n' "${DOT_DOMAIN:-?}"
     printf '  公网 IP %s\n' "$(cfg_get DNS_PUBLIC_IP || echo N/A)"
     echo ""
@@ -4639,13 +4738,41 @@ manage_screen_overview() {
 
 # --- screen: services ---------------------------------------------------------
 manage_screen_services() {
-    local unit
+    local unit state cert_mode cert_lineage
     echo "服务"
     echo ""
-    for unit in 5gpn-mihomo.service 5gpn-intercept-cert.path 5gpn-intercept-cert.timer 5gpn-certbot-renew.timer; do
+    for unit in 5gpn-mihomo.service 5gpn-intercept-cert.path 5gpn-intercept-cert.timer; do
+        state="$(manage_unit_state "$unit")"
         printf '  %s %-32s %s\n' \
-            "$(manage_mark "$(manage_unit_state "$unit")")" "$unit" "$(manage_unit_state "$unit")"
+            "$(manage_mark "$state")" "$unit" "$state"
     done
+    unit=5gpn-certbot-renew.timer
+    cert_mode="$(cert_provenance_get mode || true)"
+    cert_lineage="$(cert_provenance_get certbot_lineage || true)"
+    case "$cert_lineage" in
+        owned)
+            state="$(manage_unit_state "$unit")"
+            printf '  %s %-32s %s (5gpn-owned renewal)\n' \
+                "$(manage_mark "$state")" "$unit" "$state"
+            ;;
+        reused)
+            printf '  ⏸️  %-32s 外部续期 external renewal\n' "$unit"
+            ;;
+        missing)
+            printf '  ⚠️  %-32s 需修复 renewal needs repair\n' "$unit"
+            ;;
+        none)
+            if [[ "$cert_mode" == debug ]]; then
+                printf '  ⏸️  %-32s 不适用 debug certificate\n' "$unit"
+            else
+                printf '  ⚠️  %-32s provenance 不完整\n' "$unit"
+            fi
+            ;;
+        *)
+            state="$(manage_unit_state "$unit")"
+            printf '  ❔ %-32s %s (provenance unknown)\n' "$unit" "$state"
+            ;;
+    esac
     echo ""
     printf '  一个进程拥有解析、转发、控制台、机器人和拦截,所以只有一个服务单元。\n'
     printf '  两个 root oneshot 只因为它们持有网络进程不该碰的密钥材料而存在。\n'
@@ -4724,6 +4851,8 @@ manage_screen() {
 # Rule reload and Telegram Bot configuration belonged to the retired multi-process design.
 manage_action() {
     case "$1" in
+        "显示 Console 连接信息 Console connection")
+            show_console_connection_info ;;
         "重启服务 Restart services")
             run_management_with_install_lock restart_services ;;
         "查看核心日志 Core logs")
@@ -4752,7 +4881,7 @@ manage_action() {
 # drift into offering different things -- which is the shape of the bug that let
 # two menu entries do nothing for the whole of the monolith work.
 MANAGE_SCREENS=(
-    "概览|manage_screen_overview|重启服务 Restart services|编辑安装配置 Configure installation"
+    "概览|manage_screen_overview|显示 Console 连接信息 Console connection|重启服务 Restart services|编辑安装配置 Configure installation"
     "服务|manage_screen_services|重启服务 Restart services|查看核心日志 Core logs"
     "证书|manage_screen_certificates|重新生成 iOS 描述文件 Regenerate iOS profile|设置 Cloudflare Token Set Cloudflare token"
     "网络|manage_screen_network|编辑安装配置 Configure installation"
@@ -4813,13 +4942,32 @@ manage_tab_strip() {
     printf '%s\n' "$out"
 }
 
+# Build the complete visible frame before touching the terminal. Facts are a
+# cached renderer snapshot supplied by manage_menu_tabs; cursor-only movement
+# therefore never repeats systemctl, API, certificate, or filesystem probes.
+manage_tab_frame() {
+    local tab="$1" cursor="$2" facts="$3"; shift 3
+    local -a labels=("$@")
+    local i
+    manage_tab_strip "$tab"
+    printf '\n%s\n\n' "$facts"
+    for i in "${!labels[@]}"; do
+        if [[ "$i" == "$cursor" ]]; then
+            printf '  \033[7m> %s\033[0m\n' "${labels[$i]}"
+        else
+            printf '    %s\n' "${labels[$i]}"
+        fi
+    done
+    printf '\n  ←/→ 切换标签  ↑/↓ 选择  Enter 执行  q 退出\n'
+}
+
 # manage_menu_tabs — one level: tabs across, actions down.
 #
 # Only reached on a real terminal. Everything it draws is printf, so there is no
 # dependency on gum for input or layout; gum still styles the fact cards through
 # card() when it is present.
 manage_menu_tabs() {
-    local tab=0 cursor=0 key entry title render
+    local tab=0 cursor=0 key entry title render facts="" frame="" loaded_tab=-1
     local -a labels
     while true; do
         entry="${MANAGE_SCREENS[$tab]}"
@@ -4827,40 +4975,43 @@ manage_menu_tabs() {
         render="${entry#*|}"; render="${render%%|*}"
         IFS='|' read -r -a labels <<< "${entry#*|*|}"
 
-        printf '\033[2J\033[H'
-        manage_tab_strip "$tab"
-        printf '\n'
-        "$render" | card
-        printf '\n'
-        local i
-        for i in "${!labels[@]}"; do
-            if [[ "$i" == "$cursor" ]]; then
-                printf '  \033[7m> %s\033[0m\n' "${labels[$i]}"
-            else
-                printf '    %s\n' "${labels[$i]}"
-            fi
-        done
-        printf '\n  ←/→ 切换标签  ↑/↓ 选择  Enter 执行  q 退出\n'
+        if [[ "$loaded_tab" != "$tab" ]]; then
+            # card normally detects a terminal on stdout. This explicit mode
+            # preserves Gum styling while its already-rendered bytes are being
+            # captured for one atomic paint.
+            facts="$("$render" | card capture)"
+            loaded_tab="$tab"
+        fi
+        frame="$(manage_tab_frame "$tab" "$cursor" "$facts" "${labels[@]}")"
+        # Home, the complete frame, then erase the remainder of the old frame.
+        # A single write avoids ever exposing the blank interval caused by
+        # clearing before slow status probes or before the new bytes arrive.
+        printf '\033[H%s\n\033[J' "$frame"
 
         key="$(manage_read_key)" || break
         case "$key" in
             left)
                 tab=$(( (tab - 1 + ${#MANAGE_SCREENS[@]}) % ${#MANAGE_SCREENS[@]} ))
-                cursor=0 ;;
+                cursor=0
+                loaded_tab=-1 ;;
             right)
                 tab=$(( (tab + 1) % ${#MANAGE_SCREENS[@]} ))
-                cursor=0 ;;
+                cursor=0
+                loaded_tab=-1 ;;
             up)   (( cursor > 0 )) && cursor=$(( cursor - 1 )) ;;
             down) (( cursor < ${#labels[@]} - 1 )) && cursor=$(( cursor + 1 )) ;;
             enter)
-                printf '\033[2J\033[H'
+                # Leave an immediate, stable title while the selected action
+                # prompts or performs work; never flash an empty terminal.
+                printf '\033[H▶ %s\n\033[J' "${labels[$cursor]}"
                 # Actions prompt and print; they need the screen to themselves
                 # and a cooked terminal, which is what we are already in.
                 manage_action "${labels[$cursor]}" || true
                 printf '\n按任意键返回 Press any key to return\n'
-                manage_read_key >/dev/null || true ;;
+                manage_read_key >/dev/null || true
+                loaded_tab=-1 ;;
             quit)
-                printf '\033[2J\033[H'
+                printf '\033[H\033[J'
                 return 0 ;;
         esac
     done
@@ -7027,7 +7178,7 @@ show_status() {
         # inside it rather than a service that can be up or down on its own --
         # whether it is switched on is a property of the document, which the
         # control API reports.
-        s="$(systemctl is-active 5gpn-mihomo.service 2>/dev/null || echo unknown)"
+        s="$(manage_unit_state 5gpn-mihomo.service)"
         echo "  $([[ "$s" == active ]] && echo '✅' || echo '❌') 5gpn-mihomo  (${s})"
         if intercept_snapshot="$(fivegpn_interception_snapshot)"; then
             if grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true' <<<"$intercept_snapshot"; then
@@ -7039,7 +7190,7 @@ show_status() {
             echo "  ❔ interception  (control API unreachable)"
         fi
         echo ""
-        echo "  WebUI 域名  $webdomain  (https://${webdomain}/)"
+        echo "  WebUI 域名  $webdomain  (https://${webdomain}/ui/)"
         echo "  DoT 域名    $domain"
         echo "  公网 IP     $pubip"
         echo "  DoT         tls://${domain}:853"
@@ -7513,6 +7664,12 @@ delegate_pinned_channel_switch() {
 
 full_install() {
     local mode="${1:-}" force_tui=0 reset_mihomo=0 postcommit_failed=0
+    local reveal_console_connection=0
+    # Capture the real destination before the success block enters a pipeline:
+    # stdout inside `{ ...; } | card` is a pipe and can never satisfy `-t 1`.
+    if [[ -t 1 ]]; then
+        reveal_console_connection=1
+    fi
     [[ "$mode" == configure ]] && force_tui=1
     [[ "$mode" == upgrade-reset-mihomo ]] && reset_mihomo=1
     delegate_pinned_channel_switch "$mode" || return 1
@@ -7664,15 +7821,7 @@ full_install() {
         echo "  MITM CA 描述文件  $(ios_profile_url ios-intercept-ca.mobileconfig)（需手动完全信任）"
         echo "  Public console   ${CONSOLE_DOMAIN} A -> ${PUBLIC_IP}（NPN 可用客户端可路由 ${GATEWAY_IP}）"
     } | card
-    {
-        echo "控制台 Console: https://${CONSOLE_DOMAIN}/ui/"
-        # The controller secret, because that is what zashboard's backend
-        # dialog asks for. This printed the retired control server's token
-        # instead, and the two are different values, so the credential on
-        # screen opened nothing.
-        [[ -t 1 ]] && echo "Console secret: $(cfg_get DNS_MIHOMO_SECRET)"
-        echo "(panel public; /5gpn/* and controller routes require the controller secret)"
-    } | card
+    print_console_connection_info "$reveal_console_connection" | card
     print_qr
     echo ""
     ok "管理入口：直接输入  5gpn  打开管理菜单（状态 / 重启 / 改域名 / 改公网IP / 卸载 …）。"

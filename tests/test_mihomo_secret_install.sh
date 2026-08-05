@@ -16,6 +16,80 @@ for secret in 'actual # secret' 'controller"secret' 'controller\secret' "control
     yaml_value="$(yaml_single_quoted_value "$secret")" || fail "could not quote YAML secret: $secret"
     [[ -n "$yaml_value" ]] || fail "empty YAML secret encoding"
 done
+
+setup_secret='controller #&?/%'
+setup_url="$(console_setup_url console.example.test "$setup_secret")" \
+    || fail "could not build zashboard setup URL"
+expected_setup='https://console.example.test/ui/#/setup?type=clash&hostname=console.example.test&port=443&https=1&secret=controller%20%23%26%3F%2F%25&label=5gpn&disableUpgradeCore=1&disableTunMode=1'
+[[ "$setup_url" == "$expected_setup" ]] \
+    || fail "zashboard setup URL was not encoded field-by-field: $setup_url"
+[[ "${setup_url%%#*}" != *"$setup_secret"* ]] \
+    || fail "controller secret appeared before the client-side fragment"
+for invalid_secret in '' $'line\nfeed' $'carriage\rreturn'; do
+    if console_setup_url console.example.test "$invalid_secret" >/dev/null; then
+        fail "zashboard setup URL accepted an empty or multiline secret"
+    fi
+done
+boundary_secret="$(printf 'x%.0s' {1..4096})"
+console_setup_url console.example.test "$boundary_secret" >/dev/null \
+    || fail "zashboard setup URL rejected a 4096-byte secret"
+oversize_secret="${boundary_secret}x"
+if console_setup_url console.example.test "$oversize_secret" >/dev/null; then
+    fail "zashboard setup URL accepted a secret above 4096 UTF-8 bytes"
+fi
+
+public_connection="$({
+    CONSOLE_DOMAIN=console.example.test
+    print_console_connection_info 0
+})" || fail "could not render non-sensitive Console connection information"
+grep -Fq 'https://console.example.test/ui/' <<<"$public_connection" \
+    || fail "non-sensitive Console output omitted the public URL"
+grep -Fq 'sudo 5gpn' <<<"$public_connection" \
+    || fail "non-sensitive Console output omitted the host recovery instruction"
+grep -Fq "$setup_secret" <<<"$public_connection" \
+    && fail "non-sensitive Console output leaked the controller secret"
+grep -Fq '#/setup?' <<<"$public_connection" \
+    && fail "non-sensitive Console output leaked the password-equivalent setup link"
+
+sensitive_connection="$({
+    CONSOLE_DOMAIN=console.example.test
+    cfg_get() {
+        [[ "$1" == DNS_MIHOMO_SECRET ]] || return 1
+        printf '%s' "$setup_secret"
+    }
+    print_console_connection_info 1
+})" || fail "could not render interactive Console connection information"
+for field in \
+    "$expected_setup" \
+    'Clash API' \
+    'HTTPS' \
+    'console.example.test' \
+    '443' \
+    'Secondary Path      留空' \
+    "$setup_secret" \
+    '127.0.0.1' \
+    '浏览器所在的客户端'; do
+    grep -Fq "$field" <<<"$sensitive_connection" \
+        || fail "interactive Console output omitted: $field"
+done
+grep -Fq '上述链接等同于密码' <<<"$sensitive_connection" \
+    || fail "setup link is not labelled as password-equivalent"
+
+oversize_connection="$({
+    CONSOLE_DOMAIN=console.example.test
+    cfg_get() {
+        [[ "$1" == DNS_MIHOMO_SECRET ]] || return 1
+        printf '%s' "$oversize_secret"
+    }
+    print_console_connection_info 1
+})" || fail "an oversized secret made post-install Console output fail"
+grep -Fq '一键连接不可用' <<<"$oversize_connection" \
+    || fail "oversized secret output did not explain the manual fallback"
+grep -Fq '#/setup?' <<<"$oversize_connection" \
+    && fail "oversized secret output emitted a setup link the Console rejects"
+grep -Fq "$oversize_secret" <<<"$oversize_connection" \
+    || fail "oversized secret output omitted the manual password"
+
 grep -Fq "secret: '__CONTROLLER_SECRET__'" "$ROOT/etc/mihomo/config.yaml.tmpl" \
     || fail "mihomo seed does not quote the controller secret placeholder"
 

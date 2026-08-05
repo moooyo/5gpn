@@ -59,6 +59,35 @@ jobs:
       - name: Verify pinned artifacts against their published releases
         run: bash tests/verify-artifact-pins.sh
 
+  # The manifests maintained in the separate first-party repository are an
+  # input contract of the exact core this installer ships. Pin both sides so a
+  # later mutable branch cannot turn an already-reviewed release green or red.
+  official-extension-manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: moooyo/mihomo
+          ref: v1.19.28-monolith.18
+          path: 5gpn-core
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: moooyo/5gpn-extensions
+          ref: baafb3800d692de5a2ff5321ecb672328f3694d7
+          path: official-extensions
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: 5gpn-core/go.mod
+          cache-dependency-path: 5gpn-core/go.sum
+      - name: Validate official manifests with the shipped core parser
+        working-directory: 5gpn-core
+        env:
+          FIVEGPN_EXTENSIONS_ROOT: ${{ github.workspace }}/official-extensions
+        run: |
+          set -euo pipefail
+          grep -Fq 'func TestOfficialExtensionManifestParserCorpus' 5gpn/engine/module_mock_test.go
+          go test ./5gpn/engine -count=1 -run '^TestOfficialExtensionManifestParserCorpus$'
+
   mihomo-config:
     runs-on: ubuntu-latest
     env:
@@ -66,8 +95,8 @@ jobs:
       # one checks a configuration nobody will run. Keep this pin and its digest
       # in lockstep with MIHOMO_VERSION/MIHOMO_SHA256 in install.sh.
       MIHOMO_REPO: moooyo/mihomo
-      MIHOMO_VERSION: v1.19.28-monolith.17
-      MIHOMO_SHA256: eef6c88c9fd864f9d5a78448e5518a42005c1ad03f3075360339d50025286e5e
+      MIHOMO_VERSION: v1.19.28-monolith.18
+      MIHOMO_SHA256: 17fb5cc7092e2a4b6e3a7d71b71a0511538d96c4d589553b276e303ea09e3823
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Download pinned mihomo

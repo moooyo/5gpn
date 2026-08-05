@@ -276,10 +276,12 @@ An action declares exactly one of seven kinds. Six are declarative and never
 reach the JavaScript runtime — they are dispatched before a VM is created:
 
 - `reject`: `true`, which aborts the exchange;
-- `mock`: a synthetic response (`status`, `headers`, and one of `body` or
-  `base64Body`), bounded at 1 MiB by its own limit rather than by
-  `maxBodyBytes`, because the body is declared here rather than read off the
-  wire;
+- `mock`: a synthetic response (`status`, `headers`, and at most one of `body`
+  or `base64Body`). Omitting both produces an empty body. `body` contributes
+  its UTF-8 bytes; `base64Body` is standard padded Base64 and contributes its
+  decoded bytes. Either representation is bounded at 1 MiB by its own limit
+  rather than by `maxBodyBytes`, because the body is declared here rather than
+  read off the wire;
 - `headers`: `set` and `remove` maps, applied to whichever message the phase
   owns;
 - `rewrite`: `pattern`, `to`, and optional `status` (302 or 307). Request phase

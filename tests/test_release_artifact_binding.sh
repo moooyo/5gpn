@@ -154,4 +154,16 @@ else
     fail "checks.yml no longer runs tests/verify-artifact-pins.sh"
 fi
 
+# The public extension corpus must be parsed by the exact core release the
+# installer pins. Both repositories are immutable inputs to this release gate.
+if grep -Fq 'repository: moooyo/5gpn-extensions' "$CHECKS" \
+   && grep -Fq 'ref: baafb3800d692de5a2ff5321ecb672328f3694d7' "$CHECKS" \
+   && grep -Fq "ref: ${MIHOMO_VERSION}" "$CHECKS" \
+   && grep -Fq 'FIVEGPN_EXTENSIONS_ROOT:' "$CHECKS" \
+   && grep -Fq "TestOfficialExtensionManifestParserCorpus\$'" "$CHECKS"; then
+    pass "CI parses the immutable official extension corpus with the shipped core"
+else
+    fail "checks.yml no longer gates official manifests with the exact shipped core"
+fi
+
 exit "$FAIL"

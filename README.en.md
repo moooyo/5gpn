@@ -201,12 +201,18 @@ Replace the example domain and address with actual values; skip the first DNS co
 
 Then open `https://console.<base>/ui/`. The panel and two iOS profiles are
 public, while `/5gpn/*` and the ordinary controller routes require mihomo's
-controller secret. On first open, enter that secret in zashboard. To recover it
-on the host:
+controller secret. A successful interactive installation prints a
+password-equivalent zashboard setup link. The same link and decoded manual
+fields are available later under `sudo 5gpn` → `Console connection`;
+non-interactive installer output never includes them.
 
-```bash
-sudo sed -n 's/^DNS_MIHOMO_SECRET=//p' /etc/5gpn/dns.env
-```
+For manual setup, select `Clash API`, enable `HTTPS`, enter
+`console.<base>` as the host, `443` as the port, leave `Secondary Path` empty,
+and use the displayed controller secret as the password. Do not enter
+`127.0.0.1`: zashboard runs in the browser, so loopback names the browser's
+client device rather than the gateway. The old raw `sed` example was incorrect
+because `dns.env` stores a shell-escaped value; use the management menu, which
+decodes it through the installer's strict reader.
 
 - **Android**: find `dot.<base>` in the Console Setup Guide and enter it as the system Private DNS provider. Modern Android apps generally do not trust user-installed CAs by default, so the project does not offer an Android MITM CA workflow.
 - **iOS**: download and install `/ui/ios-dot.mobileconfig` from the Setup Guide. If extensions are needed, install `/ui/ios-intercept-ca.mobileconfig` separately and manually enable Full SSL Trust in system settings.

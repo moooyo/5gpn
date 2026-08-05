@@ -199,11 +199,20 @@ dig @127.0.0.1 -p 5353 example.com A
 
 Replace the example domain and address with actual values; skip the first DNS command when an older `dig` lacks `+tls`. Public plain DNS `:53` and remote access to `:5353` must fail. There is no `5gpn-dns` or `5gpn-intercept` service in the monolith. See [tests/integration-smoke.md](tests/integration-smoke.md) for the complete real-host checklist, and run it only on a disposable or explicitly designated Linux gateway.
 
-Open `https://console.<base>/ui/`. The panel and two iOS profiles are public, while `/5gpn/*` and the ordinary controller routes require mihomo's controller secret. On first open, enter that secret in zashboard. To recover it on the host:
+Open `https://console.<base>/ui/`. The panel and two iOS profiles are public,
+while `/5gpn/*` and the ordinary controller routes require mihomo's controller
+secret. A successful interactive installation prints a password-equivalent
+zashboard setup link. The same link and the decoded manual fields are available
+later under `sudo 5gpn` → `Console connection`; non-interactive installer output
+never includes them.
 
-```bash
-sudo sed -n 's/^DNS_MIHOMO_SECRET=//p' /etc/5gpn/dns.env
-```
+For manual setup, select `Clash API`, enable `HTTPS`, enter
+`console.<base>` as the host, `443` as the port, leave `Secondary Path` empty,
+and use the displayed controller secret as the password. Do not enter
+`127.0.0.1`: zashboard runs in the browser, so loopback names the browser's
+client device rather than the gateway. The old raw `sed` example was also
+incorrect because `dns.env` stores a shell-escaped value; use the management
+menu, which decodes it through the installer's strict reader.
 
 - **Android**：在 Console 的 Setup Guide 中查看 `dot.<base>`，然后填入系统 Private DNS。现代 Android 应用通常默认不信任用户安装的 CA，因此项目不提供 Android MITM CA 安装流程。
 - **iOS**：下载并安装 `https://console.<base>/ui/ios-dot.mobileconfig`。若使用扩展，再单独安装 `/ui/ios-intercept-ca.mobileconfig`，并在系统设置中手动启用 Full SSL Trust。

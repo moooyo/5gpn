@@ -160,6 +160,20 @@ client that can reach `/configs` can reach these and one that cannot, cannot.
 unauthenticated surface: an unenrolled phone downloading a `.mobileconfig`
 trusts nothing yet and holds no secret.
 
+The installer and the root-only management TUI may display a zashboard setup
+URL. It is not the deleted server-side handoff: it is the ordinary public
+`/ui/` URL followed by a client-side `#/setup` fragment containing the same
+controller secret and explicit Clash connection fields. A fragment is not sent
+in the HTTP request. Before the router or controller probe can observe it, the
+Console synchronously replaces the history entry with a credential-free URL;
+until that consumption succeeds, however, the complete link and terminal
+scrollback remain password-equivalent. It is therefore printed only to an
+interactive terminal or after an explicit `Console connection` action;
+redirected installer output contains only the public panel URL and tells the
+operator how to retrieve the credential on the host. The manual host is always
+`console.<base>`, never `127.0.0.1`, because zashboard executes on the browser's
+device and its loopback is not the gateway.
+
 The controller assigns `.mobileconfig` responses the explicit media type
 `application/x-apple-aspen-config`; serving profiles must not depend on the
 host distribution's MIME database. The installer never edits a shared MIME
@@ -383,6 +397,21 @@ neither. It also put the one file the console most needed to repair out of its
 reach.
 
 `config.yaml` remains fully operator-owned.
+
+## Operator TUI
+
+The terminal UI renders the facts for the selected tab into a complete cached
+frame before replacing the visible screen. Cursor-only movement reuses that
+snapshot, while changing tabs runs only the destination tab's renderer. The
+paint uses cursor-home plus erase-to-end in one write rather than clearing the
+display before slow system and controller probes; plain list and non-Gum
+fallbacks retain the same actions. Sensitive Console connection fields are an
+explicit action and are never part of the overview frame.
+
+Service status is provenance-aware. An inactive 5gpn-owned Certbot timer is an
+error; a debug certificate has no applicable renewal timer; a reused external
+lineage remains externally renewed; and `missing` provenance requires repair.
+Each displayed systemd unit is queried at most once per rendered snapshot.
 
 ## Upgrading an existing gateway
 

@@ -282,6 +282,19 @@ printf '%s' "$screen_fn" | grep -Fq 'ask_choice' \
 overview_fn="$(sed -n '/^manage_screen_overview()/,/^}/p' "$INSTALL")"
 printf '%s' "$overview_fn" | grep -Fq 'command -v jq' \
     || fail "the overview screen reports interception state without checking jq is present"
+printf '%s' "$overview_fn" | grep -Fq 'console_public_url' \
+    && printf '%s' "$overview_fn" | grep -Fq 'Console connection' \
+    || fail "the overview does not show the public Console URL and explicit connection action"
+printf '%s' "$overview_fn" | grep -Eq 'DNS_MIHOMO_SECRET|console_setup_url' \
+    && fail "the overview renderer contains sensitive Console connection material"
+
+tabs_fn="$(sed -n '/^manage_menu_tabs()/,/^}/p' "$INSTALL")"
+printf '%s' "$tabs_fn" | grep -Fq "printf '\\033[H%s\\n\\033[J'" \
+    || fail "tab frames are not written before erase-to-end"
+printf '%s' "$tabs_fn" | grep -Fq "printf '\\033[H▶ %s\\n\\033[J'" \
+    || fail "actions clear the old frame before leaving a visible action title"
+printf '%s' "$tabs_fn" | grep -Fq '\033[2J' \
+    && fail "tab navigation clears the terminal before rendering"
 
 # The menu is still interactive-only, and still names the subcommands.
 printf '%s' "$menu_fn" | grep -Fq '[[ ! -t 0 ]]' \
