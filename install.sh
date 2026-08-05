@@ -3019,7 +3019,7 @@ seal_mihomo_home_for_state_migration() {
         && runtime_directory_slot_is_safe "$MIHOMO_DIR" "$CONF_DIR" \
         && mihomo_home_metadata_is_reconcilable \
         || { err "Mihomo home ownership or mode is unsafe for state migration."; return 1; }
-    chown root:root "$MIHOMO_DIR" && chmod 0700 "$MIHOMO_DIR" \
+    chown root:root "$MIHOMO_DIR" && chmod 00700 "$MIHOMO_DIR" \
         || { err "Could not seal the mihomo home for state migration."; return 1; }
     [[ "$(file_uid "$MIHOMO_DIR")" == 0 \
        && "$(file_gid "$MIHOMO_DIR")" == 0 \
@@ -3037,7 +3037,7 @@ seal_state_directory_for_migration() {
     state_directory_metadata_is_reconcilable "$path" \
         || { err "State directory ownership or mode is unsafe: $path"; return 1; }
     managed_path_has_no_nested_mounts "$path" || return 1
-    chown root:root "$path" && chmod 0700 "$path" \
+    chown root:root "$path" && chmod 00700 "$path" \
         || { err "Could not seal state directory for migration: $path"; return 1; }
     runtime_tree_has_only_plain_entries "$path" \
         || { err "State directory contains a link, hardlink, or special entry: $path"; return 1; }
@@ -3046,14 +3046,14 @@ seal_state_directory_for_migration() {
 normalize_fivegpn_state_tree_permissions() {
     local state="$1" request="${1}/certificate-request"
     runtime_tree_has_only_plain_entries "$state" || return 1
-    find "$state" -mindepth 1 -type d -exec chmod 0700 {} + || return 1
-    find "$state" -mindepth 1 -type f -exec chmod 0600 {} + || return 1
+    find "$state" -mindepth 1 -type d -exec chmod 00700 {} + || return 1
+    find "$state" -mindepth 1 -type f -exec chmod 00600 {} + || return 1
     if [[ -e "$request" || -L "$request" ]]; then
         [[ -f "$request" && ! -L "$request" && "$(file_nlink "$request")" == 1 ]] \
             || { err "Certificate request state file is unsafe."; return 1; }
-        chmod 0644 "$request" || return 1
+        chmod 00644 "$request" || return 1
     fi
-    chmod 0711 "$state"
+    chmod 00711 "$state"
 }
 
 migrate_fivegpn_state_directory() {

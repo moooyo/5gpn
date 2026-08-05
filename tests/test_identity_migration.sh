@@ -75,6 +75,29 @@ pass "old-only runtime state is renamed to the 5gpn directory"
 ) || fail "conflicting old and current state did not fail before mutation"
 pass "two populated state directories fail before mutation"
 
+# GNU chmod preserves a directory's set-group-ID bit when a four-digit mode is
+# used. State normalization must clear inherited special bits explicitly while
+# restoring the one public certificate-request file.
+(
+    state="$TMP/state-modes"
+    mkdir -p "$state/dns-rules"
+    printf 'private\n' > "$state/dns.json"
+    printf 'request\n' > "$state/certificate-request"
+    printf 'cache\n' > "$state/dns-rules/cache.txt"
+    chmod 02711 "$state"
+    chmod 02770 "$state/dns-rules"
+    chmod 0666 "$state/dns.json" "$state/certificate-request" "$state/dns-rules/cache.txt"
+    normalize_fivegpn_state_tree_permissions "$state"
+    [[ "$(file_mode "$state")" == 711 ]]
+    [[ "$(file_mode "$state/dns-rules")" == 700 ]]
+    [[ "$(file_mode "$state/dns.json")" == 600 ]]
+    [[ "$(file_mode "$state/dns-rules/cache.txt")" == 600 ]]
+    [[ "$(file_mode "$state/certificate-request")" == 644 ]]
+    seal_body="$(sed -n '/^seal_mihomo_home_for_state_migration()/,/^}/p' "$ROOT/install.sh")"
+    grep -Fq 'chmod 00700 "$MIHOMO_DIR"' <<<"$seal_body"
+) || fail "state migration did not clear inherited special bits or restore exact modes"
+pass "state migration normalizes inherited setgid and file permissions"
+
 # The current fivegpn identity is installer-owned. If its shape is incompatible
 # but its numeric IDs are exclusive, it is recreated non-interactively with the
 # same IDs instead of wedging every reinstall.
