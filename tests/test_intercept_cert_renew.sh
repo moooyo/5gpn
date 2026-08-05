@@ -25,7 +25,7 @@ CERT_STATE="$INTERCEPT_DIR/cert-state"
 LOCK_FILE="$TMP/cert-renew.lock"
 
 mkdir -p "$CA_DIR" "$TLS_DIR"
-chmod 3771 "$CONFIG_ROOT"
+chmod 0755 "$CONFIG_ROOT"
 chmod 0700 "$CA_DIR"
 chmod 3770 "$INTERCEPT_DIR"
 chmod 0750 "$TLS_DIR"
@@ -120,7 +120,7 @@ lock_line="$(grep -nF 'flock -w 10 9' <<<"$main_fn" | cut -d: -f1)"
 [[ -n "$readonly_line" && -n "$lock_line" && "$readonly_line" -lt "$lock_line" ]] \
     || fail "valid leaf cannot bypass a contended public certificate lock"
 grep -Fq 'if [[ "$readonly_rc" == 4 ]]' <<<"$main_fn" \
-    || fail "lock contention still fails a runtime-valid renewal-due sidecar leaf"
+    || fail "lock contention still fails a runtime-valid renewal-due leaf"
 if (
     stage="$TMP/readonly-stage"
     mkdir -p "$stage"

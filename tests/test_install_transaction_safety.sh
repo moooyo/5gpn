@@ -66,6 +66,10 @@ CERT_RENEW_LOCK_FILE="$lock_root/cert.lock"
 INSTALL_LOCK_HELD=0
 INSTALL_CERT_LOCK_HELD=0
 file_uid() { printf '0\n'; }
+file_gid() { printf '0\n'; }
+file_mode() { [[ -d "$1" ]] && printf '700\n' || printf '600\n'; }
+file_nlink() { printf '1\n'; }
+chown() { return 0; }
 info() { :; }
 err() { printf '%s\n' "$*" >&2; }
 
@@ -139,6 +143,10 @@ source "$TEST_INSTALL"
 INSTALL_LOCK_FILE="$TEST_INSTALL_LOCK_FILE"
 CERT_RENEW_LOCK_FILE="$TEST_CERT_LOCK_FILE"
 file_uid() { printf '0\n'; }
+file_gid() { printf '0\n'; }
+file_mode() { [[ -d "$1" ]] && printf '700\n' || printf '600\n'; }
+file_nlink() { printf '1\n'; }
+chown() { return 0; }
 info() { :; }
 err() { :; }
 management_mutation() { : > "$TEST_MANAGEMENT_MARKER"; }
@@ -201,7 +209,7 @@ systemctl() {
 }
 wait_service_ready() { return 0; }
 start_services || fail "start_services failed on a healthy host"
-[[ "$(tr '\n' ' ' < "$service_order")" == 'mihomo ' ]] \
+[[ "$(tr '\n' ' ' < "$service_order")" == '5gpn-mihomo.service ' ]] \
     || fail "start_services started something other than the one unit: $(tr '\n' ' ' < "$service_order")"
 pass "one unit is started, and nothing that was retired with the old layout"
 

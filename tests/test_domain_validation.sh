@@ -3,7 +3,7 @@
 # bash+grep -- runs on the dev box and in CI.
 #
 # The same table lives in the fork, beside the regexp, as
-# gpn/bot/domain_test.go's TestValidDomainMatchesTheInstallerRule. Two
+# 5gpn/bot/domain_test.go's TestValidDomainMatchesTheInstallerRule. Two
 # implementations of one rule drift silently, so both run it and the day they
 # disagree one of them fails. Keep the two tables identical.
 #

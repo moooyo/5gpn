@@ -1,95 +1,52 @@
 # Copilot instructions
 
-Follow `AGENTS.md`; `docs/architecture.md` is the only current-architecture
-reference. Historical plans and design handoffs are context only.
+Follow `AGENTS.md`. Read `docs/architecture.md` before architectural changes;
+it is the sole current-architecture reference. Historical plans, fixtures, and
+handoffs are context only.
 
 ## Current system
 
-- `5gpn-dns` serves client DoT on `:853`, loopback debug DNS on
-  `127.0.0.1:5353/udp`, loopback egress DNS for mihomo on `127.0.0.1:5354`,
-  and the authenticated console/API on loopback TLS `:443`.
-- New mihomo seeds listen on configured local IPv4 addresses at TCP `:80`,
-  `:443`, `:8080`, and `:8443`, plus UDP `:443`. They sniff the original host
-  and own all post-steering egress behavior. Existing valid operator configs
-  remain byte-preserved until an explicit edit or reset.
-- DNS policy is an ordered, first-match block/direct/proxy model in
-  `/etc/5gpn/policy.json`. It does not project into mihomo.
-- The complete `/etc/5gpn/mihomo/config.yaml` is operator-owned. Preserve it on
-  reinstall and `configure`; only explicit reset may replace it after
-  validation and atomic publication.
-- Optional ingress modules are authenticated, explicit one-shot structural
-  edits of that same complete config, never a generated region or second state
-  file. The `speedtest-5060` module is default-off and may add TCP/UDP `:5060`
-  only when the current listener/sniffer/guard shape is canonical and protected
-  by the exact-byte config revision. It also blocks console/zash on that port.
-  UDP support means sniffable QUIC only; raw Ookla UDP cannot recover its
-  pre-steering target.
-- `console.<base>` publicly serves the SPA and `/ios/`; every `/api/*` route
-  remains bearer-authenticated. `zash.<base>` is source-allowlisted. There is
-  no separate bootstrap hostname. `dot.<base>` is DoT.
-- The console uses bearer `/api/*` endpoints. Mihomo logs require a one-use
-  ticket minted by `POST /api/mihomo/log-ticket`; the console has no arbitrary
-  controller proxy. zashboard uses its separate allowlisted `/proxy/`.
+- The `moooyo/mihomo` fork is the only long-running process. The installed unit
+  is `5gpn-mihomo.service`, the executable is
+  `/opt/5gpn/bin/5gpn-mihomo`, and the sole managed Unix identity is
+  `fivegpn:fivegpn`.
+- Client DNS ingress is DoT `:853` only. The same process owns DNS policy,
+  forwarding, native-extension interception, the Telegram control plane, and
+  the authenticated controller API.
+- Product API routes are `/5gpn/*`, capability keys are `5gpn-*`, and runtime
+  documents live under `/etc/5gpn/mihomo/5gpn`.
+- HTTP/3 interception is unsupported and the fixed UDP/443 `REJECT` guard is
+  mandatory. HTTP/H1/H2 interception remains available on explicitly enabled
+  capture hosts.
+- `/etc/5gpn/mihomo/config.yaml` is operator-owned. Normal install, reinstall,
+  and configure operations preserve it; only an explicit validated reset may
+  replace it.
+- Runtime source belongs in `moooyo/mihomo`, Console source belongs in
+  `moooyo/zashboard`, and first-party extension source belongs in
+  `moooyo/5gpn-extensions`. This repository ships only the installer, templates,
+  operational scripts, tests, and digest-pinned release coordinates.
 
-Do not add Xray, sing-box, smartdns, chinadns-ng, Python, DoH/public `:53`,
-policy-v2 drafts, structured egress, TUN/TProxy, WireGuard, fwmark, policy
-routing, or host firewall ownership. This project is pre-release: accept only
-the current config keys, schemas, commands, and callbacks; do not add aliases,
-migrations, or teardown for superseded implementations.
+Do not add a sidecar, second controller origin, public DoH or plain DNS,
+TUN/TProxy, host firewall management, policy-routing machinery, or an in-process
+subsystem supervisor. Expected operation failures stay local; unrecoverable
+runtime invariants terminate the monolith and systemd applies the bounded
+restart policy.
 
-## Development commands
+## Development checks
 
 From the repository root:
 
 ```bash
 for t in tests/test_*.sh; do bash "$t"; done
-
-cd cmd/5gpn-dns
-gofmt -w .
-go vet ./...
-go test -race ./...
-
-cd ../../web
-npm ci
-npm run typecheck
-npx vitest run
-npm run build
-npm run bundle:check
-npx playwright test
+tests/verify-artifact-pins.sh
 ```
 
-CI downloads mihomo `v1.19.28`, verifies the pinned digest, renders
-`etc/mihomo/config.yaml.tmpl`, and runs `mihomo -t`. Keep that job aligned with
-the installer's version pin and renderer placeholders.
+CI also renders the seed and validates it with the exact mihomo version and
+digest pinned by `install.sh`. Keep `.github/workflows/checks.yml` synchronized
+with that pair.
 
-## Change rules
-
-- Operator-facing shell interaction must use the repository's Gum helpers with
-  a noninteractive plain-output fallback. Gate Gum interaction on a TTY and
-  guard cancellation under `set -e`.
-- Never broadly flush nftables, overwrite host firewall config, or recursively
-  delete an unvalidated/unowned path.
-- Never place a debug certificate under `/etc/letsencrypt`; use
-  `/etc/5gpn/debug-cert`.
-- Keep certificate modes exact: `cloudflare`, `http-01`, or `debug`; do not add
-  aliases. HTTP-01 uses the three derived service names and its scoped renewal
-  helper, while Cloudflare credentials remain DNS-01-only.
-- Keep the `5gpn-dns` module's direct dependencies limited to `miekg/dns`,
-  `go-telegram/bot`, and `gopkg.in/yaml.v3` unless a design explicitly changes
-  the policy. AGENTS.md and docs/architecture.md state the same three; keep all
-  three lists in step.
-- Preserve sequential member order inside each upstream group and concurrent
-  china/trust auto arbitration. Preserve Rcode/authority when rewriting.
-- Subscription parse/scan/network failure keeps the old cache. SSRF checks
-  apply after every resolution and redirect.
-- Keep the DaisyUI/zds cascade layer ordering, CSS-only active sidebar,
-  virtualized logs, responsive drawer, and single-flight cancellable polling.
-- `web/src/app/navigation.ts` is the route manifest used by the router and E2E;
-  add a route there, its loader in `router.tsx`, a `page-<id>` root selector,
-  and coverage together.
-- Do not commit `web/dist` or weaken bundle/PWA/font budgets just to make a
-  regression pass.
-
-When behavior changes, update `docs/architecture.md`,
-`etc/5gpn-dns/dns.env.example`, relevant shell policy tests, and
-`tests/integration-smoke.md` in the same change.
+When behavior changes, update `AGENTS.md`, `MEMORY.md`,
+`docs/architecture.md`, the relevant shell policy tests, and
+`tests/integration-smoke.md` together. Preserve the Gum-or-echo installer
+policy, filesystem ownership markers, fail-before-publish checks, certificate
+boundaries, and operator-owned configuration contract.

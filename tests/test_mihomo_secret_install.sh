@@ -29,7 +29,7 @@ trap 'rm -rf -- "$TMP"' EXIT
 CONF_DIR="$TMP/etc-5gpn"
 MIHOMO_DIR="$CONF_DIR/mihomo"
 SCRIPT_DIR="$ROOT"
-MIHOMO_SERVICE_USER="$(id -gn)"
+FIVEGPN_SERVICE_GROUP="$(id -gn)"
 MIHOMO_BIN="$TMP/mihomo"
 mkdir -p "$MIHOMO_DIR"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$MIHOMO_BIN"

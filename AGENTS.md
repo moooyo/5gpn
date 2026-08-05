@@ -24,7 +24,7 @@ plans, design handoffs, and git history are context only.
   subsystem supervisor. A deliberate `systemctl stop` remains stopped, and
   restart does not claim to repair deterministic configuration or host errors.
   The DNS document's listener and certificate-path fields are installation-owned
-  and must be round-tripped unchanged by `/gpn/dns` writes; changing them is
+  and must be round-tripped unchanged by `/5gpn/dns` writes; changing them is
   rejected before persistence so an occupied port cannot become a restart loop.
 - Native-extension interception is limited to plain HTTP and TLS/H1/H2 on
   explicitly enabled capture hosts. HTTP/3 interception is unsupported:
@@ -58,9 +58,17 @@ plans, design handoffs, and git history are context only.
   Console exposes only the narrow group list needed for this binding; do not
   recreate policy-v2, drafts/generations, node/selector APIs, or a generated
   mihomo config region.
+- The installed runtime identity is intentionally uniform: the only managed
+  Unix user and group are `fivegpn`, the main unit is
+  `5gpn-mihomo.service`, and its executable is
+  `/opt/5gpn/bin/5gpn-mihomo`. Runtime documents live under
+  `/etc/5gpn/mihomo/5gpn`. Old `gpn-*` accounts, the unprefixed `mihomo`
+  account/unit/binary, and the old `gpn` state directory are legacy migration
+  inputs only; they are never current names or compatibility aliases.
 - `/etc/5gpn/mihomo/config.yaml` is fully operator-owned. Normal install,
   reinstall, and `configure` operations preserve a valid existing file. Only
-  explicit reset may replace it, after `mihomo -t`, backup, and atomic rename.
+  explicit reset may replace it, after `5gpn-mihomo -t`, backup, and atomic
+  rename.
   The fixed UDP/443 guard is part of fresh/reset seeds and the live readiness
   boundary, but it is not an installer-owned generated region. An operator may
   edit the complete YAML manually; if the guard is missing or disabled,
@@ -76,10 +84,10 @@ plans, design handoffs, and git history are context only.
   amplification (one unrecoverable unit disabling every healthy one) is why it
   was removed. Keep fail-before-publish checks, the locks, and staging.
 - `console.<base>` is the single public bootstrap and panel SNI. `/ui/*` and its
-  iOS profiles are public, while `/gpn/*` and the ordinary controller routes
+  iOS profiles are public, while `/5gpn/*` and the ordinary controller routes
   require the mihomo controller secret. Do not restore a separate bootstrap,
   Console API, panel hostname, source allowlist, or handoff session.
-- The mihomo controller secret protects `/gpn/*` and the ordinary authenticated
+- The mihomo controller secret protects `/5gpn/*` and the ordinary authenticated
   controller routes. `/ui/*` remains public for bootstrap and profile delivery.
   Plugin logs remain in mihomo's bounded in-memory ring and are read through the
   authenticated interception API; do not persist script console output or add a

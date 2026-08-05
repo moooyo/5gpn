@@ -95,11 +95,11 @@ printf '%s' "$ic" | grep -Eq -- '--http-01-port|--webroot' \
 # an originally active service immediately; successful initial issuance defers
 # restoration until after role publication. Cloudflare reaches Certbot directly.
 http_run="$(sed -n '/^run_http_certbot()/,/^)/p' "$INSTALL")"
-printf '%s' "$http_run" | grep -Fq 'systemctl is-active --quiet mihomo.service' \
+printf '%s' "$http_run" | grep -Fq 'systemctl is-active --quiet 5gpn-mihomo.service' \
     || fail "install.sh: HTTP-01 wrapper does not remember whether mihomo was active"
-printf '%s' "$http_run" | grep -Fq 'systemctl stop mihomo.service' \
+printf '%s' "$http_run" | grep -Fq 'systemctl stop 5gpn-mihomo.service' \
     || fail "install.sh: HTTP-01 wrapper does not release mihomo TCP :80"
-printf '%s' "$http_run" | grep -Fq 'systemctl start mihomo.service' \
+printf '%s' "$http_run" | grep -Fq 'systemctl start 5gpn-mihomo.service' \
     || fail "install.sh: HTTP-01 wrapper does not restore the originally active mihomo"
 printf '%s' "$http_run" | grep -Eq 'xray|5gpn-dns' \
     && fail "install.sh: HTTP-01 wrapper may coordinate only mihomo"
@@ -222,9 +222,9 @@ printf '%s' "$rt" | grep -Fq '5gpn-dns' \
     && fail "install.sh: rotate_token still restarts the deleted 5gpn-dns unit"
 printf '%s' "$rt" | grep -Fq 'persist_mihomo_secret' \
     || fail "install.sh: rotate_token does not mirror the new secret into dns.env"
-printf '%s' "$rt" | grep -Fq 'systemctl restart mihomo' \
-    || fail "install.sh: rotate_token must restart mihomo (the secret is read when the router is built)"
-printf '%s' "$rt" | grep -Eq 'systemctl reload mihomo|kill -HUP' \
+printf '%s' "$rt" | grep -Fq 'systemctl restart 5gpn-mihomo.service' \
+    || fail "install.sh: rotate_token must restart 5gpn-mihomo (the secret is read when the router is built)"
+printf '%s' "$rt" | grep -Eq 'systemctl reload 5gpn-mihomo|kill -HUP' \
     && fail "install.sh: rotate_token must not use reload/SIGHUP (insufficient for a secret change)"
 # The live config is rewritten atomically, or not at all: a half-written
 # config.yaml is a gateway that will not start.

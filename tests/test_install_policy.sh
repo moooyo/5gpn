@@ -73,7 +73,7 @@ remove_unit_fn="$(sed -n '/^remove_unit()/,/^}/p' "$INSTALL")"
 grep -Fq '5gpn-unit-id' <<<"$remove_unit_fn" \
     && fail "unit removal consults a provenance marker instead of the fixed unit path"
 # Every shipped unit carries a provenance marker. The revision is deliberately
-# not pinned: mihomo.service is currently at v3, and pinning an older revision is exactly the trap the
+# not pinned: 5gpn-mihomo.service may change revision, and pinning an older one is exactly the trap the
 # comment above describes -- a revision that wedges the check on every bump.
 # Assert the shape, and that no shipped unit is missing one.
 for unit in "$ROOT"/etc/systemd/*; do
@@ -143,9 +143,9 @@ if [[ -z "$cfg_line" || -z "$dns_line" || -z "$cert_line" || -z "$lock_line" \
     fail "configuration/DNS-gate/certificate issuance order is not fail-closed"
 fi
 grep -Fq '    start_services_with_cert_lock_handoff' <<<"$full_fn" \
-    || fail "full install does not hand the certificate lock to sidecar startup"
+    || fail "full install does not hand the certificate lock to runtime startup"
 grep -Fqx '    start_services' <<<"$full_fn" \
-    && fail "full install still starts the sidecar while holding the certificate lock"
+    && fail "full install still starts the runtime while holding the certificate lock"
 
 # ===== iOS profile is served by the controller under /ui/; the standalone :8111
 # responder, the host firewall and the separate console origin that owned /ios/
@@ -190,8 +190,8 @@ grep -Eq '^install_ui\(\)'      "$INSTALL" || fail "no install_ui() to publish t
 grep -Eq 'UI_DIR="/opt/5gpn/ui"' "$INSTALL" || fail "UI_DIR is not pinned to /opt/5gpn/ui"
 grep -Fq 'external-ui: /opt/5gpn/ui' "$ROOT/etc/mihomo/config.yaml.tmpl" \
     || fail "seed template does not point external-ui at /opt/5gpn/ui"
-grep -Fq '/opt/5gpn/ui' "$ROOT/etc/systemd/mihomo.service" \
-    || fail "mihomo.service does not grant read access to /opt/5gpn/ui"
+grep -Fq '/opt/5gpn/ui' "$ROOT/etc/systemd/5gpn-mihomo.service" \
+    || fail "5gpn-mihomo.service does not grant read access to /opt/5gpn/ui"
 grep -Eq 'install_web|5gpn-web-.*\.tar\.gz|DNS_WEB_DIR=' "$INSTALL" \
     && fail "the retired console SPA is still fetched or published"
 
@@ -313,8 +313,10 @@ grep -Eq '^[[:space:]]*stage_artifacts( \|\| return 1)?$' "$INSTALL" || fail "fu
 grep -Eq '^(capture_install_rollback|rollback_install|quarantine_managed_units_after_failed_rollback)\(\)' "$INSTALL" \
     && fail "the install rollback subsystem came back"
 grep -q 'ROLLBACK_DIR' "$INSTALL" && fail "a rollback snapshot directory came back"
-grep -Eq '^remove_legacy_|^clean_previous_install\(\)' "$INSTALL" \
-    && fail "installer still contains an old-release teardown helper"
+grep -Eq '^clean_previous_install\(\)' "$INSTALL" \
+    && fail "the broad old-release teardown helper returned"
+grep -Eq '^remove_legacy_service_accounts\(\)' "$INSTALL" \
+    || fail "the exact legacy identity cleanup required by the naming migration is missing"
 
 # Official and beta publications share one gate but have disjoint tag,
 # provenance, and GitHub release metadata boundaries.

@@ -53,8 +53,8 @@ MOCK_BAD_GROUP_ROLE=""
 MOCK_BAD_GROUP_FILE=""
 named_group_gid() {
     case "$1" in
-        5gpn-dns) printf '%s\n' 61001 ;;
-        mihomo) printf '%s\n' 61002 ;;
+        fivegpn) printf '%s\n' 61001 ;;
+        root) printf '%s\n' 61002 ;;
         *) return 1 ;;
     esac
 }
@@ -62,8 +62,8 @@ file_gid() {
     local path="$1" role expected basename
     case "$path" in
         "$CERT_ROOT"/dot/*) role=dot; expected=61001 ;;
-        "$CERT_ROOT"/web/*) role=web; expected=61001 ;;
-        "$CERT_ROOT"/console/*) role=console; expected=61002 ;;
+        "$CERT_ROOT"/web/*) role=web; expected=61002 ;;
+        "$CERT_ROOT"/console/*) role=console; expected=61001 ;;
         *) return 1 ;;
     esac
     basename="${path##*/}"
@@ -275,9 +275,9 @@ cmp -s "$LE_LIVE_ROOT/example.com/fullchain.pem" "$CERT_ROOT/web/current/fullcha
     && pass "stale role certificate was redeployed from the live lineage" \
     || fail "stale role certificate survived the not-due fast path"
 
-# Content, owner, and mode are insufficient: the DNS copies must be readable
-# only through gpn-dns and the controller copy only through mihomo. A wrong role
-# group is treated as stale and repaired by the owned deploy hook.
+# Content, owner, and mode are insufficient: every served role must be readable
+# by the unified fivegpn runtime identity. A wrong role group is treated as
+# stale and repaired by the owned deploy hook.
 reset_case
 MOCK_CERT_FRESH=1
 MOCK_BAD_GROUP_ROLE=console
@@ -320,19 +320,19 @@ expect_no_log "systemctl " "multiple-A rejection happens before touching mihomo"
 reset_case
 MOCK_CERTBOT_RC=23
 expect_failure "failed HTTP Certbot attempt is reported" cert_renew_main --cert-name example.com
-expect_log "systemctl stop mihomo" "active mihomo is stopped for HTTP-01"
+expect_log "systemctl stop 5gpn-mihomo.service" "active 5gpn-mihomo is stopped for HTTP-01"
 expect_log "certbot renew --cert-name example.com --non-interactive" "HTTP Certbot call is cert-name scoped"
-expect_log "systemctl start mihomo" "failed HTTP Certbot attempt restores mihomo"
-expect_before "dig A console.example.com @1.1.1.1" "systemctl stop mihomo" "DNS gate completes before mihomo is stopped"
-expect_before "systemctl stop mihomo" "certbot renew --cert-name example.com --non-interactive" "mihomo stops before HTTP Certbot"
-expect_before "certbot renew --cert-name example.com --non-interactive" "systemctl start mihomo" "mihomo restarts after failed HTTP Certbot"
+expect_log "systemctl start 5gpn-mihomo.service" "failed HTTP Certbot attempt restores 5gpn-mihomo"
+expect_before "dig A console.example.com @1.1.1.1" "systemctl stop 5gpn-mihomo.service" "DNS gate completes before 5gpn-mihomo is stopped"
+expect_before "systemctl stop 5gpn-mihomo.service" "certbot renew --cert-name example.com --non-interactive" "5gpn-mihomo stops before HTTP Certbot"
+expect_before "certbot renew --cert-name example.com --non-interactive" "systemctl start 5gpn-mihomo.service" "5gpn-mihomo restarts after failed HTTP Certbot"
 
 # Even a partially failing stop operation is followed by a restore attempt;
 # Certbot must not start while :80 ownership is uncertain.
 reset_case
 MOCK_STOP_RC=5
 expect_failure "failed mihomo stop aborts HTTP renewal" cert_renew_main --cert-name example.com
-expect_log "systemctl start mihomo" "failed stop still restores the originally active mihomo"
+expect_log "systemctl start 5gpn-mihomo.service" "failed stop still restores the originally active 5gpn-mihomo"
 expect_no_log "certbot " "failed stop never reaches Certbot"
 
 # An initially inactive data plane is neither stopped nor spuriously started.
@@ -340,8 +340,8 @@ reset_case
 MOCK_MIHOMO_ACTIVE=0
 expect_success "HTTP renewal works with initially inactive mihomo" cert_renew_main --cert-name example.com
 expect_log "certbot renew --cert-name example.com --non-interactive" "inactive-mihomo renewal remains cert-name scoped"
-expect_no_log "systemctl stop mihomo" "initially inactive mihomo is not stopped"
-expect_no_log "systemctl start mihomo" "initially inactive mihomo is not started"
+expect_no_log "systemctl stop 5gpn-mihomo.service" "initially inactive 5gpn-mihomo is not stopped"
+expect_no_log "systemctl start 5gpn-mihomo.service" "initially inactive 5gpn-mihomo is not started"
 
 # Cloudflare DNS-01 never enters the HTTP DNS or mihomo handoff path.
 reset_case

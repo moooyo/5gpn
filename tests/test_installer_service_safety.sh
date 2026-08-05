@@ -30,9 +30,12 @@ else
 fi
 
 deps="$(sed -n '/^install_deps()/,/^}/p' "$INSTALL")"
-grep -Eq 'for cmd in .* timeout;' <<<"$deps" \
-    && pass "installer verifies the timeout dependency" \
-    || fail "installer does not verify the timeout dependency"
+if grep -Eq 'for cmd in .* timeout([[:space:]]|;)' <<<"$deps" \
+   && grep -Eq 'for cmd in .* findmnt([[:space:]]|;)' <<<"$deps"; then
+    pass "installer verifies timeout and mount-inspection dependencies"
+else
+    fail "installer does not verify timeout and mount-inspection dependencies"
+fi
 
 listener_probe="$(sed -n '/^ss_has_exact_listener()/,/^}/p' "$INSTALL")"
 if grep -Fq '$4 == target' <<<"$listener_probe" \
@@ -41,32 +44,6 @@ if grep -Fq '$4 == target' <<<"$listener_probe" \
 else
     fail "listener readiness permits an address substring match"
 fi
-
-slow_intercept="$(mktemp)"
-cat > "$slow_intercept" <<'EOF'
-#!/usr/bin/env bash
-case " $* " in
-    *' --check-enabled '*) exit 0 ;;
-    *' --healthcheck '*) sleep 30; exit 0 ;;
-esac
-exit 1
-EOF
-chmod +x "$slow_intercept"
-if (
-    INTERCEPT_BIN="$slow_intercept"
-    INTERCEPT_DIR="$(dirname "$slow_intercept")"
-    SERVICE_READY_TIMEOUT=1
-    INTERCEPT_HEALTHCHECK_MAX_TIMEOUT=1
-    systemctl() { return 0; }
-    started=$SECONDS
-    ! wait_service_ready 5gpn-intercept >/dev/null 2>&1
-    (( SECONDS - started <= 3 ))
-); then
-    pass "silent sidecar readiness respects the total wall-clock budget"
-else
-    fail "silent sidecar readiness exceeded the total wall-clock budget"
-fi
-rm -f -- "$slow_intercept"
 
 echo "----"
 if [[ "$FAIL" == 0 ]]; then

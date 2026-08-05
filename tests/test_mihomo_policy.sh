@@ -21,11 +21,11 @@ check install.sh 'MIHOMO_VERSION' 'mihomo version pin knob'
 nocheck install.sh 'install_xray\(\)' 'install_xray removed'
 
 # Task 2: mihomo unit
-check etc/systemd/mihomo.service 'ExecStart=/opt/5gpn/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' 'project-private mihomo ExecStart'
-check etc/systemd/mihomo.service 'RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX' 'mihomo AF set incl AF_NETLINK (required for QUIC/UDP DIRECT dial)'
-check etc/systemd/mihomo.service 'ReadWritePaths=/etc/5gpn/mihomo' 'mihomo writes provider caches'
-check etc/systemd/mihomo.service 'Environment=SAFE_PATHS=/etc/5gpn/cert/console' 'mihomo SAFE_PATHS scoped to the controller cert role'
-check install.sh 'mihomo\.service' 'install_units installs mihomo.service'
+check etc/systemd/5gpn-mihomo.service 'ExecStart=/opt/5gpn/bin/5gpn-mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' 'project-private 5gpn-mihomo ExecStart'
+check etc/systemd/5gpn-mihomo.service 'RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX' 'mihomo AF set incl AF_NETLINK (required for QUIC/UDP DIRECT dial)'
+check etc/systemd/5gpn-mihomo.service 'ReadWritePaths=/etc/5gpn/mihomo' 'mihomo writes provider caches'
+check etc/systemd/5gpn-mihomo.service 'Environment=SAFE_PATHS=/etc/5gpn/cert/console' 'mihomo SAFE_PATHS scoped to the controller cert role'
+check install.sh '5gpn-mihomo\.service' 'install_units installs 5gpn-mihomo.service'
 
 # Task 3: mihomo config template shape
 T=etc/mihomo/config.yaml.tmpl
@@ -147,15 +147,13 @@ fi
 # install.sh is its only renderer. If a Go-side copy reappears anywhere, the
 # two will drift and a mihomo-reset will produce a config the installer never
 # validated.
-if [ -e "$root/cmd" ]; then
-    echo 'FAIL: a cmd/ tree came back; the seed template may have a second copy again'
+if git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+   && git -C "$root" ls-files 'cmd/**' | grep -q .; then
+    echo 'FAIL: a tracked cmd/ tree came back; the seed template may have a second copy again'
     FAIL=1
 else
     echo 'ok: the seed template has exactly one copy, rendered only by install.sh'
 fi
-nocheck cmd/5gpn-dns/policy_compile.go 'RULE-SET'                   'policy_compile.go no longer renders mihomo RULE-SET lines (DNS-only compiler)'
-nocheck cmd/5gpn-dns/policy_compile.go 'type: file, behavior: domain' 'policy_compile.go no longer renders mihomo rule-provider stanzas'
-
 check install.sh 'render_mihomo_config'                'installer renders config'
 nocheck install.sh 'apply_.*_to_xray'                  'xray patchers removed'
 
@@ -194,7 +192,7 @@ check install.sh 'set_cf_token' 'TUI op to set CF token'
 
 # Task 10: lifecycle/management surface uses mihomo + transactional configure.
 check install.sh 'configure\)' 'single transactional configure op'
-check install.sh 'systemctl enable mihomo' 'lifecycle drives the one unit (enable/restart)'
+check install.sh 'systemctl enable 5gpn-mihomo' 'lifecycle drives the one 5gpn-mihomo unit'
 nocheck install.sh 'for svc in .*xray' 'start/status service loop no longer includes xray'
 nocheck install.sh 'systemctl restart xray' 'restart_services no longer restarts xray'
 nocheck install.sh 'xray\.service|/usr/local/bin/xray' 'no old Xray teardown remains'
@@ -228,12 +226,12 @@ nocheck install.sh 'rm -rf "\$UI_DIR"' 'no raw recursive deletion of UI_DIR'
 # mihomo process changed one of them and produced a tree the other rejected.
 check install.sh '^cert_role_group\(\)' 'certificate role ownership has one definition'
 nocheck install.sh 'dot\|web\) group=' 'no second role->account mapping remains'
-# Every `mihomo -t` the installer runs must see the SAFE_PATHS the unit grants.
+# Every `5gpn-mihomo -t` the installer runs must see the SAFE_PATHS the unit grants.
 # The seed names paths outside its own home -- the certificates and the UI
 # bundle -- so a -t without them rejects a config the running service accepts,
 # and a fresh install fails its own preflight on a correct config.
 installer_safe="$(sed -n 's/^MIHOMO_SAFE_PATHS="\(.*\)"$/\1/p' "$root/install.sh")"
-unit_safe="$(sed -n 's/^Environment=SAFE_PATHS=\(.*\)$/\1/p' "$root/etc/systemd/mihomo.service" | tr -d '\r')"
+unit_safe="$(sed -n 's/^Environment=SAFE_PATHS=\(.*\)$/\1/p' "$root/etc/systemd/5gpn-mihomo.service" | tr -d '\r')"
 if [[ -n "$installer_safe" && "$installer_safe" == "$unit_safe" ]]; then
     echo "ok: installer and unit agree on SAFE_PATHS"
 else
@@ -242,9 +240,9 @@ fi
 untested_t="$(grep -c '^[^#]*[^_]-t -f' "$root/install.sh" || true)"
 guarded_t="$(grep -c 'SAFE_PATHS="\$MIHOMO_SAFE_PATHS"' "$root/install.sh" || true)"
 if [[ "$untested_t" -gt 0 && "$guarded_t" -ge "$untested_t" ]]; then
-    echo "ok: every mihomo -t carries the unit SAFE_PATHS"
+    echo "ok: every 5gpn-mihomo -t carries the unit SAFE_PATHS"
 else
-    echo "FAIL: a mihomo -t runs without SAFE_PATHS ($guarded_t guarded of $untested_t)"; FAIL=1
+    echo "FAIL: a 5gpn-mihomo -t runs without SAFE_PATHS ($guarded_t guarded of $untested_t)"; FAIL=1
 fi
 # The retired console origin must not come back with its own directory or listener.
 nocheck install.sh 'install_web\(\)|DNS_WEB_DIR=|DNS_ZASH_LISTEN=' 'no second origin is published'

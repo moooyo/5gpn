@@ -36,8 +36,7 @@ CERT_ROOT_MARKER=.5gpn-cert-root-owned
 CERT_ROOT_MARKER_VALUE=5gpn-cert-root-v1
 CERT_ROLE_MARKER=.5gpn-cert-role-owned
 CERT_ROLE_VALUE_PREFIX=5gpn-cert-role-v1
-DNS_CERT_GROUP=5gpn-dns
-MIHOMO_CERT_GROUP=mihomo
+FIVEGPN_CERT_GROUP=fivegpn
 
 BASE_DOMAIN=""
 CERT_MODE=""
@@ -77,7 +76,7 @@ acquire_deploy_lock() {
     # invoking Certbot. Their root-only internal marker avoids recursively
     # locking from the Certbot child hook. A distro-wide Certbot invocation has
     # no marker and must serialize its role publication here.
-    [[ "${GPN_CERT_LOCK_HELD:-0}" == 1 ]] && return 0
+    [[ "${FIVEGPN_CERT_LOCK_HELD:-0}" == 1 ]] && return 0
     command -v flock >/dev/null 2>&1 \
         || { err "flock is required for certificate deployment exclusion."; return 1; }
     lock_dir="$(dirname -- "$RENEW_LOCK_FILE")"
@@ -178,8 +177,12 @@ cleanup_staged() {
 }
 
 role_group() {
-    local role="$1" group="$DNS_CERT_GROUP"
-    [[ "$role" == console ]] && group="$MIHOMO_CERT_GROUP"
+    local role="$1" group
+    case "$role" in
+        dot|console) group="$FIVEGPN_CERT_GROUP" ;;
+        web)         group=root ;;
+        *)           return 1 ;;
+    esac
     if getent group "$group" >/dev/null 2>&1; then
         printf '%s\n' "$group"
     elif [[ "$CERT_ROOT" != /etc/5gpn/cert ]]; then
@@ -235,15 +238,14 @@ safe_marker() {
 }
 
 cert_root_is_safe() {
-    local config_root root_group config_group entry name
+    local config_root root_group entry name
     config_root="$(dirname -- "$CERT_ROOT")"
     [[ "$(basename -- "$CERT_ROOT")" == cert ]] || return 1
     root_group="$(root_gid)" || return 1
-    config_group="$(group_gid "$DNS_CERT_GROUP")" || return 1
     canonical_directory "$config_root" \
         && [[ "$(path_uid "$config_root")" == "$EUID" \
-           && "$(path_gid "$config_root")" == "$config_group" \
-           && "$(path_mode "$config_root")" == 3771 ]] \
+           && "$(path_gid "$config_root")" == "$root_group" \
+           && "$(path_mode "$config_root")" == 755 ]] \
         && safe_marker "$config_root" "$CONFIG_ROOT_MARKER" "$CONFIG_ROOT_MARKER_VALUE" \
         || return 1
     canonical_directory "$CERT_ROOT" \

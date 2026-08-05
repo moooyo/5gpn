@@ -1,23 +1,23 @@
-# 5gpn-unit-id: mihomo.service:v3
+# 5gpn-unit-id: 5gpn-mihomo.service:v1
 [Unit]
 Description=5gpn (DNS engine, interception engine, forwarding data plane, control API)
-After=network-online.target
-Wants=network-online.target
+After=network-online.target 5gpn-intercept-cert.path
+Wants=network-online.target 5gpn-intercept-cert.path
 StartLimitIntervalSec=60
 StartLimitBurst=10
 StartLimitAction=none
 
 [Service]
 Type=simple
-ExecStart=/opt/5gpn/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo
+ExecStart=/opt/5gpn/bin/5gpn-mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo
 # mihomo is the complete gateway runtime. Any unexpected exit, including a
 # clean return after a fatal listener ends, must replace the whole process from
 # its atomically persisted state. A deliberate `systemctl stop` is not restarted
 # by systemd even with Restart=always.
 Restart=always
 RestartSec=3
-User=mihomo
-Group=mihomo
+User=fivegpn
+Group=fivegpn
 UMask=0027
 
 # One process now, so this unit carries the union of what three used to. What
@@ -25,11 +25,6 @@ UMask=0027
 # generation sockets are gone, and with them the runtime directory that held
 # them and the two groups whose only purpose was handing a socket from one
 # service user to another. There is no second process left to agree with.
-
-# The interception leaf is published by the root oneshot that owns the CA, and
-# this group is how it is read. Membership grants nothing else — the group owns
-# the leaf and nothing besides.
-SupplementaryGroups=gpn-intercept
 
 LimitNOFILE=65535
 
@@ -64,7 +59,7 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
 # rather than by relaxing the check.
 Environment=SAFE_PATHS=/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui
 
-# Writable: mihomo's own directory, which now also holds the gpn/ state
+# Writable: mihomo's own directory, which now also holds the 5gpn/ state
 # documents, and the per-extension persistent storage.
 ReadWritePaths=/etc/5gpn/mihomo /var/lib/5gpn-intercept
 

@@ -17,7 +17,9 @@ Update the status and the normative documentation when an implementation lands.
   rejected writes fail only their current operation. A critical DNS listener
   ending, an escaped panic, or another unrecoverable runtime invariant exits the
   process rather than leaving a partially live gateway.
-- systemd owns process replacement. The shipped unit uses `Restart=always`,
+- systemd owns process replacement. The shipped `5gpn-mihomo.service` unit
+  runs `/opt/5gpn/bin/5gpn-mihomo` as the sole managed `fivegpn` user and group,
+  and uses `Restart=always`,
   `RestartSec=3`, `StartLimitIntervalSec=60`, `StartLimitBurst=10`, and
   `StartLimitAction=none`. An
   explicit `systemctl stop` remains stopped.
@@ -26,6 +28,13 @@ Update the status and the normative documentation when an implementation lands.
   remains alive without making progress requires an independent external DoT
   and HTTPS pull probe. The persisted `DNS_HEARTBEAT_*` fields are currently
   inert and are not evidence of health.
+- The installed runtime naming is uniformly 5gpn-prefixed. Documents live in
+  `/etc/5gpn/mihomo/5gpn`, and authenticated routes use `/5gpn/*`. Exact old
+  names are migration inputs only. The installer atomically renames old-only
+  state, refuses two populated state trees, and removes safe idle legacy
+  identities only with project provenance. The current `fivegpn` identity is
+  installer-owned and is recreated non-interactively when its exclusive IDs
+  are safe to retain; aliased IDs fail closed.
 
 ## Native interception extensions
 
@@ -65,7 +74,7 @@ contract and explicit HTTP/3 refusal on 2026-08-05.**
 - Plugin engine observability is memory-only. The mihomo process retains a
   bounded 1000-entry ring of structured script-console and action lifecycle
   events and exposes snapshots only through the authenticated
-  `/gpn/interception/logs` controller route. Script console text and detailed
+  `/5gpn/interception/logs` controller route. Script console text and detailed
   action errors are not persisted to journald or another file. The Console owns
   the virtualized `/plugin-logs` view, local filters, pause snapshot, and clear
   watermark.
@@ -239,7 +248,7 @@ stable-to-beta upgrade contract on 2026-07-21.**
   explicit checked migration: legacy anchors and the old interception inbound
   are removed from a candidate, panel rules are rewritten to exclude `INNER`,
   the fixed UDP/443 guard is present, and the candidate passes pinned
-  `mihomo -t` before atomic publication.
+  `5gpn-mihomo -t` before atomic publication.
 - The installer still accepts only the one current `dns.env` key schema. The
   retired `DNS_EGRESS_RESOLVER` key is not ignored or migrated. Every pre-v5
   deployment, including `0.0.19`, `test-env`, and `kfchost`, must first use its
@@ -255,7 +264,7 @@ stable-to-beta upgrade contract on 2026-07-21.**
 - `--beta upgrade-reset-mihomo` is the only installer upgrade mode authorized to
   replace the full operator mihomo config. It requires an existing installation,
   a pinned beta bundle, and an interactive TTY confirmation. It must back up the
-  old bytes, validate the complete current seed with pinned `mihomo -t`, publish
+  old bytes, validate the complete current seed with pinned `5gpn-mihomo -t`, publish
   atomically inside the install transaction, and state that custom proxies,
   providers, groups, and rules require manual restoration. Normal install,
   reinstall, and `configure` never choose this reset.

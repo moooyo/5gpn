@@ -62,7 +62,7 @@ DNS 策略是一个全局有序、first-match 的规则列表：
 
 上表描述成功的 A 答案。采纳或改写上游 response 时，5gpn 会保留其 Rcode 与 authority；`NXDOMAIN` 和 `SERVFAIL` 不会被改成 `NOERROR`。
 
-`auto` queries the China and trust upstream groups concurrently. Members within each group are attempted sequentially in configured order with fair slices of the remaining deadline. Fresh installations seed `223.5.5.5:53` and `22.22.22.22:53` into `/etc/5gpn/mihomo/gpn/dns.json`, the atomic source of truth for DNS policy and upstreams, after which the Console can hot-apply a revision-protected whole-document update. A member declares its transport by spec form: bare `IP[:port]` is UDP, `serverName@IP[:port]` is DoT, and `https://host/path@IP[:port]` is DoH. AAAA, HTTPS, and SVCB remain behind the documented IPv4-only NODATA boundary.
+`auto` queries the China and trust upstream groups concurrently. Members within each group are attempted sequentially in configured order with fair slices of the remaining deadline. Fresh installations seed `223.5.5.5:53` and `22.22.22.22:53` into `/etc/5gpn/mihomo/5gpn/dns.json`, the atomic source of truth for DNS policy and upstreams, after which the Console can hot-apply a revision-protected whole-document update. A member declares its transport by spec form: bare `IP[:port]` is UDP, `serverName@IP[:port]` is DoT, and `https://host/path@IP[:port]` is DoH. AAAA, HTTPS, and SVCB remain behind the documented IPv4-only NODATA boundary.
 
 AAAA 的 NODATA 不只针对客户端。mihomo 嗅探出主机名之后，会在 `127.0.0.1:5354` 这个回源解析器上重新解析 origin，那里同样在查询任何上游之前就返回合成 NODATA。这一条是网关保持 IPv4-only 出口的实际保证：mihomo 对每个 origin 都会无条件发出 AAAA 查询，它的 `dns.ipv6` 并不能抑制该查询，只有顶层 `ipv6` 可以，而 `/etc/5gpn/mihomo/config.yaml` 完全归运维者所有，无法假定其中存在某个 seed 值。若放行 AAAA，mihomo 会拿到 origin 的真实 IPv6 并与 IPv4 竞速；IPv6 一侧一旦完成 TCP 握手，双栈回退就不会再触发，而拒绝或错误定位机房 IPv6 段的目标站会在应用层失败，此时已无任何可回退的余地。返回 NODATA 后 mihomo 只剩 IPv4 候选。代价是明确接受的：只发布 AAAA 的 origin（或以主机名配置的运维者节点）无法经网关访问 —— 在 IPv4-only 数据面上，即使拿到 IPv6 答案也同样拨不通。新装或显式 reset 的 mihomo seed 另外写入 `ipv6: false` 作为纵深防御。
 
@@ -157,9 +157,16 @@ sudo 5gpn status
 最小服务与配置验证：
 
 ```bash
-sudo systemctl is-active mihomo
-sudo /opt/5gpn/bin/mihomo -t -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo
+sudo systemctl is-active 5gpn-mihomo
+sudo /opt/5gpn/bin/5gpn-mihomo -t -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo
 ```
+
+The installer owns one Unix service identity, `fivegpn:fivegpn`. DNS,
+interception, Telegram, and forwarding all run inside `5gpn-mihomo.service`;
+there are no separate `gpn-dns`, `gpn-intercept`, or unprefixed `mihomo`
+service accounts. All external product names remain `5gpn`; this spelled-out
+identity is the only exception because portable Linux/POSIX account names
+cannot begin with a digit.
 
 ### Process recovery
 
@@ -174,7 +181,7 @@ connections are lost during a successful restart.
 
 This is process recovery, not self-healing: a persistent bad configuration,
 port conflict, or broken certificate remains an operator-visible failure. A
-deliberate `systemctl stop mihomo` stays stopped. Use an independent external
+deliberate `systemctl stop 5gpn-mihomo` stays stopped. Use an independent external
 monitor that actively probes DoT and HTTPS; the persisted `DNS_HEARTBEAT_*`
 fields are not consumed by the monolith and provide no health signal.
 DNS listener and certificate-path fields are installation-owned; controller
@@ -192,7 +199,7 @@ dig @127.0.0.1 -p 5353 example.com A
 
 Replace the example domain and address with actual values; skip the first DNS command when an older `dig` lacks `+tls`. Public plain DNS `:53` and remote access to `:5353` must fail. There is no `5gpn-dns` or `5gpn-intercept` service in the monolith. See [tests/integration-smoke.md](tests/integration-smoke.md) for the complete real-host checklist, and run it only on a disposable or explicitly designated Linux gateway.
 
-Open `https://console.<base>/ui/`. The panel and two iOS profiles are public, while `/gpn/*` and the ordinary controller routes require mihomo's controller secret. On first open, enter that secret in zashboard. To recover it on the host:
+Open `https://console.<base>/ui/`. The panel and two iOS profiles are public, while `/5gpn/*` and the ordinary controller routes require mihomo's controller secret. On first open, enter that secret in zashboard. To recover it on the host:
 
 ```bash
 sudo sed -n 's/^DNS_MIHOMO_SECRET=//p' /etc/5gpn/dns.env
@@ -218,15 +225,15 @@ operations.
 | --- | --- |
 | `/etc/5gpn/dns.env` | 安装身份与 daemon knobs 的持久 source of truth |
 | `/etc/5gpn/mihomo/config.yaml` | 运维者完整拥有的 mihomo 配置 |
-| `/etc/5gpn/mihomo/gpn/dns.json` | Ordered DNS policy, upstreams, subscriptions, and resolver settings |
-| `/etc/5gpn/mihomo/gpn/intercept.json` | Interception master, fixed-false HTTP/3 marker, catalogs, and extension snapshots |
-| `/etc/5gpn/mihomo/gpn/bot.json` | Telegram switch, token, administrators, and alerts |
+| `/etc/5gpn/mihomo/5gpn/dns.json` | Ordered DNS policy, upstreams, subscriptions, and resolver settings |
+| `/etc/5gpn/mihomo/5gpn/intercept.json` | Interception master, fixed-false HTTP/3 marker, catalogs, and extension snapshots |
+| `/etc/5gpn/mihomo/5gpn/bot.json` | Telegram switch, token, administrators, and alerts |
 
-普通 install、reinstall 和 `configure` 会先用 `mihomo -t` 验证已有配置，再逐字节保留它。只有显式 `mihomo-reset` 或 TTY 确认的 `upgrade-reset-mihomo` 能在备份、完整校验和原子 rename 后替换它。`configure` 若发现新域名、gateway 或 listener 与现有 operator-owned YAML 不兼容，会在写入前中止，而不是暗中修改数据面。
+普通 install、reinstall 和 `configure` 会先用 `5gpn-mihomo -t` 验证已有配置，再逐字节保留它。只有显式 `mihomo-reset` 或 TTY 确认的 `upgrade-reset-mihomo` 能在备份、完整校验和原子 rename 后替换它。`configure` 若发现新域名、gateway 或 listener 与现有 operator-owned YAML 不兼容，会在写入前中止，而不是暗中修改数据面。
 
 fresh/reset seed 的 `Proxies` 组初始只有 `DIRECT`；5gpn 不附带代理节点。直接执行 `sudo 5gpn mihomo-reset` 会显示替换警告，但不会再次要求确认，运行前必须准备好从备份恢复自定义 proxies、providers、groups 和 rules 的方案。
 
-Console writes hot-apply the revisioned mihomo `gpn` documents. Deployment values in `dns.env` change only through a validated installer run; certificates hot-reload when their files change.
+Console writes hot-apply the revisioned mihomo `5gpn` documents. Deployment values in `dns.env` change only through a validated installer run; certificates hot-reload when their files change.
 
 ## 常用命令
 
@@ -266,7 +273,7 @@ Only the root-owned certificate publisher can read the private CA signing key; m
 ## 升级与发布通道
 
 - 默认 quick installer 只安装最新正式版；`--beta` 是显式、单次的 beta opt-in，不会写入 `dns.env`。
-- A normal channel transition uses one complete verified installer bundle and preserves a valid current operator-owned mihomo YAML byte for byte. Moving from the retired multi-process design to the monolith is a separate checked migration: it removes only the retired anchors and inbound from a candidate, rewrites the management-plane exclusion to `INNER`, requires the fixed UDP/443 guard, and publishes only after pinned `mihomo -t` succeeds.
+- A normal channel transition uses one complete verified installer bundle and preserves a valid current operator-owned mihomo YAML byte for byte. Moving from the retired multi-process design to the monolith is a separate checked migration: it removes only the retired anchors and inbound from a candidate, rewrites the management-plane exclusion to `INNER`, requires the fixed UDP/443 guard, and publishes only after pinned `5gpn-mihomo -t` succeeds.
 - `upgrade-reset-mihomo` 会替换完整 YAML；自定义 proxies、providers、groups 和 rules 不会自动合并，只能从备份手工恢复。
 - A successful beta upgrade does not guarantee that an in-place downgrade to the stable release channel is supported. Keep a system snapshot before upgrading when reversal is required. The installer does not claim whole-system rollback after publication begins.
 - 所有仍使用 interception config schema v4 的 pre-v5 部署都需要先做显式、可恢复的 lockstep rebuild；不要删除旧 interception 文件或只改 schema version。请严格执行 [pre-v5 rebuild runbook](docs/pre-v5-upgrade.md)。
@@ -276,7 +283,7 @@ Only the root-owned certificate publisher can read the private CA signing key; m
 - 名称级 encrypted-DNS blocking 无法阻止使用硬编码 resolver IP 且能绕过网关的客户端。5gpn 不声称提供网络层强制执行。
 - Steering 依赖 DNS 和可见 hostname。任意端口、通用 raw UDP、没有可用 Host/SNI 的流量、由应用内预置 ECH 隐藏的 inner name，以及绕过 5gpn DNS 的连接不受支持。
 - The fixed global UDP/443 guard rejects only traffic that reaches the gateway. It is immutable through product management, does not manage a firewall, and does not affect ordinary UDP or QUIC sniffing on other configured ports such as `:5060`.
-- Console SPA assets and profiles under `/ui/*` are public. `/gpn/*` and the ordinary controller routes require mihomo's controller secret; there is no second panel origin, source allowlist, handoff session, or Console bearer.
+- Console SPA assets and profiles under `/ui/*` are public. `/5gpn/*` and the ordinary controller routes require mihomo's controller secret; there is no second panel origin, source allowlist, handoff session, or Console bearer.
 - 扩展 root CA 的信任范围覆盖整个扩展子系统，但实际解密仍受启用的 capture hosts 限制。普通 uninstall 和 purge 为已注册设备保留该 CA；只有 explicit decommission 才尝试删除所有权可证明的 CA 与公共 lineage。
 - 5gpn 不修改 nftables 或任何宿主防火墙。公共入口、特别是 `:5060`，必须由运维者限制到预期客户端。
 

@@ -2,11 +2,9 @@
 # What the installer still owes the resolver: dns.env, and the things that must
 # not come back into it.
 #
-# The file keeps its name because that is what it grew from -- the policy suite
-# for a daemon called 5gpn-dns -- but the daemon, its unit, its Go source, its
-# API routes and its bot are all gone, and with them roughly two thirds of what
-# was here. Those assertions were not weakened, they moved: the resolver's own
-# behaviour is tested in gpn/dns in the fork, where the code is.
+# The former DNS sidecar, its unit, its Go source, its API routes, and its bot
+# are gone. The resolver's own behavior is tested in 5gpn/dns in the fork;
+# this suite holds the installer-owned configuration contract.
 #
 # What is left is the half that was always about this repository. dns.env is
 # the resolver's entire configuration surface and install.sh is its only
@@ -59,7 +57,7 @@ grep -Eq '(^|[[:space:]])nft([[:space:]]|$)' "$INSTALL" && fail "install.sh: mus
 # --- install.sh: stages etc/systemd into the installed tree (install_units
 # falls back to it on a piped curl|bash install with no checkout) ---
 grep -Fq '${BASE_DIR}/etc/systemd' "$INSTALL" || fail "install.sh: install_files does not stage etc/systemd into /opt/5gpn"
-grep -Fq 'mihomo.service' "$INSTALL" || fail "install.sh: install_units does not install mihomo.service"
+grep -Fq '5gpn-mihomo.service' "$INSTALL" || fail "install.sh: install_units does not install 5gpn-mihomo.service"
 grep -Fq '${BASE_DIR}/etc/mihomo' "$INSTALL" || fail "install.sh: installed management runtime has no mihomo asset directory"
 grep -Fq 'for asset in config.yaml.tmpl; do' "$INSTALL" \
     || fail "install.sh: installed management runtime does not retain every mihomo reset asset"
@@ -83,7 +81,7 @@ grep -Fq 'DNS_API_TOKEN="$(openssl rand' "$INSTALL" \
 grep -Fq 'persist_mihomo_secret "$secret"' "$INSTALL" \
     || fail "install.sh: does not preserve the controller secret across re-install"
 
-grep -Fq 'DNS_EGRESS_BROKER=127.0.0.1:5354' "$ROOT/etc/5gpn-dns/dns.env.example" \
+grep -Fq 'DNS_EGRESS_BROKER=127.0.0.1:5354' "$ROOT/etc/5gpn/dns.env.example" \
     || fail "dns.env.example: DNS_EGRESS_BROKER not documented with default 127.0.0.1:5354"
 
 INSTALL_SH="$ROOT/install.sh"
@@ -122,5 +120,5 @@ grep -Fq 'blacklist' "$INSTALL" && fail "install.sh: removed blacklist category 
 
 true  # ensure the block's last command never sets rc via a && short-circuit
 
-[ $rc -eq 0 ] && echo "5gpn-dns policy: PASS"
+[ $rc -eq 0 ] && echo "5gpn installer policy: PASS"
 exit $rc

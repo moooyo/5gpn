@@ -75,8 +75,8 @@ for _ in $(seq 1 100); do
 done
 [[ -n "$dns_base" ]] || { echo "could not allocate isolated DNS listener ports" >&2; exit 1; }
 
-mkdir -p "$RUNTIME/gpn"
-cat > "$RUNTIME/gpn/dns.json" <<EOF
+mkdir -p "$RUNTIME/5gpn"
+cat > "$RUNTIME/5gpn/dns.json" <<EOF
 {
   "listen": {
     "dot": "127.0.0.1:${dns_base}",

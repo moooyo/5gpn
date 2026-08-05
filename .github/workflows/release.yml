@@ -88,10 +88,10 @@ jobs:
 
       # No toolchain is set up here any more. This repository builds nothing:
       # the daemon and the control-console SPA it used to compile were deleted
-      # with the three-process layout, and the two binaries a gateway now runs --
-      # the monolith core and the zashboard bundle -- are released from their own
-      # repositories under their own digest pins. What ships from here is the
-      # installer bundle and the digest that binds it.
+      # with the three-process layout. The sole long-running executable and the
+      # static zashboard bundle are released from their own repositories under
+      # their own digest pins. What ships from here is the installer bundle and
+      # the digest that binds it.
 
       # The bundle contains every first-party installer input and is stamped to
       # this exact tag. The quick installer never falls back to branch content.

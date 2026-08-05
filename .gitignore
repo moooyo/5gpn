@@ -11,9 +11,7 @@ __pycache__/
 *.tmp
 *.log
 
-# Go build outputs (5gpn-dns is built in CI / cross-compiled; never commit binaries)
-/cmd/5gpn-dns/5gpn-dns
-/cmd/5gpn-dns/5gpn-dns.exe
+# Local executable outputs
 *.exe
 
 # Local build/staging scratch (cross-compiled binary + web tarballs for test-env deploys)
@@ -32,8 +30,5 @@ __pycache__/
 # Scratch probes written by exploratory tooling; never part of the tree.
 zz_*_test.go
 *_probe_test.go
-plugin-sidecar/5gpn-intercept
-cmd/5gpn-dns/5gpn-dns
-*.exe
 /web/dist.tar.gz
 /web/e2e/live/out/

@@ -17,10 +17,10 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
 rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
-SVC="$ROOT/etc/systemd/mihomo.service"
+SVC="$ROOT/etc/systemd/5gpn-mihomo.service"
 CERT_SVC="$ROOT/etc/systemd/5gpn-intercept-cert.service"
 INSTALL="$ROOT/install.sh"
-DNS_ENV_EXAMPLE="$ROOT/etc/5gpn-dns/dns.env.example"
+DNS_ENV_EXAMPLE="$ROOT/etc/5gpn/dns.env.example"
 
 unit_has_unique_directive_in_section() {
     local section="$1" key="$2" expected="$3" file="$4"
@@ -35,30 +35,33 @@ unit_has_unique_directive_in_section() {
 }
 
 # --- the one long-running unit -------------------------------------------
-grep -Fq 'NoNewPrivileges=yes' "$SVC" || fail "mihomo.service: no NoNewPrivileges"
-grep -Fxq 'User=mihomo' "$SVC" || fail "mihomo.service must run as its dedicated user"
-grep -Fq 'ProtectSystem=strict' "$SVC" || fail "mihomo.service: no ProtectSystem=strict"
-grep -Fxq 'PrivateDevices=yes' "$SVC" || fail "mihomo.service does not isolate devices"
-grep -Fxq 'ProtectHome=yes' "$SVC" || fail "mihomo.service does not isolate home directories"
-grep -Fxq 'ProtectProc=invisible' "$SVC" || fail "mihomo.service can enumerate other processes"
-grep -Fxq 'RestrictSUIDSGID=yes' "$SVC" || fail "mihomo.service can create setuid files"
-grep -Fq 'ExecStart=/opt/5gpn/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' "$SVC" \
-    || fail "mihomo.service: unexpected ExecStart"
+grep -Fq 'NoNewPrivileges=yes' "$SVC" || fail "5gpn-mihomo.service: no NoNewPrivileges"
+grep -Fxq 'User=fivegpn' "$SVC" || fail "5gpn-mihomo.service must run as fivegpn"
+grep -Fxq 'Group=fivegpn' "$SVC" || fail "5gpn-mihomo.service must use the fivegpn primary group"
+grep -Fq 'ProtectSystem=strict' "$SVC" || fail "5gpn-mihomo.service: no ProtectSystem=strict"
+grep -Fxq 'PrivateDevices=yes' "$SVC" || fail "5gpn-mihomo.service does not isolate devices"
+grep -Fxq 'ProtectHome=yes' "$SVC" || fail "5gpn-mihomo.service does not isolate home directories"
+grep -Fxq 'ProtectProc=invisible' "$SVC" || fail "5gpn-mihomo.service can enumerate other processes"
+grep -Fxq 'RestrictSUIDSGID=yes' "$SVC" || fail "5gpn-mihomo.service can create setuid files"
+grep -Fq 'ExecStart=/opt/5gpn/bin/5gpn-mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' "$SVC" \
+    || fail "5gpn-mihomo.service: unexpected ExecStart"
+grep -Eq '^RuntimeDirectory=' "$SVC" \
+    && fail "5gpn-mihomo.service must not own the root certificate-lock directory"
 
 # The monolith is one failure domain. Fatal runtime failures replace the whole
 # process from its persisted state; a bounded start rate prevents a persistent
 # configuration or host error from spinning without limit. systemd deliberately
 # suppresses Restart=always after an explicit stop operation.
 unit_has_unique_directive_in_section Service Restart 'Restart=always' "$SVC" \
-    || fail "mihomo.service must always restart after an unexpected exit"
+    || fail "5gpn-mihomo.service must always restart after an unexpected exit"
 unit_has_unique_directive_in_section Service RestartSec 'RestartSec=3' "$SVC" \
-    || fail "mihomo.service restart delay must be exactly three seconds"
+    || fail "5gpn-mihomo.service restart delay must be exactly three seconds"
 unit_has_unique_directive_in_section Unit StartLimitIntervalSec 'StartLimitIntervalSec=60' "$SVC" \
-    || fail "mihomo.service start-limit interval must be 60 seconds in [Unit]"
+    || fail "5gpn-mihomo.service start-limit interval must be 60 seconds in [Unit]"
 unit_has_unique_directive_in_section Unit StartLimitBurst 'StartLimitBurst=10' "$SVC" \
-    || fail "mihomo.service start-limit burst must be 10 in [Unit]"
+    || fail "5gpn-mihomo.service start-limit burst must be 10 in [Unit]"
 unit_has_unique_directive_in_section Unit StartLimitAction 'StartLimitAction=none' "$SVC" \
-    || fail "mihomo.service start-limit action must never reboot or power off the host"
+    || fail "5gpn-mihomo.service start-limit action must never reboot or power off the host"
 grep -Fq 'The monolith does not read these fields or send a push heartbeat.' "$DNS_ENV_EXAMPLE" \
     || fail "dns.env.example claims the inert heartbeat fields are a live monitor"
 grep -Eq 'daemon GETs this URL|dead-man.s switch' "$DNS_ENV_EXAMPLE" \
@@ -67,48 +70,53 @@ grep -Eq 'daemon GETs this URL|dead-man.s switch' "$DNS_ENV_EXAMPLE" \
 # Binding :853 and the operator's gateway ports is the whole reason a capability
 # is needed at all; anything wider is not.
 grep -Fxq 'CapabilityBoundingSet=CAP_NET_BIND_SERVICE' "$SVC" \
-    || fail "mihomo.service capability bounding set is broader than low-port bind"
+    || fail "5gpn-mihomo.service capability bounding set is broader than low-port bind"
 grep -Fxq 'AmbientCapabilities=CAP_NET_BIND_SERVICE' "$SVC" \
-    || fail "mihomo.service lacks the low-port bind ambient capability"
+    || fail "5gpn-mihomo.service lacks the low-port bind ambient capability"
 
 # AF_NETLINK is required and not decorative: the UDP/QUIC DIRECT dial path does
 # a route-table lookup that fatals the forward without it, while TCP is
 # unaffected — so removing it presents as "QUIC is broken", not as a sandbox
 # problem.
 grep -Fxq 'RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX' "$SVC" \
-    || fail "mihomo.service: address families must be AF_INET AF_INET6 AF_NETLINK AF_UNIX (AF_NETLINK is required for the QUIC/UDP forward)"
+    || fail "5gpn-mihomo.service: address families must be AF_INET AF_INET6 AF_NETLINK AF_UNIX (AF_NETLINK is required for the QUIC/UDP forward)"
 
 # The state documents live under mihomo's own directory, and per-extension
 # storage is the only other thing this process writes.
 grep -Fq 'ReadWritePaths=/etc/5gpn/mihomo /var/lib/5gpn-intercept' "$SVC" \
-    || fail "mihomo.service write scope is not exactly its own directory and extension storage"
+    || fail "5gpn-mihomo.service write scope is not exactly its own directory and extension storage"
 
 # The signing key can mint a leaf for any name. An engine that could read it
 # would be a compromise of every identity this gateway can present, permanently
 # and far beyond the SAN set the published leaf bounds it to.
 grep -Fq -- '-/etc/5gpn/intercept-ca' "$SVC" \
-    || fail "mihomo.service must not be able to read the interception CA signing key"
+    || fail "5gpn-mihomo.service must not be able to read the interception CA signing key"
 grep -Fq 'InaccessiblePaths=-/etc/5gpn/intercept-ca -/etc/5gpn/acme' "$SVC" \
-    || fail "mihomo.service must not read the ACME credentials"
+    || fail "5gpn-mihomo.service must not read the ACME credentials"
 grep -Fq -- '-/etc/5gpn/dns.env' "$SVC" \
-    || fail "mihomo.service must not read installer-owned secrets"
+    || fail "5gpn-mihomo.service must not read installer-owned secrets"
 
 # Certificates are read-only. A network-facing process able to replace its own
 # leaf could replace the SAN set that bounds what it may intercept.
 grep -Fq 'ReadOnlyPaths=/etc/5gpn/cert /etc/5gpn/intercept/tls /opt/5gpn/ui' "$SVC" \
-    || fail "mihomo.service can write the certificates or the UI bundle it serves"
+    || fail "5gpn-mihomo.service can write the certificates or the UI bundle it serves"
 grep -Fq 'Environment=SAFE_PATHS=/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui' "$SVC" \
-    || fail "mihomo.service SAFE_PATHS must name exactly the paths it serves from outside its own directory"
+    || fail "5gpn-mihomo.service SAFE_PATHS must name exactly the paths it serves from outside its own directory"
 
-# The leaf is published by the root oneshot and read through this group. It must
-# be the only supplementary group: the two overlay socket groups existed to hand
-# a socket between service users and have no remaining purpose.
-grep -Fxq 'SupplementaryGroups=gpn-intercept' "$SVC" \
-    || fail "mihomo.service must hold exactly the leaf-reading group"
+# The leaf and runtime share the fivegpn primary group. No supplementary group
+# is needed now that there is one service identity.
+grep -Eq '^SupplementaryGroups=' "$SVC" \
+    && fail "5gpn-mihomo.service must not join supplementary service groups"
 grep -Fq 'systemd-journal' "$SVC" \
-    && fail "mihomo.service must not receive host-wide journal read access"
+    && fail "5gpn-mihomo.service must not receive host-wide journal read access"
 grep -Fq '5gpn-overlay' "$SVC" \
-    && fail "mihomo.service still joins an overlay socket group that no longer exists"
+    && fail "5gpn-mihomo.service still joins an overlay socket group that no longer exists"
+grep -Fxq 'After=network-online.target 5gpn-intercept-cert.path' "$SVC" \
+    || fail "the certificate watcher is not ordered before 5gpn-mihomo"
+grep -Fxq 'Wants=network-online.target 5gpn-intercept-cert.path' "$SVC" \
+    || fail "5gpn-mihomo does not pull in the certificate watcher"
+grep -Eq '^RuntimeDirectory=5gpn$' "$SVC" \
+    && fail "the main unit still owns the root-only shared lock directory"
 
 # --- the root oneshot that does hold the key ------------------------------
 grep -Fxq 'User=root' "$CERT_SVC" || fail "the certificate oneshot must run as root"
@@ -121,6 +129,17 @@ grep -Fq 'ProtectSystem=strict' "$CERT_SVC" || fail "the certificate oneshot: no
 
 # --- installer -------------------------------------------------------------
 grep -Fq 'install_service_accounts' "$INSTALL" || fail "installer does not create service accounts"
+start_fn="$(sed -n '/^start_services()/,/^}/p' "$INSTALL")"
+cert_reset="$(grep -nF 'systemctl reset-failed 5gpn-intercept-cert.service' <<<"$start_fn" | cut -d: -f1)"
+path_enable="$(grep -nF 'systemctl enable --now 5gpn-intercept-cert.path' <<<"$start_fn" | cut -d: -f1)"
+main_reset="$(grep -nF 'systemctl reset-failed 5gpn-mihomo.service' <<<"$start_fn" | cut -d: -f1)"
+main_restart="$(grep -nF 'systemctl restart 5gpn-mihomo.service' <<<"$start_fn" | cut -d: -f1)"
+[[ -n "$cert_reset" && -n "$path_enable" && "$cert_reset" -lt "$path_enable" ]] \
+    || fail "certificate publisher start-limit is not cleared before arming the watcher"
+[[ -n "$main_reset" && -n "$main_restart" && "$main_reset" -lt "$main_restart" ]] \
+    || fail "validated install does not clear the main start-limit before its single restart"
+grep -Fq 'systemctl start 5gpn-mihomo.service' <<<"$start_fn" \
+    && fail "service activation still consumes a second start token after restart failure"
 # The published asset is the compressed one, so that is what the pin covers.
 # Checking the unpacked binary instead would verify something gzip produced
 # rather than something the release published.

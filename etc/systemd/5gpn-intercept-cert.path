@@ -7,7 +7,7 @@ Description=Watch the engine's certificate request
 # edits a setting or a binding; the request changes only when the set of
 # hosts the leaf must cover does, so this fires when a reissue is actually
 # needed rather than on every unrelated edit.
-PathChanged=/etc/5gpn/mihomo/gpn/certificate-request
+PathChanged=/etc/5gpn/mihomo/5gpn/certificate-request
 Unit=5gpn-intercept-cert.service
 
 [Install]

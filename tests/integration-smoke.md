@@ -20,7 +20,7 @@ current architecture is `docs/architecture.md`.
   as noise.
 - At least two controllable upstreams when testing sequential fallback.
 - For an upgrade acceptance run, preserve active `dns.env`, mihomo YAML, and
-  the complete mihomo `gpn/` state directory before mutation. A legacy
+  the complete mihomo `5gpn/` state directory before mutation. A legacy
   multi-process deployment must follow `docs/pre-v5-upgrade.md` and then the
   checked monolith migration; do not improvise a partial schema edit.
 
@@ -33,15 +33,15 @@ sudo cp -a /etc/5gpn/mihomo/config.yaml /tmp/mihomo-config.before
 
 ## 1. Static and service health
 
-- [ ] `systemctl is-active mihomo` reports active. No `5gpn-dns` or
+- [ ] `systemctl is-active 5gpn-mihomo` reports active. No `5gpn-dns` or
   `5gpn-intercept` long-running service exists.
-- [ ] `systemctl show -p User -p Group mihomo` reports the dedicated mihomo
-  account selected by the installer.
-- [ ] `systemctl show mihomo -p Restart -p RestartUSec \
+- [ ] `systemctl show -p User -p Group 5gpn-mihomo` reports exactly
+  `fivegpn:fivegpn`, the installer's only managed Unix service identity.
+- [ ] `systemctl show 5gpn-mihomo -p Restart -p RestartUSec \
   -p StartLimitIntervalUSec -p StartLimitBurst -p StartLimitAction` reports
   `Restart=always`, a three-second restart delay, a 60-second start-limit
   interval, burst 10, and action `none`.
-- [ ] `journalctl -u mihomo -b` contains no `External controller tls listen error`
+- [ ] `journalctl -u 5gpn-mihomo -b` contains no `External controller tls listen error`
   or safe-path rejection after startup.
 - [ ] `ss -lntup` shows:
   - `:853/tcp` owned by mihomo;
@@ -52,7 +52,7 @@ sudo cp -a /etc/5gpn/mihomo/config.yaml /tmp/mihomo-config.before
     configured local listen IP when testing a fresh or explicitly reset seed.
 - [ ] Nothing exposes public DNS `:53`, a DoH handler, or a standalone profile
   port. TCP `:8443` is mihomo application ingress, not DoH.
-- [ ] `/opt/5gpn/bin/mihomo -t -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo` succeeds.
+- [ ] `/opt/5gpn/bin/5gpn-mihomo -t -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo` succeeds.
 - [ ] Every `DNS_MIHOMO_LISTEN_IPS` value appears on a local interface. A
   non-local NAT/public address is rejected by installer validation.
 
@@ -65,41 +65,41 @@ three-second systemd restart:
 
 ```bash
 sudo sha256sum /etc/5gpn/mihomo/config.yaml \
-  /etc/5gpn/mihomo/gpn/*.json > /tmp/5gpn-crash-state.before
-before_pid="$(systemctl show mihomo -p MainPID --value)"
-before_restarts="$(systemctl show mihomo -p NRestarts --value)"
+  /etc/5gpn/mihomo/5gpn/*.json > /tmp/5gpn-crash-state.before
+before_pid="$(systemctl show 5gpn-mihomo -p MainPID --value)"
+before_restarts="$(systemctl show 5gpn-mihomo -p NRestarts --value)"
 test "$before_pid" -gt 0
-sudo systemctl is-active --quiet mihomo.service
+sudo systemctl is-active --quiet 5gpn-mihomo.service
 
-sudo systemctl kill --kill-whom=main --signal=SIGKILL mihomo.service
+sudo systemctl kill --kill-whom=main --signal=SIGKILL 5gpn-mihomo.service
 
 deadline=$((SECONDS + 15))
 while (( SECONDS < deadline )); do
-  after_pid="$(systemctl show mihomo -p MainPID --value)"
-  if systemctl is-active --quiet mihomo \
+  after_pid="$(systemctl show 5gpn-mihomo -p MainPID --value)"
+  if systemctl is-active --quiet 5gpn-mihomo \
      && [[ "$after_pid" != 0 && "$after_pid" != "$before_pid" ]]; then
     break
   fi
   sleep 1
 done
 
-after_restarts="$(systemctl show mihomo -p NRestarts --value)"
+after_restarts="$(systemctl show 5gpn-mihomo -p NRestarts --value)"
 test "$after_pid" != 0
 test "$after_pid" != "$before_pid"
 test "$after_restarts" -gt "$before_restarts"
 sudo sha256sum /etc/5gpn/mihomo/config.yaml \
-  /etc/5gpn/mihomo/gpn/*.json > /tmp/5gpn-crash-state.after
+  /etc/5gpn/mihomo/5gpn/*.json > /tmp/5gpn-crash-state.after
 diff -u /tmp/5gpn-crash-state.before /tmp/5gpn-crash-state.after
 ```
 
 - [ ] mihomo becomes active with a new main PID and an incremented `NRestarts`.
-- [ ] The operator YAML and revisioned `gpn` documents remain byte-identical.
+- [ ] The operator YAML and revisioned `5gpn` documents remain byte-identical.
   DoT, the authenticated controller, and one ordinary forwarded request all
   work after restart. Connections that existed at the injected crash are
   expected to have failed.
 - [ ] A deliberate stop is not undone by `Restart=always`. Run
-  `sudo systemctl stop mihomo`, wait five seconds, record that `MainPID` is
-  still zero, and then run `sudo systemctl start mihomo` before evaluating the
+  `sudo systemctl stop 5gpn-mihomo`, wait five seconds, record that `MainPID` is
+  still zero, and then run `sudo systemctl start 5gpn-mihomo` before evaluating the
   result or continuing the checklist.
 - [ ] An independent monitor outside this host actively probes DoT and HTTPS,
   observes the injected outage, and clears only after service recovery. The
@@ -141,8 +141,8 @@ afterward.
   - `direct`: real address, no gateway rewrite;
   - `gateway`: gateway steering.
 - [ ] A cached reply preserves its original verdict/reason/upstream metadata in
-  `/gpn/dns/querylog`; a fallback-direct cache hit is not mislabeled chnroute-cn.
-- [ ] `/gpn/dns/resolve` agrees with the live query for direct, proxy, every
+  `/5gpn/dns/querylog`; a fallback-direct cache hit is not mislabeled chnroute-cn.
+- [ ] `/5gpn/dns/resolve` agrees with the live query for direct, proxy, every
   fallback, NXDOMAIN, and NODATA.
 
 ## 4. Upstream ordering, reload, and subscriptions
@@ -153,9 +153,9 @@ afterward.
   total request deadline. Recovered first member regains precedence.
 - [ ] Parent-context cancellation does not open the upstream breaker; a member
   attempt deadline does allow fallback.
-- [ ] A revision-correct whole-document `PUT /gpn/dns` hot-swaps upstream
+- [ ] A revision-correct whole-document `PUT /5gpn/dns` hot-swaps upstream
   groups, preserves China ECS, flushes old cached answers, and survives mihomo
-  restart through `/etc/5gpn/mihomo/gpn/dns.json`.
+  restart through `/etc/5gpn/mihomo/5gpn/dns.json`.
 - [ ] A whole-document write that changes any listener or certificate-path
   field returns 400, leaves the revision and disk bytes unchanged, and leaves
   all existing listeners serving.
@@ -177,12 +177,12 @@ secret. Direct loopback tests isolate controller routing:
 
 ```bash
 curl --resolve "$CONSOLE:443:127.0.0.1" -fsS \
-  -H "Authorization: Bearer $SECRET" "https://$CONSOLE/gpn/dns"
+  -H "Authorization: Bearer $SECRET" "https://$CONSOLE/5gpn/dns"
 curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   "https://$CONSOLE/ui/ios-dot.mobileconfig"
 ```
 
-- [ ] The correct controller secret returns 200 from `/gpn/dns` and ordinary
+- [ ] The correct controller secret returns 200 from `/5gpn/dns` and ordinary
   authenticated controller routes. A missing or wrong secret returns 401.
 - [ ] The console profile response is `200` with
   `Content-Type: application/x-apple-aspen-config`, contains no secret, and is
@@ -200,12 +200,12 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
 ## 6. Mihomo controller boundaries
 
 - [ ] The single `console.<base>` origin completes a TLS handshake with the
-  console certificate and no safe-path rejection in `journalctl -u mihomo -b`;
+  console certificate and no safe-path rejection in `journalctl -u 5gpn-mihomo -b`;
   plaintext HTTP or a mismatched SNI fails closed.
 - [ ] zashboard REST and WebSocket operations use mihomo's controller directly
   on the same origin. There is no `/proxy/`, second panel SNI, source allowlist,
   handoff session, or separate Console bearer.
-- [ ] `/ui/*` remains the only unauthenticated controller surface. `/gpn/*`
+- [ ] `/ui/*` remains the only unauthenticated controller surface. `/5gpn/*`
   and ordinary controller routes reject a missing or wrong controller secret,
   and neither secrets nor extension log contents appear in error bodies or
   persistent journal output.
@@ -273,7 +273,8 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   `409`, preserve the newer module config, and leave the controller untouched.
 
 - [ ] Editing only a harmless mihomo field runs validation, atomically replaces
-  the file, hot-applies it, and retains mode `0600` in a `0700` directory.
+  the file, hot-applies it, and retains `root:fivegpn` mode `0640` inside the
+  root-owned mihomo home.
 - [ ] Raw config edits that enable `external-controller`, remove
   `external-controller-tls`, or change either required zash certificate path
   return 400 and leave disk/runtime unchanged.
@@ -307,7 +308,7 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
   pre-v5 runbook without shortcuts, then run the checked monolith migration.
   The candidate removes only retired runtime-overlay anchors and the old
   interception inbound boundary, rewrites panel exclusions to `IN-TYPE,INNER`,
-  contains exactly one fixed UDP/443 guard, and passes the pinned `mihomo -t`
+  contains exactly one fixed UDP/443 guard, and passes the pinned `5gpn-mihomo -t`
   before atomic publication. Preserve recoverable copies throughout.
 - [ ] After migration, exactly one long-running mihomo process owns DNS,
   forwarding, interception, Telegram, and the controller. The migrated DNS,
@@ -336,9 +337,15 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
 - [ ] Custom cleanup paths outside 5gpn defaults are rejected unless canonical,
   safe, and marked as 5gpn-owned. `/`, system directories, and unowned paths are
   never recursively deleted.
-- [ ] Pre-create similarly named operator-managed services, binaries, and
-  directories without 5gpn ownership markers; install, reinstall, and uninstall
-  preserve them unchanged.
+- [ ] Exact old names are migration inputs only. With owned legacy evidence,
+  safe legacy identity shapes for `mihomo`, `gpn-dns`, `gpn-intercept`,
+  `5gpn-overlay-ctl`, and `5gpn-overlay-gen` are removed non-interactively after
+  the old unit is stopped and process use is excluded. An unsafe or ambiguous
+  host identity is preserved with a warning rather than guessed to be ours.
+- [ ] The owned old `mihomo.service`, `/opt/5gpn/bin/mihomo`, and
+  `/etc/5gpn/mihomo/gpn` migrate to `5gpn-mihomo.service`,
+  `/opt/5gpn/bin/5gpn-mihomo`, and `/etc/5gpn/mihomo/5gpn`. If both state
+  directories contain data, installation fails before mutating either.
 
 ## 10. Certificate renewal and recovery
 
@@ -394,14 +401,14 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
 - [ ] A successful production renewal runs the deploy hook, updates all three
   role copies, and regenerates/signs the iOS profile.
 - [ ] After a fresh install and an in-place upgrade, `/etc/5gpn` is
-  `root:gpn-dns` mode `3771`, `/etc/5gpn/cert` is `root:root` mode `0751`, and
+  `root:root` mode `0755`, `/etc/5gpn/cert` is `root:root` mode `0751`, and
   its root marker is `root:root` mode `0644`. Verify the runtime traversal
   contract directly:
-  `sudo -u mihomo test -r /etc/5gpn/cert/dot/current/fullchain.pem` and
-  `sudo -u mihomo test -r /etc/5gpn/cert/console/current/privkey.pem` both succeed.
-  Both name `mihomo`, not one account each: the DoT listener moved into the same
+  `sudo -u fivegpn test -r /etc/5gpn/cert/dot/current/fullchain.pem` and
+  `sudo -u fivegpn test -r /etc/5gpn/cert/console/current/privkey.pem` both succeed.
+  Both use `fivegpn`, not one account each: the DoT listener moved into the same
   process that serves the controller, so one account reads every certificate the
-  gateway presents. A `dot` role still readable only by `gpn-dns` is the shape
+  gateway presents. A `dot` role still readable only by a legacy DNS account is the shape
   that let a fresh install come up with no DNS ingress and no error.
   Neither runtime account can rename the root-owned `cert`, `mihomo`,
   `intercept`, or interception `tls` directory through its sticky parent.
@@ -416,11 +423,11 @@ curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
 ## 11. Telegram bot (optional real-network smoke)
 
 Use a disposable Telegram bot token and at least two test administrator
-accounts. Back up `/etc/5gpn/mihomo/gpn/bot.json` first and never paste the token
+accounts. Back up `/etc/5gpn/mihomo/5gpn/bot.json` first and never paste the token
 into recorded command output, screenshots, or issue logs.
 
 - [ ] Console configuration writes the bot document atomically. Reads
-  report only `token_set`; neither `/gpn/bot` nor status output returns the
+  report only `token_set`; neither `/5gpn/bot` nor status output returns the
   token. A malformed or unauthorized token leaves the previous document and
   running bot usable.
 - [ ] A token that previously had a webhook is safely returned to long polling.
@@ -444,7 +451,7 @@ into recorded command output, screenshots, or issue logs.
 
 ## Native HTTP/H1/H2 interception and the HTTP/3 boundary
 
-- [ ] `GET /gpn/interception` reports `http3: false`. A revision-correct
+- [ ] `GET /5gpn/interception` reports `http3: false`. A revision-correct
   settings write attempting `http3: true` returns 422, does not advance the
   revision, and does not change any other setting.
 - [ ] The running rule set contains exactly one fixed global
@@ -513,7 +520,7 @@ into recorded command output, screenshots, or issue logs.
   `console.log`/`info`/`warn`/`error` levels, action completion and timeout
   metadata, plugin/action filters, debounced search, one-row expansion, local
   clear, and pause behavior on desktop and mobile. Confirm authenticated
-  `/gpn/interception/logs` reads the retained in-memory ring and script console
+  `/5gpn/interception/logs` reads the retained in-memory ring and script console
   text does not appear in the persistent journal.
 - [ ] Select one official marketplace entry, review the cached scope in the
   install-confirm dialog, and verify the daemon then refetches the

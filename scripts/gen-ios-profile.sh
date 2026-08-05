@@ -1,7 +1,7 @@
 #!/bin/bash
 # Generate the signed 5gpn iOS DoT configuration profile (.mobileconfig).
 #
-# Architecture: client DoT:853 (the ONLY DNS transport) -> 5gpn-dns; DNS
+# Architecture: client DoT:853 (the ONLY DNS transport) -> 5gpn-mihomo; DNS
 # answers then steer application traffic to direct origins or the mihomo gateway.
 # The profile points the phone's cellular DNS at this gateway over TLS (DoT). On
 # Wi-Fi it disconnects, so it only applies on cellular as designed.

@@ -64,8 +64,9 @@ done
 # retired with that copy. What replaces it is the stronger condition: there is
 # no second copy to lock. A cmd/ tree reappearing is the shape of the
 # regression, since that is where the Go copy lived.
-if [[ -e "$root/cmd" ]]; then
-    echo "FAIL: a cmd/ tree came back; the seed template may have a second copy again"
+if git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+   && git -C "$root" ls-files 'cmd/**' | grep -q .; then
+    echo "FAIL: a tracked cmd/ tree came back; the seed template may have a second copy again"
     FAIL=1
 else
     echo "ok: the template has exactly one copy"

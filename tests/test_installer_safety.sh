@@ -75,9 +75,9 @@ else
 fi
 rm -rf -- "$archive_fixture"
 
-if service_account_name_is_valid gpn-dns \
+if service_account_name_is_valid fivegpn \
    && ! service_account_name_is_valid 5gpn-dns \
-   && ! service_account_name_is_valid 'gpn.dns'; then
+   && ! service_account_name_is_valid 'five.gpn'; then
     pass "service accounts use Debian/systemd strict user-name syntax"
 else
     fail "service account name validation does not match strict Linux syntax"
@@ -321,7 +321,7 @@ fi
 
 if (
     CONF_DIR="$TMP/fixed-conf"
-    DNS_SERVICE_USER=gpn-dns
+    # This exact old group is accepted only to claim a legacy configuration root.
     mkdir -p "$CONF_DIR"
     printf '%s\n' "$CONF_OWNERSHIP_VALUE" > "$CONF_DIR/$CONF_OWNERSHIP_MARKER"
     getent() {
@@ -336,7 +336,7 @@ if (
     }
     fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"
 ); then
-    pass "sticky root:gpn-dns configuration root remains valid"
+    pass "legacy sticky configuration root remains valid for controlled migration"
 else
     fail "sticky configuration-root design was rejected"
 fi
@@ -382,8 +382,8 @@ fi
 # rollback report itself incomplete. An instance name must NOT take that path.
 if unit_is_template 5gpn-journal@.service \
    && unit_is_template example@.timer \
-   && ! unit_is_template 5gpn-journal@mihomo.service \
-   && ! unit_is_template mihomo.service; then
+   && ! unit_is_template 5gpn-journal@5gpn-mihomo.service \
+   && ! unit_is_template 5gpn-mihomo.service; then
     pass "a template name is told apart from its instances and from plain units"
 else
     fail "template detection would misclassify an instance or a plain unit"
@@ -416,20 +416,18 @@ fi
 
 if (
     CONF_DIR="$TMP/cfg-get-safe"
-    DNS_SERVICE_USER=gpn-dns
     mkdir -p "$CONF_DIR"
     printf '%s\n' "$CONF_OWNERSHIP_VALUE" > "$CONF_DIR/$CONF_OWNERSHIP_MARKER"
     printf 'DNS_BASE_DOMAIN=example.com\n' > "$CONF_DIR/dns.env"
-    getent() { [[ "$1" == group && "$2" == gpn-dns ]] && printf 'gpn-dns:x:4242:\n'; }
     file_uid() { printf '0\n'; }
     file_gid() {
-        [[ "$1" == "$CONF_DIR/dns.env" ]] && printf '4242\n' || printf '0\n'
+        printf '0\n'
     }
     file_mode() {
         case "$1" in
             "$CONF_DIR") printf '755\n' ;;
             "$CONF_DIR/$CONF_OWNERSHIP_MARKER") printf '644\n' ;;
-            *) printf '640\n' ;;
+            *) printf '600\n' ;;
         esac
     }
     [[ "$(cfg_get DNS_BASE_DOMAIN)" == example.com ]] || exit 1
@@ -456,11 +454,11 @@ for initial_mode in 755 2771; do
         CERT_MODE=cloudflare
         preflight_runtime_publication_paths() { :; }
         install() {
-            [[ "$*" != *'-m 3771'*"$CONF_DIR"* ]] || boundary_mode=3771
+            [[ "$*" != *'-m 0755'*"$CONF_DIR"* ]] || boundary_mode=755
             return 0
         }
         fixed_owned_dir_is_safe() {
-            [[ "$1" != "$CONF_DIR" || "$boundary_mode" == 3771 ]]
+            [[ "$1" != "$CONF_DIR" || "$boundary_mode" == 755 ]]
         }
         prepare_intercept_runtime_dirs() { :; }
         runtime_file_slot_is_safe() { :; }
@@ -471,7 +469,7 @@ for initial_mode in 755 2771; do
         chmod() { :; }
         find() { :; }
         prepare_certificate_publication_boundaries \
-            && [[ "$boundary_mode" == 3771 ]]
+            && [[ "$boundary_mode" == 755 ]]
     ); then
         certificate_boundary_modes_ok=0
     fi
@@ -483,7 +481,7 @@ if [[ "$certificate_boundary_modes_ok" == 1 \
    && -n "$prep_boundary_line" && -n "$install_files_line" && -n "$intercept_cert_line" \
    && "$prep_boundary_line" -lt "$install_files_line" \
    && "$prep_boundary_line" -lt "$intercept_cert_line" ]]; then
-    pass "fresh 0755 and legacy 2771 config roots seal before certificate helpers"
+    pass "fresh 0755 and legacy 2771 config roots seal as root:root 0755 before certificate helpers"
 else
     fail "certificate publication can run before the sticky config boundary"
 fi
@@ -534,7 +532,6 @@ fi
 
 if (
     DNS_CERT_DIR="$TMP/cert-roles"
-    DNS_SERVICE_USER=gpn-dns
     role="$DNS_CERT_DIR/dot"
     generation="$role/generations/generation-20260721T010203Z-10-20"
     mkdir -p "$generation"
@@ -597,7 +594,7 @@ fi
 
 # Static publication must override restrictive source modes before the atomic
 # swap. The console, zashboard, and iOS profile are all served by the
-# unprivileged gpn-dns account, while their source trees can originate from
+# unprivileged fivegpn runtime, while their source trees can originate from
 # mktemp or a caller running with umask 077.
 static_root="$TMP/static-publication"
 if (
@@ -632,9 +629,9 @@ if (
     grep -qxF index "$dest/index.html"
     grep -qxF asset "$dest/assets/app.js"
 ); then
-    pass "static publication normalizes restrictive source modes for gpn-dns"
+    pass "static publication normalizes restrictive source modes for fivegpn"
 else
-    fail "static publication retained modes that block the gpn-dns service"
+    fail "static publication retained modes that block the fivegpn runtime"
 fi
 
 if (
@@ -840,7 +837,7 @@ render_fn="$(sed -n '/^render_mihomo_config()/,/^}/p' "$INSTALL")"
 # accounts, then validated — not how the rendering is spelled.
 render_line="$(grep -nF 'render_mihomo_seed "$template"' <<<"$render_fn" | cut -d: -f1)"
 nonempty_line="$(grep -nF '[[ -s "$candidate" ]]' <<<"$render_fn" | cut -d: -f1)"
-secure_line="$(grep -nF 'chown "$DNS_SERVICE_USER:$MIHOMO_SERVICE_USER" "$candidate"' <<<"$render_fn" | cut -d: -f1)"
+secure_line="$(grep -nF 'chown "root:$FIVEGPN_SERVICE_GROUP" "$candidate"' <<<"$render_fn" | cut -d: -f1)"
 validate_line="$(grep -nF '"$MIHOMO_BIN" -t -f "$candidate"' <<<"$render_fn" | cut -d: -f1)"
 if grep -Fq 'template="${BASE_DIR}/etc/mihomo/config.yaml.tmpl"' <<<"$render_fn" \
    && [[ -n "$render_line" && -n "$nonempty_line" && -n "$secure_line" && -n "$validate_line" \
@@ -860,17 +857,9 @@ SCRIPT_DIR="$runtime_root"
 # Seed -> preserve byte-for-byte -> explicit validated reset with backup.
 CONF_DIR="$TMP/conf"
 MIHOMO_DIR="$CONF_DIR/mihomo"
-MIHOMO_SERVICE_USER="$(id -gn)"
-DNS_SERVICE_USER="$(id -un)"
-# The live render resolves real identities for the overlay runtime block and
-# refuses rather than inventing them, so the seed cannot be rendered at all
-# without these. Point them at this test runner's own account and group.
-INTERCEPT_SERVICE_USER="$(id -un)"
-OVERLAY_CONTROL_GROUP="$(id -gn)"
-OVERLAY_GENERATION_GROUP="$(id -gn)"
+FIVEGPN_SERVICE_USER="$(id -un)"
+FIVEGPN_SERVICE_GROUP="$(id -gn)"
 MIHOMO_BIN="$TMP/fake-mihomo"
-DNS_BIN="$TMP/fake-dns"
-INTERCEPT_BIN="$TMP/fake-intercept"
 INTERCEPT_DIR="$CONF_DIR/intercept"
 MIHOMO_TEST_LOG="$TMP/mihomo.log"; export MIHOMO_TEST_LOG
 cat > "$MIHOMO_BIN" <<'EOF'
@@ -879,21 +868,7 @@ printf '%s\n' "$*" >> "$MIHOMO_TEST_LOG"
 exit 0
 EOF
 chmod +x "$MIHOMO_BIN"
-cat > "$DNS_BIN" <<'EOF'
-#!/usr/bin/env bash
-if [[ "${1:-}" == --print-mihomo-secret && "${2:-}" == --config && -f "${3:-}" ]]; then
-    sed -n 's/^secret:[[:space:]]*//p' "$3"
-    exit 0
-fi
-exit 1
-EOF
-chmod +x "$DNS_BIN"
 mkdir -p "$INTERCEPT_DIR"
-cat > "$INTERCEPT_BIN" <<'EOF'
-#!/usr/bin/env bash
-printf 'test-inbound-user\ttest-inbound-password-123456\ttest-upstream-user\ttest-upstream-password-123456\n'
-EOF
-chmod +x "$INTERCEPT_BIN"
 mkdir -p "$CONF_DIR"
 printf '%s\n' "$CONF_OWNERSHIP_VALUE" > "$CONF_DIR/$CONF_OWNERSHIP_MARKER"
 file_uid() {
@@ -912,11 +887,12 @@ file_mode() {
     case "$1" in
         "$CONF_DIR") printf '755\n' ;;
         "$CONF_DIR/$CONF_OWNERSHIP_MARKER") printf '644\n' ;;
-        "$CONF_DIR/dns.env") printf '640\n' ;;
+        "$CONF_DIR/dns.env") printf '600\n' ;;
         *) stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || true ;;
     esac
 }
 persist_mihomo_secret() { :; }
+chown() { :; }
 BASE_DOMAIN=example.com
 MIHOMO_LISTEN_IPS=10.20.30.40
 render_mihomo_config >/dev/null
@@ -992,6 +968,7 @@ else
 fi
 SCRIPT_DIR="$source_script_dir"
 BASE_DIR="$source_base_dir"
+unset -f chown
 
 # dns.env accepts exactly the current key set and rejects ambiguous state.
 saved_dns_env="$(cat "$CONF_DIR/dns.env" 2>/dev/null || true)"
@@ -1025,7 +1002,7 @@ whitelist_keys="$(for key in $DNS_ENV_KEYS; do printf '%s\n' "$key"; done | sort
 rendered_keys="$(sed -n '/^write_dns_env()/,/^}/p' "$INSTALL" \
     | sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' | sort)"
 example_keys="$(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' \
-    "$ROOT/etc/5gpn-dns/dns.env.example" | sort)"
+    "$ROOT/etc/5gpn/dns.env.example" | sort)"
 [[ "$whitelist_keys" == "$rendered_keys" && "$whitelist_keys" == "$example_keys" ]] \
     && pass "dns.env writer, example, and current-key whitelist match exactly" \
     || fail "dns.env writer/example keys drifted from the current-key whitelist"
@@ -1157,12 +1134,12 @@ fi
 # validator disagreed the failure was silent in the worst way: the service
 # started, bound every tunnel and the TLS controller, reported itself healthy,
 # and had no DNS ingress at all because it could not open its own key.
-[[ "$(cert_role_group dot)" == "$MIHOMO_SERVICE_USER" ]] \
+[[ "$(cert_role_group dot)" == "$FIVEGPN_SERVICE_GROUP" ]] \
     || fail "the DoT certificate role is not owned by the account that serves DoT"
-[[ "$(cert_role_group console)" == "$MIHOMO_SERVICE_USER" ]] \
+[[ "$(cert_role_group console)" == "$FIVEGPN_SERVICE_GROUP" ]] \
     || fail "the controller certificate role is not owned by the serving account"
-[[ "$(cert_role_group web)" == "$DNS_SERVICE_USER" ]] \
-    || fail "the reader-less web role was widened beyond the retired account"
+[[ "$(cert_role_group web)" == root ]] \
+    || fail "the reader-less web role was widened beyond root"
 if cert_role_group nonsense >/dev/null 2>&1; then
     fail "an unknown certificate role was given an owning account"
 fi
@@ -1223,22 +1200,11 @@ else
     pass "service start failure propagates as a non-zero installer result"
 fi
 
-# A disabled MITM service is a successful steady state. systemd reports a
-# skipped ExecCondition as a non-zero start, so start_services must inspect the
-# persisted master setting before attempting restart/start.
+# MITM no longer has a second service lifecycle. The one runtime and the two
+# certificate triggers are the complete activation set regardless of master
+# state; capture remains inert inside the process while the document is off.
 if (
-    calls="$TMP/disabled-mitm-systemctl.log"
-    check_bin="$TMP/5gpn-intercept-check"
-    cat > "$check_bin" <<'EOF'
-#!/bin/sh
-case " $* " in
-    *' --check-enabled '*) exit 3 ;;
-esac
-exit 0
-EOF
-    chmod +x "$check_bin"
-    INTERCEPT_BIN="$check_bin"
-    INTERCEPT_DIR="$TMP/intercept-disabled"
+    calls="$TMP/monolith-systemctl.log"
     MIHOMO_LISTEN_IPS=10.20.30.40
     resolve_mihomo_listen_ips() { printf '%s\n' "$1"; }
     cfg_get() { return 0; }
@@ -1248,13 +1214,15 @@ EOF
         return 0
     }
     start_services >/dev/null 2>&1
-    grep -Fxq 'enable 5gpn-intercept' "$calls"
-    grep -Fxq 'stop 5gpn-intercept.service' "$calls"
-    ! grep -Eq '^(restart|start) 5gpn-intercept($|\.service)' "$calls"
+    grep -Fxq 'enable --now 5gpn-intercept-cert.path' "$calls"
+    grep -Fxq 'enable --now 5gpn-intercept-cert.timer' "$calls"
+    grep -Fxq 'enable 5gpn-mihomo.service' "$calls"
+    grep -Fxq 'restart 5gpn-mihomo.service' "$calls"
+    ! grep -Eq '(^| )5gpn-(dns|intercept)\.service$' "$calls"
 ); then
-    pass "disabled MITM remains stopped without failing service activation"
+    pass "service activation drives only the monolith and certificate triggers"
 else
-    fail "disabled MITM was started or treated as an activation failure"
+    fail "service activation retained a retired sidecar lifecycle"
 fi
 
 # Public/certificate DNS is fail-closed and always uses the independent
@@ -1374,8 +1342,8 @@ certbot() {
 : > "$PORT80_LOG"
 if run_http_certbot certonly --standalone >/dev/null 2>&1; then
     fail "HTTP-01 wrapper hid a Certbot failure"
-elif grep -q '^systemctl stop mihomo.service$' "$PORT80_LOG" \
-  && grep -q '^systemctl start mihomo.service$' "$PORT80_LOG"; then
+elif grep -q '^systemctl stop 5gpn-mihomo.service$' "$PORT80_LOG" \
+  && grep -q '^systemctl start 5gpn-mihomo.service$' "$PORT80_LOG"; then
     pass "HTTP-01 restores an originally active mihomo after Certbot failure"
 else
     fail "HTTP-01 did not stop and restore active mihomo around Certbot"
@@ -1384,8 +1352,8 @@ HTTP_CERTBOT_RC=0
 : > "$PORT80_LOG"
 run_http_certbot certonly --standalone >/dev/null 2>&1 \
     || fail "HTTP-01 wrapper failed after successful Certbot"
-if grep -q '^systemctl stop mihomo.service$' "$PORT80_LOG" \
-   && ! grep -q '^systemctl start mihomo.service$' "$PORT80_LOG"; then
+if grep -q '^systemctl stop 5gpn-mihomo.service$' "$PORT80_LOG" \
+   && ! grep -q '^systemctl start 5gpn-mihomo.service$' "$PORT80_LOG"; then
     pass "successful HTTP-01 keeps active mihomo stopped for certificate publication"
 else
     fail "successful HTTP-01 restored mihomo before certificate publication"
@@ -1394,8 +1362,8 @@ for HTTP_CERTBOT_SIGNAL in INT TERM; do
     : > "$PORT80_LOG"
     if run_http_certbot certonly --standalone >/dev/null 2>&1; then
         fail "HTTP-01 wrapper hid a $HTTP_CERTBOT_SIGNAL signal"
-    elif grep -q '^systemctl stop mihomo.service$' "$PORT80_LOG" \
-      && grep -q '^systemctl start mihomo.service$' "$PORT80_LOG"; then
+    elif grep -q '^systemctl stop 5gpn-mihomo.service$' "$PORT80_LOG" \
+      && grep -q '^systemctl start 5gpn-mihomo.service$' "$PORT80_LOG"; then
         pass "HTTP-01 restores an originally active mihomo after $HTTP_CERTBOT_SIGNAL"
     else
         fail "HTTP-01 $HTTP_CERTBOT_SIGNAL path did not restore active mihomo"
@@ -1407,7 +1375,7 @@ HTTP_CERTBOT_RC=0
 : > "$PORT80_LOG"
 run_http_certbot certonly --standalone >/dev/null 2>&1 \
     || fail "HTTP-01 wrapper failed with inactive mihomo and successful Certbot"
-if grep -Eq '^systemctl (stop|start) mihomo.service$' "$PORT80_LOG"; then
+if grep -Eq '^systemctl (stop|start) 5gpn-mihomo.service$' "$PORT80_LOG"; then
     fail "HTTP-01 changed the state of an originally inactive mihomo"
 else
     pass "HTTP-01 leaves an originally inactive mihomo stopped"
@@ -1449,7 +1417,7 @@ HTTP_INSTALL_LOG="$TMP/http-install-order.log"
     }
     start_services() {
         printf 'start_services\n' >> "$HTTP_INSTALL_LOG"
-        systemctl start mihomo.service
+        systemctl start 5gpn-mihomo.service
     }
     : > "$HTTP_INSTALL_LOG"
     install_cert example.com >/dev/null 2>&1 || exit 1
@@ -1457,7 +1425,7 @@ HTTP_INSTALL_LOG="$TMP/http-install-order.log"
 ) || fail "mocked successful HTTP-01 install flow failed"
 http_certbot_line="$(grep -n '^certbot ' "$HTTP_INSTALL_LOG" | head -1 | cut -d: -f1)"
 http_deploy_line="$(grep -n '^deploy_cert_roles console/current$' "$HTTP_INSTALL_LOG" | head -1 | cut -d: -f1)"
-http_start_line="$(grep -n '^systemctl start mihomo.service$' "$HTTP_INSTALL_LOG" | head -1 | cut -d: -f1)"
+http_start_line="$(grep -n '^systemctl start 5gpn-mihomo.service$' "$HTTP_INSTALL_LOG" | head -1 | cut -d: -f1)"
 if [[ -n "$http_certbot_line" && -n "$http_deploy_line" && -n "$http_start_line" \
    && "$http_certbot_line" -lt "$http_deploy_line" \
    && "$http_deploy_line" -lt "$http_start_line" ]]; then
@@ -1485,9 +1453,9 @@ else
     fail "certificate lock can clobber or follow files in a shared runtime directory"
 fi
 
-# An enabled MITM sidecar requires its certificate oneshot during service
-# startup. The installer must release the shared certificate lock for that
-# dependency and reacquire it before success or rollback processing.
+# Starting the monolith can publish a certificate request and trigger the root
+# certificate oneshot. The installer must release the shared certificate lock
+# for that dependency and reacquire it before success or failure processing.
 handoff_log="$TMP/cert-lock-handoff.log"
 if (
     INSTALL_CERT_LOCK_HELD=1

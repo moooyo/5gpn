@@ -15,7 +15,7 @@ if [[ -z "$EXPECTED_RELEASE" ]]; then
 fi
 
 INSTALLER=/opt/5gpn/install.sh
-MIHOMO=/opt/5gpn/bin/mihomo
+MIHOMO=/opt/5gpn/bin/5gpn-mihomo
 MIHOMO_CONF=/etc/5gpn/mihomo/config.yaml
 CONTROLLER=https://127.0.0.1
 
@@ -53,12 +53,35 @@ else
     bad "mihomo binary is missing"
 fi
 
-[[ "$(systemctl is-active mihomo 2>/dev/null)" == active ]] \
-    && ok 'mihomo is active' || bad 'mihomo is not active'
-for retired in 5gpn-dns.service 5gpn-intercept.service; do
+[[ "$(systemctl is-active 5gpn-mihomo 2>/dev/null)" == active ]] \
+    && ok '5gpn-mihomo is active' || bad '5gpn-mihomo is not active'
+if [[ "$(systemctl show 5gpn-mihomo -p User --value 2>/dev/null)" == fivegpn ]] \
+   && [[ "$(systemctl show 5gpn-mihomo -p Group --value 2>/dev/null)" == fivegpn ]]; then
+    ok '5gpn-mihomo runs as the single fivegpn identity'
+else
+    bad '5gpn-mihomo does not run as fivegpn:fivegpn'
+fi
+
+# These names are legacy cleanup targets, never current compatibility aliases.
+for retired in mihomo.service 5gpn-dns.service 5gpn-intercept.service; do
     [[ "$(systemctl is-active "$retired" 2>/dev/null)" != active ]] \
         && ok "$retired is retired" || bad "$retired is still active"
 done
+for retired_user in mihomo gpn-dns gpn-intercept; do
+    getent passwd "$retired_user" >/dev/null \
+        && bad "legacy account $retired_user still exists" \
+        || ok "legacy account $retired_user is absent"
+done
+for retired_group in mihomo gpn-dns gpn-intercept 5gpn-overlay-ctl 5gpn-overlay-gen; do
+    getent group "$retired_group" >/dev/null \
+        && bad "legacy group $retired_group still exists" \
+        || ok "legacy group $retired_group is absent"
+done
+[[ -d /etc/5gpn/mihomo/5gpn ]] \
+    && ok '5gpn state directory exists' || bad '5gpn state directory is missing'
+[[ ! -e /etc/5gpn/mihomo/gpn ]] \
+    && ok 'legacy gpn state directory is absent' \
+    || bad 'legacy gpn state directory still exists'
 
 echo
 echo '== controller authentication and documents =='
@@ -84,18 +107,18 @@ http_status() {
 }
 
 unauth="$(curl -sk --max-time 30 -o /dev/null -w '%{http_code}' \
-    "$CONTROLLER/gpn/dns")"
-[[ "$unauth" == 401 ]] && ok '/gpn/dns rejects missing authentication' \
-    || bad "/gpn/dns returned $unauth without authentication"
+    "$CONTROLLER/5gpn/dns")"
+[[ "$unauth" == 401 ]] && ok '/5gpn/dns rejects missing authentication' \
+    || bad "/5gpn/dns returned $unauth without authentication"
 
 ui="$(curl -sk --max-time 30 -o /dev/null -w '%{http_code}' \
     "$CONTROLLER/ui/")"
 [[ "$ui" == 200 ]] && ok '/ui/ is available for bootstrap' \
     || bad "/ui/ returned $ui"
 
-dns="$(request "$CONTROLLER/gpn/dns")"
-interception="$(request "$CONTROLLER/gpn/interception")"
-bot="$(request "$CONTROLLER/gpn/bot")"
+dns="$(request "$CONTROLLER/5gpn/dns")"
+interception="$(request "$CONTROLLER/5gpn/interception")"
+bot="$(request "$CONTROLLER/5gpn/bot")"
 for name in dns interception bot; do
     value="${!name}"
     if jq -e '.revision | type == "string" and length > 0' \
@@ -122,11 +145,11 @@ enable_h3="$(jq -nc --arg r "$revision" --argjson e "$enabled" \
     --argjson h2 "$http2" \
     '{revision:$r, enabled:$e, http2:$h2, http3:true}')"
 code="$(http_status -X PUT --data "$enable_h3" \
-    "$CONTROLLER/gpn/interception/settings")"
+    "$CONTROLLER/5gpn/interception/settings")"
 [[ "$code" == 422 ]] && ok 'http3=true is rejected with 422' \
     || bad "http3=true returned $code"
 
-after="$(request "$CONTROLLER/gpn/interception")"
+after="$(request "$CONTROLLER/5gpn/interception")"
 if [[ "$(jq -r '.revision' <<<"$after")" == "$revision" ]] \
    && [[ "$(jq -r '.snapshot.http3' <<<"$after")" == false ]]; then
     ok 'the rejected HTTP/3 write changed no state'

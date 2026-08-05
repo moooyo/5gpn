@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh |
 
 `upgrade-reset-mihomo` requires an existing installation and an interactive TTY
 confirmation. It retains a byte-for-byte backup, renders the target release's
-seed, runs the pinned `mihomo -t`, and publishes the candidate atomically.
+seed, runs the pinned `5gpn-mihomo -t`, and publishes the candidate atomically.
 Custom proxies, providers, groups, and rules are not merged and must be restored
 manually from the backup. Normal install, reinstall, and `configure` operations
 never select this reset path.

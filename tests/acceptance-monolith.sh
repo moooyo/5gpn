@@ -28,7 +28,7 @@ SECRET="$(grep -m1 -E "^secret:" "$CONF" | sed -E "s/^secret: *'?([^']*)'?.*/\1/
 API="https://127.0.0.1:443"
 CURL=(curl -sk --max-time 15 -H "Authorization: Bearer ${SECRET}")
 
-GATEWAY="$(jq -r '.gateway' /etc/5gpn/mihomo/gpn/dns.json)"
+GATEWAY="$(jq -r '.gateway' /etc/5gpn/mihomo/5gpn/dns.json)"
 
 # --- DNS: the three listeners -------------------------------------------
 head_ "DNS listeners"
@@ -83,7 +83,7 @@ head_ "policy"
 # Only asserted when a policy exists. A gateway that was installed rather than
 # migrated has no rules by design, and demanding one here asserted a *migrated*
 # gateway from a suite that also has to pass on a fresh one.
-blocked="$(jq -r '[.policy.rules[]?|select(.intent=="block" and .enabled and .kind=="domain-suffix")][0].value' /etc/5gpn/mihomo/gpn/dns.json)"
+blocked="$(jq -r '[.policy.rules[]?|select(.intent=="block" and .enabled and .kind=="domain-suffix")][0].value' /etc/5gpn/mihomo/5gpn/dns.json)"
 if [ -n "$blocked" ] && [ "$blocked" != "null" ]; then
   rc="$(dig +timeout=5 @127.0.0.1 -p 5353 "$blocked" A 2>/dev/null | grep -m1 'status:' | sed -E 's/.*status: ([A-Z]+).*/\1/')"
   if [ "$rc" = "NXDOMAIN" ]; then ok "a blocked name ($blocked) returns NXDOMAIN"; else bad "blocked name $blocked returned $rc"; fi
@@ -94,7 +94,7 @@ fi
 # --- control API ----------------------------------------------------------
 head_ "control API"
 caps="$("${CURL[@]}" "$API/capabilities")"
-for feature in gpn-core gpn-dns gpn-interception; do
+for feature in 5gpn-core 5gpn-dns 5gpn-interception; do
   if echo "$caps" | jq -e ".features[\"$feature\"].version == 1" >/dev/null 2>&1; then
     ok "$feature advertised at version 1"
   else
@@ -102,16 +102,16 @@ for feature in gpn-core gpn-dns gpn-interception; do
   fi
 done
 
-dnsdoc="$("${CURL[@]}" "$API/gpn/dns")"
+dnsdoc="$("${CURL[@]}" "$API/5gpn/dns")"
 rules="$(echo "$dnsdoc" | jq -r '.document.policy.rules | length' 2>/dev/null)"
 rev="$(echo "$dnsdoc" | jq -r '.revision' 2>/dev/null)"
 # The document must be served with a revision and a policy list. How many rules
 # are in it is the operator's business, not this suite's: zero is what a fresh
 # gateway has, and `[]` rather than null is what the seed guarantees.
 if [ -n "$rev" ] && [ "$rev" != "null" ] && [ "${rules:-x}" != "x" ] && [ "$rules" != "null" ]; then
-  ok "GET /gpn/dns serves $rules rule(s), revision ${rev:0:12}"
+  ok "GET /5gpn/dns serves $rules rule(s), revision ${rev:0:12}"
 else
-  bad "GET /gpn/dns did not serve a document with a policy list and a revision"
+  bad "GET /5gpn/dns did not serve a document with a policy list and a revision"
 fi
 
 subs="$(echo "$dnsdoc" | jq -r '[.subscriptions[]?|select(.entries>0)]|length' 2>/dev/null)"
@@ -124,16 +124,16 @@ fi
 cn="$(echo "$dnsdoc" | jq -r '.stats.cnRanges' 2>/dev/null)"
 if [ "${cn:-0}" -gt 1000 ] 2>/dev/null; then ok "CN arbitration set loaded ($cn ranges)"; else bad "CN set has $cn ranges — the whole domestic internet would read as foreign"; fi
 
-icept="$("${CURL[@]}" "$API/gpn/interception")"
+icept="$("${CURL[@]}" "$API/5gpn/interception")"
 if echo "$icept" | jq -e '.snapshot | has("enabled")' >/dev/null 2>&1; then
-  ok "GET /gpn/interception serves a snapshot (master: $(echo "$icept" | jq -r '.snapshot.enabled'))"
+  ok "GET /5gpn/interception serves a snapshot (master: $(echo "$icept" | jq -r '.snapshot.enabled'))"
 else
-  bad "GET /gpn/interception: $(echo "$icept" | head -c 200)"
+  bad "GET /5gpn/interception: $(echo "$icept" | head -c 200)"
 fi
 
 # The diagnostic must agree with what the resolver actually did, and must report
 # both boundaries -- the client answer alone reads as "DNS is broken".
-exp="$("${CURL[@]}" "$API/gpn/dns/resolve?name=www.google.com")"
+exp="$("${CURL[@]}" "$API/5gpn/dns/resolve?name=www.google.com")"
 if echo "$exp" | jq -e '.answers[0] == "'"$GATEWAY"'"' >/dev/null 2>&1 \
    && echo "$exp" | jq -e '(.origin|length) > 0' >/dev/null 2>&1; then
   ok "resolve diagnostic reports both boundaries (reason: $(echo "$exp" | jq -r '.verdict.reason'))"
@@ -141,7 +141,7 @@ else
   bad "resolve diagnostic: $(echo "$exp" | head -c 300)"
 fi
 
-qlog="$("${CURL[@]}" "$API/gpn/dns/querylog?limit=5")"
+qlog="$("${CURL[@]}" "$API/5gpn/dns/querylog?limit=5")"
 n="$(echo "$qlog" | jq -r '.entries|length' 2>/dev/null)"
 if [ "${n:-0}" -gt 0 ] 2>/dev/null; then ok "query log has $n recent entries"; else bad "query log is empty after the queries above"; fi
 
@@ -151,8 +151,8 @@ code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 15 "$API/ui/")"
 if [ "$code" = "200" ]; then ok "/ui/ serves the bundle"; else bad "/ui/ returned HTTP $code"; fi
 # /ui/ must be reachable WITHOUT the controller secret: an unenrolled client has
 # no credential yet. Everything else must not be.
-code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 15 "$API/gpn/dns")"
-if [ "$code" = "401" ]; then ok "/gpn/dns refuses an unauthenticated request"; else bad "/gpn/dns returned $code without a token"; fi
+code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 15 "$API/5gpn/dns")"
+if [ "$code" = "401" ]; then ok "/5gpn/dns refuses an unauthenticated request"; else bad "/5gpn/dns returned $code without a token"; fi
 
 # --- forwarding still works ----------------------------------------------
 head_ "data plane"

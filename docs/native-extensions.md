@@ -388,7 +388,7 @@ action-scoped timers, but no ambient network, filesystem, process, socket,
 module loader, or Go object. Console output and structured action
 completion/error/timeout events
 live only in mihomo's 1000-entry memory ring and the authenticated
-`/gpn/interception/logs` projection used by `/plugin-logs`; they are not written
+`/5gpn/interception/logs` projection used by `/plugin-logs`; they are not written
 to journald or another file. Event
 URLs retain only scheme, host, and path. The optional storage object exposes
 bounded `get`, `set`, `delete`, and `clear` methods scoped to the extension ID.

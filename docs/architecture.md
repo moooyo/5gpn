@@ -34,16 +34,16 @@ choose a mihomo node, proxy group, selector, or transport.
 client
   | DoT :853
   v
-mihomo ─┬─ gpn/dns      ordered policy, deterministic CN arbitration
+mihomo ─┬─ 5gpn/dns      ordered policy, deterministic CN arbitration
         │                   |                        |
         │   real origin address                gateway address
         │       v                                    v
-        │  client connects direct          gpn capture hook, after the sniffer
+        │  client connects direct          5gpn capture hook, after the sniffer
         │                                   and before rule resolution
         │                                            |
-        ├─ gpn/engine   goja scripts, MITM TLS/H1/H2 ─┘
+        ├─ 5gpn/engine   goja scripts, MITM TLS/H1/H2 ─┘
         │       |
-        │       | gpn/dial -> the same rule evaluation any connection gets
+        │       | 5gpn/dial -> the same rule evaluation any connection gets
         v       v
      tunnel / proxies / rules ──> operator-defined egress
 ```
@@ -62,7 +62,7 @@ journal, roll-forward recovery, quarantine and draining states, two
 and two authenticated loopback SOCKS5 hops per intercepted connection.
 
 In one address space that coordination is a field read. What replaced all of it
-is `gpn/state`: a file written atomically, a pointer swapped atomically, and a
+is `5gpn/state`: a file written atomically, a pointer swapped atomically, and a
 content hash so two browser tabs cannot silently overwrite each other.
 
 The cost is a shared failure domain. Expected extension failures do not consume
@@ -76,14 +76,19 @@ exist.
 
 ### Failure and process recovery
 
-systemd is the only process supervisor. The shipped `mihomo.service` uses
+systemd is the only process supervisor. The shipped `5gpn-mihomo.service` runs
+`/opt/5gpn/bin/5gpn-mihomo` as the sole managed Unix user and group, `fivegpn`.
+All external product names remain `5gpn`; the spelled-out Unix identity is the
+only exception because portable Linux/POSIX account names cannot begin with a
+digit.
+It uses
 `Restart=always` with a three-second delay, so both a non-zero crash and an
 unexpected clean return replace the entire runtime from its atomically
 persisted state. Ten starts within 60 seconds hit systemd's start limit and
 leave the unit failed; `StartLimitAction=none` guarantees the limit never
 reboots or powers off the host. A
-deliberate `systemctl stop mihomo` is an operator action and is not restarted;
-`systemctl start mihomo` is then required.
+deliberate `systemctl stop 5gpn-mihomo` is an operator action and is not
+restarted; `systemctl start 5gpn-mihomo` is then required.
 
 This is crash recovery, not self-healing. It does not rewrite a bad operator
 configuration, free a conflicting port, repair certificate files, or detect a
@@ -99,7 +104,7 @@ and HTTPS probes rather than an in-process heartbeat.
 | `:853/tcp` | The only client DNS ingress, DNS over TLS. |
 | `127.0.0.1:5354/udp` and `/tcp` | The origin boundary. mihomo's own resolver queries it after the sniffer recovers a hostname, and it answers a different question from the client listener — see below. Loopback is enforced at bind. |
 | `127.0.0.1:5353/udp` | Local debugging only. The bind is refused if it is not loopback: it answers the same policy without TLS or client identity, which on a public address is an open resolver. |
-| `127.0.0.1:443/tcp` | TLS-only external controller. Serves the Clash-compatible API, the `/gpn/*` routes, `/capabilities`, and the zashboard bundle at `/ui/` — so the panel is `https://console.<base>/ui/`. Loopback, on :443, because that is the port a browser reaching the console name arrives on: the name resolves to `127.0.0.1` through the seed's `hosts` block, so the allow rule's DIRECT dial lands here, on this same process through a different listener. |
+| `127.0.0.1:443/tcp` | TLS-only external controller. Serves the Clash-compatible API, the `/5gpn/*` routes, `/capabilities`, and the zashboard bundle at `/ui/` — so the panel is `https://console.<base>/ui/`. Loopback, on :443, because that is the port a browser reaching the console name arrives on: the name resolves to `127.0.0.1` through the seed's `hosts` block, so the allow rule's DIRECT dial lands here, on this same process through a different listener. |
 | configured gateway addresses | HTTP/TLS ingress for traffic steered to the gateway, sniffed for Host or SNI. |
 
 There is no public DoH listener and no client-facing plain DNS listener on `:53`.
@@ -147,7 +152,7 @@ Exactly one credential: mihomo's controller secret, presented as
 
 The 5gpn bearer token, the one-use log tickets, the zashboard handoff URL, the
 `__Host-5gpn-zash` session cookie and the two-origin `127.0.0.1`/`127.0.0.2`
-split are all deleted. `/gpn/*` registers through `hub/route.Register`, which
+split are all deleted. `/5gpn/*` registers through `hub/route.Register`, which
 mounts inside the group that already applies `authentication(secret)`, so a
 client that can reach `/configs` can reach these and one that cannot, cannot.
 
@@ -164,7 +169,7 @@ showing an operator a status that might be wrong is worse than showing nothing.
 A subsystem whose document failed to load does not advertise itself, so an
 absent panel and an empty one mean different things.
 
-`/gpn/dns` is read and written whole. The edits are not independent: moving a
+`/5gpn/dns` is read and written whole. The edits are not independent: moving a
 gateway to a new address and changing the upstreams that serve it is one
 decision, and there is no useful state between the two halves of it.
 The listener addresses and certificate paths inside that document are
@@ -173,7 +178,7 @@ must round-trip them unchanged. Listener changes require a checked installer
 operation; rejecting them before the durable write prevents a port conflict
 from becoming a persistent systemd restart loop.
 
-`/gpn/interception` is the opposite, and for the same reason. Enabling an
+`/5gpn/interception` is the opposite, and for the same reason. Enabling an
 extension authorizes a capture set, a script set, a storage grant and possibly
 an unrestricted network grant; reordering decides which of two extensions owns
 an overlapping host, and therefore which script acts on it, which egress binding
@@ -194,7 +199,7 @@ reviewed". The install re-fetches and compares rather than committing the
 candidate it already holds, which is what makes the digest a check on the
 publisher rather than on our own bookkeeping.
 
-`/gpn/interception/catalog` is discovery and nothing else. A catalog is a list
+`/5gpn/interception/catalog` is discovery and nothing else. A catalog is a list
 of manifests: it is fetched through the same guarded client an import uses, it
 is never persisted, and installing from an entry runs exactly the
 review-then-confirm path a pasted URL runs. It is deliberately not an update
@@ -211,7 +216,7 @@ leniently: it is a contract with every deployed gateway, so rejecting unknown
 fields would make older cores refuse whole catalogs whenever a publisher added
 something for newer ones.
 
-`/gpn/bot` is one read and one write, whole-document rather than a write per
+`/5gpn/bot` is one read and one write, whole-document rather than a write per
 field. The interception routes are split because each authorizes something
 different; here there is a single question — who may ask this gateway things
 over Telegram — and splitting it would allow a gateway with a token and no
@@ -265,13 +270,13 @@ as the optional `:5060` ingress.
 
 ## The Telegram control plane
 
-`gpn/bot` is one goroutine, off unless configured. It reads and it alerts. It
+`5gpn/bot` is one goroutine, off unless configured. It reads and it alerts. It
 cannot enable an extension, install one, edit policy, restart a service or touch
 the interception CA — zashboard owns extension management, and a second surface
 for authorizing what may decrypt traffic would be a second place for the
 operator's confirmation to mean something slightly different.
 
-The narrowness is enforced by construction rather than by review: `gpn/bot`
+The narrowness is enforced by construction rather than by review: `5gpn/bot`
 cannot import the resolver or the engine, and reaches both through a `Facts`
 struct of read functions the façade assembles. Widening what a command can do
 requires widening that struct.
@@ -290,11 +295,13 @@ private proxy knob.
 
 ## Code layout and the fork budget
 
-All 5gpn code lives under `gpn/` in the mihomo fork, a directory upstream never
-touches. Upstream packages may import `gpn`; they may not import anything
-beneath it. `gpn/importrule_test.go` enforces this by walking `go list`.
+All 5gpn code lives under `5gpn/` in the mihomo fork, a directory upstream never
+touches. The façade package is named `fivegpn`, because Go identifiers cannot
+begin with a digit. Upstream packages may import `5gpn`; they may not import
+anything beneath it. `5gpn/importrule_test.go` enforces this by walking
+`go list`.
 
-The rule exists because the fork's cost is not the size of `gpn/` — it is how
+The rule exists because the fork's cost is not the size of `5gpn/` — it is how
 many upstream-owned files carry a 5gpn-shaped change, since those are what a
 rebase must reconcile. All 5gpn-specific upstream edits remain concentrated in
 two files: `tunnel/tunnel.go` owns the capture and reviewed-routing hooks, while
@@ -312,19 +319,21 @@ those are general improvements to mihomo rather than 5gpn-shaped, and the right
 destination for them is upstream.
 
 There is one ordering constraint on the façade: `hub/route` imports
-`hub/executor`, so `gpn` cannot be called from `hub/executor` without an import
+`hub/executor`, so `fivegpn` cannot be called from `hub/executor` without an import
 cycle. It is started from `hub/hub.go`.
 
 Absorbing the script engine raises the module's go directive to 1.25, which
 drops the sub-1.25 rows of the upstream build matrix — every legacy Windows and
 macOS target. For a Linux gateway that costs nothing. It also arms vet's
 non-constant-format-string check against upstream files: those are not fixed,
-because every edit there is rebase surface. CI runs `go vet ./gpn/...` and
+because every edit there is rebase surface. CI runs `go vet ./5gpn/...` and
 `go build ./...`.
 
 ## State
 
-`gpn/state` holds every 5gpn document under the mihomo home directory. Writes
+`5gpn/state` holds every 5gpn document under the mihomo home directory. The
+installed path is `/etc/5gpn/mihomo/5gpn`; `gpn` is retained only as the exact
+legacy source name recognized by the one-time installer migration. Writes
 are temp-file, fsync, rename, fsync-directory; the in-memory pointer is
 published only after the rename, so a reader can never observe a value a crash
 would un-observe. A document that fails to parse refuses to open rather than
@@ -372,7 +381,7 @@ reach.
 
 A legacy three-process gateway may carry configuration the monolith cannot
 parse: two retired `RUNTIME-OVERLAY,5gpn,*` anchors and an
-`IN-NAME,intercept-egress,REJECT` terminator. The core fails `mihomo -t` rather
+`IN-NAME,intercept-egress,REJECT` terminator. The core fails `5gpn-mihomo -t` rather
 than starting with capture silently absent.
 
 `scripts/migrate-to-monolith.sh` removes those three rules. It does not strip
@@ -398,10 +407,26 @@ that is not. The list of retired units is therefore the only record that they
 were ever ours, and dropping an entry from it strands whatever it names on every
 host that has not upgraded yet.
 
+The final naming transition is similarly exact. The current runtime is
+`5gpn-mihomo.service`, executes `/opt/5gpn/bin/5gpn-mihomo`, and runs as the
+single `fivegpn:fivegpn` identity. An old-only
+`/etc/5gpn/mihomo/gpn` directory is renamed on the same filesystem to
+`/etc/5gpn/mihomo/5gpn`; two populated directories fail before either is
+changed. The generic `mihomo.service` and old `mihomo`, `gpn-dns`,
+`gpn-intercept`, and overlay-group identities are removed only with project
+provenance and an exact, idle, numerically exclusive system identity. An owned
+legacy unit or state tree is provenance; so is the closed shape of the
+project-specific `gpn-dns` or `gpn-intercept` account. The generic `mihomo`
+identity additionally requires its owned unit/state evidence or membership in
+the retired `5gpn-overlay-*` groups. An incompatible current `fivegpn` account
+is different: that name is installer-owned, so exclusive numeric IDs are
+retained while the account is recreated non-interactively. Aliased IDs fail
+closed.
+
 ## Verification boundary
 
 Changes are tested in proportion to their surface. `go build ./...` and
-`go test -race ./gpn/...` must be green. `tests/` holds the installer suites,
+`go test -race ./5gpn/...` must be green. `tests/` holds the installer suites,
 which are shell and must be run under Linux against an LF checkout.
 
 A real gateway is reachable as `test-env` over OpenSSH. Because it is a working

@@ -313,14 +313,8 @@ INTERCEPT_DIR="$CONF_DIR/intercept"
 MIHOMO_BIN="$TMP/fake-mihomo"
 INTERCEPT_BIN="$TMP/fake-intercept"
 DNS_BIN="$TMP/fake-dns"
-MIHOMO_SERVICE_USER="$(id -gn)"
-DNS_SERVICE_USER="$(id -un)"
-# The live render resolves real identities for the overlay runtime block and
-# refuses rather than inventing them, so the seed cannot be rendered at all
-# without these. Point them at this test runner's own account and group.
-INTERCEPT_SERVICE_USER="$(id -un)"
-OVERLAY_CONTROL_GROUP="$(id -gn)"
-OVERLAY_GENERATION_GROUP="$(id -gn)"
+FIVEGPN_SERVICE_USER="$(id -un)"
+FIVEGPN_SERVICE_GROUP="$(id -gn)"
 SCRIPT_DIR="$ROOT"
 BASE_DOMAIN=example.com
 PUBLIC_IP=192.0.2.10
@@ -420,6 +414,7 @@ if (
     seed_mihomo_whitelist() { return 0; }
     persist_mihomo_secret() { return 0; }
     install() { return 0; }
+    chown() { return 0; }
     render_mihomo_config
 ) >/dev/null 2>&1 \
    && [[ "$legacy_hash" == "$(hash_file "$MIHOMO_DIR/config.yaml")" ]] \
@@ -438,6 +433,7 @@ if (
     seed_mihomo_whitelist() { return 0; }
     persist_mihomo_secret() { return 0; }
     install() { return 0; }
+    chown() { return 0; }
     BASE_DIR="$TMP/reset-runtime"
     mkdir -p "$BASE_DIR/etc/mihomo"
     cp -- "$ROOT/etc/mihomo/config.yaml.tmpl" "$BASE_DIR/etc/mihomo/config.yaml.tmpl"
@@ -528,12 +524,12 @@ fi
 if (
     getent() {
         case "$1" in
-            group) printf 'gpn-test:x:999:\n' ;;
+            group) printf 'sample-service:x:999:\n' ;;
             passwd)
                 if [[ "$#" == 2 ]]; then
-                    printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n'
+                    printf 'sample-service:x:998:999::/nonexistent:/usr/sbin/nologin\n'
                 else
-                    printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n'
+                    printf 'sample-service:x:998:999::/nonexistent:/usr/sbin/nologin\n'
                     printf 'other-service:x:997:999::/nonexistent:/usr/sbin/nologin\n'
                 fi
                 ;;
@@ -542,13 +538,13 @@ if (
     }
     id() {
         case "$1" in
-            -gn) printf 'gpn-test\n' ;;
+            -gn) printf 'sample-service\n' ;;
             -g) printf '999\n' ;;
             -G) printf '999\n' ;;
             *) return 1 ;;
         esac
     }
-    ! service_account_is_safe gpn-test gpn-test
+    ! service_account_is_safe sample-service sample-service
 ); then
     pass "service account validation rejects another passwd user sharing the primary GID"
 else
@@ -557,12 +553,12 @@ fi
 if (
     getent() {
         case "$1" in
-            group) printf 'gpn-test:x:999:\n' ;;
+            group) printf 'sample-service:x:999:\n' ;;
             passwd)
                 if [[ "$#" == 2 ]]; then
-                    printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n'
+                    printf 'sample-service:x:998:999::/nonexistent:/usr/sbin/nologin\n'
                 else
-                    printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n'
+                    printf 'sample-service:x:998:999::/nonexistent:/usr/sbin/nologin\n'
                     printf 'uid-alias:x:998:997::/nonexistent:/usr/sbin/nologin\n'
                 fi
                 ;;
@@ -571,12 +567,12 @@ if (
     }
     id() {
         case "$1" in
-            -gn) printf 'gpn-test\n' ;;
+            -gn) printf 'sample-service\n' ;;
             -g|-G) printf '999\n' ;;
             *) return 1 ;;
         esac
     }
-    ! service_account_is_safe gpn-test gpn-test
+    ! service_account_is_safe sample-service sample-service
 ); then
     pass "service account validation rejects a duplicate numeric UID"
 else
@@ -587,24 +583,24 @@ if (
         case "$1" in
             group)
                 if [[ "$#" == 2 ]]; then
-                    printf 'gpn-test:x:999:\n'
+                    printf 'sample-service:x:999:\n'
                 else
-                    printf 'gpn-test:x:999:\n'
+                    printf 'sample-service:x:999:\n'
                     printf 'gid-alias:x:999:other-user\n'
                 fi
                 ;;
-            passwd) printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n' ;;
+            passwd) printf 'sample-service:x:998:999::/nonexistent:/usr/sbin/nologin\n' ;;
             *) return 1 ;;
         esac
     }
     id() {
         case "$1" in
-            -gn) printf 'gpn-test\n' ;;
+            -gn) printf 'sample-service\n' ;;
             -g|-G) printf '999\n' ;;
             *) return 1 ;;
         esac
     }
-    ! service_account_is_safe gpn-test gpn-test
+    ! service_account_is_safe sample-service sample-service
 ); then
     pass "service account validation rejects a duplicate numeric GID alias"
 else
@@ -613,20 +609,20 @@ fi
 if (
     getent() {
         case "$1" in
-            group) printf 'gpn-test:x:999:\n' ;;
-            passwd) printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n' ;;
+            group) printf 'sample-service:x:999:\n' ;;
+            passwd) printf 'sample-service:x:998:999::/nonexistent:/usr/sbin/nologin\n' ;;
             *) return 1 ;;
         esac
     }
     id() {
         case "$1" in
-            -gn) printf 'gpn-test\n' ;;
+            -gn) printf 'sample-service\n' ;;
             -g) printf '999\n' ;;
             -G) printf '999 1000\n' ;;
             *) return 1 ;;
         esac
     }
-    ! service_account_is_safe gpn-test gpn-test
+    ! service_account_is_safe sample-service sample-service
 ); then
     pass "service account validation rejects unexpected supplementary groups"
 else
@@ -635,19 +631,19 @@ fi
 if (
     getent() {
         case "$1" in
-            group) printf 'gpn-test:x:999:\n' ;;
-            passwd) printf 'gpn-test:x:0:999::/nonexistent:/usr/sbin/nologin\n' ;;
+            group) printf 'sample-service:x:999:\n' ;;
+            passwd) printf 'sample-service:x:0:999::/nonexistent:/usr/sbin/nologin\n' ;;
             *) return 1 ;;
         esac
     }
     id() {
         case "$1" in
-            -gn) printf 'gpn-test\n' ;;
+            -gn) printf 'sample-service\n' ;;
             -g|-G) printf '999\n' ;;
             *) return 1 ;;
         esac
     }
-    ! service_account_is_safe gpn-test gpn-test
+    ! service_account_is_safe sample-service sample-service
 ); then
     pass "service account validation rejects a UID-zero account alias"
 else
@@ -656,19 +652,19 @@ fi
 if (
     getent() {
         case "$1" in
-            group) printf 'gpn-test:x:999:\n' ;;
-            passwd) printf 'gpn-test:x:998:999::/nonexistent:/usr/sbin/nologin\n' ;;
+            group) printf 'sample-service:x:999:\n' ;;
+            passwd) printf 'sample-service:x:998:999::/nonexistent:/usr/sbin/nologin\n' ;;
             *) return 1 ;;
         esac
     }
     id() {
         case "$1" in
-            -gn) printf 'gpn-test\n' ;;
+            -gn) printf 'sample-service\n' ;;
             -g|-G) printf '999\n' ;;
             *) return 1 ;;
         esac
     }
-    service_account_is_safe gpn-test gpn-test
+    service_account_is_safe sample-service sample-service
 ); then
     pass "an isolated system service account remains valid"
 else
@@ -678,7 +674,7 @@ if (
     calls="$TMP/account-shared-primary.log"
     getent() {
         case "$1" in
-            group) printf 'gpn-test:x:999:\n' ;;
+            group) printf 'sample-service:x:999:\n' ;;
             passwd)
                 if [[ "$#" == 2 ]]; then
                     return 1
@@ -692,7 +688,7 @@ if (
     useradd() { printf 'unexpected-useradd\n' >> "$calls"; }
     groupdel() { printf 'unexpected-groupdel\n' >> "$calls"; }
     userdel() { printf 'unexpected-userdel\n' >> "$calls"; }
-    ! ensure_service_account gpn-test gpn-test && [[ ! -e "$calls" ]]
+    ! ensure_service_account sample-service sample-service && [[ ! -e "$calls" ]]
 ); then
     pass "service account creation refuses a group used as another user's primary group"
 else
@@ -703,8 +699,8 @@ if (
     user_exists=0
     getent() {
         case "$1" in
-            group) [[ "$group_exists" == 1 ]] && printf 'gpn-intercept:x:999:\n' ;;
-            passwd) [[ "$user_exists" == 1 ]] && printf 'gpn-intercept:x:998:999::/nonexistent:/usr/sbin/nologin\n' ;;
+            group) [[ "$group_exists" == 1 ]] && printf 'fivegpn:x:999:\n' ;;
+            passwd) [[ "$user_exists" == 1 ]] && printf 'fivegpn:x:998:999::/nonexistent:/usr/sbin/nologin\n' ;;
             *) return 1 ;;
         esac
     }
@@ -725,7 +721,7 @@ if (
     created_group=0
     created_uid=""
     created_gid=""
-    ensure_service_account gpn-intercept gpn-intercept created_user created_group created_uid created_gid
+    ensure_service_account fivegpn fivegpn created_user created_group created_uid created_gid
     [[ "$created_user" == 1 && "$created_group" == 1 \
        && "$created_uid" == 998 && "$created_gid" == 999 ]]
 ); then

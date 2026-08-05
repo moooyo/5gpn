@@ -16,7 +16,7 @@ source "$HELPER"
 CONFIG_ROOT="$TMP/config"
 CERT_ROOT="$CONFIG_ROOT/cert"
 mkdir -p "$CERT_ROOT"
-chmod 3771 "$CONFIG_ROOT"
+chmod 0755 "$CONFIG_ROOT"
 chmod 0751 "$CERT_ROOT"
 chmod g-s "$CERT_ROOT"
 printf '%s\n' "$CONFIG_ROOT_MARKER_VALUE" > "$CONFIG_ROOT/$CONFIG_ROOT_MARKER"
@@ -79,7 +79,7 @@ pass "service-owned role marker fails closed"
 
 # The core's own state directory survives the installer's mode sweep.
 #
-# install.sh hardens everything under the mihomo home to 0660/2770. gpn/ must be
+# install.sh hardens everything under the mihomo home to 0660/2770. 5gpn/ must be
 # excluded: state.Dir keeps it 0711 so the certificate oneshot -- root with an
 # empty capability bounding set, and therefore subject to ordinary permission
 # checks -- can traverse without listing, and the certificate request is 0644 so
@@ -89,11 +89,11 @@ pass "service-owned role marker fails closed"
 # Found by upgrading test-env. A fresh install writes the right modes and the
 # sweep only reaches these documents on a host where they already exist, so no
 # amount of fresh-install acceptance could have caught it.
-sweep="$(sed -n '/^    install -d -o root -g "\$MIHOMO_SERVICE_USER" -m 3770 "\$MIHOMO_DIR" || return 1$/,/^    for path in config.yaml; do$/p' "$ROOT/install.sh")"
+sweep="$(sed -n '/^    install -d -o root -g "\$FIVEGPN_SERVICE_USER" -m 3770 "\$MIHOMO_DIR" || return 1$/,/^    for path in config.yaml; do$/p' "$ROOT/install.sh")"
 [[ -n "$sweep" ]] || fail "could not extract the mihomo home mode sweep"
-[[ "$(printf '%s' "$sweep" | grep -c -- '-path "\$MIHOMO_DIR/gpn" -prune')" == 2 ]] \
-    || fail "the mode sweep does not prune \$MIHOMO_DIR/gpn; the certificate request loses 0644"
-pass "the mode sweep prunes the core's gpn/ state directory"
+[[ "$(printf '%s' "$sweep" | grep -c -- '-path "\$FIVEGPN_STATE_DIR" -prune')" == 2 ]] \
+    || fail "the mode sweep does not prune \$FIVEGPN_STATE_DIR; the certificate request loses 0644"
+pass "the mode sweep prunes the core's 5gpn/ state directory"
 
 
 
@@ -112,7 +112,6 @@ pass "the mode sweep prunes the core's gpn/ state directory"
 # the list above cannot hide.
 for site in \
     'cert_role_group' \
-    'cert_root_contents_are_safe' \
     'deploy_cert_roles' \
     'preflight_runtime_publication_paths'; do
     body="$(sed -n "/^${site}()/,/^}/p" "$ROOT/install.sh")"
@@ -122,6 +121,11 @@ for site in \
     printf '%s' "$body" | grep -Fq 'zash' \
         && fail "$site still names the retired zash certificate role"
 done
+legacy_gate="$(sed -n '/^cert_root_contents_are_safe()/,/^}/p' "$ROOT/install.sh")"
+printf '%s' "$legacy_gate" | grep -Fq 'allow_legacy_zash' \
+    || fail "certificate root validation has no explicit legacy-zash migration gate"
+printf '%s' "$legacy_gate" | grep -Fq 'cert_role_tree_is_safe_for_recursive_metadata "$entry" zash' \
+    || fail "legacy-zash migration gate does not structurally validate the legacy role"
 body="$(sed -n '/^publish_roles()/,/^}/p' "$ROOT/scripts/renew-hook.sh")"
 [[ -n "$body" ]] || fail "publish_roles is missing from renew-hook.sh"
 printf '%s' "$body" | grep -Fq 'console' \

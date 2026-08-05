@@ -8,7 +8,7 @@
 # sandboxed daemon, so the console could not repair the file it most needed to,
 # and every cross-cutting edit was two writes with no way to name the pair.
 #
-# The monolith reads one document, <mihomo-home>/gpn/dns.json, with one
+# The monolith reads one document, <mihomo-home>/5gpn/dns.json, with one
 # revision. This script writes it from what is already on the box. It does not
 # touch the sources: an operator who runs it and then decides to roll back has
 # lost nothing.
@@ -24,7 +24,7 @@ fi
 
 CONF_DIR="${1:-/etc/5gpn}"
 MIHOMO_HOME="${2:-/etc/5gpn/mihomo}"
-STATE_DIR="${MIHOMO_HOME}/gpn"
+STATE_DIR="${MIHOMO_HOME}/5gpn"
 
 DNS_ENV="${CONF_DIR}/dns.env"
 POLICY="${CONF_DIR}/policy.json"
@@ -135,7 +135,7 @@ if [[ "$DRY_RUN" == 1 ]]; then
     exit 0
 fi
 
-install -d -m 0700 "$STATE_DIR"
+install -d -m 0711 "$STATE_DIR"
 install -d -m 0700 "${STATE_DIR}/dns-rules"
 
 # A subscription cache is keyed on the rule id alone now. The v5 layout put it

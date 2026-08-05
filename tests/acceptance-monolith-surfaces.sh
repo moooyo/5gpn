@@ -26,7 +26,7 @@ status() { curl -sk --max-time 120 -o /dev/null -w '%{http_code}' -H "Authorizat
 
 head_ "capabilities advertise what is installed"
 caps="$(req "$API/capabilities")"
-for feature in gpn-core gpn-dns gpn-interception gpn-bot; do
+for feature in 5gpn-core 5gpn-dns 5gpn-interception 5gpn-bot; do
   if [ "$(echo "$caps" | jq -r --arg f "$feature" '.features[$f].version // 0')" -ge 1 ]; then
     ok "$feature is advertised"
   else
@@ -37,7 +37,7 @@ done
 head_ "the seeded policy is a list, not null"
 # Go marshals a nil slice as null, and every consumer that iterates it errors on
 # that rather than seeing zero rules.
-rules="$(req "$API/gpn/dns" | jq -c '.document.policy.rules')"
+rules="$(req "$API/5gpn/dns" | jq -c '.document.policy.rules')"
 if [ "$rules" != "null" ]; then
   ok "policy.rules is $rules"
 else
@@ -45,7 +45,7 @@ else
 fi
 
 head_ "HTTP/3 is explicitly unsupported"
-snap="$(req "$API/gpn/interception")"
+snap="$(req "$API/5gpn/interception")"
 rev="$(echo "$snap" | jq -r .revision)"
 if echo "$snap" | jq -e 'has("snapshot") and (.snapshot.http3 == false)' >/dev/null; then
   ok "the snapshot reports http3=false"
@@ -62,13 +62,13 @@ orig_http2="$(echo "$snap" | jq -r '.snapshot.http2')"
 orig_master="$(echo "$snap" | jq -r '.snapshot.enabled')"
 body="$(jq -nc --arg r "$rev" --argjson e "$orig_master" --argjson h2 "$orig_http2" \
          '{revision:$r, enabled:$e, http2:$h2, http3:true}')"
-code="$(status -X PUT --data "$body" "$API/gpn/interception/settings")"
+code="$(status -X PUT --data "$body" "$API/5gpn/interception/settings")"
 if [ "$code" = "422" ]; then
   ok "PUT http3=true is refused with 422"
 else
   bad "PUT http3=true returned $code, expected 422"
 fi
-after="$(req "$API/gpn/interception")"
+after="$(req "$API/5gpn/interception")"
 if [ "$(echo "$after" | jq -r '.revision')" = "$rev" ] \
    && [ "$(echo "$after" | jq -r '.snapshot.http3')" = "false" ]; then
   ok "the rejected write left the revision and http3 state unchanged"
@@ -116,7 +116,7 @@ else
 fi
 
 head_ "the extension catalog"
-cat_res="$(req "$API/gpn/interception/catalog")"
+cat_res="$(req "$API/5gpn/interception/catalog")"
 src_count="$(echo "$cat_res" | jq -r '.catalog.sources | length')"
 if [ "$src_count" -ge 1 ]; then
   ok "$src_count catalog source(s) are configured"
@@ -148,7 +148,7 @@ if [ "$entries" -ge 1 ]; then
   # The review is the whole install path minus the confirmation: it fetches the
   # manifest, checks it against the digest the catalog published and the shape
   # it advertised, and returns the digest an install must quote.
-  rev_res="$(req -X POST --data '{}' "$API/gpn/interception/catalog/$src_id/entries/$entry_id/review")"
+  rev_res="$(req -X POST --data '{}' "$API/5gpn/interception/catalog/$src_id/entries/$entry_id/review")"
   if [ "$(echo "$rev_res" | jq -r '.candidate.detail.id // ""')" = "$entry_id" ]; then
     ok "reviewing $entry_id through the catalog succeeds"
   else
@@ -166,7 +166,7 @@ if [ "$entries" -ge 1 ]; then
   fi
 
   # Nothing was installed by reviewing.
-  if [ "$(req "$API/gpn/interception" | jq -r --arg i "$entry_id" '[.snapshot.modules[] | select(.id==$i)] | length')" = "0" ]; then
+  if [ "$(req "$API/5gpn/interception" | jq -r --arg i "$entry_id" '[.snapshot.modules[] | select(.id==$i)] | length')" = "0" ]; then
     ok "reviewing installed nothing"
   else
     skip "$entry_id was already installed before this run"
@@ -176,15 +176,15 @@ else
 fi
 
 # An unknown source or entry is a 404, not a 500.
-code="$(status -X POST --data '{}' "$API/gpn/interception/catalog/no.such.catalog/entries/x/review")"
+code="$(status -X POST --data '{}' "$API/5gpn/interception/catalog/no.such.catalog/entries/x/review")"
 if [ "$code" = "404" ]; then ok "an unknown catalog is a 404"; else bad "an unknown catalog returned $code"; fi
 if [ "$entries" -ge 1 ]; then
-  code="$(status -X POST --data '{}' "$API/gpn/interception/catalog/$src_id/entries/no.such.entry/review")"
+  code="$(status -X POST --data '{}' "$API/5gpn/interception/catalog/$src_id/entries/no.such.entry/review")"
   if [ "$code" = "404" ]; then ok "an unknown entry is a 404"; else bad "an unknown entry returned $code"; fi
 fi
 
 head_ "the Telegram control plane"
-bot="$(req "$API/gpn/bot")"
+bot="$(req "$API/5gpn/bot")"
 bot_rev="$(echo "$bot" | jq -r .revision)"
 if echo "$bot" | jq -e '.bot | has("token_set")' >/dev/null; then
   ok "the bot view reports whether a token is set"
@@ -205,14 +205,14 @@ fi
 # An enabled bot with no token, or no admins, answers nobody. Both are refused
 # rather than stored, because an operator would read the silence as a network
 # fault and go looking in the wrong place.
-code="$(status -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:true, admins:[42], alerts:false}')" "$API/gpn/bot")"
+code="$(status -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:true, admins:[42], alerts:false}')" "$API/5gpn/bot")"
 if [ "$code" = "422" ]; then ok "enabling without a token is refused"; else bad "enabling without a token returned $code"; fi
-code="$(status -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:true, admins:[], alerts:false, token:"123:fake"}')" "$API/gpn/bot")"
+code="$(status -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:true, admins:[], alerts:false, token:"123:fake"}')" "$API/5gpn/bot")"
 if [ "$code" = "422" ]; then ok "enabling without an admin is refused"; else bad "enabling without an admin returned $code"; fi
 
 # A disabled write with a token stores it without starting anything, which is
 # what lets an operator stage the configuration before turning it on.
-res="$(req -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:false, admins:[42], alerts:false, token:"123:acceptance-fake"}')" "$API/gpn/bot")"
+res="$(req -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:false, admins:[42], alerts:false, token:"123:acceptance-fake"}')" "$API/5gpn/bot")"
 if [ "$(echo "$res" | jq -r '.bot.token_set')" = "true" ] && [ "$(echo "$res" | jq -r '.bot.enabled')" = "false" ]; then
   ok "a token can be staged without enabling the bot"
 else
@@ -221,7 +221,7 @@ fi
 bot_rev="$(echo "$res" | jq -r .revision)"
 
 # Editing the admin list without resending the token must keep it.
-res="$(req -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:false, admins:[42,43], alerts:false}')" "$API/gpn/bot")"
+res="$(req -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:false, admins:[42,43], alerts:false}')" "$API/5gpn/bot")"
 if [ "$(echo "$res" | jq -r '.bot.token_set')" = "true" ] && [ "$(echo "$res" | jq -r '.bot.admins | length')" = "2" ]; then
   ok "editing the admin list keeps the stored token"
 else
@@ -229,11 +229,11 @@ else
 fi
 bot_rev="$(echo "$res" | jq -r .revision)"
 
-code="$(status -X PUT --data "$(jq -nc '{revision:"stale", enabled:false, admins:[42], alerts:false}')" "$API/gpn/bot")"
+code="$(status -X PUT --data "$(jq -nc '{revision:"stale", enabled:false, admins:[42], alerts:false}')" "$API/5gpn/bot")"
 if [ "$code" = "409" ]; then ok "a stale bot revision is refused with 409"; else bad "a stale bot write returned $code"; fi
 
 # Restore: clear the token and the admins.
-res="$(req -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:false, admins:[], alerts:false, token:"-"}')" "$API/gpn/bot")"
+res="$(req -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:false, admins:[], alerts:false, token:"-"}')" "$API/5gpn/bot")"
 if [ "$(echo "$res" | jq -r '.bot.token_set')" = "false" ]; then
   ok "the token was cleared and the gateway is back where it started"
 else
@@ -241,7 +241,7 @@ else
 fi
 
 head_ "the bot document is on disk, 0600, and holds no token"
-doc=/etc/5gpn/mihomo/gpn/bot.json
+doc=/etc/5gpn/mihomo/5gpn/bot.json
 if [ -f "$doc" ]; then
   ok "$doc exists"
   mode="$(stat -c '%a' "$doc")"

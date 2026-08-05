@@ -19,12 +19,12 @@ head_() { echo; echo "== $1"; }
 CONF=/etc/5gpn/mihomo/config.yaml
 SECRET="$(grep -m1 -E "^secret:" "$CONF" | sed -E "s/^secret: *'?([^']*)'?.*/\1/")"
 API="https://127.0.0.1:443"
-REQUEST=/etc/5gpn/mihomo/gpn/certificate-request
+REQUEST=/etc/5gpn/mihomo/5gpn/certificate-request
 HOST=smoke.5gpn-beta.example
 EXT=beta.smoke
 
 req() { curl -sk --max-time 60 -H "Authorization: Bearer ${SECRET}" -H 'Content-Type: application/json' "$@"; }
-irev() { req "$API/gpn/interception" | jq -r .revision; }
+irev() { req "$API/5gpn/interception" | jq -r .revision; }
 
 MANIFEST="$(cat <<YAML
 apiVersion: 5gpn.io/v1
@@ -56,7 +56,7 @@ digest_before="$(head -n1 "$REQUEST")"
 
 head_ "review"
 body="$(jq -nc --arg c "$MANIFEST" '{content:$c}')"
-review="$(req -X POST --data "$body" "$API/gpn/interception/review")"
+review="$(req -X POST --data "$body" "$API/5gpn/interception/review")"
 cand="$(echo "$review" | jq -r '.candidate.digest // ""')"
 if [ -n "$cand" ]; then
   ok "the manifest reviews to digest ${cand:0:16}"
@@ -79,14 +79,14 @@ head_ "install"
 # A digest that does not match what a fresh fetch produces must be refused --
 # that check is the whole reason the digest exists.
 wrong="$(jq -nc --arg r "$(irev)" --arg c "$MANIFEST" '{revision:$r, digest:"0000000000000000", content:$c}')"
-if req -X POST --data "$wrong" "$API/gpn/interception/extensions" | jq -e '.message' >/dev/null 2>&1; then
+if req -X POST --data "$wrong" "$API/5gpn/interception/extensions" | jq -e '.message' >/dev/null 2>&1; then
   ok "an install quoting the wrong digest is refused"
 else
   bad "an install with a wrong digest was accepted"
 fi
 
 body="$(jq -nc --arg r "$(irev)" --arg d "$cand" --arg c "$MANIFEST" '{revision:$r, digest:$d, content:$c}')"
-res="$(req -X POST --data "$body" "$API/gpn/interception/extensions")"
+res="$(req -X POST --data "$body" "$API/5gpn/interception/extensions")"
 if echo "$res" | jq -e --arg id "$EXT" '.snapshot.modules[] | select(.id == $id)' >/dev/null 2>&1; then
   ok "the extension is installed"
 else
@@ -106,7 +106,7 @@ fi
 
 head_ "enable, and the certificate that follows"
 res="$(req -X PUT --data "$(jq -nc --arg r "$(irev)" '{revision:$r, enabled:true}')" \
-        "$API/gpn/interception/extensions/${EXT}/enabled")"
+        "$API/5gpn/interception/extensions/${EXT}/enabled")"
 if [ "$(echo "$res" | jq -r --arg id "$EXT" '.snapshot.modules[]|select(.id==$id)|.enabled')" = "true" ]; then
   ok "the extension is enabled"
 else
@@ -140,7 +140,7 @@ fi
 head_ "the resolver sees the capture"
 # With the master off the declaration is carried but inert -- and the diagnostic
 # has to say so, because the extensions page shows the extension as enabled.
-exp="$(req "$API/gpn/dns/resolve?name=${HOST}")"
+exp="$(req "$API/5gpn/dns/resolve?name=${HOST}")"
 if [ "$(echo "$exp" | jq -r '.capture.extensionId')" = "$EXT" ]; then
   ok "the resolver attributes the name to the extension"
 else
@@ -153,9 +153,9 @@ else
 fi
 
 req -X PUT --data "$(jq -nc --arg r "$(irev)" '{revision:$r, enabled:true, http2:true, http3:false}')" \
-    "$API/gpn/interception/settings" >/dev/null
-exp="$(req "$API/gpn/dns/resolve?name=${HOST}")"
-gw="$(jq -r .gateway /etc/5gpn/mihomo/gpn/dns.json)"
+    "$API/5gpn/interception/settings" >/dev/null
+exp="$(req "$API/5gpn/dns/resolve?name=${HOST}")"
+gw="$(jq -r .gateway /etc/5gpn/mihomo/5gpn/dns.json)"
 if [ "$(echo "$exp" | jq -r '.capture.ready')" = "true" ] \
    && [ "$(echo "$exp" | jq -r '.answers[0]')" = "$gw" ] \
    && [ "$(echo "$exp" | jq -r '.verdict.reason')" = "force-proxy" ]; then
@@ -166,8 +166,8 @@ fi
 
 head_ "clean up"
 req -X PUT --data "$(jq -nc --arg r "$(irev)" '{revision:$r, enabled:false, http2:true, http3:false}')" \
-    "$API/gpn/interception/settings" >/dev/null
-res="$(req -X DELETE --data "$(jq -nc --arg r "$(irev)" '{revision:$r}')" "$API/gpn/interception/extensions/${EXT}")"
+    "$API/5gpn/interception/settings" >/dev/null
+res="$(req -X DELETE --data "$(jq -nc --arg r "$(irev)" '{revision:$r}')" "$API/5gpn/interception/extensions/${EXT}")"
 if echo "$res" | jq -e --arg id "$EXT" '[.snapshot.modules[]|select(.id==$id)]|length == 0' >/dev/null 2>&1; then
   ok "the extension is uninstalled"
 else
@@ -178,7 +178,7 @@ if [ "$(head -n1 "$REQUEST")" = "$digest_before" ]; then
 else
   bad "the request did not return to its original digest"
 fi
-if [ "$(req "$API/gpn/interception" | jq -r '.snapshot.enabled')" = "false" ]; then
+if [ "$(req "$API/5gpn/interception" | jq -r '.snapshot.enabled')" = "false" ]; then
   ok "the MITM master is off again"
 else
   bad "the master was left on"

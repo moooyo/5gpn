@@ -16,7 +16,7 @@ external-controller: ""
 external-controller-tls: 127.0.0.1:443
 # The zashboard bundle, served at /ui/ on the controller above -- so the panel
 # is https://__CONSOLE_DOMAIN__/ui/. This path is not
-# free: mihomo.service names it in both SAFE_PATHS and ReadOnlyPaths, and the
+# free: 5gpn-mihomo.service names it in both SAFE_PATHS and ReadOnlyPaths, and the
 # unit's ReadOnlyPaths entry carries no `-` prefix, so systemd refuses to build
 # the namespace -- the service does not start -- if nothing has published here.
 # install.sh publishes the dist to it before install_units runs.

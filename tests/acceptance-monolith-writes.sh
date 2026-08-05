@@ -16,31 +16,31 @@ req() { curl -sk --max-time 30 -H "Authorization: Bearer ${SECRET}" -H 'Content-
 status() { curl -sk --max-time 30 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${SECRET}" -H 'Content-Type: application/json' "$@"; }
 
 head_ "DNS document write"
-orig="$(req "$API/gpn/dns")"
+orig="$(req "$API/5gpn/dns")"
 rev="$(echo "$orig" | jq -r .revision)"
 doc="$(echo "$orig" | jq -c .document)"
 orig_ecs="$(echo "$doc" | jq -r '.upstreams.ecs')"
 
 # Change one field and prove it reaches the running resolver, not just the file.
 body="$(jq -nc --arg r "$rev" --argjson d "$(echo "$doc" | jq -c '.upstreams.ecs = "203.0.113.0/24"')" '{revision:$r, document:$d}')"
-after="$(req -X PUT --data "$body" "$API/gpn/dns")"
+after="$(req -X PUT --data "$body" "$API/5gpn/dns")"
 if [ "$(echo "$after" | jq -r '.document.upstreams.ecs')" = "203.0.113.0/24" ]; then
-  ok "PUT /gpn/dns applied and returned the new document"
+  ok "PUT /5gpn/dns applied and returned the new document"
 else
-  bad "PUT /gpn/dns: $(echo "$after" | head -c 200)"
+  bad "PUT /5gpn/dns: $(echo "$after" | head -c 200)"
 fi
 newrev="$(echo "$after" | jq -r .revision)"
 if [ "$newrev" != "$rev" ] && [ -n "$newrev" ]; then ok "the revision advanced"; else bad "the revision did not move"; fi
 
 # Two tabs. The stale revision must lose rather than silently overwrite.
-code="$(status -X PUT --data "$body" "$API/gpn/dns")"
+code="$(status -X PUT --data "$body" "$API/5gpn/dns")"
 if [ "$code" = "409" ]; then ok "a stale revision is refused with 409"; else bad "a stale write returned $code, expected 409"; fi
 
 # Listener settings are installation-owned and fail before persistence.
 listener_body="$(jq -nc --arg r "$newrev" --argjson d "$(echo "$after" | jq -c '.document | .listen.debug = "127.0.0.1:5355"')" '{revision:$r, document:$d}')"
-code="$(status -X PUT --data "$listener_body" "$API/gpn/dns")"
+code="$(status -X PUT --data "$listener_body" "$API/5gpn/dns")"
 if [ "$code" = "400" ]; then ok "listener changes are refused with 400"; else bad "a listener change returned $code"; fi
-if [ "$(req "$API/gpn/dns" | jq -r .revision)" = "$newrev" ]; then
+if [ "$(req "$API/5gpn/dns" | jq -r .revision)" = "$newrev" ]; then
   ok "the rejected listener change did not move the revision"
 else
   bad "a rejected listener change changed the document"
@@ -48,21 +48,21 @@ fi
 
 # An invalid document must leave the running resolver untouched.
 badbody="$(jq -nc --arg r "$newrev" --argjson d "$(echo "$doc" | jq -c '.upstreams.trust = ["not-an-upstream"]')" '{revision:$r, document:$d}')"
-code="$(status -X PUT --data "$badbody" "$API/gpn/dns")"
+code="$(status -X PUT --data "$badbody" "$API/5gpn/dns")"
 if [ "$code" = "400" ]; then ok "an invalid upstream spec is refused with 400"; else bad "an invalid document returned $code"; fi
-if [ "$(req "$API/gpn/dns" | jq -r .revision)" = "$newrev" ]; then
+if [ "$(req "$API/5gpn/dns" | jq -r .revision)" = "$newrev" ]; then
   ok "the rejected write did not move the revision"
 else
   bad "a rejected write changed the document"
 fi
 
 # Restore.
-cur="$(req "$API/gpn/dns")"
+cur="$(req "$API/5gpn/dns")"
 restore="$(jq -nc --arg r "$(echo "$cur" | jq -r .revision)" \
                   --argjson d "$(echo "$cur" | jq -c --arg e "$orig_ecs" '.document | .upstreams.ecs = $e')" \
                   '{revision:$r, document:$d}')"
-req -X PUT --data "$restore" "$API/gpn/dns" >/dev/null
-if [ "$(req "$API/gpn/dns" | jq -r '.document.upstreams.ecs')" = "$orig_ecs" ]; then
+req -X PUT --data "$restore" "$API/5gpn/dns" >/dev/null
+if [ "$(req "$API/5gpn/dns" | jq -r '.document.upstreams.ecs')" = "$orig_ecs" ]; then
   ok "the original client subnet was restored"
 else
   bad "restore failed — the gateway is not where it started"
@@ -76,12 +76,12 @@ else
 fi
 
 head_ "interception settings write"
-snap="$(req "$API/gpn/interception")"
+snap="$(req "$API/5gpn/interception")"
 irev="$(echo "$snap" | jq -r .revision)"
 was="$(echo "$snap" | jq -r '.snapshot.enabled')"
 
 on="$(jq -nc --arg r "$irev" '{revision:$r, enabled:true, http2:true, http3:false}')"
-res="$(req -X PUT --data "$on" "$API/gpn/interception/settings")"
+res="$(req -X PUT --data "$on" "$API/5gpn/interception/settings")"
 if [ "$(echo "$res" | jq -r '.snapshot.enabled')" = "true" ]; then
   ok "the MITM master can be turned on"
 else
@@ -99,7 +99,7 @@ fi
 
 back="$(jq -nc --arg r "$(echo "$res" | jq -r .revision)" --argjson w "$was" \
         '{revision:$r, enabled:$w, http2:true, http3:false}')"
-res="$(req -X PUT --data "$back" "$API/gpn/interception/settings")"
+res="$(req -X PUT --data "$back" "$API/5gpn/interception/settings")"
 if [ "$(echo "$res" | jq -r '.snapshot.enabled')" = "$was" ]; then
   ok "the master was restored to $was"
 else
@@ -110,7 +110,7 @@ head_ "extension review refuses what it should"
 # A pasted manifest that is not the native format must be refused outright:
 # there is no compatibility mode, because a partially understood manifest drops
 # permissions and capture hosts silently.
-res="$(req -X POST --data '{"content":"apiVersion: v1\nkind: ConfigMap\n"}' "$API/gpn/interception/review")"
+res="$(req -X POST --data '{"content":"apiVersion: v1\nkind: ConfigMap\n"}' "$API/5gpn/interception/review")"
 if echo "$res" | jq -e '.message' >/dev/null 2>&1; then
   ok "a foreign manifest is refused: $(echo "$res" | jq -r '.message' | head -c 80)"
 else
@@ -118,7 +118,7 @@ else
 fi
 
 # An install without a reviewed digest is not a decision the operator made.
-res="$(status -X POST --data '{"revision":"'"$(req "$API/gpn/interception" | jq -r .revision)"'","url":"https://example.invalid/x.yaml"}' "$API/gpn/interception/extensions")"
+res="$(status -X POST --data '{"revision":"'"$(req "$API/5gpn/interception" | jq -r .revision)"'","url":"https://example.invalid/x.yaml"}' "$API/5gpn/interception/extensions")"
 if [ "$res" = "400" ]; then ok "an install without a digest is refused"; else bad "install without a digest returned $res"; fi
 
 echo

@@ -226,10 +226,12 @@ else
     fail "project-private swap path missing"
 fi
 
-if grep -Eq '^remove_legacy_|xray\.service|smartdns\.service|sing-box\.service' "$INSTALL"; then
-    fail "old-release service teardown remains"
+if grep -Eq 'xray\.service|smartdns\.service|sing-box\.service' "$INSTALL"; then
+    fail "unrelated historical service teardown remains"
+elif grep -Eq '^remove_legacy_service_accounts\(\)' "$INSTALL"; then
+    pass "only the exact 5gpn identity migration teardown remains"
 else
-    pass "installer has no old-release service teardown"
+    fail "the exact 5gpn identity migration teardown is missing"
 fi
 
 renew_remove="$(sed -n '/^remove_owned_renewal_automation()/,/^}/p' "$INSTALL")"
@@ -238,10 +240,13 @@ grep -Fq 'remove_unit 5gpn-certbot-renew.timer' <<<"$renew_remove" \
     && pass "renewal timer and service are both torn down" \
     || fail "renewal teardown misses a unit"
 
-grep -Fq 'MIHOMO_BIN="${BIN_DIR}/mihomo"' "$INSTALL" \
-    && grep -Fq 'GUM_BIN="${BIN_DIR}/gum"' "$INSTALL" \
-    && pass "generic mihomo/gum binaries moved under the project root" \
-    || fail "generic global binary collision remains"
+if grep -Fxq 'MIHOMO_BIN="${BIN_DIR}/5gpn-mihomo"' "$INSTALL" \
+   && ! grep -Fxq 'MIHOMO_BIN="${BIN_DIR}/mihomo"' "$INSTALL" \
+   && grep -Fxq 'GUM_BIN="${BIN_DIR}/gum"' "$INSTALL"; then
+    pass "the runtime binary is 5gpn-prefixed under the project root"
+else
+    fail "the runtime binary still uses an unprefixed or global path"
+fi
 uninstall_fn="$(sed -n '/^uninstall()/,/^}/p' "$INSTALL")"
 grep -Fq 'remove_runtime_preserving_gum' <<<"$uninstall_fn" \
     && ! grep -Fq 'remove_fixed_owned_dir "$BASE_DIR"' <<<"$uninstall_fn" \
@@ -311,8 +316,8 @@ if command -v openssl >/dev/null 2>&1; then
     cert_failure_root="$(mktemp -d)"
     DEBUG_CERT_DIR="$cert_failure_root/debug-cert"
     DNS_CERT_DIR="$cert_failure_root/cert"
-    DNS_SERVICE_USER="$(id -gn)"
-    MIHOMO_SERVICE_USER="$DNS_SERVICE_USER"
+    FIVEGPN_SERVICE_USER="$(id -un)"
+    FIVEGPN_SERVICE_GROUP="$(id -gn)"
     mkdir -p "$DEBUG_CERT_DIR/example.com" "$DNS_CERT_DIR"
     cp "$cert_tmp/cert.pem" "$DEBUG_CERT_DIR/example.com/fullchain.pem"
     cp "$cert_tmp/key.pem" "$DEBUG_CERT_DIR/example.com/privkey.pem"

@@ -15,9 +15,15 @@ export RENEW_HOOK_LIB_ONLY=1
 TEST_PATH="$PATH"
 source "$HOOK"
 PATH="$TEST_PATH"
+# The production mapping is held statically; temporary fixtures use the current
+# developer group so an unprivileged test runner can exercise atomic metadata.
+grep -Fq 'dot|console) group="$FIVEGPN_CERT_GROUP"' "$HOOK" \
+    && grep -Fq 'web)         group=root' "$HOOK" \
+    || fail "certificate roles do not map to fivegpn/root"
+role_group() { id -gn; }
 # Behaviour fixtures emulate the scoped helper, which already owns the shared
 # certificate lock before invoking the hook.
-GPN_CERT_LOCK_HELD=1
+FIVEGPN_CERT_LOCK_HELD=1
 
 # Fixtures are intentionally self-signed; production chain verification itself
 # is locked structurally below while SAN/key/publication behavior stays real.
@@ -35,7 +41,7 @@ IOSGEN="$TMP/no-ios-generator"
 WWW_DIR="$TMP/www"
 SYSTEMCTL_LOG="$TMP/systemctl.log"
 mkdir -p "$LE_LIVE_ROOT"
-chmod 3771 "$TMP"
+chmod 0755 "$TMP"
 printf '%s\n' "$CONFIG_ROOT_MARKER_VALUE" > "$TMP/$CONFIG_ROOT_MARKER"
 chmod 0644 "$TMP/$CONFIG_ROOT_MARKER"
 mkdir -p "$CERT_ROOT"

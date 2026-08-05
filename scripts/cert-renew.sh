@@ -31,8 +31,7 @@ RENEW_BEFORE_SECONDS=$((30 * 86400))
 MIHOMO_RESTORE_NEEDED=0
 RENEW_LOCK_FILE=/run/5gpn/cert-renew.lock
 INSTALL_LOCK_FILE=/run/5gpn/install.lock
-DNS_CERT_GROUP=5gpn-dns
-MIHOMO_CERT_GROUP=mihomo
+FIVEGPN_CERT_GROUP=fivegpn
 CONFIG_ROOT_MARKER=.5gpn-owned
 CONFIG_ROOT_MARKER_VALUE=5gpn-config
 CERT_ROOT_MARKER=.5gpn-cert-root-owned
@@ -74,6 +73,14 @@ named_group_gid() {
     IFS=: read -r _ _ gid _ <<<"$entry"
     [[ "$gid" =~ ^[0-9]+$ ]] || return 1
     printf '%s\n' "$gid"
+}
+
+certificate_role_group() {
+    case "$1" in
+        dot|console) printf '%s\n' "$FIVEGPN_CERT_GROUP" ;;
+        web)         printf '%s\n' root ;;
+        *)           return 1 ;;
+    esac
 }
 
 normalized_mode() {
@@ -198,12 +205,11 @@ role_generation_tree_safe() {
 }
 
 certificate_role_tree_safe() {
-    local config_root root_gid dns_gid role group expected_gid dest marker generations
+    local config_root root_gid role group expected_gid dest marker generations
     local entry name current target
     config_root="$(dirname -- "$CERT_ROOT")"
     root_gid="$(named_group_gid root)" || return 1
-    dns_gid="$(named_group_gid "$DNS_CERT_GROUP")" || return 1
-    canonical_directory_metadata_safe "$config_root" "$dns_gid" 3771 || return 1
+    canonical_directory_metadata_safe "$config_root" "$root_gid" 755 || return 1
     plain_file_metadata_safe "$config_root/$CONFIG_ROOT_MARKER" "$root_gid" 644 \
         && [[ "$(cat "$config_root/$CONFIG_ROOT_MARKER" 2>/dev/null || true)" == "$CONFIG_ROOT_MARKER_VALUE" ]] \
         || return 1
@@ -222,8 +228,7 @@ certificate_role_tree_safe() {
         esac
     done < <(find "$CERT_ROOT" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
     for role in dot web console; do
-        group="$DNS_CERT_GROUP"
-        [[ "$role" == console ]] && group="$MIHOMO_CERT_GROUP"
+        group="$(certificate_role_group "$role")" || return 1
         expected_gid="$(named_group_gid "$group")" || return 1
         dest="$CERT_ROOT/$role"
         canonical_directory_metadata_safe "$dest" "$expected_gid" 750 || return 1
@@ -263,8 +268,7 @@ role_copies_match_live() {
     local live="$1" role cert key current group expected_gid
     certificate_role_tree_safe || return 1
     for role in dot web console; do
-        group="$DNS_CERT_GROUP"
-        [[ "$role" == console ]] && group="$MIHOMO_CERT_GROUP"
+        group="$(certificate_role_group "$role")" || return 1
         expected_gid="$(named_group_gid "$group")" || return 1
         current="${CERT_ROOT}/${role}/current"
         [[ -L "$current" && "$(readlink -- "$current")" =~ ^generations/[A-Za-z0-9._-]+$ ]] \
@@ -289,11 +293,11 @@ ensure_live_deployed() {
     local live="$1"
     deploy_hook_owned \
         || { err "Owned 5gpn certificate deploy hook is missing or invalid: ${DEPLOY_HOOK}."; return 1; }
-    GPN_CERT_LOCK_HELD=1 RENEW_HOOK_VALIDATE_ONLY=1 RENEWED_LINEAGE="$live" "$DEPLOY_HOOK" >/dev/null \
+    FIVEGPN_CERT_LOCK_HELD=1 RENEW_HOOK_VALIDATE_ONLY=1 RENEWED_LINEAGE="$live" "$DEPLOY_HOOK" >/dev/null \
         || { err "Live lineage failed the configured mode/SAN/key validation."; return 1; }
     role_copies_match_live "$live" && return 0
     warn "Certificate role copies differ from the live lineage; redeploying them before returning."
-    GPN_CERT_LOCK_HELD=1 RENEWED_LINEAGE="$live" "$DEPLOY_HOOK" || return 1
+    FIVEGPN_CERT_LOCK_HELD=1 RENEWED_LINEAGE="$live" "$DEPLOY_HOOK" || return 1
     role_copies_match_live "$live" \
         || { err "Certificate role copies still differ after deploy-hook recovery."; return 1; }
 }
@@ -362,11 +366,11 @@ wait_for_http_dns() {
 restore_mihomo() {
     [[ "$MIHOMO_RESTORE_NEEDED" == 1 ]] || return 0
     MIHOMO_RESTORE_NEEDED=0
-    if systemctl start mihomo; then
-        ok "mihomo restored after the HTTP-01 renewal attempt."
+    if systemctl start 5gpn-mihomo.service; then
+        ok "5gpn-mihomo restored after the HTTP-01 renewal attempt."
         return 0
     fi
-    err "Could not restore mihomo after the HTTP-01 renewal attempt."
+    err "Could not restore 5gpn-mihomo after the HTTP-01 renewal attempt."
     return 1
 }
 
@@ -376,13 +380,13 @@ run_http_renewal() (
     trap 'restore_mihomo || true' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    if systemctl is-active --quiet mihomo 2>/dev/null; then
-        info "Temporarily stopping mihomo to release TCP :80 for HTTP-01."
+    if systemctl is-active --quiet 5gpn-mihomo.service 2>/dev/null; then
+        info "Temporarily stopping 5gpn-mihomo to release TCP :80 for HTTP-01."
         MIHOMO_RESTORE_NEEDED=1
-        systemctl stop mihomo \
-            || { err "Could not stop mihomo; refusing to start Certbot with :80 still occupied."; return 1; }
+        systemctl stop 5gpn-mihomo.service \
+            || { err "Could not stop 5gpn-mihomo; refusing to start Certbot with :80 still occupied."; return 1; }
     fi
-    GPN_CERT_LOCK_HELD=1 certbot "${certbot_args[@]}" || certbot_rc=$?
+    FIVEGPN_CERT_LOCK_HELD=1 certbot "${certbot_args[@]}" || certbot_rc=$?
     restore_mihomo || restore_rc=$?
     trap - EXIT INT TERM
     [[ "$certbot_rc" == 0 ]] || return "$certbot_rc"
@@ -528,7 +532,7 @@ cert_renew_main() {
         run_http_renewal "${certbot_args[@]}" \
             || { err "Scoped HTTP-01 certificate renewal failed."; return 1; }
     else
-        GPN_CERT_LOCK_HELD=1 certbot "${certbot_args[@]}" \
+        FIVEGPN_CERT_LOCK_HELD=1 certbot "${certbot_args[@]}" \
             || { err "Scoped Cloudflare DNS-01 certificate renewal failed."; return 1; }
     fi
     ensure_live_deployed "${LE_LIVE_ROOT}/${base}" || return 1

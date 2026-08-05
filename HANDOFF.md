@@ -7,9 +7,9 @@ superseded where it conflicts with the current monolith or HTTP/3 boundary.
 
 | Repository | Maintenance branch | Release coordinate |
 | --- | --- | --- |
-| `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.13` |
-| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.20` |
-| `moooyo/5gpn` | `main` | `0.0.63` |
+| `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.16` |
+| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.22` |
+| `moooyo/5gpn` | `main` | `0.0.64` (publication target) |
 
 The stable release has one long-running process: mihomo. HTTP/3 interception is
 unsupported, `http3=true` is rejected, and the fixed global UDP/443 `REJECT`
@@ -17,15 +17,28 @@ cannot be disabled through product management. Fallback-capable clients may
 retry over TCP and enter HTTP/H1/H2 capture; H3-only clients fail. There is no
 sidecar, runtime-overlay publication, or loopback SOCKS return path.
 
-Green: `go test -race ./gpn/...` (**run it in WSL** — Windows has no gcc, so
-`-race` cannot build there), all 28 installer suites, four console build-time
-checks, and CI on every branch push. See [Reproducing the checks](#reproducing-the-checks).
+The installed runtime is `5gpn-mihomo.service`, executes
+`/opt/5gpn/bin/5gpn-mihomo`, and uses the sole managed Unix identity
+`fivegpn:fivegpn`. Runtime documents live under
+`/etc/5gpn/mihomo/5gpn`; authenticated product routes are `/5gpn/*`, and
+capability keys are `5gpn-*`. Unprefixed names are legacy migration inputs,
+not current aliases.
+
+The target gate includes `go test -race ./5gpn/...` (**run it in WSL** —
+Windows has no gcc, so `-race` cannot build there), every installer suite, the
+console build-time checks, and CI on every maintenance-branch push. See
+[Reproducing the checks](#reproducing-the-checks).
 
 ---
 
-## Pick up here
+## Historical pickup record (superseded)
 
-Nothing is half-finished; everything below is a next thing, not a loose end.
+The remainder of this file is retained as a dated engineering record. Old
+paths, capability keys, API routes, units, and release coordinates below are
+historical evidence, not supported aliases or current instructions.
+
+Nothing was half-finished at the time of this record; everything below was a
+next thing, not a loose end.
 The former beta line is promoted to `main` as stable `0.0.62`; `main`, `beta`,
 and `feat/installer-tui` identify the same release commit.
 
@@ -41,7 +54,7 @@ In the order they are worth doing:
 2. **Second-install acceptance** — still the top item on the installer side, and
    still nothing installs, upgrades, then asserts. Nine of ten faults in the
    earlier round lived in that transition.
-3. **`gpn/engine` request-path tests** — the proxy path, the goja runtime and
+3. **`5gpn/engine` request-path tests** — the proxy path, the goja runtime and
    TLS termination are the largest untested surface, and they are the parts that
    see live traffic and run operator-supplied JavaScript.
 4. **Unverified despite shipping:** the read-only bot against a real Telegram
@@ -790,8 +803,8 @@ because `install.sh` fetches digest-pinned artifacts and `quick-install.sh`
 fetches a digest-checked bundle. There is no local-bundle install path.
 
 - **mihomo** has no working Actions on the fork: every `v1.19.28-*` release was
-  built locally and uploaded. Build with the flags `package-beta.sh` uses
-  (`CGO_ENABLED=0 GOOS=linux GOARCH=amd64 -tags with_gvisor -trimpath`, ldflags
+  built locally and uploaded. Build with
+  `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 -tags with_gvisor -trimpath`, with ldflags
   setting `constant.Version` **and** `constant.BuildTime`), gzip to
   `mihomo-linux-amd64-compatible-<tag>.gz`, `gh release create --prerelease`.
   The version token must match `MIHOMO_VERSION` exactly —

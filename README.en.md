@@ -62,7 +62,7 @@ DNS policy is one globally ordered, first-match rule list:
 
 The table describes successful A answers. When adopting or rewriting an upstream response, 5gpn preserves its Rcode and authority data; `NXDOMAIN` and `SERVFAIL` never become `NOERROR`.
 
-`auto` queries the China and trust upstream groups concurrently. Members within each group are attempted sequentially in configured order with fair slices of the remaining deadline. Fresh installations seed `223.5.5.5:53` and `22.22.22.22:53` into `/etc/5gpn/mihomo/gpn/dns.json`, the atomic source of truth for DNS policy and upstreams, after which the Console can hot-apply a revision-protected whole-document update. A member of either group declares its transport by spec form: a bare `IP[:port]` is plain UDP, `serverName@IP[:port]` is DoT, and `https://host/path@IP[:port]` is DoH over a pooled HTTP/2 connection. Transport is a per-member property, so one group may mix all three. Plain UDP carries no query-name anti-spoof mechanism, so prefer DoT or DoH wherever the resolver offers it. A queries follow the policy above; AAAA, HTTPS, and SVCB return NODATA with authority data. Other types go to the trust group with AAAA, HTTPS, and SVCB records removed from every section before the reply is cached or returned.
+`auto` queries the China and trust upstream groups concurrently. Members within each group are attempted sequentially in configured order with fair slices of the remaining deadline. Fresh installations seed `223.5.5.5:53` and `22.22.22.22:53` into `/etc/5gpn/mihomo/5gpn/dns.json`, the atomic source of truth for DNS policy and upstreams, after which the Console can hot-apply a revision-protected whole-document update. A member of either group declares its transport by spec form: a bare `IP[:port]` is plain UDP, `serverName@IP[:port]` is DoT, and `https://host/path@IP[:port]` is DoH over a pooled HTTP/2 connection. Transport is a per-member property, so one group may mix all three. Plain UDP carries no query-name anti-spoof mechanism, so prefer DoT or DoH wherever the resolver offers it. A queries follow the policy above; AAAA, HTTPS, and SVCB return NODATA with authority data. Other types go to the trust group with AAAA, HTTPS, and SVCB records removed from every section before the reply is cached or returned.
 
 The AAAA NODATA is not client-only. After mihomo sniffs a hostname it re-resolves the origin through the loopback resolver on `127.0.0.1:5354`, which returns the same synthetic NODATA before consulting any upstream. That boundary is what actually keeps egress on IPv4: mihomo issues an AAAA query for every origin unconditionally, its `dns.ipv6` setting does not suppress it — only the top-level `ipv6` key does — and `/etc/5gpn/mihomo/config.yaml` is fully operator-owned, so no seed value can be assumed present. If the AAAA were forwarded, mihomo would learn the origin's real IPv6 addresses and race them against the IPv4 ones; once the IPv6 leg completes its TCP handshake the dual-stack fallback no longer fires, and a destination that refuses or mislocates the gateway's datacenter IPv6 prefix then fails at the application layer with nothing left to fall back to. With NODATA, mihomo has only IPv4 candidates. The trade-off is accepted deliberately: an origin published only as AAAA — or an operator node configured by hostname — is unreachable through the gateway, and on an IPv4-only data plane an IPv6 answer would not have been dialable either. Fresh and explicitly reset mihomo seeds additionally set `ipv6: false` as defence in depth.
 
@@ -157,9 +157,16 @@ sudo 5gpn status
 Run a minimal service and configuration check:
 
 ```bash
-sudo systemctl is-active mihomo
-sudo /opt/5gpn/bin/mihomo -t -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo
+sudo systemctl is-active 5gpn-mihomo
+sudo /opt/5gpn/bin/5gpn-mihomo -t -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo
 ```
+
+The installer owns one Unix service identity, `fivegpn:fivegpn`. DNS,
+interception, Telegram, and forwarding all run inside `5gpn-mihomo.service`;
+there are no separate `gpn-dns`, `gpn-intercept`, or unprefixed `mihomo`
+service accounts. All external product names remain `5gpn`; this spelled-out
+identity is the only exception because portable Linux/POSIX account names
+cannot begin with a digit.
 
 ### Process recovery
 
@@ -174,7 +181,7 @@ connections are lost during a successful restart.
 
 This is process recovery, not self-healing: a persistent bad configuration,
 port conflict, or broken certificate remains an operator-visible failure. A
-deliberate `systemctl stop mihomo` stays stopped. Use an independent external
+deliberate `systemctl stop 5gpn-mihomo` stays stopped. Use an independent external
 monitor that actively probes DoT and HTTPS; the persisted `DNS_HEARTBEAT_*`
 fields are not consumed by the monolith and provide no health signal.
 DNS listener and certificate-path fields are installation-owned; controller
@@ -193,7 +200,7 @@ dig @127.0.0.1 -p 5353 example.com A
 Replace the example domain and address with actual values; skip the first DNS command when an older `dig` lacks `+tls`. Public plain DNS `:53` and remote access to `:5353` must fail. There is no `5gpn-dns` or `5gpn-intercept` service in the monolith. See [tests/integration-smoke.md](tests/integration-smoke.md) for the complete real-host checklist, and run it only on a disposable or explicitly designated Linux gateway.
 
 Then open `https://console.<base>/ui/`. The panel and two iOS profiles are
-public, while `/gpn/*` and the ordinary controller routes require mihomo's
+public, while `/5gpn/*` and the ordinary controller routes require mihomo's
 controller secret. On first open, enter that secret in zashboard. To recover it
 on the host:
 
@@ -221,15 +228,15 @@ operations.
 | --- | --- |
 | `/etc/5gpn/dns.env` | Persistent source of truth for deployment identity and daemon knobs |
 | `/etc/5gpn/mihomo/config.yaml` | Complete operator-owned mihomo configuration |
-| `/etc/5gpn/mihomo/gpn/dns.json` | Ordered DNS policy, upstreams, subscriptions, and resolver settings |
-| `/etc/5gpn/mihomo/gpn/intercept.json` | Interception master, fixed-false HTTP/3 marker, catalogs, and extension snapshots |
-| `/etc/5gpn/mihomo/gpn/bot.json` | Telegram switch, token, administrators, and alerts |
+| `/etc/5gpn/mihomo/5gpn/dns.json` | Ordered DNS policy, upstreams, subscriptions, and resolver settings |
+| `/etc/5gpn/mihomo/5gpn/intercept.json` | Interception master, fixed-false HTTP/3 marker, catalogs, and extension snapshots |
+| `/etc/5gpn/mihomo/5gpn/bot.json` | Telegram switch, token, administrators, and alerts |
 
-Normal install, reinstall, and `configure` validate an existing mihomo file with `mihomo -t` and then preserve it byte for byte. Only explicit `mihomo-reset` or TTY-confirmed `upgrade-reset-mihomo` may replace it after backup, complete validation, and atomic rename. If `configure` finds that a new domain, gateway, or listener conflicts with the operator-owned YAML, it aborts before writing instead of silently modifying the data plane.
+Normal install, reinstall, and `configure` validate an existing mihomo file with `5gpn-mihomo -t` and then preserve it byte for byte. Only explicit `mihomo-reset` or TTY-confirmed `upgrade-reset-mihomo` may replace it after backup, complete validation, and atomic rename. If `configure` finds that a new domain, gateway, or listener conflicts with the operator-owned YAML, it aborts before writing instead of silently modifying the data plane.
 
 The fresh/reset seed starts its `Proxies` group with `DIRECT` only; 5gpn ships no proxy nodes. Running `sudo 5gpn mihomo-reset` directly prints a replacement warning but does not ask for another confirmation. Before running it, prepare to restore custom proxies, providers, groups, and rules from the backup.
 
-Console writes hot-apply the revisioned mihomo `gpn` documents. Deployment values in `dns.env` change only through a validated installer run; certificates hot-reload when their files change.
+Console writes hot-apply the revisioned mihomo `5gpn` documents. Deployment values in `dns.env` change only through a validated installer run; certificates hot-reload when their files change.
 
 ## Common commands
 
@@ -269,7 +276,7 @@ Only the root-owned certificate publisher can read the private CA signing key; m
 ## Upgrades and release channels
 
 - The default quick installer selects only the latest official release. `--beta` is an explicit, per-invocation beta opt-in and is never persisted in `dns.env`.
-- A normal channel transition uses one complete verified installer bundle and preserves a valid current operator-owned mihomo YAML byte for byte. Moving from the retired multi-process design to the monolith is a separate checked migration: it removes only the retired anchors and inbound from a candidate, rewrites the management-plane exclusion to `INNER`, requires the fixed UDP/443 guard, and publishes only after pinned `mihomo -t` succeeds.
+- A normal channel transition uses one complete verified installer bundle and preserves a valid current operator-owned mihomo YAML byte for byte. Moving from the retired multi-process design to the monolith is a separate checked migration: it removes only the retired anchors and inbound from a candidate, rewrites the management-plane exclusion to `INNER`, requires the fixed UDP/443 guard, and publishes only after pinned `5gpn-mihomo -t` succeeds.
 - `upgrade-reset-mihomo` replaces the complete YAML. Custom proxies, providers, groups, and rules are not merged and must be restored manually from the backup.
 - A successful beta upgrade does not guarantee that an in-place downgrade to the stable release channel is supported. Keep a system snapshot before upgrading when reversal is required. The installer does not claim whole-system rollback after publication begins.
 - Every pre-v5 deployment that still uses interception config schema v4 requires an explicit, recoverable lockstep rebuild first. Never delete the old interception file or change only its schema version. Follow the [pre-v5 rebuild runbook](docs/pre-v5-upgrade.md) exactly.
@@ -279,7 +286,7 @@ Only the root-owned certificate publisher can read the private CA signing key; m
 - Name-based encrypted-DNS blocking cannot stop a client that uses a hard-coded resolver IP and can route around the gateway. 5gpn does not claim network-layer enforcement.
 - Steering depends on DNS and a visible hostname. Arbitrary ports, generic raw UDP, traffic without a usable Host/SNI, inner names hidden by application-provisioned ECH, and connections that bypass 5gpn DNS are unsupported.
 - The fixed global UDP/443 guard rejects only traffic that reaches the gateway. It is immutable through product management, does not manage a firewall, and does not affect ordinary UDP or QUIC sniffing on other configured ports such as `:5060`.
-- Console SPA assets and profiles under `/ui/*` are public. `/gpn/*` and the ordinary controller routes require mihomo's controller secret; there is no second panel origin, source allowlist, handoff session, or Console bearer.
+- Console SPA assets and profiles under `/ui/*` are public. `/5gpn/*` and the ordinary controller routes require mihomo's controller secret; there is no second panel origin, source allowlist, handoff session, or Console bearer.
 - Trust in the extension root CA spans the whole extension subsystem, while actual decryption remains limited to enabled capture hosts. Normal uninstall and purge preserve this CA for enrolled devices; only explicit decommission attempts to remove an ownership-proven CA and public lineage.
 - 5gpn never modifies nftables or another host firewall. Public ingress, especially `:5060`, must be restricted to intended clients by the operator.
 

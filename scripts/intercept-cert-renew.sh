@@ -11,7 +11,7 @@ err() { if [[ "$_HAVE_GUM" == 1 ]]; then CI=1 gum log --level error -- "$*" >&2;
 CA_DIR=/etc/5gpn/intercept-ca
 INTERCEPT_DIR=/etc/5gpn/intercept
 TLS_DIR=/etc/5gpn/intercept/tls
-CERT_REQUEST=/etc/5gpn/mihomo/gpn/certificate-request
+CERT_REQUEST=/etc/5gpn/mihomo/5gpn/certificate-request
 CERT_STATE=/etc/5gpn/intercept/cert-state
 CA_MARKER=.5gpn-intercept-ca-owned
 CA_MARKER_VALUE=5gpn-intercept-ca-v1
@@ -56,15 +56,14 @@ safe_plain_file() {
 }
 
 config_boundary_safe() {
-    local config_root dns_gid root_gid marker
+    local config_root root_gid marker
     config_root="$(dirname -- "$CA_DIR")"
     [[ "$(dirname -- "$INTERCEPT_DIR")" == "$config_root" ]] || return 1
-    dns_gid="$(group_gid gpn-dns)" || return 1
     root_gid="$(group_gid root)" || return 1
     canonical_directory "$config_root" \
         && [[ "$(path_uid "$config_root")" == "$EUID" \
-           && "$(path_gid "$config_root")" == "$dns_gid" \
-           && "$(path_mode "$config_root")" == 3771 ]] \
+           && "$(path_gid "$config_root")" == "$root_gid" \
+           && "$(path_mode "$config_root")" == 755 ]] \
         || return 1
     marker="${config_root}/${CONFIG_ROOT_MARKER}"
     safe_plain_file "$marker" "$root_gid" 644 \
@@ -98,7 +97,7 @@ ca_boundary_safe() {
 tls_directory_safe() {
     local intercept_gid
     config_boundary_safe || return 1
-    intercept_gid="$(group_gid gpn-intercept)" || return 1
+    intercept_gid="$(group_gid fivegpn)" || return 1
     canonical_directory "$INTERCEPT_DIR" \
         && [[ "$(path_uid "$INTERCEPT_DIR")" == "$EUID" \
            && "$(path_gid "$INTERCEPT_DIR")" == "$intercept_gid" \
@@ -113,7 +112,7 @@ tls_directory_safe() {
 tls_tree_safe() {
     local intercept_gid entry name
     tls_directory_safe || return 1
-    intercept_gid="$(group_gid gpn-intercept)" || return 1
+    intercept_gid="$(group_gid fivegpn)" || return 1
     while IFS= read -r -d '' entry; do
         name="$(basename -- "$entry")"
         case "$name" in
@@ -168,7 +167,7 @@ interrupted_tls_candidate_is_safe() {
 cleanup_tls_candidates() {
     local intercept_gid path
     tls_directory_safe || return 1
-    intercept_gid="$(group_gid gpn-intercept)" || return 1
+    intercept_gid="$(group_gid fivegpn)" || return 1
     for path in \
         "$TLS_DIR/.leaf.crt.new" "$TLS_DIR/.fullchain.pem.new" \
         "$TLS_DIR/.privkey.pem.new" "$TLS_DIR/.cert-state.new"; do
@@ -327,8 +326,8 @@ main() {
         return 0
     fi
 
-    group="$(getent group gpn-intercept 2>/dev/null | cut -d: -f1 || true)"
-    [[ "$group" == gpn-intercept ]] || { err "The gpn-intercept service group is missing."; return 1; }
+    group="$(getent group fivegpn 2>/dev/null | cut -d: -f1 || true)"
+    [[ "$group" == fivegpn ]] || { err "The fivegpn service group is missing."; return 1; }
     group_gid_value="$(group_gid "$group")" || return 1
     first_host="$(head -n 1 "$stage/hosts")"
     san=""
