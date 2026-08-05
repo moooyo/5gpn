@@ -20,6 +20,19 @@ rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 SVC="$ROOT/etc/systemd/mihomo.service"
 CERT_SVC="$ROOT/etc/systemd/5gpn-intercept-cert.service"
 INSTALL="$ROOT/install.sh"
+DNS_ENV_EXAMPLE="$ROOT/etc/5gpn-dns/dns.env.example"
+
+unit_has_unique_directive_in_section() {
+    local section="$1" key="$2" expected="$3" file="$4"
+    awk -v wanted_section="[$section]" -v wanted_key="$key" -v wanted_line="$expected" '
+        /^\[[^]]+\]$/ { current_section = $0 }
+        $0 ~ "^[[:space:]]*" wanted_key "=" {
+            directives++
+            if (current_section == wanted_section && $0 == wanted_line) correct++
+        }
+        END { exit !(directives == 1 && correct == 1) }
+    ' "$file"
+}
 
 # --- the one long-running unit -------------------------------------------
 grep -Fq 'NoNewPrivileges=yes' "$SVC" || fail "mihomo.service: no NoNewPrivileges"
@@ -31,6 +44,25 @@ grep -Fxq 'ProtectProc=invisible' "$SVC" || fail "mihomo.service can enumerate o
 grep -Fxq 'RestrictSUIDSGID=yes' "$SVC" || fail "mihomo.service can create setuid files"
 grep -Fq 'ExecStart=/opt/5gpn/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' "$SVC" \
     || fail "mihomo.service: unexpected ExecStart"
+
+# The monolith is one failure domain. Fatal runtime failures replace the whole
+# process from its persisted state; a bounded start rate prevents a persistent
+# configuration or host error from spinning without limit. systemd deliberately
+# suppresses Restart=always after an explicit stop operation.
+unit_has_unique_directive_in_section Service Restart 'Restart=always' "$SVC" \
+    || fail "mihomo.service must always restart after an unexpected exit"
+unit_has_unique_directive_in_section Service RestartSec 'RestartSec=3' "$SVC" \
+    || fail "mihomo.service restart delay must be exactly three seconds"
+unit_has_unique_directive_in_section Unit StartLimitIntervalSec 'StartLimitIntervalSec=60' "$SVC" \
+    || fail "mihomo.service start-limit interval must be 60 seconds in [Unit]"
+unit_has_unique_directive_in_section Unit StartLimitBurst 'StartLimitBurst=10' "$SVC" \
+    || fail "mihomo.service start-limit burst must be 10 in [Unit]"
+unit_has_unique_directive_in_section Unit StartLimitAction 'StartLimitAction=none' "$SVC" \
+    || fail "mihomo.service start-limit action must never reboot or power off the host"
+grep -Fq 'The monolith does not read these fields or send a push heartbeat.' "$DNS_ENV_EXAMPLE" \
+    || fail "dns.env.example claims the inert heartbeat fields are a live monitor"
+grep -Eq 'daemon GETs this URL|dead-man.s switch' "$DNS_ENV_EXAMPLE" \
+    && fail "dns.env.example retains the deleted in-process heartbeat promise"
 
 # Binding :853 and the operator's gateway ports is the whole reason a capability
 # is needed at all; anything wider is not.

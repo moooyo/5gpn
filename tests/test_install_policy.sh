@@ -73,7 +73,7 @@ remove_unit_fn="$(sed -n '/^remove_unit()/,/^}/p' "$INSTALL")"
 grep -Fq '5gpn-unit-id' <<<"$remove_unit_fn" \
     && fail "unit removal consults a provenance marker instead of the fixed unit path"
 # Every shipped unit carries a provenance marker. The revision is deliberately
-# not pinned: mihomo.service is at v2, and pinning v1 is exactly the trap the
+# not pinned: mihomo.service is currently at v3, and pinning an older revision is exactly the trap the
 # comment above describes -- a revision that wedges the check on every bump.
 # Assert the shape, and that no shipped unit is missing one.
 for unit in "$ROOT"/etc/systemd/*; do

@@ -17,13 +17,15 @@ GATEWAY_LISTENER="$(grep -F 'name: gateway,' <<<"$RENDERED_LISTENERS")"
 GATEWAY_LISTENER="${GATEWAY_LISTENER/port: 443/port: 10443}"
 GATEWAY_LISTENER="${GATEWAY_LISTENER/target: console.example.test:443/target: console.example.test:18443}"
 
-RUNTIME="$(mktemp -d)"
+RUNTIME="$(mktemp -d /tmp/5gpn-sniff-cache.XXXXXX)"
+RUNTIME_MARKER=.5gpn-sniff-cache-test-owned
+printf '%s\n' '5gpn-sniff-cache-test-v1' > "$RUNTIME/$RUNTIME_MARKER"
 CONSOLE_PID=""
 ORIGIN_PID=""
 MIHOMO_PID=""
 
 cleanup() {
-    local pid attempt
+    local pid attempt canonical
     for pid in "$MIHOMO_PID" "$ORIGIN_PID" "$CONSOLE_PID"; do
         [[ -n "$pid" ]] || continue
         kill "$pid" 2>/dev/null || true
@@ -34,7 +36,11 @@ cleanup() {
         kill -KILL "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
     done
-    rm -rf -- "$RUNTIME"
+    canonical="$(readlink -f -- "$RUNTIME" 2>/dev/null || true)"
+    if [[ "$canonical" == "$RUNTIME" && "$canonical" == /tmp/5gpn-sniff-cache.* \
+       && "$(cat "$canonical/$RUNTIME_MARKER" 2>/dev/null || true)" == 5gpn-sniff-cache-test-v1 ]]; then
+        rm -rf -- "$canonical"
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -46,6 +52,46 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
     -subj '/CN=console.example.test' \
     -addext 'subjectAltName=DNS:console.example.test,DNS:origin.example.test' \
     -keyout "$RUNTIME/key.pem" -out "$RUNTIME/cert.pem" >/dev/null 2>&1
+
+# The monolith treats client DoT and the loopback origin resolver as critical.
+# This isolated runtime therefore needs its own complete DNS document rather
+# than relying on the old degraded-start behavior. Pick three adjacent high
+# ports that are free for both protocols so parallel CI jobs cannot collide.
+dns_base=""
+for _ in $(seq 1 100); do
+    candidate=$((20000 + RANDOM % 20000))
+    available=1
+    for port in "$candidate" "$((candidate + 1))" "$((candidate + 2))"; do
+        if ss -H -ltn "sport = :$port" | grep -q . \
+           || ss -H -lun "sport = :$port" | grep -q .; then
+            available=0
+            break
+        fi
+    done
+    if [[ "$available" == 1 ]]; then
+        dns_base="$candidate"
+        break
+    fi
+done
+[[ -n "$dns_base" ]] || { echo "could not allocate isolated DNS listener ports" >&2; exit 1; }
+
+mkdir -p "$RUNTIME/gpn"
+cat > "$RUNTIME/gpn/dns.json" <<EOF
+{
+  "listen": {
+    "dot": "127.0.0.1:${dns_base}",
+    "debug": "127.0.0.1:$((dns_base + 1))",
+    "origin": "127.0.0.1:$((dns_base + 2))",
+    "certificate": "$RUNTIME/cert.pem",
+    "privateKey": "$RUNTIME/key.pem"
+  },
+  "gateway": "198.51.100.1",
+  "localNames": [],
+  "upstreams": {"china": ["127.0.0.1:9"], "trust": ["127.0.0.1:9"], "ecs": ""},
+  "policy": {"rules": [], "fallback": "direct"},
+  "tuning": {}
+}
+EOF
 
 (
     cd "$RUNTIME/console"

@@ -1,14 +1,21 @@
-# 5gpn-unit-id: mihomo.service:v2
+# 5gpn-unit-id: mihomo.service:v3
 [Unit]
 Description=5gpn (DNS engine, interception engine, forwarding data plane, control API)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+StartLimitAction=none
 
 [Service]
 Type=simple
 ExecStart=/opt/5gpn/bin/mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo
-Restart=on-failure
-RestartSec=5
+# mihomo is the complete gateway runtime. Any unexpected exit, including a
+# clean return after a fatal listener ends, must replace the whole process from
+# its atomically persisted state. A deliberate `systemctl stop` is not restarted
+# by systemd even with Restart=always.
+Restart=always
+RestartSec=3
 User=mihomo
 Group=mihomo
 UMask=0027

@@ -65,11 +65,32 @@ In one address space that coordination is a field read. What replaced all of it
 is `gpn/state`: a file written atomically, a pointer swapped atomically, and a
 content hash so two browser tabs cannot silently overwrite each other.
 
-The cost is a shared failure domain. A panic in the script engine takes the
-gateway's DNS and forwarding with it. This is an accepted trade: a user who
-installs a third-party plugin is responsible for that choice, and the
-coordination machinery was not buying isolation anyway — it was buying agreement
-between processes that no longer exist.
+The cost is a shared failure domain. Expected extension failures do not consume
+that boundary: JavaScript exceptions, timeouts, denied network calls, and
+invalid configuration writes fail their current action or request. A panic that
+escapes that containment, a critical DNS listener that ends, or another
+unrecoverable runtime invariant terminates the process instead of leaving a
+partially live gateway. The deleted coordination machinery was not buying fault
+isolation anyway — it was buying agreement between processes that no longer
+exist.
+
+### Failure and process recovery
+
+systemd is the only process supervisor. The shipped `mihomo.service` uses
+`Restart=always` with a three-second delay, so both a non-zero crash and an
+unexpected clean return replace the entire runtime from its atomically
+persisted state. Ten starts within 60 seconds hit systemd's start limit and
+leave the unit failed; `StartLimitAction=none` guarantees the limit never
+reboots or powers off the host. A
+deliberate `systemctl stop mihomo` is an operator action and is not restarted;
+`systemctl start mihomo` is then required.
+
+This is crash recovery, not self-healing. It does not rewrite a bad operator
+configuration, free a conflicting port, repair certificate files, or detect a
+process that remains alive but cannot make progress. A deterministic startup
+failure eventually leaves the unit failed at the start limit. Availability
+monitoring therefore belongs outside this process and host, using active DoT
+and HTTPS probes rather than an in-process heartbeat.
 
 ## Listeners
 
@@ -146,6 +167,11 @@ absent panel and an empty one mean different things.
 `/gpn/dns` is read and written whole. The edits are not independent: moving a
 gateway to a new address and changing the upstreams that serve it is one
 decision, and there is no useful state between the two halves of it.
+The listener addresses and certificate paths inside that document are
+installation-owned and read-only through this API. A whole-document client
+must round-trip them unchanged. Listener changes require a checked installer
+operation; rejecting them before the durable write prevents a port conflict
+from becoming a persistent systemd restart loop.
 
 `/gpn/interception` is the opposite, and for the same reason. Enabling an
 extension authorizes a capture set, a script set, a storage grant and possibly
@@ -253,8 +279,10 @@ requires widening that struct.
 Alerts are transitions, never states, and the bot does not claim to detect the
 gateway's own death: a monitor inside the process cannot report that the process
 stopped, and an operator who read silence as health would be worse off than one
-who knows it means nothing. `DNS_HEARTBEAT_URL` remains the external
-dead-man's switch.
+who knows it means nothing. The persisted `DNS_HEARTBEAT_URL` and
+`DNS_HEARTBEAT_INTERVAL` fields are not consumed by the monolith and provide no
+health signal. An independent monitor must actively probe the gateway from
+outside the host.
 
 Egress goes through the core's own inner dialer, so reaching `api.telegram.org`
 from a network that blocks it is the operator's existing rules rather than a
@@ -268,12 +296,12 @@ beneath it. `gpn/importrule_test.go` enforces this by walking `go list`.
 
 The rule exists because the fork's cost is not the size of `gpn/` — it is how
 many upstream-owned files carry a 5gpn-shaped change, since those are what a
-rebase must reconcile. That number is **two files, twelve lines**: the capture
-hooks in `tunnel/tunnel.go` (eleven — seven for TCP, three for the datagram
-path, one blank) and the one call that starts the subsystems in `hub/hub.go`.
-Everything else 5gpn adds is a new file, which does not conflict. The datagram
-hook is three lines rather than the twenty the bookkeeping needs because the
-bookkeeping lives in `tunnel/gpn.go`, which is fork-owned.
+rebase must reconcile. All 5gpn-specific upstream edits remain concentrated in
+two files: `tunnel/tunnel.go` owns the capture and reviewed-routing hooks, while
+`hub/hub.go` starts the subsystems and propagates critical startup failure.
+Runtime authorization and fail-fast startup made the former twelve-line count
+obsolete; keep the file boundary rather than preserving a misleading fixed
+line budget. The supporting bookkeeping remains in fork-owned files.
 
 Two other categories of change exist against upstream and are deliberately not
 counted, because counting them would make the number mean something else.

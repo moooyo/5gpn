@@ -36,6 +36,16 @@ if [ "$newrev" != "$rev" ] && [ -n "$newrev" ]; then ok "the revision advanced";
 code="$(status -X PUT --data "$body" "$API/gpn/dns")"
 if [ "$code" = "409" ]; then ok "a stale revision is refused with 409"; else bad "a stale write returned $code, expected 409"; fi
 
+# Listener settings are installation-owned and fail before persistence.
+listener_body="$(jq -nc --arg r "$newrev" --argjson d "$(echo "$after" | jq -c '.document | .listen.debug = "127.0.0.1:5355"')" '{revision:$r, document:$d}')"
+code="$(status -X PUT --data "$listener_body" "$API/gpn/dns")"
+if [ "$code" = "400" ]; then ok "listener changes are refused with 400"; else bad "a listener change returned $code"; fi
+if [ "$(req "$API/gpn/dns" | jq -r .revision)" = "$newrev" ]; then
+  ok "the rejected listener change did not move the revision"
+else
+  bad "a rejected listener change changed the document"
+fi
+
 # An invalid document must leave the running resolver untouched.
 badbody="$(jq -nc --arg r "$newrev" --argjson d "$(echo "$doc" | jq -c '.upstreams.trust = ["not-an-upstream"]')" '{revision:$r, document:$d}')"
 code="$(status -X PUT --data "$badbody" "$API/gpn/dns")"

@@ -172,8 +172,8 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # leaves the gateway with no resolver, no capture and no control API at all. The
 # staging probe checks the version token exactly rather than accepting a prefix.
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-monolith.12"
-MIHOMO_SHA256="ed47e9642de0d38fdc8d13190398a3cb9ad160d062a3a04fde6813568575bb10"
+MIHOMO_VERSION="v1.19.28-monolith.13"
+MIHOMO_SHA256="5fd7f77bbb4ab7f90dae4073a4f8d755a671cc963e94307e91312d1b5a9e83a1"
 # Every `mihomo -t` in this script must run with the same SAFE_PATHS the unit
 # grants, because the seed names paths outside its own home directory -- the
 # certificates it serves and the UI bundle it publishes. Without this the core
@@ -3340,8 +3340,8 @@ EOF
     ok "Management command installed: type '5gpn' to manage (status / restart / configure / uninstall / …)."
 }
 
-# restart_services restarts the three 5gpn runtime units. The in-process bot and
-# iOS server come back with 5gpn-dns; the interception sidecar remains isolated.
+# restart_services restarts the sole long-running mihomo runtime. DNS,
+# interception, the controller, and the bot return with that one process.
 restart_services() {
     check_root
     info "Restarting 5gpn services..."
@@ -5145,6 +5145,9 @@ write_dns_env() {
     local intercept_config="${INTERCEPT_DIR}/config.json"
     local heartbeat_url="$(cfg_get DNS_HEARTBEAT_URL)"
     local heartbeat_interval="$(cfg_get DNS_HEARTBEAT_INTERVAL)"; heartbeat_interval="${heartbeat_interval:-60s}"
+    if [[ -n "$heartbeat_url" ]]; then
+        warn "DNS_HEARTBEAT_URL is retained but the monolith does not send push heartbeats; use an external pull probe."
+    fi
     # full_install has already validated and normalized the China ECS value.
     local china_ecs="$CHINA_ECS"
 
@@ -5258,6 +5261,8 @@ DNS_TTL_MIN=${ttl_min}
 DNS_TTL_MAX=${ttl_max}
 DNS_QUERY_TIMEOUT=${query_timeout}
 DNS_STATS_FILE=${stats_file}
+# Reserved inactive fields. The monolith does not consume them or send a
+# push heartbeat; use an independent external DoT and HTTPS pull probe.
 DNS_HEARTBEAT_URL=${heartbeat_url}
 DNS_HEARTBEAT_INTERVAL=${heartbeat_interval}
 EOF
@@ -6473,7 +6478,7 @@ full_install() {
         # instead, and the two are different values, so the credential on
         # screen opened nothing.
         [[ -t 1 ]] && echo "Console secret: $(cfg_get DNS_MIHOMO_SECRET)"
-        echo "(面板公开；/api 需要 bearer token)"
+        echo "(panel public; /gpn/* and controller routes require the controller secret)"
     } | card
     print_qr
     echo ""

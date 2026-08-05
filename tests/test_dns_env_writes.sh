@@ -87,6 +87,13 @@ if printf '%s' "$heredoc_body" | grep -qF '$('; then
 fi
 pass "the dns.env heredoc carries no live command substitution"
 
+printf '%s' "$heredoc_body" | grep -Fq 'The monolith does not consume them or send a' \
+    || fail "the generated dns.env does not identify heartbeat fields as inert"
+writer_fn="$(sed -n '/^write_dns_env()/,/^}/p' "$ROOT/install.sh")"
+printf '%s' "$writer_fn" | grep -Fq 'DNS_HEARTBEAT_URL is retained but the monolith does not send push heartbeats' \
+    || fail "write_dns_env does not warn when a stale heartbeat URL is configured"
+pass "generated dns.env and installer warning expose the inert heartbeat fields"
+
 # DNS_MIHOMO_CONTROLLER follows the operator's config, and does not survive it.
 #
 # On the upgrade that moved the panel onto the console name, the controller went

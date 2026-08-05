@@ -37,6 +37,10 @@ sudo cp -a /etc/5gpn/mihomo/config.yaml /tmp/mihomo-config.before
   `5gpn-intercept` long-running service exists.
 - [ ] `systemctl show -p User -p Group mihomo` reports the dedicated mihomo
   account selected by the installer.
+- [ ] `systemctl show mihomo -p Restart -p RestartUSec \
+  -p StartLimitIntervalUSec -p StartLimitBurst -p StartLimitAction` reports
+  `Restart=always`, a three-second restart delay, a 60-second start-limit
+  interval, burst 10, and action `none`.
 - [ ] `journalctl -u mihomo -b` contains no `External controller tls listen error`
   or safe-path rejection after startup.
 - [ ] `ss -lntup` shows:
@@ -51,6 +55,56 @@ sudo cp -a /etc/5gpn/mihomo/config.yaml /tmp/mihomo-config.before
 - [ ] `/opt/5gpn/bin/mihomo -t -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo` succeeds.
 - [ ] Every `DNS_MIHOMO_LISTEN_IPS` value appears on a local interface. A
   non-local NAT/public address is rejected by installer validation.
+
+### Crash-restart injection
+
+Run this only through an out-of-band management path. It deliberately drops all
+live gateway connections once. Capture immutable state first, send an
+uncatchable signal to the main process, and allow up to 15 seconds for the
+three-second systemd restart:
+
+```bash
+sudo sha256sum /etc/5gpn/mihomo/config.yaml \
+  /etc/5gpn/mihomo/gpn/*.json > /tmp/5gpn-crash-state.before
+before_pid="$(systemctl show mihomo -p MainPID --value)"
+before_restarts="$(systemctl show mihomo -p NRestarts --value)"
+test "$before_pid" -gt 0
+sudo systemctl is-active --quiet mihomo.service
+
+sudo systemctl kill --kill-whom=main --signal=SIGKILL mihomo.service
+
+deadline=$((SECONDS + 15))
+while (( SECONDS < deadline )); do
+  after_pid="$(systemctl show mihomo -p MainPID --value)"
+  if systemctl is-active --quiet mihomo \
+     && [[ "$after_pid" != 0 && "$after_pid" != "$before_pid" ]]; then
+    break
+  fi
+  sleep 1
+done
+
+after_restarts="$(systemctl show mihomo -p NRestarts --value)"
+test "$after_pid" != 0
+test "$after_pid" != "$before_pid"
+test "$after_restarts" -gt "$before_restarts"
+sudo sha256sum /etc/5gpn/mihomo/config.yaml \
+  /etc/5gpn/mihomo/gpn/*.json > /tmp/5gpn-crash-state.after
+diff -u /tmp/5gpn-crash-state.before /tmp/5gpn-crash-state.after
+```
+
+- [ ] mihomo becomes active with a new main PID and an incremented `NRestarts`.
+- [ ] The operator YAML and revisioned `gpn` documents remain byte-identical.
+  DoT, the authenticated controller, and one ordinary forwarded request all
+  work after restart. Connections that existed at the injected crash are
+  expected to have failed.
+- [ ] A deliberate stop is not undone by `Restart=always`. Run
+  `sudo systemctl stop mihomo`, wait five seconds, record that `MainPID` is
+  still zero, and then run `sudo systemctl start mihomo` before evaluating the
+  result or continuing the checklist.
+- [ ] An independent monitor outside this host actively probes DoT and HTTPS,
+  observes the injected outage, and clears only after service recovery. The
+  persisted `DNS_HEARTBEAT_URL` and `DNS_HEARTBEAT_INTERVAL` fields are inert
+  and are not accepted as evidence of health or recovery.
 
 ## 2. DNS transport and protocol behavior
 
@@ -102,6 +156,9 @@ afterward.
 - [ ] A revision-correct whole-document `PUT /gpn/dns` hot-swaps upstream
   groups, preserves China ECS, flushes old cached answers, and survives mihomo
   restart through `/etc/5gpn/mihomo/gpn/dns.json`.
+- [ ] A whole-document write that changes any listener or certificate-path
+  field returns 400, leaves the revision and disk bytes unchanged, and leaves
+  all existing listeners serving.
 - [ ] A china group configured with a DoT or DoH member resolves CN names, and
   the operator's `DNS_CHINA_ECS` subnet still rides the query on that member —
   ECS is attached before the transport is chosen, but nothing else covers it.
@@ -382,8 +439,8 @@ into recorded command output, screenshots, or issue logs.
   failure/recovery transitions notify configured administrators without
   repeated unchanged-state spam.
 - [ ] Stopping mihomo cannot produce a Telegram alert from inside that process.
-  The configured external heartbeat monitor detects this dead-man's-switch
-  failure.
+  An independent external pull probe detects the unavailable DoT and HTTPS
+  endpoints; no in-process push heartbeat is treated as evidence of health.
 
 ## Native HTTP/H1/H2 interception and the HTTP/3 boundary
 

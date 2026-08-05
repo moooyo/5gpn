@@ -13,6 +13,19 @@ plans, design handoffs, and git history are context only.
   Telegram control plane, and the authenticated controller API. Client DNS
   ingress is DoT `:853` only; public DoH and plain `:53` must not be
   reintroduced. `127.0.0.1:5353/udp` is debug-only.
+- The monolith is one deliberate failure domain. Expected extension script
+  errors, timeouts, denied network calls, and rejected configuration writes
+  fail only their current operation. A critical DNS listener ending, an
+  escaped panic, or another unrecoverable runtime invariant terminates the
+  process instead of leaving a partially live gateway. Recovery belongs only
+  to systemd: the shipped unit has `Restart=always`, `RestartSec=3`,
+  `StartLimitIntervalSec=60`, `StartLimitBurst=10`, and
+  `StartLimitAction=none`. Do not add an in-process
+  subsystem supervisor. A deliberate `systemctl stop` remains stopped, and
+  restart does not claim to repair deterministic configuration or host errors.
+  The DNS document's listener and certificate-path fields are installation-owned
+  and must be round-tripped unchanged by `/gpn/dns` writes; changing them is
+  rejected before persistence so an occupied port cannot become a restart loop.
 - Native-extension interception is limited to plain HTTP and TLS/H1/H2 on
   explicitly enabled capture hosts. HTTP/3 interception is unsupported:
   `mitm.http3=true` is rejected, fresh and explicitly reset seeds contain one

@@ -6,6 +6,27 @@ in [`docs/architecture.md`](docs/architecture.md). A section marked **Pending**
 describes required future behavior, not behavior that is already implemented.
 Update the status and the normative documentation when an implementation lands.
 
+## Monolith failure and process recovery
+
+**Status: Implemented. Recorded 2026-08-05.**
+
+- mihomo is the sole long-running process and one deliberate failure domain.
+  Do not add an in-process subsystem supervisor or restart DNS and interception
+  independently.
+- Expected extension exceptions, timeouts, denied network operations, and
+  rejected writes fail only their current operation. A critical DNS listener
+  ending, an escaped panic, or another unrecoverable runtime invariant exits the
+  process rather than leaving a partially live gateway.
+- systemd owns process replacement. The shipped unit uses `Restart=always`,
+  `RestartSec=3`, `StartLimitIntervalSec=60`, `StartLimitBurst=10`, and
+  `StartLimitAction=none`. An
+  explicit `systemctl stop` remains stopped.
+- Restart is crash recovery, not configuration repair or a general liveness
+  detector. Persistent startup errors reach the start limit, and a process that
+  remains alive without making progress requires an independent external DoT
+  and HTTPS pull probe. The persisted `DNS_HEARTBEAT_*` fields are currently
+  inert and are not evidence of health.
+
 ## Native interception extensions
 
 **Status: Implemented. Recorded 2026-07-19, extended with operator capture-DNS

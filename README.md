@@ -161,6 +161,26 @@ sudo systemctl is-active mihomo
 sudo /opt/5gpn/bin/mihomo -t -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo
 ```
 
+### Process recovery
+
+mihomo is the sole long-running process and therefore the gateway's single
+failure domain. Expected extension exceptions, timeouts, and network failures
+fail only the current operation. A critical listener failure, escaped panic, or
+other unrecoverable runtime failure exits the process. The shipped systemd unit
+restarts any unexpected exit after three seconds and limits repeated starts to
+ten within 60 seconds. The unit then remains failed, and the limit action is
+explicitly `none`, so a crash loop cannot reboot or power off the host. Existing
+connections are lost during a successful restart.
+
+This is process recovery, not self-healing: a persistent bad configuration,
+port conflict, or broken certificate remains an operator-visible failure. A
+deliberate `systemctl stop mihomo` stays stopped. Use an independent external
+monitor that actively probes DoT and HTTPS; the persisted `DNS_HEARTBEAT_*`
+fields are not consumed by the monolith and provide no health signal.
+DNS listener and certificate-path fields are installation-owned; controller
+writes must preserve them exactly and are rejected before persistence if they
+attempt to change them.
+
 再使用具备 DoT 支持的 `dig` 验证 DNS：
 
 ```bash
