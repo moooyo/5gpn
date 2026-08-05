@@ -178,15 +178,32 @@ secret. Direct loopback tests isolate controller routing:
 ```bash
 curl --resolve "$CONSOLE:443:127.0.0.1" -fsS \
   -H "Authorization: Bearer $SECRET" "https://$CONSOLE/5gpn/dns"
-curl --resolve "$CONSOLE:443:127.0.0.1" -fsSI \
-  "https://$CONSOLE/ui/ios-dot.mobileconfig"
+for profile in ios-dot.mobileconfig ios-intercept-ca.mobileconfig; do
+  probe="$(curl --noproxy '*' --resolve "$CONSOLE:443:127.0.0.1" \
+    -sS -o /dev/null -w $'%{http_code}\t%{content_type}' \
+    "https://$CONSOLE/ui/$profile")"
+  IFS=$'\t' read -r code content_type <<< "$probe"
+  media_type="${content_type%%;*}"
+  media_type="${media_type#"${media_type%%[![:space:]]*}"}"
+  media_type="${media_type%"${media_type##*[![:space:]]}"}"
+  [[ "$code" == 200 \
+    && "${media_type,,}" == application/x-apple-aspen-config ]] || {
+      printf '%s: HTTP %s, Content-Type %s\n' \
+        "$profile" "${code:-none}" "${content_type:-<missing>}" >&2
+      exit 1
+    }
+done
 ```
 
 - [ ] The correct controller secret returns 200 from `/5gpn/dns` and ordinary
   authenticated controller routes. A missing or wrong secret returns 401.
-- [ ] The console profile response is `200` with
-  `Content-Type: application/x-apple-aspen-config`, contains no secret, and is
-  installable by iOS before DoT is configured.
+- [ ] Both console profile responses are `200` with media type exactly
+  `application/x-apple-aspen-config` (case-insensitive, optional parameters
+  allowed), contain no secret, and are installable by iOS before DoT is
+  configured.
+- [ ] Installing or reinstalling does not add a `mobileconfig` entry to
+  `/etc/mime.types` or otherwise modify the host's shared MIME database; the
+  controller supplies the profile media type itself.
 - [ ] A normal install fails before declaring success when the console A record
   is missing/wrong; exported skip variables cannot bypass the gate.
 - [ ] `https://$CONSOLE/ui` redirects to `/ui/`; `/ui/` serves zashboard

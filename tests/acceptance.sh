@@ -95,26 +95,42 @@ else
 fi
 
 request() {
-    curl -sk --max-time 30 \
+    curl --noproxy '*' -sk --max-time 30 \
         -H "Authorization: Bearer ${SECRET}" \
         -H 'Content-Type: application/json' "$@"
 }
 
 http_status() {
-    curl -sk --max-time 30 -o /dev/null -w '%{http_code}' \
+    curl --noproxy '*' -sk --max-time 30 -o /dev/null -w '%{http_code}' \
         -H "Authorization: Bearer ${SECRET}" \
         -H 'Content-Type: application/json' "$@"
 }
 
-unauth="$(curl -sk --max-time 30 -o /dev/null -w '%{http_code}' \
+unauth="$(curl --noproxy '*' -sk --max-time 30 -o /dev/null -w '%{http_code}' \
     "$CONTROLLER/5gpn/dns")"
 [[ "$unauth" == 401 ]] && ok '/5gpn/dns rejects missing authentication' \
     || bad "/5gpn/dns returned $unauth without authentication"
 
-ui="$(curl -sk --max-time 30 -o /dev/null -w '%{http_code}' \
+ui="$(curl --noproxy '*' -sk --max-time 30 -o /dev/null -w '%{http_code}' \
     "$CONTROLLER/ui/")"
 [[ "$ui" == 200 ]] && ok '/ui/ is available for bootstrap' \
     || bad "/ui/ returned $ui"
+
+for profile in ios-dot.mobileconfig ios-intercept-ca.mobileconfig; do
+    profile_probe="$(curl --noproxy '*' -sk --max-time 30 -o /dev/null \
+        -w $'%{http_code}\t%{content_type}' \
+        "$CONTROLLER/ui/$profile")"
+    IFS=$'\t' read -r profile_code profile_content_type <<< "$profile_probe"
+    profile_media_type="${profile_content_type%%;*}"
+    profile_media_type="${profile_media_type#"${profile_media_type%%[![:space:]]*}"}"
+    profile_media_type="${profile_media_type%"${profile_media_type##*[![:space:]]}"}"
+    if [[ "$profile_code" == 200 \
+       && "${profile_media_type,,}" == "application/x-apple-aspen-config" ]]; then
+        ok "/ui/$profile is served as an Apple configuration profile"
+    else
+        bad "/ui/$profile returned HTTP ${profile_code:-none}, Content-Type '${profile_content_type:-<missing>}'"
+    fi
+done
 
 dns="$(request "$CONTROLLER/5gpn/dns")"
 interception="$(request "$CONTROLLER/5gpn/interception")"

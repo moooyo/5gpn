@@ -7,6 +7,7 @@ ROOT="$HERE/.."
 rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
 INSTALL="$ROOT/install.sh"
+ACCEPTANCE="$ROOT/tests/acceptance.sh"
 CERT_RENEW="$ROOT/scripts/cert-renew.sh"
 RELEASE="$ROOT/.github/workflows/release.yml"
 
@@ -204,19 +205,34 @@ grep -Fq '"${UI_DIR}/$(basename -- "$f")"' "$INSTALL" \
     || fail "the iOS profiles are not published into the served UI directory"
 grep -Eq 'publish_owned_tree "\$candidate" "\$WWW_DIR"' "$INSTALL" \
     && fail "the iOS profiles are still published to the unserved WWW_DIR"
-# Without a MIME entry Go serves them as application/octet-stream and iOS
-# downloads the file instead of offering to install it.
-grep -Fq 'application/x-apple-aspen-config' "$INSTALL" \
-    || fail "the .mobileconfig MIME type is never registered"
-grep -Eq '^ensure_profile_mime_type\(\)' "$INSTALL" \
-    || fail "no helper registers the .mobileconfig MIME type"
+# The core owns the response header. The installer must not mutate a
+# distribution-owned MIME database in an attempt to influence Go's process-wide
+# MIME loader, whose source differs between distributions.
+grep -Fq 'ensure_profile_mime_type' "$INSTALL" \
+    && fail "installer still calls or defines the retired shared MIME-table mutation helper"
+grep -Eq '/etc/mime\.types|/usr/share/mime|update-mime-database' "$INSTALL" \
+    && fail "installer still mutates a distribution-owned MIME database"
 verify_fn="$(sed -n '/^verify_console_endpoint() {/,/^}/p' "$INSTALL")"
 printf '%s' "$verify_fn" | grep -Fq '/ui/${name}' \
     || fail "console verification does not probe the profiles where they are served"
-printf '%s' "$verify_fn" | grep -Fq 'x-apple-aspen-config' \
-    || fail "console verification does not assert the profile content type"
+printf '%s' "$verify_fn" | grep -Fq '${content_type%%;*}' \
+    || fail "console verification does not permit valid Content-Type parameters"
+printf '%s' "$verify_fn" | grep -Fq '[[ "${media_type,,}" != "application/x-apple-aspen-config" ]]' \
+    || fail "console verification does not compare the complete media type case-insensitively"
+printf '%s' "$verify_fn" | grep -Fq "Content-Type '\${content_type:-<missing>}'" \
+    || fail "console verification failure does not report the observed Content-Type"
 printf '%s' "$verify_fn" | grep -Eq 'https://\$\{console\}' \
     && fail "console verification still probes the retired public console origin"
+for profile in ios-dot.mobileconfig ios-intercept-ca.mobileconfig; do
+    grep -Fq "$profile" "$ACCEPTANCE" \
+        || fail "post-release acceptance does not probe $profile"
+done
+grep -Fq '[[ "$profile_code" == 200' "$ACCEPTANCE" \
+    || fail "post-release acceptance does not require HTTP 200 for profiles"
+grep -Fq '"${profile_media_type,,}" == "application/x-apple-aspen-config"' "$ACCEPTANCE" \
+    || fail "post-release acceptance does not require the exact Apple profile media type"
+[[ "$(grep -c 'curl ' "$ACCEPTANCE")" == "$(grep -c "curl --noproxy '\*'" "$ACCEPTANCE")" ]] \
+    || fail "post-release loopback acceptance can be diverted by proxy environment variables"
 
 # --- `5gpn` management command: installed on PATH, backed by a copy of install.sh ---
 grep -Eq '^install_manage_cli\(\)' "$INSTALL" || fail "no install_manage_cli() (the 5gpn management command)"
@@ -265,6 +281,8 @@ printf '%s' "$mc_fn" | grep -Fq -- '--connect-to' \
     || fail "mihomo_controller_curl does not dial the configured loopback target"
 printf '%s' "$mc_fn" | grep -Fq 'https://' \
     || fail "mihomo_controller_curl does not use HTTPS"
+printf '%s' "$mc_fn" | grep -Fq -- "--noproxy '*'" \
+    || fail "mihomo_controller_curl can be diverted by the host proxy environment"
 printf '%s' "$mc_fn" | grep -Eq -- '(^|[[:space:]])(-k|--insecure)([[:space:]]|$)' \
     && fail "mihomo_controller_curl must not disable TLS verification"
 pmr_fn="$(sed -n '/^probe_mihomo_ready()/,/^}/p' "$INSTALL")"

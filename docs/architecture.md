@@ -160,6 +160,13 @@ client that can reach `/configs` can reach these and one that cannot, cannot.
 unauthenticated surface: an unenrolled phone downloading a `.mobileconfig`
 trusts nothing yet and holds no secret.
 
+The controller assigns `.mobileconfig` responses the explicit media type
+`application/x-apple-aspen-config`; serving profiles must not depend on the
+host distribution's MIME database. The installer never edits a shared MIME
+table. Its readiness probe bypasses proxy environment variables and requires
+both public profiles to return HTTP 200 with that exact media type, comparing
+the type case-insensitively and allowing parameters.
+
 ## Control surface
 
 `/capabilities` reports which subsystems are actually installed, with a schema

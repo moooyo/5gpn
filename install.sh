@@ -175,8 +175,8 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # leaves the gateway with no resolver, no capture and no control API at all. The
 # staging probe checks the version token exactly rather than accepting a prefix.
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-monolith.16"
-MIHOMO_SHA256="6f1e1e961e28a22fb2009d9029def6d21dbc0dccbf646d65b8cb69c25b43f494"
+MIHOMO_VERSION="v1.19.28-monolith.17"
+MIHOMO_SHA256="eef6c88c9fd864f9d5a78448e5518a42005c1ad03f3075360339d50025286e5e"
 # Every `mihomo -t` in this script must run with the same SAFE_PATHS the unit
 # grants, because the seed names paths outside its own home directory -- the
 # certificates it serves and the UI bundle it publishes. Without this the core
@@ -4284,8 +4284,9 @@ reset_mihomo_config() {
 # ----------------------------------------------------------------------------
 
 # mihomo_controller_curl dials the loopback mihomo controller over verified TLS
-# using the console certificate and SNI, while still letting callers supply their
-# own curl flags and path.
+# using the console certificate and SNI. It ignores proxy environment variables
+# so readiness always measures this process, while still letting callers supply
+# their own curl flags and path.
 mihomo_controller_curl() {
     local path="$1"; shift
     local controller server_name cert_file host port base
@@ -4304,7 +4305,7 @@ mihomo_controller_curl() {
         || { warn "mihomo controller trust certificate is unreadable: $cert_file"; return 1; }
     curl --cacert "$cert_file" \
         --connect-to "${server_name}:${port}:${host}:${port}" \
-        "$@" "https://${server_name}:${port}${path}"
+        "$@" --noproxy '*' "https://${server_name}:${port}${path}"
 }
 
 # The interception snapshot, as JSON on stdout.
@@ -6499,7 +6500,6 @@ setup_ios_profile() {
     # atomically from the zashboard dist, so a tree publication here would
     # delete the console. install_ui runs earlier in the same phase, and a
     # re-install repeats both in that order.
-    ensure_profile_mime_type || return 1
     for f in "$candidate"/*.mobileconfig; do
         [[ -f "$f" ]] || continue
         install -o root -g root -m 0644 "$f" "${UI_DIR}/$(basename -- "$f")" \
@@ -6509,25 +6509,6 @@ setup_ios_profile() {
     remove_owned_root "$candidate" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE"
 
     ok "iOS profile generated (served at /ui/ios-dot.mobileconfig on the controller)."
-}
-
-# Teach the system MIME table what a .mobileconfig is.
-#
-# The controller serves the bundle with Go's static file handler, which resolves
-# content types through mime.TypeByExtension -- and that consults the system
-# database on Unix. Without an entry the profile is served as
-# application/octet-stream, and iOS then downloads it instead of offering to
-# install it, which is a silently worse experience rather than a visible error.
-#
-# Idempotent, and additive to a file the distro owns: a package update that
-# rewrites /etc/mime.types costs the entry, and the next install restores it.
-ensure_profile_mime_type() {
-    local table=/etc/mime.types
-    [[ -f "$table" && ! -L "$table" ]] || return 0
-    grep -qE '(^|[[:space:]])mobileconfig([[:space:]]|$)' "$table" && return 0
-    printf 'application/x-apple-aspen-config\tmobileconfig\n' >> "$table" \
-        || { err "Could not register the .mobileconfig MIME type in ${table}."; return 1; }
-    info "Registered the .mobileconfig MIME type so iOS is offered the profile."
 }
 
 # ios_profile_url — the ONE derivation of where a phone fetches the DoT profile.
@@ -6677,25 +6658,24 @@ verify_console_endpoint() {
     # controller's authentication group. And they must carry the Apple content
     # type, or iOS downloads the file instead of offering to install it -- a
     # silently worse experience rather than a visible error.
-    local tmp code name
-    tmp="$(mktemp -d /tmp/5gpn-console-probe.XXXXXX)" || return 1
-    claim_temp_dir "$tmp" || { rmdir -- "$tmp"; return 1; }
+    local code content_type media_type name probe
 
     for name in ios-dot.mobileconfig ios-intercept-ca.mobileconfig; do
         [[ -s "${UI_DIR}/${name}" ]] \
-            || { remove_temp_dir "$tmp"
-                 err "Profile ${name} is absent from ${UI_DIR} after generation."; return 1; }
-        code="$(mihomo_controller_curl "/ui/${name}" \
+            || { err "Profile ${name} is absent from ${UI_DIR} after generation."; return 1; }
+        probe="$(mihomo_controller_curl "/ui/${name}" \
             --silent --show-error --max-time 5 \
-            -D "$tmp/headers" -o /dev/null -w '%{http_code}' 2>/dev/null || true)"
+            -o /dev/null -w $'%{http_code}\t%{content_type}' 2>/dev/null || true)"
+        IFS=$'\t' read -r code content_type <<< "$probe"
         if [[ "$code" != 200 ]]; then
-            remove_temp_dir "$tmp"
             err "Profile probe failed: /ui/${name} returned HTTP ${code:-none}, want 200."
             return 1
         fi
-        if ! grep -qi '^Content-Type:[[:space:]]*application/x-apple-aspen-config' "$tmp/headers"; then
-            remove_temp_dir "$tmp"
-            err "Profile /ui/${name} is not served as application/x-apple-aspen-config; iOS would download it instead of installing it."
+        media_type="${content_type%%;*}"
+        media_type="${media_type#"${media_type%%[![:space:]]*}"}"
+        media_type="${media_type%"${media_type##*[![:space:]]}"}"
+        if [[ "${media_type,,}" != "application/x-apple-aspen-config" ]]; then
+            err "Profile /ui/${name} returned Content-Type '${content_type:-<missing>}', want application/x-apple-aspen-config; iOS would download it instead of installing it."
             return 1
         fi
     done
@@ -6704,13 +6684,12 @@ verify_console_endpoint() {
     code="$(mihomo_controller_curl "/ui/" --silent --max-time 5 \
         -o /dev/null -w '%{http_code}' 2>/dev/null || true)"
     [[ "$code" == 200 ]] \
-        || { remove_temp_dir "$tmp"; err "Console bundle probe failed: /ui/ returned HTTP ${code:-none}, want 200."; return 1; }
+        || { err "Console bundle probe failed: /ui/ returned HTTP ${code:-none}, want 200."; return 1; }
 
     # And the authenticated half stays authenticated. Asking without a bearer
     # must be refused: /ui/* being open is a deliberate exception, not the rule.
     code="$(mihomo_controller_curl "/configs" --silent --max-time 5 \
         -o /dev/null -w '%{http_code}' 2>/dev/null || true)"
-    remove_temp_dir "$tmp"
     [[ "$code" == 401 ]] \
         || { err "Controller auth probe failed: unauthenticated /configs returned HTTP ${code:-none}, want 401."; return 1; }
     ok "Console verified: bundle and both profiles are served unauthenticated; the control API is not."
