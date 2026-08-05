@@ -130,9 +130,14 @@ grep -Fq 'ProtectSystem=strict' "$CERT_SVC" || fail "the certificate oneshot: no
 # --- installer -------------------------------------------------------------
 grep -Fq 'install_service_accounts' "$INSTALL" || fail "installer does not create service accounts"
 start_fn="$(sed -n '/^start_services()/,/^}/p' "$INSTALL")"
-cert_reset="$(grep -nF 'systemctl reset-failed 5gpn-intercept-cert.service' <<<"$start_fn" | cut -d: -f1)"
+reset_fn="$(sed -n '/^reset_systemd_failed_state()/,/^}/p' "$INSTALL")"
+grep -Fq 'systemctl reset-failed "$unit"' <<<"$reset_fn" \
+    || fail "systemd failed-state helper no longer attempts reset-failed"
+grep -Fq 'LoadState' <<<"$reset_fn" && grep -Fq 'ActiveState' <<<"$reset_fn" \
+    || fail "systemd failed-state helper does not inspect the effective unit state"
+cert_reset="$(grep -nF 'reset_systemd_failed_state 5gpn-intercept-cert.service' <<<"$start_fn" | cut -d: -f1)"
 path_enable="$(grep -nF 'systemctl enable --now 5gpn-intercept-cert.path' <<<"$start_fn" | cut -d: -f1)"
-main_reset="$(grep -nF 'systemctl reset-failed 5gpn-mihomo.service' <<<"$start_fn" | cut -d: -f1)"
+main_reset="$(grep -nF 'reset_systemd_failed_state 5gpn-mihomo.service' <<<"$start_fn" | cut -d: -f1)"
 main_restart="$(grep -nF 'systemctl restart 5gpn-mihomo.service' <<<"$start_fn" | cut -d: -f1)"
 [[ -n "$cert_reset" && -n "$path_enable" && "$cert_reset" -lt "$path_enable" ]] \
     || fail "certificate publisher start-limit is not cleared before arming the watcher"

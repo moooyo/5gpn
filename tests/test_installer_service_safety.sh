@@ -45,6 +45,36 @@ else
     fail "listener readiness permits an address substring match"
 fi
 
+(
+    systemctl() {
+        case "$1" in
+            reset-failed) return 1 ;;
+            show)
+                [[ "$3" == LoadState ]] && printf 'loaded\n' || printf 'inactive\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    info() { :; }
+    err() { :; }
+    reset_systemd_failed_state 5gpn-intercept-cert.service
+) && pass "reset-failed not-loaded race is tolerated for a loaded inactive unit" \
+  || fail "loaded inactive unit was treated as a failed reset-failed state"
+
+(
+    systemctl() {
+        case "$1" in
+            reset-failed) return 1 ;;
+            show)
+                [[ "$3" == LoadState ]] && printf 'loaded\n' || printf 'failed\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    info() { :; }
+    err() { :; }
+    ! reset_systemd_failed_state 5gpn-mihomo.service
+) && pass "failed unit remains fatal when reset-failed also fails" \
+  || fail "failed unit was allowed to start after reset-failed failed"
+
 echo "----"
 if [[ "$FAIL" == 0 ]]; then
     echo "installer service safety: PASS"

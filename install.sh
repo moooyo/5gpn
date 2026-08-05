@@ -6817,6 +6817,21 @@ wait_service_ready() {
     return 1
 }
 
+reset_systemd_failed_state() {
+    local unit="$1" load_state active_state
+    systemctl reset-failed "$unit" >/dev/null 2>&1 && return 0
+    load_state="$(systemctl show -p LoadState --value "$unit" 2>/dev/null)" \
+        || { err "could not read LoadState after reset-failed failed for ${unit}."; return 1; }
+    active_state="$(systemctl show -p ActiveState --value "$unit" 2>/dev/null)" \
+        || { err "could not read ActiveState after reset-failed failed for ${unit}."; return 1; }
+    if [[ "$load_state" == loaded && -n "$active_state" && "$active_state" != failed ]]; then
+        info "${unit} has no tracked failed state to clear (ActiveState=${active_state}); continuing."
+        return 0
+    fi
+    err "could not clear failed state for ${unit} (LoadState=${load_state:-unknown}, ActiveState=${active_state:-unknown})."
+    return 1
+}
+
 start_services() {
     info "Enabling and starting services..."
     PUBLIC_IP="${PUBLIC_IP:-$(cfg_get DNS_PUBLIC_IP)}"
@@ -6825,8 +6840,7 @@ start_services() {
     MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" || return 1
     export PUBLIC_IP GATEWAY_IP MIHOMO_LISTEN_IPS
     systemctl daemon-reload || { err "systemctl daemon-reload failed."; return 1; }
-    systemctl reset-failed 5gpn-intercept-cert.service >/dev/null 2>&1 \
-        || { err "could not clear the interception certificate publisher start-limit state."; return 1; }
+    reset_systemd_failed_state 5gpn-intercept-cert.service || return 1
     systemctl enable --now 5gpn-intercept-cert.path >/dev/null 2>&1 \
         || { err "could not enable the interception certificate watcher."; return 1; }
     systemctl enable --now 5gpn-intercept-cert.timer >/dev/null 2>&1 \
@@ -6849,8 +6863,7 @@ start_services() {
         err "could not enable 5gpn-mihomo (check: systemctl status 5gpn-mihomo.service)."
         failed=1
     fi
-    if ! systemctl reset-failed 5gpn-mihomo.service 2>/dev/null; then
-        err "could not clear the validated 5gpn-mihomo start-limit state."
+    if ! reset_systemd_failed_state 5gpn-mihomo.service; then
         failed=1
     elif ! systemctl restart 5gpn-mihomo.service 2>/dev/null; then
         err "could not start 5gpn-mihomo (check: journalctl -u 5gpn-mihomo.service)."
