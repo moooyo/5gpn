@@ -6,7 +6,7 @@
 # The profile points the phone's cellular DNS at this gateway over TLS (DoT). On
 # Wi-Fi it disconnects, so it only applies on cellular as designed.
 #
-# Usage: gen-ios-profile.sh <DOMAIN> <GATEWAY_IP> <WWW_DIR>
+# Usage: gen-ios-profile.sh <DOMAIN> <GATEWAY_IP> <OUTPUT_DIR>
 #   GATEWAY_IP = client-facing gateway address written into ServerAddresses
 #   (public IP for public deployments, internal 172.22 addr for NPN-only).
 set -euo pipefail
@@ -20,13 +20,13 @@ warn() { if [ "$_HAVE_GUM" = 1 ]; then CI=1 gum log --level warn  -- "$*" >&2; e
 err()  { if [ "$_HAVE_GUM" = 1 ]; then CI=1 gum log --level error -- "$*" >&2; else echo "[ERR]  $*" >&2; fi; }
 
 if [[ $# -ne 3 ]]; then
-    err "Usage: $0 <DOMAIN> <PUBLIC_IP> <WWW_DIR>"
+    err "Usage: $0 <DOMAIN> <PUBLIC_IP> <OUTPUT_DIR>"
     exit 1
 fi
 
 DOMAIN="$1"
 GATEWAY_IP="$2"
-WWW_DIR="$3"
+OUTPUT_DIR="$3"
 
 gen_uuid() {
     cat /proc/sys/kernel/random/uuid 2>/dev/null \
@@ -36,21 +36,21 @@ gen_uuid() {
 PAYLOAD_UUID="$(gen_uuid)"
 TOP_UUID="$(gen_uuid)"
 
-if [[ -e "$WWW_DIR" || -L "$WWW_DIR" ]]; then
-    [[ -d "$WWW_DIR" && ! -L "$WWW_DIR" ]] \
-        || { err "Unsafe iOS profile directory: $WWW_DIR"; exit 1; }
+if [[ -e "$OUTPUT_DIR" || -L "$OUTPUT_DIR" ]]; then
+    [[ -d "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] \
+        || { err "Unsafe iOS profile directory: $OUTPUT_DIR"; exit 1; }
 else
-    mkdir -p -- "$WWW_DIR"
+    mkdir -p -- "$OUTPUT_DIR"
 fi
 
 # Both payloads are completed in one private, same-filesystem staging directory.
 # Nothing under the public filenames changes until both CMS signatures exist.
-stage_dir="$(mktemp -d "${WWW_DIR}/.ios-profile.XXXXXX")" \
+stage_dir="$(mktemp -d "${OUTPUT_DIR}/.ios-profile.XXXXXX")" \
     || { err "Could not create the iOS profile staging directory."; exit 1; }
 chmod 0700 "$stage_dir" \
     || { rmdir -- "$stage_dir" 2>/dev/null || true; exit 1; }
-profile_path="${WWW_DIR}/ios-dot.mobileconfig"
-intercept_profile_path="${WWW_DIR}/ios-intercept-ca.mobileconfig"
+profile_path="${OUTPUT_DIR}/ios-dot.mobileconfig"
+intercept_profile_path="${OUTPUT_DIR}/ios-intercept-ca.mobileconfig"
 staged_profile="${stage_dir}/ios-dot.mobileconfig"
 unsigned_profile="${stage_dir}/ios-dot.mobileconfig.unsigned"
 staged_intercept_profile="${stage_dir}/ios-intercept-ca.mobileconfig"

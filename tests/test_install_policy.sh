@@ -208,8 +208,8 @@ grep -Eq 'install_web|5gpn-web-.*\.tar\.gz|DNS_WEB_DIR=' "$INSTALL" \
 # says why: an unenrolled phone downloading a .mobileconfig holds no secret. The
 # loopback console origin that used to serve them is gone, so a profile
 # published anywhere else is a profile nothing can read.
-grep -Fq '"${UI_DIR}/$(basename -- "$f")"' "$INSTALL" \
-    || fail "the iOS profiles are not published into the served UI directory"
+grep -Fq 'bash "${SCRIPTS_DIR}/gen-ios-profile.sh" "$DOT_DOMAIN" "$gw" "$UI_DIR"' "$INSTALL" \
+    || fail "the iOS profile transaction does not publish directly into the served UI directory"
 grep -Eq 'publish_owned_tree "\$candidate" "\$WWW_DIR"' "$INSTALL" \
     && fail "the iOS profiles are still published to the unserved WWW_DIR"
 # The core owns the response header. The installer must not mutate a
@@ -266,8 +266,9 @@ grep -Eq 'DNS_(DOMAIN|WEB_DOMAIN|CONSOLE_DOMAIN|ZASH_DOMAIN)=' "$INSTALL" \
     && fail "installer still persists a redundant derived-domain key"
 
 # --- Task 4: the source allowlist is gone by owner decision. The panel and
-# the control API answer any client that reaches this gateway; /api/* still
-# requires the bearer token. Nothing may reintroduce the management surface,
+# the control API answer any client that reaches this gateway; /5gpn/* and the
+# ordinary controller routes still require the bearer token. Nothing may
+# reintroduce the management surface,
 # because the rule and the rule-provider that gave it meaning are gone from
 # the seed -- an add-allow that edits a file no rule reads is worse than no
 # add-allow at all, since it reports success while changing nothing. ---

@@ -26,8 +26,8 @@ Update the status and the normative documentation when an implementation lands.
 - Restart is crash recovery, not configuration repair or a general liveness
   detector. Persistent startup errors reach the start limit, and a process that
   remains alive without making progress requires an independent external DoT
-  and HTTPS pull probe. The persisted `DNS_HEARTBEAT_*` fields are currently
-  inert and are not evidence of health.
+  and HTTPS pull probe. Retired `DNS_HEARTBEAT_*` keys are accepted only while
+  rewriting an older `dns.env`; current installations do not persist them.
 - The installed runtime naming is uniformly 5gpn-prefixed. Documents live in
   `/etc/5gpn/mihomo/5gpn`, and authenticated routes use `/5gpn/*`. Exact old
   names are migration inputs only. The installer atomically renames old-only
@@ -40,8 +40,10 @@ Update the status and the normative documentation when an implementation lands.
 
 **Status: Implemented. Recorded 2026-08-06.**
 
-- Mihomo and Zashboard are maintained forks and move only through the
-  digest-pinned 5gpn installer release. The controller returns HTTP 403 for
+- Mihomo and Zashboard are maintained forks and move only through the 5gpn
+  installer, which records independent release tags and SHA-256 pins for each
+  upstream artifact. A 5gpn release does not rebuild or republish either
+  component. The controller returns HTTP 403 for
   `/upgrade` and `/upgrade/ui`; Zashboard exposes no manual, automatic, or
   update-check path for either component. Updating GEO data remains separate.
 - Zashboard remains installable as a PWA, but its worker is network-only. It
@@ -55,6 +57,29 @@ Update the status and the normative documentation when an implementation lands.
   be used. Zashboard tracks `Zephyruso/zashboard:main`. Every sync verifies the
   merge-base first, fast-forwards the matching fork baseline, and then merges
   that baseline without rebasing already tagged downstream history.
+
+## Installer state and certificate publication
+
+**Status: Implemented. Recorded 2026-08-06.**
+
+- `dns.env` contains installation-owned host coordinates only. Live policy,
+  upstreams, subscriptions, resolver tuning, statistics, and health monitoring
+  are not mirrored from `dns.json`. Known retired keys are tolerated for one
+  rewrite and then dropped.
+- A missing `dns.json` receives the exact pinned-core defaults, including the
+  ChinaMax `direct` and GFW `proxy` subscription rules. Their caches live under
+  the monolith state directory; `/etc/5gpn/rules` is legacy evidence only.
+- The old standalone-resolver files and cache tree remain root-only migration
+  evidence. The mihomo service account cannot read or mutate them. The retired
+  sidecar `config.json` is likewise root-only; the current interception document
+  is `<mihomo-home>/5gpn/intercept.json`.
+- The only current public certificate roles are `dot` and `console`. A safe
+  legacy `web` role may remain for migration evidence but is never refreshed or
+  exposed to mihomo. Both public iOS profiles are generated transactionally
+  directly in `/opt/5gpn/ui`; `/opt/5gpn/www` is retired.
+- Only explicit gateway runtime and upgrade helper scripts are copied into
+  `/opt/5gpn/scripts`. Development helpers remain in the source repository and
+  are excluded from the release bundle and installed tree.
 
 ## Mihomo proxy selection
 
@@ -241,8 +266,8 @@ contract and explicit HTTP/3 refusal on 2026-08-05.**
 
 ## Stable and beta release channels
 
-**Status: Implemented. Recorded 2026-07-19 and extended with the explicit
-stable-to-beta upgrade contract on 2026-07-21.**
+**Status: Implemented. Recorded 2026-07-19 and extended with the explicit beta
+channel-switch and anti-downgrade contract on 2026-08-06.**
 
 ### Current repository state
 
@@ -253,11 +278,15 @@ stable-to-beta upgrade contract on 2026-07-21.**
 - Official releases remain normal latest-eligible GitHub releases. Beta releases
   are prereleases with `make_latest=false`.
 - `quick-install.sh` and source `install.sh` default to the latest official
-  release; `--beta` explicitly selects the latest verified beta prerelease.
+  release. `--beta` selects the latest verified beta only when its base version
+  is newer than the latest official release; an older beta line is refused.
 - A release bundle stamps `RELEASE_TAG` to its exact tag. Unpinned source
   installs delegate to that verified bundle, and packaged or installed scripts
-  retain the stamped tag so scripts, daemon binaries, web assets, and checksums
-  cannot drift across releases or channels.
+  retain the stamped tag. The 5gpn release publishes exactly
+  `5gpn-installer.tar.gz`, `checksums.txt`, and `THIRD_PARTY_NOTICES.md`; the
+  bundle contains installer inputs, not mihomo binaries or zashboard assets.
+  Mihomo and zashboard are fetched from their own repositories using the
+  independent release tags and SHA-256 pins embedded in that installer.
 - The current repository revision contains the cross-channel compatibility
   check and `upgrade-reset-mihomo` flow, but a new beta prerelease must publish
   this revision before the public `--beta` selector can deploy that behavior.
@@ -287,9 +316,10 @@ stable-to-beta upgrade contract on 2026-07-21.**
 
 - A normal installation with no channel argument installs the latest official
   release. This remains the default.
-- `--beta` is the explicit, non-interactive opt-in that installs the latest beta
-  release. Do not add a TUI prompt or menu choice for release channels, and do
-  not use the caller's environment as channel input.
+- `--beta` is the explicit, non-interactive opt-in for a newer beta line. It
+  must fail when the latest beta base is not newer than latest official. Do not
+  add a TUI prompt or menu choice for release channels, and do not use the
+  caller's environment as channel input.
 - The quick-install path must honor the same contract. For example:
 
   ```bash
@@ -300,15 +330,21 @@ stable-to-beta upgrade contract on 2026-07-21.**
 - Channel selection must happen before `quick-install.sh` downloads the
   installer bundle, and `install.sh` must also understand the selected channel.
   The two layers must never select different releases.
-- Resolve a release tag exactly once per installation, validate it against the
-  selected channel, and pin every first-party artifact to that exact tag. Keep
-  the current checksum verification, staging, rollback, and no-branch-fallback
-  guarantees for both channels.
+- Resolve the 5gpn release tag exactly once per installation and validate it
+  against the selected channel. Verify its installer bundle against
+  `checksums.txt`, then use the independent mihomo and zashboard release tags
+  and SHA-256 pins recorded by that bundle. Keep checksum verification,
+  fail-before-publish checks, staging, and the no-branch-fallback guarantee for
+  both channels. A failure before publication leaves the host untouched; a
+  failure during publication is reported as a partial installation and is not
+  rolled back automatically.
 - Official resolution must ignore prereleases. Beta resolution must select only
-  valid `X.Y.Z-beta.N` prereleases and must not silently fall back to an official
-  release when no beta release exists.
-- A packaged installer remains stamped to its own exact tag. It must not mix its
-  scripts or templates with daemon or web artifacts from another tag or channel.
+  valid `X.Y.Z-beta.N` prereleases whose base version is newer than latest
+  official. It must not silently fall back or downgrade when no such beta
+  exists.
+- A packaged installer remains stamped to its own exact 5gpn tag. It must use
+  the scripts, templates, and independent component pins from that bundle; a
+  mihomo or zashboard tag is not required to equal the 5gpn tag.
 - A stable release that includes the upgrade mechanism stores the verified
   quick installer from its own release bundle. An explicit `--beta` invocation
   of that installed stable script delegates the complete operation to the quick
@@ -330,7 +366,9 @@ stable-to-beta upgrade contract on 2026-07-21.**
   upstream proxy, and protocol booleans in a checked, atomically published,
   disabled empty v5 document. Historical sidecar and DNS routing checks must
   both pass against the clean mihomo file before the legacy config and env
-  candidates publish with rollback copies. Never delete v4 and accept randomized credentials against a preserved
+  candidates publish with explicit previous-file backups. Those backups are
+  operator recovery material, not an automatic installer rollback. Never delete
+  v4 and accept randomized credentials against a preserved
   mihomo file. Extensions are re-imported and reviewed; this is not a lossless
   automatic migration.
 - `--beta upgrade-reset-mihomo` is the only installer upgrade mode authorized to
@@ -340,9 +378,11 @@ stable-to-beta upgrade contract on 2026-07-21.**
   atomically inside the install transaction, and state that custom proxies,
   providers, groups, and rules require manual restoration. Normal install,
   reinstall, and `configure` never choose this reset.
-- A successful stable-to-beta upgrade does not define or promise a direct
-  beta-to-stable downgrade. Operators who need reversal retain a pre-upgrade
-  system snapshot; automatic installer rollback covers failure before commit.
+- A successful beta channel switch does not define or promise a direct switch
+  back to the official channel. Operators who need reversal retain a pre-switch
+  system snapshot. Pre-publication failure leaves the host untouched; once
+  publication begins, a failure is reported as partial and no automatic
+  installer rollback is claimed.
 - The channel option affects only 5gpn's first-party release. Existing explicit
   third-party version pins remain independent.
 
@@ -353,9 +393,11 @@ stable-to-beta upgrade contract on 2026-07-21.**
   are built.
 - Publication automation must distinguish official tags from beta tags and
   verify their branch provenance before publishing.
-- Both channels must build from the tagged commit, stamp the exact tag into the
-  daemon and installer bundle, and publish the existing version-matched daemon,
-  web, installer, and checksum assets.
+- Both channels package installer inputs from the tagged commit and stamp the
+  exact 5gpn tag into the installer bundle. They publish only
+  `5gpn-installer.tar.gz`, `checksums.txt`, and `THIRD_PARTY_NOTICES.md`. CI
+  verifies the independently pinned mihomo binary and zashboard asset without
+  republishing them.
 - Official publication must preserve the current stable `releases/latest`
   behavior. Beta publication must be a separate prerelease path and must not
   change what a default installation resolves.
@@ -372,10 +414,11 @@ Future release-channel changes must update all affected surfaces together:
 - `.github/workflows/release.yml`, or an explicitly separate beta publication
   workflow, while retaining `.github/workflows/checks.yml` as the common gate;
 - installer and quick-installer safety tests, including default-stable behavior,
-  explicit beta selection, malformed or cross-channel tags, missing beta
+  explicit beta selection, older-beta downgrade refusal, malformed or cross-channel tags, missing beta
   releases, exact-tag pinning, checksum enforcement, and a frozen raw `0.0.13`
   fixture whose test performs the explicit checked rebuild before covering both
-  core-preserve and explicit-reset paths plus rollback of newly created
-  CA/state roots and service accounts;
+  core-preserve and explicit-reset paths plus the fail-before-publish and
+  partial-publication boundaries for newly created CA/state roots and service
+  accounts;
 - `README.md` installation and release documentation; and
 - `docs/architecture.md` and this durable decision record.

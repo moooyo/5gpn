@@ -51,12 +51,22 @@ The verified executable is installed as `/opt/5gpn/bin/gum`.
 
 ## Runtime rule data
 
-A fresh installation writes one enabled, 24-hour subscription for the
-split-horizon China IPv4 input:
+The pinned mihomo binary embeds the China IPv4 prefix snapshot used for
+deterministic arbitration. It is part of the versioned core artifact rather than
+a mutable installer cache:
 
 | Data source | Fetch behavior | License status |
 |---|---|---|
-| [`17mon/china_ip_list`](https://github.com/17mon/china_ip_list), [`china_ip_list.txt`](https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt) | The installed `5gpn-mihomo` fetches the unversioned `master` resource and stores the cache under `/etc/5gpn/rules`; the list is not included in the 5gpn release asset. | The upstream repository publishes no license file and reports no declared license. No license is inferred here; operators must review the upstream terms before enabling or redistributing this data. |
+| [`17mon/china_ip_list`](https://github.com/17mon/china_ip_list) | A snapshot is embedded in the pinned `moooyo/mihomo` release; the installer does not fetch or refresh `/etc/5gpn/rules`. | The upstream repository publishes no license file and reports no declared license. No license is inferred here. |
+
+A missing `dns.json` also starts with two enabled 24-hour subscription rules.
+They are fetched by the running core into its private state directory and are
+not bundled in the 5gpn installer release:
+
+| Data source | Default purpose | Repository license |
+|---|---|---|
+| [`blackmatrix7/ios_rule_script` ChinaMax domains](https://github.com/blackmatrix7/ios_rule_script) | `direct` subscription in Clash format | GPL-2.0 |
+| [`Loyalsoldier/v2ray-rules-dat` gfw list](https://github.com/Loyalsoldier/v2ray-rules-dat) | `proxy` subscription in plain format | GPL-3.0 |
 
 Operator-added rule subscriptions and extension catalogs are neither selected
 nor redistributed by the 5gpn release. Their licenses and service terms remain
@@ -69,12 +79,10 @@ downloaded from the operator's configured OS repositories, are not pinned by
 the 5gpn release, and remain governed by the distribution's package metadata
 and license notices.
 
-- Debian-family names: `wget`, `curl`, `ca-certificates`, `unzip`, `iproute2`,
-  `openssl`, `qrencode`, `jq`, `libcap2-bin`, `util-linux`, `polkitd`, and
-  `dnsutils`.
-- RPM-family names: `wget`, `curl`, `ca-certificates`, `unzip`, `iproute`,
-  `openssl`, `qrencode`, `jq`, `util-linux`, `polkit`, `bind-utils`, `libcap`,
-  and `libcap-ng-utils`.
+- Debian-family names: `curl`, `ca-certificates`, `unzip`, `iproute2`,
+  `openssl`, `qrencode`, `jq`, `util-linux`, and `dnsutils`.
+- RPM-family names: `curl`, `ca-certificates`, `unzip`, `iproute`, `openssl`,
+  `qrencode`, `jq`, `util-linux`, and `bind-utils`.
 - Production certificate modes also install the distribution's `certbot`
   package. Cloudflare DNS-01 mode additionally installs
   `python3-certbot-dns-cloudflare`.

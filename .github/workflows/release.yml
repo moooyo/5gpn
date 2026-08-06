@@ -97,15 +97,89 @@ jobs:
       # this exact tag. The quick installer never falls back to branch content.
       - name: Package installer bundle
         run: |
+          set -euo pipefail
           stage="installer-bundle"
-          mkdir -p "$stage/docs" "$stage/tests"
-          cp -r install.sh quick-install.sh etc scripts README.md README.en.md LICENSE THIRD_PARTY_NOTICES.md "$stage"/
-          cp docs/architecture.md docs/native-extensions.md docs/pre-v5-upgrade.md "$stage/docs"/
-          cp tests/integration-smoke.md "$stage/tests"/
+          [[ ! -e "$stage" ]] \
+            || { echo "Refusing to reuse existing bundle stage: $stage" >&2; exit 1; }
+
+          # This is the complete installer-bundle policy. Runtime helpers and
+          # one-shot upgrade tools are listed individually so a repository-only
+          # helper cannot become gateway payload by merely landing in scripts/.
+          # scripts/run-suites.sh is a development-only test runner and must not
+          # ship in a release bundle.
+          bundle_files=(
+            install.sh
+            quick-install.sh
+            README.md
+            README.en.md
+            LICENSE
+            THIRD_PARTY_NOTICES.md
+            etc/5gpn/dns.env.example
+            etc/mihomo/config.yaml.tmpl
+            etc/systemd/5gpn-intercept-cert.path
+            etc/systemd/5gpn-intercept-cert.service
+            etc/systemd/5gpn-intercept-cert.timer
+            etc/systemd/5gpn-mihomo.service
+            # Runtime helpers installed under /opt/5gpn/scripts.
+            scripts/cert-renew.sh
+            scripts/gen-ios-profile.sh
+            scripts/intercept-cert-renew.sh
+            scripts/renew-hook.sh
+            # Explicit operator upgrade and migration tools.
+            scripts/migrate-panel-to-console.sh
+            scripts/migrate-state-to-monolith.sh
+            scripts/migrate-to-monolith.sh
+            docs/architecture.md
+            docs/native-extensions.md
+            docs/pre-v5-upgrade.md
+            tests/integration-smoke.md
+          )
+          executable_files=(
+            install.sh
+            quick-install.sh
+            scripts/cert-renew.sh
+            scripts/gen-ios-profile.sh
+            scripts/intercept-cert-renew.sh
+            scripts/renew-hook.sh
+            scripts/migrate-panel-to-console.sh
+            scripts/migrate-state-to-monolith.sh
+            scripts/migrate-to-monolith.sh
+          )
+
+          mkdir -p "$stage"
+          for file in "${bundle_files[@]}"; do
+            install -D -m 0644 "$file" "$stage/$file"
+          done
+          for file in "${executable_files[@]}"; do
+            chmod 0755 "$stage/$file"
+          done
+
           sed -i "s/^RELEASE_TAG=.*/RELEASE_TAG=\"${GITHUB_REF_NAME}\"/" "$stage/install.sh"
           grep -q "^RELEASE_TAG=\"${GITHUB_REF_NAME}\"" "$stage/install.sh" \
             || { echo "RELEASE_TAG stamp failed"; exit 1; }
+
+          expected_manifest="$RUNNER_TEMP/5gpn-installer-expected.txt"
+          actual_manifest="$RUNNER_TEMP/5gpn-installer-actual.txt"
+          printf '%s\n' "${bundle_files[@]}" | LC_ALL=C sort > "$expected_manifest"
+          find "$stage" -type f -printf '%P\n' | LC_ALL=C sort > "$actual_manifest"
+          diff -u "$expected_manifest" "$actual_manifest"
+
           tar czf 5gpn-installer.tar.gz -C "$stage" .
+
+          # Re-read the completed archive rather than trusting only the stage.
+          # This closes the gap where a later packaging command could add or
+          # replace an entry after the staged manifest passed.
+          archive_root="$(mktemp -d "${RUNNER_TEMP}/5gpn-installer-archive.XXXXXX")"
+          archive_manifest="$RUNNER_TEMP/5gpn-installer-archive.txt"
+          tar xzf 5gpn-installer.tar.gz -C "$archive_root"
+          find "$archive_root" -type f -printf '%P\n' | LC_ALL=C sort > "$archive_manifest"
+          diff -u "$expected_manifest" "$archive_manifest"
+          unexpected_archive_entry="$(
+            find "$archive_root" -mindepth 1 ! -type d ! -type f -print -quit
+          )"
+          [[ -z "$unexpected_archive_entry" ]] \
+            || { echo "Unexpected non-file archive entry: $unexpected_archive_entry" >&2; exit 1; }
+
           sha256sum 5gpn-installer.tar.gz > checksums.txt
 
       - name: Collect exact release assets

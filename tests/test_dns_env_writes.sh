@@ -15,7 +15,7 @@ pass() { echo "ok: $*"; }
 CONF_DIR="$TMP/etc-5gpn"
 mkdir -p "$CONF_DIR"
 printf '%s\n' "$CONF_OWNERSHIP_VALUE" > "$CONF_DIR/$CONF_OWNERSHIP_MARKER"
-printf 'DNS_API_TOKEN=old-token\n' > "$CONF_DIR/dns.env"
+printf 'DNS_BASE_DOMAIN=old.example\n' > "$CONF_DIR/dns.env"
 cp "$CONF_DIR/dns.env" "$TMP/original.env"
 
 fixed_owned_dir_is_safe() { return 0; }
@@ -25,7 +25,7 @@ chown() { return 0; }
 sync() { return 0; }
 mv() { return 73; }
 
-if set_dns_env_kv "$CONF_DIR/dns.env" DNS_API_TOKEN new-token >/dev/null 2>&1; then
+if set_dns_env_kv "$CONF_DIR/dns.env" DNS_BASE_DOMAIN new.example >/dev/null 2>&1; then
     fail "set_dns_env_kv swallowed an atomic rename failure"
 fi
 cmp -s "$CONF_DIR/dns.env" "$TMP/original.env" \
@@ -39,18 +39,10 @@ GATEWAY_IP=192.0.2.10
 MIHOMO_LISTEN_IPS=192.0.2.10
 CERT_MODE=debug
 CERT_EMAIL=admin@example.com
-CHINA_ECS=112.96.32.0/24
-CACHE_SIZE=20000
 MIHOMO_DIR="$CONF_DIR/mihomo"
-INTERCEPT_DIR="$CONF_DIR/intercept"
-DNS_RULES_DIR_DEFAULT="$CONF_DIR/rules"
-DOT_CERT_DIR="$CONF_DIR/cert/dot"
-WEB_CERT_DIR="$CONF_DIR/cert/web"
 CONSOLE_CERT_DIR="$CONF_DIR/cert/console"
-WWW_DIR="$TMP/www"
 cfg_get() {
     case "$1" in
-        DNS_API_TOKEN) printf '%s' existing-token ;;
         DNS_MIHOMO_SECRET) printf '%s' 'controller"secret' ;;
         *) return 0 ;;
     esac
@@ -87,12 +79,20 @@ if printf '%s' "$heredoc_body" | grep -qF '$('; then
 fi
 pass "the dns.env heredoc carries no live command substitution"
 
-printf '%s' "$heredoc_body" | grep -Fq 'The monolith does not consume them or send a' \
-    || fail "the generated dns.env does not identify heartbeat fields as inert"
+current_keys=" $(printf '%s' "$DNS_ENV_KEYS" | tr '\n' ' ') "
+for retired_key in DNS_CERT DNS_KEY DNS_WEB_CERT DNS_WEB_KEY WWW_DIR DNS_CHINA_ECS; do
+    case "$current_keys" in
+        *" $retired_key "*) fail "current dns.env schema still accepts retired key $retired_key" ;;
+    esac
+    printf '%s' "$heredoc_body" | grep -Eq "^${retired_key}=" \
+        && fail "write_dns_env still publishes retired key $retired_key"
+done
 writer_fn="$(sed -n '/^write_dns_env()/,/^}/p' "$ROOT/install.sh")"
-printf '%s' "$writer_fn" | grep -Fq 'DNS_HEARTBEAT_URL is retained but the monolith does not send push heartbeats' \
-    || fail "write_dns_env does not warn when a stale heartbeat URL is configured"
-pass "generated dns.env and installer warning expose the inert heartbeat fields"
+printf '%s' "$writer_fn" | grep -Fq 'WEB_CERT_DIR' \
+    && fail "write_dns_env still consumes the retired web certificate role"
+printf '%s' "$heredoc_body" | grep -Eq '^DNS_(CACHE_SIZE|MAX_INFLIGHT|TTL_MIN|TTL_MAX|QUERY_TIMEOUT|HEARTBEAT_URL|HEARTBEAT_INTERVAL)=' \
+    && fail "write_dns_env still duplicates live DNS runtime fields"
+pass "current dns.env contains only installer and controller coordinates"
 
 # DNS_MIHOMO_CONTROLLER follows the operator's config, and does not survive it.
 #

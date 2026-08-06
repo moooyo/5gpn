@@ -111,7 +111,9 @@ Expose only what you need. `speedtest-5060` is an unauthenticated Host/SNI relay
 
 ## 证书模式
 
-首次安装 TUI 会要求选择以下一种模式。两个生产模式都只使用一个名为 `<base>` 的 scoped Certbot lineage，并把证书部署到 dot、web 和 console 三个角色目录。
+The first-install TUI asks for one of the following modes. Both production
+modes use one scoped Certbot lineage named `<base>` and deploy it to the only
+current public certificate roles: `dot` and `console`.
 
 | 模式 | 证书与 DNS 要求 | 续期行为 |
 | --- | --- | --- |
@@ -129,7 +131,8 @@ Cloudflare token 只写入 root-only 的 `/etc/5gpn/acme/cloudflare.ini`，不�
 curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash
 ```
 
-显式安装最新 beta prerelease：
+Explicitly switch to a beta whose base version is newer than the latest
+official release; an older public beta is refused:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash -s -- --beta
@@ -142,9 +145,20 @@ sudo bash install.sh
 sudo bash install.sh --beta
 ```
 
-源码安装器也会先解析并委托给一个经过校验的精确 release bundle，避免把某个 tag 的二进制与另一份脚本或模板混用。默认通道只接受 `X.Y.Z`；`--beta` 只接受已发布的 `X.Y.Z-beta.N`，找不到合法 beta 时不会回退到正式版。
+The source installer first resolves and delegates to one verified, exact 5gpn
+release bundle. That bundle carries independent mihomo and zashboard release
+tags and SHA-256 pins, so component artifacts cannot drift from the scripts and
+templates that install them. The default channel accepts only `X.Y.Z`;
+`--beta` accepts only a published `X.Y.Z-beta.N` whose base version is newer
+than the latest official release. It never falls back and never downgrades to an
+older beta line.
 
 The first installation collects configuration through the TUI and atomically writes `/etc/5gpn/dns.env`. Reinstall reads only that file and never treats the caller environment as configuration input. Preflight and staging fail before publication where possible; a failure during publication is reported as a partial installation rather than hidden behind a rollback claim.
+
+A missing `dns.json` enables two built-in 24-hour subscriptions: ChinaMax
+domains with `direct` intent and the GFW list with `proxy` intent. Mihomo fetches
+them into its private state directory; the authenticated Console can disable,
+replace, or reorder them.
 
 ## 安装后
 
@@ -182,8 +196,8 @@ connections are lost during a successful restart.
 This is process recovery, not self-healing: a persistent bad configuration,
 port conflict, or broken certificate remains an operator-visible failure. A
 deliberate `systemctl stop 5gpn-mihomo` stays stopped. Use an independent external
-monitor that actively probes DoT and HTTPS; the persisted `DNS_HEARTBEAT_*`
-fields are not consumed by the monolith and provide no health signal.
+monitor that actively probes DoT and HTTPS. Retired `DNS_HEARTBEAT_*` keys are
+accepted only while an older `dns.env` is rewritten and are not persisted.
 DNS listener and certificate-path fields are installation-owned; controller
 writes must preserve them exactly and are rejected before persistence if they
 attempt to change them.
@@ -216,7 +230,10 @@ menu, which decodes it through the installer's strict reader.
 
 - **Android**：在 Console 的 Setup Guide 中查看 `dot.<base>`，然后填入系统 Private DNS。现代 Android 应用通常默认不信任用户安装的 CA，因此项目不提供 Android MITM CA 安装流程。
 - **iOS**：下载并安装 `https://console.<base>/ui/ios-dot.mobileconfig`。若使用扩展，再单独安装 `/ui/ios-intercept-ca.mobileconfig`，并在系统设置中手动启用 Full SSL Trust。
-- **面板 (zashboard)**：`https://console.<base>/ui/`，对所有能解析到本网关的客户端开放。凭据只有 mihomo controller secret 一个，且只挡 `/api` 一侧——`/ui/` 与其下的描述文件是免鉴权的，因为未入网的手机身上没有 token。
+- **zashboard**: `https://console.<base>/ui/` and both profiles beneath
+  `/ui/` are public. `/5gpn/*` and the ordinary controller routes require the
+  single mihomo controller secret. There is no separate Console token, origin,
+  source allowlist, or handoff session.
 
 The Console and mihomo controller share one process, origin, and controller secret. Plugin logs are read through the authenticated interception API; there is no second one-use ticket service.
 
@@ -232,7 +249,7 @@ operations.
 
 | 路径 | 所有权与用途 |
 | --- | --- |
-| `/etc/5gpn/dns.env` | 安装身份与 daemon knobs 的持久 source of truth |
+| `/etc/5gpn/dns.env` | Deployment identity, host addresses, certificate mode, and controller coordinates; no mirrored runtime DNS state |
 | `/etc/5gpn/mihomo/config.yaml` | 运维者完整拥有的 mihomo 配置 |
 | `/etc/5gpn/mihomo/5gpn/dns.json` | Ordered DNS policy, upstreams, subscriptions, and resolver settings |
 | `/etc/5gpn/mihomo/5gpn/intercept.json` | Interception master, fixed-false HTTP/3 marker, catalogs, and extension snapshots |
@@ -296,7 +313,7 @@ Console writes hot-apply the revisioned mihomo `5gpn` documents. Deployment valu
 | 命令 | 作用 |
 | --- | --- |
 | `sudo 5gpn` | 打开交互管理菜单 |
-| `sudo 5gpn status` | 查看服务、域名、地址和规则状态 |
+| `sudo 5gpn status` | Show service, interception, domain, and address state |
 | `sudo 5gpn restart` | Restart mihomo |
 | `sudo 5gpn configure` | 打开完整配置 TUI，校验后事务化应用 |
 | `sudo 5gpn ios` | 重新生成 iOS profile 与二维码 |
@@ -330,10 +347,10 @@ Only the root-owned certificate publisher can read the private CA signing key; m
 
 ## 升级与发布通道
 
-- 默认 quick installer 只安装最新正式版；`--beta` 是显式、单次的 beta opt-in，不会写入 `dns.env`。
+- The default quick installer selects only the latest official release. `--beta` is an explicit, per-invocation opt-in, accepts only a prerelease whose base is newer than latest official, and is never persisted in `dns.env`.
 - A normal channel transition uses one complete verified installer bundle and preserves a valid current operator-owned mihomo YAML byte for byte. Moving from the retired multi-process design to the monolith is a separate checked migration: it removes only the retired anchors and inbound from a candidate, rewrites the management-plane exclusion to `INNER`, requires the fixed UDP/443 guard, and publishes only after pinned `5gpn-mihomo -t` succeeds.
 - `upgrade-reset-mihomo` 会替换完整 YAML；自定义 proxies、providers、groups 和 rules 不会自动合并，只能从备份手工恢复。
-- A successful beta upgrade does not guarantee that an in-place downgrade to the stable release channel is supported. Keep a system snapshot before upgrading when reversal is required. The installer does not claim whole-system rollback after publication begins.
+- A successful beta channel switch does not guarantee an in-place switch back to the official channel. Keep a system snapshot before switching when reversal is required. The installer does not claim whole-system rollback after publication begins.
 - 所有仍使用 interception config schema v4 的 pre-v5 部署都需要先做显式、可恢复的 lockstep rebuild；不要删除旧 interception 文件或只改 schema version。请严格执行 [pre-v5 rebuild runbook](docs/pre-v5-upgrade.md)。
 
 ## 安全边界与已知限制
@@ -366,8 +383,8 @@ CI renders and validates the seed with the digest-pinned mihomo binary. Validate
 | --- | --- |
 | *(external: `moooyo/mihomo`)* | The single runtime: DNS, forwarding, HTTP/TLS interception, Telegram, and controller API |
 | *(external: `moooyo/zashboard`)* | The React Console served by mihomo |
-| `etc/` | 配置样例、mihomo seed、systemd/polkit 单元与规则种子 |
-| `scripts/` | 证书、规则、iOS profile 和 Telegram 运维 helper |
+| `etc/` | Current dns.env example, mihomo seed, and systemd units |
+| `scripts/` | Certificate, iOS profile, and explicit upgrade/migration helpers; the suite runner stays source-only |
 | `tests/` | Shell regression、升级 fixture 与 gateway smoke checklist |
 | `docs/` | 当前架构、扩展 author contract 与升级 runbook |
 | `.github/workflows/` | 共享 CI gate 与精确 tag release pipeline |
@@ -377,7 +394,7 @@ CI renders and validates the seed with the digest-pinned mihomo binary. Validate
 
 - [当前架构](docs/architecture.md)
 - [原生扩展开发规范](docs/native-extensions.md)
-- [Pre-v5 rebuild 与 release-channel upgrade](docs/pre-v5-upgrade.md)
+- [Pre-v5 rebuild and release-channel switches](docs/pre-v5-upgrade.md)
 - [Linux gateway integration smoke checklist](tests/integration-smoke.md)
 - [官方扩展仓库](https://github.com/moooyo/5gpn-extensions)
 - [Releases](https://github.com/moooyo/5gpn/releases) 与 [Issues](https://github.com/moooyo/5gpn/issues)

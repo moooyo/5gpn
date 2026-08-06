@@ -62,8 +62,8 @@ unit_has_unique_directive_in_section Unit StartLimitBurst 'StartLimitBurst=10' "
     || fail "5gpn-mihomo.service start-limit burst must be 10 in [Unit]"
 unit_has_unique_directive_in_section Unit StartLimitAction 'StartLimitAction=none' "$SVC" \
     || fail "5gpn-mihomo.service start-limit action must never reboot or power off the host"
-grep -Fq 'The monolith does not read these fields or send a push heartbeat.' "$DNS_ENV_EXAMPLE" \
-    || fail "dns.env.example claims the inert heartbeat fields are a live monitor"
+! grep -Eq '^DNS_HEARTBEAT_(URL|INTERVAL)=' "$DNS_ENV_EXAMPLE" \
+    || fail "dns.env.example still persists the retired heartbeat fields"
 grep -Eq 'daemon GETs this URL|dead-man.s switch' "$DNS_ENV_EXAMPLE" \
     && fail "dns.env.example retains the deleted in-process heartbeat promise"
 
@@ -159,6 +159,9 @@ grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/mihomo.gz" "$MIHOMO_SHA256"' "$INSTALL"
     || fail "the polkit rule survived the collapse to one unit"
 grep -Fq 'install_polkit_rule' "$INSTALL" \
     && fail "installer still publishes a polkit rule for a boundary that no longer exists"
+deps_fn="$(sed -n '/^install_deps()/,/^}/p' "$INSTALL")"
+printf '%s' "$deps_fn" | grep -Eq 'polkitd|libcap2-bin|libcap-ng-utils|[[:space:]]polkit([[:space:]\\]|$)|[[:space:]]wget([[:space:]\\]|$)' \
+    && fail "installer still installs packages used only by retired polkit/setcap/download paths"
 
 [ $rc -eq 0 ] && echo "hardening policy: PASS"
 exit $rc

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fixed regression coverage for an in-place 0.0.13 stable-to-beta upgrade.
+# Fixed regression coverage for an in-place 0.0.13 beta channel switch.
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -45,16 +45,44 @@ if [[ "$raw_validation" == *"Pre-v5 dns.env contains retired DNS_EGRESS_RESOLVER
 else
     fail "raw stable dns.env failure is not actionable: $raw_validation"
 fi
+for bridge_token in \
+    "BRIDGE_RELEASE='0.0.24-beta.3'" \
+    'https://github.com/moooyo/5gpn/releases/download/0.0.24-beta.3/checksums.txt' \
+    'https://github.com/moooyo/5gpn/releases/download/0.0.24-beta.3/5gpn-dns-linux-amd64' \
+    'https://github.com/moooyo/5gpn/releases/download/0.0.24-beta.3/5gpn-intercept-linux-amd64' \
+    'https://github.com/moooyo/5gpn/releases/download/0.0.24-beta.3/5gpn-installer.tar.gz' \
+    '0a68844cc241c253a59e1d7b40fd164b3c3d0d62b5f6b61b3f9f91f0696c2050  checksums.txt' \
+    'c43996b79db30a6bad1fb76aa3308951359a0202403dbaa015b70926c2354886  5gpn-dns-linux-amd64' \
+    '6b9a7c9d38ae0290eddbb03d5d5d65874ce2fd6573d2cdb050cf5b763c5f4467  5gpn-intercept-linux-amd64' \
+    '0bb15813887430be45622264cef20c1d514a2ed227d1c66dab42943710e892c6  5gpn-installer.tar.gz'; do
+    grep -Fq -- "$bridge_token" "$MIGRATION_GUIDE" \
+        || fail "pre-v5 bridge pin is missing: $bridge_token"
+done
+if grep -Fq 'verified current sidecar binary' "$MIGRATION_GUIDE" \
+   || grep -Fq 'valid_release_tag "$RELEASE_TAG"' "$MIGRATION_GUIDE" \
+   || grep -Fq "printf '%s\\n' \"\$RELEASE_TAG\"" "$MIGRATION_GUIDE"; then
+    fail "pre-v5 rebuild still assumes the current release publishes bridge artifacts"
+else
+    pass "pre-v5 rebuild uses only the frozen bridge artifact contract"
+fi
 for recipe_token in \
     'set -euo pipefail' \
+    "readonly BRIDGE_RELEASE='0.0.24-beta.3'" \
     'NEW_INSTALL_SH' \
+    'mktemp -d /root/5gpn-v5-bridge.XXXXXX' \
+    "curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2" \
+    'sha256sum --check expected.sha256' \
+    'tar -xOzf 5gpn-installer.tar.gz ./install.sh > bridge-install.sh' \
     'artifact_is_root_safe()' \
     '[[ "$path" == /*' \
     'while true; do' \
     'NEW_5GPN_INTERCEPT must be a root-owned, single-link' \
     'source "$NEW_INSTALL_SH"' \
     'declare -F validate_dns_env_schema' \
-    'valid_release_tag "$RELEASE_TAG"' \
+    'declare -F valid_dns_release_tag' \
+    '[[ "${DNS_VERSION_DEFAULT:-}" == "$BRIDGE_RELEASE" ]]' \
+    'valid_dns_release_tag "$DNS_VERSION_DEFAULT"' \
+    "printf '%s\\n' \"\$BRIDGE_RELEASE\"" \
     'binary_reports_target_version()' \
     'binary_reports_target_version "$NEW_5GPN_INTERCEPT"' \
     'acquire_install_lock' \
@@ -122,6 +150,16 @@ if [[ -n "$artifact_preflight_line" && -n "$install_lock_line" && -n "$live_muta
 else
     fail "documented artifact preflight or installer lock occurs after live mutation"
 fi
+bridge_commit_heading_line="$(grep -n '^### Run the current installer only after the bridge commits$' "$MIGRATION_GUIDE" | cut -d: -f1)"
+recovery_success_line="$(grep -n "^printf 'Recovery snapshots retained in %s" "$MIGRATION_GUIDE" | cut -d: -f1)"
+current_quick_line="$(grep -n '^curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash$' "$MIGRATION_GUIDE" | cut -d: -f1)"
+if [[ -n "$recovery_success_line" && -n "$bridge_commit_heading_line" && -n "$current_quick_line" \
+   && "$recovery_success_line" -lt "$bridge_commit_heading_line" \
+   && "$bridge_commit_heading_line" -lt "$current_quick_line" ]]; then
+    pass "current quick installer is documented only after the bridge commits"
+else
+    fail "current quick installer is not ordered after successful bridge completion"
+fi
 artifact_guard_fn="$(sed -n '/^artifact_is_root_safe() {$/,/^}$/p' "$MIGRATION_GUIDE")"
 hostile_parent="$TMP/world-writable-parent"
 hostile_artifact="$hostile_parent/target-binary"
@@ -155,7 +193,7 @@ EOF
 chmod 0755 "$wrong_version_binary"
 if (
     eval "$version_guard_fn"
-    RELEASE_TAG=1.2.3
+    BRIDGE_RELEASE=1.2.3
     mktemp() {
         local output="$TMP/documented-version-output"
         : > "$output"
@@ -254,30 +292,18 @@ fixture_keys="$(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$FIXTURE/dns.env.exampl
 current_keys="$(for key in $DNS_ENV_KEYS; do printf '%s\n' "$key"; done | sort)"
 raw_missing_keys="$(comm -23 <(printf '%s\n' "$current_keys") <(printf '%s\n' "$fixture_keys"))"
 raw_extra_keys="$(comm -13 <(printf '%s\n' "$current_keys") <(printf '%s\n' "$fixture_keys"))"
-expected_missing="$(printf '%s\n' DNS_INTERCEPT_CONFIG DNS_CONSOLE_CERT DNS_CONSOLE_KEY | sort)"
-# A 0.0.13 dns.env carries sixteen keys the current installer no longer manages:
-# DNS_EGRESS_RESOLVER, retired pre-v5 and still requiring the documented manual
-# rebuild; DNS_CHINA/DNS_TRUST (retired when upstreams.json became the sole
-# source of truth) and DNS_CHINA_0X20 (retired with the 0x20 mechanism itself);
-# DNS_WEB_DIR/DNS_ZASH_DIR/DNS_ZASH_LISTEN, retired with the second and
-# third origins -- one process serves one UI from a path the unit fixes, so a
-# key that could relocate it would only move it out from under the unit; and the
-# five TGBOT_* keys, retired when the bot moved into the fork and took its own
-# document with it; and DNS_ZASH_CERT/DNS_ZASH_KEY, retired when the panel moved
-# onto the console name and the certificate role was renamed with it; and
-# DNS_WHITELIST_FILE, retired with the source allowlist itself -- the panel is
-# not source-restricted, so there is no file to point at; and DNS_API_TOKEN,
-# retired with the control server that was the only thing reading it -- the
-# console credential is the mihomo controller secret now.
-# All are tolerated on read and dropped on rewrite, so an upgrade must not
-# stumble over them.
-expected_extra="$(printf '%s\n' DNS_CHINA DNS_CHINA_0X20 DNS_EGRESS_RESOLVER DNS_TRUST \
-    DNS_WEB_DIR DNS_ZASH_DIR DNS_ZASH_LISTEN \
-    TGBOT_TOKEN TGBOT_ADMINS DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS \
-    DNS_ZASH_CERT DNS_ZASH_KEY DNS_WHITELIST_FILE DNS_API_TOKEN | sort)"
+expected_missing="$(printf '%s\n' DNS_CONSOLE_CERT DNS_CONSOLE_KEY | sort)"
+# Every historical key outside the current schema must be an explicitly named
+# retired input, except DNS_EGRESS_RESOLVER: that key intentionally forces this
+# reviewed bridge transaction before it can be removed.
+expected_extra="$(
+    for key in $DNS_ENV_RETIRED_KEYS DNS_EGRESS_RESOLVER; do
+        grep -Fxq "$key" <<<"$fixture_keys" && printf '%s\n' "$key"
+    done | sort
+)"
 if [[ "$raw_missing_keys" == "$expected_missing" && "$raw_extra_keys" == "$expected_extra" \
    && "$(printf '%s\n' "$fixture_keys" | grep -c .)" == 51 ]]; then
-    pass "raw stable key delta is the additive console keys plus the sixteen retired ones"
+    pass "raw stable key delta is the additive console keys plus explicit retired inputs"
 else
     fail "raw stable dns.env key delta is unexpected (missing='$raw_missing_keys', extra='$raw_extra_keys')"
 fi
@@ -291,13 +317,13 @@ fi
 rebuilt_keys="$(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$CONF_DIR/dns.env" | sort)"
 rebuilt_missing_keys="$(comm -23 <(printf '%s\n' "$current_keys") <(printf '%s\n' "$rebuilt_keys"))"
 rebuilt_extra_keys="$(comm -13 <(printf '%s\n' "$current_keys") <(printf '%s\n' "$rebuilt_keys"))"
-# The operator's documented rebuild removes only DNS_EGRESS_RESOLVER; the other
-# retired keys stay in their file, and the schema must still accept it — that is
-# the whole point of tolerating retired keys on read.
-rebuilt_expected_extra="$(printf '%s\n' DNS_CHINA DNS_CHINA_0X20 DNS_TRUST \
-    DNS_WEB_DIR DNS_ZASH_DIR DNS_ZASH_LISTEN \
-    TGBOT_TOKEN TGBOT_ADMINS DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS \
-    DNS_ZASH_CERT DNS_ZASH_KEY DNS_WHITELIST_FILE DNS_API_TOKEN | sort)"
+# The bridge removes only DNS_EGRESS_RESOLVER. Every other historical key stays
+# readable until the current installer rewrites dns.env and drops retired keys.
+rebuilt_expected_extra="$(
+    for key in $DNS_ENV_RETIRED_KEYS; do
+        grep -Fxq "$key" <<<"$rebuilt_keys" && printf '%s\n' "$key"
+    done | sort
+)"
 if [[ "$rebuilt_missing_keys" == "$expected_missing" && "$rebuilt_extra_keys" == "$rebuilt_expected_extra" \
    && "$(printf '%s\n' "$rebuilt_keys" | grep -c .)" == 50 ]]; then
     pass "rebuilt 0.0.13 dns.env lacks only the additive console keys and keeps the retired ones"

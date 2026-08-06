@@ -48,11 +48,10 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"   # repo 5gpn/ when run fr
 BASE_DIR="/opt/5gpn"                 # installed runtime root
 BIN_DIR="${BASE_DIR}/bin"                # project-managed binaries; Gum survives uninstall for host reuse
 SCRIPTS_DIR="${BASE_DIR}/scripts"        # installed copies of repo scripts
-WWW_DIR="${BASE_DIR}/www"                # signed iOS profile root (served in-process by 5gpn-mihomo)
 BASE_OWNERSHIP_MARKER=".5gpn-owned"
 BASE_OWNERSHIP_VALUE="5gpn-runtime"
 
-CONF_DIR="/etc/5gpn"                 # config: dns.env is the single source of truth
+CONF_DIR="/etc/5gpn"                 # installation coordinates plus legacy migration inputs
 CONF_OWNERSHIP_MARKER=".5gpn-owned"
 CONF_OWNERSHIP_VALUE="5gpn-config"
 # The value carried a -v1 until 0.0.44 dropped it, and claiming a root rewrites a
@@ -71,7 +70,7 @@ IDENTITY_RECONCILE_VERSION=1
 SWAP_FILE="${STATE_DIR}/swapfile"
 SWAP_FSTAB_MARKER="# 5gpn-owned-swap-v1"
 SWAP_CREATED_THIS_RUN=0
-DNS_CERT_DIR="/etc/5gpn/cert"            # selected cert copied into dot/, web/, console/ roles
+DNS_CERT_DIR="/etc/5gpn/cert"            # selected cert copied into the current dot/ and console/ roles
 # Certificate ownership values keep their revision suffix, and it is not dead
 # weight. Every other 5gpn root self-heals -- claiming republishes whatever
 # marker is there -- so its value can change freely. Certificate roots
@@ -83,7 +82,6 @@ DEBUG_CERT_DIR="/etc/5gpn/debug-cert"     # self-signed debug certs; NEVER under
 DEBUG_CERT_MARKER=".5gpn-debug-cert-owned"
 DEBUG_CERT_MARKER_VALUE="5gpn-debug-cert-v1"
 DOT_CERT_DIR="${DNS_CERT_DIR}/dot"       # DoT :853 cert copy (hot-reloaded on mtime change)
-WEB_CERT_DIR="${DNS_CERT_DIR}/web"       # loopback HTTPS console :443 cert copy
 CONSOLE_CERT_DIR="${DNS_CERT_DIR}/console"  # the controller TLS pair; mihomo serves the panel with it
 CERT_ROOT_MARKER=".5gpn-cert-root-owned"
 CERT_ROOT_MARKER_VALUE="5gpn-cert-root-v1"
@@ -126,7 +124,6 @@ DECOMMISSION_PRESERVE_ACME=0
 # ReadOnlyPaths, and the seed template names it in external-ui. A dns.env key
 # that could move it would only ever move it out from under the unit.
 UI_DIR="/opt/5gpn/ui"
-DNS_RULES_DIR_DEFAULT="/etc/5gpn/rules"  # subscription caches and chnroute snapshot
 MIHOMO_BIN="${BIN_DIR}/5gpn-mihomo"
 LEGACY_MIHOMO_BIN="${BIN_DIR}/mihomo"
 MIHOMO_DIR="/etc/5gpn/mihomo"           # config.yaml + provider caches
@@ -165,8 +162,6 @@ POLKIT_RULE_PATH="/etc/polkit-1/rules.d/50-5gpn.rules"
 POLKIT_RULE_MARKER="// 5gpn-polkit-id: runtime-operations"
 ZASH_OWNERSHIP_MARKER=".5gpn-zashboard-owned"
 ZASH_OWNERSHIP_VALUE="5gpn-zashboard"
-IOS_OWNERSHIP_MARKER=".5gpn-ios-owned"
-IOS_OWNERSHIP_VALUE="5gpn-ios"
 TEMP_OWNERSHIP_MARKER=".5gpn-temp-owned"
 TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # Upstream v1.19.28 plus the 5gpn monolith, built from moooyo/mihomo's
@@ -194,15 +189,18 @@ ZASH_SHA256="f32cd39c758d1d64f49ac4fa163a78cfcb14dc8cac0a185bdf3581e46011afd3"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
+DNS_CHINA_DOMAINS_DEFAULT="https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/ChinaMax/ChinaMax_Domain.yaml"
+DNS_GFWLIST_DEFAULT="https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/gfw.txt"
+DNS_SUBSCRIPTION_INTERVAL_DEFAULT=86400
 # Keys this installer used to manage and no longer writes. An existing dns.env
 # from before their removal still contains them, so validate_dns_env_schema must
 # TOLERATE them — rejecting one would abort every upgrade — while set_dns_env_kv
 # still refuses to write one back. write_dns_env drops them from the rewritten
 # file, so they disappear on the first upgrade rather than lingering forever.
 #
-# DNS_CHINA/DNS_TRUST moved to upstreams.json, which the daemon can write and
-# dns.env cannot be. seed_dns_document reads them one last time on upgrade so
-# a hand-edited value is carried across instead of being reset.
+# DNS_CHINA/DNS_TRUST moved into dns.json, which the monolith can write and
+# dns.env cannot be. seed_dns_document reads them one last time on upgrade so a
+# hand-edited value is carried across instead of being reset.
 #
 # DNS_CHINA_0X20 governed DNS 0x20 anti-spoof encoding, which is gone: it only
 # ever protected the plaintext-UDP china path, and the china group now accepts
@@ -216,15 +214,15 @@ DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
 # upgraded dns.env fail validation on a key this installer wrote itself.
 readonly DNS_ENV_RETIRED_KEYS="DNS_CHINA DNS_CHINA_0X20 DNS_TRUST DNS_WEB_DIR DNS_ZASH_DIR DNS_ZASH_LISTEN DNS_WHITELIST_FILE DNS_API_TOKEN \
 TGBOT_TOKEN TGBOT_ADMINS DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS DNS_MARKETPLACES_FILE \
-DNS_ZASH_CERT DNS_ZASH_KEY"
+DNS_ZASH_CERT DNS_ZASH_KEY DNS_WEB_CERT DNS_WEB_KEY DNS_INTERCEPT_CONFIG WWW_DIR \
+DNS_LISTEN_API DNS_CERT DNS_KEY DNS_UPSTREAMS DNS_ECS_FILE DNS_RULES_DIR DNS_CHNROUTE DNS_EGRESS_BROKER \
+DNS_SUBSCRIPTIONS DNS_POLICY_RULES DNS_API_RATE DNS_API_BURST DNS_MIHOMO_CONFIG \
+DNS_CACHE_SIZE DNS_MAX_INFLIGHT DNS_TTL_MIN DNS_TTL_MAX DNS_QUERY_TIMEOUT DNS_STATS_FILE \
+DNS_HEARTBEAT_URL DNS_HEARTBEAT_INTERVAL DNS_CHINA_ECS"
 
-readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_LISTEN_API DNS_CERT DNS_KEY DNS_WEB_CERT DNS_WEB_KEY DNS_CONSOLE_CERT DNS_CONSOLE_KEY \
-DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL DNS_UPSTREAMS \
-DNS_CHINA_ECS DNS_ECS_FILE DNS_RULES_DIR DNS_CHNROUTE DNS_EGRESS_BROKER \
-DNS_SUBSCRIPTIONS DNS_POLICY_RULES DNS_API_RATE DNS_API_BURST DNS_MIHOMO_CONTROLLER DNS_MIHOMO_SECRET \
-DNS_MIHOMO_CONFIG DNS_INTERCEPT_CONFIG WWW_DIR \
-DNS_CACHE_SIZE DNS_MAX_INFLIGHT DNS_TTL_MIN DNS_TTL_MAX DNS_QUERY_TIMEOUT \
-DNS_STATS_FILE DNS_HEARTBEAT_URL DNS_HEARTBEAT_INTERVAL"
+readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_CONSOLE_CERT DNS_CONSOLE_KEY \
+DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL \
+DNS_MIHOMO_CONTROLLER DNS_MIHOMO_SECRET"
 # EDNS Client Subnet uses the operational default above. Operators can disable
 # or change it through the web console, which persists the runtime value.
 GUM_VERSION="0.17.0"                     # charmbracelet/gum (prebuilt; installer TUI)
@@ -418,15 +416,16 @@ attach_tty() {
     [[ -t 0 ]] && return 0
     if [[ -e /dev/tty ]] && { : < /dev/tty; } 2>/dev/null; then
         exec 0</dev/tty
-        info "管道安装：已将输入接入当前终端 (/dev/tty)，将进行交互式提问（域名 / 网关IP / 解析器）。"
+        info "Piped install: stdin is attached to /dev/tty for domain, gateway/listener IP, and certificate prompts."
     fi
 }
 
-# ── Single config file ──────────────────────────────────────────────────────
-# /etc/5gpn/dns.env is the ONE source of truth for every persisted knob. There
-# are NO per-key .state files. Reinstall reads this file; first install writes it
-# from the TUI. cfg_get reads one key from dns.env (empty if absent); it greps rather
-# than sourcing so a value can contain any shell-special character safely.
+# ── Installer coordinates ──────────────────────────────────────────────────
+# /etc/5gpn/dns.env is the one source of truth for installation-owned host
+# coordinates. Runtime DNS policy, upstreams, subscriptions and tuning live in
+# dns.json. Reinstall reads this file; first install writes it from the TUI.
+# cfg_get greps rather than sourcing so a value can contain shell-special
+# characters without becoming code.
 file_uid() { stat -c %u -- "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null || true; }
 file_gid() { stat -c %g -- "$1" 2>/dev/null || stat -f %g "$1" 2>/dev/null || true; }
 file_mode() { stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || true; }
@@ -517,21 +516,17 @@ cfg_get() {
     fi
 }
 
-# Caller configuration is discarded before command dispatch. systemd still
-# reads the persisted dns.env when it launches the daemon.
+# Caller configuration is discarded before command dispatch. Root installer and
+# certificate helpers read persisted coordinates explicitly; systemd denies the
+# network-facing monolith access to dns.env.
 clear_external_config_env() {
     local key
     unset BASE_DOMAIN CONSOLE_DOMAIN DOT_DOMAIN PUBLIC_IP GATEWAY_IP \
-        MIHOMO_LISTEN_IPS CHINA_ECS CACHE_SIZE LOWMEM
+        MIHOMO_LISTEN_IPS LOWMEM
     # Retired keys are cleared too. A key stops being written before it stops
     # being something a caller might have exported, and one that survived here
     # would still be in the environment of everything this script runs.
     for key in $DNS_ENV_KEYS $DNS_ENV_RETIRED_KEYS; do
-        # WWW_DIR is an installer-owned constant that was assigned above, not
-        # caller configuration. Preserve it while clearing every externally
-        # supplied daemon key. The UI directory is not in this set at all: it is
-        # a fixed constant now, not a dns.env key.
-        [[ "$key" == WWW_DIR ]] && continue
         unset "$key"
     done
 }
@@ -903,6 +898,17 @@ runtime_file_slot_is_safe() {
     [[ -f "$path" && ! -L "$path" ]]
 }
 
+# A path that this installer may chmod or chown must not be a hard link. The
+# directory-slot check rejects symlinks and escapes, while this final identity
+# check prevents metadata publication through one name from mutating a second
+# file outside the intended configuration transaction.
+runtime_plain_file_slot_is_safe() {
+    local path="$1" parent="$2"
+    runtime_file_slot_is_safe "$path" "$parent" || return 1
+    [[ ! -e "$path" && ! -L "$path" ]] && return 0
+    [[ -f "$path" && ! -L "$path" && "$(file_nlink "$path")" == 1 ]]
+}
+
 runtime_tree_has_only_plain_entries() {
     local root="$1" unsafe
     runtime_directory_slot_is_safe "$root" "$root" || return 1
@@ -948,9 +954,9 @@ cert_generation_is_safe() {
 # meant changing one of them -- which produced a directory the validator then
 # rejected as unsafe. A single definition cannot disagree with itself.
 #
-# dot and console: the monolith serves both, so it must read both. web: nothing
-# reads it since its origin went with the process that served it, and a
-# role with no reader should not be widened to the account that would gain one.
+# dot and console are the two current roles and the monolith must read both.
+# web is accepted only to validate an older owned tree during upgrade; no
+# current publication refreshes it and no runtime account may read it.
 cert_role_group() {
     case "$1" in
         dot|console) printf '%s\n' "$FIVEGPN_SERVICE_GROUP" ;;
@@ -1209,6 +1215,16 @@ migrate_cert_role_zash_to_console() {
     ok "Certificate role zash renamed to console."
 }
 
+normalize_legacy_web_cert_role() {
+    local web="${DNS_CERT_DIR}/web"
+    [[ ! -e "$web" && ! -L "$web" ]] && return 0
+    runtime_directory_slot_is_safe "$web" "$DNS_CERT_DIR" \
+        && cert_role_tree_is_safe_for_recursive_metadata "$web" web \
+        || { err "Refusing unsafe legacy web certificate role."; return 1; }
+    normalize_cert_role_group "$web" root web \
+        || { err "Could not seal the legacy web certificate role as root-only."; return 1; }
+}
+
 ensure_dns_cert_root() {
     migrate_cert_role_zash_to_console || return 1
     fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
@@ -1227,6 +1243,7 @@ ensure_dns_cert_root() {
            && cert_root_contents_are_safe; then
             chmod 00751 "$DNS_CERT_DIR" || return 1
         fi
+        normalize_legacy_web_cert_role || return 1
         cert_root_is_safe \
             || { err "Existing certificate root failed structural validation: $DNS_CERT_DIR"; return 1; }
         return 0
@@ -1324,15 +1341,15 @@ preflight_runtime_publication_paths() {
         || { err "Unsafe configuration root: $CONF_DIR"; return 1; }
 
     for path in \
-        "$SCRIPTS_DIR" "$WWW_DIR" "${BASE_DIR}/etc" "${BASE_DIR}/etc/systemd" \
+        "$SCRIPTS_DIR" "${BASE_DIR}/etc" "${BASE_DIR}/etc/systemd" \
         "${BASE_DIR}/etc/mihomo"; do
         runtime_directory_slot_is_safe "$path" "$BASE_DIR" \
             || { err "Refusing unsafe runtime directory slot: $path"; return 1; }
     done
     for path in \
-        "$DNS_RULES_DIR_DEFAULT" "${DNS_RULES_DIR_DEFAULT}/block" \
-        "${DNS_RULES_DIR_DEFAULT}/direct" "${DNS_RULES_DIR_DEFAULT}/proxy" \
-        "${DNS_RULES_DIR_DEFAULT}/chnroute" "$MIHOMO_DIR" "$INTERCEPT_DIR" \
+        "/etc/5gpn/rules" "/etc/5gpn/rules/block" \
+        "/etc/5gpn/rules/direct" "/etc/5gpn/rules/proxy" \
+        "/etc/5gpn/rules/chnroute" "$MIHOMO_DIR" "$INTERCEPT_DIR" \
         "${INTERCEPT_DIR}/tls" "$DNS_CERT_DIR" "${DNS_CERT_DIR}/dot" \
         "${DNS_CERT_DIR}/web" "${DNS_CERT_DIR}/console"; do
         runtime_directory_slot_is_safe "$path" "$CONF_DIR" \
@@ -1343,10 +1360,10 @@ preflight_runtime_publication_paths() {
         "${CONF_DIR}/policy.json" "${CONF_DIR}/upstreams.json" \
         "${CONF_DIR}/ecs.json" "${CONF_DIR}/stats.json" \
         "${CONF_DIR}/tgbot.json" "${CONF_DIR}/extension-marketplaces.json" \
-        "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" \
+        "/etc/5gpn/rules/china_ip_list.txt" \
         "${MIHOMO_DIR}/config.yaml" \
         "${INTERCEPT_DIR}/config.json" "${INTERCEPT_DIR}/cert-state"; do
-        runtime_file_slot_is_safe "$path" "$CONF_DIR" \
+        runtime_plain_file_slot_is_safe "$path" "$CONF_DIR" \
             || { err "Refusing unsafe configuration file slot: $path"; return 1; }
     done
 }
@@ -1377,11 +1394,11 @@ runtime_control_file_metadata_is_safe() {
 runtime_permission_boundary_is_safe() {
     fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
         && shared_runtime_directory_metadata_is_safe "$MIHOMO_DIR" "$FIVEGPN_SERVICE_USER" 3770 \
-        && shared_runtime_directory_metadata_is_safe "$INTERCEPT_DIR" "$FIVEGPN_SERVICE_USER" 3770 \
+        && shared_runtime_directory_metadata_is_safe "$INTERCEPT_DIR" "$FIVEGPN_SERVICE_USER" 750 \
         && runtime_control_file_metadata_is_safe "$MIHOMO_DIR/config.yaml" \
             root "$FIVEGPN_SERVICE_GROUP" 640 \
         && runtime_control_file_metadata_is_safe "$INTERCEPT_DIR/config.json" \
-            "$FIVEGPN_SERVICE_USER" "$FIVEGPN_SERVICE_USER" 640 \
+            root root 600 \
         && runtime_control_file_metadata_is_safe "$INTERCEPT_DIR/cert-state" \
             root "$FIVEGPN_SERVICE_USER" 640 \
         && cert_root_is_safe
@@ -1881,17 +1898,6 @@ publish_owned_tree() {
     fi
 }
 
-# WWW_DIR is claimed the same way as the other static trees: an absent, stale, or
-# older-release marker is adopted rather than refused.
-claim_ios_dir() {
-    [[ ! -e "$WWW_DIR" || -d "$WWW_DIR" ]] || return 1
-    if verify_ownership_marker "$WWW_DIR" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE"; then
-        return 0
-    fi
-    rm -f -- "$WWW_DIR/$IOS_OWNERSHIP_MARKER" 2>/dev/null || true
-    write_ownership_marker "$WWW_DIR" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE"
-}
-
 # Bootstrap gum (prebuilt binary + sha256 verify). Never fatal: on any failure
 # _HAVE_GUM stays 0 and all helpers fall back to plain echo.
 install_gum() {
@@ -2029,23 +2035,17 @@ check_arch() {
     esac
 }
 
-# Sets MEM_TOTAL_MB, LOWMEM (0/1), MAKE_JOBS, CACHE_SIZE from host memory.
+# Sets MEM_TOTAL_MB and LOWMEM (0/1) from host memory. Low-memory mode only
+# decides whether this installer offers a private swapfile; DNS tuning belongs
+# to the live dns.json document and is never inferred from the installer host.
 detect_memory_profile() {
     MEM_TOTAL_MB=$(awk '/MemTotal/ { printf "%d", $2 / 1024 }' /proc/meminfo 2>/dev/null || echo 0)
     if [[ "${MEM_TOTAL_MB:-0}" -le 1300 ]]; then LOWMEM=1; else LOWMEM=0; fi
 
-    # RAM-derived cache default only; full_install resolves the effective
-    # CACHE_SIZE (persisted dns.env > this default) — the single-source
-    # config model, no separate .cache_size state file.
     if [[ "$LOWMEM" == "1" ]]; then
-        MAKE_JOBS=1; _CACHE_SIZE_DEFAULT=20000
+        warn "Low-memory mode ON (RAM ${MEM_TOTAL_MB}MB): private swap will be ensured when possible."
     else
-        MAKE_JOBS="$(nproc 2>/dev/null || echo 2)"; _CACHE_SIZE_DEFAULT=512000
-    fi
-    if [[ "$LOWMEM" == "1" ]]; then
-        warn "Low-memory mode ON (RAM ${MEM_TOTAL_MB}MB): 1 build job, swap ensured (cache default ${_CACHE_SIZE_DEFAULT})."
-    else
-        info "Standard memory mode (RAM ${MEM_TOTAL_MB}MB): cache default ${_CACHE_SIZE_DEFAULT}."
+        info "Standard memory mode (RAM ${MEM_TOTAL_MB}MB)."
     fi
 }
 
@@ -3244,8 +3244,8 @@ install_deps() {
             export DEBIAN_FRONTEND=noninteractive
             gum_spin "更新软件包索引…" apt-get update -qq || true
             apt-get install -y -qq \
-                wget curl ca-certificates unzip iproute2 openssl \
-                qrencode jq libcap2-bin util-linux polkitd \
+                curl ca-certificates unzip iproute2 openssl \
+                qrencode jq util-linux \
                 dnsutils || warn "some apt packages failed; continuing."
             if [[ "$CERT_MODE" != debug ]]; then
                 apt-get install -y -qq certbot \
@@ -3258,8 +3258,8 @@ install_deps() {
             ;;
         dnf|yum)
             $PKG_MGR install -y -q \
-                wget curl ca-certificates unzip iproute openssl \
-                qrencode jq util-linux polkit \
+                curl ca-certificates unzip iproute openssl \
+                qrencode jq util-linux \
                 bind-utils || warn "some rpm packages failed; continuing."
             if [[ "$CERT_MODE" != debug ]]; then
                 $PKG_MGR install -y -q certbot \
@@ -3269,8 +3269,6 @@ install_deps() {
                 $PKG_MGR install -y -q python3-certbot-dns-cloudflare \
                     || { err "Could not install the Cloudflare DNS plugin from the OS repository."; return 1; }
             fi
-            # libcap setcap tooling (name varies by distro)
-            $PKG_MGR install -y -q libcap libcap-ng-utils 2>/dev/null || true
             ;;
     esac
     local cmd
@@ -3358,10 +3356,52 @@ beta_tags_from_release_list() {
         | sed -E 's/^.*"([^"]+)"$/\1/' || true
 }
 
+stable_tags_from_release_list() {
+    grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' "$1" 2>/dev/null \
+        | sed -E 's/^.*"([^"]+)"$/\1/' || true
+}
+
+latest_beta_tag_from_list() {
+    beta_tags_from_release_list "$1" \
+        | sed -E 's/^([0-9]+)\.([0-9]+)\.([0-9]+)-beta\.([0-9]+)$/\1 \2 \3 \4 &/' \
+        | sort -k1,1n -k2,2n -k3,3n -k4,4n \
+        | tail -n 1 \
+        | awk '{print $5}'
+}
+
+latest_stable_tag_from_list() {
+    stable_tags_from_release_list "$1" \
+        | sed -E 's/^([0-9]+)\.([0-9]+)\.([0-9]+)$/\1 \2 \3 &/' \
+        | sort -k1,1n -k2,2n -k3,3n \
+        | tail -n 1 \
+        | awk '{print $4}'
+}
+
+decimal_component_is_greater() {
+    local left="$1" right="$2" LC_ALL=C
+    ((${#left} > ${#right})) && return 0
+    ((${#left} < ${#right})) && return 1
+    [[ "$left" > "$right" ]]
+}
+
+beta_base_is_newer_than_stable() {
+    local beta="$1" stable="$2" beta_base
+    local b_major b_minor b_patch s_major s_minor s_patch
+    valid_beta_release_tag "$beta" && valid_stable_release_tag "$stable" || return 1
+    beta_base="${beta%%-beta.*}"
+    IFS=. read -r b_major b_minor b_patch <<< "$beta_base"
+    IFS=. read -r s_major s_minor s_patch <<< "$stable"
+    decimal_component_is_greater "$b_major" "$s_major" && return 0
+    [[ "$b_major" == "$s_major" ]] || return 1
+    decimal_component_is_greater "$b_minor" "$s_minor" && return 0
+    [[ "$b_minor" == "$s_minor" ]] || return 1
+    decimal_component_is_greater "$b_patch" "$s_patch"
+}
+
 resolve_latest_beta_tag() { # optional list and exact-metadata URLs are internal test seams
     local list_url="${1:-${RELEASES_API}?per_page=100}"
     local metadata_url="${2:-}"
-    local list_json metadata_json candidate="" tag metadata_tag
+    local list_json metadata_json candidate="" latest_stable="" metadata_tag
 
     list_json="$(mktemp /tmp/5gpn-beta-releases.XXXXXX)" || return 1
     if ! curl -fsSL "$list_url" -o "$list_json"; then
@@ -3369,15 +3409,15 @@ resolve_latest_beta_tag() { # optional list and exact-metadata URLs are internal
         err "Could not list 5gpn prereleases."
         return 1
     fi
-    while IFS= read -r tag; do
-        if valid_beta_release_tag "$tag"; then
-            candidate="$tag"
-            break
-        fi
-    done < <(beta_tags_from_release_list "$list_json")
+    candidate="$(latest_beta_tag_from_list "$list_json")"
+    latest_stable="$(latest_stable_tag_from_list "$list_json")"
     rm -f -- "$list_json"
     [[ -n "$candidate" ]] \
         || { err "No published 5gpn beta release is available."; return 1; }
+    [[ -n "$latest_stable" ]] \
+        || { err "Could not establish the latest official release before selecting beta."; return 1; }
+    beta_base_is_newer_than_stable "$candidate" "$latest_stable" \
+        || { err "Latest beta ${candidate} is not newer than official ${latest_stable}; refusing a channel downgrade."; return 1; }
 
     metadata_url="${metadata_url:-${RELEASES_API}/tags/${candidate}}"
     metadata_json="$(mktemp /tmp/5gpn-beta-release.XXXXXX)" || return 1
@@ -3883,7 +3923,11 @@ prepare_intercept_runtime_dirs() {
             || { err "Refusing interception runtime path alias: $path -> $canonical"; return 1; }
     done
     chmod g-s "$INTERCEPT_DIR/tls" || return 1
-    chmod 3770 "$INTERCEPT_DIR" || return 1
+    # The monolith only reads the root-published certificate result and TLS
+    # material here. Its writable documents live below FIVEGPN_STATE_DIR and
+    # persistent extension storage lives below INTERCEPT_STATE_DIR. Keeping this
+    # directory group-writable would preserve the retired sidecar config plane.
+    chmod 0750 "$INTERCEPT_DIR" || return 1
 }
 
 prepare_intercept_state_dir() {
@@ -4120,8 +4164,9 @@ install_ui() {
     ok "Verified zashboard published to ${UI_DIR}/ (${ZASH_VERSION})."
 }
 
-# mihomo: prebuilt binary from MetaCubeX/mihomo releases (amd64-compatible).
-# Pinned by MIHOMO_VERSION (env or default); opt-in sha256 verify via MIHOMO_SHA256.
+# mihomo: prebuilt binary from the maintained moooyo/mihomo fork.
+# MIHOMO_VERSION and MIHOMO_SHA256 are fixed release coordinates and every
+# download is rejected unless both the digest and embedded version match.
 #
 # Fresh-artifact rule (2026-07-10): ALWAYS downloads the pinned MIHOMO_VERSION
 # and installs it over $MIHOMO_BIN (install(1) unlinks first — safe while the old
@@ -4150,41 +4195,6 @@ install_mihomo() {
     fi
     ok "Verified mihomo ${MIHOMO_VERSION} published to $MIHOMO_BIN."
     return 0
-}
-
-# ----------------------------------------------------------------------------
-# subscriptions.json (remote rule-list auto-update, in-process in 5gpn-mihomo)
-# ----------------------------------------------------------------------------
-# Writes the default subscriptions.json — only if absent, so operator edits
-# (added/disabled/re-pointed subscriptions) are never clobbered on re-install.
-# Ships one default subscription: chnroute, the system arbitration input.
-#   chnroute  china-ip    17mon/china_ip_list  (cidr)  split-horizon arbitration input
-# Best-effort + offline-safe: a failed or too-small fetch keeps the prior cache.
-# The system subscription is edited directly in subscriptions.json.
-write_subscriptions_json() {
-    local f="${CONF_DIR}/subscriptions.json"
-    if [[ -f "$f" ]]; then
-        info "Keeping existing ${f}."
-        return 0
-    fi
-    cat > "$f" <<'EOF'
-{
-  "version": 1,
-  "subscriptions": [
-    {
-      "id": "china-ip",
-      "category": "chnroute",
-      "name": "china_ip_list",
-      "url": "https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt",
-      "format": "cidr",
-      "enabled": true,
-      "interval": "24h"
-    }
-  ]
-}
-EOF
-    chmod 644 "$f"
-    ok "Written ${f} (1 default subscription: chnroute; DNS intent rules live in policy.json)."
 }
 
 # ----------------------------------------------------------------------------
@@ -4505,37 +4515,48 @@ remove_retired_installer_state_files() {
 }
 
 install_files() {
+    local f script_name retired_path
+    local -a installed_scripts=(
+        cert-renew.sh
+        gen-ios-profile.sh
+        intercept-cert-renew.sh
+        migrate-panel-to-console.sh
+        migrate-state-to-monolith.sh
+        migrate-to-monolith.sh
+        renew-hook.sh
+    )
+    local -a retired_installed_scripts=(
+        export-journal.sh
+        package-beta.sh
+        reload-rules.sh
+        run-suites.sh
+        setup-tgbot.sh
+        update-lists.sh
+        upgrade-to-beta.sh
+    )
     info "Installing config files and scripts..."
     preflight_runtime_publication_paths || return 1
     remove_retired_installer_state_files || return 1
-    mkdir -p "$BASE_DIR" "$SCRIPTS_DIR" "$WWW_DIR" \
-             "$CONF_DIR" "$DNS_CERT_DIR" "$DNS_RULES_DIR_DEFAULT"
+    mkdir -p "$BASE_DIR" "$SCRIPTS_DIR" "$CONF_DIR" "$DNS_CERT_DIR"
 
-    # Per-category subdirectories hold subscription-fetched caches. Ordered
-    # DNS intent rules themselves live only in policy.json.
-    install -d -m 0755 "${DNS_RULES_DIR_DEFAULT}"/{block,direct,proxy,chnroute}
-
-    # Fresh-install fix (defense in depth #1): seed the manual chnroute file from
-    # the bundled snapshot so 5gpn-mihomo has a non-empty chnroute at first boot,
-    # before the subscription manager's in-process fetch has had a chance to run.
-    # Only when the cache is absent — never clobber a fresher subscription-fetched
-    # cache on re-install. DNS_CHNROUTE (dns.env) points at this same path.
-    if [[ -s "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" ]]; then
-        info "Keeping existing ${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt."
-    elif [[ -f "${SCRIPT_DIR}/etc/china_ip_list.txt" ]]; then
-        install -m 0644 "${SCRIPT_DIR}/etc/china_ip_list.txt" \
-            "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt"
-        ok "Seeded ${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt from bundled snapshot."
-    else
-        warn "${SCRIPT_DIR}/etc/china_ip_list.txt missing; chnroute unseeded until subscription fetch runs."
-    fi
-
-    write_subscriptions_json
-
-    # repo scripts -> /opt/5gpn/scripts.
-    for f in "${SCRIPT_DIR}"/scripts/*.sh; do
-        [[ -e "$f" ]] || continue
-        install -m 0755 "$f" "${SCRIPTS_DIR}/$(basename "$f")"
+    # Only gateway runtime and explicit upgrade helpers are installed. Developer
+    # utilities such as run-suites.sh remain source-tree tools and must never be
+    # copied onto a gateway merely because they share a filename suffix.
+    for script_name in "${installed_scripts[@]}"; do
+        f="${SCRIPT_DIR}/scripts/${script_name}"
+        [[ -f "$f" && ! -L "$f" ]] \
+            || { err "Required installed script is missing or unsafe: $f"; return 1; }
+        install -m 0755 "$f" "${SCRIPTS_DIR}/${script_name}" || return 1
+    done
+    # Remove only scripts this project previously installed. Unknown files are
+    # preserved rather than treating the directory as an implicit ownership
+    # claim over operator content.
+    for script_name in "${retired_installed_scripts[@]}"; do
+        retired_path="${SCRIPTS_DIR}/${script_name}"
+        [[ -e "$retired_path" || -L "$retired_path" ]] || continue
+        [[ -f "$retired_path" || -L "$retired_path" ]] \
+            || { err "Refusing unsafe retired installed-script path: $retired_path"; return 1; }
+        rm -f -- "$retired_path" || return 1
     done
     # repo systemd units -> /opt/5gpn/etc/systemd (staged copies; install_units
     # installs them into /etc/systemd/system from here or from the checkout).
@@ -4576,7 +4597,7 @@ install_manage_cli() {
     publish_executable "$SCRIPT_PATH" "${BASE_DIR}/install.sh" || return 1
     local quick_source="${SCRIPT_DIR}/quick-install.sh"
     [[ -f "$quick_source" && ! -L "$quick_source" ]] \
-        || { err "Verified quick-install.sh is required for future release-channel upgrades."; return 1; }
+        || { err "Verified quick-install.sh is required for future release-channel switches."; return 1; }
     publish_executable "$quick_source" "${BASE_DIR}/quick-install.sh" || return 1
     if [[ ( -e /usr/local/bin/5gpn || -L /usr/local/bin/5gpn ) ]] && ! launcher_owned; then
         err "Refusing to overwrite an unowned /usr/local/bin/5gpn."
@@ -4800,15 +4821,6 @@ manage_unit_state() {
     printf '%s' "${state:-unknown}"
 }
 
-# Same shape: `grep -c` prints 0 and exits 1 when it counts nothing, so a
-# `|| echo 0` fallback prints a second zero.
-manage_count_lines() {
-    local n
-    [[ -f "$1" ]] || { printf '%s' "-"; return 0; }
-    n="$(grep -cvE '^[[:space:]]*(#|$)' "$1" 2>/dev/null | head -1 || true)"
-    printf '%s' "${n:-0}"
-}
-
 manage_mark() { [[ "$1" == active ]] && printf '✅' || printf '❌'; }
 
 # --- screen: overview ---------------------------------------------------------
@@ -4925,7 +4937,7 @@ manage_screen_certificates() {
     printf '  签发模式  %s\n' "$mode"
     printf '  基础域名  %s\n' "$(cfg_get DNS_BASE_DOMAIN || echo '?')"
     echo ""
-    for role in dot console web; do
+    for role in dot console; do
         dir="${CONF_DIR}/cert/${role}/current"
         if [[ -f "$dir/fullchain.pem" ]]; then
             printf '  ✅ %-5s %s 到期\n' "$role" \
@@ -4948,21 +4960,11 @@ manage_screen_certificates() {
 
 # --- screen: network ----------------------------------------------------------
 manage_screen_network() {
-    local wl lines age now mtime
     echo "网络"
     echo ""
     printf '  公网 IPv4     %s\n' "$(cfg_get DNS_PUBLIC_IP || echo N/A)"
     printf '  网关 IPv4     %s\n' "$(cfg_get DNS_GATEWAY_IP || echo N/A)"
     printf '  5gpn-mihomo 监听   %s\n' "$(cfg_get DNS_MIHOMO_LISTEN_IPS || echo N/A)"
-    echo ""
-    if [[ -f "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" ]]; then
-        lines="$(manage_count_lines "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt")"
-        now=$(date +%s); mtime=$(stat -c %Y "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" 2>/dev/null || echo "$now")
-        age="$(( (now - mtime) / 3600 ))h"
-        printf '  china_ip_list     %s 行（age %s）\n' "$lines" "$age"
-    else
-        printf '  china_ip_list     缺失（订阅拉取前未播种）\n'
-    fi
 }
 
 # --- screen: static proxy nodes ----------------------------------------------
@@ -5395,9 +5397,8 @@ is_valid_ipv4_or_cidr() {
 }
 
 # install_cert <base_domain> — provision ONE scoped production lineage and
-# deploy it to all three role directories:
+# deploy it to the two current role directories:
 #   dot  -> ${DOT_CERT_DIR}  (serves DoT :853; also signs the iOS profile)
-#   web  -> ${WEB_CERT_DIR}  (serves the web console behind the mihomo SNI split)
 #   console -> ${CONSOLE_CERT_DIR} (the controller TLS pair; the panel is served with it)
 # Three modes (resolved from persisted dns.env or the TUI):
 #   cloudflare (default) — Let's Encrypt DNS-01 through the Cloudflare API
@@ -5809,11 +5810,12 @@ install_cert_deploy_hook() {
         return 1
     fi
     install -m 0755 "$src" /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh || return 1
-    ok "Renewal deploy hook installed (validated dot/web/console publication + iOS re-sign)."
+    ok "Renewal deploy hook installed (validated dot/console publication + iOS re-sign)."
 }
 
 # Certbot standalone must own public TCP :80. Run in a subshell so its signal
-# traps cannot replace the full install transaction's ERR/EXIT rollback traps.
+# traps cannot replace the full install transaction's ERR/EXIT failure-reporting
+# and cleanup traps.
 # Only a mihomo service that was active is stopped. Failure and signal paths
 # restore it from this subshell. After successful initial issuance, leave it
 # stopped so install_cert can validate and publish console/current before
@@ -6060,15 +6062,14 @@ issue_selfsigned_wildcard() {
     remove_owned_renewal_automation
 }
 
-# deploy_cert_roles <base> — copy the selected lineage to all three role dirs.
-# deploy_cert_roles <base> [src_dir] [mode] — copy the selected cert to all role
-# dirs. Defaults to reading from the Certbot lineage; a preserved role copy or
-# debug mode may pass an alternate source directory explicitly.
+# deploy_cert_roles <base> [src_dir] [mode] — copy the selected cert to the two
+# current role dirs. Defaults to reading from the Certbot lineage; a preserved
+# role copy or debug mode may pass an alternate source directory explicitly.
 deploy_cert_roles() {
     local base="$1" mode="${3:-${CERT_MODE:-cloudflare}}"
     local src="${2:-${LE_LIVE_ROOT}/${base}}"
     local r dest group generation final link_tmp old trust=production i j rollback_link
-    local -a roles=(dot web console) dests=() generations=() links=() old_targets=()
+    local -a roles=(dot console) dests=() generations=() links=() old_targets=()
     [[ "$src" == "$DEBUG_CERT_DIR"/* ]] && { trust=debug; mode=debug; }
     validate_cert_pair "${src}/fullchain.pem" "${src}/privkey.pem" "$base" 0 "$trust" "$mode" \
         || { err "Certificate source failed validation: $src"; return 1; }
@@ -6165,7 +6166,7 @@ deploy_cert_roles() {
     done
     cert_root_is_safe \
         || { err "Published certificate role tree failed ownership validation."; return 1; }
-    ok "${mode} certificate for ${base} deployed to dot/web/console role dirs."
+    ok "${mode} certificate for ${base} deployed to dot/console role dirs."
 }
 
 # install_renewal_automation installs a daily systemd timer running only the
@@ -6434,19 +6435,19 @@ prepare_runtime_permissions() {
         chmod 0600 "${CONF_DIR}/dns.env" || return 1
     fi
 
-    install -d -o "$FIVEGPN_SERVICE_USER" -g "$FIVEGPN_SERVICE_USER" -m 2770 \
-        "$DNS_RULES_DIR_DEFAULT" || return 1
-    runtime_tree_has_only_plain_entries "$DNS_RULES_DIR_DEFAULT" \
-        || { err "Refusing unsafe link, hardlink, or special entry below $DNS_RULES_DIR_DEFAULT"; return 1; }
-    find "$DNS_RULES_DIR_DEFAULT" -type d -exec chown "$FIVEGPN_SERVICE_USER:$FIVEGPN_SERVICE_USER" {} + \
-        -exec chmod 2770 {} + || return 1
-    find "$DNS_RULES_DIR_DEFAULT" -type f -exec chown "$FIVEGPN_SERVICE_USER:$FIVEGPN_SERVICE_USER" {} + \
-        -exec chmod 0640 {} + || return 1
-
+    # These files and caches belonged to the standalone resolver. They remain
+    # accepted as root-only migration evidence, but the monolith never reads
+    # them: its live document and subscription caches are below FIVEGPN_STATE_DIR.
+    if [[ -d "/etc/5gpn/rules" && ! -L "/etc/5gpn/rules" ]]; then
+        runtime_tree_has_only_plain_entries "/etc/5gpn/rules" \
+            || { err "Refusing unsafe legacy resolver cache tree."; return 1; }
+        find "/etc/5gpn/rules" -type d -exec chown root:root {} + -exec chmod 0700 {} + || return 1
+        find "/etc/5gpn/rules" -type f -exec chown root:root {} + -exec chmod 0600 {} + || return 1
+    fi
     for path in subscriptions.json policy.json upstreams.json ecs.json stats.json; do
         [[ -f "${CONF_DIR}/${path}" ]] || continue
-        chown "$FIVEGPN_SERVICE_USER:$FIVEGPN_SERVICE_USER" "${CONF_DIR}/${path}" || return 1
-        chmod 0640 "${CONF_DIR}/${path}" || return 1
+        chown root:root "${CONF_DIR}/${path}" || return 1
+        chmod 0600 "${CONF_DIR}/${path}" || return 1
     done
     runtime_tree_has_only_plain_entries "$MIHOMO_DIR" \
         || { err "Refusing unsafe link, hardlink, or special entry below $MIHOMO_DIR"; return 1; }
@@ -6488,8 +6489,11 @@ prepare_runtime_permissions() {
 
     prepare_intercept_runtime_dirs || return 1
     prepare_intercept_state_dir || return 1
+    # config.json belonged to the retired sidecar. Preserve an existing regular
+    # file as root-only migration evidence, but never grant the monolith access
+    # to its obsolete credentials or treat it as live configuration.
     [[ ! -f "$INTERCEPT_DIR/config.json" ]] \
-        || { chown "$FIVEGPN_SERVICE_USER:$FIVEGPN_SERVICE_USER" "$INTERCEPT_DIR/config.json" && chmod 0640 "$INTERCEPT_DIR/config.json"; } || return 1
+        || { chown root:root "$INTERCEPT_DIR/config.json" && chmod 0600 "$INTERCEPT_DIR/config.json"; } || return 1
     [[ ! -f "$INTERCEPT_DIR/cert-state" ]] \
         || { chown "root:$FIVEGPN_SERVICE_USER" "$INTERCEPT_DIR/cert-state" && chmod 0640 "$INTERCEPT_DIR/cert-state"; } || return 1
     if [[ -d "$INTERCEPT_DIR/tls" ]]; then
@@ -6502,7 +6506,9 @@ prepare_runtime_permissions() {
     fi
 
     ensure_dns_cert_root || return 1
-    for role in dot web console; do
+    # Validate the two current roles and any retained legacy web role. Only the
+    # current roles are published above.
+    for role in dot console web; do
         [[ -d "${DNS_CERT_DIR}/${role}" ]] || continue
         cert_role_tree_is_safe_for_recursive_metadata "${DNS_CERT_DIR}/${role}" \
             || { err "Refusing unsafe certificate-role tree: ${DNS_CERT_DIR}/${role}"; return 1; }
@@ -6532,8 +6538,8 @@ prepare_certificate_publication_boundaries() {
         && runtime_file_slot_is_safe "$INTERCEPT_DIR/cert-state" "$CONF_DIR" \
         || { err "Unsafe interception certificate-control file slot."; return 1; }
     if [[ -f "$INTERCEPT_DIR/config.json" ]]; then
-        chown "$FIVEGPN_SERVICE_USER:$FIVEGPN_SERVICE_USER" "$INTERCEPT_DIR/config.json" \
-            && chmod 0640 "$INTERCEPT_DIR/config.json" || return 1
+        chown root:root "$INTERCEPT_DIR/config.json" \
+            && chmod 0600 "$INTERCEPT_DIR/config.json" || return 1
     fi
     if [[ -f "$INTERCEPT_DIR/cert-state" ]]; then
         chown "root:$FIVEGPN_SERVICE_USER" "$INTERCEPT_DIR/cert-state" \
@@ -6557,6 +6563,40 @@ prepare_certificate_publication_boundaries() {
     if [[ "${CERT_MODE:-}" == debug ]]; then
         ensure_debug_cert_root || return 1
     fi
+}
+
+# Render the exact document shape used only when dns.json is absent. Keeping the
+# jq program independently callable lets the policy suite parse and validate the
+# real candidate rather than grepping a second hand-written fixture.
+render_fresh_dns_document() {
+    local dot="$1" debug="$2" cert="$3" key="$4" gateway="$5"
+    local ecs="$6" china="$7" trust="$8"
+    jq -n \
+        --arg dot "$dot" --arg debug "$debug" --arg origin "127.0.0.1:5354" \
+        --arg cert "$cert" --arg key "$key" --arg gw "$gateway" \
+        --arg ecs "$ecs" --arg china "$china" --arg trust "$trust" \
+        --arg chinaDomains "$DNS_CHINA_DOMAINS_DEFAULT" \
+        --arg gfwlist "$DNS_GFWLIST_DEFAULT" \
+        --argjson interval "$DNS_SUBSCRIPTION_INTERVAL_DEFAULT" \
+        'def addrs: split(",") | map(gsub("\\s";""))
+                    | map(select(length > 0))
+                    | map(if test(":[0-9]+$") then . else . + ":53" end);
+         {
+           listen:    {dot: $dot, debug: $debug, origin: $origin,
+                       certificate: $cert, privateKey: $key},
+           gateway:   $gw,
+           upstreams: {china: ($china | addrs), trust: ($trust | addrs), ecs: $ecs},
+           policy:    {
+             rules: [
+               {id: "china-domains", kind: "subscription", value: $chinaDomains,
+                intent: "direct", enabled: true, format: "clash", intervalSeconds: $interval},
+               {id: "gfwlist", kind: "subscription", value: $gfwlist,
+                intent: "proxy", enabled: true, format: "plain", intervalSeconds: $interval}
+             ],
+             fallback: "auto"
+           },
+           tuning:    {}
+         }'
 }
 
 # The installer does not prompt for any of this: these are operational defaults,
@@ -6650,21 +6690,8 @@ seed_dns_document() {
     # An upstream without a port is a dns.env spelling; the document wants a
     # resolver address. Appending :53 here keeps a carried-forward value usable
     # instead of failing validation on a difference the operator never made.
-    if ! jq -n \
-            --arg dot "$dot" --arg debug "$debug" --arg origin "127.0.0.1:5354" \
-            --arg cert "$cert" --arg key "$key" --arg gw "$GATEWAY_IP" \
-            --arg ecs "$ecs" --arg china "$china" --arg trust "$trust" \
-            'def addrs: split(",") | map(gsub("\\s";""))
-                        | map(select(length > 0))
-                        | map(if test(":[0-9]+$") then . else . + ":53" end);
-             {
-               listen:    {dot: $dot, debug: $debug, origin: $origin,
-                           certificate: $cert, privateKey: $key},
-               gateway:   $gw,
-               upstreams: {china: ($china | addrs), trust: ($trust | addrs), ecs: $ecs},
-               policy:    {rules: null, fallback: "auto"},
-               tuning:    {}
-             }' > "$tmp"; then
+    if ! render_fresh_dns_document "$dot" "$debug" "$cert" "$key" "$GATEWAY_IP" \
+            "$ecs" "$china" "$trust" > "$tmp"; then
         rm -f -- "$tmp"
         err "Could not write the DNS document candidate."
         return 1
@@ -6702,15 +6729,9 @@ write_dns_env() {
     # DNS_API_TOKEN belonged to the retired standalone control server, and nothing has
     # read it since that process was deleted -- not the core, not zashboard, not
     # a script. It is generated nowhere now and retired in the schema.
-    # Read current values from the single config file (dns.env). Secrets + tuning
-    # knobs are preserved across a re-install; caller environment is ignored.
-    local existing_china existing_trust
-    existing_china="$(cfg_get DNS_CHINA)"
-    existing_trust="$(cfg_get DNS_TRUST)"
-    # Upstream groups are seeded into upstreams.json (see seed_upstreams_json),
-    # not written here. existing_china/existing_trust are read only to carry a
-    # pre-existing dns.env value forward on the first upgrade past this change,
-    # so an operator who hand-edited the old keys does not silently lose them.
+    # Read the one controller secret from the operator file. Runtime DNS policy,
+    # upstreams, subscriptions and tuning live only in dns.json; dns.env retains
+    # installation inputs and host-managed certificate/controller coordinates.
 
     # Obtain the console/dot/base domains from the single derivation of the
     # operator's base (apex) domain
@@ -6738,28 +6759,6 @@ write_dns_env() {
     dns_mihomo_secret_env="$(dns_env_encode_value "$dns_mihomo_secret")" \
         || { err "DNS_MIHOMO_SECRET cannot be represented safely in dns.env."; return 1; }
 
-    # Tuning knobs: current dns.env value > default (single-source, so a
-    # hand-edited value survives an idempotent re-run).
-    local max_inflight="$(cfg_get DNS_MAX_INFLIGHT)"; max_inflight="${max_inflight:-4096}"
-    local ttl_min="$(cfg_get DNS_TTL_MIN)";               ttl_min="${ttl_min:-300}"
-    local ttl_max="$(cfg_get DNS_TTL_MAX)";               ttl_max="${ttl_max:-86400}"
-    local query_timeout="$(cfg_get DNS_QUERY_TIMEOUT)"; query_timeout="${query_timeout:-5s}"
-    local api_rate="$(cfg_get DNS_API_RATE)"; api_rate="${api_rate:-20}"
-    local api_burst="$(cfg_get DNS_API_BURST)"; api_burst="${api_burst:-40}"
-    local upstreams_file="$(cfg_get DNS_UPSTREAMS)"; upstreams_file="${upstreams_file:-${CONF_DIR}/upstreams.json}"
-    local ecs_file="$(cfg_get DNS_ECS_FILE)"; ecs_file="${ecs_file:-${CONF_DIR}/ecs.json}"
-    local policy_rules="$(cfg_get DNS_POLICY_RULES)"; policy_rules="${policy_rules:-${CONF_DIR}/policy.json}"
-    local stats_file="$(cfg_get DNS_STATS_FILE)"; stats_file="${stats_file:-${CONF_DIR}/stats.json}"
-    local mihomo_config="$(cfg_get DNS_MIHOMO_CONFIG)"; mihomo_config="${mihomo_config:-${MIHOMO_DIR}/config.yaml}"
-    local intercept_config="${INTERCEPT_DIR}/config.json"
-    local heartbeat_url="$(cfg_get DNS_HEARTBEAT_URL)"
-    local heartbeat_interval="$(cfg_get DNS_HEARTBEAT_INTERVAL)"; heartbeat_interval="${heartbeat_interval:-60s}"
-    if [[ -n "$heartbeat_url" ]]; then
-        warn "DNS_HEARTBEAT_URL is retained but the monolith does not send push heartbeats; use an external pull probe."
-    fi
-    # full_install has already validated and normalized the China ECS value.
-    local china_ecs="$CHINA_ECS"
-
     local dns_env_tmp
     dns_env_tmp="$(mktemp "${CONF_DIR}/.dns.env.XXXXXX")" \
         || { err "Could not create the dns.env candidate."; return 1; }
@@ -6774,17 +6773,12 @@ DNS_LISTEN_DOT=:853
 DNS_LISTEN_DEBUG=127.0.0.1:5353
 
 # TLS certs — ONE scoped lineage. Cloudflare uses apex+wildcard; HTTP-01 uses
-# exact console/dot SANs. Either shape is deployed to THREE role dirs:
-#   dot/     serves DoT :853 (also signs the iOS profile)
-#   web/     serves nothing today; see cert_role_group
-#   console/ serves the mihomo TLS controller, and so the panel behind it
+# exact console/dot SANs. Either shape is deployed to two current role dirs:
+#   dot/     serves DoT :853 and signs the iOS profiles
+#   console/ serves the mihomo TLS controller and the panel behind it
 # All hot-reload on file-mtime change; pinned mihomo v1.19.28 guarantees that
 # mihomo reloads the controller certificate files automatically, and
 # renew-hook.sh redeploys on renewal.
-DNS_CERT=${DOT_CERT_DIR}/current/fullchain.pem
-DNS_KEY=${DOT_CERT_DIR}/current/privkey.pem
-DNS_WEB_CERT=${WEB_CERT_DIR}/current/fullchain.pem
-DNS_WEB_KEY=${WEB_CERT_DIR}/current/privkey.pem
 
 # ── Deployment identity + cert (read by install.sh/renew-hook.sh; also read by
 # the in-process Telegram bot). DNS_BASE_DOMAIN = the operator's ONE apex domain
@@ -6803,46 +6797,13 @@ DNS_MIHOMO_LISTEN_IPS=${MIHOMO_LISTEN_IPS}
 CERT_MODE=${CERT_MODE}
 CERT_EMAIL=${CERT_EMAIL}
 
-# Upstream resolver groups live in upstreams.json, not here. That file is the
-# single source of truth: seeded by this installer, read at startup, and
-# rewritten by the web console (Settings → upstream DNS) which hot-applies
-# without a restart. There is deliberately no DNS_CHINA/DNS_TRUST key — the
-# daemon cannot write dns.env under its systemd sandbox, so a second copy here
-# could only ever go stale and silently disagree with the live configuration.
-DNS_UPSTREAMS=${upstreams_file}
-
-# EDNS Client Subnet attached to china-group queries. New installations use
-# the operational 112.96.32.0/24 default; /etc/5gpn/ecs.json (written by the
-# web console and hot-applied without a restart) overrides it at runtime.
-DNS_CHINA_ECS=${china_ecs}
-DNS_ECS_FILE=${ecs_file}
-
-DNS_RULES_DIR=${DNS_RULES_DIR_DEFAULT}
-DNS_CHNROUTE=${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt
-
-# Mihomo resolves sniffed hostnames only through this loopback broker. The
-# broker uses each active extension's operator-selected China/trust binding and
-# defaults all other hostnames to the live trust group.
-DNS_EGRESS_BROKER=127.0.0.1:5354
-
-# Remote rule-list subscriptions (fetched in-process; caches written to
-# DNS_RULES_DIR/<category>/<name>.txt). See /etc/5gpn/subscriptions.json.
-DNS_SUBSCRIPTIONS=${CONF_DIR}/subscriptions.json
-DNS_POLICY_RULES=${policy_rules}
-
 # Mihomo's controller and public zashboard bundle share this loopback TLS
 # listener. Browsers reach it at https://console.<DNS_BASE_DOMAIN>/ui/. The
 # /ui/* bundle and profiles are public; /5gpn/* and ordinary controller routes
 # require DNS_MIHOMO_SECRET.
-DNS_LISTEN_API=127.0.0.1:443
-DNS_API_RATE=${api_rate}
-DNS_API_BURST=${api_burst}
-
 # Mihomo's loopback external-controller API and its sole controller secret.
 DNS_MIHOMO_CONTROLLER=${dns_mihomo_controller}
 DNS_MIHOMO_SECRET=${dns_mihomo_secret_env}
-DNS_MIHOMO_CONFIG=${mihomo_config}
-DNS_INTERCEPT_CONFIG=${intercept_config}
 # Extension catalogs are part of the interception document, not a file of their
 # own: a fetched index is refetchable by definition, so only the operator's list
 # of sources is state. See the catalogs field in intercept.json.
@@ -6854,9 +6815,6 @@ DNS_INTERCEPT_CONFIG=${intercept_config}
 DNS_CONSOLE_CERT=${CONSOLE_CERT_DIR}/current/fullchain.pem
 DNS_CONSOLE_KEY=${CONSOLE_CERT_DIR}/current/privkey.pem
 
-# iOS .mobileconfig files served by mihomo under the public /ui/ path.
-WWW_DIR=${WWW_DIR}
-
 # The Telegram bot is configured in the console, not here. It has its own
 # document beside the resolver's and the engine's (<mihomo-home>/5gpn/bot.json),
 # written 0600 by the core because it carries a token. dns.env used to hold the
@@ -6864,16 +6822,6 @@ WWW_DIR=${WWW_DIR}
 # reads it for the bot any more, so keeping the keys would describe a
 # configuration surface that does not exist.
 
-DNS_CACHE_SIZE=${CACHE_SIZE}
-DNS_MAX_INFLIGHT=${max_inflight}
-DNS_TTL_MIN=${ttl_min}
-DNS_TTL_MAX=${ttl_max}
-DNS_QUERY_TIMEOUT=${query_timeout}
-DNS_STATS_FILE=${stats_file}
-# Reserved inactive fields. The monolith does not consume them or send a
-# push heartbeat; use an independent external DoT and HTTPS pull probe.
-DNS_HEARTBEAT_URL=${heartbeat_url}
-DNS_HEARTBEAT_INTERVAL=${heartbeat_interval}
 EOF
     then
         rm -f -- "$dns_env_tmp"
@@ -6902,44 +6850,22 @@ EOF
 
 setup_ios_profile() {
     info "Generating iOS DoT profile..."
-    local gw="${GATEWAY_IP:-$PUBLIC_IP}" candidate f
-    candidate="$(mktemp -d "${BASE_DIR}/.www.new.XXXXXX")" || return 1
-    write_ownership_marker "$candidate" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE" \
-        || { rmdir -- "$candidate"; return 1; }
+    local gw="${GATEWAY_IP:-$PUBLIC_IP}"
+    static_owned_tree_is_safe "$UI_DIR" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
+        || { err "The zashboard UI tree is missing, unsafe, or unowned: $UI_DIR"; return 1; }
     if [[ -x "${SCRIPTS_DIR}/gen-ios-profile.sh" ]]; then
-        # The profile configures (and is signed with) the DoT domain's cert.
-        if ! bash "${SCRIPTS_DIR}/gen-ios-profile.sh" "$DOT_DOMAIN" "$gw" "$candidate"; then
+        # The generator owns the two-file same-directory transaction. Publishing
+        # directly into UI_DIR avoids a second copy step that renewal did not
+        # share and guarantees install, manual regeneration and renewal all
+        # update the only directory mihomo serves.
+        if ! bash "${SCRIPTS_DIR}/gen-ios-profile.sh" "$DOT_DOMAIN" "$gw" "$UI_DIR"; then
             warn "gen-ios-profile.sh failed because a signed profile could not be produced — no profile served."
-            remove_owned_root "$candidate" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE" || true
             return 1
         fi
     else
         warn "scripts/gen-ios-profile.sh not present yet; skipping profile generation."
-        remove_owned_root "$candidate" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE" || true
         return 1
     fi
-
-    # The profiles go into the UI bundle, not a directory of their own.
-    #
-    # architecture.md is explicit that /ui/* is mounted outside the controller's
-    # authentication group and is the only unauthenticated surface, for exactly
-    # this reason: an unenrolled phone downloading a .mobileconfig trusts nothing
-    # yet and holds no secret. The loopback console origin that used to serve
-    # them went with the process that served it, so publishing to a directory of
-    # its own would put them where nothing can read them -- which is where the
-    # fresh install left them until now.
-    #
-    # Copied in rather than published as a tree: install_ui replaces UI_DIR
-    # atomically from the zashboard dist, so a tree publication here would
-    # delete the console. install_ui runs earlier in the same phase, and a
-    # re-install repeats both in that order.
-    for f in "$candidate"/*.mobileconfig; do
-        [[ -f "$f" ]] || continue
-        install -o root -g root -m 0644 "$f" "${UI_DIR}/$(basename -- "$f")" \
-            || { remove_owned_root "$candidate" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE" || true
-                 err "Could not publish the iOS profiles into ${UI_DIR}."; return 1; }
-    done
-    remove_owned_root "$candidate" "$IOS_OWNERSHIP_MARKER" "$IOS_OWNERSHIP_VALUE"
 
     ok "iOS profile generated (served at /ui/ios-dot.mobileconfig on the controller)."
 }
@@ -7432,7 +7358,7 @@ regen_ios() {
         err "iOS profile not generated (fail-closed on unsigned profile). Fix certificate signing."
         exit 1
     fi
-    # No service restart needed: 5gpn-mihomo serves the profile from WWW_DIR on each request.
+    # No service restart needed: mihomo serves the profile from UI_DIR on each request.
     verify_console_dns
     MIHOMO_LISTEN_IPS="${MIHOMO_LISTEN_IPS:-$(cfg_get DNS_MIHOMO_LISTEN_IPS)}"
     MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" || return 1
@@ -7476,15 +7402,6 @@ show_status() {
         echo "  DoT 域名    $domain"
         echo "  公网 IP     $pubip"
         echo "  DoT         tls://${domain}:853"
-        if [[ -f "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" ]]; then
-            local f_lines now mtime f_age
-            f_lines="$(grep -cvE '^[[:space:]]*(#|$)' "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" 2>/dev/null | head -n1 || echo 0)"
-            now=$(date +%s); mtime=$(stat -c %Y "${DNS_RULES_DIR_DEFAULT}/china_ip_list.txt" 2>/dev/null || echo "$now")
-            f_age="$(( (now - mtime) / 3600 ))h"
-            echo "  china_ip_list  ${f_lines:-0} 行（age ${f_age}）"
-        else
-            echo "  china_ip_list  缺失"
-        fi
     } | card
 }
 
@@ -7535,8 +7452,6 @@ load_persisted_install_config() {
     MIHOMO_LISTEN_IPS="$(cfg_get DNS_MIHOMO_LISTEN_IPS)"
     CERT_MODE="$(cfg_get CERT_MODE)"
     CERT_EMAIL="$(cfg_get CERT_EMAIL)"
-    CACHE_SIZE="$(cfg_get DNS_CACHE_SIZE)"
-    CHINA_ECS="$(cfg_get DNS_CHINA_ECS)"
     derive_domains "$BASE_DOMAIN"
 }
 
@@ -7551,14 +7466,8 @@ validate_install_config() {
         [[ "${CERT_EMAIL:-}" == *@* && "$CERT_EMAIL" != *[[:space:]]* ]] \
             || { err "Persisted CERT_EMAIL is invalid for the selected production certificate mode."; return 1; }
     fi
-    [[ "$CACHE_SIZE" =~ ^[1-9][0-9]*$ ]] || { err "Persisted DNS_CACHE_SIZE is invalid."; return 1; }
-    case "$CHINA_ECS" in
-        ""|off|none|disable|0) ;;
-        *) is_valid_ipv4 "${CHINA_ECS%%/*}" || { err "Persisted DNS_CHINA_ECS is invalid."; return 1; } ;;
-    esac
     MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" || return 1
-    export BASE_DOMAIN PUBLIC_IP GATEWAY_IP MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL \
-        CACHE_SIZE CHINA_ECS
+    export BASE_DOMAIN PUBLIC_IP GATEWAY_IP MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL
 }
 
 # ---------------------------------------------------------------------------
@@ -7694,15 +7603,6 @@ configure_install_tui() {
         MIHOMO_LISTEN_IPS="$default_listen"
     fi
 
-    # ECS and the cache size are derived, never asked: one is an operational
-    # default and the other follows host memory. test_tui_policy holds that.
-    if [[ -z "${CHINA_ECS+x}" ]]; then
-        CHINA_ECS="$DNS_CHINA_ECS_DEFAULT"
-    fi
-    CACHE_SIZE="${CACHE_SIZE:-${_CACHE_SIZE_DEFAULT:-4096}}"
-    [[ "$CACHE_SIZE" =~ ^[1-9][0-9]*$ ]] \
-        || { err "DNS cache size must be a positive integer."; return 1; }
-
     install_tui_cert_email || return 1
     if [[ "$CERT_MODE" == cloudflare ]]; then
         ensure_cf_token || return 1
@@ -7720,8 +7620,6 @@ configure_install_tui() {
             echo "  gateway:    $GATEWAY_IP"
             echo "  listeners:  $MIHOMO_LISTEN_IPS"
             echo "  email:      ${CERT_EMAIL:-(debug: none)}"
-            echo "  ECS:        ${CHINA_ECS:-disabled (configure in WebUI)}"
-            echo "  cache:      $CACHE_SIZE"
         } | card
         choice="$(ask_choice '确认或修改 Confirm or edit' \
             '确认并继续 Confirm and continue' \
@@ -7781,8 +7679,7 @@ configure_install_tui() {
         ask_yesno "保存以上 debug 配置并继续?" \
             || { warn "Configuration cancelled."; return 1; }
     fi
-    export BASE_DOMAIN PUBLIC_IP GATEWAY_IP MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL \
-        CACHE_SIZE CHINA_ECS
+    export BASE_DOMAIN PUBLIC_IP GATEWAY_IP MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL
 }
 
 resolve_install_configuration() {
@@ -7940,7 +7837,7 @@ delegate_pinned_channel_switch() {
             || { err "Installed quick installer is outside a valid owned runtime root."; return 1; }
     fi
     [[ -z "$mode" ]] || args+=("$mode")
-    info "Handing the stable-to-beta channel upgrade to verified quick-install.sh."
+    info "Handing the explicit beta channel switch to verified quick-install.sh; older beta lines are refused."
     exec bash "$quick" "${args[@]}"
 }
 
@@ -7984,7 +7881,7 @@ full_install() {
     # publication time when the binaries have already been replaced.
     cert_root_claim_is_possible
     # Bootstrap the TUI here, not at publication time. Every prompt this
-    # installer asks -- domain, gateway IP, resolver, certificate mode -- runs in
+    # installer asks -- domain, gateway/listener IPs, certificate mode -- runs in
     # the stage below, so a later bootstrap meant the interactive helpers always
     # fell back to `read -p` and Gum only ever coloured the closing log lines.
     install_gum
@@ -8010,12 +7907,9 @@ full_install() {
             # release and may not have the script at all -- or, worse, may hold
             # a version that migrates in the opposite direction.
             #
-            # Invoked through bash, because nothing in scripts/ carries the
-            # executable bit: the repo is developed on Windows and every one of
-            # them is 100644 in git, so the release tarball -- a plain `cp -r
-            # scripts` -- ships them non-executable. Printing the bare path
-            # gives the operator "command not found" from a command this
-            # installer told them to run.
+            # Invoke through bash so this instruction also works from older
+            # bundles that shipped scripts without an executable bit. Current
+            # releases publish the explicit script allowlist as 0755.
             err "  bash ${SCRIPT_DIR}/scripts/migrate-panel-to-console.sh ${MIHOMO_DIR}/config.yaml --in-place"
             err "Then rerun the installer. The script keeps a .pre-console.bak beside the file."
         else
@@ -8278,18 +8172,20 @@ usage() {
 Usage: sudo bash install.sh [--beta] [command] — or, after install:  5gpn [command]
 
   (no channel option) Resolve the latest official release when run from source.
-  --beta              Resolve the latest beta prerelease through verified
-                      quick-install.sh. A missing beta never falls back to official.
+  --beta              Resolve a beta prerelease through verified quick-install.sh
+                      only when its base is newer than latest official. Older or
+                      missing beta lines fail instead of downgrading/falling back.
   (no command)        Full install/re-run. First install requires the TUI;
                       reinstall validates and reuses /etc/5gpn/dns.env. A
                       packaged script remains pinned to its tag unless an
-                      explicit stable-to-beta handoff invokes verified quick-install.sh.
-  configure           Open the full TUI, stage/verify, publish, probe, and rollback on failure
+                      explicit beta channel switch invokes verified quick-install.sh.
+  configure           Open the full TUI, stage/verify, publish, and probe. A
+                      pre-publication failure is untouched; later failure is partial
   upgrade-reset-mihomo
                       Explicit TTY-confirmed upgrade that replaces the complete
                       operator-owned mihomo config with the backed-up current seed
   menu                Open the interactive management menu (this is what bare '5gpn' runs)
-  status              Show service states, domains, IP, list counts/age
+  status              Show service state, interception state, domains, and IP
   restart             Restart the 5gpn service
   ios                 Regenerate the iOS profile + QR
   rotate-token        Generate a new mihomo controller secret (the console
@@ -8307,8 +8203,9 @@ Usage: sudo bash install.sh [--beta] [command] — or, after install:  5gpn [com
 After a full install, `5gpn` opens the management TUI. Configuration commands do
 not accept values on argv or through the caller environment.
 
-Config: /etc/5gpn/dns.env is the persistent source of truth. First install writes
-it from the TUI; reinstall reads it. Ambient shell variables are discarded.
+Config: /etc/5gpn/dns.env stores installation-owned host coordinates. First
+install writes it from the TUI; reinstall reads it. Live DNS state is only in
+dns.json, and ambient shell variables are discarded.
 
 Domains + certificates: ONE base domain and ONE scoped Let's Encrypt lineage.
   BASE_DOMAIN (e.g. example.com)     the operator's single domain knob. Two
@@ -8355,12 +8252,14 @@ routes require the mihomo controller secret.
     Cloudflare token.
 
   Automatic runtime defaults:
-    China/trust upstream groups, China ECS, and cache size. The authenticated
-    Console can change the upstream groups and ECS at runtime.
+    dns.json starts with China/trust upstreams, China ECS, two built-in default
+    subscription rules, and core-owned zero-value tuning defaults. The
+    authenticated Console changes these live fields.
 
   Fixed release inputs:
-    DNS/mihomo/zashboard/Gum versions and SHA-256 values are embedded in the
-    release installer. Unsigned profiles and profile-DNS bypasses do not exist.
+    The 5gpn release tag plus mihomo/zashboard/Gum versions and SHA-256 values
+    are embedded in the release installer. Unsigned profiles and profile-DNS
+    bypasses do not exist.
 EOF
 }
 

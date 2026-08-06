@@ -14,12 +14,8 @@ __pycache__/
 # Local executable outputs
 *.exe
 
-# Local build/staging scratch (cross-compiled binary + web tarballs for test-env deploys)
+# Local build/staging scratch
 /build/
-
-# Frontend build output (Phase 3 web UI; built in CI)
-/web/node_modules/
-/web/dist/
 
 # Visual-companion brainstorm mockups (scratch, not committed)
 /.superpowers/brainstorm/
@@ -30,5 +26,3 @@ __pycache__/
 # Scratch probes written by exploratory tooling; never part of the tree.
 zz_*_test.go
 *_probe_test.go
-/web/dist.tar.gz
-/web/e2e/live/out/

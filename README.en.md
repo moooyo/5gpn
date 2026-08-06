@@ -111,7 +111,9 @@ Expose only what you need. `speedtest-5060` is an unauthenticated Host/SNI relay
 
 ## Certificate modes
 
-The first-install TUI asks for one of the following modes. Both production modes use one scoped Certbot lineage named `<base>` and deploy its certificate into the dot, web, and console role directories.
+The first-install TUI asks for one of the following modes. Both production
+modes use one scoped Certbot lineage named `<base>` and deploy it to the only
+current public certificate roles: `dot` and `console`.
 
 | Mode | Certificate and DNS requirements | Renewal behavior |
 | --- | --- | --- |
@@ -129,7 +131,8 @@ Install the latest official release:
 curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash
 ```
 
-Explicitly install the latest beta prerelease:
+Explicitly switch to a beta whose base version is newer than the latest
+official release; an older public beta is refused rather than installed:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash -s -- --beta
@@ -142,9 +145,20 @@ sudo bash install.sh
 sudo bash install.sh --beta
 ```
 
-The source installer also resolves and delegates to one verified, exact release bundle so binaries from one tag cannot be mixed with scripts or templates from another. The default channel accepts only `X.Y.Z`; `--beta` accepts only a published `X.Y.Z-beta.N` and never falls back to an official release when no valid beta exists.
+The source installer first resolves and delegates to one verified, exact 5gpn
+release bundle. That bundle carries independent mihomo and zashboard release
+tags and SHA-256 pins, so component artifacts cannot drift from the scripts and
+templates that install them. The default channel accepts only `X.Y.Z`;
+`--beta` accepts only a published `X.Y.Z-beta.N` whose base version is newer
+than the latest official release. It never falls back and never downgrades to an
+older beta line.
 
 The first installation collects configuration through the TUI and atomically writes `/etc/5gpn/dns.env`. Reinstall reads only that file and never treats the caller environment as configuration input. Preflight and staging fail before publication where possible; a failure during publication is reported as a partial installation rather than hidden behind a rollback claim.
+
+A missing `dns.json` enables two built-in 24-hour subscriptions: ChinaMax
+domains with `direct` intent and the GFW list with `proxy` intent. Mihomo fetches
+them into its private state directory; the authenticated Console can disable,
+replace, or reorder them.
 
 ## After installation
 
@@ -182,8 +196,8 @@ connections are lost during a successful restart.
 This is process recovery, not self-healing: a persistent bad configuration,
 port conflict, or broken certificate remains an operator-visible failure. A
 deliberate `systemctl stop 5gpn-mihomo` stays stopped. Use an independent external
-monitor that actively probes DoT and HTTPS; the persisted `DNS_HEARTBEAT_*`
-fields are not consumed by the monolith and provide no health signal.
+monitor that actively probes DoT and HTTPS. Retired `DNS_HEARTBEAT_*` keys are
+accepted only while an older `dns.env` is rewritten and are not persisted.
 DNS listener and certificate-path fields are installation-owned; controller
 writes must preserve them exactly and are rejected before persistence if they
 attempt to change them.
@@ -216,7 +230,10 @@ decodes it through the installer's strict reader.
 
 - **Android**: find `dot.<base>` in the Console Setup Guide and enter it as the system Private DNS provider. Modern Android apps generally do not trust user-installed CAs by default, so the project does not offer an Android MITM CA workflow.
 - **iOS**: download and install `/ui/ios-dot.mobileconfig` from the Setup Guide. If extensions are needed, install `/ui/ios-intercept-ca.mobileconfig` separately and manually enable Full SSL Trust in system settings.
-- **zashboard**: `https://console.<base>/ui/` is the Console. There is no second origin, source allowlist, handoff session, or separate Console token.
+- **zashboard**: `https://console.<base>/ui/` and both profiles beneath
+  `/ui/` are public. `/5gpn/*` and the ordinary controller routes require the
+  single mihomo controller secret. There is no separate Console token, origin,
+  source allowlist, or handoff session.
 
 The Console includes `/overview`, `/setup-guide`, `/logs`, `/resolve-test`, `/policy-rules`, `/extensions`, `/extensions/hosts`, `/marketplace`, `/plugin-logs`, `/mihomo`, `/mihomo-config`, and `/settings`. Its API and mihomo's controller share the same process, origin, and controller secret.
 
@@ -232,7 +249,7 @@ operations.
 
 | Path | Ownership and purpose |
 | --- | --- |
-| `/etc/5gpn/dns.env` | Persistent source of truth for deployment identity and daemon knobs |
+| `/etc/5gpn/dns.env` | Deployment identity, host addresses, certificate mode, and controller coordinates; no mirrored runtime DNS state |
 | `/etc/5gpn/mihomo/config.yaml` | Complete operator-owned mihomo configuration |
 | `/etc/5gpn/mihomo/5gpn/dns.json` | Ordered DNS policy, upstreams, subscriptions, and resolver settings |
 | `/etc/5gpn/mihomo/5gpn/intercept.json` | Interception master, fixed-false HTTP/3 marker, catalogs, and extension snapshots |
@@ -251,6 +268,22 @@ the live group. It does not create a Console node API, second node database, or
 continuing Sub-Store subscription. Provider subscriptions and arbitrary group
 or rule edits remain manual operator YAML changes.
 
+### Mihomo proxy selection
+
+The supported 5gpn seed remains in `mode: rule` and ends with
+`MATCH,Proxies`. Ordinary gateway traffic therefore uses the current member of
+the operator-defined `Proxies` group, which initially contains only `DIRECT`.
+Mihomo's virtual `GLOBAL` selector belongs to global mode; switching modes
+bypasses the complete rule list, including the private-address and UDP/443
+guards, and is not the supported 5gpn data-plane mode.
+
+Persistent nodes and providers belong only in the fully operator-owned
+`/etc/5gpn/mihomo/config.yaml`. The Console's **Update config** path/payload
+action hot-applies a complete configuration but never writes that file, so a
+restart or reload of the default path discards payload-only changes. Validate
+and publish the operator file first, then use **Reload config** or restart for a
+durable change.
+
 The fresh/reset seed starts its `Proxies` group with `DIRECT` only; 5gpn ships no proxy nodes. Running `sudo 5gpn mihomo-reset` directly prints a replacement warning but does not ask for another confirmation. Before running it, prepare to restore custom proxies, providers, groups, and rules from the backup.
 
 Console writes hot-apply the revisioned mihomo `5gpn` documents. Deployment values in `dns.env` change only through a validated installer run; certificates hot-reload when their files change.
@@ -260,7 +293,7 @@ Console writes hot-apply the revisioned mihomo `5gpn` documents. Deployment valu
 | Command | Effect |
 | --- | --- |
 | `sudo 5gpn` | Open the interactive management menu |
-| `sudo 5gpn status` | Show service, domain, address, and rule state |
+| `sudo 5gpn status` | Show service, interception, domain, and address state |
 | `sudo 5gpn restart` | Restart mihomo |
 | `sudo 5gpn configure` | Open the full configuration TUI and apply a validated transaction |
 | `sudo 5gpn ios` | Regenerate the iOS profile and QR code |
@@ -294,10 +327,10 @@ Only the root-owned certificate publisher can read the private CA signing key; m
 
 ## Upgrades and release channels
 
-- The default quick installer selects only the latest official release. `--beta` is an explicit, per-invocation beta opt-in and is never persisted in `dns.env`.
+- The default quick installer selects only the latest official release. `--beta` is an explicit, per-invocation opt-in, accepts only a prerelease whose base is newer than latest official, and is never persisted in `dns.env`.
 - A normal channel transition uses one complete verified installer bundle and preserves a valid current operator-owned mihomo YAML byte for byte. Moving from the retired multi-process design to the monolith is a separate checked migration: it removes only the retired anchors and inbound from a candidate, rewrites the management-plane exclusion to `INNER`, requires the fixed UDP/443 guard, and publishes only after pinned `5gpn-mihomo -t` succeeds.
 - `upgrade-reset-mihomo` replaces the complete YAML. Custom proxies, providers, groups, and rules are not merged and must be restored manually from the backup.
-- A successful beta upgrade does not guarantee that an in-place downgrade to the stable release channel is supported. Keep a system snapshot before upgrading when reversal is required. The installer does not claim whole-system rollback after publication begins.
+- A successful beta channel switch does not guarantee an in-place switch back to the official channel. Keep a system snapshot before switching when reversal is required. The installer does not claim whole-system rollback after publication begins.
 - Every pre-v5 deployment that still uses interception config schema v4 requires an explicit, recoverable lockstep rebuild first. Never delete the old interception file or change only its schema version. Follow the [pre-v5 rebuild runbook](docs/pre-v5-upgrade.md) exactly.
 
 ## Security boundaries and known limitations
@@ -330,8 +363,8 @@ CI renders and validates the seed with the digest-pinned mihomo binary. Validate
 | --- | --- |
 | *(external: `moooyo/mihomo`)* | The single runtime: DNS, forwarding, HTTP/TLS interception, Telegram, and controller API |
 | *(external: `moooyo/zashboard`)* | The React Console served by mihomo |
-| `etc/` | Configuration examples, mihomo seed, systemd/polkit units, and rule seeds |
-| `scripts/` | Certificate, rule, iOS profile, and Telegram operations helpers |
+| `etc/` | Current dns.env example, mihomo seed, and systemd units |
+| `scripts/` | Certificate, iOS profile, and explicit upgrade/migration helpers; the suite runner stays source-only |
 | `tests/` | Shell regressions, upgrade fixtures, and gateway smoke checklist |
 | `docs/` | Current architecture, extension author contract, and upgrade runbook |
 | `.github/workflows/` | Shared CI gate and exact-tag release pipeline |
@@ -341,7 +374,7 @@ CI renders and validates the seed with the digest-pinned mihomo binary. Validate
 
 - [Current architecture](docs/architecture.md)
 - [Native extension authoring contract](docs/native-extensions.md)
-- [Pre-v5 rebuild and release-channel upgrades](docs/pre-v5-upgrade.md)
+- [Pre-v5 rebuild and release-channel switches](docs/pre-v5-upgrade.md)
 - [Linux gateway integration smoke checklist](tests/integration-smoke.md)
 - [Official extension repository](https://github.com/moooyo/5gpn-extensions)
 - [Releases](https://github.com/moooyo/5gpn/releases) and [Issues](https://github.com/moooyo/5gpn/issues)

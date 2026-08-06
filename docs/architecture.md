@@ -17,6 +17,11 @@ described in earlier revisions of this file.
   and an API client that talks to mihomo's controller.
 - **This repository** is an installer and a TUI. It contains no service.
 
+A 5gpn release publishes only `5gpn-installer.tar.gz`, `checksums.txt`, and
+`THIRD_PARTY_NOTICES.md`; the bundle contains installer material only. It does
+not build or republish mihomo or zashboard. The installer fetches those artifacts
+from their own repositories using independent release tags and SHA-256 pins.
+
 Zashboard remains installable as a PWA, but its worker is network-only. It
 precaches no application files, deletes caches left by older releases when it
 activates, and mihomo serves every `/ui/*` response with `Cache-Control:
@@ -36,6 +41,13 @@ network-facing process must not:
   whose SAN set covers the enabled capture hosts.
 - `5gpn-certbot-renew.service` owns the Let's Encrypt lineage for the public
   service names.
+
+The only current public certificate roles are `dot` for DoT and `console` for
+the controller, Console, and profiles. A legacy `web` certificate role and the
+old `DNS_WEB_CERT`/`DNS_WEB_KEY` configuration fields are migration inputs only;
+current configuration neither persists nor consumes them. The interception CA
+and constrained leaf are a separate private trust boundary, not another public
+certificate role.
 
 The DNS answer determines whether a client connects directly to an origin or
 connects to the gateway. When the gateway address is returned, mihomo sniffs the
@@ -192,6 +204,11 @@ host distribution's MIME database. The installer never edits a shared MIME
 table. Its readiness probe bypasses proxy environment variables and requires
 both public profiles to return HTTP 200 with that exact media type, comparing
 the type case-insensitively and allowing parameters.
+
+Both profile files are published directly beneath `/opt/5gpn/ui`, which is the
+only current profile publication directory, and mihomo serves them beneath
+`/ui/` alongside zashboard. `/opt/5gpn/www`, `WWW_DIR`, and any separate web
+root are legacy migration inputs only and must never receive a current profile.
 
 ## Control surface
 
@@ -422,10 +439,10 @@ requires widening that struct.
 Alerts are transitions, never states, and the bot does not claim to detect the
 gateway's own death: a monitor inside the process cannot report that the process
 stopped, and an operator who read silence as health would be worse off than one
-who knows it means nothing. The persisted `DNS_HEARTBEAT_URL` and
-`DNS_HEARTBEAT_INTERVAL` fields are not consumed by the monolith and provide no
-health signal. An independent monitor must actively probe the gateway from
-outside the host.
+who knows it means nothing. Retired `DNS_HEARTBEAT_URL` and
+`DNS_HEARTBEAT_INTERVAL` keys are tolerated only while an older `dns.env` is
+rewritten and are not persisted by the current installer. An independent
+monitor must actively probe the gateway from outside the host.
 
 Egress goes through the core's own inner dialer, so reaching `api.telegram.org`
 from a network that blocks it is the operator's existing rules rather than a
@@ -525,6 +542,22 @@ upstreams that serve it left a window in which the resolver was configured as
 neither. It also put the one file the console most needed to repair out of its
 reach.
 
+A missing `dns.json` is seeded with the same two subscription rules as the
+pinned core default: ChinaMax domains with `direct` intent and the GFW list with
+`proxy` intent, both refreshed every 24 hours. Their caches live in the
+monolith's private `dns-rules` state directory. `/etc/5gpn/rules` is never a
+current cache path.
+
+`dns.env` now contains only installation-owned host coordinates: the DoT/debug
+listeners used for a missing-document seed, base/public/gateway/listener
+addresses, certificate mode and email, and the controller coordinates and
+secret. Runtime policy, upstreams, subscription
+state, resolver tuning, statistics, and heartbeat fields are not mirrored
+there. Known retired keys are accepted only so one installer rewrite can drop
+them. Legacy `policy.json`, `upstreams.json`, `ecs.json`, `subscriptions.json`,
+`stats.json`, and `/etc/5gpn/rules` remain root-only migration evidence; the
+monolith neither reads them nor receives write access to them.
+
 `config.yaml` remains fully operator-owned.
 
 ## Operator TUI
@@ -579,6 +612,14 @@ hosts get the same predicate a fresh install seeds.
 
 The legacy `intercept-egress` listener and `MODULE-INTERCEPT` node are unused by
 the monolith but harmless, so they are cleanup rather than migration.
+
+Legacy `DNS_INTERCEPT_CONFIG`, `DNS_WEB_CERT`, `DNS_WEB_KEY`, `WWW_DIR`, and the
+retired resolver/API/tuning keys may be recognized only while an older
+installation is rewritten. The old sidecar config and resolver state are kept
+root-only, while a structurally verified `web` certificate-role tree may remain
+as migration evidence. None is accepted as current configuration or exposed to
+the mihomo service account, and none creates a listener, certificate consumer,
+or profile publication path.
 
 The units are handled the same way, and the asymmetry is deliberate: the
 installer publishes only the units this release owns, but keeps removing the

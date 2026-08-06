@@ -92,7 +92,7 @@ touch "$unit_conflicts/5gpn-journal@5gpn-dns.service"
 if journal_export_instances_clear "$unit_conflicts"; then
     fail "pre-existing exact journal exporter instance was accepted"
 else
-    pass "exact journal exporter instance conflicts are rejected before polkit publication"
+    pass "exact journal exporter instance conflicts are rejected before legacy cleanup"
 fi
 rm -f -- "$unit_conflicts/5gpn-journal@5gpn-dns.service"
 mkdir "$unit_conflicts/5gpn-dns.service.d"
@@ -154,6 +154,14 @@ if valid_stable_release_tag 9.8.7 \
 else
     fail "main installer release tag grammar is not strict"
 fi
+if ! beta_base_is_newer_than_stable \
+        9223372036854775808.0.0-beta.1 9223372036854775807.99.99 \
+   || beta_base_is_newer_than_stable \
+        9223372036854775807.0.0-beta.1 9223372036854775808.0.0; then
+    fail "main installer beta comparison overflows large SemVer components"
+else
+    pass "main installer beta comparison is arbitrary-precision"
+fi
 
 # Source checkouts resolve the selected channel once, while release bundles
 # remain pinned to the exact tag stamped by the release workflow.
@@ -190,6 +198,20 @@ if [[ "$resolved" == 9.9.0-beta.2 ]]; then
 else
     fail "source installer did not resolve the beta prerelease"
 fi
+
+printf '%s\n' \
+    '[{"tag_name":"9.9.0","draft":false,"prerelease":false},{"tag_name":"9.8.9-beta.4","draft":false,"prerelease":true}]' \
+    > "$beta_list"
+printf '{"tag_name":"9.8.9-beta.4","draft":false,"prerelease":true}\n' > "$beta_metadata"
+if resolve_install_release_tag "file://$TMP/absent" "file://$beta_list" "file://$beta_metadata" >/dev/null 2>&1; then
+    fail "source installer allowed an older beta to downgrade the latest official release"
+else
+    pass "source installer refuses a beta channel downgrade"
+fi
+
+printf '%s\n' \
+    '[{"tag_name":"9.8.7","draft":false,"prerelease":false},{"tag_name":"9.9.0-beta.2","draft":false,"prerelease":true}]' \
+    > "$beta_list"
 
 printf '{"tag_name":"9.9.0-beta.2","draft":false,"prerelease":false}\n' > "$beta_metadata"
 if resolve_install_release_tag "file://$TMP/absent" "file://$beta_list" "file://$beta_metadata" >/dev/null 2>&1; then
@@ -504,6 +526,15 @@ if runtime_file_slot_is_safe "$runtime_slots/root/policy.json" "$runtime_slots/r
 else
     fail "direct runtime file validation did not distinguish regular files and symlinks"
 fi
+ln -- "$runtime_slots/root/policy.json" "$runtime_slots/outside/policy-hardlink.json"
+if runtime_plain_file_slot_is_safe "$runtime_slots/root/policy.json" "$runtime_slots/root"; then
+    fail "metadata publication accepted a hardlinked runtime control file"
+else
+    pass "metadata publication rejects hardlinked runtime control files before chmod/chown"
+fi
+rm -f -- "$runtime_slots/outside/policy-hardlink.json"
+runtime_plain_file_slot_is_safe "$runtime_slots/root/policy.json" "$runtime_slots/root" \
+    || fail "single-link runtime control file did not recover after hardlink removal"
 
 tls_tree="$TMP/tls-tree"
 mkdir -p "$tls_tree"
@@ -772,17 +803,15 @@ got="$(resolve_mihomo_listen_ips '10.20.30.40,10.20.30.40')" || got=""
 [[ "$got" == 10.20.30.40 ]] && pass "listener addresses are deduplicated" \
     || fail "listener dedupe = '$got'"
 
-# Fresh-install automatic values are a complete valid configuration: the
-# operational upstream groups and ECS subnet are accepted, and cache size is the
-# memory-profile default selected before the TUI runs.
+# Fresh-install host coordinates form a complete installer configuration.
+# Resolver defaults are rendered separately into dns.json and do not pass
+# through this validator.
 BASE_DOMAIN=example.com
 MIHOMO_LISTEN_IPS=10.20.30.40
 CERT_MODE=debug
 CERT_EMAIL=""
-CACHE_SIZE=20000
-CHINA_ECS="112.96.32.0/24"
 if validate_install_config >/dev/null 2>&1; then
-    pass "automatic upstream, ECS, and cache defaults validate"
+    pass "fresh installer host coordinates validate"
 else
     fail "fresh-install automatic defaults were rejected"
 fi

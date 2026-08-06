@@ -35,7 +35,7 @@ cat > "$DEPLOY_HOOK" <<'EOF'
 # Let's Encrypt renewal deploy hook; reads DNS_BASE_DOMAIN; publishes /etc/5gpn/cert.
 set -eu
 [[ "${RENEW_HOOK_VALIDATE_ONLY:-0}" == 1 ]] && exit 0
-for role in dot web console; do
+for role in dot console; do
     mkdir -p "$TEST_CERT_ROOT/$role/generations/fixture"
     cp "$RENEWED_LINEAGE/fullchain.pem" "$TEST_CERT_ROOT/$role/generations/fixture/fullchain.pem"
     cp "$RENEWED_LINEAGE/privkey.pem" "$TEST_CERT_ROOT/$role/generations/fixture/privkey.pem"
@@ -62,7 +62,6 @@ file_gid() {
     local path="$1" role expected basename
     case "$path" in
         "$CERT_ROOT"/dot/*) role=dot; expected=61001 ;;
-        "$CERT_ROOT"/web/*) role=web; expected=61002 ;;
         "$CERT_ROOT"/console/*) role=console; expected=61001 ;;
         *) return 1 ;;
     esac
@@ -78,7 +77,7 @@ file_gid() {
 
 sync_role_copies() {
     local role
-    for role in dot web console; do
+    for role in dot console; do
         mkdir -p "$CERT_ROOT/$role/generations/fixture"
         cp "$LE_LIVE_ROOT/example.com/fullchain.pem" "$CERT_ROOT/$role/generations/fixture/fullchain.pem"
         cp "$LE_LIVE_ROOT/example.com/privkey.pem" "$CERT_ROOT/$role/generations/fixture/privkey.pem"
@@ -269,11 +268,28 @@ expect_no_log "certbot " "unsafe role tree never reaches Certbot"
 # deploy hook instead of being skipped forever as "not due".
 reset_case
 MOCK_CERT_FRESH=1
-printf 'stale\n' > "$CERT_ROOT/web/current/fullchain.pem"
+printf 'stale\n' > "$CERT_ROOT/dot/current/fullchain.pem"
 expect_success "not-due lineage repairs stale role copies" cert_renew_main --cert-name example.com
-cmp -s "$LE_LIVE_ROOT/example.com/fullchain.pem" "$CERT_ROOT/web/current/fullchain.pem" \
+cmp -s "$LE_LIVE_ROOT/example.com/fullchain.pem" "$CERT_ROOT/dot/current/fullchain.pem" \
     && pass "stale role certificate was redeployed from the live lineage" \
     || fail "stale role certificate survived the not-due fast path"
+[[ ! -e "$CERT_ROOT/web" && ! -L "$CERT_ROOT/web" ]] \
+    && pass "renewal does not recreate the retired web certificate role" \
+    || fail "renewal recreated the retired web certificate role"
+
+# A validated legacy web tree may remain as migration evidence. Renewal neither
+# compares it to the live lineage nor deletes or refreshes its unused material.
+reset_case
+mkdir -p "$CERT_ROOT/web"
+printf 'legacy web key material\n' > "$CERT_ROOT/web/retained.pem"
+cp "$CERT_ROOT/web/retained.pem" "$TMP/retained-web.pem"
+MOCK_CERT_FRESH=1
+printf 'stale\n' > "$CERT_ROOT/console/current/fullchain.pem"
+expect_success "not-due lineage ignores a retained legacy web role" cert_renew_main --cert-name example.com
+cmp -s "$CERT_ROOT/web/retained.pem" "$TMP/retained-web.pem" \
+    && pass "renewal leaves validated legacy web material untouched" \
+    || fail "renewal rewrote or deleted retained legacy web material"
+rm -rf -- "$CERT_ROOT/web"
 
 # Content, owner, and mode are insufficient: every served role must be readable
 # by the unified fivegpn runtime identity. A wrong role group is treated as
@@ -286,15 +302,6 @@ expect_success "not-due lineage repairs a role copy with the wrong group" cert_r
 [[ -e "$CERT_ROOT/.deploy-ran" ]] \
     && pass "wrong console group forced deploy-hook recovery" \
     || fail "wrong console group was accepted without deploy-hook recovery"
-
-reset_case
-MOCK_CERT_FRESH=1
-MOCK_BAD_GROUP_ROLE=web
-MOCK_BAD_GROUP_FILE=fullchain.pem
-expect_success "not-due lineage repairs a DNS role copy with the wrong group" cert_renew_main --cert-name example.com
-[[ -e "$CERT_ROOT/.deploy-ran" ]] \
-    && pass "wrong web group forced deploy-hook recovery" \
-    || fail "wrong web group was accepted without deploy-hook recovery"
 
 # A stale AAAA record fails the fixed-resolver gate before any :80 disruption.
 reset_case

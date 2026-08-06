@@ -190,6 +190,22 @@ if find "$CANDIDATE_DIR" -mindepth 1 \
 fi
 pass "fresh installation candidate receives both signed profiles"
 
+# The generator already owns same-directory staging, pair rollback, and atomic
+# renames. The installer must therefore invoke it against the one live directory
+# instead of generating elsewhere and copying over public filenames.
+INSTALL="$ROOT/install.sh"
+grep -Fxq 'UI_DIR="/opt/5gpn/ui"' "$INSTALL" \
+    || fail "the fixed live profile directory is not /opt/5gpn/ui"
+grep -Eq '^WWW_DIR=' "$INSTALL" \
+    && fail "the installer still defines a second live profile directory"
+setup_fn="$(sed -n '/^setup_ios_profile()/,/^}/p' "$INSTALL")"
+[[ -n "$setup_fn" ]] || fail "setup_ios_profile is missing"
+printf '%s' "$setup_fn" | grep -Fq 'gen-ios-profile.sh" "$DOT_DOMAIN" "$gw" "$UI_DIR"' \
+    || fail "setup_ios_profile does not let the generator publish atomically into UI_DIR"
+printf '%s' "$setup_fn" | grep -Fq 'install -o root -g root -m 0644' \
+    && fail "setup_ios_profile still copies profiles non-atomically over UI files"
+pass "installer profile generation publishes atomically into the sole UI directory"
+
 # The URL an operator is told to open must be the URL the installer verified.
 #
 # Three surfaces print it -- the QR code, the success banner and the regenerate
@@ -198,7 +214,6 @@ pass "fresh installation candidate receives both signed profiles"
 # install reported success while the printed URL and the QR a phone would scan
 # both returned 404. Nothing on the host could notice: the two paths are read by
 # different readers, and only one of them is a machine.
-INSTALL="$ROOT/install.sh"
 grep -nE '(https://\$\{CONSOLE_DOMAIN[^}]*\}|https://%s)/ios/' "$INSTALL" \
     && fail "a printed URL still points at the retired /ios/ path"
 url_fn="$(sed -n '/^ios_profile_url()/,/^}/p' "$INSTALL")"

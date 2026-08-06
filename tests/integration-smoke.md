@@ -102,9 +102,9 @@ diff -u /tmp/5gpn-crash-state.before /tmp/5gpn-crash-state.after
   still zero, and then run `sudo systemctl start 5gpn-mihomo` before evaluating the
   result or continuing the checklist.
 - [ ] An independent monitor outside this host actively probes DoT and HTTPS,
-  observes the injected outage, and clears only after service recovery. The
-  persisted `DNS_HEARTBEAT_URL` and `DNS_HEARTBEAT_INTERVAL` fields are inert
-  and are not accepted as evidence of health or recovery.
+  observes the injected outage, and clears only after service recovery. Retired
+  `DNS_HEARTBEAT_URL` and `DNS_HEARTBEAT_INTERVAL` keys are not persisted and
+  are not accepted as evidence of health or recovery.
 
 ## 2. DNS transport and protocol behavior
 
@@ -160,7 +160,7 @@ afterward.
   field returns 400, leaves the revision and disk bytes unchanged, and leaves
   all existing listeners serving.
 - [ ] A china group configured with a DoT or DoH member resolves CN names, and
-  the operator's `DNS_CHINA_ECS` subnet still rides the query on that member —
+  the operator's `dns.json` `upstreams.ecs` subnet still rides the query on that member —
   ECS is attached before the transport is chosen, but nothing else covers it.
 - [ ] Repeated whole-document writes with a China DoH member leave mihomo's fd
   count flat. A pooled `http.Transport` is retired on a grace timer, and a
@@ -326,7 +326,8 @@ done
 - [ ] With both channels published, the default quick installer resolves the
   newest normal `X.Y.Z` release even when a newer beta prerelease exists.
 - [ ] `quick-install.sh --beta` resolves the newest published
-  `X.Y.Z-beta.N` prerelease. Missing beta metadata, a normal release carrying a
+  `X.Y.Z-beta.N` only when its base version is newer than the newest official
+  release. An older beta line, missing metadata, a normal release carrying a
   beta-looking tag, and a beta-tagged bundle selected for the official channel
   all fail before deployment mutation and never fall back across channels.
 - [ ] Starting from a clean legacy multi-process fixture, follow the historical
@@ -352,8 +353,9 @@ done
   the operator to the remote verified quick path. Do not expect this behavior
   from the historical `0.0.13` installer.
 - [ ] GitHub still reports the official release through `/releases/latest` after
-  publishing a beta, and every installed first-party asset reports or records
-  the same exact selected tag.
+  publishing a beta. The installed installer records its exact 5gpn tag, while
+  mihomo and zashboard match the independent version and digest coordinates
+  embedded in that bundle.
 - [ ] Missing/invalid Gum checksum falls back to plain output without installing
   the unverified binary.
 - [ ] Compare `nft list ruleset` with `/tmp/nft.before`: install, reinstall, and
@@ -423,8 +425,10 @@ done
   exits without reaching the certificate lock or Certbot. The interception
   certificate oneshot still succeeds during the installer's explicit
   certificate-lock handoff.
-- [ ] A successful production renewal runs the deploy hook, updates all three
-  role copies, and regenerates/signs the iOS profile.
+- [ ] A successful production renewal runs the deploy hook, updates the current
+  `dot` and `console` role copies, leaves any validated legacy `web` tree
+  untouched, and atomically regenerates/signs both iOS profiles in
+  `/opt/5gpn/ui`.
 - [ ] After a fresh install and an in-place upgrade, `/etc/5gpn` is
   `root:root` mode `0755`, `/etc/5gpn/cert` is `root:root` mode `0751`, and
   its root marker is `root:root` mode `0644`. Verify the runtime traversal
@@ -586,7 +590,7 @@ into recorded command output, screenshots, or issue logs.
   after revision check. A stale reorder is rejected without changing state.
 - [ ] Verify every installed extension defaults its capture-host DNS binding to
   trust. Switch one to China and confirm its captured hostname resolves through
-  the live China group with `DNS_CHINA_ECS`; non-captured names remain on trust.
+  the live China group with `dns.json` `upstreams.ecs`; non-captured names remain on trust.
   Create an exact/wildcard overlap with different bindings and verify the first
   enabled extension in execution order wins. Reorder and confirm the winner
   changes only after the reviewed revision-protected transaction. URL paths

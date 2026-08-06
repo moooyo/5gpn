@@ -79,21 +79,6 @@ for i in "${!MANAGE_SCREENS[@]}"; do
 done
 pass "the non-terminal list offers every screen and hands over the table's own renderer and labels"
 
-# An empty subscription is a valid zero-row snapshot. GNU grep prints `0` but
-# returns 1 for that case; under the installer's errexit/pipefail policy the
-# network screen must retain the value and render it instead of exiting.
-RULES_DIR="$TAB_TMP/rules"
-mkdir -p "$RULES_DIR"
-printf '# no entries yet\n\n' > "$RULES_DIR/china_ip_list.txt"
-SAVED_DNS_RULES_DIR_DEFAULT="$DNS_RULES_DIR_DEFAULT"
-DNS_RULES_DIR_DEFAULT="$RULES_DIR"
-network_output="$(manage_screen_network)" \
-    || fail "a comment-only china_ip_list aborted the network screen under set -e"
-DNS_RULES_DIR_DEFAULT="$SAVED_DNS_RULES_DIR_DEFAULT"
-grep -Fq 'china_ip_list     0 行' <<< "$network_output" \
-    || fail "a comment-only china_ip_list was not rendered as zero rows"
-pass "the network screen treats an empty china_ip_list as zero rows"
-
 # Quitting must return rather than loop. An empty answer is what ask_choice
 # yields when the operator escapes, and it has to mean the same thing.
 DISPATCHED=()

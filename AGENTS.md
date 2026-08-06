@@ -149,9 +149,11 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
 
 ## Installer and filesystem safety
 
-- `/etc/5gpn/dns.env` is the installer environment source of truth. New daemon
-  knobs need config parsing, installer persistence, the example env file, and
-  tests together.
+- `/etc/5gpn/dns.env` is the installer environment source of truth for
+  installation-owned host coordinates only. New installer knobs need config
+  parsing, persistence, the example env file, and tests together. Live DNS
+  policy, upstreams, subscriptions, tuning, and statistics belong only in
+  `dns.json`; do not mirror them back into `dns.env`.
 - Never execute a broad `nft flush ruleset`, overwrite the host's nftables
   configuration, disable its firewall service, or assume ownership of unrelated
   tables. 5gpn does not create, migrate, or remove host firewall rules.
@@ -191,11 +193,16 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
 
 ## Web console conventions
 
+- These conventions govern Console source in the separate `moooyo/zashboard`
+  repository. This repository must not grow a Web source tree or vendor a built
+  Console tree.
 - Keep the current React/DaisyUI design language, five-theme catalog, `light`
   default, and MiSans stack.
-- Scale comes from tokens, never literals. `styles/theme.css` owns seven type
+- Scale comes from tokens, never literals. In `moooyo/zashboard`,
+  `src/styles/theme.css` owns seven type
   steps (nothing below 11px), five radius steps, five control heights
-  (32/36/40/44/48px) and the two translucent tints. `styles/scale.test.ts`
+  (32/36/40/44/48px) and the two translucent tints.
+  `src/styles/scale.test.ts`
   fails a bare `text-[Npx]`/`rounded-[Npx]` and an off-4px-grid
   padding/margin/gap literal anywhere in `src/**`, plus a bare control-range
   height inside `components/ds` — the primitives are where a bypass reaches
@@ -216,7 +223,7 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   live are different things and the UI has to say which is which (policy
   rules), and a control that changes what happens to data has to say what it
   changes (pause).
-- `web/src/styles/index.css` cascade layering is load-bearing:
+- `moooyo/zashboard`'s `src/styles/index.css` cascade layering is load-bearing:
   DaisyUI is below the zds layer, while direct utility classes remain able to
   win. Do not move design-system CSS back into a losing `components` layer or
   unlayer it.
@@ -264,7 +271,8 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   browser watermark — which is why it offers an undo rather than a
   confirmation. Pausing the mihomo stream buffers and reports the count; it
   must not discard.
-- Do not commit `web/dist`. Keep the Console installable as a PWA, but its
+- Do not commit `dist` in `moooyo/zashboard` or vendor it into this repository.
+  Keep the Console installable as a PWA, but its
   worker is network-only: it precaches no UI or font asset and deletes caches
   left by older releases on activation. Keep initial JS/CSS, lazy-route, and
   font budgets green.

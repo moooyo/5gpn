@@ -257,6 +257,40 @@ beta_tags_from_release_list() {
         | sed -E 's/^.*"([^"]+)"$/\1/' || true
 }
 
+stable_tags_from_release_list() {
+    grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' "$1" 2>/dev/null \
+        | sed -E 's/^.*"([^"]+)"$/\1/' || true
+}
+
+latest_stable_tag_from_list() {
+    stable_tags_from_release_list "$1" \
+        | sed -E 's/^([0-9]+)\.([0-9]+)\.([0-9]+)$/\1 \2 \3 &/' \
+        | sort -k1,1n -k2,2n -k3,3n \
+        | tail -n 1 \
+        | awk '{print $4}'
+}
+
+decimal_component_is_greater() {
+    local left="$1" right="$2" LC_ALL=C
+    ((${#left} > ${#right})) && return 0
+    ((${#left} < ${#right})) && return 1
+    [[ "$left" > "$right" ]]
+}
+
+beta_base_is_newer_than_stable() {
+    local beta="$1" stable="$2" beta_base
+    local b_major b_minor b_patch s_major s_minor s_patch
+    valid_beta_release_tag "$beta" && valid_stable_release_tag "$stable" || return 1
+    beta_base="${beta%%-beta.*}"
+    IFS=. read -r b_major b_minor b_patch <<< "$beta_base"
+    IFS=. read -r s_major s_minor s_patch <<< "$stable"
+    decimal_component_is_greater "$b_major" "$s_major" && return 0
+    [[ "$b_major" == "$s_major" ]] || return 1
+    decimal_component_is_greater "$b_minor" "$s_minor" && return 0
+    [[ "$b_minor" == "$s_minor" ]] || return 1
+    decimal_component_is_greater "$b_patch" "$s_patch"
+}
+
 # The highest beta tag, ordered numerically on all four components.
 #
 # Not "the first one the API listed". GitHub does not return releases newest
@@ -276,7 +310,7 @@ latest_beta_tag_from_list() {
 resolve_latest_beta_tag() { # optional list and exact-metadata URLs are internal test seams
     local list_url="${1:-${RELEASES_API}?per_page=100}"
     local metadata_url="${2:-}"
-    local list_json metadata_json candidate="" tag metadata_tag
+    local list_json metadata_json candidate="" latest_stable="" metadata_tag
 
     list_json="$(mktemp /tmp/5gpn-beta-releases.json.XXXXXX)" || return 1
     if ! dl "$list_url" "$list_json"; then
@@ -284,15 +318,15 @@ resolve_latest_beta_tag() { # optional list and exact-metadata URLs are internal
         red "Could not list 5gpn prereleases."
         return 1
     fi
-    while IFS= read -r tag; do
-        if valid_beta_release_tag "$tag"; then
-            candidate="$tag"
-            break
-        fi
-    done < <(latest_beta_tag_from_list "$list_json")
+    candidate="$(latest_beta_tag_from_list "$list_json")"
+    latest_stable="$(latest_stable_tag_from_list "$list_json")"
     rm -f -- "$list_json"
     [[ -n "$candidate" ]] \
         || { red "No published 5gpn beta release is available."; return 1; }
+    [[ -n "$latest_stable" ]] \
+        || { red "Could not establish the latest official release before selecting beta."; return 1; }
+    beta_base_is_newer_than_stable "$candidate" "$latest_stable" \
+        || { red "Latest beta ${candidate} is not newer than official ${latest_stable}; refusing a channel downgrade."; return 1; }
 
     metadata_url="${metadata_url:-${RELEASES_API}/tags/${candidate}}"
     metadata_json="$(mktemp /tmp/5gpn-beta-release.json.XXXXXX)" || return 1
@@ -489,14 +523,15 @@ usage() {
 Usage: quick-install.sh [--beta] [installer-command]
 
   (no channel option)  Download the latest official release.
-  --beta              Download the latest published beta prerelease.
+  --beta              Download the latest beta only when its base version is
+                      newer than latest official; never downgrade to an older line.
 
 Installer command:
   upgrade-reset-mihomo  Explicit TTY-confirmed upgrade that backs up and replaces
                         the complete operator-owned mihomo config.
 
-The selected release is pinned to one exact tag. A missing beta never falls
-back to the official channel.
+The selected release is pinned to one exact tag. A missing or older beta never
+falls back to the official channel and never downgrades it.
 EOF
 }
 

@@ -9,7 +9,7 @@ superseded where it conflicts with the current monolith or HTTP/3 boundary.
 | --- | --- | --- | --- |
 | `moooyo/mihomo` | `feat/5gpn-monolith` | `MetaCubeX/mihomo:Alpha` at `99ce79c9` | `v1.19.28-monolith.26` |
 | `moooyo/zashboard` | `feat/5gpn-console` | `Zephyruso/zashboard:main` at `b40a283` | `v3.16.1-monolith.27` |
-| `moooyo/5gpn` | `main` | — | `0.0.77` (publication target) |
+| `moooyo/5gpn` | `main` | — | `0.0.77` (published 2026-08-06) |
 
 The stable release has one long-running process: mihomo. HTTP/3 interception is
 unsupported, `http3=true` is rejected, and the fixed global UDP/443 `REJECT`
@@ -24,10 +24,10 @@ The installed runtime is `5gpn-mihomo.service`, executes
 capability keys are `5gpn-*`. Unprefixed names are legacy migration inputs,
 not current aliases.
 
-The target gate includes `go test -race ./5gpn/...` (**run it in WSL** —
-Windows has no gcc, so `-race` cannot build there), every installer suite, the
-console build-time checks, and CI on every maintenance-branch push. See
-[Reproducing the checks](#reproducing-the-checks).
+The runtime and Console gates live in their own repositories. This repository's
+gate covers every installer suite, exact release-bundle assembly, published
+artifact digests, and seed validation with the pinned core. See [Reproducing
+the checks](#reproducing-the-checks).
 
 ---
 

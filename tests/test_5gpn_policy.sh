@@ -1,17 +1,11 @@
 #!/usr/bin/env bash
-# What the installer still owes the resolver: dns.env, and the things that must
-# not come back into it.
+# Holds the repository-owned deployment boundary for the monolith resolver.
+# Runtime DNS behavior is tested in the mihomo fork. This suite verifies that
+# the installer seeds and refreshes the one live DNS document, preserves its
+# operator-owned fields, and does not recreate a standalone DNS service.
 #
-# The former DNS sidecar, its unit, its Go source, its API routes, and its bot
-# are gone. The resolver's own behavior is tested in 5gpn/dns in the fork;
-# this suite holds the installer-owned configuration contract.
-#
-# What is left is the half that was always about this repository. dns.env is
-# the resolver's entire configuration surface and install.sh is its only
-# writer, so the schema, the token handling, the listener pins, and the
-# subscriptions seed are still this suite's to hold. So are the negative
-# assertions -- a retired key or a resurrected xray-era path reappearing in the
-# writer is exactly the regression a grep suite is good at catching.
+# Legacy dns.env values may be read once while creating a missing document.
+# They are migration input, not a second live resolver configuration surface.
 #
 # Pure grep — runs on the dev box under Git Bash, no Linux/Python needed.
 set -u
@@ -21,104 +15,158 @@ rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 INSTALL="$ROOT/install.sh"
 RENEW="$ROOT/scripts/renew-hook.sh"
 
-grep -Fq 'moooyo/5gpn'                      "$INSTALL" || fail "install.sh: release URL not from moooyo/5gpn"
+grep -Fq 'moooyo/5gpn' "$INSTALL" \
+    || fail "install.sh: release URL not from moooyo/5gpn"
 
-# --- install.sh: writes /etc/5gpn/dns.env and uses DNS_* vars ---
-grep -Fq '/etc/5gpn/dns.env'    "$INSTALL" || fail "install.sh: does not write /etc/5gpn/dns.env"
-grep -Fq 'DNS_GATEWAY_IP'       "$INSTALL" || fail "install.sh: no DNS_GATEWAY_IP in dns.env"
-grep -Fq 'DNS_CHINA'            "$INSTALL" || fail "install.sh: no DNS_CHINA in dns.env"
-grep -Fq 'DNS_TRUST'            "$INSTALL" || fail "install.sh: no DNS_TRUST in dns.env"
-grep -Fq 'DNS_RULES_DIR'        "$INSTALL" || fail "install.sh: no DNS_RULES_DIR in dns.env"
-grep -Fq 'DNS_CERT'             "$INSTALL" || fail "install.sh: no DNS_CERT in dns.env"
-grep -Fq 'DNS_KEY'              "$INSTALL" || fail "install.sh: no DNS_KEY in dns.env"
+seed_dns_fn="$(sed -n '/^seed_dns_document()/,/^}/p' "$INSTALL")"
+render_dns_fn="$(sed -n '/^render_fresh_dns_document()/,/^}/p' "$INSTALL")"
+write_dns_env_fn="$(sed -n '/^write_dns_env()/,/^}/p' "$INSTALL")"
+full_install_fn="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
+[[ -n "$seed_dns_fn" ]] || fail "install.sh: seed_dns_document() is missing"
+[[ -n "$render_dns_fn" ]] || fail "install.sh: render_fresh_dns_document() is missing"
+[[ -n "$write_dns_env_fn" ]] || fail "install.sh: write_dns_env() is missing"
 
-# --- renewal publishes cert files; SIGHUP remains rules/chnroute-only ---
-grep -Fq '/etc/5gpn/cert'             "$RENEW" || fail "renew-hook.sh: certs not copied to /etc/5gpn/cert"
-grep -Eq 'systemctl reload 5gpn-dns|kill -HUP' "$RENEW" \
-    && fail "renew-hook.sh: certificate publication must not misuse the rules-only SIGHUP API"
-grep -Fq '/etc/5gpn/cert'             "$INSTALL" || fail "install.sh: does not copy certs to /etc/5gpn/cert"
+# --- dns.json is the sole live resolver document ---
+grep -Fq 'FIVEGPN_STATE_DIR="/etc/5gpn/mihomo/5gpn"' "$INSTALL" \
+    || fail "install.sh: monolith state directory is not /etc/5gpn/mihomo/5gpn"
+printf '%s' "$seed_dns_fn" | grep -Fq 'target="${state_dir}/dns.json"' \
+    || fail "seed_dns_document does not target the monolith DNS document"
+printf '%s' "$seed_dns_fn" | grep -Fq 'dot="${dot:-:853}"' \
+    || fail "fresh DNS document does not default client ingress to DoT :853"
+printf '%s' "$seed_dns_fn" | grep -Fq 'debug="${debug:-127.0.0.1:5353}"' \
+    || fail "fresh DNS document does not keep debug DNS on loopback :5353"
+printf '%s' "$render_dns_fn" | grep -Fq -- '--arg dot "$dot" --arg debug "$debug" --arg origin "127.0.0.1:5354"' \
+    || fail "fresh DNS document does not pin the origin resolver to loopback :5354"
+printf '%s' "$render_dns_fn" | grep -Fq 'certificate: $cert, privateKey: $key' \
+    || fail "fresh DNS document does not carry the installer-owned DoT keypair"
+printf '%s' "$render_dns_fn" | grep -Fq 'gateway:   $gw' \
+    || fail "fresh DNS document does not carry the selected gateway address"
+printf '%s' "$render_dns_fn" | grep -Fq 'upstreams: {china: ($china | addrs), trust: ($trust | addrs), ecs: $ecs}' \
+    || fail "fresh DNS document does not seed both resolver groups and ECS"
+printf '%s' "$render_dns_fn" | grep -Fq 'id: "china-domains", kind: "subscription"' \
+    && printf '%s' "$render_dns_fn" | grep -Fq 'intent: "direct", enabled: true, format: "clash"' \
+    && printf '%s' "$render_dns_fn" | grep -Fq 'id: "gfwlist", kind: "subscription"' \
+    && printf '%s' "$render_dns_fn" | grep -Fq 'intent: "proxy", enabled: true, format: "plain"' \
+    && printf '%s' "$render_dns_fn" | grep -Fq 'fallback: "auto"' \
+    || fail "fresh DNS document does not seed the two core default subscriptions and auto fallback"
+grep -Fq 'DNS_SUBSCRIPTION_INTERVAL_DEFAULT=86400' "$INSTALL" \
+    || fail "fresh DNS subscription interval drifted from the core default"
+grep -Fq 'blackmatrix7/ios_rule_script/master/rule/Clash/ChinaMax/ChinaMax_Domain.yaml' "$INSTALL" \
+    && grep -Fq 'Loyalsoldier/v2ray-rules-dat/release/gfw.txt' "$INSTALL" \
+    || fail "fresh DNS subscription sources drifted from the core defaults"
+printf '%s' "$render_dns_fn" | grep -Fq 'tuning:    {}' \
+    || fail "fresh DNS document does not seed the tuning object"
 
-# --- no smartdns implementation in install.sh ---
-grep -Eq '^\s*install_smartdns\b'            "$INSTALL" \
-    && fail "install.sh: still calls install_smartdns (not just disabled/removed)"
-grep -Eq '^\s*install_smartdns_unit\b'       "$INSTALL" \
-    && fail "install.sh: still calls install_smartdns_unit"
-grep -Eq '^\s*(render_smartdns_conf|gen_foreign_cidr)' "$INSTALL" \
-    && fail "install.sh: still references render_smartdns_conf/gen_foreign_cidr as a call"
+if command -v jq >/dev/null 2>&1; then
+    rendered_dns="$(
+        export INSTALL_SH_LIB_ONLY=1
+        # shellcheck source=../install.sh
+        source "$INSTALL"
+        render_fresh_dns_document ':853' '127.0.0.1:5353' \
+            '/cert.pem' '/key.pem' '192.0.2.1' '112.96.32.0/24' \
+            '223.5.5.5' '22.22.22.22'
+    )" || fail "fresh DNS renderer failed"
+    printf '%s' "$rendered_dns" | jq -e '
+        .listen == {dot:":853",debug:"127.0.0.1:5353",origin:"127.0.0.1:5354",certificate:"/cert.pem",privateKey:"/key.pem"}
+        and .gateway == "192.0.2.1"
+        and .upstreams == {china:["223.5.5.5:53"],trust:["22.22.22.22:53"],ecs:"112.96.32.0/24"}
+        and (.policy.rules | length) == 2
+        and .policy.rules[0].id == "china-domains"
+        and .policy.rules[1].id == "gfwlist"
+        and .policy.fallback == "auto"
+        and .tuning == {}
+    ' >/dev/null || fail "fresh DNS renderer produced an invalid document"
+fi
 
-# --- DoT-only ingress (2026-07-10): no DoH/plain-53 listeners, no host firewall ---
-[ -e "$ROOT/scripts/setup-firewall.sh" ] && fail "scripts/setup-firewall.sh must stay removed (no host firewall management)"
-grep -Eq '^DNS_LISTEN_DOH='   "$INSTALL" && fail "install.sh: dns.env must not emit DNS_LISTEN_DOH (DoH removed)"
-grep -Eq '^DNS_LISTEN_PLAIN=' "$INSTALL" && fail "install.sh: dns.env must not emit DNS_LISTEN_PLAIN (plain :53 removed)"
-grep -Fq 'DNS_LISTEN_DOT=:853' "$INSTALL" || fail "install.sh: dns.env must pin the DoT listener :853"
-grep -Fq 'install_units'       "$INSTALL" || fail "install.sh: no install_units (unit install moved out of the removed setup-firewall.sh)"
-grep -Eq '(^|[[:space:]])nft([[:space:]]|$)' "$INSTALL" && fail "install.sh: must not manage host nftables"
+# Reinstall refreshes only installation-owned fields. Policy, upstreams,
+# listener addresses, and tuning remain the operator's current document.
+for assignment in \
+    '.listen.certificate = $cert' \
+    '.listen.privateKey = $key' \
+    '.gateway = $gw'; do
+    printf '%s' "$seed_dns_fn" | grep -Fq "$assignment" \
+        || fail "existing DNS document does not refresh $assignment"
+done
+printf '%s' "$seed_dns_fn" | grep -Eq '\.listen\.(dot|debug|origin)[[:space:]]*=' \
+    && fail "reinstall rewrites an operator-owned DNS listener address"
+printf '%s' "$seed_dns_fn" | grep -Eq '\.(upstreams|policy|tuning)[[:space:]]*=' \
+    && fail "reinstall rewrites operator-owned live DNS settings"
 
-# --- install.sh: stages etc/systemd into the installed tree (install_units
-# falls back to it on a piped curl|bash install with no checkout) ---
-grep -Fq '${BASE_DIR}/etc/systemd' "$INSTALL" || fail "install.sh: install_files does not stage etc/systemd into /opt/5gpn"
-grep -Fq '5gpn-mihomo.service' "$INSTALL" || fail "install.sh: install_units does not install 5gpn-mihomo.service"
-grep -Fq '${BASE_DIR}/etc/mihomo' "$INSTALL" || fail "install.sh: installed management runtime has no mihomo asset directory"
-grep -Fq 'for asset in config.yaml.tmpl; do' "$INSTALL" \
-    || fail "install.sh: installed management runtime does not retain every mihomo reset asset"
+# The live document is service-owned, mode 0600, and atomically renamed.
+printf '%s' "$seed_dns_fn" | grep -Fq 'chown "${FIVEGPN_SERVICE_USER}:${FIVEGPN_SERVICE_GROUP}" "$tmp"' \
+    || fail "DNS document candidate is not owned by the monolith identity"
+printf '%s' "$seed_dns_fn" | grep -Fq 'chmod 0600 "$tmp"' \
+    || fail "DNS document candidate is not mode 0600"
+printf '%s' "$seed_dns_fn" | grep -Fq 'mv -Tf -- "$tmp" "$target"' \
+    || fail "DNS document is not published by same-directory atomic rename"
 
-# --- install.sh: control-plane token + loopback :443 pin ---
-grep -Fq 'openssl rand'      "$INSTALL" || fail "install.sh: no token auto-gen (openssl rand)"
-grep -Fq 'DNS_API_TOKEN'     "$INSTALL" || fail "install.sh: does not write DNS_API_TOKEN into dns.env"
-grep -Fq 'DNS_LISTEN_API=127.0.0.1:443' "$INSTALL" \
-    || fail "install.sh: dns.env must pin the control plane to 127.0.0.1:443 (webui behind the mihomo SNI split)"
-grep -Fq 'DNS_LISTEN_API=:9443' "$INSTALL" \
-    && fail "install.sh: the old :9443 control-plane port must not come back"
-grep -Fq 'DNS_LISTEN_API=:18443' "$INSTALL" \
-    && fail "install.sh: the old xray-era :18443 control-plane port must not come back"
-# The console credential is the mihomo controller secret, and it is preserved
-# because it lives in the operator's config.yaml -- render_mihomo_config reads it
-# back and persist_mihomo_secret mirrors it into dns.env. DNS_API_TOKEN, whose
-# preservation this used to assert, belonged to the deleted control server and is
-# generated nowhere now.
-grep -Fq 'DNS_API_TOKEN="$(openssl rand' "$INSTALL" \
-    && fail "install.sh: generates the retired DNS_API_TOKEN again"
-grep -Fq 'persist_mihomo_secret "$secret"' "$INSTALL" \
-    || fail "install.sh: does not preserve the controller secret across re-install"
+# A missing document is seeded before dns.env is rewritten, so exact retired
+# upstream values can be consumed once and then dropped from the current file.
+printf '%s' "$seed_dns_fn" | grep -Fq 'cfg_get DNS_CHINA' \
+    || fail "first seed no longer carries the legacy China upstream input"
+printf '%s' "$seed_dns_fn" | grep -Fq 'cfg_get DNS_TRUST' \
+    || fail "first seed no longer carries the legacy trust upstream input"
+seed_call_line="$(printf '%s\n' "$full_install_fn" | grep -nE '^[[:space:]]*seed_dns_document([[:space:]]|$)' | cut -d: -f1)"
+env_call_line="$(printf '%s\n' "$full_install_fn" | grep -nE '^[[:space:]]*write_dns_env([[:space:]]|$)' | cut -d: -f1)"
+if [[ -z "$seed_call_line" || -z "$env_call_line" || "$seed_call_line" -ge "$env_call_line" ]]; then
+    fail "full_install must seed dns.json before rewriting migration inputs in dns.env"
+fi
+printf '%s\n' "$write_dns_env_fn" | grep -Eq '^[[:space:]]*DNS_(CHINA|TRUST)=' \
+    && fail "write_dns_env still persists retired resolver-group keys"
 
-grep -Fq 'DNS_EGRESS_BROKER=127.0.0.1:5354' "$ROOT/etc/5gpn/dns.env.example" \
-    || fail "dns.env.example: DNS_EGRESS_BROKER not documented with default 127.0.0.1:5354"
+# dns.env remains an installer-owned, root-only deployment record. It is not
+# the live resolver document, but its safe publication contract is current.
+printf '%s' "$write_dns_env_fn" | grep -Fq 'validate_dns_env_schema "$dns_env_tmp"' \
+    || fail "dns.env candidate is not schema-validated before publication"
+printf '%s' "$write_dns_env_fn" | grep -Fq 'chown root:root "$dns_env_tmp"' \
+    || fail "dns.env candidate is not root-owned"
+printf '%s' "$write_dns_env_fn" | grep -Fq 'chmod 0600 "$dns_env_tmp"' \
+    || fail "dns.env candidate is not mode 0600"
+printf '%s' "$write_dns_env_fn" | grep -Fq 'mv -f -- "$dns_env_tmp" "${CONF_DIR}/dns.env"' \
+    || fail "dns.env is not atomically published"
 
-INSTALL_SH="$ROOT/install.sh"
-grep -Fq 'Pre-v5 dns.env contains retired DNS_EGRESS_RESOLVER' "$INSTALL_SH" \
+# --- Explicit retired-input and removed-component guards ---
+grep -Fq 'Pre-v5 dns.env contains retired DNS_EGRESS_RESOLVER' "$INSTALL" \
     || fail "install.sh: retired DNS_EGRESS_RESOLVER is not rejected explicitly"
-grep -Eq '^[[:space:]]*DNS_EGRESS_RESOLVER=' "$INSTALL_SH" \
+grep -Eq '^[[:space:]]*DNS_EGRESS_RESOLVER=' "$INSTALL" \
     && fail "install.sh: retired DNS_EGRESS_RESOLVER is still persisted"
-grep -Fq 'XRAY_RESOLVER' "$INSTALL_SH" \
+grep -Fq 'XRAY_RESOLVER' "$INSTALL" \
     && fail "install.sh: removed XRAY_RESOLVER key remains"
+printf '%s\n' "$write_dns_env_fn" | grep -Eq '^[[:space:]]*DNS_API_TOKEN=' \
+    && fail "write_dns_env emits the retired standalone API credential"
+grep -Fq 'DNS_API_TOKEN="$(openssl rand' "$INSTALL" \
+    && fail "install.sh: generates the retired standalone API credential again"
+grep -Fq 'persist_mihomo_secret "$secret"' "$INSTALL" \
+    || fail "install.sh: controller secret is not mirrored after rendering mihomo"
 
-grep -Fq '${CONF_DIR}/policy.json' "$INSTALL" || fail "install.sh: does not seed /etc/5gpn/policy.json"
-
-# No superseded policy/egress state helper or path remains.
+grep -Eq '^DNS_LISTEN_DOH=' "$INSTALL" \
+    && fail "install.sh: public DoH ingress returned"
+grep -Eq '^DNS_LISTEN_PLAIN=' "$INSTALL" \
+    && fail "install.sh: plain :53 ingress returned"
+[[ ! -e "$ROOT/etc/systemd/5gpn-dns.service" ]] \
+    || fail "retired standalone DNS unit is shipped again"
+grep -Eq 'systemctl reload 5gpn-dns|kill -HUP' "$RENEW" \
+    && fail "renew-hook.sh: certificate publication calls the retired DNS reload API"
+[[ ! -e "$ROOT/scripts/setup-firewall.sh" ]] \
+    || fail "scripts/setup-firewall.sh returned (5gpn does not manage the host firewall)"
+grep -Eq '(^|[[:space:]])nft([[:space:]]|$)' "$INSTALL" \
+    && fail "install.sh: host nftables management returned"
 grep -Fq 'remove_legacy_policy_state' "$INSTALL" \
-    && fail "install.sh: old policy-state migration helper remains"
+    && fail "install.sh: superseded policy-state helper remains"
 grep -Eq 'egress(-nodes)?\.(json|enc)' "$INSTALL" \
     && fail "install.sh: removed structured-egress state path remains"
 
+# Release bundles retain only the current mihomo seed asset and unit.
+grep -Fq '${BASE_DIR}/etc/systemd' "$INSTALL" \
+    || fail "install.sh: systemd assets are not staged"
+grep -Fq '5gpn-mihomo.service' "$INSTALL" \
+    || fail "install.sh: current monolith unit is not installed"
+grep -Fq '${BASE_DIR}/etc/mihomo' "$INSTALL" \
+    || fail "install.sh: mihomo reset assets are not staged"
+grep -Fq 'for asset in config.yaml.tmpl; do' "$INSTALL" \
+    || fail "install.sh: current mihomo reset template is not retained"
 
-# chnroute STAYS in subscriptions.json (system arbitration input, NOT a policy rule)
-grep -Fq '"category": "chnroute"' "$INSTALL" || fail "install.sh: chnroute subscription must stay in subscriptions.json"
-grep -Fq 'china_ip_list'          "$INSTALL" || fail "install.sh: china_ip_list chnroute source must stay"
+true  # Keep a trailing successful command after intentional && guards.
 
-# Policy-owned subscriptions stay in policy.json rather than subscriptions.json.
-grep -Fq '"category": "block"'   "$INSTALL" && fail "install.sh: block subscription must move to policy.json"
-grep -Fq '"category": "proxy"'     "$INSTALL" && fail "install.sh: proxy(gfw) subscription must move to policy.json"
-grep -Fq '"category": "direct"'    "$INSTALL" && fail "install.sh: direct(china-list) subscription must move to policy.json"
-
-# Current cache directories use the block/direct/proxy vocabulary; there is no
-# shell-managed category file.
-grep -Fq '"${DNS_RULES_DIR_DEFAULT}"/{block,direct,proxy,chnroute}' "$INSTALL" \
-    || fail "install.sh: current subscription cache directories are incomplete"
-grep -Eq '(block|direct|proxy|blacklist)(\.keyword|\.prefix|\.suffix)?\.txt' "$INSTALL" \
-    && fail "install.sh: shell-managed DNS category file remains"
-grep -Fq 'blacklist' "$INSTALL" && fail "install.sh: removed blacklist category remains"
-
-true  # ensure the block's last command never sets rc via a && short-circuit
-
-[ $rc -eq 0 ] && echo "5gpn installer policy: PASS"
-exit $rc
+[[ $rc -eq 0 ]] && echo "5gpn installer policy: PASS"
+exit "$rc"

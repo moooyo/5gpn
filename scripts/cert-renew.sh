@@ -207,6 +207,7 @@ role_generation_tree_safe() {
 certificate_role_tree_safe() {
     local config_root root_gid role group expected_gid dest marker generations
     local entry name current target
+    local -a roles=(dot console)
     config_root="$(dirname -- "$CERT_ROOT")"
     root_gid="$(named_group_gid root)" || return 1
     canonical_directory_metadata_safe "$config_root" "$root_gid" 755 || return 1
@@ -227,7 +228,10 @@ certificate_role_tree_safe() {
             *) return 1 ;;
         esac
     done < <(find "$CERT_ROOT" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-    for role in dot web console; do
+    # The retired web role is optional. If an upgraded host still has it, prove
+    # its complete owned structure but never make it a current renewal target.
+    [[ ! -e "$CERT_ROOT/web" && ! -L "$CERT_ROOT/web" ]] || roles+=(web)
+    for role in "${roles[@]}"; do
         group="$(certificate_role_group "$role")" || return 1
         expected_gid="$(named_group_gid "$group")" || return 1
         dest="$CERT_ROOT/$role"
@@ -256,6 +260,9 @@ certificate_role_tree_safe() {
             [[ "$name" =~ ^generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] || return 1
             role_generation_tree_safe "$entry" "$expected_gid" || return 1
         done < <(find "$generations" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+        if [[ "$role" == web && ! -e "$current" && ! -L "$current" ]]; then
+            continue
+        fi
         [[ -L "$current" ]] || return 1
         target="$(readlink -- "$current")" || return 1
         [[ "$target" =~ ^generations/generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] \
@@ -267,7 +274,7 @@ certificate_role_tree_safe() {
 role_copies_match_live() {
     local live="$1" role cert key current group expected_gid
     certificate_role_tree_safe || return 1
-    for role in dot web console; do
+    for role in dot console; do
         group="$(certificate_role_group "$role")" || return 1
         expected_gid="$(named_group_gid "$group")" || return 1
         current="${CERT_ROOT}/${role}/current"

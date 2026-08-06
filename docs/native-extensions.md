@@ -163,14 +163,17 @@ capture-DNS, and global routing precedence. Rules affect only traffic that
 reaches mihomo on the DNS-steering gateway; they cannot block a hard-coded IP
 path that bypasses it.
 
-An extension may declare `requirements.egressGroup.required: true`, but the
-manifest and script never name or choose an arbitrary group. The operator
-selects one existing mihomo proxy group or `DIRECT` before enable. Extensions
-without that requirement use the operator's terminal mihomo target unless an optional binding was
-selected. The in-process traffic policy applies the selected group to the
-engine's inner dial, and the first matching bound extension in the operator's
-explicit execution order wins. A missing or removed group makes the extension not ready
-and never silently falls back to DIRECT or another group. A separately reviewed
+Every installed extension has exactly one explicit operator egress binding.
+New imports receive `DIRECT` before they are persisted; an empty or unbound
+value is not representable. A manifest may declare
+`requirements.egressGroup.required: true` as review metadata, but neither the
+manifest nor the script can name or change the binding, and that declaration
+does not alter the `DIRECT` default. The operator may select `DIRECT` or one
+existing mihomo proxy group. The in-process traffic policy applies that binding
+to the engine's inner dial, and the first matching extension in explicit
+execution order wins. If a selected group disappears, its name remains stored
+and visible and traffic fails closed until the operator chooses an available
+value; there is no terminal-target or `DIRECT` fallback. A separately reviewed
 `routingRules` action may still explicitly select `direct` for its own matcher.
 
 The same execution order is used for request and response actions, top to

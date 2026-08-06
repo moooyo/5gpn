@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Policy assertions for the single-config-file model + cert-mode surface
-# (2026-07: /etc/5gpn/dns.env is the ONE source of truth; caller environment is
-# not configuration input and there are NO per-key .state files). Cert modes are
-# cloudflare | http-01 | debug; generic DNS plugins and import remain removed.
-# ONE base-domain lineage is deployed to dot/web/console role dirs. The host
+# Policy assertions for the installer-input + runtime-document model.
+# /etc/5gpn/dns.env is the installer environment source of truth; live DNS
+# policy, upstreams, subscriptions, and tuning belong only to dns.json. Caller
+# environment is not configuration input and there are no per-key .state files.
+# Cert modes are cloudflare | http-01 | debug; generic DNS plugins and import
+# remain removed.
+# ONE base-domain lineage is deployed to dot/console role dirs. The host
 # nftables firewall management was REMOVED — this file also locks that.
 # Pure grep/sed — runs on the dev box under Git Bash; also the CI test job.
 set -u
@@ -42,22 +44,27 @@ grep -Fq 'Persisted CERT_MODE must be cloudflare, http-01, or debug.' "$INSTALL"
 grep -Eq 'IMPORT_CERT:-|CERTBOT_DNS_PLUGIN=|== "dns-01"|== "import"' "$INSTALL" \
     && fail "install.sh: removed generic DNS-01/import certificate modes returned"
 
-# ===== One base domain, one mode-specific certificate, THREE role cert dirs =====
+# ===== One base domain, one mode-specific certificate, TWO current role dirs =====
 grep -Fq 'DOT_CERT_DIR="${DNS_CERT_DIR}/dot"' "$INSTALL" \
     || fail "install.sh: no DOT_CERT_DIR role dir (/etc/5gpn/cert/dot)"
-grep -Fq 'WEB_CERT_DIR="${DNS_CERT_DIR}/web"' "$INSTALL" \
-    || fail "install.sh: no WEB_CERT_DIR role dir (/etc/5gpn/cert/web)"
 grep -Fq 'CONSOLE_CERT_DIR="${DNS_CERT_DIR}/console"' "$INSTALL" \
     || fail "install.sh: no CONSOLE_CERT_DIR role dir (/etc/5gpn/cert/console)"
-grep -Fq 'DNS_WEB_CERT=${WEB_CERT_DIR}/current/fullchain.pem' "$INSTALL" \
-    || fail "install.sh: dns.env does not point DNS_WEB_CERT at the web role dir"
-grep -Fq 'DNS_CERT=${DOT_CERT_DIR}/current/fullchain.pem' "$INSTALL" \
-    || fail "install.sh: dns.env does not point DNS_CERT at the dot role dir"
+grep -Eq '^WEB_CERT_DIR=' "$INSTALL" \
+    && fail "install.sh: retired WEB_CERT_DIR remains a current certificate role"
+grep -Eq '^DNS_WEB_(CERT|KEY)=' "$INSTALL" \
+    && fail "install.sh: dns.env still publishes the retired web certificate role"
+grep -Eq '^DNS_(CERT|KEY)=' "$INSTALL" \
+    && fail "install.sh: dns.env still publishes runtime DoT certificate keys"
 # full_install must provision the ONE lineage named for the base domain.
 grep -Eq '^[[:space:]]*install_cert "\$BASE_DOMAIN"' "$INSTALL" \
     || fail "install.sh: full_install does not provision the single scoped cert via install_cert \$BASE_DOMAIN"
 grep -Eq '^deploy_cert_roles\(\)' "$INSTALL" \
-    || fail "install.sh: no deploy_cert_roles() (copies the selected certificate to dot/web/console)"
+    || fail "install.sh: no deploy_cert_roles() (copies the selected certificate to dot/console)"
+deploy_roles="$(sed -n '/^deploy_cert_roles()/,/^}/p' "$INSTALL")"
+printf '%s' "$deploy_roles" | grep -Fq 'roles=(dot console)' \
+    || fail "install.sh: deploy_cert_roles does not enumerate exactly dot and console"
+printf '%s' "$deploy_roles" | grep -Eq '(^|[^[:alnum:]_])web([^[:alnum:]_]|$)' \
+    && fail "install.sh: deploy_cert_roles still publishes the retired web role"
 
 # ===== CERT_MODE=debug — self-signed WILDCARD + dismantles ACME machinery =====
 dbg="$(sed -n '/^issue_selfsigned_wildcard()/,/^}/p' "$INSTALL")"
@@ -177,12 +184,14 @@ grep -Fq 'systemctl stop xray' "$INSTALL" \
 grep -Eq 'open_port80|close_port80' "$INSTALL" \
     && fail "install.sh: open_port80/close_port80 must stay removed (no host firewall)"
 
-# ===== renew-hook.sh — deploys the ONE selected certificate to all THREE role dirs =====
+# ===== renew-hook.sh — deploys the ONE selected certificate to both current roles =====
 RENEW="$ROOT/scripts/renew-hook.sh"
 grep -Fq 'RENEWED_LINEAGE' "$RENEW" || fail "renew-hook.sh: does not use RENEWED_LINEAGE"
 grep -Fq 'DNS_BASE_DOMAIN' "$RENEW" || fail "renew-hook.sh: does not match the lineage to DNS_BASE_DOMAIN"
-grep -Fq 'roles=(dot web console)' "$RENEW" \
-    || fail "renew-hook.sh: does not deploy to all dot/web/console role dirs"
+grep -Fq 'roles=(dot console)' "$RENEW" \
+    || fail "renew-hook.sh: does not deploy to both dot/console role dirs"
+grep -Eq 'roles=\([^)]*web' "$RENEW" \
+    && fail "renew-hook.sh: still deploys the retired web certificate role"
 grep -Fq 'validate_cert_pair' "$RENEW" \
     || fail "renew-hook.sh: does not validate SANs and the certificate/private-key pair"
 grep -Fq 'mktemp -d "${dest}/generations/.new.XXXXXX"' "$RENEW" \
@@ -194,13 +203,19 @@ grep -Fq 'mihomo reloads the controller certificate files automatically' "$RENEW
 grep -Eq 'systemctl (restart|reload) mihomo' "$RENEW" \
     && fail "renew-hook.sh: must not restart/reload mihomo for controller certificate renewal"
 grep -iq 'xray' "$RENEW" && fail "renew-hook.sh: must not reference xray (mihomo is the data plane)"
+grep -Fxq 'UI_DIR=/opt/5gpn/ui' "$RENEW" \
+    || fail "renew-hook.sh: live profile destination is not /opt/5gpn/ui"
+grep -Fq 'bash "$IOSGEN" "$DOT_DOMAIN" "$gw" "$UI_DIR"' "$RENEW" \
+    || fail "renew-hook.sh: renewed profiles are not re-signed directly into UI_DIR"
+grep -Fq '/opt/5gpn/www' "$RENEW" \
+    && fail "renew-hook.sh: retired /opt/5gpn/www profile destination remains"
 
 # ===== gen-ios-profile.sh — unsigned profile fails CLOSED =====
 grep -Fq 'ALLOW_UNSIGNED_PROFILE' "$IOSGEN" \
     && fail "gen-ios-profile.sh: caller environment can still allow unsigned profiles"
 grep -Fq 'Refusing to serve an UNSIGNED .mobileconfig' "$IOSGEN" \
     || fail "gen-ios-profile.sh: refusing an unsigned profile must exit non-zero"
-grep -Fq 'stage_dir="$(mktemp -d "${WWW_DIR}/.ios-profile.XXXXXX")"' "$IOSGEN" \
+grep -Fq 'stage_dir="$(mktemp -d "${OUTPUT_DIR}/.ios-profile.XXXXXX")"' "$IOSGEN" \
     || fail "gen-ios-profile.sh: profiles are not staged privately on the destination filesystem"
 grep -Fq 'mv -Tf -- "$staged_profile" "$profile_path"' "$IOSGEN" \
     && grep -Fq 'mv -Tf -- "$staged_intercept_profile" "$intercept_profile_path"' "$IOSGEN" \
@@ -274,11 +289,12 @@ grep -Eq '^check_arch\(\)' "$INSTALL" \
 grep -Eq '^[[:space:]]*check_arch([[:space:]]*\|\| return 1)?$' "$INSTALL" \
     || fail "install.sh: check_arch is defined but never called in full_install"
 
-# ===== DNS_CACHE_SIZE — the RAM-derived cache size must reach dns.env =====
-grep -Eq 'DNS_CACHE_SIZE=\$\{CACHE_SIZE' "$INSTALL" \
-    || fail "install.sh: write_dns_env hardcodes DNS_CACHE_SIZE (must interpolate \${CACHE_SIZE} so the memory-derived size takes effect)"
+# ===== Runtime DNS knobs live only in dns.json =====
+dns_env_writer="$(sed -n '/^write_dns_env()/,/^}/p' "$INSTALL")"
+printf '%s' "$dns_env_writer" | grep -Eq '^DNS_(CACHE_SIZE|MAX_INFLIGHT|TTL_MIN|TTL_MAX|QUERY_TIMEOUT|UPSTREAMS|POLICY_RULES)=' \
+    && fail "install.sh: write_dns_env still duplicates runtime DNS document fields"
 grep -Fq 'CACHE_SIZE="$(cfg_get DNS_CACHE_SIZE)"' "$INSTALL" \
-    || fail "install.sh: CACHE_SIZE not loaded from persisted dns.env"
+    && fail "install.sh: retired DNS_CACHE_SIZE is still loaded as installer configuration"
 
 [ $rc -eq 0 ] && echo "intranet policy: PASS"
 exit $rc

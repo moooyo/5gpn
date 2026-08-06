@@ -87,7 +87,6 @@ fi
 # config. Fresh-install acceptance could not catch it by construction.
 render_seed() {
     sed -e "s/__CONSOLE_DOMAIN__/console.seedcheck.test/g" \
-        -e "s/__ZASH_DOMAIN__/zash.seedcheck.test/g" \
         -e "s/__GATEWAY_IP__/10.0.0.1/g" \
         -e "s/__CONTROLLER_SECRET__/seed-check-secret/g" \
         -e "s/^__MIHOMO_LISTENERS__$/  - {name: gateway, type: tunnel, listen: 10.0.0.1, port: 443, network: [tcp, udp], target: console.seedcheck.test:443}/" \
@@ -105,7 +104,6 @@ render_seed > "$seed_dir/mihomo/config.yaml"
     source "$root/install.sh"
     MIHOMO_DIR="$seed_dir/mihomo"
     CONSOLE_DOMAIN=console.seedcheck.test
-    ZASH_DOMAIN=zash.seedcheck.test
     BASE_DOMAIN=seedcheck.test
     GATEWAY_IP=10.0.0.1
     MIHOMO_LISTEN_IPS=10.0.0.1
@@ -188,11 +186,10 @@ done
 
 # A command the installer tells an operator to run must be runnable as printed.
 #
-# It was not: the hint printed the bare script path, and nothing in scripts/
-# carries the executable bit -- every one is 100644 in git, because the repo is
-# developed on Windows, and the release tarball is a plain `cp -r scripts`. So
-# the installer stopped the upgrade, named the fix, and the fix answered
-# "command not found".
+# Older bundles preserved the repository's 100644 script mode, so a bare path
+# answered "command not found". Current release packaging explicitly publishes
+# the script allowlist as 0755, while an interpreter-qualified hint remains
+# compatible with both old and current bundles.
 #
 # The rule is the general one rather than "must say bash": either the target is
 # executable in the tree, or the printed command invokes an interpreter.

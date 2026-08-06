@@ -108,23 +108,6 @@ CONSOLE_PID=$!
 ORIGIN_PID=$!
 
 awk -v cert="$RUNTIME/cert.pem" -v key="$RUNTIME/key.pem" -v listener="$GATEWAY_LISTENER" '
-  # The anchors are literal in the template; only the runtime block is
-  # substituted, and it must be, because an anchor with no block behind it is a
-  # config mihomo refuses to parse.
-  $0 == "__OVERLAY_RUNTIME_BLOCK__" {
-    print ""
-    print "runtime-overlay:"
-    print "  owner: 5gpn"
-    print "  control-socket: /run/mihomo/overlay-control.sock"
-    print "  generation-socket: /run/mihomo/overlay-generation.sock"
-    print "  control-peer-uid: 65534"
-    print "  control-peer-gid: 65534"
-    print "  control-socket-gid: 65534"
-    print "  generation-peer-uid: 65534"
-    print "  generation-peer-gid: 65534"
-    print "  generation-socket-gid: 65534"
-    next
-  }
   $0 == "__MIHOMO_LISTENERS__" {
     print listener
     next
@@ -142,23 +125,16 @@ awk -v cert="$RUNTIME/cert.pem" -v key="$RUNTIME/key.pem" -v listener="$GATEWAY_
   }
   $0 == "rules:" {
     print
-    # Above the egress anchor, so it has to exclude the processor inbound. The
-    # core refuses a bare allow rule here: a processor-originated connection
-    # would match it and reach its target without ever meeting the anchor,
-    # which is the egress control the overlay exists to apply. The seed panel
-    # rules carry the same exclusion for the same reason.
-    print "  - AND,((NOT,((IN-NAME,intercept-egress))),(DOMAIN,origin.example.test)),DIRECT"
+    # Keep the fixture route above the seed guards while excluding mihomo inner
+    # dials. The monolith has no processor inbound or overlay egress socket;
+    # extension traffic re-enters the ordinary rule path as INNER.
+    print "  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,origin.example.test)),DIRECT"
     next
   }
   {
     gsub(/__GATEWAY_IP__/, "10.0.0.1")
     gsub(/__CONSOLE_DOMAIN__/, "console.example.test")
     gsub(/__CONTROLLER_SECRET__/, "ci-controller-secret")
-    gsub(/__INTERCEPT_INBOUND_USERNAME__/, "ci-module-inbound-user")
-    gsub(/__INTERCEPT_INBOUND_PASSWORD__/, "ci-module-inbound-password-123456")
-    gsub(/__INTERCEPT_UPSTREAM_USERNAME__/, "ci-module-upstream-user")
-    gsub(/__INTERCEPT_UPSTREAM_PASSWORD__/, "ci-module-upstream-password-123456")
-    gsub(/127.0.0.1:9090/, "127.0.0.1:19090")
     gsub(/\/etc\/5gpn\/cert\/console\/current\/fullchain.pem/, cert)
     gsub(/\/etc\/5gpn\/cert\/console\/current\/privkey.pem/, key)
 	if ($0 ~ /TLS:.*ports: \[443, 8080, 8443, 5060\]/) {

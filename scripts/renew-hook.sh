@@ -1,7 +1,7 @@
 #!/bin/bash
 # 5gpn-renew-hook-id: deploy-v1
 # Let's Encrypt renewal deploy hook — publish the renewed 5gpn lineage to
-# /etc/5gpn/cert/{dot,web,console}. Cloudflare DNS-01 lineages must cover the apex
+# /etc/5gpn/cert/{dot,console}. Cloudflare DNS-01 lineages must cover the apex
 # and wildcard; HTTP-01 lineages must cover both derived service names.
 # The console role is mihomo TLS controller pair; the panel is served with it.
 # The pinned mihomo v1.19.28 build guarantees that mihomo reloads the controller certificate files automatically, so the renewed console copy becomes active without a mihomo restart or reload.
@@ -28,7 +28,7 @@ CERT_ROOT=/etc/5gpn/cert
 DNS_ENV=/etc/5gpn/dns.env
 LE_LIVE_ROOT=/etc/letsencrypt/live
 IOSGEN=/opt/5gpn/scripts/gen-ios-profile.sh
-WWW_DIR=/opt/5gpn/www
+UI_DIR=/opt/5gpn/ui
 RENEW_LOCK_FILE=/run/5gpn/cert-renew.lock
 CONFIG_ROOT_MARKER=.5gpn-owned
 CONFIG_ROOT_MARKER_VALUE=5gpn-config
@@ -36,6 +36,8 @@ CERT_ROOT_MARKER=.5gpn-cert-root-owned
 CERT_ROOT_MARKER_VALUE=5gpn-cert-root-v1
 CERT_ROLE_MARKER=.5gpn-cert-role-owned
 CERT_ROLE_VALUE_PREFIX=5gpn-cert-role-v1
+UI_OWNERSHIP_MARKER=.5gpn-zashboard-owned
+UI_OWNERSHIP_VALUE=5gpn-zashboard
 FIVEGPN_CERT_GROUP=fivegpn
 
 BASE_DOMAIN=""
@@ -260,10 +262,26 @@ cert_root_is_safe() {
             "$CERT_ROOT_MARKER") ;;
             .provenance) safe_plain_file "$entry" "$root_group" 640 || return 1 ;;
             .certbot-ownership) safe_plain_file "$entry" "$root_group" 640 || return 1 ;;
-            dot|web|console) [[ -d "$entry" && ! -L "$entry" ]] || return 1 ;;
+            dot|console) [[ -d "$entry" && ! -L "$entry" ]] || return 1 ;;
+            web)
+                # A web role may remain from the retired console origin. It is
+                # never refreshed, but accepting it must still prove the full
+                # owned role structure rather than treating any directory as
+                # harmless legacy state.
+                role_tree_is_safe web "$entry" || return 1 ;;
             *) return 1 ;;
         esac
     done < <(find "$CERT_ROOT" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+}
+
+ui_dir_is_safe() {
+    local root_group
+    root_group="$(root_gid)" || return 1
+    canonical_directory "$UI_DIR" \
+        && [[ "$(path_uid "$UI_DIR")" == "$EUID" \
+           && "$(path_gid "$UI_DIR")" == "$root_group" \
+           && "$(path_mode "$UI_DIR")" == 755 ]] \
+        && safe_marker "$UI_DIR" "$UI_OWNERSHIP_MARKER" "$UI_OWNERSHIP_VALUE"
 }
 
 generation_name_is_safe() {
@@ -474,7 +492,7 @@ scrub_interrupted_role_candidates() {
 publish_roles() {
     local cert="$1" key="$2" mode="$3" base="$4"
     local console="$5" dot="$6" r dest group expected_gid root_group generation final link_tmp old i j rollback_link
-    local -a roles=(dot web console) dests=() generations=() links=() old_targets=()
+    local -a roles=(dot console) dests=() generations=() links=() old_targets=()
 
     cert_root_is_safe \
         || { err "certificate publication root is unsafe: $CERT_ROOT"; return 1; }
@@ -581,7 +599,7 @@ deploy_lineage() {
         "$CERT_MODE" "$BASE_DOMAIN" "$CONSOLE_DOMAIN" "$DOT_DOMAIN" \
         || return 1
     _CERT_RENEWED=1
-    ok "${CERT_MODE} cert for ${BASE_DOMAIN} redeployed to dot/web/console"
+    ok "${CERT_MODE} cert for ${BASE_DOMAIN} redeployed to dot/console"
 }
 
 renew_hook_main() {
@@ -628,12 +646,12 @@ renew_hook_main() {
 
     cert_root_is_safe || return 1
     local role
-    for role in dot web console; do
+    for role in dot console; do
         scrub_interrupted_role_candidates "$role" "$CERT_ROOT/$role" || return 1
     done
 
     if [[ "${RENEW_HOOK_VALIDATE_ONLY:-0}" == 1 ]]; then
-        for role in dot web console; do
+        for role in dot console; do
             role_tree_is_safe "$role" "$CERT_ROOT/$role" || return 1
         done
         validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
@@ -655,7 +673,9 @@ renew_hook_main() {
     # failure must not fail renewal and the last-known-good profiles stay live.
     gw="$(cfg_get DNS_GATEWAY_IP)"
     if [[ "$_CERT_RENEWED" == 1 && -x "$IOSGEN" && -n "$DOT_DOMAIN" && -n "$gw" ]]; then
-        if bash "$IOSGEN" "$DOT_DOMAIN" "$gw" "$WWW_DIR"; then
+        if ! ui_dir_is_safe; then
+            warn "iOS profile re-sign skipped: the zashboard UI tree is missing, unsafe, or unowned: $UI_DIR"
+        elif bash "$IOSGEN" "$DOT_DOMAIN" "$gw" "$UI_DIR"; then
             ok "iOS profiles re-signed with the renewed cert."
         else
             warn "iOS profile re-sign failed (non-fatal); inspect the preceding generator error and any retained recovery path before rerunning 'install.sh ios'."

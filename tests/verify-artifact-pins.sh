@@ -63,16 +63,27 @@ check() {
 
 echo "Verifying pinned artifacts against their published releases."
 
-# Two artifacts, because there are two processes' worth of code left to fetch and
-# they both run inside one. The 5gpn-intercept sidecar that used to be checked
-# here is not unpinned, it is gone: the monolith absorbed it, so there is no
-# third binary to bind.
+# Mihomo and zashboard are the two product artifacts. The 5gpn-intercept sidecar
+# that used to be checked here is not unpinned, it is gone: the monolith absorbed
+# it. Gum is an optional installer dependency, but it is still downloaded and
+# installed as root, so every architecture the bootstrap accepts is bound here.
 
 check "mihomo ${MIHOMO_VERSION}" "$MIHOMO_SHA256" \
     "https://github.com/${MIHOMO_REPO}/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz"
 
 check "zashboard ${ZASH_VERSION}" "$ZASH_SHA256" \
     "https://github.com/${ZASH_REPO}/releases/download/${ZASH_VERSION}/dist.zip"
+
+check_gum_release() { # check_gum_release <release-arch> <expected-sha256>
+    local arch="$1" expected="$2"
+    check "gum ${GUM_VERSION} Linux ${arch}" "$expected" \
+        "https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/gum_${GUM_VERSION}_Linux_${arch}.tar.gz"
+}
+
+# Keep these release architecture names aligned with install_gum's uname map.
+check_gum_release x86_64 "$GUM_SHA256_X86_64"
+check_gum_release arm64 "$GUM_SHA256_ARM64"
+check_gum_release armv7 "$GUM_SHA256_ARMV7"
 
 if [[ "$FAIL" -ne 0 ]]; then
     echo "artifact pins: FAIL"

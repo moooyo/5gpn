@@ -111,6 +111,14 @@ if valid_stable_release_tag 9.8.7 \
 else
     fail "release tag grammar accepted a cross-channel or malformed tag"
 fi
+if ! beta_base_is_newer_than_stable \
+        9223372036854775808.0.0-beta.1 9223372036854775807.99.99 \
+   || beta_base_is_newer_than_stable \
+        9223372036854775807.0.0-beta.1 9223372036854775808.0.0; then
+    fail "beta anti-downgrade comparison overflows large SemVer components"
+else
+    pass "beta anti-downgrade comparison is arbitrary-precision"
+fi
 
 # Latest official is resolved once to a validated stable tag.
 latest_json="$TMP/latest.json"
@@ -142,7 +150,19 @@ got="$(resolve_release_tag beta "$beta_list" "$beta_metadata" 2>/dev/null)"
 [[ "$got" == 9.9.0-beta.2 ]] && pass "beta resolution selects and verifies the newest beta candidate" \
     || fail "beta resolution returned '$got'"
 
+printf '%s\n' \
+    '[{"tag_name":"9.9.0","draft":false,"prerelease":false},{"tag_name":"9.8.9-beta.4","draft":false,"prerelease":true}]' \
+    > "$beta_list"
+printf '{"tag_name":"9.8.9-beta.4","draft":false,"prerelease":true}\n' > "$beta_metadata"
+resolve_release_tag beta "$beta_list" "$beta_metadata" >/dev/null 2>&1
+[[ "$?" != 0 ]] && pass "beta resolution refuses a channel downgrade" \
+    || fail "beta resolution allowed an older prerelease to downgrade the latest official release"
+
+printf '%s\n' \
+    '[{"tag_name":"9.8.7","draft":false,"prerelease":false},{"tag_name":"9.9.0-beta.2","draft":false,"prerelease":true},{"tag_name":"9.9.0-beta.1","draft":false,"prerelease":true}]' \
+    > "$beta_list"
 printf '{"tag_name":"9.9.0-beta.2","draft":false,"prerelease":false}\n' > "$beta_metadata"
+
 resolve_release_tag beta "$beta_list" "$beta_metadata" >/dev/null 2>&1
 [[ "$?" != 0 ]] && pass "beta resolution refuses a non-prerelease candidate" \
     || fail "beta resolution accepted a non-prerelease candidate"

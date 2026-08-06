@@ -94,8 +94,9 @@ rules:
   #
   # There is no source restriction. The panel and the control API answer any
   # client that can reach this gateway on :443 and resolve the console name;
-  # /api/* still requires the bearer token, and /ui/ deliberately does not,
-  # because an unenrolled phone fetching its profile holds no token.
+  # /5gpn/* and ordinary controller routes require the bearer token, while
+  # /ui/* deliberately does not because an unenrolled phone fetching its
+  # profile holds no token.
   - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,__CONSOLE_DOMAIN__)),DIRECT
   # Fail closed for what the rule above excluded. A captured extension dialling
   # the console arrives as INNER, misses that rule, and stops here rather than

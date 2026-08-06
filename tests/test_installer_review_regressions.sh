@@ -17,13 +17,14 @@ PUBLIC_IP=203.0.113.9
 DNS_CHNROUTE=/tmp/attacker-chnroute
 CERT_MODE=debug
 TGBOT_TOKEN=123:secret
+WWW_DIR=/tmp/attacker-www
 clear_external_config_env
 if [[ -z "${BASE_DOMAIN+x}" && -z "${PUBLIC_IP+x}" && -z "${DNS_CHNROUTE+x}" \
    && -z "${CERT_MODE+x}" && -z "${TGBOT_TOKEN+x}" \
-   && "${WWW_DIR:-}" == "${BASE_DIR}/www" ]]; then
+   && -z "${WWW_DIR+x}" && "${UI_DIR:-}" == "/opt/5gpn/ui" ]]; then
     pass "caller configuration environment is discarded"
 else
-    fail "caller configuration survived or the fixed WWW_DIR was cleared"
+    fail "caller configuration survived or the fixed UI_DIR changed"
 fi
 
 main_fn="$(sed -n '/^main()/,/^}/p' "$INSTALL")"
@@ -305,7 +306,7 @@ if command -v openssl >/dev/null 2>&1; then
         if validate_cert_pair "$cert_tmp/http-extra-cert.pem" "$cert_tmp/http-extra-key.pem" example.com 0 production http-01; then
             fail "HTTP-01 certificate with an extra DNS SAN was accepted"
         else
-            pass "HTTP-01 reuse requires the exact three-service DNS SAN set"
+            pass "HTTP-01 reuse requires the exact two-service DNS SAN set"
         fi
     else
         fail "test OpenSSL cannot generate an HTTP-01 SAN certificate"
@@ -321,7 +322,7 @@ if command -v openssl >/dev/null 2>&1; then
     mkdir -p "$DEBUG_CERT_DIR/example.com" "$DNS_CERT_DIR"
     cp "$cert_tmp/cert.pem" "$DEBUG_CERT_DIR/example.com/fullchain.pem"
     cp "$cert_tmp/key.pem" "$DEBUG_CERT_DIR/example.com/privkey.pem"
-    touch "$DNS_CERT_DIR/web"
+    touch "$DNS_CERT_DIR/console"
     if deploy_cert_roles example.com "$DEBUG_CERT_DIR/example.com" debug >/dev/null 2>&1; then
         fail "certificate deployment succeeded despite an invalid later role path"
     elif find "$DNS_CERT_DIR/dot" -mindepth 1 \
@@ -361,7 +362,6 @@ rm -rf -- "$ownership_tmp"
 cert_state_tmp="$(mktemp -d)"
 DNS_CERT_DIR="$cert_state_tmp/cert"
 DOT_CERT_DIR="$DNS_CERT_DIR/dot"
-WEB_CERT_DIR="$DNS_CERT_DIR/web"
 CONSOLE_CERT_DIR="$DNS_CERT_DIR/console"
 DEBUG_CERT_DIR="$cert_state_tmp/debug-cert"
 ACME_DIR="$cert_state_tmp/acme"
@@ -430,6 +430,34 @@ else
 fi
 rm -rf -- "$cert_state_tmp"
 
+# The bridge release wrote certificate and profile paths that are no longer
+# current installer inputs. The upgrade reader may accept those exact legacy
+# keys, but the current writer drops them and uses fixed role/UI paths.
+retired_env="$(mktemp)"
+cat > "$retired_env" <<'RETIRED_ENV'
+DNS_BASE_DOMAIN=env.example
+DNS_CERT=/etc/5gpn/cert/dot/current/fullchain.pem
+DNS_KEY=/etc/5gpn/cert/dot/current/privkey.pem
+DNS_WEB_CERT=/etc/5gpn/cert/web/current/fullchain.pem
+DNS_WEB_KEY=/etc/5gpn/cert/web/current/privkey.pem
+WWW_DIR=/opt/5gpn/www
+RETIRED_ENV
+if validate_dns_env_schema "$retired_env" 2>/dev/null; then
+    pass "bridge certificate/profile keys are accepted only as legacy input"
+else
+    fail "bridge certificate/profile keys abort the upgrade before cleanup"
+fi
+
+# Legacy input is a closed allowlist; arbitrary keys still fail closed.
+unsupported_env="$(mktemp)"
+printf 'DNS_BASE_DOMAIN=env.example\nDNS_NOT_A_REAL_KEY=x\n' > "$unsupported_env"
+if validate_dns_env_schema "$unsupported_env" 2>/dev/null; then
+    fail "a genuinely unsupported dns.env key was accepted"
+else
+    pass "a genuinely unsupported dns.env key is still rejected"
+fi
+rm -f "$retired_env" "$unsupported_env"
+
 echo "----"
 if [[ "$FAIL" == 0 ]]; then
     echo "installer review regressions: PASS"
@@ -437,34 +465,3 @@ else
     echo "installer review regressions: FAIL"
     exit 1
 fi
-
-# An existing installation's dns.env still contains DNS_CHINA/DNS_TRUST, which
-# moved to upstreams.json, and DNS_CHINA_0X20, whose mechanism was removed
-# outright. validate_dns_env_schema must TOLERATE all three: it is run against
-# the persisted file on every upgrade, and rejecting an unknown key aborts the
-# install. This is exactly how the retired DNS_EGRESS_RESOLVER path behaves,
-# except these are dropped silently instead of demanding operator action,
-# because seed_upstreams_json carries the upstream values across first.
-retired_env="$(mktemp)"
-cat > "$retired_env" <<'RETIRED_ENV'
-DNS_BASE_DOMAIN=env.example
-DNS_CHINA=223.5.5.5
-DNS_TRUST=dns.google@8.8.8.8
-DNS_CHINA_0X20=1
-DNS_UPSTREAMS=/etc/5gpn/upstreams.json
-RETIRED_ENV
-if validate_dns_env_schema "$retired_env" 2>/dev/null; then
-    pass "a pre-upgrade dns.env carrying every retired key still validates"
-else
-    fail "a retired key aborts the upgrade instead of being tolerated"
-fi
-
-# Tolerated on read is not the same as writable: nothing may put them back.
-unsupported_env="$(mktemp)"
-printf 'DNS_BASE_DOMAIN=env.example\nDNS_NOT_A_REAL_KEY=x\n' > "$unsupported_env"
-if validate_dns_env_schema "$unsupported_env" 2>/dev/null; then
-    fail "an genuinely unsupported dns.env key was accepted"
-else
-    pass "a genuinely unsupported dns.env key is still rejected"
-fi
-rm -f "$retired_env" "$unsupported_env"

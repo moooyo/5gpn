@@ -4,6 +4,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL="$ROOT/install.sh"
 RELEASE="$ROOT/.github/workflows/release.yml"
+PIN_VERIFY="$ROOT/tests/verify-artifact-pins.sh"
 FAIL=0
 
 pass() { echo "ok: $*"; }
@@ -133,6 +134,38 @@ for pin in MIHOMO ZASH; do
         pass "$pin is pinned as a complete version/digest pair and verified before use"
     else
         fail "$digest is declared but never passed to verify_sha256"
+    fi
+done
+
+# Gum is optional only in the sense that a bootstrap failure falls back to plain
+# output. It is still a root-installed release artifact when available. Lock all
+# three uname-to-release mappings and require the network verifier to bind each
+# corresponding tarball to the digest read from install.sh.
+install_gum_fn="$(sed -n '/^install_gum()/,/^}/p' "$INSTALL")"
+if grep -Fq 'x86_64|amd64)  arch="x86_64"; exp="$GUM_SHA256_X86_64"' <<<"$install_gum_fn" \
+   && grep -Fq 'aarch64|arm64) arch="arm64";  exp="$GUM_SHA256_ARM64"' <<<"$install_gum_fn" \
+   && grep -Fq 'armv7l|armhf)  arch="armv7";  exp="$GUM_SHA256_ARMV7"' <<<"$install_gum_fn" \
+   && grep -Fq 'gum_${GUM_VERSION}_Linux_${arch}.tar.gz' <<<"$install_gum_fn"; then
+    pass "Gum uname aliases map to the three pinned release architectures"
+else
+    fail "Gum architecture mapping or release URL drifted from its pins"
+fi
+
+gum_verify_url='https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/gum_${GUM_VERSION}_Linux_${arch}.tar.gz'
+if grep -Fq "$gum_verify_url" "$PIN_VERIFY" \
+   && grep -Fq 'check_gum_release x86_64 "$GUM_SHA256_X86_64"' "$PIN_VERIFY" \
+   && grep -Fq 'check_gum_release arm64 "$GUM_SHA256_ARM64"' "$PIN_VERIFY" \
+   && grep -Fq 'check_gum_release armv7 "$GUM_SHA256_ARMV7"' "$PIN_VERIFY"; then
+    pass "network pin verification covers every Gum release architecture"
+else
+    fail "network pin verification omits or misroutes a Gum release architecture"
+fi
+
+for digest in GUM_SHA256_X86_64 GUM_SHA256_ARM64 GUM_SHA256_ARMV7; do
+    if [[ "${!digest-}" =~ ^[0-9a-f]{64}$ ]]; then
+        pass "$digest is a complete lowercase SHA-256"
+    else
+        fail "$digest is missing or malformed"
     fi
 done
 

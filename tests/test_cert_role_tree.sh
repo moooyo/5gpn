@@ -28,7 +28,7 @@ chmod 0640 "$CERT_ROOT/.provenance"
 
 named_group_gid() { id -g; }
 
-for role in dot web console; do
+for role in dot console; do
     generation="$CERT_ROOT/$role/generations/generation-20000101T000000Z-1-1"
     mkdir -p "$generation"
     chmod 0750 "$CERT_ROOT/$role" "$CERT_ROOT/$role/generations" "$generation"
@@ -45,6 +45,35 @@ done
 certificate_role_tree_safe || fail "canonical certificate role tree was rejected"
 pass "canonical certificate root and role generations validate"
 
+# The old web role remains valid migration evidence. Root validators must accept
+# and fully inspect it, while publication loops leave its key material alone.
+legacy_web="$CERT_ROOT/web"
+legacy_generation="$legacy_web/generations/generation-20000101T000000Z-1-1"
+mkdir -p "$legacy_generation"
+chmod 0750 "$legacy_web" "$legacy_web/generations" "$legacy_generation"
+chmod g-s "$legacy_web" "$legacy_web/generations" "$legacy_generation"
+printf '%s\n' "${CERT_ROLE_VALUE_PREFIX}:web" > "$legacy_web/$CERT_ROLE_MARKER"
+printf '%s\n' cert > "$legacy_generation/fullchain.pem"
+printf '%s\n' key > "$legacy_generation/privkey.pem"
+chmod 0644 "$legacy_web/$CERT_ROLE_MARKER"
+chmod 0640 "$legacy_generation/fullchain.pem" "$legacy_generation/privkey.pem"
+ln -s generations/generation-20000101T000000Z-1-1 "$legacy_web/current"
+certificate_role_tree_safe \
+    || fail "renewal root validation rejected a structurally valid legacy web role"
+ln -- "$legacy_generation/privkey.pem" "$TMP/legacy-key-hardlink"
+if certificate_role_tree_safe; then
+    fail "legacy web role bypassed structural private-key validation"
+fi
+rm -f -- "$TMP/legacy-key-hardlink"
+certificate_role_tree_safe \
+    || fail "legacy web role did not recover after restoring safe metadata"
+rm -f -- "$legacy_web/current"
+certificate_role_tree_safe \
+    || fail "legacy web role without a published generation blocked current renewal"
+ln -s generations/generation-20000101T000000Z-1-1 "$legacy_web/current"
+rm -rf -- "$legacy_web"
+pass "legacy web role is accepted only as a structurally safe optional retained tree"
+
 dot_key="$CERT_ROOT/dot/current/privkey.pem"
 ln -- "$dot_key" "$TMP/key-hardlink"
 if certificate_role_tree_safe; then
@@ -53,13 +82,13 @@ fi
 rm -f -- "$TMP/key-hardlink"
 pass "hardlinked role private key fails closed"
 
-mv -- "$CERT_ROOT/web" "$CERT_ROOT/web.saved"
-ln -s web.saved "$CERT_ROOT/web"
+mv -- "$CERT_ROOT/console" "$CERT_ROOT/console.saved"
+ln -s console.saved "$CERT_ROOT/console"
 if certificate_role_tree_safe; then
     fail "symlinked certificate role was accepted"
 fi
-rm -f -- "$CERT_ROOT/web"
-mv -- "$CERT_ROOT/web.saved" "$CERT_ROOT/web"
+rm -f -- "$CERT_ROOT/console"
+mv -- "$CERT_ROOT/console.saved" "$CERT_ROOT/console"
 pass "symlinked certificate role fails closed"
 
 original_file_uid="$(declare -f file_uid)"
@@ -113,7 +142,7 @@ pass "the installer preserves the node helper's lock and backup ownership contra
 
 
 
-# Every place that enumerates the certificate roles must name the same three.
+# Every current publication path must name the same two certificate roles.
 #
 # They were five lists in three files, and the rename kept leaving one behind:
 # first cert_root_contents_are_safe still allowed dot|web|zash, so a migrated
@@ -126,29 +155,50 @@ pass "the installer preserves the node helper's lock and backup ownership contra
 # roles. The second is the one that matters: it sweeps for the retired name
 # anywhere it could still be load-bearing, so a site nobody thought to add to
 # the list above cannot hide.
-for site in \
-    'cert_role_group' \
-    'deploy_cert_roles' \
-    'preflight_runtime_publication_paths'; do
+for site in 'deploy_cert_roles'; do
     body="$(sed -n "/^${site}()/,/^}/p" "$ROOT/install.sh")"
     [[ -n "$body" ]] || fail "$site is missing"
     printf '%s' "$body" | grep -Fq 'console' \
         || fail "$site does not know the console certificate role"
+    printf '%s' "$body" | grep -Fq 'dot' \
+        || fail "$site does not know the DoT certificate role"
+    printf '%s' "$body" | grep -Eq '(^|[^[:alnum:]_])web([^[:alnum:]_]|$)' \
+        && fail "$site still names the retired web certificate role"
     printf '%s' "$body" | grep -Fq 'zash' \
         && fail "$site still names the retired zash certificate role"
 done
 legacy_gate="$(sed -n '/^cert_root_contents_are_safe()/,/^}/p' "$ROOT/install.sh")"
+printf '%s\n' "$legacy_gate" \
+    | grep -Eq 'web[^)]*\).*cert_role_tree_is_safe_for_recursive_metadata "\$entry"' \
+    || fail "installer root allowlist does not structurally validate legacy web"
 printf '%s' "$legacy_gate" | grep -Fq 'allow_legacy_zash' \
     || fail "certificate root validation has no explicit legacy-zash migration gate"
 printf '%s' "$legacy_gate" | grep -Fq 'cert_role_tree_is_safe_for_recursive_metadata "$entry" zash' \
     || fail "legacy-zash migration gate does not structurally validate the legacy role"
+legacy_web_normalizer="$(sed -n '/^normalize_legacy_web_cert_role()/,/^}/p' "$ROOT/install.sh")"
+printf '%s' "$legacy_web_normalizer" | grep -Fq 'normalize_cert_role_group "$web" root web' \
+    || fail "legacy web role is not normalized away from the retired gpn-dns group"
+ensure_root="$(sed -n '/^ensure_dns_cert_root()/,/^}/p' "$ROOT/install.sh")"
+printf '%s' "$ensure_root" | grep -Fq 'normalize_legacy_web_cert_role' \
+    || fail "certificate-root publication does not invoke legacy web normalization"
+pass "legacy web role is sealed root-only before retired identities are removed"
 body="$(sed -n '/^publish_roles()/,/^}/p' "$ROOT/scripts/renew-hook.sh")"
 [[ -n "$body" ]] || fail "publish_roles is missing from renew-hook.sh"
 printf '%s' "$body" | grep -Fq 'console' \
     || fail "publish_roles does not know the console certificate role"
+printf '%s' "$body" | grep -Fq 'dot' \
+    || fail "publish_roles does not know the DoT certificate role"
+printf '%s' "$body" | grep -Eq '(^|[^[:alnum:]_])web([^[:alnum:]_]|$)' \
+    && fail "publish_roles still names the retired web certificate role"
 printf '%s' "$body" | grep -Fq 'zash' \
     && fail "publish_roles still names the retired zash certificate role"
-pass "every certificate-role enumeration names console and not zash"
+pass "current certificate publication enumerates only dot and console"
+
+body="$(sed -n '/^role_copies_match_live()/,/^}/p' "$ROOT/scripts/cert-renew.sh")"
+[[ -n "$body" ]] || fail "role_copies_match_live is missing from cert-renew.sh"
+printf '%s' "$body" | grep -Fq 'for role in dot console' \
+    || fail "renewal freshness checks are not limited to dot and console"
+pass "renewal compares only current dot and console copies"
 
 # The sweep. A role name reaches the filesystem as a cert path or as a member of
 # a roles=() array; those two shapes are what must never say zash again.

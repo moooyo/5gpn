@@ -8,11 +8,11 @@ nocheck() { if grep -qE "$2" "$root/$1"; then echo "FAIL: $3 ($1 =~ $2)"; FAIL=1
 
 # Task 1: mihomo binary install
 check install.sh 'install_mihomo\(\)' 'install_mihomo function exists'
-# The data plane no longer comes from upstream: upstream does not implement the
-# RUNTIME-OVERLAY anchors, so an upstream core makes the overlay a mechanism that
-# can never switch on. What has to stay true is that the source is pinned and
-# auditable — a named repository, an exact version, and a digest — rather than
-# assembled from anything an operator or an environment can influence.
+# The data plane no longer comes from upstream: the maintained fork contains the
+# monolith DNS, interception, and controller integration. What has to stay true
+# is that the source is pinned and auditable — a named repository, an exact
+# version, and a digest — rather than assembled from anything an operator or an
+# environment can influence.
 check install.sh '^MIHOMO_REPO="[A-Za-z0-9._-]+/[A-Za-z0-9._-]+"$' 'mihomo source repository is a pinned literal'
 check install.sh 'github.com/\$\{MIHOMO_REPO\}/releases/download' 'downloads mihomo from the pinned repository'
 check install.sh '^MIHOMO_SHA256="[0-9a-f]{64}"$' 'mihomo artifact is pinned by digest'
@@ -31,10 +31,10 @@ check install.sh '5gpn-mihomo\.service' 'install_units installs 5gpn-mihomo.serv
 T=etc/mihomo/config.yaml.tmpl
 check "$T" '__MIHOMO_LISTENERS__'                      'dynamic local-listener placeholder'
 SNI_REGRESSION=tests/mihomo-sniff-cache-regression.sh
-check "$SNI_REGRESSION" '__INTERCEPT_INBOUND_USERNAME__'  'sniff-cache fixture renders interception inbound username'
-check "$SNI_REGRESSION" '__INTERCEPT_INBOUND_PASSWORD__'  'sniff-cache fixture renders interception inbound password'
-check "$SNI_REGRESSION" '__INTERCEPT_UPSTREAM_USERNAME__' 'sniff-cache fixture renders interception upstream username'
-check "$SNI_REGRESSION" '__INTERCEPT_UPSTREAM_PASSWORD__' 'sniff-cache fixture renders interception upstream password'
+check "$SNI_REGRESSION" 'IN-TYPE,INNER'                  'sniff-cache fixture excludes monolith inner dials'
+nocheck "$SNI_REGRESSION" 'runtime-overlay:|__OVERLAY_RUNTIME_BLOCK__' 'sniff-cache fixture has no retired runtime overlay'
+nocheck "$SNI_REGRESSION" 'IN-NAME,intercept-egress'     'sniff-cache fixture has no retired egress inbound'
+nocheck "$SNI_REGRESSION" '__INTERCEPT_(INBOUND|UPSTREAM)_(USERNAME|PASSWORD)__' 'sniff-cache fixture has no sidecar credentials'
 check "$T" 'external-controller: ""'                   'plaintext controller disabled in seed'
 check "$T" 'certificate: /etc/5gpn/cert/console/current/fullchain\.pem' 'controller TLS certificate key pinned'
 check "$T" 'private-key: /etc/5gpn/cert/console/current/privkey\.pem'   'controller TLS private-key key pinned'

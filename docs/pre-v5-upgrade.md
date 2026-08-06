@@ -1,29 +1,31 @@
-# Pre-v5 rebuild and release-channel upgrades
+# Pre-v5 rebuild and release-channel switches
 
 This runbook covers the exceptional upgrade paths that do not belong in the
 project overview. Read it completely before changing a deployed gateway. The
 commands below intentionally fail closed and assume that the operator has
-checksum-verified artifacts from the exact target release.
+checksum-verified artifacts from the exact release named by each procedure.
 
 > [!WARNING]
 > A pre-v5 interception document has no lossless automatic migration. Do not
 > delete it, edit only its version number, or let a new installer generate
 > replacement SOCKS credentials while preserving the old mihomo configuration.
 
-## Stable-to-beta upgrade
+## Explicit beta channel switch
 
-The normal stable-to-beta path preserves the core deployment:
+`--beta` is an explicit channel switch, not permission to install an older
+build. The selector requires the beta base version to be newer than the latest
+official release; if the published beta line is older or absent, it fails
+instead of downgrading or falling back:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash -s -- --beta
 ```
 
-The installer preserves a valid operator-owned mihomo configuration byte for
-byte and checks the interception boundary structurally. If an inactive legacy
-configuration lacks the authenticated `intercept-egress` listener,
-`MODULE-INTERCEPT` node, or fail-closed rule, the core DNS, Console, Telegram,
-and existing mihomo data plane may be upgraded while Extensions are reported as
-unavailable. The installer never silently patches operator YAML.
+When a newer beta exists, the selected release's complete verified bundle
+preserves a valid operator-owned mihomo configuration byte for byte. A legacy
+multi-process deployment must complete the frozen bridge rebuild below before
+attempting the current channel switch; the installer never silently patches
+operator YAML.
 
 Use the reset path only when replacing the complete mihomo configuration is
 acceptable:
@@ -39,9 +41,11 @@ Custom proxies, providers, groups, and rules are not merged and must be restored
 manually from the backup. Normal install, reinstall, and `configure` operations
 never select this reset path.
 
-A successful beta upgrade does not promise an in-place downgrade to the
-official channel. Keep a pre-upgrade system snapshot when reversal is required;
-the installer rollback covers failures before commit, not a later downgrade.
+A successful beta channel switch does not promise an in-place switch back to the
+official channel. Keep a pre-switch system snapshot when reversal is required;
+the installer leaves the host untouched only when it fails before publication
+and reports a partial installation if publication has begun. It does not provide
+an automatic rollback or a later channel downgrade.
 
 Repository documentation describes the current source tree. A quick installer
 can deploy a behavior only after it is included in a published tag, so verify
@@ -68,11 +72,64 @@ is the required v5 routing baseline.
 Use `jq` to project only installer-owned infrastructure from v4 into a disabled,
 empty v5 document. This preserves both authenticated SOCKS credential pairs,
 the listener, TLS paths, upstream proxy, and protocol choices while clearing
-extension snapshots and execution order. All three `NEW_*` paths must come from
-the same exact GitHub release. `NEW_5GPN_INTERCEPT` and `NEW_5GPN_DNS` are
-standalone release assets verified against that release's `checksums.txt`;
-`NEW_INSTALL_SH` is extracted from the `5gpn-installer.tar.gz` whose digest is
-verified by the same file.
+extension snapshots and execution order.
+
+### Frozen v5 bridge artifacts
+
+This rebuild deliberately uses the frozen `0.0.24-beta.3` bridge, not the
+current 5gpn release. It is the final published release, by publication time,
+that contains the standalone DNS and interception validators together with a
+version-matched installer bundle. It is pinned even though it is a prerelease:
+it follows `0.0.25` in history and contains the installer lock fixes verified by
+that release's end-to-end installation. The bridge is a one-time validation and
+configuration-rebuild tool; it is not the runtime that the gateway should keep.
+
+Do not substitute `latest`, a newer installer, or assets from different tags.
+The bridge installer exports the historical `DNS_VERSION_DEFAULT` and
+`valid_dns_release_tag` contract used by the recovery block. Current installers
+use a different contract and no longer publish either standalone binary.
+
+| Asset | SHA-256 | Exact download URL |
+| --- | --- | --- |
+| `checksums.txt` | `0a68844cc241c253a59e1d7b40fd164b3c3d0d62b5f6b61b3f9f91f0696c2050` | `https://github.com/moooyo/5gpn/releases/download/0.0.24-beta.3/checksums.txt` |
+| `5gpn-dns-linux-amd64` | `c43996b79db30a6bad1fb76aa3308951359a0202403dbaa015b70926c2354886` | `https://github.com/moooyo/5gpn/releases/download/0.0.24-beta.3/5gpn-dns-linux-amd64` |
+| `5gpn-intercept-linux-amd64` | `6b9a7c9d38ae0290eddbb03d5d5d65874ce2fd6573d2cdb050cf5b763c5f4467` | `https://github.com/moooyo/5gpn/releases/download/0.0.24-beta.3/5gpn-intercept-linux-amd64` |
+| `5gpn-installer.tar.gz` | `0bb15813887430be45622264cef20c1d514a2ed227d1c66dab42943710e892c6` | `https://github.com/moooyo/5gpn/releases/download/0.0.24-beta.3/5gpn-installer.tar.gz` |
+
+Download into a newly created root-only directory, verify the fixed digest of
+`checksums.txt` and all three required assets, and extract only `install.sh` to
+a new regular file. The release's `checksums.txt` contains the same three asset
+digests; pinning its own digest prevents it from silently redefining them.
+
+```bash
+set -euo pipefail
+umask 077
+BRIDGE_RELEASE='0.0.24-beta.3'
+BRIDGE_BASE_URL="https://github.com/moooyo/5gpn/releases/download/${BRIDGE_RELEASE}"
+BRIDGE_DIR="$(mktemp -d /root/5gpn-v5-bridge.XXXXXX)"
+chmod 0700 "$BRIDGE_DIR"
+cd "$BRIDGE_DIR"
+
+for asset in checksums.txt 5gpn-dns-linux-amd64 \
+  5gpn-intercept-linux-amd64 5gpn-installer.tar.gz; do
+  curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+    --output "$asset" "${BRIDGE_BASE_URL}/${asset}"
+done
+
+cat > expected.sha256 <<'EOF_CHECKSUMS'
+0a68844cc241c253a59e1d7b40fd164b3c3d0d62b5f6b61b3f9f91f0696c2050  checksums.txt
+c43996b79db30a6bad1fb76aa3308951359a0202403dbaa015b70926c2354886  5gpn-dns-linux-amd64
+6b9a7c9d38ae0290eddbb03d5d5d65874ce2fd6573d2cdb050cf5b763c5f4467  5gpn-intercept-linux-amd64
+0bb15813887430be45622264cef20c1d514a2ed227d1c66dab42943710e892c6  5gpn-installer.tar.gz
+EOF_CHECKSUMS
+sha256sum --check expected.sha256
+
+tar -xOzf 5gpn-installer.tar.gz ./install.sh > bridge-install.sh
+chmod 0700 5gpn-dns-linux-amd64 5gpn-intercept-linux-amd64 bridge-install.sh
+printf 'NEW_5GPN_DNS=%q\n' "$BRIDGE_DIR/5gpn-dns-linux-amd64"
+printf 'NEW_5GPN_INTERCEPT=%q\n' "$BRIDGE_DIR/5gpn-intercept-linux-amd64"
+printf 'NEW_INSTALL_SH=%q\n' "$BRIDGE_DIR/bridge-install.sh"
+```
 
 Enter a root shell, place the three verified artifacts in root-owned,
 single-link paths that are not group- or world-writable, assign the `NEW_*`
@@ -83,9 +140,10 @@ all target artifacts pass local preflight checks.
 
 ```bash
 set -euo pipefail
-: "${NEW_5GPN_INTERCEPT:?set this to the verified current sidecar binary}"
-: "${NEW_5GPN_DNS:?set this to the verified current DNS binary}"
-: "${NEW_INSTALL_SH:?set this to the verified current installer}"
+readonly BRIDGE_RELEASE='0.0.24-beta.3'
+: "${NEW_5GPN_INTERCEPT:?set this to the verified frozen bridge sidecar binary}"
+: "${NEW_5GPN_DNS:?set this to the verified frozen bridge DNS binary}"
+: "${NEW_INSTALL_SH:?set this to the verified frozen bridge installer}"
 
 if (( EUID != 0 )); then
   echo 'save this block in a root-only file, set the three NEW_* paths inside it, and run it as root' >&2
@@ -128,9 +186,13 @@ source "$NEW_INSTALL_SH"
 declare -F validate_dns_env_schema >/dev/null
 declare -F acquire_install_lock >/dev/null
 declare -F release_install_lock >/dev/null
-declare -F valid_release_tag >/dev/null
-valid_release_tag "$RELEASE_TAG" || {
-  echo 'NEW_INSTALL_SH is not stamped to an exact official or beta release tag' >&2
+declare -F valid_dns_release_tag >/dev/null
+[[ "${DNS_VERSION_DEFAULT:-}" == "$BRIDGE_RELEASE" ]] || {
+  echo 'NEW_INSTALL_SH is not the frozen bridge installer' >&2
+  exit 1
+}
+valid_dns_release_tag "$DNS_VERSION_DEFAULT" || {
+  echo 'NEW_INSTALL_SH is not stamped to a valid bridge release tag' >&2
   exit 1
 }
 binary_reports_target_version() {
@@ -138,18 +200,18 @@ binary_reports_target_version() {
   output="$(mktemp /root/.5gpn-target-version.XXXXXX)" || return 1
   chmod 0600 "$output" || { rm -f -- "$output"; return 1; }
   if "$binary" --version > "$output" 2>/dev/null \
-     && printf '%s\n' "$RELEASE_TAG" | cmp -s - "$output"; then
+     && printf '%s\n' "$BRIDGE_RELEASE" | cmp -s - "$output"; then
     result=0
   fi
   rm -f -- "$output" || return 1
   return "$result"
 }
 binary_reports_target_version "$NEW_5GPN_INTERCEPT" || {
-  echo 'NEW_5GPN_INTERCEPT does not report the installer release tag exactly' >&2
+  echo 'NEW_5GPN_INTERCEPT does not report the frozen bridge release exactly' >&2
   exit 1
 }
 binary_reports_target_version "$NEW_5GPN_DNS" || {
-  echo 'NEW_5GPN_DNS does not report the installer release tag exactly' >&2
+  echo 'NEW_5GPN_DNS does not report the frozen bridge release exactly' >&2
   exit 1
 }
 
@@ -396,9 +458,20 @@ printf 'Recovery snapshots retained in %s\n' "$backup_dir"
 
 The old master-disable and `ready` routing check are mandatory. An empty v5
 document cannot claim or remove rules owned by the old snapshot. The synced
-dual-file transaction removes the one retired environment key. After it
-completes, run the current installer and explicitly re-import and review every
-extension.
+dual-file transaction removes the one retired environment key.
+
+### Run the current installer only after the bridge commits
+
+Do not start the current quick installer until the recovery block has printed
+the retained snapshot path and exited successfully. Then resolve and run the
+current stable release normally:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash
+```
+
+Explicitly re-import and review every extension after the current installer
+finishes. The frozen bridge binaries are not installed as the final runtime.
 
 The `0.0.13` stable installer predates channel delegation, so use the remote
 quick installer after completing the rebuild. Later installed releases may

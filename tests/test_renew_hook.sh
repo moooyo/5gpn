@@ -18,8 +18,11 @@ PATH="$TEST_PATH"
 # The production mapping is held statically; temporary fixtures use the current
 # developer group so an unprivileged test runner can exercise atomic metadata.
 grep -Fq 'dot|console) group="$FIVEGPN_CERT_GROUP"' "$HOOK" \
-    && grep -Fq 'web)         group=root' "$HOOK" \
-    || fail "certificate roles do not map to fivegpn/root"
+    || fail "current certificate roles do not map to fivegpn"
+grep -Fxq 'UI_DIR=/opt/5gpn/ui' "$HOOK" \
+    || fail "renew hook profile destination is not the live UI directory"
+grep -Eq '^WWW_DIR=/opt/5gpn/www$' "$HOOK" \
+    && fail "renew hook still defines the retired profile directory"
 role_group() { id -gn; }
 # Behaviour fixtures emulate the scoped helper, which already owns the shared
 # certificate lock before invoking the hook.
@@ -37,10 +40,30 @@ acquire_deploy_lock() { return 0; }
 CERT_ROOT="$TMP/cert"
 DNS_ENV="$TMP/dns.env"
 LE_LIVE_ROOT="$TMP/live"
-IOSGEN="$TMP/no-ios-generator"
-WWW_DIR="$TMP/www"
+IOSGEN="$TMP/gen-ios-profile.sh"
+UI_DIR="$TMP/ui"
+# A sentinel keeps a partially updated hook inside the fixture and lets the
+# invocation assertion prove that this retired destination was not selected.
+WWW_DIR="$TMP/retired-www"
+PROFILE_LOG="$TMP/profile.log"
 SYSTEMCTL_LOG="$TMP/systemctl.log"
-mkdir -p "$LE_LIVE_ROOT"
+mkdir -p "$LE_LIVE_ROOT" "$UI_DIR"
+printf '%s\n' "$UI_OWNERSHIP_VALUE" > "$UI_DIR/$UI_OWNERSHIP_MARKER"
+chmod 0755 "$UI_DIR"
+chmod 0644 "$UI_DIR/$UI_OWNERSHIP_MARKER"
+cat > "$IOSGEN" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$PROFILE_LOG"
+mkdir -p -- "$3"
+for name in ios-dot.mobileconfig ios-intercept-ca.mobileconfig; do
+    candidate="$(mktemp "$3/.profile.XXXXXX")"
+    printf 'renewed %s\n' "$name" > "$candidate"
+    mv -f -- "$candidate" "$3/$name"
+done
+EOF
+chmod +x "$IOSGEN"
+export PROFILE_LOG
 chmod 0755 "$TMP"
 printf '%s\n' "$CONFIG_ROOT_MARKER_VALUE" > "$TMP/$CONFIG_ROOT_MARKER"
 chmod 0644 "$TMP/$CONFIG_ROOT_MARKER"
@@ -52,7 +75,7 @@ printf '%s\n' 'mode=cloudflare' 'base=example.test' 'certbot_lineage=owned' \
     > "$CERT_ROOT/.provenance"
 chmod 0644 "$CERT_ROOT/$CERT_ROOT_MARKER"
 chmod 0640 "$CERT_ROOT/.provenance"
-for role in dot web console; do
+for role in dot console; do
     mkdir -p "$CERT_ROOT/$role/generations"
     chmod 0750 "$CERT_ROOT/$role" "$CERT_ROOT/$role/generations"
     chmod g-s "$CERT_ROOT/$role" "$CERT_ROOT/$role/generations"
@@ -93,13 +116,12 @@ mode_of() {
 role_checksums() {
     cksum \
         "$CERT_ROOT/dot/current/fullchain.pem" "$CERT_ROOT/dot/current/privkey.pem" \
-        "$CERT_ROOT/web/current/fullchain.pem" "$CERT_ROOT/web/current/privkey.pem" \
         "$CERT_ROOT/console/current/fullchain.pem" "$CERT_ROOT/console/current/privkey.pem"
 }
 
 roles_unpublished() {
     local role
-    for role in dot web console; do
+    for role in dot console; do
         [[ ! -e "$CERT_ROOT/$role/current" && ! -L "$CERT_ROOT/$role/current" ]] || return 1
         ! find "$CERT_ROOT/$role/generations" -mindepth 1 -print -quit | grep -q . || return 1
     done
@@ -157,9 +179,10 @@ pass "debug, aliases, and invalid production deploy-hook modes fail closed"
 # published with final permissions. Reload happens only after publication.
 write_env cloudflare
 : > "$SYSTEMCTL_LOG"
+: > "$PROFILE_LOG"
 RENEWED_LINEAGE="$LE_LIVE_ROOT/example.test/"
 renew_hook_main >/dev/null
-for role in dot web console; do
+for role in dot console; do
     [[ -L "$CERT_ROOT/$role/current" ]] || fail "$role current generation is not an atomic symlink"
     cert="$CERT_ROOT/$role/current/fullchain.pem"
     key="$CERT_ROOT/$role/current/privkey.pem"
@@ -170,13 +193,45 @@ for role in dot web console; do
         console.example.test dot.example.test >/dev/null \
         || fail "$role certificate pair failed post-publication validation"
 done
+[[ "$(cat "$PROFILE_LOG")" == $'dot.example.test\t192.0.2.10\t'"$UI_DIR" ]] \
+    || fail "renew hook did not re-sign profiles directly into the live UI directory"
+for profile in ios-dot.mobileconfig ios-intercept-ca.mobileconfig; do
+    [[ -s "$UI_DIR/$profile" ]] || fail "renew hook did not publish $profile into UI_DIR"
+done
+[[ ! -e "$WWW_DIR/ios-dot.mobileconfig" \
+   && ! -e "$WWW_DIR/ios-intercept-ca.mobileconfig" ]] \
+    || fail "renew hook published a profile into the retired directory"
+if find "$UI_DIR" -mindepth 1 -name '.profile.*' -print | grep -q .; then
+    fail "renew hook left a profile publication candidate in UI_DIR"
+fi
 [[ ! -s "$SYSTEMCTL_LOG" ]] \
     || fail "valid certificate publication incorrectly used SIGHUP/systemctl"
 if find "$CERT_ROOT" \( -name '.new.*' -o -name '.current.*' \) \
     | grep -q .; then
     fail "staging files were left behind after successful publication"
 fi
-pass "valid Cloudflare pair is staged/published without misusing SIGHUP"
+pass "valid Cloudflare pair and renewed profiles publish into their live paths"
+
+# A structurally valid web role may remain from an older installation. It is
+# accepted as retained migration evidence, but is not one of the renewed roles.
+legacy_generation="$CERT_ROOT/web/generations/generation-20000101T000000Z-1-1"
+mkdir -p "$legacy_generation"
+chmod 0750 "$CERT_ROOT/web" "$CERT_ROOT/web/generations" "$legacy_generation"
+chmod g-s "$CERT_ROOT/web" "$CERT_ROOT/web/generations" "$legacy_generation"
+printf '%s\n' "${CERT_ROLE_VALUE_PREFIX}:web" > "$CERT_ROOT/web/$CERT_ROLE_MARKER"
+cp "$CERT_ROOT/dot/current/fullchain.pem" "$legacy_generation/fullchain.pem"
+cp "$CERT_ROOT/dot/current/privkey.pem" "$legacy_generation/privkey.pem"
+chmod 0644 "$CERT_ROOT/web/$CERT_ROLE_MARKER"
+chmod 0640 "$legacy_generation/fullchain.pem" "$legacy_generation/privkey.pem"
+ln -s generations/generation-20000101T000000Z-1-1 "$CERT_ROOT/web/current"
+legacy_target="$(readlink -- "$CERT_ROOT/web/current")"
+legacy_checksum="$(cksum "$legacy_generation/fullchain.pem" "$legacy_generation/privkey.pem")"
+renew_hook_main >/dev/null
+[[ "$(readlink -- "$CERT_ROOT/web/current")" == "$legacy_target" \
+   && "$(cksum "$legacy_generation/fullchain.pem" "$legacy_generation/privkey.pem")" == "$legacy_checksum" ]] \
+    || fail "renew hook refreshed or replaced retained legacy web material"
+rm -rf -- "$CERT_ROOT/web"
+pass "renew hook validates but does not refresh retained legacy web material"
 
 # SIGKILL cannot run traps. Root-owned, structurally valid unpublished
 # candidates from an interrupted prior run are scrubbed under the lock before
@@ -239,7 +294,7 @@ before="$(role_checksums)"
 # root ownership. Simulate that ownership drift through the metadata helper and
 # require the hook to reject it before touching any live role.
 original_path_uid="$(declare -f path_uid)"
-UNSAFE_OWNER_PATH="$CERT_ROOT/web/$CERT_ROLE_MARKER"
+UNSAFE_OWNER_PATH="$CERT_ROOT/console/$CERT_ROLE_MARKER"
 path_uid() {
     if [[ "$1" == "$UNSAFE_OWNER_PATH" ]]; then
         printf '%s\n' "$((EUID + 1))"
@@ -257,13 +312,13 @@ pass "service-owned role marker fails closed before publication"
 
 # Neither the certificate root nor a role may be replaced with a symlink, even
 # when the link resolves back to a byte-for-byte valid owned tree.
-mv -- "$CERT_ROOT/web" "$CERT_ROOT/web.saved"
-ln -s web.saved "$CERT_ROOT/web"
+mv -- "$CERT_ROOT/console" "$CERT_ROOT/console.saved"
+ln -s console.saved "$CERT_ROOT/console"
 if renew_hook_main >/dev/null 2>&1; then
     fail "symlinked certificate role was accepted"
 fi
-rm -f -- "$CERT_ROOT/web"
-mv -- "$CERT_ROOT/web.saved" "$CERT_ROOT/web"
+rm -f -- "$CERT_ROOT/console"
+mv -- "$CERT_ROOT/console.saved" "$CERT_ROOT/console"
 mv -- "$CERT_ROOT" "${CERT_ROOT}.saved"
 ln -s "$(basename -- "$CERT_ROOT").saved" "$CERT_ROOT"
 if renew_hook_main >/dev/null 2>&1; then
@@ -313,21 +368,21 @@ after="$(role_checksums)"
     || fail "extra Cloudflare DNS SAN changed roles or reloaded the daemon"
 pass "Cloudflare certificate with an extra DNS SAN fails before publication"
 
-# HTTP-01 uses a non-wildcard lineage containing exactly the three
+# HTTP-01 uses a non-wildcard lineage containing exactly the two
 # derived service DNS names. Non-DNS SANs do not change that identity set.
 write_env http-01
 generate_cert "$LE_LIVE_ROOT/example.test" \
     'DNS:console.example.test,DNS:dot.example.test,IP:192.0.2.10'
 : > "$SYSTEMCTL_LOG"
 renew_hook_main >/dev/null
-for role in dot web console; do
+for role in dot console; do
     validate_cert_pair "$CERT_ROOT/$role/current/fullchain.pem" "$CERT_ROOT/$role/current/privkey.pem" \
         http-01 example.test console.example.test dot.example.test >/dev/null \
         || fail "$role HTTP-01 certificate failed post-publication validation"
 done
 [[ ! -s "$SYSTEMCTL_LOG" ]] \
     || fail "valid HTTP-01 publication incorrectly used SIGHUP/systemctl"
-pass "HTTP-01 publishes a certificate covering all three service SANs"
+pass "HTTP-01 publishes a certificate covering both service SANs"
 
 # An extra HTTP-01 DNS identity must fail before any live role is changed.
 write_env http-01
