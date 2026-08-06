@@ -231,9 +231,10 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   never inside the installed-plugin page. Source aliases are local display text,
   not publisher identity. Do not fabricate popularity, author, health, or update
   metadata that the authenticated marketplace API does not provide. An entry is
-  current only when the gateway proves the installed version, manifest digest,
-  and every external-script URL/digest match the catalog; version equality or
-  `installed_version` truthiness alone is never an update verdict.
+  current when the gateway proves the installed version and manifest digest
+  match the catalog; version equality or `installed_version` truthiness alone
+  is never an update verdict. External script resources are live dependencies
+  and are deliberately not audited against catalog digests.
 - Logs remain virtualized, polling is single-flight/cancellable, and mobile
   uses card rows plus a drawer sidebar. `ds/LogSurface` owns the shared log
   chrome and the one height policy; `ds/LiveToggle` is the one pause control

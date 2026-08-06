@@ -197,8 +197,9 @@ contract and explicit HTTP/3 refusal on 2026-08-05.**
   snapshot.
   Marketplace data is discovery metadata, never an execution or trust root.
   Selecting an entry refetches one manifest through the native parser, verifies
-  the listed manifest/script digests and derived capability summary, and stores
-  the normal disabled immutable snapshot. There is no automatic install,
+  the listed manifest digest and derived capability summary, and stores the
+  normal disabled immutable snapshot. External script resources are fetched
+  live without comparing catalog resource digests. There is no automatic install,
   enable, update, crawling, remote artwork, or source mirroring.
 - In the Web Console, marketplace discovery is a top-level `/marketplace`
   route. Installed snapshot configuration and execution remain on

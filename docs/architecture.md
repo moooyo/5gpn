@@ -273,13 +273,13 @@ leniently: it is a contract with every deployed gateway, so rejecting unknown
 fields would make older cores refuse whole catalogs whenever a publisher added
 something for newer ones.
 
-For an installed entry, the listing reports **current** only when the catalog
-version, manifest SHA-256, and complete external-script URL/digest set match the
-immutable installed snapshot. A same-version republish is therefore still an
-update, while a successful reviewed apply becomes current after the catalog's
-local installed-state projection refreshes. This status never replaces review:
-any non-current entry is refetched and checked with the full SnapshotDigest
-before apply.
+For an installed entry, the listing reports **current** when the catalog version
+and manifest SHA-256 match the installed snapshot. A same-version manifest
+republish is therefore still an update, while a successful reviewed apply
+becomes current after the catalog's local installed-state projection refreshes.
+External script resources are fetched live and are not compared with the
+catalog's resource digests. This status never replaces review: any non-current
+entry is refetched and checked before apply.
 
 `/5gpn/bot` is one read and one write, whole-document rather than a write per
 field. The interception routes are split because each authorizes something
