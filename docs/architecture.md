@@ -17,6 +17,18 @@ described in earlier revisions of this file.
   and an API client that talks to mihomo's controller.
 - **This repository** is an installer and a TUI. It contains no service.
 
+Zashboard remains installable as a PWA, but its worker is network-only. It
+precaches no application files, deletes caches left by older releases when it
+activates, and mihomo serves every `/ui/*` response with `Cache-Control:
+no-store`. An offline control plane cannot operate the gateway; keeping an old
+one available is actively unsafe.
+
+Core and Console self-upgrade are not controller capabilities. Authenticated
+requests to `/upgrade` and `/upgrade/ui` fail with HTTP 403, and the Console
+contains no check, automatic action, or manual action for them. `/configs/geo`
+remains an independent maintenance action. Core and Console versions move only
+through the digest-pinned 5gpn installer release.
+
 Two root oneshots survive, and only because they hold key material a
 network-facing process must not:
 

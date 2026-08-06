@@ -20,7 +20,7 @@ done
 setup_secret='controller #&?/%'
 setup_url="$(console_setup_url console.example.test "$setup_secret")" \
     || fail "could not build zashboard setup URL"
-expected_setup='https://console.example.test/ui/#/setup?type=clash&hostname=console.example.test&port=443&https=1&secret=controller%20%23%26%3F%2F%25&label=5gpn&disableUpgradeCore=1&disableTunMode=1'
+expected_setup='https://console.example.test/ui/#/setup?type=clash&hostname=console.example.test&port=443&https=1&secret=controller%20%23%26%3F%2F%25&label=5gpn&disableTunMode=1'
 [[ "$setup_url" == "$expected_setup" ]] \
     || fail "zashboard setup URL was not encoded field-by-field: $setup_url"
 [[ "${setup_url%%#*}" != *"$setup_secret"* ]] \

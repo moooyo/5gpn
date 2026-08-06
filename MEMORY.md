@@ -36,6 +36,20 @@ Update the status and the normative documentation when an implementation lands.
   installer-owned and is recreated non-interactively when its exclusive IDs
   are safe to retain; aliased IDs fail closed.
 
+## Managed component updates and Console cache
+
+**Status: Implemented. Recorded 2026-08-06.**
+
+- Mihomo and Zashboard are maintained forks and move only through the
+  digest-pinned 5gpn installer release. The controller returns HTTP 403 for
+  `/upgrade` and `/upgrade/ui`; Zashboard exposes no manual, automatic, or
+  update-check path for either component. Updating GEO data remains separate.
+- Zashboard remains installable as a PWA, but its worker is network-only. It
+  precaches no UI or font assets, removes caches left by earlier workers when
+  it activates, and reloads their controlled windows once. Mihomo serves all
+  `/ui/*` responses with `Cache-Control: no-store`. Offline Console operation
+  is not a supported property because the gateway API is unavailable offline.
+
 ## Native interception extensions
 
 **Status: Implemented. Recorded 2026-07-19, extended with operator capture-DNS

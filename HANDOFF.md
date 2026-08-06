@@ -7,9 +7,9 @@ superseded where it conflicts with the current monolith or HTTP/3 boundary.
 
 | Repository | Maintenance branch | Release coordinate |
 | --- | --- | --- |
-| `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.20` |
-| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.24` |
-| `moooyo/5gpn` | `main` | `0.0.71` (publication target) |
+| `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.21` |
+| `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.25` |
+| `moooyo/5gpn` | `main` | `0.0.72` (publication target) |
 
 The stable release has one long-running process: mihomo. HTTP/3 interception is
 unsupported, `http3=true` is rejected, and the fixed global UDP/443 `REJECT`
@@ -780,9 +780,10 @@ ssh test-env 'curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/<sha>/qui
 Windows OpenSSH only. Keep remote commands straight-line — heredocs through
 `ssh` from PowerShell get mangled; write the script locally and `scp` it.
 
-**After deploying, hard-reload the browser.** zashboard is a PWA
-(`registerType: 'autoUpdate'`) and will otherwise serve the previously cached
-bundle, which reads exactly like "the fix did not land".
+Zashboard remains installable as a PWA, but the shipped worker is network-only,
+clears caches from older releases on activation, and reloads controlled windows
+once. A pre-network-only worker may require one ordinary reload to discover the
+new worker; hard reload is no longer part of the steady-state deployment loop.
 
 **Installer suites** — `scripts/run-suites.sh` makes the LF copy and runs them
 under Linux:

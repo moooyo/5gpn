@@ -240,8 +240,10 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   browser watermark — which is why it offers an undo rather than a
   confirmation. Pausing the mihomo stream buffers and reports the count; it
   must not discard.
-- Do not commit `web/dist`. Fonts are runtime-cached by the PWA; keep PWA,
-  initial JS/CSS, lazy-route, and font budgets green.
+- Do not commit `web/dist`. Keep the Console installable as a PWA, but its
+  worker is network-only: it precaches no UI or font asset and deletes caches
+  left by older releases on activation. Keep initial JS/CSS, lazy-route, and
+  font budgets green.
 
 ## Tests and delivery
 
