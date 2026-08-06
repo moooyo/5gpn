@@ -285,16 +285,16 @@ done
   the previous exact bytes are restored and reapplied. Disabling a canonical
   module removes only its exact listeners, sniffer entries, and panel guards.
 
-- [ ] Load the raw editor, change the ingress module elsewhere, then submit the
-  old raw snapshot and an old reset confirmation. Both stale revisions return
-  `409`, preserve the newer module config, and leave the controller untouched.
-
-- [ ] Editing only a harmless mihomo field runs validation, atomically replaces
-  the file, hot-applies it, and retains `root:fivegpn` mode `0640` inside the
-  root-owned mihomo home.
-- [ ] Raw config edits that enable `external-controller`, remove
-  `external-controller-tls`, or change either required zash certificate path
-  return 400 and leave disk/runtime unchanged.
+- [ ] Hot-applying a complete payload through `PUT /configs` changes only the
+  live runtime: the operator YAML hash and mode remain unchanged, and reloading
+  the default path removes payload-only proxy nodes and groups.
+- [ ] A candidate operator YAML that adds one proxy and wires it into
+  `Proxies` passes the pinned `5gpn-mihomo -t`. After safe publication and
+  reload, `/proxies` lists the node in `Proxies`, the selector can choose it,
+  and the terminal `MATCH,Proxies` traffic path uses it in rule mode.
+- [ ] Publishing an invalid operator candidate is refused before replacement;
+  the live YAML, controller listeners, UI path, and current runtime remain
+  unchanged.
 - [ ] The dedicated secret-rotation workflow updates the daemon and mihomo
   together; neither side is left locked out.
 - [ ] Two concurrent policy Apply calls serialize or return a clear conflict.

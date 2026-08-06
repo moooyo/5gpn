@@ -1,8 +1,8 @@
 # 5gpn mihomo data plane — install-time seed (rendered by install.sh). This
 # file is fully operator-owned from here on: no region of it is daemon-
-# managed by the runtime -- edit it via the
-# console's mihomo config editor (GET/PUT /configs), '5gpn
-# mihomo-reset' to restore this seed, or by hand. The console's policy
+# managed by the runtime -- edit it by hand and reload the default path,
+# hot-apply a complete path/payload without persistence through PUT /configs,
+# or use '5gpn mihomo-reset' to restore this seed. The console's policy
 # engine only ever decides "gateway or not" (DNS layer); everything below
 # about what happens to gateway-bound traffic is yours to shape.
 external-controller: ""
@@ -60,6 +60,8 @@ hosts:
 # node-subscription providers (proxy-providers:), then wire them into
 # proxy-groups as you like; the terminal MATCH rule below routes every
 # gateway-bound query that reached this point to the Proxies group.
+# Mihomo also exposes a virtual GLOBAL selector, but it is used only after an
+# operator switches to global mode; it is not this rule-mode terminal egress.
 #
 # There is no interception outbound to declare here. Capture is a stage inside
 # this process -- the core hands a sniffed connection to the engine before

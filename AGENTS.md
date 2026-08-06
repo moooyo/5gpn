@@ -73,6 +73,11 @@ plans, design handoffs, and git history are context only.
   boundary, but it is not an installer-owned generated region. An operator may
   edit the complete YAML manually; if the guard is missing or disabled,
   interception readiness fails closed.
+  The seed stays in rule mode and terminates at `MATCH,Proxies`; persistent
+  nodes/providers and `Proxies` membership exist only in this operator file.
+  Mihomo's virtual `GLOBAL` selector is not rule-mode egress. `PUT /configs`
+  may hot-apply a complete path/payload but does not persist it, and the Console
+  must not pretend to be a node database.
 - Interception capture hosts, typed `REJECT`/`DIRECT` rules, and egress bindings
   are immutable in-memory projections of the current extension document. The
   tunnel and inner dialer consume those projections directly. Do not restore a
@@ -225,7 +230,10 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
 - Marketplace discovery lives on the separate top-level `/marketplace` route,
   never inside the installed-plugin page. Source aliases are local display text,
   not publisher identity. Do not fabricate popularity, author, health, or update
-  metadata that the authenticated marketplace API does not provide.
+  metadata that the authenticated marketplace API does not provide. An entry is
+  current only when the gateway proves the installed version, manifest digest,
+  and every external-script URL/digest match the catalog; version equality or
+  `installed_version` truthiness alone is never an update verdict.
 - Logs remain virtualized, polling is single-flight/cancellable, and mobile
   uses card rows plus a drawer sidebar. `ds/LogSurface` owns the shared log
   chrome and the one height policy; `ds/LiveToggle` is the one pause control

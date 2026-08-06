@@ -240,7 +240,37 @@ operations.
 
 普通 install、reinstall 和 `configure` 会先用 `5gpn-mihomo -t` 验证已有配置，再逐字节保留它。只有显式 `mihomo-reset` 或 TTY 确认的 `upgrade-reset-mihomo` 能在备份、完整校验和原子 rename 后替换它。`configure` 若发现新域名、gateway 或 listener 与现有 operator-owned YAML 不兼容，会在写入前中止，而不是暗中修改数据面。
 
-fresh/reset seed 的 `Proxies` 组初始只有 `DIRECT`；5gpn 不附带代理节点。直接执行 `sudo 5gpn mihomo-reset` 会显示替换警告，但不会再次要求确认，运行前必须准备好从备份恢复自定义 proxies、providers、groups 和 rules 的方案。
+### Mihomo proxy selection
+
+The supported 5gpn seed stays in `mode: rule`. Its final rule is
+`MATCH,Proxies`, so ordinary gateway traffic uses the current member selected
+inside the configured `Proxies` group. That group initially contains only
+`DIRECT`; 5gpn ships no proxy node.
+
+`GLOBAL` is a virtual selector mihomo creates for `mode: global`. Seeing it in
+the Console does not mean rule-mode traffic uses it. Switching to global mode
+bypasses the complete rule list, including the private-address and UDP/443
+guards, so it is not the normal 5gpn data-plane mode.
+
+Persistent nodes belong in the fully operator-owned
+`/etc/5gpn/mihomo/config.yaml`. Define the node under `proxies:` (or a
+subscription under `proxy-providers:`), add its name or provider to `Proxies`,
+then validate and reload the file. For example:
+
+```yaml
+proxies:
+  - {name: MyProxy, type: socks5, server: proxy.example, port: 1080}
+
+proxy-groups:
+  - {name: Proxies, type: select, proxies: [MyProxy, DIRECT]}
+```
+
+The Console's **Update config** path/payload action only hot-applies a complete
+configuration; it does not write the YAML. Restarting or reloading the default
+path therefore discards payload-only nodes. Run the documented `5gpn-mihomo
+-t`, publish the operator file safely, then use **Reload config** or restart for
+a durable change. An explicit `mihomo-reset` replaces the whole file from a
+backup and therefore removes custom nodes, providers, groups, and rules.
 
 Console writes hot-apply the revisioned mihomo `5gpn` documents. Deployment values in `dns.env` change only through a validated installer run; certificates hot-reload when their files change.
 

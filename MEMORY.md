@@ -50,6 +50,20 @@ Update the status and the normative documentation when an implementation lands.
   `/ui/*` responses with `Cache-Control: no-store`. Offline Console operation
   is not a supported property because the gateway API is unavailable offline.
 
+## Mihomo proxy selection
+
+**Status: Implemented. Recorded 2026-08-06.**
+
+- The supported runtime mode is `rule`. The seed's terminal
+  `MATCH,Proxies` uses the operator-defined `Proxies` selector, which initially
+  contains only `DIRECT`.
+- `GLOBAL` is mihomo's virtual selector for global mode, not rule-mode egress.
+  Global and direct modes bypass the rule list, including the private-address
+  and UDP/443 guards, and therefore withdraw the extension client boundary.
+- Proxy nodes and providers persist only in the fully operator-owned
+  `/etc/5gpn/mihomo/config.yaml`. `PUT /configs` can hot-apply a complete path or
+  payload but never writes that file; the Console is not a node database.
+
 ## Native interception extensions
 
 **Status: Implemented. Recorded 2026-07-19, extended with operator capture-DNS

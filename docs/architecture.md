@@ -273,6 +273,14 @@ leniently: it is a contract with every deployed gateway, so rejecting unknown
 fields would make older cores refuse whole catalogs whenever a publisher added
 something for newer ones.
 
+For an installed entry, the listing reports **current** only when the catalog
+version, manifest SHA-256, and complete external-script URL/digest set match the
+immutable installed snapshot. A same-version republish is therefore still an
+update, while a successful reviewed apply becomes current after the catalog's
+local installed-state projection refreshes. This status never replaces review:
+any non-current entry is refetched and checked with the full SnapshotDigest
+before apply.
+
 `/5gpn/bot` is one read and one write, whole-document rather than a write per
 field. The interception routes are split because each authorizes something
 different; here there is a single question — who may ask this gateway things
@@ -352,6 +360,25 @@ guard affects only UDP destination port 443 that reaches the gateway: it is not
 a firewall, does not affect traffic that bypasses the gateway, and does not
 disable ordinary UDP forwarding or QUIC sniffing on other configured ports such
 as the optional `:5060` ingress.
+
+### Mihomo modes and proxy groups
+
+The fresh/reset seed uses `mode: rule` and ends in `MATCH,Proxies`. `Proxies` is
+an operator-defined selector containing only `DIRECT` until the operator adds
+static nodes or providers and wires them into that group. It is the normal
+terminal egress for gateway traffic that passes the preceding guards.
+
+`GLOBAL` is a mihomo-created virtual selector for `mode: global`; it is not the
+terminal group in rule mode. Global and direct modes bypass the rule list, so
+they also bypass the private-address and UDP/443 guards. Extension capture
+therefore treats any non-rule mode as an unavailable client boundary. The
+supported 5gpn configuration remains rule mode even though the fully
+operator-owned YAML can still be edited manually.
+
+The Console can hot-apply a complete YAML payload or load an absolute safe
+path through the upstream `/configs` API, but that API never writes
+`config.yaml`. Persistent proxy nodes, providers, memberships, and rules are
+operator file changes; the Console is not a second node database.
 
 ## The Telegram control plane
 
