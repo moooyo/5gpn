@@ -289,12 +289,16 @@ printf '%s' "$multiline_fn" | grep -Fq '[[ -t 0 ]]' \
 
 add_nodes_fn="$(sed -n '/^manage_add_nodes()/,/^}/p' "$INSTALL")"
 delete_node_fn="$(sed -n '/^manage_delete_node()/,/^}/p' "$INSTALL")"
+nodes_snapshot_fn="$(sed -n '/^fivegpn_nodes_snapshot()/,/^}/p' "$INSTALL")"
 for fn in "$add_nodes_fn" "$delete_node_fn"; do
     printf '%s' "$fn" | grep -Fq '5gpn-nodes' \
         || fail "a node mutation bypasses the core parser helper"
     printf '%s' "$fn" | grep -Fq 'fivegpn_apply_node_change' \
         || fail "a persisted node mutation does not use the shared apply-and-verify path"
 done
+node_helper_surface="${nodes_snapshot_fn}${add_nodes_fn}${delete_node_fn}"
+[[ "$(printf '%s' "$node_helper_surface" | grep -Fc 'SAFE_PATHS="$MIHOMO_SAFE_PATHS"')" == 4 ]] \
+    || fail "not every one-shot node helper call inherits the runtime SAFE_PATHS contract"
 printf '%s' "$add_nodes_fn" | grep -Fq -- '--dry-run' \
     && printf '%s' "$add_nodes_fn" | grep -Fq 'ask_yesno' \
     || fail "node import does not preview the parsed names before confirmation"
@@ -305,11 +309,16 @@ printf '%s' "$delete_node_fn" | grep -Fq '@base64' \
     && printf '%s' "$delete_node_fn" | grep -Fq '@json' \
     || fail "node deletion does not separate the exact name from its terminal-safe label"
 apply_nodes_fn="$(sed -n '/^fivegpn_apply_node_change()/,/^}/p' "$INSTALL")"
+verify_nodes_fn="$(sed -n '/^fivegpn_verify_live_node_change()/,/^}/p' "$INSTALL")"
 printf '%s' "$apply_nodes_fn" | grep -Fq 'fivegpn_reload_operator_config' \
     && printf '%s' "$apply_nodes_fn" | grep -Fq 'fivegpn_verify_live_node_change' \
     || fail "node changes are not hot-applied and checked against the live Proxies view"
 printf '%s' "$apply_nodes_fn" | grep -Fq 'restart_services' \
     || fail "node changes do not converge disk and runtime when hot apply fails"
+printf '%s' "$verify_nodes_fn" | grep -Fq '[$names[] as $name |' \
+    || fail "live node verification lost its jq 1.6-compatible all-members expression"
+printf '%s' "$verify_nodes_fn" | grep -Fq 'all($names[] as $name;' \
+    && fail "live node verification uses jq syntax unsupported by the deployed jq 1.6"
 screen_fn="$(sed -n '/^manage_screen()/,/^}/p' "$INSTALL")"
 printf '%s' "$screen_fn" | grep -Fq '| card' \
     || fail "manage_screen does not frame its status through card()"

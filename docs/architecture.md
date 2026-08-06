@@ -389,9 +389,10 @@ makes the whole operation fail.
 
 This is a revision-checked edit of the operator file, not another source of
 truth. The one-shot command keeps a previous-file backup, validates the
-complete candidate through mihomo's own configuration parser, and publishes
-with an fsynced same-directory rename. The TUI then hot-applies that complete
-path through the existing `/configs` route. A failed hot apply restarts the
+complete candidate through mihomo's own configuration parser under the same
+`SAFE_PATHS` as the service, and publishes with an fsynced same-directory
+rename. The TUI then hot-applies that complete path through the existing
+`/configs` route. A failed hot apply restarts the
 complete service from the already validated disk file; it does not roll the
 operator edit back. No node CRUD route, selector API, generated YAML region, or
 continuing subscription service exists. Provider subscriptions and arbitrary

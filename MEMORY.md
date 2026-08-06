@@ -67,8 +67,9 @@ Update the status and the normative documentation when an implementation lands.
   Its short-lived `5gpn-mihomo 5gpn-nodes` command accepts Mihomo/Clash proxy
   YAML and mihomo-supported share-link or standard-Base64 exports, rejects a
   partially parsed batch, revision-checks the raw operator file, validates the
-  complete candidate, and atomically edits only `proxies` plus membership in the
-  existing `Proxies` selector. It keeps one previous-file backup, then the TUI
+  complete candidate under the service's exact `SAFE_PATHS`, and atomically
+  edits only `proxies` plus membership in the existing `Proxies` selector. It
+  keeps one previous-file backup, then the TUI
   hot-applies the complete path; a failed hot apply falls back to a full service
   restart against the validated new file, not an automatic rollback. There is
   no node/selector controller API, second database, generated YAML region, or

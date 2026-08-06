@@ -4411,7 +4411,8 @@ fivegpn_interception_snapshot() {
 # this shell surface only gathers input and asks the already-running controller
 # to hot-apply the resulting complete file.
 fivegpn_nodes_snapshot() {
-    "$MIHOMO_BIN" 5gpn-nodes list --config "${MIHOMO_DIR}/config.yaml"
+    SAFE_PATHS="$MIHOMO_SAFE_PATHS" "$MIHOMO_BIN" 5gpn-nodes list \
+        --config "${MIHOMO_DIR}/config.yaml"
 }
 
 fivegpn_reload_operator_config() {
@@ -4441,9 +4442,9 @@ fivegpn_verify_live_node_change() {
         import)
             names="$(printf '%s' "$result" | jq -c '.added')" || return 1
             printf '%s' "$live" | jq -e --argjson names "$names" '
-                all($names[] as $name;
+                [$names[] as $name |
                     (.proxies | has($name)) and
-                    ((.proxies.Proxies.all // []) | index($name) != null))
+                    ((.proxies.Proxies.all // []) | index($name) != null)] | all
             ' >/dev/null
             ;;
         delete)
@@ -5014,7 +5015,8 @@ manage_add_nodes() {
         'Clash proxies: YAML, ss:// / vmess:// / vless:// / trojan:// / hy2:// ...' || true)"
     [[ -n "${content//[[:space:]]/}" ]] || { warn "未输入节点,未做任何修改。"; return 0; }
 
-    if ! preview="$(printf '%s' "$content" | "$MIHOMO_BIN" 5gpn-nodes import \
+    if ! preview="$(printf '%s' "$content" | SAFE_PATHS="$MIHOMO_SAFE_PATHS" \
+        "$MIHOMO_BIN" 5gpn-nodes import \
         --dry-run --config "${MIHOMO_DIR}/config.yaml" --revision "$revision")"; then
         err "节点解析或配置校验失败；当前配置未改变。"
         return 1
@@ -5027,7 +5029,8 @@ manage_add_nodes() {
     } | card
     ask_yesno "确认写入以上静态节点?" || { warn "已取消,当前配置未改变。"; return 0; }
 
-    if ! result="$(printf '%s' "$content" | "$MIHOMO_BIN" 5gpn-nodes import \
+    if ! result="$(printf '%s' "$content" | SAFE_PATHS="$MIHOMO_SAFE_PATHS" \
+        "$MIHOMO_BIN" 5gpn-nodes import \
         --config "${MIHOMO_DIR}/config.yaml" --revision "$revision")"; then
         err "节点解析或配置校验失败；当前配置未改变。"
         return 1
@@ -5075,7 +5078,7 @@ manage_delete_node() {
     fi
     ask_yesno "确认从 config.yaml 和 Proxies 删除节点 ${display}?" || return 0
 
-    if ! result="$("$MIHOMO_BIN" 5gpn-nodes delete \
+    if ! result="$(SAFE_PATHS="$MIHOMO_SAFE_PATHS" "$MIHOMO_BIN" 5gpn-nodes delete \
         --config "${MIHOMO_DIR}/config.yaml" --revision "$revision" --name "$name")"; then
         err "节点仍被其他组、规则或 dialer 引用,或配置已改变；未删除。"
         return 1

@@ -9,7 +9,7 @@ superseded where it conflicts with the current monolith or HTTP/3 boundary.
 | --- | --- | --- |
 | `moooyo/mihomo` | `feat/5gpn-monolith` | `v1.19.28-monolith.24` |
 | `moooyo/zashboard` | `feat/5gpn-console` | `v3.16.0-monolith.26` |
-| `moooyo/5gpn` | `main` | `0.0.75` (publication target) |
+| `moooyo/5gpn` | `main` | `0.0.76` (publication target) |
 
 The stable release has one long-running process: mihomo. HTTP/3 interception is
 unsupported, `http3=true` is rejected, and the fixed global UDP/443 `REJECT`

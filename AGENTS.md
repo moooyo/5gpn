@@ -72,8 +72,9 @@ plans, design handoffs, and git history are context only.
   one narrower explicit transaction: its bundled `5gpn-nodes` one-shot parser
   may add or remove static `proxies` entries and their membership in the
   existing `Proxies` selector. That transaction is revision-checked, validates
-  the complete candidate with mihomo's own parser, writes a previous-file
-  backup, publishes atomically, and hot-applies the complete path. It is not a
+  the complete candidate with mihomo's own parser and the runtime's exact
+  `SAFE_PATHS`, writes a previous-file backup, publishes atomically, and
+  hot-applies the complete path. It is not a
   controller API, node database, generated YAML region, or subscription
   service.
   The fixed UDP/443 guard is part of fresh/reset seeds and the live readiness
