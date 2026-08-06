@@ -231,9 +231,10 @@ followed by a new enable confirmation.
 An extension holding the grant reaches the network through one unbounded egress
 authorization rather than a destination allowlist. The immutable in-process
 policy revalidates each request against the current document and live mihomo
-group set before dialing. Explicit destination bindings win first; otherwise
-the authorizing extension's selected group is used. Missing or removed groups
-fail closed, including for pooled transports after their authorization changes.
+group set before dialing. Every installed extension has one explicit binding,
+defaulting to `DIRECT`; there is no unbound/terminal-rule fallback. A selected
+group that later disappears stays visible and fails closed, including for
+pooled transports after their authorization changes.
 
 ## HTTP/3 boundary
 
@@ -519,7 +520,8 @@ their `require` calls only on a Node.js branch this runtime never selects.
 **Install from URL** accepts one HTTPS manifest and snapshots its referenced
 scripts. **Add locally** accepts one pasted or uploaded manifest; local
 manifests use inline scripts or absolute HTTPS script URLs. Both actions install
-the extension disabled.
+the extension disabled and reject an ID that is already installed. Every new
+extension receives the explicit `DIRECT` egress default.
 
 The top-level Console Marketplace page accepts explicit HTTPS marketplace
 indexes using the strict `5gpn.io/marketplace/v1` JSON contract. A marketplace
@@ -535,22 +537,23 @@ snapshot digest includes the display name so a revision-protected write for one
 reviewed label cannot authorize another.
 
 Selecting a marketplace entry refetches its manifest through this same native
-parser and verifies the index's manifest and script SHA-256 digests, byte sizes,
-identity, and derived capability summary. A mismatch aborts before local state
+parser and verifies the index's manifest SHA-256, identity, and derived
+capability summary. External script resources remain live dependencies and are
+not compared with catalog digests. A mismatch aborts before local state
 changes. A successful selection creates the ordinary disabled immutable
-snapshot and still requires the complete settings, permission, capture-host,
+snapshot for a new ID, or atomically replaces an installed snapshot while
+retaining its enabled authorization, typed values, order, resolver, and egress.
+Both paths still require the complete settings, permission, capture-host,
 routing-rule, execution-order, and egress review described above. The
 marketplace capability summary carries a required `routingRuleCount`, but the
 actual normalized rules come only from the refetched manifest snapshot.
 Marketplace descriptions,
 tags, and licenses are informational and do not replace source review.
 
-An update check refetches only the installed manifest URL. The candidate must
-keep the same `metadata.id`. The management surface displays the candidate
-version, snapshot digest, capture hosts, actions, and settings before
-replacement. Replacement requires the current extension to be disabled, refetches the exact
-reviewed digest, preserves still-valid setting values by key and type, and
-leaves the new snapshot disabled. Enabling reviews capture hosts, the network
+Installed extensions have no ordinary source-URL update check or apply route.
+The operator selects the intended Marketplace entry, reviews its version,
+snapshot digest, capture hosts, actions, settings, and source change, then
+applies that exact refetched digest. Enabling reviews capture hosts, the network
 grant, every exact normalized routing rule, execution position, and the current
 operator egress binding before the transaction publishes the certificate
 request, in-process traffic policy, engine state, and DNS overlay.

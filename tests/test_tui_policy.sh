@@ -336,12 +336,16 @@ printf '%s' "$overview_fn" | grep -Fq 'console_public_url' \
     || fail "the overview does not show the public Console URL and explicit connection action"
 printf '%s' "$overview_fn" | grep -Eq 'DNS_MIHOMO_SECRET|console_setup_url' \
     && fail "the overview renderer contains sensitive Console connection material"
+printf '%s' "$overview_fn" | grep -Fq "printf '  🚫 HTTP/3 禁用\\n'" \
+    || fail "the overview does not render the intentionally short HTTP/3 disabled state"
+printf '%s' "$overview_fn" | grep -Fq 'H3-only fails' \
+    && fail "the overview restored the long HTTP/3 explanation that widens the TUI frame"
 
 tabs_fn="$(sed -n '/^manage_menu_tabs()/,/^}/p' "$INSTALL")"
-printf '%s' "$tabs_fn" | grep -Fq "printf '\\033[H%s\\n\\033[J'" \
-    || fail "tab frames are not written before erase-to-end"
-printf '%s' "$tabs_fn" | grep -Fq "printf '\\033[H▶ %s\\n\\033[J'" \
-    || fail "actions clear the old frame before leaving a visible action title"
+printf '%s' "$tabs_fn" | grep -Fq "printf '\\033[0m\\033[H\\033[J%s\\n'" \
+    || fail "tab frames do not reset, erase, and paint in one ready-frame write"
+printf '%s' "$tabs_fn" | grep -Fq "printf '\\033[0m\\033[H\\033[J▶ %s\\n'" \
+    || fail "action titles do not erase old line suffixes before painting"
 printf '%s' "$tabs_fn" | grep -Fq '\033[2J' \
     && fail "tab navigation clears the terminal before rendering"
 

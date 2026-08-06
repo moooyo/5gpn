@@ -53,11 +53,14 @@ plans, design handoffs, and git history are context only.
   manifest may declare bounded typed mihomo `REJECT` or `DIRECT` rules. Those
   rules cannot name a proxy group, are shown exactly in the single enable
   confirmation, and exist only while both the extension and MITM master are
-  enabled. An extension may also require an operator-selected mihomo egress
-  group, but the manifest and script cannot name or change that group. The
-  Console exposes only the narrow group list needed for this binding; do not
-  recreate policy-v2, drafts/generations, node/selector APIs, or a generated
-  mihomo config region.
+  enabled. Every installed extension has one explicit operator egress binding,
+  defaulting to `DIRECT`; there is no unbound value. A manifest may still mark
+  egress as required review metadata, but neither the manifest nor script can
+  name or change the binding. The Console exposes only `DIRECT` and the narrow
+  live group list. A selected group that later disappears remains named and
+  fails closed until the operator chooses an available value; it never falls
+  back to `DIRECT`. Do not recreate policy-v2, drafts/generations,
+  node/selector APIs, or a generated mihomo config region.
 - The installed runtime identity is intentionally uniform: the only managed
   Unix user and group are `fivegpn`, the main unit is
   `5gpn-mihomo.service`, and its executable is
@@ -242,7 +245,11 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   current when the gateway proves the installed version and manifest digest
   match the catalog; version equality or `installed_version` truthiness alone
   is never an update verdict. External script resources are live dependencies
-  and are deliberately not audited against catalog digests.
+  and are deliberately not audited against catalog digests. The installed
+  extension surface has no check-update action and the controller exposes no
+  installed-source update route. An installed extension changes version only
+  after the operator selects and reviews its Marketplace entry; pasted-URL
+  review is install-only and refuses an already installed ID.
 - Logs remain virtualized, polling is single-flight/cancellable, and mobile
   uses card rows plus a drawer sidebar. `ds/LogSurface` owns the shared log
   chrome and the one height policy; `ds/LiveToggle` is the one pause control

@@ -176,8 +176,8 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # leaves the gateway with no resolver, no capture and no control API at all. The
 # staging probe checks the version token exactly rather than accepting a prefix.
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-monolith.24"
-MIHOMO_SHA256="253f61943dec0050eff49ecdb3662b990d85147c44401093d42f33de53336305"
+MIHOMO_VERSION="v1.19.28-monolith.26"
+MIHOMO_SHA256="9cb82c8520cc45c171e6c770dc505382b14935febbb0f30a9f9e450a46313213"
 # Every `mihomo -t` in this script must run with the same SAFE_PATHS the unit
 # grants, because the seed names paths outside its own home directory -- the
 # certificates it serves and the UI bundle it publishes. Without this the core
@@ -189,8 +189,8 @@ MIHOMO_SHA256="253f61943dec0050eff49ecdb3662b990d85147c44401093d42f33de53336305"
 # a drift here fails at install time on a config the running service accepts.
 MIHOMO_SAFE_PATHS="/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui"
 ZASH_REPO="moooyo/zashboard"
-ZASH_VERSION="v3.16.0-monolith.26"        # our fork's dist.zip, built from feat/5gpn-console
-ZASH_SHA256="8a4571a1db87ebbed0bec591c0f8d4036ea63da4b906326271962a0703e3946d"
+ZASH_VERSION="v3.16.1-monolith.27"        # our fork's dist.zip, built from feat/5gpn-console
+ZASH_SHA256="f32cd39c758d1d64f49ac4fa163a78cfcb14dc8cac0a185bdf3581e46011afd3"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
@@ -4840,7 +4840,7 @@ manage_screen_overview() {
         printf '  %s 拦截    %s · %s/%s 启用\n' \
             "$([[ "$master" == true ]] && printf '✅' || printf '⏸️ ')" \
             "$([[ "$master" == true ]] && echo on || echo off)" "$on" "$total"
-        printf '  🚫 HTTP/3 unsupported · UDP/443 fixed REJECT · fallback uses TCP/H1/H2; H3-only fails\n'
+        printf '  🚫 HTTP/3 禁用\n'
 
         cert_loaded="$(fivegpn_json "$snap" '.snapshot.certificate.loaded' false)"
         cert_cov="$(fivegpn_json "$snap" '.snapshot.certificate.covers_all_capture_hosts' false)"
@@ -5251,10 +5251,12 @@ manage_menu_tabs() {
             loaded_tab="$tab"
         fi
         frame="$(manage_tab_frame "$tab" "$cursor" "$facts" "${labels[@]}")"
-        # Home, the complete frame, then erase the remainder of the old frame.
-        # A single write avoids ever exposing the blank interval caused by
-        # clearing before slow status probes or before the new bytes arrive.
-        printf '\033[H%s\n\033[J' "$frame"
+        # Reset any style left by an action, then clear and paint the already
+        # complete frame in one write. H + frame + J left old suffixes on every
+        # line where the new frame was shorter, including inverse-video and QR
+        # remnants. The probes are already complete, so J + frame introduces
+        # no wait on a blank screen and does not clear scrollback like 2J.
+        printf '\033[0m\033[H\033[J%s\n' "$frame"
 
         key="$(manage_read_key)" || break
         case "$key" in
@@ -5271,7 +5273,7 @@ manage_menu_tabs() {
             enter)
                 # Leave an immediate, stable title while the selected action
                 # prompts or performs work; never flash an empty terminal.
-                printf '\033[H▶ %s\n\033[J' "${labels[$cursor]}"
+                printf '\033[0m\033[H\033[J▶ %s\n' "${labels[$cursor]}"
                 # Actions prompt and print; they need the screen to themselves
                 # and a cooked terminal, which is what we are already in.
                 manage_action "${labels[$cursor]}" || true
@@ -5279,7 +5281,7 @@ manage_menu_tabs() {
                 manage_read_key >/dev/null || true
                 loaded_tab=-1 ;;
             quit)
-                printf '\033[H\033[J'
+                printf '\033[0m\033[H\033[J'
                 return 0 ;;
         esac
     done

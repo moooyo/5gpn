@@ -28,14 +28,14 @@ listed SHA-256 digest, and then publishes them on the gateway.
 
 | Component | Exact release and downloaded artifact | SHA-256 | License evidence | Installed use |
 |---|---|---|---|---|
-| 5gpn mihomo fork | [`moooyo/mihomo` `v1.19.28-monolith.24`](https://github.com/moooyo/mihomo/releases/tag/v1.19.28-monolith.24), `mihomo-linux-amd64-compatible-v1.19.28-monolith.24.gz` | `253f61943dec0050eff49ecdb3662b990d85147c44401093d42f33de53336305` | GPL-3.0; see the exact tag's [`LICENSE`](https://github.com/moooyo/mihomo/blob/v1.19.28-monolith.24/LICENSE) and [source](https://github.com/moooyo/mihomo/tree/v1.19.28-monolith.24) | Installed as `/opt/5gpn/bin/5gpn-mihomo`; this is the sole long-running 5gpn process. |
-| zashboard fork | [`moooyo/zashboard` `v3.16.0-monolith.26`](https://github.com/moooyo/zashboard/releases/tag/v3.16.0-monolith.26), `dist.zip` | `8a4571a1db87ebbed0bec591c0f8d4036ea63da4b906326271962a0703e3946d` | The zashboard project is MIT, Copyright 2024 Zephyruso; see the exact tag's [`LICENSE`](https://github.com/moooyo/zashboard/blob/v3.16.0-monolith.26/LICENSE) and [`package.json`](https://github.com/moooyo/zashboard/blob/v3.16.0-monolith.26/package.json) | Extracted to `/opt/5gpn/ui` and served as static browser assets by `5gpn-mihomo`. |
+| 5gpn mihomo fork | [`moooyo/mihomo` `v1.19.28-monolith.26`](https://github.com/moooyo/mihomo/releases/tag/v1.19.28-monolith.26), `mihomo-linux-amd64-compatible-v1.19.28-monolith.26.gz` | `9cb82c8520cc45c171e6c770dc505382b14935febbb0f30a9f9e450a46313213` | GPL-3.0; see the exact tag's [`LICENSE`](https://github.com/moooyo/mihomo/blob/v1.19.28-monolith.26/LICENSE) and [source](https://github.com/moooyo/mihomo/tree/v1.19.28-monolith.26) | Installed as `/opt/5gpn/bin/5gpn-mihomo`; this is the sole long-running 5gpn process. |
+| zashboard fork | [`moooyo/zashboard` `v3.16.1-monolith.27`](https://github.com/moooyo/zashboard/releases/tag/v3.16.1-monolith.27), `dist.zip` | `f32cd39c758d1d64f49ac4fa163a78cfcb14dc8cac0a185bdf3581e46011afd3` | The zashboard project is MIT, Copyright 2024 Zephyruso; see the exact tag's [`LICENSE`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.27/LICENSE) and [`package.json`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.27/package.json) | Extracted to `/opt/5gpn/ui` and served as static browser assets by `5gpn-mihomo`. |
 
 The zashboard `dist.zip` is a compiled browser bundle and includes code and
 assets from its runtime dependency graph. Those dependencies retain their own
 licenses. The exact dependency graph used to build this artifact is recorded in
-the tagged [`package.json`](https://github.com/moooyo/zashboard/blob/v3.16.0-monolith.26/package.json)
-and [`pnpm-lock.yaml`](https://github.com/moooyo/zashboard/blob/v3.16.0-monolith.26/pnpm-lock.yaml);
+the tagged [`package.json`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.27/package.json)
+and [`pnpm-lock.yaml`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.27/pnpm-lock.yaml);
 5gpn does not rebuild or modify the downloaded archive.
 
 ## Optional installer TUI downloaded separately

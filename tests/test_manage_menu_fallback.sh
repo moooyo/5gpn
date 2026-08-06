@@ -127,9 +127,12 @@ tab_output="$(manage_menu_tabs)"
     || fail "cursor movement reran a renderer or the tab switch rendered the wrong side: $(tr '\n' ' ' < "$RENDER_CALLS")"
 [[ "$tab_output" != *$'\033[2J'* ]] \
     || fail "terminal navigation still performs a full 2J clear"
-first_paint="${tab_output%%$'\033[J'*}"
-[[ "$first_paint" == $'\033[H'* && "$first_paint" == *'facts A'* ]] \
-    || fail "the terminal erased its old frame before writing the complete new frame"
+repaint_prefix=$'\033[0m\033[H\033[J'
+[[ "$tab_output" == "${repaint_prefix}"* && "$tab_output" == "${repaint_prefix}"*'facts A'* ]] \
+    || fail "the ready frame is not painted immediately after reset/home/erase"
+without_repaints="${tab_output//"$repaint_prefix"/}"
+[[ "$without_repaints" != *$'\033[H'* && "$without_repaints" != *$'\033[J'* ]] \
+    || fail "a terminal paint still writes content before erasing the old visible frame"
 [[ "$tab_output" == *'facts A'* && "$tab_output" == *'facts B'* ]] \
     || fail "the terminal frames omitted a cached renderer snapshot"
 pass "tab frames are complete before paint and cursor movement reuses cached facts"

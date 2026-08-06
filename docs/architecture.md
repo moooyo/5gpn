@@ -224,13 +224,16 @@ Every write quotes the revision it was read at and is refused with `409` if it
 has moved, carrying the current revision back so a client can re-read rather
 than being told only that it lost.
 
-Install and update are two calls, joined by a digest. The digest covers the
-manifest bytes, every script that will run, and the immutable capability shape —
-and deliberately not the operator's bindings or entered settings, which would
-make it change whenever they edited a field and stop meaning "this is what you
-reviewed". The install re-fetches and compares rather than committing the
-candidate it already holds, which is what makes the digest a check on the
-publisher rather than on our own bookkeeping.
+Fresh install and Marketplace update are each review/apply pairs joined by a
+digest. The digest covers the manifest bytes, every script that will run, and
+the immutable capability shape — and deliberately not the operator's bindings
+or entered settings, which would make it change whenever they edited a field
+and stop meaning "this is what you reviewed". Apply re-fetches and compares
+rather than committing the candidate it already holds, which is what makes the
+digest a check on the publisher rather than on our own bookkeeping. Pasted URL
+and local review are install-only; an installed ID can update only from an
+explicitly selected Marketplace entry, and no installed-source update route is
+mounted.
 
 `enabled` records operator authorization, not a claim that every runtime
 prerequisite is currently healthy. The API separately projects each module's
@@ -245,24 +248,29 @@ written as a complete typed map. The engine validates and compiles the whole map
 before one document rename and pointer swap; it does not expose a sequence of
 per-key writes that could leave action gates observing a combination the
 operator never submitted. Egress and capture-DNS bindings remain separate
-writes because they authorize different routing decisions.
+writes because they authorize different routing decisions. Every extension has
+one explicit egress binding, defaulting to `DIRECT`; an empty binding is not a
+state the current document or API can represent. The live choice list contains
+only `DIRECT` and real proxy groups. If a selected group later disappears, the
+stored name remains visible and traffic fails closed until the operator selects
+an available value.
 
-An enabled extension may be updated without first disabling it. Review still
-precedes apply, apply refetches and verifies the reviewed immutable digest, and
-operator bindings and type-compatible setting values are retained. The fully
+An enabled extension may be updated from a reviewed Marketplace entry without
+first disabling it. Review still precedes apply, apply refetches and verifies
+the reviewed immutable digest, and operator bindings and type-compatible
+setting values are retained. The fully
 validated replacement is published by the same immutable Config pointer swap:
 an in-flight request finishes on the old snapshot and a later request sees only
 the new one. A new required setting must be supplied as part of the reviewed
-apply and a newly required egress binding must already exist; neither condition
+apply; the existing explicit egress binding is retained. Neither condition
 silently disables the extension.
 
-`/5gpn/interception/catalog` is discovery and nothing else. A catalog is a list
-of manifests: it is fetched through the same guarded client an import uses, it
-is never persisted, and installing from an entry runs exactly the
-review-then-confirm path a pasted URL runs. It is deliberately not an update
-source — `CheckUpdate` re-reads the URL an extension was installed from, never an
-entry that happens to share its id, or adding a catalog would silently change
-where an operator's code comes from.
+`/5gpn/interception/catalog` is explicit discovery, installation, and update
+selection. A catalog is a list of manifests: it is fetched through the same
+guarded client an import uses and is never persisted. Selecting an entry runs
+the same review-then-confirm boundary as a fresh import. For an installed ID,
+that explicit selection authorizes changing the source to the reviewed entry;
+merely adding or refreshing a catalog never changes installed code.
 
 What a catalog is allowed to do is contradict itself, and that is checked. An
 entry states the manifest's SHA-256 and the shape of what it declares; if the
@@ -425,6 +433,15 @@ private proxy knob.
 
 ## Code layout and the fork budget
 
+Fork synchronization is branch-explicit. `moooyo/mihomo` rebases conceptually
+on canonical `MetaCubeX/mihomo:Alpha` (merged into the published maintenance
+branch, never history-rewritten), while `moooyo/zashboard` tracks
+`Zephyruso/zashboard:main`. A remote's default branch is not evidence of the
+baseline: before every sync, verify the documented branch and merge-base, then
+fast-forward the corresponding fork baseline and merge it into the maintenance
+branch. In particular, the mihomo fork's `origin/HEAD -> main` is unrelated to
+the `Alpha` ancestry and must never be used as an update source.
+
 All 5gpn code lives under `5gpn/` in the mihomo fork, a directory upstream never
 touches. The façade package is named `fivegpn`, because Go identifiers cannot
 begin with a digit. Upstream packages may import `5gpn`; they may not import
@@ -515,10 +532,13 @@ reach.
 The terminal UI renders the facts for the selected tab into a complete cached
 frame before replacing the visible screen. Cursor-only movement reuses that
 snapshot, while changing tabs runs only the destination tab's renderer. The
-paint uses cursor-home plus erase-to-end in one write rather than clearing the
-display before slow system and controller probes; plain list and non-Gum
-fallbacks retain the same actions. Sensitive Console connection fields are an
-explicit action and are never part of the overview frame.
+paint first prepares the complete frame, then resets terminal styling, homes,
+erases the visible region, and writes that frame in one output call. Slow
+system and controller probes therefore never leave a blank screen, while old
+long-line, inverse-video, and QR suffixes cannot survive a shorter frame. It
+does not use `2J` or clear scrollback. Plain list and non-Gum fallbacks retain
+the same actions. Sensitive Console connection fields are an explicit action
+and are never part of the overview frame.
 
 The Nodes tab is a host-side editor for static snapshots, not a Console node
 store. Multiline Gum input accepts a Mihomo/Clash proxy mapping/list or supported

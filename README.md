@@ -74,7 +74,7 @@ AAAA 的 NODATA 不只针对客户端。mihomo 嗅探出主机名之后，会在
 - **可审计的 DNS 策略**：exact、suffix、keyword 与 subscription 匹配统一进入有序的 `block`、`direct`、`proxy` 规则和单一 fallback。
 - **运维者拥有的数据面**：完整 mihomo YAML 没有 daemon 生成区；普通安装、重装和 `configure` 会逐字节保留有效文件。
 - **Unified control plane**: zashboard covers status, setup, DNS logs and diagnosis, policy, upstreams, mihomo health and configuration, extensions, marketplace discovery, and logs. The Telegram bot is read-only and alert-only.
-- **可选原生扩展**：严格的 `5gpn.io/v1` 快照、明确声明的 exact 与受限 wildcard capture-host allowlist、typed settings、权限审阅、显式执行顺序和 operator-selected egress binding。
+- **可选原生扩展**：严格的 `5gpn.io/v1` 快照、明确声明的 exact 与受限 wildcard capture-host allowlist、typed settings、权限审阅、显式执行顺序，以及默认 `DIRECT`、不可为空的 operator egress binding。
 - **Checked installation**: exact tags, SHA-256 verification, staging, atomic file publication, and readiness probes. Failures before publication leave the host untouched; failures during publication are reported as partial. No Go or Node toolchain is installed on the gateway.
 
 ## 安装要求
@@ -316,9 +316,9 @@ Native extensions are optional, and a fresh installation has the MITM master dis
 - HTTP/3 interception is unsupported. `http3=true` is rejected, and the fixed global UDP/443 `REJECT` has no product-management off switch. Fallback-capable clients may retry over captured TCP; H3-only clients fail.
 - An extension may remain armed while the MITM master is off, but it is not ready and contributes no DNS overlay or in-process capture policy.
 - 证书发布处于 pending 或 error 时，已启用的 capture name 仍被留在网关，但其 HTTP/TLS 连接会在普通规则前被拒绝；匹配的 fenced ready result 无需再次写配置或重启即可激活。系统不会呈现旧证书，也不会把 pending 降级为直连绕过。
-- Console 暴露 manifest 声明的全部 typed setting，包括本地 location editor；一次保存会以一个 revision 原子替换完整 settings map，不会留下半保存组合。启用中的扩展可以原地应用已审阅更新：in-flight request 使用旧 immutable snapshot 完成，之后的请求只看到完整编译的新 snapshot。
+- Console 暴露 manifest 声明的全部 typed setting，包括本地 location editor；一次保存会以一个 revision 原子替换完整 settings map，不会留下半保存组合。启用中的扩展可以原地应用已审阅的 Marketplace 更新：in-flight request 使用旧 immutable snapshot 完成，之后的请求只看到完整编译的新 snapshot。已安装页不提供单独的 source-URL 检查更新入口。
 - Every action runs in a fresh, bounded goja VM. Quota-bound `context.storage` exists only when the manifest requests it. The sandbox exposes bounded action-scoped timers and, with the network grant, synchronous `request` plus promise-based `requestAsync`; it has no filesystem, process, module loader, socket, ambient `fetch`, or direct egress. All permitted network calls return through mihomo's inner dialer and current rule evaluation.
-- 扩展可以要求运维者从已有 mihomo group 中选择 egress，但 manifest 和脚本不能命名或修改 group。启用确认中审阅的全局 routing rule 只允许 `REJECT` 或 `DIRECT`，且只在扩展与 MITM master 同时启用时存在。
+- 每个扩展都显式绑定出口并默认 `DIRECT`；运维者可以改选已有 mihomo group，但 manifest 和脚本不能命名或修改该值。已选 group 消失时流量 fail closed，不会静默回退。启用确认中审阅的全局 routing rule 只允许 `REJECT` 或 `DIRECT`，且只在扩展与 MITM master 同时启用时存在。
 - 执行顺序会影响 action composition、重叠 host 的 egress/capture-DNS winner 和 routing first-match，因此重排也必须确认。
 - marketplace 只是 discovery metadata，不是信任根；不会自动安装、启用、更新、抓取或镜像内容。第一方扩展源码位于独立的 [moooyo/5gpn-extensions](https://github.com/moooyo/5gpn-extensions) 仓库，并发布[官方 marketplace index](https://moooyo.github.io/5gpn-extensions/marketplace/v2/index.json)。
 - Plugin engine logs exist only in mihomo's 1000-entry memory ring. Pausing or clearing the Console view neither stops ingestion nor deletes that ring; the log disappears when the process exits.

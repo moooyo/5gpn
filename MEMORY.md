@@ -49,6 +49,12 @@ Update the status and the normative documentation when an implementation lands.
   it activates, and reloads their controlled windows once. Mihomo serves all
   `/ui/*` responses with `Cache-Control: no-store`. Offline Console operation
   is not a supported property because the gateway API is unavailable offline.
+- Upstream synchronization is branch-explicit and uses merge commits on the
+  published maintenance lines. Mihomo tracks canonical
+  `MetaCubeX/mihomo:Alpha`; its fork `main` has unrelated ancestry and must not
+  be used. Zashboard tracks `Zephyruso/zashboard:main`. Every sync verifies the
+  merge-base first, fast-forwards the matching fork baseline, and then merges
+  that baseline without rebasing already tagged downstream history.
 
 ## Mihomo proxy selection
 
@@ -147,14 +153,17 @@ contract and explicit HTTP/3 refusal on 2026-08-05.**
   disclosure explicitly, and all resulting traffic returns through mihomo's
   in-process inner dialer and current rule evaluation.
 - Extensions cannot name, inspect, or change arbitrary application egress
-  groups. A manifest may require an operator egress binding; the operator
-  selects an existing mihomo group, and the in-process traffic policy passes
-  that group as the inner dialer's explicit target. A separately reviewed
-  typed routing rule may bypass the normal operator target with `DIRECT`, but
-  cannot choose any other target. Missing or removed bindings fail closed
-  without a default fallback. The explicit extension execution order determines
-  action composition, the first binding that wins for an overlapping
-  destination, and global routing first-match precedence.
+  groups. Every installed extension has an explicit operator egress binding
+  and new imports default to `DIRECT`; empty/unbound is not a valid state. A
+  manifest may retain its egress-required flag as review metadata, while the
+  operator can select `DIRECT` or an existing mihomo group and the in-process
+  traffic policy passes that value as the inner dialer's explicit target. A
+  separately reviewed typed routing rule may bypass the normal operator target
+  with `DIRECT`, but
+  cannot choose any other target. A selected group that disappears remains
+  visible but fails closed without a default fallback. The explicit extension
+  execution order determines action composition, the first binding that wins
+  for an overlapping destination, and global routing first-match precedence.
 - Native interception supports plain HTTP and TLS/H1/H2 only. `mitm.http3=true`
   is invalid and every management write attempting it fails without changing
   state. Fresh and explicitly reset mihomo seeds contain one fixed global
@@ -208,10 +217,15 @@ contract and explicit HTTP/3 refusal on 2026-08-05.**
   snapshot.
   Marketplace data is discovery metadata, never an execution or trust root.
   Selecting an entry refetches one manifest through the native parser, verifies
-  the listed manifest digest and derived capability summary, and stores the
-  normal disabled immutable snapshot. External script resources are fetched
-  live without comparing catalog resource digests. There is no automatic install,
-  enable, update, crawling, remote artwork, or source mirroring.
+  the listed manifest digest and derived capability summary, and either stores
+  a new disabled immutable snapshot or atomically updates the already installed
+  snapshot while retaining operator state. External script resources are
+  fetched live without comparing catalog resource digests. There is no
+  automatic install, enable, update, crawling, remote artwork, or source
+  mirroring.
+  Installed extensions have no source-URL check/update controller route or
+  Console button; an operator-reviewed Marketplace entry is the only update
+  path, while pasted URL/local review is install-only.
 - In the Web Console, marketplace discovery is a top-level `/marketplace`
   route. Installed snapshot configuration and execution remain on
   `/extensions`, with host audit on `/extensions/hosts`; the

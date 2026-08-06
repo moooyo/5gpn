@@ -547,8 +547,8 @@ into recorded command output, screenshots, or issue logs.
   relative script. Repeat through the separate local-add dialog with an inline
   script. Unknown fields, duplicate keys, YAML aliases/anchors/merges, multiple
   documents, non-HTTPS resources, unsafe redirects, and out-of-scope action
-  hosts must fail installation. Every valid install starts disabled; required
-  typed settings and required operator egress-group bindings remain hard enable
+  hosts must fail installation. Every valid install starts disabled with an
+  explicit `DIRECT` egress binding; required typed settings remain hard enable
   gates. The unrestricted network grant is a single reviewed boolean with no
   destination list; changing it changes the immutable snapshot digest.
 - [ ] Confirm `/extensions` contains only installed-plugin management and host
@@ -570,12 +570,15 @@ into recorded command output, screenshots, or issue logs.
   text does not appear in the persistent journal.
 - [ ] Select one official marketplace entry, review the cached scope in the
   install-confirm dialog, and verify the daemon then refetches the
-  listed manifest, checks its byte size and SHA-256 plus every referenced script
-  size/digest and derived capability summary, then shows the actual imported
-  snapshot review. A changed manifest, script, identity, version, permission,
-  or capability count must abort before the module revision changes. A valid
-  install starts disabled and never turns on the MITM master. Remove and re-add
-  the marketplace; installed immutable extension snapshots must be unaffected.
+  listed manifest, checks its SHA-256 and derived capability summary, then shows
+  the actual imported snapshot review. External script resources remain live
+  and are not compared with catalog digests. A changed manifest, identity,
+  version, permission, or capability count must abort before the module revision
+  changes. A valid install starts disabled and never turns on the MITM master.
+  The installed page exposes no check-update button and the old
+  `/extensions/{id}/update` routes return 404; selecting a changed Marketplace
+  entry is the only reviewed update path. Remove and re-add the marketplace;
+  installed immutable extension snapshots must be unaffected.
 - [ ] Reorder installed extensions through the Console. Request and response
   actions execute top-to-bottom in the displayed order. For a host or network
   origin shared by extensions with different bindings, the first matching
@@ -605,12 +608,14 @@ into recorded command output, screenshots, or issue logs.
   backtracking-regexp timeout remain bounded. The enable dialog must state that
   the plugin can send any decrypted request, response, setting, or storage data
   visible to it to any host it can reach; the grant has no destination list.
-- [ ] Bind a required extension to an existing mihomo group and verify only
-  group names plus `DIRECT` are offered. Removing or renaming a referenced group
-  through the raw config API is rejected before publication. An out-of-band
-  invalidation marks the extension not-ready, withdraws the DNS overlay, and
-  never falls back to DIRECT or the terminal group; rebinding restores service
-  through the normal transaction.
+- [ ] Verify every installed extension, whether or not the manifest marks egress
+  required, has `DIRECT` selected initially and the Console offers no empty
+  option. Switch one to an existing group; only live group names plus `DIRECT`
+  are offered. An out-of-band group removal keeps the missing name visible but
+  disabled, marks the extension not-ready, withdraws the DNS overlay, and never
+  falls back to DIRECT or the terminal group; rebinding restores service through
+  the normal transaction. Attempting to clear the binding is rejected without
+  moving the revision.
 - [ ] Turn `MitM over HTTP/2` off and verify new captured TLS connections
   negotiate HTTP/1.1 only. The fixed UDP/443 reject remains unchanged.
 - [ ] Install
