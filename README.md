@@ -264,10 +264,12 @@ Console writes hot-apply the revisioned mihomo `5gpn` documents. Deployment valu
 
 Native extensions are optional, and a fresh installation has the MITM master disabled. The engine remains inside mihomo; no sidecar service is started:
 
-- 只接受严格的 `5gpn.io/v1` YAML。URL manifest 与引用的远程脚本经 HTTPS/redirect/SSRF 防护抓取一次；local add 接受一份粘贴或上传的 manifest。所有输入都受大小限制、计算摘要并保存为不可变本地快照；安装和更新后都保持 disabled。
+- 只接受严格的 `5gpn.io/v1` YAML。URL manifest 与引用的远程脚本经 HTTPS/redirect/SSRF 防护抓取一次；local add 接受一份粘贴或上传的 manifest。所有输入都受大小限制、计算摘要并保存为不可变本地快照；新安装保持 disabled，经过审阅的更新则原子保留扩展原有的 enabled 授权。
 - `traffic.captureHosts` is the sole traffic-acquisition permission. Only when both the extension and MITM master are enabled and ready does it capture plain HTTP or TLS/H1/H2 on ports `80` and `443`.
 - HTTP/3 interception is unsupported. `http3=true` is rejected, and the fixed global UDP/443 `REJECT` has no product-management off switch. Fallback-capable clients may retry over captured TCP; H3-only clients fail.
 - An extension may remain armed while the MITM master is off, but it is not ready and contributes no DNS overlay or in-process capture policy.
+- 证书发布处于 pending 或 error 时，已启用的 capture name 仍被留在网关，但其 HTTP/TLS 连接会在普通规则前被拒绝；匹配的 fenced ready result 无需再次写配置或重启即可激活。系统不会呈现旧证书，也不会把 pending 降级为直连绕过。
+- Console 暴露 manifest 声明的全部 typed setting，包括本地 location editor；一次保存会以一个 revision 原子替换完整 settings map，不会留下半保存组合。启用中的扩展可以原地应用已审阅更新：in-flight request 使用旧 immutable snapshot 完成，之后的请求只看到完整编译的新 snapshot。
 - Every action runs in a fresh, bounded goja VM. Quota-bound `context.storage` exists only when the manifest requests it. The sandbox exposes bounded action-scoped timers and, with the network grant, synchronous `request` plus promise-based `requestAsync`; it has no filesystem, process, module loader, socket, ambient `fetch`, or direct egress. All permitted network calls return through mihomo's inner dialer and current rule evaluation.
 - 扩展可以要求运维者从已有 mihomo group 中选择 egress，但 manifest 和脚本不能命名或修改 group。启用确认中审阅的全局 routing rule 只允许 `REJECT` 或 `DIRECT`，且只在扩展与 MITM master 同时启用时存在。
 - 执行顺序会影响 action composition、重叠 host 的 egress/capture-DNS winner 和 routing first-match，因此重排也必须确认。

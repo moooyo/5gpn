@@ -132,6 +132,24 @@ contract and explicit HTTP/3 refusal on 2026-08-05.**
   with its current ECS, and `trust` forces the live trust group. Non-extension
   hostnames default to trust. Client DNS policy and chnroute arbitration do not
   select this egress resolver, and URL paths cannot participate in DNS choice.
+- Extension `enabled` is durable operator authorization, while runtime
+  readiness is derived and never persisted. The complete enabled capture-host
+  union remains claimed at the gateway while its fenced root-issued certificate
+  is pending or failed; HTTP/TLS traffic is rejected before ordinary routing
+  until the final certificate result, keypair hashes, validity and SAN set all
+  match. The request and root result carry a target digest plus random attempt,
+  stale signing attempts cannot publish, and TLS SNI, resumption and every
+  request on an existing connection repeat the same immutable-plan admission.
+  Certificate readiness changes neither the interception revision nor
+  operator-owned mihomo YAML and does not require a process restart.
+- Typed extension settings are exposed through the Console and are replaced as
+  one complete revision-protected map, never a sequence of per-key writes. An
+  enabled extension may apply a reviewed update without first being disabled:
+  the refetched digest-verified candidate is fully validated and compiled, then
+  one immutable Config swap lets in-flight requests finish on the old snapshot
+  while later requests see only the new one. Execution order, bindings and
+  type-compatible values survive; missing new required values or egress state
+  reject the update before persistence rather than silently disabling it.
 - One extension, one action host matcher, and the enabled interception
   certificate set are each bounded to 512 capture-host patterns. The routing
   and action/upstream-mapping declaration limits remain independently bounded

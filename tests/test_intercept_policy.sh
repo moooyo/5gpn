@@ -35,11 +35,12 @@ find "$ROOT" -type f -name '*.py' -print -quit | grep -q . \
     && fail "Python source was introduced"
 
 # --- the certificate publisher -----------------------------------------------
-grep -Fxq '# 5gpn-unit-id: 5gpn-intercept-cert.service:v1' "$CERT_UNIT" || fail "certificate publisher ownership marker missing"
+grep -Fxq '# 5gpn-unit-id: 5gpn-intercept-cert.service:v2' "$CERT_UNIT" || fail "certificate publisher ownership marker missing"
 grep -Fxq 'ExecStart=/opt/5gpn/scripts/intercept-cert-renew.sh' "$CERT_UNIT" || fail "certificate publisher helper is missing"
 grep -Fxq 'Group=root' "$CERT_UNIT" || fail "certificate publisher primary group is not root"
 grep -Fxq 'SupplementaryGroups=fivegpn' "$CERT_UNIT" || fail "capability-free certificate publisher lacks the runtime file group"
 grep -Fxq 'CapabilityBoundingSet=' "$CERT_UNIT" || fail "certificate publisher has capabilities"
+grep -Fxq 'PrivateNetwork=yes' "$CERT_UNIT" || fail "certificate publisher does not have a private network namespace"
 grep -Fxq 'RuntimeDirectory=5gpn' "$CERT_UNIT" || fail "certificate publisher cannot create its fresh-boot lock directory"
 grep -Fxq 'RuntimeDirectoryMode=0700' "$CERT_UNIT" || fail "certificate publisher runtime directory is not private"
 grep -Fxq 'RuntimeDirectoryPreserve=yes' "$CERT_UNIT" || fail "certificate lock directory is not preserved between oneshot runs"
@@ -55,7 +56,8 @@ grep -Fq 'ReadOnlyPaths=/etc/5gpn/intercept-ca /etc/5gpn/mihomo/5gpn /opt/5gpn/s
 
 # The watcher fires on the request, not on the document. The document changes
 # whenever an operator edits a setting; the request changes only when the host
-# set the leaf must cover does, so this reissues when it is actually needed.
+# set changes or an operator explicitly retries a failed attempt.
+grep -Fxq '# 5gpn-unit-id: 5gpn-intercept-cert.path:v2' "$CERT_PATH" || fail "certificate watcher ownership marker missing"
 grep -Fxq 'PathChanged=/etc/5gpn/mihomo/5gpn/certificate-request' "$CERT_PATH" || fail "certificate watcher does not watch the request file"
 grep -Fxq '# 5gpn-unit-id: 5gpn-intercept-cert.timer:v1' "$CERT_TIMER" || fail "interception certificate timer ownership marker is missing"
 grep -Fxq 'OnCalendar=*-*-* 02:00:00' "$CERT_TIMER" || fail "interception certificate timer does not run on the fixed daily schedule"
@@ -68,7 +70,17 @@ grep -Fq "stat -Lc '%d:%i'" "$RENEW" \
     || fail "interception helper does not validate the inherited installer lock inode"
 grep -Fq 'CERT_REQUEST=/etc/5gpn/mihomo/5gpn/certificate-request' "$RENEW" \
     || fail "certificate helper does not consume the engine's atomic host-set request"
-grep -Fq 'if [[ ! -s "$stage/hosts" ]]' "$RENEW" || fail "certificate helper does not accept a fresh zero-extension host set"
+grep -Fq 'request_re=' "$RENEW" \
+    && grep -Fq '"target_digest"' "$RENEW" \
+    && grep -Fq '"attempt"' "$RENEW" \
+    || fail "certificate helper does not parse the fenced JSON v1 request"
+grep -Fq 'request_is_current || return 3' "$RENEW" \
+    || fail "certificate helper does not discard a stale signing attempt"
+grep -Fq 'render_ready_state "$stage/ready-state"' "$RENEW" \
+    || fail "certificate helper does not commit zero-host requests as ready"
+grep -Fq 'fsync_file "$candidate"' "$RENEW" \
+    && grep -Fq 'fsync_directory "$state_dir"' "$RENEW" \
+    || fail "certificate helper does not durably commit its final manifest"
 
 # --- the installer's side ----------------------------------------------------
 grep -Fq 'install_service_account "$FIVEGPN_SERVICE_USER" "$FIVEGPN_SERVICE_GROUP"' "$INSTALL" || fail "the unified 5gpn service account is not installed"
@@ -88,6 +100,18 @@ grep -Fq 'inherited_lock' "$ROOT/scripts/intercept-cert-renew.sh" \
     && fail "the renew helper still has a branch that skips taking the certificate lock"
 grep -Fq 'CERT_REQUEST_FILE="${FIVEGPN_STATE_DIR}/certificate-request"' "$INSTALL" \
     || fail "installer does not read the leaf host set from the engine's published request"
+validate_leaf="$(sed -n '/^validate_intercept_leaf()/,/^}/p' "$INSTALL")"
+grep -Fq "jq -e '" <<<"$validate_leaf" \
+    && grep -Fq '.target_digest' <<<"$validate_leaf" \
+    && grep -Fq '.attempt' <<<"$validate_leaf" \
+    && grep -Fq '.certificate_sha256' <<<"$validate_leaf" \
+    && grep -Fq '.private_key_sha256' <<<"$validate_leaf" \
+    && grep -Fq 'sha256sum "$fullchain"' <<<"$validate_leaf" \
+    || fail "installer readiness still treats the fenced certificate protocol as plaintext"
+grep -Fq 'digest="$(head -n 1' <<<"$validate_leaf" \
+    && fail "installer leaf validation still reads a plaintext first-line digest"
+grep -Fq 'hosts="$(tail -n +2' <<<"$validate_leaf" \
+    && fail "installer leaf validation still reads plaintext host lines"
 renew_service="$(sed -n '/^install_renewal_automation()/,/^}/p' "$INSTALL")"
 grep -Fq 'ExecStart=/opt/5gpn/scripts/intercept-cert-renew.sh' <<<"$renew_service" \
     && fail "public certificate renewal still couples interception leaf renewal"

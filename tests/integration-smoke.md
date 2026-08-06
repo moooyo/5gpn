@@ -494,11 +494,32 @@ into recorded command output, screenshots, or issue logs.
   mihomo; the runtime leaf is not a CA and
   covers only the capture hosts of enabled native extensions. With none enabled,
   the private root remains valid but no leaf is required.
-- [ ] `5gpn-intercept-cert.path` reacts to an atomic certificate request
-  replacement, the root-owned publisher writes the expected state digest, and
-  mihomo cannot read the signing key. Turning the Console master off withdraws
-  the DNS overlay and in-process traffic policy; turning it back on restores
-  only ready armed hosts.
+- [ ] Turn the MITM master on before enabling a synthetic extension whose host
+  is not covered by the current leaf. The enable write authorizes the extension
+  and returns `pending`; before publication DNS still claims the host at the
+  gateway, while the pre-capture plan rejects its new TCP/TLS connections before
+  ordinary rules can turn the pending state into a direct bypass. Do not toggle
+  the master, write the extension a second time, start the oneshot manually, or
+  restart mihomo.
+  The path unit must observe the atomic JSON v1 request, and the runtime must
+  automatically become ready after the root publisher commits a JSON v1 result
+  carrying the same `target_digest` and `attempt` plus the SHA-256 of the exact
+  `fullchain.pem` and `privkey.pem` bytes. The interception document revision
+  remains the revision returned by enable while readiness changes; only then may
+  the claimed connections enter TLS interception and extension actions.
+- [ ] Hold the certificate lock while publishing rapid A -> B -> C host-set
+  requests, then release it. A result for A or B must never make either stale
+  set ready, partially replaced certificate/key files must fail their commit
+  hashes, and the bounded publisher must converge to C. Publish a safe error for
+  the current attempt, use the authenticated retry action, and verify the same
+  target digest receives a fresh attempt while a late error for the old attempt
+  is ignored. An empty host request commits `ready` without material hashes.
+  Throughout the test, mihomo cannot read the signing key and the publisher has
+  no network address family or Linux capability.
+- [ ] Turning the Console master off withdraws the DNS overlay and in-process
+  traffic policy. Turning it back on restores only armed hosts whose current
+  request, committed result, exact keypair bytes, validity, and complete SAN set
+  all agree; it never restores a merely enabled or publisher-error host.
 - [ ] `5gpn-intercept-cert.timer` remains enabled and active in Cloudflare,
   HTTP-01, debug, and missing-public-lineage installations. Trigger it directly
   and verify it invokes only `5gpn-intercept-cert.service`; a public renewal

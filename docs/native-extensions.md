@@ -92,6 +92,15 @@ capture-host set is consumed atomically by:
 2. the constrained interception certificate SAN set; and
 3. the in-process TCP capture policy for ports 80 and 443.
 
+`enabled` is durable operator intent. If the root publisher has not yet
+committed a valid certificate generation for that complete set, the set is
+`certificate_pending`: DNS continues to claim those names at the gateway, but
+the pre-capture traffic plan rejects their HTTP/TLS connections instead of
+presenting an old certificate or falling through to direct routing. A matching
+ready result activates the already-authorized immutable plan without another
+API write or process restart. A publisher error remains fail-closed and can be
+retried with a new fenced attempt.
+
 Every action `match.hosts` and every upstream mapping host must be covered by
 the same extension's `captureHosts`. The control plane validates this relation,
 and the engine repeats it at runtime. A plugin cannot act on a host captured
@@ -169,6 +178,20 @@ bottom. Every action sees the output produced by earlier actions in its phase.
 Import appends an extension to the order; delete removes it; the Console can
 move an extension up or down with a revision-protected, explicitly confirmed
 complete reorder.
+
+The Console exposes every declared typed setting. One save submits the complete
+setting map and the engine validates and compiles it as one revision-protected
+transaction; boolean, select, text, number and location values are never
+published key by key. The flat `longitude`/`latitude`/optional `accuracy` trio
+retains its declared scalar types while sharing the same local map editor as a
+location value.
+
+Updates may apply while an extension remains enabled. The candidate is reviewed
+and refetched by digest, then replaces the immutable snapshot atomically while
+preserving execution order, bindings and type-compatible operator values.
+In-flight requests retain the old snapshot; later requests see the new one. A
+candidate that introduces an unconfigured required value or egress requirement
+is rejected before publication rather than disabling the extension implicitly.
 
 ## Network permission
 

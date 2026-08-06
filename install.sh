@@ -133,11 +133,12 @@ MIHOMO_DIR="/etc/5gpn/mihomo"           # config.yaml + provider caches
 FIVEGPN_STATE_DIR="/etc/5gpn/mihomo/5gpn" # the engine's own documents, beside mihomo's
 LEGACY_STATE_DIR="/etc/5gpn/mihomo/gpn"
 # What the interception leaf must cover, published by the engine after every
-# successful write and once at startup: a digest on the first line, then one
-# host pattern per line. It is a file rather than a subcommand because its
-# consumer is a root oneshot holding the CA signing key, and having that
-# process execute the network-facing program to find out what to sign is a
-# different shape from having it read what that program wrote.
+# successful write and once at startup. The versioned JSON carries the desired
+# host-set digest, a random attempt fence, and the canonical host list. It is a
+# file rather than a subcommand because its consumer is a root oneshot holding
+# the CA signing key, and having that process execute the network-facing program
+# to find out what to sign is a different shape from having it read what that
+# program wrote.
 # scripts/intercept-cert-renew.sh parses the same file.
 CERT_REQUEST_FILE="${FIVEGPN_STATE_DIR}/certificate-request"
 INTERCEPT_DIR="/etc/5gpn/intercept"
@@ -175,8 +176,8 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # leaves the gateway with no resolver, no capture and no control API at all. The
 # staging probe checks the version token exactly rather than accepting a prefix.
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-monolith.18"
-MIHOMO_SHA256="17fb5cc7092e2a4b6e3a7d71b71a0511538d96c4d589553b276e303ea09e3823"
+MIHOMO_VERSION="v1.19.28-monolith.19"
+MIHOMO_SHA256="0221182c2db75f3aa758e927d88568f4cb7d8637f0990a7462147090f231a5e7"
 # Every `mihomo -t` in this script must run with the same SAFE_PATHS the unit
 # grants, because the seed names paths outside its own home directory -- the
 # certificates it serves and the UI bundle it publishes. Without this the core
@@ -188,8 +189,8 @@ MIHOMO_SHA256="17fb5cc7092e2a4b6e3a7d71b71a0511538d96c4d589553b276e303ea09e3823"
 # a drift here fails at install time on a config the running service accepts.
 MIHOMO_SAFE_PATHS="/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui"
 ZASH_REPO="moooyo/zashboard"
-ZASH_VERSION="v3.16.0-monolith.23"        # our fork's dist.zip, built from feat/5gpn-console
-ZASH_SHA256="66907c3a730ec512019d73ceade958d866a669b57bb455d31319aa1e17206c25"
+ZASH_VERSION="v3.16.0-monolith.24"        # our fork's dist.zip, built from feat/5gpn-console
+ZASH_SHA256="53dd9c06549c1d36ffe5a525c1033a72cf406d82501ef49c1e8c49ca79c1406b"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
@@ -3953,18 +3954,67 @@ preflight_intercept_ca_publication() {
 }
 
 validate_intercept_leaf() {
-    local leaf="$INTERCEPT_DIR/tls/leaf.crt" key="$INTERCEPT_DIR/tls/privkey.pem"
-    [[ -f "$leaf" && ! -L "$leaf" && -f "$key" && ! -L "$key" ]] || return 1
+    local leaf="$INTERCEPT_DIR/tls/leaf.crt" fullchain="$INTERCEPT_DIR/tls/fullchain.pem"
+    local key="$INTERCEPT_DIR/tls/privkey.pem" state_file="$INTERCEPT_DIR/cert-state"
+    local host probe request_target request_attempt state_target state_attempt
+    local certificate_hash private_key_hash computed_target hosts san_output entry san_name
+    local -a san_entries certificate_hosts
+    command -v jq >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1 || return 1
+    [[ -f "$leaf" && ! -L "$leaf" && -f "$fullchain" && ! -L "$fullchain" \
+       && -f "$key" && ! -L "$key" && -f "$CERT_REQUEST_FILE" \
+       && ! -L "$CERT_REQUEST_FILE" && -f "$state_file" && ! -L "$state_file" ]] || return 1
+    jq -e '
+      type == "object" and
+      ((keys | sort) == ["attempt", "hosts", "target_digest", "version"]) and
+      .version == 1 and
+      (.target_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+      (.attempt | type == "string" and test("^[0-9a-f]{32}$")) and
+      (.hosts | type == "array" and length > 0 and length <= 512 and
+        . == (sort | unique) and
+        all(.[]; type == "string" and test("^(\\*\\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$")))
+    ' "$CERT_REQUEST_FILE" >/dev/null 2>&1 || return 1
+    jq -e '
+      type == "object" and
+      ((keys | sort) == ["attempt", "certificate_sha256", "private_key_sha256", "status", "target_digest", "version"]) and
+      .version == 1 and .status == "ready" and
+      (.target_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+      (.attempt | type == "string" and test("^[0-9a-f]{32}$")) and
+      (.certificate_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+      (.private_key_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+    ' "$state_file" >/dev/null 2>&1 || return 1
+    request_target="$(jq -r '.target_digest' "$CERT_REQUEST_FILE")" || return 1
+    request_attempt="$(jq -r '.attempt' "$CERT_REQUEST_FILE")" || return 1
+    state_target="$(jq -r '.target_digest' "$state_file")" || return 1
+    state_attempt="$(jq -r '.attempt' "$state_file")" || return 1
+    [[ "$request_target" == "$state_target" && "$request_attempt" == "$state_attempt" ]] || return 1
+    hosts="$(jq -r '.hosts[]' "$CERT_REQUEST_FILE")" || return 1
+    computed_target="$(printf '%s\n' "$hosts" | sha256sum | awk '{print $1}')" || return 1
+    [[ "$computed_target" == "$request_target" ]] || return 1
+    certificate_hash="$(sha256sum "$fullchain" | awk '{print $1}')" || return 1
+    private_key_hash="$(sha256sum "$key" | awk '{print $1}')" || return 1
+    [[ "$certificate_hash" == "$(jq -r '.certificate_sha256' "$state_file")" \
+       && "$private_key_hash" == "$(jq -r '.private_key_sha256' "$state_file")" ]] || return 1
     openssl x509 -in "$leaf" -noout -checkend 2592000 >/dev/null 2>&1 || return 1
     openssl verify -CAfile "$INTERCEPT_CA_DIR/root.crt" "$leaf" >/dev/null 2>&1 || return 1
     intercept_keypair_matches "$leaf" "$key" || return 1
-    local host probe digest state request hosts
-    [[ -f "$CERT_REQUEST_FILE" && ! -L "$CERT_REQUEST_FILE" ]] || return 1
-    request="$(cat -- "$CERT_REQUEST_FILE")" || return 1
-    digest="$(head -n 1 <<<"$request" | tr -d '[:space:]')"
-    hosts="$(tail -n +2 <<<"$request")"
-    state="$(tr -d '[:space:]' < "$INTERCEPT_DIR/cert-state" 2>/dev/null || true)"
-    [[ "$digest" =~ ^[0-9a-f]{64}$ && "$state" == "$digest" ]] || return 1
+    [[ "$(openssl x509 -in "$leaf" -noout -fingerprint -sha256 2>/dev/null)" \
+       == "$(openssl x509 -in "$fullchain" -noout -fingerprint -sha256 2>/dev/null)" ]] || return 1
+    san_output="$(openssl x509 -in "$leaf" -noout -ext subjectAltName 2>/dev/null)" || return 1
+    san_output="$(tail -n +2 <<<"$san_output" | tr '\n' ',')"
+    IFS=',' read -r -a san_entries <<<"$san_output"
+    certificate_hosts=()
+    for entry in "${san_entries[@]}"; do
+        entry="${entry#"${entry%%[![:space:]]*}"}"
+        entry="${entry%"${entry##*[![:space:]]}"}"
+        [[ -n "$entry" ]] || continue
+        [[ "$entry" == DNS:* ]] || return 1
+        san_name="${entry#DNS:}"
+        [[ "$san_name" =~ ^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || return 1
+        certificate_hosts+=("$san_name")
+    done
+    [[ "${#certificate_hosts[@]}" -gt 0 \
+       && "${#certificate_hosts[@]}" == "$(printf '%s\n' "${certificate_hosts[@]}" | sort -u | wc -l | tr -d '[:space:]')" \
+       && "$(printf '%s\n' "${certificate_hosts[@]}" | sort)" == "$hosts" ]] || return 1
     while IFS= read -r host; do
         probe="$host"
         [[ "$probe" != \*.* ]] || probe="probe.${probe#*.}"
@@ -4013,7 +4063,9 @@ ensure_intercept_certificates() {
     # Removing it leaves one path to a leaf and no special cases. The first real
     # issuance happens when the first extension is enabled, which is also the
     # first moment a leaf means anything.
-    if [[ -s "$CERT_REQUEST_FILE" ]] && [[ -n "$(tail -n +2 -- "$CERT_REQUEST_FILE")" ]]; then
+    if [[ -s "$CERT_REQUEST_FILE" ]] \
+       && jq -e '.version == 1 and (.hosts | type == "array" and length > 0)' \
+            "$CERT_REQUEST_FILE" >/dev/null 2>&1; then
         validate_intercept_leaf \
             || warn "The interception leaf does not currently cover the enabled capture hosts; the certificate watcher will reissue it."
     fi

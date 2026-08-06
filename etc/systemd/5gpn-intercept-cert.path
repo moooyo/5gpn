@@ -1,12 +1,13 @@
-# 5gpn-unit-id: 5gpn-intercept-cert.path:v1
+# 5gpn-unit-id: 5gpn-intercept-cert.path:v2
 [Unit]
-Description=Watch the engine's certificate request
+Description=Watch the engine's fenced certificate request
 
 [Path]
 # The request, not the document. The document changes whenever an operator
 # edits a setting or a binding; the request changes only when the set of
 # hosts the leaf must cover does, so this fires when a reissue is actually
-# needed rather than on every unrelated edit.
+# needed rather than on every unrelated edit. The request carries both the
+# target digest and an attempt token, so a same-host retry also changes it.
 PathChanged=/etc/5gpn/mihomo/5gpn/certificate-request
 Unit=5gpn-intercept-cert.service
 

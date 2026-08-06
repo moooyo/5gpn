@@ -220,6 +220,30 @@ reviewed". The install re-fetches and compares rather than committing the
 candidate it already holds, which is what makes the digest a check on the
 publisher rather than on our own bookkeeping.
 
+`enabled` records operator authorization, not a claim that every runtime
+prerequisite is currently healthy. The API separately projects each module's
+derived runtime phase. Enabling, changing a capture set, or applying an update
+may therefore return an authorized `certificate_pending` module; it becomes
+`active` without another configuration write once the root publisher commits a
+matching certificate result. Certificate transitions never advance the
+interception document revision and no derived `active` bit is persisted.
+
+All setting values for one extension are one configuration decision and are
+written as a complete typed map. The engine validates and compiles the whole map
+before one document rename and pointer swap; it does not expose a sequence of
+per-key writes that could leave action gates observing a combination the
+operator never submitted. Egress and capture-DNS bindings remain separate
+writes because they authorize different routing decisions.
+
+An enabled extension may be updated without first disabling it. Review still
+precedes apply, apply refetches and verifies the reviewed immutable digest, and
+operator bindings and type-compatible setting values are retained. The fully
+validated replacement is published by the same immutable Config pointer swap:
+an in-flight request finishes on the old snapshot and a later request sees only
+the new one. A new required setting must be supplied as part of the reviewed
+apply and a newly required egress binding must already exist; neither condition
+silently disables the extension.
+
 `/5gpn/interception/catalog` is discovery and nothing else. A catalog is a list
 of manifests: it is fetched through the same guarded client an import uses, it
 is never persisted, and installing from an entry runs exactly the
@@ -262,6 +286,34 @@ mechanism for "the core needs to dial something and wants its own rules
 applied". An intercepted upstream therefore cannot diverge from an ordinary
 client connection: same rules, same outbound selection, same row in the
 connection table.
+
+### Certificate readiness
+
+The CA signing key remains outside mihomo. After an authorization changes the
+enabled capture-host union, mihomo atomically writes a versioned certificate
+request containing the target digest, a random attempt fence and the canonical
+host list. `5gpn-intercept-cert.path` starts the root oneshot, which signs only
+that request, rechecks the fence before every publication boundary, fsyncs the
+certificate and key, and commits a hash-bound ready or error result last. A
+stale A or B attempt can never overwrite a newer C request.
+
+The runtime treats the result as data, not as a second configuration document.
+It derives one immutable interception plan from the committed Config, the fixed
+client boundary, live egress groups and the current certificate generation. A
+plan is active only when the non-CA keypair matches its committed hashes, is
+currently valid and covers the complete enabled host union. Otherwise the
+authorized hosts remain claimed but their HTTP/TLS traffic is explicitly
+rejected before ordinary mihomo rules; pending must never become direct bypass.
+The same gate runs again for every ClientHello—including resumed TLS—and every
+HTTP request on an existing connection. Session-ticket keys rotate with the
+certificate-plan generation.
+
+The certificate publisher has no network namespace, capability, controller
+credential or mihomo control call. A retry changes only the request attempt and
+does not change the interception revision. Runtime readiness is reconstructed
+from durable configuration and the committed certificate files on every process
+start; it is never repaired by rewriting operator state or restarting a
+subsystem.
 
 ### Datagrams and HTTP/3
 

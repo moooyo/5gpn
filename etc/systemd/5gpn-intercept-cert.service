@@ -1,10 +1,10 @@
-# 5gpn-unit-id: 5gpn-intercept-cert.service:v1
+# 5gpn-unit-id: 5gpn-intercept-cert.service:v2
 [Unit]
-Description=Publish the module-scoped 5gpn interception leaf
+Description=Publish the fenced 5gpn interception certificate result
 After=local-fs.target
-# The manager can republish one unchanged candidate every 500 ms for at most
-# 15 seconds to recover a coalesced PathChanged event. Keep that bounded retry
-# inside systemd's guard without inheriting the default five-start burst.
+# The helper internally converges across a bounded burst of request attempts.
+# Keep coalesced PathChanged recovery inside systemd's guard without inheriting
+# the default five-start burst.
 StartLimitIntervalSec=30
 StartLimitBurst=64
 
@@ -24,6 +24,7 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
+PrivateNetwork=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
