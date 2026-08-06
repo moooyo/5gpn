@@ -240,6 +240,17 @@ operations.
 
 Normal install, reinstall, and `configure` validate an existing mihomo file with `5gpn-mihomo -t` and then preserve it byte for byte. Only explicit `mihomo-reset` or TTY-confirmed `upgrade-reset-mihomo` may replace it after backup, complete validation, and atomic rename. If `configure` finds that a new domain, gateway, or listener conflicts with the operator-owned YAML, it aborts before writing instead of silently modifying the data plane.
 
+The root-only **Nodes** tab in `sudo 5gpn` is a narrow explicit exception, not
+a whole-file replacement. It can add or remove static `proxies` and their
+membership in the existing `Proxies` selector. The one-shot core helper accepts
+Mihomo/Clash proxy YAML or mihomo-supported plain/standard-Base64 share-link
+exports, rejects a partially parsed batch, shows the parsed names before
+confirmation, revision-checks and validates the complete file, keeps the
+previous bytes, publishes atomically, hot-applies the complete path, and checks
+the live group. It does not create a Console node API, second node database, or
+continuing Sub-Store subscription. Provider subscriptions and arbitrary group
+or rule edits remain manual operator YAML changes.
+
 The fresh/reset seed starts its `Proxies` group with `DIRECT` only; 5gpn ships no proxy nodes. Running `sudo 5gpn mihomo-reset` directly prints a replacement warning but does not ask for another confirmation. Before running it, prepare to restore custom proxies, providers, groups, and rules from the backup.
 
 Console writes hot-apply the revisioned mihomo `5gpn` documents. Deployment values in `dns.env` change only through a validated installer run; certificates hot-reload when their files change.

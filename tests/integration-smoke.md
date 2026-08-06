@@ -292,6 +292,14 @@ done
   `Proxies` passes the pinned `5gpn-mihomo -t`. After safe publication and
   reload, `/proxies` lists the node in `Proxies`, the selector can choose it,
   and the terminal `MATCH,Proxies` traffic path uses it in rule mode.
+- [ ] The root TUI Nodes tab previews a pasted Clash proxy and a standard-Base64
+  URI export without writing, then a confirmed import atomically persists every
+  parsed static node, appends it to `Proxies`, preserves the current selection,
+  and verifies the live `/proxies` projection. One bad URI or a stale revision
+  rejects the whole batch. Delete removes the exact static node and membership,
+  but refuses a node currently selected by any group or referenced elsewhere.
+  A reinstall keeps `config.yaml.5gpn-nodes.lock` root-owned `0600`, after which
+  another node transaction still succeeds.
 - [ ] Publishing an invalid operator candidate is refused before replacement;
   the live YAML, controller listeners, UI path, and current runtime remain
   unchanged.

@@ -67,8 +67,15 @@ plans, design handoffs, and git history are context only.
   inputs only; they are never current names or compatibility aliases.
 - `/etc/5gpn/mihomo/config.yaml` is fully operator-owned. Normal install,
   reinstall, and `configure` operations preserve a valid existing file. Only
-  explicit reset may replace it, after `5gpn-mihomo -t`, backup, and atomic
-  rename.
+  explicit reset may replace the complete file wholesale, after
+  `5gpn-mihomo -t`, backup, and atomic rename. The root management TUI may make
+  one narrower explicit transaction: its bundled `5gpn-nodes` one-shot parser
+  may add or remove static `proxies` entries and their membership in the
+  existing `Proxies` selector. That transaction is revision-checked, validates
+  the complete candidate with mihomo's own parser, writes a previous-file
+  backup, publishes atomically, and hot-applies the complete path. It is not a
+  controller API, node database, generated YAML region, or subscription
+  service.
   The fixed UDP/443 guard is part of fresh/reset seeds and the live readiness
   boundary, but it is not an installer-owned generated region. An operator may
   edit the complete YAML manually; if the guard is missing or disabled,

@@ -240,6 +240,13 @@ operations.
 
 普通 install、reinstall 和 `configure` 会先用 `5gpn-mihomo -t` 验证已有配置，再逐字节保留它。只有显式 `mihomo-reset` 或 TTY 确认的 `upgrade-reset-mihomo` 能在备份、完整校验和原子 rename 后替换它。`configure` 若发现新域名、gateway 或 listener 与现有 operator-owned YAML 不兼容，会在写入前中止，而不是暗中修改数据面。
 
+The root-only **Nodes** tab in `sudo 5gpn` is a narrow explicit exception, not
+a whole-file replacement: it may add or remove static `proxies` and their
+membership in the existing `Proxies` selector. It revision-checks and validates
+the complete operator file, keeps the previous bytes beside it, publishes
+atomically, and hot-applies the complete path. No Console node API or second
+node database is created.
+
 ### Mihomo proxy selection
 
 The supported 5gpn seed stays in `mode: rule`. Its final rule is
@@ -264,6 +271,16 @@ proxies:
 proxy-groups:
   - {name: Proxies, type: select, proxies: [MyProxy, DIRECT]}
 ```
+
+For static snapshots, `sudo 5gpn` → **Nodes** can perform that transaction. It
+accepts a Mihomo/Clash `proxies:` document, one proxy mapping, a proxy mapping
+list, or the plain/standard-Base64 share-link exports supported by mihomo. Every
+non-empty URI line must parse; one bad line rejects the complete batch. The TUI
+shows the parsed names before confirmation, rejects collisions, adds every new
+name to `Proxies`, hot-applies the complete file, and verifies the live group.
+This does not create a continuing Sub-Store subscription. YAML remains the path
+for protocols without a supported share URI, and `proxy-providers`, arbitrary
+groups, and rules remain manual operator edits.
 
 The Console's **Update config** path/payload action only hot-applies a complete
 configuration; it does not write the YAML. Restarting or reloading the default

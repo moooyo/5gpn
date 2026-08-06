@@ -378,7 +378,24 @@ operator-owned YAML can still be edited manually.
 The Console can hot-apply a complete YAML payload or load an absolute safe
 path through the upstream `/configs` API, but that API never writes
 `config.yaml`. Persistent proxy nodes, providers, memberships, and rules are
-operator file changes; the Console is not a second node database.
+operator file changes; the Console is not a second node database. The root
+management TUI has one deliberately narrower host action for static nodes. A
+short-lived `5gpn-mihomo 5gpn-nodes` command parses pasted Mihomo/Clash
+`proxies` YAML or the share-link formats already supported by mihomo, rejects
+partial imports, and adds the validated static nodes to the existing `Proxies`
+selector. Delete removes the static node and that membership, but the complete
+candidate must still parse, so a reference from another group, rule, or dialer
+makes the whole operation fail.
+
+This is a revision-checked edit of the operator file, not another source of
+truth. The one-shot command keeps a previous-file backup, validates the
+complete candidate through mihomo's own configuration parser, and publishes
+with an fsynced same-directory rename. The TUI then hot-applies that complete
+path through the existing `/configs` route. A failed hot apply restarts the
+complete service from the already validated disk file; it does not roll the
+operator edit back. No node CRUD route, selector API, generated YAML region, or
+continuing subscription service exists. Provider subscriptions and arbitrary
+group/rule edits remain manual operator YAML changes.
 
 ## The Telegram control plane
 
@@ -415,12 +432,15 @@ anything beneath it. `5gpn/importrule_test.go` enforces this by walking
 
 The rule exists because the fork's cost is not the size of `5gpn/` — it is how
 many upstream-owned files carry a 5gpn-shaped change, since those are what a
-rebase must reconcile. All 5gpn-specific upstream edits remain concentrated in
-two files: `tunnel/tunnel.go` owns the capture and reviewed-routing hooks, while
-`hub/hub.go` starts the subsystems and propagates critical startup failure.
-Runtime authorization and fail-fast startup made the former twelve-line count
-obsolete; keep the file boundary rather than preserving a misleading fixed
-line budget. The supporting bookkeeping remains in fork-owned files.
+rebase must reconcile. All runtime 5gpn-specific upstream edits remain
+concentrated in two files: `tunnel/tunnel.go` owns the capture and
+reviewed-routing hooks, while `hub/hub.go` starts the subsystems and propagates
+critical startup failure. `main.go` has one additional one-shot dispatch to the
+root `5gpn` façade for the offline `5gpn-nodes` command; it starts no service
+and has no data-plane role. Runtime authorization and fail-fast startup made
+the former twelve-line count obsolete; keep these file boundaries rather than
+preserving a misleading fixed line budget. The supporting bookkeeping remains
+in fork-owned files.
 
 Two other categories of change exist against upstream and are deliberately not
 counted, because counting them would make the number mean something else.
@@ -498,6 +518,19 @@ paint uses cursor-home plus erase-to-end in one write rather than clearing the
 display before slow system and controller probes; plain list and non-Gum
 fallbacks retain the same actions. Sensitive Console connection fields are an
 explicit action and are never part of the overview frame.
+
+The Nodes tab is a host-side editor for static snapshots, not a Console node
+store. Multiline Gum input accepts a Mihomo/Clash proxy mapping/list or supported
+share-link export. The TUI holds the installer lock, quotes the current raw-file
+revision, delegates all protocol parsing and complete-config validation to the
+one-shot core command, and adds every imported name to `Proxies`. Deletion is
+exact-name, refuses a node currently selected by any live group, and rejects a
+candidate that leaves another reference dangling. Only a successful atomic file
+publication followed by full-path hot apply and live `/proxies` verification is
+reported as complete; a reload failure triggers a complete service restart
+against the validated new file. If that also fails,
+the TUI reports the saved-versus-live split and the previous-file backup path;
+it does not roll the edit back automatically.
 
 Service status is provenance-aware. An inactive 5gpn-owned Certbot timer is an
 error; a debug certificate has no applicable renewal timer; a reused external

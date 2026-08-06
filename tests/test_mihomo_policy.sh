@@ -156,6 +156,8 @@ else
 fi
 check install.sh 'render_mihomo_config'                'installer renders config'
 nocheck install.sh 'apply_.*_to_xray'                  'xray patchers removed'
+check install.sh '5gpn-nodes (list|import|delete)'      'root TUI delegates node semantics to the one-shot core command'
+nocheck install.sh '/5gpn/nodes'                       'node management is not exposed as a controller API'
 
 # Task 4: the source allowlist was removed by owner decision. Nothing may
 # reintroduce a management surface for it -- the ops, the live refresh, or

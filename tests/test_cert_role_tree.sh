@@ -95,6 +95,22 @@ sweep="$(sed -n '/^    install -d -o root -g "\$FIVEGPN_SERVICE_USER" -m 3770 "\
     || fail "the mode sweep does not prune \$FIVEGPN_STATE_DIR; the certificate request loses 0644"
 pass "the mode sweep prunes the core's 5gpn/ state directory"
 
+# The one-shot node helper's persistent lock is root-owned in the sticky mihomo
+# directory. Letting the generic runtime sweep hand it to fivegpn would allow
+# the service account to replace the locked inode and defeat transaction
+# exclusion on the next TUI edit.
+permissions_fn="$(sed -n '/^prepare_runtime_permissions()/,/^}/p' "$ROOT/install.sh")"
+printf '%s' "$permissions_fn" | grep -Fq '! -path "$node_lock"' \
+    && printf '%s' "$permissions_fn" | grep -Fq '! -path "$node_backup"' \
+    || fail "the generic mihomo mode sweep still rewrites node transaction files"
+printf '%s' "$permissions_fn" | grep -Fq 'chown root:root "$node_lock"' \
+    && printf '%s' "$permissions_fn" | grep -Fq 'chmod 0600 "$node_lock"' \
+    || fail "the node transaction lock is not normalized to root:root 0600"
+printf '%s' "$permissions_fn" | grep -Fq 'chown "root:$FIVEGPN_SERVICE_GROUP" "$node_backup"' \
+    && printf '%s' "$permissions_fn" | grep -Fq 'chmod 0640 "$node_backup"' \
+    || fail "the previous node config backup is not normalized like config.yaml"
+pass "the installer preserves the node helper's lock and backup ownership contract"
+
 
 
 # Every place that enumerates the certificate roles must name the same three.

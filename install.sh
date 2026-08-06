@@ -176,8 +176,8 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # leaves the gateway with no resolver, no capture and no control API at all. The
 # staging probe checks the version token exactly rather than accepting a prefix.
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-monolith.23"
-MIHOMO_SHA256="624356d15f9d045f184a5fe80702ca0ef98dbdef74e70aa314298a0e0ae952d7"
+MIHOMO_VERSION="v1.19.28-monolith.24"
+MIHOMO_SHA256="253f61943dec0050eff49ecdb3662b990d85147c44401093d42f33de53336305"
 # Every `mihomo -t` in this script must run with the same SAFE_PATHS the unit
 # grants, because the seed names paths outside its own home directory -- the
 # certificates it serves and the UI bundle it publishes. Without this the core
@@ -334,6 +334,29 @@ ask_choice() {
         [[ "$answer" =~ ^[0-9]+$ && "$answer" -ge 1 && "$answer" -lt "$i" ]] || return 1
         printf '%s\n' "${!answer}"
     fi
+}
+
+# Multiline operator input is needed for pasted proxy exports. Gum owns the
+# normal path; the plain fallback opens a private temporary file in the
+# operator's editor so YAML and URI lists keep their line boundaries.
+ask_multiline() {
+    local prompt="$1" placeholder="${2:-}" editor tmp value
+    [[ -t 0 ]] || return 1
+    if [[ "$_HAVE_GUM" == 1 ]]; then
+        CI=1 gum write --header "$prompt" --header.foreground "$UI_ACCENT" \
+            --placeholder "$placeholder" --width 100 --height 16
+        return
+    fi
+
+    editor="${VISUAL:-${EDITOR:-vi}}"
+    command -v "$editor" >/dev/null 2>&1 \
+        || { err "No editor is available for multiline input (tried: $editor)."; return 1; }
+    tmp="$(umask 077; mktemp /tmp/5gpn-node-input.XXXXXX)" || return 1
+    printf '%s\n' "# $prompt" "# Save and close to continue; comment-only input cancels." >"$tmp"
+    "$editor" "$tmp" || { rm -f -- "$tmp"; return 1; }
+    value="$(sed '/^[[:space:]]*#/d' "$tmp")"
+    rm -f -- "$tmp"
+    printf '%s' "$value"
 }
 # Run an opaque wait command behind a spinner when interactive; else run it plainly.
 # Restore the caller's CI state for the wrapped command because Gum inherits its
@@ -4383,6 +4406,68 @@ fivegpn_interception_snapshot() {
     mihomo_controller_curl "/5gpn/interception" "${curl_args[@]}" 2>/dev/null
 }
 
+# Static nodes remain fields in the operator-owned mihomo YAML. The core's
+# one-shot helper performs structured parsing and the atomic file transaction;
+# this shell surface only gathers input and asks the already-running controller
+# to hot-apply the resulting complete file.
+fivegpn_nodes_snapshot() {
+    "$MIHOMO_BIN" 5gpn-nodes list --config "${MIHOMO_DIR}/config.yaml"
+}
+
+fivegpn_reload_operator_config() {
+    local secret body
+    secret="$(cfg_get DNS_MIHOMO_SECRET)"
+    [[ -n "$secret" ]] || { err "Persisted controller secret is missing."; return 1; }
+    body="$(jq -nc --arg path "${MIHOMO_DIR}/config.yaml" '{path: $path}')" || return 1
+    mihomo_controller_curl "/configs" \
+        --fail-with-body --silent --show-error --max-time 120 \
+        -H "Authorization: Bearer $secret" -H 'Content-Type: application/json' \
+        -X PUT --data "$body" >/dev/null
+}
+
+fivegpn_live_proxies_snapshot() {
+    local secret
+    secret="$(cfg_get DNS_MIHOMO_SECRET)"
+    [[ -n "$secret" ]] || return 1
+    mihomo_controller_curl "/proxies" \
+        --fail --silent --show-error --max-time 10 \
+        -H "Authorization: Bearer $secret"
+}
+
+fivegpn_verify_live_node_change() {
+    local result="$1" action="$2" live names name
+    live="$(fivegpn_live_proxies_snapshot)" || return 1
+    case "$action" in
+        import)
+            names="$(printf '%s' "$result" | jq -c '.added')" || return 1
+            printf '%s' "$live" | jq -e --argjson names "$names" '
+                all($names[] as $name;
+                    (.proxies | has($name)) and
+                    ((.proxies.Proxies.all // []) | index($name) != null))
+            ' >/dev/null
+            ;;
+        delete)
+            name="$(printf '%s' "$result" | jq -r '.removed')" || return 1
+            printf '%s' "$live" | jq -e --arg name "$name" '
+                ((.proxies | has($name)) | not) and
+                (((.proxies.Proxies.all // []) | index($name)) == null)
+            ' >/dev/null
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+fivegpn_apply_node_change() {
+    local result="$1" action="$2"
+    if fivegpn_reload_operator_config \
+       && fivegpn_verify_live_node_change "$result" "$action"; then
+        return 0
+    fi
+    warn "mihomo 热应用或运行态核对失败；将重启完整服务以应用已验证的磁盘配置。"
+    restart_services || return 1
+    fivegpn_verify_live_node_change "$result" "$action"
+}
+
 install_mihomo_runtime_assets() {
     local runtime_dir="${BASE_DIR}/etc/mihomo" asset source candidate
     install -d -m 0755 "$runtime_dir" \
@@ -4879,6 +4964,129 @@ manage_screen_network() {
     fi
 }
 
+# --- screen: static proxy nodes ----------------------------------------------
+manage_screen_nodes() {
+    local snapshot total members
+    echo "节点"
+    echo ""
+    if ! snapshot="$(fivegpn_nodes_snapshot 2>/dev/null)"; then
+        printf '  ❔ 无法读取 operator-owned mihomo 配置中的静态节点。\n'
+        printf '  请确认当前 Core 支持 5gpn-nodes 本机管理命令。\n'
+        return 0
+    fi
+    if ! command -v jq >/dev/null 2>&1 \
+       || ! printf '%s' "$snapshot" | jq -e '
+            (.revision | test("^[0-9a-f]{64}$")) and
+            (.group == "Proxies") and (.nodes | type == "array")
+          ' >/dev/null 2>&1; then
+        printf '  ❔ 节点配置可读,但无法解析管理结果。\n'
+        return 0
+    fi
+
+    total="$(printf '%s' "$snapshot" | jq '.nodes | length')"
+    members="$(printf '%s' "$snapshot" | jq '[.nodes[] | select(.in_proxies)] | length')"
+    printf '  静态节点 %s · Proxies 成员 %s\n' "$total" "$members"
+    echo ""
+    if [[ "$total" == 0 ]]; then
+        printf '  暂无静态节点；Proxies 仍可包含 DIRECT 或 proxy-provider。\n'
+    else
+        printf '%s' "$snapshot" | jq -r \
+            '.nodes[] | [(.name | @json), .type, ((.server // "-") | @json), ((.port // "-") | tostring), (if .in_proxies then "Proxies" else "未加入" end)] | @tsv' \
+          | while IFS=$'\t' read -r name type server port membership; do
+                printf '  • %s  [%s]  %s:%s  %s\n' "$name" "$type" "$server" "$port" "$membership"
+            done
+    fi
+    echo ""
+    printf '  新增接受 Clash/Mihomo proxies YAML、常见分享链接或标准 Base64 订阅。\n'
+    printf '  导入是静态快照；所有新节点追加到 Proxies,但不会自动切换当前选择。\n'
+}
+
+manage_add_nodes() {
+    local before revision content preview result added
+    command -v jq >/dev/null 2>&1 || { err "jq is required for node management."; return 1; }
+    before="$(fivegpn_nodes_snapshot)" || return 1
+    revision="$(printf '%s' "$before" | jq -r '.revision // empty')"
+    [[ "$revision" =~ ^[0-9a-f]{64}$ ]] \
+        || { err "Could not read the current mihomo configuration revision."; return 1; }
+
+    content="$(ask_multiline \
+        '粘贴节点 Paste nodes（保存退出后导入）' \
+        'Clash proxies: YAML, ss:// / vmess:// / vless:// / trojan:// / hy2:// ...' || true)"
+    [[ -n "${content//[[:space:]]/}" ]] || { warn "未输入节点,未做任何修改。"; return 0; }
+
+    if ! preview="$(printf '%s' "$content" | "$MIHOMO_BIN" 5gpn-nodes import \
+        --dry-run --config "${MIHOMO_DIR}/config.yaml" --revision "$revision")"; then
+        err "节点解析或配置校验失败；当前配置未改变。"
+        return 1
+    fi
+    {
+        echo "将新增并加入 Proxies："
+        printf '%s' "$preview" | jq -r '.added[] | "  • " + @json'
+        echo ""
+        echo "导入不会自动切换 Proxies 当前选项。"
+    } | card
+    ask_yesno "确认写入以上静态节点?" || { warn "已取消,当前配置未改变。"; return 0; }
+
+    if ! result="$(printf '%s' "$content" | "$MIHOMO_BIN" 5gpn-nodes import \
+        --config "${MIHOMO_DIR}/config.yaml" --revision "$revision")"; then
+        err "节点解析或配置校验失败；当前配置未改变。"
+        return 1
+    fi
+    fivegpn_apply_node_change "$result" import || {
+        err "节点已安全写入磁盘,但运行态未核对成功；请检查 ${MIHOMO_DIR}/config.yaml 及其 .5gpn-nodes.bak。"
+        return 1
+    }
+
+    added="$(printf '%s' "$result" | jq -r '.added | map(@json) | join(", ")')"
+    ok "节点已写入 operator-owned config.yaml、加入 Proxies 并热应用: ${added}"
+}
+
+manage_delete_node() {
+    local before revision choice index name display result live selected_by
+    local -a encoded_names display_names options=()
+    command -v jq >/dev/null 2>&1 || { err "jq is required for node management."; return 1; }
+    before="$(fivegpn_nodes_snapshot)" || return 1
+    revision="$(printf '%s' "$before" | jq -r '.revision // empty')"
+    mapfile -t encoded_names < <(printf '%s' "$before" | jq -r '.nodes[].name | @base64')
+    mapfile -t display_names < <(printf '%s' "$before" | jq -r '.nodes[].name | @json')
+    if (( ${#encoded_names[@]} == 0 )); then
+        warn "当前没有可删除的静态节点。"
+        return 0
+    fi
+    for index in "${!display_names[@]}"; do
+        options+=("$((index + 1)). ${display_names[$index]}")
+    done
+    choice="$(ask_choice '选择要删除的静态节点' "${options[@]}" '取消 Cancel' || true)"
+    [[ -n "$choice" && "$choice" != '取消 Cancel' ]] || return 0
+    index="${choice%%.*}"
+    [[ "$index" =~ ^[0-9]+$ && "$index" -ge 1 && "$index" -le "${#encoded_names[@]}" ]] || return 1
+    display="${display_names[$((index - 1))]}"
+    name="$(printf '%s' "${encoded_names[$((index - 1))]}" | base64 -d)" || return 1
+    live="$(fivegpn_live_proxies_snapshot 2>/dev/null)" \
+        || { err "无法核对当前 selector 选择；为避免流量静默切换,拒绝删除。"; return 1; }
+    selected_by="$(printf '%s' "$live" | jq -r --arg name "$name" '
+        [.proxies | to_entries[] |
+            select(.value.now? == $name and ((.value.all? // []) | index($name) != null)) |
+            (.key | @json)] | join(", ")
+    ')"
+    if [[ -n "$selected_by" ]]; then
+        warn "该节点当前被 selector 使用: ${selected_by}。请先切换选择后再删除。"
+        return 1
+    fi
+    ask_yesno "确认从 config.yaml 和 Proxies 删除节点 ${display}?" || return 0
+
+    if ! result="$("$MIHOMO_BIN" 5gpn-nodes delete \
+        --config "${MIHOMO_DIR}/config.yaml" --revision "$revision" --name "$name")"; then
+        err "节点仍被其他组、规则或 dialer 引用,或配置已改变；未删除。"
+        return 1
+    fi
+    fivegpn_apply_node_change "$result" delete || {
+        err "删除已安全写入磁盘,但运行态未核对成功；请检查 ${MIHOMO_DIR}/config.yaml 及其 .5gpn-nodes.bak。"
+        return 1
+    }
+    ok "节点已从 config.yaml 和 Proxies 删除并热应用: ${display}"
+}
+
 # manage_screen runs one screen: render its facts, offer its actions, repeat
 # until the operator goes back. The status is re-rendered after every action, so
 # the effect of what they just did is on screen before the next choice.
@@ -4911,6 +5119,10 @@ manage_action() {
             journalctl -u 5gpn-mihomo.service -n 80 --no-pager 2>/dev/null | card || warn "journalctl unavailable" ;;
         "编辑安装配置 Configure installation")
             full_install configure ;;
+        "新增节点 Add nodes")
+            run_management_with_install_lock manage_add_nodes ;;
+        "删除节点 Delete node")
+            run_management_with_install_lock manage_delete_node ;;
         "重新生成 iOS 描述文件 Regenerate iOS profile")
             run_management_with_install_and_cert_lock regen_ios ;;
         "设置 Cloudflare Token Set Cloudflare token")
@@ -4937,6 +5149,7 @@ MANAGE_SCREENS=(
     "服务|manage_screen_services|重启服务 Restart services|查看核心日志 Core logs"
     "证书|manage_screen_certificates|重新生成 iOS 描述文件 Regenerate iOS profile|设置 Cloudflare Token Set Cloudflare token"
     "网络|manage_screen_network|编辑安装配置 Configure installation"
+    "节点|manage_screen_nodes|新增节点 Add nodes|删除节点 Delete node"
     # Grouped because each one is irreversible or drops live sessions, and a list
     # that mixed them with "show status" made the cursor pass over them on the
     # way to something harmless.
@@ -6206,6 +6419,8 @@ remove_retired_polkit_rule() {
 
 prepare_runtime_permissions() {
     local path role
+    local node_lock="${MIHOMO_DIR}/config.yaml.5gpn-nodes.lock"
+    local node_backup="${MIHOMO_DIR}/config.yaml.5gpn-nodes.bak"
     preflight_runtime_publication_paths || return 1
     install -d -o root -g root -m 0755 "$CONF_DIR" || return 1
     chmod g-s "$CONF_DIR" || return 1
@@ -6245,6 +6460,8 @@ prepare_runtime_permissions() {
     find "$MIHOMO_DIR" -mindepth 1 -path "$FIVEGPN_STATE_DIR" -prune -o -type f \
         ! -path "$MIHOMO_DIR/config.yaml" \
         ! -name 'config.yaml.bak.*' \
+        ! -path "$node_lock" \
+        ! -path "$node_backup" \
         -exec chown "$FIVEGPN_SERVICE_USER:$FIVEGPN_SERVICE_USER" {} + \
         -exec chmod 0660 {} + || return 1
     find "$MIHOMO_DIR" -mindepth 1 -maxdepth 1 -type f -name 'config.yaml.bak.*' \
@@ -6255,6 +6472,14 @@ prepare_runtime_permissions() {
         chown "root:$FIVEGPN_SERVICE_GROUP" "$MIHOMO_DIR/$path" || return 1
         chmod 0640 "$MIHOMO_DIR/$path" || return 1
     done
+    if [[ -f "$node_backup" ]]; then
+        chown "root:$FIVEGPN_SERVICE_GROUP" "$node_backup" || return 1
+        chmod 0640 "$node_backup" || return 1
+    fi
+    if [[ -f "$node_lock" ]]; then
+        chown root:root "$node_lock" || return 1
+        chmod 0600 "$node_lock" || return 1
+    fi
 
     prepare_intercept_runtime_dirs || return 1
     prepare_intercept_state_dir || return 1

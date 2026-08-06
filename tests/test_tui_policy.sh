@@ -267,9 +267,49 @@ echo "ok: the key reader leaves no terminal state to restore"
 # Each screen renders its own facts before offering its actions: a decision is
 # made with the state it acts on already on screen.
 for screen in manage_screen_overview manage_screen_services \
-              manage_screen_certificates manage_screen_network; do
+              manage_screen_certificates manage_screen_network manage_screen_nodes; do
     grep -Eq "^${screen}\(\)" "$INSTALL" || fail "$screen is missing"
 done
+
+nodes_screen_fn="$(sed -n '/^manage_screen_nodes()/,/^}/p' "$INSTALL")"
+printf '%s' "$nodes_screen_fn" | grep -Fq 'fivegpn_nodes_snapshot' \
+    || fail "the node screen does not read the operator-owned mihomo config through the core helper"
+printf '%s' "$nodes_screen_fn" | grep -Fq 'if ! snapshot=' \
+    && printf '%s' "$nodes_screen_fn" | grep -Fq '.nodes | type == "array"' \
+    || fail "the node screen mistakes a helper error JSON for a successful node view"
+printf '%s' "$nodes_screen_fn" | grep -Fq 'Proxies' \
+    || fail "the node screen does not explain the Proxies membership boundary"
+printf '%s' "$nodes_screen_fn" | grep -Fq '@json' \
+    || fail "the node screen prints untrusted YAML strings without terminal escaping"
+multiline_fn="$(sed -n '/^ask_multiline()/,/^}/p' "$INSTALL")"
+printf '%s' "$multiline_fn" | grep -Fq 'gum write' \
+    || fail "multiline node input does not use Gum on the primary TUI path"
+printf '%s' "$multiline_fn" | grep -Fq '[[ -t 0 ]]' \
+    || fail "multiline node input is not gated on attached stdin"
+
+add_nodes_fn="$(sed -n '/^manage_add_nodes()/,/^}/p' "$INSTALL")"
+delete_node_fn="$(sed -n '/^manage_delete_node()/,/^}/p' "$INSTALL")"
+for fn in "$add_nodes_fn" "$delete_node_fn"; do
+    printf '%s' "$fn" | grep -Fq '5gpn-nodes' \
+        || fail "a node mutation bypasses the core parser helper"
+    printf '%s' "$fn" | grep -Fq 'fivegpn_apply_node_change' \
+        || fail "a persisted node mutation does not use the shared apply-and-verify path"
+done
+printf '%s' "$add_nodes_fn" | grep -Fq -- '--dry-run' \
+    && printf '%s' "$add_nodes_fn" | grep -Fq 'ask_yesno' \
+    || fail "node import does not preview the parsed names before confirmation"
+printf '%s' "$delete_node_fn" | grep -Fq 'fivegpn_live_proxies_snapshot' \
+    && printf '%s' "$delete_node_fn" | grep -Fq '.value.now?' \
+    || fail "node deletion does not refuse a node currently selected by a live group"
+printf '%s' "$delete_node_fn" | grep -Fq '@base64' \
+    && printf '%s' "$delete_node_fn" | grep -Fq '@json' \
+    || fail "node deletion does not separate the exact name from its terminal-safe label"
+apply_nodes_fn="$(sed -n '/^fivegpn_apply_node_change()/,/^}/p' "$INSTALL")"
+printf '%s' "$apply_nodes_fn" | grep -Fq 'fivegpn_reload_operator_config' \
+    && printf '%s' "$apply_nodes_fn" | grep -Fq 'fivegpn_verify_live_node_change' \
+    || fail "node changes are not hot-applied and checked against the live Proxies view"
+printf '%s' "$apply_nodes_fn" | grep -Fq 'restart_services' \
+    || fail "node changes do not converge disk and runtime when hot apply fails"
 screen_fn="$(sed -n '/^manage_screen()/,/^}/p' "$INSTALL")"
 printf '%s' "$screen_fn" | grep -Fq '| card' \
     || fail "manage_screen does not frame its status through card()"
