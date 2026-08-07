@@ -264,9 +264,12 @@ Marketplace update apply also quotes the exact manifest URL returned by review.
 Changing or removing that selected entry therefore invalidates the confirmation
 even when a different URL happens to serve byte-identical code; a digest proves
 content identity, not that the operator authorized an unshown source change.
-These `snapshot_digest`, reviewed-source, and structured-conflict fields are the
-`5gpn-interception` capability version 4 contract; a version-3 Console must not
-render or write the version-4 surface.
+These `snapshot_digest`, reviewed-source, and structured-conflict fields were
+introduced by the `5gpn-interception` capability version 4 contract. Version 5
+retains that complete surface and adds the authenticated same-origin location
+search used by typed extension settings. A Console and core must still match the
+feature version exactly; a client must not infer the search route from an older
+version that never mounted it.
 Catalog review resolves its configured source and installed-state projection
 from one committed interception revision. If that document changes while the
 catalog or manifest is being fetched, review returns a revision conflict rather

@@ -171,8 +171,8 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # leaves the gateway with no resolver, no capture and no control API at all. The
 # staging probe checks the version token exactly rather than accepting a prefix.
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-monolith.27"
-MIHOMO_SHA256="db365542ec4ac1921bcb3229ce674c946de27e6d6e84cdeba1cb9a4b4c43a3b7"
+MIHOMO_VERSION="v1.19.28-monolith.28"
+MIHOMO_SHA256="38ecedf63efcc24f0c258cc820b14fab21cc575c1af6fa802f35e5752f9fa257"
 # Every `mihomo -t` in this script must run with the same SAFE_PATHS the unit
 # grants, because the seed names paths outside its own home directory -- the
 # certificates it serves and the UI bundle it publishes. Without this the core
@@ -184,8 +184,8 @@ MIHOMO_SHA256="db365542ec4ac1921bcb3229ce674c946de27e6d6e84cdeba1cb9a4b4c43a3b7"
 # a drift here fails at install time on a config the running service accepts.
 MIHOMO_SAFE_PATHS="/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui"
 ZASH_REPO="moooyo/zashboard"
-ZASH_VERSION="v3.16.1-monolith.28"        # our fork's dist.zip, built from feat/5gpn-console
-ZASH_SHA256="4b63a376c72dc7d46fe7a30271fa4707d5d81152dbabae99552af496c37ec00d"
+ZASH_VERSION="v3.16.1-monolith.29"        # our fork's dist.zip, built from feat/5gpn-console
+ZASH_SHA256="568b6a80cec46b584aeb6ae8b28966d72af686f07257a273092b42fb2b693d68"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
@@ -3927,7 +3927,10 @@ prepare_intercept_runtime_dirs() {
     # material here. Its writable documents live below FIVEGPN_STATE_DIR and
     # persistent extension storage lives below INTERCEPT_STATE_DIR. Keeping this
     # directory group-writable would preserve the retired sidecar config plane.
-    chmod 0750 "$INTERCEPT_DIR" || return 1
+    # Five octal digits explicitly clear the set-group-ID bit left by the old
+    # 3770 directory. GNU chmod preserves that bit for a four-digit directory
+    # mode, producing 2750 while the final boundary correctly requires 750.
+    chmod 00750 "$INTERCEPT_DIR" || return 1
 }
 
 prepare_intercept_state_dir() {

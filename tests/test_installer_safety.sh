@@ -436,6 +436,17 @@ else
     pass "live setgid marker ownership skipped because the suite is not root on a POSIX-mode filesystem"
 fi
 
+# 0.0.77 published the interception runtime directory as 3770. GNU chmod keeps
+# a directory's setgid bit when asked for four-digit 0750, producing 2750 and
+# making the final exact-mode boundary reject the installer's own publication.
+intercept_dirs_fn="$(sed -n '/^prepare_intercept_runtime_dirs()/,/^}/p' "$INSTALL")"
+if grep -Fq 'chmod 00750 "$INTERCEPT_DIR"' <<<"$intercept_dirs_fn" \
+   && ! grep -Fq 'chmod 0750 "$INTERCEPT_DIR"' <<<"$intercept_dirs_fn"; then
+    pass "interception runtime publication clears the legacy setgid bit explicitly"
+else
+    fail "interception runtime publication can preserve the legacy setgid bit"
+fi
+
 if (
     CONF_DIR="$TMP/cfg-get-safe"
     mkdir -p "$CONF_DIR"

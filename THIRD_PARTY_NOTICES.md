@@ -28,14 +28,14 @@ listed SHA-256 digest, and then publishes them on the gateway.
 
 | Component | Exact release and downloaded artifact | SHA-256 | License evidence | Installed use |
 |---|---|---|---|---|
-| 5gpn mihomo fork | [`moooyo/mihomo` `v1.19.28-monolith.27`](https://github.com/moooyo/mihomo/releases/tag/v1.19.28-monolith.27), `mihomo-linux-amd64-compatible-v1.19.28-monolith.27.gz` | `db365542ec4ac1921bcb3229ce674c946de27e6d6e84cdeba1cb9a4b4c43a3b7` | GPL-3.0; see the exact tag's [`LICENSE`](https://github.com/moooyo/mihomo/blob/v1.19.28-monolith.27/LICENSE) and [source](https://github.com/moooyo/mihomo/tree/v1.19.28-monolith.27) | Installed as `/opt/5gpn/bin/5gpn-mihomo`; this is the sole long-running 5gpn process. |
-| zashboard fork | [`moooyo/zashboard` `v3.16.1-monolith.28`](https://github.com/moooyo/zashboard/releases/tag/v3.16.1-monolith.28), `dist.zip` | `4b63a376c72dc7d46fe7a30271fa4707d5d81152dbabae99552af496c37ec00d` | The zashboard project is MIT, Copyright 2024 Zephyruso; see the exact tag's [`LICENSE`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.28/LICENSE) and [`package.json`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.28/package.json) | Extracted to `/opt/5gpn/ui` and served as static browser assets by `5gpn-mihomo`. |
+| 5gpn mihomo fork | [`moooyo/mihomo` `v1.19.28-monolith.28`](https://github.com/moooyo/mihomo/releases/tag/v1.19.28-monolith.28), `mihomo-linux-amd64-compatible-v1.19.28-monolith.28.gz` | `38ecedf63efcc24f0c258cc820b14fab21cc575c1af6fa802f35e5752f9fa257` | GPL-3.0; see the exact tag's [`LICENSE`](https://github.com/moooyo/mihomo/blob/v1.19.28-monolith.28/LICENSE) and [source](https://github.com/moooyo/mihomo/tree/v1.19.28-monolith.28) | Installed as `/opt/5gpn/bin/5gpn-mihomo`; this is the sole long-running 5gpn process. |
+| zashboard fork | [`moooyo/zashboard` `v3.16.1-monolith.29`](https://github.com/moooyo/zashboard/releases/tag/v3.16.1-monolith.29), `dist.zip` | `568b6a80cec46b584aeb6ae8b28966d72af686f07257a273092b42fb2b693d68` | The zashboard project is MIT, Copyright 2024 Zephyruso; see the exact tag's [`LICENSE`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.29/LICENSE) and [`package.json`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.29/package.json). The archive includes Leaflet 1.9.4 under BSD-2-Clause and ships its complete license text. | Extracted to `/opt/5gpn/ui` and served as static browser assets by `5gpn-mihomo`. |
 
 The zashboard `dist.zip` is a compiled browser bundle and includes code and
 assets from its runtime dependency graph. Those dependencies retain their own
 licenses. The exact dependency graph used to build this artifact is recorded in
-the tagged [`package.json`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.28/package.json)
-and [`pnpm-lock.yaml`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.28/pnpm-lock.yaml);
+the tagged [`package.json`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.29/package.json)
+and [`pnpm-lock.yaml`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.29/pnpm-lock.yaml);
 5gpn does not rebuild or modify the downloaded archive.
 
 ## Optional installer TUI downloaded separately
@@ -94,6 +94,14 @@ release APIs, Let's Encrypt's ACME service, Cloudflare through the OS-provided
 Certbot plugin, and `api.ipify.org`, `ifconfig.me`, or `icanhazip.com` for public
 IPv4 discovery. These are network services, not software or data bundled by
 5gpn; their respective service terms apply.
+
+The Console location editor loads the visible OpenStreetMap Standard raster
+tiles directly in the operator's browser and displays the required
+OpenStreetMap contributor attribution. An explicit city search instead reaches
+the fixed Nominatim service through an authenticated, bounded mihomo projection;
+the controller credential is never forwarded. OpenStreetMap data is available
+under the ODbL, while the public tile and Nominatim services remain governed by
+their own usage policies and have no 5gpn availability guarantee.
 
 First-party extension source lives in the separate
 [`moooyo/5gpn-extensions`](https://github.com/moooyo/5gpn-extensions)

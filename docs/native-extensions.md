@@ -265,11 +265,21 @@ Supported setting types are:
 
 Required settings must be complete before enable. A `location` setting is
 rendered by the Console with city search, a draggable OpenStreetMap point,
-accuracy visualization, and direct coordinate fields. The browser calls one
-authenticated same-origin city-search endpoint; that bounded server projection
-contacts the fixed Nominatim origin only after an explicit Search action and
-never forwards the controller secret. The read-only Telegram bot does not edit
-extension settings or collect locations.
+accuracy visualization, and direct coordinate fields. Only an explicit Search
+action posts the bounded `{query, language}` JSON body to the authenticated
+same-origin `/5gpn/interception/location/search` endpoint. That server
+projection contacts the fixed Nominatim origin and never forwards the
+controller secret. The read-only Telegram bot does not edit extension settings
+or collect locations.
+
+The Console bundles Leaflet locally and OpenStreetMap Standard raster tiles are
+the location editor's only basemap. It does not load executable map code from a
+third party and does not substitute an embedded or alternate map when tiles are
+unavailable. Tile requests originate in the operator's browser, retain visible
+OpenStreetMap attribution, and disclose that browser's address, Console origin,
+and viewed tile area to the tile service. A tile failure is a persistent editor
+state; the direct coordinate fields remain usable without pretending another
+map has equivalent detail.
 
 A `location` value reaches a script nested under its own setting key, so it
 cannot drive a published proxy-compat bundle: those are written against Loon's
