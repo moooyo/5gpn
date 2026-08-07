@@ -252,6 +252,26 @@ and local review are install-only; an installed ID can update only from an
 explicitly selected Marketplace entry, and no installed-source update route is
 mounted.
 
+Extension detail exposes that complete immutable `snapshot_digest` separately
+from the manifest-only source digest, so an enable review can identify the same
+capability and code shape an install or update review names. If apply re-fetches
+a different immutable snapshot, a different extension ID, or Marketplace claims
+that no longer match the candidate, it returns HTTP 409 with
+`code: review_conflict` and the current document revision. The client preserves
+entered settings, disables the old confirmation, and requires a fresh review;
+it does not classify this state by parsing human-readable error text.
+Marketplace update apply also quotes the exact manifest URL returned by review.
+Changing or removing that selected entry therefore invalidates the confirmation
+even when a different URL happens to serve byte-identical code; a digest proves
+content identity, not that the operator authorized an unshown source change.
+These `snapshot_digest`, reviewed-source, and structured-conflict fields are the
+`5gpn-interception` capability version 4 contract; a version-3 Console must not
+render or write the version-4 surface.
+Catalog review resolves its configured source and installed-state projection
+from one committed interception revision. If that document changes while the
+catalog or manifest is being fetched, review returns a revision conflict rather
+than pairing an old source with a newer revision.
+
 `enabled` records operator authorization, not a claim that every runtime
 prerequisite is currently healthy. The API separately projects each module's
 derived runtime phase. Enabling, changing a capture set, or applying an update
