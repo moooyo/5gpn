@@ -173,5 +173,8 @@ jobs:
             "$runtime/config.yaml" > "$runtime/config-speedtest-5060-disabled.yaml"
           ! grep -Fq '5060' "$runtime/config-speedtest-5060-disabled.yaml"
           /tmp/mihomo -t -f "$runtime/config-speedtest-5060-disabled.yaml" -d "$runtime"
-      - name: Exercise sniff-cache isolation
-        run: bash tests/mihomo-sniff-cache-regression.sh /tmp/mihomo
+      # The released monolith intentionally refuses to start outside the
+      # systemd 257 private delegated cgroup boundary. A GitHub-hosted runner
+      # cannot satisfy that production startup contract. The regression script
+      # remains a seed renderer and is exercised only in a compatible deployed
+      # integration environment; this job limits itself to parser/config gates.
