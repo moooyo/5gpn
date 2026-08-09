@@ -92,6 +92,7 @@ cat > "$RUNTIME/5gpn/dns.json" <<EOF
   "tuning": {}
 }
 EOF
+chmod 0600 "$RUNTIME/5gpn/dns.json"
 
 (
     cd "$RUNTIME/console"
