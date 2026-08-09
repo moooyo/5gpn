@@ -22,11 +22,52 @@ API="https://127.0.0.1:443"
 REQUEST=/etc/5gpn/mihomo/5gpn/certificate-request
 RESULT=/etc/5gpn/intercept/cert-state
 CERT_LOCK=/run/5gpn/cert-renew.lock
-HOST=smoke.5gpn-beta.example
-EXT=beta.smoke
+RUN_ID="$(openssl rand -hex 6)"
+HOST="smoke-${RUN_ID}.5gpn-beta.example"
+EXT="beta.smoke.${RUN_ID}"
 
 req() { curl -sk --max-time 60 -H "Authorization: Bearer ${SECRET}" -H 'Content-Type: application/json' "$@"; }
 irev() { req "$API/5gpn/interception" | jq -r .revision; }
+
+installed_by_acceptance=false
+install_attempted=false
+candidate_digest=""
+master_restore_needed=false
+lock_open=false
+master_before=false
+http2_before=true
+
+cleanup() {
+  local current revision detail
+  if [ "$lock_open" = true ]; then
+    flock -u 9 >/dev/null 2>&1 || true
+    exec 9>&-
+    lock_open=false
+  fi
+  if [ "$install_attempted" = true ]; then
+    current="$(req "$API/5gpn/interception" 2>/dev/null || true)"
+    revision="$(echo "$current" | jq -r '.revision // ""' 2>/dev/null || true)"
+    detail="$(req "$API/5gpn/interception/extensions/${EXT}" 2>/dev/null || true)"
+    if [ -n "$revision" ] \
+       && [ "$(echo "$detail" | jq -r '.extension.snapshot_digest // ""' 2>/dev/null || true)" = "$candidate_digest" ]; then
+      req -X DELETE --data "$(jq -nc --arg r "$revision" '{revision:$r}')" "$API/5gpn/interception/extensions/${EXT}" >/dev/null 2>&1 || true
+    elif echo "$current" | jq -e --arg id "$EXT" '.snapshot.modules[]? | select(.id == $id)' >/dev/null 2>&1; then
+      echo "WARNING: refusing to delete $EXT because its installed snapshot no longer matches this acceptance run" >&2
+    fi
+  fi
+  if [ "$master_restore_needed" = true ]; then
+    current="$(req "$API/5gpn/interception" 2>/dev/null || true)"
+    revision="$(echo "$current" | jq -r '.revision // ""' 2>/dev/null || true)"
+    if [ -n "$revision" ] \
+       && [ "$(echo "$current" | jq -r '.snapshot.enabled' 2>/dev/null || true)" = true ] \
+       && [ "$(echo "$current" | jq -r '.snapshot.http2' 2>/dev/null || true)" = "$http2_before" ] \
+       && [ "$(echo "$current" | jq -r '.snapshot.modules | length' 2>/dev/null || true)" = 0 ]; then
+      req -X PUT --data "$(jq -nc --arg r "$revision" --argjson enabled "$master_before" --argjson h2 "$http2_before" '{revision:$r, enabled:$enabled, http2:$h2, http3:false}')" "$API/5gpn/interception/settings" >/dev/null 2>&1 || true
+    fi
+  fi
+}
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
 
 MANIFEST="$(cat <<YAML
 apiVersion: 5gpn.io/v1
@@ -43,20 +84,41 @@ traffic:
   captureHosts:
     - ${HOST}
 actions:
-  - id: noop
+  - id: memory-bomb
     phase: request
     match:
       hosts: [${HOST}]
-      pathRegex: "^/"
+      pathRegex: "^/oom$"
     script:
-      inline: "function transform(context) { return {}; }"
+      inline: |
+        function transform() {
+          const blocks = [];
+          while (true) blocks.push(new Uint8Array(16 * 1024 * 1024));
+        }
       bodyMode: none
+      timeoutMs: 30000
+      maxBodyBytes: 1024
+  - id: healthy
+    phase: request
+    match:
+      hosts: [${HOST}]
+      pathRegex: "^/healthy$"
+    script:
+      inline: "function transform() { return {response: {status: 204, headers: {}}}; }"
+      bodyMode: none
+      timeoutMs: 1000
+      maxBodyBytes: 1024
 YAML
 )"
 
 initial="$(req "$API/5gpn/interception")"
 master_before="$(echo "$initial" | jq -r '.snapshot.enabled')"
 http2_before="$(echo "$initial" | jq -r '.snapshot.http2')"
+module_count="$(echo "$initial" | jq -r '.snapshot.modules | length')"
+if [ "$module_count" != "0" ]; then
+  echo "SKIP: extension lifecycle mutation requires an empty installed-extension set; found $module_count"
+  exit 0
+fi
 digest_before="$(jq -r '.target_digest' "$REQUEST")"
 [[ "$digest_before" =~ ^[0-9a-f]{64}$ ]] \
   || { bad "the initial certificate request is not JSON v1"; echo "$pass passed, $fail failed"; exit 1; }
@@ -65,6 +127,7 @@ head_ "review"
 body="$(jq -nc --arg c "$MANIFEST" '{content:$c}')"
 review="$(req -X POST --data "$body" "$API/5gpn/interception/review")"
 cand="$(echo "$review" | jq -r '.candidate.digest // ""')"
+candidate_digest="$cand"
 if [ -n "$cand" ]; then
   ok "the manifest reviews to digest ${cand:0:16}"
 else
@@ -93,13 +156,17 @@ else
 fi
 
 body="$(jq -nc --arg r "$(irev)" --arg d "$cand" --arg c "$MANIFEST" '{revision:$r, digest:$d, content:$c}')"
+install_attempted=true
 res="$(req -X POST --data "$body" "$API/5gpn/interception/extensions")"
-if echo "$res" | jq -e --arg id "$EXT" '.snapshot.modules[] | select(.id == $id)' >/dev/null 2>&1; then
+installed_detail="$(req "$API/5gpn/interception/extensions/${EXT}" 2>/dev/null || true)"
+if [ "$(echo "$installed_detail" | jq -r '.extension.snapshot_digest // ""' 2>/dev/null || true)" = "$candidate_digest" ]; then
+  installed_by_acceptance=true
   ok "the extension is installed"
 else
-  bad "install failed: $(echo "$res" | head -c 300)"
+  bad "install did not publish the reviewed snapshot: $(echo "$res" | head -c 300)"
+  exit 1
 fi
-if [ "$(echo "$res" | jq -r --arg id "$EXT" '.snapshot.modules[]|select(.id==$id)|.enabled')" = "false" ]; then
+if [ "$(echo "$installed_detail" | jq -r '.extension.enabled')" = "false" ]; then
   ok "it landed disabled, as every install must"
 else
   bad "the install landed enabled"
@@ -116,16 +183,28 @@ head_ "enable, and the certificate that follows"
 # creates a deterministic pending window, so the acceptance proves that an
 # authorized extension is not active until the fenced root transaction commits.
 if [ "$master_before" != true ]; then
-  req -X PUT --data "$(jq -nc --arg r "$(irev)" --argjson h2 "$http2_before" \
+  # Set the cleanup intent before the request: a committed write with a lost
+  # response must still be restored by the EXIT trap.
+  master_restore_needed=true
+  master_res="$(req -X PUT --data "$(jq -nc --arg r "$(irev)" --argjson h2 "$http2_before" \
       '{revision:$r, enabled:true, http2:$h2, http3:false}')" \
-      "$API/5gpn/interception/settings" >/dev/null
+      "$API/5gpn/interception/settings")"
+  master_live="$(req "$API/5gpn/interception")"
+  if [ "$(echo "$master_res" | jq -r '.snapshot.enabled // false')" != true ] \
+     || [ "$(echo "$master_live" | jq -r '.snapshot.enabled // false')" != true ] \
+     || [ "$(echo "$master_live" | jq -r '.snapshot.http2')" != "$http2_before" ]; then
+    bad "the MITM master could not be enabled safely"
+    exit 1
+  fi
 fi
 exec 9>"$CERT_LOCK"
+lock_open=true
 chmod 0600 "$CERT_LOCK"
 if flock -w 5 9; then
   ok "the certificate publisher is delayed for a deterministic pending check"
 else
   bad "could not acquire the certificate publisher lock"
+  exit 1
 fi
 res="$(req -X PUT --data "$(jq -nc --arg r "$(irev)" '{revision:$r, enabled:true}')" \
         "$API/5gpn/interception/extensions/${EXT}/enabled")"
@@ -176,6 +255,7 @@ fi
 # request; this test deliberately does not start it or issue a second API write.
 flock -u 9
 exec 9>&-
+lock_open=false
 ready=""
 for _ in $(seq 1 120); do
   current="$(req "$API/5gpn/interception")"
@@ -226,9 +306,120 @@ else
   bad "the capture did not steer: $(echo "$exp" | jq -c '{ready:.capture.ready, answers, reason:.verdict.reason}')"
 fi
 
+head_ "a worker OOM stays inside the owned action"
+# Re-prove ownership immediately before intentionally exhausting a worker. The
+# random ID, immutable digest, and empty-start contract ensure this request can
+# execute only code installed by this acceptance run.
+owned_detail="$(req "$API/5gpn/interception/extensions/${EXT}" 2>/dev/null || true)"
+if [ "$installed_by_acceptance" != true ] \
+   || [ "$(echo "$owned_detail" | jq -r '.extension.snapshot_digest // ""' 2>/dev/null || true)" != "$candidate_digest" ] \
+   || [ "$(echo "$owned_detail" | jq -r '.extension.enabled // false' 2>/dev/null || true)" != true ]; then
+  bad "refusing the OOM fixture because the owned extension fence changed"
+  exit 1
+fi
+main_pid="$(systemctl show 5gpn-mihomo.service -p MainPID --value 2>/dev/null || true)"
+if ! [[ "$main_pid" =~ ^[1-9][0-9]*$ ]]; then
+  bad "the monolith has no live MainPID before the OOM fixture"
+  exit 1
+fi
+cgroup_root="/proc/${main_pid}/root/sys/fs/cgroup"
+root_procs="$(tr -d '[:space:]' < "$cgroup_root/cgroup.procs" 2>/dev/null || true)"
+main_procs="$(awk 'NF { print }' "$cgroup_root/main/cgroup.procs" 2>/dev/null || true)"
+if [ -z "$root_procs" ] && [ "$main_procs" = "$main_pid" ] \
+   && grep -qw memory "$cgroup_root/cgroup.subtree_control" 2>/dev/null \
+   && grep -qw pids "$cgroup_root/cgroup.subtree_control" 2>/dev/null; then
+  ok "the trusted parent normalized the private delegated root before listeners"
+else
+  bad "the private delegated root/main layout is not normalized"
+  exit 1
+fi
+mapfile -t aggregate_paths < <(find "$cgroup_root" -mindepth 1 -maxdepth 1 -type d \
+  -name "workers.${main_pid}.*" -print 2>/dev/null | LC_ALL=C sort)
+if [ "${#aggregate_paths[@]}" -ne 1 ] \
+   || ! [[ "$(basename -- "${aggregate_paths[0]:-}")" =~ ^workers\.${main_pid}\.[0-9a-f]{32}$ ]]; then
+  bad "the private worker aggregate cgroup is missing or ambiguous"
+  exit 1
+fi
+aggregate_path="${aggregate_paths[0]}"
+if [ "$(tr -d '[:space:]' < "$aggregate_path/memory.max" 2>/dev/null || true)" = 1073741824 ] \
+   && [ "$(tr -d '[:space:]' < "$aggregate_path/memory.swap.max" 2>/dev/null || true)" = 0 ] \
+   && [ "$(tr -d '[:space:]' < "$aggregate_path/pids.max" 2>/dev/null || true)" = 64 ]; then
+  ok "the production worker aggregate enforces the fixed 1GiB/64-task budget"
+else
+  bad "the worker aggregate resource limits differ from the fixed contract"
+  exit 1
+fi
+oom_kill_count() {
+  awk '$1 == "oom_kill" && $2 ~ /^[0-9]+$/ { value=$2; found=1 } END { if (!found) exit 1; print value }' "$1"
+}
+oom_before="$(oom_kill_count "$aggregate_path/memory.events" 2>/dev/null || true)"
+if ! [[ "$oom_before" =~ ^[0-9]+$ ]]; then
+  bad "the worker aggregate exposes no valid hierarchical oom_kill counter"
+  exit 1
+fi
+if [ -n "$(find "$aggregate_path" -mindepth 1 -maxdepth 1 -type d -name 'action.*' -print -quit 2>/dev/null)" ]; then
+  bad "an action leaf existed before the isolated OOM request"
+  exit 1
+fi
+oom_http="$(curl -sk --noproxy '*' --connect-timeout 3 --max-time 40 \
+  --resolve "${HOST}:443:${gw}" -o /dev/null -w '%{http_code}' \
+  "https://${HOST}/oom" 2>/dev/null || true)"
+oom_after="$oom_before"
+for _ in $(seq 1 100); do
+  oom_after="$(oom_kill_count "$aggregate_path/memory.events" 2>/dev/null || true)"
+  if [[ "$oom_after" =~ ^[0-9]+$ ]] && [ "$oom_after" -gt "$oom_before" ]; then
+    break
+  fi
+  sleep 0.1
+done
+if [[ "$oom_after" =~ ^[0-9]+$ ]] && [ "$oom_after" -gt "$oom_before" ]; then
+  ok "the owned /oom action incremented aggregate oom_kill (${oom_before} -> ${oom_after}; HTTP ${oom_http:-none})"
+else
+  bad "the /oom action did not produce a cgroup OOM kill (HTTP ${oom_http:-none})"
+fi
+after_pid="$(systemctl show 5gpn-mihomo.service -p MainPID --value 2>/dev/null || true)"
+if [ "$after_pid" = "$main_pid" ] && systemctl is-active --quiet 5gpn-mihomo.service; then
+  ok "the monolith remained active with the same MainPID after worker OOM"
+else
+  bad "the worker OOM restarted or stopped the monolith (before=$main_pid after=${after_pid:-none})"
+fi
+leaf_left=""
+for _ in $(seq 1 100); do
+  leaf_left="$(find "$aggregate_path" -mindepth 1 -maxdepth 1 -type d -name 'action.*' -print -quit 2>/dev/null)"
+  [ -n "$leaf_left" ] || break
+  sleep 0.1
+done
+if [ -z "$leaf_left" ]; then
+  ok "the OOM action leaf was removed"
+else
+  bad "the OOM action leaf remains: $leaf_left"
+fi
+healthy_http="$(curl -sk --noproxy '*' --connect-timeout 3 --max-time 10 \
+  --resolve "${HOST}:443:${gw}" -o /dev/null -w '%{http_code}' \
+  "https://${HOST}/healthy" 2>/dev/null || true)"
+if [ "$healthy_http" = 204 ] \
+   && [ "$(systemctl show 5gpn-mihomo.service -p MainPID --value 2>/dev/null || true)" = "$main_pid" ] \
+   && systemctl is-active --quiet 5gpn-mihomo.service; then
+  ok "the next isolated /healthy action returned 204 without restarting mihomo"
+else
+  bad "the healthy action after OOM returned ${healthy_http:-no response}"
+fi
+if [ -z "$(find "$aggregate_path" -mindepth 1 -maxdepth 1 -type d -name 'action.*' -print -quit 2>/dev/null)" ]; then
+  ok "the healthy action leaf was also removed"
+else
+  bad "an action cgroup remained after the healthy response"
+fi
+
 head_ "clean up"
-res="$(req -X DELETE --data "$(jq -nc --arg r "$(irev)" '{revision:$r}')" "$API/5gpn/interception/extensions/${EXT}")"
+owned_detail="$(req "$API/5gpn/interception/extensions/${EXT}" 2>/dev/null || true)"
+if [ "$(echo "$owned_detail" | jq -r '.extension.snapshot_digest // ""' 2>/dev/null || true)" != "$candidate_digest" ]; then
+  bad "the test extension changed before cleanup; refusing to delete it"
+  exit 1
+fi
+res="$(req -X DELETE --data "$(jq -nc --arg r "$(echo "$owned_detail" | jq -r .revision)" '{revision:$r}')" "$API/5gpn/interception/extensions/${EXT}")"
 if echo "$res" | jq -e --arg id "$EXT" '[.snapshot.modules[]|select(.id==$id)]|length == 0' >/dev/null 2>&1; then
+  installed_by_acceptance=false
+  install_attempted=false
   ok "the extension is uninstalled"
 else
   bad "uninstall failed: $(echo "$res" | head -c 250)"
@@ -238,15 +429,43 @@ if [ "$(jq -r '.target_digest' "$REQUEST")" = "$digest_before" ]; then
 else
   bad "the request did not return to its original digest"
 fi
-if [ "$master_before" != true ]; then
-  req -X PUT --data "$(jq -nc --arg r "$(irev)" --argjson h2 "$http2_before" \
-      '{revision:$r, enabled:false, http2:$h2, http3:false}')" \
-      "$API/5gpn/interception/settings" >/dev/null
-fi
-if [ "$(req "$API/5gpn/interception" | jq -r '.snapshot.enabled')" = "$master_before" ]; then
-  ok "the MITM master is restored to its initial state"
+certificate_restored=false
+for _ in $(seq 1 120); do
+  request_target="$(jq -r '.target_digest // ""' "$REQUEST" 2>/dev/null || true)"
+  request_attempt="$(jq -r '.attempt // ""' "$REQUEST" 2>/dev/null || true)"
+  if [ "$request_target" = "$digest_before" ] \
+     && jq -e --arg target "$request_target" --arg attempt "$request_attempt" '
+       .status == "ready" and .target_digest == $target and .attempt == $attempt
+     ' "$RESULT" >/dev/null 2>&1; then
+    certificate_restored=true
+    break
+  fi
+  sleep 0.25
+done
+if [ "$certificate_restored" = true ]; then
+  ok "the certificate publisher finished the restored target"
 else
-  bad "the master was not restored"
+  bad "the restored certificate target did not reach ready"
+fi
+if [ "$master_before" != true ]; then
+  before_restore="$(req "$API/5gpn/interception")"
+  if [ "$(echo "$before_restore" | jq -r '.snapshot.enabled')" = true ] \
+     && [ "$(echo "$before_restore" | jq -r '.snapshot.http2')" = "$http2_before" ] \
+     && [ "$(echo "$before_restore" | jq -r '.snapshot.modules | length')" = 0 ]; then
+    req -X PUT --data "$(jq -nc --arg r "$(echo "$before_restore" | jq -r .revision)" --argjson enabled "$master_before" --argjson h2 "$http2_before" \
+        '{revision:$r, enabled:$enabled, http2:$h2, http3:false}')" \
+        "$API/5gpn/interception/settings" >/dev/null
+  else
+    bad "interception state changed concurrently; refusing to overwrite it during restore"
+  fi
+fi
+restored="$(req "$API/5gpn/interception")"
+if [ "$(echo "$restored" | jq -r '.snapshot.enabled')" = "$master_before" ] \
+   && [ "$(echo "$restored" | jq -r '.snapshot.http2')" = "$http2_before" ]; then
+  master_restore_needed=false
+  ok "the interception settings are restored to their initial state"
+else
+  bad "the interception settings were not restored"
 fi
 
 echo

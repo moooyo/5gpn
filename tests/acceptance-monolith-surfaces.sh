@@ -6,10 +6,9 @@
 # revision. The bot document write is restored, and the last check verifies the
 # gateway is back where it started.
 #
-# The catalog checks reach the public index over the network. That is the point
-# of running them here rather than in the offline suite: what is under test is
-# that a real gateway can fetch a real catalog through its own guarded client
-# and hold the entries to what they advertise.
+# A fresh gateway has no catalog source and performs no marketplace request. If
+# the operator has explicitly configured one, the additional checks exercise
+# that real source through the guarded client.
 set -u
 
 pass=0; fail=0
@@ -24,15 +23,68 @@ API="https://127.0.0.1:443"
 req() { curl -sk --max-time 120 -H "Authorization: Bearer ${SECRET}" -H 'Content-Type: application/json' "$@"; }
 status() { curl -sk --max-time 120 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${SECRET}" -H 'Content-Type: application/json' "$@"; }
 
+BOT_DOC=/etc/5gpn/mihomo/5gpn/bot.json
+bot_restore_needed=false
+bot_marker_token=""
+
+cleanup_bot() {
+  local current revision restored
+  [ "$bot_restore_needed" = true ] || return 0
+  current="$(req "$API/5gpn/bot" 2>/dev/null || true)"
+  revision="$(echo "$current" | jq -r '.revision // ""' 2>/dev/null || true)"
+  if [ -n "$revision" ] \
+     && echo "$current" | jq -e '.bot | (
+          .enabled == false and .alerts == false and .token_set == true and
+          (.admins == [42] or .admins == [42,43])
+        )' >/dev/null 2>&1 \
+     && jq -e --arg token "$bot_marker_token" '.token == $token' "$BOT_DOC" >/dev/null 2>&1; then
+    restored="$(req -X PUT --data "$(jq -nc --arg r "$revision" '{revision:$r, enabled:false, admins:[], alerts:false, token:"-"}')" "$API/5gpn/bot" 2>/dev/null || true)"
+    if echo "$restored" | jq -e '.bot | (
+        .state == "stopped" and .enabled == false and .token_set == false and
+        .alerts == false and (.admins == [])
+      )' >/dev/null 2>&1; then
+      bot_restore_needed=false
+      return 0
+    fi
+  fi
+  return 1
+}
+trap 'cleanup_bot || true' EXIT
+trap 'exit 130' HUP INT TERM
+
 head_ "capabilities advertise what is installed"
 caps="$(req "$API/capabilities")"
+declare -A expected_feature_versions=(
+  [5gpn-core]=1
+  [5gpn-dns]=1
+  [5gpn-interception]=6
+  [5gpn-bot]=1
+)
 for feature in 5gpn-core 5gpn-dns 5gpn-interception 5gpn-bot; do
-  if [ "$(echo "$caps" | jq -r --arg f "$feature" '.features[$f].version // 0')" -ge 1 ]; then
-    ok "$feature is advertised"
+  expected="${expected_feature_versions[$feature]}"
+  actual="$(echo "$caps" | jq -r --arg f "$feature" '.features[$f].version // 0')"
+  if [ "$actual" = "$expected" ]; then
+    ok "$feature advertises exact version $expected"
   else
-    bad "$feature is not advertised: $(echo "$caps" | jq -c .features)"
+    bad "$feature version is $actual, expected $expected: $(echo "$caps" | jq -c .features)"
   fi
 done
+
+head_ "plugin logs expose a restart-safe cursor envelope"
+logs="$(req "$API/5gpn/interception/logs?limit=1")"
+if echo "$logs" | jq -e '
+  (.logs | type) == "array" and
+  (.stream_id | type) == "string" and (.stream_id | test("^[0-9a-f]{32}$")) and
+  (.oldest_seq | type) == "string" and (.oldest_seq | test("^(0|[1-9][0-9]*)$")) and
+  (.latest_seq | type) == "string" and (.latest_seq | test("^(0|[1-9][0-9]*)$")) and
+  (.dropped | type) == "string" and (.dropped | test("^(0|[1-9][0-9]*)$")) and
+  (.reset | type) == "boolean" and
+  (all(.logs[]; (.seq | type) == "string" and (.seq | test("^[1-9][0-9]*$"))))
+' >/dev/null; then
+  ok "plugin log cursor fields are canonical strings"
+else
+  bad "plugin log cursor envelope is invalid: $(echo "$logs" | jq -c . | head -c 300)"
+fi
 
 head_ "the seeded policy is a list, not null"
 # Go marshals a nil slice as null, and every consumer that iterates it errors on
@@ -118,21 +170,31 @@ fi
 head_ "the extension catalog"
 cat_res="$(req "$API/5gpn/interception/catalog")"
 src_count="$(echo "$cat_res" | jq -r '.catalog.sources | length')"
-if [ "$src_count" -ge 1 ]; then
-  ok "$src_count catalog source(s) are configured"
+if echo "$cat_res" | jq -e '.catalog.sources | type == "array"' >/dev/null; then
+  ok "catalog sources are an array"
 else
-  bad "no catalog source is configured: $(echo "$cat_res" | head -c 200)"
+  bad "catalog sources are not an array: $(echo "$cat_res" | head -c 200)"
 fi
 
-src_id="$(echo "$cat_res" | jq -r '.catalog.sources[0].id')"
-src_err="$(echo "$cat_res" | jq -r '.catalog.sources[0].error // ""')"
-entries="$(echo "$cat_res" | jq -r '.catalog.sources[0].entries | length')"
-if [ -n "$src_err" ]; then
-  bad "the seeded catalog could not be fetched: $src_err"
-elif [ "$entries" -ge 1 ]; then
-  ok "$src_id lists $entries extensions"
+src_id=""
+src_err=""
+entries=0
+if [ "$src_count" = "0" ]; then
+  ok "no implicit marketplace source is configured"
+elif [ "$src_count" -ge 1 ]; then
+  ok "$src_count catalog source(s) are configured"
+  src_id="$(echo "$cat_res" | jq -r '.catalog.sources[0].id')"
+  src_err="$(echo "$cat_res" | jq -r '.catalog.sources[0].error // ""')"
+  entries="$(echo "$cat_res" | jq -r '.catalog.sources[0].entries | length')"
+  if [ -n "$src_err" ]; then
+    bad "$src_id could not be fetched: $src_err"
+  elif [ "$entries" -ge 1 ]; then
+    ok "$src_id lists $entries extensions"
+  else
+    bad "$src_id fetched but lists nothing"
+  fi
 else
-  bad "$src_id fetched but lists nothing"
+  bad "catalog source count is invalid: $src_count"
 fi
 
 if [ "$entries" -ge 1 ]; then
@@ -196,63 +258,100 @@ if echo "$bot" | jq -e '.bot | has("token")' >/dev/null; then
 else
   ok "the bot view never carries the token"
 fi
-if [ "$(echo "$bot" | jq -r '.bot.state')" = "stopped" ]; then
+bot_pristine="$(echo "$bot" | jq -r '.bot | (
+  .state == "stopped" and .enabled == false and .token_set == false and
+  .alerts == false and ((.admins | type) == "array" and (.admins | length) == 0)
+)')"
+if [ "$bot_pristine" = "true" ]; then
   ok "an unconfigured bot is stopped"
-else
-  bad "an unconfigured bot reports state $(echo "$bot" | jq -r '.bot.state')"
-fi
+  bot_marker_token="999999999:acceptance_$(openssl rand -hex 12)"
 
-# An enabled bot with no token, or no admins, answers nobody. Both are refused
-# rather than stored, because an operator would read the silence as a network
-# fault and go looking in the wrong place.
-code="$(status -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:true, admins:[42], alerts:false}')" "$API/5gpn/bot")"
-if [ "$code" = "422" ]; then ok "enabling without a token is refused"; else bad "enabling without a token returned $code"; fi
-code="$(status -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:true, admins:[], alerts:false, token:"123:fake"}')" "$API/5gpn/bot")"
-if [ "$code" = "422" ]; then ok "enabling without an admin is refused"; else bad "enabling without an admin returned $code"; fi
+  # An enabled bot with no token, or no admins, answers nobody. Both are
+  # refused rather than stored. These mutations are safe only for the exact
+  # fresh-default document: the API deliberately never returns an existing
+  # token, so a configured deployment cannot be restored after replacing it.
+  code="$(status -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:true, admins:[42], alerts:false}')" "$API/5gpn/bot")"
+  if [ "$code" = "422" ]; then ok "enabling without a token is refused"; else bad "enabling without a token returned $code"; fi
+  code="$(status -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:true, admins:[], alerts:false, token:"123:fake"}')" "$API/5gpn/bot")"
+  if [ "$code" = "422" ]; then ok "enabling without an admin is refused"; else bad "enabling without an admin returned $code"; fi
 
-# A disabled write with a token stores it without starting anything, which is
-# what lets an operator stage the configuration before turning it on.
-res="$(req -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:false, admins:[42], alerts:false, token:"123:acceptance-fake"}')" "$API/5gpn/bot")"
-if [ "$(echo "$res" | jq -r '.bot.token_set')" = "true" ] && [ "$(echo "$res" | jq -r '.bot.enabled')" = "false" ]; then
-  ok "a token can be staged without enabling the bot"
-else
-  bad "staging a token failed: $(echo "$res" | head -c 200)"
-fi
-bot_rev="$(echo "$res" | jq -r .revision)"
-
-# Editing the admin list without resending the token must keep it.
-res="$(req -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:false, admins:[42,43], alerts:false}')" "$API/5gpn/bot")"
-if [ "$(echo "$res" | jq -r '.bot.token_set')" = "true" ] && [ "$(echo "$res" | jq -r '.bot.admins | length')" = "2" ]; then
-  ok "editing the admin list keeps the stored token"
-else
-  bad "editing the admin list lost the token: $(echo "$res" | head -c 200)"
-fi
-bot_rev="$(echo "$res" | jq -r .revision)"
-
-code="$(status -X PUT --data "$(jq -nc '{revision:"stale", enabled:false, admins:[42], alerts:false}')" "$API/5gpn/bot")"
-if [ "$code" = "409" ]; then ok "a stale bot revision is refused with 409"; else bad "a stale bot write returned $code"; fi
-
-# Restore: clear the token and the admins.
-res="$(req -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:false, admins:[], alerts:false, token:"-"}')" "$API/5gpn/bot")"
-if [ "$(echo "$res" | jq -r '.bot.token_set')" = "false" ]; then
-  ok "the token was cleared and the gateway is back where it started"
-else
-  bad "the token was not cleared"
-fi
-
-head_ "the bot document is on disk, 0600, and holds no token"
-doc=/etc/5gpn/mihomo/5gpn/bot.json
-if [ -f "$doc" ]; then
-  ok "$doc exists"
-  mode="$(stat -c '%a' "$doc")"
-  if [ "$mode" = "600" ]; then ok "$doc is 0600"; else bad "$doc is $mode"; fi
-  if [ "$(jq -r '.token' "$doc")" = "" ]; then
-    ok "the cleared token really left the file"
+  # A disabled write with a token stores it without starting anything, which
+  # lets an operator stage the configuration before turning it on.
+  bot_mutation_owned=false
+  bot_restore_needed=true
+  res="$(req -X PUT --data "$(jq -nc --arg r "$bot_rev" --arg token "$bot_marker_token" '{revision:$r, enabled:false, admins:[42], alerts:false, token:$token}')" "$API/5gpn/bot")"
+  if echo "$res" | jq -e '.bot | (
+      .enabled == false and .alerts == false and .token_set == true and .admins == [42]
+    )' >/dev/null 2>&1 \
+     && jq -e --arg token "$bot_marker_token" '.token == $token' "$BOT_DOC" >/dev/null 2>&1; then
+    bot_mutation_owned=true
+    ok "a token can be staged without enabling the bot"
   else
-    bad "the file still holds a token"
+    bad "staging a token failed: $(echo "$res" | head -c 200)"
+    cleanup_bot || true
+  fi
+  if [ "$bot_mutation_owned" = true ]; then
+    bot_rev="$(echo "$res" | jq -r .revision)"
+
+    # Editing the admin list without resending the token must keep it.
+    res="$(req -X PUT --data "$(jq -nc --arg r "$bot_rev" '{revision:$r, enabled:false, admins:[42,43], alerts:false}')" "$API/5gpn/bot")"
+    if echo "$res" | jq -e '.bot | (
+        .enabled == false and .alerts == false and .token_set == true and .admins == [42,43]
+      )' >/dev/null 2>&1 \
+       && jq -e --arg token "$bot_marker_token" '.token == $token' "$BOT_DOC" >/dev/null 2>&1; then
+      ok "editing the admin list keeps the stored token"
+      bot_rev="$(echo "$res" | jq -r .revision)"
+    else
+      bad "editing the admin list lost ownership of the test document: $(echo "$res" | head -c 200)"
+      bot_mutation_owned=false
+      cleanup_bot || true
+    fi
+  fi
+
+  if [ "$bot_mutation_owned" = true ]; then
+    code="$(status -X PUT --data "$(jq -nc '{revision:"stale", enabled:false, admins:[42], alerts:false}')" "$API/5gpn/bot")"
+    if [ "$code" = "409" ]; then ok "a stale bot revision is refused with 409"; else bad "a stale bot write returned $code"; fi
+
+    # Restore only while the marker token and test-owned shape still match.
+    if cleanup_bot; then
+      res="$(req "$API/5gpn/bot")"
+      if echo "$res" | jq -e '.bot | (
+          .state == "stopped" and .enabled == false and .token_set == false and
+          .alerts == false and (.admins == [])
+        )' >/dev/null; then
+        ok "the token was cleared and the gateway is back where it started"
+      else
+        bad "the fresh bot document was not restored exactly: $(echo "$res" | head -c 200)"
+      fi
+    else
+      bad "the bot test lost ownership before restore; refusing to overwrite concurrent state"
+    fi
   fi
 else
-  bad "$doc was not created"
+  skip "bot write checks (the deployment already has bot state that the write-only token API cannot restore)"
+fi
+
+head_ "the bot document is on disk and private"
+if [ -f "$BOT_DOC" ]; then
+  ok "$BOT_DOC exists"
+  mode="$(stat -c '%a' "$BOT_DOC")"
+  if [ "$mode" = "600" ]; then ok "$BOT_DOC is 0600"; else bad "$BOT_DOC is $mode"; fi
+  if [ "$bot_pristine" = "true" ]; then
+    if jq -e '
+      .version == 1 and .enabled == false and .token == "" and
+      .alerts == false and ((.admins | type) == "array" and (.admins | length) == 0)
+    ' "$BOT_DOC" >/dev/null; then
+      ok "the private document returned to the exact fresh-default shape"
+    else
+      bad "the private document did not return to its fresh-default shape"
+    fi
+  elif jq -e 'has("token") and (.token | type == "string")' "$BOT_DOC" >/dev/null; then
+    ok "the private document retains the current token field without exposing it through the API"
+  else
+    bad "the private document has an invalid token field"
+  fi
+else
+  bad "$BOT_DOC was not created"
 fi
 
 echo

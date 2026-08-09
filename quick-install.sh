@@ -7,18 +7,27 @@
 # across channels, and a downloaded bundle is never used without its published
 # digest.
 set -euo pipefail
+# Descriptor variables must remain open across `exec bash ./install.sh`; an
+# inherited varredir_close shell option would otherwise defeat the lease.
+shopt -u varredir_close 2>/dev/null || true
 
 readonly RELEASE_REPO="https://github.com/moooyo/5gpn"
 readonly LATEST_RELEASE_API="https://api.github.com/repos/moooyo/5gpn/releases/latest"
 readonly RELEASES_API="https://api.github.com/repos/moooyo/5gpn/releases"
 readonly SOURCE_MARKER=".5gpn-quick-install-owned"
 readonly SOURCE_MARKER_VALUE="5gpn-quick-install-v1"
+readonly SOURCE_LEASE=".5gpn-quick-install-lease"
+readonly SOURCE_LEASE_VALUE="5gpn-quick-install-lease-v1"
 readonly WORK_MARKER=".5gpn-quick-install-work-owned"
 readonly WORK_MARKER_VALUE="5gpn-quick-install-work-v1"
 readonly BUNDLE_NAME="5gpn-installer.tar.gz"
 readonly CHECKSUMS_NAME="checksums.txt"
+readonly MIN_WORKER_KERNEL_MAJOR=5
+readonly MIN_WORKER_KERNEL_MINOR=7
+readonly MIN_WORKER_SYSTEMD_VERSION=257
 
 _QI_SOURCE_DIR=""
+_QI_SOURCE_LEASE_FD=""
 
 # Gum-or-ANSI helpers. This entrypoint runs before install.sh bootstraps Gum, so
 # Gum is merely detected here; failure or absence always has a plain fallback.
@@ -36,6 +45,97 @@ dl() { # dl <url> <out> -- curl or wget, whichever exists
         red "Need curl or wget to download."
         return 1
     fi
+}
+
+# The lease and mount boundary protects source cleanup before the verified
+# installer is available, so these util-linux tools cannot be installed by that
+# installer retroactively. Fail before allocating or claiming any source path;
+# this bootstrap never mutates the host package set itself.
+require_quick_prerequisites() {
+    local cmd
+    local -a missing=()
+    for cmd in flock findmnt; do
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+    ((${#missing[@]} == 0)) && return 0
+    red "Quick install requires flock and findmnt before any installer files are created (missing: ${missing[*]})."
+    red "Install util-linux first: apt-get install -y util-linux, dnf install -y util-linux, or yum install -y util-linux."
+    return 1
+}
+
+quick_kernel_release_supported() {
+    local release="$1" major minor
+    [[ "$release" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    (( 10#$major > MIN_WORKER_KERNEL_MAJOR \
+       || (10#$major == MIN_WORKER_KERNEL_MAJOR \
+           && 10#$minor >= MIN_WORKER_KERNEL_MINOR) ))
+}
+
+quick_systemd_version_supported() {
+    local version="$1" major
+    [[ "$version" =~ ^([0-9]+) ]] || return 1
+    major="${BASH_REMATCH[1]}"
+    (( 10#$major >= MIN_WORKER_SYSTEMD_VERSION ))
+}
+
+quick_host_uses_pure_cgroup_v2() {
+    local line left right fstype mountpoint
+    local v2_root_count=0 v1_count=0
+    [[ -r /proc/self/mountinfo && -r /sys/fs/cgroup/cgroup.controllers ]] \
+        || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" == *' - '* ]] || continue
+        left="${line%% - *}"
+        right="${line#* - }"
+        fstype="${right%% *}"
+        read -r _ _ _ _ mountpoint _ <<< "$left"
+        if [[ "$fstype" == cgroup2 && "$mountpoint" == /sys/fs/cgroup ]]; then
+            v2_root_count=$((v2_root_count + 1))
+        elif [[ "$fstype" == cgroup ]]; then
+            v1_count=$((v1_count + 1))
+        fi
+    done < /proc/self/mountinfo
+    (( v2_root_count == 1 && v1_count == 0 ))
+}
+
+quick_host_has_worker_controllers() {
+    local controller have_memory=0 have_pids=0
+    local -a controllers=()
+    [[ -r /sys/fs/cgroup/cgroup.controllers ]] || return 1
+    read -r -a controllers < /sys/fs/cgroup/cgroup.controllers || return 1
+    for controller in "${controllers[@]}"; do
+        case "$controller" in
+            memory) have_memory=1 ;;
+            pids) have_pids=1 ;;
+        esac
+    done
+    (( have_memory == 1 && have_pids == 1 ))
+}
+
+# Reject an unsupported worker-isolation host before allocating the verified
+# installer source directory. install.sh repeats this authoritative gate and
+# additionally verifies the candidate unit and installed drop-in boundary.
+require_worker_isolation_prerequisites() {
+    local kernel_name kernel_release machine systemd_version
+    kernel_name="$(uname -s 2>/dev/null || true)"
+    kernel_release="$(uname -r 2>/dev/null || true)"
+    machine="$(uname -m 2>/dev/null || true)"
+    [[ "$kernel_name" == Linux && "$machine" == x86_64 ]] \
+        || { red "5gpn requires a Linux amd64 gateway; found '${kernel_name:-unknown}/${machine:-unknown}'."; return 1; }
+    quick_kernel_release_supported "$kernel_release" \
+        || { red "Linux kernel ${MIN_WORKER_KERNEL_MAJOR}.${MIN_WORKER_KERNEL_MINOR} or newer is required for extension worker isolation; found '${kernel_release:-unknown}'."; return 1; }
+    quick_host_uses_pure_cgroup_v2 \
+        || { red "A pure cgroup v2 hierarchy at /sys/fs/cgroup is required before quick install."; return 1; }
+    quick_host_has_worker_controllers \
+        || { red "The cgroup-v2 memory and pids controllers must both be available before quick install."; return 1; }
+    command -v systemctl >/dev/null 2>&1 \
+        && command -v systemd-analyze >/dev/null 2>&1 \
+        || { red "systemctl and systemd-analyze are required before quick install."; return 1; }
+    systemd_version="$(systemctl show --property=Version --value 2>/dev/null || true)"
+    quick_systemd_version_supported "$systemd_version" \
+        || { red "A running systemd ${MIN_WORKER_SYSTEMD_VERSION} or newer manager is required; found '${systemd_version:-unknown}'."; return 1; }
 }
 
 # Resolve a path even when its final component does not yet exist. Every source
@@ -83,6 +183,37 @@ marker_matches() { # marker_matches <path> <exact-value>
     printf '%s\n' "$value" | cmp -s - "$marker"
 }
 
+quick_uid() { stat -c %u -- "$1" 2>/dev/null; }
+quick_mode() { stat -c %a -- "$1" 2>/dev/null; }
+quick_nlink() { stat -c %h -- "$1" 2>/dev/null; }
+
+private_source_dir_safe() {
+    local dir="$1" expected_uid="${EUID:-$(id -u)}"
+    [[ -d "$dir" && ! -L "$dir" ]] \
+        && [[ "$(quick_uid "$dir")" == "$expected_uid" ]] \
+        && [[ "$(quick_mode "$dir")" == 700 ]]
+}
+
+private_control_file_safe() {
+    local file="$1" expected_uid="${EUID:-$(id -u)}"
+    [[ -f "$file" && ! -L "$file" ]] \
+        && [[ "$(quick_uid "$file")" == "$expected_uid" ]] \
+        && [[ "$(quick_mode "$file")" == 600 ]] \
+        && [[ "$(quick_nlink "$file")" == 1 ]]
+}
+
+source_dir_has_no_nested_mounts() {
+    local dir="$1" target output
+    command -v findmnt >/dev/null 2>&1 || return 1
+    output="$(findmnt -R -r -n -o TARGET --target "$dir" 2>/dev/null)" || return 1
+    while IFS= read -r target; do
+        [[ -n "$target" ]] || continue
+        case "$target" in
+            "$dir"|"$dir"/*) return 1 ;;
+        esac
+    done <<< "$output"
+}
+
 # Create a marker without following or overwriting a raced symlink. The hard
 # link succeeds only while the destination name is still absent.
 create_marker() { # create_marker <directory> <name> <value>
@@ -101,41 +232,95 @@ create_marker() { # create_marker <directory> <name> <value>
 
 source_dir_is_owned() {
     local canonical
-    [[ -n "$_QI_SOURCE_DIR" && -d "$_QI_SOURCE_DIR" && ! -L "$_QI_SOURCE_DIR" ]] || return 1
+    [[ -n "$_QI_SOURCE_DIR" ]] && private_source_dir_safe "$_QI_SOURCE_DIR" || return 1
     safe_source_path "$_QI_SOURCE_DIR" || return 1
     canonical="$(canonical_path "$_QI_SOURCE_DIR")" || return 1
     [[ "$canonical" == "$_QI_SOURCE_DIR" ]] || return 1
-    marker_matches "$_QI_SOURCE_DIR/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE"
+    private_control_file_safe "$_QI_SOURCE_DIR/$SOURCE_MARKER" \
+        && marker_matches "$_QI_SOURCE_DIR/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE"
 }
 
-# sweep_stale_source_dirs — remove the private directories older runs left in
-# /tmp, except the one just created.
+source_lease_is_safe() {
+    local lease="${1:-${_QI_SOURCE_DIR:+$_QI_SOURCE_DIR/$SOURCE_LEASE}}"
+    [[ -n "$lease" ]] && private_control_file_safe "$lease" \
+        && marker_matches "$lease" "$SOURCE_LEASE_VALUE"
+}
+
+release_source_lease() {
+    [[ -n "${_QI_SOURCE_LEASE_FD:-}" ]] || return 0
+    exec {_QI_SOURCE_LEASE_FD}>&-
+    _QI_SOURCE_LEASE_FD=""
+}
+
+# Hold one descriptor across `exec bash ./install.sh`. flock locks belong to the
+# open file description, so a later quick installer cannot reclaim this source
+# tree while the installed script is still reading templates and helper files
+# from it. Bash preserves the descriptor across exec; no EXIT trap owns it.
+acquire_source_lease() {
+    local lease="$_QI_SOURCE_DIR/$SOURCE_LEASE"
+    command -v flock >/dev/null 2>&1 \
+        || { red "flock is required to protect the installer source lease."; return 1; }
+    private_source_dir_safe "$_QI_SOURCE_DIR" || return 1
+    if [[ -e "$lease" || -L "$lease" ]]; then
+        source_lease_is_safe "$lease" \
+            || { red "Refusing installer source with an invalid lease file: $_QI_SOURCE_DIR"; return 1; }
+    else
+        # A directory with the public ownership marker is already sweepable.
+        # Never publish a lease into that state before holding its lock: another
+        # quick run could acquire the new inode in the gap and remove this tree.
+        [[ ! -e "$_QI_SOURCE_DIR/$SOURCE_MARKER" && ! -L "$_QI_SOURCE_DIR/$SOURCE_MARKER" ]] \
+            || { red "Refusing a claimed installer source with no lease: $_QI_SOURCE_DIR"; return 1; }
+        create_marker "$_QI_SOURCE_DIR" "$SOURCE_LEASE" "$SOURCE_LEASE_VALUE" \
+            || { red "Could not create installer source lease: $_QI_SOURCE_DIR"; return 1; }
+    fi
+    release_source_lease
+    exec {_QI_SOURCE_LEASE_FD}<>"$lease" || return 1
+    if ! flock -n "$_QI_SOURCE_LEASE_FD"; then
+        exec {_QI_SOURCE_LEASE_FD}>&-
+        _QI_SOURCE_LEASE_FD=""
+        red "Installer source is already active: $_QI_SOURCE_DIR"
+        return 1
+    fi
+    source_lease_is_safe "$lease"
+}
+
+# sweep_stale_source_dirs — remove only private directories whose lease proves
+# no quick installer or exec'd install.sh is still using them.
 #
-# This entrypoint `exec`s install.sh, which replaces the shell that would have
-# held an EXIT trap, so nothing here can clean up after itself. Sweeping at the
-# START of the next run is not a workaround for that: it is better, because the
-# failure message install.sh prints when a config needs migrating names a script
-# path *inside* this directory. Removing it at exit would delete the file the
-# operator was just told to run. Keeping it until the next install is exactly
-# the window in which it is still useful, and bounds the accumulation at one.
+# This entrypoint `exec`s install.sh, so the lease descriptor intentionally
+# survives. A later run may remove a directory only after obtaining that exact
+# lease non-blockingly. Lease-less directories from older installers are kept:
+# absence is not proof that an old process stopped using one.
 #
 # Only directories carrying this entrypoint's own ownership marker are touched:
 # /tmp is world-writable, and a name match alone would let anyone hand root an
 # rm -rf target.
 sweep_stale_source_dirs() {
-    local keep="$1" dir
+    local keep="$1" dir canonical lease candidate_fd
     for dir in /tmp/5gpn-installer.*; do
         [[ -d "$dir" && ! -L "$dir" ]] || continue
         [[ "$dir" != "$keep" ]] || continue
-        [[ "$(cat "$dir/$SOURCE_MARKER" 2>/dev/null)" == "$SOURCE_MARKER_VALUE" ]] || continue
+        safe_source_path "$dir" && private_source_dir_safe "$dir" || continue
+        canonical="$(canonical_path "$dir" 2>/dev/null)" || continue
+        [[ "$canonical" == "$dir" ]] || continue
+        private_control_file_safe "$dir/$SOURCE_MARKER" \
+            && marker_matches "$dir/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE" || continue
+        source_dir_has_no_nested_mounts "$dir" || continue
+        lease="$dir/$SOURCE_LEASE"
+        source_lease_is_safe "$lease" || continue
+        exec {candidate_fd}<>"$lease" 2>/dev/null || continue
+        if ! flock -n "$candidate_fd" 2>/dev/null; then
+            exec {candidate_fd}>&-
+            continue
+        fi
+        private_source_dir_safe "$dir" \
+            && private_control_file_safe "$dir/$SOURCE_MARKER" \
+            && marker_matches "$dir/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE" \
+            && source_lease_is_safe "$lease" \
+            && source_dir_has_no_nested_mounts "$dir" \
+            || { exec {candidate_fd}>&-; continue; }
         rm -rf -- "$dir" 2>/dev/null || true
-    done
-    # Bundle downloads clean up on every branch of fetch_bundle; a survivor means
-    # an abnormal exit, and it is a plain file with no marker to check.
-    local f
-    for f in /tmp/5gpn-installer.tgz.* /tmp/5gpn-checksums.txt.*; do
-        [[ -f "$f" && ! -L "$f" ]] || continue
-        rm -f -- "$f" 2>/dev/null || true
+        exec {candidate_fd}>&-
     done
 }
 
@@ -143,11 +328,11 @@ sweep_stale_source_dirs() {
 # always passes an empty value and therefore uses a private mktemp directory;
 # SRC is deliberately not a public environment override.
 prepare_source_dir() {
-    local requested="${1:-}" canonical contents
+    local requested="${1:-}" canonical contents allocated=0
     if [[ -z "$requested" ]]; then
         canonical="$(mktemp -d /tmp/5gpn-installer.XXXXXX)" \
             || { red "Could not allocate a temporary installer directory."; return 1; }
-        sweep_stale_source_dirs "$canonical"
+        allocated=1
     else
         canonical="$(canonical_path "$requested")" \
             || { red "Invalid installer source path."; return 1; }
@@ -166,22 +351,38 @@ prepare_source_dir() {
     _QI_SOURCE_DIR="$canonical"
 
     if [[ -e "$_QI_SOURCE_DIR/$SOURCE_MARKER" || -L "$_QI_SOURCE_DIR/$SOURCE_MARKER" ]]; then
-        marker_matches "$_QI_SOURCE_DIR/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE" \
+        private_source_dir_safe "$_QI_SOURCE_DIR" \
+            && private_control_file_safe "$_QI_SOURCE_DIR/$SOURCE_MARKER" \
+            && marker_matches "$_QI_SOURCE_DIR/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE" \
             || { red "Refusing installer source with an invalid ownership marker: $_QI_SOURCE_DIR"; return 1; }
+        acquire_source_lease || return 1
     else
         contents="$(find "$_QI_SOURCE_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"
         [[ -z "$contents" ]] \
             || { red "Refusing to claim a non-empty installer source: $_QI_SOURCE_DIR"; return 1; }
+        chmod 0700 "$_QI_SOURCE_DIR" \
+            || { red "Could not make installer source private: $_QI_SOURCE_DIR"; return 1; }
+        private_source_dir_safe "$_QI_SOURCE_DIR" \
+            || { red "Installer source metadata is unsafe: $_QI_SOURCE_DIR"; return 1; }
+        # Hold the lease before publishing SOURCE_MARKER. The sweep requires
+        # both names, so no other run can observe a sweepable-but-unlocked tree.
+        acquire_source_lease || return 1
         create_marker "$_QI_SOURCE_DIR" "$SOURCE_MARKER" "$SOURCE_MARKER_VALUE" \
             || { red "Could not claim installer source: $_QI_SOURCE_DIR"; return 1; }
     fi
-    source_dir_is_owned
+    source_dir_is_owned || return 1
+    if [[ "$allocated" == 1 ]]; then
+        sweep_stale_source_dirs "$canonical"
+    fi
 }
 
 clear_source_dir() {
     source_dir_is_owned \
         || { red "Refusing to clear unowned installer directory: ${_QI_SOURCE_DIR:-<empty>}"; return 1; }
-    find "$_QI_SOURCE_DIR" -mindepth 1 -maxdepth 1 ! -name "$SOURCE_MARKER" -exec rm -rf -- {} +
+    source_dir_has_no_nested_mounts "$_QI_SOURCE_DIR" \
+        || { red "Refusing installer source containing a nested mount: $_QI_SOURCE_DIR"; return 1; }
+    find "$_QI_SOURCE_DIR" -mindepth 1 -maxdepth 1 \
+        ! -name "$SOURCE_MARKER" ! -name "$SOURCE_LEASE" -exec rm -rf -- {} +
     # Revalidate immediately after deletion so a replaced marker cannot be used
     # by a later archive or git publication step.
     source_dir_is_owned \
@@ -396,7 +597,8 @@ archive_is_safe() {
         case "/$normalized/" in
             */../*) red "Bundle contains a parent-directory path."; return 1 ;;
         esac
-        [[ "$normalized" != "$SOURCE_MARKER" && "$normalized" != "$WORK_MARKER" ]] \
+        [[ "$normalized" != "$SOURCE_MARKER" && "$normalized" != "$SOURCE_LEASE" \
+           && "$normalized" != "$WORK_MARKER" ]] \
             || { red "Bundle attempts to replace an ownership marker."; return 1; }
         [[ -z "${seen[$normalized]+x}" ]] \
             || { red "Bundle contains a duplicate path."; return 1; }
@@ -475,8 +677,11 @@ publish_stage() {
 fetch_bundle() { # fetch_bundle <repo> <channel> <release-tag>; 10=asset absent, 20=hard failure
     local repo="$1" channel="$2" tag="$3" tgz checksums stage bundle_url checksums_url
     valid_release_tag_for_channel "$channel" "$tag" || return 20
-    tgz="$(mktemp /tmp/5gpn-installer.tgz.XXXXXX)" || return 20
-    checksums="$(mktemp /tmp/5gpn-checksums.txt.XXXXXX)" || { rm -f -- "$tgz"; return 20; }
+    source_dir_is_owned && source_lease_is_safe \
+        || { red "Installer source lease is unavailable before download."; return 20; }
+    tgz="$(mktemp "$_QI_SOURCE_DIR/.bundle.tgz.XXXXXX")" || return 20
+    checksums="$(mktemp "$_QI_SOURCE_DIR/.checksums.txt.XXXXXX")" \
+        || { rm -f -- "$tgz"; return 20; }
     bundle_url="${repo}/releases/download/${tag}/${BUNDLE_NAME}"
     checksums_url="${repo}/releases/download/${tag}/${CHECKSUMS_NAME}"
 
@@ -532,6 +737,9 @@ Installer command:
 
 The selected release is pinned to one exact tag. A missing or older beta never
 falls back to the official channel and never downgrades it.
+
+Host baseline: Linux amd64, kernel 5.7+, systemd 257+, and pure cgroup v2 with
+the memory and pids controllers. Unsupported hosts fail before source allocation.
 EOF
 }
 
@@ -557,6 +765,8 @@ main() {
         return 1
     fi
 
+    require_quick_prerequisites || return 1
+    require_worker_isolation_prerequisites || return 1
     prepare_source_dir "" || return 1
     release_tag="$(resolve_release_tag "$channel")" || return 1
 

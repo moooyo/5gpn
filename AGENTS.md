@@ -33,7 +33,15 @@ plans, design handoffs, and git history are context only.
   guard. A client that supports protocol fallback may retry over TCP and enter
   the normal HTTP/H1/H2 capture path; an H3-only client fails. Native
   `5gpn.io/v1` scripts execute from immutable local snapshots
-  in a no-filesystem goja sandbox. A script receives bounded synchronous and
+  in a no-filesystem goja sandbox. Untrusted JavaScript, GoJQ, and DOM
+  validation and execution run only in a short-lived mode of the same mihomo
+  binary, with one fresh OS process per operation. Linux starts that process
+  directly in a bounded cgroup-v2 leaf; Windows starts it directly in nested
+  Job Objects. There is no in-process fallback, reusable worker pool, service,
+  or sidecar. The parent retains network, storage, and log authority over a
+  bounded private protocol; a worker crash, timeout, or OOM fails only that
+  operation. Failure of the mandatory startup isolation probe is fatal before
+  listeners open. A script receives bounded synchronous and
   promise-based network calls only when its manifest declares
   `permissions.network: true` and the operator confirms it. That grant names no
   destinations: a script holding it may

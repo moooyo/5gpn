@@ -46,6 +46,10 @@ grep -Fq 'release_install_cert_lock' <<<"$finish_fn" \
     && grep -Fq 'cleanup_artifact_stage' <<<"$finish_fn" \
     && pass "the unwind path releases both locks and drops staging" \
     || fail "a failed install can leak a lock or its staging directory"
+grep -Fq 'INSTALL_PUBLICATION_STARTED=1' <<<"$full_fn" \
+    && grep -Fq 'INSTALL_PUBLICATION_STARTED:-0' <<<"$finish_fn" \
+    && pass "partial-install reporting is gated by the explicit publication boundary" \
+    || fail "prepublication failures are still reported as partial installs"
 
 timer_restore_line="$(line_of "$full_fn" 'restore_global_certbot_timer_after_success')"
 cleanup_line="$(line_of "$full_fn" 'cleanup_artifact_stage')"
@@ -239,6 +243,7 @@ set +e
 cleanup_rc=$?
 (
     ARTIFACT_STAGE="$TMP/unwind-stage-2"
+    INSTALL_PUBLICATION_STARTED=1
     mkdir -p "$ARTIFACT_STAGE"
     cleanup_artifact_stage() { return 0; }
     release_install_cert_lock() { return 0; }
@@ -247,12 +252,26 @@ cleanup_rc=$?
     finish_install_transaction 7
 )
 failed_rc=$?
+prepublication_notice="$TMP/prepublication-notice"
+(
+    ARTIFACT_STAGE="$TMP/unwind-stage-3"
+    INSTALL_PUBLICATION_STARTED=0
+    mkdir -p "$ARTIFACT_STAGE"
+    cleanup_artifact_stage() { return 0; }
+    release_install_cert_lock() { return 0; }
+    release_install_lock() { return 0; }
+    err() { printf '%s\n' "$*" >> "$prepublication_notice"; }
+    finish_install_transaction 8
+)
+prepublication_rc=$?
 set -e
-[[ "$cleanup_rc" == 1 && "$failed_rc" == 7 ]] \
+[[ "$cleanup_rc" == 1 && "$failed_rc" == 7 && "$prepublication_rc" == 8 ]] \
     || fail "the unwind lost a cleanup failure or rewrote the original exit status"
 grep -q 'does not roll back' "$notice" \
-    || fail "a failed install never tells the operator it left the host partially installed"
-pass "unwind failures surface, and a failed install states it did not roll back"
+    || fail "a publication-phase failure never tells the operator the host may be partially installed"
+grep -q 'Publication did not start' "$prepublication_notice" \
+    || fail "a pre-publication failure is mislabeled as a partial install"
+pass "unwind failures surface with distinct pre-publication and may-be-partial notices"
 
 # HUP/INT/TERM are ignored once finalization starts, so a second signal cannot
 # cut the unwind short and strand a lock.

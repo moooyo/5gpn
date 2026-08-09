@@ -190,7 +190,7 @@ fi
 # The public extension corpus must be parsed by the exact core release the
 # installer pins. Both repositories are immutable inputs to this release gate.
 if grep -Fq 'repository: moooyo/5gpn-extensions' "$CHECKS" \
-   && grep -Fq 'ref: baafb3800d692de5a2ff5321ecb672328f3694d7' "$CHECKS" \
+   && grep -Fq 'ref: ac04d79a12ef01f99bf1637f7dc62b6952694d78' "$CHECKS" \
    && grep -Fq "ref: ${MIHOMO_VERSION}" "$CHECKS" \
    && grep -Fq 'FIVEGPN_EXTENSIONS_ROOT:' "$CHECKS" \
    && grep -Fq "TestOfficialExtensionManifestParserCorpus\$'" "$CHECKS"; then

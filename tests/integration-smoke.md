@@ -6,7 +6,9 @@ current architecture is `docs/architecture.md`.
 
 ## Prerequisites
 
-- A Linux amd64 host with the current release installed.
+- A Linux amd64 host with kernel 5.7 or newer, systemd 257 or newer, and the
+  current release installed on a pure cgroup v2 hierarchy with the memory
+  and pids controllers available.
 - `dig` with DoT support, `curl`, `openssl`, `jq`, and `systemctl`.
 - A client with L3 reachability to one address in `DNS_MIHOMO_LISTEN_IPS`.
 - A test `BASE_DOMAIN`, a certificate matching the selected `CERT_MODE`
@@ -41,6 +43,37 @@ sudo cp -a /etc/5gpn/mihomo/config.yaml /tmp/mihomo-config.before
   -p StartLimitIntervalUSec -p StartLimitBurst -p StartLimitAction` reports
   `Restart=always`, a three-second restart delay, a 60-second start-limit
   interval, burst 10, and action `none`.
+- [ ] `/sys/fs/cgroup` is the single cgroup-v2 root, no cgroup-v1 filesystem is
+  mounted, `memory` and `pids` appear in `/sys/fs/cgroup/cgroup.controllers`, and the
+  running system manager reports version 257 or newer.
+- [ ] `systemctl show 5gpn-mihomo -p MemoryAccounting -p Delegate \
+  -p DelegateControllers -p DelegateSubgroup -p OOMPolicy -p KillMode \
+  -p ProtectControlGroups` reports memory accounting, delegation of only the
+  memory and pids controllers, an empty `DelegateSubgroup`, OOM policy
+  `continue`, kill mode `control-group`, and private control groups.
+- [ ] The live main PID's `/proc/<pid>/cgroup` contains exactly `0::/main`; from
+  its private cgroup namespace `/sys/fs/cgroup` is the delegated unit root,
+  root `cgroup.procs` is empty, and `/main/cgroup.procs` contains only that PID.
+- [ ] The main unit contains `SystemCallFilter=~unshare setns` and no
+  `RestrictNamespaces=` directive. Startup logs contain no worker-isolation
+  probe failure, and a reviewed extension validation proves that
+  `clone3(CLONE_INTO_CGROUP)` can start a child directly in its sealed leaf.
+- [ ] A deliberately failed startup isolation probe in a disposable fixture
+  leaves DoT and the controller closed and makes the complete unit fail. After a
+  successful probe, an injected single-child start failure or OOM fails only the
+  current validation/action and leaves DoT and the controller healthy.
+- [ ] With controlled guest actions, two different extensions can occupy the
+  two global worker slots, a second concurrent action from either extension is
+  rejected immediately by its per-extension limit, and any third guest action
+  is rejected immediately by the global limit. Requests do not queue behind a
+  slot. While both slots are occupied, a parent-side reject, mock, header edit,
+  URL rewrite, or bounded body replacement still completes without acquiring a
+  worker; JQ and script actions remain subject to admission.
+- [ ] `systemd-analyze verify /etc/systemd/system/5gpn-mihomo.service \
+  /etc/systemd/system/5gpn-intercept-cert.service \
+  /etc/systemd/system/5gpn-intercept-cert.path \
+  /etc/systemd/system/5gpn-intercept-cert.timer` succeeds against the published
+  units and live executable paths.
 - [ ] `journalctl -u 5gpn-mihomo -b` contains no `External controller tls listen error`
   or safe-path rejection after startup.
 - [ ] `ss -lntup` shows:
@@ -565,20 +598,31 @@ into recorded command output, screenshots, or issue logs.
   published entries. Refreshing a valid source atomically updates the
   complete list. Inject an unreachable origin, unsafe redirect, private dial
   target, malformed/oversized JSON, duplicate field, and partial entry; each
-  failure must leave the previous complete marketplace snapshot unchanged.
+  failure must leave the previous complete marketplace snapshot visible,
+  preserve its original fetched time even after TTL expiry, and display the
+  source error. A source that has never succeeded remains empty with an error.
 - [ ] Open `/plugin-logs` with an enabled synthetic extension. Verify
   `console.log`/`info`/`warn`/`error` levels, action completion and timeout
   metadata, plugin/action filters, debounced search, one-row expansion, local
   clear, and pause behavior on desktop and mobile. Confirm authenticated
   `/5gpn/interception/logs` reads the retained in-memory ring and script console
-  text does not appear in the persistent journal.
+  text does not appear in the persistent journal. Page with the returned
+  decimal-string `seq` and `stream_id`, overflow the 1000-entry ring to observe
+  `dropped`, then restart mihomo and verify the changed stream returns
+  `reset: true` plus a usable current tail rather than leaving polling stuck on
+  a future cursor.
 - [ ] Select one official marketplace entry, review the cached scope in the
   install-confirm dialog, and verify the daemon then refetches the
   listed manifest, checks its SHA-256 and derived capability summary, then shows
-  the actual imported snapshot review. External script resources remain live
-  and are not compared with catalog digests. A changed manifest, identity,
+  the actual imported snapshot review. External script resources remain live,
+  are not enumerated in a parallel catalog resource list, and are covered by
+  the complete runtime snapshot digest. A changed manifest, identity,
   version, permission, or capability count must abort before the module revision
   changes. A valid install starts disabled and never turns on the MITM master.
+  With a test entry whose manifest URL redirects, verify review returns the
+  selected entry URL separately from the redirect-resolved candidate source;
+  apply succeeds only with the returned URL and rejects the resolved URL as a
+  review conflict.
   The installed page exposes no check-update button and the old
   `/extensions/{id}/update` routes return 404; selecting a changed Marketplace
   entry is the only reviewed update path. Remove and re-add the marketplace;

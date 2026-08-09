@@ -132,6 +132,35 @@ if systemd_unit_has_dropins 5gpn-dns.service "$unit_conflicts" \
 else
     fail "global service ExecStart override was ignored"
 fi
+rm -f -- "$unit_conflicts/service.d/20-exec.conf"
+resource_override_ok=1
+for key in \
+    OOMPolicy MemoryAccounting TasksAccounting Delegate Slice DisableControllers TasksMax \
+    CPUAccounting IOAccounting CPUWeight StartupCPUWeight CPUQuota CPUQuotaPeriodSec \
+    CPUShares StartupCPUShares AllowedCPUs StartupAllowedCPUs \
+    MemoryMin MemoryLow StartupMemoryLow MemoryHigh StartupMemoryHigh \
+    MemoryMax MemoryLimit StartupMemoryMax MemorySwapMax StartupMemorySwapMax \
+    MemoryZSwapMax StartupMemoryZSwapMax MemoryZSwapWriteback \
+    AllowedMemoryNodes StartupAllowedMemoryNodes \
+    IOWeight StartupIOWeight IODeviceWeight IODeviceLatencyTargetSec \
+    IOReadBandwidthMax IOWriteBandwidthMax IOReadIOPSMax IOWriteIOPSMax \
+    BlockIOWeight StartupBlockIOWeight BlockIODeviceWeight \
+    BlockIOReadBandwidth BlockIOWriteBandwidth \
+    ManagedOOMSwap ManagedOOMMemoryPressure ManagedOOMMemoryPressureLimit \
+    LimitAS LimitNPROC LimitNOFILE LimitCORE Nice OOMScoreAdjust TimerSlackNSec \
+    CPUSchedulingPolicy CPUSchedulingPriority CPUSchedulingResetOnFork \
+    CPUAffinity NUMAPolicy NUMAMask IOSchedulingClass IOSchedulingPriority; do
+    printf '[Service]\n%s=fixture\n' "$key" \
+        > "$unit_conflicts/service.d/20-resource.conf"
+    if ! systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
+        fail "global service resource override was ignored: $key"
+        resource_override_ok=0
+    fi
+done
+rm -f -- "$unit_conflicts/service.d/20-resource.conf"
+if [[ "$resource_override_ok" == 1 ]]; then
+    pass "global inherited resource limits cannot alter the worker isolation unit"
+fi
 rm -rf -- "$unit_conflicts/service.d"
 
 mkdir "$unit_conflicts/5gpn-intercept-.service.d"

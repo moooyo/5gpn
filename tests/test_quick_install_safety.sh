@@ -30,22 +30,67 @@ else
     fail "stdin execution guard failed: $entry_result"
 fi
 
+# util-linux is a bootstrap prerequisite, not something unverified quick-install
+# may install for itself. The check must precede the first source-tree mutation.
+prereq_fn="$(sed -n '/^require_quick_prerequisites()/,/^}/p' "$QUICK")"
+worker_prereq_fn="$(sed -n '/^require_worker_isolation_prerequisites()/,/^}/p' "$QUICK")"
+main_fn="$(sed -n '/^main()/,/^}/p' "$QUICK")"
+prereq_line="$(grep -n 'require_quick_prerequisites' <<<"$main_fn" | head -1 | cut -d: -f1)"
+worker_prereq_line="$(grep -n 'require_worker_isolation_prerequisites' <<<"$main_fn" | head -1 | cut -d: -f1)"
+source_line="$(grep -n 'prepare_source_dir ""' <<<"$main_fn" | head -1 | cut -d: -f1)"
+if grep -Fq 'for cmd in flock findmnt' <<<"$prereq_fn" \
+   && grep -Fq 'command -v "$cmd"' <<<"$prereq_fn" \
+   && grep -Fq 'Install util-linux first:' <<<"$prereq_fn" \
+   && ! grep -Eq '^[[:space:]]*(apt-get|dnf|yum)[[:space:]]' <<<"$prereq_fn" \
+   && [[ -n "$prereq_line" && -n "$worker_prereq_line" && -n "$source_line" \
+      && "$prereq_line" -lt "$worker_prereq_line" \
+      && "$worker_prereq_line" -lt "$source_line" ]]; then
+    pass "util-linux prerequisites fail with guidance before source allocation"
+else
+    fail "quick install can mutate its source tree before proving flock/findmnt exist"
+fi
+
+if grep -Fq 'MIN_WORKER_SYSTEMD_VERSION=257' "$QUICK" \
+   && grep -Fq 'quick_host_uses_pure_cgroup_v2' <<<"$worker_prereq_fn" \
+   && grep -Fq 'quick_host_has_worker_controllers' <<<"$worker_prereq_fn" \
+   && grep -Fq 'systemctl show --property=Version --value' <<<"$worker_prereq_fn" \
+   && grep -Fq 'command -v systemd-analyze' <<<"$worker_prereq_fn" \
+   && quick_kernel_release_supported 5.7.0 \
+   && ! quick_kernel_release_supported 5.6.99 \
+   && quick_systemd_version_supported 257 \
+   && ! quick_systemd_version_supported 256; then
+    pass "quick install rejects unsupported worker-isolation hosts before source allocation"
+else
+    fail "quick install worker-isolation prerequisites drifted from the release baseline"
+fi
+
 # A new or empty custom path can be claimed, and the stored path is canonical.
 mkdir -p "$TMP/canonical"
 prepare_source_dir "$TMP/source" >/dev/null 2>&1
 expected="$(canonical_path "$TMP/source")"
 if [[ "$?" == 0 && "$_QI_SOURCE_DIR" == "$expected" ]] \
-   && marker_matches "$_QI_SOURCE_DIR/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE"; then
-    pass "empty source is claimed with an exact marker and canonical path"
+   && marker_matches "$_QI_SOURCE_DIR/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE" \
+   && source_lease_is_safe; then
+    pass "empty source is claimed with exact ownership and lease markers"
 else
     fail "empty source claim or canonicalisation failed"
+fi
+
+prepare_fn="$(sed -n '/^prepare_source_dir()/,/^}/p' "$QUICK")"
+lease_line="$(grep -n 'acquire_source_lease' <<<"$prepare_fn" | tail -1 | cut -d: -f1)"
+marker_line="$(grep -n 'create_marker "$_QI_SOURCE_DIR" "$SOURCE_MARKER"' <<<"$prepare_fn" | head -1 | cut -d: -f1)"
+if [[ -n "$lease_line" && -n "$marker_line" && "$lease_line" -lt "$marker_line" ]]; then
+    pass "new source holds its lease before publishing the sweep ownership marker"
+else
+    fail "new source becomes sweepable before its lease is held"
 fi
 
 echo payload > "$_QI_SOURCE_DIR/payload"
 clear_source_dir >/dev/null 2>&1
 if [[ "$?" == 0 && ! -e "$_QI_SOURCE_DIR/payload" ]] \
-   && marker_matches "$_QI_SOURCE_DIR/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE"; then
-    pass "owned source is cleared while retaining its exact marker"
+   && marker_matches "$_QI_SOURCE_DIR/$SOURCE_MARKER" "$SOURCE_MARKER_VALUE" \
+   && source_lease_is_safe; then
+    pass "owned source is cleared while retaining its marker and active lease"
 else
     fail "owned source clear failed"
 fi
@@ -300,6 +345,15 @@ if [[ "$?" != 0 ]] && grep -Fq -- '--no-same-owner --no-same-permissions' "$QUIC
 else
     fail "unsafe archive validation or extraction ownership gate is missing"
 fi
+
+rm -rf -- "$unsafe_payload"
+mkdir -p "$unsafe_payload"
+echo '#!/bin/sh' > "$unsafe_payload/install.sh"
+printf '%s\n' forged > "$unsafe_payload/$SOURCE_LEASE"
+tar -czf "$TMP/unsafe-lease.tgz" -C "$unsafe_payload" .
+archive_is_safe "$TMP/unsafe-lease.tgz" >/dev/null 2>&1
+[[ "$?" != 0 ]] && pass "bundle cannot replace the inherited source lease" \
+    || fail "bundle ownership lease entry was accepted"
 
 # --beta must resolve the highest beta, and "highest" is numeric.
 #

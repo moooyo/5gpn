@@ -36,12 +36,35 @@ grep -Fq 'ExecStart=/opt/5gpn/scripts/cert-renew.sh --quiet' <<<"$renew_auto_fn"
     || fail "renewal timer does not invoke the unified certificate helper"
 grep -Fq '# 5gpn-unit-id: 5gpn-certbot-renew.service:v1' <<<"$renew_auto_fn" \
     || fail "renewal service has no exact ownership marker"
+for directive in \
+    'NoNewPrivileges=yes' \
+    'CapabilityBoundingSet=CAP_CHOWN CAP_NET_BIND_SERVICE' \
+    'PrivateTmp=yes' \
+    'PrivateDevices=yes' \
+    'ProtectSystem=strict' \
+    'ProtectHome=yes' \
+    'ProtectControlGroups=yes' \
+    'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' \
+    'MemoryDenyWriteExecute=yes' \
+    'SystemCallArchitectures=native'; do
+    grep -Fq "$directive" <<<"$renew_auto_fn" \
+        || fail "public renewal service lacks hardening directive: $directive"
+done
+grep -Fq 'ReadWritePaths=/etc/letsencrypt /var/lib/letsencrypt /var/log/letsencrypt' <<<"$renew_auto_fn" \
+    && grep -Fq 'ReadWritePaths=/etc/5gpn/cert -/opt/5gpn/ui /run/5gpn' <<<"$renew_auto_fn" \
+    && grep -Fq 'ReadOnlyPaths=-/etc/5gpn/acme -/etc/5gpn/intercept-ca/root.crt' <<<"$renew_auto_fn" \
+    && grep -Fq 'InaccessiblePaths=-/etc/5gpn/intercept-ca/root.key -/etc/5gpn/intercept-ca/.root.key.new -/etc/5gpn/intercept -/etc/5gpn/mihomo -/var/lib/5gpn-intercept -/var/lib/5gpn' <<<"$renew_auto_fn" \
+    || fail "public renewal service can write outside its certificate/profile scope or read interception/runtime state"
 grep -Fq '# 5gpn-unit-id: 5gpn-certbot-renew.timer:v1' <<<"$renew_auto_fn" \
     || fail "renewal timer has no exact ownership marker"
 grep -Fq 'TimeoutStartSec=30min' <<<"$renew_auto_fn" \
     || fail "renewal service timeout cannot cover the 1.1.1.1 wait plus Certbot"
 grep -Fq 'TimeoutStopSec=2min' <<<"$renew_auto_fn" \
     || fail "renewal service does not leave a bounded TERM/restore window"
+grep -Fq 'RuntimeDirectory=5gpn' <<<"$renew_auto_fn" \
+    && grep -Fq 'RuntimeDirectoryMode=0700' <<<"$renew_auto_fn" \
+    && grep -Fq 'RuntimeDirectoryPreserve=yes' <<<"$renew_auto_fn" \
+    || fail "public renewal service cannot establish its fresh-boot lock directory"
 grep -Eq 'ExecStart=.*certbot renew' <<<"$renew_auto_fn" \
     && fail "renewal timer bypasses the scoped helper with direct certbot renew"
 grep -Fq 'intercept-cert-renew.sh' <<<"$renew_auto_fn" \
@@ -352,10 +375,26 @@ grep -Fq 'required_branch=beta' "$RELEASE" \
     || fail "beta release tags are not tied to beta"
 grep -Fq 'git merge-base --is-ancestor' "$RELEASE" \
     || fail "release workflow does not verify tag branch provenance"
+grep -Fq 'event_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"' "$RELEASE" \
+    && grep -Fq '[[ "$tagged_commit" == "$event_commit" ]]' "$RELEASE" \
+    || fail "release provenance is not bound to the immutable tag-push event commit"
+grep -Fq 'stable_gt "$tag" "$existing"' "$RELEASE" \
+    || fail "official releases can move latest backwards to an older stable SemVer"
 grep -Fq 'prerelease: ${{ needs.classify.outputs.prerelease }}' "$RELEASE" \
     || fail "release workflow does not publish beta as a prerelease"
-grep -Fq 'make_latest: ${{ needs.classify.outputs.make_latest }}' "$RELEASE" \
-    || fail "release workflow does not protect the official latest pointer"
+grep -Fq 'draft: true' "$RELEASE" \
+    && grep -Fq 'steps.release_draft.outputs.id' "$RELEASE" \
+    && grep -Fq 'make_latest="$RELEASE_MAKE_LATEST"' "$RELEASE" \
+    && grep -Fq '.immutable == true' "$RELEASE" \
+    || fail "release assets are not finalized through an immutable draft"
+grep -Fq 'tag_name: ${{ github.ref_name }}' "$RELEASE" \
+    || fail "release publication does not name the exact validated tag"
+[[ "$(grep -Fc 'stable_gt "$GITHUB_REF_NAME" "$existing"' "$RELEASE")" == 1 ]] \
+    && grep -Fq 'Release existence check returned HTTP $release_status.' "$RELEASE" \
+    || fail "release jobs can skip final monotonicity or overwrite an existing release"
+grep -Fq 'group: 5gpn-release-${{ github.ref }}' "$RELEASE" \
+    && grep -Fq 'group: 5gpn-release-publish' "$RELEASE" \
+    || fail "same-tag runs and immutable publication are not independently serialized"
 grep -Fq 'uses: ./.github/workflows/checks.yml' "$RELEASE" \
     || fail "release channels do not share the repository checks gate"
 grep -Fq 'RELEASE_TAG=\"${GITHUB_REF_NAME}\"' "$RELEASE" \

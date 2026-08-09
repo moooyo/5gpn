@@ -105,7 +105,7 @@ CERT_DNS_WAIT_INTERVAL=10
 # unconditional wait on the certificate path; our own DNS verification checks
 # first and sleeps only after a failed check. Lower it if the zone's
 # authoritative servers converge quickly; too low fails validation outright.
-CERT_DNS_PROPAGATION_SECONDS="${CERT_DNS_PROPAGATION_SECONDS:-30}"
+CERT_DNS_PROPAGATION_SECONDS=30
 INSTALL_LOCK_FILE="/run/5gpn/install.lock"
 CERT_RENEW_LOCK_FILE="/run/5gpn/cert-renew.lock"
 INSTALL_LOCK_WAIT_TIMEOUT=900
@@ -114,6 +114,7 @@ LOCK_WAIT_REPORT_INTERVAL=5
 LE_PRODUCTION_SERVER="https://acme-v02.api.letsencrypt.org/directory"
 INSTALL_LOCK_HELD=0
 INSTALL_CERT_LOCK_HELD=0
+INSTALL_PUBLICATION_STARTED=0
 # The transaction layer restores the pre-install distro certbot.timer state on
 # rollback and after non-owning certificate flows. Owned 5gpn lineages set this
 # flag so the unscoped distro timer stays disabled after commit.
@@ -167,12 +168,13 @@ TEMP_OWNERSHIP_VALUE="5gpn-temp"
 # Upstream v1.19.28 plus the 5gpn monolith, built from moooyo/mihomo's
 # feat/5gpn-monolith branch. This core does not merely add interception, it *is*
 # the DNS engine, the interception engine, the data plane and the control API in
-# one process, so an upstream binary here does not degrade the install -- it
+# one long-running process (plus isolated same-binary one-shot workers), so an
+# upstream binary here does not degrade the install -- it
 # leaves the gateway with no resolver, no capture and no control API at all. The
 # staging probe checks the version token exactly rather than accepting a prefix.
 MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-monolith.28"
-MIHOMO_SHA256="38ecedf63efcc24f0c258cc820b14fab21cc575c1af6fa802f35e5752f9fa257"
+MIHOMO_VERSION="v1.19.28-monolith.29"
+MIHOMO_SHA256="d04749b6b51974a788028b6596a3a2db803ca4144f60f915cd696c181f7a7ae3"
 # Every `mihomo -t` in this script must run with the same SAFE_PATHS the unit
 # grants, because the seed names paths outside its own home directory -- the
 # certificates it serves and the UI bundle it publishes. Without this the core
@@ -184,8 +186,8 @@ MIHOMO_SHA256="38ecedf63efcc24f0c258cc820b14fab21cc575c1af6fa802f35e5752f9fa257"
 # a drift here fails at install time on a config the running service accepts.
 MIHOMO_SAFE_PATHS="/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui"
 ZASH_REPO="moooyo/zashboard"
-ZASH_VERSION="v3.16.1-monolith.29"        # our fork's dist.zip, built from feat/5gpn-console
-ZASH_SHA256="568b6a80cec46b584aeb6ae8b28966d72af686f07257a273092b42fb2b693d68"
+ZASH_VERSION="v3.16.1-monolith.30"        # our fork's dist.zip, built from feat/5gpn-console
+ZASH_SHA256="e10f8af6a05b03ae4182104777b8de4ba95e0b4eeb6455d0f7595f29af6ae55f"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
@@ -257,6 +259,9 @@ STABLE_RELEASE_API="https://api.github.com/repos/moooyo/5gpn/releases/latest"
 RELEASES_API="https://api.github.com/repos/moooyo/5gpn/releases"
 SERVICE_READY_TIMEOUT=20
 ACCOUNT_QUIESCE_TIMEOUT=10
+MIN_EXTENSION_WORKER_KERNEL_MAJOR=5
+MIN_EXTENSION_WORKER_KERNEL_MINOR=7
+MIN_EXTENSION_WORKER_SYSTEMD_VERSION=257
 ACCOUNT_QUIESCE_INTERVAL=1
 
 # ----------------------------------------------------------------------------
@@ -2209,7 +2214,11 @@ systemd_global_dropin_key_is_managed() {
             case "$key" in
                 Exec*|User|Group|SupplementaryGroups|DynamicUser|Environment|EnvironmentFile|PassEnvironment|UnsetEnvironment|\
                 WorkingDirectory|RootDirectory|RootDirectoryStartOnly|RootImage|RootEphemeral|UMask|PermissionsStartOnly|\
-                Restart*|Kill*|\
+                Restart*|Kill*|OOMPolicy|Delegate*|Slice|DisableControllers|\
+                Memory*|StartupMemory*|AllowedMemoryNodes|StartupAllowedMemoryNodes|\
+                CPU*|StartupCPU*|AllowedCPUs|StartupAllowedCPUs|\
+                IO*|StartupIO*|BlockIO*|StartupBlockIO*|Tasks*|ManagedOOM*|\
+                Limit*|Nice|OOMScoreAdjust|TimerSlackNSec|NUMA*|\
                 Protect*|Private*|Restrict*|ReadWritePaths|ReadOnlyPaths|InaccessiblePaths|BindPaths|BindReadOnlyPaths|\
                 TemporaryFileSystem|MountImages|ExtensionImages|NoExecPaths|ExecPaths|CapabilityBoundingSet|AmbientCapabilities|\
                 NoNewPrivileges|SystemCall*|LockPersonality|MemoryDenyWriteExecute|SecureBits|KeyringMode|ProtectProc|ProcSubset|\
@@ -2384,6 +2393,153 @@ unit_file_has_5gpn_marker() {
         || grep -m1 -Eq "^# 5gpn-unit-id: ${unit//./\\.}:v[0-9]+$" "$file" 2>/dev/null
 }
 
+# Extension source is untrusted input. Each validation and action therefore
+# executes in a short-lived worker whose memory is capped in its own cgroup-v2
+# subtree. There is deliberately no in-process fallback: a host that cannot
+# provide the isolation boundary is not a supported installation target.
+kernel_release_supports_extension_workers() {
+    local release="$1" major minor
+    [[ "$release" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    (( 10#$major > MIN_EXTENSION_WORKER_KERNEL_MAJOR \
+       || (10#$major == MIN_EXTENSION_WORKER_KERNEL_MAJOR \
+           && 10#$minor >= MIN_EXTENSION_WORKER_KERNEL_MINOR) ))
+}
+
+systemd_version_supports_extension_workers() {
+    local version="$1" major
+    [[ "$version" =~ ^([0-9]+) ]] || return 1
+    major="${BASH_REMATCH[1]}"
+    (( 10#$major >= MIN_EXTENSION_WORKER_SYSTEMD_VERSION ))
+}
+
+current_systemd_manager_version() {
+    local version
+    command -v systemctl >/dev/null 2>&1 || return 1
+    version="$(systemctl show --property=Version --value 2>/dev/null || true)"
+    [[ -n "$version" ]] || return 1
+    printf '%s\n' "$version"
+}
+
+host_uses_pure_cgroup_v2() {
+    local line left right fstype mountpoint
+    local v2_root_count=0 v1_count=0
+    [[ -r /proc/self/mountinfo && -r /sys/fs/cgroup/cgroup.controllers ]] \
+        || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" == *' - '* ]] || continue
+        left="${line%% - *}"
+        right="${line#* - }"
+        fstype="${right%% *}"
+        read -r _ _ _ _ mountpoint _ <<< "$left"
+        if [[ "$fstype" == cgroup2 && "$mountpoint" == /sys/fs/cgroup ]]; then
+            v2_root_count=$((v2_root_count + 1))
+        elif [[ "$fstype" == cgroup ]]; then
+            v1_count=$((v1_count + 1))
+        fi
+    done < /proc/self/mountinfo
+    (( v2_root_count == 1 && v1_count == 0 ))
+}
+
+host_has_cgroup_v2_worker_controllers() {
+    local controller have_memory=0 have_pids=0
+    local -a controllers=()
+    [[ -r /sys/fs/cgroup/cgroup.controllers ]] || return 1
+    read -r -a controllers < /sys/fs/cgroup/cgroup.controllers || return 1
+    for controller in "${controllers[@]}"; do
+        case "$controller" in
+            memory) have_memory=1 ;;
+            pids) have_pids=1 ;;
+        esac
+    done
+    (( have_memory == 1 && have_pids == 1 ))
+}
+
+systemd_unit_candidate_source() {
+    local unit="$1" source
+    for source in "${SCRIPT_DIR}/etc/systemd/${unit}" "${BASE_DIR}/etc/systemd/${unit}"; do
+        if [[ -f "$source" && ! -L "$source" ]]; then
+            printf '%s\n' "$source"
+            return 0
+        fi
+    done
+    return 1
+}
+
+verify_systemd_unit_candidates() {
+    local unit source output line line_count=0 verify_dir candidate index
+    local -a units=(5gpn-mihomo.service 5gpn-intercept-cert.service \
+                    5gpn-intercept-cert.path 5gpn-intercept-cert.timer)
+    local -a sources=() candidates=()
+    command -v systemd-analyze >/dev/null 2>&1 \
+        || { err "systemd-analyze is required to validate the service isolation contract."; return 1; }
+    for unit in "${units[@]}"; do
+        source="$(systemd_unit_candidate_source "$unit")" \
+            || { err "Could not locate the candidate systemd unit: $unit"; return 1; }
+        sources+=("$source")
+    done
+    verify_dir="$(mktemp -d /tmp/5gpn-systemd-verify.XXXXXX)" || return 1
+    output="${verify_dir}/output"
+    # A fresh host does not yet have the runtime account, binary, or helper.
+    # Verify byte-derived candidates with only those unavailable external
+    # references replaced; every unit directive, relationship, and sandbox
+    # value remains the exact candidate that install_units will publish.
+    for index in "${!units[@]}"; do
+        candidate="${verify_dir}/${units[$index]}"
+        if ! sed -e 's|^ExecStart=.*$|ExecStart=/bin/true|' \
+                 -e 's/^User=.*$/User=root/' \
+                 -e 's/^Group=.*$/Group=root/' \
+                 -e 's/^SupplementaryGroups=.*$/SupplementaryGroups=root/' \
+                 "${sources[$index]}" > "$candidate"; then
+            rm -f -- "$output" "${candidates[@]}" "$candidate"
+            rmdir -- "$verify_dir" 2>/dev/null || true
+            err "Could not prepare the candidate systemd unit for verification: ${units[$index]}"
+            return 1
+        fi
+        candidates+=("$candidate")
+    done
+    if ! SYSTEMD_UNIT_PATH="${verify_dir}:" \
+            systemd-analyze verify "${candidates[@]}" >"$output" 2>&1; then
+        err "Candidate systemd units failed systemd-analyze verify; no project file was published."
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            err "systemd-analyze: $line"
+            line_count=$((line_count + 1))
+            (( line_count < 20 )) || break
+        done < "$output"
+        rm -f -- "$output" "${candidates[@]}"
+        rmdir -- "$verify_dir" 2>/dev/null || true
+        return 1
+    fi
+    rm -f -- "$output" "${candidates[@]}"
+    rmdir -- "$verify_dir" \
+        || { err "Could not remove the systemd verification staging directory: $verify_dir"; return 1; }
+}
+
+preflight_extension_worker_isolation_host() {
+    local kernel_name kernel_release systemd_version
+    kernel_name="$(uname -s 2>/dev/null || true)"
+    kernel_release="$(uname -r 2>/dev/null || true)"
+    [[ "$kernel_name" == Linux ]] \
+        || { err "Extension worker isolation requires Linux; found '${kernel_name:-unknown}'."; return 1; }
+    kernel_release_supports_extension_workers "$kernel_release" \
+        || { err "Linux kernel ${MIN_EXTENSION_WORKER_KERNEL_MAJOR}.${MIN_EXTENSION_WORKER_KERNEL_MINOR} or newer is required for extension worker memory isolation; found '${kernel_release:-unknown}'. Upgrade and reboot before installing 5gpn."; return 1; }
+    host_uses_pure_cgroup_v2 \
+        || { err "A pure cgroup v2 hierarchy mounted at /sys/fs/cgroup is required; legacy or hybrid cgroups were detected. Boot the host in unified cgroup-v2 mode and remove all cgroup-v1 controller mounts."; return 1; }
+    host_has_cgroup_v2_worker_controllers \
+        || { err "The cgroup-v2 memory and pids controllers must both be available. Enable kernel memory and PID cgroups, remove cgroup_disable=memory and cgroup_disable=pids, then reboot before installing 5gpn."; return 1; }
+    systemd_version="$(current_systemd_manager_version || true)"
+    [[ -n "$systemd_version" ]] \
+        || { err "A running systemd system manager is required; systemctl could not read its Version property."; return 1; }
+    systemd_version_supports_extension_workers "$systemd_version" \
+        || { err "systemd ${MIN_EXTENSION_WORKER_SYSTEMD_VERSION} or newer is required for delegated extension workers; found '$systemd_version'. Upgrade systemd before installing 5gpn."; return 1; }
+    if systemd_unit_has_dropins 5gpn-mihomo.service; then
+        err "Refusing a systemd override that can change or block the extension worker isolation contract before publication.${SYSTEMD_UNIT_CONFLICT_REASON:+ ($SYSTEMD_UNIT_CONFLICT_REASON)}"
+        return 1
+    fi
+    verify_systemd_unit_candidates
+}
+
 legacy_mihomo_unit_owned() {
     unit_file_has_5gpn_marker mihomo.service
 }
@@ -2442,9 +2598,9 @@ service_group_is_exclusive_for_user() {
 # A service account may carry exactly one gid: its own.
 #
 # It used to be allowed two more -- the overlay socket groups that let three
-# processes hand sockets to each other. There is one process now, so a service
-# account holding any supplementary group is something this installer did not
-# put there.
+# long-running services hand sockets to each other. There is one service
+# identity now, inherited by its same-binary one-shot workers, so an account
+# holding any supplementary group is something this installer did not put there.
 service_account_groups_are_permitted() {
     local user_groups="$1" primary_gid="$2" gid allowed
     allowed=" ${primary_gid} "
@@ -3245,8 +3401,10 @@ install_deps() {
             gum_spin "更新软件包索引…" apt-get update -qq || true
             apt-get install -y -qq \
                 curl ca-certificates unzip iproute2 openssl \
-                qrencode jq util-linux \
-                dnsutils || warn "some apt packages failed; continuing."
+                jq util-linux dnsutils \
+                || { err "Could not install required host packages."; return 1; }
+            apt-get install -y -qq qrencode \
+                || warn "qrencode is unavailable; QR display will use the plain URL fallback."
             if [[ "$CERT_MODE" != debug ]]; then
                 apt-get install -y -qq certbot \
                     || { err "Could not install certbot from the OS repository."; return 1; }
@@ -3259,8 +3417,10 @@ install_deps() {
         dnf|yum)
             $PKG_MGR install -y -q \
                 curl ca-certificates unzip iproute openssl \
-                qrencode jq util-linux \
-                bind-utils || warn "some rpm packages failed; continuing."
+                jq util-linux bind-utils \
+                || { err "Could not install required host packages."; return 1; }
+            $PKG_MGR install -y -q qrencode \
+                || warn "qrencode is unavailable; QR display will use the plain URL fallback."
             if [[ "$CERT_MODE" != debug ]]; then
                 $PKG_MGR install -y -q certbot \
                     || { err "Could not install certbot from the OS repository."; return 1; }
@@ -3272,7 +3432,7 @@ install_deps() {
             ;;
     esac
     local cmd
-    for cmd in curl openssl tar gzip unzip sha256sum ip flock timeout findmnt; do
+    for cmd in curl openssl tar gzip unzip sha256sum ip flock timeout findmnt jq; do
         command -v "$cmd" >/dev/null 2>&1 \
             || { err "Required command is missing after dependency install: $cmd"; return 1; }
     done
@@ -3875,11 +4035,17 @@ finish_install_transaction() {
     trap '' HUP INT TERM
     trap - ERR EXIT
 
-    # The installer does not undo a partial publication. Say so plainly: this is
-    # the operator's only signal that the host needs looking at.
+    # The installer does not undo a partial publication. Once the publication
+    # phase starts, some roots may already exist unchanged while another step
+    # may have written state, so report the possibility without claiming every
+    # failure necessarily mutated the host.
     if [[ "$final_rc" != 0 ]]; then
-        err "The installer does not roll back. This host is left partially installed."
-        err "Inspect the reported phase, then rerun the installer or repair it by hand."
+        if [[ "${INSTALL_PUBLICATION_STARTED:-0}" == 1 ]]; then
+            err "The installer does not roll back. Publication started, so this host may be partially installed."
+            err "Inspect the reported phase, then rerun the installer or repair it by hand."
+        else
+            err "Publication did not start; no 5gpn publication step ran."
+        fi
     fi
 
     set +e
@@ -5850,7 +6016,10 @@ run_http_certbot() (
     else
         restore_active_mihomo || restore_rc=$?
     fi
-    trap - EXIT INT TERM
+    # Keep INT/TERM armed until the subshell itself returns. Bash may defer a
+    # signal delivered as Certbot exits; clearing those traps here creates a
+    # narrow window in which a real operator interrupt is reported as success.
+    trap - EXIT
     [[ "$certbot_rc" == 0 ]] || exit "$certbot_rc"
     [[ "$restore_rc" == 0 ]] || exit "$restore_rc"
 )
@@ -6200,6 +6369,34 @@ Type=oneshot
 TimeoutStartSec=30min
 TimeoutStopSec=2min
 ExecStart=/opt/5gpn/scripts/cert-renew.sh --quiet
+UMask=0077
+RuntimeDirectory=5gpn
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_NET_BIND_SERVICE
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+ReadWritePaths=/etc/letsencrypt /var/lib/letsencrypt /var/log/letsencrypt
+ReadWritePaths=/etc/5gpn/cert -/opt/5gpn/ui /run/5gpn
+ReadOnlyPaths=-/etc/5gpn/acme -/etc/5gpn/intercept-ca/root.crt
+InaccessiblePaths=-/etc/5gpn/intercept-ca/root.key -/etc/5gpn/intercept-ca/.root.key.new -/etc/5gpn/intercept -/etc/5gpn/mihomo -/var/lib/5gpn-intercept -/var/lib/5gpn
 EOF
     cat > "$timer_tmp" <<'EOF'
 # 5gpn-unit-id: 5gpn-certbot-renew.timer:v1
@@ -7847,6 +8044,7 @@ delegate_pinned_channel_switch() {
 full_install() {
     local mode="${1:-}" force_tui=0 reset_mihomo=0 postcommit_failed=0
     local reveal_console_connection=0
+    INSTALL_PUBLICATION_STARTED=0
     # Capture the real destination before the success block enters a pipeline:
     # stdout inside `{ ...; } | card` is a pipe and can never satisfy `-t 1`.
     if [[ -t 1 ]]; then
@@ -7869,10 +8067,13 @@ full_install() {
     trap 'install_transaction_signal 129' HUP
     trap 'install_transaction_signal 130' INT
     trap 'install_transaction_signal 143' TERM
+    INSTALL_PHASE="checking extension worker isolation support"
+    preflight_extension_worker_isolation_host
     INSTALL_PHASE="loading identity reconciliation state"
     load_identity_reconcile_journal
     preload_fivegpn_identity_for_claim
-    INSTALL_PHASE="claiming project roots"
+    INSTALL_PHASE="starting publication by claiming project roots"
+    INSTALL_PUBLICATION_STARTED=1
     claim_project_roots
     preflight_fivegpn_state_migration
     preflight_intercept_roots
@@ -7944,8 +8145,9 @@ full_install() {
     phase "preparing low-memory runtime support" "准备低内存运行支持"
     ensure_swap
 
-    # Only after every input, host conflict, download, digest, archive, console
-    # DNS gate, and existing mihomo config has passed do we enter publication.
+    # Every runtime payload has now passed its input, host-conflict, digest,
+    # archive, DNS and existing-config gates. Project-root publication began
+    # earlier; this is the narrower runtime-payload boundary.
     phase "installing the runtime account" "创建运行账户"
     install_service_accounts
     migrate_fivegpn_state_directory

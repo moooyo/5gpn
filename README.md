@@ -42,7 +42,7 @@ Android Private DNS / iOS configuration profile
                                       |
                          optional HTTP/TLS capture hook
                                       |
-                          goja actions and inner dial
+                    isolated one-shot goja workers
                                       |
                        operator binding / terminal target
                                       |
@@ -75,13 +75,14 @@ AAAA 的 NODATA 不只针对客户端。mihomo 嗅探出主机名之后，会在
 - **运维者拥有的数据面**：完整 mihomo YAML 没有 daemon 生成区；普通安装、重装和 `configure` 会逐字节保留有效文件。
 - **Unified control plane**: zashboard covers status, setup, DNS logs and diagnosis, policy, upstreams, mihomo health and configuration, extensions, marketplace discovery, and logs. The Telegram bot is read-only and alert-only.
 - **可选原生扩展**：严格的 `5gpn.io/v1` 快照、明确声明的 exact 与受限 wildcard capture-host allowlist、typed settings、权限审阅、显式执行顺序，以及默认 `DIRECT`、不可为空的 operator egress binding。
-- **Checked installation**: exact tags, SHA-256 verification, staging, atomic file publication, and readiness probes. Failures before publication leave the host untouched; failures during publication are reported as partial. No Go or Node toolchain is installed on the gateway.
+- **Checked installation**: exact tags, SHA-256 verification, staging, atomic file publication, and readiness probes. Publication begins when the installer starts claiming its durable project roots; failures before that phase run no publication step, while later failures are reported as potentially partial. No Go or Node toolchain is installed on the gateway.
 
 ## 安装要求
 
 开始前需要：
 
-- 一台带 systemd 的 Linux amd64 网关和 root 权限。安装器直接支持使用 apt 或 dnf/yum 的发行版；其他发行版只有在检测到上述包管理器时才会尽力适配。
+- A Linux amd64 gateway with kernel 5.7 or newer, systemd 257 or newer, a pure cgroup v2 hierarchy with the memory and pids controllers available, and root access. The installer checks this isolation baseline before project publication. It directly supports distributions using apt or dnf/yum; other distributions are attempted only when one of those package managers is detected.
+- Quick Installer 在创建任何安装器文件前就需要 `util-linux` 提供的 `flock` 与 `findmnt`。最小化系统请先运行 `apt-get install -y util-linux`、`dnf install -y util-linux` 或 `yum install -y util-linux`。
 - 首次安装可用的交互 TTY。`curl | sudo bash` 会尝试重新连接 `/dev/tty`；没有 TTY 时首次安装会 fail closed。
 - 至少一个已分配给本机接口、客户端可路由到达的非回环 IPv4。5gpn 的 steering 路径是 IPv4-only；IPv6-only 客户端无法到达网关，除非网络提供 CLAT 等 IPv4 可达性。
 - 一个自有 base domain。系统会派生 `dot.<base>` 和 `console.<base>`。
@@ -192,6 +193,26 @@ restarts any unexpected exit after three seconds and limits repeated starts to
 ten within 60 seconds. The unit then remains failed, and the limit action is
 explicitly `none`, so a crash loop cannot reboot or power off the host. Existing
 connections are lost during a successful restart.
+
+Extension code is the deliberate process-isolation exception, not another
+long-running component. Each validation and action starts the same
+`5gpn-mihomo` binary in a one-shot worker mode below a dedicated cgroup-v2
+memory limit. Worker-manager construction and its hard-isolation probe are an
+unconditional startup invariant: failure terminates monolith startup before DoT,
+the controller, or another listener is opened. After that probe succeeds, a
+single child start error, timeout, crash, or OOM fails only its validation or
+action while the main process remains live. Extension code is never executed in
+the main process. systemd remains the only supervisor and stopping the unit removes all
+of its workers with the main process. At most two workers run concurrently.
+Each Linux worker has `memory.max=536870912`, `memory.swap.max=0`,
+`memory.oom.group=1`, and `pids.max=32`; the admitted aggregate upper bounds are
+1GiB and 64 tasks. These are caps, not reserved memory or a physical-RAM
+minimum; deployment sizing must still leave capacity for the main gateway and
+the host. `RestrictNamespaces=` is intentionally absent from the main unit:
+systemd 257 blocks all `clone3` calls when it applies that seccomp policy, while
+Go's cgroup-FD spawn requires `clone3(CLONE_INTO_CGROUP)`. The unit still denies
+`unshare` and `setns`; the runtime startup probe makes failure fatal before any
+gateway listener becomes available.
 
 This is process recovery, not self-healing: a persistent bad configuration,
 port conflict, or broken certificate remains an operator-visible failure. A
@@ -326,7 +347,7 @@ Console writes hot-apply the revisioned mihomo `5gpn` documents. Deployment valu
 
 ## 原生扩展
 
-Native extensions are optional, and a fresh installation has the MITM master disabled. The engine remains inside mihomo; no sidecar service is started:
+Native extensions are optional, and a fresh installation has the MITM master disabled. The control and capture engine remains inside mihomo; no sidecar service is started. Untrusted code runs only in same-binary one-shot workers, so mihomo remains the sole long-running process:
 
 - 只接受严格的 `5gpn.io/v1` YAML。URL manifest 与引用的远程脚本经 HTTPS/redirect/SSRF 防护抓取一次；local add 接受一份粘贴或上传的 manifest。所有输入都受大小限制、计算摘要并保存为不可变本地快照；新安装保持 disabled，经过审阅的更新则原子保留扩展原有的 enabled 授权。
 - `traffic.captureHosts` is the sole traffic-acquisition permission. Only when both the extension and MITM master are enabled and ready does it capture plain HTTP or TLS/H1/H2 on ports `80` and `443`.
@@ -334,7 +355,7 @@ Native extensions are optional, and a fresh installation has the MITM master dis
 - An extension may remain armed while the MITM master is off, but it is not ready and contributes no DNS overlay or in-process capture policy.
 - 证书发布处于 pending 或 error 时，已启用的 capture name 仍被留在网关，但其 HTTP/TLS 连接会在普通规则前被拒绝；匹配的 fenced ready result 无需再次写配置或重启即可激活。系统不会呈现旧证书，也不会把 pending 降级为直连绕过。
 - Console 暴露 manifest 声明的全部 typed setting，包括本地 location editor；一次保存会以一个 revision 原子替换完整 settings map，不会留下半保存组合。启用中的扩展可以原地应用已审阅的 Marketplace 更新：in-flight request 使用旧 immutable snapshot 完成，之后的请求只看到完整编译的新 snapshot。已安装页不提供单独的 source-URL 检查更新入口。
-- Every action runs in a fresh, bounded goja VM. Quota-bound `context.storage` exists only when the manifest requests it. The sandbox exposes bounded action-scoped timers and, with the network grant, synchronous `request` plus promise-based `requestAsync`; it has no filesystem, process, module loader, socket, ambient `fetch`, or direct egress. All permitted network calls return through mihomo's inner dialer and current rule evaluation.
+- Every validation and action runs in a fresh, memory-isolated one-shot process containing a bounded goja VM. Linux uses delegated cgroup-v2 memory and pids controller subtrees; supported Windows execution uses a 512MiB Job Object with `ActiveProcessLimit=1`. If that hard limit cannot be established, the operation fails closed without an in-process fallback. Quota-bound storage, logs, and permitted network calls cross bounded IPC back to the main process, where network calls enter mihomo's inner dialer and current rule evaluation. The sandbox has no filesystem, process, module loader, socket, ambient `fetch`, or direct egress.
 - 每个扩展都显式绑定出口并默认 `DIRECT`；运维者可以改选已有 mihomo group，但 manifest 和脚本不能命名或修改该值。已选 group 消失时流量 fail closed，不会静默回退。启用确认中审阅的全局 routing rule 只允许 `REJECT` 或 `DIRECT`，且只在扩展与 MITM master 同时启用时存在。
 - 执行顺序会影响 action composition、重叠 host 的 egress/capture-DNS winner 和 routing first-match，因此重排也必须确认。
 - marketplace 只是 discovery metadata，不是信任根；不会自动安装、启用、更新、抓取或镜像内容。第一方扩展源码位于独立的 [moooyo/5gpn-extensions](https://github.com/moooyo/5gpn-extensions) 仓库，并发布[官方 marketplace index](https://moooyo.github.io/5gpn-extensions/marketplace/v2/index.json)。
@@ -352,6 +373,7 @@ Only the root-owned certificate publisher can read the private CA signing key; m
 - `upgrade-reset-mihomo` 会替换完整 YAML；自定义 proxies、providers、groups 和 rules 不会自动合并，只能从备份手工恢复。
 - A successful beta channel switch does not guarantee an in-place switch back to the official channel. Keep a system snapshot before switching when reversal is required. The installer does not claim whole-system rollback after publication begins.
 - 所有仍使用 interception config schema v4 的 pre-v5 部署都需要先做显式、可恢复的 lockstep rebuild；不要删除旧 interception 文件或只改 schema version。请严格执行 [pre-v5 rebuild runbook](docs/pre-v5-upgrade.md)。
+- Repository administration must prevent release-tag updates and deletion with a GitHub ruleset and keep immutable releases enabled. The workflow binds assets to the tag-push commit, refuses an existing release, uploads every asset to a draft, and publishes that draft with the stable `latest` decision in the same serialized operation.
 
 ## 安全边界与已知限制
 

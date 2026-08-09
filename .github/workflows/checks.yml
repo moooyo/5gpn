@@ -68,12 +68,12 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: moooyo/mihomo
-          ref: v1.19.28-monolith.28
+          ref: v1.19.28-monolith.29
           path: 5gpn-core
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: moooyo/5gpn-extensions
-          ref: baafb3800d692de5a2ff5321ecb672328f3694d7
+          ref: ac04d79a12ef01f99bf1637f7dc62b6952694d78
           path: official-extensions
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
@@ -95,8 +95,8 @@ jobs:
       # one checks a configuration nobody will run. Keep this pin and its digest
       # in lockstep with MIHOMO_VERSION/MIHOMO_SHA256 in install.sh.
       MIHOMO_REPO: moooyo/mihomo
-      MIHOMO_VERSION: v1.19.28-monolith.28
-      MIHOMO_SHA256: 38ecedf63efcc24f0c258cc820b14fab21cc575c1af6fa802f35e5752f9fa257
+      MIHOMO_VERSION: v1.19.28-monolith.29
+      MIHOMO_SHA256: d04749b6b51974a788028b6596a3a2db803ca4144f60f915cd696c181f7a7ae3
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Download pinned mihomo

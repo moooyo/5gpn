@@ -42,7 +42,7 @@ Android Private DNS / iOS configuration profile
                                       |
                          optional HTTP/TLS capture hook
                                       |
-                          goja actions and inner dial
+                    isolated one-shot goja workers
                                       |
                        operator binding / terminal target
                                       |
@@ -75,13 +75,14 @@ When both the MITM master and an extension are enabled and active, the capture-h
 - **Operator-owned data plane**: the complete mihomo YAML has no daemon-generated region; normal install, reinstall, and `configure` preserve a valid file byte for byte.
 - **Unified control plane**: zashboard covers status, setup, DNS logs and diagnosis, policy, upstreams, mihomo health and configuration, extensions, marketplace discovery, and logs. The Telegram bot is read-only and alert-only.
 - **Optional native extensions**: strict `5gpn.io/v1` snapshots, explicitly declared exact and constrained-wildcard capture-host allowlists, typed settings, permission review, explicit execution order, and a non-empty operator egress binding that defaults to `DIRECT`.
-- **Checked installation**: exact tags, SHA-256 verification, staging, atomic file publication, and readiness probes. Failures before publication leave the host untouched; failures during publication are reported as partial. No Go or Node toolchain is installed on the gateway.
+- **Checked installation**: exact tags, SHA-256 verification, staging, atomic file publication, and readiness probes. Publication begins when the installer starts claiming its durable project roots; failures before that phase run no publication step, while later failures are reported as potentially partial. No Go or Node toolchain is installed on the gateway.
 
 ## Requirements
 
 Before you start, provide:
 
-- A Linux amd64 gateway with systemd and root access. The installer directly supports distributions using apt or dnf/yum; it attempts best-effort adaptation for other distributions only when one of those package managers is detected.
+- A Linux amd64 gateway with kernel 5.7 or newer, systemd 257 or newer, a pure cgroup v2 hierarchy with the memory and pids controllers available, and root access. The installer checks this isolation baseline before project publication. It directly supports distributions using apt or dnf/yum; other distributions are attempted only when one of those package managers is detected.
+- The quick installer requires `flock` and `findmnt` from `util-linux` before it creates any installer files. Minimal images must install it first with `apt-get install -y util-linux`, `dnf install -y util-linux`, or `yum install -y util-linux`.
 - An interactive TTY for the first installation. `curl | sudo bash` attempts to reattach `/dev/tty`; a first install without a TTY fails closed.
 - At least one non-loopback IPv4 address assigned to a local interface and routable from clients. The 5gpn steering path is IPv4-only; IPv6-only clients cannot reach the gateway unless the network provides IPv4 reachability such as CLAT.
 - A base domain you control. The system derives `dot.<base>` and `console.<base>`.
@@ -192,6 +193,26 @@ restarts any unexpected exit after three seconds and limits repeated starts to
 ten within 60 seconds. The unit then remains failed, and the limit action is
 explicitly `none`, so a crash loop cannot reboot or power off the host. Existing
 connections are lost during a successful restart.
+
+Extension code is the deliberate process-isolation exception, not another
+long-running component. Each validation and action starts the same
+`5gpn-mihomo` binary in a one-shot worker mode below a dedicated cgroup-v2
+memory limit. Worker-manager construction and its hard-isolation probe are an
+unconditional startup invariant: failure terminates monolith startup before DoT,
+the controller, or another listener is opened. After that probe succeeds, a
+single child start error, timeout, crash, or OOM fails only its validation or
+action while the main process remains live. Extension code is never executed in
+the main process. systemd remains the only supervisor and stopping the unit removes all
+of its workers with the main process. At most two workers run concurrently.
+Each Linux worker has `memory.max=536870912`, `memory.swap.max=0`,
+`memory.oom.group=1`, and `pids.max=32`; the admitted aggregate upper bounds are
+1GiB and 64 tasks. These are caps, not reserved memory or a physical-RAM
+minimum; deployment sizing must still leave capacity for the main gateway and
+the host. `RestrictNamespaces=` is intentionally absent from the main unit:
+systemd 257 blocks all `clone3` calls when it applies that seccomp policy, while
+Go's cgroup-FD spawn requires `clone3(CLONE_INTO_CGROUP)`. The unit still denies
+`unshare` and `setns`; the runtime startup probe makes failure fatal before any
+gateway listener becomes available.
 
 This is process recovery, not self-healing: a persistent bad configuration,
 port conflict, or broken certificate remains an operator-visible failure. A
@@ -306,7 +327,7 @@ Console writes hot-apply the revisioned mihomo `5gpn` documents. Deployment valu
 
 ## Native extensions
 
-Native extensions are optional, and a fresh installation has the MITM master disabled. The engine remains inside mihomo; no sidecar service is started:
+Native extensions are optional, and a fresh installation has the MITM master disabled. The control and capture engine remains inside mihomo; no sidecar service is started. Untrusted code runs only in same-binary one-shot workers, so mihomo remains the sole long-running process:
 
 - Only strict `5gpn.io/v1` YAML is accepted. URL manifests and referenced remote scripts are fetched once through HTTPS, redirect, and SSRF guards; local add accepts one pasted or uploaded manifest. Every input is size-bounded, hashed, and stored as an immutable local snapshot. A fresh install lands disabled; a reviewed update atomically retains the extension's prior enabled authorization.
 - `traffic.captureHosts` is the sole traffic-acquisition permission. Only when both the extension and MITM master are enabled and ready does it capture plain HTTP or TLS/H1/H2 on ports `80` and `443`.
@@ -314,7 +335,7 @@ Native extensions are optional, and a fresh installation has the MITM master dis
 - An extension may remain armed while the MITM master is off, but it is not ready and contributes no DNS overlay or in-process capture policy.
 - When certificate publication is pending or has failed, enabled capture names remain claimed at the gateway and their HTTP/TLS connections are rejected before ordinary routing. A fenced ready result activates them without another write or restart; an old certificate is never presented and pending never becomes direct bypass.
 - The Console exposes every declared typed setting, including the local location editor. One save replaces the complete settings map as a single validated revision; it cannot leave a partially saved combination. Enabled extensions may apply a reviewed Marketplace update in place: in-flight requests finish on the old immutable snapshot and later requests see only the fully compiled replacement. The installed page exposes no separate source-URL update check.
-- Every action runs in a fresh, bounded goja VM. Quota-bound `context.storage` exists only when the manifest requests it. The sandbox exposes bounded action-scoped timers and, with the network grant, synchronous `request` plus promise-based `requestAsync`; it has no filesystem, process, module loader, socket, ambient `fetch`, or direct egress. All permitted network calls return through mihomo's inner dialer and current rule evaluation.
+- Every validation and action runs in a fresh, memory-isolated one-shot process containing a bounded goja VM. Linux uses delegated cgroup-v2 memory and pids controller subtrees; supported Windows execution uses a 512MiB Job Object with `ActiveProcessLimit=1`. If that hard limit cannot be established, the operation fails closed without an in-process fallback. Quota-bound storage, logs, and permitted network calls cross bounded IPC back to the main process, where network calls enter mihomo's inner dialer and current rule evaluation. The sandbox has no filesystem, process, module loader, socket, ambient `fetch`, or direct egress.
 - Every extension has an explicit egress binding that defaults to `DIRECT`. The operator may select an existing mihomo group, but the manifest and scripts cannot name or change that value. A selected group that disappears fails closed without silently returning to `DIRECT`. Global routing rules reviewed in the enablement confirmation may select only `REJECT` or `DIRECT` and exist only while both the extension and MITM master are enabled.
 - Execution order affects action composition, egress and capture-DNS winners for overlapping hosts, and routing first-match behavior, so reordering also requires confirmation.
 - Marketplace data is discovery metadata, not a trust root. Nothing is installed, enabled, updated, crawled, or mirrored automatically. First-party extension source lives in the separate [moooyo/5gpn-extensions](https://github.com/moooyo/5gpn-extensions) repository, which publishes the [official marketplace index](https://moooyo.github.io/5gpn-extensions/marketplace/v2/index.json).
@@ -332,6 +353,7 @@ Only the root-owned certificate publisher can read the private CA signing key; m
 - `upgrade-reset-mihomo` replaces the complete YAML. Custom proxies, providers, groups, and rules are not merged and must be restored manually from the backup.
 - A successful beta channel switch does not guarantee an in-place switch back to the official channel. Keep a system snapshot before switching when reversal is required. The installer does not claim whole-system rollback after publication begins.
 - Every pre-v5 deployment that still uses interception config schema v4 requires an explicit, recoverable lockstep rebuild first. Never delete the old interception file or change only its schema version. Follow the [pre-v5 rebuild runbook](docs/pre-v5-upgrade.md) exactly.
+- Repository administration must prevent release-tag updates and deletion with a GitHub ruleset and keep immutable releases enabled. The workflow binds assets to the tag-push commit, refuses an existing release, uploads every asset to a draft, and publishes that draft with the stable `latest` decision in the same serialized operation.
 
 ## Security boundaries and known limitations
 

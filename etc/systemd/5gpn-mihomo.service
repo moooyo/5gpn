@@ -1,4 +1,4 @@
-# 5gpn-unit-id: 5gpn-mihomo.service:v1
+# 5gpn-unit-id: 5gpn-mihomo.service:v2
 [Unit]
 Description=5gpn (DNS engine, interception engine, forwarding data plane, control API)
 After=network-online.target 5gpn-intercept-cert.path
@@ -16,15 +16,33 @@ ExecStart=/opt/5gpn/bin/5gpn-mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn
 # by systemd even with Restart=always.
 Restart=always
 RestartSec=3
+OOMPolicy=continue
+KillMode=control-group
 User=fivegpn
 Group=fivegpn
 UMask=0027
 
-# One process now, so this unit carries the union of what three used to. What
-# it does not carry is the coordination between them: the overlay control and
-# generation sockets are gone, and with them the runtime directory that held
-# them and the two groups whose only purpose was handing a socket from one
-# service user to another. There is no second process left to agree with.
+# mihomo is the sole long-running process. Each extension validation or action
+# executes in a short-lived, same-binary worker below this unit's delegated
+# controller subtree. OOMPolicy=continue contains a worker OOM to that operation;
+# KillMode=control-group still removes every worker when the unit is stopped.
+# These workers are not services or independently supervised sidecars.
+#
+# systemd starts the trusted parent alone in the private delegated unit root.
+# Before opening a listener, the parent creates or validates an empty /main,
+# moves itself there, proves the root is empty, enables memory+pids, and only
+# then creates worker leaves. DelegateSubgroup= would make /main the namespace
+# root too early and hide the unit root, so it must remain unset. The installer
+# rejects kernels before 5.7, systemd before 257, hybrid/v1 cgroups, and a missing
+# cgroup-v2
+# memory or pids controller before it publishes anything.
+# The runtime admits at most two workers and gives each leaf memory.max=512MiB,
+# memory.swap.max=0, memory.oom.group=1, and pids.max=32.
+# Inside the private namespace the delegated unit root stays /sys/fs/cgroup.
+# The process starts at 0::/ and reports 0::/main after trusted normalization.
+MemoryAccounting=yes
+TasksAccounting=yes
+Delegate=memory pids
 
 LimitNOFILE=65535
 
@@ -45,9 +63,16 @@ PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
-ProtectControlGroups=yes
+ProtectControlGroups=private
 RestrictSUIDSGID=yes
-RestrictNamespaces=yes
+# Do not add RestrictNamespaces=. systemd 257 implements any value of that
+# directive by returning ENOSYS for every clone3 call because seccomp cannot
+# inspect clone3's pointed-to flag structure. Go's UseCgroupFD requires
+# clone3(CLONE_INTO_CGROUP) to start a worker directly in its sealed leaf.
+# Direct namespace switching remains denied. The mandatory runtime startup probe
+# proves the required clone3 path before any gateway listener opens; probe
+# failure terminates monolith startup, while later child failures remain local.
+SystemCallFilter=~unshare setns
 LockPersonality=yes
 ProtectProc=invisible
 ProcSubset=pid

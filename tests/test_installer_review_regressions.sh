@@ -27,6 +27,23 @@ else
     fail "caller configuration survived or the fixed UI_DIR changed"
 fi
 
+if grep -Fq 'CERT_DNS_PROPAGATION_SECONDS="${CERT_DNS_PROPAGATION_SECONDS:-' "$INSTALL"; then
+    fail "certificate propagation timing still accepts caller environment"
+elif grep -Eq '^CERT_DNS_PROPAGATION_SECONDS=[0-9]+$' "$INSTALL"; then
+    pass "certificate propagation timing is an installer constant"
+else
+    fail "certificate propagation timing has no fixed installer value"
+fi
+
+deps_fn="$(sed -n '/^install_deps()/,/^}/p' "$INSTALL")"
+if grep -Fq 'findmnt jq' <<<"$deps_fn" \
+   && grep -Fq 'Could not install required host packages.' <<<"$deps_fn" \
+   && grep -Fq 'QR display will use the plain URL fallback.' <<<"$deps_fn"; then
+    pass "required jq and optional qrencode have separate fail-hard/fallback paths"
+else
+    fail "host dependency installation can defer a missing jq until publication"
+fi
+
 main_fn="$(sed -n '/^main()/,/^}/p' "$INSTALL")"
 [[ "$(grep -n 'attach_tty' <<<"$main_fn" | head -1 | cut -d: -f1)" -lt \
    "$(grep -n 'case "\$cmd"' <<<"$main_fn" | head -1 | cut -d: -f1)" ]] \
@@ -46,6 +63,16 @@ if [[ -n "$stage_line" && -n "$publish_line" && "$stage_line" -lt "$publish_line
     pass "artifact verification precedes publication"
 else
     fail "artifacts are published before they are staged and verified"
+fi
+
+full_fn="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
+claim_line="$(grep -n 'INSTALL_PUBLICATION_STARTED=1' <<<"$full_fn" | head -1 | cut -d: -f1)"
+root_line="$(grep -n 'claim_project_roots' <<<"$full_fn" | head -1 | cut -d: -f1)"
+if [[ -n "$claim_line" && -n "$root_line" && "$claim_line" -lt "$root_line" ]] \
+   && grep -Fq 'if [[ "${INSTALL_PUBLICATION_STARTED:-0}" == 1 ]]' "$INSTALL"; then
+    pass "failure reporting enters the explicit project-root publication phase"
+else
+    fail "publication failure reporting is not tied to the explicit publication phase"
 fi
 
 # The installer reports a failure and unwinds its locks; it does not undo a

@@ -11,6 +11,13 @@ on:
 permissions:
   contents: read
 
+# Duplicate deliveries of one tag must not both pass the no-existing-release
+# check. Different tags validate independently; the publication job has a
+# separate fixed mutex and chooses latest while publishing the immutable draft.
+concurrency:
+  group: 5gpn-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   classify:
     runs-on: ubuntu-latest
@@ -53,17 +60,46 @@ jobs:
             '+refs/heads/beta:refs/remotes/origin/beta'
           git fetch --force --tags origin
           tagged_commit="$(git rev-list -n 1 "$tag")"
+          event_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          [[ "$tagged_commit" == "$event_commit" ]] \
+            || { echo "Tag $tag moved: event $event_commit, current $tagged_commit." >&2; exit 1; }
           git merge-base --is-ancestor "$tagged_commit" "refs/remotes/origin/${required_branch}" \
             || { echo "Tag $tag is not reachable from ${required_branch}." >&2; exit 1; }
 
-          if [[ "$channel" == beta ]]; then
+          decimal_gt() {
+            local left="$1" right="$2"
+            local LC_ALL=C
+            (( ${#left} > ${#right} )) && return 0
+            (( ${#left} < ${#right} )) && return 1
+            [[ "$left" > "$right" ]]
+          }
+          stable_gt() {
+            local left="$1" right="$2" li ri
+            local -a lparts rparts
+            IFS=. read -r -a lparts <<< "$left"
+            IFS=. read -r -a rparts <<< "$right"
+            for li in 0 1 2; do
+              ri="${rparts[$li]}"
+              decimal_gt "${lparts[$li]}" "$ri" && return 0
+              decimal_gt "$ri" "${lparts[$li]}" && return 1
+            done
+            return 1
+          }
+
+          if [[ "$channel" == stable ]]; then
+            while IFS= read -r existing; do
+              [[ "$existing" == "$tag" || ! "$existing" =~ $stable_re ]] && continue
+              stable_gt "$tag" "$existing" \
+                || { echo "Stable release $tag is not newer than $existing." >&2; exit 1; }
+            done < <(git tag --list)
+          else
             base="${tag%-beta.*}"
             current_number="${tag##*.}"
             while IFS= read -r existing; do
               [[ "$existing" == "$tag" ]] && continue
               existing_number="${existing#"${base}-beta."}"
               [[ "$existing_number" =~ ^[1-9][0-9]*$ ]] || continue
-              (( current_number > existing_number )) \
+              decimal_gt "$current_number" "$existing_number" \
                 || { echo "Beta sequence $tag is not newer than $existing." >&2; exit 1; }
             done < <(git tag --list "${base}-beta.*")
           fi
@@ -81,10 +117,54 @@ jobs:
   build:
     needs: [classify, gate]
     runs-on: ubuntu-latest
+    concurrency:
+      group: 5gpn-release-publish
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Revalidate immutable release identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CHANNEL: ${{ needs.classify.outputs.channel }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          git fetch --force --tags origin
+          tagged_commit="$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}")"
+          event_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          [[ "$tagged_commit" == "$event_commit" ]] \
+            || { echo "Tag moved after validation: $tagged_commit != $event_commit" >&2; exit 1; }
+          if [[ "$RELEASE_CHANNEL" == stable ]]; then
+            decimal_gt() {
+              local left="$1" right="$2"
+              local LC_ALL=C
+              (( ${#left} > ${#right} )) && return 0
+              (( ${#left} < ${#right} )) && return 1
+              [[ "$left" > "$right" ]]
+            }
+            stable_gt() {
+              local left="$1" right="$2" index
+              local -a lparts rparts
+              IFS=. read -r -a lparts <<< "$left"
+              IFS=. read -r -a rparts <<< "$right"
+              for index in 0 1 2; do
+                decimal_gt "${lparts[$index]}" "${rparts[$index]}" && return 0
+                decimal_gt "${rparts[$index]}" "${lparts[$index]}" && return 1
+              done
+              return 1
+            }
+            number='(0|[1-9][0-9]*)'
+            stable_re="^${number}\.${number}\.${number}$"
+            while IFS= read -r existing; do
+              [[ "$existing" == "$GITHUB_REF_NAME" || ! "$existing" =~ $stable_re ]] && continue
+              stable_gt "$GITHUB_REF_NAME" "$existing" \
+                || { echo "Stable release $GITHUB_REF_NAME is not newer than $existing." >&2; exit 1; }
+            done < <(git tag --list)
+          fi
 
       # No toolchain is set up here any more. This repository builds nothing:
       # the daemon and the control-console SPA it used to compile were deleted
@@ -187,11 +267,70 @@ jobs:
           mkdir release-assets
           cp 5gpn-installer.tar.gz checksums.txt THIRD_PARTY_NOTICES.md release-assets/
 
-      - name: Publish release
+      - name: Revalidate release identity immediately before publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          tagged_commit="$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}")"
+          event_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          [[ "$tagged_commit" == "$event_commit" ]] \
+            || { echo "Tag moved before publication: $tagged_commit != $event_commit" >&2; exit 1; }
+          api_url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}"
+          if ! release_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api_url")"; then
+            echo "Could not verify whether release $GITHUB_REF_NAME already exists." >&2
+            exit 1
+          fi
+          case "$release_status" in
+            404) ;;
+            200) echo "Release $GITHUB_REF_NAME already exists; refusing to overwrite it." >&2; exit 1 ;;
+            *) echo "Release existence check returned HTTP $release_status." >&2; exit 1 ;;
+          esac
+
+      - name: Create release draft and upload assets
+        id: release_draft
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
+          tag_name: ${{ github.ref_name }}
           generate_release_notes: true
+          draft: true
           prerelease: ${{ needs.classify.outputs.prerelease }}
-          make_latest: ${{ needs.classify.outputs.make_latest }}
+          # The final PATCH below chooses latest while publishing the draft.
+          make_latest: false
           fail_on_unmatched_files: true
           files: release-assets/*
+
+      - name: Publish and verify immutable release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PRERELEASE: ${{ needs.classify.outputs.prerelease }}
+          RELEASE_MAKE_LATEST: ${{ needs.classify.outputs.make_latest }}
+          RELEASE_ID: ${{ steps.release_draft.outputs.id }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+          gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false \
+            -F prerelease="$RELEASE_PRERELEASE" \
+            -f make_latest="$RELEASE_MAKE_LATEST" >/dev/null
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            | jq -e --arg tag "$GITHUB_REF_NAME" \
+                --argjson prerelease "$RELEASE_PRERELEASE" '
+                .tag_name == $tag and
+                .draft == false and
+                .prerelease == $prerelease and
+                .immutable == true and
+                ([.assets[].name] | sort) == [
+                  "5gpn-installer.tar.gz",
+                  "THIRD_PARTY_NOTICES.md",
+                  "checksums.txt"
+                ]
+              ' >/dev/null

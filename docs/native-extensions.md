@@ -122,11 +122,15 @@ An `upstreamMappings` entry takes one of three target forms.
 
 An **address** (`203.0.113.7`) or an **alias** (`origin.example.net`) changes
 the engine's upstream target. It preserves the original HTTP Host and TLS SNI.
-An address target rejects private, loopback, link-local, CGNAT, and otherwise
-unsafe IPv4 addresses; an alias is a name, so the same intent cannot be enforced
-for it and a name that resolves into a private range is an accepted consequence.
-Every upstream connection returns through mihomo's in-process inner dialer and
-current rule evaluation.
+Both forms reject private, loopback, link-local, CGNAT, metadata, and otherwise
+unsafe addresses. An alias is resolved before rule selection; every returned
+address must be globally routable, mixed public/private answers fail closed,
+and the accepted address is pinned for the outbound dial while the original
+hostname remains available to HTTP and TLS. Every request, including one that
+reuses a pooled connection, is re-authorized against the current protected-rule
+prefix before the extension's terminal egress binding is applied. Every
+upstream connection returns through mihomo's in-process inner dialer, current
+protected prefix, and reviewed terminal binding.
 
 A **resolver** form (`server:1.1.1.1`, up to four comma-separated specs) names
 nameservers rather than a destination. It changes where the monolith resolver
@@ -210,7 +214,7 @@ Every other guard is unchanged. The request URL is still canonicalized, IP
 literals and unsafe or private hosts are still refused, and the request still
 leaves through mihomo's in-process inner dialer. Redirects from
 `context.network.request` are returned to the script rather than followed. Fixed
-process-wide time, body, header, call-count, and concurrency bounds apply; they
+runtime-wide time, body, header, call-count, and concurrency bounds apply; they
 are runtime safety limits, not manifest-controlled permissions.
 
 The permission is part of the immutable snapshot digest. It provides no global
@@ -228,8 +232,11 @@ request sends its complete method, decoded body, and end-to-end headers,
 potentially including `Cookie` or `Authorization`, to a host the manifest never
 names; framing and hop-by-hop fields remain runtime-owned. Every management
 surface's enable review must state these consequences explicitly. Taking or
-dropping the grant changes the snapshot and therefore requires a disabled update
-followed by a new enable confirmation.
+dropping the grant changes the snapshot digest, so the single Marketplace
+replacement review must disclose the new grant state and its consequences.
+Applying that reviewed replacement preserves the extension's prior enabled
+authorization atomically; it does not require a disable-first cycle or a second
+enable confirmation.
 
 An extension holding the grant reaches the network through one unbounded egress
 authorization rather than a destination allowlist. The immutable in-process
@@ -309,8 +316,8 @@ An action phase is `request` or `response`. Its structured matcher contains:
 - a required RE2 `pathRegex`, matched against path plus query; and
 - optional response `statusCodes` from 100 through 599.
 
-An action declares exactly one of seven kinds. Six are declarative and never
-reach the JavaScript runtime — they are dispatched before a VM is created:
+An action declares exactly one of seven kinds. Five are purely declarative and
+execute in the parent before worker admission:
 
 - `reject`: `true`, which aborts the exchange;
 - `mock`: a synthetic response (`status`, `headers`, and at most one of `body`
@@ -325,11 +332,16 @@ reach the JavaScript runtime — they are dispatched before a VM is created:
   only — its executor rewrites the request URL, which the response phase has no
   way to honour;
 - `replaceBody`: `pattern`, `to`, and optional `valueMap`. Requires `bodyMode`
-  `text` or `binary`, since it edits a body it has to be given;
-- `jq`: one expression, at most 32768 bytes, requiring `bodyMode: text`. A
-  document whose shape the expression cannot act on — a top-level array where an
-  object was expected, `"data": []` standing in for an object — skips the action
-  rather than failing the exchange, the same as a body that is not JSON at all;
+  `text` or `binary`, since it edits a body it has to be given.
+
+The remaining two kinds consume guest worker capacity:
+
+- `jq`: one expression, at most 32768 bytes, requiring `bodyMode: text`. It does
+  not instantiate JavaScript, but it runs in the isolated worker because its
+  guest-controlled intermediate values can allocate memory. A document whose
+  shape the expression cannot act on — a top-level array where an object was
+  expected, `"data": []` standing in for an object — skips the action rather
+  than failing the exchange, the same as a body that is not JSON at all;
 - a script, declaring exactly one of:
   - `source`: an HTTPS URL, or a relative URL when the manifest itself was
     installed by URL; or
@@ -356,7 +368,7 @@ values. Source,
 aggregate script, response, and VM resource limits are enforced independently.
 `bodyMode` controls only whether the input projection contains a body; it does
 not restrict which valid patch the action may return. Replacement and synthetic
-result bodies remain subject to both the action limit and the process-wide body
+result bodies remain subject to both the action limit and the runtime-wide body
 limit. For a fixed-length, identity-coded H1/H2 request whose matching actions
 all use `none`, actions may execute before the request body is consumed. A
 header-only result can then stream the original body and late trailers, while a
@@ -369,6 +381,57 @@ published proxy-client bundle: the script returns immediately, does its work
 asynchronously, and signals completion by calling `$done`. The mode is declared
 rather than inferred, because it changes how an action completes and what its
 result means.
+
+## Worker isolation
+
+Manifest validation and each action execute in a new one-shot mode of the same
+`5gpn-mihomo` binary. This is not a persistent helper, sidecar, or second
+service: the main mihomo process remains the sole long-running runtime and owns
+all live configuration, storage, logs, routing, and network policy. A worker
+receives only its bounded immutable input and uses bounded IPC for the narrowly
+exposed storage, logging, and network operations.
+
+The VM limits remain defense in depth, not the memory boundary. Linux workers
+must enter a fresh cgroup-v2 controller subtree before untrusted code is
+loaded; the installed service requires Linux 5.7 or newer, systemd 257 or newer,
+and pure cgroup v2 with both memory and pids controllers.
+The private namespace initially exposes the delegated unit root as
+`/sys/fs/cgroup` with the trusted parent at `0::/`. Before listeners open, the
+parent creates `/main` or validates a prior empty one, moves itself there,
+verifies the root is empty, and enables both controllers. `DelegateSubgroup=`
+remains unset because applying it before cgroup namespace creation would hide
+the unit root required for worker
+siblings. The normalized parent then reports `0::/main`.
+Guest worker admission is global 2 and per extension 1. The per-extension bound
+applies to runtime actions, while whole-document validation shares the global
+pool. Admission never queues; saturation fails the current operation immediately.
+Pure parent-side declarative actions do not acquire a worker slot. JQ and script
+validation/execution do.
+
+Worker admission is fixed at two concurrent processes. Every Linux leaf is
+configured with
+`memory.max=536870912`, `memory.swap.max=0`, `memory.oom.group=1`, and
+`pids.max=32`, for admitted aggregate upper bounds of 1GiB and 64 tasks. These
+are consumption caps, not reservations or a minimum-RAM check. Supported
+Windows workers use a 512MiB Job Object with `ActiveProcessLimit=1`.
+
+Worker-manager construction and the initial hard-isolation probe are mandatory
+during engine construction, before any DoT, controller, or data-plane listener
+opens.
+Startup isolation probe failure is fatal before listeners open.
+After a successful probe, each child failure stays local.
+An individual child start failure, timeout, crash, or OOM therefore fails the
+current operation. There is no in-process fallback on any platform.
+
+On Linux the child must be born in its final leaf with Go `UseCgroupFD`, which
+uses `clone3(CLONE_INTO_CGROUP)`. The main systemd unit therefore cannot use
+`RestrictNamespaces=`: systemd 257 implements that directive by returning
+`ENOSYS` for every `clone3` call. `SystemCallFilter=~unshare setns` denies the
+direct namespace-switch calls without blocking `clone3`.
+The runtime startup isolation probe proves the required cgroup-FD spawn.
+Initial probe failure aborts monolith startup; a child is never spawned outside
+the leaf and moved into it afterward. A later per-operation spawn failure is
+local because the host boundary has already passed its mandatory startup probe.
 
 ## Script contracts
 
@@ -431,7 +494,9 @@ live only in mihomo's 1000-entry memory ring and the authenticated
 to journald or another file. Event
 URLs retain only scheme, host, and path. The optional storage object exposes
 bounded `get`, `set`, `delete`, and `clear` methods scoped to the extension ID.
-With the network grant, a script can make a bounded request:
+The worker sends these calls over bounded IPC to the main process; it never
+receives a socket or direct storage handle. With the network grant, a script can
+make a bounded request:
 
 ```javascript
 const result = context.network.request({
@@ -463,7 +528,7 @@ draw on one per-action call budget, so mixing them cannot double a script's
 allowance, and the same origin, body, header, and egress rules apply to each.
 
 The synchronous form holds the VM for the whole round trip, so it fails
-immediately when the process-wide concurrency bound is saturated; an awaited
+immediately when the runtime-wide concurrency bound is saturated; an awaited
 request waits for a slot instead, because it can settle later. The action
 deadline bounds both.
 
@@ -543,6 +608,15 @@ same redirect and post-resolution SSRF guard, while the Console renders only
 the authenticated normalized projection. Adding or refreshing a marketplace
 never installs, updates, enables, or executes an extension.
 
+Only a complete successful fetch replaces a source's in-memory listing. A
+network or parse failure, including a duplicate field or partially invalid
+entry, keeps the previous complete listing regardless of cache age and displays
+the source error beside it. A source with no successful snapshot remains empty.
+
+Fresh and explicitly reset interception documents contain `catalogs: []`.
+There is no built-in marketplace and no publisher request until an
+authenticated operator adds a reviewed HTTPS index through the Console.
+
 An optional source display name is local operator text only. It does not replace
 the index metadata identity or prove publisher ownership. It never changes the
 remote index, manifest, or script digests. The separate local normalized-source
@@ -552,10 +626,12 @@ reviewed label cannot authorize another.
 Selecting a marketplace entry refetches its manifest through this same native
 parser and verifies the index's manifest SHA-256, identity, and derived
 capability summary. External script resources remain live dependencies and are
-not compared with catalog digests. A mismatch aborts before local state
-changes. A successful selection creates the ordinary disabled immutable
-snapshot for a new ID, or atomically replaces an installed snapshot while
-retaining its enabled authorization, typed values, order, resolver, and egress.
+not enumerated or compared against a parallel catalog resource-digest list;
+their fetched bytes remain covered by the complete runtime snapshot digest. A
+mismatch aborts before local state changes. A successful selection creates the
+ordinary disabled immutable snapshot for a new ID, or atomically replaces an
+installed snapshot while retaining its enabled authorization, typed values,
+order, resolver, and egress.
 Both paths still require the complete settings, permission, capture-host,
 routing-rule, execution-order, and egress review described above. The
 marketplace capability summary carries a required `routingRuleCount`, but the
@@ -566,7 +642,9 @@ tags, and licenses are informational and do not replace source review.
 Installed extensions have no ordinary source-URL update check or apply route.
 The operator selects the intended Marketplace entry, reviews its version,
 snapshot digest, capture hosts, actions, settings, and source change, then
-applies that exact refetched digest. Enabling reviews capture hosts, the network
+applies that exact refetched digest. The review response's selected-entry URL is
+opaque apply state and remains distinct from a redirect-resolved manifest source.
+Enabling reviews capture hosts, the network
 grant, every exact normalized routing rule, execution position, and the current
 operator egress binding before the transaction publishes the certificate
 request, in-process traffic policy, engine state, and DNS overlay.

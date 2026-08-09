@@ -12,7 +12,10 @@ described in earlier revisions of this file.
 
 - **mihomo** (the `moooyo/mihomo` fork) is the entire runtime: the DNS decision
   engine, the interception/plugin engine, the forwarding data plane, the
-  Telegram control plane, and the control API.
+  Telegram control plane, and the control API. It is the sole long-running
+  process. Each extension validation or action uses a short-lived worker mode
+  of the same binary; workers are not services, sidecars, or durable state
+  owners.
 - **zashboard** is the only user interface. It is a static bundle mihomo serves
   and an API client that talks to mihomo's controller.
 - **This repository** is an installer and a TUI. It contains no service.
@@ -65,9 +68,9 @@ mihomo ─┬─ 5gpn/dns      ordered policy, deterministic CN arbitration
         │  client connects direct          5gpn capture hook, after the sniffer
         │                                   and before rule resolution
         │                                            |
-        ├─ 5gpn/engine   goja scripts, MITM TLS/H1/H2 ─┘
-        │       |
-        │       | 5gpn/dial -> the same rule evaluation any connection gets
+        ├─ 5gpn/engine   MITM TLS/H1/H2 ──────────────┘
+        │       | bounded IPC to one-shot goja workers
+        │       | 5gpn/dial -> protected rule prefix, then operator binding
         v       v
      tunnel / proxies / rules ──> operator-defined egress
 ```
@@ -85,18 +88,27 @@ journal, roll-forward recovery, quarantine and draining states, two
 `SO_PEERCRED` control sockets, a wire schema duplicated on each side of them,
 and two authenticated loopback SOCKS5 hops per intercepted connection.
 
-In one address space that coordination is a field read. What replaced all of it
-is `5gpn/state`: a file written atomically, a pointer swapped atomically, and a
-content hash so two browser tabs cannot silently overwrite each other.
+Inside the trusted long-running runtime that coordination is a field read. What
+replaced all of it is `5gpn/state`: a file written atomically, a pointer swapped
+atomically, and a content hash so two browser tabs cannot silently overwrite
+each other. Untrusted extension code is the narrow exception to the shared
+address space: every validation and action executes in a stateless one-shot
+child of the same binary and reaches storage, logs, and approved network calls
+only through bounded IPC back to the main process.
 
-The cost is a shared failure domain. Expected extension failures do not consume
-that boundary: JavaScript exceptions, timeouts, denied network calls, and
-invalid configuration writes fail their current action or request. A panic that
-escapes that containment, a critical DNS listener that ends, or another
-unrecoverable runtime invariant terminates the process instead of leaving a
-partially live gateway. The deleted coordination machinery was not buying fault
-isolation anyway — it was buying agreement between processes that no longer
-exist.
+The cost is a shared failure domain for the trusted runtime. Worker-manager
+construction and the initial hard-isolation probe run unconditionally during
+engine construction, before any gateway listener opens.
+Startup isolation probe failure is fatal before listeners open.
+It does not leave DoT or the controller available without extension isolation.
+After a successful probe, each child failure stays local.
+JavaScript exceptions, timeouts, denied network calls, child-start errors,
+worker crashes, and worker OOMs therefore fail the current operation. There is
+no in-process script fallback. A panic in the main process, a
+critical DNS listener that ends, or another unrecoverable runtime invariant
+terminates the process instead of leaving a partially live gateway. The deleted
+coordination machinery was not buying this isolation — it was buying agreement
+between independently durable services that no longer exist.
 
 ### Failure and process recovery
 
@@ -113,6 +125,67 @@ leave the unit failed; `StartLimitAction=none` guarantees the limit never
 reboots or powers off the host. A
 deliberate `systemctl stop 5gpn-mihomo` is an operator action and is not
 restarted; `systemctl start 5gpn-mihomo` is then required.
+
+The Linux deployment baseline is kernel 5.7 or newer, systemd 257 or newer, and
+a pure cgroup v2 hierarchy with its memory and pids controllers available.
+Before any project publication, the installer checks that baseline, rejects
+managed main-unit or global service drop-ins, and runs
+`systemd-analyze verify` against byte-derived candidates for every shipped
+unit. The systemd floor is 257 because 254 through 256 parse
+`ProtectControlGroups=` as a boolean and do not support the required `private`
+namespace mode. `5gpn-mihomo.service` uses `MemoryAccounting=yes`,
+`TasksAccounting=yes`,
+`Delegate=memory pids`, and no `DelegateSubgroup=`. With
+`ProtectControlGroups=private`, systemd starts the trusted parent alone at
+`0::/`, with the empty unit hierarchy mounted at `/sys/fs/cgroup`. Before any
+listener opens, the parent creates `/main` or validates the empty directory left
+by a prior clean stop, moves only itself into it, verifies
+that the delegated root is empty, enables the memory and pids controllers, and
+then creates the worker aggregate as a sibling. Its final `/proc/*/cgroup` entry
+is `0::/main`. Setting `DelegateSubgroup=main` in the unit would instead make
+that subgroup the cgroup namespace root, hide the unit parent, and make the
+required sibling worker hierarchy impossible. `OOMPolicy=continue` keeps a
+worker OOM from stopping the unit, while `KillMode=control-group` removes every
+worker when the unit stops. No in-process supervisor is introduced.
+
+The global drop-in rejection includes the complete systemd 257 `Memory*`,
+`CPU*`, `IO*`, `BlockIO*`, `Tasks*`, `ManagedOOM*`, and `Limit*` resource
+families, their startup/allowed-node variants, `Slice=`/`DisableControllers=`,
+and process scheduling controls. This deliberately includes accounting keys and
+the older `MemoryLimit`, `CPUShares`, and `BlockIO*` aliases: accepting an
+apparently observational global family member makes the fail-before-publication
+gate dependent on an incomplete hand-maintained key list. Any inherited member
+of these families is rejected before project publication.
+
+Guest worker admission is global 2 and per extension 1. The per-extension bound
+applies to runtime actions; whole-document validation shares the global pool
+because it is not attributable to one installed extension.
+Admission never queues; saturation fails the current operation immediately.
+Pure parent-side declarative actions do not acquire a worker slot. The five
+such kinds are reject, mock, header edits, URL rewrite, and bounded body
+replacement. JQ and script validation/execution use a worker because their
+guest-controlled allocation is the reason for this isolation boundary.
+
+Worker admission is fixed at two concurrent processes. Each Linux leaf receives
+`memory.max=536870912`, `memory.swap.max=0`, `memory.oom.group=1`, and
+`pids.max=32`, making the admitted aggregate upper bounds of 1GiB and 64 tasks.
+Those limits cap consumption; they do not reserve memory and are not a physical
+RAM preflight. Host sizing must account separately for the main runtime and the
+operating system. The Windows worker boundary uses the same 512MiB process limit
+and `ActiveProcessLimit=1` in a Job Object.
+
+`RestrictNamespaces=` is deliberately absent from the main service. In systemd
+257, every non-default value installs a seccomp rule that returns `ENOSYS` for
+all `clone3` calls because seccomp cannot inspect the pointed-to flags. Go's
+`UseCgroupFD` path necessarily calls `clone3(CLONE_INTO_CGROUP)` so the child is
+born inside the already sealed leaf; falling back to `clone` would lose that
+atomic boundary. The unit instead denies direct `unshare` and `setns` calls with
+`SystemCallFilter=~unshare setns`. It cannot safely filter namespace flags inside
+`clone3`, so the runtime startup isolation probe is the authoritative gate. A
+failed initial cgroup-FD spawn aborts monolith startup before listeners open;
+after a successful probe, one later child-start failure remains local to its
+validation or action. Neither phase selects an in-process or move-after-spawn
+fallback.
 
 This is crash recovery, not self-healing. It does not rewrite a bad operator
 configuration, free a conflicting port, repair certificate files, or detect a
@@ -183,6 +256,13 @@ client that can reach `/configs` can reach these and one that cannot, cannot.
 `/ui/*` is mounted outside that group. That is deliberate and is the only
 unauthenticated surface: an unenrolled phone downloading a `.mobileconfig`
 trusts nothing yet and holds no secret.
+
+Every `/ui/*` response is nevertheless an isolated browser boundary. Mihomo
+sets a same-origin script policy, denies framing and object embedding, permits
+only the local bundle plus the explicit OpenStreetMap tile origin, and emits
+`nosniff`, `no-referrer`, and a restrictive Permissions Policy. Controller API
+coordinates remain operator-configurable, so the connect policy permits HTTP(S)
+and WS(S) backends without permitting remote script execution.
 
 The installer and the root-only management TUI may display a zashboard setup
 URL. It is not the deleted server-side handoff: it is the ordinary public
@@ -264,12 +344,21 @@ Marketplace update apply also quotes the exact manifest URL returned by review.
 Changing or removing that selected entry therefore invalidates the confirmation
 even when a different URL happens to serve byte-identical code; a digest proves
 content identity, not that the operator authorized an unshown source change.
+The returned value is the selected entry URL and remains authoritative when its
+fetch redirects; the redirect-resolved `candidate.detail.source_url` cannot be
+substituted for it.
 These `snapshot_digest`, reviewed-source, and structured-conflict fields were
 introduced by the `5gpn-interception` capability version 4 contract. Version 5
 retains that complete surface and adds the authenticated same-origin location
-search used by typed extension settings. A Console and core must still match the
-feature version exactly; a client must not infer the search route from an older
-version that never mounted it.
+search used by typed extension settings. Version 6 retains both and adds the
+cursor contract for the bounded in-memory plugin log: every event has a
+monotonic decimal-string `seq`, one process lifetime has an opaque `stream_id`,
+and incremental reads quote both the stream and exclusive `after` cursor. The
+response reports decimal-string oldest/latest/dropped values and an explicit
+reset when a process restart, future cursor, or ring eviction makes the old
+position unusable. Filters never redefine the global sequence. A Console and
+core must still match the feature version exactly; a client must not infer the
+location or log routes from an older version that never mounted their contract.
 Catalog review resolves its configured source and installed-state projection
 from one committed interception revision. If that document changes while the
 catalog or manifest is being fetched, review returns a revision conflict rather
@@ -306,11 +395,14 @@ apply; the existing explicit egress binding is retained. Neither condition
 silently disables the extension.
 
 `/5gpn/interception/catalog` is explicit discovery, installation, and update
-selection. A catalog is a list of manifests: it is fetched through the same
-guarded client an import uses and is never persisted. Selecting an entry runs
-the same review-then-confirm boundary as a fresh import. For an installed ID,
-that explicit selection authorizes changing the source to the reviewed entry;
-merely adding or refreshing a catalog never changes installed code.
+selection. A fresh interception document has `catalogs: []`: there is no
+built-in publisher and no marketplace request until an authenticated operator
+adds an HTTPS source through the Console. A catalog is a list of manifests: it
+is fetched through the same guarded client an import uses and is never
+persisted. Selecting an entry runs the same review-then-confirm boundary as a
+fresh import. For an installed ID, that explicit selection authorizes changing
+the source to the reviewed entry; merely adding or refreshing a catalog never
+changes installed code.
 
 What a catalog is allowed to do is contradict itself, and that is checked. An
 entry states the manifest's SHA-256 and the shape of what it declares; if the
@@ -321,13 +413,21 @@ leniently: it is a contract with every deployed gateway, so rejecting unknown
 fields would make older cores refuse whole catalogs whenever a publisher added
 something for newer ones.
 
+A successful fetch atomically replaces one source's complete in-memory index.
+Network, JSON, duplicate-field, or partially invalid entry failures retain the
+last complete snapshot regardless of its cache age and return it together with
+an explicit source error. A source that has never succeeded reports the same
+error with an empty list. Cache TTL schedules another fetch; it never converts
+stale discovery data into an apparent publisher deletion.
+
 For an installed entry, the listing reports **current** when the catalog version
 and manifest SHA-256 match the installed snapshot. A same-version manifest
 republish is therefore still an update, while a successful reviewed apply
 becomes current after the catalog's local installed-state projection refreshes.
-External script resources are fetched live and are not compared with the
-catalog's resource digests. This status never replaces review: any non-current
-entry is refetched and checked before apply.
+External script resources are fetched live during review and are not enumerated
+or compared against a parallel catalog resource-digest list. They remain part
+of the runtime's complete immutable snapshot digest. This status never replaces
+review: any non-current entry is refetched and checked before apply.
 
 `/5gpn/bot` is one read and one write, whole-document rather than a write per
 field. The interception routes are split because each authorizes something
@@ -349,11 +449,15 @@ available to the TLS server that receives it.
 dialing back through the same tunnel, which arrives as an inner connection;
 capturing those would feed the engine its own output indefinitely.
 
-An engine upstream is dialed through `inner.HandleTcp`, mihomo's existing
-mechanism for "the core needs to dial something and wants its own rules
-applied". An intercepted upstream therefore cannot diverge from an ordinary
-client connection: same rules, same outbound selection, same row in the
-connection table.
+An engine upstream enters mihomo through a narrow in-memory `INNER` dial. The
+operator-owned rule prefix through the fixed UDP/443 guard runs first, so
+management-plane, private-address, and explicit `REJECT` decisions cannot be
+bypassed; the extension's reviewed operator binding is then the terminal egress
+choice. The hostname is resolved once, every answer must be globally routable,
+and the accepted address is pinned for the outbound while HTTP Host and TLS SNI
+retain the original name. The connection still appears in mihomo's ordinary
+connection table, but the normal rule remainder cannot silently replace the
+binding the operator reviewed.
 
 ### Certificate readiness
 
@@ -446,6 +550,18 @@ operator edit back. No node CRUD route, selector API, generated YAML region, or
 continuing subscription service exists. Provider subscriptions and arbitrary
 group/rule edits remain manual operator YAML changes.
 
+Hot apply has an explicit controller boundary. Listener address, transport,
+and routing-mark changes are startup-only and `/configs` returns `409` instead
+of claiming they became live. With listener topology unchanged, a complete
+controller plan—secret, CORS, TLS material, and UI root—is prepared first and
+then swapped atomically; preparation failure leaves the prior listener usable.
+An empty UI root withdraws the old UI rather than continuing to serve stale
+files. New HTTP requests and TLS handshakes use the new plan; already-established
+TLS and authenticated WebSocket connections end on their normal connection
+lifetime. An unexpected end of the current controller listener is a
+monolith-fatal invariant, while closing a retired generation during a successful
+swap is not.
+
 ## The Telegram control plane
 
 `5gpn/bot` is one goroutine, off unless configured. It reads and it alerts. It
@@ -493,9 +609,10 @@ many upstream-owned files carry a 5gpn-shaped change, since those are what a
 rebase must reconcile. All runtime 5gpn-specific upstream edits remain
 concentrated in two files: `tunnel/tunnel.go` owns the capture and
 reviewed-routing hooks, while `hub/hub.go` starts the subsystems and propagates
-critical startup failure. `main.go` has one additional one-shot dispatch to the
-root `5gpn` façade for the offline `5gpn-nodes` command; it starts no service
-and has no data-plane role. Runtime authorization and fail-fast startup made
+critical startup failure. `main.go` dispatches the offline `5gpn-nodes` command
+and the internal extension worker mode into the root `5gpn` façade. Both are
+same-binary one-shot modes; neither starts a service or owns durable runtime
+state. Runtime authorization and fail-fast startup made
 the former twelve-line count obsolete; keep these file boundaries rather than
 preserving a misleading fixed line budget. The supporting bookkeeping remains
 in fork-owned files.
@@ -542,6 +659,11 @@ the interception engine: the master switch, the protocol settings, the
 configured extension catalogs, and the installed extensions with their immutable
 snapshots and the operator's own bindings. `bot.json` is the Telegram control
 plane: the switch, the token, the admin set and whether alerts are on.
+
+The configured catalog list starts as an explicit empty array. No official or
+third-party source is seeded, because contacting a publisher is an operator
+trust decision. The authenticated Console is the only management surface that
+adds marketplace URLs.
 
 The bot is its own document rather than a field on either of the others,
 because it is neither: the resolver document is what the gateway answers with
