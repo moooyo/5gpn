@@ -68,12 +68,12 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: moooyo/mihomo
-          ref: v1.19.28-monolith.30
+          ref: v1.19.28-monolith.31
           path: 5gpn-core
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: moooyo/5gpn-extensions
-          ref: c411578f2ae2472d17e8f2c66e4f2fc07013634b
+          ref: e5c550c46e819a06e078751ee9a245dda07bcbe7
           path: official-extensions
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
@@ -95,8 +95,8 @@ jobs:
       # one checks a configuration nobody will run. Keep this pin and its digest
       # in lockstep with MIHOMO_VERSION/MIHOMO_SHA256 in install.sh.
       MIHOMO_REPO: moooyo/mihomo
-      MIHOMO_VERSION: v1.19.28-monolith.30
-      MIHOMO_SHA256: 07f849fcc74342361a2ddd88abad154f5b455af9cf7c52f2b9ac04f967d70fae
+      MIHOMO_VERSION: v1.19.28-monolith.31
+      MIHOMO_SHA256: 48cdc59cbc143fd826dbeb03f3402cba10650a7e9fb4652282fd2128dcfd168b
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Download pinned mihomo
@@ -107,6 +107,42 @@ jobs:
           echo "${MIHOMO_SHA256}  /tmp/mihomo.gz" | sha256sum -c -
           gunzip /tmp/mihomo.gz
           chmod 0755 /tmp/mihomo
+      - name: Validate current state with the shipped core
+        run: |
+          set -euo pipefail
+          state="$(mktemp -d)"
+          trap 'rm -rf "$state"' EXIT
+          jq -n '{
+            listen: {
+              dot: ":853",
+              debug: "127.0.0.1:5353",
+              origin: "127.0.0.1:5354",
+              certificate: "/etc/5gpn/cert/dot/current/fullchain.pem",
+              privateKey: "/etc/5gpn/cert/dot/current/privkey.pem"
+            },
+            gateway: "10.0.0.1",
+            upstreams: {china: ["223.5.5.5:53"], trust: ["22.22.22.22:53"], ecs: ""},
+            policy: {rules: [], fallback: "auto"},
+            tuning: {}
+          }' > "$state/dns.json"
+          jq -n '{
+            version: 6,
+            execution_order: [],
+            tls_cert: "/etc/5gpn/intercept/tls/fullchain.pem",
+            tls_key: "/etc/5gpn/intercept/tls/privkey.pem",
+            mitm: {enabled: false, http2: true, http3: false},
+            modules: [],
+            catalogs: []
+          }' > "$state/intercept.json"
+          jq -n '{version: 1, enabled: false, token: "", admins: [], alerts: false}' \
+            > "$state/bot.json"
+          chmod 0600 "$state"/*.json
+          /tmp/mihomo 5gpn-state validate --owner-uid "$(id -u)" "$state" \
+            | jq -e '
+                .status == "ok"
+                and (.validated | sort) == ["bot.json", "dns.json", "intercept.json"]
+                and .missing == []
+              '
       - name: Render and validate the seed the installer publishes
         run: |
           set -euo pipefail

@@ -188,6 +188,13 @@ else
     fail "checks.yml pins a different mihomo version or digest than install.sh"
 fi
 
+if grep -Fq '/tmp/mihomo 5gpn-state validate --owner-uid' "$CHECKS" \
+   && grep -Fq '.validated | sort' "$CHECKS"; then
+    pass "CI executes the shipped core state validator against current documents"
+else
+    fail "CI does not execute the pinned core state validator"
+fi
+
 # The network check is a CI job of its own. It must not be quietly dropped: an
 # unverified pin is how 0.0.57 shipped an installer that could not install.
 if grep -Fq 'bash tests/verify-artifact-pins.sh' "$CHECKS"; then
@@ -199,7 +206,7 @@ fi
 # The public extension corpus must be parsed by the exact core release the
 # installer pins. Both repositories are immutable inputs to this release gate.
 if grep -Fq 'repository: moooyo/5gpn-extensions' "$CHECKS" \
-   && grep -Fq 'ref: c411578f2ae2472d17e8f2c66e4f2fc07013634b' "$CHECKS" \
+   && grep -Fq 'ref: e5c550c46e819a06e078751ee9a245dda07bcbe7' "$CHECKS" \
    && grep -Fq "ref: ${MIHOMO_VERSION}" "$CHECKS" \
    && grep -Fq 'FIVEGPN_EXTENSIONS_ROOT:' "$CHECKS" \
    && grep -Fq "TestOfficialExtensionManifestParserCorpus\$'" "$CHECKS"; then

@@ -7,9 +7,9 @@ superseded where it conflicts with the current monolith or HTTP/3 boundary.
 
 | Repository | Maintenance branch | Upstream baseline | Release coordinate |
 | --- | --- | --- | --- |
-| `moooyo/mihomo` | `feat/5gpn-monolith` | `MetaCubeX/mihomo:Alpha` at `99ce79c9` | `v1.19.28-monolith.30` |
+| `moooyo/mihomo` | `feat/5gpn-monolith` | `MetaCubeX/mihomo:Alpha` at `99ce79c9` | `v1.19.28-monolith.31` |
 | `moooyo/zashboard` | `feat/5gpn-console` | `Zephyruso/zashboard:main` at `b40a283` | `v3.16.1-monolith.31` |
-| `moooyo/5gpn-extensions` | `main` | — | `c411578f2ae2472d17e8f2c66e4f2fc07013634b` |
+| `moooyo/5gpn-extensions` | `main` | — | `e5c550c46e819a06e078751ee9a245dda07bcbe7` |
 | `moooyo/5gpn` | `main` | — | `0.0.80` latest published; current candidate unreleased |
 
 The stable release has one long-running process: mihomo. HTTP/3 interception is
