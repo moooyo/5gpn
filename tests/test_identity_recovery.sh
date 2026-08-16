@@ -694,6 +694,14 @@ pass "user-only journal recovery rejects a primary GID claimed by another group"
 journal_state="$TMP/journal-state"
 mkdir -p "$journal_state"
 (
+    fake_bin="$TMP/journal-fake-bin"
+    mkdir -p "$fake_bin"
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$fake_bin/chown"
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$fake_bin/sync"
+    chmod 0755 "$fake_bin/chown" "$fake_bin/sync"
+    PATH="$fake_bin:$PATH"
+    export PATH
+    hash -r
     STATE_DIR="$journal_state"
     IDENTITY_RECONCILE_FILE="$STATE_DIR/identity-reconcile"
     IDENTITY_RECONCILE_LOADED=0
@@ -702,8 +710,6 @@ mkdir -p "$journal_state"
     file_gid() { printf '0\n'; }
     file_mode() { stat -c %a -- "$1"; }
     file_nlink() { stat -c %h -- "$1"; }
-    chown() { return 0; }
-    sync() { return 0; }
     persist_replaced_fivegpn_identity 901 902 902
     [[ "$(file_mode "$IDENTITY_RECONCILE_FILE")" == 600 ]]
     grep -Fxq 'uid=901' "$IDENTITY_RECONCILE_FILE"
