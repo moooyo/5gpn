@@ -17,6 +17,7 @@ fi
 INSTALLER=/opt/5gpn/install.sh
 MIHOMO=/opt/5gpn/bin/5gpn-mihomo
 MIHOMO_CONF=/etc/5gpn/mihomo/config.yaml
+ZASH_VERSION_FILE=/opt/5gpn/ui/.zash_version
 CONTROLLER=https://127.0.0.1
 
 PASS=0
@@ -34,12 +35,14 @@ echo '== release and service health =='
 if [[ -f "$INSTALLER" ]]; then
     release="$(installed_value RELEASE_TAG)"
     core_pin="$(installed_value MIHOMO_VERSION)"
+    zash_pin="$(installed_value ZASH_VERSION)"
     [[ "$release" == "$EXPECTED_RELEASE" ]] \
         && ok "installed release is $EXPECTED_RELEASE" \
         || bad "expected release $EXPECTED_RELEASE, found ${release:-<unknown>}"
 else
     release=''
     core_pin=''
+    zash_pin=''
     bad "installed release metadata is missing at $INSTALLER"
 fi
 
@@ -51,6 +54,15 @@ if [[ -x "$MIHOMO" ]]; then
         || bad "mihomo does not match the installed ${core_pin:-<unknown>} pin"
 else
     bad "mihomo binary is missing"
+fi
+
+if [[ -n "$zash_pin" && -f "$ZASH_VERSION_FILE" ]]; then
+    deployed_zash="$(<"$ZASH_VERSION_FILE")"
+    [[ "$deployed_zash" == "$zash_pin" ]] \
+        && ok "zashboard matches the installed $zash_pin pin" \
+        || bad "zashboard marker is ${deployed_zash:-<empty>}, expected $zash_pin"
+else
+    bad "zashboard pin or deployed version marker is missing"
 fi
 
 [[ "$(systemctl is-active 5gpn-mihomo 2>/dev/null)" == active ]] \
@@ -143,6 +155,21 @@ for name in dns interception bot; do
     else
         bad "$name document is unavailable or malformed"
     fi
+done
+
+capabilities="$(request "$CONTROLLER/capabilities")"
+declare -A expected_feature_versions=(
+    [5gpn-core]=1
+    [5gpn-dns]=1
+    [5gpn-interception]=7
+    [5gpn-bot]=1
+)
+for feature in 5gpn-core 5gpn-dns 5gpn-interception 5gpn-bot; do
+    expected="${expected_feature_versions[$feature]}"
+    actual="$(jq -r --arg feature "$feature" '.features[$feature].version // 0' <<<"$capabilities")"
+    [[ "$actual" == "$expected" ]] \
+        && ok "$feature advertises exact version $expected" \
+        || bad "$feature advertises version $actual, expected $expected"
 done
 
 echo

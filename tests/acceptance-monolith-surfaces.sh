@@ -20,6 +20,7 @@ head_() { echo; echo "== $1"; }
 CONF=/etc/5gpn/mihomo/config.yaml
 SECRET="$(grep -m1 -E "^secret:" "$CONF" | sed -E "s/^secret: *'?([^']*)'?.*/\1/")"
 API="https://127.0.0.1:443"
+REVIEW_CONTRACT=7
 req() { curl -sk --max-time 120 -H "Authorization: Bearer ${SECRET}" -H 'Content-Type: application/json' "$@"; }
 status() { curl -sk --max-time 120 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${SECRET}" -H 'Content-Type: application/json' "$@"; }
 
@@ -57,7 +58,7 @@ caps="$(req "$API/capabilities")"
 declare -A expected_feature_versions=(
   [5gpn-core]=1
   [5gpn-dns]=1
-  [5gpn-interception]=6
+  [5gpn-interception]=7
   [5gpn-bot]=1
 )
 for feature in 5gpn-core 5gpn-dns 5gpn-interception 5gpn-bot; do
@@ -215,6 +216,40 @@ if [ "$entries" -ge 1 ]; then
     ok "reviewing $entry_id through the catalog succeeds"
   else
     bad "catalog review failed: $(echo "$rev_res" | head -c 300)"
+  fi
+  if echo "$rev_res" | jq -e --argjson contract "$REVIEW_CONTRACT" '
+      .candidate.detail.review_contract == $contract and
+      (.candidate.detail | has("manifest") | not) and
+      (.candidate.detail | has("content") | not) and
+      ((.candidate.detail.actions // []) | type == "array") and
+      all(.candidate.detail.actions[]?;
+        (.id | type == "string" and length > 0) and
+        (.phase | type == "string" and length > 0) and
+        (.kind as $kind | ["script", "jq", "reject", "mock", "headers", "rewrite", "replace_body"] | index($kind) != null) and
+        (.body_mode | type == "string") and
+        (.review_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+        (.timeout_ms | type == "number") and
+        (.max_body_bytes | type == "number") and
+        (has("script") | not) and (has("inline") | not) and
+        (has("script_body") | not) and (has("jq") | not) and
+        (has("jq_program") | not) and (has("program") | not) and
+        (has("code") | not) and (has("source") | not) and
+        (has("content") | not) and (has("body") | not) and
+        (has("base64_body") | not) and
+        (if .kind == "mock" then
+          (.mock.body | type == "object") and
+          (.mock.body.kind | type == "string") and
+          (.mock.body.bytes | type == "number") and
+          (.mock.body.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+          (.mock.body | has("text") | not) and
+          (.mock.body | has("value") | not) and
+          (.mock.body | has("base64") | not)
+        else true end)
+      )
+    ' >/dev/null; then
+    ok "the catalog review uses contract $REVIEW_CONTRACT and bounded body-free action records"
+  else
+    bad "the catalog review detail is not a contract-$REVIEW_CONTRACT action review"
   fi
   if [ -n "$(echo "$rev_res" | jq -r '.candidate.digest // ""')" ]; then
     ok "the review returns a digest for the install to quote"

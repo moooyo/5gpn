@@ -12,8 +12,38 @@ head_() { echo; echo "== $1"; }
 CONF=/etc/5gpn/mihomo/config.yaml
 SECRET="$(grep -m1 -E "^secret:" "$CONF" | sed -E "s/^secret: *'?([^']*)'?.*/\1/")"
 API="https://127.0.0.1:443"
+REVIEW_CONTRACT=7
+REVIEW_CONTRACT_ERROR="review_contract must be ${REVIEW_CONTRACT}; reload the current state and review the action again"
 req() { curl -sk --max-time 30 -H "Authorization: Bearer ${SECRET}" -H 'Content-Type: application/json' "$@"; }
 status() { curl -sk --max-time 30 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${SECRET}" -H 'Content-Type: application/json' "$@"; }
+
+with_review_contract() {
+  local payload="$1" contract="$2"
+  if [ "$contract" = missing ]; then
+    echo "$payload" | jq -c 'del(.review_contract)'
+  else
+    echo "$payload" | jq -c --argjson contract "$contract" '.review_contract = $contract'
+  fi
+}
+
+probe_review_contract_rejection() {
+  local label="$1" method="$2" path="$3" payload="$4"
+  local before response code response_body message after
+  before="$(req "$API/5gpn/interception" | jq -r .revision)"
+  response="$(curl -sk --max-time 30 \
+    -H "Authorization: Bearer ${SECRET}" -H 'Content-Type: application/json' \
+    -X "$method" --data "$payload" -w $'\n%{http_code}' "$API$path")"
+  code="${response##*$'\n'}"
+  response_body="${response%$'\n'*}"
+  message="$(echo "$response_body" | jq -r '.message // ""' 2>/dev/null || true)"
+  after="$(req "$API/5gpn/interception" | jq -r .revision)"
+  if [ "$code" = 400 ] && [ "$message" = "$REVIEW_CONTRACT_ERROR" ] \
+     && [ "$after" = "$before" ]; then
+    ok "$label is rejected before mutation and leaves the revision unchanged"
+  else
+    bad "$label returned $code/message '$message' or moved revision ${before:0:12} -> ${after:0:12}"
+  fi
+}
 
 dns_restore_needed=false
 orig_ecs_state='{"present":false,"value":null}'
@@ -164,6 +194,53 @@ else
   echo "  SKIP: interception setting writes (the deployment already has extensions)"
 fi
 
+head_ "review-contract confirmation fence"
+contract_probe_id="acceptance.contract.$(openssl rand -hex 6)"
+contract_probe_manifest="$(cat <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${contract_probe_id}
+YAML
+)"
+
+# Every rejected request is independently fenced by the current revision. The
+# fixture remains safe even if the contract check regresses: install carries a
+# foreign document and an impossible digest, update and enable name absent
+# objects, and reorder repeats the exact current order.
+for contract in missing 6 8; do
+  current="$(req "$API/5gpn/interception")"
+  current_revision="$(echo "$current" | jq -r .revision)"
+  current_order="$(echo "$current" | jq -c '.snapshot.execution_order')"
+  impossible_digest="$(printf '%064d' 0)"
+
+  install_base="$(jq -nc --arg r "$current_revision" --arg d "$impossible_digest" --arg c "$contract_probe_manifest" \
+    --argjson review_contract "$REVIEW_CONTRACT" \
+    '{revision:$r, review_contract:$review_contract, digest:$d, content:$c}')"
+  update_base="$(jq -nc --arg r "$current_revision" --arg d "$impossible_digest" \
+    --argjson review_contract "$REVIEW_CONTRACT" \
+    '{revision:$r, review_contract:$review_contract, digest:$d, url:"https://review-contract.invalid/manifest.yaml"}')"
+  reorder_base="$(jq -nc --arg r "$current_revision" --argjson review_contract "$REVIEW_CONTRACT" \
+    --argjson order "$current_order" '{revision:$r, review_contract:$review_contract, order:$order}')"
+  enable_base="$(jq -nc --arg r "$current_revision" --argjson review_contract "$REVIEW_CONTRACT" \
+    '{revision:$r, review_contract:$review_contract, enabled:true}')"
+
+  probe_review_contract_rejection \
+    "install with review_contract ${contract}" POST "/5gpn/interception/extensions" \
+    "$(with_review_contract "$install_base" "$contract")"
+  probe_review_contract_rejection \
+    "catalog update with review_contract ${contract}" POST \
+    "/5gpn/interception/catalog/${contract_probe_id}/entries/${contract_probe_id}/update" \
+    "$(with_review_contract "$update_base" "$contract")"
+  probe_review_contract_rejection \
+    "reorder with review_contract ${contract}" PUT "/5gpn/interception/order" \
+    "$(with_review_contract "$reorder_base" "$contract")"
+  probe_review_contract_rejection \
+    "enable with review_contract ${contract}" PUT \
+    "/5gpn/interception/extensions/${contract_probe_id}/enabled" \
+    "$(with_review_contract "$enable_base" "$contract")"
+done
+
 head_ "extension review refuses what it should"
 # A pasted manifest that is not the native format must be refused outright:
 # there is no compatibility mode, because a partially understood manifest drops
@@ -176,7 +253,11 @@ else
 fi
 
 # An install without a reviewed digest is not a decision the operator made.
-res="$(status -X POST --data '{"revision":"'"$(req "$API/5gpn/interception" | jq -r .revision)"'","url":"https://example.invalid/x.yaml"}' "$API/5gpn/interception/extensions")"
+missing_digest_body="$(jq -nc \
+  --arg r "$(req "$API/5gpn/interception" | jq -r .revision)" \
+  --argjson review_contract "$REVIEW_CONTRACT" \
+  '{revision:$r, review_contract:$review_contract, url:"https://example.invalid/x.yaml"}')"
+res="$(status -X POST --data "$missing_digest_body" "$API/5gpn/interception/extensions")"
 if [ "$res" = "400" ]; then ok "an install without a digest is refused"; else bad "install without a digest returned $res"; fi
 
 echo

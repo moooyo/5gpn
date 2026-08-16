@@ -19,6 +19,8 @@ head_() { echo; echo "== $1"; }
 CONF=/etc/5gpn/mihomo/config.yaml
 SECRET="$(grep -m1 -E "^secret:" "$CONF" | sed -E "s/^secret: *'?([^']*)'?.*/\1/")"
 API="https://127.0.0.1:443"
+REVIEW_CONTRACT=7
+REVIEW_CONTRACT_ERROR="review_contract must be ${REVIEW_CONTRACT}; reload the current state and review the action again"
 REQUEST=/etc/5gpn/mihomo/5gpn/certificate-request
 RESULT=/etc/5gpn/intercept/cert-state
 CERT_LOCK=/run/5gpn/cert-renew.lock
@@ -27,6 +29,7 @@ HOST="smoke-${RUN_ID}.5gpn-beta.example"
 EXT="beta.smoke.${RUN_ID}"
 
 req() { curl -sk --max-time 60 -H "Authorization: Bearer ${SECRET}" -H 'Content-Type: application/json' "$@"; }
+response() { curl -sk --max-time 60 -w $'\n%{http_code}' -H "Authorization: Bearer ${SECRET}" -H 'Content-Type: application/json' "$@"; }
 irev() { req "$API/5gpn/interception" | jq -r .revision; }
 
 installed_by_acceptance=false
@@ -139,6 +142,41 @@ if [ "$(echo "$review" | jq -r '.candidate.detail.capture_hosts[0]')" = "$HOST" 
 else
   bad "the review did not report the capture host"
 fi
+if [ "$(echo "$review" | jq -r '.candidate.detail.review_contract // 0')" = "$REVIEW_CONTRACT" ]; then
+  ok "the review detail uses contract $REVIEW_CONTRACT"
+else
+  bad "the review detail does not use contract $REVIEW_CONTRACT"
+fi
+if echo "$review" | jq -e --arg host "$HOST" '
+    (.candidate.detail.actions | sort_by(.id)) as $actions |
+    (.candidate.detail | has("manifest") | not) and
+    (.candidate.detail | has("content") | not) and
+    ($actions | length) == 2 and
+    all($actions[];
+      .phase == "request" and .hosts == [$host] and .kind == "script" and
+      .body_mode == "none" and .entry == "native" and .source_kind == "inline" and
+      (.code_digest | test("^[0-9a-f]{64}$")) and (.code_bytes > 0) and
+      (.review_digest | test("^[0-9a-f]{64}$")) and
+      .max_body_bytes == 1024 and
+      (has("script") | not) and (has("inline") | not) and
+      (has("script_body") | not) and (has("jq") | not) and
+      (has("jq_program") | not) and (has("program") | not) and
+      (has("code") | not) and (has("source") | not) and
+      (has("content") | not) and (has("body") | not) and
+      (has("base64_body") | not)
+    ) and
+    ($actions[0].id == "healthy" and $actions[0].path == "^/healthy$" and $actions[0].timeout_ms == 1000) and
+    ($actions[1].id == "memory-bomb" and $actions[1].path == "^/oom$" and $actions[1].timeout_ms == 30000)
+  ' >/dev/null 2>&1; then
+  ok "the review exposes structured action metadata and per-action review digests"
+else
+  bad "the review action records are incomplete or unstructured"
+fi
+if echo "$review" | grep -Eq 'function transform|apiVersion: 5gpn\.io/v1'; then
+  bad "the review leaked executable action bodies or manifest text"
+else
+  ok "the review action records contain no executable bodies or manifest text"
+fi
 if [ "$(echo "$review" | jq -r '.candidate.installed // "none"')" = "none" ]; then
   ok "the review reports nothing installed under this id yet"
 else
@@ -148,14 +186,25 @@ fi
 head_ "install"
 # A digest that does not match what a fresh fetch produces must be refused --
 # that check is the whole reason the digest exists.
-wrong="$(jq -nc --arg r "$(irev)" --arg c "$MANIFEST" '{revision:$r, digest:"0000000000000000", content:$c}')"
-if req -X POST --data "$wrong" "$API/5gpn/interception/extensions" | jq -e '.message' >/dev/null 2>&1; then
-  ok "an install quoting the wrong digest is refused"
+wrong_before="$(irev)"
+wrong="$(jq -nc --arg r "$wrong_before" --arg c "$MANIFEST" --argjson review_contract "$REVIEW_CONTRACT" \
+  '{revision:$r, review_contract:$review_contract, digest:"0000000000000000", content:$c}')"
+wrong_response="$(response -X POST --data "$wrong" "$API/5gpn/interception/extensions")"
+wrong_code="${wrong_response##*$'\n'}"
+wrong_body="${wrong_response%$'\n'*}"
+wrong_after="$(irev)"
+if [ "$wrong_code" = 409 ] \
+   && [ "$(echo "$wrong_body" | jq -r '.code // ""' 2>/dev/null || true)" = review_conflict ] \
+   && [ "$wrong_after" = "$wrong_before" ] \
+   && ! req "$API/5gpn/interception" | jq -e --arg id "$EXT" '.snapshot.modules[]? | select(.id == $id)' >/dev/null 2>&1; then
+  ok "an install quoting the wrong digest is refused as a review conflict without changing state"
 else
-  bad "an install with a wrong digest was accepted"
+  bad "wrong digest returned $wrong_code, changed revision, installed the extension, or lacked review_conflict"
 fi
 
-body="$(jq -nc --arg r "$(irev)" --arg d "$cand" --arg c "$MANIFEST" '{revision:$r, digest:$d, content:$c}')"
+body="$(jq -nc --arg r "$(irev)" --arg d "$cand" --arg c "$MANIFEST" \
+  --argjson review_contract "$REVIEW_CONTRACT" \
+  '{revision:$r, review_contract:$review_contract, digest:$d, content:$c}')"
 install_attempted=true
 res="$(req -X POST --data "$body" "$API/5gpn/interception/extensions")"
 installed_detail="$(req "$API/5gpn/interception/extensions/${EXT}" 2>/dev/null || true)"
@@ -206,7 +255,8 @@ else
   bad "could not acquire the certificate publisher lock"
   exit 1
 fi
-res="$(req -X PUT --data "$(jq -nc --arg r "$(irev)" '{revision:$r, enabled:true}')" \
+res="$(req -X PUT --data "$(jq -nc --arg r "$(irev)" --argjson review_contract "$REVIEW_CONTRACT" \
+          '{revision:$r, review_contract:$review_contract, enabled:true}')" \
         "$API/5gpn/interception/extensions/${EXT}/enabled")"
 enabled_revision="$(echo "$res" | jq -r '.revision')"
 if [ "$(echo "$res" | jq -r --arg id "$EXT" '.snapshot.modules[]|select(.id==$id)|.enabled')" = "true" ]; then
@@ -416,6 +466,53 @@ if [ "$(echo "$owned_detail" | jq -r '.extension.snapshot_digest // ""' 2>/dev/n
   bad "the test extension changed before cleanup; refusing to delete it"
   exit 1
 fi
+disabled="$(req -X PUT --data "$(jq -nc --arg r "$(echo "$owned_detail" | jq -r .revision)" \
+  '{revision:$r, enabled:false}')" "$API/5gpn/interception/extensions/${EXT}/enabled")"
+if [ "$(echo "$disabled" | jq -r --arg id "$EXT" '.snapshot.modules[] | select(.id == $id) | .enabled')" = false ]; then
+  ok "disable accepts an omitted review_contract"
+else
+  bad "disable without review_contract failed: $(echo "$disabled" | head -c 250)"
+fi
+for contract in 0 null; do
+  before_disable_escape="$(irev)"
+  if [ "$contract" = null ]; then
+    disable_escape="$(jq -nc --arg r "$before_disable_escape" '{revision:$r, review_contract:null, enabled:false}')"
+  else
+    disable_escape="$(jq -nc --arg r "$before_disable_escape" '{revision:$r, review_contract:0, enabled:false}')"
+  fi
+  escape_response="$(response -X PUT --data "$disable_escape" \
+    "$API/5gpn/interception/extensions/${EXT}/enabled")"
+  escape_code="${escape_response##*$'\n'}"
+  escape_body="${escape_response%$'\n'*}"
+  escape_response_revision="$(echo "$escape_body" | jq -r '.revision // ""' 2>/dev/null || true)"
+  escape_after="$(irev)"
+  escape_enabled="$(echo "$escape_body" | jq -r --arg id "$EXT" '.snapshot.modules[] | select(.id == $id) | .enabled' 2>/dev/null || true)"
+  escape_live_enabled="$(req "$API/5gpn/interception/extensions/${EXT}" | jq -r '.extension.enabled' 2>/dev/null || true)"
+  if [ "$escape_code" = 200 ] && [ "$escape_enabled" = false ] \
+     && [ "$escape_live_enabled" = false ] && [ "$escape_after" = "$escape_response_revision" ]; then
+    ok "disable treats review_contract $contract as omitted and keeps the extension disabled"
+  else
+    bad "disable with review_contract $contract returned $escape_code or response/live state diverged"
+  fi
+done
+for contract in 6 8; do
+  before_disable_reject="$(irev)"
+  reject_response="$(response -X PUT --data "$(jq -nc --arg r "$before_disable_reject" --argjson review_contract "$contract" \
+    '{revision:$r, review_contract:$review_contract, enabled:false}')" \
+    "$API/5gpn/interception/extensions/${EXT}/enabled")"
+  code="${reject_response##*$'\n'}"
+  reject_body="${reject_response%$'\n'*}"
+  message="$(echo "$reject_body" | jq -r '.message // ""' 2>/dev/null || true)"
+  after_disable_reject="$(irev)"
+  still_disabled="$(req "$API/5gpn/interception/extensions/${EXT}" | jq -r '.extension.enabled' 2>/dev/null || true)"
+  if [ "$code" = 400 ] && [ "$message" = "$REVIEW_CONTRACT_ERROR" ] \
+     && [ "$after_disable_reject" = "$before_disable_reject" ] && [ "$still_disabled" = false ]; then
+    ok "disable rejects explicit review_contract $contract for the contract reason without changing state"
+  else
+    bad "disable with review_contract $contract returned $code/message '$message' or changed state"
+  fi
+done
+owned_detail="$(req "$API/5gpn/interception/extensions/${EXT}" 2>/dev/null || true)"
 res="$(req -X DELETE --data "$(jq -nc --arg r "$(echo "$owned_detail" | jq -r .revision)" '{revision:$r}')" "$API/5gpn/interception/extensions/${EXT}")"
 if echo "$res" | jq -e --arg id "$EXT" '[.snapshot.modules[]|select(.id==$id)]|length == 0' >/dev/null 2>&1; then
   installed_by_acceptance=false
