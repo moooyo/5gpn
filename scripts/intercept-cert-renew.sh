@@ -104,7 +104,7 @@ tls_directory_safe() {
     canonical_directory "$INTERCEPT_DIR" \
         && [[ "$(path_uid "$INTERCEPT_DIR")" == "$EUID" \
            && "$(path_gid "$INTERCEPT_DIR")" == "$intercept_gid" \
-           && "$(path_mode "$INTERCEPT_DIR")" == 3770 ]] \
+           && "$(path_mode "$INTERCEPT_DIR")" == 750 ]] \
         || return 1
     canonical_directory "$TLS_DIR" \
         && [[ "$(path_uid "$TLS_DIR")" == "$EUID" \
