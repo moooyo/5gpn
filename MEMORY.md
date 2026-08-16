@@ -46,6 +46,14 @@ Update the status and the normative documentation when an implementation lands.
   component. The controller returns HTTP 403 for
   `/upgrade` and `/upgrade/ui`; Zashboard exposes no manual, automatic, or
   update-check path for either component. Updating GEO data remains separate.
+- A shared `5gpn-interception` contract revision is a paired Core/Console
+  release even though the two repositories keep independent tags. The 5gpn
+  repository updates both tags and SHA-256 values in one commit, stages and
+  verifies both artifacts before publication, publishes the binary and Console
+  tree before restarting mihomo into the new pair, and does not claim that the
+  two filesystem replacements are one atomic operation. A deliberately mixed
+  pair is not a supported release state; exact capability matching makes a
+  transient or partial mismatch fail closed.
 - Zashboard remains installable as a PWA, but its worker is network-only. It
   precaches no UI or font assets, removes caches left by earlier workers when
   it activates, and reloads their controlled windows once. Mihomo serves all
@@ -109,8 +117,9 @@ Update the status and the normative documentation when an implementation lands.
 ## Native interception extensions
 
 **Status: Implemented. Recorded 2026-07-19, extended with operator capture-DNS
-bindings on 2026-07-22, and superseded in place by the single-process mihomo
-contract and explicit HTTP/3 refusal on 2026-08-05.**
+bindings on 2026-07-22, superseded in place by the single-process mihomo
+contract and explicit HTTP/3 refusal on 2026-08-05, and extended with review
+contract 7 on 2026-08-17.**
 
 - The extension system accepts only strict `5gpn.io/v1` native YAML manifests.
   It does not parse or emulate third-party proxy-client plugin formats.
@@ -129,6 +138,28 @@ contract and explicit HTTP/3 refusal on 2026-08-05.**
   normalized rules and authorizes them together with the extension; there is no
   second routing-only confirmation. Reordering requires its own review because
   it can change global first-match behavior.
+- `5gpn-interception` capability 7 is also the exact operator review contract;
+  it does not change native manifest v1, Marketplace v1, or persisted
+  `intercept.json` version 6. Every installed detail and install or Marketplace
+  candidate carries `review_contract: 7`. Its action list is a structured,
+  bounded `ActionReview` projection with matchers, gate, kind, body mode,
+  limits, source evidence, declarative parameters, and one deterministic
+  `review_digest` per action. Manifest bytes, script or JQ source text, and mock
+  body bytes are never returned; hidden code and bodies contribute through
+  SHA-256 and byte counts. The Console identifies added, removed, changed, and
+  reordered actions by action ID, digest, and sequence rather than displaying a
+  raw action or source dump.
+- Fresh install apply, Marketplace update apply, complete reorder, and enable
+  require `review_contract: 7`; missing, stale, and future values fail with HTTP
+  400 before revision or state changes. For disable, a missing, null, or zero
+  value is treated as omitted so revocation remains available; nonzero stale
+  and future versions are rejected. The
+  Console validates returned contracts against its local constant before
+  rendering an actionable review and always sends that constant rather than
+  echoing the server value. Existing current-schema enabled snapshots are
+  grandfathered as durable authorization: loading v7 neither disables them nor
+  creates an authorization epoch, while their next protected mutation must use
+  v7 and a later re-enable must be reviewed again.
 - Native scripts define `transform(context)`. They receive structured
   request/response data, typed settings, console logging, optional bounded
   storage, bounded action-scoped timers, and—only when explicitly declared and
@@ -215,6 +246,12 @@ contract and explicit HTTP/3 refusal on 2026-08-05.**
   request on an existing connection repeat the same immutable-plan admission.
   Certificate readiness changes neither the interception revision nor
   operator-owned mihomo YAML and does not require a process restart.
+- Typed extension `reject` and `direct` rules share that readiness boundary.
+  Certificate pending/error or an unavailable fixed client boundary withdraws
+  both typed decisions; claimed HTTP(S) capture hosts remain rejected, while
+  unrelated traffic returns to the operator-owned routing rules. Restoring
+  certificate and boundary readiness restores the same rules from the immutable
+  document without a revision change or operator write.
 - Typed extension settings are exposed through the Console and are replaced as
   one complete revision-protected map, never a sequence of per-key writes. An
   enabled extension may apply a reviewed update without first being disabled:

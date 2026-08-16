@@ -101,7 +101,20 @@ plans, design handoffs, and git history are context only.
   are immutable in-memory projections of the current extension document. The
   tunnel and inner dialer consume those projections directly. Do not restore a
   sidecar, runtime-overlay socket, YAML anchors, generated mihomo rule block, or
-  loopback SOCKS hop.
+  loopback SOCKS hop. Certificate pending/error or an unavailable fixed client
+  boundary withdraws the complete runtime plan, including typed rules; claimed
+  HTTP(S) capture hosts remain rejected while unrelated traffic returns to the
+  operator rules. Readiness restoration republishes the same projection without
+  a document revision or operator write.
+- `5gpn-interception` capability 7 is also review contract 7; persisted
+  `intercept.json` remains version 6. Installed details and review candidates
+  expose structured, bounded, body-free `ActionReview` entries with one
+  deterministic `review_digest` per action. Fresh install apply, Marketplace
+  update apply, complete reorder, and enable require the exact contract before
+  mutation. Disable treats a missing, null, or zero value as omitted so
+  revocation remains available; nonzero stale and future versions are rejected.
+  Existing current-schema enabled snapshots remain authorized when v7 loads;
+  do not invent an authorization epoch or disable them during upgrade.
 - The installer does not roll back. A failure before publication leaves the host
   untouched; a failure during publication leaves it partially installed and says
   so. Do not reintroduce snapshot/restore/quarantine machinery — its failure
@@ -120,7 +133,9 @@ plans, design handoffs, and git history are context only.
   source belongs in `moooyo/mihomo`, Console source belongs in
   `moooyo/zashboard`, and first-party extension source belongs in
   `moooyo/5gpn-extensions`. This repository installs digest-pinned release
-  artifacts from those repositories.
+  artifacts from those repositories. A shared review-contract change updates
+  the Mihomo and Zashboard tags and SHA-256 pins together in one root-repository
+  commit; do not publish an intentionally mixed Core/Console pair.
 
 ## Shell TUI policy: Gum
 
@@ -251,6 +266,14 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   and end-to-end headers, potentially including `Cookie` or `Authorization`.
   Reordering also requires review
   because it changes action, egress, and global routing first-match precedence.
+  At review contract 7, render each action from its typed `ActionReview`; never
+  fall back to raw manifest/action JSON or expose manifest, script, JQ, or mock
+  body bytes. Classify added, removed, changed, and reordered actions by action
+  ID, `review_digest`, and sequence. Treat the returned `review_contract` as an
+  untrusted number: actionable review requires exact equality with the local
+  constant, and protected requests send that local constant rather than echoing
+  the server value. A mismatch must hide action cards, block confirmation, and
+  issue no mutation request.
   `/extensions/hosts` owns searchable, per-plugin capture-host and egress-winner
   auditing; do not move plugin management back into Settings.
 - Marketplace discovery lives on the separate top-level `/marketplace` route,
