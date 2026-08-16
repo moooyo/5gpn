@@ -28,14 +28,14 @@ listed SHA-256 digest, and then publishes them on the gateway.
 
 | Component | Exact release and downloaded artifact | SHA-256 | License evidence | Installed use |
 |---|---|---|---|---|
-| 5gpn mihomo fork | [`moooyo/mihomo` `v1.19.28-monolith.29`](https://github.com/moooyo/mihomo/releases/tag/v1.19.28-monolith.29), `mihomo-linux-amd64-compatible-v1.19.28-monolith.29.gz` | `d04749b6b51974a788028b6596a3a2db803ca4144f60f915cd696c181f7a7ae3` | GPL-3.0; see the exact tag's [`LICENSE`](https://github.com/moooyo/mihomo/blob/v1.19.28-monolith.29/LICENSE) and [source](https://github.com/moooyo/mihomo/tree/v1.19.28-monolith.29) | Installed as `/opt/5gpn/bin/5gpn-mihomo`; this is the sole long-running 5gpn process. |
-| zashboard fork | [`moooyo/zashboard` `v3.16.1-monolith.30`](https://github.com/moooyo/zashboard/releases/tag/v3.16.1-monolith.30), `dist.zip` | `e10f8af6a05b03ae4182104777b8de4ba95e0b4eeb6455d0f7595f29af6ae55f` | The zashboard project is MIT, Copyright 2024 Zephyruso; see the exact tag's [`LICENSE`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.30/LICENSE) and [`package.json`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.30/package.json). The archive includes Leaflet 1.9.4 under BSD-2-Clause and ships its complete license text. | Extracted to `/opt/5gpn/ui` and served as static browser assets by `5gpn-mihomo`. |
+| 5gpn mihomo fork | [`moooyo/mihomo` `v1.19.28-monolith.30`](https://github.com/moooyo/mihomo/releases/tag/v1.19.28-monolith.30), `mihomo-linux-amd64-compatible-v1.19.28-monolith.30.gz` | `07f849fcc74342361a2ddd88abad154f5b455af9cf7c52f2b9ac04f967d70fae` | GPL-3.0; see the exact tag's [`LICENSE`](https://github.com/moooyo/mihomo/blob/v1.19.28-monolith.30/LICENSE) and [source](https://github.com/moooyo/mihomo/tree/v1.19.28-monolith.30) | Installed as `/opt/5gpn/bin/5gpn-mihomo`; this is the sole long-running 5gpn process. |
+| zashboard fork | [`moooyo/zashboard` `v3.16.1-monolith.31`](https://github.com/moooyo/zashboard/releases/tag/v3.16.1-monolith.31), `dist.zip` | `aed3b9149a86cb3fb6e901c461b777ffff578832a1d7f06cddbcfb5dd53a7929` | The zashboard project is MIT, Copyright 2024 Zephyruso; see the exact tag's [`LICENSE`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.31/LICENSE) and [`package.json`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.31/package.json). The archive includes Leaflet 1.9.4 under BSD-2-Clause and ships its complete license text. | Extracted to `/opt/5gpn/ui` and served as static browser assets by `5gpn-mihomo`. |
 
 The zashboard `dist.zip` is a compiled browser bundle and includes code and
 assets from its runtime dependency graph. Those dependencies retain their own
 licenses. The exact dependency graph used to build this artifact is recorded in
-the tagged [`package.json`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.30/package.json)
-and [`pnpm-lock.yaml`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.30/pnpm-lock.yaml);
+the tagged [`package.json`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.31/package.json)
+and [`pnpm-lock.yaml`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.31/pnpm-lock.yaml);
 5gpn does not rebuild or modify the downloaded archive.
 
 ## Optional installer TUI downloaded separately
