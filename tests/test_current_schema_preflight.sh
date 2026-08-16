@@ -297,6 +297,7 @@ pass "retired runtime document is rejected read-only by the staged Core"
     chmod 0755 "$ARTIFACT_STAGE/mihomo"
     export VALIDATOR_LOG
     getent() { return 1; }
+    current_deployment_proves_identity_repair() { return 0; }
     journaled_identity_recovery_is_safe() { return 0; }
     err() { :; }
     validate_existing_runtime_documents
@@ -319,6 +320,7 @@ pass "account-absent journal recovery passes the recorded UID to the staged Core
     chmod 0755 "$ARTIFACT_STAGE/mihomo"
     export VALIDATOR_LOG
     getent() { return 1; }
+    current_deployment_proves_identity_repair() { return 0; }
     journaled_identity_recovery_is_safe() { return 0; }
     err() { :; }
     ! validate_existing_runtime_documents >/dev/null 2>&1
