@@ -3756,6 +3756,18 @@ extracted_tree_safe() {
     [[ -z "$(find "$root" -mindepth 1 -type f -links +1 -print -quit 2>/dev/null)" ]] || return 1
 }
 
+flatten_zashboard_dist() {
+    local root="$1" dist="${1}/dist" unexpected
+    [[ -d "$root" && ! -L "$root" && -d "$dist" && ! -L "$dist" \
+       && -f "$dist/index.html" && ! -L "$dist/index.html" ]] || return 1
+    unexpected="$(find "$root" -mindepth 1 -maxdepth 1 ! -path "$dist" -print -quit 2>/dev/null)" \
+        || return 1
+    [[ -z "$unexpected" ]] || return 1
+    find "$dist" -mindepth 1 -maxdepth 1 -exec mv -t "$root" -- {} + \
+        || return 1
+    rmdir -- "$dist"
+}
+
 validate_existing_runtime_documents() {
     local path present=0 owner_uid=""
     for path in "${FIVEGPN_STATE_DIR}/dns.json" "${FIVEGPN_STATE_DIR}/intercept.json" \
@@ -3829,8 +3841,8 @@ stage_artifacts() {
     extracted_tree_safe "$ARTIFACT_STAGE/zash" \
         || { err "Unsafe object found after zashboard archive extraction."; return 1; }
     if [[ -f "$ARTIFACT_STAGE/zash/dist/index.html" ]]; then
-        mv "$ARTIFACT_STAGE/zash/dist"/* "$ARTIFACT_STAGE/zash/"
-        rmdir "$ARTIFACT_STAGE/zash/dist"
+        flatten_zashboard_dist "$ARTIFACT_STAGE/zash" \
+            || { err "Could not flatten the verified zashboard dist tree."; return 1; }
     fi
     [[ -f "$ARTIFACT_STAGE/zash/index.html" ]] \
         || { err "Staged zashboard archive has no index.html."; return 1; }

@@ -65,6 +65,33 @@ else
     fail "artifacts are published before they are staged and verified"
 fi
 
+zash_flatten_root="$(mktemp -d)"
+mkdir -p "$zash_flatten_root/dist/.vite" "$zash_flatten_root/dist/assets"
+printf 'ui\n' > "$zash_flatten_root/dist/index.html"
+printf 'manifest\n' > "$zash_flatten_root/dist/.vite/manifest.json"
+printf 'asset\n' > "$zash_flatten_root/dist/assets/app.js"
+if flatten_zashboard_dist "$zash_flatten_root" \
+   && [[ -f "$zash_flatten_root/index.html" \
+      && -f "$zash_flatten_root/.vite/manifest.json" \
+      && -f "$zash_flatten_root/assets/app.js" \
+      && ! -e "$zash_flatten_root/dist" ]]; then
+    pass "zashboard dist flattening preserves hidden build metadata"
+else
+    fail "zashboard dist flattening dropped hidden entries or retained dist"
+fi
+rm -rf -- "$zash_flatten_root"
+
+zash_sibling_root="$(mktemp -d)"
+mkdir -p "$zash_sibling_root/dist"
+printf 'ui\n' > "$zash_sibling_root/dist/index.html"
+printf 'unexpected\n' > "$zash_sibling_root/sibling.txt"
+if flatten_zashboard_dist "$zash_sibling_root" >/dev/null 2>&1; then
+    fail "zashboard dist flattening accepted ambiguous outer siblings"
+else
+    pass "zashboard dist flattening rejects ambiguous outer siblings"
+fi
+rm -rf -- "$zash_sibling_root"
+
 full_fn="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
 claim_line="$(grep -n 'INSTALL_PUBLICATION_STARTED=1' <<<"$full_fn" | head -1 | cut -d: -f1)"
 root_line="$(grep -n 'claim_project_roots' <<<"$full_fn" | head -1 | cut -d: -f1)"
