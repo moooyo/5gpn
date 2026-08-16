@@ -742,6 +742,8 @@ mkdir -p "$journal_state"
     file_gid() { printf '0\n'; }
     file_mode() { stat -c %a -- "$1"; }
     file_nlink() { stat -c %h -- "$1"; }
+    chown() { return 0; }
+    sync() { return 0; }
     getent() {
         local database="$1" key="${2:-}"
         case "$database:$key" in
