@@ -22,6 +22,8 @@ skip_(){ echo "  --: $1"; }
 head_() { echo; echo "== $1"; }
 
 CONF=/etc/5gpn/mihomo/config.yaml
+INSTALLER=/opt/5gpn/install.sh
+ZASH_VERSION_FILE=/opt/5gpn/ui/.zash_version
 SECRET="$(grep -m1 -E "^secret:" "$CONF" | sed -E "s/^secret: *'?([^']*)'?.*/\1/")"
 API="https://127.0.0.1:443"
 CURL=(curl -sk --max-time 15 -H "Authorization: Bearer ${SECRET}")
@@ -91,11 +93,19 @@ fi
 # --- control API ----------------------------------------------------------
 head_ "control API"
 caps="$("${CURL[@]}" "$API/capabilities")"
-for feature in 5gpn-core 5gpn-dns 5gpn-interception; do
-  if echo "$caps" | jq -e ".features[\"$feature\"].version == 1" >/dev/null 2>&1; then
-    ok "$feature advertised at version 1"
+declare -A expected_feature_versions=(
+  [5gpn-core]=1
+  [5gpn-dns]=1
+  [5gpn-interception]=7
+  [5gpn-bot]=1
+)
+for feature in 5gpn-core 5gpn-dns 5gpn-interception 5gpn-bot; do
+  expected="${expected_feature_versions[$feature]}"
+  if echo "$caps" | jq -e --arg feature "$feature" --argjson expected "$expected" \
+      '.features[$feature].version == $expected' >/dev/null 2>&1; then
+    ok "$feature advertised at version $expected"
   else
-    bad "$feature not advertised: $(echo "$caps" | jq -c '.features' 2>/dev/null)"
+    bad "$feature did not advertise version $expected: $(echo "$caps" | jq -c '.features' 2>/dev/null)"
   fi
 done
 
@@ -144,6 +154,13 @@ if [ "${n:-0}" -gt 0 ] 2>/dev/null; then ok "query log has $n recent entries"; e
 
 # --- the UI ---------------------------------------------------------------
 head_ "zashboard"
+zash_pin="$(sed -n 's/^ZASH_VERSION="\([^"]*\)".*/\1/p' "$INSTALLER" 2>/dev/null | head -n 1)"
+deployed_zash="$(cat "$ZASH_VERSION_FILE" 2>/dev/null || true)"
+if [ -n "$zash_pin" ] && [ "$deployed_zash" = "$zash_pin" ]; then
+  ok "the deployed zashboard marker matches the installed $zash_pin pin"
+else
+  bad "zashboard pin/marker mismatch (pin=${zash_pin:-missing}, marker=${deployed_zash:-missing})"
+fi
 code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 15 "$API/ui/")"
 if [ "$code" = "200" ]; then ok "/ui/ serves the bundle"; else bad "/ui/ returned HTTP $code"; fi
 # /ui/ must be reachable WITHOUT the controller secret: an unenrolled client has
