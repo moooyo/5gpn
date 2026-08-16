@@ -24,6 +24,13 @@ A 5gpn release publishes only `5gpn-installer.tar.gz`, `checksums.txt`, and
 `THIRD_PARTY_NOTICES.md`; the bundle contains installer material only. It does
 not build or republish mihomo or zashboard. The installer fetches those artifacts
 from their own repositories using independent release tags and SHA-256 pins.
+The tags remain independently versioned, but a change to their shared
+`5gpn-interception` contract is one release decision: the root repository updates
+and verifies both pins in the same commit. Both artifacts are staged and
+verified before publication, then the binary and Console tree are published
+before the service is restarted into the new pair. The filesystem publications
+are sequential rather than one cross-artifact atomic rename; exact capability
+matching makes a transient or partially published mixed pair fail closed.
 
 Zashboard remains installable as a PWA, but its worker is network-only. It
 precaches no application files, deletes caches left by older releases when it
@@ -357,9 +364,44 @@ monotonic decimal-string `seq`, one process lifetime has an opaque `stream_id`,
 and incremental reads quote both the stream and exclusive `after` cursor. The
 response reports decimal-string oldest/latest/dropped values and an explicit
 reset when a process restart, future cursor, or ring eviction makes the old
-position unusable. Filters never redefine the global sequence. A Console and
-core must still match the feature version exactly; a client must not infer the
-location or log routes from an older version that never mounted their contract.
+position unusable. Filters never redefine the global sequence.
+
+Version 7 retains those surfaces and makes the feature version the exact
+operator review contract. Every installed-extension detail and every install or
+Marketplace review candidate carries `review_contract: 7`. Its `actions` are
+bounded, typed `ActionReview` projections: they identify the action, matchers,
+gate, kind, body mode, timing and body limits, source form, and declarative
+parameters. Script and JQ source text, manifest bytes, and mock response body
+bytes are not returned; code is represented by its SHA-256 and byte count, and
+a mock body by its kind, decoded length, and SHA-256. Each action also carries a
+deterministic `review_digest` over its complete executable declaration,
+including the digests of hidden code or body bytes. That action digest supports
+an exact changed-action identity; the IDs, digests, and returned sequence support
+the Console's added, removed, changed, and reordered presentation. Neither
+replaces the candidate digest, reviewed source, document revision, or apply-time
+refetch.
+
+Four confirmation-bearing writes require the exact current contract before any
+engine mutation: fresh install apply, Marketplace update apply, complete
+execution-order replacement, and `enabled: true`. A missing, older, or future
+value returns HTTP 400 and leaves revision and state unchanged. `enabled: false`
+may omit the field so revocation remains available; null and zero are decoded as
+the same absent value, while an explicitly sent nonzero stale or future version
+is rejected. The Console treats a returned
+contract as an untrusted number, renders no actionable review unless it equals
+its compiled-in constant, and always sends that local constant rather than
+echoing the server's value. A stale tab therefore either stops before issuing a
+write or sends its old constant and is rejected by a newer core.
+
+This control-plane change does not create a new persisted authorization epoch.
+`intercept.json` remains current schema version 6, and an already enabled
+current-schema snapshot remains authorized when a v7 core loads it. The v7 gate
+applies to the next install, Marketplace update, reorder, or enable operation;
+disabling that snapshot remains possible without a contract, while enabling it
+again requires the current contract. A Console and core must still match the
+feature version exactly; a client must not infer any of these routes or fields
+from an older version.
+
 Catalog review resolves its configured source and installed-state projection
 from one committed interception revision. If that document changes while the
 catalog or manifest is being fetched, review returns a revision conflict rather
@@ -372,6 +414,15 @@ may therefore return an authorized `certificate_pending` module; it becomes
 `active` without another configuration write once the root publisher commits a
 matching certificate result. Certificate transitions never advance the
 interception document revision and no derived `active` bit is persisted.
+
+Typed extension `REJECT` and `DIRECT` rules are part of that same derived
+runtime plan, not an independently live rule set. While the certificate is
+pending or in error, or the fixed client boundary is unavailable, both typed
+decisions are withdrawn. A claimed HTTP(S) capture host remains rejected before
+ordinary routing so it cannot bypass the authorization, while unrelated traffic
+receives no extension decision and returns to the operator-owned rule set. Once
+the certificate and boundary are ready again, the typed rules resume from the
+same immutable document without a revision change or another operator write.
 
 All setting values for one extension are one configuration decision and are
 written as a complete typed map. The engine validates and compiles the whole map

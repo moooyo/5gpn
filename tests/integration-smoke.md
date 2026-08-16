@@ -256,6 +256,10 @@ done
   and ordinary controller routes reject a missing or wrong controller secret,
   and neither secrets nor extension log contents appear in error bodies or
   persistent journal output.
+- [ ] `/capabilities` advertises `5gpn-interception` at exactly version 7. A
+  cold-loaded Console whose compiled capability version differs in either
+  direction treats interception, Marketplace, settings, and plugin logs as
+  absent rather than rendering a partially understood surface.
 - [ ] An engine inner dial naming `console.<base>` is rejected by the
   `IN-TYPE,INNER` exclusion before it can reach the management listener.
 
@@ -397,7 +401,16 @@ done
 - [ ] GitHub still reports the official release through `/releases/latest` after
   publishing a beta. The installed installer records its exact 5gpn tag, while
   mihomo and zashboard match the independent version and digest coordinates
-  embedded in that bundle.
+  embedded in that bundle. The running binary reports the pinned
+  `MIHOMO_VERSION`, `/opt/5gpn/ui/.zash_version` equals the pinned
+  `ZASH_VERSION`, and both pins were changed by the same root-repository commit.
+- [ ] Reinstall stages and verifies both pinned artifacts before runtime
+  publication, publishes the binary and Console tree before restarting mihomo
+  into the new pair, and does not claim a cross-artifact atomic rename. While
+  the prior process is still live or after a partial publication failure, a
+  deliberately mismatched v6/v7 pair in a disposable fixture fails closed
+  through exact capability matching; it is never accepted as a releasable
+  combination.
 - [ ] Missing/invalid Gum checksum falls back to plain output without installing
   the unverified binary.
 - [ ] Compare `nft list ruleset` with `/tmp/nft.before`: install, reinstall, and
@@ -564,6 +577,13 @@ into recorded command output, screenshots, or issue logs.
   is ignored. An empty host request commits `ready` without material hashes.
   Throughout the test, mihomo cannot read the signing key and the publisher has
   no network address family or Linux capability.
+- [ ] Give the enabled synthetic extension one typed `reject` rule and one typed
+  `direct` rule. During certificate pending, certificate error, and fixed client
+  boundary unavailable states, both typed decisions are withdrawn, an already
+  claimed HTTP(S) capture host remains rejected, and unrelated traffic returns
+  to ordinary operator routing. Restoring certificate and boundary readiness
+  restores both typed decisions from the same document without advancing the
+  interception revision or issuing another configuration write.
 - [ ] Turning the Console master off withdraws the DNS overlay and in-process
   traffic policy. Turning it back on restores only armed hosts whose current
   request, committed result, exact keypair bytes, validity, and complete SAN set
@@ -591,6 +611,37 @@ into recorded command output, screenshots, or issue logs.
   explicit `DIRECT` egress binding; required typed settings remain hard enable
   gates. The unrestricted network grant is a single reviewed boolean with no
   destination list; changing it changes the immutable snapshot digest.
+- [ ] Installed detail, URL/local install review, and Marketplace review all
+  report `review_contract: 7`. Exercise all seven action kinds (`script`, `jq`,
+  `reject`, `mock`, `headers`, `rewrite`, and `replace_body`) and verify the
+  Console shows the structured matcher, optional gate, kind, body mode, timing
+  and body limits, source evidence, and declarative parameters. Script/JQ code
+  is represented only by digest and byte count; mock bodies only by kind,
+  decoded byte count, and digest. Seed unique manifest, script, JQ, and mock body
+  strings and confirm none appears in the response or rendered review.
+- [ ] Change each action's matcher/gate, hidden code or mock body, declarative
+  parameter, and limits in reviewed candidates. Every semantic change alters
+  that action's `review_digest`, map insertion order does not, and the Console
+  identifies added, removed, changed, and reordered actions by ID, digest, and
+  sequence without falling back to a raw JSON or source dump.
+- [ ] For fresh install apply, Marketplace update apply, complete reorder, and
+  `enabled: true`, send otherwise valid requests with `review_contract` missing,
+  6, and 8. Each returns HTTP 400 before the engine mutation and leaves the
+  revision, order, installed snapshot, and enabled state unchanged. Repeating
+  with 7 reaches the operation's normal validation. `enabled: false` succeeds
+  when the field is omitted, null, or zero, while an explicitly nonzero stale
+  value is rejected.
+- [ ] In an instrumented already-open v7 Console tab, return a missing, 6, or 8
+  contract from install, Marketplace, and enable review/detail reads. The page
+  clears any older candidate, shows a persistent incompatibility state, renders
+  no trusted action cards, keeps confirmation unavailable, and emits no mutation
+  request. Returning 7 enables confirmation, and the request body contains the
+  Console's local constant 7 rather than an echoed server value.
+- [ ] Load a current-schema version 6 interception document containing an
+  already enabled extension into the v7 core. Startup preserves that durable
+  authorization and does not rewrite the document or synthesize a confirmation.
+  Its next protected update or reorder requires contract 7; disabling remains
+  available without the field, and a later re-enable requires 7.
 - [ ] Confirm `/extensions` contains only installed-plugin management and host
   audit entry points: there is no embedded Marketplace tab and no decorative
   capture/transform/egress traffic rail. Open the top-level `/marketplace`
