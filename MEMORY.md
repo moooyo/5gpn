@@ -41,9 +41,10 @@ Update the status and the normative documentation when an implementation lands.
 **Status: Implemented. Recorded 2026-08-06.**
 
 - Mihomo and Zashboard are maintained forks and move only through the 5gpn
-  installer, which records independent release tags and SHA-256 pins for each
-  upstream artifact. A 5gpn release does not rebuild or republish either
-  component. The controller returns HTTP 403 for
+  release, whose `install.sh` records independent release tags and SHA-256 pins
+  for each upstream artifact. The host installer fetches those artifacts; the
+  Docker build copies the same verified artifacts into OCI. Neither path
+  rebuilds either component. The controller returns HTTP 403 for
   `/upgrade` and `/upgrade/ui`; Zashboard exposes no manual, automatic, or
   update-check path for either component. Updating GEO data remains separate.
 - Zashboard remains installable as a PWA, but its worker is network-only. It
@@ -57,6 +58,87 @@ Update the status and the normative documentation when an implementation lands.
   be used. Zashboard tracks `Zephyruso/zashboard:main`. Every sync verifies the
   merge-base first, fast-forwards the matching fork baseline, and then merges
   that baseline without rebasing already tagged downstream history.
+
+## Simplified Docker delivery
+
+**Status: Implemented on the Docker development branches; first publication is
+pending a new mihomo release pin. Recorded 2026-08-09.**
+
+- Docker is a packaging and process-lifecycle variant, not a second runtime
+  architecture. One `linux/amd64` image runs as one container and one Compose
+  service. Synchronous entrypoint bootstrap ends with `exec 5gpn-mihomo`, so
+  mihomo is PID 1 and remains the sole long-running product process. There is no
+  sidecar, init, cron daemon, systemd instance, or in-container supervisor.
+- The extension worker boundary is unchanged. The fixed `fivegpn` UID/GID owns
+  the runc-delegated private cgroup, the existing runtime normalizes itself into
+  `/main`, and the real cgroup-FD startup probe remains fatal before listeners
+  open. The first supported host is rootful Docker Engine 28 or newer with a
+  pure cgroup v2 hierarchy, the systemd cgroup driver, no daemon user namespace
+  remapping, Docker's writable-cgroup delegation, and the shipped seccomp
+  profile that permits `clone3` without unconfined seccomp or `SYS_ADMIN`.
+  Rootless Docker, Docker Desktop, SELinux enforcing, and arm64 are not part of
+  the first support contract.
+- After the worker probe succeeds, a container-only certificate manager may
+  run the fixed trusted public-renewal and interception-reconciliation helpers.
+  They are globally serialized, short-lived process groups, are always waited,
+  and are terminated before engine shutdown. A container `/restart` request and
+  SIGTERM both perform complete orderly shutdown; Docker's
+  `restart: unless-stopped` policy replaces the whole failure domain.
+- Docker certificate issuance is Cloudflare DNS-01 only. The Compose
+  `cloudflare_api_token` secret becomes a mode-0600 Certbot credential in
+  `/run`, one `<base>` lineage covers `<base>` and `*.<base>`, and the `dot` and
+  `console` roles are published without restarting the gateway. Docker rejects
+  HTTP-01, debug, and every unknown certificate mode. The host installer keeps
+  its existing three modes.
+- `.5gpn-docker-lineage-ready` is the Docker public-lineage commit fence. Before
+  it exists, only marker-owned first-boot partials may be cleaned and ACME
+  accounts remain; after it exists, an invalid current lineage restores only a
+  validated complete generation or fails closed. Role generation deletion uses
+  `.delete.generation-*` tombstones.
+- The owner explicitly accepts weaker key isolation in exchange for a single
+  container. The same `fivegpn` container identity can read the Cloudflare
+  token, ACME account, public private keys, and interception CA signing key.
+  The helpers remain trusted and short-lived, but process, network, or key
+  namespace separation is not claimed.
+- One named volume mounted at `/etc/5gpn` is the complete durable boundary; the
+  image root is read-only and runtime scratch paths are tmpfs. The numeric
+  `fivegpn` UID/GID is therefore a persistent volume ABI.
+- A GitHub Release still contains exactly the installer archive, its checksum,
+  and the notice file. The same tag publishes
+  `ghcr.io/moooyo/5gpn:<tag>`; stable tags also advance `latest`, while beta
+  tags never do. Image assembly downloads and verifies the exact mihomo and
+  zashboard coordinates read from the tagged `install.sh`; no second pin file
+  exists. The pinned mihomo must additionally answer the offline
+  `5gpn-container-contract` probe with exactly
+  `5gpn-container-runtime-v1`; this prevents a release from packaging an older
+  core that has the right version syntax but no container lifecycle.
+- The exact GHCR tag is published before the GitHub draft and its resolved OCI
+  digest is written into the release body. A retry may reuse an existing exact
+  tag only when its image content digest and complete label map equal the local
+  candidate, and may reuse only the matching draft or immutable release.
+  Stable `latest` moves last, after the GitHub release is immutable; a beta
+  never moves it. This ordering makes a partial publication resumable without
+  letting `latest` name an unpublished release.
+- Hosted CI can prove pin verification, image construction, and static smoke
+  only. It must not present those checks as cgroup validation. The release
+  readiness gate is a real Docker 28/cgroup-v2 run on `test-env`, covering the
+  startup probe, extension execution and OOM containment, certificate hot
+  publication, recreate, and volume persistence. Release fails closed unless
+  `FIVEGPN_CONTAINER_ACCEPTED_COMMIT` and
+  `FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256` bind that evidence to the exact
+  tag commit and its current pinned core digest, while
+  `FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` must equal the reproducibly rebuilt
+  candidate image content digest.
+- The acceptance driver verifies that its Git root and `HEAD` identify the
+  accepted commit and that every versioned installer-pin, Compose, seccomp,
+  driver, and probe input is tracked and unchanged at that commit. A copied or
+  locally weakened harness cannot emit release evidence by repeating the
+  expected commit string.
+- The implementation has passed development-mode acceptance on `test-env`, but
+  `install.sh` still pins `v1.19.28-monolith.29`, which predates the required
+  container contract. Do not treat the Docker image as publishable until a new
+  mihomo artifact is released, its tag and compressed-asset SHA-256 replace the
+  old pin, and the exact pinned image passes release-mode acceptance again.
 
 ## Installer state and certificate publication
 
@@ -282,11 +364,15 @@ channel-switch and anti-downgrade contract on 2026-08-06.**
   is newer than the latest official release; an older beta line is refused.
 - A release bundle stamps `RELEASE_TAG` to its exact tag. Unpinned source
   installs delegate to that verified bundle, and packaged or installed scripts
-  retain the stamped tag. The 5gpn release publishes exactly
+  retain the stamped tag. The GitHub Release publishes exactly
   `5gpn-installer.tar.gz`, `checksums.txt`, and `THIRD_PARTY_NOTICES.md`; the
-  bundle contains installer inputs, not mihomo binaries or zashboard assets.
+  bundle contains host installer inputs plus the minimal Docker Compose,
+  seccomp, bootstrap-example, and runbook launch set, but not mihomo binaries
+  or zashboard assets.
   Mihomo and zashboard are fetched from their own repositories using the
-  independent release tags and SHA-256 pins embedded in that installer.
+  independent release tags and SHA-256 pins embedded in that installer. The
+  matching GHCR image is an additional registry artifact, not a fourth GitHub
+  Release asset.
 - The current repository revision contains the cross-channel compatibility
   check and `upgrade-reset-mihomo` flow, but a new beta prerelease must publish
   this revision before the public `--beta` selector can deploy that behavior.
@@ -394,10 +480,11 @@ channel-switch and anti-downgrade contract on 2026-08-06.**
 - Publication automation must distinguish official tags from beta tags and
   verify their branch provenance before publishing.
 - Both channels package installer inputs from the tagged commit and stamp the
-  exact 5gpn tag into the installer bundle. They publish only
+  exact 5gpn tag into the installer bundle. Their GitHub Releases publish only
   `5gpn-installer.tar.gz`, `checksums.txt`, and `THIRD_PARTY_NOTICES.md`. CI
   verifies the independently pinned mihomo binary and zashboard asset without
-  republishing them.
+  rebuilding them. It also assembles the matching GHCR image from those exact
+  verified artifacts; stable advances `latest` and beta does not.
 - Official publication must preserve the current stable `releases/latest`
   behavior. Beta publication must be a separate prerelease path and must not
   change what a default installation resolves.

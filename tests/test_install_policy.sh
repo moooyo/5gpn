@@ -373,30 +373,38 @@ grep -Fq 'required_branch=main' "$RELEASE" \
     || fail "official release tags are not tied to main"
 grep -Fq 'required_branch=beta' "$RELEASE" \
     || fail "beta release tags are not tied to beta"
-grep -Fq 'git merge-base --is-ancestor' "$RELEASE" \
-    || fail "release workflow does not verify tag branch provenance"
+[[ "$(grep -Fc 'git merge-base --is-ancestor' "$RELEASE")" -ge 3 ]] \
+    && grep -Fq 'required_branch: ${{ steps.release.outputs.required_branch }}' "$RELEASE" \
+    && grep -Fq 'REQUIRED_BRANCH: ${{ needs.classify.outputs.required_branch }}' "$RELEASE" \
+    || fail "release workflow does not reverify tag branch provenance at publication boundaries"
 grep -Fq 'event_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"' "$RELEASE" \
     && grep -Fq '[[ "$tagged_commit" == "$event_commit" ]]' "$RELEASE" \
     || fail "release provenance is not bound to the immutable tag-push event commit"
 grep -Fq 'stable_gt "$tag" "$existing"' "$RELEASE" \
     || fail "official releases can move latest backwards to an older stable SemVer"
-grep -Fq 'prerelease: ${{ needs.classify.outputs.prerelease }}' "$RELEASE" \
+grep -Fq 'RELEASE_PRERELEASE: ${{ needs.classify.outputs.prerelease }}' "$RELEASE" \
     || fail "release workflow does not publish beta as a prerelease"
-grep -Fq 'draft: true' "$RELEASE" \
+grep -Fq -- '-F draft=true' "$RELEASE" \
     && grep -Fq 'steps.release_draft.outputs.id' "$RELEASE" \
     && grep -Fq 'make_latest="$RELEASE_MAKE_LATEST"' "$RELEASE" \
     && grep -Fq '.immutable == true' "$RELEASE" \
     || fail "release assets are not finalized through an immutable draft"
-grep -Fq 'tag_name: ${{ github.ref_name }}' "$RELEASE" \
+grep -Fq -- '-f tag_name="$GITHUB_REF_NAME"' "$RELEASE" \
     || fail "release publication does not name the exact validated tag"
 [[ "$(grep -Fc 'stable_gt "$GITHUB_REF_NAME" "$existing"' "$RELEASE")" == 1 ]] \
-    && grep -Fq 'Release existence check returned HTTP $release_status.' "$RELEASE" \
-    || fail "release jobs can skip final monotonicity or overwrite an existing release"
+    && grep -Fq 'remote_id" == "$candidate_id" && "$remote_labels" == "$candidate_labels' "$RELEASE" \
+    && grep -Fq 'Existing release does not match this exact image.' "$RELEASE" \
+    || fail "release jobs can skip final monotonicity or reuse mismatched publication state"
 grep -Fq 'group: 5gpn-release-${{ github.ref }}' "$RELEASE" \
     && grep -Fq 'group: 5gpn-release-publish' "$RELEASE" \
     || fail "same-tag runs and immutable publication are not independently serialized"
 grep -Fq 'uses: ./.github/workflows/checks.yml' "$RELEASE" \
     || fail "release channels do not share the repository checks gate"
+grep -Fq 'FIVEGPN_CONTAINER_ACCEPTED_COMMIT' "$RELEASE" \
+    && grep -Fq 'FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256' "$RELEASE" \
+    && grep -Fq 'FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID' "$RELEASE" \
+    && grep -Fq 'Candidate image ID differs from the exact test-env result.' "$RELEASE" \
+    || fail "release publication is not bound to exact test-env evidence"
 grep -Fq 'RELEASE_TAG=\"${GITHUB_REF_NAME}\"' "$RELEASE" \
     || fail "release installer bundle is not stamped to the exact tag"
 

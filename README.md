@@ -19,8 +19,9 @@ long-running process:
 - The `moooyo/mihomo` fork is the entire runtime: DoT DNS policy, forwarding,
   native-extension interception, Telegram, and the authenticated controller.
 - zashboard is the static Console mihomo serves at `https://console.<base>/ui/`.
-- This repository contains only the installer and operator TUI. It installs
-  digest-pinned mihomo and zashboard release artifacts.
+- This repository contains the host installer/operator TUI and Docker image
+  assembly, but no runtime or Console source. Both delivery paths consume the
+  same digest-pinned mihomo and zashboard release artifacts.
 
 它不是 VPN、全隧道或默认路由器，不自带代理节点，也不安装或管理 TUN、TProxy、WireGuard、NAT、fwmark、策略路由或宿主防火墙。客户端 DNS 入口只有 DoT `:853`；没有公共 DoH，也没有客户端明文 DNS `:53`。
 
@@ -81,7 +82,12 @@ AAAA 的 NODATA 不只针对客户端。mihomo 嗅探出主机名之后，会在
 
 开始前需要：
 
-- A Linux amd64 gateway with kernel 5.7 or newer, systemd 257 or newer, a pure cgroup v2 hierarchy with the memory and pids controllers available, and root access. The installer checks this isolation baseline before project publication. It directly supports distributions using apt or dnf/yum; other distributions are attempted only when one of those package managers is detected.
+- 宿主安装需要 Linux amd64、kernel 5.7+、systemd 257+、提供 memory 与
+  pids controller 的纯 cgroup v2 hierarchy，以及 root。安装器会在发布任何
+  项目文件前检查这一隔离基线；直接支持 apt 或 dnf/yum 系统。
+- Docker 运行是另一条窄基线：Linux amd64、rootful Docker Engine 28+、纯
+  cgroup v2、systemd cgroup driver，且 daemon 未启用 `userns-remap`。首版
+  不支持 rootless、Docker Desktop、SELinux enforcing 或 arm64。
 - Quick Installer 在创建任何安装器文件前就需要 `util-linux` 提供的 `flock` 与 `findmnt`。最小化系统请先运行 `apt-get install -y util-linux`、`dnf install -y util-linux` 或 `yum install -y util-linux`。
 - 首次安装可用的交互 TTY。`curl | sudo bash` 会尝试重新连接 `/dev/tty`；没有 TTY 时首次安装会 fail closed。
 - 至少一个已分配给本机接口、客户端可路由到达的非回环 IPv4。5gpn 的 steering 路径是 IPv4-only；IPv6-only 客户端无法到达网关，除非网络提供 CLAT 等 IPv4 可达性。
@@ -89,7 +95,8 @@ AAAA 的 NODATA 不只针对客户端。mihomo 嗅探出主机名之后，会在
 - 生产模式需要 `console.<base>` 指向公网或客户端可路由网关 IPv4 的 A 记录；`debug` 会跳过公共 DNS gate。Android 首次启用 Private DNS 前，`dot.<base>` 还必须能通过客户端原有 resolver 解析。
 - 由云安全组或独立防火墙控制入口来源。5gpn 不创建、修改或删除宿主防火墙规则。
 
-三个 IPv4 配置承担不同角色：
+宿主安装中的三个 IPv4 配置承担不同角色；Docker 内部监听固定为
+`0.0.0.0`，由 Compose 把宿主标准端口显式映射到容器：
 
 - `DNS_PUBLIC_IP` 是部署的公网身份，也是 HTTP-01 A 记录目标；
 - `DNS_GATEWAY_IP` 是 DNS 返回给客户端、且客户端实际可路由到的网关地址；
@@ -112,7 +119,7 @@ Expose only what you need. `speedtest-5060` is an unauthenticated Host/SNI relay
 
 ## 证书模式
 
-The first-install TUI asks for one of the following modes. Both production
+The host installer's first-install TUI asks for one of the following modes. Both production
 modes use one scoped Certbot lineage named `<base>` and deploy it to the only
 current public certificate roles: `dot` and `console`.
 
@@ -123,6 +130,11 @@ current public certificate roles: `dot` and `console`.
 | `debug` | 隔离的自签证书，不使用 Certbot，不受客户端默认信任 | 仅用于测试 |
 
 Cloudflare token 只写入 root-only 的 `/etc/5gpn/acme/cloudflare.ini`，不会进入 `dns.env`、调用者环境或日志。可选 interception 使用完全独立的私有根 CA，不会替换 DoT 或 Console 公网证书。
+
+Docker 版固定使用 Cloudflare DNS-01：`cloudflare_api_token` Compose secret
+只会在 tmpfs `/run` 中转换为 mode `0600` 的 Certbot 凭据；它申请同一个
+`<base>` lineage 的 `<base>` 与 `*.<base>`，再发布 `dot` 与 `console`。
+Docker 明确拒绝 `http-01`、`debug` 和未知 `CERT_MODE`。
 
 ## 快速安装
 
@@ -161,6 +173,58 @@ domains with `direct` intent and the GFW list with `proxy` intent. Mihomo fetche
 them into its private state directory; the authenticated Console can disable,
 replace, or reorder them.
 
+## Docker 运行
+
+Docker 版仍是完整网关，不是精简功能集：DNS、转发、Console、Telegram 和
+原生扩展都在同一个 `5gpn-mihomo` 中。交付形态固定为一个镜像、一个容器、
+一个 Compose service；证书操作只是 entrypoint 或 monolith 同步启动并等待的
+可信短命 helper。
+
+从同一 tag 的 `5gpn-installer.tar.gz` 解出 Compose、seccomp、bootstrap
+example 与 [Docker runbook](docs/docker.md)；无需 checkout 源码。复制模板并
+填写 base domain、客户端可路由的网关 IPv4、邮箱；建议在首次启动前同时填写匹配
+`[A-Za-z0-9._~-]{16,256}` 的 `DNS_MIHOMO_SECRET`。Cloudflare token 文件必须
+只包含 token 本身：
+
+```bash
+cp docker/bootstrap/config.env.example docker/bootstrap/config.env
+${EDITOR:-vi} docker/bootstrap/config.env
+install -m 0600 /dev/null docker/bootstrap/cloudflare_api_token
+${EDITOR:-vi} docker/bootstrap/cloudflare_api_token
+sudo chown 10001:10001 \
+  docker/bootstrap/config.env docker/bootstrap/cloudflare_api_token
+sudo chmod 0600 docker/bootstrap/config.env docker/bootstrap/cloudflare_api_token
+```
+
+确认 Engine 28+、cgroup v2 和 systemd driver 后，以明确 tag 启动。稳定发布
+会更新 registry 的便利别名 `latest`，但 release bundle 不默认使用可移动别名；
+beta 不会更新它：
+
+```bash
+docker version --format '{{.Server.Version}}'
+docker info --format '{{.CgroupVersion}} {{.CgroupDriver}}'
+export FIVEGPN_IMAGE=ghcr.io/moooyo/5gpn:X.Y.Z
+docker compose pull gateway
+docker compose up -d gateway
+docker compose logs -f gateway
+```
+
+Compose 使用 bridge 网络和显式 IPv4 端口发布、private cgroup namespace、
+`writable-cgroups=true` 和随仓库发布的 seccomp profile。容器内 `443`
+由 loopback controller 占用，因此公网 `443` 映射到数据面的 `9443`；其他公开
+端口保持同端口映射。不需要 `privileged`、额外 capability、`SYS_ADMIN`、
+Docker socket 或宿主 cgroup bind mount。持久数据
+只有 `fivegpn-data:/etc/5gpn`，镜像根只读，`/run`、临时目录与 Console
+发布目录是 tmpfs。升级时切换 `FIVEGPN_IMAGE` 后再次 `pull` 和 `up -d`；不要
+执行 `docker compose down -v`，除非确实要删除配置、ACME 状态和 interception
+CA。
+
+> [!WARNING]
+> 单容器简化版有意弱化证书密钥隔离：同一个 `fivegpn` identity 可以读取
+> Cloudflare token、ACME account、公网证书私钥和 interception CA 私钥。
+> worker 的 cgroup 隔离仍是强制启动条件；被授权的扩展代码不会因此进入主
+> 进程，但 Docker 容器本身不是这些可信密钥之间的隔离边界。
+
 ## 安装后
 
 先检查服务状态：
@@ -194,6 +258,12 @@ ten within 60 seconds. The unit then remains failed, and the limit action is
 explicitly `none`, so a crash loop cannot reboot or power off the host. Existing
 connections are lost during a successful restart.
 
+在宿主安装中 systemd 负责上述进程替换。Docker 版则由
+`restart: unless-stopped` 替换整个容器；容器内没有 systemd、init、cron、
+sidecar 或 supervisor。同步 entrypoint 最后 `exec 5gpn-mihomo`，所以
+mihomo 是 PID 1。`/restart`、SIGTERM 和 fatal path 都先完成统一 shutdown，
+再由 Docker 重启整个 failure domain。
+
 Extension code is the deliberate process-isolation exception, not another
 long-running component. Each validation and action starts the same
 `5gpn-mihomo` binary in a one-shot worker mode below a dedicated cgroup-v2
@@ -202,8 +272,8 @@ unconditional startup invariant: failure terminates monolith startup before DoT,
 the controller, or another listener is opened. After that probe succeeds, a
 single child start error, timeout, crash, or OOM fails only its validation or
 action while the main process remains live. Extension code is never executed in
-the main process. systemd remains the only supervisor and stopping the unit removes all
-of its workers with the main process. At most two workers run concurrently.
+the main process. On a host, stopping the systemd unit removes all workers with
+the main process; in Docker, stopping the container does the same. At most two workers run concurrently.
 Each Linux worker has `memory.max=536870912`, `memory.swap.max=0`,
 `memory.oom.group=1`, and `pids.max=32`; the admitted aggregate upper bounds are
 1GiB and 64 tasks. These are caps, not reserved memory or a physical-RAM
@@ -364,7 +434,9 @@ Native extensions are optional, and a fresh installation has the MITM master dis
 > [!CAUTION]
 > When a manifest declares `permissions.network: true` and the operator confirms it, the script may send any request or response data visible to it, including decrypted content, settings, and storage data, to any host it can reach. The grant has no destination allowlist. An authorized cross-origin URL rewrite forwards the complete method, decoded body, and end-to-end headers, potentially including `Cookie` or `Authorization`. The enablement confirmation names the unrestricted grant and every routing rule; any changed snapshot requires a new review.
 
-Only the root-owned certificate publisher can read the private CA signing key; mihomo receives a constrained leaf and cannot access the root key. Installing the private CA does not guarantee that every application can be captured. Certificate pinning, mTLS, application-provisioned ECH, HTTP/3, and protocols without HTTP semantics are unsupported: the connection fails closed instead of bypassing interception. See [docs/native-extensions.md](docs/native-extensions.md) for the full manifest contract.
+宿主安装中只有 root-owned certificate publisher 能读取私有 CA signing key，
+mihomo 只接收受限 leaf；Docker 则采用上文明确披露的同容器弱隔离。
+Installing the private CA does not guarantee that every application can be captured. Certificate pinning, mTLS, application-provisioned ECH, HTTP/3, and protocols without HTTP semantics are unsupported: the connection fails closed instead of bypassing interception. See [docs/native-extensions.md](docs/native-extensions.md) for the full manifest contract.
 
 ## 升级与发布通道
 
@@ -373,7 +445,10 @@ Only the root-owned certificate publisher can read the private CA signing key; m
 - `upgrade-reset-mihomo` 会替换完整 YAML；自定义 proxies、providers、groups 和 rules 不会自动合并，只能从备份手工恢复。
 - A successful beta channel switch does not guarantee an in-place switch back to the official channel. Keep a system snapshot before switching when reversal is required. The installer does not claim whole-system rollback after publication begins.
 - 所有仍使用 interception config schema v4 的 pre-v5 部署都需要先做显式、可恢复的 lockstep rebuild；不要删除旧 interception 文件或只改 schema version。请严格执行 [pre-v5 rebuild runbook](docs/pre-v5-upgrade.md)。
-- Repository administration must prevent release-tag updates and deletion with a GitHub ruleset and keep immutable releases enabled. The workflow binds assets to the tag-push commit, refuses an existing release, uploads every asset to a draft, and publishes that draft with the stable `latest` decision in the same serialized operation.
+- GitHub Release 始终只有 `5gpn-installer.tar.gz`、`checksums.txt` 与
+  `THIRD_PARTY_NOTICES.md`。同一 tag 另发
+  `ghcr.io/moooyo/5gpn:<tag>`；stable 更新 `latest`，beta 永不更新。
+- Repository administration must prevent release-tag updates and deletion with a GitHub ruleset and keep immutable releases enabled. The workflow binds assets and the OCI digest to the tag-push commit. A retry may reuse only an identical exact image and matching draft/immutable release; drift is rejected. Stable GHCR `latest` advances only after the GitHub release is immutable.
 
 ## 安全边界与已知限制
 
@@ -388,16 +463,21 @@ Only the root-owned certificate publisher can read the private CA signing key; m
 
 ## 开发与验证
 
-This repository contains installer assets only. The local gate is:
+This repository contains installer assets and Docker assembly, but no runtime
+or Console source. The source-level gate is:
 
 ```bash
-for s in install.sh quick-install.sh scripts/*.sh; do bash -n "$s"; done
+for s in install.sh quick-install.sh scripts/*.sh docker/*.sh tests/container-acceptance.sh tests/docker/*.sh; do bash -n "$s"; done
 for t in tests/test_*.sh; do bash "$t"; done
 
 tests/verify-artifact-pins.sh
 ```
 
-CI renders and validates the seed with the digest-pinned mihomo binary. Validate real Linux gateway behavior with [tests/integration-smoke.md](tests/integration-smoke.md).
+CI renders and validates the seed and builds the digest-pinned image without
+starting the gateway. Validate host behavior with
+[tests/integration-smoke.md](tests/integration-smoke.md); real Docker cgroup,
+worker, OOM, certificate, restart, and persistence acceptance runs only on
+`test-env` through [tests/container-acceptance.sh](tests/container-acceptance.sh).
 
 ## 仓库结构
 
@@ -405,6 +485,7 @@ CI renders and validates the seed with the digest-pinned mihomo binary. Validate
 | --- | --- |
 | *(external: `moooyo/mihomo`)* | The single runtime: DNS, forwarding, HTTP/TLS interception, Telegram, and controller API |
 | *(external: `moooyo/zashboard`)* | The React Console served by mihomo |
+| `Dockerfile`, `compose.yaml`, `docker/` | 单容器镜像、Compose/security profile、bootstrap 与可信短命 certificate helpers |
 | `etc/` | Current dns.env example, mihomo seed, and systemd units |
 | `scripts/` | Certificate, iOS profile, and explicit upgrade/migration helpers; the suite runner stays source-only |
 | `tests/` | Shell regression、升级 fixture 与 gateway smoke checklist |
@@ -418,6 +499,8 @@ CI renders and validates the seed with the digest-pinned mihomo binary. Validate
 - [原生扩展开发规范](docs/native-extensions.md)
 - [Pre-v5 rebuild and release-channel switches](docs/pre-v5-upgrade.md)
 - [Linux gateway integration smoke checklist](tests/integration-smoke.md)
+- [Docker 28 test-env acceptance contract](tests/container-acceptance.sh)
+- [Docker deployment runbook](docs/docker.md)
 - [官方扩展仓库](https://github.com/moooyo/5gpn-extensions)
 - [Releases](https://github.com/moooyo/5gpn/releases) 与 [Issues](https://github.com/moooyo/5gpn/issues)
 - [MIT License](LICENSE) 与 [Third-party notices](THIRD_PARTY_NOTICES.md)

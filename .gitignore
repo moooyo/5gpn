@@ -16,6 +16,9 @@ __pycache__/
 
 # Local build/staging scratch
 /build/
+/docker/build/
+/docker/bootstrap/config.env
+/docker/bootstrap/cloudflare_api_token
 
 # Visual-companion brainstorm mockups (scratch, not committed)
 /.superpowers/brainstorm/

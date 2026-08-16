@@ -76,6 +76,27 @@ plans, design handoffs, and git history are context only.
   `/etc/5gpn/mihomo/5gpn`. Old `gpn-*` accounts, the unprefixed `mihomo`
   account/unit/binary, and the old `gpn` state directory are legacy migration
   inputs only; they are never current names or compatibility aliases.
+- Docker delivery is one `linux/amd64` image, one container, and one Compose
+  service. `5gpn-mihomo` remains the sole long-running process and PID 1 after
+  synchronous bootstrap; do not add a sidecar, init, cron daemon, or supervisor.
+  The fixed `fivegpn` UID/GID owns the delegated container cgroup and is part of
+  the volume ABI. Container mode requires rootful Docker Engine 28+, cgroup v2,
+  the systemd cgroup driver, a private cgroup namespace,
+  `writable-cgroups=true`, and the shipped clone3-aware seccomp profile. Do not
+  replace that contract with `privileged`, `SYS_ADMIN`, an unconfined seccomp
+  profile, a Docker socket, or a host cgroup bind mount. The mandatory real
+  worker probe remains fatal before listeners open. Image preparation must
+  also require the pinned binary's exact offline
+  `5gpn-container-contract`/`5gpn-container-runtime-v1` handshake; never
+  publish a Docker image from a core that lacks it.
+- Docker certificate management is Cloudflare DNS-01 only. After the worker
+  probe, mihomo may supervise the fixed trusted, short-lived public and
+  interception certificate helpers; every helper is waited and terminated as a
+  process group during shutdown. The simplified single-container form
+  deliberately lets the `fivegpn` identity read the Cloudflare credential,
+  ACME state, and interception CA key. Preserve this explicit weaker owner
+  decision without pretending it is the host installation's key separation.
+  Do not add Docker support for HTTP-01 or debug certificates.
 - `/etc/5gpn/mihomo/config.yaml` is fully operator-owned. Normal install,
   reinstall, and `configure` operations preserve a valid existing file. Only
   explicit reset may replace the complete file wholesale, after
@@ -119,8 +140,9 @@ plans, design handoffs, and git history are context only.
 - There is no Python, Go module, or Web source tree in this repository. Runtime
   source belongs in `moooyo/mihomo`, Console source belongs in
   `moooyo/zashboard`, and first-party extension source belongs in
-  `moooyo/5gpn-extensions`. This repository installs digest-pinned release
-  artifacts from those repositories.
+  `moooyo/5gpn-extensions`. The host installer and Docker assembly consume the
+  same digest-pinned release artifacts from those repositories; neither builds
+  their source here.
 
 ## Shell TUI policy: Gum
 
@@ -296,6 +318,16 @@ tests/verify-artifact-pins.sh
 
 CI also renders the seed and validates it with digest-pinned mihomo. For real
 deployment behavior follow `tests/integration-smoke.md`.
+GitHub-hosted CI may build and statically inspect the Docker image but cannot
+prove delegated cgroup behavior. Docker runtime acceptance, including a real
+extension worker and OOM containment, runs only on the Engine 28/cgroup-v2
+`test-env` gate; never replace it with a hosted-runner mock. A release must fail
+closed unless `FIVEGPN_CONTAINER_ACCEPTED_COMMIT` and
+`FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256` match its exact commit and core pin;
+`FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` must also match the reproducibly rebuilt
+candidate. Update those repository variables only after the exact candidate
+passes from a checkout whose Git root, HEAD, and versioned acceptance inputs
+match that commit byte-for-byte.
 
 Preserve unrelated dirty-worktree changes. Use `rg` for discovery and
 `apply_patch` for edits. Until a release policy says otherwise, change stale

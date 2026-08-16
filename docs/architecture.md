@@ -18,12 +18,27 @@ described in earlier revisions of this file.
   owners.
 - **zashboard** is the only user interface. It is a static bundle mihomo serves
   and an API client that talks to mihomo's controller.
-- **This repository** is an installer and a TUI. It contains no service.
+- **This repository** is the host installer and TUI, and the assembly source
+  for the Docker image. It contains no runtime, Console, or extension source.
 
-A 5gpn release publishes only `5gpn-installer.tar.gz`, `checksums.txt`, and
-`THIRD_PARTY_NOTICES.md`; the bundle contains installer material only. It does
-not build or republish mihomo or zashboard. The installer fetches those artifacts
-from their own repositories using independent release tags and SHA-256 pins.
+A GitHub Release publishes exactly `5gpn-installer.tar.gz`, `checksums.txt`, and
+`THIRD_PARTY_NOTICES.md`. The archive contains the host installer plus the
+minimal Docker launch set (`compose.yaml`, the seccomp profile, bootstrap
+example, and runbook), but no runtime or Console binary. The same tag also
+publishes `ghcr.io/moooyo/5gpn:<tag>` for `linux/amd64`, and a stable tag
+additionally advances `ghcr.io/moooyo/5gpn:latest`. A beta tag never moves
+`latest`. The image does not rebuild mihomo or zashboard: its build consumes the
+independent release coordinates and SHA-256 pins from the tagged `install.sh`,
+verifies both downloaded artifacts, and copies those exact results into the
+image. It also requires the pinned binary's offline
+`5gpn-container-contract` command to print exactly
+`5gpn-container-runtime-v1`; a stale runtime without the container lifecycle is
+therefore unpublishable even when its ordinary version string is valid. There
+is no second component lock file. Publication writes the exact OCI digest into
+the GitHub release body. A retry reuses only a content-and-label-identical exact
+image and matching draft or immutable release; any drift fails closed. Stable
+`latest` moves only after the GitHub release is immutable, and beta never moves
+it.
 
 Zashboard remains installable as a PWA, but its worker is network-only. It
 precaches no application files, deletes caches left by older releases when it
@@ -35,15 +50,28 @@ Core and Console self-upgrade are not controller capabilities. Authenticated
 requests to `/upgrade` and `/upgrade/ui` fail with HTTP 403, and the Console
 contains no check, automatic action, or manual action for them. `/configs/geo`
 remains an independent maintenance action. Core and Console versions move only
-through the digest-pinned 5gpn installer release.
+through a digest-pinned 5gpn release: the host installer bundle or the matching
+container image tag.
 
-Two root oneshots survive, and only because they hold key material a
-network-facing process must not:
+The host/systemd installation retains two root oneshots, and only because they
+hold key material a network-facing process must not:
 
 - `5gpn-intercept-cert.service` owns the interception CA and mints the leaf
   whose SAN set covers the enabled capture hosts.
 - `5gpn-certbot-renew.service` owns the Let's Encrypt lineage for the public
   service names.
+
+The Docker delivery deliberately chooses a simpler and weaker key boundary.
+It runs one image as one container and one Compose service. `5gpn-mihomo` is
+still the only long-running process and PID 1 after synchronous bootstrap.
+The entrypoint starts and waits for the trusted initial CA and public-certificate
+helpers before `exec`. After the mandatory worker-isolation probe succeeds, the
+runtime may start and wait for trusted short-lived renewal or reconciliation
+helpers. None is a service or sidecar. The container's single `fivegpn` identity
+can read the Cloudflare credential, ACME account, public certificate keys, and
+interception CA key. This loss of the host installation's process-level key
+separation is an explicit owner decision for the simplified Docker form, not an
+accidental security claim.
 
 The only current public certificate roles are `dot` for DoT and `console` for
 the controller, Console, and profiles. A legacy `web` certificate role and the
@@ -112,7 +140,8 @@ between independently durable services that no longer exist.
 
 ### Failure and process recovery
 
-systemd is the only process supervisor. The shipped `5gpn-mihomo.service` runs
+There is no in-process subsystem supervisor. On a host installation, systemd
+is the process supervisor. The shipped `5gpn-mihomo.service` runs
 `/opt/5gpn/bin/5gpn-mihomo` as the sole managed Unix user and group, `fivegpn`.
 All external product names remain `5gpn`; the spelled-out Unix identity is the
 only exception because portable Linux/POSIX account names cannot begin with a
@@ -194,6 +223,99 @@ failure eventually leaves the unit failed at the start limit. Availability
 monitoring therefore belongs outside this process and host, using active DoT
 and HTTPS probes rather than an in-process heartbeat.
 
+### Docker deployment
+
+The Docker form preserves the same runtime and one-failure-domain model. It is
+one image, one container, and one Compose service; it does not introduce a DNS
+container, certificate sidecar, init process, cron daemon, or supervisor.
+`docker/entrypoint.sh` performs bounded bootstrap operations synchronously as
+the fixed `fivegpn` identity `10001:10001` and waits for each child. It then uses `exec` so
+`5gpn-mihomo` becomes PID 1 with `FIVEGPN_RUNTIME=container`. An empty or
+unrecognized runtime value never silently selects container semantics.
+
+The runtime still constructs the worker controller and performs the real
+cgroup-FD worker probe before opening listeners. Only after that probe succeeds
+may its certificate manager run either fixed helper command. Public renewal and
+interception reconciliation are globally serialized, each child is placed in a
+separate process group, and the parent always waits for it. Shutdown stops new
+certificate work, sends the active helper group TERM and then KILL after a
+bounded deadline, waits for DNS/subscription and Bot loops, closes Engine
+transports, logs, workers and its cgroup hierarchy, and then exits. Ordinary
+mihomo listener descriptors close with PID 1 rather than widening the fork
+surface with a second lifecycle API. In container mode `/restart` requests that
+same orderly whole-process exit; Docker's restart policy replaces the
+container. It never `exec`s over live workers or helpers.
+
+The manager runs an immediate reconciliation and then a 24-hour check with a
+fresh cryptographic 0–1 hour jitter on every round. Helpers inherit no ambient
+process environment: only the fixed `PATH`, `HOME=/nonexistent`, `LANG=C`,
+`LC_ALL=C`, and `TMPDIR=/tmp` are supplied. Container `/restart` acknowledges
+and flushes the HTTP response before notifying the process owner. Managed host
+and container runtimes both complete the same 5gpn teardown and exit normally;
+systemd or Docker then replaces the process. Only a non-managed upstream mihomo
+path retains the old self-exec fallback.
+
+The supported Compose contract is deliberately narrow:
+
+- Linux `amd64`, rootful Docker Engine 28 or newer, a pure cgroup v2 host, the
+  systemd cgroup driver, and no daemon `userns-remap`;
+- a private cgroup namespace plus Docker 28's `writable-cgroups=true`, so runc
+  delegates only the container cgroup directory and delegation files to the
+  fixed container UID/GID;
+- the shipped seccomp profile, derived from Docker's default profile, which
+  admits `clone3` for `CLONE_INTO_CGROUP` while retaining the default denials;
+- an IPv4-only bridge network with explicit public port mappings, a namespaced
+  `net.ipv4.ip_unprivileged_port_start=0`, a read-only image root, one
+  `/etc/5gpn` named volume, tmpfs runtime directories, every capability dropped,
+  no new privileges, no Docker socket, and no host cgroup bind mount; and
+- `init: false`, `restart: unless-stopped`, and a 30-second stop grace period.
+
+The Docker data-plane listeners use the stable container coordinate
+`0.0.0.0`, which is persisted as `DNS_MIHOMO_LISTEN_IPS`; public and gateway
+addresses remain DNS/deployment identity rather than container-interface bind
+targets. Compose publishes `853/tcp`, `80/tcp`, `443/tcp+udp`,
+`5060/tcp+udp`, `8080/tcp`, and `8443/tcp`. The public 443 mapping terminates at
+the Docker-only tunnel socket `0.0.0.0:9443`, whose target remains
+`console.<base>:443`. This translation is necessary because a wildcard
+container `:443` socket would collide with the load-bearing controller at
+`127.0.0.1:443`; it does not change the public port or the sniffed destination
+port. Every other published port maps to the same container port. Every mapping
+binds the Docker host's IPv4 wildcard `0.0.0.0` explicitly; an IPv6-enabled
+daemon must not publish the service on `::`. Compose publishes neither plain
+DNS (`53`), the debug listener (`5353`), the origin boundary (`5354`), nor the
+container's controller port 443.
+
+Rootless Docker, Docker Desktop, daemon user-namespace remapping, SELinux
+enforcing hosts, and `arm64` are outside the first supported release. AppArmor
+on Debian or Ubuntu is the validated host MAC path. The worker startup probe is
+still authoritative: a platform that appears to meet the list but cannot
+create the exact bounded sibling hierarchy fails before DoT or the controller
+opens. A GitHub-hosted image build and static container smoke cannot prove this
+runtime property; the release gate includes a real Engine 28/cgroup-v2
+acceptance run on `test-env`.
+The driver verifies that its Git root and `HEAD` are the requested candidate
+and that every versioned installer-pin, Compose, seccomp, driver, and probe
+input is tracked and unchanged at that commit. Supplying a commit label to a
+copied or locally weakened harness is not acceptance evidence.
+
+Docker certificate bootstrap is Cloudflare DNS-01 only. It accepts the
+`cloudflare_api_token` Compose secret, keeps the generated Certbot credential
+file under `/run`, uses the single `<base>` lineage for `<base>` and
+`*.<base>`, and publishes the `dot` and `console` roles. `http-01`, `debug`,
+and any other `CERT_MODE` are rejected in the Docker path. The host installer
+continues to support its documented `cloudflare`, `http-01`, and `debug`
+modes.
+
+`/etc/5gpn/letsencrypt/.5gpn-docker-lineage-ready` is the mode-0600,
+`fivegpn`-owned first-lineage commit fence and binds the base domain. Before it
+exists, bootstrap may clean only marker-owned partial first-boot lineage files
+and never deletes ACME accounts. After it exists, a damaged current lineage is
+restored only from a previously validated complete generation or fails closed;
+it is never silently reset. Public-role generation collection first renames a
+candidate to `.delete.generation-*` in the same role directory and removes only
+that tombstone, so an interrupted deletion cannot make a live generation
+ambiguous.
+
 ## Listeners
 
 | Listener | Purpose |
@@ -202,7 +324,7 @@ and HTTPS probes rather than an in-process heartbeat.
 | `127.0.0.1:5354/udp` and `/tcp` | The origin boundary. mihomo's own resolver queries it after the sniffer recovers a hostname, and it answers a different question from the client listener — see below. Loopback is enforced at bind. |
 | `127.0.0.1:5353/udp` | Local debugging only. The bind is refused if it is not loopback: it answers the same policy without TLS or client identity, which on a public address is an open resolver. |
 | `127.0.0.1:443/tcp` | TLS-only external controller. Serves the Clash-compatible API, the `/5gpn/*` routes, `/capabilities`, and the zashboard bundle at `/ui/` — so the panel is `https://console.<base>/ui/`. Loopback, on :443, because that is the port a browser reaching the console name arrives on: the name resolves to `127.0.0.1` through the seed's `hosts` block, so the allow rule's DIRECT dial lands here, on this same process through a different listener. |
-| configured gateway addresses | HTTP/TLS ingress for traffic steered to the gateway, sniffed for Host or SNI. |
+| configured gateway addresses (host) or the Compose-published `0.0.0.0` tunnel sockets (Docker) | HTTP/TLS ingress for traffic steered to the gateway, sniffed for Host or SNI. Docker maps public `:443` to its tunnel's private `:9443` socket while retaining target port 443. |
 
 There is no public DoH listener and no client-facing plain DNS listener on `:53`.
 There is no separate console origin, no separate panel origin, and no interception
@@ -461,13 +583,17 @@ binding the operator reviewed.
 
 ### Certificate readiness
 
-The CA signing key remains outside mihomo. After an authorization changes the
-enabled capture-host union, mihomo atomically writes a versioned certificate
-request containing the target digest, a random attempt fence and the canonical
-host list. `5gpn-intercept-cert.path` starts the root oneshot, which signs only
-that request, rechecks the fence before every publication boundary, fsyncs the
-certificate and key, and commits a hash-bound ready or error result last. A
-stale A or B attempt can never overwrite a newer C request.
+After an authorization changes the enabled capture-host union, mihomo
+atomically writes a versioned certificate request containing the target digest,
+a random attempt fence and the canonical host list. On a host installation the
+CA signing key remains outside mihomo and `5gpn-intercept-cert.path` starts the
+root oneshot. In Docker the same long-running mihomo process notifies its
+certificate manager, which starts and waits for the fixed trusted
+`docker-intercept-cert.sh reconcile` helper; a startup scan and daily
+reconciliation cover notifications lost across a process exit. Both publishers
+sign only the current request, recheck the fence before every publication
+boundary, fsync the certificate and key, and commit a hash-bound ready or error
+result last. A stale A or B attempt can never overwrite a newer C request.
 
 The runtime treats the result as data, not as a second configuration document.
 It derives one immutable interception plan from the committed Config, the fixed
@@ -480,10 +606,12 @@ The same gate runs again for every ClientHello—including resumed TLS—and eve
 HTTP request on an existing connection. Session-ticket keys rotate with the
 certificate-plan generation.
 
-The certificate publisher has no network namespace, capability, controller
-credential or mihomo control call. A retry changes only the request attempt and
-does not change the interception revision. Runtime readiness is reconstructed
-from durable configuration and the committed certificate files on every process
+The host certificate publisher has no network namespace, capability,
+controller credential or mihomo control call. The Docker helper performs no
+network operation, but the single-container design does not give it a separate
+network or key namespace. A retry changes only the request attempt and does not
+change the interception revision. Runtime readiness is reconstructed from
+durable configuration and the committed certificate files on every process
 start; it is never repaired by rewriting operator state or restarting a
 subsystem.
 
@@ -705,6 +833,17 @@ monolith neither reads them nor receives write access to them.
 
 `config.yaml` remains fully operator-owned.
 
+The Docker deployment maps one local named volume at `/etc/5gpn`. That volume
+is the complete persistence boundary for the operator configuration, monolith
+documents, public certificate lineage and role copies, interception CA and leaf,
+and ownership markers. The image root is read-only; `/run/5gpn`, the secured
+bootstrap copy, `/tmp`, `/var/tmp`, and `/opt/5gpn/ui` are tmpfs. A fresh
+container copies the pinned Console into that empty UI tmpfs and may seed
+missing files, but must preserve
+and validate existing operator-owned files under the same atomic-publication
+rules. The fixed numeric `fivegpn` UID/GID is therefore part of the Docker
+volume ABI and may not drift between image tags.
+
 ## Operator TUI
 
 The terminal UI renders the facts for the selected tab into a complete cached
@@ -799,3 +938,19 @@ which are shell and must be run under Linux against an LF checkout.
 A real gateway is reachable as `test-env` over OpenSSH. Because it is a working
 gateway, configuration changes are validated against copies rather than in
 place.
+
+Docker has an additional manual release gate. GitHub-hosted CI may prepare the
+digest-pinned components, build the `linux/amd64` image, inspect its static
+contents, and exercise commands that do not start the gateway. It must not
+claim that this proves cgroup isolation. Before publication, the exact candidate
+is exercised on `test-env` with rootful Docker Engine 28, cgroup v2 and the
+systemd cgroup driver. The acceptance contract verifies the real startup probe,
+an extension worker operation, worker OOM containment, authenticated
+capabilities, certificate hot publication, container recreation, and named-volume
+persistence. Publication additionally fails closed unless repository variables
+`FIVEGPN_CONTAINER_ACCEPTED_COMMIT` and
+`FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256` match the exact tag commit and its
+current `install.sh` pin, and `FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` matches the
+reproducibly rebuilt candidate image content digest. Those variables are
+updated only after that exact candidate passes on `test-env`. No GitHub-hosted
+fallback may turn a missing or stale real-host result into a pass.

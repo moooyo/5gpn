@@ -104,8 +104,10 @@ fi
 
 if grep -Fq 'README.en.md' "$RELEASE" \
    && grep -Fq 'docs/architecture.md' "$RELEASE" \
+   && grep -Fq 'docs/docker.md' "$RELEASE" \
    && grep -Fq 'docs/native-extensions.md' "$RELEASE" \
    && grep -Fq 'docs/pre-v5-upgrade.md' "$RELEASE" \
+   && grep -Fq 'tests/container-acceptance.sh' "$RELEASE" \
    && grep -Fq 'tests/integration-smoke.md' "$RELEASE"; then
     pass "installer bundle retains both README languages and linked operator runbooks"
 else

@@ -2,7 +2,8 @@ name: Release
 
 # Official tags are X.Y.Z and must be reachable from main. Beta tags are
 # X.Y.Z-beta.N and must be reachable from beta. Both channels run the same
-# checks.yml gate and publish assets built from the exact tagged commit.
+# checks.yml gate, publish the exact three GitHub assets, and publish the
+# matching linux/amd64 GHCR image from the exact tagged commit.
 on:
   push:
     tags:
@@ -11,9 +12,10 @@ on:
 permissions:
   contents: read
 
-# Duplicate deliveries of one tag must not both pass the no-existing-release
-# check. Different tags validate independently; the publication job has a
-# separate fixed mutex and chooses latest while publishing the immutable draft.
+# Duplicate deliveries of one tag serialize here. A retry may reuse only the
+# byte-identical exact OCI image and matching draft/immutable release; any
+# content or label drift fails closed. Different tags validate independently,
+# while the publication job has a separate fixed mutex.
 concurrency:
   group: 5gpn-release-${{ github.ref }}
   cancel-in-progress: false
@@ -23,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       channel: ${{ steps.release.outputs.channel }}
+      required_branch: ${{ steps.release.outputs.required_branch }}
       prerelease: ${{ steps.release.outputs.prerelease }}
       make_latest: ${{ steps.release.outputs.make_latest }}
     steps:
@@ -106,6 +109,7 @@ jobs:
 
           {
             echo "channel=$channel"
+            echo "required_branch=$required_branch"
             echo "prerelease=$prerelease"
             echo "make_latest=$make_latest"
           } >> "$GITHUB_OUTPUT"
@@ -122,6 +126,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: write
+      packages: write
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
@@ -130,14 +135,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_CHANNEL: ${{ needs.classify.outputs.channel }}
+          REQUIRED_BRANCH: ${{ needs.classify.outputs.required_branch }}
         run: |
           set -euo pipefail
           git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
           git fetch --force --tags origin
+          git fetch --force origin \
+            "+refs/heads/${REQUIRED_BRANCH}:refs/remotes/origin/${REQUIRED_BRANCH}"
           tagged_commit="$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}")"
           event_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
           [[ "$tagged_commit" == "$event_commit" ]] \
             || { echo "Tag moved after validation: $tagged_commit != $event_commit" >&2; exit 1; }
+          git merge-base --is-ancestor "$tagged_commit" \
+            "refs/remotes/origin/${REQUIRED_BRANCH}" \
+            || { echo "Tag is no longer reachable from ${REQUIRED_BRANCH}." >&2; exit 1; }
           if [[ "$RELEASE_CHANNEL" == stable ]]; then
             decimal_gt() {
               local left="$1" right="$2"
@@ -166,18 +177,38 @@ jobs:
             done < <(git tag --list)
           fi
 
-      # No toolchain is set up here any more. This repository builds nothing:
-      # the daemon and the control-console SPA it used to compile were deleted
-      # with the three-process layout. The sole long-running executable and the
-      # static zashboard bundle are released from their own repositories under
-      # their own digest pins. What ships from here is the installer bundle and
-      # the digest that binds it.
+      - name: Require exact test-env container acceptance
+        shell: bash
+        env:
+          ACCEPTED_COMMIT: ${{ vars.FIVEGPN_CONTAINER_ACCEPTED_COMMIT }}
+          ACCEPTED_MIHOMO_SHA256: ${{ vars.FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256 }}
+          ACCEPTED_IMAGE_ID: ${{ vars.FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID }}
+        run: |
+          set -euo pipefail
+          pinned_sha="$(sed -n 's/^MIHOMO_SHA256="\([0-9a-f]*\)".*/\1/p' install.sh)"
+          event_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          [[ "$pinned_sha" =~ ^[0-9a-f]{64}$ \
+             && "$(grep -c '^MIHOMO_SHA256=' install.sh)" == 1 ]] \
+            || { echo "install.sh does not contain one exact mihomo digest." >&2; exit 1; }
+          [[ "$ACCEPTED_COMMIT" == "$event_commit" ]] \
+            || { echo "test-env has not accepted exact commit $event_commit." >&2; exit 1; }
+          [[ "$ACCEPTED_MIHOMO_SHA256" == "$pinned_sha" ]] \
+            || { echo "test-env acceptance does not bind pinned mihomo $pinned_sha." >&2; exit 1; }
+          [[ "$ACCEPTED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || { echo "test-env acceptance has no exact candidate image ID." >&2; exit 1; }
 
-      # The bundle contains every first-party installer input and is stamped to
-      # this exact tag. The quick installer never falls back to branch content.
+      # No Go or Node toolchain is set up here. The runtime and Console are
+      # built in their own repositories; this job packages installer inputs and
+      # assembles their already-published, digest-pinned artifacts into OCI.
+
+      # The bundle contains every first-party host-installer input plus the
+      # Docker launch files, their runbook, and the versioned test-env acceptance
+      # driver/probes, and is stamped to this exact tag. The quick installer never
+      # falls back to branch content.
       - name: Package installer bundle
         run: |
           set -euo pipefail
+          umask 0022
           stage="installer-bundle"
           [[ ! -e "$stage" ]] \
             || { echo "Refusing to reuse existing bundle stage: $stage" >&2; exit 1; }
@@ -194,6 +225,9 @@ jobs:
             README.en.md
             LICENSE
             THIRD_PARTY_NOTICES.md
+            compose.yaml
+            docker/seccomp-5gpn.json
+            docker/bootstrap/config.env.example
             etc/5gpn/dns.env.example
             etc/mihomo/config.yaml.tmpl
             etc/systemd/5gpn-intercept-cert.path
@@ -210,8 +244,14 @@ jobs:
             scripts/migrate-state-to-monolith.sh
             scripts/migrate-to-monolith.sh
             docs/architecture.md
+            docs/docker.md
             docs/native-extensions.md
             docs/pre-v5-upgrade.md
+            tests/container-acceptance.sh
+            tests/docker/probe-lib.sh
+            tests/docker/extension-worker-probe.sh
+            tests/docker/public-certificate-hot-reload.sh
+            tests/docker/recreate-container.sh
             tests/integration-smoke.md
           )
           executable_files=(
@@ -224,6 +264,9 @@ jobs:
             scripts/migrate-panel-to-console.sh
             scripts/migrate-state-to-monolith.sh
             scripts/migrate-to-monolith.sh
+            tests/container-acceptance.sh
+            tests/docker/extension-worker-probe.sh
+            tests/docker/recreate-container.sh
           )
 
           mkdir -p "$stage"
@@ -244,7 +287,9 @@ jobs:
           find "$stage" -type f -printf '%P\n' | LC_ALL=C sort > "$actual_manifest"
           diff -u "$expected_manifest" "$actual_manifest"
 
-          tar czf 5gpn-installer.tar.gz -C "$stage" .
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+            --format=gnu -cf - -C "$stage" . \
+            | gzip -n > 5gpn-installer.tar.gz
 
           # Re-read the completed archive rather than trusting only the stage.
           # This closes the gap where a later packaging command could add or
@@ -262,6 +307,87 @@ jobs:
 
           sha256sum 5gpn-installer.tar.gz > checksums.txt
 
+      # The OCI image is a registry artifact, never a fourth GitHub Release
+      # asset. Component preparation reads the tagged install.sh rather than a
+      # parallel Docker lock file and verifies both upstream digests before the
+      # Docker build can see either artifact.
+      - name: Prepare digest-pinned Docker components
+        run: |
+          set -euo pipefail
+          bash docker/prepare-components.sh
+          grep -Fxq 'MIHOMO_SOURCE=pinned-release' docker/build/components/manifest.env
+          grep -Fxq 'MIHOMO_CONTAINER_CONTRACT=5gpn-container-runtime-v1' \
+            docker/build/components/manifest.env
+
+      - name: Start pinned reproducible BuildKit builder
+        run: |
+          set -euo pipefail
+          docker buildx create \
+            --name 5gpn-release-builder \
+            --driver docker-container \
+            --driver-opt 'image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8' \
+            --use
+          docker buildx inspect --bootstrap 5gpn-release-builder
+
+      - name: Build exact-tag Linux amd64 image
+        shell: bash
+        env:
+          CANDIDATE_IMAGE: 5gpn-release-candidate:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          source_epoch="$(git show -s --format=%ct "${GITHUB_SHA}^{commit}")"
+          event_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          [[ "$source_epoch" =~ ^[1-9][0-9]*$ ]]
+          context_inputs=(
+            Dockerfile
+            .dockerignore
+            LICENSE
+            THIRD_PARTY_NOTICES.md
+            docker/entrypoint.sh
+            docker/docker-public-cert.sh
+            docker/docker-intercept-cert.sh
+            docker/build
+            etc/mihomo/config.yaml.tmpl
+            scripts/gen-ios-profile.sh
+          )
+          for input in "${context_inputs[@]}"; do
+            find "$input" -exec touch -h -d "@${source_epoch}" {} +
+          done
+          label_args=()
+          while IFS= read -r label; do
+            [[ "$label" == *=* ]] || { echo "Malformed component label: $label" >&2; exit 1; }
+            label_args+=(--label "$label")
+          done < <(bash docker/prepare-components.sh --print-labels)
+          ((${#label_args[@]} == 20)) \
+            || { echo "Expected ten component labels." >&2; exit 1; }
+          candidate_archive="$RUNNER_TEMP/5gpn-release-candidate.tar"
+          docker buildx build --builder 5gpn-release-builder \
+            --platform linux/amd64 \
+            --build-arg "VCS_REF=${event_commit}" \
+            --build-arg "VERSION=${GITHUB_REF_NAME}" \
+            --build-arg "SOURCE_DATE_EPOCH=${source_epoch}" \
+            "${label_args[@]}" \
+            --tag "$CANDIDATE_IMAGE" \
+            --output "type=docker,dest=${candidate_archive},rewrite-timestamp=true" \
+            .
+          docker load --input "$candidate_archive"
+          docker buildx rm 5gpn-release-builder
+          [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$CANDIDATE_IMAGE")" \
+             == linux/amd64 ]]
+          docker run --rm --entrypoint /bin/cat "$CANDIDATE_IMAGE" \
+            /usr/share/5gpn/components.env > "$RUNNER_TEMP/release-image-components.env"
+          diff -u docker/build/components/manifest.env "$RUNNER_TEMP/release-image-components.env"
+
+      - name: Bind candidate image to test-env acceptance
+        env:
+          CANDIDATE_IMAGE: 5gpn-release-candidate:${{ github.sha }}
+          ACCEPTED_IMAGE_ID: ${{ vars.FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID }}
+        run: |
+          set -euo pipefail
+          candidate_id="$(docker image inspect --format '{{.Id}}' "$CANDIDATE_IMAGE")"
+          [[ "$candidate_id" == "$ACCEPTED_IMAGE_ID" ]] \
+            || { echo "Candidate image ID differs from the exact test-env result." >&2; exit 1; }
+
       - name: Collect exact release assets
         run: |
           mkdir release-assets
@@ -270,41 +396,207 @@ jobs:
       - name: Revalidate release identity immediately before publish
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          REQUIRED_BRANCH: ${{ needs.classify.outputs.required_branch }}
         run: |
           set -euo pipefail
           git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          git fetch --force origin \
+            "+refs/heads/${REQUIRED_BRANCH}:refs/remotes/origin/${REQUIRED_BRANCH}"
           tagged_commit="$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}")"
           event_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
           [[ "$tagged_commit" == "$event_commit" ]] \
             || { echo "Tag moved before publication: $tagged_commit != $event_commit" >&2; exit 1; }
+          git merge-base --is-ancestor "$tagged_commit" \
+            "refs/remotes/origin/${REQUIRED_BRANCH}" \
+            || { echo "Tag is no longer reachable from ${REQUIRED_BRANCH}." >&2; exit 1; }
+
+      - name: Authenticate to GHCR and bind the exact image identity
+        id: image_identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ghcr.io/moooyo/5gpn:${{ github.ref_name }}
+          CANDIDATE_IMAGE: 5gpn-release-candidate:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin
+          candidate_id="$(docker image inspect --format '{{.Id}}' "$CANDIDATE_IMAGE")"
+          candidate_labels="$(docker image inspect "$CANDIDATE_IMAGE" \
+            | jq -S -c '.[0].Config.Labels')"
+          reuse=false
+          manifest_error="$RUNNER_TEMP/exact-image-manifest-error.txt"
+          remote_manifest="$RUNNER_TEMP/exact-image-manifest.json"
+          if docker manifest inspect "$IMAGE" >"$remote_manifest" 2>"$manifest_error"; then
+            jq -e '
+              (.mediaType == "application/vnd.oci.image.manifest.v1+json" or
+               .mediaType == "application/vnd.docker.distribution.manifest.v2+json") and
+              (has("manifests") | not) and
+              has("config") and has("layers")
+            ' "$remote_manifest" >/dev/null \
+              || { echo "Exact OCI tag must be one image manifest, not an index." >&2; exit 1; }
+            docker pull "$IMAGE" >/dev/null
+            [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")" \
+               == linux/amd64 ]] \
+              || { echo "Existing exact OCI tag is not linux/amd64." >&2; exit 1; }
+            remote_id="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
+            remote_labels="$(docker image inspect "$IMAGE" \
+              | jq -S -c '.[0].Config.Labels')"
+            [[ "$remote_id" == "$candidate_id" && "$remote_labels" == "$candidate_labels" ]] \
+              || { echo "OCI tag exists with different content or labels: $IMAGE" >&2; exit 1; }
+            reuse=true
+          elif grep -Eiq '(^no such manifest:|manifest unknown|MANIFEST_UNKNOWN)' "$manifest_error"; then
+            docker tag "$CANDIDATE_IMAGE" "$IMAGE"
+          else
+            cat "$manifest_error" >&2
+            echo "Could not determine whether exact OCI tag exists; refusing to push." >&2
+            exit 1
+          fi
+          echo "reuse=$reuse" >> "$GITHUB_OUTPUT"
+
+      - name: Publish or reuse exact-tag OCI image
+        id: image_publish
+        shell: bash
+        env:
+          IMAGE: ghcr.io/moooyo/5gpn:${{ github.ref_name }}
+          CANDIDATE_IMAGE: 5gpn-release-candidate:${{ github.sha }}
+          REUSE_IMAGE: ${{ steps.image_identity.outputs.reuse }}
+        run: |
+          set -euo pipefail
+          if [[ "$REUSE_IMAGE" == false ]]; then
+            docker push "$IMAGE"
+          elif [[ "$REUSE_IMAGE" != true ]]; then
+            echo "Invalid exact-image reuse state: $REUSE_IMAGE" >&2
+            exit 1
+          fi
+          published_manifest="$RUNNER_TEMP/published-image-manifest.json"
+          docker manifest inspect "$IMAGE" > "$published_manifest"
+          jq -e '
+            (.mediaType == "application/vnd.oci.image.manifest.v1+json" or
+             .mediaType == "application/vnd.docker.distribution.manifest.v2+json") and
+            (has("manifests") | not) and
+            has("config") and has("layers")
+          ' "$published_manifest" >/dev/null \
+            || { echo "Published exact OCI tag is not one linux/amd64 image manifest." >&2; exit 1; }
+          docker pull "$IMAGE" >/dev/null
+          [[ "$(docker image inspect --format '{{.Id}}' "$IMAGE")" \
+             == "$(docker image inspect --format '{{.Id}}' "$CANDIDATE_IMAGE")" ]] \
+            || { echo "Published exact image does not match the candidate." >&2; exit 1; }
+          image_inspect="$(docker buildx imagetools inspect "$IMAGE")"
+          digest="$(sed -n 's/^Digest:[[:space:]]*//p' <<<"$image_inspect" | head -1)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || { echo "Could not resolve exact OCI digest for $IMAGE." >&2; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Create or reuse release draft and upload exact assets
+        id: release_draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PRERELEASE: ${{ needs.classify.outputs.prerelease }}
+          IMAGE: ghcr.io/moooyo/5gpn:${{ github.ref_name }}
+          IMAGE_DIGEST: ${{ steps.image_publish.outputs.digest }}
+        run: |
+          set -euo pipefail
           api_url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}"
-          if ! release_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+          response="$RUNNER_TEMP/existing-release.json"
+          if ! status="$(curl -sS -o "$response" -w '%{http_code}' \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H 'Accept: application/vnd.github+json' \
             -H 'X-GitHub-Api-Version: 2022-11-28' \
             "$api_url")"; then
-            echo "Could not verify whether release $GITHUB_REF_NAME already exists." >&2
+            echo "Could not inspect release $GITHUB_REF_NAME." >&2
             exit 1
           fi
-          case "$release_status" in
-            404) ;;
-            200) echo "Release $GITHUB_REF_NAME already exists; refusing to overwrite it." >&2; exit 1 ;;
-            *) echo "Release existence check returned HTTP $release_status." >&2; exit 1 ;;
+          image_ref="${IMAGE}@${IMAGE_DIGEST}"
+          target_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          published=false
+          case "$status" in
+            404)
+              release_json="$(gh api --method POST \
+                "repos/${GITHUB_REPOSITORY}/releases" \
+                -f tag_name="$GITHUB_REF_NAME" \
+                -f target_commitish="$target_commit" \
+                -F draft=true \
+                -F prerelease="$RELEASE_PRERELEASE" \
+                -F generate_release_notes=true \
+                -f make_latest=false \
+                -f body="OCI image: ${image_ref}")"
+              ;;
+            200)
+              release_json="$(<"$response")"
+              jq -e --arg tag "$GITHUB_REF_NAME" \
+                    --arg image "$image_ref" \
+                    --argjson prerelease "$RELEASE_PRERELEASE" '
+                    .tag_name == $tag and
+                    .prerelease == $prerelease and
+                    ((.body // "") | split("\n") |
+                      map(select(startswith("OCI image: ")))) ==
+                      [("OCI image: " + $image)]
+                  ' <<<"$release_json" >/dev/null \
+                || { echo "Existing release does not match this exact image." >&2; exit 1; }
+              if jq -e '.draft == false and .immutable == true' <<<"$release_json" >/dev/null; then
+                published=true
+              else
+                jq -e '.draft == true' <<<"$release_json" >/dev/null \
+                  || { echo "Existing release is neither a reusable draft nor immutable." >&2; exit 1; }
+              fi
+              ;;
+            *) echo "Release existence check returned HTTP $status." >&2; exit 1 ;;
           esac
-
-      - name: Create release draft and upload assets
-        id: release_draft
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
-        with:
-          tag_name: ${{ github.ref_name }}
-          generate_release_notes: true
-          draft: true
-          prerelease: ${{ needs.classify.outputs.prerelease }}
-          # The final PATCH below chooses latest while publishing the draft.
-          make_latest: false
-          fail_on_unmatched_files: true
-          files: release-assets/*
+          release_id="$(jq -r '.id' <<<"$release_json")"
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+          if [[ "$published" == false ]]; then
+            gh release upload "$GITHUB_REF_NAME" \
+              release-assets/5gpn-installer.tar.gz \
+              release-assets/checksums.txt \
+              release-assets/THIRD_PARTY_NOTICES.md \
+              --clobber
+          fi
+          verified_release="$RUNNER_TEMP/verified-release.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "$verified_release"
+          jq -e --arg tag "$GITHUB_REF_NAME" \
+                --arg image "$image_ref" \
+                --argjson prerelease "$RELEASE_PRERELEASE" '
+                .tag_name == $tag and
+                .prerelease == $prerelease and
+                ((.body // "") | split("\n") |
+                  map(select(startswith("OCI image: ")))) ==
+                  [("OCI image: " + $image)] and
+                ([.assets[].name] | sort) == [
+                  "5gpn-installer.tar.gz",
+                  "THIRD_PARTY_NOTICES.md",
+                  "checksums.txt"
+                ]
+              ' "$verified_release" >/dev/null
+          remote_assets="$RUNNER_TEMP/verified-release-assets"
+          mkdir "$remote_assets"
+          for asset in 5gpn-installer.tar.gz checksums.txt THIRD_PARTY_NOTICES.md; do
+            asset_id="$(jq -r --arg name "$asset" '
+              [.assets[] | select(.name == $name)] |
+              if length == 1 then .[0].id else empty end
+            ' "$verified_release")"
+            declared_size="$(jq -r --arg name "$asset" '
+              [.assets[] | select(.name == $name)][0].size
+            ' "$verified_release")"
+            [[ "$asset_id" =~ ^[1-9][0-9]*$ && "$declared_size" =~ ^[0-9]+$ ]]
+            gh api --method GET \
+              -H 'Accept: application/octet-stream' \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
+              > "$remote_assets/$asset"
+            local_size="$(stat -c %s "release-assets/$asset")"
+            remote_size="$(stat -c %s "$remote_assets/$asset")"
+            local_sha="$(sha256sum "release-assets/$asset" | awk '{print $1}')"
+            remote_sha="$(sha256sum "$remote_assets/$asset" | awk '{print $1}')"
+            [[ "$declared_size" == "$local_size" \
+               && "$remote_size" == "$local_size" \
+               && "$remote_sha" == "$local_sha" ]] \
+              || { echo "Remote release asset differs from local bytes: $asset" >&2; exit 1; }
+          done
+          {
+            echo "id=$release_id"
+            echo "published=$published"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Publish and verify immutable release
         shell: bash
@@ -313,24 +605,92 @@ jobs:
           RELEASE_PRERELEASE: ${{ needs.classify.outputs.prerelease }}
           RELEASE_MAKE_LATEST: ${{ needs.classify.outputs.make_latest }}
           RELEASE_ID: ${{ steps.release_draft.outputs.id }}
+          RELEASE_ALREADY_PUBLISHED: ${{ steps.release_draft.outputs.published }}
+          IMAGE: ghcr.io/moooyo/5gpn:${{ github.ref_name }}
+          IMAGE_DIGEST: ${{ steps.image_publish.outputs.digest }}
         run: |
           set -euo pipefail
           [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
-          gh api --method PATCH \
-            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
-            -F draft=false \
-            -F prerelease="$RELEASE_PRERELEASE" \
-            -f make_latest="$RELEASE_MAKE_LATEST" >/dev/null
+          assert_exact_image_digest() {
+            local inspect digest
+            inspect="$(docker buildx imagetools inspect "$IMAGE")"
+            digest="$(sed -n 's/^Digest:[[:space:]]*//p' <<<"$inspect" | head -1)"
+            [[ "$digest" == "$IMAGE_DIGEST" ]] \
+              || { echo "Exact OCI tag moved during publication." >&2; return 1; }
+          }
+          assert_exact_image_digest
+          if [[ "$RELEASE_ALREADY_PUBLISHED" == false ]]; then
+            gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+              -F draft=false \
+              -F prerelease="$RELEASE_PRERELEASE" \
+              -f make_latest="$RELEASE_MAKE_LATEST" >/dev/null
+          elif [[ "$RELEASE_ALREADY_PUBLISHED" != true ]]; then
+            echo "Invalid release reuse state: $RELEASE_ALREADY_PUBLISHED" >&2
+            exit 1
+          fi
           gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
             | jq -e --arg tag "$GITHUB_REF_NAME" \
+                --arg image "${IMAGE}@${IMAGE_DIGEST}" \
                 --argjson prerelease "$RELEASE_PRERELEASE" '
                 .tag_name == $tag and
                 .draft == false and
                 .prerelease == $prerelease and
                 .immutable == true and
+                ((.body // "") | split("\n") |
+                  map(select(startswith("OCI image: ")))) ==
+                  [("OCI image: " + $image)] and
                 ([.assets[].name] | sort) == [
                   "5gpn-installer.tar.gz",
                   "THIRD_PARTY_NOTICES.md",
                   "checksums.txt"
                 ]
               ' >/dev/null
+          assert_exact_image_digest
+          latest_json="$RUNNER_TEMP/github-latest-release.json"
+          latest_status="$(curl -sS -o "$latest_json" -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/latest")"
+          if [[ "$RELEASE_MAKE_LATEST" == true ]]; then
+            [[ "$latest_status" == 200 \
+               && "$(jq -r '.id' "$latest_json")" == "$RELEASE_ID" ]] \
+              || { echo "Stable release did not become GitHub latest." >&2; exit 1; }
+          elif [[ "$RELEASE_MAKE_LATEST" == false ]]; then
+            if [[ "$latest_status" == 200 \
+               && "$(jq -r '.id' "$latest_json")" == "$RELEASE_ID" ]]; then
+              echo "Beta release must not become GitHub latest." >&2
+              exit 1
+            fi
+            [[ "$latest_status" == 200 || "$latest_status" == 404 ]] \
+              || { echo "GitHub latest verification returned HTTP $latest_status." >&2; exit 1; }
+          else
+            echo "Invalid GitHub latest policy: $RELEASE_MAKE_LATEST" >&2
+            exit 1
+          fi
+
+      - name: Advance stable GHCR latest after immutable release
+        shell: bash
+        env:
+          IMAGE: ghcr.io/moooyo/5gpn:${{ github.ref_name }}
+          IMAGE_DIGEST: ${{ steps.image_publish.outputs.digest }}
+          RELEASE_CHANNEL: ${{ needs.classify.outputs.channel }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_CHANNEL" == stable ]]; then
+            latest=ghcr.io/moooyo/5gpn:latest
+            docker buildx imagetools create --prefer-index=false \
+              --tag "$latest" "${IMAGE}@${IMAGE_DIGEST}"
+            latest_inspect="$(docker buildx imagetools inspect "$latest")"
+            latest_digest="$(sed -n 's/^Digest:[[:space:]]*//p' <<<"$latest_inspect" | head -1)"
+            [[ "$latest_digest" == "$IMAGE_DIGEST" ]] \
+              || { echo "GHCR latest does not resolve to the immutable release image." >&2; exit 1; }
+          elif [[ "$RELEASE_CHANNEL" != beta ]]; then
+            echo "Unknown release channel: $RELEASE_CHANNEL" >&2
+            exit 1
+          fi
+
+      - name: Remove registry credential
+        if: always()
+        run: docker logout ghcr.io || true

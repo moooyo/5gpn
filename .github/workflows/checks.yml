@@ -20,7 +20,8 @@ jobs:
       - name: bash -n syntax gate
         run: |
           set -euo pipefail
-          for s in install.sh quick-install.sh scripts/*.sh; do
+          for s in install.sh quick-install.sh scripts/*.sh docker/*.sh \
+                   tests/container-acceptance.sh tests/docker/*.sh; do
             echo "--- bash -n $s ---"; bash -n "$s"
           done
       - name: Shell policy tests
@@ -34,9 +35,9 @@ jobs:
   # SPA this repository used to build were deleted with the three-process layout;
   # the Go that replaced them lives in the mihomo fork and the UI in the
   # zashboard fork, each gated by its own CI before it is ever released. What is
-  # left in this repository is shell, so the shell gate above and the two gates
-  # below -- which validate the pinned artifacts and the seed they have to
-  # accept -- are the whole check surface.
+  # remains here is shell plus Docker assembly, so the shell, pinned-artifact,
+  # image-build, manifest-corpus, and seed-parser jobs below are the complete
+  # hosted check surface. Real cgroup behavior remains on test-env.
 
   # Validate the committed seed and the optional ingress-module candidate with
   # the exact pinned data-plane binary. The digest prevents a mutable upstream
@@ -58,6 +59,66 @@ jobs:
       # an artifact cannot be fetched.
       - name: Verify pinned artifacts against their published releases
         run: bash tests/verify-artifact-pins.sh
+
+  # Build the real image context only after the independent pin-verification
+  # job succeeds. Component preparation reads MIHOMO_* and ZASH_* exclusively
+  # from install.sh, verifies those digests, and leaves a manifest that is also
+  # copied into the image. Nothing here starts the gateway: a GitHub-hosted
+  # runner cannot prove writable cgroup-v2 delegation or clone3-into-cgroup.
+  # The authoritative runtime gate is tests/container-acceptance.sh on test-env.
+  docker-image:
+    needs: artifact-pins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Prepare digest-pinned Docker components
+        run: |
+          set -euo pipefail
+          bash docker/prepare-components.sh
+          grep -Fxq 'MIHOMO_SOURCE=pinned-release' docker/build/components/manifest.env
+          grep -Fxq 'MIHOMO_CONTAINER_CONTRACT=5gpn-container-runtime-v1' \
+            docker/build/components/manifest.env
+      - name: Build the Linux amd64 image
+        shell: bash
+        run: |
+          set -euo pipefail
+          label_args=()
+          while IFS= read -r label; do
+            [[ "$label" == *=* ]] || { echo "Malformed component label: $label" >&2; exit 1; }
+            label_args+=(--label "$label")
+          done < <(bash docker/prepare-components.sh --print-labels)
+          ((${#label_args[@]} == 20)) \
+            || { echo "Expected ten component labels." >&2; exit 1; }
+          docker build --platform linux/amd64 \
+            --build-arg "VCS_REF=${GITHUB_SHA}" \
+            --build-arg "VERSION=ci-${GITHUB_SHA}" \
+            "${label_args[@]}" \
+            --tag 5gpn:ci .
+      - name: Inspect image without starting the gateway
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(docker image inspect --format '{{.Architecture}}' 5gpn:ci)" == amd64 ]]
+          docker image inspect 5gpn:ci \
+            | jq -e '.[0].Config.User == "10001:10001" and
+                     .[0].Config.Entrypoint == ["/opt/5gpn/bin/docker-entrypoint.sh"] and
+                     (.[0].Config.Env | any(. == "FIVEGPN_RUNTIME=container"))' >/dev/null
+          docker run --rm --entrypoint /bin/sh 5gpn:ci -ec '
+            test "$(id -u):$(id -g)" = 10001:10001
+            test -x /opt/5gpn/bin/5gpn-mihomo
+            test -x /opt/5gpn/bin/docker-entrypoint.sh
+            test -x /opt/5gpn/scripts/docker-public-cert.sh
+            test -x /opt/5gpn/scripts/docker-intercept-cert.sh
+            test -f /usr/share/5gpn/ui/index.html
+            test -f /usr/share/5gpn/components.env
+            test -f /usr/share/doc/5gpn/LICENSE
+            test -f /usr/share/doc/5gpn/THIRD_PARTY_NOTICES.md
+          '
+          docker run --rm --entrypoint /bin/cat 5gpn:ci \
+            /usr/share/5gpn/components.env > "$RUNNER_TEMP/image-components.env"
+          diff -u docker/build/components/manifest.env "$RUNNER_TEMP/image-components.env"
+          # This is intentionally the end of hosted-runner coverage. Do not add
+          # a privileged/unconfined start here and call it an isolation test.
 
   # The manifests maintained in the separate first-party repository are an
   # input contract of the exact core this installer ships. Pin both sides so a

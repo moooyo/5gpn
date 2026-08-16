@@ -63,6 +63,9 @@ expected_bundle=(
     README.en.md
     LICENSE
     THIRD_PARTY_NOTICES.md
+    compose.yaml
+    docker/seccomp-5gpn.json
+    docker/bootstrap/config.env.example
     etc/5gpn/dns.env.example
     etc/mihomo/config.yaml.tmpl
     etc/systemd/5gpn-intercept-cert.path
@@ -77,8 +80,14 @@ expected_bundle=(
     scripts/migrate-state-to-monolith.sh
     scripts/migrate-to-monolith.sh
     docs/architecture.md
+    docs/docker.md
     docs/native-extensions.md
     docs/pre-v5-upgrade.md
+    tests/container-acceptance.sh
+    tests/docker/probe-lib.sh
+    tests/docker/extension-worker-probe.sh
+    tests/docker/public-certificate-hot-reload.sh
+    tests/docker/recreate-container.sh
     tests/integration-smoke.md
 )
 expected_executables=(
@@ -91,6 +100,9 @@ expected_executables=(
     scripts/migrate-panel-to-console.sh
     scripts/migrate-state-to-monolith.sh
     scripts/migrate-to-monolith.sh
+    tests/container-acceptance.sh
+    tests/docker/extension-worker-probe.sh
+    tests/docker/recreate-container.sh
 )
 expected_installed_scripts=(
     cert-renew.sh
@@ -199,6 +211,14 @@ else
     fail "release packaging does not verify the completed archive"
 fi
 
+if grep -Fq -- "--sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner" <<<"$package_step" \
+   && grep -Fq -- '--format=gnu -cf - -C "$stage" .' <<<"$package_step" \
+   && grep -Fq 'gzip -n > 5gpn-installer.tar.gz' <<<"$package_step"; then
+    pass "installer archive bytes are reproducible across publication retries"
+else
+    fail "installer archive retains wall-clock or host ownership nondeterminism"
+fi
+
 prepare_package_workspace() { # prepare_package_workspace <directory>
     local workspace="$1" file
     mkdir -p "$workspace"
@@ -246,10 +266,11 @@ mapfile -t published_files < <(
     find "$PUBLISHED_ROOT" -type f -printf '%P\n' | LC_ALL=C sort
 )
 compare_exact_list "published installer archive manifest" expected_bundle published_files
-if ((${#published_files[@]} == 23)); then
-    pass "published installer archive contains exactly 23 files"
+expected_bundle_count="${#expected_bundle[@]}"
+if ((${#published_files[@]} == expected_bundle_count)); then
+    pass "published installer archive contains exactly $expected_bundle_count files"
 else
-    fail "published installer archive contains ${#published_files[@]} files instead of 23"
+    fail "published installer archive contains ${#published_files[@]} files instead of $expected_bundle_count"
 fi
 
 declare -A executable_lookup=()
@@ -269,9 +290,12 @@ for file in "${published_files[@]}"; do
         [[ "$mode" == 644 ]] || mode_failures+=("$file=$mode (expected 644)")
     fi
 done
-if ((executable_count == 9 && nonexecutable_count == 14 \
+expected_executable_count="${#expected_executables[@]}"
+expected_nonexecutable_count=$((expected_bundle_count - expected_executable_count))
+if ((executable_count == expected_executable_count \
+      && nonexecutable_count == expected_nonexecutable_count \
       && ${#mode_failures[@]} == 0)); then
-    pass "published modes are exactly nine 0755 files and fourteen 0644 files"
+    pass "published modes are exactly $expected_executable_count 0755 files and $expected_nonexecutable_count 0644 files"
 else
     fail "published archive modes differ from the approved policy: ${mode_failures[*]-}"
 fi

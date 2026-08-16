@@ -1,0 +1,24 @@
+# The Docker build consumes only the immutable runtime inputs below. Product
+# components are downloaded and digest-checked by docker/prepare-components.sh
+# before `docker build`; the Dockerfile never downloads GitHub release assets.
+**
+!Dockerfile
+!.dockerignore
+!LICENSE
+!THIRD_PARTY_NOTICES.md
+!docker/
+!docker/entrypoint.sh
+!docker/docker-public-cert.sh
+!docker/docker-intercept-cert.sh
+!docker/build/
+!docker/build/components/
+!docker/build/components/**
+!etc/
+!etc/mihomo/
+!etc/mihomo/config.yaml.tmpl
+!scripts/
+!scripts/gen-ios-profile.sh
+
+# Never let local bootstrap material enter an image build context.
+docker/bootstrap/config.env
+docker/bootstrap/cloudflare_api_token

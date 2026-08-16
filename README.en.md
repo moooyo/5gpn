@@ -19,8 +19,9 @@ long-running process:
 - The `moooyo/mihomo` fork is the entire runtime: DoT DNS policy, forwarding,
   native-extension interception, Telegram, and the authenticated controller.
 - zashboard is the static Console mihomo serves at `https://console.<base>/ui/`.
-- This repository contains only the installer and operator TUI. It installs
-  digest-pinned mihomo and zashboard release artifacts.
+- This repository contains the host installer/operator TUI and Docker image
+  assembly, but no runtime or Console source. Both delivery paths consume the
+  same digest-pinned mihomo and zashboard release artifacts.
 
 It is not a VPN, full tunnel, or default router. It includes no proxy nodes and does not install or manage TUN, TProxy, WireGuard, NAT, fwmarks, policy routing, or a host firewall. The only client DNS ingress is DoT on `:853`; there is no public DoH or client-facing plain DNS on `:53`.
 
@@ -81,7 +82,14 @@ When both the MITM master and an extension are enabled and active, the capture-h
 
 Before you start, provide:
 
-- A Linux amd64 gateway with kernel 5.7 or newer, systemd 257 or newer, a pure cgroup v2 hierarchy with the memory and pids controllers available, and root access. The installer checks this isolation baseline before project publication. It directly supports distributions using apt or dnf/yum; other distributions are attempted only when one of those package managers is detected.
+- A host installation requires Linux amd64, kernel 5.7 or newer, systemd 257
+  or newer, a pure cgroup v2 hierarchy with the memory and pids controllers,
+  and root access. The installer checks this isolation baseline before project
+  publication and directly supports apt or dnf/yum systems.
+- Docker is a separate narrow baseline: Linux amd64, rootful Docker Engine 28
+  or newer, pure cgroup v2, the systemd cgroup driver, and no daemon
+  `userns-remap`. The first release does not support rootless Docker, Docker
+  Desktop, SELinux enforcing, or arm64.
 - The quick installer requires `flock` and `findmnt` from `util-linux` before it creates any installer files. Minimal images must install it first with `apt-get install -y util-linux`, `dnf install -y util-linux`, or `yum install -y util-linux`.
 - An interactive TTY for the first installation. `curl | sudo bash` attempts to reattach `/dev/tty`; a first install without a TTY fails closed.
 - At least one non-loopback IPv4 address assigned to a local interface and routable from clients. The 5gpn steering path is IPv4-only; IPv6-only clients cannot reach the gateway unless the network provides IPv4 reachability such as CLAT.
@@ -89,7 +97,9 @@ Before you start, provide:
 - Production modes require an A record for `console.<base>` pointing to the public or otherwise client-routable gateway IPv4; `debug` skips the public DNS gate. Before Android enables Private DNS, `dot.<base>` must also resolve through the client's existing resolver.
 - A cloud security group or independently managed firewall that restricts ingress. 5gpn never creates, changes, or removes host firewall rules.
 
-Three IPv4 settings have distinct roles:
+Three IPv4 settings have distinct roles on a host installation. Docker fixes
+its internal listeners at `0.0.0.0` and Compose explicitly publishes the
+standard host ports into the container:
 
 - `DNS_PUBLIC_IP` is the deployment's public identity and HTTP-01 A-record target;
 - `DNS_GATEWAY_IP` is the client-routable gateway address returned in steered DNS answers;
@@ -112,7 +122,7 @@ Expose only what you need. `speedtest-5060` is an unauthenticated Host/SNI relay
 
 ## Certificate modes
 
-The first-install TUI asks for one of the following modes. Both production
+The host installer's first-install TUI asks for one of the following modes. Both production
 modes use one scoped Certbot lineage named `<base>` and deploy it to the only
 current public certificate roles: `dot` and `console`.
 
@@ -123,6 +133,11 @@ current public certificate roles: `dot` and `console`.
 | `debug` | Isolated self-signed certificate, no Certbot, and not trusted by clients by default | Testing only |
 
 The Cloudflare token is written only to `/etc/5gpn/acme/cloudflare.ini`, which is root-only; it never enters `dns.env`, the caller environment, or logs. Optional interception uses a completely separate private root CA and never replaces the public DoT or Console certificate.
+
+Docker is fixed to Cloudflare DNS-01. The `cloudflare_api_token` Compose secret
+becomes a mode-`0600` Certbot credential only in the `/run` tmpfs; one `<base>`
+lineage requests `<base>` and `*.<base>` and publishes the `dot` and `console`
+roles. Docker rejects `http-01`, `debug`, and an unknown `CERT_MODE`.
 
 ## Quick install
 
@@ -161,6 +176,64 @@ domains with `direct` intent and the GFW list with `proxy` intent. Mihomo fetche
 them into its private state directory; the authenticated Console can disable,
 replace, or reorder them.
 
+## Docker
+
+Docker runs the complete gateway, not a reduced feature set: DNS, forwarding,
+Console, Telegram, and native extensions remain in the same `5gpn-mihomo`.
+Delivery is fixed to one image, one container, and one Compose service;
+certificate operations are trusted short-lived helpers synchronously started
+and waited by the entrypoint or monolith.
+
+Extract Compose, seccomp, the bootstrap example, and the
+[Docker runbook](docs/docker.md) from the same tag's
+`5gpn-installer.tar.gz`; no source checkout is required. Copy the bootstrap
+template and fill in the base domain, client-routable gateway IPv4, and email. Setting
+a `DNS_MIHOMO_SECRET` matching `[A-Za-z0-9._~-]{16,256}` before first start is recommended.
+The Cloudflare token file must contain only the token:
+
+```bash
+cp docker/bootstrap/config.env.example docker/bootstrap/config.env
+${EDITOR:-vi} docker/bootstrap/config.env
+install -m 0600 /dev/null docker/bootstrap/cloudflare_api_token
+${EDITOR:-vi} docker/bootstrap/cloudflare_api_token
+sudo chown 10001:10001 \
+  docker/bootstrap/config.env docker/bootstrap/cloudflare_api_token
+sudo chmod 0600 docker/bootstrap/config.env docker/bootstrap/cloudflare_api_token
+```
+
+Confirm Engine 28+, cgroup v2, and the systemd driver, then start an explicit
+tag. Stable publication updates the convenience registry alias `latest`, but
+the release bundle never defaults to a movable alias; beta never updates it:
+
+```bash
+docker version --format '{{.Server.Version}}'
+docker info --format '{{.CgroupVersion}} {{.CgroupDriver}}'
+export FIVEGPN_IMAGE=ghcr.io/moooyo/5gpn:X.Y.Z
+docker compose pull gateway
+docker compose up -d gateway
+docker compose logs -f gateway
+```
+
+Compose uses a bridge network with explicit IPv4 port publication, a private
+cgroup namespace, `writable-cgroups=true`, and the repository's seccomp
+profile. The loopback controller owns container port `443`, so public `443`
+maps to the data-plane socket on `9443`; the other public ports map to the same
+container port. It needs no `privileged`, added capability, `SYS_ADMIN`, Docker
+socket, or host cgroup bind mount. The only
+durable storage is `fivegpn-data:/etc/5gpn`; the image root is read-only and
+`/run`, scratch directories, and the published Console directory are tmpfs. To
+upgrade, change `FIVEGPN_IMAGE`, then run `pull` and `up -d` again. Do not run
+`docker compose down -v` unless you intend to remove configuration, ACME state,
+and the interception CA.
+
+> [!WARNING]
+> The simplified single-container form intentionally weakens certificate-key
+> isolation. The same `fivegpn` identity can read the Cloudflare token, ACME
+> account, public private keys, and interception CA private key. Worker cgroup
+> isolation remains a mandatory startup invariant; authorized extension code
+> still never runs in the main process, but the Docker container is not a
+> security boundary between these trusted keys.
+
 ## After installation
 
 Start by checking service state:
@@ -194,6 +267,13 @@ ten within 60 seconds. The unit then remains failed, and the limit action is
 explicitly `none`, so a crash loop cannot reboot or power off the host. Existing
 connections are lost during a successful restart.
 
+On a host, systemd owns that process replacement. In Docker,
+`restart: unless-stopped` replaces the whole container; there is no in-container
+systemd, init, cron, sidecar, or supervisor. The synchronous entrypoint ends
+with `exec 5gpn-mihomo`, making mihomo PID 1. `/restart`, SIGTERM, and fatal
+paths perform one complete orderly shutdown before Docker replaces the failure
+domain.
+
 Extension code is the deliberate process-isolation exception, not another
 long-running component. Each validation and action starts the same
 `5gpn-mihomo` binary in a one-shot worker mode below a dedicated cgroup-v2
@@ -202,8 +282,8 @@ unconditional startup invariant: failure terminates monolith startup before DoT,
 the controller, or another listener is opened. After that probe succeeds, a
 single child start error, timeout, crash, or OOM fails only its validation or
 action while the main process remains live. Extension code is never executed in
-the main process. systemd remains the only supervisor and stopping the unit removes all
-of its workers with the main process. At most two workers run concurrently.
+the main process. On a host, stopping the systemd unit removes all workers with
+the main process; in Docker, stopping the container does the same. At most two workers run concurrently.
 Each Linux worker has `memory.max=536870912`, `memory.swap.max=0`,
 `memory.oom.group=1`, and `pids.max=32`; the admitted aggregate upper bounds are
 1GiB and 64 tasks. These are caps, not reserved memory or a physical-RAM
@@ -344,7 +424,9 @@ Native extensions are optional, and a fresh installation has the MITM master dis
 > [!CAUTION]
 > When a manifest declares `permissions.network: true` and the operator confirms it, the script may send any request or response data visible to it, including decrypted content, settings, and storage data, to any host it can reach. The grant has no destination allowlist. An authorized cross-origin URL rewrite forwards the complete method, decoded body, and end-to-end headers, potentially including `Cookie` or `Authorization`. The enablement confirmation names the unrestricted grant and every routing rule; any changed snapshot requires a new review.
 
-Only the root-owned certificate publisher can read the private CA signing key; mihomo receives a constrained leaf and cannot access the root key. Installing the private CA does not guarantee that every application can be captured. Certificate pinning, mTLS, application-provisioned ECH, HTTP/3, and protocols without HTTP semantics are unsupported: the connection fails closed instead of bypassing interception. See [docs/native-extensions.md](docs/native-extensions.md) for the full manifest contract.
+On a host installation only the root-owned certificate publisher can read the
+private CA signing key; mihomo receives a constrained leaf. Docker instead uses
+the explicitly disclosed weaker same-container boundary above. Installing the private CA does not guarantee that every application can be captured. Certificate pinning, mTLS, application-provisioned ECH, HTTP/3, and protocols without HTTP semantics are unsupported: the connection fails closed instead of bypassing interception. See [docs/native-extensions.md](docs/native-extensions.md) for the full manifest contract.
 
 ## Upgrades and release channels
 
@@ -353,7 +435,11 @@ Only the root-owned certificate publisher can read the private CA signing key; m
 - `upgrade-reset-mihomo` replaces the complete YAML. Custom proxies, providers, groups, and rules are not merged and must be restored manually from the backup.
 - A successful beta channel switch does not guarantee an in-place switch back to the official channel. Keep a system snapshot before switching when reversal is required. The installer does not claim whole-system rollback after publication begins.
 - Every pre-v5 deployment that still uses interception config schema v4 requires an explicit, recoverable lockstep rebuild first. Never delete the old interception file or change only its schema version. Follow the [pre-v5 rebuild runbook](docs/pre-v5-upgrade.md) exactly.
-- Repository administration must prevent release-tag updates and deletion with a GitHub ruleset and keep immutable releases enabled. The workflow binds assets to the tag-push commit, refuses an existing release, uploads every asset to a draft, and publishes that draft with the stable `latest` decision in the same serialized operation.
+- A GitHub Release always contains only `5gpn-installer.tar.gz`,
+  `checksums.txt`, and `THIRD_PARTY_NOTICES.md`. The same tag separately
+  publishes `ghcr.io/moooyo/5gpn:<tag>`; stable advances `latest`, while beta
+  never does.
+- Repository administration must prevent release-tag updates and deletion with a GitHub ruleset and keep immutable releases enabled. The workflow binds assets and the OCI digest to the tag-push commit. A retry may reuse only an identical exact image and matching draft/immutable release; drift is rejected. Stable GHCR `latest` advances only after the GitHub release is immutable.
 
 ## Security boundaries and known limitations
 
@@ -368,16 +454,21 @@ See [docs/architecture.md](docs/architecture.md) for the complete, normative cur
 
 ## Development and verification
 
-This repository contains installer assets only. The local gate is:
+This repository contains installer assets and Docker assembly, but no runtime
+or Console source. The source-level gate is:
 
 ```bash
-for s in install.sh quick-install.sh scripts/*.sh; do bash -n "$s"; done
+for s in install.sh quick-install.sh scripts/*.sh docker/*.sh tests/container-acceptance.sh tests/docker/*.sh; do bash -n "$s"; done
 for t in tests/test_*.sh; do bash "$t"; done
 
 tests/verify-artifact-pins.sh
 ```
 
-CI renders and validates the seed with the digest-pinned mihomo binary. Validate real Linux gateway behavior with [tests/integration-smoke.md](tests/integration-smoke.md).
+CI renders and validates the seed and builds the digest-pinned image without
+starting the gateway. Validate host behavior with
+[tests/integration-smoke.md](tests/integration-smoke.md); real Docker cgroup,
+worker, OOM, certificate, restart, and persistence acceptance runs only on
+`test-env` through [tests/container-acceptance.sh](tests/container-acceptance.sh).
 
 ## Repository layout
 
@@ -385,6 +476,7 @@ CI renders and validates the seed with the digest-pinned mihomo binary. Validate
 | --- | --- |
 | *(external: `moooyo/mihomo`)* | The single runtime: DNS, forwarding, HTTP/TLS interception, Telegram, and controller API |
 | *(external: `moooyo/zashboard`)* | The React Console served by mihomo |
+| `Dockerfile`, `compose.yaml`, `docker/` | Single-container image, Compose/security profile, bootstrap, and trusted short-lived certificate helpers |
 | `etc/` | Current dns.env example, mihomo seed, and systemd units |
 | `scripts/` | Certificate, iOS profile, and explicit upgrade/migration helpers; the suite runner stays source-only |
 | `tests/` | Shell regressions, upgrade fixtures, and gateway smoke checklist |
@@ -398,6 +490,8 @@ CI renders and validates the seed with the digest-pinned mihomo binary. Validate
 - [Native extension authoring contract](docs/native-extensions.md)
 - [Pre-v5 rebuild and release-channel switches](docs/pre-v5-upgrade.md)
 - [Linux gateway integration smoke checklist](tests/integration-smoke.md)
+- [Docker 28 test-env acceptance contract](tests/container-acceptance.sh)
+- [Docker deployment runbook](docs/docker.md)
 - [Official extension repository](https://github.com/moooyo/5gpn-extensions)
 - [Releases](https://github.com/moooyo/5gpn/releases) and [Issues](https://github.com/moooyo/5gpn/issues)
 - [MIT License](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md)
