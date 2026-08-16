@@ -62,10 +62,85 @@ else
     bad '5gpn-mihomo does not run as fivegpn:fivegpn'
 fi
 
-# These names are legacy cleanup targets, never current compatibility aliases.
-for retired in mihomo.service 5gpn-dns.service 5gpn-intercept.service; do
-    [[ "$(systemctl is-active "$retired" 2>/dev/null)" != active ]] \
-        && ok "$retired is retired" || bad "$retired is still active"
+fivegpn_passwd="$(getent passwd fivegpn 2>/dev/null || true)"
+fivegpn_group="$(getent group fivegpn 2>/dev/null || true)"
+if [[ -n "$fivegpn_passwd" && -n "$fivegpn_group" ]]; then
+    IFS=: read -r account_name _ account_uid account_gid _ account_home account_shell \
+        <<< "$fivegpn_passwd"
+    IFS=: read -r group_name _ named_gid group_members <<< "$fivegpn_group"
+    uid_min="$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs 2>/dev/null)"
+    gid_min="$(awk '$1 == "GID_MIN" { print $2; exit }' /etc/login.defs 2>/dev/null)"
+    uid_min="${uid_min:-1000}"
+    gid_min="${gid_min:-1000}"
+    uid_users="$(getent passwd | awk -F: -v id="$account_uid" '$3 == id { print $1 }')"
+    gid_groups="$(getent group | awk -F: -v id="$named_gid" '$3 == id { print $1 }')"
+    primary_users="$(getent passwd | awk -F: -v id="$named_gid" '$4 == id { print $1 }')"
+    account_groups="$(id -G fivegpn 2>/dev/null || true)"
+    if [[ "$account_name" == fivegpn && "$group_name" == fivegpn \
+       && "$account_uid" =~ ^[1-9][0-9]*$ && "$account_gid" =~ ^[1-9][0-9]*$ \
+       && "$named_gid" =~ ^[1-9][0-9]*$ && "$uid_min" =~ ^[1-9][0-9]*$ \
+       && "$gid_min" =~ ^[1-9][0-9]*$ && "$account_uid" -lt "$uid_min" \
+       && "$account_gid" -lt "$gid_min" && "$account_gid" == "$named_gid" \
+       && "$account_home" == /nonexistent && -z "$group_members" \
+       && "$uid_users" == fivegpn && "$gid_groups" == fivegpn \
+       && "$primary_users" == fivegpn && "$account_groups" == "$account_gid" \
+       && "$(id -gn fivegpn 2>/dev/null)" == fivegpn \
+       && ( "$account_shell" == */nologin || "$account_shell" == /bin/false ) ]]; then
+        ok 'fivegpn is an exclusive system identity with no supplementary groups'
+    else
+        bad 'fivegpn account shape, numeric ownership, or group exclusivity is unsafe'
+    fi
+else
+    bad 'fivegpn account or group is missing'
+fi
+
+state_owner_uid="$(id -u fivegpn 2>/dev/null || true)"
+state_validation_rc=0
+state_validation="$(timeout --kill-after=5s 30s "$MIHOMO" 5gpn-state validate \
+    --owner-uid "$state_owner_uid" /etc/5gpn/mihomo/5gpn 2>/dev/null)" \
+    || state_validation_rc=$?
+if [[ "$state_validation_rc" == 0 \
+   && "$(printf '%s\n' "$state_validation" | awk 'END { print NR }')" == 1 ]] \
+   && jq -e '
+        .status == "ok"
+        and (.validated | type == "array")
+        and (.missing | type == "array")
+        and (((.validated + .missing) | sort)
+            == ["bot.json","dns.json","intercept.json"])
+        and (.validated | index("dns.json") != null)
+    ' >/dev/null 2>&1 <<< "$state_validation"; then
+    ok 'installed Core validates every present runtime document read-only'
+else
+    bad "installed Core state validator failed or returned malformed output (rc=$state_validation_rc)"
+fi
+
+# These names are unsupported footprints, never current compatibility aliases.
+retired_unit_definition_exists() {
+    local unit="$1" load_state fragment_path root
+    local -a roots=(/etc/systemd/system.control /run/systemd/system.control \
+                    /run/systemd/transient /run/systemd/generator.early \
+                    /etc/systemd/system /etc/systemd/system.attached \
+                    /run/systemd/system /run/systemd/system.attached \
+                    /run/systemd/generator /usr/local/lib/systemd/system \
+                    /usr/lib/systemd/system /lib/systemd/system \
+                    /run/systemd/generator.late)
+    load_state="$(systemctl show "$unit" -p LoadState --value 2>/dev/null || true)"
+    fragment_path="$(systemctl show "$unit" -p FragmentPath --value 2>/dev/null || true)"
+    [[ -n "$fragment_path" ]] && return 0
+    [[ -n "$load_state" && "$load_state" != not-found ]] && return 0
+    for root in "${roots[@]}"; do
+        [[ -e "$root/$unit" || -L "$root/$unit" \
+           || -e "$root/$unit.d" || -L "$root/$unit.d" ]] && return 0
+    done
+    return 1
+}
+
+for retired in mihomo.service 5gpn-dns.service 5gpn-intercept.service \
+               5gpn-intercept-runtime.path 5gpn-journal@.service \
+               5gpn-journal@5gpn-dns.service 5gpn-journal@mihomo.service; do
+    retired_unit_definition_exists "$retired" \
+        && bad "$retired still has a unit file, drop-in, generated definition, or loaded state" \
+        || ok "$retired has no unit definition"
 done
 for retired_user in mihomo gpn-dns gpn-intercept; do
     getent passwd "$retired_user" >/dev/null \

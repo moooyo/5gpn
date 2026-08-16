@@ -44,9 +44,9 @@ sniffer:
   override-destination: true
   force-domain: [__CONSOLE_DOMAIN__]
   sniff:
-    TLS:  { ports: [443, 8080, 8443, 5060] }
-    QUIC: { ports: [443, 5060] }
-    HTTP: { ports: [80, 8080, 8443, 5060] }
+    TLS:  { ports: [443, 8080, 8443] }
+    QUIC: { ports: [443] }
+    HTTP: { ports: [80, 8080, 8443] }
 
 dns:
   enable: true
@@ -78,7 +78,6 @@ rules:
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,80)),REJECT
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8080)),REJECT
   - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8443)),REJECT
-  - AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,5060)),REJECT
   # The one panel allow rule. It carries two predicates and both are load-bearing.
   #
   # NOT,((IN-TYPE,INNER)) excludes the engine's own egress. The engine has no

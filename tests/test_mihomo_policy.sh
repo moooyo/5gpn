@@ -44,23 +44,22 @@ check install.sh 'name: gateway%s'                       'current gateway listen
 check install.sh 'name: gateway80%s'                     'current gateway HTTP listener name'
 check install.sh 'name: gateway8080%s'                   'alternate HTTP listener name'
 check install.sh 'name: gateway8443%s'                   'alternate HTTPS listener name'
-check install.sh 'name: gateway5060%s'                   'default Speedtest listener name'
 check install.sh 'type: tunnel.*port: 443.*network: \[tcp, udp\]' ':443 tcp+udp listener renderer'
 check install.sh 'target: %s:443'                       'listener renderer hostname target'
 check install.sh 'port: 8080.*network: \[tcp\].*target: %s:8080' ':8080 TCP hostname target renderer'
 check install.sh 'port: 8443.*network: \[tcp\].*target: %s:8443' ':8443 TCP hostname target renderer'
-check install.sh 'port: 5060.*network: \[tcp, udp\].*target: %s:5060' ':5060 TCP/UDP hostname target renderer'
+nocheck install.sh 'gateway5060|port: 5060'              'fresh/reset seed has no implicit :5060 ingress'
 check install.sh 'render_mihomo_listeners "\$MIHOMO_LISTEN_IPS" "\$CONSOLE_DOMAIN"' 'renderer receives the console hostname'
 nocheck "$T" 'proxy:'                                  'NO proxy field on listeners (would bypass rules)'
 check "$T" 'parse-pure-ip: true'                       'sniffer parse-pure-ip'
 check "$T" 'override-destination: true'                'sniffer override-destination'
 check "$T" 'force-domain: \[__CONSOLE_DOMAIN__\]'     'console fallback always forces hostname sniffing'
-check "$T" 'TLS:  \{ ports: \[443, 8080, 8443, 5060\] \}'   'TLS sniffer covers default ingress ports'
-check "$T" 'HTTP: \{ ports: \[80, 8080, 8443, 5060\] \}'    'HTTP sniffer covers default ingress ports'
-check "$T" 'QUIC: \{ ports: \[443, 5060\] \}'               'QUIC sniffer covers default UDP ingress ports'
+check "$T" 'TLS:  \{ ports: \[443, 8080, 8443\] \}'   'TLS sniffer covers default ingress ports'
+check "$T" 'HTTP: \{ ports: \[80, 8080, 8443\] \}'    'HTTP sniffer covers default ingress ports'
+check "$T" 'QUIC: \{ ports: \[443\] \}'               'QUIC sniffer covers the guarded UDP ingress'
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,8080.*REJECT' 'console cannot expose loopback :8080'
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,8443.*REJECT' 'console cannot expose loopback :8443'
-check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,5060.*REJECT' 'console cannot expose loopback :5060'
+nocheck "$T" '5060'                                     'seed template has no implicit :5060 contract'
 nocheck "$T" 'rule-providers:'                         'no rule-provider survives the allowlist removal'
 nocheck "$T" 'RULE-SET,[[:space:]]*whitelist'          'no rule reads the retired allowlist provider'
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__,REJECT'           'fail-closed deny for engine egress naming the console'
@@ -83,8 +82,8 @@ check "$T" 'external-controller-tls: 127\.0\.0\.1:443' 'the controller listens w
 check "$T" 'AND,\(\(NETWORK,UDP\),\(DST-PORT,443\)\),REJECT' 'HTTP3/QUIC UDP 443 block enabled by default'
 # HTTP/3 interception is unsupported. The fixed guard must appear exactly once,
 # below the private-range denies and above the terminal MATCH, so a capable
-# client falls back to TCP. This remains scoped to UDP/443; the seed still
-# permits ordinary UDP and keeps QUIC sniffing on :5060.
+# client falls back to TCP. This remains scoped to UDP/443 and does not disable
+# ordinary UDP on operator-configured ports.
 private_deny_line="$(grep -nF '  - IP-CIDR,169.254.0.0/16,REJECT,no-resolve' "$root/$T" | cut -d: -f1 || true)"
 quic_block_line="$(grep -nF '  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' "$root/$T" | cut -d: -f1 || true)"
 quic_block_count="$(grep -cFx '  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' "$root/$T" || true)"
@@ -103,8 +102,7 @@ for rule in \
     'AND,((DOMAIN,__CONSOLE_DOMAIN__),(NETWORK,UDP)),REJECT' \
     'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,80)),REJECT' \
     'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8080)),REJECT' \
-    'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8443)),REJECT' \
-    'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,5060)),REJECT'; do
+    'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8443)),REJECT'; do
     reject_line="$(grep -nF "  - $rule" "$root/$T" | cut -d: -f1 || true)"
     route_line="$console_direct_line"
     if [ -z "$reject_line" ] || [ -z "$route_line" ] || [ "$reject_line" -ge "$route_line" ]; then
@@ -166,17 +164,19 @@ nocheck install.sh '/5gpn/nodes'                       'node management is not e
 nocheck install.sh 'add_allow_ip' 'no allowlist add op'
 nocheck install.sh 'del_allow_ip' 'no allowlist del op'
 nocheck install.sh 'providers/rules/whitelist' 'no live allowlist refresh'
-# Same exemption as in test_installer_safety: retire_mihomo_whitelist names the
-# path in order to delete it. Everything else naming it is a survivor.
-if [[ -n "$(awk '
-    /^retire_mihomo_whitelist\(\)/ { skip = 1 }
-    skip { if ($0 == "}") skip = 0; next }
-    /[/]whitelist[.]txt/ { print }
-' "$root/install.sh")" ]]; then
-    echo "FAIL: installer builds a path to an allowlist file outside the retirement"; FAIL=1
+preflight_free_install="$(mktemp)"
+awk '
+    /^detect_legacy_footprints\(\)/ { skip = 1 }
+    skip && /^kernel_release_supports_extension_workers\(\)/ { skip = 0 }
+    skip { print ""; next }
+    { print }
+' "$root/install.sh" > "$preflight_free_install"
+if grep -Eq 'retire_mihomo_whitelist|/whitelist\.txt' "$preflight_free_install"; then
+    echo "FAIL: allowlist teardown path remains outside read-only preflight"; FAIL=1
 else
-    echo "ok: installer builds no allowlist path outside the retirement"
+    echo "ok: no allowlist teardown path"
 fi
+rm -f -- "$preflight_free_install"
 
 # Task 5: selectable Cloudflare DNS-01 wildcard or HTTP-01 exact-SAN cert.
 check install.sh 'dns-cloudflare' 'Cloudflare mode uses DNS-01'
@@ -261,17 +261,10 @@ nocheck install.sh 'secondaryPath=/proxy' 'zashboard #/setup deep-link NOT hardc
 #
 # Two shapes are swept, chosen so the assertions that assert ABSENCE do not
 # match themselves: a redirection that creates an allowlist file, and an actual
-# rule line reading the retired provider. Prose about the removal, and the
-# migration that performs it, name the string without being either shape.
-#
-# test_installer_safety.sh is exempt: it creates one on purpose, to prove
-# retire_mihomo_whitelist deletes it. That is the same kind of exemption the
-# zash sweep gives the migration -- the one caller allowed to name a thing is
-# the one whose job is to get rid of it.
+# rule line reading the retired provider.
 creators="$(grep -rn '> *"[^"]*whitelist\.txt"' \
     --include='*.sh' --include='*.yml' --include='*.tmpl' \
-    "$root/install.sh" "$root/scripts" "$root/etc" "$root/tests" "$root/.github" 2>/dev/null \
-    | grep -v '/tests/test_installer_safety.sh' || true)"
+    "$root/install.sh" "$root/scripts" "$root/etc" "$root/tests" "$root/.github" 2>/dev/null || true)"
 if [[ -n "$creators" ]]; then
     printf '%s\n' "$creators" >&2
     echo "FAIL: something still creates an allowlist file"; FAIL=1

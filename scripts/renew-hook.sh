@@ -182,7 +182,6 @@ role_group() {
     local role="$1" group
     case "$role" in
         dot|console) group="$FIVEGPN_CERT_GROUP" ;;
-        web)         group=root ;;
         *)           return 1 ;;
     esac
     if getent group "$group" >/dev/null 2>&1; then
@@ -263,12 +262,6 @@ cert_root_is_safe() {
             .provenance) safe_plain_file "$entry" "$root_group" 640 || return 1 ;;
             .certbot-ownership) safe_plain_file "$entry" "$root_group" 640 || return 1 ;;
             dot|console) [[ -d "$entry" && ! -L "$entry" ]] || return 1 ;;
-            web)
-                # A web role may remain from the retired console origin. It is
-                # never refreshed, but accepting it must still prove the full
-                # owned role structure rather than treating any directory as
-                # harmless legacy state.
-                role_tree_is_safe web "$entry" || return 1 ;;
             *) return 1 ;;
         esac
     done < <(find "$CERT_ROOT" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)

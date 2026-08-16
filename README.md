@@ -105,10 +105,9 @@ TCP `853` is mihomo's fixed client DNS ingress. The remaining data-plane listene
 | TCP `443` | Console HTTPS 与 DNS-steered TLS/HTTP 流量 |
 | TCP `80` | DNS-steered HTTP；HTTP-01 challenge 也需要它 |
 | TCP `8080`, `8443` | 需要可见 HTTP Host 或 TLS SNI 的显式备用 Web 入口 |
-| TCP/UDP `5060` | 默认启用的 `speedtest-5060` 模块；不支持 SIP、Ookla native UDP 或通用 raw UDP |
 | UDP `443` | Remains bound; one fixed global rule rejects gateway UDP/443 so capable clients can fall back to TCP |
 
-Expose only what you need. `speedtest-5060` is an unauthenticated Host/SNI relay and must be source-restricted on public deployments. The UDP/443 guard is not a firewall rule, does not close the socket, and cannot guarantee that every client falls back. Product management cannot disable it; an H3-only client fails.
+Expose only what you need. The UDP/443 guard is not a firewall rule, does not close the socket, and cannot guarantee that every client falls back. Product management cannot disable it; an H3-only client fails.
 
 ## 证书模式
 
@@ -154,7 +153,7 @@ templates that install them. The default channel accepts only `X.Y.Z`;
 than the latest official release. It never falls back and never downgrades to an
 older beta line.
 
-The first installation collects configuration through the TUI and atomically writes `/etc/5gpn/dns.env`. Reinstall reads only that file and never treats the caller environment as configuration input. Preflight and staging fail before publication where possible; a failure during publication is reported as a partial installation rather than hidden behind a rollback claim.
+The first installation collects configuration through the TUI and atomically writes `/etc/5gpn/dns.env`. A reinstall is supported only when the existing deployment already uses the current identity, paths, keys, and document schemas; it reads only that file and never treats the caller environment as configuration input. Before stopping a managed 5gpn service or publishing a live 5gpn file, preflight rejects any legacy unit definition, account, group, binary, state tree, configuration key, document, certificate role, or mihomo rule footprint. A generic `mihomo` user or group is always such a conflict. That check is read-only: the installer does not rename, remove, rewrite, or adopt legacy state. Host dependency installation is a separate pre-publication step and may update distribution packages. Existing runtime documents are checked by the staged, digest-pinned Core's `5gpn-state validate --owner-uid <proven-uid>` one-shot mode, so shell code does not duplicate the Core's decoder/validation rules for existing documents and validation cannot follow or adopt files with the wrong owner, mode, or link count. The installer still renders the defined seed when a document is absent. Exact non-sensitive installation roots may claim a safe populated directory with no marker after canonical-path, metadata, legacy, symlink, hardlink, special-file, and nested-mount checks; certificate, CA, UI, and temporary roots remain strict. A failure during publication is reported as a partial installation rather than hidden behind a rollback claim.
 
 A missing `dns.json` enables two built-in 24-hour subscriptions: ChinaMax
 domains with `direct` intent and the GFW list with `proxy` intent. Mihomo fetches
@@ -182,6 +181,22 @@ there are no separate `gpn-dns`, `gpn-intercept`, or unprefixed `mihomo`
 service accounts. All external product names remain `5gpn`; this spelled-out
 identity is the only exception because portable Linux/POSIX account names
 cannot begin with a digit.
+
+A pre-existing `fivegpn` name is not automatically adopted. An incompatible
+identity can be repaired only when a safe current ownership marker or the
+marked current main unit proves provenance, all existing UID/GID values are
+exclusive system-range IDs, and the old numeric ownership is durably journaled
+before removal. Preflight only authorizes this recovery in memory; journal and
+account mutation begin only after the declared publication boundary.
+Interrupted reconciliation resumes from that journal. A
+same-named identity on a fresh host, a normal-range ID, or any shared/aliased ID
+is rejected without mutation. If the crash happened after account removal,
+recovery still requires the current marker/unit provenance and recorded IDs
+that remain safe and unclaimed by any other identity; an exact surviving
+`fivegpn` group may retain its recorded GID. A journal alone is not ownership
+proof. Group-only journal recovery is possible only when all three runtime
+documents are absent; any present document requires a proven current or
+journaled owner UID.
 
 ### Process recovery
 
@@ -218,7 +233,7 @@ This is process recovery, not self-healing: a persistent bad configuration,
 port conflict, or broken certificate remains an operator-visible failure. A
 deliberate `systemctl stop 5gpn-mihomo` stays stopped. Use an independent external
 monitor that actively probes DoT and HTTPS. Retired `DNS_HEARTBEAT_*` keys are
-accepted only while an older `dns.env` is rewritten and are not persisted.
+unsupported legacy footprints and make installer preflight fail before publication.
 DNS listener and certificate-path fields are installation-owned; controller
 writes must preserve them exactly and are rejected before persistence if they
 attempt to change them.
@@ -276,7 +291,7 @@ operations.
 | `/etc/5gpn/mihomo/5gpn/intercept.json` | Interception master, fixed-false HTTP/3 marker, catalogs, and extension snapshots |
 | `/etc/5gpn/mihomo/5gpn/bot.json` | Telegram switch, token, administrators, and alerts |
 
-普通 install、reinstall 和 `configure` 会先用 `5gpn-mihomo -t` 验证已有配置，再逐字节保留它。只有显式 `mihomo-reset` 或 TTY 确认的 `upgrade-reset-mihomo` 能在备份、完整校验和原子 rename 后替换它。`configure` 若发现新域名、gateway 或 listener 与现有 operator-owned YAML 不兼容，会在写入前中止，而不是暗中修改数据面。
+Normal install, current-schema reinstall, and `configure` validate an existing mihomo file with `5gpn-mihomo -t` and then preserve it byte for byte. Only explicit `mihomo-reset` may replace it after backup, complete validation, and atomic rename; that command is not a legacy conversion path. If `configure` finds that a new domain, gateway, or listener conflicts with the operator-owned YAML, it aborts before writing instead of silently modifying the data plane.
 
 The root-only **Nodes** tab in `sudo 5gpn` is a narrow explicit exception, not
 a whole-file replacement: it may add or remove static `proxies` and their
@@ -369,20 +384,20 @@ Only the root-owned certificate publisher can read the private CA signing key; m
 ## 升级与发布通道
 
 - The default quick installer selects only the latest official release. `--beta` is an explicit, per-invocation opt-in, accepts only a prerelease whose base is newer than latest official, and is never persisted in `dns.env`.
-- A normal channel transition uses one complete verified installer bundle and preserves a valid current operator-owned mihomo YAML byte for byte. Moving from the retired multi-process design to the monolith is a separate checked migration: it removes only the retired anchors and inbound from a candidate, rewrites the management-plane exclusion to `INNER`, requires the fixed UDP/443 guard, and publishes only after pinned `5gpn-mihomo -t` succeeds.
-- `upgrade-reset-mihomo` 会替换完整 YAML；自定义 proxies、providers、groups 和 rules 不会自动合并，只能从备份手工恢复。
+- A normal channel transition uses one complete verified installer bundle and supports only a deployment that already conforms to the current schema. It preserves a valid current operator-owned mihomo YAML byte for byte.
+- A legacy footprint is a hard pre-publication error. The installer reports the conflicting path, unit, account, key, document, certificate role, or mihomo construct without stopping it or changing any bytes. Rebuild or decommission that host explicitly before a fresh installation; no in-place legacy migration is provided.
+- `mihomo-reset` replaces the complete YAML only for a current-schema deployment. Custom proxies, providers, groups, and rules are not merged and must be restored manually from the backup.
 - A successful beta channel switch does not guarantee an in-place switch back to the official channel. Keep a system snapshot before switching when reversal is required. The installer does not claim whole-system rollback after publication begins.
-- 所有仍使用 interception config schema v4 的 pre-v5 部署都需要先做显式、可恢复的 lockstep rebuild；不要删除旧 interception 文件或只改 schema version。请严格执行 [pre-v5 rebuild runbook](docs/pre-v5-upgrade.md)。
 - Repository administration must prevent release-tag updates and deletion with a GitHub ruleset and keep immutable releases enabled. The workflow binds assets to the tag-push commit, refuses an existing release, uploads every asset to a draft, and publishes that draft with the stable `latest` decision in the same serialized operation.
 
 ## 安全边界与已知限制
 
 - 名称级 encrypted-DNS blocking 无法阻止使用硬编码 resolver IP 且能绕过网关的客户端。5gpn 不声称提供网络层强制执行。
 - Steering 依赖 DNS 和可见 hostname。任意端口、通用 raw UDP、没有可用 Host/SNI 的流量、由应用内预置 ECH 隐藏的 inner name，以及绕过 5gpn DNS 的连接不受支持。
-- The fixed global UDP/443 guard rejects only traffic that reaches the gateway. It is immutable through product management, does not manage a firewall, and does not affect ordinary UDP or QUIC sniffing on other configured ports such as `:5060`.
+- The fixed global UDP/443 guard rejects only traffic that reaches the gateway. It is immutable through product management, does not manage a firewall, and does not affect ordinary UDP or QUIC sniffing on other explicitly operator-configured ports.
 - Console SPA assets and profiles under `/ui/*` are public. `/5gpn/*` and the ordinary controller routes require mihomo's controller secret; there is no second panel origin, source allowlist, handoff session, or Console bearer.
 - 扩展 root CA 的信任范围覆盖整个扩展子系统，但实际解密仍受启用的 capture hosts 限制。普通 uninstall 和 purge 为已注册设备保留该 CA；只有 explicit decommission 才尝试删除所有权可证明的 CA 与公共 lineage。
-- 5gpn 不修改 nftables 或任何宿主防火墙。公共入口、特别是 `:5060`，必须由运维者限制到预期客户端。
+- 5gpn never modifies nftables or another host firewall. Any additional public ingress must be restricted to intended clients by the operator.
 
 完整、规范的当前系统边界见 [docs/architecture.md](docs/architecture.md)。
 
@@ -406,9 +421,9 @@ CI renders and validates the seed with the digest-pinned mihomo binary. Validate
 | *(external: `moooyo/mihomo`)* | The single runtime: DNS, forwarding, HTTP/TLS interception, Telegram, and controller API |
 | *(external: `moooyo/zashboard`)* | The React Console served by mihomo |
 | `etc/` | Current dns.env example, mihomo seed, and systemd units |
-| `scripts/` | Certificate, iOS profile, and explicit upgrade/migration helpers; the suite runner stays source-only |
-| `tests/` | Shell regression、升级 fixture 与 gateway smoke checklist |
-| `docs/` | 当前架构、扩展 author contract 与升级 runbook |
+| `scripts/` | Certificate and iOS profile helpers; the suite runner stays source-only |
+| `tests/` | Shell regressions and the gateway smoke checklist |
+| `docs/` | Current architecture and the extension author contract |
 | `.github/workflows/` | 共享 CI gate 与精确 tag release pipeline |
 | `install.sh`, `quick-install.sh` | 事务安装器与可信 release 入口 |
 
@@ -416,7 +431,6 @@ CI renders and validates the seed with the digest-pinned mihomo binary. Validate
 
 - [当前架构](docs/architecture.md)
 - [原生扩展开发规范](docs/native-extensions.md)
-- [Pre-v5 rebuild and release-channel switches](docs/pre-v5-upgrade.md)
 - [Linux gateway integration smoke checklist](tests/integration-smoke.md)
 - [官方扩展仓库](https://github.com/moooyo/5gpn-extensions)
 - [Releases](https://github.com/moooyo/5gpn/releases) 与 [Issues](https://github.com/moooyo/5gpn/issues)

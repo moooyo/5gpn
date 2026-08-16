@@ -26,15 +26,14 @@ Update the status and the normative documentation when an implementation lands.
 - Restart is crash recovery, not configuration repair or a general liveness
   detector. Persistent startup errors reach the start limit, and a process that
   remains alive without making progress requires an independent external DoT
-  and HTTPS pull probe. Retired `DNS_HEARTBEAT_*` keys are accepted only while
-  rewriting an older `dns.env`; current installations do not persist them.
+  and HTTPS pull probe. Retired `DNS_HEARTBEAT_*` keys are unsupported legacy
+  footprints and make installer preflight fail before publication.
 - The installed runtime naming is uniformly 5gpn-prefixed. Documents live in
   `/etc/5gpn/mihomo/5gpn`, and authenticated routes use `/5gpn/*`. Exact old
-  names are migration inputs only. The installer atomically renames old-only
-  state, refuses two populated state trees, and removes safe idle legacy
-  identities only with project provenance. The current `fivegpn` identity is
-  installer-owned and is recreated non-interactively when its exclusive IDs
-  are safe to retain; aliased IDs fail closed.
+  names are unsupported footprints. Compatibility preflight reports them
+  before publication without stopping, renaming, deleting, rewriting, adopting,
+  or changing permissions on them. Only a fresh host or a current-schema
+  deployment is supported.
 
 ## Managed component updates and Console cache
 
@@ -58,26 +57,77 @@ Update the status and the normative documentation when an implementation lands.
   merge-base first, fast-forwards the matching fork baseline, and then merges
   that baseline without rebasing already tagged downstream history.
 
+## Cross-repository development baselines
+
+**Status: Implemented. Recorded 2026-08-07.**
+
+- `moooyo/5gpn` develops from `main`. The long-lived `beta` branch is only for
+  test features that are intentionally not ready for the official line; it is
+  not the normal development baseline.
+- `moooyo/mihomo` develops 5gpn product changes on
+  `feat/5gpn-monolith`. Its canonical upstream synchronization baseline is
+  `MetaCubeX/mihomo:Alpha`; neither the fork's default branch nor its `main`
+  branch defines the 5gpn baseline.
+- `moooyo/zashboard` develops 5gpn Console changes on
+  `feat/5gpn-console`. Its canonical upstream synchronization baseline is
+  `Zephyruso/zashboard:main`; the upstream branch is merged into the
+  maintenance branch and is not itself the 5gpn product development line.
+- `moooyo/5gpn-extensions` develops, integrates, and publishes from `main`.
+  Topic branches target `main`; whichever topic branch a working tree happens
+  to have checked out does not redefine the repository baseline.
+- New cross-repository work starts from these named maintenance or integration
+  branches. Before editing, verify the checked-out branch and use the matching
+  linked worktree when one already exists. Live commit tips are observations,
+  not durable replacements for this branch contract.
+
 ## Installer state and certificate publication
 
 **Status: Implemented. Recorded 2026-08-06.**
 
 - `dns.env` contains installation-owned host coordinates only. Live policy,
   upstreams, subscriptions, resolver tuning, statistics, and health monitoring
-  are not mirrored from `dns.json`. Known retired keys are tolerated for one
-  rewrite and then dropped.
+  are not mirrored from `dns.json`. Unknown and retired keys are rejected; no
+  older schema is rewritten into the current one.
 - A missing `dns.json` receives the exact pinned-core defaults, including the
   ChinaMax `direct` and GFW `proxy` subscription rules. Their caches live under
-  the monolith state directory; `/etc/5gpn/rules` is legacy evidence only.
-- The old standalone-resolver files and cache tree remain root-only migration
-  evidence. The mihomo service account cannot read or mutate them. The retired
-  sidecar `config.json` is likewise root-only; the current interception document
-  is `<mihomo-home>/5gpn/intercept.json`.
-- The only current public certificate roles are `dot` and `console`. A safe
-  legacy `web` role may remain for migration evidence but is never refreshed or
-  exposed to mihomo. Both public iOS profiles are generated transactionally
-  directly in `/opt/5gpn/ui`; `/opt/5gpn/www` is retired.
-- Only explicit gateway runtime and upgrade helper scripts are copied into
+  the monolith state directory; `/etc/5gpn/rules` is an unsupported legacy
+  footprint.
+- Standalone-resolver files, old cache trees, a sidecar `config.json`, and any
+  document using a retired schema are unsupported footprints. Installer
+  preflight reports them read-only and the mihomo service account never receives
+  access to them. The current interception document is
+  `<mihomo-home>/5gpn/intercept.json`.
+- Existing `dns.json`, `intercept.json`, and `bot.json` files are validated
+  read-only before publication by the staged, digest-pinned Core using its
+  `5gpn-state validate --owner-uid <proven-uid>` one-shot mode. Missing
+  documents remain valid seed inputs and are not created by validation. A
+  present file must be a no-follow regular file owned by that UID, mode `0600`,
+  and singly linked. A group-only recovery journal is usable only when all three
+  documents are absent; a present document requires a proven current or
+  journaled UID. The installer does not carry a second shell decoder or
+  validator for existing runtime documents; it may still render the defined
+  seed for a missing document.
+- A generic `mihomo` user or group and every retired unit definition are hard
+  pre-publication conflicts regardless of whether their bytes carry a 5gpn
+  marker. Detection is read-only; the installer does not stop or adopt them.
+- An incompatible `fivegpn` identity is repairable only as current installation
+  recovery. A safe current ownership marker or the marked current main-unit
+  definition must prove provenance, each existing UID/GID must be a system ID
+  used exclusively by that identity, and the installer must durably journal the
+  old numeric IDs before removing anything. Preflight only grants in-memory
+  authorization; journal publication and account deletion are forbidden until
+  the declared publication phase. The journal survives interruption and is
+  completed only after recreated ownership is reconciled. In the
+  account-absent crash window, recovery still requires safe current marker/unit
+  provenance, a valid current journal, system-range recorded IDs, and proof
+  that no other identity claimed them; an exact surviving `fivegpn` group may
+  retain its recorded GID. The journal alone authorizes nothing. A same-named
+  identity without current provenance is foreign and is rejected unchanged.
+- The only current public certificate roles are `dot` and `console`. A `web`
+  role is an unsupported legacy footprint. Both public iOS profiles are
+  generated transactionally directly in `/opt/5gpn/ui`; `/opt/5gpn/www` is
+  unsupported.
+- Only explicit current gateway runtime helper scripts are copied into
   `/opt/5gpn/scripts`. Development helpers remain in the source repository and
   are excluded from the release bundle and installed tree.
 
@@ -287,10 +337,10 @@ channel-switch and anti-downgrade contract on 2026-08-06.**
   bundle contains installer inputs, not mihomo binaries or zashboard assets.
   Mihomo and zashboard are fetched from their own repositories using the
   independent release tags and SHA-256 pins embedded in that installer.
-- The current repository revision contains the cross-channel compatibility
-  check and `upgrade-reset-mihomo` flow, but a new beta prerelease must publish
-  this revision before the public `--beta` selector can deploy that behavior.
-  An older published beta must not be represented as equivalent to the current
+- The current repository revision contains the cross-channel and current-schema
+  compatibility checks, but a new beta prerelease must publish this revision
+  before the public `--beta` selector can deploy that behavior. An older
+  published beta must not be represented as equivalent to the current
   repository state.
 
 ### Durable branch and release decisions
@@ -335,9 +385,11 @@ channel-switch and anti-downgrade contract on 2026-08-06.**
   `checksums.txt`, then use the independent mihomo and zashboard release tags
   and SHA-256 pins recorded by that bundle. Keep checksum verification,
   fail-before-publish checks, staging, and the no-branch-fallback guarantee for
-  both channels. A failure before publication leaves the host untouched; a
-  failure during publication is reported as a partial installation and is not
-  rolled back automatically.
+  both channels. A failure before project publication leaves 5gpn-managed
+  services, accounts, units, and live files untouched; dependency installation
+  may already have changed shared distribution package state. A failure during
+  publication is reported as a partial installation and is not rolled back
+  automatically.
 - Official resolution must ignore prereleases. Beta resolution must select only
   valid `X.Y.Z-beta.N` prereleases whose base version is newer than latest
   official. It must not silently fall back or downgrade when no such beta
@@ -351,38 +403,38 @@ channel-switch and anti-downgrade contract on 2026-08-06.**
   installer; it never uses stable templates with beta binaries. Stable releases
   that predate this mechanism still require the remote verified quick installer.
 - A normal channel transition uses the selected release's complete verified
-  installer bundle. It preserves a valid current mihomo config byte-for-byte.
-  Moving from the retired multi-process design to the monolith is a separate,
-  explicit checked migration: legacy anchors and the old interception inbound
-  are removed from a candidate, panel rules are rewritten to exclude `INNER`,
-  the fixed UDP/443 guard is present, and the candidate passes pinned
-  `5gpn-mihomo -t` before atomic publication.
-- The installer still accepts only the one current `dns.env` key schema. The
-  retired `DNS_EGRESS_RESOLVER` key is not ignored or migrated. Every pre-v5
-  deployment, including `0.0.19`, `test-env`, and `kfchost`, must first use its
-  old v4 control plane to snapshot active state, disable MITM, remove the old
-  managed rules, and retain a separate clean post-disable baseline. A fixed
-  explicit rebuild then preserves the listener, SOCKS credentials, TLS paths,
-  upstream proxy, and protocol booleans in a checked, atomically published,
-  disabled empty v5 document. Historical sidecar and DNS routing checks must
-  both pass against the clean mihomo file before the legacy config and env
-  candidates publish with explicit previous-file backups. Those backups are
-  operator recovery material, not an automatic installer rollback. Never delete
-  v4 and accept randomized credentials against a preserved
-  mihomo file. Extensions are re-imported and reviewed; this is not a lossless
-  automatic migration.
-- `--beta upgrade-reset-mihomo` is the only installer upgrade mode authorized to
-  replace the full operator mihomo config. It requires an existing installation,
-  a pinned beta bundle, and an interactive TTY confirmation. It must back up the
-  old bytes, validate the complete current seed with pinned `5gpn-mihomo -t`, publish
-  atomically inside the install transaction, and state that custom proxies,
-  providers, groups, and rules require manual restoration. Normal install,
-  reinstall, and `configure` never choose this reset.
+  installer bundle and supports only a deployment that already conforms to the
+  current identity, path, key, and document schemas. It preserves a valid
+  current mihomo config byte-for-byte.
+- Compatibility preflight finishes before any managed 5gpn service stop or
+  project publication. A retired unit, account, group, binary, state path,
+  environment key, document, certificate role, or mihomo construct is a hard
+  error. The check is read-only: the installer reports the footprint but never
+  stops, renames, deletes, rewrites, imports, adopts, or changes permissions on
+  it.
+- Exact non-sensitive installation roots may claim a safe populated directory
+  when no marker exists. This fixed-path claim is not legacy adoption: known
+  legacy children are still scanned and rejected before publication, invalid or
+  retired markers are never replaced, and canonical-path, metadata, symlink,
+  hardlink, special-entry, nested-mount, current-marker, and recursive-deletion
+  checks remain mandatory. Certificate roots, the interception CA, UI trees,
+  and temporary paths remain strict.
+- The installer provides no in-place legacy migration, retired-component
+  teardown, state salvage, schema conversion, or compatibility alias. Reusing a
+  host with such a footprint requires explicit operator decommissioning or a
+  rebuild outside the installer, followed by a fresh installation.
+- Explicit `mihomo-reset` may replace the full operator mihomo config only on a
+  current-schema deployment. It backs up the old bytes, validates the complete
+  current seed with pinned `5gpn-mihomo -t`, publishes atomically, and states
+  that custom proxies, providers, groups, and rules require manual restoration.
+  It is not a legacy conversion path; normal install, reinstall, and `configure`
+  never choose this reset.
 - A successful beta channel switch does not define or promise a direct switch
   back to the official channel. Operators who need reversal retain a pre-switch
-  system snapshot. Pre-publication failure leaves the host untouched; once
-  publication begins, a failure is reported as partial and no automatic
-  installer rollback is claimed.
+  system snapshot. Pre-publication failure leaves 5gpn-managed services,
+  accounts, units, and live files untouched but does not roll back shared
+  dependency package changes; once publication begins, a failure is reported as
+  partial and no automatic installer rollback is claimed.
 - The channel option affects only 5gpn's first-party release. Existing explicit
   third-party version pins remain independent.
 
@@ -415,9 +467,8 @@ Future release-channel changes must update all affected surfaces together:
   workflow, while retaining `.github/workflows/checks.yml` as the common gate;
 - installer and quick-installer safety tests, including default-stable behavior,
   explicit beta selection, older-beta downgrade refusal, malformed or cross-channel tags, missing beta
-  releases, exact-tag pinning, checksum enforcement, and a frozen raw `0.0.13`
-  fixture whose test performs the explicit checked rebuild before covering both
-  core-preserve and explicit-reset paths plus the fail-before-publish and
+  releases, exact-tag pinning, checksum enforcement, current-schema reinstall,
+  explicit reset, unsupported-legacy fail-before-publication behavior, and the
   partial-publication boundaries for newly created CA/state roots and service
   accounts;
 - `README.md` installation and release documentation; and

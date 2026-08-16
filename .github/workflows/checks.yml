@@ -118,7 +118,6 @@ jobs:
               print "  - {name: gateway80, type: tunnel, listen: 203.0.113.10, port: 80, network: [tcp], target: console.example.test:80}"
               print "  - {name: gateway8080, type: tunnel, listen: 203.0.113.10, port: 8080, network: [tcp], target: console.example.test:8080}"
               print "  - {name: gateway8443, type: tunnel, listen: 203.0.113.10, port: 8443, network: [tcp], target: console.example.test:8443}"
-              print "  - {name: gateway5060, type: tunnel, listen: 203.0.113.10, port: 5060, network: [tcp, udp], target: console.example.test:5060}"
               next
             }
             {
@@ -138,11 +137,7 @@ jobs:
           # its own home, so a bare -t rejects a config that runs fine.
           export SAFE_PATHS=/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui
           /tmp/mihomo -t -f "$runtime/config.yaml" -d "$runtime"
-          /tmp/mihomo -t -f tests/fixtures/stable-0.0.13/mihomo-config.yaml -d "$runtime"
-          grep -Fq 'name: gateway5060' "$runtime/config.yaml"
-          grep -Fq 'target: console.example.test:5060' "$runtime/config.yaml"
-          grep -Fq 'QUIC: { ports: [443, 5060] }' "$runtime/config.yaml"
-          grep -Fq 'AND,((DOMAIN,console.example.test),(DST-PORT,5060)),REJECT' "$runtime/config.yaml"
+          ! grep -Fq '5060' "$runtime/config.yaml"
           # The UI is served by this process from the path the unit grants, and
           # the seed has to say so: without external-ui the controller serves no
           # bundle, and with a path the unit does not list the service cannot
@@ -166,13 +161,6 @@ jobs:
           # It is independent of the MITM master switch and has no product
           # management off switch.
           grep -Fq 'AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' "$runtime/config.yaml"
-          sed \
-            -e '/name: gateway5060/d' \
-            -e 's/, 5060//g' \
-            -e '/DST-PORT,5060/d' \
-            "$runtime/config.yaml" > "$runtime/config-speedtest-5060-disabled.yaml"
-          ! grep -Fq '5060' "$runtime/config-speedtest-5060-disabled.yaml"
-          /tmp/mihomo -t -f "$runtime/config-speedtest-5060-disabled.yaml" -d "$runtime"
       # The released monolith intentionally refuses to start outside the
       # systemd 257 private delegated cgroup boundary. A GitHub-hosted runner
       # cannot satisfy that production startup contract. The regression script

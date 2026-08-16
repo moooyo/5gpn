@@ -73,12 +73,8 @@ expected_bundle=(
     scripts/gen-ios-profile.sh
     scripts/intercept-cert-renew.sh
     scripts/renew-hook.sh
-    scripts/migrate-panel-to-console.sh
-    scripts/migrate-state-to-monolith.sh
-    scripts/migrate-to-monolith.sh
     docs/architecture.md
     docs/native-extensions.md
-    docs/pre-v5-upgrade.md
     tests/integration-smoke.md
 )
 expected_executables=(
@@ -88,29 +84,13 @@ expected_executables=(
     scripts/gen-ios-profile.sh
     scripts/intercept-cert-renew.sh
     scripts/renew-hook.sh
-    scripts/migrate-panel-to-console.sh
-    scripts/migrate-state-to-monolith.sh
-    scripts/migrate-to-monolith.sh
 )
 expected_installed_scripts=(
     cert-renew.sh
     gen-ios-profile.sh
     intercept-cert-renew.sh
-    migrate-panel-to-console.sh
-    migrate-state-to-monolith.sh
-    migrate-to-monolith.sh
     renew-hook.sh
 )
-expected_retired_installed_scripts=(
-    export-journal.sh
-    package-beta.sh
-    reload-rules.sh
-    run-suites.sh
-    setup-tgbot.sh
-    update-lists.sh
-    upgrade-to-beta.sh
-)
-
 mapfile -t actual_bundle < <(extract_workflow_array bundle_files)
 mapfile -t actual_executables < <(extract_workflow_array executable_files)
 
@@ -124,19 +104,13 @@ mapfile -t actual_installed_scripts < <(awk '
 ' "$INSTALL")
 compare_exact_list "gateway-installed script manifest" expected_installed_scripts actual_installed_scripts
 
-mapfile -t actual_retired_installed_scripts < <(awk '
-    /^[[:space:]]*local -a retired_installed_scripts=\([[:space:]]*$/ { inside=1; next }
-    inside && /^[[:space:]]*\)[[:space:]]*$/ { exit }
-    inside { gsub(/^[[:space:]]+|[[:space:]]+$/, ""); if ($0 != "") print }
-' "$INSTALL")
-compare_exact_list "retired gateway-script cleanup manifest" \
-    expected_retired_installed_scripts actual_retired_installed_scripts
 install_files_body="$(sed -n '/^install_files()/,/^}/p' "$INSTALL")"
-if grep -Fq 'for script_name in "${retired_installed_scripts[@]}"' <<<"$install_files_body" \
-   && grep -Fq 'rm -f -- "$retired_path"' <<<"$install_files_body"; then
-    pass "installed-tree cleanup consumes the retired script manifest"
+if grep -Fq 'clear_owned_scope "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"' <<<"$install_files_body" \
+   && grep -Fq '"$SCRIPTS_DIR"' <<<"$install_files_body" \
+   && ! grep -Fq 'retired_installed_scripts' <<<"$install_files_body"; then
+    pass "gateway script directory is replaced from the exact current manifest"
 else
-    fail "retired gateway scripts are declared but not removed from the installed tree"
+    fail "gateway script publication retains a historical-script compatibility list"
 fi
 
 installed_missing_from_bundle=()
@@ -246,10 +220,10 @@ mapfile -t published_files < <(
     find "$PUBLISHED_ROOT" -type f -printf '%P\n' | LC_ALL=C sort
 )
 compare_exact_list "published installer archive manifest" expected_bundle published_files
-if ((${#published_files[@]} == 23)); then
-    pass "published installer archive contains exactly 23 files"
+if ((${#published_files[@]} == 19)); then
+    pass "published installer archive contains exactly 19 files"
 else
-    fail "published installer archive contains ${#published_files[@]} files instead of 23"
+    fail "published installer archive contains ${#published_files[@]} files instead of 19"
 fi
 
 declare -A executable_lookup=()
@@ -269,9 +243,9 @@ for file in "${published_files[@]}"; do
         [[ "$mode" == 644 ]] || mode_failures+=("$file=$mode (expected 644)")
     fi
 done
-if ((executable_count == 9 && nonexecutable_count == 14 \
+if ((executable_count == 6 && nonexecutable_count == 13 \
       && ${#mode_failures[@]} == 0)); then
-    pass "published modes are exactly nine 0755 files and fourteen 0644 files"
+    pass "published modes are exactly six 0755 files and thirteen 0644 files"
 else
     fail "published archive modes differ from the approved policy: ${mode_failures[*]-}"
 fi

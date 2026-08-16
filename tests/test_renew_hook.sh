@@ -212,26 +212,12 @@ if find "$CERT_ROOT" \( -name '.new.*' -o -name '.current.*' \) \
 fi
 pass "valid Cloudflare pair and renewed profiles publish into their live paths"
 
-# A structurally valid web role may remain from an older installation. It is
-# accepted as retained migration evidence, but is not one of the renewed roles.
-legacy_generation="$CERT_ROOT/web/generations/generation-20000101T000000Z-1-1"
-mkdir -p "$legacy_generation"
-chmod 0750 "$CERT_ROOT/web" "$CERT_ROOT/web/generations" "$legacy_generation"
-chmod g-s "$CERT_ROOT/web" "$CERT_ROOT/web/generations" "$legacy_generation"
-printf '%s\n' "${CERT_ROLE_VALUE_PREFIX}:web" > "$CERT_ROOT/web/$CERT_ROLE_MARKER"
-cp "$CERT_ROOT/dot/current/fullchain.pem" "$legacy_generation/fullchain.pem"
-cp "$CERT_ROOT/dot/current/privkey.pem" "$legacy_generation/privkey.pem"
-chmod 0644 "$CERT_ROOT/web/$CERT_ROLE_MARKER"
-chmod 0640 "$legacy_generation/fullchain.pem" "$legacy_generation/privkey.pem"
-ln -s generations/generation-20000101T000000Z-1-1 "$CERT_ROOT/web/current"
-legacy_target="$(readlink -- "$CERT_ROOT/web/current")"
-legacy_checksum="$(cksum "$legacy_generation/fullchain.pem" "$legacy_generation/privkey.pem")"
-renew_hook_main >/dev/null
-[[ "$(readlink -- "$CERT_ROOT/web/current")" == "$legacy_target" \
-   && "$(cksum "$legacy_generation/fullchain.pem" "$legacy_generation/privkey.pem")" == "$legacy_checksum" ]] \
-    || fail "renew hook refreshed or replaced retained legacy web material"
+mkdir -p "$CERT_ROOT/web"
+if renew_hook_main >/dev/null 2>&1; then
+    fail "renew hook accepted a retired web certificate role"
+fi
 rm -rf -- "$CERT_ROOT/web"
-pass "renew hook validates but does not refresh retained legacy web material"
+pass "renew hook rejects retired certificate roles"
 
 # SIGKILL cannot run traps. Root-owned, structurally valid unpublished
 # candidates from an interrupted prior run are scrubbed under the lock before

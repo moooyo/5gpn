@@ -256,8 +256,8 @@ controller rule-management API refuses to disable it. A fallback-capable client 
 retry over TCP and enter the normal capture path. An H3-only client fails.
 
 This guard covers only UDP destination port 443 that reaches the gateway. It
-does not disable ordinary UDP forwarding or QUIC sniffing on other configured
-ports such as `:5060`, and it is not a host firewall.
+does not disable ordinary UDP forwarding or QUIC sniffing on other explicitly
+operator-configured ports, and it is not a host firewall.
 
 ## Typed settings
 

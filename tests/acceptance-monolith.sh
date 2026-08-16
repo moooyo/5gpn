@@ -2,11 +2,9 @@
 # Post-deploy acceptance for the 5gpn monolith. Read-only: it asks the running
 # gateway questions and checks the answers. Nothing here changes state.
 #
-# It must pass on a gateway that was *installed*, not only on one migrated from
-# the three-process layout. Three checks used to assert migrated content — an
+# It must pass on a freshly installed gateway. Three checks once assumed an
 # enabled block rule, a non-empty policy, and a subscription with fetched
-# entries — none of which a fresh gateway has by design, so they failed forever
-# and 17/20 became a number nobody could read a regression out of.
+# entries, none of which a fresh gateway has by design.
 #
 # They are now conditional and report `--` when there is nothing to assert
 # against. What that costs is real and worth naming: on a gateway with no
@@ -80,9 +78,8 @@ if [ "$n" = "0" ]; then ok "HTTPS/SVCB is withheld"; else bad "an HTTPS record w
 
 # --- the ordered policy is live ------------------------------------------
 head_ "policy"
-# Only asserted when a policy exists. A gateway that was installed rather than
-# migrated has no rules by design, and demanding one here asserted a *migrated*
-# gateway from a suite that also has to pass on a fresh one.
+# Only asserted when a policy exists. A fresh gateway may have no operator
+# block rules, so demanding one would make this acceptance suite unusable.
 blocked="$(jq -r '[.policy.rules[]?|select(.intent=="block" and .enabled and .kind=="domain-suffix")][0].value' /etc/5gpn/mihomo/5gpn/dns.json)"
 if [ -n "$blocked" ] && [ "$blocked" != "null" ]; then
   rc="$(dig +timeout=5 @127.0.0.1 -p 5353 "$blocked" A 2>/dev/null | grep -m1 'status:' | sed -E 's/.*status: ([A-Z]+).*/\1/')"

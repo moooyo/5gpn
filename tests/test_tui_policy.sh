@@ -55,14 +55,14 @@ grep -Fq 'DNS_CHINA_DEFAULT="223.5.5.5"' "$INSTALL" \
     && grep -Fq 'DNS_TRUST_DEFAULT="22.22.22.22"' "$INSTALL" \
     && grep -Fq 'DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"' "$INSTALL" \
     || fail "installer operational DNS/ECS defaults drifted"
-# The upstream groups live in dns.json, not dns.env. The seeder consumes the
-# operational defaults, refuses to clobber an operator-configured document, and
-# carries a pre-existing dns.env value forward once so the first upgrade past
-# this change does not reset a hand-edited value.
+# The upstream groups live in dns.json, not dns.env. A missing current document
+# is seeded from the current operational defaults; retired dns.env values are
+# never imported. An existing document is preserved apart from installer-owned
+# coordinates below.
 seed_fn="$(sed -n '/^seed_dns_document() {/,/^    ok "Seeded the DNS document/p' "$INSTALL")"
 render_fn="$(sed -n '/^render_fresh_dns_document()/,/^}/p' "$INSTALL")"
-printf '%s' "$seed_fn" | grep -Fq 'china="${prev_china:-$DNS_CHINA_DEFAULT}"' \
-    && printf '%s' "$seed_fn" | grep -Fq 'trust="${prev_trust:-$DNS_TRUST_DEFAULT}"' \
+printf '%s' "$seed_fn" | grep -Fq 'local china="$DNS_CHINA_DEFAULT" trust="$DNS_TRUST_DEFAULT"' \
+    && printf '%s' "$seed_fn" | grep -Fq 'local ecs="$DNS_CHINA_ECS_DEFAULT"' \
     || fail "DNS document seeder does not consume the operational upstream defaults"
 # An existing document is refreshed, not replaced: the installer owns the
 # certificate pair and the gateway, and the console owns policy, upstreams and

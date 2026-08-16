@@ -21,10 +21,8 @@ current architecture is `docs/architecture.md`.
   looks fabricated — treat that warning as a signal the fixture is wrong, not
   as noise.
 - At least two controllable upstreams when testing sequential fallback.
-- For an upgrade acceptance run, preserve active `dns.env`, mihomo YAML, and
-  the complete mihomo `5gpn/` state directory before mutation. A legacy
-  multi-process deployment must follow `docs/pre-v5-upgrade.md` and then the
-  checked monolith migration; do not improvise a partial schema edit.
+- For a current-schema reinstall acceptance run, preserve active `dns.env`,
+  mihomo YAML, and the complete mihomo `5gpn/` state directory before mutation.
 
 Capture before-state for host-owned facilities. In particular:
 
@@ -80,8 +78,7 @@ sudo cp -a /etc/5gpn/mihomo/config.yaml /tmp/mihomo-config.before
   - `:853/tcp` owned by mihomo;
   - `127.0.0.1:5353/udp` and `127.0.0.1:5354/tcp+udp`;
   - console/controller `127.0.0.1:443/tcp`;
-  - mihomo TCP `:80`, `:443`, `:5060`, `:8080`, and `:8443`, plus UDP `:443`
-    and `:5060`, on every
+  - mihomo TCP `:80`, `:443`, `:8080`, and `:8443`, plus UDP `:443`, on every
     configured local listen IP when testing a fresh or explicitly reset seed.
 - [ ] Nothing exposes public DNS `:53`, a DoH handler, or a standalone profile
   port. TCP `:8443` is mihomo application ingress, not DoH.
@@ -272,17 +269,10 @@ done
 - [ ] Fresh/reset seeds forward sniffable TCP `:8080` and `:8443` traffic to
   the visible HTTP Host or TLS SNI on the same destination port. No-SNI,
   unrecognized raw TCP, and UDP on those ports fail closed.
-- [ ] A fresh or explicitly reset seed reports `speedtest-5060` enabled and has
-  TCP and UDP `:5060` listeners on every configured gateway address, with
-  `5060` present in the HTTP, TLS, and QUIC sniffer port sets and the exact
-  console `:5060` reject immediately after the canonical panel-reject
-  prefix. Disabling it requires confirmation and removes only those canonical
-  objects; re-enabling restores them. Restrict the test source in the provider
-  security group.
-- [ ] On the enabled module, HTTP Host and TLS SNI preserve destination port
-  `5060`. Test QUIC only against an origin that actually serves supported QUIC
-  on `:5060`. A raw UDP packet and a raw TCP/SIP connection fail closed; they
-  are not successful Speedtest acceptance cases.
+- [ ] A fresh or explicitly reset seed contains no TCP/UDP `:5060` listener,
+  sniffer entry, panel guard, module state, or product API. If an operator adds
+  a custom listener to the complete YAML, it remains ordinary operator-owned
+  mihomo configuration and is preserved by reinstall.
 - [ ] With the reset seed active, send at least six malformed or non-TLS TCP
   connections to the gateway `:443` listener, then immediately verify both a
   valid `console.<base>` TLS request and a different gateway-steered TLS SNI.
@@ -294,9 +284,9 @@ done
   rule. Mihomo logs show no attempted dial to `127.0.0.1:80`; HTTPS through
   the gateway `:443` listener still reaches the console successfully.
 - [ ] UDP traffic that remains identified as `console.<base>` is rejected
-  promptly before its panel `DIRECT` rule. QUIC on another configured port,
-  including the optional `:5060` ingress, still follows operator data-plane
-  rules after successful sniffing.
+  promptly before its panel `DIRECT` rule. QUIC on another explicitly
+  operator-configured port still follows operator data-plane rules after
+  successful sniffing.
 - [ ] The reset seed contains no `REJECT-DROP`. Non-allowlisted zashboard and
   anti-loop traffic match `REJECT`, create no outbound dial retries, and leave
   no connection tracker after the client closes.
@@ -311,12 +301,6 @@ done
   forwarding setup.
 
 ## 8. Config apply and concurrency
-
-- [ ] A stale ingress-module revision, a partial/custom `:5060` shape, or a
-  missing, late, or bypassed fail-closed private/loopback guard is rejected
-  without changing the live file. Force a module hot-apply failure and verify
-  the previous exact bytes are restored and reapplied. Disabling a canonical
-  module removes only its exact listeners, sniffer entries, and panel guards.
 
 - [ ] Hot-applying a complete payload through `PUT /configs` changes only the
   live runtime: the operator YAML hash and mode remain unchanged, and reloading
@@ -363,28 +347,53 @@ done
   release. An older beta line, missing metadata, a normal release carrying a
   beta-looking tag, and a beta-tagged bundle selected for the official channel
   all fail before deployment mutation and never fall back across channels.
-- [ ] Starting from a clean legacy multi-process fixture, follow the historical
-  pre-v5 runbook without shortcuts, then run the checked monolith migration.
-  The candidate removes only retired runtime-overlay anchors and the old
-  interception inbound boundary, rewrites panel exclusions to `IN-TYPE,INNER`,
-  contains exactly one fixed UDP/443 guard, and passes the pinned `5gpn-mihomo -t`
-  before atomic publication. Preserve recoverable copies throughout.
-- [ ] After migration, exactly one long-running mihomo process owns DNS,
-  forwarding, interception, Telegram, and the controller. The migrated DNS,
-  extension, catalog, and bot documents remain readable; the operator-owned
-  egress configuration remains intact; retired services cannot restart or bind
-  their old ports.
+- [ ] Introduce each unsupported legacy footprint independently: every retired
+  unit definition (active or inactive), a generic `mihomo` user only, a generic
+  `mihomo` group only, each old project account/group, every removed migration
+  helper path, an unprefixed binary, `mihomo/gpn` state, a retired `dns.env`
+  key, each retired document/role, and each retired mihomo rule/inbound.
+  Installer preflight reports the exact conflict before claiming a root,
+  stopping a managed 5gpn service, changing a managed account, or publishing a
+  live 5gpn file. Content hashes, link targets, hardlink counts, ownership,
+  modes, account databases, and unit state remain unchanged.
+- [ ] Place valid current runtime documents in the existing state directory and
+  confirm the digest-verified staged Core runs `5gpn-state validate
+  --owner-uid <proven-uid>` before any publication. Repeat with each document
+  missing, which remains a valid seed input and is not created. Then corrupt
+  each document independently and vary owner, mode, link count, and symlink
+  metadata; preflight fails read-only before root claims, account/service
+  mutation, or live binary replacement. The installer contains no parallel
+  shell decoder/validator for existing documents; missing-document seed
+  rendering remains separate.
+- [ ] On a fresh host, create an incompatible same-named `fivegpn` user/group
+  without a current marker or marked main unit; preflight rejects it unchanged.
+  Repeat with safe current marker provenance and marked current-unit provenance:
+  exclusive system-range IDs may be journaled and repaired. A normal-range ID,
+  UID/GID alias, shared membership, unsafe provenance, or malformed journal is
+  always rejected. Interrupt after journal publication and again after account
+  removal; the next run resumes reconciliation without adopting unrelated
+  ownership. No other identity may claim the recorded IDs, while an exact
+  surviving `fivegpn` group may keep its recorded GID. The journal clears only
+  after the managed-root sweep succeeds. A group-only journal proceeds only
+  when all three runtime documents are absent; any present document requires a
+  proven current or journaled owner UID.
+- [ ] For each exact populated unmarked fixed root (`/opt/5gpn`, `/etc/5gpn`,
+  `/var/lib/5gpn`, and `/var/lib/5gpn-intercept`), inject a symlink, hardlinked
+  regular file, FIFO/socket/device, or nested mount independently. Preflight
+  refuses the claim and publishes no marker. A safe regular-file-only fixture
+  remains byte-for-byte intact when claimed.
 - [ ] Inject failures before candidate validation, state publication, and
-  service readiness. A failure before publication leaves the host untouched; a
-  failure during publication is reported as partial and never claims a rollback
-  that did not occur. Unowned lookalike paths remain untouched.
+  service readiness. A failure before project publication leaves managed 5gpn
+  services, accounts, units, and live files untouched, while any shared distro
+  package changes are reported and not presented as rolled back. A failure
+  during publication is reported as partial and never claims a rollback that
+  did not occur. Unowned lookalike paths remain untouched.
 - [ ] With a future stamped stable fixture that includes cross-channel
   delegation, invoke its installed `5gpn --beta` and verify that it executes the
   root-owned quick installer retained from the verified bundle, selects one
   exact beta tag, and uses only that tag's scripts and artifacts. A missing,
   symlinked, or non-root-owned retained quick installer fails closed and directs
-  the operator to the remote verified quick path. Do not expect this behavior
-  from the historical `0.0.13` installer.
+  the operator to the remote verified quick path.
 - [ ] GitHub still reports the official release through `/releases/latest` after
   publishing a beta. The installed installer records its exact 5gpn tag, while
   mihomo and zashboard match the independent version and digest coordinates
@@ -397,15 +406,12 @@ done
 - [ ] Custom cleanup paths outside 5gpn defaults are rejected unless canonical,
   safe, and marked as 5gpn-owned. `/`, system directories, and unowned paths are
   never recursively deleted.
-- [ ] Exact old names are migration inputs only. With owned legacy evidence,
-  safe legacy identity shapes for `mihomo`, `gpn-dns`, `gpn-intercept`,
-  `5gpn-overlay-ctl`, and `5gpn-overlay-gen` are removed non-interactively after
-  the old unit is stopped and process use is excluded. An unsafe or ambiguous
-  host identity is preserved with a warning rather than guessed to be ours.
-- [ ] The owned old `mihomo.service`, `/opt/5gpn/bin/mihomo`, and
-  `/etc/5gpn/mihomo/gpn` migrate to `5gpn-mihomo.service`,
-  `/opt/5gpn/bin/5gpn-mihomo`, and `/etc/5gpn/mihomo/5gpn`. If both state
-  directories contain data, installation fails before mutating either.
+- [ ] A host containing any exact old runtime name is rejected read-only. The
+  installer does not disable units, delete accounts/groups, rename binaries or
+  state directories, rewrite configuration, or adopt their ownership markers.
+- [ ] `upgrade-reset-mihomo` is absent from both installer entrypoints and help
+  output. `mihomo-reset` is the sole explicit whole-file reset and is available
+  only as the current root management command.
 
 ## 10. Certificate renewal and recovery
 
@@ -425,11 +431,10 @@ done
   instead of disabling unrelated renewal. Forced failure restores the exact
   pre-transaction enabled/active state; an already active `certbot.service`
   also aborts before lineage inspection.
-- [ ] Record an enabled/active distro `certbot.timer`, complete the first owned
-  takeover, and verify the root-only saved state survives an owned reinstall
-  without changing. Switch to debug or uninstall normally: the original
-  enabled/active state is restored exactly and the saved takeover state is
-  removed.
+- [ ] Inject a failure after the distro timer is disabled but before
+  `5gpn-certbot-renew.timer` is enabled and active; the original distro timer
+  enablement and activity are restored. Once scoped renewal is active, the
+  transaction commits ownership and keeps the unscoped distro timer disabled.
 - [ ] In `cloudflare` mode, the certificate has the exact apex `<base>` and
   `*.<base>` SAN shape. Initial issuance and a due timer renewal use Cloudflare
   DNS-01 without stopping mihomo or binding an ACME `:80` listener.
@@ -458,20 +463,18 @@ done
   exits without reaching the certificate lock or Certbot. The interception
   certificate oneshot still succeeds during the installer's explicit
   certificate-lock handoff.
-- [ ] A successful production renewal runs the deploy hook, updates the current
-  `dot` and `console` role copies, leaves any validated legacy `web` tree
-  untouched, and atomically regenerates/signs both iOS profiles in
-  `/opt/5gpn/ui`.
-- [ ] After a fresh install and an in-place upgrade, `/etc/5gpn` is
+- [ ] A successful production renewal runs the deploy hook, updates only the
+  current `dot` and `console` role copies, and atomically regenerates/signs both
+  iOS profiles in `/opt/5gpn/ui`. A retired `web` role fails validation before
+  publication.
+- [ ] After a fresh install and a current-schema reinstall, `/etc/5gpn` is
   `root:root` mode `0755`, `/etc/5gpn/cert` is `root:root` mode `0751`, and
   its root marker is `root:root` mode `0644`. Verify the runtime traversal
   contract directly:
   `sudo -u fivegpn test -r /etc/5gpn/cert/dot/current/fullchain.pem` and
   `sudo -u fivegpn test -r /etc/5gpn/cert/console/current/privkey.pem` both succeed.
-  Both use `fivegpn`, not one account each: the DoT listener moved into the same
-  process that serves the controller, so one account reads every certificate the
-  gateway presents. A `dot` role still readable only by a legacy DNS account is the shape
-  that let a fresh install come up with no DNS ingress and no error.
+  Both use `fivegpn`: the same process serves DoT and the controller, so one
+  account reads every certificate the gateway presents.
   Neither runtime account can rename the root-owned `cert`, `mihomo`,
   `intercept`, or interception `tls` directory through its sticky parent.
 - [ ] New TLS handshakes observe renewed files by mtime without daemon restart.
@@ -522,9 +525,9 @@ into recorded command output, screenshots, or issue logs.
 - [ ] A client offered H3 receives no forwarded UDP/443 response. A client that
   supports fallback retries over TCP and reaches the same origin through
   HTTP/H1/H2 capture; an H3-only client fails.
-- [ ] Ordinary UDP remains unaffected. The optional `:5060` ingress still
-  recognizes supported QUIC Host/SNI and follows operator rules; raw UDP remains
-  outside the HTTP interception contract.
+- [ ] Ordinary UDP remains unaffected. Explicitly operator-configured QUIC
+  ingress on a non-443 port follows operator rules; raw UDP remains outside the
+  HTTP interception contract.
 
 - [ ] On a fresh install the Console MITM master is off and there are no
   installed extensions. The engine is loaded inside mihomo and exposes no

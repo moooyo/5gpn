@@ -85,25 +85,15 @@ fi
 
 unit_conflicts="$TMP/systemd-conflicts"
 mkdir -p "$unit_conflicts"
-if ! journal_export_instances_clear "$unit_conflicts"; then
-    fail "empty systemd search root was treated as an exporter conflict"
-fi
-touch "$unit_conflicts/5gpn-journal@5gpn-dns.service"
-if journal_export_instances_clear "$unit_conflicts"; then
-    fail "pre-existing exact journal exporter instance was accepted"
-else
-    pass "exact journal exporter instance conflicts are rejected before legacy cleanup"
-fi
-rm -f -- "$unit_conflicts/5gpn-journal@5gpn-dns.service"
-mkdir "$unit_conflicts/5gpn-dns.service.d"
-if systemd_unit_has_dropins 5gpn-dns.service "$unit_conflicts"; then
+mkdir "$unit_conflicts/5gpn-mihomo.service.d"
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
     pass "systemd unit drop-ins invalidate the project ownership fingerprint"
 else
     fail "systemd unit drop-in was ignored by ownership validation"
 fi
-rmdir "$unit_conflicts/5gpn-dns.service.d"
+rmdir "$unit_conflicts/5gpn-mihomo.service.d"
 mkdir "$unit_conflicts/5gpn-.service.d"
-if systemd_unit_has_dropins 5gpn-dns.service "$unit_conflicts" \
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts" \
    && [[ "$SYSTEMD_UNIT_CONFLICT_REASON" == *5gpn-.service.d* ]]; then
     pass "systemd dash-prefix drop-ins invalidate managed unit ownership"
 else
@@ -116,7 +106,7 @@ cat > "$unit_conflicts/service.d/10-host-defaults.conf" <<'EOF'
 [Service]
 TimeoutStopSec=90s
 EOF
-if systemd_unit_has_dropins 5gpn-dns.service "$unit_conflicts"; then
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
     fail "unrelated global service default was treated as an execution override"
 else
     pass "unrelated global service defaults remain compatible"
@@ -126,7 +116,7 @@ cat > "$unit_conflicts/service.d/20-exec.conf" <<'EOF'
 ExecStart=
 ExecStart=/tmp/not-5gpn
 EOF
-if systemd_unit_has_dropins 5gpn-dns.service "$unit_conflicts" \
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts" \
    && [[ "$SYSTEMD_UNIT_CONFLICT_REASON" == *global*service.d* ]]; then
     pass "global service execution overrides invalidate managed unit ownership"
 else
@@ -370,28 +360,6 @@ else
     fail "fixed-root marker was written into an untrusted empty directory"
 fi
 
-if (
-    CONF_DIR="$TMP/fixed-conf"
-    # This exact old group is accepted only to claim a legacy configuration root.
-    mkdir -p "$CONF_DIR"
-    printf '%s\n' "$CONF_OWNERSHIP_VALUE" > "$CONF_DIR/$CONF_OWNERSHIP_MARKER"
-    getent() {
-        [[ "$1" == group && "$2" == gpn-dns ]] && printf 'gpn-dns:x:4242:\n'
-    }
-    file_uid() { printf '0\n'; }
-    file_gid() {
-        [[ "$1" == "$CONF_DIR" ]] && printf '4242\n' || printf '0\n'
-    }
-    file_mode() {
-        [[ "$1" == "$CONF_DIR" ]] && printf '3771\n' || printf '644\n'
-    }
-    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"
-); then
-    pass "legacy sticky configuration root remains valid for controlled migration"
-else
-    fail "sticky configuration-root design was rejected"
-fi
-
 # That sticky root is also where markers get published, and a file created in a
 # setgid directory inherits its group. The marker must therefore be chowned to
 # root:root before it is renamed into place, or the claim deletes the marker it
@@ -427,13 +395,12 @@ else
     fail "remove_unit read a caller-scope variable or touched systemd"
 fi
 
-# `5gpn-journal@.service` is a template. systemd cannot stop or disable a name
-# with no instance, so the stop-and-disable gate refused to delete a unit file
-# that was always safe to delete, and the same empty status answers made a clean
-# rollback report itself incomplete. An instance name must NOT take that path.
-if unit_is_template 5gpn-journal@.service \
+# A template unit cannot be stopped or disabled without an instance, so removal
+# must identify template names before the stop-and-disable path. An instance
+# name must not take that shortcut.
+if unit_is_template example@.service \
    && unit_is_template example@.timer \
-   && ! unit_is_template 5gpn-journal@5gpn-mihomo.service \
+   && ! unit_is_template example@worker.service \
    && ! unit_is_template 5gpn-mihomo.service; then
     pass "a template name is told apart from its instances and from plain units"
 else
@@ -506,7 +473,7 @@ else
 fi
 
 certificate_boundary_modes_ok=1
-for initial_mode in 755 2771; do
+for initial_mode in 755 3771; do
     if ! (
         boundary_mode="$initial_mode"
         CONF_DIR="$TMP/early-cert-conf-$initial_mode"
@@ -543,7 +510,7 @@ if [[ "$certificate_boundary_modes_ok" == 1 \
    && -n "$prep_boundary_line" && -n "$install_files_line" && -n "$intercept_cert_line" \
    && "$prep_boundary_line" -lt "$install_files_line" \
    && "$prep_boundary_line" -lt "$intercept_cert_line" ]]; then
-    pass "fresh 0755 and legacy 2771 config roots seal as root:root 0755 before certificate helpers"
+    pass "fresh 0755 and current 3771 config roots seal as root:root 0755 before certificate helpers"
 else
     fail "certificate publication can run before the sticky config boundary"
 fi
@@ -794,10 +761,10 @@ if (
     }
     printf '#!/bin/sh\nexit 0\n' > "$GUM_BIN"
     chmod 0755 "$GUM_BIN"
-    printf 'runtime\n' > "$BIN_DIR/5gpn-dns"
+    printf 'runtime\n' > "$BIN_DIR/obsolete-helper"
     printf 'runtime\n' > "$BASE_DIR/scripts/helper"
     remove_runtime_preserving_gum >/dev/null
-    [[ -x "$GUM_BIN" && ! -e "$BIN_DIR/5gpn-dns" && ! -e "$BASE_DIR/scripts" ]]
+    [[ -x "$GUM_BIN" && ! -e "$BIN_DIR/obsolete-helper" && ! -e "$BASE_DIR/scripts" ]]
 ); then
     pass "uninstall preserves Gum and removes the remaining runtime"
 else
@@ -870,21 +837,19 @@ listeners="$(render_mihomo_listeners '10.20.30.40,10.20.30.41' 'console.example.
    && "$(grep -Fc 'port: 80,' <<<"$listeners")" == 2 \
    && "$(grep -Fc 'port: 8080,' <<<"$listeners")" == 2 \
    && "$(grep -Fc 'port: 8443,' <<<"$listeners")" == 2 \
-   && "$(grep -Fc 'port: 5060,' <<<"$listeners")" == 2 ]] \
-    && pass "two bind IPs render independent :80/:443/:5060/:8080/:8443 listener sets" \
-    || fail "dynamic listener renderer did not emit five listeners per bind IP"
+   && "$listeners" != *'5060'* ]] \
+    && pass "two bind IPs render independent :80/:443/:8080/:8443 listener sets" \
+    || fail "dynamic listener renderer did not emit four listeners per bind IP"
 [[ "$listeners" == *'name: gateway,'* && "$listeners" == *'name: gateway-2,'* \
    && "$listeners" == *'name: gateway80,'* && "$listeners" == *'name: gateway80-2,'* \
    && "$listeners" == *'name: gateway8080,'* && "$listeners" == *'name: gateway8080-2,'* \
-   && "$listeners" == *'name: gateway8443,'* && "$listeners" == *'name: gateway8443-2,'* \
-   && "$listeners" == *'name: gateway5060,'* && "$listeners" == *'name: gateway5060-2,'* ]] \
+   && "$listeners" == *'name: gateway8443,'* && "$listeners" == *'name: gateway8443-2,'* ]] \
     && pass "listener names use the current gateway vocabulary" \
     || fail "dynamic listener names do not cover all seeded gateway ports"
 [[ "$(grep -Fc 'target: console.example.com:443}' <<<"$listeners")" == 2 \
    && "$(grep -Fc 'target: console.example.com:80}' <<<"$listeners")" == 2 \
    && "$(grep -Fc 'target: console.example.com:8080}' <<<"$listeners")" == 2 \
-   && "$(grep -Fc 'target: console.example.com:8443}' <<<"$listeners")" == 2 \
-   && "$(grep -Fc 'target: console.example.com:5060}' <<<"$listeners")" == 2 ]] \
+   && "$(grep -Fc 'target: console.example.com:8443}' <<<"$listeners")" == 2 ]] \
     && pass "all listener sets use same-port console hostname fallback targets" \
     || fail "dynamic listeners did not use the console hostname target"
 
@@ -980,10 +945,10 @@ config_mode="$(stat -c %a "$config" 2>/dev/null || stat -f %Lp "$config")"
 # longer a listener to name.
 grep -Fq 'console.example.com: 127.0.0.1' "$config" \
     && grep -Fq 'AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,console.example.com)),DIRECT' "$config" \
-    && grep -Fq 'name: gateway5060' "$config" \
-    && grep -Fq 'QUIC: { ports: [443, 5060] }' "$config" \
+    && grep -Fq 'QUIC: { ports: [443] }' "$config" \
+    && ! grep -Fq '5060' "$config" \
     && pass "seed contains public console mapping" \
-    || fail "seed lacks public console mapping or default :5060 ingress"
+    || fail "seed lacks the public console mapping or retains :5060"
 printf '%s\n' '# operator edit must survive' >> "$config"
 before="$(sha256sum "$config" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$config" | awk '{print $1}')"
 render_mihomo_config >/dev/null
@@ -1041,9 +1006,7 @@ unset -f chown
 
 # dns.env accepts exactly the current key set and rejects ambiguous state.
 saved_dns_env="$(cat "$CONF_DIR/dns.env" 2>/dev/null || true)"
-printf '%s\n' \
-    'DNS_BASE_DOMAIN=example.com' \
-    'DNS_PUBLIC_IP=198.51.100.9' > "$CONF_DIR/dns.env"
+cp "$ROOT/etc/5gpn/dns.env.example" "$CONF_DIR/dns.env"
 validate_dns_env_schema >/dev/null 2>&1 \
     && pass "current dns.env keys pass strict schema validation" \
     || fail "current dns.env keys were rejected"
@@ -1099,72 +1062,23 @@ else
     pass "command arity is enforced before dispatch"
 fi
 
-# The orphaned allowlist file is removed, and only when no rule reads it.
-#
-# whitelist.txt survived on every host that had one: holding the operator's
-# CIDRs, swept to 0660 by the mode pass, and read by nothing. An operator who
-# finds it reasonably concludes the panel is still source-restricted.
-#
-# Both call sites matter and one was nearly missed: render_mihomo_config returns
-# early on the preserve path, which is THE path an upgrade takes, and that is
-# exactly where the orphan lives.
-retire_fn="$(sed -n '/^retire_mihomo_whitelist()/,/^}/p' "$INSTALL")"
-if [[ -z "$retire_fn" ]]; then
-    fail "retire_mihomo_whitelist is missing"
+# The allowlist management surface and its retired-file teardown are both gone.
+# The read-only legacy detector is the only code allowed to name the path.
+allowlist_preflight_free="$TMP/allowlist-preflight-free"
+awk '
+    /^detect_legacy_footprints\(\)/ { skip = 1 }
+    skip && /^kernel_release_supports_extension_workers\(\)/ { skip = 0 }
+    skip { print ""; next }
+    { print }
+' "$INSTALL" > "$allowlist_preflight_free"
+if grep -Eq '^(add_allow_ip|del_allow_ip|apply_whitelist|retire_mihomo_whitelist)\(\)' "$allowlist_preflight_free"; then
+    fail "an allowlist mutation or teardown operation remains"
+elif grep -Fq '/whitelist.txt' "$allowlist_preflight_free"; then
+    fail "the installer still builds a path to an allowlist file"
 else
-    printf '%s' "$retire_fn" | grep -Fq 'RULE-SET' \
-        || fail "retire_mihomo_whitelist deletes the file without checking the live config"
-    render_fn="$(sed -n '/^render_mihomo_config()/,/^}/p' "$INSTALL")"
-    [[ "$(printf '%s' "$render_fn" | grep -c 'retire_mihomo_whitelist')" == 2 ]] \
-        || fail "render_mihomo_config does not retire the allowlist on both the preserve and the seed path"
+    pass "the installer neither manages nor tears down an allowlist file"
 fi
-
-retire_dir="$TMP/retire/mihomo"
-mkdir -p "$retire_dir"
-printf '203.0.113.1/32\n' > "$retire_dir/whitelist.txt"
-printf 'rules:\n  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,c.test)),DIRECT\n' > "$retire_dir/config.yaml"
-(
-    MIHOMO_DIR="$retire_dir"
-    retire_mihomo_whitelist "$retire_dir/config.yaml"
-) >/dev/null 2>&1
-if [[ -e "$retire_dir/whitelist.txt" ]]; then
-    fail "the orphaned allowlist file survived a config that does not read it"
-else
-    pass "the orphaned allowlist file is removed once no rule reads it"
-fi
-
-# And it is kept when a rule still does, because deleting a file a live rule
-# reads takes the gateway down at the next reload.
-printf '203.0.113.1/32\n' > "$retire_dir/whitelist.txt"
-printf 'rules:\n  - AND,((DOMAIN,c.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT\n' > "$retire_dir/config.yaml"
-(
-    MIHOMO_DIR="$retire_dir"
-    retire_mihomo_whitelist "$retire_dir/config.yaml"
-) >/dev/null 2>&1
-if [[ -e "$retire_dir/whitelist.txt" ]]; then
-    pass "an allowlist file a live rule still reads is kept"
-else
-    fail "the allowlist file was deleted while a rule still reads it"
-fi
-
-# The allowlist ops are gone by owner decision, so the boundaries they used to
-# enforce -- canonical CIDR validation, exact-match deletion, symlink refusal
-# -- have nothing left to protect. What replaces them is the assertion that
-# nothing writes an allowlist file at all: a writer that survives its rule
-# would edit a file no rule reads, and report success doing it.
-if grep -Eq '^(add_allow_ip|del_allow_ip|apply_whitelist)\(\)' "$INSTALL"; then
-    fail "an allowlist mutation op survived the allowlist"
-elif [[ -n "$(awk '
-    /^retire_mihomo_whitelist\(\)/ { skip = 1 }
-    skip { if ($0 == "}") skip = 0; next }
-    /[/]whitelist[.]txt/ { print }
-' "$INSTALL")" ]]; then
-    # retire_mihomo_whitelist is exempt by range: it names the path in order to
-    # delete it, which is the one legitimate reason left to name it at all.
-    fail "the installer still builds a path to an allowlist file outside the retirement"
-else
-    pass "no allowlist file is written or refreshed by the installer"
-fi
+rm -f -- "$allowlist_preflight_free"
 # Reset must stop at the first failed boundary even when main dispatch invokes
 # it through an && list (which suppresses Bash errexit inside called functions).
 reset_ran="$TMP/reset-ran"
@@ -1207,8 +1121,9 @@ fi
     || fail "the DoT certificate role is not owned by the account that serves DoT"
 [[ "$(cert_role_group console)" == "$FIVEGPN_SERVICE_GROUP" ]] \
     || fail "the controller certificate role is not owned by the serving account"
-[[ "$(cert_role_group web)" == root ]] \
-    || fail "the reader-less web role was widened beyond root"
+if cert_role_group web >/dev/null 2>&1; then
+    fail "the retired web certificate role was assigned an owning account"
+fi
 if cert_role_group nonsense >/dev/null 2>&1; then
     fail "an unknown certificate role was given an owning account"
 fi
@@ -1591,10 +1506,10 @@ grep -Eq '^wait_service_ready\(\)' "$INSTALL" \
     || fail "service readiness gate is absent"
 
 echo "----"
-# Certificate material has no migration path and nothing to roll back to, so a
+# Certificate material has no compatibility path and nothing to roll back to, so a
 # host this release cannot accept must be turned away while its deployment is
 # still intact. ensure_dns_cert_root only runs at publication time, by which
-# point the three binaries are already replaced -- hence the same read-only
+# point runtime artifacts may already be replaced -- hence the same read-only
 # verdict runs in preflight, from one shared implementation.
 cert_pf="$TMP/cert-preflight"
 if (

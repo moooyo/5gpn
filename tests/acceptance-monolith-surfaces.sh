@@ -129,8 +129,8 @@ else
 fi
 
 # The fixed guard appears exactly once, after all private-address denies and
-# before the terminal policy. The QUIC sniffer still covers non-443 protocols
-# such as :5060; this rule deliberately blocks only UDP/443.
+# before the terminal policy. It deliberately blocks only UDP/443; an operator
+# may still configure unrelated UDP or QUIC ingress explicitly.
 guard='  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT'
 guard_count="$(grep -cF "$guard" "$CONF" || true)"
 private_line="$(grep -nF '  - IP-CIDR,169.254.0.0/16,REJECT,no-resolve' "$CONF" | cut -d: -f1 || true)"

@@ -44,22 +44,30 @@ grep -Fq 'report_install_failure' <<<"$finish_fn" \
 grep -Fq 'release_install_cert_lock' <<<"$finish_fn" \
     && grep -Fq 'release_install_lock' <<<"$finish_fn" \
     && grep -Fq 'cleanup_artifact_stage' <<<"$finish_fn" \
-    && pass "the unwind path releases both locks and drops staging" \
+    && grep -Fq 'restore_global_certbot_timer' <<<"$finish_fn" \
+    && pass "the unwind path restores external timer state, releases both locks, and drops staging" \
     || fail "a failed install can leak a lock or its staging directory"
 grep -Fq 'INSTALL_PUBLICATION_STARTED=1' <<<"$full_fn" \
     && grep -Fq 'INSTALL_PUBLICATION_STARTED:-0' <<<"$finish_fn" \
     && pass "partial-install reporting is gated by the explicit publication boundary" \
     || fail "prepublication failures are still reported as partial installs"
 
-timer_restore_line="$(line_of "$full_fn" 'restore_global_certbot_timer_after_success')"
+finish_timer_line="$(line_of "$finish_fn" 'restore_global_certbot_timer')"
+finish_release_line="$(line_of "$finish_fn" 'release_install_cert_lock')"
+[[ -n "$finish_timer_line" && -n "$finish_release_line" \
+   && "$finish_timer_line" -lt "$finish_release_line" ]] \
+    || fail "failure cleanup releases the certificate lock before restoring the distro timer"
+pass "failure cleanup restores the distro timer while the certificate lock is held"
+
+timer_restore_line="$(line_of "$full_fn" 'restore_global_certbot_timer')"
 cleanup_line="$(line_of "$full_fn" 'cleanup_artifact_stage')"
 release_line="$(line_of "$full_fn" 'release_install_cert_lock')"
 if [[ -n "$timer_restore_line" && -n "$cleanup_line" && -n "$release_line" \
-   && "$release_line" -lt "$timer_restore_line" \
-   && "$timer_restore_line" -lt "$cleanup_line" ]]; then
-    pass "a verified deployment restores the distro timer before dropping staging"
+   && "$timer_restore_line" -lt "$release_line" \
+   && "$release_line" -lt "$cleanup_line" ]]; then
+    pass "a verified deployment restores the distro timer before releasing the certificate lock"
 else
-    fail "success-path timer restore and stage cleanup are out of order"
+    fail "success-path timer restore and certificate-lock release are out of order"
 fi
 
 # Exercise both locks and prove that they are independently exclusive.
@@ -228,7 +236,8 @@ unset -f systemctl wait_service_ready resolve_mihomo_listen_ips
 
 # The unwind path still owns three things: it surfaces its own failures, it
 # preserves the original exit status, and a failed run says plainly that the
-# host was left as it stands. Nothing here restores anything.
+# published host was left as it stands. External timer state is restored, but
+# project publication is never rolled back.
 notice="$TMP/unwind-notice"
 set +e
 (

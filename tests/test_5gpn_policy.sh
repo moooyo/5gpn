@@ -4,9 +4,6 @@
 # the installer seeds and refreshes the one live DNS document, preserves its
 # operator-owned fields, and does not recreate a standalone DNS service.
 #
-# Legacy dns.env values may be read once while creating a missing document.
-# They are migration input, not a second live resolver configuration surface.
-#
 # Pure grep — runs on the dev box under Git Bash, no Linux/Python needed.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
@@ -21,7 +18,6 @@ grep -Fq 'moooyo/5gpn' "$INSTALL" \
 seed_dns_fn="$(sed -n '/^seed_dns_document()/,/^}/p' "$INSTALL")"
 render_dns_fn="$(sed -n '/^render_fresh_dns_document()/,/^}/p' "$INSTALL")"
 write_dns_env_fn="$(sed -n '/^write_dns_env()/,/^}/p' "$INSTALL")"
-full_install_fn="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
 [[ -n "$seed_dns_fn" ]] || fail "install.sh: seed_dns_document() is missing"
 [[ -n "$render_dns_fn" ]] || fail "install.sh: render_fresh_dns_document() is missing"
 [[ -n "$write_dns_env_fn" ]] || fail "install.sh: write_dns_env() is missing"
@@ -100,17 +96,10 @@ printf '%s' "$seed_dns_fn" | grep -Fq 'chmod 0600 "$tmp"' \
 printf '%s' "$seed_dns_fn" | grep -Fq 'mv -Tf -- "$tmp" "$target"' \
     || fail "DNS document is not published by same-directory atomic rename"
 
-# A missing document is seeded before dns.env is rewritten, so exact retired
-# upstream values can be consumed once and then dropped from the current file.
-printf '%s' "$seed_dns_fn" | grep -Fq 'cfg_get DNS_CHINA' \
-    || fail "first seed no longer carries the legacy China upstream input"
-printf '%s' "$seed_dns_fn" | grep -Fq 'cfg_get DNS_TRUST' \
-    || fail "first seed no longer carries the legacy trust upstream input"
-seed_call_line="$(printf '%s\n' "$full_install_fn" | grep -nE '^[[:space:]]*seed_dns_document([[:space:]]|$)' | cut -d: -f1)"
-env_call_line="$(printf '%s\n' "$full_install_fn" | grep -nE '^[[:space:]]*write_dns_env([[:space:]]|$)' | cut -d: -f1)"
-if [[ -z "$seed_call_line" || -z "$env_call_line" || "$seed_call_line" -ge "$env_call_line" ]]; then
-    fail "full_install must seed dns.json before rewriting migration inputs in dns.env"
-fi
+# Fresh state is rendered only from current installation inputs. Retired
+# resolver-group keys are neither consumed nor persisted.
+printf '%s' "$seed_dns_fn" | grep -Eq 'cfg_get DNS_(CHINA|TRUST)' \
+    && fail "fresh DNS seeding still consumes retired dns.env resolver groups"
 printf '%s\n' "$write_dns_env_fn" | grep -Eq '^[[:space:]]*DNS_(CHINA|TRUST)=' \
     && fail "write_dns_env still persists retired resolver-group keys"
 
@@ -126,8 +115,6 @@ printf '%s' "$write_dns_env_fn" | grep -Fq 'mv -f -- "$dns_env_tmp" "${CONF_DIR}
     || fail "dns.env is not atomically published"
 
 # --- Explicit retired-input and removed-component guards ---
-grep -Fq 'Pre-v5 dns.env contains retired DNS_EGRESS_RESOLVER' "$INSTALL" \
-    || fail "install.sh: retired DNS_EGRESS_RESOLVER is not rejected explicitly"
 grep -Eq '^[[:space:]]*DNS_EGRESS_RESOLVER=' "$INSTALL" \
     && fail "install.sh: retired DNS_EGRESS_RESOLVER is still persisted"
 grep -Fq 'XRAY_RESOLVER' "$INSTALL" \

@@ -78,7 +78,6 @@ named_group_gid() {
 certificate_role_group() {
     case "$1" in
         dot|console) printf '%s\n' "$FIVEGPN_CERT_GROUP" ;;
-        web)         printf '%s\n' root ;;
         *)           return 1 ;;
     esac
 }
@@ -224,13 +223,10 @@ certificate_role_tree_safe() {
             "$CERT_ROOT_MARKER") ;;
             .provenance) plain_file_metadata_safe "$entry" "$root_gid" 640 || return 1 ;;
             .certbot-ownership) plain_file_metadata_safe "$entry" "$root_gid" 640 || return 1 ;;
-            dot|web|console) [[ -d "$entry" && ! -L "$entry" ]] || return 1 ;;
+            dot|console) [[ -d "$entry" && ! -L "$entry" ]] || return 1 ;;
             *) return 1 ;;
         esac
     done < <(find "$CERT_ROOT" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-    # The retired web role is optional. If an upgraded host still has it, prove
-    # its complete owned structure but never make it a current renewal target.
-    [[ ! -e "$CERT_ROOT/web" && ! -L "$CERT_ROOT/web" ]] || roles+=(web)
     for role in "${roles[@]}"; do
         group="$(certificate_role_group "$role")" || return 1
         expected_gid="$(named_group_gid "$group")" || return 1
@@ -260,9 +256,6 @@ certificate_role_tree_safe() {
             [[ "$name" =~ ^generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] || return 1
             role_generation_tree_safe "$entry" "$expected_gid" || return 1
         done < <(find "$generations" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-        if [[ "$role" == web && ! -e "$current" && ! -L "$current" ]]; then
-            continue
-        fi
         [[ -L "$current" ]] || return 1
         target="$(readlink -- "$current")" || return 1
         [[ "$target" =~ ^generations/generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] \

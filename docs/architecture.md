@@ -1,7 +1,7 @@
 # 5gpn current architecture
 
 This document is the normative description of the current 5gpn system. Design
-proposals and archived migration notes are not sources of current behavior.
+proposals and historical notes are not sources of current behavior.
 
 The project is pre-release. There is no compatibility obligation to anything
 described in earlier revisions of this file.
@@ -46,9 +46,10 @@ network-facing process must not:
   service names.
 
 The only current public certificate roles are `dot` for DoT and `console` for
-the controller, Console, and profiles. A legacy `web` certificate role and the
-old `DNS_WEB_CERT`/`DNS_WEB_KEY` configuration fields are migration inputs only;
-current configuration neither persists nor consumes them. The interception CA
+the controller, Console, and profiles. A `web` certificate role or the retired
+`DNS_WEB_CERT`/`DNS_WEB_KEY` fields are unsupported legacy footprints that make
+installer preflight fail before publication; current configuration neither
+persists nor consumes them. The interception CA
 and constrained leaf are a separate private trust boundary, not another public
 certificate role.
 
@@ -288,7 +289,7 @@ the type case-insensitively and allowing parameters.
 Both profile files are published directly beneath `/opt/5gpn/ui`, which is the
 only current profile publication directory, and mihomo serves them beneath
 `/ui/` alongside zashboard. `/opt/5gpn/www`, `WWW_DIR`, and any separate web
-root are legacy migration inputs only and must never receive a current profile.
+root are unsupported legacy footprints and must never receive a current profile.
 
 ## Control surface
 
@@ -510,8 +511,9 @@ A client that supports protocol fallback can retry over TCP, where plain HTTP
 or TLS/H1/H2 follows the ordinary capture path. An H3-only client fails. The
 guard affects only UDP destination port 443 that reaches the gateway: it is not
 a firewall, does not affect traffic that bypasses the gateway, and does not
-disable ordinary UDP forwarding or QUIC sniffing on other configured ports such
-as the optional `:5060` ingress.
+disable ordinary UDP forwarding or QUIC sniffing on other explicitly
+operator-configured ports. Fresh and reset seeds do not create a `:5060`
+listener or a product-managed ingress module.
 
 ### Mihomo modes and proxy groups
 
@@ -579,8 +581,8 @@ Alerts are transitions, never states, and the bot does not claim to detect the
 gateway's own death: a monitor inside the process cannot report that the process
 stopped, and an operator who read silence as health would be worse off than one
 who knows it means nothing. Retired `DNS_HEARTBEAT_URL` and
-`DNS_HEARTBEAT_INTERVAL` keys are tolerated only while an older `dns.env` is
-rewritten and are not persisted by the current installer. An independent
+`DNS_HEARTBEAT_INTERVAL` keys are unsupported legacy footprints and make
+installer preflight fail before publication. An independent
 monitor must actively probe the gateway from outside the host.
 
 Egress goes through the core's own inner dialer, so reaching `api.telegram.org`
@@ -639,8 +641,8 @@ because every edit there is rebase surface. CI runs `go vet ./5gpn/...` and
 ## State
 
 `5gpn/state` holds every 5gpn document under the mihomo home directory. The
-installed path is `/etc/5gpn/mihomo/5gpn`; `gpn` is retained only as the exact
-legacy source name recognized by the one-time installer migration. Writes
+installed path is `/etc/5gpn/mihomo/5gpn`; no alternate or historical state
+directory name is accepted. Writes
 are temp-file, fsync, rename, fsync-directory; the in-memory pointer is
 published only after the rename, so a reader can never observe a value a crash
 would un-observe. A document that fails to parse refuses to open rather than
@@ -648,9 +650,11 @@ resetting to defaults, which would discard the operator's extensions and policy
 without saying so.
 
 Updates carry the revision they were read at and are refused with
-`ErrRevisionConflict` if it has moved. This is the only concurrency control in
-the system and it exists for one reason: two operators with the same page open
-in two tabs.
+`ErrRevisionConflict` if it has moved. This is each runtime document's API
+optimistic-concurrency boundary: it prevents two operators with the same page
+open in two tabs from silently overwriting one another. Mutexes, atomic file
+publication, installer locks, Nodes file locks, and certificate fences enforce
+their separate ordering and durability contracts.
 
 There are three documents. `dns.json` is the resolver: listeners, gateway
 address, the two upstream groups and their client subnet, the ordered policy,
@@ -693,15 +697,16 @@ pinned core default: ChinaMax domains with `direct` intent and the GFW list with
 monolith's private `dns-rules` state directory. `/etc/5gpn/rules` is never a
 current cache path.
 
-`dns.env` now contains only installation-owned host coordinates: the DoT/debug
+`dns.env` contains only installation-owned host coordinates: the DoT/debug
 listeners used for a missing-document seed, base/public/gateway/listener
 addresses, certificate mode and email, and the controller coordinates and
 secret. Runtime policy, upstreams, subscription
 state, resolver tuning, statistics, and heartbeat fields are not mirrored
-there. Known retired keys are accepted only so one installer rewrite can drop
-them. Legacy `policy.json`, `upstreams.json`, `ecs.json`, `subscriptions.json`,
-`stats.json`, and `/etc/5gpn/rules` remain root-only migration evidence; the
-monolith neither reads them nor receives write access to them.
+there. Unknown or retired keys are rejected; the installer never rewrites an
+older schema into the current one. Historical `policy.json`, `upstreams.json`,
+`ecs.json`, `subscriptions.json`, `stats.json`, `/etc/5gpn/rules`, and sidecar
+documents are unsupported legacy footprints. The monolith never reads them,
+and installer preflight reports them without modifying them.
 
 `config.yaml` remains fully operator-owned.
 
@@ -736,65 +741,96 @@ error; a debug certificate has no applicable renewal timer; a reused external
 lineage remains externally renewed; and `missing` provenance requires repair.
 Each displayed systemd unit is queried at most once per rendered snapshot.
 
-## Upgrading an existing gateway
+## Installation compatibility boundary
 
-A legacy three-process gateway may carry configuration the monolith cannot
-parse: two retired `RUNTIME-OVERLAY,5gpn,*` anchors and an
-`IN-NAME,intercept-egress,REJECT` terminator. The core fails `5gpn-mihomo -t` rather
-than starting with capture silently absent.
+The installer supports exactly two starting states: a fresh host with no 5gpn
+footprint, or a deployment already produced by the current schema. A current
+reinstall uses `5gpn-mihomo.service`, `/opt/5gpn/bin/5gpn-mihomo`, the single
+`fivegpn:fivegpn` identity, `/etc/5gpn/mihomo/5gpn`, the exact current `dns.env`
+key set, and current `dns.json`, `intercept.json`, and `bot.json` schemas. A
+normal channel transition preserves a valid operator-owned `config.yaml` byte
+for byte. Explicit `mihomo-reset` remains a current-schema reset, not a
+conversion mechanism.
 
-`scripts/migrate-to-monolith.sh` removes those three rules. It does not strip
-the `NOT,((IN-NAME,intercept-egress))` qualifiers on the two panel allow rules;
-it rewrites them to `NOT,((IN-TYPE,INNER))`. The qualifier looks vacuous once
-the listener is gone — nothing can arrive on an inbound that does not exist —
-but the rule was never about the listener. It kept extension-borne traffic off
-the gateway's own management plane, and the engine still produces such traffic:
-every upstream it opens goes back through these same rules by inner dialling,
-which is what keeps intercepted traffic inside the operator's routing. That
-traffic arrives as `INNER`, with no inbound name. Stripping the qualifier would
-therefore let a captured extension naming the console reach it — so migrated
-hosts get the same predicate a fresh install seeds.
+Compatibility preflight completes before any managed 5gpn service is stopped,
+managed account or unit is changed, project certificate is issued, or live 5gpn
+file is published. It performs read-only inspection and reports every
+conflicting footprint. It never stops, renames, deletes, rewrites, imports,
+adopts, or changes permissions on legacy state. Host dependency installation is
+a separate pre-publication step and may change distribution package state.
 
-The legacy `intercept-egress` listener and `MODULE-INTERCEPT` node are unused by
-the monolith but harmless, so they are cleanup rather than migration.
+The installer does not independently decode the three Core-owned document
+schemas. After downloading and digest-verifying the pinned Core into staging,
+it runs that binary's `5gpn-state validate` one-shot mode against the absolute
+state directory, with `--owner-uid` set to the proven current `fivegpn` UID or
+the old UID recorded by an interrupted reconciliation journal. The command only
+reads `dns.json`, `intercept.json`, and `bot.json`; missing documents are valid
+fresh-seed inputs and are not created. Any present document must be a no-follow
+regular file owned by that UID, mode `0600`, singly linked, and satisfy the exact
+schema implemented by the Core that will be published. A group-only identity
+journal can resume only when all three documents are absent; any present
+document requires a proven current or journaled UID. Validation finishes before
+project-root claims, managed 5gpn account/service changes, or live 5gpn file
+publication. The staged binary is never executed as a service during this
+check.
 
-Legacy `DNS_INTERCEPT_CONFIG`, `DNS_WEB_CERT`, `DNS_WEB_KEY`, `WWW_DIR`, and the
-retired resolver/API/tuning keys may be recognized only while an older
-installation is rewritten. The old sidecar config and resolver state are kept
-root-only, while a structurally verified `web` certificate-role tree may remain
-as migration evidence. None is accepted as current configuration or exposed to
-the mihomo service account, and none creates a listener, certificate consumer,
-or profile publication path.
+The exact non-sensitive top-level roots `/opt/5gpn`, `/etc/5gpn`,
+`/var/lib/5gpn`, and `/var/lib/5gpn-intercept` are installation coordinates,
+not content-provenance claims. When one has no ownership marker, the installer
+may claim its existing contents only after canonical-path, top-level metadata,
+known-legacy, symlink, hardlink, special-entry, and nested-mount checks pass. An
+existing invalid or retired marker is refused rather than replaced. Certificate
+roots, the interception CA, the UI tree, and temporary paths keep their stricter
+ownership requirements. Every recursive deletion still revalidates the current
+marker and nested-mount boundary.
 
-The units are handled the same way, and the asymmetry is deliberate: the
-installer publishes only the units this release owns, but keeps removing the
-ones it used to. An orphaned `5gpn-dns.service` on an upgraded host would keep
-restarting against a binary that is gone — or keep `:853` bound against the one
-that is not. The list of retired units is therefore the only record that they
-were ever ours, and dropping an entry from it strands whatever it names on every
-host that has not upgraded yet.
+Unsupported footprints include any definition of generic `mihomo.service` or
+retired `5gpn-dns.service`, `5gpn-intercept.service`,
+`5gpn-intercept-runtime.path`, `5gpn-journal@.service`,
+`5gpn-journal@5gpn-dns.service`, or `5gpn-journal@mihomo.service`; a generic
+`mihomo` user or group; old `gpn-dns`, `gpn-intercept`, or overlay-group
+identities; an unprefixed runtime binary; `/etc/5gpn/mihomo/gpn`,
+`/opt/5gpn/www`, standalone resolver state, sidecar configuration, or old rule
+caches; retired `dns.env` keys or document schemas; a `web` certificate role;
+and mihomo constructs such as
+`RUNTIME-OVERLAY,5gpn,*`, `runtime-overlay-processor`, `intercept-egress`, or
+`MODULE-INTERCEPT`.
 
-The final naming transition is similarly exact. The current runtime is
-`5gpn-mihomo.service`, executes `/opt/5gpn/bin/5gpn-mihomo`, and runs as the
-single `fivegpn:fivegpn` identity. An old-only
-`/etc/5gpn/mihomo/gpn` directory is renamed on the same filesystem to
-`/etc/5gpn/mihomo/5gpn`; two populated directories fail before either is
-changed. The generic `mihomo.service` and old `mihomo`, `gpn-dns`,
-`gpn-intercept`, and overlay-group identities are removed only with project
-provenance and an exact, idle, numerically exclusive system identity. An owned
-legacy unit or state tree is provenance; so is the closed shape of the
-project-specific `gpn-dns` or `gpn-intercept` account. The generic `mihomo`
-identity additionally requires its owned unit/state evidence or membership in
-the retired `5gpn-overlay-*` groups. An incompatible current `fivegpn` account
-is different: that name is installer-owned, so exclusive numeric IDs are
-retained while the account is recreated non-interactively. Aliased IDs fail
-closed.
+The current `fivegpn` name has a narrower recovery rule and is never adopted by
+name alone. If an existing identity is incompatible, repair is allowed only
+when either a safe current root marker or the marked current
+`5gpn-mihomo.service` definition proves it belongs to this installation. Every
+existing UID and GID must be below the host's normal-user threshold and must be
+exclusive to `fivegpn`. Read-only preflight grants only an in-memory repair
+authorization. After the installer crosses its declared publication boundary
+and before deleting a proven current identity, it durably records the old
+numeric IDs; after an interruption, the next run resumes from that journal,
+recreates the system identity, and reconciles only validated managed roots
+before clearing it. Even when the crash happened
+after account deletion, safe current marker or unit provenance must still be
+present, the current journal must validate, and the recorded system-range IDs
+must remain unclaimed by any other identity; an exact surviving `fivegpn` group
+may retain its recorded GID. The journal is recovery state rather than ownership
+proof. A same-named identity without current provenance, a normal-range ID, an
+alias, shared membership, or an unsafe journal is a hard read-only refusal.
+
+Finding any such footprint is a hard pre-publication error. The operator must
+explicitly decommission or rebuild the host outside the installer and then
+begin a fresh installation. 5gpn provides no in-place legacy migration,
+retired-component teardown, state salvage, schema conversion, or compatibility
+alias.
 
 ## Verification boundary
 
 Changes are tested in proportion to their surface. `go build ./...` and
 `go test -race ./5gpn/...` must be green. `tests/` holds the installer suites,
 which are shell and must be run under Linux against an LF checkout.
+
+The root release gate downloads the exact digest-pinned Core and invokes its
+`5gpn-state validate --owner-uid` command against missing, valid, malformed,
+wrong-owner, wrong-mode, symlink, and hardlink fixtures. A fake executable in a
+shell unit test checks argument plumbing only and cannot prove that the pinned
+release contains the one-shot mode.
 
 A real gateway is reachable as `test-env` over OpenSSH. Because it is a working
 gateway, configuration changes are validated against copies rather than in

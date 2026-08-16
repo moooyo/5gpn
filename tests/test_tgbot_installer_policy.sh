@@ -1,26 +1,16 @@
 #!/usr/bin/env bash
-# The Telegram bot is configured in the console now, not in dns.env.
-#
-# It has its own document beside the resolver's and the engine's
-# (<mihomo-home>/5gpn/bot.json, written 0600 by the core because it carries a
-# token), and 5gpn/bot owns the live path with its own Go tests. What this suite
-# holds is the installer's half of that decision:
-#
-#   - the five TGBOT_* keys are RETIRED, not merely absent. An upgraded host has
-#     them in its dns.env; naming them in DNS_ENV_RETIRED_KEYS is what strips
-#     them. Dropping them from that list instead would make an upgraded dns.env
-#     fail validation on a key this installer wrote itself.
-#   - nothing writes them any more, and the example does not document them.
-#   - the setup-tgbot command stays gone. It sourced a helper deleted with the
-#     three-process layout, so it could only ever have failed.
+# Telegram configuration belongs only to the core-owned bot document.
 set -u
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL="$ROOT/install.sh"
 EXAMPLE="$ROOT/etc/5gpn/dns.env.example"
 FAIL=0
-fail(){ echo "FAIL: $1"; FAIL=1; }
+
+fail() { echo "FAIL: $1"; FAIL=1; }
+pass() { echo "ok: $1"; }
+
 write_fn="$(sed -n '/^write_dns_env()/,/^}/p' "$INSTALL")"
-retired="$(sed -n '/^readonly DNS_ENV_RETIRED_KEYS=/,/"$/p' "$INSTALL")"
 active="$(sed -n '/^readonly DNS_ENV_KEYS=/,/"$/p' "$INSTALL")"
 
 if grep -Eq 'setup_tgbot\(\)|setup-tgbot\)' "$INSTALL"; then
@@ -28,8 +18,6 @@ if grep -Eq 'setup_tgbot\(\)|setup-tgbot\)' "$INSTALL"; then
 fi
 
 for key in TGBOT_TOKEN TGBOT_ADMINS DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS DNS_MARKETPLACES_FILE; do
-    printf '%s' "$retired" | grep -Fq "$key" \
-        || fail "$key is not listed as retired, so an upgraded dns.env carrying it fails validation"
     printf '%s' "$active" | grep -Fq "$key" \
         && fail "$key is still an accepted dns.env key"
     printf '%s' "$write_fn" | grep -Fq "${key}=" \
@@ -38,40 +26,33 @@ for key in TGBOT_TOKEN TGBOT_ADMINS DNS_TGBOT_FILE TGBOT_PROXY_URL TGBOT_ALERTS 
         && fail "the example still documents $key"
 done
 
-# The bot document is the core's to create, not the installer's: 5gpn/bot opens
-# it at startup and writes a disabled default if it is absent. An installer that
-# seeded it would be a second writer for a file holding a credential.
-#
-# Comments are excluded deliberately -- install.sh says where the document
-# lives, which is exactly the pointer an operator reading dns.env needs.
-grep -v '^[[:space:]]*#' "$INSTALL" | grep -Fq '5gpn/bot.json' \
-    && fail "install.sh writes 5gpn/bot.json, which the core owns"
-
-# The retired files are still removed, and that has to stay true. An upgraded
-# host has /etc/5gpn/tgbot.json and extension-marketplaces.json from the layout
-# that wrote them; the removal list is the only record they were ever ours, and
-# dropping an entry strands whatever it names on every host that has not
-# upgraded yet.
-for stale in tgbot.json extension-marketplaces.json; do
-    grep -Fq "\${CONF_DIR}/${stale}" "$INSTALL" \
-        || fail "uninstall no longer removes the retired ${stale}"
-done
-
 (
-    set -e
     export INSTALL_SH_LIB_ONLY=1
     # shellcheck source=../install.sh
     source "$INSTALL"
-    tmp="$(mktemp -d /tmp/5gpn-retired-state.XXXXXX)"
-    trap 'rm -rf -- "$tmp"' EXIT
-    CONF_DIR="$tmp/conf"
-    mkdir -p "$CONF_DIR"
-    printf 'token\n' > "$CONF_DIR/tgbot.json"
-    printf 'catalog\n' > "$CONF_DIR/extension-marketplaces.json"
-    fixed_owned_dir_is_safe() { return 0; }
-    runtime_file_slot_is_safe() { [[ -f "$1" && ! -L "$1" ]]; }
-    remove_retired_installer_state_files
-    [[ ! -e "$CONF_DIR/tgbot.json" && ! -e "$CONF_DIR/extension-marketplaces.json" ]]
-) || fail "retired bot/marketplace files were not actually removed"
+    retired_env="$(mktemp)"
+    trap 'rm -f -- "$retired_env"' EXIT
+    printf '%s\n' \
+        'DNS_BASE_DOMAIN=example.test' \
+        'TGBOT_TOKEN=retired-token' \
+        > "$retired_env"
+    ! validate_dns_env_schema "$retired_env" >/dev/null 2>&1
+) || fail "retired Telegram dns.env keys are not rejected"
 
-[[ "$FAIL" == 0 ]] && echo "tgbot installer policy: PASS" || exit 1
+if grep -Eq 'DNS_ENV_RETIRED_KEYS|remove_retired_installer_state_files\(\)' "$INSTALL"; then
+    fail "legacy Telegram or marketplace compatibility teardown remains"
+else
+    pass "legacy Telegram and marketplace footprints have no compatibility path"
+fi
+
+# The bot document is the core's to create, not the installer's: 5gpn/bot opens
+# it at startup and writes a disabled default if it is absent. An installer that
+# seeded it would be a second writer for a file holding a credential.
+grep -v '^[[:space:]]*#' "$INSTALL" | grep -Fq '5gpn/bot.json' \
+    && fail "install.sh writes 5gpn/bot.json, which the core owns"
+
+if [[ "$FAIL" == 0 ]]; then
+    echo "tgbot installer policy: PASS"
+else
+    exit 1
+fi

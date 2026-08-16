@@ -7,9 +7,10 @@ superseded where it conflicts with the current monolith or HTTP/3 boundary.
 
 | Repository | Maintenance branch | Upstream baseline | Release coordinate |
 | --- | --- | --- | --- |
-| `moooyo/mihomo` | `feat/5gpn-monolith` | `MetaCubeX/mihomo:Alpha` at `99ce79c9` | `v1.19.28-monolith.27` |
-| `moooyo/zashboard` | `feat/5gpn-console` | `Zephyruso/zashboard:main` at `b40a283` | `v3.16.1-monolith.28` |
-| `moooyo/5gpn` | `main` | — | `0.0.77` (published 2026-08-06) |
+| `moooyo/mihomo` | `feat/5gpn-monolith` | `MetaCubeX/mihomo:Alpha` at `99ce79c9` | `v1.19.28-monolith.30` |
+| `moooyo/zashboard` | `feat/5gpn-console` | `Zephyruso/zashboard:main` at `b40a283` | `v3.16.1-monolith.31` |
+| `moooyo/5gpn-extensions` | `main` | — | `c411578f2ae2472d17e8f2c66e4f2fc07013634b` |
+| `moooyo/5gpn` | `main` | — | `0.0.80` latest published; current candidate unreleased |
 
 The stable release has one long-running process: mihomo. HTTP/3 interception is
 unsupported, `http3=true` is rejected, and the fixed global UDP/443 `REJECT`
@@ -21,8 +22,11 @@ The installed runtime is `5gpn-mihomo.service`, executes
 `/opt/5gpn/bin/5gpn-mihomo`, and uses the sole managed Unix identity
 `fivegpn:fivegpn`. Runtime documents live under
 `/etc/5gpn/mihomo/5gpn`; authenticated product routes are `/5gpn/*`, and
-capability keys are `5gpn-*`. Unprefixed names are legacy migration inputs,
-not current aliases.
+capability keys are `5gpn-*`. Unprefixed project-specific names are unsupported
+legacy footprints, not migration inputs or current aliases. The installer
+detects them before publication and refuses to modify or adopt them.
+The unreleased root candidate pairs Core `.30`, Console `.31`, and the listed
+Extensions revision; the published `0.0.80` bundle predates that pair.
 
 The runtime and Console gates live in their own repositories. This repository's
 gate covers every installer suite, exact release-bundle assembly, published
@@ -115,9 +119,9 @@ that already had state.
 
 - `mihomo_config_matches_install_config` accepted only the *retired*
   `NOT,((IN-NAME,intercept-egress))` qualifier, so **every monolith-installed
-  host failed its own drift check** and was told to run `upgrade-reset-mihomo`,
-  which replaces the operator's entire config. The check reads a config that
-  must already exist, so the first install never runs it.
+  host failed its own drift check** and was directed toward a destructive
+  full-file reset. The check reads a config that must already exist, so the
+  first install never runs it.
 - **A comment ran as a command.** The dns.env heredoc is unquoted by design, so
   a comment containing `` `catalogs` `` executed `catalogs` and failed the
   publication phase with exit 127.
@@ -166,8 +170,8 @@ plane with no second purpose.
 
 The source allowlist moved onto the console name with the panel, and was then
 **removed entirely by owner decision** — see the section below.
-`scripts/migrate-panel-to-console.sh` performs both transitions on an
-operator-owned config and nothing else.
+The historical transition helper is no longer shipped. Current installation
+accepts no legacy panel layout or migration input.
 
 **Four more second-install faults, in a single feature.** The rule from the
 round above held again, unbroken, and each of these reached a real upgrade:
@@ -676,8 +680,8 @@ readiness; it does not enable QUIC capture.
 
 A client that supports fallback may retry over TCP and reach plain HTTP or
 TLS/H1/H2 capture. H3-only clients fail. The rule is scoped to gateway UDP/443
-and does not disable ordinary UDP or QUIC sniffing on another configured port,
-including the optional `:5060` ingress.
+and does not disable ordinary UDP or QUIC sniffing on another explicitly
+operator-configured port. Fresh and reset seeds create no `:5060` ingress.
 
 ---
 

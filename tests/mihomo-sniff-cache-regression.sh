@@ -138,8 +138,8 @@ awk -v cert="$RUNTIME/cert.pem" -v key="$RUNTIME/key.pem" -v listener="$GATEWAY_
     gsub(/__CONTROLLER_SECRET__/, "ci-controller-secret")
     gsub(/\/etc\/5gpn\/cert\/console\/current\/fullchain.pem/, cert)
     gsub(/\/etc\/5gpn\/cert\/console\/current\/privkey.pem/, key)
-	if ($0 ~ /TLS:.*ports: \[443, 8080, 8443, 5060\]/) {
-	  gsub(/ports: \[443, 8080, 8443, 5060\]/, "ports: [18443, 8080, 8443, 5060]")
+	if ($0 ~ /TLS:.*ports: \[443, 8080, 8443\]/) {
+	  gsub(/ports: \[443, 8080, 8443\]/, "ports: [18443, 8080, 8443]")
 	}
     print
   }

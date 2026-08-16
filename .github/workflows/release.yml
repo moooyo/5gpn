@@ -182,9 +182,9 @@ jobs:
           [[ ! -e "$stage" ]] \
             || { echo "Refusing to reuse existing bundle stage: $stage" >&2; exit 1; }
 
-          # This is the complete installer-bundle policy. Runtime helpers and
-          # one-shot upgrade tools are listed individually so a repository-only
-          # helper cannot become gateway payload by merely landing in scripts/.
+          # This is the complete installer-bundle policy. Runtime helpers are
+          # listed individually so a repository-only helper cannot become
+          # gateway payload by merely landing in scripts/.
           # scripts/run-suites.sh is a development-only test runner and must not
           # ship in a release bundle.
           bundle_files=(
@@ -205,13 +205,8 @@ jobs:
             scripts/gen-ios-profile.sh
             scripts/intercept-cert-renew.sh
             scripts/renew-hook.sh
-            # Explicit operator upgrade and migration tools.
-            scripts/migrate-panel-to-console.sh
-            scripts/migrate-state-to-monolith.sh
-            scripts/migrate-to-monolith.sh
             docs/architecture.md
             docs/native-extensions.md
-            docs/pre-v5-upgrade.md
             tests/integration-smoke.md
           )
           executable_files=(
@@ -221,9 +216,6 @@ jobs:
             scripts/gen-ios-profile.sh
             scripts/intercept-cert-renew.sh
             scripts/renew-hook.sh
-            scripts/migrate-panel-to-console.sh
-            scripts/migrate-state-to-monolith.sh
-            scripts/migrate-to-monolith.sh
           )
 
           mkdir -p "$stage"

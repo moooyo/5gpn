@@ -277,20 +277,6 @@ cmp -s "$LE_LIVE_ROOT/example.com/fullchain.pem" "$CERT_ROOT/dot/current/fullcha
     && pass "renewal does not recreate the retired web certificate role" \
     || fail "renewal recreated the retired web certificate role"
 
-# A validated legacy web tree may remain as migration evidence. Renewal neither
-# compares it to the live lineage nor deletes or refreshes its unused material.
-reset_case
-mkdir -p "$CERT_ROOT/web"
-printf 'legacy web key material\n' > "$CERT_ROOT/web/retained.pem"
-cp "$CERT_ROOT/web/retained.pem" "$TMP/retained-web.pem"
-MOCK_CERT_FRESH=1
-printf 'stale\n' > "$CERT_ROOT/console/current/fullchain.pem"
-expect_success "not-due lineage ignores a retained legacy web role" cert_renew_main --cert-name example.com
-cmp -s "$CERT_ROOT/web/retained.pem" "$TMP/retained-web.pem" \
-    && pass "renewal leaves validated legacy web material untouched" \
-    || fail "renewal rewrote or deleted retained legacy web material"
-rm -rf -- "$CERT_ROOT/web"
-
 # Content, owner, and mode are insufficient: every served role must be readable
 # by the unified fivegpn runtime identity. A wrong role group is treated as
 # stale and repaired by the owned deploy hook.

@@ -29,6 +29,10 @@ grep -Fq 'certbot_lineage_owned_by_5gpn "$base"' <<<"$renew_auto_fn" \
 grep -Fq 'acquire_install_gate || return 1' "$CERT_RENEW" \
     || fail "public renewal can enter the installer certificate-lock handoff window"
 grep -Fq '5gpn-certbot-renew.timer' <<<"$renew_auto_fn" || fail "no certificate renewal timer installed"
+renew_active_line="$(grep -n 'is-active --quiet 5gpn-certbot-renew.timer' <<<"$renew_auto_fn" | head -1 | cut -d: -f1)"
+renew_commit_line="$(grep -n 'KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=1' <<<"$renew_auto_fn" | head -1 | cut -d: -f1)"
+[[ -n "$renew_active_line" && -n "$renew_commit_line" && "$renew_active_line" -lt "$renew_commit_line" ]] \
+    || fail "distro timer takeover commits before scoped renewal is active"
 grep -Fq 'OnCalendar=*-*-* 03:00:00' <<<"$renew_auto_fn" \
     || fail "renewal timer does not run on the fixed daily schedule"
 grep -Fq 'Persistent=true' <<<"$renew_auto_fn" || fail "renewal timer not Persistent (missed runs will not catch up)"
@@ -106,13 +110,17 @@ for unit in "$ROOT"/etc/systemd/*; do
         || fail "$(basename "$unit") lacks its provenance marker"
 done
 
-# The same trap lives in every other ownership check: a marker revision or a
-# body fingerprint that changes between releases wedges every host that has not
-# upgraded yet. Project roots self-heal at claim time; the path predicates match
-# the owner rather than the revision or the contents.
+# Exact top-level project roots may claim a safe populated directory only when
+# no marker exists. Known legacy contents are rejected by read-only preflight;
+# an invalid, legacy, or symlinked marker is never replaced.
 claim_roots_fn="$(sed -n '/^claim_project_roots()/,/^}/p' "$INSTALL")"
 [[ "$(grep -c 'claim_fixed_owned_dir .* 1 || return 1' <<<"$claim_roots_fn")" == 3 ]] \
-    || fail "project roots are not all claimed self-healingly"
+    || fail "project roots do not explicitly allow safe fixed-path adoption"
+claim_fixed_fn="$(sed -n '/^claim_fixed_owned_dir()/,/^}/p' "$INSTALL")"
+grep -Fq 'allow_populated_unmarked="${4:-0}"' <<<"$claim_fixed_fn" \
+    && grep -Fq 'Invalid or symlinked ownership marker' <<<"$claim_fixed_fn" \
+    && grep -Fq 'managed_path_has_no_nested_mounts "$dir"' <<<"$claim_fixed_fn" \
+    || fail "fixed-root adoption bypasses marker or nested-mount safety"
 grep -Fq 'claim_fixed_owned_dir "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" 1' "$INSTALL" \
     && fail "interception CA root is claimed self-healingly; certificate material must stay strict"
 launcher_owned_fn="$(sed -n '/^launcher_owned()/,/^}/p' "$INSTALL")"
@@ -126,17 +134,14 @@ grep -Fq 'grep -Fqx "$POLKIT_RULE_MARKER"' <<<"$polkit_owned_fn" \
 # The rule file itself is gone: every grant in it named a uid nothing runs as
 # now. install.sh keeps only the preflight above, which refuses to touch a
 # leftover rule on an upgraded host -- that is the surviving property.
-# The value a root is claimed with must never be versioned: comparing it exactly
-# is what wedged upgrades. A LEGACY value is the opposite of that mistake -- it
-# is never written, only accepted so the claim can heal a marker an older release
-# left behind, which is what CONF_LEGACY_OWNERSHIP_VALUE does for the config
-# root. So the rule covers the values we write and exempts that one shape.
+# Current root marker values remain unversioned so reinstall does not create a
+# needless marker-revision compatibility problem.
 if grep -RE '_VALUE="5gpn-(runtime|config|state|web|ios|temp|zashboard|intercept-state)-v[0-9]' "$INSTALL" \
-    | grep -qv 'LEGACY'; then
+    | grep -q .; then
     fail "a self-healing ownership value carries a revision suffix again"
 fi
 grep -Fq 'CONF_LEGACY_OWNERSHIP_VALUE=' "$INSTALL" \
-    || fail "the legacy config ownership value is gone; a pre-0.0.44 host cannot upgrade"
+    && fail "legacy config-root marker compatibility remains"
 # The converse: certificate roots have no self-heal, so their values are frozen.
 # Changing one strands every existing host.
 for cert_value in 'DEBUG_CERT_MARKER_VALUE="5gpn-debug-cert-v1"' \
@@ -188,8 +193,6 @@ grep -Eq '^clear_external_config_env\(\)' "$INSTALL" || fail "caller environment
 grep -Fq "First install/configuration requires an attached TTY" "$INSTALL" \
     || fail "headless first install does not fail closed"
 grep -Eq "prompt_default .*网关|prompt_default .*Gateway" "$INSTALL" || fail "TUI has no gateway prompt"
-grep -Fq 'Pre-v5 dns.env contains retired DNS_EGRESS_RESOLVER' "$INSTALL" \
-    || fail "installer does not reject the retired single egress resolver explicitly"
 grep -Eq '^[[:space:]]*DNS_EGRESS_RESOLVER=' "$INSTALL" \
     && fail "installer still persists the retired single egress resolver"
 # The banner must print the credential zashboard's backend dialog actually
@@ -321,14 +324,14 @@ printf '%s' "$pmr_fn" | grep -Fq 'mihomo_controller_curl "/version"' \
     || fail "probe_mihomo_ready must call mihomo_controller_curl for the TLS controller probe"
 printf '%s' "$pmr_fn" | grep -Fq 'local -a tcp_ports=(80 443)' \
     || fail "probe_mihomo_ready must always require the baseline TCP ports"
-printf '%s' "$pmr_fn" | grep -Fq 'tcp_ports+=(5060 8080 8443)' \
+printf '%s' "$pmr_fn" | grep -Fq 'tcp_ports+=(8080 8443)' \
     || fail "probe_mihomo_ready must conditionally require every extra seed TCP port"
 printf '%s' "$pmr_fn" | grep -Fq '${MIHOMO_SEED_PORTS_REQUIRED:-0}' \
     || fail "probe_mihomo_ready must default alternate-port readiness to disabled"
 printf '%s' "$pmr_fn" | grep -Fq 'local -a udp_ports=(443)' \
     || fail "probe_mihomo_ready must always require UDP :443"
-printf '%s' "$pmr_fn" | grep -Fq 'udp_ports+=(5060)' \
-    || fail "probe_mihomo_ready must conditionally require default-module UDP :5060"
+printf '%s' "$pmr_fn" | grep -Fq '5060' \
+    && fail "probe_mihomo_ready still requires the removed :5060 seed ingress"
 # The TUI must NOT offer allowlist entries: the ops behind them are gone, and
 # test_tui_policy would fail a label whose branch no longer exists anyway.
 mm_fn="$(sed -n '/^manage_menu()/,/^}/p' "$INSTALL")"
@@ -365,7 +368,7 @@ grep -q 'ROLLBACK_DIR' "$INSTALL" && fail "a rollback snapshot directory came ba
 grep -Eq '^clean_previous_install\(\)' "$INSTALL" \
     && fail "the broad old-release teardown helper returned"
 grep -Eq '^remove_legacy_service_accounts\(\)' "$INSTALL" \
-    || fail "the exact legacy identity cleanup required by the naming migration is missing"
+    && fail "legacy identity cleanup remains in the current-only installer"
 
 # Official and beta publications share one gate but have disjoint tag,
 # provenance, and GitHub release metadata boundaries.

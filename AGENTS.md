@@ -73,11 +73,15 @@ plans, design handoffs, and git history are context only.
   Unix user and group are `fivegpn`, the main unit is
   `5gpn-mihomo.service`, and its executable is
   `/opt/5gpn/bin/5gpn-mihomo`. Runtime documents live under
-  `/etc/5gpn/mihomo/5gpn`. Old `gpn-*` accounts, the unprefixed `mihomo`
-  account/unit/binary, and the old `gpn` state directory are legacy migration
-  inputs only; they are never current names or compatibility aliases.
+  `/etc/5gpn/mihomo/5gpn`. Old `gpn-*` accounts, a generic `mihomo` user or
+  group, an unprefixed binary, any retired unit definition, and the old `gpn`
+  state directory are unsupported legacy footprints; they are never current
+  names or compatibility aliases. Installer preflight must reject them before
+  publication using read-only checks. It must not stop, rename, delete,
+  rewrite, adopt, or change permissions on them.
 - `/etc/5gpn/mihomo/config.yaml` is fully operator-owned. Normal install,
-  reinstall, and `configure` operations preserve a valid existing file. Only
+  current-schema reinstall, and `configure` operations preserve a valid existing
+  file. Only
   explicit reset may replace the complete file wholesale, after
   `5gpn-mihomo -t`, backup, and atomic rename. The root management TUI may make
   one narrower explicit transaction: its bundled `5gpn-nodes` one-shot parser
@@ -102,11 +106,14 @@ plans, design handoffs, and git history are context only.
   tunnel and inner dialer consume those projections directly. Do not restore a
   sidecar, runtime-overlay socket, YAML anchors, generated mihomo rule block, or
   loopback SOCKS hop.
-- The installer does not roll back. A failure before publication leaves the host
-  untouched; a failure during publication leaves it partially installed and says
-  so. Do not reintroduce snapshot/restore/quarantine machinery — its failure
-  amplification (one unrecoverable unit disabling every healthy one) is why it
-  was removed. Keep fail-before-publish checks, the locks, and staging.
+- The installer does not roll back. A failure before project publication leaves
+  5gpn-managed services, accounts, units, and live files untouched; dependency
+  installation may already have changed shared distribution package state and
+  is not rolled back. A failure during publication leaves the host partially
+  installed and says so. Do not reintroduce snapshot/restore/quarantine
+  machinery — its failure amplification (one unrecoverable unit disabling every
+  healthy one) is why it was removed. Keep fail-before-publish checks, the locks,
+  and staging.
 - `console.<base>` is the single public bootstrap and panel SNI. `/ui/*` and its
   iOS profiles are public, while `/5gpn/*` and the ordinary controller routes
   require the mihomo controller secret. Do not restore a separate bootstrap,
@@ -168,6 +175,33 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
 - The project is pre-release: persist and accept only the current configuration
   keys, file schemas, commands, and callback formats. Do not add compatibility
   aliases, schema migrations, or retired-component teardown paths.
+- Installation supports only a fresh host with no 5gpn footprint or a
+  current-schema reinstall. Any retired unit, account, group, binary, state
+  path, environment key, document, certificate role, or mihomo construct is a
+  hard pre-publication error. The installer reports the conflict read-only; the
+  operator must explicitly decommission or rebuild the host outside the
+  installer before starting a fresh installation.
+- A same-named `fivegpn` user or group is not ownership proof on a fresh host.
+  The installer may repair an incompatible current identity only when a safe
+  current ownership marker or the marked current `5gpn-mihomo.service`
+  definition proves provenance, every existing numeric UID/GID is in the
+  system range and exclusive, and a durable reconciliation journal is
+  published before deletion. Preflight only grants in-memory authorization;
+  journal publication and account deletion cannot begin until the declared
+  publication phase. If a crash leaves the user/group absent, a later run may
+  resume only when the current marker/unit provenance and safe journal still
+  agree and no other identity has claimed the recorded IDs; an exact surviving
+  `fivegpn` group may retain its recorded GID. A journal alone is not provenance.
+  Without those conditions the identity is rejected and left unchanged.
+- Existing runtime documents are validated read-only before publication by the
+  staged, digest-pinned Core through its `5gpn-state validate` one-shot mode.
+  The installer supplies the proven current or journaled owner UID explicitly;
+  the Core enforces that owner plus regular-file, mode, link-count, and
+  no-follow metadata. A group-only journal can resume only when all three
+  runtime documents are absent; any present document requires a proven current
+  or journaled UID. The installer must not duplicate the Core's decoder or
+  validation rules for existing documents in shell; rendering a missing
+  document seed remains an installer responsibility.
 - `CERT_MODE` is exactly `cloudflare`, `http-01`, or `debug`. Both production
   modes use one scoped `<base>` Certbot lineage. HTTP-01 requires exact
   console/dot A records, no AAAA, and may stop mihomo only for the bounded
@@ -175,6 +209,13 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
 - Any root recursive deletion must use a canonical, validated path plus a 5gpn
   ownership marker. Refuse `/`, system directories, empty paths, and unowned
   custom directories.
+- The exact non-sensitive fixed roots `/opt/5gpn`, `/etc/5gpn`,
+  `/var/lib/5gpn`, and `/var/lib/5gpn-intercept` may claim a safe populated
+  directory when no marker exists. Canonical-path, metadata, known
+  legacy-footprint, symlink, hardlink, special-entry, and nested-mount checks
+  run before marker publication. An existing invalid or retired marker is never
+  replaced. Certificate roots, the interception CA root, UI trees, and
+  temporary paths remain strict.
 - Debug certificates belong under `/etc/5gpn/debug-cert`, never anywhere below
   `/etc/letsencrypt/live` or `archive`.
 - Third-party tools are prebuilt; no toolchain is installed on the gateway.
@@ -294,8 +335,11 @@ for t in tests/test_*.sh; do bash "$t"; done
 tests/verify-artifact-pins.sh
 ```
 
-CI also renders the seed and validates it with digest-pinned mihomo. For real
-deployment behavior follow `tests/integration-smoke.md`.
+CI also renders the seed and validates it with digest-pinned mihomo. The same
+downloaded pinned Core must execute `5gpn-state validate --owner-uid` against
+missing, valid, malformed, and unsafe-metadata fixtures; a shell fake is not
+release evidence. For real deployment behavior follow
+`tests/integration-smoke.md`.
 
 Preserve unrelated dirty-worktree changes. Use `rg` for discovery and
 `apply_patch` for edits. Until a release policy says otherwise, change stale

@@ -14,14 +14,14 @@ source "$INSTALL"
 
 BASE_DOMAIN=env.example
 PUBLIC_IP=203.0.113.9
-DNS_CHNROUTE=/tmp/attacker-chnroute
 CERT_MODE=debug
-TGBOT_TOKEN=123:secret
-WWW_DIR=/tmp/attacker-www
+DNS_BASE_DOMAIN=attacker.example
+DNS_GATEWAY_IP=203.0.113.10
+DNS_MIHOMO_SECRET=attacker-secret
 clear_external_config_env
-if [[ -z "${BASE_DOMAIN+x}" && -z "${PUBLIC_IP+x}" && -z "${DNS_CHNROUTE+x}" \
-   && -z "${CERT_MODE+x}" && -z "${TGBOT_TOKEN+x}" \
-   && -z "${WWW_DIR+x}" && "${UI_DIR:-}" == "/opt/5gpn/ui" ]]; then
+if [[ -z "${BASE_DOMAIN+x}" && -z "${PUBLIC_IP+x}" && -z "${CERT_MODE+x}" \
+   && -z "${DNS_BASE_DOMAIN+x}" && -z "${DNS_GATEWAY_IP+x}" \
+   && -z "${DNS_MIHOMO_SECRET+x}" && "${UI_DIR:-}" == "/opt/5gpn/ui" ]]; then
     pass "caller configuration environment is discarded"
 else
     fail "caller configuration survived or the fixed UI_DIR changed"
@@ -186,7 +186,9 @@ if (
         case "${1:-}:${2:-}:${3:-}" in
             cat:certbot.timer:*) return 0 ;;
             stop:certbot.timer:*) printf '%s\n' stopped >> "$cert_ownership_tmp/timer.log"; return 0 ;;
+            is-active:certbot.timer:*) printf '%s\n' active; return 0 ;;
             is-active:--quiet:certbot.timer) return 1 ;;
+            is-enabled:certbot.timer:*) printf '%s\n' enabled; return 0 ;;
             is-active:--quiet:certbot.service) return 0 ;;
             *) return 1 ;;
         esac
@@ -198,38 +200,60 @@ else
     fail "active external Certbot can race the lineage snapshot"
 fi
 
-# `pause_global_certbot_timer` stops the distro timer on every run. The success
-# path must put back exactly what it paused, or a *successful* install silently
-# leaves an unrelated machine's renewals stopped forever. A failed install
-# deliberately restores nothing -- that is the contract, not an oversight.
+# `pause_global_certbot_timer` snapshots both active and enabled state. Until
+# scoped 5gpn renewal is committed, every success, failure, and signal path must
+# restore both values exactly.
 if (
     KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=0
-    GLOBAL_CERTBOT_TIMER_PAUSED_ACTIVE=""
+    GLOBAL_CERTBOT_TIMER_STATE_CAPTURED=0
+    GLOBAL_CERTBOT_TIMER_ORIGINAL_ACTIVE=""
+    GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED=""
     timer_active=active
-    global_certbot_timer_exists() { return 0; }
+    timer_enabled=enabled
+    certbot_lineage_set_is_exclusive() { return 0; }
     systemctl() {
         case "${1:-}" in
+            cat) return 0 ;;
+            show) printf 'loaded\n' ;;
             stop) timer_active=inactive ;;
             start) timer_active=active ;;
+            enable)
+                if [[ "$*" == *--runtime* ]]; then
+                    timer_enabled=enabled-runtime
+                else
+                    timer_enabled=enabled
+                fi ;;
+            disable)
+                timer_enabled=disabled
+                [[ "$*" != *--now* ]] || timer_active=inactive ;;
             is-active)
                 [[ "$*" == *--quiet* ]] || printf '%s\n' "$timer_active"
                 [[ "$timer_active" == active ]] ;;
+            is-enabled)
+                printf '%s\n' "$timer_enabled"
+                [[ "$timer_enabled" == enabled || "$timer_enabled" == enabled-runtime ]] ;;
             *) return 0 ;;
         esac
     }
     pause_global_certbot_timer >/dev/null 2>&1 \
         && [[ "$timer_active" == inactive \
-           && "$GLOBAL_CERTBOT_TIMER_PAUSED_ACTIVE" == active ]] \
-        && restore_global_certbot_timer_after_success >/dev/null 2>&1 \
-        && [[ "$timer_active" == active ]]
+           && "$GLOBAL_CERTBOT_TIMER_ORIGINAL_ACTIVE" == active \
+           && "$GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED" == enabled ]] \
+        && disable_global_certbot_timer_for_owned_lineage example.com >/dev/null 2>&1 \
+        && [[ "$timer_enabled" == disabled && "$KEEP_GLOBAL_CERTBOT_TIMER_DISABLED" == 0 ]] \
+        && restore_global_certbot_timer >/dev/null 2>&1 \
+        && [[ "$timer_active" == active && "$timer_enabled" == enabled \
+           && "$GLOBAL_CERTBOT_TIMER_STATE_CAPTURED" == 0 ]]
 ); then
-    pass "a successful install restarts the distro timer it paused"
+    pass "an uncommitted timer takeover restores original active and enabled state"
 else
-    fail "a successful install can leave the distro certbot.timer stopped"
+    fail "a failed or non-owning transaction can strand the distro certbot.timer"
 fi
 if (
     KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=1
-    GLOBAL_CERTBOT_TIMER_PAUSED_ACTIVE=active
+    GLOBAL_CERTBOT_TIMER_STATE_CAPTURED=1
+    GLOBAL_CERTBOT_TIMER_ORIGINAL_ACTIVE=active
+    GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED=enabled
     systemctl() {
         case "${1:-}" in
             show) printf 'loaded\n' ;;
@@ -238,7 +262,8 @@ if (
             *) return 0 ;;
         esac
     }
-    restore_global_certbot_timer_after_success >/dev/null 2>&1
+    restore_global_certbot_timer >/dev/null 2>&1 \
+        && [[ "$GLOBAL_CERTBOT_TIMER_STATE_CAPTURED" == 0 ]]
 ); then
     pass "an owned-lineage takeover keeps the distro timer disabled"
 else
@@ -254,12 +279,10 @@ else
     fail "project-private swap path missing"
 fi
 
-if grep -Eq 'xray\.service|smartdns\.service|sing-box\.service' "$INSTALL"; then
-    fail "unrelated historical service teardown remains"
-elif grep -Eq '^remove_legacy_service_accounts\(\)' "$INSTALL"; then
-    pass "only the exact 5gpn identity migration teardown remains"
+if grep -Eq 'xray\.service|smartdns\.service|sing-box\.service|^remove_legacy_service_accounts\(\)' "$INSTALL"; then
+    fail "historical service-account teardown remains"
 else
-    fail "the exact 5gpn identity migration teardown is missing"
+    pass "installer contains no historical service-account teardown"
 fi
 
 renew_remove="$(sed -n '/^remove_owned_renewal_automation()/,/^}/p' "$INSTALL")"
@@ -457,9 +480,8 @@ else
 fi
 rm -rf -- "$cert_state_tmp"
 
-# The bridge release wrote certificate and profile paths that are no longer
-# current installer inputs. The upgrade reader may accept those exact legacy
-# keys, but the current writer drops them and uses fixed role/UI paths.
+# Retired certificate and profile fields are unsupported footprints. The
+# current-only installer must reject them without rewriting the file.
 retired_env="$(mktemp)"
 cat > "$retired_env" <<'RETIRED_ENV'
 DNS_BASE_DOMAIN=env.example
@@ -470,12 +492,12 @@ DNS_WEB_KEY=/etc/5gpn/cert/web/current/privkey.pem
 WWW_DIR=/opt/5gpn/www
 RETIRED_ENV
 if validate_dns_env_schema "$retired_env" 2>/dev/null; then
-    pass "bridge certificate/profile keys are accepted only as legacy input"
+    fail "retired certificate/profile keys were accepted"
 else
-    fail "bridge certificate/profile keys abort the upgrade before cleanup"
+    pass "retired certificate/profile keys fail closed"
 fi
 
-# Legacy input is a closed allowlist; arbitrary keys still fail closed.
+# Arbitrary unknown keys also fail closed.
 unsupported_env="$(mktemp)"
 printf 'DNS_BASE_DOMAIN=env.example\nDNS_NOT_A_REAL_KEY=x\n' > "$unsupported_env"
 if validate_dns_env_schema "$unsupported_env" 2>/dev/null; then
