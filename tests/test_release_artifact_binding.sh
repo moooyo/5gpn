@@ -136,6 +136,16 @@ for pin in MIHOMO ZASH; do
     fi
 done
 
+NOTICES="$ROOT/THIRD_PARTY_NOTICES.md"
+if grep -Fq "$MIHOMO_VERSION" "$NOTICES" \
+   && grep -Fq "$MIHOMO_SHA256" "$NOTICES" \
+   && grep -Fq "$ZASH_VERSION" "$NOTICES" \
+   && grep -Fq "$ZASH_SHA256" "$NOTICES"; then
+    pass "third-party notices match the component versions and digests install.sh ships"
+else
+    fail "third-party notices drifted from the pinned component releases"
+fi
+
 # Gum is optional only in the sense that a bootstrap failure falls back to plain
 # output. It is still a root-installed release artifact when available. Lock all
 # three uname-to-release mappings and require the network verifier to bind each
@@ -189,7 +199,7 @@ fi
 # The public extension corpus must be parsed by the exact core release the
 # installer pins. Both repositories are immutable inputs to this release gate.
 if grep -Fq 'repository: moooyo/5gpn-extensions' "$CHECKS" \
-   && grep -Fq 'ref: ac04d79a12ef01f99bf1637f7dc62b6952694d78' "$CHECKS" \
+   && grep -Fq 'ref: c411578f2ae2472d17e8f2c66e4f2fc07013634b' "$CHECKS" \
    && grep -Fq "ref: ${MIHOMO_VERSION}" "$CHECKS" \
    && grep -Fq 'FIVEGPN_EXTENSIONS_ROOT:' "$CHECKS" \
    && grep -Fq "TestOfficialExtensionManifestParserCorpus\$'" "$CHECKS"; then
