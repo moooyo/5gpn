@@ -340,6 +340,7 @@ pass "missing runtime documents remain valid non-creating seed inputs"
 (
     BASE_DIR="$TMP/current/runtime"
     BIN_DIR="$BASE_DIR/bin"
+    SCRIPTS_DIR="$BASE_DIR/scripts"
     CONF_DIR="$TMP/current/config"
     MIHOMO_DIR="$CONF_DIR/mihomo"
     DNS_CERT_DIR="$CONF_DIR/cert"
@@ -348,7 +349,7 @@ pass "missing runtime documents remain valid non-creating seed inputs"
     STATE_DIR="$TMP/current/state"
     INTERCEPT_STATE_DIR="$TMP/current/intercept-state"
     IDENTITY_RECONCILE_FILE="$STATE_DIR/identity-reconcile"
-    mkdir -p "$BIN_DIR" "$DNS_CERT_DIR" "$INTERCEPT_DIR" \
+    mkdir -p "$BIN_DIR" "$SCRIPTS_DIR" "$DNS_CERT_DIR" "$INTERCEPT_DIR" \
         "$FIVEGPN_STATE_DIR" "$STATE_DIR" "$INTERCEPT_STATE_DIR"
     printf '%s\n' \
         '# RUNTIME-OVERLAY,5gpn and MODULE-INTERCEPT are historical notes only' \
