@@ -429,15 +429,20 @@ set_certbot_ownership() {
     printf 'version=1\nowned=%s\n' "$1" > "$CERTBOT_OWNERSHIP_FILE"
 }
 clear_certbot_ownership() { rm -f -- "$CERTBOT_OWNERSHIP_FILE"; }
+set_cert_provenance() {
+    printf 'mode=%s\nbase=%s\ncertbot_lineage=%s\n' "$1" "$2" "$3" \
+        > "$DNS_CERT_DIR/.provenance"
+    chmod 0640 "$DNS_CERT_DIR/.provenance"
+}
 
 clear_certbot_ownership
-write_cert_provenance cloudflare example.com reused
+set_cert_provenance cloudflare example.com reused
 if certbot_lineage_owned_by_5gpn example.com; then
     fail "a reused Certbot lineage was treated as 5gpn-owned"
 else
     pass "reused Certbot lineage provenance is non-owning"
 fi
-write_cert_provenance cloudflare example.com owned
+set_cert_provenance cloudflare example.com owned
 set_certbot_ownership example.com
 certbot_lineage_owned_by_5gpn example.com \
     && pass "the current Certbot ownership record proves ownership" \
@@ -448,14 +453,14 @@ certbot() { printf '%s\n' "$*" >> "$certbot_log"; }
 printf 'dns_cloudflare_credentials = %s/cloudflare.ini\n' "$ACME_DIR" \
     > "$LE_RENEWAL_ROOT/example.com.conf"
 clear_certbot_ownership
-write_cert_provenance cloudflare example.com reused
+set_cert_provenance cloudflare example.com reused
 decommission_certbot_lineage example.com >/dev/null
 if [[ -s "$certbot_log" || "$DECOMMISSION_PRESERVE_ACME" != 1 ]]; then
     fail "decommission sent a reused external lineage to certbot delete"
 else
     pass "decommission preserves a reused external lineage and its referenced credential"
 fi
-write_cert_provenance cloudflare example.com owned
+set_cert_provenance cloudflare example.com owned
 set_certbot_ownership example.com
 decommission_lineage_safe() { return 0; }
 decommission_certbot_lineage example.com >/dev/null
@@ -475,7 +480,7 @@ deploy_cert_roles() { printf 'deploy:%s:%s\n' "$1" "${2:-}" >> "$reuse_log"; }
 remove_owned_renew_hook() { printf '%s\n' hook-removed >> "$reuse_log"; }
 remove_owned_renewal_automation() { printf '%s\n' units-removed >> "$reuse_log"; }
 ensure_cf_token() { printf '%s\n' token-requested >> "$reuse_log"; return 1; }
-write_cert_provenance cloudflare example.com reused
+set_cert_provenance cloudflare example.com reused
 CERT_MODE=cloudflare
 if install_cert example.com >/dev/null \
    && grep -qx "deploy:example.com:${DOT_CERT_DIR}/current" "$reuse_log" \
