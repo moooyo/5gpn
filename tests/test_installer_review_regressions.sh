@@ -411,6 +411,7 @@ rm -rf -- "$ownership_tmp"
 
 cert_state_tmp="$(mktemp -d)"
 DNS_CERT_DIR="$cert_state_tmp/cert"
+CERTBOT_OWNERSHIP_FILE="$DNS_CERT_DIR/.certbot-ownership"
 DOT_CERT_DIR="$DNS_CERT_DIR/dot"
 CONSOLE_CERT_DIR="$DNS_CERT_DIR/console"
 DEBUG_CERT_DIR="$cert_state_tmp/debug-cert"
@@ -423,8 +424,13 @@ mkdir -p "$DOT_CERT_DIR/current" "$LE_LIVE_ROOT/example.com" "$LE_ARCHIVE_ROOT" 
 # certificate-root ownership boundary.
 ensure_dns_cert_root() { mkdir -p "$DNS_CERT_DIR"; }
 cert_root_is_safe() { return 0; }
-persist_certbot_lineage_ownership() { return 0; }
+certbot_ownership_record_is_safe() { [[ -f "$CERTBOT_OWNERSHIP_FILE" ]]; }
+set_certbot_ownership() {
+    printf 'version=1\nowned=%s\n' "$1" > "$CERTBOT_OWNERSHIP_FILE"
+}
+clear_certbot_ownership() { rm -f -- "$CERTBOT_OWNERSHIP_FILE"; }
 
+clear_certbot_ownership
 write_cert_provenance cloudflare example.com reused
 if certbot_lineage_owned_by_5gpn example.com; then
     fail "a reused Certbot lineage was treated as 5gpn-owned"
@@ -432,14 +438,16 @@ else
     pass "reused Certbot lineage provenance is non-owning"
 fi
 write_cert_provenance cloudflare example.com owned
+set_certbot_ownership example.com
 certbot_lineage_owned_by_5gpn example.com \
-    && pass "newly issued Certbot lineage provenance records ownership" \
-    || fail "owned Certbot lineage provenance was not recognized"
+    && pass "the current Certbot ownership record proves ownership" \
+    || fail "the current Certbot ownership record was not recognized"
 
 certbot_log="$cert_state_tmp/certbot.log"
 certbot() { printf '%s\n' "$*" >> "$certbot_log"; }
 printf 'dns_cloudflare_credentials = %s/cloudflare.ini\n' "$ACME_DIR" \
     > "$LE_RENEWAL_ROOT/example.com.conf"
+clear_certbot_ownership
 write_cert_provenance cloudflare example.com reused
 decommission_certbot_lineage example.com >/dev/null
 if [[ -s "$certbot_log" || "$DECOMMISSION_PRESERVE_ACME" != 1 ]]; then
@@ -448,6 +456,7 @@ else
     pass "decommission preserves a reused external lineage and its referenced credential"
 fi
 write_cert_provenance cloudflare example.com owned
+set_certbot_ownership example.com
 decommission_lineage_safe() { return 0; }
 decommission_certbot_lineage example.com >/dev/null
 grep -qx -- 'delete --non-interactive --cert-name example.com' "$certbot_log" \
