@@ -245,16 +245,57 @@ acquire_deploy_lock() {
         || { err "Another 5gpn certificate operation is running."; return 1; }
 }
 
-assert_no_retained_configure_gate() {
-    [[ -f "$RUNTIME_GATE_HELPER" && ! -L "$RUNTIME_GATE_HELPER" \
-       && "$(stat -Lc '%u:%g:%a:%h' -- "$RUNTIME_GATE_HELPER" 2>/dev/null)" == 0:0:755:1 ]] \
-        || { err "The installed configure runtime-gate helper is missing or unsafe."; return 1; }
-    grep -Fxq '# 5gpn-configure-runtime-gate-id: v1' "$RUNTIME_GATE_HELPER" \
-        && grep -Fq 'wait|validate-ui|assert-clear' "$RUNTIME_GATE_HELPER" \
-        || { err "The installed configure runtime-gate helper generation is invalid."; return 1; }
-    "$RUNTIME_GATE_HELPER" assert-clear \
+assert_no_retained_configure_gate() (
+    local production=/opt/5gpn/scripts/configure-runtime-gate.sh
+    local directory expected_uid=0 expected_gid=0 before_metadata before_digest
+    local source_fd hash_fd marker_fd fd metadata digest after_metadata after_digest
+    directory="$(dirname -- "$RUNTIME_GATE_HELPER")" || return 1
+    if [[ "$RUNTIME_GATE_HELPER" != "$production" ]]; then
+        expected_uid="${EUID:-$(id -u)}"
+        expected_gid="$(id -g)" || return 1
+    fi
+    [[ -d "$directory" && ! -L "$directory" \
+       && "$(readlink -f -- "$directory" 2>/dev/null)" == "$directory" \
+       && "$(stat -Lc '%u:%g:%a' -- "$directory" 2>/dev/null)" \
+          == "${expected_uid}:${expected_gid}:755" \
+       && -f "$RUNTIME_GATE_HELPER" && ! -L "$RUNTIME_GATE_HELPER" ]] \
+        || { err "The configure runtime-gate helper parent or path is unsafe."; return 1; }
+    before_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "$RUNTIME_GATE_HELPER" 2>/dev/null)" \
+        || return 1
+    [[ "$before_metadata" == *":${expected_uid}:${expected_gid}:755:1" ]] \
+        || { err "The configure runtime-gate helper metadata is unsafe."; return 1; }
+    before_digest="$(sha256sum -- "$RUNTIME_GATE_HELPER" | awk '{print $1}')" \
+        || return 1
+    [[ "$before_digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+    exec {source_fd}<"$RUNTIME_GATE_HELPER" || return 1
+    exec {hash_fd}<"$RUNTIME_GATE_HELPER" || return 1
+    exec {marker_fd}<"$RUNTIME_GATE_HELPER" || return 1
+    for fd in "$source_fd" "$hash_fd" "$marker_fd"; do
+        metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$fd" 2>/dev/null)" \
+            || return 1
+        [[ "$metadata" == "$before_metadata" ]] \
+            || { err "The configure runtime-gate helper changed while it was opened."; return 1; }
+    done
+    digest="$(sha256sum -- "/proc/self/fd/$hash_fd" | awk '{print $1}')" \
+        || return 1
+    [[ "$digest" == "$before_digest" ]] \
+        || { err "The configure runtime-gate helper FD digest changed."; return 1; }
+    awk '
+        $0 == "# 5gpn-configure-runtime-gate-id: v1" { marker = 1 }
+        index($0, "wait|validate-ui|assert-clear") { modes = 1 }
+        END { exit !(marker && modes) }
+    ' "/proc/self/fd/$marker_fd" \
+        || { err "The configure runtime-gate helper generation is invalid."; return 1; }
+    after_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "$RUNTIME_GATE_HELPER" 2>/dev/null)" \
+        || return 1
+    after_digest="$(sha256sum -- "$RUNTIME_GATE_HELPER" | awk '{print $1}')" \
+        || return 1
+    [[ "$after_metadata" == "$before_metadata" && "$after_digest" == "$before_digest" ]] \
+        || { err "The configure runtime-gate helper path changed before execution."; return 1; }
+    bash "/proc/self/fd/$source_fd" assert-clear \
         || { err "A retained configure runtime gate blocks independent certificate deployment until installed '5gpn configure' recovers it."; return 1; }
-}
+)
 
 cert_chain_trusted() {
     local cert="$1"

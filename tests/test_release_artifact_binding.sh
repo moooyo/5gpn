@@ -413,6 +413,16 @@ else
     fail "CI skips a root-only configure runtime-gate branch"
 fi
 
+for guard_script in scripts/cert-renew.sh scripts/renew-hook.sh scripts/intercept-cert-renew.sh; do
+    grep -Fq 'readlink -f -- "$directory"' "$ROOT/$guard_script" \
+        && grep -Fq 'exec {source_fd}<"$RUNTIME_GATE_HELPER"' "$ROOT/$guard_script" \
+        && grep -Fq 'sha256sum -- "/proc/self/fd/$hash_fd"' "$ROOT/$guard_script" \
+        && grep -Fq 'bash "/proc/self/fd/$source_fd" assert-clear' "$ROOT/$guard_script" \
+        && ! grep -Fq '"$RUNTIME_GATE_HELPER" assert-clear' "$ROOT/$guard_script" \
+        || fail "$guard_script reopens the root configure-gate helper by path"
+done
+pass "every certificate entry executes one parent-validated, digest-bound runtime-gate helper FD"
+
 # The network check is a CI job of its own. It must not be quietly dropped: an
 # unverified pin is how 0.0.57 shipped an installer that could not install.
 if grep -Fq 'bash tests/verify-artifact-pins.sh' "$CHECKS"; then

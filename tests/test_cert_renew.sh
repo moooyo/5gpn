@@ -17,6 +17,32 @@ source "$HELPER"
 
 TMP="$(mktemp -d /var/tmp/5gpn-cert-renew.XXXXXX)"
 trap 'rm -rf -- "$TMP"' EXIT
+if [[ -d /proc/self/fd ]]; then
+    runtime_helper_dir="$TMP/runtime-helper"
+    mkdir -p "$runtime_helper_dir"
+    chmod 0755 "$runtime_helper_dir"
+    cat > "$runtime_helper_dir/configure-runtime-gate.sh" <<'BOUND_GATE_HELPER'
+#!/usr/bin/env bash
+# 5gpn-configure-runtime-gate-id: v1
+# usage: wait|validate-ui|assert-clear
+set -eu
+[[ "$#" == 1 && "$1" == assert-clear ]]
+: > "$TEST_BOUND_RUNTIME_GATE_HELPER"
+BOUND_GATE_HELPER
+    chmod 0755 "$runtime_helper_dir/configure-runtime-gate.sh"
+    RUNTIME_GATE_HELPER="$runtime_helper_dir/configure-runtime-gate.sh"
+    export TEST_BOUND_RUNTIME_GATE_HELPER="$TMP/runtime-gate-helper-ran"
+    assert_no_retained_configure_gate \
+        || fail "bound configure runtime-gate helper assertion failed"
+    [[ -f "$TEST_BOUND_RUNTIME_GATE_HELPER" ]] \
+        || fail "bound configure runtime-gate helper FD was not executed"
+    chmod 0777 "$runtime_helper_dir"
+    if assert_no_retained_configure_gate >/dev/null 2>&1; then
+        fail "runtime-gate helper accepted a writable parent directory"
+    fi
+    chmod 0755 "$runtime_helper_dir"
+    pass "runtime-gate assertion binds helper parent, inode, metadata, digest, and execution FD"
+fi
 LOG="$TMP/actions.log"
 LE_LIVE_ROOT="$TMP/live"
 LE_RENEWAL_ROOT="$TMP/renewal"
