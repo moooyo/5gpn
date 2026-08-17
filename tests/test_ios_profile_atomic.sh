@@ -10,6 +10,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 pass() { echo "ok: $*"; }
 
 REAL_OPENSSL="$(command -v openssl)"
+export REAL_OPENSSL
 REAL_RMDIR="$(command -v rmdir)"
 REAL_MV="$(command -v mv)"
 CONFIG_ROOT="$TMP/config"
