@@ -169,6 +169,40 @@ fi
     || fail "backslash path rejection changed publication state"
 pass "managed publication paths reject every findmnt-escaped spelling"
 
+mount_table_root="$TMP/mount-table-root"
+new_root "$mount_table_root"
+REAL_FINDMNT="$(command -v findmnt)"
+MOUNT_TABLE_MODE=unrelated
+MOUNT_TABLE_TARGET="$mount_table_root/generations/generation-a"
+findmnt() {
+    "$REAL_FINDMNT" "$@"
+    local rc=$?
+    [[ "$rc" == 0 ]] || return "$rc"
+    if [[ " $* " == *" -R "* && " $* " == *" -o TARGET "* ]]; then
+        case "$MOUNT_TABLE_MODE" in
+            unrelated) printf '%s\n' '/run/credentials/getty@tty1.service' ;;
+            in-scope) printf '%s\n' "$MOUNT_TABLE_TARGET/unsafe@mount" ;;
+        esac
+    fi
+}
+publication_fs_commit_relative_pointer \
+    "$mount_table_root" current generations/generation-a "" \
+    "$EXPECTED_UID" "$EXPECTED_GID" \
+    || fail "an unrelated mount target with punctuation poisoned publication"
+[[ "$(readlink -- "$mount_table_root/current")" == generations/generation-a ]] \
+    || fail "unrelated mount-table entry changed the committed pointer"
+MOUNT_TABLE_MODE=in-scope
+MOUNT_TABLE_TARGET="$mount_table_root/generations/generation-b"
+if publication_fs_commit_relative_pointer \
+    "$mount_table_root" current generations/generation-b generations/generation-a \
+    "$EXPECTED_UID" "$EXPECTED_GID" >/dev/null 2>&1; then
+    fail "an unsafe in-scope nested mount target was ignored"
+fi
+unset -f findmnt
+[[ "$(readlink -- "$mount_table_root/current")" == generations/generation-a ]] \
+    || fail "in-scope mount rejection changed current"
+pass "unrelated unsafe mount names cannot poison scope checks, while in-scope ones fail"
+
 commit_mount_drift_root="$TMP/commit-mount-drift-root"
 new_root "$commit_mount_drift_root"
 publication_fs_commit_relative_pointer \

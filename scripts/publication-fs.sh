@@ -106,10 +106,12 @@ publication_fs_mount_boundary_is_safe() {
     output="$(findmnt -R -r -n -o TARGET --target "$target" 2>/dev/null)" || return 1
     [[ -n "$output" ]] || return 1
     while IFS= read -r mount; do
-        publication_fs_mount_target_text_is_safe "$mount" || return 1
         [[ "$mount" == "$containing" ]] && continue
         case "$mount" in
-            "$target"|"$target"/*) return 1 ;;
+            "$target"|"$target"/*)
+                publication_fs_mount_target_text_is_safe "$mount" || return 1
+                return 1
+                ;;
             *) continue ;;
         esac
     done <<< "$output"
