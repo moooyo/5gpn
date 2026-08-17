@@ -847,6 +847,7 @@ publish_roles() {
     load_cert_role_helpers || return 1
     cert_role_ctl_tree_is_recoverable \
         && cert_role_ctl_repair_recoverable_tree \
+        && cert_role_ctl_prepare_stage_parent \
         && cert_role_ctl_scrub_source_snapshots \
         || { err "The certificate-role tree is not safely recoverable."; return 1; }
     if roles_match_live && cert_role_ctl_validate_current; then

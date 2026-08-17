@@ -47,6 +47,11 @@ for runbook in "${expected_index_runbooks[@]}"; do
 done
 
 expected_packaged_acceptance=(
+    tests/container-acceptance.sh
+    tests/docker/probe-lib.sh
+    tests/docker/extension-worker-probe.sh
+    tests/docker/public-certificate-hot-reload.sh
+    tests/docker/recreate-container.sh
     tests/integration-smoke.md
     tests/deployment-smoke.md
     tests/acceptance/installer.md
@@ -65,7 +70,7 @@ mapfile -t actual_packaged_acceptance < <(
 )
 compare_exact_list "release acceptance document set" \
     expected_packaged_acceptance actual_packaged_acceptance
-pass "the root index and release bundle contain only the approved acceptance documents"
+pass "the root index and release bundle contain only the approved acceptance documents and Docker probes"
 
 MIHOMO_ACCEPTANCE_COMMIT=aba0cfcea5ebeda580ab63e174fd17146c3ef962
 ZASHBOARD_ACCEPTANCE_COMMIT=cf3d018ffa20eae0297c434b7a185b0d69f43b66
