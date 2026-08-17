@@ -395,12 +395,21 @@ for fixture in missing malformed wrong-owner wrong-mode symlink hardlink; do
         || fail "CI state-validator gate lacks the real $fixture fixture"
 done
 
+controller_negative_line="$(grep -n 'if /tmp/mihomo 5gpn-config inspect-controller' "$CHECKS" | cut -d: -f1)"
+controller_revision_line="$(grep -n 'expected_revision="$(sha256sum "$runtime/config.yaml"' "$CHECKS" | cut -d: -f1)"
+controller_chown_line="$(grep -n 'sudo chown root:root "$runtime/config.yaml"' "$CHECKS" | cut -d: -f1)"
+controller_root_line="$(grep -n 'sudo /tmp/mihomo 5gpn-config inspect-controller' "$CHECKS" | cut -d: -f1)"
 if grep -Fq '5gpn-config inspect-controller --config "$runtime/config.yaml"' "$CHECKS" \
    && grep -Fq '.version == 2' "$CHECKS" \
    && grep -Fq 'external_ui' "$CHECKS" \
    && grep -Fq 'private_key' "$CHECKS" \
    && grep -Fq 'sudo chown root:root "$runtime/config.yaml"' "$CHECKS" \
-   && grep -Fq 'sudo chmod 0640 "$runtime/config.yaml"' "$CHECKS"; then
+   && grep -Fq 'sudo chmod 0640 "$runtime/config.yaml"' "$CHECKS" \
+   && [[ -n "$controller_negative_line" && -n "$controller_revision_line" \
+      && -n "$controller_chown_line" && -n "$controller_root_line" \
+      && "$controller_negative_line" -lt "$controller_revision_line" \
+      && "$controller_revision_line" -lt "$controller_chown_line" \
+      && "$controller_chown_line" -lt "$controller_root_line" ]]; then
     pass "CI executes the shipped root-only controller inspector v2 contract"
 else
     fail "CI does not execute the exact pinned controller inspector contract"

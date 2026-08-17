@@ -241,9 +241,9 @@ jobs:
             echo "controller inspector unexpectedly accepted a non-root caller" >&2
             exit 1
           fi
+          expected_revision="$(sha256sum "$runtime/config.yaml" | awk '{print $1}')"
           sudo chown root:root "$runtime/config.yaml"
           sudo chmod 0640 "$runtime/config.yaml"
-          expected_revision="$(sha256sum "$runtime/config.yaml" | awk '{print $1}')"
           sudo /tmp/mihomo 5gpn-config inspect-controller --config "$runtime/config.yaml" \
             | jq -cse --arg revision "$expected_revision" '
                 select(length == 1) | .[0] | select(
