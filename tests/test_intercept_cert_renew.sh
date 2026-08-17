@@ -11,6 +11,18 @@ pass() { echo "ok: $*"; }
 
 grep -Fxq 'INTERCEPT_DIR=/etc/5gpn/intercept' "$HELPER" \
     || fail "production interception directory default is missing"
+main_fn="$(sed -n '/^main()/,/^}/p' "$HELPER")"
+gate_line="$(grep -n 'assert_no_retained_configure_gate' <<<"$main_fn" | cut -d: -f1)"
+cert_lock_line="$(grep -n 'exec 9>"$LOCK_FILE"' <<<"$main_fn" | cut -d: -f1)"
+cleanup_armed_line="$(grep -n 'CERT_LOCK_HELD=1' <<<"$main_fn" | cut -d: -f1)"
+publication_line="$(grep -n 'cleanup_tls_candidates' <<<"$main_fn" | tail -1 | cut -d: -f1)"
+[[ -n "$gate_line" && -n "$cert_lock_line" && -n "$cleanup_armed_line" && -n "$publication_line" \
+   && "$cert_lock_line" -lt "$gate_line" \
+   && "$gate_line" -lt "$cleanup_armed_line" \
+   && "$cleanup_armed_line" -lt "$publication_line" \
+   && ! "$main_fn" =~ INSTALL_LOCK_FILE ]] \
+    || fail "interception certificate writer does not assert retained-gate absence before arming cleanup/publication"
+pass "interception certificate writer rejects retained gate state before cleanup or publication"
 
 export INTERCEPT_CERT_RENEW_LIB_ONLY=1
 # shellcheck source=../scripts/intercept-cert-renew.sh

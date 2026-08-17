@@ -101,15 +101,43 @@ die() {
 }
 
 lock_root_is_safe() {
-    local root_mount lock_mount
+    local parent parent_target parent_device parent_root
+    local lock_target lock_device lock_fsroot relative expected_root
     [[ -d "$LOCK_ROOT" && ! -L "$LOCK_ROOT" \
        && "$(readlink -f -- "$LOCK_ROOT" 2>/dev/null)" == "$LOCK_ROOT" \
        && "$(stat -Lc '%u:%g:%a' -- "$LOCK_ROOT" 2>/dev/null)" == 0:0:700 ]] \
         || return 1
-    root_mount="$(findmnt -rn -T "$(dirname -- "$LOCK_ROOT")" -o TARGET 2>/dev/null)" \
+    parent="$(dirname -- "$LOCK_ROOT")"
+    read -r parent_target parent_device parent_root \
+        < <(findmnt -rn -T "$parent" -o TARGET,MAJ:MIN,FSROOT 2>/dev/null) \
         || return 1
-    lock_mount="$(findmnt -rn -T "$LOCK_ROOT" -o TARGET 2>/dev/null)" || return 1
-    [[ -n "$root_mount" && "$lock_mount" == "$root_mount" ]]
+    read -r lock_target lock_device lock_fsroot \
+        < <(findmnt -rn -T "$LOCK_ROOT" -o TARGET,MAJ:MIN,FSROOT 2>/dev/null) \
+        || return 1
+    [[ -n "$parent_target" && -n "$parent_device" && -n "$parent_root" \
+       && -n "$lock_target" && -n "$lock_device" && -n "$lock_fsroot" ]] \
+        || return 1
+    [[ "$lock_target" == "$parent_target" ]] && return 0
+    relative="${LOCK_ROOT#"${parent_target%/}/"}"
+    [[ -n "$relative" && "$relative" != "$LOCK_ROOT" && "$relative" != */../* ]] \
+        || return 1
+    expected_root="${parent_root%/}/${relative}"
+    [[ "$expected_root" == /* ]] || expected_root="/${expected_root}"
+    [[ "$lock_target" == "$LOCK_ROOT" \
+       && "$lock_device" == "$parent_device" \
+       && "$lock_fsroot" == "$expected_root" ]]
+}
+
+gate_state_is_clear() {
+    local path
+    local -a paths=("$GATE_RECORD" "$GATE_JOB" "$GATE_ACK" "$GATE_RELEASE") temps=()
+    shopt -s nullglob
+    temps=("$LOCK_ROOT"/.configure-runtime-gate.*)
+    shopt -u nullglob
+    paths+=("${temps[@]}")
+    for path in "${paths[@]}"; do
+        [[ ! -e "$path" && ! -L "$path" ]] || return 1
+    done
 }
 
 load_gate_record() {
@@ -212,7 +240,7 @@ validate_current_ui() {
 }
 
 main() {
-    [[ "$#" == 1 ]] || die "usage: configure-runtime-gate.sh wait|validate-ui"
+    [[ "$#" == 1 ]] || die "usage: configure-runtime-gate.sh wait|validate-ui|assert-clear"
     case "$1" in
         wait)
             if [[ ! -e "$LOCK_ROOT" && ! -L "$LOCK_ROOT" ]]; then
@@ -232,8 +260,15 @@ main() {
         validate-ui)
             validate_current_ui
             ;;
+        assert-clear)
+            if [[ ! -e "$LOCK_ROOT" && ! -L "$LOCK_ROOT" ]]; then
+                exit 0
+            fi
+            lock_root_is_safe || die "the private runtime directory is unsafe"
+            gate_state_is_clear || die "retained configure runtime-gate state is present"
+            ;;
         *)
-            die "usage: configure-runtime-gate.sh wait|validate-ui"
+            die "usage: configure-runtime-gate.sh wait|validate-ui|assert-clear"
             ;;
     esac
 }

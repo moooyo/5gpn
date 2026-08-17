@@ -39,6 +39,15 @@ grep -Fq 'certificate chain is not trusted for production TLS' "$HOOK" \
     || fail "renew hook does not enforce a trusted production chain"
 grep -Fq 'acquire_deploy_lock || return 1' "$HOOK" \
     || fail "external Certbot deploy hook publication is not certificate-lock serialized"
+deploy_lock_fn="$(sed -n '/^acquire_deploy_lock()/,/^}/p' "$HOOK")"
+install_lock_line="$(grep -n 'exec 8>"$INSTALL_LOCK_FILE"' <<<"$deploy_lock_fn" | cut -d: -f1)"
+gate_line="$(grep -n 'assert_no_retained_configure_gate' <<<"$deploy_lock_fn" | cut -d: -f1)"
+renew_lock_line="$(grep -n 'exec 9>"$RENEW_LOCK_FILE"' <<<"$deploy_lock_fn" | cut -d: -f1)"
+[[ -n "$install_lock_line" && -n "$gate_line" && -n "$renew_lock_line" \
+   && "$install_lock_line" -lt "$gate_line" \
+   && "$gate_line" -lt "$renew_lock_line" ]] \
+    || fail "external deploy hook does not reject retained gate state between install and certificate locks"
+pass "external deploy hook serializes and rejects retained gate state before publication"
 acquire_deploy_lock() { return 0; }
 
 CERT_ROOT="$TMP/cert"

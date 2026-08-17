@@ -31,6 +31,10 @@ jobs:
           done
       - name: Root certificate-role recovery gate
         run: sudo bash tests/test_cert_role_ctl.sh
+      - name: Root configure runtime gates
+        run: |
+          sudo bash tests/test_configure_runtime_gate.sh
+          sudo bash tests/test_configure_boundary.sh
 
   # There is no Go or web gate here any more. The daemon and the control-console
   # SPA this repository used to build were deleted with the three-process layout;

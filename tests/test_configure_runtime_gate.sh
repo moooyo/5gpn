@@ -17,6 +17,8 @@ grep -Fq 'trap on_term TERM' "$SOURCE" \
     || fail "operator stop can leave a signaled ExecStartPre failure"
 grep -Fq 'GATE_MAX_WAIT_SECONDS=2100' "$SOURCE" \
     || fail "runtime gate wait is not explicitly bounded"
+grep -Fq 'wait|validate-ui|assert-clear' "$SOURCE" \
+    || fail "runtime gate helper does not expose the shared retained-state assertion"
 
 if [[ "${EUID:-$(id -u)}" != 0 ]]; then
     pass "root-owned gate behavior is covered by the disposable root acceptance"
@@ -53,6 +55,43 @@ token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 rm -f -- "$record" "$ack" "$job" "$release"
 "$HELPER" wait || fail "normal start did not pass without gate state"
 pass "normal service starts pass the configure gate immediately"
+
+"$HELPER" assert-clear || fail "empty runtime gate state was not accepted"
+printf 'retained\n' > "$record"
+chmod 0600 "$record"
+if "$HELPER" assert-clear >/dev/null 2>&1; then
+    fail "shared retained-state assertion accepted a named gate file"
+fi
+rm -f -- "$record"
+temp_residue="$LOCK_ROOT/.configure-runtime-gate.abc123"
+printf 'retained\n' > "$temp_residue"
+chmod 0600 "$temp_residue"
+if "$HELPER" assert-clear >/dev/null 2>&1; then
+    fail "shared retained-state assertion accepted a private gate residue"
+fi
+rm -f -- "$temp_residue"
+pass "shared retained-state assertion rejects named and temporary gate state"
+
+mount_fake_bin="$TMP/mount-fake-bin"
+mkdir "$mount_fake_bin"
+cat > "$mount_fake_bin/findmnt" <<FAKE_FINDMNT
+#!/usr/bin/env bash
+set -eu
+case "\$*" in
+    *'-T $TMP/run '*) printf '%s\n' '$TMP/run 0:42 /sandbox-run' ;;
+    *'-T $LOCK_ROOT '*) printf '%s %s %s\n' '$LOCK_ROOT' '0:42' "\${TEST_GATE_FSROOT:-/sandbox-run/5gpn}" ;;
+    *) exit 1 ;;
+esac
+FAKE_FINDMNT
+chmod 0755 "$mount_fake_bin/findmnt"
+PATH="$mount_fake_bin:$PATH" TEST_GATE_FSROOT=/sandbox-run/5gpn \
+    "$HELPER" assert-clear \
+    || fail "exact systemd self-bind of the private runtime directory was rejected"
+if PATH="$mount_fake_bin:$PATH" TEST_GATE_FSROOT=/foreign-root \
+    "$HELPER" assert-clear >/dev/null 2>&1; then
+    fail "an unrelated nested mount was accepted as the systemd runtime self-bind"
+fi
+pass "runtime gate accepts only the exact same-device systemd self-bind"
 
 "$HELPER" validate-ui || fail "valid current UI wrapper failed"
 ui_started="$TMP/ui-started"
@@ -132,6 +171,50 @@ fi
 rm -f -- "$record" "$ack"
 pass "a bare TERM cannot bypass the gate helper"
 
+stop_fake_bin="$TMP/stop-fake-bin"
+mkdir "$stop_fake_bin"
+cat > "$stop_fake_bin/busctl" <<'STOP_BUSCTL'
+#!/usr/bin/env bash
+set -eu
+case "$*" in
+    *' GetUnit s 5gpn-mihomo.service')
+        printf '{"type":"o","data":["/org/freedesktop/systemd1/unit/5gpn_2dmihomo_2eservice"]}\n' ;;
+    *' org.freedesktop.systemd1.Unit Job')
+        printf '{"type":"(uo)","data":[77,"/org/freedesktop/systemd1/job/77"]}\n' ;;
+    *' org.freedesktop.systemd1.Job JobType')
+        printf '{"type":"s","data":"stop"}\n' ;;
+    *' org.freedesktop.systemd1.Job State')
+        printf '{"type":"s","data":"running"}\n' ;;
+    *) exit 1 ;;
+esac
+STOP_BUSCTL
+cat > "$stop_fake_bin/systemctl" <<'STOP_SYSTEMCTL'
+#!/usr/bin/env bash
+set -eu
+case "$*" in
+    'show -p ActiveState --value 5gpn-mihomo.service') printf 'deactivating\n' ;;
+    'show -p SubState --value 5gpn-mihomo.service') printf 'stop-sigterm\n' ;;
+    *) exit 1 ;;
+esac
+STOP_SYSTEMCTL
+chmod 0755 "$stop_fake_bin/busctl" "$stop_fake_bin/systemctl"
+printf 'version=1\ntoken=%s\nunit=5gpn-mihomo.service\n' "$token" > "$record"
+chmod 0600 "$record"
+PATH="$stop_fake_bin:$PATH" \
+    INVOCATION_ID=00112233445566778899aabbccddeeff "$HELPER" wait &
+gate_pid=$!
+deadline=$((SECONDS + 10))
+while [[ ! -f "$ack" && "$SECONDS" -lt "$deadline" ]]; do
+    sleep 0.05
+done
+[[ -f "$ack" ]] \
+    || { kill -TERM "$gate_pid" 2>/dev/null || true; fail "stop-job gate did not acknowledge"; }
+kill -TERM "$gate_pid"
+wait "$gate_pid" \
+    || fail "an exact PID1 stop job did not terminate the gate helper cleanly"
+rm -f -- "$record" "$ack"
+pass "an exact PID1 stop job cleanly terminates the gate helper"
+
 (
     INSTALL_SH_LIB_ONLY=1
     export INSTALL_SH_LIB_ONLY
@@ -147,7 +230,44 @@ pass "a bare TERM cannot bypass the gate helper"
     CONFIGURE_RUNTIME_GATE_ACK="$private/configure-runtime-gate.ack"
     CONFIGURE_RUNTIME_GATE_RELEASE="$private/configure-runtime-gate.release"
     configure_unit_has_no_job() { :; }
+    configure_runtime_is_stably_active_without_job() { :; }
+    configure_runtime_is_confirmed_inactive_success() { return 1; }
     residue="$private/.configure-runtime-gate.abc123"
+    refuse_retained_configure_runtime_gate_state \
+        || fail "an empty private gate directory was treated as retained state"
+    for state_path in \
+        "$CONFIGURE_RUNTIME_GATE_RECORD" "$CONFIGURE_RUNTIME_GATE_JOB" \
+        "$CONFIGURE_RUNTIME_GATE_ACK" "$CONFIGURE_RUNTIME_GATE_RELEASE" "$residue"; do
+        printf 'retained\n' > "$state_path"
+        chmod 0600 "$state_path"
+        if refuse_retained_configure_runtime_gate_state >/dev/null 2>&1; then
+            fail "a non-configure entry accepted retained gate state: $state_path"
+        fi
+        rm -f -- "$state_path"
+    done
+
+    acquire_install_lock() { INSTALL_LOCK_HELD=1; }
+    release_install_lock() { INSTALL_LOCK_HELD=0; }
+    assert_installed_backend_revision() { :; }
+    require_completed_runtime_identity() { :; }
+    blocked_callback="$TMP/retained-gate-callback"
+    retained_record_contents="$(printf 'version=1\ntoken=%s\nunit=5gpn-mihomo.service\n' "$token")"
+    printf '%s\n' "$retained_record_contents" > "$CONFIGURE_RUNTIME_GATE_RECORD"
+    chmod 0600 "$CONFIGURE_RUNTIME_GATE_RECORD"
+    retained_gate_callback() { : > "$blocked_callback"; }
+    if run_management_with_install_lock retained_gate_callback >/dev/null 2>&1; then
+        fail "the locked management wrapper accepted retained gate state"
+    fi
+    [[ ! -e "$blocked_callback" ]] \
+        || fail "a retained gate reached the management mutation callback"
+    configure_recovery_callback="$TMP/configure-recovery-callback"
+    configure_installation() { : > "$configure_recovery_callback"; }
+    run_management_with_install_lock configure_installation \
+        || fail "the configure recovery entry was blocked by its own retained gate"
+    [[ -f "$configure_recovery_callback" ]] \
+        || fail "the configure recovery callback did not run"
+    rm -f -- "$CONFIGURE_RUNTIME_GATE_RECORD" "$configure_recovery_callback"
+
     printf 'version=1\ntoken=%s\nunit=5gpn-mihomo.service\n' "$token" > "$residue"
     chmod 0600 "$residue"
     ln -- "$residue" "$CONFIGURE_RUNTIME_GATE_RECORD"

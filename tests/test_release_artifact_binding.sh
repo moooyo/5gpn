@@ -199,9 +199,27 @@ for guarded_function in run_management_with_install_lock run_management_with_ins
     guarded_body="$(sed -n "/^${guarded_function}()/,/^}/p" "$INSTALL")"
     lock_line="$(grep -n 'acquire_install_lock' <<<"$guarded_body" | head -n 1 | cut -d: -f1)"
     stale_line="$(grep -n 'assert_installed_backend_revision' <<<"$guarded_body" | head -n 1 | cut -d: -f1)"
-    [[ -n "$lock_line" && -n "$stale_line" && "$lock_line" -lt "$stale_line" ]] \
-        || fail "$guarded_function does not reject a backend changed while waiting for the install lock"
+    gate_line="$(grep -n 'refuse_retained_configure_runtime_gate_state' <<<"$guarded_body" | head -n 1 | cut -d: -f1)"
+    case "$guarded_function" in
+        run_management_with_install_lock)
+            mutation_line="$(grep -n '^[[:space:]]*"\$@"$' <<<"$guarded_body" | head -n 1 | cut -d: -f1)" ;;
+        run_management_with_install_and_cert_lock)
+            mutation_line="$(grep -n 'acquire_install_cert_lock' <<<"$guarded_body" | head -n 1 | cut -d: -f1)" ;;
+        full_install)
+            mutation_line="$(grep -n 'delegate_pinned_channel_switch' <<<"$guarded_body" | head -n 1 | cut -d: -f1)" ;;
+        uninstall)
+            mutation_line="$(grep -n 'claim_project_roots' <<<"$guarded_body" | head -n 1 | cut -d: -f1)" ;;
+    esac
+    [[ -n "$lock_line" && -n "$stale_line" && -n "$gate_line" && -n "$mutation_line" \
+       && "$lock_line" -lt "$stale_line" \
+       && "$stale_line" -lt "$gate_line" \
+       && "$gate_line" -lt "$mutation_line" ]] \
+        || fail "$guarded_function does not reject stale backend or retained gate state before mutation"
 done
+management_guard_body="$(sed -n '/^run_management_with_install_lock()/,/^}/p' "$INSTALL")"
+grep -Fq '[[ "${1:-}" != configure_installation ]]' <<<"$management_guard_body" \
+    || fail "the configure recovery entry is blocked by the retained-gate refusal"
+pass "every non-configure write entry rejects retained runtime-gate state before mutation"
 main_fn="$(sed -n '/^main()/,/^}/p' "$INSTALL")"
 manage_action_fn="$(sed -n '/^manage_action()/,/^}/p' "$INSTALL")"
 if grep -Fq 'run_management_with_install_lock configure_installation' <<<"$main_fn" \
@@ -386,6 +404,13 @@ if grep -Fq '5gpn-config inspect-controller --config "$runtime/config.yaml"' "$C
     pass "CI executes the shipped root-only controller inspector v2 contract"
 else
     fail "CI does not execute the exact pinned controller inspector contract"
+fi
+
+if grep -Fq 'sudo bash tests/test_configure_runtime_gate.sh' "$CHECKS" \
+   && grep -Fq 'sudo bash tests/test_configure_boundary.sh' "$CHECKS"; then
+    pass "CI executes the root-owned PID1 gate and configure transaction branches"
+else
+    fail "CI skips a root-only configure runtime-gate branch"
 fi
 
 # The network check is a CI job of its own. It must not be quietly dropped: an

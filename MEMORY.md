@@ -170,11 +170,20 @@ Update the status and the normative documentation when an implementation lands.
   that PID 1 now owns this unit's stop job; a bare control-process signal fails
   closed. An operator stop replaces that job in PID 1, terminates either
   pre-start helper cleanly, and remains stopped because
-  configure never creates a replacement job. Stale recovery releases only the
-  same still-blocked job while its pre-publication restoration entitlement
-  remains valid; a missing, replaced, unbound, or post-publication job is kept
-  inactive. Cleanup atomically closes the nonce record before deleting ACK/job
-  state, so a concurrent start cannot create a record-less acknowledgement.
+  configure never creates a replacement job. Before a matching release exists,
+  stale recovery releases only the same still-blocked job while its
+  pre-publication restoration entitlement remains valid; any visible coordinate
+  commit revokes that entitlement and stays inactive. A durable matching release
+  is the activation commit and may complete only that exact job after current
+  inputs, readiness, final active/running process state, and absence of another
+  systemd job all revalidate. Failed, timed-out, or deactivating activation is
+  cleaned inactive and reported as failure. Cleanup atomically closes the nonce
+  record before deleting ACK/job state, so an interrupted close resumes only
+  while inactive and a concurrent start cannot create a record-less acknowledgement.
+  Every other mutating installer or management entry refuses retained named or
+  temporary gate state before publication or systemd mutation and directs the
+  operator to the installed `5gpn configure` recovery path; read-only status
+  remains available.
   The account is proven process-free, and current state plus the
   exact job are revalidated before CAS. Profiles are prepared before the CAS
   and published only after `dns.json` and `dns.env`; HTTP-01 uses the same
@@ -215,6 +224,12 @@ Update the status and the normative documentation when an implementation lands.
   favicon/PWA/manifest/worker URLs exposed by the preceding generation must
   remain present and generation-local, but may contain the new bytes. This is a
   one-release stable-URL assumption, not arbitrary top-level compatibility. A
+  deliberate lock-order split keeps certificate writers deadlock-free: public
+  renewal uses install lock, retained-gate assertion, then certificate lock;
+  the interception-certificate oneshot uses certificate lock then the same
+  assertion because full install waits for it while still holding the install
+  lock. Configure cannot create a gate across that assertion because it also
+  needs the certificate lock. A
   flat `/opt/5gpn/ui` tree and `/opt/5gpn/www` are unsupported.
 - Public certificate role validation, staging, pointer commit, and protected
   cleanup have one installed implementation. `cert-role-ctl.sh` consumes the

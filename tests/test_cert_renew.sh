@@ -128,10 +128,15 @@ write_renewal_conf
 
 # Keep every case inside the temporary tree and bypass the real global lock.
 LOCK_ORDER=""
+MOCK_GATE_CLEAR=1
 acquire_install_gate() { LOCK_ORDER=install; }
+assert_no_retained_configure_gate() {
+    [[ "$LOCK_ORDER" == install && "$MOCK_GATE_CLEAR" == 1 ]] || return 1
+    LOCK_ORDER=install-gate
+}
 acquire_renew_lock() {
-    [[ "$LOCK_ORDER" == install ]] || return 1
-    LOCK_ORDER=install-cert
+    [[ "$LOCK_ORDER" == install-gate ]] || return 1
+    LOCK_ORDER=install-gate-cert
 }
 cf_credential_safe() { return 0; }
 cert_provenance_selects_owned() { [[ "$MOCK_PROVENANCE" == owned ]]; }
@@ -230,6 +235,7 @@ reset_case() {
     MOCK_OWNERSHIP_BASE=example.com
     MOCK_ROLE_TREE_SAFE=1
     MOCK_PROFILE_INPUTS_MATCH=1
+    MOCK_GATE_CLEAR=1
     LOCK_ORDER=""
     write_ownership_record
     sync_role_copies
@@ -273,11 +279,20 @@ expect_before() {
 
 # A fresh-enough certificate returns before DNS or service inspection.
 reset_case
+MOCK_GATE_CLEAR=0
+expect_failure "retained configure gate defers public certificate renewal" cert_renew_main --cert-name example.com
+[[ "$LOCK_ORDER" == install ]] \
+    && pass "retained gate refusal happens after the install lock and before the certificate lock" \
+    || fail "retained gate refusal crossed the certificate-lock boundary"
+expect_no_log "certbot " "retained gate refusal performs no Certbot mutation"
+expect_no_log "systemctl " "retained gate refusal performs no systemd mutation"
+
+reset_case
 MOCK_CERT_FRESH=1
 expect_success "not-due HTTP certificate exits successfully" cert_renew_main --cert-name example.com
-[[ "$LOCK_ORDER" == install-cert ]] \
-    && pass "public renewal takes the install gate before the certificate lock" \
-    || fail "public renewal lock order is not install then certificate"
+[[ "$LOCK_ORDER" == install-gate-cert ]] \
+    && pass "public renewal checks retained gate state between the install and certificate locks" \
+    || fail "public renewal lock/gate order is not install, gate, certificate"
 expect_no_log "dig " "not-due certificate does not query DNS"
 expect_no_log "systemctl " "not-due certificate does not inspect/stop mihomo"
 expect_no_log "certbot " "not-due certificate does not invoke Certbot"

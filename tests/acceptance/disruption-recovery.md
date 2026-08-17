@@ -148,8 +148,20 @@ failure and interaction behavior belongs to the immutable zashboard runbook.
   durably bound, after ACK, before publication, and after publication. A later
   configure releases only a record whose exact original job, ACK, root control
   PID, invocation, and restoration entitlement remain live. Every unbound,
-  canceled, replaced, or post-publication case is cleaned while Core stays
-  inactive; recovery never creates a new start job.
+  canceled, replaced, or visible-publication-without-release case is cleaned
+  while Core stays inactive; recovery never creates a new start job.
+- [ ] Kill after a visible role/file/profile commit but before the matching gate
+  release: recovery keeps Core inactive. Kill after the release is durable but
+  before closing: recovery may complete only the original exact job and must
+  prove ready plus final `active/running`, MainPID, ControlPID, Result, and no-job
+  state. Kill after closing begins: recovery remains inactive and only finishes
+  owned cleanup. Inject failed, deactivating, timeout, and start-limit results;
+  each cleanup returns failure rather than continuing into a new configure.
+- [ ] With each retained named gate file and each private temporary gate residue
+  present separately, run reinstall, restart, node/reset/profile/token writes,
+  and uninstall. Every non-configure mutating entry refuses before publication
+  or systemd mutation and directs the operator to installed `5gpn configure`;
+  read-only status still works and configure remains the sole recovery entry.
 - [ ] Interrupt public role and UI/profile publication at each file, fsync, and
   rename boundary. Public certificate roles retain their documented sequential
   boundary: failure before the first current leaves both old roles selected;

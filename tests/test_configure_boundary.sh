@@ -149,7 +149,8 @@ grep -Fq 'configure_publish_private_runtime_gate_file "$CONFIGURE_RUNTIME_GATE_R
     && grep -Fq 'CONFIGURE_RUNTIME_GATE_INVOCATION_ID' <<<"$runtime_gate_ack_fn" \
     && grep -Fq 'configure_publish_private_runtime_gate_file "$CONFIGURE_RUNTIME_GATE_RELEASE"' <<<"$runtime_gate_publish_release_fn" \
     && grep -Fq 'configure_runtime_gate_ack_matches_control_process' <<<"$runtime_gate_release_fn" \
-    && grep -Fq 'configure_systemd_job_is_exact' <<<"$runtime_fence_recover_fn" \
+    && grep -Fq 'configure_runtime_is_stably_active_without_job' <<<"$runtime_fence_recover_fn" \
+    && grep -Fq 'configure_runtime_is_confirmed_inactive_success' <<<"$runtime_fence_recover_fn" \
     && ! grep -Eq 'systemctl[[:space:]].*start[[:space:]]+5gpn-mihomo' <<<"$runtime_gate_release_fn$runtime_fence_recover_fn" \
     && ! grep -Eq 'systemctl[[:space:]]+(mask|unmask)' "$INSTALL" \
     || fail "gateway publication is not bound to one exact PID1 job, ACK/ControlPID, and matching release record"
@@ -426,6 +427,18 @@ pass "configure orchestration is no-op safe and applies only field-specific effe
     environment_failure_log="$TMP/environment-failure.log"
     : > "$environment_failure_log"
     CONFIGURE_RESTART_REQUIRED=1
+    acquire_install_cert_lock() {
+        INSTALL_CERT_LOCK_HELD=1
+        printf 'acquire\n' >> "$environment_failure_log"
+    }
+    release_install_cert_lock() {
+        INSTALL_CERT_LOCK_HELD=0
+        printf 'release\n' >> "$environment_failure_log"
+    }
+    configure_revalidate_locked_publication_inputs() {
+        printf 'revalidate:%s\n' "$1" >> "$environment_failure_log"
+        [[ "${TEST_LOCKED_REVALIDATE_FAIL:-0}" == 0 ]]
+    }
     configure_quiesce_runtime_for_gateway() {
         CONFIGURE_RUNTIME_QUIESCED_BY_US=1
         CONFIGURE_RUNTIME_FENCE_ATTEMPTED=1
@@ -444,13 +457,44 @@ pass "configure orchestration is no-op safe and applies only field-specific effe
     configure_restart_runtime_if_active() { printf 'unexpected-restart\n' >> "$environment_failure_log"; }
     configure_stop_runtime_after_visible_failure() { printf 'stop\n' >> "$environment_failure_log"; }
     err() { :; }
-    if configure_apply_environment_transaction >/dev/null 2>&1; then
+    TEST_LOCKED_REVALIDATE_FAIL=1
+    if configure_apply_environment_transaction 192.0.2.20 >/dev/null 2>&1; then
+        fail "environment transaction accepted locked-input drift"
+    fi
+    [[ "$(paste -sd '|' "$environment_failure_log")" == 'acquire|revalidate:192.0.2.20|release' ]] \
+        || fail "locked-input drift reached gate creation or dns.env publication"
+    : > "$environment_failure_log"
+    TEST_LOCKED_REVALIDATE_FAIL=0
+    if configure_apply_environment_transaction 192.0.2.20 >/dev/null 2>&1; then
         fail "environment transaction accepted a post-rename dns.env failure"
     fi
-    [[ "$(paste -sd '|' "$environment_failure_log")" == 'quiesce|disarm|env-visible|stop' ]] \
+    [[ "$(paste -sd '|' "$environment_failure_log")" == 'acquire|revalidate:192.0.2.20|quiesce|disarm|env-visible|stop|release' ]] \
         || fail "visible dns.env failure did not stop Core before any restart"
 )
 pass "non-profile coordinate publication also stops Core after a visible failure"
+
+(
+    locked_revalidate_log="$TMP/environment-locked-revalidate.log"
+    : > "$locked_revalidate_log"
+    INSTALL_CERT_LOCK_HELD=1
+    CONFIGURE_NODE_LOCK_HELD=1
+    CONFIGURE_GATEWAY_CHANGED=0
+    CONFIGURE_DNS_GATE_REQUIRED=0
+    configure_assert_certificate_selection() { fail "non-profile revalidation inspected certificate selection"; }
+    configure_revalidate_selected_operator_config() { printf 'config\n' >> "$locked_revalidate_log"; }
+    configure_assert_runtime_state_before_publication() { printf 'runtime\n' >> "$locked_revalidate_log"; }
+    assert_loaded_persisted_dns_env_revision() { printf 'env\n' >> "$locked_revalidate_log"; }
+    validate_existing_runtime_documents() {
+        printf 'documents\n' >> "$locked_revalidate_log"
+        VALIDATED_DNS_SOURCE_REVISION=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    }
+    err() { :; }
+    configure_revalidate_locked_publication_inputs 192.0.2.20 0 \
+        || fail "non-profile locked revalidation failed without certificate selection"
+    [[ "$(paste -sd '|' "$locked_revalidate_log")" == 'config|runtime|env|documents' ]] \
+        || fail "non-profile locked revalidation skipped a current runtime input"
+)
+pass "non-profile locked revalidation does not invent certificate-selection authority"
 
 # Exercise the real certificate transaction wrapper. The pending token must
 # remain memory-only until both locks and the final input recheck, and the
@@ -638,6 +682,8 @@ load_ui_generation_helper() { :; }
 _ui_generation_current_only_is_safe() { :; }
 wait_service_ready() { printf 'ready\n' >> "$restart_operations"; }
 systemctl() { printf 'systemctl:%s\n' "$*" >> "$restart_operations"; }
+configure_runtime_is_stably_active_without_job() { [[ "${TEST_LIVE_STATE:-}" == active ]]; }
+configure_runtime_is_confirmed_inactive_success() { [[ "${TEST_LIVE_STATE:-}" == inactive ]]; }
 read_exact_systemd_unit_state() {
     SYSTEMD_UNIT_LOAD_STATE=loaded
     SYSTEMD_UNIT_FILE_STATE=enabled
@@ -768,6 +814,18 @@ configure_systemd_job_is_exact() {
 }
 configure_unit_has_no_job() {
     [[ "$TEST_JOB_PRESENT" == 0 ]]
+}
+configure_runtime_is_stably_active_without_job() {
+    [[ "$TEST_BOUNDARY_STATE" == active \
+       && "$TEST_BOUNDARY_SUB_STATE" == running \
+       && "$TEST_CONTROL_PID" == 0 \
+       && "$TEST_JOB_PRESENT" == 0 ]]
+}
+configure_runtime_is_confirmed_inactive_success() {
+    [[ "$TEST_BOUNDARY_STATE" == inactive \
+       && "$TEST_BOUNDARY_SUB_STATE" == dead \
+       && "$TEST_CONTROL_PID" == 0 \
+       && "$TEST_JOB_PRESENT" == 0 ]]
 }
 configure_runtime_gate_ack_matches_control_process() {
     [[ "$TEST_JOB_PRESENT" == 1 \
@@ -1333,6 +1391,8 @@ if [[ "${EUID:-$(id -u)}" == 0 ]]; then
     TEST_RUNTIME_STATE=activating
     TEST_RUNTIME_SUB_STATE=start-pre
     TEST_CONTROL_PID="$$"
+    TEST_MAIN_PID=0
+    TEST_RESULT=success
     TEST_INVOCATION_ID=0123456789abcdef0123456789abcdef
     TEST_READY_MODE=success
     TEST_READY_CALLS=0
@@ -1400,6 +1460,12 @@ if [[ "${EUID:-$(id -u)}" == 0 ]]; then
             'show -p ControlPID --value 5gpn-mihomo.service')
                 printf '%s\n' "$TEST_CONTROL_PID"
                 ;;
+            'show -p MainPID --value 5gpn-mihomo.service')
+                printf '%s\n' "$TEST_MAIN_PID"
+                ;;
+            'show -p Result --value 5gpn-mihomo.service')
+                printf '%s\n' "$TEST_RESULT"
+                ;;
             'show -p InvocationID --value 5gpn-mihomo.service')
                 printf '%s\n' "$TEST_INVOCATION_ID"
                 ;;
@@ -1408,6 +1474,7 @@ if [[ "${EUID:-$(id -u)}" == 0 ]]; then
                 TEST_RUNTIME_STATE=inactive
                 TEST_RUNTIME_SUB_STATE=dead
                 TEST_CONTROL_PID=0
+                TEST_MAIN_PID=0
                 TEST_JOB_STATE=missing
                 ;;
             *)
@@ -1427,6 +1494,8 @@ if [[ "${EUID:-$(id -u)}" == 0 ]]; then
                 TEST_RUNTIME_STATE=active
                 TEST_RUNTIME_SUB_STATE=running
                 TEST_CONTROL_PID=0
+                TEST_MAIN_PID=4242
+                TEST_RESULT=success
                 TEST_JOB_STATE=missing
                 return 0
                 ;;
@@ -1434,8 +1503,37 @@ if [[ "${EUID:-$(id -u)}" == 0 ]]; then
                 TEST_RUNTIME_STATE=inactive
                 TEST_RUNTIME_SUB_STATE=dead
                 TEST_CONTROL_PID=0
+                TEST_MAIN_PID=0
+                TEST_RESULT=success
                 TEST_JOB_STATE=missing
                 return 1
+                ;;
+            success-failed)
+                TEST_RUNTIME_STATE=failed
+                TEST_RUNTIME_SUB_STATE=failed
+                TEST_CONTROL_PID=0
+                TEST_MAIN_PID=0
+                TEST_RESULT=exit-code
+                TEST_JOB_STATE=missing
+                return 0
+                ;;
+            success-activating)
+                TEST_RUNTIME_STATE=activating
+                TEST_RUNTIME_SUB_STATE=start-post
+                TEST_CONTROL_PID="$$"
+                TEST_MAIN_PID=0
+                TEST_RESULT=success
+                TEST_JOB_STATE=missing
+                return 0
+                ;;
+            success-control)
+                TEST_RUNTIME_STATE=active
+                TEST_RUNTIME_SUB_STATE=running
+                TEST_CONTROL_PID="$$"
+                TEST_MAIN_PID=4242
+                TEST_RESULT=success
+                TEST_JOB_STATE=missing
+                return 0
                 ;;
             failure) return 1 ;;
         esac
@@ -1506,6 +1604,8 @@ if [[ "${EUID:-$(id -u)}" == 0 ]]; then
     TEST_RUNTIME_STATE=active
     TEST_RUNTIME_SUB_STATE=running
     TEST_CONTROL_PID=0
+    TEST_MAIN_PID=4242
+    TEST_RESULT=success
     configure_release_runtime_start_fence \
         || fail "could not remove the completed PID1 gate state"
     assert_no_gate_state
@@ -1513,6 +1613,8 @@ if [[ "${EUID:-$(id -u)}" == 0 ]]; then
     TEST_RUNTIME_STATE=inactive
     TEST_RUNTIME_SUB_STATE=dead
     TEST_CONTROL_PID=0
+    TEST_MAIN_PID=0
+    TEST_RESULT=success
     TEST_TRY_OUTPUT=invalid
     configure_install_runtime_start_fence \
         || fail "could not stage invalid TryRestartUnit response fixture"
@@ -1533,6 +1635,8 @@ if [[ "${EUID:-$(id -u)}" == 0 ]]; then
     TEST_RUNTIME_STATE=activating
     TEST_RUNTIME_SUB_STATE=start-pre
     TEST_CONTROL_PID="$$"
+    TEST_MAIN_PID=0
+    TEST_RESULT=success
     configure_install_runtime_start_fence \
         || fail "could not stage operator-stop PID1 gate fixture"
     configure_enqueue_pid1_try_restart \
@@ -1542,6 +1646,8 @@ if [[ "${EUID:-$(id -u)}" == 0 ]]; then
     TEST_RUNTIME_STATE=inactive
     TEST_RUNTIME_SUB_STATE=dead
     TEST_CONTROL_PID=0
+    TEST_MAIN_PID=0
+    TEST_RESULT=success
     CONFIGURE_RUNTIME_QUIESCED_BY_US=1
     CONFIGURE_RUNTIME_FENCED_BY_US=1
     TEST_RELEASE_CALLS=0
@@ -1553,10 +1659,89 @@ if [[ "${EUID:-$(id -u)}" == 0 ]]; then
         || fail "configure released or waited on a PID1 job already canceled by operator stop"
     assert_no_gate_state
 
+    for TEST_READY_MODE in success-failed success-activating success-control; do
+        TEST_JOB_STATE=exact
+        TEST_RUNTIME_STATE=activating
+        TEST_RUNTIME_SUB_STATE=start-pre
+        TEST_CONTROL_PID="$$"
+        TEST_MAIN_PID=0
+        TEST_RESULT=success
+        configure_install_runtime_start_fence \
+            || fail "could not stage post-readiness state fixture: $TEST_READY_MODE"
+        configure_enqueue_pid1_try_restart \
+            || fail "could not bind post-readiness state fixture: $TEST_READY_MODE"
+        publish_ack_fixture || fail "could not acknowledge post-readiness state fixture"
+        CONFIGURE_RUNTIME_QUIESCED_BY_US=1
+        CONFIGURE_RUNTIME_FENCED_BY_US=1
+        CONFIGURE_RUNTIME_WAS_ACTIVE=1
+        CONFIGURE_NODE_LOCK_HELD=0
+        if configure_start_quiesced_runtime >/dev/null 2>&1; then
+            fail "configure accepted unstable state after readiness: $TEST_READY_MODE"
+        fi
+        assert_no_gate_state
+    done
+    TEST_READY_MODE=success
+
+    for released_state in failed deactivating; do
+        TEST_JOB_STATE=exact
+        TEST_RUNTIME_STATE=activating
+        TEST_RUNTIME_SUB_STATE=start-pre
+        TEST_CONTROL_PID="$$"
+        TEST_MAIN_PID=0
+        TEST_RESULT=success
+        configure_install_runtime_start_fence \
+            || fail "could not stage retained released-state fixture: $released_state"
+        configure_enqueue_pid1_try_restart \
+            || fail "could not bind retained released-state fixture: $released_state"
+        publish_ack_fixture || fail "could not acknowledge retained released-state fixture"
+        configure_publish_runtime_gate_release \
+            || fail "could not publish retained released-state fixture"
+        TEST_JOB_STATE=missing
+        TEST_RUNTIME_STATE="$released_state"
+        TEST_RUNTIME_SUB_STATE="$released_state"
+        TEST_CONTROL_PID=0
+        TEST_MAIN_PID=0
+        TEST_RESULT=exit-code
+        CONFIGURE_RUNTIME_FENCE_ATTEMPTED=0
+        CONFIGURE_RUNTIME_FENCED_BY_US=0
+        CONFIGURE_RUNTIME_QUIESCED_BY_US=0
+        if recover_stale_configure_runtime_fence >/dev/null 2>&1; then
+            fail "released $released_state activation continued into configure"
+        fi
+        assert_no_gate_state
+    done
+
     TEST_JOB_STATE=exact
     TEST_RUNTIME_STATE=activating
     TEST_RUNTIME_SUB_STATE=start-pre
     TEST_CONTROL_PID="$$"
+    TEST_MAIN_PID=0
+    TEST_RESULT=success
+    configure_install_runtime_start_fence \
+        || fail "could not stage missing-job timeout fixture"
+    configure_enqueue_pid1_try_restart \
+        || fail "could not bind missing-job timeout fixture"
+    publish_ack_fixture || fail "could not acknowledge missing-job timeout fixture"
+    TEST_JOB_STATE=missing
+    TEST_RUNTIME_STATE=inactive
+    TEST_RUNTIME_SUB_STATE=dead
+    TEST_CONTROL_PID=0
+    TEST_MAIN_PID=0
+    TEST_RESULT=timeout
+    CONFIGURE_RUNTIME_FENCE_ATTEMPTED=0
+    CONFIGURE_RUNTIME_FENCED_BY_US=0
+    CONFIGURE_RUNTIME_QUIESCED_BY_US=0
+    if recover_stale_configure_runtime_fence >/dev/null 2>&1; then
+        fail "a missing PID1 job with timeout result was misclassified as operator stop"
+    fi
+    assert_no_gate_state
+
+    TEST_JOB_STATE=exact
+    TEST_RUNTIME_STATE=activating
+    TEST_RUNTIME_SUB_STATE=start-pre
+    TEST_CONTROL_PID="$$"
+    TEST_MAIN_PID=0
+    TEST_RESULT=success
     configure_install_runtime_start_fence \
         || fail "could not stage retained exact-job recovery fixture"
     configure_enqueue_pid1_try_restart \
@@ -1580,6 +1765,8 @@ if [[ "${EUID:-$(id -u)}" == 0 ]]; then
     TEST_RUNTIME_STATE=activating
     TEST_RUNTIME_SUB_STATE=start-pre
     TEST_CONTROL_PID="$$"
+    TEST_MAIN_PID=0
+    TEST_RESULT=success
     configure_install_runtime_start_fence \
         || fail "could not stage foreign-job stale recovery fixture"
     configure_enqueue_pid1_try_restart \
@@ -1593,8 +1780,9 @@ if [[ "${EUID:-$(id -u)}" == 0 ]]; then
     TEST_RELEASE_CALLS=0
     TEST_READY_CALLS=0
     : > "$TEST_SYSTEMCTL_LOG"
-    recover_stale_configure_runtime_fence \
-        || fail "foreign PID1 job stale state did not fail closed to inactive cleanup"
+    if recover_stale_configure_runtime_fence >/dev/null 2>&1; then
+        fail "foreign PID1 job stale state continued into a new configure"
+    fi
     [[ "$TEST_RELEASE_CALLS" == 0 && "$TEST_READY_CALLS" == 0 \
        && "$(grep -c '^stop$' "$TEST_SYSTEMCTL_LOG")" -ge 1 ]] \
         || fail "stale recovery released a non-exact PID1 job or skipped inactive cleanup"

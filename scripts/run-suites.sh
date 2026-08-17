@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run the installer suites the way CI does: an LF copy, under Linux.
+# Run the portable installer suites from an LF copy under Linux. CI additionally
+# repeats the root-only configure and certificate recovery branches with sudo.
 #
 # The Windows worktree is CRLF and the git index is LF, so the suites cannot be
 # run in place -- `grep -q 'foo$'` fails against a CR-terminated line and the

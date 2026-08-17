@@ -17,6 +17,7 @@ CERT_STATE=/etc/5gpn/intercept/cert-state
 CA_MARKER=.5gpn-intercept-ca-owned
 CA_MARKER_VALUE=5gpn-intercept-ca-v1
 LOCK_FILE=/run/5gpn/cert-renew.lock
+RUNTIME_GATE_HELPER=/opt/5gpn/scripts/configure-runtime-gate.sh
 RENEW_BEFORE=2592000
 MAX_REQUEST_BYTES=262144
 MAX_CONVERGENCE_ATTEMPTS=16
@@ -142,6 +143,17 @@ lock_fd_targets_file() {
     fd_identity="$(stat -Lc '%d:%i' -- "/proc/${process_id}/fd/${fd}" 2>/dev/null || true)"
     file_identity="$(stat -Lc '%d:%i' -- "$lock" 2>/dev/null || true)"
     [[ -n "$fd_identity" && "$fd_identity" == "$file_identity" ]]
+}
+
+assert_no_retained_configure_gate() {
+    [[ -f "$RUNTIME_GATE_HELPER" && ! -L "$RUNTIME_GATE_HELPER" \
+       && "$(stat -Lc '%u:%g:%a:%h' -- "$RUNTIME_GATE_HELPER" 2>/dev/null)" == 0:0:755:1 ]] \
+        || { err "The installed configure runtime-gate helper is missing or unsafe."; return 1; }
+    grep -Fxq '# 5gpn-configure-runtime-gate-id: v1' "$RUNTIME_GATE_HELPER" \
+        && grep -Fq 'wait|validate-ui|assert-clear' "$RUNTIME_GATE_HELPER" \
+        || { err "The installed configure runtime-gate helper generation is invalid."; return 1; }
+    "$RUNTIME_GATE_HELPER" assert-clear \
+        || { err "A retained configure runtime gate defers interception certificate publication until installed '5gpn configure' recovers it."; return 1; }
 }
 
 cleanup_stage() {
@@ -630,6 +642,12 @@ main() {
         err "Another 5gpn certificate operation is running."
         return 1
     fi
+    # The full installer intentionally releases only the certificate lock while
+    # it still holds the install lock and waits for this oneshot. Acquiring the
+    # shared certificate lock first avoids a reverse-lock self-deadlock. A
+    # configure transaction cannot create its runtime gate until it owns this
+    # same certificate lock, so the following read-only assertion is stable.
+    assert_no_retained_configure_gate || return 1
     CERT_LOCK_HELD=1
     cleanup_tls_candidates \
         || { err "Interrupted interception certificate candidates are unsafe."; return 1; }

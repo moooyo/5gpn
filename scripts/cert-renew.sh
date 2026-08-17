@@ -39,6 +39,7 @@ RENEW_BEFORE_SECONDS=$((30 * 86400))
 MIHOMO_RESTORE_NEEDED=0
 RENEW_LOCK_FILE=/run/5gpn/cert-renew.lock
 INSTALL_LOCK_FILE=/run/5gpn/install.lock
+RUNTIME_GATE_HELPER=/opt/5gpn/scripts/configure-runtime-gate.sh
 FIVEGPN_CERT_GROUP=fivegpn
 CONFIG_ROOT_MARKER=.5gpn-owned
 CONFIG_ROOT_MARKER_VALUE=5gpn-config
@@ -642,6 +643,17 @@ acquire_install_gate() {
         || { err "A 5gpn install/configure transaction is active; deferring certificate renewal."; return 1; }
 }
 
+assert_no_retained_configure_gate() {
+    [[ -f "$RUNTIME_GATE_HELPER" && ! -L "$RUNTIME_GATE_HELPER" \
+       && "$(stat -Lc '%u:%g:%a:%h' -- "$RUNTIME_GATE_HELPER" 2>/dev/null)" == 0:0:755:1 ]] \
+        || { err "The installed configure runtime-gate helper is missing or unsafe."; return 1; }
+    grep -Fxq '# 5gpn-configure-runtime-gate-id: v1' "$RUNTIME_GATE_HELPER" \
+        && grep -Fq 'wait|validate-ui|assert-clear' "$RUNTIME_GATE_HELPER" \
+        || { err "The installed configure runtime-gate helper generation is invalid."; return 1; }
+    "$RUNTIME_GATE_HELPER" assert-clear \
+        || { err "A retained configure runtime gate defers certificate renewal until installed '5gpn configure' recovers it."; return 1; }
+}
+
 acquire_renew_lock() {
     local lock_dir
     [[ "$EUID" == 0 ]] || { err "Certificate renewal must run as root."; return 1; }
@@ -679,6 +691,7 @@ cert_renew_main() {
     # Preserve the global lock order used by the installer. The public timer and
     # Bot action must not enter the certificate-lock handoff window.
     acquire_install_gate || return 1
+    assert_no_retained_configure_gate || return 1
     acquire_renew_lock || return 1
 
     local configured base mode public cert

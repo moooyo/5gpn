@@ -30,6 +30,8 @@ LE_LIVE_ROOT=/etc/letsencrypt/live
 IOSGEN=/opt/5gpn/scripts/gen-ios-profile.sh
 UI_DIR=/opt/5gpn/ui
 RENEW_LOCK_FILE=/run/5gpn/cert-renew.lock
+INSTALL_LOCK_FILE=/run/5gpn/install.lock
+RUNTIME_GATE_HELPER=/opt/5gpn/scripts/configure-runtime-gate.sh
 CONFIG_ROOT_MARKER=.5gpn-owned
 CONFIG_ROOT_MARKER_VALUE=5gpn-config
 CERT_ROOT_MARKER=.5gpn-cert-root-owned
@@ -201,7 +203,9 @@ acquire_deploy_lock() {
     [[ "${FIVEGPN_CERT_LOCK_HELD:-0}" == 1 ]] && return 0
     command -v flock >/dev/null 2>&1 \
         || { err "flock is required for certificate deployment exclusion."; return 1; }
-    lock_dir="$(dirname -- "$RENEW_LOCK_FILE")"
+    lock_dir="$(dirname -- "$INSTALL_LOCK_FILE")"
+    [[ "$lock_dir" == "$(dirname -- "$RENEW_LOCK_FILE")" ]] \
+        || { err "Certificate deployment locks must share one private directory."; return 1; }
     root_group="$(group_gid root)" || return 1
     if [[ ! -e "$lock_dir" && ! -L "$lock_dir" ]]; then
         install -d -o root -g root -m 0700 "$lock_dir" || return 1
@@ -212,6 +216,20 @@ acquire_deploy_lock() {
        && "$(path_gid "$lock_dir")" == "$root_group" \
        && "$(path_mode "$lock_dir")" == 700 ]] \
         || { err "Unsafe certificate deployment lock directory: $lock_dir"; return 1; }
+    if [[ -e "$INSTALL_LOCK_FILE" || -L "$INSTALL_LOCK_FILE" ]]; then
+        safe_plain_file "$INSTALL_LOCK_FILE" "$root_group" 600 \
+            || { err "Unsafe installer lock file: $INSTALL_LOCK_FILE"; return 1; }
+    fi
+    exec 8>"$INSTALL_LOCK_FILE"
+    chmod 0600 "$INSTALL_LOCK_FILE" || { exec 8>&-; return 1; }
+    safe_plain_file "$INSTALL_LOCK_FILE" "$root_group" 600 || { exec 8>&-; return 1; }
+    fd_identity="$(stat -Lc '%d:%i' -- "/proc/$$/fd/8" 2>/dev/null || true)"
+    file_identity="$(stat -Lc '%d:%i' -- "$INSTALL_LOCK_FILE" 2>/dev/null || true)"
+    [[ -n "$fd_identity" && "$fd_identity" == "$file_identity" ]] \
+        || { exec 8>&-; err "The installer lock descriptor is unsafe."; return 1; }
+    flock -w 10 8 \
+        || { err "A 5gpn install/configure transaction is active; deferring certificate deployment."; return 1; }
+    assert_no_retained_configure_gate || return 1
     if [[ -e "$RENEW_LOCK_FILE" || -L "$RENEW_LOCK_FILE" ]]; then
         safe_plain_file "$RENEW_LOCK_FILE" "$root_group" 600 \
             || { err "Unsafe certificate deployment lock file: $RENEW_LOCK_FILE"; return 1; }
@@ -225,6 +243,17 @@ acquire_deploy_lock() {
         || { exec 9>&-; err "The certificate deployment lock descriptor is unsafe."; return 1; }
     flock -w 10 9 \
         || { err "Another 5gpn certificate operation is running."; return 1; }
+}
+
+assert_no_retained_configure_gate() {
+    [[ -f "$RUNTIME_GATE_HELPER" && ! -L "$RUNTIME_GATE_HELPER" \
+       && "$(stat -Lc '%u:%g:%a:%h' -- "$RUNTIME_GATE_HELPER" 2>/dev/null)" == 0:0:755:1 ]] \
+        || { err "The installed configure runtime-gate helper is missing or unsafe."; return 1; }
+    grep -Fxq '# 5gpn-configure-runtime-gate-id: v1' "$RUNTIME_GATE_HELPER" \
+        && grep -Fq 'wait|validate-ui|assert-clear' "$RUNTIME_GATE_HELPER" \
+        || { err "The installed configure runtime-gate helper generation is invalid."; return 1; }
+    "$RUNTIME_GATE_HELPER" assert-clear \
+        || { err "A retained configure runtime gate blocks independent certificate deployment until installed '5gpn configure' recovers it."; return 1; }
 }
 
 cert_chain_trusted() {

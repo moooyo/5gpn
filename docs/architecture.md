@@ -69,6 +69,13 @@ signed profiles. Install, renewal, and manual profile refresh build or clone an
 unpublished generation under the shared certificate lock, validate and fsync
 it, and change visibility with one `current` rename. A service startup precheck
 validates the complete current tree before mihomo opens listeners.
+Independent public renewal takes the install lock, rejects retained configure
+gate state, then takes the certificate lock. The interception-certificate
+oneshot is deliberately different: the full installer releases the certificate
+lock while retaining the install lock and waits for that oneshot, so it takes
+only the certificate lock and then rejects retained gate state. Configure cannot
+create a gate while that check is in flight because it needs the same
+certificate lock before its runtime-affecting transaction.
 
 One browser may fetch an old `index.html` immediately before a generation
 switch and request its hashed asset immediately afterwards. Each generation
@@ -225,7 +232,9 @@ worker when the unit stops. No in-process supervisor is introduced.
 The global drop-in rejection includes the complete systemd 257 `Memory*`,
 `CPU*`, `IO*`, `BlockIO*`, `Tasks*`, `ManagedOOM*`, and `Limit*` resource
 families, their startup/allowed-node variants, `Slice=`/`DisableControllers=`,
-and process scheduling controls. This deliberately includes accounting keys and
+process scheduling controls, service success-status changes, and every global
+`[Unit]` or `[Install]` directive, including aliases, manual start/stop, failure
+actions, conditions, assertions, dependencies, and job timeouts. This deliberately includes accounting keys and
 the older `MemoryLimit`, `CPUShares`, and `BlockIO*` aliases: accepting an
 apparently observational global family member makes the fail-before-publication
 gate dependent on an incomplete hand-maintained key list. Any inherited member
@@ -912,24 +921,29 @@ initially inactive service receives no configure-owned start job; the nonce
 still prevents a concurrent external start from crossing the publication
 boundary, and cleanup retains inactive state.
 
-A retained gate is recoverable only while its exact original blocked job,
-acknowledgement, control PID, and pre-publication restoration entitlement all
-still agree. Recovery releases that job rather than creating another one. If
-the job was canceled, replaced, never durably bound, or crossed a visible
-publication boundary, recovery removes the owned gate state while keeping the
-unit inactive. Cleanup first atomically changes the owned record to a closing
-state, so a concurrent start cannot publish a record-less acknowledgement while
-subordinate state is removed. An interrupted close resumes only while inactive.
-A Core released by recovery is stopped again if the subsequent
-current-deployment validation fails. The latest complete document, writer
+A retained gate before its matching release is recoverable only while the exact
+original blocked job, acknowledgement, control PID, and pre-publication
+restoration entitlement all still agree. Recovery releases that job rather than
+creating another one. Once any certificate role, `dns.json`, `dns.env`, or UI
+`current` publication is visible, that entitlement is revoked and a pre-release
+crash keeps the unit inactive. A durable matching release is the activation
+commit: all selected inputs are already visible, so recovery may let only the
+same exact job finish after revalidating the token, ACK, current inputs,
+readiness, final `active/running` state, positive MainPID, zero ControlPID, and
+absence of another systemd job. Failed, timed-out, or deactivating activation is
+cleaned to inactive and reported as failure. Cleanup first atomically changes
+the owned record to a closing state, so a concurrent start cannot publish a
+record-less acknowledgement while subordinate state is removed. An interrupted
+close resumes only while inactive. The latest complete document, writer
 quiescence, and exact blocked job are revalidated before the file CAS. HTTP-01
 configure uses the same outer job and never starts or stops mihomo from inside
 Certbot; certificate roles, the prepared profile, coordinates, and final
-runtime inputs complete before the single gate release. A failure before
-visible certificate or coordinate publication may release the still-original
-job. Once a certificate role, `dns.json`, `dns.env`, or UI `current`
-publication is visible, failure leaves mihomo stopped and reports the partial
-transaction without rollback. A
+runtime inputs complete before the single activation release. Before any other mutating full-install,
+management, reset, certificate, profile, or uninstall entry can publish files
+or call systemd, it read-only rejects retained named or temporary gate state
+and directs the operator to the installed `5gpn configure` recovery path.
+Read-only status remains available; no alternate entry guesses that a retained
+gate is safe or deletes it as unrelated residue. A
 listener change requires the operator YAML to already match, then updates
 `dns.env` and restarts. Base-domain or certificate-mode changes run the DNS,
 certificate, role, profile, environment, and restart boundaries. Only a

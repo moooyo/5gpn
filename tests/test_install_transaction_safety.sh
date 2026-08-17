@@ -102,6 +102,10 @@ lock_root="$TMP/locks"
 mkdir -m 0700 "$lock_root"
 INSTALL_LOCK_FILE="$lock_root/install.lock"
 CERT_RENEW_LOCK_FILE="$lock_root/cert.lock"
+CONFIGURE_RUNTIME_GATE_RECORD="$lock_root/configure-runtime-gate"
+CONFIGURE_RUNTIME_GATE_JOB="$lock_root/configure-runtime-gate.job"
+CONFIGURE_RUNTIME_GATE_ACK="$lock_root/configure-runtime-gate.ack"
+CONFIGURE_RUNTIME_GATE_RELEASE="$lock_root/configure-runtime-gate.release"
 INSTALL_LOCK_HELD=0
 INSTALL_CERT_LOCK_HELD=0
 file_uid() { printf '0\n'; }
@@ -181,6 +185,11 @@ export INSTALL_SH_LIB_ONLY
 source "$TEST_INSTALL"
 INSTALL_LOCK_FILE="$TEST_INSTALL_LOCK_FILE"
 CERT_RENEW_LOCK_FILE="$TEST_CERT_LOCK_FILE"
+gate_root="$(dirname -- "$INSTALL_LOCK_FILE")"
+CONFIGURE_RUNTIME_GATE_RECORD="$gate_root/configure-runtime-gate"
+CONFIGURE_RUNTIME_GATE_JOB="$gate_root/configure-runtime-gate.job"
+CONFIGURE_RUNTIME_GATE_ACK="$gate_root/configure-runtime-gate.ack"
+CONFIGURE_RUNTIME_GATE_RELEASE="$gate_root/configure-runtime-gate.release"
 file_uid() { printf '0\n'; }
 file_gid() { printf '0\n'; }
 file_mode() { [[ -d "$1" ]] && printf '700\n' || printf '600\n'; }

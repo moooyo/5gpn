@@ -154,6 +154,84 @@ else
     fail "global service ExecStart override was ignored"
 fi
 rm -f -- "$unit_conflicts/service.d/20-exec.conf"
+cat > "$unit_conflicts/service.d/20-success-status.conf" <<'EOF'
+[Service]
+SuccessExitStatus=1 143
+EOF
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts" \
+   && [[ "$SYSTEMD_UNIT_CONFLICT_REASON" == *global*service.d* ]]; then
+    pass "global success-status overrides cannot turn gate refusal into service success"
+else
+    fail "global service SuccessExitStatus override was ignored"
+fi
+rm -f -- "$unit_conflicts/service.d/20-success-status.conf"
+cat > "$unit_conflicts/service.d/20-continuation.conf" <<'EOF'
+[Service]
+ExecStartPre\
+=
+EOF
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
+    pass "global systemd continuations cannot hide a gate-reset directive"
+else
+    fail "a continued global ExecStartPre reset bypassed override detection"
+fi
+rm -f -- "$unit_conflicts/service.d/20-continuation.conf"
+unit_gate_override_ok=1
+for key in \
+    RefuseManualStart RefuseManualStop JobTimeoutSec JobRunningTimeoutSec \
+    JobTimeoutAction JobTimeoutRebootArgument FailureAction OnFailure \
+    ConditionPathExists AssertPathExists Upholds; do
+    printf '[Unit]\n%s=fixture\n' "$key" \
+        > "$unit_conflicts/service.d/20-unit-gate.conf"
+    if ! systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
+        fail "global unit gate override was ignored: $key"
+        unit_gate_override_ok=0
+    fi
+done
+rm -f -- "$unit_conflicts/service.d/20-unit-gate.conf"
+if [[ "$unit_gate_override_ok" == 1 ]]; then
+    pass "global Unit directives cannot cancel, bypass, or amplify the PID1 configure gate"
+fi
+printf '\357\273\277[Unit]\nFailureAction=reboot-force\n' \
+    > "$unit_conflicts/service.d/20-bom-unit.conf"
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
+    pass "UTF-8 BOM cannot hide a global Unit override"
+else
+    fail "a BOM-prefixed global Unit section bypassed override detection"
+fi
+rm -f -- "$unit_conflicts/service.d/20-bom-unit.conf"
+printf '[Unit]   \nDescription=hidden-global-unit-directive\n' \
+    > "$unit_conflicts/service.d/20-trailing-space-unit.conf"
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
+    pass "trailing whitespace cannot hide a global Unit override"
+else
+    fail "a whitespace-suffixed global Unit section bypassed override detection"
+fi
+rm -f -- "$unit_conflicts/service.d/20-trailing-space-unit.conf"
+for key in Alias Also; do
+    printf '[Install]\n%s=alternate-gateway.service\n' "$key" \
+        > "$unit_conflicts/service.d/20-install-alias.conf"
+    if ! systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
+        fail "global Install directive was ignored: $key"
+        unit_gate_override_ok=0
+    fi
+done
+rm -f -- "$unit_conflicts/service.d/20-install-alias.conf"
+if [[ "$unit_gate_override_ok" == 1 ]]; then
+    pass "global Install aliases cannot appear only when the managed unit is enabled"
+fi
+mkdir "$unit_conflicts/path.d" "$unit_conflicts/timer.d"
+printf '[Unit]\nOnFailure=unexpected-recovery.service\n' \
+    > "$unit_conflicts/path.d/20-unit.conf"
+printf '[Install]\nAlso=unexpected-recovery.service\n' \
+    > "$unit_conflicts/timer.d/20-install.conf"
+if systemd_unit_has_dropins 5gpn-intercept-cert.path "$unit_conflicts" \
+   && systemd_unit_has_dropins 5gpn-intercept-cert.timer "$unit_conflicts"; then
+    pass "global Unit and Install directives are rejected for path and timer units"
+else
+    fail "a path/timer global Unit or Install directive bypassed override detection"
+fi
+rm -rf -- "$unit_conflicts/path.d" "$unit_conflicts/timer.d"
 resource_override_ok=1
 for key in \
     OOMPolicy MemoryAccounting TasksAccounting Delegate Slice DisableControllers TasksMax \
@@ -183,6 +261,61 @@ if [[ "$resource_override_ok" == 1 ]]; then
     pass "global inherited resource limits cannot alter the worker isolation unit"
 fi
 rm -rf -- "$unit_conflicts/service.d"
+
+ln -s 5gpn-mihomo.service "$unit_conflicts/alternate-gateway.service"
+mkdir "$unit_conflicts/alternate-gateway.service.d"
+printf '[Service]\nExecStartPre=\n' \
+    > "$unit_conflicts/alternate-gateway.service.d/override.conf"
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts" \
+   && [[ "$SYSTEMD_UNIT_CONFLICT_REASON" == *alias* ]]; then
+    pass "systemd aliases cannot attach an unscanned gate-bypass drop-in"
+else
+    fail "an alias unit drop-in bypassed managed-unit override detection"
+fi
+rm -rf -- "$unit_conflicts/alternate-gateway.service.d"
+rm -f -- "$unit_conflicts/alternate-gateway.service"
+
+TEST_EFFECTIVE_NAMES='5gpn-mihomo.service alternate-gateway.service'
+TEST_EFFECTIVE_PRE=exact
+systemctl() {
+    case "$*" in
+        'show -p Names --value 5gpn-mihomo.service') printf '%s\n' "$TEST_EFFECTIVE_NAMES" ;;
+        'show -p DropInPaths --value 5gpn-mihomo.service') printf '\n' ;;
+        *) return 1 ;;
+    esac
+}
+busctl() {
+    case "$*" in
+        *'org.freedesktop.systemd1.Manager GetUnit s 5gpn-mihomo.service')
+            printf '{"type":"o","data":["/org/freedesktop/systemd1/unit/5gpn_2dmihomo_2eservice"]}\n'
+            ;;
+        *' org.freedesktop.systemd1.Service ExecStartPre')
+            if [[ "$TEST_EFFECTIVE_PRE" == exact ]]; then
+                printf '%s\n' '{"type":"a(sasbttttuii)","data":[["/opt/5gpn/scripts/configure-runtime-gate.sh",["/opt/5gpn/scripts/configure-runtime-gate.sh","wait"],false,0,0,0,0,0,0,0],["/opt/5gpn/scripts/configure-runtime-gate.sh",["/opt/5gpn/scripts/configure-runtime-gate.sh","validate-ui"],false,0,0,0,0,0,0,0]]}'
+            else
+                printf '%s\n' '{"type":"a(sasbttttuii)","data":[["/opt/5gpn/scripts/configure-runtime-gate.sh",["/opt/5gpn/scripts/configure-runtime-gate.sh","wait"],false,0,0,0,0,0,0,0]]}'
+            fi
+            ;;
+        *) return 1 ;;
+    esac
+}
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts" \
+   && [[ "$SYSTEMD_UNIT_CONFLICT_REASON" == *effective*alias* ]]; then
+    pass "PID 1 effective alias names invalidate the managed unit contract"
+else
+    fail "PID 1 effective alias metadata was ignored"
+fi
+TEST_EFFECTIVE_NAMES=5gpn-mihomo.service
+configure_effective_exec_start_pre_is_current \
+    || fail "the exact effective two-step PID1 gate was rejected"
+TEST_EFFECTIVE_PRE=missing-validator
+if configure_effective_exec_start_pre_is_current; then
+    fail "PID 1 effective ExecStartPre accepted a missing gate step"
+else
+    pass "PID 1 effective ExecStartPre must retain both gate steps in order"
+fi
+unset -f systemctl
+unset -f busctl
 
 mkdir "$unit_conflicts/5gpn-intercept-.service.d"
 if systemd_unit_has_dropins 5gpn-intercept-cert.service "$unit_conflicts"; then

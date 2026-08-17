@@ -2307,7 +2307,7 @@ systemd_global_dropin_key_is_managed() {
             case "$key" in
                 Exec*|User|Group|SupplementaryGroups|DynamicUser|Environment|EnvironmentFile|PassEnvironment|UnsetEnvironment|\
                 WorkingDirectory|RootDirectory|RootDirectoryStartOnly|RootImage|RootEphemeral|UMask|PermissionsStartOnly|\
-                Restart*|Kill*|TimeoutStartSec|OOMPolicy|Delegate*|Slice|DisableControllers|\
+                Restart*|Kill*|TimeoutStartSec|SuccessExitStatus|OOMPolicy|Delegate*|Slice|DisableControllers|\
                 Memory*|StartupMemory*|AllowedMemoryNodes|StartupAllowedMemoryNodes|\
                 CPU*|StartupCPU*|AllowedCPUs|StartupAllowedCPUs|\
                 IO*|StartupIO*|BlockIO*|StartupBlockIO*|Tasks*|ManagedOOM*|\
@@ -2346,18 +2346,24 @@ systemd_global_dropin_has_managed_override() {
         while IFS= read -r line || [[ -n "$line" ]]; do
             line="${line%$'\r'}"
             line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            [[ "$line" != *$'\xEF\xBB\xBF'* ]] || return 0
             [[ -n "$line" && "$line" != \#* && "$line" != \;* ]] || continue
+            # systemd joins a trailing-backslash physical line with the next
+            # one before parsing the directive. A physical-line scanner cannot
+            # safely classify that reconstructed key, so any continuation in a
+            # global drop-in is a managed override for this fail-closed gate.
+            [[ "$line" != *\\ ]] || return 0
             if [[ "$line" == \[*\] ]]; then
                 section="$line"
                 continue
             fi
             case "$type:$section" in
                 service:'[Service]'|path:'[Path]'|timer:'[Timer]') ;;
-                service:'[Unit]')
-                    [[ "$line" == *=* ]] || continue
-                    key="${line%%=*}"
-                    key="${key//[[:space:]]/}"
-                    [[ "$key" == StartLimit* ]] && return 0
+                service:'[Unit]'|service:'[Install]'|\
+                path:'[Unit]'|path:'[Install]'|\
+                timer:'[Unit]'|timer:'[Install]')
+                    [[ "$line" == *=* ]] && return 0
                     continue ;;
                 *) continue ;;
             esac
@@ -2370,8 +2376,64 @@ systemd_global_dropin_has_managed_override() {
     return 1
 }
 
+systemd_unit_alias_path() {
+    local unit="$1" root entry target canonical
+    shift
+    local -a entries=()
+    for root in "$@"; do
+        [[ -d "$root" && ! -L "$root" ]] || continue
+        shopt -s nullglob
+        entries=("$root"/*."${unit##*.}")
+        shopt -u nullglob
+        for entry in "${entries[@]}"; do
+            [[ -L "$entry" && "${entry##*/}" != "$unit" ]] || continue
+            target="$(readlink -- "$entry" 2>/dev/null)" || continue
+            [[ "$target" == /* ]] || target="${root}/${target}"
+            canonical="$(realpath -m -- "$target" 2>/dev/null)" || continue
+            if [[ "${canonical##*/}" == "$unit" ]]; then
+                printf '%s\n' "$entry"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+systemd_unit_has_effective_alias_or_unsafe_dropin() {
+    local unit="$1" names dropins name path dir
+    names="$(systemctl show -p Names --value "$unit" 2>/dev/null)" || return 1
+    [[ -n "$names" ]] || return 1
+    for name in $names; do
+        [[ "$name" == "$unit" ]] || {
+            SYSTEMD_UNIT_CONFLICT_REASON="effective alias name ${name} for ${unit}"
+            return 0
+        }
+    done
+    dropins="$(systemctl show -p DropInPaths --value "$unit" 2>/dev/null)" || return 0
+    for path in $dropins; do
+        case "$path" in
+            */"${unit}.d"/*.conf|*/"${unit%.*}-.${unit##*.}.d"/*.conf)
+                SYSTEMD_UNIT_CONFLICT_REASON="effective unit drop-in ${path}"
+                return 0
+                ;;
+            */"${unit##*.}.d"/*.conf)
+                dir="${path%/*}"
+                systemd_global_dropin_has_managed_override "$dir" "${unit##*.}" && {
+                    SYSTEMD_UNIT_CONFLICT_REASON="managed directive in effective global drop-in ${path}"
+                    return 0
+                }
+                ;;
+            *)
+                SYSTEMD_UNIT_CONFLICT_REASON="effective alias or prefix drop-in ${path}"
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
 systemd_unit_has_dropins() {
-    local unit="$1" root name type="${1##*.}" global
+    local unit="$1" root name type="${1##*.}" global alias_path
     shift
     local -a roots=("$@")
     SYSTEMD_UNIT_CONFLICT_REASON=""
@@ -2383,6 +2445,11 @@ systemd_unit_has_dropins() {
                /run/systemd/generator /usr/local/lib/systemd/system \
                /usr/lib/systemd/system /lib/systemd/system \
                /run/systemd/generator.late)
+    fi
+    alias_path="$(systemd_unit_alias_path "$unit" "${roots[@]}" 2>/dev/null)" || alias_path=""
+    if [[ -n "$alias_path" ]]; then
+        SYSTEMD_UNIT_CONFLICT_REASON="alias unit ${alias_path}"
+        return 0
     fi
     for root in "${roots[@]}"; do
         while IFS= read -r name; do
@@ -2404,6 +2471,7 @@ systemd_unit_has_dropins() {
                 fi ;;
         esac
     done
+    systemd_unit_has_effective_alias_or_unsafe_dropin "$unit" && return 0
     return 1
 }
 
@@ -4442,6 +4510,9 @@ run_management_with_install_lock() (
     trap 'exit 143' TERM
     assert_installed_backend_revision || exit $?
     require_completed_runtime_identity || exit $?
+    if [[ "${1:-}" != configure_installation ]]; then
+        refuse_retained_configure_runtime_gate_state || exit $?
+    fi
     "$@"
 )
 
@@ -4454,6 +4525,7 @@ run_management_with_install_and_cert_lock() (
     trap 'exit 143' TERM
     assert_installed_backend_revision || exit $?
     require_completed_runtime_identity || exit $?
+    refuse_retained_configure_runtime_gate_state || exit $?
     acquire_install_cert_lock || exit $?
     "$@"
 )
@@ -8836,6 +8908,30 @@ installed_mihomo_is_current() {
         || { err "The installed Core is ${actual}; this management backend requires ${MIHOMO_VERSION}."; return 1; }
 }
 
+configure_effective_exec_start_pre_is_current() {
+    local helper="${SCRIPTS_DIR}/configure-runtime-gate.sh" unit_path property
+    unit_path="$(busctl --system --json=short call org.freedesktop.systemd1 \
+        /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager GetUnit \
+        s 5gpn-mihomo.service 2>/dev/null \
+        | jq -er 'select(.type == "o") | .data | select(type == "array" and length == 1) | .[0]')" \
+        || return 1
+    [[ "$unit_path" == /org/freedesktop/systemd1/unit/* ]] || return 1
+    property="$(busctl --system --json=short get-property org.freedesktop.systemd1 \
+        "$unit_path" org.freedesktop.systemd1.Service ExecStartPre 2>/dev/null)" \
+        || return 1
+    jq -e --arg helper "$helper" '
+        select(.type == "a(sasbttttuii)")
+        | .data
+        | select(type == "array" and length == 2)
+        | .[0][0] == $helper
+          and .[0][1] == [$helper, "wait"]
+          and .[0][2] == false
+          and .[1][0] == $helper
+          and .[1][1] == [$helper, "validate-ui"]
+          and .[1][2] == false
+    ' <<<"$property" >/dev/null
+}
+
 configure_main_unit_restart_gate_is_current() {
     local live=/etc/systemd/system/5gpn-mihomo.service
     local staged="${BASE_DIR}/etc/systemd/5gpn-mihomo.service"
@@ -8862,12 +8958,14 @@ configure_main_unit_restart_gate_is_current() {
         || { err "The installed UI generation validator is missing or unsafe: $ui_validator"; return 1; }
     grep -Fxq '# 5gpn-configure-runtime-gate-id: v1' "$helper" \
         && grep -Fxq 'GATE_MAX_WAIT_SECONDS=2100' "$helper" \
-        && grep -Fq 'wait|validate-ui' "$helper" \
+        && grep -Fq 'wait|validate-ui|assert-clear' "$helper" \
         || { err "The installed PID1 restart-gate helper is not the current helper generation."; return 1; }
     need_reload="$(systemctl show -p NeedDaemonReload --value 5gpn-mihomo.service 2>/dev/null)" \
         || { err "Could not inspect the loaded mihomo unit generation."; return 1; }
     [[ "$need_reload" == no ]] \
         || { err "PID 1 has not loaded the installed restart-gate unit generation; run daemon-reload and retry."; return 1; }
+    configure_effective_exec_start_pre_is_current \
+        || { err "PID 1 is not enforcing the exact two-step configure restart gate."; return 1; }
     if [[ -z "${CONFIGURE_RUNTIME_GATE_LIVE_UNIT_STATE:-}" ]]; then
         CONFIGURE_RUNTIME_GATE_LIVE_UNIT_STATE="$live_state"
         CONFIGURE_RUNTIME_GATE_STAGED_UNIT_STATE="$staged_state"
@@ -9355,17 +9453,61 @@ configure_read_mihomo_runtime_state() {
 }
 
 configure_runtime_fence_private_dir() {
-    local fence_dir lock_dir parent_mount fence_mount
+    local fence_dir lock_dir parent_target parent_device parent_root
+    local fence_target fence_device fence_fsroot relative expected_root
     fence_dir="$(dirname -- "$CONFIGURE_RUNTIME_GATE_RECORD")" || return 1
     lock_dir="$(dirname -- "$INSTALL_LOCK_FILE")" || return 1
     [[ "$fence_dir" == "$lock_dir" && "$fence_dir" == /* && "$fence_dir" != / ]] \
         || return 1
-    parent_mount="$(findmnt -rn -T "$(dirname -- "$fence_dir")" -o TARGET 2>/dev/null)" \
+    read -r parent_target parent_device parent_root \
+        < <(findmnt -rn -T "$(dirname -- "$fence_dir")" -o TARGET,MAJ:MIN,FSROOT 2>/dev/null) \
         || return 1
-    fence_mount="$(findmnt -rn -T "$fence_dir" -o TARGET 2>/dev/null)" \
+    read -r fence_target fence_device fence_fsroot \
+        < <(findmnt -rn -T "$fence_dir" -o TARGET,MAJ:MIN,FSROOT 2>/dev/null) \
         || return 1
-    [[ -n "$parent_mount" && "$fence_mount" == "$parent_mount" ]] || return 1
+    [[ -n "$parent_target" && -n "$parent_device" && -n "$parent_root" \
+       && -n "$fence_target" && -n "$fence_device" && -n "$fence_fsroot" ]] \
+        || return 1
+    if [[ "$fence_target" != "$parent_target" ]]; then
+        relative="${fence_dir#"${parent_target%/}/"}"
+        [[ -n "$relative" && "$relative" != "$fence_dir" && "$relative" != */../* ]] \
+            || return 1
+        expected_root="${parent_root%/}/${relative}"
+        [[ "$expected_root" == /* ]] || expected_root="/${expected_root}"
+        [[ "$fence_target" == "$fence_dir" \
+           && "$fence_device" == "$parent_device" \
+           && "$fence_fsroot" == "$expected_root" ]] \
+            || return 1
+    fi
     printf '%s\n' "$fence_dir"
+}
+
+configure_runtime_gate_state_is_absent() {
+    local fence_dir path
+    local -a paths=() temps=()
+    fence_dir="$(dirname -- "$CONFIGURE_RUNTIME_GATE_RECORD")" || return 1
+    [[ -e "$fence_dir" || -L "$fence_dir" ]] || return 0
+    fence_dir="$(configure_runtime_fence_private_dir)" || return 1
+    paths=(
+        "$CONFIGURE_RUNTIME_GATE_RECORD"
+        "$CONFIGURE_RUNTIME_GATE_JOB"
+        "$CONFIGURE_RUNTIME_GATE_ACK"
+        "$CONFIGURE_RUNTIME_GATE_RELEASE"
+    )
+    shopt -s nullglob
+    temps=("$fence_dir"/.configure-runtime-gate.*)
+    shopt -u nullglob
+    paths+=("${temps[@]}")
+    for path in "${paths[@]}"; do
+        [[ ! -e "$path" && ! -L "$path" ]] || return 1
+    done
+}
+
+refuse_retained_configure_runtime_gate_state() {
+    configure_runtime_gate_state_is_absent && return 0
+    err "A retained or unsafe configure runtime gate blocks this mutating command."
+    err "Run the installed '5gpn configure' command to validate and recover the gate before retrying."
+    return 1
 }
 
 configure_repair_runtime_gate_link_residue() {
@@ -9707,7 +9849,9 @@ configure_delete_closed_runtime_gate_state() {
     if [[ "$require_inactive" == 1 ]]; then
         configure_force_runtime_inactive_for_gate || return 1
     else
-        configure_unit_has_no_job || return 1
+        configure_runtime_is_stably_active_without_job \
+            || configure_runtime_is_confirmed_inactive_success \
+            || return 1
     fi
     for path in "$CONFIGURE_RUNTIME_GATE_RELEASE" "$CONFIGURE_RUNTIME_GATE_ACK" \
                 "$CONFIGURE_RUNTIME_GATE_JOB"; do
@@ -9716,7 +9860,9 @@ configure_delete_closed_runtime_gate_state() {
     if [[ "$require_inactive" == 1 ]]; then
         configure_force_runtime_inactive_for_gate || return 1
     else
-        configure_unit_has_no_job || return 1
+        configure_runtime_is_stably_active_without_job \
+            || configure_runtime_is_confirmed_inactive_success \
+            || return 1
     fi
     rm -f -- "$CONFIGURE_RUNTIME_GATE_RECORD" || return 1
     sync -f "$fence_dir" 2>/dev/null || return 1
@@ -9771,6 +9917,40 @@ configure_unit_has_no_job() {
         | jq -cer 'select(.type == "(uo)") | .data | select(type == "array" and length == 2)')" \
         || return 1
     jq -e '.[0] == 0 and .[1] == "/"' <<<"$job" >/dev/null
+}
+
+configure_read_mihomo_activation_result() {
+    CONFIGURE_MIHOMO_MAIN_PID="$(systemctl show -p MainPID --value \
+        5gpn-mihomo.service 2>/dev/null)" \
+        || { err "Could not read mihomo MainPID."; return 1; }
+    CONFIGURE_MIHOMO_RESULT="$(systemctl show -p Result --value \
+        5gpn-mihomo.service 2>/dev/null)" \
+        || { err "Could not read mihomo Result."; return 1; }
+    [[ "$CONFIGURE_MIHOMO_MAIN_PID" =~ ^[0-9]+$ \
+       && -n "$CONFIGURE_MIHOMO_RESULT" ]] \
+        || { err "Mihomo activation result is incomplete."; return 1; }
+}
+
+configure_runtime_is_stably_active_without_job() {
+    configure_read_mihomo_runtime_state \
+        && configure_read_mihomo_activation_result \
+        && [[ "$CONFIGURE_MIHOMO_ACTIVE_STATE" == active \
+           && "$CONFIGURE_MIHOMO_SUB_STATE" == running \
+           && "$CONFIGURE_MIHOMO_CONTROL_PID" == 0 \
+           && "$CONFIGURE_MIHOMO_MAIN_PID" =~ ^[1-9][0-9]*$ \
+           && "$CONFIGURE_MIHOMO_RESULT" == success ]] \
+        && configure_unit_has_no_job
+}
+
+configure_runtime_is_confirmed_inactive_success() {
+    configure_read_mihomo_runtime_state \
+        && configure_read_mihomo_activation_result \
+        && [[ "$CONFIGURE_MIHOMO_ACTIVE_STATE" == inactive \
+           && "$CONFIGURE_MIHOMO_SUB_STATE" == dead \
+           && "$CONFIGURE_MIHOMO_CONTROL_PID" == 0 \
+           && "$CONFIGURE_MIHOMO_MAIN_PID" == 0 \
+           && "$CONFIGURE_MIHOMO_RESULT" == success ]] \
+        && configure_unit_has_no_job
 }
 
 configure_force_runtime_inactive_for_gate() {
@@ -9835,14 +10015,24 @@ recover_stale_configure_runtime_fence() {
                              configure_remove_runtime_gate_state 1 || true; \
                          fi; return 1; }
                 if wait_service_ready 5gpn-mihomo.service; then
-                    CONFIGURE_RUNTIME_RECOVERED_FROM_STALE_FENCE=1
-                    configure_remove_runtime_gate_state || return 1
-                    warn "Completed cleanup for an already released configure restart job."
-                    return 0
+                    if configure_runtime_is_stably_active_without_job; then
+                        CONFIGURE_RUNTIME_RECOVERED_FROM_STALE_FENCE=1
+                        configure_remove_runtime_gate_state || return 1
+                        warn "Completed cleanup for an already released configure restart job."
+                        return 0
+                    fi
+                    if configure_runtime_is_confirmed_inactive_success; then
+                        configure_remove_runtime_gate_state 1 || return 1
+                        warn "An operator stop won after the configure gate was released; preserving that stop."
+                        return 0
+                    fi
+                    if configure_force_runtime_inactive_for_gate; then
+                        configure_remove_runtime_gate_state 1 || true
+                    fi
+                    err "Mihomo lost its stable active state after retained-gate readiness."
+                    return 1
                 fi
-                configure_read_mihomo_runtime_state || return 1
-                if [[ "$CONFIGURE_MIHOMO_ACTIVE_STATE" == inactive ]] \
-                   && ! configure_systemd_job_is_exact; then
+                if configure_runtime_is_confirmed_inactive_success; then
                     configure_remove_runtime_gate_state 1 || return 1
                     warn "An operator stop won after the configure gate was released; preserving that stop."
                     return 0
@@ -9853,13 +10043,20 @@ recover_stale_configure_runtime_fence() {
                 return 1
                 ;;
             inactive)
+                if configure_runtime_is_confirmed_inactive_success; then
+                    configure_remove_runtime_gate_state 1 || return 1
+                    return 0
+                fi
+                configure_force_runtime_inactive_for_gate || return 1
                 configure_remove_runtime_gate_state 1 || return 1
-                return 0
+                err "The retained released gate ended inactive with a failed activation result."
+                return 1
                 ;;
             failed|deactivating)
                 configure_force_runtime_inactive_for_gate || return 1
                 configure_remove_runtime_gate_state 1 || return 1
-                return 0
+                err "The retained released gate ended failed or deactivating; activation did not complete."
+                return 1
                 ;;
             *)
                 err "The retained released gate found an unsupported mihomo state: $CONFIGURE_MIHOMO_ACTIVE_STATE"
@@ -9881,26 +10078,45 @@ recover_stale_configure_runtime_fence() {
         CONFIGURE_RUNTIME_RECOVERED_FROM_STALE_FENCE=1
         configure_publish_runtime_gate_release || return 1
         if ! wait_service_ready 5gpn-mihomo.service; then
-            configure_read_mihomo_runtime_state || return 1
-            if [[ "$CONFIGURE_MIHOMO_ACTIVE_STATE" == inactive ]] \
-               && ! configure_systemd_job_is_exact; then
+            if configure_runtime_is_confirmed_inactive_success; then
                 CONFIGURE_RUNTIME_RECOVERED_FROM_STALE_FENCE=0
                 configure_remove_runtime_gate_state 1 || return 1
                 warn "An operator stop canceled the retained PID1 restart job; preserving that stop."
                 return 0
             fi
-            configure_stop_runtime_recovered_from_stale_fence || true
+            if configure_stop_runtime_recovered_from_stale_fence; then
+                configure_remove_runtime_gate_state 1 || true
+            fi
             err "Mihomo did not become ready after retained gate recovery."
             return 1
         fi
+        if ! configure_runtime_is_stably_active_without_job; then
+            if configure_runtime_is_confirmed_inactive_success; then
+                CONFIGURE_RUNTIME_RECOVERED_FROM_STALE_FENCE=0
+                configure_remove_runtime_gate_state 1 || return 1
+                warn "An operator stop won after retained-gate readiness; preserving that stop."
+                return 0
+            fi
+            if configure_stop_runtime_recovered_from_stale_fence; then
+                configure_remove_runtime_gate_state 1 || true
+            fi
+            err "Mihomo lost its stable active state after retained-gate readiness."
+            return 1
+        fi
         configure_remove_runtime_gate_state || return 1
+        return 0
+    fi
+    if configure_runtime_is_confirmed_inactive_success; then
+        configure_remove_runtime_gate_state 1 || return 1
+        warn "Discarded a retained configure gate after a successful operator stop. Mihomo remains stopped."
         return 0
     fi
     configure_force_runtime_inactive_for_gate || runtime_rc=$?
     [[ "$runtime_rc" == 0 ]] \
         || { err "Could not retain inactive state while cleaning a stale configure gate; the gate state was retained."; return 1; }
     configure_remove_runtime_gate_state 1 || return 1
-    warn "Discarded a retained configure gate because its original blocked PID1 job no longer exists. Mihomo remains stopped."
+    err "Discarded a retained configure gate whose original job disappeared without a successful operator-stop result."
+    return 1
 }
 
 configure_install_runtime_start_fence() {
@@ -10170,6 +10386,19 @@ configure_start_quiesced_runtime() {
             err "Operator YAML changed while mihomo was starting; stopping the runtime."
             start_rc=1
         fi
+        if [[ "$start_rc" == 0 && "$should_start" == 1 ]]; then
+            if configure_runtime_is_stably_active_without_job; then
+                :
+            elif configure_runtime_is_confirmed_inactive_success; then
+                warn "An operator stop won after readiness; preserving that stop."
+                CONFIGURE_RUNTIME_WAS_ACTIVE=0
+                should_start=0
+                cleanup_inactive=1
+            else
+                err "Mihomo lost its stable active state after readiness; stopping the runtime."
+                start_rc=1
+            fi
+        fi
     else
         configure_read_mihomo_runtime_state || start_rc=1
         if [[ "$start_rc" == 0 ]]; then
@@ -10202,11 +10431,14 @@ configure_visible_coordinate_was_committed() {
 }
 
 configure_revalidate_locked_publication_inputs() {
-    local expected_old_gateway="$1"
+    local expected_old_gateway="$1" require_certificate_selection="${2:-1}"
+    [[ "$require_certificate_selection" == 0 \
+       || "$require_certificate_selection" == 1 ]] || return 1
     [[ "${CONFIGURE_NODE_LOCK_HELD:-0}" == 1 \
        && "$INSTALL_CERT_LOCK_HELD" == 1 ]] \
         || { err "Configure final validation requires both transaction locks."; return 1; }
-    configure_assert_certificate_selection || return 1
+    [[ "$require_certificate_selection" == 0 ]] \
+        || configure_assert_certificate_selection || return 1
     configure_revalidate_selected_operator_config || return 1
     configure_assert_runtime_state_before_publication || return 1
     assert_loaded_persisted_dns_env_revision 1 || return 1
@@ -10260,7 +10492,8 @@ configure_apply_gateway_publication() {
 }
 
 configure_apply_environment_transaction() (
-    local final_rc=0 stop_rc=0 runtime_rc=0
+    local expected_old_gateway="${1:-}"
+    local final_rc=0 stop_rc=0 runtime_rc=0 lock_rc=0
     DNS_ENV_PUBLICATION_COMMIT_STATE=not-committed
     CONFIGURE_DNS_GATEWAY_COMMIT_STATE=not-committed
     CONFIGURE_CERT_PUBLICATION_COMPLETED=0
@@ -10284,7 +10517,9 @@ configure_apply_environment_transaction() (
             err "Configure failed before dns.env publication; releasing only the original PID1 restart job."
             configure_start_quiesced_runtime || runtime_rc=$?
         fi
-        if [[ "$final_rc" == 0 && ( "$stop_rc" != 0 || "$runtime_rc" != 0 ) ]]; then
+        release_install_cert_lock || lock_rc=$?
+        if [[ "$final_rc" == 0 \
+           && ( "$stop_rc" != 0 || "$runtime_rc" != 0 || "$lock_rc" != 0 ) ]]; then
             final_rc=1
         fi
         exit "$final_rc"
@@ -10293,6 +10528,12 @@ configure_apply_environment_transaction() (
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    # Listener-only and other non-profile runtime changes can still create the
+    # PID1 gate. Hold the shared certificate lock first so the interception
+    # certificate oneshot cannot pass its retained-gate assertion and publish
+    # concurrently with gate creation.
+    acquire_install_cert_lock || exit $?
+    configure_revalidate_locked_publication_inputs "$expected_old_gateway" 0 || exit $?
     if [[ "$CONFIGURE_RESTART_REQUIRED" == 1 ]]; then
         configure_quiesce_runtime_for_gateway || exit $?
         configure_disarm_runtime_restore_for_coordinate_commit || exit $?
@@ -10501,6 +10742,16 @@ configure_restart_runtime_if_active() {
         err "Operator YAML changed while mihomo was restarting; the runtime was stopped."
         return 1
     fi
+    if configure_runtime_is_stably_active_without_job; then
+        return 0
+    fi
+    if configure_runtime_is_confirmed_inactive_success; then
+        warn "An operator stop won after restart readiness; preserving that stop."
+        return 0
+    fi
+    configure_force_runtime_inactive_for_gate || true
+    err "Mihomo lost its stable active state after restart readiness."
+    return 1
 }
 
 configure_installation() {
@@ -10572,7 +10823,7 @@ configure_installation() {
     else
         configure_assert_runtime_state_before_publication || return 1
         configure_assert_operator_config_revision || return 1
-        configure_apply_environment_transaction || return 1
+        configure_apply_environment_transaction "$old_gateway" || return 1
     fi
     if ! release_configure_node_lock; then
         configure_stop_runtime_after_visible_failure || true
@@ -10678,6 +10929,7 @@ full_install() {
     trap 'install_transaction_signal 130' INT
     trap 'install_transaction_signal 143' TERM
     assert_installed_backend_revision || return 1
+    refuse_retained_configure_runtime_gate_state || return 1
     delegate_pinned_channel_switch "$mode" || return 1
     validate_quick_installer_generation || return 1
     INSTALL_PHASE="loading identity reconciliation state"
@@ -10887,6 +11139,7 @@ uninstall() {
     trap 'install_transaction_signal 130' INT
     trap 'install_transaction_signal 143' TERM
     assert_installed_backend_revision || return 1
+    refuse_retained_configure_runtime_gate_state || return 1
     load_identity_reconcile_journal || return 1
     if [[ -n "$REPLACED_FIVEGPN_UID" || -n "$REPLACED_FIVEGPN_GID" \
        || -n "$REPLACED_FIVEGPN_NAMED_GID" ]]; then
