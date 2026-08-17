@@ -63,33 +63,56 @@ expected_bundle=(
     README.en.md
     LICENSE
     THIRD_PARTY_NOTICES.md
+    release/pins.env
+    release/pins.sh
     etc/5gpn/dns.env.example
     etc/mihomo/config.yaml.tmpl
+    etc/systemd/5gpn-certbot-renew.service
+    etc/systemd/5gpn-certbot-renew.timer
     etc/systemd/5gpn-intercept-cert.path
     etc/systemd/5gpn-intercept-cert.service
     etc/systemd/5gpn-intercept-cert.timer
     etc/systemd/5gpn-mihomo.service
+    scripts/publication-fs.sh
+    scripts/cert-role-ctl.sh
     scripts/cert-renew.sh
+    scripts/configure-runtime-gate.sh
     scripts/gen-ios-profile.sh
     scripts/intercept-cert-renew.sh
     scripts/renew-hook.sh
+    scripts/ui-generation.sh
     docs/architecture.md
     docs/native-extensions.md
     tests/integration-smoke.md
+    tests/deployment-smoke.md
+    tests/acceptance/installer.md
+    tests/acceptance/disruption-recovery.md
 )
 expected_executables=(
     install.sh
     quick-install.sh
+    scripts/publication-fs.sh
+    scripts/cert-role-ctl.sh
     scripts/cert-renew.sh
+    scripts/configure-runtime-gate.sh
     scripts/gen-ios-profile.sh
     scripts/intercept-cert-renew.sh
     scripts/renew-hook.sh
+    scripts/ui-generation.sh
 )
 expected_installed_scripts=(
+    publication-fs.sh
+    cert-role-ctl.sh
     cert-renew.sh
+    configure-runtime-gate.sh
     gen-ios-profile.sh
     intercept-cert-renew.sh
     renew-hook.sh
+    ui-generation.sh
+)
+expected_installed_release_files=(
+    pins.env
+    pins.sh
 )
 mapfile -t actual_bundle < <(extract_workflow_array bundle_files)
 mapfile -t actual_executables < <(extract_workflow_array executable_files)
@@ -103,6 +126,14 @@ mapfile -t actual_installed_scripts < <(awk '
     inside { gsub(/^[[:space:]]+|[[:space:]]+$/, ""); if ($0 != "") print }
 ' "$INSTALL")
 compare_exact_list "gateway-installed script manifest" expected_installed_scripts actual_installed_scripts
+
+mapfile -t actual_installed_release_files < <(awk '
+    /^[[:space:]]*local -a pin_files=\([[:space:]]*$/ { inside=1; next }
+    inside && /^[[:space:]]*\)[[:space:]]*$/ { exit }
+    inside { gsub(/^[[:space:]]+|[[:space:]]+$/, ""); if ($0 != "") print }
+' "$INSTALL")
+compare_exact_list "gateway-installed release-pin manifest" \
+    expected_installed_release_files actual_installed_release_files
 
 install_files_body="$(sed -n '/^install_files()/,/^}/p' "$INSTALL")"
 if grep -Fq 'clear_owned_scope "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"' <<<"$install_files_body" \
@@ -122,6 +153,16 @@ if ((${#installed_missing_from_bundle[@]} == 0)); then
     pass "every gateway-installed script is present in the release bundle"
 else
     fail "gateway-installed scripts are absent from the bundle: ${installed_missing_from_bundle[*]}"
+fi
+
+for file in "${actual_installed_release_files[@]}"; do
+    [[ " ${actual_bundle[*]} " =~ [[:space:]]release/${file}[[:space:]] ]] \
+        || installed_missing_from_bundle+=("release/$file")
+done
+if ((${#installed_missing_from_bundle[@]} == 0)); then
+    pass "every gateway-installed release-pin file is present in the release bundle"
+else
+    fail "gateway-installed files are absent from the bundle: ${installed_missing_from_bundle[*]}"
 fi
 
 missing=()
@@ -220,10 +261,11 @@ mapfile -t published_files < <(
     find "$PUBLISHED_ROOT" -type f -printf '%P\n' | LC_ALL=C sort
 )
 compare_exact_list "published installer archive manifest" expected_bundle published_files
-if ((${#published_files[@]} == 19)); then
-    pass "published installer archive contains exactly 19 files"
+expected_file_count="${#expected_bundle[@]}"
+if ((${#published_files[@]} == expected_file_count)); then
+    pass "published installer archive contains exactly ${expected_file_count} files"
 else
-    fail "published installer archive contains ${#published_files[@]} files instead of 19"
+    fail "published installer archive contains ${#published_files[@]} files instead of ${expected_file_count}"
 fi
 
 declare -A executable_lookup=()
@@ -243,9 +285,12 @@ for file in "${published_files[@]}"; do
         [[ "$mode" == 644 ]] || mode_failures+=("$file=$mode (expected 644)")
     fi
 done
-if ((executable_count == 6 && nonexecutable_count == 13 \
+expected_executable_count="${#expected_executables[@]}"
+expected_nonexecutable_count=$((expected_file_count - expected_executable_count))
+if ((executable_count == expected_executable_count \
+      && nonexecutable_count == expected_nonexecutable_count \
       && ${#mode_failures[@]} == 0)); then
-    pass "published modes are exactly six 0755 files and thirteen 0644 files"
+    pass "published modes match the executable and non-executable manifests"
 else
     fail "published archive modes differ from the approved policy: ${mode_failures[*]-}"
 fi
@@ -257,6 +302,27 @@ if [[ "$release_tag_lines" == 1 && "$exact_stamp_lines" == 1 ]]; then
     pass "published installer contains one exact release tag stamp"
 else
     fail "published installer release tag stamp is missing or ambiguous"
+fi
+
+expected_pins_binding="$(sha256sum "$PUBLISHED_ROOT/release/pins.env" | awk '{print $1}'):\
+$(sha256sum "$PUBLISHED_ROOT/release/pins.sh" | awk '{print $1}')"
+binding_lines="$(grep -c '^RELEASE_PINS_BINDING=' "$PUBLISHED_ROOT/install.sh" || true)"
+exact_binding_lines="$(grep -Fc "RELEASE_PINS_BINDING=\"${expected_pins_binding}\"" \
+    "$PUBLISHED_ROOT/install.sh" || true)"
+if [[ "$binding_lines" == 1 && "$exact_binding_lines" == 1 ]]; then
+    pass "published installer binds the exact bundled release pin generation"
+else
+    fail "published installer release-pin generation binding is missing or ambiguous"
+fi
+
+expected_quick_binding="$(sha256sum "$PUBLISHED_ROOT/quick-install.sh" | awk '{print $1}')"
+quick_binding_lines="$(grep -c '^RELEASE_QUICK_BINDING=' "$PUBLISHED_ROOT/install.sh" || true)"
+exact_quick_binding_lines="$(grep -Fc "RELEASE_QUICK_BINDING=\"${expected_quick_binding}\"" \
+    "$PUBLISHED_ROOT/install.sh" || true)"
+if [[ "$quick_binding_lines" == 1 && "$exact_quick_binding_lines" == 1 ]]; then
+    pass "published installer binds the exact bundled quick installer generation"
+else
+    fail "published installer quick-installer generation binding is missing or ambiguous"
 fi
 
 if (cd "$PACKAGE_WORKSPACE" && sha256sum -c checksums.txt >/dev/null); then

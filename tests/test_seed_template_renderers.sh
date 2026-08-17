@@ -86,7 +86,6 @@ fi
 # install acceptance run could not catch it by construction.
 render_seed() {
     sed -e "s/__CONSOLE_DOMAIN__/console.seedcheck.test/g" \
-        -e "s/__GATEWAY_IP__/10.0.0.1/g" \
         -e "s/__CONTROLLER_SECRET__/seed-check-secret/g" \
         -e "s/^__MIHOMO_LISTENERS__$/  - {name: gateway, type: tunnel, listen: 10.0.0.1, port: 443, network: [tcp, udp], target: console.seedcheck.test:443}/" \
         "$template"
@@ -104,12 +103,15 @@ render_seed > "$seed_dir/mihomo/config.yaml"
     MIHOMO_DIR="$seed_dir/mihomo"
     CONSOLE_DOMAIN=console.seedcheck.test
     BASE_DOMAIN=seedcheck.test
-    GATEWAY_IP=10.0.0.1
+    # The DNS gateway is installation-owned runtime state. Changing it must not
+    # require a matching rule in the fully operator-owned mihomo YAML.
+    GATEWAY_IP=10.0.0.2
     MIHOMO_LISTEN_IPS=10.0.0.1
+    mihomo_controller_inspection() { printf '{}\n'; }
     mihomo_config_matches_install_config
 ) >/dev/null 2>&1
 if [[ $? == 0 ]]; then
-    echo "ok: the drift check accepts the config the seed template renders"
+    echo "ok: the drift check accepts the rendered seed independently of the DNS gateway coordinate"
 else
     echo "FAIL: mihomo_config_matches_install_config rejects the installer's own seed"
     FAIL=1

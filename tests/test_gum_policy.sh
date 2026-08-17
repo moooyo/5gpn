@@ -6,6 +6,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
 rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
 INSTALL="$ROOT/install.sh"
+PINS="$ROOT/release/pins.env"
 
 # --- removed Python web control plane stays absent ---
 [ ! -e "$ROOT/api-server.py" ] || fail "api-server.py must be removed"
@@ -14,12 +15,23 @@ grep -Eq 'setup_api|api-server\.py|API_PORT' "$INSTALL" && fail "install.sh stil
 
 # --- gum bootstrap: prebuilt + verify, version-pinned, never fatal ---
 grep -Eq 'install_gum\(\)' "$INSTALL"                 || fail "no install_gum() bootstrap"
-grep -Eq '^GUM_VERSION="0\.17\.0"' "$INSTALL"       || fail "GUM_VERSION not fixed at 0.17.0"
+grep -Eq '^GUM_REPO=charmbracelet/gum$' "$PINS"      || fail "Gum repository is not centralized"
+grep -Eq '^GUM_VERSION=[0-9]+\.[0-9]+\.[0-9]+$' "$PINS" \
+    || fail "GUM_VERSION is not a fixed semver literal"
+gum_template="$(sed -n 's/^GUM_ASSET_TEMPLATE=//p' "$PINS")"
+[[ "$gum_template" == *'{version}'* \
+   && "$gum_template" == *'{arch}'* \
+   && "$gum_template" == *.tar.gz ]] \
+    || fail "Gum asset template is not centralized"
 grep -Fq 'GUM_BIN="${BIN_DIR}/gum"' "$INSTALL"       || fail "gum is not installed under the project-private bin dir"
-grep -Eq '^GUM_SHA256_X86_64="[0-9a-f]{64}"$' "$INSTALL" || fail "gum x86_64 checksum is not embedded"
-grep -Eq '^GUM_SHA256_ARM64="[0-9a-f]{64}"$' "$INSTALL"  || fail "gum arm64 checksum is not embedded"
-grep -Eq '^GUM_SHA256_ARMV7="[0-9a-f]{64}"$' "$INSTALL"  || fail "gum armv7 checksum is not embedded"
+grep -Eq '^GUM_SHA256_X86_64=[0-9a-f]{64}$' "$PINS" || fail "gum x86_64 checksum is not pinned"
+grep -Eq '^GUM_SHA256_ARM64=[0-9a-f]{64}$' "$PINS"  || fail "gum arm64 checksum is not pinned"
+grep -Eq '^GUM_SHA256_ARMV7=[0-9a-f]{64}$' "$PINS"  || fail "gum armv7 checksum is not pinned"
 gum_fn="$(sed -n '/^install_gum()/,/^}/p' "$INSTALL")"
+grep -Fq 'release_asset_name gum "$arch"' <<<"$gum_fn" \
+    && grep -Fq 'release_download_url gum "$arch"' <<<"$gum_fn" \
+    && grep -Fq 'release_artifact_sha256 gum "$arch"' <<<"$gum_fn" \
+    || fail "Gum does not use the centralized asset, URL, and digest builders"
 grep -Fq 'checksums.txt' <<<"$gum_fn" && fail "gum trusts a mutable remote checksum document"
 grep -Fq 'return 1' <<<"$gum_fn" && fail "gum bootstrap has a fatal failure path"
 grep -Fq 'gum sha256 mismatch' "$INSTALL"             || fail "gum verify is not fail-closed"
@@ -62,8 +74,11 @@ grep -Fq 'env -u CI' <<<"$gum_spin_fn" \
 # The Telegram case used to be named here specifically. That command is gone
 # with the helper it sourced, so the assertion is the general one it was an
 # instance of: an op that prompts must refuse a pipe rather than block on it.
-grep -Fq 'requires an interactive TTY' "$INSTALL" \
-    || fail "no management op is TTY-gated"
+for gated_fn in configure_install_tui set_cf_token uninstall; do
+    gated_body="$(sed -n "/^${gated_fn}()/,/^}/p" "$INSTALL")"
+    grep -Fq '[[ -t 0 ]]' <<<"$gated_body" \
+        || fail "$gated_fn is not TTY-gated before prompting"
+done
 
 # --- Gum must exist before the prompts, not after them -------------------------
 # Every question this installer asks runs in resolve_install_configuration. When

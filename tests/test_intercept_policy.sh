@@ -88,8 +88,9 @@ grep -Fq 'ensure_intercept_certificates' "$INSTALL" || fail "interception certif
 grep -Fq 'systemctl enable --now 5gpn-intercept-cert.timer' "$INSTALL" || fail "interception leaf renewal timer is not always enabled"
 grep -Fq 'systemctl enable --now 5gpn-intercept-cert.path' "$INSTALL" || fail "interception certificate watcher is not enabled"
 install_files_body="$(sed -n '/^install_files()/,/^}/p' "$INSTALL")"
-grep -Fq '5gpn-intercept-cert.timer' <<<"$install_files_body" \
-    && grep -Fq 'for u in "${installed_units[@]}"' <<<"$install_files_body" \
+managed_units_decl="$(sed -n '/^declare -ar MANAGED_SYSTEMD_UNITS=(/,/^)/p' "$INSTALL")"
+grep -Fq '5gpn-intercept-cert.timer' <<<"$managed_units_decl" \
+    && grep -Fq 'for u in "${MANAGED_SYSTEMD_UNITS[@]}"' <<<"$install_files_body" \
     || fail "interception certificate timer is absent from the exact installed-unit manifest"
 grep -Fq 'intercept-cert-renew.sh" --installer-lock-held' "$INSTALL" \
     && fail "the installer mints leaves again instead of leaving them to the watcher"

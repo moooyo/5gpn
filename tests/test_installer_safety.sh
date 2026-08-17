@@ -9,6 +9,26 @@ FAIL=0
 pass() { echo "ok: $*"; }
 fail() { echo "FAIL: $*"; FAIL=1; }
 
+uninstall_fn="$(sed -n '/^uninstall()/,/^}/p' "$INSTALL")"
+runtime_removal_line="$(grep -nF 'remove_runtime_preserving_gum' <<<"$uninstall_fn" | head -1 | cut -d: -f1)"
+decommission_cleanup_order_ok=1
+for cleanup_call in \
+    'remove_owned_root "$DNS_CERT_DIR"' \
+    'remove_debug_cert_root' \
+    'remove_owned_child "$CONF_DIR"' \
+    'remove_fixed_owned_dir "$INTERCEPT_CA_DIR"'
+do
+    cleanup_line="$(grep -nF "$cleanup_call" <<<"$uninstall_fn" | head -1 | cut -d: -f1)"
+    [[ -n "$cleanup_line" && -n "$runtime_removal_line" \
+       && "$cleanup_line" -lt "$runtime_removal_line" ]] \
+        || decommission_cleanup_order_ok=0
+done
+if [[ "$decommission_cleanup_order_ok" == 1 ]]; then
+    pass "decommission keeps certificate publication helpers until role cleanup finishes"
+else
+    fail "decommission removes runtime helpers before certificate-role cleanup"
+fi
+
 export INSTALL_SH_LIB_ONLY=1
 # shellcheck source=../install.sh
 source "$INSTALL"
@@ -111,6 +131,17 @@ if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
 else
     pass "unrelated global service defaults remain compatible"
 fi
+cat > "$unit_conflicts/service.d/15-start-timeout.conf" <<'EOF'
+[Service]
+TimeoutStartSec=90s
+EOF
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts" \
+   && [[ "$SYSTEMD_UNIT_CONFLICT_REASON" == *global*service.d* ]]; then
+    pass "global start-timeout overrides cannot truncate the PID1 configure gate"
+else
+    fail "global service TimeoutStartSec override was ignored"
+fi
+rm -f -- "$unit_conflicts/service.d/15-start-timeout.conf"
 cat > "$unit_conflicts/service.d/20-exec.conf" <<'EOF'
 [Service]
 ExecStart=
@@ -383,7 +414,7 @@ else
 fi
 
 # remove_unit is called with a literal from scopes that have no `unit` variable
-# of their own (remove_owned_renewal_automation), so its own declaration must not
+# of their own (disable_scoped_renewal_timer), so its own declaration must not
 # read one. It returns early for an absent unit file, which keeps this off
 # systemd.
 if (
@@ -569,27 +600,26 @@ if mkfifo "$tls_tree/special"; then
 fi
 
 if (
-    DNS_CERT_DIR="$TMP/cert-roles"
+    cert_fixture="$(mktemp -d /tmp/5gpn-installer-cert-role.XXXXXX)"
+    trap 'rm -rf -- "$cert_fixture"' EXIT
+    CONF_DIR="$cert_fixture/config"
+    DNS_CERT_DIR="$CONF_DIR/cert"
     role="$DNS_CERT_DIR/dot"
     generation="$role/generations/generation-20260721T010203Z-10-20"
     mkdir -p "$generation"
+    chmod 0755 "$CONF_DIR"
+    chmod 0751 "$DNS_CERT_DIR"
+    printf '%s\n' "$CONF_OWNERSHIP_VALUE" > "$CONF_DIR/$CONF_OWNERSHIP_MARKER"
+    printf '%s\n' "$CERT_ROOT_MARKER_VALUE" > "$DNS_CERT_DIR/$CERT_ROOT_MARKER"
     printf '%s\n' "${CERT_ROLE_VALUE_PREFIX}:dot" > "$role/$CERT_ROLE_MARKER"
     printf 'cert\n' > "$generation/fullchain.pem"
     printf 'key\n' > "$generation/privkey.pem"
+    chmod 0750 "$role" "$role/generations" "$generation"
+    chmod 0644 "$CONF_DIR/$CONF_OWNERSHIP_MARKER" "$DNS_CERT_DIR/$CERT_ROOT_MARKER" \
+        "$role/$CERT_ROLE_MARKER"
+    chmod 0640 "$generation/fullchain.pem" "$generation/privkey.pem"
     ln -s "generations/$(basename -- "$generation")" "$role/current"
-    account_gid() { printf '4242\n'; }
-    file_uid() { printf '0\n'; }
-    file_gid() {
-        case "$1" in "$role/$CERT_ROLE_MARKER"|"$role/current") printf '0\n' ;; *) printf '4242\n' ;; esac
-    }
-    file_mode() {
-        case "$1" in
-            "$role"|"$role/generations"|"$generation") printf '750\n' ;;
-            "$role/$CERT_ROLE_MARKER") printf '644\n' ;;
-            *) printf '640\n' ;;
-        esac
-    }
-    file_nlink() { printf '1\n'; }
+    account_gid() { id -g; }
     cert_role_tree_is_safe_for_recursive_metadata "$role" || exit 1
     rm -f -- "$role/current"
     ln -s ../../outside "$role/current"
@@ -630,128 +660,25 @@ else
     fail "debug root marker was written into an untrusted directory"
 fi
 
-# Static publication must override restrictive source modes before the atomic
-# swap. The console, zashboard, and iOS profile are all served by the
-# unprivileged fivegpn runtime, while their source trees can originate from
-# mktemp or a caller running with umask 077.
-static_root="$TMP/static-publication"
-if (
-    umask 077
-    src="$static_root/source"
-    dest="$static_root/live"
-    file_uid() { printf '0\n'; }
-    file_gid() { printf '0\n'; }
-    file_mode() {
-        case "$1" in
-            "$src"|"$src"/*|"$dest"|"$dest"/*|"$static_root"/.live.new.*)
-                if [[ "$POSIX_MODES" == 0 ]]; then
-                    [[ -d "$1" ]] && printf '755\n' || printf '644\n'
-                else
-                    stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || true
-                fi ;;
-            *) printf '755\n' ;;
-        esac
-    }
-    normalize_static_tree_ownership() { :; }
-    mkdir -p "$src/assets"
-    printf 'index\n' > "$src/index.html"
-    printf 'asset\n' > "$src/assets/app.js"
-    chmod 0700 "$src" "$src/assets"
-    chmod 0600 "$src/index.html" "$src/assets/app.js"
-    publish_owned_tree "$src" "$dest" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE"
-    [[ "$(file_mode "$dest")" == 755 ]]
-    [[ "$(file_mode "$dest/assets")" == 755 ]]
-    [[ "$(file_mode "$dest/index.html")" == 644 ]]
-    [[ "$(file_mode "$dest/assets/app.js")" == 644 ]]
-    [[ "$(file_mode "$dest/$ZASH_OWNERSHIP_MARKER")" == 644 ]]
-    grep -qxF index "$dest/index.html"
-    grep -qxF asset "$dest/assets/app.js"
-); then
-    pass "static publication normalizes restrictive source modes for fivegpn"
+# The retired whole-tree replacement helper must not survive beside the
+# generation publisher. Detailed filesystem behavior is exercised by
+# test_ui_generation.sh against the source-only helper itself.
+if declare -F publish_owned_tree >/dev/null 2>&1; then
+    fail "retired move-live-then-replace UI publisher remains"
 else
-    fail "static publication retained modes that block the fivegpn runtime"
-fi
-
-if (
-    custom_parent="$TMP/custom-static-writable"
-    mkdir -p "$custom_parent"
-    file_uid() { printf '0\n'; }
-    file_mode() {
-        [[ "$1" == "$custom_parent" ]] && printf '777\n' || printf '755\n'
-    }
-    ! static_publish_parent_is_safe "$custom_parent/web"
-); then
-    pass "custom static publication rejects a group/world-writable parent"
-else
-    fail "custom static publication accepted a writable parent"
-fi
-
-if (
-    custom_parent="$TMP/custom-static-marker"
-    UI_DIR="$custom_parent/web"
-    mkdir -p "$UI_DIR"
-    printf '%s\n' "$ZASH_OWNERSHIP_VALUE" > "$UI_DIR/$ZASH_OWNERSHIP_MARKER"
-    file_uid() {
-        [[ "$1" == "$UI_DIR/$ZASH_OWNERSHIP_MARKER" ]] \
-            && printf '1001\n' || printf '0\n'
-    }
-    file_gid() { printf '0\n'; }
-    file_mode() {
-        [[ "$1" == "$UI_DIR/$ZASH_OWNERSHIP_MARKER" ]] \
-            && printf '644\n' || printf '755\n'
-    }
-    ! claim_web_dir >/dev/null 2>&1
-); then
-    pass "custom static ownership markers must be root-published"
-else
-    fail "custom static tree accepted a non-root ownership marker"
-fi
-
-if (
-    custom_parent="$TMP/custom-static-empty-owner"
-    UI_DIR="$custom_parent/web"
-    mkdir -p "$UI_DIR"
-    file_uid() {
-        [[ "$1" == "$UI_DIR" ]] && printf '1001\n' || printf '0\n'
-    }
-    file_gid() { printf '0\n'; }
-    file_mode() { printf '755\n'; }
-    ! claim_web_dir >/dev/null 2>&1 \
-        && [[ ! -e "$UI_DIR/$ZASH_OWNERSHIP_MARKER" ]]
-); then
-    pass "empty custom asset roots are trusted before marker publication"
-else
-    fail "public-tree marker was written into an untrusted empty directory"
-fi
-
-if (
-    race_root="$TMP/custom-static-race"
-    src="$race_root/source"
-    dest="$race_root/live"
-    mkdir -p "$src" "$dest"
-    printf 'new\n' > "$src/index.html"
-    printf 'old\n' > "$dest/index.html"
-    ensure_static_publish_parent() { :; }
-    static_publish_parent_is_safe() { return 1; }
-    file_uid() { printf '0\n'; }
-    file_gid() { printf '0\n'; }
-    file_mode() { [[ -d "$1" ]] && printf '755\n' || printf '644\n'; }
-    normalize_static_tree_ownership() { :; }
-    ! publish_owned_tree "$src" "$dest" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" >/dev/null 2>&1 \
-        && grep -qxF old "$dest/index.html"
-); then
-    pass "static publication revalidates its trusted parent before the swap"
-else
-    fail "static publication swapped after its parent boundary changed"
+    pass "UI publication is delegated exclusively to the generation helper"
 fi
 
 # Uninstall keeps Gum while deleting the rest of an owned runtime, and falls
 # back to plain output before deleting a runtime where Gum is already absent.
 if (
     BASE_DIR="$TMP/runtime-with-gum"
+    UI_DIR="$BASE_DIR/ui"
+    UI_CURRENT_DIR="$UI_DIR/current"
     BIN_DIR="$BASE_DIR/bin"
     GUM_BIN="$BIN_DIR/gum"
     _HAVE_GUM=0
+    [[ "$UI_DIR" == "$BASE_DIR/ui" && "$UI_CURRENT_DIR" == "$UI_DIR/current" ]] || exit 1
     mkdir -p "$BIN_DIR" "$BASE_DIR/scripts"
     printf '%s\n' "$BASE_OWNERSHIP_VALUE" > "$BASE_DIR/$BASE_OWNERSHIP_MARKER"
     file_uid() { printf '0\n'; }
@@ -763,8 +690,12 @@ if (
     chmod 0755 "$GUM_BIN"
     printf 'runtime\n' > "$BIN_DIR/obsolete-helper"
     printf 'runtime\n' > "$BASE_DIR/scripts/helper"
-    remove_runtime_preserving_gum >/dev/null
-    [[ -x "$GUM_BIN" && ! -e "$BIN_DIR/obsolete-helper" && ! -e "$BASE_DIR/scripts" ]]
+    remove_runtime_preserving_gum >/dev/null || exit 1
+    [[ -x "$GUM_BIN" \
+       && -f "$BASE_DIR/$BASE_OWNERSHIP_MARKER" \
+       && ! -e "$BIN_DIR/obsolete-helper" \
+       && ! -e "$BASE_DIR/scripts" \
+       && ! -e "$UI_DIR" ]]
 ); then
     pass "uninstall preserves Gum and removes the remaining runtime"
 else
@@ -772,9 +703,12 @@ else
 fi
 if (
     BASE_DIR="$TMP/runtime-without-gum"
+    UI_DIR="$BASE_DIR/ui"
+    UI_CURRENT_DIR="$UI_DIR/current"
     BIN_DIR="$BASE_DIR/bin"
     GUM_BIN="$BIN_DIR/gum"
     _HAVE_GUM=1
+    [[ "$UI_DIR" == "$BASE_DIR/ui" && "$UI_CURRENT_DIR" == "$UI_DIR/current" ]] || exit 1
     mkdir -p "$BIN_DIR"
     printf '%s\n' "$BASE_OWNERSHIP_VALUE" > "$BASE_DIR/$BASE_OWNERSHIP_MARKER"
     file_uid() { printf '0\n'; }
@@ -782,12 +716,40 @@ if (
     file_mode() {
         [[ "$1" == "$BASE_DIR/$BASE_OWNERSHIP_MARKER" ]] && printf '644\n' || printf '755\n'
     }
-    remove_runtime_preserving_gum >/dev/null
+    remove_runtime_preserving_gum >/dev/null || exit 1
     [[ ! -e "$BASE_DIR" && "$_HAVE_GUM" == 0 ]]
 ); then
     pass "uninstall disables Gum output before removing an absent-Gum runtime"
 else
     fail "uninstall retained a stale Gum output state"
+fi
+
+if (
+    BASE_DIR="$TMP/runtime-with-unsafe-ui"
+    UI_DIR="$BASE_DIR/ui"
+    UI_CURRENT_DIR="$UI_DIR/current"
+    BIN_DIR="$BASE_DIR/bin"
+    GUM_BIN="$BIN_DIR/gum"
+    mkdir -p "$BIN_DIR" "$UI_DIR"
+    printf '%s\n' "$BASE_OWNERSHIP_VALUE" > "$BASE_DIR/$BASE_OWNERSHIP_MARKER"
+    printf '#!/bin/sh\nexit 0\n' > "$GUM_BIN"
+    chmod 0755 "$GUM_BIN"
+    printf 'runtime\n' > "$BASE_DIR/runtime-sentinel"
+    printf 'ui\n' > "$UI_DIR/ui-sentinel"
+    file_uid() { printf '0\n'; }
+    file_gid() { printf '0\n'; }
+    file_mode() {
+        [[ "$1" == "$BASE_DIR/$BASE_OWNERSHIP_MARKER" ]] && printf '644\n' || printf '755\n'
+    }
+    remove_ui_dir() { return 1; }
+    ! remove_runtime_preserving_gum >/dev/null 2>&1 \
+        && [[ -x "$GUM_BIN" \
+           && -f "$BASE_DIR/runtime-sentinel" \
+           && -f "$UI_DIR/ui-sentinel" ]]
+); then
+    pass "an unsafe UI tree blocks runtime removal before Gum or runtime mutation"
+else
+    fail "runtime removal changed files after the UI safety gate failed"
 fi
 
 # Fake a host with one assigned non-loopback IPv4 and a matching default route.
@@ -894,11 +856,17 @@ MIHOMO_DIR="$CONF_DIR/mihomo"
 FIVEGPN_SERVICE_USER="$(id -un)"
 FIVEGPN_SERVICE_GROUP="$(id -gn)"
 MIHOMO_BIN="$TMP/fake-mihomo"
+ARTIFACT_STAGE=""
 INTERCEPT_DIR="$CONF_DIR/intercept"
 MIHOMO_TEST_LOG="$TMP/mihomo.log"; export MIHOMO_TEST_LOG
 cat > "$MIHOMO_BIN" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$MIHOMO_TEST_LOG"
+if [[ "${1:-}" == 5gpn-config && "${2:-}" == inspect-controller && "${3:-}" == --config ]]; then
+    revision="$(sha256sum "$4" | awk '{print $1}')"
+    jq -nc --arg revision "$revision" \
+        '{version:2,raw_revision:$revision,secret:"test-controller-secret",external_controller_tls:"127.0.0.1:443",external_ui:"/opt/5gpn/ui/current",certificate:"/etc/5gpn/cert/console/current/fullchain.pem",private_key:"/etc/5gpn/cert/console/current/privkey.pem"}'
+fi
 exit 0
 EOF
 chmod +x "$MIHOMO_BIN"
@@ -925,7 +893,6 @@ file_mode() {
         *) stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || true ;;
     esac
 }
-persist_mihomo_secret() { :; }
 chown() { :; }
 BASE_DOMAIN=example.com
 MIHOMO_LISTEN_IPS=10.20.30.40
@@ -1117,14 +1084,15 @@ fi
 # validator disagreed the failure was silent in the worst way: the service
 # started, bound every tunnel and the TLS controller, reported itself healthy,
 # and had no DNS ingress at all because it could not open its own key.
-[[ "$(cert_role_group dot)" == "$FIVEGPN_SERVICE_GROUP" ]] \
+load_cert_role_helpers || fail "shared certificate role helper could not be loaded"
+[[ "$(cert_role_ctl_group_name dot)" == "$FIVEGPN_SERVICE_GROUP" ]] \
     || fail "the DoT certificate role is not owned by the account that serves DoT"
-[[ "$(cert_role_group console)" == "$FIVEGPN_SERVICE_GROUP" ]] \
+[[ "$(cert_role_ctl_group_name console)" == "$FIVEGPN_SERVICE_GROUP" ]] \
     || fail "the controller certificate role is not owned by the serving account"
-if cert_role_group web >/dev/null 2>&1; then
+if cert_role_ctl_group_name web >/dev/null 2>&1; then
     fail "the retired web certificate role was assigned an owning account"
 fi
-if cert_role_group nonsense >/dev/null 2>&1; then
+if cert_role_ctl_group_name nonsense >/dev/null 2>&1; then
     fail "an unknown certificate role was given an owning account"
 fi
 pass "certificate roles are owned by the account that serves them"
@@ -1136,6 +1104,9 @@ BASE_DIR="$TMP/base"
 if (
     safe_ui_path() { printf '%s\n' "$UI_DIR"; }
     UI_DIR="$TMP/external/ui"
+    # shellcheck source=../scripts/ui-generation.sh
+    source "$ROOT/scripts/ui-generation.sh"
+    UI_GENERATION_HELPER_LOADED=1
     file_uid() { printf '0\n'; }
     file_gid() { printf '0\n'; }
     file_mode() {
@@ -1147,7 +1118,9 @@ if (
     ! claim_ui_dir >/dev/null 2>&1
     rm -f "$UI_DIR/file"
     claim_ui_dir >/dev/null
-    echo owned > "$UI_DIR/file"
+    echo unsafe > "$UI_DIR/file"
+    ! remove_ui_dir >/dev/null 2>&1
+    rm -f "$UI_DIR/file"
     remove_ui_dir >/dev/null
     [[ ! -e "$UI_DIR" ]]
 ); then
@@ -1166,6 +1139,29 @@ if safe_ui_path >/dev/null 2>&1; then
     fail "system-directory descendant accepted as UI_DIR"
 else
     pass "system-directory descendants are rejected as panel cleanup paths"
+fi
+
+restart_log="$TMP/restart-systemctl.log"
+if (
+    check_root() { :; }
+    load_ui_generation_helper() { return 1; }
+    systemctl() { printf '%s\n' "$*" >> "$restart_log"; }
+    ! restart_services >/dev/null 2>&1
+) && [[ ! -s "$restart_log" ]]; then
+    pass "manual restart rejects an unsafe UI helper before systemd mutation"
+else
+    fail "manual restart touched systemd before the UI helper/current gate"
+fi
+if (
+    check_root() { :; }
+    load_ui_generation_helper() { :; }
+    _ui_generation_current_only_is_safe() { return 1; }
+    systemctl() { printf '%s\n' "$*" >> "$restart_log"; }
+    ! restart_services >/dev/null 2>&1
+) && [[ ! -s "$restart_log" ]]; then
+    pass "manual restart rejects invalid current before systemd mutation"
+else
+    fail "manual restart stopped/restarted before current validation"
 fi
 
 # Service activation errors must propagate instead of falling through to the
@@ -1390,8 +1386,11 @@ HTTP_INSTALL_LOG="$TMP/http-install-order.log"
     deploy_cert_roles() { printf 'deploy_cert_roles console/current\n' >> "$HTTP_INSTALL_LOG"; }
     systemctl() {
         printf 'systemctl %s\n' "$*" >> "$HTTP_INSTALL_LOG"
-        case "$*" in
-            'cat certbot.timer'|'is-active --quiet certbot.service') return 1 ;;
+        case "${1:-}:${2:-}:${3:-}:${4:-}:${5:-}" in
+            show:-p:LoadState:--value:certbot.timer|show:-p:LoadState:--value:certbot.service)
+                printf '%s\n' not-found
+                return 0
+                ;;
         esac
         return 0
     }

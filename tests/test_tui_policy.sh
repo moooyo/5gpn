@@ -41,8 +41,8 @@ printf '%s' "$tui_fn" | grep -Fq "http-01 — Let’s Encrypt exact service SANs
     || fail "certificate-mode TUI does not offer HTTP-01"
 printf '%s' "$tui_fn" | grep -Fq "cloudflare — Let’s Encrypt wildcard" \
     || fail "certificate-mode TUI does not offer Cloudflare DNS-01"
-printf '%s' "$tui_fn" | grep -Fq 'ensure_cf_token || return 1' \
-    || fail "Cloudflare selection does not collect or reuse the API token inside the TUI"
+printf '%s' "$tui_fn" | grep -Fq 'ensure_cf_token' \
+    && fail "the configuration TUI persists a Cloudflare token before final candidate confirmation"
 printf '%s' "$tui_fn" | grep -Eq "国内解析 ECS|DNS cache entries" \
     && fail "installer still prompts for automatic ECS/cache values"
 printf '%s' "$tui_fn" | grep -Fq 'EGRESS_RESOLVER' \
@@ -64,14 +64,14 @@ render_fn="$(sed -n '/^render_fresh_dns_document()/,/^}/p' "$INSTALL")"
 printf '%s' "$seed_fn" | grep -Fq 'local china="$DNS_CHINA_DEFAULT" trust="$DNS_TRUST_DEFAULT"' \
     && printf '%s' "$seed_fn" | grep -Fq 'local ecs="$DNS_CHINA_ECS_DEFAULT"' \
     || fail "DNS document seeder does not consume the operational upstream defaults"
-# An existing document is refreshed, not replaced: the installer owns the
-# certificate pair and the gateway, and the console owns policy, upstreams and
-# tuning through the same file. A seeder that rewrote the whole document would
-# discard every console edit on the next reinstall.
-printf '%s' "$seed_fn" | grep -Fq '.listen.certificate = $cert' \
-    && printf '%s' "$seed_fn" | grep -Fq '.listen.privateKey = $key' \
-    && printf '%s' "$seed_fn" | grep -Fq '.gateway = $gw' \
-    || fail "DNS document seeder does not refresh the installer-owned fields in place"
+# An existing document keeps operator policy/upstreams/tuning. Fixed listeners
+# and key paths are validated rather than rewritten; only the checked gateway
+# host coordinate is updated.
+printf '%s' "$seed_fn" | grep -Fq 'current_dns_document_is_compatible "$target"' \
+    && printf '%s' "$seed_fn" | grep -Fq "'.gateway = \$gw'" \
+    || fail "DNS document seeder does not validate fixed fields before the gateway update"
+printf '%s' "$seed_fn" | grep -Eq '\.listen\.(certificate|privateKey|dot|debug|origin)[[:space:]]*=' \
+    && fail "DNS document seeder silently rewrites a fixed listener or key path"
 # The pair is the whole point: DefaultDocument asks for :853 and cannot name a
 # key, so a document without it means a gateway that starts healthy with no DNS.
 printf '%s' "$render_fn" | grep -Fq 'certificate: $cert, privateKey: $key' \
@@ -113,11 +113,17 @@ printf '%s' "$tui_fn" | grep -Fq 'wait for 1.1.1.1' \
 http_plan_line="$(grep -nF 'HTTP-01 DNS / network prerequisites' <<<"$tui_fn" | head -1 | cut -d: -f1)"
 http_confirm_line="$(grep -nF '我已确认上述 DNS 和 TCP/80 配置正确' <<<"$tui_fn" | head -1 | cut -d: -f1)"
 cf_confirm_line="$(grep -nF '我已添加上述 console A 记录' <<<"$tui_fn" | head -1 | cut -d: -f1)"
-cf_token_line="$(grep -nF 'ensure_cf_token || return 1' <<<"$tui_fn" | head -1 | cut -d: -f1)"
 [[ -n "$http_plan_line" && -n "$http_confirm_line" && "$http_plan_line" -lt "$http_confirm_line" ]] \
     || fail "HTTP-01 DNS plan is not shown before explicit confirmation"
-[[ -n "$cf_token_line" && -n "$cf_confirm_line" && "$cf_token_line" -lt "$cf_confirm_line" ]] \
-    || fail "Cloudflare token is not collected before final DNS confirmation"
+configure_fn="$(sed -n '/^configure_installation()/,/^}/p' "$INSTALL")"
+install_cert_fn="$(sed -n '/^install_cert()/,/^}/p' "$INSTALL")"
+configure_tui_line="$(grep -nF 'configure_install_tui 1' <<<"$configure_fn" | head -1 | cut -d: -f1)"
+configure_cert_line="$(grep -nF 'configure_apply_certificate_transaction' <<<"$configure_fn" | head -1 | cut -d: -f1)"
+[[ -n "$cf_confirm_line" && -n "$configure_tui_line" && -n "$configure_cert_line" \
+   && "$configure_tui_line" -lt "$configure_cert_line" ]] \
+    || fail "certificate work is not deferred until after complete TUI candidate confirmation"
+printf '%s' "$install_cert_fn" | grep -Fq 'ensure_cf_token || return 1' \
+    || fail "confirmed Cloudflare certificate issuance no longer obtains its protected credential"
 printf '%s' "$tui_fn" | grep -Fq 'The API token is used only for ACME TXT records.' \
     && printf '%s' "$tui_fn" | grep -Fq 'does NOT create or modify this A record' \
     || fail "Cloudflare TUI does not explain that the console A record is operator-managed"
@@ -335,6 +341,8 @@ printf '%s' "$overview_fn" | grep -Fq 'console_public_url' \
     || fail "the overview does not show the public Console URL and explicit connection action"
 printf '%s' "$overview_fn" | grep -Eq 'DNS_MIHOMO_SECRET|console_setup_url' \
     && fail "the overview renderer contains sensitive Console connection material"
+grep -Fq 'Rotate console secret' "$INSTALL" \
+    && fail "the TUI still exposes the removed partial secret writer"
 printf '%s' "$overview_fn" | grep -Fq "printf '  🚫 HTTP/3 禁用\\n'" \
     || fail "the overview does not render the intentionally short HTTP/3 disabled state"
 printf '%s' "$overview_fn" | grep -Fq 'H3-only fails' \

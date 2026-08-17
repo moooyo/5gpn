@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HELPER="$ROOT/scripts/cert-renew.sh"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d /tmp/5gpn-cert-role-tree.XXXXXX)"
 trap 'rm -rf -- "$TMP"' EXIT
 
 fail() { echo "FAIL: $*"; exit 1; }
@@ -42,11 +42,12 @@ for role in dot console; do
     ln -s generations/generation-20000101T000000Z-1-1 "$CERT_ROOT/$role/current"
 done
 
-certificate_role_tree_safe || fail "canonical certificate role tree was rejected"
+load_cert_role_helpers && cert_role_ctl_validate_tree \
+    || fail "canonical certificate role tree was rejected"
 pass "canonical certificate root and role generations validate"
 
 mkdir -p "$CERT_ROOT/web"
-if certificate_role_tree_safe; then
+if load_cert_role_helpers && cert_role_ctl_validate_tree; then
     fail "retired web certificate role was accepted"
 fi
 rm -rf -- "$CERT_ROOT/web"
@@ -54,7 +55,7 @@ pass "retired certificate roles fail closed"
 
 dot_key="$CERT_ROOT/dot/current/privkey.pem"
 ln -- "$dot_key" "$TMP/key-hardlink"
-if certificate_role_tree_safe; then
+if load_cert_role_helpers && cert_role_ctl_validate_tree; then
     fail "hardlinked role private key was accepted"
 fi
 rm -f -- "$TMP/key-hardlink"
@@ -62,27 +63,20 @@ pass "hardlinked role private key fails closed"
 
 mv -- "$CERT_ROOT/console" "$CERT_ROOT/console.saved"
 ln -s console.saved "$CERT_ROOT/console"
-if certificate_role_tree_safe; then
+if load_cert_role_helpers && cert_role_ctl_validate_tree; then
     fail "symlinked certificate role was accepted"
 fi
 rm -f -- "$CERT_ROOT/console"
 mv -- "$CERT_ROOT/console.saved" "$CERT_ROOT/console"
 pass "symlinked certificate role fails closed"
 
-original_file_uid="$(declare -f file_uid)"
 UNSAFE_OWNER_PATH="$CERT_ROOT/console/$CERT_ROLE_MARKER"
-file_uid() {
-    if [[ "$1" == "$UNSAFE_OWNER_PATH" ]]; then
-        printf '%s\n' "$((EUID + 1))"
-    else
-        stat -c %u -- "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null || true
-    fi
-}
-if certificate_role_tree_safe; then
-    fail "service-owned role marker was accepted"
+chmod 0664 "$UNSAFE_OWNER_PATH"
+if load_cert_role_helpers && cert_role_ctl_validate_tree; then
+    fail "writable role marker was accepted"
 fi
-eval "$original_file_uid"
-pass "service-owned role marker fails closed"
+chmod 0644 "$UNSAFE_OWNER_PATH"
+pass "writable role marker fails closed"
 
 # The core's own state directory survives the installer's mode sweep.
 #
@@ -129,25 +123,19 @@ pass "the installer preserves the node helper's lock and backup ownership contra
 for site in 'deploy_cert_roles'; do
     body="$(sed -n "/^${site}()/,/^}/p" "$ROOT/install.sh")"
     [[ -n "$body" ]] || fail "$site is missing"
-    printf '%s' "$body" | grep -Fq 'console' \
-        || fail "$site does not know the console certificate role"
-    printf '%s' "$body" | grep -Fq 'dot' \
-        || fail "$site does not know the DoT certificate role"
+    printf '%s' "$body" | grep -Fq 'cert_role_ctl_' \
+        || fail "$site does not delegate to the shared certificate-role core"
     printf '%s' "$body" | grep -Eq '(^|[^[:alnum:]_])web([^[:alnum:]_]|$)' \
         && fail "$site still names the retired web certificate role"
     printf '%s' "$body" | grep -Fq 'zash' \
         && fail "$site still names the retired zash certificate role"
 done
-body="$(sed -n '/^publish_roles()/,/^}/p' "$ROOT/scripts/renew-hook.sh")"
-[[ -n "$body" ]] || fail "publish_roles is missing from renew-hook.sh"
-printf '%s' "$body" | grep -Fq 'console' \
-    || fail "publish_roles does not know the console certificate role"
-printf '%s' "$body" | grep -Fq 'dot' \
-    || fail "publish_roles does not know the DoT certificate role"
-printf '%s' "$body" | grep -Eq '(^|[^[:alnum:]_])web([^[:alnum:]_]|$)' \
-    && fail "publish_roles still names the retired web certificate role"
-printf '%s' "$body" | grep -Fq 'zash' \
-    && fail "publish_roles still names the retired zash certificate role"
+body="$(sed -n '/^deploy_lineage()/,/^}/p' "$ROOT/scripts/renew-hook.sh")"
+[[ -n "$body" ]] || fail "deploy_lineage is missing from renew-hook.sh"
+printf '%s' "$body" | grep -Fq 'cert_role_ctl_deploy_lineage' \
+    || fail "renew-hook deploy_lineage does not delegate to the shared core"
+ctl_roles="$(grep -F 'local -a roles=(dot console)' "$ROOT/scripts/cert-role-ctl.sh" || true)"
+[[ -n "$ctl_roles" ]] || fail "shared certificate-role core does not enumerate exactly dot and console"
 pass "current certificate publication enumerates only dot and console"
 
 body="$(sed -n '/^role_copies_match_live()/,/^}/p' "$ROOT/scripts/cert-renew.sh")"

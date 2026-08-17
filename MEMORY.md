@@ -92,10 +92,30 @@ Update the status and the normative documentation when an implementation lands.
 
 **Status: Implemented. Recorded 2026-08-06.**
 
-- `dns.env` contains installation-owned host coordinates only. Live policy,
-  upstreams, subscriptions, resolver tuning, statistics, and health monitoring
-  are not mirrored from `dns.json`. Unknown and retired keys are rejected; no
-  older schema is rewritten into the current one.
+- `dns.env` contains exactly six host-specific inputs: base domain,
+  public/gateway/listener IPv4 values, certificate mode, and certificate email.
+  DoT/debug/origin listeners, controller/UI coordinates, and certificate paths
+  are fixed constants. Live policy, upstreams, subscriptions, resolver tuning,
+  statistics, health monitoring, and the controller secret are not mirrored.
+  Unknown and retired keys, including the wider pre-release schema, are
+  rejected; no older schema is rewritten into the current one. Existing bytes
+  undergo complete read-only metadata, exact-key, and low-cost value validation
+  before Gum or project-root publication, then are revalidated after claim.
+- The controller secret has one persistent source: operator-owned
+  `config.yaml`. Root management accepts only the pinned Core's root-only
+  `5gpn-config inspect-controller` version-2 JSON projection with the exact raw
+  revision, secret, TLS controller, UI root, certificate, and private-key paths.
+  There is no shell YAML parser, dotenv encoding, single-key sync, or partial
+  secret writer. Managed `PUT /configs` secret changes return `409`; rotation
+  requires a complete file edit and explicit process restart. Authenticated
+  host calls pass the bearer through a fresh inherited descriptor rather than
+  curl argv, leaving stdin free for request bodies.
+- The gateway coordinate in `dns.json` is installation-owned and read-only
+  through `/5gpn/dns`. At startup the Core publishes it to a dynamic anti-loop
+  guard limited to private 5gpn system and extension tunnel carriers. Ordinary
+  client ingress and generic mihomo `INNER` traffic remain unaffected. The
+  installer never writes a gateway-specific `IP-CIDR` rule into operator-owned
+  `config.yaml`; a checked gateway change takes effect after a full restart.
 - A missing `dns.json` receives the exact pinned-core defaults, including the
   ChinaMax `direct` and GFW `proxy` subscription rules. Their caches live under
   the monolith state directory; `/etc/5gpn/rules` is an unsupported legacy
@@ -114,10 +134,59 @@ Update the status and the normative documentation when an implementation lands.
   documents are absent; a present document requires a proven current or
   journaled UID. The installer does not carry a second shell decoder or
   validator for existing runtime documents; it may still render the defined
-  seed for a missing document.
+  seed for a missing document. The state root is normally service-owned `0711`;
+  only the otherwise exact inherited-setgid `2711` interruption shape is
+  recoverable, and it is sealed and normalized before publication.
 - A generic `mihomo` user or group and every retired unit definition are hard
   pre-publication conflicts regardless of whether their bytes carry a 5gpn
   marker. Detection is read-only; the installer does not stop or adopt them.
+- Installed `configure` is a narrow current-schema transaction rather than a
+  reinstall. It requires the current owned environment, operator YAML, DNS
+  document, installed Core, identity, unit, and filesystem boundaries. It does
+  not install dependencies, download or publish release artifacts, claim
+  roots, create accounts, replace units or scripts, publish Console assets, or
+  seed missing state. The complete candidate is confirmed before a Cloudflare
+  token is held only in memory; it is written only after the node and
+  certificate locks plus final certificate/configuration/DNS revalidation. A
+  no-op performs no managed write, creates no node lock, and does not restart.
+  External lineages and valid preserved-role recovery do not collect a project
+  credential. The operator YAML revision remains pinned across the TUI and a
+  concurrent edit is rejected rather than adopted. Changing transactions hold
+  the node-writer file lock, validate with Core again before activation, and
+  compare the revision after readiness; ordinary restarts use `try-restart` so
+  a concurrent operator stop is preserved.
+- Configure side effects are field-specific. Email changes only `dns.env`;
+  production public-IP changes add the public DNS gate, while debug public or
+  gateway IP changes also reissue the IP-bound debug certificate. Gateway
+  changes use a revision-checked `dns.json.gateway` update and refresh profiles.
+  Because the controller API rejects that installation-owned field, every
+  certificate-role publication, gateway CAS, and other runtime-affecting
+  configure write quiesces an active Core with one fail-on-conflict systemd
+  `TryRestartUnit` job. PID 1
+  performs its stop half and the unit's first root-only `ExecStartPre` blocks
+  the start half on a private acknowledged nonce; configure never composes a
+  separate stop with a later start. The nonce record binds the exact job ID and
+  object path, helper control PID, and invocation. A clean TERM requires proof
+  that PID 1 now owns this unit's stop job; a bare control-process signal fails
+  closed. An operator stop replaces that job in PID 1, terminates either
+  pre-start helper cleanly, and remains stopped because
+  configure never creates a replacement job. Stale recovery releases only the
+  same still-blocked job while its pre-publication restoration entitlement
+  remains valid; a missing, replaced, unbound, or post-publication job is kept
+  inactive. Cleanup atomically closes the nonce record before deleting ACK/job
+  state, so a concurrent start cannot create a record-less acknowledgement.
+  The account is proven process-free, and current state plus the
+  exact job are revalidated before CAS. Profiles are prepared before the CAS
+  and published only after `dns.json` and `dns.env`; HTTP-01 uses the same
+  outer job and never starts or stops Core inside Certbot. Configure may
+  release only its original blocked job before any visible certificate or
+  coordinate publication. After a visible role/file/profile commit, failure
+  leaves Core stopped and never rolls back the publication;
+  listener changes require matching operator YAML; base or certificate-mode
+  changes traverse the certificate and profile boundary. Restart is permitted
+  only when mihomo was stably active and remains active at the final check. A
+  deliberate stop stays stopped, while failed or transitioning service state
+  rejects the transaction.
 - An incompatible `fivegpn` identity is repairable only as current installation
   recovery. A safe current ownership marker or the marked current main-unit
   definition must prove provenance, each existing UID/GID must be a system ID
@@ -132,9 +201,61 @@ Update the status and the normative documentation when an implementation lands.
   retain its recorded GID. The journal alone authorizes nothing. A same-named
   identity without current provenance is foreign and is rejected unchanged.
 - The only current public certificate roles are `dot` and `console`. A `web`
-  role is an unsupported legacy footprint. Both public iOS profiles are
-  generated transactionally directly in `/opt/5gpn/ui`; `/opt/5gpn/www` is
-  unsupported.
+  role is an unsupported legacy footprint. The public Console and both signed
+  iOS profiles are one atomic generation selected by the relative
+  `/opt/5gpn/ui/current` symlink. Each root-owned generation carries
+  `.zash_version`, disjoint `.zash_primary_files` and `.zash_compat_files`
+  digest manifests, the complete Console tree, and both profiles. Install,
+  renewal, and manual profile refresh share the
+  certificate lock and switch current only after the complete candidate and
+  its signing inputs verify. A new generation retains only the immediately
+  previous release's missing primary hashed assets so an old index cannot cross
+  the switch into a 404; compat files do not become the next generation's
+  primary set. Top-level files always come from the new dist. The fixed
+  favicon/PWA/manifest/worker URLs exposed by the preceding generation must
+  remain present and generation-local, but may contain the new bytes. This is a
+  one-release stable-URL assumption, not arbitrary top-level compatibility. A
+  flat `/opt/5gpn/ui` tree and `/opt/5gpn/www` are unsupported.
+- Public certificate role validation, staging, pointer commit, and protected
+  cleanup have one installed implementation. `cert-role-ctl.sh` consumes the
+  shared `publication-fs.sh` mount and durability primitives; the installer,
+  deploy hook, renewal checker, and profile signer do not carry independent
+  role-tree writers. Dot and console use one immutable source snapshot and
+  sequential durable relative-pointer commits. Once either current pointer is
+  visible, failure is reported as committed-partial or committed-undurable and
+  is never rolled back; a later locked run repairs forward. Cleanup starts only
+  after both pointers are durable and uses a current-protected tombstone so an
+  interrupted exact-file deletion remains resumable.
+- Public-certificate selection and Certbot ownership are independent.
+  `.provenance` records only the source currently copied into the role trees;
+  `.certbot-ownership` alone retains exact-base renewal and deletion authority.
+  Debug selection writes `debug:none` but preserves that ownership proof. A
+  return to the same production base reuses an owned lineage without Certbot
+  only when the current selection is the same owned mode or same-base debug and
+  the live certificate, key, production server, authenticator, credential, and
+  live/archive paths all match the requested mode. Source, base, mode, or
+  ownership mismatches cannot authorize reuse.
+- An external canonical lineage is always read-only and non-owning. Strict
+  current certificate and renewal fingerprints may select it, including after
+  debug when no ownership record names that exact base; retained ownership of a
+  different base is unrelated. 5gpn neither writes ownership nor enables its
+  scoped renewal timer. The old currently selected base or production mode is
+  not an authorization requirement for a new strictly validated external
+  source. External and debug selections do not pause or take over the distro
+  Certbot timer. `missing` remains a preserved-role fallback with
+  renewal disabled rather than a lineage-history record; repair is classified
+  again from the live strict fingerprint and exact-base ownership proof.
+- Explicit Certbot lineage decommission validates the complete owned lineage,
+  then withdraws current owned-renewal provenance and removes and syncs the
+  exact-base ownership entry before invoking Certbot deletion. A crash or
+  deletion failure leaves the lineage read-only/external and does not roll
+  either withdrawal back, so a future same-named lineage cannot inherit stale
+  renewal or deletion rights. An absent lineage is marked missing and its stale
+  entry is cleaned without invoking Certbot. Service status requires configured
+  base/mode, current provenance, and exact-base ownership to agree before an
+  active project timer is shown as healthy; every mismatch is a repair state.
+  Decommission retains the installed certificate publication helpers until all
+  helper-validated certificate and CA deletion boundaries have completed.
 - Only explicit current gateway runtime helper scripts are copied into
   `/opt/5gpn/scripts`. Development helpers remain in the source repository and
   are excluded from the release bundle and installed tree.

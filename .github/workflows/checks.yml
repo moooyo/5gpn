@@ -20,7 +20,7 @@ jobs:
       - name: bash -n syntax gate
         run: |
           set -euo pipefail
-          for s in install.sh quick-install.sh scripts/*.sh; do
+          for s in install.sh quick-install.sh release/*.sh scripts/*.sh; do
             echo "--- bash -n $s ---"; bash -n "$s"
           done
       - name: Shell policy tests
@@ -29,6 +29,8 @@ jobs:
           for t in tests/test_*.sh; do
             echo "--- $t ---"; bash "$t"
           done
+      - name: Root certificate-role recovery gate
+        run: sudo bash tests/test_cert_role_ctl.sh
 
   # There is no Go or web gate here any more. The daemon and the control-console
   # SPA this repository used to build were deleted with the three-process layout;
@@ -45,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-      # install.sh pins each third-party artifact as a PAIR: a version and the
+      # release/pins.env pins each third-party artifact as a PAIR: a version and the
       # SHA-256 of the asset that version publishes. Nothing bound the two
       # together, so a version bump that left its digest behind shipped an
       # installer that downloaded the right artifact, hashed it correctly, and
@@ -53,8 +55,8 @@ jobs:
       # that is the only place the digest was ever checked.
       #
       # This is a separate job rather than a step in `shell`, because the local
-      # suite is deliberately offline and deterministic. It reads the pins out of
-      # install.sh instead of restating them, and it fails rather than skips when
+      # suite is deliberately offline and deterministic. It strictly parses the
+      # bundled manifest instead of restating pins, and fails rather than skips when
       # an artifact cannot be fetched.
       - name: Verify pinned artifacts against their published releases
         run: bash tests/verify-artifact-pins.sh
@@ -66,9 +68,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Parse centralized release pins
+        id: release_pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          source release/pins.sh
+          load_release_pins release/pins.env
+          printf 'mihomo_repo=%s\n' "$MIHOMO_REPO" >> "$GITHUB_OUTPUT"
+          printf 'mihomo_version=%s\n' "$MIHOMO_VERSION" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          repository: moooyo/mihomo
-          ref: v1.19.28-monolith.31
+          repository: ${{ steps.release_pins.outputs.mihomo_repo }}
+          ref: ${{ steps.release_pins.outputs.mihomo_version }}
           path: 5gpn-core
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
@@ -90,28 +102,26 @@ jobs:
 
   mihomo-config:
     runs-on: ubuntu-latest
-    env:
-      # The core the installer actually ships. Validating against a different
-      # one checks a configuration nobody will run. Keep this pin and its digest
-      # in lockstep with MIHOMO_VERSION/MIHOMO_SHA256 in install.sh.
-      MIHOMO_REPO: moooyo/mihomo
-      MIHOMO_VERSION: v1.19.28-monolith.31
-      MIHOMO_SHA256: 48cdc59cbc143fd826dbeb03f3402cba10650a7e9fb4652282fd2128dcfd168b
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Download pinned mihomo
         run: |
           set -euo pipefail
-          url="https://github.com/${MIHOMO_REPO}/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz"
-          curl -fsSL "$url" -o /tmp/mihomo.gz
-          echo "${MIHOMO_SHA256}  /tmp/mihomo.gz" | sha256sum -c -
-          gunzip /tmp/mihomo.gz
+          source release/pins.sh
+          load_release_pins release/pins.env
+          asset="$(release_asset_name mihomo)"
+          url="$(release_download_url mihomo)"
+          digest="$(release_artifact_sha256 mihomo)"
+          curl -fsSL "$url" -o "/tmp/$asset"
+          echo "${digest}  /tmp/$asset" | sha256sum -c -
+          gzip -dc "/tmp/$asset" > /tmp/mihomo
           chmod 0755 /tmp/mihomo
       - name: Validate current state with the shipped core
         run: |
           set -euo pipefail
           state="$(mktemp -d)"
-          trap 'rm -rf "$state"' EXIT
+          cases="$(mktemp -d)"
+          trap 'rm -rf "$state" "$cases"' EXIT
           jq -n '{
             listen: {
               dot: ":853",
@@ -143,6 +153,33 @@ jobs:
                 and (.validated | sort) == ["bot.json", "dns.json", "intercept.json"]
                 and .missing == []
               '
+          /tmp/mihomo 5gpn-state validate --owner-uid "$(id -u)" "$cases/missing" \
+            | jq -e '
+                .status == "ok" and .validated == []
+                and (.missing | sort) == ["bot.json", "dns.json", "intercept.json"]
+              '
+          mkdir "$cases/malformed" "$cases/wrong-owner" "$cases/wrong-mode" \
+            "$cases/symlink" "$cases/hardlink"
+          printf '{\n' > "$cases/malformed/dns.json"
+          cp "$state/dns.json" "$cases/wrong-owner/dns.json"
+          cp "$state/dns.json" "$cases/wrong-mode/dns.json"
+          ln -s "$state/dns.json" "$cases/symlink/dns.json"
+          cp "$state/dns.json" "$cases/hardlink/dns.json"
+          ln "$cases/hardlink/dns.json" "$cases/hardlink/extra-link"
+          chmod 0600 "$cases/malformed/dns.json" "$cases/wrong-owner/dns.json" \
+            "$cases/hardlink/dns.json"
+          chmod 0644 "$cases/wrong-mode/dns.json"
+          sudo chown root:root "$cases/wrong-owner/dns.json"
+          for invalid in malformed wrong-mode symlink hardlink; do
+            if /tmp/mihomo 5gpn-state validate --owner-uid "$(id -u)" "$cases/$invalid" >/dev/null 2>&1; then
+              echo "state validator accepted invalid $invalid fixture" >&2
+              exit 1
+            fi
+          done
+          if sudo /tmp/mihomo 5gpn-state validate --owner-uid "$(id -u)" "$cases/wrong-owner" >/dev/null 2>&1; then
+            echo "state validator accepted a wrong-owner fixture" >&2
+            exit 1
+          fi
       - name: Render and validate the seed the installer publishes
         run: |
           set -euo pipefail
@@ -157,7 +194,6 @@ jobs:
               next
             }
             {
-              gsub(/__GATEWAY_IP__/, "10.0.0.1")
               gsub(/__CONSOLE_DOMAIN__/, "console.example.test")
               gsub(/__CONTROLLER_SECRET__/, "ci-controller-secret")
               print
@@ -178,7 +214,7 @@ jobs:
           # the seed has to say so: without external-ui the controller serves no
           # bundle, and with a path the unit does not list the service cannot
           # start at all.
-          grep -Fq 'external-ui: /opt/5gpn/ui' "$runtime/config.yaml"
+          grep -Fq 'external-ui: /opt/5gpn/ui/current' "$runtime/config.yaml"
           # The panel is served on the console name. The controller has to
           # listen on :443 for the console's DIRECT dial to land on it, and the
           # allow rule has to keep the IN-TYPE,INNER exclusion -- with the
@@ -197,6 +233,25 @@ jobs:
           # It is independent of the MITM master switch and has no product
           # management off switch.
           grep -Fq 'AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' "$runtime/config.yaml"
+          if /tmp/mihomo 5gpn-config inspect-controller --config "$runtime/config.yaml" >/dev/null 2>&1; then
+            echo "controller inspector unexpectedly accepted a non-root caller" >&2
+            exit 1
+          fi
+          sudo chown root:root "$runtime/config.yaml"
+          sudo chmod 0640 "$runtime/config.yaml"
+          expected_revision="$(sha256sum "$runtime/config.yaml" | awk '{print $1}')"
+          sudo /tmp/mihomo 5gpn-config inspect-controller --config "$runtime/config.yaml" \
+            | jq -cse --arg revision "$expected_revision" '
+                select(length == 1) | .[0] | select(
+                type == "object" and .version == 2
+                and ((keys | sort) == ["certificate","external_controller_tls","external_ui","private_key","raw_revision","secret","version"])
+                and .raw_revision == $revision
+                and .secret == "ci-controller-secret"
+                and .external_controller_tls == "127.0.0.1:443"
+                and .external_ui == "/opt/5gpn/ui/current"
+                and .certificate == "/etc/5gpn/cert/console/current/fullchain.pem"
+                and .private_key == "/etc/5gpn/cert/console/current/privkey.pem"
+                )'
       # The released monolith intentionally refuses to start outside the
       # systemd 257 private delegated cgroup boundary. A GitHub-hosted runner
       # cannot satisfy that production startup contract. The regression script

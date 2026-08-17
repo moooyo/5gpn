@@ -7,7 +7,7 @@ export INSTALL_SH_LIB_ONLY=1
 # shellcheck source=../install.sh
 source "$ROOT/install.sh"
 
-TMP="$(mktemp -d /tmp/5gpn-identity-test.XXXXXX)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/5gpn-identity-test.XXXXXX")"
 trap 'rm -rf -- "$TMP"' EXIT
 
 fail() { echo "FAIL: $*"; exit 1; }
@@ -330,6 +330,48 @@ pass "supplementary group membership blocks current identity repair"
     [[ "$(file_mode "$state/certificate-request")" == 644 ]]
 ) || fail "current state permission recovery did not restore exact modes"
 pass "current state permission recovery clears special bits and restores exact modes"
+
+# A crash between install -d under the setgid mihomo home and the explicit
+# chmod may leave the state root at 2711. That exact service-owned shape is a
+# recoverable current-state residue; broader special or writable modes remain
+# unsafe.
+(
+    state="$TMP/state-root-inherited-setgid"
+    mkdir -p "$state"
+    TEST_STATE_UID=996
+    TEST_STATE_GID=996
+    TEST_STATE_MODE=2711
+    file_uid() { printf '%s\n' "$TEST_STATE_UID"; }
+    file_gid() { printf '%s\n' "$TEST_STATE_GID"; }
+    file_mode() { printf '%s\n' "$TEST_STATE_MODE"; }
+    uid_gid_match_named_account() { [[ "$1:$2:$3:$4" == 996:996:fivegpn:fivegpn ]]; }
+    FIVEGPN_SERVICE_USER=fivegpn
+    FIVEGPN_SERVICE_GROUP=fivegpn
+    REPLACED_FIVEGPN_UID=""
+    state_directory_metadata_is_reconcilable "$state" || exit 1
+    TEST_STATE_MODE=2700
+    ! state_directory_metadata_is_reconcilable "$state" || exit 1
+    TEST_STATE_MODE=3711
+    ! state_directory_metadata_is_reconcilable "$state" || exit 1
+    TEST_STATE_UID=0
+    TEST_STATE_GID=0
+    TEST_STATE_MODE=2711
+    ! state_directory_metadata_is_reconcilable "$state" || exit 1
+    TEST_STATE_MODE=700
+    state_directory_metadata_is_reconcilable "$state" || exit 1
+    TEST_STATE_UID=995
+    TEST_STATE_GID=994
+    TEST_STATE_MODE=2711
+    REPLACED_FIVEGPN_UID=995
+    gid_matches_replaced_fivegpn_identity() { [[ "$1" == 994 ]]; }
+    state_directory_metadata_is_reconcilable "$state"
+) || fail "state-root inherited setgid recovery boundary is incorrect"
+pass "only exact service-owned inherited setgid state roots are recoverable"
+
+seed_fn="$(sed -n '/^seed_dns_document()/,/^}/p' "$ROOT/install.sh")"
+grep -Fq 'chmod g-s "$state_dir" && chmod 00711 "$state_dir"' <<<"$seed_fn" \
+    || fail "fresh DNS seeding does not clear the state root inherited setgid bit"
+pass "fresh DNS seeding publishes the exact 0711 state root"
 
 # Once current provenance, system-range IDs, and exclusivity have been proven
 # before publication, an incompatible current identity can be recreated with

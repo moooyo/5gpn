@@ -7,8 +7,8 @@ superseded where it conflicts with the current monolith or HTTP/3 boundary.
 
 | Repository | Maintenance branch | Upstream baseline | Release coordinate |
 | --- | --- | --- | --- |
-| `moooyo/mihomo` | `feat/5gpn-monolith` | `MetaCubeX/mihomo:Alpha` at `99ce79c9` | `v1.19.28-monolith.31` |
-| `moooyo/zashboard` | `feat/5gpn-console` | `Zephyruso/zashboard:main` at `b40a283` | `v3.16.1-monolith.31` |
+| `moooyo/mihomo` | `feat/5gpn-monolith` | `MetaCubeX/mihomo:Alpha` at `99ce79c9` | authoritative tag/asset/digest: `release/pins.env` |
+| `moooyo/zashboard` | `feat/5gpn-console` | `Zephyruso/zashboard:main` at `b40a283` | authoritative tag/asset/digest: `release/pins.env` |
 | `moooyo/5gpn-extensions` | `main` | — | `e5c550c46e819a06e078751ee9a245dda07bcbe7` |
 | `moooyo/5gpn` | `main` | — | `0.0.80` latest published; current candidate unreleased |
 
@@ -25,8 +25,15 @@ The installed runtime is `5gpn-mihomo.service`, executes
 capability keys are `5gpn-*`. Unprefixed project-specific names are unsupported
 legacy footprints, not migration inputs or current aliases. The installer
 detects them before publication and refuses to modify or adopt them.
-The unreleased root candidate pairs Core `.30`, Console `.31`, and the listed
-Extensions revision; the published `0.0.80` bundle predates that pair.
+The unreleased root candidate pairs Core `.32`, Console `.32`, and the listed
+Extensions revision; the published `0.0.80` bundle predates that pair. Its
+installer persists exactly six `dns.env` keys, treats the gateway and fixed
+listener/controller/UI/certificate coordinates as installation-owned, and
+validates the root-only Core inspector v2's exact seven-field projection before
+publication. The controller secret exists only in operator-owned `config.yaml`;
+host curl calls pass it through a fresh inherited descriptor. Gateway anti-loop
+protection is dynamic Core state and no longer appears as an operator-YAML
+`IP-CIDR` rule.
 
 The runtime and Console gates live in their own repositories. This repository's
 gate covers every installer suite, exact release-bundle assembly, published
@@ -748,30 +755,18 @@ npm run build           # runs the four checks first, then vite
 The four checks are `scripts/check-{capability-probe,i18n-compiles,i18n-keys-exist,built-output}.mjs`.
 `check-built-output.mjs` runs AFTER vite because it inspects `dist/`.
 
-**Release loop, all three repositories.** Each artifact is pinned by version AND
-digest, and the two must move together or the installer downloads the right file
-and refuses it.
+**Release loop, all three repositories.** Each artifact is pinned by version,
+asset template, and digest in the single data manifest `release/pins.env`.
+`release/pins.sh` is the strict parser and GitHub release URL builder used by the
+installer, CI, and the network verifier. Do not copy a component coordinate into
+`install.sh` or a workflow.
 
 ```
-# console
-cd zashboard-5gpn-console && git push fork feat/5gpn-console
-git tag v3.16.0-monolith.N && git push fork v3.16.0-monolith.N   # triggers 5gpn-release.yml
-curl -fsSL -o z.zip https://github.com/moooyo/zashboard/releases/download/<tag>/dist.zip
-sha256sum z.zip                                                   # -> ZASH_SHA256
-
-# core: built locally, there is no CI release for it
-cd mihomo-5gpn-monolith
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 go build -tags with_gvisor -trimpath   -ldflags '-X "github.com/metacubex/mihomo/constant.Version=<tag>"             -X "github.com/metacubex/mihomo/constant.BuildTime=<date -u>" -w -s -buildid='   -o mihomo-linux-amd64-compatible .
-gzip -k …  &&  gh release create <tag> --repo moooyo/mihomo --prerelease <asset>.gz
-
-# installer: bump BOTH install.sh and .github/workflows/checks.yml for the core
+# publish Core and Console from their maintained release workflows, then update
+# only the matching repository/version/asset-template/digest rows in pins.env
 bash tests/verify-artifact-pins.sh
-git push --atomic origin HEAD:feat/installer-tui HEAD:beta HEAD:main
-git tag X.Y.Z && git push origin X.Y.Z
+for t in tests/test_*.sh; do bash "$t"; done
 ```
-
-`MIHOMO_VERSION`/`MIHOMO_SHA256` appear in **two** files — `install.sh` and
-`.github/workflows/checks.yml`. Bumping only one fails CI's seed gate.
 
 **Deploying to test-env.** Re-fetch `quick-install.sh` **by commit SHA**, not by
 branch: `raw.githubusercontent.com` caches a branch for minutes and you will
@@ -818,8 +813,10 @@ fetches a digest-checked bundle. There is no local-bundle install path.
 - **zashboard** has `5gpn-release.yml`, triggered by a `v*-monolith.*` tag.
 - **5gpn**: tag `X.Y.Z-beta.N` **reachable from `origin/beta`**, and N greater
   than every existing `X.Y.Z-beta.*`. `classify` enforces both.
-- Then bump `MIHOMO_VERSION`/`MIHOMO_SHA256` in **both** `install.sh` and
-  `.github/workflows/checks.yml`, and run `verify-artifact-pins.sh`.
+- Then update the exact Core/Console/Gum coordinates only in
+  `release/pins.env`; run `tests/verify-artifact-pins.sh` and the shell suite.
+  `THIRD_PARTY_NOTICES.md` is a human-readable projection whose binding test
+  must be updated in the same commit, not a second executable authority.
 
 ### Driving a fresh install
 

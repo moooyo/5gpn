@@ -10,18 +10,21 @@ nocheck() { if grep -qE "$2" "$root/$1"; then echo "FAIL: $3 ($1 =~ $2)"; FAIL=1
 check install.sh 'install_mihomo\(\)' 'install_mihomo function exists'
 # The data plane no longer comes from upstream: the maintained fork contains the
 # monolith DNS, interception, and controller integration. What has to stay true
-# is that the source is pinned and auditable — a named repository, an exact
-# version, and a digest — rather than assembled from anything an operator or an
-# environment can influence.
-check install.sh '^MIHOMO_REPO="[A-Za-z0-9._-]+/[A-Za-z0-9._-]+"$' 'mihomo source repository is a pinned literal'
-check install.sh 'github.com/\$\{MIHOMO_REPO\}/releases/download' 'downloads mihomo from the pinned repository'
-check install.sh '^MIHOMO_SHA256="[0-9a-f]{64}"$' 'mihomo artifact is pinned by digest'
-check install.sh 'mihomo-linux-amd64-compatible' 'uses amd64-compatible asset'
-check install.sh 'MIHOMO_VERSION' 'mihomo version pin knob'
+# is that the source is pinned and auditable in the centralized manifest — a
+# named repository, an exact version, an asset template, and a digest — rather
+# than assembled from anything an operator or environment can influence.
+check release/pins.env '^MIHOMO_REPO=moooyo/mihomo$' 'mihomo source repository is a pinned literal'
+check release/pins.env '^MIHOMO_VERSION=v[0-9]+\.[0-9]+\.[0-9]+-monolith\.[0-9]+$' 'mihomo version is an exact monolith tag'
+check release/pins.env '^MIHOMO_ASSET_TEMPLATE=[A-Za-z0-9._+-]*\{version\}[A-Za-z0-9._+{}-]*\.gz$' 'mihomo asset template is pinned'
+check release/pins.env '^MIHOMO_SHA256=[0-9a-f]{64}$' 'mihomo artifact is pinned by digest'
+check install.sh 'release_asset_name mihomo' 'installer resolves the centralized mihomo asset'
+check install.sh 'release_download_url mihomo' 'installer uses the closed mihomo URL builder'
 nocheck install.sh 'install_xray\(\)' 'install_xray removed'
 
 # Task 2: mihomo unit
 check etc/systemd/5gpn-mihomo.service 'ExecStart=/opt/5gpn/bin/5gpn-mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' 'project-private 5gpn-mihomo ExecStart'
+check etc/systemd/5gpn-mihomo.service 'ExecStartPre=\+/opt/5gpn/scripts/configure-runtime-gate.sh wait' 'PID1-owned configure restart gate'
+check etc/systemd/5gpn-mihomo.service 'ExecStartPre=/opt/5gpn/scripts/configure-runtime-gate.sh validate-ui' 'current UI generation startup gate'
 check etc/systemd/5gpn-mihomo.service 'RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX' 'mihomo AF set incl AF_NETLINK (required for QUIC/UDP DIRECT dial)'
 check etc/systemd/5gpn-mihomo.service 'ReadWritePaths=/etc/5gpn/mihomo' 'mihomo writes provider caches'
 check etc/systemd/5gpn-mihomo.service 'Environment=SAFE_PATHS=/etc/5gpn/cert/console' 'mihomo SAFE_PATHS scoped to the controller cert role'
@@ -111,12 +114,13 @@ for rule in \
 done
 panel_deny_line="$(grep -nF '  - DOMAIN,__CONSOLE_DOMAIN__,REJECT' "$root/$T" | cut -d: -f1 || true)"
 anti_loop_line="$(grep -nF '  - IP-CIDR,__GATEWAY_IP__/32,REJECT,no-resolve' "$root/$T" | cut -d: -f1 || true)"
-if [ "$panel_order_ok" = 1 ] && [ -n "$panel_deny_line" ] && [ -n "$anti_loop_line" ] \
-    && [ "$panel_deny_line" -lt "$anti_loop_line" ]; then
-    echo "ok: panel rejects precede panel routes and anti-loop guards follow them"
+if [ "$panel_order_ok" = 1 ] && [ -n "$panel_deny_line" ] && [ -z "$anti_loop_line" ]; then
+    echo "ok: panel rejects precede panel routes and gateway anti-loop state stays out of operator YAML"
 else
-    echo "FAIL: unsafe panel/anti-loop rule ordering"; FAIL=1
+    echo "FAIL: unsafe panel ordering or static gateway anti-loop rule remains"; FAIL=1
 fi
+nocheck "$T" '__GATEWAY_IP__'                             'gateway is a dynamic core boundary, not a YAML placeholder'
+nocheck install.sh 'SEED_GATEWAY_IP|__GATEWAY_IP__'       'installer does not render gateway state into operator YAML'
 nocheck "$T" '__PROFILE_DOMAIN__'                         'retired profile SNI removed'
 # UP-4 (2026-07-15 policy/mihomo decoupling): the daemon no longer owns ANY
 # region of the mihomo config -- the four >>>5gpn:*/<<<5gpn:* marker comment
@@ -201,32 +205,39 @@ nocheck install.sh 'xray\.service|/usr/local/bin/xray' 'no old Xray teardown rem
 
 # Task A4: zashboard dist acquisition (pinned dist.zip download + wiring)
 check install.sh '^install_ui\(\)' 'install_ui function exists'
-# The shape, not the number. What matters is that the pin is one column-zero,
-# double-quoted, uninterpolated literal naming a monolith tag -- not `latest`,
-# not a variable, not something a caller can set. Asserting the exact version
-# instead made every console release edit this file, which is churn that teaches
-# the next person to bump the string without reading what it is for.
-check install.sh '^ZASH_VERSION="v[0-9]+\.[0-9]+\.[0-9]+-monolith\.[0-9]+"' 'ZASH_VERSION is a fixed literal monolith pin'
-nocheck install.sh '^ZASH_VERSION=.*(\$|`|latest)' 'ZASH_VERSION is neither interpolated nor a moving tag'
-check install.sh 'ZASH_REPO="moooyo/zashboard"' 'zashboard comes from our fork'
-check install.sh '\$\{ZASH_REPO\}/releases/download' 'zashboard download URL is parameterised by ZASH_REPO'
+# The centralized data manifest, not install.sh or caller variables, owns the
+# exact Console repository, tag, asset, and digest.
+check release/pins.env '^ZASH_VERSION=v[0-9]+\.[0-9]+\.[0-9]+-monolith\.[0-9]+$' 'ZASH_VERSION is a fixed literal monolith pin'
+nocheck release/pins.env '^ZASH_VERSION=.*(\$|`|latest)' 'ZASH_VERSION is neither interpolated nor a moving tag'
+check release/pins.env '^ZASH_REPO=moooyo/zashboard$' 'zashboard comes from our fork'
+check release/pins.env '^ZASH_ASSET_TEMPLATE=[A-Za-z0-9][A-Za-z0-9._+-]*\.zip$' 'zashboard asset is pinned in the manifest'
+check install.sh 'release_download_url zashboard' 'zashboard uses the closed release URL builder'
 nocheck install.sh 'Zephyruso/zashboard/releases/download' 'no hardcoded upstream zashboard download remains'
-# The bundle must be on disk before install_units starts the service: the unit
-# names UI_DIR in ReadOnlyPaths with no `-` prefix, so an unpublished directory
-# is not a missing panel, it is a unit that cannot enter its namespace.
-if grep -A1 -E '^\s*install_ui(\s*\|\| return 1)?\s*$' "$root/install.sh" | grep -q 'install_units'; then
-    echo "ok: full_install publishes the UI immediately before install_units"
+# The helper is installed with the unit, while the complete UI generation is
+# switched only after certificate roles and the interception CA are ready and
+# before runtime startup. ExecStartPre validates current before listeners open.
+full_install_body="$(sed -n '/^full_install()/,/^}/p' "$root/install.sh")"
+files_line="$(grep -n '^[[:space:]]*install_files$' <<<"$full_install_body" | cut -d: -f1)"
+units_line="$(grep -n '^[[:space:]]*install_units$' <<<"$full_install_body" | cut -d: -f1)"
+ui_line="$(grep -n '^[[:space:]]*install_ui$' <<<"$full_install_body" | cut -d: -f1)"
+profile_line="$(grep -n '^[[:space:]]*setup_ios_profile$' <<<"$full_install_body" | cut -d: -f1)"
+start_line="$(grep -n '^[[:space:]]*start_services_with_cert_lock_handoff$' <<<"$full_install_body" | cut -d: -f1)"
+if [[ -n "$files_line$units_line$ui_line$profile_line$start_line" \
+   && "$files_line" -lt "$units_line" && "$units_line" -lt "$ui_line" \
+   && "$ui_line" -lt "$profile_line" && "$profile_line" -lt "$start_line" ]]; then
+    echo "ok: helper/unit installation precedes one complete pre-start UI switch"
 else
-    echo "FAIL: full_install publishes the UI immediately before install_units"; FAIL=1
+    echo "FAIL: full_install UI generation ordering is unsafe"; FAIL=1
 fi
 # UI cleanup is marker-gated; raw rm of the published path is banned.
 check install.sh 'claim_ui_dir\(\)' 'UI ownership marker claim exists'
 check install.sh 'remove_ui_dir\(\)' 'UI marker-gated removal exists'
 nocheck install.sh 'rm -rf "\$UI_DIR"' 'no raw recursive deletion of UI_DIR'
-# The role->account mapping must exist exactly once. It used to be two case
-# statements -- one in the writer, one in the validator -- so moving DoT into the
-# mihomo process changed one of them and produced a tree the other rejected.
-check install.sh '^cert_role_group\(\)' 'certificate role ownership has one definition'
+# The role->account mapping must exist exactly once in the shared role core. It
+# used to be separate writer and validator case statements, so moving DoT into
+# the mihomo process produced a tree that the other side rejected.
+check scripts/cert-role-ctl.sh '^cert_role_ctl_group_name\(\)' 'certificate role ownership has one definition'
+nocheck install.sh '^cert_role_group\(\)' 'installer has no second certificate role mapping'
 nocheck install.sh 'dot\|web\) group=' 'no second role->account mapping remains'
 # Every `5gpn-mihomo -t` the installer runs must see the SAFE_PATHS the unit grants.
 # The seed names paths outside its own home -- the certificates and the UI

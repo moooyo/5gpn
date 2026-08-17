@@ -725,16 +725,17 @@ fetch_bundle() { # fetch_bundle <repo> <channel> <release-tag>; 10=asset absent,
 usage() {
     cat <<'EOF'
 5gpn quick installer
-Usage: quick-install.sh [--beta] [configure]
+Usage: quick-install.sh [--beta]
 
   (no channel option)  Download the latest official release.
   --beta              Download the latest beta only when its base version is
                       newer than latest official; never downgrade to an older line.
 
-  configure            Open the selected release's installation TUI.
-
 The selected release is pinned to one exact tag. A missing or older beta never
 falls back to the official channel and never downgrades it.
+
+Use `sudo 5gpn configure` for a current installed deployment. Configure never
+downloads or switches a release bundle.
 
 Host baseline: Linux amd64, kernel 5.7+, systemd 257+, and pure cgroup v2 with
 the memory and pids controllers. Unsupported hosts fail before source allocation.
@@ -755,15 +756,11 @@ main() {
         red "--beta must be specified exactly once as the first argument."
         return 2
     fi
-    if (( $# > 1 )); then
-        red "The quick installer accepts at most one command."
+    if (( $# > 0 )); then
+        red "The quick installer performs only a full install. Use 'sudo 5gpn configure' for an installed deployment."
         return 2
     fi
-    case "${1:-}" in
-        ''|configure) ;;
-        *) red "Unsupported quick-installer command: ${1}"; return 2 ;;
-    esac
-    install_args=("$@")
+    install_args=()
     [[ "$channel" == stable ]] || install_args=(--beta "${install_args[@]}")
 
     if [[ ${EUID:-$(id -u)} -ne 0 ]]; then

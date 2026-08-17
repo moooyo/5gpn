@@ -325,12 +325,80 @@ manage_fn="$(sed -n '/^install_manage_cli()/,/^}/p' "$INSTALL")"
 delegate_fn="$(sed -n '/^delegate_pinned_channel_switch()/,/^}/p' "$INSTALL")"
 if grep -Fq 'publish_executable "$quick_source" "${BASE_DIR}/quick-install.sh"' <<<"$manage_fn" \
    && grep -Fq 'file_uid "$quick"' <<<"$delegate_fn" \
+   && grep -Fq 'file_nlink "$quick"' <<<"$delegate_fn" \
    && grep -Fq 'file_mode "$quick"' <<<"$delegate_fn" \
    && grep -Fq 'owned_root_canonical "$BASE_DIR"' <<<"$delegate_fn" \
-   && grep -Fq 'exec bash "$quick" "${args[@]}"' <<<"$delegate_fn"; then
+   && grep -Fq 'exec 9<"$quick"' <<<"$delegate_fn" \
+   && grep -Fq '"$quick_digest" == "$RELEASE_QUICK_BINDING"' <<<"$delegate_fn" \
+   && grep -Fq 'quick_fd_state' <<<"$delegate_fn" \
+   && grep -Fq 'release_install_lock' <<<"$delegate_fn" \
+   && grep -Fq 'exec bash /proc/self/fd/9 "${args[@]}"' <<<"$delegate_fn" \
+   && ! grep -Fq 'exec bash "$quick"' <<<"$delegate_fn"; then
     pass "installed channel handoff retains and verifies the quick installer"
 else
     fail "installed channel handoff is incomplete"
+fi
+
+# Anchor the verified quick-installer inode before releasing the install lock.
+# The replacement occurs inside the release callback, exactly between the fd
+# identity check and exec; the old bytes must still run.
+handoff_dir="$TMP/anchored-handoff"
+mkdir -p "$handoff_dir"
+handoff_result="$handoff_dir/result"
+cat > "$handoff_dir/quick-install.sh" <<EOF
+#!/usr/bin/env bash
+printf 'OLD\n' > "$handoff_result"
+EOF
+cat > "$handoff_dir/quick-install.sh.new" <<EOF
+#!/usr/bin/env bash
+printf 'NEW\n' > "$handoff_result"
+EOF
+chmod 0755 "$handoff_dir/quick-install.sh" "$handoff_dir/quick-install.sh.new"
+if (
+    SCRIPT_DIR="$handoff_dir"
+    BASE_DIR="$TMP/different-runtime"
+    RELEASE_TAG=1.0.0
+    RELEASE_QUICK_BINDING="$(sha256sum "$handoff_dir/quick-install.sh" | awk '{print $1}')"
+    RELEASE_CHANNEL_EXPLICIT=1
+    RELEASE_CHANNEL=beta
+    INSTALL_LOCK_HELD=1
+    file_uid() { printf '0\n'; }
+    release_install_lock() {
+        mv -f "$handoff_dir/quick-install.sh.new" "$handoff_dir/quick-install.sh"
+        INSTALL_LOCK_HELD=0
+    }
+    delegate_pinned_channel_switch
+); then
+    [[ "$(cat "$handoff_result" 2>/dev/null)" == OLD ]] \
+        || fail "channel handoff executed a replacement path instead of the anchored inode"
+else
+    fail "anchored channel handoff did not execute"
+fi
+pass "channel handoff executes the verified inode after an atomic path replacement"
+
+if (
+    SCRIPT_DIR="$handoff_dir"
+    BASE_DIR="$TMP/different-runtime"
+    cp "$handoff_dir/quick-install.sh" "$handoff_dir/quick-install.sh.safe"
+    SCRIPT_DIR="$handoff_dir"
+    mv -f "$handoff_dir/quick-install.sh.safe" "$handoff_dir/quick-install.sh"
+    chmod 0755 "$handoff_dir/quick-install.sh"
+    RELEASE_TAG=1.0.0
+    RELEASE_QUICK_BINDING="$(printf 'different generation' | sha256sum | awk '{print $1}')"
+    RELEASE_CHANNEL_EXPLICIT=1
+    RELEASE_CHANNEL=beta
+    INSTALL_LOCK_HELD=1
+    released=0
+    file_uid() { printf '0\n'; }
+    release_install_lock() { released=1; }
+    if delegate_pinned_channel_switch >/dev/null 2>&1; then
+        exit 1
+    fi
+    [[ "$released" == 0 && "$INSTALL_LOCK_HELD" == 1 ]]
+); then
+    pass "channel handoff rejects a safe but wrong-generation quick installer before unlock"
+else
+    fail "channel handoff accepted or unlocked for a wrong-generation quick installer"
 fi
 
 # Installed channel handoff must reject writable scripts and runtime roots.

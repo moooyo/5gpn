@@ -22,7 +22,15 @@ LE_RENEWAL_ROOT=/etc/letsencrypt/renewal
 LE_ARCHIVE_ROOT=/etc/letsencrypt/archive
 LE_PRODUCTION_SERVER=https://acme-v02.api.letsencrypt.org/directory
 CERT_ROOT=/etc/5gpn/cert
+CERTBOT_OWNERSHIP_FILE="$CERT_ROOT/.certbot-ownership"
 DEPLOY_HOOK=/etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh
+UI_GENERATION_HELPER=/opt/5gpn/scripts/ui-generation.sh
+UI_ROOT=/opt/5gpn/ui
+PROFILE_INPUTS_FILE=/opt/5gpn/ui/current/.5gpn-profile-inputs
+INTERCEPT_CA=/etc/5gpn/intercept-ca/root.crt
+INTERCEPT_CA_ROOT=/etc/5gpn/intercept-ca
+INTERCEPT_CA_MARKER=.5gpn-intercept-ca-owned
+INTERCEPT_CA_MARKER_VALUE=5gpn-intercept-ca-v1
 ACME_DIR=/etc/5gpn/acme
 DNS_RESOLVER=1.1.1.1
 DNS_WAIT_TIMEOUT=600
@@ -38,6 +46,9 @@ CERT_ROOT_MARKER=.5gpn-cert-root-owned
 CERT_ROOT_MARKER_VALUE=5gpn-cert-root-v1
 CERT_ROLE_MARKER=.5gpn-cert-role-owned
 CERT_ROLE_VALUE_PREFIX=5gpn-cert-role-v1
+CERT_RENEW_SOURCE="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+CERT_RENEW_SOURCE_DIR="$(cd "$(dirname -- "$CERT_RENEW_SOURCE")" && pwd)"
+CERT_ROLE_HELPERS_LOADED=0
 
 cfg_get() {
     [[ -f "$DNS_ENV" && ! -L "$DNS_ENV" ]] || return 0
@@ -64,6 +75,16 @@ file_gid() { stat -c %g -- "$1" 2>/dev/null || stat -f %g "$1" 2>/dev/null || tr
 file_mode() { stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || true; }
 file_nlink() { stat -c %h -- "$1" 2>/dev/null || stat -f %l "$1" 2>/dev/null || true; }
 
+path_has_no_nested_mounts() {
+    local root="$1" target output
+    command -v findmnt >/dev/null 2>&1 || return 1
+    output="$(findmnt -R -r -n -o TARGET --target "$root" 2>/dev/null)" || return 1
+    while IFS= read -r target; do
+        [[ -n "$target" ]] || continue
+        case "$target" in "$root"/*) return 1 ;; esac
+    done <<< "$output"
+}
+
 # Resolve by name but compare numeric IDs so aliases or NSS display behavior
 # cannot make a certificate copy appear to belong to the required role group.
 # Kept as a helper so tests can provide deterministic synthetic group IDs.
@@ -75,11 +96,80 @@ named_group_gid() {
     printf '%s\n' "$gid"
 }
 
-certificate_role_group() {
-    case "$1" in
-        dot|console) printf '%s\n' "$FIVEGPN_CERT_GROUP" ;;
-        *)           return 1 ;;
-    esac
+cert_role_ctl_group_gid_override() {
+    named_group_gid "$1"
+}
+
+cert_renew_bound_helper_state() {
+    local path="$1" production="$2" parent metadata digest
+    [[ -f "$path" && ! -L "$path" && "$(file_nlink "$path")" == 1 ]] || return 1
+    if [[ "$path" == "$production" ]]; then
+        parent="$(dirname -- "$production")"
+        [[ -d "$parent" && ! -L "$parent" \
+           && "$(readlink -f -- "$parent")" == "$parent" \
+           && "$(stat -Lc '%u:%g:%a' -- "$parent")" == 0:0:755 \
+           && "$(stat -Lc '%u:%g:%a:%h' -- "$path")" == 0:0:755:1 ]] || return 1
+    fi
+    metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "$path")" || return 1
+    digest="$(sha256sum -- "$path" | awk '{print $1}')" || return 1
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s:%s\n' "$metadata" "$digest"
+}
+
+load_cert_role_helpers() {
+    local helper path production before after hash_fd source_fd hash_metadata source_metadata fd_digest
+    local -a helpers=(publication-fs.sh cert-role-ctl.sh)
+    if [[ "$CERT_ROLE_HELPERS_LOADED" != 1 ]]; then
+        for helper in "${helpers[@]}"; do
+            production="/opt/5gpn/scripts/$helper"
+            if [[ "${CERT_RENEW_LIB_ONLY:-0}" == 1 \
+               && -f "$CERT_RENEW_SOURCE_DIR/$helper" && ! -L "$CERT_RENEW_SOURCE_DIR/$helper" ]]; then
+                path="$CERT_RENEW_SOURCE_DIR/$helper"
+            else
+                path="$production"
+            fi
+            before="$(cert_renew_bound_helper_state "$path" "$production")" || return 1
+            exec {hash_fd}<"$path" || return 1
+            exec {source_fd}<"$path" || { exec {hash_fd}<&-; return 1; }
+            hash_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$hash_fd")" \
+                || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+            source_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$source_fd")" \
+                || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+            fd_digest="$(sha256sum -- "/proc/self/fd/$hash_fd" | awk '{print $1}')" \
+                || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+            exec {hash_fd}<&-
+            [[ "$hash_metadata" == "${before%:*}" \
+               && "$source_metadata" == "${before%:*}" \
+               && "$fd_digest" == "${before##*:}" ]] \
+                || { exec {source_fd}<&-; return 1; }
+            # shellcheck source=/dev/null
+            source "/proc/self/fd/$source_fd" || { exec {source_fd}<&-; return 1; }
+            exec {source_fd}<&-
+            after="$(cert_renew_bound_helper_state "$path" "$production")" || return 1
+            [[ "$after" == "$before" ]] || return 1
+        done
+        declare -F publication_fs_commit_relative_pointer >/dev/null 2>&1 \
+            && [[ "${CERT_ROLE_CTL_API_VERSION:-0}" == 1 ]] || return 1
+        CERT_ROLE_HELPERS_LOADED=1
+    fi
+    CERT_ROLE_CTL_ROOT="$CERT_ROOT"
+    CERT_ROLE_CTL_CONFIG_MARKER="$CONFIG_ROOT_MARKER"
+    CERT_ROLE_CTL_CONFIG_MARKER_VALUE="$CONFIG_ROOT_MARKER_VALUE"
+    CERT_ROLE_CTL_ROOT_MARKER="$CERT_ROOT_MARKER"
+    CERT_ROLE_CTL_ROOT_MARKER_VALUE="$CERT_ROOT_MARKER_VALUE"
+    CERT_ROLE_CTL_ROLE_MARKER="$CERT_ROLE_MARKER"
+    CERT_ROLE_CTL_ROLE_VALUE_PREFIX="$CERT_ROLE_VALUE_PREFIX"
+    CERT_ROLE_CTL_SERVICE_GROUP="$FIVEGPN_CERT_GROUP"
+    CERT_ROLE_CTL_SERVICE_GID=""
+    CERT_ROLE_CTL_ALLOW_CREATE=0
+    CERT_ROLE_CTL_ADDITIONAL_GIDS=""
+    if [[ "${CERT_RENEW_LIB_ONLY:-0}" == 1 && "$CERT_ROOT" != /etc/5gpn/cert ]]; then
+        CERT_ROLE_CTL_ALLOW_TEST_ROOT=1
+        CERT_ROLE_CTL_STAGE_PARENT="$(dirname -- "$CERT_ROOT")/.cert-role-staging"
+    else
+        CERT_ROLE_CTL_ALLOW_TEST_ROOT=0
+        CERT_ROLE_CTL_STAGE_PARENT=/run/5gpn
+    fi
 }
 
 normalized_mode() {
@@ -91,17 +181,47 @@ normalized_mode() {
     esac
 }
 
-cert_provenance_owned() {
+cert_provenance_selects_owned() {
     local base="$1" mode="$2" file="${CERT_ROOT}/.provenance"
     local -a lines=()
     [[ -f "$file" && ! -L "$file" \
        && "$(file_uid "$file")" == 0 \
-       && "$(file_mode "$file")" == 640 ]] || return 1
+       && "$(file_gid "$file")" == 0 \
+       && "$(file_mode "$file")" == 640 \
+       && "$(file_nlink "$file")" == 1 ]] || return 1
     mapfile -t lines < "$file" || return 1
     [[ "${#lines[@]}" == 3 \
        && "${lines[0]}" == "mode=${mode}" \
        && "${lines[1]}" == "base=${base}" \
        && "${lines[2]}" == 'certbot_lineage=owned' ]]
+}
+
+certbot_ownership_record_has() {
+    local wanted="$1" file="$CERTBOT_OWNERSHIP_FILE" line base previous="" index
+    local -a lines=()
+    [[ -f "$file" && ! -L "$file" \
+       && "$(file_uid "$file")" == 0 \
+       && "$(file_gid "$file")" == 0 \
+       && "$(file_mode "$file")" == 640 \
+       && "$(file_nlink "$file")" == 1 ]] || return 1
+    mapfile -t lines < "$file" || return 1
+    [[ "${#lines[@]}" -ge 2 && "${#lines[@]}" -le 17 \
+       && "${lines[0]}" == version=1 ]] || return 1
+    for ((index = 1; index < ${#lines[@]}; index++)); do
+        line="${lines[$index]}"
+        [[ "$line" == owned=* ]] || return 1
+        base="${line#owned=}"
+        valid_domain "$base" || return 1
+        [[ -z "$previous" || "$previous" < "$base" ]] || return 1
+        previous="$base"
+    done
+    grep -Fqx -- "owned=${wanted}" "$file"
+}
+
+cert_provenance_owned() {
+    local base="$1" mode="$2"
+    cert_provenance_selects_owned "$base" "$mode" \
+        && certbot_ownership_record_has "$base"
 }
 
 cf_credential_safe() {
@@ -163,128 +283,190 @@ http_cert_domains() {
 }
 
 deploy_hook_owned() {
-    [[ -f "$DEPLOY_HOOK" && ! -L "$DEPLOY_HOOK" && -x "$DEPLOY_HOOK" ]] || return 1
+    local parent expected_gid
+    [[ -f "$DEPLOY_HOOK" && ! -L "$DEPLOY_HOOK" && -x "$DEPLOY_HOOK" \
+       && "$(file_nlink "$DEPLOY_HOOK")" == 1 ]] || return 1
+    if [[ "$DEPLOY_HOOK" == /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh ]]; then
+        parent="$(dirname -- "$DEPLOY_HOOK")"
+        [[ -d "$parent" && ! -L "$parent" \
+           && "$(readlink -f -- "$parent")" == "$parent" \
+           && "$(stat -Lc '%u:%g' -- "$parent")" == 0:0 ]] || return 1
+        mode_has_no_group_or_other_write "$(file_mode "$parent")" || return 1
+        [[ "$(stat -Lc '%u:%g:%a:%h' -- "$DEPLOY_HOOK")" == 0:0:755:1 ]] || return 1
+    fi
     grep -Fqx '# 5gpn-renew-hook-id: deploy-v1' "$DEPLOY_HOOK" \
         && grep -qF "Let's Encrypt renewal deploy hook" "$DEPLOY_HOOK" \
         && grep -qF 'DNS_BASE_DOMAIN' "$DEPLOY_HOOK" 2>/dev/null \
         && grep -qF '/etc/5gpn/cert' "$DEPLOY_HOOK" 2>/dev/null
 }
 
-plain_file_metadata_safe() {
-    local path="$1" gid="$2" mode="$3"
-    [[ -f "$path" && ! -L "$path" \
-       && "$(file_uid "$path")" == "$EUID" \
-       && "$(file_gid "$path")" == "$gid" \
-       && "$(file_mode "$path")" == "$mode" \
-       && "$(file_nlink "$path")" == 1 ]]
+mode_has_no_group_or_other_write() {
+    local mode="$1" value
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+    value=$((8#$mode))
+    (( (value & 0022) == 0 ))
 }
 
-canonical_directory_metadata_safe() {
-    local path="$1" gid="$2" mode="$3"
-    [[ -d "$path" && ! -L "$path" \
-       && "$(readlink -f -- "$path" 2>/dev/null || true)" == "$path" \
-       && "$(file_uid "$path")" == "$EUID" \
-       && "$(file_gid "$path")" == "$gid" \
-       && "$(file_mode "$path")" == "$mode" ]]
+deploy_hook_state() {
+    local metadata digest
+    deploy_hook_owned || return 1
+    metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "$DEPLOY_HOOK")" || return 1
+    digest="$(sha256sum -- "$DEPLOY_HOOK" | awk '{print $1}')" || return 1
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s:%s\n' "$metadata" "$digest"
 }
 
-role_generation_tree_safe() {
-    local generation="$1" expected_gid="$2" entry name count=0
-    canonical_directory_metadata_safe "$generation" "$expected_gid" 750 || return 1
-    while IFS= read -r -d '' entry; do
-        name="$(basename -- "$entry")"
-        case "$name" in
-            fullchain.pem|privkey.pem)
-                plain_file_metadata_safe "$entry" "$expected_gid" 640 || return 1 ;;
-            *) return 1 ;;
-        esac
-        ((count += 1))
-    done < <(find "$generation" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-    [[ "$count" == 2 ]]
+run_bound_deploy_hook() { # <mode:validate|profile|deploy> <live>
+    local mode="$1" live="$2" before after hash_fd source_fd hash_metadata source_metadata fd_digest rc=0
+    before="$(deploy_hook_state)" || return 1
+    exec {hash_fd}<"$DEPLOY_HOOK" || return 1
+    exec {source_fd}<"$DEPLOY_HOOK" || { exec {hash_fd}<&-; return 1; }
+    hash_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$hash_fd")" \
+        || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+    source_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$source_fd")" \
+        || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+    fd_digest="$(sha256sum -- "/proc/self/fd/$hash_fd" | awk '{print $1}')" \
+        || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+    exec {hash_fd}<&-
+    [[ "$hash_metadata" == "${before%:*}" \
+       && "$source_metadata" == "${before%:*}" \
+       && "$fd_digest" == "${before##*:}" ]] \
+        || { exec {source_fd}<&-; return 1; }
+    case "$mode" in
+        validate)
+            FIVEGPN_CERT_LOCK_HELD=1 RENEW_HOOK_VALIDATE_ONLY=1 \
+                RENEWED_LINEAGE="$live" bash "/proc/self/fd/$source_fd" >/dev/null || rc=$? ;;
+        profile)
+            FIVEGPN_CERT_LOCK_HELD=1 FIVEGPN_PROFILE_ONLY_REFRESH=1 \
+                RENEWED_LINEAGE="$live" bash "/proc/self/fd/$source_fd" || rc=$? ;;
+        deploy)
+            FIVEGPN_CERT_LOCK_HELD=1 RENEWED_LINEAGE="$live" \
+                bash "/proc/self/fd/$source_fd" || rc=$? ;;
+        *) rc=2 ;;
+    esac
+    exec {source_fd}<&-
+    after="$(deploy_hook_state)" || return 1
+    [[ "$after" == "$before" && "$rc" == 0 ]]
 }
 
-certificate_role_tree_safe() {
-    local config_root root_gid role group expected_gid dest marker generations
-    local entry name current target
-    local -a roles=(dot console)
-    config_root="$(dirname -- "$CERT_ROOT")"
-    root_gid="$(named_group_gid root)" || return 1
-    canonical_directory_metadata_safe "$config_root" "$root_gid" 755 || return 1
-    plain_file_metadata_safe "$config_root/$CONFIG_ROOT_MARKER" "$root_gid" 644 \
-        && [[ "$(cat "$config_root/$CONFIG_ROOT_MARKER" 2>/dev/null || true)" == "$CONFIG_ROOT_MARKER_VALUE" ]] \
-        || return 1
-    canonical_directory_metadata_safe "$CERT_ROOT" "$root_gid" 751 || return 1
-    plain_file_metadata_safe "$CERT_ROOT/$CERT_ROOT_MARKER" "$root_gid" 644 \
-        && [[ "$(cat "$CERT_ROOT/$CERT_ROOT_MARKER" 2>/dev/null || true)" == "$CERT_ROOT_MARKER_VALUE" ]] \
-        || return 1
-    while IFS= read -r -d '' entry; do
-        name="$(basename -- "$entry")"
-        case "$name" in
-            "$CERT_ROOT_MARKER") ;;
-            .provenance) plain_file_metadata_safe "$entry" "$root_gid" 640 || return 1 ;;
-            .certbot-ownership) plain_file_metadata_safe "$entry" "$root_gid" 640 || return 1 ;;
-            dot|console) [[ -d "$entry" && ! -L "$entry" ]] || return 1 ;;
-            *) return 1 ;;
-        esac
-    done < <(find "$CERT_ROOT" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-    for role in "${roles[@]}"; do
-        group="$(certificate_role_group "$role")" || return 1
-        expected_gid="$(named_group_gid "$group")" || return 1
-        dest="$CERT_ROOT/$role"
-        canonical_directory_metadata_safe "$dest" "$expected_gid" 750 || return 1
-        marker="$dest/$CERT_ROLE_MARKER"
-        plain_file_metadata_safe "$marker" "$root_gid" 644 \
-            && [[ "$(cat "$marker" 2>/dev/null || true)" == "${CERT_ROLE_VALUE_PREFIX}:${role}" ]] \
-            || return 1
-        generations="$dest/generations"
-        canonical_directory_metadata_safe "$generations" "$expected_gid" 750 || return 1
-        current="$dest/current"
-        while IFS= read -r -d '' entry; do
-            name="$(basename -- "$entry")"
-            case "$name" in
-                "$CERT_ROLE_MARKER"|generations) ;;
-                current)
-                    [[ -L "$entry" \
-                       && "$(file_uid "$entry")" == "$EUID" \
-                       && "$(file_gid "$entry")" == "$root_gid" \
-                       && "$(file_nlink "$entry")" == 1 ]] || return 1 ;;
-                *) return 1 ;;
-            esac
-        done < <(find "$dest" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-        while IFS= read -r -d '' entry; do
-            name="$(basename -- "$entry")"
-            [[ "$name" =~ ^generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] || return 1
-            role_generation_tree_safe "$entry" "$expected_gid" || return 1
-        done < <(find "$generations" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-        [[ -L "$current" ]] || return 1
-        target="$(readlink -- "$current")" || return 1
-        [[ "$target" =~ ^generations/generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] \
-            || return 1
-        role_generation_tree_safe "$dest/$target" "$expected_gid" || return 1
-    done
+certificate_role_current_safe() {
+    load_cert_role_helpers || return 1
+    cert_role_ctl_validate_current
 }
 
 role_copies_match_live() {
-    local live="$1" role cert key current group expected_gid
-    certificate_role_tree_safe || return 1
+    local live="$1" role cert key target_before target_after
+    certificate_role_current_safe || return 1
     for role in dot console; do
-        group="$(certificate_role_group "$role")" || return 1
-        expected_gid="$(named_group_gid "$group")" || return 1
-        current="${CERT_ROOT}/${role}/current"
-        [[ -L "$current" && "$(readlink -- "$current")" =~ ^generations/[A-Za-z0-9._-]+$ ]] \
-            || return 1
-        cert="${CERT_ROOT}/${role}/current/fullchain.pem"
-        key="${CERT_ROOT}/${role}/current/privkey.pem"
-        [[ -f "$cert" && ! -L "$cert" && -f "$key" && ! -L "$key" \
-           && "$(file_uid "$cert")" == "$EUID" \
-           && "$(file_uid "$key")" == "$EUID" \
-           && "$(file_gid "$cert")" == "$expected_gid" \
-           && "$(file_gid "$key")" == "$expected_gid" \
-           && "$(file_mode "$cert")" == 640 \
-           && "$(file_mode "$key")" == 640 ]] || return 1
+        target_before="$(cert_role_ctl_current_target "$role" 0)" || return 1
+        cert="${CERT_ROOT}/${role}/${target_before}/fullchain.pem"
+        key="${CERT_ROOT}/${role}/${target_before}/privkey.pem"
         cmp -s "${live}/fullchain.pem" "$cert" || return 1
         cmp -s "${live}/privkey.pem" "$key" || return 1
+        target_after="$(cert_role_ctl_current_target "$role" 0)" || return 1
+        [[ "$target_after" == "$target_before" ]] || return 1
     done
+}
+
+intercept_ca_boundary_is_safe() {
+    local marker="$INTERCEPT_CA_ROOT/$INTERCEPT_CA_MARKER"
+    local not_before not_before_epoch now_epoch
+    path_has_no_nested_mounts "$INTERCEPT_CA_ROOT" || return 1
+    [[ -d "$INTERCEPT_CA_ROOT" && ! -L "$INTERCEPT_CA_ROOT" \
+       && "$(readlink -f -- "$INTERCEPT_CA_ROOT")" == "$INTERCEPT_CA_ROOT" \
+       && "$(file_uid "$INTERCEPT_CA_ROOT")" == 0 \
+       && "$(file_gid "$INTERCEPT_CA_ROOT")" == 0 \
+       && ( "$(file_mode "$INTERCEPT_CA_ROOT")" == 700 \
+            || "$(file_mode "$INTERCEPT_CA_ROOT")" == 755 ) \
+       && -f "$marker" && ! -L "$marker" \
+       && "$(file_uid "$marker")" == 0 && "$(file_gid "$marker")" == 0 \
+       && "$(file_mode "$marker")" == 644 && "$(file_nlink "$marker")" == 1 \
+       && "$(cat "$marker")" == "$INTERCEPT_CA_MARKER_VALUE" \
+       && -f "$INTERCEPT_CA" && ! -L "$INTERCEPT_CA" \
+       && "$(file_uid "$INTERCEPT_CA")" == 0 && "$(file_gid "$INTERCEPT_CA")" == 0 \
+       && "$(file_mode "$INTERCEPT_CA")" == 644 && "$(file_nlink "$INTERCEPT_CA")" == 1 ]] \
+        || return 1
+    openssl x509 -in "$INTERCEPT_CA" -noout -checkend 0 >/dev/null 2>&1 || return 1
+    not_before="$(openssl x509 -in "$INTERCEPT_CA" -noout -startdate 2>/dev/null)" || return 1
+    not_before="${not_before#notBefore=}"
+    not_before_epoch="$(date -u -d "$not_before" +%s 2>/dev/null)" || return 1
+    now_epoch="$(date -u +%s)" || return 1
+    [[ "$not_before_epoch" =~ ^[0-9]+$ && "$now_epoch" =~ ^[0-9]+$ \
+       && "$not_before_epoch" -le "$now_epoch" ]] || return 1
+    openssl x509 -in "$INTERCEPT_CA" -noout -text 2>/dev/null | grep -Fq 'CA:TRUE' \
+        && openssl verify -CAfile "$INTERCEPT_CA" "$INTERCEPT_CA" >/dev/null 2>&1
+}
+
+bound_ui_helper_validate_current() {
+    local directory before after metadata digest hash_fd source_fd hash_metadata source_metadata fd_digest rc=0
+    [[ "$UI_GENERATION_HELPER" == /opt/5gpn/scripts/ui-generation.sh ]] || return 1
+    directory="$(dirname -- "$UI_GENERATION_HELPER")"
+    [[ -d "$directory" && ! -L "$directory" \
+       && "$(readlink -f -- "$directory")" == "$directory" \
+       && "$(stat -Lc '%u:%g:%a' -- "$directory")" == 0:0:755 \
+       && -f "$UI_GENERATION_HELPER" && ! -L "$UI_GENERATION_HELPER" \
+       && "$(readlink -f -- "$UI_GENERATION_HELPER")" == "$UI_GENERATION_HELPER" \
+       && "$(stat -Lc '%u:%g:%a:%h' -- "$UI_GENERATION_HELPER")" == 0:0:755:1 ]] \
+        || return 1
+    metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "$UI_GENERATION_HELPER")" || return 1
+    digest="$(sha256sum -- "$UI_GENERATION_HELPER" | awk '{print $1}')" || return 1
+    before="${metadata}:${digest}"
+    exec {hash_fd}<"$UI_GENERATION_HELPER" || return 1
+    exec {source_fd}<"$UI_GENERATION_HELPER" || { exec {hash_fd}<&-; return 1; }
+    hash_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$hash_fd")" \
+        || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+    source_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$source_fd")" \
+        || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+    fd_digest="$(sha256sum -- "/proc/self/fd/$hash_fd" | awk '{print $1}')" \
+        || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+    exec {hash_fd}<&-
+    [[ "$hash_metadata" == "$metadata" && "$source_metadata" == "$metadata" \
+       && "$fd_digest" == "$digest" ]] || { exec {source_fd}<&-; return 1; }
+    bash "/proc/self/fd/$source_fd" validate-current || rc=$?
+    exec {source_fd}<&-
+    metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "$UI_GENERATION_HELPER")" || return 1
+    digest="$(sha256sum -- "$UI_GENERATION_HELPER" | awk '{print $1}')" || return 1
+    after="${metadata}:${digest}"
+    [[ "$rc" == 0 && "$after" == "$before" ]]
+}
+
+profile_inputs_match_live() {
+    local live="$1" base domain gateway leaf_sha public_key_sha ca_sha dot_sha intercept_sha
+    local -a lines=()
+    certificate_role_current_safe || return 1
+    intercept_ca_boundary_is_safe || return 1
+    bound_ui_helper_validate_current || return 1
+    [[ -f "$PROFILE_INPUTS_FILE" && ! -L "$PROFILE_INPUTS_FILE" \
+       && "$(file_uid "$PROFILE_INPUTS_FILE")" == 0 \
+       && "$(file_gid "$PROFILE_INPUTS_FILE")" == 0 \
+       && "$(file_mode "$PROFILE_INPUTS_FILE")" == 644 \
+       && "$(file_nlink "$PROFILE_INPUTS_FILE")" == 1 ]] || return 1
+    mapfile -t lines < "$PROFILE_INPUTS_FILE" || return 1
+    [[ "${#lines[@]}" == 8 ]] || return 1
+    base="$(cfg_get DNS_BASE_DOMAIN)"
+    base="${base%.}"
+    base="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')"
+    valid_domain "$base" || return 1
+    domain="dot.${base}"
+    gateway="$(cfg_get DNS_GATEWAY_IP)"
+    valid_ipv4 "$gateway" || return 1
+    leaf_sha="$(openssl x509 -in "$live/fullchain.pem" -outform DER 2>/dev/null \
+        | sha256sum | awk '{print $1}')" || return 1
+    public_key_sha="$(openssl x509 -in "$live/fullchain.pem" -pubkey -noout 2>/dev/null \
+        | openssl pkey -pubin -outform DER 2>/dev/null \
+        | sha256sum | awk '{print $1}')" || return 1
+    ca_sha="$(openssl x509 -in "$INTERCEPT_CA" -outform DER 2>/dev/null \
+        | sha256sum | awk '{print $1}')" || return 1
+    dot_sha="$(sha256sum "$UI_ROOT/current/ios-dot.mobileconfig" | awk '{print $1}')" || return 1
+    intercept_sha="$(sha256sum "$UI_ROOT/current/ios-intercept-ca.mobileconfig" | awk '{print $1}')" || return 1
+    [[ "${lines[0]}" == version=1 \
+       && "${lines[1]}" == "dot_signer_leaf_sha256=${leaf_sha}" \
+       && "${lines[2]}" == "dot_public_key_sha256=${public_key_sha}" \
+       && "${lines[3]}" == "intercept_ca_der_sha256=${ca_sha}" \
+       && "${lines[4]}" == "domain=${domain}" \
+       && "${lines[5]}" == "gateway_ipv4=${gateway}" \
+       && "${lines[6]}" == "ios_dot_sha256=${dot_sha}" \
+       && "${lines[7]}" == "ios_intercept_ca_sha256=${intercept_sha}" ]]
 }
 
 # Validate the live lineage with the deploy hook's single mode-aware validator,
@@ -293,13 +475,22 @@ ensure_live_deployed() {
     local live="$1"
     deploy_hook_owned \
         || { err "Owned 5gpn certificate deploy hook is missing or invalid: ${DEPLOY_HOOK}."; return 1; }
-    FIVEGPN_CERT_LOCK_HELD=1 RENEW_HOOK_VALIDATE_ONLY=1 RENEWED_LINEAGE="$live" "$DEPLOY_HOOK" >/dev/null \
+    run_bound_deploy_hook validate "$live" \
         || { err "Live lineage failed the configured mode/SAN/key validation."; return 1; }
-    role_copies_match_live "$live" && return 0
-    warn "Certificate role copies differ from the live lineage; redeploying them before returning."
-    FIVEGPN_CERT_LOCK_HELD=1 RENEWED_LINEAGE="$live" "$DEPLOY_HOOK" || return 1
+    if role_copies_match_live "$live"; then
+        if profile_inputs_match_live "$live"; then
+            return 0
+        fi
+        warn "UI profile inputs differ from the live lineage, DNS coordinates, or interception CA; repairing only the profile generation."
+        run_bound_deploy_hook profile "$live" || return 1
+    else
+        warn "Certificate role copies differ from the live lineage; redeploying them before returning."
+        run_bound_deploy_hook deploy "$live" || return 1
+    fi
     role_copies_match_live "$live" \
         || { err "Certificate role copies still differ after deploy-hook recovery."; return 1; }
+    profile_inputs_match_live "$live" \
+        || { err "UI profile inputs still differ after deploy-hook recovery."; return 1; }
 }
 
 dns_records_match() {

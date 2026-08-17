@@ -8,7 +8,7 @@ export INSTALL_SH_LIB_ONLY=1
 # shellcheck source=../install.sh
 source "$INSTALL"
 
-TMP="$(mktemp -d /tmp/5gpn-current-preflight.XXXXXX)"
+TMP="$(mktemp -d /var/tmp/5gpn-current-preflight.XXXXXX)"
 trap 'rm -rf -- "$TMP"' EXIT
 
 fail() { echo "FAIL: $*"; exit 1; }
@@ -48,16 +48,19 @@ validator="$(sed -n '/^validate_existing_runtime_documents()/,/^}/p' "$INSTALL")
 stage_fn="$(sed -n '/^stage_artifacts()/,/^}/p' "$INSTALL")"
 grep -Fq 'validate_existing_runtime_documents' <<<"$stage_fn" \
     || fail "staged artifact verification does not invoke runtime document validation"
-grep -Fq '"$ARTIFACT_STAGE/mihomo"' <<<"$validator" \
-    && grep -Fq '5gpn-state validate' <<<"$validator" \
+configure_preflight_fn="$(sed -n '/^configure_require_current_deployment()/,/^}/p' "$INSTALL")"
+grep -Fq '${1:-${ARTIFACT_STAGE}/mihomo}' <<<"$validator" \
+    && grep -Fq '"$validator" 5gpn-state validate' <<<"$validator" \
     && grep -Fq 'FIVEGPN_STATE_DIR' <<<"$validator" \
     && grep -Fq -- '--owner-uid' <<<"$validator" \
     && grep -Fq 'timeout --kill-after=' <<<"$validator" \
-    || fail "runtime documents are not validated by the staged Core against their proven owner UID"
+    || fail "runtime documents are not validated by the selected Core against their proven owner UID"
+grep -Fq 'validate_existing_runtime_documents "$MIHOMO_BIN" "installed Core"' <<<"$configure_preflight_fn" \
+    || fail "installed configure does not validate current documents with the installed Core"
 if grep -Eq '\bjq\b|\.version[[:space:]]*==|keys[[:space:]]*-' <<<"$detector$validator"; then
     fail "installer shell duplicates Core-owned existing-document validation"
 fi
-pass "state validation uses the staged Core without a duplicate shell decoder"
+pass "state validation selects the staged or installed Core without a duplicate shell decoder"
 
 full_install="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
 line_of() {
@@ -105,6 +108,7 @@ assert_legacy_case() { # assert_legacy_case <label> <setup-function> [args...]
     if (
         CASE_ROOT="$TMP/case-$CASE_INDEX"
         BASE_DIR="$CASE_ROOT/runtime"
+        UI_DIR="$BASE_DIR/ui"
         BIN_DIR="$BASE_DIR/bin"
         SCRIPT_DIR="$BASE_DIR/scripts"
         SCRIPTS_DIR="$BASE_DIR/scripts"
@@ -341,6 +345,7 @@ pass "missing runtime documents remain valid non-creating seed inputs"
 # comments are not deployment evidence.
 (
     BASE_DIR="$TMP/current/runtime"
+    UI_DIR="$BASE_DIR/ui"
     BIN_DIR="$BASE_DIR/bin"
     SCRIPTS_DIR="$BASE_DIR/scripts"
     CONF_DIR="$TMP/current/config"

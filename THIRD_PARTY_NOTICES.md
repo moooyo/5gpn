@@ -13,8 +13,10 @@ authoritative.
 
 The `5gpn-installer.tar.gz` release asset contains the installer, service and
 configuration templates, maintenance scripts, selected documentation, and this
-notice file. Those first-party files are covered by the repository's MIT
-License.
+notice file. It also contains `release/pins.env` and the strict
+`release/pins.sh` parser/URL builder; installed deployments retain both below
+`/opt/5gpn/release`. Those first-party files are covered by the repository's
+MIT License.
 
 The release asset contains no compiled daemon, sidecar, dashboard bundle, Go
 module tree, npm package tree, or third-party rule-list snapshot. The current
@@ -23,19 +25,21 @@ digest pins.
 
 ## Release artifacts downloaded by the installer
 
-`install.sh` retrieves these exact upstream release artifacts, verifies the
-listed SHA-256 digest, and then publishes them on the gateway.
+`release/pins.env` is the machine-readable authority for these coordinates.
+The release binding gate requires this human-readable table to match that
+manifest. `install.sh` retrieves the derived upstream release artifacts,
+verifies the listed SHA-256 digest, and then publishes them on the gateway.
 
 | Component | Exact release and downloaded artifact | SHA-256 | License evidence | Installed use |
 |---|---|---|---|---|
-| 5gpn mihomo fork | [`moooyo/mihomo` `v1.19.28-monolith.31`](https://github.com/moooyo/mihomo/releases/tag/v1.19.28-monolith.31), `mihomo-linux-amd64-compatible-v1.19.28-monolith.31.gz` | `48cdc59cbc143fd826dbeb03f3402cba10650a7e9fb4652282fd2128dcfd168b` | GPL-3.0; see the exact tag's [`LICENSE`](https://github.com/moooyo/mihomo/blob/v1.19.28-monolith.31/LICENSE) and [source](https://github.com/moooyo/mihomo/tree/v1.19.28-monolith.31) | Installed as `/opt/5gpn/bin/5gpn-mihomo`; this is the sole long-running 5gpn process. |
-| zashboard fork | [`moooyo/zashboard` `v3.16.1-monolith.31`](https://github.com/moooyo/zashboard/releases/tag/v3.16.1-monolith.31), `dist.zip` | `aed3b9149a86cb3fb6e901c461b777ffff578832a1d7f06cddbcfb5dd53a7929` | The zashboard project is MIT, Copyright 2024 Zephyruso; see the exact tag's [`LICENSE`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.31/LICENSE) and [`package.json`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.31/package.json). The archive includes Leaflet 1.9.4 under BSD-2-Clause and ships its complete license text. | Extracted to `/opt/5gpn/ui` and served as static browser assets by `5gpn-mihomo`. |
+| 5gpn mihomo fork | [`moooyo/mihomo` `v1.19.28-monolith.32`](https://github.com/moooyo/mihomo/releases/tag/v1.19.28-monolith.32), `mihomo-linux-amd64-compatible-v1.19.28-monolith.32.gz` | `0533c4a2d233be504c0c080404e265ed9caf348a6532d933d2ba40ec53635ce2` | GPL-3.0; see the exact tag's [`LICENSE`](https://github.com/moooyo/mihomo/blob/v1.19.28-monolith.32/LICENSE) and [source](https://github.com/moooyo/mihomo/tree/v1.19.28-monolith.32) | Installed as `/opt/5gpn/bin/5gpn-mihomo`; this is the sole long-running 5gpn process. |
+| zashboard fork | [`moooyo/zashboard` `v3.16.1-monolith.32`](https://github.com/moooyo/zashboard/releases/tag/v3.16.1-monolith.32), `dist.zip` | `314e44501326d26de4d66b36972f9db962ac86277797abf67cfeda4a3630e5d9` | The zashboard project is MIT, Copyright 2024 Zephyruso; see the exact tag's [`LICENSE`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.32/LICENSE) and [`package.json`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.32/package.json). The archive includes Leaflet 1.9.4 under BSD-2-Clause and ships its complete license text. | Extracted to `/opt/5gpn/ui` and served as static browser assets by `5gpn-mihomo`. |
 
 The zashboard `dist.zip` is a compiled browser bundle and includes code and
 assets from its runtime dependency graph. Those dependencies retain their own
 licenses. The exact dependency graph used to build this artifact is recorded in
-the tagged [`package.json`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.31/package.json)
-and [`pnpm-lock.yaml`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.31/pnpm-lock.yaml);
+the tagged [`package.json`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.32/package.json)
+and [`pnpm-lock.yaml`](https://github.com/moooyo/zashboard/blob/v3.16.1-monolith.32/pnpm-lock.yaml);
 5gpn does not rebuild or modify the downloaded archive.
 
 ## Optional installer TUI downloaded separately
@@ -45,7 +49,7 @@ non-fatal and the installer falls back to plain output.
 
 | Component | Exact release | License evidence | Verified Linux archive digests |
 |---|---|---|---|
-| [Charmbracelet Gum](https://github.com/charmbracelet/gum/tree/v0.17.0) | `v0.17.0` | MIT, Copyright (c) 2022-2024 Charmbracelet, Inc; see [`LICENSE`](https://github.com/charmbracelet/gum/blob/v0.17.0/LICENSE) | `x86_64`: `69ee169bd6387331928864e94d47ed01ef649fbfe875baed1bbf27b5377a6fdb`; `arm64`: `b0b9ed95cbf7c8b7073f17b9591811f5c001e33c7cfd066ca83ce8a07c576f9c`; `armv7`: `25711c2fbc6887cde79ed586972834121a04955968808dd688c688381ac50ab2` |
+| [Charmbracelet Gum](https://github.com/charmbracelet/gum/tree/v0.17.0) | `v0.17.0`; `gum_0.17.0_Linux_x86_64.tar.gz`, `gum_0.17.0_Linux_arm64.tar.gz`, and `gum_0.17.0_Linux_armv7.tar.gz` | MIT, Copyright (c) 2022-2024 Charmbracelet, Inc; see [`LICENSE`](https://github.com/charmbracelet/gum/blob/v0.17.0/LICENSE) | `x86_64`: `69ee169bd6387331928864e94d47ed01ef649fbfe875baed1bbf27b5377a6fdb`; `arm64`: `b0b9ed95cbf7c8b7073f17b9591811f5c001e33c7cfd066ca83ce8a07c576f9c`; `armv7`: `25711c2fbc6887cde79ed586972834121a04955968808dd688c688381ac50ab2` |
 
 The verified executable is installed as `/opt/5gpn/bin/gum`.
 

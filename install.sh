@@ -44,10 +44,241 @@ set -Eeuo pipefail
 # ----------------------------------------------------------------------------
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]:-}" 2>/dev/null || echo "${BASH_SOURCE[0]:-}")"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"   # repo 5gpn/ when run from a checkout
-
 BASE_DIR="/opt/5gpn"                 # installed runtime root
+# Release packaging replaces these development sentinels with the SHA-256 pair
+# for release/pins.env + release/pins.sh and the separate quick-install.sh
+# digest. They are derived generation bindings, not component authorities.
+RELEASE_PINS_BINDING="development"
+RELEASE_QUICK_BINDING="development"
+RELEASE_PINS_BUNDLE_DIR="${SCRIPT_DIR}/release"
+RELEASE_PINS_ENV="${RELEASE_PINS_BUNDLE_DIR}/pins.env"
+RELEASE_PINS_LIBRARY="${RELEASE_PINS_BUNDLE_DIR}/pins.sh"
+RELEASE_QUICK_PATH="${SCRIPT_DIR}/quick-install.sh"
+RELEASE_PINS_SNAPSHOT_DIR=""
+RELEASE_PINS_BUNDLE_ENV_STATE=""
+RELEASE_PINS_BUNDLE_LIBRARY_STATE=""
+RELEASE_PINS_SNAPSHOT_ENV_STATE=""
+RELEASE_PINS_SNAPSHOT_LIBRARY_STATE=""
+RELEASE_PINS_ENV_REVISION=""
+RELEASE_PINS_LIBRARY_REVISION=""
+RELEASE_PINS_ENV_SNAPSHOT_B64=""
+RELEASE_PINS_LIBRARY_SNAPSHOT_B64=""
+RELEASE_QUICK_BUNDLE_STATE=""
+RELEASE_QUICK_REVISION=""
+INSTALLED_BACKEND_SCRIPT_STATE=""
+
+release_pin_file_state() { # release_pin_file_state <plain-file>
+    local file="$1" metadata digest
+    [[ -f "$file" && ! -L "$file" ]] || return 1
+    metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "$file" 2>/dev/null)" \
+        || return 1
+    [[ "${metadata##*:}" == 1 ]] || return 1
+    digest="$(sha256sum -- "$file" 2>/dev/null | awk '{print $1}')" \
+        || return 1
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s:%s\n' "$metadata" "$digest"
+}
+
+cleanup_release_pin_snapshot() {
+    local dir="${RELEASE_PINS_SNAPSHOT_DIR:-}" uid mode
+    [[ -n "$dir" ]] || return 0
+    case "$dir" in /var/tmp/5gpn-release-pins.*) ;; *) return 1 ;; esac
+    [[ -d "$dir" && ! -L "$dir" ]] || return 1
+    uid="$(stat -Lc '%u' -- "$dir" 2>/dev/null)" || return 1
+    mode="$(stat -Lc '%a' -- "$dir" 2>/dev/null)" || return 1
+    [[ "$uid" == "$(id -u)" && "$mode" == 700 ]] || return 1
+    rm -f -- "$dir/pins.env" "$dir/pins.sh" || return 1
+    rmdir -- "$dir" || return 1
+    RELEASE_PINS_SNAPSHOT_DIR=""
+}
+
+capture_release_pin_pair() { # capture_release_pin_pair <bundle-release-dir>
+    local origin_dir="$1" origin_canonical env library snapshot
+    local before_env before_library after_env after_library snapshot_env snapshot_library
+    [[ -d "$origin_dir" && ! -L "$origin_dir" ]] || return 1
+    origin_canonical="$(readlink -f -- "$origin_dir" 2>/dev/null)" || return 1
+    [[ "$origin_canonical" == "$origin_dir" ]] || return 1
+    env="$origin_dir/pins.env"
+    library="$origin_dir/pins.sh"
+    before_env="$(release_pin_file_state "$env")" || return 1
+    before_library="$(release_pin_file_state "$library")" || return 1
+
+    snapshot="$(mktemp -d /var/tmp/5gpn-release-pins.XXXXXX)" || return 1
+    chmod 0700 "$snapshot" \
+        || { rmdir -- "$snapshot" 2>/dev/null || true; return 1; }
+    if ! install -m 0600 -- "$env" "$snapshot/pins.env" \
+       || ! install -m 0600 -- "$library" "$snapshot/pins.sh"; then
+        rm -f -- "$snapshot/pins.env" "$snapshot/pins.sh"
+        rmdir -- "$snapshot" 2>/dev/null || true
+        return 1
+    fi
+
+    snapshot_env="$(release_pin_file_state "$snapshot/pins.env")" || {
+        rm -f -- "$snapshot/pins.env" "$snapshot/pins.sh"; rmdir -- "$snapshot" 2>/dev/null || true; return 1;
+    }
+    snapshot_library="$(release_pin_file_state "$snapshot/pins.sh")" || {
+        rm -f -- "$snapshot/pins.env" "$snapshot/pins.sh"; rmdir -- "$snapshot" 2>/dev/null || true; return 1;
+    }
+    after_env="$(release_pin_file_state "$env")" || {
+        rm -f -- "$snapshot/pins.env" "$snapshot/pins.sh"; rmdir -- "$snapshot" 2>/dev/null || true; return 1;
+    }
+    after_library="$(release_pin_file_state "$library")" || {
+        rm -f -- "$snapshot/pins.env" "$snapshot/pins.sh"; rmdir -- "$snapshot" 2>/dev/null || true; return 1;
+    }
+    if [[ "$before_env" != "$after_env" \
+       || "$before_library" != "$after_library" \
+       || "${snapshot_env##*:}" != "${before_env##*:}" \
+       || "${snapshot_library##*:}" != "${before_library##*:}" ]]; then
+        rm -f -- "$snapshot/pins.env" "$snapshot/pins.sh"
+        rmdir -- "$snapshot" 2>/dev/null || true
+        return 1
+    fi
+
+    RELEASE_PINS_SNAPSHOT_DIR="$snapshot"
+    RELEASE_PINS_BUNDLE_ENV_STATE="$after_env"
+    RELEASE_PINS_BUNDLE_LIBRARY_STATE="$after_library"
+    RELEASE_PINS_SNAPSHOT_ENV_STATE="$snapshot_env"
+    RELEASE_PINS_SNAPSHOT_LIBRARY_STATE="$snapshot_library"
+    RELEASE_PINS_ENV_REVISION="${snapshot_env##*:}"
+    RELEASE_PINS_LIBRARY_REVISION="${snapshot_library##*:}"
+    RELEASE_PINS_ENV="$snapshot/pins.env"
+    RELEASE_PINS_LIBRARY="$snapshot/pins.sh"
+}
+
+assert_release_pin_bundle_revision() {
+    local env_state library_state
+    env_state="$(release_pin_file_state "$RELEASE_PINS_BUNDLE_DIR/pins.env")" \
+        || { printf 'Release pin manifest metadata is unsafe or unreadable.\n' >&2; return 1; }
+    library_state="$(release_pin_file_state "$RELEASE_PINS_BUNDLE_DIR/pins.sh")" \
+        || { printf 'Release pin parser metadata is unsafe or unreadable.\n' >&2; return 1; }
+    [[ "$env_state" == "$RELEASE_PINS_BUNDLE_ENV_STATE" \
+       && "$library_state" == "$RELEASE_PINS_BUNDLE_LIBRARY_STATE" ]] \
+        || { printf 'Release pin files changed after their private snapshot was loaded.\n' >&2; return 1; }
+}
+
+validate_quick_installer_generation() {
+    local quick_state quick_revision
+    quick_state="$(release_pin_file_state "$RELEASE_QUICK_PATH")" \
+        || { err "Quick installer is missing, linked, or unreadable; use the verified external installer."; return 1; }
+    quick_revision="${quick_state##*:}"
+    if [[ "$SCRIPT_DIR" == "$BASE_DIR" ]]; then
+        [[ "$(stat -Lc '%u:%g:%a:%h' "$RELEASE_QUICK_PATH" 2>/dev/null)" == 0:0:755:1 ]] \
+            || { err "Installed quick installer metadata is unsafe; use the verified external installer."; return 1; }
+    fi
+    if [[ "$RELEASE_QUICK_BINDING" == development ]]; then
+        [[ "$SCRIPT_DIR" != "$BASE_DIR" ]] \
+            || { err "Installed quick installer has no immutable generation binding."; return 1; }
+        return 0
+    fi
+    [[ "$RELEASE_QUICK_BINDING" =~ ^[0-9a-f]{64}$ \
+       && "$quick_revision" == "$RELEASE_QUICK_BINDING" ]] \
+        || { err "Quick installer does not match this release generation; use the verified external installer."; return 1; }
+}
+
+installed_backend_stamped_release_tag() {
+    local tag
+    local -a tags=()
+    mapfile -t tags < <(sed -n 's/^RELEASE_TAG="\([^"]*\)"$/\1/p' "$SCRIPT_PATH")
+    [[ "${#tags[@]}" == 1 ]] || return 1
+    tag="${tags[0]}"
+    [[ "$tag" != latest ]] && valid_release_tag "$tag" || return 1
+    printf '%s\n' "$tag"
+}
+
+assert_installed_backend_revision() {
+    local script_state stamped_tag
+    [[ "$SCRIPT_DIR" == "$BASE_DIR" ]] || return 0
+    [[ "${RELEASE_TAG:-latest}" != latest ]] && valid_release_tag "$RELEASE_TAG" \
+        || { err "The installed management backend has no immutable release stamp; use the verified external installer."; return 1; }
+    stamped_tag="$(installed_backend_stamped_release_tag)" \
+        || { err "The installed management backend release stamp is missing or ambiguous; use the verified external installer."; return 1; }
+    [[ "$stamped_tag" == "$RELEASE_TAG" ]] \
+        || { err "The installed management backend changed while this command was starting; rerun 5gpn."; return 1; }
+    script_state="$(release_pin_file_state "$SCRIPT_PATH")" \
+        || { err "The installed management backend is missing or unsafe; rerun the verified external installer."; return 1; }
+    [[ "$script_state" == "$INSTALLED_BACKEND_SCRIPT_STATE" ]] \
+        || { err "The installed management backend changed while this command was queued; rerun 5gpn."; return 1; }
+    assert_release_pin_bundle_revision \
+        || { err "The installed release pins changed while this command was queued; rerun 5gpn."; return 1; }
+}
+
+if [[ "$SCRIPT_DIR" == "$BASE_DIR" ]]; then
+    if [[ "$(stat -c '%u:%g:%a' "$BASE_DIR" 2>/dev/null)" != 0:0:755 \
+       || "$(stat -c '%u:%g:%a' "$RELEASE_PINS_BUNDLE_DIR" 2>/dev/null)" != 0:0:755 \
+       || "$(stat -c '%u:%g:%a:%h' "$SCRIPT_PATH" 2>/dev/null)" != 0:0:755:1 \
+       || "$(stat -c '%u:%g:%a:%h' "$RELEASE_PINS_ENV" 2>/dev/null)" != 0:0:644:1 \
+       || "$(stat -c '%u:%g:%a:%h' "$RELEASE_PINS_LIBRARY" 2>/dev/null)" != 0:0:644:1 ]]; then
+        printf 'Installed release pin metadata is unsafe below %s.\n' "$RELEASE_PINS_BUNDLE_DIR" >&2
+        exit 1
+    fi
+fi
+capture_release_pin_pair "$RELEASE_PINS_BUNDLE_DIR" \
+    || { printf 'Could not capture one stable release pin pair below %s.\n' "$RELEASE_PINS_BUNDLE_DIR" >&2; exit 1; }
+if [[ "$RELEASE_PINS_BINDING" == development ]]; then
+    if [[ "$SCRIPT_DIR" == "$BASE_DIR" ]]; then
+        cleanup_release_pin_snapshot || true
+        printf 'Installed management backend has no immutable release-pin generation binding.\n' >&2
+        exit 1
+    fi
+elif [[ "$RELEASE_PINS_BINDING" =~ ^[0-9a-f]{64}:[0-9a-f]{64}$ ]]; then
+    if [[ "$RELEASE_PINS_BINDING" != "${RELEASE_PINS_ENV_REVISION}:${RELEASE_PINS_LIBRARY_REVISION}" ]]; then
+        cleanup_release_pin_snapshot || true
+        printf 'Release pin files do not match the installer generation binding.\n' >&2
+        exit 1
+    fi
+else
+    cleanup_release_pin_snapshot || true
+    printf 'Installer release-pin generation binding is malformed.\n' >&2
+    exit 1
+fi
+if [[ "$SCRIPT_DIR" != "$BASE_DIR" ]]; then
+    RELEASE_QUICK_BUNDLE_STATE="$(release_pin_file_state "$RELEASE_QUICK_PATH")" \
+        || { cleanup_release_pin_snapshot || true; printf 'Could not fingerprint the bundled quick installer.\n' >&2; exit 1; }
+    RELEASE_QUICK_REVISION="${RELEASE_QUICK_BUNDLE_STATE##*:}"
+    if [[ "$RELEASE_QUICK_BINDING" == development ]]; then
+        :
+    elif [[ "$RELEASE_QUICK_BINDING" =~ ^[0-9a-f]{64}$ \
+         && "$RELEASE_QUICK_BINDING" == "$RELEASE_QUICK_REVISION" ]]; then
+        :
+    else
+        cleanup_release_pin_snapshot || true
+        printf 'Quick installer does not match the installer generation binding.\n' >&2
+        exit 1
+    fi
+fi
+# shellcheck source=release/pins.sh
+if ! source "$RELEASE_PINS_LIBRARY" \
+   || ! load_release_pins "$RELEASE_PINS_ENV" \
+   || [[ "$(release_pin_file_state "$RELEASE_PINS_ENV")" != "$RELEASE_PINS_SNAPSHOT_ENV_STATE" ]] \
+   || [[ "$(release_pin_file_state "$RELEASE_PINS_LIBRARY")" != "$RELEASE_PINS_SNAPSHOT_LIBRARY_STATE" ]]; then
+    cleanup_release_pin_snapshot || true
+    printf 'Release pin snapshot changed while it was being loaded.\n' >&2
+    exit 1
+fi
+RELEASE_PINS_ENV_SNAPSHOT_B64="$(base64 -w0 -- "$RELEASE_PINS_ENV")" \
+    || { cleanup_release_pin_snapshot || true; printf 'Could not retain the release pin manifest snapshot.\n' >&2; exit 1; }
+RELEASE_PINS_LIBRARY_SNAPSHOT_B64="$(base64 -w0 -- "$RELEASE_PINS_LIBRARY")" \
+    || { cleanup_release_pin_snapshot || true; printf 'Could not retain the release pin parser snapshot.\n' >&2; exit 1; }
+cleanup_release_pin_snapshot \
+    || { printf 'Could not clean the private release pin snapshot.\n' >&2; exit 1; }
+RELEASE_PINS_ENV="${RELEASE_PINS_BUNDLE_DIR}/pins.env"
+RELEASE_PINS_LIBRARY="${RELEASE_PINS_BUNDLE_DIR}/pins.sh"
+if [[ "$SCRIPT_DIR" == "$BASE_DIR" ]]; then
+    INSTALLED_BACKEND_SCRIPT_STATE="$(release_pin_file_state "$SCRIPT_PATH")" \
+        || { printf 'Could not fingerprint the installed management backend.\n' >&2; exit 1; }
+fi
+
 BIN_DIR="${BASE_DIR}/bin"                # project-managed binaries; Gum survives uninstall for host reuse
 SCRIPTS_DIR="${BASE_DIR}/scripts"        # installed copies of repo scripts
+RELEASE_DIR="${BASE_DIR}/release"        # installed immutable artifact coordinates and strict parser
+declare -ar MANAGED_SYSTEMD_UNITS=(
+    5gpn-mihomo.service
+    5gpn-intercept-cert.service
+    5gpn-intercept-cert.path
+    5gpn-intercept-cert.timer
+    5gpn-certbot-renew.service
+    5gpn-certbot-renew.timer
+)
 BASE_OWNERSHIP_MARKER=".5gpn-owned"
 BASE_OWNERSHIP_VALUE="5gpn-runtime"
 
@@ -75,6 +306,13 @@ DEBUG_CERT_MARKER=".5gpn-debug-cert-owned"
 DEBUG_CERT_MARKER_VALUE="5gpn-debug-cert-v1"
 DOT_CERT_DIR="${DNS_CERT_DIR}/dot"       # DoT :853 cert copy (hot-reloaded on mtime change)
 CONSOLE_CERT_DIR="${DNS_CERT_DIR}/console"  # the controller TLS pair; mihomo serves the panel with it
+DOT_LISTEN_ADDR=":853"
+DEBUG_LISTEN_ADDR="127.0.0.1:5353"
+ORIGIN_LISTEN_ADDR="127.0.0.1:5354"
+MIHOMO_CONTROLLER_TLS_ADDR="127.0.0.1:443"
+MIHOMO_CONTROLLER_CERT="${CONSOLE_CERT_DIR}/current/fullchain.pem"
+MIHOMO_CONTROLLER_KEY="${CONSOLE_CERT_DIR}/current/privkey.pem"
+MIHOMO_CONTROLLER_INSPECTION_VERSION=2
 CERT_ROOT_MARKER=".5gpn-cert-root-owned"
 CERT_ROOT_MARKER_VALUE="5gpn-cert-root-v1"
 CERTBOT_OWNERSHIP_FILE="${DNS_CERT_DIR}/.certbot-ownership"
@@ -87,6 +325,15 @@ ACME_DIR="/etc/5gpn/acme"                # root-only Cloudflare API-token creden
 GLOBAL_CERTBOT_TIMER_STATE_CAPTURED=0
 GLOBAL_CERTBOT_TIMER_ORIGINAL_ACTIVE=""
 GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED=""
+GLOBAL_CERTBOT_TIMER_EXPECTED_LOAD=""
+GLOBAL_CERTBOT_TIMER_EXPECTED_ACTIVE=""
+GLOBAL_CERTBOT_TIMER_EXPECTED_ENABLED=""
+CERTBOT_TIMER_LOAD_STATE=""
+CERTBOT_TIMER_ACTIVE_STATE=""
+CERTBOT_TIMER_UNIT_FILE_STATE=""
+SYSTEMD_UNIT_LOAD_STATE=""
+SYSTEMD_UNIT_ACTIVE_STATE=""
+SYSTEMD_UNIT_FILE_STATE=""
 LE_ROOT="/etc/letsencrypt"
 LE_LIVE_ROOT="${LE_ROOT}/live"
 LE_ARCHIVE_ROOT="${LE_ROOT}/archive"
@@ -103,6 +350,12 @@ CERT_DNS_WAIT_INTERVAL=10
 CERT_DNS_PROPAGATION_SECONDS=30
 INSTALL_LOCK_FILE="/run/5gpn/install.lock"
 CERT_RENEW_LOCK_FILE="/run/5gpn/cert-renew.lock"
+CONFIGURE_RUNTIME_GATE_RECORD="/run/5gpn/configure-runtime-gate"
+CONFIGURE_RUNTIME_GATE_JOB="/run/5gpn/configure-runtime-gate.job"
+CONFIGURE_RUNTIME_GATE_ACK="/run/5gpn/configure-runtime-gate.ack"
+CONFIGURE_RUNTIME_GATE_RELEASE="/run/5gpn/configure-runtime-gate.release"
+CONFIGURE_RUNTIME_GATE_UNIT="5gpn-mihomo.service"
+CONFIGURE_RUNTIME_GATE_QUIESCE_TIMEOUT=120
 INSTALL_LOCK_WAIT_TIMEOUT=900
 CERT_LOCK_WAIT_TIMEOUT=30
 LOCK_WAIT_REPORT_INTERVAL=5
@@ -110,16 +363,25 @@ LE_PRODUCTION_SERVER="https://acme-v02.api.letsencrypt.org/directory"
 INSTALL_LOCK_HELD=0
 INSTALL_CERT_LOCK_HELD=0
 INSTALL_PUBLICATION_STARTED=0
+VALIDATED_DNS_SOURCE_REVISION=""
+LOADED_DNS_ENV_SOURCE_STATE=""
+LOADED_DNS_ENV_SOURCE_REVISION=""
+LOADED_DNS_ENV_SOURCE_IDENTITY=""
 # The transaction layer restores the pre-install distro certbot.timer state on
 # every uncommitted exit and after non-owning certificate flows. Owned 5gpn
 # renewal sets this flag only after its scoped timer is active.
 KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=0
 DECOMMISSION_PRESERVE_ACME=0
-# The zashboard bundle, and the only user interface. Fixed, not operator-
-# configurable: 5gpn-mihomo.service names this exact path in SAFE_PATHS and in
-# ReadOnlyPaths, and the seed template names it in external-ui. A dns.env key
-# that could move it would only ever move it out from under the unit.
+# Stable root for the zashboard/profile generation tree. The service sandbox
+# grants this root, while the operator config names only its atomic `current`
+# symlink. A dns.env key that could move either path would move it out from
+# under the unit's fixed SAFE_PATHS and ReadOnlyPaths boundary.
 UI_DIR="/opt/5gpn/ui"
+UI_CURRENT_DIR="${UI_DIR}/current"
+UI_GENERATION_CANDIDATE=""
+UI_GENERATION_CANDIDATE_CREATED_FROM_CURRENT=0
+UI_GENERATION_HELPER_LOADED=0
+CONFIGURE_RUNTIME_RECOVERED_FROM_STALE_FENCE=0
 MIHOMO_BIN="${BIN_DIR}/5gpn-mihomo"
 MIHOMO_DIR="/etc/5gpn/mihomo"           # config.yaml + provider caches
 FIVEGPN_STATE_DIR="/etc/5gpn/mihomo/5gpn" # the engine's own documents, beside mihomo's
@@ -147,19 +409,22 @@ REPLACED_FIVEGPN_NAMED_GID=""
 FIVEGPN_IDENTITY_REPAIR_AUTHORIZED=0
 IDENTITY_RECONCILE_LOADED=0
 ZASH_OWNERSHIP_MARKER=".5gpn-zashboard-owned"
-ZASH_OWNERSHIP_VALUE="5gpn-zashboard"
+ZASH_OWNERSHIP_VALUE="5gpn-ui-generations"
 TEMP_OWNERSHIP_MARKER=".5gpn-temp-owned"
 TEMP_OWNERSHIP_VALUE="5gpn-temp"
-# Upstream v1.19.28 plus the 5gpn monolith, built from moooyo/mihomo's
+# The exact Core, Console, and Gum coordinates are loaded from the strict
+# 14-key release/pins.env manifest above. release/pins.sh accepts only the
+# approved repositories, release-tag shapes, asset templates, and lowercase
+# SHA-256 values, and it alone constructs GitHub release download URLs.
+#
+# The current Core is upstream v1.19.28 plus the 5gpn monolith, built from
+# moooyo/mihomo's
 # feat/5gpn-monolith branch. This core does not merely add interception, it *is*
 # the DNS engine, the interception engine, the data plane and the control API in
 # one long-running process (plus isolated same-binary one-shot workers), so an
 # upstream binary here does not degrade the install -- it
 # leaves the gateway with no resolver, no capture and no control API at all. The
 # staging probe checks the version token exactly rather than accepting a prefix.
-MIHOMO_REPO="moooyo/mihomo"
-MIHOMO_VERSION="v1.19.28-monolith.31"
-MIHOMO_SHA256="48cdc59cbc143fd826dbeb03f3402cba10650a7e9fb4652282fd2128dcfd168b"
 # Every `mihomo -t` in this script must run with the same SAFE_PATHS the unit
 # grants, because the seed names paths outside its own home directory -- the
 # certificates it serves and the UI bundle it publishes. Without this the core
@@ -170,24 +435,15 @@ MIHOMO_SHA256="48cdc59cbc143fd826dbeb03f3402cba10650a7e9fb4652282fd2128dcfd168b"
 # The duplication is checked: test_mihomo_policy asserts the two agree, because
 # a drift here fails at install time on a config the running service accepts.
 MIHOMO_SAFE_PATHS="/etc/5gpn/cert/console:/etc/5gpn/cert/dot:/etc/5gpn/intercept/tls:/opt/5gpn/ui"
-ZASH_REPO="moooyo/zashboard"
-ZASH_VERSION="v3.16.1-monolith.31"        # our fork's dist.zip, built from feat/5gpn-console
-ZASH_SHA256="aed3b9149a86cb3fb6e901c461b777ffff578832a1d7f06cddbcfb5dd53a7929"
 DNS_CHINA_DEFAULT="223.5.5.5"
 DNS_TRUST_DEFAULT="22.22.22.22"
 DNS_CHINA_ECS_DEFAULT="112.96.32.0/24"
 DNS_CHINA_DOMAINS_DEFAULT="https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/ChinaMax/ChinaMax_Domain.yaml"
 DNS_GFWLIST_DEFAULT="https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/gfw.txt"
 DNS_SUBSCRIPTION_INTERVAL_DEFAULT=86400
-readonly DNS_ENV_KEYS="DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_CONSOLE_CERT DNS_CONSOLE_KEY \
-DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL \
-DNS_MIHOMO_CONTROLLER DNS_MIHOMO_SECRET"
+readonly DNS_ENV_KEYS="DNS_BASE_DOMAIN DNS_PUBLIC_IP DNS_GATEWAY_IP DNS_MIHOMO_LISTEN_IPS CERT_MODE CERT_EMAIL"
 # EDNS Client Subnet uses the operational default above. Operators can disable
 # or change it through the web console, which persists the runtime value.
-GUM_VERSION="0.17.0"                     # charmbracelet/gum (prebuilt; installer TUI)
-GUM_SHA256_X86_64="69ee169bd6387331928864e94d47ed01ef649fbfe875baed1bbf27b5377a6fdb"
-GUM_SHA256_ARM64="b0b9ed95cbf7c8b7073f17b9591811f5c001e33c7cfd066ca83ce8a07c576f9c"
-GUM_SHA256_ARMV7="25711c2fbc6887cde79ed586972834121a04955968808dd688c688381ac50ab2"
 GUM_BIN="${BIN_DIR}/gum"
 _HAVE_GUM=0                              # set by install_gum(); helpers fall back to echo when 0
 INSTALL_ORIGINAL_PATH="$PATH"
@@ -394,12 +650,9 @@ file_gid() { stat -c %g -- "$1" 2>/dev/null || stat -f %g "$1" 2>/dev/null || tr
 file_mode() { stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || true; }
 file_nlink() { stat -c %h -- "$1" 2>/dev/null || stat -f %l "$1" 2>/dev/null || true; }
 
-persisted_dns_env_is_safe() {
-    local env="${CONF_DIR}/dns.env" marker="${CONF_DIR}/${CONF_OWNERSHIP_MARKER}"
-    local canonical conf_mode conf_gid
-    [[ -d "$CONF_DIR" && ! -L "$CONF_DIR" ]] || return 1
-    canonical="$(readlink -f -- "$CONF_DIR" 2>/dev/null || true)"
-    [[ "$canonical" == "$CONF_DIR" && "$(file_uid "$CONF_DIR")" == 0 ]] || return 1
+persisted_dns_env_file_metadata_is_safe() {
+    local env="${CONF_DIR}/dns.env" conf_mode conf_gid
+    fixed_root_is_safe_for_readonly_inspection "$CONF_DIR" || return 1
     conf_mode="$(file_mode "$CONF_DIR")"
     conf_gid="$(file_gid "$CONF_DIR")"
     if [[ "$conf_mode:$conf_gid" != 755:0 ]]; then
@@ -410,13 +663,6 @@ persisted_dns_env_is_safe() {
              && "$conf_gid" == "$REPLACED_FIVEGPN_NAMED_GID" ]]; } \
             || return 1
     fi
-    [[ -f "$marker" && ! -L "$marker" \
-       && "$(file_uid "$marker")" == 0 \
-       && "$(file_gid "$marker")" == 0 \
-       && "$(file_mode "$marker")" == 644 \
-       && "$(file_nlink "$marker")" == 1 \
-       && "$(cat "$marker" 2>/dev/null || true)" == "$CONF_OWNERSHIP_VALUE" ]] \
-        || return 1
     [[ -f "$env" && ! -L "$env" \
        && "$(file_uid "$env")" == 0 \
        && "$(file_nlink "$env")" == 1 ]] || return 1
@@ -427,38 +673,91 @@ persisted_dns_env_is_safe() {
     fi
 }
 
-dns_env_encode_value() {
-    local value="$1"
-    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
-    value="${value//\\/\\\\}"
-    value="${value//\"/\\\"}"
-    printf '"%s"' "$value"
+persisted_dns_env_is_safe() {
+    local marker="${CONF_DIR}/${CONF_OWNERSHIP_MARKER}"
+    persisted_dns_env_file_metadata_is_safe || return 1
+    [[ -f "$marker" && ! -L "$marker" \
+       && "$(file_uid "$marker")" == 0 \
+       && "$(file_gid "$marker")" == 0 \
+       && "$(file_mode "$marker")" == 644 \
+       && "$(file_nlink "$marker")" == 1 \
+       && "$(cat "$marker" 2>/dev/null || true)" == "$CONF_OWNERSHIP_VALUE" ]]
 }
 
-dns_env_decode_value() {
-    local raw="$1" body out="" char next i
-    if [[ "$raw" != \"* ]]; then
-        printf '%s' "$raw"
-        return 0
+dns_env_value_from_file() {
+    local file="$1" key="$2"
+    [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || return 1
+    awk -v key="$key" '
+        index($0, key "=") == 1 { value=substr($0, length(key) + 2); found++ }
+        END { if (found == 1) print value; else exit 1 }
+    ' "$file"
+}
+
+validate_persisted_install_config_values() {
+    local file="$1" base public gateway listen cert_mode cert_email
+    base="$(dns_env_value_from_file "$file" DNS_BASE_DOMAIN)" || return 1
+    public="$(dns_env_value_from_file "$file" DNS_PUBLIC_IP)" || return 1
+    gateway="$(dns_env_value_from_file "$file" DNS_GATEWAY_IP)" || return 1
+    listen="$(dns_env_value_from_file "$file" DNS_MIHOMO_LISTEN_IPS)" || return 1
+    cert_mode="$(dns_env_value_from_file "$file" CERT_MODE)" || return 1
+    cert_email="$(dns_env_value_from_file "$file" CERT_EMAIL)" || return 1
+
+    is_valid_domain "$base" \
+        || { err "Persisted DNS_BASE_DOMAIN is invalid before publication."; return 1; }
+    is_valid_ipv4 "$public" \
+        || { err "Persisted DNS_PUBLIC_IP is invalid before publication."; return 1; }
+    is_valid_ipv4 "$gateway" \
+        || { err "Persisted DNS_GATEWAY_IP is invalid before publication."; return 1; }
+    cert_mode="$(normalize_cert_mode "$cert_mode" 2>/dev/null || true)"
+    [[ "$cert_mode" == cloudflare || "$cert_mode" == http-01 || "$cert_mode" == debug ]] \
+        || { err "Persisted CERT_MODE is invalid before publication."; return 1; }
+    if [[ "$cert_mode" != debug ]]; then
+        is_valid_cert_email "$cert_email" \
+            || { err "Persisted CERT_EMAIL is invalid before publication."; return 1; }
     fi
-    [[ ${#raw} -ge 2 && "$raw" == *\" ]] || return 1
-    body="${raw:1:${#raw}-2}"
-    for ((i = 0; i < ${#body}; i++)); do
-        char="${body:i:1}"
-        if [[ "$char" == \\ ]]; then
-            ((i += 1))
-            (( i < ${#body} )) || return 1
-            next="${body:i:1}"
-            case "$next" in
-                '"'|'\'|'$'|'`') out+="$next" ;;
-                *) out+="\\$next" ;;
-            esac
-        else
-            [[ "$char" != '"' ]] || return 1
-            out+="$char"
-        fi
-    done
-    printf '%s' "$out"
+    [[ -n "$listen" ]] \
+        || { err "Persisted DNS_MIHOMO_LISTEN_IPS is empty before publication."; return 1; }
+    (
+        PUBLIC_IP="$public"
+        GATEWAY_IP="$gateway"
+        resolve_mihomo_listen_ips "$listen" >/dev/null
+    ) || { err "Persisted DNS_MIHOMO_LISTEN_IPS is invalid before publication."; return 1; }
+}
+
+assert_loaded_persisted_dns_env_revision() {
+    local require_marker="${1:-0}" env="${CONF_DIR}/dns.env" revision identity
+    case "$LOADED_DNS_ENV_SOURCE_STATE" in
+        absent)
+            [[ ! -e "$env" && ! -L "$env" ]] \
+                || { err "A dns.env file appeared after the installer selected fresh configuration."; return 1; }
+            ;;
+        present)
+            if [[ "$require_marker" == 1 ]]; then
+                persisted_dns_env_is_safe \
+                    || { err "Persisted installer configuration is unsafe after root claim: $env"; return 1; }
+            else
+                persisted_dns_env_file_metadata_is_safe \
+                    || { err "Persisted installer configuration is unsafe before root claim: $env"; return 1; }
+            fi
+            revision="$(sha256sum "$env" | awk '{print $1}')" || return 1
+            identity="$(stat -Lc '%d:%i' -- "$env" 2>/dev/null)" || return 1
+            [[ "$revision" == "$LOADED_DNS_ENV_SOURCE_REVISION" \
+               && "$identity" == "$LOADED_DNS_ENV_SOURCE_IDENTITY" ]] \
+                || { err "Persisted dns.env changed after its configuration snapshot was loaded."; return 1; }
+            ;;
+        *)
+            err "The installer has no pinned dns.env source revision."
+            return 1
+            ;;
+    esac
+}
+
+revalidate_claimed_persisted_dns_env() {
+    local env="${CONF_DIR}/dns.env"
+    assert_loaded_persisted_dns_env_revision 1 || return 1
+    [[ "$LOADED_DNS_ENV_SOURCE_STATE" == absent ]] && return 0
+    validate_dns_env_schema "$env" \
+        && validate_persisted_install_config_values "$env"
 }
 
 cfg_get() {
@@ -471,11 +770,7 @@ cfg_get() {
     # `set -euo pipefail` a grep no-match (pipeline rc=1) inside a bare
     # `VAR="$(cfg_get X)"` assignment would otherwise abort the whole install.
     raw="$(grep -E "^${1}=" "$env" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
-    if [[ "$1" == DNS_MIHOMO_SECRET ]]; then
-        dns_env_decode_value "$raw"
-    else
-        printf '%s' "$raw"
-    fi
+    printf '%s' "$raw"
 }
 
 # Caller configuration is discarded before command dispatch. Root installer and
@@ -484,7 +779,9 @@ cfg_get() {
 clear_external_config_env() {
     local key
     unset BASE_DOMAIN CONSOLE_DOMAIN DOT_DOMAIN PUBLIC_IP GATEWAY_IP \
-        MIHOMO_LISTEN_IPS LOWMEM
+        MIHOMO_LISTEN_IPS LOWMEM \
+        DNS_LISTEN_DOT DNS_LISTEN_DEBUG DNS_CONSOLE_CERT DNS_CONSOLE_KEY \
+        DNS_MIHOMO_CONTROLLER DNS_MIHOMO_SECRET
     for key in $DNS_ENV_KEYS; do
         unset "$key"
     done
@@ -569,6 +866,18 @@ identity_reconcile_state_root_is_safe() {
     fixed_owned_dir_is_safe "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE"
 }
 
+# A current reconciliation journal may be the surviving proof needed to repair
+# an interrupted install before the exact fixed state root has received its
+# marker. Reading that one file is allowed only when the complete unmarked-root
+# claim boundary already passes; publication still requires the current marker.
+identity_reconcile_state_root_is_safe_for_read() {
+    identity_reconcile_state_root_is_safe && return 0
+    [[ ! -e "$STATE_DIR/$STATE_OWNERSHIP_MARKER" \
+       && ! -L "$STATE_DIR/$STATE_OWNERSHIP_MARKER" ]] || return 1
+    preflight_fixed_owned_dir_claim \
+        "$STATE_DIR" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE" 1
+}
+
 identity_reconcile_journal_file_is_safe() {
     [[ -f "$IDENTITY_RECONCILE_FILE" && ! -L "$IDENTITY_RECONCILE_FILE" \
        && "$(file_uid "$IDENTITY_RECONCILE_FILE")" == 0 \
@@ -589,7 +898,7 @@ load_identity_reconcile_journal() {
         IDENTITY_RECONCILE_LOADED=1
         return 0
     fi
-    identity_reconcile_state_root_is_safe \
+    identity_reconcile_state_root_is_safe_for_read \
         || { err "Identity reconciliation journal is outside a safe 5gpn state root."; return 1; }
     identity_reconcile_journal_file_is_safe \
         || { err "Identity reconciliation journal metadata is unsafe: $IDENTITY_RECONCILE_FILE"; return 1; }
@@ -865,122 +1174,20 @@ root_plain_file_metadata_is_safe() {
        && "$(file_nlink "$path")" == 1 ]]
 }
 
-cert_generation_is_safe() {
-    local generation="$1" expected_gid="$2" entry name count=0
-    root_owned_nonwritable_directory_is_safe "$generation" || return 1
-    [[ "$(file_gid "$generation")" == "$expected_gid" \
-       && "$(file_mode "$generation")" == 750 ]] || return 1
-    while IFS= read -r -d '' entry; do
-        name="$(basename -- "$entry")"
-        case "$name" in fullchain.pem|privkey.pem) ;; *) return 1 ;; esac
-        root_plain_file_metadata_is_safe "$entry" "$expected_gid" 640 || return 1
-        count=$((count + 1))
-    done < <(find "$generation" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-    [[ "$count" == 2 ]]
-}
-
-# The account that must be able to read a certificate role's material.
-#
-# One mapping, two callers: deploy_cert_roles creates the tree with it and
-# cert_role_tree_is_safe_for_recursive_metadata validates the tree against it.
-# They were separate case statements, and moving DoT into the mihomo process
-# meant changing one of them -- which produced a directory the validator then
-# rejected as unsafe. A single definition cannot disagree with itself.
-#
-# dot and console are the two current roles and the monolith must read both.
-cert_role_group() {
-    case "$1" in
-        dot|console) printf '%s\n' "$FIVEGPN_SERVICE_GROUP" ;;
-        *) return 1 ;;
-    esac
-}
-
-cert_role_gid_is_permitted() {
-    local role="$1" actual_gid="$2" target_group target_gid
-    target_group="$(cert_role_group "$role")" || return 1
-    target_gid="$(account_gid "$target_group")"
-    [[ -n "$target_gid" && "$actual_gid" == "$target_gid" ]] && return 0
-    if [[ -n "$REPLACED_FIVEGPN_GID" && "$actual_gid" == "$REPLACED_FIVEGPN_GID" ]] \
-       || [[ -n "$REPLACED_FIVEGPN_NAMED_GID" \
-          && "$actual_gid" == "$REPLACED_FIVEGPN_NAMED_GID" ]]; then
-        return 0
-    fi
-    return 1
-}
-
 cert_role_tree_is_safe_for_recursive_metadata() {
-    local role="$1" role_name="${2:-}" group expected_gid current target canonical entry name generations
+    local role="$1" role_name="${2:-}"
     [[ -n "$role_name" ]] || role_name="$(basename -- "$role")"
-    expected_gid="$(file_gid "$role")"
-    group="$(cert_role_group "$role_name")" || return 1
-    cert_role_gid_is_permitted "$role_name" "$expected_gid" || return 1
-    runtime_directory_slot_is_safe "$role" "$DNS_CERT_DIR" || return 1
-    root_owned_nonwritable_directory_is_safe "$role" \
-        && [[ "$(file_gid "$role")" == "$expected_gid" \
-           && "$(file_mode "$role")" == 750 ]] \
-        && root_ownership_marker_is_safe "$role" "$CERT_ROLE_MARKER" \
-            "${CERT_ROLE_VALUE_PREFIX}:${role_name}" \
-        || return 1
-    generations="$role/generations"
-    root_owned_nonwritable_directory_is_safe "$generations" \
-        && [[ "$(file_gid "$generations")" == "$expected_gid" \
-           && "$(file_mode "$generations")" == 750 ]] \
-        || return 1
-    current="$role/current"
-    while IFS= read -r -d '' entry; do
-        name="$(basename -- "$entry")"
-        case "$name" in
-            "$CERT_ROLE_MARKER"|generations) ;;
-            current)
-                [[ -L "$entry" && "$(file_uid "$entry")" == 0 \
-                   && "$(file_gid "$entry")" == 0 \
-                   && "$(file_nlink "$entry")" == 1 ]] || return 1 ;;
-            *) return 1 ;;
-        esac
-    done < <(find "$role" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-    while IFS= read -r -d '' entry; do
-        name="$(basename -- "$entry")"
-        [[ "$name" =~ ^generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] \
-            || return 1
-        cert_generation_is_safe "$entry" "$expected_gid" || return 1
-    done < <(find "$generations" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-    if [[ -e "$current" || -L "$current" ]]; then
-        [[ -L "$current" ]] || return 1
-        target="$(readlink -- "$current")" || return 1
-        [[ "$target" =~ ^generations/generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] \
-            || return 1
-        [[ -d "$role/$target" && ! -L "$role/$target" ]] || return 1
-        canonical="$(canonical_dir_path "$role/$target")" || return 1
-        [[ "$canonical" == "$role/$target" ]] || return 1
-    fi
-}
-
-normalize_cert_role_group() {
-    local role="$1" group="$2" logical_role="${3:-}"
-    local marker="$1/$CERT_ROLE_MARKER" current="$1/current"
-    cert_role_tree_is_safe_for_recursive_metadata "$role" "$logical_role" || return 1
-    find "$role" -type d -exec chown "root:$group" {} + || return 1
-    find "$role/generations" -type f -exec chown "root:$group" {} + || return 1
-    chown root:root "$marker" || return 1
-    [[ ! -L "$current" ]] || chown -h root:root "$current" || return 1
-    cert_role_tree_is_safe_for_recursive_metadata "$role" "$logical_role"
+    [[ "$role" == "$DNS_CERT_DIR/$role_name" ]] || return 1
+    load_cert_role_helpers || return 1
+    cert_role_ctl_validate_role "$role_name" 0
 }
 
 
 
 
 cert_root_contents_are_safe() {
-    local entry name
-    while IFS= read -r -d '' entry; do
-        name="$(basename -- "$entry")"
-        case "$name" in
-            "$CERT_ROOT_MARKER") ;;
-            .provenance) root_plain_file_metadata_is_safe "$entry" 0 640 || return 1 ;;
-            .certbot-ownership) root_plain_file_metadata_is_safe "$entry" 0 640 || return 1 ;;
-            dot|console) cert_role_tree_is_safe_for_recursive_metadata "$entry" || return 1 ;;
-            *) return 1 ;;
-        esac
-    done < <(find "$DNS_CERT_DIR" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    load_cert_role_helpers || return 1
+    cert_role_ctl_root_is_steady_allow_missing_roles
 }
 
 cert_root_is_safe() {
@@ -990,6 +1197,17 @@ cert_root_is_safe() {
            && "$(file_mode "$DNS_CERT_DIR")" == 751 ]] \
         && root_ownership_marker_is_safe "$DNS_CERT_DIR" "$CERT_ROOT_MARKER" "$CERT_ROOT_MARKER_VALUE" \
         && cert_root_contents_are_safe
+}
+
+cert_root_is_recoverable() {
+    runtime_directory_slot_is_safe "$DNS_CERT_DIR" "$CONF_DIR" \
+        && root_owned_nonwritable_directory_is_safe "$DNS_CERT_DIR" \
+        && [[ "$(file_gid "$DNS_CERT_DIR")" == 0 \
+           && ( "$(file_mode "$DNS_CERT_DIR")" == 750 \
+                || "$(file_mode "$DNS_CERT_DIR")" == 751 ) ]] \
+        && root_ownership_marker_is_safe "$DNS_CERT_DIR" "$CERT_ROOT_MARKER" "$CERT_ROOT_MARKER_VALUE" \
+        && load_cert_role_helpers \
+        && cert_role_ctl_tree_is_recoverable
 }
 
 # Every reason an existing certificate root can be refused, decided without
@@ -1013,7 +1231,7 @@ cert_root_claim_is_possible() {
     if root_ownership_marker_is_safe "$DNS_CERT_DIR" "$CERT_ROOT_MARKER" "$CERT_ROOT_MARKER_VALUE"; then
         mode="$(file_mode "$DNS_CERT_DIR")"
         [[ "$mode" == 750 || "$mode" == 751 ]] \
-            && cert_root_contents_are_safe \
+            && { cert_root_contents_are_safe || cert_root_is_recoverable; } \
             || { err "Marked certificate root failed structural validation before publication."; return 1; }
         return 0
     fi
@@ -1046,9 +1264,19 @@ ensure_dns_cert_root() {
        && "$(file_gid "$DNS_CERT_DIR")" == 0 ]] \
         || { err "Certificate root ownership is unsafe: $DNS_CERT_DIR"; return 1; }
     if root_ownership_marker_is_safe "$DNS_CERT_DIR" "$CERT_ROOT_MARKER" "$CERT_ROOT_MARKER_VALUE"; then
-        if [[ "$(file_mode "$DNS_CERT_DIR")" == 750 ]] \
-           && cert_root_contents_are_safe; then
+        if [[ "$(file_mode "$DNS_CERT_DIR")" == 750 ]]; then
             chmod 00751 "$DNS_CERT_DIR" || return 1
+            sync -f "$DNS_CERT_DIR" \
+                || { err "Could not make the recovered certificate-root traversal mode durable."; return 1; }
+        fi
+        if ! cert_root_is_safe; then
+            cert_root_is_recoverable \
+                || { err "Existing certificate root is neither steady nor safely recoverable: $DNS_CERT_DIR"; return 1; }
+            [[ "$INSTALL_PUBLICATION_STARTED" == 1 && "$INSTALL_CERT_LOCK_HELD" == 1 ]] \
+                || { err "Recoverable certificate role residue may be repaired only after publication begins under the certificate lock."; return 1; }
+            load_cert_role_helpers || return 1
+            cert_role_ctl_repair_recoverable_tree \
+                || { err "Could not repair the interrupted certificate role publication forward."; return 1; }
         fi
         cert_root_is_safe \
             || { err "Existing certificate root failed structural validation: $DNS_CERT_DIR"; return 1; }
@@ -1168,32 +1396,55 @@ remove_debug_cert_root() {
 }
 
 preflight_runtime_publication_paths() {
-    local path
-    fixed_owned_dir_is_safe "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
-        || { err "Unsafe installed-runtime root: $BASE_DIR"; return 1; }
-    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
-        || { err "Unsafe configuration root: $CONF_DIR"; return 1; }
+    local allow_unclaimed="${1:-0}" path
 
-    for path in \
-        "$SCRIPTS_DIR" "${BASE_DIR}/etc" "${BASE_DIR}/etc/systemd" \
-        "${BASE_DIR}/etc/mihomo"; do
-        runtime_directory_slot_is_safe "$path" "$BASE_DIR" \
-            || { err "Refusing unsafe runtime directory slot: $path"; return 1; }
-    done
-    for path in \
-        "$MIHOMO_DIR" "$INTERCEPT_DIR" \
-        "${INTERCEPT_DIR}/tls" "$DNS_CERT_DIR" "${DNS_CERT_DIR}/dot" \
-        "${DNS_CERT_DIR}/console"; do
-        runtime_directory_slot_is_safe "$path" "$CONF_DIR" \
-            || { err "Refusing unsafe configuration directory slot: $path"; return 1; }
-    done
-    for path in \
-        "${CONF_DIR}/dns.env" \
-        "${MIHOMO_DIR}/config.yaml" \
-        "${INTERCEPT_DIR}/cert-state"; do
-        runtime_plain_file_slot_is_safe "$path" "$CONF_DIR" \
-            || { err "Refusing unsafe configuration file slot: $path"; return 1; }
-    done
+    if [[ -e "$BASE_DIR" || -L "$BASE_DIR" ]]; then
+        if ! fixed_owned_dir_is_safe "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE"; then
+            [[ "$allow_unclaimed" == 1 ]] \
+                && unmarked_fixed_dir_is_safe_to_claim "$BASE_DIR" \
+                || { err "Unsafe installed-runtime root: $BASE_DIR"; return 1; }
+        fi
+        for path in \
+            "$SCRIPTS_DIR" "$RELEASE_DIR" "${BASE_DIR}/etc" "${BASE_DIR}/etc/systemd" \
+            "${BASE_DIR}/etc/mihomo"; do
+            runtime_directory_slot_is_safe "$path" "$BASE_DIR" \
+                || { err "Refusing unsafe runtime directory slot: $path"; return 1; }
+        done
+        for path in \
+            "${RELEASE_DIR}/pins.env" \
+            "${RELEASE_DIR}/pins.sh"; do
+            runtime_plain_file_slot_is_safe "$path" "$BASE_DIR" \
+                || { err "Refusing unsafe installed release-pin file slot: $path"; return 1; }
+        done
+    elif [[ "$allow_unclaimed" != 1 ]]; then
+        err "Installed-runtime root is missing after project-root claim: $BASE_DIR"
+        return 1
+    fi
+
+    if [[ -e "$CONF_DIR" || -L "$CONF_DIR" ]]; then
+        if ! fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"; then
+            [[ "$allow_unclaimed" == 1 ]] \
+                && unmarked_fixed_dir_is_safe_to_claim "$CONF_DIR" \
+                || { err "Unsafe configuration root: $CONF_DIR"; return 1; }
+        fi
+        for path in \
+            "$MIHOMO_DIR" "$INTERCEPT_DIR" \
+            "${INTERCEPT_DIR}/tls" "$DNS_CERT_DIR" "${DNS_CERT_DIR}/dot" \
+            "${DNS_CERT_DIR}/console"; do
+            runtime_directory_slot_is_safe "$path" "$CONF_DIR" \
+                || { err "Refusing unsafe configuration directory slot: $path"; return 1; }
+        done
+        for path in \
+            "${CONF_DIR}/dns.env" \
+            "${MIHOMO_DIR}/config.yaml" \
+            "${INTERCEPT_DIR}/cert-state"; do
+            runtime_plain_file_slot_is_safe "$path" "$CONF_DIR" \
+                || { err "Refusing unsafe configuration file slot: $path"; return 1; }
+        done
+    elif [[ "$allow_unclaimed" != 1 ]]; then
+        err "Configuration root is missing after project-root claim: $CONF_DIR"
+        return 1
+    fi
 }
 
 shared_runtime_directory_metadata_is_safe() {
@@ -1276,50 +1527,6 @@ remove_owned_child() {
     [[ "$(canonical_dir_path "$target")" == "$target" ]] || return 1
     managed_path_has_no_nested_mounts "$target" || return 1
     rm -rf -- "$target"
-}
-
-remove_owned_scoped_child() {
-    local root="$1" marker="$2" value="$3" scope="$4" child="$5"
-    local canonical scope_canonical target
-    [[ -n "$child" && "$child" != */* ]] || return 1
-    canonical="$(owned_root_canonical "$root" "$marker" "$value")" || return 1
-    scope_canonical="$(canonical_dir_path "$scope")" || return 1
-    [[ "$scope_canonical" == "$scope" && "$scope_canonical" == "$canonical"/* ]] || return 1
-    target="${scope_canonical}/${child}"
-    [[ ! -e "$target" && ! -L "$target" ]] && return 0
-    [[ -d "$target" && ! -L "$target" ]] || return 1
-    [[ "$(canonical_dir_path "$target")" == "$target" ]] || return 1
-    managed_path_has_no_nested_mounts "$target" || return 1
-    rm -rf -- "$target"
-}
-
-# Remove unpublished certificate generations and temporary current links after
-# a staging or publication failure. A generation still referenced by current is
-# deliberately retained: that can happen only when rollback of a published role
-# also failed, and deleting it would turn a recoverable new certificate into a
-# dangling live link.
-cleanup_cert_role_candidates() {
-    local roles_name="$1" dests_name="$2" generations_name="$3" links_name="$4"
-    local -n candidate_roles="$roles_name"
-    local -n candidate_dests="$dests_name"
-    local -n candidate_generations="$generations_name"
-    local -n candidate_links="$links_name"
-    local i role dest generation link target current
-    for i in "${!candidate_generations[@]}"; do
-        role="${candidate_roles[$i]}"
-        dest="${candidate_dests[$i]}"
-        generation="${candidate_generations[$i]}"
-        link="${candidate_links[$i]:-}"
-        [[ -z "$link" ]] || rm -f -- "$link"
-        [[ -n "$generation" ]] || continue
-        target="generations/$(basename -- "$generation")"
-        current="$(readlink -- "${dest}/current" 2>/dev/null || true)"
-        if [[ "$current" != "$target" ]]; then
-            remove_owned_scoped_child "$dest" "$CERT_ROLE_MARKER" \
-                "${CERT_ROLE_VALUE_PREFIX}:${role}" "${dest}/generations" \
-                "$(basename -- "$generation")" || true
-        fi
-    done
 }
 
 claim_temp_dir() {
@@ -1526,6 +1733,10 @@ remove_runtime_preserving_gum() {
         || { err "Refusing runtime directory alias during removal: $BASE_DIR"; return 1; }
     fixed_owned_dir_is_safe "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
         || { err "Refusing to remove unowned runtime directory: $BASE_DIR"; return 1; }
+    if [[ -e "$UI_DIR" || -L "$UI_DIR" ]]; then
+        remove_ui_dir \
+            || { err "Refusing runtime removal while the UI generation tree is unsafe."; return 1; }
+    fi
 
     if [[ -d "$BIN_DIR" && ! -L "$BIN_DIR" && -f "$GUM_BIN" && ! -L "$GUM_BIN" ]]; then
         clear_owned_scope "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
@@ -1557,108 +1768,14 @@ root_owned_nonwritable_directory_is_safe() {
     mode_has_no_group_or_other_write "$(file_mode "$dir")"
 }
 
-# A local user must not be able to rename the publication parent after it was
-# checked but before root creates or swaps a static tree. Validate every existing
-# component, including the direct parent, and reject aliases and writable dirs.
-secure_directory_chain_is_safe() {
-    local path="$1" canonical relative component current="/"
-    [[ "$path" == /* ]] || return 1
-    canonical="$(canonical_dir_path "$path")" || return 1
-    [[ "$canonical" == "$path" ]] || return 1
-    root_owned_nonwritable_directory_is_safe / || return 1
-    relative="${path#/}"
-    while [[ -n "$relative" ]]; do
-        component="${relative%%/*}"
-        [[ -n "$component" && "$component" != . && "$component" != .. ]] || return 1
-        current="${current%/}/${component}"
-        if [[ -e "$current" || -L "$current" ]]; then
-            root_owned_nonwritable_directory_is_safe "$current" || return 1
-        fi
-        if [[ "$relative" == */* ]]; then
-            relative="${relative#*/}"
-        else
-            relative=""
-        fi
-    done
-}
-
-ensure_static_publish_parent() {
-    local dest="$1" parent
-    parent="$(dirname -- "$dest")" || return 1
-    secure_directory_chain_is_safe "$parent" || return 1
-    root_owned_nonwritable_directory_is_safe "$parent"
-}
-
-static_publish_parent_is_safe() {
-    local parent
-    parent="$(dirname -- "$1")" || return 1
-    secure_directory_chain_is_safe "$parent" \
-        && root_owned_nonwritable_directory_is_safe "$parent"
-}
-
-static_owned_tree_is_safe() {
-    local dir="$1" marker="$2" value="$3"
-    root_owned_nonwritable_directory_is_safe "$dir" \
-        && root_ownership_marker_is_safe "$dir" "$marker" "$value"
-}
-
-# Claim a fresh empty public static tree and publish the marker that later
-# removals re-verify. A populated or marked tree is never adopted.
-claim_public_owned_tree() {
-    local dir="$1" marker="$2" value="$3" created_dir=0 existing_entry=""
-    if [[ -e "$dir" || -L "$dir" ]]; then
-        root_owned_nonwritable_directory_is_safe "$dir" || return 1
-        [[ ! -e "$dir/$marker" && ! -L "$dir/$marker" ]] || return 1
-        existing_entry="$(find "$dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" \
-            || return 1
-        [[ -z "$existing_entry" ]] || return 1
-    else
-        created_dir=1
-    fi
-    write_ownership_marker "$dir" "$marker" "$value" || return 1
-    if ! static_owned_tree_is_safe "$dir" "$marker" "$value"; then
-        rm -f -- "$dir/$marker"
-        [[ "$created_dir" == 0 ]] || rmdir -- "$dir" 2>/dev/null || true
-        return 1
-    fi
-}
-
-remove_public_owned_tree() {
-    local dir="$1" marker="$2" value="$3"
-    [[ ! -e "$dir" && ! -L "$dir" ]] && return 0
-    static_publish_parent_is_safe "$dir" \
-        && static_owned_tree_is_safe "$dir" "$marker" "$value" \
-        || { err "Refusing to remove unsafe or unowned public tree: $dir"; return 1; }
-    remove_owned_root "$dir" "$marker" "$value"
-}
-
-normalize_static_tree_ownership() {
-    find "$1" -exec chown root:root {} +
-}
-
-preflight_public_owned_tree() {
-    local path="$1" marker="$2" value="$3" parent existing_entry=""
-    parent="$(dirname -- "$path")" || return 1
-    secure_directory_chain_is_safe "$parent" \
-        && root_owned_nonwritable_directory_is_safe "$parent" || return 1
-    [[ ! -e "$path" && ! -L "$path" ]] && return 0
-    [[ -d "$path" && ! -L "$path" ]] || return 1
-    if verify_ownership_marker "$path" "$marker" "$value"; then
-        static_owned_tree_is_safe "$path" "$marker" "$value"
-        return
-    fi
-    root_owned_nonwritable_directory_is_safe "$path" || return 1
-    existing_entry="$(find "$path" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" \
-        || return 1
-    [[ -z "$existing_entry" ]]
-}
-
 safe_ui_path() {
     local p
     [[ -n "${UI_DIR:-}" && "$UI_DIR" != *$'\n'* && "$UI_DIR" != *$'\r'* ]] \
         || { err "UI_DIR is empty or contains a newline; refusing it."; return 1; }
     p="$(canonical_dir_path "$UI_DIR")" \
         || { err "Could not canonicalize UI_DIR='$UI_DIR'."; return 1; }
+    [[ "$p" == "$UI_DIR" ]] \
+        || { err "Refusing aliased fixed UI root: $UI_DIR -> $p"; return 1; }
     case "$p" in
         /|/bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/home|/home/*|/lib|/lib/*|/lib64|/lib64/*|/opt|/private/etc|/private/etc/*|/private/tmp|/private/tmp/*|/private/var|/private/var/*|/proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/srv|/sys|/sys/*|/tmp|/tmp/*|/usr|/usr/*|/var|/var/*|"$BASE_DIR"|"$CONF_DIR")
             err "Refusing unsafe UI_DIR: $p"; return 1 ;;
@@ -1666,87 +1783,159 @@ safe_ui_path() {
     printf '%s\n' "$p"
 }
 
+load_ui_generation_helper() {
+    local helper="${SCRIPT_DIR}/scripts/ui-generation.sh" before="" after=""
+    local hash_fd source_fd hash_metadata source_metadata fd_digest
+    [[ "$UI_GENERATION_HELPER_LOADED" == 1 ]] && return 0
+    [[ -f "$helper" && ! -L "$helper" ]] \
+        || { err "Required UI generation helper is missing or unsafe: $helper"; return 1; }
+    if [[ "$SCRIPT_DIR" == "$BASE_DIR" ]]; then
+        [[ -d "$SCRIPTS_DIR" && ! -L "$SCRIPTS_DIR" \
+           && "$(readlink -f -- "$SCRIPTS_DIR")" == "$SCRIPTS_DIR" \
+           && "$(stat -Lc '%u:%g:%a' -- "$SCRIPTS_DIR")" == 0:0:755 ]] \
+            || { err "Installed script directory metadata is unsafe."; return 1; }
+        [[ "$(stat -Lc '%u:%g:%a:%h' -- "$helper" 2>/dev/null)" == 0:0:755:1 ]] \
+            || { err "Installed UI generation helper metadata is unsafe."; return 1; }
+        before="$(release_pin_file_state "$helper")" \
+            || { err "Could not bind the installed UI generation helper."; return 1; }
+        exec {hash_fd}<"$helper" || return 1
+        exec {source_fd}<"$helper" || { exec {hash_fd}<&-; return 1; }
+        hash_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$hash_fd")" \
+            || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+        source_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$source_fd")" \
+            || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+        [[ "$hash_metadata" == "${before%:*}" && "$source_metadata" == "${before%:*}" ]] \
+            || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+        fd_digest="$(sha256sum -- "/proc/self/fd/$hash_fd" | awk '{print $1}')" \
+            || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+        exec {hash_fd}<&-
+        [[ "$fd_digest" == "${before##*:}" ]] || { exec {source_fd}<&-; return 1; }
+        # shellcheck source=scripts/ui-generation.sh
+        source "/proc/self/fd/$source_fd" || { exec {source_fd}<&-; return 1; }
+        exec {source_fd}<&-
+    else
+        # shellcheck source=scripts/ui-generation.sh
+        source "$helper" || return 1
+    fi
+    if [[ -n "$before" ]]; then
+        after="$(release_pin_file_state "$helper")" \
+            || { err "Could not revalidate the installed UI generation helper."; return 1; }
+        [[ "$after" == "$before" ]] \
+            || { err "Installed UI generation helper changed while it was loaded."; return 1; }
+    fi
+    [[ "$UI_GENERATION_ROOT" == "$UI_DIR" \
+       && "$UI_GENERATION_MARKER" == "$ZASH_OWNERSHIP_MARKER" \
+       && "$UI_GENERATION_MARKER_VALUE" == "$ZASH_OWNERSHIP_VALUE" ]] \
+        || { err "UI generation helper constants drifted from the installer contract."; return 1; }
+    UI_GENERATION_HELPER_LOADED=1
+}
+
+CERT_ROLE_HELPERS_LOADED=0
+
+load_cert_role_helpers() {
+    local helper path before after hash_fd source_fd hash_metadata source_metadata fd_digest
+    local -a helpers=(publication-fs.sh cert-role-ctl.sh)
+    if [[ "$CERT_ROLE_HELPERS_LOADED" != 1 ]]; then
+        for helper in "${helpers[@]}"; do
+            path="${SCRIPT_DIR}/scripts/${helper}"
+            [[ -f "$path" && ! -L "$path" ]] \
+                || { err "Required certificate publication helper is missing or unsafe: $path"; return 1; }
+            if [[ "$SCRIPT_DIR" == "$BASE_DIR" ]]; then
+                before="$(installed_runtime_script_state "$path")" \
+                    || { err "Installed certificate publication helper metadata is unsafe: $path"; return 1; }
+                exec {hash_fd}<"$path" || return 1
+                exec {source_fd}<"$path" || { exec {hash_fd}<&-; return 1; }
+                hash_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$hash_fd")" \
+                    || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+                source_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$source_fd")" \
+                    || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+                [[ "$hash_metadata" == "${before%:*}" && "$source_metadata" == "${before%:*}" ]] \
+                    || { exec {hash_fd}<&-; exec {source_fd}<&-; err "Certificate publication helper changed while it was anchored: $path"; return 1; }
+                fd_digest="$(sha256sum -- "/proc/self/fd/$hash_fd" | awk '{print $1}')" \
+                    || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+                exec {hash_fd}<&-
+                [[ "$fd_digest" == "${before##*:}" ]] \
+                    || { exec {source_fd}<&-; err "Certificate publication helper bytes differ from the anchored path: $path"; return 1; }
+                # shellcheck source=/dev/null
+                source "/proc/self/fd/$source_fd" || { exec {source_fd}<&-; return 1; }
+                exec {source_fd}<&-
+                after="$(installed_runtime_script_state "$path")" \
+                    || { err "Could not revalidate installed certificate publication helper: $path"; return 1; }
+                [[ "$after" == "$before" ]] \
+                    || { err "Installed certificate publication helper changed while it was loaded: $path"; return 1; }
+            else
+                # The release-bundle source lease and generation binding cover
+                # source execution outside the installed management tree.
+                # shellcheck source=/dev/null
+                source "$path" || return 1
+            fi
+        done
+        declare -F publication_fs_commit_relative_pointer >/dev/null 2>&1 \
+            && [[ "${CERT_ROLE_CTL_API_VERSION:-0}" == 1 ]] \
+            || { err "Certificate publication helper API mismatch."; return 1; }
+        CERT_ROLE_HELPERS_LOADED=1
+    fi
+    CERT_ROLE_CTL_ROOT="$DNS_CERT_DIR"
+    CERT_ROLE_CTL_SERVICE_GROUP="$FIVEGPN_SERVICE_GROUP"
+    CERT_ROLE_CTL_CONFIG_MARKER="$CONF_OWNERSHIP_MARKER"
+    CERT_ROLE_CTL_CONFIG_MARKER_VALUE="$CONF_OWNERSHIP_VALUE"
+    CERT_ROLE_CTL_ROOT_MARKER="$CERT_ROOT_MARKER"
+    CERT_ROLE_CTL_ROOT_MARKER_VALUE="$CERT_ROOT_MARKER_VALUE"
+    CERT_ROLE_CTL_ROLE_MARKER="$CERT_ROLE_MARKER"
+    CERT_ROLE_CTL_ROLE_VALUE_PREFIX="$CERT_ROLE_VALUE_PREFIX"
+    CERT_ROLE_CTL_ALLOW_CREATE=0
+    CERT_ROLE_CTL_SERVICE_GID=""
+    CERT_ROLE_CTL_ADDITIONAL_GIDS="${REPLACED_FIVEGPN_GID:-}:${REPLACED_FIVEGPN_NAMED_GID:-}"
+    if [[ "${INSTALL_SH_LIB_ONLY:-0}" == 1 && "$DNS_CERT_DIR" != /etc/5gpn/cert ]]; then
+        CERT_ROLE_CTL_ALLOW_TEST_ROOT=1
+    else
+        CERT_ROLE_CTL_ALLOW_TEST_ROOT=0
+    fi
+}
+
+cert_role_ctl_group_gid_override() {
+    account_gid "$1"
+}
+
+installed_runtime_script_state() {
+    local path="$1"
+    [[ "$path" == "$SCRIPTS_DIR"/* \
+       && -d "$SCRIPTS_DIR" && ! -L "$SCRIPTS_DIR" \
+       && "$(readlink -f -- "$SCRIPTS_DIR")" == "$SCRIPTS_DIR" \
+       && "$(stat -Lc '%u:%g:%a' -- "$SCRIPTS_DIR")" == 0:0:755 \
+       && -f "$path" && ! -L "$path" \
+       && "$(readlink -f -- "$path")" == "$path" \
+       && "$(stat -Lc '%u:%g:%a:%h' -- "$path" 2>/dev/null)" == 0:0:755:1 ]] \
+        || return 1
+    release_pin_file_state "$path"
+}
+
 preflight_ui_dir() {
     local p
     p="$(safe_ui_path)" || return 1
-    preflight_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
+    load_ui_generation_helper || return 1
+    ui_generation_preflight "$p" \
         || { err "Refusing unsafe or unowned UI_DIR before staging: $p"; return 1; }
 }
 
-# Claim the UI directory before ever clearing it. A non-empty directory must
-# already carry the exact current ownership marker.
+# Claim the stable UI generation root without publishing a live generation.
+# A populated unmarked root and the retired flat-tree schema are never adopted.
 claim_ui_dir() {
     local p
     preflight_ui_dir || return 1
     p="$(safe_ui_path)" || return 1
-    ensure_static_publish_parent "$p" \
-        || { err "UI_DIR parent is not root-owned and non-writable: $(dirname -- "$p")"; return 1; }
-    if [[ ( -e "$p" || -L "$p" ) && ( ! -d "$p" || -L "$p" ) ]]; then
-        err "UI_DIR exists but is not a directory: $p"; return 1
-    fi
-    if verify_ownership_marker "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE"; then
-        static_owned_tree_is_safe "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
-            || { err "Unsafe UI directory or ownership marker: $p"; return 1; }
-    else
-        claim_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
-            || { err "Could not establish safe UI directory ownership: $p"; return 1; }
-    fi
+    ui_generation_claim_root "$p" \
+        || { err "Could not establish the safe UI generation root: $p"; return 1; }
 }
 
 
 remove_ui_dir() {
     local p
     p="$(safe_ui_path)" || return 1
-    [[ -e "$p" ]] || return 0
-    static_publish_parent_is_safe "$p" \
-        && static_owned_tree_is_safe "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
-        || { err "Refusing to remove unsafe UI directory: $p"; return 1; }
-    remove_public_owned_tree "$p" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE"
-}
-
-# Atomically publish a tree of public static assets. Source trees may come from
-# mktemp (0700) or a restrictive caller umask, and cp -a preserves those modes.
-# Normalize the complete candidate before the live-tree swap so the unprivileged
-# The runtime can traverse and read the console, zashboard, and iOS profile
-# without exposing any writable path to it.
-publish_owned_tree() {
-    local src="$1" dest="$2" marker="$3" value="$4" parent leaf candidate backup
-    parent="$(dirname -- "$dest")"; leaf="$(basename -- "$dest")"
-    ensure_static_publish_parent "$dest" \
-        || { err "Refusing unsafe static publication parent: $parent"; return 1; }
-    candidate="$(mktemp -d "${parent}/.${leaf}.new.XXXXXX")" || return 1
-    write_ownership_marker "$candidate" "$marker" "$value" \
-        || { rmdir -- "$candidate"; return 1; }
-    cp -a -- "$src/." "$candidate/" \
-        || { remove_owned_root "$candidate" "$marker" "$value" || true; return 1; }
-    write_ownership_marker "$candidate" "$marker" "$value" \
-        || { remove_owned_root "$candidate" "$marker" "$value" || true; return 1; }
-    runtime_tree_has_only_plain_entries "$candidate" \
-        && normalize_static_tree_ownership "$candidate" \
-        && find "$candidate" -type d -exec chmod 0755 {} + \
-        && find "$candidate" -type f -exec chmod 0644 {} + \
-        || { remove_owned_root "$candidate" "$marker" "$value" || true; return 1; }
-    static_owned_tree_is_safe "$candidate" "$marker" "$value" \
-        || { remove_owned_root "$candidate" "$marker" "$value" || true; return 1; }
-    backup="${parent}/.${leaf}.old.$$"
-    static_publish_parent_is_safe "$dest" \
-        || { remove_owned_root "$candidate" "$marker" "$value" || true; err "Static publication parent changed before swap: $parent"; return 1; }
-    [[ ! -e "$backup" && ! -L "$backup" ]] \
-        || { remove_owned_root "$candidate" "$marker" "$value" || true; err "Static publication backup path already exists: $backup"; return 1; }
-    if [[ -e "$dest" || -L "$dest" ]]; then
-        static_owned_tree_is_safe "$dest" "$marker" "$value" \
-            || { remove_owned_root "$candidate" "$marker" "$value" || true; err "Refusing to replace unowned tree: $dest"; return 1; }
-        mv -- "$dest" "$backup" \
-            || { remove_owned_root "$candidate" "$marker" "$value" || true; return 1; }
-    fi
-    if ! mv -- "$candidate" "$dest"; then
-        [[ -e "$backup" ]] && mv -- "$backup" "$dest"
-        remove_owned_root "$candidate" "$marker" "$value" || true
-        return 1
-    fi
-    if [[ -e "$backup" ]]; then
-        remove_owned_root "$backup" "$marker" "$value" || true
-    fi
+    [[ ! -e "$p" && ! -L "$p" ]] && return 0
+    load_ui_generation_helper || return 1
+    ui_generation_remove_root "$p" \
+        || { err "Refusing to remove an unsafe UI generation tree: $p"; return 1; }
 }
 
 # Bootstrap Gum in an owned temporary directory. It is usable for every prompt
@@ -1754,7 +1943,11 @@ publish_owned_tree() {
 # pass and project publication begins, publish_verified_gum may copy the exact
 # verified binary into the owned runtime root. Any failure remains non-fatal.
 install_gum() {
-    local arch url tmp exp got bin m
+    local arch asset url tmp exp got bin m
+    if ! assert_release_pin_bundle_revision; then
+        warn "release pin files changed; refusing the optional Gum download and using plain output."
+        return 0
+    fi
     if [[ -n "$TEMP_GUM_DIR" ]]; then
         cleanup_temporary_gum \
             || { warn "gum: previous temporary staging could not be cleaned; using plain output."; return 0; }
@@ -1766,13 +1959,18 @@ install_gum() {
     [[ "$_HAVE_GUM" == 1 ]] && return 0
     m="$(uname -m 2>/dev/null || echo x86_64)"
     case "$m" in
-        x86_64|amd64)  arch="x86_64"; exp="$GUM_SHA256_X86_64" ;;
-        aarch64|arm64) arch="arm64";  exp="$GUM_SHA256_ARM64" ;;
-        armv7l|armhf)  arch="armv7";  exp="$GUM_SHA256_ARMV7" ;;
-        *)             arch="x86_64"; exp="$GUM_SHA256_X86_64" ;;
+        x86_64|amd64)  arch="x86_64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        armv7l|armhf)  arch="armv7" ;;
+        *)             arch="x86_64" ;;
     esac
-    url="https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/gum_${GUM_VERSION}_Linux_${arch}.tar.gz"
-    info "Downloading optional Gum ${GUM_VERSION} TUI helper (up to 60s; plain output remains available)."
+    if ! asset="$(release_asset_name gum "$arch")" \
+       || ! url="$(release_download_url gum "$arch")" \
+       || ! exp="$(release_artifact_sha256 gum "$arch")"; then
+        warn "gum release coordinates are invalid; using plain output."
+        return 0
+    fi
+    info "Downloading optional Gum ${GUM_VERSION} TUI helper ${asset} (up to 60s; plain output remains available)."
     tmp="$(mktemp -d /tmp/5gpn-gum.XXXXXX 2>/dev/null)" || { warn "gum: mktemp failed; using plain output."; _HAVE_GUM=0; return 0; }
     claim_temp_dir "$tmp" || { rmdir -- "$tmp" 2>/dev/null || true; warn "gum: could not claim temp directory; using plain output."; return 0; }
     TEMP_GUM_DIR="$tmp"
@@ -2061,7 +2259,6 @@ render_mihomo_seed() {
                 printf '%s\n' "$listeners"
                 continue ;;
         esac
-        line="${line//__GATEWAY_IP__/$SEED_GATEWAY_IP}"
         line="${line//__CONSOLE_DOMAIN__/$SEED_CONSOLE_DOMAIN}"
         line="${line//__CONTROLLER_SECRET__/$SEED_CONTROLLER_SECRET}"
         printf '%s\n' "$line"
@@ -2110,7 +2307,7 @@ systemd_global_dropin_key_is_managed() {
             case "$key" in
                 Exec*|User|Group|SupplementaryGroups|DynamicUser|Environment|EnvironmentFile|PassEnvironment|UnsetEnvironment|\
                 WorkingDirectory|RootDirectory|RootDirectoryStartOnly|RootImage|RootEphemeral|UMask|PermissionsStartOnly|\
-                Restart*|Kill*|OOMPolicy|Delegate*|Slice|DisableControllers|\
+                Restart*|Kill*|TimeoutStartSec|OOMPolicy|Delegate*|Slice|DisableControllers|\
                 Memory*|StartupMemory*|AllowedMemoryNodes|StartupAllowedMemoryNodes|\
                 CPU*|StartupCPU*|AllowedCPUs|StartupAllowedCPUs|\
                 IO*|StartupIO*|BlockIO*|StartupBlockIO*|Tasks*|ManagedOOM*|\
@@ -2352,10 +2549,85 @@ legacy_dns_env_key_is_known() {
         DNS_LISTEN_API|DNS_CERT|DNS_KEY|DNS_UPSTREAMS|DNS_ECS_FILE|DNS_RULES_DIR|DNS_CHNROUTE|DNS_EGRESS_BROKER|DNS_EGRESS_RESOLVER|\
         DNS_SUBSCRIPTIONS|DNS_POLICY_RULES|DNS_API_RATE|DNS_API_BURST|DNS_MIHOMO_CONFIG|\
         DNS_CACHE_SIZE|DNS_MAX_INFLIGHT|DNS_TTL_MIN|DNS_TTL_MAX|DNS_QUERY_TIMEOUT|DNS_STATS_FILE|\
-        DNS_HEARTBEAT_URL|DNS_HEARTBEAT_INTERVAL|DNS_CHINA_ECS)
+        DNS_HEARTBEAT_URL|DNS_HEARTBEAT_INTERVAL|DNS_CHINA_ECS|\
+        DNS_LISTEN_DOT|DNS_LISTEN_DEBUG|DNS_CONSOLE_CERT|DNS_CONSOLE_KEY|\
+        DNS_MIHOMO_CONTROLLER|DNS_MIHOMO_SECRET)
             return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# Validate only the installation-owned projection of a Core-validated DNS
+# document. Full schema and semantic validation belongs to the staged pinned
+# Core; this shell boundary pins the fields that a reinstall may neither repair
+# nor reinterpret.
+current_dns_document_is_compatible() {
+    local file="$1"
+    local cert="${DOT_CERT_DIR}/current/fullchain.pem"
+    local key="${DOT_CERT_DIR}/current/privkey.pem"
+    [[ -f "$file" && ! -L "$file" ]] || return 1
+    jq -e \
+        --arg dot "$DOT_LISTEN_ADDR" \
+        --arg debug "$DEBUG_LISTEN_ADDR" \
+        --arg origin "$ORIGIN_LISTEN_ADDR" \
+        --arg cert "$cert" \
+        --arg key "$key" '
+            type == "object"
+            and (.gateway | type == "string")
+            and (.listen | type == "object")
+            and (.listen.dot == $dot)
+            and (.listen.debug == $debug)
+            and (.listen.origin == $origin)
+            and (.listen.certificate == $cert)
+            and (.listen.privateKey == $key)
+        ' "$file" >/dev/null 2>&1
+}
+
+# jq uses IEEE-754 numbers. The Core accepts 64-bit integer fields, so a
+# gateway-only rewrite is safe only when every existing number is exactly
+# representable and integral. The staged Core remains the schema authority.
+dns_document_is_jq_gateway_update_safe() {
+    local file="$1"
+    jq -e '
+        [.. | numbers]
+        | all(. == floor and . >= -9007199254740991 and . <= 9007199254740991)
+    ' "$file" >/dev/null 2>&1
+}
+
+validate_dns_candidate_with_core() {
+    local candidate="$1" validator="$2" validator_label="$3" probe_parent="$4"
+    local owner_uid probe_dir probe_file rc=0
+    [[ -x "$validator" ]] \
+        || { err "The ${validator_label} is unavailable for DNS candidate validation."; return 1; }
+    [[ -d "$probe_parent" && ! -L "$probe_parent" ]] \
+        || { err "The DNS candidate validation root is unavailable: $probe_parent"; return 1; }
+    owner_uid="$(id -u "$FIVEGPN_SERVICE_USER")" || return 1
+    probe_dir="$(mktemp -d "${probe_parent}/dns-candidate-probe.XXXXXX")" || return 1
+    probe_file="${probe_dir}/dns.json"
+    if ! install -o "$FIVEGPN_SERVICE_USER" -g "$FIVEGPN_SERVICE_GROUP" -m 0600 \
+            "$candidate" "$probe_file"; then
+        rmdir -- "$probe_dir" 2>/dev/null || true
+        return 1
+    fi
+    timeout --kill-after=5s 30s "$validator" 5gpn-state validate \
+        --owner-uid "$owner_uid" "$probe_dir" >/dev/null || rc=$?
+    rm -f -- "$probe_file"
+    rmdir -- "$probe_dir" \
+        || { err "Could not remove the DNS candidate validation directory."; return 1; }
+    [[ "$rc" == 0 ]] \
+        || { err "The ${validator_label} rejected the DNS gateway-update candidate."; return "$rc"; }
+}
+
+validate_dns_candidate_with_staged_core() {
+    validate_dns_candidate_with_core "$1" "${ARTIFACT_STAGE}/mihomo" \
+        "staged Core" "$ARTIFACT_STAGE"
+}
+
+validate_dns_candidate_with_installed_core() {
+    local probe_parent
+    probe_parent="$(dirname -- "$INSTALL_LOCK_FILE")"
+    validate_dns_candidate_with_core "$1" "$MIHOMO_BIN" \
+        "installed Core" "$probe_parent"
 }
 
 noncomment_config_matches() {
@@ -2395,6 +2667,7 @@ detect_legacy_footprints() {
     local path unit user group line key
     local base_raw="" legacy_base=""
     local conf_marker="${CONF_DIR}/${CONF_OWNERSHIP_MARKER}"
+    local ui_marker="${UI_DIR}/${ZASH_OWNERSHIP_MARKER}"
     local env="${CONF_DIR}/dns.env" config="${MIHOMO_DIR}/config.yaml"
     local polkit_rule="/etc/polkit-1/rules.d/50-5gpn.rules"
 
@@ -2453,6 +2726,20 @@ detect_legacy_footprints() {
     done
 
     if [[ "$base_inspectable" == 1 ]]; then
+        if [[ -f "$ui_marker" && ! -L "$ui_marker" \
+           && "$(file_uid "$ui_marker")" == 0 \
+           && "$(cat "$ui_marker" 2>/dev/null || true)" == "5gpn-zashboard" ]]; then
+            legacy_found "$UI_DIR uses the retired flat-UI ownership marker"
+        fi
+        for path in "$UI_DIR/index.html" "$UI_DIR/.zash_version" \
+                    "$UI_DIR/ios-dot.mobileconfig" "$UI_DIR/ios-intercept-ca.mobileconfig"; do
+            [[ ! -e "$path" && ! -L "$path" ]] \
+                || legacy_found "$path is a retired flat UI/profile publication"
+        done
+        if [[ -e "$UI_DIR/current" || -L "$UI_DIR/current" ]]; then
+            [[ -L "$UI_DIR/current" ]] \
+                || legacy_found "$UI_DIR/current is not the current relative generation symlink"
+        fi
         for path in \
             "${BIN_DIR}/mihomo" "${BIN_DIR}/5gpn-dns" "${BIN_DIR}/5gpn-intercept" \
             "${BIN_DIR}/gpn-dns" "${BIN_DIR}/gpn-intercept" \
@@ -2482,8 +2769,7 @@ detect_legacy_footprints() {
         done
         if [[ -f "$env" && ! -L "$env" ]]; then
             base_raw="$(grep -E '^DNS_BASE_DOMAIN=' "$env" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
-            legacy_base="$(dns_env_decode_value "$base_raw" 2>/dev/null || true)"
-            legacy_base="$(printf '%s' "$legacy_base" | tr '[:upper:]' '[:lower:]')"
+            legacy_base="$(printf '%s' "$base_raw" | tr '[:upper:]' '[:lower:]')"
             if grep -Eq '^DNS_MIHOMO_CONTROLLER=127\.0\.0\.1:9090[[:space:]]*$|^DNS_CONSOLE_(CERT|KEY)=.*/(zash|web)/' \
                 "$env" 2>/dev/null; then
                 legacy_found "$env contains retired panel controller or certificate coordinates"
@@ -2507,7 +2793,9 @@ detect_legacy_footprints() {
                 || noncomment_config_matches "$config" \
                     '(^|[[:space:]{,])name[[:space:]]*:[[:space:]]*MODULE-INTERCEPT([[:space:]]*[,}]|[[:space:]]*$)' \
                 || noncomment_config_matches "$config" \
-                    'external-controller-tls:[[:space:]]*127\.0\.0\.1:9090|RULE-SET,[[:space:]]*whitelist|^[[:space:]]*whitelist:[[:space:]]*$|/etc/5gpn/cert/(zash|web)/'; }; then
+                    'external-controller-tls:[[:space:]]*127\.0\.0\.1:9090|RULE-SET,[[:space:]]*whitelist|^[[:space:]]*whitelist:[[:space:]]*$|/etc/5gpn/cert/(zash|web)/' \
+                || noncomment_config_matches "$config" \
+                    '^[[:space:]]*external-ui:[[:space:]]*/opt/5gpn/ui[[:space:]]*$'; }; then
             legacy_found "$config contains a retired overlay, interception inbound, or panel shape"
         fi
         if [[ -n "$legacy_base" && -f "$config" && ! -L "$config" ]] \
@@ -2615,12 +2903,11 @@ systemd_unit_candidate_source() {
 
 verify_systemd_unit_candidates() {
     local unit source output line line_count=0 verify_dir candidate index
-    local -a units=(5gpn-mihomo.service 5gpn-intercept-cert.service \
-                    5gpn-intercept-cert.path 5gpn-intercept-cert.timer)
+    local -a units=("${MANAGED_SYSTEMD_UNITS[@]}")
     local -a sources=() candidates=()
     command -v systemd-analyze >/dev/null 2>&1 \
         || { err "systemd-analyze is required to validate the service isolation contract."; return 1; }
-    for unit in "${units[@]}"; do
+    for unit in "${MANAGED_SYSTEMD_UNITS[@]}"; do
         source="$(systemd_unit_candidate_source "$unit")" \
             || { err "Could not locate the candidate systemd unit: $unit"; return 1; }
         sources+=("$source")
@@ -2633,7 +2920,9 @@ verify_systemd_unit_candidates() {
     # value remains the exact candidate that install_units will publish.
     for index in "${!units[@]}"; do
         candidate="${verify_dir}/${units[$index]}"
-        if ! sed -e 's|^ExecStart=.*$|ExecStart=/bin/true|' \
+        if ! sed -e 's|^ExecStartPre=+/opt/5gpn/scripts/configure-runtime-gate.sh wait$|ExecStartPre=+/bin/true|' \
+                 -e 's|^ExecStartPre=/opt/5gpn/scripts/configure-runtime-gate.sh validate-ui$|ExecStartPre=/bin/true|' \
+                 -e 's|^ExecStart=.*$|ExecStart=/bin/true|' \
                  -e 's/^User=.*$/User=root/' \
                  -e 's/^Group=.*$/Group=root/' \
                  -e 's/^SupplementaryGroups=.*$/SupplementaryGroups=root/' \
@@ -2952,28 +3241,66 @@ remove_managed_account_identity() {
 }
 
 stop_managed_runtime_units() {
-    local unit load_state enabled_state
+    local unit
     for unit in 5gpn-intercept-cert.path \
                 5gpn-intercept-cert.timer 5gpn-certbot-renew.timer \
                 5gpn-mihomo.service; do
-        load_state="$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)"
-        [[ -z "$load_state" || "$load_state" == not-found ]] && continue
-        systemctl disable --now "$unit" >/dev/null 2>&1 \
-            || { err "Could not disable managed unit before identity reconciliation: $unit"; return 1; }
-        enabled_state="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
-        [[ "$enabled_state" != enabled && "$enabled_state" != enabled-runtime ]] \
-            || { err "Managed unit remained enabled during identity reconciliation: $unit"; return 1; }
+        read_exact_systemd_unit_state "$unit" \
+            || { err "Could not read managed unit state before identity reconciliation: $unit"; return 1; }
+        [[ "$SYSTEMD_UNIT_LOAD_STATE" == not-found ]] && continue
+        case "$SYSTEMD_UNIT_FILE_STATE" in
+            enabled-runtime)
+                systemctl disable --runtime --now "$unit" >/dev/null 2>&1 \
+                    || { err "Could not disable runtime-enabled managed unit: $unit"; return 1; }
+                ;;
+            enabled|disabled)
+                systemctl disable --now "$unit" >/dev/null 2>&1 \
+                    || { err "Could not disable managed unit before identity reconciliation: $unit"; return 1; }
+                read_exact_systemd_unit_state "$unit" \
+                    || { err "Could not re-read managed unit after persistent disable: $unit"; return 1; }
+                if [[ "$SYSTEMD_UNIT_FILE_STATE" == enabled-runtime ]]; then
+                    systemctl disable --runtime --now "$unit" >/dev/null 2>&1 \
+                        || { err "Could not clear the remaining runtime enablement: $unit"; return 1; }
+                fi
+                ;;
+            *)
+                err "Managed unit has unsupported enablement state before identity reconciliation: $unit (${SYSTEMD_UNIT_FILE_STATE})."
+                return 1
+                ;;
+        esac
+        read_exact_systemd_unit_state "$unit" \
+            || { err "Could not verify managed unit after disable: $unit"; return 1; }
+        [[ "$SYSTEMD_UNIT_LOAD_STATE" == loaded \
+           && "$SYSTEMD_UNIT_ACTIVE_STATE" == inactive \
+           && "$SYSTEMD_UNIT_FILE_STATE" == disabled ]] \
+            || { err "Managed unit did not enter loaded/inactive/disabled state: $unit"; return 1; }
     done
     for unit in 5gpn-intercept-cert.service 5gpn-certbot-renew.service; do
-        load_state="$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)"
-        [[ -n "$load_state" && "$load_state" != not-found ]] || continue
+        read_exact_systemd_unit_state "$unit" \
+            || { err "Could not read managed certificate publisher state: $unit"; return 1; }
+        [[ "$SYSTEMD_UNIT_LOAD_STATE" == not-found ]] && continue
         systemctl stop "$unit" >/dev/null 2>&1 \
             || { err "Could not stop managed certificate publisher: $unit"; return 1; }
+        read_exact_systemd_unit_state "$unit" \
+            || { err "Could not verify managed certificate publisher after stop: $unit"; return 1; }
+        [[ "$SYSTEMD_UNIT_LOAD_STATE" == loaded \
+           && "$SYSTEMD_UNIT_ACTIVE_STATE" == inactive ]] \
+            || { err "Managed certificate publisher remained active: $unit"; return 1; }
     done
 }
 
 assert_managed_accounts_quiescent() {
     wait_managed_account_quiescent "$FIVEGPN_SERVICE_USER"
+}
+
+assert_dns_publication_quiescent() {
+    local active_state
+    active_state="$(systemctl show -p ActiveState --value 5gpn-mihomo.service 2>/dev/null)" \
+        || { err "Could not verify 5gpn-mihomo quiescence before DNS publication."; return 1; }
+    [[ "$active_state" == inactive ]] \
+        || { err "5gpn-mihomo must be inactive before DNS publication; found ${active_state:-empty}."; return 1; }
+    assert_managed_accounts_quiescent \
+        || { err "A fivegpn process is still running before DNS publication."; return 1; }
 }
 
 preload_fivegpn_identity_for_claim() {
@@ -3319,8 +3646,19 @@ state_directory_metadata_is_reconcilable() {
     uid="$(file_uid "$path")"
     gid="$(file_gid "$path")"
     mode="$(file_mode "$path")"
-    [[ "$mode" == 700 || "$mode" == 711 ]] || return 1
-    [[ "$uid" == 0 && "$gid" == 0 ]] && return 0
+    # A fresh state directory created beneath the current setgid mihomo home
+    # may inherit that bit before the explicit post-create chmod runs. Treat
+    # only the otherwise exact service-owned 2711 shape as interrupted
+    # current-state reconciliation. Root-owned state is accepted only in its
+    # ordinary sealed modes; the publication pass normalizes service-owned
+    # state to 0711 before publishing documents.
+    case "$mode" in
+        700|711)
+            [[ "$uid" == 0 && "$gid" == 0 ]] && return 0
+            ;;
+        2711) ;;
+        *) return 1 ;;
+    esac
     uid_gid_match_named_account "$uid" "$gid" \
         "$FIVEGPN_SERVICE_USER" "$FIVEGPN_SERVICE_GROUP" && return 0
     [[ -n "$REPLACED_FIVEGPN_UID" && "$uid" == "$REPLACED_FIVEGPN_UID" ]] \
@@ -3444,11 +3782,41 @@ assert_replaced_fivegpn_identity_reconciled() {
     done
 }
 
-remove_owned_renewal_automation() {
-    remove_unit 5gpn-certbot-renew.timer || return 1
-    remove_unit 5gpn-certbot-renew.service || return 1
-    systemctl daemon-reload 2>/dev/null \
-        || { err "Could not reload systemd after removing certificate renewal units."; return 1; }
+read_exact_systemd_unit_state() {
+    local unit="$1" load active unit_file
+    load="$(systemctl show -p LoadState --value "$unit" 2>/dev/null)" || return 1
+    [[ -n "$load" ]] || return 1
+    case "$load" in
+        not-found)
+            SYSTEMD_UNIT_LOAD_STATE=not-found
+            SYSTEMD_UNIT_ACTIVE_STATE=not-found
+            SYSTEMD_UNIT_FILE_STATE=not-found
+            return 0
+            ;;
+        loaded) ;;
+        *) return 1 ;;
+    esac
+    active="$(systemctl show -p ActiveState --value "$unit" 2>/dev/null)" || return 1
+    unit_file="$(systemctl show -p UnitFileState --value "$unit" 2>/dev/null)" || return 1
+    [[ -n "$active" && -n "$unit_file" ]] || return 1
+    SYSTEMD_UNIT_LOAD_STATE="$load"
+    SYSTEMD_UNIT_ACTIVE_STATE="$active"
+    SYSTEMD_UNIT_FILE_STATE="$unit_file"
+}
+
+disable_scoped_renewal_timer() {
+    read_exact_systemd_unit_state 5gpn-certbot-renew.timer \
+        || { err "Could not read the scoped certificate renewal timer state."; return 1; }
+    [[ "$SYSTEMD_UNIT_LOAD_STATE" == loaded ]] \
+        || { err "The static scoped renewal timer is not installed."; return 1; }
+    systemctl disable --now 5gpn-certbot-renew.timer >/dev/null 2>&1 \
+        || { err "Could not disable the scoped certificate renewal timer."; return 1; }
+    read_exact_systemd_unit_state 5gpn-certbot-renew.timer \
+        || { err "Could not verify the scoped certificate renewal timer after disable."; return 1; }
+    [[ "$SYSTEMD_UNIT_LOAD_STATE" == loaded \
+       && "$SYSTEMD_UNIT_ACTIVE_STATE" == inactive \
+       && "$SYSTEMD_UNIT_FILE_STATE" == disabled ]] \
+        || { err "Scoped certificate renewal timer did not enter loaded/inactive/disabled state."; return 1; }
 }
 install_deps() {
     info "Installing dependencies..."
@@ -3769,7 +4137,10 @@ flatten_zashboard_dist() {
 }
 
 validate_existing_runtime_documents() {
-    local path present=0 owner_uid=""
+    local validator="${1:-${ARTIFACT_STAGE}/mihomo}" validator_label="${2:-staged Core}"
+    local path present=0 owner_uid="" dns_revision_before="" dns_revision_after=""
+    local dns_document="${FIVEGPN_STATE_DIR}/dns.json"
+    VALIDATED_DNS_SOURCE_REVISION=""
     for path in "${FIVEGPN_STATE_DIR}/dns.json" "${FIVEGPN_STATE_DIR}/intercept.json" \
                 "${FIVEGPN_STATE_DIR}/bot.json"; do
         [[ -e "$path" || -L "$path" ]] || continue
@@ -3777,9 +4148,15 @@ validate_existing_runtime_documents() {
         [[ -f "$path" && ! -L "$path" && "$(file_nlink "$path")" == 1 ]] \
             || { err "Existing runtime document path is unsafe: $path"; return 1; }
     done
-    [[ "$present" == 1 ]] || return 0
-    [[ -x "$ARTIFACT_STAGE/mihomo" ]] \
-        || { err "The staged Core validator is unavailable."; return 1; }
+    if [[ -f "$dns_document" && ! -L "$dns_document" ]]; then
+        dns_revision_before="$(sha256sum "$dns_document" | awk '{print $1}')" || return 1
+    fi
+    if [[ "$present" != 1 ]]; then
+        VALIDATED_DNS_SOURCE_REVISION=absent
+        return 0
+    fi
+    [[ -x "$validator" ]] \
+        || { err "The ${validator_label} validator is unavailable."; return 1; }
     current_deployment_proves_identity_repair \
         || { err "Existing runtime documents lack safe current-deployment provenance."; return 1; }
     if getent passwd "$FIVEGPN_SERVICE_USER" >/dev/null 2>&1; then
@@ -3798,15 +4175,32 @@ validate_existing_runtime_documents() {
         [[ -n "$owner_uid" ]] \
             || { err "Existing runtime documents cannot be validated from a group-only identity journal."; return 1; }
     fi
-    timeout --kill-after=5s 30s "$ARTIFACT_STAGE/mihomo" 5gpn-state validate \
+    timeout --kill-after=5s 30s "$validator" 5gpn-state validate \
         --owner-uid "$owner_uid" "$FIVEGPN_STATE_DIR" \
         >/dev/null \
-        || { err "Existing runtime documents failed validation by the staged Core."; return 1; }
-    ok "Existing runtime documents were validated by the staged Core."
+        || { err "Existing runtime documents failed validation by the ${validator_label}."; return 1; }
+    if [[ -n "$dns_revision_before" ]]; then
+        [[ -f "$dns_document" && ! -L "$dns_document" ]] \
+            || { err "The DNS document changed while the ${validator_label} validated it."; return 1; }
+        dns_revision_after="$(sha256sum "$dns_document" | awk '{print $1}')" || return 1
+        [[ "$dns_revision_after" == "$dns_revision_before" ]] \
+            || { err "The DNS document changed while the ${validator_label} validated it."; return 1; }
+        current_dns_document_is_compatible "$dns_document" \
+            || { err "The Core-valid DNS document has drifted installation-owned listener or certificate fields."; return 1; }
+        VALIDATED_DNS_SOURCE_REVISION="$dns_revision_after"
+    else
+        [[ ! -e "$dns_document" && ! -L "$dns_document" ]] \
+            || { err "A DNS document appeared while the ${validator_label} validated runtime state."; return 1; }
+        VALIDATED_DNS_SOURCE_REVISION=absent
+    fi
+    ok "Existing runtime documents were validated by the ${validator_label}."
 }
 
 stage_artifacts() {
-    local ver
+    local ver controller_inspection_target state_validator_probe state_seed_probe
+    local mihomo_asset mihomo_url mihomo_sha zash_asset zash_url zash_sha
+    assert_release_pin_bundle_revision \
+        || { err "Release pin files changed before artifact staging."; return 1; }
     ver="$(resolve_install_release_tag)" || return 1
     RELEASE_TAG="$ver"
     ARTIFACT_STAGE="$(mktemp -d /var/tmp/5gpn-artifacts.XXXXXX)" \
@@ -3823,17 +4217,27 @@ stage_artifacts() {
     # selects the channel and still gates an unpinned source; it no longer
     # selects an artifact.
 
-    curl -fsSL "https://github.com/${MIHOMO_REPO}/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz" \
-        -o "$ARTIFACT_STAGE/mihomo.gz" || { err "Could not download mihomo ${MIHOMO_VERSION}."; return 1; }
-    verify_sha256 "$ARTIFACT_STAGE/mihomo.gz" "$MIHOMO_SHA256" || return 1
+    mihomo_asset="$(release_asset_name mihomo)" \
+        && mihomo_url="$(release_download_url mihomo)" \
+        && mihomo_sha="$(release_artifact_sha256 mihomo)" \
+        || { err "Pinned mihomo release coordinates are invalid."; return 1; }
+    curl -fsSL "$mihomo_url" \
+        -o "$ARTIFACT_STAGE/mihomo.gz" \
+        || { err "Could not download mihomo ${MIHOMO_VERSION} asset ${mihomo_asset}."; return 1; }
+    verify_sha256 "$ARTIFACT_STAGE/mihomo.gz" "$mihomo_sha" || return 1
     gzip -dc "$ARTIFACT_STAGE/mihomo.gz" > "$ARTIFACT_STAGE/mihomo"
     chmod 0755 "$ARTIFACT_STAGE/mihomo"
     mihomo_reports_exact_version "$ARTIFACT_STAGE/mihomo" "$MIHOMO_VERSION" \
         || { err "Staged mihomo version does not match pinned release ${MIHOMO_VERSION}."; return 1; }
 
-    curl -fsSL "https://github.com/${ZASH_REPO}/releases/download/${ZASH_VERSION}/dist.zip" \
-        -o "$ARTIFACT_STAGE/zash.zip" || { err "Could not download zashboard ${ZASH_VERSION}."; return 1; }
-    verify_sha256 "$ARTIFACT_STAGE/zash.zip" "$ZASH_SHA256" || return 1
+    zash_asset="$(release_asset_name zashboard)" \
+        && zash_url="$(release_download_url zashboard)" \
+        && zash_sha="$(release_artifact_sha256 zashboard)" \
+        || { err "Pinned zashboard release coordinates are invalid."; return 1; }
+    curl -fsSL "$zash_url" \
+        -o "$ARTIFACT_STAGE/zash.zip" \
+        || { err "Could not download zashboard ${ZASH_VERSION} asset ${zash_asset}."; return 1; }
+    verify_sha256 "$ARTIFACT_STAGE/zash.zip" "$zash_sha" || return 1
     archive_paths_safe zip "$ARTIFACT_STAGE/zash.zip" \
         || { err "Unsafe path in zashboard archive."; return 1; }
     mkdir "$ARTIFACT_STAGE/zash"
@@ -3862,7 +4266,6 @@ stage_artifacts() {
         # Placeholder secret: this candidate is fed to `mihomo -t` and
         # discarded. Nothing in it reaches the live config, which
         # render_mihomo_config writes later once the accounts are real.
-        SEED_GATEWAY_IP="$GATEWAY_IP"
         SEED_CONSOLE_DOMAIN="$CONSOLE_DOMAIN"
         SEED_CONTROLLER_SECRET="preflight-only-secret"
         render_mihomo_seed "${SCRIPT_DIR}/etc/mihomo/config.yaml.tmpl" \
@@ -3873,12 +4276,33 @@ stage_artifacts() {
             err "The core and the seed ship together, so this is a packaging fault rather than a host one. Live deployment was not touched."
             return 1
         fi
+        controller_inspection_target="$seed"
         ok "Staged mihomo accepts the seed; writing it."
     else
         SAFE_PATHS="$MIHOMO_SAFE_PATHS" \
             "$ARTIFACT_STAGE/mihomo" -t -f "$MIHOMO_DIR/config.yaml" -d "$MIHOMO_DIR" \
             || { err "Existing operator-owned mihomo config is invalid; live deployment was not touched."; return 1; }
+        controller_inspection_target="$MIHOMO_DIR/config.yaml"
     fi
+    mihomo_controller_inspection "$controller_inspection_target" >/dev/null \
+        || { err "Staged mihomo does not provide the required controller inspection v2 contract."; return 1; }
+    state_validator_probe="$ARTIFACT_STAGE/missing-state-validator-probe"
+    [[ ! -e "$state_validator_probe" && ! -L "$state_validator_probe" ]] || return 1
+    timeout --kill-after=5s 30s "$ARTIFACT_STAGE/mihomo" 5gpn-state validate \
+        --owner-uid "$(id -u)" "$state_validator_probe" >/dev/null \
+        || { err "Staged mihomo does not provide the required owner-bound state validation contract."; return 1; }
+    state_seed_probe="$ARTIFACT_STAGE/state-seed-probe"
+    install -d -m 0700 "$state_seed_probe" || return 1
+    render_fresh_dns_document "$DOT_LISTEN_ADDR" "$DEBUG_LISTEN_ADDR" \
+        "${DOT_CERT_DIR}/current/fullchain.pem" "${DOT_CERT_DIR}/current/privkey.pem" \
+        "$GATEWAY_IP" "$DNS_CHINA_ECS_DEFAULT" "$DNS_CHINA_DEFAULT" "$DNS_TRUST_DEFAULT" \
+        > "$state_seed_probe/dns.json" || return 1
+    chmod 0600 "$state_seed_probe/dns.json" || return 1
+    current_dns_document_is_compatible "$state_seed_probe/dns.json" \
+        || { err "The installer rendered a DNS seed with drifted fixed fields."; return 1; }
+    timeout --kill-after=5s 30s "$ARTIFACT_STAGE/mihomo" 5gpn-state validate \
+        --owner-uid "$(id -u)" "$state_seed_probe" >/dev/null \
+        || { err "Staged mihomo rejected the DNS document seed this installer publishes."; return 1; }
     validate_existing_runtime_documents || return 1
     ok "All release artifacts staged and verified."
 }
@@ -4016,6 +4440,7 @@ run_management_with_install_lock() (
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    assert_installed_backend_revision || exit $?
     require_completed_runtime_identity || exit $?
     "$@"
 )
@@ -4027,6 +4452,7 @@ run_management_with_install_and_cert_lock() (
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    assert_installed_backend_revision || exit $?
     require_completed_runtime_identity || exit $?
     acquire_install_cert_lock || exit $?
     "$@"
@@ -4086,6 +4512,12 @@ clear_global_certbot_timer_snapshot() {
     GLOBAL_CERTBOT_TIMER_STATE_CAPTURED=0
     GLOBAL_CERTBOT_TIMER_ORIGINAL_ACTIVE=""
     GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED=""
+    GLOBAL_CERTBOT_TIMER_EXPECTED_LOAD=""
+    GLOBAL_CERTBOT_TIMER_EXPECTED_ACTIVE=""
+    GLOBAL_CERTBOT_TIMER_EXPECTED_ENABLED=""
+    CERTBOT_TIMER_LOAD_STATE=""
+    CERTBOT_TIMER_ACTIVE_STATE=""
+    CERTBOT_TIMER_UNIT_FILE_STATE=""
 }
 
 # Restore both activity and enablement to the pre-transaction state. An owned
@@ -4093,61 +4525,50 @@ clear_global_certbot_timer_snapshot() {
 # enabled successfully. The function is idempotent and is used by success,
 # error, EXIT, and signal paths while the certificate lock is still held.
 restore_global_certbot_timer() {
-    local load_state active_state enabled_state
     [[ "$GLOBAL_CERTBOT_TIMER_STATE_CAPTURED" == 1 ]] || return 0
-    if [[ "$KEEP_GLOBAL_CERTBOT_TIMER_DISABLED" == 1 ]]; then
-        systemctl disable --now certbot.timer >/dev/null 2>&1 || true
-        systemctl stop certbot.timer >/dev/null 2>&1 || true
-        load_state="$(systemctl show -p LoadState --value certbot.timer 2>/dev/null || true)"
-        active_state="$(systemctl is-active certbot.timer 2>/dev/null || true)"
-        enabled_state="$(systemctl is-enabled certbot.timer 2>/dev/null || true)"
-        if [[ -z "$load_state" || -z "$active_state" || -z "$enabled_state" ]] \
-           || [[ "$active_state" != inactive && "$active_state" != failed \
-              && ! ( "$active_state" == unknown && "$load_state" == not-found ) ]] \
-           || [[ "$enabled_state" == enabled || "$enabled_state" == enabled-runtime ]]; then
-            err "Could not keep the unscoped distro certbot.timer disabled."
-            return 1
-        fi
+    global_certbot_timer_matches_expected_state \
+        || { err "The distro certbot.timer changed outside the installer transaction; refusing to overwrite it."; return 1; }
+    if [[ "$GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED" == not-found ]]; then
         clear_global_certbot_timer_snapshot
         return 0
     fi
-
-    global_certbot_timer_exists \
-        || { err "The distro certbot.timer disappeared before its original state could be restored."; return 1; }
+    if [[ "$KEEP_GLOBAL_CERTBOT_TIMER_DISABLED" == 1 ]]; then
+        [[ "$GLOBAL_CERTBOT_TIMER_EXPECTED_LOAD" == loaded \
+           && "$GLOBAL_CERTBOT_TIMER_EXPECTED_ACTIVE" == inactive \
+           && "$GLOBAL_CERTBOT_TIMER_EXPECTED_ENABLED" == disabled ]] \
+            || { err "Could not keep the unscoped distro certbot.timer disabled."; return 1; }
+        clear_global_certbot_timer_snapshot
+        return 0
+    fi
     case "$GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED" in
         enabled)
             systemctl enable certbot.timer >/dev/null 2>&1 \
                 || { err "Could not restore enabled certbot.timer state."; return 1; } ;;
-        enabled-runtime)
-            systemctl enable --runtime certbot.timer >/dev/null 2>&1 \
-                || { err "Could not restore runtime-enabled certbot.timer state."; return 1; } ;;
         disabled)
             systemctl disable certbot.timer >/dev/null 2>&1 \
                 || { err "Could not restore disabled certbot.timer state."; return 1; } ;;
-        static|indirect|generated|transient|alias|linked|linked-runtime|masked|masked-runtime)
-            : ;;
         *)
             err "Unsupported original certbot.timer enablement state: ${GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED:-empty}"
             return 1 ;;
     esac
-    enabled_state="$(systemctl is-enabled certbot.timer 2>/dev/null || true)"
-    [[ "$enabled_state" == "$GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED" ]] \
-        || { err "Could not restore the original certbot.timer enablement state (${GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED})."; return 1; }
 
     case "$GLOBAL_CERTBOT_TIMER_ORIGINAL_ACTIVE" in
         active)
             systemctl start certbot.timer >/dev/null 2>&1 \
-                && systemctl is-active --quiet certbot.timer 2>/dev/null \
                 || { err "Could not restore active certbot.timer state."; return 1; } ;;
-        inactive|failed)
+        inactive)
             systemctl stop certbot.timer >/dev/null 2>&1 \
-                || { err "Could not restore inactive certbot.timer state."; return 1; }
-            systemctl is-active --quiet certbot.timer 2>/dev/null \
-                && { err "The distro certbot.timer remained active after state restoration."; return 1; } ;;
+                || { err "Could not restore inactive certbot.timer state."; return 1; } ;;
         *)
             err "Unsupported original certbot.timer activity state: ${GLOBAL_CERTBOT_TIMER_ORIGINAL_ACTIVE:-empty}"
             return 1 ;;
     esac
+    read_global_certbot_timer_state \
+        || { err "Could not verify the restored distro certbot.timer state."; return 1; }
+    [[ "$CERTBOT_TIMER_LOAD_STATE" == loaded \
+       && "$CERTBOT_TIMER_ACTIVE_STATE" == "$GLOBAL_CERTBOT_TIMER_ORIGINAL_ACTIVE" \
+       && "$CERTBOT_TIMER_UNIT_FILE_STATE" == "$GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED" ]] \
+        || { err "Could not restore the exact original distro certbot.timer state."; return 1; }
     clear_global_certbot_timer_snapshot
 }
 
@@ -4178,7 +4599,7 @@ install_transaction_signal() {
 
 
 finish_install_transaction() {
-    local original_rc="$1" timer_rc=0 cleanup_rc=0 gum_cleanup_rc=0 lock_rc=0 final_rc
+    local original_rc="$1" timer_rc=0 cleanup_rc=0 gum_cleanup_rc=0 ui_cleanup_rc=0 lock_rc=0 final_rc
     final_rc="$original_rc"
     trap '' HUP INT TERM
     trap - ERR EXIT
@@ -4203,11 +4624,22 @@ finish_install_transaction() {
     cleanup_rc=$?
     cleanup_temporary_gum
     gum_cleanup_rc=$?
+    if [[ -n "${UI_GENERATION_CANDIDATE:-}" ]]; then
+        load_ui_generation_helper \
+            && ui_generation_cleanup_candidate "$UI_DIR" "$UI_GENERATION_CANDIDATE"
+        ui_cleanup_rc=$?
+        if [[ "$ui_cleanup_rc" == 0 ]]; then
+            UI_GENERATION_CANDIDATE=""
+            UI_GENERATION_CANDIDATE_CREATED_FROM_CURRENT=0
+        fi
+    fi
     set -e
     [[ "$cleanup_rc" == 0 || -z "$ARTIFACT_STAGE" ]] \
         || err "Staging was retained at: $ARTIFACT_STAGE"
     [[ "$gum_cleanup_rc" == 0 || -z "$TEMP_GUM_DIR" ]] \
         || err "Temporary Gum staging was retained at: $TEMP_GUM_DIR"
+    [[ "$ui_cleanup_rc" == 0 || -z "$UI_GENERATION_CANDIDATE" ]] \
+        || err "Unpublished UI generation was retained at: $UI_GENERATION_CANDIDATE"
 
     set +e
     release_install_cert_lock
@@ -4215,7 +4647,8 @@ finish_install_transaction() {
     release_install_lock
     [[ "$?" == 0 ]] || lock_rc=1
     set -e
-    if [[ "$timer_rc" != 0 || "$cleanup_rc" != 0 || "$gum_cleanup_rc" != 0 || "$lock_rc" != 0 ]]; then
+    if [[ "$timer_rc" != 0 || "$cleanup_rc" != 0 || "$gum_cleanup_rc" != 0 \
+       || "$ui_cleanup_rc" != 0 || "$lock_rc" != 0 ]]; then
         [[ "$final_rc" != 0 ]] || final_rc=1
     fi
     exit "$final_rc"
@@ -4461,8 +4894,8 @@ ensure_intercept_certificates() {
 
 # zashboard: prebuilt static dist from our fork moooyo/zashboard, which carries
 # the 5gpn panels upstream does not have. Pinned by ZASH_REPO/ZASH_VERSION and
-# verified against ZASH_SHA256. Fresh-artifact: wipes+replaces UI_DIR on every
-# run (never build on the box).
+# verified against ZASH_SHA256. It is staged as one unpublished generation;
+# profile signing completes that generation before one `current` symlink swap.
 #
 # This is the only user interface, and publishing it is NOT optional. mihomo
 # serves it at /ui/ on the controller, reading it from the path the seed
@@ -4475,13 +4908,21 @@ ensure_intercept_certificates() {
 # reaches the controller as a same-origin relative URL, because the bundle and
 # the API are now served by one process on one origin.
 install_ui() {
+    local candidate
     [[ -n "$ARTIFACT_STAGE" && -f "$ARTIFACT_STAGE/zash/index.html" ]] \
         || { err "zashboard was not staged."; return 1; }
     claim_ui_dir || return 1
-    printf '%s\n' "$ZASH_VERSION" > "$ARTIFACT_STAGE/zash/.zash_version"
-    publish_owned_tree "$ARTIFACT_STAGE/zash" "$UI_DIR" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
-        || { err "Could not atomically publish the zashboard bundle."; return 1; }
-    ok "Verified zashboard published to ${UI_DIR}/ (${ZASH_VERSION})."
+    load_ui_generation_helper || return 1
+    if [[ -n "$UI_GENERATION_CANDIDATE" ]]; then
+        ui_generation_cleanup_candidate "$UI_DIR" "$UI_GENERATION_CANDIDATE" \
+            || { err "Could not clean the previous unpublished UI generation."; return 1; }
+        UI_GENERATION_CANDIDATE=""
+        UI_GENERATION_CANDIDATE_CREATED_FROM_CURRENT=0
+    fi
+    candidate="$(ui_generation_stage_tree "$UI_DIR" "$ARTIFACT_STAGE/zash" "$ZASH_VERSION")" \
+        || { err "Could not stage the verified zashboard generation."; return 1; }
+    UI_GENERATION_CANDIDATE="$candidate"
+    ok "Verified zashboard ${ZASH_VERSION} staged in an unpublished UI generation."
 }
 
 # mihomo: prebuilt binary from the maintained moooyo/mihomo fork.
@@ -4512,22 +4953,56 @@ install_mihomo() {
 # rendered file with `mihomo -t` (fatal on failure — a bad config must never
 # be left live). This is the SINGLE writer for the mihomo data-plane config.
 
-# Read the controller secret out of the operator's own YAML.
-#
-# This used to shell out to the resolver binary for a structural YAML parse.
-# That binary is gone, and reaching for a structural parser again would mean
-# either shipping one or making the installer depend on the very core it is in
-# the middle of replacing. What is actually being read is a single scalar that
-# this installer wrote, on a line it controls the shape of: `secret: '...'`,
-# optionally single-quoted. The acceptance suite reads it exactly this way.
-#
-# A multi-line or block-scalar secret is therefore not readable here -- and not
-# writable either, because yaml_single_quoted_value refuses to emit one.
-mihomo_config_secret() {
-    local f="$1"
-    [[ -f "$f" && -r "$f" ]] \
-        || { err "The mihomo config is unreadable for controller secret parsing: $f"; return 1; }
-    grep -m1 -E "^secret:" "$f" | sed -E "s/^secret: *'?([^']*)'?.*/\1/"
+# Select the verified core used for structural config inspection. During an
+# install the staged artifact is authoritative before publication; installed
+# management commands use the published binary.
+mihomo_config_inspector_binary() {
+    if [[ -n "${ARTIFACT_STAGE:-}" && -x "${ARTIFACT_STAGE}/mihomo" ]]; then
+        printf '%s' "${ARTIFACT_STAGE}/mihomo"
+    elif [[ -x "$MIHOMO_BIN" ]]; then
+        printf '%s' "$MIHOMO_BIN"
+    else
+        err "No verified mihomo binary is available for controller config inspection."
+        return 1
+    fi
+}
+
+# Return the exact v2 controller projection from the root-only core inspector.
+# Shell never parses operator YAML and never persists the secret in dns.env.
+# Exact keys and fixed values keep future contracts from being misread as this
+# release's managed controller boundary.
+mihomo_controller_inspection() {
+    local config="${1:-${MIHOMO_DIR}/config.yaml}" inspector output
+    [[ -f "$config" && ! -L "$config" && -r "$config" ]] \
+        || { err "The operator mihomo config is missing, linked, or unreadable: $config"; return 1; }
+    command -v jq >/dev/null 2>&1 \
+        || { err "jq is required to validate the controller config inspection."; return 1; }
+    inspector="$(mihomo_config_inspector_binary)" || return 1
+    output="$("$inspector" 5gpn-config inspect-controller --config "$config" 2>/dev/null)" \
+        || { err "The verified core rejected controller config inspection: $config"; return 1; }
+    printf '%s' "$output" | jq -cse \
+        --argjson version "$MIHOMO_CONTROLLER_INSPECTION_VERSION" \
+        --arg controller "$MIHOMO_CONTROLLER_TLS_ADDR" \
+        --arg ui "$UI_CURRENT_DIR" \
+        --arg certificate "$MIHOMO_CONTROLLER_CERT" \
+        --arg private_key "$MIHOMO_CONTROLLER_KEY" '
+        select(length == 1) | .[0] | select(
+            type == "object"
+            and ((keys | sort) == ["certificate","external_controller_tls","external_ui","private_key","raw_revision","secret","version"])
+            and (.version == $version)
+            and (.raw_revision | type == "string" and test("^[0-9a-f]{64}$"))
+            and (.secret | type == "string" and length > 0 and (explode | all(. >= 32 and . != 127)))
+            and (.external_controller_tls == $controller)
+            and (.external_ui == $ui)
+            and (.certificate == $certificate)
+            and (.private_key == $private_key)
+        )' \
+        || { err "The controller config inspection does not match the managed 5gpn contract."; return 1; }
+}
+
+mihomo_controller_inspection_field() {
+    local inspection="$1" field="$2"
+    printf '%s' "$inspection" | jq -er --arg field "$field" '.[$field]'
 }
 
 yaml_single_quoted_value() {
@@ -4537,13 +5012,6 @@ yaml_single_quoted_value() {
     printf '%s' "$value"
 }
 
-persist_mihomo_secret() {
-    local secret="$1"
-    [[ -n "$secret" ]] || { warn "mihomo config has no readable controller secret; DNS_MIHOMO_SECRET was not changed."; return 0; }
-    set_dns_env_kv "${CONF_DIR}/dns.env" DNS_MIHOMO_SECRET "$secret" \
-        || { err "Could not persist DNS_MIHOMO_SECRET to dns.env."; return 1; }
-}
-
 # Seed mihomo's fully operator-owned config only when it is missing. A normal
 # install or configure operation validates and preserves an existing file
 # byte-for-byte. `render_mihomo_config --reset` is the sole overwrite path: it
@@ -4551,6 +5019,7 @@ persist_mihomo_secret() {
 # old file, fsyncs, and atomically renames it into place.
 render_mihomo_config() {
     local mode="${1:-seed}" config="${MIHOMO_DIR}/config.yaml" secret="" template=""
+    local inspection="" inspected_revision=""
     MIHOMO_SEED_PORTS_REQUIRED=0
     fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
         || { err "Unsafe configuration root: $CONF_DIR"; return 1; }
@@ -4569,9 +5038,8 @@ render_mihomo_config() {
         fi
         chown "root:$FIVEGPN_SERVICE_GROUP" "$config" 2>/dev/null || true
         chmod 0640 "$config" 2>/dev/null || true
-        secret="$(mihomo_config_secret "$config")" \
-            || { err "Existing mihomo controller secret could not be parsed safely."; return 1; }
-        persist_mihomo_secret "$secret" || return 1
+        inspection="$(mihomo_controller_inspection "$config")" \
+            || { err "Existing mihomo controller configuration could not be inspected safely."; return 1; }
         ok "Existing operator-owned mihomo config validated and preserved: $config"
         return 0
     fi
@@ -4581,18 +5049,19 @@ render_mihomo_config() {
         || { err "Bundled mihomo seed template is missing, unreadable, or empty: $template"; return 1; }
 
     # Controller secret survives an explicit reset. On first install, prefer a
-    # persisted value and otherwise generate a strong mixed secret.
+    # structurally inspected existing value and otherwise generate a strong
+    # mixed secret. dns.env never contains the credential.
     if [[ -f "$config" ]]; then
-        secret="$(mihomo_config_secret "$config")" \
-            || { err "Existing mihomo controller secret could not be parsed safely."; return 1; }
+        inspection="$(mihomo_controller_inspection "$config")" \
+            || { err "Existing mihomo controller configuration could not be inspected safely."; return 1; }
+        secret="$(mihomo_controller_inspection_field "$inspection" secret)" || return 1
+        inspected_revision="$(mihomo_controller_inspection_field "$inspection" raw_revision)" || return 1
     fi
-    [[ -n "$secret" ]] || secret="$(cfg_get DNS_MIHOMO_SECRET)"
     [[ -n "$secret" ]] || secret="$(openssl rand -base64 24)"
 
     # Resolve deployment-specific seed values only for first install/reset.
     local base="${BASE_DOMAIN:-$(cfg_get DNS_BASE_DOMAIN)}"
     derive_domains "$base"
-    local gw="${GATEWAY_IP:-$PUBLIC_IP}"
     MIHOMO_LISTEN_IPS="${MIHOMO_LISTEN_IPS:-$(cfg_get DNS_MIHOMO_LISTEN_IPS)}"
     MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" || return 1
     export MIHOMO_LISTEN_IPS
@@ -4603,7 +5072,6 @@ render_mihomo_config() {
     candidate="$(mktemp "${MIHOMO_DIR}/.config.yaml.XXXXXX")" \
         || { err "Could not create a mihomo config candidate in $MIHOMO_DIR"; return 1; }
 
-    SEED_GATEWAY_IP="$gw"
     SEED_CONSOLE_DOMAIN="$CONSOLE_DOMAIN"
     SEED_CONTROLLER_SECRET="$secret_yaml_value"
     if ! render_mihomo_seed "$template" live "$listeners" > "$candidate"; then
@@ -4624,6 +5092,8 @@ render_mihomo_config() {
     fi
     sync -f "$candidate" 2>/dev/null || true
     if [[ -f "$config" ]]; then
+        [[ "$(sha256sum "$config" | awk '{print $1}')" == "$inspected_revision" ]] \
+            || { rm -f -- "$candidate"; err "Operator mihomo config changed after inspection; live config was not changed."; return 1; }
         backup="$(mktemp "${config}.bak.$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")" \
             || { rm -f -- "$candidate"; err "Could not reserve a mihomo config backup path."; return 1; }
         cp -p -- "$config" "$backup" \
@@ -4637,7 +5107,6 @@ render_mihomo_config() {
     mv -f -- "$candidate" "$config" \
         || { rm -f -- "$candidate"; err "Could not atomically publish the mihomo config candidate."; return 1; }
     sync -f "$MIHOMO_DIR" 2>/dev/null || true
-    persist_mihomo_secret "$secret" || return 1
     MIHOMO_SEED_PORTS_REQUIRED=1
 
     ok "mihomo config ${mode/--/} candidate validated and atomically installed at $config."
@@ -4657,14 +5126,13 @@ reset_mihomo_config() {
 # The mihomo controller client.
 # ----------------------------------------------------------------------------
 
-# mihomo_controller_curl dials the loopback mihomo controller over verified TLS
-# using the console certificate and SNI. It ignores proxy environment variables
-# so readiness always measures this process, while still letting callers supply
-# their own curl flags and path.
-mihomo_controller_curl() {
-    local path="$1"; shift
+# Dial the loopback controller using one already validated inspector snapshot.
+# Address, trust root, and an optional bearer therefore come from one structural
+# read of the operator config rather than independent shell parsers.
+mihomo_controller_curl_with_inspection() {
+    local inspection="$1" path="$2"; shift 2
     local controller server_name cert_file host port base
-    controller="$(cfg_get DNS_MIHOMO_CONTROLLER)"
+    controller="$(mihomo_controller_inspection_field "$inspection" external_controller_tls)" || return 1
     host="${controller%:*}"
     port="${controller##*:}"
     [[ "$host" != "$controller" && "$port" =~ ^[0-9]+$ ]] \
@@ -4674,12 +5142,38 @@ mihomo_controller_curl() {
         || { warn "DNS_BASE_DOMAIN is required for mihomo controller TLS"; return 1; }
     derive_domains "$base" || return 1
     server_name="$CONSOLE_DOMAIN"
-    cert_file="$(cfg_get DNS_CONSOLE_CERT)"
+    cert_file="$(mihomo_controller_inspection_field "$inspection" certificate)" || return 1
     [[ -r "$cert_file" ]] \
         || { warn "mihomo controller trust certificate is unreadable: $cert_file"; return 1; }
     curl --cacert "$cert_file" \
         --connect-to "${server_name}:${port}:${host}:${port}" \
         "$@" --noproxy '*' "https://${server_name}:${port}${path}"
+}
+
+# Public controller requests still inspect the config so management cannot
+# drift onto a duplicate address, UI tree, or certificate path.
+mihomo_controller_curl() {
+    local path="$1" inspection; shift
+    inspection="$(mihomo_controller_inspection)" || return 1
+    mihomo_controller_curl_with_inspection "$inspection" "$path" "$@"
+}
+
+mihomo_authenticated_controller_curl() {
+    local path="$1" inspection secret auth_fd status; shift
+    inspection="$(mihomo_controller_inspection)" || return 1
+    secret="$(mihomo_controller_inspection_field "$inspection" secret)" || return 1
+    # Bash allocates a fresh descriptor for every request. curl reads the bearer
+    # from that inherited descriptor, so it never appears in argv and stdin
+    # remains available to callers using --data-binary @-.
+    exec {auth_fd}<<<"Authorization: Bearer $secret" || return 1
+    if mihomo_controller_curl_with_inspection "$inspection" "$path" \
+        -H "@/proc/self/fd/${auth_fd}" "$@"; then
+        status=0
+    else
+        status=$?
+    fi
+    exec {auth_fd}<&-
+    return "$status"
 }
 
 # The interception snapshot, as JSON on stdout.
@@ -4689,11 +5183,8 @@ mihomo_controller_curl() {
 # it. This asks the control API the same question the console asks, so the
 # installer and the operator's browser cannot disagree about what is enabled.
 fivegpn_interception_snapshot() {
-    local secret
-    secret="$(cfg_get DNS_MIHOMO_SECRET)"
-    local -a curl_args=(--fail --silent --show-error --max-time 3)
-    [[ -n "$secret" ]] && curl_args+=(-H "Authorization: Bearer $secret")
-    mihomo_controller_curl "/5gpn/interception" "${curl_args[@]}" 2>/dev/null
+    mihomo_authenticated_controller_curl "/5gpn/interception" \
+        --fail --silent --show-error --max-time 3 2>/dev/null
 }
 
 # Static nodes remain fields in the operator-owned mihomo YAML. The core's
@@ -4706,23 +5197,17 @@ fivegpn_nodes_snapshot() {
 }
 
 fivegpn_reload_operator_config() {
-    local secret body
-    secret="$(cfg_get DNS_MIHOMO_SECRET)"
-    [[ -n "$secret" ]] || { err "Persisted controller secret is missing."; return 1; }
+    local body
     body="$(jq -nc --arg path "${MIHOMO_DIR}/config.yaml" '{path: $path}')" || return 1
-    mihomo_controller_curl "/configs" \
+    mihomo_authenticated_controller_curl "/configs" \
         --fail-with-body --silent --show-error --max-time 120 \
-        -H "Authorization: Bearer $secret" -H 'Content-Type: application/json' \
+        -H 'Content-Type: application/json' \
         -X PUT --data "$body" >/dev/null
 }
 
 fivegpn_live_proxies_snapshot() {
-    local secret
-    secret="$(cfg_get DNS_MIHOMO_SECRET)"
-    [[ -n "$secret" ]] || return 1
-    mihomo_controller_curl "/proxies" \
-        --fail --silent --show-error --max-time 10 \
-        -H "Authorization: Bearer $secret"
+    mihomo_authenticated_controller_curl "/proxies" \
+        --fail --silent --show-error --max-time 10
 }
 
 fivegpn_verify_live_node_change() {
@@ -4782,23 +5267,81 @@ install_mihomo_runtime_assets() {
     done
 }
 
+install_release_pin_files() {
+    local name destination candidate expected_revision current_revision encoded
+    local -a pin_files=(
+        pins.env
+        pins.sh
+    )
+
+    runtime_directory_slot_is_safe "$RELEASE_DIR" "$BASE_DIR" \
+        || { err "Refusing unsafe installed release-pin directory slot: $RELEASE_DIR"; return 1; }
+    install -d -o root -g root -m 0755 "$RELEASE_DIR" \
+        || { err "Could not create the installed release-pin directory: $RELEASE_DIR"; return 1; }
+    root_owned_nonwritable_directory_is_safe "$RELEASE_DIR" \
+        && [[ "$(file_gid "$RELEASE_DIR")" == 0 && "$(file_mode "$RELEASE_DIR")" == 755 ]] \
+        || { err "Installed release-pin directory metadata is unsafe: $RELEASE_DIR"; return 1; }
+    clear_owned_scope "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
+        "$RELEASE_DIR" "${pin_files[@]}" \
+        || { err "Could not reset the managed release-pin directory."; return 1; }
+
+    for name in "${pin_files[@]}"; do
+        destination="${RELEASE_DIR}/${name}"
+        case "$name" in
+            pins.env)
+                expected_revision="$RELEASE_PINS_ENV_REVISION"
+                encoded="$RELEASE_PINS_ENV_SNAPSHOT_B64"
+                ;;
+            pins.sh)
+                expected_revision="$RELEASE_PINS_LIBRARY_REVISION"
+                encoded="$RELEASE_PINS_LIBRARY_SNAPSHOT_B64"
+                ;;
+            *) return 1 ;;
+        esac
+        [[ -n "$encoded" ]] \
+            || { err "The in-memory release-pin snapshot is missing: $name"; return 1; }
+        candidate="$(mktemp "${RELEASE_DIR}/.${name}.XXXXXX")" \
+            || { err "Could not stage installed release-pin file: $name"; return 1; }
+        if ! printf '%s' "$encoded" | base64 -d > "$candidate" \
+           || ! chown root:root "$candidate" \
+           || ! chmod 0644 "$candidate"; then
+            rm -f -- "$candidate"
+            err "Could not materialize the private release-pin snapshot: $name"
+            return 1
+        fi
+        sync -f "$candidate" 2>/dev/null || true
+        current_revision="$(sha256sum -- "$candidate" 2>/dev/null | awk '{print $1}')" \
+            || { rm -f -- "$candidate"; err "Could not fingerprint staged release-pin file: $name"; return 1; }
+        [[ "$current_revision" == "$expected_revision" ]] \
+            || { rm -f -- "$candidate"; err "Release-pin snapshot changed while it was staged: $name"; return 1; }
+        mv -f -- "$candidate" "$destination" \
+            || { rm -f -- "$candidate"; err "Could not publish release-pin file: $name"; return 1; }
+        current_revision="$(sha256sum -- "$destination" 2>/dev/null | awk '{print $1}')" \
+            || { err "Could not fingerprint installed release-pin file: $destination"; return 1; }
+        root_plain_file_metadata_is_safe "$destination" 0 644 \
+            && [[ "$current_revision" == "$expected_revision" ]] \
+            || { err "Installed release-pin file failed verification: $destination"; return 1; }
+    done
+    sync -f "$RELEASE_DIR" \
+        || { err "Could not make the installed release-pin directory durable."; return 1; }
+}
+
 install_files() {
     local f script_name u
     local -a installed_scripts=(
+        publication-fs.sh
+        cert-role-ctl.sh
         cert-renew.sh
+        configure-runtime-gate.sh
         gen-ios-profile.sh
         intercept-cert-renew.sh
         renew-hook.sh
-    )
-    local -a installed_units=(
-        5gpn-intercept-cert.path
-        5gpn-intercept-cert.service
-        5gpn-intercept-cert.timer
-        5gpn-mihomo.service
+        ui-generation.sh
     )
     info "Installing config files and scripts..."
     preflight_runtime_publication_paths || return 1
     mkdir -p "$BASE_DIR" "$SCRIPTS_DIR" "$CONF_DIR" "$DNS_CERT_DIR"
+    install_release_pin_files || return 1
     for script_name in "${installed_scripts[@]}"; do
         f="${SCRIPT_DIR}/scripts/${script_name}"
         [[ -f "$f" && ! -L "$f" ]] \
@@ -4826,7 +5369,7 @@ install_files() {
     # repo systemd units -> /opt/5gpn/etc/systemd (staged copies; install_units
     # installs them into /etc/systemd/system from here or from the checkout).
     install -d -m 0755 "${BASE_DIR}/etc/systemd"
-    for u in "${installed_units[@]}"; do
+    for u in "${MANAGED_SYSTEMD_UNITS[@]}"; do
         f="${SCRIPT_DIR}/etc/systemd/${u}"
         [[ -f "$f" && ! -L "$f" ]] \
             || { err "Required systemd unit is missing or unsafe: $f"; return 1; }
@@ -4837,9 +5380,9 @@ install_files() {
         fi
     done
     clear_owned_scope "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
-        "${BASE_DIR}/etc/systemd" "${installed_units[@]}" \
+        "${BASE_DIR}/etc/systemd" "${MANAGED_SYSTEMD_UNITS[@]}" \
         || { err "Could not reset the managed systemd staging directory."; return 1; }
-    for u in "${installed_units[@]}"; do
+    for u in "${MANAGED_SYSTEMD_UNITS[@]}"; do
         f="${SCRIPT_DIR}/etc/systemd/${u}"
         if [[ "$f" == "${BASE_DIR}/etc/systemd/${u}" ]]; then
             chmod 0644 "$f" || return 1
@@ -4904,6 +5447,9 @@ EOF
 # interception, the controller, and the bot return with that one process.
 restart_services() {
     check_root
+    load_ui_generation_helper || return 1
+    _ui_generation_current_only_is_safe "$UI_DIR" \
+        || { err "Current UI generation is unsafe; refusing to mutate service state."; return 1; }
     info "Restarting 5gpn services..."
     start_services
 }
@@ -4935,24 +5481,6 @@ derive_domains() {
     CONSOLE_DOMAIN="console.${BASE_DOMAIN}"
     DOT_DOMAIN="dot.${BASE_DOMAIN}"
     export BASE_DOMAIN CONSOLE_DOMAIN DOT_DOMAIN
-}
-
-# mihomo_configured_controller — the address the operator's config actually
-# tells mihomo to serve the controller on, or empty if there is no config yet
-# (fresh install, where the seed's own 127.0.0.1:443 is the answer).
-#
-# One line, one reader. Callers that need a dial target must come through here
-# or through the DNS_MIHOMO_CONTROLLER this writes, never through a literal.
-mihomo_configured_controller() {
-    local config="${1:-$MIHOMO_DIR/config.yaml}" value
-    [[ -f "$config" ]] || return 0
-    value="$(sed -n 's/^[[:space:]]*external-controller-tls:[[:space:]]*//p' "$config" | head -1)"
-    # Cut any trailing comment first, then unquote: doing it the other way round
-    # leaves the closing quote attached to the address.
-    value="${value%%[[:space:]]*}"
-    value="${value%\"}"; value="${value#\"}"
-    value="${value%\'}"; value="${value#\'}"
-    printf '%s' "$value"
 }
 
 load_persisted_domains() {
@@ -5017,7 +5545,7 @@ console_setup_url() {
 # never the controller credential. The interactive install and the explicit
 # root-only management action may opt in to the password and fragment link.
 print_console_connection_info() {
-    local reveal="${1:-0}" domain="${CONSOLE_DOMAIN:-}" public_url secret setup_url
+    local reveal="${1:-0}" domain="${CONSOLE_DOMAIN:-}" public_url secret setup_url inspection
     if [[ -z "$domain" ]]; then
         load_persisted_domains || return 1
         domain="$CONSOLE_DOMAIN"
@@ -5033,9 +5561,8 @@ print_console_connection_info() {
         return 0
     fi
 
-    secret="$(cfg_get DNS_MIHOMO_SECRET)" || return 1
-    [[ -n "$secret" ]] \
-        || { err "Persisted controller secret is missing."; return 1; }
+    inspection="$(mihomo_controller_inspection)" || return 1
+    secret="$(mihomo_controller_inspection_field "$inspection" secret)" || return 1
     if setup_url="$(console_setup_url "$domain" "$secret")"; then
         printf '  一键连接（含密码）   %s\n' "$setup_url"
         echo "  ⚠ 上述链接等同于密码；不要转发、截图或保存到共享书签。"
@@ -5108,7 +5635,7 @@ manage_screen_overview() {
     echo "5gpn 概览"
     echo ""
     printf '  %s 核心    %s (%s)\n' "$(manage_mark "$unit")" "${ver:-未知}" "$unit"
-    printf '  %s DoT     %s\n' "$(manage_mark "$unit")" "$(cfg_get DNS_LISTEN_DOT || echo :853)"
+    printf '  %s DoT     %s\n' "$(manage_mark "$unit")" "$DOT_LISTEN_ADDR"
 
     if [[ -z "$snap" ]]; then
         printf '  ❔ 拦截    控制 API 不可达\n'
@@ -5163,7 +5690,7 @@ manage_screen_overview() {
 
 # --- screen: services ---------------------------------------------------------
 manage_screen_services() {
-    local unit state cert_mode cert_lineage
+    local unit state cert_mode cert_lineage cert_base configured_mode configured_base ownership_match=0
     echo "服务"
     echo ""
     for unit in 5gpn-mihomo.service 5gpn-intercept-cert.path 5gpn-intercept-cert.timer; do
@@ -5173,21 +5700,44 @@ manage_screen_services() {
     done
     unit=5gpn-certbot-renew.timer
     cert_mode="$(cert_provenance_get mode || true)"
+    cert_base="$(cert_provenance_get base || true)"
     cert_lineage="$(cert_provenance_get certbot_lineage || true)"
+    configured_mode="$(cfg_get CERT_MODE || true)"
+    configured_base="$(cfg_get DNS_BASE_DOMAIN || true)"
+    if [[ -n "$configured_base" ]] \
+       && certbot_lineage_owned_by_5gpn "$configured_base"; then
+        ownership_match=1
+    fi
     case "$cert_lineage" in
         owned)
-            state="$(manage_unit_state "$unit")"
-            printf '  %s %-32s %s (5gpn-owned renewal)\n' \
-                "$(manage_mark "$state")" "$unit" "$state"
+            if [[ "$cert_mode" == "$configured_mode" \
+               && "$cert_base" == "$configured_base" \
+               && ( "$cert_mode" == cloudflare || "$cert_mode" == http-01 ) \
+               && "$ownership_match" == 1 ]]; then
+                state="$(manage_unit_state "$unit")"
+                printf '  %s %-32s %s (5gpn-owned renewal)\n' \
+                    "$(manage_mark "$state")" "$unit" "$state"
+            else
+                printf '  ⚠️  %-32s 需修复 renewal needs repair\n' "$unit"
+            fi
             ;;
         reused)
-            printf '  ⏸️  %-32s 外部续期 external renewal\n' "$unit"
+            if [[ "$cert_mode" == "$configured_mode" \
+               && "$cert_base" == "$configured_base" \
+               && ( "$cert_mode" == cloudflare || "$cert_mode" == http-01 ) \
+               && "$ownership_match" == 0 ]]; then
+                printf '  ⏸️  %-32s 外部续期 external renewal\n' "$unit"
+            else
+                printf '  ⚠️  %-32s 需修复 renewal needs repair\n' "$unit"
+            fi
             ;;
         missing)
             printf '  ⚠️  %-32s 需修复 renewal needs repair\n' "$unit"
             ;;
         none)
-            if [[ "$cert_mode" == debug ]]; then
+            if [[ "$cert_mode" == debug \
+               && "$configured_mode" == debug \
+               && "$cert_base" == "$configured_base" ]]; then
                 printf '  ⏸️  %-32s 不适用 debug certificate\n' "$unit"
             else
                 printf '  ⚠️  %-32s provenance 不完整\n' "$unit"
@@ -5397,7 +5947,7 @@ manage_action() {
         "查看核心日志 Core logs")
             journalctl -u 5gpn-mihomo.service -n 80 --no-pager 2>/dev/null | card || warn "journalctl unavailable" ;;
         "编辑安装配置 Configure installation")
-            full_install configure ;;
+            run_management_with_install_lock configure_installation ;;
         "新增节点 Add nodes")
             run_management_with_install_lock manage_add_nodes ;;
         "删除节点 Delete node")
@@ -5406,8 +5956,6 @@ manage_action() {
             run_management_with_install_and_cert_lock regen_ios ;;
         "设置 Cloudflare Token Set Cloudflare token")
             run_management_with_install_and_cert_lock set_cf_token ;;
-        "轮换控制台 secret Rotate console secret")
-            run_management_with_install_lock rotate_token ;;
         "重置 mihomo 配置 Reset mihomo config")
             if ask_yesno "确认备份并重置 operator-owned mihomo config?"; then
                 run_management_with_install_lock reset_mihomo_config
@@ -5432,7 +5980,7 @@ MANAGE_SCREENS=(
     # Grouped because each one is irreversible or drops live sessions, and a list
     # that mixed them with "show status" made the cursor pass over them on the
     # way to something harmless.
-    "危险操作|manage_screen_overview|轮换控制台 secret Rotate console secret|重置 mihomo 配置 Reset mihomo config|卸载 Uninstall"
+    "危险操作|manage_screen_overview|重置 mihomo 配置 Reset mihomo config|卸载 Uninstall"
 )
 
 # manage_read_key — one keypress, decoded to a direction.
@@ -5589,12 +6137,6 @@ manage_menu_list() {
 
 manage_menu() {
     check_root
-    load_identity_reconcile_journal || return 1
-    if [[ -n "$REPLACED_FIVEGPN_UID" || -n "$REPLACED_FIVEGPN_GID" \
-       || -n "$REPLACED_FIVEGPN_NAMED_GID" ]]; then
-        err "Runtime identity reconciliation is incomplete. Rerun the installer before using the management menu."
-        return 1
-    fi
     run_management_with_install_lock install_gum_for_managed_deployment || return 1
     activate_verified_installed_gum
     if [[ ! -t 0 ]]; then
@@ -5638,6 +6180,18 @@ normalize_cert_mode() {
         debug) printf '%s\n' debug ;;
         *) return 1 ;;
     esac
+}
+
+is_valid_cert_email() {
+    local value="${1:-}" local_part domain
+    [[ ${#value} -ge 3 && ${#value} -le 254 ]] || return 1
+    [[ "$value" == *@* && "${value#*@}" != *"@"* ]] || return 1
+    local_part="${value%%@*}"
+    domain="${value#*@}"
+    [[ ${#local_part} -ge 1 && ${#local_part} -le 64 ]] || return 1
+    [[ "$local_part" =~ ^[A-Za-z0-9]([A-Za-z0-9._%+-]{0,62}[A-Za-z0-9])?$ ]] || return 1
+    [[ "$local_part" != *..* ]] || return 1
+    is_valid_domain "$domain"
 }
 
 is_valid_ipv4() {
@@ -5771,16 +6325,76 @@ validate_cert_pair() {
     fi
 }
 
+cert_provenance_load() {
+    local file="${DNS_CERT_DIR}/.provenance"
+    local -a lines=()
+    CERT_PROVENANCE_MODE=""
+    CERT_PROVENANCE_BASE=""
+    CERT_PROVENANCE_LINEAGE=""
+    root_plain_file_metadata_is_safe "$file" 0 640 || return 1
+    mapfile -t lines < "$file" || return 1
+    [[ "${#lines[@]}" == 3 \
+       && "${lines[0]}" == mode=* \
+       && "${lines[1]}" == base=* \
+       && "${lines[2]}" == certbot_lineage=* ]] || return 1
+    CERT_PROVENANCE_MODE="${lines[0]#mode=}"
+    CERT_PROVENANCE_BASE="${lines[1]#base=}"
+    CERT_PROVENANCE_LINEAGE="${lines[2]#certbot_lineage=}"
+    is_valid_domain "$CERT_PROVENANCE_BASE" || return 1
+    case "${CERT_PROVENANCE_MODE}:${CERT_PROVENANCE_LINEAGE}" in
+        debug:none|cloudflare:owned|cloudflare:reused|cloudflare:missing|http-01:owned|http-01:reused|http-01:missing) ;;
+        *) return 1 ;;
+    esac
+}
+
 cert_provenance_get() {
     local key="$1" file="${DNS_CERT_DIR}/.provenance"
-    [[ -f "$file" && ! -L "$file" ]] || return 0
-    grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- || true
+    [[ ! -e "$file" && ! -L "$file" ]] && return 0
+    cert_provenance_load || return 1
+    case "$key" in
+        mode) printf '%s\n' "$CERT_PROVENANCE_MODE" ;;
+        base) printf '%s\n' "$CERT_PROVENANCE_BASE" ;;
+        certbot_lineage) printf '%s\n' "$CERT_PROVENANCE_LINEAGE" ;;
+        *) return 1 ;;
+    esac
 }
 
 cert_provenance_matches() {
-    local mode="$1" base="$2"
-    [[ "$(cert_provenance_get mode)" == "$mode" \
-       && "$(cert_provenance_get base)" == "$base" ]]
+    local mode="$1" base="$2" lineage="${3:-}"
+    cert_provenance_load || return 1
+    [[ "$CERT_PROVENANCE_MODE" == "$mode" \
+       && "$CERT_PROVENANCE_BASE" == "$base" \
+       && ( -z "$lineage" || "$CERT_PROVENANCE_LINEAGE" == "$lineage" ) ]]
+}
+
+# .provenance identifies the certificate source selected for the current role
+# publication. It is not a history of Certbot lineage ownership. Returning from
+# debug may select the same production lineage only when the independent
+# ownership record still proves that exact base and the caller separately
+# validates the live certificate and renewal configuration for the requested
+# production mode.
+owned_lineage_current_selection_allows_reuse() {
+    local base="$1" mode="$2"
+    case "$mode" in cloudflare|http-01) ;; *) return 1 ;; esac
+    cert_provenance_matches "$mode" "$base" owned \
+        || cert_provenance_matches "$mode" "$base" missing \
+        || cert_provenance_matches debug "$base" none
+}
+
+# An external lineage is never adopted. `.provenance` describes the source
+# currently copied into the role trees, so changing base or production mode does
+# not require that old marker to describe the new external source. Selection is
+# authorized only by the absence of exact-base ownership plus the caller's
+# strict validation of the canonical lineage before and after publication.
+# Ownership retained for another base is unrelated.
+external_lineage_current_selection_allows_reuse() {
+    local base="$1" mode="$2" provenance="${DNS_CERT_DIR}/.provenance"
+    case "$mode" in cloudflare|http-01) ;; *) return 1 ;; esac
+    ! certbot_lineage_owned_by_5gpn "$base" || return 1
+    if [[ ! -e "$provenance" && ! -L "$provenance" ]]; then
+        return 0
+    fi
+    cert_provenance_load
 }
 
 cert_provenance_base_matches() {
@@ -5847,10 +6461,77 @@ persist_certbot_lineage_ownership() {
         || { err "Could not persist Certbot lineage ownership for ${base}."; return 1; }
 }
 
+revoke_certbot_lineage_ownership() {
+    local base="$1" tmp
+    local -a retained=()
+    is_valid_domain "$base" || return 1
+    certbot_ownership_record_is_safe || return 1
+    certbot_ownership_record_has "$base" || return 0
+    mapfile -t retained < <(sed -n 's/^owned=//p' "$CERTBOT_OWNERSHIP_FILE" \
+        | grep -Fvx -- "$base" || true)
+    if [[ "${#retained[@]}" == 0 ]]; then
+        rm -f -- "$CERTBOT_OWNERSHIP_FILE" || return 1
+        sync -f "$DNS_CERT_DIR" 2>/dev/null \
+            || { err "Certbot ownership removal became visible but its durability was not confirmed."; return 1; }
+        [[ ! -e "$CERTBOT_OWNERSHIP_FILE" && ! -L "$CERTBOT_OWNERSHIP_FILE" ]]
+        return
+    fi
+    tmp="$(mktemp "${DNS_CERT_DIR}/.certbot-ownership.revoke.XXXXXX")" || return 1
+    {
+        printf 'version=1\n'
+        printf '%s\n' "${retained[@]}" | sort -u | sed 's/^/owned=/'
+    } > "$tmp" \
+        && chown root:root "$tmp" \
+        && chmod 0640 "$tmp" \
+        || { rm -f -- "$tmp"; return 1; }
+    sync -f "$tmp" 2>/dev/null \
+        || { rm -f -- "$tmp"; err "Could not durably write the reduced Certbot ownership record."; return 1; }
+    mv -f -- "$tmp" "$CERTBOT_OWNERSHIP_FILE" \
+        || { rm -f -- "$tmp"; return 1; }
+    sync -f "$DNS_CERT_DIR" 2>/dev/null \
+        || { err "Could not durably publish the reduced Certbot ownership record."; return 1; }
+    if ! certbot_ownership_record_is_safe \
+       || certbot_ownership_record_has "$base"; then
+        err "Could not revoke Certbot lineage ownership for ${base}."
+        return 1
+    fi
+}
+
 certbot_lineage_owned_by_5gpn() {
     local base="$1"
     [[ -e "$CERTBOT_OWNERSHIP_FILE" || -L "$CERTBOT_OWNERSHIP_FILE" ]] \
         && certbot_ownership_record_has "$base"
+}
+
+certificate_selection_state_is_safe() {
+    if [[ -e "$CERTBOT_OWNERSHIP_FILE" || -L "$CERTBOT_OWNERSHIP_FILE" ]]; then
+        certbot_ownership_record_is_safe \
+            || { err "The retained Certbot ownership record is unsafe."; return 1; }
+    fi
+    if [[ -e "$DNS_CERT_DIR/.provenance" || -L "$DNS_CERT_DIR/.provenance" ]]; then
+        cert_provenance_load \
+            || { err "The current certificate provenance marker is unsafe."; return 1; }
+    fi
+}
+
+certificate_selection_state_is_consistent_for_install() {
+    local base="$1" mode="$2" provenance="${DNS_CERT_DIR}/.provenance"
+    is_valid_domain "$base" || return 1
+    case "$mode" in cloudflare|http-01|debug) ;; *) return 1 ;; esac
+    certificate_selection_state_is_safe || return 1
+    [[ -e "$provenance" || -L "$provenance" ]] || return 0
+    cert_provenance_load || return 1
+    [[ "$CERT_PROVENANCE_BASE" == "$base" ]] || return 0
+    case "$CERT_PROVENANCE_LINEAGE" in
+        owned)
+            certbot_lineage_owned_by_5gpn "$base" \
+                || { err "Current certificate provenance claims owned without matching Certbot ownership for ${base}."; return 1; } ;;
+        reused)
+            ! certbot_lineage_owned_by_5gpn "$base" \
+                || { err "Current certificate provenance claims external while Certbot ownership names ${base}."; return 1; } ;;
+        none|missing) ;;
+        *) return 1 ;;
+    esac
 }
 
 certbot_lineage_artifacts_exist() {
@@ -5863,52 +6544,163 @@ certbot_lineage_artifacts_exist() {
         || compgen -G "${LE_RENEWAL_ROOT}/${base}-[0-9][0-9][0-9][0-9].conf" >/dev/null
 }
 
-global_certbot_timer_exists() {
-    systemctl cat certbot.timer >/dev/null 2>&1
+read_global_certbot_timer_state() {
+    read_exact_systemd_unit_state certbot.timer || return 1
+    CERTBOT_TIMER_LOAD_STATE="$SYSTEMD_UNIT_LOAD_STATE"
+    CERTBOT_TIMER_ACTIVE_STATE="$SYSTEMD_UNIT_ACTIVE_STATE"
+    CERTBOT_TIMER_UNIT_FILE_STATE="$SYSTEMD_UNIT_FILE_STATE"
 }
 
-# Stop the distro-wide unscoped timer before inspecting or mutating certificate
-# state. Capture both activity and enablement before the first change so every
-# transaction exit can restore the exact external state unless owned renewal
-# automation commits a takeover.
+global_certbot_timer_matches_expected_state() {
+    read_global_certbot_timer_state || return 1
+    [[ "$CERTBOT_TIMER_LOAD_STATE" == "$GLOBAL_CERTBOT_TIMER_EXPECTED_LOAD" \
+       && "$CERTBOT_TIMER_ACTIVE_STATE" == "$GLOBAL_CERTBOT_TIMER_EXPECTED_ACTIVE" \
+       && "$CERTBOT_TIMER_UNIT_FILE_STATE" == "$GLOBAL_CERTBOT_TIMER_EXPECTED_ENABLED" ]]
+}
+
+certbot_timer_state_is_round_trippable() {
+    [[ "$CERTBOT_TIMER_LOAD_STATE" == loaded ]] || return 1
+    case "$CERTBOT_TIMER_ACTIVE_STATE" in active|inactive) ;; *) return 1 ;; esac
+    case "$CERTBOT_TIMER_UNIT_FILE_STATE" in enabled|disabled) ;; *) return 1 ;; esac
+}
+
+certbot_service_is_quiescent() {
+    read_exact_systemd_unit_state certbot.service \
+        || { err "Could not read certbot.service state exactly."; return 1; }
+    case "$SYSTEMD_UNIT_LOAD_STATE:$SYSTEMD_UNIT_ACTIVE_STATE" in
+        not-found:not-found|loaded:inactive) return 0 ;;
+        *)
+            err "certbot.service is not quiescent (LoadState=${SYSTEMD_UNIT_LOAD_STATE}, ActiveState=${SYSTEMD_UNIT_ACTIVE_STATE})."
+            return 1
+            ;;
+    esac
+}
+
+preflight_global_certbot_timer_state() {
+    read_global_certbot_timer_state \
+        || { err "Could not inspect the distro certbot.timer before publication."; return 1; }
+    case "$CERTBOT_TIMER_LOAD_STATE" in
+        not-found) ;;
+        loaded)
+            certbot_timer_state_is_round_trippable \
+                || { err "The distro certbot.timer is not safely round-trippable before publication."; return 1; }
+            ;;
+        *) return 1 ;;
+    esac
+    certbot_service_is_quiescent
+}
+
+# Stop the distro-wide unscoped timer before mutating an owned lineage or
+# issuing a new one. External lineages are consumed read-only and debug mode
+# never enters this transaction. Capture both activity and enablement before the
+# first change so every transaction exit can restore the exact external state
+# unless owned renewal automation commits a takeover.
 pause_global_certbot_timer() {
-    if global_certbot_timer_exists; then
-        if [[ "$GLOBAL_CERTBOT_TIMER_STATE_CAPTURED" != 1 ]]; then
-            GLOBAL_CERTBOT_TIMER_ORIGINAL_ACTIVE="$(systemctl is-active certbot.timer 2>/dev/null || true)"
-            GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED="$(systemctl is-enabled certbot.timer 2>/dev/null || true)"
-            case "$GLOBAL_CERTBOT_TIMER_ORIGINAL_ACTIVE" in
-                active|inactive|failed) ;;
-                *) err "Could not capture the original certbot.timer activity state."; return 1 ;;
-            esac
-            case "$GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED" in
-                enabled|enabled-runtime|disabled|static|indirect|generated|transient|alias|linked|linked-runtime|masked|masked-runtime) ;;
-                *) err "Could not capture the original certbot.timer enablement state."; return 1 ;;
-            esac
-            GLOBAL_CERTBOT_TIMER_STATE_CAPTURED=1
-        fi
-        systemctl stop certbot.timer \
-            || { err "Could not stop the distro certbot.timer before the certificate transaction."; return 1; }
-        systemctl is-active --quiet certbot.timer 2>/dev/null \
-            && { err "The distro certbot.timer remained active after stop; refusing a certificate race."; return 1; }
+    local first_load first_active first_unit_file
+    read_global_certbot_timer_state \
+        || { err "Could not read the distro certbot.timer state exactly."; return 1; }
+    if [[ "$GLOBAL_CERTBOT_TIMER_STATE_CAPTURED" == 1 ]]; then
+        [[ "$CERTBOT_TIMER_LOAD_STATE" == "$GLOBAL_CERTBOT_TIMER_EXPECTED_LOAD" \
+           && "$CERTBOT_TIMER_ACTIVE_STATE" == "$GLOBAL_CERTBOT_TIMER_EXPECTED_ACTIVE" \
+           && "$CERTBOT_TIMER_UNIT_FILE_STATE" == "$GLOBAL_CERTBOT_TIMER_EXPECTED_ENABLED" ]] \
+            || { err "The captured distro certbot.timer changed after its installer transition."; return 1; }
+        certbot_service_is_quiescent \
+            || { err "Wait for the external Certbot operation to finish, then rerun the installer."; return 1; }
+        return 0
     fi
-    if systemctl is-active --quiet certbot.service 2>/dev/null; then
-        err "certbot.service is already running outside the 5gpn certificate lock."
-        err "Wait for it to finish, then rerun the installer."
+    if [[ "$CERTBOT_TIMER_LOAD_STATE" == not-found ]]; then
+        GLOBAL_CERTBOT_TIMER_ORIGINAL_ACTIVE=not-found
+        GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED=not-found
+        GLOBAL_CERTBOT_TIMER_EXPECTED_LOAD=not-found
+        GLOBAL_CERTBOT_TIMER_EXPECTED_ACTIVE=not-found
+        GLOBAL_CERTBOT_TIMER_EXPECTED_ENABLED=not-found
+        GLOBAL_CERTBOT_TIMER_STATE_CAPTURED=1
+        certbot_service_is_quiescent \
+            || { clear_global_certbot_timer_snapshot; err "Wait for the external Certbot operation to finish, then rerun the installer."; return 1; }
+        return 0
+    fi
+    if [[ "$CERTBOT_TIMER_LOAD_STATE" == loaded ]]; then
+        certbot_timer_state_is_round_trippable \
+            || { err "The distro certbot.timer is not in a safely round-trippable state."; return 1; }
+        first_load="$CERTBOT_TIMER_LOAD_STATE"
+        first_active="$CERTBOT_TIMER_ACTIVE_STATE"
+        first_unit_file="$CERTBOT_TIMER_UNIT_FILE_STATE"
+        read_global_certbot_timer_state \
+            || { err "Could not re-read the distro certbot.timer state exactly."; return 1; }
+        [[ "$CERTBOT_TIMER_LOAD_STATE" == "$first_load" \
+           && "$CERTBOT_TIMER_ACTIVE_STATE" == "$first_active" \
+           && "$CERTBOT_TIMER_UNIT_FILE_STATE" == "$first_unit_file" ]] \
+            || { err "The distro certbot.timer changed while its reversible state was being captured."; return 1; }
+        GLOBAL_CERTBOT_TIMER_ORIGINAL_ACTIVE="$first_active"
+        GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED="$first_unit_file"
+        GLOBAL_CERTBOT_TIMER_EXPECTED_LOAD=loaded
+        GLOBAL_CERTBOT_TIMER_EXPECTED_ACTIVE="$first_active"
+        GLOBAL_CERTBOT_TIMER_EXPECTED_ENABLED="$first_unit_file"
+        GLOBAL_CERTBOT_TIMER_STATE_CAPTURED=1
+        if ! systemctl stop certbot.timer; then
+            if read_global_certbot_timer_state \
+               && [[ "$CERTBOT_TIMER_LOAD_STATE" == loaded \
+                  && "$CERTBOT_TIMER_UNIT_FILE_STATE" == "$first_unit_file" \
+                  && ( "$CERTBOT_TIMER_ACTIVE_STATE" == active \
+                       || "$CERTBOT_TIMER_ACTIVE_STATE" == inactive ) ]]; then
+                GLOBAL_CERTBOT_TIMER_EXPECTED_ACTIVE="$CERTBOT_TIMER_ACTIVE_STATE"
+            fi
+            err "Could not stop the distro certbot.timer before the certificate transaction."
+            return 1
+        fi
+        read_global_certbot_timer_state \
+            || { err "Could not verify the distro certbot.timer after stop."; return 1; }
+        [[ "$CERTBOT_TIMER_LOAD_STATE" == loaded \
+           && "$CERTBOT_TIMER_ACTIVE_STATE" == inactive \
+           && "$CERTBOT_TIMER_UNIT_FILE_STATE" == "$first_unit_file" ]] \
+            || { err "The distro certbot.timer did not enter the exact paused state."; return 1; }
+        GLOBAL_CERTBOT_TIMER_EXPECTED_LOAD=loaded
+        GLOBAL_CERTBOT_TIMER_EXPECTED_ACTIVE=inactive
+        GLOBAL_CERTBOT_TIMER_EXPECTED_ENABLED="$first_unit_file"
+    else
+        err "The distro certbot.timer load state is unsupported."
         return 1
     fi
+    certbot_service_is_quiescent \
+        || { err "Wait for the external Certbot operation to finish, then rerun the installer."; return 1; }
+}
+
+# A canonical lineage without an ownership record is external. Reading it does
+# not authorize stopping the distro timer. Owned lineages and an absent
+# canonical lineage may need Certbot mutation, so those paths take the reversible
+# timer snapshot before publication and re-check it inside install_cert.
+certbot_transaction_requires_global_timer_pause() {
+    local base="$1" mode="${2:-${CERT_MODE:-}}"
+    case "$mode" in
+        debug) return 1 ;;
+        cloudflare|http-01) ;;
+        *) return 1 ;;
+    esac
+    if certbot_lineage_artifacts_exist "$base" \
+       && ! certbot_lineage_owned_by_5gpn "$base"; then
+        return 1
+    fi
+    return 0
 }
 
 # The distro timer invokes an unscoped `certbot renew`. It can be disabled only
 # when every visible Certbot lineage belongs to this exact 5gpn base; otherwise
 # disabling it would silently break renewal for unrelated services.
 certbot_lineage_set_is_exclusive() {
-    local base="$1" root entry name expected
+    local base="$1" root entry name expected listing
     local -a roots=("$LE_LIVE_ROOT" "$LE_ARCHIVE_ROOT" "$LE_RENEWAL_ROOT")
     for root in "${roots[@]}"; do
         [[ ! -e "$root" && ! -L "$root" ]] && continue
         [[ -d "$root" && ! -L "$root" \
            && "$(readlink -f -- "$root" 2>/dev/null || true)" == "$root" ]] \
             || { err "Unsafe Certbot lineage root: $root"; return 1; }
+        listing="$(mktemp /tmp/5gpn-certbot-lineages.XXXXXX)" || return 1
+        chmod 0600 "$listing" || { rm -f -- "$listing"; return 1; }
+        if ! find "$root" -mindepth 1 -maxdepth 1 -print0 > "$listing" 2>/dev/null; then
+            rm -f -- "$listing"
+            err "Could not enumerate Certbot lineage state: $root"
+            return 1
+        fi
         while IFS= read -r -d '' entry; do
             name="$(basename -- "$entry")"
             if [[ "$root" == "$LE_RENEWAL_ROOT" ]]; then
@@ -5920,24 +6712,70 @@ certbot_lineage_set_is_exclusive() {
             if [[ "$name" != "$expected" ]]; then
                 err "Unrelated Certbot lineage state prevents disabling the distro certbot.timer: $entry"
                 err "Configure independent locked renewal for every lineage before installing an owned 5gpn lineage."
+                rm -f -- "$listing"
                 return 1
             fi
-        done < <(find "$root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+        done < "$listing"
+        rm -f -- "$listing" || return 1
     done
 }
 
 disable_global_certbot_timer_for_owned_lineage() {
     local base="$1"
-    if global_certbot_timer_exists; then
+    read_global_certbot_timer_state \
+        || { err "Could not read the distro certbot.timer before takeover."; return 1; }
+    if [[ "$GLOBAL_CERTBOT_TIMER_STATE_CAPTURED" == 1 ]]; then
+        if [[ "$GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED" == not-found ]]; then
+            [[ "$CERTBOT_TIMER_LOAD_STATE" == not-found ]] \
+                || { err "A distro certbot.timer appeared after absence was captured."; return 1; }
+            return 0
+        fi
+        [[ "$CERTBOT_TIMER_LOAD_STATE" == loaded \
+           && "$CERTBOT_TIMER_ACTIVE_STATE" == inactive \
+           && "$CERTBOT_TIMER_UNIT_FILE_STATE" == "$GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED" ]] \
+            || { err "The captured distro certbot.timer changed or disappeared before takeover."; return 1; }
         certbot_lineage_set_is_exclusive "$base" || return 1
+        read_global_certbot_timer_state \
+            || { err "Could not re-read the distro certbot.timer before takeover."; return 1; }
+        [[ "$CERTBOT_TIMER_LOAD_STATE" == loaded \
+           && "$CERTBOT_TIMER_ACTIVE_STATE" == inactive \
+           && "$CERTBOT_TIMER_UNIT_FILE_STATE" == "$GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED" ]] \
+            || { err "The distro certbot.timer changed after pause; refusing irreversible takeover."; return 1; }
         systemctl disable --now certbot.timer \
             || { err "Could not disable the unscoped distro certbot.timer."; return 1; }
-        systemctl is-active --quiet certbot.timer 2>/dev/null \
-            && { err "The distro certbot.timer is still active."; return 1; }
-        systemctl is-enabled --quiet certbot.timer 2>/dev/null \
-            && { err "The distro certbot.timer is still enabled."; return 1; }
+        read_global_certbot_timer_state \
+            || { err "Could not verify the distro certbot.timer after disable."; return 1; }
+        [[ "$CERTBOT_TIMER_LOAD_STATE" == loaded \
+           && "$CERTBOT_TIMER_ACTIVE_STATE" == inactive \
+           && "$CERTBOT_TIMER_UNIT_FILE_STATE" == disabled ]] \
+            || { err "The distro certbot.timer did not enter the exact disabled state."; return 1; }
+        GLOBAL_CERTBOT_TIMER_EXPECTED_LOAD=loaded
+        GLOBAL_CERTBOT_TIMER_EXPECTED_ACTIVE=inactive
+        GLOBAL_CERTBOT_TIMER_EXPECTED_ENABLED=disabled
+    else
+        [[ "$CERTBOT_TIMER_LOAD_STATE" == not-found ]] \
+            || { err "A distro certbot.timer appeared without a reversible snapshot."; return 1; }
     fi
     return 0
+}
+
+global_certbot_timer_takeover_state_is_stable() {
+    read_global_certbot_timer_state \
+        || { err "Could not verify the distro certbot.timer before renewal commit."; return 1; }
+    if [[ "$GLOBAL_CERTBOT_TIMER_STATE_CAPTURED" == 1 ]]; then
+        if [[ "$GLOBAL_CERTBOT_TIMER_ORIGINAL_ENABLED" == not-found ]]; then
+            [[ "$CERTBOT_TIMER_LOAD_STATE" == not-found ]] \
+                || { err "A distro certbot.timer appeared before renewal commit."; return 1; }
+            return 0
+        fi
+        [[ "$CERTBOT_TIMER_LOAD_STATE" == loaded \
+           && "$CERTBOT_TIMER_ACTIVE_STATE" == inactive \
+           && "$CERTBOT_TIMER_UNIT_FILE_STATE" == disabled ]] \
+            || { err "The captured distro certbot.timer changed before renewal commit."; return 1; }
+    else
+        [[ "$CERTBOT_TIMER_LOAD_STATE" == not-found ]] \
+            || { err "A distro certbot.timer appeared before renewal commit."; return 1; }
+    fi
 }
 
 certbot_renewal_conf_scoped() {
@@ -6023,21 +6861,32 @@ write_cert_provenance() {
 }
 
 decommission_certbot_lineage() {
-    local base="$1" conf
+    local base="$1" conf current_mode current_base current_lineage
     conf="${LE_RENEWAL_ROOT}/${base}.conf"
     DECOMMISSION_PRESERVE_ACME=0
     is_valid_domain "$base" \
         || { err "Cannot decommission: persisted base domain is invalid."; return 1; }
-    if ! certbot_lineage_artifacts_exist "$base"; then
-        info "No Certbot lineage artifacts exist for '${base}'."
-        return 0
-    fi
     if [[ ( -e "$CERTBOT_OWNERSHIP_FILE" || -L "$CERTBOT_OWNERSHIP_FILE" ) ]] \
        && ! certbot_ownership_record_is_safe; then
         warn "Preserving Certbot lineage '${base}': the retained ownership record is unsafe and cannot authorize deletion."
         if grep -qF -- "$ACME_DIR/cloudflare.ini" "$conf" 2>/dev/null; then
             DECOMMISSION_PRESERVE_ACME=1
         fi
+        return 0
+    fi
+    if ! certbot_lineage_artifacts_exist "$base"; then
+        if certbot_lineage_owned_by_5gpn "$base"; then
+            current_mode="$(cert_provenance_get mode)" || return 1
+            current_base="$(cert_provenance_get base)" || return 1
+            if [[ "$current_base" == "$base" \
+               && ( "$current_mode" == cloudflare || "$current_mode" == http-01 ) ]]; then
+                write_cert_provenance "$current_mode" "$base" missing \
+                    || { err "Could not withdraw stale owned renewal provenance for '${base}'."; return 1; }
+            fi
+            revoke_certbot_lineage_ownership "$base" \
+                || { err "Lineage '${base}' is already absent, but its stale ownership authority could not be revoked."; return 1; }
+        fi
+        info "No Certbot lineage artifacts exist for '${base}'."
         return 0
     fi
     if ! certbot_lineage_owned_by_5gpn "$base"; then
@@ -6051,8 +6900,24 @@ decommission_certbot_lineage() {
     fi
     decommission_lineage_safe "$base" \
         || { err "Owned lineage '${base}' is partial, unscoped, or mode-mismatched; refusing Certbot deletion."; return 1; }
+    current_mode="$(cert_provenance_get mode)" || return 1
+    current_lineage="$(cert_provenance_get certbot_lineage)" || return 1
+    # Withdraw renewal authorization before removing deletion ownership. A
+    # crash between these two durable writes is reported as a source/ownership
+    # conflict, never as healthy renewal. Debug and missing role selections
+    # already carry no renewal authorization and remain unchanged.
+    if [[ "$current_lineage" == owned \
+       && ( "$current_mode" == cloudflare || "$current_mode" == http-01 ) ]]; then
+        write_cert_provenance "$current_mode" "$base" reused \
+            || { err "Could not withdraw owned renewal provenance for '${base}'."; return 1; }
+    fi
+    # Revoke durable deletion authority before the destructive external call.
+    # A crash or Certbot failure after this boundary leaves the lineage present
+    # but read-only/external. Do not roll either withdrawal back.
+    revoke_certbot_lineage_ownership "$base" \
+        || { err "Could not revoke ownership for '${base}' before Certbot deletion."; return 1; }
     certbot delete --non-interactive --cert-name "$base" \
-        || { err "Certbot refused to delete the exact 5gpn-owned lineage '$base'."; return 1; }
+        || { err "Certbot refused to delete '${base}'; its ownership was already revoked and was not rolled back."; return 1; }
     ok "Deleted the provenance-confirmed 5gpn Certbot lineage '${base}'."
 }
 
@@ -6076,30 +6941,63 @@ remove_owned_renew_hook() {
 }
 
 install_cert_deploy_hook() {
-    local src="${SCRIPT_DIR}/scripts/renew-hook.sh"
-    [[ -f "$src" ]] || src="${SCRIPTS_DIR}/renew-hook.sh"
-    [[ -f "$src" ]] \
-        || { err "scripts/renew-hook.sh not found; refusing production certificate setup without a deploy hook."; return 1; }
-    install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy || return 1
+    local src="${SCRIPT_DIR}/scripts/renew-hook.sh" source_path before after
+    local hash_fd source_fd hash_metadata source_metadata fd_digest anchored=0
+    if [[ "$SCRIPT_DIR" == "$BASE_DIR" ]]; then
+        source_path="${SCRIPTS_DIR}/renew-hook.sh"
+        before="$(installed_runtime_script_state "$source_path")" \
+            || { err "Installed renew-hook.sh metadata is unsafe."; return 1; }
+        exec {hash_fd}<"$source_path" || return 1
+        exec {source_fd}<"$source_path" || { exec {hash_fd}<&-; return 1; }
+        hash_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$hash_fd")" \
+            || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+        source_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$source_fd")" \
+            || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+        [[ "$hash_metadata" == "${before%:*}" && "$source_metadata" == "${before%:*}" ]] \
+            || { exec {hash_fd}<&-; exec {source_fd}<&-; err "Installed renew-hook.sh changed while it was anchored."; return 1; }
+        fd_digest="$(sha256sum -- "/proc/self/fd/$hash_fd" | awk '{print $1}')" \
+            || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+        exec {hash_fd}<&-
+        [[ "$fd_digest" == "${before##*:}" ]] \
+            || { exec {source_fd}<&-; err "Installed renew-hook.sh bytes differ from its anchored path."; return 1; }
+        src="/proc/self/fd/$source_fd"
+        anchored=1
+    else
+        [[ -f "$src" && ! -L "$src" && "$(file_nlink "$src")" == 1 ]] \
+            || { err "scripts/renew-hook.sh not found or unsafe; refusing production certificate setup without a deploy hook."; return 1; }
+    fi
+    install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy \
+        || { [[ "$anchored" == 0 ]] || exec {source_fd}<&-; return 1; }
     if [[ -e /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh ]] \
        && ! renew_hook_owned; then
+        [[ "$anchored" == 0 ]] || exec {source_fd}<&-
         err "Refusing to overwrite an unowned Certbot deploy hook: /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh"
         return 1
     fi
-    install -m 0755 "$src" /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh || return 1
+    install -m 0755 "$src" /etc/letsencrypt/renewal-hooks/deploy/99-5gpn.sh \
+        || { [[ "$anchored" == 0 ]] || exec {source_fd}<&-; return 1; }
+    if [[ "$anchored" == 1 ]]; then
+        exec {source_fd}<&-
+        after="$(installed_runtime_script_state "$source_path")" \
+            || { err "Could not revalidate installed renew-hook.sh after publication."; return 1; }
+        [[ "$after" == "$before" ]] \
+            || { err "Installed renew-hook.sh changed during deploy-hook publication."; return 1; }
+    fi
     ok "Renewal deploy hook installed (validated dot/console publication + iOS re-sign)."
 }
 
 # Certbot standalone must own public TCP :80. Run in a subshell so its signal
 # traps cannot replace the full install transaction's ERR/EXIT failure-reporting
 # and cleanup traps.
-# Only a mihomo service that was active is stopped. Failure and signal paths
-# restore it from this subshell. After successful initial issuance, leave it
-# stopped so install_cert can validate and publish console/current before
-# full_install's normal start_services step restores the data plane. An
+# Full install stops only a service that was active and restores it on failure.
+# Installed configure instead arrives with the start half of one PID1-owned
+# try-restart job blocked in ExecStartPre; this helper never starts or stops that
+# runtime. The outer configure transaction releases that exact job once, after
+# every selected document and profile generation passes final validation. An
 # unrelated process occupying :80 is never killed and makes Certbot fail closed.
 run_http_certbot() (
     local restore=0 certbot_rc=0 restore_rc=0
+    local externally_quiesced="${FIVEGPN_HTTP_CERTBOT_RUNTIME_FENCED:-0}"
     restore_active_mihomo() {
         [[ "$restore" == 1 ]] || return 0
         restore=0
@@ -6110,7 +7008,10 @@ run_http_certbot() (
     trap 'restore_active_mihomo || true' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    if systemctl is-active --quiet 5gpn-mihomo.service 2>/dev/null; then
+    if [[ "$externally_quiesced" == 1 ]]; then
+        configure_assert_runtime_gate_quiescent \
+            || { err "HTTP-01 configure requires its PID1-owned restart gate."; exit 1; }
+    elif systemctl is-active --quiet 5gpn-mihomo.service 2>/dev/null; then
         info "Temporarily stopping 5gpn-mihomo to release TCP :80 for HTTP-01."
         restore=1
         systemctl stop 5gpn-mihomo.service \
@@ -6118,8 +7019,8 @@ run_http_certbot() (
     fi
     certbot "$@" || certbot_rc=$?
     if [[ "$certbot_rc" == 0 ]]; then
-        # Disarm the EXIT restore only after Certbot has returned successfully.
-        # Until this assignment, INT/TERM/EXIT still restore the original state.
+        # Full install and installed configure both leave a successful
+        # challenge quiescent for their outer verified publication boundary.
         restore=0
     else
         restore_active_mihomo || restore_rc=$?
@@ -6132,27 +7033,39 @@ run_http_certbot() (
     [[ "$restore_rc" == 0 ]] || exit "$restore_rc"
 )
 
+deployed_cert_roles_match_source() {
+    local source="$1" role target_before target_after
+    [[ -s "$source/fullchain.pem" && -s "$source/privkey.pem" ]] || return 1
+    load_cert_role_helpers || return 1
+    cert_role_ctl_validate_current || return 1
+    for role in dot console; do
+        target_before="$(cert_role_ctl_current_target "$role" 0)" || return 1
+        cmp -s -- "$source/fullchain.pem" "$DNS_CERT_DIR/$role/$target_before/fullchain.pem" \
+            || return 1
+        cmp -s -- "$source/privkey.pem" "$DNS_CERT_DIR/$role/$target_before/privkey.pem" \
+            || return 1
+        target_after="$(cert_role_ctl_current_target "$role" 0)" || return 1
+        [[ "$target_after" == "$target_before" ]] || return 1
+    done
+}
+
 install_cert() {
     local base="${1:?install_cert needs a base domain}"
     local mode="$CERT_MODE"
     local live="${LE_LIVE_ROOT}/${base}"
     local lineage_origin="" lineage_artifacts=0 lineage_was_owned=0
-    local force=0 cf_token_ready=0
-    if [[ -e "$CERTBOT_OWNERSHIP_FILE" || -L "$CERTBOT_OWNERSHIP_FILE" ]]; then
-        certbot_ownership_record_is_safe \
-            || { err "The retained Certbot ownership record is unsafe."; return 1; }
-    fi
+    local force=0 cf_token_ready=0 external_deploy_attempt external_deploy_matched=0
+    certificate_selection_state_is_safe || return 1
     certbot_lineage_owned_by_5gpn "$base" && lineage_was_owned=1
     certbot_lineage_artifacts_exist "$base" && lineage_artifacts=1
     KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=0
 
     [[ "$mode" == cloudflare || "$mode" == http-01 || "$mode" == debug ]] \
         || { err "CERT_MODE must be cloudflare, http-01, or debug."; return 1; }
-    pause_global_certbot_timer || return 1
 
     if [ "$mode" = "debug" ]; then
         local debug_src="${DEBUG_CERT_DIR}/${base}"
-        if cert_provenance_matches debug "$base" \
+        if cert_provenance_matches debug "$base" none \
            && validate_cert_pair "${debug_src}/fullchain.pem" "${debug_src}/privkey.pem" \
                 "$base" "$((30*86400))" debug \
            && { [[ -z "$GATEWAY_IP" ]] || openssl x509 -checkip "$GATEWAY_IP" -noout -in "${debug_src}/fullchain.pem" >/dev/null 2>&1; } \
@@ -6167,7 +7080,7 @@ install_cert() {
         fi
         write_cert_provenance debug "$base" none || return 1
         remove_owned_renew_hook
-        remove_owned_renewal_automation || return 1
+        disable_scoped_renewal_timer || return 1
         return 0
     fi
 
@@ -6180,12 +7093,31 @@ install_cert() {
         if validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
                 "$base" "$((30*86400))" production "$mode" \
            && certbot_renewal_mode_matches "$base" "$mode" \
-           && { [[ ! -e "$DNS_CERT_DIR/.provenance" ]] || cert_provenance_matches "$mode" "$base"; }; then
+           && external_lineage_current_selection_allows_reuse "$base" "$mode"; then
             info "Reusing the valid externally owned ${mode} lineage for ${base} without changing it."
-            deploy_cert_roles "$base" "$live" "$mode" || return 1
-            write_cert_provenance "$mode" "$base" reused || return 1
+            # Install the audited hook before taking the role snapshot. A
+            # renewal that completes after this point either runs that hook or
+            # is detected by the exact live-to-current comparison below. One
+            # bounded retry converges when an already-running renewal crosses
+            # the first snapshot.
             install_cert_deploy_hook || return 1
-            remove_owned_renewal_automation || return 1
+            certbot_service_is_quiescent \
+                || { err "An external Certbot operation predates the deploy hook; wait for it to finish and rerun."; return 1; }
+            for external_deploy_attempt in 1 2; do
+                deploy_cert_roles "$base" "$live" "$mode" || return 1
+                if validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
+                        "$base" "$((30*86400))" production "$mode" \
+                   && certbot_renewal_mode_matches "$base" "$mode" \
+                   && deployed_cert_roles_match_source "$live"; then
+                    external_deploy_matched=1
+                    break
+                fi
+                warn "The external lineage changed across role publication; retrying one fresh immutable snapshot."
+            done
+            [[ "$external_deploy_matched" == 1 ]] \
+                || { err "The external Certbot lineage did not stabilize against the deployed role copies."; return 1; }
+            write_cert_provenance "$mode" "$base" reused || return 1
+            disable_scoped_renewal_timer || return 1
             warn "The external lineage remains operator-owned; 5gpn did not install a public renewal timer or gain deletion authority."
             return 0
         fi
@@ -6206,14 +7138,10 @@ install_cert() {
         deploy_cert_roles "$base" "$DOT_CERT_DIR/current" "$mode" || return 1
         write_cert_provenance "$mode" "$base" missing || return 1
         remove_owned_renew_hook
-        remove_owned_renewal_automation || return 1
+        disable_scoped_renewal_timer || return 1
         warn "The preserved certificate is active, but automatic renewal is disabled until the Certbot lineage is repaired or reissued."
         return 0
     fi
-
-    # From here the lineage is either absent or provenance-confirmed as owned.
-    # Only this path may disable the distro-wide timer and invoke Certbot.
-    disable_global_certbot_timer_for_owned_lineage "$base" || return 1
 
     # Reuse is mode-aware. The SAN shape distinguishes wildcard DNS-01 from
     # exact-name HTTP-01; renewal.conf and owned provenance prevent a mode
@@ -6233,9 +7161,21 @@ install_cert() {
         reuse_declined="the certificate is missing, untrusted, wrong for ${mode}, or expires within 30 days"
     elif ! certbot_renewal_mode_matches "$base" "$mode"; then
         reuse_declined="its renewal configuration does not use the ${mode} authenticator"
-    elif ! cert_provenance_matches "$mode" "$base"; then
-        reuse_declined="its recorded provenance does not match ${mode}"
+    elif ! owned_lineage_current_selection_allows_reuse "$base" "$mode"; then
+        reuse_declined="the current certificate selection does not authorize this owned ${mode} lineage"
     fi
+
+    if [[ "$lineage_was_owned" == 1 ]] \
+       && cert_provenance_matches "$mode" "$base" reused; then
+        err "The Certbot ownership record conflicts with the current ${mode} certificate source for ${base}."
+        err "Refusing to mutate or adopt the canonical lineage until the current ownership state is repaired."
+        return 1
+    fi
+
+    # External and debug paths returned above. Only owned reuse or a possible
+    # new issuance may coordinate and take over the distro Certbot timer.
+    pause_global_certbot_timer || return 1
+    disable_global_certbot_timer_for_owned_lineage "$base" || return 1
 
     if [[ -z "$reuse_declined" ]]; then
         lineage_origin=owned
@@ -6272,10 +7212,12 @@ install_cert() {
         # same cert-name switches between wildcard DNS-01 and exact HTTP-01.
         [[ "$force" == 1 ]] && certbot_args+=(--force-renewal --renew-with-new-domains)
         if [[ "$mode" == http-01 ]]; then
-            FIVEGPN_CERT_LOCK_HELD=1 run_http_certbot "${certbot_args[@]}" \
+            FIVEGPN_CERT_LOCK_HELD=1 FIVEGPN_SKIP_PROFILE_REFRESH=1 \
+                run_http_certbot "${certbot_args[@]}" \
                 || { err "Certbot HTTP-01 failed. Check both public A records, absence of AAAA, TCP/80/NAT/security-group reachability, and rate limits."; return 1; }
         else
-            FIVEGPN_CERT_LOCK_HELD=1 certbot "${certbot_args[@]}" \
+            FIVEGPN_CERT_LOCK_HELD=1 FIVEGPN_SKIP_PROFILE_REFRESH=1 \
+                certbot "${certbot_args[@]}" \
                 || { err "Certbot DNS-01 failed for *.${base} (check the Cloudflare token's Zone:DNS:Edit scope + zone match)."; return 1; }
         fi
         lineage_origin=owned
@@ -6339,7 +7281,7 @@ issue_selfsigned_wildcard() {
     warn "CERT_MODE=debug: SELF-SIGNED WILDCARD cert for *.${base} (CN=${base}, SAN=${san}). NOT trusted by clients — test/dev only."
     # Dismantle production renewal machinery when switching to debug mode.
     remove_owned_renew_hook
-    remove_owned_renewal_automation
+    disable_scoped_renewal_timer
 }
 
 # deploy_cert_roles <base> [src_dir] [mode] — copy the selected cert to the two
@@ -6348,105 +7290,52 @@ issue_selfsigned_wildcard() {
 deploy_cert_roles() {
     local base="$1" mode="${3:-${CERT_MODE:-cloudflare}}"
     local src="${2:-${LE_LIVE_ROOT}/${base}}"
-    local r dest group generation final link_tmp old trust=production i j rollback_link
-    local -a roles=(dot console) dests=() generations=() links=() old_targets=()
+    local trust=production rc=0
     [[ "$src" == "$DEBUG_CERT_DIR"/* ]] && { trust=debug; mode=debug; }
     validate_cert_pair "${src}/fullchain.pem" "${src}/privkey.pem" "$base" 0 "$trust" "$mode" \
         || { err "Certificate source failed validation: $src"; return 1; }
     ensure_dns_cert_root || return 1
-
-    # Each role publishes one complete generation through an atomically replaced
-    # relative symlink. Readers therefore see the old pair or the new pair,
-    # never a key and certificate from different generations.
-    for r in "${roles[@]}"; do
-        dest="${DNS_CERT_DIR}/$r"
-        # One mapping for both the writer and the validator; see cert_role_group.
-        group="$(cert_role_group "$r")" \
-            || { cleanup_cert_role_candidates roles dests generations links; err "Unknown certificate role: $r"; return 1; }
-        if [[ -e "$dest" || -L "$dest" ]]; then
-            cert_role_tree_is_safe_for_recursive_metadata "$dest" \
-                || { cleanup_cert_role_candidates roles dests generations links; err "Certificate role boundary is unsafe: $dest"; return 1; }
-            normalize_cert_role_group "$dest" "$group" \
-                || { cleanup_cert_role_candidates roles dests generations links; err "Could not normalize certificate role ownership: $dest"; return 1; }
-        else
-            install -d -o root -g "$group" -m 0750 "$dest" \
-                || { cleanup_cert_role_candidates roles dests generations links; return 1; }
-            write_ownership_marker "$dest" "$CERT_ROLE_MARKER" "${CERT_ROLE_VALUE_PREFIX}:${r}" \
-                || { cleanup_cert_role_candidates roles dests generations links; return 1; }
-            install -d -o root -g "$group" -m 0750 "${dest}/generations" \
-                || { cleanup_cert_role_candidates roles dests generations links; return 1; }
-            cert_role_tree_is_safe_for_recursive_metadata "$dest" \
-                || { cleanup_cert_role_candidates roles dests generations links; err "Could not establish certificate role boundary: $dest"; return 1; }
-        fi
-        if [[ -e "${dest}/current" || -L "${dest}/current" ]]; then
-            [[ -L "${dest}/current" ]] \
-                || { cleanup_cert_role_candidates roles dests generations links; err "Certificate role current path is not a symlink: ${dest}/current"; return 1; }
-            old="$(readlink -- "${dest}/current")"
-            [[ "$old" =~ ^generations/[A-Za-z0-9._-]+$ && -d "${dest}/${old}" ]] \
-                || { cleanup_cert_role_candidates roles dests generations links; err "Certificate role current symlink is unsafe: ${dest}/current"; return 1; }
-        else
-            old=""
-        fi
-
-        generation="$(mktemp -d "${dest}/generations/.new.XXXXXX")" \
-            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
-        dests+=("$dest")
-        generations+=("$generation")
-        links+=("")
-        old_targets+=("$old")
-        i=$((${#generations[@]} - 1))
-        chown "root:$group" "$generation" && chmod 0750 "$generation" \
-            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
-        install -g "$group" -m 0640 "${src}/fullchain.pem" "${generation}/fullchain.pem" \
-            && install -g "$group" -m 0640 "${src}/privkey.pem" "${generation}/privkey.pem" \
-            && validate_cert_pair "${generation}/fullchain.pem" "${generation}/privkey.pem" \
-                "$base" 0 "$trust" "$mode" \
-            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
-        sync -f "${generation}/fullchain.pem" "${generation}/privkey.pem" "$generation" 2>/dev/null || true
-        final="${dest}/generations/generation-$(date -u +%Y%m%dT%H%M%SZ)-${BASHPID}-${RANDOM}"
-        [[ ! -e "$final" ]] \
-            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
-        mv -- "$generation" "$final" \
-            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
-        generations[$i]="$final"
-        link_tmp="${dest}/.current.${BASHPID}.${RANDOM}"
-        [[ ! -e "$link_tmp" && ! -L "$link_tmp" ]] \
-            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
-        links[$i]="$link_tmp"
-        ln -s "generations/$(basename -- "$final")" "$link_tmp" \
-            || { cleanup_cert_role_candidates roles dests generations links; return 1; }
-    done
-
-    for i in "${!roles[@]}"; do
-        if ! mv -Tf -- "${links[$i]}" "${dests[$i]}/current"; then
-            for ((j = 0; j < i; j++)); do
-                if [[ -n "${old_targets[$j]}" ]]; then
-                    rollback_link="${dests[$j]}/.rollback.${BASHPID}.${RANDOM}"
-                    ln -s "${old_targets[$j]}" "$rollback_link" \
-                        && mv -Tf -- "$rollback_link" "${dests[$j]}/current" || true
-                    rm -f -- "$rollback_link"
-                else
-                    rm -f -- "${dests[$j]}/current"
-                fi
-            done
-            cleanup_cert_role_candidates roles dests generations links
-            err "Could not atomically publish certificate role ${roles[$i]}."
-            return 1
-        fi
-        links[$i]=""
-    done
-
-    for i in "${!roles[@]}"; do
-        r="${roles[$i]}"
-        dest="${dests[$i]}"
-        final="${generations[$i]}"
-        clear_owned_scope "$dest" "$CERT_ROLE_MARKER" "${CERT_ROLE_VALUE_PREFIX}:${r}" \
-            "${dest}/generations" "$(basename -- "$final")" || return 1
-        rm -f -- "${dest}/fullchain.pem" "${dest}/privkey.pem"
-    done
-    cert_root_is_safe \
-        || { err "Published certificate role tree failed ownership validation."; return 1; }
+    load_cert_role_helpers || return 1
+    CERT_ROLE_CTL_ALLOW_CREATE=1
+    if [[ "$DNS_CERT_DIR" == /etc/5gpn/cert ]]; then
+        CERT_ROLE_CTL_STAGE_PARENT=/run/5gpn
+        CERT_ROLE_CTL_LINEAGE_LIVE_ROOT="$LE_LIVE_ROOT"
+        CERT_ROLE_CTL_LINEAGE_ARCHIVE_ROOT="$LE_ARCHIVE_ROOT"
+    else
+        CERT_ROLE_CTL_STAGE_PARENT="$(dirname -- "$DNS_CERT_DIR")/.cert-role-staging"
+        CERT_ROLE_CTL_LINEAGE_LIVE_ROOT="$LE_LIVE_ROOT"
+        CERT_ROLE_CTL_LINEAGE_ARCHIVE_ROOT="$LE_ARCHIVE_ROOT"
+    fi
+    CERT_ROLE_DEPLOY_BASE="$base"
+    CERT_ROLE_DEPLOY_MODE="$mode"
+    CERT_ROLE_DEPLOY_TRUST="$trust"
+    if [[ "$src" == "$LE_LIVE_ROOT/$base" ]]; then
+        cert_role_ctl_deploy_lineage "$src" "$base" cert_role_install_validate_candidate || rc=$?
+    else
+        cert_role_ctl_publish_pair "$src/fullchain.pem" "$src/privkey.pem" \
+            cert_role_install_validate_candidate || rc=$?
+    fi
+    if [[ "$rc" != 0 ]]; then
+        case "$CERT_ROLE_CTL_COMMIT_STATE" in
+            committed-undurable)
+                err "Certificate role current changed, but durability was not confirmed; no rollback was attempted." ;;
+            committed-partial|committed)
+                err "Certificate role publication crossed its commit boundary and remains partial; no rollback was attempted." ;;
+            *) err "Certificate role publication failed before any current pointer changed." ;;
+        esac
+        [[ -z "$CERT_ROLE_CTL_LAST_ERROR" ]] || err "$CERT_ROLE_CTL_LAST_ERROR"
+        return "$rc"
+    fi
+    cert_role_ctl_validate_current \
+        || { err "Published certificate role current generations failed validation."; return 1; }
+    [[ "$CERT_ROLE_CTL_GC_WARNING" == 0 ]] \
+        || warn "Certificate roles are active, but an old unreferenced generation or private source snapshot was retained."
     ok "${mode} certificate for ${base} deployed to dot/console role dirs."
+}
+
+cert_role_install_validate_candidate() {
+    validate_cert_pair "$1" "$2" "$CERT_ROLE_DEPLOY_BASE" 0 \
+        "$CERT_ROLE_DEPLOY_TRUST" "$CERT_ROLE_DEPLOY_MODE"
 }
 
 # install_renewal_automation installs a daily systemd timer running only the
@@ -6457,85 +7346,32 @@ deploy_cert_roles() {
 # releases/restores mihomo's TCP :80 listeners.
 install_renewal_automation() {
     local base="${1:?install_renewal_automation needs a base domain}"
-    local service_tmp timer_tmp
     certbot_lineage_owned_by_5gpn "$base" \
         || { err "Refusing to install project renewal automation for a non-owned Certbot lineage."; return 1; }
     [[ -x "${SCRIPTS_DIR}/cert-renew.sh" ]] \
         || { err "Scoped renewal helper is missing: ${SCRIPTS_DIR}/cert-renew.sh"; return 1; }
-    preflight_current_managed_unit_definition 5gpn-certbot-renew.service || return 1
-    preflight_current_managed_unit_definition 5gpn-certbot-renew.timer || return 1
-    service_tmp="$(mktemp /etc/systemd/system/.5gpn-certbot-renew.service.XXXXXX)" || return 1
-    timer_tmp="$(mktemp /etc/systemd/system/.5gpn-certbot-renew.timer.XXXXXX)" \
-        || { rm -f -- "$service_tmp"; return 1; }
-    cat > "$service_tmp" <<'EOF'
-# 5gpn-unit-id: 5gpn-certbot-renew.service:v1
-[Unit]
-Description=5gpn certbot renewal
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-TimeoutStartSec=30min
-TimeoutStopSec=2min
-ExecStart=/opt/5gpn/scripts/cert-renew.sh --quiet
-UMask=0077
-RuntimeDirectory=5gpn
-RuntimeDirectoryMode=0700
-RuntimeDirectoryPreserve=yes
-NoNewPrivileges=yes
-CapabilityBoundingSet=CAP_CHOWN CAP_NET_BIND_SERVICE
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectSystem=strict
-ProtectHome=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
-ProtectProc=invisible
-ProcSubset=pid
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-RestrictRealtime=yes
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RemoveIPC=yes
-SystemCallArchitectures=native
-ReadWritePaths=/etc/letsencrypt /var/lib/letsencrypt /var/log/letsencrypt
-ReadWritePaths=/etc/5gpn/cert -/opt/5gpn/ui /run/5gpn
-ReadOnlyPaths=-/etc/5gpn/acme -/etc/5gpn/intercept-ca/root.crt
-InaccessiblePaths=-/etc/5gpn/intercept-ca/root.key -/etc/5gpn/intercept-ca/.root.key.new -/etc/5gpn/intercept -/etc/5gpn/mihomo -/var/lib/5gpn-intercept -/var/lib/5gpn
-EOF
-    cat > "$timer_tmp" <<'EOF'
-# 5gpn-unit-id: 5gpn-certbot-renew.timer:v1
-[Unit]
-Description=5gpn daily certbot renewal check
-
-[Timer]
-OnCalendar=*-*-* 03:00:00
-RandomizedDelaySec=6h
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-    chmod 0644 "$service_tmp" "$timer_tmp"
-    mv -f -- "$service_tmp" /etc/systemd/system/5gpn-certbot-renew.service || return 1
-    mv -f -- "$timer_tmp" /etc/systemd/system/5gpn-certbot-renew.timer || return 1
     current_managed_unit_file_is_safe 5gpn-certbot-renew.service \
         && current_managed_unit_file_is_safe 5gpn-certbot-renew.timer \
-        || { err "Published certificate renewal units failed their ownership marker boundary."; return 1; }
-    systemctl daemon-reload
+        || { err "Scoped renewal units were not published through the managed unit transaction."; return 1; }
+    systemctl daemon-reload \
+        || { err "Could not reload systemd before enabling scoped certificate renewal."; return 1; }
+    global_certbot_timer_takeover_state_is_stable || return 1
     systemctl enable --now 5gpn-certbot-renew.timer \
         || { err "Could not enable/start scoped certificate renewal timer."; return 1; }
-    systemctl is-enabled --quiet 5gpn-certbot-renew.timer \
-        || { err "Scoped certificate renewal timer is not enabled."; return 1; }
-    systemctl is-active --quiet 5gpn-certbot-renew.timer \
-        || { err "Scoped certificate renewal timer is not active."; return 1; }
+    if ! read_exact_systemd_unit_state 5gpn-certbot-renew.timer \
+       || [[ "$SYSTEMD_UNIT_LOAD_STATE" != loaded \
+          || "$SYSTEMD_UNIT_ACTIVE_STATE" != active \
+          || "$SYSTEMD_UNIT_FILE_STATE" != enabled ]]; then
+        err "Scoped certificate renewal timer did not enter loaded/active/enabled state."
+        disable_scoped_renewal_timer || true
+        return 1
+    fi
+    if ! global_certbot_timer_takeover_state_is_stable; then
+        disable_scoped_renewal_timer || true
+        return 1
+    fi
     KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=1
-    ok "Installed 5gpn-certbot-renew.timer (daily, Persistent, mode-aware scoped renewal)."
+    ok "Enabled 5gpn-certbot-renew.timer (daily, Persistent, mode-aware scoped renewal)."
 }
 
 acme_dir_safe() {
@@ -6622,6 +7458,33 @@ ensure_cf_token() {
     ok "Cloudflare API token saved → ${ACME_DIR}/cloudflare.ini (0600, root-only)."
 }
 
+# Decide whether a confirmed full-install candidate must obtain a Cloudflare
+# credential before project publication. A canonical external lineage remains
+# read-only and keeps its owner's renewal mechanism, so asking for a token would
+# falsely imply 5gpn needs or gains authority over it. An absent lineage or one
+# already provenance-confirmed as 5gpn-owned does require the credential for
+# issuance or scoped renewal.
+cloudflare_credential_required_for_install() {
+    local base="$1"
+    [[ "$CERT_MODE" == cloudflare ]] || return 1
+    if certbot_lineage_artifacts_exist "$base"; then
+        certbot_lineage_owned_by_5gpn "$base"
+        return $?
+    fi
+    if cert_provenance_matches cloudflare "$base" \
+       && validate_cert_pair \
+            "${DOT_CERT_DIR}/current/fullchain.pem" \
+            "${DOT_CERT_DIR}/current/privkey.pem" \
+            "$base" "$((30*86400))" production cloudflare; then
+        # Purge may preserve a still-valid role pair after the canonical
+        # lineage disappears. install_cert consumes that pair read-only and
+        # leaves renewal disabled, so collecting a token would grant and retain
+        # a credential no operation will use.
+        return 1
+    fi
+    return 0
+}
+
 # set_cf_token prompts for the Cloudflare API token used by
 # install_cert's cloudflare/DNS-01 issuance path, and writes it to
 # ${ACME_DIR}/cloudflare.ini (0600, root-only). This is the ONLY TUI/CLI op that
@@ -6643,9 +7506,7 @@ set_cf_token() {
 # ----------------------------------------------------------------------------
 preflight_unit_ownership() {
     local managed_unit
-    for managed_unit in 5gpn-mihomo.service 5gpn-intercept-cert.service \
-                        5gpn-intercept-cert.path 5gpn-intercept-cert.timer \
-                        5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
+    for managed_unit in "${MANAGED_SYSTEMD_UNITS[@]}"; do
         preflight_current_managed_unit_definition "$managed_unit" || return 1
         if systemd_unit_has_dropins "$managed_unit"; then
             err "Refusing a systemd override that changes the managed ${managed_unit} security contract.${SYSTEMD_UNIT_CONFLICT_REASON:+ ($SYSTEMD_UNIT_CONFLICT_REASON)}"
@@ -6655,11 +7516,11 @@ preflight_unit_ownership() {
 }
 
 install_units() {
-    info "Installing systemd units (one service, two root oneshots)..."
+    info "Installing six managed systemd units..."
     # Prefer the repo checkout; fall back to the staged copies under /opt/5gpn
     # (a piped curl|bash install has no checkout after install_files staged them).
     local src u
-    for u in 5gpn-mihomo.service 5gpn-intercept-cert.service 5gpn-intercept-cert.path 5gpn-intercept-cert.timer; do
+    for u in "${MANAGED_SYSTEMD_UNITS[@]}"; do
         preflight_current_managed_unit_definition "$u" || return 1
         if [[ -f "${SCRIPT_DIR}/etc/systemd/${u}" ]]; then
             src="${SCRIPT_DIR}/etc/systemd/${u}"
@@ -6677,8 +7538,9 @@ install_units() {
         current_managed_unit_file_is_safe "$u" \
             || { err "Published managed unit failed its ownership marker boundary: $u"; return 1; }
     done
-    systemctl daemon-reload
-    ok "5gpn-mihomo, the certificate watcher and its timer installed."
+    systemctl daemon-reload \
+        || { err "Could not reload systemd after managed unit publication."; return 1; }
+    ok "All six managed 5gpn units were installed and verified."
 }
 
 prepare_runtime_permissions() {
@@ -6803,7 +7665,7 @@ render_fresh_dns_document() {
     local dot="$1" debug="$2" cert="$3" key="$4" gateway="$5"
     local ecs="$6" china="$7" trust="$8"
     jq -n \
-        --arg dot "$dot" --arg debug "$debug" --arg origin "127.0.0.1:5354" \
+        --arg dot "$dot" --arg debug "$debug" --arg origin "$ORIGIN_LISTEN_ADDR" \
         --arg cert "$cert" --arg key "$key" --arg gw "$gateway" \
         --arg ecs "$ecs" --arg china "$china" --arg trust "$trust" \
         --arg chinaDomains "$DNS_CHINA_DOMAINS_DEFAULT" \
@@ -6836,15 +7698,15 @@ seed_dns_document() {
     # <mihomo-home>/5gpn/dns.json is the only document the DNS engine reads.
     # A fresh document must include the installation-owned DoT certificate pair
     # because the runtime cannot infer it from policy defaults.
-    # Three fields belong to the installer and are refreshed on every run: the
-    # certificate, the private key, and the gateway address. Everything else in
-    # an existing document belongs to the operator -- the console edits policy,
-    # upstreams and tuning through it -- and a reinstall must not discard that.
+    # Listener and key paths are fixed installation fields. The staged Core and
+    # this publication-time recheck both require their exact current values; a
+    # reinstall never repairs drift by silently rewriting them. Only the
+    # separately checked installation-owned gateway may change here.
     local state_dir="$FIVEGPN_STATE_DIR"
     local target="${state_dir}/dns.json"
-    local cert="${DNS_CERT_DIR}/dot/current/fullchain.pem"
-    local key="${DNS_CERT_DIR}/dot/current/privkey.pem"
-    local tmp
+    local cert="${DOT_CERT_DIR}/current/fullchain.pem"
+    local key="${DOT_CERT_DIR}/current/privkey.pem"
+    local tmp source_revision current_revision
 
     # The engine creates the state directory itself on first start, but the
     # document has to exist before that start, so the installer creates it to
@@ -6858,6 +7720,19 @@ seed_dns_document() {
         || { err "Could not create the mihomo home: ${MIHOMO_DIR}"; return 1; }
     install -d -o "$FIVEGPN_SERVICE_USER" -g "$FIVEGPN_SERVICE_USER" -m 0711 "$state_dir" \
         || { err "Could not create the engine state directory: ${state_dir}"; return 1; }
+    chmod g-s "$state_dir" && chmod 00711 "$state_dir" \
+        || { err "Could not clear inherited special bits from the engine state directory."; return 1; }
+    [[ "$(file_uid "$state_dir")" == "$(account_uid "$FIVEGPN_SERVICE_USER")" \
+       && "$(file_gid "$state_dir")" == "$(account_gid "$FIVEGPN_SERVICE_GROUP")" \
+       && "$(file_mode "$state_dir")" == 711 ]] \
+        || { err "The engine state directory failed its exact ownership and mode boundary."; return 1; }
+    # install_service_accounts has already stopped the monolith and waited for
+    # every process using the service identity. Reassert that boundary here so
+    # the content hash below detects only external/offline tampering, not a
+    # legitimate concurrent Core/API writer.
+    assert_dns_publication_quiescent || return 1
+    validate_existing_runtime_documents \
+        || { err "Runtime documents changed or became invalid before quiesced publication."; return 1; }
 
     if [[ -e "$target" || -L "$target" ]]; then
         runtime_control_file_metadata_is_safe "$target" \
@@ -6866,33 +7741,60 @@ seed_dns_document() {
     fi
 
     if [[ -f "$target" ]]; then
+        [[ "$VALIDATED_DNS_SOURCE_REVISION" =~ ^[0-9a-f]{64}$ ]] \
+            || { err "The existing DNS document lacks a quiesced Core validation revision."; return 1; }
+        source_revision="$(sha256sum "$target" | awk '{print $1}')" || return 1
+        [[ "$source_revision" == "$VALIDATED_DNS_SOURCE_REVISION" ]] \
+            || { err "The DNS document changed after pre-publication Core validation."; return 1; }
+        current_dns_document_is_compatible "$target" \
+            || { err "Existing DNS fixed listener or certificate fields have drifted; refusing to rewrite them: $target"; return 1; }
+        if jq -e --arg gw "$GATEWAY_IP" '.gateway == $gw' "$target" >/dev/null; then
+            ok "Existing DNS document has the current fixed fields and gateway; preserved it unchanged."
+            return 0
+        fi
+        dns_document_is_jq_gateway_update_safe "$target" \
+            || { err "Existing DNS numeric fields cannot be preserved exactly by the gateway-only updater."; return 1; }
         tmp="$(mktemp "${state_dir}/.dns.json.XXXXXX")" \
             || { err "Could not create the DNS document candidate."; return 1; }
-        if ! jq --arg cert "$cert" --arg key "$key" --arg gw "$GATEWAY_IP" \
-                '.listen.certificate = $cert
-                 | .listen.privateKey = $key
-                 | .gateway = $gw' "$target" > "$tmp"; then
+        if ! jq --arg gw "$GATEWAY_IP" '.gateway = $gw' "$target" > "$tmp"; then
             rm -f -- "$tmp"
             err "Could not refresh the DNS document: ${target}"
             return 1
         fi
+        current_dns_document_is_compatible "$tmp" \
+            || { rm -f -- "$tmp"; err "Refusing an invalid DNS gateway-update candidate."; return 1; }
+        jq -e --arg gw "$GATEWAY_IP" '.gateway == $gw' "$tmp" >/dev/null \
+            || { rm -f -- "$tmp"; err "DNS gateway-update candidate does not contain the selected gateway."; return 1; }
         chown "${FIVEGPN_SERVICE_USER}:${FIVEGPN_SERVICE_GROUP}" "$tmp" \
             && chmod 0600 "$tmp" \
             && sync -f "$tmp" 2>/dev/null \
             || { rm -f -- "$tmp"; err "Could not secure the DNS document candidate."; return 1; }
+        validate_dns_candidate_with_staged_core "$tmp" \
+            || { rm -f -- "$tmp"; return 1; }
+        runtime_control_file_metadata_is_safe "$target" \
+            "$FIVEGPN_SERVICE_USER" "$FIVEGPN_SERVICE_GROUP" 600 \
+            || { rm -f -- "$tmp"; err "DNS document metadata changed before publication."; return 1; }
+        current_revision="$(sha256sum "$target" | awk '{print $1}')" || { rm -f -- "$tmp"; return 1; }
+        [[ "$current_revision" == "$source_revision" ]] \
+            || { rm -f -- "$tmp"; err "DNS document changed while its gateway update was staged."; return 1; }
+        current_dns_document_is_compatible "$target" \
+            || { rm -f -- "$tmp"; err "DNS fixed fields changed while its gateway update was staged."; return 1; }
         mv -Tf -- "$tmp" "$target" \
             || { rm -f -- "$tmp"; err "Could not install ${target}."; return 1; }
         runtime_control_file_metadata_is_safe "$target" \
             "$FIVEGPN_SERVICE_USER" "$FIVEGPN_SERVICE_GROUP" 600 \
             || { err "Published DNS document failed metadata validation."; return 1; }
-        ok "Refreshed the DNS document's certificate pair and gateway."
+        current_dns_document_is_compatible "$target" \
+            || { err "Published DNS document failed fixed-field validation."; return 1; }
+        ok "Refreshed the DNS document's installation-owned gateway."
         return 0
     fi
 
     local china="$DNS_CHINA_DEFAULT" trust="$DNS_TRUST_DEFAULT"
-    local ecs="$DNS_CHINA_ECS_DEFAULT" dot debug
-    dot="$(cfg_get DNS_LISTEN_DOT)";     dot="${dot:-:853}"
-    debug="$(cfg_get DNS_LISTEN_DEBUG)"; debug="${debug:-127.0.0.1:5353}"
+    local ecs="$DNS_CHINA_ECS_DEFAULT" dot="$DOT_LISTEN_ADDR" debug="$DEBUG_LISTEN_ADDR"
+
+    [[ "$VALIDATED_DNS_SOURCE_REVISION" == absent ]] \
+        || { err "A fresh DNS document was not proven absent before publication."; return 1; }
 
     tmp="$(mktemp "${state_dir}/.dns.json.XXXXXX")" \
         || { err "Could not create the DNS document candidate."; return 1; }
@@ -6908,113 +7810,57 @@ seed_dns_document() {
         err "Refusing to seed an empty upstream group into ${target}."
         return 1
     fi
+    current_dns_document_is_compatible "$tmp" \
+        || { rm -f -- "$tmp"; err "Refusing a fresh DNS document with drifted fixed fields."; return 1; }
     # Owned by the service account: unlike dns.env, the engine must be able to
     # replace this file when the console saves a change.
     chown "${FIVEGPN_SERVICE_USER}:${FIVEGPN_SERVICE_GROUP}" "$tmp" \
         && chmod 0600 "$tmp" \
         && sync -f "$tmp" 2>/dev/null \
         || { rm -f -- "$tmp"; err "Could not secure the DNS document candidate."; return 1; }
+    validate_dns_candidate_with_staged_core "$tmp" \
+        || { rm -f -- "$tmp"; return 1; }
+    [[ ! -e "$target" && ! -L "$target" ]] \
+        || { rm -f -- "$tmp"; err "A DNS document appeared after pre-publication absence validation."; return 1; }
     mv -Tf -- "$tmp" "$target" \
         || { rm -f -- "$tmp"; err "Could not install ${target}."; return 1; }
     runtime_control_file_metadata_is_safe "$target" \
         "$FIVEGPN_SERVICE_USER" "$FIVEGPN_SERVICE_GROUP" 600 \
         || { err "Published DNS document failed metadata validation."; return 1; }
+    current_dns_document_is_compatible "$target" \
+        || { err "Published fresh DNS document failed fixed-field validation."; return 1; }
     ok "Seeded the DNS document (china=${china} trust=${trust})."
 }
 
 write_dns_env() {
     # Write /etc/5gpn/dns.env from install-time collected vars.
-    # cert paths always point at the /etc/5gpn/cert copies (maintained by renew-hook.sh).
+    DNS_ENV_PUBLICATION_COMMIT_STATE=not-committed
+    assert_loaded_persisted_dns_env_revision 1 || return 1
     fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
         && runtime_file_slot_is_safe "${CONF_DIR}/dns.env" "$CONF_DIR" \
         || { err "Refusing unsafe dns.env path: ${CONF_DIR}/dns.env"; return 1; }
     [[ -d "$CONF_DIR" && ! -L "$CONF_DIR" ]] \
         || { err "Configuration root disappeared before dns.env publication."; return 1; }
 
-    # There is one console credential: the mihomo controller secret. Read it
-    # from the operator file. Runtime DNS policy,
-    # upstreams, subscriptions and tuning live only in dns.json; dns.env retains
-    # installation inputs and host-managed certificate/controller coordinates.
-
-    # Obtain the console/dot/base domains from the single derivation of the
-    # operator's base (apex) domain
-    # (console.<base> / dot.<base>), also used by render_mihomo_config and the
-    # *.<base> wildcard install_cert issues, so dns.env and the rendered
-    # config.yaml agree instead of drifting.
+    # Runtime documents and the operator-owned mihomo file are separate sources
+    # of truth. This file contains exactly the six host-specific installer
+    # inputs needed to reproduce a checked install transaction.
     local base_domain="$BASE_DOMAIN"
     derive_domains "$base_domain" || return 1
-    # Mihomo's loopback external-controller API, persisted so the daemon reads
-    # back what it is actually being served against.
-    #
-    # The address is read from the operator's config rather than treated as an
-    # independent knob, so dns.env cannot disagree with the live listener.
-    local dns_mihomo_controller
-    dns_mihomo_controller="$(mihomo_configured_controller)"
-    dns_mihomo_controller="${dns_mihomo_controller:-$(cfg_get DNS_MIHOMO_CONTROLLER)}"
-    dns_mihomo_controller="${dns_mihomo_controller:-127.0.0.1:443}"
-    local dns_mihomo_secret="$(cfg_get DNS_MIHOMO_SECRET)" dns_mihomo_secret_env
-    dns_mihomo_secret_env="$(dns_env_encode_value "$dns_mihomo_secret")" \
-        || { err "DNS_MIHOMO_SECRET cannot be represented safely in dns.env."; return 1; }
 
     local dns_env_tmp
     dns_env_tmp="$(mktemp "${CONF_DIR}/.dns.env.XXXXXX")" \
         || { err "Could not create the dns.env candidate."; return 1; }
     if ! cat > "$dns_env_tmp" <<EOF
-# 5gpn installer environment — the SINGLE deployment source of truth.
-# Mihomo's live DNS/interception/bot documents live under its 5gpn state
-# directory. Re-run install.sh for deployment or certificate changes; use the
-# authenticated Console for live document changes.
-
-# DoT is the ONLY client-facing DNS transport; no DoH or client :53 is served.
-DNS_LISTEN_DOT=:853
-DNS_LISTEN_DEBUG=127.0.0.1:5353
-
-# TLS certs — ONE scoped lineage. Cloudflare uses apex+wildcard; HTTP-01 uses
-# exact console/dot SANs. Either shape is deployed to two current role dirs:
-#   dot/     serves DoT :853 and signs the iOS profiles
-#   console/ serves the mihomo TLS controller and the panel behind it
-# All hot-reload on file-mtime change; pinned mihomo v1.19.28 guarantees that
-# mihomo reloads the controller certificate files automatically, and
-# renew-hook.sh redeploys on renewal.
-
-# ── Deployment identity + cert (read by install.sh/renew-hook.sh; also read by
-# the in-process Telegram bot). DNS_BASE_DOMAIN = the operator's ONE apex domain
-# (the cert-name); the two service domains are auto-derived subdomains and
-# covered by the selected wildcard or exact-SAN certificate. Runtime components
-# derive dot./console. directly from DNS_BASE_DOMAIN.
-# ──
+# 5gpn installer inputs. Runtime DNS/interception/bot state lives only in the
+# Core-owned documents, and controller credentials live only in operator-owned
+# config.yaml. Re-run the installer for changes to these six coordinates.
 DNS_BASE_DOMAIN=${BASE_DOMAIN}
 DNS_PUBLIC_IP=${PUBLIC_IP}
 DNS_GATEWAY_IP=${GATEWAY_IP}
-# Local addresses on which mihomo binds its public tunnel listeners. This is
-# deliberately separate from DNS_PUBLIC_IP (which may be a provider/NAT
-# identity) and DNS_GATEWAY_IP (the address returned to clients). Every entry
-# must be assigned to this host; loopback is reserved for panel backends.
 DNS_MIHOMO_LISTEN_IPS=${MIHOMO_LISTEN_IPS}
 CERT_MODE=${CERT_MODE}
 CERT_EMAIL=${CERT_EMAIL}
-
-# Mihomo's controller and public zashboard bundle share this loopback TLS
-# listener. Browsers reach it at https://console.<DNS_BASE_DOMAIN>/ui/. The
-# /ui/* bundle and profiles are public; /5gpn/* and ordinary controller routes
-# require DNS_MIHOMO_SECRET.
-# Mihomo's loopback external-controller API and its sole controller secret.
-DNS_MIHOMO_CONTROLLER=${dns_mihomo_controller}
-DNS_MIHOMO_SECRET=${dns_mihomo_secret_env}
-# Extension catalogs are part of the interception document, not a file of their
-# own: a fetched index is refetchable by definition, so only the operator's list
-# of sources is state. See the catalogs field in intercept.json.
-
-# DNS_CONSOLE_CERT/KEY always point at the selected certificate's console/
-# role-dir copy (deploy_cert_roles). mihomo serves the controller with them, and
-# the panel is served behind that controller, so there is no second origin with
-# a directory and a listen address of its own to write here any more.
-DNS_CONSOLE_CERT=${CONSOLE_CERT_DIR}/current/fullchain.pem
-DNS_CONSOLE_KEY=${CONSOLE_CERT_DIR}/current/privkey.pem
-
-# The Telegram bot is configured in the console and persists only in
-# <mihomo-home>/5gpn/bot.json.
-
 EOF
     then
         rm -f -- "$dns_env_tmp"
@@ -7027,40 +7873,150 @@ EOF
         || { rm -f -- "$dns_env_tmp"; err "Could not protect or sync the dns.env candidate."; return 1; }
     validate_dns_env_schema "$dns_env_tmp" \
         || { rm -f -- "$dns_env_tmp"; err "dns.env candidate failed schema validation."; return 1; }
+    validate_persisted_install_config_values "$dns_env_tmp" \
+        || { rm -f -- "$dns_env_tmp"; err "dns.env candidate failed value validation."; return 1; }
+    assert_loaded_persisted_dns_env_revision 1 \
+        || { rm -f -- "$dns_env_tmp"; return 1; }
     mv -f -- "$dns_env_tmp" "${CONF_DIR}/dns.env" \
         || { rm -f -- "$dns_env_tmp"; err "Could not atomically publish dns.env."; return 1; }
+    DNS_ENV_PUBLICATION_COMMIT_STATE=committed-undurable
     sync -f "$CONF_DIR" 2>/dev/null \
         || { err "Could not sync the dns.env directory publication."; return 1; }
+    DNS_ENV_PUBLICATION_COMMIT_STATE=committed
     [[ -f "${CONF_DIR}/dns.env" && ! -L "${CONF_DIR}/dns.env" \
        && "$(file_uid "${CONF_DIR}/dns.env")" == 0 \
        && "$(file_gid "${CONF_DIR}/dns.env")" == 0 \
        && "$(file_mode "${CONF_DIR}/dns.env")" == 600 \
        && "$(file_nlink "${CONF_DIR}/dns.env")" == 1 ]] \
-        && validate_dns_env_schema \
+       && validate_dns_env_schema \
+        && validate_persisted_install_config_values "${CONF_DIR}/dns.env" \
         || { err "Published dns.env failed metadata or schema validation."; return 1; }
+    LOADED_DNS_ENV_SOURCE_STATE=present
+    LOADED_DNS_ENV_SOURCE_REVISION="$(sha256sum "${CONF_DIR}/dns.env" | awk '{print $1}')" || return 1
+    LOADED_DNS_ENV_SOURCE_IDENTITY="$(stat -Lc '%d:%i' -- "${CONF_DIR}/dns.env" 2>/dev/null)" || return 1
     ok "Written ${CONF_DIR}/dns.env (current schema only)."
 }
 
-setup_ios_profile() {
-    info "Generating iOS DoT profile..."
-    local gw="${GATEWAY_IP:-$PUBLIC_IP}"
-    static_owned_tree_is_safe "$UI_DIR" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" \
-        || { err "The zashboard UI tree is missing, unsafe, or unowned: $UI_DIR"; return 1; }
-    if [[ -x "${SCRIPTS_DIR}/gen-ios-profile.sh" ]]; then
-        # The generator owns the two-file same-directory transaction. Publishing
-        # directly into UI_DIR avoids a second copy step that renewal did not
-        # share and guarantees install, manual regeneration and renewal all
-        # update the only directory mihomo serves.
-        if ! bash "${SCRIPTS_DIR}/gen-ios-profile.sh" "$DOT_DOMAIN" "$gw" "$UI_DIR"; then
-            warn "gen-ios-profile.sh failed because a signed profile could not be produced — no profile served."
+prepare_ios_profile() {
+    info "Preparing iOS DoT profile generation..."
+    local gw="${GATEWAY_IP:-$PUBLIC_IP}" candidate created_candidate=0
+    local generator="${SCRIPTS_DIR}/gen-ios-profile.sh" generator_before generator_after
+    local generator_hash_fd generator_source_fd generator_hash_metadata
+    local generator_source_metadata generator_fd_digest
+    [[ "$INSTALL_CERT_LOCK_HELD" == 1 ]] \
+        || { err "UI profile preparation requires the certificate transaction lock."; return 1; }
+    load_ui_generation_helper || return 1
+    UI_GENERATION_CANDIDATE_CREATED_FROM_CURRENT=0
+    candidate="$UI_GENERATION_CANDIDATE"
+    if [[ -z "$candidate" ]]; then
+        ui_generation_prepare_existing_current "$UI_DIR" \
+            || { err "A valid existing current UI generation is required for manual profile refresh."; return 1; }
+        candidate="$(ui_generation_clone_current "$UI_DIR")" \
+            || { err "Could not clone the validated current UI generation."; return 1; }
+        UI_GENERATION_CANDIDATE="$candidate"
+        created_candidate=1
+    else
+        claim_ui_dir || return 1
+    fi
+    if generator_before="$(installed_runtime_script_state "$generator")"; then
+        # The generator writes only the unpublished candidate. The filesystem
+        # helper validates the complete Console/profile tree and performs the
+        # only live switch, so an old current generation remains reachable on
+        # every signing or validation failure.
+        exec {generator_hash_fd}<"$generator" \
+            || { ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true; \
+                 err "Could not anchor the installed profile generator."; return 1; }
+        exec {generator_source_fd}<"$generator" \
+            || { exec {generator_hash_fd}<&-; ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true; return 1; }
+        generator_hash_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' \
+            -- "/proc/self/fd/$generator_hash_fd")" \
+            || { exec {generator_hash_fd}<&-; exec {generator_source_fd}<&-; ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true; return 1; }
+        generator_source_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' \
+            -- "/proc/self/fd/$generator_source_fd")" \
+            || { exec {generator_hash_fd}<&-; exec {generator_source_fd}<&-; ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true; return 1; }
+        [[ "$generator_hash_metadata" == "${generator_before%:*}" \
+           && "$generator_source_metadata" == "${generator_before%:*}" ]] \
+            || { exec {generator_hash_fd}<&-; exec {generator_source_fd}<&-; ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true; \
+                 err "Profile generator changed while it was anchored."; return 1; }
+        generator_fd_digest="$(sha256sum -- "/proc/self/fd/$generator_hash_fd" | awk '{print $1}')" \
+            || { exec {generator_hash_fd}<&-; exec {generator_source_fd}<&-; ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true; return 1; }
+        exec {generator_hash_fd}<&-
+        [[ "$generator_fd_digest" == "${generator_before##*:}" ]] \
+            || { exec {generator_source_fd}<&-; ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true; \
+                 err "Profile generator bytes differ from the anchored path."; return 1; }
+        if ! bash "/proc/self/fd/$generator_source_fd" "$DOT_DOMAIN" "$gw" "$candidate"; then
+            exec {generator_source_fd}<&-
+            if ui_generation_cleanup_candidate "$UI_DIR" "$candidate"; then
+                UI_GENERATION_CANDIDATE=""
+            else
+                err "Unpublished UI generation cleanup failed; retained for inspection: $candidate"
+            fi
+            warn "gen-ios-profile.sh failed because a signed profile could not be produced; the previous current generation remains live."
+            return 1
+        fi
+        exec {generator_source_fd}<&-
+        generator_after="$(installed_runtime_script_state "$generator")" \
+            || { ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true; \
+                 err "Could not revalidate the installed profile generator."; return 1; }
+        if [[ "$generator_after" != "$generator_before" ]]; then
+            if ui_generation_cleanup_candidate "$UI_DIR" "$candidate"; then
+                UI_GENERATION_CANDIDATE=""
+            fi
+            err "Installed profile generator changed during execution."
             return 1
         fi
     else
+        if ui_generation_cleanup_candidate "$UI_DIR" "$candidate"; then
+            UI_GENERATION_CANDIDATE=""
+        else
+            err "Unpublished UI generation cleanup failed; retained for inspection: $candidate"
+        fi
         warn "scripts/gen-ios-profile.sh not present yet; skipping profile generation."
         return 1
     fi
 
-    ok "iOS profile generated (served at /ui/ios-dot.mobileconfig on the controller)."
+    UI_GENERATION_CANDIDATE_CREATED_FROM_CURRENT="$created_candidate"
+    ok "Prepared a complete unpublished UI/profile generation."
+}
+
+publish_ios_profile() {
+    local candidate="${UI_GENERATION_CANDIDATE:-}"
+    local created_candidate="${UI_GENERATION_CANDIDATE_CREATED_FROM_CURRENT:-0}"
+    [[ "$INSTALL_CERT_LOCK_HELD" == 1 ]] \
+        || { err "UI profile publication requires the certificate transaction lock."; return 1; }
+    [[ -n "$candidate" ]] \
+        || { err "No prepared UI/profile generation is available for publication."; return 1; }
+
+    if ! ui_generation_publish "$UI_DIR" "$candidate"; then
+        if [[ "$UI_GENERATION_COMMIT_STATE" == committed* ]]; then
+            UI_GENERATION_CANDIDATE=""
+            UI_GENERATION_CANDIDATE_CREATED_FROM_CURRENT=0
+            err "The UI current switch committed, but its durability or final validation could not be confirmed."
+            err "The installer will not roll that committed switch back; inspect the generation tree and rerun."
+            return 1
+        fi
+        if ui_generation_cleanup_candidate "$UI_DIR" "$candidate"; then
+            UI_GENERATION_CANDIDATE=""
+            UI_GENERATION_CANDIDATE_CREATED_FROM_CURRENT=0
+        else
+            err "Unpublished UI generation cleanup failed; retained for inspection: $candidate"
+        fi
+        err "The complete UI/profile generation could not be atomically published."
+        return 1
+    fi
+    UI_GENERATION_CANDIDATE=""
+    UI_GENERATION_CANDIDATE_CREATED_FROM_CURRENT=0
+    [[ "$UI_GENERATION_GC_WARNING" == 0 ]] \
+        || warn "The new UI generation is active, but an older unreferenced generation could not be removed."
+    if [[ "$created_candidate" == 1 ]]; then
+        ok "iOS profiles re-signed in a cloned generation and atomically activated."
+    else
+        ok "Verified zashboard and both signed iOS profiles atomically activated."
+    fi
+}
+
+setup_ios_profile() {
+    prepare_ios_profile && publish_ios_profile
 }
 
 # ios_profile_url — the ONE derivation of where a phone fetches the DoT profile.
@@ -7213,8 +8169,8 @@ verify_console_endpoint() {
     local code content_type media_type name probe
 
     for name in ios-dot.mobileconfig ios-intercept-ca.mobileconfig; do
-        [[ -s "${UI_DIR}/${name}" ]] \
-            || { err "Profile ${name} is absent from ${UI_DIR} after generation."; return 1; }
+        [[ -s "${UI_CURRENT_DIR}/${name}" ]] \
+            || { err "Profile ${name} is absent from ${UI_CURRENT_DIR} after generation."; return 1; }
         probe="$(mihomo_controller_curl "/ui/${name}" \
             --silent --show-error --max-time 5 \
             -o /dev/null -w $'%{http_code}\t%{content_type}' 2>/dev/null || true)"
@@ -7286,16 +8242,15 @@ ss_has_exact_listener() {
 # the window install_cert runs in.
 probe_mihomo_ready() {
     systemctl is-active --quiet 5gpn-mihomo.service || return 1
-    local secret ip port domain
+    local ip port domain
     local -a tcp_ports=(80 443)
     local -a udp_ports=(443)
     if [[ "${MIHOMO_SEED_PORTS_REQUIRED:-0}" == 1 ]]; then
         tcp_ports+=(8080 8443)
     fi
-    secret="$(cfg_get DNS_MIHOMO_SECRET)"
-    local -a curl_args=(--fail --silent --show-error --max-time 2 -o /dev/null)
-    [[ -n "$secret" ]] && curl_args+=(-H "Authorization: Bearer $secret")
-    mihomo_controller_curl "/version" "${curl_args[@]}" >/dev/null 2>&1 || return 1
+    mihomo_authenticated_controller_curl "/version" \
+        --fail --silent --show-error --max-time 2 -o /dev/null \
+        >/dev/null 2>&1 || return 1
 
     command -v ss >/dev/null 2>&1 || return 1
     while IFS= read -r ip; do
@@ -7420,116 +8375,6 @@ start_services_with_cert_lock_handoff() {
 }
 
 # ----------------------------------------------------------------------------
-# dns.env maintenance.
-# ----------------------------------------------------------------------------
-# Set (or replace) a KEY=VALUE line in a dotenv file, preserving all other keys.
-# Appends the key if absent without clobbering unrelated settings.
-set_dns_env_kv() {
-    local f="$1" key="$2" val="$3" tmp encoded_val
-    [[ "$f" == "${CONF_DIR}/dns.env" ]] \
-        || { err "Refusing a non-canonical dns.env path: $f"; return 1; }
-    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
-        && runtime_file_slot_is_safe "$f" "$CONF_DIR" \
-        || { err "Refusing unsafe dns.env path: $f"; return 1; }
-    if [[ -e "$f" || -L "$f" ]]; then
-        persisted_dns_env_is_safe \
-            || { err "Refusing unsafe persisted dns.env before update: $f"; return 1; }
-    fi
-    case " $DNS_ENV_KEYS " in
-        *" $key "*) ;;
-        *) err "Refusing unsupported dns.env key: $key"; return 1 ;;
-    esac
-    [[ "$val" != *$'\n'* && "$val" != *$'\r'* ]] \
-        || { err "Refusing a multiline dns.env value for $key."; return 1; }
-    encoded_val="$val"
-    if [[ "$key" == DNS_MIHOMO_SECRET ]]; then
-        encoded_val="$(dns_env_encode_value "$val")" || return 1
-    fi
-    if [[ "$f" == "${CONF_DIR}/dns.env" && -s "$f" ]]; then
-        validate_dns_env_schema || return 1
-    fi
-    tmp="$(mktemp "${f}.XXXXXX")" \
-        || { err "Could not create a dns.env update candidate."; return 1; }
-    # Drop any existing (commented or live) definition of this key, then append the new one.
-    if [[ -f "$f" ]]; then
-        awk -v key="$key" '$0 !~ ("^#?[[:space:]]*" key "=") { print }' "$f" > "$tmp" \
-            || { rm -f -- "$tmp"; return 1; }
-    else
-        : > "$tmp" || { rm -f -- "$tmp"; return 1; }
-    fi
-    printf '%s=%s\n' "$key" "$encoded_val" >> "$tmp" \
-        || { rm -f -- "$tmp"; return 1; }
-    chown root:root "$tmp" \
-        && chmod 0600 "$tmp" \
-        && sync -f "$tmp" 2>/dev/null \
-        || { rm -f -- "$tmp"; return 1; }
-    validate_dns_env_schema "$tmp" || { rm -f -- "$tmp"; return 1; }
-    mv -f -- "$tmp" "$f" \
-        || { rm -f -- "$tmp"; return 1; }
-    sync -f "$CONF_DIR" 2>/dev/null || return 1
-    persisted_dns_env_is_safe && validate_dns_env_schema
-}
-
-# rotate_token replaces the console credential — the mihomo controller secret.
-#
-# The secret lives in the operator-owned config.yaml and is mirrored into
-# dns.env. config.yaml is theirs and ordinary runs preserve it byte-for-byte,
-# but this is an explicit operator command whose entire purpose is to change
-# that one line, so rewriting it here is the point rather than a violation.
-#
-# mihomo reads the controller secret when it builds the router, so the restart
-# is required and is not free: it is the data plane too, and client traffic
-# drops for its duration. Said out loud rather than discovered.
-rotate_token() {
-    check_root
-    [[ -t 0 && -t 1 ]] || { err "Secret rotation requires an interactive TTY; refusing to write a secret to logs."; return 1; }
-    local envf="${CONF_DIR}/dns.env" config="${MIHOMO_DIR}/config.yaml"
-    [[ -f "$envf" ]] || { err "${envf} not found (run a full install first)."; return 1; }
-    [[ -f "$config" ]] || { err "${config} not found (run a full install first)."; return 1; }
-    grep -qE "^secret:" "$config" \
-        || { err "No 'secret:' line in ${config}; refusing to guess where the controller credential lives."; return 1; }
-
-    local new
-    new="$(openssl rand -base64 24)" \
-        || { err "Could not generate a controller secret."; return 1; }
-    # base64 can end in '=' and contains '/' and '+'; single-quoted YAML carries
-    # all three, and the generator cannot emit a single quote, so the value needs
-    # no escaping. Assert rather than assume.
-    [[ "$new" != *"'"* ]] \
-        || { err "Generated secret contains a quote; refusing to write it unescaped."; return 1; }
-
-    local tmp
-    tmp="$(mktemp "${config}.XXXXXX")" || return 1
-    # Same-directory rename, so the config is the old one or the new one and
-    # never a half-written file the core will not start on.
-    if ! awk -v secret="$new" '
-        !done && /^secret:/ { print "secret: " "'"'"'" secret "'"'"'"; done = 1; next }
-        { print }
-    ' "$config" > "$tmp"; then
-        rm -f -- "$tmp"
-        err "Could not render the rotated mihomo config."
-        return 1
-    fi
-    grep -qF "secret: '${new}'" "$tmp" \
-        || { rm -f -- "$tmp"; err "The rotated config does not carry the new secret; live config unchanged."; return 1; }
-    chown --reference="$config" "$tmp" 2>/dev/null || true
-    chmod --reference="$config" "$tmp" 2>/dev/null || chmod 0640 "$tmp"
-    mv -f -- "$tmp" "$config" \
-        || { rm -f -- "$tmp"; err "Could not publish the rotated mihomo config."; return 1; }
-    sync -f "$MIHOMO_DIR" 2>/dev/null || true
-
-    persist_mihomo_secret "$new" || return 1
-    systemctl restart 5gpn-mihomo.service 2>/dev/null \
-        || warn "could not restart 5gpn-mihomo (check: journalctl -u 5gpn-mihomo.service); the new secret is on disk but not live."
-    {
-        echo "控制台 secret 已轮换（旧 secret 立即失效）"
-        echo ""
-        echo "New secret: ${new}"
-        echo "(在 zashboard 的后端设置里替换；仅显示一次)"
-    } | card
-}
-
-# ----------------------------------------------------------------------------
 # Rule status
 # ----------------------------------------------------------------------------
 regen_ios() {
@@ -7541,7 +8386,9 @@ regen_ios() {
     GATEWAY_IP="${GATEWAY_IP:-$(cfg_get DNS_GATEWAY_IP)}"
     [[ -n "$DOT_DOMAIN" && -n "$PUBLIC_IP" ]] || { err "Domain/public IP unknown; run a full install first."; exit 1; }
     if ! setup_ios_profile; then
-        err "iOS profile not generated (fail-closed on unsigned profile). Fix certificate signing."
+        if [[ "$UI_GENERATION_COMMIT_STATE" != committed* ]]; then
+            err "iOS profile generation failed before current changed. Fix the reported signing or filesystem boundary."
+        fi
         exit 1
     fi
     # No service restart needed: mihomo serves the profile from UI_DIR on each request.
@@ -7597,11 +8444,11 @@ prompt_default() {
     [[ -n "$value" ]] && printf '%s\n' "$value" || printf '%s\n' "$default"
 }
 
-validate_dns_env_schema() {
-    local file="${1:-${CONF_DIR}/dns.env}" line key required seen=" "
-    [[ -f "$file" && ! -L "$file" ]] \
-        || { err "Persisted dns.env is missing or unsafe: $file"; return 1; }
+validate_dns_env_schema_contents() {
+    local file="$1" line key required seen=" "
     while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" != *$'\r'* ]] \
+            || { err "Persisted dns.env contains a carriage return."; return 1; }
         case "$line" in ''|\#*) continue ;; esac
         [[ "$line" == *=* ]] \
             || { err "Persisted dns.env contains a malformed line."; return 1; }
@@ -7626,24 +8473,66 @@ validate_dns_env_schema() {
     done
 }
 
+validate_dns_env_schema() {
+    local file="${1:-${CONF_DIR}/dns.env}"
+    [[ -f "$file" && ! -L "$file" ]] \
+        || { err "Persisted dns.env is missing or unsafe: $file"; return 1; }
+    validate_dns_env_schema_contents "$file"
+}
+
 preflight_persisted_dns_env() {
     local env="${CONF_DIR}/dns.env"
-    [[ -e "$env" || -L "$env" ]] || return 0
-    persisted_dns_env_is_safe \
-        || { err "Refusing unsafe persisted configuration before publication: $env"; return 1; }
-    validate_dns_env_schema "$env"
+    [[ ! -e "$env" && ! -L "$env" ]] && return 0
+    persisted_dns_env_file_metadata_is_safe \
+        || { err "Refusing unsafe persisted installer configuration before publication: $env"; return 1; }
+    validate_dns_env_schema "$env" \
+        || { err "Persisted installer configuration is not the exact current six-key schema: $env"; return 1; }
+    validate_persisted_install_config_values "$env" \
+        || { err "Persisted installer configuration contains invalid values: $env"; return 1; }
 }
 
 load_persisted_install_config() {
-    [[ -f "${CONF_DIR}/dns.env" ]] || return 1
-    validate_dns_env_schema || return 1
-    BASE_DOMAIN="$(cfg_get DNS_BASE_DOMAIN)"
-    BASE_DOMAIN="$(printf '%s' "$BASE_DOMAIN" | tr '[:upper:]' '[:lower:]')"
-    PUBLIC_IP="$(cfg_get DNS_PUBLIC_IP)"
-    GATEWAY_IP="$(cfg_get DNS_GATEWAY_IP)"
-    MIHOMO_LISTEN_IPS="$(cfg_get DNS_MIHOMO_LISTEN_IPS)"
-    CERT_MODE="$(cfg_get CERT_MODE)"
-    CERT_EMAIL="$(cfg_get CERT_EMAIL)"
+    local env="${CONF_DIR}/dns.env" dns_env_fd fd_path revision identity
+    local loaded_base loaded_public loaded_gateway loaded_listen loaded_mode loaded_email
+    preflight_persisted_dns_env || return 1
+    [[ -f "$env" ]] || return 1
+    exec {dns_env_fd}<"$env" \
+        || { err "Could not open persisted dns.env for a stable read."; return 1; }
+    fd_path="/proc/self/fd/${dns_env_fd}"
+    if ! validate_dns_env_schema_contents "$fd_path" \
+       || ! validate_persisted_install_config_values "$fd_path"; then
+        exec {dns_env_fd}<&-
+        return 1
+    fi
+    revision="$(sha256sum "$fd_path" | awk '{print $1}')" \
+        || { exec {dns_env_fd}<&-; return 1; }
+    identity="$(stat -Lc '%d:%i' -- "$fd_path" 2>/dev/null)" \
+        || { exec {dns_env_fd}<&-; return 1; }
+    loaded_base="$(dns_env_value_from_file "$fd_path" DNS_BASE_DOMAIN)" \
+        || { exec {dns_env_fd}<&-; return 1; }
+    loaded_public="$(dns_env_value_from_file "$fd_path" DNS_PUBLIC_IP)" \
+        || { exec {dns_env_fd}<&-; return 1; }
+    loaded_gateway="$(dns_env_value_from_file "$fd_path" DNS_GATEWAY_IP)" \
+        || { exec {dns_env_fd}<&-; return 1; }
+    loaded_listen="$(dns_env_value_from_file "$fd_path" DNS_MIHOMO_LISTEN_IPS)" \
+        || { exec {dns_env_fd}<&-; return 1; }
+    loaded_mode="$(dns_env_value_from_file "$fd_path" CERT_MODE)" \
+        || { exec {dns_env_fd}<&-; return 1; }
+    loaded_email="$(dns_env_value_from_file "$fd_path" CERT_EMAIL)" \
+        || { exec {dns_env_fd}<&-; return 1; }
+    exec {dns_env_fd}<&-
+
+    LOADED_DNS_ENV_SOURCE_STATE=present
+    LOADED_DNS_ENV_SOURCE_REVISION="$revision"
+    LOADED_DNS_ENV_SOURCE_IDENTITY="$identity"
+    assert_loaded_persisted_dns_env_revision 0 || return 1
+
+    BASE_DOMAIN="$(printf '%s' "$loaded_base" | tr '[:upper:]' '[:lower:]')"
+    PUBLIC_IP="$loaded_public"
+    GATEWAY_IP="$loaded_gateway"
+    MIHOMO_LISTEN_IPS="$loaded_listen"
+    CERT_MODE="$loaded_mode"
+    CERT_EMAIL="$loaded_email"
     derive_domains "$BASE_DOMAIN"
 }
 
@@ -7655,7 +8544,7 @@ validate_install_config() {
     [[ "$CERT_MODE" == cloudflare || "$CERT_MODE" == http-01 || "$CERT_MODE" == debug ]] \
         || { err "Persisted CERT_MODE must be cloudflare, http-01, or debug."; return 1; }
     if [[ "$CERT_MODE" != debug ]]; then
-        [[ "${CERT_EMAIL:-}" == *@* && "$CERT_EMAIL" != *[[:space:]]* ]] \
+        is_valid_cert_email "${CERT_EMAIL:-}" \
             || { err "Persisted CERT_EMAIL is invalid for the selected production certificate mode."; return 1; }
     fi
     MIHOMO_LISTEN_IPS="$(resolve_mihomo_listen_ips "$MIHOMO_LISTEN_IPS")" || return 1
@@ -7757,7 +8646,7 @@ install_tui_cert_email() {
         return 0
     fi
     CERT_EMAIL="$(prompt_default 'Let’s Encrypt email' "${CERT_EMAIL:-admin@${BASE_DOMAIN}}")"
-    [[ "$CERT_EMAIL" == *@* && "$CERT_EMAIL" != *[[:space:]]* ]] \
+    is_valid_cert_email "$CERT_EMAIL" \
         || { err "Invalid certificate email."; return 1; }
 }
 
@@ -7796,9 +8685,6 @@ configure_install_tui() {
     fi
 
     install_tui_cert_email || return 1
-    if [[ "$CERT_MODE" == cloudflare ]]; then
-        ensure_cf_token || return 1
-    fi
 
     # Review. Every label here has an arm below; a label without one is a menu
     # entry that does nothing, which is exactly what went unnoticed in
@@ -7827,12 +8713,11 @@ configure_install_tui() {
             '修改 证书模式'*)
                 install_tui_cert_mode || return 1
                 # The mode decides whether these are asked for at all, so a
-                # change re-asks rather than leaving an address or a token that
-                # belonged to the previous mode.
-                install_tui_cert_email || return 1
-                if [[ "$CERT_MODE" == cloudflare ]]; then
-                    ensure_cf_token || return 1
-                fi ;;
+                # change re-asks rather than retaining an address that belonged
+                # to the previous mode. A Cloudflare credential is requested
+                # only after this complete candidate is confirmed and only if
+                # certificate issuance or owned renewal actually needs it.
+                install_tui_cert_email || return 1 ;;
             '修改 主域名'*)    install_tui_base_domain || return 1 ;;
             '修改 公网 IPv4'*) install_tui_public_ip "$PUBLIC_IP" || return 1 ;;
             '修改 网关 IPv4'*) install_tui_gateway_ip || return 1 ;;
@@ -7883,6 +8768,10 @@ resolve_install_configuration() {
             info "Using validated persisted configuration from ${CONF_DIR}/dns.env (caller environment ignored)."
             return 0
         fi
+    else
+        LOADED_DNS_ENV_SOURCE_STATE=absent
+        LOADED_DNS_ENV_SOURCE_REVISION=absent
+        LOADED_DNS_ENV_SOURCE_IDENTITY=absent
     fi
     configure_install_tui "$force_tui"
     validate_install_config
@@ -7910,24 +8799,1786 @@ mihomo_config_matches_install_config() {
     [[ -z "$deny_line" || "$allow_line" -lt "$deny_line" ]] || return 1
     # The current seed has no source allowlist rule-provider.
     ! grep -Eq "RULE-SET,[[:space:]]*whitelist" "$config" || return 1
-    # The controller must be on 127.0.0.1:443, because that is where the console
-    # DIRECT dial lands: the hosts mapping sends the name to loopback and the
-    # gateway listener's target names port 443. Anywhere else and the rule still
-    # matches, the dial still succeeds against nothing, and the panel simply does
-    # not answer.
-    #
-    # This is asserted here rather than left to fail later because it already
-    # failed later once. dns.env follows the config now, so a :9090 config is
-    # internally consistent -- every caller dials :9090 and mihomo is listening
-    # there -- and the only thing that breaks is the one surface an installer
-    # cannot test from the inside. It surfaced as "mihomo did not become ready"
-    # with mihomo running perfectly well.
-    [[ "$(mihomo_configured_controller "$config")" == "127.0.0.1:443" ]] || return 1
+    # The staged Core later validates the complete fixed controller projection
+    # through inspect-controller v2. This early drift check deliberately does
+    # not carry a second YAML parser.
     ! grep -Fq -- "profile.${BASE_DOMAIN}" "$config" || return 1
-    grep -Fq -- "${GATEWAY_IP}/32" "$config" || return 1
+    # Gateway loop prevention is a dynamic Core boundary derived from dns.json;
+    # operator YAML no longer contains an installer-rendered gateway /32 rule.
     while IFS= read -r ip; do
         grep -Eq "listen:[[:space:]]*${ip//./\\.}([,}[:space:]]|$)" "$config" || return 1
     done < <(printf '%s\n' "$MIHOMO_LISTEN_IPS" | tr ',' '\n')
+}
+
+# Configure is an installed-state transaction, not a reinstall. It consumes
+# the already published Core and current documents, changes only the selected
+# host coordinates, and never repairs a missing deployment by seeding or
+# republishing release artifacts.
+installed_mihomo_is_current() {
+    local output first actual
+    fixed_owned_dir_is_safe "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
+        || { err "The installed runtime root is not current 5gpn state."; return 1; }
+    [[ -d "$BIN_DIR" && ! -L "$BIN_DIR" \
+       && "$(readlink -f -- "$BIN_DIR" 2>/dev/null || true)" == "$BIN_DIR" \
+       && "$(stat -Lc '%u:%g:%a' -- "$BIN_DIR" 2>/dev/null)" == 0:0:755 \
+       && -f "$MIHOMO_BIN" && ! -L "$MIHOMO_BIN" \
+       && "$(readlink -f -- "$MIHOMO_BIN" 2>/dev/null || true)" == "$MIHOMO_BIN" \
+       && "$(stat -Lc '%u:%g:%a:%h' -- "$MIHOMO_BIN" 2>/dev/null)" == 0:0:755:1 ]] \
+        || { err "The installed Core path is missing or has unsafe metadata: $MIHOMO_BIN"; return 1; }
+    output="$(LC_ALL=C "$MIHOMO_BIN" -v 2>/dev/null)" \
+        || { err "The installed Core did not report its version."; return 1; }
+    first="${output%%$'\n'*}"
+    [[ "$first" != *$'\r'* \
+       && "$first" =~ ^Mihomo\ Meta\ ([^[:space:]]+)\ linux\ amd64\ with\ go[^[:space:]]+\ .+$ ]] \
+        || { err "The installed Core version output is malformed."; return 1; }
+    actual="${BASH_REMATCH[1]}"
+    [[ "$actual" == "$MIHOMO_VERSION" ]] \
+        || { err "The installed Core is ${actual}; this management backend requires ${MIHOMO_VERSION}."; return 1; }
+}
+
+configure_main_unit_restart_gate_is_current() {
+    local live=/etc/systemd/system/5gpn-mihomo.service
+    local staged="${BASE_DIR}/etc/systemd/5gpn-mihomo.service"
+    local helper="${SCRIPTS_DIR}/configure-runtime-gate.sh"
+    local ui_validator="${SCRIPTS_DIR}/ui-generation.sh" need_reload
+    local live_state staged_state helper_state ui_validator_state
+    root_plain_file_metadata_is_safe "$live" 0 644 \
+        && root_plain_file_metadata_is_safe "$staged" 0 644 \
+        && cmp -s -- "$live" "$staged" \
+        || { err "Configure requires the exact installed PID1 restart-gate unit generation."; return 1; }
+    grep -Fxq '# 5gpn-unit-id: 5gpn-mihomo.service:v3' "$live" \
+        && [[ "$(grep -n '^ExecStartPre=' "$live" | head -1)" \
+              == *'ExecStartPre=+/opt/5gpn/scripts/configure-runtime-gate.sh wait' ]] \
+        && grep -Fxq 'ExecStartPre=/opt/5gpn/scripts/configure-runtime-gate.sh validate-ui' "$live" \
+        && grep -Fxq 'TimeoutStartSec=40min' "$live" \
+        || { err "The installed mihomo unit does not contain the current PID1 restart gate."; return 1; }
+    live_state="$(release_pin_file_state "$live")" \
+        || { err "Could not bind the live PID1 restart-gate unit bytes."; return 1; }
+    staged_state="$(release_pin_file_state "$staged")" \
+        || { err "Could not bind the staged PID1 restart-gate unit bytes."; return 1; }
+    helper_state="$(installed_runtime_script_state "$helper")" \
+        || { err "The installed PID1 restart-gate helper is missing or unsafe: $helper"; return 1; }
+    ui_validator_state="$(installed_runtime_script_state "$ui_validator")" \
+        || { err "The installed UI generation validator is missing or unsafe: $ui_validator"; return 1; }
+    grep -Fxq '# 5gpn-configure-runtime-gate-id: v1' "$helper" \
+        && grep -Fxq 'GATE_MAX_WAIT_SECONDS=2100' "$helper" \
+        && grep -Fq 'wait|validate-ui' "$helper" \
+        || { err "The installed PID1 restart-gate helper is not the current helper generation."; return 1; }
+    need_reload="$(systemctl show -p NeedDaemonReload --value 5gpn-mihomo.service 2>/dev/null)" \
+        || { err "Could not inspect the loaded mihomo unit generation."; return 1; }
+    [[ "$need_reload" == no ]] \
+        || { err "PID 1 has not loaded the installed restart-gate unit generation; run daemon-reload and retry."; return 1; }
+    if [[ -z "${CONFIGURE_RUNTIME_GATE_LIVE_UNIT_STATE:-}" ]]; then
+        CONFIGURE_RUNTIME_GATE_LIVE_UNIT_STATE="$live_state"
+        CONFIGURE_RUNTIME_GATE_STAGED_UNIT_STATE="$staged_state"
+        CONFIGURE_RUNTIME_GATE_HELPER_STATE="$helper_state"
+        CONFIGURE_RUNTIME_UI_VALIDATOR_STATE="$ui_validator_state"
+    else
+        [[ "$live_state" == "$CONFIGURE_RUNTIME_GATE_LIVE_UNIT_STATE" \
+           && "$staged_state" == "$CONFIGURE_RUNTIME_GATE_STAGED_UNIT_STATE" \
+           && "$helper_state" == "$CONFIGURE_RUNTIME_GATE_HELPER_STATE" \
+           && "$ui_validator_state" == "$CONFIGURE_RUNTIME_UI_VALIDATOR_STATE" ]] \
+            || { err "The PID1 restart-gate unit or helper changed during configure."; return 1; }
+    fi
+}
+
+configure_capture_runtime_state() {
+    preflight_current_managed_unit_definition 5gpn-mihomo.service || return 1
+    if systemd_unit_has_dropins 5gpn-mihomo.service; then
+        err "Refusing a systemd override that changes the managed 5gpn-mihomo.service contract.${SYSTEMD_UNIT_CONFLICT_REASON:+ ($SYSTEMD_UNIT_CONFLICT_REASON)}"
+        return 1
+    fi
+    configure_main_unit_restart_gate_is_current || return 1
+    read_exact_systemd_unit_state 5gpn-mihomo.service \
+        || { err "Could not inspect the current mihomo service state."; return 1; }
+    [[ "$SYSTEMD_UNIT_LOAD_STATE" == loaded ]] \
+        || { err "The current 5gpn-mihomo.service is not installed."; return 1; }
+    case "$SYSTEMD_UNIT_FILE_STATE" in
+        enabled|disabled) ;;
+        *) err "The current mihomo unit file state is unsafe: $SYSTEMD_UNIT_FILE_STATE"; return 1 ;;
+    esac
+    CONFIGURE_RUNTIME_UNIT_FILE_STATE="$SYSTEMD_UNIT_FILE_STATE"
+    case "$SYSTEMD_UNIT_ACTIVE_STATE" in
+        active) CONFIGURE_RUNTIME_WAS_ACTIVE=1 ;;
+        inactive) CONFIGURE_RUNTIME_WAS_ACTIVE=0 ;;
+        failed)
+            err "5gpn-mihomo.service is failed; repair the current deployment before changing installation coordinates."
+            return 1
+            ;;
+        *)
+            err "The mihomo service is transitioning (${SYSTEMD_UNIT_ACTIVE_STATE}); wait and rerun configure."
+            return 1
+            ;;
+    esac
+}
+
+configure_validate_operator_config() {
+    local require_selected_coordinates="${1:-1}" config="${MIHOMO_DIR}/config.yaml"
+    local inspection raw_revision path_state
+    [[ -f "$config" && ! -L "$config" ]] \
+        || { err "A current operator-owned mihomo config is required: $config"; return 1; }
+    runtime_control_file_metadata_is_safe "$config" root "$FIVEGPN_SERVICE_GROUP" 640 \
+        || { err "The operator-owned mihomo config has unsafe metadata: $config"; return 1; }
+    SAFE_PATHS="$MIHOMO_SAFE_PATHS" "$MIHOMO_BIN" -t -f "$config" -d "$MIHOMO_DIR" \
+        || { err "The installed Core rejected the operator-owned mihomo config."; return 1; }
+    inspection="$(mihomo_controller_inspection "$config")" \
+        || { err "The installed Core could not inspect the current controller projection."; return 1; }
+    raw_revision="$(mihomo_controller_inspection_field "$inspection" raw_revision)" || return 1
+    [[ "$raw_revision" =~ ^[0-9a-f]{64}$ \
+       && "$raw_revision" == "$(sha256sum "$config" | awk '{print $1}')" ]] \
+        || { err "The operator config revision changed during Core inspection."; return 1; }
+    if [[ "$require_selected_coordinates" == 1 ]]; then
+        mihomo_config_matches_install_config \
+            || { err "The operator-owned mihomo config does not match the selected domains and listener addresses."; \
+                 err "Edit and validate the complete operator file explicitly, then rerun configure."; return 1; }
+    fi
+    path_state="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "$config" 2>/dev/null)" \
+        || return 1
+    CONFIGURE_OPERATOR_CONFIG_STATE="${path_state}:${raw_revision}"
+}
+
+configure_revalidate_selected_operator_config() {
+    local pinned_state="${CONFIGURE_OPERATOR_CONFIG_STATE:-}" observed_state
+    [[ -n "$pinned_state" ]] \
+        || { err "No pre-TUI operator config revision is pinned."; return 1; }
+    configure_validate_operator_config 1 || return 1
+    observed_state="$CONFIGURE_OPERATOR_CONFIG_STATE"
+    CONFIGURE_OPERATOR_CONFIG_STATE="$pinned_state"
+    [[ "$observed_state" == "$pinned_state" ]] \
+        || { err "The operator-owned mihomo config changed while the configuration TUI was open."; \
+             err "The concurrent file was not adopted; review it and rerun configure."; return 1; }
+}
+
+configure_assert_operator_config_revision() {
+    local config="${MIHOMO_DIR}/config.yaml" path_state revision
+    [[ -n "${CONFIGURE_OPERATOR_CONFIG_STATE:-}" ]] \
+        || { err "No operator config revision is pinned for configure."; return 1; }
+    runtime_control_file_metadata_is_safe "$config" root "$FIVEGPN_SERVICE_GROUP" 640 \
+        || { err "The operator-owned mihomo config metadata changed during configure."; return 1; }
+    path_state="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "$config" 2>/dev/null)" \
+        || return 1
+    revision="$(sha256sum "$config" | awk '{print $1}')" || return 1
+    [[ "${path_state}:${revision}" == "$CONFIGURE_OPERATOR_CONFIG_STATE" ]] \
+        || { err "The operator-owned mihomo config changed during configure; no restart was attempted."; return 1; }
+}
+
+configure_node_lock_path_is_safe() {
+    local lock="${MIHOMO_DIR}/config.yaml.5gpn-nodes.lock"
+    [[ -f "$lock" && ! -L "$lock" \
+       && "$(file_uid "$lock")" == 0 \
+       && "$(file_gid "$lock")" == 0 \
+       && "$(file_mode "$lock")" == 600 \
+       && "$(file_nlink "$lock")" == 1 ]]
+}
+
+acquire_configure_node_lock() {
+    local lock="${MIHOMO_DIR}/config.yaml.5gpn-nodes.lock" created=0
+    command -v flock >/dev/null 2>&1 || return 1
+    shared_runtime_directory_metadata_is_safe \
+        "$MIHOMO_DIR" "$FIVEGPN_SERVICE_GROUP" 3770 \
+        || { err "The mihomo home is unsafe before the node/configure lock."; return 1; }
+    if [[ -e "$lock" || -L "$lock" ]]; then
+        configure_node_lock_path_is_safe \
+            || { err "The node/configure transaction lock is unsafe: $lock"; return 1; }
+        exec 9<>"$lock" || return 1
+    else
+        set -o noclobber
+        if exec 9>"$lock"; then
+            created=1
+        else
+            set +o noclobber
+            err "The node/configure transaction lock appeared concurrently."
+            return 1
+        fi
+        set +o noclobber
+        chown root:root "/proc/self/fd/9" \
+            && chmod 0600 "/proc/self/fd/9" \
+            && sync -f "/proc/self/fd/9" 2>/dev/null \
+            || { exec 9>&-; err "Could not secure the node/configure transaction lock."; return 1; }
+    fi
+    configure_node_lock_path_is_safe \
+        && [[ "$(stat -Lc '%d:%i' -- /proc/self/fd/9 2>/dev/null)" \
+             == "$(stat -Lc '%d:%i' -- "$lock" 2>/dev/null)" ]] \
+        || { exec 9>&-; err "The node/configure lock identity changed during open."; return 1; }
+    flock -w "$INSTALL_LOCK_WAIT_TIMEOUT" 9 \
+        || { exec 9>&-; err "Timed out waiting for the node/configure transaction lock."; return 1; }
+    configure_node_lock_path_is_safe \
+        && [[ "$(stat -Lc '%d:%i' -- /proc/self/fd/9 2>/dev/null)" \
+             == "$(stat -Lc '%d:%i' -- "$lock" 2>/dev/null)" ]] \
+        || { flock -u 9 2>/dev/null || true; exec 9>&-; \
+             err "The node/configure lock changed after acquisition."; return 1; }
+    CONFIGURE_NODE_LOCK_HELD=1
+    [[ "$created" == 0 ]] || sync -f "$MIHOMO_DIR" 2>/dev/null \
+        || { err "Could not sync the new node/configure lock directory entry."; return 1; }
+}
+
+release_configure_node_lock() {
+    local rc=0
+    if [[ "${CONFIGURE_NODE_LOCK_HELD:-0}" == 1 ]]; then
+        configure_node_lock_path_is_safe || rc=1
+        flock -u 9 2>/dev/null || rc=1
+    fi
+    exec 9>&- || true
+    CONFIGURE_NODE_LOCK_HELD=0
+    [[ "$rc" == 0 ]] \
+        || { err "The node/configure lock descriptor was invalid during release."; return 1; }
+}
+
+configure_require_current_deployment() {
+    local expected_gateway="$1" state_uid state_gid
+    local pre_recovery_config_state pre_recovery_dns_revision
+    fixed_owned_dir_is_safe "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" \
+        && fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" \
+        || { err "Configure requires current owned 5gpn installation roots."; return 1; }
+    [[ "$(stat -Lc '%u:%g:%a' -- "$CONF_DIR" 2>/dev/null)" == 0:0:755 \
+       && "$(stat -Lc '%u:%g:%a:%h' -- "${CONF_DIR}/dns.env" 2>/dev/null)" == 0:0:600:1 ]] \
+        || { err "Configure refuses an incomplete configuration-root reconciliation state."; return 1; }
+    persisted_dns_env_is_safe \
+        || { err "Configure requires a current owned ${CONF_DIR}/dns.env."; return 1; }
+    getent passwd "$FIVEGPN_SERVICE_USER" >/dev/null 2>&1 \
+        && getent group "$FIVEGPN_SERVICE_GROUP" >/dev/null 2>&1 \
+        && managed_user_uid_is_exclusive "$FIVEGPN_SERVICE_USER" \
+        && managed_primary_gid_is_exclusive_for_user "$FIVEGPN_SERVICE_USER" \
+        || { err "Configure requires the current exclusive fivegpn runtime identity."; return 1; }
+    shared_runtime_directory_metadata_is_safe "$MIHOMO_DIR" "$FIVEGPN_SERVICE_GROUP" 3770 \
+        || { err "Configure requires the current mihomo home boundary."; return 1; }
+    state_uid="$(account_uid "$FIVEGPN_SERVICE_USER")"
+    state_gid="$(account_gid "$FIVEGPN_SERVICE_GROUP")"
+    [[ -n "$state_uid" && -n "$state_gid" \
+       && -d "$FIVEGPN_STATE_DIR" && ! -L "$FIVEGPN_STATE_DIR" \
+       && "$(file_uid "$FIVEGPN_STATE_DIR")" == "$state_uid" \
+       && "$(file_gid "$FIVEGPN_STATE_DIR")" == "$state_gid" \
+       && "$(file_mode "$FIVEGPN_STATE_DIR")" == 711 ]] \
+        || { err "Configure requires the current Core state directory."; return 1; }
+    runtime_tree_has_only_plain_entries "$FIVEGPN_STATE_DIR" \
+        || { err "The Core state directory contains an unsafe link, hardlink, or special entry."; return 1; }
+    [[ -f "${MIHOMO_DIR}/config.yaml" && ! -L "${MIHOMO_DIR}/config.yaml" ]] \
+        || { err "Configure cannot seed a missing operator-owned mihomo config."; return 1; }
+    [[ -f "${FIVEGPN_STATE_DIR}/dns.json" && ! -L "${FIVEGPN_STATE_DIR}/dns.json" ]] \
+        || { err "Configure cannot seed a missing DNS document."; return 1; }
+    installed_mihomo_is_current || return 1
+    configure_validate_operator_config 0 || return 1
+    pre_recovery_config_state="$CONFIGURE_OPERATOR_CONFIG_STATE"
+    validate_existing_runtime_documents "$MIHOMO_BIN" "installed Core" || return 1
+    [[ "$VALIDATED_DNS_SOURCE_REVISION" =~ ^[0-9a-f]{64}$ ]] \
+        || { err "Configure requires an existing Core-validated DNS document."; return 1; }
+    pre_recovery_dns_revision="$VALIDATED_DNS_SOURCE_REVISION"
+    jq -e --arg gateway "$expected_gateway" '.gateway == $gateway' \
+        "${FIVEGPN_STATE_DIR}/dns.json" >/dev/null \
+        || { err "dns.env and dns.json disagree on the current gateway; repair that drift explicitly before configure."; return 1; }
+    command -v busctl >/dev/null 2>&1 \
+        || { err "Configure requires the systemd busctl client for exact restart-job ownership."; return 1; }
+    configure_main_unit_restart_gate_is_current || return 1
+    # Recover only after the offline Core gates above. If recovery starts the
+    # previously active runtime, every pinned input is compared again and a
+    # failed comparison stops that recovered process before returning.
+    CONFIGURE_RUNTIME_RECOVERED_FROM_STALE_FENCE=0
+    recover_stale_configure_runtime_fence || return 1
+    configure_capture_runtime_state \
+        || { configure_stop_runtime_recovered_from_stale_fence || true; return 1; }
+    configure_validate_operator_config 0 \
+        || { configure_stop_runtime_recovered_from_stale_fence || true; return 1; }
+    [[ "$CONFIGURE_OPERATOR_CONFIG_STATE" == "$pre_recovery_config_state" ]] \
+        || { err "The operator YAML changed across retained-fence recovery."; \
+             configure_stop_runtime_recovered_from_stale_fence || true; return 1; }
+    validate_existing_runtime_documents "$MIHOMO_BIN" "installed Core" \
+        || { configure_stop_runtime_recovered_from_stale_fence || true; return 1; }
+    [[ "$VALIDATED_DNS_SOURCE_REVISION" =~ ^[0-9a-f]{64}$ ]] \
+        || { err "Configure requires an existing Core-validated DNS document."; \
+             configure_stop_runtime_recovered_from_stale_fence || true; return 1; }
+    [[ "$VALIDATED_DNS_SOURCE_REVISION" == "$pre_recovery_dns_revision" ]] \
+        || { err "The DNS document changed across retained-fence recovery."; \
+             configure_stop_runtime_recovered_from_stale_fence || true; return 1; }
+    jq -e --arg gateway "$expected_gateway" '.gateway == $gateway' \
+        "${FIVEGPN_STATE_DIR}/dns.json" >/dev/null \
+        || { err "dns.env and dns.json disagree on the current gateway; repair that drift explicitly before configure."; \
+             configure_stop_runtime_recovered_from_stale_fence || true; return 1; }
+    CONFIGURE_RUNTIME_RECOVERED_FROM_STALE_FENCE=0
+}
+
+configure_plan_changes() {
+    local old_base="$1" old_public="$2" old_gateway="$3" old_listen="$4"
+    local old_mode="$5" old_email="$6" new_base="$7" new_public="$8"
+    local new_gateway="$9" new_listen="${10}" new_mode="${11}" new_email="${12}"
+    local base_changed=0 public_changed=0 gateway_changed=0 listen_changed=0
+    local mode_changed=0 email_changed=0 debug_ip_changed=0
+    [[ "$old_base" == "$new_base" ]] || base_changed=1
+    [[ "$old_public" == "$new_public" ]] || public_changed=1
+    [[ "$old_gateway" == "$new_gateway" ]] || gateway_changed=1
+    [[ "$old_listen" == "$new_listen" ]] || listen_changed=1
+    [[ "$old_mode" == "$new_mode" ]] || mode_changed=1
+    [[ "$old_email" == "$new_email" ]] || email_changed=1
+    if [[ "$new_mode" == debug && ( "$public_changed" == 1 || "$gateway_changed" == 1 ) ]]; then
+        debug_ip_changed=1
+    fi
+
+    CONFIGURE_DNS_ENV_CHANGED=$((base_changed || public_changed || gateway_changed || listen_changed || mode_changed || email_changed))
+    CONFIGURE_DNS_GATE_REQUIRED=$((base_changed || public_changed || mode_changed))
+    CONFIGURE_GATEWAY_CHANGED="$gateway_changed"
+    CONFIGURE_CERT_CHANGED=$((base_changed || mode_changed || debug_ip_changed))
+    CONFIGURE_PROFILE_CHANGED=$((CONFIGURE_CERT_CHANGED || gateway_changed))
+    CONFIGURE_RESTART_REQUIRED=$((base_changed || mode_changed || gateway_changed || listen_changed || debug_ip_changed))
+    CONFIGURE_ANY_CHANGE="$CONFIGURE_DNS_ENV_CHANGED"
+}
+
+configure_certificate_selection_state() {
+    local artifacts=0 owned=0 preserved=0 credential_required=0
+    certbot_lineage_artifacts_exist "$BASE_DOMAIN" && artifacts=1
+    certbot_lineage_owned_by_5gpn "$BASE_DOMAIN" && owned=1
+    if [[ "$artifacts" == 0 && "$CERT_MODE" != debug ]] \
+       && cert_provenance_matches "$CERT_MODE" "$BASE_DOMAIN" \
+       && validate_cert_pair \
+            "${DOT_CERT_DIR}/current/fullchain.pem" \
+            "${DOT_CERT_DIR}/current/privkey.pem" \
+            "$BASE_DOMAIN" "$((30*86400))" production "$CERT_MODE"; then
+        preserved=1
+    fi
+    cloudflare_credential_required_for_install "$BASE_DOMAIN" \
+        && credential_required=1
+    printf '%s|%s|%s|%s|%s|%s\n' \
+        "$CERT_MODE" "$BASE_DOMAIN" "$artifacts" "$owned" \
+        "$preserved" "$credential_required"
+}
+
+configure_capture_certificate_selection() {
+    CONFIGURE_CERTIFICATE_SELECTION_STATE="$(configure_certificate_selection_state)" \
+        || return 1
+    [[ -n "$CONFIGURE_CERTIFICATE_SELECTION_STATE" ]]
+}
+
+configure_assert_certificate_selection() {
+    local observed
+    [[ -n "${CONFIGURE_CERTIFICATE_SELECTION_STATE:-}" ]] \
+        || { err "No certificate selection is pinned for configure."; return 1; }
+    observed="$(configure_certificate_selection_state)" || return 1
+    [[ "$observed" == "$CONFIGURE_CERTIFICATE_SELECTION_STATE" ]] \
+        || { err "Certificate lineage ownership or reuse state changed while configure waited for its locks."; return 1; }
+}
+
+configure_collect_pending_cf_token() {
+    PENDING_CF_TOKEN=""
+    [[ "$CONFIGURE_CERT_CHANGED" == 1 && "$CERT_MODE" == cloudflare ]] \
+        || return 0
+    cloudflare_credential_required_for_install "$BASE_DOMAIN" || return 0
+    if has_valid_cf_credential; then
+        info "Reusing the saved Cloudflare API token after the locked publication recheck."
+        return 0
+    fi
+    local tok=""
+    [[ -t 0 ]] \
+        && tok="$(ask_secret 'Cloudflare API token (Zone:DNS:Edit scope for your base zone):' || true)"
+    if [[ -z "$tok" || ! "$tok" =~ [^[:space:]] ]]; then
+        err "No Cloudflare API token. Run the attached-terminal TUI; shell environment tokens are not accepted."
+        return 1
+    fi
+    if [[ "$tok" =~ $'\r' || "$tok" =~ $'\n' ]]; then
+        err "Cloudflare API token must not contain CR or LF (check for a trailing newline)."
+        return 1
+    fi
+    PENDING_CF_TOKEN="$tok"
+    info "Cloudflare API token retained only in memory until the locked final recheck."
+}
+
+configure_commit_pending_cf_token() {
+    [[ "${CONFIGURE_NODE_LOCK_HELD:-0}" == 1 \
+       && "$INSTALL_CERT_LOCK_HELD" == 1 ]] \
+        || { err "Cloudflare credential publication requires both configure locks."; return 1; }
+    configure_assert_certificate_selection || return 1
+    cloudflare_credential_required_for_install "$BASE_DOMAIN" || return 0
+    if has_valid_cf_credential; then
+        PENDING_CF_TOKEN=""
+        return 0
+    fi
+    [[ -n "${PENDING_CF_TOKEN:-}" ]] \
+        || { err "The confirmed Cloudflare credential candidate is no longer available."; return 1; }
+    write_cf_credential "$PENDING_CF_TOKEN" || return 1
+    PENDING_CF_TOKEN=""
+    has_valid_cf_credential \
+        || { err "The locked Cloudflare credential publication could not be verified."; return 1; }
+    ok "Cloudflare API token saved after the locked final recheck."
+}
+
+configure_update_existing_dns_gateway() {
+    local target="${FIVEGPN_STATE_DIR}/dns.json" state_dir="$FIVEGPN_STATE_DIR"
+    local source_revision current_revision tmp
+    CONFIGURE_DNS_GATEWAY_COMMIT_STATE=not-committed
+    configure_assert_runtime_gate_quiescent \
+        || { err "Gateway publication requires a PID1-gated quiescent Core writer boundary."; return 1; }
+    configure_runtime_start_fence_is_active \
+        || { err "Gateway publication requires the temporary PID1 mihomo start gate."; return 1; }
+    [[ "$VALIDATED_DNS_SOURCE_REVISION" =~ ^[0-9a-f]{64}$ ]] \
+        || { err "The existing DNS document has no pinned installed-Core revision."; return 1; }
+    runtime_control_file_metadata_is_safe "$target" \
+        "$FIVEGPN_SERVICE_USER" "$FIVEGPN_SERVICE_GROUP" 600 \
+        || { err "The existing DNS document has unsafe metadata."; return 1; }
+    source_revision="$(sha256sum "$target" | awk '{print $1}')" || return 1
+    [[ "$source_revision" == "$VALIDATED_DNS_SOURCE_REVISION" ]] \
+        || { err "The DNS document changed after the configure snapshot was validated."; return 1; }
+    current_dns_document_is_compatible "$target" \
+        || { err "The DNS document's fixed listener or certificate fields drifted."; return 1; }
+    jq -e --arg gateway "$GATEWAY_IP" '.gateway == $gateway' "$target" >/dev/null \
+        && return 0
+    dns_document_is_jq_gateway_update_safe "$target" \
+        || { err "The DNS document cannot be preserved exactly by the gateway-only updater."; return 1; }
+    tmp="$(mktemp "${state_dir}/.dns.json.configure.XXXXXX")" \
+        || { err "Could not create the DNS gateway candidate."; return 1; }
+    jq --arg gateway "$GATEWAY_IP" '.gateway = $gateway' "$target" > "$tmp" \
+        || { rm -f -- "$tmp"; err "Could not render the DNS gateway candidate."; return 1; }
+    current_dns_document_is_compatible "$tmp" \
+        && jq -e --arg gateway "$GATEWAY_IP" '.gateway == $gateway' "$tmp" >/dev/null \
+        || { rm -f -- "$tmp"; err "The DNS gateway candidate failed the fixed-field boundary."; return 1; }
+    chown "$FIVEGPN_SERVICE_USER:$FIVEGPN_SERVICE_GROUP" "$tmp" \
+        && chmod 0600 "$tmp" \
+        && sync -f "$tmp" 2>/dev/null \
+        || { rm -f -- "$tmp"; err "Could not secure or sync the DNS gateway candidate."; return 1; }
+    validate_dns_candidate_with_installed_core "$tmp" \
+        || { rm -f -- "$tmp"; return 1; }
+    runtime_control_file_metadata_is_safe "$target" \
+        "$FIVEGPN_SERVICE_USER" "$FIVEGPN_SERVICE_GROUP" 600 \
+        || { rm -f -- "$tmp"; err "The DNS document metadata changed before gateway publication."; return 1; }
+    configure_assert_runtime_gate_quiescent \
+        || { rm -f -- "$tmp"; err "A Core writer reappeared before the gateway rename."; return 1; }
+    configure_runtime_start_fence_is_active \
+        || { rm -f -- "$tmp"; err "The PID1-owned mihomo restart gate disappeared before the gateway rename."; return 1; }
+    current_revision="$(sha256sum "$target" | awk '{print $1}')" \
+        || { rm -f -- "$tmp"; return 1; }
+    [[ "$current_revision" == "$source_revision" ]] \
+        && current_dns_document_is_compatible "$target" \
+        || { rm -f -- "$tmp"; err "The DNS document changed while its gateway candidate was staged."; return 1; }
+    configure_disarm_runtime_restore_for_coordinate_commit \
+        || { rm -f -- "$tmp"; err "Could not disarm stale-gate recovery at the DNS commit boundary."; return 1; }
+    if ! mv -Tf -- "$tmp" "$target"; then
+        rm -f -- "$tmp"
+        configure_rearm_runtime_restore_after_failed_commit || true
+        err "Could not atomically publish the DNS gateway update."
+        return 1
+    fi
+    CONFIGURE_DNS_GATEWAY_COMMIT_STATE=committed-undurable
+    sync -f "$state_dir" 2>/dev/null \
+        || { err "The DNS gateway update is visible but its directory sync failed; it was not rolled back."; return 1; }
+    CONFIGURE_DNS_GATEWAY_COMMIT_STATE=committed
+    runtime_control_file_metadata_is_safe "$target" \
+        "$FIVEGPN_SERVICE_USER" "$FIVEGPN_SERVICE_GROUP" 600 \
+        && current_dns_document_is_compatible "$target" \
+        && jq -e --arg gateway "$GATEWAY_IP" '.gateway == $gateway' "$target" >/dev/null \
+        || { err "The published DNS gateway update failed validation."; return 1; }
+    VALIDATED_DNS_SOURCE_REVISION="$(sha256sum "$target" | awk '{print $1}')" || return 1
+    ok "Updated only the installation-owned DNS gateway field."
+}
+
+configure_require_selected_dependencies() {
+    local cmd
+    for cmd in openssl jq flock timeout findmnt sync busctl; do
+        command -v "$cmd" >/dev/null 2>&1 \
+            || { err "Configure requires the already installed command: $cmd"; return 1; }
+    done
+    if [[ "$CONFIGURE_DNS_GATE_REQUIRED" == 1 && "$CERT_MODE" != debug ]]; then
+        command -v dig >/dev/null 2>&1 \
+            || { err "Production coordinate changes require the already installed dig command."; return 1; }
+    fi
+    if [[ "$CONFIGURE_CERT_CHANGED" == 1 && "$CERT_MODE" != debug ]]; then
+        command -v certbot >/dev/null 2>&1 && certbot --version >/dev/null 2>&1 \
+            || { err "Production certificate changes require an already installed working Certbot."; return 1; }
+        if [[ "$CERT_MODE" == cloudflare ]]; then
+            certbot plugins 2>/dev/null | grep -q dns-cloudflare \
+                || { err "Cloudflare certificate changes require the already installed dns-cloudflare plugin."; return 1; }
+        fi
+    fi
+}
+
+configure_preflight_selected_runtime_helpers() {
+    local generator="${SCRIPTS_DIR}/gen-ios-profile.sh" helper unit
+    if [[ "$CONFIGURE_CERT_CHANGED" == 1 ]]; then
+        load_cert_role_helpers \
+            || { err "Current certificate publication helpers are required before certificate changes."; return 1; }
+        for helper in renew-hook.sh cert-renew.sh; do
+            installed_runtime_script_state "${SCRIPTS_DIR}/${helper}" >/dev/null \
+                || { err "Installed certificate helper is missing or unsafe: ${SCRIPTS_DIR}/${helper}"; return 1; }
+        done
+        for unit in 5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
+            preflight_current_managed_unit_definition "$unit" || return 1
+            if systemd_unit_has_dropins "$unit"; then
+                err "Refusing a systemd override that changes the managed ${unit} certificate contract.${SYSTEMD_UNIT_CONFLICT_REASON:+ ($SYSTEMD_UNIT_CONFLICT_REASON)}"
+                return 1
+            fi
+        done
+    fi
+    if [[ "$CONFIGURE_PROFILE_CHANGED" == 1 ]]; then
+        load_ui_generation_helper \
+            && _ui_generation_current_only_is_safe "$UI_DIR" \
+            || { err "A valid current UI/profile generation is required before profile changes."; return 1; }
+        installed_runtime_script_state "$generator" >/dev/null \
+            || { err "The installed profile generator is missing or unsafe: $generator"; return 1; }
+    fi
+}
+
+configure_assert_runtime_state_before_publication() {
+    read_exact_systemd_unit_state 5gpn-mihomo.service \
+        || { err "Could not re-read mihomo state before configuration publication."; return 1; }
+    [[ "$SYSTEMD_UNIT_LOAD_STATE" == loaded ]] \
+        || { err "The managed mihomo unit disappeared during configure."; return 1; }
+    case "${CONFIGURE_RUNTIME_WAS_ACTIVE:-0}:${SYSTEMD_UNIT_ACTIVE_STATE}" in
+        1:active|1:inactive|0:inactive) return 0 ;;
+        0:active)
+            err "5gpn-mihomo was started outside this transaction; refusing to publish coordinates against an unpinned live generation."
+            return 1
+            ;;
+        *:failed)
+            err "5gpn-mihomo entered failed state during configure; no coordinate publication was attempted."
+            return 1
+            ;;
+        *)
+            err "5gpn-mihomo is transitioning (${SYSTEMD_UNIT_ACTIVE_STATE}); no coordinate publication was attempted."
+            return 1
+            ;;
+    esac
+}
+
+configure_read_mihomo_runtime_state() {
+    CONFIGURE_MIHOMO_ACTIVE_STATE="$(systemctl show -p ActiveState --value \
+        5gpn-mihomo.service 2>/dev/null)" \
+        || { err "Could not read mihomo ActiveState."; return 1; }
+    CONFIGURE_MIHOMO_SUB_STATE="$(systemctl show -p SubState --value \
+        5gpn-mihomo.service 2>/dev/null)" \
+        || { err "Could not read mihomo SubState."; return 1; }
+    CONFIGURE_MIHOMO_UNIT_FILE_STATE="$(systemctl show -p UnitFileState --value \
+        5gpn-mihomo.service 2>/dev/null)" \
+        || { err "Could not read mihomo UnitFileState."; return 1; }
+    CONFIGURE_MIHOMO_CONTROL_PID="$(systemctl show -p ControlPID --value \
+        5gpn-mihomo.service 2>/dev/null)" \
+        || { err "Could not read mihomo ControlPID."; return 1; }
+    [[ -n "$CONFIGURE_MIHOMO_ACTIVE_STATE" \
+       && -n "$CONFIGURE_MIHOMO_SUB_STATE" \
+       && -n "$CONFIGURE_MIHOMO_UNIT_FILE_STATE" \
+       && "$CONFIGURE_MIHOMO_CONTROL_PID" =~ ^[0-9]+$ ]] \
+        || { err "Mihomo runtime state is incomplete."; return 1; }
+}
+
+configure_runtime_fence_private_dir() {
+    local fence_dir lock_dir parent_mount fence_mount
+    fence_dir="$(dirname -- "$CONFIGURE_RUNTIME_GATE_RECORD")" || return 1
+    lock_dir="$(dirname -- "$INSTALL_LOCK_FILE")" || return 1
+    [[ "$fence_dir" == "$lock_dir" && "$fence_dir" == /* && "$fence_dir" != / ]] \
+        || return 1
+    parent_mount="$(findmnt -rn -T "$(dirname -- "$fence_dir")" -o TARGET 2>/dev/null)" \
+        || return 1
+    fence_mount="$(findmnt -rn -T "$fence_dir" -o TARGET 2>/dev/null)" \
+        || return 1
+    [[ -n "$parent_mount" && "$fence_mount" == "$parent_mount" ]] || return 1
+    printf '%s\n' "$fence_dir"
+}
+
+configure_repair_runtime_gate_link_residue() {
+    local fence_dir temp target temp_identity target_identity matched_target=""
+    local nlink matches changed=0
+    local -a temps=() targets=(
+        "$CONFIGURE_RUNTIME_GATE_RECORD"
+        "$CONFIGURE_RUNTIME_GATE_JOB"
+        "$CONFIGURE_RUNTIME_GATE_ACK"
+        "$CONFIGURE_RUNTIME_GATE_RELEASE"
+    )
+    fence_dir="$(configure_runtime_fence_private_dir)" || return 1
+    shopt -s nullglob
+    temps=(
+        "$fence_dir"/.configure-runtime-gate.??????
+        "$fence_dir"/.configure-runtime-gate.job.??????
+        "$fence_dir"/.configure-runtime-gate.ack.??????
+        "$fence_dir"/.configure-runtime-gate.close.??????
+    )
+    shopt -u nullglob
+    for temp in "${temps[@]}"; do
+        [[ -f "$temp" && ! -L "$temp" \
+           && "$(stat -Lc '%u:%g:%a' -- "$temp" 2>/dev/null)" == 0:0:600 ]] \
+            || { err "Unsafe PID1 gate publication residue: $temp"; return 1; }
+        nlink="$(file_nlink "$temp")"
+        [[ "$nlink" == 1 || "$nlink" == 2 ]] \
+            || { err "Unexpected PID1 gate residue link count: $temp"; return 1; }
+        temp_identity="$(stat -Lc '%d:%i' -- "$temp" 2>/dev/null)" || return 1
+        matches=0
+        matched_target=""
+        for target in "${targets[@]}"; do
+            [[ -f "$target" && ! -L "$target" ]] || continue
+            target_identity="$(stat -Lc '%d:%i' -- "$target" 2>/dev/null)" || return 1
+            if [[ "$target_identity" == "$temp_identity" ]]; then
+                matches=$((matches + 1))
+                matched_target="$target"
+            fi
+        done
+        if [[ "$nlink" == 1 ]]; then
+            [[ "$matches" == 0 ]] \
+                || { err "Single-link PID1 gate residue aliases a published target: $temp"; return 1; }
+        else
+            [[ "$matches" == 1 \
+               && "$(stat -Lc '%u:%g:%a:%h' -- "$matched_target" 2>/dev/null)" == 0:0:600:2 ]] \
+                || { err "PID1 gate residue does not match one exact publication target: $temp"; return 1; }
+        fi
+        rm -f -- "$temp" || return 1
+        if [[ -n "$matched_target" ]]; then
+            root_plain_file_metadata_is_safe "$matched_target" 0 600 \
+                || { err "Recovered PID1 gate target metadata is unsafe: $matched_target"; return 1; }
+        fi
+        changed=1
+    done
+    [[ "$changed" == 0 ]] || sync -f "$fence_dir" 2>/dev/null
+}
+
+configure_publish_private_runtime_gate_file() {
+    local path="$1" contents="$2" tmp fence_dir
+    fence_dir="$(configure_runtime_fence_private_dir)" || return 1
+    [[ "$path" == "$fence_dir"/* \
+       && ! -e "$path" && ! -L "$path" ]] || return 1
+    tmp="$(mktemp "${fence_dir}/.configure-runtime-gate.XXXXXX")" || return 1
+    if ! printf '%s' "$contents" > "$tmp" \
+       || ! chown root:root "$tmp" \
+       || ! chmod 0600 "$tmp" \
+       || ! sync -f "$tmp" 2>/dev/null \
+       || ! ln -- "$tmp" "$path"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+    rm -f -- "$tmp" || return 1
+    sync -f "$fence_dir" 2>/dev/null || return 1
+    root_plain_file_metadata_is_safe "$path" 0 600
+}
+
+configure_close_runtime_gate_record() {
+    local token tmp fence_dir
+    configure_runtime_gate_record_is_safe open || return 1
+    token="$CONFIGURE_RUNTIME_GATE_TOKEN"
+    fence_dir="$(configure_runtime_fence_private_dir)" || return 1
+    tmp="$(mktemp "${fence_dir}/.configure-runtime-gate.close.XXXXXX")" || return 1
+    if ! printf 'version=1\ntoken=%s\nunit=%s\nstate=closing\n' \
+            "$token" "$CONFIGURE_RUNTIME_GATE_UNIT" > "$tmp" \
+       || ! chown root:root "$tmp" \
+       || ! chmod 0600 "$tmp" \
+       || ! sync -f "$tmp" 2>/dev/null; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+    configure_runtime_gate_record_is_safe open \
+        && [[ "$CONFIGURE_RUNTIME_GATE_TOKEN" == "$token" ]] \
+        || { rm -f -- "$tmp"; return 1; }
+    mv -Tf -- "$tmp" "$CONFIGURE_RUNTIME_GATE_RECORD" \
+        || { rm -f -- "$tmp"; return 1; }
+    sync -f "$fence_dir" 2>/dev/null || return 1
+    configure_runtime_gate_record_is_safe closing \
+        && [[ "$CONFIGURE_RUNTIME_GATE_TOKEN" == "$token" ]]
+}
+
+configure_runtime_gate_record_is_safe() {
+    local expected_mode="${1:-open}" token fence_dir
+    local -a lines=()
+    [[ "$expected_mode" == open || "$expected_mode" == closing ]] || return 1
+    fence_dir="$(configure_runtime_fence_private_dir)" || return 1
+    root_plain_file_metadata_is_safe "$CONFIGURE_RUNTIME_GATE_RECORD" 0 600 \
+        || return 1
+    mapfile -t lines < "$CONFIGURE_RUNTIME_GATE_RECORD" || return 1
+    if [[ "$expected_mode" == open ]]; then
+        [[ "${#lines[@]}" == 3 \
+           && "${lines[0]}" == version=1 \
+           && "${lines[1]}" == token=* \
+           && "${lines[2]}" == "unit=${CONFIGURE_RUNTIME_GATE_UNIT}" ]] || return 1
+    else
+        [[ "${#lines[@]}" == 4 \
+           && "${lines[0]}" == version=1 \
+           && "${lines[1]}" == token=* \
+           && "${lines[2]}" == "unit=${CONFIGURE_RUNTIME_GATE_UNIT}" \
+           && "${lines[3]}" == state=closing ]] || return 1
+    fi
+    token="${lines[1]#token=}"
+    [[ "$token" =~ ^[0-9a-f]{64}$ ]] || return 1
+    CONFIGURE_RUNTIME_GATE_TOKEN="$token"
+    CONFIGURE_RUNTIME_GATE_RECORD_MODE="$expected_mode"
+}
+
+configure_runtime_gate_job_record_is_safe() {
+    local record_mode="${1:-open}" token job_id job_path method restore_active
+    local -a lines=()
+    configure_runtime_gate_record_is_safe "$record_mode" || return 1
+    root_plain_file_metadata_is_safe "$CONFIGURE_RUNTIME_GATE_JOB" 0 600 \
+        || return 1
+    mapfile -t lines < "$CONFIGURE_RUNTIME_GATE_JOB" || return 1
+    [[ "${#lines[@]}" == 6 \
+       && "${lines[0]}" == version=1 \
+       && "${lines[1]}" == token=* \
+       && "${lines[2]}" == job_id=* \
+       && "${lines[3]}" == job_path=* \
+       && "${lines[4]}" == method=* \
+       && "${lines[5]}" == restore_active=* ]] || return 1
+    token="${lines[1]#token=}"
+    job_id="${lines[2]#job_id=}"
+    job_path="${lines[3]#job_path=}"
+    method="${lines[4]#method=}"
+    restore_active="${lines[5]#restore_active=}"
+    [[ "$token" == "$CONFIGURE_RUNTIME_GATE_TOKEN" \
+       && ( "$restore_active" == 0 || "$restore_active" == 1 ) ]] || return 1
+    if [[ "$job_id" == 0 ]]; then
+        [[ "$job_path" == / && "$method" == none && "$restore_active" == 0 ]] \
+            || return 1
+    else
+        [[ "$job_id" =~ ^[1-9][0-9]*$ \
+           && "$job_path" == "/org/freedesktop/systemd1/job/${job_id}" \
+           && "$method" == TryRestartUnit ]] || return 1
+    fi
+    CONFIGURE_RUNTIME_GATE_JOB_ID="$job_id"
+    CONFIGURE_RUNTIME_GATE_JOB_PATH="$job_path"
+    CONFIGURE_RUNTIME_GATE_JOB_METHOD="$method"
+    CONFIGURE_RUNTIME_FENCE_RESTORE_ACTIVE="$restore_active"
+}
+
+configure_runtime_gate_ack_is_safe() {
+    local record_mode="${1:-open}" token pid invocation
+    local -a lines=()
+    configure_runtime_gate_record_is_safe "$record_mode" || return 1
+    root_plain_file_metadata_is_safe "$CONFIGURE_RUNTIME_GATE_ACK" 0 600 \
+        || return 1
+    mapfile -t lines < "$CONFIGURE_RUNTIME_GATE_ACK" || return 1
+    [[ "${#lines[@]}" == 4 \
+       && "${lines[0]}" == version=1 \
+       && "${lines[1]}" == token=* \
+       && "${lines[2]}" == pid=* \
+       && "${lines[3]}" == invocation_id=* ]] || return 1
+    token="${lines[1]#token=}"
+    pid="${lines[2]#pid=}"
+    invocation="${lines[3]#invocation_id=}"
+    [[ "$token" == "$CONFIGURE_RUNTIME_GATE_TOKEN" \
+       && "$pid" =~ ^[1-9][0-9]*$ \
+       && "$invocation" =~ ^[0-9a-f]{32}$ ]] || return 1
+    CONFIGURE_RUNTIME_GATE_ACK_PID="$pid"
+    CONFIGURE_RUNTIME_GATE_INVOCATION_ID="$invocation"
+}
+
+configure_runtime_gate_release_is_safe() {
+    local record_mode="${1:-open}" token
+    local -a lines=()
+    configure_runtime_gate_record_is_safe "$record_mode" || return 1
+    root_plain_file_metadata_is_safe "$CONFIGURE_RUNTIME_GATE_RELEASE" 0 600 \
+        || return 1
+    mapfile -t lines < "$CONFIGURE_RUNTIME_GATE_RELEASE" || return 1
+    [[ "${#lines[@]}" == 2 \
+       && "${lines[0]}" == version=1 \
+       && "${lines[1]}" == token=* ]] || return 1
+    token="${lines[1]#token=}"
+    [[ "$token" == "$CONFIGURE_RUNTIME_GATE_TOKEN" ]]
+}
+
+configure_replace_runtime_gate_job_record() {
+    local job_id="$1" job_path="$2" method="$3" restore_active="$4"
+    local tmp fence_dir
+    configure_runtime_gate_job_record_is_safe || return 1
+    fence_dir="$(configure_runtime_fence_private_dir)" || return 1
+    tmp="$(mktemp "${fence_dir}/.configure-runtime-gate.job.XXXXXX")" || return 1
+    if ! printf 'version=1\ntoken=%s\njob_id=%s\njob_path=%s\nmethod=%s\nrestore_active=%s\n' \
+            "$CONFIGURE_RUNTIME_GATE_TOKEN" "$job_id" "$job_path" "$method" "$restore_active" > "$tmp" \
+       || ! chown root:root "$tmp" \
+       || ! chmod 0600 "$tmp" \
+       || ! sync -f "$tmp" 2>/dev/null; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+    configure_runtime_gate_job_record_is_safe \
+        || { rm -f -- "$tmp"; return 1; }
+    mv -Tf -- "$tmp" "$CONFIGURE_RUNTIME_GATE_JOB" \
+        || { rm -f -- "$tmp"; return 1; }
+    sync -f "$fence_dir" 2>/dev/null || return 1
+    configure_runtime_gate_job_record_is_safe \
+        && [[ "$CONFIGURE_RUNTIME_GATE_JOB_ID" == "$job_id" \
+           && "$CONFIGURE_RUNTIME_GATE_JOB_PATH" == "$job_path" \
+           && "$CONFIGURE_RUNTIME_GATE_JOB_METHOD" == "$method" \
+           && "$CONFIGURE_RUNTIME_FENCE_RESTORE_ACTIVE" == "$restore_active" ]]
+}
+
+configure_update_runtime_fence_restore_entitlement() {
+    local value="$1"
+    [[ "$value" == 0 || "$value" == 1 ]] || return 1
+    configure_runtime_gate_job_record_is_safe || return 1
+    [[ "$CONFIGURE_RUNTIME_GATE_JOB_ID" != 0 || "$value" == 0 ]] || return 1
+    [[ "$CONFIGURE_RUNTIME_FENCE_RESTORE_ACTIVE" == "$value" ]] && return 0
+    configure_replace_runtime_gate_job_record \
+        "$CONFIGURE_RUNTIME_GATE_JOB_ID" "$CONFIGURE_RUNTIME_GATE_JOB_PATH" \
+        "$CONFIGURE_RUNTIME_GATE_JOB_METHOD" "$value"
+}
+
+configure_systemd_job_is_exact() {
+    local id_property unit_name unit_path unit_job_id unit_job_path
+    local type_property state_property lookup unit_property
+    configure_runtime_gate_job_record_is_safe || return 1
+    [[ "$CONFIGURE_RUNTIME_GATE_JOB_ID" != 0 ]] || return 1
+    lookup="$(busctl --system --json=short call org.freedesktop.systemd1 \
+        /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager GetJob \
+        u "$CONFIGURE_RUNTIME_GATE_JOB_ID" 2>/dev/null \
+        | jq -er 'select(.type == "o") | .data | select(type == "array" and length == 1) | .[0]')" \
+        || return 1
+    [[ "$lookup" == "$CONFIGURE_RUNTIME_GATE_JOB_PATH" ]] || return 1
+    id_property="$(busctl --system --json=short get-property org.freedesktop.systemd1 \
+        "$CONFIGURE_RUNTIME_GATE_JOB_PATH" org.freedesktop.systemd1.Job Id 2>/dev/null \
+        | jq -er 'select(.type == "u") | .data | select(type == "number") | tostring')" \
+        || return 1
+    unit_property="$(busctl --system --json=short get-property org.freedesktop.systemd1 \
+        "$CONFIGURE_RUNTIME_GATE_JOB_PATH" org.freedesktop.systemd1.Job Unit 2>/dev/null \
+        | jq -cer 'select(.type == "(so)") | .data | select(type == "array" and length == 2)')" \
+        || return 1
+    unit_name="$(jq -er '.[0] | select(type == "string")' <<<"$unit_property")" || return 1
+    unit_path="$(jq -er '.[1] | select(type == "string" and startswith("/org/freedesktop/systemd1/unit/"))' \
+        <<<"$unit_property")" || return 1
+    unit_property="$(busctl --system --json=short get-property org.freedesktop.systemd1 \
+        "$unit_path" org.freedesktop.systemd1.Unit Job 2>/dev/null \
+        | jq -cer 'select(.type == "(uo)") | .data | select(type == "array" and length == 2)')" \
+        || return 1
+    unit_job_id="$(jq -er '.[0] | select(type == "number") | tostring' <<<"$unit_property")" \
+        || return 1
+    unit_job_path="$(jq -er '.[1] | select(type == "string")' <<<"$unit_property")" \
+        || return 1
+    type_property="$(busctl --system --json=short get-property org.freedesktop.systemd1 \
+        "$CONFIGURE_RUNTIME_GATE_JOB_PATH" org.freedesktop.systemd1.Job JobType 2>/dev/null \
+        | jq -er 'select(.type == "s") | .data | select(type == "string")')" \
+        || return 1
+    state_property="$(busctl --system --json=short get-property org.freedesktop.systemd1 \
+        "$CONFIGURE_RUNTIME_GATE_JOB_PATH" org.freedesktop.systemd1.Job State 2>/dev/null \
+        | jq -er 'select(.type == "s") | .data | select(type == "string")')" \
+        || return 1
+    [[ "$id_property" == "$CONFIGURE_RUNTIME_GATE_JOB_ID" \
+       && "$unit_name" == "$CONFIGURE_RUNTIME_GATE_UNIT" \
+       && "$unit_job_id" == "$CONFIGURE_RUNTIME_GATE_JOB_ID" \
+       && "$unit_job_path" == "$CONFIGURE_RUNTIME_GATE_JOB_PATH" \
+       && ( "$type_property" == try-restart \
+            || "$type_property" == restart \
+            || "$type_property" == start ) \
+       && ( "$state_property" == waiting || "$state_property" == running ) ]]
+}
+
+configure_runtime_gate_ack_matches_control_process() {
+    local invocation
+    configure_systemd_job_is_exact || return 1
+    configure_runtime_gate_ack_is_safe || return 1
+    configure_read_mihomo_runtime_state || return 1
+    invocation="$(systemctl show -p InvocationID --value \
+        5gpn-mihomo.service 2>/dev/null)" || return 1
+    [[ "$CONFIGURE_MIHOMO_ACTIVE_STATE" == activating \
+       && "$CONFIGURE_MIHOMO_SUB_STATE" == start-pre \
+       && "$CONFIGURE_MIHOMO_CONTROL_PID" == "$CONFIGURE_RUNTIME_GATE_ACK_PID" \
+       && "$invocation" == "$CONFIGURE_RUNTIME_GATE_INVOCATION_ID" \
+       && -d "/proc/${CONFIGURE_RUNTIME_GATE_ACK_PID}" \
+       && "$(stat -Lc '%u' -- "/proc/${CONFIGURE_RUNTIME_GATE_ACK_PID}" 2>/dev/null)" == 0 ]]
+}
+
+configure_runtime_start_fence_is_active() {
+    configure_runtime_gate_job_record_is_safe || return 1
+    [[ ! -e "$CONFIGURE_RUNTIME_GATE_RELEASE" \
+       && ! -L "$CONFIGURE_RUNTIME_GATE_RELEASE" ]] || return 1
+    configure_read_mihomo_runtime_state || return 1
+    case "$CONFIGURE_MIHOMO_ACTIVE_STATE:$CONFIGURE_MIHOMO_SUB_STATE" in
+        inactive:dead|inactive:*) return 0 ;;
+        activating:start-pre) configure_runtime_gate_ack_matches_control_process ;;
+        *) return 1 ;;
+    esac
+}
+
+configure_assert_runtime_gate_quiescent() {
+    configure_runtime_start_fence_is_active \
+        || { err "The PID1-owned runtime start gate is not active."; return 1; }
+    wait_managed_account_quiescent "$FIVEGPN_SERVICE_USER" \
+        || { err "A fivegpn process survived the PID1 restart stop phase."; return 1; }
+}
+
+configure_publish_runtime_gate_release() {
+    configure_runtime_gate_job_record_is_safe || return 1
+    [[ ! -e "$CONFIGURE_RUNTIME_GATE_RELEASE" \
+       && ! -L "$CONFIGURE_RUNTIME_GATE_RELEASE" ]] || return 1
+    configure_publish_private_runtime_gate_file "$CONFIGURE_RUNTIME_GATE_RELEASE" \
+        "$(printf 'version=1\ntoken=%s\n' "$CONFIGURE_RUNTIME_GATE_TOKEN")" \
+        && configure_runtime_gate_release_is_safe
+}
+
+configure_delete_closed_runtime_gate_state() {
+    local require_inactive="$1" path fence_dir
+    [[ "$require_inactive" == 0 || "$require_inactive" == 1 ]] || return 1
+    fence_dir="$(configure_runtime_fence_private_dir)" || return 1
+    configure_runtime_gate_record_is_safe closing || return 1
+    if [[ -e "$CONFIGURE_RUNTIME_GATE_JOB" || -L "$CONFIGURE_RUNTIME_GATE_JOB" ]]; then
+        configure_runtime_gate_job_record_is_safe closing || return 1
+    fi
+    if [[ -e "$CONFIGURE_RUNTIME_GATE_RELEASE" || -L "$CONFIGURE_RUNTIME_GATE_RELEASE" ]]; then
+        configure_runtime_gate_release_is_safe closing || return 1
+    fi
+    if [[ -e "$CONFIGURE_RUNTIME_GATE_ACK" || -L "$CONFIGURE_RUNTIME_GATE_ACK" ]]; then
+        configure_runtime_gate_ack_is_safe closing || return 1
+    fi
+    if [[ "$require_inactive" == 1 ]]; then
+        configure_force_runtime_inactive_for_gate || return 1
+    else
+        configure_unit_has_no_job || return 1
+    fi
+    for path in "$CONFIGURE_RUNTIME_GATE_RELEASE" "$CONFIGURE_RUNTIME_GATE_ACK" \
+                "$CONFIGURE_RUNTIME_GATE_JOB"; do
+        [[ ! -e "$path" && ! -L "$path" ]] || rm -f -- "$path" || return 1
+    done
+    if [[ "$require_inactive" == 1 ]]; then
+        configure_force_runtime_inactive_for_gate || return 1
+    else
+        configure_unit_has_no_job || return 1
+    fi
+    rm -f -- "$CONFIGURE_RUNTIME_GATE_RECORD" || return 1
+    sync -f "$fence_dir" 2>/dev/null || return 1
+    [[ ! -e "$CONFIGURE_RUNTIME_GATE_RECORD" && ! -L "$CONFIGURE_RUNTIME_GATE_RECORD" \
+       && ! -e "$CONFIGURE_RUNTIME_GATE_JOB" && ! -L "$CONFIGURE_RUNTIME_GATE_JOB" \
+       && ! -e "$CONFIGURE_RUNTIME_GATE_ACK" && ! -L "$CONFIGURE_RUNTIME_GATE_ACK" \
+       && ! -e "$CONFIGURE_RUNTIME_GATE_RELEASE" && ! -L "$CONFIGURE_RUNTIME_GATE_RELEASE" ]]
+}
+
+configure_remove_runtime_gate_state() {
+    local require_inactive="${1:-0}"
+    [[ "$require_inactive" == 0 || "$require_inactive" == 1 ]] || return 1
+    configure_repair_runtime_gate_link_residue || return 1
+    configure_runtime_gate_job_record_is_safe open || return 1
+    if [[ -e "$CONFIGURE_RUNTIME_GATE_RELEASE" || -L "$CONFIGURE_RUNTIME_GATE_RELEASE" ]]; then
+        configure_runtime_gate_release_is_safe open || return 1
+    fi
+    if [[ -e "$CONFIGURE_RUNTIME_GATE_ACK" || -L "$CONFIGURE_RUNTIME_GATE_ACK" ]]; then
+        configure_runtime_gate_ack_is_safe open || return 1
+    fi
+    configure_close_runtime_gate_record || return 1
+    configure_delete_closed_runtime_gate_state "$require_inactive"
+}
+
+configure_remove_unbound_runtime_gate_state() {
+    local require_inactive="${1:-0}"
+    [[ "$require_inactive" == 0 || "$require_inactive" == 1 ]] || return 1
+    configure_repair_runtime_gate_link_residue || return 1
+    configure_runtime_gate_record_is_safe open || return 1
+    [[ ! -e "$CONFIGURE_RUNTIME_GATE_JOB" \
+       && ! -L "$CONFIGURE_RUNTIME_GATE_JOB" ]] || return 1
+    if [[ -e "$CONFIGURE_RUNTIME_GATE_RELEASE" || -L "$CONFIGURE_RUNTIME_GATE_RELEASE" ]]; then
+        configure_runtime_gate_release_is_safe open || return 1
+    fi
+    if [[ -e "$CONFIGURE_RUNTIME_GATE_ACK" || -L "$CONFIGURE_RUNTIME_GATE_ACK" ]]; then
+        configure_runtime_gate_ack_is_safe open || return 1
+    fi
+    configure_close_runtime_gate_record || return 1
+    configure_delete_closed_runtime_gate_state "$require_inactive"
+}
+
+configure_unit_has_no_job() {
+    local unit_path job
+    unit_path="$(busctl --system --json=short call org.freedesktop.systemd1 \
+        /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager GetUnit \
+        s "$CONFIGURE_RUNTIME_GATE_UNIT" 2>/dev/null \
+        | jq -er 'select(.type == "o") | .data | select(type == "array" and length == 1) | .[0]')" \
+        || return 1
+    [[ "$unit_path" == /org/freedesktop/systemd1/unit/* ]] || return 1
+    job="$(busctl --system --json=short get-property org.freedesktop.systemd1 \
+        "$unit_path" org.freedesktop.systemd1.Unit Job 2>/dev/null \
+        | jq -cer 'select(.type == "(uo)") | .data | select(type == "array" and length == 2)')" \
+        || return 1
+    jq -e '.[0] == 0 and .[1] == "/"' <<<"$job" >/dev/null
+}
+
+configure_force_runtime_inactive_for_gate() {
+    local rc=0
+    systemctl --job-mode=replace stop 5gpn-mihomo.service >/dev/null 2>&1 || rc=1
+    configure_read_mihomo_runtime_state || rc=1
+    [[ "$CONFIGURE_MIHOMO_ACTIVE_STATE" == inactive ]] || rc=1
+    configure_unit_has_no_job || rc=1
+    wait_managed_account_quiescent "$FIVEGPN_SERVICE_USER" || rc=1
+    configure_read_mihomo_runtime_state || rc=1
+    [[ "$CONFIGURE_MIHOMO_ACTIVE_STATE" == inactive ]] || rc=1
+    configure_unit_has_no_job || rc=1
+    [[ "$rc" == 0 ]]
+}
+
+configure_stop_runtime_recovered_from_stale_fence() {
+    [[ "${CONFIGURE_RUNTIME_RECOVERED_FROM_STALE_FENCE:-0}" == 1 ]] \
+        || return 0
+    CONFIGURE_RUNTIME_RECOVERED_FROM_STALE_FENCE=0
+    configure_force_runtime_inactive_for_gate \
+        || { err "Could not stop mihomo after retained-gate recovery validation failed."; return 1; }
+    warn "Stopped the Core restored from a retained configure gate because the current deployment failed validation."
+}
+
+recover_stale_configure_runtime_fence() {
+    local path runtime_rc=0
+    ensure_private_lock_dir || return 1
+    configure_runtime_fence_private_dir >/dev/null || return 1
+    configure_repair_runtime_gate_link_residue || return 1
+    if [[ ! -e "$CONFIGURE_RUNTIME_GATE_RECORD" \
+       && ! -L "$CONFIGURE_RUNTIME_GATE_RECORD" ]]; then
+        for path in "$CONFIGURE_RUNTIME_GATE_JOB" "$CONFIGURE_RUNTIME_GATE_ACK" \
+                    "$CONFIGURE_RUNTIME_GATE_RELEASE"; do
+            [[ ! -e "$path" && ! -L "$path" ]] \
+                || { err "Orphan PID1 runtime-gate state exists without its ownership record: $path"; return 1; }
+        done
+        return 0
+    fi
+    if configure_runtime_gate_record_is_safe closing; then
+        configure_delete_closed_runtime_gate_state 1 \
+            || { err "Could not finish a retained closing PID1 gate transaction."; return 1; }
+        warn "Finished cleanup for a retained closing PID1 gate; mihomo remains stopped."
+        return 0
+    fi
+    configure_runtime_gate_record_is_safe \
+        || { err "The retained configure runtime-gate record is unsafe."; return 1; }
+    if ! configure_runtime_gate_job_record_is_safe; then
+        err "The retained configure gate has no safe PID1 job binding; keeping mihomo inactive."
+        configure_force_runtime_inactive_for_gate || return 1
+        configure_remove_unbound_runtime_gate_state 1 || return 1
+        return 0
+    fi
+    if [[ -e "$CONFIGURE_RUNTIME_GATE_RELEASE" \
+       || -L "$CONFIGURE_RUNTIME_GATE_RELEASE" ]]; then
+        configure_runtime_gate_release_is_safe \
+            || { err "The retained PID1 gate release record is unsafe."; return 1; }
+        configure_read_mihomo_runtime_state || return 1
+        case "$CONFIGURE_MIHOMO_ACTIVE_STATE" in
+            active|activating)
+                configure_validate_runtime_before_start \
+                    || { if configure_force_runtime_inactive_for_gate; then \
+                             configure_remove_runtime_gate_state 1 || true; \
+                         fi; return 1; }
+                if wait_service_ready 5gpn-mihomo.service; then
+                    CONFIGURE_RUNTIME_RECOVERED_FROM_STALE_FENCE=1
+                    configure_remove_runtime_gate_state || return 1
+                    warn "Completed cleanup for an already released configure restart job."
+                    return 0
+                fi
+                configure_read_mihomo_runtime_state || return 1
+                if [[ "$CONFIGURE_MIHOMO_ACTIVE_STATE" == inactive ]] \
+                   && ! configure_systemd_job_is_exact; then
+                    configure_remove_runtime_gate_state 1 || return 1
+                    warn "An operator stop won after the configure gate was released; preserving that stop."
+                    return 0
+                fi
+                if configure_force_runtime_inactive_for_gate; then
+                    configure_remove_runtime_gate_state 1 || true
+                fi
+                return 1
+                ;;
+            inactive)
+                configure_remove_runtime_gate_state 1 || return 1
+                return 0
+                ;;
+            failed|deactivating)
+                configure_force_runtime_inactive_for_gate || return 1
+                configure_remove_runtime_gate_state 1 || return 1
+                return 0
+                ;;
+            *)
+                err "The retained released gate found an unsupported mihomo state: $CONFIGURE_MIHOMO_ACTIVE_STATE"
+                return 1
+                ;;
+        esac
+    fi
+    if [[ "$CONFIGURE_RUNTIME_FENCE_RESTORE_ACTIVE" == 1 ]] \
+       && configure_runtime_gate_ack_matches_control_process; then
+        if ! configure_validate_runtime_before_start; then
+            configure_update_runtime_fence_restore_entitlement 0 || true
+            if configure_force_runtime_inactive_for_gate; then
+                configure_remove_runtime_gate_state 1 || true
+            fi
+            err "Refusing to release a retained PID1 job against invalid current runtime inputs."
+            return 1
+        fi
+        configure_update_runtime_fence_restore_entitlement 0 || return 1
+        CONFIGURE_RUNTIME_RECOVERED_FROM_STALE_FENCE=1
+        configure_publish_runtime_gate_release || return 1
+        if ! wait_service_ready 5gpn-mihomo.service; then
+            configure_read_mihomo_runtime_state || return 1
+            if [[ "$CONFIGURE_MIHOMO_ACTIVE_STATE" == inactive ]] \
+               && ! configure_systemd_job_is_exact; then
+                CONFIGURE_RUNTIME_RECOVERED_FROM_STALE_FENCE=0
+                configure_remove_runtime_gate_state 1 || return 1
+                warn "An operator stop canceled the retained PID1 restart job; preserving that stop."
+                return 0
+            fi
+            configure_stop_runtime_recovered_from_stale_fence || true
+            err "Mihomo did not become ready after retained gate recovery."
+            return 1
+        fi
+        configure_remove_runtime_gate_state || return 1
+        return 0
+    fi
+    configure_force_runtime_inactive_for_gate || runtime_rc=$?
+    [[ "$runtime_rc" == 0 ]] \
+        || { err "Could not retain inactive state while cleaning a stale configure gate; the gate state was retained."; return 1; }
+    configure_remove_runtime_gate_state 1 || return 1
+    warn "Discarded a retained configure gate because its original blocked PID1 job no longer exists. Mihomo remains stopped."
+}
+
+configure_install_runtime_start_fence() {
+    local token record_contents job_contents
+    recover_stale_configure_runtime_fence || return 1
+    token="$(openssl rand -hex 32 2>/dev/null)" || return 1
+    [[ "$token" =~ ^[0-9a-f]{64}$ ]] || return 1
+    record_contents="$(printf 'version=1\ntoken=%s\nunit=%s\n' \
+        "$token" "$CONFIGURE_RUNTIME_GATE_UNIT")"
+    job_contents="$(printf 'version=1\ntoken=%s\njob_id=0\njob_path=/\nmethod=none\nrestore_active=0\n' \
+        "$token")"
+    CONFIGURE_RUNTIME_FENCE_ATTEMPTED=1
+    configure_publish_private_runtime_gate_file "$CONFIGURE_RUNTIME_GATE_RECORD" \
+        "${record_contents}"$'\n' \
+        || { err "Could not publish the PID1 runtime-gate ownership record."; return 1; }
+    configure_publish_private_runtime_gate_file "$CONFIGURE_RUNTIME_GATE_JOB" \
+        "${job_contents}"$'\n' \
+        || { err "Could not publish the initial PID1 runtime-gate job record."; return 1; }
+    configure_runtime_gate_job_record_is_safe \
+        || { err "The PID1 runtime gate failed its post-publication validation."; return 1; }
+}
+
+configure_release_runtime_start_fence() {
+    local require_inactive="${1:-0}"
+    [[ "$require_inactive" == 0 || "$require_inactive" == 1 ]] || return 1
+    [[ "${CONFIGURE_RUNTIME_FENCE_ATTEMPTED:-0}" == 1 \
+       || "${CONFIGURE_RUNTIME_FENCED_BY_US:-0}" == 1 ]] || return 0
+    configure_repair_runtime_gate_link_residue || return 1
+    if [[ ! -e "$CONFIGURE_RUNTIME_GATE_RECORD" \
+       && ! -L "$CONFIGURE_RUNTIME_GATE_RECORD" ]]; then
+        [[ ! -e "$CONFIGURE_RUNTIME_GATE_JOB" && ! -L "$CONFIGURE_RUNTIME_GATE_JOB" \
+           && ! -e "$CONFIGURE_RUNTIME_GATE_ACK" && ! -L "$CONFIGURE_RUNTIME_GATE_ACK" \
+           && ! -e "$CONFIGURE_RUNTIME_GATE_RELEASE" && ! -L "$CONFIGURE_RUNTIME_GATE_RELEASE" ]] \
+            || return 1
+    elif [[ ! -e "$CONFIGURE_RUNTIME_GATE_JOB" \
+         && ! -L "$CONFIGURE_RUNTIME_GATE_JOB" ]]; then
+        configure_remove_unbound_runtime_gate_state "$require_inactive" || return 1
+    else
+        configure_remove_runtime_gate_state "$require_inactive" || return 1
+    fi
+    CONFIGURE_RUNTIME_FENCE_ATTEMPTED=0
+    CONFIGURE_RUNTIME_FENCED_BY_US=0
+}
+
+configure_enqueue_pid1_try_restart() {
+    local output job_path job_id
+    output="$(busctl --system --json=short call org.freedesktop.systemd1 \
+        /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager \
+        TryRestartUnit ss "$CONFIGURE_RUNTIME_GATE_UNIT" fail 2>/dev/null)" \
+        || return 1
+    job_path="$(jq -er '
+        select(.type == "o")
+        | .data
+        | select(type == "array" and length == 1)
+        | .[0]
+        | select(type == "string" and test("^/org/freedesktop/systemd1/job/[1-9][0-9]*$"))
+    ' <<<"$output")" || return 1
+    job_id="${job_path##*/}"
+    configure_replace_runtime_gate_job_record \
+        "$job_id" "$job_path" TryRestartUnit 1 || return 1
+    CONFIGURE_RUNTIME_QUIESCED_BY_US=1
+}
+
+configure_wait_for_pid1_restart_gate() {
+    local deadline rc=0
+    deadline=$((SECONDS + CONFIGURE_RUNTIME_GATE_QUIESCE_TIMEOUT))
+    while (( SECONDS < deadline )); do
+        if configure_runtime_gate_ack_matches_control_process; then
+            CONFIGURE_RUNTIME_FENCED_BY_US=1
+            return 0
+        fi
+        if ! configure_systemd_job_is_exact; then
+            configure_read_mihomo_runtime_state || return 1
+            case "$CONFIGURE_MIHOMO_ACTIVE_STATE" in
+                inactive)
+                    configure_update_runtime_fence_restore_entitlement 0 || return 1
+                    CONFIGURE_RUNTIME_WAS_ACTIVE=0
+                    CONFIGURE_RUNTIME_QUIESCED_BY_US=0
+                    return 2
+                    ;;
+                failed)
+                    configure_force_runtime_inactive_for_gate || return 1
+                    configure_update_runtime_fence_restore_entitlement 0 || return 1
+                    CONFIGURE_RUNTIME_WAS_ACTIVE=0
+                    CONFIGURE_RUNTIME_QUIESCED_BY_US=0
+                    err "The PID1 restart job failed before reaching the acknowledged gate."
+                    return 1
+                    ;;
+            esac
+        fi
+        sleep 0.1
+    done
+    err "Timed out waiting for PID 1 to reach the blocked mihomo ExecStartPre gate."
+    return 1
+}
+
+configure_wait_for_runtime_inactive_behind_gate() {
+    local deadline
+    deadline=$((SECONDS + CONFIGURE_RUNTIME_GATE_QUIESCE_TIMEOUT))
+    while (( SECONDS < deadline )); do
+        configure_read_mihomo_runtime_state || return 1
+        case "$CONFIGURE_MIHOMO_ACTIVE_STATE" in
+            inactive) return 0 ;;
+            failed)
+                configure_force_runtime_inactive_for_gate || return 1
+                err "The conflicting PID1 transaction left mihomo failed."
+                return 1
+                ;;
+            active|activating|deactivating) ;;
+            *) return 1 ;;
+        esac
+        sleep 0.1
+    done
+    return 1
+}
+
+configure_quiesce_runtime_for_gateway() {
+    local should_restart=0 gate_rc=0
+    CONFIGURE_RUNTIME_QUIESCED_BY_US=0
+    CONFIGURE_RUNTIME_FENCE_ATTEMPTED=0
+    CONFIGURE_RUNTIME_FENCED_BY_US=0
+    configure_main_unit_restart_gate_is_current || return 1
+    read_exact_systemd_unit_state 5gpn-mihomo.service \
+        || { err "Could not inspect mihomo at the gateway publication boundary."; return 1; }
+    [[ "$SYSTEMD_UNIT_LOAD_STATE" == loaded ]] \
+        || { err "The managed mihomo unit disappeared before gateway publication."; return 1; }
+    case "${CONFIGURE_RUNTIME_WAS_ACTIVE:-0}:${SYSTEMD_UNIT_ACTIVE_STATE}" in
+        1:active) should_restart=1 ;;
+        1:inactive)
+            CONFIGURE_RUNTIME_WAS_ACTIVE=0
+            ;;
+        0:inactive) ;;
+        0:active)
+            err "Mihomo was started outside configure after the initial inactive snapshot; refusing the gateway write."
+            return 1
+            ;;
+        *:failed)
+            err "Mihomo is failed at the gateway publication boundary; refusing the gateway write."
+            return 1
+            ;;
+        *)
+            err "Mihomo is transitioning (${SYSTEMD_UNIT_ACTIVE_STATE}); refusing the gateway write."
+            return 1
+            ;;
+    esac
+
+    configure_install_runtime_start_fence || return 1
+    if [[ "$should_restart" == 1 ]]; then
+        info "Asking PID 1 for one fail-on-conflict try-restart; its start phase will remain gated during publication."
+        if ! configure_enqueue_pid1_try_restart; then
+            configure_wait_for_runtime_inactive_behind_gate \
+                || { err "Could not enqueue the PID1-owned try-restart job while mihomo remained active."; return 1; }
+            CONFIGURE_RUNTIME_WAS_ACTIVE=0
+        else
+            configure_wait_for_pid1_restart_gate || gate_rc=$?
+            [[ "$gate_rc" == 0 || "$gate_rc" == 2 ]] || return "$gate_rc"
+        fi
+    fi
+    configure_assert_runtime_gate_quiescent
+}
+
+configure_disarm_runtime_restore_for_coordinate_commit() {
+    [[ "${CONFIGURE_RUNTIME_QUIESCED_BY_US:-0}" == 1 ]] || return 0
+    configure_update_runtime_fence_restore_entitlement 0 || return 1
+    CONFIGURE_RUNTIME_RESTORE_DISARMED=1
+}
+
+configure_rearm_runtime_restore_after_failed_commit() {
+    [[ "${CONFIGURE_RUNTIME_RESTORE_DISARMED:-0}" == 1 \
+       && "${CONFIGURE_RUNTIME_QUIESCED_BY_US:-0}" == 1 ]] || return 0
+    configure_visible_coordinate_was_committed && return 0
+    configure_systemd_job_is_exact || return 0
+    configure_update_runtime_fence_restore_entitlement 1 || return 1
+    CONFIGURE_RUNTIME_RESTORE_DISARMED=0
+}
+
+configure_release_quiesced_runtime_without_start() {
+    local rc=0
+    configure_update_runtime_fence_restore_entitlement 0 || rc=1
+    configure_release_runtime_start_fence 1 \
+        || { err "Could not prove mihomo inactive; retaining the PID1 gate state."; return 1; }
+    CONFIGURE_RUNTIME_QUIESCED_BY_US=0
+    CONFIGURE_RUNTIME_RESTORE_DISARMED=0
+    [[ "$rc" == 0 ]]
+}
+
+configure_stop_runtime_after_visible_failure() {
+    local rc=0
+    if [[ "${CONFIGURE_RUNTIME_QUIESCED_BY_US:-0}" == 1 \
+       || "${CONFIGURE_RUNTIME_FENCE_ATTEMPTED:-0}" == 1 \
+       || "${CONFIGURE_RUNTIME_FENCED_BY_US:-0}" == 1 ]]; then
+        configure_release_quiesced_runtime_without_start || rc=1
+    else
+        configure_force_runtime_inactive_for_gate || rc=1
+    fi
+    [[ "$rc" == 0 ]]
+}
+
+configure_validate_runtime_before_start() {
+    local expected_gateway="${GATEWAY_IP:-}"
+    configure_main_unit_restart_gate_is_current || return 1
+    if [[ "${CONFIGURE_GATEWAY_CHANGED:-0}" == 1 \
+       && "${CONFIGURE_DNS_GATEWAY_COMMIT_STATE:-}" != committed* ]]; then
+        expected_gateway="${CONFIGURE_EXPECTED_OLD_GATEWAY:-}"
+    fi
+    configure_revalidate_selected_operator_config || return 1
+    assert_loaded_persisted_dns_env_revision 1 || return 1
+    validate_existing_runtime_documents "$MIHOMO_BIN" "installed Core" || return 1
+    [[ -n "$expected_gateway" ]] \
+        && jq -e --arg gateway "$expected_gateway" '.gateway == $gateway' \
+            "${FIVEGPN_STATE_DIR}/dns.json" >/dev/null \
+        || { err "The DNS gateway failed the final pre-start validation."; return 1; }
+    load_ui_generation_helper \
+        && _ui_generation_current_only_is_safe "$UI_DIR" \
+        || { err "The current UI/profile generation failed the final pre-start validation."; return 1; }
+}
+
+configure_start_quiesced_runtime() {
+    local should_start="${CONFIGURE_RUNTIME_QUIESCED_BY_US:-0}"
+    local fence_rc=0 start_rc=0 wait_rc=0 cleanup_inactive=0
+    if [[ "$should_start" == 1 ]]; then
+        if ! configure_validate_runtime_before_start; then
+            configure_update_runtime_fence_restore_entitlement 0 || true
+            if configure_release_runtime_start_fence 1; then
+                CONFIGURE_RUNTIME_QUIESCED_BY_US=0
+            fi
+            err "Refusing to restore mihomo from a runtime generation that failed final validation."
+            return 1
+        fi
+        configure_update_runtime_fence_restore_entitlement 0 || return 1
+        if ! configure_runtime_gate_ack_matches_control_process; then
+            configure_read_mihomo_runtime_state || start_rc=1
+            if [[ "$start_rc" == 0 && "$CONFIGURE_MIHOMO_ACTIVE_STATE" == inactive ]]; then
+                warn "An operator stop canceled the PID1 restart job; preserving that stop."
+                CONFIGURE_RUNTIME_WAS_ACTIVE=0
+                should_start=0
+                cleanup_inactive=1
+            else
+                err "The original PID1 restart job disappeared before gate release."
+                start_rc=1
+            fi
+        else
+            configure_publish_runtime_gate_release || start_rc=1
+        fi
+        if [[ "$start_rc" == 0 && "$should_start" == 1 ]]; then
+            wait_service_ready 5gpn-mihomo.service || wait_rc=$?
+            if [[ "$wait_rc" != 0 ]]; then
+                configure_read_mihomo_runtime_state || start_rc=1
+                if [[ "$start_rc" == 0 \
+                   && "$CONFIGURE_MIHOMO_ACTIVE_STATE" == inactive ]] \
+                   && ! configure_systemd_job_is_exact; then
+                    warn "An operator stop canceled the released PID1 restart job; preserving that stop."
+                    CONFIGURE_RUNTIME_WAS_ACTIVE=0
+                    should_start=0
+                    cleanup_inactive=1
+                else
+                    err "Mihomo did not become ready after the PID1 restart gate was released."
+                    start_rc=1
+                fi
+            fi
+        fi
+        if [[ "$start_rc" == 0 \
+           && "$should_start" == 1 \
+           && "${CONFIGURE_NODE_LOCK_HELD:-0}" == 1 \
+           && -n "${CONFIGURE_OPERATOR_CONFIG_STATE:-}" ]] \
+           && ! configure_assert_operator_config_revision; then
+            err "Operator YAML changed while mihomo was starting; stopping the runtime."
+            start_rc=1
+        fi
+    else
+        configure_read_mihomo_runtime_state || start_rc=1
+        if [[ "$start_rc" == 0 ]]; then
+            case "$CONFIGURE_MIHOMO_ACTIVE_STATE" in
+                inactive) cleanup_inactive=1 ;;
+                active)
+                    [[ "${CONFIGURE_RUNTIME_WAS_ACTIVE:-0}" == 1 ]] \
+                        && configure_unit_has_no_job \
+                        || start_rc=1
+                    ;;
+                *) start_rc=1 ;;
+            esac
+        fi
+    fi
+    if [[ "$start_rc" != 0 ]]; then
+        configure_force_runtime_inactive_for_gate || return 1
+        cleanup_inactive=1
+    fi
+    CONFIGURE_RUNTIME_QUIESCED_BY_US=0
+    CONFIGURE_RUNTIME_RESTORE_DISARMED=0
+    configure_release_runtime_start_fence "$cleanup_inactive" || fence_rc=$?
+    [[ "$fence_rc" == 0 && "$start_rc" == 0 ]]
+}
+
+configure_visible_coordinate_was_committed() {
+    [[ "${CONFIGURE_DNS_GATEWAY_COMMIT_STATE:-}" == committed* \
+       || "${DNS_ENV_PUBLICATION_COMMIT_STATE:-}" == committed* \
+       || "${CERT_ROLE_CTL_COMMIT_STATE:-}" == committed* \
+       || "${CONFIGURE_CERT_PUBLICATION_COMPLETED:-0}" == 1 ]]
+}
+
+configure_revalidate_locked_publication_inputs() {
+    local expected_old_gateway="$1"
+    [[ "${CONFIGURE_NODE_LOCK_HELD:-0}" == 1 \
+       && "$INSTALL_CERT_LOCK_HELD" == 1 ]] \
+        || { err "Configure final validation requires both transaction locks."; return 1; }
+    configure_assert_certificate_selection || return 1
+    configure_revalidate_selected_operator_config || return 1
+    configure_assert_runtime_state_before_publication || return 1
+    assert_loaded_persisted_dns_env_revision 1 || return 1
+    validate_existing_runtime_documents "$MIHOMO_BIN" "installed Core" || return 1
+    [[ "$VALIDATED_DNS_SOURCE_REVISION" =~ ^[0-9a-f]{64}$ ]] \
+        || { err "The installed Core did not pin the current DNS document revision."; return 1; }
+    if [[ "$CONFIGURE_GATEWAY_CHANGED" == 1 ]]; then
+        jq -e --arg gateway "$expected_old_gateway" '.gateway == $gateway' \
+            "${FIVEGPN_STATE_DIR}/dns.json" >/dev/null \
+            || { err "The current gateway changed while configure waited for its locks."; return 1; }
+    fi
+    if [[ "$CONFIGURE_DNS_GATE_REQUIRED" == 1 ]]; then
+        verify_console_dns || return 1
+    fi
+}
+
+configure_apply_gateway_publication() {
+    local expected_old_gateway="$1"
+    [[ "$INSTALL_CERT_LOCK_HELD" == 1 \
+       && -n "${UI_GENERATION_CANDIDATE:-}" ]] \
+        || { err "Gateway publication requires the locked prepared profile generation."; return 1; }
+    if [[ "${CONFIGURE_RUNTIME_FENCE_ATTEMPTED:-0}" != 1 \
+       && "${CONFIGURE_RUNTIME_FENCED_BY_US:-0}" != 1 ]]; then
+        configure_quiesce_runtime_for_gateway || return 1
+    else
+        configure_runtime_start_fence_is_active \
+            || { err "The HTTP-01 PID1 restart gate disappeared before gateway publication."; return 1; }
+        configure_assert_runtime_gate_quiescent || return 1
+    fi
+    configure_assert_operator_config_revision || return 1
+    assert_loaded_persisted_dns_env_revision 1 || return 1
+    validate_existing_runtime_documents "$MIHOMO_BIN" "installed Core" || return 1
+    [[ "$VALIDATED_DNS_SOURCE_REVISION" =~ ^[0-9a-f]{64}$ ]] || return 1
+    jq -e --arg gateway "$expected_old_gateway" '.gateway == $gateway' \
+        "${FIVEGPN_STATE_DIR}/dns.json" >/dev/null \
+        || { err "The current gateway changed outside configure before the bounded publication."; return 1; }
+
+    configure_update_existing_dns_gateway || return 1
+    write_dns_env || return 1
+    publish_ios_profile || return 1
+    configure_revalidate_selected_operator_config || return 1
+    assert_loaded_persisted_dns_env_revision 1 || return 1
+    validate_existing_runtime_documents "$MIHOMO_BIN" "installed Core" || return 1
+    jq -e --arg gateway "$GATEWAY_IP" '.gateway == $gateway' \
+        "${FIVEGPN_STATE_DIR}/dns.json" >/dev/null \
+        || { err "The published DNS gateway failed final validation."; return 1; }
+    load_ui_generation_helper \
+        && _ui_generation_current_only_is_safe "$UI_DIR" \
+        || { err "The published UI/profile generation failed final validation."; return 1; }
+    configure_start_quiesced_runtime
+}
+
+configure_apply_environment_transaction() (
+    local final_rc=0 stop_rc=0 runtime_rc=0
+    DNS_ENV_PUBLICATION_COMMIT_STATE=not-committed
+    CONFIGURE_DNS_GATEWAY_COMMIT_STATE=not-committed
+    CONFIGURE_CERT_PUBLICATION_COMPLETED=0
+    CERT_ROLE_CTL_COMMIT_STATE=""
+    CONFIGURE_RUNTIME_QUIESCED_BY_US=0
+    CONFIGURE_RUNTIME_FENCE_ATTEMPTED=0
+    CONFIGURE_RUNTIME_FENCED_BY_US=0
+    CONFIGURE_RUNTIME_RESTORE_DISARMED=0
+    configure_environment_finish() {
+        final_rc="$1"
+        trap - EXIT
+        trap '' HUP INT TERM
+        if [[ "$final_rc" != 0 \
+           && "${DNS_ENV_PUBLICATION_COMMIT_STATE:-}" == committed* ]]; then
+            err "Configure failed after dns.env became visible; stopping mihomo without rolling the file back."
+            configure_stop_runtime_after_visible_failure || stop_rc=$?
+        elif [[ "$final_rc" != 0 \
+             && ( "${CONFIGURE_RUNTIME_QUIESCED_BY_US:-0}" == 1 \
+                  || "${CONFIGURE_RUNTIME_FENCE_ATTEMPTED:-0}" == 1 \
+                  || "${CONFIGURE_RUNTIME_FENCED_BY_US:-0}" == 1 ) ]]; then
+            err "Configure failed before dns.env publication; releasing only the original PID1 restart job."
+            configure_start_quiesced_runtime || runtime_rc=$?
+        fi
+        if [[ "$final_rc" == 0 && ( "$stop_rc" != 0 || "$runtime_rc" != 0 ) ]]; then
+            final_rc=1
+        fi
+        exit "$final_rc"
+    }
+    trap 'configure_environment_finish $?' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    if [[ "$CONFIGURE_RESTART_REQUIRED" == 1 ]]; then
+        configure_quiesce_runtime_for_gateway || exit $?
+        configure_disarm_runtime_restore_for_coordinate_commit || exit $?
+        if ! write_dns_env; then
+            if [[ "${DNS_ENV_PUBLICATION_COMMIT_STATE:-}" != committed* ]]; then
+                configure_rearm_runtime_restore_after_failed_commit || true
+            fi
+            exit 1
+        fi
+        configure_start_quiesced_runtime || exit $?
+    else
+        write_dns_env || exit $?
+    fi
+)
+
+configure_apply_certificate_transaction() (
+    local cert_changed="$1" profile_changed="$2" expected_old_gateway="$3"
+    local cleanup_rc=0 timer_rc=0 lock_rc=0 runtime_rc=0
+    local visible_failure_stopped=0 cert_install_rc=0
+    CONFIGURE_RUNTIME_QUIESCED_BY_US=0
+    CONFIGURE_RUNTIME_FENCE_ATTEMPTED=0
+    CONFIGURE_RUNTIME_FENCED_BY_US=0
+    CONFIGURE_RUNTIME_RESTORE_DISARMED=0
+    CONFIGURE_DNS_GATEWAY_COMMIT_STATE=not-committed
+    DNS_ENV_PUBLICATION_COMMIT_STATE=not-committed
+    CONFIGURE_CERT_PUBLICATION_COMPLETED=0
+    CERT_ROLE_CTL_COMMIT_STATE=""
+    CONFIGURE_EXPECTED_OLD_GATEWAY="$expected_old_gateway"
+    configure_certificate_finish() {
+        local final_rc="$1"
+        trap - EXIT
+        trap '' HUP INT TERM
+        set +e
+        if [[ "$final_rc" != 0 ]] && configure_visible_coordinate_was_committed; then
+            err "Configure failed after visible certificate or coordinate publication; mihomo remains stopped and visible files were not rolled back."
+            configure_stop_runtime_after_visible_failure
+            runtime_rc=$?
+            visible_failure_stopped=1
+        elif [[ "${CONFIGURE_RUNTIME_QUIESCED_BY_US:-0}" == 1 \
+             || "${CONFIGURE_RUNTIME_FENCE_ATTEMPTED:-0}" == 1 \
+             || "${CONFIGURE_RUNTIME_FENCED_BY_US:-0}" == 1 ]]; then
+            [[ "$final_rc" == 0 ]] \
+                || err "Configure failed before a visible coordinate commit; attempting to restore the previously active runtime."
+            configure_start_quiesced_runtime
+            runtime_rc=$?
+        fi
+        if [[ -n "${UI_GENERATION_CANDIDATE:-}" ]]; then
+            load_ui_generation_helper \
+                && ui_generation_cleanup_candidate "$UI_DIR" "$UI_GENERATION_CANDIDATE"
+            cleanup_rc=$?
+            if [[ "$cleanup_rc" == 0 ]]; then
+                UI_GENERATION_CANDIDATE=""
+                UI_GENERATION_CANDIDATE_CREATED_FROM_CURRENT=0
+            fi
+        fi
+        PENDING_CF_TOKEN=""
+        restore_global_certbot_timer
+        timer_rc=$?
+        release_install_cert_lock
+        lock_rc=$?
+        set -e
+        [[ "$cleanup_rc" == 0 ]] || err "An unpublished UI generation was retained after configure failure."
+        [[ "$runtime_rc" == 0 ]] || err "The PID1 runtime gate could not be finalized after configure."
+        [[ "$timer_rc" == 0 ]] || err "The distro Certbot timer state needs repair after configure."
+        [[ "$lock_rc" == 0 ]] || err "The certificate lock descriptor was invalid during configure cleanup."
+        if [[ "$final_rc" == 0 \
+           && ( "$cleanup_rc" != 0 || "$runtime_rc" != 0 \
+                || "$timer_rc" != 0 || "$lock_rc" != 0 ) ]]; then
+            final_rc=1
+        fi
+        if [[ "$final_rc" != 0 && "$visible_failure_stopped" == 0 ]] \
+           && configure_visible_coordinate_was_committed; then
+            configure_stop_runtime_after_visible_failure || runtime_rc=1
+            visible_failure_stopped=1
+        fi
+        exit "$final_rc"
+    }
+    trap 'configure_certificate_finish $?' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    [[ "$profile_changed" == 1 ]] \
+        || { err "The certificate transaction requires a profile generation."; exit 1; }
+    acquire_install_cert_lock || exit $?
+    configure_revalidate_locked_publication_inputs "$expected_old_gateway" || exit $?
+    if [[ "$cert_changed" == 1 ]]; then
+        preflight_global_certbot_timer_state || exit $?
+    fi
+    if [[ "$cert_changed" == 1 && "$CERT_MODE" == cloudflare ]]; then
+        configure_commit_pending_cf_token || exit $?
+    fi
+    if [[ "$cert_changed" == 1 ]]; then
+        configure_quiesce_runtime_for_gateway || exit $?
+        # From this point a hard process death must not make a later configure
+        # release the blocked restart across an unknown certificate publication
+        # boundary. A normal pre-commit failure can re-arm the same still-live
+        # PID1 job for the EXIT restoration.
+        configure_disarm_runtime_restore_for_coordinate_commit || exit $?
+        if [[ "$CERT_MODE" == http-01 ]]; then
+            FIVEGPN_HTTP_CERTBOT_RUNTIME_FENCED=1 install_cert "$BASE_DOMAIN" \
+                || cert_install_rc=$?
+        else
+            install_cert "$BASE_DOMAIN" || cert_install_rc=$?
+        fi
+        if [[ "$cert_install_rc" != 0 ]]; then
+            if [[ "${CERT_ROLE_CTL_COMMIT_STATE:-}" != committed* \
+               && "${CONFIGURE_CERT_PUBLICATION_COMPLETED:-0}" != 1 ]]; then
+                configure_rearm_runtime_restore_after_failed_commit || true
+            fi
+            exit "$cert_install_rc"
+        fi
+        CONFIGURE_CERT_PUBLICATION_COMPLETED=1
+    fi
+    prepare_ios_profile || exit $?
+    configure_revalidate_selected_operator_config || exit $?
+    assert_loaded_persisted_dns_env_revision 1 || exit $?
+    validate_existing_runtime_documents "$MIHOMO_BIN" "installed Core" || exit $?
+
+    if [[ "$CONFIGURE_GATEWAY_CHANGED" == 1 ]]; then
+        configure_apply_gateway_publication "$expected_old_gateway" || exit $?
+    else
+        if [[ "$CONFIGURE_DNS_ENV_CHANGED" == 1 ]]; then
+            configure_disarm_runtime_restore_for_coordinate_commit || exit $?
+            if ! write_dns_env; then
+                if [[ "${DNS_ENV_PUBLICATION_COMMIT_STATE:-}" != committed* ]]; then
+                    configure_rearm_runtime_restore_after_failed_commit || true
+                fi
+                exit 1
+            fi
+        fi
+        publish_ios_profile || exit $?
+        configure_revalidate_selected_operator_config || exit $?
+        assert_loaded_persisted_dns_env_revision 1 || exit $?
+        validate_existing_runtime_documents "$MIHOMO_BIN" "installed Core" || exit $?
+        load_ui_generation_helper \
+            && _ui_generation_current_only_is_safe "$UI_DIR" \
+            || { err "The published UI/profile generation failed final validation."; exit 1; }
+        if [[ "${CONFIGURE_RUNTIME_FENCE_ATTEMPTED:-0}" == 1 \
+           || "${CONFIGURE_RUNTIME_FENCED_BY_US:-0}" == 1 ]]; then
+            configure_start_quiesced_runtime || exit $?
+        elif [[ "$CONFIGURE_RESTART_REQUIRED" == 1 ]]; then
+            configure_restart_runtime_if_active || exit $?
+        fi
+    fi
+)
+
+configure_restart_runtime_if_active() {
+    configure_revalidate_selected_operator_config || return 1
+    if [[ "${CONFIGURE_RUNTIME_WAS_ACTIVE:-0}" != 1 ]]; then
+        read_exact_systemd_unit_state 5gpn-mihomo.service \
+            || { err "Could not re-read the initially inactive mihomo service."; return 1; }
+        case "$SYSTEMD_UNIT_LOAD_STATE:$SYSTEMD_UNIT_ACTIVE_STATE" in
+            loaded:inactive)
+                warn "Configuration was saved, but 5gpn-mihomo remains stopped; start it explicitly when ready."
+                return 0
+                ;;
+            loaded:active)
+                err "Mihomo was started outside configure; it was not restarted against the newly saved coordinates."
+                return 1
+                ;;
+            loaded:failed)
+                err "Mihomo is failed after configuration publication; it was not misclassified as an operator stop."
+                return 1
+                ;;
+            *)
+                err "Mihomo is transitioning after configuration publication: ${SYSTEMD_UNIT_ACTIVE_STATE}."
+                return 1
+                ;;
+        esac
+    fi
+    load_ui_generation_helper || return 1
+    _ui_generation_current_only_is_safe "$UI_DIR" \
+        || { err "Current UI generation is unsafe; refusing to restart mihomo."; return 1; }
+    if ! systemctl --job-mode=fail try-restart 5gpn-mihomo.service 2>/dev/null; then
+        read_exact_systemd_unit_state 5gpn-mihomo.service \
+            || { err "Could not inspect mihomo after a conflicting try-restart job."; return 1; }
+        if [[ "$SYSTEMD_UNIT_LOAD_STATE:$SYSTEMD_UNIT_ACTIVE_STATE" == loaded:inactive ]]; then
+            warn "An operator stop won the try-restart job race; preserving that stop."
+            return 0
+        fi
+        err "Could not try-restart 5gpn-mihomo after configuration."
+        return 1
+    fi
+    read_exact_systemd_unit_state 5gpn-mihomo.service \
+        || { err "Could not inspect mihomo after try-restart."; return 1; }
+    case "$SYSTEMD_UNIT_LOAD_STATE:$SYSTEMD_UNIT_ACTIVE_STATE" in
+        loaded:inactive)
+            warn "5gpn-mihomo was stopped before try-restart committed; preserving that operator stop."
+            return 0
+            ;;
+        loaded:active) ;;
+        loaded:failed)
+            err "Mihomo entered failed state during try-restart."
+            return 1
+            ;;
+        *)
+            err "Mihomo is transitioning after try-restart: ${SYSTEMD_UNIT_ACTIVE_STATE}."
+            return 1
+            ;;
+    esac
+    wait_service_ready 5gpn-mihomo.service || return 1
+    if ! configure_assert_operator_config_revision; then
+        systemctl stop 5gpn-mihomo.service >/dev/null 2>&1 || true
+        wait_managed_account_quiescent "$FIVEGPN_SERVICE_USER" || true
+        err "Operator YAML changed while mihomo was restarting; the runtime was stopped."
+        return 1
+    fi
+}
+
+configure_installation() {
+    local old_base old_public old_gateway old_listen old_mode old_email
+    local PENDING_CF_TOKEN=""
+    check_root || return 1
+    [[ "$SCRIPT_DIR" == "$BASE_DIR" ]] \
+        || { err "Configure is available only through the installed 5gpn management backend."; return 1; }
+    [[ "${RELEASE_CHANNEL_EXPLICIT:-0}" != 1 ]] \
+        || { err "Configure does not select or switch release channels; rerun without --beta."; return 2; }
+    activate_verified_installed_gum
+    LOADED_DNS_ENV_SOURCE_STATE=""
+    LOADED_DNS_ENV_SOURCE_REVISION=""
+    LOADED_DNS_ENV_SOURCE_IDENTITY=""
+    CONFIGURE_OPERATOR_CONFIG_STATE=""
+    CONFIGURE_NODE_LOCK_HELD=0
+    CONFIGURE_CERTIFICATE_SELECTION_STATE=""
+    CONFIGURE_RUNTIME_GATE_LIVE_UNIT_STATE=""
+    CONFIGURE_RUNTIME_GATE_STAGED_UNIT_STATE=""
+    CONFIGURE_RUNTIME_GATE_HELPER_STATE=""
+    CONFIGURE_RUNTIME_UI_VALIDATOR_STATE=""
+    UI_GENERATION_CANDIDATE=""
+    UI_GENERATION_CANDIDATE_CREATED_FROM_CURRENT=0
+    load_persisted_install_config \
+        || { err "Configure requires a complete current dns.env; it cannot perform a fresh install."; return 1; }
+    validate_install_config || return 1
+    old_base="$BASE_DOMAIN"
+    old_public="$PUBLIC_IP"
+    old_gateway="$GATEWAY_IP"
+    old_listen="$MIHOMO_LISTEN_IPS"
+    old_mode="$CERT_MODE"
+    old_email="$CERT_EMAIL"
+    configure_require_current_deployment "$old_gateway" || return 1
+
+    configure_install_tui 1 || return 1
+    validate_install_config || return 1
+    configure_plan_changes \
+        "$old_base" "$old_public" "$old_gateway" "$old_listen" "$old_mode" "$old_email" \
+        "$BASE_DOMAIN" "$PUBLIC_IP" "$GATEWAY_IP" "$MIHOMO_LISTEN_IPS" "$CERT_MODE" "$CERT_EMAIL"
+    configure_revalidate_selected_operator_config || return 1
+    assert_loaded_persisted_dns_env_revision 1 || return 1
+
+    if [[ "$CONFIGURE_ANY_CHANGE" != 1 ]]; then
+        configure_assert_operator_config_revision || return 1
+        ok "Configuration is already current; no file was written and mihomo was not restarted."
+        return 0
+    fi
+
+    configure_require_selected_dependencies || return 1
+    configure_preflight_selected_runtime_helpers || return 1
+    if [[ "$CONFIGURE_PROFILE_CHANGED" == 1 ]]; then
+        configure_capture_certificate_selection || return 1
+    fi
+    if [[ "$CONFIGURE_DNS_GATE_REQUIRED" == 1 ]]; then
+        verify_console_dns || return 1
+    fi
+    configure_collect_pending_cf_token || return 1
+    acquire_configure_node_lock || return 1
+    configure_revalidate_selected_operator_config || return 1
+    configure_assert_runtime_state_before_publication || return 1
+    configure_assert_operator_config_revision || return 1
+    assert_loaded_persisted_dns_env_revision 1 || return 1
+
+    if [[ "$CONFIGURE_PROFILE_CHANGED" == 1 ]]; then
+        configure_apply_certificate_transaction \
+            "$CONFIGURE_CERT_CHANGED" "$CONFIGURE_PROFILE_CHANGED" "$old_gateway" \
+            || { PENDING_CF_TOKEN=""; return 1; }
+        PENDING_CF_TOKEN=""
+    else
+        configure_assert_runtime_state_before_publication || return 1
+        configure_assert_operator_config_revision || return 1
+        configure_apply_environment_transaction || return 1
+    fi
+    if ! release_configure_node_lock; then
+        configure_stop_runtime_after_visible_failure || true
+        return 1
+    fi
+    ok "Installed configuration update complete."
 }
 
 delegate_unpinned_installer() {
@@ -7940,11 +10591,8 @@ delegate_unpinned_installer() {
     [[ "$RELEASE_CHANNEL" == stable || "$RELEASE_CHANNEL" == beta ]] \
         || { err "Unknown 5gpn release channel: $RELEASE_CHANNEL"; return 1; }
     [[ "$RELEASE_CHANNEL" == stable ]] || args+=(--beta)
-    case "$mode" in
-        "") ;;
-        configure) args+=("$mode") ;;
-        *) err "Unsupported delegated installer mode: $mode"; return 1 ;;
-    esac
+    [[ -z "$mode" ]] \
+        || { err "Only a full install may delegate to quick-install.sh."; return 1; }
     info "Resolving a version-matched ${RELEASE_CHANNEL} installer bundle before installation."
     exec bash "$quick" "${args[@]}"
 }
@@ -7953,18 +10601,17 @@ delegate_unpinned_installer() {
 # beta request. Future installed management scripts keep a verified copy of
 # quick-install.sh and hand the channel transition back to that resolver.
 delegate_pinned_channel_switch() {
-    local mode="${1:-}" quick quick_mode base_mode
+    local mode="${1:-}" quick quick_mode quick_digest base_mode quick_before quick_after quick_fd_state rc
     local -a args=(--beta)
-    case "$mode" in
-        ""|configure) ;;
-        *) err "Unsupported channel-switch installer mode: $mode"; return 1 ;;
-    esac
+    [[ -z "$mode" ]] \
+        || { err "Only a full install may switch release channels."; return 1; }
     [[ "$RELEASE_CHANNEL_EXPLICIT" == 1 && "$RELEASE_CHANNEL" == beta ]] || return 0
     [[ "$RELEASE_TAG" != latest ]] || return 0
     valid_stable_release_tag "$RELEASE_TAG" || return 0
     quick="${SCRIPT_DIR}/quick-install.sh"
     quick_mode="$(file_mode "$quick")"
     [[ -f "$quick" && ! -L "$quick" && "$(file_uid "$quick")" == 0 \
+       && "$(file_nlink "$quick")" == 1 \
        && "$quick_mode" =~ ^[4-7][0145][0145]$ ]] \
         || { err "This stable installer is pinned and cannot switch channels by itself."; \
              err "Run the verified remote quick installer with --beta."; return 1; }
@@ -7975,22 +10622,51 @@ delegate_pinned_channel_switch() {
         owned_root_canonical "$BASE_DIR" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" >/dev/null \
             || { err "Installed quick installer is outside a valid owned runtime root."; return 1; }
     fi
-    [[ -z "$mode" ]] || args+=("$mode")
+    quick_digest="$(sha256sum -- "$quick" 2>/dev/null | awk '{print $1}')" \
+        || { err "Could not hash the verified quick installer."; return 1; }
+    [[ "$RELEASE_QUICK_BINDING" =~ ^[0-9a-f]{64}$ \
+       && "$quick_digest" == "$RELEASE_QUICK_BINDING" ]] \
+        || { err "Quick installer does not match this release generation."; return 1; }
     info "Handing the explicit beta channel switch to verified quick-install.sh; older beta lines are refused."
-    exec bash "$quick" "${args[@]}"
+    [[ "$INSTALL_LOCK_HELD" == 1 ]] \
+        || { err "Channel handoff requires the stale-backend check under the install lock."; return 1; }
+    quick_before="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "$quick" 2>/dev/null)" \
+        || { err "Could not fingerprint the verified quick installer."; return 1; }
+    exec 9<"$quick" \
+        || { err "Could not anchor the verified quick installer."; return 1; }
+    quick_fd_state="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- /proc/self/fd/9 2>/dev/null)" \
+        || { exec 9<&-; err "Could not inspect the anchored quick installer."; return 1; }
+    quick_after="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "$quick" 2>/dev/null)" \
+        || { exec 9<&-; err "Quick installer path changed during handoff."; return 1; }
+    [[ "$quick_before" == "$quick_after" && "$quick_fd_state" == "$quick_after" ]] \
+        || { exec 9<&-; err "Quick installer changed during handoff."; return 1; }
+    # quick-install.sh takes its source lease before it waits for this lock, so
+    # retaining fd 7 would invert the lock order. fd 9 instead anchors the exact
+    # verified inode across unlock and exec; an atomic path replacement cannot
+    # change the script this process executes.
+    release_install_lock \
+        || { exec 9<&-; err "Could not release the install lock before channel handoff."; return 1; }
+    trap - ERR EXIT HUP INT TERM
+    exec bash /proc/self/fd/9 "${args[@]}"
+    rc=$?
+    exec 9<&-
+    return "$rc"
 }
 
 full_install() {
-    local mode="${1:-}" force_tui=0 postcommit_failed=0
+    local mode="" postcommit_failed=0
     local reveal_console_connection=0
     INSTALL_PUBLICATION_STARTED=0
+    LOADED_DNS_ENV_SOURCE_STATE=""
+    LOADED_DNS_ENV_SOURCE_REVISION=""
+    LOADED_DNS_ENV_SOURCE_IDENTITY=""
+    UI_GENERATION_CANDIDATE=""
+    UI_GENERATION_CANDIDATE_CREATED_FROM_CURRENT=0
     # Capture the real destination before the success block enters a pipeline:
     # stdout inside `{ ...; } | card` is a pipe and can never satisfy `-t 1`.
     if [[ -t 1 ]]; then
         reveal_console_connection=1
     fi
-    [[ "$mode" == configure ]] && force_tui=1
-    delegate_pinned_channel_switch "$mode" || return 1
     delegate_unpinned_installer "$mode" || return 1
     check_root || return 1
     acquire_install_lock || return 1
@@ -8001,6 +10677,9 @@ full_install() {
     trap 'install_transaction_signal 129' HUP
     trap 'install_transaction_signal 130' INT
     trap 'install_transaction_signal 143' TERM
+    assert_installed_backend_revision || return 1
+    delegate_pinned_channel_switch "$mode" || return 1
+    validate_quick_installer_generation || return 1
     INSTALL_PHASE="loading identity reconciliation state"
     load_identity_reconcile_journal
     preload_fivegpn_identity_for_claim
@@ -8014,13 +10693,17 @@ full_install() {
     managed_roots_have_no_nested_mounts
     INSTALL_PHASE="checking current publication boundaries"
     preflight_project_root_claims
+    preflight_runtime_publication_paths 1
     preflight_persisted_dns_env
     preflight_fivegpn_state_directory
     preflight_intercept_roots
     cert_root_claim_is_possible
+    certificate_selection_state_is_safe
     debug_cert_root_claim_is_possible
     preflight_unit_ownership
     preflight_ui_dir
+    assert_release_pin_bundle_revision \
+        || { err "Release pin files changed before any installer download."; return 1; }
     # The optional TUI helper is verified inside an owned temporary directory.
     # It is not published beneath /opt/5gpn until every read-only gate and
     # staged-artifact validation below has passed.
@@ -8030,17 +10713,27 @@ full_install() {
     check_arch
     detect_memory_profile
     banner "$RELEASE_TAG" "${OS:-unknown} ${VER:-?} · $(uname -m 2>/dev/null || echo unknown)${MEM_TOTAL_MB:+ · ${MEM_TOTAL_MB}MB}"
-    resolve_install_configuration "$force_tui"
+    resolve_install_configuration 0
     derive_domains "$BASE_DOMAIN"
+    certificate_selection_state_is_consistent_for_install "$BASE_DOMAIN" "$CERT_MODE"
     mihomo_config_matches_install_config || {
-        err "The operator-owned mihomo config does not match the selected domains, gateway, and listener addresses."
+        err "The operator-owned mihomo config does not match the selected domains and listener addresses."
         err "Edit and validate the current operator-owned file explicitly before rerunning configuration."
         return 1
     }
+    # The shared TUI never persists a credential while the operator is still
+    # editing or may cancel the candidate. A full install nevertheless keeps a
+    # missing Cloudflare credential on the fail-before-publication side by
+    # collecting it only after the complete candidate and operator YAML agree.
+    if cloudflare_credential_required_for_install "$BASE_DOMAIN"; then
+        ensure_cf_token
+    fi
     # Package installation may add shared OS packages, but no live 5gpn file has
     # been removed or replaced yet. Debug mode deliberately skips Certbot.
     phase "installing host dependencies" "安装主机依赖"
     install_deps
+    INSTALL_PHASE="checking external Certbot timer state"
+    preflight_global_certbot_timer_state
     managed_roots_have_no_nested_mounts
     preflight_intercept_ca_publication \
         || { err "Interception CA publication state is unsafe before binary publication."; return 1; }
@@ -8050,21 +10743,44 @@ full_install() {
     stage_artifacts
     INSTALL_PHASE="acquiring the certificate transaction lock"
     acquire_install_cert_lock
+    INSTALL_PHASE="coordinating the external Certbot timer"
+    certificate_selection_state_is_consistent_for_install "$BASE_DOMAIN" "$CERT_MODE"
+    if certbot_transaction_requires_global_timer_pause "$BASE_DOMAIN" "$CERT_MODE"; then
+        pause_global_certbot_timer
+    fi
     INSTALL_PHASE="rechecking publication boundaries"
     preload_fivegpn_identity_for_claim
     detect_legacy_footprints
     preflight_project_root_claims
+    preflight_runtime_publication_paths 1
     preflight_persisted_dns_env
+    assert_loaded_persisted_dns_env_revision 0
     preflight_fivegpn_state_directory
     preflight_intercept_roots
     cert_root_claim_is_possible
+    certificate_selection_state_is_consistent_for_install "$BASE_DOMAIN" "$CERT_MODE"
     debug_cert_root_claim_is_possible
     preflight_unit_ownership
     preflight_ui_dir
     validate_existing_runtime_documents
+    if certbot_transaction_requires_global_timer_pause "$BASE_DOMAIN" "$CERT_MODE"; then
+        pause_global_certbot_timer
+    fi
+    if cloudflare_credential_required_for_install "$BASE_DOMAIN"; then
+        ensure_cf_token
+    fi
+    certificate_selection_state_is_consistent_for_install "$BASE_DOMAIN" "$CERT_MODE"
+    validate_quick_installer_generation || return 1
+    assert_release_pin_bundle_revision \
+        || { err "Release pin files changed at the final publication boundary."; return 1; }
     INSTALL_PHASE="starting publication by claiming project roots"
     INSTALL_PUBLICATION_STARTED=1
     claim_project_roots
+    revalidate_claimed_persisted_dns_env
+    phase "quiescing runtime state writers" "暂停运行时写入"
+    stop_managed_runtime_units
+    assert_managed_accounts_quiescent
+    validate_existing_runtime_documents
     publish_verified_gum
     phase "claiming publication directories" "认领发布目录"
     claim_ui_dir
@@ -8084,13 +10800,16 @@ full_install() {
     prepare_certificate_publication_boundaries
     install_files
     install_manage_cli
-    install_ui
     install_units
     seed_dns_document
     write_dns_env
     ensure_intercept_certificates
     install_cert "$BASE_DOMAIN"
     render_mihomo_config
+    # Do not expose a half-built fresh UI or replace a healthy current tree
+    # during reinstall. Both public certificate roles and the interception CA
+    # are ready before the complete Console/profile candidate is built.
+    install_ui
     setup_ios_profile
     prepare_runtime_permissions
     assert_replaced_fivegpn_identity_reconciled
@@ -8167,6 +10886,7 @@ uninstall() {
     trap 'install_transaction_signal 129' HUP
     trap 'install_transaction_signal 130' INT
     trap 'install_transaction_signal 143' TERM
+    assert_installed_backend_revision || return 1
     load_identity_reconcile_journal || return 1
     if [[ -n "$REPLACED_FIVEGPN_UID" || -n "$REPLACED_FIVEGPN_GID" \
        || -n "$REPLACED_FIVEGPN_NAMED_GID" ]]; then
@@ -8212,12 +10932,6 @@ uninstall() {
     elif [[ -e /usr/local/bin/5gpn ]]; then
         warn "Preserving unowned /usr/local/bin/5gpn."
     fi
-    # The UI tree lives at $BASE_DIR/ui and is removed with $BASE_DIR itself.
-    # It no longer needs a separate claim-then-remove pass: that existed because
-    # the console and zashboard directories were operator-relocatable through
-    # dns.env and could therefore sit outside the tree this uninstall owns.
-    remove_runtime_preserving_gum
-
     if [[ "$decommission" == 1 ]]; then
         if [[ -e "$DNS_CERT_DIR" || -L "$DNS_CERT_DIR" ]]; then
             ensure_dns_cert_root \
@@ -8238,6 +10952,13 @@ uninstall() {
             || { err "Refusing unsafe interception CA removal."; return 1; }
         ok "Deleted the dedicated interception CA."
     fi
+
+    # Keep the installed publication helpers until decommission has finished
+    # validating and removing the certificate-role tree. Removing /opt first
+    # would make a safe decommission deterministically fail on its own missing
+    # cert-role/publication helpers. The UI tree lives below $BASE_DIR and is
+    # removed with that runtime after the certificate boundary is complete.
+    remove_runtime_preserving_gum
 
     if [[ $purge == 1 ]]; then
         # DELIBERATELY preserve the cert dir even on --purge: re-issuing a Let's
@@ -8294,14 +11015,13 @@ Usage: sudo bash install.sh [--beta] [command] — or, after install:  5gpn [com
                       reinstall validates and reuses /etc/5gpn/dns.env. A
                       packaged script remains pinned to its tag unless an
                       explicit beta channel switch invokes verified quick-install.sh.
-  configure           Open the full TUI, stage/verify, publish, and probe. A
-                      pre-publication failure is untouched; later failure is partial
+  configure           Edit only a complete current installation. It does not
+                      download or republish release artifacts, repair missing
+                      state, or start a deliberately stopped mihomo service.
   menu                Open the interactive management menu (this is what bare '5gpn' runs)
   status              Show service state, interception state, domains, and IP
   restart             Restart the 5gpn service
   ios                 Regenerate the iOS profile + QR
-  rotate-token        Generate a new mihomo controller secret (the console
-                      credential), write it to config.yaml + dns.env, restart
   set-cf-token        Enter/update the Cloudflare token through the TUI only
   mihomo-reset        Explicitly back up + replace the operator mihomo config
                       with a freshly rendered, validated seed, then restart
@@ -8315,9 +11035,12 @@ Usage: sudo bash install.sh [--beta] [command] — or, after install:  5gpn [com
 After a full install, `5gpn` opens the management TUI. Configuration commands do
 not accept values on argv or through the caller environment.
 
-Config: /etc/5gpn/dns.env stores installation-owned host coordinates. First
-install writes it from the TUI; reinstall reads it. Live DNS state is only in
-dns.json, and ambient shell variables are discarded.
+Config: /etc/5gpn/dns.env stores exactly six host-specific installer inputs.
+First install writes that schema from the TUI; reinstall reads it. Live DNS
+state is only in dns.json, and ambient shell variables are discarded. The
+controller secret exists only in operator-owned config.yaml. Rotate it by
+editing the complete file, validating it, and explicitly restarting mihomo;
+managed PUT /configs secret changes are rejected with HTTP 409.
 
 Domains + certificates: ONE base domain and ONE scoped Let's Encrypt lineage.
   BASE_DOMAIN (e.g. example.com)     the operator's single domain knob. Two
@@ -8360,8 +11083,9 @@ TCP 80, 443, 8080, and 8443 plus UDP 443. The console panel at
 routes require the mihomo controller secret.
 
   TUI configuration:
-    certificate mode/email, base domain, public/gateway/listener IPv4, and
-    Cloudflare token.
+    certificate mode/email, base domain, and public/gateway/listener IPv4.
+    A missing Cloudflare token is requested only after the complete candidate
+    is confirmed and only when owned certificate issuance/renewal needs it.
 
   Automatic runtime defaults:
     dns.json starts with China/trust upstreams, China ECS, two built-in default
@@ -8369,9 +11093,9 @@ routes require the mihomo controller secret.
     authenticated Console changes these live fields.
 
   Fixed release inputs:
-    The 5gpn release tag plus mihomo/zashboard/Gum versions and SHA-256 values
-    are embedded in the release installer. Unsigned profiles and profile-DNS
-    bypasses do not exist.
+    The 5gpn release tag plus the strictly parsed release/pins.env coordinates
+    for mihomo, zashboard, and Gum are bundled and installed together. Unsigned
+    profiles and profile-DNS bypasses do not exist.
 EOF
 }
 
@@ -8404,12 +11128,14 @@ main() {
     local cmd="${1:-}"
     case "$cmd" in
         "")             require_command_arity install "$#" 0 0 || return $?; full_install ;;
-        configure)      require_command_arity "$cmd" "$#" 1 1 || return $?; full_install configure ;;
+        configure)      require_command_arity "$cmd" "$#" 1 1 || return $?
+                        [[ "$SCRIPT_DIR" == "$BASE_DIR" ]] \
+                            || { err "Configure is available only through the installed 5gpn management backend."; return 1; }
+                        run_management_with_install_lock configure_installation ;;
         menu)           require_command_arity "$cmd" "$#" 1 1 || return $?; manage_menu ;;
         restart)        require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_lock restart_services ;;
         status)         require_command_arity "$cmd" "$#" 1 1 || return $?; show_status ;;
         ios)            require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_and_cert_lock regen_ios ;;
-        rotate-token)   require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_lock rotate_token ;;
         set-cf-token)   require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_and_cert_lock set_cf_token ;;
         mihomo-reset)   require_command_arity "$cmd" "$#" 1 1 || return $?; run_management_with_install_lock reset_mihomo_config ;;
         uninstall)      require_command_arity "$cmd" "$#" 1 2 || return $?; uninstall "${2:-}" ;;

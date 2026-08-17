@@ -128,9 +128,17 @@ address must be globally routable, mixed public/private answers fail closed,
 and the accepted address is pinned for the outbound dial while the original
 hostname remains available to HTTP and TLS. Every request, including one that
 reuses a pooled connection, is re-authorized against the current protected-rule
-prefix before the extension's terminal egress binding is applied. Every
-upstream connection returns through mihomo's in-process inner dialer, current
-protected prefix, and reviewed terminal binding.
+prefix and the installation-owned gateway before the extension's terminal
+egress binding is applied. Every upstream connection returns through mihomo's
+in-process inner dialer, carrier-scoped gateway guard, current protected prefix,
+and reviewed terminal binding.
+
+The gateway check is dynamic core state, not a static rule rendered into the
+operator's mihomo YAML. It applies only to the private carrier attached to 5gpn
+system and extension tunnel egress. Ordinary client ingress and generic mihomo
+`INNER` traffic are not marked. DNS upstream members, subscription fetches, and
+manifest importer fetches use separate direct-socket clients and retain their
+own destination and redirect policies.
 
 A **resolver** form (`server:1.1.1.1`, up to four comma-separated specs) names
 nameservers rather than a destination. It changes where the monolith resolver

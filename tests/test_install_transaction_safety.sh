@@ -51,6 +51,33 @@ grep -Fq 'INSTALL_PUBLICATION_STARTED=1' <<<"$full_fn" \
     && grep -Fq 'INSTALL_PUBLICATION_STARTED:-0' <<<"$finish_fn" \
     && pass "partial-install reporting is gated by the explicit publication boundary" \
     || fail "prepublication failures are still reported as partial installs"
+deps_line="$(line_of "$full_fn" 'install_deps')"
+timer_preflight_line="$(line_of "$full_fn" 'preflight_global_certbot_timer_state')"
+timer_pause_line="$(line_of "$full_fn" 'pause_global_certbot_timer')"
+timer_pause_final_line="$(grep -nF 'pause_global_certbot_timer' <<<"$full_fn" | tail -1 | cut -d: -f1)"
+timer_pause_count="$(grep -Fc 'pause_global_certbot_timer' <<<"$full_fn")"
+publication_boundary_line="$(line_of "$full_fn" 'INSTALL_PUBLICATION_STARTED=1')"
+[[ -n "$deps_line" && -n "$timer_preflight_line" && -n "$timer_pause_line" \
+   && -n "$timer_pause_final_line" && -n "$publication_boundary_line" \
+   && "$timer_pause_count" -ge 2 \
+   && "$deps_line" -lt "$timer_preflight_line" \
+   && "$timer_preflight_line" -lt "$timer_pause_line" \
+   && "$timer_pause_line" -le "$timer_pause_final_line" \
+   && "$timer_pause_final_line" -lt "$publication_boundary_line" \
+   && "$timer_pause_line" -lt "$publication_boundary_line" ]] \
+    || fail "distro Certbot timer is not checked and captured before publication"
+pass "distro Certbot timer compatibility and snapshot finish before project publication"
+claim_root_line="$(line_of "$full_fn" 'claim_project_roots')"
+runtime_stop_line="$(line_of "$full_fn" 'stop_managed_runtime_units')"
+runtime_revalidate_line="$(grep -nF 'validate_existing_runtime_documents' <<<"$full_fn" | tail -1 | cut -d: -f1)"
+first_payload_line="$(line_of "$full_fn" 'publish_verified_gum')"
+[[ -n "$claim_root_line" && -n "$runtime_stop_line" \
+   && -n "$runtime_revalidate_line" && -n "$first_payload_line" \
+   && "$claim_root_line" -lt "$runtime_stop_line" \
+   && "$runtime_stop_line" -lt "$runtime_revalidate_line" \
+   && "$runtime_revalidate_line" -lt "$first_payload_line" ]] \
+    || fail "runtime writers are not stopped and Core state revalidated immediately after publication begins"
+pass "runtime writers quiesce before the first payload publication"
 
 finish_timer_line="$(line_of "$finish_fn" 'restore_global_certbot_timer')"
 finish_release_line="$(line_of "$finish_fn" 'release_install_cert_lock')"

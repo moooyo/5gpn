@@ -194,28 +194,46 @@ jobs:
             README.en.md
             LICENSE
             THIRD_PARTY_NOTICES.md
+            # Centralized third-party coordinates and their non-executing parser.
+            release/pins.env
+            release/pins.sh
+            # Public contract for the exact six-key installer-input schema.
             etc/5gpn/dns.env.example
             etc/mihomo/config.yaml.tmpl
+            etc/systemd/5gpn-certbot-renew.service
+            etc/systemd/5gpn-certbot-renew.timer
             etc/systemd/5gpn-intercept-cert.path
             etc/systemd/5gpn-intercept-cert.service
             etc/systemd/5gpn-intercept-cert.timer
             etc/systemd/5gpn-mihomo.service
             # Runtime helpers installed under /opt/5gpn/scripts.
+            scripts/publication-fs.sh
+            scripts/cert-role-ctl.sh
             scripts/cert-renew.sh
+            scripts/configure-runtime-gate.sh
             scripts/gen-ios-profile.sh
             scripts/intercept-cert-renew.sh
             scripts/renew-hook.sh
+            scripts/ui-generation.sh
             docs/architecture.md
             docs/native-extensions.md
+            # Acceptance routing and root-owned runbooks; no executable mega-suite.
             tests/integration-smoke.md
+            tests/deployment-smoke.md
+            tests/acceptance/installer.md
+            tests/acceptance/disruption-recovery.md
           )
           executable_files=(
             install.sh
             quick-install.sh
+            scripts/publication-fs.sh
+            scripts/cert-role-ctl.sh
             scripts/cert-renew.sh
+            scripts/configure-runtime-gate.sh
             scripts/gen-ios-profile.sh
             scripts/intercept-cert-renew.sh
             scripts/renew-hook.sh
+            scripts/ui-generation.sh
           )
 
           mkdir -p "$stage"
@@ -226,6 +244,16 @@ jobs:
             chmod 0755 "$stage/$file"
           done
 
+          pins_env_sha="$(sha256sum "$stage/release/pins.env" | awk '{print $1}')"
+          pins_library_sha="$(sha256sum "$stage/release/pins.sh" | awk '{print $1}')"
+          quick_sha="$(sha256sum "$stage/quick-install.sh" | awk '{print $1}')"
+          pins_binding="${pins_env_sha}:${pins_library_sha}"
+          sed -i "s/^RELEASE_PINS_BINDING=.*/RELEASE_PINS_BINDING=\"${pins_binding}\"/" "$stage/install.sh"
+          grep -q "^RELEASE_PINS_BINDING=\"${pins_binding}\"$" "$stage/install.sh" \
+            || { echo "RELEASE_PINS_BINDING stamp failed"; exit 1; }
+          sed -i "s/^RELEASE_QUICK_BINDING=.*/RELEASE_QUICK_BINDING=\"${quick_sha}\"/" "$stage/install.sh"
+          grep -q "^RELEASE_QUICK_BINDING=\"${quick_sha}\"$" "$stage/install.sh" \
+            || { echo "RELEASE_QUICK_BINDING stamp failed"; exit 1; }
           sed -i "s/^RELEASE_TAG=.*/RELEASE_TAG=\"${GITHUB_REF_NAME}\"/" "$stage/install.sh"
           grep -q "^RELEASE_TAG=\"${GITHUB_REF_NAME}\"" "$stage/install.sh" \
             || { echo "RELEASE_TAG stamp failed"; exit 1; }

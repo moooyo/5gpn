@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Verifies every pinned third-party artifact against its published release.
 #
-# install.sh pins each one as a PAIR: a version and the SHA-256 of the exact
+# release/pins.env pins each one as a PAIR: a version and the SHA-256 of the exact
 # asset that version publishes. Nothing bound the two together, so bumping the
 # version and leaving the digest behind produced an installer that downloaded
 # the right artifact, computed the right hash, and refused it. That shipped once
@@ -25,11 +25,13 @@ FAIL=0
 pass() { echo "ok:   $*"; }
 fail() { echo "FAIL: $*"; FAIL=1; }
 
-# Read the pins from install.sh rather than restating them. A second copy is a
-# second thing to forget.
-export INSTALL_SH_LIB_ONLY=1
-# shellcheck source=../install.sh
-source "$ROOT/install.sh"
+# Parse the data manifest directly. Loading the installer would execute a much
+# wider library surface and make this verifier depend on unrelated host logic.
+PINS_ENV="$ROOT/release/pins.env"
+PINS_LIBRARY="$ROOT/release/pins.sh"
+# shellcheck source=../release/pins.sh
+source "$PINS_LIBRARY"
+load_release_pins "$PINS_ENV" || exit 1
 
 TMP="$(mktemp -d /tmp/5gpn-pins.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
@@ -68,22 +70,29 @@ echo "Verifying pinned artifacts against their published releases."
 # it. Gum is an optional installer dependency, but it is still downloaded and
 # installed as root, so every architecture the bootstrap accepts is bound here.
 
-check "mihomo ${MIHOMO_VERSION}" "$MIHOMO_SHA256" \
-    "https://github.com/${MIHOMO_REPO}/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz"
+mihomo_asset="$(release_asset_name mihomo)" || exit 1
+check "mihomo ${MIHOMO_VERSION} ${mihomo_asset}" "$(release_artifact_sha256 mihomo)" \
+    "$(release_download_url mihomo)"
 
-check "zashboard ${ZASH_VERSION}" "$ZASH_SHA256" \
-    "https://github.com/${ZASH_REPO}/releases/download/${ZASH_VERSION}/dist.zip"
+zash_asset="$(release_asset_name zashboard)" || exit 1
+check "zashboard ${ZASH_VERSION} ${zash_asset}" "$(release_artifact_sha256 zashboard)" \
+    "$(release_download_url zashboard)"
 
-check_gum_release() { # check_gum_release <release-arch> <expected-sha256>
-    local arch="$1" expected="$2"
-    check "gum ${GUM_VERSION} Linux ${arch}" "$expected" \
-        "https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/gum_${GUM_VERSION}_Linux_${arch}.tar.gz"
+check_gum_release() { # check_gum_release <release-arch>
+    local arch="$1" asset digest url
+    asset="$(release_asset_name gum "$arch")" \
+        || { fail "gum ${arch} asset builder rejected its pinned coordinate"; return 1; }
+    digest="$(release_artifact_sha256 gum "$arch")" \
+        || { fail "gum ${arch} digest builder rejected its pinned coordinate"; return 1; }
+    url="$(release_download_url gum "$arch")" \
+        || { fail "gum ${arch} URL builder rejected its pinned coordinate"; return 1; }
+    check "gum ${GUM_VERSION} Linux ${arch} ${asset}" "$digest" "$url"
 }
 
 # Keep these release architecture names aligned with install_gum's uname map.
-check_gum_release x86_64 "$GUM_SHA256_X86_64"
-check_gum_release arm64 "$GUM_SHA256_ARM64"
-check_gum_release armv7 "$GUM_SHA256_ARMV7"
+check_gum_release x86_64
+check_gum_release arm64
+check_gum_release armv7
 
 if [[ "$FAIL" -ne 0 ]]; then
     echo "artifact pins: FAIL"
