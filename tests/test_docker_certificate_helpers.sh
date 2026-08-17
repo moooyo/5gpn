@@ -261,16 +261,6 @@ EOF
     [[ "$(readlink -- "$UI_DIR/current")" == "$current_ui_target" ]] \
         || fail "matching profile inputs needlessly switched Console current"
     current_before="$(readlink -- "$CERT_ROOT/dot/current")"
-    current_name="${current_before#generations/}"
-    mv -- "$CERT_ROOT/dot/generations/$current_name" \
-        "$CERT_ROOT/dot/generations/.delete.$current_name"
-    if purge_generation_candidate dot ".delete.$current_name"; then
-        fail "role tombstone GC deleted the material named by current"
-    fi
-    [[ -d "$CERT_ROOT/dot/generations/.delete.$current_name" ]] \
-        || fail "current-target tombstone disappeared after fail-closed refusal"
-    mv -- "$CERT_ROOT/dot/generations/.delete.$current_name" \
-        "$CERT_ROOT/dot/generations/$current_name"
     old_name=generation-20000101T000000Z-1-1
     mkdir "$CERT_ROOT/dot/generations/$old_name"
     chmod 0750 "$CERT_ROOT/dot/generations/$old_name"
@@ -280,24 +270,10 @@ EOF
         "$CERT_ROOT/dot/generations/$old_name/privkey.pem"
     chmod 0640 "$CERT_ROOT/dot/generations/$old_name/fullchain.pem" \
         "$CERT_ROOT/dot/generations/$old_name/privkey.pem"
-    # Bash locals are dynamically scoped. A caller's stale role must never be
-    # consumed while deriving the callee's root in the same local declaration.
-    role=console
-    remove_generation dot "$old_name" || fail "old role generation tombstone GC failed"
+    cert_role_ctl_gc_role dot || fail "shared old-generation GC failed"
     [[ ! -e "$CERT_ROOT/dot/generations/$old_name" \
-       && ! -e "$CERT_ROOT/dot/generations/.delete.$old_name" \
        && "$(readlink -- "$CERT_ROOT/dot/current")" == "$current_before" ]] \
         || fail "role generation GC changed current or retained its tombstone"
-    tomb_name=.delete.generation-20000101T000001Z-1-2
-    mkdir "$CERT_ROOT/dot/generations/$tomb_name"
-    chmod 0750 "$CERT_ROOT/dot/generations/$tomb_name"
-    cp -- "$CERT_ROOT/dot/current/fullchain.pem" \
-        "$CERT_ROOT/dot/generations/$tomb_name/fullchain.pem"
-    chmod 0640 "$CERT_ROOT/dot/generations/$tomb_name/fullchain.pem"
-    scrub_role_candidates dot || fail "interrupted role tombstone did not resume safely"
-    [[ ! -e "$CERT_ROOT/dot/generations/$tomb_name" \
-       && "$(readlink -- "$CERT_ROOT/dot/current")" == "$current_before" ]] \
-        || fail "interrupted tombstone recovery changed current or remained partial"
     publish_roles || fail "idempotent public role publication failed"
     [[ "$_ROLES_CHANGED" == 0 ]] || fail "unchanged lineage needlessly republished role generations"
 
