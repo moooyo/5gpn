@@ -284,6 +284,11 @@ pass "non-production roots require the explicit test seam"
 cat > "$MOCK_BIN/openssl" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${EMULATE_X509_CHECKHOST_ZERO:-0}" == 1 \
+   && " $* " == *" x509 "* && " $* " == *" -checkhost "* ]]; then
+    printf '%s\n' 'Hostname does NOT match certificate'
+    exit 0
+fi
 if [[ " $* " == *" smime -sign "* ]]; then
     for arg in "$@"; do
         if [[ "${FAIL_DOT_SIGN:-0}" == 1 && "$arg" == */ios-dot.mobileconfig.unsigned ]]; then exit 1; fi
@@ -328,6 +333,25 @@ fi
 exit "$rc"
 MOCK
 chmod 0755 "$MOCK_BIN/openssl"
+
+cp "$CERT_GENERATION/fullchain.pem" "$TMP/dot-fullchain.openssl3.backup"
+cp "$CERT_GENERATION/privkey.pem" "$TMP/dot-privkey.openssl3.backup"
+"$REAL_OPENSSL" req -x509 -newkey rsa:2048 -nodes -days 2 \
+    -keyout "$CERT_GENERATION/privkey.pem" -out "$CERT_GENERATION/fullchain.pem" \
+    -subj '/CN=wrong.example.test' -addext 'subjectAltName=DNS:wrong.example.test' >/dev/null 2>&1
+chmod 0640 "$CERT_GENERATION/fullchain.pem" "$CERT_GENERATION/privkey.pem"
+candidate="$(new_candidate)" || fail "could not stage OpenSSL 3.0 hostname-status candidate"
+if EMULATE_X509_CHECKHOST_ZERO=1 PATH="$MOCK_BIN:$PATH" \
+    run_generator bash "$GENERATOR" dot.example.test 192.0.2.10 "$candidate" >/dev/null 2>&1; then
+    fail "OpenSSL 3.0 x509 -checkhost zero status accepted a wrong-host DoT certificate"
+fi
+ui_generation_cleanup_candidate "$UI_ROOT" "$candidate" \
+    || fail "could not clean OpenSSL 3.0 hostname-status candidate"
+cp "$TMP/dot-fullchain.openssl3.backup" "$CERT_GENERATION/fullchain.pem"
+cp "$TMP/dot-privkey.openssl3.backup" "$CERT_GENERATION/privkey.pem"
+chmod 0640 "$CERT_GENERATION/fullchain.pem" "$CERT_GENERATION/privkey.pem"
+pass "hostname validation does not trust OpenSSL 3.0 x509 -checkhost exit status"
+
 cat > "$MOCK_BIN/mv" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail

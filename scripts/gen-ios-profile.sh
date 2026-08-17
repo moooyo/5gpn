@@ -354,8 +354,12 @@ profile_certificate_time_is_valid() {
 
 profile_cert_pair_is_valid() {
     local cert="$1" key="$2" cert_pub key_pub
+    # OpenSSL 3.0's `x509 -checkhost` prints a mismatch but still exits zero.
+    # `verify` provides a stable status while the explicit partial trust keeps
+    # this hostname check independent of the host CA store and an omitted root.
     profile_certificate_time_is_valid "$cert" \
-        && openssl x509 -in "$cert" -noout -checkhost "$DOMAIN" >/dev/null 2>&1 \
+        && openssl verify -verify_hostname "$DOMAIN" -partial_chain \
+            -trusted "$cert" "$cert" >/dev/null 2>&1 \
         || return 1
     cert_pub="$(openssl x509 -in "$cert" -pubkey -noout 2>/dev/null)" || return 1
     key_pub="$(openssl pkey -in "$key" -pubout 2>/dev/null)" || return 1
