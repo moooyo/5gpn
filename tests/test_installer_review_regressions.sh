@@ -127,11 +127,20 @@ grep -Fqi 'intercept' <<<"$render_fn" \
     || pass "the mihomo seed renderer has no interception inputs"
 
 ic="$(sed -n '/^install_cert()/,/^}/p' "$INSTALL")"
+cert_identity_fn="$(sed -n '/^cert_identity_matches_mode()/,/^}/p' "$INSTALL")"
 grep -Fq 'validate_cert_pair' <<<"$ic" \
     && grep -Fq 'production' <<<"$ic" \
     && grep -Fq 'Reusing valid matching debug certificate' <<<"$ic" \
     && pass "production/debug certificate reuse paths are validated and isolated" \
     || fail "certificate reuse validation/mode isolation missing"
+if grep -Fq 'cert_matches_hostname "$cert" "dot.${base}"' <<<"$cert_identity_fn" \
+   && grep -Fq 'cert_matches_ip "${debug_src}/fullchain.pem" "$GATEWAY_IP"' <<<"$ic" \
+   && grep -Fq 'cert_matches_ip "${debug_src}/fullchain.pem" "$PUBLIC_IP"' <<<"$ic" \
+   && ! grep -Eq 'x509 .*-(checkhost|checkip)' <<<"${cert_identity_fn}${ic}"; then
+    pass "certificate reuse routes hostname and IP identity through stable-status helpers"
+else
+    fail "certificate reuse still trusts x509 checkhost/checkip exit status"
+fi
 
 if grep -Fq -- '--cert-name "$base"' <<<"$ic" \
    && grep -Fq 'certbot_args=(renew --cert-name "$base" --non-interactive)' "$CERT_RENEW" \
@@ -528,7 +537,34 @@ if command -v openssl >/dev/null 2>&1; then
     if openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
         -keyout "$cert_tmp/key.pem" -out "$cert_tmp/cert.pem" \
         -subj /CN=example.com \
-        -addext 'subjectAltName=DNS:example.com,DNS:*.example.com' >/dev/null 2>&1; then
+        -addext 'subjectAltName=DNS:example.com,DNS:*.example.com,IP:203.0.113.9' >/dev/null 2>&1; then
+        cert_mock="$cert_tmp/mock"
+        mkdir "$cert_mock"
+        real_cert_openssl="$(command -v openssl)"
+        cat > "$cert_mock/openssl" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${EMULATE_X509_CHECK_STATUS_ZERO:-0}" == 1 \
+   && " $* " == *" x509 "* \
+   && ( " $* " == *" -checkhost "* || " $* " == *" -checkip "* ) ]]; then
+    exit 0
+fi
+exec "$REAL_CERT_OPENSSL" "$@"
+MOCK
+        chmod 0755 "$cert_mock/openssl"
+        if (
+            export PATH="$cert_mock:$PATH"
+            export REAL_CERT_OPENSSL="$real_cert_openssl"
+            export EMULATE_X509_CHECK_STATUS_ZERO=1
+            cert_matches_hostname "$cert_tmp/cert.pem" dot.example.com \
+                && ! cert_matches_hostname "$cert_tmp/cert.pem" dot.other.test \
+                && cert_matches_ip "$cert_tmp/cert.pem" 203.0.113.9 \
+                && ! cert_matches_ip "$cert_tmp/cert.pem" 203.0.113.10
+        ); then
+            pass "hostname and IP matching ignore OpenSSL 3.0 x509 check exit status"
+        else
+            fail "hostname or IP matching trusts OpenSSL 3.0 x509 check exit status"
+        fi
         validate_cert_pair "$cert_tmp/cert.pem" "$cert_tmp/key.pem" example.com 0 debug \
             && pass "matching debug wildcard validates in debug mode" \
             || fail "matching debug wildcard was rejected"
@@ -542,6 +578,9 @@ if command -v openssl >/dev/null 2>&1; then
         # non-production path, which ran no verification at all. It would then
         # be rejected by every client that saw it.
         if openssl req -x509 -newkey rsa:2048 -nodes             -not_before "$(date -u -d '+2 days' +%Y%m%d%H%M%SZ)"             -not_after "$(date -u -d '+800 days' +%Y%m%d%H%M%SZ)"             -keyout "$cert_tmp/future-key.pem" -out "$cert_tmp/future-cert.pem"             -subj /CN=example.com             -addext 'subjectAltName=DNS:example.com,DNS:*.example.com' >/dev/null 2>&1; then
+            cert_matches_hostname "$cert_tmp/future-cert.pem" dot.example.com \
+                && pass "certificate identity matching is independent of validity time" \
+                || fail "certificate identity matching incorrectly enforces validity time"
             if validate_cert_pair "$cert_tmp/future-cert.pem" "$cert_tmp/future-key.pem" example.com 0 debug; then
                 fail "a not-yet-valid debug certificate was accepted"
             else
@@ -554,6 +593,40 @@ if command -v openssl >/dev/null 2>&1; then
         fi
     else
         fail "test OpenSSL cannot generate a SAN certificate"
+    fi
+    chain_tmp="$cert_tmp/partial-chain"
+    mkdir "$chain_tmp"
+    if openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+           -keyout "$chain_tmp/root.key" -out "$chain_tmp/root.crt" \
+           -subj '/CN=Root CA' -addext 'basicConstraints=critical,CA:TRUE' >/dev/null 2>&1 \
+       && openssl req -newkey rsa:2048 -nodes \
+           -keyout "$chain_tmp/intermediate.key" -out "$chain_tmp/intermediate.csr" \
+           -subj '/CN=Intermediate CA' >/dev/null 2>&1; then
+        printf '%s\n' 'basicConstraints=critical,CA:TRUE' \
+            'keyUsage=critical,keyCertSign,cRLSign' > "$chain_tmp/intermediate.ext"
+        printf '%s\n' 'subjectAltName=DNS:dot.chain.example' > "$chain_tmp/leaf.ext"
+        openssl x509 -req -in "$chain_tmp/intermediate.csr" \
+            -CA "$chain_tmp/root.crt" -CAkey "$chain_tmp/root.key" -CAcreateserial \
+            -days 2 -out "$chain_tmp/intermediate.crt" \
+            -extfile "$chain_tmp/intermediate.ext" >/dev/null 2>&1 \
+            || fail "test OpenSSL cannot sign an intermediate CA"
+        openssl req -newkey rsa:2048 -nodes \
+            -keyout "$chain_tmp/leaf.key" -out "$chain_tmp/leaf.csr" \
+            -subj '/CN=dot.chain.example' >/dev/null 2>&1 \
+            || fail "test OpenSSL cannot create a partial-chain leaf request"
+        openssl x509 -req -in "$chain_tmp/leaf.csr" \
+            -CA "$chain_tmp/intermediate.crt" -CAkey "$chain_tmp/intermediate.key" -CAcreateserial \
+            -days 2 -out "$chain_tmp/leaf.crt" -extfile "$chain_tmp/leaf.ext" >/dev/null 2>&1 \
+            || fail "test OpenSSL cannot sign a partial-chain leaf"
+        cat "$chain_tmp/leaf.crt" "$chain_tmp/intermediate.crt" > "$chain_tmp/fullchain.pem"
+        if cert_matches_hostname "$chain_tmp/fullchain.pem" dot.chain.example \
+           && ! cert_matches_hostname "$chain_tmp/fullchain.pem" wrong.chain.example; then
+            pass "hostname matching accepts a leaf+intermediate fullchain without a root"
+        else
+            fail "hostname matching cannot validate an ordinary rootless fullchain"
+        fi
+    else
+        fail "test OpenSSL cannot create a partial-chain fixture"
     fi
     if openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
         -keyout "$cert_tmp/http-key.pem" -out "$cert_tmp/http-cert.pem" \

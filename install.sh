@@ -6332,6 +6332,22 @@ cert_dns_san_count() {
         | tr ',' '\n' | sed -n 's/^[[:space:]]*DNS://p' | wc -l | tr -d '[:space:]'
 }
 
+# OpenSSL 3.0's `x509 -checkhost/-checkip` reports a mismatch in text while
+# still exiting zero. The verify command has stable status semantics; explicit
+# partial trust keeps this identity check independent of the host CA store and
+# accepts the ordinary leaf+intermediate fullchain that omits a root.
+cert_matches_hostname() {
+    local cert="$1" hostname="$2"
+    openssl verify -verify_hostname "$hostname" -no_check_time -partial_chain \
+        -trusted "$cert" "$cert" >/dev/null 2>&1
+}
+
+cert_matches_ip() {
+    local cert="$1" ip="$2"
+    openssl verify -verify_ip "$ip" -no_check_time -partial_chain \
+        -trusted "$cert" "$cert" >/dev/null 2>&1
+}
+
 cert_key_matches() {
     local cert="$1" key="$2" a b
     a="$(mktemp)"; b="$(mktemp)"
@@ -6369,7 +6385,7 @@ cert_identity_matches_mode() {
             cert_has_exact_san "$cert" "dot.${base}" || return 1 ;;
         *) return 1 ;;
     esac
-    openssl x509 -checkhost "dot.${base}" -noout -in "$cert" >/dev/null 2>&1 || return 1
+    cert_matches_hostname "$cert" "dot.${base}" || return 1
     cert_key_matches "$cert" "$key"
 }
 
@@ -7140,8 +7156,8 @@ install_cert() {
         if cert_provenance_matches debug "$base" none \
            && validate_cert_pair "${debug_src}/fullchain.pem" "${debug_src}/privkey.pem" \
                 "$base" "$((30*86400))" debug \
-           && { [[ -z "$GATEWAY_IP" ]] || openssl x509 -checkip "$GATEWAY_IP" -noout -in "${debug_src}/fullchain.pem" >/dev/null 2>&1; } \
-           && { [[ -z "$PUBLIC_IP" ]] || openssl x509 -checkip "$PUBLIC_IP" -noout -in "${debug_src}/fullchain.pem" >/dev/null 2>&1; }; then
+           && { [[ -z "$GATEWAY_IP" ]] || cert_matches_ip "${debug_src}/fullchain.pem" "$GATEWAY_IP"; } \
+           && { [[ -z "$PUBLIC_IP" ]] || cert_matches_ip "${debug_src}/fullchain.pem" "$PUBLIC_IP"; }; then
             info "Reusing valid matching debug certificate for *.${base}."
         else
             issue_selfsigned_wildcard "$base" || return 1
